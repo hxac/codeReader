@@ -1,0 +1,831 @@
+{
+  "project": "typst-crates-typst-html",
+  "head": "146a58329a30f6cd38978c22c6bf0e430d8962a1",
+  "rationale": "typst-html 是 Typst 的 HTML 导出器，核心职责是把 Typst 文档编译为 HTML 字符串，本 crate 约 7500 行、18 个源文件，属于中大型 crate，故规划 6 单元共 27 篇讲义。学习路线按「先认识项目与入口、再吃透 DOM 数据模型、接着走通编译与转换主链路、然后深入空白/display/CSS 等核心机制、最后攻克制码与内省/链接/数学等专家主题」逐层递进。第一单元让读者从零建立全局认知（定位、模块树、CLI 调用链、用户 API）；第二单元打牢 HtmlDocument/HtmlNode/HtmlTag/HtmlAttr 及类型化 API 等 DOM 数据结构基础；第三单元串起 realization→convert_to_nodes→finalize_dom→encode 的编译主流程与 show 规则注册；第四单元聚焦浏览器正确渲染所必需的空白保护、display 提升、CSS 属性系统与类型转换；第五单元覆盖字符串编码、字符转义、HTML 内省查询、链接锚点与 MathML 转换；第六单元以 html.frame/SVG、表格与图片导出、类型化属性系统、comemo 缓存等专题收尾。讲义之间通过 depends_on 形成由数据结构到流程、由流程到细节的单向依赖，便于读者按序阅读。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 typst-html 与导出入口",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 typst-html 是什么、在 typst 工作区中的角色，以及它把 Typst 文档导出为 HTML 的整体定位与版本背景。",
+          "learning_goals": [
+            "了解 typst-html 作为 Typst HTML 导出器的定位与 since 0.13.0 的版本背景",
+            "理解它依赖哪些 typst 兄弟 crate（typst-library、typst-syntax、typst-svg、typst-assets 等）",
+            "区分 typst-html 与 typst-svg、typst-pdf 等导出器的关系"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "Cargo.toml"
+          ],
+          "minimal_modules": [
+            "module()",
+            "HtmlElem",
+            "FrameElem",
+            "Cargo.toml [dependencies]"
+          ],
+          "practice_task": "阅读 Cargo.toml 列出依赖的全部 typst-* crate，并说明 typst-svg 与 typst-assets 在 HTML 导出中各自承担的作用；用一句话描述 typst-html 的输入与输出。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与模块组织",
+          "order": 2,
+          "filename": "u1-l2-module-structure.md",
+          "level": "beginner",
+          "topic": "浏览 src/ 下全部源文件，理解 pub 模块（attr/property/tag）与私有模块（convert/document/dom/encode 等）的划分及各自职责。",
+          "learning_goals": [
+            "画出 typst-html 的模块树",
+            "区分公开 API 模块与内部实现模块",
+            "说出每个 .rs 文件负责的子系统"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/css/mod.rs"
+          ],
+          "minimal_modules": [
+            "mod 声明",
+            "pub use 重导出",
+            "css 子模块"
+          ],
+          "practice_task": "根据 lib.rs 的模块声明绘制 typst-html 的模块依赖关系图，标注哪些是 pub、哪些是私有，并标注 css 子模块的组成。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "导出调用链与 CLI 入口",
+          "order": 3,
+          "filename": "u1-l3-export-pipeline-and-cli.md",
+          "level": "beginner",
+          "topic": "从 typst-cli 的 --format html 出发，追踪 typst::compile::<HtmlDocument> 到 typst_html::html 的完整调用链，理解 Output/Target 抽象。",
+          "learning_goals": [
+            "理解 Target::Html 如何驱动编译",
+            "理解 HtmlDocument 实现 Output trait 的机制",
+            "定位 html_document 与 html 两个核心函数的位置"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/document.rs",
+            "src/encode.rs",
+            "../typst-cli/src/compile.rs"
+          ],
+          "minimal_modules": [
+            "html_document",
+            "html",
+            "HtmlOptions",
+            "Output::create",
+            "Target::Html"
+          ],
+          "practice_task": "在 typst-cli/src/compile.rs 中找到触发 HTML 导出的分支，写出从 world 到最终 HTML 字符串的函数调用序列，并标注每步返回的类型。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "用户侧 API：html.elem 与 html.frame",
+          "order": 4,
+          "filename": "u1-l4-user-api-html-elem-frame.md",
+          "level": "beginner",
+          "topic": "讲解用户在 Typst 脚本中可用的两个原生元素 html.elem（自定义任意 HTML 元素）与 html.frame（把内容以 SVG 嵌入）。",
+          "learning_goals": [
+            "学会用 html.elem 手写任意 HTML 元素及其属性",
+            "理解 HtmlElem 的 tag/attrs/body/role 字段含义",
+            "了解 html.frame 的用途与语义"
+          ],
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "HtmlElem",
+            "FrameElem",
+            "with_attr",
+            "with_optional_attr"
+          ],
+          "practice_task": "在 Typst 中用 html.elem 写一个带 style 属性的 <div>，再用 html.frame 包裹一段需要精确定位的内容，编译为 HTML 并对比两者输出差异。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：HTML DOM 数据模型",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "HTML DOM 数据模型总览",
+          "order": 1,
+          "filename": "u2-l1-dom-data-model.md",
+          "level": "intermediate",
+          "topic": "系统讲解 typst-html 内部的 DOM 表示：HtmlDocument、HtmlOutput、HtmlNode 枚举、HtmlElement、HtmlFrame 及其字段含义。",
+          "learning_goals": [
+            "掌握 HtmlNode 的四种变体（Tag/Text/Element/Frame）",
+            "理解 HtmlElement 各字段（tag/attrs/css/children/parent/pre_span）的作用",
+            "理解 HtmlOutput 的 nodes 与 root_index 设计"
+          ],
+          "source_files": [
+            "src/dom.rs",
+            "src/document.rs"
+          ],
+          "minimal_modules": [
+            "HtmlDocument",
+            "HtmlNode",
+            "HtmlElement",
+            "HtmlOutput",
+            "HtmlSliceExt"
+          ],
+          "practice_task": "写一小段概念性 Rust 伪代码，手动构造一个嵌套的 HtmlElement（如 <ul><li>文本</li></ul>），并描述其在内存中的树状结构。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "HtmlTag 标签与字符串驻留",
+          "order": 2,
+          "filename": "u2-l2-htmltag-interning.md",
+          "level": "intermediate",
+          "topic": "讲解 HtmlTag 如何用 PicoStr 做字符串驻留、intern() 的校验逻辑（含自定义元素规则）以及 constant() 的编译期常量机制。",
+          "learning_goals": [
+            "理解 PicoStr 驻留节省内存与比较成本的原理",
+            "掌握标签名校验规则与自定义元素命名规范",
+            "区分 intern/constant/resolve 三种创建方式"
+          ],
+          "source_files": [
+            "src/dom.rs",
+            "src/charsets.rs"
+          ],
+          "minimal_modules": [
+            "HtmlTag",
+            "HtmlTag::intern",
+            "HtmlTag::constant",
+            "charsets::is_valid_in_tag_name"
+          ],
+          "practice_task": "阅读 intern() 中针对含连字符标签的校验分支，列出合法自定义元素名必须满足的条件，并各构造一个会被接受、一个会被拒绝的例子。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "HtmlAttr 与 HtmlAttrs 属性系统",
+          "order": 3,
+          "filename": "u2-l3-htmlattr-attrs-system.md",
+          "level": "intermediate",
+          "topic": "讲解属性名的驻留（HtmlAttr）与属性列表（HtmlAttrs），以及 Fold 合并语义和与 Typst Dict 的 cast 互转。",
+          "learning_goals": [
+            "理解 HtmlAttrs 的 push/get/get_mut 操作",
+            "掌握 Fold::fold 如何合并内外层同名属性",
+            "理解 cast! 与 Dict 的互转"
+          ],
+          "source_files": [
+            "src/dom.rs",
+            "src/attr.rs"
+          ],
+          "minimal_modules": [
+            "HtmlAttr",
+            "HtmlAttrs",
+            "Fold for HtmlAttrs",
+            "attr 常量"
+          ],
+          "practice_task": "解释 HtmlAttrs 的 fold 行为：当内层和外层对同名属性给出不同值时最终保留哪一个，并逐行追踪 fold 逻辑说明理由。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "预定义标签常量与内容模型分类",
+          "order": 4,
+          "filename": "u2-l4-tag-constants-content-models.md",
+          "level": "intermediate",
+          "topic": "讲解 tag.rs 中预定义的 HtmlTag 常量，以及 HTML 规范定义的内容模型分类函数（void/raw/flow/phrasing/replaced 等）及其对后续逻辑的影响。",
+          "learning_goals": [
+            "理解 is_void/is_raw/is_escapable_raw/is_foreign 的区分",
+            "掌握内容模型分类（flow/phrasing/embedded/interactive 等）",
+            "理解 should_group_into_pars 与 is_whitespace_collapsing 如何影响段落分组"
+          ],
+          "source_files": [
+            "src/tag.rs"
+          ],
+          "minimal_modules": [
+            "is_void",
+            "is_raw",
+            "is_escapable_raw",
+            "is_flow_content",
+            "is_phrasing_content",
+            "should_group_into_pars"
+          ],
+          "practice_task": "选三个标签（如 img、script、a），查表判断它们分别属于哪些内容模型，并说明这些分类在编码或转换阶段会带来哪些不同的处理。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "类型化 HTML API 的生成机制",
+          "order": 5,
+          "filename": "u2-l5-typed-html-api-generation.md",
+          "level": "intermediate",
+          "topic": "讲解 html.div/html.span 等类型化构造函数如何由 typst-assets 的 HTML 规范数据在运行时动态生成 NativeFuncData。",
+          "learning_goals": [
+            "理解 FUNCS 静态与 create_func_data 的生成流程",
+            "掌握 create_param_info 如何根据 void/raw 决定是否生成 body 参数",
+            "理解 construct() 如何把命名参数装配为 HtmlAttrs"
+          ],
+          "source_files": [
+            "src/typed.rs"
+          ],
+          "minimal_modules": [
+            "define()",
+            "FUNCS",
+            "create_func_data",
+            "create_param_info",
+            "construct"
+          ],
+          "practice_task": "追踪 html.a(href: \"...\")[...] 的执行路径，说明参数如何被 cast 并写入 HtmlAttrs，并解释 void 标签为何没有 body 参数。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：编译与转换主流程",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "文档编译主链路 html_document",
+          "order": 1,
+          "filename": "u3-l1-document-compilation-pipeline.md",
+          "level": "intermediate",
+          "topic": "逐段讲解 html_document → html_document_impl → html_document_common，串联 realize→convert_to_nodes→finalize_dom→resolve_inline_styles→create_link_anchors 的完整流程。",
+          "learning_goals": [
+            "理解 comemo::memoize 包裹的意义",
+            "掌握 RealizationKind::Document 的作用与 styles.outside()",
+            "理解 DocumentInfo 填充与方程 CSS 注入逻辑"
+          ],
+          "source_files": [
+            "src/document.rs"
+          ],
+          "minimal_modules": [
+            "html_document",
+            "html_document_common",
+            "realize",
+            "EQUATION_CSS_STYLES 注入"
+          ],
+          "practice_task": "画出 html_document_common 的处理步骤流程图，标出每一步的输入与输出类型，并指出创建 HtmlDocument 后还做了哪两步后处理。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "finalize_dom 与文档骨架生成",
+          "order": 2,
+          "filename": "u3-l2-finalize-dom-skeleton.md",
+          "level": "intermediate",
+          "topic": "讲解 finalize_dom 如何决定是否包裹 <html>/<body>、生成 head_element（meta/title/description/keywords），以及处理脚注容器与自定义 DOM 的限制。",
+          "learning_goals": [
+            "理解 needs_body 的判定逻辑",
+            "掌握 head_element 生成的 meta 标签集合",
+            "理解自定义 <html>/<body> 时脚注不可用的报错路径"
+          ],
+          "source_files": [
+            "src/document.rs"
+          ],
+          "minimal_modules": [
+            "finalize_dom",
+            "head_element",
+            "footnotes_unsupported_with_custom_dom",
+            "HtmlOutput"
+          ],
+          "practice_task": "解释当用户已用 html.elem 手写 <body> 时 finalize_dom 会跳过哪些步骤、保留哪些步骤，并说明为何此时不能使用默认脚注。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "convert_to_nodes 内容转换器",
+          "order": 3,
+          "filename": "u3-l3-convert-to-nodes.md",
+          "level": "intermediate",
+          "topic": "讲解 convert_to_nodes 与 handle() 调度器：如何把 realization 产出的 Content 逐类转换为 HtmlNode（文本/空格/换行/智能引号/box/block/frame/html.elem）。",
+          "learning_goals": [
+            "理解 ConversionLevel（Block/Inline）与 Whitespace（Normal/Pre）",
+            "掌握 handle() 对各类元素的分支处理",
+            "理解无法转换元素的警告机制"
+          ],
+          "source_files": [
+            "src/convert.rs"
+          ],
+          "minimal_modules": [
+            "convert_to_nodes",
+            "handle",
+            "handle_html_elem",
+            "ConversionLevel",
+            "Whitespace"
+          ],
+          "practice_task": "追踪一段含强调文本（如 _emph_）的段落被转换的过程，说明 TextElem、SpaceElem、SmartQuoteElem 分别如何变成对应的 HtmlNode。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "块级/行内/数学片段的递归编译",
+          "order": 4,
+          "filename": "u3-l4-block-inline-fragments.md",
+          "level": "intermediate",
+          "topic": "讲解 fragment.rs 的三个入口 html_block_fragment/html_inline_fragment/html_math_fragment，以及 realize_fragment、缓存策略与智能引号共享状态。",
+          "learning_goals": [
+            "理解为何 block 片段缓存而 inline 片段不缓存",
+            "掌握 SmartQuoter 在 inline 上下文的共享机制",
+            "理解 route.check_html_depth() 防止递归过深"
+          ],
+          "source_files": [
+            "src/fragment.rs",
+            "src/convert.rs"
+          ],
+          "minimal_modules": [
+            "html_block_fragment",
+            "html_inline_fragment",
+            "html_math_fragment",
+            "realize_fragment",
+            "check_html_depth"
+          ],
+          "practice_task": "对比 html_block_fragment 与 html_inline_fragment 的签名与缓存策略，解释智能引号状态为何不能用 memoize 保存。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "内建 show 规则注册机制",
+          "order": 5,
+          "filename": "u3-l5-show-rule-registration.md",
+          "level": "intermediate",
+          "topic": "讲解 rules.rs 的 register() 如何为 Target::Html 注册模型/文本/可视化/数学各元素的 ShowFn，把 Typst 元素映射为 HTML 元素。",
+          "learning_goals": [
+            "理解 NativeRuleMap 与 ShowFn 的注册模式",
+            "掌握常见映射（strong→<strong>、list→<ul>、heading→<h2>~、footnote 的 ARIA role）",
+            "理解为何 FrameElem 在 Paged target 注册为 no-op"
+          ],
+          "source_files": [
+            "src/rules.rs"
+          ],
+          "minimal_modules": [
+            "register",
+            "ShowFn",
+            "HEADING_RULE",
+            "FOOTNOTE_RULE",
+            "RAW_RULE"
+          ],
+          "practice_task": "选择 strong 和 heading 两条规则，分析它们的映射逻辑，并解释标题级别为何从 <h2> 起步而非 <h1>。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "进阶：空白、display 与 CSS 机制",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "HTML 空白保护机制",
+          "order": 1,
+          "filename": "u4-l1-whitespace-protection.md",
+          "level": "intermediate",
+          "topic": "深入讲解 convert.rs 中防止浏览器折叠空白的核心机制：Converter 的尾随空白追踪、protect_spaces/Protector 状态机、pre_wrap() 的 white-space:pre-wrap span。",
+          "learning_goals": [
+            "理解为何要保护空白以及 CSS 折叠规则的影响",
+            "掌握 TrailingWhitespace 与 flush_whitespace 的时机",
+            "理解 Protector 的 Collapsing/Supportive/Space 三态"
+          ],
+          "source_files": [
+            "src/convert.rs"
+          ],
+          "minimal_modules": [
+            "handle_text",
+            "Converter",
+            "TrailingWhitespace",
+            "protect_spaces",
+            "Protector",
+            "pre_wrap"
+          ],
+          "practice_task": "用一个含连续空格和制表符的例子，说明哪些空白会在 handle_text 中立即包进 pre-wrap span、哪些要等到 protect_spaces 这一遍才处理。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "display 属性与块级/行内提升",
+          "order": 2,
+          "filename": "u4-l2-display-block-inline-promotion.md",
+          "level": "intermediate",
+          "topic": "讲解 property.rs 的 Display 枚举与 default_for(tag)，以及 convert.rs 的 make_block_level/make_inline_level/set_display 如何用 CSS display 控制元素渲染层级。",
+          "learning_goals": [
+            "理解 Display 各变体与 §15 用户代理样式表",
+            "掌握 to_lone_element 的单元素提升优化",
+            "理解 box/block 如何影响 display，以及 math 的 InlineMath/BlockMath 特殊处理"
+          ],
+          "source_files": [
+            "src/property.rs",
+            "src/convert.rs"
+          ],
+          "minimal_modules": [
+            "Display",
+            "default_for",
+            "make_block_level",
+            "make_inline_level",
+            "set_display",
+            "to_lone_element"
+          ],
+          "practice_task": "解释当一个 Typst block 包裹了单个 <img> 时，make_block_level 会给它设置什么 CSS，并说明哪些 display 值无法被提升而必须包一层 <div>。",
+          "depends_on": [
+            "u2-l4",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "CSS 属性系统与内联样式解析",
+          "order": 3,
+          "filename": "u4-l3-css-properties-inline-styles.md",
+          "level": "intermediate",
+          "topic": "讲解 css/ 子模块：Properties 列表（按名排序去重）、PropertiesBuilder，以及 resolve_inline_styles 如何把元素 css 转为 style 属性。",
+          "learning_goals": [
+            "理解 Properties 的二分插入去重",
+            "掌握 push/remove/with/to_inline 用法",
+            "理解 resolve.rs 的 DOM 遍历与既有 style 属性的合并"
+          ],
+          "source_files": [
+            "src/css/encode.rs",
+            "src/css/resolve.rs",
+            "src/css/mod.rs"
+          ],
+          "minimal_modules": [
+            "Properties",
+            "PropertiesBuilder",
+            "to_inline",
+            "resolve_inline_styles"
+          ],
+          "practice_task": "跟踪一个带 white-space:pre-wrap 的元素，说明它的 css 字段如何在 resolve_inline_styles 中被写入 style 属性，并与用户已有的 style 合并。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "Typst 类型到 CSS 类型的转换",
+          "order": 4,
+          "filename": "u4-l4-typst-to-css-conversion.md",
+          "level": "intermediate",
+          "topic": "讲解 ToCss trait 与 CssWriter，以及 Abs/Em/Length/Angle/Ratio/Rel/Color 等类型如何序列化为合法 CSS 值（含 calc() 生成与颜色空间转换）。",
+          "learning_goals": [
+            "理解 ToCss 的 emit 模式与 CssWriter",
+            "掌握 Length/Rel 如何生成 calc() 表达式",
+            "理解 Rgb 的 hex 与 rgb() 选择、is_very_close 精度判断及失败警告"
+          ],
+          "source_files": [
+            "src/css/encode.rs"
+          ],
+          "minimal_modules": [
+            "ToCss",
+            "CssWriter",
+            "CalcWriter",
+            "impl ToCss for Color/Rgb/Length",
+            "is_very_close"
+          ],
+          "practice_task": "分析一个 Rel（如 2em + 3pt）如何被 CalcWriter 序列化为 calc() 表达式，并说明当只有一个操作数时为何会省略 calc() 包裹。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "专家：编码、内省、链接与数学",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "DOM 到 HTML 字符串的编码",
+          "order": 1,
+          "filename": "u5-l1-dom-to-html-encoding.md",
+          "level": "advanced",
+          "topic": "逐函数讲解 encode.rs：Writer、write_element/write_node/write_text/write_children，以及 void/raw/escapable-raw 的不同编码路径与 pretty 打印策略。",
+          "learning_goals": [
+            "理解 DOCTYPE 注入与 link_resolver 的作用",
+            "掌握属性空值的简写语法与自闭合标签处理",
+            "理解 write_children 的 pretty_inside/wants_pretty_around 缩进判定"
+          ],
+          "source_files": [
+            "src/encode.rs"
+          ],
+          "minimal_modules": [
+            "html_impl",
+            "Writer",
+            "write_element",
+            "write_children",
+            "allows_pretty_inside",
+            "wants_pretty_around"
+          ],
+          "practice_task": "追踪一个 <ul><li>..</li></ul> 在 pretty=true 与 pretty=false 下的不同输出，解释缩进与换行何时被插入。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "字符集约束与 HTML 转义",
+          "order": 2,
+          "filename": "u5-l2-charsets-and-escaping.md",
+          "level": "advanced",
+          "topic": "讲解 charsets.rs 的字符有效性规则与 encode.rs 的 write_escape，覆盖文本/属性值/raw 文本的可编码性与转义策略。",
+          "learning_goals": [
+            "理解 is_valid_in_normal_element_text/is_valid_in_attribute_value/is_w3c_text_char",
+            "掌握 write_escape 对 &<>\"' 的处理与不可编码字符的报错",
+            "理解 raw 元素的 find_closing_tag 校验"
+          ],
+          "source_files": [
+            "src/charsets.rs",
+            "src/encode.rs"
+          ],
+          "minimal_modules": [
+            "charsets 函数集",
+            "write_escape",
+            "write_text",
+            "unencodable",
+            "find_closing_tag"
+          ],
+          "practice_task": "构造一段含 &、<、不可编码控制字符的文本，预测哪些会被转义、哪些会触发报错，并对照 write_escape 验证你的判断。",
+          "depends_on": [
+            "u2-l2",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "HTML 内省器 HtmlIntrospector",
+          "order": 3,
+          "filename": "u5-l3-html-introspector.md",
+          "level": "advanced",
+          "topic": "讲解 introspect.rs 如何从 DOM 构建 HtmlIntrospector 支持查询，包括 DOM 索引计算（iter_with_dom_indices）、frame 内省与 Introspector trait 实现。",
+          "learning_goals": [
+            "理解 ElementIntrospector<HtmlPosition> 的构建过程",
+            "掌握 discover_nodes/discover_frame 的遍历方式",
+            "理解 Tag/Element/Frame 的位置编码与 link_targets 来源"
+          ],
+          "source_files": [
+            "src/introspect.rs",
+            "src/dom.rs"
+          ],
+          "minimal_modules": [
+            "HtmlIntrospector",
+            "HtmlIntrospectorBuilder",
+            "discover_nodes",
+            "discover_frame",
+            "iter_with_dom_indices"
+          ],
+          "practice_task": "解释一个位于多层嵌套元素中的可内省元素，其 HtmlPosition 的索引向量是如何在 discover_nodes 中逐步累积与回退的。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "链接锚点与文档内跳转",
+          "order": 4,
+          "filename": "u5-l4-link-anchors-jumps.md",
+          "level": "advanced",
+          "topic": "讲解 link.rs 的 create_link_anchors：如何为被链接的目标元素分配人类可读的 fragment ID，并处理空元素/纯文本/帧三种情况。",
+          "learning_goals": [
+            "理解 Work 队列与 drain/remove 的协同",
+            "掌握 AnchorGenerator 的 ID 生成与标签去重",
+            "理解为何空元素需插入空 <span>、帧目标写入 anchors"
+          ],
+          "source_files": [
+            "src/link.rs",
+            "src/document.rs"
+          ],
+          "minimal_modules": [
+            "create_link_anchors",
+            "traverse",
+            "Work",
+            "AnchorGenerator",
+            "traverse_frame"
+          ],
+          "practice_task": "分析当一个被链接的元素未产生任何 DOM 节点时，traverse 如何通过 Tag::End 检测并插入空 span 分配 ID。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "数学公式到 MathML 的转换",
+          "order": 5,
+          "filename": "u5-l5-math-to-mathml.md",
+          "level": "advanced",
+          "topic": "讲解 mathml.rs 如何把 typst_library::math::ir 的 MathItem 转换为 MathML 节点，以及 EQUATION_CSS_STYLES 覆盖 UA 样式的目的。",
+          "learning_goals": [
+            "理解 convert_math_to_nodes 的整体结构",
+            "掌握分数/根号/上下标/表格等结构到 MathML 元素的映射",
+            "理解 CSS 覆盖规则如何让浏览器渲染逼近 Typst 分页导出"
+          ],
+          "source_files": [
+            "src/mathml.rs",
+            "src/rules.rs"
+          ],
+          "minimal_modules": [
+            "convert_math_to_nodes",
+            "EQUATION_CSS_STYLES",
+            "EQUATION_RULE",
+            "MathItem 处理"
+          ],
+          "practice_task": "选一个分数或根号公式，追踪它从 EquationElem 到 <mfrac>/<mroot> 的转换路径，并说明注入 head 的 CSS 解决了什么渲染偏差。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "专家：高级专题与架构取舍",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "html.frame 与 SVG 嵌入",
+          "order": 1,
+          "filename": "u6-l1-html-frame-svg-embedding.md",
+          "level": "advanced",
+          "topic": "讲解 html.frame 把 Typst 内容布局为 Frame 再以内联 SVG 嵌入 HTML 的完整链路：FrameElem→layout_frame→HtmlFrame→write_frame→typst_svg::svg_in_html。",
+          "learning_goals": [
+            "理解 FrameElem 如何切换 Target::Paged 进行布局",
+            "掌握 HtmlFrame 的 text_size/anchors/id 用途",
+            "理解 SVG 缓存与缩进后处理，以及 html_span_filled 临时方案"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/dom.rs",
+            "src/convert.rs",
+            "src/encode.rs"
+          ],
+          "minimal_modules": [
+            "FrameElem",
+            "handle FrameElem 分支",
+            "HtmlFrame",
+            "write_frame"
+          ],
+          "practice_task": "解释 html.frame 为何要记录 text_size，以及 frame.anchors 在文档内链接跳转中起到什么作用。",
+          "depends_on": [
+            "u3-l3",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "表格与图片导出",
+          "order": 2,
+          "filename": "u6-l2-table-image-export.md",
+          "level": "advanced",
+          "topic": "讲解 rules.rs 中 TABLE_RULE/show_cellgrid 的表格转换（thead/tbody/tfoot、表头范围、colspan/rowspan）与 IMAGE_RULE 的图片 base64 编码。",
+          "learning_goals": [
+            "理解 CellGrid 到 HTML 表格结构的映射",
+            "掌握连续表头归入 thead、其余作为 th 行的逻辑",
+            "理解 IMAGE_RULE 的 src/alt/width/height 与 image-rendering CSS"
+          ],
+          "source_files": [
+            "src/rules.rs"
+          ],
+          "minimal_modules": [
+            "TABLE_RULE",
+            "show_cellgrid",
+            "show_cell",
+            "IMAGE_RULE",
+            "WebImage::to_base64_url"
+          ],
+          "practice_task": "分析一个带表头和合并单元格的 Typst table，追踪它如何生成 thead/tbody 结构与 colspan/rowspan 属性。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "类型化属性类型系统深入",
+          "order": 3,
+          "filename": "u6-l3-typed-attribute-type-system.md",
+          "level": "advanced",
+          "topic": "深入 typed.rs 的属性类型系统：AttrType 各变体（Native/Strings/Union/List/Presence）、IntoAttr trait 与各种布尔编码、datetime/duration/ImageCandidate 等序列化。",
+          "learning_goals": [
+            "理解 AttrType::convert 的分派机制",
+            "掌握 ListType 的分隔符与简写校验",
+            "理解 TrueFalseBool/YesNoBool/OnOffBool 等编码差异与 Duration/Datetime 的 HTML 规范格式"
+          ],
+          "source_files": [
+            "src/typed.rs"
+          ],
+          "minimal_modules": [
+            "AttrType",
+            "IntoAttr",
+            "ListType",
+            "UnionType",
+            "impl IntoAttr for Duration/Datetime"
+          ],
+          "practice_task": "追踪某个列表型属性（如空格或逗号分隔），说明 ListType 如何把 Typst 数组编码为对应分隔字符串并拒绝含分隔符的项。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "缓存与 comemo memoization",
+          "order": 4,
+          "filename": "u6-l4-caching-comemo-memoization.md",
+          "level": "advanced",
+          "topic": "讲解 typst-html 中 comemo::memoize 的使用（document.rs 与 fragment.rs 的若干 _impl 函数），分析缓存粒度、可变内省状态与设计取舍。",
+          "learning_goals": [
+            "理解为何要把 Tracked 参数逐个传入 memoize 函数",
+            "理解内省器为何不参与哈希（root_mut 的副作用）",
+            "理解 inline 片段因共享 SmartQuoter 不缓存的设计权衡"
+          ],
+          "source_files": [
+            "src/document.rs",
+            "src/fragment.rs"
+          ],
+          "minimal_modules": [
+            "html_document_impl",
+            "html_document_for_bundle_impl",
+            "html_block_fragment_impl",
+            "Tracked/TrackedMut 参数"
+          ],
+          "practice_task": "结合 dom.rs 注释与 issue #7951，解释 HtmlDocument 为何不实现 Hash，并讨论这对缓存正确性与 root_mut 用法的影响。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

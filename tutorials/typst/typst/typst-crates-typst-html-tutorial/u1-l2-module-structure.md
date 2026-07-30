@@ -1,0 +1,505 @@
+# 目录结构与模块组织
+
+## 1. 本讲目标
+
+上一篇（u1-l1）我们建立了 typst-html 的全局认知：它是 Typst 的 HTML 导出器，输入 Typst 文档内容、输出 HTML 字符串，并认识了三个基础积木 `module()`、`HtmlElem`、`FrameElem`。本讲把镜头拉到 **目录层面**，带你看清整个 crate 是怎么用 Rust 的模块系统组织起来的。读完本讲，你应当能够：
+
+- 画出 typst-html 的 **模块树**：知道 `src/` 下一共有哪些 `.rs` 文件、它们之间如何嵌套。
+- 区分 **公开 API 模块**（`pub mod`）和 **内部实现模块**（私有 `mod`），并理解这种划分的用意。
+- 说清楚 **每个 `.rs` 文件负责哪个子系统**（DOM 模型、编码、转换、CSS、规则……）。
+- 理解 `pub use` **重导出（门面模式）** 如何在不暴露内部模块的前提下对外提供公开类型。
+- 理解 **`css` 子模块** 的三层组成（`mod.rs` / `encode.rs` / `resolve.rs`）。
+
+本讲仍是“只读源码、建立认知”，不会修改任何代码。
+
+## 2. 前置知识
+
+本讲假设你已经读过 u1-l1，熟悉以下概念（不熟悉的我们也会顺带复习）：
+
+- **Rust 模块系统基础**：知道 `mod xxx;` 声明一个子模块、`pub mod xxx;` 把它公开、`pub use` 把某条路径上的名字重新暴露到当前位置。
+- **`crate` 根**：`src/lib.rs` 是一个库 crate 的根文件，crate 对外可见性的“总入口”就在这里。
+- **门面模式（facade）**：把内部一堆零散的模块，通过 `pub use` 汇总到 crate 根，对外呈现一个干净的 API 表面。
+- **u1-l1 已建立的概念**：`module()`（标准库 `html` 模块的组装入口）、`HtmlElem`/`FrameElem`（两个原生元素）、导出主线 `html_document` → `html`（编译 → 编码）。本讲会反复引用它们，但不会重复讲解。
+
+> 术语提示：本讲里“公开（public）”指**对 crate 外部可见**（即其他 crate 可以写 `typst_html::XXX` 来用）；“私有（private）”指只在 typst-html **内部**使用。注意一个微妙之处：一个模块本身可以是私有的，但它里面的个别类型仍可通过 `pub use` 被公开出去——这正是 typst-html 的核心组织手法。
+
+## 3. 本讲源码地图
+
+typst-html 一共有 **18 个源文件**：`src/` 下 15 个 `.rs` 文件，外加 `src/css/` 子目录里的 3 个文件。本讲的“导航图”如下（本讲会逐一说明每个文件的职责）：
+
+| 文件 | 是否公开模块 | 一句话职责 |
+| --- | --- | --- |
+| [src/lib.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/lib.rs) | （crate 根） | 声明全部模块、`pub use` 门面、`module()`、`HtmlElem`、`FrameElem` |
+| [src/attr.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/attr.rs) | **pub** | 预定义 HTML 属性名常量表（`href`、`class`……） |
+| [src/property.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/property.rs) | **pub** | 类型化 CSS 属性（如 `Display` 枚举及其 `default_for(tag)`） |
+| [src/tag.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/tag.rs) | **pub** | 预定义 HTML 标签常量 + 内容模型分类函数 |
+| [src/charsets.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/charsets.rs) | 私有 | 字符有效性规则（哪些字符能出现在标签名/属性名/文本里） |
+| [src/convert.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/convert.rs) | 私有 | 内容转换器：把 Typst `Content` 转成 `HtmlNode` |
+| [src/css/mod.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/css/mod.rs) | 私有 | CSS 子系统入口，汇总重导出 |
+| [src/css/encode.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/css/encode.rs) | 私有 | Typst 类型 → CSS 值的序列化（`ToCss`、`CssWriter`） |
+| [src/css/resolve.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/css/resolve.rs) | 私有 | 把元素的 `css` 字段写成内联 `style` 属性 |
+| [src/document.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/document.rs) | 私有 | 文档编译主入口 `html_document`（realize→convert→finalize） |
+| [src/dom.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/dom.rs) | 私有 | DOM 数据模型（`HtmlDocument`/`HtmlNode`/`HtmlElement`…） |
+| [src/encode.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/encode.rs) | 私有 | DOM → HTML 字符串的编码器 `html()` |
+| [src/fragment.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/fragment.rs) | 私有 | block/inline/math 片段编译入口 |
+| [src/introspect.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/introspect.rs) | 私有 | HTML 内省器 `HtmlIntrospector`（支持查询/跳转） |
+| [src/link.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/link.rs) | 私有 | 链接锚点分配 `create_link_anchors` |
+| [src/mathml.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/mathml.rs) | 私有 | 数学公式 → MathML 转换 |
+| [src/rules.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/rules.rs) | 私有 | 内建 show 规则注册 `register()`（Typst 元素 → HTML 元素） |
+| [src/typed.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/typed.rs) | 私有 | 类型化 API（`html.div` 等）的运行时生成 |
+
+> 提示：本讲的“关键源码”是 `src/lib.rs` 和 `src/css/mod.rs`，但为了让你建立完整地图，第 4.4 节会用源码佐证上面这张表的每一行。
+
+## 4. 核心概念与源码讲解
+
+本讲拆成四个最小模块：先看模块声明如何划分公开/私有，再看 `pub use` 门面，再看 `css` 子模块，最后用一张全图把 18 个文件的职责落实。
+
+### 4.1 模块声明：`pub mod` 与 `mod` 的划分
+
+#### 4.1.1 概念说明
+
+`src/lib.rs` 顶部的模块声明决定了 crate 的骨架。typst-html 用了两类声明：
+
+- `pub mod xxx;`：声明一个 **公开子模块**。这意味着外部可以写 `typst_html::xxx::...` 来访问其中的公开项。typst-html 只对 **3 个**模块这样做。
+- `mod xxx;`：声明一个 **私有子模块**。外部无法直接访问，但 crate 内部可以用 `crate::xxx::...` 或 `xxx::...` 调用。
+
+这个划分不是随意的：被设为 `pub mod` 的三个模块（`attr`/`property`/`tag`）都是 **名字表/分类表**——它们是“查标签、查属性、查 CSS 属性”的常量库，外部程序化构造 HTML 时需要直接引用这些常量；而其余模块都是 **内部实现**，外部只该通过门面（4.2 节）暴露的少量类型来交互。
+
+#### 4.1.2 核心流程
+
+模块声明的整体布局如下：
+
+```
+src/lib.rs 顶部
+│
+├─ 3 个公开模块（pub mod）      ← 外部可直接访问的“表”
+│    ├─ attr        属性名常量表
+│    ├─ property    类型化 CSS 属性
+│    └─ tag         标签常量 + 内容模型
+│
+└─ 12 个私有模块（mod）         ← 内部实现
+     ├─ charsets   字符有效性规则
+     ├─ convert    内容 → HtmlNode
+     ├─ css        CSS 子系统（含子目录）
+     ├─ document   文档编译主入口
+     ├─ dom        DOM 数据模型
+     ├─ encode     DOM → HTML 字符串
+     ├─ fragment   片段编译
+     ├─ introspect 内省器
+     ├─ link       链接锚点
+     ├─ mathml     数学 → MathML
+     ├─ rules      show 规则注册
+     └─ typed      类型化 API 生成
+```
+
+#### 4.1.3 源码精读
+
+公开模块的声明在 [src/lib.rs:3-5](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/lib.rs#L3-L5)：
+
+```rust
+pub mod attr;
+pub mod property;
+pub mod tag;
+```
+
+私有模块的声明在 [src/lib.rs:7-18](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/lib.rs#L7-L18)：
+
+```rust
+mod charsets;
+mod convert;
+mod css;
+mod document;
+mod dom;
+mod encode;
+mod fragment;
+mod introspect;
+mod link;
+mod mathml;
+mod rules;
+mod typed;
+```
+
+数一下：3 个 `pub mod` + 12 个 `mod` = 15 个顶层模块声明，对应 `src/` 下的 15 个 `.rs` 文件（`css` 模块对应的是目录 `src/css/`，入口是 `src/css/mod.rs`，详见 4.3 节）。
+
+> 小提示：`lib.rs` 自身还定义了 `module()`、`HtmlElem`、`FrameElem`（u1-l1 已详解），它们不属于“子模块”，而是直接长在 crate 根上的顶层条目。
+
+#### 4.1.4 代码实践
+
+> 实践目标：亲手数清公开/私有模块的数量，并验证“公开模块 = 名字表”这一规律。
+
+操作步骤（源码阅读型实践）：
+
+1. 打开 [src/lib.rs:3-5](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/lib.rs#L3-L5)，确认公开模块正好是 `attr`、`property`、`tag` 三个。
+2. 打开 [src/tag.rs:8-13](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/tag.rs#L8-L13)，确认它确实是“一张常量表”（`pub const a: HtmlTag = ...`、`pub const abbr: HtmlTag = ...`）。
+3. 打开 [src/attr.rs:8-10](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/attr.rs#L8-L10)，确认它同样是“属性名常量表”（`pub const abbr: HtmlAttr = ...`、`pub const accept: HtmlAttr = ...`）。
+
+需要观察的现象：
+
+- 三个公开模块的内容形态高度一致：都是 `pub const` 常量罗列，适合外部按名字引用。
+
+预期结果：
+
+- 公开模块 3 个（`attr`/`property`/`tag`），私有模块 12 个；公开模块的共同特征是“可被外部直接引用的名字表/分类表”。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：如果一个外部 crate 想用 typst-html 里表示 `<div>` 标签的常量，它能直接写 `typst_html::tag::div` 吗？为什么？
+
+> **参考答案**：可以。因为 `tag` 是用 `pub mod tag;` 声明的公开模块，而 `div` 是其中的 `pub const`，所以外部能直接通过 `typst_html::tag::div` 访问。
+
+**练习 2**：`dom` 模块是用 `pub mod` 还是 `mod` 声明的？这意味着外部能写 `typst_html::dom::HtmlElement` 吗？
+
+> **参考答案**：`dom` 是用私有 `mod dom;` 声明的（见 [src/lib.rs:11](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/lib.rs#L11)）。所以外部 **不能** 写 `typst_html::dom::HtmlElement`。但 `HtmlElement` 仍然对外可用——它是通过下一节要讲的 `pub use self::dom::*;` 被重新暴露到 crate 根的，所以外部应该写 `typst_html::HtmlElement`。
+
+---
+
+### 4.2 `pub use` 重导出：对外公开 API 的门面
+
+#### 4.2.1 概念说明
+
+上一节我们看到：内部实现模块（`dom`、`encode`、`document` 等）都是私有的。但导出器毕竟要给外部用——比如 `typst-cli` 需要调用 `html_document` 来编译、调用 `html` 来编码。 typst-html 的做法是 **门面模式（facade）**：
+
+- 内部模块保持私有（外部看不到 `typst_html::dom`、`typst_html::encode` 这些路径）；
+- 用一组 `pub use self::xxx::{...};` 把 **需要对外暴露的少数类型/函数** 重新导出到 crate 根。
+
+这样，外部只需要认识 crate 根上的那几个名字，而不必了解内部的模块切分。
+
+#### 4.2.2 核心流程
+
+门面的映射关系如下（左侧是 crate 根上对外可见的名字，右侧是它真正来自的私有模块）：
+
+```
+typst_html (crate 根)
+│
+├─ html_document, html_document_for_bundle   ← from document.rs
+├─ (dom 的全部公开类型，如 HtmlDocument/HtmlNode/
+│   HtmlElement/HtmlFrame/HtmlTag/HtmlAttr/HtmlAttrs …)  ← from dom.rs
+├─ HtmlOptions, html, html_in_bundle         ← from encode.rs
+├─ HtmlIntrospector                          ← from introspect.rs
+├─ create_link_anchors                       ← from link.rs
+└─ html_mathml_body, html_span_filled, register  ← from rules.rs
+
+另外，三个 pub mod（attr/property/tag）本身就是公开的，无需 pub use。
+```
+
+#### 4.2.3 源码精读
+
+整组 `pub use` 声明在 [src/lib.rs:20-25](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/lib.rs#L20-L25)：
+
+```rust
+pub use self::document::{html_document, html_document_for_bundle};
+pub use self::dom::*;
+pub use self::encode::{HtmlOptions, html, html_in_bundle};
+pub use self::introspect::HtmlIntrospector;
+pub use self::link::create_link_anchors;
+pub use self::rules::{html_mathml_body, html_span_filled, register};
+```
+
+逐行说明（结合上一篇 u1-l1 已经认识的名字）：
+
+- 第 1 行：从 `document` 导出 `html_document`（编译主入口）及其“bundle 变体” `html_document_for_bundle`。`html_document` 正是 u1-l1 介绍的导出主线第一步。
+- 第 2 行：`pub use self::dom::*;` 是一条 **通配重导出**——把 `dom` 模块里所有公开的类型一次性搬到 crate 根。这就是为什么 `HtmlDocument`、`HtmlNode`、`HtmlElement`、`HtmlFrame`、`HtmlTag`、`HtmlAttr`、`HtmlAttrs` 等类型虽然定义在私有的 `dom.rs` 里，却能被外部当作 `typst_html::HtmlElement` 直接使用。
+- 第 3 行：从 `encode` 导出 `html`（编码主入口，导出主线第二步）、`html_in_bundle` 及选项类型 `HtmlOptions`。
+- 第 4 行：导出内省器 `HtmlIntrospector`（用于查询/定位，后续 u5-l3 详解）。
+- 第 5 行：导出 `create_link_anchors`（为被链接的目标分配锚点 ID，后续 u5-l4 详解）。
+- 第 6 行：从 `rules` 导出 `register`（show 规则注册函数，由上层在初始化 `Target::Html` 时调用）、以及两个辅助函数 `html_mathml_body`、`html_span_filled`。
+
+> 关键洞察：第 2 行的 `pub use self::dom::*;` 和 4.1 节的 `mod dom;` 配合，实现了“**模块私有、类型公开**”。这是 typst-html 最值得学习的一种 API 组织手法——既能把相关类型集中放在 `dom.rs` 一个文件里，又能避免外部依赖 `dom` 这个内部模块路径，将来重构内部模块切分也不会破坏外部 API。
+
+#### 4.2.4 代码实践
+
+> 实践目标：验证“公开类型来自私有模块”这一门面结构。
+
+操作步骤（源码阅读型实践）：
+
+1. 在 [src/dom.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/dom.rs) 中搜索 `pub struct HtmlElement`（或 `pub enum HtmlNode`），确认这些类型确实定义在私有的 `dom.rs` 里。
+2. 回到 [src/lib.rs:21](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/lib.rs#L21) 的 `pub use self::dom::*;`，理解正是这一行把它们搬到了 crate 根。
+3. 在 [src/encode.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/encode.rs) 中找到 `pub fn html(`（[src/encode.rs:23](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/encode.rs#L23)），确认它就是被第 3 行 `pub use` 导出的那个 `html`。
+
+需要观察的现象：
+
+- 类型/函数的“定义处”和“对外暴露处”是分离的：定义在私有模块里，暴露在 crate 根上。
+
+预期结果：
+
+- 能向别人解释：外部调用 `typst_html::html(...)` 时，这个函数其实住在私有的 `encode.rs` 里，靠 `pub use` 暴露出来。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么 typst-html 选择 `pub use self::dom::*;`（通配），而对 `encode` 却逐个列举 `{HtmlOptions, html, html_in_bundle}`？
+
+> **参考答案**：`dom` 是一整套 **数据模型类型**（很多个且经常需要一起使用），用通配可以一次性、低成本地把整族类型暴露出去；而 `encode` 里除了少数几个对外有用的入口（`html`/`html_in_bundle`/`HtmlOptions`），还有大量编码器内部细节（如 `Writer`、各种 `write_*` 函数），逐个列举可以 **只暴露入口、隐藏内部实现**，保持 API 表面干净。
+
+**练习 2**：如果维护者把 `dom.rs` 拆成了 `dom.rs` + `dom/element.rs` 两个文件（内部重构），会破坏外部代码 `typst_html::HtmlElement` 吗？
+
+> **参考答案**：不会。因为外部用的是 crate 根上的 `typst_html::HtmlElement`，它由 `pub use self::dom::*;` 提供。只要重构后 `dom` 模块仍然（直接或间接地）公开了 `HtmlElement`，门面对外就不变。这正是门面模式带来的“内部可自由重构”的好处。
+
+---
+
+### 4.3 `css` 子模块的组织
+
+#### 4.3.1 概念说明
+
+`css` 是 typst-html 里唯一一个 **目录型模块**（其他模块都是单个 `.rs` 文件）。它对应 `src/css/` 目录，入口是 `src/css/mod.rs`，下面又分出 `encode.rs` 和 `resolve.rs` 两个子文件。
+
+为什么 CSS 需要单独成模块？因为 typst-html 不只是把 DOM 编码成字符串，还要处理 **样式**：一方面要把 Typst 的数值类型（长度、颜色、角度……）序列化成合法的 CSS 值；另一方面要把生成出来的 CSS 属性写进元素的 `style` 属性。这两件事相对独立，于是被拆成了两个子文件，由 `mod.rs` 统一汇总。
+
+注意一个细节：`css` 模块本身是 **私有** 的（`mod css;`，见 [src/lib.rs:9](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/lib.rs#L9)），外部看不到 `typst_html::css`。但 crate 内部大量代码（包括 `lib.rs` 里的 `HtmlElem`）都通过 `crate::css::Properties` 来使用它。
+
+#### 4.3.2 核心流程
+
+`css` 子模块的三层结构：
+
+```
+src/css/
+├─ mod.rs       入口：用 pub use 汇总对内可见的名字
+│                 ├─ pub use encode::{Properties, ToCss}
+│                 └─ pub use resolve::resolve_inline_styles
+│                 ├─ mod encode    （私有子模块）
+│                 └─ mod resolve   （私有子模块）
+│
+├─ encode.rs    职责：Typst 类型 → CSS 值
+│                 提供 Properties（CSS 属性集合）、ToCss（序列化 trait）、CssWriter 等
+│
+└─ resolve.rs   职责：把元素 css 字段写成内联 style 属性
+                  入口 resolve_inline_styles(&mut HtmlElement)
+```
+
+#### 4.3.3 源码精读
+
+`css/mod.rs` 非常短，完整内容在 [src/css/mod.rs:1-5](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/css/mod.rs#L1-L5)：
+
+```rust
+pub use encode::{Properties, ToCss};
+pub use resolve::resolve_inline_styles;
+
+mod encode;
+mod resolve;
+```
+
+逐行说明：
+
+- 前两行 `pub use`：把 `encode` 里的 `Properties`、`ToCss` 和 `resolve` 里的 `resolve_inline_styles` 提升到 `crate::css::` 路径下，供 crate 其他地方使用（例如 `crate::css::Properties`）。
+- 后两行 `mod`：声明 `encode` 和 `resolve` 是 `css` 的 **私有子模块**——连 crate 内的其他模块也访问不到 `crate::css::encode::XXX`，只能用 `mod.rs` 重导出过的名字。
+
+两个子文件的职责，由它们各自的文件首注释点明：
+
+- [src/css/encode.rs:1](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/css/encode.rs#L1)：`//! Conversion from Typst data types into CSS data types.`（把 Typst 数据类型转换成 CSS 数据类型）。它提供 `Properties`（按名排序去重的 CSS 属性集合）、`ToCss`（把值写成 CSS 文本的 trait）以及 `CssWriter`/`CalcWriter` 等写入器（后续 u4-l4 详解）。
+- [src/css/resolve.rs:5-13](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/css/resolve.rs#L5-L13)：`resolve_inline_styles` 函数“把所有元素的 CSS 属性变成内联 `style` 属性”。
+
+`css` 模块被 crate 内部使用的最直接证据，就在 `lib.rs` 的 `HtmlElem` 定义里。[src/lib.rs:74-77](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/lib.rs#L74-L77)：
+
+```rust
+/// The element's CSS properties. Currently only used for generated styles.
+#[internal]
+#[parse(Some(css::Properties::default()))]
+pub css: css::Properties,
+```
+
+这里的 `css::Properties`（即 `crate::css::Properties`，来自 `css/encode.rs`）就是 `HtmlElem` 的一个内部字段，说明 `lib.rs` 直接依赖 `css` 子模块。
+
+> 小结：`css/mod.rs` 自己也玩了一次“小门面”——`encode`/`resolve` 是它的私有子模块，它只把 `Properties`/`ToCss`/`resolve_inline_styles` 这几个名字重新暴露给 crate 其余部分。这和 4.2 节 crate 根的门面是同一种手法，只是规模更小。
+
+#### 4.3.4 代码实践
+
+> 实践目标：看清 `css` 子模块“私有模块 + 内部 pub use”的组织方式，并找到一个跨模块引用它的真实位置。
+
+操作步骤（源码阅读型实践）：
+
+1. 打开 [src/css/mod.rs:1-5](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/css/mod.rs#L1-L5)，确认它由 2 条 `pub use` + 2 条 `mod` 组成。
+2. 在整个 crate 中搜索 `css::Properties` 的使用，确认 [src/lib.rs:76-77](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/lib.rs#L76-L77) 是其中一个使用点（`HtmlElem` 的 `css` 字段）。
+3. 打开 [src/css/resolve.rs:11](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/css/resolve.rs#L11)，确认 `resolve_inline_styles` 的签名是接收一个 `&mut HtmlElement`（它会在 DOM 上原地改写）。
+
+需要观察的现象：
+
+- `css` 模块对 **内** 通过 `crate::css::Properties` 可用，对 **外** 不可见（外部找不到 `typst_html::css` 这条路径）。
+
+预期结果：
+
+- 能说出 `css` 子模块三件事：`mod.rs` 汇总重导出、`encode.rs` 负责 Typst→CSS 类型序列化、`resolve.rs` 负责把 CSS 写成内联 `style`。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：外部 crate 能不能写 `typst_html::css::Properties`？能不能写 `typst_html::Properties`？
+
+> **参考答案**：都 **不能**。`css` 是私有模块（`mod css;`），所以 `typst_html::css::Properties` 这条路径对外不存在；同时 crate 根上也没有 `pub use` 导出 `Properties`，所以 `typst_html::Properties` 也不存在。`Properties` 只在 typst-html 内部使用。
+
+**练习 2**：`css/mod.rs` 里的 `mod encode;` `mod resolve;` 如果改成 `pub mod encode;` `pub mod resolve;`，外部访问情况会怎样变化？
+
+> **参考答案**：即使改成 `pub mod`，由于父模块 `css` 本身是私有的（`mod css;`），`encode`/`resolve` 对外仍然不可见——可见性受最外层私有模块限制。所以这个改动对外部 API 没有影响，只会让 crate 内其他模块能多看到一些 `css::encode::*` 的路径（但通常没必要）。
+
+---
+
+### 4.4 各源文件的职责全图
+
+#### 4.4.1 概念说明
+
+前面三节讲清了“模块怎么声明、怎么暴露、`css` 怎么拆”。这一节把 18 个文件的 **职责** 一一落实到源码，给你一张可以随时回查的“全图”。理解每个文件管什么，能让你在后续讲义里迅速定位：遇到一个问题，该去哪个文件找答案。
+
+#### 4.4.2 核心流程
+
+按“数据流”把文件分成五组（这也是后续单元的阅读顺序）：
+
+```
+① 数据模型（“长什么样”）
+   dom.rs ── HTML DOM 的内存表示
+   tag.rs / attr.rs / property.rs ── 标签/属性/CSS属性 的名字表与分类
+   charsets.rs ── 字符合法性规则
+
+② 编译主链（“怎么造出来”）
+   document.rs ── 文档级编译入口
+   fragment.rs ── 片段级编译入口
+   convert.rs ── Content → HtmlNode 转换器
+
+③ 规则与特殊内容（“怎么映射”）
+   rules.rs ── 内建 show 规则（Typst 元素 → HTML 元素）
+   mathml.rs ── 数学公式 → MathML
+   link.rs ── 链接锚点
+
+④ 样式（“怎么打扮”）
+   css/ ── CSS 类型序列化 + 内联样式解析
+
+⑤ 输出与内省（“怎么用”）
+   encode.rs ── DOM → HTML 字符串
+   introspect.rs ── 内省/查询/定位
+   lib.rs ── crate 根 + 用户元素 HtmlElem/FrameElem
+   typed.rs ── 类型化 html.div 等 API 的生成
+```
+
+#### 4.4.3 源码精读
+
+下面用每个文件的 **首行注释或首个公开条目** 来佐证其职责（这些都是你打开文件第一眼就能看到的东西）：
+
+**① 数据模型**
+
+- [src/dom.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/dom.rs)：定义 DOM 数据模型。它 `use` 了 `Content`、`Dict`、`Fold`、`Output`、`Frame`、`Document` 等，是 `HtmlDocument`/`HtmlNode`/`HtmlElement`/`HtmlFrame`/`HtmlTag`/`HtmlAttr`/`HtmlAttrs` 的家（详见 u2-l1）。
+- [src/tag.rs:1](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/tag.rs#L1)：`//! Predefined constants for HTML tags.`——预定义标签常量；它还含内容模型分类函数，如 `is_void`（[src/tag.rs:125](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/tag.rs#L125)）、`is_flow_content`（[src/tag.rs:185](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/tag.rs#L185)）、`should_group_into_pars`（[src/tag.rs:543](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/tag.rs#L543)）（详见 u2-l4）。
+- [src/attr.rs:8](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/attr.rs#L8) 起：`pub const abbr: HtmlAttr = HtmlAttr::constant("abbr");`——属性名常量表。
+- [src/property.rs:1-2](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/property.rs#L1-L2)：`//! Typed CSS properties.`——类型化 CSS 属性，如 `Display` 枚举及其 `default_for(tag)`（详见 u4-l2）。
+- [src/charsets.rs:1](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/charsets.rs#L1)：`//! Defines syntactical properties of HTML tags, attributes, and text.`——字符有效性规则，如 `is_valid_in_tag_name`（[src/charsets.rs:4](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/charsets.rs#L4)）（详见 u5-l2）。
+
+**② 编译主链**
+
+- [src/document.rs:25](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/document.rs#L25)：`pub fn html_document(...)`——文档级编译主入口，内部用 `comemo::memoize` 缓存（详见 u3-l1）。
+- [src/fragment.rs:18](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/fragment.rs#L18) / [src/fragment.rs:88](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/fragment.rs#L88) / [src/fragment.rs:117](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/fragment.rs#L117)：`html_block_fragment` / `html_inline_fragment` / `html_math_fragment`——片段级编译入口（详见 u3-l4）。
+- [src/convert.rs:60](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/convert.rs#L60)：`pub fn convert_to_nodes(...)`——内容转换器，把 `Content` 转成 `HtmlNode`（详见 u3-l3）。
+
+**③ 规则与特殊内容**
+
+- [src/rules.rs:39](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/rules.rs#L39)：`pub fn register(rules: &mut NativeRuleMap)`——注册内建 show 规则，把 Typst 元素映射成 HTML 元素（详见 u3-l5、u6-l2）。
+- [src/mathml.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/mathml.rs)：`use typst_assets::mathml::*;`——把数学公式转成 MathML（详见 u5-l5）。
+- [src/link.rs:26](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/link.rs#L26)：`pub fn create_link_anchors(...)`——为被链接的目标分配锚点 ID（详见 u5-l4）。
+
+**④ 样式**
+
+- `src/css/` 三件套已在 4.3 节详解：`mod.rs` 汇总、`encode.rs` 做 Typst→CSS 类型序列化、`resolve.rs` 做内联 `style` 解析（详见 u4-l3、u4-l4）。
+
+**⑤ 输出与内省**
+
+- [src/encode.rs:23](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/encode.rs#L23)：`pub fn html(document: &HtmlDocument, options: &HtmlOptions) -> SourceResult<String>`——把 DOM 编码成 HTML 字符串（详见 u5-l1）。
+- [src/introspect.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/introspect.rs)：`use ...::{ElementIntrospector, ElementIntrospectorBuilder, HtmlPosition, Introspector, ...}`——构建 `HtmlIntrospector`，支持查询与定位（详见 u5-l3）。
+- [src/lib.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/lib.rs)：crate 根，定义用户元素 `HtmlElem`/`FrameElem` 与 `module()`（u1-l1 已详解）。
+- [src/typed.rs:1-4](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/typed.rs#L1-L4)：`//! The typed HTML element API (e.g. html.div).`——由 `typst-assets` 的 HTML 规范数据驱动，运行时生成类型化构造函数（详见 u2-l5、u6-l3）。
+
+#### 4.4.4 代码实践
+
+> 实践目标：用“首行注释/首个公开条目”快速核实上表，建立“看到文件名就知道职责”的肌肉记忆。
+
+操作步骤（源码阅读型实践）：
+
+1. 对 5 个代表文件，分别打开并只看 **最前面 1～12 行**，核对它们与上表的描述是否一致：`dom.rs`、`convert.rs`、`encode.rs`、`property.rs`、`typed.rs`。
+2. 记录每个文件的 `use` 语句里出现的 `typst_library::...` 子模块名（如 `foundations`、`layout`、`introspection`、`text`、`math`），这些往往暗示该文件和哪一块打交道。
+
+需要观察的现象：
+
+- 文件的 `use` 与首注释高度自洽：例如 `convert.rs` 引入大量 `text::*`（`TextElem`、`SpaceElem`…），说明它处理“文本到节点”的转换。
+
+预期结果：
+
+- 你能不查表地说出：DOM 模型在 `dom.rs`、转换在 `convert.rs`、编码在 `encode.rs`、规则在 `rules.rs`、CSS 在 `css/`。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：如果你想看“`<strong>` 是怎么从 Typst 的加粗映射来的”，应该去哪个文件？
+
+> **参考答案**：去 [src/rules.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/rules.rs)。它负责注册内建 show 规则（`register`），把 Typst 元素映射成 HTML 元素；`strong → <strong>` 的映射就在这里。
+
+**练习 2**：`charsets.rs`、`tag.rs`、`attr.rs` 都和“名字/字符”有关，三者分工有何不同？
+
+> **参考答案**：`charsets.rs` 管 **字符级**的合法性（某个字符能否出现在标签名/属性名/文本里）；`tag.rs` 管 **标签级**（预定义标签常量 + 某标签属于哪种内容模型）；`attr.rs` 管 **属性级**（预定义属性名常量）。一个是从“字符”维度校验，另两个是从“名字表”维度提供常量。
+
+---
+
+## 5. 综合实践
+
+把本讲的知识串成一张图。**任务：亲手绘制 typst-html 的模块依赖关系图，并标注公开/私有与 css 子模块的组成。**
+
+操作步骤：
+
+1. 以 [src/lib.rs:3-25](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/lib.rs#L3-L25) 为唯一信息源（`pub mod` / `mod` / `pub use`），画出以 `typst-html` 为根的模块树。
+2. 在树上用不同标记区分：**公开模块**（`pub mod`）、**私有模块**（`mod`）、**门面重导出**（`pub use`）。
+3. 单独把 `src/css/` 子目录画成一个子树，标出 `mod.rs`/`encode.rs`/`resolve.rs` 三者关系。
+4. 用箭头标出“公开类型来自哪个私有模块”（例如 `HtmlElement → dom.rs`、`html → encode.rs`）。
+
+下面给出一份 **参考答案**（建议你先自己画，再对照）：
+
+```
+typst-html  (crate 根: src/lib.rs)
+│
+│  ──[门面 pub use]──────────────────────────────────────
+│   html_document, html_document_for_bundle ………… from document
+│   (HtmlDocument/HtmlNode/HtmlElement/HtmlFrame/        from dom
+│    HtmlTag/HtmlAttr/HtmlAttrs …)        ………………… from dom (*)
+│   HtmlOptions, html, html_in_bundle   …………………… from encode
+│   HtmlIntrospector                    ………………………… from introspect
+│   create_link_anchors                 ………………………… from link
+│   html_mathml_body, html_span_filled, register …… from rules
+│
+├─ [pub mod] attr.rs ………………… HTML 属性名常量表（href/class/…）
+├─ [pub mod] property.rs ………… 类型化 CSS 属性（Display/default_for）
+├─ [pub mod] tag.rs ………………… HTML 标签常量 + 内容模型分类
+│
+├─ [mod] charsets.rs ……………… 字符有效性规则
+├─ [mod] convert.rs ……………… Content → HtmlNode 转换器
+│
+├─ [mod] css/  ←── 唯一的目录型模块（私有）
+│        ├─ mod.rs ……… pub use {Properties, ToCss} + resolve_inline_styles
+│        ├─ [mod] encode.rs … Typst 类型 → CSS 值（ToCss/CssWriter）
+│        └─ [mod] resolve.rs . 把 css 字段写成内联 style 属性
+│
+├─ [mod] document.rs …………… 文档编译主入口 html_document
+├─ [mod] dom.rs ………………… DOM 数据模型（被 pub use * 整体暴露）
+├─ [mod] encode.rs …………… DOM → HTML 字符串编码 html()
+├─ [mod] fragment.rs ………… block/inline/math 片段编译
+├─ [mod] introspect.rs ……… HtmlIntrospector
+├─ [mod] link.rs ……………… 链接锚点 create_link_anchors
+├─ [mod] mathml.rs …………… 数学公式 → MathML
+├─ [mod] rules.rs …………… 内建 show 规则注册 register()
+└─ [mod] typed.rs …………… 类型化 html.div 等 API 的生成
+```
+
+要点自检：
+
+- 公开模块只有 3 个：`attr`/`property`/`tag`；其余 12 个为私有。
+- `dom` 虽私有，但靠 `pub use self::dom::*;` 把整族类型公开到 crate 根。
+- `css` 是私有模块，其内部又用 `mod.rs` 的小门面只暴露 `Properties`/`ToCss`/`resolve_inline_styles`。
+
+> 说明：本实践为纯源码阅读型，不需要编译运行；以 `lib.rs` 的声明为准即可完成。
+
+## 6. 本讲小结
+
+- typst-html 共 **18 个源文件**：`src/` 下 15 个 `.rs` + `src/css/` 下 3 个，由 `lib.rs` 顶部的模块声明串成骨架。
+- 模块声明分两类：**3 个公开模块** `attr`/`property`/`tag`（都是供外部引用的名字表/分类表）和 **12 个私有模块**（内部实现）。
+- 对外 API 采用 **门面模式**：[src/lib.rs:20-25](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/lib.rs#L20-L25) 用 `pub use` 把内部模块里的少数类型/函数（`html_document`、`html`、`HtmlElement` 等）暴露到 crate 根。
+- `dom` 模块是“**模块私有、类型公开**”的典型：靠 `pub use self::dom::*;` 整体暴露数据模型类型，外部用 `typst_html::HtmlElement` 而非 `typst_html::dom::HtmlElement`。
+- `css` 是唯一的目录型模块（私有），由 `mod.rs`（汇总重导出）、`encode.rs`（Typst→CSS 类型序列化）、`resolve.rs`（内联 `style` 解析）三层组成，内部也复用了门面手法。
+- 文件按职责可分为五组：数据模型（`dom`/`tag`/`attr`/`property`/`charsets`）、编译主链（`document`/`fragment`/`convert`）、规则与特殊内容（`rules`/`mathml`/`link`）、样式（`css/`）、输出与内省（`encode`/`introspect`）+ 根（`lib`/`typed`）。
+
+## 7. 下一步学习建议
+
+本讲让你看清了“骨架在哪里”，接下来建议按数据流深入：
+
+- 想走通“从命令行到 HTML 字符串”的完整调用链，请阅读 **u1-l3《导出调用链与 CLI 入口》**，把 `Target::Html` 如何驱动 `html_document` → `html` 串起来。
+- 想直接上手 `html.elem`/`html.frame`，请阅读 **u1-l4《用户侧 API：html.elem 与 html.frame》**。
+- 想深入数据模型本身（`HtmlNode`/`HtmlElement` 等），进入第二单元 **u2-l1《HTML DOM 数据模型总览》**——届时你会回到本讲的 `dom.rs`，从“职责速查”升级到“逐字段精读”。
+- 在进入后续讲义前，建议先确认你能脱口而出：哪些模块是公开的、`pub use self::dom::*;` 解决了什么问题、`css` 子模块由哪三个文件组成。
