@@ -1,0 +1,856 @@
+{
+  "project": "typst-crates-typst-ide",
+  "head": "146a58329a30f6cd38978c22c6bf0e430d8962a1",
+  "rationale": "typst-ide 是为 Typst 提供 IDE 能力（补全、悬停、跳转定义、源码与渲染结果双向跳转、表达式分析）的库，约 5000 行、9 个源文件，属中型项目，故规划 8 个单元、共 27 篇讲义。学习顺序遵循「先认识再打地基、再讲 LSP 经典功能、最后深入最复杂的补全与跳转」：第 1 单元从项目定位、IdeWorld 数据契约与 TestWorld 测试设施入手，让读者先能运行；第 2 单元是所有功能共享的基石——语法树光标定位、deref_target 表达式归类、named_items 作用域收集、analyze 值推断与 utils 工具集，因为 tooltip/definition/complete 都依赖它们；第 3、4 单元进入较独立的悬停提示与跳转定义；第 5、6 单元聚焦最大的 complete.rs（先讲入口分发与数据模型、三模式补全，再分篇讲参数/字段/import/scope-cast/apply 生成等进阶）；第 7 单元单独讲 typst 特有的源码↔渲染双向 jump；第 8 单元回到测试体系与集成实践作为收尾。讲义之间通过 depends_on 显式声明依赖，保证读者可按拓扑顺序学习，且每篇都绑定真实源码文件并给出可操作的实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 typst-ide",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位、依赖与整体架构",
+          "order": 1,
+          "filename": "u1-l1-project-overview-and-architecture.md",
+          "level": "beginner",
+          "topic": "typst-ide 是什么、它在 typst 工程中的定位、依赖关系，以及它提供的补全/悬停/定义/跳转/分析五大 IDE 能力如何通过 lib.rs 的模块声明与 re-export 暴露。",
+          "learning_goals": [
+            "了解 typst-ide 在 typst monorepo 中的定位与对 typst/typst-eval/typst-html/typst-layout 等的依赖",
+            "能说出 typst-ide 提供的五大 IDE 能力及其公共入口函数",
+            "理解 lib.rs 中 mod 声明与 pub use re-export 的对应关系"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "lib.rs 模块声明",
+            "pub use 导出",
+            "Cargo.toml 依赖"
+          ],
+          "practice_task": "阅读 src/lib.rs，绘制一张「公共 API 函数（autocomplete/tooltip/definition/jump_from_click 等）→ 所属源文件 → 对外类型」的对照表，并标注每个能力的输入参数与返回类型。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "IdeWorld —— IDE 功能的数据契约",
+          "order": 2,
+          "filename": "u1-l2-ideworld-trait.md",
+          "level": "beginner",
+          "topic": "IdeWorld trait 如何在 World 之上扩展 upcast、packages、files 三个方法，为 IDE 功能提供数据来源，以及这些方法的默认实现与可选性。",
+          "learning_goals": [
+            "理解为什么需要 IdeWorld 而不是直接用 World",
+            "掌握 upcast 存在的原因（Rust trait 向上转型尚未稳定）",
+            "明白 packages() 与 files() 是可选增强项及其默认空实现"
+          ],
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "IdeWorld trait",
+            "upcast",
+            "packages",
+            "files",
+            "World trait"
+          ],
+          "practice_task": "定义一个空结构体并为它实现 IdeWorld（含 upcast 返回 self），思考：若不实现 packages() 和 files()，哪些 IDE 功能会降级、哪些不受影响。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "运行、构建与测试基础设施",
+          "order": 3,
+          "filename": "u1-l3-build-and-testworld.md",
+          "level": "beginner",
+          "topic": "typst-ide 如何构建与测试，TestWorld 如何模拟一个最小 World，以及 TestBase 共享 library/book/fonts 的懒初始化设计。",
+          "learning_goals": [
+            "了解 crate 的 cargo build/test 方式与 dev-dependencies（typst-assets、typst-dev-assets）",
+            "理解 TestWorld 的结构与共享 TestBase 的复用设计",
+            "掌握 with_source/with_asset 构造多文件测试场景的方法"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "src/tests.rs"
+          ],
+          "minimal_modules": [
+            "Cargo.toml dev-deps",
+            "TestWorld",
+            "TestBase",
+            "with_source",
+            "with_asset"
+          ],
+          "practice_task": "用 TestWorld::new(\"#import \\\"other.typ\\\": x; #x\").with_source(\"other.typ\", \"#let x = 1\") 构造一个跨文件 import 测试场景，并解释该 world 如何复用共享的 library 和 book。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "语法树定位与表达式分析基石",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "从光标到语法树节点",
+          "order": 1,
+          "filename": "u2-l1-cursor-to-syntax-node.md",
+          "level": "beginner",
+          "topic": "如何用 LinkedNode::new(source.root()) 配合 leaf_at(cursor, side) 把光标位置映射到语法树叶子节点，以及 Side::Before/After 在光标歧义时的作用。",
+          "learning_goals": [
+            "掌握 LinkedNode 与 leaf_at 的用法",
+            "理解 Side::Before/After 在两个 token 交界处的歧义消解",
+            "明白 trivia（空白、注释）节点的判定与处理"
+          ],
+          "source_files": [
+            "src/definition.rs",
+            "src/tooltip.rs",
+            "src/matchers.rs"
+          ],
+          "minimal_modules": [
+            "LinkedNode",
+            "leaf_at",
+            "Side",
+            "Source::root"
+          ],
+          "practice_task": "写一段代码：给定 Typst 源码与一个光标，打印 leaf_at 在 Side::Before 与 Side::After 两种取值下得到的节点 kind 与 leaf_text，并找出一处两者不同的位置。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "deref_target —— 把任意表达式归类",
+          "order": 2,
+          "filename": "u2-l2-deref-target.md",
+          "level": "beginner",
+          "topic": "deref_target 如何沿祖先向上找到第一个表达式节点，并把它归类为 VarAccess/Callee/ImportPath/IncludePath/Code/Label/Ref 等可被 IDE 操作的类别。",
+          "learning_goals": [
+            "理解 DerefTarget 枚举各变体的含义与触发场景",
+            "掌握从任意节点向上定位到表达式的算法",
+            "明白同一个 Str 在不同父节点（import/include/普通代码）下归类不同的逻辑"
+          ],
+          "source_files": [
+            "src/matchers.rs"
+          ],
+          "minimal_modules": [
+            "deref_target",
+            "DerefTarget",
+            "ast::Expr 模式匹配"
+          ],
+          "practice_task": "对若干典型片段（#foo()、#import \"x\"、<label>、@ref、#a.b）手动推断光标处的 deref_target 类别，再与源码逻辑对照验证。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "named_items —— 收集作用域内可见命名项",
+          "order": 3,
+          "filename": "u2-l3-named-items.md",
+          "level": "intermediate",
+          "topic": "named_items 如何沿祖先与前置兄弟遍历，收集 let 绑定、import 项、for 循环绑定、闭包参数等作用域内可见的命名项，以及 NamedItem 的四种变体。",
+          "learning_goals": [
+            "理解 NamedItem::Var/Fn/Module/Import 四种变体",
+            "掌握「沿祖先 + 前置兄弟」收集作用域的双层遍历策略",
+            "理解 import 的通配/具名/重命名三种形式如何被解析为命名项"
+          ],
+          "source_files": [
+            "src/matchers.rs"
+          ],
+          "minimal_modules": [
+            "named_items",
+            "NamedItem",
+            "LetBinding/ModuleImport/ForLoop/Closure 处理"
+          ],
+          "practice_task": "给定一段含 import 和闭包的 Typst 代码（如 #let f(a) = ...; 在函数体内某光标处），列出 named_items 会收集到的全部命名项及其类别。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "analyze —— 推断表达式可能的值",
+          "order": 4,
+          "filename": "u2-l4-analyze-values.md",
+          "level": "intermediate",
+          "topic": "analyze_expr 对字面量直接求值、对复杂表达式回退到 trace 追踪；analyze_import 解析模块；analyze_labels 收集文档标签与参考文献并返回分界偏移。",
+          "learning_goals": [
+            "理解 analyze_expr 的字面量求值与 trace 回退机制",
+            "掌握 analyze_import 如何借助 engine 真正执行 import 得到模块值",
+            "理解 analyze_labels 返回的 (labels, split) 中 split 偏移的含义"
+          ],
+          "source_files": [
+            "src/analyze.rs",
+            "src/utils.rs"
+          ],
+          "minimal_modules": [
+            "analyze_expr",
+            "analyze_expr_with_fallback",
+            "analyze_import",
+            "analyze_labels",
+            "with_engine"
+          ],
+          "practice_task": "解释为何 analyze_expr 能得到 set 规则之后某函数调用的值（依赖 trace），并说明 analyze_labels 中 split 之前是文档标签、之后是参考文献的设计意图。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "utils —— 共享工具集",
+          "order": 5,
+          "filename": "u2-l5-utils.md",
+          "level": "intermediate",
+          "topic": "with_engine 创建临时 Engine、globals 按语法模式返回标准库作用域、check_value_recursively 限步递归检查值、summarize_font_family 生成字体摘要。",
+          "learning_goals": [
+            "理解 with_engine 为何使用 EmptyIntrospector 并 track world",
+            "掌握 globals 如何根据 mode_after 在 math 与 global 作用域间切换",
+            "理解 Searcher 用 max_steps 防止递归爆炸的设计"
+          ],
+          "source_files": [
+            "src/utils.rs"
+          ],
+          "minimal_modules": [
+            "with_engine",
+            "globals",
+            "check_value_recursively",
+            "summarize_font_family",
+            "MetricRange"
+          ],
+          "practice_task": "说明 globals 如何决定返回 math 还是 global 作用域；并用 check_value_recursively 解释「一个含颜色的字典/模块也会出现在颜色补全里」这一行为的实现原理。",
+          "depends_on": [
+            "u1-l2",
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "文档查找与悬停提示",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "docs —— 查找值与参数的文档",
+          "order": 1,
+          "filename": "u3-l1-docs.md",
+          "level": "intermediate",
+          "topic": "find_value_docs / find_param_docs 如何从原生文档或源码 doc 注释中提取文档，Docs 的 Native/Comment 两类来源，以及 collect_doc_comment 与 summary 的文本处理。",
+          "learning_goals": [
+            "理解 Docs 的 Native（原生静态文档）与 Comment（源码注释）两类来源",
+            "掌握 collect_doc_comment 沿前置 trivia 收集行/块注释的策略",
+            "理解 summary 去除 Markdown 格式、保留反引号、取首句的逻辑"
+          ],
+          "source_files": [
+            "src/docs.rs"
+          ],
+          "minimal_modules": [
+            "find_value_docs",
+            "find_param_docs",
+            "Docs",
+            "collect_doc_comment",
+            "summary"
+          ],
+          "practice_task": "给定一个带 /// 与 // 注释的闭包定义，手算 Docs::collect_doc_comment 收集到的行顺序，以及 summary 提取出的首句文本。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "tooltip 总入口与分发策略",
+          "order": 2,
+          "filename": "u3-l2-tooltip-dispatch.md",
+          "level": "intermediate",
+          "topic": "tooltip 函数如何依次短路尝试 named_param/font/label/import/expr/closure 各分支，首个命中即返回，以及 Tooltip 的 Text/Code 两类与 trivia 跳过。",
+          "learning_goals": [
+            "掌握 tooltip 的短路分发顺序及其设计原因",
+            "理解 Tooltip::Text 与 Tooltip::Code 的区别",
+            "明白为何首先跳过 is_trivia 的节点"
+          ],
+          "source_files": [
+            "src/tooltip.rs"
+          ],
+          "minimal_modules": [
+            "tooltip",
+            "Tooltip",
+            "分发链 or_else"
+          ],
+          "practice_task": "解释为什么 named_param_tooltip 优先于 expr_tooltip；并构造一个场景说明同一光标在 Side::Before 与 Side::After 下得到不同 tooltip。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "表达式与函数调用的 tooltip",
+          "order": 3,
+          "filename": "u3-l3-expr-tooltip.md",
+          "level": "intermediate",
+          "topic": "expr_tooltip 如何用 analyze_expr 得到候选值、合并重复值并标注 ×N、对长度做单位换算提示，以及只有可哈希或数学变量访问表达式才会被分析的原因。",
+          "learning_goals": [
+            "理解 expr_tooltip 仅分析可哈希表达式或数学变量访问的设计权衡",
+            "掌握多值合并与 ×N 计数的展示逻辑",
+            "理解 length_tooltip 把 pt 换算成 mm/cm/in 的展示"
+          ],
+          "source_files": [
+            "src/tooltip.rs",
+            "src/analyze.rs"
+          ],
+          "minimal_modules": [
+            "expr_tooltip",
+            "analyze_expr",
+            "length_tooltip",
+            "repr::pretty_comma_list",
+            "Sink::MAX_VALUES"
+          ],
+          "practice_task": "给定 #let x = 1 + 2，解释为何 hover 在 x 上得到 Tooltip::Code(\"3\")；并说明当候选值超过 MAX_VALUES-1 个时结尾 \"...\" 的处理方式。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "特殊场景 tooltip：字体、标签、import、闭包捕获",
+          "order": 4,
+          "filename": "u3-l4-special-tooltips.md",
+          "level": "intermediate",
+          "topic": "font_tooltip 展示字体家族摘要、label_tooltip 展示标签详情、import_tooltip 列出通配导入项、closure_tooltip 用 CapturesVisitor 列出闭包捕获的变量。",
+          "learning_goals": [
+            "掌握四类特殊 tooltip 的触发条件与数据来源",
+            "理解 closure_tooltip 仅在 = / arrow 上触发的降噪设计",
+            "明白 import_tooltip 如何借助 analyze_import 列出 star 导入的名字"
+          ],
+          "source_files": [
+            "src/tooltip.rs",
+            "src/utils.rs"
+          ],
+          "minimal_modules": [
+            "font_tooltip",
+            "label_tooltip",
+            "import_tooltip",
+            "closure_tooltip",
+            "summarize_font_family"
+          ],
+          "practice_task": "为 closure_tooltip 补一个测试场景：闭包无任何捕获时应返回 None；并解释为什么该 tooltip 不在整个闭包子树上都显示。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "跳转定义 definition",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Definition 类型与 definition 主流程",
+          "order": 1,
+          "filename": "u4-l1-definition-flow.md",
+          "level": "intermediate",
+          "topic": "definition 如何用 leaf_at + deref_target 定位目标并对不同 DerefTarget 分派，Definition 的 Span/File/Std 三类返回值分别对应什么场景，以及可选 output 参数的作用。",
+          "learning_goals": [
+            "理解 Definition::Span/File/Std 三种返回类型对应的场景",
+            "掌握 definition 的 deref_target 分派结构",
+            "明白可选 output 参数为何对引用（Ref）定义是必需的"
+          ],
+          "source_files": [
+            "src/definition.rs"
+          ],
+          "minimal_modules": [
+            "definition",
+            "Definition",
+            "deref_target",
+            "leaf_at"
+          ],
+          "practice_task": "说明在 #x、#import \"o.typ\"、#table 三种光标下 definition 可能分别返回 Span、File、Std 的原因；并解释 Ref 分支为何需要传入编译产物 output。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "各类目标的定义解析",
+          "order": 2,
+          "filename": "u4-l2-definition-targets.md",
+          "level": "intermediate",
+          "topic": "VarAccess/Callee 如何先查 named_items 再回退 analyze_expr 与 globals；ImportPath/IncludePath 如何跳到文件；Ref 如何通过 introspector 用 Selector::Label 查询元素。",
+          "learning_goals": [
+            "掌握变量定义查找的三级回退策略（named_items → analyze_expr span → globals 标准库）",
+            "理解 import/include 跳转文件依赖 analyze_import + file_id",
+            "理解引用跳转用 Selector::Label 查询 introspector 的过程"
+          ],
+          "source_files": [
+            "src/definition.rs",
+            "src/analyze.rs"
+          ],
+          "minimal_modules": [
+            "named_items 回退",
+            "analyze_expr span 比对",
+            "globals",
+            "Selector::Label",
+            "analyze_import"
+          ],
+          "practice_task": "为 #import \"other.typ\": x 后使用 #x 的跨文件场景，逐步追踪 definition 的调用链，定位最终返回的 Definition::Span 及其所在文件与偏移。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "自动补全引擎核心",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "autocomplete 入口与补全分发管线",
+          "order": 1,
+          "filename": "u5-l1-autocomplete-dispatch.md",
+          "level": "intermediate",
+          "topic": "autocomplete 如何构造 CompletionContext，并按「字段访问 > 开放标签 > import > 规则 > 参数 > 通用模式」的顺序短路分派，mode_after 同时用于排除注释。",
+          "learning_goals": [
+            "理解补全的优先级与短路设计（特定补全优先于通用补全）",
+            "掌握 (from, completions) 返回值中 from 的含义",
+            "明白 mode_after 既给出语法模式又能排除注释节点"
+          ],
+          "source_files": [
+            "src/complete.rs"
+          ],
+          "minimal_modules": [
+            "autocomplete",
+            "CompletionContext::new",
+            "分派链",
+            "mode_after"
+          ],
+          "practice_task": "说明为什么通用 code/markup/math 补全要放在分派链最后；并解释 explicit=true 如何改变各 complete_* 的触发条件。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Completion 数据模型与 CompletionContext",
+          "order": 2,
+          "filename": "u5-l2-completion-model.md",
+          "level": "intermediate",
+          "topic": "Completion / CompletionKind 的字段与种类含义，CompletionContext 维护 before/after/leaf/cursor 等上下文，以及 snippet_completion / enrich / seen_casts 等方法。",
+          "learning_goals": [
+            "掌握 Completion 的 kind/label/apply/detail 四字段与 ${} snippet 占位语法",
+            "理解 CompletionContext 的 before_window 与 enrich 机制",
+            "明白 seen_casts 用于 cast_completions 去重"
+          ],
+          "source_files": [
+            "src/complete.rs"
+          ],
+          "minimal_modules": [
+            "Completion",
+            "CompletionKind",
+            "CompletionContext",
+            "snippet_completion",
+            "enrich"
+          ],
+          "practice_task": "手写一个 snippet_completion(\"test\", \"${a} + ${b}\", \"desc\") 调用，预测它生成的 Completion 结构（含 kind/label/apply/detail），并解释 apply 的占位符语法。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "三种语法模式的补全",
+          "order": 3,
+          "filename": "u5-l3-mode-completions.md",
+          "level": "intermediate",
+          "topic": "complete_markup / complete_math / complete_code 如何识别各自触发条件（@ 引用、# 嵌入代码、raw 标签、ident 等）并产出结构化 snippet 与 scope 补全。",
+          "learning_goals": [
+            "理解 markup 模式下 @ 引用、# 嵌入代码、``` raw 标签等触发条件",
+            "掌握 math 模式补全的范围与 snippet（sub/sup/frac）",
+            "理解 code 模式下 Hash/Ident/explicit 三种分支的区别"
+          ],
+          "source_files": [
+            "src/complete.rs",
+            "src/utils.rs"
+          ],
+          "minimal_modules": [
+            "complete_markup",
+            "complete_math",
+            "complete_code",
+            "markup/math/code_completions",
+            "raw_completions"
+          ],
+          "practice_task": "列出 markup 模式下「显式触发（explicit=true）」会补充的全部 snippet，并解释 raw 块标签补全 raw_completions 的数据来源（RawElem::languages）。",
+          "depends_on": [
+            "u5-l2",
+            "u2-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "补全进阶",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "set/show 规则与函数参数补全",
+          "order": 1,
+          "filename": "u6-l1-rules-and-params.md",
+          "level": "advanced",
+          "topic": "complete_rules 处理 set 关键字、show 选择器与 recipe；complete_params 与 param_completions 处理位置/具名参数，并用 deciding 节点回溯定位、对已填参数去重。",
+          "learning_goals": [
+            "掌握 set 规则只补可设置函数、show 选择器只补元素函数的过滤",
+            "理解 param_completions 对已有位置/具名参数的跳过逻辑",
+            "理解 deciding 节点回溯到 ( / , / : 来判断补全参数还是参数值"
+          ],
+          "source_files": [
+            "src/complete.rs"
+          ],
+          "minimal_modules": [
+            "complete_rules",
+            "set_rule_completions",
+            "show_rule_selector_completions",
+            "show_rule_recipe_completions",
+            "complete_params",
+            "param_completions"
+          ],
+          "practice_task": "给定 #rect(fill: red, |)，解释 param_completions 如何跳过已填的 fill、补出剩余 settable 参数；并说明 named_param_value_completions 在 fill:| 处如何工作。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "字段访问补全",
+          "order": 2,
+          "filename": "u6-l2-field-access.md",
+          "level": "advanced",
+          "topic": "complete_field_accesses 识别「expr.」与「expr.id|」两类形态，field_access_completions 用 analyze_expr 得到值后补方法、字段、symbol 修饰符、content/dict 字段及 get 规则。",
+          "learning_goals": [
+            "掌握点号后补全的两类触发形态与文本点号的处理",
+            "理解方法补全只取带 self 参数的函数",
+            "掌握 symbol.modifiers、content.fields、dict 字段、Func get 规则各自的补全来源"
+          ],
+          "source_files": [
+            "src/complete.rs",
+            "src/analyze.rs"
+          ],
+          "minimal_modules": [
+            "complete_field_accesses",
+            "field_access_completions",
+            "analyze_expr",
+            "fields_on",
+            "scope().iter()"
+          ],
+          "practice_task": "解释 #(). 会补出 insert/remove/len/all 的原因（类型 scope 中带 self 参数的方法）；并为 emoji.fa| 写出完整的补全推导过程。",
+          "depends_on": [
+            "u6-l1",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "import、路径、包、字体、标签补全",
+          "order": 3,
+          "filename": "u6-l3-import-path-package-font-label.md",
+          "level": "advanced",
+          "topic": "complete_imports 处理文件/包路径与 import 项；file/package/font/label/raw 各类专项补全如何基于 IdeWorld 的 packages()/files()/book 与编译产物生成。",
+          "learning_goals": [
+            "理解包补全的排序与按 (namespace,name) 去重版本逻辑",
+            "掌握字体补全在 equation show 规则下只补数学字体的过滤",
+            "理解标签补全在 @ / < > / citation 三种上下文下的 skip/take 区分",
+            "掌握路径补全按函数参数扩展名过滤（path_completion）"
+          ],
+          "source_files": [
+            "src/complete.rs",
+            "src/tests.rs"
+          ],
+          "minimal_modules": [
+            "complete_imports",
+            "import_item_completions",
+            "package_completions",
+            "font_completions",
+            "label_completions",
+            "file_completions_with_extensions",
+            "raw_completions",
+            "complete_open_labels"
+          ],
+          "practice_task": "说明 IdeWorld 的 packages() 与 files() 分别被哪些补全消费；并解释 label_completions 中如何用 split 区分文档标签与参考文献（citation 场景）。",
+          "depends_on": [
+            "u6-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "scope_completions 与类型驱动补全",
+          "order": 4,
+          "filename": "u6-l4-scope-and-cast.md",
+          "level": "advanced",
+          "topic": "scope_completions 用 named_items + globals 合并作用域项（局部优先），cast_completions 按 CastInfo（Value/Type/Union）递归产出对应补全，并借助 check_value_recursively 让容器内含目标类型的值也参与。",
+          "learning_goals": [
+            "掌握 scope_completions 的「局部命名优先于全局」合并与 defined 集合去重",
+            "理解 check_value_recursively 让「含颜色的字典/模块」也算颜色补全",
+            "掌握 cast_completions 对 Color/bool/Label/Func 等类型的特殊 snippet 处理"
+          ],
+          "source_files": [
+            "src/complete.rs",
+            "src/utils.rs"
+          ],
+          "minimal_modules": [
+            "scope_completions",
+            "cast_completions",
+            "check_value_recursively",
+            "named_items",
+            "globals",
+            "CastInfo"
+          ],
+          "practice_task": "解释 #rect(fill: |) 为何会补出所有颜色以及「内部含颜色的模块/字典」；并追踪 cast_completions 对一个 alignment 类型参数的递归展开过程。",
+          "depends_on": [
+            "u6-l1",
+            "u2-l3",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "补全内容生成：apply 片段与 BracketMode",
+          "order": 5,
+          "filename": "u6-l5-apply-and-bracketmode.md",
+          "level": "advanced",
+          "topic": "value_completion_full 统一生成 label/apply/detail，依据值类型与上下文决定括号形式；BracketMode::of 决定 ()/[]、光标位置与换行缩进。",
+          "learning_goals": [
+            "掌握 value_completion/call_completion/str_completion 如何汇聚到 value_completion_full",
+            "理解 BracketMode 四种模式（RoundWithin/RoundAfter/RoundNewline/SquareWithin）与按函数名/参数的判断",
+            "理解 detail 在缺少显式文档时的回退生成（repr、find_value_docs）"
+          ],
+          "source_files": [
+            "src/complete.rs"
+          ],
+          "minimal_modules": [
+            "value_completion_full",
+            "value_completion",
+            "call_completion",
+            "str_completion",
+            "BracketMode"
+          ],
+          "practice_task": "给定函数 emph 与 figure，分别预测其补全的 apply 形式（[...] 与 (\\n  ...\\n)），并说明 BracketMode::of 是依据什么做出判断的。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "双向跳转 jump —— 源码与渲染结果的映射",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "jump_from_click 入口与文档后端抽象",
+          "order": 1,
+          "filename": "u7-l1-jump-from-click.md",
+          "level": "advanced",
+          "topic": "Jump 的 File/Url/Position 三类目标；jump_from_click 通过 JumpFromDocument sealed trait 同时支持 PagedDocument 与 HtmlDocument 两种输出后端的点击定位。",
+          "learning_goals": [
+            "理解 Jump::File/Url/Position 三类跳转目标",
+            "掌握用 sealed trait 抽象两种文档后端（Paged/Html）的设计",
+            "明白 PagedDocument 的 resolve_position 如何落到对应 page 的 frame"
+          ],
+          "source_files": [
+            "src/jump.rs"
+          ],
+          "minimal_modules": [
+            "Jump",
+            "jump_from_click",
+            "JumpFromDocument",
+            "sealed 模式",
+            "resolve_position"
+          ],
+          "practice_task": "解释为何用 sealed trait（而非泛型或 enum）统一两种文档后端；并描述 jump_from_click 对 PagedDocument 从 PagedPosition 到 frame 的 resolve_position 流程。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "frame 内点击命中检测",
+          "order": 2,
+          "filename": "u7-l2-hit-test-in-frame.md",
+          "level": "advanced",
+          "topic": "jump_from_click_in_frame 先找链接，再逆序搜索文本字形/图形/图片/分组；处理 group 的 clip 与 transform 逆变换，以及 shape 的 fill/stroke（含 Curve、polygon、even-odd）命中。",
+          "learning_goals": [
+            "掌握链接优先于 span 命中的设计",
+            "理解文本字形命中时用 span_offset 与半宽判断得到字符内偏移",
+            "掌握 shape 的 fill/stroke 命中（Curve.contains、stroke_contains、even-odd）",
+            "理解 group 的 transform 逆变换与 clip 裁剪的递归处理"
+          ],
+          "source_files": [
+            "src/jump.rs"
+          ],
+          "minimal_modules": [
+            "jump_from_click_in_frame",
+            "is_in_rect",
+            "FrameItem::Link/Text/Shape/Image/Group",
+            "glyph span_offset",
+            "Jump::from_span"
+          ],
+          "practice_task": "解释为什么点击一个带 #rotate 的 rect 仍能正确定位源码（依赖 transform.invert）；并说明命中文字字形时如何区分「点击落在字符前还是字符后」。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "jump_from_cursor 与源码到输出映射",
+          "order": 3,
+          "filename": "u7-l3-jump-from-cursor.md",
+          "level": "advanced",
+          "topic": "jump_from_cursor 从源码光标找 Text/MathText 叶子，再用 JumpInDocument 在 Paged/Html 文档中反查 span 的渲染位置（find_in_frame / find_in_elem），与 jump_from_click 互为逆向。",
+          "learning_goals": [
+            "理解只对 Text/MathText 节点做反向跳转的原因",
+            "掌握 PagedDocument::find_span 遍历页帧、按 glyph span 匹配定位",
+            "理解 HtmlDocument::find_span 沿 DOM 索引路径与内嵌 frame 定位",
+            "明白 jump_from_click 与 jump_from_cursor 的数据流方向互逆"
+          ],
+          "source_files": [
+            "src/jump.rs"
+          ],
+          "minimal_modules": [
+            "jump_from_cursor",
+            "JumpInDocument",
+            "find_in_frame",
+            "find_in_elem",
+            "HtmlPosition"
+          ],
+          "practice_task": "对比 jump_from_click 与 jump_from_cursor 的输入输出方向；并解释 HtmlPosition 的 DOM 索引路径与 frame 内坐标如何共同定位一个源码 span 的渲染位置。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "测试与集成实践",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "测试体系与断言扩展",
+          "order": 1,
+          "filename": "u8-l1-testing.md",
+          "level": "advanced",
+          "topic": "TestWorld / WorldLike / FilePos 的设计，以及各模块 tests 中 ResponseExt 这类链式断言助手（must_include/must_be_at/must_be_code 等）的写法与约定。",
+          "learning_goals": [
+            "掌握 WorldLike/FilePos 抽象如何让测试既能传字符串又能传完整 world",
+            "理解负数光标从字符串末尾索引的 cursor 解析逻辑",
+            "学会读懂并仿写 must_include/must_be_at/must_apply_as 等链式断言"
+          ],
+          "source_files": [
+            "src/tests.rs",
+            "src/tooltip.rs",
+            "src/complete.rs"
+          ],
+          "minimal_modules": [
+            "WorldLike",
+            "FilePos",
+            "cursor",
+            "ResponseExt 模式",
+            "EXAMPLE_CLOSURE"
+          ],
+          "practice_task": "仿照 tooltip.rs 或 complete.rs 的测试风格，为 definition 或 jump 的某个函数新增一个测试用例，并使用链式断言（如 must_be_at / must_include）表达期望。",
+          "depends_on": [
+            "u1-l3",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "集成实践与架构取舍",
+          "order": 2,
+          "filename": "u8-l2-integration.md",
+          "level": "advanced",
+          "topic": "如何把 typst-ide 集成进自己的语言服务器/编辑器；AsOutput、sealed trait、IdeWorld 可选方法等扩展点，以及 best-effort、可选 output 等架构取舍。",
+          "learning_goals": [
+            "掌握实现 IdeWorld 的最小方式与增强方式（实现 packages/files）",
+            "理解 AsOutput 让 LSP 功能复用上一次编译产物",
+            "明白各功能在缺少 output/packages/files 时的优雅降级",
+            "理解 sealed trait 限制外部自行扩展输出后端的设计权衡"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "Cargo.toml",
+            "src/jump.rs"
+          ],
+          "minimal_modules": [
+            "IdeWorld 实现",
+            "AsOutput",
+            "可选 output 降级",
+            "sealed trait 边界",
+            "best-effort 哲学"
+          ],
+          "practice_task": "设计一个最小 LSP 服务方案：列出为支持「补全、悬停、跳转定义、点击跳转」四项功能，分别需要实现 IdeWorld 的哪些方法、缓存哪一类编译产物（output）。",
+          "depends_on": [
+            "u8-l1",
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

@@ -4,35 +4,35 @@
 
 本讲聚焦 `typst-eval/src/math.rs`，把前几讲建立的「`Eval` trait + `Vm` 虚拟机 + `ast::Expr` 总分发器」框架应用到 **Math（数学）模式** 上。学完本讲，你应当能够：
 
-- 说清楚一行 `$ x^2 + 1 $` 是如何被求值成 `EquationElem`（并最终成为 `Content`）的。
-- 区分 `Equation`、`Math`、`MathText` 三层节点的职责，理解「方程壳 → 表达式流 → 叶子文本」的分层。
-- 解释数学标识符为什么用 `scopes.get_in_math` 而不是普通 `scopes.get`，以及它查的是 **数学作用域**（`base.math`）而非全局作用域（`base.global`）。
-- 读懂 `MathFrac::eval` 里 `num_depar` / `denom_depar` 两个「去括号标记」的来源（`was_deparenthesized`）和意义。
-- 理解 `ExprExt::eval_display` 这个辅助方法为什么是数学模式的「统一接口」，以及 `MathFieldAccess` 为什么复用 `code.rs` 的 `access_field`。
+- 说清楚一行 `$ x^2 + 1 $` 是如何被求值成 `EquationElem`（最终成为 `Content`）的，并能区分 `Equation`、`Math`、`MathText` 三层节点的职责。
+- 解释数学标识符为什么用 `scopes.get_in_math` 而不是普通 `scopes.get`——它查的是**数学作用域**（`base.math`）而非全局作用域（`base.global`），并产生专属的 `unknown_variable_math` 错误。
+- 读懂 `ExprExt::eval_display` 这个辅助方法为什么是数学模式的「统一显示接口」，以及它和 `Expr::eval` 调用约定的关系。
+- 读懂 `MathFrac::eval` 里 `num_depar` / `denom_depar` 两个「去括号标记」的来源（`was_deparenthesized`）和它们在排版期的作用。
+- 理解 `MathFieldAccess` 为什么复用 `code.rs` 的 `access_field`，而不是自己实现字段访问。
 
-本讲承接 u2-l4（Markup 模式求值）。Markup 模式把标记流拼接成 `Content::sequence`，Math 模式做的事高度相似——只是叶子节点换成了数学元素，且标识符查找走专门的数学作用域。
+本讲承接 **u2-l4（Markup 模式求值）**。Markup 模式把标记流拼接成 `Content::sequence`，Math 模式做的事高度相似——只是叶子节点换成了数学元素，且标识符查找走专门的数学作用域。可以说，看完本讲你会发现 Math 与 Markup 是一对「同构的兄弟」。
 
 ## 2. 前置知识
 
 在进入源码前，先建立三个直觉。
 
-**直觉一：数学也是一种「模式」。** Typst 有三种语法模式：Code（`#`、`{}`）、Markup（正文）、Math（`$ ... $`）。解析器 `typst-syntax` 会为不同模式生成不同 AST 节点。本讲只关心 Math 模式产物：`Equation`、`Math`、`MathText`、`MathIdent`、`MathShorthand`、`MathDelimited`、`MathAttach`、`MathPrimes`、`MathFrac`、`MathRoot` 等。求值器的工作，就是把这些 AST 节点翻译成 `typst-library` 里定义的运行时元素（`EquationElem`、`FracElem`、`RootElem`、`AttachElem` 等）。
+**直觉一：数学也是一种「语法模式」。** Typst 有三种语法模式：Code（`#`、`{}`）、Markup（正文）、Math（`$ ... $`）。解析器 `typst-syntax` 会为不同模式生成不同 AST 节点。本讲只关心 Math 模式的产物：`Equation`、`Math`、`MathText`、`MathIdent`、`MathShorthand`、`MathDelimited`、`MathAttach`、`MathPrimes`、`MathFrac`、`MathRoot` 等。求值器的工作，就是把这些 AST 节点翻译成 `typst-library` 里定义的运行时数学元素（`EquationElem`、`FracElem`、`RootElem`、`AttachElem` 等）。
 
-**直觉二：求值的输出是「排版用的内容」。** 数学求值的最终产物是 `Content`（排版内容），而不是 `Value`。和 Markup 一样，多个数学片段会被 `Content::sequence` 串起来。但注意：个别数学节点（如 `MathIdent`、`MathShorthand`、函数调用）求值出来的是 `Value`（符号、函数等），需要经过一道「显示」转换才能进入内容流。这道转换由本讲的关键辅助方法 `eval_display` 完成。
+**直觉二：求值的输出大多是「排版用的内容」。** 数学求值的最终产物是 `Content`（排版内容），而不是 `Value`。和 Markup 一样，多个数学片段会被 `Content::sequence` 串起来。但要注意：个别数学节点（如 `MathIdent`、`MathShorthand`、字段访问）求值出来的是 `Value`（符号、函数等），需要经过一道「显示」转换才能进入内容流。这道转换由本讲的关键辅助方法 `eval_display` 统一完成。
 
-**直觉三：数学符号有自己的「字典」。** 在正文里写 `pi` 只是普通文本；在 `$ $` 里写 `pi` 却会变成希腊字母 π。这是因为数学模式有一套独立的符号作用域，`pi`、`alpha`、`sum`、`integral` 这些名字默认指向数学符号，而不是代码里的全局变量。这正是 `get_in_math` 存在的原因。
+**直觉三：数学符号有自己的「字典」。** 在正文里写 `pi` 只是普通文本；在 `$ $` 里写 `pi` 却会变成希腊字母 π。这是因为数学模式有一套独立的符号作用域（`base.math`），`pi`、`alpha`、`sum`、`integral` 这些名字默认指向数学符号，而不是代码里的全局变量。这正是 `get_in_math` 存在的原因，也是本讲与前面字面量讲义（u2-l1）最大的区别点。
 
-> 名词速查：`EquationElem`（方程元素，一个 `$ ... $` 的整体外壳）、`Content`（排版内容）、`Value`（运行时值）、`Symbol`（符号）、`NativeElement`（原生元素 trait，`.pack()` 把强类型元素打包成 `Content`）。这些都在 u1 / u2 前几讲解释过。
+> 名词速查：`EquationElem`（方程元素，一个 `$ ... $` 的整体外壳）、`Content`（排版内容）、`Value`（运行时值）、`Symbol`（符号）、`SymbolElem`/`TextElem`（符号/文本元素）、`NativeElement`（原生元素 trait，`.pack()` 把强类型元素打包成 `Content`）。这些大多在前几讲解释过。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
 |------|------|
-| `src/math.rs` | 本讲主战场。为所有数学 AST 节点实现 `Eval`，把它们打包成数学元素；定义 `ExprExt::eval_display`。 |
+| `src/math.rs` | 本讲主战场。为所有数学 AST 节点实现 `Eval`，把它们打包成数学元素；并定义 `ExprExt::eval_display`。 |
 | `src/code.rs` | 提供 `ast::Expr::eval` 总分发器（数学节点在此被派发），以及被 `MathFieldAccess` 复用的 `access_field` 函数。 |
-| `typst-syntax/src/ast.rs` | 定义数学 AST 节点本身，包括 `Math::was_deparenthesized`、`MathText::get` / `MathTextKind`。 |
+| `typst-syntax/src/ast.rs` | 定义数学 AST 节点本身，包括 `Math::was_deparenthesized`、`MathText::get` / `MathTextKind`、`Equation::block`。 |
 | `typst-library/src/foundations/scope.rs` | 定义 `Scopes::get`（普通查找）与 `Scopes::get_in_math`（数学查找），是理解标识符分派的关键对照。 |
-| `src/call.rs` | 定义 `MathCall::eval`（数学里的函数调用）。本讲只引用其存在与手动 `trace_at` 的约定。 |
+| `typst-library/src/math/frac.rs`、`…/math/ir/resolve.rs` | 定义 `FracElem` 的 `num_deparenthesized`/`denom_deparenthesized` 字段，及其在排版期 `resolve_frac` 的消费方式。用于理解实践任务。 |
 
 ## 4. 核心概念与源码讲解
 
@@ -45,7 +45,7 @@
 - **`Equation`（方程）**：最外层外壳，对应一对 `$ ... $`。它知道「这是不是一个块级公式」（行内 `$x$` 还是块级 `$ x $`，区别在于 `$` 内侧是否有空格）。
 - **`Math`（数学内容）**：外壳里面的真正内容，是一串数学表达式的流（`x^2`、`+`、`1`）。
 
-求值时，`Equation` 负责把 `Math` 求值出的 `Content` 包进 `EquationElem`，并打上「是否块级」的标记；`Math` 负责把内部表达式流逐个求值、拼接成一段 `Content`。这种「外壳负责定位/分类，内层负责内容」的分层，和 Markup 里 `Markup::eval` 委托给 `eval_markup` 的思路完全一致。
+求值时，`Equation` 负责把 `Math` 求值出的 `Content` 包进 `EquationElem`，并打上「是否块级」的标记；`Math` 负责把内部表达式流逐个求值、拼接成一段 `Content`。这种「外壳负责定位/分类，内层负责内容」的分层，和 Markup 里 `Markup::eval` 委托给 `eval_markup` 的思路完全一致（见 u2-l4）。
 
 #### 4.1.2 核心流程
 
@@ -58,390 +58,356 @@
 `Math::eval` 的流程：
 
 1. 取出 `self.exprs()`（数学表达式迭代器）。
-2. 对每个表达式调用 `expr.eval_display(vm)`（注意是 `eval_display`，不是普通 `eval`），把每个 `Value` 统一转成 `Content`。
-3. 把所有 `Content` 收集进 `Vec`，最后用 `Content::sequence(...)` 串成一段。
+2. 对每个表达式调用 `expr.eval_display(vm)`（注意：是 `eval_display`，不是 `eval`！），收集成 `Vec<Content>`。
+3. 用 `Content::sequence(...)` 拼成一段内容返回。
+
+`block()` 的判定规则值得注意：解析器只在「`$` 紧贴着内侧有空格」时才认定为块级，即第二个子节点和倒数第二个子节点都是 `Space`。所以 `$x$` 是行内、`$ x $` 是块级。
 
 #### 4.1.3 源码精读
 
-`Equation::eval`——求值内部 body，包进方程外壳：
+`Equation::eval`——方程外壳的打包：[src/math.rs:12-20](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L12-L20)。先求 body 得到 `Content`，再用 `with_block` 标记是否块级，最后 `pack()`。
 
-[Math::eval 的外壳 Equation::eval](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L12-L20)
+`Math::eval`——表达式流的拼接：[src/math.rs:22-32](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L22-L32)。逐个 `eval_display` 后 `Content::sequence`，和 `eval_markup` 同构。
 
-> 这段先 `self.body().eval(vm)?` 求值出内部 `Content`，再用 `EquationElem::new(body).with_block(block).pack()` 打包。`block` 来自 `self.block()`，它由解析器根据 `$` 内侧空格判定（见 `typst-syntax/src/ast.rs` 中 `Equation::block`）。
-
-`Math::eval`——把表达式流拼接成内容序列：
-
-[Math::eval 流式拼接](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L22-L32)
-
-> 注意 `.map(|expr| expr.eval_display(vm))`：这里**没有**直接调 `expr.eval(vm)`，而是调 `eval_display`。原因是数学表达式流里既有产出 `Content` 的节点（如 `MathText`），也有产出 `Value` 的节点（如 `MathIdent`、函数调用）。`eval_display` 统一把它们转成 `Content`，这样 `Content::sequence` 才能拼接。`eval_display` 的实现见 4.5。
-
-要理解 `Equation` 与 `Math` 在总分发器里的位置，看 `ast::Expr::eval` 的 match 分支：
-
-[ast::Expr::eval 中数学节点的派发](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/code.rs#L103-L115)
-
-> 可以看到一个清晰规律：产出 `Content` 的数学节点（`Equation`/`Math`/`MathText`/`MathDelimited`/`MathAttach`/`MathPrimes`/`MathFrac`/`MathRoot`/`MathAlignPoint`）都带 `.map(Value::Content)`，把 `Content` 适配成统一的 `Value`；而产出 `Value` 的节点（`MathIdent`/`MathFieldAccess`/`MathShorthand`/`MathCall`）则直接 `v.eval(vm)`。这与 u2-l1 讲过的「`Eval` trait 用关联类型 `Output` 声明各自输出，总分发器用 `.map` 适配」完全吻合。注意 `MathAlignPoint`（对齐点 `&`）也被视为 `Content`。
+`Equation::block()`——块级判定：[typst-syntax/src/ast.rs:874-879](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-syntax/src/ast.rs#L874-L879)。检查 `$` 内侧两侧是否都是 `Space`。
 
 #### 4.1.4 代码实践
 
-**实践目标**：亲手追踪一行公式 `$ x^2 $` 的求值调用链，理解三层节点的协作。
+**实践目标**：直观感受行内公式与块级公式的差异，并验证它由 `block` 字段决定。
 
-**操作步骤（源码阅读型）**：
+**操作步骤**：
 
-1. 在 `src/math.rs` 打开 `Equation::eval`（L12–L20），确认它调用 `self.body().eval(vm)`——这里的 `body()` 返回 `Math` 节点。
-2. 跳到 `Math::eval`（L22–L32），确认它对 `self.exprs()` 里的每个表达式调 `eval_display`。对于 `$ x^2 $`，表达式流大致是 `x`（MathIdent）、`^2`（MathAttach）、可能的空格。
-3. 思考：`x` 作为 `MathIdent` 求值得 `Value::Symbol(...)`，它是怎么变成能进入 `Content::sequence` 的 `Content` 的？答案是 `eval_display` 里的 `.display()`（见 4.5）。
+1. 在一个 Typst 文档里写：
 
-**需要观察的现象 / 预期结果**：你能用一句话描述「`Equation`（外壳 + 块级标记）→ `Math`（流式拼接）→ 各叶子节点」三层各自的职责。块级判定结果：`$x$` 是行内（`block == false`），`$ x $`（两侧有空格）是块级（`block == true`）——这一点可在 `typst-syntax/src/ast.rs` 的 `Equation::block` 中验证，逻辑是「第 2 个子节点和倒数第 2 个子节点都是空格」。
+   ```typst
+   行内：$ x^2 + 1 $ 换行
+   块级：$ x^2 + 1 $
+   ```
 
-> 本实践为源码阅读型，不涉及运行命令；块级 vs 行内的实际排版效果待本地验证。
+2. 编译后对比：行内公式紧贴文字、不独占一行；块级公式居中独占一行。
+
+**需要观察的现象**：去掉 `$` 内侧的空格（`$x^2 + 1$`）后，原本的块级公式会变成行内。
+
+**预期结果**：`block()` 完全由 `$` 内侧是否有空格决定，与公式内容无关。
+
+> 说明：本实践需要本地安装 Typst 编译器并渲染。如果你当前只能阅读源码，可改为「源码阅读型实践」——对照 `Equation::block()` 的实现，口述 `$x$`、`$ x$`、`$x $`、`$ x $` 四种写法各自的 `block` 取值（答案：只有最后一种为 `true`）。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 `Math::eval` 用 `eval_display` 而不是直接 `expr.eval(vm)`？
-**参考答案**：因为表达式流里既有产出 `Content` 的节点，也有产出 `Value`（如 `Value::Symbol`）的节点。`Content::sequence` 只能拼接 `Content`，所以需要一个统一把 `Value` 转成 `Content` 的入口，这正是 `eval_display`。
+**练习 1**：为什么 `Equation` 和 `Math` 要拆成两个 AST 节点，而不是合成一个？
 
-**练习 2**：`Equation::eval` 里 `self.block()` 的值由什么决定？
-**参考答案**：由解析器根据 `$` 与内容之间是否有空格决定——`$ x $`（两侧有空格）为块级 `true`，`$x$` 为行内 `false`。求值器只是把这个布尔值透传给 `EquationElem::with_block`。
+**参考答案**：职责分离。`Equation` 只关心「这是一段需要被排版成数学公式的内容，且是行内还是块级」；`Math` 只关心「把内部表达式流求值拼接成 `Content`」。这样 `Math` 的求值逻辑可以被其他需要「数学内容」的场合复用（例如 `MathDelimited` 的 body 也是一段 `Math`），而外壳属性（是否块级）不会污染内层。
+
+**练习 2**：`Math::eval` 为什么用 `expr.eval_display(vm)` 而不是 `expr.eval(vm)`？
+
+**参考答案**：因为数学表达式流里既有产出 `Content` 的节点（如 `MathText`），也有产出 `Value` 的节点（如 `MathIdent` 求值出符号、`MathShorthand` 求值出符号）。`eval_display` 把 `Value` 统一 `.display()` 成 `Content`，从而让所有片段都能进入 `Content::sequence`。详见 4.3。
 
 ---
 
-### 4.2 数学标识符与作用域：MathIdent 与 get_in_math
+### 4.2 叶子节点：MathText 与 MathIdent
 
 #### 4.2.1 概念说明
 
-这是本讲最重要的「为什么」。在正文里，`pi` 只是一段文本；在 `$ pi $` 里，`pi` 变成了符号 π。这背后是因为数学模式有一套**独立的作用域查找路径**。
+数学表达式流的「叶子」主要有两类：
 
-回顾 u2-l1：普通标识符 `Ident` 用 `vm.scopes.get(&self)` 查找，按「顶层 → 外层用户作用域 → 标准库全局作用域（`base.global`）」逐层找。数学标识符 `MathIdent` 用的是 `vm.scopes.get_in_math(&self)`，差别只在**最后一层兜底**：它查的是 **数学作用域 `base.math`**，而不是全局作用域 `base.global`。
+- **`MathText`**：纯粹的文本片段，如单个字母 `x`、数字 `25`、等号 `=`。它又细分为 **Grapheme（字形）** 和 **Number（数字）** 两种——字母/符号当字形处理，数字当数字文本处理。这种区分影响排版（数字字体、字间距与字母不同）。
+- **`MathIdent`**：数学标识符，如 `pi`、`alpha`、`sum`。和代码模式里的 `Ident`（u2-l1）长得很像，但查找路径完全不同——它走**数学作用域**。
 
-这个差别解释了为什么 `$ pi $` 是 π（命中数学作用域里的符号），而 `$ #pi $`（用 `#` 逃逸回代码模式）才会去查代码里的 `pi`。
+理解 `MathIdent` 是本讲的核心：在 `$pi$` 里写 `pi` 得到 π，在 `#pi` 里写 `pi` 却会报「未知变量」——这就是数学作用域的功劳。
 
 #### 4.2.2 核心流程
 
-`MathIdent::eval` 流程：
+`MathText::eval` 的流程（自包含，签名是 `_: &mut Vm`，不需要 `Vm` 状态）：
 
-1. `vm.scopes.get_in_math(&self)` 在「顶层 → 外层 → 数学作用域」中查找绑定，返回 `&Binding`；未命中则返回带提示的错误。
-2. `.at(span)` 把字符串错误贴上源码位置。
-3. `.read_checked((&mut vm.engine, span))` 做弃用（deprecated）检查。
+1. 调用 `self.get()` 得到 `MathTextKind`。
+2. 若是 `Grapheme(text)`：用 `SymbolElem::packed(text)` 打包成符号元素。
+3. 若是 `Number(text)`：用 `TextElem::packed(text)` 打包成普通文本元素。
+
+`MathIdent::eval` 的流程（首个真正用到 `Vm` 的数学叶子）：
+
+1. 取 `span`。
+2. 调用 `vm.scopes.get_in_math(&self)` 在数学作用域里查找绑定，`.at(span)?` 贴上出错位置。
+3. 调用 `.read_checked((&mut vm.engine, span))` 做弃用（deprecation）检查。
 4. `.clone()` 返回独立的 `Value`。
 
-与普通 `Ident::eval` 几乎逐行对应，唯一区别是第 1 步调用 `get_in_math` 而非 `get`。
+与普通 `Ident::eval`（u2-l1）相比，唯一的实质区别就是第 2 步用了 `get_in_math` 而非 `get`。
 
 #### 4.2.3 源码精读
 
-`MathIdent::eval`——数学标识符求值：
+`MathText::eval`——区分字形与数字：[src/math.rs:34-43](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L34-L43)。`Grapheme` 走 `SymbolElem`，`Number` 走 `TextElem`。
 
-[MathIdent::eval 走 get_in_math](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L45-L57)
+`MathTextKind` 的判定：[typst-syntax/src/ast.rs:910-927](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-syntax/src/ast.rs#L910-L927)。以「首字符是否为数字」来分类，注释提到多个数字字符会被词法器成组（见 `Lexer::math_text`）。
 
-> 与 u2-l1 的 `Ident::eval` 对照：两者都是「`scopes.get_xxx` → `.at(span)` → `read_checked` → `clone()`」。这里换成 `get_in_math`。
+`MathIdent::eval`——数学作用域查找：[src/math.rs:45-57](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L45-L57)。
 
-对照 `Scopes::get`（普通查找）与 `Scopes::get_in_math`（数学查找），看兜底层差异：
+关键对照——`Scopes::get`（普通查找）：[typst-library/src/foundations/scope.rs:46-59](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L46-L59)。它在 fallback 时查的是 `base.global.scope()`（全局标准库），未命中报 `unknown_variable`。
 
-[普通查找 get 兜底 base.global](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L46-L59)
+关键对照——`Scopes::get_in_math`（数学查找）：[typst-library/src/foundations/scope.rs:76-94](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L76-L94)。它在 fallback 时查的是 `base.math.scope()`（数学标准库），未命中报 `unknown_variable_math`。
 
-> `get` 的兜底是 `base.global.scope().get(var)`——标准库**全局**作用域。找不到就报 `unknown_variable(var)`。
-
-[数学查找 get_in_math 兜底 base.math](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L76-L94)
-
-> `get_in_math` 的兜底是 `base.math.scope().get(var)`——**数学**作用域。注意它还调用 `unknown_variable_math(var, ...)` 生成错误，第二个参数 `base.global.scope().get(var).is_some()` 用来判断「这个名字在全局作用域里其实存在」，从而给出「你是不是想用 `#` 逃逸」之类的提示。
-
-两者的**前半段完全相同**（都查 `self.top` + `self.scopes`，即用户自定义的作用域），区别只在兜底查哪个标准库作用域。这意味着：用户在数学模式里 `#let pi = ...` 绑定的 `pi`（进入用户作用域）会优先于数学符号命中；只有用户没定义时，才回落到数学符号字典。
+两者的「逐层查找」逻辑（顶层 `top` → 外层 `scopes` 栈逆序）完全相同，差别**只在最后的 fallback 基作用域**：`get` 查全局库，`get_in_math` 查数学库。另外 `get_in_math` 还会向错误信息里附带一条提示：若该变量在全局库里存在，会告诉你「它在标准库里存在，但在数学里不能直接用」（见 `unknown_variable_math` 的 `in_global` 分支）。
 
 #### 4.2.4 代码实践
 
-**实践目标**：通过对照两个查找函数，理解「为什么数学符号不污染代码、代码变量也不污染数学」。
+**实践目标**：体会 `get` 与 `get_in_math` 的语义差异，并理解专属错误提示。
 
-**操作步骤（源码阅读型）**：
+**操作步骤**（源码阅读型）：
 
-1. 打开 `scope.rs` 的 `get`（L46–L59）和 `get_in_math`（L76–L94），逐行对比。圈出唯一不同的那一行（兜底的 `base.global` vs `base.math`）。
-2. 思考以下两段 Typst 代码的求值差异：
-   - `$ pi $`：`pi` 是 `MathIdent` → `get_in_math` → 命中 `base.math` 的符号 π。
-   - `#pi`：`pi` 是（代码模式的）`Ident` → `get` → 查 `base.global`；若代码里没定义 `pi`，会报错。
-3. 再思考 `$ #pi $`：`#` 把 `pi` 切回代码模式，所以走的是普通 `Ident` 查找路径。
+1. 打开 [scope.rs:76-94](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L76-L94) 与 [scope.rs:443 起](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L443) 的 `unknown_variable_math`。
+2. 回答：在数学模式里写一个全局库里存在、但数学库里不存在的名字（例如 `table`），求值会得到什么错误？提示信息会说什么？
 
-**需要观察的现象 / 预期结果**：你能解释「同一个名字 `pi`，在 `$ $` 内外查的是两套不同字典」。预期：`$ pi $` 渲染为 π；`#pi`（未定义时）报「unknown variable」。
+**需要观察的现象**：错误信息是 `unknown variable: table`，并附带 hint「`table` is not available directly in math, but is in the standard library」。
 
-> 排版效果待本地验证；作用域分派逻辑可在源码中确认。
+**预期结果**：`get_in_math` 的 `in_global` 参数为 `true`（因为 `base.global.scope().get("table")` 命中），触发那条专属提示，引导用户用 `#table` 把它从代码模式引入。
+
+> 待本地验证：上述错误文案与触发条件，建议在本地 Typst 中输入 `$ table $` 实际编译确认。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：如果用户写了 `#let alpha = "hello"`，那么 `$ alpha $` 会渲染成什么？
-**参考答案**：会渲染成用户绑定的值 `"hello"` 经 `display` 后的内容，而不是希腊字母 α。因为 `get_in_math` 先查用户作用域（`self.top` / `self.scopes`），用户绑定优先于数学符号字典。
+**练习 1**：`get` 和 `get_in_math` 的实现几乎一模一样，为什么 Typst 不复用同一个函数？
 
-**练习 2**：`get` 和 `get_in_math` 在查找用户自定义变量时，行为有区别吗？
-**参考答案**：没有区别。两者前半段完全一样——都先查 `self.top` 再查 `self.scopes`（用户作用域栈）。区别仅在用户作用域未命中后的兜底：`get` 查全局作用域 `base.global`，`get_in_math` 查数学作用域 `base.math`。
+**参考答案**：因为两者的「基作用域」不同（`base.global` vs `base.math`），且未命中时的错误处理不同（`unknown_variable` vs `unknown_variable_math`，后者还能给出「在标准库存在」的修复提示）。复用需要传入「查哪个基作用域 + 用哪个错误构造器」两个参数，反而不如分两个函数清晰。
+
+**练习 2**：在 `$ x $` 里，`x` 走的是 `MathText` 还是 `MathIdent`？
+
+**参考答案**：单个字母 `x` 由词法器识别为 `MathText`（Grapheme），不会进入 `MathIdent`。`MathIdent` 针对的是像 `pi`、`alpha` 这样的多字符标识符。两者求值路径不同：`MathText` 直接打包成 `SymbolElem`，`MathIdent` 要查数学作用域。
 
 ---
 
-### 4.3 数学结构节点：MathDelimited、MathAttach、MathPrimes、MathRoot
+### 4.3 eval_display：数学模式的统一显示接口
 
 #### 4.3.1 概念说明
 
-除标识符和文本外，数学模式还有一类「结构节点」，它们对应数学排版里的常见结构：
+回顾 4.1：`Math::eval` 对每个表达式调用的是 `eval_display`，而不是 `eval`。为什么？
 
-- **`MathDelimited`**：定界分组，如 `( x + 1 )`、`[ a, b ]`。开/闭符号可以是任意数学表达式，求值后包进 `LrElem`（左右定界元素，自动缩放括号）。
-- **`MathAttach`**：上下标附着，如 `x^2`、`a_i`、`f'(x)`。把底、上标、下标、撇号（primes）附到一个 `AttachElem` 上。
-- **`MathPrimes`**：撇号序列，如 `''`。打包成 `PrimesElem`，记录撇号个数。
-- **`MathRoot`**：根号，如 `root(3, x)`。打包成 `RootElem`，带可选的指数。
+因为数学表达式流是「异构」的：
 
-这些节点的求值套路高度一致：**读出各组成部分 → 构造对应的强类型元素 → `.pack()` 成 `Content`**。其中凡是要放进元素字段的「子表达式」，几乎都走 `eval_display`（转成 `Content`）。
+- 有些节点求值产出 `Content`（如 `MathText`、`MathDelimited`、`MathFrac`）。
+- 有些节点求值产出 `Value`（如 `MathIdent` 产出符号、`MathShorthand` 产出符号、`MathFieldAccess` 产出任意值）。
+
+而 `Content::sequence` 只能拼接 `Content`。所以需要一个「无论你产出什么，都给我转成 `Content`」的适配层——这就是 `eval_display`。它定义在一个私有扩展 trait `ExprExt` 上。
+
+此外，`eval_display` 还承担了一个微妙的**调用约定**：在 u1-l4 / u2-l1 里我们强调过「每个产生值的表达式都应调用 `trace_at` 以满足 IDE 追踪」。普通表达式走 `ast::Expr::eval`（总分发器），末尾会统一调 `trace_at`。但 `eval_display` 是**绕过**总分发器、直接在 `Expr` 上调 `.eval()` 的另一条路径，所以它需要自己补上 `.spanned(self.span())`，让产出的 `Content` 携带正确的源码位置。
 
 #### 4.3.2 核心流程
 
-`MathDelimited::eval`：求值开符号 `eval_display` → 求值 body（`Math`，直接 `eval` 得 `Content`）→ 求值闭符号 `eval_display` → 用 `LrElem::new(open + body + close)` 拼成一段再打包。
+`ExprExt::eval_display` 的流程：
 
-`MathAttach::eval`：
-
-1. 底（base）：`self.base().eval_display(vm)`。
-2. 上标（top）：若存在，`self.top().eval_display(vm)`。
-3. 撇号（primes）：若存在，`self.primes().eval(vm)`（注意是普通 `eval`，得 `Content`），并固定设到右上角 `tr`（top-right），用 scripts 风格而非 limits 风格。
-4. 下标（bottom）：若存在，`self.bottom().eval_display(vm)`。
-
-`MathPrimes::eval`：`PrimesElem::new(self.count()).pack()`，只记录撇号数量。
-
-`MathRoot::eval`：可选指数（`self.index()`）格式化成 `TextElem`（与数字文本节点保持一致），被开方数 `self.radicand().eval_display(vm)`，包进 `RootElem`。
+1. 调用 `self.eval(vm)?` 得到一个 `Value`（这里 `self` 是 `ast::Expr`，走的是总分发器，因此 `trace_at` 已经被调用过）。
+2. 调用 `.display()` 把 `Value` 转成 `Content`（对已经是 `Content` 的值是恒等操作；对符号、函数等会转成可显示形式）。
+3. `.spanned(self.span())` 给 `Content` 贴上当前表达式的 span。
 
 #### 4.3.3 源码精读
 
-`MathDelimited::eval`——定界分组包进 `LrElem`：
+`ExprExt` trait 与 `eval_display` 实现：[src/math.rs:176-184](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L176-L184)。注意它是 `impl ExprExt for ast::Expr<'_>`，接收的是 `&self`（借用，不消费），这与 `Eval::eval(self, ...)`（消费）不同——因为 `eval_display` 在 `Math::eval` 的 `map` 闭包里被迭代调用，需要借用。
 
-[MathDelimited::eval](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L100-L109)
+`eval_display` 的典型使用点之一——`MathDelimited::eval` 里的 open/close：[src/math.rs:100-109](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L100-L109)。定界符（如 `[`、`]`）本身可能是 `MathIdent` 或 `MathText`，求值出 `Value`，需要 `eval_display` 转成 `Content` 才能拼进 `LrElem`。
 
-> 开/闭符号用 `eval_display`（它们是任意 `Expr`，可能是标识符、函数调用等，需转成 `Content`）；body 是 `Math`，直接 `eval` 已是 `Content`。最后 `open + body + close` 用 `Content` 的 `+` 拼接，交给 `LrElem` 做自动缩放。
-
-`MathAttach::eval`——上下标与撇号附着：
-
-[MathAttach::eval](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L111-L134)
-
-> 关键细节：撇号（`primes`）被显式设到 `elem.tr`（top-right），并注释说明「撇号总是用 scripts 风格（贴在右上角），而不是 limits 风格（堆在正上方）」。这是为什么 `f'(x)` 的撇号紧贴 `f` 右上、而 `\sum` 类算子的上下限却可以堆叠的求值层根因之一。注意 `primes` 走的是普通 `eval`（`MathPrimes` 产出 `Content`），其余子表达式走 `eval_display`。
-
-`MathPrimes::eval`——撇号数量：
-
-[MathPrimes::eval](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L136-L142)
-
-> 只把撇号个数 `self.count()` 传给 `PrimesElem`，自包含、签名 `_: &mut Vm`。
-
-`MathRoot::eval`——根号与指数：
-
-[MathRoot::eval](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L165-L174)
-
-> 指数用 `TextElem::packed(eco_format!("{i}"))` 而非 `Number` 元素——注释指出这是为了和 `MathText::get` 里 `MathTextKind::Number` 的处理保持一致（都用 `TextElem` 表示数字）。被开方数走 `eval_display`。
+> 提醒：`eval_display` 内部调用的 `self.eval(vm)` 已经满足 `trace_at` 调用约定；但下文 4.4 会看到，`MathAccess::eval` 是**手动**调 `trace_at` 的，因为它也没有走 `Expr::eval` 总分发器。
 
 #### 4.3.4 代码实践
 
-**实践目标**：理解结构节点「读组成 → 构造元素 → pack」的统一套路，并注意 `eval_display` 与普通 `eval` 的混用。
+**实践目标**：弄清「谁该用 `eval_display`、谁该用 `eval`」。
 
-**操作步骤（源码阅读型）**：
+**操作步骤**（源码阅读型）：
 
-1. 在 `MathAttach::eval` 中数一下有几处 `eval_display`、几处普通 `eval`。预期：base/top/bottom 三处用 `eval_display`，primes 一处用普通 `eval`。
-2. 思考：为什么 base 必须用 `eval_display`？因为 `self.base()` 返回的是 `ast::Expr`（可能是 `MathIdent` 产出 `Value::Symbol`），`AttachElem::new(base)` 需要的是 `Content`，所以必须 `.display()`。
-3. 对照 `MathRoot::eval`，确认指数为什么用 `TextElem` 而不是直接传整数——因为 `RootElem` 的 `index` 字段是 `Content` 类型，需要把数字渲染成文本内容。
+1. 在 `src/math.rs` 中统计 `eval_display` 的调用点（`Math::eval`、`MathDelimited::eval`、`MathAttach::eval`、`MathFrac::eval`、`MathRoot::eval`）。
+2. 观察这些调用点的共同点：它们都是「需要把子表达式塞进一段 `Content` 序列或一个元素的 `Content` 字段」的场合。
 
-**需要观察的现象 / 预期结果**：你能总结出一条规则——「凡元素字段要求 `Content`、而子表达式可能产出任意 `Value` 的，都用 `eval_display`；子表达式本身就直接产出 `Content` 的（如 `MathPrimes`、`Math` body），用普通 `eval`」。
+**需要观察的现象**：凡是子表达式求值结果要进入 `Content` 流的，都用 `eval_display`；凡是需要原始 `Value`（如 `MathAttach` 里 primes 走 `prims.eval(vm)` 因为 `MathPrimes` 直接产出 `Content`，以及 `MathIdent`/`MathFieldAccess` 本身就是 `Value` 产出者）的，用 `eval`。
 
-> 排版效果（撇号位置、根号指数）待本地验证。
+**预期结果**：你能总结出一条规则——「数学元素的字段类型是 `Content` 时，用 `eval_display` 喂它；需要 `Value` 时用 `eval`」。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`MathDelimited::eval` 里，为什么 open/body/close 三者中，只有 body 用普通 `eval`，open 和 close 用 `eval_display`？
-**参考答案**：`body()` 返回 `Math` 节点，其 `Eval::Output = Content`，直接 `eval` 即可；`open()` / `close()` 返回的是任意 `ast::Expr`（可能是产出 `Value` 的标识符或函数调用），需要 `eval_display` 把 `Value` 统一转成 `Content` 才能与 body 拼接。
+**练习 1**：如果 `eval_display` 忘了调 `.spanned(self.span())`，会有什么后果？
 
-**练习 2**：`MathAttach::eval` 为什么把 primes 固定设到 `elem.tr`（右上角）？
-**参考答案**：撇号在数学排版中约定俗成地贴在底的右上角（scripts 风格），而不像 `\sum` 的上下限那样可以堆叠在正上下方（limits 风格）。求值层通过把 primes 写入 `tr` 字段来强制这一约定。
+**参考答案**：产出的 `Content` 会丢失源码位置（变成 detached span）。这会让 IDE 的跳转/hover 定位失效，也会让排错误诊断无法指向正确的源码位置。`spanned` 是补回这一信息的手段。
+
+**练习 2**：`eval_display` 为什么不直接消费 `self`（像 `Eval::eval` 那样），而用 `&self`？
+
+**参考答案**：因为 `Math::eval` 用 `.map(|expr| expr.eval_display(vm))` 迭代调用，`expr` 是迭代器借出的 `&Expr`，无法消费。`ExprExt` 设计成接收 `&self` 正是为了适配这种借用场景。
 
 ---
 
-### 4.4 分式与去括号标记：MathFrac 与 was_deparenthesized
+### 4.4 字段访问与复用：MathFieldAccess / MathAccess 与 access_field
 
 #### 4.4.1 概念说明
 
-分式 `x / y` 求值成 `FracElem`（分子 + 分母）。本模块的精华在于两个布尔标记：`num_depar` / `denom_depar`（numerator/denominator deparenthesized，分子/分母「是否曾被括号包裹」）。
+在数学模式里也可以写字段访问，例如 `$ alpha.sym.bot $`（访问符号 `alpha` 的某个变体）。这对应两个 AST 节点：
 
-考虑两种写法：
+- **`MathFieldAccess`**：`target.field` 形式的字段访问，产出 `Value`。
+- **`MathAccess`**：一个枚举，把 `MathIdent` 和 `MathFieldAccess` 统一成「数学里的左值/可访问表达式」。
 
-- `1 / x` —— 分母 `x` 没有括号。
-- `1 / (x + 1)` —— 分母 `(x + 1)` 是用户**显式加了括号**的数学分组。
-
-解析器会把 `(x + 1)` 解析成一个 `Math` 节点，并且这个 `Math` 节点「记得」自己原本被括号包裹。`Math::was_deparenthesized()` 就是问这个问题：「你本来是不是一对括号 `(...)`？」
-
-`MathFrac::eval` 在求值分子分母后，额外读取这两个「去括号标记」，原样传给 `FracElem`。排版层（`typst-library` / `typst-math`）据此决定渲染策略——例如对被括号包裹的分母，可能采用不同的尺寸或缩放处理。求值层的职责只是**忠实地把这个语法事实传递下去**。
+本模块的核心设计取舍是：`MathFieldAccess::eval` **没有**自己实现字段访问逻辑，而是直接复用了 `code.rs` 里的 `access_field` 函数。为什么？因为「读一个值的字段」这件事，在代码模式和数学模式里**语义完全一致**——都要处理元素函数的可设置字段（settable field）在 context 下的兜底读取（详见 u4-l2）。重复实现这套复杂逻辑既冗余又容易不一致。
 
 #### 4.4.2 核心流程
 
-`MathFrac::eval`：
+`MathFieldAccess::eval` 的流程：
 
-1. 求分子：`num_expr = self.num()`、`num = num_expr.eval_display(vm)`。
-2. 求分母：`denom_expr = self.denom()`、`denom = denom_expr.eval_display(vm)`。
-3. 判定分子去括号标记：`num_depar = matches!(num_expr, ast::Expr::Math(math) if math.was_deparenthesized())`。
-4. 判定分母去括号标记：同理得 `denom_depar`。
-5. 构造 `FracElem::new(num, denom).with_num_deparenthesized(num_depar).with_denom_deparenthesized(denom_depar).pack()`。
+1. 求值 `self.target()` 得到 `Value`。
+2. 取 `self.field()`（字段名 + span）。
+3. 调用 `crate::code::access_field(vm, target, field.as_str(), field.span())`，返回 `Value`。
 
-`was_deparenthesized` 的判定（在 `typst-syntax`）：检查这个 `Math` 节点的第一个子节点是不是 `LeftParen`、最后一个子节点是不是 `RightParen`。
+`MathAccess::eval` 的流程（一个枚举的总分发）：
+
+1. match 分派：`MathIdent` 走 `ident.eval(vm)`，`MathFieldAccess` 走 `access.eval(vm)`，都得到 `Value`。
+2. **手动调用** `vm.trace_at(self.span(), &value)`——因为它没走 `Expr::eval` 总分发器，必须自己补上 trace 调用约定。
+
+`access_field`（被复用的函数）的流程：
+
+1. 先调 `target.field(field, ...)` 尝试普通字段读取；成功就返回。
+2. 失败时，检查 `target` 是否是元素函数（`func.to_element()`），且该字段是否是可设置字段（`element.settable_field_accessor(field)`）——这是为了支持像 `block.stroke` 这种「在 context 下读取样式字段」的写法。
+3. 若是，用 `vm.context.styles()` 取当前样式，调用字段访问器返回值；否则返回原错误。
 
 #### 4.4.3 源码精读
 
-`MathFrac::eval`——求值分式并传递去括号标记：
+`MathFieldAccess::eval`——复用 `access_field`：[src/math.rs:59-67](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L59-L67)。
 
-[MathFrac::eval 读取 was_deparenthesized](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L144-L163)
+`MathAccess::eval`——枚举分派 + 手动 trace_at：[src/math.rs:69-82](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L69-L82)。注释明确写了「We need to call `trace_at` for the value because we did not evaluate via `ast::Expr::eval()`」——这是理解 trace 调用约定的关键证据。
 
-> `num_depar` / `denom_depar` 用 `matches!` 宏判定：仅当对应表达式是一个 `ast::Expr::Math` 且 `math.was_deparenthesized()` 为真时才为 `true`。这两个布尔值通过 `with_num_deparenthesized` / `with_denom_deparenthesized` 装进 `FracElem`。注意求值器本身**不解释**这两个标记的排版含义，只负责采集与传递。
+被复用的 `access_field`：[src/code.rs:363-385](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/code.rs#L363-L385)。注意它是 `pub(crate)`，专为跨模块复用而暴露。
 
-`Math::was_deparenthesized`——解析器侧的「曾否被括号包裹」判定：
+#### 4.4.4 代码实践（本讲指定实践任务之一）
 
-[Math::was_deparenthesized 检查首尾括号](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-syntax/src/ast.rs#L894-L901)
+**实践目标**：解释为什么 `MathFieldAccess` 要复用 `code.rs` 的 `access_field`，而不是自己实现字段访问。
 
-> 取子节点迭代器，若第一个是 `LeftParen` 且最后一个是 `RightParen`，返回 `true`。这是一种「语法事实回溯」——括号在解析成 `Math` 节点时已被「吸收」，但通过检查首尾 token 种类仍能还原出「它原本是带括号的」。
+**操作步骤**（源码阅读型）：
 
-#### 4.4.4 代码实践（本讲主实践）
+1. 阅读 [access_field](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/code.rs#L363-L385)，注意它第二个分支（元素函数 + settable 字段 + context 样式兜底）。
+2. 假设 `MathFieldAccess::eval` 自己实现字段访问，只调 `target.field(...)`，省略第二分支。
 
-**实践目标**：读懂 `num_depar` / `denom_depar` 两个标记的采集逻辑，并解释它们传递给 `FracElem` 的意义；同时说明 `MathFieldAccess` 复用 `access_field` 的原因（见 4.5）。
+**需要观察的现象 / 思考**：那么 `$ block.stroke $` 这类写法在数学模式里就会失效——因为「读取一个元素函数在当前样式下的可设置字段」这套兜底逻辑会被漏掉。
 
-**操作步骤（源码阅读型）**：
-
-1. 打开 `MathFrac::eval`（math.rs L144–L163）。
-2. 找到这两行：
-   ```rust
-   let num_depar = matches!(num_expr, ast::Expr::Math(math) if math.was_deparenthesized());
-   let denom_depar = matches!(denom_expr, ast::Expr::Math(math) if math.was_deparenthesized());
-   ```
-3. 解释 `matches!` 在做什么：它同时满足两个条件才算 `true`——(a) 该表达式是一个 `Math` 节点；(b) 这个 `Math` 节点 `was_deparenthesized()`（首尾是括号）。
-4. 追踪 `was_deparenthesized`（ast.rs L894–L901），确认它只看首尾子节点的 `SyntaxKind`。
-
-**解释 `num_depar` / `denom_depar` 的意义**：这两个标记回答的是「用户在源码里有没有给分子/分母显式加括号」。例如 `(x + 1) / 2` 中分子会被标记 `num_depar = true`，`1 / (x + 1)` 中分母会被标记 `denom_depar = true`，而 `x / y` 两者都是 `false`。求值器把这个信息原样传给 `FracElem`，由排版层决定如何渲染（比如对带括号的分母保留恰当的分组视觉）。这正是「解析层捕获语法事实 → 求值层透传 → 排版层消费」的典型三层协作。
-
-**预期结果**：你能说出——`num_depar` / `denom_depar` 不改变求值出的 `Content` 本身，它们是附加在 `FracElem` 上的元信息，供下游排版使用。
-
-> 具体排版层如何利用这两个标记（例如是否影响括号尺寸/分数大小）待本地验证；求值层行为可在源码中确认。
+**预期结论**：复用 `access_field` 的根本原因是 **DRY + 语义一致**。字段访问在代码模式和数学模式里语义完全相同（尤其是 settable 字段在 context 下的兜底读取这段较复杂的逻辑），分别实现会造成行为分叉和维护负担。把它抽成一个 `pub(crate)` 自由函数，让 `code.rs`（`FieldAccess::eval`）和 `math.rs`（`MathFieldAccess::eval`）共享同一份实现，是典型的「抽公共子逻辑」重构。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：写出 `x / (y + z)` 求值时 `num_depar` 和 `denom_depar` 各是什么值。
-**参考答案**：`num_depar = false`（分子 `x` 不是带括号的 `Math` 节点），`denom_depar = true`（分母 `(y + z)` 是一个首尾为括号的 `Math` 节点）。
+**练习 1**：`MathAccess::eval` 为什么要手动调 `trace_at`，而 `MathFieldAccess::eval` 自己不用调？
 
-**练习 2**：如果一个分子表达式是 `#f(x)`（代码模式的函数调用，不是 `Math` 节点），`num_depar` 会是 `true` 吗？
-**参考答案**：不会。`matches!(num_expr, ast::Expr::Math(math) if ...)` 要求表达式必须是 `ast::Expr::Math` 变体；`#f(x)` 不是 `Math` 节点，所以直接为 `false`，无论它内容如何。
+**参考答案**：`MathFieldAccess` 是被 `MathAccess::eval`（或直接被总分发器 `Expr::eval`）调用的内层节点，它的值最终会经过外层的 trace 点。而 `MathAccess::eval` 是一个「汇总」节点，绕过了 `Expr::eval` 总分发器（总分发器末尾会统一 trace_at），所以它必须自己补上 trace，否则 IDE hover 取不到值。
+
+**练习 2**：`access_field` 为什么是 `pub(crate)` 自由函数，而不是某个 trait 的方法？
+
+**参考答案**：因为它要被两个不同文件（`code.rs` 的 `FieldAccess`、`math.rs` 的 `MathFieldAccess`）共享，而它们没有公共的 trait 来承载这个方法。用 `pub(crate)` 自由函数是最简单的跨模块复用方式，无需引入只为共享而存在的新 trait。
 
 ---
 
-### 4.5 统一显示接口：ExprExt::eval_display 与字段访问复用
+### 4.5 结构化数学节点：Shorthand、Delimited、Attach、Primes、Frac、Root
 
 #### 4.5.1 概念说明
 
-前几个模块反复出现 `eval_display`。它定义在 math.rs 末尾的一个私有扩展 trait `ExprExt` 上，是数学模式的「统一显示接口」。
+除叶子节点外，数学模式还有一批「结构化」节点，它们各自对应一种数学排版结构：
 
-为什么需要它？因为 `ast::Expr` 是一个枚举，其 `Eval::Output = Value`（见 u2-l1 的总分发器）。但数学元素的字段（如 `AttachElem` 的 base、`FracElem` 的分子分母）需要的是 `Content`。`eval_display` 就是这道「`Value` → `Content`」的桥梁：
+| AST 节点 | 含义 | 产出的运行时元素 | 输出类型 |
+|----------|------|------------------|----------|
+| `MathShorthand` | 多字符符号简写，如 `<=`、`=>` | `Value::Symbol` | `Value` |
+| `MathAlignPoint` | 对齐点 `&` | `AlignPointElem`（共享单例） | `Content` |
+| `MathDelimited` | 配对定界符 `[x + y]` | `LrElem` | `Content` |
+| `MathAttach` | 上下标附着 `a_1^2` | `AttachElem` | `Content` |
+| `MathPrimes` | 撇号 `a'''` | `PrimesElem` | `Content` |
+| `MathFrac` | 分式 `x/2` | `FracElem` | `Content` |
+| `MathRoot` | 根号 `√x`、`∛x`、`∜x` | `RootElem` | `Content` |
 
-\[
-\texttt{eval\_display}(\text{expr}) = \texttt{expr.eval(vm)?.display().spanned(expr.span())}
-\]
-
-即：先按表达式求值得 `Value`，再 `.display()` 转成 `Content`（`Value::Content` 原样透传，`Value::Symbol` 转成可显示内容，等等），最后贴上源码 span。这样无论子表达式产出什么 `Value`，都能统一喂给需要 `Content` 的数学元素。
-
-本模块还涉及两个「复用」设计：
-
-- **`MathFieldAccess` 复用 `access_field`**：数学里的字段访问 `a.b` 与代码里的 `a.b`，其字段读取语义（包括「settable 字段在 context 下读取」的兜底）完全一样。所以数学版只求值 target（注意 target 是 `MathIdent`，走 `get_in_math`），然后把字段读取整体委托给 `code.rs` 的 `access_field`，避免重复实现。
-- **`MathAccess::eval` 手动调 `trace_at`**：数学访问节点不经过 `ast::Expr::eval`（后者末尾有统一的 `trace_at`），所以要自己补上这一调用，以满足 IDE 追踪约定（见 u6-l2）。
+它们的求值套路高度统一：读子节点 → 构造强类型元素（`XxxElem::new(...)`）→ 用 `.with_xxx(...)` 填可选字段 → `.pack()` 成 `Content`。
 
 #### 4.5.2 核心流程
 
-`ExprExt::eval_display`：`self.eval(vm)?.display().spanned(self.span())`。
+逐个看关键流程：
 
-`MathFieldAccess::eval`：
-
-1. 求值 target：`self.target().eval(vm)?`（target 是 `MathIdent`，走 `get_in_math`）。
-2. 取字段名 `self.field()`。
-3. 调 `crate::code::access_field(vm, target, field.as_str(), field.span())`——与代码模式 `FieldAccess::eval` 走同一个函数。
-
-`MathAccess::eval`（数学访问的总入口，可能是 `MathIdent` 或 `MathFieldAccess`）：
-
-1. 匹配并求值，得 `Value`。
-2. 手动 `vm.trace_at(self.span(), &value)`（因为没走 `ast::Expr::eval`）。
+- **`MathShorthand`**：用 `Symbol::runtime_char(self.get())` 把简写对应的单个 Unicode 码点包成 `Value::Symbol`。自包含，签名 `_: &mut Vm`。
+- **`MathDelimited`**：`open` 与 `close` 用 `eval_display`（它们可能是符号 `Value`），`body` 用 `eval`（已经是 `Math`/`Content`），三者相加 `open + body + close` 包进 `LrElem`。
+- **`MathAttach`**：先求 `base`（`eval_display`）；依次处理上标 `top`、撇号 `primes`、下标 `bottom`。注意 `primes` 被设置到 `elem.tr`（右上角），且源码注释说明撇号总是以 scripts 样式（而非 limits 样式）附着在右上角。
+- **`MathPrimes`**：用撇号个数 `self.count()` 构造 `PrimesElem`。
+- **`MathFrac`**：分别 `eval_display` 求分子 `num` 与分母 `denom`；然后用 `matches!(num_expr, ast::Expr::Math(math) if math.was_deparenthesized())` 计算 `num_depar` / `denom_depar` 两个布尔标记，随 `FracElem` 一起带出。
+- **`MathRoot`**：根指数 `self.index()` 是 `Option<u8>`（`√`→None 即平方根、`∛`→3、`∜`→4），转成 `TextElem`；被开方数 `radicand` 用 `eval_display`。
 
 #### 4.5.3 源码精读
 
-`ExprExt` trait 及其实现——数学模式的统一显示接口：
+`MathShorthand::eval`：[src/math.rs:84-90](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L84-L90)。
 
-[ExprExt::eval_display：Value → Content](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L176-L184)
+`MathDelimited::eval`：[src/math.rs:100-109](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L100-L109)。
 
-> 这就是 `eval_display` 的全部实现：`self.eval(vm)?` 得 `Value`，`.display()` 转 `Content`，`.spanned(self.span())` 贴位置。它让 `Math::eval`、`MathDelimited::eval`、`MathAttach::eval`、`MathFrac::eval`、`MathRoot::eval` 等处都能用同一句话处理「任意子表达式」。
+`MathAttach::eval`——上下标与撇号：[src/math.rs:111-134](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L111-L134)。注意 `primes` 进 `elem.tr`、`top` 进 `elem.t`、`bottom` 进 `elem.b`，且注释解释了撇号固定用 scripts 样式。
 
-`MathFieldAccess::eval`——复用代码模式的 `access_field`：
+`MathPrimes::eval`：[src/math.rs:136-142](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L136-L142)。
 
-[MathFieldAccess::eval 委托 access_field](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L59-L67)
+`MathFrac::eval`——带去括号标记的分式：[src/math.rs:144-163](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L144-L163)。
 
-> 注意它调用的是 `crate::code::access_field(...)`——直接复用 `code.rs` 里的同一个函数。
+`MathRoot::eval`：[src/math.rs:165-174](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L165-L174)。
 
-被复用的 `access_field`（在 code.rs，`FieldAccess::eval` 也调它）：
+`was_deparenthesized` 的定义——判断 `Math` 节点原本是否被括号包裹：[typst-syntax/src/ast.rs:894-901](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-syntax/src/ast.rs#L894-L901)。它检查首尾子节点是否是 `LeftParen` / `RightParen`。
 
-[access_field：字段读取 + settable 兜底](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/code.rs#L363-L385)
+`FracElem` 的两个标记字段：[typst-library/src/math/frac.rs:98-110](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/math/frac.rs#L98-L110)。注释写明：「Whether the numerator/denominator was originally surrounded by parentheses that were stripped by the parser.」
 
-> `access_field` 先试 `target.field(field, ...)`；若失败且目标是元素函数、且该字段是 settable 的，则在 `vm.context` 的样式里读取（这是 `block.stroke` 这类「带 context 读 settable 字段」的兜底逻辑）。`MathFieldAccess` 复用它，意味着数学模式下的字段访问**自动获得完全相同的兜底能力**，无需重复实现。
+这两个标记在排版期 `resolve_frac` 被消费：[typst-library/src/math/ir/resolve.rs:685-712](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/math/ir/resolve.rs#L685-L712)。它们只在 `FracStyle::Horizontal`（行内斜杠分式）时传给 `resolve_horizontal_frac`，用来决定是否要把分子/分母重新加上括号。
 
-`MathAccess::eval`——手动补 `trace_at`：
+#### 4.5.4 代码实践（本讲指定实践任务之二）
 
-[MathAccess::eval 手动 trace_at](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L69-L82)
+**实践目标**：解释 `MathFrac::eval` 里 `num_depar` / `denom_depar` 两个标记的来源与意义。
 
-> 注释明确写道：「我们需要为这个值调用 `trace_at`，因为我们没有经由 `ast::Expr::eval()` 求值。」这是 trace 调用约定（每个产生值的表达式都要 `trace_at`）在数学访问节点上的手工补丁。同样的手工补丁也出现在 `call.rs` 的 `MathCall::eval` / `eval_math_call` 中。
+**操作步骤**（源码阅读型）：
 
-#### 4.5.4 代码实践
+1. 阅读 [MathFrac::eval](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-eval/src/math.rs#L144-L163) 与 [was_deparenthesized](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-syntax/src/ast.rs#L894-L901)。
+2. 追踪这两个标记如何流到排版期：[FracElem 字段](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/math/frac.rs#L98-L110) → [resolve_frac](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/math/ir/resolve.rs#L685-L712)。
 
-**实践目标**：回答本讲主实践的第二个问题——为什么 `MathFieldAccess` 要复用 `code.rs` 的 `access_field`，而不是自己实现字段访问。
+**需要观察的现象**：解析器会把分式中「仅起分组作用」的括号剥掉（例如 `$ (a+b)/c $` 解析后 `num` 是不带括号的 `a+b`），但「括号曾经存在」这个事实被 `was_deparenthesized` 记录下来，求值器把它翻译成 `num_depar`/`denom_depar` 两个布尔字段，随 `FracElem` 带到排版阶段。
 
-**操作步骤（源码阅读型）**：
+**预期结论**：
 
-1. 打开 `MathFieldAccess::eval`（math.rs L59–L67），看到它只做两件事：求值 target、调 `access_field`。
-2. 打开被复用的 `access_field`（code.rs L363–L385），读懂它的兜底逻辑（settable 字段在 context 下读取）。
-3. 思考：如果 `MathFieldAccess` 自己实现字段访问，会漏掉什么？会漏掉这段 settable 字段兜底，导致数学模式下的 `elem.field` 读取行为与代码模式不一致。
+- **来源**：`num_depar` 由 `matches!(num_expr, ast::Expr::Math(math) if math.was_deparenthesized())` 计算得到——即「分子表达式是一个 `Math` 节点，且该 `Math` 节点原本被括号包裹」。`denom_depar` 同理。
+- **意义**：这两个标记记录的是**源码层面的信息（括号是否曾被写出）**，而非求值后的值的信息。排版阶段在 `FracStyle::Horizontal`（行内 `(x-y)/z` 这种斜杠分式）风格下，需要据此决定**是否给分子/分母重新加上括号**——因为「分组括号」在垂直分式里没必要画出来，但在斜杠分式里不加括号会改变运算优先级的视觉表达。其他风格（`Vertical`、`Skewed`）不读这两个标记。
+- **为何放在求值阶段**：因为「括号是否曾被写出」是**语法层**的信息（解析器知道），而「是否需要重画括号」是**排版层**的决策（取决于 `FracStyle`，即样式）。求值器（`typst-eval`）是连接两者的桥梁，由它把语法层事实翻译成元素字段、随元素带到排版期，是职责最合适的位置。这也呼应了 u1-l1 强调的「typst-eval 把 AST 翻译成运行时值/元素」的定位。
 
-**解释「为什么复用」**：字段访问的**读取语义是模式无关的**——无论在代码还是数学里，`target.field` 都要：先查目标值的字段，失败时对元素函数的 settable 字段做 context 兜底。两套模式下唯一不同的是 **target 怎么求值**（代码用 `scopes.get`，数学用 `scopes.get_in_math`）。既然 `MathFieldAccess::eval` 已经在第一步用数学路径求出了 target（一个 `Value`），剩下的「在这个 `Value` 上读字段」就完全是模式无关的逻辑，自然应当复用同一个 `access_field`。复用的好处：(1) 避免重复实现兜底逻辑；(2) 保证两种模式下字段访问行为一致；(3) settable 字段的 context 兜底自动对数学模式生效。这是典型的 DRY（Don't Repeat Yourself）设计。
-
-**需要观察的现象 / 预期结果**：你能用一句话总结——「模式差异只体现在 target 查找（`get` vs `get_in_math`），字段读取本身模式无关，故复用 `access_field`」。
-
-> 本实践为源码阅读型，无需运行命令。
+> 待本地验证：可在本地 Typst 中对比 `$ (a+b)/c $` 在 `#set math.frac(style: "horizontal")` 与默认（vertical）下的渲染差异，确认斜杠风格下括号被保留。
 
 #### 4.5.5 小练习与答案
 
-**练习 1**：`eval_display` 和直接 `eval` 的返回类型分别是什么？
-**参考答案**：`eval` 返回 `SourceResult<Value>`（因为 `ast::Expr::Eval::Output = Value`）；`eval_display` 返回 `SourceResult<Content>`，它在 `eval` 之后多了 `.display().spanned(span)` 两步转换。
+**练习 1**：`MathAttach::eval` 里，撇号（`primes`）为什么设置到 `elem.tr`（右上角），而不是和 `top`（上标）共用同一个字段？
 
-**练习 2**：为什么 `MathAccess::eval` 要手动调用 `vm.trace_at`？
-**参考答案**：因为 `MathAccess::eval` 是直接被调用求值的（例如作为函数调用的 callee），没有经过 `ast::Expr::eval`。而 trace 调用约定要求「每个产生值的表达式都要 `trace_at`」（`ast::Expr::eval` 末尾有统一的 `trace_at`）。既然绕过了那条统一路径，就必须在这里手工补上，否则 IDE 的 hover/追踪就拿不到这个表达式的值。
+**参考答案**：因为撇号必须以 **scripts 样式**（角标，固定在右上角）附着，而不能像普通上标那样随元素配置切换成 **limits 样式**（置于元素正上方）。源码注释明确：「Always attach primes in scripts style (not limits style), i.e. at the top-right corner.」所以撇号有独立的字段 `tr`，与上标 `t` 区分。
+
+**练习 2**：`MathRoot::eval` 里，平方根 `√`、立方根 `∛`、四次根 `∜` 的 `index()` 分别返回什么？为什么用 `TextElem::packed` 来包装 index？
+
+**参考答案**：`√`→`None`（平方根，省略指数）、`∛`→`Some(3)`、`∜`→`Some(4)`。用 `TextElem::packed(eco_format!("{i}"))` 是为了让根指数的渲染方式和 `MathTextKind::Number`（见 4.2）一致——数字在数学里统一按文本元素处理。源码注释也点明了「Use `TextElem` to match `MathTextKind::Number` above」。
+
+**练习 3**：`MathShorthand::eval` 返回的是 `Value` 而非 `Content`，那它是怎么变成可见内容的？
+
+**参考答案**：通过 4.3 的 `eval_display`。在 `Math::eval` 拼接表达式流时，`MathShorthand` 求值出的 `Value::Symbol` 会被 `.display()` 转成 `Content`，再进入 `Content::sequence`。这正是 `eval_display` 存在的意义。
 
 ---
 
 ## 5. 综合实践
 
-设计一个贯穿本讲的小任务：**画一张「`$ f'(x) = (x^2 + 1) / x $` 求值调用树」**，把本讲所有模块串起来。
+**任务**：跟踪一条稍复杂的数学公式 `$ a^(b+c)' / sqrt(2) $` 的完整求值链路，画出每个 AST 节点对应的求值调用与产出。
 
-**任务步骤**：
+**操作步骤**（源码阅读 + 推理型）：
 
-1. 先拆解这行公式对应的 AST 嵌套（顶层是 `Equation`，内部 `Math` 流里有：`MathIdent(f)`、`MathAttach`（底 `f` + primes `'`）、`=`（`MathText`）、`MathFrac`（分子是 `MathDelimited` 包着 `x^2 + 1`，分母是 `MathIdent(x)`））。
-2. 对树中每个节点，标注它走哪个 `Eval` 实现、产出 `Value` 还是 `Content`、是否经过 `eval_display`。预期：
-   - `Equation` → `EquationElem`（`Content`）。
-   - `MathIdent(f)` → `get_in_math` → `Value::Symbol`/`Value::Func`，再经 `eval_display` 转 `Content`。
-   - `MathAttach` 的 primes → `MathPrimes` → `PrimesElem`，设到 `tr`。
-   - `MathFrac` 的分子 `MathDelimited` → `LrElem`，并因 `(x^2 + 1)` 被 `was_deparenthesized` 判定，`num_depar = true`；分母 `x` → `denom_depar = false`。
-   - `MathFrac` → `FracElem`（带两个去括号标记）。
-3. 在图中用箭头标出「`Value` → `eval_display` → `Content`」的转换发生位置（凡是数学元素字段需要 `Content`、而子表达式产出 `Value` 的地方）。
-4. 最后回答：这张图里出现了几次 `get_in_math`、几次 `access_field`、几次 `eval_display`？分别在哪条路径上？
+1. 先自行断句，写出你以为的 AST 结构：外层是一个 `Equation`（块级 or 行内？注意 `$` 内侧空格）；内部 `Math` 表达式流大致包含一个 `MathFrac`（分子是带撇号的 `MathAttach`，分母是 `MathRoot` 或函数调用）。
+2. 对照本讲源码，逐节点写出求值调用：
+   - `Equation::eval` → 求 `Math` → `EquationElem::new(...).with_block(...).pack()`。
+   - `Math::eval` → 对每个表达式 `eval_display` → `Content::sequence`。
+   - 分式 `MathFrac::eval` → 对 `num_expr`、`denom_expr` 分别 `eval_display`；计算 `num_depar`/`denom_depar`（本题分子 `a^(b+c)'` 是否被括号包裹？取决于解析器是否把 `(b+c)` 归成一个 `Math` 节点）→ `FracElem::new(...).with_num_deparenthesized(...).with_denom_deparenthesized(...).pack()`。
+   - 分子里的 `MathAttach::eval` → `base` 用 `eval_display`（`a`），撇号 `primes` 用 `eval`（产出 `PrimesElem` 的 `Content`）→ 设置到 `elem.tr`。
+   - 分母若解析为 `MathRoot` → `MathRoot::eval`；若解析为函数调用 `sqrt(...)` → 走 `MathCall::eval`（在 `call.rs`，本讲不展开）。
+3. 标注哪些节点产出 `Value`（需 `eval_display` 转换）、哪些直接产出 `Content`。
 
-**预期产出**：一张手绘或文本描述的调用树，能清楚说明 (a) 三层节点（`Equation`/`Math`/叶子）的分层；(b) `get_in_math` 与 `access_field` 各自负责的模式差异点；(c) `eval_display` 作为「`Value`→`Content` 桥梁」出现的位置；(d) `was_deparenthesized` 标记从解析层经求值层透传到 `FracElem` 的路径。
+**需要观察的现象**：你能清晰说出每个片段走的是 `eval` 还是 `eval_display`，以及为什么；并能指出撇号最终附着在 `AttachElem` 的右上角（`tr` 字段）。
 
-> 排版渲染效果待本地验证；调用树结构与求值路径可在源码中完整确认。
+**预期结果**：一张「AST 节点 → eval 调用 → 运行时元素/值」的对照表，覆盖 `Equation`、`Math`、`MathFrac`、`MathAttach`、`MathPrimes`、`MathRoot`（或 `MathCall`）至少六类节点。
+
+> 待本地验证：`sqrt(2)` 究竟被解析成 `MathRoot` 还是 `MathCall`，建议在本地用 Typst 的语法树工具（或对照 typst-syntax 的解析规则）确认；本实践的求值侧推理不依赖该结论。
 
 ## 6. 本讲小结
 
-- **三层分层**：`Equation`（外壳 + 块级标记）→ `Math`（表达式流拼接成 `Content::sequence`）→ 各叶子/结构节点（打包成数学元素）。
-- **`eval_display` 是数学模式的统一接口**：把任意 `ast::Expr` 求值得 `Value`，再 `.display().spanned()` 转成 `Content`，解决「元素字段要 `Content`、子表达式产出 `Value`」的类型落差。
-- **`get_in_math` vs `get`**：两者只在用户作用域未命中后的兜底层不同——数学查 `base.math`（数学符号字典），普通查 `base.global`（标准库全局）。这解释了 `$ pi $` 是 π、`#pi` 走代码路径。
-- **结构节点套路一致**：`MathDelimited`/`MathAttach`/`MathPrimes`/`MathRoot` 都是「读组成 → 构造强类型元素 → `.pack()`」，撇号固定设到右上角（scripts 风格）。
-- **`was_deparenthesized` 透传**：`MathFrac::eval` 读取分子分母「是否曾被括号包裹」，作为 `num_depar`/`denom_depar` 透传给 `FracElem`，供排版层消费——求值层只采集不解释。
-- **复用与约定**：`MathFieldAccess` 复用 `code.rs` 的 `access_field`（字段读取模式无关），`MathAccess`/`MathCall` 因绕过 `ast::Expr::eval` 而手工补 `trace_at`。
+- **`Equation`/`Math` 两层分工**：`Equation` 是方程外壳（决定行内/块级），`Math` 是表达式流；后者用 `Content::sequence` 拼接，与 Markup 的 `eval_markup` 高度同构。
+- **`MathText` 区分字形与数字**：`Grapheme` → `SymbolElem`，`Number` → `TextElem`，影响排版字体与间距。
+- **`MathIdent` 走数学作用域**：`scopes.get_in_math` 的 fallback 查 `base.math`（而非 `base.global`），并产生专属的 `unknown_variable_math` 错误与「在标准库存在」的修复提示——这是数学模式标识符与代码模式的本质区别。
+- **`eval_display` 是数学模式的统一显示接口**：把异构的 `Value`/`Content` 产出统一转成带 span 的 `Content`，供 `Content::sequence` 拼接。
+- **`MathFieldAccess` 复用 `access_field`**：代码模式与数学模式的字段访问语义一致（含 settable 字段的 context 兜底），抽成 `pub(crate)` 自由函数共享，避免重复与分叉。
+- **`MathFrac` 的去括号标记**：`num_depar`/`denom_depar` 来自 `was_deparenthesized`，把「源码里是否写过括号」这一语法信息带到排版期，供 `Horizontal` 风格分式决定是否重画括号——体现了 typst-eval 作为「语法→运行时」桥梁的定位。
 
 ## 7. 下一步学习建议
 
-本讲把 Math 模式的求值讲完了。接下来建议：
-
-1. **进入第 3 单元（控制流）**：`src/flow.rs` 的 `Conditional`/`WhileLoop`/`ForLoop` 与 `FlowEvent`。数学模式里也能写 `#for`、`#if`（用 `#` 逃逸），理解控制流有助于读懂更复杂的数学宏。
-2. **阅读 `src/call.rs` 的 `MathCall::eval` / `eval_math_call`**：本讲多次提到数学函数调用（如 `root(3, x)`、`abs(x)`），它的 callee 解析、`trace_at` 手工补丁、与 `FieldCallee` 的分派，是数学与代码调用交汇的关键，对应讲义 u4-l1 / u4-l2。
-3. **关注 `eval_display` 的下游 `.display()`**：想理解 `Value` 如何具体转成 `Content`（尤其是 `Value::Symbol`、`Value::Func`），可去 `typst-library` 里读 `Value::display` 的实现。
-4. **回到排版层验证**：找一个本地 Typst 环境，渲染 `$ (x+1)/x $` 与 `$ x+1 / x $`，观察 `was_deparenthesized` 标记对 `FracElem` 排版的实际影响，把本讲的「求值层透传」与「排版层消费」两端连起来。
+- **进入函数调用与字段调用**：本讲提到 `MathCall`（数学里的函数调用）定义在 `call.rs`，且 `MathAccess::eval` 需手动 `trace_at`。下一单元（u4）会系统讲解 `FuncCall`、`eval_field_callee`、方法与字段调用的优先级分派，建议接着学 **u4-l1（函数调用与参数求值）** 与 **u4-l2（字段访问与方法调用分派）**，届时你会更完整地理解 `access_field` 在整条调用链里的位置。
+- **回顾 trace 调用约定**：若本讲对「为什么 `MathAccess::eval` 要手动 `trace_at`」还有疑问，可回到 **u1-l4（Eval trait 与 Vm 虚拟机）** 复习 `Vm::trace` / `trace_at` 与 IDE 追踪的关系；**u6-l2（追踪机制与 IDE 支持）** 会做系统总结。
+- **延伸阅读**：想了解数学元素的**排版期**行为（如 `resolve_frac` 如何消费去括号标记、`AttachElem` 如何摆放上下标），可阅读 `typst-library/src/math/` 下的 `frac.rs`、`ir/resolve.rs`，这超出了 typst-eval 的范围，但能帮你看完「求值→排版」的完整闭环。
