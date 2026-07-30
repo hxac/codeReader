@@ -1,0 +1,450 @@
+{
+  "project": "typst-crates-typst-macros",
+  "head": "146a58329a30f6cd38978c22c6bf0e430d8962a1",
+  "rationale": "typst-macros 是 Typst 把原生 Rust 代码桥接到运行时的过程宏 crate，七个公开宏共享同一套「解析中间结构 → quote! 生成」流水线和 util 工具层。学习顺序据此设计：第一单元先让读者理解 crate 定位、过程宏工作流和共享工具层（文档/属性/命名/版本），打好地基；第二单元从最简单的 #[time] 入手，逐步到 #[ty]、cast!、#[derive(Cast)]，掌握「类型与值转换」这条线；第三单元进入最常用的 #[func]，分「参数解析」与「代码生成」两讲，再讲 #[scope] 如何把函数/类型/元素及其常量、构造器组装进作用域；第四单元深入最复杂的 #[elem]，按「字段模型与校验 → 结构体与构造方法 → NativeElement 与字段 vtable → Construct/Set 与能力系统」四阶段拆解，最后用一讲总览整套代码生成架构、DefSite 定位、LazyLock 延迟初始化与设计取舍。难度由浅入深，每讲只聚焦一个宏或一个生成阶段，并通过 depends_on 形成清晰依赖链，整体 15 讲契合本中型 proc-macro crate 的体量。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 typst-macros 与过程宏基础",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览：typst-macros 是什么",
+          "order": 1,
+          "filename": "u1-l1-overview.md",
+          "level": "beginner",
+          "topic": "介绍 typst-macros 作为 Typst 过程宏 crate 的定位、它如何把原生 Rust 代码桥接到 Typst 运行时，以及 crate 的文件组织与 Cargo.toml 中 proc-macro 配置。",
+          "learning_goals": [
+            "理解 crate 的 proc-macro=true 性质及其对 heck/proc-macro2/quote/syn 的依赖",
+            "说出七个公开宏（func/ty/elem/scope/cast/derive_cast/time）各自的作用",
+            "理解 lib.rs 作为入口如何按模块分发到 cast/elem/func/scope/time/ty"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Cargo.toml 的 [lib] proc-macro=true",
+            "lib.rs 的七个 #[proc_macro] 入口",
+            "lib.rs 开头的模块声明与 extern crate proc_macro"
+          ],
+          "practice_task": "阅读 src/lib.rs，为七个公开宏各写一张「输入项类型 → 实现的 trait → 生成内容」卡片；并解释为何 #[func] 作为 attribute macro 却还能生成一个与函数同名的空 enum（提示：Rust 中函数与类型位于不同命名空间）。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "过程宏工作流与错误处理",
+          "order": 2,
+          "filename": "u1-l2-procmacro-workflow.md",
+          "level": "beginner",
+          "topic": "讲解 proc-macro 的端到端流程：BoundaryStream → proc_macro2::TokenStream → syn 解析 → quote! 生成，以及每个入口共享的 unwrap_or_else(to_compile_error) 错误回传模式。",
+          "learning_goals": [
+            "区分 attribute、function-like、derive 三类过程宏的签名差异（参数个数、stream/item）",
+            "理解 parse_macro_input! 把 TokenStream 解析为 syn 项的作用",
+            "掌握 .unwrap_or_else(|err| err.to_compile_error()) 如何把 syn::Error 变成编译错误"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/util.rs"
+          ],
+          "minimal_modules": [
+            "pub fn func/ty/elem/scope/cast/derive_cast/time 的签名",
+            "parse_macro_input! 宏",
+            "bail! 宏与 to_compile_error 模式"
+          ],
+          "practice_task": "任选一个宏入口（如 func），画出从用户源码到生成 TokenStream 的数据流图（标注每步类型）；并写一段说明：为什么宏内部普遍使用 proc_macro2::TokenStream 而不是直接用 proc_macro::TokenStream。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "共享工具层 util.rs：文档、属性、命名与版本",
+          "order": 3,
+          "filename": "u1-l3-shared-util.md",
+          "level": "beginner",
+          "topic": "讲解 util.rs 中所有宏共用的工具：documentation() 文档提取、属性三件套（has_attr/take_attr/parse_attr/validate_attrs）、determine_name_and_title 命名推导、foundations 简写、Since 版本、oneliner、BlockWithReturn/BareType 辅助解析类型与 kw 关键字。",
+          "learning_goals": [
+            "理解 documentation 如何拼装普通 doc 注释并支持 stringify! 的 int/float",
+            "掌握属性的「取出 → 解析 → 校验」三步法与 parse_key_value/parse_flag/parse_string_array 等 helpers",
+            "理解 determine_name_and_title 的 kebab/title 推导与冗余校验、foundations 简写、Since 三态与 BlockWithReturn 的解析"
+          ],
+          "source_files": [
+            "src/util.rs"
+          ],
+          "minimal_modules": [
+            "documentation / oneliner",
+            "has_attr / take_attr / parse_attr / validate_attrs",
+            "determine_name_and_title",
+            "foundations 简写与 kw 自定义关键字",
+            "Since 与 BlockWithReturn / BareType"
+          ],
+          "practice_task": "参照 documentation() 实现一个迷你 extract_docs(attrs)，把多行 doc 注释拼成字符串并去掉每行行首空格；再说明 validate_attrs 为什么只放行 doc 和 derive 两类属性（结合宏会主动消费自定义属性这一事实）。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：类型与值转换宏",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "#[time] 计时宏：最简单的代码注入",
+          "order": 1,
+          "filename": "u2-l1-time-macro.md",
+          "level": "intermediate",
+          "topic": "以最简单的 #[time] 宏入手，讲解如何解析 Meta 并在函数体开头插入一条 TimingScope 语句，理解 name/span 选项及其在 wasm32 目标下省略的设计。",
+          "learning_goals": [
+            "掌握 time::Meta 的解析（name 与 span）",
+            "理解通过修改 syn::ItemFn 的 block.stmts.insert(0, …) 注入代码",
+            "区分 with_span(#name, Some(span)) 与 new(#name) 两种构造方式"
+          ],
+          "source_files": [
+            "src/time.rs",
+            "src/util.rs"
+          ],
+          "minimal_modules": [
+            "time::time / time::Meta / time::create",
+            "parse_string / parse_key_value",
+            "TimingScope 注入语句"
+          ],
+          "practice_task": "仿照 time::create 写一个迷你 attribute 宏 #[log_entry]，在函数体开头注入一条 println! 语句；再结合 lib.rs 注释说明 #[time] 默认在 wasm32 目标下被省略的原因（为避免拖大体积）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "#[ty] 类型宏：把 Rust 类型变成 Typst 类型",
+          "order": 2,
+          "filename": "u2-l2-ty-macro.md",
+          "level": "intermediate",
+          "topic": "讲解 #[ty] 如何解析 struct/enum/type/verbatim 多种类型项，计算 name/title/long，按需自动生成 cast!，并实现 NativeType 与 NativeTypeData。",
+          "learning_goals": [
+            "理解 BareType 与 Item 的四种分支（Struct/Type/Enum/Verbatim）及 keep 标志",
+            "掌握 scope/cast 标志如何改变生成代码（scope 改 constructor/scope 来源，cast 抑制自动 cast!）",
+            "理解 NativeTypeData 各字段的来源与 LazyLock 延迟初始化"
+          ],
+          "source_files": [
+            "src/ty.rs",
+            "src/util.rs"
+          ],
+          "minimal_modules": [
+            "ty::ty / ty::Type / ty::Meta",
+            "ty::parse / ty::create",
+            "BareType",
+            "NativeTypeData 字面量生成"
+          ],
+          "practice_task": "给定 `#[ty(title=\"String\")] struct Str(EcoString);`，手写宏生成的 NativeType impl 与 NativeTypeData 字面量；并说明当 cast 标志为 true 时为何不再自动生成 `cast! { type #ident, }`。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "cast! 函数式宏：值的双向转换",
+          "order": 3,
+          "filename": "u2-l3-cast-macro.md",
+          "level": "intermediate",
+          "topic": "深入 cast! 的输入语法（type 动态标记、self=> 转出、若干 pattern=>expr 转入），讲解它如何条件性地生成 Reflect/IntoValue/FromValue 三个 impl 及其方法体。",
+          "learning_goals": [
+            "区分 Pattern::Str（字面量字符串）与 Pattern::Ty（绑定:类型）两种模式",
+            "理解 dynamic（type 前缀）如何同时影响四个方法的生成与否",
+            "掌握 castable/input/output/from_value/into_value 各自的生成逻辑与判断顺序"
+          ],
+          "source_files": [
+            "src/cast.rs",
+            "src/util.rs"
+          ],
+          "minimal_modules": [
+            "cast::cast / CastInput",
+            "Cast / Pattern",
+            "create_castable_body / create_from_value_body",
+            "create_input_body / create_output_body / create_into_value_body"
+          ],
+          "practice_task": "为 `struct CoolInt(u8)` 写一个 cast! 调用（含 `self => self.0.into_value()` 与 `v: i64 => …`、`v: bool => …` 两条转入臂），然后预测宏会生成哪些 impl，并列出 FromValue 方法体里的判断先后顺序。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "#[derive(Cast)]：枚举的字符串转换",
+          "order": 4,
+          "filename": "u2-l4-derive-cast.md",
+          "level": "intermediate",
+          "topic": "讲解 derive_cast 如何只支持枚举、把变体名转成 kebab-case 字符串（可用 #[string] 覆盖），并委托给 cast! 生成双向转换代码。",
+          "learning_goals": [
+            "理解 derive 宏与 function-like 宏在签名与实现上的差异",
+            "掌握 variant 字符串映射的双向生成（strs_to_variants / variants_to_strs）",
+            "理解 #[derive(Cast)] 与 cast! 的复用关系及显式 discriminant 被拒绝的原因"
+          ],
+          "source_files": [
+            "src/cast.rs"
+          ],
+          "minimal_modules": [
+            "cast::derive_cast",
+            "Variant",
+            "strs_to_variants / variants_to_strs"
+          ],
+          "practice_task": "给定一个含 `#[string(\"❌\")] Unnice` 变体的枚举，写出 derive(Cast) 最终展开出的等价 cast! 代码；并说明为何带显式 discriminant 的变体会被 bail! 拒绝。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：函数宏与作用域组装",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "#[func]（一）：参数与元数据解析",
+          "order": 1,
+          "filename": "u3-l1-func-parsing.md",
+          "level": "intermediate",
+          "topic": "讲解 func::parse 如何从函数项解析出 Func/Param/SpecialParams，处理 #[named]/#[default]/#[variadic]/#[external] 参数属性，以及 engine/context/args/span 四个运行时特殊参数与 self 绑定。",
+          "learning_goals": [
+            "理解 SpecialParams 如何按参数名识别 engine/context/args/span",
+            "区分参数的 named/variadic/external/default 四种配置及其默认值解析",
+            "掌握 Binding（Owned/Ref/RefMut）与 self 接收者的处理，以及 parent 作用"
+          ],
+          "source_files": [
+            "src/func.rs",
+            "src/util.rs"
+          ],
+          "minimal_modules": [
+            "func::parse / func::parse_param",
+            "Func / Param / SpecialParams / Binding",
+            "func::Meta"
+          ],
+          "practice_task": "给定一个带 `&self`、`#[variadic] values: Vec<i64>`、`#[named] #[default(0)] default: i64` 的函数签名，列出 SpecialParams 与 params 各自包含的条目及它们的 name/类型；并解释参数「positional 且 required」的默认判定逻辑（基于 named 与 default）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "#[func]（二）：函数数据与包装闭包的代码生成",
+          "order": 2,
+          "filename": "u3-l2-func-codegen.md",
+          "level": "intermediate",
+          "topic": "讲解 create 如何生成函数影子类型（或 _data 函数）、NativeFuncData 字面量、解析参数并调用原函数的包装闭包，以及 NativeParamInfo 的构造。",
+          "learning_goals": [
+            "理解影子 enum 与 {ident}_data 两种模式的取舍（取决于是否有 parent）",
+            "掌握 wrapper closure 如何按参数属性选择 args.all/named/eat/expect 并按默认值兜底",
+            "理解 LazyLock 延迟初始化 scope/params/returns 与 DefSite/def_site_key 的定位作用"
+          ],
+          "source_files": [
+            "src/func.rs"
+          ],
+          "minimal_modules": [
+            "func::create / create_func_data",
+            "create_wrapper_closure / create_param_parser",
+            "create_param_info / create_func_ty"
+          ],
+          "practice_task": "对一个简单的 `#[func] fn double(x: i64) -> i64`，手写宏生成的包装闭包与 NativeFuncData（含 params、returns 的 LazyLock）；并说明 `args.take().finish()?` 这一行在什么条件下才会被插入。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "#[scope] 作用域组装",
+          "order": 3,
+          "filename": "u3-l3-scope-macro.md",
+          "level": "intermediate",
+          "topic": "讲解 #[scope] 如何遍历 impl 块的四类成员（const/fn/type/elem），把 parent 类型注入每个 #[func]，识别并注册 constructor，实现 NativeScope；以及 ext 扩展 trait 与 #[deprecated] 处理。",
+          "learning_goals": [
+            "理解 handle_const/handle_fn/handle_type_or_elem 的分工与生成的 scope.define* 调用",
+            "掌握 constructor 的识别与向 #[func] 注入 parent 的机制",
+            "理解 ext 模式下 rewrite_primitive_base 为何要把 inherent impl 改写为 trait + impl"
+          ],
+          "source_files": [
+            "src/scope.rs",
+            "src/func.rs"
+          ],
+          "minimal_modules": [
+            "scope::scope",
+            "handle_const / handle_fn (FnKind) / handle_type_or_elem",
+            "rewrite_primitive_base",
+            "deprecated 属性处理"
+          ],
+          "practice_task": "给一个含 `const VAL`、一个普通 `#[func]` 方法、一个 `#[func(constructor)]` 方法的 impl 块，写出 scope() 方法体里的 definitions 序列与 constructor 的最终取值；并解释 ext 模式为何必须生成一个 XxxExt trait 而不能直接用 inherent impl。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "专家：元素宏深度剖析与架构总览",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "#[elem]（一）：字段模型与属性校验",
+          "order": 1,
+          "filename": "u4-l1-elem-fields.md",
+          "level": "advanced",
+          "topic": "讲解 Elem/Field 数据结构与 parse_field，覆盖 positional/required/variadic/fold/internal/external/ghost/synthesized/parse/default 等字段属性，以及各类字段分类方法与互斥校验规则。",
+          "learning_goals": [
+            "理解字段属性的优先级推导（variadic→required→positional）",
+            "掌握 real/struct/accessor/construct/set 各类字段过滤器的语义差异",
+            "理解 required/synthesized 与 default/fold/ghost 的互斥规则，以及 ghost 公有字段 + 自动构造的禁止条件"
+          ],
+          "source_files": [
+            "src/elem.rs",
+            "src/util.rs"
+          ],
+          "minimal_modules": [
+            "elem::parse / parse_field",
+            "Elem 的字段分类方法（real_fields/struct_fields/accessor_fields/construct_fields/set_fields）",
+            "Field 结构与属性",
+            "BlockWithReturn"
+          ],
+          "practice_task": "设计一个含 required、#[default] settable、#[ghost] internal、#[synthesized] 四个字段的元素，逐字段标注 i/positional/required/fold 等标志，并指出哪些字段组合会触发 bail!（如 required + synthesized + default）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "#[elem]（二）：结构体与构造方法生成",
+          "order": 2,
+          "filename": "u4-l2-elem-struct.md",
+          "level": "advanced",
+          "topic": "讲解 create_struct 如何按字段类型选择存储形态（裸类型 / Option / Settable）、create_new_func 生成 new()、create_with_field_method 生成 with_ 链式构造器，以及 Field 常量与 const _:() 匿名作用域。",
+          "learning_goals": [
+            "理解字段存储的三种形态及其判定（required / synthesized / 普通 settable）",
+            "掌握 new() 的参数（仅 required）与各字段初始化的对应",
+            "理解 with_ builder 对 required/synthesized/settable 的三种赋值方式，以及为何整体生成代码包在 const _: () = { … }; 中"
+          ],
+          "source_files": [
+            "src/elem.rs"
+          ],
+          "minimal_modules": [
+            "create / create_struct / create_field",
+            "create_inherent_impl / create_new_func",
+            "create_with_field_method 与 Field 常量"
+          ],
+          "practice_task": "给定字段定义（含一个 required、一个 #[default] settable、一个 synthesized），手写 create_struct 生成的 struct（含正确的字段存储类型）和 new() 的签名与函数体；并解释 const _: () = { … }; 这个匿名作用域的作用（避免局部定义泄漏）。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "#[elem]（三）：NativeElement 与字段 vtable",
+          "order": 3,
+          "filename": "u4-l3-elem-vtable.md",
+          "level": "advanced",
+          "topic": "讲解 create_native_elem_impl 如何用 vtable 注册元素，create_field_impl 如何为每个字段按属性生成对应 trait（Required/Settable/Synthesized/External/Ghost/SettableProperty）的 impl 与 FIELD 常量，以及 fold/refable 与 OnceLock slot 的条件生成。",
+          "learning_goals": [
+            "理解 Element::from_vtable 与 LazyElementStore/ContentVtable 的注册机制",
+            "掌握按字段属性选择不同 FieldData 类型（Required/Settable/Synthesized/External/Ghost）的分支逻辑",
+            "理解 field_id 闭包、OnceLock slot、with_fold 与 RefableProperty 的条件生成"
+          ],
+          "source_files": [
+            "src/elem.rs"
+          ],
+          "minimal_modules": [
+            "create_native_elem_impl",
+            "create_field_impl 及字段 vtable 选择分支",
+            "Field::new / with_fold / RefableProperty",
+            "field_id 闭包"
+          ],
+          "practice_task": "为一个 required 字段和一个普通 settable 字段，分别写出 create_field_impl 生成的 impl 与 FIELD 常量；并说明带 fold 的字段为何不再实现 RefableProperty（依据代码中 refable 的生成条件）。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "#[elem]（四）：Construct/Set 与能力系统",
+          "order": 4,
+          "filename": "u4-l4-elem-construct-capabilities.md",
+          "level": "advanced",
+          "topic": "讲解 create_construct_impl/create_set_impl 的字段解析与生成、create_field_parser 对 #[parse] 块与四种默认解析的处理，以及 capabilities、FORBIDDEN 列表、introspection 能力、用 dangling 指针取 vtable 的技巧与 Mathy。",
+          "learning_goals": [
+            "理解 Construct 与 Set 的差异及各自参与的字段集合",
+            "掌握 #[parse({ … })] 自定义解析块的注入方式与默认 args.all/expect/find/named 分支",
+            "理解能力如何通过 TypeId 匹配与 fat::vtable 动态查询，哪些能力被 FORBIDDEN 特殊处理，以及 introspection 三能力的校验"
+          ],
+          "source_files": [
+            "src/elem.rs"
+          ],
+          "minimal_modules": [
+            "create_construct_impl / create_set_impl",
+            "create_field_parser",
+            "create_capable_func / FORBIDDEN 列表",
+            "create_introspection_capabilities / create_mathy_impl"
+          ],
+          "practice_task": "为一个带 `#[parse({ let x = …; x })]` 字段的元素写出 Construct impl 中对应的 setup 片段；并依据代码注释解释 create_capable_func 里用 NonNull::dangling 取虚表指针为何是安全的。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "代码生成架构总览与设计取舍",
+          "order": 5,
+          "filename": "u4-l5-architecture-overview.md",
+          "level": "advanced",
+          "topic": "纵览全部宏共享的 parse→create 流水线、util 工具层、DefSite/def_site_key 错误定位、LazyLock 延迟初始化、foundations 简写，以及宏与 typst_library::foundations 运行时 trait 之间的契约关系和整体设计取舍。",
+          "learning_goals": [
+            "把七个宏统一到「解析中间结构 → quote! 生成」的同一架构视图下",
+            "理解 def_site_key 的命名规则（函数/字段/类型）对编译期精确定位的作用",
+            "能评估「重代码生成 + 运行时 trait 契约」架构的优点与代价"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/util.rs",
+            "src/func.rs",
+            "src/elem.rs"
+          ],
+          "minimal_modules": [
+            "各宏共用的 parse/create 模式",
+            "foundations 简写与 ::typst_library::foundations 契约",
+            "DefSite / def_site_key",
+            "LazyLock 延迟初始化",
+            "to_compile_error 错误回传"
+          ],
+          "practice_task": "选 #[func] 与 #[elem] 两个宏，对比它们 def_site_key 的生成方式（函数名 vs `Elem::field`），写一份说明；并总结该 crate 选择编译期 proc-macro 代码生成（而非运行时反射注册）的至少两条理由与一条代价。",
+          "depends_on": [
+            "u3-l2",
+            "u4-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
