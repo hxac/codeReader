@@ -38,7 +38,7 @@
 
 `convert()` 的返回类型是 `SourceResult<Vec<u8>>`，即 `Result<Vec<u8>, EcoVec<SourceDiagnostic>>`——成功是字节，失败是**一组带 span 的诊断**。函数体内大量 `?`：任何一步失败都直接把错误向上抛。理解「哪一步带 `?`」就是理解「哪一步可能失败」。
 
-### 2.4 承接前两讲的关键结论
+### 2.4 承接前几讲的关键结论
 
 - 公共入口 `pdf()` / `pdf_in_bundle()` 都是对 `convert::convert()` 的一行委托；区别只在 `anchors`（命名目的地址）与 `link_resolver`（跨文档链接解析器）（见 u1-l2）。
 - `PdfOptions` 有 7 个字段：`ident` / `creator` / `timestamp` / `page_ranges` / `standards` / `tagged` / `pretty`（见 u1-l2）。
@@ -214,7 +214,7 @@ pub fn convert(
    - 再推理：把 `tagged` 从默认 `true` 改成 `false`，`enable_tagging` 变成什么？输出 PDF 会缺少哪一块（提示：结构树，`document.set_tag_tree` 仍会被调用，但树会是空的）？
 3. 需要观察的现象：哪些选项影响**体积/可读性**（pretty），哪些影响**可访问性/合规性**（tagged、standards）。
 4. 预期结果：你能说出「减小体积」与「保留无障碍」往往是**互斥**的取舍——这正是 `PdfOptions::tagged` 字段文档里提到的「为减小文档体积，可酌情关闭 tagged PDF」（见 [src/lib.rs:L82-L88](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-pdf/src/lib.rs#L82-L88)）。
-5. `待本地验证`：若有 Typst CLI，可用同一份 `.typ` 文档分别以默认与 `--pp`（美化）/关闭 tagging 导出，对比文件大小。
+5. `待本地验证`：若有 Typst CLI，可用同一份 `.typ` 文档分别以默认与美化/关闭 tagging 导出，对比文件大小。
 
 #### 4.2.5 小练习与答案
 
@@ -286,7 +286,7 @@ GlobalContext
 
 `GlobalContext::new` 在 `convert()` 中的调用点：
 
-[src/convert.rs:L77-L84](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-pdf/src/convert.rs#L77-L84) —— 把 `typst_document`、`options`、`link_resolver`、`named_destinations`（阶段①④的产物）、`page_index_converter`（阶段③）、`tags`（阶段⑤）六个值一次性塞进 `gc`。
+[src/convert.rs:L77-L84](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-pdf/src/convert.rs#L77-L84) —— 把 `typst_document`、`options`、`link_resolver`、`named_destinations`、`page_index_converter`、`tags` 六个值一次性塞进 `gc`。
 
 **双向字体缓存的妙处**——为什么字体需要两张映射，而图像只需要一张？
 
@@ -373,7 +373,11 @@ gc, configuration ──► finish(document, gc, config) ──► Vec<u8>
 
 [src/convert.rs:L67-L73](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-pdf/src/convert.rs#L67-L73) —— 先 `PageIndexConverter::new`，再 `collect_named_destinations(&mut document, ..., &page_index_converter)`。`collect_named_destinations` 内部会调用 `crate::link::pos_to_xyz(pic, pos)`（见 [src/convert.rs:L874](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-pdf/src/convert.rs#L874)），把 Typst 的逻辑页号经 `pic` 映射成 PDF 页号——所以 `pic` 必须先就绪。
 
-> `PageIndexConverter` 的细节（如何处理 `page_ranges` 跳页）详见 u2-l6。这里只需知道：它把「Typst 文档第 i 页」映射成「PDF 第几页（若该页被排除则为 `None`）」。
+> `PageIndexConverter` 的细节（如何处理 `page_ranges` 跳页）详见 u2-l6。这里只需知道：它把「Typst 文档第 i 页」映射成「PDF 第几页（若该页被排除则为 `None`）」。其页号换算可写成（对**保留**的页）：
+>
+> \[ \text{pdf\_index}(i) = i - \text{skipped\_before}(i) \]
+>
+> 其中 \(\text{skipped\_before}(i)\) 是序号小于 \(i\) 且被排除的页数。
 
 **依赖点 ②：tags::init 必须在遍历之前，且可能失败**
 
@@ -388,15 +392,15 @@ gc, configuration ──► finish(document, gc, config) ──► Vec<u8>
 [src/convert.rs:L88-L92](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-pdf/src/convert.rs#L88-L92) —— 关键三行：
 
 ```rust
-let (doc_lang, tree) = tags::resolve(&mut gc)?;   // ③ 产出
-document.set_outline(build_outline(&gc));          // ④ 大纲（只用 gc）
-document.set_metadata(build_metadata(&gc, doc_lang)); // ④ 元数据消费 doc_lang
-document.set_tag_tree(tree);                       // ④ 结构树消费 tree
+let (doc_lang, tree) = tags::resolve(&mut gc)?;      // ③ 产出
+document.set_outline(build_outline(&gc));            // ④ 大纲（只用 gc）
+document.set_metadata(build_metadata(&gc, doc_lang));// ④ 元数据消费 doc_lang
+document.set_tag_tree(tree);                         // ④ 结构树消费 tree
 ```
 
 `tags::resolve` 返回 `SourceResult<(Option<Locale>, TagTree)>`（见 [src/tags/resolve/mod.rs:L56](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-pdf/src/tags/resolve/mod.rs#L56)）。其中 `doc_lang` 是从结构树里推断出的**文档主语言**，作为 `build_metadata` 的参数；`tree` 是最终的结构树，直接挂给 `set_tag_tree`。这就是为什么 `set_metadata`/`set_tag_tree` **必须排在 `tags::resolve` 之后**。
 
-> 顺带一提：`tags::resolve` 之所以排在 `convert_pages` 之后，是因为 tagged PDF 是「三段式」——`init` 预构建逻辑树、遍历时发射标记、`resolve` 把两者合起来解析成 `TagTree` 并做 PDF/UA 校验（详见 u1-l4 §4.3 与 u5-l19）。`resolve` 必须等到遍历结束、所有标记发射完毕才能进行。
+> 顺带一提：`tags::resolve` 之所以排在 `convert_pages` 之后，是因为 tagged PDF 是「三段式」——`init` 预构建逻辑树、遍历时发射标记、`resolve` 把两者合起来解析成 `TagTree` 并做 PDF/UA 校验（详见 u1-l4 与 u5-l19）。`resolve` 开头第一句就是 `gc.tags.tree.assert_finished_traversal()`（见 [src/tags/resolve/mod.rs:L57](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-pdf/src/tags/resolve/mod.rs#L57)），它要求遍历必须已经结束、所有标记发射完毕，否则直接报错。
 
 **依赖点 ⑤：collect_named_destinations 既写 document 又产 loc_to_names**
 
@@ -408,7 +412,7 @@ document.set_tag_tree(tree);                       // ④ 结构树消费 tree
 
 1. 实践目标：用「故意打乱顺序」的反向推理，验证依赖链。
 2. 操作步骤（纯纸面推理，**勿改源码**）：
-   - 假设把 [src/convert.rs:L88](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-pdf/src/convert.rs#L88) 的 `tags::resolve` 移到 [src/convert.rs:L86](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-pdf/src/convert.rs#L86) 的 `convert_pages` **之前**，会发生什么？（提示：`resolve` 先调用 `assert_finished_traversal`，此时遍历还没开始，结构标记尚未发射，校验必然失败或得到空树。）
+   - 假设把 [src/convert.rs:L88](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-pdf/src/convert.rs#L88) 的 `tags::resolve` 移到 [src/convert.rs:L86](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-pdf/src/convert.rs#L86) 的 `convert_pages` **之前**，会发生什么？（提示：`resolve` 先调用 `assert_finished_traversal`，此时遍历还没开始，结构标记尚未发射，断言/校验必然失败或得到空树。）
    - 假设把 `GlobalContext::new`（L77）移到 `tags::init`（L75）**之前**，编译能不能过？（提示：`Tags` 尚未构造，无法作为参数传入 `GlobalContext::new`。）
    - 假设把 `collect_named_destinations`（L68）移到 `PageIndexConverter::new`（L67）**之前**，会怎样？（提示：`pos_to_xyz(pic, ...)` 拿不到 `pic`。）
 3. 需要观察的现象：有些乱序会被**编译器**拦下（`Tags`/`pic` 未定义），有些能编译过但**运行时逻辑错乱**（resolve 拿到空树）。能区分这两类，说明你真正理解了依赖。
@@ -417,13 +421,13 @@ document.set_tag_tree(tree);                       // ④ 结构树消费 tree
 #### 4.4.5 小练习与答案
 
 **练习 1**：`set_outline` 为什么排在 `tags::resolve` 之后、却又不依赖 `resolve` 的产物？
-**答案**：`build_outline(&gc)` 只用 `gc`（查标题、用 `page_index_converter` 算页号），不依赖 `doc_lang`/`tree`。把它排在 `resolve` 之后主要是**代码组织**——把三个 `document.set_*` 调用集中放在一起便于阅读；逻辑上它甚至在 `convert_pages` 之后任何位置都可以。而 `set_metadata`（用 `doc_lang`）和 `set_tag_tree`（用 `tree`）才是**真正依赖** `resolve` 的。
+**答案**：`build_outline(&gc)` 只用 `gc`（查标题、用 `page_index_converter` 算页号），不依赖 `doc_lang`/`tree`。把它排在 `resolve` 之后主要是**代码组织**——把三个 `document.set_*` 调用集中放在一起便于阅读；逻辑上它在 `convert_pages` 之后任何位置都可以。而 `set_metadata`（用 `doc_lang`）和 `set_tag_tree`（用 `tree`）才是**真正依赖** `resolve` 的。
 
 **练习 2**：为什么 `collect_named_destinations` 需要 `&mut document`，而 `convert_pages` 之外的多数函数只读 `gc`？
 **答案**：因为它要把命名目的地**注册进 krilla 文档对象**（`document.register_named_destination`），这是对 `document` 的写操作。命名目的地必须在「文档对象」里登记，PDF 阅读器才能按名字跳转；同时它的返回值又进 `gc` 供链接解析。所以它一身二任：既改 `document`，又产 `gc` 字段。
 
 **练习 3**：若用户关闭了 `tagged`（`options.tagged = false`），`tags::init` 和 `tags::resolve` 还会跑吗？产出有什么不同？
-**答案**：都会跑，但 `tags::init` 走 `Tree::empty(...)` 分支（见 [src/tags/mod.rs:L36](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-pdf/src/tags/mod.rs#L36)），产出一棵空树；遍历期间各 tags 钩子因 `disabled()` 为真而直接返回、不发射标记；最终 `tags::resolve` 解析出一棵**空** `TagTree`，`set_tag_tree` 挂上去等于没挂。结果是 PDF 里没有无障碍结构树，体积更小、但失去可访问性。
+**答案**：都会跑，但 `tags::init` 走 `Tree::empty(...)` 分支（见 [src/tags/mod.rs:L36](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-pdf/src/tags/mod.rs#L36)），产出一棵空树；遍历期间各 tags 钩子因 `disabled()` 为真而直接返回、不发射标记；最终 `tags::resolve` 解析出一棵**空** `TagTree`（见 [src/tags/resolve/mod.rs:L66-L67](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-pdf/src/tags/resolve/mod.rs#L66-L67)），`set_tag_tree` 挂上去等于没挂。结果是 PDF 里没有无障碍结构树，体积更小、但失去可访问性。
 
 ---
 
