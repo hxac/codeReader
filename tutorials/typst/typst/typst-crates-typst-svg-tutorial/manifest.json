@@ -1,0 +1,593 @@
+{
+  "project": "typst-crates-typst-svg",
+  "head": "32fd4cc3861e0ab99f4c42ca6bea281482ba9f51",
+  "rationale": "typst-svg 是 Typst 的矢量 SVG 导出器，承接 typst-layout 的 Page/Frame，被 typst-cli（文件输出）和 typst-html（HTML 内嵌）调用，约 2200 行、7 个源文件，属于中偏小 crate。学习顺序按「先见森林再见树木、由数据流入口到细节」设计：第 1 单元先建立项目定位、模块职责与公共 API 的全局观；第 2 单元切入渲染主链路（SVGRenderer/State 调度、Frame 遍历、write.rs 输出抽象）这三个贯穿全 crate 的基石；第 3、4 单元按「矢量原语→形状→文本/字形」逐层向上讲渲染对象；第 5 单元专门拆解最复杂的 paint.rs（颜色序列化、填充/描边入口、线/径向/圆锥渐变、平铺），其中圆锥渐变与平铺因实现特殊（360 段近似、双次渲染）设为专家层；第 6 单元收束到图像处理（含 hayro 转换 PDF）、去重机制（体积优化核心）与跨文档/HTML/合并等集成模式。单元内讲义按「抽象→实现→高级变体」排列，依赖关系保证读者总是先读过被引用的源码模块。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：定位、结构与运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与整体架构",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "typst-svg 是什么——Typst 的 SVG 矢量导出器，承接 typst-layout 的 Page/Frame，输出 SVG 字符串，并被 typst-cli、typst-html 调用。",
+          "learning_goals": [
+            "理解 typst-svg 在 Typst 工具链中的位置（layout 排版 → svg 导出 → 文件）",
+            "区分它与 typst-render（位图）、typst-pdf（PDF）的职责差异",
+            "了解它的输入（Page/Frame）与输出（SVG 字符串）"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "lib.rs 模块声明",
+            "lib.rs 公共 API（svg 等）",
+            "Cargo.toml 依赖"
+          ],
+          "practice_task": "在 Cargo.toml 中找到 typst-svg 的依赖列表，画出它依赖哪些 typst crate（typst-layout、typst-library 等），并说明为什么 typst-html 也会依赖 typst-svg（提示：WebImage 与 svg_in_html）。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "源码结构与模块职责",
+          "order": 2,
+          "filename": "u1-l2-source-structure.md",
+          "level": "beginner",
+          "topic": "7 个源码文件（lib/write/path/shape/text/paint/image）各自负责什么，以及它们之间的依赖与拼装关系。",
+          "learning_goals": [
+            "说出每个 src/*.rs 文件的核心职责",
+            "理解 lib.rs 作为聚合入口的组织方式（mod 声明 + 把各模块的 impl SVGRenderer 拼到同一类型）",
+            "建立从「输出抽象 → 原语 → 高层渲染」的源码阅读顺序"
+          ],
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "lib.rs 的 mod 声明",
+            "lib.rs 顶部的 use 与 pub use"
+          ],
+          "practice_task": "为 7 个源码文件画一张依赖关系图（谁 use 谁），标注 lib.rs 如何把分散在 write/shape/text/paint/image 里的 impl SVGRenderer 块汇聚到同一个 SVGRenderer 类型上。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "公共 API 与运行方式",
+          "order": 3,
+          "filename": "u1-l3-public-api-and-usage.md",
+          "level": "beginner",
+          "topic": "四个导出入口 svg / svg_merged / svg_in_bundle / svg_in_html 的签名与用途，SvgOptions 配置，以及一次完整导出的步骤。",
+          "learning_goals": [
+            "区分四个导出函数各自的使用场景（单页/合并多页/HTML 内嵌/bundle 多文档）",
+            "理解 SvgOptions 的 render_bleed 与 pretty 字段的作用",
+            "看懂一次导出的步骤：page_bleed → svg_header → render_page → finalize → end_document"
+          ],
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "svg",
+            "svg_merged",
+            "svg_in_bundle",
+            "svg_in_html",
+            "SvgOptions",
+            "page_bleed",
+            "svg_header"
+          ],
+          "practice_task": "阅读 typst-cli/src/compile.rs 中调用 typst_svg::svg 的代码，追踪 SvgOptions 是如何从 CompileConfig 经 svg_options 构造的，并解释 pretty 与 render_bleed 对最终 SVG 输出的影响。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "渲染主链路与输出抽象",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "SVGRenderer 渲染器与渲染状态",
+          "order": 1,
+          "filename": "u2-l1-renderer-and-state.md",
+          "level": "intermediate",
+          "topic": "SVGRenderer 结构（持有 7 个 Deduplicator 资源）、State 渲染上下文（transform + size），以及 render_page 的页面级渲染流程。",
+          "learning_goals": [
+            "理解 SVGRenderer 持有的 7 个 Deduplicator 各自缓存什么资源（glyph/clip/gradients/gradient_refs/subgradients/tilings/tiling_refs）",
+            "掌握 State 的 pre_concat / pre_translate / with_size / with_transform 语义",
+            "看懂 render_page 如何处理页面背景填充与 bleed 偏移"
+          ],
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "SVGRenderer",
+            "State",
+            "render_page",
+            "new",
+            "with_options"
+          ],
+          "practice_task": "跟踪 render_page 的执行：解释为什么页面背景用 Geometry::Rect(...).filled(fill) 来渲染，并说明 render_page 与 render_frame 的调用关系。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Frame 遍历与 Group/Link/Anchor",
+          "order": 2,
+          "filename": "u2-l2-frame-traversal.md",
+          "level": "intermediate",
+          "topic": "render_frame 如何按 FrameItem 分发，render_group 对软/硬 frame 与裁剪的处理，以及 render_link/render_anchor 生成 <a> 与锚点。",
+          "learning_goals": [
+            "掌握 FrameItem 六种变体（Group/Text/Shape/Image/Link/Tag）的渲染分发",
+            "理解软 frame（仅拼接 transform）与硬 frame（重置坐标系并生成 <g>）的区别",
+            "理解 clip path 的创建与 clip-path 引用、Destination 三种链接类型的处理"
+          ],
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "render_frame",
+            "render_group",
+            "render_link",
+            "render_anchor",
+            "write_clip_path_defs"
+          ],
+          "practice_task": "在 render_group 中，软 frame 和硬 frame 对 State 的处理有何不同？写一段说明解释：硬 frame 为什么要把 transform 重置为单位矩阵、并更新 size 为 group.frame.size()。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "SVG 输出抽象层 write.rs",
+          "order": 3,
+          "filename": "u2-l3-write-abstraction.md",
+          "level": "intermediate",
+          "topic": "SvgElem（基于 XmlWriter 的 RAII 元素包装）、LazySvgElem 延迟创建、SvgWrite/SvgDisplay 两个 trait，以及 SvgTransform/SvgUrl/SvgIdRef 适配器。",
+          "learning_goals": [
+            "理解 SvgElem 利用 Drop 自动闭合 XML 标签的设计",
+            "掌握 LazySvgElem「按需 init」如何避免生成空元素",
+            "区分 SvgWrite（底层写入，含数字格式化与转义）与 SvgDisplay（值格式化）两个 trait 的分工"
+          ],
+          "source_files": [
+            "src/write.rs"
+          ],
+          "minimal_modules": [
+            "SvgElem",
+            "LazySvgElem",
+            "SvgWrite",
+            "SvgDisplay",
+            "SvgTransform",
+            "SvgUrl",
+            "SvgIdRef"
+          ],
+          "practice_task": "用 SvgElem 的 elem / attr_with / with 方法手工模拟生成一个带 transform 属性的 <g> 元素片段，并解释 Drop 在作用域结束时如何保证标签闭合。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "矢量原语：路径与形状",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "SVG 路径构建器 path.rs",
+          "order": 1,
+          "filename": "u3-l1-path-builder.md",
+          "level": "intermediate",
+          "topic": "SvgPathBuilder 用相对坐标生成 SVG path 数据，move/line/curve/quad/arc/close 命令，以及为 ttf_parser 实现的 OutlineBuilder。",
+          "learning_goals": [
+            "理解相对坐标（last_point/map）如何压缩 path 数据体积",
+            "掌握 line_to 在纯水平/纯垂直时退化为 h/v 命令的优化",
+            "看懂 with_scale/with_translate/empty 三种构造方式，以及 outline 模块如何提取字形轮廓"
+          ],
+          "source_files": [
+            "src/path.rs"
+          ],
+          "minimal_modules": [
+            "SvgPathBuilder",
+            "move_to",
+            "line_to",
+            "curve_to",
+            "arc",
+            "close",
+            "outline"
+          ],
+          "practice_task": "阅读 rect() 方法，解释它如何用 move_to/line_to/close 拼出矩形；再说明 with_scale 构造器为什么对字形轮廓提取（outline_glyph）很重要。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "形状渲染与描边 shape.rs",
+          "order": 2,
+          "filename": "u3-l2-shape-rendering.md",
+          "level": "intermediate",
+          "topic": "render_shape 把 Shape 转成 <path>，convert_geometry_to_path/convert_curve 的几何转路径（含 comemo 记忆化），write_stroke 描边属性，以及 paint 变换与 aspect ratio 计算。",
+          "learning_goals": [
+            "理解 fill/stroke 如何委托 write_fill/write_stroke",
+            "掌握 convert_geometry_to_path 的 comemo::memoize 优化",
+            "理解 shape_paint_transform 对 Gradient/Tiling 的 RelativeTo::Self_ 与 Parent 两种参照的处理"
+          ],
+          "source_files": [
+            "src/shape.rs"
+          ],
+          "minimal_modules": [
+            "render_shape",
+            "convert_geometry_to_path",
+            "convert_curve",
+            "write_stroke",
+            "shape_paint_transform",
+            "shape_fill_size"
+          ],
+          "practice_task": "在 render_shape 中，fill 为 None 时输出 fill=\"none\"；追踪 shape_paint_transform 为一个 RelativeTo::Parent 的渐变计算的变换矩阵含义，并说明 Geometry::Rect 负尺寸为何需要特殊处理。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "文本与字形",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "文本与字形渲染 text.rs",
+          "order": 1,
+          "filename": "u4-l1-text-and-glyphs.md",
+          "level": "intermediate",
+          "topic": "render_text 翻转 Y 轴后逐字形推进，render_glyph 区分轮廓字形（outline）与图像字形（bitmap/colr/svg），以及 RenderedGlyph 枚举。",
+          "learning_goals": [
+            "理解为什么文本渲染要先做 Y 轴翻转（字体坐标系为 Y-Up）",
+            "掌握字形 x_advance/y_advance 与 x_offset/y_offset 的累加推进",
+            "区分 should_outline 路径与 glyph_frame 图像路径，以及它们各自的去重键"
+          ],
+          "source_files": [
+            "src/text.rs"
+          ],
+          "minimal_modules": [
+            "render_text",
+            "render_glyph",
+            "render_path_glyph",
+            "render_image_glyph",
+            "RenderedGlyph"
+          ],
+          "practice_task": "对比 render_path_glyph 与 render_image_glyph：为什么轮廓字形在去重时就预缩放（key 含 scale），而图像字形在使用处才缩放？说明这分别是什么空间/体积上的取舍。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "字形定义与符号复用 write_glyph_defs",
+          "order": 2,
+          "filename": "u4-l2-glyph-defs.md",
+          "level": "intermediate",
+          "topic": "finalize 阶段的 write_glyph_defs 如何把去重后的字形写入 <defs><symbol>，Tofu/图像字形帧的处理，以及 <use> 引用机制。",
+          "learning_goals": [
+            "理解 <defs><symbol> + <use> 的字形复用模型",
+            "掌握 GlyphFrame 的两种 GlyphFrameItem（Tofu/Image）如何递归调用 render_shape/render_image",
+            "理解 std::mem::take 与结尾 assert!(self.glyphs.is_empty()) 的不变量含义"
+          ],
+          "source_files": [
+            "src/text.rs"
+          ],
+          "minimal_modules": [
+            "write_glyph_defs",
+            "RenderedGlyph"
+          ],
+          "practice_task": "跟踪 write_glyph_defs 把 RenderedGlyph::Frame 与 RenderedGlyph::Path 分别写成什么样的 SVG 结构；解释为什么写完定义后 glyphs 必须为空（assert）。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "绘制系统：颜色、渐变与平铺",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "颜色序列化",
+          "order": 1,
+          "filename": "u5-l1-color-serialization.md",
+          "level": "intermediate",
+          "topic": "Color 的 SvgDisplay 实现：RGB/Luma/CMYK/HSV 转 hex，LinearRgb/Oklab/Oklch/Hsl 输出 CSS color() / oklab() / oklch() / hsl() 函数语法。",
+          "learning_goals": [
+            "理解不同色彩空间如何映射到 SVG/CSS 可表示的形式",
+            "掌握 round::<N> 的精度控制与 alpha 通道的「 / 」语法",
+            "区分 sRGB 系（to_hex）与函数式语法（color()/oklab()/oklch()/hsl()）的输出路径"
+          ],
+          "source_files": [
+            "src/paint.rs"
+          ],
+          "minimal_modules": [
+            "SvgDisplay for Color",
+            "round"
+          ],
+          "practice_task": "给定一个 Oklch 颜色，手工推演 SvgDisplay 输出的字符串格式（含 l%、chroma、hue、alpha）；再说明为什么 RGB/CMYK/HSV 走 to_hex 而 LinearRgb/Oklab 走函数语法。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "填充/描边入口与去重引用模型",
+          "order": 2,
+          "filename": "u5-l2-fill-stroke-dedup.md",
+          "level": "intermediate",
+          "topic": "write_fill/write_stroke 如何按 Paint（Solid/Gradient/Tiling）分发，push_gradient/push_tiling 的「源 + ref」两层去重模型，以及 gradientTransform/patternTransform 复用。",
+          "learning_goals": [
+            "理解 write_fill 对 Paint 三种变体的分发与 fill-rule 输出",
+            "掌握 push_gradient 的两层去重：源渐变（无变换）+ GradientRef（带变换、用 href 引用源）",
+            "理解这种「源 + ref」设计如何大幅节省文件体积"
+          ],
+          "source_files": [
+            "src/paint.rs",
+            "src/shape.rs"
+          ],
+          "minimal_modules": [
+            "write_fill",
+            "write_stroke",
+            "push_gradient",
+            "push_tiling",
+            "GradientRef",
+            "TilingRef",
+            "write_gradient_refs",
+            "write_tiling_refs"
+          ],
+          "practice_task": "解释 push_gradient 在 ts.is_identity() 时直接返回源 ID、否则插入 GradientRef 的逻辑；说明 write_gradient_refs 如何用 href 与 xlink:href 引用源渐变并附加 gradientTransform。",
+          "depends_on": [
+            "u5-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "线性与径向渐变实现",
+          "order": 3,
+          "filename": "u5-l3-linear-radial-gradients.md",
+          "level": "intermediate",
+          "topic": "write_gradients 中 linearGradient（角度→端点、象限、aspect-ratio 修正）与 radialGradient（圆心/半径/焦点）的生成，以及 anti-alias 中间停靠点 workaround。",
+          "learning_goals": [
+            "理解线性渐变角度如何经 correct_aspect_ratio 与象限计算 x1/y1/x2/y2",
+            "掌握径向渐变的 cx/cy/r/fx/fy/fr 参数映射",
+            "理解 generate_intermediate_stops_for_rgb_interpolation 作为「兼容读取器」workaround 的作用"
+          ],
+          "source_files": [
+            "src/paint.rs"
+          ],
+          "minimal_modules": [
+            "write_gradients（Linear/Radial 分支）",
+            "write_gradient_refs"
+          ],
+          "practice_task": "跟踪一个 45° 线性渐变：从 angle.quadrant() 与 sin/cos factor 推导出最终 x1,y1,x2,y2；解释 spreadMethod=\"pad\" 与 gradientUnits=\"userSpaceOnUse\" 的作用。",
+          "depends_on": [
+            "u5-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "圆锥渐变 Conic",
+          "order": 4,
+          "filename": "u5-l4-conic-gradient.md",
+          "level": "advanced",
+          "topic": "SVG 原生不支持 conic 渐变，typst-svg 用 NUM_CONIC_SEGMENTS=360 段扇形 <pattern> + 每段独立 linearGradient（SVGSubGradient）近似实现。",
+          "learning_goals": [
+            "理解为何用 pattern + 360 段扇形近似 conic 渐变",
+            "掌握每段扇形 path 的构建（move/line/arc/close）与中心、角度采样",
+            "理解 write_subgradients 如何为每个扇形生成双停靠 linearGradient"
+          ],
+          "source_files": [
+            "src/paint.rs"
+          ],
+          "minimal_modules": [
+            "write_gradients（Conic 分支）",
+            "write_subgradients",
+            "SVGSubGradient",
+            "correct_tiling_pos",
+            "NUM_CONIC_SEGMENTS"
+          ],
+          "practice_task": "解释 inverse_ratio（aspect_ratio.recip()）在 conic 角度修正中的作用；说明每个扇形为什么要单独引用一个 subgradient ID，而不是直接填单一颜色。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "平铺 Tiling",
+          "order": 5,
+          "filename": "u5-l5-tiling.md",
+          "level": "advanced",
+          "topic": "push_tiling 把 tiling frame 渲染成 <pattern>，为何要渲染两次，write_tilings/write_tiling_refs 的 pattern href 复用与 patternTransform 拼接。",
+          "learning_goals": [
+            "理解 Tiling（重复填充图案）如何映射到 SVG <pattern>",
+            "掌握 push_tiling 用「渲染结果字符串」作为去重键的原因（Tiling 含不稳定的 Location）",
+            "理解 patternTransform 的 ts.pre_concat(tiling.transform()) 拼接含义"
+          ],
+          "source_files": [
+            "src/paint.rs"
+          ],
+          "minimal_modules": [
+            "push_tiling",
+            "render_tiling_frame",
+            "write_tilings",
+            "write_tiling_refs",
+            "TilingRef",
+            "correct_tiling_pos"
+          ],
+          "practice_task": "解释 push_tiling 中「渲染两次」注释的原因（xmlwriter 限制：先分配资源、再实际渲染）；并说明 write_tiling_refs 里 href 引用为何会覆盖被引用 pattern 的 patternTransform、代码又是如何用 pre_concat 规避的。",
+          "depends_on": [
+            "u5-l2",
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "图像、去重机制与集成",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "图像渲染与 WebImage",
+          "order": 1,
+          "filename": "u6-l1-images-and-webimage.md",
+          "level": "intermediate",
+          "topic": "render_image 输出 <image> 与 base64 data URL，WebImage/WebImageFormat 的格式归一化（含 Pixel→PNG 重编码），convert_image_scaling 映射 CSS image-rendering。",
+          "learning_goals": [
+            "理解图像如何以 data:{mime};base64, URL 内嵌进 SVG",
+            "掌握 WebImage::new 对 Raster(Exchange/Pixel)/Svg 各格式的归一化处理",
+            "理解 convert_image_scaling 的 Smart::Auto / Smooth / Pixelated 到 CSS 值的映射"
+          ],
+          "source_files": [
+            "src/image.rs"
+          ],
+          "minimal_modules": [
+            "render_image",
+            "WebImage",
+            "WebImageFormat",
+            "WebImage::new",
+            "to_base64_url",
+            "convert_image_scaling"
+          ],
+          "practice_task": "追踪一个 Pixel 格式光栅图如何经 PngEncoder（含 icc_profile）重编码为 PNG 并内联；解释 preserveAspectRatio=\"none\" 与 width/height（pt）如何控制图像在 SVG 中的缩放。",
+          "depends_on": [
+            "u2-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "嵌入 PDF 图转 SVG（hayro）",
+          "order": 2,
+          "filename": "u6-l2-pdf-to-svg-hayro.md",
+          "level": "advanced",
+          "topic": "pdf_to_svg 用 hayro/hayro_svg 把嵌入的 PdfImage 转成 SVG，14 种 PDF 标准字体由 typst-assets 提供，并与 typst-png 保持同步。",
+          "learning_goals": [
+            "理解为什么矢量 SVG 里嵌入的 PDF 图要先经 hayro 转换",
+            "掌握 InterpreterSettings 的 font_resolver / cmap_resolver / warning_sink / render_annotations 配置",
+            "理解「Keep this in sync with typst-png / typst-render」这一跨 crate 维护约定的含义"
+          ],
+          "source_files": [
+            "src/image.rs"
+          ],
+          "minimal_modules": [
+            "pdf_to_svg",
+            "WebImage::new（Pdf 分支）"
+          ],
+          "practice_task": "阅读 pdf_to_svg 的 select_standard_font 闭包，列出 PDF 标准字体（Helvetica/Courier/Times 等）到 typst_assets::pdf 常量的映射；说明 hayro_svg::convert 的 SvgRenderSettings 背景透明参数（[0,0,0,0]）含义。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "去重机制 Deduplicator 与 ID 编码",
+          "order": 3,
+          "filename": "u6-l3-deduplicator.md",
+          "level": "advanced",
+          "topic": "Deduplicator<T> 用 hash128 + IndexMap 去重，DedupId 的「kind 字符 + 大写十六进制哈希」编码，以及它在体积优化中的核心作用。",
+          "learning_goals": [
+            "理解 insert_with / insert_with_val 的「按 key 哈希、惰性构造值」语义",
+            "掌握 DedupId 把 u128 哈希编为大写十六进制并 trim 前导零的格式",
+            "理解 7 个 Deduplicator 用不同 kind 字符（g/c/f/r/s/t/p）区分 ID 命名空间"
+          ],
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Deduplicator",
+            "DedupId",
+            "insert_with",
+            "insert_with_val",
+            "SvgDisplay for DedupId"
+          ],
+          "practice_task": "解释为什么用 typst_utils::hash128(&key) 而非直接把 key 存进 map；手工推演一个 u128 哈希值经 to_be_bytes + to_hex_digit、再 trim_start_matches('0') 后得到的最终 ID 字符串。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "链接、锚点与 HTML/Bundle 集成",
+          "order": 4,
+          "filename": "u6-l4-links-html-bundle.md",
+          "level": "advanced",
+          "topic": "finalize 把所有 <defs> 写出，render_link 的 Destination 三态与 link_resolver，render_anchor 锚点，以及 svg_in_html/svg_in_bundle/svg_merged 三种集成模式的差异。",
+          "learning_goals": [
+            "理解 finalize 写入 8 类定义（glyph/clip/gradients/refs/subgradients/tilings/refs）的顺序",
+            "掌握 Destination::Location 如何经 LateLinkResolver 解析为跨文档链接 URI",
+            "对比三种集成入口（HTML 内嵌 / bundle 多文档 / 合并多页）在坐标系、bleed、锚点上的处理差异"
+          ],
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "finalize",
+            "render_link",
+            "render_anchor",
+            "svg_in_html",
+            "svg_in_bundle",
+            "svg_merged",
+            "page_bleed",
+            "svg_header_with_custom_attrs"
+          ],
+          "practice_task": "对比 svg / svg_in_html / svg_merged 三者：它们如何设置 viewBox/width/height、如何处理 bleed、如何串接 anchors；解释 svg_in_html 为什么用 em 单位（frame 尺寸 / text_size）而非 pt。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
