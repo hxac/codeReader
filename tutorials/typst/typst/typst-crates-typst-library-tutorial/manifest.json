@@ -1,0 +1,1202 @@
+{
+  "project": "typst-crates-typst-library",
+  "head": "32fd4cc3861e0ab99f4c42ca6bea281482ba9f51",
+  "rationale": "typst-library 既是 Typst 的标准库 crate，又承载了编译器的核心类型定义（Value/Content/Element 等），是一个覆盖 13 个 Category、200+ 源码文件的大型 crate。大纲按「先全局后局部、先类型后机制」组织：第 1 单元建立 crate 在编译器生态（typst-eval/typst-realize/typst-layout 等分 crate）中的定位与标准库装配全景；第 2–4 单元从值与类型系统出发，经 Content/元素系统进入样式系统，这是一切元素行为的根基；第 5 单元串起 World/Engine/诊断/Routines 四个编译环境支柱；第 6–8 单元按布局、文本、文档模型的顺序讲解各功能子系统的元素实现；第 9 单元的内省与收敛循环是 Typst 区别于普通排版引擎的核心机制；第 10 单元的数学公式（含中间表示 IR）属进阶；第 11 单元覆盖数据加载、系统/插件与可视化等独立工具集；第 12 单元收束于特性开关、性能并发与扩展实践。讲义之间以源码依赖关系串接（依赖只指向更早的讲义，保证可线性学习），每篇聚焦单一主题并配有可操作的代码实践任务。本次为增量更新（HEAD 146a5832 → 32fd4cc3）：diff 仅含两处提交——其一为 src/visualize/image/mod.rs 新增裁剪(clipping)文档示例（纯文档，未改 ImageElem 的字段或格式分发机制）；其二为「修复以数字开头的 host 断行」，其断行引擎与 URL/host 断点判定位于 typst-layout 而非本 crate（本 crate 内 struct Costs 仅作惩罚配置、linebreak.rs 仅为 #linebreak 元素，均未涉及该逻辑）。两者均不影响本 crate 已生成讲义所述机制，故 u1–u10-l2 已生成讲义标记为 keep；尚未生成的 u10-l3 及 u11/u12 全部讲义仍为 new。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "全景与入门",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "typst-library 项目定位与编译器生态",
+          "order": 1,
+          "filename": "u1-l1-project-and-ecosystem.md",
+          "level": "beginner",
+          "topic": "介绍 typst-library 是什么：它既是 Typst 的标准库，也集中了编译器的核心类型定义，并通过 typst 主 crate 完整 reexport；梳理它与 typst-eval/typst-realize/typst-layout 等行为 crate 的分工边界。",
+          "learning_goals": [
+            "理解 crate 的职责：标准库 + 核心类型定义",
+            "识别它在编译流水线中的位置，区分「类型」与「行为」的拆分",
+            "建立 World / Library / Engine 三者关系的初步印象"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "Cargo.toml"
+          ],
+          "minimal_modules": [
+            "lib.rs 顶部文档注释",
+            "依赖清单"
+          ],
+          "practice_task": "阅读 src/lib.rs 顶部模块文档，用自己的话解释「为何大部分编译行为被拆到别的 crate」；在本地运行 cargo doc -p typst-library --no-deps 并浏览根模块，列出顶层 pub mod。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与模块导览",
+          "order": 2,
+          "filename": "u1-l2-directory-structure.md",
+          "level": "beginner",
+          "topic": "按 foundations/introspection/layout/text/model/math/visualize/loading/pdf 等目录梳理 src 结构，并把它们对应到 lib.rs 中 13 个 Category 枚举与 global() 的各处 define 调用。",
+          "learning_goals": [
+            "掌握 src 目录与 13 个 Category 的对应关系",
+            "看懂 global() 如何把子模块的 define 串联",
+            "区分全局模块（global）与数学子模块（math）的注册方式"
+          ],
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "模块声明",
+            "Category 枚举",
+            "global 函数"
+          ],
+          "practice_task": "对照 src/lib.rs 的 pub mod 列表与 src 目录，绘制一张模块树，并在每个目录旁标注它由 global() 中哪一行 define 注册。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "标准库的装配：Library、Builder、global 与 prelude",
+          "order": 3,
+          "filename": "u1-l3-library-assembly.md",
+          "level": "beginner",
+          "topic": "讲解 Library 结构（routines/global/math/styles/rules/std/features）、LibraryBuilder、Category、Features(Feature) 开关，以及 global() 的装配顺序与 prelude() 如何注入全局颜色/方向/对齐常量。",
+          "learning_goals": [
+            "理解 Library 的字段构成与 build() 流程",
+            "掌握 Feature(Html/Bundle/A11yExtras) 开关的作用",
+            "理解 prelude 如何把常用值提升为全局可见"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/foundations/mod.rs"
+          ],
+          "minimal_modules": [
+            "Library / LibraryBuilder",
+            "global 装配",
+            "prelude 常量",
+            "Features / Category"
+          ],
+          "practice_task": "追踪 global() 的执行顺序，写出「标准库装配顺序」清单；说明若启用 Feature::Html，global 会额外注册什么（结合 routines.html_module）。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "值与类型基础",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Value 枚举与标量类型",
+          "order": 1,
+          "filename": "u2-l1-value-and-scalars.md",
+          "level": "beginner",
+          "topic": "解析 Value 枚举的全部变体，以及 bool/int/float/str/none/auto 等基础标量类型的定义、默认值与相互关系。",
+          "learning_goals": [
+            "掌握 Value 枚举每个变体对应的 Rust 类型",
+            "理解 None/Auto 的语义差异与 #[default]",
+            "了解 Value 如何参与运算（结合 ops.rs 线索）"
+          ],
+          "source_files": [
+            "src/foundations/value.rs",
+            "src/foundations/int.rs",
+            "src/foundations/str.rs",
+            "src/foundations/float.rs"
+          ],
+          "minimal_modules": [
+            "Value 枚举",
+            "标量类型定义"
+          ],
+          "practice_task": "阅读 Value 枚举，绘制变体到 Rust 类型的映射表；找出 Value 上支撑 +、== 等运算的方法（搜索 ops.rs 的引用）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "容器类型 Array、Dict、Bytes 与 Label",
+          "order": 2,
+          "filename": "u2-l2-containers-array-dict-bytes.md",
+          "level": "beginner",
+          "topic": "讲解数组、字典、字节串与标签容器的内部表示（ecow/indexmap）、迭代、哈希与构造能力。",
+          "learning_goals": [
+            "理解 Array/Dict 为何使用 EcoVec/IndexMap",
+            "掌握 Bytes 作为引用计数字节视图的设计",
+            "了解 Label 的生成与比较"
+          ],
+          "source_files": [
+            "src/foundations/array.rs",
+            "src/foundations/dict.rs",
+            "src/foundations/bytes.rs",
+            "src/foundations/label.rs"
+          ],
+          "minimal_modules": [
+            "Array",
+            "Dict",
+            "Bytes",
+            "Label"
+          ],
+          "practice_task": "阅读 Array::range_data 与 Dict 的实现，说明它们的哈希/克隆成本；写一段伪代码演示从 Dict 取值并做类型转换。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "类型转换系统：cast、Type、Module 与 Scope",
+          "order": 3,
+          "filename": "u2-l3-cast-type-module-scope.md",
+          "level": "intermediate",
+          "topic": "讲解 cast! 宏与 Reflect/IntoValue/FromValue/CastInfo 的三段式转换模型，以及 Type、Module、Scope/Binding/Scopes 如何把类型和定义组织成可查找的命名空间。",
+          "learning_goals": [
+            "掌握 Reflect/IntoValue/FromValue 的分工",
+            "看懂 cast! 宏的多分支声明",
+            "理解 Scope/Binding/Scopes 的变量查找与回退"
+          ],
+          "source_files": [
+            "src/foundations/cast.rs",
+            "src/foundations/ty.rs",
+            "src/foundations/module.rs",
+            "src/foundations/scope.rs"
+          ],
+          "minimal_modules": [
+            "cast 宏与 Reflect",
+            "Type / Module",
+            "Scope / Binding / Scopes"
+          ],
+          "practice_task": "选一个 cast! 实例（如 visualize/color.rs 中 Color 的 cast），标注它的输入分支与输出；阅读 Scopes::get 说明变量查找如何回退到标准库 base 与 std。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "Content 与元素系统",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Content 与 RawContent：文档内容的内核",
+          "order": 1,
+          "filename": "u3-l1-content-rawcontent.md",
+          "level": "intermediate",
+          "topic": "讲解 Content 类型为何是 Typst 的核心、RawContent 的透明表示、span/label/meta、序列化以及 content 的算术拼接。",
+          "learning_goals": [
+            "理解 Content 是所有标记与函数调用的产物",
+            "掌握 span/label/meta 的附加方式",
+            "了解 content 如何被 + 拼接、成为 show 规则入口"
+          ],
+          "source_files": [
+            "src/foundations/content/mod.rs",
+            "src/foundations/content/raw.rs"
+          ],
+          "minimal_modules": [
+            "Content",
+            "RawContent",
+            "字段与元信息"
+          ],
+          "practice_task": "阅读 Content 的方法（empty/labelled/spanned/field 等），说明 SequenceElem 在拼接中的角色，并解释 content 如何携带 label 供 query 使用。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Element、NativeElement 与能力 vtable",
+          "order": 2,
+          "filename": "u3-l2-element-nativeelement-vtable.md",
+          "level": "intermediate",
+          "topic": "讲解 Element 句柄、ContentVtable、能力（capability）查询，以及 locatable/unqueriable/tagged 等内省能力字段如何决定元素行为。",
+          "learning_goals": [
+            "理解 Element 作为类型擦除句柄的设计",
+            "掌握 can<C> 能力查询机制",
+            "了解元素的 construct/set/scope 接口"
+          ],
+          "source_files": [
+            "src/foundations/content/element.rs",
+            "src/foundations/content/vtable.rs"
+          ],
+          "minimal_modules": [
+            "Element",
+            "ContentVtable",
+            "NativeElement",
+            "能力字段"
+          ],
+          "practice_task": "阅读 Element::can<C> 与 vtable，列出 TextElem/HeadingElem 等元素可能具备的能力；说明 Element::construct 与 set 如何被调用。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "elem 宏、字段系统与 Packed",
+          "order": 3,
+          "filename": "u3-l3-elem-macro-fields-packed.md",
+          "level": "intermediate",
+          "topic": "通过真实元素（如 heading）讲解 #[elem] 宏、required/default/ghost/fold/parse 字段标注、SettableProperty，以及类型擦除的 Packed 包装。",
+          "learning_goals": [
+            "看懂 #[elem] 宏生成的字段与方法",
+            "掌握 required/default/ghost/fold/parse 的语义",
+            "理解 Packed 如何在擦除类型后取回字段"
+          ],
+          "source_files": [
+            "src/foundations/content/field.rs",
+            "src/foundations/content/packed.rs",
+            "src/foundations/fields.rs",
+            "src/model/heading.rs"
+          ],
+          "minimal_modules": [
+            "elem 宏",
+            "字段标注",
+            "Packed",
+            "SettableProperty"
+          ],
+          "practice_task": "对照 heading.rs 的字段标注，逐字段解释 required/default/ghost/fold/parse 的作用；说明 Packed<TextElem> 与 Content 之间的转换。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "func 宏、NativeFunc 与 Args",
+          "order": 4,
+          "filename": "u3-l4-func-nativefunc-args.md",
+          "level": "intermediate",
+          "topic": "讲解 #[func] 宏如何把 Rust 函数变成标准库函数、NativeFunc/NativeFuncData、以及位置/命名/可变参数在 Args 中的解析。",
+          "learning_goals": [
+            "理解 #[func] 与 #[scope] 的协作",
+            "掌握 Args 的 named/positional/variadic 消费",
+            "了解 func 与 elem 两类函数的区别"
+          ],
+          "source_files": [
+            "src/foundations/func.rs",
+            "src/foundations/args.rs",
+            "src/foundations/mod.rs"
+          ],
+          "minimal_modules": [
+            "func 宏",
+            "NativeFunc",
+            "Args",
+            "scope 宏"
+          ],
+          "practice_task": "以 foundations/mod.rs 的 panic/assert/eval 为例，说明 #[func] 与 #[scope] 如何协作；阅读 Args 解释 named/positional/variadic 的取用顺序。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "样式系统",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Styles、StyleChain 与 fold/resolve",
+          "order": 1,
+          "filename": "u4-l1-styles-stylechain-fold-resolve.md",
+          "level": "intermediate",
+          "topic": "讲解样式列表、StyleChain 的链式查询、Smart 默认值、Fold/Resolve trait 与幽灵(ghost)字段的折叠语义。",
+          "learning_goals": [
+            "理解 StyleChain 如何沿样式栈查询值",
+            "掌握 Fold 与 Resolve 的区别",
+            "了解 Smart::Auto 默认值机制"
+          ],
+          "source_files": [
+            "src/foundations/styles.rs"
+          ],
+          "minimal_modules": [
+            "Styles",
+            "StyleChain",
+            "Fold / Resolve",
+            "Property"
+          ],
+          "practice_task": "结合 text/mod.rs 的 TextSize::fold，解释字体大小为何以「线性函数相乘」方式折叠；举一个 Resolve 依赖 StyleChain 的例子（如 TextSize::resolve）。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "属性、set 规则、Selector 与 Recipe",
+          "order": 2,
+          "filename": "u4-l2-property-set-selector-recipe.md",
+          "level": "intermediate",
+          "topic": "讲解 Property/SettableProperty、set 规则如何生成样式、Selector（元素 + where 过滤）、Recipe/NativeRuleMap 与 show 规则的衔接。",
+          "learning_goals": [
+            "理解 set 规则到 Styles 的转换",
+            "掌握 Selector 的 where 过滤机制",
+            "了解 NativeRuleMap 的来源与 show 规则衔接"
+          ],
+          "source_files": [
+            "src/foundations/content/mod.rs",
+            "src/foundations/selector.rs",
+            "src/foundations/styles.rs"
+          ],
+          "minimal_modules": [
+            "Property",
+            "Selector",
+            "Recipe",
+            "NativeRuleMap"
+          ],
+          "practice_task": "阅读 Selector 枚举与 select_where，写出 heading.where(level: 1) 的等价伪代码；说明 Library.rules 的来源（routines.rules）。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "编译环境与核心机制",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "World trait 与资源加载",
+          "order": 1,
+          "filename": "u5-l1-world-trait.md",
+          "level": "intermediate",
+          "topic": "讲解 World trait（library/book/main/source/file/font/today）、缓存职责的分工、world_impl 宏与 WorldExt 辅助方法。",
+          "learning_goals": [
+            "理解 World 作为编译环境的抽象",
+            "掌握缓存为何交给 World 实现者",
+            "了解 source/file/font 都是引用计数且廉价克隆"
+          ],
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "World trait",
+            "world_impl 宏",
+            "WorldExt"
+          ],
+          "practice_task": "阅读 World trait 注释，列出实现一个最小 World 需要提供的方法；说明为何字体可跨编译缓存而源文件需要每次清理。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Engine、Route、Sink 与 Traced",
+          "order": 2,
+          "filename": "u5-l2-engine-route-sink.md",
+          "level": "intermediate",
+          "topic": "讲解 Engine 编译上下文、route 防止循环导入与过深嵌套、sink 收集警告与延迟错误、traced 跟踪被检视的 span，以及 parallelize 并行执行。",
+          "learning_goals": [
+            "理解 Engine 聚合的各项编译数据",
+            "掌握延迟错误(delay)的设计动机",
+            "了解 Route 在递归求值中的作用"
+          ],
+          "source_files": [
+            "src/engine.rs"
+          ],
+          "minimal_modules": [
+            "Engine",
+            "Route",
+            "Sink",
+            "Traced",
+            "parallelize"
+          ],
+          "practice_task": "阅读 Engine::delay 与 parallelize，解释「延迟错误」为何要到内省循环结束才提升为致命错误；说明 parallelize 如何为每个任务创建子 Sink。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "诊断系统：bail/error/warning 与结果类型",
+          "order": 3,
+          "filename": "u5-l3-diagnostics.md",
+          "level": "intermediate",
+          "topic": "讲解 SourceResult/StrResult/HintedStrResult、bail!/error!/warning! 宏、Hint、At trait 与错误 span 的归属。",
+          "learning_goals": [
+            "区分三种 Result 类型的使用场景",
+            "掌握 bail! 带 span 与不带 span 的差异",
+            "了解 Hint 与 .at(span) 的用法"
+          ],
+          "source_files": [
+            "src/diag.rs"
+          ],
+          "minimal_modules": [
+            "bail! / error! / warning!",
+            "SourceResult / StrResult",
+            "Hint",
+            "At trait"
+          ],
+          "practice_task": "阅读 bail! 宏的两个分支，说明带 span 与不带 span 的返回类型差异；在某个 func 中找到 .at(span) 的用法并解释其作用。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l4",
+          "title": "Routines 与 crate 分离机制",
+          "order": 4,
+          "filename": "u5-l4-routines-crate-splitting.md",
+          "level": "intermediate",
+          "topic": "讲解 Routines 函数指针表、为何用它实现 crate splitting（eval/realize/layout 等行为在别的 crate）、以及 SpanMode/RealizationKind 等附属类型。",
+          "learning_goals": [
+            "理解 Routines 作为动态链接的设计",
+            "掌握 typst-library 不依赖行为 crate 的原因",
+            "了解 routines! 宏如何生成结构"
+          ],
+          "source_files": [
+            "src/routines.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Routines",
+            "routines! 宏",
+            "SpanMode / RealizationKind"
+          ],
+          "practice_task": "阅读 routines! 宏生成的 Routines 结构，列出它暴露的所有例程；说明 (engine.library.routines.eval_string)(...) 这种调用如何打破循环依赖。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "布局系统",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "度量与几何类型",
+          "order": 1,
+          "filename": "u6-l1-measurements-and-geometry.md",
+          "level": "intermediate",
+          "topic": "讲解 Length/Angle/Ratio/Rel/Fr/Abs/Em、Sides/Corners/Axes/Size/Point、Align/Dir 等布局度量与几何原语。",
+          "learning_goals": [
+            "掌握相对长度 Rel<Length> 的表示",
+            "理解 Em 与 Abs 的换算为何依赖样式",
+            "了解 Alignment 与 Dir 的轴语义"
+          ],
+          "source_files": [
+            "src/layout/length.rs",
+            "src/layout/rel.rs",
+            "src/layout/abs.rs",
+            "src/layout/em.rs",
+            "src/layout/align.rs"
+          ],
+          "minimal_modules": [
+            "Length / Rel / Abs / Em",
+            "Angle / Ratio / Fr",
+            "Align / Dir"
+          ],
+          "practice_task": "阅读 Rel<Length>，解释 20% + 5cm 如何被表示与解析；说明 Em::resolve 为何需要 StyleChain（字体大小）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "Region、Regions、Frame 与 Fragment",
+          "order": 2,
+          "filename": "u6-l2-region-regions-frame-fragment.md",
+          "level": "intermediate",
+          "topic": "讲解布局的输入（Region/Regions：尺寸、expand、backlog、last）与输出（Frame 帧树、Fragment 多帧片段）。",
+          "learning_goals": [
+            "理解 Regions 的 backlog/last 分页模型",
+            "掌握 Frame 帧树的组成",
+            "了解 expand 控制的「填充 vs 收缩」语义"
+          ],
+          "source_files": [
+            "src/layout/regions.rs",
+            "src/layout/frame.rs",
+            "src/layout/fragment.rs"
+          ],
+          "minimal_modules": [
+            "Region / Regions",
+            "Frame / FrameItem",
+            "Fragment"
+          ],
+          "practice_task": "阅读 Regions 的 backlog/last，解释分页时后续区域高度队列如何工作；阅读 Frame 列出帧树由哪些 FrameItem 组成。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "流式布局：stack、grid、columns",
+          "order": 3,
+          "filename": "u6-l3-stack-grid-columns.md",
+          "level": "intermediate",
+          "topic": "讲解 StackElem/GridElem/ColumnsElem 的布局流程，以及 grid 子模块如何解析轨道与单元格。",
+          "learning_goals": [
+            "掌握 stack 的轴向堆叠与间距",
+            "理解 grid 轨道(track)解析",
+            "了解 columns 的区域切分"
+          ],
+          "source_files": [
+            "src/layout/stack.rs",
+            "src/layout/grid/mod.rs",
+            "src/layout/columns.rs"
+          ],
+          "minimal_modules": [
+            "StackElem",
+            "GridElem / grid::resolve",
+            "ColumnsElem"
+          ],
+          "practice_task": "阅读 grid/mod.rs 与 grid/resolve.rs，追踪一个 2x2 网格如何被解析成轨道与单元格；说明 columns 如何在区域内切分出多列。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l4",
+          "title": "页面、定位与变换",
+          "order": 4,
+          "filename": "u6-l4-page-place-transform.md",
+          "level": "intermediate",
+          "topic": "讲解 PageElem（分页、页眉页脚、边距）、PlaceElem（绝对/相对定位）、Move/Scale/Rotate/Skew/Hide 变换与 Pad。",
+          "learning_goals": [
+            "掌握 PageElem 的页面配置字段",
+            "理解 Place 的对齐与偏移定位",
+            "了解变换元素如何作用于内容"
+          ],
+          "source_files": [
+            "src/layout/page.rs",
+            "src/layout/place.rs",
+            "src/layout/transform.rs",
+            "src/layout/pad.rs"
+          ],
+          "minimal_modules": [
+            "PageElem",
+            "PlaceElem",
+            "Move/Scale/Rotate/Skew/Hide",
+            "PadElem"
+          ],
+          "practice_task": "阅读 PageElem 字段，说明 margin/header/footer 如何配置；解释 Place 的 alignment + dx/dy 与 measure 函数的关系。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "文本系统",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "TextElem 与字体变体",
+          "order": 1,
+          "filename": "u7-l1-textelem-and-font-variant.md",
+          "level": "intermediate",
+          "topic": "讲解 TextElem 的海量字段（font/size/fill/lang/dir/features 等）、ghost 字段、特殊的构造逻辑，以及 FontList/FontFamily/Covers 与 variant() 的综合。",
+          "learning_goals": [
+            "理解 TextElem 为何不直接创建文本元素而是改样式",
+            "掌握字体回退列表与 Covers 覆盖集",
+            "了解 variant() 如何综合 style/weight/stretch/delta/emph"
+          ],
+          "source_files": [
+            "src/text/mod.rs",
+            "src/text/font/variant.rs"
+          ],
+          "minimal_modules": [
+            "TextElem 字段",
+            "FontList / FontFamily / Covers",
+            "FontVariant"
+          ],
+          "practice_task": "阅读 TextElem::construct，说明 #text(...) 为何返回 styled body 而非新建元素；解释 variant() 中 emph/delta 如何反向影响字体选择。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "字体管理：FontBook、FontInfo、metrics 与 variations",
+          "order": 2,
+          "filename": "u7-l2-font-book-info-metrics-variations.md",
+          "level": "intermediate",
+          "topic": "讲解 Font 数据结构、FontBook 字体发现、FontInfo 元数据、metrics 度量与 variations 变量字体轴。",
+          "learning_goals": [
+            "掌握字体匹配的 family→variant→fallback 流程",
+            "理解 FontInfo 提供的度量和命名",
+            "了解变量字体轴如何被设置"
+          ],
+          "source_files": [
+            "src/text/font/book.rs",
+            "src/text/font/info.rs",
+            "src/text/font/metrics.rs",
+            "src/text/font/variations.rs"
+          ],
+          "minimal_modules": [
+            "FontBook",
+            "FontInfo",
+            "metrics",
+            "variations"
+          ],
+          "practice_task": "阅读 FontBook::select_family/select，说明字体匹配顺序；解释 variations 如何把 weight/stretch/style/size 映射到 wght/wdth/slnt/ital/opsz 轴。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "OpenType 特性、语言、断行、引号、装饰与 raw",
+          "order": 3,
+          "filename": "u7-l3-opentype-lang-linebreak-quotes-deco-raw.md",
+          "level": "intermediate",
+          "topic": "讲解 features() 收集 OpenType 特性、Lang/Region/script、linebreak 断行（注：实际断行引擎与 URL/host 断点判定位于 typst-layout，本 crate 仅含 #linebreak 元素与 Costs 惩罚配置）、smartquote 智能引号、deco 装饰、case/shift/smallcaps 与 raw 原始文本。",
+          "learning_goals": [
+            "掌握 OpenType tag 的收集逻辑",
+            "理解语言/区域如何影响排版与无障碍",
+            "了解断行成本(Costs)与智能引号的机制"
+          ],
+          "source_files": [
+            "src/text/mod.rs",
+            "src/text/linebreak.rs",
+            "src/text/smartquote.rs",
+            "src/text/lang.rs",
+            "src/text/deco.rs",
+            "src/text/raw.rs"
+          ],
+          "minimal_modules": [
+            "features() OpenType 收集",
+            "Lang / Region / script",
+            "linebreak / Costs",
+            "smartquote / deco / raw"
+          ],
+          "practice_task": "阅读 features() 函数，逐一列出 kerning/ligatures/number-type 等如何映射到 OpenType tag；阅读 text/mod.rs 中 Costs 结构与 linebreak.rs 元素，说明 Costs 提供的断行惩罚项，并指出真正消费 Costs 的最优断行算法位于 typst-layout。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "文档模型",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "Document 与段落 ParElem",
+          "order": 1,
+          "filename": "u8-l1-document-and-paragraph.md",
+          "level": "intermediate",
+          "topic": "讲解 DocumentElem/DocumentInfo、ParElem 段落（justify/leading/first-line-indent/linebreaks）与 parbreak。",
+          "learning_goals": [
+            "掌握 DocumentElem 如何承载文档元信息",
+            "理解 ParElem 的对齐与换行配置",
+            "了解 linebreaks:\"optimized\" 与 justify 的关系"
+          ],
+          "source_files": [
+            "src/model/document.rs",
+            "src/model/par.rs"
+          ],
+          "minimal_modules": [
+            "DocumentElem / DocumentInfo",
+            "ParElem",
+            "ParbreakElem"
+          ],
+          "practice_task": "阅读 ParElem 字段，说明 justify 与 linebreaks:\"optimized\" 的关系；解释 leading/spacing 如何影响行间距。",
+          "depends_on": [
+            "u6-l2",
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "标题、列表、枚举与术语",
+          "order": 2,
+          "filename": "u8-l2-heading-list-enum-terms.md",
+          "level": "intermediate",
+          "topic": "讲解 HeadingElem、ListElem、EnumElem、TermsElem 的结构、编号能力与 outline/refable 的衔接。",
+          "learning_goals": [
+            "掌握 Heading 的层级与编号字段",
+            "理解 list/enum/terms 的 marker 机制",
+            "了解 LocalName 与 Outlinable/Refable 能力"
+          ],
+          "source_files": [
+            "src/model/heading.rs",
+            "src/model/list.rs",
+            "src/model/enum.rs",
+            "src/model/terms.rs"
+          ],
+          "minimal_modules": [
+            "HeadingElem",
+            "ListElem",
+            "EnumElem",
+            "TermsElem"
+          ],
+          "practice_task": "阅读 HeadingElem，追踪 numbering 字段如何与 Counter/outline 联动；对比 list/enum/terms 三者的 marker 配置。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "编号、引用、图表与目录",
+          "order": 3,
+          "filename": "u8-l3-numbering-reference-figure-outline.md",
+          "level": "intermediate",
+          "topic": "讲解 numbering 函数与 NumberingPattern、RefElem 引用、FigureElem 图表、OutlineElem 目录（引用计数器的概念将在内省单元深入）。",
+          "learning_goals": [
+            "掌握 NumberingPattern 的解析",
+            "理解 RefElem 对被引用元素 Refable 能力的依赖",
+            "了解 Figure/Outline 如何组织可编号对象"
+          ],
+          "source_files": [
+            "src/model/numbering.rs",
+            "src/model/reference.rs",
+            "src/model/figure.rs",
+            "src/model/outline.rs"
+          ],
+          "minimal_modules": [
+            "numbering / NumberingPattern",
+            "RefElem",
+            "FigureElem",
+            "OutlineElem"
+          ],
+          "practice_task": "阅读 NumberingPattern，说明 1.a) 如何被解析；阅读 RefElem 说明引用如何依赖被引用元素的 Refable 能力与 supplement。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "内省与上下文",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "Location、Locator、Tag 与 query/locate/here、Context",
+          "order": 1,
+          "filename": "u9-l1-location-locator-tag-query-context.md",
+          "level": "intermediate",
+          "topic": "讲解文档位置的底层表示 Location/Tag、Locator/SplitLocator 分配器、query/locate/here 函数，以及 Context 如何作为内省的门控。",
+          "learning_goals": [
+            "理解 Location/Tag 的底层表示",
+            "掌握 Locator/SplitLocator 的位置分配",
+            "了解 Context 对内省的门控与错误提示"
+          ],
+          "source_files": [
+            "src/introspection/location.rs",
+            "src/introspection/locator.rs",
+            "src/introspection/tag.rs",
+            "src/introspection/query.rs",
+            "src/introspection/locate.rs",
+            "src/introspection/here.rs",
+            "src/foundations/context.rs"
+          ],
+          "minimal_modules": [
+            "Location / Tag",
+            "Locator / SplitLocator",
+            "query / locate / here",
+            "Context"
+          ],
+          "practice_task": "阅读 Context::location/introspect，解释「没有 context 就无法 introspect」的错误如何产生；说明 query 返回的元素如何携带 location。",
+          "depends_on": [
+            "u3-l2",
+            "u8-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "Counter、State 与 Metadata",
+          "order": 2,
+          "filename": "u9-l2-counter-state-metadata.md",
+          "level": "intermediate",
+          "topic": "讲解 Counter（get/display/step/at/where）、State 状态机与 MetadataElem 元数据投放。",
+          "learning_goals": [
+            "掌握 Counter 为何返回多级数组",
+            "理解 State 的 update/display 模型",
+            "了解 Metadata 如何被 query 检索"
+          ],
+          "source_files": [
+            "src/introspection/counter.rs",
+            "src/introspection/state.rs",
+            "src/introspection/metadata.rs"
+          ],
+          "minimal_modules": [
+            "Counter",
+            "State",
+            "MetadataElem"
+          ],
+          "practice_task": "阅读 Counter，说明它为何返回多级数组；追踪 counter(heading).display() 在文档中如何随位置变化（结合 introspector）。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l3",
+          "title": "Introspector 与收敛循环",
+          "order": 3,
+          "filename": "u9-l3-introspector-convergence.md",
+          "level": "advanced",
+          "topic": "讲解 Introspector trait 的查询接口、comemo 增量记忆化，以及 convergence.rs 的多次迭代收敛与「document did not converge」诊断。",
+          "learning_goals": [
+            "理解 Introspector 的统一查询接口",
+            "掌握 comemo 记忆化与验证的关系",
+            "了解收敛循环与 MAX_ITERS 的设计"
+          ],
+          "source_files": [
+            "src/introspection/introspector.rs",
+            "src/introspection/convergence.rs"
+          ],
+          "minimal_modules": [
+            "Introspector trait",
+            "comemo 验证",
+            "convergence 收敛分析"
+          ],
+          "practice_task": "阅读 convergence.rs 的 MAX_ITERS 与 analyze，解释 Typst 为何需要反复编译直到内省稳定；说明 comemo 验证通过与否和收敛诊断的关系。",
+          "depends_on": [
+            "u9-l2",
+            "u5-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "数学公式",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "EquationElem 与数学模式",
+          "order": 1,
+          "filename": "u10-l1-equation-math-mode.md",
+          "level": "intermediate",
+          "topic": "讲解 math 模块的装配、EquationElem、Mathy trait、数学字号/间距常量与数学字体回退。",
+          "learning_goals": [
+            "掌握 math::module() 的注册内容",
+            "理解 EquationElem 的 size/block/display 配置",
+            "了解数学模式独有的元素与函数"
+          ],
+          "source_files": [
+            "src/math/mod.rs",
+            "src/math/equation.rs"
+          ],
+          "minimal_modules": [
+            "math::module",
+            "EquationElem",
+            "Mathy trait",
+            "数学间距常量"
+          ],
+          "practice_task": "阅读 math::module()，列出数学模式独有的元素与函数；解释 EquationElem 的 size 如何通过 TextSize::resolve 影响数学字号。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l2",
+          "title": "数学元素：frac、matrix、attach、accent、lr、root",
+          "order": 2,
+          "filename": "u10-l2-math-elements.md",
+          "level": "advanced",
+          "topic": "讲解分数、矩阵/向量、上下标附加、重音、定界符伸缩、根式等元素的实现，以及 MathClass 对间距的影响。",
+          "learning_goals": [
+            "掌握各数学元素的构造与字段",
+            "理解 MathClass 如何决定符号间距与脚本附加",
+            "了解 lr 的定界符伸缩机制"
+          ],
+          "source_files": [
+            "src/math/frac.rs",
+            "src/math/matrix.rs",
+            "src/math/attach.rs",
+            "src/math/accent.rs",
+            "src/math/lr.rs",
+            "src/math/root.rs"
+          ],
+          "minimal_modules": [
+            "FracElem",
+            "MatElem/VecElem",
+            "AttachElem",
+            "AccentElem",
+            "LrElem",
+            "RootElem",
+            "ClassElem/MathClass"
+          ],
+          "practice_task": "阅读 ClassElem 与 MathClass，说明 relation/binary 等类如何决定符号间距；追踪 attach 如何把上下标挂到 base 上。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l3",
+          "title": "数学中间表示 IR",
+          "order": 3,
+          "filename": "u10-l3-math-intermediate-representation.md",
+          "level": "advanced",
+          "topic": "讲解 math/ir 子模块如何把 Content 转成可布局的数学中间表示（item/multiline/process/resolve）。",
+          "learning_goals": [
+            "理解数学 IR 的设计动机",
+            "掌握从 Content 到 MathItem 的处理流水线",
+            "了解 multiline 如何处理多行对齐(&/&&)"
+          ],
+          "source_files": [
+            "src/math/ir/mod.rs",
+            "src/math/ir/item.rs",
+            "src/math/ir/process.rs"
+          ],
+          "minimal_modules": [
+            "math IR 模块",
+            "MathItem",
+            "process/resolve"
+          ],
+          "practice_task": "阅读 ir/process.rs，描述从 Content 到 MathItem 的处理流水线；说明 ir/multiline 如何处理多行公式中的对齐点。",
+          "depends_on": [
+            "u10-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "数据加载、系统与可视化",
+      "level": "intermediate",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "数据加载：read/csv/json/toml/yaml/cbor/xml",
+          "order": 1,
+          "filename": "u11-l1-data-loading.md",
+          "level": "intermediate",
+          "topic": "讲解 loading 模块的 DataSource/Load/Loaded/Readable 抽象与各格式解析函数如何把数据转成 Typst Value。",
+          "learning_goals": [
+            "掌握 path 与 bytes 两种数据源的统一抽象",
+            "理解 Loaded 的来源标记",
+            "了解各格式函数如何返回 Value"
+          ],
+          "source_files": [
+            "src/loading/mod.rs",
+            "src/loading/json.rs",
+            "src/loading/yaml.rs",
+            "src/loading/csv.rs",
+            "src/loading/read.rs"
+          ],
+          "minimal_modules": [
+            "DataSource / Load / Loaded",
+            "read / json / yaml / csv"
+          ],
+          "practice_task": "阅读 Load trait 实现链，说明 path 与 bytes 两种数据源如何统一；追踪 json() 如何把解析结果转成 Typst Value。",
+          "depends_on": [
+            "u5-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "sys 模块、WASM plugin 与符号系统",
+          "order": 2,
+          "filename": "u11-l2-sys-plugin-symbols.md",
+          "level": "intermediate",
+          "topic": "讲解 sys（version/inputs）、plugin 加载 WebAssembly 模块并导出函数，以及 symbols/codex 如何注入 sym 符号表。",
+          "learning_goals": [
+            "掌握 sys 模块暴露的版本与 inputs",
+            "理解 WASM 插件的纯函数约束来源",
+            "了解 codex 符号如何变成 math.sym 命名空间"
+          ],
+          "source_files": [
+            "src/foundations/sys.rs",
+            "src/foundations/plugin.rs",
+            "src/symbols.rs",
+            "src/foundations/symbol.rs"
+          ],
+          "minimal_modules": [
+            "sys 模块",
+            "plugin (WASM)",
+            "symbols / codex",
+            "Symbol"
+          ],
+          "practice_task": "阅读 plugin.rs，说明 WASM 插件函数的「纯函数」约束从何而来；阅读 symbols.rs 解释 codex::SYM 如何被注入为 math.sym 命名空间。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "可视化：颜色、描边、形状、曲线与图像",
+          "order": 3,
+          "filename": "u11-l3-visualize-color-stroke-shape-image.md",
+          "level": "intermediate",
+          "topic": "讲解 visualize 模块的 Color/Gradient/Tiling/Paint/Stroke、shape(rect/circle/ellipse/square/polygon)、curve 与 image(raster/svg)；并说明 image 文档新增的 clipping 示例（通过 block(clip: true) 视觉裁剪图像）属于用法演示，不改变 ImageElem 的字段或解码机制。",
+          "learning_goals": [
+            "掌握 Color 的构造器与类型注册",
+            "理解 Stroke/Paint 的组合",
+            "了解 ImageElem 按格式分发解码"
+          ],
+          "source_files": [
+            "src/visualize/color.rs",
+            "src/visualize/stroke.rs",
+            "src/visualize/shape.rs",
+            "src/visualize/image/mod.rs"
+          ],
+          "minimal_modules": [
+            "Color / Gradient / Tiling",
+            "Stroke / Paint",
+            "shape 元素",
+            "ImageElem"
+          ],
+          "practice_task": "阅读 Color 的构造器（luma/oklch/rgb/cmyk），说明它如何被注册为类型；追踪 ImageElem 如何根据格式分发到 raster/svg 解码；并查看 image/mod.rs 中 = Clipping 段示例，说明它是借助 block(clip: true) 而非 ImageElem 字段实现裁剪。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "高级与扩展",
+      "level": "advanced",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "特性开关与 PDF/HTML 输出模块",
+          "order": 1,
+          "filename": "u12-l1-features-pdf-html-modules.md",
+          "level": "advanced",
+          "topic": "讲解 Features/Feature(Html/Bundle/A11yExtras) 开关、pdf 模块（AttachElem/ArtifactElem/无障碍函数）、以及 html_module routine 的按需装配。",
+          "learning_goals": [
+            "掌握 Feature 开关如何影响模块注册",
+            "理解 pdf 模块的用户可见定义",
+            "了解 html_module 为何通过 routine 装配"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/pdf/mod.rs",
+            "src/pdf/accessibility.rs",
+            "src/routines.rs"
+          ],
+          "minimal_modules": [
+            "Features / Feature",
+            "pdf 模块",
+            "html_module routine"
+          ],
+          "practice_task": "阅读 LibraryBuilder::withFeatures 与各 define 处的 feature 判断，画出「启用某 feature 会多注册哪些定义」的对照表。",
+          "depends_on": [
+            "u1-l3",
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l2",
+          "title": "性能与并发：comemo、rayon、LazyHash 与 singleton",
+          "order": 2,
+          "filename": "u12-l2-performance-concurrency.md",
+          "level": "advanced",
+          "topic": "讲解贯穿全 crate 的性能手段：comemo 记忆化与 tracked、rayon 并行、LazyHash 惰性哈希、singleton! 单例缓存、SmallVec/EcoVec。",
+          "learning_goals": [
+            "理解 comemo tracked 对增量编译的意义",
+            "掌握 LazyHash 为何被大量使用",
+            "了解 singleton! 的典型用途"
+          ],
+          "source_files": [
+            "src/engine.rs",
+            "src/foundations/styles.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "comemo / tracked",
+            "rayon parallelize",
+            "LazyHash",
+            "singleton!"
+          ],
+          "practice_task": "阅读 Engine::parallelize 与 LazyHash<Style>，解释为何大量类型派生 Hash；列出代码中 singleton! 的典型用途（如 AlignPointElem::shared、Content::empty）。",
+          "depends_on": [
+            "u5-l2",
+            "u9-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l3",
+          "title": "扩展 typst-library：新增元素与函数（综合实践）",
+          "order": 3,
+          "filename": "u12-l3-extending-the-library.md",
+          "level": "advanced",
+          "topic": "综合前面知识，演示如何在 fork 中新增一个 NativeElement（elem 宏）与一个 NativeFunc（func 宏），并注册到对应模块的 define。",
+          "learning_goals": [
+            "掌握新增元素的完整流程（字段标注/能力/注册）",
+            "掌握新增函数的完整流程（func/define_func）",
+            "理解元素如何参与 show/set 规则"
+          ],
+          "source_files": [
+            "src/foundations/mod.rs",
+            "src/model/heading.rs",
+            "src/foundations/cast.rs"
+          ],
+          "minimal_modules": [
+            "elem 宏",
+            "func 宏",
+            "define / define_elem / define_func",
+            "cast!"
+          ],
+          "practice_task": "以 heading.rs 为模板，设计一个最小自定义元素（含 required 字段与 show 能力），写出所需的 #[elem]、字段标注与 define_elem 注册行；再仿照 panic() 写一个自定义函数并用 define_func 注册。",
+          "depends_on": [
+            "u3-l3",
+            "u3-l4",
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
