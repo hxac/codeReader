@@ -1,7 +1,7 @@
 {
   "project": "typst-crates-typst-pdf",
-  "head": "146a58329a30f6cd38978c22c6bf0e430d8962a1",
-  "rationale": "typst-pdf 的本质是「适配器层」：它不直接写 PDF 字节，而是把 Typst 排版后的 PagedDocument / Frame 树翻译成对底层 krilla 库的调用，并额外构建逻辑结构树（tagged PDF / 无障碍）、书签、元数据、命名目的地址、链接与附件。因此学习路线的设计围绕这条主线展开。第一单元先建立全局认知：项目定位、公共 API 与 PdfOptions、PDF 标准与校验配置、目录结构与构建依赖，让读者明白「这个 crate 在 Typst 工程中的位置」以及「它把工作委托给谁」。第二单元进入转换主链路：convert() 编排、页面导出与页码标签、递归 Frame 遍历器（handle_frame/handle_group 与变换状态栈）、以及类型转换工具集。第三单元按内容类型拆解：文字与字体、图形与几何、纯色与色彩空间、渐变与平铺图案、图像（栅格/SVG/嵌入 PDF）。第四单元讲文档级特性：链接与目的地址、书签大纲、元数据与时间戳、文件附件。第五单元（专家层）集中攻克最复杂的两块——错误与校验映射，以及 tagged PDF 子系统：该子系统采用「先构建逻辑树（build 预处理）→ 遍历时发射标记内容并处理重叠标签（tree 状态机）→ 解析为 krilla TagTree 并做 PDF/UA 结构校验（resolve）」的三段式，因此细分为概览、逻辑树构建、分组数据模型、遍历与重叠标签拆分、解析与校验、以及表格/列表/图表等结构化上下文六讲。整体 24 讲，依赖关系严格沿「先链路后细节、先内容后结构、先机制后校验」递进，每讲都锚定真实源码文件并配一个可操作的实践任务。",
+  "head": "32fd4cc3861e0ab99f4c42ca6bea281482ba9f51",
+  "rationale": "typst-pdf 的本质是「适配器层」：它不直接写 PDF 字节，而是把 Typst 排版后的 PagedDocument / Frame 树翻译成对底层 krilla 库的调用，并额外构建逻辑结构树（tagged PDF / 无障碍）、书签、元数据、命名目的地址、链接与附件。因此学习路线的设计围绕这条主线展开。第一单元先建立全局认知：项目定位、公共 API 与 PdfOptions、PDF 标准与校验配置、目录结构与构建依赖，让读者明白「这个 crate 在 Typst 工程中的位置」以及「它把工作委托给谁」。第二单元进入转换主链路：convert() 编排、页面导出与页码标签、递归 Frame 遍历器（handle_frame/handle_group 与变换状态栈）、以及类型转换工具集。第三单元按内容类型拆解：文字与字体、图形与几何、纯色与色彩空间、渐变与平铺图案、图像（栅格/SVG/嵌入 PDF）。第四单元讲文档级特性：链接与目的地址、书签大纲、元数据与时间戳、文件附件。第五单元（专家层）集中攻克最复杂的两块——错误与校验映射，以及 tagged PDF 子系统：该子系统采用「先构建逻辑树（build 预处理）→ 遍历时发射标记内容并处理重叠标签（tree 状态机）→ 解析为 krilla TagTree 并做 PDF/UA 结构校验（resolve）」的三段式，因此细分为概览、逻辑树构建、分组数据模型、遍历与重叠标签拆分、解析与校验、以及表格/列表/图表等结构化上下文六讲。整体 24 讲，依赖关系严格沿「先链路后细节、先内容后结构、先机制后校验」递进，每讲都锚定真实源码文件并配一个可操作的实践任务。\n\n本次为增量更新：在 previous_head(146a58329)..current_head(32fd4cc38) 之间，两个提交（#7666 给 image 文档补充裁剪示例、#8039 修复以数字开头的 host 换行）均只改动 typst-layout、typst-library 及测试参考文件，crates/typst-pdf/ 目录零文件变更，git diff --stat 对该目录返回空。因此本 crate 所有 24 讲引用的源码文件、函数符号、行号、实践任务全部仍然有效，全部标记为 keep，仅更新 head。",
   "units": [
     {
       "id": "u1",
@@ -31,7 +31,7 @@
           ],
           "practice_task": "阅读 Cargo.toml，列出 typst-pdf 的全部 workspace 依赖，并用自己的话写一段 100 字说明：为什么 typst-pdf 需要 krilla、typst-layout、typst-library 这三者各自提供什么。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -57,7 +57,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -84,7 +84,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -112,7 +112,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -149,7 +149,7 @@
             "u1-l2",
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l6",
@@ -176,7 +176,7 @@
           "depends_on": [
             "u2-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l7",
@@ -203,7 +203,7 @@
           "depends_on": [
             "u2-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l8",
@@ -231,7 +231,7 @@
           "depends_on": [
             "u2-l5"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -266,7 +266,7 @@
             "u2-l7",
             "u2-l8"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l10",
@@ -294,7 +294,7 @@
             "u2-l7",
             "u2-l8"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l11",
@@ -322,7 +322,7 @@
             "u2-l8",
             "u3-l10"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l12",
@@ -351,7 +351,7 @@
             "u3-l11",
             "u2-l7"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l13",
@@ -379,7 +379,7 @@
             "u2-l7",
             "u2-l8"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -417,7 +417,7 @@
             "u2-l6",
             "u2-l7"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l15",
@@ -444,7 +444,7 @@
             "u2-l6",
             "u4-l14"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l16",
@@ -471,7 +471,7 @@
           "depends_on": [
             "u2-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l17",
@@ -498,7 +498,7 @@
             "u2-l5",
             "u4-l16"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -533,7 +533,7 @@
           "depends_on": [
             "u2-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l19",
@@ -563,7 +563,7 @@
             "u2-l5",
             "u2-l7"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l20",
@@ -590,7 +590,7 @@
           "depends_on": [
             "u5-l19"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l21",
@@ -619,7 +619,7 @@
             "u5-l19",
             "u5-l20"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l22",
@@ -650,7 +650,7 @@
             "u5-l20",
             "u5-l21"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l23",
@@ -681,7 +681,7 @@
             "u5-l21",
             "u5-l22"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l24",
@@ -716,7 +716,7 @@
             "u5-l21",
             "u5-l23"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

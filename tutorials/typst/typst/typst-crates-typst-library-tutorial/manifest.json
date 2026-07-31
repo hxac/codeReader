@@ -1,7 +1,7 @@
 {
   "project": "typst-crates-typst-library",
-  "head": "146a58329a30f6cd38978c22c6bf0e430d8962a1",
-  "rationale": "typst-library 既是 Typst 的标准库 crate，又承载了编译器的核心类型定义（Value/Content/Element 等），是一个覆盖 13 个 Category、200+ 源码文件的大型 crate。大纲按「先全局后局部、先类型后机制」组织：第 1 单元建立 crate 在编译器生态（typst-eval/typst-realize/typst-layout 等分 crate）中的定位与标准库装配全景；第 2–4 单元从值与类型系统出发，经 Content/元素系统进入样式系统，这是一切元素行为的根基；第 5 单元串起 World/Engine/诊断/Routines 四个编译环境支柱；第 6–8 单元按布局、文本、文档模型的顺序讲解各功能子系统的元素实现；第 9 单元的内省与收敛循环是 Typst 区别于普通排版引擎的核心机制；第 10 单元的数学公式（含中间表示 IR）属进阶；第 11 单元覆盖数据加载、系统/插件与可视化等独立工具集；第 12 单元收束于特性开关、性能并发与扩展实践。讲义之间以源码依赖关系串接（依赖只指向更早的讲义，保证可线性学习），每篇聚焦单一主题并配有可操作的代码实践任务。full 模式下所有讲义 action 均为 new。",
+  "head": "32fd4cc3861e0ab99f4c42ca6bea281482ba9f51",
+  "rationale": "typst-library 既是 Typst 的标准库 crate，又承载了编译器的核心类型定义（Value/Content/Element 等），是一个覆盖 13 个 Category、200+ 源码文件的大型 crate。大纲按「先全局后局部、先类型后机制」组织：第 1 单元建立 crate 在编译器生态（typst-eval/typst-realize/typst-layout 等分 crate）中的定位与标准库装配全景；第 2–4 单元从值与类型系统出发，经 Content/元素系统进入样式系统，这是一切元素行为的根基；第 5 单元串起 World/Engine/诊断/Routines 四个编译环境支柱；第 6–8 单元按布局、文本、文档模型的顺序讲解各功能子系统的元素实现；第 9 单元的内省与收敛循环是 Typst 区别于普通排版引擎的核心机制；第 10 单元的数学公式（含中间表示 IR）属进阶；第 11 单元覆盖数据加载、系统/插件与可视化等独立工具集；第 12 单元收束于特性开关、性能并发与扩展实践。讲义之间以源码依赖关系串接（依赖只指向更早的讲义，保证可线性学习），每篇聚焦单一主题并配有可操作的代码实践任务。本次为增量更新（HEAD 146a5832 → 32fd4cc3）：diff 仅含两处提交——其一为 src/visualize/image/mod.rs 新增裁剪(clipping)文档示例（纯文档，未改 ImageElem 的字段或格式分发机制）；其二为「修复以数字开头的 host 断行」，其断行引擎与 URL/host 断点判定位于 typst-layout 而非本 crate（本 crate 内 struct Costs 仅作惩罚配置、linebreak.rs 仅为 #linebreak 元素，均未涉及该逻辑）。两者均不影响本 crate 已生成讲义所述机制，故 u1–u10-l2 已生成讲义标记为 keep；尚未生成的 u10-l3 及 u11/u12 全部讲义仍为 new。",
   "units": [
     {
       "id": "u1",
@@ -31,7 +31,7 @@
           ],
           "practice_task": "阅读 src/lib.rs 顶部模块文档，用自己的话解释「为何大部分编译行为被拆到别的 crate」；在本地运行 cargo doc -p typst-library --no-deps 并浏览根模块，列出顶层 pub mod。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -57,7 +57,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -85,7 +85,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -121,7 +121,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -151,7 +151,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -181,7 +181,7 @@
             "u2-l1",
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -216,7 +216,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -244,7 +244,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -274,7 +274,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -303,7 +303,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -338,7 +338,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -367,7 +367,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -401,7 +401,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -429,7 +429,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -456,7 +456,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l4",
@@ -483,7 +483,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -521,7 +521,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -549,7 +549,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -577,7 +577,7 @@
           "depends_on": [
             "u6-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l4",
@@ -607,7 +607,7 @@
           "depends_on": [
             "u6-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -642,7 +642,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -672,7 +672,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -680,7 +680,7 @@
           "order": 3,
           "filename": "u7-l3-opentype-lang-linebreak-quotes-deco-raw.md",
           "level": "intermediate",
-          "topic": "讲解 features() 收集 OpenType 特性、Lang/Region/script、linebreak 断行、smartquote 智能引号、deco 装饰、case/shift/smallcaps 与 raw 原始文本。",
+          "topic": "讲解 features() 收集 OpenType 特性、Lang/Region/script、linebreak 断行（注：实际断行引擎与 URL/host 断点判定位于 typst-layout，本 crate 仅含 #linebreak 元素与 Costs 惩罚配置）、smartquote 智能引号、deco 装饰、case/shift/smallcaps 与 raw 原始文本。",
           "learning_goals": [
             "掌握 OpenType tag 的收集逻辑",
             "理解语言/区域如何影响排版与无障碍",
@@ -700,11 +700,11 @@
             "linebreak / Costs",
             "smartquote / deco / raw"
           ],
-          "practice_task": "阅读 features() 函数，逐一列出 kerning/ligatures/number-type 等如何映射到 OpenType tag；阅读 linebreak.rs 说明 Costs 如何参与断行决策。",
+          "practice_task": "阅读 features() 函数，逐一列出 kerning/ligatures/number-type 等如何映射到 OpenType tag；阅读 text/mod.rs 中 Costs 结构与 linebreak.rs 元素，说明 Costs 提供的断行惩罚项，并指出真正消费 Costs 的最优断行算法位于 typst-layout。",
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -740,7 +740,7 @@
             "u6-l2",
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -770,7 +770,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -800,7 +800,7 @@
           "depends_on": [
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -842,7 +842,7 @@
             "u3-l2",
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -870,7 +870,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",
@@ -878,7 +878,7 @@
           "order": 3,
           "filename": "u9-l3-introspector-convergence.md",
           "level": "advanced",
-          "topic": "讲解 Introspector trait 的查询接口、comemo 增量记忆化，以及 convergence.rs 的 5 次迭代收敛与「document did not converge」诊断。",
+          "topic": "讲解 Introspector trait 的查询接口、comemo 增量记忆化，以及 convergence.rs 的多次迭代收敛与「document did not converge」诊断。",
           "learning_goals": [
             "理解 Introspector 的统一查询接口",
             "掌握 comemo 记忆化与验证的关系",
@@ -898,7 +898,7 @@
             "u9-l2",
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -934,7 +934,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -969,7 +969,7 @@
           "depends_on": [
             "u10-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l3",
@@ -1073,7 +1073,7 @@
           "order": 3,
           "filename": "u11-l3-visualize-color-stroke-shape-image.md",
           "level": "intermediate",
-          "topic": "讲解 visualize 模块的 Color/Gradient/Tiling/Paint/Stroke、shape(rect/circle/ellipse/square/polygon)、curve 与 image(raster/svg)。",
+          "topic": "讲解 visualize 模块的 Color/Gradient/Tiling/Paint/Stroke、shape(rect/circle/ellipse/square/polygon)、curve 与 image(raster/svg)；并说明 image 文档新增的 clipping 示例（通过 block(clip: true) 视觉裁剪图像）属于用法演示，不改变 ImageElem 的字段或解码机制。",
           "learning_goals": [
             "掌握 Color 的构造器与类型注册",
             "理解 Stroke/Paint 的组合",
@@ -1091,7 +1091,7 @@
             "shape 元素",
             "ImageElem"
           ],
-          "practice_task": "阅读 Color 的构造器（luma/oklch/rgb/cmyk），说明它如何被注册为类型；追踪 ImageElem 如何根据格式分发到 raster/svg 解码。",
+          "practice_task": "阅读 Color 的构造器（luma/oklch/rgb/cmyk），说明它如何被注册为类型；追踪 ImageElem 如何根据格式分发到 raster/svg 解码；并查看 image/mod.rs 中 = Clipping 段示例，说明它是借助 block(clip: true) 而非 ImageElem 字段实现裁剪。",
           "depends_on": [
             "u2-l3"
           ],
@@ -1128,7 +1128,7 @@
             "pdf 模块",
             "html_module routine"
           ],
-          "practice_task": "阅读 LibraryBuilder::with_features 与各 define 处的 feature 判断，画出「启用某 feature 会多注册哪些定义」的对照表。",
+          "practice_task": "阅读 LibraryBuilder::withFeatures 与各 define 处的 feature 判断，画出「启用某 feature 会多注册哪些定义」的对照表。",
           "depends_on": [
             "u1-l3",
             "u5-l4"

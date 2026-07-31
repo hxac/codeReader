@@ -1,0 +1,395 @@
+{
+  "project": "typst-crates-typst-render",
+  "head": "32fd4cc3861e0ab99f4c42ca6bea281482ba9f51",
+  "rationale": "typst-render 是 Typst 的\"光栅图像导出器\"，体量虽小（5 个源文件约 1000 行）但内部机制密集：它把 typst-layout 产出的 Frame 场景树通过 tiny-skia 渲染成位图（PNG），被 typst-cli 调用。学习顺序遵循\"由外到内、由结构到机制\"：入门层先讲清定位、入口与 Frame 派发，让读者建立全局观；进阶层按渲染递归的自然顺序依次拆解 State 变换→Group 裁剪遮罩→纯色 Paint→形状→图像→文本这六条主链；专家层再深入渐变、平铺、字形光栅化与像素级 src-over 混合，并以记忆化/性能收尾。这样安排是因为 Paint 转换是形状与文本的共同依赖（故放在二者之前），而渐变/平铺依赖对文本与 relative-to 的理解（故放在进阶层之后）。12 篇讲义每篇只解决一个独立子问题，依赖关系构成无环图，确保读者可按顺序从零读到能二次开发。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 typst-render 与渲染主流程",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "typst-render 是什么、它在 Typst 整体架构中扮演光栅图像导出器的角色、依赖了哪些外部渲染库，以及如何被 typst-cli 调用做 PNG 导出。",
+          "learning_goals": [
+            "理解 typst-render 的职责：把排版结果（Page）渲染为位图",
+            "了解关键依赖：tiny-skia（2D 引擎）、pixglyph（字形光栅化）、resvg（SVG）、hayro（PDF）",
+            "了解该 crate 在 workspace 中的位置以及 typst_cli::compile 中 PNG 导出的调用链"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "src/lib.rs",
+            "../typst-cli/src/compile.rs"
+          ],
+          "minimal_modules": [
+            "render",
+            "RenderOptions",
+            "Cargo.toml dependencies"
+          ],
+          "practice_task": "阅读 Cargo.toml，列出 typst-render 依赖的所有渲染相关外部 crate（tiny-skia / pixglyph / resvg / hayro / image），用一句话说明每个库的职责；再在 ../typst-cli/src/compile.rs 中定位 export_image_page 调用 typst_render::render 的代码，说明 pixel_per_pt = ppi/72.0 的含义。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "渲染入口 render 与 RenderOptions",
+          "order": 2,
+          "filename": "u1-l2-entry-points.md",
+          "level": "beginner",
+          "topic": "render() 与 render_merged() 两个公共入口的完整流程，以及 RenderOptions（pixel_per_pt、render_bleed）如何控制输出分辨率与出血区。",
+          "learning_goals": [
+            "掌握 render() 如何根据页面尺寸 + bleed 与 pixel_per_pt 计算像素画布大小",
+            "理解 render_merged() 如何把多页纵向拼成一张图（含 gap 与 fill）",
+            "会配置 RenderOptions 并理解默认 pixel_per_pt=2.0 与 render_bleed 的作用"
+          ],
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "render",
+            "render_merged",
+            "RenderOptions",
+            "AbsExt",
+            "fill_or_white"
+          ],
+          "practice_task": "跟踪 render() 中 pxw/pxh 的计算公式，把 RenderOptions 默认值 pixel_per_pt 从 2.0 改为 1.0，手算一个 A4 页面（约 595×842 pt）的输出像素尺寸变化，并解释 round().max(1.0) 的保护意义。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "Frame 场景树与 render_frame 派发",
+          "order": 3,
+          "filename": "u1-l3-frame-tree.md",
+          "level": "beginner",
+          "topic": "Typst 排版结果以 Frame 树表达，render_frame 递归遍历 FrameItem（Group/Text/Shape/Image/Link/Tag）并分派到对应子模块。",
+          "learning_goals": [
+            "理解 Frame 作为层级化场景图的数据结构",
+            "掌握 render_frame 中 match 各分支的派发目标",
+            "了解 Link、Tag 在位图渲染中被忽略的原因"
+          ],
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "render_frame",
+            "FrameItem",
+            "Frame",
+            "GroupItem"
+          ],
+          "practice_task": "为 render_frame 的 match 中每一种 FrameItem，写出它被交给哪个子模块函数（如 FrameItem::Text → text::render_text），并解释 Link/Tag 为何是空分支、Text/Shape/Image 为何都要 state.pre_translate(*pos)。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：核心渲染机制",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "State 状态与坐标变换",
+          "order": 1,
+          "filename": "u2-l1-state-and-transforms.md",
+          "level": "intermediate",
+          "topic": "State 在渲染递归中携带当前变换、容器变换、遮罩、像素比与尺寸；pre_translate/pre_concat/pre_scale 与 to_sk_transform 如何组合坐标变换。",
+          "learning_goals": [
+            "理解 State 各字段（transform/container_transform/mask/pixel_per_pt/size）的含义与不可变更新模式",
+            "掌握 Typst Transform 到 tiny-skia Transform 的字段映射",
+            "理解 AbsExt 把 Abs 转为 f32（基于 pt）的作用"
+          ],
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "State",
+            "to_sk_transform",
+            "AbsExt",
+            "pre_translate",
+            "pre_concat"
+          ],
+          "practice_task": "画出两层嵌套的坐标变换推导图：外层 pre_translate(10,10)、内层 pre_scale(2,2)，写出最终 state.transform 相对画布的表达式；再说明 to_sk_transform 如何把 Transform 的 sx/ky/kx/sy/tx/ty 映射到 from_row。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Group 渲染、裁剪与遮罩",
+          "order": 2,
+          "filename": "u2-l2-groups-clipping-masks.md",
+          "level": "intermediate",
+          "topic": "render_group 处理子框架的变换与裁剪；FrameKind::Soft 与 Hard 的区别（Hard 帧重置 container_transform）；clip 曲线转为 tiny-skia Mask 并与父遮罩求交。",
+          "learning_goals": [
+            "理解软/硬帧对 container_transform 的不同更新方式",
+            "掌握裁剪曲线 convert_curve → path → Mask 的转换与 intersect_path 求交逻辑",
+            "理解遮罩如何沿递归通过 with_mask 向下传递"
+          ],
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "render_group",
+            "FrameKind",
+            "Mask",
+            "container_transform",
+            "with_mask"
+          ],
+          "practice_task": "阅读 render_group 中 clip 处理的两条分支（已有父 mask 时 clone+intersect_path，无父 mask 时 new+fill_path），解释二者差别；并说明为什么 sk::Mask::new 失败（裁剪区域为空）时直接 return。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "纯色 Paint 转换",
+          "order": 3,
+          "filename": "u2-l3-paint-solid.md",
+          "level": "intermediate",
+          "topic": "paint::to_sk_paint 把 Typst 的 Paint 转成 tiny-skia Paint；本讲聚焦 Paint::Solid 纯色分支，以及 to_sk_color / to_sk_color_u8 颜色转换与 ProcessColor 的角色。",
+          "learning_goals": [
+            "掌握 to_sk_paint 的整体签名与 shape/on_text/include_stroke_in_bbox 等参数的作用",
+            "理解 to_sk_color 通过 ProcessColor→to_rgb→from_rgba 的转换链与 premultiply 概念",
+            "了解纯色分支中 item_size/fill_transform/gradient_map 如何取默认值"
+          ],
+          "source_files": [
+            "src/paint.rs"
+          ],
+          "minimal_modules": [
+            "to_sk_paint",
+            "to_sk_color",
+            "to_sk_color_u8",
+            "Paint::Solid",
+            "ProcessColor"
+          ],
+          "practice_task": "跟踪 render_shape 中一次纯色填充调用 to_sk_paint(fill, state, false, &mut pixmap, Some(shape), false) 时，函数内 shape=Some 分支计算出的 bbox、fill_transform、gradient_map 各是什么；再说明 Paint::Solid 分支只设置了 set_color 和 anti_alias。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "几何形状与描边",
+          "order": 4,
+          "filename": "u2-l4-shapes.md",
+          "level": "intermediate",
+          "topic": "render_shape 把 Geometry（Line/Rect/Curve）转为 tiny-skia 路径并执行填充与描边；convert_curve 把 Typst Curve 转路径；处理虚线、线帽、连接与负尺寸矩形。",
+          "learning_goals": [
+            "掌握三种几何到 sk::Path 的转换（含负尺寸矩形的 signum 变换）",
+            "理解填充规则 NonZero/EvenOdd 到 sk::FillRule 的映射与描边参数映射",
+            "了解虚线数组的奇数偶数化处理"
+          ],
+          "source_files": [
+            "src/shape.rs"
+          ],
+          "minimal_modules": [
+            "render_shape",
+            "convert_curve",
+            "to_sk_dash_pattern",
+            "to_sk_line_cap",
+            "to_sk_line_join"
+          ],
+          "practice_task": "为一条带虚线描边的矩形，画出从 FixedStroke 到 sk::Stroke 的字段映射表（paint/thickness/cap/join/dash/miter_limit）；并解释 to_sk_dash_pattern 为什么要把奇数长度数组翻倍成偶数。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "图像渲染：光栅 / SVG / PDF",
+          "order": 5,
+          "filename": "u2-l5-images.md",
+          "level": "intermediate",
+          "topic": "render_image 根据变换计算目标尺寸并构建纹理；build_texture（被 memoize）处理光栅图（含 resize 滤镜选择）、SVG（resvg）与 PDF（hayro）三种纹理。",
+          "learning_goals": [
+            "掌握 render_image 中基于变换角度 theta 计算 scale_x 的数学推导与避免除零的策略",
+            "理解 build_texture 对 ImageKind::Raster/Svg/Pdf 三类分支的处理",
+            "了解放大用 CatmullRom、缩小用 Lanczos3、Pixelated 用 Nearest 的滤镜选择策略"
+          ],
+          "source_files": [
+            "src/image.rs"
+          ],
+          "minimal_modules": [
+            "render_image",
+            "build_texture",
+            "build_pdf_texture"
+          ],
+          "practice_task": "阅读 build_texture 中 ImageScaling::Pixelated / upscale / downscale 三种情况分别选择的 FilterType，说明 CatmullRom 与 Lanczos3 的适用场景；并解释为什么 (w,h) 与原始尺寸相等时跳过 resize 是一项优化。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "文本渲染基础",
+          "order": 6,
+          "filename": "u2-l6-text-basics.md",
+          "level": "intermediate",
+          "topic": "render_text 遍历字形串，依据 should_outline 分流：普通字形走轮廓渲染，彩色字形走 glyph_frame 子框架；字形位置由 x_offset/y_offset/x_advance 计算。",
+          "learning_goals": [
+            "掌握 render_text 的字形遍历与偏移/步进计算",
+            "理解 outline 与 glyph_frame 两条路径的分流条件",
+            "了解 upem / text_scale 的缩放作用"
+          ],
+          "source_files": [
+            "src/text.rs"
+          ],
+          "minimal_modules": [
+            "render_text",
+            "render_outline_glyph",
+            "glyph_frame",
+            "should_outline"
+          ],
+          "practice_task": "对一个彩色 emoji 字形（should_outline=false 且 glyph_frame 返回 Some），画出 state 的缩放链：pre_translate(x_offset,-y_offset) → pre_scale(text_scale) → render_frame，并解释 text_scale = size/upem 的含义。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "专家：高级填充、字形光栅化与性能",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "渐变填充",
+          "order": 1,
+          "filename": "u3-l1-gradients.md",
+          "level": "advanced",
+          "topic": "GradientSampler 与 to_sk_paint 的 Paint::Gradient 分支；RelativeTo::Self_/Parent 决定渐变坐标系；cached 把渐变采样缓存为 pixmap；gradient_map 用于对齐描边与填充。",
+          "learning_goals": [
+            "理解 GradientSampler::sample 如何把像素坐标经 transform_to_parent 映射回渐变空间采样",
+            "掌握 container_transform / transform 在 Parent 相对模式下逆变换的作用",
+            "了解 comemo 缓存的 cached 函数与矩形负尺寸镜像 gradient_map"
+          ],
+          "source_files": [
+            "src/paint.rs",
+            "src/text.rs"
+          ],
+          "minimal_modules": [
+            "GradientSampler",
+            "to_sk_paint(Paint::Gradient)",
+            "cached",
+            "RelativeTo",
+            "PaintSampler"
+          ],
+          "practice_task": "对比 RelativeTo::Self_ 与 Parent 两种模式下 container_size、fill_transform、gradient_map 的取值差异，解释 Parent 模式为何需要 container_transform.invert()；并说明 GradientSampler 在文本字形采样时的坐标换算。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "平铺图案 Tiling",
+          "order": 2,
+          "filename": "u3-l2-tilings.md",
+          "level": "advanced",
+          "topic": "TilingSampler 与 to_sk_paint 的 Paint::Tiling 分支；render_tiling_frame 把图案帧渲染到独立画布；Repeat 展开模式与平铺偏移/间距/变换。",
+          "learning_goals": [
+            "理解 TilingSampler::sample 用 rem_euclid 实现周期性采样的原理",
+            "掌握 render_tiling_frame 递归复用 render_frame 把图案帧光栅化",
+            "了解 pattern_transform 与 base_offset 的组合以及 SpreadMode::Repeat"
+          ],
+          "source_files": [
+            "src/paint.rs"
+          ],
+          "minimal_modules": [
+            "TilingSampler",
+            "render_tiling_frame",
+            "to_sk_paint(Paint::Tiling)",
+            "PaintSampler"
+          ],
+          "practice_task": "阅读 TilingSampler::sample 中 rem_euclid 的用法，画出从画布像素 (x,y) 到图案 pixmap 像素 (x',y') 的映射链；并解释 size = (tilings.size()+spacing()) * pixel_per_pt 中 spacing 的作用。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "字形光栅化与像素级混合",
+          "order": 3,
+          "filename": "u3-l3-glyph-raster-blend.md",
+          "level": "advanced",
+          "topic": "render_outline_glyph 的快慢路径分流（ppem>100、描边、非均匀缩放走路径绘制，否则走 pixglyph 光栅化）；write_bitmap 的有/无遮罩两条分支；blend_src_over/alpha_mul 的 Skia 移植实现。",
+          "learning_goals": [
+            "理解快路径选择条件与 ppem = size.to_f32()*ts.sy 的计算",
+            "掌握 write_bitmap 手动 alpha 混合与遮罩下二级画布（带 1px padding）策略",
+            "理解 premultiplied alpha 的 src-over 公式与位运算实现"
+          ],
+          "source_files": [
+            "src/text.rs"
+          ],
+          "minimal_modules": [
+            "render_outline_glyph",
+            "rasterize",
+            "write_bitmap",
+            "blend_src_over",
+            "alpha_mul",
+            "WrappedPathBuilder"
+          ],
+          "practice_task": "分析 write_bitmap 在 state.mask.is_some() 时为何先渲染到 mw+2×mh+2 的临时 pixmap 再 draw_pixmap 到画布；并推导 blend_src_over(src,dst) = src + alpha_mul(dst, 256-(src>>24)) 与 alpha_mul 中 0xff00ff 掩码的位运算含义。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "记忆化与性能优化",
+          "order": 4,
+          "filename": "u3-l4-memoization-perf.md",
+          "level": "advanced",
+          "topic": "typst-render 在三处使用 comemo::memoize（rasterize 字形光栅化、build_texture 纹理构建、cached 渐变采样）与 #[typst_macros::time] 计时，分析这些缓存对重复渲染的性能意义。",
+          "learning_goals": [
+            "理解 comemo::memoize 的缓存键与命中条件",
+            "掌握三处缓存各自的输入维度（字形键含 f32::to_bits、纹理键含宽高、渐变键含 gradient_map）",
+            "了解 #[typst_macros::time] 在渲染性能剖析中的作用"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/image.rs",
+            "src/text.rs",
+            "src/paint.rs"
+          ],
+          "minimal_modules": [
+            "comemo::memoize",
+            "rasterize",
+            "build_texture",
+            "cached",
+            "typst_macros::time"
+          ],
+          "practice_task": "列出三处 #[comemo::memoize] 的缓存键参数；分析同一个字形在不同位置但相同 ppem 下能否命中 rasterize 缓存（提示：键是 tx/ty/ppem 的 to_bits），并解释为何用 f32::to_bits 而非直接用 f32 作为键。",
+          "depends_on": [
+            "u3-l3",
+            "u2-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

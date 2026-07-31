@@ -1,7 +1,7 @@
 {
   "project": "typst-crates-typst-realize",
-  "head": "146a58329a30f6cd38978c22c6bf0e430d8962a1",
-  "rationale": "typst-realize 是 Typst 的「具现化」子系统，是评估（eval）与排版（layout）之间的关键桥梁：它递归地应用样式与 show 规则，把任意 content 树规整为排版/导出阶段可直接消费的「已知元素」扁平列表。本手册按「先定位、再机制、后集成」的三层节奏设计：入门层（u1）帮助读者从零理解 realization 的定位、入口 realize() 的签名与数据类型，以及 visit() 调度流水线的总体顺序；进阶层（u2）逐一拆解核心机制——State 状态机、show 规则应用、verdict 判定、prepare 准备、带样式元素的页面/文档样式处理、分组规则框架及其生命周期、段落/列表/引用/文本四类分组的具体构建，以及空格折叠；专家层（u3）覆盖标签与内省、过滤规则、多生命周期与 arena 内存分配、五种 RealizationKind 的差异、与 layout/html/bundle/math 的集成，以及递归深度限制与错误延迟处理。讲义顺序遵循依赖关系：先讲全局入口与调度，再讲 visit 内部各分支（kind→show→sequence→styled→grouping→filter），再按数据流展开各分组 finisher，最后是横切的标签/内存/集成/健壮性主题。由于该 crate 本质上是一个约 1500 行单文件加一个空间折叠小文件的紧密子系统，因此拆分为 20 篇讲义，每篇聚焦一个相对独立的函数群或机制，均结合真实源码行号并给出可在本地 fork 中操作的实践任务。",
+  "head": "32fd4cc3861e0ab99f4c42ca6bea281482ba9f51",
+  "rationale": "增量分析：对比上次 HEAD(146a58329) 与当前 HEAD(32fd4cc38)，crates/typst-realize/ 目录本身零改动，且本手册各讲义引用的所有源文件——typst-library 的 routines.rs、content/mod.rs、content/element.rs、styles.rs、selector.rs，以及 typst-layout 的 flow/inline/pages mod.rs、typst-html、typst-bundle——在两次 HEAD 之间逐字节相同。整个仓库此区间内的代码改动仅涉及 crates/typst-layout/src/inline/linebreak.rs、crates/typst-library/src/layout/container.rs、crates/typst-library/src/visualize/image/mod.rs（以及 Cargo 版本号与测试），这些文件均未被任何讲义引用。因此没有一篇讲义赖以成文的源码基础发生变化，三层（入门/进阶/专家）的单元划分与 22 篇讲义的依赖链完全保持有效。考虑到磁盘上目前仅 u1-l1-project-overview.md 已生成、且其源码未变，该篇标为 keep；其余 21 篇尚未落盘，在源码不变的既定计划下仍属待首次生成，故保留 new；同时对上一版 manifest 中损坏的 u2-l10（practice_task 被截断、混入 practice_task2/action2 杂字段）按其主题（文本分组与正则 show 规则）补全为合法的 practice_task 并复用真实存在的 find_regex_match_in_elems / visit_regex_match 等符号。结论：讲义集合与内容需求与上版一致，仅 bump head 并修正动作标注。",
   "units": [
     {
       "id": "u1",
@@ -33,7 +33,7 @@
           ],
           "practice_task": "在本地 clone typst 仓库后，定位 crates/typst-realize/Cargo.toml 并指出它在 workspace 中的位置；用一段注释描述 realize 接收什么（content + styles）、产出什么（Vec<Pair>），并在 crates/typst-layout/src/flow/mod.rs 中找到调用 routines.realize 的那一行。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -357,12 +357,11 @@
             "find_regex_match_in_elems / find_regex_match_in_str",
             "visit_regex_match / slice_textual"
           ],
-          "practice_task": "写一个 #show ",
-          "practice_task2": "x, ",
+          "practice_task": "写一个正则 show 规则（例如 #show \"x, \": it => ...）使其能跨多个文本元素匹配；在 find_regex_match_in_elems 与 visit_regex_match 的切片处加日志，观察匹配文本如何被切分重打包，以及 Revocation 如何防止同一规则在同一文本上重复应用。",
           "depends_on": [
             "u2-l7"
           ],
-          "action2": "new"
+          "action": "new"
         },
         {
           "id": "u2-l11",
