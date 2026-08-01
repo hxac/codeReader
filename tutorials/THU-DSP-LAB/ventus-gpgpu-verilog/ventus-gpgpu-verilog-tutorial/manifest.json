@@ -1,0 +1,1037 @@
+{
+  "project": "ventus-gpgpu-verilog",
+  "head": "192d1e054d8628fe188894927c0e1976f4c25cde",
+  "rationale": "本项目是“乘影”GPGPU 的 Verilog 版本，规模较大（SM 流水线内部就有上百个文件），因此采用“由外到内、由控制流到数据流、由单核到系统”的分层学习路线。单元 1（入门）先让读者建立项目定位、目录、配置、仿真方法和顶层系统观；单元 2 进入任务调度（CTA→Warp 派发），这是理解整条主机到核的数据通路的起点；单元 3 顺次讲解 SM 流水线前半段（取指/缓冲/译码/发射/记分板）；单元 4 讲执行单元（操作数采集与 ALU/乘法/FPU/SFU）；单元 5 讲访存与控制类（LSU/CSR/SIMT 分支发散/张量核）；单元 6 进入专家层存储子系统（dcache/共享内存/L1 仲裁）；单元 7 讲片上互联与 L2、TileLink 与 AXI 协议转换；单元 8 收尾于工程实践（仿真框架、公共单元库、FPGA 与综合、指令集扩展二次开发）。依赖关系遵循“先顶层后细节、先前端后后端、先单核后系统互联”的原则，每篇只解决一个主题并结合 1~6 个真实源码文件与一个动手任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 Ventus GPGPU 项目",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与硬件架构总览",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 ventus-gpgpu-verilog 是什么：基于 RISC-V 向量扩展的 GPGPU 处理器的 Verilog 版本（乘影），它与 Chisel 原版的关系，以及整体硬件架构框图（GPGPU_top、SM 核、CTA 调度、L2、AXI）。",
+          "learning_goals": [
+            "理解 Ventus GPGPU 的项目定位、指令集特征（RV32V 向量扩展）与开源来源",
+            "对照架构框图识别 GPGPU_top、SM、CTA scheduler、L2Cache、AXI 接口等主要部件",
+            "了解项目的综合指标（28nm、620MHz、面积）与参考的开源设计"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/ventus-gpgpu-verilog-release-v1.0-spec.pdf"
+          ],
+          "minimal_modules": [
+            "GPGPU_top",
+            "sm_wrapper",
+            "CTA scheduler",
+            "L2Cache"
+          ],
+          "practice_task": "阅读 README 与架构框图，绘制一张从主机请求（host_req）到 AXI/L2 再到 SM 核的顶层数据流向草图，并标注 NUM_SM、NUM_WARP、NUM_THREAD 三个关键规模参数的含义。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "源码目录结构与模块组织",
+          "order": 2,
+          "filename": "u1-l2-source-directory-layout.md",
+          "level": "beginner",
+          "topic": "讲解仓库目录组织：src/define（配置宏）、src/common_cell（公共单元库）、src/gpgpu_top（顶层及子模块 GPGPU_top/sm/cta_top/l2cache/axi4_adapter）、testcase（仿真用例）、FPGA_test 与 docs。",
+          "learning_goals": [
+            "掌握 src 各子目录的职责划分与模块归属",
+            "能够根据功能需求在目录树中定位到对应的源码文件",
+            "区分 define、common_cell、gpgpu_top 三大基础目录的作用"
+          ],
+          "source_files": [
+            "README.md",
+            "src/gpgpu_top/model_list",
+            "src/common_cell/fifo.v"
+          ],
+          "minimal_modules": [
+            "src/define",
+            "src/common_cell",
+            "src/gpgpu_top",
+            "testcase"
+          ],
+          "practice_task": "用树状图整理 src/gpgpu_top 下的子目录（cta_top、sm、l2cache、axi4_adapter 等），并为每个子目录写一句话功能说明；统计 sm/pipeline 下各执行单元目录。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "核心配置参数 define.v",
+          "order": 3,
+          "filename": "u1-l3-define-parameters.md",
+          "level": "beginner",
+          "topic": "逐组讲解 src/define/define.v 中的核心可配置参数：NUM_CLUSTER/NUM_SM/NUM_WARP/NUM_THREAD、寄存器堆规模、L1/L2 cache 参数、AXI 位宽，以及指令编码宏、CSR 地址、TileLink 操作码等。",
+          "learning_goals": [
+            "理解 NUM_SM/NUM_WARP/NUM_THREAD/NUM_LANE 等规模参数及其相互派生关系",
+            "掌握 L1/L2 cache 的组数、路数、块字数等关键配置项",
+            "了解 define.v 中指令编码、操作类型 FN_*、CSR 地址等宏的组织方式"
+          ],
+          "source_files": [
+            "src/define/define.v",
+            "src/define/undefine.v"
+          ],
+          "minimal_modules": [
+            "NUM_THREAD",
+            "NUM_WARP",
+            "NUM_SM",
+            "DCACHE 参数",
+            "L2CACHE 参数"
+          ],
+          "practice_task": "在 define.v 中将 NUM_THREAD 修改为不同取值（如 4/8/16/32），观察派生宏 DEPTH_THREAD、DCACHE_NLANES、NUM_SFU 的变化，并说明为何仿真前必须确认 NUM_THREAD。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "仿真环境搭建与用例运行",
+          "order": 4,
+          "filename": "u1-l4-simulation-and-testcases.md",
+          "level": "beginner",
+          "topic": "讲解如何用 VCS 编译仿真、用 Verdi 查看波形：进入 testcase/test_gpgpu_axi_top/tc_gaussian，使用 make run-vcs-4w4t 等目标，理解 run.f、Makefile、CASE_* 宏与 PASSED/FAILED 结果。",
+          "learning_goals": [
+            "掌握 VCS 仿真命令、Makefile 目标与编译选项（-f run.f、+define+CASE_*）的含义",
+            "理解 run.f 中 top、file_list、incdir、model_list 的组织方式",
+            "能够独立跑通一个测试用例并用 Verdi 打开波形"
+          ],
+          "source_files": [
+            "testcase/test_gpgpu_axi_top/tc_gaussian/Makefile",
+            "testcase/test_gpgpu_axi_top/common/run.f",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "Makefile",
+            "run.f",
+            "file_list.f",
+            "CASE 宏"
+          ],
+          "practice_task": "在 tc_vecadd 或 tc_gaussian 目录下执行 make run-vcs-4w4t，记录仿真输出的 PASSED/FAILED 与周期数，并修改为另一组 warp/thread 配置（如 4w8t）再跑一次对比。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "顶层模块 GPGPU_top 与系统数据流",
+          "order": 5,
+          "filename": "u1-l5-gpgpu-top-and-dataflow.md",
+          "level": "beginner",
+          "topic": "精读 GPGPU_top.v：主机 host_req 接口、cta_interface、多个 sm_wrapper 的 generate 例化、L2 cache(Scheduler)、cluster 到 L2 的若干 arbiter/distribute，以及 NO_CACHE 宏控制的两种对外接口（TileLink out_a/out_d 或直连 mem）。",
+          "learning_goals": [
+            "理解 GPGPU_top 顶层如何把主机请求接入 CTA 调度再分发到各 SM",
+            "梳理 sm2cluster_arb、l2_distribute、cluster_to_l2_arb、Scheduler(L2) 之间的连接关系",
+            "理解 NO_CACHE 宏如何切换“带 L2+AXI”与“直连 cache 接口”两种工作模式"
+          ],
+          "source_files": [
+            "src/gpgpu_top/GPGPU_top.v",
+            "src/gpgpu_top/gpgpu_axi_top.sv",
+            "src/define/define.v"
+          ],
+          "minimal_modules": [
+            "GPGPU_top",
+            "cta_interface",
+            "sm_wrapper",
+            "Scheduler(L2)",
+            "cluster_to_l2_arb",
+            "l2_distribute"
+          ],
+          "practice_task": "在 GPGPU_top.v 中跟踪一次主机 host_req_valid_i 到 cta_interface、再到某个 sm_wrapper 的 cta_req 接口的信号连线，画出该控制路径；并说明 wg_done/is_flushing 如何产生 host_rsp_valid_o。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "任务调度：CTA 与 Warp 派发",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "CTA 调度器与资源表",
+          "order": 1,
+          "filename": "u2-l1-cta-scheduler-and-resource-table.md",
+          "level": "intermediate",
+          "topic": "讲解 CTA scheduler（基于 MIAOW）如何接收主机 workgroup 请求、维护资源表并在满足资源条件时把 workgroup 分配到某个 CU，涉及 cta_interface、cta_scheduler、resource_table 系列、allocator。",
+          "learning_goals": [
+            "理解 workgroup/block、warp/wavefront、CU(SM) 之间的调度层次",
+            "掌握资源表（VGPR/SGPR/LDS/WF slot）如何约束 workgroup 能否被派发",
+            "理清 cta_interface、cta_scheduler、allocator、resource_table 的协作关系"
+          ],
+          "source_files": [
+            "src/gpgpu_top/cta_top/cta_interface.v",
+            "src/gpgpu_top/cta_top/cta/cta_scheduler.v",
+            "src/gpgpu_top/cta_top/cta/resource_table.v",
+            "src/gpgpu_top/cta_top/cta/allocator_neo.v"
+          ],
+          "minimal_modules": [
+            "cta_interface",
+            "cta_scheduler",
+            "resource_table",
+            "allocator"
+          ],
+          "practice_task": "阅读 cta_scheduler 与 resource_table，说明一个 workgroup 从 host2cta_valid 到被选中分配给某 CU 的判定条件（资源、slot、tag），并指出 NUMBER_WF_SLOTS、NUMBER_CU 等参数的影响。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "cu_handler 与 inflight_wg_buffer 派发流程",
+          "order": 2,
+          "filename": "u2-l2-cu-handler-and-inflight-wg.md",
+          "level": "intermediate",
+          "topic": "讲解 cu_handler、dis_controller、inflight_wg_buffer、gpu_interface、throttling_engine 如何把调度结果组装成对 CU 的派发握手，并回收 warp 完成信号（wf_done）。",
+          "learning_goals": [
+            "理解 dispatch 到 CU 的握手时序与字段（start_pc、base、wf_size、tag 等）",
+            "掌握 inflight_wg_buffer 如何跟踪在途 workgroup 与完成回收",
+            "了解 throttling_engine / prefer_select 对派发节奏的影响"
+          ],
+          "source_files": [
+            "src/gpgpu_top/cta_top/cta/cu_handler.v",
+            "src/gpgpu_top/cta_top/cta/inflight_wg_buffer.v",
+            "src/gpgpu_top/cta_top/cta/dis_controller.v",
+            "src/gpgpu_top/cta_top/cta/gpu_interface.v",
+            "src/gpgpu_top/cta_top/wf_done_interface_single.v"
+          ],
+          "minimal_modules": [
+            "cu_handler",
+            "inflight_wg_buffer",
+            "dis_controller",
+            "gpu_interface"
+          ],
+          "practice_task": "跟踪一个 workgroup 的派发字段（wg_id、wf_count、start_pc、vgpr/sgpr/lds base、wf_tag）如何从 cu_handler 传递到 SM 侧，并说明 warp 完成后 wf_done 如何经 wf_done_interface 汇报。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "cta2warp 与 Warp 派发接口",
+          "order": 3,
+          "filename": "u2-l3-cta2warp-interface.md",
+          "level": "intermediate",
+          "topic": "讲解 SM 侧的 cta2warp.v：把 CTA 派发的一个 workgroup 拆解为若干 warp 请求（warpReq），维护 wid 分配与 warp 完成回收（warp2cta），是调度器与流水线之间的桥梁。",
+          "learning_goals": [
+            "理解 workgroup 到 warp 的拆分逻辑与 wid 分配",
+            "掌握 cta2warp 与 pipe 之间的 warpReq/warpRsp 握手",
+            "理解 warp 完成如何回传并最终汇聚成 workgroup 完成"
+          ],
+          "source_files": [
+            "src/gpgpu_top/sm/cta2warp.v",
+            "src/gpgpu_top/sm/sm_wrapper.v"
+          ],
+          "minimal_modules": [
+            "cta2warp",
+            "sm_wrapper",
+            "warpReq/warpRsp"
+          ],
+          "practice_task": "在 cta2warp.v 中找到 warp 请求生成与 wid 分配的逻辑，说明 NUM_WARP、wf_count 如何决定派发几个 warp，以及最后一个 warp 完成时如何回送 wg 完成。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "SM 流水线：取指到发射",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "SM 流水线总览 pipe.v",
+          "order": 1,
+          "filename": "u3-l1-sm-pipeline-overview.md",
+          "level": "intermediate",
+          "topic": "精读 pipe.v，建立 SM 核流水线全景：取指(fetch/icache)、指令缓冲(ibuffer)、译码(decode)、发射(issue+scoreboard)、操作数采集(operand_collector)、各类执行单元(valu/vmul/fpu/sfu/lsu/tensor)、写回，以及与 cache/shared/simt 的连接。",
+          "learning_goals": [
+            "建立 SM 流水线从取指到写回的整体数据通路图",
+            "识别 pipe.v 例化的各主要子模块及其交互接口",
+            "理解 warp 级调度、icache/dcache/shared 请求与 flush 机制在 pipe 中的位置"
+          ],
+          "source_files": [
+            "src/gpgpu_top/sm/pipeline/pipe.v",
+            "src/gpgpu_top/sm/sm_wrapper.v",
+            "src/define/define.v"
+          ],
+          "minimal_modules": [
+            "pipe",
+            "ibuffer",
+            "decodeUnit",
+            "issue",
+            "operand_collector",
+            "执行单元"
+          ],
+          "practice_task": "以 pipe.v 为蓝本绘制 SM 流水线框图，标出取指、ibuffer、译码、发射、操作数采集、各执行单元、写回、以及 icache/dcache/shared_mem 请求出口的位置。",
+          "depends_on": [
+            "u2-l3",
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "取指与指令缓存 icache",
+          "order": 2,
+          "filename": "u3-l2-fetch-and-icache.md",
+          "level": "intermediate",
+          "topic": "讲解取指阶段如何按 PC 发起 icache 请求并处理命中/缺失，涉及 instruction_cache、tag_access_icache、tag_checker_icache、mshr_icache，以及 NUM_FETCH 取指宽度。",
+          "learning_goals": [
+            "理解 icache 的组相联结构、tag 检查与命中/缺失判定",
+            "掌握 mshr_icache 如何处理缺失并在数据返回后重发命中",
+            "理解 NUM_FETCH 决定一次取指的指令条数与对齐"
+          ],
+          "source_files": [
+            "src/gpgpu_top/sm/l1cache/icache/instruction_cache.v",
+            "src/gpgpu_top/sm/l1cache/icache/tag_access_icache.v",
+            "src/gpgpu_top/sm/l1cache/icache/tag_checker_icache.v",
+            "src/gpgpu_top/sm/l1cache/icache/mshr_icache.v"
+          ],
+          "minimal_modules": [
+            "instruction_cache",
+            "tag_access_icache",
+            "mshr_icache",
+            "NUM_FETCH"
+          ],
+          "practice_task": "梳理一条取指请求从 pipe 的 icache_req 到 instruction_cache、tag 检查、（缺失时）mshr 再到 icache_rsp 回送 icache_rsp_status(0 hit/1 miss) 的完整流程。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "指令缓冲 ibuffer 与译码 decodeUnit",
+          "order": 3,
+          "filename": "u3-l3-ibuffer-and-decode.md",
+          "level": "intermediate",
+          "topic": "讲解 ibuffer 缓存已取回的指令、decodeUnit 将 32 位指令按 define.v 中的编码模式译码为控制信号（操作类型 FN_*、立即数类型、mem 宽度、CSR 类型等），以及 ibuffer2issue 的衔接。",
+          "learning_goals": [
+            "理解 ibuffer 的深度、按 warp 组织与暂存机制",
+            "掌握 decodeUnit 如何利用 define.v 的指令位模式宏进行译码",
+            "理解译码产出字段（fn、立即数类型、alu/fpu/mem/csr 控制等）如何驱动后续执行"
+          ],
+          "source_files": [
+            "src/gpgpu_top/sm/pipeline/decodeUnit.v",
+            "src/gpgpu_top/sm/pipeline/ibuffer/ibuffer.v",
+            "src/gpgpu_top/sm/pipeline/ibuffer2issue.v",
+            "src/define/define.v"
+          ],
+          "minimal_modules": [
+            "decodeUnit",
+            "ibuffer",
+            "ibuffer2issue",
+            "指令编码宏"
+          ],
+          "practice_task": "选取一条具体指令（如 VADD_VV 或 ADDI），对照 define.v 的位模式，说明 decodeUnit 译码出的操作类型、立即数类型、源/目的操作数选择信号。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "发射 issue 与记分板 scoreboard",
+          "order": 4,
+          "filename": "u3-l4-issue-and-scoreboard.md",
+          "level": "intermediate",
+          "topic": "讲解 issue.v 如何从就绪指令中选择发射、scoreboard.v 如何做冒险检测（读写冲突、写写冲突、长延迟操作占用），以及与操作数采集的衔接。",
+          "learning_goals": [
+            "理解发射单元的就绪判定与选择策略",
+            "掌握 scoreboard 记录的占用与释放机制如何避免数据冒险",
+            "理解发射宽度 NUM_ISSUE 与 collector unit 数量的关系"
+          ],
+          "source_files": [
+            "src/gpgpu_top/sm/pipeline/issue.v",
+            "src/gpgpu_top/sm/pipeline/scoreboard.v"
+          ],
+          "minimal_modules": [
+            "issue",
+            "scoreboard",
+            "NUM_ISSUE",
+            "NUM_COLLECTORUNIT"
+          ],
+          "practice_task": "构造一个存在 RAW 冒险的指令序列，分析 scoreboard 如何阻止后续指令过早发射，并在前一指令写回后释放；说明 NUM_COLLECTORUNIT 与并发发射能力的关系。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "SM 流水线：操作数与执行单元",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "操作数采集 operand_collector 与寄存器堆",
+          "order": 1,
+          "filename": "u4-l1-operand-collector-and-regfile.md",
+          "level": "intermediate",
+          "topic": "讲解 operand_collector 如何为发射的指令从标量/向量寄存器堆读取操作数并生成立即数，涉及 collector_unit、operand_arbiter、scalar/vector_regfile_bank、gen_imm、inst_demux。",
+          "learning_goals": [
+            "理解标量寄存器堆(SGPR)与向量寄存器堆(VGPR)的组织与 bank 划分",
+            "掌握 collector unit 如何仲裁并采集多源操作数送入执行单元",
+            "理解立即数生成 gen_imm 与指令分发 inst_demux 的作用"
+          ],
+          "source_files": [
+            "src/gpgpu_top/sm/pipeline/operand_collector/collector_unit.v",
+            "src/gpgpu_top/sm/pipeline/operand_collector/operand_arbiter.v",
+            "src/gpgpu_top/sm/pipeline/operand_collector/scalar_regfile_bank.v",
+            "src/gpgpu_top/sm/pipeline/operand_collector/vector_regfile_bank.v",
+            "src/gpgpu_top/sm/pipeline/operand_collector/gen_imm.v"
+          ],
+          "minimal_modules": [
+            "collector_unit",
+            "operand_arbiter",
+            "scalar_regfile_bank",
+            "vector_regfile_bank",
+            "gen_imm"
+          ],
+          "practice_task": "说明 NUM_VGPR/NUM_SGPR 与 NUM_BANK 如何决定每个 bank 的深度，并跟踪一条向量指令的源操作数如何经 operand_arbiter→collector_unit→vector_regfile_bank 读出。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "向量 ALU valu",
+          "order": 2,
+          "filename": "u4-l2-vector-alu.md",
+          "level": "intermediate",
+          "topic": "讲解向量 ALU 如何按 lane 并行执行 NUM_THREAD 条线程的整数运算，涉及 valu_top/valu 的 lane 组织、alu 的功能函数(FN_ADD/FN_SUB/FN_SLT 等) 与 aluexe 的接入。",
+          "learning_goals": [
+            "理解 valu 的 SIMT lane 级并行结构与 NUM_LANE/NUM_THREAD 的对应",
+            "掌握 alu 模块支持的功能函数集合及其与 define.v FN_* 的对应",
+            "理解 aluexe 如何把 valu 结果接回写回通路"
+          ],
+          "source_files": [
+            "src/gpgpu_top/sm/pipeline/valu/valu_top.v",
+            "src/gpgpu_top/sm/pipeline/valu/valu.v",
+            "src/gpgpu_top/sm/pipeline/valu/alu.v",
+            "src/gpgpu_top/sm/pipeline/aluexe.v",
+            "src/define/define.v"
+          ],
+          "minimal_modules": [
+            "valu_top",
+            "valu",
+            "alu",
+            "aluexe"
+          ],
+          "practice_task": "选取 VADD_VV 指令，说明其如何在 valu 中被拆分到各 lane 的 alu 并行执行 FN_ADD，并对比 VADD_VX（标量-向量）在操作数采集上的差异。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "乘法器 vmul 与 array_multiplier",
+          "order": 3,
+          "filename": "u4-l3-vector-multiplier.md",
+          "level": "intermediate",
+          "topic": "讲解向量乘法 vmul 及其底层阵列乘法器 array_multiplier（参考香山 Array Multiplier），理解 MUL/MULH/MULHU/MULHSU 与乘加类指令的实现。",
+          "learning_goals": [
+            "理解 array_multiplier 的阵列化实现思路",
+            "掌握有符号/无符号/高低位乘法(MUL/MULH/MULHU/MULHSU)的处理",
+            "理解乘加类指令(MACC/MADD 等)在执行单元中的复用"
+          ],
+          "source_files": [
+            "src/gpgpu_top/sm/pipeline/vmul/array_multiplier.v",
+            "src/gpgpu_top/sm/pipeline/valu/alu.v",
+            "src/define/define.v"
+          ],
+          "minimal_modules": [
+            "array_multiplier",
+            "vmul",
+            "乘法功能函数"
+          ],
+          "practice_task": "阅读 array_multiplier，说明其如何支持 32×32 有符号/无符号乘法并产出 64 位结果，以及 MULH（高位）与 MUL（低位）如何从同一结果中选取。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "浮点单元 FPU 与 vFPU",
+          "order": 4,
+          "filename": "u4-l4-fpu-and-vfpu.md",
+          "level": "intermediate",
+          "topic": "讲解浮点执行通路：fpuexe 接入、vfpu 的向量浮点并行、scalar_fpu 与各子运算（fadd_pipe/fmul_pipe/fma/fcmp/fp_to_int/int_to_fp），设计受香山启发。",
+          "learning_goals": [
+            "理解标量 FPU 与向量 vFPU 的层次关系",
+            "掌握主要浮点运算（加/减/乘/乘加/比较/类型转换）的流水化实现",
+            "理解浮点功能函数 FN_FADD/FN_FMUL/FN_FMADD 等与舍入模式的衔接"
+          ],
+          "source_files": [
+            "src/gpgpu_top/sm/pipeline/fpu/fpuexe.v",
+            "src/gpgpu_top/sm/pipeline/fpu/vfpu.v",
+            "src/gpgpu_top/sm/pipeline/fpu/fpu/scalar_fpu.v",
+            "src/gpgpu_top/sm/pipeline/fpu/fpu/fma.v",
+            "src/define/define.v"
+          ],
+          "minimal_modules": [
+            "fpuexe",
+            "vfpu",
+            "scalar_fpu",
+            "fma/fadd/fmul/fcmp"
+          ],
+          "practice_task": "梳理一条 VFADD_VV 指令如何在 vfpu 中被分发到各 lane 的 scalar_fpu（fadd_pipe）执行，并指出舍入模式(RNE/RTZ/...)如何传入。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "SFU 特殊功能单元",
+          "order": 5,
+          "filename": "u4-l5-sfu.md",
+          "level": "intermediate",
+          "topic": "讲解 SFU（基于 pulp-platform）如何处理除法、开方、指数等慢速运算，涉及 sfu_exe、int_div，以及与 define.v 中 FN_DIV/FN_REM/FN_FSQRT/FN_EXP 的对应。",
+          "learning_goals": [
+            "理解 SFU 承担的高延迟运算类型与 NUM_SFU 配置",
+            "掌握整数除法 int_div 的实现方式与被 SFU 复用的关系",
+            "理解 SFU 结果如何与流水线写回及 scoreboard 释放配合"
+          ],
+          "source_files": [
+            "src/gpgpu_top/sm/pipeline/sfu_v2/sfu_exe.v",
+            "src/gpgpu_top/sm/pipeline/sfu_v2/int_div.v",
+            "src/define/define.v"
+          ],
+          "minimal_modules": [
+            "sfu_exe",
+            "int_div",
+            "NUM_SFU"
+          ],
+          "practice_task": "选取一条 DIV 或 FSQRT 指令，说明它如何被路由到 SFU、int_div 如何迭代/流水执行，以及 scoreboard 在此期间如何保持依赖指令阻塞。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "访存与控制：LSU、CSR、SIMT、张量核",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "访存单元 LSU",
+          "order": 1,
+          "filename": "u5-l1-lsu.md",
+          "level": "intermediate",
+          "topic": "讲解 LSU 如何处理向量 load/store：地址计算 addrcalculate、字节提取 byte_extract、LSU MSHR(mshr_reg/shiftboard)、rsp_arb、input_fifo 与 lsu2wb 写回，以及各类访存指令(VLE/VSE/VLx/VSx)与掩码。",
+          "learning_goals": [
+            "理解向量访存的逐 lane 地址计算与字节对齐",
+            "掌握 LSU MSHR 如何跟踪未完成访存并合并/排序响应",
+            "理解 load/store 的字/半字/字节宽度(MEM_W/H/B)与掩码处理"
+          ],
+          "source_files": [
+            "src/gpgpu_top/sm/pipeline/lsu/lsu_exe.v",
+            "src/gpgpu_top/sm/pipeline/lsu/addrcalculate.v",
+            "src/gpgpu_top/sm/pipeline/lsu/mshr_reg.v",
+            "src/gpgpu_top/sm/pipeline/lsu/byte_extract.v",
+            "src/gpgpu_top/sm/pipeline/lsu/lsu2wb.v"
+          ],
+          "minimal_modules": [
+            "lsu_exe",
+            "addrcalculate",
+            "mshr_reg",
+            "byte_extract",
+            "lsu2wb"
+          ],
+          "practice_task": "跟踪一条 VLE32_V（向量 load）从地址计算、dcache 请求、MSHR 暂存、到响应经 byte_extract 对齐后经 lsu2wb 写回向量寄存器堆的完整流程。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "CSR 寄存器与分支 branch_back",
+          "order": 2,
+          "filename": "u5-l2-csr-and-branch.md",
+          "level": "intermediate",
+          "topic": "讲解 CSR 文件(csrfile/csrexe)如何支持标准机器态 CSR 与 Ventus 自定义 CSR（wg_id、kn_base、rpc、pds_baseaddr 等），以及 branch_back 如何处理标量分支与跳转(SETRPC/JAL/JALR)。",
+          "learning_goals": [
+            "掌握 CSR 地址空间（标准 + 自定义）及其在派发/执行中的用途",
+            "理解 CSR 读改写类型(CSR_W/S/C)与 csrexe 的实现",
+            "理解分支/跳转指令如何更新 PC 并触发 flush"
+          ],
+          "source_files": [
+            "src/gpgpu_top/sm/pipeline/csr/csrfile.v",
+            "src/gpgpu_top/sm/pipeline/csr/csrexe.v",
+            "src/gpgpu_top/sm/pipeline/branch_back.v",
+            "src/define/define.v"
+          ],
+          "minimal_modules": [
+            "csrfile",
+            "csrexe",
+            "branch_back",
+            "自定义CSR"
+          ],
+          "practice_task": "列举 define.v 中 Ventus 自定义 CSR（如 CSR_WG_ID、CSR_KNL_BASE、CSR_PDS_BASEADDR、CSR_RPC），说明它们分别由谁写入、谁读取，以及 SETRPC 如何影响分支目标。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "SIMT 栈与分支发散",
+          "order": 3,
+          "filename": "u5-l3-simt-stack.md",
+          "level": "intermediate",
+          "topic": "讲解 GPU 分支发散与汇合机制：simt_stack 维护活跃掩码与分支/汇合点，branch_join_stack 配合 VBEQ/VBNE/JOIN 指令实现 warp 内线程的发散执行与重新汇合。",
+          "learning_goals": [
+            "理解 warp 内不同线程走不同分支时的发散问题与活跃掩码",
+            "掌握 simt_stack 如何记录分支点并在汇合处恢复执行",
+            "理解 JOIN/VBEQ/VBNE 等指令与 simt 栈的协作"
+          ],
+          "source_files": [
+            "src/gpgpu_top/sm/pipeline/simt_stack/simt_stack.v",
+            "src/gpgpu_top/sm/pipeline/simt_stack/branch_join_stack.v",
+            "src/define/define.v"
+          ],
+          "minimal_modules": [
+            "simt_stack",
+            "branch_join_stack",
+            "活跃掩码"
+          ],
+          "practice_task": "构造一个 warp 内部分线程成立、部分不成立的 VBEQ 分支，画出 simt_stack 如何压栈保存 diverge 点、如何先执行一路再汇合到 JOIN 处恢复全部线程活跃。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "张量核 tensor core",
+          "order": 4,
+          "filename": "u5-l4-tensor-core.md",
+          "level": "intermediate",
+          "topic": "讲解张量核（M/N/K 维矩阵乘）的实现：tensor_core_exe/tensor_core_fp32 顶层、tc_dot_product 点积、各级乘加流水(tc_mul_pipe/fmul_s*/fadd_s*) 与 naivemultiplier，以及 VFTTA 等张量指令。",
+          "learning_goals": [
+            "理解 TC_DIM_M/N/K 张量核的运算维度与点积实现",
+            "掌握张量核各级流水(乘/加)的组织与流水化",
+            "理解张量指令如何接入执行单元与操作数采集"
+          ],
+          "source_files": [
+            "src/gpgpu_top/sm/pipeline/tensor/tensor_core_exe.v",
+            "src/gpgpu_top/sm/pipeline/tensor/tensor_core_fp32.v",
+            "src/gpgpu_top/sm/pipeline/tensor/tc_dot_product.v",
+            "src/gpgpu_top/sm/pipeline/tensor/tc_mul_pipe.v",
+            "src/define/define.v"
+          ],
+          "minimal_modules": [
+            "tensor_core_exe",
+            "tc_dot_product",
+            "tc_mul_pipe",
+            "TC_DIM_*"
+          ],
+          "practice_task": "结合 TC_DIM_M/N/K 说明一次张量点积 tc_dot_product 需要多少次乘加，并梳理 tc_mul_pipe→fadd_s1/s2 的流水级如何累加出最终结果。",
+          "depends_on": [
+            "u4-l3",
+            "u4-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "存储子系统：L1 Cache 与共享内存",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "数据缓存 dcache 与 MSHR",
+          "order": 1,
+          "filename": "u6-l1-dcache-and-mshr.md",
+          "level": "advanced",
+          "topic": "精读 l1_dcache 数据缓存：dcache_control 控制状态机、tag_access_top_v2/tag_checker、l1_mshr(get_entry_status_req/rsp) 处理缺失、dcache_wshr 写缓冲，以及 TileLink 风格的 opcode/param(TLAOP_GET/PUTFULL/FLUSH)。",
+          "learning_goals": [
+            "理解 L1 D-cache 的组相联结构与命中/缺失控制状态机",
+            "掌握 MSHR 如何合并多个缺失请求并按 set/entry 跟踪",
+            "理解写缓冲 wshr 与 TileLink 操作码(opcode/param)的配合"
+          ],
+          "source_files": [
+            "src/gpgpu_top/sm/l1cache/dcache/l1_dcache.v",
+            "src/gpgpu_top/sm/l1cache/dcache/dcache_control.v",
+            "src/gpgpu_top/sm/l1cache/dcache/l1_mshr/l1_mshr.v",
+            "src/gpgpu_top/sm/l1cache/dcache/dcache_wshr.v",
+            "src/gpgpu_top/sm/l1cache/dcache/tag_access/tag_access_top_v2.v"
+          ],
+          "minimal_modules": [
+            "l1_dcache",
+            "dcache_control",
+            "l1_mshr",
+            "dcache_wshr",
+            "tag_access"
+          ],
+          "practice_task": "梳理一次 dcache 缺失：tag miss→分配 MSHR entry→向 l2 发 GET→数据返回填入→唤醒等待的 LSU 请求，并说明 DCACHE_MSHRENTRY/SUBENTRY 参数对并发缺失的支持。",
+          "depends_on": [
+            "u5-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "共享内存 shared_memory",
+          "order": 2,
+          "filename": "u6-l2-shared-memory.md",
+          "level": "advanced",
+          "topic": "讲解 SM 内的共享内存(LDS)：sharemem 的多 bank 组织、bankconflict_arb 对 bank 冲突的仲裁，以及 SHAREDMEM_DEPTH/NWAYS/BLOCKWORDS/NBANKS 等参数。",
+          "learning_goals": [
+            "理解共享内存作为同 workgroup 内线程通信的低延迟存储",
+            "掌握多 bank 划分与 bank 冲突的检测/仲裁",
+            "理解共享内存参数(SHAREMEM_SIZE、SHAREMEM_NBANKS)与 NUM_THREAD 的关系"
+          ],
+          "source_files": [
+            "src/gpgpu_top/sm/l1cache/shared_memory/sharemem.v",
+            "src/gpgpu_top/sm/l1cache/shared_memory/bankconflict_arb.v",
+            "src/define/define.v"
+          ],
+          "minimal_modules": [
+            "sharemem",
+            "bankconflict_arb",
+            "SHAREDMEM 参数"
+          ],
+          "practice_task": "构造一组合并访问 sharemem 的请求，说明 bankconflict_arb 如何检测并仲裁 bank 冲突，并计算当前配置下共享内存总容量 SHAREMEM_SIZE。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "L1 cache 仲裁 l1cache_arb",
+          "order": 3,
+          "filename": "u6-l3-l1cache-arbiter.md",
+          "level": "advanced",
+          "topic": "讲解 l1cache_arb 如何把 icache、dcache、shared_memory 的请求仲裁后统一对接 SM 对外存储接口（NUM_CACHE_IN_SM），以及 cache_invalid/flush 的协同。",
+          "learning_goals": [
+            "理解多路 L1 请求(icache/dcache/shared)的仲裁与复用",
+            "掌握 cache_invalid 如何驱动缓存无效/回写流程",
+            "理解 NUM_CACHE_IN_SM 与对外接口的关系"
+          ],
+          "source_files": [
+            "src/gpgpu_top/sm/l1cache_arb.v",
+            "src/gpgpu_top/sm/sm_wrapper.v",
+            "src/define/define.v"
+          ],
+          "minimal_modules": [
+            "l1cache_arb",
+            "icache",
+            "dcache",
+            "shared_memory"
+          ],
+          "practice_task": "在 l1cache_arb 中梳理 icache/dcache/shared 三类请求如何被仲裁输出到 sm_wrapper 的 mem_req 接口，并说明 cache_invalid 何时由 GPGPU_top 在 wg 完成时置起。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "片上互联与 L2：TileLink 与 AXI",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "TileLink 协议基础与操作码",
+          "order": 1,
+          "filename": "u7-l1-tilelink-protocol.md",
+          "level": "advanced",
+          "topic": "讲解项目中使用的 TileLink 风格接口：A/D 通道、操作码(PUTFULLDATA/GET/ACQUIREBLOCK/...)、param 参数、source 编码与 mask，结合 define.v 的 TL 相关宏。",
+          "learning_goals": [
+            "理解 TileLink A 通道(请求)与 D 通道(响应)的握手与字段",
+            "掌握主要操作码(GET/PUTFULL/ACQUIRE/PROBE/RELEASE/GRANT)的语义",
+            "理解 source 编码如何携带 SM/cache/set/entry 来源信息以供响应路由"
+          ],
+          "source_files": [
+            "src/define/define.v",
+            "src/gpgpu_top/GPGPU_top.v"
+          ],
+          "minimal_modules": [
+            "TileLink A/D 通道",
+            "TL 操作码",
+            "source 编码",
+            "mask"
+          ],
+          "practice_task": "列举 define.v 中 SOURCE_BITS/A_SOURCE/D_SOURCE/CLUSTER_SOURCE 的计算式，解释一个 L1 请求如何把来源(SM号/cache号/set/entry)打包进 source 字段以便 L2 响应正确路由。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "L2 Cache Scheduler 架构",
+          "order": 2,
+          "filename": "u7-l2-l2cache-scheduler.md",
+          "level": "advanced",
+          "topic": "精读基于 SiFive block-inclusivecache 的 L2：Scheduler 顶层、directory_test 目录、banked_store 存储体、MSHR、Listbuffer，以及 sinkA/sourceA/sourceD/sinkD 各通道处理。",
+          "learning_goals": [
+            "理解 L2 的包含式(inclusive)目录与 banked store 组织",
+            "掌握 Scheduler 如何用各 sink/source 通道并发处理 A/D 流",
+            "理解 L2 MSHR 与 Listbuffer 如何处理未完成事务"
+          ],
+          "source_files": [
+            "src/gpgpu_top/l2cache/Scheduler.v",
+            "src/gpgpu_top/l2cache/directory_test.v",
+            "src/gpgpu_top/l2cache/banked_store.v",
+            "src/gpgpu_top/l2cache/MSHR.v",
+            "src/gpgpu_top/l2cache/Listbuffer.v",
+            "src/gpgpu_top/l2cache/sourceD.v"
+          ],
+          "minimal_modules": [
+            "Scheduler",
+            "directory",
+            "banked_store",
+            "MSHR",
+            "Listbuffer",
+            "sink/source 通道"
+          ],
+          "practice_task": "梳理一次 L2 缺失：sinkA 接收→directory 查找→(必要时)sourceA 向内存发请求、probe 下级→banked_store 填充→sourceD 经 D 通道回送 L1，并说明 l2cache_finish_issue 的产生。",
+          "depends_on": [
+            "u7-l1",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "cluster 到 L2 的互联",
+          "order": 3,
+          "filename": "u7-l3-cluster-l2-interconnect.md",
+          "level": "advanced",
+          "topic": "讲解多 SM(cluster) 到 L2 的互联网络：sm2cluster_arb 汇聚各 SM 请求、l2_distribute 把请求分发到各 L2、cluster_to_l2_arb 在请求端仲裁并处理响应回送。",
+          "learning_goals": [
+            "理解多 SM 请求如何经 sm2cluster_arb 汇聚成 cluster 级流",
+            "掌握 l2_distribute 按地址把请求分发到对应 L2 的策略",
+            "理解 cluster_to_l2_arb 在请求/响应两端的仲裁与路由"
+          ],
+          "source_files": [
+            "src/gpgpu_top/l2_distribute.v",
+            "src/gpgpu_top/cluster_to_l2_arb.v",
+            "src/gpgpu_top/GPGPU_top.v",
+            "src/define/define.v"
+          ],
+          "minimal_modules": [
+            "sm2cluster_arb",
+            "l2_distribute",
+            "cluster_to_l2_arb",
+            "NUM_CLUSTER/NUM_L2CACHE"
+          ],
+          "practice_task": "在 GPGPU_top.v 中跟踪一个 SM 的 mem_req 如何经 sm2cluster_arb→l2_distribute→cluster_to_l2_arb 到达 Scheduler，再反向把 D 通道响应送回原 SM，画出互联拓扑。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "AXI4 适配器与 host 接口",
+          "order": 4,
+          "filename": "u7-l4-axi-adapter-and-host.md",
+          "level": "advanced",
+          "topic": "讲解 GPGPU 对外接口：gpgpu_axi_top 顶层、axi4_adapter/axi4_adapter_top 把 TileLink 转换为 AXI4，axi4lite_2_cta 提供 AXI4-Lite 主机接口驱动 CTA 派发，以及 spill_register 等 CDC/时序优化单元。",
+          "learning_goals": [
+            "理解 TileLink(out_a/out_d) 与 AXI4 之间的协议转换",
+            "掌握 AXI4-Lite 主机接口如何写入寄存器触发 CTA 派发",
+            "理解 spill_register/cut 在接口时序优化中的作用"
+          ],
+          "source_files": [
+            "src/gpgpu_top/gpgpu_axi_top.sv",
+            "src/gpgpu_top/axi4_adapter/axi4_adapter_top.sv",
+            "src/gpgpu_top/axi4_adapter/axi4_adapter.sv",
+            "src/gpgpu_top/axi4lite_2_cta.v",
+            "src/gpgpu_top/axi4_adapter/spill_register.sv"
+          ],
+          "minimal_modules": [
+            "gpgpu_axi_top",
+            "axi4_adapter_top",
+            "axi4lite_2_cta",
+            "spill_register"
+          ],
+          "practice_task": "对照 AXI4/AXI4-Lite 参数宏(AXI_DATA_WIDTH、AXILITE_*)，说明 axi4_adapter 如何把 L2 的 TileLink GET/PUT 映射为 AXI AR/AW/W/R/B 事务，以及主机经 axi4lite_2_cta 配置一次派发的流程。",
+          "depends_on": [
+            "u7-l2",
+            "u1-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "工程实践：仿真、综合与扩展",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "仿真测试框架与 testbench",
+          "order": 1,
+          "filename": "u8-l1-testbench-framework.md",
+          "level": "advanced",
+          "topic": "精读 testbench：test_gpu_axi_top 顶层例化、host_inter 模拟主机经 AXI4-Lite 派发 workgroup 并加载指令/数据、axi_ram 模拟外部存储，以及 file_list.f 组织。",
+          "learning_goals": [
+            "理解 AXI 仿真平台的组件构成与启动流程",
+            "掌握 host_inter 如何加载 metadata、驱动 CTA 派发并等待 wf_done",
+            "理解 axi_ram 如何响应 AXI 读写请求作为内存模型"
+          ],
+          "source_files": [
+            "testcase/test_gpgpu_axi_top/common/test_gpu_axi_top.sv",
+            "testcase/test_gpgpu_axi_top/common/host_inter.sv",
+            "testcase/test_gpgpu_axi_top/common/axi_ram.sv",
+            "testcase/test_gpgpu_axi_top/common/file_list.f"
+          ],
+          "minimal_modules": [
+            "test_gpu_axi_top",
+            "host_inter",
+            "axi_ram",
+            "file_list.f"
+          ],
+          "practice_task": "在 testbench 中找到 host_inter 加载程序、发起首个 workgroup、以及检测 PASSED/FAILED 退出条件的代码，说明 AXI RAM 如何被预加载 kernel 与数据。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "公共单元库 common_cell",
+          "order": 2,
+          "filename": "u8-l2-common-cell-library.md",
+          "level": "advanced",
+          "topic": "讲解 src/common_cell 提供的可复用基础单元：各类 FIFO(stream_fifo*/fifo_with_*)、仲裁器(fixed_pri_arb/round_robin_arb)、pop_cnt、find_first、bin2one/one2bin 等，及其在全项目的复用。",
+          "learning_goals": [
+            "掌握项目内复用的 FIFO 变体及其适用场景(pipe/flush/count/SRAM)",
+            "理解固定优先级与轮询仲裁器的实现差异",
+            "了解 popcount、find-first-one 等常用组合逻辑单元"
+          ],
+          "source_files": [
+            "src/common_cell/stream_fifo.v",
+            "src/common_cell/fifo.v",
+            "src/common_cell/round_robin_arb.v",
+            "src/common_cell/fixed_pri_arb.v",
+            "src/common_cell/pop_cnt.v",
+            "src/common_cell/find_first.v"
+          ],
+          "minimal_modules": [
+            "stream_fifo 系列",
+            "仲裁器",
+            "pop_cnt",
+            "find_first"
+          ],
+          "practice_task": "对比 stream_fifo 与 stream_fifo_useSRAM 的实现差异，说明何时应选用 SRAM 版 FIFO；并分析 round_robin_arb 的轮询状态更新逻辑。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "FPGA 验证与综合流程",
+          "order": 3,
+          "filename": "u8-l3-fpga-and-synthesis.md",
+          "level": "advanced",
+          "topic": "讲解 FPGA_test 子模块（driver、tcl、memory model）的 FPGA 验证思路，以及 README 中给出的 DC 综合（tsmc 28nm、620MHz、面积）与 T28_MEM 宏的影响。",
+          "learning_goals": [
+            "了解 FPGA 验证的驱动框架与内存模型组织",
+            "理解 DC 综合的关键配置(NUM_THREAD/NUM_SM/NUM_WARP/DCACHE_BLOCKWORDS)与结果指标",
+            "了解 T28_MEM 宏对 SRAM 替换与综合/实现的影响"
+          ],
+          "source_files": [
+            "FPGA_test/README.md",
+            "FPGA_test/ventus_fpga.tcl",
+            "FPGA_test/driver/naive_driver.c",
+            "README.md",
+            "src/define/define.v"
+          ],
+          "minimal_modules": [
+            "FPGA_test driver",
+            "ventus_fpga.tcl",
+            "DC 综合",
+            "T28_MEM"
+          ],
+          "practice_task": "阅读 FPGA_test 框架与 README 综合章节，整理 FPGA 验证时主机驱动如何加载并启动 kernel，并说明开启/关闭 T28_MEM 宏对 SRAM 例化的影响。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "指令集扩展与二次开发",
+          "order": 4,
+          "filename": "u8-l4-isa-extension.md",
+          "level": "advanced",
+          "topic": "以新增一条自定义指令为例，串起全栈：在 define.v 增加位模式与 FN_*、在 decodeUnit 译码、在执行单元(alu/fpu/sfu)实现功能、经 operand_collector 取数与写回，并编写测试用例验证。",
+          "learning_goals": [
+            "掌握新增一条指令需要改动的源码位置与依赖关系",
+            "理解译码→操作数采集→执行→写回的完整贯通方法",
+            "能够设计对应的测试程序并用仿真验证新指令正确性"
+          ],
+          "source_files": [
+            "src/define/define.v",
+            "src/gpgpu_top/sm/pipeline/decodeUnit.v",
+            "src/gpgpu_top/sm/pipeline/valu/alu.v",
+            "src/gpgpu_top/sm/pipeline/operand_collector/gen_imm.v",
+            "src/gpgpu_top/sm/pipeline/pipe.v"
+          ],
+          "minimal_modules": [
+            "define.v",
+            "decodeUnit",
+            "执行单元",
+            "operand_collector",
+            "testcase"
+          ],
+          "practice_task": "设计一条简单的自定义向量运算指令（如带饱和的向量加），依次修改 define.v(位模式+FN)、decodeUnit(译码)、alu(功能实现)，并编写最小测试用例在 tc_vecadd 框架下仿真验证其正确性。",
+          "depends_on": [
+            "u3-l3",
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
