@@ -1,0 +1,383 @@
+{
+  "project": "typst-crates-typst",
+  "head": "32fd4cc3861e0ab99f4c42ca6bea281482ba9f51",
+  "rationale": "typst crate 本身只有一个 src/lib.rs，它是整个 Typst 编译器的顶层「门面 + 编排层」：re-export typst_library/syntax/utils，把解析→求值→布局→导出四步流水线串起来。由于仓库里 typst-eval/layout/html/realize/library/syntax/utils 等子 crate 各有自己的讲义，本手册刻意聚焦「typst crate 独有的编排逻辑」，只在 compile 直接调用处下钻到子 crate 文件。学习顺序按三层推进：入门层先让读者认清 facade 角色、四步流水线地图、嵌入所需的 World 契约，以及如何调用 compile() 完成一次编译；进阶层精读 compile_impl 主流程，重点攻克本 crate 最核心的「内省稳定化循环」及其收敛检测机制，再讲透贯穿全程的 Engine/Sink/Route/Traced 上下文；专家层落在架构抽象上——多目标 Target/Output、为 crate 切分而生的 ROUTINES 动态链接表、Library 构建与特性开关、诊断去重/延迟错误/友好提示，以及与 compile 并列的 trace() 值追踪入口。每篇只解决一个独立主题，依赖关系沿「先会用、再读主流程、最后看架构」自然展开。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 typst crate 并完成第一次编译",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "typst crate 定位与编译流水线地图",
+          "order": 1,
+          "filename": "u1-l1-facade-and-pipeline.md",
+          "level": "beginner",
+          "topic": "介绍 typst crate 是 Typst 编译器的顶层门面（facade），它把解析、求值、布局、导出四步流水线串联起来；通过 Cargo.toml 依赖与 lib.rs 顶部模块文档建立阅读全局地图。",
+          "learning_goals": [
+            "理解 typst crate 在 typst/typst 仓库中的角色：顶层门面，re-export typst_library 并对外暴露 compile/trace",
+            "说出编译四步流水线：解析 parse → 求值 eval → 布局 layout → 导出 export",
+            "通过 Cargo.toml 理解它依赖哪些子 crate（typst-eval/layout/html/realize/syntax/library/timing/utils）",
+            "把 lib.rs 顶部模块文档当作阅读整本手册的导航来使用"
+          ],
+          "source_files": [
+            "crates/typst/Cargo.toml",
+            "crates/typst/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "lib.rs 顶部模块文档（Steps 小节）",
+            "Cargo.toml 的 [dependencies]",
+            "pub use typst_library::* / syntax / utils"
+          ],
+          "practice_task": "在本地 clone 仓库后，画出 typst crate 与其依赖的子 crate 的依赖关系图；并用自己话写出 compile() 从源码字符串到导出产物经过的四步，标注每步由哪个 crate 负责。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "World trait —— 嵌入 Typst 的环境契约",
+          "order": 2,
+          "filename": "u1-l2-world-trait.md",
+          "level": "beginner",
+          "topic": "讲解编译器与外部世界之间的接口 World trait：宿主必须提供 library/book/main/source/file/font/today，以及为何缓存职责放在 World 一侧。",
+          "learning_goals": [
+            "理解 World trait 是嵌入 Typst 编译器时唯一必须实现的环境接口",
+            "说出 World 的 7 个方法各自提供什么（标准库、字体簿、主文件 id、源码、二进制、字体、日期）",
+            "理解为何文件与字体的缓存由 World 而非编译器负责（watch、增量、语言服务器场景）",
+            "了解 WorldExt 以及对 Box/Arc/& 的自动实现"
+          ],
+          "source_files": [
+            "crates/typst-library/src/lib.rs",
+            "crates/typst/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "World trait 定义",
+            "world_impl! 宏（Box/Arc/& 的 blanket 实现）",
+            "WorldExt::range"
+          ],
+          "practice_task": "草拟一个最小 MyWorld 结构体（不必完全可运行），列出实现 World 7 个方法需要持有的字段；并写注释说明哪几个方法在 typst watch 场景下应跨编译缓存、哪几个应每轮清空。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "调用 compile() 完成一次编译",
+          "order": 3,
+          "filename": "u1-l3-compile-entrypoint.md",
+          "level": "beginner",
+          "topic": "讲解公开入口 compile<T> 的签名、泛型 T: Output（如 PagedDocument/HtmlDocument）、返回类型 Warned<SourceResult<T>>，以及如何把 compile 接入一个最小可运行的编译流程。",
+          "learning_goals": [
+            "看懂 pub fn compile<T>(world: &dyn World) -> Warned<SourceResult<T>> 的签名",
+            "理解泛型 T: Output 决定产出类型（分页 PagedDocument / HTML HtmlDocument）",
+            "区分 Warned 里的 output（Ok/Err）与 warnings",
+            "知道 #[typst_macros::time] 计时注解的存在"
+          ],
+          "source_files": [
+            "crates/typst/src/lib.rs",
+            "crates/typst-library/src/diag.rs"
+          ],
+          "minimal_modules": [
+            "compile 函数",
+            "Warned 结构体",
+            "SourceResult / SourceDiagnostic"
+          ],
+          "practice_task": "写一段伪代码骨架（或对照仓库已有 World 实现思路），展示「构造 World → 调用 typst::compile::<PagedDocument>(&world) → 分别用 Warned 的 output 与 warnings 处理成功与告警」的完整流程。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：compile 主流程与内省稳定化机制",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "compile_impl 编译主流程精读",
+          "order": 1,
+          "filename": "u2-l1-compile-impl-walkthrough.md",
+          "level": "intermediate",
+          "topic": "逐段精读 compile_impl：取 library、按 target 做特性门控、构造基础样式链、取出主源码、调用 typst_eval::eval 得到 content、进入稳定化循环、最后提升延迟错误。",
+          "learning_goals": [
+            "跟踪 compile_impl 从 world.library() 到返回 document 的完整执行路径",
+            "理解 base 样式链与 TargetElem::target 如何把「编译目标」注入样式系统",
+            "理解主源码获取失败时 hint_invalid_main_file 的友好提示机制",
+            "理解循环结束后「提升延迟错误（promote delayed errors）」的作用"
+          ],
+          "source_files": [
+            "crates/typst/src/lib.rs",
+            "crates/typst-eval/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "compile_impl 函数体",
+            "typst_eval::eval 调用",
+            "hint_invalid_main_file",
+            "循环末尾 sink.delayed() 提升逻辑"
+          ],
+          "practice_task": "为 compile_impl 的每个阶段（取库/门控/样式/取主源码/求值/循环/提升错误）画一张时序流程图，并标注每一步可能产生致命 SourceResult::Err 还是只产生 warning。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "内省稳定化循环",
+          "order": 2,
+          "filename": "u2-l2-introspection-stabilization-loop.md",
+          "level": "intermediate",
+          "topic": "深入 compile_impl 中的循环：为何要反复布局直到内省（introspection）稳定，constraint 校验、history (ArrayVec) 记录历史文档、MAX_ITERS 上限、EmptyIntrospector 的作用。",
+          "learning_goals": [
+            "解释 Typst 为何需要「反复布局直到稳定」：计数器、查询、交叉引用依赖最终页面布局",
+            "读懂循环里 introspector 取自 history.last()、constraint.validate 判定收敛的逻辑",
+            "理解 MAX_ITERS=5 的上限与 ITER_NAMES 计时标签",
+            "理解 EmptyIntrospector 在首轮迭代提供「空的内省」"
+          ],
+          "source_files": [
+            "crates/typst/src/lib.rs",
+            "crates/typst-library/src/introspection/convergence.rs",
+            "crates/typst-library/src/introspection/introspector.rs"
+          ],
+          "minimal_modules": [
+            "compile_impl 中的 loop 块",
+            "constraint.validate 收敛判定",
+            "history (ArrayVec) 与 history.push",
+            "MAX_ITERS / ITER_NAMES / EmptyIntrospector"
+          ],
+          "practice_task": "用一个具体例子（如「目录页码依赖正文页数」）推演前 3 轮迭代各自的内省器状态，并说明第几轮会触发 constraint.validate 返回 true 而跳出循环。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "内省记录与非收敛检测",
+          "order": 3,
+          "filename": "u2-l3-introspection-convergence.md",
+          "level": "intermediate",
+          "topic": "讲解收敛是如何被「判定 + 诊断」的：Introspect trait、Engine::introspect 把内省记入 Sink、循环未收敛时 compile 调用 analyze() 生成「文档未在五次内收敛」的告警与 History。",
+          "learning_goals": [
+            "理解 Introspect trait（Output/introspect/diagnose）如何抽象「一次对文档的观察」",
+            "理解 Engine::introspect 在求值同时把 Introspection 记进 Sink",
+            "读懂 analyze() 如何遍历历史内省器、用 History::converged 判定并生成诊断",
+            "理解 comemo 校验失败但文档实际收敛时不发警告的细节"
+          ],
+          "source_files": [
+            "crates/typst-library/src/introspection/convergence.rs",
+            "crates/typst/src/lib.rs",
+            "crates/typst-library/src/engine.rs"
+          ],
+          "minimal_modules": [
+            "Introspect trait",
+            "Introspection 类型擦除",
+            "analyze 函数",
+            "History::converged",
+            "Engine::introspect"
+          ],
+          "practice_task": "选一种已有内省（如 QueryIntrospection 或计数器内省），对照 convergence.rs 写出它在 5 次迭代中 History 的取值变化，并判断最终是否会产生非收敛告警。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "编译上下文 Engine / Sink / Route / Traced",
+          "order": 4,
+          "filename": "u2-l4-engine-sink-route-traced.md",
+          "level": "intermediate",
+          "topic": "讲解贯穿求值与布局的中央上下文 Engine，以及它携带的 Sink（告警/延迟错误/内省/追踪值）、Route（嵌套深度与循环导入检测）、Traced（被追踪的 span）。",
+          "learning_goals": [
+            "理解 Engine 结构体的 6 个字段及其用途",
+            "理解 Sink 作为「只增容器」如何收集告警（含去重）、延迟错误、内省记录、追踪值",
+            "理解 Route 如何用长度上界与 contains 检测循环导入与过深嵌套",
+            "理解 Traced 如何按文件 id 过滤被追踪 span"
+          ],
+          "source_files": [
+            "crates/typst-library/src/engine.rs",
+            "crates/typst/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Engine 结构体",
+            "Sink（warn 去重 / delayed / introspection / value）",
+            "Route（within / contains / MAX_*_DEPTH）",
+            "Traced::get 过滤"
+          ],
+          "practice_task": "画一张 Engine 在一次求值中如何被克隆/追踪（track/track_mut）并最终把子 Sink 合并回主 Sink 的数据流图；并解释 Route::within 为何用「上界」而非精确长度来兼顾缓存复用。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "专家：架构抽象、扩展点与诊断",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Target 与 Output 多目标抽象",
+          "order": 1,
+          "filename": "u3-l1-target-and-output.md",
+          "level": "advanced",
+          "topic": "讲解同一份 compile 如何产出不同目标（Paged/Html/Bundle）：Target 枚举、Output trait（target/create/introspector）、TargetElem 把目标注入样式、contextual target() 函数。",
+          "learning_goals": [
+            "理解 Target 枚举（Paged/Html/Bundle）与 Output trait 的一一对应",
+            "读懂 compile<T: Output> 如何靠 T::target() 做特性门控、靠 T::create() 产出",
+            "理解 TargetElem 如何把编译目标作为样式字段向下传递",
+            "理解 AsOutput trait 与 contextual target() 函数的用途"
+          ],
+          "source_files": [
+            "crates/typst-library/src/foundations/target.rs",
+            "crates/typst/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Target 枚举",
+            "Output trait",
+            "TargetElem",
+            "AsOutput",
+            "target() contextual 函数"
+          ],
+          "practice_task": "写一个对照表，说明 PagedDocument、HtmlDocument、bundle 各自对应哪个 Target、哪个 T::create 实现，以及 compile 里分别走 warn_or_error_for_* 的哪条分支。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "ROUTINES 表与 crate 切分",
+          "order": 2,
+          "filename": "u3-l2-routines-crate-splitting.md",
+          "level": "advanced",
+          "topic": "讲解 Routines 函数指针表为何存在（为「crate 切分」做动态链接，打破循环依赖），以及 typst crate 顶层 ROUTINES 静态量如何把 typst-layout/html/realize/eval 的实现接进来。",
+          "learning_goals": [
+            "理解 ROUTINES 是「用函数指针表实现的动态链接」，目的是 crate 切分",
+            "读懂 typst/src/lib.rs 中 ROUTINES LazyLock 如何填入 rules/eval_string/eval_closure/realize/layout_frame/html_*",
+            "理解 Routines 的 Hash 实现为空、Debug 打印 Routines(..) 的原因",
+            "看懂 routines! 宏如何统一声明字段与签名"
+          ],
+          "source_files": [
+            "crates/typst/src/lib.rs",
+            "crates/typst-library/src/routines.rs"
+          ],
+          "minimal_modules": [
+            "ROUTINES LazyLock 静态量",
+            "Routines 结构体（routines! 宏）",
+            "register 接线（typst_layout/typst_html）",
+            "eval_string/eval_closure/realize/layout_frame 接线"
+          ],
+          "practice_task": "选 Routines 中的某一个字段（如 realize 或 layout_frame），追查它在 typst-library 中被调用、在子 crate（typst-realize/typst-layout）中被实现、在 typst crate 的 ROUTINES 中被「接线」的三处源码位置，画出这条「接口—实现—装配」链路。",
+          "depends_on": [
+            "u1-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Library 构建与特性开关",
+          "order": 3,
+          "filename": "u3-l3-library-builder-features.md",
+          "level": "advanced",
+          "topic": "讲解标准库 Library 是如何被构建出来的：LibraryExt（default/builder）、LibraryBuilder（inputs/features）、global 模块装配、prelude、Features/Feature 开关与条件注册 html 模块。",
+          "learning_goals": [
+            "理解 LibraryExt::default()/builder() 与 LibraryBuilder 的 builder 模式",
+            "读懂 Library 的字段（routines/global/math/styles/rules/std/features）",
+            "理解 global() 如何按 category 装配 foundations/model/text/layout/visualize/introspection/loading/symbols",
+            "理解 Features/Feature 开关如何控制 html 模块等的条件注册"
+          ],
+          "source_files": [
+            "crates/typst-library/src/lib.rs",
+            "crates/typst/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "LibraryExt（default/builder）",
+            "LibraryBuilder（with_inputs/with_features/build）",
+            "Library 结构体字段",
+            "global() 与 prelude()",
+            "Features / Feature"
+          ],
+          "practice_task": "用 Library::builder().with_features(...).with_inputs(...).build() 写一段配置示例，并说明开启 Feature::Html 后 global 模块会发生什么额外注册。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "诊断处理：去重、延迟错误与友好提示",
+          "order": 4,
+          "filename": "u3-l4-diagnostics-dedup-hints.md",
+          "level": "advanced",
+          "topic": "讲解 compile 周边的诊断处理：deduplicate 去重、延迟错误在循环末尾才提升为主错误、hint_invalid_main_file 的 UTF-8 友好提示、warn_or_error_for_html/bundle 的特性门控告警。",
+          "learning_goals": [
+            "理解 deduplicate 按 (span, message) 哈希去重诊断",
+            "理解「延迟错误」语义：循环早期忽略，仅末轮仍存在才致命",
+            "读懂 hint_invalid_main_file 如何针对 .typ 误扩展给出提示",
+            "理解 warn_or_error_for_html/bundle 根据 feature 开关决定告警还是报错"
+          ],
+          "source_files": [
+            "crates/typst/src/lib.rs",
+            "crates/typst-library/src/diag.rs"
+          ],
+          "minimal_modules": [
+            "deduplicate 函数",
+            "循环末尾 sink.delayed() 提升逻辑",
+            "hint_invalid_main_file",
+            "warn_or_error_for_html / warn_or_error_for_bundle"
+          ],
+          "practice_task": "构造两个会产生「重复诊断」或「延迟错误」的场景（用文字描述触发条件即可），分别说明 deduplicate 与「末轮提升」各起什么作用、最终用户看到的诊断是什么。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "trace() 值追踪机制",
+          "order": 5,
+          "filename": "u3-l5-trace-value-inspection.md",
+          "level": "advanced",
+          "topic": "讲解与 compile 并列的公开入口 trace()：传入一个 span，编译过程中把该 span 处观察到的值与样式收集进 Sink，用于 IDE 的「查看某处的值」等功能。",
+          "learning_goals": [
+            "理解 trace() 与 compile() 共用 compile_impl 的关系",
+            "理解 Traced 携带目标 span、并按文件 id 过滤",
+            "理解 Sink::value 在求值时如何记录 (Value, Option<Styles>) 以及 MAX_VALUES 上限",
+            "理解 trace 场景下为何用 .ok() 丢弃错误、只关心 values"
+          ],
+          "source_files": [
+            "crates/typst/src/lib.rs",
+            "crates/typst-library/src/engine.rs"
+          ],
+          "minimal_modules": [
+            "trace 函数",
+            "Traced::new/get",
+            "Sink::value / MAX_VALUES",
+            "compile_impl 在 trace 中的复用"
+          ],
+          "practice_task": "用一段说明描述「在 IDE 中点击某表达式查看其求值结果」时 trace() 是如何被调用的：传入哪个 span、编译期间发生了什么、最终从 sink.values() 拿到什么。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
