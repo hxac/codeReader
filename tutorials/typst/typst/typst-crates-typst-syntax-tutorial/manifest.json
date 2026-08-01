@@ -1,0 +1,1072 @@
+{
+  "project": "typst-crates-typst-syntax",
+  "head": "32fd4cc3861e0ab99f4c42ca6bea281482ba9f51",
+  "rationale": "typst-syntax 是 Typst 编译器的前端核心，职责覆盖「文本→词法 token→CST→AST」的完整链路，外加文件身份(FileId)、行列索引(Lines)、源码定位(Span)、增量重解析(reparser)与语法高亮。它体量大（14 个源码文件、约 40 万字符），设计大量借鉴 rust-analyzer，增量重解析还有专门论文支撑，因此适合拆成 30 篇以上的讲义。\n\n学习顺序遵循「先见森林再见树木、由数据流驱动」的原则：\n1. 入门层(U1–U2)先让读者跑通端到端、建立全局模块地图，再掌握贯穿全 crate 的词汇表 SyntaxKind / SyntaxSet。\n2. 进阶层(U3–U8)沿着真实的编译数据流推进：Lexer(词法) → Parser(语法/CST) → SyntaxNode/LinkedNode(CST 数据结构) → Span(定位) → AST(语义视图) → Source/Lines(文本与编辑)，每一层都直接依赖上一层产物。\n3. 专家层(U9–U10)讲解对正确性与性能最敏感的部分：增量重解析、文件身份驻留、包清单解析、语法高亮，并以一篇二次开发与测试收尾。\n\n依赖关系严格对应「上层消费下层产物」的真实代码依赖，确保读者按序学习时不会遇到未铺垫的概念。每篇讲义只聚焦一个主题、引用 1–6 个真实源码文件，并配一个可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 typst-syntax：定位、运行与全景",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与核心概念",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 typst-syntax 在 Typst 中的角色：它负责词法分析、CST/AST 构建、span 定位与语法高亮；讲清 CST 与 AST 的区别、三种语法模式 Markup/Math/Code。",
+          "learning_goals": [
+            "理解 typst-syntax 解决什么问题、在整个 Typst 编译流水线中的位置",
+            "区分 Concrete Syntax Tree (CST) 与 Abstract Syntax Tree (AST)",
+            "认识 SyntaxMode 的三种模式：Markup、Math、Code"
+          ],
+          "source_files": [
+            "README.md",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "lib.rs 的模块声明与公共导出",
+            "SyntaxMode 枚举"
+          ],
+          "practice_task": "阅读 README 与 lib.rs，用自己的话写出 typst-syntax 的 5 项核心职责，并说明 lib.rs 中 pub use 把哪些类型暴露给外部使用。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建、依赖与运行方式",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解 Cargo.toml 的依赖（ecow、unscanny、unicode-* 等）、如何单独构建/测试本 crate，以及如何在最小程序里调用 parse 与 Source。",
+          "learning_goals": [
+            "看懂 Cargo.toml 的 workspace 配置与关键外部依赖",
+            "学会用 cargo 单独构建与测试 typst-syntax crate",
+            "能在最小 Rust 程序里调用 parse 或 Source::detached 跑通一次解析"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "src/lib.rs",
+            "src/source.rs"
+          ],
+          "minimal_modules": [
+            "Cargo.toml",
+            "Source::detached / Source::new",
+            "parse 入口"
+          ],
+          "practice_task": "在仓库外新建一个小 Rust 项目，添加 typst-syntax 依赖（或用 cargo test -p typst-syntax 在本仓库运行测试），用 Source::detached 解析一段 \"= Hello\"，打印出 root 节点的 kind。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "源码目录与模块地图",
+          "order": 3,
+          "filename": "u1-l3-module-map.md",
+          "level": "beginner",
+          "topic": "逐一介绍 14 个源码文件的职责，并画出从文本到 AST、再到 Source 的数据流与模块依赖关系图。",
+          "learning_goals": [
+            "记住每个源码文件（lexer/parser/node/ast/span/source/lines/reparser/path/package/highlight/kind/set）的职责",
+            "理解文本→token→CST→AST 的数据流",
+            "能复述 lib.rs 中 mod 声明与 pub use 的对应关系"
+          ],
+          "source_files": [
+            "README.md",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "lib.rs 模块树",
+            "各文件的 README 描述"
+          ],
+          "practice_task": "依据源码绘制一张模块依赖图，标注哪些模块是 pub、哪些是私有 mod，并解释 Source 为什么依赖 lines 与 reparser。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "端到端体验：从文本到语法树",
+          "order": 4,
+          "filename": "u1-l4-end-to-end-walkthrough.md",
+          "level": "beginner",
+          "topic": "以 Source::new 为线索走一遍完整链路：文本 → parse 生成 SyntaxNode → numberize 赋予 Span → Lines 建索引，最终得到可查询的 Source。",
+          "learning_goals": [
+            "理解 Source::new 内部依次调用了 parse、numberize、Lines::new",
+            "学会用 Source::root / text / id / lines 访问解析结果",
+            "初步认识 span 编号化的作用"
+          ],
+          "source_files": [
+            "src/source.rs",
+            "src/lib.rs",
+            "src/parser.rs"
+          ],
+          "minimal_modules": [
+            "Source::new",
+            "parse",
+            "numberize",
+            "Lines::new"
+          ],
+          "practice_task": "用 Source::detached 解析 \"#let x = 1\"，遍历 root().descendants() 打印每个节点的 kind 与文本片段，观察 CST 的结构。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "语法词汇表：SyntaxKind 与 SyntaxSet",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "SyntaxKind 枚举全貌",
+          "order": 1,
+          "filename": "u2-l1-syntaxkind-overview.md",
+          "level": "intermediate",
+          "topic": "系统讲解 kind.rs 中 SyntaxKind 枚举的所有变体分类：trivia、markup、math、code、分隔符、字面量、语句与节点类型。",
+          "learning_goals": [
+            "了解 SyntaxKind 的 #[repr(u8)] 紧凑表示与变体数量上限",
+            "按类别辨识 markup/math/code 各自专属的 kind",
+            "理解同一个 kind 既可由 lexer 产生（token）也可由 parser 产生（节点）"
+          ],
+          "source_files": [
+            "src/kind.rs"
+          ],
+          "minimal_modules": [
+            "SyntaxKind 枚举定义"
+          ],
+          "practice_task": "把 SyntaxKind 的所有变体按 markup/math/code/通用 列成四张表，并标注哪些只可能由 lexer 产生、哪些只由 parser 产生。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "SyntaxKind 的分类方法",
+          "order": 2,
+          "filename": "u2-l2-syntaxkind-classify.md",
+          "level": "intermediate",
+          "topic": "讲解 kind.rs 中的 is_grouping/is_block/is_stmt/is_keyword/is_trivia/is_error/name 等判定方法，以及它们如何被 parser 与 highlight 复用。",
+          "learning_goals": [
+            "掌握各类 is_* 判定方法返回 true 的 kind 范围",
+            "理解 trivia、block、stmt 等分类在解析器中的决策意义",
+            "学会用 name() 做面向用户的错误提示"
+          ],
+          "source_files": [
+            "src/kind.rs"
+          ],
+          "minimal_modules": [
+            "impl SyntaxKind 的判定方法",
+            "name()"
+          ],
+          "practice_task": "写一段代码：给定任意 SyntaxKind，利用 is_* 方法把它归到 trivia/block/stmt/keyword/其它 五类之一并打印结果。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "SyntaxSet 位集与 syntax_set! 宏",
+          "order": 3,
+          "filename": "u2-l3-syntaxset.md",
+          "level": "intermediate",
+          "topic": "讲解 set.rs 用 u128 实现的 SyntaxSet 位集、syntax_set! 编译期宏，以及 parser 预定义的 STMT/CODE_EXPR/PATTERN/ARG 等集合。",
+          "learning_goals": [
+            "理解 SyntaxSet 基于 u128 位运算的实现与 <128 的限制",
+            "学会用 syntax_set! 宏在编译期构造集合",
+            "了解预定义集合（STMT、CODE_EXPR、PATTERN、ARG 等）在 parser 中的用途"
+          ],
+          "source_files": [
+            "src/set.rs",
+            "src/kind.rs"
+          ],
+          "minimal_modules": [
+            "SyntaxSet",
+            "syntax_set! 宏",
+            "预定义集合常量"
+          ],
+          "practice_task": "用 SyntaxSet::new().add(...).union(...) 自定义一个「可开启表达式的 token 集合」，并验证 contains() 结果，再与 ATOMIC_CODE_EXPR 对比。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "词法分析 Lexer",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Lexer 结构与工作流程",
+          "order": 1,
+          "filename": "u3-l1-lexer-internals.md",
+          "level": "intermediate",
+          "topic": "讲解 lexer.rs 中 Lexer 结构（Scanner、mode、newline、error）、next() 的分发逻辑，以及 error/hint 机制如何产出带提示的 Error token。",
+          "learning_goals": [
+            "理解 Lexer 基于 unscanny::Scanner 的工作方式与游标",
+            "掌握 next() 如何按字符分派到 whitespace/comment/raw/markup/math/code",
+            "了解词法错误如何以 SyntaxKind::Error + hints 的形式返回"
+          ],
+          "source_files": [
+            "src/lexer.rs"
+          ],
+          "minimal_modules": [
+            "Lexer 结构",
+            "next()",
+            "error()/hint()"
+          ],
+          "practice_task": "手动创建一个 Lexer::new(\"// c\\n#x\", Code) 迭代调用 next()，打印每个 token 的 kind、text 与 newline 标记。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Markup / Code / Math 三模式词法",
+          "order": 2,
+          "filename": "u3-l2-lexer-modes.md",
+          "level": "intermediate",
+          "topic": "对比 lexer.rs 中 markup()、code()、math() 三个分派函数，讲解同一字符在不同模式下产出不同 token，以及空白/注释等共享逻辑。",
+          "learning_goals": [
+            "理解 SyntaxMode 如何决定 token 产生规则",
+            "区分 markup 模式下的文本/智能引号/转义与 code 模式下的字面量/标识符",
+            "了解 math 模式可能返回附带 SyntaxNode 的特殊 token"
+          ],
+          "source_files": [
+            "src/lexer.rs"
+          ],
+          "minimal_modules": [
+            "markup()",
+            "code()",
+            "math()",
+            "whitespace()/line_comment()/block_comment()"
+          ],
+          "practice_task": "对字符串 \"1-2\" 分别用 Markup、Code、Math 模式词法化，比较产出的 token kind 差异并解释原因。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "原始文本 Raw 的词法处理",
+          "order": 3,
+          "filename": "u3-l3-lexer-raw.md",
+          "level": "intermediate",
+          "topic": "深入 lexer.rs 的 raw() 函数：反引号定界、语言标签 RawLang、行内/块级（1 个或 3+ 个反引号）、RawTrimmed 与转义插值。",
+          "learning_goals": [
+            "理解 raw 文本的定界规则与行内/块级判定",
+            "认识 RawDelim、RawLang、RawTrimmed 等 kind 的来源",
+            "了解 raw 文本几乎完全在 lexer 中处理、parser 直接 eat 的设计"
+          ],
+          "source_files": [
+            "src/lexer.rs",
+            "src/kind.rs"
+          ],
+          "minimal_modules": [
+            "raw()",
+            "Raw / RawDelim / RawLang / RawTrimmed"
+          ],
+          "practice_task": "词法化 \"`typ` code\"\" 与 \"\"\"\\nblock\\n\"\"\"，打印其子 token，验证 RawLang 与块级 RawDelim 的产生。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "字符判定工具函数",
+          "order": 4,
+          "filename": "u3-l4-lexer-utils.md",
+          "level": "intermediate",
+          "topic": "讲解 lib.rs 导出的 is_id_start/is_id_continue/is_ident/is_newline/is_valid_label_literal_id/link_prefix/split_newlines 等公共字符工具及其 Unicode 处理。",
+          "learning_goals": [
+            "掌握标识符合法性与换行判定（基于 unicode-ident / unicode-segmentation）",
+            "理解 link_prefix 如何识别 URL 前缀",
+            "学会用 split_newlines 切分多行文本"
+          ],
+          "source_files": [
+            "src/lexer.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "is_id_start/is_id_continue/is_ident",
+            "is_newline",
+            "link_prefix",
+            "split_newlines",
+            "is_valid_label_literal_id"
+          ],
+          "practice_task": "写一个小测试：对若干字符串验证 is_ident 的真假，并用 link_prefix 尝试从 \"https://typst.org 网址\" 提取出链接前缀长度。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "语法分析 Parser",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Parser 架构与入口",
+          "order": 1,
+          "filename": "u4-l1-parser-architecture.md",
+          "level": "intermediate",
+          "topic": "讲解 parser.rs 的三个入口 parse/parse_code/parse_math、Parser 结构（lexer、token、nodes、balanced、memo、depth）以及 finish/finish_into 如何收尾为 SyntaxNode。",
+          "learning_goals": [
+            "理解递归下降 + 事件式(marker)解析的整体架构",
+            "掌握 Parser 持有的状态字段及其用途",
+            "了解 MAX_DEPTH 深度限制与 memo 记忆化"
+          ],
+          "source_files": [
+            "src/parser.rs"
+          ],
+          "minimal_modules": [
+            "parse/parse_code/parse_math",
+            "struct Parser",
+            "finish/finish_into"
+          ],
+          "practice_task": "对比 parse、parse_code、parse_math 三个入口，说明它们选择的 SyntaxMode 与最终 wrap 的根 kind（Markup/Code/Math）的对应关系。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Marker、Token 与解析原语",
+          "order": 2,
+          "filename": "u4-l2-parser-primitives.md",
+          "level": "intermediate",
+          "topic": "讲解 parser.rs 中的 Marker、Token、AtNewline，以及 eat/at/current/marker/before_trivia/flush_trivia/wrap/convert_and_eat 等解析原语与单 token 前瞻。",
+          "learning_goals": [
+            "理解 Marker 用于回溯包装子树的机制",
+            "掌握 token 作为「单 token 前瞻 + 前置 trivia」的设计",
+            "学会用 eat/at/current/wrap 组合描述解析步骤"
+          ],
+          "source_files": [
+            "src/parser.rs"
+          ],
+          "minimal_modules": [
+            "Marker",
+            "Token",
+            "AtNewline",
+            "eat/at/current/marker/wrap/convert_and_eat"
+          ],
+          "practice_task": "阅读 strong() 函数，画出用 marker→eat→wrap 构造 Strong 节点的步骤；然后仿照其结构手写一份解析步骤伪代码。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Markup 解析",
+          "order": 3,
+          "filename": "u4-l3-parse-markup.md",
+          "level": "intermediate",
+          "topic": "讲解 markup/markup_exprs/markup_expr 如何解析文本、标题、strong/emph、列表/枚举/术语项、引用、方程($..$)与 #嵌套代码，以及 at_start 状态。",
+          "learning_goals": [
+            "理解 markup 表达式序列的循环与 at_start 判定",
+            "掌握标题/列表/枚举/术语项的 marker 触发条件",
+            "了解 #、$、[ ] 如何切换到 code/math/content 模式"
+          ],
+          "source_files": [
+            "src/parser.rs"
+          ],
+          "minimal_modules": [
+            "markup/markup_exprs/markup_expr",
+            "heading/list_item/enum_item/term_item",
+            "reference/equation"
+          ],
+          "practice_task": "解析 \"= Title\\n- item\\n*bold*\"，在 CST 中找到 Heading、ListItem、Strong 节点并打印它们的子节点 kind。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "Code 与 Math 解析",
+          "order": 4,
+          "filename": "u4-l4-parse-code-and-math.md",
+          "level": "intermediate",
+          "topic": "讲解 code/code_expr/code_expr_prec/code_primary 的优先级爬升与主表达式解析，以及 math/math_expr_prec 的数学算符优先级、math_delimited、math_args。",
+          "learning_goals": [
+            "理解代码表达式的优先级爬升（Pratt）与 atomic 主表达式",
+            "掌握 let/set/show/if/while/for 等语句的解析",
+            "了解数学表达式的算符优先级与定界/参数处理"
+          ],
+          "source_files": [
+            "src/parser.rs"
+          ],
+          "minimal_modules": [
+            "code/code_exprs/code_expr_prec/code_primary",
+            "let_binding/set_rule/show_rule/conditional/for_loop",
+            "math/math_expr_prec/math_delimited/math_args"
+          ],
+          "practice_task": "解析 \"#let f(x) = x + 1 * 2\"，对照 CST 解释 + 与 * 的优先级如何体现为不同的嵌套层级。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "新行处理与错误恢复",
+          "order": 5,
+          "filename": "u4-l5-newline-and-error-recovery.md",
+          "level": "intermediate",
+          "topic": "讲解 AtNewline（Continue/Stop/ContextualContinue/StopParBreak/RequireColumn）如何控制语句终止、with_nl_mode 的作用，以及 unexpected/expected/hint/trim_errors 的错误恢复与提示策略。",
+          "learning_goals": [
+            "理解换行如何影响 code 语句终止与 markup 段落",
+            "掌握 trim_errors 在错误恢复时清理噪音的策略",
+            "学会用 hint() 给出面向用户的修正建议"
+          ],
+          "source_files": [
+            "src/parser.rs"
+          ],
+          "minimal_modules": [
+            "AtNewline 与 stop_at",
+            "with_nl_mode",
+            "unexpected/expected/expected_at/hint/trim_errors"
+          ],
+          "practice_task": "解析 \"#let x = 1\\n#let y = 2\" 与故意写错的 \"#let = \"，观察 trim_errors 后产生的 Error 节点及其 hints。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "具体语法树 CST 数据结构",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "SyntaxNode 的四种形态",
+          "order": 1,
+          "filename": "u5-l1-syntaxnode-variants.md",
+          "level": "intermediate",
+          "topic": "讲解 node.rs 中 Node 枚举的 Leaf/Inner/Error/Warning 四种形态、NodeRef 视图，以及 Warning 如何包装子节点并下钻访问。",
+          "learning_goals": [
+            "理解 SyntaxNode.data 的四种内部表示",
+            "掌握 Warning 包装层与 node_ref 下钻跳过警告的逻辑",
+            "了解 kind 与 span 的存储位置及节省 8 字节的设计取舍"
+          ],
+          "source_files": [
+            "src/node.rs"
+          ],
+          "minimal_modules": [
+            "SyntaxNode",
+            "enum Node",
+            "enum NodeRef",
+            "node_ref/inner_and_span_mut"
+          ],
+          "practice_task": "构造一个 SyntaxNode::inner，对它调用 warn()，再用 Debug 打印观察 Warning 包装层如何包裹原节点。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "SyntaxNode 的构造与访问",
+          "order": 2,
+          "filename": "u5-l2-syntaxnode-build-access.md",
+          "level": "intermediate",
+          "topic": "讲解 leaf/inner/error/warn/warn_at 构造器，以及 children/kind/leaf_text/span/len/descendants 等访问方法，还有 InnerNode 的内部字段。",
+          "learning_goals": [
+            "学会用 leaf/inner/error 构造合法节点",
+            "掌握 children()/leaf_text() 在遍历 CST 时的用途",
+            "了解 InnerNode 缓存 descendants 等用于增量更新的字段"
+          ],
+          "source_files": [
+            "src/node.rs"
+          ],
+          "minimal_modules": [
+            "leaf/inner/error/warn/warn_at",
+            "children/kind/leaf_text/span",
+            "InnerNode"
+          ],
+          "practice_task": "手工用 leaf/inner 组装一个表示 \"*hi*\" 的 Strong 节点树（Star + Text + Star），并验证其 leaf_text 拼接。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "LinkedNode 带父指针遍历",
+          "order": 3,
+          "filename": "u5-l3-linkednode-traversal.md",
+          "level": "intermediate",
+          "topic": "讲解 LinkedNode 如何用 Rc<LinkedNode> 提供父指针、offset/range/index/children，以及 find/find_number/find_range 利用 span 编号有序性快速定位、leaf_at + Side 的光标定位。",
+          "learning_goals": [
+            "理解 LinkedNode 相比裸 SyntaxNode 提供的父链与绝对偏移",
+            "掌握 find_number 利用编号单调性做二分式定位",
+            "学会用 leaf_at(cursor, Side) 找到光标处的叶子"
+          ],
+          "source_files": [
+            "src/node.rs"
+          ],
+          "minimal_modules": [
+            "LinkedNode",
+            "LinkedChildren",
+            "Side",
+            "find/find_number/find_range/leaf_at"
+          ],
+          "practice_task": "用 LinkedNode::new(root) 遍历 \"= head <label>\"，调用 leaf_at 在偏移 2 处定位叶子，并用 range() 输出其字节范围。",
+          "depends_on": [
+            "u5-l2",
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "错误与警告诊断",
+          "order": 4,
+          "filename": "u5-l4-diagnostics.md",
+          "level": "intermediate",
+          "topic": "讲解 ErrorNode/WarningWrapper、Diagnosis(errors/warnings)、SyntaxDiagnostic，以及 build_diagnostic_hints 如何把节点上的错误/警告汇总为可上报的诊断。",
+          "learning_goals": [
+            "理解 CST 中错误与警告的存储与区分",
+            "掌握 Diagnosis 的或/与聚合语义",
+            "学会从 SyntaxNode 收集 SyntaxDiagnostic 列表"
+          ],
+          "source_files": [
+            "src/node.rs"
+          ],
+          "minimal_modules": [
+            "ErrorNode",
+            "WarningWrapper",
+            "Diagnosis",
+            "SyntaxDiagnostic",
+            "build_diagnostic_hints"
+          ],
+          "practice_task": "解析含错误的文本，遍历 root 收集所有 SyntaxDiagnostic，分别打印错误与警告的消息及 hints。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "源码定位 Span 系统",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Span 紧凑编码",
+          "order": 1,
+          "filename": "u6-l1-span-encoding.md",
+          "level": "intermediate",
+          "topic": "讲解 span.rs 中 Span 如何在 8 字节内编码（16 位 FileId + 48 位 number）、SpanKind 的 Detached/Number/Range 三类，以及 detached/from_number/get。",
+          "learning_goals": [
+            "理解 Span 的 8 字节位布局与 null 优化",
+            "区分 detached / numbered / range 三类 span",
+            "了解 span 用编号而非字节范围以保持编辑稳定的设计动机"
+          ],
+          "source_files": [
+            "src/span.rs"
+          ],
+          "minimal_modules": [
+            "Span",
+            "SpanKind",
+            "from_number/get/detached",
+            "FILE_ID_SHIFT 等常量"
+          ],
+          "practice_task": "阅读 span.rs 顶部注释，画出 Span 的 64 位布局图，标出 file id、number、各类范围所占的比特位。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "编号 Span 与 numberize",
+          "order": 2,
+          "filename": "u6-l2-span-numberize.md",
+          "level": "intermediate",
+          "topic": "讲解 node.rs 的 numberize 中序遍历如何为每个节点分配 SpanNumber、父节点编号小于子节点、兄弟节点从左到右递增的两条不变量，以及 Unnumberable 错误。",
+          "learning_goals": [
+            "理解 numberize 的中序分配与编号区间划分",
+            "掌握编号不变量如何支撑 find_number 的快速定位",
+            "了解 SpanNumber 与 Span::FULL 的范围约束"
+          ],
+          "source_files": [
+            "src/node.rs",
+            "src/span.rs"
+          ],
+          "minimal_modules": [
+            "numberize",
+            "InnerNode::numberize",
+            "NumberingResult/Unnumberable",
+            "SpanNumber",
+            "Span::FULL"
+          ],
+          "practice_task": "对一段解析后的 root，打印若干节点与其 span().number()，验证「父<子、兄弟递增」两条不变量成立。",
+          "depends_on": [
+            "u6-l1",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "DiagSpan、SubRange 与外部范围",
+          "order": 3,
+          "filename": "u6-l3-diagspan-subrange.md",
+          "level": "intermediate",
+          "topic": "讲解 DiagSpan/DiagSpanKind 如何支持非 Typst 文件（如 JSON）的外部范围定位、SubRange 如何在节点内指向子区间、Spanned 与 RangeMapper 的映射用途。",
+          "learning_goals": [
+            "理解外部文件诊断范围(external start)与内部 range span 的区别",
+            "掌握 SubRange 相对偏移与 to_absolute 的换算",
+            "了解 Source::range 如何结合 SpanNumber 与 SubRange 求字节范围"
+          ],
+          "source_files": [
+            "src/span.rs",
+            "src/source.rs"
+          ],
+          "minimal_modules": [
+            "DiagSpan/DiagSpanKind",
+            "SubRange/to_absolute",
+            "Spanned",
+            "RangeMapper",
+            "Source::range"
+          ],
+          "practice_task": "复现 source.rs 的 test_source_sub_ranges：用 SubRange::new(1,3) 取出 \"head\" 的 \"ea\" 子串，理解相对偏移含义。",
+          "depends_on": [
+            "u6-l1",
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "抽象语法树 AST",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "AST 是 CST 的类型化视图",
+          "order": 1,
+          "filename": "u7-l1-ast-as-view.md",
+          "level": "intermediate",
+          "topic": "依据 ast.rs 顶部文档，讲解 AST 的四大特性（视图、类型化、以 Markup 为根、惰性）、AstNode trait 与 node! 宏如何安全地把 CST 节点转为类型化 AST 结构。",
+          "learning_goals": [
+            "理解 AST 是建立在 CST 之上、按需转换的惰性视图",
+            "掌握 AstNode trait 的 from_untyped/to_untyped/placeholder",
+            "了解 node! 宏如何通过校验 kind 保证类型安全"
+          ],
+          "source_files": [
+            "src/ast.rs"
+          ],
+          "minimal_modules": [
+            "AstNode trait",
+            "node! 宏",
+            "SyntaxNode::cast/is",
+            "placeholder"
+          ],
+          "practice_task": "用 SyntaxNode::cast::<Raw> 把一个 Raw 节点转为 Raw<'_>，调用其方法；再尝试 cast 错误 kind 观察 Some/None 行为。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "Markup 根与 Expr 枚举",
+          "order": 2,
+          "filename": "u7-l2-markup-and-expr.md",
+          "level": "intermediate",
+          "topic": "讲解 Markup::exprs 迭代器如何过滤语句后换行，Expr 枚举如何统一 markup/math/code 表达式，以及 cast_with_space 的特殊处理。",
+          "learning_goals": [
+            "理解 Markup 作为 AST 根只暴露 exprs() 的设计",
+            "掌握 Expr 枚举作为「图中的边」连接各类型节点",
+            "了解 cast_with_space 为何对 Space 特殊处理"
+          ],
+          "source_files": [
+            "src/ast.rs"
+          ],
+          "minimal_modules": [
+            "Markup::exprs",
+            "enum Expr",
+            "cast_with_space",
+            "was_stmt 过滤"
+          ],
+          "practice_task": "解析 \"#let x=1 x\" 后遍历 Markup::exprs()，打印每个 Expr 变体的种类，观察语句后换行被过滤的效果。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "典型 AST 节点剖析与扩展",
+          "order": 3,
+          "filename": "u7-l3-ast-node-anatomy.md",
+          "level": "intermediate",
+          "topic": "以 Raw/Text/LetBinding 等为例讲解 AST 节点如何从 CST 子节点抽取语义（如 Raw::lines/lang/block），并演示如何为新增 SyntaxKind 添加对应 AST 节点。",
+          "learning_goals": [
+            "学会阅读一个 AST 节点的实现方法与其依赖的子节点结构",
+            "掌握 node! 声明 + impl 方法 的两步扩展模式",
+            "理解 AST 方法依赖 parser 产出的固定子结构的假设"
+          ],
+          "source_files": [
+            "src/ast.rs",
+            "src/kind.rs",
+            "src/parser.rs"
+          ],
+          "minimal_modules": [
+            "Raw impl（lines/lang/block）",
+            "Text/LetBinding impl",
+            "node! 宏使用"
+          ],
+          "practice_task": "选定一个 AST 节点（如 Heading），阅读其方法实现，写出它期望的 CST 子节点顺序，并解释若结构不符时的 placeholder 兜底。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "文本与 Source 管理",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "Source 文件抽象",
+          "order": 1,
+          "filename": "u8-l1-source-abstraction.md",
+          "level": "advanced",
+          "topic": "讲解 source.rs 中 Source=Arc<LazyHash<SourceInner>> 的廉价克隆/哈希、new/detached/with_root、root/id/text/lines，以及 find/range 如何把 span 映射回字节范围。",
+          "learning_goals": [
+            "理解 Source 把 FileId+文本+Lines+CST 打包为可哈希的不可变值",
+            "掌握 detached（测试用）与 with_root（带预建树）两种构造",
+            "学会用 find(span)/range(num, sub_range) 做反向定位"
+          ],
+          "source_files": [
+            "src/source.rs"
+          ],
+          "minimal_modules": [
+            "Source/SourceInner",
+            "new/detached/with_root",
+            "root/id/text/lines",
+            "find/range"
+          ],
+          "practice_task": "用 Source::detached 解析文本，取某个节点的 span，再用 source.find(span) 找回 LinkedNode 并比对文本。",
+          "depends_on": [
+            "u1-l4",
+            "u5-l3",
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "Lines 行列与编码转换",
+          "order": 2,
+          "filename": "u8-l2-lines-indexing.md",
+          "level": "advanced",
+          "topic": "讲解 lines.rs 中 Lines/Line 结构、byte↔line↔column↔utf16 的双向转换、二分查找定位行、以及参考计数 + 哈希语义。",
+          "learning_goals": [
+            "理解 Lines 缓存每行的 byte_idx 与 utf16_idx 加速转换",
+            "掌握 byte_to_line/column、line_column_to_byte、utf16_to_byte 等转换",
+            "了解为何需要 UTF-16 转换（LSP/IDE 兼容）"
+          ],
+          "source_files": [
+            "src/lines.rs"
+          ],
+          "minimal_modules": [
+            "Lines/Line",
+            "byte_to_line/column",
+            "byte_to_utf16/utf16_to_byte",
+            "line_column_to_byte"
+          ],
+          "practice_task": "用含多字节字符与 \\r\\n 的文本构造 Lines，验证 byte_to_utf16 与 utf16_to_byte 的往返一致性。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "文本编辑与行重建",
+          "order": 3,
+          "filename": "u8-l3-lines-editing.md",
+          "level": "advanced",
+          "topic": "讲解 Lines::edit/replace/replacement_range 如何用前缀/后缀 diff 求最小编辑、用 Arc::make_mut 写时复制、截断失效行起点并重算、处理 \\r 与 \\n 拼接的边界。",
+          "learning_goals": [
+            "理解 replacement_range 的公共前缀/后缀 diff 与字符边界对齐",
+            "掌握 edit 后只重算受影响行起点的增量策略",
+            "了解 \\r\\n 跨编辑拼接的修正逻辑"
+          ],
+          "source_files": [
+            "src/lines.rs"
+          ],
+          "minimal_modules": [
+            "edit/replace",
+            "replacement_range",
+            "lines_from",
+            "Arc::make_mut",
+            "\\r\\n 拼接处理"
+          ],
+          "practice_task": "参考 lines.rs 的 test_source_file_edit，构造若干 (旧文本, 编辑范围, 新片段) 用例，验证 edit 后行起点数组正确。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "增量重解析",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "增量编译与 reparse 入口",
+          "order": 1,
+          "filename": "u9-l1-reparse-entry.md",
+          "level": "advanced",
+          "topic": "讲解 reparser.rs 的 reparse 作为 Source::edit 的底层、try_reparse 失败时回退到全量 parse + numberize，以及增量重解析对编译性能的意义。",
+          "learning_goals": [
+            "理解 Source::edit → reparse 的调用链与返回「实际重解析范围」",
+            "掌握失败回退到全量解析并重新 numberize 的兜底",
+            "了解增量重解析为何能加速增量编译"
+          ],
+          "source_files": [
+            "src/reparser.rs",
+            "src/source.rs"
+          ],
+          "minimal_modules": [
+            "reparse",
+            "try_reparse 兜底",
+            "Source::edit/replace"
+          ],
+          "practice_task": "用 Source::edit 对一段文本做小修改，打印返回的实际重解析字节范围，体会其远小于全文。",
+          "depends_on": [
+            "u8-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "try_reparse 核心算法",
+          "order": 2,
+          "filename": "u9-l2-try-reparse.md",
+          "level": "advanced",
+          "topic": "深入 try_reparse：深度优先找到完全包住编辑范围的最内层节点、单个块子节点 vs 多个 markup 表达式、递归下钻与向外扩展、定界符平衡与嵌套层级校验。",
+          "learning_goals": [
+            "理解 overlapping_children 如何定位受影响子节点",
+            "掌握「单块子节点」与「顶层/markup 表达式序列」两条重解析路径",
+            "了解平衡的定界符与相同嵌套层级是重解析成功的判据"
+          ],
+          "source_files": [
+            "src/reparser.rs"
+          ],
+          "minimal_modules": [
+            "try_reparse",
+            "overlapping_children",
+            "update_parent",
+            "is_block/平衡校验"
+          ],
+          "practice_task": "阅读 try_reparse 注释，画出自顶向下找到最内层包围节点、并在失败时向外扩展的决策流程图。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "markup / block 重解析钩子",
+          "order": 3,
+          "filename": "u9-l3-reparse-hooks.md",
+          "level": "advanced",
+          "topic": "讲解 parser.rs 暴露的 reparse_markup/reparse_block 如何复用 Parser 重新解析局部文本、at_start/nesting 的传递、为何当前不对列表/标题/math 做局部重解析。",
+          "learning_goals": [
+            "理解 reparse_markup 与 reparse_block 的输入输出与平衡校验",
+            "掌握 top_level 与 nesting 的作用",
+            "了解当前重解析覆盖范围的取舍与原因"
+          ],
+          "source_files": [
+            "src/parser.rs",
+            "src/reparser.rs"
+          ],
+          "minimal_modules": [
+            "reparse_markup",
+            "reparse_block",
+            "Parser 复用",
+            "at_start/nesting"
+          ],
+          "practice_task": "对比 reparse_markup 与 reparse_block 的成功条件（balanced + 边界对齐），说明为何它们要求定界符平衡。",
+          "depends_on": [
+            "u9-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "文件身份、包清单与高亮",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "FileId 与路径驻留",
+          "order": 1,
+          "filename": "u10-l1-fileid-interning.md",
+          "level": "advanced",
+          "topic": "讲解 path.rs 的 RootedPath/VirtualPath/VirtualRoot、全局 INTERNER 把路径驻留为 16 位 FileId 的 leak 策略、RwLock 与 2^16 上限，以及 Span 如何携带 FileId。",
+          "learning_goals": [
+            "理解 VirtualRoot::Project/Package 与 VirtualPath 的虚拟文件系统模型",
+            "掌握 FileId 全局驻留的 leak 策略与上限",
+            "了解 FileId 为何是 NonZeroU16 并嵌入 Span"
+          ],
+          "source_files": [
+            "src/path.rs",
+            "src/span.rs"
+          ],
+          "minimal_modules": [
+            "RootedPath/VirtualPath/VirtualRoot",
+            "FileId/INTERNER",
+            "intern/leak 策略"
+          ],
+          "practice_task": "用 RootedPath::new(...).intern() 驻留两条相同路径，验证返回的 FileId 相等，并解释 leak 为何在此场景可接受。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "包清单解析",
+          "order": 2,
+          "filename": "u10-l2-package-manifest.md",
+          "level": "advanced",
+          "topic": "讲解 package.rs 中 PackageManifest/PackageInfo/TemplateInfo/ToolInfo 的 serde 解析、unknown_fields 收集未知字段、PackageSpec/PackageVersion 的格式与解析。",
+          "learning_goals": [
+            "理解 typst.toml 清单的结构与各 section 的映射",
+            "掌握 unknown_fields 用于前向兼容校验的设计",
+            "了解 PackageSpec 的命名空间/名称/版本格式"
+          ],
+          "source_files": [
+            "src/package.rs"
+          ],
+          "minimal_modules": [
+            "PackageManifest",
+            "PackageInfo/TemplateInfo/ToolInfo",
+            "UnknownFields",
+            "PackageSpec/PackageVersion"
+          ],
+          "practice_task": "参考 package.rs 文档示例，用 toml::from_str 解析一份含 [tool.my-tool] 的清单，取出并反序列化自定义工具配置。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "语法高亮",
+          "order": 3,
+          "filename": "u10-l3-highlight.md",
+          "level": "advanced",
+          "topic": "讲解 highlight.rs 的 Tag 枚举、highlight/highlight_html 如何遍历 CST 产出带标签的高亮信息、Tag::tm_scope 与 TextMate 语法的对应，以及与错误节点的关系。",
+          "learning_goals": [
+            "理解 highlight 如何把 SyntaxKind/CST 结构映射为 Tag",
+            "掌握 highlight_html 输出 HTML 的形式",
+            "了解 tm_scope 与编辑器 TextMate 语法的衔接"
+          ],
+          "source_files": [
+            "src/highlight.rs"
+          ],
+          "minimal_modules": [
+            "Tag 枚举",
+            "highlight/highlight_html",
+            "tm_scope"
+          ],
+          "practice_task": "用 highlight_html 对一段 Typst 代码生成带 span class 的 HTML，观察不同构造（关键字、字符串、注释）对应的 Tag。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l4",
+          "title": "二次开发指南与测试",
+          "order": 4,
+          "filename": "u10-l4-extending-and-testing.md",
+          "level": "advanced",
+          "topic": "综合讲解如何扩展 typst-syntax：新增 SyntaxKind、在 lexer/parser 中支持、添加 AST 节点与高亮 Tag、考虑重解析影响，并介绍 crate 内 #![cfg(test)] 模块的测试组织方式。",
+          "learning_goals": [
+            "掌握新增一个语法构造时需要改动的文件链路",
+            "理解新增 kind/parser 规则对重解析与高亮的连带影响",
+            "学会在 src 各文件的 #[cfg(test)] mod tests 中添加与运行测试"
+          ],
+          "source_files": [
+            "src/kind.rs",
+            "src/lexer.rs",
+            "src/parser.rs",
+            "src/ast.rs",
+            "src/highlight.rs",
+            "src/set.rs"
+          ],
+          "minimal_modules": [
+            "新增 SyntaxKind 的流程",
+            "parser 规则 + AST 节点 + 高亮联动",
+            "各模块内联测试"
+          ],
+          "practice_task": "设计一个假想的新语法构造，列出需修改的源码文件与每处改动要点（kind/lexer/parser/ast/highlight/set），并写出至少一条对应的解析测试用例。",
+          "depends_on": [
+            "u2-l1",
+            "u4-l3",
+            "u7-l3",
+            "u9-l3",
+            "u10-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
