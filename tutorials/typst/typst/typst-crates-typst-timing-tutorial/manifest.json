@@ -1,0 +1,298 @@
+{
+  "project": "typst-crates-typst-timing",
+  "head": "32fd4cc3861e0ab99f4c42ca6bea281482ba9f51",
+  "rationale": "typst-timing 是一个只有单个源文件（src/lib.rs 约 320 行）的小型 crate，职责单一：为 Typst 记录性能计时事件并以 Chrome Trace JSON 导出。因此学习手册按「认识 → 核心机制 → 设计取舍与集成」三层展开，共 10 篇讲义，避免为凑数量硬拆。入门层（u1）先让读者搞清 crate 定位、依赖与快速上手；进阶层（u2）按数据流拆成「事件模型 → 全局状态与线程模型 → 跨平台时间戳 → JSON 导出」四篇，每篇只解决一个核心子问题；专家层（u3）聚焦设计哲学（零成本门控）、宏生态（timed! 与 #[time]）、WASM 支持（WasmTimer）以及与 typst-kit Timer 的端到端集成作为收尾。讲义依赖关系遵循「先会用，再读内部，最后理解取舍与集成」的递进，跨单元依赖通过 lecture id 显式声明。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 typst-timing：定位、结构与快速上手",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与整体结构",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 typst-timing 在 Typst workspace 中的角色、Cargo.toml 的依赖与 feature 配置，以及 src/lib.rs 单文件的整体组织。",
+          "learning_goals": [
+            "理解 typst-timing 的定位：为 Typst 记录性能计时事件并导出为 Chrome Trace JSON",
+            "读懂 Cargo.toml 中的 workspace 依赖（parking_lot/serde/serde_json）与可选 wasm feature、web-sys 依赖",
+            "掌握 crate 的单文件目录结构与对外 API 的分布"
+          ],
+          "source_files": [
+            "crates/typst-timing/Cargo.toml",
+            "crates/typst-timing/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Cargo.toml 与 workspace 依赖关系（parking_lot/serde/serde_json/web-sys）",
+            "src/lib.rs 单文件组织与 crate 在 Typst 中的定位",
+            "wasm feature 与可选依赖 web-sys 的条件引入"
+          ],
+          "practice_task": "新建一个 Rust 二进制项目，把 typst-timing 加入 Cargo.toml；编写 main 调用 enable() 后用 is_enabled() 验证返回 true 并打印，再调用 disable() 验证返回 false，确认依赖与开关 API 可正常编译运行。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "快速上手：启用计时与 timed! 宏",
+          "order": 2,
+          "filename": "u1-l2-quick-start-timed-macro.md",
+          "level": "beginner",
+          "topic": "演示如何开启计时、使用 timed! 宏和 TimingScope::new 包裹代码块，并通过 RAII 在作用域结束时记录 End 事件。",
+          "learning_goals": [
+            "掌握 enable()/disable()/is_enabled() 全局开关的用法",
+            "学会 timed! 宏的两种调用形式（带 span = ... 与不带 span）",
+            "理解 TimingScope 的 RAII 模型：创建时记 Start，Drop 时记 End"
+          ],
+          "source_files": [
+            "crates/typst-timing/src/lib.rs",
+            "crates/typst-syntax/src/parser.rs"
+          ],
+          "minimal_modules": [
+            "enable()/disable()/is_enabled() 全局开关",
+            "timed! 宏的两种调用形式（带/不带 span）",
+            "TimingScope 的 RAII 创建与 Drop 行为"
+          ],
+          "practice_task": "编写程序调用 enable()，用 timed!(\"sleep\", std::thread::sleep(std::time::Duration::from_millis(50))) 包裹一段休眠；随后调用 export_json(&mut Vec<u8>, |_| (\"test.rs\".to_string(), 1)) 导出，打印 JSON 并确认其中包含一对 B/E 事件。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心机制：事件、状态、时间与导出",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "数据模型：Event 与 EventKind",
+          "order": 1,
+          "filename": "u2-l1-event-data-model.md",
+          "level": "intermediate",
+          "topic": "剖析内部 Event 结构体与 EventKind 枚举，说明 TimingScope 创建与销毁时如何各自产生一条 Start/End 事件。",
+          "learning_goals": [
+            "掌握 Event 结构体各字段（kind/timestamp/name/span/thread_id）的含义",
+            "理解 EventKind::Start/End 与导出时 B/E 事件对的对应关系",
+            "理清 TimingScope::new_impl 与 Drop::drop 如何分别 push 一条事件"
+          ],
+          "source_files": [
+            "crates/typst-timing/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Event 结构体字段（kind/timestamp/name/span/thread_id）",
+            "EventKind::Start/End 与 B/E 事件对的产生",
+            "TimingScope::new_impl 与 Drop::drop 各自 push 一条事件"
+          ],
+          "practice_task": "阅读源码后画出 TimingScope 创建与 Drop 时各自产生的事件（kind、name、span、thread_id）；解释 name 为何使用 &'static str 而非 String，并说明这样做的内存与并发好处。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "全局状态与线程模型：ENABLED、EVENTS 与 thread_local",
+          "order": 2,
+          "filename": "u2-l2-global-state-threading.md",
+          "level": "intermediate",
+          "topic": "讲解静态变量 ENABLED、EVENTS 以及 thread_local THREAD_DATA 如何协同，并解释自定义 u64 thread id 的设计原因。",
+          "learning_goals": [
+            "理解 ENABLED（AtomicBool）与 EVENTS（Mutex<Vec<Event>>）这两个全局静态量的作用",
+            "掌握 thread_local THREAD_DATA 的结构与其承载的每线程数据",
+            "理解 Ordering::Relaxed 在此处足够的原因"
+          ],
+          "source_files": [
+            "crates/typst-timing/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "静态变量 ENABLED（AtomicBool）与 EVENTS（Mutex<Vec<Event>>）",
+            "thread_local THREAD_DATA 与自定义 u64 thread id",
+            "Ordering::Relaxed 的选择理由"
+          ],
+          "practice_task": "编写多线程示例：用两个线程各自通过 timed! 包裹任务，导出 JSON 后观察 tid 字段如何区分不同线程；结合源码注释说明为何用自定义 u64 而非 std::thread::current().id()（wasm 兼容与避免克隆 Arc）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "跨平台时间戳：Timestamp 抽象",
+          "order": 3,
+          "filename": "u2-l3-cross-platform-timestamp.md",
+          "level": "intermediate",
+          "topic": "分析 Timestamp 如何通过条件编译在 native 用 SystemTime、在 wasm 用 f64，以及 micros_since 的单位换算逻辑。",
+          "learning_goals": [
+            "理解 Timestamp 在 native（SystemTime）与 wasm（f64）上的条件编译差异",
+            "掌握 now/now_with 的取时路径选择",
+            "读懂 micros_since 在两套平台上的单位换算"
+          ],
+          "source_files": [
+            "crates/typst-timing/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Timestamp 在 native（SystemTime）与 wasm（f64）上的条件编译",
+            "now / now_with 的取时路径",
+            "micros_since 的单位换算（纳秒→微秒、毫秒→微秒）"
+          ],
+          "practice_task": "为 micros_since 的非 wasm 分支逐行注释纳秒到微秒的换算（as_nanos() as f64 / 1000.0）；并解释 wasm 分支为何要乘以 1000.0，讨论 duration_since 失败时 unwrap_or(ZERO) 的稳健性意义。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "导出 Chrome Trace JSON：export_json",
+          "order": 4,
+          "filename": "u2-l4-export-chrome-trace-json.md",
+          "level": "intermediate",
+          "topic": "讲解 export_json 的签名、source 闭包的作用，以及如何把事件序列化为 Chrome Trace Event 格式（B/E 相位、pid、tid、ts、args）。",
+          "learning_goals": [
+            "掌握 export_json 的泛型签名与 source 闭包（NonZeroU64 -> (String, u32)）的用途",
+            "理解 Chrome Trace Event 格式中 ph=B/E、pid、tid、ts、args 字段的含义",
+            "看清 Entry/Args 序列化与用 std::mem::take 取出事件以防死锁的技巧"
+          ],
+          "source_files": [
+            "crates/typst-timing/src/lib.rs",
+            "crates/typst-kit/src/timer.rs"
+          ],
+          "minimal_modules": [
+            "export_json 的签名与 source 闭包",
+            "Chrome Trace Event 格式（B/E 相位、pid、tid、ts、args）",
+            "Entry/Args 序列化与 std::mem::take 防死锁"
+          ],
+          "practice_task": "编写程序 enable() 后用 timed! 记录若干事件，调用 export_json 传入 source 闭包返回 (\"demo.rs\", 10)，将结果写入 events.json；用 chrome://tracing 或 Perfetto 加载该文件，验证事件按线程与时间正确显示。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "设计取舍、宏生态、WASM 与集成",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "零成本与启用门控设计",
+          "order": 1,
+          "filename": "u3-l1-zero-cost-enable-gate.md",
+          "level": "advanced",
+          "topic": "分析 TimingScope::new 返回 Option 带来的零成本门控，以及 #[inline]、Relaxed 内存序等性能取舍。",
+          "learning_goals": [
+            "理解 TimingScope::new/with_span 返回 Option<Self> 如何实现禁用态零成本",
+            "掌握 fast path（is_enabled 检查）与 #[inline] 的配合",
+            "能分析禁用与启用两种状态下的运行时开销差异"
+          ],
+          "source_files": [
+            "crates/typst-timing/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "TimingScope::new 返回 Option 的零成本门控",
+            "#[inline] 与 fast path 检查",
+            "禁用态开销分析与设计取舍"
+          ],
+          "practice_task": "结合源码与（可选）cargo expand 说明在 is_enabled() 为 false 时 TimingScope::new 直接返回 None 且不分配、不加锁；写一段推理或简易基准对比 enable=false 与 enable=true 下大量 timed! 调用的开销差距，总结该设计为何适合「默认关闭」的生产场景。",
+          "depends_on": [
+            "u1-l2",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "宏的两种入口：timed! 宏与 #[time] 属性宏",
+          "order": 2,
+          "filename": "u3-l2-timed-and-time-attribute-macro.md",
+          "level": "advanced",
+          "topic": "对照 typst-timing 内的 timed! macro_rules! 与 typst-macros 中的 #[time] 属性宏，说明二者如何生成 TimingScope 调用并处理 span。",
+          "learning_goals": [
+            "读懂 lib.rs 中 timed! macro_rules! 的两个匹配分支及其展开",
+            "理解 typst-macros/src/time.rs 里 #[time] 属性宏如何改写函数体插入 TimingScope",
+            "掌握 span = ... 如何转为 NonZeroU64，以及为何用裸数字以规避与 typst-syntax 的循环依赖"
+          ],
+          "source_files": [
+            "crates/typst-timing/src/lib.rs",
+            "crates/typst-macros/src/time.rs"
+          ],
+          "minimal_modules": [
+            "timed! 宏（macro_rules!）的两种分支",
+            "#[time] 属性宏在 typst-macros 中的展开逻辑",
+            "span 转为 NonZeroU64 与循环依赖规避"
+          ],
+          "practice_task": "阅读 typst-macros/src/time.rs，对一个普通函数手工模拟 #[time(name = \"foo\")] 的展开结果（在函数体首行插入 let __scope = ::typst_timing::TimingScope::new(\"foo\");）；再与 timed! 宏展开对照，指出带 span = 时生成的 with_span(..., Some(...into_raw())) 调用，并解释为何 span 要用 into_raw() 取裸数值。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "WASM 支持与 WebAssembly 计时：WasmTimer",
+          "order": 3,
+          "filename": "u3-l3-wasm-support-wasmtimer.md",
+          "level": "advanced",
+          "topic": "讲解 wasm feature 与 cfg 网关，以及 WasmTimer 如何通过 web-sys Performance 获取时间并保证多线程时间一致。",
+          "learning_goals": [
+            "理解 wasm feature 与 cfg(target_arch = \"wasm32\") 的双层网关",
+            "掌握 WasmTimer::new 依次尝试 window 与 WorkerGlobalScope 获取 performance 的逻辑",
+            "理解为何要缓存 time_origin 并在 now() 中叠加，以保证多线程结果一致"
+          ],
+          "source_files": [
+            "crates/typst-timing/Cargo.toml",
+            "crates/typst-timing/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "wasm feature 与 cfg(target_arch = wasm32) 网关",
+            "WasmTimer::new 获取 performance（window/WorkerGlobalScope）",
+            "time_origin 缓存与多线程时间一致性"
+          ],
+          "practice_task": "阅读 WasmTimer::new 与 now()，画出它如何先 window().and_then(performance) 再回退到 WorkerGlobalScope 的获取链路；说明每线程各自 time_origin 的来源，以及为何把它加到 perf.now() 上能让多线程时间戳落在同一时间基准（讨论：未启用 wasm feature 时 wasm 分支返回 0.0 的退化行为）。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "集成实践：typst-kit Timer 与端到端计时导出",
+          "order": 4,
+          "filename": "u3-l4-integration-typst-kit-timer.md",
+          "level": "advanced",
+          "topic": "以 typst-kit 的 Timer 为综合案例，串联 enable→clear→record→export_json 的完整时序，以及通过 World 还原 span 到 (file, line) 的流程。",
+          "learning_goals": [
+            "掌握 typst-kit Timer 的 new / placeholder / new_or_placeholder 三种构造的语义",
+            "理清 record 方法内 enable→clear→f→export_json 的端到端时序与 {n} 编号文件命名",
+            "理解 resolve_span 如何借助 World 将裸 span 解析回 (file, line)"
+          ],
+          "source_files": [
+            "crates/typst-kit/src/timer.rs",
+            "crates/typst-timing/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Timer 的 new / placeholder / new_or_placeholder",
+            "record 的 enable→clear→f→export_json 时序",
+            "resolve_span 通过 World 还原 (file, line)"
+          ],
+          "practice_task": "阅读 typst-kit/src/timer.rs，写出一次完整 record 调用的时间线（何时 enable、何时 clear、何时执行被计时函数 f、何时写入文件并 export_json）；练习编写一个统一调用路径，分别用 placeholder() 和 new(path) 构造 Timer 并调用 record，验证 placeholder 分支不会真正导出文件，而带 path 分支会按 {n} 规则写出编号文件。",
+          "depends_on": [
+            "u2-l4",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
