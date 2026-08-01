@@ -1,0 +1,571 @@
+{
+  "project": "typst-crates-typst-realize",
+  "head": "32fd4cc3861e0ab99f4c42ca6bea281482ba9f51",
+  "rationale": "增量分析：对比上次 HEAD(146a58329) 与当前 HEAD(32fd4cc38)，crates/typst-realize/ 目录本身零改动，且本手册各讲义引用的所有源文件——typst-library 的 routines.rs、content/mod.rs、content/element.rs、styles.rs、selector.rs，以及 typst-layout 的 flow/inline/pages mod.rs、typst-html、typst-bundle——在两次 HEAD 之间逐字节相同。整个仓库此区间内的代码改动仅涉及 crates/typst-layout/src/inline/linebreak.rs、crates/typst-library/src/layout/container.rs、crates/typst-library/src/visualize/image/mod.rs（以及 Cargo 版本号与测试），这些文件均未被任何讲义引用。因此没有一篇讲义赖以成文的源码基础发生变化，三层（入门/进阶/专家）的单元划分与 22 篇讲义的依赖链完全保持有效。考虑到磁盘上目前仅 u1-l1-project-overview.md 已生成、且其源码未变，该篇标为 keep；其余 21 篇尚未落盘，在源码不变的既定计划下仍属待首次生成，故保留 new；同时对上一版 manifest 中损坏的 u2-l10（practice_task 被截断、混入 practice_task2/action2 杂字段）按其主题（文本分组与正则 show 规则）补全为合法的 practice_task 并复用真实存在的 find_regex_match_in_elems / visit_regex_match 等符号。结论：讲义集合与内容需求与上版一致，仅 bump head 并修正动作标注。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 realization 子系统",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "typst-realize 是什么：realization 在编译流水线中的位置",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 typst-realize crate 的定位、职责，以及 realization 在 Typst「评估 → 具现化 → 排版/导出」流水线中的桥梁作用，并说明本 crate 的目录结构（lib.rs 与 spaces.rs）和依赖。",
+          "learning_goals": [
+            "理解 realization（具现化）的概念与它解决的问题",
+            "说清 realize 在 eval 与 layout 之间的位置与职责边界",
+            "了解 typst-realize crate 的文件结构与外部依赖（typst-library、typst-html 等）"
+          ],
+          "source_files": [
+            "crates/typst-realize/Cargo.toml",
+            "crates/typst-realize/src/lib.rs",
+            "crates/typst-library/src/routines.rs"
+          ],
+          "minimal_modules": [
+            "crate 顶层文档注释",
+            "Cargo.toml 依赖清单",
+            "Routines trait 中的 realize 声明"
+          ],
+          "practice_task": "在本地 clone typst 仓库后，定位 crates/typst-realize/Cargo.toml 并指出它在 workspace 中的位置；用一段注释描述 realize 接收什么（content + styles）、产出什么（Vec<Pair>），并在 crates/typst-layout/src/flow/mod.rs 中找到调用 routines.realize 的那一行。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "入口函数 realize() 与核心数据类型",
+          "order": 2,
+          "filename": "u1-l2-realize-entrypoint-types.md",
+          "level": "beginner",
+          "topic": "逐行讲解 pub fn realize() 的签名与函数体初始化逻辑，以及 RealizationKind、Pair、Arenas、SplitLocator、StyleChain 等核心数据类型的含义和来源。",
+          "learning_goals": [
+            "读懂 realize() 的参数与返回类型",
+            "区分 RealizationKind 的五个变体及其用途",
+            "理解 Pair<'a> = (&'a Content, StyleChain<'a>) 的含义与 Arenas 的作用"
+          ],
+          "source_files": [
+            "crates/typst-realize/src/lib.rs",
+            "crates/typst-library/src/routines.rs",
+            "crates/typst-library/src/foundations/content/mod.rs"
+          ],
+          "minimal_modules": [
+            "realize 函数体",
+            "RealizationKind / FragmentKind 枚举",
+            "Arenas / Pair 类型别名"
+          ],
+          "practice_task": "在 realize() 函数入口处临时加入 eprintln! 打印传入的 RealizationKind，在返回前打印 s.sink 的长度；用一个最小 Typst 文档（如 #highlight[Hi]）触发排版，观察输出。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "visit() 调度流水线总览",
+          "order": 3,
+          "filename": "u1-l3-visit-dispatch-overview.md",
+          "level": "beginner",
+          "topic": "讲解 fn visit() 如何按固定顺序依次尝试：TagElem 直推、kind 规则、show 规则、序列递归、styled 递归、分组、过滤，最后才 push 到 sink，从而建立对整条调度流水线的全局认识。",
+          "learning_goals": [
+            "掌握 visit() 中各分支的判定顺序与短路逻辑",
+            "理解「well-known elements」与 sink 输出的关系",
+            "建立对 realize 主循环的整体心智模型"
+          ],
+          "source_files": [
+            "crates/typst-realize/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "visit 函数",
+            "visit_kind_rules / visit_show_rules / visit_grouping_rules / visit_filter_rules 的调用顺序"
+          ],
+          "practice_task": "在 visit() 的每个 if 分支命中处插入计数日志，统计一次 realize 调用中各分支被命中的次数；用一个含文本、列表与段落的文档运行，验证 dispatch 顺序。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：realization 的核心机制",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "State 状态机与分组栈",
+          "order": 1,
+          "filename": "u2-l1-state-and-grouping-stack.md",
+          "level": "intermediate",
+          "topic": "剖析 State 结构体的所有字段（kind、engine、locator、arenas、sink、rules、groupings、outside、may_attach、saw_parbreak），重点讲解 groupings 栈与 MAX_GROUP_NESTING 限制。",
+          "learning_goals": [
+            "理解 State 各字段在 realize 过程中的作用",
+            "掌握 groupings 栈（ArrayVec）如何驱动分组",
+            "了解 outside / may_attach / saw_parbreak 等标志的语义"
+          ],
+          "source_files": [
+            "crates/typst-realize/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "State 结构体",
+            "Grouping 结构体",
+            "MAX_GROUP_NESTING 常量"
+          ],
+          "practice_task": "阅读 State 结构体并绘制字段在 realize 过程中如何变化的示意图；再写一个三层嵌套列表的 Typst 文档，预测并验证 groupings 栈的深度变化（上限为 MAX_GROUP_NESTING=3）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "show 规则的应用流程 visit_show_rules",
+          "order": 2,
+          "filename": "u2-l2-show-rule-application.md",
+          "level": "intermediate",
+          "topic": "讲解 visit_show_rules 如何根据 Verdict 决定是否准备元素、应用 ShowStep（用户 Recipe 或内置 Builtin），以及如何处理 tag、outside 与 show 深度，并用 engine.delay 延迟错误。",
+          "learning_goals": [
+            "掌握 Verdict / ShowStep 的结构与使用方式",
+            "理解 Recipe.apply 与 Builtin rule.apply 两条执行路径",
+            "了解 show 规则错误为何不立即终止编译而是被延迟"
+          ],
+          "source_files": [
+            "crates/typst-realize/src/lib.rs",
+            "crates/typst-library/src/foundations/styles.rs"
+          ],
+          "minimal_modules": [
+            "visit_show_rules",
+            "Verdict / ShowStep 结构体",
+            "Recipe 与 NativeShowRule"
+          ],
+          "practice_task": "在 visit_show_rules 的 ShowStep::Recipe 与 ShowStep::Builtin 两个分支处各加日志；分别用一个用户 show 规则（show heading: it）和一个内置规则触发，确认两者的执行路径与输出内容。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "verdict——决定如何处理元素",
+          "order": 3,
+          "filename": "u2-l3-verdict-decision.md",
+          "level": "intermediate",
+          "topic": "深入 verdict() 函数：预合成（pre-synthesis）克隆、遍历 recipes 匹配 selector、show-set 规则的收集、RecipeIndex guard 防重入，以及内置 show 规则的兜底查找。",
+          "learning_goals": [
+            "理解为什么 verdict 要先 clone 再预合成（为了让 figure.where(kind:) 能匹配合成字段）",
+            "掌握 show-set 规则与 transformational show 规则的区分",
+            "理解 RecipeIndex guard 如何防止 show 规则无限递归"
+          ],
+          "source_files": [
+            "crates/typst-realize/src/lib.rs",
+            "crates/typst-library/src/foundations/styles.rs",
+            "crates/typst-library/src/foundations/selector.rs"
+          ],
+          "minimal_modules": [
+            "verdict 函数",
+            "RecipeIndex / is_guarded",
+            "Selector::matches"
+          ],
+          "practice_task": "写一个 show figure.where(kind: table) 的文档，结合 verdict 中的预合成克隆逻辑，在日志中打印 elem 在 clone+synthesize 前后的关键字段，解释为什么必须先克隆再合成。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "prepare——元素的首次准备",
+          "order": 4,
+          "filename": "u2-l4-prepare-first-visit.md",
+          "level": "intermediate",
+          "topic": "讲解 prepare() 的四步：分配 location、应用内置 show-set、执行合成（synthesize）、materialize 样式字段，以及生成 start/end tag 并 mark_prepared 保证幂等。",
+          "learning_goals": [
+            "理解 location 何时分配（locatable/labelled 元素）",
+            "掌握 show-set、synthesize、materialize 的顺序与相互影响",
+            "理解 mark_prepared 为何能让准备只执行一次"
+          ],
+          "source_files": [
+            "crates/typst-realize/src/lib.rs",
+            "crates/typst-library/src/foundations/content/element.rs"
+          ],
+          "minimal_modules": [
+            "prepare 函数",
+            "TagFlags / Tag",
+            "Synthesize / ShowSet trait"
+          ],
+          "practice_task": "给一个元素加 label（如 <my-elem>），在 prepare() 各步骤处加日志，观察 location 分配、start/end tag 生成与 mark_prepared 的调用顺序，并解释幂等性的意义。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "带样式元素 visit_styled 与页面/文档样式",
+          "order": 5,
+          "filename": "u2-l5-styled-and-page-doc-styles.md",
+          "level": "intermediate",
+          "topic": "讲解 visit_styled 如何处理 StyledElem，重点是对 DocumentElem / TextElem / PageElem 样式的特殊处理：文档信息填充、locale 推断、pagebreak「突破」show 规则笼子，以及 outside 样式提升。",
+          "learning_goals": [
+            "理解容器内外对 page/document set 规则的不同处理与报错",
+            "掌握 pagebreak 弱断点与边界断点的生成时机",
+            "理解 outside 标志与样式提升（outside()）的作用"
+          ],
+          "source_files": [
+            "crates/typst-realize/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "visit_styled",
+            "DocumentElem / PageElem / TextElem 样式分支",
+            "PagebreakElem::shared_weak / shared_boundary"
+          ],
+          "practice_task": "写两个文档：一个在 block 容器内 #set page(...) 触发 bail 报错，另一个在顶层 set page 观察 pagebreak 与 outside 提升；在 visit_styled 相应分支加日志验证行为差异。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "分组规则框架 GroupingRule",
+          "order": 6,
+          "filename": "u2-l6-grouping-rule-framework.md",
+          "level": "intermediate",
+          "topic": "讲解 GroupingRule 结构（priority、tags、effect、interrupt、finish）与 GroupingEffect 枚举（Trigger/Inner/Neutral/Interrupt），以及四张静态规则表 BUNDLE/FLOW/PAR/MATH_RULES 的差异。",
+          "learning_goals": [
+            "掌握 GroupingRule 各字段的含义与协作方式",
+            "理解 GroupingEffect 四种取值如何决定元素与分组的关系",
+            "对比不同 RealizationKind 选用不同 rules 表的原因"
+          ],
+          "source_files": [
+            "crates/typst-realize/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "GroupingRule 结构体",
+            "GroupingEffect 枚举",
+            "BUNDLE_RULES / FLOW_RULES / PAR_RULES / MATH_RULES"
+          ],
+          "practice_task": "用表格列出 TEXTUAL/PAR/CITES/LIST/ENUM/TERMS 六条规则的 priority、tags、effect 对 TextElem/SpaceElem 等元素的取值；并解释 priority 数值如何决定分组的嵌套与抢占。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "分组生命周期：启动、完成、中断",
+          "order": 7,
+          "filename": "u2-l7-grouping-lifecycle.md",
+          "level": "intermediate",
+          "topic": "讲解 visit_grouping_rules（启动/继续/结束分组）、finish_innermost_grouping（neutral 元素分段）、finish_grouping（尾部裁剪与 tag 处理）、finish_interrupted，以及 512 次防死循环守卫。",
+          "learning_goals": [
+            "掌握一个分组从启动到 finish 的完整流程",
+            "理解 neutral 元素如何被切分后分别 finish",
+            "了解 finish_grouping_while 的迭代上限与「maximum grouping depth exceeded」触发条件"
+          ],
+          "source_files": [
+            "crates/typst-realize/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "visit_grouping_rules",
+            "finish_innermost_grouping",
+            "finish_grouping / finish_interrupted"
+          ],
+          "practice_task": "构造一段混合 inline 与 block 的 HTML 导出内容（如 html.div 内夹 html.span 与段落），在 finish_innermost_grouping 的 neutral 分段逻辑处加日志，观察子分组如何被切分并分别 finish。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l8",
+          "title": "段落分组与 ParElem 构建",
+          "order": 8,
+          "filename": "u2-l8-paragraph-grouping.md",
+          "level": "intermediate",
+          "topic": "讲解 PAR 规则的 effect（哪些元素触发段落）、finish_par 如何折叠空格并 repack 出 ParElem，以及 is_fully_inline_or_neutral 的 inline 回退优化。",
+          "learning_goals": [
+            "理解 PAR 分组如何把 inline 元素收集成段落",
+            "掌握 repack 如何把带样式的 pairs 还原为 Content 与 trunk StyleChain",
+            "理解完全 inline 的 fragment 为何不强制变成段落"
+          ],
+          "source_files": [
+            "crates/typst-realize/src/lib.rs",
+            "crates/typst-realize/src/spaces.rs"
+          ],
+          "minimal_modules": [
+            "PAR 规则",
+            "finish_par / repack",
+            "is_fully_inline_or_neutral"
+          ],
+          "practice_task": "在 finish_par 与 repack 中加日志，对一个含多种行内样式（如 bold 与 highlight 混排）的段落，观察 trunk style chain 的提取、suffix 的打包以及最终 Content::sequence 的结构。",
+          "depends_on": [
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l9",
+          "title": "列表/枚举/术语与引用分组",
+          "order": 9,
+          "filename": "u2-l9-list-enum-terms-cites.md",
+          "level": "intermediate",
+          "topic": "讲解 list_like_grouping 泛型如何统一构造 LIST/ENUM/TERMS 三条规则，finish_list_like 的 tight 判定与 trunk 样式提取，以及 CITES 规则与 finish_cites。",
+          "learning_goals": [
+            "理解泛型 list_like_grouping 如何复用于三种列表",
+            "掌握 tight（紧凑）列表的判定与 item 局部样式的提取",
+            "了解 CiteElem 如何被收集成 CiteGroup"
+          ],
+          "source_files": [
+            "crates/typst-realize/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "list_like_grouping / LIST / ENUM / TERMS",
+            "finish_list_like",
+            "CITES / finish_cites"
+          ],
+          "practice_task": "分别写一个紧凑列表（无空行分隔）和一个宽松列表（项间空行），在 finish_list_like 的 tight 判定与 trunk 提取处加日志，验证二者差异及 ListElem::create 的 tight 参数。",
+          "depends_on": [
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l10",
+          "title": "文本分组与正则 show 规则",
+          "order": 10,
+          "filename": "u2-l10-textual-grouping-regex.md",
+          "level": "intermediate",
+          "topic": "讲解 TEXTUAL 分组如何在连续文本元素上查找正则匹配（find_regex_match_in_elems / find_regex_match_in_str），visit_regex_match 如何切片与撤销（Revocation）已应用规则，以及 finish_textual 的回退逻辑。",
+          "learning_goals": [
+            "理解正则 show 规则如何跨多个文本元素匹配",
+            "掌握 visit_regex_match 对匹配文本的切片与重打包策略",
+            "理解 Revocation 如何防止同一规则在同一文本上重复应用"
+          ],
+          "source_files": [
+            "crates/typst-realize/src/lib.rs",
+            "crates/typst-library/src/foundations/styles.rs",
+            "crates/typst-library/src/foundations/selector.rs"
+          ],
+          "minimal_modules": [
+            "TEXTUAL 规则 / finish_textual",
+            "find_regex_match_in_elems / find_regex_match_in_str",
+            "visit_regex_match / slice_textual"
+          ],
+          "practice_task": "写一个正则 show 规则（例如 #show \"x, \": it => ...）使其能跨多个文本元素匹配；在 find_regex_match_in_elems 与 visit_regex_match 的切片处加日志，观察匹配文本如何被切分重打包，以及 Revocation 如何防止同一规则在同一文本上重复应用。",
+          "depends_on": [
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l11",
+          "title": "空格折叠 spaces.rs",
+          "order": 11,
+          "filename": "u2-l11-space-collapsing.md",
+          "level": "intermediate",
+          "topic": "讲解 spaces.rs 中的 SpaceState 四态（Invisible/Destructive/Supportive/Space）、collapse_spaces 的原地左移算法，以及 collapse_state / collapse_state_textual 两个判定函数。",
+          "learning_goals": [
+            "掌握空格折叠的四态状态机规则",
+            "理解 collapse_spaces 为何用原地 copy_within 左移而非分配新缓冲",
+            "了解 collapse_state 与 collapse_state_textual 的使用场景差异"
+          ],
+          "source_files": [
+            "crates/typst-realize/src/spaces.rs",
+            "crates/typst-realize/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "SpaceState 枚举",
+            "collapse_spaces",
+            "collapse_state / collapse_state_textual"
+          ],
+          "practice_task": "写一个含连续空格、行首/行尾空格与行内换行的段落，在 collapse_spaces 的 copy_within 处加日志，验证原地左移如何丢弃边缘空格并把相邻空格合并为第一个空格的样式。",
+          "depends_on": [
+            "u2-l8"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "专家：内省、内存、集成与健壮性",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "标签与内省 TagElem",
+          "order": 1,
+          "filename": "u3-l1-tags-and-introspection.md",
+          "level": "advanced",
+          "topic": "讲解 TagElem 在 realize 中的直推、prepare 生成的 start/end tag，以及 finish_grouping 中 tag 跨分组边界的纳入逻辑（before/within/after 三个集合）。",
+          "learning_goals": [
+            "理解 Tag / TagElem / TagFlags 与内省系统的关系",
+            "掌握 start/end tag 的生成与配对规则",
+            "理解 finish_grouping 中 tag 边界调整的复杂逻辑"
+          ],
+          "source_files": [
+            "crates/typst-realize/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "visit 中的 TagElem 直推",
+            "prepare 中的 tag 生成",
+            "finish_grouping 的 tag 边界逻辑 / tag_set"
+          ],
+          "practice_task": "给一个 locatable 元素加 label，在 prepare 与 finish_grouping 的 before/within/after 集合构建处加日志，追踪 start/end tag 如何在分组裁剪时跨边界被纳入或排除。",
+          "depends_on": [
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "过滤规则与边界元素",
+          "order": 2,
+          "filename": "u3-l2-filter-rules-and-edges.md",
+          "level": "advanced",
+          "topic": "讲解 visit_filter_rules 如何在非 Par/Math 的 realize 中丢弃 SpaceElem、记录 ParbreakElem、并根据 may_attach 折叠 attach 的 VElem。",
+          "learning_goals": [
+            "理解哪些元素会被静默过滤及原因",
+            "掌握 parbreak 作为分组边界却不进入 sink 的处理",
+            "理解 may_attach 标志对 attach 间距存活的影响"
+          ],
+          "source_files": [
+            "crates/typst-realize/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "visit_filter_rules",
+            "ParbreakElem / SpaceElem 处理",
+            "VElem attach 折叠"
+          ],
+          "practice_task": "构造分别触发 SpaceElem 丢弃、ParbreakElem 记录、attach VElem 折叠的三段内容，在 visit_filter_rules 各分支加日志，确认过滤条件与 may_attach 的状态翻转。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "多生命周期与 arena 内存分配",
+          "order": 3,
+          "filename": "u3-l3-lifetimes-and-arenas.md",
+          "level": "advanced",
+          "topic": "讲解 State 的四个生命周期 'a/'x/'y/'z 为何必要（&mut 不变性），store / store_slice 如何用 Bump arena 延长 content 与 styles 的生命周期，以及 BumpVec 复用策略。",
+          "learning_goals": [
+            "理解为什么 State 需要四个独立生命周期参数",
+            "掌握 arenas（content/styles/bump）的分工与生命周期延长原理",
+            "理解 store_slice 为何用 BumpVec 以便复用空间"
+          ],
+          "source_files": [
+            "crates/typst-realize/src/lib.rs",
+            "crates/typst-library/src/routines.rs"
+          ],
+          "minimal_modules": [
+            "State 的生命周期参数",
+            "store / store_slice",
+            "Arenas（typed_arena + bumpalo）"
+          ],
+          "practice_task": "在 store、store_slice 与 visit_styled 的 arena 分配处加日志，统计一次 realize 的 arena 分配次数；写一段说明解释四个生命周期的作用，以及为什么用 bump arena 而非普通 Vec。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "RealizationKind 各模式深入对比",
+          "order": 4,
+          "filename": "u3-l4-realization-kinds-in-depth.md",
+          "level": "advanced",
+          "topic": "深入对比 Bundle / Document / Fragment / Par / Math 五种 kind：各自选用哪张 rules 表、outside 初值、kind 规则差异（math 透明展开 equation、符号转文本等），以及 Fragment 的 inline 回退优化。",
+          "learning_goals": [
+            "掌握五种 kind 的规则表与初始化差异",
+            "理解 visit_kind_rules 中 math 与非 math 的不同处理",
+            "理解 Fragment 的 Block/Inline 自动判定与回退"
+          ],
+          "source_files": [
+            "crates/typst-realize/src/lib.rs",
+            "crates/typst-library/src/routines.rs"
+          ],
+          "minimal_modules": [
+            "realize 中的 kind→rules 映射",
+            "visit_kind_rules",
+            "FragmentKind 与 is_fully_inline_or_neutral"
+          ],
+          "practice_task": "对比 Document 与 Fragment 两种 kind 的规则表与 outside 初值；写一个完全 inline 的容器内容，在 finish() 中验证 FragmentKind 被改写为 Inline 的回退路径。",
+          "depends_on": [
+            "u2-l6",
+            "u2-l8"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "与 layout / html / bundle / math 的集成",
+          "order": 5,
+          "filename": "u3-l5-integration-with-crates.md",
+          "level": "advanced",
+          "topic": "梳理 realize 如何通过 Routines trait 被 typst-layout（flow/inline/pages）、typst-html（document/fragment）、typst-bundle、typst-library(math resolve) 调用，绘制调用关系图。",
+          "learning_goals": [
+            "理解 realize 作为 routine 的注册与分发机制",
+            "掌握每个下游 crate 在何处、用哪种 kind 调用 realize",
+            "建立 realize 在整个 Typst 架构中的位置认知"
+          ],
+          "source_files": [
+            "crates/typst-library/src/routines.rs",
+            "crates/typst-layout/src/flow/mod.rs",
+            "crates/typst-layout/src/inline/mod.rs",
+            "crates/typst-layout/src/pages/mod.rs",
+            "crates/typst-html/src/fragment.rs",
+            "crates/typst-html/src/document.rs",
+            "crates/typst-bundle/src/lib.rs",
+            "crates/typst-realize/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Routines::realize 调用点",
+            "flow / inline / pages 三处 layout 调用",
+            "html / bundle / math 调用"
+          ],
+          "practice_task": "在 typst-layout 的 flow/inline/pages、typst-html 的 fragment/document、typst-bundle、typst-library(math) 中各定位一处调用 routines.realize 的代码，绘制一张调用关系图，标注每处使用的 RealizationKind 及触发场景。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "递归深度限制与错误处理",
+          "order": 6,
+          "filename": "u3-l6-recursion-limits-and-errors.md",
+          "level": "advanced",
+          "topic": "讲解 realize 中的多重防递归机制：engine.route 的 show 深度检查（check_show_depth）、finish_grouping_while 的 512 次分组上限，以及 visit_show_rules 用 engine.delay 延迟 show 规则错误的策略。",
+          "learning_goals": [
+            "理解 show 规则深度与分组深度的两道防线",
+            "掌握「maximum grouping depth exceeded」的触发场景（show 与 grouping 循环）",
+            "理解 engine.delay 为何延迟错误而非立即终止编译"
+          ],
+          "source_files": [
+            "crates/typst-realize/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "engine.route.check_show_depth",
+            "finish_grouping_while 的 512 上限",
+            "engine.delay"
+          ],
+          "practice_task": "构造一个会让某 show 规则产出被分组规则匹配的内容、从而形成 show↔grouping 循环的文档，在 finish_grouping_while 的计数处加日志，观察迭代次数攀升直至报错；并解释 engine.delay 如何让多轮内省中的早期错误被忽略。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l7"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

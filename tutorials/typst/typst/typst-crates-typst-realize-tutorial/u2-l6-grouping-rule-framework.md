@@ -1,0 +1,444 @@
+# 分组规则框架 GroupingRule
+
+## 1. 本讲目标
+
+本讲聚焦 typst-realize 的「分组（grouping）」机制的数据骨架。在 [u2-l1](u2-l1-state-and-grouping-stack.md) 中我们看到了 `State` 持有一个 `groupings` 栈，但当时刻意没有展开「分组到底是什么、靠什么驱动」。本讲就来补上这块拼图：**分组规则（GroupingRule）** 这个静态结构体。
+
+学完本讲，你应该能够：
+
+- 说清 `GroupingRule` 结构体的五个字段（`priority` / `tags` / `effect` / `interrupt` / `finish`）各自的作用与协作方式。
+- 区分 `GroupingEffect` 的四种取值（`Trigger` / `Inner` / `Neutral` / `Interrupt`）如何决定一个元素与某个分组的关系。
+- 解释为什么 `priority` 数值（仅 `{1, 2, 3}` 三档）能同时表达「嵌套」与「抢占」，以及它为何把分组深度卡死在 `MAX_GROUP_NESTING = 3`。
+- 对比四张静态规则表 `BUNDLE_RULES` / `FLOW_RULES` / `PAR_RULES` / `MATH_RULES`，并理解不同 `RealizationKind` 为何选用不同的表。
+
+本讲只讲**框架与数据**：规则长什么样、规则表如何组织。至于「分组如何启动、如何被中性元素切片、如何收尾」等**生命周期**细节，留待 [u2-l7](u2-l7-grouping-lifecycle.md)；六条规则各自的 `finish` 函数内部逻辑，留待 [u2-l8](u2-l8-paragraph-grouping.md) 至 [u2-l11](u2-l11-space-collapsing.md)。
+
+## 2. 前置知识
+
+在进入本讲前，你需要先建立以下几个直觉（均在前面几讲中讲过，这里只做最简回顾）：
+
+- **realization 产出的是扁平清单**：`realize()` 最终返回 `Vec<Pair>`，其中 `Pair = (&Content, StyleChain)`（见 [u1-l2](u1-l2-realize-entrypoint-types.md)）。但用户写的内容往往不是扁平的——一段文字由许多 `TextElem` / `SpaceElem` 组成，需要先聚合成一个 `ParElem` 才能交给后续排版。**「分组」就是把相邻的若干元素收集起来、打包成一个新元素的过程**。
+- **`visit()` 是唯一递归入口**：所有内容都从 `visit()` 流过，它按固定顺序尝试若干关卡（见 [u1-l3](u1-l3-visit-dispatch-overview.md)）。分组是其中第 6 道关卡 `visit_grouping_rules`。
+- **`State.groupings` 是一个栈**：容量为 `MAX_GROUP_NESTING` 的 `ArrayVec`，保存当前「正在进行中」的分组（见 [u2-l1](u2-l1-state-and-grouping-stack.md)）。
+- **函数指针表**：`GroupingRule` 的几个字段是 `fn` 指针而非 trait 对象。这是 Rust 里一种常见、零开销的「静态多态」写法——把行为直接以函数指针的形式存进结构体，编译期确定，运行期无虚表查找。
+
+> 术语提示：「分组（grouping）」是一个动词性概念，指「把元素收集起来打包」；「分组规则（GroupingRule）」是一个名词，指描述「哪些元素要被怎样打包」的配置项。本讲讲的 `GroupingRule` 就是这个配置项。
+
+## 3. 本讲源码地图
+
+本讲只涉及一个源文件，但它既是框架定义、又是六条具体规则的实例化地：
+
+| 文件 | 本讲关注的内容 |
+|------|---------------|
+| `crates/typst-realize/src/lib.rs` | `GroupingRule` 结构体、`GroupingEffect` 枚举、四张静态规则表、六条具体规则（`TEXTUAL` / `PAR` / `CITES` / `LIST` / `ENUM` / `TERMS`）、`realize()` 中 kind→表的映射、`visit_grouping_rules()` 中读取这些字段的调度逻辑 |
+
+可以说，本讲几乎全部围绕 `lib.rs` 第 110–149 行（类型定义）与第 1001–1120 行（常量与规则实例）展开。
+
+## 4. 核心概念与源码讲解
+
+### 4.1 GroupingRule 结构体
+
+#### 4.1.1 概念说明
+
+回想一下分组要解决的核心问题：**给定一连串即将进入 `sink` 的元素，哪些应该被「攒」在一起、攒够之后又该用什么函数把它们合并成一个新元素？** 比如：
+
+- 连续的 `TextElem` / `SpaceElem` / `LinebreakElem` 应攒成一段（`ParElem`）。
+- 连续的 `CiteElem` 应攒成一个 `CiteGroup`。
+- 连续的 `ListItem` 应攒成一个 `ListElem`。
+
+不同场景下「攒什么、怎么攒」各不相同。如果把每种都写死成一段 `match`，代码会又长又难扩展。typst 的做法是：**把「一种分组策略」抽象成一个数据结构 `GroupingRule`**，把可变的部分（判定函数、收尾函数）以**函数指针**的形式塞进去。于是「新增一种列表」就只是再写一个 `GroupingRule` 常量，调度逻辑完全不用动。
+
+`GroupingRule` 本身不持有任何状态——它是一份**静态说明书**。真正运行时的状态（已经攒了哪些元素、从 `sink` 的哪个下标开始攒）记录在 `State.groupings` 栈里的 `Grouping` 实例中（`Grouping` 持有一个 `&'a GroupingRule` 引用，指向这份说明书）。
+
+#### 4.1.2 核心流程
+
+`GroupingRule` 的五个字段在一次「遇到新元素」的判定中是这样协作的（对应 `visit_grouping_rules` 的主循环）：
+
+```text
+对每个新元素 content：
+  1. 在当前 rules 表里找第一条 effect(content) == Trigger 的规则 → matching
+  2. 从最内层活跃分组开始（groupings 栈顶往底）：
+       a. 若 matching 存在 且 matching.priority > 当前分组的 priority
+            → 跳出循环，准备「嵌套」一个新分组（更高优先级）
+       b. 否则计算 effect = 当前分组.effect(content)：
+            - 若分组未被中断 且 effect != Interrupt
+                → 把 content 追加进当前分组（sink），返回（认领）
+            - 否则 finish 掉这个最内层分组，继续往外层尝试
+  3. 若 matching 仍存在 → 在栈顶 push 一个新分组
+```
+
+可以看到：
+
+- **`effect`** 决定「这个元素和某个分组的关系」（触发 / 内部 / 中性 / 中断）。
+- **`priority`** 决定「当多个分组可能都想管这个元素时，谁嵌套谁、谁抢占谁」。
+- **`interrupt`** 是另一条独立的触发线：它不是针对正在 `visit` 的元素，而是针对**正在施加的样式**（见 `visit_styled` → `finish_interrupted`）。当某种元素的 `set` 规则出现时，`interrupt(elem)` 为真的分组会被提前结束。
+- **`tags`** 决定收尾时标签（`TagElem`）由谁负责：`true` 表示分组自己管标签（`finish` 能看到标签），`false` 表示 realize 代为剥离、收尾后再回放。
+- **`finish`** 是「攒够之后」的收尾函数，把 `sink[start..]` 里攒下的元素合并成一个新元素并重新喂回 `visit()`。
+
+> 注意 `effect` 与 `interrupt` 的输入类型不同：`effect: fn(&Content) -> GroupingEffect` 拿到的是**正在被访问的内容**；`interrupt: fn(Element) -> bool` 拿到的是**某个样式所归属的元素类型**（`Element`，不带数据）。这是一个容易混淆的细节。
+
+#### 4.1.3 源码精读
+
+先看结构体定义本身：
+
+[crates/typst-realize/src/lib.rs:110-126](https://github.com/typst/typst/blob/32fd4cc3861e0ab99f4c42ca6bea281482ba9f51/crates/typst-realize/src/lib.rs#L110-L126) — `GroupingRule` 结构体定义，五个字段对应上面五点。注释已经把每个字段的意图说得相当清楚，尤其是 `priority` 的注释点明了「严格更高优先级 → 嵌套」这条核心规则。
+
+```rust
+struct GroupingRule {
+    priority: u8,
+    tags: bool,
+    effect: fn(&Content) -> GroupingEffect,
+    interrupt: fn(Element) -> bool,
+    finish: fn(Grouped) -> SourceResult<()>,
+}
+```
+
+再看 `State` 里如何引用它——`rules` 是一个**静态切片引用**，构造后只读：
+
+[crates/typst-realize/src/lib.rs:97-100](https://github.com/typst/typst/blob/32fd4cc3861e0ab99f4c42ca6bea281482ba9f51/crates/typst-realize/src/lib.rs#L97-L100) — `State.rules: &'x [&'x GroupingRule]` 与 `groupings: ArrayVec<Grouping<'x>, MAX_GROUP_NESTING>`。注意 `rules` 是「当前这次 realize 选用哪张规则表」，而 `groupings` 是「当前进行中的分组实例栈」，二者分离：说明书是共享只读的，栈才是可变工作区。
+
+然后看调度主循环如何读取这些字段：
+
+[crates/typst-realize/src/lib.rs:696-749](https://github.com/typst/typst/blob/32fd4cc3861e0ab99f4c42ca6bea281482ba9f51/crates/typst-realize/src/lib.rs#L696-L749) — `visit_grouping_rules`。关键三处：
+
+- 第 701–704 行：`s.rules.iter().find(|&rule| (rule.effect)(content) == GroupingEffect::Trigger)` —— 找 `matching`。
+- 第 710 行：`matching.is_some_and(|rule| rule.priority > active.rule.priority)` —— **嵌套判定**（严格大于才嵌套）。
+- 第 715–719 行：`(active.rule.effect)(content)` 计算 effect，`!active.interrupted && effect != GroupingEffect::Interrupt` 决定是否把元素纳入当前分组。
+
+至于 `interrupt` 字段的读取点不在 `visit_grouping_rules`，而在样式驱动的 `finish_interrupted`：
+
+[crates/typst-realize/src/lib.rs:813-831](https://github.com/typst/typst/blob/32fd4cc3861e0ab99f4c42ca6bea281482ba9f51/crates/typst-realize/src/lib.rs#L813-L831) — `finish_interrupted`。第 820 行 `(grouping.rule.interrupt)(elem)` 正是读取 `interrupt` 函数指针：遍历新到的样式所涉及的元素类型，对每个活跃分组判断是否需要提前结束。
+
+`tags` 与 `finish` 的读取点都在收尾逻辑里：
+
+[crates/typst-realize/src/lib.rs:898-981](https://github.com/typst/typst/blob/32fd4cc3861e0ab99f4c42ca6bea281482ba9f51/crates/typst-realize/src/lib.rs#L898-L981) — `finish_grouping`。第 915 行 `if rule.tags { ... }` 走标签边界归并的复杂分支；第 956 行 `if !rule.tags { ... }` 走标签剥离分支；第 973 行 `(rule.finish)(Grouped { s, start })?` 调用收尾函数指针。
+
+#### 4.1.4 代码实践
+
+**实践目标**：亲眼看到 `priority` 如何决定「嵌套 vs 抢占」。
+
+**操作步骤**：
+
+1. 在 `visit_grouping_rules`（[lib.rs:696](https://github.com/typst/typst/blob/32fd4cc3861e0ab99f4c42ca6bea281482ba9f51/crates/typst-realize/src/lib.rs#L696)）函数体开头加一行临时日志：
+   ```rust
+   // 示例代码（调试用，勿提交）
+   eprintln!(
+       "[grouping] content={:?} matching_priority={:?} stack_depth={}",
+       content.elem().name(),
+       matching.map(|r| r.priority),
+       s.groupings.len(),
+   );
+   ```
+2. 在第 710 行的嵌套判定 `if matching.is_some_and(...) { break; }` 命中后、第 738 行 `s.groupings.push(...)` 之前，各加一条日志，标注「嵌套 / 抢占 / 新建」。
+3. 编译 typst（根目录 `cargo build -p typst-cli`）。
+4. 用以下最小文档触发排版：
+   ```typst
+   一段文字 #cite[<x>] 更多文字
+   ```
+   （需要一份 `bibliography` 才能真正解析 `cite`，若本地无 bib，可改用更简单的 `第一行。第二行。` 观察段落分组即可。）
+
+**需要观察的现象**：日志里 `stack_depth` 会从 0 涨到 1 再到 2；当 `TextElem` 在一个 `PAR` 分组（priority 1）内到达时，`matching_priority` 为 3（`TEXTUAL`），触发「嵌套」而非「抢占」。
+
+**预期结果**：`stack_depth` 的最大值不超过 3（`MAX_GROUP_NESTING`）。若你观察到 `stack_depth` 达到 3，说明同时存在 priority 为 1、2、3 的三层嵌套（例如 `PAR` 内套 `CITES` 内套 `TEXTUAL`）。
+
+> 待本地验证：具体日志行数与顺序取决于你本地的 typst 文档与 bib 设置；本实践不假设你已成功运行，重在读懂日志含义。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：`GroupingRule` 的 `effect` 和 `interrupt` 都返回判定结果，为何前者输入 `&Content`、后者输入 `Element`？
+
+> **参考答案**：`effect` 判定的是「**正在被访问的那个具体内容**和某分组的关系」（需要看它的元素类型乃至字段，所以传 `&Content`）；`interrupt` 判定的是「**某种元素的 set 规则**是否打断分组」，调用点（`finish_interrupted`）手里只有样式归属的元素类型 `Element`，不带具体数据，所以传 `Element`。两者回答的是不同时机、不同对象的问题。
+
+**练习 2**：为什么 `rules` 字段用 `&'x [&'x GroupingRule]`（切片引用）而非 `Vec<GroupingRule>`？
+
+> **参考答案**：因为规则表在编译期就是完全已知的静态常量（见 4.3 的四张 `static` 表），运行期从不增删。用切片引用既能表达「只读、共享」语义，又避免了任何堆分配与拷贝，是零开销的写法。
+
+---
+
+### 4.2 GroupingEffect 枚举
+
+#### 4.2.1 概念说明
+
+`GroupingEffect` 回答的是一个非常具体的问题：**「这个元素，相对于某一种分组，扮演什么角色？」** 它有四个取值。理解它的关键是记住：同一个元素，对不同分组可能有不同 effect。例如 `SpaceElem`：
+
+- 对 `TEXTUAL` 分组是 `Inner`（夹在文字中间的空格，属于文本内部）。
+- 对 `CITES` 分组也是 `Inner`（两个引用之间的空格）。
+- 对 `PAR` 分组同样是 `Inner`。
+
+而 `TextElem`：
+
+- 对 `TEXTUAL` 与 `PAR` 是 `Trigger`（能触发这两种分组）。
+- 对 `CITES` / `LIST` 等是 `Interrupt`（打断引用/列表分组）。
+
+四个取值的语义：
+
+| 取值 | 语义 | 对分组的影响 |
+|------|------|-------------|
+| `Trigger` | 触发该分组 | 能让一个新分组启动；进入分组后也是正常成员 |
+| `Inner` | 内部元素 | 不会触发分组，但可安全出现在分组**内部**（尤其是边缘） |
+| `Neutral` | 中性元素 | 不触发、也不中断分组，可穿插在分组成员之间；收尾时会被「切片」分段处理 |
+| `Interrupt` | 中断 | 该元素不能属于此分组，遇到它就要结束当前分组 |
+
+#### 4.2.2 核心流程
+
+四态在 `visit_grouping_rules` 与收尾流程里的行为可以这样概括（伪状态机）：
+
+```text
+当元素 e 到达、且当前有活跃分组 G：
+  effect_G(e) =
+    Trigger ─┐
+    Inner   ─┼─→ 若 G 未被中断：把 e 纳入 G（追加到 sink），G 继续
+            │
+    Neutral ─┘   （Neutral 还会把 G 的 contains_neutral 标志置位）
+
+    Interrupt ──→ 结束 G（finish），回到外层分组重新判定 e
+
+当元素 e 到达、且无活跃分组：
+  若存在规则 R 使 effect_R(e) == Trigger → 启动新分组 R
+```
+
+`Neutral` 比较特殊，它解决的是 **HTML 导出里 inline 与 block 元素交错**的场景：一个 `html.div`（block）里可能既夹着 `html.span`（inline）又夹着段落。`Neutral` 元素允许这种交错而不频繁打断分组，代价是收尾时要做切片（见 [u2-l7](u2-l7-grouping-lifecycle.md) 的 `finish_innermost_grouping` 中性分段逻辑）。
+
+> 数学上可把 effect 理解为一个把「元素」映射到「四元角色」的分类函数 \(\text{effect}: \text{Content} \to \{\text{Trigger}, \text{Inner}, \text{Neutral}, \text{Interrupt}\}\)。每种分组各自定义自己的分类函数，互不干扰。
+
+#### 4.2.3 源码精读
+
+[crates/typst-realize/src/lib.rs:128-147](https://github.com/typst/typst/blob/32fd4cc3861e0ab99f4c42ca6bea281482ba9f51/crates/typst-realize/src/lib.rs#L128-L147) — `GroupingEffect` 枚举定义。四个变体的文档注释本身就是最好的说明，尤其 `Neutral` 的注释点明了它「为 HTML 的 inline/block 混排而生」的设计意图。
+
+```rust
+enum GroupingEffect { Trigger, Inner, Neutral, Interrupt }
+```
+
+`Neutral` 的消费点在 `visit_grouping_rules` 第 717 行：
+
+[crates/typst-realize/src/lib.rs:715-720](https://github.com/typst/typst/blob/32fd4cc3861e0ab99f4c42ca6bea281482ba9f51/crates/typst-realize/src/lib.rs#L715-L720) — `active.contains_neutral |= effect == GroupingEffect::Neutral;` 记录该分组是否含中性元素；这个标志日后会触发 `finish_innermost_grouping` 的分段路径（[lib.rs:856](https://github.com/typst/typst/blob/32fd4cc3861e0ab99f4c42ca6bea281482ba9f51/crates/typst-realize/src/lib.rs#L856)）。
+
+#### 4.2.4 代码实践
+
+**实践目标**：感受 `Inner` 与 `Interrupt` 的差别。
+
+**操作步骤**：
+
+1. 准备一份能产生引用的 typst 文档（或退化为列表文档）：
+   ```typst
+   #set list(marker: [-])
+   - 第一项
+   - 第二项
+   ```
+2. 在 `LIST.effect` 闭包里（[lib.rs:1107](https://github.com/typst/typst/blob/32fd4cc3861e0ab99f4c42ca6bea281482ba9f51/crates/typst-realize/src/lib.rs#L1107)）临时加 `eprintln!("LIST effect for {:?}", content.elem().name());`，并在返回前打印返回值。
+
+**需要观察的现象**：列表项之间的换行/空格会被 realize 解析成 `ParbreakElem`（对 `LIST` 是 `Inner`），而列表项 `ListItem` 本身是 `Trigger`。
+
+**预期结果**：日志里能看到 `ListItem → Trigger`、`ParbreakElem → Inner`、其它非列表内容 → `Interrupt`。
+
+> 待本地验证：具体元素序列取决于 typst 的 markup 解析；本实践重在确认 `effect` 闭包对不同元素返回不同值。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`SpaceElem` 为什么在几乎所有分组里都是 `Inner` 而不是 `Trigger`？
+
+> **参考答案**：因为单独一个空格不足以构成有意义的分组——空格只是「文字之间」「引用之间」「列表项之间」的粘合剂。若让它当 `Trigger`，就会在每两个文字之间凭空启动新分组，毫无意义。`Inner` 恰好表达「我不能发起分组，但我可以安静地待在分组内部」。
+
+**练习 2**：`Neutral` 与 `Inner` 都「不触发分组」，二者本质区别是什么？
+
+> **参考答案**：`Inner` 是「正常内部成员」，收尾时和其它成员一起被 `finish` 处理；`Neutral` 是「中性穿插元素」，收尾时会被**切分成独立片段**单独处理（触发 `contains_neutral` 路径）。`Neutral` 专门服务于 HTML 的 inline/block 交错，允许在不打断分组的前提下混入异类内容。
+
+---
+
+### 4.3 四张静态规则表与 RealizationKind 的对应
+
+#### 4.3.1 概念说明
+
+前面两节定义了「一条规则长什么样」。但不同的 realize 场景（`RealizationKind`）需要的规则组合不同：
+
+- **文档级（Document）/ 片段级（Fragment）排版**：需要把文字聚成段落、把列表项聚成列表、把引用聚成 `CiteGroup`，全套规则都要——用 `FLOW_RULES`。
+- **已经在一个段落内部（Par）**：段落本身已经在处理文字了，不需要再启动 `PAR` 分组，但引用、列表仍要处理——用 `PAR_RULES`（比 FLOW 少了 `&PAR`）。
+- **数学模式（Math）**：数学里文字不聚成段落、也不跑正则文本分组——用 `MATH_RULES`（比 PAR 又少了 `&TEXTUAL`）。
+- **打包（Bundle）**：bundle 目标不做任何分组——用空表 `BUNDLE_RULES`。
+
+可见四张表是**逐级裁剪**的关系：`FLOW ⊃ PAR ⊃ MATH`，而 `BUNDLE` 是空集。这种设计让「该场景下哪些分组会发生」一目了然。
+
+每张表里的元素**顺序**也有意义：`visit_grouping_rules` 用 `.find()` 找第一条 `Trigger` 规则，所以表里靠前的规则对「既是 A 的触发器又是 B 的触发器」的元素有优先解释权（不过实际设计中，每种元素通常只触发一种规则，顺序更多是为了可读性）。
+
+#### 4.3.2 核心流程：kind → 表 的映射
+
+`realize()` 入口在构造 `State` 时，用一个 `match` 把 `RealizationKind` 映射到对应的静态表：
+
+```text
+RealizationKind::Bundle          → BUNDLE_RULES （空）
+RealizationKind::Document { .. } → FLOW_RULES
+RealizationKind::Fragment { .. } → FLOW_RULES
+RealizationKind::Par             → PAR_RULES
+RealizationKind::Math            → MATH_RULES
+```
+
+之后整条 `visit()` 流水线读取的就是 `State.rules`，不再关心具体 kind（除了少数几处直接读 `s.kind` 的特判，如 `visit_kind_rules`、`finish`）。这是典型的「构造期做选择、运行期统一处理」分离。
+
+#### 4.3.3 源码精读
+
+先看四张表与嵌套上限常量：
+
+[crates/typst-realize/src/lib.rs:1001-1015](https://github.com/typst/typst/blob/32fd4cc3861e0ab99f4c42ca6bea281482ba9f51/crates/typst-realize/src/lib.rs#L1001-L1015) — `MAX_GROUP_NESTING = 3` 与 `BUNDLE_RULES` / `FLOW_RULES` / `PAR_RULES` / `MATH_RULES`。注意三张非空表恰好是裁剪关系。
+
+```rust
+const MAX_GROUP_NESTING: usize = 3;
+static BUNDLE_RULES: &[&GroupingRule] = &[];
+static FLOW_RULES:   &[&GroupingRule] = &[&TEXTUAL, &PAR, &CITES, &LIST, &ENUM, &TERMS];
+static PAR_RULES:    &[&GroupingRule] = &[&TEXTUAL, &CITES, &LIST, &ENUM, &TERMS];
+static MATH_RULES:   &[&GroupingRule] = &[&CITES, &LIST, &ENUM, &TERMS];
+```
+
+`MAX_GROUP_NESTING = 3` 的注释点明它「等于唯一优先级层级的数量」。下一节的 priority 表会印证：六条规则的 priority 只有 `{1, 2, 3}` 三个值，所以分组栈最深就是 3 层。
+
+再看 kind→表的映射：
+
+[crates/typst-realize/src/lib.rs:55-61](https://github.com/typst/typst/blob/32fd4cc3861e0ab99f4c42ca6bea281482ba9f51/crates/typst-realize/src/lib.rs#L55-L61) — `realize()` 中的 `rules: match kind { ... }`，对应上面流程图。`Document` 与 `Fragment` 共用 `FLOW_RULES`，差异通过其它字段（如 `outside` 初值、`Fragment` 的 inline 回退）体现，而非规则表。
+
+最后是六条具体规则实例。先把它们的「身份证信息」（priority / tags / finish）汇总：
+
+[crates/typst-realize/src/lib.rs:1017-1100](https://github.com/typst/typst/blob/32fd4cc3861e0ab99f4c42ca6bea281482ba9f51/crates/typst-realize/src/lib.rs#L1017-L1100) — 六条规则的常量定义。其中 `LIST` / `ENUM` / `TERMS` 三条都由泛型函数 `list_like_grouping::<T>()` 生成，复用同一种结构：
+
+[crates/typst-realize/src/lib.rs:1103-1120](https://github.com/typst/typst/blob/32fd4cc3861e0ab99f4c42ca6bea281482ba9f51/crates/typst-realize/src/lib.rs#L1103-L1120) — `const fn list_like_grouping<T: ListLike>()`。这是「用泛型 + const fn 批量生成规则」的优雅写法：三种列表共用 `priority: 2`、`tags: false`、相同的 effect/interrupt 结构，只在 `T::Item`（条目类型）与 `T::ELEM`（容器类型）上有差异。
+
+#### 4.3.4 代码实践：构建六条规则的总表（本讲核心实践）
+
+**实践目标**：把六条规则对常见元素的取值整理成一张表，并据此解释 priority 如何决定嵌套与抢占。这是本讲的核心练习。
+
+**操作步骤**：
+
+1. 打开 [lib.rs:1017-1120](https://github.com/typst/typst/blob/32fd4cc3861e0ab99f4c42ca6bea281482ba9f51/crates/typst-realize/src/lib.rs#L1017-L1120)，逐条阅读六条规则的 `effect` 闭包。
+2. 对下表「待填」的每个格子，根据闭包逻辑推断 effect 取值。
+3. 填完后与下方「参考答案」对照。
+4. 用一句话回答：priority 数值如何决定嵌套与抢占？
+
+**待填写的工作表（A：priority / tags / finish）**：
+
+| 规则 | priority | tags | finish |
+|------|----------|------|--------|
+| TEXTUAL | ? | ? | ? |
+| PAR | ? | ? | ? |
+| CITES | ? | ? | ? |
+| LIST | ? | ? | ? |
+| ENUM | ? | ? | ? |
+| TERMS | ? | ? | ? |
+
+**待填写的工作表（B：effect 取值）**：
+
+| 元素 \ 规则 | TEXTUAL | PAR | CITES | LIST | ENUM | TERMS |
+|-------------|---------|-----|-------|------|------|-------|
+| TextElem | ? | ? | ? | ? | ? | ? |
+| SpaceElem | ? | ? | ? | ? | ? | ? |
+| LinebreakElem / SmartQuoteElem | ? | ? | ? | ? | ? | ? |
+| HElem / InlineElem / BoxElem | ? | ? | ? | ? | ? | ? |
+| CiteElem | ? | ? | ? | ? | ? | ? |
+| ListItem / EnumItem / TermItem | ? | ? | ? | ? | ? | ? |
+| ParbreakElem | ? | ? | ? | ? | ? | ? |
+
+**参考答案（A）**：
+
+| 规则 | priority | tags | finish |
+|------|----------|------|--------|
+| TEXTUAL | 3 | true | `finish_textual` |
+| PAR | 1 | true | `finish_par` |
+| CITES | 2 | false | `finish_cites` |
+| LIST | 2 | false | `finish_list_like::<ListElem>` |
+| ENUM | 2 | false | `finish_list_like::<EnumElem>` |
+| TERMS | 2 | false | `finish_list_like::<TermsElem>` |
+
+**参考答案（B）**（`T`=`Trigger`，`I`=`Inner`，`N`=`Neutral`，`X`=`Interrupt`）：
+
+| 元素 \ 规则 | TEXTUAL(3) | PAR(1) | CITES(2) | LIST(2) | ENUM(2) | TERMS(2) |
+|-------------|-----------|--------|----------|---------|---------|----------|
+| TextElem | T | T | X | X | X | X |
+| SpaceElem | I | I | I | I | I | I |
+| LinebreakElem / SmartQuoteElem | T | T | X | X | X | X |
+| HElem / InlineElem / BoxElem | X | T | X | X | X | X |
+| CiteElem | X | X | T | X | X | X |
+| ListItem | X | X | X | T | X | X |
+| EnumItem | X | X | X | X | T | X |
+| TermItem | X | X | X | X | X | T |
+| ParbreakElem | X | X | X | I | I | I |
+
+> 补充：`PAR` 对 `HtmlElem` 的 effect 取决于 `typst_html::tag::should_group_into_pars(tag)`：返回 `true` 则 `Trigger`、否则 `Neutral`。这正是 `Neutral` 存在的原因——让 HTML 的 inline/block 混排得以穿插。其余非上述类型的 block 元素对 `PAR` 一般是 `Interrupt`。
+
+**priority 如何决定嵌套与抢占**：在 `visit_grouping_rules` 中，`matching` 是「对当前元素 effect 为 `Trigger` 的第一条规则」。随后对最内层活跃分组 `active`：
+
+- 若 `matching.priority > active.priority`（**严格大于**）→ **嵌套**：跳出循环，在 `active` 之上 push 一个新的 `matching` 分组。
+- 若 `matching.priority <= active.priority` 且当前元素无法纳入 `active`（被中断或 effect 为 `Interrupt`）→ **抢占**：先 `finish` 掉 `active`，再在外层（或顶层）启动 `matching` 分组。
+
+由于 priority 只有 `{1, 2, 3}` 三档，且只有「严格更大」才能嵌套，分组栈深度被天然卡死在 3，这正是 `MAX_GROUP_NESTING = 3` 的由来。具体地：`TEXTUAL(3)` 可以嵌套在任何分组之内；`CITES` / `LIST` / `ENUM` / `TERMS(2)` 之间互不嵌套（同级，只能抢占），但可嵌套在 `PAR(1)` 之内；`PAR(1)` 是最低优先级，作为段落的「最外层容器」，不再被嵌套。
+
+**需要观察的现象**：填表时你会发现，`SpaceElem` 这一整行几乎全是 `I`（`Inner`），而每条规则的「触发元素」基本互不重叠——这正是分组互不冲突、能和平共处的设计前提。
+
+**预期结果**：你能用 priority 三档解释「为什么典型文档的分组栈深度最多是 3」，并能预测某个元素序列会把栈推到多深。
+
+> 待本地验证：若想运行时核对上表，可在每条规则的 `effect` 闭包返回前加 `eprintln!` 打印 `(规则名, 元素名, effect)`，再用不同文档触发。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么 `PAR_RULES` 比 `FLOW_RULES` 少了 `&PAR`？
+
+> **参考答案**：`Par` realize 场景本身就是在「已经身处一个段落内部」进行的（被 `typst-layout` 的 inline 模块调用，用来具现化单个段落的内容）。此时再启动一个 `PAR` 分组就是多此一举、甚至会导致重复嵌套。所以 `PAR_RULES` 移除 `&PAR`，但保留 `TEXTUAL`（仍需对段落内的文本跑正则 show 规则）和列表/引用规则。
+
+**练习 2**：为什么 `MATH_RULES` 比 `PAR_RULES` 又少了 `&TEXTUAL`？
+
+> **参考答案**：数学模式里不需要把连续文本聚成段落，也不应跨多个文本元素跑正则 show 规则（正则匹配在 math 里改为**逐元素**进行，见 `visit_kind_rules` 第 317–327 行的特判）。因此 `MATH_RULES` 去掉 `TEXTUAL`，只保留引用与三种列表的分组能力。
+
+**练习 3**：`BUNDLE_RULES` 是空表，这意味着 bundle realize 时 `visit_grouping_rules` 会怎样？
+
+> **参考答案**：第 701–704 行的 `.find()` 在空表上返回 `None`，于是 `matching` 恒为 `None`；第 736 行 `if let Some(rule) = matching` 不成立，函数直接返回 `Ok(false)`——即 bundle 场景下**不发生任何分组**，所有元素穿过分组关卡，交由后续的 `visit_filter_rules` 与最终 `push` 处理。
+
+---
+
+## 5. 综合实践
+
+把本讲三个最小模块串起来，做一个「分组栈深度预测」的小任务。
+
+**任务**：阅读下面三段 typst 文档，**先在纸上**预测它们在 `FLOW_RULES` 下 `State.groupings` 栈的最大深度，以及每一层分别是什么规则；然后再用日志验证。
+
+文档一（纯段落）：
+```typst
+这是一段普通的中文文字，应被聚成一个段落。
+```
+
+文档二（段落 + 引用 + 文字）：
+```typst
+正文中嵌入引用 #cite[<k>] 随后又是文字。
+```
+
+文档三（带列表的段落环境）：
+```typst
+正文之后紧跟
+- 列表项一
+- 列表项二
+再接正文
+```
+
+**预测提示**：
+
+- 文档一：栈最深 2（`PAR(1)` 内套 `TEXTUAL(3)`）。
+- 文档二：栈最深 3（`PAR(1)` → `CITES(2)` → `TEXTUAL(3)`，当文字出现在引用分组旁时）。
+- 文档三：`LIST(2)` 与 `PAR(1)` 同源文档，注意列表项的正文会**单独**递归 realize（跨调用嵌套，不是同一次 `groupings` 栈的深度），单次调用内栈深主要看 priority 嵌套。
+
+**验证方法**：在 [lib.rs:738](https://github.com/typst/typst/blob/32fd4cc3861e0ab99f4c42ca6bea281482ba9f51/crates/typst-realize/src/lib.rs#L738) `s.groupings.push(...)` 处与 [lib.rs:855](https://github.com/typst/typst/blob/32fd4cc3861e0ab99f4c42ca6bea281482ba9f51/crates/typst-realize/src/lib.rs#L855) `s.groupings.pop()` 处各加日志，打印 push 后的栈深度与各层 `rule.priority`，编译后分别渲染三份文档比对。
+
+> 待本地验证：具体栈深度取决于 typst 解析与样式链细节；本综合实践重在建立「priority → 嵌套深度」的推理能力，而非死记数值。
+
+## 6. 本讲小结
+
+- `GroupingRule` 是一份**静态说明书**，用五个字段描述一种分组策略：`priority`（优先级）、`tags`（是否自管标签）、`effect`（元素与分组的关系函数）、`interrupt`（样式中断判定函数）、`finish`（收尾打包函数）。后三个是函数指针，编译期确定、零开销。
+- `GroupingEffect` 四态——`Trigger`（触发）、`Inner`（内部）、`Neutral`（中性，为 HTML 混排而生，收尾时切片）、`Interrupt`（中断）——分类了「元素相对于某分组」的角色。同一元素对不同分组可有不同 effect。
+- 四张规则表是**逐级裁剪**关系：`FLOW_RULES`（全套六条）⊃ `PAR_RULES`（去掉 `PAR`）⊃ `MATH_RULES`（再去掉 `TEXTUAL`），`BUNDLE_RULES` 为空。`realize()` 入口用一个 `match kind` 选表，之后运行期只读 `State.rules`。
+- 六条规则的 priority 只有 `{1, 2, 3}`：`TEXTUAL=3`、`CITES`/`LIST`/`ENUM`/`TERMS=2`、`PAR=1`。
+- **严格更高优先级 → 嵌套**；**同级或更低且无法纳入 → 先 finish 再启动（抢占）**。因「严格大于」才嵌套，栈深度被天然卡在 `MAX_GROUP_NESTING = 3`。
+- 三种列表由泛型 `const fn list_like_grouping::<T>()` 批量生成，是「用泛型消除重复」的范例；`TEXTUAL` 与 `PAR` 的 `tags: true`，引用/列表的 `tags: false`，决定了收尾时标签的不同处理路径。
+
+## 7. 下一步学习建议
+
+本讲只搭好了「数据骨架」。接下来应当进入分组的**生命周期**：
+
+- **[u2-l7 分组生命周期：启动、完成、中断](u2-l7-grouping-lifecycle.md)**：精读 `visit_grouping_rules` 的完整循环、`finish_innermost_grouping` 的中性元素分段、`finish_grouping` 的尾部裁剪与标签边界归并，以及 512 次防死循环守卫。这是本讲的直接续篇。
+- **[u2-l8 段落分组与 ParElem 构建](u2-l8-paragraph-grouping.md)**：看 `finish_par` 如何把攒下的行内元素折叠空格、`repack` 成 `ParElem`，以及 `finish_textual` 如何在无正则匹配时把文本「漏」进段落分组。
+- **[u3-l1 标签与内省 TagElem](u3-l1-tags-and-introspection.md)**：本讲多次提到 `tags` 字段控制标签归属，标签跨分组边界的完整逻辑在那里展开。
+
+建议在进入 u2-l7 前，先把本讲 4.3.4 的总表自己默写一遍——priority 与 effect 的取值是理解后续所有收尾逻辑的前提。
