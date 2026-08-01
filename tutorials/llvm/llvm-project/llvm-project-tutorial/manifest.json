@@ -1,0 +1,1105 @@
+{
+  "project": "llvm-project",
+  "head": "610a3105af18f5efd127d2eaa1e4633de830b593",
+  "rationale": "llvm-project 是体量极大的编译器基础设施 monorepo，核心由 llvm（IR/优化/后端）、clang（C/C++ 前端）、mlir（多级 IR）、lld/lldb（链接/调试）等子项目组成。学习手册按「先建立全局认知、再深入单一机制」的思路设计成三层九单元：入门层（u1-u2）先讲清项目定位、monorepo 结构、构建方式、核心工具与三段式编译理念，并用 Kaleidoscope 官方教程串起全流程；进阶层（u3-u7）按「数据结构→优化框架→前端→后端→MLIR」的依赖顺序展开，让读者先掌握 IR 核心类（Module/Value/Type），再理解基于它构建的 Pass 机制，随后自然延伸到 Clang 如何把源码变成 IR、IR 如何变成机器码、以及 MLIR 这套更现代的可扩展 IR；专家层（u8-u9）覆盖 JIT/LTO/链接、TableGen、测试体系、插件机制、调试信息与新增后端等二次开发主题。每篇讲义只聚焦一个相对独立的主题，引用 1-6 个真实源码文件，并配一个可动手的实践任务，单元与讲义之间用 depends_on 形成清晰的由浅入深依赖链。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "走进 LLVM 项目",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与 monorepo 架构",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 LLVM 是什么（编译器工具链）、为什么采用单仓库 monorepo，以及 llvm/clang/mlir/lld/lldb/flang/compiler-rt/libcxx 等核心子项目各自承担的职责。",
+          "learning_goals": [
+            "理解 LLVM 作为编译器基础设施的定位与三段式理念",
+            "说出 monorepo 中主要子项目的名称与职责",
+            "建立各子项目之间协作关系的整体印象"
+          ],
+          "source_files": [
+            "README.md",
+            "llvm/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "项目概述",
+            "monorepo 子项目划分"
+          ],
+          "practice_task": "克隆或浏览仓库，画出顶层各子项目（llvm/clang/mlir/lld/lldb 等）的关系图，并用一句话标注每个项目的职责。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "源码目录结构与组织方式",
+          "order": 2,
+          "filename": "u1-l2-directory-structure.md",
+          "level": "beginner",
+          "topic": "讲解 llvm/ 核心目录的标准布局：lib/（实现）、include/（公共头）、tools/（命令行工具）、examples/（示例）、test/（测试）、docs/（文档），并说明每个子项目都遵循同样的布局。",
+          "learning_goals": [
+            "掌握 llvm/ 下 lib/include/tools/examples/test 的划分规则",
+            "能在仓库中快速定位某个功能对应的源码目录",
+            "理解工具（tools）与库（lib）的对应关系"
+          ],
+          "source_files": [
+            "llvm/tools/opt/opt.cpp",
+            "llvm/tools/llc/llc.cpp",
+            "llvm/examples/Kaleidoscope/Chapter2/toy.cpp"
+          ],
+          "minimal_modules": [
+            "lib/include 布局",
+            "tools 与 examples 目录"
+          ],
+          "practice_task": "选择 opt 或 llc 工具，找到它的 main 入口文件以及它主要依赖的 lib/ 子目录，记录这条从工具到库的路径。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建系统：CMake 与编译流程",
+          "order": 3,
+          "filename": "u1-l3-build-system.md",
+          "level": "beginner",
+          "topic": "讲解如何用 CMake + Ninja 配置和构建 LLVM/Clang，重点介绍 CMAKE_BUILD_TYPE、LLVM_ENABLE_PROJECTS、LLVM_TARGETS_TO_BUILD、LLVM_ENABLE_ASSERTIONS 等常用变量。",
+          "learning_goals": [
+            "掌握 CMake 配置 LLVM 的标准命令与关键变量",
+            "理解为什么 LLVM_ENABLE_PROJECTS 能选择构建哪些子项目",
+            "能独立完成一次最小化构建"
+          ],
+          "source_files": [
+            "llvm/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "CMake 配置选项",
+            "构建目录与 Ninja"
+          ],
+          "practice_task": "用 CMake 配置一个仅构建 LLVM 核心与 X86 目标的最小构建目录，并执行构建（或仅写出配置命令）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "核心命令行工具一览",
+          "order": 4,
+          "filename": "u1-l4-core-tools.md",
+          "level": "beginner",
+          "topic": "介绍 opt、llc、llvm-as、llvm-dis、lli、clang 等核心工具的用途与协作关系，帮助读者建立「源码→IR→目标码」的端到端直觉。",
+          "learning_goals": [
+            "理解 opt、llc、llvm-as、llvm-dis、lli 各自的角色",
+            "能拼出一条从文本 IR 到可执行代码的命令链",
+            "区分优化驱动（opt）与代码生成驱动（llc）"
+          ],
+          "source_files": [
+            "llvm/tools/opt/opt.cpp",
+            "llvm/tools/llc/llc.cpp",
+            "llvm/tools/llvm-as/llvm-as.cpp",
+            "llvm/tools/llvm-dis/llvm-dis.cpp",
+            "llvm/tools/lli/lli.cpp"
+          ],
+          "minimal_modules": [
+            "opt 与 llc",
+            "llvm-as/llvm-dis/lli"
+          ],
+          "practice_task": "编写一段最简单的 .ll 文本 IR，依次用 llvm-as、opt、llc 处理它，观察每一步输出文件的变化。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "LLVM IR 与三段式编译",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "三段式编译器设计与 IR 的角色",
+          "order": 1,
+          "filename": "u2-l1-three-phase-design.md",
+          "level": "beginner",
+          "topic": "讲解 Frontend（前端）→ IR（中间表示）→ Backend（后端）的三段式架构，解释为什么 IR 是解耦前后端、实现跨语言跨平台优化的关键。",
+          "learning_goals": [
+            "理解三段式编译器各阶段的输入输出",
+            "认识到 IR 作为前后端公共接口的价值",
+            "能定位 clang 作为前端、llvm 作为后端的位置"
+          ],
+          "source_files": [
+            "README.md",
+            "clang/tools/driver/driver.cpp"
+          ],
+          "minimal_modules": [
+            "三段式架构",
+            "IR 的桥梁作用"
+          ],
+          "practice_task": "用一张流程图标注：源码经 clang 前端生成 IR，IR 再经 LLVM 后端生成目标码，并指出 IR 出现在哪些工具之间。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "阅读与编写 LLVM IR（.ll 文本格式）",
+          "order": 2,
+          "filename": "u2-l2-read-write-ir.md",
+          "level": "beginner",
+          "topic": "讲解 .ll 文本 IR 的基本语法：模块头、函数签名、基本块、SSA 指令、类型标注，并用 clang -S -emit-llvm 观察真实输出。",
+          "learning_goals": [
+            "能读懂一段简单的 .ll 文本 IR",
+            "理解基本块、phi、寄存器命名（%0/%name）等概念",
+            "会用 clang 生成并查看文本 IR"
+          ],
+          "source_files": [
+            "llvm/lib/IR/AsmWriter.cpp",
+            "llvm/lib/AsmParser/LLParser.cpp"
+          ],
+          "minimal_modules": [
+            ".ll 文本语法",
+            "基本块与 SSA 指令"
+          ],
+          "practice_task": "编写一个返回两数之和的 C 函数，用 clang 生成 .ll，手工读懂每个基本块与指令，并尝试修改其中一条指令。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "Kaleidoscope 教程导览：从源码到 IR",
+          "order": 3,
+          "filename": "u2-l3-kaleidoscope-tour.md",
+          "level": "beginner",
+          "topic": "以 LLVM 官方 Kaleidoscope 教程为线索，串起「词法分析→AST→生成 IR→IR 优化→JIT 执行」的完整语言实现流程，作为后续各单元的总览。",
+          "learning_goals": [
+            "了解一个完整小语言前端是如何逐步构建的",
+            "建立从 AST 到 LLVM IR 的代码生成直觉",
+            "熟悉官方教程的章节组织以便后续深入"
+          ],
+          "source_files": [
+            "llvm/examples/Kaleidoscope/Chapter2/toy.cpp",
+            "llvm/docs/tutorial/MyFirstLanguageFrontend/LangImpl01.rst"
+          ],
+          "minimal_modules": [
+            "Kaleidoscope 章节结构",
+            "AST 到 IR 的主线"
+          ],
+          "practice_task": "阅读 Chapter2 的 toy.cpp，列出它包含的几个主要阶段（Lexer/Parser/Codegen），并运行它生成一段 IR 输出。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "LLVM IR 核心数据结构",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Module / Function / BasicBlock：IR 的层次结构",
+          "order": 1,
+          "filename": "u3-l1-ir-hierarchy.md",
+          "level": "intermediate",
+          "topic": "讲解 LLVM IR 在内存中的核心类层次：Module（模块）包含 Function（函数），Function 包含 BasicBlock（基本块），BasicBlock 包含 Instruction（指令）。",
+          "learning_goals": [
+            "掌握 Module/Function/BasicBlock/Instruction 的包含关系",
+            "理解这些类在 include/llvm/IR 中的定义位置",
+            "能用代码遍历一个 Module 中的所有函数与指令"
+          ],
+          "source_files": [
+            "llvm/include/llvm/IR/Module.h",
+            "llvm/include/llvm/IR/Function.h",
+            "llvm/include/llvm/IR/BasicBlock.h",
+            "llvm/lib/IR/Module.cpp"
+          ],
+          "minimal_modules": [
+            "Module 类",
+            "Function 与 BasicBlock"
+          ],
+          "practice_task": "编写一小段 C++（伪代码即可）：加载一个 Module，遍历其中的每个 Function，再遍历每个 BasicBlock 并打印指令数量。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Value / User / Use：SSA 与 def-use 链",
+          "order": 2,
+          "filename": "u3-l2-value-use-ssa.md",
+          "level": "intermediate",
+          "topic": "讲解 LLVM IR 的根基类 Value，以及 User/Use 如何构成 SSA 的定义-使用链，这是所有优化遍历与改写的基础。",
+          "learning_goals": [
+            "理解 Value 作为几乎所有 IR 对象基类的设计",
+            "掌握 Use/User 表示的 def-use 双向链",
+            "能解释 SSA 单静态赋值在 IR 中如何体现"
+          ],
+          "source_files": [
+            "llvm/include/llvm/IR/Value.h",
+            "llvm/include/llvm/IR/Instruction.h",
+            "llvm/lib/IR/Value.cpp",
+            "llvm/lib/IR/Use.cpp"
+          ],
+          "minimal_modules": [
+            "Value 基类",
+            "Use/User def-use 链"
+          ],
+          "practice_task": "给定一条指令，用 use-def 关系找到它的操作数定义，并用 def-use 关系找到它的所有使用者（描述思路或写出 API 调用）。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Type 系统与常量",
+          "order": 3,
+          "filename": "u3-l3-type-system-constants.md",
+          "level": "intermediate",
+          "topic": "讲解 LLVM IR 的类型系统（整型、浮点、指针、数组、向量、结构体、函数类型）以及 Constants 如何表示编译期常量。",
+          "learning_goals": [
+            "掌握 LLVM 类型体系的主要类别",
+            "理解 Type 的唯一化（context 内单例）设计",
+            "了解 Constant/ConstantInt/ConstantExpr 的作用"
+          ],
+          "source_files": [
+            "llvm/include/llvm/IR/Type.h",
+            "llvm/include/llvm/IR/Constants.h",
+            "llvm/lib/IR/Type.cpp",
+            "llvm/lib/IR/Constants.cpp"
+          ],
+          "minimal_modules": [
+            "类型体系",
+            "常量表示"
+          ],
+          "practice_task": "用代码获取或构造 i32、ptr、<4 x float> 等类型，并构造一个 ConstantInt 与一个 ConstantExpr，打印它们的文本形式。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "IRBuilder：以代码构造 IR",
+          "order": 4,
+          "filename": "u3-l4-irbuilder.md",
+          "level": "intermediate",
+          "topic": "讲解 IRBuilder 如何作为构造 IR 指令的便捷 API，包括插入点管理、创建运算/内存/控制流指令，以及它对常量折叠的处理。",
+          "learning_goals": [
+            "掌握 IRBuilder 创建各类指令的用法",
+            "理解插入点（InsertPoint）与 BasicBlock 的关系",
+            "了解 IRBuilder 的常量折叠行为"
+          ],
+          "source_files": [
+            "llvm/include/llvm/IR/IRBuilder.h",
+            "llvm/lib/IR/IRBuilder.cpp"
+          ],
+          "minimal_modules": [
+            "IRBuilder API",
+            "插入点与指令构造"
+          ],
+          "practice_task": "用 IRBuilder 在一个空函数里生成：分配一个 i32 变量、存入常量 42、再加载返回，得到一段可被验证通过的 IR。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "IR 的文本与二进制表示：AsmParser 与 Bitcode",
+          "order": 5,
+          "filename": "u3-l5-asm-bitcode.md",
+          "level": "intermediate",
+          "topic": "讲解 LLVM IR 的两种持久化形式：人类可读的 .ll 文本（由 AsmParser 解析、AsmWriter 打印）与紧凑的 .bc 位码（Bitcode Reader/Writer）。",
+          "learning_goals": [
+            "理解 .ll 与 .bc 两种 IR 表示的区别与用途",
+            "了解 AsmParser/AsmWriter 的分工",
+            "认识 Bitcode 在链接时优化与分发中的角色"
+          ],
+          "source_files": [
+            "llvm/lib/AsmParser/Parser.cpp",
+            "llvm/lib/AsmParser/LLLexer.cpp",
+            "llvm/lib/Bitcode/Reader/BitcodeReader.cpp",
+            "llvm/lib/Bitcode/Writer/BitcodeWriter.cpp"
+          ],
+          "minimal_modules": [
+            "文本 IR 解析与打印",
+            "Bitcode 读写"
+          ],
+          "practice_task": "用 llvm-as 把一段 .ll 转成 .bc，再用 llvm-dis 还原，并用 hexdump 或 llvm-bcanalyzer 观察位码结构（描述所见即可）。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "Pass 管理器与优化框架",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "新 Pass 管理器架构",
+          "order": 1,
+          "filename": "u4-l1-new-pass-manager.md",
+          "level": "intermediate",
+          "topic": "讲解 LLVM 新 Pass 管理器（New PM）的整体架构：PassManager/AnalysisManager、PassBuilder 如何注册与拼接 pass 流水线，以及 -passes 文本流水线语法。",
+          "learning_goals": [
+            "理解新 PM 的 PassManager 与 AnalysisManager 分工",
+            "掌握 PassBuilder 注册 pass 与扩展点的机制",
+            "能读懂 -passes=... 的文本流水线"
+          ],
+          "source_files": [
+            "llvm/include/llvm/Passes/PassBuilder.h",
+            "llvm/lib/IR/PassManager.cpp",
+            "llvm/docs/NewPassManager.md",
+            "llvm/tools/opt/NewPMDriver.cpp"
+          ],
+          "minimal_modules": [
+            "新 PM 架构",
+            "PassBuilder 与流水线"
+          ],
+          "practice_task": "用 opt -passes='instcombine,gvn' 处理一段 IR，并对照文档理解这条流水线如何被 PassBuilder 解析与执行。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Analysis 分析 pass 与 AnalysisManager",
+          "order": 2,
+          "filename": "u4-l2-analysis-passes.md",
+          "level": "intermediate",
+          "topic": "讲解分析 pass 的概念及其缓存机制，以 LoopInfo、别名分析（AliasAnalysis/BasicAliasAnalysis）、MemorySSA 为典型例子说明它们如何被变换 pass 复用。",
+          "learning_goals": [
+            "区分分析 pass 与变换 pass",
+            "理解 AnalysisManager 的惰性缓存与失效",
+            "认识 LoopInfo、别名分析、MemorySSA 的用途"
+          ],
+          "source_files": [
+            "llvm/lib/Analysis/LoopInfo.cpp",
+            "llvm/lib/Analysis/AliasAnalysis.cpp",
+            "llvm/lib/Analysis/BasicAliasAnalysis.cpp",
+            "llvm/lib/Analysis/MemorySSA.cpp"
+          ],
+          "minimal_modules": [
+            "分析 pass 与缓存",
+            "LoopInfo/别名分析/MemorySSA"
+          ],
+          "practice_task": "用 opt -passes='print<loops>' 或 -passes='aa' 打印一段含循环 IR 的分析结果，观察分析 pass 输出的信息。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "经典优化 pass 巡礼",
+          "order": 3,
+          "filename": "u4-l3-classic-optimization-passes.md",
+          "level": "intermediate",
+          "topic": "选取若干经典优化 pass 讲解其原理与源码位置：InstCombine（指令合并）、GVN（全局值编号）、LICM（循环不变量外提）、Inliner（内联）。",
+          "learning_goals": [
+            "理解指令合并、值编号、循环外提、内联的优化目标",
+            "能在 lib/Transforms 中定位这些 pass 的源码",
+            "认识到不同 pass 之间的协同与顺序依赖"
+          ],
+          "source_files": [
+            "llvm/lib/Transforms/InstCombine/InstructionCombining.cpp",
+            "llvm/lib/Transforms/Scalar/GVN.cpp",
+            "llvm/lib/Transforms/Scalar/LICM.cpp",
+            "llvm/lib/Transforms/IPO/Inliner.cpp",
+            "llvm/docs/Passes.md"
+          ],
+          "minimal_modules": [
+            "InstCombine/GVN/LICM",
+            "过程间优化与内联"
+          ],
+          "practice_task": "对一段有意冗余的 IR，分别单独运行 instcombine、gvn、licm，对比每步前后 IR 的变化并解释优化效果。",
+          "depends_on": [
+            "u4-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "编写你自己的 LLVM Pass（新 PM）",
+          "order": 4,
+          "filename": "u4-l4-write-your-own-pass.md",
+          "level": "intermediate",
+          "topic": "手把手讲解如何在新 PM 下编写一个 FunctionPass 或 ModulePass：继承 PassInfoMixin、实现 run 方法、用 STATISTIC 统计、并注册到流水线。",
+          "learning_goals": [
+            "能编写一个最简的新 PM pass 并通过 opt 运行",
+            "掌握 PreservedAnalyses 的返回约定",
+            "了解如何把 pass 注册为可被 -passes 引用"
+          ],
+          "source_files": [
+            "llvm/docs/WritingAnLLVMNewPMPass.md",
+            "llvm/examples/Bye/Bye.cpp",
+            "llvm/include/llvm/Passes/PassBuilder.h"
+          ],
+          "minimal_modules": [
+            "新 PM pass 骨架",
+            "注册与回调"
+          ],
+          "practice_task": "参照 Bye 示例，编写一个遍历函数并统计其中指令条数的 pass，用 opt -passes=yourpass 运行并打印统计。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "Clang 前端全流程",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Clang 架构总览与 Driver 驱动层",
+          "order": 1,
+          "filename": "u5-l1-clang-architecture-driver.md",
+          "level": "intermediate",
+          "topic": "讲解 Clang 的整体架构与 driver/cpp 双层结构：外层 Driver 负责命令行解析与编译动作编排，内层 cc1 真正执行编译，并介绍 ExecuteCC1Tool 的派发。",
+          "learning_goals": [
+            "理解 clang 命令如何被 Driver 拆解为一组动作",
+            "掌握 driver 与 cc1 的两层职责划分",
+            "能在源码中定位 driver.cpp 与 cc1_main 的入口"
+          ],
+          "source_files": [
+            "clang/tools/driver/driver.cpp",
+            "clang/tools/driver/cc1_main.cpp",
+            "clang/docs/InternalsManual.rst",
+            "clang/docs/DriverInternals.rst"
+          ],
+          "minimal_modules": [
+            "Driver 与 cc1",
+            "编译动作编排"
+          ],
+          "practice_task": "用 clang -### 观察一次编译被展开成哪些具体动作与命令行参数，并对照源码理解 Driver 的编排过程。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "词法分析 Lex 与预处理",
+          "order": 2,
+          "filename": "u5-l2-lexer-preprocessor.md",
+          "level": "intermediate",
+          "topic": "讲解 Clang 的词法分析（Lexer）与预处理器（Preprocessor）：如何把源码切分为 Token、处理宏展开、头文件包含与条件编译。",
+          "learning_goals": [
+            "理解 Token 的表示与词法切分流程",
+            "掌握预处理器的宏展开与头文件搜索机制",
+            "能在源码中定位 Lexer 与 Preprocessor 的入口"
+          ],
+          "source_files": [
+            "clang/lib/Lex/Lexer.cpp",
+            "clang/lib/Lex/Preprocessor.cpp",
+            "clang/lib/Lex/HeaderSearch.cpp"
+          ],
+          "minimal_modules": [
+            "Lexer 词法切分",
+            "Preprocessor 宏与包含"
+          ],
+          "practice_task": "用 clang -E 观察一段含宏与 #include 的源码预处理结果，并对照理解 Token 流是如何产生的。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "语法分析 Parse 与 AST 构建",
+          "order": 3,
+          "filename": "u5-l3-parser-ast.md",
+          "level": "intermediate",
+          "topic": "讲解 Clang 的递归下降语法分析器（Parser）如何把 Token 流构建为抽象语法树（AST），以及 Decl/Stmt/ASTContext 等核心 AST 类。",
+          "learning_goals": [
+            "理解递归下降语法分析与 AST 构建过程",
+            "掌握 Decl、Stmt、ASTContext 等 AST 核心类",
+            "认识 ParseAST 作为语法分析入口"
+          ],
+          "source_files": [
+            "clang/lib/Parse/Parser.cpp",
+            "clang/lib/Parse/ParseAST.cpp",
+            "clang/include/clang/AST/Decl.h",
+            "clang/include/clang/AST/Stmt.h"
+          ],
+          "minimal_modules": [
+            "Parser 递归下降",
+            "AST 节点 Decl/Stmt"
+          ],
+          "practice_task": "用 clang -Xclang -ast-dump 观察一段 C/C++ 代码的 AST 结构，辨认其中的 Decl 与 Stmt 节点。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "语义分析 Sema",
+          "order": 4,
+          "filename": "u5-l4-sema-semantic-analysis.md",
+          "level": "intermediate",
+          "topic": "讲解 Clang 的语义分析（Sema）阶段：类型检查、名字查找、重载决议、模板实例化，以及它如何在构建 AST 的同时校验语义正确性。",
+          "learning_goals": [
+            "理解 Sema 在类型检查与名字查找中的作用",
+            "掌握重载决议与模板实例化的基本流程",
+            "认识 Sema 如何与 Parser 协作标注 AST"
+          ],
+          "source_files": [
+            "clang/lib/Sema/Sema.cpp",
+            "clang/lib/Sema/SemaDecl.cpp",
+            "clang/lib/Sema/SemaExpr.cpp",
+            "clang/include/clang/AST/ASTContext.h"
+          ],
+          "minimal_modules": [
+            "类型检查与名字查找",
+            "重载与模板"
+          ],
+          "practice_task": "构造一段含类型错误或重载决议的代码，用 clang 编译观察 Sema 报出的诊断信息，并定位相关 Sema 源码位置。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "CodeGen：从 AST 到 LLVM IR",
+          "order": 5,
+          "filename": "u5-l5-codegen-ast-to-ir.md",
+          "level": "intermediate",
+          "topic": "讲解 Clang CodeGen 如何遍历 AST 并生成 LLVM IR，重点看 CodeGenModule/CodeGenFunction 如何映射声明与语句、CodeGenAction 如何作为 FrontendAction 触发生成。",
+          "learning_goals": [
+            "理解 AST 到 LLVM IR 的代码生成主线",
+            "掌握 CodeGenModule 与 CodeGenFunction 的职责",
+            "认识 CodeGenAction 把生成结果交给后端的衔接"
+          ],
+          "source_files": [
+            "clang/lib/CodeGen/CodeGenModule.cpp",
+            "clang/lib/CodeGen/CodeGenFunction.cpp",
+            "clang/lib/CodeGen/CodeGenAction.cpp"
+          ],
+          "minimal_modules": [
+            "CodeGenModule/CodeGenFunction",
+            "AST 到 IR 的映射"
+          ],
+          "practice_task": "对一段含函数与局部变量的 C 代码，用 clang -S -emit-llvm 观察 CodeGen 生成的 IR，并对照 AST 解释每条 IR 的来源。",
+          "depends_on": [
+            "u5-l3",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "目标代码生成与后端",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "CodeGen 总览与后端流水线",
+          "order": 1,
+          "filename": "u6-l1-codegen-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 LLVM 后端从 Machine-independent IR 到目标机器码的整体流水线：指令选择、寄存器分配、指令调度、机器代码（MC）发射，以及 CodeGenPassBuilder 的组织。",
+          "learning_goals": [
+            "掌握后端各主要阶段的顺序与职责",
+            "理解 CodeGenPassBuilder 如何组织后端 pass",
+            "认识 MachineFunction/MachineInstr 作为后端 IR"
+          ],
+          "source_files": [
+            "llvm/include/llvm/Passes/CodeGenPassBuilder.h",
+            "llvm/tools/llc/llc.cpp",
+            "llvm/docs/WritingAnLLVMBackend.md"
+          ],
+          "minimal_modules": [
+            "后端流水线阶段",
+            "CodeGenPassBuilder"
+          ],
+          "practice_task": "用 llc -debug 或 -print-after-all 观察一段 IR 经过后端各阶段的中间 MachineIR 输出（描述阶段顺序即可）。",
+          "depends_on": [
+            "u3-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "SelectionDAG 指令选择与调度",
+          "order": 2,
+          "filename": "u6-l2-selectiondag.md",
+          "level": "intermediate",
+          "topic": "讲解经典的 SelectionDAG 指令选择框架：IR 如何被 SelectionDAGBuilder 下沉为 DAG、合法化（Legalize）、模式匹配选出目标指令，以及指令调度。",
+          "learning_goals": [
+            "理解 SelectionDAG 的节点与 DAG 构建流程",
+            "掌握合法化与基于模式匹配的指令选择",
+            "认识调度器对指令顺序的影响"
+          ],
+          "source_files": [
+            "llvm/lib/CodeGen/SelectionDAG/SelectionDAGISel.cpp",
+            "llvm/lib/CodeGen/SelectionDAG/SelectionDAGBuilder.cpp",
+            "llvm/lib/CodeGen/SelectionDAG/LegalizeDAG.cpp",
+            "llvm/lib/CodeGen/SelectionDAG/SelectionDAG.cpp"
+          ],
+          "minimal_modules": [
+            "DAG 构建",
+            "合法化与指令选择"
+          ],
+          "practice_task": "用 llc -view-dag-combine1-dags 或 -debug 观察一段简单函数的 SelectionDAG（描述看到的节点与合法化步骤）。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "GlobalISel 新一代指令选择",
+          "order": 3,
+          "filename": "u6-l3-globalisel.md",
+          "level": "intermediate",
+          "topic": "讲解新一代的 GlobalISel 框架：IRTranslator→Legalizer→RegBankSelect→InstructionSelect 的四阶段流水线，及其相对 SelectionDAG 的优势。",
+          "learning_goals": [
+            "理解 GlobalISel 的四阶段流水线",
+            "掌握 GMI（Generic Machine IR）的作用",
+            "认识 GlobalISel 与 SelectionDAG 的取舍"
+          ],
+          "source_files": [
+            "llvm/lib/CodeGen/GlobalISel/IRTranslator.cpp",
+            "llvm/lib/CodeGen/GlobalISel/Legalizer.cpp",
+            "llvm/lib/CodeGen/GlobalISel/RegBankSelect.cpp",
+            "llvm/lib/CodeGen/GlobalISel/InstructionSelect.cpp"
+          ],
+          "minimal_modules": [
+            "IRTranslator/Legalizer",
+            "RegBankSelect/InstructionSelect"
+          ],
+          "practice_task": "用 llc -global-isel 对一段 IR 进行指令选择，并用 -debug 观察 GlobalISel 各阶段的中间输出。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "MC 层：机器代码与目标文件",
+          "order": 4,
+          "filename": "u6-l4-mc-layer.md",
+          "level": "intermediate",
+          "topic": "讲解 MC 层如何把机器指令发射为目标汇编或目标文件（ELF/Mach-O/COFF/Wasm），以及 MCStreamer/MCContext/TargetRegistry 的分工。",
+          "learning_goals": [
+            "理解从 MachineInstr 到目标文件的过程",
+            "掌握 MCStreamer/MCContext 的抽象",
+            "认识 TargetRegistry 统一注册目标后端"
+          ],
+          "source_files": [
+            "llvm/lib/MC/MCStreamer.cpp",
+            "llvm/lib/MC/MCContext.cpp",
+            "llvm/lib/MC/MCObjectStreamer.cpp",
+            "llvm/lib/MC/TargetRegistry.cpp"
+          ],
+          "minimal_modules": [
+            "MCStreamer/MCContext",
+            "TargetRegistry"
+          ],
+          "practice_task": "用 llvm-mc 汇编一段目标汇编，再用 llvm-objdump 反汇编观察，对照理解 MC 层的发射与解析。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "TableGen 与目标描述",
+          "order": 5,
+          "filename": "u6-l5-tablegen-target.md",
+          "level": "intermediate",
+          "topic": "讲解 TableGen 这套领域特定语言如何用 .td 描述指令、寄存器、调用约定，再由后端生成大量 C++ 代码供后端复用。",
+          "learning_goals": [
+            "理解 TableGen 的描述-生成两段式工作方式",
+            "掌握指令/寄存器描述如何驱动后端代码生成",
+            "认识 TableGen 在降低后端开发成本上的价值"
+          ],
+          "source_files": [
+            "llvm/lib/TableGen/Record.cpp",
+            "llvm/lib/TableGen/TGParser.cpp",
+            "llvm/docs/WritingAnLLVMBackend.md"
+          ],
+          "minimal_modules": [
+            "TableGen .td 描述",
+            "后端代码生成"
+          ],
+          "practice_task": "阅读某个目标（如 X86 或 RISCV）下的 InstrInfo.td 片段，描述一条指令是如何被定义的，以及它会生成哪些 C++ 接口。",
+          "depends_on": [
+            "u6-l1",
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "MLIR 多级中间表示",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "MLIR 设计哲学与核心 IR",
+          "order": 1,
+          "filename": "u7-l1-mlir-design-core-ir.md",
+          "level": "intermediate",
+          "topic": "讲解 MLIR 的设计哲学：可扩展的多级 IR、一切皆 Operation，以及 Operation/OpDefinition/Builders 等核心抽象与 LLVM IR 的异同。",
+          "learning_goals": [
+            "理解 MLIR「一切皆 Operation」的设计",
+            "掌握 Operation/Region/Block 的层次",
+            "认识到方言（Dialect）带来的可扩展性"
+          ],
+          "source_files": [
+            "mlir/include/mlir/IR/Operation.h",
+            "mlir/include/mlir/IR/OpDefinition.h",
+            "mlir/include/mlir/IR/Builders.h"
+          ],
+          "minimal_modules": [
+            "Operation 抽象",
+            "Region/Block 层次"
+          ],
+          "practice_task": "用 mlir-minimal-opt 或玩具工具打开一段 MLIR 文本，辨认其中的 Operation、Region 与 Block 结构。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "Dialect 方言机制",
+          "order": 2,
+          "filename": "u7-l2-dialect-mechanism.md",
+          "level": "intermediate",
+          "topic": "讲解 MLIR 的方言（Dialect）机制：每个 Dialect 定义自己的 Operation/Type/Attribute，并通过 Dialect.h 注册，举例 arith/func/linalg/scf 等内置方言。",
+          "learning_goals": [
+            "理解 Dialect 如何封装一组 Operation 与类型",
+            "掌握 Dialect 的注册与加载机制",
+            "认识常用内置方言的职责"
+          ],
+          "source_files": [
+            "mlir/include/mlir/IR/Dialect.h",
+            "mlir/examples/toy/Ch2/mlir/Dialect.cpp",
+            "mlir/lib/Dialect/Func/IR/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "Dialect 定义与注册",
+            "内置方言举例"
+          ],
+          "practice_task": "浏览 Toy 示例（Ch2）如何定义自己的 Toy 方言，列出它声明的若干 Operation 与类型。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "Pass、Pattern 与 Conversion",
+          "order": 3,
+          "filename": "u7-l3-pass-pattern-conversion.md",
+          "level": "intermediate",
+          "topic": "讲解 MLIR 的变换机制：Pass 框架（PassManager/Pass）、基于 RewritePattern 的模式重写，以及把高层方言逐步 Lowering 到低层方言的 Conversion。",
+          "learning_goals": [
+            "掌握 MLIR Pass 的编写与注册方式",
+            "理解 RewritePattern 的图重写模型",
+            "认识方言间 Conversion/Lowering 的流程"
+          ],
+          "source_files": [
+            "mlir/lib/Pass/Pass.cpp",
+            "mlir/lib/Pass/PassRegistry.cpp",
+            "mlir/examples/toy/Ch3/mlir/ToyCombine.cpp",
+            "mlir/examples/toy/Ch5/mlir/LowerToAffineLoops.cpp"
+          ],
+          "minimal_modules": [
+            "MLIR Pass 框架",
+            "RewritePattern 与 Conversion"
+          ],
+          "practice_task": "用 Toy 示例的 toyc 工具运行一次优化与一次 lowering（如到 affine），观察 IR 在每一步的变化。",
+          "depends_on": [
+            "u7-l1",
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "Toy 教程：从语言到 MLIR 到 LLVM IR",
+          "order": 4,
+          "filename": "u7-l4-toy-tutorial.md",
+          "level": "intermediate",
+          "topic": "以 MLIR 官方 Toy 教程为线索，串起「解析 AST→MLIRGen 生成 MLIR→模式优化→逐步 Lowering 到 affine/LLVM 方言→最终到 LLVM IR」的完整流程。",
+          "learning_goals": [
+            "理解一个完整语言到 MLIR 的实现主线",
+            "掌握 MLIRGen 如何把 AST 翻译为 Operation",
+            "认识从高层方言一路 Lowering 到 LLVM IR 的路径"
+          ],
+          "source_files": [
+            "mlir/examples/toy/Ch1/toyc.cpp",
+            "mlir/examples/toy/Ch2/mlir/MLIRGen.cpp",
+            "mlir/examples/toy/Ch6/mlir/LowerToLLVM.cpp"
+          ],
+          "minimal_modules": [
+            "Toy 章节结构",
+            "MLIRGen 与 Lowering"
+          ],
+          "practice_task": "运行 Toy 示例（Ch6）把一段 Toy 代码 lowering 到 LLVM 方言，并用 mlir-translate 或工具得到最终的 LLVM IR。",
+          "depends_on": [
+            "u7-l2",
+            "u7-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "执行引擎、JIT 与链接",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "ExecutionEngine 与 ORC JIT",
+          "order": 1,
+          "filename": "u8-l1-executionengine-orc-jit.md",
+          "level": "advanced",
+          "topic": "讲解 LLVM 的即时编译执行能力：lli 解释/JIT 执行，以及 ORC（On-Request Compilation）v2 的分层架构（LLJIT、IRCompileLayer、ObjectLinkingLayer）与 Core。",
+          "learning_goals": [
+            "理解 JIT 执行模型与 ORC v2 分层架构",
+            "掌握 LLJIT 的主要组件与协作关系",
+            "认识 IRCompileLayer/对象链接层的职责"
+          ],
+          "source_files": [
+            "llvm/lib/ExecutionEngine/Orc/LLJIT.cpp",
+            "llvm/lib/ExecutionEngine/Orc/Core.cpp",
+            "llvm/lib/ExecutionEngine/Orc/IRCompileLayer.cpp",
+            "llvm/tools/lli/lli.cpp",
+            "llvm/examples/HowToUseLLJIT/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "ORC v2 分层架构",
+            "LLJIT 组件"
+          ],
+          "practice_task": "用 lli 直接运行一段 .ll/.bc，或参照 HowToUseLLJIT 示例描述如何用 LLJIT 把一个 IR 模块编译并执行得到结果。",
+          "depends_on": [
+            "u3-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "LTO 链接时优化",
+          "order": 2,
+          "filename": "u8-l2-lto.md.md",
+          "level": "advanced",
+          "topic": "讲解链接时优化（LTO/ThinLTO）的原理：用 Module Summary Index 跨模块分析、FunctionImport 跨模块内联、ThinLTOBitcodeWriter 写出摘要，并区分全 LTO 与 ThinLTO。",
+          "learning_goals": [
+            "理解 LTO 与 ThinLTO 的目标与差异",
+            "掌握 Module Summary Index 的作用",
+            "认识跨模块内联（FunctionImport）的流程"
+          ],
+          "source_files": [
+            "llvm/lib/IR/ModuleSummaryIndex.cpp",
+            "llvm/lib/Analysis/ModuleSummaryAnalysis.cpp",
+            "llvm/lib/Transforms/IPO/ThinLTOBitcodeWriter.cpp",
+            "llvm/lib/Transforms/IPO/FunctionImport.cpp"
+          ],
+          "minimal_modules": [
+            "LTO/ThinLTO 原理",
+            "Module Summary 与 FunctionImport"
+          ],
+          "practice_task": "用 clang -flto 与 -flto=thin 分别构建一个多文件小项目，对比生成的产物与优化范围差异（描述现象即可）。",
+          "depends_on": [
+            "u4-l1",
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "LLD 链接器架构",
+          "order": 3,
+          "filename": "u8-l3-lld-linker.md",
+          "level": "advanced",
+          "topic": "讲解 LLD 这套高性能链接器：它如何按目标格式（ELF/COFF/Mach-O/Wasm）分驱动，以 ELF 驱动 Driver 为例介绍符号解析、段合并与输出。",
+          "learning_goals": [
+            "理解 LLD 的多格式驱动结构与定位",
+            "掌握链接器符号解析与段合并的基本流程",
+            "认识 LLD 相对传统链接器的性能优势"
+          ],
+          "source_files": [
+            "lld/ELF/Driver.h",
+            "lld/CMakeLists.txt",
+            "lld/README.md"
+          ],
+          "minimal_modules": [
+            "LLD 多格式驱动",
+            "符号解析与段合并"
+          ],
+          "practice_task": "用 ld.lld 链接一组目标文件生成可执行程序，并用 readelf/nm 观察符号表与段，描述链接器完成的工作。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "二次开发与工程实践",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "测试体系：lit、FileCheck 与单元测试",
+          "order": 1,
+          "filename": "u9-l1-testing-infra.md",
+          "level": "advanced",
+          "topic": "讲解 LLVM 的测试基础设施：基于 lit 的回归测试与 FileCheck 模式匹配、基于 gtest 的单元测试（llvm/lib/Testing），以及如何编写与运行测试。",
+          "learning_goals": [
+            "掌握 lit 测试组织与运行方式",
+            "理解 FileCheck 的 CHECK 模式匹配语法",
+            "认识 LLVM 单元测试框架与位置"
+          ],
+          "source_files": [
+            "llvm/utils/lit/lit.py",
+            "llvm/lib/Testing/Support/Error.cpp",
+            "llvm/examples/Bye/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "lit 与 FileCheck",
+            "单元测试框架"
+          ],
+          "practice_task": "为一个简单 pass 或工具编写一个 .ll + FileCheck 的回归测试，并用 llvm-lit 运行通过。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "Pass 插件机制（Plugins）",
+          "order": 2,
+          "filename": "u9-l2-pass-plugins.md",
+          "level": "advanced",
+          "topic": "讲解如何把 pass 编译为动态加载的插件（.so/.dll），通过 PassPlugin/PassBuilder 回调在不重编 LLVM 的前提下注入 opt/clang 的流水线，并以 Bye 示例为范本。",
+          "learning_goals": [
+            "理解 pass 插件的动态加载机制",
+            "掌握 registerPassBuilderCallbacks 的注册回调用法",
+            "能用插件方式扩展 opt 而无需重编 LLVM"
+          ],
+          "source_files": [
+            "llvm/examples/Bye/Bye.cpp",
+            "llvm/docs/WritingAnLLVMNewPMPass.md",
+            "llvm/tools/opt/opt.cpp"
+          ],
+          "minimal_modules": [
+            "PassPlugin 动态加载",
+            "PassBuilder 回调注册"
+          ],
+          "practice_task": "把 Bye 示例构建为插件，用 opt -load-pass-plugin=... -passes=goodbye 运行，观察插件被加载并执行。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "调试信息与 LLDB",
+          "order": 3,
+          "filename": "u9-l3-debuginfo-lldb.md",
+          "level": "advanced",
+          "topic": "讲解 LLVM 如何在 IR 与目标代码中表达调试信息：DIBuilder 构造调试元数据、DebugInfoMetadata 的表示、DWARF 输出，以及 LLDB 如何消费这些信息进行源码级调试。",
+          "learning_goals": [
+            "理解调试信息在 IR 中的元数据表示",
+            "掌握 DIBuilder 的基本用法",
+            "认识 DWARF 输出与 LLDB 调试的衔接"
+          ],
+          "source_files": [
+            "llvm/lib/IR/DIBuilder.cpp",
+            "llvm/lib/IR/DebugInfoMetadata.cpp",
+            "llvm/lib/IR/DebugInfo.cpp"
+          ],
+          "minimal_modules": [
+            "调试元数据",
+            "DIBuilder 与 DWARF"
+          ],
+          "practice_task": "用 clang -g 编译一段代码生成带调试信息的 IR，用 llvm-dwarfdump 查看输出的 DWARF 段，并解释其与源码的对应关系。",
+          "depends_on": [
+            "u3-l3",
+            "u5-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "添加一个新后端（WritingAnLLVMBackend）",
+          "order": 4,
+          "filename": "u9-l4-writing-new-backend.md",
+          "level": "advanced",
+          "topic": "讲解为 LLVM 添加一个新目标后端的总体步骤与关键组件：Target 目录结构、TargetLowering/TargetRegisterInfo/InstrInfo、TableGen 描述，以及官方 WritingAnLLVMBackend 指南。",
+          "learning_goals": [
+            "理解一个后端需要实现的关键类与文件",
+            "掌握 TableGen 描述与 C++ 实现的配合",
+            "认识新增后端在注册与流水线中的接入点"
+          ],
+          "source_files": [
+            "llvm/docs/WritingAnLLVMBackend.md",
+            "llvm/lib/Target/X86/CMakeLists.txt",
+            "llvm/include/llvm/Passes/CodeGenPassBuilder.h",
+            "llvm/lib/MC/TargetRegistry.cpp"
+          ],
+          "minimal_modules": [
+            "后端关键组件",
+            "TableGen 与注册"
+          ],
+          "practice_task": "参照官方指南与某个简单后端（如 MIPS 或 RISCV）目录，列出新增后端必须提供的 .td 文件与 C++ 类清单。",
+          "depends_on": [
+            "u6-l1",
+            "u6-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
