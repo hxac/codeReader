@@ -1,7 +1,7 @@
 {
   "project": "llvm-project",
-  "head": "610a3105af18f5efd127d2eaa1e4633de830b593",
-  "rationale": "llvm-project 是体量极大的编译器基础设施 monorepo，核心由 llvm（IR/优化/后端）、clang（C/C++ 前端）、mlir（多级 IR）、lld/lldb（链接/调试）等子项目组成。学习手册按「先建立全局认知、再深入单一机制」的思路设计成三层九单元：入门层（u1-u2）先讲清项目定位、monorepo 结构、构建方式、核心工具与三段式编译理念，并用 Kaleidoscope 官方教程串起全流程；进阶层（u3-u7）按「数据结构→优化框架→前端→后端→MLIR」的依赖顺序展开，让读者先掌握 IR 核心类（Module/Value/Type），再理解基于它构建的 Pass 机制，随后自然延伸到 Clang 如何把源码变成 IR、IR 如何变成机器码、以及 MLIR 这套更现代的可扩展 IR；专家层（u8-u9）覆盖 JIT/LTO/链接、TableGen、测试体系、插件机制、调试信息与新增后端等二次开发主题。每篇讲义只聚焦一个相对独立的主题，引用 1-6 个真实源码文件，并配一个可动手的实践任务，单元与讲义之间用 depends_on 形成清晰的由浅入深依赖链。",
+  "head": "bd9aa3ca5789c94b3a0d0c42b0aa8a94be4c0695",
+  "rationale": "本次为增量更新，相对上次 HEAD（610a310）仅有 9 个提交、约 116 个文件变动，且集中在：lldb 测试与 PlatformWindows 错误信息/require 装饰器、LLD/ELF 针对 PPC64 位置无关长分支 thunk 的 .rela.dyn 保留（Writer.cpp/Config.h）、AArch64 GlobalISel 选择测试 NFC、ConstraintElimination 与 InstSimplify 的小幅折叠优化、libc/gn 构建/lit reports.py 基础设施。这些改动均未触及本手册任何讲义引用的核心源码文件（IR 核心类、Pass 管理器、Clang 前端、后端/SelectionDAG/GlobalISel/MC、MLIR、ORC JIT、LTO、调试信息等均无实质变化），也没有引入新子项目或新机制，因此本次无需新增讲义，也无需对任何讲义做 update/rebuild。已完成生成的入门层讲义（u1 全部 4 篇、u2 全部 3 篇）本次代码变化不影响其内容，action 设为 keep；尚未生成（讲义目录中尚无对应 .md 文件）的 u3-u9 各讲义仍按上一轮 full 模式的既有计划保持 new，等待 worker 继续生成。学习顺序与九单元划分沿用上次设计（入门→IR 数据结构→Pass 优化框架→Clang 前端→后端代码生成→MLIR→JIT/LTO/链接→二次开发与工程实践），保持由浅入深、单元间依赖清晰的路线。另外修正了原 manifest 中 u8-l2 文件名的笔误（u8-l2-lto.md.md → u8-l2-lto.md）。",
   "units": [
     {
       "id": "u1",
@@ -31,7 +31,7 @@
           ],
           "practice_task": "克隆或浏览仓库，画出顶层各子项目（llvm/clang/mlir/lld/lldb 等）的关系图，并用一句话标注每个项目的职责。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -58,7 +58,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -83,7 +83,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -113,7 +113,7 @@
             "u1-l1",
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -147,7 +147,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -173,7 +173,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -199,7 +199,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -928,7 +928,7 @@
           "id": "u8-l2",
           "title": "LTO 链接时优化",
           "order": 2,
-          "filename": "u8-l2-lto.md.md",
+          "filename": "u8-l2-lto.md",
           "level": "advanced",
           "topic": "讲解链接时优化（LTO/ThinLTO）的原理：用 Module Summary Index 跨模块分析、FunctionImport 跨模块内联、ThinLTOBitcodeWriter 写出摘要，并区分全 LTO 与 ThinLTO。",
           "learning_goals": [
