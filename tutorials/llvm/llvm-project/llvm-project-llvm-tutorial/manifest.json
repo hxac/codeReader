@@ -1,7 +1,7 @@
 {
   "project": "llvm-project-llvm",
-  "head": "4e924a6276ef015e1482b68371bb8229368fe5f7",
-  "rationale": "本手册面向 LLVM 项目的 llvm/ 子目录（核心优化器、后端与工具箱）。学习顺序遵循“先认识项目与 IR，再掌握 Pass / 分析 / 变换，最后深入代码生成、后端与 TableGen，并以 JIT 与测试收尾”的渐进路线：单元 1-2 为入门，建立项目定位、构建方式与 LLVM IR 心智模型；单元 3-4 进入中阶，讲解新 Pass 管理器与优化、分析两大核心机制；单元 5-7 为高阶，深入后端流水线、机器 IR、指令选择、寄存器分配、调度、MC 层、目标后端与 TableGen；单元 8 覆盖 JIT 执行与测试体系，并给出二次开发的工程实践。讲义之间通过 depends_on 形成清晰依赖，每篇都结合真实源码（examples/、lib/、include/、tools/、docs/）并附带一个可操作的代码实践任务。",
+  "head": "036af906f355771a5c2b3bb51a88d995c6010219",
+  "rationale": "本手册面向 LLVM 项目的 llvm/ 子目录（核心优化器、后端与工具箱）。学习顺序遵循“先认识项目与 IR，再掌握 Pass / 分析 / 变换，最后深入代码生成、后端与 TableGen，并以 JIT 与测试收尾”的渐进路线：单元 1-2 为入门，建立项目定位、构建方式与 LLVM IR 心智模型；单元 3-4 进入中阶，讲解新 Pass 管理器与优化、分析两大核心机制；单元 5-7 为高阶，深入后端流水线、机器 IR、指令选择、寄存器分配、调度、MC 层、目标后端与 TableGen；单元 8 覆盖 JIT 执行与测试体系，并给出二次开发的工程实践。讲义之间通过 depends_on 形成清晰依赖，每篇都结合真实源码（examples/、lib/、include/、tools/、docs/）并附带一个可操作的代码实践任务。本次增量更新（4e924a6→036af906）的代码改动集中在 ORC/JITLink：新增了 COFF dllimport 自动导入的 COFFAutoImportGenerator（一种新的 DefinitionGenerator）、RTBridge Caller 的泛化以及 ORCv2.md 文档更新，因此仅 u8-l1（执行引擎与 ORC JIT）需要 update，补入 DefinitionGenerator 扩展点这一概念并以新增的 COFFAutoImportGenerator 为实例、引用更新后的 ORCv2.md；其余讲义所依赖的源码文件均未受影响，保持 keep。",
   "units": [
     {
       "id": "u1",
@@ -34,7 +34,7 @@
           ],
           "practice_task": "阅读 README.txt 与 docs/GettingStarted.md，用一句话描述 LLVM 的作用，并整理出主要文档入口分别在哪些路径。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -63,7 +63,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -94,7 +94,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -122,7 +122,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -159,7 +159,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -188,7 +188,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -216,7 +216,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -246,7 +246,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -282,7 +282,7 @@
           "depends_on": [
             "u2-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -309,7 +309,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -336,7 +336,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -364,7 +364,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -399,7 +399,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -427,7 +427,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -455,7 +455,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -483,7 +483,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -519,7 +519,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -547,7 +547,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -574,7 +574,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l4",
@@ -601,7 +601,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -637,7 +637,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -664,7 +664,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -692,7 +692,7 @@
           "depends_on": [
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -728,7 +728,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -757,7 +757,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -784,7 +784,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -800,27 +800,31 @@
           "order": 1,
           "filename": "u8-l1-orc-jit.md",
           "level": "advanced",
-          "topic": "讲解 ExecutionEngine 抽象与 ORC JIT 的执行模型，并通过 HowToUseLLJIT 示例上手。",
+          "topic": "讲解 ExecutionEngine 抽象与 ORC v2 的层式架构思想，并介绍 JITDylib 的 DefinitionGenerator 扩展点（以本次新增的 COFFAutoImportGenerator 为例），最后通过 HowToUseLLJIT 示例上手。",
           "learning_goals": [
             "理解 IR 如何被 JIT 编译并执行",
             "掌握 ORC v2 的层式架构思想",
-            "看懂 HowToUseLLJIT 示例"
+            "看懂 HowToUseLLJIT 示例",
+            "了解 ORC 的 DefinitionGenerator 扩展点（以新增的 COFFAutoImportGenerator 为例）"
           ],
           "source_files": [
             "examples/HowToUseLLJIT/HowToUseLLJIT.cpp",
             "lib/ExecutionEngine/ExecutionEngine.cpp",
-            "lib/ExecutionEngine/Orc"
+            "lib/ExecutionEngine/Orc",
+            "docs/ORCv2.md",
+            "include/llvm/ExecutionEngine/Orc/COFFAutoImportGenerator.h"
           ],
           "minimal_modules": [
             "ExecutionEngine 抽象",
             "ORC v2 层式架构",
-            "HowToUseLLJIT 示例"
+            "HowToUseLLJIT 示例",
+            "DefinitionGenerator 扩展点与 COFF dllimport 自动导入示例"
           ],
-          "practice_task": "运行 HowToUseLLJIT，并修改它让 JIT 模块返回不同整数，验证执行结果。",
+          "practice_task": "运行 HowToUseLLJIT，并修改它让 JIT 模块返回不同整数，验证执行结果；再阅读 COFFAutoImportGenerator 的头文件注释，说明它如何以单个动态库的导出表为权威来按需合成 __imp_X 指针槽与跳转 thunk。",
           "depends_on": [
             "u2-l4"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u8-l2",
@@ -849,7 +853,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -878,7 +882,7 @@
             "u3-l2",
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

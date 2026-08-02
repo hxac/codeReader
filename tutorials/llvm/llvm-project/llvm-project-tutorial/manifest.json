@@ -1,7 +1,7 @@
 {
   "project": "llvm-project",
-  "head": "e096d2f60dbc6cab991d5c02a5f7125a6dc694dc",
-  "rationale": "本次为增量更新，相对上次 HEAD（11038cc）共 16 个提交、77 个文件变动，按主题归为以下几组，经逐一比对，均未触及本手册任何讲义引用的核心源码文件：1) ORC 移除 ExecutorProcessControl 上的 runAsVoidFunction/runAsIntFunction 便捷方法并清理 JITLink 的 LTmp C++17 临时方案（#213265、#213428），影响 ExecutorProcessControl.h、InProcessEPC、SelfExecutorProcessControl、OrcRTBridge、SimpleRemoteEPC、COFFPlatform、JITLinkGeneric 等文件，而 u8-l1 引用的是 LLJIT.cpp、Core.cpp、IRCompileLayer.cpp、lli.cpp、HowToUseLLJIT/CMakeLists.txt——无一被改动；被移除的只是 EPC 层的工具方法，并非 u8-l1 所讲 LLJIT/IRCompileLayer/ObjectLinkingLayer 分层架构，且该讲义尚未生成；2) LLD 的 COFF ARM64EC TLS 原生 chunk 替换与 ELF SPARC 的 TLS IE/GOTDATA 重定位（#212845、#213497、#213500），影响 lld/COFF/Chunks.h、lld/COFF/Driver.cpp、lld/ELF/Arch/SPARCV9.cpp，而 u8-l3 引用的是 lld/ELF/Driver.h、lld/CMakeLists.txt、lld/README.md，属不同驱动与具体重定位实现，且尚未生成；3) AArch64 GlobalISel 将扩展标量类型固化为整型及若干 combiner 测试 NFC（#213457、#213522），改动 CallLowering.cpp 与大量 .mir 测试，而 u6-l3 引用 IRTranslator/Legalizer/RegBankSelect/InstructionSelect 四个流水线文件均未改，u6-l1 已生成且只引用 CodeGenPassBuilder.h 等高层文件，不受影响；4) MLIR x86 方言的向量收缩累加器解耦与新增 MoveAccumulatorForContractLoop 变换、Python 扩展去除 LLVMSupport 依赖（#204327、#213509），影响 mlir/Dialect/X86/* 与 mlir/python CMake，而 u7 讲义引用的是 Operation.h、Dialect.h、Pass.cpp 等核心抽象与 Toy 示例——均未改动；x86 只是又一个具体方言实例（与上轮 XeGPU 同理），不引入新机制；5) InstCombine 不再修改 elementwise atomic load 的类型、LowerAtomic 清除 elementwise 标志、ConstraintElimination 新增 SREM facts（#213414、#213401、#213453），分别落在 InstCombineLoadStoreAlloca.cpp、LowerAtomicPass.cpp、ConstraintElimination.cpp，而 u4-l3 引用的是 InstructionCombining.cpp 主驱动文件与 GVN/LICM/Inliner，主题为 pass 原理巡礼，与这些子文件的具体折叠逻辑无关；6) CSKY 汇编构建属性、libc GPU 位码库改用 llvm-link、lldb PythonCallable::GetArgInfo 重写、BlockFrequencyInfo 不可归约 CFG 测试（#213507、#210662、#213378、#213492），均为目标/库/插件内部或测试改动，无讲义引用。综上，本次无需新增讲义，也无需对任何讲义做 update/rebuild。需要特别说明的是：自上次 manifest 以来，worker 又生成了 u4-l3、u4-l4、u5 全部 5 篇、u6-l1 共 8 篇讲义，讲义目录现已覆盖 u1–u5 全部及 u6-l1；这些讲义所讲概念与 API 均未受本次代码变化影响，action 统一设为 keep。尚未生成（目录中无对应 .md 文件）的 u6-l2/u6-l3/u6-l4/u6-l5、u7 全部 4 篇、u8 全部 3 篇、u9 全部 4 篇仍按既有计划保持 new，等待 worker 继续生成。九单元划分与由浅入深的学习顺序（入门→IR 数据结构→Pass 优化框架→Clang 前端→后端代码生成→MLIR→JIT/LTO/链接→二次开发与工程实践）保持不变。",
+  "head": "2a4acc46ea711175ef5cfe6ea5a795f62221084a",
+  "rationale": "本次为增量更新，相对上次 HEAD（e096d2f）共 7 个提交、36 个文件变动，按主题归为以下五组，经逐一比对，无一组触及任何讲义引用的核心源码文件：1) ORC 新增 COFFAutoImportGenerator 实现 COFF dllimport 自动导入（#203914）并将 RTBridge 调用方泛化为任意 runtime 函数（#213526），同时更新 llvm-jitlink 工具与 ORCv2 文档，影响 ExecutionEngine/Orc 下新增的 COFFAutoImportGenerator.{h,cpp}、RTBridge/Calls.h、RTBridge/SPS/Calls.h、JITLink/COFF_x86_64.cpp、tools/llvm-jitlink.{cpp,h}、docs/ORCv2.md；而 u8-l1 引用的是 LLJIT.cpp、Core.cpp、IRCompileLayer.cpp、lli.cpp、HowToUseLLJIT/CMakeLists.txt——无一被改动，且该讲义尚未生成，保持 new，worker 将基于当前最新源码生成；被新增的是一个 COFF 平台特化的小特性，并非 u8-l1 所讲的 LLJIT/IRCompileLayer/ObjectLinkingLayer 分层架构。2) Clang 驱动修复 NetBSD 上 libc++ 头文件搜索路径（#212716），落在 ToolChains/NetBSD.{cpp,h}、ToolChains/Clang.cpp、Options.td、LangOptions.def，属目标工具链内部路径逻辑，而 u5-l1 引用的是 driver.cpp、cc1_main.cpp、InternalsManual.rst、DriverInternals.rst，主题为 Driver/cc1 两层派发架构，不受影响。3) OpenMP/offload 新增跨团队原子归约（#209298），落在 CGOpenMPRuntimeGPU.cpp、OMPIRBuilder.cpp、OMPKinds.def 及 offload/openmp 设备运行时与测试，u5-l5 引用的是 CodeGenModule.cpp/CodeGenFunction.cpp/CodeGenAction.cpp 通用 CodeGen 主线，与 OpenMP GPU 运行时特化无关。4) VPlan 向量化优化处理 IV 符号无法判定的步进（#213450）及 SLP vectorizer 测试 NFC（提交 2a4acc46），影响 Transforms/Vectorize/VPlanTransforms.{cpp,h} 与若干 .ll 测试，而 u4-l3 引用的是 InstCombine/GVN/LICM/Inliner 经典标量 pass，分属不同优化模块。5) lldb 将 unique_ptr 的 .release() 改为 std::move（#213525，NFC），仅触及 IRExecutionUnit.cpp，u9-l3 引用的是 DIBuilder/DebugInfoMetadata/DebugInfo，无关。综上，本次无需新增讲义，也无需对任何讲义做 update/rebuild。需特别说明：自上次 manifest 以来，worker 又生成了 u6-l2、u6-l3、u6-l4、u6-l5、u7-l1、u7-l2、u7-l3 共 7 篇讲义，讲义目录现已覆盖 u1–u7-l3 全部；这些讲义所讲概念与 API 均未受本次代码变化影响，action 由 new 调整为 keep。尚未生成（目录中无对应 .md 文件）的 u7-l4、u8 全部 3 篇、u9 全部 4 篇仍按既有计划保持 new，等待 worker 继续生成。九单元划分与由浅入深的学习顺序（入门→IR 数据结构→Pass 优化框架→Clang 前端→后端代码生成→MLIR→JIT/LTO/链接→二次开发与工程实践）保持不变。",
   "units": [
     {
       "id": "u1",
@@ -681,7 +681,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -709,7 +709,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l4",
@@ -737,7 +737,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l5",
@@ -765,7 +765,7 @@
             "u6-l1",
             "u6-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -800,7 +800,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -827,7 +827,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -856,7 +856,7 @@
             "u7-l1",
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l4",
