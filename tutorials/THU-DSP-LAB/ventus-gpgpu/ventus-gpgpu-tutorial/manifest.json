@@ -1,0 +1,916 @@
+{
+  "project": "ventus-gpgpu",
+  "head": "681172541a8a34ffb43c483a19c075acbc11a4eb",
+  "rationale": "Ventus(乘影)是一个基于 Chisel HDL、支持 RISC-V 向量扩展(RVV)的开源 GPGPU 硬件项目，属于大型 RTL 工程。学习路线遵循\"先宏观再微观、先能跑通再读源码、沿着真实数据通路走\"的原则，分为 7 个单元、共 30 篇讲义。第 1 单元让读者从零认识项目定位、用 Mill/Makefile 构建并生成 Verilog、读懂目录结构、用 sim-verilator 跑通第一个测试用例；第 2 单元建立 GPU 编程模型(grid/block/warp/thread)认知，并拆解 GPGPU_top 顶层模块与全局参数系统；第 3 单元沿\"host→wg_buffer→resource_table→allocator→cu_interface\"走通 CTA 任务调度；第 4、5 单元按取指→译码→指令缓冲/记分板→寄存器堆/操作数收集→发射→各类执行单元→SIMT 分支→写回/CSR 的顺序，逐一剖析 SM 流水线；第 6 单元深入 L1I/L1D/SharedMem/L2 缓存层次与 MSHR/WSHR 机制；第 7 单元覆盖可选的 MMU/TLB、AXI host 接口、Verilator 仿真框架、GVM 对拍协同仿真以及 FPGA 部署与参数定制。讲义之间通过 depends_on 形成清晰依赖链，每篇均结合真实源码并给出可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门与环境搭建",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与整体架构",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Ventus(乘影) 是什么：一个用 Chisel 实现、支持 RISC-V 向量扩展的开源 GPGPU，以及它在软硬件工具链中的位置和整体微架构概览。",
+          "learning_goals": [
+            "理解 Ventus 的项目目标、技术栈(Chisel/RISC-V/RVV)与开源背景",
+            "认识整体微架构：CTA 调度器、多个 SM、L1/L2 缓存与 AXI 接口的关系",
+            "了解配套的软件工具链(isa-simulator、pocl、driver、LLVM)与本仓库的职责边界"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/Ventus-GPGPU-doc.md"
+          ],
+          "minimal_modules": [
+            "整体架构图 ventus_arch",
+            "工具链组成"
+          ],
+          "practice_task": "阅读 README 与架构文档，画出一张包含 Host、CTA Scheduler、SM、L1I/L1D、SharedMem、L2Cache、AXI/DDR 的顶层模块关系图，并标注每个模块对应的源码目录。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建系统与 Verilog 生成",
+          "order": 2,
+          "filename": "u1-l2-build-and-verilog.md",
+          "level": "beginner",
+          "topic": "讲解基于 Mill 的构建系统，如何初始化依赖、生成仿真/综合用 Verilog，以及 Makefile 暴露的核心命令。",
+          "learning_goals": [
+            "掌握 make init 初始化子模块依赖的流程",
+            "学会用 make verilog / make fpga-verilog 生成 RTL",
+            "理解 build.sc 中 ventus 模块及其依赖(hardfloat/fpuv2/rocketchip/inclusivecache)的组织"
+          ],
+          "source_files": [
+            "Makefile",
+            "build.sc",
+            "common.sc"
+          ],
+          "minimal_modules": [
+            "Ventus 模块(build.sc)",
+            "Makefile 目标"
+          ],
+          "practice_task": "执行 make init 与 make verilog，定位生成的 GPGPU_top.v，记录顶层模块名并查看其端口列表，确认构建成功。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与源码组织",
+          "order": 3,
+          "filename": "u1-l3-directory-structure.md",
+          "level": "beginner",
+          "topic": "梳理仓库目录结构：ventus/src 下的 top/pipeline/cta/L1Cache/L2cache/mmu/axi 等子目录的职责，以及 sim-verilator、dependencies、docs 的作用。",
+          "learning_goals": [
+            "建立对 ventus/src 各子目录职责的整体认知",
+            "区分顶层(top)、流水线(pipeline)、调度(cta)、缓存(L1Cache/L2cache)等代码分区",
+            "了解 dependencies 子模块(rocket-chip、fpuv2、inclusive-cache 等)的来源与用途"
+          ],
+          "source_files": [
+            "README.md",
+            "ventus/src/top/GPGPU_top.scala",
+            ".gitmodules"
+          ],
+          "minimal_modules": [
+            "目录划分"
+          ],
+          "practice_task": "用 git ls-files 统计 ventus/src 各子目录的 Scala 文件数量，编写一份目录-职责对照表，标注每个目录对应的功能域。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "Verilator 仿真与测试用例",
+          "order": 4,
+          "filename": "u1-l4-verilator-simulation.md",
+          "level": "beginner",
+          "topic": "介绍 sim-verilator 仿真框架的三部分(libVentusRTL.so、mini driver、testcase)，如何构建运行，以及 .metadata/.data 测试用例格式与程序输出含义。",
+          "learning_goals": [
+            "会用 make -j run / make RELEASE=1 -j run 构建并运行仿真",
+            "理解 .metadata 与 .data 文件结构及 ventus_args.txt 配置",
+            "读懂 warp 执行、访存、分支等程序输出格式"
+          ],
+          "source_files": [
+            "sim-verilator/README.md",
+            "sim-verilator/Makefile",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "libVentusRTL.so",
+            "mini driver",
+            "testcase"
+          ],
+          "practice_task": "在 sim-verilator 目录下运行 vecadd 测试用例(make -j run 或手动指定 -f ventus_args.txt)，使用 --dump-mem 导出结果地址区间并核对加法结果是否正确。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "GPU 编程模型与顶层架构",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "GPU 编程模型与 CTA/Warp/Thread 概念",
+          "order": 1,
+          "filename": "u2-l1-programming-model.md",
+          "level": "beginner",
+          "topic": "讲解 GPU 的 grid/block/thread/warp 编程模型，Ventus 如何以 32 线程组成一个 warp、以 block 为调度单位，以及 CSR 寄存器与地址映射(sharedmem/globalmem)约定。",
+          "learning_goals": [
+            "理解 grid/block/warp/thread 层级与硬件 warp(32 线程)的对应",
+            "掌握 CSR_NUMW/CSR_NUMT/CSR_TID/CSR_WID/CSR_LDS/CSR_GDS 等寄存器含义",
+            "理解 sharedmem 与 globalmem 的地址空间划分方式"
+          ],
+          "source_files": [
+            "docs/Ventus-GPGPU-doc.md",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "编程模型",
+            "CSR 约定",
+            "地址映射"
+          ],
+          "practice_task": "结合文档整理一份表，列出每个 CSR 的地址与作用，并说明一个 block 被分配到 SM 后，软件如何通过 CSR 获知 thread id、warp id 与 sharedmem 基址。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "GPGPU_top 顶层模块与集群互联",
+          "order": 2,
+          "filename": "u2-l2-gpgpu-top.md",
+          "level": "beginner",
+          "topic": "剖析 GPGPU_top：CTAinterface、若干 SM_wrapper、L2Cache(Scheduler)、SM2clusterArbiter/l2Distribute/cluster2L2Arbiter 之间的请求/响应连接与 source 编码路由。",
+          "learning_goals": [
+            "理解 GPGPU_top 如何例化 CTA 接口、SM 集群与 L2 缓存",
+            "掌握 SM↔L2 之间 cluster 仲裁与地址分发(source 字段编码)机制",
+            "理解 host_req/host_rsp 与 out_a/out_d(AXI) 端口的作用"
+          ],
+          "source_files": [
+            "ventus/src/top/GPGPU_top.scala"
+          ],
+          "minimal_modules": [
+            "GPGPU_top",
+            "SM_wrapper",
+            "CTAinterface",
+            "SM2clusterArbiter",
+            "l2Distribute",
+            "cluster2L2Arbiter"
+          ],
+          "practice_task": "在 GPGPU_top.scala 中追踪一个 SM 发出的 memReq 如何经 SM2clusterArbiter→l2Distribute→cluster2L2Arbiter 到达 L2 Scheduler，画出请求与响应的数据流并标注 source 位域含义。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "参数系统与配置机制",
+          "order": 3,
+          "filename": "u2-l3-parameter-system.md",
+          "level": "beginner",
+          "topic": "讲解两套参数机制：全局 object parameters(num_sm/num_warp/num_thread/缓存配置/CTA_SCHE_CONFIG)与源自 rocket-chip 的 CDE 配置系统(Field/View/Parameters/Config)。",
+          "learning_goals": [
+            "掌握 parameters object 中关键参数(num_sm、num_warp、num_thread、dcache/l2cache 配置)的含义",
+            "理解 CTA_SCHE_CONFIG 子对象如何描述 WG/WF 资源上限",
+            "认识 CDE 的 Field/Parameters/Config 链式查询机制及 ParametersToJson 导出"
+          ],
+          "source_files": [
+            "ventus/src/top/parameters.scala",
+            "ventus/src/config/config.scala"
+          ],
+          "minimal_modules": [
+            "parameters",
+            "CTA_SCHE_CONFIG",
+            "config(Field/View/Parameters)",
+            "ParametersToJson"
+          ],
+          "practice_task": "修改 parameters 中的 num_warp 或 num_thread，重新生成 Verilog，观察 GPGPU_top.v 中相关位宽变化；并尝试运行 ParamPrintApp 导出 parameters.json。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "CTA 任务调度器",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "CTA 调度器总体与 WG buffer",
+          "order": 1,
+          "filename": "u3-l1-cta-scheduler-overview.md",
+          "level": "intermediate",
+          "topic": "剖析 cta_scheduler_top 的整体结构，以及 wg_buffer 如何缓存来自 host 的 workgroup 并以轮询方式提供给分配器。",
+          "learning_goals": [
+            "理解 CTA 调度器的 host-interface→wg_buffer→allocator→resource_table→cu_interface 总体流程",
+            "掌握 wg_buffer 的双口 RAM(wgram1/wgram2)与轮询选择机制",
+            "理解 host_wg_new/host_wg_done/cu_wf_new/cu_wf_done 端口语义"
+          ],
+          "source_files": [
+            "ventus/src/cta/cta_scheduler.scala",
+            "ventus/src/cta/wg_buffer.scala",
+            "docs/cta_scheduler/Top.md",
+            "docs/cta_scheduler/wg_buffer.md"
+          ],
+          "minimal_modules": [
+            "cta_scheduler_top",
+            "wg_buffer"
+          ],
+          "practice_task": "对照 docs/cta_scheduler 文档，画出 cta_scheduler_top 内部模块连接图，标注一个 workgroup 从进入到被拆分为 warp 发往 CU 的完整路径。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "资源表与分配器",
+          "order": 2,
+          "filename": "u3-l2-resource-table-allocator.md",
+          "level": "intermediate",
+          "topic": "深入 resource_table(基于链表管理每个 CU 的 LDS/SGPR/VGPR)与 allocator(RTcache + FSM 选择资源充足的 CU)如何协同完成 block 分配。",
+          "learning_goals": [
+            "理解 resource_table 用链表(prev/next/addr1/addr2)管理资源分配与释放的原理",
+            "掌握 allocator 的 FSM(IDLE/CU_PREFER/RESOURCE_CHECK/ALLOC/REJECT)与 RTcache 加速机制",
+            "理解分配时如何依据 LDS/SGPR/VGPR 余量选择目标 CU"
+          ],
+          "source_files": [
+            "ventus/src/cta/resource_table.scala",
+            "ventus/src/cta/allocator.scala",
+            "docs/cta_scheduler/Allocator.md",
+            "docs/cta_scheduler/Resouce table.md"
+          ],
+          "minimal_modules": [
+            "resource_table_top",
+            "allocator",
+            "RTcache"
+          ],
+          "practice_task": "梳理 allocator 的状态机转移条件，编写一段文字+伪代码描述：当一个请求 4 个 warp、占用若干 VGPR/SGPR/LDS 的 block 到来时，调度器如何逐步选定 CU 并返回基地址。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "CU 接口、warp 拆分与释放",
+          "order": 3,
+          "filename": "u3-l3-cu-interface-warp-dispatch.md",
+          "level": "intermediate",
+          "topic": "讲解 cu_interface 如何将一个 workgroup 拆分为逐个 warp 派发、收集完成信号并触发资源释放，以及 SM 侧 CTA2warp 如何接收 warp 并分配硬件 warp id。",
+          "learning_goals": [
+            "理解 cu_interface 的 FSM(GET_WF/UPDATE/DEALLOC)与 wf_gather 完成收集机制",
+            "掌握 warp 派发时的 wf_tag(wg_slot_id, wf_id_in_wg)编码",
+            "理解 CTA2warp 如何把派发信息转为 warpReq 并分配 wid"
+          ],
+          "source_files": [
+            "ventus/src/cta/cu_interface.scala",
+            "ventus/src/pipeline/CTA2warp.scala"
+          ],
+          "minimal_modules": [
+            "cu_interface",
+            "CTA2warp"
+          ],
+          "practice_task": "追踪一个含 2 个 warp 的 block 从 cu_interface 派发到 CTA2warp 接收的全过程，记录每拍传递的字段(wg_id、wf_tag、sgpr_base、vgpr_base、start_pc 等)，说明全部 warp 完成后如何回传释放。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "SM 流水线前端",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "SM 流水线总体与取指",
+          "order": 1,
+          "filename": "u4-l1-pipe-overview-and-fetch.md",
+          "level": "intermediate",
+          "topic": "剖析 pipe.scala 如何把各流水级模块连成整体，重点讲解 warp_scheduler + PCcontrol 的取指逻辑：多 warp 的 PC 管理、icache miss/ibuffer 满时的回退切换。",
+          "learning_goals": [
+            "理解 SM 流水线各模块(warp_scheduler/decode/ibuffer/scoreboard/issue/operandCollector/各执行单元/writeback)在 pipe.scala 中的连接关系",
+            "掌握取指阶段 warp 调度策略(贪婪选 warp、miss 或满时回退切换)",
+            "理解 PCcontrol 的 PC_next 来源(PC+fetch/分支目标/replay)"
+          ],
+          "source_files": [
+            "ventus/src/pipeline/pipe.scala",
+            "ventus/src/pipeline/warp_schedule.scala",
+            "ventus/src/pipeline/PCcontrol.scala"
+          ],
+          "minimal_modules": [
+            "pipe",
+            "warp_scheduler",
+            "PCcontrol"
+          ],
+          "practice_task": "在 pipe.scala 中标注取指相关连接(warp_sche.io.pc_req/icache_req/pc_rsp)，画出 warp_scheduler↔ibuffer↔icache 的握手关系，并说明取指 miss 时如何回退 PC 并切换 warp。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "译码与指令定义",
+          "order": 2,
+          "filename": "u4-l2-decode-and-instructions.md",
+          "level": "intermediate",
+          "topic": "讲解 InstrDecodeV2/DecodeUnit 如何将 32 位指令译码为 CtrlSigs 控制信号，以及 Instructions.scala 中 RVV/RV32I/自定义指令的 BitPat 定义。",
+          "learning_goals": [
+            "理解 CtrlSigs 控制信号包(inst/wid/fp/branch/csr/alu_fn/mem/mul/reg_idx 等字段)的含义",
+            "掌握译码表(IDecode)如何依据 opcode 生成控制信号",
+            "认识 Instructions.scala 中支持的指令类型与自定义指令(setrpc/vbranch/join/endprg/barrier 等)"
+          ],
+          "source_files": [
+            "ventus/src/pipeline/DecodeUnit.scala",
+            "ventus/src/pipeline/Instructions.scala"
+          ],
+          "minimal_modules": [
+            "InstrDecodeV2",
+            "IDecode",
+            "CtrlSigs",
+            "Instructions"
+          ],
+          "practice_task": "选取一条向量加法指令与一条自定义分支指令，对照 Instructions.scala 与 DecodeUnit.scala，手工推导其译码后 CtrlSigs 各字段的取值，并解释 alu_fn/branch/isvec 的作用。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "指令缓冲与记分板",
+          "order": 3,
+          "filename": "u4-l3-ibuffer-and-scoreboard.md",
+          "level": "intermediate",
+          "topic": "讲解每 warp 的指令缓冲 InstrBufferV2 + ibuffer2issue 的仲裁，以及每 warp 的 Scoreboard 如何通过标记目标寄存器来检测数据冒险并控制停顿。",
+          "learning_goals": [
+            "理解 InstrBufferV2 的 per-warp FIFO 结构与 ibuffer2issue 选 warp 发射的机制",
+            "掌握 Scoreboard 标记/释放寄存器(WAR/WAW/Raw)的实现与 delay 停顿信号",
+            "理解分支/barrier 指令在记分板中的特殊锁定与流水线冲刷"
+          ],
+          "source_files": [
+            "ventus/src/pipeline/ibuffer.scala",
+            "ventus/src/pipeline/scoreboard.scala"
+          ],
+          "minimal_modules": [
+            "InstrBufferV2",
+            "ibuffer2issue",
+            "Scoreboard",
+            "ScoreboardUtil"
+          ],
+          "practice_task": "构造一个存在 RAW 数据依赖的两条指令序列，分析 Scoreboard 如何在第一条未写回时阻塞第二条发射，并说明 delay 信号如何传递到 ibuffer2issue。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "寄存器堆与操作数收集",
+          "order": 4,
+          "filename": "u4-l4-regfile-and-operand-collector.md",
+          "level": "intermediate",
+          "topic": "讲解按 warp 分区的寄存器堆(标量 RegFileBank + 向量 FloatRegFileBank，多读端口)与 operandCollector(collectorUnit + 交叉-bar)如何为发射收集源操作数。",
+          "learning_goals": [
+            "理解寄存器堆按 warp 分区、标量(3 读 1 写)/向量(4 读 1 写)端口的设计与避免 bank 冲突的原因",
+            "掌握 operandCollector/collectorUnit 如何依据 sgpr_base/vgpr_base 读出操作数",
+            "理解 vExeData/in1/in2/in3/mask 如何组装"
+          ],
+          "source_files": [
+            "ventus/src/pipeline/regfile.scala",
+            "ventus/src/pipeline/operandCollector.scala"
+          ],
+          "minimal_modules": [
+            "RegFileBank",
+            "FloatRegFileBank",
+            "operandCollector",
+            "collectorUnit"
+          ],
+          "practice_task": "梳理 operandCollector 读取 3 个源操作数与 mask 的时序：从 ibuffer2issue 给出控制信号到 crossbar2CU 返回 bank 数据再到 issue.io 输出，画出每拍的数据与握手。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "SM 流水线后端",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "发射与执行单元总览",
+          "order": 1,
+          "filename": "u5-l1-issue-and-execution-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 Issue 模块(标量 issueX / 向量 issueV 双发射)如何依据控制信号把指令分发到 sALU/vALU/vFPU/LSU/SFU/SIMT/CSR/MUL/TC 等执行单元。",
+          "learning_goals": [
+            "理解 Issue 模块的双发射(issueX/issueV)与按运算单元类型(out_sALU/out_vALU/...)分发逻辑",
+            "掌握各执行单元在 pipe.scala 中的实例化与连接(ALUexe/vALUv2/FPUexe/LSUexe/SFUexe/vMULv2/vTCexe)",
+            "理解 out_warpscheduler 用于 barrier/endprg 的旁路"
+          ],
+          "source_files": [
+            "ventus/src/pipeline/issue.scala",
+            "ventus/src/pipeline/execution.scala"
+          ],
+          "minimal_modules": [
+            "Issue",
+            "ALUexe",
+            "vALUv2",
+            "FPUexe",
+            "LSUexe",
+            "SFUexe",
+            "vMULv2",
+            "vTCexe"
+          ],
+          "practice_task": "在 pipe.scala 中列出所有执行单元的 in/out 连接对象，并标注每种指令类型(标量算术/向量算术/浮点/访存/分支)分别经由哪个 Issue 端口进入哪个执行单元。",
+          "depends_on": [
+            "u4-l3",
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "标量 ALU 与向量 ALU",
+          "order": 2,
+          "filename": "u5-l2-scalar-and-vector-alu.md",
+          "level": "intermediate",
+          "topic": "深入 ScalarALU(标量算术/逻辑/移位/比较/跳转控制)与 vALUv2(按 lane 复制、SIMT 多线程并行的核心整型运算单元)。",
+          "learning_goals": [
+            "理解 ScalarALU 支持的运算(ADD/SUB/SLT/AND/OR/XOR/移位/MIN/MAX)与 func 解码",
+            "掌握 vALUv2 如何为每个 thread lane 并行执行向量整型运算",
+            "理解 ALUexe 如何输出 BranchCtrl(jump/new_pc)给分支处理"
+          ],
+          "source_files": [
+            "ventus/src/pipeline/ALU.scala",
+            "ventus/src/pipeline/execution.scala"
+          ],
+          "minimal_modules": [
+            "ScalarALU",
+            "ALUexe",
+            "vALUv2"
+          ],
+          "practice_task": "选取一条标量 ADDI 与一条向量加法指令，分别追踪其在 ScalarALU 与 vALUv2 中的数据通路，说明向量单元如何利用 num_thread 个 lane 并行计算并输出带 mask 的结果。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "浮点、乘法与 SFU 特殊运算单元",
+          "order": 3,
+          "filename": "u5-l3-fpu-mul-sfu.md",
+          "level": "intermediate",
+          "topic": "讲解 FPUexe(依赖 fpuv2 的单精度浮点运算)、vMULv2(2 拍 32 位乘法/乘加)与 SFU(整数除法取余、浮点除法、浮点平方根等多周期单元)。",
+          "learning_goals": [
+            "理解 FPUexe 如何对接 fpuv2 依赖完成向量/标量浮点运算",
+            "掌握 vMULv2 的乘法/乘加流水与周期数",
+            "理解 SFU 多周期执行、单元数少于 lane 导致 chime 变长的特性"
+          ],
+          "source_files": [
+            "ventus/src/pipeline/fpu_utils.scala",
+            "ventus/src/pipeline/Multiplier.scala",
+            "ventus/src/pipeline/FloatDivSqrt.scala",
+            "ventus/src/pipeline/IntDivMod.scala"
+          ],
+          "minimal_modules": [
+            "FPUexe",
+            "vMULv2",
+            "SFUexe",
+            "FloatDivSqrt",
+            "IntDivMod"
+          ],
+          "practice_task": "对比一条向量乘法(vMULv2)与一条浮点除法(SFU)在执行周期与吞吐上的差异，结合 num_sfu=(num_thread>>2) 说明 SFU 单元数如何影响带 mask 的多线程执行时间。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "LSU 访存单元",
+          "order": 1,
+          "filename": "u5-l4-lsu.md",
+          "level": "intermediate",
+          "topic": "深入 LSUexe：地址计算(AddrCalculate)、strided/indexed 模式向量地址生成、按 cacheline 合并(coalesce)访问、依据地址范围路由到 sharedmem 或 dcache，以及 MSHR 形式记录在途请求与 fence 同步。",
+          "learning_goals": [
+            "理解 LSU 如何计算并合并向量访存地址(coalesce 到 cacheline)",
+            "掌握依据地址范围(0-128kB 共享/LDS_BASE 等)路由到 SharedMem 或 DCache 的逻辑",
+            "理解 LSU 内 MSHR 记录在途请求、收集返回数据与 fence 等待机制"
+          ],
+          "source_files": [
+            "ventus/src/pipeline/LSU.scala"
+          ],
+          "minimal_modules": [
+            "LSUexe",
+            "AddrCalculate",
+            "MshrTag",
+            "DCacheCoreReq_np",
+            "ShareMemCoreReq_np"
+          ],
+          "practice_task": "追踪一个向量 load 指令：从操作数得到基址→AddrCalculate 计算各 lane 地址→判断落在 global 还是 shared→coalesce 为 cacheline 请求→发往 dcache/sharedmem，画出完整流程并说明 fence 指令如何等待在途请求。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "SIMT stack 与分支汇合",
+          "order": 2,
+          "filename": "u5-l5-simt-stack-branch-join.md",
+          "level": "intermediate",
+          "topic": "讲解 SIMT_STACK/branch_join 如何维护分支嵌套控制流、压栈 else 路径掩码、在 join 处汇合恢复掩码，以及硬件 predicate 与全走单支时跳过压栈的优化。",
+          "learning_goals": [
+            "理解分支分歧(divergence)问题与 SIMT stack 的 ipdom 算法",
+            "掌握 vbeq 等自定义分支指令如何计算 else 掩码并压栈、join 如何出栈合并",
+            "理解 SIMT 隐式 mask 与 RVV 软件 mask 的叠加生效"
+          ],
+          "source_files": [
+            "ventus/src/pipeline/SIMT_STACK.scala",
+            "ventus/src/pipeline/branch_join.scala"
+          ],
+          "minimal_modules": [
+            "SIMT_STACK",
+            "ipdom_stack",
+            "branch_join",
+            "branch_join_stack"
+          ],
+          "practice_task": "以一个 if-else(部分线程走 if、部分走 else)为例，逐步画出 SIMT stack 的压栈/出栈过程，标出每阶段的活动掩码与 PC，并说明无分歧时为何跳过压栈。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l6",
+          "title": "写回与 CSR",
+          "order": 3,
+          "filename": "u5-l6-writeback-and-csr.md",
+          "level": "intermediate",
+          "topic": "讲解 Writeback(多执行单元结果经 Arbiter 写回标量/向量寄存器，独立数据通路)与 CSRexe(warp 启动时设置 thread id 等、vsetl 计算、机器模式 CSR)。",
+          "learning_goals": [
+            "理解各执行单元输出级 FIFO 与 Writeback Arbiter 写回标量/向量寄存器的流程",
+            "掌握 Branch_back 如何合并分支结果回传 warp_scheduler",
+            "理解 CSRexe 在 warp 启动时设置 CSR_TID/CSR_NUMW 等及 vsetl 的 vl 计算"
+          ],
+          "source_files": [
+            "ventus/src/pipeline/writeback.scala",
+            "ventus/src/pipeline/CSR.scala"
+          ],
+          "minimal_modules": [
+            "Writeback",
+            "Branch_back",
+            "CSRexe",
+            "CSRFile"
+          ],
+          "practice_task": "追踪一条运算指令从执行单元输出→FIFO→Writeback Arbiter→写回寄存器堆的时序，并说明 warp 启动时 CSRexe 如何依据 wf_tag 计算并写入 CSR_TID/CSR_WID/CSR_LDS。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "缓存层次与共享内存",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "L1 指令缓存",
+          "order": 1,
+          "filename": "u6-l1-instruction-cache.md",
+          "level": "advanced",
+          "topic": "剖析 InstructionCache：只读非阻塞 cache、tag 访问、数据 SRAM、ICacheMSHR 管理在途 miss，以及 coreReq/coreRsp(对 SM)与 memReq/memRsp(对 L2)接口。",
+          "learning_goals": [
+            "理解 L1 ICache 只读、非阻塞、用静态 MSHR 管理 miss 的设计",
+            "掌握 coreReq/coreRsp 与 memReq/memRsp 四组接口的交互",
+            "理解 ICacheParameters 中的 cache 参数配置"
+          ],
+          "source_files": [
+            "ventus/src/L1Cache/ICache/ICache.scala",
+            "ventus/src/L1Cache/ICache/ICacheMSHR.scala",
+            "ventus/src/L1Cache/ICache/ICacheParameters.scala"
+          ],
+          "minimal_modules": [
+            "InstructionCache",
+            "ICacheMSHR"
+          ],
+          "practice_task": "模拟一次 icache miss：coreReq 未命中→分配 ICacheMSHR→发 memReq 到 L2→memRsp 回填→coreRsp 返回 SM，画出各阶段信号变化并说明非阻塞如何支持多 warp 交替取指。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "L1 数据缓存",
+          "order": 2,
+          "filename": "u6-l2-data-cache.md",
+          "level": "advanced",
+          "topic": "剖析 DataCache：写穿、写不分配策略，dirty 位追踪与写回、MSHR 管理 miss、WSHR(写状态保持寄存器)防止写序违规，以及 bank 化 SRAM。",
+          "learning_goals": [
+            "理解 DCache 写穿(write-through)/写不分配(write-no-allocate)策略",
+            "掌握 MSHR 管理读/写 miss 与 WSHR 管理待写回的作用",
+            "理解 DCacheParameters 的参数与 dirty 追踪机制"
+          ],
+          "source_files": [
+            "ventus/src/L1Cache/DCache/DCache.scala",
+            "ventus/src/L1Cache/DCache/DCacheParameters.scala",
+            "ventus/src/L1Cache/DCache/DCacheWSHR.scala"
+          ],
+          "minimal_modules": [
+            "DataCache",
+            "DCacheWSHR"
+          ],
+          "practice_task": "分别追踪一次命中读、一次 miss 读、一次命中写：说明写穿策略下写数据如何同时更新 cache 与发往 L2，以及 WSHR 在其中如何记录待写回以避免顺序问题。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "Tag 访问与 MSHR 机制",
+          "order": 3,
+          "filename": "u6-l3-tag-access-and-mshr.md",
+          "level": "advanced",
+          "topic": "深入 L1TagAccess(tag 存储、命中检测、替换、DCache 版的 dirty 位)与 L1MSHR(主/子条目、primary/secondary miss 状态机)及 L1Interfaces 的 bundle 定义。",
+          "learning_goals": [
+            "理解 L1TagAccess 的 tag 命中检测与替换策略(DCache 版含 dirty)",
+            "掌握 L1MSHR 的 entry/subentry 与 PRIMARY_AVAIL/SECONDARY_AVAIL 等状态",
+            "理解 L1Interfaces 中 core/mem 侧 bundle 字段"
+          ],
+          "source_files": [
+            "ventus/src/L1Cache/L1TagAccess.scala",
+            "ventus/src/L1Cache/L1MSHR.scala",
+            "ventus/src/L1Cache/L1Interfaces.scala"
+          ],
+          "minimal_modules": [
+            "L1TagAccess",
+            "L1MSHR",
+            "L1Interfaces"
+          ],
+          "practice_task": "构造两个落同一 cacheline 不同 offset 的 miss 请求，分析第二个如何作为 secondary miss 复用 MSHR 主条目而不重复发往 L2，画出 MSHR 状态转移。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "共享内存 SharedMemory",
+          "order": 4,
+          "filename": "u6-l4-shared-memory.md",
+          "level": "advanced",
+          "topic": "剖析片上共享内存 SharedMemory：bank 化 SRAM 结构、每 workgroup 按 CSR_LDS 偏移占用、BankConflictArbiter 处理 bank 冲突分多拍返回。",
+          "learning_goals": [
+            "理解 sharedmem 的 bank 化组织与每个 workgroup 的 LDS 偏移分配",
+            "掌握 BankConflictArbiter 在两元素落同一 bank 时分摊到多周期的仲裁机制",
+            "理解 sharedmem 与 dcache 的地址空间区分(LDS_BASE)"
+          ],
+          "source_files": [
+            "ventus/src/L1Cache/ShareMem/ShareMem.scala",
+            "ventus/src/L1Cache/ShareMem/BankConflictArbiter.scala",
+            "ventus/src/L1Cache/ShareMem/ShareMemParameters.scala"
+          ],
+          "minimal_modules": [
+            "SharedMemory",
+            "BankConflictArbiter"
+          ],
+          "practice_task": "分析一个发生 bank 冲突的向量 shared 写：说明 BankConflictArbiter 如何把冲突请求拆分到多个周期、如何按 mask 选择有效 lane，并对照无冲突情形比较吞吐。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "L1Cache2L2 仲裁与 L2 缓存",
+          "order": 5,
+          "filename": "u6-l5-l2cache-and-arbiter.md",
+          "level": "advanced",
+          "topic": "讲解 L1Cache2L2Arbiter(每 SM 内 ICache/DCache 仲裁)与参考 SiFive block-inclusive-cache 的 L2 Scheduler(SourceA/D、SinkA/D、Directory、BankedStore、MSHR)。",
+          "learning_goals": [
+            "理解 L1Cache2L2Arbiter 如何用 a_source 区分并仲裁 ICache/DCache 请求",
+            "掌握 L2 Scheduler 的目录(directory)式包容性 cache 与 SourceA/D、SinkA/D、BankedStore 协作",
+            "理解 L2 MSHR 跟踪 L2 miss 并经 out_a/out_d 访问外部内存"
+          ],
+          "source_files": [
+            "ventus/src/L1Cache/L1Cache2L2Arbiter.scala",
+            "ventus/src/L2cache/Scheduler.scala",
+            "ventus/src/L2cache/BankedStore.scala",
+            "ventus/src/L2cache/Parameters.scala"
+          ],
+          "minimal_modules": [
+            "L1Cache2L2Arbiter",
+            "Scheduler",
+            "BankedStore",
+            "L2 MSHR"
+          ],
+          "practice_task": "追踪一次 L2 miss：L1 miss 请求经 L1Cache2L2Arbiter→cluster 仲裁→L2 Scheduler→目录未命中→BankedStore miss→经 out_a 发往 AXI 外存→out_d 回填，画出端到端流程。",
+          "depends_on": [
+            "u6-l2",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "MMU、互联与集成实践",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "MMU 与 TLB/PTW",
+          "order": 1,
+          "filename": "u7-l1-mmu-tlb-ptw.md",
+          "level": "advanced",
+          "topic": "剖析可选的 MMU(MMU_ENABLED)：L1TLB(全相联)、L2TLB(分组+加速表)、PTW(SV32/SV39 页表遍历)与 AsidLookup(ASID→PTBR)的协同，以及 TLB miss→PTW→经 L2 cache 走页表的流程。",
+          "learning_goals": [
+            "理解 L1TLB→L2TLB→PTW→L2Cache 的缺页处理链路",
+            "掌握 PTW 对 SV32/SV39 多级页表的遍历与 leaf/non-leaf PTE 判断",
+            "理解 AsidLookup 的 ASID 到页表基址映射与 invalidate 机制"
+          ],
+          "source_files": [
+            "ventus/src/mmu/L1TLB.scala",
+            "ventus/src/mmu/L2TLB.scala",
+            "ventus/src/mmu/PTW.scala",
+            "ventus/src/mmu/AsidLookup.scala"
+          ],
+          "minimal_modules": [
+            "L1TLB",
+            "L2TLB",
+            "PTW",
+            "AsidLookup",
+            "SVParam"
+          ],
+          "practice_task": "把 MMU_ENABLED 置 true，追踪一次 L1TLB miss→L2TLB miss→PTW 按 SV32 遍历两级页表→回填的全过程，画出各级地址(VPN/PPN/offset)的拆分与 PTE 字段判断。",
+          "depends_on": [
+            "u6-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "AXI 接口与 host 驱动",
+          "order": 2,
+          "filename": "u7-l2-axi-host-interface.md",
+          "level": "advanced",
+          "topic": "讲解 AXI4Lite2CTA(host 经 AXI4-Lite 写寄存器派发 kernel)、AXI4Adapter(L2 TileLink↔AXI4 外存桥接)与 AXI4Lite/AXI4Bundle 通道定义。",
+          "learning_goals": [
+            "理解 AXI4Lite2CTA 的寄存器映射(wg_id/num_wf/wf_size/start_pc/资源/3D 维度等)与触发派发流程",
+            "掌握 AXI4Adapter 把 L2 Get/PutFullData 转为 AXI4 AR/AW/W 及 R/B 响应的桥接",
+            "理解 GPGPU_axi_top 如何把 AXI4-Lite slave 与 AXI4 master 组合暴露给外部"
+          ],
+          "source_files": [
+            "ventus/src/axi/AXI4Lite2CTA.scala",
+            "ventus/src/axi/AXI4Adapter.scala",
+            "ventus/src/axi/AXI4Lite.scala"
+          ],
+          "minimal_modules": [
+            "AXI4Lite2CTA",
+            "AXI4Adapter",
+            "AXI4Lite",
+            "GPGPU_axi_top"
+          ],
+          "practice_task": "编写一段 AXI4-Lite 写序列(伪代码或波形描述)：依次写入一个 kernel 的参数寄存器并置 input_valid 触发派发，说明每个寄存器偏移对应的 host2CTA 字段，以及完成后如何从完成寄存器读回 wg_id。",
+          "depends_on": [
+            "u3-l1",
+            "u6-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "Verilator 仿真框架深入",
+          "order": 3,
+          "filename": "u7-l3-verilator-framework-internals.md",
+          "level": "advanced",
+          "topic": "深入 sim-verilator：ventus_rtlsim(C API + 实现核心仿真循环/波形/快照)、cta_sche_wrapper(Cta 派发管理)、kernel(元数据容器)、physical_mem(分页物理内存)与 cmdarg/json2cpp。",
+          "learning_goals": [
+            "理解 libVentusRTL.so 如何封装 Chisel 硬件、物理内存与内核拆分三部分建模",
+            "掌握 ventus_rtlsim_t 的构造/step/快照机制与 C API 设计",
+            "理解 Cta/Kernel/PhysicalMemory 在 driver 中的协作与 json2cpp 参数生成"
+          ],
+          "source_files": [
+            "sim-verilator/ventus_rtlsim.cpp",
+            "sim-verilator/ventus_rtlsim_impl.cpp",
+            "sim-verilator/cta_sche_wrapper.cpp",
+            "sim-verilator/kernel.cpp",
+            "sim-verilator/physical_mem.cpp"
+          ],
+          "minimal_modules": [
+            "ventus_rtlsim_t",
+            "Cta",
+            "Kernel",
+            "PhysicalMemory"
+          ],
+          "practice_task": "在 sim_main.cpp 基础上，编写(或描述)一段调用 libVentusRTL.so C API 的最小 driver：加载一个 kernel、派发、运行到完成并 dump 结果内存，说明各 API 的调用顺序。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "GVM 协同仿真与对拍",
+          "order": 4,
+          "filename": "u7-l4-gvm-cosimulation.md",
+          "level": "advanced",
+          "topic": "讲解 GVM：RTL 与 SPIKE ISA 模拟器并行运行、在指令退休时比对标量/向量寄存器结果，涉及 gvm.cpp/gvm_dpic.cpp(DPI-C 提取 DUT 状态)与 GvmDutApi.scala。",
+          "learning_goals": [
+            "理解 GVM 协同仿真比对 RTL 与参考模型(SPIKE)的目的",
+            "掌握 gvm_t::getDut 经 DPI-C 提取 warp 寄存器状态、gvmStep 推进并比对 XReg/VReg 的机制",
+            "理解 RTL_GVM_ENABLED/ENABLE_GVM 开关与 GvmDutApi 的硬件钩子"
+          ],
+          "source_files": [
+            "sim-verilator/gvm.cpp",
+            "sim-verilator/gvm_dpic.cpp",
+            "ventus/src/GvmDutApi.scala"
+          ],
+          "minimal_modules": [
+            "gvm_t",
+            "gvm_dpic",
+            "GvmDutApi",
+            "GvmDutCta2Warp"
+          ],
+          "practice_task": "启用 GVM(RTL_GVM_ENABLED)运行一个测试用例，观察对拍输出，定位一处 RTL 与 SPIKE 结果不一致的报告行，并说明 getDut 如何提取软硬件 warp 对应关系与寄存器基址用于比对。",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l5",
+          "title": "FPGA 部署与参数定制",
+          "order": 5,
+          "filename": "u7-l5-fpga-deploy-and-customization.md",
+          "level": "advanced",
+          "topic": "讲解 FPGA 部署：make fpga-verilog 生成 gen_fpga_verilog、firtool 分拆与 mem.conf/分离 SRAM、scripts/gen_sep_mem.sh，以及 fpga_test 工程(naive_driver)与通过 parameters 定制规模。",
+          "learning_goals": [
+            "掌握 make fpga-verilog 与 firtool --split-verilog --repl-seq-mem 的 FPGA 综合流程",
+            "理解 scripts/vlsi_mem_gen 与 mem.conf 如何分离出可替换的 SRAM 宏",
+            "认识 fpga_test 的 Vivado 工程、axi 顶层与 naive_driver 上板验证思路"
+          ],
+          "source_files": [
+            "ventus/fpga_test/readme.md",
+            "ventus/fpga_test/project_gpgpu.tcl",
+            "Makefile",
+            "ventus/src/top/parameters.scala"
+          ],
+          "minimal_modules": [
+            "GPGPU_axi_adapter_top",
+            "project_gpgpu",
+            "gen_sep_mem.sh"
+          ],
+          "practice_task": "执行 make fpga-verilog 生成 gen_fpga_verilog，查看 mem.conf 并用 scripts/gen_sep_mem.sh 分离 SRAM；调整 parameters(如 num_sm/num_warp)重新生成并对比资源量变化。",
+          "depends_on": [
+            "u1-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
