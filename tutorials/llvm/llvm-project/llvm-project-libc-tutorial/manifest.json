@@ -1,7 +1,7 @@
 {
   "project": "llvm-project-libc",
-  "head": "1ac9b999f8b521b5d6d82cf1a19858bc40a18c6a",
-  "rationale": "LLVM-libc 是 LLVM 项目中从零开始、用现代 C++ 编写的 C 标准库，其最独特之处不是“实现了哪些函数”，而是“如何组织与构建每一个函数”：以 entrypoint（入口点）为最小构建单元、用 YAML+hdrgen 生成公共头文件、用 __support 内部库沉淀公共能力、靠 config 体系做平台裁剪。因此学习路线必须先让读者建立这套“骨架”认知，再深入具体函数族与系统级机制。大纲分三层：入门层（单元1）解决“它是什么、目录如何、怎么跑起来”，并用 isalpha 打通一条从 YAML 到测试的完整链路；进阶层（单元2-8）按“机制→基础设施→函数族→系统交互”的顺序展开，先讲入口点/实现规范/构建/配置（单元2）、头文件生成（单元3）、内部支持库（单元4），再讲字符与内存（单元5）、数学与浮点（单元6）、数值转换与格式化（单元7）、系统调用与启动与文件 I/O（单元8），使依赖关系始终向后指；专家层（单元9-11）覆盖分配器、线程并发、测试/模糊/基准、移植、特殊目标与端到端贡献实战。依赖关系刻意做成有向无环图：所有具体函数族都依赖 entrypoint 与 __support 基础，系统级讲义（启动、文件 I/O、分配器、线程）依赖 OS 抽象层，二次开发讲义则汇拢配置、头文件生成与测试三块前置知识。",
+  "head": "4e924a6276ef015e1482b68371bb8229368fe5f7",
+  "rationale": "LLVM-libc 是 LLVM 项目中从零开始、用现代 C++ 编写的 C 标准库，其最独特之处不是“实现了哪些函数”，而是“如何组织与构建每一个函数”：以 entrypoint（入口点）为最小构建单元、用 YAML+hdrgen 生成公共头文件、用 __support 内部库沉淀公共能力、靠 config 体系做平台裁剪。因此学习路线必须先让读者建立这套“骨架”认知，再深入具体函数族与系统级机制。大纲分三层：入门层（单元1）解决“它是什么、目录如何、怎么跑起来”，并用 isalpha 打通一条从 YAML 到测试的完整链路；进阶层（单元2-8）按“机制→基础设施→函数族→系统交互”的顺序展开，先讲入口点/实现规范/构建/配置（单元2）、头文件生成（单元3）、内部支持库（单元4），再讲字符与内存（单元5）、数学与浮点（单元6）、数值转换与格式化（单元7）、系统调用与启动与文件 I/O（单元8），使依赖关系始终向后指；专家层（单元9-11）覆盖分配器、线程并发、测试/模糊/基准、移植、特殊目标与端到端贡献实战。依赖关系刻意做成有向无环图：所有具体函数族都依赖 entrypoint 与 __support 基础，系统级讲义（启动、文件 I/O、分配器、线程）依赖 OS 抽象层，二次开发讲义则汇拢配置、头文件生成与测试三块前置知识。本次增量：仅有一个提交 a3da10236c52 改动 libc，它把 GPU 目标生成 libc bitcode 库与启动对象的方式由旧的链接器 -r/-flto LTO 方案改为基于 llvm-link 的 llvm_link_bitcode 规则，并使 llvm-link 成为 GPU 构建的必需工具；该变化只影响 u11-l2（GPU/baremetal/UEFI 目标）讲义，故对其规格做更新，其余讲义保持不变。",
   "units": [
     {
       "id": "u1",
@@ -33,7 +33,7 @@
           ],
           "practice_task": "阅读 docs/index.md 后，用自己的话写出三句话：LLVM-libc 解决什么问题、它最突出的两个设计目标、它目前还不能完整替代系统 libc 的原因。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -60,7 +60,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -89,7 +89,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -601,7 +601,7 @@
         {
           "id": "u7-l2",
           "title": "printf_core 架构：解析器、写入器与转换器",
-          "order": 1,
+          "order": 2,
           "filename": "u7-l2-printf-core-architecture.md",
           "level": "intermediate",
           "topic": "剖析 __support/printf_core 把 printf 家族拆成解析格式串的 parser、负责输出的 writer、以及针对不同转换说明的 converter 的三段式架构。",
@@ -630,7 +630,7 @@
         {
           "id": "u7-l3",
           "title": "模块化格式串：让编译器按需链接 printf 的实现片段",
-          "order": 2,
+          "order": 3,
           "filename": "u7-l3-modular-format-strings.md",
           "level": "intermediate",
           "topic": "讲解 modular_format 机制：借助 clang 属性与弱符号，把 printf/scanf 中可能完全死代码的功能（如浮点、errno）拆成可按需链接的实现片段，缩小最终二进制体积。",
@@ -960,9 +960,10 @@
           "order": 2,
           "filename": "u11-l2-gpu-baremetal-uefi-targets.md",
           "level": "advanced",
-          "topic": "讲解三类非主流 Linux 目标的特殊构建与启动：GPU（AMDGPU/NVPTX 经 offload 在内核中调用 libc）、baremetal（最小足迹、自带 startup）、UEFI（固件应用）。",
+          "topic": "讲解三类非主流 Linux 目标的特殊构建与启动：GPU（AMDGPU/NVPTX 经 offload 在内核中调用 libc，并通过 llvm-link 把入口点 bitcode 合并成单一 LLVM IR 模块）、baremetal（最小足迹、自带 startup）、UEFI（固件应用）。",
           "learning_goals": [
             "理解 GPU 目标如何通过 offloading 运行时让内核调用 libc 函数",
+            "掌握 GPU 构建如何用 llvm-link（llvm_link_bitcode 规则）将入口点静态库合并为单一 bitcode 模块，并理解 llvm-link 已成为 GPU 构建的必需工具",
             "掌握 baremetal 最小足迹构建与自带 startup/start 的特点",
             "认识 UEFI 目标的构建与支持范围"
           ],
@@ -970,15 +971,18 @@
             "docs/gpu/index.rst",
             "docs/uefi/index.rst",
             "startup/gpu/start.cpp",
+            "startup/gpu/CMakeLists.txt",
+            "cmake/modules/LLVMLibCLibraryRules.cmake",
             "startup/baremetal"
           ],
           "minimal_modules": [
             "GPU offload",
+            "llvm_link_bitcode 规则",
             "baremetal 最小构建",
             "UEFI 固件支持",
             "特殊 startup"
           ],
-          "practice_task": "对比 startup/gpu/start.cpp 与 startup/baremetal 下的启动实现，说明 GPU 与 baremetal 两种环境在“程序入口”上的根本差异，以及各自能复用哪些公共入口点。",
+          "practice_task": "对比 startup/gpu/start.cpp 与 startup/baremetal 下的启动实现，说明 GPU 与 baremetal 两种环境在“程序入口”上的根本差异；再阅读 startup/gpu/CMakeLists.txt 与 LLVMLibCLibraryRules.cmake 中的 llvm_link_bitcode，说明 GPU 启动对象与 libc bitcode 库如何由 llvm-link 合并生成，以及为何这一改动能取代旧的链接器 -r/-flto LTO 方案。",
           "depends_on": [
             "u1-l4",
             "u8-l2"

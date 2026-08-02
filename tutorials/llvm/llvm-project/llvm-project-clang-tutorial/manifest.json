@@ -1,7 +1,7 @@
 {
   "project": "llvm-project-clang",
-  "head": "11038cc1618ac1f801e4029b7149f68f3ad949f5",
-  "rationale": "Clang 是 LLVM 的 C/C++/ObjC 前端，同时也是一套源码级工具平台，体量极大（lib/ 下 30+ 子库，AST/CodeGen 各有近 90/70 个源文件）。因此手册按「先认识全貌、再沿编译流水线由浅入深、最后落到工具生态与前沿特性」来组织。第 1 单元让读者从零建立项目认知；第 2 单元打通命令行到前端的入口（Driver→cc1→CompilerInstance）；第 3 单元讲清楚贯穿全程的基础设施（SourceManager、Diagnostics、FrontendAction），它们是后续所有模块的依赖；第 4–8 单元严格按真实编译管线顺序展开：Lex（词法/预处理）→ Parse（语法）→ Sema（语义）→ AST（中间表示）→ CodeGen（生成 LLVM IR），这是 Clang 的主干，必须线性依赖学习。第 9–14 单元为专家层，覆盖序列化/Modules、Tooling/LibTooling/ASTMatchers/插件/Transformer、格式化与索引、静态分析、以及 REPL/CIR/测试体系等扩展点。每篇只解决一个主题、引用 1–6 个真实源码文件、并配一个可动手的实践任务，依赖关系由 depends_on 显式给出，保证读者可按图索骥。",
+  "head": "4e924a6276ef015e1482b68371bb8229368fe5f7",
+  "rationale": "Clang 是 LLVM 的 C/C++/ObjC 前端，同时也是一套源码级工具平台，体量极大（lib/ 下 30+ 子库，AST/CodeGen 各有近 90/70 个源文件）。因此手册按「先认识全貌、再沿编译流水线由浅入深、最后落到工具生态与前沿特性」来组织。第 1 单元让读者从零建立项目认知；第 2 单元打通命令行到前端的入口（Driver→cc1→CompilerInstance）；第 3 单元讲清楚贯穿全程的基础设施（SourceManager、Diagnostics、FrontendAction），它们是后续所有模块的依赖；第 4–8 单元严格按真实编译管线顺序展开：Lex（词法/预处理）→ Parse（语法）→ Sema（语义）→ AST（中间表示）→ CodeGen（生成 LLVM IR），这是 Clang 的主干，必须线性依赖学习。第 9–14 单元为专家层，覆盖序列化/Modules、Tooling/LibTooling/ASTMatchers/插件/Transformer、格式化与索引、静态分析、以及 REPL/CIR/测试体系等扩展点。每篇只解决一个主题、引用 1–6 个真实源码文件、并配一个可动手的实践任务，依赖关系由 depends_on 显式给出，保证读者可按图索骥。本次增量：相比上次 HEAD(11038cc)，本轮提交（4e924a6）所涉改动全部落在 libc/lld/lldb/llvm/mlir 子项目内，clang 子树无任何源码或文档变化（git diff 过滤 clang 路径为空），故所有讲义 action 标为 keep，仅推进 head，结构与依赖关系保持不变。",
   "units": [
     {
       "id": "u1",
@@ -33,7 +33,7 @@
           ],
           "practice_task": "阅读 README.md 与 docs/index.rst，用自己的话写出 Clang 解决的三个主要问题，并列举两个除“编译代码”之外的用途。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -61,7 +61,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -89,7 +89,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -117,7 +117,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -153,7 +153,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -183,7 +183,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -211,7 +211,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -239,7 +239,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -275,7 +275,7 @@
           "depends_on": [
             "u2-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -304,7 +304,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -312,7 +312,7 @@
           "filename": "u3-l3-frontend-action.md",
           "level": "intermediate",
           "order": 3,
-          "topic": "讲解 FrontendAction 抽象：它是连接前端管线与具体任务（生成 AST、打印、 EmitLLVM 等）的可插拔核心。",
+          "topic": "讲解 FrontendAction 抽象：它是连接前端管线与具体任务（生成 AST、打印、EmitLLVM 等）的可插拔核心。",
           "learning_goals": [
             "理解 FrontendAction 的生命周期方法",
             "掌握 ASTFrontendAction/WrapperFrontendAction 等子类",
@@ -333,7 +333,7 @@
             "u2-l4",
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -370,7 +370,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -399,7 +399,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -428,7 +428,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -464,7 +464,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -492,7 +492,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -520,7 +520,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -557,7 +557,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -586,7 +586,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -615,7 +615,7 @@
           "depends_on": [
             "u6-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -651,7 +651,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -679,7 +679,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -706,7 +706,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l4",
@@ -735,7 +735,7 @@
             "u7-l3",
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -773,7 +773,7 @@
             "u7-l1",
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -801,7 +801,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -829,7 +829,7 @@
           "depends_on": [
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -867,7 +867,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -897,7 +897,7 @@
             "u4-l3",
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -935,7 +935,7 @@
             "u3-l3",
             "u7-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -964,11 +964,11 @@
           "depends_on": [
             "u10-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l3",
-          "title": "ASTMatchers 声明式查询",
+          "title": "AST Matchers 声明式查询",
           "filename": "u10-l3-ast-matchers.md",
           "level": "advanced",
           "order": 3,
@@ -993,7 +993,7 @@
             "u7-l4",
             "u10-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l4",
@@ -1022,7 +1022,7 @@
             "u10-l1",
             "u7-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1059,7 +1059,7 @@
           "depends_on": [
             "u7-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l2",
@@ -1089,7 +1089,7 @@
             "u3-l3",
             "u7-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l3",
@@ -1118,7 +1118,7 @@
           "depends_on": [
             "u10-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1155,7 +1155,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u12-l2",
@@ -1184,7 +1184,7 @@
           "depends_on": [
             "u7-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1221,7 +1221,7 @@
           "depends_on": [
             "u7-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u13-l2",
@@ -1251,7 +1251,7 @@
             "u13-l1",
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1289,7 +1289,7 @@
             "u8-l1",
             "u2-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u14-l2",
@@ -1318,7 +1318,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u14-l3",
@@ -1348,7 +1348,7 @@
             "u3-l2",
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }
