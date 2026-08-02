@@ -2,250 +2,356 @@
 
 ## 1. 本讲目标
 
-学完本讲后，你应当能够：
+本讲是单元 8（工程实践）的第一篇，带你走进 Ventus GPGPU 的**仿真验证层**。前面所有讲义都在读 RTL 本身（DUT，Design Under Test），本讲要回答的是：**在没有真实芯片、没有主机 CPU 的情况下，怎么证明这份 RTL 跑得对？**
 
-- 说清 Ventus GPGPU（Verilog 版）AXI 仿真平台的「五大组件」分别是谁、各管什么。
-- 看懂一次仿真从上电复位、预加载内存、派发 workgroup、等待执行完成，到最终比对结果打印 `PASSED`/`FAILED` 的完整时序。
-- 区分两个容易混淆的职责：**谁把 kernel/数据写进内存**（不是 `host_inter`，而是 `tc.v` 里的 `init_mem`），**谁驱动主机口派发 workgroup**（才是 `host_inter`）。
-- 理解 `axi_ram` 这个 AXI4 从端内存模型如何用状态机响应读写，以及它为何能被「正常访存」和「force 预加载」两种方式同时使用。
-- 能够独立打开一个测试用例，在源码里定位到「加载程序、发起首个 workgroup、检测退出条件」这三段代码。
+读完本讲你应当能够：
 
-本讲是单元 8（工程实践）的第一篇，承接 u1-l4（仿真环境搭建与用例运行）——那里讲了「怎么敲 `make run-vcs-4w8t` 跑起来」，本讲回答「这一声 make 背后，testbench 到底做了什么」。
+- 说清 `test_gpu_axi_top` 这个仿真顶层例化了哪几个模块、它们如何连成一条「主机 → GPU → 外部存储」的闭环。
+- 解释 `host_inter` 如何扮演「虚拟主机 CPU」：读 metadata、按 AXI4-Lite 协议把一个 workgroup 的派发参数写进 DUT、再轮询完成信号。
+- 解释 `axi_ram` 作为外部 DRAM 模型如何响应 AXI4 读写，以及 kernel 代码与数据是**怎样、在哪里**被预先灌进去的。
+- 看懂 `file_list.f` 与各用例自带的 `tc.v` 如何让「一套公共平台」服务「多个测试用例」。
+
+本讲与 [u1-l4（仿真环境搭建与用例运行）](u1-l4-simulation-and-testcases.md) 是一对：u1-l4 讲「**怎么跑**」（Makefile、run.f、CASE 宏、看 PASSED/FAILED），本讲讲「**跑进去的到底是什么**」（testbench 内部如何驱动 DUT）。同时也承接 [u7-l4（AXI4 适配器与 host 接口）](u7-l4-axi-adapter-and-host.md)——那里讲的 `axi4lite_2_cta` 寄存器映射，在本讲会看到主机侧如何一笔笔写它。
+
+> 说明：本讲以 `tc_gaussian`（高斯消元）用例为蓝本精读，所有行号均对照该目录下的 `tc.v`。其他用例（`tc_vecadd`、`tc_matadd` 等）的 testbench 结构完全一致，只是 `.metadata`/`.data` 内容与 `print_result` 的比对逻辑不同。
 
 ## 2. 前置知识
 
-在进入源码前，先用三段白话建立直觉。
+### 2.1 什么叫 testbench
 
-**什么是 testbench？** 被测芯片 RTL（DUT，Design Under Test）本身是被动的——它需要有时钟、有复位、有人喂给它输入、有地方放它要读写的存储。testbench 就是把这些「外部世界」用 Verilog 搭出来的一个壳：产生时钟复位、扮演主机 CPU、扮演外部 DRAM、并在跑完后检查结果对不对。它只存在于仿真，不会被综合成真实电路。
+RTL 描述的是「芯片内部该怎么工作」，但芯片自己不会动——它需要外部给时钟、给复位、给激励（输入数据/控制）、再观察输出。**testbench** 就是一段**只用于仿真、不会被综合成电路**的 Verilog 代码，负责扮演这些外部角色。它通常包含：
 
-**AXI4 与 AXI4-Lite 是什么？** 它们是 ARM 定义的片上总线协议。AXI4 是完整版（有 burst 突发、独立 5 通道），AXI4-Lite 是精简版（每笔单拍、无突发）。Ventus 里：主机 CPU 用 **AXI4-Lite** 慢速配置寄存器、派发任务；GPU 对外读写 DRAM 用 **AXI4** 高速搬运数据。u7-l4 已讲过 DUT 侧的转换，本讲关注 testbench 侧怎么「扮演」这两端的主/从。
+- 时钟/复位发生器（产生周期的方波、上电复位脉冲）；
+- 激励发生器（模仿主机 CPU 往芯片写寄存器、写内存）；
+- 响应模型（模仿外部 DRAM 应答读写）；
+- 自检逻辑（把硬件输出和「黄金参考」对比，打印 PASSED/FAILED）。
 
-**`$readmemh`、`force`/`release`、hierarchical 引用是什么？** 这是 Verilog 仿真专用的系统任务与构造：`$readmemh("文件", 数组)` 把一个十六进制文本文件按行读进一个数组；`force 信号=值` 强行覆盖某信号（`release` 解除），常用于绕过正常协议直接「塞」数据；`test_gpu_axi_top.u_host_inter.drv_gpu(...)` 这种带点号的全路径叫 hierarchical（层次化）引用，让一个模块能直接调用另一个模块里定义的 `task`。理解这三个，本讲的代码就懂了一大半。
+### 2.2 AXI4 / AXI4-Lite 两套接口（承接 u7-l4）
+
+Ventus 对外暴露两类接口，本讲会同时碰到：
+
+- **AXI4-Lite（控制通路，从端 s_axilite）**：主机 CPU 用它配置寄存器、触发一个 workgroup 派发。5 个通道：AW（写地址）、W（写数据）、B（写响应）、AR（读地址）、R（读数据），每通道独立 `valid/ready` 握手。
+- **AXI4（数据通路，主端 m_axi）**：GPU 用它读写外部 DRAM，搬运指令与数据。在 AXI4-Lite 基础上多了 burst（一次事务传多拍）、`wlast`（最后一拍）、`id`（事务标识）等。
+
+### 2.3 `$readmemh` 与 `force/release`
+
+两个仿真专用系统任务，是本讲预加载机制的核心：
+
+- `$readmemh("文件名", 数组)`：把一个**十六进制文本文件**按行读进一个 reg 数组，每行一个字。`.metadata` / `.data` 文件就是这种格式。
+- `force 信号 = 值; ... release 信号;`：在仿真里**强行改写**某条线网/寄存器的值，跨越模块层次，`release` 后恢复。testbench 用它从外部「假装自己是主机」去驱动 RAM 的从端口。
+
+> 提示：这两个构造只在仿真器（VCS/Verdi）里有意义，综合工具会忽略或报错。这也是 testbench 文件与 RTL 分目录的原因。
 
 ## 3. 本讲源码地图
 
-本讲围绕 `testcase/test_gpgpu_axi_top/common/` 下的平台文件，以及每个用例私有的 `tc.v`：
+本讲全部位于 `testcase/test_gpgpu_axi_top/`，是「带 AXI 接口」的仿真平台（另一个不带 AXI 的 `test_gpgpu_top/` 思路类似）。
 
-| 文件 | 角色 | 关键内容 |
-| --- | --- | --- |
-| `test_gpu_axi_top.sv` | 仿真顶层 | 例化 DUT、时钟/复位、host_inter、axi_ram、tc；定义波形 dump 与 `PASSED`/`FAILED` 打印 |
-| `host_inter.sv` | 主机驱动（AXI4-Lite Master） | 读 metadata、配置 host 寄存器、触发派发、轮询完成 |
-| `axi_ram.sv` | 外部存储模型（AXI4 Slave） | reg 数组 + 读写状态机；提供 `display_mem`/`store_mem` 读回结果 |
-| `file_list.f` | 文件清单 | 列出 6 个 testbench 文件，其中 `./tc.v` 是用例私有 |
-| `<用例>/tc.v` | 测试控制（每用例一份） | 串起整个流程：选数据、预加载内存、启动、等完、比对结果 |
+| 文件 | 作用 | 归属 |
+|------|------|------|
+| `common/test_gpu_axi_top.sv` | 仿真顶层，例化 DUT + 时钟复位 + 主机模型 + RAM 模型，声明所有 AXI 连线 | 公共 |
+| `common/host_inter.sv` | 虚拟主机：解析 metadata、AXI4-Lite 写派发参数、轮询完成 | 公共 |
+| `common/axi_ram.sv` | 外部 DRAM 模型（AXI4 从端 RAM），并提供内存窥探任务 | 公共 |
+| `common/gen_clk.v` / `gen_rst.v` | 10ns 时钟、2 拍复位发生器 | 公共 |
+| `common/file_list.f` | 列出 6 个 testbench 文件，其中 `./tc.v` 由各用例提供 | 公共 |
+| `common/run.f` | VCS 编译配方，引用 `file_list.f` 与 RTL `model_list`（u1-l4 已讲） | 公共 |
+| `tc_gaussian/tc.v` | 用例私有：编排整个仿真流程、预加载内存、比对结果、打印 PASSED/FAILED | 用例私有 |
+| `tc_gaussian/Makefile` | `make run-vcs-*` 等目标，本质是带 `+define+CASE_*` 的 vcs 命令（u1-l4 已讲） | 用例私有 |
 
-> 提醒：`source_files` 里只列了前四个，但 `file_list.f` 的最后一行 `./tc.v` 把用例控制文件也拉进了编译，而「预加载内存」和「`PASSED`/`FAILED` 判定」恰恰都在 `tc.v` 里。所以本讲第 4.4 节会把 `tc.v` 与 `file_list.f` 一起讲，否则无法回答实践任务里的问题。
+一句话区分：`common/` 是**平台**（换用例不变），`tc_gaussian/`（或 `tc_vecadd/` 等）是**内容**（换用例就换这里的 `tc.v` 与 `softdata/`）。
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 test_gpu_axi_top —— 仿真平台顶层
+### 4.1 test_gpu_axi_top：仿真顶层与例化
 
 #### 4.1.1 概念说明
 
-`test_gpu_axi_top` 是整个仿真的最顶层模块。它自身**不做任何运算**，只做三件事：声明连接信号、例化五个子部件、定义两个纯打印 task。可以把它理解成一块「主板」——CPU、内存、GPU 都插在它上面，靠它布线连通。
+`test_gpu_axi_top` 是整个仿真的**最外层模块**，它没有端口（testbench 顶层与外界唯一的交互是 `$display` 打印和写波形文件）。它的职责只有两件：
 
-它例化的五个部件是：
+1. **声明**连接 DUT 两侧接口的所有 wire/reg；
+2. **例化** 6 个模块，把线接好，构成闭环。
 
-1. `gpgpu_axi_top u_dut` —— 被测对象（DUT），即打包成 AXI IP 的整颗 GPU。
-2. `gen_clk u_gen_clk` —— 时钟发生器。
-3. `gen_rst u_gen_rst` —— 复位发生器。
-4. `host_inter u_host_inter` —— 扮演主机 CPU 的驱动器。
-5. `axi_ram u_ram` —— 扮演外部 DRAM 的内存模型。
-6. `tc u_tc()` —— 测试流程控制器（无端口，靠层次化引用驱动其他模块）。
+它本身不做任何运算——这与 [u1-l5](u1-l5-gpgpu-top-and-dataflow.md) 讲的 `GPGPU_top`「只连线」的定位一致，是仿真版的「主板」。
 
 #### 4.1.2 核心流程
 
-平台启动后的时序如下：
+仿真启动后的连接拓扑与数据流如下：
 
 ```text
-gen_clk  ──> 产生 10ns 周期 clk（100MHz），永久翻转
-gen_rst  ──> rst_n 保持 0 共 2 个上升沿，之后拉 1（释放复位）
-            └─> 所有 DUT 寄存器在这 2 拍内被复位
-host_inter / tc 的 initial 块 ──> 在复位释放后开始驱动
-DUT 运行 ──> 经 AXI4 读写 axi_ram（取指 + 访存）
-结束 ──> tc 比对结果，调用 PASSED 或 FAILED task 打印 ASCII 横幅
-$finish 退出
+                 ┌─────────────── test_gpu_axi_top (无端口顶层) ───────────────┐
+                 │                                                              │
+   gen_clk ──clk─┼─► gpgpu_axi_top (u_dut, DUT)                 gen_rst ──rst_n┘
+                 │     │        │
+   host_inter ◄──┼─────┘        └──► axi_ram (u_ram, 外部 DRAM)
+   (AXI4-Lite)        (m_axi4)
+    虚拟主机             数据通路
+                 │
+                 └─ tc (u_tc): 流程编排 / 预加载 / 比对 (在 tc.v)
 ```
 
-关键点：时钟周期 `PERIOD=10.0`（见 [gen_clk.v:8](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/gen_clk.v#L8)），所以 `kernel_cycles` 的换算里到处出现「除以 10」（一个周期 = 10ns，见 4.2 节）。
+- **控制通路**：`host_inter` 经 AXI4-Lite（`s_axilite_*`）连到 DUT 的主机从端口，写寄存器触发 CTA 派发（承接 u7-l4 的 `axi4lite_2_cta`）。
+- **数据通路**：DUT 的 AXI4 主端口（`m_axi_*`）连到 `axi_ram`，GPU 通过它取指、读写数据（承接 u7-l4 的 `axi4_adapter`，即实例 `l2_2_mem`）。
+- `tc` 模块（在 `tc.v`，见 4.4）通过**层次化引用**（如 `u_host_inter.drv_gpu(...)`）调用上面各模块的 task，编排「灌数据 → 派发 → 等完成 → 比对」全流程。
 
 #### 4.1.3 源码精读
 
-**信号声明**分两组：`s_axilite_*` 是连到 `host_inter` 的 AXI4-Lite 口，`m_axi_*` 是连到 `axi_ram` 的 AXI4 口。顶层只是把它们声明成 `wire`/`reg`，再连到对应模块上：[test_gpu_axi_top.sv:6-81](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/test_gpu_axi_top.sv#L6-L81)（声明两组总线信号）。
+顶层声明了大量 AXI 信号，按「AXI4-Lite 从端（接 host_inter）」与「AXI4 主端（接 RAM）」两组组织。例如 AXI4-Lite 写地址通道：
 
-**例化 DUT**：把上面两组信号连到 `gpgpu_axi_top` 上——`s_axilite_*` 接它的主机从端，`m_axi_*` 接它的对外主端：[test_gpu_axi_top.sv:83-160](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/test_gpu_axi_top.sv#L83-L160)（例化 `u_dut`，注意端口按 AXI4 五通道 AW/W/B/AR/R 顺序一一对应）。
+[test_gpu_axi_top.sv:9-12](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/test_gpu_axi_top.sv#L9-L12) — 声明 `s_axilite_awready_o`（DUT 输出）、`s_axilite_awvalid_i`/`awaddr_i`/`awprot_i`（host_inter 驱动），位宽取自 `define.v` 的 `AXILITE_*_WIDTH` 宏。
 
-**例化时钟与复位**：[test_gpu_axi_top.sv:162-169](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/test_gpu_axi_top.sv#L162-L169)（`gen_clk` 出 `clk`，`gen_rst` 吃 `clk` 出 `rst_n`）。
+DUT 例化是把所有 `s_axilite_*` 与 `m_axi_*` 信号一一接到 `gpgpu_axi_top u_dut` 的端口：
 
-**例化主机驱动 `host_inter`**：把 `s_axilite_*` 双向信号连过去，于是 `host_inter` 就成了 AXI4-Lite 总线的主机：[test_gpu_axi_top.sv:171-197](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/test_gpu_axi_top.sv#L171-L197)。
+[test_gpu_axi_top.sv:83-160](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/test_gpu_axi_top.sv#L83-L160) — 例化 DUT `gpgpu_axi_top`，即 [u7-l4](u7-l4-axi-adapter-and-host.md) 讲的「把 `GPGPU_top` 包成 AXI IP 的壳」。`s_axilite_*` 接它的主机从端，`m_axi_*` 接它的对外主端。
 
-**例化内存模型 `axi_ram`**：注意它带参数例化 `DATA_WIDTH=64, ADDR_WIDTH=32, ID_WIDTH=4`，复位取反 `~rst_n`（axi_ram 用高有效 `rst`）：[test_gpu_axi_top.sv:199-242](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/test_gpu_axi_top.sv#L199-L242)。
+随后例化时钟、复位、主机、RAM 四个配角：
 
-**例化测试控制器 `tc`**：无端口例化 `tc u_tc();`，它完全靠层次化路径驱动其他模块：[test_gpu_axi_top.sv:244](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/test_gpu_axi_top.sv#L244)。
+[test_gpu_axi_top.sv:162-169](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/test_gpu_axi_top.sv#L162-L169) — `gen_clk` 产生 10ns 周期时钟、`gen_rst` 产生 2 拍复位。
 
-**波形 dump**：仿真开始即把整个 `test_gpu_axi_top` 层次（`+all` 含内部、`+mda` 含多维数组/内存）dump 进 `test.fsdb`，供 Verdi 查看：[test_gpu_axi_top.sv:246-249](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/test_gpu_axi_top.sv#L246-L249)。
+[test_gpu_axi_top.sv:171-197](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/test_gpu_axi_top.sv#L171-L197) — 例化 `host_inter`，把 AXI4-Lite 信号悉数对接（控制通路）。
 
-**`PASSED`/`FAILED` task**：这两个 task 只是打印一段字符画横幅，本身**不做任何判定**——判定逻辑在 `tc.v` 里（见 4.4 节），判定完才调用它们：[test_gpu_axi_top.sv:251-273](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/test_gpu_axi_top.sv#L251-L273)。
+[test_gpu_axi_top.sv:199-242](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/test_gpu_axi_top.sv#L199-L242) — 例化 `axi_ram`，参数 `DATA_WIDTH=64/ADDR_WIDTH=32/ID_WIDTH=4`，把 DUT 的 `m_axi_*` 主端口连到 RAM 的从端口（数据通路）。注意 RAM 的 `rst` 接的是 `~rst_n`（高有效复位，与 DUT 的低有效相反）。
+
+最后是 `tc` 例化、波形转储与结果打印任务：
+
+[test_gpu_axi_top.sv:244](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/test_gpu_axi_top.sv#L244) — 无端口例化 `tc u_tc();`，它完全靠层次化路径驱动其他实例。
+
+[test_gpu_axi_top.sv:246-249](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/test_gpu_axi_top.sv#L246-L249) — `$fsdbDumpfile("test.fsdb")` 指定波形文件，`$fsdbDumpvars(0, test_gpu_axi_top, "+mda","+all")` 转储全部层次（`+mda` 支持多维数组/内存阵列，对 `axi_ram` 的 `mem` 数组很关键）。这就是 u1-l4 提到的 `test.fsdb` 的来源。
+
+[test_gpu_axi_top.sv:251-273](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/test_gpu_axi_top.sv#L251-L273) — `PASSED` / `FAILED` 是两个 `task`，用一串 `$display` 打印 ASCII 艺术字。它们**本身不做判定**，只是「报幕员」；判定逻辑在 `tc.v` 的 `print_result`（见 4.4）。
 
 #### 4.1.4 代码实践
 
-1. **实践目标**：建立平台拓扑直觉。
-2. **操作步骤**：打开 [test_gpu_axi_top.sv:83-244](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/test_gpu_axi_top.sv#L83-L244)，画出五个例化块（u_dut / u_gen_clk / u_gen_rst / u_host_inter / u_ram）及其连线。
-3. **需要观察的现象**：`s_axilite_*` 信号同时连到 `u_dut`（作为从端输入）和 `u_host_inter`（作为主端输出）；`m_axi_*` 信号同时连到 `u_dut`（主端输出）和 `u_ram`（从端输入）。
-4. **预期结果**：你会得到一张「host_inter ──AXI4-Lite──> DUT ──AXI4──> axi_ram」的链路图，DUT 夹在两种总线之间。
-5. 待本地验证：若环境有 Verdi，可在波形里确认 `clk` 每 5ns 翻转一次、`rst_n` 在第 3 个上升沿才变 1。
+**实践目标**：在不开仿真器的前提下，凭源码画出仿真顶层的「谁连谁」。
+
+**操作步骤**：
+
+1. 打开 `test_gpu_axi_top.sv`，把 6 个例化（`u_dut`、`u_gen_clk`、`u_gen_rst`、`u_host_inter`、`u_ram`、`u_tc`）各自列出来。
+2. 对每个例化，记下它对接的是 DUT 的哪一组信号（`s_axilite_*` 还是 `m_axi_*`）。
+3. 标注 `u_tc` 是「无端口模块」，它只靠层次化路径访问其他实例。
+
+**需要观察的现象**：你会发现 `s_axilite_*` 这组 wire 同时出现在 `u_dut` 和 `u_host_inter` 两处，`m_axi_*` 同时出现在 `u_dut` 和 `u_ram` 两处——这就是「连线」的本质：同一根 wire 接两个端口。
+
+**预期结果**：得到一张与本节「核心流程」框图一致的连接图。
+
+> 待本地验证：若环境有 Verdi，可在波形里确认 `clk` 每 5ns 翻转一次、`rst_n` 在第 3 个上升沿才变 1。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 `axi_ram` 的复位端口接的是 `~rst_n` 而不是 `rst_n`？
-**答案**：`gen_rst` 输出的是低有效复位 `rst_n`（复位时为 0），而 `axi_ram` 模块内部用的是高有效 `rst`（见 [axi_ram.sv:265](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/axi_ram.sv#L265) 的 `if (rst)`），所以顶层取反 `~rst_n` 把极性对齐。
+**练习 1**：为什么 `u_ram` 的复位端口接 `~rst_n`，而其他模块接 `rst_n`？
 
-**练习 2**：`PASSED`/`FAILED` task 定义在顶层，但它们怎么知道该打印哪一个？
-**答案**：它们自己不知道。它们只是打印工具，被 `tc.v` 的 `print_result` 在比对结果后「按需调用」（见 4.4.3）。真正的判定（`if (&sum_32_pass)`）在 `tc.v` 里。
+> **答案**：DUT 与 `host_inter` 用**低有效**复位（`rst_n`，0 表示复位）；而 `axi_ram` 这个 IP 的 `rst` 是**高有效**（1 表示复位，见 [axi_ram.sv:265](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/axi_ram.sv#L265) 的 `if (rst)`）。为了和同一个 `gen_rst` 产生的复位同步，顶层取反接入。
+
+**练习 2**：`PASSED`/`FAILED` 这两个 task 定义在 `test_gpu_axi_top` 模块里，但 `tc.v`（在另一个模块 `tc` 里）能调用它们，这是怎么做到的？
+
+> **答案**：Verilog 允许跨模块的**层次化任务调用**。`tc` 模块通过层次名引用到了 `test_gpu_axi_top` 实例下的 task——这是仿真专用的「跨层调用」，综合不支持，因此只能出现在 testbench。
 
 ---
 
-### 4.2 host_inter —— 主机驱动（AXI4-Lite Master）
+### 4.2 host_inter：虚拟主机驱动 CTA 派发
 
 #### 4.2.1 概念说明
 
-`host_inter` 模拟主机 CPU，是一个 **AXI4-Lite 主端**。它的全部工作可以浓缩成一句话：**「读 metadata 文件 → 把 workgroup 参数逐个写进 DUT 的主机寄存器 → 拉一下 valid 启动 → 等执行完」**。
+`host_inter` 是「假装自己是主机 CPU」的激励发生器。真实系统里，主机 CPU 跑驱动程序、通过 MMIO 写 GPU 寄存器来下发任务；仿真里没有 CPU，于是 `host_inter` 用 Verilog 的 `task` + AXI4-Lite 握手时序来扮演这个角色。
 
-⚠️ 一个常见误解需要先澄清：**`host_inter` 并不把 kernel 代码或数据写进 DRAM**。它只读 `.metadata` 文件、配置寄存器、启动派发。真正把 kernel/数据预加载进 `axi_ram` 的是 `tc.v` 的 `init_mem`（见 4.4 节）。之所以容易混淆，是因为两者都「读文件」，但读的是不同的文件、写到不同的地方：`host_inter` 读 `.metadata` 写「寄存器」；`init_mem` 读 `.data` 写「内存」。
+它对外只暴露一组 AXI4-Lite **主端口**（输出 valid/addr/data，输入 ready/resp），连到 DUT 的从端口；内部维护一个 `metadata` 数组，承载从 `.metadata` 文件读来的「kernel 描述符」。
 
-它对外暴露 5 个 task：`drv_gpu`（配置并启动）、`axilite_write`/`axilite_read`（底层总线读写）、`exe_finish`（等完成并计周期）、`get_result_addr`（解析结果地址）。
+> ⚠️ 一个常见误解：**`host_inter` 并不把 kernel 代码或数据写进 DRAM**。它只读 `.metadata` 描述符、配置寄存器、启动派发。真正把 kernel/数据预加载进 `axi_ram` 的是 `tc.v` 的 `init_mem`（见 4.4）。两者都「读文件」，但读不同文件、写到不同地方：`host_inter` 读 `.metadata` 写「寄存器」；`init_mem` 读 `.data` 写「内存」。
 
 #### 4.2.2 核心流程
 
-`drv_gpu` 的执行流程（这是「发起首个 workgroup」的核心）：
+`host_inter` 自己不主动跑主流程——它的 task 是被 `tc.v` 调用的。完整的一次 kernel 派发分两段：
 
 ```text
-1. $readmemh(fn_metadata, metadata)         // 把 .metadata 读进数组
-2. 解析 64 位字段（每字段 = {metadata[i+1], metadata[i]}，小端拼接）
-   wf_size, wg_size, vgprUsage, sgprUsage, pdsBaseAddr, metaDataBaseAddr ...
-3. 逐个 axilite_write(地址, 值) 配置 reg[1]~reg[15]：
-   0x04 wg_id | 0x08 num_wf | 0x0c wf_size | 0x10 start_pc(固定 0x8000_0000)
-   0x14 vgpr_total | 0x18 sgpr_total | 0x1c lds_total | 0x20 vgpr_per_wf
-   0x24 sgpr_per_wf | 0x28 gds_base | 0x2c pds_base | 0x30 csr_knl | 0x34/38/3c kernel_size_3d
-4. axilite_write(0x00, 1)                   // 写 reg[0]=1，触发 host_req_valid
-5. wait(cta2host_rcvd_ack_o 的下降沿)        // 等 DUT 确认已收到这次派发
-6. 记录起始时间 cycle_count[0]
+ tc.v:drv_gpu(meta,data)             tc.v:exe_finish(meta,data)
+        │                                     │
+        ▼                                     ▼
+ ┌──────────────────┐                  ┌──────────────────┐
+ │ $readmemh(meta)  │ 读描述符          │ 轮询 reg[17]      │
+ │ → 解析 wf/wg 尺寸 │                  │ @0x44 直到≠0      │
+ │ → axilite_write  │ 写 reg[1..15]    │ = host_rsp_valid  │
+ │ → 写 reg[0]=1    │ 触发 host_req   │ → 统计 cycles     │
+ └──────────────────┘                  └──────────────────┘
+        │                                     │
+        ▼                                     ▼
+   等 cta2host_rcvd_ack_o            返回，tc 继续下一个 kernel
 ```
 
-`exe_finish` 的流程（这是「检测完成」的核心）：
+**寄存器映射**（与 [u7-l4](u7-l4-axi-adapter-and-host.md) 的 `axi4lite_2_cta` 的 18 个 `data_buf` 一一对应）：
 
-```text
-while(未完成):
-    wait(s_axilite_rvalid_o 为低)            // 避免读到上次的残留
-    axilite_read(0x44, r_data)               // 回读 reg[17] = host_rsp_valid
-    若 r_data != 0  →  完成，跳出
-记录结束时间 cycle_count[1]
-kernel_cycles = (cycle_count[1] - cycle_count[0]) / 10   // ns 换算成周期
-```
+| 地址 | reg[] | host_req 字段 | drv_gpu 写入的值 |
+|------|-------|--------------|------------------|
+| 0x00 | reg[0] | host_req_valid | 写 `1` 才触发派发（最后一笔） |
+| 0x04 | reg[1] | wg_id | 0 |
+| 0x08 | reg[2] | num_wf | wg_size |
+| 0x0c | reg[3] | wf_size | wf_size |
+| 0x10 | reg[4] | start_pc | `0x8000_0000`（硬编码） |
+| 0x14 | reg[5] | vgpr_size_total | wg_size×vgprUsage |
+| 0x18 | reg[6] | sgpr_size_total | wg_size×sgprUsage |
+| 0x1c | reg[7] | lds_size_total | 128 |
+| 0x20 | reg[8] | vgpr_size_per_wf | vgprUsage |
+| 0x24 | reg[9] | sgpr_size_per_wf | sgprUsage |
+| 0x28 | reg[10] | gds_baseaddr | 0 |
+| 0x2c | reg[11] | pds_baseaddr | pdsBaseAddr+… |
+| 0x30 | reg[12] | csr_knl | metaDataBaseAddr |
+| 0x34/38/3c | reg[13~15] | kernel_size_3d | 0 |
+| 0x44 | reg[17] | （读）完成状态 | exe_finish 轮询 |
+
+> 关键点：**写 reg[0]=1 是「扣扳机」**——前面 reg[1..15] 只是装填参数，只有最后一笔写 0x00 才把 `host_req_valid` 拉起来，CTA 调度器（[u2-l1](u2-l1-cta-scheduler-and-resource-table.md)）才开始消费这个 workgroup。
 
 #### 4.2.3 源码精读
 
-**寄存器配置 + 触发 valid**：从读 metadata 到写满寄存器、最后写 `reg[0]=1` 的全过程，注意第 160 行的 `axilite_write(32'h0000_0000,32'd1)` 就是「扣下扳机」的一句：[host_inter.sv:104-161](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L104-L161)（`drv_gpu` 主体：`$readmemh` 读 metadata、按小端解析字段、逐寄存器配置、第 160 行触发 host_req_valid、第 161 行等 DUT 回 ack）。
+模块端口与内部寄存器：
 
-**`axilite_write`（AXI4-Lite 写）**：用 `fork...join` 并发驱动 AW（写地址）与 W（写数据）两个通道，各自 `wait` 对应的 `ready` 后撤掉 `valid`，体现 AXI「地址与数据通道独立握手」的特点：[host_inter.sv:172-195](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L172-L195)。
+[host_inter.sv:4-30](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L4-L30) — AXI4-Lite 主端口声明。注意命名后缀 `_o` 表示主机侧驱动（ready 是输入、valid 是输出）。
 
-**`axilite_read`（AXI4-Lite 读）**：驱动 AR（读地址）通道、等 `arready`，再等 R（读数据）通道的 `rvalid`，最后采样 `rdata`：[host_inter.sv:197-212](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L197-L212)。
+[host_inter.sv:33-69](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L33-L69) — 用一组 `_r` 寄存器实现输出，`initial` 里把它们清零，并把 `bready`/`rready` 常置 1（主机端「永远准备好接收响应」，简化握手）。
 
-**`exe_finish`（轮询完成）**：循环回读 `0x44` 直到非零，记录周期数。注意第 223 行 `wait(!s_axilite_rvalid_o)` 是为避免读到上一拍残留的读响应：[host_inter.sv:214-246](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L214-L246)（轮询 `reg[0x44]`、第 238 行把 ns 差除以 10 得到 `kernel_cycles`）。
+加载与解析 metadata 的核心——`drv_gpu` task：
 
-> 寄存器映射小结（与 u7-l4 一致）：`reg[0]@0x00`=`host_req_valid`（触发），`reg[2]@0x08`=`num_wf`，`reg[4]@0x10`=`start_pc`，`reg[12]@0x30`=`csr_knl`，`reg[17]@0x44`=`host_rsp_valid`（完成回读）。
+[host_inter.sv:104](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L104) — `$readmemh(fn_metadata, metadata)` 把 `.metadata` 十六进制文件读进数组，**这是 host_inter 加载程序描述符的入口**。
+
+[host_inter.sv:113-127](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L113-L127) — 把 metadata 数组里**每两个 32 位字拼成 1 个 64 位字段**（小端：低字在前 `{metadata[2k+1], metadata[2k]}`），解析出 `kernel_id`、`kernal_size0/1/2`、`wf_size`、`wg_size`、`metaDataBaseAddr`、`ldsSize`、`pdsSize`、`sgprUsage`、`vgprUsage`、`pdsBaseAddr`、`num_buffer`。这些就是 [u2-l1](u2-l1-cta-scheduler-and-resource-table.md) 资源表判定 WG 能否派发所需的全部输入。
+
+[host_inter.sv:129-160](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L129-L160) — 逐笔 `axilite_write(地址, 值)` 把上表 reg[1..15] 写进去，最后一笔 `axilite_write(32'h0000_0000, 32'd1)` 写 reg[0]=1 触发派发。这就是**「发起首个（及每个）workgroup」的代码**。
+
+[host_inter.sv:160-161](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L160-L161) — 写完 reg[0] 后 `@(negedge ...cta2host_rcvd_ack_o)`：等到 CTA 调度器**收到并应答**这个 host_req（ack 下沿），说明派发参数已被取走，主机可以记录「配置完成」时刻 `cycle_count[0]`。
+
+AXI4-Lite 写握手实现 `axilite_write`：
+
+[host_inter.sv:172-195](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L172-L195) — 用 `fork...join` **并行**驱动 AW（写地址）与 W（写数据）两个通道，各自 `wait(ready)` 后在时钟沿撤掉 valid，`join` 后隐式等 B 通道响应（因 `bready` 常 1）。这还原了 AXI4-Lite「AW/W 可同时、B 在后」的标准时序。
+
+完成轮询 `exe_finish`：
+
+[host_inter.sv:214-246](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L214-L246) — 循环 `axilite_read(0x44, r_data)` 读 reg[17]，直到非零。非零意味着 DUT 已经把 `host_rsp_valid` 拉起——即 workgroup 全部 warp 完成、缓存冲刷完毕、L2 发出了 `finish_issue`（见 [u7-l2](u7-l2-l2cache-scheduler.md) 的 `finish_issue` 与 [u1-l5](u1-l5-gpgpu-top-and-dataflow.md) 的 `host_rsp_valid_o`）。随后 [host_inter.sv:238](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L238) 用 `(cycle_count[1]-cycle_count[0])/10` 算出 kernel 耗时（除 10 是因为时钟周期 10ns，结果换算成「周期数」），即 u1-l4 提到的 `kernel_cycles`。
+
+> 旁路 task `get_result_addr`（[host_inter.sv:248-262](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L248-L262)）解析出每个输出 buffer 的基地址 `parsed_base_r` 与大小 `parsed_size_r`，供后续 `print_result` 去 RAM 里取硬件结果用。
 
 #### 4.2.4 代码实践
 
-1. **实践目标**：搞清「一个 workgroup 参数如何从文件流到寄存器」。
-2. **操作步骤**：对照 [host_inter.sv:113-160](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L113-L160)，挑一个字段（如 `wf_size`）追全程：它在 `.metadata` 的第 10/11 字 → 第 118 行 `{metadata[11],metadata[10]}` 拼成 64 位 → 第 134 行 `axilite_write(0x0c, wf_size[31:0])` 写进 `reg[3]`。
-3. **需要观察的现象**：`start_pc` 在第 136 行被**硬编码**为 `0x8000_0000`，而不是从 metadata 取（`noused` 读了但没用）。
-4. **预期结果**：你能列出一张「metadata 偏移 → 字段名 → 寄存器地址」对照表，并解释为何 `vgpr_size_total = wg_size * vgprUsage`（总量 = 每 warp 用量 × warp 数）。
-5. 待本地验证：若跑过仿真，可在 `simv.log` 里看到 `Config finish! time: ... ns`，它对应第 165 行的打印、即 `cycle_count[0]` 采样点。
+**实践目标**：定位「加载描述符」「触发派发」「等待完成」三段代码。
+
+**操作步骤**：
+
+1. 在 `host_inter.sv` 中找到 `$readmemh` 调用（第 104 行），确认它读的是 metadata 而非 data。
+2. 找到写 `0x00=1` 的那一行（第 160 行），确认它是 `drv_gpu` 里**最后一笔**写操作（前面都是装填参数）。
+3. 找到 `exe_finish` 里读 `0x44` 的循环（第 222-230 行），看清循环退出条件是 `r_data != 0`。
+4. 对照本节寄存器映射表，把 `drv_gpu` 写的 16 笔地址逐一对应到 `host_req_*` 字段。
+
+**需要观察的现象**：注意 `drv_gpu` 里 `metaDataBaseAddr`（CSR/knl 基址，样例 `0x9000_8000`）被写进 reg[12]，`start_pc` 固定写 `0x8000_0000`（reg[4]）——这两个地址后续就是 SM 去 `axi_ram` 取指、取 CSR 初始值的落点。
+
+**预期结果**：能口述「主机写 16 个寄存器描述这次任务、最后一笔拉 valid、然后死等 0x44 变 1」。
+
+> 待本地验证：跑 `make run-vcs-4w4t`，可在 `simv.log` 里依次找到 `Begin test`（[host_inter.sv:106](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L106)）、`Config finish!`（第 165 行）、`exe finish!`（第 234 行）三句打印，对照时间戳验证顺序。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：`drv_gpu` 里 `vgpr_size_total` 写的是 `wg_size*vgprUsage`，而 `vgpr_size_per_wf` 写的是 `vgprUsage`。这两个寄存器分别给谁用？
-**答案**：`_total` 是整个 workgroup 的 VGPR 总需求，供 CTA 调度器的资源表（allocator）判断「这个 SM 放不放得下」（见 u2-l1）；`_per_wf` 是单 warp 的 VGPR 用量，派发后用于为每个 warp 计算 VGPR 基址偏移（见 u2-l2「逐 warp 递增基址」）。
+**练习 1**：`drv_gpu` 为什么把 `wg_size` 同时写进 reg[2]（num_wf）和参与 reg[5]/reg[6]（vgpr/sgpr 总量）的计算？
 
-**练习 2**：`exe_finish` 为什么用「轮询读 `0x44`」而不是等一个中断信号？
-**答案**：因为 AXI4-Lite 是「主机主动发起读写」的协议，从端（DUT）不能主动通知主机。DUT 把完成标志写进 `reg[17]`，主机只能反复读它直到变非零——这正是 `while(i==0)` 轮询的原因。
+> **答案**：`wg_size` 是这个 workgroup 包含的 **warp 数**（num_wf）。每个 warp 都要独立占用若干 VGPR/SGPR，所以寄存器堆**总需求** = `wg_size × per_wf 用量`（[host_inter.sv:138-140](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L138-L140)），CTA 调度器据此查资源表判断能否放得下（承接 [u2-l1](u2-l1-cta-scheduler-and-resource-table.md) 的 CAM 比较与 [u2-l2](u2-l2-cu-handler-and-inflight-wg.md) 的逐 warp 递增基址）。
+
+**练习 2**：`exe_finish` 里为何要 `wait(!s_axilite_rvalid_o)` 再读？
+
+> **答案**：避免在上一笔读响应还没结束时发起新的 AR。AXI4-Lite 同一时刻只允许一个未完成读事务，先等 R 通道空闲（`rvalid` 为 0）再拉 `arvalid`，保证握手干净。
 
 ---
 
-### 4.3 axi_ram —— AXI4 内存模型
+### 4.3 axi_ram：外部存储模型与预加载
 
 #### 4.3.1 概念说明
 
-`axi_ram` 是一个行为级（behavioral）的 **AXI4 从端内存模型**，用来替代真实 DRAM。它的核心就是一个大数组 `mem`，外加两套状态机（读、写）把 AXI4 五通道握手翻译成对 `mem` 的读写。
+`axi_ram` 是一个**行为级 AXI4 从端 RAM**（源自开源 verilog-axi，C\*Core 改造），用来扮演 GPU 外部的 DRAM。它不是真的存储器 IP（不综合），而是一段用 `reg` 数组实现的「记忆体 + AXI 协议状态机」，仿真器里跑得很快。
 
 它在仿真里身兼两职，这是理解它的关键：
 
 - **运行期**：作为 DUT 的「远方存储」——DUT 取指、访存的 AXI4 读写都打到它这里，它按状态机正常响应。
-- **预加载期**：它的内部信号被 `tc.v` 用 `force` 直接驱动，绕过状态机把 `.data` 内容批量灌进 `mem`（见 4.4）。这两件事之所以能并存，是因为 `force` 只在仿真开始、DUT 还没发起访存时短暂使用，之后 `release` 即恢复正常。
+- **预加载期**：它的从端口信号被 `tc.v` 用 `force` 直接驱动，**绕过状态机**把 `.data` 内容批量灌进 `mem`（见 4.4）。两者之所以能并存，是因为 `force` 只在仿真开始、DUT 还没发起访存时短暂使用，之后 `release` 即恢复正常。
 
-它还提供两个 task 给结果比对用：`display_mem`（打印某地址内容）和 `store_mem`（把一段地址的内容拷到 `mem_tmp_1/2` 数组供逐字比较）。
+它还提供两个 task 给结果比对用：`display_mem`（打印某地址内容）、`store_mem`（把一段地址的内容拷到 `mem_tmp_1/2` 数组供逐字比较）。
 
 #### 4.3.2 核心流程
 
-**写状态机**（3 态）：
+存储体与地址译码：
 
-```text
-IDLE  ──awvalid&awready──> 锁存 id/addr/len/size/burst，进 BURST，拉 wready
-BURST ──每拍 wvalid&wready──> 按 wstrb 逐字节写 mem，地址步进，count--
-        count 归零 ──> 若主机 bready 则发 bvalid 回 IDLE，否则进 RESP
-RESP  ──等 bready──> 发 bvalid，回 IDLE
-```
+- 存储体 `mem`：`reg [DATA_WIDTH-1:0] mem [0 : 2**VALID_ADDR_WIDTH - 1]`。
+- `VALID_ADDR_WIDTH = ADDR_WIDTH - $clog2(STRB_WIDTH) = 32 - $clog2(8) = 32 - 3 = 29`。
+- 即 `mem` 有 \(2^{29}\) 个表项，每项 64 位（8 字节），按**字地址**（word-addressed）寻址。
 
-**读状态机**（2 态）：
+容量与地址空间（默认参数）：
 
-```text
-IDLE  ──arvalid&arready──> 锁存 id/addr/len/size/burst，进 BURST
-BURST ──每拍──> 从 mem[addr] 读，发 rvalid+rdata，地址步进，count--
-        count 归零(rlast) ─> 回 IDLE 并重新拉 arready
-```
+\[
+\text{容量} = 2^{29} \times 8\,\text{字节} = 2^{29} \times 2^{3}\,\text{字节} = 2^{32}\,\text{字节} = 4\,\text{GB}
+\]
 
-**地址换算**：AXI 地址是字节地址（32 位），但 `mem` 按 `DATA_WIDTH=64` 位（8 字节）为一个表项。所以有效地址 = 字节地址右移 `log2(8)=3` 位，得到 `mem` 的索引（`VALID_ADDR_WIDTH = ADDR_WIDTH - $clog2(STRB_WIDTH)`）。
+读写各一套独立状态机（AXI4 的读、写通道本就相互独立）：
+
+- **写状态机**：`IDLE → BURST → RESP`。IDLE 收 AW、锁存 id/addr/len/size/burst；BURST 逐拍收 W 并按 `wstrb` 写入 `mem`，`wlast` 时结束；RESP 发 B（写响应）。
+- **读状态机**：`IDLE → BURST`。IDLE 收 AR、锁存；BURST 逐拍从 `mem` 读出、发 R，计到 len 发 `rlast`。
 
 #### 4.3.3 源码精读
 
-**存储数组与地址换算**：[axi_ram.sv:136](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/axi_ram.sv#L136)（`reg [DATA_WIDTH-1:0] mem [...]` 数组，是整个内存模型的核心存储）；[axi_ram.sv:139-142](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/axi_ram.sv#L139-L142)（把字节地址右移成 `mem` 索引的 `*_addr_valid`）。
+存储体与地址换算：
 
-**写状态机（组合部分）**：[axi_ram.sv:188-242](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/axi_ram.sv#L188-L242)（IDLE→BURST→RESP，第 211 行按 `write_burst_reg != 0` 决定是否地址步进）；写时的实际写存储动作在时序块 [axi_ram.sv:259-263](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/axi_ram.sv#L259-L263)（按 `wstrb` 逐字节写入 `mem`）。
+[axi_ram.sv:136](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/axi_ram.sv#L136) — `mem` 数组定义。注释掉的 `(* RAM_STYLE="BLOCK" *)` 提示在 FPGA 上可综合成块 RAM，但仿真里只是 reg 数组。
 
-**读状态机**：[axi_ram.sv:291-328](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/axi_ram.sv#L291-L328)（IDLE→BURST）；读时把 `mem` 内容锁进 `rdata` 在 [axi_ram.sv:345-347](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/axi_ram.sv#L345-L347)。
+[axi_ram.sv:139-142](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/axi_ram.sv#L139-L142) — 把字节地址右移 `(ADDR_WIDTH-VALID_ADDR_WIDTH)=3` 位得字索引，等效于 `addr >> 3`（每项 8 字节）。
 
-**`store_mem` task（结果回读）**：把一段 `mem` 内容拆成 32 位字拷进 `mem_tmp_1`/`mem_tmp_2`，供 `print_result` 逐字与 golden 比较：[axi_ram.sv:383-412](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/axi_ram.sv#L383-L412)。
+写状态机（IDLE/BURST/RESP 的组合部分）：
 
-#### 4.3.4 代码实践
+[axi_ram.sv:188-242](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/axi_ram.sv#L188-L242) — 算 `write_state_next`。第 211-214 行在收到 W 拍时按 burst 递增地址（仅 INCR，`awburst==2'b01`；FIXED `2'b00` 不递增）；第 219-221 行计满后发 B 响应。
 
-1. **实践目标**：把 axi_ram 与 D-cache 缺失（u6-l1）串起来。
-2. **操作步骤**：沿「D-cache miss → 经 L2、axi4_adapter 发 AXI4 AR → axi_ram 读状态机响应 R → 数据逐级回到 LSU」这条链，在 [axi_ram.sv:291-328](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/axi_ram.sv#L291-L328) 找到 axi_ram 这一环。
-3. **需要观察的现象**：axi_ram 的 `s_axi_rresp` 恒为 `2'b00`（OKAY，见第 155 行）、`s_axi_bresp` 恒为 `2'b00`（第 150 行）——它永远成功，不模拟错误。
-4. **预期结果**：理解 axi_ram 只是一个「无错的、按 burst 顺序返回数据」的理想 DRAM，时序上近似零延迟（除握手本身）。
-5. 待本地验证：在波形里抓 DUT 的 `m_axi_arvalid_o` 与 axi_ram 的 `s_axi_rvalid`，观察一次 burst 读的握手时序。
+按字节使能写入：
+
+[axi_ram.sv:259-263](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/axi_ram.sv#L259-L263) — 对 `STRB_WIDTH=8` 个字节位逐位判断，`wstrb[i]` 为 1 才把 `wdata` 对应字节写进 `mem`。这正是 [u7-l1](u7-l1-tilelink-protocol.md) 讲的 TileLink `mask`（字节使能）一路映射到 AXI `wstrb` 后的落点。
+
+读状态机：
+
+[axi_ram.sv:291-328](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/axi_ram.sv#L291-L328) — `IDLE → BURST`。第 309-317 行在能发 R 时从 `mem[read_addr_valid]` 读出，设 `rlast = (count==0)`，递增地址、递减计数；读出数据锁进 `rdata` 在 [axi_ram.sv:345-347](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/axi_ram.sv#L345-L347)。
+
+窥探 task：
+
+[axi_ram.sv:365-412](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/axi_ram.sv#L365-L412) — `display_mem(addr)` 打印某地址的高低 32 位；`store_mem(base1, base2, size1, size2, en1, en2)` 把两段结果区拷进 `mem_tmp_1`/`mem_tmp_2`（每段按 32 位拆开），供 `tc.v` 比对。
+
+#### 4.3.4 代码实践（核心：理解 kernel 如何被预加载）
+
+**实践目标**：搞清「kernel 代码与输入数据是怎么进到 RAM 里的」。
+
+**关键认知**：RAM 的 `mem` 数组**没有**用 `$readmemh` 直接初始化。预加载是 `tc.v` 的 `init_mem` task 用 `force` **驱动 RAM 自己的 AXI4 从端口**完成的——相当于「testbench 假装自己是 DUT，按 AXI4 写时序往 RAM 里写」。
+
+**操作步骤**（读 `tc.v` 的 `init_mem`）：
+
+1. 看 [tc.v:173-174](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L173-L174)：`$readmemh(fn_data, data)` 把 `.data`（kernel 二进制 + 输入数据）读进 `data[]`，`$readmemh(fn_metadata, metadata)` 读描述符。
+2. 看 [tc.v:175-185](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L175-L185)：从 metadata 解析每个 buffer 的基地址 `buf_ba_w[]` 与大小 `buf_size[]`（样例基地址含 `0x8000_0000` 指令区与若干 `0x9000_xxxx` 数据区）。
+3. 看 [tc.v:203-257](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L203-L257)：对每个 buffer，用 `force u_ram.s_axi_aw*` / `s_axi_w*` 按 INCR burst（`awlen=0xf` 即 16 拍、`awsize=2` 即 4 字节）把 `data[]` 逐段写进 RAM 的对应地址。[tc.v:237-238](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L237-L238) 把每个 32 位数据拼到 64 位 `wdata` 的高/低半，配 `wstrb=0xf`/`0xf0` 写对应半字。
+
+**需要观察的现象**：`init_mem` 写完才 `release`，紧接着 `tc.v` 才调 `drv_gpu` 派发。也就是说**先有内存里的指令/数据，再启动核**——和真实「加载可执行文件到内存再跳转执行」一致。`start_pc=0x8000_0000` 正是 `init_mem` 写进去的指令区首地址。
+
+**预期结果**：能解释「`.data` 文件经 `$readmemh`→`data[]`→`force` 走 AXI4 写通路→落到 `axi_ram.mem`」这条预加载链。
+
+> 待本地验证：若你有 VCS，可在 `init_mem` 末尾插一句 `u_ram.display_mem(32'h8000_0000);`，应能看到 kernel 首条指令的编码（与 `.data` 文件对应位置一致）。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`mem` 数组的深度是 `2**VALID_ADDR_WIDTH`，其中 `VALID_ADDR_WIDTH = ADDR_WIDTH - $clog2(STRB_WIDTH)`。给定 `ADDR_WIDTH=32, DATA_WIDTH=64`，这个内存有多大？
-**答案**：`STRB_WIDTH=64/8=8`，`$clog2(8)=3`，`VALID_ADDR_WIDTH=29`，深度 `2^29` 项，每项 64 位 → `2^29 × 8 B = 4 GB`。当然这只是行为模型的地址空间上限，仿真里实际只用了很少一部分（kernel 与几个 buffer）。
+**练习 1**：为什么 `init_mem` 用 `force` 驱动 RAM 端口，而不是直接 `$readmemh` 到 `u_ram.mem`？
 
-**练习 2**：为什么写状态机里要判断 `write_burst_reg != 2'b00` 才地址步进？
-**答案**：`awburst=2'b00` 是 AXI 的 FIXED 突发类型（每次地址不变），只有 INCR（`2'b01`）等类型才需要每次地址递增。axi_ram 据此正确处理不同突发模式。
+> **答案**：用 `force` 走 AXI4 写通路，能**同时验证 RAM 的写状态机本身是对的**（AW/W/B 握手、wstrb、burst 递增都参与了）；直接写 `mem` 数组则绕过了这些逻辑。此外 buffer 基地址由 metadata 决定、按段分布，逐段 AXI 写更贴近真实「DMA 搬运」。代价是 `init_mem` 代码较长。
+
+**练习 2**：默认配置下 `axi_ram` 能寻址 4GB，但仿真真会分配 4GB 内存吗？
+
+> **答案**：仿真器按需分配 `reg` 数组，`mem` 在被写入前不占实内存；且 `init_mem` 只写了少量 buffer 段。但 `$fsdbDumpvars` 用了 `+mda`（[test_gpu_axi_top.sv:248](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/test_gpu_axi_top.sv#L248)）会尝试转储多维数组，所以波形里 `mem` 全量转储可能很大——这也是 `test.fsdb` 体积可观的原因之一。
 
 ---
 
-### 4.4 file_list.f 与 tc.v —— 文件组织与测试控制
+### 4.4 file_list.f 与 tc.v：用例组织与流程编排
 
 #### 4.4.1 概念说明
 
-这一节把「平台如何被组织」与「流程如何被驱动」一起讲，因为二者紧密耦合。
+仿真平台分成「公共平台」与「用例内容」两层，靠两个文件粘合：
 
-**`file_list.f`** 是 testbench 的文件清单，只 6 行。它的精妙在于：5 个平台文件用相对 `common/` 的路径写死，可被所有用例共享；唯独最后一行 `./tc.v` 是「当前用例私有」——每个用例目录（如 `tc_vecadd/`、`tc_gaussian/`）下都有自己的 `tc.v`，编译时由该用例目录发起，`./tc.v` 就指到它。这样「换用例」=「换 `tc.v`」，平台代码零修改。
+- `common/file_list.f` 列出 6 个 testbench 文件，其中 **`./tc.v` 是相对路径**，指向**当前用例目录**下的 `tc.v`。
+- 各用例目录（`tc_gaussian/`、`tc_vecadd/`…）提供自己的 `tc.v` + `Makefile` + `softdata/`，复用同一套 `common/`。
 
-**`tc.v`** 是测试流程的「总指挥」。它本身没有任何硬件端口（`module tc;`），完全靠**层次化引用**调用 `host_inter` 和 `axi_ram` 里的 task。它的开头先用一堆 `` `define `` 给这些长路径起别名，例如 `` `define drv_gpu u_host_inter.drv_gpu ``，之后代码里写 `` `drv_gpu(...) `` 等于 `test_gpu_axi_top.u_host_inter.drv_gpu(...)`。
+`tc.v` 是真正的「总指挥」：本身无端口（`module tc;`），完全靠**层次化引用**调用 `host_inter` 与 `axi_ram` 的 task。它开头先用一堆 `` `define `` 给长路径起别名，例如 `` `define drv_gpu u_host_inter.drv_gpu ``，之后写 `` `drv_gpu(...) `` 即等价于层次化调用。
 
-`tc.v` 定义了四个关键 task，对应实践任务要找的三个点：
+`tc.v` 定义了四个关键 task，对应实践任务要找的几个点：
 
 - `init_test_file`：按 `CASE_xWyT` 宏选 `.metadata`/`.data` 文件名。
 - `init_mem`：**预加载内存**（实践任务的「AXI RAM 如何被预加载」）。
@@ -254,115 +360,114 @@ BURST ──每拍──> 从 mem[addr] 读，发 rvalid+rdata，地址步进，
 
 #### 4.4.2 核心流程
 
-`tc.v` 顶层 `initial` 的总流程：
+`tc` 模块的主循环（`test_main`）对每个 kernel 文件执行：
 
 ```text
-repeat(100) @(posedge clk)        // 等 100 拍，让复位彻底稳定
-init_test_file()                  // 选数据文件
-test_main()                       // 跑测试
-repeat(100) @(posedge clk)        // 收尾
-$finish()
+for i in 0..FILE_NUM-1:
+    force u_dut.l2_2_mem.m_axi_bvalid_i = 0   # 暂时压住 DUT 的写响应，别干扰预加载
+    init_mem(meta[i], data[i])                 # 把 data 灌进 axi_ram
+    release u_dut.l2_2_mem.m_axi_bvalid_i
+    drv_gpu(meta[i], data[i])                  # host_inter 写寄存器、触发派发
+    if i==0: get_result_addr(...)              # 解析输出 buffer 地址（仅首份）
+    exe_finish(meta[i], data[i])               # 等 host_rsp_valid，统计 cycles
+    if 末份: print_result()                    # 取硬件结果、比对、PASSED/FAILED
 ```
 
-`test_main` 对每个用例文件（`FILE_NUM` 个）循环：
+判定逻辑（`print_result`）：
 
-```text
-force u_dut.l2_2_mem.m_axi_bvalid_i = 0   // 屏蔽 DUT 的写响应，避免干扰预加载
-init_mem(meta, data)                       // ★ 用 force 把 .data 灌进 axi_ram
-release u_dut.l2_2_mem.m_axi_bvalid_i     // 解除屏蔽
-`drv_gpu(meta, data)                       // ★ 配置寄存器并写 reg[0]=1，发起首个 workgroup
-`get_result_addr(meta, data)               // 解析结果缓冲的基址/大小
-`exe_finish(meta, data)                    // ★ 轮询 0x44 等执行完成
-sum_cycles += kernel_cycles
-`print_result()                            // ★ 比对结果，打印 PASSED/FAILED
-```
+1. 用 `store_mem` 把硬件写回的结果区拷到 `mem_tmp_1`/`mem_tmp_2`；
+2. 与代码里**硬编码的黄金参考**（`matrix_a_*_soft`/`array_b_*_soft`）逐字比较；
+3. 全部相等（`&pass` 归约）才调 `PASSED`，否则 `FAILED`。
 
-**`init_mem`（预加载）的机制**——这是本节最该记住的一段：
-
-```text
-1. $readmemh(fn_data, data)                 // 把 .data 十六进制读进 data[] 数组
-   $readmemh(fn_metadata, metadata)         // 读 metadata 拿到 buffer 基址/大小
-2. 解析每个 buffer 的 base addr(buf_ba_w) 与 size
-3. 对每个 buffer，按「16 字为一组 burst」用 force 直接驱动 axi_ram 的 AXI4 写口：
-   force u_ram.s_axi_awvalid = 1
-   force u_ram.s_axi_awaddr  = buf_ba_w     // 写地址 = buffer 基址
-   force u_ram.s_axi_awlen   = 0x0f (15)    // 16-beat burst
-   ... 等 awready，再逐 beat force wdata/wstrb/wlast，把 data[] 依次写进去 ...
-4. release 所有 force 信号                   // 恢复 axi_ram 自身驱动
-```
-
-所以「AXI RAM 如何被预加载 kernel 与数据」的答案是：**`tc.v` 的 `init_mem` 读 `.data` 文件，用 `force` 直接驱动 `axi_ram` 的 AXI4 写端口，以 burst 方式把内容写进 `mem` 数组；写完 `release`，之后 DUT 的正常访存就能读到这些预置的 kernel 指令和数据。**
+> 注意：`PASSED`/`FAILED` 这两个 task 定义在 `test_gpu_axi_top` 模块里（4.1.3），`tc.v` 通过层次名调用——所以「报幕」在顶层、「判定」在 `tc.v`。
 
 #### 4.4.3 源码精读
 
-**`file_list.f` 全文**：[file_list.f:1-6](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/file_list.f#L1-L6)（注意第 6 行 `./tc.v` 是唯一的用例私有文件）。
+[file_list.f:1-6](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/file_list.f#L1-L6) — 6 行，前 5 个是 `../common/` 下公共文件，第 6 行 `./tc.v` 是用例私有。这是「一平台多用例」的关键：换用例只换目录，`run.f`/`file_list.f` 都不用动（u1-l4 讲过的 `-f ../common/file_list.f` 把它拉进来）。
 
-**`tc.v` 的层次化别名**：[tc_vecadd/tc.v:2-12](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_vecadd/tc.v#L2-L12)（把 `u_host_inter.drv_gpu`、`u_ram.store_mem` 等长路径起短别名，这是 `tc` 能「遥控」其他模块的钥匙）。
+`tc.v` 顶部的层次化别名（让代码可读）：
 
-**顶层流程**：[tc_vecadd/tc.v:43-51](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_vecadd/tc.v#L43-L51)（等 100 拍 → `init_test_file` → `test_main` → 等 100 拍 → `$finish`）。
+[tc.v:1-13](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L1-L13) — 用 `` `define `` 把 `drv_gpu`、`exe_finish`、`display_mem`、`store_mem`、`kernel_cycles` 等定义成 `u_host_inter.xxx`/`u_ram.xxx` 的层次路径别名，后续就能像本地 task 一样调用。
 
-**`test_main`（串起三件大事）**：[tc_vecadd/tc.v:83-103](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_vecadd/tc.v#L83-L103)（第 88 行 `init_mem` 预加载、第 90 行 `drv_gpu` 发起 workgroup、第 94 行 `exe_finish` 等完成、第 97 行 `print_result` 比对）。
+CASE 宏决定文件数：
 
-**`init_mem` 读文件 + force 预加载**：[tc_vecadd/tc.v:123-124](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_vecadd/tc.v#L123-L124)（`$readmemh` 读 `.data` 与 `.metadata`）；核心的 force 驱动 burst 写循环在 [tc_vecadd/tc.v:153-207](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_vecadd/tc.v#L153-L207)（逐 buffer、逐 burst 地 force `awvalid/awaddr/awlen` 与 `wdata/wstrb/wlast` 把数据塞进 `u_ram`）。注意第 87 行先 `force ... m_axi_bvalid_i = 0` 把 DUT 的写响应通道静音，防止预加载期间 DUT 的残留事务与 force 冲突。
+[tc.v:31-35](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L31-L35) — `CASE_4W8T` 时 `FILE_NUM=8`，否则 6。这与 u1-l4 讲的 `+define+CASE_xWyT` 一一对应——`init_test_file`（[tc.v:60-131](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L60-L131)）据此选 `softdata/` 下不同子目录的 `.metadata`/`.data`。
 
-**`print_result` 比对与 PASSED/FAILED**：先 `store_mem` 把结果从 `axi_ram` 拷到 `mem_tmp_1`，再逐字与 golden 比较：[tc_vecadd/tc.v:240](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_vecadd/tc.v#L240)（`store_mem` 回读结果）；比较与判定在 [tc_vecadd/tc.v:242-322](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_vecadd/tc.v#L242-L322)（按 `CASE_xWyT` 分支，把每个 32 位结果与期望值比，全对才 `PASSED`，任一错即 `FAILED`）。vecadd 的期望值是浮点 `32'h42000000`（即 32.0）等，见第 244 行。
+主流程：
+
+[tc.v:50-58](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L50-L58) — `initial`：等 100 拍（让复位/时钟稳定）→ `init_test_file` → `test_main` → 再 100 拍 → `$finish`。这是整个仿真唯一的顶层 `initial` 入口。
+
+[tc.v:133-153](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L133-L153) — `test_main` 主循环。[tc.v:137-139](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L137-L139) 的 `force u_dut.l2_2_mem.m_axi_bvalid_i = 0` 很巧妙：`l2_2_mem` 是 DUT 内的 AXI4 适配器（[u7-l4](u7-l4-axi-adapter-and-host.md)），预加载期间压住它的写响应输入，避免 DUT 在主机还在灌数据时抢先发事务干扰 RAM。[tc.v:138](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L138) 调 `init_mem` 预加载、[tc.v:140](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L140) 调 `drv_gpu` 派发、[tc.v:144](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L144) 调 `exe_finish` 等完成、[tc.v:147](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L147) 在末份调 `print_result`。
+
+判定与退出：
+
+[tc.v:262-393](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L262-L393) — `print_result`：[tc.v:277-280](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L277-L280) 硬编码黄金参考（高斯消元的浮点结果矩阵/数组）；[tc.v:314](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L314) 调 `store_mem` 取硬件结果；[tc.v:316-346](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L316-L346) 按 `CASE` 选 4×4 或 5×5 参考逐字比对（注意 `mem_tmp_1[j]==matrix_a_*_soft[N-1-j]` 的反向索引，源自 `store_mem` 高低字拆包顺序）；[tc.v:348-383](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L348-L383) 全相等（`(&matrix_*_pass) && (&array_*_pass)`）才 `PASSED`，否则 `FAILED`。这就是 u1-l4 所说 `simv.log` 里 `PASSED`/`FAILED` 的**真正来源**。
+
+> 说明：本用例（高斯消元）的黄金参考是**直接硬编码**在 `tc.v` 里的浮点十六进制常量。其他用例（如 vecadd）可能改用 `.data` 里的参考段比对，但「取硬件结果→比→报 PASSED/FAILED」的模式一致。
 
 #### 4.4.4 代码实践（本讲主实践）
 
 > 实践任务原文：在 testbench 中找到 host_inter 加载程序、发起首个 workgroup、以及检测 PASSED/FAILED 退出条件的代码，说明 AXI RAM 如何被预加载 kernel 与数据。
 
-1. **实践目标**：把「加载 → 启动 → 等完 → 判定」四段代码在源码里逐一指认出来，并纠正「host_inter 加载程序」的措辞。
-2. **操作步骤**：
-   - **加载程序/数据（预加载）**：打开 [tc_vecadd/tc.v:105-209](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_vecadd/tc.v#L105-L209)，确认它是 `init_mem`、用 `$readmemh` + `force` 把 `.data` 写进 `u_ram`。这就是真正的「加载」，**它在 `tc.v` 而非 `host_inter`**。
-   - **发起首个 workgroup**：`init_mem` 之后，`test_main` 第 90 行调用 `` `drv_gpu ``，进入 [host_inter.sv:104-161](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L104-L161)，确认第 160 行 `axilite_write(0x00,1)` 是「扣扳机」。
-   - **检测完成与 PASSED/FAILED**：等完成在 [host_inter.sv:214-246](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L214-L246)（`exe_finish` 轮询 `0x44`）；判定在 [tc_vecadd/tc.v:242-322](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_vecadd/tc.v#L242-L322)（`print_result` 比较 + 调 `PASSED`/`FAILED`）。
-3. **需要观察的现象**：预加载用 `force`/`release`（第 154-205 行），而正常派发用 `axilite_write`（host_inter）——两种完全不同的「写」机制。`force` 绕过协议直接捅 `axi_ram` 内部，`axilite_write` 则严格走 AXI4-Lite 握手。
-4. **预期结果**：你能画出 `init_mem($readmemh→force) → drv_gpu(配寄存器→reg[0]=1) → DUT 运行(读写 axi_ram) → exe_finish(轮询0x44) → print_result(store_mem→比较→PASSED/FAILED)` 的完整时序图，并指出「加载」与「启动」是两个不同模块干的。
-5. 待本地验证：跑 `make run-vcs-4w8t`，在 `simv.log` 里依次找到 `Begin test`（drv_gpu 第 106 行）、`Config finish!`（第 165 行）、`exe finish!`（exe_finish 第 234 行）、最后的 `PASSED`/`FAILED` 横幅，对照时间戳验证顺序。
+**实践目标**：把「加载 → 启动 → 等完 → 判定」四段代码在源码里逐一指认出来，并纠正「host_inter 加载程序」的措辞。
+
+**操作步骤**：
+
+1. **加载程序/数据（预加载）**：打开 [tc.v:155-259](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L155-L259)，确认它是 `init_mem`、用 `$readmemh` + `force` 把 `.data` 写进 `u_ram`。这才是真正的「加载」，**它在 `tc.v` 而非 `host_inter`**。`host_inter` 加载的是 `.metadata` 描述符（写进寄存器），不是程序本体。
+2. **发起首个 workgroup**：`init_mem` 之后，`test_main` 调用 `` `drv_gpu ``（[tc.v:140](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L140)），进入 [host_inter.sv:84-170](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L84-L170)，确认 [host_inter.sv:160](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L160) 的 `axilite_write(0x00,1)` 是「扣扳机」。
+3. **检测完成与 PASSED/FAILED**：等完成在 [host_inter.sv:214-246](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L214-L246)（`exe_finish` 轮询 `0x44`）；退出/判定在 [tc.v:50-58](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L50-L58) 的 `$finish` 与 [tc.v:262-393](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L262-L393) 的 `print_result`（比较 + 调 `PASSED`/`FAILED`）。
+4. **AXI RAM 预加载原理**：沿 `.data` → `$readmemh`（[tc.v:173](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L173)）→ `data[]` → `force u_ram.s_axi_aw*/s_axi_w*`（[tc.v:203-257](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L203-L257)）→ `axi_ram.mem` 这条链走一遍。
+
+**需要观察的现象**：预加载用 `force`/`release`（绕过协议直接捅 `axi_ram` 从端口），而正常派发用 `axilite_write`（严格走 AXI4-Lite 握手）——两种完全不同的「写」机制。`init_mem` 写完 `release` 后，DUT 才开始正常读写 RAM。
+
+**预期结果**：能画出 `init_mem($readmemh→force) → drv_gpu(配寄存器→reg[0]=1) → DUT 运行(读写 axi_ram) → exe_finish(轮询0x44) → print_result(store_mem→比较→PASSED/FAILED) → $finish` 的完整时序图，并指出「加载」与「启动」是两个不同模块干的。
+
+> 待本地验证：把 `print_result` 里某个黄金参考常量（如 [tc.v:277](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L277) 的某个浮点值）故意改错一位，重跑 `make run-vcs-4w4t`，应看到 `simv.log` 从 PASSED 变 FAILED——以此验证判定通路。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：为什么 `init_mem` 用 `force` 直接驱动 `axi_ram`，而不像 `drv_gpu` 那样走正常的 AXI 写握手？
-**答案**：因为预加载发生在 DUT 还没启动、整个 AXI 通路（DUT 主端 → axi_ram 从端）尚未「运转」时；用 `force` 直接驱动从端输入，可以不依赖 DUT、不触发 DUT 的访存逻辑，快速把大量初始数据灌入内存。`release` 后 DUT 才开始正常读写。
+**练习 1**：`file_list.f` 第 6 行写 `./tc.v` 而不是 `../common/tc.v`，这个相对路径是相对于谁？
 
-**练习 2**：`tc.v` 里第 87 行 `force u_dut.l2_2_mem.m_axi_bvalid_i = 1'd0` 的作用是什么？为什么预加载后要 `release`？
-**答案**：`l2_2_mem` 是 DUT 对外 AXI 口的适配实例（见 u7-l4）。预加载期间强制其写响应 `bvalid=0`，是为了屏蔽 DUT 可能发出的残留/无意义写响应，防止它们干扰 `init_mem` 对 `u_ram` 的 force 写时序；预加载完成后 `release`，让 DUT 的真实事务恢复正常握手。
+> **答案**：相对于 **VCS 的工作目录**（即执行 `make` 时所在的用例目录，如 `tc_gaussian/`）。所以每个用例目录放自己的 `tc.v`，`common/` 不含 `tc.v`。这也是 `Makefile` 里 `-f ../common/run.f`、`run.f` 内 `-f ../common/file_list.f`、而 `file_list.f` 里 `./tc.v` 落到用例目录的原因——三层相对路径各指各的基准。
 
-**练习 3**：换一个用例（如 `tc_gaussian`）时，平台文件（`common/` 下的 5 个）需要改吗？
-**答案**：不需要。`file_list.f` 里前 5 个文件路径写死、共享；只有 `./tc.v` 随用例目录变化。所以换用例只需进入对应目录、改 `define.v` 的 `NUM_THREAD`、跑对应 `make` 目标即可（详见 u1-l4）。
+**练习 2**：为什么要 `force u_dut.l2_2_mem.m_axi_bvalid_i = 0` 再 `init_mem`？
+
+> **答案**：`init_mem` 用 `force` 直接驱动 `axi_ram` 的从端口写数据，此时 DUT 的 AXI 适配器 `l2_2_mem` 不应同时往 RAM 发写响应/事务，否则两边争抢同一组 `s_axi_*` 信号会产生 X 或冲突。压住 `m_axi_bvalid_i` 让适配器在这段时间「沉默」，预加载完 `release` 再恢复正常数据通路。
+
+**练习 3**：换一个用例（如 `tc_vecadd`）时，平台文件（`common/` 下的 5 个）需要改吗？
+
+> **答案**：不需要。`file_list.f` 里前 5 个文件路径写死、共享；只有 `./tc.v` 随用例目录变化。换用例只需进入对应目录、改 `define.v` 的 `NUM_THREAD`（使 kernel 的 VLEN 匹配，详见 u1-l4）、跑对应 `make` 目标即可。
 
 ---
 
 ## 5. 综合实践
 
-把本讲知识串起来，做一次「端到端追踪」：
+**任务**：以 `tc_gaussian` 的 `4w4t` 配置为例，写一份「仿真生命周期报告」，覆盖以下 7 个时刻，每个时刻给出**对应的源码位置（带行号的永久链接）**和**一句话说明**：
 
-**任务**：以 `tc_vecadd` 的 `4w8t` 配置为例，写一份「仿真生命周期报告」，覆盖以下 7 个时刻，每个时刻给出**对应的源码位置（带行号的永久链接）**和**一句话说明**：
+1. 上电复位释放（`gen_rst`，[gen_rst.v:10-15](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/gen_rst.v#L10-L15)）。
+2. 内存预加载完成（`init_mem` 末尾的 `release`，[tc.v:255](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L255)）。
+3. workgroup 参数配置完毕（`drv_gpu` 写完 reg[15]，[host_inter.sv:158](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L158)）。
+4. 首个 workgroup 被触发（`drv_gpu` 写 reg[0]=1，[host_inter.sv:160](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L160)）。
+5. DUT 确认收到派发（`cta2host_rcvd_ack_o` 下降沿，[host_inter.sv:161](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L161)）。
+6. 执行完成被检测到（`exe_finish` 读到 `0x44 != 0`，[host_inter.sv:226-227](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/host_inter.sv#L226-L227)）。
+7. 结果判定（`print_result` 调 `PASSED` 或 `FAILED`，`CASE_4W4T` 分支 [tc.v:369](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L369) / [tc.v:372](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v#L372)）。
 
-1. 上电复位释放（`gen_rst`）。
-2. 内存预加载完成（`init_mem` 的最后一笔 `release`）。
-3. workgroup 参数配置完毕（`drv_gpu` 写完 `reg[15]`）。
-4. 首个 workgroup 被触发（`drv_gpu` 写 `reg[0]=1`）。
-5. DUT 确认收到派发（`cta2host_rcvd_ack_o` 下降沿）。
-6. 执行完成被检测到（`exe_finish` 读到 `0x44 != 0`）。
-7. 结果判定（`print_result` 调 `PASSED` 或 `FAILED`）。
+**进阶**：在报告里画一张时序轴（ns 为单位），标出 `cycle_count[0]`（时刻 4/5 之间）和 `cycle_count[1]`（时刻 6）的位置，并用 `kernel_cycles = (cycle_count[1]-cycle_count[0])/10` 解释这个除以 10 的来源（提示：`gen_clk` 的 `PERIOD=10.0`，见 [gen_clk.v:8](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/common/gen_clk.v#L8)）。
 
-**进阶**：在报告里画一张时序轴（ns 为单位），标出 `cycle_count[0]`（时刻 4/5 之间）和 `cycle_count[1]`（时刻 6）的位置，并用 `kernel_cycles = (cycle_count[1]-cycle_count[0])/10` 解释这个除以 10 的来源（提示：`gen_clk` 的 `PERIOD`）。
-
-**验证方式**：若本地有 VCS，跑 `make run-vcs-4w8t`，把 `simv.log` 里 `$display` 打印的时间戳填进你的时序轴，核对你的源码定位是否正确。无法运行则标注「待本地验证」。
+**验证方式**：若本地有 VCS，跑 `make run-vcs-4w4t`，把 `simv.log` 里 `$display` 打印的时间戳填进你的时序轴，核对你的源码定位是否正确。无法运行则标注「待本地验证」。
 
 ## 6. 本讲小结
 
-- 仿真顶层 `test_gpu_axi_top` 只做例化与连线，把 DUT、时钟/复位、`host_inter`、`axi_ram`、`tc` 拼成完整平台，自身只额外提供波形 dump 与 `PASSED`/`FAILED` 打印 task。
-- `host_inter` 是 AXI4-Lite 主机，读 `.metadata`、配置 host 寄存器、写 `reg[0]=1` 触发首个 workgroup，再轮询 `reg[0x44]` 判断完成——它**不负责**加载 kernel/数据。
-- `axi_ram` 是 AXI4 从端内存模型，用 `mem` 数组 + 读写状态机响应 DUT 访存，并提供 `store_mem`/`display_mem` 供结果回读。
-- 真正的内存预加载在 `tc.v` 的 `init_mem`：用 `$readmemh` 读 `.data`，再用 `force` 直接驱动 `axi_ram` 的 AXI4 写口以 burst 灌入数据，写完 `release`。
-- `PASSED`/`FAILED` 的判定逻辑在 `tc.v` 的 `print_result`：把结果与 golden 逐字比较，全对才 `PASSED`。
-- `file_list.f` 让 5 个平台文件跨用例共享，仅 `./tc.v` 随用例替换——这是「换用例零改平台」的关键设计。
+- 仿真顶层 `test_gpu_axi_top` 只做例化与连线：DUT `gpgpu_axi_top`、时钟/复位、虚拟主机 `host_inter`、外部 RAM `axi_ram`、总指挥 `tc`，构成「主机→GPU→DRAM」闭环；自身额外提供波形 dump 与 `PASSED`/`FAILED` 打印 task（不做判定）。
+- `host_inter` 是虚拟主机 CPU，靠 `task` + AXI4-Lite 握手工作：`drv_gpu` 用 `$readmemh` 读 `.metadata`、写 16 个寄存器、最后写 reg[0]=1 触发派发；`exe_finish` 轮询 reg[17]@0x44 等完成并统计 `kernel_cycles`。它**不负责**加载 kernel/数据。
+- `axi_ram` 是行为级 AXI4 从端 RAM（4GB 字地址空间、独立的读/写状态机、支持 `wstrb` 字节使能），并提供 `display_mem`/`store_mem` 供 testbench 窥探内存。
+- **kernel 代码与数据不是 `$readmemh` 直接到 `mem` 的**，而是 `tc.v::init_mem` 用 `force` 驱动 RAM 的 AXI4 从端口、按 buffer 基地址逐段 INCR burst 写进去的——这同时验证了 RAM 的写通路。
+- `file_list.f` 第 6 行的 `./tc.v` 让「公共平台」服务「多用例」：换用例只换用例目录的 `tc.v`+`softdata/`，`common/` 不动。
+- `PASSED`/`FAILED` 的真正判定在 `tc.v::print_result`：取硬件写回 `axi_ram` 的结果，与硬编码黄金参考逐字比对，全等才 PASSED。
 
 ## 7. 下一步学习建议
 
-- **横向扩展（其他用例）**：对比 [tc_gaussian/tc.v](https://github.com/THU-DSP-LAB/ventus-gpgpu-verilog/blob/192d1e054d8628fe188894927c0e1976f4c25cde/testcase/test_gpgpu_axi_top/tc_gaussian/tc.v) 与本讲的 `tc_vecadd/tc.v`，观察不同用例的 `print_result` 如何改变 golden 比较逻辑——这是写自定义测试用例的模板。
-- **向下游（综合与上板）**：继续学 u8-l3（FPGA 验证与综合流程），看真实硬件（而非 `axi_ram` 模型）如何被驱动，以及 `FPGA_test/driver/naive_driver.c` 用 C 代码（而非 Verilog task）扮演主机。
-- **向纵深（指令扩展）**：学 u8-l4（指令集扩展与二次开发），那里会教你如何新增一条指令并为其编写测试用例——届时你需要回到本讲，在 `tc.v` 框架里加一个验证新指令的 case。
-- **回顾协议侧**：若对 `host_inter` 写的寄存器如何被 DUT 消费、`axi_ram` 的读写如何对应 TileLink/AXI 转换有疑问，回看 u7-l4（AXI4 适配器与 host 接口）。
+- **横向对比其他用例**：去看 `tc_vecadd/`、`tc_matadd/`、`tc_nn/`、`tc_bfs/` 各自的 `tc.v`，对比它们 `print_result` 的比对逻辑（哪些硬编码 golden、哪些读 `.data` 参考段），这是写自定义测试用例的模板。
+- **下一个公共库**：本讲多次用到 `force/release`、`$readmemh`、`fork/join` 等**仿真专用**手法，下一讲 [u8-l2 公共单元库 common_cell](u8-l2-common-cell-library.md) 转向**可综合**的复用单元（FIFO、仲裁器、popcount 等），注意区分「仿真专用」与「可综合复用」。
+- **FPGA 实践衔接**：本讲的 `axi_ram` 只是仿真模型，真实 FPGA/流片用 SRAM IP 替换——这正是 [u8-l3 FPGA 验证与综合流程](u8-l3-fpga-and-synthesis.md) 要讲的 `T28_MEM` 宏与 DC 综合，那里还会看到 `FPGA_test/driver/naive_driver.c` 用 **C 代码**（而非 Verilog task）扮演主机，可对照本讲的 `host_inter`。
+- **指令扩展验证**：若要做 [u8-l4 指令集扩展](u8-l4-isa-extension.md) 后的验证，本讲的 `init_mem`/`drv_gpu`/`exe_finish`/`print_result` 四件套就是模板——照着复制一份 `tc.v`，改 `.metadata`/`.data` 与黄金参考即可。

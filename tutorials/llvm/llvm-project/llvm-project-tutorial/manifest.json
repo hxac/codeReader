@@ -1,7 +1,7 @@
 {
   "project": "llvm-project",
-  "head": "bd9aa3ca5789c94b3a0d0c42b0aa8a94be4c0695",
-  "rationale": "本次为增量更新，相对上次 HEAD（610a310）仅有 9 个提交、约 116 个文件变动，且集中在：lldb 测试与 PlatformWindows 错误信息/require 装饰器、LLD/ELF 针对 PPC64 位置无关长分支 thunk 的 .rela.dyn 保留（Writer.cpp/Config.h）、AArch64 GlobalISel 选择测试 NFC、ConstraintElimination 与 InstSimplify 的小幅折叠优化、libc/gn 构建/lit reports.py 基础设施。这些改动均未触及本手册任何讲义引用的核心源码文件（IR 核心类、Pass 管理器、Clang 前端、后端/SelectionDAG/GlobalISel/MC、MLIR、ORC JIT、LTO、调试信息等均无实质变化），也没有引入新子项目或新机制，因此本次无需新增讲义，也无需对任何讲义做 update/rebuild。已完成生成的入门层讲义（u1 全部 4 篇、u2 全部 3 篇）本次代码变化不影响其内容，action 设为 keep；尚未生成（讲义目录中尚无对应 .md 文件）的 u3-u9 各讲义仍按上一轮 full 模式的既有计划保持 new，等待 worker 继续生成。学习顺序与九单元划分沿用上次设计（入门→IR 数据结构→Pass 优化框架→Clang 前端→后端代码生成→MLIR→JIT/LTO/链接→二次开发与工程实践），保持由浅入深、单元间依赖清晰的路线。另外修正了原 manifest 中 u8-l2 文件名的笔误（u8-l2-lto.md.md → u8-l2-lto.md）。",
+  "head": "11038cc1618ac1f801e4029b7149f68f3ad949f5",
+  "rationale": "本次为增量更新，相对上次 HEAD（bd9aa3c）共 10 个提交、约 49 个文件变动，集中在以下几组改动，且均未触及本手册任何讲义引用的核心源码文件：1) 回退 AArch64 pipeliner remarks，影响 MachinePipeliner.h/.cpp、TargetInstrInfo.h、WindowScheduler.h 及若干 test/*.mir 测试（删除），属后端软件流水线深处的内部调整，不影响 u6/u9-l4 讲义引用的高层文件（CodeGenPassBuilder.h、WritingAnLLVMBackend.md、TargetRegistry.cpp）；2) MLIR 新增 XeGPU lane_shuffle op 与 mlir-c 结构化操作等价 C API（mlir-c/IR.h、lib/CAPI/IR/IR.cpp、Dialect/XeGPU/*），其中 mlir-c 属 C 绑定而非 C++ 核心 Operation.h，XeGPU 只是又一个具体硬件方言实例，未引入新机制，不影响 u7 讲义对「Operation 抽象 / Dialect 机制 / Pass-Pattern-Conversion / Toy 教程」的概念讲解，故无需新增讲义；3) LLD MachO ICF 二次迭代性能修复（lld/MachO/InputSection.cpp），属 MachO 驱动内部优化，而 u8-l3 引用的是 lld/ELF/Driver.h、lld/CMakeLists.txt、lld/README.md，且该讲义尚未生成；4) InstSimplify/ConstantFolding/TargetFolder 的 intrinsic 折改进与 IR GEPOperator 结构体偏移截断（InstructionSimplify.cpp、ConstantFolding.cpp/.h、TargetFolder.h、Operator.cpp）—— 关键确认：u3-l4 直接引用的 IRBuilder.h/.cpp 本身未改动，这些只是 IRBuilder 委托调用的底层折叠基础设施的内部实现调整，不改变其文档化 API；u3-l3 引用的 Type.h/.cpp、Constants.h/.cpp 亦未改动，Operator.cpp 涉及的是 GEPOperator 内部正确性，不在 u3-l3 类型/常量层次主题之内；5) libc 内联修复、llubi 工具、bazel 覆盖层等，均与讲义无关。综上，本次无需新增讲义，也无需对任何讲义做 update/rebuild。已生成的 14 篇讲义（u1 全部 4 篇、u2 全部 3 篇、u3 全部 5 篇、u4-l1、u4-l2）所讲概念与 API 均未受代码变化影响，action 设为 keep；尚未生成（讲义目录中尚无对应 .md 文件）的 u4-l3、u4-l4 及 u5-u9 各讲义仍按既有 full 模式计划保持 new，等待 worker 继续生成。九单元划分与由浅入深的学习顺序（入门→IR 数据结构→Pass 优化框架→Clang 前端→后端代码生成→MLIR→JIT/LTO/链接→二次开发与工程实践）保持不变。",
   "units": [
     {
       "id": "u1",
@@ -235,7 +235,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -263,7 +263,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -291,7 +291,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -318,7 +318,7 @@
             "u3-l1",
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l5",
@@ -347,7 +347,7 @@
             "u2-l2",
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -383,7 +383,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -411,7 +411,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",

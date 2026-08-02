@@ -1,0 +1,289 @@
+# 项目总览与定位：LLVM-libc 是什么
+
+## 1. 本讲目标
+
+本讲是整本学习手册的第一讲，目标不是讲任何一行具体函数实现，而是帮你建立对 **LLVM-libc 这个项目本身** 的全局认知。读完本讲后，你应该能够：
+
+- 用一句话说清 LLVM-libc 在 LLVM 大项目里扮演什么角色、解决什么问题。
+- 复述它最突出的三个设计目标——**模块化（modular）、多平台（multiplatform）、用现代 C++ 编写**——并理解这些目标带来的取舍。
+- 列举它今天已经被真实使用的几类场景（静态链接 Linux 服务、GPU 计算、baremetal、UEFI 等），并理解为什么它「还不能」完整替代系统 libc。
+- 知道这个项目由谁维护、遇到问题去哪里提问、如何参与社区。
+
+这一讲是后续所有讲义的地基：只有先理解「LLVM-libc 为什么这样设计」，后面看 entrypoint 机制、头文件生成、`__support` 内部库时，你才会觉得一切顺理成章。
+
+## 2. 前置知识
+
+在正式开始前，我们先用最通俗的语言把几个概念说清楚。如果你已经熟悉，可以跳过本节。
+
+**什么是 C 标准库（libc）？**
+你写 C 程序时用到的 `printf`、`malloc`、`strlen`、`memcpy`、`sqrt` 这些函数，本身不是 C 语言的关键字，而是由一个叫做「C 标准库（C standard library）」的东西提供的。这个库通常简称 **libc**。操作系统不同，提供的 libc 也不同：Linux 上常见的是 **glibc** 和 **musl**，Android 用的是 **Bionic**，macOS 用 **libSystem**，Windows 则有它自己的运行时。
+
+**什么是「静态链接」与「动态链接」？**
+- **静态链接**：把你用到的库函数直接拷贝一份进你的程序可执行文件里。产物大，但运行时不依赖外部库文件，部署方便。
+- **动态链接**：程序运行时才去加载系统的共享库（如 `libc.so`）。产物小，多个程序共享同一份库。
+
+LLVM-libc 目前主要面向静态链接场景，这一点后面会反复提到。
+
+**什么是 LLVM？**
+LLVM 是一个编译器基础设施项目，最著名的产品是 Clang 编译器。LLVM-libc 就是寄居在这个大项目里的一个子项目。所以你会看到它的构建、测试都和 LLVM 的工具链（CMake、clang）深度绑定。
+
+**「retargetable（可重定向）」是什么意思？**
+源码里出现这个词，意思是这套库不绑定某一个特定操作系统或 CPU 架构，而是设计成「可以重新瞄准」新的平台。这是 LLVM-libc 区别于传统 libc 的关键之一。
+
+## 3. 本讲源码地图
+
+本讲涉及的「源码」其实主要是**文档与项目元信息**，因为总览类讲义的目标是建立认知，而不是逐行读代码。我们会用到下面三个文件：
+
+| 文件 | 作用 |
+| --- | --- |
+| `README.txt` | 项目最简短的自我介绍，一句话定位 LLVM-libc。 |
+| `docs/index.md` | 项目的「门面文档」，给出定位、设计目标、当前可用场景、社区入口。 |
+| `Maintainers.md` | 维护者名单，按领域（baremetal、GPU、math、threading 等）列出负责人。 |
+
+> 说明：`README.txt` 与 `Maintainers.md` 都在 `libc/` 根目录；`docs/index.md` 是文档站点的首页。本讲后面引用的「永久链接」都指向这些真实存在的文件。
+
+## 4. 核心概念与源码讲解
+
+本讲按三个最小模块展开：**项目说明**、**使用场景**、**维护者与社区**。
+
+### 4.1 项目说明：LLVM-libc 到底是什么
+
+#### 4.1.1 概念说明
+
+LLVM-libc 是 **从零开始（from-scratch）** 重新实现的 C 标准库。这里「从零开始」是个很重的词——它不是在 glibc 或 musl 的基础上改的，而是用现代 C++ 把整个标准库重写了一遍，并作为 LLVM 项目的一部分来维护。
+
+为什么要有这么一个东西？传统 libc（如 glibc）历史悠久，积累了大量历史包袱，代码风格、构建方式、安全模型都难以现代化。LLVM-libc 想用现代语言（C++）、现代构建（CMake）、现代设计（模块化、入口点粒度）来重新回答「一个 C 标准库应该长什么样」这个问题。
+
+它给自己定了三个设计目标，这三个词贯穿全书，建议你直接记住：
+
+1. **模块化（modular）**：库的任何一部分都可以被单独拿出来使用，而不是一个不可拆分的整体。
+2. **多平台（multiplatform）**：Linux、GPU、baremetal 嵌入式、UEFI、macOS、Windows 都在它的目标范围内。
+3. **现代 C++（modern C++）**：用 C++ 编写，追求正确性（correctness）、性能（performance）和安全性（safety）。
+
+#### 4.1.2 核心流程
+
+把 LLVM-libc 放进「C 程序如何运行」的大图里，它的位置如下：
+
+```text
+你的 C 程序 (调 printf / malloc / sqrt ...)
+        │  函数调用
+        ▼
+   C 标准库 (libc)   ← LLVM-libc 就要顶替这一层
+        │  系统调用 (syscall: read/write/mmap ...)
+        ▼
+   操作系统内核 / 硬件
+```
+
+注意中间这一层：传统上由 glibc/musl 占据。LLVM-libc 的野心就是「我也可以占据这一层」，并且因为它是模块化的，你甚至可以让它**只顶替其中一部分函数**，剩下的还用系统自带的 libc（这正是后面会讲的 Overlay 模式）。
+
+它的「可重定向」特性可以这样理解：
+
+\[ \text{可重定向} = \underbrace{\text{平台无关的算法实现}}_{\text{比如 round、memcpy 的核心}} \;+\; \underbrace{\text{可替换的平台底层}}_{\text{比如 syscall、startup}} \]
+
+同一份算法代码可以配上不同平台的底层，从而「瞄准」新目标。
+
+#### 4.1.3 源码精读
+
+先看项目最朴素的一句话自我介绍：
+
+[README.txt:L4-L5](https://github.com/llvm/llvm-project/blob/1ac9b999f8b521b5d6d82cf1a19858bc40a18c6a/libc/README.txt#L4-L5) —— 这一行说明本目录存放的是 llvm-libc 的源码，并点出它的核心特征：**一个 retargetable（可重定向）的 C 标准库实现**。
+
+再看文档首页给出的官方定位与三大设计目标：
+
+[docs/index.md:L9-L13](https://github.com/llvm/llvm-project/blob/1ac9b999f8b521b5d6d82cf1a19858bc40a18c6a/libc/docs/index.md#L9-L13) —— 这段英文直译过来就是：LLVM-libc 是从零开始的 C 标准库实现，作为 LLVM 项目的一部分构建；它被设计成**模块化**（每一部分都能独立使用）、**多平台**（Linux、GPU、baremetal 嵌入式、UEFI、macOS、Windows），并用**现代 C++** 编写，追求正确性、性能与安全。
+
+这两段是全书的「定调」文字，建议反复对照。
+
+#### 4.1.4 代码实践
+
+这是一个**源码阅读型实践**，目的是让你亲手从原始文档里提炼定位，而不是听我转述。
+
+1. **实践目标**：用自己的话，写出关于 LLVM-libc 定位的「三句话总结」。
+2. **操作步骤**：
+   - 打开本讲引用的 [docs/index.md](https://github.com/llvm/llvm-project/blob/1ac9b999f8b521b5d6d82cf1a19858bc40a18c6a/libc/docs/index.md#L9-L13) 开头段落。
+   - 写下三句话，分别回答：
+     - **它解决什么问题？**（提示：从「from-scratch」「retargetable」入手）
+     - **它最突出的两个设计目标是什么？**（从模块化 / 多平台 / 现代 C++ 中任选两个）
+     - **它目前为什么还不能完整替代系统 libc？**（提示：看「coverage is still growing」）
+3. **需要观察的现象**：你会发现文档原文用的是**克制、诚实**的措辞——既说自己「actively used in production（已在生产中使用）」，又承认「coverage is still growing（覆盖仍在增长）」。这种「双面陈述」正是判断一个开源项目成熟度的线索。
+4. **预期结果**：你得到的三句话应当同时包含「它能做什么」和「它还做不到什么」，而不是只夸优点。
+5. 如果你无法确定某句话是否准确，请在该句后标注「待本地验证」，再去查 `headers/index` 实现状态页核对。
+
+> 参考答案（你自己写完后再对照）：
+> - LLVM-libc 是 LLVM 项目里从零开始、用现代 C++ 重新编写的 C 标准库实现，目标是能在多种平台上替代传统 libc。
+> - 它最突出的两个设计目标是**模块化**（任意部分可独立使用）和**多平台**（覆盖 Linux/GPU/baremetal/UEFI 等）。
+> - 它目前还不能完整替代系统 libc，因为标准库覆盖仍在增长，像正则、locale、宽字符 I/O 等很多功能尚未实现，许多依赖完整标准库的程序还无法直接编译。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：文档说 LLVM-libc 是「retargetable」的。请结合你学到的「平台无关算法 + 可替换平台底层」，解释 retargetable 与 multiplatform 的关系。
+
+> **答案**：multiplatform 是「**目标**——希望能跑在很多平台上」；retargetable 是「**手段**——架构上允许把库重新瞄准到新平台」。正因为实现里把平台无关的算法和平台相关的底层（syscall、启动代码）分开了，库才具备 retargetable 的能力，进而支撑 multiplatform 的目标。
+
+**练习 2**：为什么 LLVM-libc 选择用 C++ 而不是 C 来实现一个「C 标准库」？说出一个理由。
+
+> **答案**：现代 C++ 提供了模板、类型 trait、RAII、`constexpr` 等机制，可以在不牺牲运行时性能的前提下，让正确性（如更严格的类型检查）、安全性（如避免手工内存管理错误）和性能（如编译期计算、内联）更容易实现。注意：虽然内部用 C++，但对外暴露的仍是标准 C 接口（这点会在第 2 单元「实现规范」讲）。
+
+---
+
+### 4.2 使用场景：今天它在哪里被真实使用
+
+#### 4.2.1 概念说明
+
+理解一个项目不能只看「它想做什么」，还要看「它现在确实做到了什么」。LLVM-libc 文档非常诚实地把这一节命名为 **What Works Today（今天能用的）**，并用「actively used in production（已在生产环境使用）」与「coverage is still growing（覆盖仍在增长）」两句话并置——这是理解它当前状态的关键。
+
+它今天被真实使用的场景大致分三类：
+
+- **生产级静态链接 Linux**：在 Google 的服务器和 Pixel Buds 上，x86-64 与 AArch64 架构，作为静态链接的 libc 真实运行。
+- **非传统计算环境**：GPU（AMDGPU、NVPTX，让 GPU 内核里也能调 libc 函数）、baremetal 嵌入式（ARM、RISC-V、AArch64 的最小足迹构建）、UEFI 固件应用（实验性）。
+- **生态内部与工具链集成**：libc++、LLVM offloading runtime 直接消费它；Android Bionic、Fuchsia、Emscripten、ARM 嵌入式工具链也复用了它的部分代码。
+
+#### 4.2.2 核心流程
+
+用一个表格把「场景 → 环境特征 → 为什么用 LLVM-libc」串起来：
+
+| 场景 | 环境特征 | 为什么要用 LLVM-libc |
+| --- | --- | --- |
+| 静态链接 Linux 服务/容器 | 有内核，但想要小而可控的二进制 | 模块化可裁剪，静态产物可预测 |
+| GPU 计算 | 没有传统 OS，内核在 GPU 上跑 | retargetable + 可移植到 GPU 目标 |
+| baremetal 嵌入式 | 没有完整 OS，资源受限 | 最小足迹、自带启动代码 |
+| UEFI 固件应用 | 固件阶段，无常规运行时 | 可重定向到固件环境 |
+| Overlay 模式增补 | 已有系统 libc，只想换部分函数 | 模块化，可只覆盖个别实现 |
+
+这一表格也回答了本讲标题里的隐含问题：「它和系统 libc 是什么关系？」——答案不是「二选一的对立」，而是：
+
+\[ \text{关系} \in \{\,\text{完整替换},\;\text{部分增补（Overlay）},\;\text{在无 libc 的环境里独立提供}\,\} \]
+
+#### 4.2.3 源码精读
+
+文档首页的 What Works Today 小节开头就给出了诚实的双面陈述：
+
+[docs/index.md:L17-L22](https://github.com/llvm/llvm-project/blob/1ac9b999f8b521b5d6d82cf1a19858bc40a18c6a/libc/docs/index.md#L17-L22) —— 既说「已在生产环境被积极使用」，又说「覆盖仍在增长」，并明确点名 regex、locale、宽字符 I/O 等许多依赖完整标准库的程序**暂时还无法**用它编译。
+
+接下来是逐条的使用场景清单：
+
+[docs/index.md:L24-L35](https://github.com/llvm/llvm-project/blob/1ac9b999f8b521b5d6d82cf1a19858bc40a18c6a/libc/docs/index.md#L24-L35) —— 列出了静态链接 Linux 服务、GPU 计算、baremetal 嵌入式、UEFI 应用、LLVM 生态内部、以及 Android Bionic / Fuchsia / Emscripten / ARM 嵌入式工具链等集成。
+
+清单之后再次强调覆盖度问题，并指向两个查进度的地方：
+
+[docs/index.md:L37-L39](https://github.com/llvm/llvm-project/blob/1ac9b999f8b521b5d6d82cf1a19858bc40a18c6a/libc/docs/index.md#L37-L39) —— 指引读者去看 `headers/index`（按头文件的实现状态）和 `platform_support`（按操作系统/架构的覆盖）这两个页面。
+
+平台覆盖的现状可以对照专门页面：
+
+[docs/platform_support.md:L1-L7](https://github.com/llvm/llvm-project/blob/1ac9b999f8b521b5d6d82cf1a19858bc40a18c6a/libc/docs/platform_support.md#L1-L7) —— 这里说当前开发主要集中在 Linux；macOS 和 Windows 只有部分支持且有 bitrot（代码腐化），未持续测试；并通过 overlay 模式集成进 Android 与 Fuchsia。
+
+#### 4.2.4 代码实践
+
+1. **实践目标**：用第一手文档，判断「LLVM-libc 能不能直接拿来编译我的桌面 Linux 程序」。
+2. **操作步骤**：
+   - 阅读本讲引用的 [docs/index.md:L24-L35](https://github.com/llvm/llvm-project/blob/1ac9b999f8b521b5d6d82cf1a19858bc40a18c6a/libc/docs/index.md#L24-L35) 与 [platform_support.md:L1-L7](https://github.com/llvm/llvm-project/blob/1ac9b999f8b521b5d6d82cf1a19858bc40a18c6a/libc/docs/platform_support.md#L1-L7)。
+   - 列出三个「LLVM-libc 已经能胜任」的场景，再列出至少两个「它目前做不到 / 不保证」的场景（例如：依赖 regex/locale 的桌面程序、macOS/Windows 上的持续测试）。
+3. **需要观察的现象**：注意文档措辞——它对「能做的」用具体公司产品（Google 服务器、Pixel Buds）背书，对「不能做的」用功能名（regex、locale、宽字符 I/O）点名。这种**证据 vs 缺口**的对照写法值得学习。
+4. **预期结果**：你得出的结论应当是分层的——「作为静态链接 Linux 服务、GPU、baremetal、UEFI 场景的专用 libc：可以；作为通用桌面系统的全功能 libc：暂时不行」。
+5. **待本地验证**：具体的逐头文件实现状态以仓库里的 `headers/index` 实现状态页为准，本讲不展开（后续进阶讲义会涉及）。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：文档把 Overlay 模式描述为「augmenting（增补）」系统 libc。请用一句话解释「增补」在这里是什么意思。
+
+> **答案**：在 Overlay 模式下，程序仍然链接系统的 libc，只是把其中**少数**由 LLVM-libc 实现的函数「覆盖」掉，从而在不替换整个库的前提下，获得 LLVM-libc 在这些函数上更快的实现或更一致的行为。
+
+**练习 2**：下列三个目标，哪些属于 LLVM-libc 今天「actively used in production」的范围？（多选）A. macOS 桌面动态链接库；B. 静态链接的 Linux 服务器；C. AMDGPU 内核里的 libc 调用。
+
+> **答案**：B、C。文档明确把「静态链接 Linux 服务/容器」和「GPU 计算（AMDGPU、NVPTX）」列为已在生产中使用的场景；而 macOS 属于「部分支持、未持续测试」，不在生产使用列表里。
+
+---
+
+### 4.3 维护者与社区：项目由谁管、去哪问
+
+#### 4.3.1 概念说明
+
+开源项目不是「无主代码」。LLVM-libc 有明确的维护者（maintainers）体系：一位首席维护者（Lead Maintainer）统筹全局，下面按领域（baremetal、GPU、math、threading、公共头文件/hdrgen 等）各有一位或多位领域维护者负责。这种「总负责人 + 领域负责人」的结构，意味着你遇到不同问题时，找对人能更快得到答复。
+
+社区入口方面，LLVM-libc 复用 LLVM 的常规渠道：GitHub（源码与 bug 报告）、Discourse 论坛、Discord 聊天室、Buildbot 持续集成。作为新人，最先该知道的是「去哪问、怎么提 bug、谁在管」。
+
+#### 4.3.2 核心流程
+
+当你想参与或求助时，标准路径是：
+
+```text
+读 docs/contributing（了解贡献流程）
+        │
+        ├── 代码/审查问题 ──▶ 找对应领域 Maintainer（按 Maintainers.md）
+        │
+        ├── 发现 bug ───────▶ GitHub 打 libc 标签的 issue
+        │
+        └── 一般讨论 ───────▶ Discourse「runtimes/libc」分区 或 Discord
+```
+
+#### 4.3.3 源码精读
+
+维护者名单的总体说明：
+
+[Maintainers.md:L1-L3](https://github.com/llvm/llvm-project/blob/1ac9b999f8b521b5d6d82cf1a19858bc40a18c6a/libc/Maintainers.md#L1-L3) —— 说明本文件是 LLVM-libc 的维护者清单，列出了活跃维护者，建议在做代码审查、就其专长领域提问或寻求帮助时联系他们。
+
+首席维护者：
+
+[Maintainers.md:L5-L7](https://github.com/llvm/llvm-project/blob/1ac9b999f8b521b5d6d82cf1a19858bc40a18c6a/libc/Maintainers.md#L5-L7) —— 首席维护者是 Michael Jones，统筹整个项目。
+
+名单其余部分按领域组织，与本手册后续单元高度对应——例如 **Baremetal**、**GPU**、**Math**、**Threading/FreeBSD**、**RISC-V**、**Public Headers / hdrgen**、**ARM and AArch64** 各有负责人。你会在进阶与专家层讲义里反复遇到这些领域。
+
+社区入口集中在文档首页末尾：
+
+[docs/index.md:L50-L60](https://github.com/llvm/llvm-project/blob/1ac9b999f8b521b5d6d82cf1a19858bc40a18c6a/libc/docs/index.md#L50-L60) —— 列出了源码地址、bug 报告标签、Discourse 论坛、Discord 频道（含邀请链接）和 Buildbot 持续集成看板。
+
+#### 4.3.4 代码实践
+
+1. **实践目标**：建立你自己的「求助通讯录」。
+2. **操作步骤**：
+   - 打开 [Maintainers.md](https://github.com/llvm/llvm-project/blob/1ac9b999f8b521b5d6d82cf1a19858bc40a18c6a/libc/Maintainers.md#L1-L3)，记下首席维护者，以及 Math、GPU、Threading、Baremetal 四个领域的维护者名字与 GitHub 账号。
+   - 打开 [docs/index.md:L50-L60](https://github.com/llvm/llvm-project/blob/1ac9b999f8b521b5d6d82cf1a19858bc40a18c6a/libc/docs/index.md#L50-L60)，把 Discourse 论坛链接和 Discord 邀请链接收藏起来。
+3. **需要观察的现象**：注意维护者是**按领域**划分的——这暗示项目的代码结构也是按领域组织的（这点在下一讲「源码目录结构」会印证）。
+4. **预期结果**：你得到一份 4–5 个人的「领域维护者小抄」，知道数学问题找谁、GPU 问题找谁。
+5. **待本地验证**：维护者名单会随时间变化，以仓库当前 `Maintainers.md` 为准；本讲引用的链接对应 HEAD `1ac9b999f8b5`。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：如果你在数学函数（如 `sin`）的实现上发现一个 bug，按本讲介绍的信息，应该优先联系谁？
+
+> **答案**：优先联系 `Maintainers.md` 里 **Math** 领域的维护者（Tue Ly / Nicolas Celik），同时在 GitHub 上用 `libc` 标签提一个 issue。一般性问题也可以发到 Discourse 的 `runtimes/libc` 分区。
+
+**练习 2**：文档首页同时提供了「Discourse」和「Discord」两个讨论渠道。它们各自适合什么样的交流？
+
+> **答案**：Discourse 是论坛，适合**长篇、可检索、能沉淀**的技术讨论与设计提案；Discord 是即时聊天，适合**快速、轻松、即时**的问答与闲聊。需要留下记录、供后人搜索的讨论宜放 Discourse，临时的小问题宜放 Discord。
+
+---
+
+## 5. 综合实践
+
+把本讲三个模块串成一个任务：**为 LLVM-libc 写一张「名片」**。
+
+要求你产出一页 Markdown，包含以下四块，且每块都要有来自原始文档的依据（可贴原文行号或链接）：
+
+1. **一句话定位**：LLVM-libc 是什么？（依据 `README.txt` 或 `docs/index.md` 首段）
+2. **三个设计目标**：模块化 / 多平台 / 现代 C++，各用一句话解释含义，并标注这是文档原话还是你的转述。
+3. **能力边界**：列出 2 个「已能用」场景 + 2 个「暂时不行」场景，分别注明出处（`docs/index.md` 的 What Works Today、`platform_support.md`）。
+4. **求助指南**：写明首席维护者是谁、至少两个领域维护者、以及遇到 bug 去 GitHub 哪个标签（依据 `Maintainers.md` 与 `docs/index.md` 末尾）。
+
+完成后自检：你的名片是否做到了「既讲优点、也讲局限」？如果只写了优点，说明你还没读懂文档里那句「coverage is still growing」。
+
+> 这个练习不涉及编译或运行命令，属于**源码阅读型综合实践**。它的真正价值在于训练你「从一手文档里提炼准确结论」的能力——这套能力在后续每一讲读源码时都会用到。
+
+## 6. 本讲小结
+
+- LLVM-libc 是 LLVM 项目中**从零开始、用现代 C++** 重新实现的 C 标准库，定位是 retargetable（可重定向）的库实现。
+- 它的三大设计目标是**模块化、多平台、现代 C++**，这三点贯穿全书。
+- 今天它已在**静态链接 Linux 服务、GPU 计算、baremetal 嵌入式、UEFI** 等场景被生产使用，但**标准库覆盖仍在增长**，还不能完整替代系统 libc。
+- 它与系统 libc 的关系不止「替换」一种，还包括 **Overlay 增补**与「在无 libc 的环境里独立提供」。
+- 项目采用**首席维护者 + 领域维护者**结构，社区入口在 GitHub（libc 标签）、Discourse、Discord 与 Buildbot。
+- 文档措辞克制诚实——「actively used in production」与「coverage is still growing」并置，是判断其成熟度的关键线索。
+
+## 7. 下一步学习建议
+
+本讲建立了「LLVM-libc 是什么」的认知。接下来建议：
+
+- 下一讲 **u1-l2「源码目录结构总览」**：动手打开 `libc/` 目录，搞清 `src`、`include`、`config`、`startup`、`test` 等顶层目录各自装什么，建立全局地图。
+- 想抢先理解「一个函数如何存在于整个体系」的，可以提前翻一下 **u1-l5「第一个入口点全流程：以 isalpha 为例」**，但建议先过完 u1-l2、u1-l3，以免缺少构建与目录背景。
+- 对构建好奇的，可以直接看 `docs/getting_started.md` 与 `docs/build_concepts.md`，它们是 u1-l3、u1-l4 的原始材料。
+
+> 一句话总结：本讲覆盖了「项目说明、使用场景、维护者与社区」三个最小模块。
