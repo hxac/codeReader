@@ -1,0 +1,1035 @@
+{
+  "project": "llvm-project-mlir",
+  "head": "e7dd336e0f7884c34108a1e722205a16c3f5307b",
+  "rationale": "本次为增量更新。经 git diff 分析，previous HEAD（036af906f355）到 current HEAD（e7dd336e0f7884c34108a1e722205a16c3f5307b）之间仅相差 6 个提交，改动文件共 25 个，全部位于 clang（OpenMP Sema）、libc（fscanf/scanf 别名）、libcxx（variant 编译期优化）、lldb（信号 API）以及 llvm 的 M68k 后端，对 mlir/ 子目录的过滤 diff 为空——即 MLIR 源码（include/lib/tools/examples/docs/test 等）在两次 HEAD 之间没有任何改动。因此现有手册的全部 33 篇讲义所引用的源码、行号、接口与机制均未受影响，本次统一标记为 keep，不新增、不重建、不局部更新。手册自身的结构与学习顺序保持不变：依然沿用 MLIR 自身分层架构自底向上组织——第 1 单元认识项目定位、目录结构与 mlir-opt 入口；第 2 单元深入 Operation/Value/Block/Region/Type/Attribute/Context 核心数据结构；第 3 单元衔接 Dialect 与 Operation 的 TableGen 定义；第 4 单元补全解析、打印与字节码持久化；第 5–7 单元进入动态变换主线（Pass 管理→模式重写→Dialect Conversion 与降级到 LLVM）；第 8 单元覆盖接口系统与数据流/常用分析；第 9 单元收束于 Transform 方言、执行引擎、CAPI/Python 绑定与自带工具链。单元与讲义严格按依赖链排序，确保每篇只依赖已学内容。仅更新 head 字段与本说明，待下次有 mlir/ 实质改动时再按 update/new/rebuild 规则处理。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 MLIR",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "MLIR 是什么：项目定位与设计哲学",
+          "order": 1,
+          "filename": "u1-l1-what-is-mlir.md",
+          "level": "beginner",
+          "topic": "介绍 MLIR 作为「多层中间表示」的核心思想、它解决的问题、以及与 LLVM IR 的关系。",
+          "learning_goals": [
+            "理解「多层中间表示」的设计动机与可扩展性理念",
+            "区分 MLIR 与传统单层 LLVM IR 的差异",
+            "了解 MLIR 的典型应用场景（编译、硬件、AI 等方言生态）"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/LangRef.md",
+            "docs/Rationale/Rationale.md",
+            "docs/Tutorials/_index.md"
+          ],
+          "minimal_modules": [
+            "多层中间表示的核心思想",
+            "MLIR 与 LLVM IR 的关系与差异",
+            "MLIR 的典型应用场景"
+          ],
+          "practice_task": "阅读 LangRef 开头与 Rationale 文档，用自己的话写一段 200 字总结：MLIR 相比单一 IR 解决了什么问题，并举出至少两个现实中的方言应用方向。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "源码目录结构与构建系统",
+          "order": 2,
+          "filename": "u1-l2-directory-and-build.md",
+          "level": "beginner",
+          "topic": "讲解 mlir 子项目的目录组织、include/lib 镜像结构以及 CMake 构建入口。",
+          "learning_goals": [
+            "掌握 include/mlir 与 lib 的镜像对应关系",
+            "理解 tools/examples/test/unittests 各自职责",
+            "看懂顶层 CMakeLists.txt 如何组织 MLIR 的构建"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "include/mlir/InitAllDialects.h",
+            "lib/RegisterAllDialects.cpp"
+          ],
+          "minimal_modules": [
+            "include/lib 镜像目录结构",
+            "CMake 构建系统入口",
+            "tools/examples/test 的职责划分"
+          ],
+          "practice_task": "选择一个具体 dialect（如 Arith），分别在 include/mlir/Dialect/ 与 lib/Dialect/ 下找到它对应的头文件目录与实现目录，列出两者的文件对应关系。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "工具链入口 mlir-opt 与运行第一个程序",
+          "order": 3,
+          "filename": "u1-l3-mlir-opt-entry.md",
+          "level": "beginner",
+          "topic": "通过 mlir-opt 的 main 函数理解入口流程：注册 dialect/pass、构造 registry、进入 MlirOptMain。",
+          "learning_goals": [
+            "理解 mlir-opt 入口 main 的执行流程",
+            "掌握 registerAllDialects/registerAllPasses 的注册模式",
+            "学会用命令行运行 mlir-opt 处理一个 .mlir 文件"
+          ],
+          "source_files": [
+            "tools/mlir-opt/mlir-opt.cpp",
+            "include/mlir/Tools/mlir-opt/MlirOptMain.h",
+            "examples/minimal-opt/mlir-minimal-opt.cpp"
+          ],
+          "minimal_modules": [
+            "mlir-opt 入口与 MlirOptMain",
+            "dialect 与 pass 的注册流程",
+            "命令行参数与运行方式"
+          ],
+          "practice_task": "对比 tools/mlir-opt/mlir-opt.cpp 与 examples/minimal-opt/mlir-minimal-opt.cpp，说明 minimal-opt 精简了哪些注册步骤，并尝试构造一个最简的 opt 入口思路（伪代码即可）。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "MLIR 文本 IR 语法速览",
+          "order": 4,
+          "filename": "u1-l4-text-ir-syntax.md",
+          "level": "beginner",
+          "topic": "通过 LangRef 与示例快速掌握 .mlir 文本格式：操作、类型、属性、函数与块的基本写法。",
+          "learning_goals": [
+            "读懂一段标准 MLIR 文本 IR",
+            "理解 operation 的通用语法 %result = dialect.op(args) {attrs} : (types) -> (types)",
+            "掌握函数、位置信息与注释的写法"
+          ],
+          "source_files": [
+            "docs/LangRef.md",
+            "docs/Tutorials/MlirOpt.md",
+            "examples/minimal-opt/README.md"
+          ],
+          "minimal_modules": [
+            "操作、类型、属性的文本表示",
+            "函数与基本块的基本写法",
+            "注释与位置（loc）信息"
+          ],
+          "practice_task": "手写一段包含一个 func.func、两个算术运算和返回值的 .mlir 文本，运行 mlir-opt（或 minimal-opt）验证它能被正确解析（--verify-diagnostics 或无报错即可）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心数据结构：Operation/Value/Block/Region",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "IR 总体结构导览",
+          "order": 1,
+          "filename": "u2-l1-ir-overview.md",
+          "level": "intermediate",
+          "topic": "用官方 IR 结构图与源码概览建立 Operation/Block/Region/Value/Dialect/Type/Attribute 的全局心智模型。",
+          "learning_goals": [
+            "建立 Operation-Region-Block-Value 的层次心智模型",
+            "理解 Dialect-Operation-Type-Attribute 之间的关系",
+            "对照官方结构图与 include/mlir/IR 头文件建立映射"
+          ],
+          "source_files": [
+            "docs/Tutorials/UnderstandingTheIRStructure.md",
+            "include/mlir/IR/Operation.h",
+            "include/mlir/IR/Visitors.h"
+          ],
+          "minimal_modules": [
+            "Operation/Block/Region/Value 的层次结构",
+            "Dialect-Operation-Type-Attribute 关系",
+            "IR 结构总览图对照源码"
+          ],
+          "practice_task": "画一张 Operation/Region/Block/Value 的包含关系图，并标注每个概念对应的头文件名（Operation.h、Block.h、Region.h、Value.h）。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Operation 与操作支持结构",
+          "order": 2,
+          "filename": "u2-l2-operation.md",
+          "level": "intermediate",
+          "topic": "深入 Operation 类的内存表示、Operand/Result/Region 存储以及 OperationSupport 辅助设施。",
+          "learning_goals": [
+            "理解 Operation 的内存布局与尾随对象（trailing objects）技巧",
+            "掌握 operand、result、region、successor 的存储方式",
+            "了解 OperationSupport 提供的工具函数与抽象"
+          ],
+          "source_files": [
+            "include/mlir/IR/Operation.h",
+            "lib/IR/Operation.cpp",
+            "lib/IR/OperationSupport.cpp"
+          ],
+          "minimal_modules": [
+            "Operation 的内存表示",
+            "Operand/Result/Region/Block 的存储",
+            "OperationSupport 辅助结构"
+          ],
+          "practice_task": "在 lib/IR/Operation.cpp 中找到创建 Operation 的入口（如 Operation::create），梳理创建一个 Operation 需要哪些要素，写一份步骤清单。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "Value：OpResult 与 BlockArgument",
+          "order": 3,
+          "filename": "u2-l3-value.md",
+          "level": "intermediate",
+          "topic": "讲解 Value 这一统一 SSA 值抽象，及其两个子类 OpResult 与 BlockArgument 与 use-def 链。",
+          "learning_goals": [
+            "理解 Value 作为统一 SSA 值抽象的意义",
+            "区分 OpResult 与 BlockArgument 的来源",
+            "掌握 use-def 链（users/uses）的遍历方法"
+          ],
+          "source_files": [
+            "lib/IR/Value.cpp",
+            "include/mlir/IR/Operation.h"
+          ],
+          "minimal_modules": [
+            "Value 的统一抽象",
+            "OpResult 与 BlockArgument",
+            "use-def 链与遍历"
+          ],
+          "practice_task": "写一段 C++ 片段（或伪代码）：给定一个 Operation*，遍历其所有 result 的所有 user 并打印出来。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "Block 与 Region",
+          "order": 4,
+          "filename": "u2-l4-block-and-region.md",
+          "level": "intermediate",
+          "topic": "讲解 Block（基本块）与 Region（区域）的语义、参数化块、后继关系与 Region 种类。",
+          "learning_goals": [
+            "理解 Block 与 BlockArgument 的作用",
+            "掌握 Region 的语义分类（SSA 控制流区域 vs 图区域）",
+            "理解块的终止符与后继（successor）关系"
+          ],
+          "source_files": [
+            "lib/IR/Block.cpp",
+            "lib/IR/Region.cpp"
+          ],
+          "minimal_modules": [
+            "Block 与 BlockArgument",
+            "Region 的语义与分类",
+            "后继与控制流"
+          ],
+          "practice_task": "构造一段含分支的 IR 文本，分析其中每个 Block 的 BlockArgument 来源，并说明 Region 在 func.func 中的边界。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l5",
+          "title": "Type 与 Attribute 体系",
+          "order": 5,
+          "filename": "u2-l5-type-and-attribute.md",
+          "level": "intermediate",
+          "topic": "讲解 Type 与 Attribute 体系、builtin 内置类型/属性，以及类型/属性的存储与唯一化机制。",
+          "learning_goals": [
+            "理解 Type 体系与 builtin 类型（IntegerType、TensorType、MemRefType 等）",
+            "理解 Attribute 体系与常用属性",
+            "掌握类型/属性基于存储的唯一化（ uniquing）机制"
+          ],
+          "source_files": [
+            "lib/IR/Types.cpp",
+            "lib/IR/Attributes.cpp",
+            "lib/IR/BuiltinTypes.cpp"
+          ],
+          "minimal_modules": [
+            "Type 体系与 builtin 类型",
+            "Attribute 体系",
+            "类型/属性的存储与唯一化"
+          ],
+          "practice_task": "在 lib/IR/BuiltinTypes.cpp 中选一个类型（如 MemRefType），找出它的存储结构（Storage）定义，说明它如何被唯一化。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l6",
+          "title": "MLIRContext、Builder 与 Location",
+          "order": 6,
+          "filename": "u2-l6-context-builder-location.md",
+          "level": "intermediate",
+          "topic": "讲解 MLIRContext 的生命周期管理、Builder 构造 IR 的便捷接口、Location 的可调试性。",
+          "learning_goals": [
+            "理解 MLIRContext 的角色与生命周期",
+            "掌握 OpBuilder/Builder 构造 IR 的常用方法",
+            "理解 Location 体系对错误定位与可调试性的作用"
+          ],
+          "source_files": [
+            "lib/IR/MLIRContext.cpp",
+            "lib/IR/Builders.cpp",
+            "lib/IR/Location.cpp"
+          ],
+          "minimal_modules": [
+            "MLIRContext 生命周期与职责",
+            "Builder 构造 IR 的方法",
+            "Location 与可调试性"
+          ],
+          "practice_task": "用 OpBuilder 写一段代码：在一个 Block 末尾插入一个 arith.addi 操作，并为它附加一个 FileLineColLoc 位置信息。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l4"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "Dialect 与 Operation 定义",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Dialect 概念与注册机制",
+          "order": 1,
+          "filename": "u3-l1-dialect-basics.md",
+          "level": "intermediate",
+          "topic": "讲解 Dialect 类、命名空间、DialectRegistry 注册机制以及 BuiltinDialect 内置操作。",
+          "learning_goals": [
+            "理解 Dialect 作为操作/类型/属性命名空间的含义",
+            "掌握 DialectRegistry 的注册与延迟加载机制",
+            "了解 BuiltinDialect 提供的内置操作（module、func 等）"
+          ],
+          "source_files": [
+            "include/mlir/IR/Dialect.h",
+            "include/mlir/IR/DialectRegistry.h",
+            "lib/IR/BuiltinDialect.cpp"
+          ],
+          "minimal_modules": [
+            "Dialect 类与命名空间",
+            "DialectRegistry 注册机制",
+            "BuiltinDialect 内置操作"
+          ],
+          "practice_task": "阅读 examples/standalone/include/Standalone/StandaloneDialect.td 与 lib/Standalone/StandaloneDialect.cpp，总结定义一个自定义 Dialect 需要做哪些事。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "用 TableGen 定义 Operation",
+          "order": 2,
+          "filename": "u3-l2-op-tablegen.md",
+          "level": "intermediate",
+          "topic": "讲解用 ODS/TableGen 定义 Operation 的写法、mlir-tblgen 的代码生成与 OpBase.td 基础设施。",
+          "learning_goals": [
+            "掌握 .td 文件中定义 Operation 的基本写法",
+            "理解 mlir-tblgen 如何从 ODS 生成 C++ 代码",
+            "了解 OpBase.td 提供的基础定义"
+          ],
+          "source_files": [
+            "docs/DefiningDialects/Operations.md",
+            "include/mlir/IR/OpBase.td",
+            "examples/standalone/include/Standalone/StandaloneOps.td"
+          ],
+          "minimal_modules": [
+            ".td 定义 Operation 的写法",
+            "mlir-tblgen 代码生成",
+            "ODS 框架基础"
+          ],
+          "practice_task": "参考 standalone 示例，为一个新的 toy.add 操作写一段 .td 定义（含两个张量输入、一个张量输出），并说明生成的 C++ 类名。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "定义自定义 Attributes 与 Types",
+          "order": 3,
+          "filename": "u3-l3-attr-type-tablegen.md",
+          "level": "intermediate",
+          "topic": "讲解用 TableGen 定义自定义 Attribute 与 Type、Storage 类型与自定义打印解析。",
+          "learning_goals": [
+            "掌握 AttributesAndTypes 的 TableGen 定义方式",
+            "理解 Storage 类型的存储与唯一化",
+            "了解自定义类型的打印与解析钩子"
+          ],
+          "source_files": [
+            "docs/DefiningDialects/AttributesAndTypes.md",
+            "examples/standalone/include/Standalone/StandaloneTypes.td"
+          ],
+          "minimal_modules": [
+            "AttributesAndTypes 的 TableGen 定义",
+            "Storage 存储类型",
+            "自定义打印与解析"
+          ],
+          "practice_task": "为 standalone 示例中的一个自定义 Type（如 Standalone 复数类型）梳理它的 .td 定义与对应 .cpp 中 Storage 的实现对应关系。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "声明式装配格式 Assembly Format",
+          "order": 4,
+          "filename": "u3-l4-assembly-format.md",
+          "level": "intermediate",
+          "topic": "讲解操作声明的 assembly format（hasAssemblyFormat）语法：指令、可选组与变量。",
+          "learning_goals": [
+            "掌握声明式装配格式的基本语法",
+            "理解指令、可选组与变量的用法",
+            "了解何时需要退回到自定义打印/解析"
+          ],
+          "source_files": [
+            "docs/DefiningDialects/Assembly.md",
+            "include/mlir/IR/OpImplementation.h"
+          ],
+          "minimal_modules": [
+            "声明式装配格式语法",
+            "指令与可选组",
+            "自定义装配的边界"
+          ],
+          "practice_task": "为前面定义的 toy.add 操作写一段 assemblyFormat，使其文本输出形如 toy.add %a, %b : tensor<?xf32>，并解释每个 token 的作用。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l5",
+          "title": "约束系统 Constraints",
+          "order": 5,
+          "filename": "u3-l5-constraints.md",
+          "level": "intermediate",
+          "topic": "讲解 ODS 中的 Constraints 约束系统、CPred 原语以及如何组合约束应用到操作数与结果。",
+          "learning_goals": [
+            "理解约束的概念与常见类型",
+            "掌握 CPred 原语与组合方式",
+            "学会把约束应用到操作数、结果与属性"
+          ],
+          "source_files": [
+            "docs/DefiningDialects/Constraints.md",
+            "include/mlir/IR/Constraints.td"
+          ],
+          "minimal_modules": [
+            "约束的概念与类型",
+            "CPred 与组合",
+            "约束的应用"
+          ],
+          "practice_task": "在 toy.add 的输入上施加一个类型相同的约束，并说明该约束会被 mlir-tblgen 转化为怎样的 C++ 校验代码位置。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "解析、打印与字节码",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "文本解析器 AsmParser",
+          "order": 1,
+          "filename": "u4-l1-asm-parser.md",
+          "level": "intermediate",
+          "topic": "讲解 .mlir 文本的词法与解析流程、Parser 入口与 dialect 自定义解析钩子。",
+          "learning_goals": [
+            "理解 AsmParser 的整体解析流程",
+            "掌握 Parser.h 提供的入口接口",
+            "了解 dialect 自定义属性/类型的解析钩子"
+          ],
+          "source_files": [
+            "lib/AsmParser/Parser.cpp",
+            "lib/AsmParser/Lexer.cpp",
+            "include/mlir/Parser/Parser.h"
+          ],
+          "minimal_modules": [
+            "词法与解析流程",
+            "Parser 入口接口",
+            "dialect 自定义解析钩子"
+          ],
+          "practice_task": "在 lib/AsmParser/Parser.cpp 中找到解析 operation 的主入口，梳理从文本到 Operation* 的关键调用步骤。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "打印器 AsmPrinter",
+          "order": 2,
+          "filename": "u4-l2-asm-printer.md",
+          "level": "intermediate",
+          "topic": "讲解 IR 的打印流程、AsmState 状态与可定制打印（别名、缩进等）。",
+          "learning_goals": [
+            "理解 Operation 被序列化为文本的打印流程",
+            "掌握 AsmState 的作用",
+            "了解别名（attribute/type alias）与可定制打印"
+          ],
+          "source_files": [
+            "lib/IR/AsmPrinter.cpp",
+            "include/mlir/IR/AsmState.h"
+          ],
+          "minimal_modules": [
+            "打印流程",
+            "AsmState 状态",
+            "别名与可定制打印"
+          ],
+          "practice_task": "运行 mlir-opt 对一段 IR 分别带与不带 --print-ir-after-all（或等价打印选项），观察输出中别名与缩进如何随 AsmState 变化。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "字节码格式 Bytecode",
+          "order": 3,
+          "filename": "u4-l3-bytecode.md",
+          "level": "intermediate",
+          "topic": "讲解 MLIR 字节码二进制格式的设计动机、Reader/Writer 与版本兼容机制。",
+          "learning_goals": [
+            "理解字节码相对文本格式的优势",
+            "掌握 Reader/Writer 的分工",
+            "了解字节码的版本与向前/向后兼容"
+          ],
+          "source_files": [
+            "docs/BytecodeFormat.md",
+            "lib/Bytecode/Reader",
+            "lib/Bytecode/Writer"
+          ],
+          "minimal_modules": [
+            "字节码设计动机",
+            "Reader 与 Writer",
+            "版本与兼容"
+          ],
+          "practice_task": "用工具（或代码）把一段 .mlir 文本写出的 IR 序列化为字节码再读回，对比文本与字节码两种形式的大小与可读性。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "Pass 管理与通用变换",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Pass 与 PassManager",
+          "order": 1,
+          "filename": "u5-l1-pass-manager.md",
+          "level": "intermediate",
+          "topic": "讲解 Pass 抽象、OperationPass、嵌套 PassManager 管线与 AnalysisManager。",
+          "learning_goals": [
+            "理解 Pass 与 OperationPass 的抽象",
+            "掌握 PassManager 的嵌套管线（nesting）模型",
+            "理解 AnalysisManager 的分析缓存与失效"
+          ],
+          "source_files": [
+            "docs/PassManagement.md",
+            "include/mlir/Pass/PassManager.h",
+            "include/mlir/Pass/Pass.h"
+          ],
+          "minimal_modules": [
+            "Pass 与 OperationPass",
+            "PassManager 嵌套管线",
+            "AnalysisManager 分析缓存"
+          ],
+          "practice_task": "在命令行用 mlir-opt 组合两个 pass（如 --canonicalize 与一个 convert 类 pass），理解 -pass-pipeline 语法并写出等价的嵌套管线字符串。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Pass 执行机制：注册、插桩、统计与崩溃恢复",
+          "order": 2,
+          "filename": "u5-l2-pass-execution.md",
+          "level": "intermediate",
+          "topic": "讲解 Pass 的注册与 PassRegistry、PassInstrumentation 插桩、统计信息与崩溃恢复。",
+          "learning_goals": [
+            "理解 Pass 注册与 PassRegistry 的静态注册机制",
+            "掌握 PassInstrumentation 的插桩点",
+            "了解 Pass 统计（statistics）与崩溃恢复（PassCrashRecovery）"
+          ],
+          "source_files": [
+            "lib/Pass/Pass.cpp",
+            "lib/Pass/PassTiming.cpp",
+            "lib/Pass/PassStatistics.cpp",
+            "lib/Pass/PassCrashRecovery.cpp"
+          ],
+          "minimal_modules": [
+            "Pass 注册与 PassRegistry",
+            "插桩 PassInstrumentation",
+            "统计与崩溃恢复"
+          ],
+          "practice_task": "用 mlir-opt --mlir-timing 与 --mlir-pass-statistics 运行一段管线，解读输出的耗时与统计表，对应到 PassTiming/PassStatistics 的实现。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "内置通用变换",
+          "order": 3,
+          "filename": "u5-l3-builtin-transforms.md",
+          "level": "intermediate",
+          "topic": "讲解 lib/Transforms 中的通用变换：CSE、Inliner、Mem2Reg/SROA 等。",
+          "learning_goals": [
+            "理解 CSE 公共子表达式消除的实现思路",
+            "掌握 Inliner 内联 pass 的工作方式",
+            "了解 Mem2Reg/SROA 等提升 IR 形式的变换"
+          ],
+          "source_files": [
+            "lib/Transforms/CSE.cpp",
+            "lib/Transforms/InlinerPass.cpp",
+            "lib/Transforms/Mem2Reg.cpp",
+            "docs/Passes.md"
+          ],
+          "minimal_modules": [
+            "CSE 公共子表达式消除",
+            "Inliner 内联",
+            "Mem2Reg 与 SROA"
+          ],
+          "practice_task": "对一段含重复计算的 IR 运行 --cse，对照 lib/Transforms/CSE.cpp 解释哪些操作被消除、为何消除。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "模式重写 Pattern Rewriting",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Pattern 与 RewritePattern 基础",
+          "order": 1,
+          "filename": "u6-l1-pattern-basics.md",
+          "level": "advanced",
+          "topic": "讲解 RewritePattern、PatternRewriter、利益驱动（benefit）与 FrozenRewritePatternSet。",
+          "learning_goals": [
+            "理解 RewritePattern 抽象与匹配-重写两段式",
+            "掌握 PatternRewriter 的修改原语",
+            "理解 benefit（利益）与模式集合的冻结"
+          ],
+          "source_files": [
+            "docs/PatternRewriter.md",
+            "include/mlir/Rewrite/FrozenRewritePatternSet.h",
+            "include/mlir/Rewrite/PatternApplicator.h",
+            "lib/IR/PatternMatch.cpp"
+          ],
+          "minimal_modules": [
+            "RewritePattern 与 PatternRewriter",
+            "利益驱动 benefit",
+            "FrozenRewritePatternSet"
+          ],
+          "practice_task": "实现一个最简 RewritePattern：把某个toy操作替换为另一个等价操作，并说明 match 与 rewrite 两个方法各做什么。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "Greedy 驱动与规范化 Canonicalization",
+          "order": 2,
+          "filename": "u6-l2-greedy-canonicalize.md",
+          "level": "advanced",
+          "topic": "讲解 GreedyPatternRewriteDriver 的工作机制、Canonicalizer 以及 fold 与规范化模式。",
+          "learning_goals": [
+            "理解 GreedyPatternRewriteDriver 的迭代驱动逻辑",
+            "掌握 Canonicalizer 的作用与配置",
+            "理解 fold 与 hasCanonicalizer/foldable 等规范化入口"
+          ],
+          "source_files": [
+            "docs/Canonicalization.md",
+            "include/mlir/Transforms/GreedyPatternRewriteDriver.h",
+            "lib/Transforms/Canonicalizer.cpp"
+          ],
+          "minimal_modules": [
+            "GreedyPatternRewriteDriver 工作机制",
+            "Canonicalizer 规范化",
+            "fold 与规范化模式"
+          ],
+          "practice_task": "为 toy.add 实现一个 fold（返回常量折叠结果）或一个 canonicalize 模式，运行 --canonicalize 验证它被触发。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "声明式重写：DRR / PDL / PDLL",
+          "order": 3,
+          "filename": "u6-l3-drr-pdl-pdll.md",
+          "level": "advanced",
+          "topic": "讲解声明式重写的三种方式：DRR（TableGen 重写规则）、PDL 与高层 PDLL 语言。",
+          "learning_goals": [
+            "理解 DRR 的 TableGen 重写规则写法",
+            "掌握 PDL 作为可执行模式语言的能力",
+            "了解 PDLL 高层语言及其编译流程"
+          ],
+          "source_files": [
+            "docs/DeclarativeRewrites.md",
+            "docs/PDLL.md",
+            "docs/Tutorials/QuickstartRewrites.md"
+          ],
+          "minimal_modules": [
+            "声明式重写 DRR",
+            "PDL 模式语言",
+            "PDLL 高层语言"
+          ],
+          "practice_task": "用 DRR 写一条把 toy.transpose(transpose(x)) 化简为 x 的重写规则（参考 QuickstartRewrites），并说明它相比手写 C++ pattern 的优势。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "Dialect Conversion 与降级",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "Dialect Conversion 框架",
+          "order": 1,
+          "filename": "u7-l1-dialect-conversion.md",
+          "level": "advanced",
+          "topic": "讲解 DialectConversion 重写框架：合法性判定、转换驱动流程与 legalization。",
+          "learning_goals": [
+            "理解 DialectConversion 与普通 pattern rewriting 的区别",
+            "掌握 legal/illegal 目标与动态合法性判定",
+            "理解转换驱动器的整体流程"
+          ],
+          "source_files": [
+            "docs/DialectConversion.md",
+            "include/mlir/Transforms/DialectConversion.h"
+          ],
+          "minimal_modules": [
+            "重写框架与合法性判定",
+            "转换驱动器流程",
+            "legalization 与目标配置"
+          ],
+          "practice_task": "阅读 docs/DialectConversion.md 与 DialectConversion.h，写出一次完整 conversion 需要配置的三个要素（ConversionTarget、RewritePatternSet、applyPartialConversion）。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "TypeConverter 与 ConversionPattern",
+          "order": 2,
+          "filename": "u7-l2-type-converter.md",
+          "level": "advanced",
+          "topic": "讲解 TypeConverter 如何映射类型、ConversionPattern 如何处理签名转换与逐操作降级。",
+          "learning_goals": [
+            "理解 TypeConverter 的类型映射职责",
+            "掌握 ConversionPattern 相比普通 pattern 的扩展",
+            "了解函数签名转换（signature conversion）的难点"
+          ],
+          "source_files": [
+            "include/mlir/Transforms/DialectConversion.h",
+            "lib/Transforms/Utils"
+          ],
+          "minimal_modules": [
+            "类型转换映射 TypeConverter",
+            "ConversionPattern",
+            "函数签名转换"
+          ],
+          "practice_task": "为一个把 tensor 类型转换为 memref 类型的 TypeConverter 写出类型映射伪代码，并说明它如何影响后续操作的签名。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "降级到 LLVM Dialect 与 LLVM IR",
+          "order": 3,
+          "filename": "u7-l3-lower-to-llvm.md",
+          "level": "advanced",
+          "topic": "讲解 ConvertToLLVM 转换 pass、LLVMCommon 基础设施与把 LLVMIR dialect 翻译为 LLVM IR 的 Target。",
+          "learning_goals": [
+            "理解 convert-to-llvmvm（ToLLVM）转换 pass 的作用",
+            "掌握 LLVMCommon 共享基础设施",
+            "了解 LLVMIR dialect 翻译为真正 LLVM IR 的 Target 机制"
+          ],
+          "source_files": [
+            "docs/TargetLLVMIR.md",
+            "include/mlir/Conversion/ConvertToLLVM/ToLLVMPass.h",
+            "include/mlir/Target/LLVMIR"
+          ],
+          "minimal_modules": [
+            "ToLLVM 转换 pass",
+            "LLVMCommon 基础设施",
+            "LLVMIR Target 翻译"
+          ],
+          "practice_task": "用命令行把一段简单 func/arith IR 通过对应 convert pass 降级到 LLVM dialect，再经 translate 翻译为 LLVM IR，记录每一步 IR 的变化。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "接口、特性与分析",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "接口系统 Interfaces",
+          "order": 1,
+          "filename": "u8-l1-interfaces.md",
+          "level": "advanced",
+          "topic": "讲解 OpInterface、DialectInterface、TypeInterface 接口系统及其 TableGen 定义与多态分发。",
+          "learning_goals": [
+            "理解三类接口的概念与区别",
+            "掌握接口的 TableGen 定义方式",
+            "理解接口如何实现跨 dialect 的多态分发"
+          ],
+          "source_files": [
+            "docs/Interfaces.md",
+            "include/mlir/Interfaces/ControlFlowInterfaces.h",
+            "include/mlir/Interfaces/InferTypeOpInterface.h"
+          ],
+          "minimal_modules": [
+            "三类接口的概念",
+            "接口的 TableGen 定义",
+            "接口的多态分发"
+          ],
+          "practice_task": "为 toy.add 实现 InferTypeOpInterface（结果类型推断），说明接口如何让通用变换在不知道具体 dialect 的情况下调用它。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "数据流分析框架 DataFlow",
+          "order": 2,
+          "filename": "u8-l2-data-flow-analysis.md",
+          "level": "advanced",
+          "topic": "讲解 MLIR 的数据流分析框架：DataFlowFramework、Lattice 与传播、死代码分析示例。",
+          "learning_goals": [
+            "理解 DataFlowAnalysis 的通用固定点框架",
+            "掌握 Lattice 与状态传播机制",
+            "了解基于数据流的死代码分析（sparse/abstract dead code analysis）"
+          ],
+          "source_files": [
+            "docs/Tutorials/DataFlowAnalysis.md",
+            "include/mlir/Analysis/DataFlowFramework.h",
+            "include/mlir/Analysis/DataFlow"
+          ],
+          "minimal_modules": [
+            "DataFlowAnalysis 框架",
+            "Lattice 与传播",
+            "死代码分析示例"
+          ],
+          "practice_task": "阅读 docs/Tutorials/DataFlowAnalysis.md，写一段说明：如何新增一个自定义的 Lattice 状态并接入数据流框架做一种简单分析。",
+          "depends_on": [
+            "u2-l3",
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "常用分析：别名、活跃性与切片",
+          "order": 3,
+          "filename": "u8-l3-common-analyses.md",
+          "level": "advanced",
+          "topic": "讲解 include/mlir/Analysis 中的常用分析：AliasAnalysis、Liveness、SliceAnalysis。",
+          "learning_goals": [
+            "理解 AliasAnalysis 别名分析的接口与用途",
+            "掌握 Liveness 活跃性分析",
+            "理解 SliceAnalysis 反向切片的用途"
+          ],
+          "source_files": [
+            "include/mlir/Analysis/AliasAnalysis.h",
+            "include/mlir/Analysis/Liveness.h",
+            "include/mlir/Analysis/SliceAnalysis.h"
+          ],
+          "minimal_modules": [
+            "AliasAnalysis 别名分析",
+            "Liveness 活跃性",
+            "SliceAnalysis 切片"
+          ],
+          "practice_task": "选择 SliceAnalysis，构造一段 IR 并描述它能够反向追溯出某个值的完整定义链，说明该分析对优化（如死代码消除）的支撑作用。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "扩展、执行与生态",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "Transform 方言",
+          "order": 1,
+          "filename": "u9-l1-transform-dialect.md",
+          "level": "advanced",
+          "topic": "讲解 Transform 方言的理念：用 IR 来描述对 IR 的变换，以及 transform 操作与 .apply 机制。",
+          "learning_goals": [
+            "理解 Transform 方言「用 IR 变换 IR」的理念",
+            "掌握 transform 操作与应用（apply）机制",
+            "了解 transform 教程示例的组织方式"
+          ],
+          "source_files": [
+            "docs/Tutorials/transform/_index.md",
+            "docs/Tutorials/transform/Ch1.md",
+            "examples/transform"
+          ],
+          "minimal_modules": [
+            "Transform 方言理念",
+            "transform 操作与 .apply",
+            "transform 教程示例"
+          ],
+          "practice_task": "阅读 docs/Tutorials/transform/Ch1.md 与 examples/transform/Ch2，写一段 transform IR 来对目标函数应用一次简单的循环变换思路（伪 IR 即可）。",
+          "depends_on": [
+            "u6-l2",
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "执行引擎与 JIT",
+          "order": 2,
+          "filename": "u9-l2-execution-engine.md",
+          "level": "advanced",
+          "topic": "讲解 ExecutionEngine 的 JIT 编译、JitRunner 入口与运行时工具函数（CRunnerUtils 等）。",
+          "learning_goals": [
+            "理解 ExecutionEngine 如何把 MLIR JIT 编译为可执行代码",
+            "掌握 JitRunner 作为执行入口的作用",
+            "了解运行时支撑函数（CRunnerUtils、RunnerUtils）"
+          ],
+          "source_files": [
+            "lib/ExecutionEngine/ExecutionEngine.cpp",
+            "lib/ExecutionEngine/JitRunner.cpp",
+            "lib/ExecutionEngine/CRunnerUtils.cpp"
+          ],
+          "minimal_modules": [
+            "ExecutionEngine JIT",
+            "JitRunner 入口",
+            "运行时工具函数"
+          ],
+          "practice_task": "梳理把一段 MLIR（func+arith）从 IR 到能用 mlir-runner 执行所需的完整链路：降级到 LLVM→翻译为 LLVM IR→JIT→运行时调用，写出每一步对应的工具/库。",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l3",
+          "title": "CAPI 与 Python 绑定",
+          "order": 3,
+          "filename": "u9-l3-capi-python.md",
+          "level": "advanced",
+          "topic": "讲解 CAPI 的 C 接口设计、Python 绑定结构与 ir.py/dialects 模块。",
+          "learning_goals": [
+            "理解 CAPI 作为 C 接口层的设计与所有权语义",
+            "掌握 Python 绑定的目录结构",
+            "了解 ir.py 与 dialects 子包如何暴露 MLIR 能力"
+          ],
+          "source_files": [
+            "include/mlir/CAPI/IR.h",
+            "include/mlir/CAPI/Registration.h",
+            "python/mlir/ir.py",
+            "python/mlir/dialects"
+          ],
+          "minimal_modules": [
+            "CAPI C 接口设计",
+            "Python 绑定结构",
+            "ir.py 与 dialects 模块"
+          ],
+          "practice_task": "用 Python 绑定（python/mlir/ir.py）写一段代码：构造一个 Context、用 parse 解析一段 IR 并遍历其 operation，对比与 C++ Builder 的异同。",
+          "depends_on": [
+            "u2-l6",
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l4",
+          "title": "自带工具链与开发流程",
+          "order": 4,
+          "filename": "u9-l4-toolchain.md",
+          "level": "advanced",
+          "topic": "讲解 mlir-tblgen、mlir-translate、mlir-lsp-server、mlir-reduce 等自带工具与 out-of-tree 开发流程（standalone 示例）。",
+          "learning_goals": [
+            "理解 mlir-tblgen 作为代码生成核心的作用",
+            "掌握 mlir-translate、mlir-lsp-server、mlir-reduce 的用途",
+            "了解基于 standalone 示例进行 out-of-tree dialect 开发的流程"
+          ],
+          "source_files": [
+            "tools/mlir-tblgen",
+            "tools/mlir-translate",
+            "tools/mlir-lsp-server",
+            "tools/mlir-reduce",
+            "examples/standalone"
+          ],
+          "minimal_modules": [
+            "mlir-tblgen 代码生成器",
+            "translate/lsp/reduce 工具",
+            "standalone out-of-tree 开发流程"
+          ],
+          "practice_task": "以 examples/standalone 为模板，列出新增一个 out-of-tree dialect 并自带 standalone-opt 工具所需的目录与文件清单，说明每个文件的作用。",
+          "depends_on": [
+            "u3-l2",
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
