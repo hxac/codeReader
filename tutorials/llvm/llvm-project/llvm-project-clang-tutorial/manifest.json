@@ -1,0 +1,1356 @@
+{
+  "project": "llvm-project-clang",
+  "head": "4e924a6276ef015e1482b68371bb8229368fe5f7",
+  "rationale": "Clang 是 LLVM 的 C/C++/ObjC 前端，同时也是一套源码级工具平台，体量极大（lib/ 下 30+ 子库，AST/CodeGen 各有近 90/70 个源文件）。因此手册按「先认识全貌、再沿编译流水线由浅入深、最后落到工具生态与前沿特性」来组织。第 1 单元让读者从零建立项目认知；第 2 单元打通命令行到前端的入口（Driver→cc1→CompilerInstance）；第 3 单元讲清楚贯穿全程的基础设施（SourceManager、Diagnostics、FrontendAction），它们是后续所有模块的依赖；第 4–8 单元严格按真实编译管线顺序展开：Lex（词法/预处理）→ Parse（语法）→ Sema（语义）→ AST（中间表示）→ CodeGen（生成 LLVM IR），这是 Clang 的主干，必须线性依赖学习。第 9–14 单元为专家层，覆盖序列化/Modules、Tooling/LibTooling/ASTMatchers/插件/Transformer、格式化与索引、静态分析、以及 REPL/CIR/测试体系等扩展点。每篇只解决一个主题、引用 1–6 个真实源码文件、并配一个可动手的实践任务，依赖关系由 depends_on 显式给出，保证读者可按图索骥。本次增量：相比上次 HEAD(11038cc)，本轮提交（4e924a6）所涉改动全部落在 libc/lld/lldb/llvm/mlir 子项目内，clang 子树无任何源码或文档变化（git diff 过滤 clang 路径为空），故所有讲义 action 标为 keep，仅推进 head，结构与依赖关系保持不变。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 Clang：项目定位与运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "Clang 是什么：项目定位与生态",
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "order": 1,
+          "topic": "介绍 Clang 在 LLVM 中的定位：它是 C/C++/Objective-C 的编译器前端，同时也是一个承载大量源码级工具的平台。",
+          "learning_goals": [
+            "理解 Clang 与 LLVM 的关系及其在前端的角色",
+            "认识到 Clang 不只是编译器，还是静态分析、格式化、索引等工具的底座",
+            "建立对项目目标与应用场景的整体认知"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/index.rst",
+            "CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "项目定位",
+            "与 LLVM 的关系",
+            "工具生态概览"
+          ],
+          "practice_task": "阅读 README.md 与 docs/index.rst，用自己的话写出 Clang 解决的三个主要问题，并列举两个除“编译代码”之外的用途。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "获取、构建与运行 Clang",
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "order": 2,
+          "topic": "讲解 Clang 的 CMake 构建方式：作为 LLVM 子项目的集成构建、独立构建、C++17 标准、对 llvm-tblgen 的依赖等。",
+          "learning_goals": [
+            "掌握 Clang 的 CMake 构建配置项",
+            "理解集成构建与独立构建的差异",
+            "知道构建产物（可执行文件与库）的输出位置"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "INSTALL.txt",
+            "cmake/caches/"
+          ],
+          "minimal_modules": [
+            "CMake 选项",
+            "独立 vs 集成构建",
+            "构建产物"
+          ],
+          "practice_task": "写出一组最小可用的 CMake 配置命令构建 Clang，并解释 -DLLVM_ENABLE_ASSERTIONS=ON 对开发调试的意义。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "源码目录与代码组织全景",
+          "filename": "u1-l3-directory-layout.md",
+          "level": "beginner",
+          "order": 3,
+          "topic": "梳理 Clang 仓库的目录职责：lib/ 实现库、include/ 公共头文件、tools/ 可执行工具、docs/ 文档、examples/ 插件示例、test/ 测试。",
+          "learning_goals": [
+            "掌握 lib/ 下各子库的职责划分",
+            "理解 include/ 与 lib/ 的镜像关系",
+            "识别 tools/ 中常用工具的用途"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "lib/CMakeLists.txt",
+            "tools/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "lib 子库职责",
+            "include 与 lib 对应关系",
+            "tools 工具一览"
+          ],
+          "practice_task": "通读 lib/ 与 tools/ 目录，制作一张“目录职责→代表子目录/工具”的映射表。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "用 clang 编译第一个程序：命令行与编译阶段",
+          "filename": "u1-l4-first-compile.md",
+          "level": "beginner",
+          "order": 4,
+          "topic": "从用户视角体验 clang 命令，理解它背后 driver 与 cc1 的分工，以及预处理/编译/汇编/链接的流水线阶段。",
+          "learning_goals": [
+            "能用 clang 完成一次完整编译并查看各阶段",
+            "理解 driver（命令行协调）与 cc1（真正的前端）的分工",
+            "学会用 -### / -v 观察编译流水线"
+          ],
+          "source_files": [
+            "docs/UsersManual.md",
+            "docs/DriverInternals.rst",
+            "tools/driver/driver.cpp"
+          ],
+          "minimal_modules": [
+            "编译阶段",
+            "driver 与 cc1 分工",
+            "常用命令行选项"
+          ],
+          "practice_task": "对一段简单 C++ 代码运行 clang -### hello.cpp，逐条解释 driver 触发的每个 Action 与工具调用。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "驱动层：从命令行到前端入口",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Driver 架构：解析命令行与构建阶段",
+          "filename": "u2-l1-driver-architecture.md",
+          "level": "intermediate",
+          "order": 1,
+          "topic": "深入 clang driver：它如何解析命令行参数、确定输入与目标，并构建出一系列编译阶段（Action）。",
+          "learning_goals": [
+            "理解 Driver 类的整体职责与关键方法",
+            "掌握参数解析（OptTable/ArgList）到 Action 的流程",
+            "学会追踪 driver 内部的执行路径"
+          ],
+          "source_files": [
+            "include/clang/Driver/Driver.h",
+            "lib/Driver/Driver.cpp",
+            "docs/DriverInternals.rst"
+          ],
+          "minimal_modules": [
+            "Driver 类",
+            "参数解析",
+            "BuildActions/BuildPhases"
+          ],
+          "practice_task": "在 Driver 的阶段构建逻辑处（如 BuildActions）定位代码，描述给定一条命令时如何生成 Action 列表。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "ToolChain、Action、Job 与 Compilation",
+          "filename": "u2-l2-toolchain-action-job.md",
+          "level": "intermediate",
+          "order": 2,
+          "topic": "讲解 driver 的核心数据结构：Action 图、ToolChain 的选择、Tool 如何生成具体的 Job，以及 Compilation 如何调度执行。",
+          "learning_goals": [
+            "理解 Action/Job/Tool/Compilation 的关系",
+            "掌握 ToolChain 如何根据目标三元组选择工具",
+            "能解释一条命令最终的 Job 执行序列"
+          ],
+          "source_files": [
+            "include/clang/Driver/Action.h",
+            "include/clang/Driver/ToolChain.h",
+            "include/clang/Driver/Compilation.h",
+            "include/clang/Driver/Job.h",
+            "include/clang/Driver/Tool.h"
+          ],
+          "minimal_modules": [
+            "Action 图",
+            "ToolChain 选择",
+            "Job 生成与执行"
+          ],
+          "practice_task": "选择一个具体目标（如 aarch64-linux），解释其 ToolChain 选用了哪些 Tool，并写出对应命令的 Action→Job 链。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "cc1 前端入口：ExecuteCompilerInvocation",
+          "filename": "u2-l3-cc1-entry.md",
+          "level": "intermediate",
+          "order": 3,
+          "topic": "进入真正的编译器前端 cc1：cc1_main 如何从命令行构造 CompilerInvocation 并驱动前端执行。",
+          "learning_goals": [
+            "理解 cc1 与 driver 的边界",
+            "掌握 ExecuteCompilerInvocation 的职责",
+            "知道如何直接以 -cc1 方式调用前端"
+          ],
+          "source_files": [
+            "tools/driver/cc1_main.cpp",
+            "tools/driver/cc1as_main.cpp",
+            "tools/driver/cc1gen_reproducer_main.cpp"
+          ],
+          "minimal_modules": [
+            "cc1 入口",
+            "CompilerInvocation 创建",
+            "前端执行"
+          ],
+          "practice_task": "用 clang -cc1 直接编译一个文件，并与普通 clang 调用对比，指出 -cc1 需要显式提供的参数。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "CompilerInstance 与 CompilerInvocation",
+          "filename": "u2-l4-compiler-instance.md",
+          "level": "intermediate",
+          "order": 4,
+          "topic": "讲解前端的大总管 CompilerInstance：它持有哪些子系统，以及 CompilerInvocation 如何拆分 FrontendOptions 等各类选项。",
+          "learning_goals": [
+            "理解 CompilerInstance 持有的核心子系统及其生命周期",
+            "掌握 CompilerInvocation 的选项分组结构",
+            "能描述从 Invocation 到 Instance 的装配过程"
+          ],
+          "source_files": [
+            "include/clang/Frontend/CompilerInstance.h",
+            "include/clang/Frontend/CompilerInvocation.h",
+            "include/clang/Frontend/FrontendOptions.h"
+          ],
+          "minimal_modules": [
+            "CompilerInstance 子系统",
+            "Invocation 选项拆分",
+            "创建与销毁顺序"
+          ],
+          "practice_task": "列出 CompilerInstance 在 BeginSourceFile 阶段创建的关键子系统（Diagnostics、SourceManager、Preprocessor、ASTContext 等）及其顺序。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "基础设施：源码位置、诊断与前端动作",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "源码位置管理：SourceManager 与 FileManager",
+          "filename": "u3-l1-source-manager.md",
+          "level": "intermediate",
+          "order": 1,
+          "topic": "讲解 Clang 如何表示和管理源码位置：SourceLocation/FileID、文件加载、行号列号解析以及宏展开位置栈。",
+          "learning_goals": [
+            "理解 SourceLocation/FileID 的抽象与编码",
+            "掌握 SourceManager 如何管理多个源文件缓冲区",
+            "能解析带宏展开的位置信息"
+          ],
+          "source_files": [
+            "include/clang/Basic/SourceManager.h",
+            "include/clang/Basic/FileManager.h",
+            "include/clang/Basic/SourceLocation.h"
+          ],
+          "minimal_modules": [
+            "SourceLocation/FileID",
+            "缓冲区与行列解析",
+            "宏展开位置栈"
+          ],
+          "practice_task": "给定一个 SourceLocation，写出获取其文件名、行号、列号所需的 SourceManager API 调用序列。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "诊断系统：DiagnosticsEngine 与 .td 定义",
+          "filename": "u3-l2-diagnostics.md",
+          "level": "intermediate",
+          "order": 2,
+          "topic": "讲解 Clang 的诊断引擎：如何产生、分类、渲染诊断信息，以及如何用 TableGen(.td) 声明新的诊断。",
+          "learning_goals": [
+            "理解 DiagnosticsEngine 与 DiagnosticIDs 的协作",
+            "掌握 DiagnosticConsumer 与文本渲染流程",
+            "能用 .td 新增一条诊断并理解其生成链路"
+          ],
+          "source_files": [
+            "include/clang/Basic/Diagnostic.h",
+            "include/clang/Basic/DiagnosticIDs.h",
+            "include/clang/Basic/Diagnostic.td",
+            "include/clang/Frontend/TextDiagnostic.h"
+          ],
+          "minimal_modules": [
+            "DiagnosticsEngine",
+            "DiagnosticIDs 与 .td",
+            "DiagnosticConsumer 与渲染"
+          ],
+          "practice_task": "在某个 Diagnostic*.td 中新增一条警告，编译后写一段最小代码触发它并观察输出格式。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "FrontendAction：可插拔的前端动作核心",
+          "filename": "u3-l3-frontend-action.md",
+          "level": "intermediate",
+          "order": 3,
+          "topic": "讲解 FrontendAction 抽象：它是连接前端管线与具体任务（生成 AST、打印、EmitLLVM 等）的可插拔核心。",
+          "learning_goals": [
+            "理解 FrontendAction 的生命周期方法",
+            "掌握 ASTFrontendAction/WrapperFrontendAction 等子类",
+            "能识别常见内置 FrontendAction 的用途"
+          ],
+          "source_files": [
+            "include/clang/Frontend/FrontendAction.h",
+            "include/clang/Frontend/FrontendActions.h",
+            "include/clang/Frontend/ASTConsumers.h"
+          ],
+          "minimal_modules": [
+            "FrontendAction 生命周期",
+            "常用 Action 子类",
+            "与 CompilerInstance 的交互"
+          ],
+          "practice_task": "基于 ASTFrontendAction 写一个最小的 Action，在处理每个文件时打印文件名，并说明它如何被 cc1 选中执行。",
+          "depends_on": [
+            "u2-l4",
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "词法分析与预处理（Lex）",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Lexer 词法分析与 Token 体系",
+          "filename": "u4-l1-lexer-tokens.md",
+          "level": "intermediate",
+          "order": 1,
+          "topic": "讲解 Clang 的词法分析器如何把源码切成 Token，以及 Token 的种类定义（TokenKinds.def/.h）。",
+          "learning_goals": [
+            "理解 Lexer 的状态机与逐字符切分逻辑",
+            "掌握 Token 结构与 TokenKinds 分类",
+            "能观察一段代码的 token 流"
+          ],
+          "source_files": [
+            "include/clang/Lex/Lexer.h",
+            "lib/Lex/Lexer.cpp",
+            "include/clang/Basic/TokenKinds.h",
+            "include/clang/Basic/TokenKinds.def"
+          ],
+          "minimal_modules": [
+            "Lexer 切分逻辑",
+            "Token 结构",
+            "TokenKinds 体系"
+          ],
+          "practice_task": "用 Lexer 相关入口（或 -dump-tokens/预处理输出）观察一段含字符串字面量与运算符的 C 代码，列出其 token 序列。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "预处理器与指令、宏展开",
+          "filename": "u4-l2-preprocessor-macros.md",
+          "level": "intermediate",
+          "order": 2,
+          "topic": "讲解 Preprocessor 如何驱动 Lexer、处理预处理指令（#include/#define/#if 等）以及对象式/函数式宏的展开。",
+          "learning_goals": [
+            "理解 Preprocessor 与 Lexer 的协作关系",
+            "掌握指令处理（PPDirectives）与条件编译",
+            "理解宏信息存储与展开过程"
+          ],
+          "source_files": [
+            "include/clang/Lex/Preprocessor.h",
+            "lib/Lex/PPDirectives.cpp",
+            "lib/Lex/PPMacroExpansion.cpp",
+            "lib/Lex/MacroInfo.cpp"
+          ],
+          "minimal_modules": [
+            "Preprocessor 主循环",
+            "指令处理",
+            "宏展开"
+          ],
+          "practice_task": "跟踪一个带参数的函数式宏的展开过程，说明 MacroArgs 如何被收集与替换。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "头文件搜索与 ModuleMap",
+          "filename": "u4-l3-header-search-modulemap.md",
+          "level": "intermediate",
+          "order": 3,
+          "topic": "讲解 HeaderSearch 的搜索路径策略，以及 ModuleMap 如何把一组头文件组织成 Clang 模块。",
+          "learning_goals": [
+            "理解头文件搜索路径与优先级",
+            "掌握 HeaderMap 与角括号/引号包含的区别",
+            "能用 module.modulemap 描述模块结构"
+          ],
+          "source_files": [
+            "include/clang/Lex/HeaderSearch.h",
+            "lib/Lex/HeaderSearch.cpp",
+            "include/clang/Lex/ModuleMap.h",
+            "lib/Lex/ModuleMap.cpp"
+          ],
+          "minimal_modules": [
+            "搜索路径策略",
+            "HeaderMap",
+            "ModuleMap 与 module.modulemap"
+          ],
+          "practice_task": "编写一个 module.modulemap 把两个头文件声明为同一模块，并用 -fmodules 验证其可被导入。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "语法分析（Parse）",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "解析驱动 ParseAST 与 Parser 主循环",
+          "filename": "u5-l1-parseast-parser.md",
+          "level": "intermediate",
+          "order": 1,
+          "topic": "讲解解析如何被启动（ParseAST）、Parser 的递归下降结构，以及解析过程中的错误恢复机制。",
+          "learning_goals": [
+            "理解 ParseAST 如何驱动 Sema 与 Parser 协作",
+            "掌握 Parser 的顶层声明解析循环",
+            "了解 Expect/Consume/SkipUntil 等错误恢复手段"
+          ],
+          "source_files": [
+            "lib/Parse/ParseAST.cpp",
+            "include/clang/Parse/Parser.h",
+            "include/clang/Parse/RAIIObjectsForParser.h"
+          ],
+          "minimal_modules": [
+            "ParseAST 入口",
+            "Parser 主循环",
+            "错误恢复"
+          ],
+          "practice_task": "在 Parser 解析顶层声明处设断点，观察一段含多个声明的代码的解析顺序与函数调用。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "声明解析 ParseDecl",
+          "filename": "u5-l2-parse-decl.md",
+          "level": "intermediate",
+          "order": 2,
+          "topic": "讲解声明语法如何被解析为 DeclSpec，以及 C++ 特有声明（类、命名空间等）的解析。",
+          "learning_goals": [
+            "理解声明语法与 DeclSpec 的构造",
+            "掌握 ParseDeclaration 与相关子例程",
+            "了解 C++ 声明解析的扩展点"
+          ],
+          "source_files": [
+            "lib/Parse/ParseDecl.cpp",
+            "lib/Parse/ParseDeclCXX.cpp",
+            "include/clang/Sema/DeclSpec.h"
+          ],
+          "minimal_modules": [
+            "声明语法",
+            "DeclSpec",
+            "C++ 声明解析"
+          ],
+          "practice_task": "跟踪一个 C++ 函数声明从 token 流到构建出声明描述对象的过程，指出关键解析函数。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "表达式与语句解析",
+          "filename": "u5-l3-parse-expr.md",
+          "level": "intermediate",
+          "order": 3,
+          "topic": "讲解表达式的优先级与结合性如何由递归下降处理，以及初始化列表的解析。",
+          "learning_goals": [
+            "理解表达式优先级的递归下降实现",
+            "掌握二元/一元运算符的解析",
+            "了解初始化列表的解析流程"
+          ],
+          "source_files": [
+            "lib/Parse/ParseExpr.cpp",
+            "lib/Parse/ParseExprCXX.cpp",
+            "lib/Parse/ParseInit.cpp"
+          ],
+          "minimal_modules": [
+            "表达式优先级",
+            "运算符解析",
+            "初始化列表"
+          ],
+          "practice_task": "画出表达式 a + b * c 的递归下降解析调用栈，标注每一步调用的 Parse 函数。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "语义分析（Sema）",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Sema 概览与名字查找",
+          "filename": "u6-l1-sema-lookup.md",
+          "level": "intermediate",
+          "order": 1,
+          "topic": "讲解 Sema 作为语义分析核心的职责，以及名字查找（Lookup）如何在不同作用域中解析标识符。",
+          "learning_goals": [
+            "理解 Sema 在解析与 AST 构建之间的桥梁作用",
+            "掌握 LookupResult 与名字查找流程",
+            "了解作用域与可见性规则"
+          ],
+          "source_files": [
+            "lib/Sema/Sema.cpp",
+            "lib/Sema/SemaBase.cpp",
+            "lib/Sema/SemaLookup.cpp",
+            "include/clang/Sema/Sema.h"
+          ],
+          "minimal_modules": [
+            "Sema 角色",
+            "LookupResult",
+            "作用域与可见性"
+          ],
+          "practice_task": "跟踪一次普通名字查找，说明它如何遍历作用域并返回候选声明集合。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "类型系统与类型检查",
+          "filename": "u6-l2-type-system.md",
+          "level": "intermediate",
+          "order": 2,
+          "topic": "讲解 Clang 的类型表示（QualType、CanonicalType）以及类型推导、转换与检查如何进行。",
+          "learning_goals": [
+            "理解 QualType 与 CanonicalType 的区别与意义",
+            "掌握类型构造与推导的入口",
+            "了解隐式转换与类型等价的判定"
+          ],
+          "source_files": [
+            "include/clang/AST/Type.h",
+            "include/clang/AST/CanonicalType.h",
+            "lib/Sema/SemaType.cpp",
+            "lib/Sema/SemaExpr.cpp"
+          ],
+          "minimal_modules": [
+            "QualType/CanonicalType",
+            "类型构造",
+            "推导与转换"
+          ],
+          "practice_task": "解释两个书写形式不同但语义相同的类型为何 CanonicalType 相同，并写出验证其相等的方法。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "声明与模板的语义分析",
+          "filename": "u6-l3-sema-decl-template.md",
+          "level": "intermediate",
+          "order": 3,
+          "topic": "讲解声明的语义检查（访问控制、属性等）以及 C++ 模板的语义处理与实例化时机。",
+          "learning_goals": [
+            "理解声明检查的主要环节",
+            "掌握访问控制（SemaAccess）与属性处理",
+            "了解模板实例化的触发点与两阶段名字查找"
+          ],
+          "source_files": [
+            "lib/Sema/SemaDecl.cpp",
+            "lib/Sema/SemaDeclCXX.cpp",
+            "lib/Sema/SemaTemplate.cpp",
+            "lib/Sema/SemaAccess.cpp"
+          ],
+          "minimal_modules": [
+            "声明检查",
+            "访问控制",
+            "模板实例化"
+          ],
+          "practice_task": "跟踪一个类模板在首次被使用时触发实例化的代码路径，说明延迟实例化的机制。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "AST 抽象语法树",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "ASTContext 与 AST 内存管理",
+          "filename": "u7-l1-astcontext.md",
+          "level": "intermediate",
+          "order": 1,
+          "topic": "讲解 ASTContext 如何作为 AST 的中枢：管理 arena 分配器、持有类型与声明的全局表。",
+          "learning_goals": [
+            "理解 ASTContext 的核心职责",
+            "掌握基于 arena 的高效内存分配",
+            "了解 ASTContext 持有的关键全局数据"
+          ],
+          "source_files": [
+            "include/clang/AST/ASTContext.h",
+            "include/clang/AST/ASTContextAllocate.h",
+            "include/clang/AST/ASTFwd.h"
+          ],
+          "minimal_modules": [
+            "ASTContext 职责",
+            "arena 分配器",
+            "全局类型/声明表"
+          ],
+          "practice_task": "通读 ASTContext 头文件，列出它持有并对外提供的主要数据结构与表。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "Decl 节点体系",
+          "filename": "u7-l2-decl-nodes.md",
+          "level": "intermediate",
+          "order": 2,
+          "topic": "讲解 AST 中声明节点的继承体系（Decl 基类、各种具体声明、DeclContext）。",
+          "learning_goals": [
+            "理解 Decl 基类与主要子类",
+            "掌握 DeclContext 表示的声明拥有关系",
+            "能从 AST dump 中识别声明类型"
+          ],
+          "source_files": [
+            "include/clang/AST/Decl.h",
+            "include/clang/AST/DeclBase.h",
+            "include/clang/AST/DeclCXX.h"
+          ],
+          "minimal_modules": [
+            "Decl 基类",
+            "声明种类",
+            "DeclContext"
+          ],
+          "practice_task": "用 -ast-dump 观察一段代码，找到一个 FunctionDecl 并描述其 DeclContext 链。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "Stmt 与 Expr 节点体系",
+          "filename": "u7-l3-stmt-expr-nodes.md",
+          "level": "intermediate",
+          "order": 3,
+          "topic": "讲解语句（Stmt）与表达式（Expr）的节点体系、分类，以及 Visitor 模式如何遍历它们。",
+          "learning_goals": [
+            "理解 Stmt/Expr 的继承与分类",
+            "掌握表达式节点（字面量、二元运算、调用等）",
+            "了解 StmtVisitor 的分发机制"
+          ],
+          "source_files": [
+            "include/clang/AST/Stmt.h",
+            "include/clang/AST/Expr.h"
+          ],
+          "minimal_modules": [
+            "Stmt 基类",
+            "表达式分类",
+            "Visitor 分发"
+          ],
+          "practice_task": "用 -ast-dump 观察一个含函数调用与运算的表达式，画出其节点树并标注每个节点类型。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l4",
+          "title": "ASTConsumer 与遍历",
+          "filename": "u7-l4-consumer-visitor.md",
+          "level": "intermediate",
+          "order": 4,
+          "topic": "讲解 ASTConsumer 接口与 RecursiveASTVisitor，这是编写基于 AST 的工具与插件的基础。",
+          "learning_goals": [
+            "理解 ASTConsumer 在前端管线中的位置",
+            "掌握 RecursiveASTVisitor 的 Traverse/Visit 钩子",
+            "能用遍历器实现简单的 AST 统计"
+          ],
+          "source_files": [
+            "include/clang/AST/ASTConsumer.h",
+            "include/clang/AST/RecursiveASTVisitor.h",
+            "include/clang/AST/LexicallyOrderedRecursiveASTVisitor.h"
+          ],
+          "minimal_modules": [
+            "ASTConsumer",
+            "RecursiveASTVisitor",
+            "Traverse/Visit 钩子"
+          ],
+          "practice_task": "用 RecursiveASTVisitor 写一个统计源文件中所有函数调用（CallExpr）数量的小工具。",
+          "depends_on": [
+            "u7-l3",
+            "u3-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "代码生成（CodeGen：AST → LLVM IR）",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "CodeGen 入口与 CodeGenModule",
+          "filename": "u8-l1-codegen-entry.md",
+          "level": "advanced",
+          "order": 1,
+          "topic": "讲解 CodeGenAction 如何接入前端、CodeGenModule 作为模块级 IR 生成的入口，以及 Clang 类型到 LLVM 类型的映射。",
+          "learning_goals": [
+            "理解 CodeGenAction 如何作为 FrontendAction 产出 IR",
+            "掌握 CodeGenModule 的模块级职责",
+            "了解类型映射（CodeGenTypes）"
+          ],
+          "source_files": [
+            "lib/CodeGen/CodeGenModule.cpp",
+            "lib/CodeGen/CodeGenAction.cpp",
+            "lib/CodeGen/CodeGenTypes.cpp",
+            "include/clang/CodeGen/CodeGenAction.h"
+          ],
+          "minimal_modules": [
+            "CodeGenAction 接入",
+            "CodeGenModule",
+            "类型映射"
+          ],
+          "practice_task": "用 -emit-llvm 输出一段代码的 IR，并把其中的全局变量与函数对应到 CodeGenModule 的产出。",
+          "depends_on": [
+            "u7-l1",
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "表达式与声明的代码生成",
+          "filename": "u8-l2-codegen-expr-decl.md",
+          "level": "advanced",
+          "order": 2,
+          "topic": "讲解表达式（左值/右值、标量与聚合）与局部变量声明的 IR 生成细节。",
+          "learning_goals": [
+            "理解左值/右值的 IR 表示",
+            "掌握标量与聚合表达式的生成路径",
+            "了解局部变量（alloca/DeclRef）的生成"
+          ],
+          "source_files": [
+            "lib/CodeGen/CGExpr.cpp",
+            "lib/CodeGen/CGExprScalar.cpp",
+            "lib/CodeGen/CGDecl.cpp"
+          ],
+          "minimal_modules": [
+            "左右值表示",
+            "标量/聚合表达式",
+            "局部变量生成"
+          ],
+          "practice_task": "对照 IR 解释 int a = 1 + 2; 的生成路径，指出涉及的 CGExpr/CGDecl 函数。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "函数体与调用的代码生成",
+          "filename": "u8-l3-codegen-func-call.md",
+          "level": "advanced",
+          "order": 3,
+          "topic": "讲解 CodeGenFunction 如何生成函数体（prologue、参数、语句）以及函数调用的 IR 生成与调用约定。",
+          "learning_goals": [
+            "理解 CodeGenFunction 的职责与生命周期",
+            "掌握函数 prologue 与参数处理",
+            "了解 CGCall 与调用约定的处理"
+          ],
+          "source_files": [
+            "lib/CodeGen/CodeGenFunction.cpp",
+            "lib/CodeGen/CGCall.cpp",
+            "lib/CodeGen/CGStmt.cpp"
+          ],
+          "minimal_modules": [
+            "CodeGenFunction",
+            "prologue 与参数",
+            "调用与调用约定"
+          ],
+          "practice_task": "跟踪一次普通函数调用的 IR 生成，说明实参如何被计算并按调用约定传递。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "序列化与模块（PCH/PCM/Modules）",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "PCH/PCM 序列化机制",
+          "filename": "u9-l1-serialization.md",
+          "level": "advanced",
+          "order": 1,
+          "topic": "讲解 Clang 如何把 AST 序列化到磁盘（预编译头 PCH、模块 PCM），以及读取时的懒加载机制。",
+          "learning_goals": [
+            "理解 AST 序列化的文件格式与写入顺序",
+            "掌握 ASTReader 的反序列化与懒加载",
+            "了解 PCH/PCM 的用途与构建方式"
+          ],
+          "source_files": [
+            "include/clang/Serialization/ASTReader.h",
+            "include/clang/Serialization/ASTWriter.h",
+            "lib/Serialization/ASTWriter.cpp",
+            "lib/Serialization/ASTReader.cpp",
+            "docs/PCHInternals.rst"
+          ],
+          "minimal_modules": [
+            "序列化格式",
+            "写入顺序",
+            "反序列化与懒加载"
+          ],
+          "practice_task": "用 -emit-pch 生成一个预编译头，结合文档说明其内部如何按记录组织 AST。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "Clang Modules 与 C++20 模块",
+          "filename": "u9-l2-modules.md",
+          "level": "advanced",
+          "order": 2,
+          "topic": "讲解 Clang 的头文件模块（module.modulemap）与 C++20 标准模块的区别及构建方式。",
+          "learning_goals": [
+            "理解 Clang 头文件模块的工作方式",
+            "掌握 C++20 模块的语义与构建",
+            "区分两种模块机制的适用场景"
+          ],
+          "source_files": [
+            "docs/Modules.md",
+            "docs/StandardCPlusPlusModules.md",
+            "include/clang/Lex/ModuleMap.h",
+            "lib/Lex/ModuleMap.cpp"
+          ],
+          "minimal_modules": [
+            "Clang 头文件模块",
+            "C++20 模块",
+            "模块构建"
+          ],
+          "practice_task": "分别用 module.modulemap 和 C++20 module 声明实现一个简单模块，对比二者的构建命令与产物。",
+          "depends_on": [
+            "u4-l3",
+            "u9-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "Tooling 工具链生态（LibTooling）",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "LibTooling 框架入门",
+          "filename": "u10-l1-libtooling.md",
+          "level": "advanced",
+          "order": 1,
+          "topic": "讲解 LibTooling 框架：CommonOptionsParser 解析命令行、ClangTool 装载并运行 FrontendAction。",
+          "learning_goals": [
+            "理解 LibTooling 的整体组成",
+            "掌握 CommonOptionsParser 与 ClangTool 的用法",
+            "能用 LibTooling 复用前端管线写工具"
+          ],
+          "source_files": [
+            "include/clang/Tooling/Tooling.h",
+            "include/clang/Tooling/CommonOptionsParser.h",
+            "lib/Tooling/CommonOptionsParser.cpp",
+            "docs/LibTooling.md"
+          ],
+          "minimal_modules": [
+            "CommonOptionsParser",
+            "ClangTool",
+            "FrontendAction 复用"
+          ],
+          "practice_task": "用 LibTooling 写一个工具，对命令行给出的每个文件打印其文件名与处理结果。",
+          "depends_on": [
+            "u3-l3",
+            "u7-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l2",
+          "title": "编译数据库 CompilationDatabase",
+          "filename": "u10-l2-compilation-database.md",
+          "level": "advanced",
+          "order": 2,
+          "topic": "讲解 compile_commands.json 的格式、解析方式，以及它如何驱动跨文件的批量工具。",
+          "learning_goals": [
+            "理解编译数据库的格式与作用",
+            "掌握 CompilationDatabase 的解析与使用",
+            "能基于编译数据库构建多文件工具"
+          ],
+          "source_files": [
+            "include/clang/Tooling/CompilationDatabase.h",
+            "include/clang/Tooling/JSONCompilationDatabase.h",
+            "lib/Tooling/CompilationDatabase.cpp",
+            "docs/JSONCompilationDatabase.rst"
+          ],
+          "minimal_modules": [
+            "compile_commands.json",
+            "解析",
+            "批量工具"
+          ],
+          "practice_task": "为一个小项目生成 compile_commands.json，并用它驱动一个 LibTooling 工具处理全部源文件。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l3",
+          "title": "AST Matchers 声明式查询",
+          "filename": "u10-l3-ast-matchers.md",
+          "level": "advanced",
+          "order": 3,
+          "topic": "讲解 ASTMatchers：用声明式组合的 matcher 匹配 AST 节点，并通过 MatchFinder 回调处理匹配结果。",
+          "learning_goals": [
+            "理解 matcher 的组合语法与分类",
+            "掌握 MatchFinder 与回调机制",
+            "能编写匹配特定代码模式的 matcher"
+          ],
+          "source_files": [
+            "include/clang/ASTMatchers/ASTMatchers.h",
+            "include/clang/ASTMatchers/ASTMatchFinder.h",
+            "docs/LibASTMatchers.rst"
+          ],
+          "minimal_modules": [
+            "matcher 组合",
+            "MatchFinder 回调",
+            "动态 matcher"
+          ],
+          "practice_task": "写一个 matcher 匹配所有调用 printf 的 CallExpr，并在回调中打印其所在函数名。",
+          "depends_on": [
+            "u7-l4",
+            "u10-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l4",
+          "title": "clang-check 实战",
+          "filename": "u10-l4-clang-check.md",
+          "level": "advanced",
+          "order": 4,
+          "topic": "以 clang-check 为例，把 LibTooling、ASTConsumer、FrontendAction 串联成一个可用命令行工具。",
+          "learning_goals": [
+            "理解 clang-check 作为 LibTooling 学习样例的价值",
+            "掌握其 AST 打印与语法检查能力",
+            "能基于它扩展自定义检查"
+          ],
+          "source_files": [
+            "tools/clang-check/ClangCheck.cpp",
+            "tools/clang-check/CMakeLists.txt",
+            "docs/ClangCheck.rst"
+          ],
+          "minimal_modules": [
+            "clang-check 结构",
+            "AST 打印",
+            "语法检查"
+          ],
+          "practice_task": "用 clang-check 对一个文件打印 AST，并定位其中某个声明节点；再说明如何在其基础上添加一个自定义 ASTConsumer。",
+          "depends_on": [
+            "u10-l1",
+            "u7-l4"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "libclang、插件与重构引擎",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "libclang C API 架构",
+          "filename": "u11-l1-libclang.md",
+          "level": "advanced",
+          "order": 1,
+          "topic": "讲解 libclang 提供的稳定 C ABI：CXTranslationUnit、CXCursor 的遍历模型及其与内部 AST 的映射。",
+          "learning_goals": [
+            "理解 libclang 的稳定 ABI 设计目标",
+            "掌握 CXCursor 的遍历与映射",
+            "能用 C API 实现基本的 AST 查询"
+          ],
+          "source_files": [
+            "tools/libclang/CIndex.cpp",
+            "tools/libclang/CXCursor.cpp",
+            "tools/libclang/CXTranslationUnit.h",
+            "docs/LibClang.md"
+          ],
+          "minimal_modules": [
+            "CXTranslationUnit",
+            "CXCursor 遍历",
+            "稳定 ABI"
+          ],
+          "practice_task": "用 libclang 写一个最小程序，列出指定源文件中所有函数的定义及其位置。",
+          "depends_on": [
+            "u7-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l2",
+          "title": "编写 Clang 插件",
+          "filename": "u11-l2-plugins.md",
+          "level": "advanced",
+          "order": 2,
+          "topic": "讲解如何编写并加载 Clang 插件：PluginASTAction、FrontendPluginRegistry，并以官方示例为模板。",
+          "learning_goals": [
+            "理解 PluginASTAction 与注册机制",
+            "掌握插件的动态加载方式（-fplugin）",
+            "能基于示例扩展自定义属性或检查"
+          ],
+          "source_files": [
+            "examples/PrintFunctionNames/PrintFunctionNames.cpp",
+            "examples/Attribute/Attribute.cpp",
+            "include/clang/Frontend/FrontendPluginRegistry.h",
+            "docs/ClangPlugins.md"
+          ],
+          "minimal_modules": [
+            "PluginASTAction",
+            "FrontendPluginRegistry",
+            "插件加载"
+          ],
+          "practice_task": "编译 PrintFunctionNames 示例插件，并用 clang -fplugin 加载它处理一个源文件，观察输出。",
+          "depends_on": [
+            "u3-l3",
+            "u7-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l3",
+          "title": "Clang Transformer 重构引擎",
+          "filename": "u11-l3-transformer.md",
+          "level": "advanced",
+          "order": 3,
+          "topic": "讲解 Clang Transformer：用 RewriteRule、RangeSelector、Stencil 以可组合的方式描述代码改写。",
+          "learning_goals": [
+            "理解 RewriteRule 的组成",
+            "掌握 RangeSelector 与 Stencil 的替换机制",
+            "能编写简单的重构规则"
+          ],
+          "source_files": [
+            "include/clang/Tooling/Transformer/Transformer.h",
+            "include/clang/Tooling/Transformer/RewriteRule.h",
+            "include/clang/Tooling/Transformer/Stencil.h",
+            "docs/RefactoringEngine.rst"
+          ],
+          "minimal_modules": [
+            "RewriteRule",
+            "RangeSelector",
+            "Stencil 替换"
+          ],
+          "practice_task": "写一个 Transformer 规则，把所有对某个旧函数的调用替换为新函数调用，并生成 Replacements。",
+          "depends_on": [
+            "u10-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "格式化与符号索引（Format / Index / ExtractAPI）",
+      "level": "advanced",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "clang-format 与 LibFormat",
+          "filename": "u12-l1-format.md",
+          "level": "advanced",
+          "order": 1,
+          "topic": "讲解 clang-format 背后的 LibFormat 库：FormatStyle 配置、排版算法与 Replacements 输出。",
+          "learning_goals": [
+            "理解 FormatStyle 的结构与常见选项",
+            "掌握 LibFormat 的排版入口与 Replacements 模型",
+            "能用编程方式对代码应用格式化"
+          ],
+          "source_files": [
+            "include/clang/Format/Format.h",
+            "lib/Format/Format.cpp",
+            "docs/LibFormat.md",
+            "docs/ClangFormatStyleOptions.rst"
+          ],
+          "minimal_modules": [
+            "FormatStyle",
+            "排版算法",
+            "Replacements"
+          ],
+          "practice_task": "用 LibFormat 编程接口对一段代码按自定义风格排版，并输出修改前后的 diff。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u12-l2",
+          "title": "Indexing 与 ExtractAPI",
+          "filename": "u12-l2-index-extractapi.md",
+          "level": "advanced",
+          "order": 2,
+          "topic": "讲解 Clang 的符号索引（IndexingAction/IndexDataConsumer）以及为库生成接口描述的 ExtractAPI。",
+          "learning_goals": [
+            "理解索引数据消费模型与符号信息",
+            "掌握 ExtractAPI 生成接口摘要的流程",
+            "能区分二者在 IDE/文档场景的应用"
+          ],
+          "source_files": [
+            "include/clang/Index/IndexingAction.h",
+            "include/clang/Index/IndexDataConsumer.h",
+            "include/clang/ExtractAPI/API.h",
+            "lib/Index/IndexingAction.cpp"
+          ],
+          "minimal_modules": [
+            "索引数据消费",
+            "符号信息",
+            "ExtractAPI 接口生成"
+          ],
+          "practice_task": "为一个头文件库生成 ExtractAPI 输出，并解释其中记录的符号与片段信息。",
+          "depends_on": [
+            "u7-l4"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u13",
+      "title": "分析与静态分析",
+      "level": "advanced",
+      "order": 13,
+      "lectures": [
+        {
+          "id": "u13-l1",
+          "title": "CFG 与数据流分析基础",
+          "filename": "u13-l1-cfg-dataflow.md",
+          "level": "advanced",
+          "order": 1,
+          "topic": "讲解 Clang 的控制流图（CFG）构建，以及基于类型擦除的现代数据流分析框架。",
+          "learning_goals": [
+            "理解 CFG 的构建与基本块结构",
+            "掌握数据流分析框架的使用方式",
+            "了解 FlowSensitive 框架的设计"
+          ],
+          "source_files": [
+            "lib/Analysis/CFG.cpp",
+            "include/clang/Analysis/CFG.h",
+            "docs/DataFlowAnalysisIntro.md",
+            "lib/Analysis/FlowSensitive/"
+          ],
+          "minimal_modules": [
+            "CFG 构建",
+            "数据流框架",
+            "类型擦除分析"
+          ],
+          "practice_task": "导出一个函数的 CFG（如通过相关 dump 选项或调试），解释其基本块与跳边。",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u13-l2",
+          "title": "Clang 静态分析器架构",
+          "filename": "u13-l2-static-analyzer.md",
+          "level": "advanced",
+          "order": 2,
+          "topic": "讲解 Clang 静态分析器的组成：AnalysisConsumer 接入前端、CheckerRegistry 注册检查器、路径敏感的 ExplodedGraph。",
+          "learning_goals": [
+            "理解静态分析器在前端中的接入点",
+            "掌握 Checker 的注册与运行模型",
+            "了解路径敏感分析（ExplodedGraph）的基本概念"
+          ],
+          "source_files": [
+            "lib/StaticAnalyzer/Frontend/AnalysisConsumer.cpp",
+            "lib/StaticAnalyzer/Frontend/CheckerRegistry.cpp",
+            "lib/StaticAnalyzer/Checkers/",
+            "docs/ClangStaticAnalyzer.md"
+          ],
+          "minimal_modules": [
+            "AnalysisConsumer",
+            "CheckerRegistry",
+            "路径敏感分析"
+          ],
+          "practice_task": "参考现有 Checker 写一个最小检查器并在 CheckerRegistry 注册运行，观察其触发。",
+          "depends_on": [
+            "u13-l1",
+            "u3-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u14",
+      "title": "前沿特性与工程实践",
+      "level": "advanced",
+      "order": 14,
+      "lectures": [
+        {
+          "id": "u14-l1",
+          "title": "Clang REPL 解释器",
+          "filename": "u14-l1-clang-repl.md",
+          "level": "advanced",
+          "order": 1,
+          "topic": "讲解 clang-repl 与 Interpreter 库：如何增量地编译并执行 C++ 代码片段。",
+          "learning_goals": [
+            "理解增量编译（IncrementalParser/Action）的机制",
+            "掌握 Interpreter 的对外接口",
+            "了解 REPL 的 JIT 执行方式"
+          ],
+          "source_files": [
+            "tools/clang-repl/ClangRepl.cpp",
+            "lib/Interpreter/Interpreter.cpp",
+            "lib/Interpreter/IncrementalParser.cpp",
+            "docs/ClangRepl.rst"
+          ],
+          "minimal_modules": [
+            "增量编译",
+            "Interpreter 接口",
+            "JIT 执行"
+          ],
+          "practice_task": "用 clang-repl 交互式定义一个函数并调用它，解释其与普通编译流程的差异。",
+          "depends_on": [
+            "u8-l1",
+            "u2-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u14-l2",
+          "title": "CIR（Clang IR）新中间表示",
+          "filename": "u14-2-cir.md",
+          "level": "advanced",
+          "order": 2,
+          "topic": "介绍 CIR：介于 Clang AST 与 LLVM IR 之间的基于 MLIR 的高层中间表示，及其生成与降级链路。",
+          "learning_goals": [
+            "理解 CIR 的定位与设计动机",
+            "掌握 CIR Dialect 的生成入口",
+            "了解 CIR 如何降级到 LLVM IR"
+          ],
+          "source_files": [
+            "lib/CIR/Dialect/",
+            "lib/CIR/FrontendAction/",
+            "lib/CIR/Lowering/",
+            "tools/cir-opt/"
+          ],
+          "minimal_modules": [
+            "CIR 定位",
+            "Dialect 生成",
+            "降级到 LLVM IR"
+          ],
+          "practice_task": "用相关工具（如 cir-opt）查看一段代码的 CIR，并与 -emit-llvm 的输出对比其抽象层次。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u14-l3",
+          "title": "诊断验证、错误恢复与测试体系",
+          "filename": "u14-l3-testing-diagnostics.md",
+          "level": "advanced",
+          "order": 3,
+          "topic": "讲解 Clang 的测试与质量保障：expected-* 诊断验证、lit+FileCheck 测试驱动，以及解析过程中的错误恢复。",
+          "learning_goals": [
+            "理解 VerifyDiagnosticConsumer 的 expected-* 机制",
+            "掌握 lit 与 FileCheck 的测试编写",
+            "了解解析错误恢复的策略与测试覆盖"
+          ],
+          "source_files": [
+            "include/clang/Frontend/VerifyDiagnosticConsumer.h",
+            "test/",
+            "lib/Parse/ParseAST.cpp",
+            "utils/"
+          ],
+          "minimal_modules": [
+            "expected-* 验证",
+            "lit/FileCheck",
+            "错误恢复"
+          ],
+          "practice_task": "为一个已知会报错的代码片段编写带 // expected-error 的 lit 测试，并用 FileCheck 验证诊断文本。",
+          "depends_on": [
+            "u3-l2",
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
