@@ -1,7 +1,7 @@
 {
   "project": "llvm-project-mlir",
-  "head": "036af906f355771a5c2b3bb51a88d995c6010219",
-  "rationale": "MLIR 是 LLVM 下的大型「多层中间表示」基础设施，体量极大，因此手册按其自身分层架构自底向上组织。第 1 单元先让读者认识项目定位、目录结构与运行入口 mlir-opt，建立「能跑起来」的全局认知；第 2 单元深入 IR 核心数据结构（Operation/Value/Block/Region/Type/Attribute/Context），这是理解一切后续机制的基石；第 3 单元讲解 Dialect 与 Operation 的 TableGen 定义方式，衔接核心 IR 与具体方言；第 4 单元补全 IR 的解析、打印与字节码持久化。前三层偏「静态表示」，第 5–7 单元进入「动态变换」主线：先讲 Pass 管理与通用变换，再讲模式重写（Pattern Rewriting），最后讲 Dialect Conversion 与降级到 LLVM；第 8 单元覆盖让一切可组合的接口系统与数据流/常用分析；第 9 单元收束于扩展生态——Transform 方言、执行引擎、CAPI/Python 绑定与自带工具链。单元与讲义之间严格按依赖链排序，确保读者每篇都只依赖已学内容，循序渐进。",
+  "head": "e7dd336e0f7884c34108a1e722205a16c3f5307b",
+  "rationale": "本次为增量更新。经 git diff 分析，previous HEAD（036af906f355）到 current HEAD（e7dd336e0f7884c34108a1e722205a16c3f5307b）之间仅相差 6 个提交，改动文件共 25 个，全部位于 clang（OpenMP Sema）、libc（fscanf/scanf 别名）、libcxx（variant 编译期优化）、lldb（信号 API）以及 llvm 的 M68k 后端，对 mlir/ 子目录的过滤 diff 为空——即 MLIR 源码（include/lib/tools/examples/docs/test 等）在两次 HEAD 之间没有任何改动。因此现有手册的全部 33 篇讲义所引用的源码、行号、接口与机制均未受影响，本次统一标记为 keep，不新增、不重建、不局部更新。手册自身的结构与学习顺序保持不变：依然沿用 MLIR 自身分层架构自底向上组织——第 1 单元认识项目定位、目录结构与 mlir-opt 入口；第 2 单元深入 Operation/Value/Block/Region/Type/Attribute/Context 核心数据结构；第 3 单元衔接 Dialect 与 Operation 的 TableGen 定义；第 4 单元补全解析、打印与字节码持久化；第 5–7 单元进入动态变换主线（Pass 管理→模式重写→Dialect Conversion 与降级到 LLVM）；第 8 单元覆盖接口系统与数据流/常用分析；第 9 单元收束于 Transform 方言、执行引擎、CAPI/Python 绑定与自带工具链。单元与讲义严格按依赖链排序，确保每篇只依赖已学内容。仅更新 head 字段与本说明，待下次有 mlir/ 实质改动时再按 update/new/rebuild 规则处理。",
   "units": [
     {
       "id": "u1",
@@ -34,7 +34,7 @@
           ],
           "practice_task": "阅读 LangRef 开头与 Rationale 文档，用自己的话写一段 200 字总结：MLIR 相比单一 IR 解决了什么问题，并举出至少两个现实中的方言应用方向。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -62,7 +62,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -91,7 +91,7 @@
             "u1-l1",
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -119,7 +119,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -155,7 +155,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -183,7 +183,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -210,7 +210,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -237,7 +237,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l5",
@@ -265,7 +265,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l6",
@@ -294,7 +294,7 @@
             "u2-l2",
             "u2-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -330,7 +330,7 @@
           "depends_on": [
             "u2-l6"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -358,7 +358,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -385,7 +385,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -412,7 +412,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l5",
@@ -439,7 +439,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -476,7 +476,7 @@
             "u2-l2",
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -503,7 +503,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -531,7 +531,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -567,7 +567,7 @@
           "depends_on": [
             "u2-l6"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -596,7 +596,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -625,7 +625,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -662,7 +662,7 @@
           "depends_on": [
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -690,7 +690,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -718,7 +718,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -753,7 +753,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -780,7 +780,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -808,7 +808,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -844,7 +844,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -873,7 +873,7 @@
             "u2-l3",
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -901,7 +901,7 @@
           "depends_on": [
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -938,7 +938,7 @@
             "u6-l2",
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -966,7 +966,7 @@
           "depends_on": [
             "u7-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",
@@ -996,7 +996,7 @@
             "u2-l6",
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l4",
@@ -1027,7 +1027,7 @@
             "u3-l2",
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

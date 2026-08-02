@@ -1,7 +1,7 @@
 {
   "project": "llvm-project-libc",
-  "head": "036af906f355771a5c2b3bb51a88d995c6010219",
-  "rationale": "LLVM-libc 是 LLVM 项目中从零开始、用现代 C++ 编写的 C 标准库，其最独特之处不在于「实现了哪些函数」，而在于「如何组织与构建每一个函数」：以 entrypoint（入口点）为最小构建单元、用 YAML+hdrgen 生成公共头文件、用 __support 内部库沉淀公共能力、靠 config 体系做平台裁剪。因此学习路线先建立这套「骨架」认知，再深入具体函数族与系统级机制。大纲分三层：入门层（单元1）解决「它是什么、目录如何、怎么跑起来」，并用 isalpha 打通一条从 YAML 到测试的完整链路；进阶层（单元2-8）按「机制→基础设施→函数族→系统交互」的顺序展开，先讲入口点/实现规范/构建/配置（单元2）、头文件生成（单元3）、内部支持库（单元4），再讲字符与内存（单元5）、数学与浮点（单元6）、数值转换与格式化（单元7）、系统调用与启动与文件 I/O（单元8），使依赖关系始终向后指；专家层（单元9-11）覆盖分配器与并发、测试/模糊/基准、移植、特殊目标与端到端贡献实战。依赖关系刻意做成有向无环图：所有具体函数族都依赖 entrypoint 与 __support 基础，系统级讲义依赖 OS 抽象层，二次开发讲义汇拢配置、头文件生成与测试三块前置知识。本次增量：对比上次 HEAD（4e924a6）与当前 HEAD（036af90），二者之间共有 7 个提交，但经 git diff/log 核实均只触及 llvm-project 单体仓库中 libc 以外的部分（Hexagon 后端、SLP、ORC JIT、clang Driver 等），libc 子树零文件改动。结合讲义目录检查，u1-l1 至 u5-l1（含）共 15 篇讲义已生成完毕、其引用的源码自上次以来无任何变化，因此全部标记为 keep；u5-l2 至 u11-l3 共 17 篇讲义尚未生成，仍标记为 new 待 worker 继续创建（其中 u11-l2 关于 GPU llvm-link/llvm_link_bitcode 的规格已在上一轮据提交 a3da10236c52 更新到位，本轮因 libc 无新变化而维持不变）。",
+  "head": "e7dd336e0f7884c34108a1e722205a16c3f5307b",
+  "rationale": "本次增量：对比上次 HEAD（036af90）与当前 HEAD（e7dd336），两版之间共 6 个提交，其中仅 1 个触及 libc 子树——e4693c0「[libc] Add __isoc99_fscanf alias」。该提交做了四件事：(1) 在 src/__support/common.h 新增 LLVM_LIBC_ADD_FUNCTION_C_ALIAS 宏，用于给同一入口点追加额外的公开 C 符号别名；(2) 在 config/config.json 与 config/linux/config.json 新增 LIBC_CONF_SCANF_PROVIDE_ISOC99_ALIASES 配置项（Linux 上默认值绑定到新引入的 LLVM_LIBC_OVERLAY 变量）；(3) 在 libc/CMakeLists.txt 由 LLVM_LIBC_FULL_BUILD 派生出 LLVM_LIBC_OVERLAY 互补变量；(4) 给 fscanf/scanf/vfscanf/vscanf/sscanf/vsscanf 在该配置开启时追加 __isoc99_* 别名。影响判定：唯一需要更新的是 u2-l2（实现规范与核心宏）——它的主题正是 common.h 中的 asm 别名机制，而新宏 LLVM_LIBC_ADD_FUNCTION_C_ALIAS 是同一机制的又一实例，fscanf.cpp 还给出了最小真实用法，故标记为 update（在 source_files 中追加 src/stdio/generic/fscanf.cpp，并在 topic/learning_goals/minimal_modules/practice_task 中加入对该宏的讲解）。其余已生成讲义一律 keep：它们引用的文件与主题均未受影响，且讲义内永久链接均钉在具体 commit 上、common.h 行号偏移不会使链接失效；新增的配置项与 LLVM_LIBC_OVERLAY 变量只是既有 config/构建机制的新数据点，不改变 u2-l4/u1-l4 已讲解的机制本身，故无需重写。此外更正磁盘实际状态：经核验讲义目录，u1-l1 至 u8-l3 共 24 篇讲义均已生成（上一版 manifest 仅记录到 u5-l1），因此 u5-l2 至 u8-l3 由 new 改为 keep；u9-l1 至 u11-l3 共 8 篇尚未生成，仍标记为 new 待 worker 创建。整体单元划分与三层学习顺序（入门→机制/基础设施/函数族/系统交互→扩展）及依赖关系均维持不变。",
   "units": [
     {
       "id": "u1",
@@ -191,28 +191,31 @@
           "order": 2,
           "filename": "u2-l2-implementation-standard-and-macros.md",
           "level": "intermediate",
-          "topic": "讲解实现规范：所有内部符号都包裹在 LIBC_NAMESPACE_DECL 命名空间内，公开函数用 LLVM_LIBC_FUNCTION 宏定义，该宏通过 asm 别名把 C++ 符号映射成 C 链接名。",
+          "topic": "讲解实现规范：所有内部符号都包裹在 LIBC_NAMESPACE_DECL 命名空间内，公开函数用 LLVM_LIBC_FUNCTION 宏定义，该宏通过 asm 别名把 C++ 符号映射成 C 链接名；并讲解新增的 LLVM_LIBC_ADD_FUNCTION_C_ALIAS 宏如何为同一函数追加额外的公开 C 别名（如 scanf 的 __isoc99_* 别名）。",
           "learning_goals": [
             "理解 LIBC_NAMESPACE_DECL 的隐藏可见性与符号隔离作用",
             "看懂 LLVM_LIBC_FUNCTION 宏展开后的 asm 别名机制",
-            "掌握实现头文件（.h）与实现文件（.cpp）的标准结构"
+            "掌握实现头文件（.h）与实现文件（.cpp）的标准结构",
+            "看懂新增的 LLVM_LIBC_ADD_FUNCTION_C_ALIAS 宏如何在不重写实现的前提下为一个入口点追加额外的公开 C 符号别名（以 scanf 的 __isoc99_fscanf 为例）"
           ],
           "source_files": [
             "docs/dev/implementation_standard.md",
             "src/__support/common.h",
-            "src/__support/macros/config.h"
+            "src/__support/macros/config.h",
+            "src/stdio/generic/fscanf.cpp"
           ],
           "minimal_modules": [
             "命名空间约定",
             "LLVM_LIBC_FUNCTION 宏",
             "asm 符号别名",
+            "额外 C 别名宏 LLVM_LIBC_ADD_FUNCTION_C_ALIAS",
             "文件结构约定"
           ],
-          "practice_task": "在 common.h 中找到 LLVM_LIBC_FUNCTION_IMPL_4 的定义，画出宏如何用 asm(...) 把内部 C++ 函数名映射成公开 C 符号；说明这种设计如何避免与系统 libc 同名符号冲突。",
+          "practice_task": "在 common.h 中找到 LLVM_LIBC_FUNCTION_IMPL_4 的定义，画出宏如何用 asm(...) 把内部 C++ 函数名映射成公开 C 符号；说明这种设计如何避免与系统 libc 同名符号冲突。再定位新增的 LLVM_LIBC_ADD_FUNCTION_C_ALIAS 宏，对照 src/stdio/generic/fscanf.cpp 末尾的用法，说明它如何为 fscanf 追加 __isoc99_fscanf 这一公开别名，以及 LIBC_COPT_SCANF_PROVIDE_ISOC99_ALIASES 宏如何控制该别名是否生成。",
           "depends_on": [
             "u2-l1"
           ],
-          "action": "keep"
+          "action": "update"
         },
         {
           "id": "u2-l3",
@@ -496,7 +499,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -533,7 +536,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -561,7 +564,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -596,7 +599,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -625,7 +628,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -653,7 +656,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -689,7 +692,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -719,7 +722,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -748,7 +751,7 @@
             "u8-l1",
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },

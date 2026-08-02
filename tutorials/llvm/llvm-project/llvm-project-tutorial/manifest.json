@@ -1,7 +1,7 @@
 {
   "project": "llvm-project",
-  "head": "2a4acc46ea711175ef5cfe6ea5a795f62221084a",
-  "rationale": "本次为增量更新，相对上次 HEAD（e096d2f）共 7 个提交、36 个文件变动，按主题归为以下五组，经逐一比对，无一组触及任何讲义引用的核心源码文件：1) ORC 新增 COFFAutoImportGenerator 实现 COFF dllimport 自动导入（#203914）并将 RTBridge 调用方泛化为任意 runtime 函数（#213526），同时更新 llvm-jitlink 工具与 ORCv2 文档，影响 ExecutionEngine/Orc 下新增的 COFFAutoImportGenerator.{h,cpp}、RTBridge/Calls.h、RTBridge/SPS/Calls.h、JITLink/COFF_x86_64.cpp、tools/llvm-jitlink.{cpp,h}、docs/ORCv2.md；而 u8-l1 引用的是 LLJIT.cpp、Core.cpp、IRCompileLayer.cpp、lli.cpp、HowToUseLLJIT/CMakeLists.txt——无一被改动，且该讲义尚未生成，保持 new，worker 将基于当前最新源码生成；被新增的是一个 COFF 平台特化的小特性，并非 u8-l1 所讲的 LLJIT/IRCompileLayer/ObjectLinkingLayer 分层架构。2) Clang 驱动修复 NetBSD 上 libc++ 头文件搜索路径（#212716），落在 ToolChains/NetBSD.{cpp,h}、ToolChains/Clang.cpp、Options.td、LangOptions.def，属目标工具链内部路径逻辑，而 u5-l1 引用的是 driver.cpp、cc1_main.cpp、InternalsManual.rst、DriverInternals.rst，主题为 Driver/cc1 两层派发架构，不受影响。3) OpenMP/offload 新增跨团队原子归约（#209298），落在 CGOpenMPRuntimeGPU.cpp、OMPIRBuilder.cpp、OMPKinds.def 及 offload/openmp 设备运行时与测试，u5-l5 引用的是 CodeGenModule.cpp/CodeGenFunction.cpp/CodeGenAction.cpp 通用 CodeGen 主线，与 OpenMP GPU 运行时特化无关。4) VPlan 向量化优化处理 IV 符号无法判定的步进（#213450）及 SLP vectorizer 测试 NFC（提交 2a4acc46），影响 Transforms/Vectorize/VPlanTransforms.{cpp,h} 与若干 .ll 测试，而 u4-l3 引用的是 InstCombine/GVN/LICM/Inliner 经典标量 pass，分属不同优化模块。5) lldb 将 unique_ptr 的 .release() 改为 std::move（#213525，NFC），仅触及 IRExecutionUnit.cpp，u9-l3 引用的是 DIBuilder/DebugInfoMetadata/DebugInfo，无关。综上，本次无需新增讲义，也无需对任何讲义做 update/rebuild。需特别说明：自上次 manifest 以来，worker 又生成了 u6-l2、u6-l3、u6-l4、u6-l5、u7-l1、u7-l2、u7-l3 共 7 篇讲义，讲义目录现已覆盖 u1–u7-l3 全部；这些讲义所讲概念与 API 均未受本次代码变化影响，action 由 new 调整为 keep。尚未生成（目录中无对应 .md 文件）的 u7-l4、u8 全部 3 篇、u9 全部 4 篇仍按既有计划保持 new，等待 worker 继续生成。九单元划分与由浅入深的学习顺序（入门→IR 数据结构→Pass 优化框架→Clang 前端→后端代码生成→MLIR→JIT/LTO/链接→二次开发与工程实践）保持不变。",
+  "head": "e7dd336e0f7884c34108a1e722205a16c3f5307b",
+  "rationale": "本次为增量更新，相对上次 HEAD（2a4acc46）共 7 个提交、27 个文件变动，按主题归为六组，经逐一比对，无一组触及任何讲义引用的核心源码文件：1) M68k 后端修复 COPY 指令误杀条件标志（#168485），落在 llvm/lib/Target/M68k 的 M68kInstrInfo.{cpp}、M68kInstrData.td、M68kInstrInfo.td、M68kSubtarget.h 及若干 .ll 测试，属目标特化寄存器/条件码处理；而 u6 各讲义引用的是 SelectionDAG/GlobalISel/MC/TableGen 通用框架源码，u9-l4 引用的是 X86 后端，均非 M68k，不受影响。2) libcxx 优化 std::visit 编译耗时（#213203，NFC 性能），仅触及 libcxx/include/variant，无任何讲义引用 libcxx 源码。3) lldb 识别 Wasm trap 为崩溃（#213551）及修复 SBUnixSignals 拼写（#213527，NFC），仅触及 lldb bindings 与 Python 测试；u9-l3 讲的是 IR 侧调试元数据（DIBuilder/DebugInfoMetadata/DebugInfo），与 lldb 接口/测试无关。4) libc 新增 __isoc99_fscanf 别名（#213125），落在 libc/src/stdio 与 libc cmake，无讲义涉及 libc。5) Clang OpenMP 对非法 assumption 子句跳过 Sema 动作（#212822），仅触及 clang/lib/Parse/ParseOpenMP.cpp 与 SemaOpenMP 测试；u5-l3 引用的是 Parser.cpp/ParseAST.cpp 的递归下降与 AST 主线，u5-l4 引用的是 Sema.cpp/SemaDecl.cpp/SemaExpr.cpp 通用语义分析，该 OpenMP 专用的局部修复不改变这些主线源码与架构。6) Hexagon 避免对调试指令做谓词化（#212917），仅触及 llvm/lib/Target/Hexagon/HexagonExpandCondsets.cpp，属目标特化，无讲义引用。综上，本次无需新增讲义，也无需对任何讲义做 update/rebuild。需特别说明：自上次 manifest 以来，worker 又生成了 u7-l4、u8-l1、u8-l2、u8-l3、u9-l1、u9-l2 共 6 篇讲义，讲义目录现已覆盖 u1–u9-l2 全部；这些讲义所讲概念与 API 均未受本次代码变化影响，action 由 new 调整为 keep。尚未生成（目录中无对应 .md 文件）的 u9-l3、u9-l4 仍按既有计划保持 new，等待 worker 继续生成。九单元划分与由浅入深的学习顺序（入门→IR 数据结构→Pass 优化框架→Clang 前端→后端代码生成→MLIR→JIT/LTO/链接→二次开发与工程实践）保持不变。",
   "units": [
     {
       "id": "u1",
@@ -884,7 +884,7 @@
             "u7-l2",
             "u7-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -922,7 +922,7 @@
             "u3-l1",
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -951,7 +951,7 @@
             "u4-l1",
             "u4-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -978,7 +978,7 @@
           "depends_on": [
             "u6-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1013,7 +1013,7 @@
           "depends_on": [
             "u4-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -1040,7 +1040,7 @@
           "depends_on": [
             "u4-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",

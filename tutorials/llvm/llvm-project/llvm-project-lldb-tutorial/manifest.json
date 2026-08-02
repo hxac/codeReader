@@ -1,0 +1,1353 @@
+{
+  "project": "llvm-project-lldb",
+  "head": "e7dd336e0f7884c34108a1e722205a16c3f5307b",
+  "rationale": "LLDB 是体量庞大的 LLVM 子项目（与 Clang 相当），由可复用组件构成，因此学习路线按「先见森林、再见树木、最后见根系」的顺序展开。第 1 单元让读者从零认识项目定位、目录地图、构建方式和 CLI 入口；第 2、3 单元打通两条核心入口链路——公共 SBAPI（SB* 对象）与命令系统（CommandInterpreter/CommandObject），它们是后续所有模块的调用方。第 4 单元打下 Core/Utility 地基（事件系统、Module/Address 寻址、Debugger 中枢），第 5 单元进入调试目标模型 Target/Process/Thread/StackFrame 这一最核心的对象层级。第 6、7、8 单元围绕「符号—类型—表达式—值展示」这条数据链层层递进：调试信息解析（DWARF）、类型系统（Clang）、表达式求值（含 JIT 与 DWARF 表达式）、值对象与数据格式化。第 9、10 单元补齐断点/监视点与 Platform/Host 两大横向能力。专家层（第 11–15 单元）面向二次开发与架构理解：插件机制、远程调试（lldb-server 与 GDB Remote 协议）、脚本与绑定、IDE/LLM 集成前端（DAP/MCP/RPC）、以及测试/并发/诊断等工程化主题。各讲义之间用 depends_on 构成有向无环图，确保读者可按线性或按需跳读。共 15 单元 41 篇讲义，规模匹配 LLDB 的复杂度，逻辑优先于数量。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 LLDB 与构建运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "LLDB 项目总览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 LLDB 是什么、在 LLVM 生态中的定位、复用 Clang/LLVM 的设计哲学、支持的平台与架构。",
+          "learning_goals": [
+            "理解 LLDB 作为下一代高性能调试器的定位与目标",
+            "理解 LLDB 复用 Clang 表达式解析器与 LLVM 反汇编器/JIT 的组件化思路",
+            "了解 LLDB 支持的操作系统与 CPU 架构范围",
+            "了解 LLDB 的许可证与维护团队"
+          ],
+          "source_files": [
+            "docs/index.md",
+            "docs/resources/overview.md",
+            "Maintainers.md",
+            "LICENSE.TXT"
+          ],
+          "minimal_modules": [
+            "docs/index.md",
+            "docs/resources/overview.md"
+          ],
+          "practice_task": "阅读 docs/index.md，用自己的话写一段 200 字摘要说明 LLDB 与 GDB 的差异，并列举 LLDB 复用了 LLVM/Clang 的哪些基础设施。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与模块地图",
+          "order": 2,
+          "filename": "u1-l2-directory-map.md",
+          "level": "beginner",
+          "topic": "讲解 lldb/ 顶层目录（source、include、tools、plugins、bindings、docs、test、examples）的职责，建立对整个代码库的心智模型。",
+          "learning_goals": [
+            "记住 source/ 下每个子模块（API/Core/Interpreter/Commands/Target/Symbol/Expression 等）的职责",
+            "理解 include/lldb/ 与 source/ 的公私分层关系",
+            "识别 tools/ 下各个可执行入口的用途",
+            "了解 plugins/ 的分类方式与 bindings/ 的作用"
+          ],
+          "source_files": [
+            "docs/resources/overview.md",
+            "CMakeLists.txt",
+            "source/API/CMakeLists.txt",
+            "source/Plugins/Plugins.def.in"
+          ],
+          "minimal_modules": [
+            "docs/resources/overview.md",
+            "source/Plugins/Plugins.def.in"
+          ],
+          "practice_task": "对照 overview.md，画出一张 source/ 子模块的职责表格；然后随机挑选 tools/ 下三个目录（如 driver、lldb-server、lldb-dap），说明它们各自链接和使用了哪些 source 模块。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "从源码构建与运行 LLDB",
+          "order": 3,
+          "filename": "u1-l3-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解如何用 CMake + Ninja 从源码构建 LLDB（含独立构建与随 LLVM 构建），关键 CMake 选项，以及构建产物的运行方式。",
+          "learning_goals": [
+            "掌握 LLDB 的 CMake 构建流程与产物（lldb、lldb-server、liblldb）",
+            "理解 LLDB_ENABLE_PYTHON、LLDB_ENABLE_LUA、LLDB_BUILD_FRAMEWORK 等关键选项",
+            "了解 LLDB_INCLUDE_TESTS / LLDB_INCLUDE_UNITTESTS 控制的测试目标",
+            "知道如何运行构建出的 lldb 与 lldb-server"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "docs/resources/build.md",
+            "docs/resources/test.md"
+          ],
+          "minimal_modules": [
+            "CMakeLists.txt",
+            "docs/resources/build.md"
+          ],
+          "practice_task": "在本地或容器中配置一个 out 目录，运行 cmake + ninja 构建 lldb（至少关闭测试以加速），记录你启用的选项，并运行 ./bin/lldb --version 验证产物。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "第一次运行：lldb CLI 驱动入口",
+          "order": 4,
+          "filename": "u1-l4-cli-driver-entry.md",
+          "level": "beginner",
+          "topic": "跟随 tools/driver/Driver.cpp 的 main()，走通从解析命令行参数、SBDebugger::Initialize 到 RunCommandInterpreter 的启动主链路。",
+          "learning_goals": [
+            "理解 lldb 可执行文件 main() 的启动顺序",
+            "掌握 Driver 如何用 LLDBOptTable 解析选项（Options.td）",
+            "看清 SBDebugger::InitializeWithErrorHandling 与 RunCommandInterpreter 的衔接",
+            "理解 Driver::MainLoop 的事件驱动循环骨架"
+          ],
+          "source_files": [
+            "tools/driver/Driver.cpp",
+            "tools/driver/Driver.h",
+            "tools/driver/Options.td",
+            "source/API/SBDebugger.cpp"
+          ],
+          "minimal_modules": [
+            "tools/driver/Driver.cpp",
+            "source/API/SBDebugger.cpp"
+          ],
+          "practice_task": "在 Driver.cpp 中标注 main() 调用了哪些关键函数；然后给 Options.td 新增一个无害的 --greet 选项，重新构建并验证 lldb --greet 能被识别（不要求实现完整行为）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "入门：公共 API（SBAPI）",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "SBAPI 设计哲学",
+          "order": 1,
+          "filename": "u2-l1-sbapi-philosophy.md",
+          "level": "beginner",
+          "topic": "讲解 LLDB 公共 C++ API（SB* 类）的设计约束：不可继承、无虚函数、单一成员、便于 SWIG 绑定，以及为何这样设计。",
+          "learning_goals": [
+            "理解 SB* 类的五条设计规则及其 ABI 稳定性动机",
+            "区分 lldb（公共 API）与 lldb_private（内部实现）命名空间",
+            "理解 SB 对象以共享指针为后端的轻量代理模式",
+            "了解 SBAPI 如何同时服务于 C++、Python、Lua"
+          ],
+          "source_files": [
+            "docs/resources/sbapi.md",
+            "docs/resources/overview.md",
+            "include/lldb/API/SBDebugger.h",
+            "source/API/SBTarget.cpp"
+          ],
+          "minimal_modules": [
+            "docs/resources/sbapi.md",
+            "docs/resources/overview.md"
+          ],
+          "practice_task": "阅读 sbapi.md，挑选一个 SB 类（如 SBTarget），在 include/lldb/API/ 与 source/API/ 中对照确认它无虚函数、无基类继承、且只有一个成员变量，写一段说明。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "SBDebugger 生命周期与初始化",
+          "order": 2,
+          "filename": "u2-l2-sbdebugger-lifecycle.md",
+          "level": "beginner",
+          "topic": "深入 SBDebugger 的 Initialize/CreateInstance/Terminate 流程，以及 SystemInitializerFull 如何注册全部插件。",
+          "learning_goals": [
+            "掌握 SBDebugger::Initialize/CreateInstance/Terminate 的调用时机",
+            "理解 SystemInitializerFull::Initialize 如何初始化 LLVM/Clang 并遍历 Plugins.def 注册插件",
+            "了解 Debugger（内部类）与 SBDebugger（公共类）的对应关系",
+            "理解初始化与销毁的对称性要求"
+          ],
+          "source_files": [
+            "source/API/SBDebugger.cpp",
+            "source/API/SystemInitializerFull.cpp",
+            "source/Core/Debugger.cpp",
+            "include/lldb/Core/Debugger.h"
+          ],
+          "minimal_modules": [
+            "source/API/SBDebugger.cpp",
+            "source/API/SystemInitializerFull.cpp"
+          ],
+          "practice_task": "写一个最小 C++ 程序：调用 SBDebugger::Initialize()，创建一个 Debugger 实例并打印其实例名，最后 Terminate()，编译链接 liblldb 验证可运行。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "核心 SB 对象模型",
+          "order": 3,
+          "filename": "u2-l3-sb-object-model.md",
+          "level": "beginner",
+          "topic": "梳理 SBTarget/SBProcess/SBThread/SBFrame/SBValue 之间的包含与导航关系，建立调试对象层级的整体认知。",
+          "learning_goals": [
+            "理解 SBTarget→SBProcess→SBThread→SBFrame→SBValue 的层级导航",
+            "掌握从一个 SBValue 获取其子成员与类型的方法",
+            "理解 SBModule/SBSection/SBSymbol/SBCompileUnit 与目标符号的关系",
+            "能在 SB 对象图上完成一次典型的读取变量操作"
+          ],
+          "source_files": [
+            "source/API/SBTarget.cpp",
+            "source/API/SBProcess.cpp",
+            "source/API/SBThread.cpp",
+            "source/API/SBFrame.cpp",
+            "source/API/SBValue.cpp"
+          ],
+          "minimal_modules": [
+            "source/API/SBTarget.cpp",
+            "source/API/SBFrame.cpp",
+            "source/API/SBValue.cpp"
+          ],
+          "practice_task": "用 Python（import lldb）脚本化加载一个带调试信息的简单程序，设置断点并运行，打印当前线程、栈帧、以及一个局部变量的 SB 对象类型与值。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "入门：命令系统",
+      "level": "beginner",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "命令解释器 CommandInterpreter",
+          "order": 1,
+          "filename": "u3-l1-command-interpreter.md",
+          "level": "beginner",
+          "topic": "讲解 CommandInterpreter 如何接收一行文本命令、查找命令对象、分发执行并返回结果。",
+          "learning_goals": [
+            "理解 CommandInterpreter::HandleCommand 的解析与分发流程",
+            "掌握 LoadCommandDictionary 如何注册内置命令",
+            "理解命令别名、多词命令与命令历史的组织",
+            "了解 RunCommandInterpreter 与 CLI 事件循环的关系"
+          ],
+          "source_files": [
+            "source/Interpreter/CommandInterpreter.cpp",
+            "include/lldb/Interpreter/CommandInterpreter.h",
+            "source/Interpreter/CommandHistory.cpp"
+          ],
+          "minimal_modules": [
+            "source/Interpreter/CommandInterpreter.cpp"
+          ],
+          "practice_task": "在 lldb 中用 help、apropos 探索命令字典；然后在 CommandInterpreter::HandleCommand 处加一条日志（或用 log enable）观察一次 breakpoint set 命令的解析路径。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "CommandObject 与选项系统",
+          "order": 2,
+          "filename": "u3-l2-command-object-options.md",
+          "level": "beginner",
+          "topic": "讲解 CommandObject/CommandObjectMultiword 基类，以及 OptionGroup/OptionValue 选项体系如何为命令提供参数解析。",
+          "learning_goals": [
+            "理解 CommandObject::Execute 的回调模型与返回对象 CommandReturnObject",
+            "区分单命令与 CommandObjectMultiword 子命令层级",
+            "掌握 OptionGroup 与 OptionValue 系列类的组合方式",
+            "理解帮助系统如何从选项定义自动生成"
+          ],
+          "source_files": [
+            "source/Interpreter/CommandObject.cpp",
+            "source/Interpreter/OptionValue.cpp",
+            "source/Interpreter/CommandReturnObject.cpp"
+          ],
+          "minimal_modules": [
+            "source/Interpreter/CommandObject.cpp",
+            "source/Interpreter/OptionValue.cpp"
+          ],
+          "practice_task": "阅读一个简单命令（如 CommandObjectApropos），绘制其选项定义与 Execute 流程；尝试为一组示例命令行参数手写预期的 OptionValue 解析结果。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "一个命令的实现全过程",
+          "order": 3,
+          "filename": "u3-l3-command-implementation.md",
+          "level": "beginner",
+          "topic": "以 breakpoint 与 expression 命令为例，端到端走通「命令文本 → 选项解析 → 调用 Target/Expression → 输出」的完整实现。",
+          "learning_goals": [
+            "理解 CommandObjectBreakpoint 如何把选项转换为断点设置操作",
+            "理解 CommandObjectExpression 如何驱动表达式求值",
+            "掌握命令实现如何与 SBAPI/内部对象协作",
+            "能够定位任意一条命令对应的 CommandObject 源文件"
+          ],
+          "source_files": [
+            "source/Commands/CommandObjectBreakpoint.cpp",
+            "source/Commands/CommandObjectExpression.cpp",
+            "source/Commands/CommandObjectDisassemble.cpp"
+          ],
+          "minimal_modules": [
+            "source/Commands/CommandObjectBreakpoint.cpp",
+            "source/Commands/CommandObjectExpression.cpp"
+          ],
+          "practice_task": "挑选 expression 命令，跟踪它在 Execute 中如何构建表达式选项并最终调用求值入口；用 lldb 的命令历史验证一次实际调用，记录关键函数名。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "进阶：核心基础设施 Core/Utility",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Utility 基础层",
+          "order": 1,
+          "filename": "u4-l1-utility-layer.md",
+          "level": "intermediate",
+          "topic": "讲解 LLDB 最底层的 Utility 模块：FileSpec、DataExtractor/DataEncoder、Stream、Status、StructuredData(JSON) 等通用设施。",
+          "learning_goals": [
+            "掌握 FileSpec 的路径抽象与跨平台处理",
+            "理解 DataExtractor/DataExtractor 的大端小端数据读写模型",
+            "了解 Stream 家族（StreamString/StreamTee）与 Status 错误对象",
+            "理解 StructuredData 如何表示 JSON 与结构化数据"
+          ],
+          "source_files": [
+            "source/Utility/FileSpec.cpp",
+            "source/Utility/Stream.cpp",
+            "source/Utility/Status.cpp",
+            "source/Utility/StructuredData.cpp",
+            "include/lldb/Utility/DataExtractor.h"
+          ],
+          "minimal_modules": [
+            "source/Utility/FileSpec.cpp",
+            "source/Utility/Status.cpp",
+            "include/lldb/Utility/DataExtractor.h"
+          ],
+          "practice_task": "用 DataExtractor 读取一段手工构造的字节并按小端解析出一个 uint32；再写一段 Status 与 StructuredData 的最小用法示例。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Broadcaster/Event/Listener 事件系统",
+          "order": 2,
+          "filename": "u4-l2-event-system.md",
+          "level": "intermediate",
+          "topic": "讲解 LLDB 的发布订阅事件机制：Broadcaster 广播、Event 携带数据、Listener 监听，以及 Debugger/Process 如何使用它。",
+          "learning_goals": [
+            "理解 Broadcaster/Event/Listener 三者的协作模型",
+            "掌握事件位掩码与广播类型的组织方式",
+            "理解 Debugger 与 Process 事件如何驱动交互循环",
+            "了解 Communication 类如何基于事件传递数据"
+          ],
+          "source_files": [
+            "source/Utility/Broadcaster.cpp",
+            "include/lldb/Utility/Broadcaster.h",
+            "include/lldb/Utility/Event.h",
+            "include/lldb/Utility/Listener.h",
+            "source/Core/Communication.cpp"
+          ],
+          "minimal_modules": [
+            "source/Utility/Broadcaster.cpp",
+            "include/lldb/Utility/Listener.h",
+            "source/Core/Communication.cpp"
+          ],
+          "practice_task": "在源码中统计 Process 都广播了哪些事件类型（grep EVENT_），并解释「进程停止」事件如何被命令循环消费；可选：写一段 SBListener 监听进程事件的 Python 示例。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Module、Address 与 section-offset 寻址",
+          "order": 3,
+          "filename": "u4-l3-module-address.md",
+          "level": "intermediate",
+          "topic": "讲解 Module/ModuleList 如何表示已加载的可执行模块，以及 Address 如何在文件偏移与加载地址之间转换。",
+          "learning_goals": [
+            "理解 Module 封装一个可执行/共享库及其符号",
+            "掌握 Address 的 section-offset 表示与加载地址转换",
+            "理解 ModuleList 如何管理一个 Target 的全部模块",
+            "了解模块加载/卸载与符号解析的触发关系"
+          ],
+          "source_files": [
+            "source/Core/Module.cpp",
+            "source/Core/ModuleList.cpp",
+            "source/Core/Address.cpp",
+            "include/lldb/Core/Module.h"
+          ],
+          "minimal_modules": [
+            "source/Core/Module.cpp",
+            "source/Core/Address.cpp"
+          ],
+          "practice_task": "用 image list 与 image dump sections 观察一个目标程序的模块与段；在 Address 相关函数中找到把文件地址转成加载地址（或反向）的关键方法并记录其实现。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "Debugger 核心对象与 IOHandler",
+          "order": 4,
+          "filename": "u4-l4-debugger-iohandler.md",
+          "level": "intermediate",
+          "topic": "讲解 Debugger 作为中枢对象的职责，以及 IOHandler 如何抽象用户输入输出（终端、GUI、脚本）。",
+          "learning_goals": [
+            "理解 Debugger 管理多个 Target、命令解释器、事件分发与线程池",
+            "掌握 IOHandler 抽象层与 IOHandlerCursesGUI 的关系",
+            "理解 Debugger 如何与 Broadcaster/Listener 协作",
+            "了解选择当前执行上下文（Selected ExecutionContext）的机制"
+          ],
+          "source_files": [
+            "source/Core/Debugger.cpp",
+            "include/lldb/Core/Debugger.h",
+            "source/Core/IOHandler.cpp",
+            "source/Core/DebuggerEvents.cpp"
+          ],
+          "minimal_modules": [
+            "source/Core/Debugger.cpp",
+            "source/Core/IOHandler.cpp"
+          ],
+          "practice_task": "在 Debugger.cpp 中找到 Initialize/CreateInstance/GetSelectedExecutionContext 的实现；运行 lldb 后用 script 打印 lldb.debugger 的关键属性，对照源码理解每个字段含义。",
+          "depends_on": [
+            "u4-l2",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "进阶：调试目标模型 Target",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Target 与 ExecutionContext",
+          "order": 1,
+          "filename": "u5-l1-target-execcontext.md",
+          "level": "intermediate",
+          "topic": "讲解 Target/TargetList 如何表示一个调试目标，以及 ExecutionContext 如何在调用链中携带「调试器-目标-进程-线程-帧」上下文。",
+          "learning_goals": [
+            "理解 Target 封装一个待调试程序及其模块、断点、平台",
+            "掌握 TargetList 的创建与管理",
+            "理解 ExecutionContext 与 ExecutionContextRef 的作用与差异",
+            "了解如何在任意调用点获取当前上下文"
+          ],
+          "source_files": [
+            "source/Target/Target.cpp",
+            "source/Target/TargetList.cpp",
+            "source/Target/ExecutionContext.cpp",
+            "include/lldb/Target/Target.h"
+          ],
+          "minimal_modules": [
+            "source/Target/Target.cpp",
+            "source/Target/ExecutionContext.cpp"
+          ],
+          "practice_task": "在源码中统计 ExecutionContext 在哪些关键函数中被构造传递；用 target create 加载一个程序，对照 SBTarget 理解 Target 与模块/断点的关联。",
+          "depends_on": [
+            "u4-l4",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Process 进程控制",
+          "order": 2,
+          "filename": "u5-l2-process-control.md",
+          "level": "intermediate",
+          "topic": "讲解 Process 类如何表示被调试进程，覆盖 attach/launch、停止原因、内存读写，以及 Process 插件接口。",
+          "learning_goals": [
+            "理解 Process 的启动（launch）与附加（attach）两种模式",
+            "掌握停止原因（StopInfo）与公共事件的组织",
+            "理解 Process 作为插件接口的抽象（Process 插件提供具体后端）",
+            "了解内存读写、保存 core 等核心 API"
+          ],
+          "source_files": [
+            "source/Target/Process.cpp",
+            "include/lldb/Target/Process.h",
+            "source/Target/ProcessTrace.cpp",
+            "source/Target/Memory.cpp"
+          ],
+          "minimal_modules": [
+            "source/Target/Process.cpp",
+            "include/lldb/Target/Process.h"
+          ],
+          "practice_task": "用 process launch/attach/continue/stop 实操一次进程控制；在 Process.h 中找到 DoLaunch/DoAttach/DoResume 等插件需实现的方法，说明它们与公共 Launch/Attach 的分层关系。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "Thread 与 ThreadPlan 步进模型",
+          "order": 1,
+          "filename": "u5-l3-thread-threadplan.md",
+          "level": "intermediate",
+          "topic": "讲解 Thread/ThreadList 如何表示线程，以及 ThreadPlan 层次结构如何实现 stepping（单步/步过/步出）等控制流。",
+          "learning_goals": [
+            "理解 Thread 与 ThreadList 的组织与刷新机制",
+            "掌握 ThreadPlan 作为可组合步进计划的设计思想",
+            "理解 ThreadPlanBase、StepInRange、StepOverRange 等常见计划的作用",
+            "了解寄存器上下文 RegisterContext 与线程的关系"
+          ],
+          "source_files": [
+            "source/Target/Thread.cpp",
+            "include/lldb/Target/ThreadPlan.h",
+            "source/Target/RegisterContext.cpp",
+            "include/lldb/Target/Thread.h"
+          ],
+          "minimal_modules": [
+            "source/Target/Thread.cpp",
+            "include/lldb/Target/ThreadPlan.h"
+          ],
+          "practice_task": "用 step-in/step-over/step-out 实操并思考每种步进对应哪个 ThreadPlan；在 include/lldb/Target/ 下枚举 ThreadPlan 的子类，绘制一棵继承与组合关系图。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "StackFrame 栈帧与回溯 Unwind",
+          "order": 2,
+          "filename": "u5-l4-stackframe-unwind.md",
+          "level": "intermediate",
+          "topic": "讲解 StackFrame/StackFrameList 如何表示调用栈，以及回溯（unwind）如何通过 RegisterContextUnwind 与 UnwindPlan 重建栈帧。",
+          "learning_goals": [
+            "理解 StackFrame 封装帧的程序计数器、寄存器与变量上下文",
+            "掌握 StackFrameList 的惰性构建过程",
+            "理解 RegisterContextUnwind 如何逐帧恢复寄存器",
+            "了解 UnwindPlan、CompactUnwindInfo、DWARF CFI 等回溯信息来源"
+          ],
+          "source_files": [
+            "source/Target/StackFrameList.cpp",
+            "source/Target/RegisterContextUnwind.cpp",
+            "source/Symbol/FuncUnwinders.cpp",
+            "include/lldb/Target/StackFrame.h"
+          ],
+          "minimal_modules": [
+            "source/Target/StackFrameList.cpp",
+            "source/Target/RegisterContextUnwind.cpp",
+            "source/Symbol/FuncUnwinders.cpp"
+          ],
+          "practice_task": "用 bt 观察一个有调用层级的程序栈；在源码中找到「从当前 PC 恢复返回地址」的关键路径，记录涉及哪些 UnwindPlan 来源。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "进阶：符号与调试信息 Symbol",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "ObjectFile 与可执行文件解析",
+          "order": 1,
+          "filename": "u6-l1-objectfile-parsing.md",
+          "level": "intermediate",
+          "topic": "讲解 ObjectFile 插件如何解析 ELF/Mach-O/PE-COFF 等可执行文件格式，提取段、节、符号入口。",
+          "learning_goals": [
+            "理解 ObjectFile 作为插件的抽象接口",
+            "掌握 ELF/Mach-O/PE-COFF 三大格式的插件位置",
+            "理解 Section 与 segment 的组织",
+            "了解 ObjectFile 与 ObjectContainer 的关系"
+          ],
+          "source_files": [
+            "source/Symbol/ObjectFile.cpp",
+            "include/lldb/Symbol/ObjectFile.h",
+            "source/Plugins/ObjectFile/ELF",
+            "source/Plugins/ObjectFile/Mach-O"
+          ],
+          "minimal_modules": [
+            "source/Symbol/ObjectFile.cpp",
+            "source/Plugins/ObjectFile/ELF",
+            "source/Plugins/ObjectFile/Mach-O"
+          ],
+          "practice_task": "用 file / image dump sections 观察一个 ELF 与一个 Mach-O（或 PE）文件的段；在 ELF ObjectFile 插件中找到解析节头表的关键函数并记录。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "SymbolFile 与 DWARF 调试信息",
+          "order": 2,
+          "filename": "u6-l2-symbolfile-dwarf.md",
+          "level": "intermediate",
+          "topic": "讲解 SymbolFile 插件如何从调试信息（主要是 DWARF，也含 PDB/Breakpad）解析编译单元、函数、行号表与变量。",
+          "learning_goals": [
+            "理解 SymbolFile 抽象与 SymbolVendor 的协作",
+            "掌握 CompileUnit/Function/Block/LineEntry 的层级",
+            "理解 SymbolContext 如何把地址解析到符号上下文",
+            "了解 DWARF SymbolFile 插件的入口与解析流程"
+          ],
+          "source_files": [
+            "source/Symbol/SymbolFile.cpp",
+            "source/Symbol/SymbolContext.cpp",
+            "source/Symbol/LineTable.cpp",
+            "source/Plugins/SymbolFile/DWARF/SymbolFileDWARF.cpp"
+          ],
+          "minimal_modules": [
+            "source/Symbol/SymbolFile.cpp",
+            "source/Symbol/SymbolContext.cpp",
+            "source/Plugins/SymbolFile/DWARF/SymbolFileDWARF.cpp"
+          ],
+          "practice_task": "编译一个带 -g 的程序，用 image lookup 与 line table 观察其编译单元与行号映射；在 SymbolFileDWARF 中找到加载编译单元的关键方法并记录调用链。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "TypeSystem 与 CompilerType",
+          "order": 3,
+          "filename": "u6-l3-typesystem-clang.md",
+          "level": "intermediate",
+          "topic": "讲解 TypeSystem 抽象与基于 Clang 的 TypeSystemClang 实现，以及 CompilerType 如何在 LLDB 内部表示语言类型。",
+          "learning_goals": [
+            "理解 TypeSystem 作为多语言类型系统抽象的设计",
+            "掌握 TypeSystemClang 如何把 DWARF 类型转为 Clang AST 类型",
+            "理解 CompilerType 作为类型句柄的用途",
+            "了解为何 LLDB 复用 Clang 来处理 C/C++/ObjC 类型"
+          ],
+          "source_files": [
+            "source/Plugins/TypeSystem/Clang/TypeSystemClang.cpp",
+            "source/Symbol/CompilerType.cpp",
+            "source/Symbol/CompilerDeclContext.cpp"
+          ],
+          "minimal_modules": [
+            "source/Plugins/TypeSystem/Clang/TypeSystemClang.cpp",
+            "source/Symbol/CompilerType.cpp"
+          ],
+          "practice_task": "用 type lookup 或 expression 观察一个结构体类型；在 TypeSystemClang 中找到把 DWARF 类型创建为 Clang QualType 的关键方法，说明复用 Clang 带来的好处。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "进阶：表达式求值 Expression",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "表达式求值流水线",
+          "order": 1,
+          "filename": "u7-l1-expression-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 Expression 模块的整体流水线：UserExpression/FunctionCaller/ExpressionParser/ExpressionVariable 各自的角色。",
+          "learning_goals": [
+            "理解 Expression 基类与 UserExpression、FunctionCaller 的差异",
+            "掌握 ExpressionParser 抽象与具体实现的衔接",
+            "理解 ExpressionVariable 如何管理表达式局部变量",
+            "了解从源码字符串到可执行结果的端到端阶段"
+          ],
+          "source_files": [
+            "source/Expression/Expression.cpp",
+            "source/Expression/FunctionCaller.cpp",
+            "source/Expression/ExpressionVariable.cpp",
+            "source/Expression/ExpressionParser.cpp"
+          ],
+          "minimal_modules": [
+            "source/Expression/Expression.cpp",
+            "source/Expression/FunctionCaller.cpp",
+            "source/Expression/ExpressionParser.cpp"
+          ],
+          "practice_task": "阅读 Expression 与 ExpressionParser 头文件，画出表达式求值的阶段图（解析→代码生成→执行→取值）；记录每个阶段对应的类。",
+          "depends_on": [
+            "u6-l3",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "基于 Clang 的表达式解析与 JIT",
+          "order": 2,
+          "filename": "u7-l2-clang-expression-jit.md",
+          "level": "intermediate",
+          "topic": "深入 ClangUserExpression/ClangExpressionParser/IRExecutionUnit：LLDB 如何内嵌 Clang 编译表达式、生成 IR，并 JIT 或解释执行。",
+          "learning_goals": [
+            "理解 ClangUserExpression 如何把用户表达式交给 Clang 编译",
+            "掌握 ClangExpressionParser 与外部标识符查找钩子的协作",
+            "理解 IRExecutionUnit 如何把 IR JIT 进被调试进程或回退解释",
+            "了解表达式结果如何取回并封装为 ValueObject"
+          ],
+          "source_files": [
+            "source/Plugins/ExpressionParser/Clang/ClangUserExpression.cpp",
+            "source/Plugins/ExpressionParser/Clang/ClangExpressionParser.cpp",
+            "source/Expression/IRExecutionUnit.cpp"
+          ],
+          "minimal_modules": [
+            "source/Plugins/ExpressionParser/Clang/ClangUserExpression.cpp",
+            "source/Plugins/ExpressionParser/Clang/ClangExpressionParser.cpp",
+            "source/Expression/IRExecutionUnit.cpp"
+          ],
+          "practice_task": "用 expr 计算一个表达式（如调用函数、修改变量）；在 ClangUserExpression 中找到编译与执行的入口，说明 JIT 不可用时如何回退到 IR 解释。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "DWARF 表达式与 DIL",
+          "order": 3,
+          "filename": "u7-l3-dwarfexpr-dil.md",
+          "level": "intermediate",
+          "topic": "讲解 DWARFExpression 如何用操作码栈求值（变量位置描述），以及较新的 DIL（Debug Info Language）表达式语言。",
+          "learning_goals": [
+            "理解 DWARFExpression 基于值栈的求值模型",
+            "掌握 DWARF 位置描述如何定位变量（寄存器/地址）",
+            "了解 DIL 表达式语言的词法/语法（dil-expr-lang.ebnf）",
+            "理解 DIL 与 Clang 表达式路径的取舍"
+          ],
+          "source_files": [
+            "source/Expression/DWARFExpression.cpp",
+            "source/ValueObject/DILLexer.cpp",
+            "source/ValueObject/DILParser.cpp",
+            "docs/dil-expr-lang.ebnf"
+          ],
+          "minimal_modules": [
+            "source/Expression/DWARFExpression.cpp",
+            "docs/dil-expr-lang.ebnf"
+          ],
+          "practice_task": "编译一个带局部变量的函数，用 image dump line-table / 表达式观察其 DWARF 位置描述；阅读 dil-expr-lang.ebnf 写出一个 DIL 表达式示例并说明它与普通 expr 的区别。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "进阶：值对象与数据格式化",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "ValueObject 值对象",
+          "order": 1,
+          "filename": "u8-l1-valueobject.md",
+          "level": "intermediate",
+          "topic": "讲解 ValueObject 如何表示一个变量的值、类型、地址，及其子成员、更新与合成机制。",
+          "learning_goals": [
+            "理解 ValueObject 封装值、类型与上下文的模型",
+            "掌握 ValueObjectChild 如何表示聚合类型的成员",
+            "理解值的更新（Update）与失效机制",
+            "了解 ValueObject 与 SBValue 的对应关系"
+          ],
+          "source_files": [
+            "source/ValueObject/ValueObject.cpp",
+            "source/ValueObject/ValueObjectChild.cpp",
+            "source/ValueObject/ValueObjectConstResult.cpp"
+          ],
+          "minimal_modules": [
+            "source/ValueObject/ValueObject.cpp",
+            "source/ValueObject/ValueObjectChild.cpp"
+          ],
+          "practice_task": "用 frame variable 观察一个结构体变量的成员树；在 ValueObject 中找到「按需展开子成员」与「刷新值」的关键方法，记录其触发时机。",
+          "depends_on": [
+            "u6-l3",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "数据格式化 Data Formatters",
+          "order": 2,
+          "filename": "u8-l2-data-formatters.md",
+          "level": "intermediate",
+          "topic": "讲解 DataVisualization/FormatManager/TypeSummary/TypeSynthetic 如何允许用户自定义变量的展示，以及内置格式化规则。",
+          "learning_goals": [
+            "理解 DataVisualization 作为格式化子系统的最高入口",
+            "掌握 FormatManager 的类型匹配与规则优先级",
+            "理解 TypeSummary（摘要）与 TypeSynthetic（合成子成员）的差异",
+            "了解如何用 type 命令添加自定义格式化"
+          ],
+          "source_files": [
+            "source/DataFormatters/DataVisualization.cpp",
+            "source/DataFormatters/FormatManager.cpp",
+            "source/DataFormatters/TypeSummary.cpp",
+            "source/DataFormatters/TypeSynthetic.cpp",
+            "docs/resources/dataformatters.md"
+          ],
+          "minimal_modules": [
+            "source/DataFormatters/FormatManager.cpp",
+            "source/DataFormatters/TypeSummary.cpp",
+            "docs/resources/dataformatters.md"
+          ],
+          "practice_task": "为一个自定义结构体用 type summary add 添加一个 Python 摘要格式化器；在 FormatManager 中找到匹配类型的路径，说明规则如何按类别组织。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "进阶：断点与监视点 Breakpoint",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "断点模型与解析",
+          "order": 1,
+          "filename": "u9-l1-breakpoint-model.md",
+          "level": "intermediate",
+          "topic": "讲解 Breakpoint/BreakpointLocation/BreakpointResolver 如何在符号层面设置断点，并在共享库加载时持续解析新位置。",
+          "learning_goals": [
+            "理解 Breakpoint 与 BreakpointLocation 的一对多关系",
+            "掌握 BreakpointResolver 各子类（文件行、符号名、地址、正则）的解析方式",
+            "理解断点随共享库加载/卸载的重新解析机制",
+            "了解断点的全局与目标级作用域"
+          ],
+          "source_files": [
+            "source/Breakpoint/Breakpoint.cpp",
+            "source/Breakpoint/BreakpointLocation.cpp",
+            "source/Breakpoint/BreakpointResolver.cpp",
+            "source/Breakpoint/BreakpointResolverFileLine.cpp"
+          ],
+          "minimal_modules": [
+            "source/Breakpoint/Breakpoint.cpp",
+            "source/Breakpoint/BreakpointResolver.cpp",
+            "source/Breakpoint/BreakpointResolverFileLine.cpp"
+          ],
+          "practice_task": "用 breakpoint set 设置文件行断点与符号名断点；在 BreakpointResolverFileLine 中跟踪一次解析过程，说明共享库加载后断点如何被重新解析。",
+          "depends_on": [
+            "u6-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "断点选项、条件与监视点",
+          "order": 2,
+          "filename": "u9-l2-breakpoint-options-watchpoint.md",
+          "level": "intermediate",
+          "topic": "讲解断点选项（条件、命中计数、忽略计数、命令）、BreakpointSite 的实际插入，以及 Watchpoint 监视点机制。",
+          "learning_goals": [
+            "理解 BreakpointOptions 如何承载条件、命令与计数",
+            "掌握 BreakpointSite 作为进程内实际断点的角色",
+            "理解 Watchpoint 对内存地址读写的监视机制",
+            "了解断点命令（breakpoint command add）的执行"
+          ],
+          "source_files": [
+            "source/Breakpoint/BreakpointOptions.cpp",
+            "source/Breakpoint/BreakpointSite.cpp",
+            "source/Breakpoint/Watchpoint.cpp",
+            "source/Breakpoint/WatchpointOptions.cpp"
+          ],
+          "minimal_modules": [
+            "source/Breakpoint/BreakpointOptions.cpp",
+            "source/Breakpoint/BreakpointSite.cpp",
+            "source/Breakpoint/Watchpoint.cpp"
+          ],
+          "practice_task": "为一个断点添加条件与命中计数，观察行为；用 watchpoint set 监视一个全局变量；在 Watchpoint.cpp 中找到读写触发是如何上报停止的。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "进阶：平台与主机 Platform/Host",
+      "level": "intermediate",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "Platform 抽象与远程调试",
+          "order": 1,
+          "filename": "u10-l1-platform-remote.md",
+          "level": "intermediate",
+          "topic": "讲解 Platform 基类如何抽象执行环境（本机/远程/模拟器），以及 RemoteAwarePlatform 与 platform 插件如何支持远程调试。",
+          "learning_goals": [
+            "理解 Platform 提供的文件传输、进程查找、调试服务器拉起等能力",
+            "掌握 RemoteAwarePlatform 的本地/远程切换设计",
+            "理解 Platform 插件（MacOSX/Linux/远程等）的组织",
+            "了解 platform 命令与 lldb-server 平台模式的协作"
+          ],
+          "source_files": [
+            "source/Target/Platform.cpp",
+            "include/lldb/Target/Platform.h",
+            "include/lldb/Target/RemoteAwarePlatform.h",
+            "docs/use/remote.md",
+            "source/Plugins/Platform"
+          ],
+          "minimal_modules": [
+            "source/Target/Platform.cpp",
+            "include/lldb/Target/RemoteAwarePlatform.h",
+            "docs/use/remote.md"
+          ],
+          "practice_task": "阅读 docs/use/remote.md，规划一次本地远程调试（lldb-server platform 模式）；在 Platform.h 中找到远程文件上传与拉起调试服务器的方法并记录。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "Host 主机抽象层",
+          "order": 2,
+          "filename": "u10-l2-host-abstraction.md",
+          "level": "intermediate",
+          "topic": "讲解 Host 模块如何抽象宿主操作系统差异：HostInfo、进程启动、MainLoop 事件循环、文件系统，以及为 lldb-server 提供的 NativeProcess 基类。",
+          "learning_goals": [
+            "理解 HostInfo 提供的宿主三元组与路径信息",
+            "掌握 MainLoop 跨平台事件循环的设计",
+            "理解 NativeProcess/Thread 层次为何用于 lldb-server",
+            "了解 Host 抽象如何隔离 OS 原语（管道、套接字、进程）"
+          ],
+          "source_files": [
+            "include/lldb/Host/HostInfo.h",
+            "include/lldb/Host/MainLoop.h",
+            "source/Host",
+            "docs/resources/overview.md"
+          ],
+          "minimal_modules": [
+            "include/lldb/Host/HostInfo.h",
+            "include/lldb/Host/MainLoop.h",
+            "source/Host"
+          ],
+          "practice_task": "在 source/Host/ 下找到宿主信息（如 triple、临时目录）的获取实现；阅读 MainLoop.h 说明它如何统一处理信号、套接字与 IO 事件。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "专家：插件系统",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "插件架构与 PluginManager",
+          "order": 1,
+          "filename": "u11-l1-plugin-architecture.md",
+          "level": "advanced",
+          "topic": "讲解 LLDB 的插件机制：PluginInterface 基类、Plugins.def 注册表、PluginManager 动态加载，以及插件如何被 Initialize 注册。",
+          "learning_goals": [
+            "理解 PluginInterface 作为插件统一基类的设计",
+            "掌握 Plugins.def.in 如何集中声明全部插件并驱动初始化",
+            "理解 PluginManager 如何注册与按需实例化插件",
+            "了解静态链接插件与动态加载插件的差异"
+          ],
+          "source_files": [
+            "source/Core/PluginManager.cpp",
+            "include/lldb/Core/PluginInterface.h",
+            "source/Plugins/Plugins.def.in",
+            "source/API/SystemInitializerFull.cpp"
+          ],
+          "minimal_modules": [
+            "source/Core/PluginManager.cpp",
+            "source/Plugins/Plugins.def.in",
+            "source/API/SystemInitializerFull.cpp"
+          ],
+          "practice_task": "统计 source/Plugins/ 下的插件类别与每类数量；在 PluginManager.cpp 中找到某类插件（如 Process）的注册与查找 API，说明插件如何被按优先级选中。",
+          "depends_on": [
+            "u1-l2",
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "实战：编写一个 LLDB 命令插件",
+          "order": 2,
+          "filename": "u11-l2-write-plugin.md",
+          "level": "advanced",
+          "topic": "以 examples/plugins/commands/fooplugin.cpp 与 Python 命令模板为例，动手实现并加载一个自定义 LLDB 命令/插件。",
+          "learning_goals": [
+            "理解 C++ 插件（命令插件）的 PluginInitialize 入口与导出符号",
+            "掌握用 SBCommandAddAPI / PluginManager 注册命令的流程",
+            "理解 Python 命令（cmdtemplate.py）作为更轻量的扩展方式",
+            "了解如何把插件加载进运行中的 LLDB（command script import / plugin load）"
+          ],
+          "source_files": [
+            "examples/plugins/commands/fooplugin.cpp",
+            "examples/python/cmdtemplate.py",
+            "docs/resources/contributing.md"
+          ],
+          "minimal_modules": [
+            "examples/plugins/commands/fooplugin.cpp",
+            "examples/python/cmdtemplate.py"
+          ],
+          "practice_task": "基于 cmdtemplate.py 写一个 hello 命令并在 lldb 中用 command script import 加载运行；进阶：尝试按 fooplugin.cpp 的结构理解一个 C++ 命令插件的注册点。",
+          "depends_on": [
+            "u11-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "专家：远程调试与协议",
+      "level": "advanced",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "lldb-server 架构",
+          "order": 1,
+          "filename": "u12-l1-lldb-server-arch.md",
+          "level": "advanced",
+          "topic": "讲解 lldb-server 的两种工作模式（platform 平台模式与 gdbserver 调试模式/LLGS）、其入口与初始化流程。",
+          "learning_goals": [
+            "理解 lldb-server platform 模式与 gdbserver(LLGS) 模式的职责差异",
+            "掌握 lldb-server.cpp / lldb-gdbserver.cpp / lldb-platform.cpp 的入口分工",
+            "理解 SystemInitializerLLGS 注册的服务端插件",
+            "了解 debugserver（macOS）与 lldb-server 的关系"
+          ],
+          "source_files": [
+            "tools/lldb-server/lldb-server.cpp",
+            "tools/lldb-server/lldb-gdbserver.cpp",
+            "tools/lldb-server/lldb-platform.cpp",
+            "tools/lldb-server/SystemInitializerLLGS.cpp"
+          ],
+          "minimal_modules": [
+            "tools/lldb-server/lldb-server.cpp",
+            "tools/lldb-server/lldb-gdbserver.cpp",
+            "tools/lldb-server/SystemInitializerLLGS.cpp"
+          ],
+          "practice_task": "在本机启动 lldb-server 的 platform 与 gdbserver 模式各一次，分别用 platform connect 与 process connect 连接；在源码中确认两种模式的入口函数。",
+          "depends_on": [
+            "u10-l1",
+            "u10-l2",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l2",
+          "title": "GDB Remote 协议",
+          "order": 2,
+          "filename": "u12-l2-gdb-remote-protocol.md",
+          "level": "advanced",
+          "topic": "深入 GDB Remote 协议：客户端 ProcessGDBRemote、服务端 GDBRemoteCommunicationServerLLGS、包格式与 LLDB 扩展（qXfer/json/stop-reply）。",
+          "learning_goals": [
+            "理解 GDB Remote 协议的包格式与握手",
+            "掌握 ProcessGDBRemote（客户端）如何映射协议到 Process 接口",
+            "理解 GDBRemoteCommunicationServerLLGS（服务端 LLGS）如何响应包",
+            "了解 LLDB 在标准协议之上的扩展（stop-reply、qXfer、json）"
+          ],
+          "source_files": [
+            "source/Plugins/Process/gdb-remote/ProcessGDBRemote.cpp",
+            "source/Plugins/Process/gdb-remote/GDBRemoteCommunicationServerLLGS.cpp",
+            "source/Plugins/Process/gdb-remote/GDBRemoteCommunicationClient.cpp",
+            "docs/resources/lldbgdbremote.md"
+          ],
+          "minimal_modules": [
+            "source/Plugins/Process/gdb-remote/ProcessGDBRemote.cpp",
+            "source/Plugins/Process/gdb-remote/GDBRemoteCommunicationServerLLGS.cpp",
+            "docs/resources/lldbgdbremote.md"
+          ],
+          "practice_task": "用 log enable gdb-remote 抓取一次远程调试的包交互；对照 lldbgdbremote.md 找出其中用到的 LLDB 扩展包，并解释 stop-reply 如何携带线程/原因信息。",
+          "depends_on": [
+            "u12-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u13",
+      "title": "专家：脚本与绑定",
+      "level": "advanced",
+      "order": 13,
+      "lectures": [
+        {
+          "id": "u13-l1",
+          "title": "ScriptInterpreter 与 Python 集成",
+          "order": 1,
+          "filename": "u13-l1-scriptinterpreter-python.md",
+          "level": "advanced",
+          "topic": "讲解 ScriptInterpreter 抽象与 Python/Lua 实现，以及 SWIG 如何把 SBAPI 绑定到脚本语言。",
+          "learning_goals": [
+            "理解 ScriptInterpreter 作为脚本后端抽象的设计",
+            "掌握 ScriptInterpreterPython 如何嵌入 CPython",
+            "理解 bindings/ 下的 SWIG 接口如何生成 lldb Python 模块",
+            "了解 Python 与 Lua 两种绑定的差异"
+          ],
+          "source_files": [
+            "source/Plugins/ScriptInterpreter/Python/ScriptInterpreterPython.cpp",
+            "source/Plugins/ScriptInterpreter/Python/ScriptInterpreterPythonImpl.h",
+            "bindings/python/python.swig",
+            "bindings/interfaces.swig",
+            "docs/use/python-reference.md"
+          ],
+          "minimal_modules": [
+            "source/Plugins/ScriptInterpreter/Python/ScriptInterpreterPython.cpp",
+            "bindings/python/python.swig",
+            "docs/use/python-reference.md"
+          ],
+          "practice_task": "阅读 python-reference.md，写一个在断点命中时自动打印某变量的事件回调；在 bindings/python/python.swig 中找到 SBValue 是如何被导出给 Python 的。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l2",
+          "title": "Scripted Process 与脚本化扩展",
+          "order": 2,
+          "filename": "u13-l2-scripted-process.md",
+          "level": "advanced",
+          "topic": "讲解 Process/scripted 插件（用 Python 驱动的虚拟进程）、ScriptedThreadPlan、以及 crashlog 等脚本化用例。",
+          "learning_goals": [
+            "理解 ScriptedProcess 如何用 Python 实现一个 Process 后端",
+            "掌握 ScriptedThread/ScriptedFrame 的协作",
+            "理解 ScriptedThreadPlan 如何用脚本扩展步进计划",
+            "了解 crashlog_scripted_process 等真实用例"
+          ],
+          "source_files": [
+            "source/Plugins/Process/scripted/ScriptedProcess.cpp",
+            "source/Plugins/Process/scripted/ScriptedThread.cpp",
+            "include/lldb/Target/ScriptedThreadPlan.h",
+            "examples/python/crashlog_scripted_process.py"
+          ],
+          "minimal_modules": [
+            "source/Plugins/Process/scripted/ScriptedProcess.cpp",
+            "source/Plugins/Process/scripted/ScriptedThread.cpp",
+            "examples/python/crashlog_scripted_process.py"
+          ],
+          "practice_task": "阅读 crashlog_scripted_process.py，说明它如何用一个 crash 文件「回放」出一个可调试的进程；进阶：实现一个最小 ScriptedProcess 只返回一帧常量寄存器。",
+          "depends_on": [
+            "u13-l1",
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u14",
+      "title": "专家：IDE 集成与现代前端",
+      "level": "advanced",
+      "order": 14,
+      "lectures": [
+        {
+          "id": "u14-l1",
+          "title": "lldb-dap 调试适配器",
+          "order": 1,
+          "filename": "u14-l1-lldb-dap.md",
+          "level": "advanced",
+          "topic": "讲解 lldb-dap 如何实现 Debug Adapter Protocol，把 LLDB 接入 VS Code 等 IDE，及其会话与事件模型。",
+          "learning_goals": [
+            "理解 DAP（Debug Adapter Protocol）的请求/响应/事件模型",
+            "掌握 lldb-dap 的入口与 DAP 会话核心（DAP.cpp）",
+            "理解 lldb-dap 如何把 DAP 操作映射到 SBAPI",
+            "了解断点、变量、堆栈在 DAP 与 SBAPI 之间的转换"
+          ],
+          "source_files": [
+            "tools/lldb-dap/lldb-dap.cpp",
+            "tools/lldb-dap/DAP.cpp",
+            "tools/lldb-dap/DAP.h",
+            "tools/lldb-dap/JSONUtils.cpp",
+            "docs/use/lldbdap.md"
+          ],
+          "minimal_modules": [
+            "tools/lldb-dap/lldb-dap.cpp",
+            "tools/lldb-dap/DAP.cpp",
+            "docs/use/lldbdap.md"
+          ],
+          "practice_task": "把 lldb-dap 接入一个支持 DAP 的编辑器跑通一次调试；在 lldb-dap 源码中找到一个 DAP 请求（如 stackTrace）到 SBAPI 的处理路径并记录。",
+          "depends_on": [
+            "u2-l3",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u14-l2",
+          "title": "lldb-mcp 与 lldb-rpc",
+          "order": 2,
+          "filename": "u14-l2-mcp-rpc.md",
+          "level": "advanced",
+          "topic": "讲解 lldb-mcp（Model Context Protocol，面向 LLM/Agent 的调试接口）与 lldb-rpc/lldb-rpc-gen（RPC 接口生成）这两种较新的集成前端。",
+          "learning_goals": [
+            "理解 lldb-mcp 如何把 LLDB 能力暴露给大模型/Agent",
+            "掌握 lldb-rpc 与 lldb-rpc-gen 的接口生成思路",
+            "理解 MCP/RPC 前端与 SBAPI/DAP 前端的差异",
+            "了解这些前端各自的适用场景"
+          ],
+          "source_files": [
+            "tools/lldb-mcp",
+            "tools/lldb-rpc",
+            "tools/lldb-rpc-gen",
+            "docs/use/mcp.md"
+          ],
+          "minimal_modules": [
+            "tools/lldb-mcp",
+            "tools/lldb-rpc",
+            "docs/use/mcp.md"
+          ],
+          "practice_task": "阅读 docs/use/mcp.md，说明 lldb-mcp 提供了哪些能力给 Agent；浏览 tools/lldb-rpc-gen 说明 RPC 接口是如何从定义生成的（若文档不足可标注待确认）。",
+          "depends_on": [
+            "u14-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u15",
+      "title": "专家：性能、测试与工程化",
+      "level": "advanced",
+      "order": 15,
+      "lectures": [
+        {
+          "id": "u15-l1",
+          "title": "LLDB 测试体系",
+          "order": 1,
+          "filename": "u15-l1-testing.md",
+          "level": "advanced",
+          "topic": "讲解 LLDB 的测试组成：基于 dotest/lit 的 API 测试（test/API）、Shell 测试（test/Shell）、gtest 单元测试（unittests/）。",
+          "learning_goals": [
+            "理解 test/API、test/Shell、unittests/ 三类测试的差异与运行方式",
+            "掌握如何用 lit 运行单个测试",
+            "理解 API 测试基于 SB API 的断言模型",
+            "了解如何为新功能添加测试"
+          ],
+          "source_files": [
+            "test/API",
+            "test/Shell",
+            "unittests",
+            "docs/resources/test.md",
+            "test/lit.cfg.py"
+          ],
+          "minimal_modules": [
+            "test/API",
+            "test/Shell",
+            "unittests",
+            "docs/resources/test.md"
+          ],
+          "practice_task": "运行一个 API 测试与一个 Shell 测试；参照现有 API 测试结构，为一个假设的新命令写一个最小测试骨架（不必合并进树）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u15-l2",
+          "title": "并发、线程与事件循环",
+          "order": 1,
+          "filename": "u15-l2-concurrency-eventloop.md",
+          "level": "advanced",
+          "topic": "讲解 LLDB 的并发模型：MainLoop 事件循环、IOHandler 的交互线程、Debugger 线程池、以及与被调试进程的异步 IO。",
+          "learning_goals": [
+            "理解 MainLoop 如何统一信号、套接字与 IO 事件",
+            "掌握 IOHandler 与命令解释器的交互线程模型",
+            "理解 Debugger 的线程池（GetThreadPool）用途",
+            "了解与被调试进程通信的异步与同步路径"
+          ],
+          "source_files": [
+            "include/lldb/Host/MainLoop.h",
+            "source/Core/IOHandler.cpp",
+            "source/Core/Debugger.cpp",
+            "source/Core/Communication.cpp"
+          ],
+          "minimal_modules": [
+            "include/lldb/Host/MainLoop.h",
+            "source/Core/IOHandler.cpp",
+            "source/Core/Debugger.cpp"
+          ],
+          "practice_task": "在源码中梳理「命令线程」「IOHandler 线程」「与进程通信」之间的协作；用 log enable 抓取事件，观察一次 continue 后停止事件的线程流转。",
+          "depends_on": [
+            "u4-l2",
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u15-l3",
+          "title": "错误处理、日志与诊断",
+          "order": 2,
+          "filename": "u15-l3-error-log-diagnostics.md",
+          "level": "advanced",
+          "topic": "讲解 LLDB 的错误处理（Status）、日志系统（Log/LLDBLog）、诊断（Diagnostics）、进度上报与可复现（reproducer）等工程化设施。",
+          "learning_goals": [
+            "理解 Status 作为统一错误对象的用法与约定",
+            "掌握 Log/LLDBLog 的分类日志机制与 channel",
+            "理解 Diagnostics 在崩溃/错误时收集的信息",
+            "了解 Progress 进度上报与 reproducer 的用途"
+          ],
+          "source_files": [
+            "source/Utility/Status.cpp",
+            "source/Utility/Log.cpp",
+            "include/lldb/Utility/LLDBLog.h",
+            "source/Core/Diagnostics.cpp",
+            "source/Core/Progress.cpp"
+          ],
+          "minimal_modules": [
+            "source/Utility/Status.cpp",
+            "source/Utility/Log.cpp",
+            "source/Core/Diagnostics.cpp"
+          ],
+          "practice_task": "用 log enable lldb 命令开启几类日志，复现一次断点设置并分析日志；在 Diagnostics.cpp 中找到错误/崩溃时收集哪些信息，说明其对排错的价值。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
