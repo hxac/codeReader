@@ -1,0 +1,890 @@
+{
+  "project": "llvm-project-llvm",
+  "head": "036af906f355771a5c2b3bb51a88d995c6010219",
+  "rationale": "本手册面向 LLVM 项目的 llvm/ 子目录（核心优化器、后端与工具箱）。学习顺序遵循“先认识项目与 IR，再掌握 Pass / 分析 / 变换，最后深入代码生成、后端与 TableGen，并以 JIT 与测试收尾”的渐进路线：单元 1-2 为入门，建立项目定位、构建方式与 LLVM IR 心智模型；单元 3-4 进入中阶，讲解新 Pass 管理器与优化、分析两大核心机制；单元 5-7 为高阶，深入后端流水线、机器 IR、指令选择、寄存器分配、调度、MC 层、目标后端与 TableGen；单元 8 覆盖 JIT 执行与测试体系，并给出二次开发的工程实践。讲义之间通过 depends_on 形成清晰依赖，每篇都结合真实源码（examples/、lib/、include/、tools/、docs/）并附带一个可操作的代码实践任务。本次增量更新（4e924a6→036af906）的代码改动集中在 ORC/JITLink：新增了 COFF dllimport 自动导入的 COFFAutoImportGenerator（一种新的 DefinitionGenerator）、RTBridge Caller 的泛化以及 ORCv2.md 文档更新，因此仅 u8-l1（执行引擎与 ORC JIT）需要 update，补入 DefinitionGenerator 扩展点这一概念并以新增的 COFFAutoImportGenerator 为实例、引用更新后的 ORCv2.md；其余讲义所依赖的源码文件均未受影响，保持 keep。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 LLVM 项目",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 LLVM 是什么、解决什么问题、三段式编译模型（前端+优化器+后端）以及许可证与文档入口。",
+          "learning_goals": [
+            "理解 LLVM 的定位与三段式编译模型",
+            "了解项目的许可证与社区文档入口",
+            "建立对 llvm/ 子目录职责的整体认知"
+          ],
+          "source_files": [
+            "README.txt",
+            "LICENSE.TXT",
+            "docs/index.md",
+            "docs/GettingStarted.md"
+          ],
+          "minimal_modules": [
+            "LLVM 定位与三段式编译模型",
+            "许可证与社区文档入口",
+            "llvm/ 子目录职责总览"
+          ],
+          "practice_task": "阅读 README.txt 与 docs/GettingStarted.md，用一句话描述 LLVM 的作用，并整理出主要文档入口分别在哪些路径。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建系统与目录结构",
+          "order": 2,
+          "filename": "u1-l2-build-and-layout.md",
+          "level": "beginner",
+          "topic": "讲解 LLVM 用 CMake 如何构建，以及 lib/、include/、tools/、examples/ 等目录的分层组织方式。",
+          "learning_goals": [
+            "学会配置并触发一次 CMake 构建",
+            "理解 lib/include/tools/examples 的分层",
+            "掌握常用构建变量与预设"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "docs/CMake.md",
+            "lib/CMakeLists.txt",
+            "include/llvm/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "CMake 顶层与 lib/include/tools 分层",
+            "CMake 预设与常用变量",
+            "从源码到可执行文件的整体流程"
+          ],
+          "practice_task": "在本地配置一次 CMake（如 cmake -B build -G Ninja），列出构建完成后生成的两个工具的可执行文件路径。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "命令行工具入口",
+          "order": 3,
+          "filename": "u1-l3-cli-tools.md",
+          "level": "beginner",
+          "topic": "讲解 opt、llc、lli、llvm-as、llvm-dis 等核心工具的作用与典型用法。",
+          "learning_goals": [
+            "区分优化器(opt)、静态编译器(llc)、解释器/JIT(lli) 的职责",
+            "掌握 IR 文本与位码互转",
+            "理解工具入口对应的源码位置"
+          ],
+          "source_files": [
+            "tools/opt/opt.cpp",
+            "tools/llc/llc.cpp",
+            "tools/lli/lli.cpp",
+            "docs/CommandGuide/opt.rst",
+            "docs/CommandGuide/llc.rst"
+          ],
+          "minimal_modules": [
+            "opt：优化流水线驱动",
+            "llc：后端代码生成",
+            "lli：解释/JIT 执行",
+            "llvm-as / llvm-dis：IR 文本与位码互转"
+          ],
+          "practice_task": "写一段最小 IR（含一个函数），用 llvm-as 转为位码、llvm-dis 转回文本，再用 opt 跑 -passes=mem2reg 观察输出变化。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "第一个 IR 程序：ModuleMaker",
+          "order": 4,
+          "filename": "u1-l4-module-maker.md",
+          "level": "beginner",
+          "topic": "通过 examples/ModuleMaker 讲解如何在 C++ 中“从零”构造一个 LLVM Module 并写出位码文件。",
+          "learning_goals": [
+            "理解 Module/Function/BasicBlock 的最小构造方式",
+            "学会插入指令并写出可被其他工具读取的位码",
+            "看懂一个最小 out-of-tree 风格示例的构建脚本"
+          ],
+          "source_files": [
+            "examples/ModuleMaker/ModuleMaker.cpp",
+            "examples/ModuleMaker/CMakeLists.txt",
+            "examples/ModuleMaker/README.txt"
+          ],
+          "minimal_modules": [
+            "创建 LLVMContext 与 Module",
+            "构造 Function 与 BasicBlock",
+            "插入指令并写出位码"
+          ],
+          "practice_task": "修改 ModuleMaker，让 main 在 2+3 之外再乘 4 后返回，编译后用 llvm-dis 验证生成的 IR 是否符合预期。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "LLVM IR 基础",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "IR 层次结构",
+          "order": 1,
+          "filename": "u2-l1-ir-hierarchy.md",
+          "level": "beginner",
+          "topic": "讲解 Module→Function→BasicBlock→Instruction 的包含关系与对应核心类。",
+          "learning_goals": [
+            "在源码层面理清 IR 的四层结构",
+            "掌握遍历这些结构的常用迭代器",
+            "区分 Instruction 与 Terminator 指令"
+          ],
+          "source_files": [
+            "include/llvm/IR/Module.h",
+            "include/llvm/IR/Function.h",
+            "include/llvm/IR/BasicBlock.h",
+            "include/llvm/IR/Instruction.h"
+          ],
+          "minimal_modules": [
+            "Module / Function 模型",
+            "BasicBlock 与终结指令",
+            "Instruction 派生与迭代器遍历"
+          ],
+          "practice_task": "写一个小程序读入一个 .ll 文件，统计并打印每个函数的基本块数量与指令数量。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "类型系统与 Value",
+          "order": 2,
+          "filename": "u2-l2-type-and-value.md",
+          "level": "beginner",
+          "topic": "讲解 Type 类型体系、Value 作为所有可被引用对象的基类，以及常量与派生类型。",
+          "learning_goals": [
+            "理解 LLVM 的类型系统与 SSA/Value 模型",
+            "区分 Value / User / Use / Constant",
+            "掌握常用基本类型与派生类型的获取方式"
+          ],
+          "source_files": [
+            "include/llvm/IR/Type.h",
+            "include/llvm/IR/Value.h",
+            "include/llvm/IR/DerivedTypes.h",
+            "include/llvm/IR/Constants.h"
+          ],
+          "minimal_modules": [
+            "Type 体系与整型/指针/向量/函数类型",
+            "Value / User / Use 关系",
+            "Constant 与 ConstantInt / ConstantFP"
+          ],
+          "practice_task": "对照源码画出 Type 与 Value 的继承关系图，并标注 IntegerType 与 ConstantInt 的位置。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "用 IRBuilder 构建 IR",
+          "order": 3,
+          "filename": "u2-l3-irbuilder.md",
+          "level": "beginner",
+          "topic": "讲解 IRBuilder 如何以更安全、便捷的方式构造算术、控制流与调用指令。",
+          "learning_goals": [
+            "掌握 IRBuilder 构造算术/比较/分支/调用指令",
+            "理解插入点与常量折叠",
+            "看懂 Fibonacci 示例的 IR 构造思路"
+          ],
+          "source_files": [
+            "include/llvm/IR/IRBuilder.h",
+            "lib/IR/IRBuilder.cpp",
+            "examples/Fibonacci/fibonacci.cpp"
+          ],
+          "minimal_modules": [
+            "IRBuilder 插入点与折叠",
+            "构造算术与控制流",
+            "Fibonacci 示例解析"
+          ],
+          "practice_task": "用 IRBuilder 构造一个计算 n! 的函数，并用 Verifier 校验生成的 IR 合法性。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "IR 的文本与位码格式",
+          "order": 4,
+          "filename": "u2-l4-ir-formats.md",
+          "level": "beginner",
+          "topic": "讲解 IR 的文本语法(.ll)与位码(.bc)格式，以及解析与写出的源码路径。",
+          "learning_goals": [
+            "理解 AsmParser / Bitcode 两条读写链路",
+            "能解释 llvm-as / llvm-dis 的底层机制",
+            "掌握 IRReader 的统一读取入口"
+          ],
+          "source_files": [
+            "lib/AsmParser/Parser.cpp",
+            "lib/AsmParser/LLParser.cpp",
+            "lib/Bitcode/Reader/BitcodeReader.cpp",
+            "lib/Bitcode/Writer/BitcodeWriter.cpp",
+            "lib/IRReader/IRReader.cpp"
+          ],
+          "minimal_modules": [
+            "IRReader：统一读取入口",
+            "AsmParser：文本解析",
+            "Bitcode Reader / Writer：紧凑格式"
+          ],
+          "practice_task": "用 llvm-dis 输出一段 IR，手动编辑后用 llvm-as 转回位码；再用 IRReader 的 API 写一段读取 IR 的最小代码。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "Pass 与优化流水线",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "新 Pass 管理器",
+          "order": 1,
+          "filename": "u3-l1-new-pass-manager.md",
+          "level": "intermediate",
+          "topic": "讲解 New Pass Manager 的核心概念：PassManager、AnalysisManager 与 PassInstrumentation。",
+          "learning_goals": [
+            "理解 pass 与 analysis 的区分与缓存机制",
+            "掌握 PassManager 的运行模型",
+            "了解 pass 的注册入口"
+          ],
+          "source_files": [
+            "include/llvm/IR/PassManager.h",
+            "include/llvm/IR/PassInstrumentation.h",
+            "include/llvm/Passes/PassBuilder.h"
+          ],
+          "minimal_modules": [
+            "PassManager 与 AnalysisManager",
+            "Pass 基类与 Result 模型",
+            "PassInstrumentation 与回调"
+          ],
+          "practice_task": "在 PassBuilder.h 中找到注册 pass 的入口，分别列出 FunctionPass 与 Analysis 各一个具体例子。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "编写一个 Pass",
+          "order": 2,
+          "filename": "u3-l2-write-a-pass.md",
+          "level": "intermediate",
+          "topic": "通过 examples/IRTransforms/SimplifyCFG 讲解如何实现并注册一个 out-of-tree 风格的 Pass。",
+          "learning_goals": [
+            "学会继承 PassInfoMixin 实现一个 FunctionPass",
+            "掌握 pass 在 pipeline 中的注册方式",
+            "理解 Statistics 与调试输出"
+          ],
+          "source_files": [
+            "examples/IRTransforms/SimplifyCFG.cpp",
+            "examples/IRTransforms/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "PassInfoMixin 与 run 签名",
+            "注册到 pipeline（registerPipelineStartEPCallback 等）",
+            "统计与调试输出"
+          ],
+          "practice_task": "复制 SimplifyCFG 示例，把它的输出改为打印每个函数的指令数，并用 opt 跑通验证。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Pass 流水线与 PassBuilder",
+          "order": 3,
+          "filename": "u3-l3-pass-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 PassBuilder 如何把 -passes=... 字符串解析成流水线，以及默认 O1/O2/O3 流水线。",
+          "learning_goals": [
+            "理解文本 pipeline 的解析机制",
+            "掌握默认优化流水线的构成入口",
+            "了解扩展点回调的注册时机"
+          ],
+          "source_files": [
+            "lib/Passes/PassBuilder.cpp",
+            "lib/Passes/PassBuilderPipelines.cpp"
+          ],
+          "minimal_modules": [
+            "文本 pipeline 解析（parsePassPipeline）",
+            "默认优化流水线（O1/O2/O3）",
+            "扩展点与回调注册"
+          ],
+          "practice_task": "用 opt -passes='function(...)' 自定义一个小流水线，并在 PassBuilder 中找到对应的解析分支。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "Pass 插件机制",
+          "order": 4,
+          "filename": "u3-l4-pass-plugins.md",
+          "level": "intermediate",
+          "topic": "通过 examples/Bye 讲解动态加载的 pass 插件（-load-pass-plugin）。",
+          "learning_goals": [
+            "理解 PassPluginLibraryInfo 与插件注册",
+            "掌握 out-of-tree pass 的链接方式",
+            "了解 opt 加载插件的处理流程"
+          ],
+          "source_files": [
+            "examples/Bye/Bye.cpp",
+            "examples/Bye/CMakeLists.txt",
+            "tools/opt/NewPMDriver.cpp"
+          ],
+          "minimal_modules": [
+            "PassPluginLibraryInfo 注册",
+            "插件 .so 的构建方式",
+            "opt 加载插件流程"
+          ],
+          "practice_task": "把 Bye 编译成插件 .so，用 opt -load-pass-plugin 调用，观察并记录其输出。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "分析与变换",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "标量优化：InstCombine 与 SCCP",
+          "order": 1,
+          "filename": "u4-l1-instcombine-sccp.md",
+          "level": "intermediate",
+          "topic": "讲解指令合并 InstCombine 与稀疏条件常量传播 SCCP 等核心标量优化。",
+          "learning_goals": [
+            "理解 InstCombine 的模式匹配思路",
+            "掌握 SCCP 的格与常量传播",
+            "了解标量优化在默认 pipeline 中的位置"
+          ],
+          "source_files": [
+            "lib/Transforms/InstCombine/InstCombine.cpp",
+            "lib/Transforms/Scalar/SCCP.cpp"
+          ],
+          "minimal_modules": [
+            "InstCombine 模式匹配",
+            "SCCP 格与常量传播",
+            "标量优化在 pipeline 中的位置"
+          ],
+          "practice_task": "写一段含冗余计算的 IR，用 opt -passes=instcombine,sccp 观察被简化掉的指令。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "循环优化与 ScalarEvolution",
+          "order": 2,
+          "filename": "u4-l2-loop-scev.md",
+          "level": "intermediate",
+          "topic": "讲解 LoopInfo、ScalarEvolution 与循环展开等循环优化。",
+          "learning_goals": [
+            "理解自然循环模型",
+            "掌握 SCEV 如何表示递归表达式",
+            "了解循环展开的代价决策"
+          ],
+          "source_files": [
+            "include/llvm/Analysis/LoopInfo.h",
+            "include/llvm/Analysis/ScalarEvolution.h",
+            "lib/Transforms/Scalar/LoopUnrollPass.cpp"
+          ],
+          "minimal_modules": [
+            "LoopInfo 自然循环模型",
+            "ScalarEvolution 表达式",
+            "循环展开决策"
+          ],
+          "practice_task": "用 opt 跑循环展开，并输出（如 -passes='print<scalar-evolution>'）某个循环的 SCEV 表达式。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "过程间优化与内联",
+          "order": 3,
+          "filename": "u4-l3-ipo-inlining.md",
+          "level": "intermediate",
+          "topic": "讲解 IPO 中最重要的内联及其代价模型。",
+          "learning_goals": [
+            "理解内联代价 InlineCost",
+            "掌握 ModuleInliner 的调用图遍历",
+            "了解 alwaysinline 等内联相关属性"
+          ],
+          "source_files": [
+            "lib/Transforms/IPO/Inliner.cpp",
+            "lib/Transforms/IPO/ModuleInliner.cpp",
+            "include/llvm/Analysis/InlineCost.h"
+          ],
+          "minimal_modules": [
+            "InlineCost 代价模型",
+            "ModuleInliner 调用图遍历",
+            "内联相关属性与禁用"
+          ],
+          "practice_task": "写两个相互调用的函数，用 opt -passes=inline 观察，并对比加 alwaysinline 后的效果。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "别名分析与 MemorySSA",
+          "order": 4,
+          "filename": "u4-l4-aa-memoryssa.md",
+          "level": "intermediate",
+          "topic": "讲解别名分析（AA）、BasicAliasAnalysis 与 MemorySSA 内存使用建模。",
+          "learning_goals": [
+            "理解别名查询接口与 ModRef 结果",
+            "掌握 BasicAliasAnalysis 的基本规则",
+            "了解 MemorySSA 的内存版本化思想"
+          ],
+          "source_files": [
+            "include/llvm/Analysis/AliasAnalysis.h",
+            "include/llvm/Analysis/BasicAliasAnalysis.h",
+            "include/llvm/Analysis/MemorySSA.h"
+          ],
+          "minimal_modules": [
+            "AliasAnalysis 查询接口",
+            "BasicAliasAnalysis 规则",
+            "MemorySSA 内存版本化"
+          ],
+          "practice_task": "用 opt -passes=aa-eval 跑别名分析，记录 NoAlias/MayAlias/PartialAlias 的统计数字。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "代码生成与后端概览",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "代码生成流水线",
+          "order": 1,
+          "filename": "u5-l1-codegen-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解后端整体流水线：IR→指令选择→寄存器分配→机器码发射。",
+          "learning_goals": [
+            "理解 CodeGen 的阶段划分",
+            "掌握 CodeGenPassBuilder 如何组装后端 pass",
+            "了解子目标信息与数据布局的作用"
+          ],
+          "source_files": [
+            "docs/CodeGenerator.md",
+            "lib/Passes/CodeGenPassBuilder.cpp",
+            "lib/CodeGen/CodeGen.cpp"
+          ],
+          "minimal_modules": [
+            "后端阶段总览",
+            "CodeGenPassBuilder 组装",
+            "子目标信息与数据布局"
+          ],
+          "practice_task": "对照 docs/CodeGenerator.md 列出后端主要阶段，并在源码中找到每个阶段对应的入口 pass。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "机器 IR（Machine IR）",
+          "order": 2,
+          "filename": "u5-l2-machine-ir.md",
+          "level": "intermediate",
+          "topic": "讲解 MachineFunction / MachineBasicBlock / MachineInstr 等后端机器指令数据结构。",
+          "learning_goals": [
+            "理解后端的机器指令表示",
+            "区分 IR Instruction 与 MachineInstr",
+            "掌握寄存器与机器操作数"
+          ],
+          "source_files": [
+            "lib/CodeGen/MachineFunction.cpp",
+            "lib/CodeGen/MachineInstr.cpp",
+            "include/llvm/CodeGen/MachineFunction.h"
+          ],
+          "minimal_modules": [
+            "MachineFunction / MBB / MachineInstr",
+            "寄存器与操作数",
+            "MIR 与 IR 的对应"
+          ],
+          "practice_task": "用 llc -print-after-all 跑一个小函数，观察指令选择后到寄存器分配前的 MachineInstr。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "SelectionDAG 指令选择",
+          "order": 3,
+          "filename": "u5-l3-selectiondag.md",
+          "level": "advanced",
+          "topic": "讲解 SelectionDAG 的指令选择机制：IR→DAG lowering 与模式匹配选指令。",
+          "learning_goals": [
+            "理解 IR 到 DAG 的 lowering 过程",
+            "掌握 DAG 合法化与优化",
+            "了解基于模式匹配的选指令"
+          ],
+          "source_files": [
+            "lib/CodeGen/SelectionDAG/SelectionDAGISel.cpp",
+            "lib/CodeGen/SelectionDAG/SelectionDAGBuilder.cpp"
+          ],
+          "minimal_modules": [
+            "SelectionDAGBuilder 构建 DAG",
+            "合法化与优化",
+            "模式匹配选指令"
+          ],
+          "practice_task": "用 llc -debug（或 DAG 可视化选项）观察一个简单算术函数的 SelectionDAG 构建过程。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l4",
+          "title": "GlobalISel",
+          "order": 4,
+          "filename": "u5-l4-globalisel.md",
+          "level": "advanced",
+          "topic": "讲解 GlobalISel 作为更通用、更快速的指令选择框架。",
+          "learning_goals": [
+            "理解 IRTranslator / Legalizer / RegBankSelect / Select 各阶段",
+            "对比 GlobalISel 与 SelectionDAG 的差异",
+            "了解其适用场景"
+          ],
+          "source_files": [
+            "lib/CodeGen/GlobalISel/IRTranslator.cpp",
+            "lib/CodeGen/GlobalISel/Legalizer.cpp"
+          ],
+          "minimal_modules": [
+            "IRTranslator 翻译为通用 MIR",
+            "Legalizer 合法化指令",
+            "与 SelectionDAG 对比"
+          ],
+          "practice_task": "用 llc -global-isel 跑一个函数，对比与默认 SelectionDAG 路径的输出差异。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "寄存器分配、调度与 MC 层",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "寄存器分配",
+          "order": 1,
+          "filename": "u6-l1-regalloc.md",
+          "level": "advanced",
+          "topic": "讲解活跃区间 LiveIntervals 与贪心寄存器分配 RegAllocGreedy。",
+          "learning_goals": [
+            "理解活跃区间的计算",
+            "掌握物理寄存器映射与冲突",
+            "了解溢出（spill）决策"
+          ],
+          "source_files": [
+            "lib/CodeGen/LiveIntervals.cpp",
+            "lib/CodeGen/RegAllocGreedy.cpp",
+            "lib/CodeGen/RegAllocBasic.cpp"
+          ],
+          "minimal_modules": [
+            "LiveIntervals 计算",
+            "贪心分配与冲突",
+            "溢出（spill）决策"
+          ],
+          "practice_task": "用 llc -regalloc=greedy/basic 观察寄存器分配，并用 -debug 找到一次 spill。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "指令调度",
+          "order": 2,
+          "filename": "u6-l2-scheduling.md",
+          "level": "advanced",
+          "topic": "讲解 MachineScheduler 与基于依赖 DAG 的指令调度。",
+          "learning_goals": [
+            "理解调度 DAG 与关键路径",
+            "掌握前/后寄存器分配调度阶段",
+            "了解 MachineScheduler 的启发式"
+          ],
+          "source_files": [
+            "lib/CodeGen/MachineScheduler.cpp",
+            "lib/CodeGen/ScheduleDAGInstrs.cpp"
+          ],
+          "minimal_modules": [
+            "ScheduleDAG 建模",
+            "MachineScheduler 启发式",
+            "Pre / Post RA 调度"
+          ],
+          "practice_task": "用 llc -enable-misched 观察调度顺序变化，记录重排前后的指令序列。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "MC 层与目标文件生成",
+          "order": 3,
+          "filename": "u6-l3-mc-layer.md",
+          "level": "advanced",
+          "topic": "讲解 MC 层（MCStreamer / MCContext）与 AsmPrinter 如何发射汇编或目标文件。",
+          "learning_goals": [
+            "理解从 MachineInstr 到 MCInst 再到目标文件的链路",
+            "区分 ELF / Mach-O / COFF 各文件格式流",
+            "掌握 AsmPrinter 的降级职责"
+          ],
+          "source_files": [
+            "include/llvm/MC/MCStreamer.h",
+            "include/llvm/MC/MCContext.h",
+            "lib/CodeGen/AsmPrinter/AsmPrinter.cpp"
+          ],
+          "minimal_modules": [
+            "MCStreamer / MCContext 抽象",
+            "AsmPrinter 降级 MachineInstr→MCInst",
+            "ELF / Mach-O / COFF 流"
+          ],
+          "practice_task": "用 llc -filetype=obj 与 -filetype=asm 对比输出，理解 AsmPrinter / MC 的分工。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "目标后端与 TableGen",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "后端目录结构与 TargetMachine",
+          "order": 1,
+          "filename": "u7-l1-backend-structure.md",
+          "level": "advanced",
+          "topic": "以 X86 为例讲解后端目录组织与 TargetMachine / CodeGenPassBuilder 的职责。",
+          "learning_goals": [
+            "理解一个后端由哪些组件构成",
+            "掌握 TargetMachine 与数据布局",
+            "了解 CodeGenPassBuilder 如何组装本后端流水线"
+          ],
+          "source_files": [
+            "lib/Target/X86/X86.h",
+            "lib/Target/X86/X86TargetMachine.cpp",
+            "lib/Target/X86/X86CodeGenPassBuilder.cpp"
+          ],
+          "minimal_modules": [
+            "后端目录组件",
+            "TargetMachine 与数据布局",
+            "X86CodeGenPassBuilder 组装"
+          ],
+          "practice_task": "在 lib/Target/X86 中找到指令选择、寄存器信息、调用约定的入口文件，整理成一份清单。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "TableGen 与 .td 描述",
+          "order": 2,
+          "filename": "u7-l2-tablegen.md",
+          "level": "advanced",
+          "topic": "讲解 TableGen 的 .td 描述语言与 backend 代码生成机制。",
+          "learning_goals": [
+            "理解 .td 如何描述指令/寄存器/调用约定",
+            "掌握 Record / Def 基础模型",
+            "了解 tablegen 后端如何生成 C++ 代码"
+          ],
+          "source_files": [
+            "include/llvm/TableGen/Record.h",
+            "lib/TableGen/Main.cpp",
+            "lib/Target/X86/X86.td",
+            "utils/TableGen/CodeEmitterGen.cpp"
+          ],
+          "minimal_modules": [
+            "Record / Def 基础模型",
+            "tablegen 工具与 Main",
+            "常用 backend 举例"
+          ],
+          "practice_task": "运行 llvm-tblgen -dump-records 处理 X86.td，统计其中指令与寄存器的 def 数量。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "指令选择与 Lowering",
+          "order": 3,
+          "filename": "u7-l3-isel-lowering.md",
+          "level": "advanced",
+          "topic": "讲解后端如何把 IR 操作 Lowering 成目标指令并完成选择。",
+          "learning_goals": [
+            "理解 TargetLowering 的操作合法化",
+            "掌握自定义 lowering 的扩展点",
+            "了解 DAG 到 DAG 的模式选择"
+          ],
+          "source_files": [
+            "lib/Target/X86/X86ISelLowering.cpp",
+            "lib/Target/X86/X86ISelDAGToDAG.cpp"
+          ],
+          "minimal_modules": [
+            "TargetLowering 操作合法化",
+            "自定义 Lowering",
+            "DAG 到 DAG 模式选择"
+          ],
+          "practice_task": "在 X86ISelLowering 中找到一个 setOperationAction 调用，说明它对某操作做了什么决策。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "JIT 执行与测试",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "执行引擎与 ORC JIT",
+          "order": 1,
+          "filename": "u8-l1-orc-jit.md",
+          "level": "advanced",
+          "topic": "讲解 ExecutionEngine 抽象与 ORC v2 的层式架构思想，并介绍 JITDylib 的 DefinitionGenerator 扩展点（以本次新增的 COFFAutoImportGenerator 为例），最后通过 HowToUseLLJIT 示例上手。",
+          "learning_goals": [
+            "理解 IR 如何被 JIT 编译并执行",
+            "掌握 ORC v2 的层式架构思想",
+            "看懂 HowToUseLLJIT 示例",
+            "了解 ORC 的 DefinitionGenerator 扩展点（以新增的 COFFAutoImportGenerator 为例）"
+          ],
+          "source_files": [
+            "examples/HowToUseLLJIT/HowToUseLLJIT.cpp",
+            "lib/ExecutionEngine/ExecutionEngine.cpp",
+            "lib/ExecutionEngine/Orc",
+            "docs/ORCv2.md",
+            "include/llvm/ExecutionEngine/Orc/COFFAutoImportGenerator.h"
+          ],
+          "minimal_modules": [
+            "ExecutionEngine 抽象",
+            "ORC v2 层式架构",
+            "HowToUseLLJIT 示例",
+            "DefinitionGenerator 扩展点与 COFF dllimport 自动导入示例"
+          ],
+          "practice_task": "运行 HowToUseLLJIT，并修改它让 JIT 模块返回不同整数，验证执行结果；再阅读 COFFAutoImportGenerator 的头文件注释，说明它如何以单个动态库的导出表为权威来按需合成 __imp_X 指针槽与跳转 thunk。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u8-l2",
+          "title": "测试体系：lit 与 FileCheck",
+          "order": 2,
+          "filename": "u8-l2-lit-filecheck.md",
+          "level": "advanced",
+          "topic": "讲解 LLVM 的测试组织、lit 测试运行器与 FileCheck 模式匹配。",
+          "learning_goals": [
+            "理解 test/ 目录与 lit 的运行方式",
+            "掌握 FileCheck 的 CHECK 写法",
+            "学会新增一个最小测试用例"
+          ],
+          "source_files": [
+            "test/",
+            "lib/FileCheck/FileCheck.cpp",
+            "docs/TestingGuide.md",
+            "docs/MyFirstTypoFix.md"
+          ],
+          "minimal_modules": [
+            "test/ 目录组织与 lit",
+            "FileCheck CHECK 语法",
+            "新增一个测试用例"
+          ],
+          "practice_task": "仿照 MyFirstTypoFix，在 test/ 下写一个用 opt + FileCheck 验证某 pass 行为的最小用例。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "扩展实践：新 Pass / 新后端",
+          "order": 3,
+          "filename": "u8-l3-extension-practice.md",
+          "level": "advanced",
+          "topic": "综合讲解如何新增一个优化 pass，以及参与一个新后端开发的最小工程流程。",
+          "learning_goals": [
+            "掌握贡献一个 pass 的注册与测试闭环",
+            "了解新后端的最小组件清单",
+            "了解编码规范与贡献流程"
+          ],
+          "source_files": [
+            "examples/BrainF/BrainF.cpp",
+            "docs/CodeGenerator.md",
+            "include/llvm/Passes/PassBuilder.h"
+          ],
+          "minimal_modules": [
+            "新 Pass 的注册与测试闭环",
+            "新后端最小组件清单",
+            "贡献流程与编码规范"
+          ],
+          "practice_task": "设计一个空的 pass 框架（注册 + 测试用例骨架），列出它需要在哪些文件中登记。",
+          "depends_on": [
+            "u3-l2",
+            "u7-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
