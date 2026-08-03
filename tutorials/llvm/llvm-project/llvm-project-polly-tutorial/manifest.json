@@ -1,7 +1,7 @@
 {
   "project": "llvm-project-polly",
-  "head": "abe5aa5cb2336f32dca8e765710ec212a926476c",
-  "rationale": "Polly 是 LLVM 的多面体循环优化器，核心是一条「检测 SCoP → 构建多面体模型 → 计算依赖 → 预优化变换 → 调度优化 → 生成 AST → 代码生成」的单函数阶段流水线，由 lib/Pass/PhaseManager.cpp 的 PhaseManager::run() 统一编排。因此学习路线严格沿这条主线展开：先让读者从零认识项目（U1）、跑通命令并理解插件如何挂入 LLVM Pass Manager（U1–U2），再以 PhaseManager 为「枢纽讲义」纵览整条流水线（U2）；随后按数据流自顶向下深入每一阶段——SCoP 检测（U3）、多面体模型构建与 SCEV→ISL 转换（U4）、依赖分析（U5）、预优化变换 Simplify/ForwardOpTree/DeLICM（U6）；之后进入专家层的核心算法：调度优化与 tiling/GEMM（U7）、AST 生成与代码生成（含 OpenMP，U8）；最后覆盖 JScop 交换格式与 ISL 支撑层（U9）以及测试、诊断与二次开发实战（U10）。讲义间依赖清晰：模型构建依赖检测、变换依赖依赖分析、代码生成依赖 AST 与调度，形成可追溯的学习图。Polly 属大型项目，故拆为 10 单元 35 讲，逻辑优先而非凑数。",
+  "head": "0e87f69d0c327612590f73b715c657c5096383c2",
+  "rationale": "本次为增量更新（incremental）。通过 git diff/log 比对上次 HEAD（abe5aa5c）与当前 HEAD（0e87f69d），在两个 HEAD 之间仓库共有 47 次提交，但没有任何一次提交触及 polly/ 子目录——`git diff --stat abe5aa5c..0e87f69d -- polly/` 输出为空，`git log -- polly/` 亦为空。这些提交全部落在 llvm-project 的其它部分（clang、lldb、libc、Flang、lld 等），与 Polly 的源码、头文件、测试与文档无关。由于本手册 35 篇讲义所引用的全部真实源码文件（lib/Pass/PhaseManager.cpp、lib/Analysis/ScopInfo.cpp、lib/Transform/ScheduleOptimizer.cpp、lib/CodeGen/* 等）均未发生任何变化，所有讲义在功能与行号引用上仍然准确，因此本次全部标记为 keep，无需 update/rebuild/new。学习路线本身维持不变：仍以 PhaseManager::run() 编排的『检测 SCoP → 构建多面体模型 → 依赖分析 → 预优化变换 → 调度优化 → AST → 代码生成』单函数阶段流水线为主线，分 10 单元 35 讲，从认识项目（U1）→ 主链路 PhaseManager（U2）→ SCoP 检测（U3）→ 模型构建（U4）→ 依赖分析（U5）→ 预优化（U6）→ 调度优化（U7）→ AST 与代码生成（U8）→ JScop 与 ISL 支撑（U9）→ 测试与二次开发（U10），依赖关系清晰可追溯。",
   "units": [
     {
       "id": "u1",
@@ -31,7 +31,7 @@
           ],
           "practice_task": "阅读 README 与 Architecture.rst，用 3–5 句话写出 Polly 的输入/输出与它相对普通 LLVM -O3 的增量价值，并列举它声称支持的两类优化。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -57,7 +57,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -83,7 +83,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -111,7 +111,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -146,7 +146,7 @@
             "u1-l1",
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -174,7 +174,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -202,7 +202,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -236,7 +236,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -262,7 +262,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -290,7 +290,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -325,7 +325,7 @@
             "u3-l1",
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -351,7 +351,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -377,7 +377,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -405,7 +405,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -439,7 +439,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -465,7 +465,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -500,7 +500,7 @@
             "u4-l1",
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -526,7 +526,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -554,7 +554,7 @@
             "u5-l2",
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l4",
@@ -585,7 +585,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -620,7 +620,7 @@
             "u5-l1",
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -645,7 +645,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -675,7 +675,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l4",
@@ -701,7 +701,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l5",
@@ -728,7 +728,7 @@
             "u7-l1",
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -762,7 +762,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -789,7 +789,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -819,7 +819,7 @@
           "depends_on": [
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l4",
@@ -849,7 +849,7 @@
           "depends_on": [
             "u8-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -885,7 +885,7 @@
             "u4-l1",
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -915,7 +915,7 @@
           "depends_on": [
             "u4-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -952,7 +952,7 @@
             "u1-l3",
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -979,7 +979,7 @@
           "depends_on": [
             "u10-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l3",
@@ -1010,7 +1010,7 @@
             "u3-l3",
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l4",
@@ -1041,7 +1041,7 @@
             "u6-l1",
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

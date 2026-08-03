@@ -1,7 +1,7 @@
 {
   "project": "llvm-project-bolt",
-  "head": "abe5aa5cb2336f32dca8e765710ec212a926476c",
-  "rationale": "本大纲按「先认识、再读数据结构、再走主链路、再深入子系统和优化、最后到代码生成/重写/工程实践」的顺序，把 BOLT 这个二进制后链接优化器拆成 9 个单元 31 篇讲义。单元 1 让读者从零认识项目并跑通端到端流程；单元 2 讲清贯穿全工程的四大核心数据结构（BinaryContext、BinaryFunction、BasicBlock/CFG、MCPlus 元数据），它们是后续所有源码阅读的基础；单元 3 顺着 RewriteInstance::run() 的真实调用链讲主处理流程（发现→反汇编→CFG→重定位）；单元 4 专门讲 Profile 子系统，因为 BOLT 是 profile-guided 的，profile 质量直接决定效果；单元 5 建立 pass 框架的心智模型（注册、顺序、并行、DynoStats、VerifyCFG），这是理解单元 6 各优化 pass 的前提；单元 6 是 BOLT 的核心价值所在——block/function 排序、热冷分裂、调用优化、栈帧与寄存器优化；单元 7 讲目标后端抽象与代码生成（发射+ORC 链接）；单元 8 讲二进制重写最难的调试信息重写、运行时库/插桩和元数据/特殊 section 重写；单元 9 收尾于测试体系与辅助工具/性能调优。讲义之间依赖关系严格遵循「先框架后细节、先公共后特化」的原则，每篇只解决一个主题并配一个可操作的源码实践任务。",
+  "head": "0e87f69d0c327612590f73b715c657c5096383c2",
+  "rationale": "本大纲按「先认识、再读数据结构、再走主链路、再深入子系统和优化、最后到代码生成/重写/工程实践」的顺序，把 BOLT 这个二进制后链接优化器拆成 9 个单元 31 篇讲义。单元 1 让读者从零认识项目并跑通端到端流程；单元 2 讲清贯穿全工程的四大核心数据结构（BinaryContext、BinaryFunction、BasicBlock/CFG、MCPlus 元数据），它们是后续所有源码阅读的基础；单元 3 顺着 RewriteInstance::run() 的真实调用链讲主处理流程（发现→反汇编→CFG→重定位）；单元 4 专门讲 Profile 子系统，因为 BOLT 是 profile-guided 的，profile 质量直接决定效果；单元 5 建立 pass 框架的心智模型（注册、顺序、并行、DynoStats、VerifyCFG），这是理解单元 6 各优化 pass 的前提；单元 6 是 BOLT 的核心价值所在——block/function 排序、热冷分裂、调用优化、栈帧与寄存器优化；单元 7 讲目标后端抽象与代码生成（发射+ORC 链接）；单元 8 讲二进制重写最难的调试信息重写、运行时库/插桩和元数据/特殊 section 重写；单元 9 收尾于测试体系与辅助工具/性能调优。讲义之间依赖关系严格遵循「先框架后细节、先公共后特化」的原则，每篇只解决一个主题并配一个可操作的源码实践任务。本次为增量更新：经 git diff 校验，上一 HEAD（abe5aa5c）与当前 HEAD（0e87f69d）之间 bolt/ 目录下的代码完全没有变化（无任何 commit 触及、变更文件数为 0、diff 为空），因此所有讲义的源码依据保持不变，全部标记为 keep，无需重写。",
   "units": [
     {
       "id": "u1",
@@ -32,7 +32,7 @@
           ],
           "practice_task": "阅读 README.md，用一句话写出 BOLT 与编译器 -O3 优化的本质区别；并列出对输入二进制必须满足的 3 个条件，说明每个条件为什么必要。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -60,7 +60,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -88,7 +88,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -116,7 +116,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -151,7 +151,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -180,7 +180,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -209,7 +209,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -237,7 +237,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -273,7 +273,7 @@
             "u1-l4",
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -302,7 +302,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -333,7 +333,7 @@
             "u2-l3",
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -363,7 +363,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -401,7 +401,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -430,7 +430,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -460,7 +460,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -491,7 +491,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -532,7 +532,7 @@
             "u2-l1",
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -560,7 +560,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -588,7 +588,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -624,7 +624,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -658,7 +658,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -688,7 +688,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l4",
@@ -719,7 +719,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l5",
@@ -752,7 +752,7 @@
             "u5-l1",
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -792,7 +792,7 @@
             "u2-l4",
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -824,7 +824,7 @@
             "u3-l1",
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -866,7 +866,7 @@
             "u3-l1",
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -901,7 +901,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -935,7 +935,7 @@
             "u3-l1",
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -976,7 +976,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -1011,7 +1011,7 @@
             "u4-l1",
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

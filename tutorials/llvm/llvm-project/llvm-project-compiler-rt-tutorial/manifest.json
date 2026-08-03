@@ -1,7 +1,7 @@
 {
   "project": "llvm-project-compiler-rt",
-  "head": "abe5aa5cb2336f32dca8e765710ec212a926476c",
-  "rationale": "compiler-rt 是 LLVM 工具链的运行时支撑库，体量庞大、子库众多（约 28 个组件），涵盖 builtins、sanitizer 公共设施、各类 sanitizer（ASan/MSan/TSan/UBSan/HWASan/LSan/MemProf 等）、分配器（Scudo/GWP-ASan）、剖析与覆盖率（profile/coverage）、函数追踪（XRay）、模糊测试（libFuzzer）、JIT 运行时（ORC）以及安全加固（SafeStack/CFI）。学习顺序遵循「先看清全貌再逐层深入、先公共设施后具体应用」的原则：第 1 单元帮助读者从零理解项目定位、目录、构建与测试；第 2 单元讲解最基础且独立的 builtins 库；第 3、4 单元夯实所有 sanitizer 共用的 sanitizer_common 与 interception 公共地基；随后第 5–8 单元按「内存 sanitizer → 线程 sanitizer → 未定义行为/类型检测」逐一深入主流检测器；第 9 单元聚焦分配器与安全加固；第 10 单元覆盖剖析与覆盖率；第 11–13 单元进入进阶的 libFuzzer、XRay 与 ORC 运行时；第 14 单元补充 DFSan/NSan/RTSan/ctx_profile 等较新的专用运行时；最后第 15 单元讨论跨平台移植、如何新增运行时以及 BlocksRuntime，并做整体回顾。每篇讲义都引用真实存在的源码文件并配有可操作的实践任务，讲义之间通过 depends_on 建立清晰的前置依赖，确保读者能由浅入深、循序渐进地掌握整个项目。",
+  "head": "0e87f69d0c327612590f73b715c657c5096383c2",
+  "rationale": "compiler-rt 是 LLVM 工具链的运行时支撑库，体量庞大、子库众多（约 28 个组件），涵盖 builtins、sanitizer 公共设施、各类 sanitizer（ASan/MSan/TSan/UBSan/HWASan/LSan/MemProf 等）、分配器（Scudo/GWP-ASan）、剖析与覆盖率（profile/coverage）、函数追踪（XRay）、模糊测试（libFuzzer）、JIT 运行时（ORC）以及安全加固（SafeStack/CFI）。学习顺序遵循「先看清全貌再逐层深入、先公共设施后具体应用」的原则：第 1 单元帮助读者从零理解项目定位、目录、构建与测试；第 2 单元讲解最基础且独立的 builtins 库；第 3、4 单元夯实所有 sanitizer 共用的 sanitizer_common 与 interception 公共地基；随后第 5–8 单元按「内存 sanitizer → 线程 sanitizer → 未定义行为/类型检测」逐一深入主流检测器；第 9 单元聚焦分配器与安全加固；第 10 单元覆盖剖析与覆盖率；第 11–13 单元进入进阶的 libFuzzer、XRay 与 ORC 运行时；第 14 单元补充 DFSan/NSan/RTSan/ctx_profile 等较新的专用运行时；最后第 15 单元讨论跨平台移植、如何新增运行时以及 BlocksRuntime，并做整体回顾。每篇讲义都引用真实存在的源码文件并配有可操作的实践任务，讲义之间通过 depends_on 建立清晰的前置依赖，确保读者能由浅入深、循序渐进地掌握整个项目。本次为增量更新：经核对，前一次 HEAD（abe5aa5cb2336f32dca8e765710ec212a926476c）到当前 HEAD（0e87f69d0c327612590f73b715c657c5096383c）之间共有 47 个提交，但没有任何一个提交改动 compiler-rt 目录下的源码（变更均集中在 lldb/libc/mlir/clang/ORC JIT/X86/AArch64 GlobalISel 等 monorepo 其他部分），因此所有讲义均标记为 keep，学习路径结构与内容保持不变。",
   "units": [
     {
       "id": "u1",
@@ -33,7 +33,7 @@
           ],
           "practice_task": "阅读 README.txt 与 Maintainers.md，列出 compiler-rt 包含的主要组件类别，并标注每个组件当前的维护者；尝试用一句话向同事解释 compiler-rt 与 libc/libgcc 的区别。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -60,7 +60,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -88,7 +88,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -116,7 +116,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -131,7 +131,7 @@
           "title": "builtins 概览：libgcc 的替代品",
           "order": 1,
           "filename": "u2-l1-builtins-overview.md",
-          "level": "beginner",
+          "level": "intermediate",
           "topic": "讲解 builtins 库作为 libgcc 替代品的定位、每个函数独立成文件的组织方式、统一的类型定义（si_int/di_int/ti_int 等），以及通用实现与架构优化实现并存的结构。",
           "learning_goals": [
             "理解 builtins 库的功能边界与命名约定",
@@ -153,7 +153,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -183,7 +183,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -212,7 +212,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -242,7 +242,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -278,7 +278,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -307,7 +307,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -335,7 +335,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -363,7 +363,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l5",
@@ -391,7 +391,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -427,7 +427,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -454,7 +454,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -491,7 +491,7 @@
             "u3-l1",
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -520,7 +520,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -549,7 +549,7 @@
             "u5-l2",
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l4",
@@ -579,7 +579,7 @@
             "u5-l3",
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l5",
@@ -607,7 +607,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -645,7 +645,7 @@
             "u3-l1",
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -673,7 +673,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -702,7 +702,7 @@
             "u3-l1",
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l4",
@@ -732,7 +732,7 @@
             "u3-l1",
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -769,7 +769,7 @@
             "u3-l1",
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -797,7 +797,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -826,7 +826,7 @@
             "u7-l1",
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l4",
@@ -854,7 +854,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -890,7 +890,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -918,7 +918,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -945,7 +945,7 @@
           "depends_on": [
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l4",
@@ -973,7 +973,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1010,7 +1010,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -1039,7 +1039,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",
@@ -1068,7 +1068,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l4",
@@ -1096,7 +1096,7 @@
           "depends_on": [
             "u3-l5"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1132,7 +1132,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -1161,7 +1161,7 @@
           "depends_on": [
             "u10-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l3",
@@ -1190,7 +1190,7 @@
             "u3-l1",
             "u10-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1228,7 +1228,7 @@
             "u10-l3",
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l2",
@@ -1256,7 +1256,7 @@
           "depends_on": [
             "u11-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l3",
@@ -1285,7 +1285,7 @@
             "u11-l1",
             "u11-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l4",
@@ -1313,7 +1313,7 @@
           "depends_on": [
             "u11-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1350,7 +1350,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u12-l2",
@@ -1378,7 +1378,7 @@
           "depends_on": [
             "u12-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u12-l3",
@@ -1406,7 +1406,7 @@
           "depends_on": [
             "u12-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1443,7 +1443,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u13-l2",
@@ -1471,7 +1471,7 @@
           "depends_on": [
             "u13-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u13-l3",
@@ -1500,7 +1500,7 @@
           "depends_on": [
             "u13-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1538,7 +1538,7 @@
             "u3-l1",
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u14-l2",
@@ -1567,7 +1567,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u14-l3",
@@ -1596,7 +1596,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u14-l4",
@@ -1625,7 +1625,7 @@
           "depends_on": [
             "u10-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1663,7 +1663,7 @@
             "u1-l3",
             "u3-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u15-l2",
@@ -1692,7 +1692,7 @@
             "u15-l1",
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u15-l3",
@@ -1722,7 +1722,7 @@
             "u14-l4",
             "u15-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }
