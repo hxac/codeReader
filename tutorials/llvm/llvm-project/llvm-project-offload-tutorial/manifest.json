@@ -1,7 +1,7 @@
 {
   "project": "llvm-project-offload",
-  "head": "0e87f69d0c327612590f73b715c657c5096383c2",
-  "rationale": "学习路线严格按运行时真实的调用链自底向上设计。第一单元（入门）先建立「项目是什么、怎么构建运行、编译器-运行时契约」的全局认识，让读者拿到可运行的 mental model。第二单元（进阶）沿真实执行路径展开：编译器生成的 __tgt_* 入口 → PluginManager 管理插件与设备 → DeviceTy 设备抽象 → 主机-设备数据映射 → target data/kernel 主流程 → 异步模型 → omp_target_* 用户 API，前置依赖逐层递进（如数据映射先于 target data 流程，流程先于 kernel 启动）。第三单元（专家）进入可复用插件框架与扩展机制，再到不绑定 OpenMP 的统一 liboffload API 与 TableGen/测试体系，并以最简单的 host 插件作为参考实现、再推广到 GPU 后端。每篇讲义只解决一个主题、锚定真实源码文件，最终目标是让读者能读懂任意插件并具备二次开发与扩展能力。",
+  "head": "3d60487f83797a10a6379669647a139e6823d3d2",
+  "rationale": "本次为增量更新。经核对 git diff（0e87f69d0c327612590f73b715c657c5096383c2..3d60487f83797a10a6379669647a139e6823d3d2），区间内 16 个提交均未触及 offload/ 子目录，offload 源码树与上一次生成时完全一致，因此所有讲义保持不变（action=keep），仅更新 head 指针。学习路线设计理由不变：严格按运行时真实调用链自底向上设计。第一单元（入门）先建立「项目是什么、怎么构建运行、编译器-运行时契约」的全局认识，让读者拿到可运行的 mental model。第二单元（进阶）沿真实执行路径展开：编译器生成的 __tgt_* 入口 → PluginManager 管理插件与设备 → DeviceTy 设备抽象 → 主机-设备数据映射 → target data/kernel 主流程 → 异步模型 → omp_target_* 用户 API，前置依赖逐层递进（如数据映射先于 target data 流程，流程先于 kernel 启动）。第三单元（专家）进入可复用插件框架与扩展机制，再到不绑定 OpenMP 的统一 liboffload API 与 TableGen/测试体系，并以最简单的 host 插件作为参考实现、再推广到 GPU 后端。每篇讲义只解决一个主题、锚定真实源码文件，最终目标是让读者能读懂任意插件并具备二次开发与扩展能力。",
   "units": [
     {
       "id": "u1",
@@ -33,7 +33,7 @@
           ],
           "practice_task": "阅读项目 README，写一段说明：这个项目解决什么问题、支持哪些主机与设备架构，并指出 libomptarget 与 liboffload 各自的定位。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -59,7 +59,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -89,7 +89,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -117,7 +117,7 @@
             "u1-l2",
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l5",
@@ -145,7 +145,7 @@
             "u1-l1",
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -179,7 +179,7 @@
           "depends_on": [
             "u1-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -205,7 +205,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -231,7 +231,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -257,7 +257,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l5",
@@ -282,7 +282,7 @@
           "depends_on": [
             "u2-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l6",
@@ -309,7 +309,7 @@
           "depends_on": [
             "u2-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l7",
@@ -335,7 +335,7 @@
           "depends_on": [
             "u2-l6"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l8",
@@ -361,7 +361,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -395,7 +395,7 @@
             "u2-l2",
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -422,7 +422,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -447,7 +447,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -478,7 +478,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l5",
@@ -503,7 +503,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l6",
@@ -527,7 +527,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l7",
@@ -554,7 +554,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l8",
@@ -584,7 +584,7 @@
             "u3-l2",
             "u2-l6"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l9",
@@ -609,7 +609,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l10",
@@ -636,7 +636,7 @@
           "depends_on": [
             "u2-l6"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l11",
@@ -663,7 +663,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l12",
@@ -693,7 +693,7 @@
           "depends_on": [
             "u3-l11"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }
