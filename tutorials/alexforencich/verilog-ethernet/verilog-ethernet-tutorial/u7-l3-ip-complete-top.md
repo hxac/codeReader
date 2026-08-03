@@ -1,0 +1,430 @@
+# ip_complete：顶层 IPv4 协议栈
+
+## 1. 本讲目标
+
+学完本讲后，你应当能够：
+
+- 说出 `ip_complete`（千兆）与 `ip_complete_64`（10G/25G）在本库协议栈中的定位：它们是把 `ip`、`arp`、`eth_arb_mux` 三个已经讲过的模块「拼装」成一个完整可用 IPv4 栈的**布线层**。
+- 画出从以太网帧输入到 IP 帧输出、再从 IP 帧输入到以太网帧输出的完整 RX/TX 数据通路，并指出每个子模块负责哪一段。
+- 理解 `ip` 模块如何通过 `arp_request`/`arp_response` 接口向 `arp` 模块查询目的 MAC，以及 ARP 失败如何回传 `tx_error_arp_failed`。
+- 解释 `local_mac`、`local_ip`、`gateway_ip`、`subnet_mask` 四个配置端口分别接到哪里、起什么作用，特别是 ARP 模块如何用子网掩码决定「直接查目的 IP」还是「改查网关 IP」。
+- 看懂 `ip_complete` 与 `ip_complete_64` 之间**仅位宽不同**的等价关系。
+
+## 2. 前置知识
+
+本讲是 IPv4 子系统的「收口」，依赖前面几讲建立的认知。开讲前请确认你已理解：
+
+- **AXI-Stream 接口与「并行头 + 载荷流」风格**（u1-l3、u3-l1）：`ip_complete` 对外的 `s_eth_*`/`m_eth_*`/`s_ip_*`/`m_ip_*` 全部沿用「`hdr_valid`/`hdr_ready` 握手的并行头部字段 + `axis_tdata/tvalid/tready/tlast/tuser` 的载荷流」这一统一接口。
+- **`eth_arb_mux` 多路复用器**（u3-2）：本讲在 TX 输出端用它把 IP 帧与 ARP 帧合并成一路以太网帧。记住它的铁律是「整帧不拆」，靠 `grant` 在帧首锁定、`tlast` 释放。
+- **`ip`/`ip_64` 核心模块**（u7-l2）：`ip` 顶层是布线层，RX 侧透传 `ip_eth_rx` 解析 IPv4 头，TX 侧有三状态机 `IDLE→ARP_QUERY→WAIT_PACKET`，发送前必须先查到目的 MAC，查不到就走「读空整帧」的丢包分支并报 `tx_error_arp_failed`。
+- **`arp` 模块与 `arp_cache`**（u6-2）：`arp` 对外提供 `arp_request(IP) → arp_response(MAC/error)` 接口，内部做被动学习、被动应答、未命中自动广播请求并按计数重试。
+
+如果你对这些还不熟，建议先读上述三讲。本讲几乎不重复它们的内部细节，只讲「它们如何被组装到一起」。
+
+### 一个直觉：协议栈就是「分层 + 查表」
+
+把 IPv4 协议栈想象成一条竖直的流水线：
+
+- **下到上（接收）**：进来的以太网帧先按 `EtherType` 分流——`0x0800` 是 IP、`0x0806` 是 ARP，各走各的解析通道。IP 帧被剥到只剩「IP 头 + 载荷」交给上层应用。
+- **上到下（发送）**：上层应用给出「IP 头字段 + 载荷」，但以太网帧还需要一个**目的 MAC 地址**——而应用只给得出目的 IP。于是 `ip` 模块必须向 `arp` 模块查表：「这个 IP 对应哪个 MAC？」查到了才能封装成完整的以太网帧发出去。
+
+`ip_complete` 做的全部工作，就是把这「分流、解析、查表、封装、合并」五件事用现成模块串起来，并暴露一组干净的对外端口。它自己几乎不带状态机，是一段精心连线的「胶水」。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 | 本讲用来讲什么 |
+|------|------|----------------|
+| `rtl/ip_complete.v` | 千兆（8 位）完整 IPv4+ARP 栈，以太网帧接口 | 主讲对象：布线结构、分类器、复用器、子模块实例化 |
+| `rtl/ip_complete_64.v` | 10G/25G（64 位）完整 IPv4+ARP 栈，以太网帧接口 | 对比对象：与 8 位版的等价差异 |
+| `rtl/arp.v` | ARP 顶层（含缓存、查表、重试） | 引用其网关/子网判定逻辑，讲「本地网络配置」 |
+| `rtl/ip.v` | IP 核心模块（u7-l2 已讲） | 作为被实例化的子模块，只看它的 ARP 请求/应答端口 |
+| `tb/test_ip_complete.py` | ip_complete 的仿真测试 | 提供真实可参照的配置值与测试场景 |
+
+> 说明：`rtl/ip.v`、`rtl/arp.v` 的内部细节已在 u7-l2、u6-l2 讲过，本讲只把它们当「黑盒端口」看，重点关注 `ip_complete` 如何把它们连线起来。
+
+## 4. 核心概念与源码讲解
+
+### 4.1 IP 栈顶层组装
+
+#### 4.1.1 概念说明
+
+`ip_complete` 是一个**纯组装模块**（wiring/integration layer）。它的注释一句话点题：
+
+> This module integrates the IP and ARP modules for a complete IP stack
+
+它自己几乎不实现协议逻辑，而是把三个已经独立可用、各自带 testbench 的子模块接在一起：
+
+1. **`ip`**（u7-l2）——负责 IPv4 收发，把以太网载荷里的 IP 包解析出来，也把上层给的 IP 字段封装成以太网帧（但缺目的 MAC）。
+2. **`arp`**（u6-l2）——负责 ARP 收发与 IP→MAC 缓存查询。
+3. **`eth_arb_mux`**（u3-2）——在发送方向把 IP 帧和 ARP 帧合并成一路以太网输出。
+
+之所以单独抽出这一层，是因为：`ip` 模块**自己不会查 MAC**——它只发请求；`arp` 模块**自己不收发 IP**——它只管地址解析。两者必须配对使用才能构成可工作的栈。`ip_complete` 就是这个「配对」的官方答案，应用层只要面对一组 `s_ip_*`/`m_ip_*` 端口即可，不必关心底层 ARP 细节。
+
+#### 4.1.2 核心流程
+
+整条通路可以画成下面这张「分流—解析—查表—合并」的示意图（`ip_complete` 内部）：
+
+```
+                         ┌───────── RX 方向（接收）─────────┐
+s_eth_* (以太网帧入) ──►│  按 EtherType 分流（分类器）      │
+                         │   0x0800 ─► ip(rx)  ─► m_ip_*    │  ← IP 帧交给上层应用
+                         │   0x0806 ─► arp(rx)              │  ← ARP 帧 arp 自己处理
+                         └──────────────────────────────────┘
+
+                         ┌───────── TX 方向（发送）─────────┐
+s_ip_* (上层 IP 入) ──► ip(tx) ──┐                         │
+            │                     ├─► eth_arb_mux(2→1) ─► m_eth_* (以太网帧出)
+            ▼                     │
+   arp_request(IP) ──► arp ──┐   │
+   ◄── arp_response(MAC) ────┘   │
+   arp 自身发送的 ARP 帧 ─────────┘
+```
+
+关键观察：
+
+- **RX 是一个 1→2 解复用**（demux）：一根输入帧流，按 `EtherType` 拆给 `ip` 或 `arp`。
+- **TX 是一个 2→1 复用**（mux）：`ip` 发出的数据帧和 `arp` 发出的 ARP 帧合并成一根输出流。
+- **`arp_request`/`arp_response` 是一条「侧信道」**：它在 `ip` 与 `arp` 之间横向传递，不走以太网帧通路。`ip` 发包前用它问 MAC，`arp` 用它回 MAC 或回错误。
+
+注意 `ip_complete` 对外暴露的端口命名规律（承接 u1-l1 的命名约定）：
+
+- `s_eth_*` / `m_eth_*`：以太网帧侧（下接口，接 MAC）。
+- `s_ip_*` / `m_ip_*`：IP 帧侧（上接口，接应用/上层协议如 UDP）。
+- `*_payload_axis_*`：载荷的 AXI-Stream 流；`*_hdr_*`：并行头部字段。
+
+#### 4.1.3 源码精读
+
+模块声明与参数。注意 4 个参数**全部是 ARP 相关的**，没有任何 IP 协议参数——说明这一层的可配置点都在地址解析上：
+
+[rtl/ip_complete.v:L34-L39](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete.v#L34-L39) —— 模块参数：ARP 缓存深度、重试次数、重试间隔、超时（千兆版基于 125 MHz 时钟）。
+
+这 4 个参数原样下传给内部的 `arp` 实例（见 4.3.3）。它们的真实时间含义：
+
+\[
+T_{\text{interval}} = \frac{125\,000\,000 \times 2}{125\,\text{MHz}} = 2\,\text{s}, \qquad
+T_{\text{timeout}} = \frac{125\,000\,000 \times 30}{125\,\text{MHz}} = 30\,\text{s}
+\]
+
+也就是：每次 ARP 请求后等 2 秒没应答就重发，最多重发 4 次，总共 4 次请求；从首次请求算起 30 秒仍无应答则判 ARP 失败。
+
+**RX 方向的分流（分类器）**。这是 `ip_complete` 里**唯一一段带寄存器的自有逻辑**，本质上是一个按 `EtherType` 工作的 1→2 解复用器：
+
+[rtl/ip_complete.v:L200-L202](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete.v#L200-L202) —— 组合判断当前帧类型：IP（`0x0800`）/ ARP（`0x0806`）/ 都不是。
+
+[rtl/ip_complete.v:L204-L227](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete.v#L204-L227) —— 把选路结果**寄存一拍并锁存到整帧结束**：帧首（无任何 select 有效时）锁存当前 `EtherType` 的判定，之后一直保持，直到 `tvalid && tready && tlast`（帧尾真正传走）才允许下一次锁存。
+
+这段锁存逻辑和 `eth_demux`（u3-2）的 `frame_reg` 是同一个思想：**整帧期间选路不变，绝不把一帧拆成两半分给两个消费者**。`s_select_none`（既不是 IP 也不是 ARP）这一路用来「吞掉」不关心的帧——对应的 `tready` 直接给 1，把帧读走丢弃。
+
+随后是把分流结果接到 `ip(rx)` 与 `arp(rx)` 输入口的 `assign`，注意 `tvalid` 被「与」上了对应的 `select_reg`，于是只有被选中的一路才真正驱动载荷：
+
+[rtl/ip_complete.v:L229-L245](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete.v#L229-L245) —— `ip_rx_*` 与 `arp_rx_*` 的载荷驱动；未被选中的路 `tvalid` 恒为 0。
+
+而回送给上游的 `s_eth_hdr_ready` / `s_eth_payload_axis_tready` 则是「按当前类型多路选择」——这其实就是一个数据选择器（mux），把被选中那一子模块的 `tready` 回传给上游：
+
+[rtl/ip_complete.v:L247-L253](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete.v#L247-L253) —— 把反压信号 `hdr_ready`/`tready` 按帧类型回选给上游；`select_none` 时直接给 ready 把帧丢弃。
+
+**TX 方向的合并（`eth_arb_mux`）**。两个发送源（`ip` 的数据帧、`arp` 的 ARP 帧）被接到一个 2 端口的 `eth_arb_mux`：
+
+[rtl/ip_complete.v:L258-L300](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete.v#L258-L300) —— `eth_arb_mux` 实例化，`S_COUNT=2`，端口 0 是 `ip_tx`、端口 1 是 `arp_tx`（靠 `{ip_tx_*, arp_tx_*}` 拼接，LSB 在前）。
+
+注意两个仲裁参数：
+
+- `ARB_TYPE_ROUND_ROBIN(0)` —— **优先级仲裁**，不是轮询。
+- `ARB_LSB_HIGH_PRIORITY(1)` —— LSB（端口 0，即 `ip_tx`）优先级更高。
+
+两者合起来意味着：**当 IP 帧和 ARP 帧同时想发送时，IP 数据帧优先**。但这并不意味着 ARP 会被饿死——因为 `eth_arb_mux` 的 `grant` 一旦给出就会保持到整帧 `tlast`（u3-2 已讲），所以只要 IP 帧这一帧发完，ARP 帧立刻就能获得输出权。
+
+**`ip` 子模块的实例化**。注意它的 `arp_request_*` / `arp_response_*` 端口接到了模块内部的一组 `wire`，这些 `wire` 同时也接到下面的 `arp` 实例——这就是连接两者的「侧信道」：
+
+[rtl/ip_complete.v:L305-L390](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete.v#L305-L390) —— `ip` 实例；以太网侧接 `ip_rx_*`/`ip_tx_*`，IP 侧直接对外接到 `m_ip_*`/`s_ip_*`，ARP 请求/应答接到内部 `wire`，配置接 `local_mac`/`local_ip`。
+
+一条值得强调的细节：`ip` 实例的 **IP 输入端口 `s_ip_*` 和 IP 输出端口 `m_ip_*` 直接连到 `ip_complete` 的对外端口**，中间没有任何缓冲或状态机——也就是说 `ip_complete` 在「上层 ↔ IP」这条路径上是**完全透传**的，所有 IP 层行为都由 `ip` 模块决定。
+
+#### 4.1.4 代码实践
+
+**实践目标**：通过阅读真实测试，确认「发送一个 IP 包会先触发 ARP 请求」这一端到端行为，并理解各端口如何被驱动。
+
+**操作步骤**：
+
+1. 打开 `tb/test_ip_complete.py`，定位到 `check()` 协程里的初始化段。注意它如何配置 `ip_complete` 的四个网络参数（地址均为十六进制，注意 IP 是大端序写入 32 位）：
+
+   ```
+   local_mac  = 0x5A5152535455
+   local_ip   = 0xc0a80164   # 192.168.1.100
+   gateway_ip = 0xc0a80101   # 192.168.1.1
+   subnet_mask= 0xffffff00   # 255.255.255.0  →  /24
+   ```
+
+   对应源码 [tb/test_ip_complete.py:L366-L369](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/tb/test_ip_complete.py#L366-L369)。
+
+2. 阅读 "test 2: test IP TX packet" 段（约 L411 起）：测试从 `s_ip_*` 侧（上层）注入一个目的 IP 为 `0xc0a80166`（192.168.1.102）的包，然后**等待 `m_eth_*` 侧（以太网）输出一个 ARP 请求**，并断言这个 ARP 请求的关键字段。
+
+3. 跟踪这条断言链：ARP 请求的目的 MAC 是广播 `0xFFFFFFFFFFFF`，源 MAC 是 `local_mac`，`arp_oper==1`（请求），`arp_tpa==0xc0a80166`（即要查的 IP）。
+
+**需要观察的现象**：上层只给了一个目的 IP，并没有给目的 MAC；但 `ip_complete` 在 `m_eth_*` 输出的第一帧是 ARP 请求而不是 IP 数据帧——这正说明 `ip` 模块发 IP 前先走了 `arp_request` 侧信道向 `arp` 查 MAC，而 `arp` 因缓存未命中自动构造并发出 ARP 请求。
+
+**预期结果**：ARP 请求发出后，测试再从 `s_eth_*` 喂回一个 `arp_oper==2` 的 ARP 应答（`arp_spa==0xc0a80166`、`arp_sha==0xDAD1D2D3D4D5`），随后 `m_eth_*` 才输出真正的 IP 数据帧，且与注入的 `test_frame` 逐字段相等。这就是「查询—应答—学习—发送」的完整闭环。
+
+> 运行说明：`tb/test_ip_complete.py` 是 myhdl 时代的旧式测试（文件头 `from myhdl import *`），按 u1-l4 的说明，当前 cocotb 回归流程不直接编译它。若要在本地复现，最稳妥的方式是参照 `tb/eth_mac_1g` 的三件套为 `ip_complete` 写一份 cocotb 版 `Makefile` + `test_ip_complete.v` + `test_ip_complete.py`，或直接把本场景的配置值与断言改写到 cocotb 用例中。本步骤以「阅读测试理解行为」为主，端到端仿真结果**待本地验证**。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 RX 方向用一个「按 `EtherType` 分流的 demux」，而 TX 方向用 `eth_arb_mux` 而不是同样一个 demux？
+
+**参考答案**：RX 是把**一根输入流**按类型送给两个互斥的消费者，任意时刻只有一路需要接收，所以是 1→2 解复用（且整帧选路固定）；TX 是**两个独立的生产者**都可能主动要发帧，且都需要争用同一根输出线，必须用仲裁器决定谁先发、并保证整帧不被拆散，所以用 `eth_arb_mux`。两者方向相反、需求不同。
+
+**练习 2**：`ip_complete` 对外的 `s_ip_*`/`m_ip_*` 端口在模块内部经过了几级寄存器/状态机？
+
+**参考答案**：零级。它们在 `ip` 实例的端口映射里**直接连到 `ip_complete` 的对外端口**（[rtl/ip_complete.v:L332-L369](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete.v#L332-L369)），`ip_complete` 在「上层 ↔ IP」路径上完全透传，所有 IP 行为由 `ip` 模块负责。
+
+---
+
+### 4.2 ARP 集成
+
+#### 4.2.1 概念说明
+
+`ip` 模块能封装 IP 头，但它**不知道**某个目的 IP 对应哪个 MAC 地址。这个知识只存在于 `arp` 模块的缓存里。因此 `ip_complete` 必须在两个子模块之间搭一条「查询通道」，让 `ip` 能向 `arp` 提问、`arp` 能给 `ip` 答复。这条通道就是 `arp_request_*` / `arp_response_*` 一组信号，也是 u7-l2 结尾预告的「与 `arp` 模块对偶的接口」。
+
+理解这条侧信道的关键是：**它和以太网帧通路是两条独立的物理路径**。ARP 查询在 `ip` 与 `arp` 之间横向直连，不经过分类器、不经过 `eth_arb_mux`；只有当查询未命中、`arp` 决定广播请求时，ARP 帧才走 `arp(tx) → eth_arb_mux → m_eth_*` 进入以太网帧通路。
+
+#### 4.2.2 核心流程
+
+`ip` 的 TX 状态机（u7-l2 已讲）与 `arp` 的查询逻辑通过下面这条握手协作：
+
+```
+ip(TX)                          arp
+  │ 发包前: 设置 arp_request_valid=1, arp_request_ip=目的IP
+  │ ──────────────────────────────────►  接收请求 (arp_request_ready)
+  │                                       子网判定 → 查 arp_cache
+  │                                            ├─ 命中: 立即回 MAC
+  │                                            └─ 未命中: 广播 ARP 请求, 重试, 超时
+  │  ◄──────────────────────────── arp_response_valid=1
+  │       arp_response_mac = MAC         arp_response_error = 0/1
+  │ 命中→锁存 MAC, 发 IP 帧
+  │ 失败→读空整帧载荷, 拉高 tx_error_arp_failed
+```
+
+要点：
+
+- **请求方是 `ip`，应答方是 `arp`**。`ip` 每发一个 IP 包都要查一次（每拍重查，见 u7-l2）。
+- `arp` 的应答分两种：成功（`arp_response_error=0`，附带 `arp_response_mac`）或失败（`arp_response_error=1`）。
+- 成功时 `ip` 锁存 MAC 并发包；失败时 `ip` 走「吞包」分支——把整帧载荷读空丢弃，并经 `tx_error_arp_failed` 上报（这个信号也直接透传到 `ip_complete` 对外）。
+- 在 `arp` 内部，一次「未命中」会触发至多 `ARP_REQUEST_RETRY_COUNT` 次广播请求；若 `ARP_REQUEST_TIMEOUT` 内仍无应答，才回 `error=1`。这段时间里 `ip` 一直在等。
+
+#### 4.2.3 源码精读
+
+侧信道的连线声明（一组简单的 `wire`，纯组合互连，无寄存器）：
+
+[rtl/ip_complete.v:L145-L151](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete.v#L145-L151) —— `arp_request_*`/`arp_response_*` 互连线：请求方向（valid/ready/ip）与应答方向（valid/ready/error/mac）。
+
+这组线在 `ip` 实例的端口里是「请求输出 + 应答输入」：
+
+[rtl/ip_complete.v:L370-L377](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete.v#L370-L377) —— `ip` 实例的 ARP 端口：`arp_request_*` 为输出、`arp_response_*` 为输入。
+
+在 `arp` 实例的端口里方向正好对调：
+
+[rtl/ip_complete.v:L426-L433](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete.v#L426-L433) —— `arp` 实例的 ARP 端口：`arp_request_*` 为输入、`arp_response_*` 为输出。
+
+一进一出，闭环成立。值得注意的是 `ip_complete` 对这条侧信道**不做任何干预**——既不缓存、也不改写 IP/MAC，只是把两端同名信号接到同一根 `wire`。所有「查询—重试—超时」的智能都在 `arp` 模块内（u6-l2 已讲）。
+
+错误信号 `tx_error_arp_failed` 由 `ip` 直接透传到模块对外端口（在 `ip` 实例映射的 [rtl/ip_complete.v:L386](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete.v#L386) 一行），告知上层「这个 IP 包因地址解析失败而被丢弃」。
+
+#### 4.2.4 代码实践
+
+**实践目标**：用现成测试场景观察「ARP 失败」时 `ip_complete` 的行为，理解重试计数与错误上报。
+
+**操作步骤**：
+
+1. 打开 `tb/test_ip_complete.py` 的 "test 3: test IP TX arp fail packet" 段（约 L491 起）。这次测试向 `0xc0a80167`（192.168.1.103）发 IP 包，但**从不回 ARP 应答**。
+2. 阅读末尾的断言：
+   - `assert tx_error_arp_failed_asserted` —— 失败错误被拉高；
+   - `assert eth_sink.count() == 4` —— 一共发出了 **4 个** ARP 请求。
+
+**需要观察的现象**：因为没有应答，`arp` 按 `ARP_REQUEST_RETRY_COUNT=4`（默认值）重发了 4 次 ARP 请求；最终在 `ARP_REQUEST_TIMEOUT` 后判定失败，`ip` 把挂起的 IP 包读空丢弃，并拉高 `tx_error_arp_failed`。
+
+**预期结果**：4 次 ARP 请求的 `arp_tpa` 全部等于 `0xc0a80167`，且最终 `tx_error_arp_failed` 为真。这验证了侧信道的失败路径：`arp` 的 `error` 经由 `arp_response_error` 传回 `ip`，`ip` 据此上报并丢包。
+
+> 同 4.1.4，该测试为 myhdl 旧式文件，运行结果**待本地验证**；但其断言数值（4 次重试）与默认参数 `ARP_REQUEST_RETRY_COUNT=4`（[rtl/ip_complete.v:L36](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete.v#L36)）严格对应，可直接用于理解行为。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：如果把 `ARP_REQUEST_RETRY_COUNT` 从 4 改成 2，4.2.4 里 `eth_sink.count() == 4` 这条断言应改成多少？
+
+**参考答案**：改成 `== 2`。重试计数直接决定广播请求的总次数（首次 + 重试，实现上等价为发出 `RETRY_COUNT` 次，见 u6-l2），因此修改参数后观察到的 ARP 请求数随之等量变化。
+
+**练习 2**：ARP 查询侧信道上的数据是否可能出现在 `m_eth_*` 输出端？
+
+**参考答案**：查询本身不会——`arp_request_*`/`arp_response_*` 是 `ip` 与 `arp` 之间的直连 `wire`，不经过 `eth_arb_mux`。但查询的**副作用**会：当未命中时，`arp` 构造的 ARP 请求帧会经 `arp(tx) → eth_arb_mux → m_eth_*` 输出到以太网上。
+
+---
+
+### 4.3 本地网络配置
+
+#### 4.3.1 概念说明
+
+`ip_complete` 有 5 个配置输入：`local_mac`、`local_ip`、`gateway_ip`、`subnet_mask`、`clear_arp_cache`。它们决定了「我是谁、我在哪个网段、谁是我的网关、何时清空地址表」。这些信号并不是都接到同一个子模块——这正是初学者容易忽略的接线细节：
+
+- `local_mac`、`local_ip` **同时**接到 `ip` 和 `arp`（`ip` 用它们填源 MAC/源 IP，`arp` 用它们做被动学习比对、构造 ARP 请求的发送方字段）。
+- `gateway_ip`、`subnet_mask`、`clear_arp_cache` **只**接到 `arp`——因为「跨不跨网段」「查目的 IP 还是查网关」完全是 ARP/路由的职责，IP 封装层不关心。
+
+#### 4.3.2 核心流程
+
+`arp` 模块收到一个 `arp_request_ip` 时，按下述顺序判定该查哪个 MAC（这是本模块「路由」的全部含义——一个二级「直连/网关」判断）：
+
+1. **全 1 广播地址**（`0xffffffff`）→ 直接返回广播 MAC `0xFFFFFFFFFFFF`。
+2. 否则做**子网判定**：请求 IP 与网关 IP 在「掩码为 1 的网络位」上是否完全一致？
+3. 若**在同子网**：再判是否是子网广播（主机位全 1），是则返回广播 MAC；否则**直接查请求 IP**。
+4. 若**不在同子网**：**改查网关 IP**——把包交给网关，由网关转发。
+
+子网判定是一个纯按位逻辑，设请求 IP 为 \(p\)、网关为 \(g\)、掩码为 \(m\)：
+
+\[
+\text{within subnet} \;\iff\; \big((p \oplus g)\ \&\ m\big) = 0
+\]
+
+直观含义：在掩码为 1（网络前缀）的那些位上，\(p\) 与 \(g\) 必须逐位相同。例如 `192.168.1.100` 与网关 `192.168.1.1` 在 `/24` 掩码下，网络前缀都是 `192.168.1`，故同子网。
+
+子网广播判定则为：
+
+\[
+\text{subnet broadcast} \;\iff\; \sim(p\ |\ m) = 0
+\]
+
+即在掩码为 0（主机位）的那些位上，\(p\) 必须全为 1（如 `192.168.1.255`）。
+
+#### 4.3.3 源码精读
+
+`ip_complete` 对外暴露的配置端口（注意 `gateway_ip`/`subnet_mask`/`clear_arp_cache` 在 IP 层是「无关项」）：
+
+[rtl/ip_complete.v:L132-L136](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete.v#L132-L136) —— 5 个配置输入：`local_mac`/`local_ip`/`gateway_ip`/`subnet_mask`/`clear_arp_cache`。
+
+`ip` 实例只用到 `local_mac` 和 `local_ip`（注意它**没有**网关/掩码端口）：
+
+[rtl/ip_complete.v:L387-L389](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete.v#L387-L389) —— `ip` 实例的配置端口：仅 `local_mac`、`local_ip`。
+
+而 `arp` 实例拿走全部网络配置，外加 `clear_cache`：
+
+[rtl/ip_complete.v:L434-L439](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete.v#L434-L439) —— `arp` 实例的配置端口：`local_mac`、`local_ip`、`gateway_ip`、`subnet_mask`、`clear_cache`（接 `clear_arp_cache`）。
+
+真正落实「同子网/跨网段」判定的是 `arp` 模块内部，对应本讲 4.3.2 的两条公式：
+
+[rtl/arp.v:L386-L412](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/arp.v#L386-L412) —— ARP 请求的目标判定：全 1 广播 → 广播 MAC；同子网非广播 → 查请求 IP；跨网段 → 查 `gateway_ip`。
+
+仔细读这段可以发现一个常被忽略的点：**跨网段时，`arp` 实际去查的是 `gateway_ip` 而非请求里的目的 IP**（[rtl/arp.v:L410-L411](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/arp.v#L410-L411) 把 `cache_query_request_ip_next` 与 `arp_request_ip_next` 都设成了 `gateway_ip`）。也就是说，`ip_complete` 本身不做「转发」，它只是保证了「发往外网的包会被封装成发给网关 MAC 的以太网帧」，真正的三层转发交给网关路由器。
+
+#### 4.3.4 代码实践
+
+**实践目标**：通过修改目的 IP，观察「同网段直接查」与「跨网段改查网关」两种行为的差异（源码阅读型）。
+
+**操作步骤**：
+
+1. 在 `tb/test_ip_complete.py` 的配置基础上（`local_ip=192.168.1.100`、`gateway_ip=192.168.1.1`、`subnet_mask=255.255.255.0`），对照 [rtl/arp.v:L386-L412](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/arp.v#L386-L412) 手算两种情形：
+   - **情形 A（同网段）**：目的 IP `192.168.1.102`（`0xc0a80166`）。
+     - \(p \oplus g = \text{0xc0a80166} \oplus \text{0xc0a80101} = \text{0x00000067}\)
+     - \((p \oplus g)\ \&\ m = \text{0x00000067}\ \&\ \text{0xffffff00} = \text{0x00000000} = 0\) → **同子网**。
+     - 主机位 `0x67` 非全 1 → 直接查 `0xc0a80166`。这正是 test 2 里 ARP 请求 `arp_tpa==0xc0a80166` 的由来。
+   - **情形 B（跨网段）**：目的 IP `10.0.0.5`（`0x0a000005`）。
+     - \((p \oplus g)\ \&\ m = \text{0x0a000005}\ \&\ \text{0xffffff00} = \text{0x0a000000} \neq 0\) → **跨网段**。
+     - 应改查网关 `0xc0a80101`。
+2. 假设你要写一个 cocotb 用例覆盖情形 B，请描述预期：发往 `10.0.0.5` 的 IP 包，应触发一个 `arp_tpa == 0xc0a80101`（网关）的 ARP 请求，而不是 `0x0a000005`。
+
+**需要观察的现象**：跨网段目的 IP 产生的 ARP 请求，其 `arp_tpa` 字段是**网关 IP**而非目的 IP。这验证了 [rtl/arp.v:L410-L411](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/arp.v#L410-L411) 的「改查网关」逻辑。
+
+**预期结果**：情形 A 查目的 IP 本身、情形 B 查网关 IP。两种情形下，最终以太网帧的目的 MAC 都是 ARP 应答里学到的那个 MAC。
+
+> 本实践为「按位手算 + 预期描述」的源码阅读型实践，仿真运行结果**待本地验证**。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：如果把 `subnet_mask` 设为 `0xffffffff`（即 /32），[rtl/arp.v:L392](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/arp.v#L392) 的子网判定会如何表现？
+
+**参考答案**：掩码全 1 时，\((p \oplus g)\ \&\ m = p \oplus g\)，仅当 \(p = g\)（目的 IP 恰好等于网关 IP）才判为同子网；其余所有 IP 都被判为跨网段，全部改查网关。这是一种「把所有流量都丢给网关」的极端配置。
+
+**练习 2**：`clear_arp_cache` 为什么只接到 `arp` 而不接到 `ip`？
+
+**参考答案**：ARP 缓存（IP→MAC 映射表）只存在于 `arp` 模块内部的 `arp_cache`（u6-l2）；`ip` 模块不缓存任何 MAC，每次发包都现查。因此清缓存操作只对 `arp` 有意义，`ip` 无对应端口。
+
+---
+
+### 4.4 ip_complete_64：64 位等价结构
+
+> 本节对应学习目标「理解 `ip_complete_64` 在 64 位通路下的等价结构」。它不是独立的新机制，而是 4.1–4.3 在宽位宽下的「同构翻版」，故合并为一个小节讲解。
+
+#### 4.4.1 概念说明
+
+`ip_complete_64` 服务于 10G/25G 的 64 位数据通路（承接 u1-l1、u1-l3 的位宽约定：64 位 `tdata` 配 8 位 `tkeep`）。它与 `ip_complete` 在**架构、子模块划分、数据通路、ARP 侧信道**上**完全同构**，差异只有三类：位宽、子模块名、ARP 定时器默认值。
+
+#### 4.4.2 核心流程
+
+数据通路与 4.1.2 的示意图**逐框对应**，只是每条 AXI-Stream 的 `tdata` 从 8 位变 64 位、并新增 `tkeep[7:0]`（标记 8 字节中哪些有效，承接 u1-l3）。分类器、`eth_arb_mux`、`ip↔arp` 侧信道的逻辑一字不差。
+
+#### 4.4.3 源码精读
+
+三处可见差异：
+
+1. **ARP 定时器默认值改为基于 156.25 MHz**（10G 的 64 位时钟，\(64 \times 156.25\,\text{MHz} = 10\,\text{Gb/s}\)）：
+
+   [rtl/ip_complete_64.v:L35-L38](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete_64.v#L35-L38) —— 参数：`156250000*2` 与 `156250000*30`。
+
+   \[
+   T_{\text{interval}} = \frac{156\,250\,000 \times 2}{156.25\,\text{MHz}} = 2\,\text{s}
+   \]
+
+   可见 8 位版与 64 位版的**真实时间语义一致**（都是 2 秒重试间隔、30 秒超时），只是时钟频率不同、周期数相应不同。
+
+2. **以太网帧与 IP 帧端口全部加宽到 64 位 + `tkeep`**：
+
+   [rtl/ip_complete_64.v:L52-L57](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete_64.v#L52-L57) —— 以太网输入 `tdata[63:0]`、`tkeep[7:0]`。
+
+3. **三个子模块换名 + 加宽参数**：
+   - `eth_arb_mux` 改 `DATA_WIDTH(64)`、`KEEP_ENABLE(1)`：[rtl/ip_complete_64.v:L268-L278](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete_64.v#L268-L278)。
+   - `ip` 换成 `ip_64`（u7-l2 已讲其等价性）：[rtl/ip_complete_64.v:L315](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete_64.v#L315)。
+   - `arp` 加 `DATA_WIDTH(64)`、`KEEP_ENABLE(1)`、`KEEP_WIDTH(8)`：[rtl/ip_complete_64.v:L409-L417](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete_64.v#L409-L417)。
+
+   分类器逻辑（[rtl/ip_complete_64.v:L208-L263](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/ip_complete_64.v#L208-L263)）与 8 位版逐行相同，只是多了把 `tkeep` 也按 select 选通的 `assign`。
+
+> 一个易错点：ARP 帧（opcode/硬件类型等字段）本身是固定 28 字节、与数据通路位宽无关的协议数据单元。在 64 位通路下，它只是「被打包进 64 位的 AXI-Stream 里」发送，`arp` 模块内部照样按字节解析。位宽改变的是搬运方式，不是协议内容。
+
+## 5. 综合实践
+
+把本讲三个最小模块串起来，完成下面这个**端到端地址解析追踪**任务：
+
+**背景**：假设你在 Arty 开发板上用 `ip_complete`（板子的 UDP 回显设计用的就是它后面接 `udp_complete`，见 u12-l1）。板子配置为：
+
+- `local_mac = 0x5A5152535455`，`local_ip = 192.168.1.100`
+- `gateway_ip = 192.168.1.1`，`subnet_mask = 255.255.255.0`
+
+**任务**：
+
+1. **预测**：从上层 `s_ip_*` 分别向以下三个目的 IP 各发一个包，`ip_complete` 会在 `m_eth_*` 上发出什么样的帧（ARP 请求的 `arp_tpa` 是什么？还是直接发 IP 帧？）：
+   - (a) `192.168.1.102`
+   - (b) `192.168.1.255`
+   - (c) `10.20.30.40`
+2. **验证方法**：参照 4.1.4 的测试结构，写一份 cocotb 用例（或修改 `test_ip_complete.py` 的场景），对每个目的 IP 注入一个 IP 包，捕获 `m_eth_*` 输出的第一帧并解析。
+3. **对照源码**：用 [rtl/arp.v:L386-L412](https://github.com/alexforencich/verilog-ethernet/blob/77320a9471d19c7dd383914bc049e02d9f4f1ffb/rtl/arp.v#L386-L412) 解释每个观察结果。
+
+**参考结论**：
+
+- (a) 同子网且非广播 → 发出 ARP 请求，`arp_tpa = 192.168.1.102`。
+- (b) 主机位全 1 的子网广播 → 不查表，直接发**目的 MAC 为广播**的 IP 帧（不经 ARP 请求）。
+- (c) 跨网段 → 发出 ARP 请求，但 `arp_tpa = 192.168.1.1`（网关），**不是** `10.20.30.40`。
+
+完成这个任务后，你就把「顶层组装（4.1）+ ARP 集成（4.2）+ 本地网络配置（4.3）」三者打通了：能看到 IP 包如何触发 ARP、ARP 如何根据子网掩码选择查询目标、以及查询结果如何回填为以太网帧的目的 MAC。
+
+> 本综合实践的仿真运行依赖本地配置好 cocotb + iverilog 环境，端到端结果**待本地验证**；但三条结论均可由本讲引用的源码直接推导得出。
+
+## 6. 本讲小结
+
+- `ip_complete` / `ip_complete_64` 是**布线层**：把 `ip`、`arp`、`eth_arb_mux` 三个现成模块拼成完整 IPv4 栈，自身除一段「按 `EtherType` 分流的分类器」外几乎不带逻辑。
+- **RX 方向**是 1→2 解复用（`EtherType=0x0800`→IP、`0x0806`→ARP），整帧选路锁定、不可拆；**TX 方向**是 `eth_arb_mux` 的 2→1 优先级合并（IP 帧优先于 ARP 帧，但整帧 grant 保证 ARP 不被饿死）。
+- `ip` 与 `arp` 之间靠 `arp_request_*`/`arp_response_*` **侧信道**直连：`ip` 发包前查 MAC，`arp` 命中回 MAC、未命中自动广播重试、超时回 `error`；失败时 `ip` 吞包并上报 `tx_error_arp_failed`。
+- 五个配置端口分工不同：`local_mac`/`local_ip` 接 `ip`+`arp`；`gateway_ip`/`subnet_mask`/`clear_arp_cache` **只**接 `arp`。
+- `arp` 用 \(((p\oplus g)\ \&\ m)=0\) 判同子网：同子网直接查目的 IP，跨网段改查 `gateway_ip`；广播地址直接返回广播 MAC。
+- `ip_complete_64` 与 8 位版**完全同构**，仅位宽（64 位 + `tkeep`）、子模块名（`ip_64`、加宽的 `arp`）、ARP 定时器默认时钟（156.25 MHz）三处不同，真实时间语义一致。
+
+## 7. 下一步学习建议
+
+- **向上一层：UDP 协议栈**。下一讲 u8-l1（`udp_ip_rx/tx` 与 `udp` 核心）会直接站在 `ip_complete` 之上——`udp_complete`（u8-l3）正是把 `ip_complete` 与 UDP 子层再拼一层。理解了本讲的「侧信道查表」「分层透传」模式，再看 UDP 栈会非常自然。
+- **向下一层：MAC 集成**。如果你关心 `m_eth_*` 那一侧如何接到真实线路上，回顾 u4-l3（`eth_mac_1g`）与 u5-l1（`_fifo` 变体的跨时钟域）。
+- **真机示例**：直接读 `example/Arty/fpga/rtl/fpga_core.v`（u12-l1 会精讲），看 `ip_complete` 在板级 UDP 回显设计里实际是怎么接线、怎么配 `local_ip`/`gateway_ip`/`subnet_mask` 的——这是把本讲知识落到工程的最佳入口。
+- **动手验证**：本讲多处仿真结果标注了「待本地验证」，建议参照 u13-l2（编写 testbench）为 `ip_complete` 写一份 cocotb 三件套，亲手跑一遍 5. 综合实践里的三个场景。
