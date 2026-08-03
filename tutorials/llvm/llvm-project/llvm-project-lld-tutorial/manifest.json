@@ -1,0 +1,988 @@
+{
+  "project": "llvm-project-lld",
+  "head": "abe5aa5cb2336f32dca8e765710ec212a926476c",
+  "rationale": "LLD 是 LLVM 子项目中体积庞大、性能极高的模块化链接器，单一可执行文件内同时包含 ELF、COFF、Mach-O、WebAssembly 四个近乎独立的链接后端。本手册以『从整体到局部、从主线到优化、以 ELF 为主线再横向对比其他后端』为编排原则：第一单元让读者建立项目定位、构建方式与多后端分发的整体认知；第二单元沿 ELF 的 link()→linkerMain→link<ELFT>→Writer 主线把链接全过程一次性走通；第三、四、五单元分别向下深入公共基础设施、输入与符号解析、输出布局与链接脚本三大支柱；第六、七单元进入重定位、目标架构、GC/ICF、LTO 等高阶机制；第八单元横向覆盖 COFF/Mach-O/wasm/MinGW 等其他后端；第九单元回到工程实践层面讲清测试体系、并行与性能剖析以及调试支持。每篇只解决一个相对独立的问题，依赖关系单向收敛，便于读者循序渐进。本次增量：prev HEAD→cur HEAD 之间 lld/ 仅有一次 NFC 提交（Relocations.cpp 中 replaceWithDefined 的微优化：用 fetch_and 取代整符号拷贝、仅保留 versionId 单成员），只影响引用该文件的 u6-l2（update）；其余讲义源码无变化（keep）。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "初识 LLD：定位、构建与多后端架构",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 LLD 是什么：LLVM 项目中替代系统链接器的高性能模块化链接器，支持 ELF/COFF/Mach-O/WebAssembly 四种目标格式，且可作为库嵌入。",
+          "learning_goals": [
+            "理解 LLD 在 LLVM 工具链中的定位与核心特性（快、可作为库、始终是交叉链接器）",
+            "了解 LLD 支持的目标格式与 CPU/ABI 范围",
+            "掌握阅读 LLD 源码时的主要参考文档与关键概念"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/index.md",
+            "docs/NewLLD.md"
+          ],
+          "minimal_modules": [
+            "LLD 项目定位与特性",
+            "支持的目标格式与后端",
+            "NewLLD 设计文档的关键概念"
+          ],
+          "practice_task": "用 `clang -fuse-ld=lld` 链接一个 hello world 程序，用 `readelf --string-dump .comment` 确认输出由 LLD 产生；再对照 docs/index.md 列出 LLD 相对 GNU ld 的三条核心优势。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建与运行 LLD",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解如何用 CMake 构建 LLD、它的构建产物（ld.lld、lld-link 等），以及作为 LLVM 子项目或独立项目的两种构建方式。",
+          "learning_goals": [
+            "掌握 LLD 的 CMake 构建入口与关键选项（LLVM_ENABLE_PROJECTS=lld、LLD_BUILD_TOOLS 等）",
+            "理解独立构建与随 LLVM 构建两种模式的区别",
+            "知道构建产物如何安装、如何替换系统默认链接器"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "docs/index.md"
+          ],
+          "minimal_modules": [
+            "CMakeLists 构建逻辑",
+            "构建产物与符号链接",
+            "lit 测试依赖（FileCheck/not/llvm-lit）"
+          ],
+          "practice_task": "克隆 llvm-project，用 `-DLLVM_ENABLE_PROJECTS=lld` 配置并构建出 ld.lld，再用 `-fuse-ld=lld` 验证可链接；记录 CMakeLists.txt 中 add_subdirectory 加入了哪些后端目录。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与多后端源码组织",
+          "order": 3,
+          "filename": "u1-l3-directory-structure.md",
+          "level": "beginner",
+          "topic": "梳理 lld 仓库的目录结构：Common 公共基础设施、ELF/COFF/MachO/wasm 四个后端、tools/lld 分发器、include 公共头、test 与 unittests。",
+          "learning_goals": [
+            "掌握 lld 顶层目录的职责划分",
+            "识别每个后端目录内重复出现的模块（Driver/SymbolTable/Symbols/Writer/ICF/MarkLive/LTO/MapFile）",
+            "理解各后端『共享设计但很少共享代码』的原因"
+          ],
+          "source_files": [
+            "README.md",
+            "ELF/README.md",
+            "COFF/README.md"
+          ],
+          "minimal_modules": [
+            "顶层目录与 include",
+            "后端目录的共性模块",
+            "test 与 unittests 的区别"
+          ],
+          "practice_task": "对照仓库结构，制作一张表格列出 ELF/COFF/MachO/wasm 各自的 Driver、SymbolTable、Writer、InputFiles 对应文件名；用一句话说明 Common 目录为何被四个后端共享。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "单一可执行文件与 flavor 分发机制",
+          "order": 4,
+          "filename": "u1-l4-flavor-dispatch.md",
+          "level": "beginner",
+          "topic": "讲解 LLD 单一可执行文件如何根据 argv[0]（ld.lld/lld-link/ld64.lld/wasm-ld）或 -flavor 选项分发到对应后端的 link() 函数。",
+          "learning_goals": [
+            "理解 tools/lld/lld.cpp 中 lld_main 的角色与 inTestVerbosity 的用途",
+            "掌握 Flavor 枚举、getFlavor/parseProgname、isPETarget 的分发逻辑",
+            "理解 LLD_ALL_DRIVERS / LLD_HAS_DRIVER 宏如何把后端 link 函数注册成分发表"
+          ],
+          "source_files": [
+            "tools/lld/lld.cpp",
+            "include/lld/Common/Driver.h",
+            "Common/DriverDispatcher.cpp"
+          ],
+          "minimal_modules": [
+            "lld.cpp 主函数与 crash recovery",
+            "DriverDispatcher 的 flavor 解析",
+            "Driver.h 的注册宏与 Result"
+          ],
+          "practice_task": "为同一个 lld 可执行文件创建 ld.lld、lld-link、wasm-ld、ld64.lld 四个符号链接，分别运行 --version 观察分发到不同后端；再阅读 DriverDispatcher.cpp 写出 `lld -flavor gnu` 的解析过程。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "ELF 链接主线：从入口到写盘",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "link() 入口与 Ctx 上下文对象",
+          "order": 1,
+          "filename": "u2-l1-elf-link-entry-and-ctx.md",
+          "level": "intermediate",
+          "topic": "讲解 ELF 后端的 link() 入口如何创建 Ctx 上下文（含 ErrorHandler、SymbolTable、LinkerScript）并交给 LinkerDriver::linkerMain 驱动整个链接。",
+          "learning_goals": [
+            "理解 elf::link() 的参数（args/stdout/stderr/exitEarly/disableOutput）与返回值含义",
+            "掌握 Ctx（Config.h）作为 ELF 全局上下文聚合了哪些核心成员（symtab/script/driver/objectFiles 等）",
+            "了解 ELFSyncStream（Err/Warn/Fatal/Msg）如何转发到 ErrorHandler"
+          ],
+          "source_files": [
+            "ELF/Driver.cpp",
+            "ELF/Config.h",
+            "include/lld/Common/CommonLinkerContext.h"
+          ],
+          "minimal_modules": [
+            "elf::link() 入口",
+            "Ctx 上下文聚合",
+            "诊断流 ELFSyncStream"
+          ],
+          "practice_task": "在 elf::link() 中按顺序列出它创建的对象（Ctx、ErrorHandler、LinkerScript、symAux、SymbolTable），并解释为什么这些对象必须先于 linkerMain 存在。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "linkerMain：选项解析、配置与文件加载",
+          "order": 2,
+          "filename": "u2-l2-linkermain-options-and-files.md",
+          "level": "intermediate",
+          "topic": "讲解 LinkerDriver::linkerMain 如何用 ELFOptTable 解析命令行、读取配置（readConfigs/setConfigs）、批量创建并并行加载输入文件（createFiles/loadFiles/addFile）。",
+          "learning_goals": [
+            "理解 linkerMain 的整体阶段：parse→readConfigs→createFiles→inferMachineType→setConfigs→checkOptions→link",
+            "掌握 Options.td 与 ELFOptTable 如何声明和解析命令行选项",
+            "理解 LoadJob 与 addFile 如何把不同文件类型（archive/obj/bitcode/shared）分类记录、再由 loadFiles 并行展开"
+          ],
+          "source_files": [
+            "ELF/Driver.cpp",
+            "ELF/Driver.h",
+            "ELF/Options.td"
+          ],
+          "minimal_modules": [
+            "选项解析与配置读取",
+            "createFiles/addFile 的 LoadJob 分类",
+            "loadFiles 的并行文件加载"
+          ],
+          "practice_task": "用 `ld.lld --help` 导出选项列表，到 ELF/Options.td 中找到其中三个选项的定义；再在 addFile 中梳理 file_magic 的分支如何决定 LoadJob::Kind。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "link<ELFT> 核心流水线全景",
+          "order": 3,
+          "filename": "u2-l3-link-template-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 link<ELFT> 模板如何串联符号解析→LTO→段聚合→GC/ICF→调用 writeResult 的完整流水线，这是理解 LLD 的核心地图。",
+          "learning_goals": [
+            "掌握 link<ELFT> 中 parseFiles、compileBitcodeFiles、aggregate sections、markLive、createSyntheticSections、processSectionCommands、ICF、writeResult 的顺序与职责",
+            "理解『惰性求值』设计：尽量推迟到必须时才读取 section 内容/重定位",
+            "能定位流水线中每一步对应的源码位置与 TimeTraceScope 标注"
+          ],
+          "source_files": [
+            "ELF/Driver.cpp"
+          ],
+          "minimal_modules": [
+            "符号解析与后解析（postParse）",
+            "LTO 编译与段聚合",
+            "GC/合成段/ICF/写盘前的收尾"
+          ],
+          "practice_task": "用 `--time-trace` 链接一个多文件项目，导出 JSON 并用 chrome://tracing 查看；对照 link<ELFT> 把每个 time trace 段对应到源码中的 TimeTraceScope 调用。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "Writer 的写盘阶段",
+          "order": 4,
+          "filename": "u2-l4-writer-run-phases.md",
+          "level": "intermediate",
+          "topic": "讲解 Writer<ELFT>::run() 如何完成段内容定稿、地址/文件偏移分配、程序头生成，以及最终把 ELF 头和各段写到 mmap 输出文件。",
+          "learning_goals": [
+            "理解 Writer::run 的阶段：finalizeSections→maybeCompress→assignFileOffsets→setPhdrs→writeHeader/writeSections→writeBuildId",
+            "掌握 finalizeSections 与 assignAddresses 为何需要多次迭代（地址相关内容相互依赖）",
+            "理解 openFile/commit 与 -o -（写到 stdout）的特殊处理"
+          ],
+          "source_files": [
+            "ELF/Writer.cpp",
+            "ELF/Writer.h"
+          ],
+          "minimal_modules": [
+            "finalizeSections 与迭代定稿",
+            "assignFileOffsets/setPhdrs",
+            "writeHeader/writeSections/writeBuildId 与输出提交"
+          ],
+          "practice_task": "在 Writer::run() 中标注每一步会改变输出大小的操作（如 maybeCompress），并解释为什么 writeBuildId 必须放在最后。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "公共基础设施 Common",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "CommonLinkerContext 与全局状态聚合",
+          "order": 1,
+          "filename": "u3-l1-common-linker-context.md",
+          "level": "intermediate",
+          "topic": "讲解 CommonLinkerContext 如何把 LLD 的全局状态（BumpPtrAllocator、StringSaver、ErrorHandler）聚合到堆对象上，从而支持把 LLD 作为库安全地反复调用。",
+          "learning_goals": [
+            "理解为什么 LLD 不用程序级全局变量而用 CommonLinkerContext 聚合",
+            "掌握 bAlloc/saver/uniqueSaver 与 context<T>() 访问方式",
+            "了解 SpecificAllocBase instances 表的作用"
+          ],
+          "source_files": [
+            "include/lld/Common/CommonLinkerContext.h",
+            "Common/CommonLinkerContext.cpp",
+            "ELF/Config.h"
+          ],
+          "minimal_modules": [
+            "全局状态聚合动机",
+            "BumpPtrAllocator 与 StringSaver",
+            "context()/hasContext() 访问接口"
+          ],
+          "practice_task": "对比『全局变量 + 函数局部静态』与 CommonLinkerContext 两种方案，说明后者如何实现确定性初始化与销毁；再找出 ELF 的 Ctx 如何继承 CommonLinkerContext。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "错误与诊断处理机制",
+          "order": 2,
+          "filename": "u3-l2-error-handling.md",
+          "level": "intermediate",
+          "topic": "讲解 LLD 的错误处理哲学：用 error()/warn()/fatal() 报告而非抛异常、用 errorCount() 在检查点退出，从而一次链接尽可能多地暴露错误。",
+          "learning_goals": [
+            "理解 error()/warn()/fatal() 的语义差异与使用场景",
+            "掌握 errorCount 检查点机制（为何在 link 各阶段反复 if (errCount) return）",
+            "了解为什么禁止直接用 llvm::outs()/errs()（线程安全）"
+          ],
+          "source_files": [
+            "include/lld/Common/ErrorHandler.h",
+            "Common/ErrorHandler.cpp",
+            "ELF/Driver.cpp"
+          ],
+          "minimal_modules": [
+            "诊断函数与错误计数",
+            "检查点式提前返回",
+            "ELFSyncStream 的线程安全输出"
+          ],
+          "practice_task": "在 ELF/Driver.cpp 中找出 3 处 `if (errCount(ctx)) return;` 检查点，解释每个检查点之后才允许执行的高代价步骤；并说明 fatal() 为何只在遇到损坏输入时使用。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "内存管理与 SpecificAlloc",
+          "order": 3,
+          "filename": "u3-l3-memory-and-specific-alloc.md",
+          "level": "intermediate",
+          "topic": "讲解 LLD 的内存模型：BumpPtrAllocator + make<>() 批量分配、SpecificAlloc 按类型分桶的 bump 分配器，以及为何链接器几乎不主动释放内存。",
+          "learning_goals": [
+            "理解 make<>() 与 bAlloc 的 arena 分配策略",
+            "掌握 SpecificAlloc/SpecificBumpPtrAllocator 的分桶设计",
+            "了解 LLD 为何选择『一次性分配、进程退出时统一回收』而非细粒度释放"
+          ],
+          "source_files": [
+            "include/lld/Common/Memory.h",
+            "Common/Memory.cpp",
+            "tools/lld/lld.cpp"
+          ],
+          "minimal_modules": [
+            "BumpPtrAllocator 与 make<>()",
+            "SpecificAlloc 按类型分桶",
+            "内存释放策略与 inTestVerbosity"
+          ],
+          "practice_task": "在 ELF 源码中找出 5 处 make<>() 调用，说明它们分配对象的生命周期；并解释 inTestVerbosity 如何在测试模式下让 LLD 反复执行以暴露内存问题。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "把 LLD 当作库使用",
+          "order": 4,
+          "filename": "u3-l4-lld-as-library.md",
+          "level": "intermediate",
+          "topic": "讲解如何把 LLD 当作库嵌入自己的程序：调用 lldMain()/unsafeLldMain()、用 LLD_HAS_DRIVER 声明要链接的后端、CrashRecoveryContext 的崩溃恢复。",
+          "learning_goals": [
+            "掌握 lldMain 的签名、返回的 Result{retCode,canRunAgain} 含义",
+            "理解 LLD_HAS_DRIVER 与 LLD_ALL_DRIVERS 宏如何控制可链接的后端集合",
+            "了解 CrashRecoveryContext 在测试/库场景下的作用与 exitLld()"
+          ],
+          "source_files": [
+            "include/lld/Common/Driver.h",
+            "Common/DriverDispatcher.cpp",
+            "tools/lld/lld.cpp",
+            "unittests/AsLibELF/SomeDrivers.cpp"
+          ],
+          "minimal_modules": [
+            "lldMain/unsafeLldMain 入口",
+            "驱动注册宏",
+            "崩溃恢复与可重入"
+          ],
+          "practice_task": "参照 unittests/AsLibELF/SomeDrivers.cpp，写一个最小程序只链接 ELF 驱动、调用 lldMain 传入 `--version` 参数，并验证调用非 ELF 驱动会返回失败。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "输入文件与符号解析",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Symbol 数据结构与就地解析",
+          "order": 1,
+          "filename": "u4-l1-symbol-structure.md",
+          "level": "intermediate",
+          "topic": "讲解 ELF 的 Symbol 类：Defined/Undefined/SharedSymbol/LazyArchive/LazyObject 的区分、placement new 就地替换、以及 Symbol 指针为何始终有效。",
+          "learning_goals": [
+            "理解 Symbol 的三大类（Defined/Undefined/Lazy）及其子类",
+            "掌握 placement new 就地覆盖如何让旧 Symbol 指针自动指向解析结果",
+            "了解 Symbol 的位标志（traced/isUsedInRegularObj 等）与 binding/type/stOther"
+          ],
+          "source_files": [
+            "ELF/Symbols.h",
+            "ELF/Symbols.cpp"
+          ],
+          "minimal_modules": [
+            "Symbol 类层次",
+            "placement new 就地解析",
+            "符号标志与属性"
+          ],
+          "practice_task": "在 Symbols.h 中画出 Symbol → Defined/Undefined/SharedSymbol 的继承关系；并解释 `overwrite(sym)` 这种就地替换为何比 swap 指针更省内存。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "SymbolTable 符号表与冲突解决",
+          "order": 2,
+          "filename": "u4-l2-symbol-table.md",
+          "level": "intermediate",
+          "topic": "讲解 SymbolTable：用 symMap（DenseMap<CachedHashStringRef,int>）+ symVector 做名字到 Symbol 的映射，并用 resolveSymbol 规则解决冲突。",
+          "learning_goals": [
+            "理解 symMap/symVector 的双结构设计与 symMapIndex 复用",
+            "掌握 Defined+Undefined、Defined+Lazy、Lazy+Undefined 三种冲突的解决与归档提取",
+            "了解 scanVersionScript、handleUndefined 等围绕符号表的高级操作"
+          ],
+          "source_files": [
+            "ELF/SymbolTable.h",
+            "ELF/SymbolTable.cpp"
+          ],
+          "minimal_modules": [
+            "符号表的双结构存储",
+            "冲突解决规则",
+            "归档成员的惰性提取"
+          ],
+          "practice_task": "在 SymbolTable.cpp 中找到 insert()/addSymbol() 的核心逻辑，描述一个 Undefined 被替换为 Defined 的全过程；并解释 symVector 为何用索引而非指针指向 symMap。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "InputFile 文件读取层次",
+          "order": 3,
+          "filename": "u4-l3-input-files.md",
+          "level": "intermediate",
+          "topic": "讲解 ELF 的 InputFile 类层次：ELFFileBase→ObjFile/SharedFile、BitcodeFile、BinaryFile，以及它们如何创建并持有 Symbol 和 InputSection。",
+          "learning_goals": [
+            "掌握 InputFile/ELFFileBase/ObjFile/SharedFile/BitcodeFile/BinaryFile 的职责",
+            "理解 ObjFile 如何按 ELFT 模板解析节与符号、initializeLocalSymbols",
+            "了解 SharedFile 的符号版本解析与 BitcodeFile 的延迟处理"
+          ],
+          "source_files": [
+            "ELF/InputFiles.h",
+            "ELF/InputFiles.cpp"
+          ],
+          "minimal_modules": [
+            "InputFile 类层次",
+            "ObjFile 的节与符号解析",
+            "SharedFile/BitcodeFile/BinaryFile"
+          ],
+          "practice_task": "对照 InputFiles.h 列出每个 InputFile 子类负责的输入类型与产出的数据结构；并说明为何 ObjFile 用 `template <class ELFT>` 而其他类不模板化。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "归档文件与符号依赖提取",
+          "order": 4,
+          "filename": "u4-l4-archive-handling.md",
+          "level": "intermediate",
+          "topic": "讲解 LLD 与传统 Unix 链接器不同的归档文件处理：记住所有符号、遇到 Undefined 立即从已访问归档中提取成员，从而高效处理相互依赖的归档。",
+          "learning_goals": [
+            "理解 LLD 记住全部符号、即时提取归档成员的策略及其相对传统算法的优势",
+            "掌握 LoadJob::Archive 与 getArchiveMembers、addDependentLibrary 的提取时机",
+            "了解 --start-group/--end-group 在 LLD 中为何基本是 no-op"
+          ],
+          "source_files": [
+            "ELF/Driver.cpp",
+            "ELF/InputFiles.h"
+          ],
+          "minimal_modules": [
+            "LLD 归档策略 vs 传统 Unix",
+            "归档成员的并行展开",
+            "dependent library 与 --whole-archive"
+          ],
+          "practice_task": "构造两个相互依赖的静态库（a.a 调 b.a、b.a 调 a.a），用 ld.lld 链接验证无需 --start-group 即可成功；再阅读 addFile/getArchiveMembers 解释原因。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "输出布局与链接脚本",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "OutputSection 与 InputSection",
+          "order": 1,
+          "filename": "u5-l1-output-and-input-sections.md",
+          "level": "intermediate",
+          "topic": "讲解 ELF 的 OutputSection（容纳 InputSection）与 InputSectionBase→InputSection/MergeInputSection/EhInputSection，以及段如何被聚合、写盘。",
+          "learning_goals": [
+            "理解 InputSectionBase 的子类职责（普通段、可合并段、eh_frame 段）",
+            "掌握 OutputSection 作为 InputSection 容器、参与地址分配的角色",
+            "了解 splitSections 如何为 GC/ICF 拆分 SHF_MERGE 与 .eh_frame"
+          ],
+          "source_files": [
+            "ELF/OutputSections.h",
+            "ELF/InputSection.h"
+          ],
+          "minimal_modules": [
+            "InputSectionBase 类层次",
+            "OutputSection 容器",
+            "splitSections 拆分"
+          ],
+          "practice_task": "在 link<ELFT> 中找到 aggregate sections 的循环，说明 InputSection 如何从 InputFile 流入 ctx.inputSections/ctx.ehInputSections；并解释 EhInputSection 为何单独存放。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "链接脚本词法与语法解析",
+          "order": 2,
+          "filename": "u5-l2-script-lexer-parser.md",
+          "level": "intermediate",
+          "topic": "讲解链接脚本（linker script）的词法与语法分析：ScriptLexer 做记号切分，ScriptParser 解析 SECTIONS/MEMORY/PHDRS/表达式命令。",
+          "learning_goals": [
+            "理解 ScriptLexer 的记号模型（next/skip/consume/errorAt）",
+            "掌握 ScriptParser 如何把脚本翻译成 SectionCommand/OutputDesc 等中间表示",
+            "了解表达式的延迟求值（SymbolAssignment、InputSectionDescription）"
+          ],
+          "source_files": [
+            "ELF/ScriptLexer.cpp",
+            "ELF/ScriptParser.cpp",
+            "docs/ELF/linker_script.md"
+          ],
+          "minimal_modules": [
+            "ScriptLexer 记号化",
+            "ScriptParser 语法规则",
+            "表达式与延迟求值"
+          ],
+          "practice_task": "写一个含 SECTIONS 与符号赋值的简单 linkerscript，用 ld.lld 链接；再对照 ScriptParser.cpp 找到 SECTIONS 命令的解析入口并跟踪到 OutputDesc 的构造。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "LinkerScript 执行与段分配",
+          "order": 3,
+          "filename": "u5-l3-linker-script-execution.md",
+          "level": "intermediate",
+          "topic": "讲解 LinkerScript 如何执行解析结果：processSectionCommands 把 InputSection 装入 OutputSection、addOrphanSections 处理孤儿段、assignAddresses 分配地址。",
+          "learning_goals": [
+            "理解 processSectionCommands / addOrphanSections / finalizeInputSections 的执行顺序",
+            "掌握 orphan section 的默认归类规则与 hasSectionsCommand 的影响",
+            "了解 declareSymbols / createOutputSection 等辅助方法"
+          ],
+          "source_files": [
+            "ELF/LinkerScript.h",
+            "ELF/LinkerScript.cpp"
+          ],
+          "minimal_modules": [
+            "processSectionCommands 段分配",
+            "addOrphanSections 孤儿段",
+            "finalizeInputSections 合并段"
+          ],
+          "practice_task": "在 link<ELFT> 中梳理脚本相关步骤的调用顺序，说明『有 SECTIONS 命令』与『没有』两种情况下输出布局的差异；并定位 addOrphanSections 的默认规则。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l4",
+          "title": "Writer 地址分配与迭代定稿",
+          "order": 4,
+          "filename": "u5-l4-address-assignment.md",
+          "level": "advanced",
+          "topic": "讲解 Writer 的地址分配与迭代定稿：finalizeAddressDependentContent 与 assignAddresses 多次循环，直到地址相关的合成段内容（GOT/PLT/动态表）不再变化。",
+          "learning_goals": [
+            "理解为什么地址分配需要迭代（地址影响 GOT/PLT 大小，大小又反过来影响地址）",
+            "掌握 finalizeSections 内 assignAddresses→finalizeAddressDependentContent 的循环终止条件",
+            "了解 removeEmptyPTLoad、allocateHeaders 与 PT_LOAD 的关系"
+          ],
+          "source_files": [
+            "ELF/Writer.cpp",
+            "ELF/LinkerScript.h"
+          ],
+          "minimal_modules": [
+            "迭代地址定稿动机",
+            "assignAddresses/finalizeAddressDependentContent",
+            "程序头与 PT_LOAD 处理"
+          ],
+          "practice_task": "在 Writer.cpp 的 finalizeSections 中找出迭代循环，解释哪些合成段的内容依赖最终地址；并说明循环为何能收敛（单调性）。",
+          "depends_on": [
+            "u5-l3",
+            "u2-l4"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "重定位与目标架构",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "TargetInfo 与架构后端分发",
+          "order": 1,
+          "filename": "u6-l1-targetinfo-arch-dispatch.md",
+          "level": "advanced",
+          "topic": "讲解 ELF 的 TargetInfo 抽象：getRelExpr/writePlt/writeGotPlt/relocateAlloc 等虚函数，以及 ELF/Arch 下每个 CPU 的具体实现（如 X86_64.cpp）。",
+          "learning_goals": [
+            "理解 TargetInfo 作为各架构后端的统一抽象（重定位表达式 RelExpr、写 PLT/GOT、needsThunk）",
+            "掌握 setTarget 如何根据 emachine 选择 ELF/Arch/X86_64.cpp 等具体实现",
+            "了解默认 imageBase、relocateAlloc/relocateNoAlloc 等关键虚函数"
+          ],
+          "source_files": [
+            "ELF/Target.h",
+            "ELF/Target.cpp",
+            "ELF/Arch/X86_64.cpp"
+          ],
+          "minimal_modules": [
+            "TargetInfo 抽象接口",
+            "架构选择与 setTarget",
+            "RelExpr 重定位表达式"
+          ],
+          "practice_task": "对照 ELF/Arch 目录列出支持的全部架构，并选 X86_64.cpp 找到它如何实现 getRelExpr 与 writePlt；说明 TargetInfo 为何用虚函数而非模板分发。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "重定位扫描与处理",
+          "order": 2,
+          "filename": "u6-l2-relocation-scan.md",
+          "level": "advanced",
+          "topic": "讲解重定位的两阶段：scanRelocations 先扫描决定是否需要 GOT/PLT/动态重定位、是否为链接期常量；写盘前再由 replaceWithDefined/addCopyRelSymbol 处理 copy relocation 与 canonical PLT，把 SharedSymbol 就地替换为指向 .bss/.plt 的 Defined。",
+          "learning_goals": [
+            "理解 scanRelocations/RelocScan::process 的扫描阶段职责（分配 GOT/PLT 槽位、判断动态重定位）",
+            "掌握 isStaticLinkTimeConstant 如何决定重定位是链接期完成还是留给动态链接器",
+            "了解 maybeReportUndefined、TLS（checkTlsLe）以及 replaceWithDefined 的 copy relocation/canonical PLT 就地替换（overwrite 后回填 versionId、用 fetch_and 保留 NEEDS_GOT 标志）"
+          ],
+          "source_files": [
+            "ELF/RelocScan.h",
+            "ELF/Relocations.cpp"
+          ],
+          "minimal_modules": [
+            "重定位扫描阶段",
+            "RelExpr 决策与动态重定位",
+            "copy relocation/canonical PLT 的就地符号替换"
+          ],
+          "practice_task": "在 Relocations.cpp 的 RelocScan::process 中找出会触发 GOT/PLT 分配的分支；再阅读 replaceWithDefined，解释为何只回填 versionId 并用 fetch_and(NEEDS_GOT) 而非整体拷贝旧 Symbol；并说明『链接期常量』与『运行期动态重定位』的区分对输出大小的影响。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u6-l3",
+          "title": "合成段：GOT/PLT 与动态表",
+          "order": 3,
+          "filename": "u6-l3-got-plt-dynamic.md",
+          "level": "advanced",
+          "topic": "讲解链接动态可执行文件/共享库时的合成段：GotSection、PltSection、DynamicSection、RelocationSection、SymbolTableSection 如何协作实现符号解析。",
+          "learning_goals": [
+            "理解 GOT/PLT 的作用与 GotSection/GotPltSection/PltSection 的关系",
+            "掌握 DynamicSection 与 hasDynsym 的判断、.dynsym/.dynstr 的生成",
+            "了解 RelocationSection 如何承载运行期重定位（R_X86_64_RELATIVE 等）"
+          ],
+          "source_files": [
+            "ELF/SyntheticSections.h",
+            "ELF/SyntheticSections.cpp"
+          ],
+          "minimal_modules": [
+            "GOT/PLT 合成段",
+            "动态表与 .dynsym",
+            "运行期重定位段"
+          ],
+          "practice_task": "用 `ld.lld -shared` 生成一个共享库，用 readelf 查看 .got/.got.plt/.dynsym/.rela.dyn，再回到 SyntheticSections.h 找到对应合成段类并说明谁在何时填充它们。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l4",
+          "title": "Thunks 远跳转桩与重定位修补",
+          "order": 4,
+          "filename": "u6-l4-thunks.md",
+          "level": "advanced",
+          "topic": "讲解远跳转桩（thunks）：当分支目标超出指令寻址范围时（如 ARM/AArch64 的短跳转），插入中间跳板并通过多次地址分配迭代收敛。",
+          "learning_goals": [
+            "理解 needsThunk 的判断与 addThunkAArch64/addThunkArm 等架构选择",
+            "掌握 Thunk 基类如何计算大小、写指令、提供目标符号",
+            "了解 Thunks 与迭代地址分配的交互（插入桩会改变大小、需要重新分配）"
+          ],
+          "source_files": [
+            "ELF/Thunks.h",
+            "ELF/Thunks.cpp"
+          ],
+          "minimal_modules": [
+            "Thunk 类层次与架构选择",
+            "桩的写入与符号",
+            "与迭代地址分配的交互"
+          ],
+          "practice_task": "构造一个 AArch64 或 ARM 上目标超出 B/BL 范围的链接用例，用 ld.lld 链接后反汇编观察插入的 thunk；再在 Thunks.cpp 中找到对应的 addThunkXX 函数。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "高级优化：GC、ICF 与 LTO",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "--gc-sections 垃圾回收",
+          "order": 1,
+          "filename": "u7-l1-gc-sections.md",
+          "level": "advanced",
+          "topic": "讲解 --gc-sections 的垃圾回收：从 entry/__init_array/dynamic 等根集合出发，沿重定位可达性标记存活的 InputSection，丢弃不可达段。",
+          "learning_goals": [
+            "理解 markLive 的根集合与可达性传播（enqueue/markLive）",
+            "掌握处理 SHF_GNU_RETAIN、--gc-keep-exported、eh_frame 可达性的规则",
+            "了解 TrackWhyLive（--print-gc-sections/--why-live）的诊断输出"
+          ],
+          "source_files": [
+            "ELF/MarkLive.h",
+            "ELF/MarkLive.cpp"
+          ],
+          "minimal_modules": [
+            "根集合与可达性传播",
+            "特殊段（eh_frame/retain）处理",
+            "--print-gc-sections 诊断"
+          ],
+          "practice_task": "编译一个含未引用函数的目标文件，对比有无 -ffunction-sections --gc-sections 的输出大小；再在 MarkLive.cpp 中定位根集合是如何初始化的。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "ICF 等价代码折叠",
+          "order": 2,
+          "filename": "u7-l2-icf.md",
+          "level": "advanced",
+          "topic": "讲解 ICF（Identical Code Folding）：通过比较只读段的元数据、内容和重定位，把完全相同的函数合并为同一地址以减小输出体积。",
+          "learning_goals": [
+            "理解 ICF 的安全性限制（不同函数可能需要不同地址）与 findKeepUniqueSections 的作用",
+            "掌握 ICF 类的分轮比较（contents→relocations）与收敛过程",
+            "了解 -icf=none/safe/all 的语义差异"
+          ],
+          "source_files": [
+            "ELF/ICF.h",
+            "ELF/ICF.cpp"
+          ],
+          "minimal_modules": [
+            "ICF 安全性与唯一性保护",
+            "分轮等价比较",
+            "ICF 等级与触发条件"
+          ],
+          "practice_task": "构造两个函数体完全相同的目标文件，用 `ld.lld --icf=all` 链接，验证它们被合并到同一地址；再在 ICF.cpp 中找到比较函数与收敛循环。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "LTO 与 DTLTO",
+          "order": 3,
+          "filename": "u7-l3-lto-dtlto.md",
+          "level": "advanced",
+          "topic": "讲解链接时优化（LTO）：LLD 把 LLVM bitcode 当作输入文件解析符号，再用 BitcodeCompiler 调用 LLVM 把全部 bitcode 编译成单个大对象，最后像普通 ELF 一样链接。",
+          "learning_goals": [
+            "理解 compileBitcodeFiles 在 link<ELFT> 中的位置与符号替换流程",
+            "掌握 BitcodeCompiler::add/compile、createConfig 的 LTO 配置（regular/thin/unified）",
+            "了解 DTLTO（分布式 ThinLTO）如何把后端编译分发给外部调度系统"
+          ],
+          "source_files": [
+            "ELF/LTO.h",
+            "ELF/LTO.cpp",
+            "docs/DTLTO.md"
+          ],
+          "minimal_modules": [
+            "bitcode 符号解析与编译",
+            "LTO 模式与配置",
+            "DTLTO 分布式 ThinLTO"
+          ],
+          "practice_task": "用 `clang -flto` 生成 bitcode 目标文件，用 ld.lld 链接并加 `-time-trace` 观察 LTO 阶段耗时；再阅读 ELF/LTO.cpp 说明 compile() 产出的对象如何被并入 objectFiles。",
+          "depends_on": [
+            "u4-l3",
+            "u2-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "其他后端：COFF、Mach-O、wasm、MinGW",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "COFF（Windows）后端",
+          "order": 1,
+          "filename": "u8-l1-coff-backend.md",
+          "level": "intermediate",
+          "topic": "讲解 COFF（Windows）后端：用 Chunk 而非 InputSection、COFFLinkerContext 聚合状态、PDB/DLL/base relocation 等机制。",
+          "learning_goals": [
+            "理解 COFF 用 Chunk 抽象输出片段（对应 ELF 的 InputSection）",
+            "掌握 COFFLinkerContext 与 ELF Ctx 的对应关系、link()/linkerMain 的并行结构",
+            "了解 PDB 调试信息、DLL 符号导入导出、RVA/VA 与 base relocation"
+          ],
+          "source_files": [
+            "COFF/Chunks.h",
+            "COFF/Driver.cpp",
+            "COFF/COFFLinkerContext.h"
+          ],
+          "minimal_modules": [
+            "Chunk 抽象",
+            "COFFLinkerContext 与驱动",
+            "PDB/DLL/base relocation"
+          ],
+          "practice_task": "对照 ELF 的 InputSection，在 COFF/Chunks.h 中找到 Chunk 类并说明它如何知道自己的大小与重定位；再列出 COFF 后端相对 ELF 多出的 PDB/DLL 模块。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "Mach-O（macOS）后端",
+          "order": 2,
+          "filename": "u8-l2-macho-backend.md",
+          "level": "intermediate",
+          "topic": "讲解 Mach-O（macOS）后端：OutputSegment/ConcatOutputSection 的分层布局、ExportTrie 符号导出、UnwindInfo 与 ObjC/KVO 处理。",
+          "learning_goals": [
+            "理解 Mach-O 的 segment→outputSection→inputSection 三层布局结构",
+            "掌握 ExportTrie 如何替代 .dynsym 实现符号导出查找",
+            "了解 UnwindInfoSection、LinkerOptimizationHints(LOH)、ObjC 专有处理"
+          ],
+          "source_files": [
+            "MachO/OutputSegment.h",
+            "MachO/ExportTrie.h",
+            "MachO/Driver.cpp"
+          ],
+          "minimal_modules": [
+            "segment/section 分层布局",
+            "ExportTrie 符号导出",
+            "UnwindInfo/LOH/ObjC"
+          ],
+          "practice_task": "在 MachO/Driver.cpp 的 link() 中找到 writeResult<LP64> 调用，对照 ELF 说明两者的写盘入口差异；再在 ExportTrie.h 中了解 trie 的构建。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "WebAssembly 与 MinGW 后端",
+          "order": 3,
+          "filename": "u8-l3-wasm-mingw-backends.md",
+          "level": "intermediate",
+          "topic": "讲解 WebAssembly 后端的 InputChunks/OutputSections 模型与 wasm-ld 写盘，以及 MinGW 驱动如何作为 COFF 后端的薄包装实现 GNU 风格命令行。",
+          "learning_goals": [
+            "理解 wasm 后端如何用 InputChunks/OutputSections 适配非 ELF 的二进制布局",
+            "掌握 wasm 的 link()/linkerMain/writeResult 结构与 ELF 的异同",
+            "了解 MinGW/Driver.cpp 如何把 GCC 风格参数翻译并委托给 COFF 后端"
+          ],
+          "source_files": [
+            "wasm/Driver.cpp",
+            "MinGW/Driver.cpp"
+          ],
+          "minimal_modules": [
+            "wasm InputChunks/OutputSections",
+            "wasm 驱动与写盘",
+            "MinGW 薄包装与 COFF 委托"
+          ],
+          "practice_task": "对比 wasm/Driver.cpp 与 ELF/Driver.cpp 的 link() 函数，列出它们共享的阶段与 wasm 特有的步骤；再阅读 MinGW/Driver.cpp 说明它如何选择并调用 COFF 后端。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "工程、测试与性能",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "lit 测试体系与单元测试",
+          "order": 1,
+          "filename": "u9-l1-lit-test-suite.md",
+          "level": "advanced",
+          "topic": "讲解 LLD 的 lit + FileCheck 测试体系：test/ELF、test/COFF、test/MachO、test/wasm、test/MinGW 下的端到端测试，以及 unittests 下的 C++ 单元测试。",
+          "learning_goals": [
+            "理解 lit 测试的组织方式、RUN/CHECK 行、以及 LLD_IN_TEST 环境变量的反复执行机制",
+            "掌握如何针对某个选项/特性定位并新增对应 lit 测试",
+            "了解 unittests/AsLibELF、AsLibAll 等库场景单元测试"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "unittests/AsLibELF/SomeDrivers.cpp",
+            "unittests/AsLibAll/AllDrivers.cpp"
+          ],
+          "minimal_modules": [
+            "lit + FileCheck 测试结构",
+            "定位与编写新测试",
+            "unittests 库测试"
+          ],
+          "practice_task": "在 test/ELF 中找到三个与 --gc-sections 相关的测试文件，读懂 RUN 与 CHECK 行；并为某个 ELF 选项（如 --print-map）补一个最小 lit 测试。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "并行设计与性能剖析",
+          "order": 2,
+          "filename": "u9-l2-parallelism-and-performance.md",
+          "level": "advanced",
+          "topic": "讲解 LLD 的高性能设计：parallelForEach 并行化符号解析与重定位扫描、sharding 降低锁竞争、惰性求值少做事，以及 Timer/--time-trace 性能剖析。",
+          "learning_goals": [
+            "理解 parallelForEach 在 postParse/scanRelocations 等阶段的并行使用与线程安全约束",
+            "掌握 NewLLD 文档中『少做事』的总体设计哲学与关键数据（symbol/section 数量级）",
+            "了解 Timer、--time-trace、--print-memory-usage 等性能剖析手段"
+          ],
+          "source_files": [
+            "ELF/Driver.cpp",
+            "ELF/Writer.cpp",
+            "include/lld/Common/Timer.h",
+            "docs/NewLLD.md"
+          ],
+          "minimal_modules": [
+            "并行化与 sharding",
+            "惰性求值设计哲学",
+            "Timer 与 time-trace 剖析"
+          ],
+          "practice_task": "用 `--time-trace` 链接一个大项目，找出耗时最长的阶段；再在 Driver.cpp/Writer.cpp 中找出对应 parallelForEach 调用，分析其并行粒度。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l3",
+          "title": "调试信息、Map 文件与 Errata 修正",
+          "order": 3,
+          "filename": "u9-l3-debuginfo-mapfiles-errata.md",
+          "level": "advanced",
+          "topic": "讲解 LLD 的调试信息支持、map 文件输出与架构勘误修正：DWARF/.gdb-index、MapFile/-M、AArch64/ARM Cortex 勘误补丁。",
+          "learning_goals": [
+            "理解 DWARF 处理与 .gdb-index 生成（Common/DWARF.h、ELF/DWARF.h）",
+            "掌握 MapFile/-M 的输出格式与 COFF 的 LLDMapFile/ELF 的 MapFile 的区别",
+            "了解 AArch64ErrataFix/ARMErrataFix 如何在写盘前修补 Cortex-A57/A8 勘误"
+          ],
+          "source_files": [
+            "include/lld/Common/DWARF.h",
+            "ELF/MapFile.h",
+            "ELF/AArch64ErrataFix.h"
+          ],
+          "minimal_modules": [
+            "DWARF 与 .gdb-index",
+            "Map 文件输出",
+            "架构勘误修正"
+          ],
+          "practice_task": "用 `ld.lld -M` 或 `--Map=out.map` 链接并解读输出文件结构；再在 AArch64ErrataFix.h 中找到勘误补丁的入口，说明它为何需要在地址分配后执行。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
