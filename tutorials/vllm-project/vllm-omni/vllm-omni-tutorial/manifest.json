@@ -1,0 +1,1188 @@
+{
+  "project": "vllm-omni",
+  "head": "900a7f0813d0482811b0e4dfd3cf7deabbe2429f",
+  "rationale": "vLLM-Omni 是在 vLLM 基础上扩展的「全模态（omni-modality）推理与服务框架」，其核心特色是 AR+DiT 多阶段、全解耦（OmniConnector + Orchestrator）的运行时。学习路线遵循「先会用 → 再懂机制 → 后能扩展」的递进。入门层 U1 从项目定位、安装、源码地图到离线/在线快速上手，让读者先跑通第一个模型；U2 讲清 vLLM-Omni 如何通过 patch.py、配置体系、输入输出数据结构扩展 vLLM，这是理解整个项目的地基。进阶层用三个单元分别拆解三大核心子系统：U3 多阶段运行时与编排（AsyncOmniEngine/Orchestrator/Stage 进程/OmniConnector/OmniCoordinator），U4 AR 模块（scheduler/worker/model runner/多模态输出），U5 Diffusion 模块（engine/sched/executor/worker/pipeline），对应架构图中的 Entrypoints、AR、Diffusion、OmniConnector；U6 讲在线服务 API。专家层 U7 集中讲 Diffusion 加速（注意力后端/并行注意力/缓存/并行策略/请求级与连续批处理），U8 讲量化、多硬件平台与性能剖析，U9 讲三类模型（Diffusion / Omni 多阶段 / TTS）的扩展开发与实验特性，U10 讲 L1–L5 测试体系与 CI 工程实践。讲义间依赖按「入门→机制→子系统→加速→扩展→工程」串成线性主干，每个加速/扩展主题都依赖其对应的子系统讲义，确保读者始终结合真实源码循序渐进。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 vLLM-Omni 与第一次运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "vLLM-Omni 是什么：全模态推理框架全景",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 vLLM-Omni 的定位、要解决的问题（非自回归结构、非文本输出、多模态），以及它与上游 vLLM 的关系，建立全局认知。",
+          "learning_goals": [
+            "理解 vLLM-Omni 相对于 vLLM 扩展的三大目标：非文本输出、非自回归结构、与 vLLM 核心兼容",
+            "识别代表模型的三种组合：DiT 为主（Qwen-Image）、AR 为主（BAGEL）、AR+DiT（Qwen-Omni）",
+            "说出 OmniRouter、EntryPoints、AR、Diffusion、OmniConnector 五大组件的职责"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/design/architecture_overview.md",
+            "vllm_omni/__init__.py"
+          ],
+          "minimal_modules": [
+            "README About / Latest News",
+            "architecture_overview.md 的 Goals 与 Key Components",
+            "vllm_omni/__init__.py 的模块说明注释"
+          ],
+          "practice_task": "阅读 architecture_overview.md 后，用自己的话画出一张 AR+DiT 模型（如 Qwen3-Omni）在 vLLM-Omni 中的请求流转草图，标出 Thinker/Talker/Code2wav 与 Orchestrator 的位置。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "安装与环境：从源码安装 vLLM-Omni",
+          "order": 2,
+          "filename": "u1-l2-installation.md",
+          "level": "beginner",
+          "topic": "讲解在不同硬件（CUDA/ROCm/NPU/XPU）上的安装方式、Python 与 vLLM 版本对齐要求，以及 setup.py/pyproject.toml 的关键约定。",
+          "learning_goals": [
+            "掌握 CUDA 与 ROCm 下从源码安装 vLLM-Omni 的命令",
+            "理解 vLLM 与 vLLM-Omni 主次版本必须对齐的原因及版本告警机制",
+            "了解 pyproject.toml 中 console_script（vllm-omni）与可选依赖的组织方式"
+          ],
+          "source_files": [
+            "docs/getting_started/quickstart.md",
+            "docs/getting_started/installation/README.md",
+            "pyproject.toml",
+            "setup.py"
+          ],
+          "minimal_modules": [
+            "quickstart.md 的 Installation 段",
+            "pyproject.toml 的 [project.scripts] 与依赖声明",
+            "vllm_omni/version.py 的版本对齐告警逻辑"
+          ],
+          "practice_task": "在本机（或容器）按 quickstart 完成 CUDA 源码安装，运行 `python -c \"import vllm_omni; print(vllm_omni.__version__)\"` 确认版本，并故意装一个版本不匹配的 vLLM 观察告警。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "源码地图：目录结构与包布局",
+          "order": 3,
+          "filename": "u1-l3-directory-map.md",
+          "level": "beginner",
+          "topic": "梳理 vllm_omni 包目录、docs/examples/recipes/tests/benchmarks 等顶层目录的职责，建立后续阅读的「地图」。",
+          "learning_goals": [
+            "掌握 vllm_omni/ 下 entrypoints、engine、diffusion、distributed、config、platforms、quantization、worker、core 等目录的职责",
+            "区分 examples/offline_inference 与 examples/online_serving 的用途",
+            "了解 docs/design 与 docs/contributing 中可参考的设计与贡献文档"
+          ],
+          "source_files": [
+            "vllm_omni/__init__.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "vllm_omni 包子目录（entrypoints/engine/diffusion/distributed/config/platforms/quantization/worker/core）",
+            "examples/offline_inference 与 examples/online_serving 目录",
+            "docs/design 与 docs/contributing 目录"
+          ],
+          "practice_task": "用树形图列出 vllm_omni/ 下的一级目录，并为每个目录写一句不超过 15 字的职责说明，形成一张速查表。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "离线推理初体验：用 Omni 类生成图像",
+          "order": 4,
+          "filename": "u1-l4-offline-quickstart.md",
+          "level": "beginner",
+          "topic": "通过 text_to_image 例子，演示如何用 Omni 类做离线批处理推理，理解 generate 的输入输出与多 prompt 自动批处理。",
+          "learning_goals": [
+            "会用 Omni(model=...).generate(prompt) 完成一次文生图",
+            "理解 outputs[0].request_output.images 的输出结构",
+            "知道 diffusion 场景下每个 prompt 是独立逻辑请求、运行时可自动批处理"
+          ],
+          "source_files": [
+            "docs/getting_started/quickstart.md",
+            "examples/offline_inference/text_to_image/text_to_image.py",
+            "vllm_omni/entrypoints/omni.py"
+          ],
+          "minimal_modules": [
+            "quickstart.md 的 Offline Inference 段",
+            "Omni.generate 的入参与返回（OmniRequestOutput）",
+            "text_to_image.py 的核心调用链"
+          ],
+          "practice_task": "运行 examples/offline_inference/text_to_image/text_to_image.py，传入 3 条不同 prompt，将生成的 3 张图片保存并对照输出，体会「多 prompt 自动批处理」。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "在线服务初体验：vllm serve --omni 与 OpenAI 兼容 API",
+          "order": 5,
+          "filename": "u1-l5-online-quickstart.md",
+          "level": "beginner",
+          "topic": "演示用 `vllm serve --omni` 启动 OpenAI 兼容服务，并用 curl 调用 /v1/chat/completions 完成文生图，理解 CLI 拦截机制。",
+          "learning_goals": [
+            "掌握 `vllm serve <model> --omni --port 8091` 的启动方式",
+            "理解 main.py 如何通过 --omni 标志拦截并接管 vLLM 命令",
+            "会用 curl 调用 /v1/chat/completions 并解析返回的图像 base64"
+          ],
+          "source_files": [
+            "docs/getting_started/quickstart.md",
+            "vllm_omni/entrypoints/cli/main.py",
+            "vllm_omni/entrypoints/cli/serve.py"
+          ],
+          "minimal_modules": [
+            "quickstart.md 的 Online Serving 段",
+            "main.py 的 --omni 拦截与子命令注册逻辑",
+            "serve.py 的 cmd_init 与启动流程"
+          ],
+          "practice_task": "启动 Z-Image-Turbo 的 --omni 服务，用 quickstart 中的 curl 命令生成一张图并保存为 png；再尝试去掉 --omni 观察命令行为差异。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心抽象：如何扩展 vLLM",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "patch 机制：vLLM-Omni 如何无缝改写 vLLM",
+          "order": 1,
+          "filename": "u2-l1-patch-mechanism.md",
+          "level": "intermediate",
+          "topic": "讲解 vllm_omni/patch.py 的 monkey-patch 思路与 __init__.py 的注册时机，理解「修改（🟡）+ 新增（🔴）」扩展模型。",
+          "learning_goals": [
+            "理解 patch.py 在 import 早期被加载的时机与作用",
+            "掌握 patch 对 ModelConfig.is_mm_prefix_lm、NVFP4 weight_scale、RequestStatus 的具体改写",
+            "区分 vLLM 组件被「修改」与被「新增」两类扩展"
+          ],
+          "source_files": [
+            "vllm_omni/__init__.py",
+            "vllm_omni/patch.py"
+          ],
+          "minimal_modules": [
+            "__init__.py 的 patch 与 transformers_utils 注册顺序",
+            "patch.py 中的 _patched_is_mm_prefix_lm / _clamp_nvfp4_weight_scale_nans / RequestStatus 扩展",
+            "MM_PREFIX_LM_MODELS 列表"
+          ],
+          "practice_task": "在 patch.py 中找到一处 monkey-patch，画出「原方法 → 被包装后的方法」的调用关系图，并解释如果不打这个补丁会发生什么。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "配置体系：从单模型到多阶段 Stage 配置",
+          "order": 2,
+          "filename": "u2-l2-config-system.md",
+          "level": "intermediate",
+          "topic": "讲解 config 目录下的三类配置：OmniModelConfig（模型级）、omni_config.py（结构化多阶段）、stage_config.py（YAML 部署），理解一个请求如何被声明成多个 stage。",
+          "learning_goals": [
+            "理解 OmniModelConfig 相对 vLLM ModelConfig 新增的 stage_id、engine_output_type、stage_connector_config 等字段",
+            "掌握 VllmOmniConfig / VllmOmniARStageConfig / VllmOmniDiffusionStageConfig 的层级关系",
+            "区分结构化 omni_config 与 legacy stage_config（StageType/StageExecutionType）的用途"
+          ],
+          "source_files": [
+            "vllm_omni/config/model.py",
+            "vllm_omni/config/omni_config.py",
+            "vllm_omni/config/stage_config.py",
+            "vllm_omni/config/config_factory.py"
+          ],
+          "minimal_modules": [
+            "OmniModelConfig 的关键字段",
+            "VllmOmniConfig 顶层容器与各 StageConfig 子类",
+            "StageConfigFactory 的构建入口"
+          ],
+          "practice_task": "为一个假想的「AR + Diffusion」两阶段模型，手写一段最小的结构化 stage 配置（含 stage_type、parallel、connector），并说明每个 stage 用哪个 StageConfig 子类。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "输入输出数据结构：OmniPromptType 与 OmniRequestOutput",
+          "order": 3,
+          "filename": "u2-l3-io-data-structures.md",
+          "level": "intermediate",
+          "topic": "讲解 inputs/data.py 中的多模态 prompt 类型与 outputs 中的统一输出结构，理解跨阶段数据如何在内存中表达。",
+          "learning_goals": [
+            "掌握 OmniPromptType 联合类型及其各成员（OmniTextPrompt/OmniEmbedsPrompt/OmniCustomPrompt 等）",
+            "理解 prompt_embeds、additional_information 在阶段间传递的作用",
+            "掌握 OmniRequestOutput / OmniModelRunnerOutput / OmniConnectorOutput 的层级与用途"
+          ],
+          "source_files": [
+            "vllm_omni/inputs/data.py",
+            "vllm_omni/outputs/__init__.py",
+            "vllm_omni/engine/__init__.py"
+          ],
+          "minimal_modules": [
+            "inputs/data.py 的各 Prompt dataclass 与 OmniDiffusionSamplingParams",
+            "outputs 的 OmniRequestOutput / OmniModelRunnerOutput / OmniConnectorOutput",
+            "engine/__init__.py 的 PromptEmbedsPayload / AdditionalInformationPayload / OmniEngineCoreRequest"
+          ],
+          "practice_task": "构造一个包含文本 + 多模态数据 + additional_information 的 OmniPromptType 字典，跟踪它如何被序列化为 OmniEngineCoreRequest，写出关键字段的映射关系。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "多阶段运行时与编排",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "AsyncOmni 与 AsyncOmniEngine：多阶段架构总览",
+          "order": 1,
+          "filename": "u3-l1-async-omni-architecture.md",
+          "level": "intermediate",
+          "topic": "基于 Qwen3-Omni 示例，讲解 API 层（Omni/AsyncOmni）、Engine 代理层（AsyncOmniEngine）、Orchestration 层、Communication 层、Execution 层的五层架构与一次 generate 的执行流。",
+          "learning_goals": [
+            "掌握 AsyncOmni / Omni / AsyncOmniEngine / Orchestrator 的职责分层",
+            "理解 request_queue / output_queue（janus.Queue）的线程间通信",
+            "跟踪一次 generate 请求从 add_request 到 yield OmniRequestOutput 的 8 步流程"
+          ],
+          "source_files": [
+            "docs/design/module/async_omni_architecture.md",
+            "vllm_omni/entrypoints/async_omni.py",
+            "vllm_omni/entrypoints/omni_base.py",
+            "vllm_omni/engine/async_omni_engine.py"
+          ],
+          "minimal_modules": [
+            "async_omni_architecture.md 的系统架构图与执行流",
+            "AsyncOmniEngine 的 add_request / try_get_output 接口",
+            "OmniBase 的共享逻辑（_run_generation / _compute_final_stage_id）"
+          ],
+          "practice_task": "对照 async_omni_architecture.md 的执行流，为一次「text → audio」请求标注每个箭头步骤发生在哪个文件/类中，形成一份执行流注释表。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Orchestrator：跨阶段请求编排",
+          "order": 2,
+          "filename": "u3-l2-orchestrator.md",
+          "level": "intermediate",
+          "topic": "讲解后台 Orchestrator 线程如何轮询各 stage 输出、路由并前推到下一阶段，以及 OrchestratorRequestState 的状态跟踪。",
+          "learning_goals": [
+            "理解 Orchestrator 的 _request_handler 与 _orchestration_output_handler 两条处理路径",
+            "掌握 _route_output 与 _forward_to_next_stage 的阶段前推逻辑",
+            "理解 OrchestratorRequestState 如何跟踪每个请求的阶段进度"
+          ],
+          "source_files": [
+            "vllm_omni/engine/orchestrator.py",
+            "vllm_omni/engine/orchestrator_monitor.py",
+            "vllm_omni/engine/stage_pool.py"
+          ],
+          "minimal_modules": [
+            "Orchestrator 的编排主循环",
+            "OrchestratorRequestState 状态机",
+            "stage_pool 与阶段副本管理"
+          ],
+          "practice_task": "在 orchestrator.py 中定位「判断请求 finished 且非最终阶段则前推」的代码，画出一个请求在 3 个阶段间转移的状态机图。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "阶段进程与运行时：StageEngineCoreProc 与 StageRuntime",
+          "order": 3,
+          "filename": "u3-l3-stage-process-runtime.md",
+          "level": "intermediate",
+          "topic": "讲解每个 stage 作为独立 EngineCore 子进程的启动、ZMQ 通信、StageRuntime 的单机/分布式实现，以及 StageClient 的请求投递。",
+          "learning_goals": [
+            "理解 StageEngineCoreProc 继承自 vLLM EngineCoreProc 并提供 run_stage_core 入口",
+            "掌握 StageRuntime 的 StageRuntimeInfo 与单机/分布式工厂上下文",
+            "理解 StageEngineCoreClient（ZMQ ROUTER/PULL + msgpack）如何把请求投递到 stage 进程"
+          ],
+          "source_files": [
+            "vllm_omni/engine/stage_engine_core_proc.py",
+            "vllm_omni/engine/stage_engine_core_proc_manager.py",
+            "vllm_omni/engine/stage_runtime.py",
+            "vllm_omni/engine/stage_client.py"
+          ],
+          "minimal_modules": [
+            "StageEngineCoreProc 的 busy loop 与 run_stage_core",
+            "StageRuntime 的 StageRuntimeInfo 与 StageRemoteFactoryContext",
+            "StageClient 的 add_request_async / get_output_async"
+          ],
+          "practice_task": "梳理 stage 进程从启动到接收第一条请求的初始化链路（init_device → load_model → busy_loop → execute），标注每步发生在哪个类。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "全解耦通信：OmniConnector 体系",
+          "order": 4,
+          "filename": "u3-l4-omni-connectors.md",
+          "level": "intermediate",
+          "topic": "讲解 OmniConnectorBase 的 put/get 抽象、各类连接器（SharedMemory/Mooncake/Mori/Yuanrong）、工厂与适配器，以及 YAML 中如何为 stage 边缘指定连接器。",
+          "learning_goals": [
+            "掌握 OmniConnectorBase 的 put/get 契约与 metadata 传递机制",
+            "理解 SharedMemoryConnector（单机自动配置）与 Mooncake/Yuanrong（多节点 RDMA）的适用场景",
+            "掌握 factory/adapter 如何把 stage 边缘绑定到连接器并实现 D2H2D 传输"
+          ],
+          "source_files": [
+            "docs/design/feature/disaggregated_inference.md",
+            "vllm_omni/distributed/omni_connectors/factory.py",
+            "vllm_omni/distributed/omni_connectors/adapter.py",
+            "vllm_omni/distributed/omni_connectors/connectors/base.py",
+            "vllm_omni/distributed/omni_connectors/kv_transfer_manager.py"
+          ],
+          "minimal_modules": [
+            "OmniConnectorBase 抽象接口",
+            "OmniConnectorFactory 注册与创建",
+            "try_send_via_connector / try_recv_via_connector 适配器",
+            "OmniKVTransferManager 的 KV 预取/消费"
+          ],
+          "practice_task": "参考 disaggregated_inference.md，为一个 2 阶段流水线编写 YAML：stage0 输出经 SharedMemoryConnector 到 stage1，stage1 输入从同一连接器读取，并解释若无显式连接器时的自动行为。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "OmniCoordinator：副本注册与负载均衡",
+          "order": 5,
+          "filename": "u3-l5-omni-coordinator.md",
+          "level": "advanced",
+          "topic": "讲解分布式场景下 OmniCoordinator 如何作为中心协调者管理 stage 副本、心跳、负载均衡策略与 wire protocol 消息。",
+          "learning_goals": [
+            "理解 OmniCoordinator 的 ZMQ ROUTER/PUB 中心角色、副本注册与心跳超时",
+            "掌握 LoadBalancingPolicy（RANDOM/ROUND_ROBIN/LEAST_QUEUE_LENGTH）的选择逻辑",
+            "理解 ReplicaStatus/ReplicaEvent/ReplicaInfo 等 wire protocol 消息与 hub/stage 两类客户端"
+          ],
+          "source_files": [
+            "vllm_omni/distributed/omni_coordinator/omni_coordinator.py",
+            "vllm_omni/distributed/omni_coordinator/load_balancer.py",
+            "vllm_omni/distributed/omni_coordinator/messages.py",
+            "vllm_omni/distributed/omni_coordinator/runtime.py"
+          ],
+          "minimal_modules": [
+            "OmniCoordinator 的副本注册表与心跳",
+            "LoadBalancer / LoadBalancingPolicy 策略",
+            "run_omni_coordinator_proc 生命周期包装"
+          ],
+          "practice_task": "设计一个场景：stage1 有 3 个副本且队列长度不同，说明 LEAST_QUEUE_LENGTH 策略会如何选择副本，并对照 load_balancer.py 验证你的判断。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "AR 模块：自回归阶段的扩展",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "AR 模块总览：继承 vLLM 的 Scheduler/Worker/ModelRunner",
+          "order": 1,
+          "filename": "u4-l1-ar-module-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 AR 模块如何通过继承 vLLM 的 Scheduler/Worker/ModelRunner/InputProcessor/OutputProcessor 来支持多模态、隐藏态暴露与直接 embedding 传递。",
+          "learning_goals": [
+            "掌握 OmniARScheduler/GPUARWorker/GPUARModelRunner 的继承体系",
+            "理解两阶段执行（execute_model + sample_tokens）与单阶段 Generation runner 的区别",
+            "了解 prompt_embeds overlay 与 additional_information 处理"
+          ],
+          "source_files": [
+            "docs/design/module/ar_module.md",
+            "vllm_omni/worker/gpu_ar_worker.py",
+            "vllm_omni/worker/gpu_ar_model_runner.py",
+            "vllm_omni/worker/base.py"
+          ],
+          "minimal_modules": [
+            "ar_module.md 的继承层次图",
+            "GPUARModelRunner 的两阶段执行",
+            "OmniGPUModelRunner 的 prompt_embeds overlay 与 additional_information"
+          ],
+          "practice_task": "对照 ar_module.md 的类图，列出 GPUARModelRunner 相对 vLLM GPUModelRunner 新增/重写的方法，并说明每个方法服务的多模态能力。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "AR 调度器：OmniARScheduler 与 OmniGenerationScheduler",
+          "order": 2,
+          "filename": "u4-l2-ar-schedulers.md",
+          "level": "intermediate",
+          "topic": "讲解两种 AR 调度器：OmniARScheduler 用 OmniNewRequestData 富化请求，OmniGenerationScheduler 为单步完成的基础异构架构提供快路径。",
+          "learning_goals": [
+            "理解 OmniARScheduler.schedule 如何把 NewRequestData 重包装为 OmniNewRequestData 并附加 prompt_embeds/additional_information",
+            "掌握 OmniGenerationScheduler 一次性分配全部 token 的快路径与 update_from_output 立即结束的逻辑",
+            "理解 AR 模块请求流：InputProcessor → Scheduler → Worker → ModelRunner → OutputProcessor"
+          ],
+          "source_files": [
+            "vllm_omni/core/sched/omni_ar_scheduler.py",
+            "vllm_omni/core/sched/omni_generation_scheduler.py",
+            "vllm_omni/core/sched/omni_scheduling_coordinator.py"
+          ],
+          "minimal_modules": [
+            "OmniARScheduler.schedule 的重包装逻辑",
+            "OmniGenerationScheduler 的单步快路径",
+            "OmniNewRequestData 富化字段"
+          ],
+          "practice_task": "比较 OmniARScheduler 与 OmniGenerationScheduler 的 schedule/update_from_output，写出两者在「token 分配」和「请求何时 finished」上的差异表。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "多模态输出处理：MultimodalOutputProcessor 与张量累积",
+          "order": 3,
+          "filename": "u4-l3-multimodal-output.md",
+          "level": "intermediate",
+          "topic": "讲解 MultimodalOutputProcessor 如何按 output_type 路由、OmniRequestState 如何跨步累积张量并在最终输出前拼接，支持流式。",
+          "learning_goals": [
+            "掌握 MultimodalOutputProcessor 按 output_type（text/image/audio/latents）路由的逻辑",
+            "理解 OmniRequestState.add_multimodal_tensor 的列表累积与 _consolidate_multimodal_tensors 拼接",
+            "了解 pooler_output 如何携带每请求隐藏态与多模态输出"
+          ],
+          "source_files": [
+            "vllm_omni/outputs/output_processor.py",
+            "vllm_omni/engine/output_processor.py",
+            "vllm_omni/outputs/__init__.py"
+          ],
+          "minimal_modules": [
+            "MultimodalOutputProcessor 的路由与累积",
+            "OmniRequestState 的张量累积与拼接",
+            "OmniModelRunnerOutput.pooler_output"
+          ],
+          "practice_task": "为一个跨多步产出音频 latent 的 AR 阶段，画出张量从「逐步累积为 list」到「最终 torch.cat 拼接」的时序，并定位对应代码行。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "Diffusion 模块：DiT 推理引擎",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Diffusion 引擎：执行模式与输出流",
+          "order": 1,
+          "filename": "u5-l1-diffusion-engine.md",
+          "level": "intermediate",
+          "topic": "讲解 DiffusionEngine 作为编排者，如何选择 REQUEST_BATCH / STEP_BATCH 执行模式、管理 pre/post 处理与统一的输出流生命周期。",
+          "learning_goals": [
+            "掌握 DiffusionExecutionMode（REQUEST_BATCH / STEP_BATCH）的区别与选择条件",
+            "理解 step_streaming 统一输出流语义与 asyncio.Queue 投递",
+            "了解 pre_process_func / postprocess_output 的注册表模式"
+          ],
+          "source_files": [
+            "docs/design/module/dit_module.md",
+            "vllm_omni/diffusion/diffusion_engine.py",
+            "vllm_omni/diffusion/data.py"
+          ],
+          "minimal_modules": [
+            "dit_module.md 的 Diffusion Engine 与 Execution Modes 段",
+            "DiffusionEngine 的 step_streaming / async_add_req_and_stream_response",
+            "OmniDiffusionConfig 与 DiffusionOutput 数据结构"
+          ],
+          "practice_task": "对比 REQUEST_BATCH 与 STEP_BATCH 两种模式下「一个请求」分别走过哪些执行函数（execute_batch vs prepare_encode/denoise_step/step_scheduler/post_decode），画出对照表。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Diffusion 调度器与执行器",
+          "order": 2,
+          "filename": "u5-l2-diffusion-scheduler-executor.md",
+          "level": "intermediate",
+          "topic": "讲解请求状态调度器（BaseScheduler/RequestScheduler/StepScheduler）与多进程执行器（MultiprocDiffusionExecutor）如何分工。",
+          "learning_goals": [
+            "掌握 DiffusionRequestStatus 生命周期（WAITING/RUNNING/PREEMPTED/FINISHED_*）",
+            "理解 RequestScheduler 的 FIFO 与兼容性准入、StepScheduler 的逐步推进",
+            "了解 MultiprocDiffusionExecutor 如何经 ZMQ/SHM 管理 worker 进程"
+          ],
+          "source_files": [
+            "vllm_omni/diffusion/sched/base_scheduler.py",
+            "vllm_omni/diffusion/sched/request_scheduler.py",
+            "vllm_omni/diffusion/sched/step_scheduler.py",
+            "vllm_omni/diffusion/executor/multiproc_executor.py"
+          ],
+          "minimal_modules": [
+            "BaseScheduler 的共享账本与 schedule/update_from_output 契约",
+            "RequestScheduler 的兼容性准入",
+            "MultiprocDiffusionExecutor 的进程管理"
+          ],
+          "practice_task": "在一个 step_batch 场景下，跟踪一条请求从 add_request 到 FINISHED_COMPLETED 的状态迁移，标注每步由 scheduler 还是 executor 推进。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "Diffusion Worker 与模型加载",
+          "order": 3,
+          "filename": "u5-l3-diffusion-worker-loader.md",
+          "level": "intermediate",
+          "topic": "讲解 DiffusionWorker 进程的设备初始化、分布式环境、消息循环，以及 DiffusersPipelineLoader 的权重加载与缓存集成。",
+          "learning_goals": [
+            "掌握 DiffusionWorker.init_device 的分布式初始化（NCCL/HCCL）与模型并行组初始化",
+            "理解 worker busy_loop 的消息路由（generation/RPC/shutdown）",
+            "了解 DiffusionModelRunner 如何加载 pipeline、刷新 cache backend 并在 set_forward_context 中执行 forward"
+          ],
+          "source_files": [
+            "vllm_omni/diffusion/worker/diffusion_worker.py",
+            "vllm_omni/diffusion/worker/diffusion_model_runner.py",
+            "vllm_omni/diffusion/model_loader/diffusers_loader.py"
+          ],
+          "minimal_modules": [
+            "DiffusionWorker 的 init_device / load_model / busy_loop",
+            "DiffusionModelRunner 的 execute_model 与 cache 刷新",
+            "DiffusersPipelineLoader 的权重加载"
+          ],
+          "practice_task": "梳理 worker 进程从 ZMQ 收到 generation 消息到调用 pipeline.forward 的调用链，标注 cache_backend.refresh 与 set_forward_context 的位置。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "Diffusion Pipeline 与去噪数据流",
+          "order": 4,
+          "filename": "u5-l4-diffusion-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 model-specific 的 pipeline 实现（diffuse 循环、CFG、cache_branch），以及从 encode_prompt 到 vae.decode 的完整数据流。",
+          "learning_goals": [
+            "掌握 pipeline 的 diffuse 多步循环：transformer.forward → scheduler.step",
+            "理解 CFG 的正负 prompt 双前向与 cache_branch 缓存分支",
+            "跟踪完整数据流：prepare_latents → diffuse → vae.decode → post_process"
+          ],
+          "source_files": [
+            "docs/design/module/dit_module.md",
+            "vllm_omni/diffusion/request.py",
+            "vllm_omni/diffusion/config.py"
+          ],
+          "minimal_modules": [
+            "dit_module.md 的 Diffusion Pipeline 与 Data Flow 段",
+            "OmniDiffusionRequest 的字段（prompt/sampling_params/kv_sender_info）",
+            "set_current_diffusion_config / get_current_diffusion_config 上下文"
+          ],
+          "practice_task": "选择 diffusion/models 下任一 pipeline 实现，阅读其 diffuse 函数，画出「单步去噪」内部的张量流（含 CFG 双前向），并标注 scheduler.step 的输入输出。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "Diffusion 模型库与 diffusers 适配器",
+          "order": 5,
+          "filename": "u5-l5-diffusion-model-zoo.md",
+          "level": "intermediate",
+          "topic": "概览 diffusion/models 下覆盖的 46+ 模型实现，并讲解 diffusers_adapter 如何把 diffusers pipeline 通用适配进 vLLM-Omni。",
+          "learning_goals": [
+            "了解 diffusion/models 目录覆盖的图像/视频/音频模型分类（qwen_image/wan2_2/flux/audiox/cosyvoice3 等）",
+            "理解 diffusers_adapter 作为通用 pipeline 适配器的作用与适用场景",
+            "了解自定义 pipeline 接入的入口与 examples/diffusers_pipeline_adapter 用法"
+          ],
+          "source_files": [
+            "vllm_omni/diffusion/models/diffusers_adapter/__init__.py",
+            "docs/features/custom_pipeline.md",
+            "examples/online_serving/diffusers_pipeline_adapter"
+          ],
+          "minimal_modules": [
+            "diffusion/models 顶层模型目录列表",
+            "diffusers_adapter 适配机制",
+            "custom_pipeline 自定义流程文档"
+          ],
+          "practice_task": "在 diffusion/models 中挑选一个图像模型和一个音频模型，比较两者 pipeline 的「输入 prompt 类型」与「输出 modality」，写一份对比说明。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "在线服务与 OpenAI 兼容 API",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "API Server：FastAPI 应用构建",
+          "order": 1,
+          "filename": "u6-l1-api-server.md",
+          "level": "intermediate",
+          "topic": "讲解 api_server.py 如何构建 FastAPI 应用、挂载多模态路由与 WebSocket，并把请求接入 AsyncOmni。",
+          "learning_goals": [
+            "掌握 build_app / setup_server 的应用构建流程",
+            "理解各 OpenAI 兼容端点的挂载方式（chat/images/videos/speech/audio）",
+            "了解 API 层如何与 AsyncOmni 引擎对接"
+          ],
+          "source_files": [
+            "vllm_omni/entrypoints/openai/api_server.py",
+            "vllm_omni/entrypoints/openai/__init__.py",
+            "vllm_omni/entrypoints/openai/utils.py"
+          ],
+          "minimal_modules": [
+            "api_server 的 build_app 与路由注册",
+            "AsyncOmni 与 serving 模块的绑定",
+            "OpenAI 兼容协议扩展"
+          ],
+          "practice_task": "启动一个 --omni 服务后，用 `curl /v1/models` 与 `/v1/chat/completions` 探测可用路由，列出 api_server.py 中对应每个路由的处理函数。",
+          "depends_on": [
+            "u1-l5",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "多模态端点：Chat / 图像 / 视频 / 语音",
+          "order": 2,
+          "filename": "u6-l2-multimodal-endpoints.md",
+          "level": "intermediate",
+          "topic": "讲解 serving_chat / serving_video / serving_speech / serving_audio_generate 各端点如何把 OpenAI 请求转成多阶段生成请求。",
+          "learning_goals": [
+            "掌握 OmniOpenAIServingChat 如何处理多模态 chat（text/audio/image/video content）",
+            "理解 serving_video 的 text/image/speech-to-video 与 ReferenceVideo/ReferenceAudio",
+            "了解 TTS 端点（serving_speech）与 diffusion 音频端点（serving_audio_generate）的区别及 tts_adapters 作用"
+          ],
+          "source_files": [
+            "vllm_omni/entrypoints/openai/serving_chat.py",
+            "vllm_omni/entrypoints/openai/serving_video.py",
+            "vllm_omni/entrypoints/openai/serving_speech.py",
+            "vllm_omni/entrypoints/openai/serving_audio_generate.py",
+            "docs/serving/chat_completions_api.md"
+          ],
+          "minimal_modules": [
+            "serving_chat 的多模态 content 解析",
+            "serving_video 的参考音视频处理",
+            "TTS adapter 的请求/参数归一化"
+          ],
+          "practice_task": "用 chat_completions_api 文档中的请求格式，分别构造一次「文生图」「文生视频」「文生语音」请求，对照源码说明每个请求落到哪个 serving 模块与哪个 stage。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "流式输出与实时/全双工",
+          "order": 3,
+          "filename": "u6-l3-streaming-realtime.md",
+          "level": "advanced",
+          "topic": "讲解视频流式理解（serving_video_stream）、实时 WebSocket（realtime_connection）与全双工检测（duplex_capability）等流式能力。",
+          "learning_goals": [
+            "掌握 serving_video_stream 的 Qwen-Omni 实时视频理解 WebSocket 处理",
+            "理解 realtime_connection 的双工音频/文本流与张量-numpy 转换",
+            "了解 duplex_capability 如何决定是否启用全双工端点"
+          ],
+          "source_files": [
+            "vllm_omni/entrypoints/openai/serving_video_stream.py",
+            "vllm_omni/entrypoints/openai/realtime_connection.py",
+            "vllm_omni/entrypoints/openai/duplex_capability.py",
+            "docs/serving/video_stream_api.md"
+          ],
+          "minimal_modules": [
+            "StreamingVideoHandler 的会话与帧处理",
+            "RealtimeConnection 的音频流编解码",
+            "should_enable_duplex_endpoint 判定"
+          ],
+          "practice_task": "阅读 realtime_connection.py，画出一个全双工音频会话中「客户端音频帧 → 模型 → 服务端音频帧」的双向数据流，标注张量与 numpy 的转换点。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "Diffusion 加速：注意力、并行、缓存与批处理",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "注意力后端：role 感知选择",
+          "order": 1,
+          "filename": "u7-l1-attention-backends.md",
+          "level": "advanced",
+          "topic": "讲解 diffusion attention 的 role 感知后端选择机制（per_role → category → default → platform）、AttentionSpec 与各类后端。",
+          "learning_goals": [
+            "掌握 Attention 层按 role（self/cross/自定义）声明并由 selector 解析后端的流程",
+            "理解 AttentionSpec 的解析优先级与 backend_kwargs 序列化",
+            "了解 FLASH_ATTN / TORCH_SDPA / SAGE_ATTN / TRTLLM 等后端的可用性与平台映射"
+          ],
+          "source_files": [
+            "docs/design/module/dit_module.md",
+            "vllm_omni/diffusion/attention/layer.py",
+            "vllm_omni/diffusion/attention/selector.py",
+            "vllm_omni/diffusion/attention/backends/abstract.py"
+          ],
+          "minimal_modules": [
+            "Attention 层的 role 声明与后端解析",
+            "get_attn_backend_for_role 的四级优先级",
+            "AttentionBackend / AttentionImpl 接口"
+          ],
+          "practice_task": "为一个含 self-attention 与 cross-attention 的 transformer，设计一份 diffusion_attention_config，让 self 用 FLASH_ATTN、cross 用 TORCH_SDPA，并解释解析顺序如何命中。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "并行注意力：Ring 与 Ulysses 序列并行",
+          "order": 2,
+          "filename": "u7-l2-parallel-attention.md",
+          "level": "advanced",
+          "topic": "讲解在 attention 层实现的序列并行（Ulysses all-to-all、Ring P2P），它们如何叠加在 AttentionBackend 之上并贡献 sequence_parallel_size。",
+          "learning_goals": [
+            "掌握 Ulysses 在序列维与头维拆分并用 all-to-all 重分布的机制",
+            "理解 Ring Attention 的环形 P2P KV 通信与对底层 kernel 的复用",
+            "了解 ring_degree × ulysses_degree = sequence_parallel_size 的关系"
+          ],
+          "source_files": [
+            "docs/design/module/dit_module.md",
+            "vllm_omni/diffusion/attention/parallel/factory.py",
+            "vllm_omni/diffusion/attention/parallel/ulysses.py",
+            "vllm_omni/diffusion/attention/parallel/ring.py",
+            "docs/design/feature/sequence_parallel.md"
+          ],
+          "minimal_modules": [
+            "ParallelAttentionStrategy 接口与 build_parallel_attention_strategy",
+            "Ulysses 的 all-to-all 重分布",
+            "Ring 的 P2P 环形通信"
+          ],
+          "practice_task": "比较 Ulysses 与 Ring 两种 SP 策略的「通信原语」与「拆分维度」，写出一张对照表，并说明它们如何与 AttentionBackend 组合。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "缓存加速：TeaCache / Cache-DiT / MagCache",
+          "order": 3,
+          "filename": "u7-l3-cache-acceleration.md",
+          "level": "advanced",
+          "topic": "讲解 cache backend 统一接口与 TeaCache、Cache-DiT（DBCache/SCM/TaylorSeer）、MagCache 等实现，以及 selector 如何按名称选择。",
+          "learning_goals": [
+            "掌握 CacheBackend 的 enable/refresh/is_enabled 契约",
+            "理解 TeaCache 的时间步感知缓存与 HookRegistry 透明注入",
+            "了解 Cache-DiT 的 DBCache/SCM/TaylorSeer 与双 transformer 支持，以及 MagCache 的幅度自适应缓存"
+          ],
+          "source_files": [
+            "docs/design/module/dit_module.md",
+            "vllm_omni/diffusion/cache/selector.py",
+            "vllm_omni/diffusion/cache/teacache/backend.py",
+            "vllm_omni/diffusion/cache/cachedit/backend.py",
+            "docs/design/feature/cache_dit.md"
+          ],
+          "minimal_modules": [
+            "CacheBackend 抽象与 get_cache_backend 选择器",
+            "TeaCacheBackend 的 enable/refresh",
+            "Cache-DiT 与 MagCache 的能力差异"
+          ],
+          "practice_task": "为一个 diffusion 模型分别启用 tea_cache 与 cache_dit，记录推理步数与时间变化，并用 selector.py 解释两种后端是如何被选中的。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "并行策略：TP/SP/DP/CFG/PP/HSDP/VAE",
+          "order": 4,
+          "filename": "u7-l4-parallel-strategies.md",
+          "level": "advanced",
+          "topic": "讲解 initialize_model_parallel 如何用 RankGenerator 生成正交并行组，以及各类并行（TP/SP/PP/CFG/DP/HSDP/VAE）的 rank 顺序与用途。",
+          "learning_goals": [
+            "掌握 rank 顺序 tp-sp-pp-cfg-dp 与各并行组的生成",
+            "理解 SP/DP/TP/CFG/PP 的用途与适用场景",
+            "了解 HSDP 与 VAE 并行在 diffusion 中的作用"
+          ],
+          "source_files": [
+            "vllm_omni/diffusion/distributed/parallel_state.py",
+            "docs/design/feature/tensor_parallel.md",
+            "docs/design/feature/cfg_parallel.md",
+            "docs/design/feature/hsdp.md",
+            "docs/design/feature/vae_parallel.md"
+          ],
+          "minimal_modules": [
+            "initialize_model_parallel 与 RankGenerator",
+            "各 get_*_group 访问器",
+            "CFG/HSDP/VAE 并行的设计意图"
+          ],
+          "practice_task": "给定总 GPU 数 8、配置 tp=2/sp=2/cfg=2，推算每个 rank 属于哪个并行组，并画出 rank 到 (tp,sp,cfg) 的映射表。",
+          "depends_on": [
+            "u5-l1",
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l5",
+          "title": "Diffusion 批处理：请求级与连续批处理",
+          "order": 5,
+          "filename": "u7-l5-diffusion-batching.md",
+          "level": "advanced",
+          "topic": "讲解 request-level batching（max_num_seqs、request_batch_max_wait_ms）与 step-wise continuous batching 两种扩散批处理模式的设计与取舍。",
+          "learning_goals": [
+            "掌握 request-level batching 如何把兼容请求融合进一次 pipeline.forward(batch)",
+            "理解 step-wise continuous batching 如何在去噪步之间加入/移除兼容请求",
+            "了解 max_num_seqs=1 串行路径与 >1 批处理路径的区别"
+          ],
+          "source_files": [
+            "docs/design/feature/diffusion_request_level_batching.md",
+            "docs/design/feature/diffusion_continuous_batching.md",
+            "docs/design/feature/diffusion_step_execution.md",
+            "vllm_omni/diffusion/sched/request_scheduler.py",
+            "vllm_omni/diffusion/sched/step_scheduler.py"
+          ],
+          "minimal_modules": [
+            "request-level batching 的兼容性键与等待策略",
+            "continuous batching 的步间准入/移除",
+            "两种模式对 executor 路径的选择"
+          ],
+          "practice_task": "设计一个实验：用相同 4 条 prompt 分别在 max_num_seqs=1 与 max_num_seqs=4 下测量吞吐，解释批处理带来的吞吐变化与兼容性约束。",
+          "depends_on": [
+            "u5-l1",
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "量化、多硬件平台与性能剖析",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "量化体系：统一框架与各方法",
+          "order": 1,
+          "filename": "u8-l1-quantization.md",
+          "level": "advanced",
+          "topic": "讲解 quantization 统一框架如何委托 vLLM 注册表并扩展 omni 专属方法（mxfp8/mxfp4/int8/fp8/bnb/inc/quack），以及多阶段模型的 per-component 量化。",
+          "learning_goals": [
+            "掌握 build_quant_config / SUPPORTED_QUANTIZATION_METHODS 与 factory 的委托机制",
+            "理解 mxfp8/mxfp4/int8 等方法在 diffusion transformer 上的在线/离线区别",
+            "了解 ComponentQuantizationConfig 如何为多阶段模型做 per-component 量化"
+          ],
+          "source_files": [
+            "vllm_omni/quantization/__init__.py",
+            "vllm_omni/quantization/factory.py",
+            "vllm_omni/quantization/component_config.py",
+            "vllm_omni/quantization/mxfp8_config.py",
+            "docs/user_guide/quantization/modelopt.md"
+          ],
+          "minimal_modules": [
+            "量化统一框架入口与工厂",
+            "各方法 config 的平台适用性",
+            "per-component 量化配置"
+          ],
+          "practice_task": "参考 examples/quantization/quantize_wan2_2_modelopt_fp8.py，说明一次 fp8 量化导出的输入输出，并指出该方法在 factory 中如何被注册。",
+          "depends_on": [
+            "u5-l3",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "平台抽象：CUDA/ROCm/NPU/XPU/MUSA",
+          "order": 2,
+          "filename": "u8-l2-platforms.md",
+          "level": "advanced",
+          "topic": "讲解 OmniPlatform 抽象、current_omni_platform 单例与各硬件平台类如何提供 worker 类、注意力后端与默认 stage 配置。",
+          "learning_goals": [
+            "掌握 OmniPlatform 抽象与 OmniPlatformEnum，以及 current_omni_platform 的惰性单例",
+            "理解各平台类（CudaOmniPlatform/NPUOmniPlatform 等）提供的 get_omni_ar_worker_cls / get_diffusion_attn_backend_cls",
+            "了解平台如何决定默认注意力后端与默认 stage 配置路径"
+          ],
+          "source_files": [
+            "vllm_omni/platforms/__init__.py",
+            "vllm_omni/platforms/interface.py",
+            "vllm_omni/platforms/cuda/platform.py",
+            "vllm_omni/platforms/npu/platform.py"
+          ],
+          "minimal_modules": [
+            "OmniPlatform 抽象接口",
+            "current_omni_platform 检测与访问",
+            "各平台 worker/注意力后端映射"
+          ],
+          "practice_task": "在两个不同硬件假设（CUDA 与 NPU）下，比较 current_omni_platform 返回的差异（默认注意力后端、worker 类），写一份平台行为对照表。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "基准测试与性能剖析",
+          "order": 3,
+          "filename": "u8-l3-benchmark-profiling.md",
+          "level": "advanced",
+          "topic": "讲解 vllm_omni/benchmarks 与顶层 benchmarks 的用途：diffusion 在线服务压测、注意力后端对比、量化质量评估与 TTS 连续性指标。",
+          "learning_goals": [
+            "掌握 diffusion_benchmark_serving 的在线压测入口与端点",
+            "理解 bench_attention_backends / quantization_quality 的对比评测用途",
+            "了解 vllm_omni/benchmarks/serve.py 如何 patch vLLM 的 serve 基准"
+          ],
+          "source_files": [
+            "benchmarks/diffusion/diffusion_benchmark_serving.py",
+            "benchmarks/diffusion/bench_attention_backends.py",
+            "vllm_omni/benchmarks/serve.py",
+            "vllm_omni/benchmarks/audio_continuity.py",
+            "docs/contributing/profiling.md"
+          ],
+          "minimal_modules": [
+            "diffusion 在线服务压测脚本",
+            "注意力后端与量化质量评测",
+            "TTS 连续性指标与 profiling 指南"
+          ],
+          "practice_task": "用 diffusion_benchmark_serving 对一个已启动的 --omni 服务做一次压测，记录吞吐与延迟，并用 profiling.md 的方法抓取一次 profiler trace 定位耗时瓶颈。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "扩展开发：添加新模型",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "添加新 Diffusion 模型",
+          "order": 1,
+          "filename": "u9-l1-add-diffusion-model.md",
+          "level": "advanced",
+          "topic": "依据 adding_diffusion_model 指南（以 Qwen-Image-Edit 为例），讲解新增 diffusion pipeline、transformer adapter、role 声明与并行/缓存接入的完整流程。",
+          "learning_goals": [
+            "掌握在 diffusion/models 下新增 pipeline 与 transformer adapter 的步骤",
+            "理解 attention role 声明、pre/post 处理注册与 model registry 接入",
+            "了解如何为新模型启用 TP/SP/CFG 并行与 TeaCache/cache-dit"
+          ],
+          "source_files": [
+            "docs/contributing/model/adding_diffusion_model.md",
+            "vllm_omni/diffusion/models/diffusers_adapter/__init__.py",
+            "vllm_omni/diffusion/attention/layer.py"
+          ],
+          "minimal_modules": [
+            "adding_diffusion_model 的分步指南",
+            "diffusers_adapter 通用适配",
+            "transformer 与 pipeline 的接入点"
+          ],
+          "practice_task": "按指南骨架，为一个简单的 diffusers 文生图模型写一份「接入清单」（需新增/修改的文件、需声明的 role、需注册的 pre/post 处理），不必完整实现。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "添加 Omni 多阶段模型",
+          "order": 2,
+          "filename": "u9-l2-add-omni-model.md",
+          "level": "advanced",
+          "topic": "依据 adding_omni_model 指南（以 Qwen3-Omni 为例），讲解如何声明多个 stage（Thinker/Talker/Code2wav）、配置 stage 间数据流与 stage config。",
+          "learning_goals": [
+            "掌握多阶段模型的 stage 声明与 stage config 编写",
+            "理解 stage 间 prompt_embeds / additional_information / hidden states 的传递",
+            "了解 final_stage_id 与输出 modality 的路由"
+          ],
+          "source_files": [
+            "docs/contributing/model/adding_omni_model.md",
+            "examples/offline_inference/qwen3_omni/end2end.py",
+            "vllm_omni/config/omni_config.py"
+          ],
+          "minimal_modules": [
+            "adding_omni_model 的分步指南",
+            "Qwen3-Omni end2end 示例的 stage 调用",
+            "多阶段结构化配置"
+          ],
+          "practice_task": "参考 Qwen3-Omni 的三阶段结构，为一个假想的「AR 编码器 + DiT 生成器」两阶段模型编写 stage 配置与数据流说明，标注每阶段的输入来源。",
+          "depends_on": [
+            "u3-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "添加 TTS 模型",
+          "order": 3,
+          "filename": "u9-l3-add-tts-model.md",
+          "level": "advanced",
+          "topic": "依据 adding_tts_model 指南，讲解如何从 HuggingFace 参考实现接入 TTS 模型，包括 stage 分离、tts_adapters 归一化与流式/CUDA graph 加速。",
+          "learning_goals": [
+            "掌握 TTS 模型 stage 分离（文本→音频 latent→波形）的接入步骤",
+            "理解 tts_adapters 的 TTSAdapter/PreparedRequest/OutputPolicy 归一化职责",
+            "了解 TTS 流式输出与 CUDA graph 加速的接入点"
+          ],
+          "source_files": [
+            "docs/contributing/model/adding_tts_model.md",
+            "vllm_omni/entrypoints/openai/tts_adapters/base.py",
+            "vllm_omni/entrypoints/openai/serving_speech.py"
+          ],
+          "minimal_modules": [
+            "adding_tts_model 的分步指南",
+            "TTSAdapter 抽象与归一化",
+            "serving_speech 的 TTS 端点接入"
+          ],
+          "practice_task": "为一个假想 TTS 模型设计一个 TTSAdapter 子类骨架，说明它如何把 OpenAI speech 请求的 voice/speed 等参数归一化成 stage 采样参数。",
+          "depends_on": [
+            "u6-l2",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "实验特性：世界模型、全双工、AR-Diffusion",
+          "order": 4,
+          "filename": "u9-l4-experimental-features.md",
+          "level": "advanced",
+          "topic": "概览 experimental 目录下的世界模型（world_models）、全双工（fullduplex）与 AR-Diffusion 联合执行（ar_diffusion）等前沿实验特性。",
+          "learning_goals": [
+            "了解 experimental/world_models 的世界模型/动作策略推理方向",
+            "理解 experimental/fullduplex 的全双工请求客户端与模型执行设计",
+            "了解 experimental/ar_diffusion 如何把 AR 与 Diffusion 联合进单一 engine/runner"
+          ],
+          "source_files": [
+            "vllm_omni/experimental/ar_diffusion/engine.py",
+            "vllm_omni/experimental/ar_diffusion/runner.py",
+            "vllm_omni/experimental/fullduplex/DESIGN.md",
+            "vllm_omni/experimental/world_models/__init__.py",
+            "docs/design/ar_diffusion_pipeline_capability.md"
+          ],
+          "minimal_modules": [
+            "ar_diffusion 的 engine/runner 联合执行",
+            "fullduplex 的请求客户端与设计",
+            "world_models 的入口"
+          ],
+          "practice_task": "阅读 fullduplex/DESIGN.md，总结全双工模式相对普通请求/响应模式新增了哪些组件与状态，并指出它与 realtime_connection 的关系。",
+          "depends_on": [
+            "u3-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "测试与工程实践",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "多级测试体系 L1–L5",
+          "order": 1,
+          "filename": "u10-l1-test-levels.md",
+          "level": "advanced",
+          "topic": "讲解 L1（单元）→L5（稳定性）的五级测试体系：测试目标、marker、目录约定与执行频率，以及 tests 目录如何镜像 vllm_omni 组件。",
+          "learning_goals": [
+            "掌握 L1–L5 各级的范围、marker（core_model/hardware_test/omni/tts/diffusion 等）与频率",
+            "理解 tests/{component} 镜像 vllm_omni/{component}、e2e/dfx/examples 的目录约定",
+            "了解本地复现某级测试的命令与 helpers/fixtures 的作用"
+          ],
+          "source_files": [
+            "docs/contributing/ci/test_system_overview.md",
+            "docs/contributing/ci/test_writing_guide.md",
+            "tests/helpers/fixtures/config.py",
+            "tests/diffusion"
+          ],
+          "minimal_modules": [
+            "test_system_overview 的五级表",
+            "test_writing_guide 的 marker 与示例",
+            "tests 目录与 fixtures 布局"
+          ],
+          "practice_task": "为一个新功能选择合适的测试级别（L1 或 L2），按 test_writing_guide 写出测试文件的放置路径、应使用的 marker 与本地 pytest 命令。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "贡献流程与 CI 流水线",
+          "order": 2,
+          "filename": "u10-l2-contributing-ci.md",
+          "level": "advanced",
+          "topic": "讲解贡献流程（PR checklist）、.buildkite CI 配置与 diff-aware CI（L2/L3 按路径前缀过滤）等工程实践。",
+          "learning_goals": [
+            "掌握 PR 提交前的自检 checklist 与贡献文档入口",
+            "理解 .buildkite 配置如何按测试级别组织 job",
+            "了解 CUDA L2/L3 的 diff-aware CI（按 PR diff 路径前缀过滤 job）机制"
+          ],
+          "source_files": [
+            "CONTRIBUTING.md",
+            "docs/contributing/README.md",
+            "docs/contributing/ci/ci_settings.md",
+            ".buildkite"
+          ],
+          "minimal_modules": [
+            "CONTRIBUTING 与 PR checklist",
+            "ci_settings 的 diff-aware CI 与 step filtering",
+            ".buildkite 流水线组织"
+          ],
+          "practice_task": "阅读 ci_settings.md 的 diff-aware CI 段，说明一个只改了 diffusion 代码的 PR 会跳过哪些 L2/L3 job、保留哪些，并解释判定依据。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
