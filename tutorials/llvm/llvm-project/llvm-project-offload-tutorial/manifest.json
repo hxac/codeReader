@@ -1,0 +1,701 @@
+{
+  "project": "llvm-project-offload",
+  "head": "3d60487f83797a10a6379669647a139e6823d3d2",
+  "rationale": "本次为增量更新。经核对 git diff（0e87f69d0c327612590f73b715c657c5096383c2..3d60487f83797a10a6379669647a139e6823d3d2），区间内 16 个提交均未触及 offload/ 子目录，offload 源码树与上一次生成时完全一致，因此所有讲义保持不变（action=keep），仅更新 head 指针。学习路线设计理由不变：严格按运行时真实调用链自底向上设计。第一单元（入门）先建立「项目是什么、怎么构建运行、编译器-运行时契约」的全局认识，让读者拿到可运行的 mental model。第二单元（进阶）沿真实执行路径展开：编译器生成的 __tgt_* 入口 → PluginManager 管理插件与设备 → DeviceTy 设备抽象 → 主机-设备数据映射 → target data/kernel 主流程 → 异步模型 → omp_target_* 用户 API，前置依赖逐层递进（如数据映射先于 target data 流程，流程先于 kernel 启动）。第三单元（专家）进入可复用插件框架与扩展机制，再到不绑定 OpenMP 的统一 liboffload API 与 TableGen/测试体系，并以最简单的 host 插件作为参考实现、再推广到 GPU 后端。每篇讲义只解决一个主题、锚定真实源码文件，最终目标是让读者能读懂任意插件并具备二次开发与扩展能力。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "起步与全局认识",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与 OpenMP 目标卸载概念",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 LLVM Offload 子项目是什么、它在 LLVM 中扮演的角色（为加速器/协处理器提供 OpenMP 目标卸载运行时与统一 Offload API），以及 OpenMP target 卸载的基本执行模型（主机/设备、target data、target region、map 子句）。",
+          "learning_goals": [
+            "理解 Offload 子项目的定位与支持的目标设备范围（CPU/GPU 等）",
+            "理解 OpenMP 目标卸载的基本执行模型",
+            "区分 libomptarget 运行时与 liboffload 新 API 的关系"
+          ],
+          "source_files": [
+            "README.md",
+            "README.txt",
+            "Maintainers.md",
+            "docs/index.md"
+          ],
+          "minimal_modules": [
+            "README",
+            "docs"
+          ],
+          "practice_task": "阅读项目 README，写一段说明：这个项目解决什么问题、支持哪些主机与设备架构，并指出 libomptarget 与 liboffload 各自的定位。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建系统与依赖",
+          "order": 2,
+          "filename": "u1-l2-build-system.md",
+          "level": "beginner",
+          "topic": "讲解 offload 顶层 CMakeLists.txt：依赖 LLVM、C++17 与 64 位要求、平台限制，以及如何用 LIBOMPTARGET_PLUGINS_TO_BUILD 选择插件（cuda/amdgpu/level_zero/host）、目标三元组清单、OMPT/调试/LTO 选项与 LibomptargetGetDependencies 依赖探测。",
+          "learning_goals": [
+            "掌握如何配置并构建 offload 及其运行时库",
+            "理解插件选择与各平台对插件的支持限制",
+            "理解运行时库输出目录与 install-offload 安装目标"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "cmake/LibomptargetGetDependencies.cmake"
+          ],
+          "minimal_modules": [
+            "CMakeLists.txt",
+            "cmake"
+          ],
+          "practice_task": "写一份最小构建命令，针对本机选择构建 host 插件与某一个 GPU 插件，逐条解释每个关键 -D 选项的作用与默认值。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与模块全景",
+          "order": 3,
+          "filename": "u1-l3-directory-map.md",
+          "level": "beginner",
+          "topic": "梳理 offload 一级目录：include（共享头文件）、libomptarget（OpenMP 目标运行时）、plugins-nextgen（设备插件框架与各后端）、liboffload（新统一 API）、tools（tblgen/deviceinfo/kernelreplay）、test、unittests，给出每个目录职责与分层关系。",
+          "learning_goals": [
+            "建立项目整体目录地图与分层关系",
+            "理解运行时层、插件层、新 API 层、工具层各自的职责",
+            "能根据功能快速定位对应源码目录"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "include/omptarget.h",
+            "libomptarget/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "include",
+            "libomptarget",
+            "plugins-nextgen",
+            "liboffload",
+            "tools"
+          ],
+          "practice_task": "绘制一张分层结构图，标出「编译器调用 → libomptarget 入口 → PluginManager → 具体插件 → 设备」的调用路径，并标注每一段对应的目录。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "工具链、编译运行与设备信息",
+          "order": 4,
+          "filename": "u1-l4-toolchain-and-run.md",
+          "level": "beginner",
+          "topic": "讲解如何用 clang/flang 编译并运行一个 OpenMP 目标卸载程序（-fopenmp-targets），如何用 llvm-offload-device-info 查看可用设备，以及关键环境变量（LIBOMPTARGET_DEBUG、LIBOMPTARGET_INFO、OFFLOAD_TRACE）的用途。",
+          "learning_goals": [
+            "掌握编译运行 OpenMP 卸载程序的工具链用法",
+            "学会用 deviceinfo 工具查看运行时设备",
+            "学会用环境变量开启运行时调试/信息输出"
+          ],
+          "source_files": [
+            "tools/deviceinfo/llvm-offload-device-info.cpp",
+            "include/Shared/EnvironmentVar.h",
+            "README.txt"
+          ],
+          "minimal_modules": [
+            "tools/deviceinfo",
+            "include/Shared"
+          ],
+          "practice_task": "编写一个简单的 target parallel for 程序，编译后在 host 插件上运行，并用 deviceinfo 工具与 LIBOMPTARGET_INFO 观察并记录输出。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l5",
+          "title": "编译器-运行时契约与核心数据结构",
+          "order": 5,
+          "filename": "u1-l5-compiler-runtime-contract.md",
+          "level": "beginner",
+          "topic": "讲解编译器（Clang）与运行时之间的契约：omptarget.h 中的 __tgt_* 系列入口、map 类型枚举 tgt_map_type、二进制描述符 __tgt_bin_desc/__tgt_device_image/__tgt_target_table，以及 offload entries（EntryTy）的组成。",
+          "learning_goals": [
+            "理解 Clang 生成的 __tgt_* 调用与运行时入口的对应关系",
+            "掌握 tgt_map_type 各标志位的语义",
+            "理解 __tgt_bin_desc 等核心数据结构如何描述卸载镜像"
+          ],
+          "source_files": [
+            "include/omptarget.h",
+            "include/Shared/APITypes.h",
+            "include/OffloadEntry.h"
+          ],
+          "minimal_modules": [
+            "include",
+            "include/Shared"
+          ],
+          "practice_task": "对一个含 target data 与 target region 的程序，查看其生成的 __tgt_* 调用，并逐字段解释其中的 __tgt_bin_desc 二进制描述符。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心运行时调用链",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "运行时初始化与库注册入口",
+          "order": 1,
+          "filename": "u2-l1-runtime-entry.md",
+          "level": "intermediate",
+          "topic": "讲解 interface.cpp 中的入口实现：__tgt_rtl_init/deinit、__tgt_register_lib/unregister_lib、__tgt_register_requires、__tgt_init_all_rtls，以及它们如何经由 PluginManager 完成插件与设备的初始化及延迟注册。",
+          "learning_goals": [
+            "理解运行时初始化与去初始化的入口与顺序",
+            "掌握 __tgt_register_lib 如何把二进制描述符注册到所有兼容插件",
+            "理解 requires 标志与延迟注册机制"
+          ],
+          "source_files": [
+            "libomptarget/interface.cpp",
+            "libomptarget/private.h",
+            "include/omptarget.h"
+          ],
+          "minimal_modules": [
+            "libomptarget"
+          ],
+          "practice_task": "跟踪 __tgt_register_lib 的执行路径，画出从二进制描述符注册到所有兼容插件加载设备镜像的流程图。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "PluginManager 设备与插件管理",
+          "order": 2,
+          "filename": "u2-l2-plugin-manager.md",
+          "level": "intermediate",
+          "topic": "讲解 PluginManager 如何持有并枚举插件（GenericPluginTy）与设备（DeviceTy），如何把「OpenMP 设备号」映射到「插件 + 插件内设备号」，以及互斥访问、Requirements、延迟注册等机制。",
+          "learning_goals": [
+            "理解多插件环境下设备与插件的统一管理",
+            "掌握 OpenMP 设备号到插件/插件内设备号的映射",
+            "理解设备的独占访问与需求（Requirements）收集机制"
+          ],
+          "source_files": [
+            "include/PluginManager.h",
+            "libomptarget/PluginManager.cpp"
+          ],
+          "minimal_modules": [
+            "include",
+            "libomptarget"
+          ],
+          "practice_task": "阅读 initializeAllDevices/initializeDevice/getDevice，说明多插件环境下设备编号如何分配，并用伪代码描述该映射。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "DeviceTy 设备抽象",
+          "order": 3,
+          "filename": "u2-l3-device-abstraction.md",
+          "level": "intermediate",
+          "topic": "讲解 device.h/device.cpp 中的 DeviceTy：它如何把上层内存分配/释放、数据搬运（submitData/retrieveData/dataExchange）、kernel 启动、事件与同步操作转发到底层插件，以及与 MappingInfo、offload entries 的关系。",
+          "learning_goals": [
+            "理解 DeviceTy 作为上层与插件之间桥梁的职责",
+            "掌握 allocData/deleteData/submitData/retrieveData/launchKernel 的接口",
+            "理解 DeviceTy 如何获取并缓存 offload entries"
+          ],
+          "source_files": [
+            "include/device.h",
+            "libomptarget/device.cpp"
+          ],
+          "minimal_modules": [
+            "include",
+            "libomptarget"
+          ],
+          "practice_task": "选择 launchKernel 与 submitData 两个方法，对照源码写出它们分别调用了 GenericPluginTy 的哪些底层接口。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "主机-设备数据映射机制",
+          "order": 4,
+          "filename": "u2-l4-data-mapping.md",
+          "level": "intermediate",
+          "topic": "讲解 OpenMP/Mapping.h/Mapping.cpp 的核心数据结构：HostDataToTargetTy（含引用计数与状态）、HDTTMap 及其互斥访问、LookupResult、TargetPointerResultTy、MappingConfig、ShadowPtrInfoTy，以及 MappingInfoTy 如何实现主机指针到设备指针的查找与映射。",
+          "learning_goals": [
+            "掌握 HostDataToTargetTy 的引用计数与状态机",
+            "理解主机指针到设备指针的查找与建立映射的算法",
+            "理解映射表的并发访问保护与影子指针机制"
+          ],
+          "source_files": [
+            "include/OpenMP/Mapping.h",
+            "libomptarget/OpenMP/Mapping.cpp"
+          ],
+          "minimal_modules": [
+            "include/OpenMP",
+            "libomptarget/OpenMP"
+          ],
+          "practice_task": "解释引用计数如何决定数据何时复制与释放，并举一个 TO/FROM/ALWAYS 映射的例子追踪 HostDataToTargetTy 的状态变化。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l5",
+          "title": "target data begin/end/update 流程",
+          "order": 5,
+          "filename": "u2-l5-target-data-flow.md",
+          "level": "intermediate",
+          "topic": "深入 omptarget.cpp 的 targetDataBegin/targetDataEnd/targetDataUpdate/targetDataMapper，讲解 map 子句如何被解析、如何调用映射层建立映射、如何在 begin/end 阶段做数据搬运与引用计数增减。",
+          "learning_goals": [
+            "理解 target data 三个阶段（begin/end/update）的差异与职责",
+            "掌握 map 子句在运行时如何被处理成数据搬运动作",
+            "理解引用计数增减与数据传输的触发时机"
+          ],
+          "source_files": [
+            "libomptarget/omptarget.cpp",
+            "libomptarget/interface.cpp"
+          ],
+          "minimal_modules": [
+            "libomptarget"
+          ],
+          "practice_task": "给定一段 target data map(to:)/map(from:) 代码，逐步追踪 targetDataBegin 与 targetDataEnd 内部的判断与数据传输调用。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l6",
+          "title": "target 内核启动流程",
+          "order": 6,
+          "filename": "u2-l6-kernel-launch-flow.md",
+          "level": "intermediate",
+          "topic": "讲解 omptarget.cpp 的 target() 函数与 interface.cpp 的 __tgt_target_kernel：如何准备 KernelArgsTy、如何在启动前后衔接数据映射、如何把参数与偏移交给 DeviceTy::launchKernel 并最终落到插件。",
+          "learning_goals": [
+            "理解 __tgt_target_kernel 到内核执行的完整链路",
+            "掌握 KernelArgsTy/KernelExtraArgsTy 的来源与作用",
+            "理解内核启动与数据映射的衔接关系"
+          ],
+          "source_files": [
+            "libomptarget/omptarget.cpp",
+            "libomptarget/interface.cpp",
+            "include/Shared/APITypes.h"
+          ],
+          "minimal_modules": [
+            "libomptarget",
+            "include/Shared"
+          ],
+          "practice_task": "追踪 __tgt_target_kernel 到 DeviceTy::launchKernel 的完整链路，标注 KernelArgsTy 各字段在其中的来源。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l7",
+          "title": "异步执行与 AsyncInfoTy",
+          "order": 7,
+          "filename": "u2-l7-async-model.md",
+          "level": "intermediate",
+          "topic": "讲解 omptarget.h 中的 AsyncInfoTy 与 __tgt_async_info、TaskAsyncInfoWrapperTy，以及 BLOCKING/NON_BLOCKING 同步、post-processing 函数、queryAsync/__tgt_target_nowait_query 的非阻塞同步机制。",
+          "learning_goals": [
+            "理解运行时的异步执行与队列抽象",
+            "掌握 nowait 区域如何把异步上下文挂在 OpenMP task 上",
+            "理解 post-processing 与 queryAsync 的作用"
+          ],
+          "source_files": [
+            "include/omptarget.h",
+            "libomptarget/interface.cpp"
+          ],
+          "minimal_modules": [
+            "include",
+            "libomptarget"
+          ],
+          "practice_task": "解释一个 target nowait 区域的异步上下文是如何挂在 OpenMP task 上，并在后续任务调度中被查询完成的。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l8",
+          "title": "omp_target_* 用户 API 与显式内存分配",
+          "order": 8,
+          "filename": "u2-l8-omp-target-api.md",
+          "level": "intermediate",
+          "topic": "讲解 OpenMP/API.cpp 中的 omp_target_alloc/free/memcpy/memset/is_present/is_accessible 等用户面 API，以及显式分配器（device/host/shared）、设备 UID 映射。",
+          "learning_goals": [
+            "掌握面向用户的 omp_target_* 内存与拷贝 API",
+            "理解显式分配器与设备/主机/共享内存空间",
+            "理解设备号与设备 UID 的转换"
+          ],
+          "source_files": [
+            "libomptarget/OpenMP/API.cpp",
+            "include/OpenMP/omp.h"
+          ],
+          "minimal_modules": [
+            "libomptarget/OpenMP",
+            "include/OpenMP"
+          ],
+          "practice_task": "编写程序使用 omp_target_alloc/memcpy 在主机与设备间搬运数据，对照源码说明运行时如何选择设备与分配器。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "插件架构、扩展机制与新 API",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "通用插件接口 GenericPluginTy/GenericDeviceTy",
+          "order": 1,
+          "filename": "u3-l1-plugin-interface.md",
+          "level": "advanced",
+          "topic": "深入 plugins-nextgen/common/include/PluginInterface.h：GenericPluginTy、GenericDeviceTy、PluginContextTy、AsyncInfoWrapperTy、DeviceInfo/InfoTreeNode 的抽象设计，以及 init/deinit/loadBinary/synchronize 等虚函数契约与基于 llvm::Error 的错误处理。",
+          "learning_goals": [
+            "理解 nextgen 插件框架的核心抽象与虚函数契约",
+            "掌握 GenericPluginTy/GenericDeviceTy 与上层 DeviceTy 的职责边界",
+            "理解基于 llvm::Error/Expected 的统一错误处理"
+          ],
+          "source_files": [
+            "plugins-nextgen/common/include/PluginInterface.h",
+            "plugins-nextgen/common/src/PluginInterface.cpp"
+          ],
+          "minimal_modules": [
+            "plugins-nextgen/common"
+          ],
+          "practice_task": "列出实现一个新插件需要 override 的关键虚函数，并说明 GenericDeviceTy 与上层 DeviceTy 各自负责什么。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "GenericKernelTy 与 DeviceImageTy",
+          "order": 2,
+          "filename": "u3-l2-kernel-and-deviceimage.md",
+          "level": "advanced",
+          "topic": "讲解 PluginInterface.h 中的 GenericKernelTy（init/launch/maxGroupSize、KernelLaunchEnvironment）、DeviceImageTy（设备镜像与 IR image），以及设备如何加载二进制并据此构造 kernel。",
+          "learning_goals": [
+            "理解内核对象的生命周期与启动抽象",
+            "掌握 DeviceImageTy 如何承载设备镜像与可选 IR image",
+            "理解 kernel 启动环境与最大组大小等可调参数"
+          ],
+          "source_files": [
+            "plugins-nextgen/common/include/PluginInterface.h",
+            "include/DeviceImage.h",
+            "libomptarget/DeviceImage.cpp"
+          ],
+          "minimal_modules": [
+            "plugins-nextgen/common",
+            "include"
+          ],
+          "practice_task": "对照 host 插件，写出一个 kernel 从 DeviceImageTy 加载到 GenericKernelTy::launch 的完整生命周期。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "host 插件完整走读",
+          "order": 3,
+          "filename": "u3-l3-host-plugin-walkthrough.md",
+          "level": "advanced",
+          "topic": "以最简单的 host 插件（GenELF64 系列）为参考实现，走读 plugins-nextgen/host/src/rtl.cpp：如何继承 GenericPluginTy/GenericDeviceTy/GenericKernelTy/GenericGlobalHandlerTy，如何在主机上「卸载」并执行 ELF 镜像。",
+          "learning_goals": [
+            "通过最简参考实现掌握 nextgen 插件的最小骨架",
+            "理解插件如何声明目标三元组并构造设备与内核",
+            "理解全局处理器与设备/内核类的协作"
+          ],
+          "source_files": [
+            "plugins-nextgen/host/src/rtl.cpp",
+            "plugins-nextgen/host/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "plugins-nextgen/host"
+          ],
+          "practice_task": "在 host 插件基础上，模仿其结构画出（或写出）一个最小新插件的类继承关系与必须实现的方法骨架。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "GPU 后端插件（CUDA / AMDGPU / Level Zero）",
+          "order": 4,
+          "filename": "u3-l4-gpu-plugins.md",
+          "level": "advanced",
+          "topic": "讲解 GPU 后端插件如何复用通用框架：CUDA（cuda/src/rtl.cpp + dynamic_cuda 动态加载）、AMDGPU（amdgpu/src/rtl.cpp + dynamic_hsa）、Level Zero（L0Plugin/L0Device/L0Queue/L0Memory 等模块化实现），以及 DLWrap 动态链接 native 库的机制。",
+          "learning_goals": [
+            "理解 CUDA/AMDGPU/Level Zero 插件如何复用 nextgen 框架",
+            "掌握 DLWrap 动态加载 native 运行时库的机制",
+            "理解 Level Zero 为何采用多模块拆分设计"
+          ],
+          "source_files": [
+            "plugins-nextgen/cuda/src/rtl.cpp",
+            "plugins-nextgen/cuda/dynamic_cuda/cuda.h",
+            "plugins-nextgen/amdgpu/src/rtl.cpp",
+            "plugins-nextgen/level_zero/src/L0Plugin.cpp",
+            "plugins-nextgen/level_zero/include/L0Device.h",
+            "plugins-nextgen/common/include/DLWrap.h"
+          ],
+          "minimal_modules": [
+            "plugins-nextgen/cuda",
+            "plugins-nextgen/amdgpu",
+            "plugins-nextgen/level_zero"
+          ],
+          "practice_task": "对比 CUDA 插件与 Level Zero 插件在「设备初始化/队列/内存」三方面的实现差异，说明 Level Zero 为何拆分为多个 L0* 模块。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l5",
+          "title": "设备全局变量处理 GlobalHandler",
+          "order": 5,
+          "filename": "u3-l5-global-handler.md",
+          "level": "advanced",
+          "topic": "讲解 GlobalHandler.h/.cpp：GlobalTy/StaticGlobalTy、SymbolKindTy、GenericGlobalHandlerTy 如何在主机与设备之间读写 declare target 全局变量、如何遍历符号与获取元数据。",
+          "learning_goals": [
+            "理解设备全局变量的主机-设备读写抽象",
+            "掌握 GlobalTy 的设计与符号遍历机制",
+            "理解插件只需 override getGlobalMetadataFromDevice 的分层原因"
+          ],
+          "source_files": [
+            "plugins-nextgen/common/include/GlobalHandler.h",
+            "plugins-nextgen/common/src/GlobalHandler.cpp"
+          ],
+          "minimal_modules": [
+            "plugins-nextgen/common"
+          ],
+          "practice_task": "写出 readGlobalFromDevice/writeGlobalToDevice 的调用层次，并解释插件为何只需 override getGlobalMetadataFromDevice。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l6",
+          "title": "设备内存管理器",
+          "order": 6,
+          "filename": "u3-l6-memory-manager.md",
+          "level": "advanced",
+          "topic": "讲解 MemoryManager.h：DeviceAllocatorTy（插件 override 的 allocate/free）、MemoryManagerTy 的 free-list 分配策略与 freeAndAllocate 回收重试机制，以及与上层 allocData/deleteData 的衔接。",
+          "learning_goals": [
+            "理解 per-device 内存分配器的抽象与 free-list 策略",
+            "掌握 OOM 时释放 free-list 并重试的回收路径",
+            "理解内存管理器与上层 DeviceTy 的衔接"
+          ],
+          "source_files": [
+            "plugins-nextgen/common/include/MemoryManager.h"
+          ],
+          "minimal_modules": [
+            "plugins-nextgen/common"
+          ],
+          "practice_task": "解释当设备返回 OOM 时运行时如何释放 free-list 并重试，画出该回收重试路径。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l7",
+          "title": "主机-设备 RPC 机制",
+          "order": 7,
+          "filename": "u3-l7-rpc-mechanism.md",
+          "level": "advanced",
+          "topic": "讲解 RPC.h/.cpp 与 Shared/RPCOpcodes.h：RPCServerTy 如何为设备端 printf/malloc 等提供服务、ServerThread 的回调注册与主机轮询线程模型，以及 __tgt_register_rpc_callback。",
+          "learning_goals": [
+            "理解设备端 printf/malloc 等如何经 RPC 回到主机处理",
+            "掌握 RPCServerTy 与 ServerThread 的线程模型",
+            "理解 RPC 回调注册机制"
+          ],
+          "source_files": [
+            "plugins-nextgen/common/include/RPC.h",
+            "plugins-nextgen/common/src/RPC.cpp",
+            "include/Shared/RPCOpcodes.h"
+          ],
+          "minimal_modules": [
+            "plugins-nextgen/common",
+            "include/Shared"
+          ],
+          "practice_task": "解释设备端一次 printf 是如何通过 RPC buffer 传到主机线程并被处理的，标出关键数据结构与回调。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l8",
+          "title": "内核录制与重放（Record/Replay）",
+          "order": 8,
+          "filename": "u3-l8-record-replay.md",
+          "level": "advanced",
+          "topic": "讲解 RecordReplay.h/.cpp、interface.cpp 的 __tgt_activate_record_replay/__tgt_target_kernel_replay，以及 tools/kernelreplay 的 llvm-omp-kernel-replay 工具，说明如何录制 kernel 参数与设备内存快照并重放。",
+          "learning_goals": [
+            "理解内核录制与重放的机制与触发方式",
+            "掌握录制内容（参数、内存快照）与重放流程",
+            "学会使用 kernel-replay 工具复现内核执行"
+          ],
+          "source_files": [
+            "plugins-nextgen/common/include/RecordReplay.h",
+            "plugins-nextgen/common/src/RecordReplay.cpp",
+            "libomptarget/interface.cpp",
+            "tools/kernelreplay/llvm-omp-kernel-replay.cpp"
+          ],
+          "minimal_modules": [
+            "plugins-nextgen/common",
+            "libomptarget",
+            "tools/kernelreplay"
+          ],
+          "practice_task": "用 kernel-replay 工具或环境变量录制并重放一个 target 内核，说明录制文件包含哪些信息。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l6"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l9",
+          "title": "设备镜像 JIT 编译",
+          "order": 9,
+          "filename": "u3-l9-jit-compilation.md",
+          "level": "advanced",
+          "topic": "讲解 common/JIT.h/.cpp 的 JITEngine：如何在加载镜像时按需对设备镜像做 JIT 编译（如 SPIR-V/PTX 到目标 ISA），以及与 DeviceImageTy::setIRImage 的衔接。",
+          "learning_goals": [
+            "理解 JIT 编译在镜像加载链路中的触发点",
+            "掌握 JITEngine 的抽象与 ComputeUnitInfo",
+            "理解哪些目标（如 spirv64-intel）依赖 JIT"
+          ],
+          "source_files": [
+            "plugins-nextgen/common/include/JIT.h",
+            "plugins-nextgen/common/src/JIT.cpp"
+          ],
+          "minimal_modules": [
+            "plugins-nextgen/common"
+          ],
+          "practice_task": "解释 JIT 编译在镜像加载链路中的触发点，并说明哪些目标三元组会依赖它。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l10",
+          "title": "OMPT 目标工具回调",
+          "order": 10,
+          "filename": "u3-l10-ompt-tooling.md",
+          "level": "advanced",
+          "topic": "讲解 include/OpenMP/OMPT/Interface.h、Connector.h 与 libomptarget/OpenMP/OMPT/Callback.cpp：如何向 OMPT 工具派发目标侧回调（数据分配/搬运、kernel 派发、target 区域进入退出），以及与主机 OMPT 的协作。",
+          "learning_goals": [
+            "理解目标侧 OMPT 回调的派发模型",
+            "掌握一次 target 内核派发触发的 before/after 回调序列",
+            "理解 OMPT 与主机 libomp 的协作"
+          ],
+          "source_files": [
+            "include/OpenMP/OMPT/Interface.h",
+            "include/OpenMP/OMPT/Connector.h",
+            "libomptarget/OpenMP/OMPT/Callback.cpp"
+          ],
+          "minimal_modules": [
+            "include/OpenMP/OMPT",
+            "libomptarget/OpenMP/OMPT"
+          ],
+          "practice_task": "列出一次 target 内核派发会触发哪些 OMPT 回调（before/after），并说明如何用 OMPT 工具采集这些事件。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l11",
+          "title": "新统一 Offload API（liboffload）",
+          "order": 11,
+          "filename": "u3-l11-liboffload-api.md",
+          "level": "advanced",
+          "topic": "讲解 liboffload 作为不绑定 OpenMP 的统一抽象层：OffloadImpl.cpp/OffloadImpl.hpp 如何在插件之上实现 Platform/Device/Context/Queue/Kernel/Memory/Event 等对象，OFFLOAD_TRACE 与校验机制，以及它与 libomptarget 的关系。",
+          "learning_goals": [
+            "理解 liboffload 的统一对象模型与设计目标",
+            "掌握其与底层 nextgen 插件、与上层 libomptarget 的关系",
+            "理解 OFFLOAD_TRACE 与校验机制"
+          ],
+          "source_files": [
+            "liboffload/README.md",
+            "liboffload/src/OffloadImpl.cpp",
+            "liboffload/include/OffloadImpl.hpp",
+            "liboffload/API/OffloadAPI.td"
+          ],
+          "minimal_modules": [
+            "liboffload"
+          ],
+          "practice_task": "阅读 liboffload README 与 API 定义，用一段文字对比 liboffload 的对象模型与 libomptarget 的 __tgt_* 模型。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l12",
+          "title": "TableGen 代码生成与测试体系",
+          "order": 12,
+          "filename": "u3-l12-tablegen-and-testing.md",
+          "level": "advanced",
+          "topic": "讲解 tools/offload-tblgen 如何用 tablegen（liboffload/API/*.td）生成 Offload API 头部与文档，以及 test（lit：offloading/mapping/ompt/jit/api 等）与 unittests（OffloadAPI、Conformance）的测试组织与运行方式（check-offload / check-offload-unit）。",
+          "learning_goals": [
+            "理解 tablegen 驱动的 API/文档代码生成流程",
+            "掌握 lit 测试目录组织与 check-offload 运行方式",
+            "理解 unittests 的 OffloadAPI 与 Conformance 测试结构"
+          ],
+          "source_files": [
+            "tools/offload-tblgen/offload-tblgen.cpp",
+            "tools/offload-tblgen/Generators.hpp",
+            "liboffload/API/OffloadAPI.td",
+            "test/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "tools/offload-tblgen",
+            "liboffload/API",
+            "test",
+            "unittests"
+          ],
+          "practice_task": "修改（或描述如何新增）一个 tablegen 记录，说明 offload-tblgen 会再生成的产物，并运行相关测试目标验证。",
+          "depends_on": [
+            "u3-l11"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
