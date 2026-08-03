@@ -1,7 +1,7 @@
 {
   "project": "llvm-project-libc",
-  "head": "e7dd336e0f7884c34108a1e722205a16c3f5307b",
-  "rationale": "本次增量：对比上次 HEAD（036af90）与当前 HEAD（e7dd336），两版之间共 6 个提交，其中仅 1 个触及 libc 子树——e4693c0「[libc] Add __isoc99_fscanf alias」。该提交做了四件事：(1) 在 src/__support/common.h 新增 LLVM_LIBC_ADD_FUNCTION_C_ALIAS 宏，用于给同一入口点追加额外的公开 C 符号别名；(2) 在 config/config.json 与 config/linux/config.json 新增 LIBC_CONF_SCANF_PROVIDE_ISOC99_ALIASES 配置项（Linux 上默认值绑定到新引入的 LLVM_LIBC_OVERLAY 变量）；(3) 在 libc/CMakeLists.txt 由 LLVM_LIBC_FULL_BUILD 派生出 LLVM_LIBC_OVERLAY 互补变量；(4) 给 fscanf/scanf/vfscanf/vscanf/sscanf/vsscanf 在该配置开启时追加 __isoc99_* 别名。影响判定：唯一需要更新的是 u2-l2（实现规范与核心宏）——它的主题正是 common.h 中的 asm 别名机制，而新宏 LLVM_LIBC_ADD_FUNCTION_C_ALIAS 是同一机制的又一实例，fscanf.cpp 还给出了最小真实用法，故标记为 update（在 source_files 中追加 src/stdio/generic/fscanf.cpp，并在 topic/learning_goals/minimal_modules/practice_task 中加入对该宏的讲解）。其余已生成讲义一律 keep：它们引用的文件与主题均未受影响，且讲义内永久链接均钉在具体 commit 上、common.h 行号偏移不会使链接失效；新增的配置项与 LLVM_LIBC_OVERLAY 变量只是既有 config/构建机制的新数据点，不改变 u2-l4/u1-l4 已讲解的机制本身，故无需重写。此外更正磁盘实际状态：经核验讲义目录，u1-l1 至 u8-l3 共 24 篇讲义均已生成（上一版 manifest 仅记录到 u5-l1），因此 u5-l2 至 u8-l3 由 new 改为 keep；u9-l1 至 u11-l3 共 8 篇尚未生成，仍标记为 new 待 worker 创建。整体单元划分与三层学习顺序（入门→机制/基础设施/函数族/系统交互→扩展）及依赖关系均维持不变。",
+  "head": "abe5aa5cb2336f32dca8e765710ec212a926476c",
+  "rationale": "本次增量：对比上次 HEAD（e7dd336）与当前 HEAD（abe5aa5），两版之间共有 6 个提交，但经 git diff --stat 与 git log 过滤 libc 子树核验，触及 libc 的提交数为 0，libc 子树的 diffstat 完全为空——即本区间内 LLVM-libc 源码、配置、构建脚本、文档均无任何改动。同时核验磁盘实际状态：讲义目录下 u1-l1 至 u11-l3 共 32 篇讲义（u1 5 篇、u2 4 篇、u3 2 篇、u4 3 篇、u5 2 篇、u6 2 篇、u7 3 篇、u8 3 篇、u9 2 篇、u10 3 篇、u11 3 篇）均已生成。其中上一版标记为 new 的 u9-l1/u9-l2/u10-l1/u10-l2/u10-l3/u11-l1/u11-l2/u11-l3 共 8 篇讲义现已在磁盘存在，说明 worker 已完成创建；上一版标记为 update 的 u2-l2 经抽查已在磁盘内容中包含对 LLVM_LIBC_ADD_FUNCTION_C_ALIAS 宏与 src/stdio/generic/fscanf.cpp __isoc99_fscanf 别名的讲解（命中 36 处相关引用），说明上次的更新也已落地。由于本区间零代码改动，所有讲义引用的源码、行号、机制均不受影响，且讲义内永久链接钉在具体 commit 上不会因 HEAD 滚动而失效，故本次所有讲义 action 一律设为 keep，无需任何重写、更新或新建。整体三层学习顺序（入门→机制/基础设施/函数族/系统交互→扩展）与单元/讲义划分、依赖关系全部维持不变。",
   "units": [
     {
       "id": "u1",
@@ -215,7 +215,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -791,7 +791,7 @@
             "u4-l1",
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -821,7 +821,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -858,7 +858,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -887,7 +887,7 @@
           "depends_on": [
             "u6-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l3",
@@ -917,7 +917,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -955,7 +955,7 @@
             "u2-l4",
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l2",
@@ -990,7 +990,7 @@
             "u1-l4",
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l3",
@@ -1022,7 +1022,7 @@
             "u3-l1",
             "u10-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

@@ -1,0 +1,1049 @@
+{
+  "project": "llvm-project-polly",
+  "head": "abe5aa5cb2336f32dca8e765710ec212a926476c",
+  "rationale": "Polly 是 LLVM 的多面体循环优化器，核心是一条「检测 SCoP → 构建多面体模型 → 计算依赖 → 预优化变换 → 调度优化 → 生成 AST → 代码生成」的单函数阶段流水线，由 lib/Pass/PhaseManager.cpp 的 PhaseManager::run() 统一编排。因此学习路线严格沿这条主线展开：先让读者从零认识项目（U1）、跑通命令并理解插件如何挂入 LLVM Pass Manager（U1–U2），再以 PhaseManager 为「枢纽讲义」纵览整条流水线（U2）；随后按数据流自顶向下深入每一阶段——SCoP 检测（U3）、多面体模型构建与 SCEV→ISL 转换（U4）、依赖分析（U5）、预优化变换 Simplify/ForwardOpTree/DeLICM（U6）；之后进入专家层的核心算法：调度优化与 tiling/GEMM（U7）、AST 生成与代码生成（含 OpenMP，U8）；最后覆盖 JScop 交换格式与 ISL 支撑层（U9）以及测试、诊断与二次开发实战（U10）。讲义间依赖清晰：模型构建依赖检测、变换依赖依赖分析、代码生成依赖 AST 与调度，形成可追溯的学习图。Polly 属大型项目，故拆为 10 单元 35 讲，逻辑优先而非凑数。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 Polly 项目",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：Polly 是什么与多面体模型入门",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Polly 作为 LLVM 多面体循环优化器的定位、它解决的问题（局部性、并行、向量化、循环变换），以及多面体模型的基本思想。",
+          "learning_goals": [
+            "理解 Polly 在 LLVM 中的角色与价值",
+            "建立『循环 → 域/调度/访问关系』多面体抽象的直觉",
+            "了解 Polly 能做哪些优化（常量传播、去死循环、分块、并行化、向量化）"
+          ],
+          "source_files": [
+            "README",
+            "docs/Architecture.rst"
+          ],
+          "minimal_modules": [
+            "多面体模型基础",
+            "LLVM 优化流水线定位"
+          ],
+          "practice_task": "阅读 README 与 Architecture.rst，用 3–5 句话写出 Polly 的输入/输出与它相对普通 LLVM -O3 的增量价值，并列举它声称支持的两类优化。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建系统与目录结构",
+          "order": 2,
+          "filename": "u1-l2-build-and-layout.md",
+          "level": "beginner",
+          "topic": "讲解 Polly 的 CMake 构建（树内/独立构建、捆绑 ISL）、include/lib/test/unittests 目录划分，以及 lib 下 Analysis/Transform/CodeGen/Support/Exchange/Pass/Plugin 的职责。",
+          "learning_goals": [
+            "掌握如何配置与构建 Polly（含 POLLY_BUNDLED_ISL）",
+            "理解 include/polly 与 lib 各子目录的分工",
+            "能定位某一类功能对应的源码位置"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "lib/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "CMake 构建基础",
+            "LLVM 子项目目录约定"
+          ],
+          "practice_task": "在 lib/ 目录下找出负责『检测』『代码生成』『调度优化』的子目录与代表性文件各一个，画出 include/polly 头文件与 lib 实现的对应关系表。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "通过 clang 与 opt 使用 Polly",
+          "order": 3,
+          "filename": "u1-l3-using-polly.md",
+          "level": "beginner",
+          "topic": "实操如何用 -mllvm -polly 启用 Polly、开启并行（-polly-parallel）与向量化（-polly-vectorizer=stripmine），以及用 -polly-dump-before-file 抓取 Polly 实际看到的 IR 再用 opt 单独跑各 pass。",
+          "learning_goals": [
+            "学会用 clang/opt 触发 Polly 优化",
+            "掌握抓取 Polly 输入 IR 与查看 Polly pass 序列的方法",
+            "理解 -polly-position 与各常用开关"
+          ],
+          "source_files": [
+            "docs/UsingPollyWithClang.rst",
+            "docs/HowToManuallyUseTheIndividualPiecesOfPolly.rst"
+          ],
+          "minimal_modules": [
+            "clang/opt 命令行",
+            "LLVM IR 基础"
+          ],
+          "practice_task": "写一段嵌套循环的矩阵乘 C 代码，用 clang -O3 -mllvm -polly 编译；再用 -polly-dump-before-file 抓出 before-polly.ll，对照文档用 opt 单独跑 -polly-opt-isl -polly-codegen 观察输出差异。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "插件入口与 LLVM Pass 注册",
+          "order": 4,
+          "filename": "u1-l4-plugin-entry-and-registration.md",
+          "level": "beginner",
+          "topic": "讲解 Polly 如何作为 Pass Plugin 暴露 llvmGetPassPluginInfo、registerPollyPasses 如何挂入 LLVM New Pass Manager（early / before-vectorizer 两种位置）以及 -polly/-passes=polly 的开关路径。",
+          "learning_goals": [
+            "理解 LLVM Pass Plugin 机制与 Polly 的入口",
+            "看懂 registerPollyPasses 注册的回调与位置选择",
+            "建立 Polly『被加载』到『被触发』的整体认知"
+          ],
+          "source_files": [
+            "lib/Plugin/Polly.cpp",
+            "lib/Support/RegisterPasses.cpp",
+            "lib/Support/PollyPasses.def",
+            "include/polly/RegisterPasses.h"
+          ],
+          "minimal_modules": [
+            "LLVM New Pass Manager",
+            "Pass Plugin API"
+          ],
+          "practice_task": "追踪从 llvmGetPassPluginInfo 到 registerPollyPasses 的调用链，说明 -polly-position=early 与 =before-vectorizer 分别注册了哪个 EP 回调，并写出触发 Polly 优化的最小命令行。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "执行主链路与阶段管理",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "PhaseManager：Polly 阶段流水线全景",
+          "order": 1,
+          "filename": "u2-l1-phase-manager-pipeline.md",
+          "level": "intermediate",
+          "topic": "以 lib/Pass/PhaseManager.cpp 的 PhaseManager::run() 为核心，逐一讲解 prepare→detect→scops→flatten→deps→simplify-0→optree→delicm→simplify-1→dce→mse→prune→opt-isl→ast→codegen 的执行顺序与每阶段产物。",
+          "learning_goals": [
+            "掌握 Polly 完整阶段流水线与执行顺序",
+            "理解 ScopInfo 在阶段间需保持（不可被 PM 失效）的原因",
+            "能对照源码解释每个 runXxxPass 调用的作用"
+          ],
+          "source_files": [
+            "lib/Pass/PhaseManager.cpp",
+            "include/polly/Pass/PhaseManager.h"
+          ],
+          "minimal_modules": [
+            "Pass 阶段模型",
+            "Region/Scop 概念"
+          ],
+          "practice_task": "阅读 PhaseManager::run()，画出 17 个 PassPhase 的顺序流程图（标注哪些依赖 DependenceInfo、哪些修改 IR），并解释 Worklist 中每个 SCoP 的处理循环结构。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "PollyFunctionPass/ModulePass 与阶段选项解析",
+          "order": 2,
+          "filename": "u2-l2-function-pass-and-options.md",
+          "level": "intermediate",
+          "topic": "讲解 PollyFunctionPass/PollyModulePass 如何封装为 LLVM Pass、PollyPassOptions 的位集表示，以及 parsePollyOptions 如何解析 -passes=polly<simplify;stopafter=ast> 等参数与一致性检查。",
+          "learning_goals": [
+            "理解 Polly 如何作为单个 Function/Module Pass 嵌入 PM",
+            "掌握 PollyPassOptions 的位集模型与 enableEnd2End/enableDefaultOpts",
+            "能解析并验证自定义 -passes=polly 参数串"
+          ],
+          "source_files": [
+            "include/polly/Pass/PollyFunctionPass.h",
+            "include/polly/Pass/PollyModulePass.h",
+            "lib/Pass/PollyFunctionPass.cpp",
+            "lib/Support/RegisterPasses.cpp"
+          ],
+          "minimal_modules": [
+            "OptionalPassInfoMixin",
+            "Pass 参数解析"
+          ],
+          "practice_task": "用 -passes='polly-custom<no-delicm;stopafter=ast>' 跑一个测试用例，结合 parsePollyOptions 解释每个阶段开关如何被隐式/显式置位，并说明 checkConsistency 会拒绝哪些非法组合。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "规范化与代码准备阶段",
+          "order": 3,
+          "filename": "u2-l3-canonicalization-and-preparation.md",
+          "level": "intermediate",
+          "topic": "讲解 prepare 阶段的 CodePreparation 与 -polly-canonicalize 背后的一组规范化 pass（mem2reg、循环规范化、SCEV 友好化等），以及为什么 Polly 必须吃规范化后的 IR。",
+          "learning_goals": [
+            "理解 Polly 对 IR 规范化形态的要求",
+            "看懂 buildCanonicalicationPassesForNPM 注册的 pass",
+            "理解 prepare 阶段对 DT/LI 的保持"
+          ],
+          "source_files": [
+            "lib/Transform/Canonicalization.cpp",
+            "lib/Transform/CodePreparation.cpp",
+            "include/polly/Canonicalization.h",
+            "include/polly/CodePreparation.h"
+          ],
+          "minimal_modules": [
+            "LLVM 规范化 pass",
+            "RegionInfo/LoopInfo/DominatorTree"
+          ],
+          "practice_task": "用 clang -O0 -Xclang -disable-O0-optnone -emit-llvm 生成 IR，再 opt -polly-canonicalize 规范化，对比前后差异并指出至少 3 处对 SCoP 检测有利的规范化结果。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "SCoP 检测",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "SCoP 概念与 ScopDetection 设计",
+          "order": 1,
+          "filename": "u3-l1-scop-detection-design.md",
+          "level": "intermediate",
+          "topic": "讲解 SCoP（Static Control Part）的定义、为何要求仿射控制流与仿射访问，以及 ScopDetection 类的 RegionSet ValidRegions 与 detect/迭代接口。",
+          "learning_goals": [
+            "理解 SCoP 的数学前提（仿射、规整控制流）",
+            "掌握 ScopDetection 的对外接口与 ValidRegions 含义",
+            "区分『检测』与『建模』两个阶段"
+          ],
+          "source_files": [
+            "include/polly/ScopDetection.h",
+            "lib/Analysis/ScopDetection.cpp"
+          ],
+          "minimal_modules": [
+            "Region/RegionInfo",
+            "仿射性与 SCEV"
+          ],
+          "practice_task": "阅读 ScopDetection.h，列出 ScopDetection 构造所需的各分析（DT/SE/LI/RI/AA/ORE），并解释 ValidRegions 与 isMaxRegionInScop 的关系。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "检测算法与合法性判定",
+          "order": 2,
+          "filename": "u3-l2-detection-algorithm.md",
+          "level": "intermediate",
+          "topic": "深入 ScopDetection.cpp 的 isValid* 系列（isValidRegion/isValidInstruction/isValidAccess/isValidBranch/isValidCFG/isValidLoop），解释哪些 IR 构造会被拒绝及原因。",
+          "learning_goals": [
+            "掌握 SCoP 合法性的逐级判定逻辑",
+            "理解对分支、调用、副作用指令、访存基址的约束",
+            "能根据 IR 推断某区域是否可成为 SCoP"
+          ],
+          "source_files": [
+            "lib/Analysis/ScopDetection.cpp",
+            "include/polly/ScopDetection.h"
+          ],
+          "minimal_modules": [
+            "控制流合法性",
+            "别名与基址分析"
+          ],
+          "practice_task": "构造一个含非常量边界/间接调用/非仿射下标的 C 循环，用 -polly-print-detect 观察 SCoP 为何被拒，对照 isValid* 函数定位拒绝它的具体判定。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "检测诊断与 CFG 图示",
+          "order": 3,
+          "filename": "u3-l3-diagnostics-and-graph.md",
+          "level": "intermediate",
+          "topic": "讲解 ScopDetectionDiagnostic 如何记录拒绝原因（OptimizationRemark/RejectLog）以及 ScopGraphPrinter（-polly-dot/-polly-show）如何可视化检测到的区域。",
+          "learning_goals": [
+            "理解 Polly 的拒绝诊断体系",
+            "学会用 dot/show 选项图形化查看 SCoP",
+            "能利用诊断定位未被优化的区域"
+          ],
+          "source_files": [
+            "include/polly/ScopDetectionDiagnostic.h",
+            "lib/Analysis/ScopDetectionDiagnostic.cpp",
+            "include/polly/ScopGraphPrinter.h",
+            "lib/Analysis/ScopGraphPrinter.cpp"
+          ],
+          "minimal_modules": [
+            "OptimizationRemark",
+            "Graphviz dot 输出"
+          ],
+          "practice_task": "对一个部分可优化的函数运行 -polly-show/-polly-dot，导出 CFG 图，并用 -polly-print-detect 收集至少 2 条 RejectLog，解释每条对应的源码判定点。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "多面体模型构建",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Scop / ScopStmt / MemoryAccess 核心数据结构",
+          "order": 1,
+          "filename": "u4-l1-scop-core-data-structures.md",
+          "level": "intermediate",
+          "topic": "以 include/polly/ScopInfo.h 为主线，讲解 Scop、ScopStmt、MemoryAccess、域（Domain）、调度（Schedule）与访问关系（Access Relation）的多面体表示。",
+          "learning_goals": [
+            "掌握 SCoP 多面体模型的核心类与字段",
+            "理解 statement 的 domain 与 schedule 的 ISL 含义",
+            "能读懂 -polly-print-scops 输出的 Statements 块"
+          ],
+          "source_files": [
+            "include/polly/ScopInfo.h",
+            "lib/Analysis/ScopInfo.cpp"
+          ],
+          "minimal_modules": [
+            "ISL 集合与映射",
+            "域/调度/访问关系"
+          ],
+          "practice_task": "对矩阵乘运行 -polly-print-scops，将输出的 Domain/Schedule/ReadAccess/MustWriteAccess 抽象成数学符号，说明每条语句的迭代空间与访问函数。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "ScopArrayInfo 与标量内存建模",
+          "order": 2,
+          "filename": "u4-l2-scoparrayinfo-and-memorykind.md",
+          "level": "intermediate",
+          "topic": "讲解 MemoryKind（Array/Value/PHI/ExitInstance）如何把跨基本块的 SSA 值与 PHI 当作零维内存对象建模，以及 ScopArrayInfo 与 .s2a/.phiops 命名的关系。",
+          "learning_goals": [
+            "理解多面体模型如何处理 SSA/标量数据流",
+            "掌握四种 MemoryKind 的语义",
+            "看清代码生成时标量被物化为栈槽的机制"
+          ],
+          "source_files": [
+            "include/polly/ScopInfo.h",
+            "lib/Analysis/ScopInfo.cpp"
+          ],
+          "minimal_modules": [
+            "SSA 与 PHI",
+            "标量到内存的建模"
+          ],
+          "practice_task": "找一个含 PHI/跨块标量的循环，用 -polly-print-scops 找出 Scalar:1 的访问，对照 MemoryKind 解释它属于哪一类，并预测代码生成会生成怎样的 alloca。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "ScopBuilder 构建流程",
+          "order": 3,
+          "filename": "u4-l3-scopbuilder.md",
+          "level": "intermediate",
+          "topic": "讲解 ScopBuilder 如何从已检测 Region 出发，逐指令建立 ScopStmt、收集 MemoryAccess、推断假设（Assumption）并填充 AssumedContext/InvalidContext。",
+          "learning_goals": [
+            "掌握从 Region 到 Scop 对象的构建步骤",
+            "理解假设的收集与运行时检查的来源",
+            "能追踪一条指令如何变成 MemoryAccess"
+          ],
+          "source_files": [
+            "include/polly/ScopBuilder.h",
+            "lib/Analysis/ScopBuilder.cpp"
+          ],
+          "minimal_modules": [
+            "指令到语句的映射",
+            "运行时假设"
+          ],
+          "practice_task": "在 ScopBuilder.cpp 中定位处理 Load/Store 与构建 MemoryAccess 的代码，画出『一条 store 指令 → MustWriteAccess』的数据流，并解释 AssumedContext 的一个真实例子。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "SCEV 到 ISL：SCEVAffinator 与 SCEVValidator",
+          "order": 4,
+          "filename": "u4-l4-scev-to-isl.md",
+          "level": "intermediate",
+          "topic": "讲解 SCEVAffinator 如何把 LLVM SCEV 表达式翻译为 ISL 仿射表达式、SCEVValidator 如何判定 SCEV 是否可被 Polly 接受，以及越界/非仿射时的处理。",
+          "learning_goals": [
+            "理解 SCEV 与 ISL 仿射表达式的对应",
+            "掌握 SCEVValidator 的接受/拒绝标准",
+            "能解释下标、循环边界如何变成 ISL 约束"
+          ],
+          "source_files": [
+            "include/polly/Support/SCEVAffinator.h",
+            "include/polly/Support/SCEVValidator.h",
+            "lib/Support/SCEVAffinator.cpp",
+            "lib/Support/SCEVValidator.cpp"
+          ],
+          "minimal_modules": [
+            "ScalarEvolution",
+            "ISL 仿射表达式"
+          ],
+          "practice_task": "选取一个含线性与整除下标的访问，用 SCEVAffinator 的思路手工推导其 ISL 访问关系，并指出 SCEVValidator 会拒绝哪类 SCEV（举例一个被拒场景）。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "依赖分析",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "依赖类型与 Dependences 计算",
+          "order": 1,
+          "filename": "u5-l1-dependences.md",
+          "level": "intermediate",
+          "topic": "讲解 RAW/WAR/WAW/RED/TC_RED 依赖的语义、Dependences 类的 isl_union_map 表示，以及 DependenceAnalysis 如何基于访问关系与调度计算依赖。",
+          "learning_goals": [
+            "掌握多面体依赖的类型与数学表示",
+            "理解依赖与调度/访问关系的因果关系",
+            "能读懂 -polly-print-deps 输出"
+          ],
+          "source_files": [
+            "include/polly/DependenceInfo.h",
+            "lib/Analysis/DependenceInfo.cpp"
+          ],
+          "minimal_modules": [
+            "数据依赖理论",
+            "ISL schedule 与依赖"
+          ],
+          "practice_task": "对矩阵乘运行 -polly-print-deps，写出 main 中 Stmt_for_body8 上的 RAW/WAW 依赖关系式，并解释为何可借此判断可否并行。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "ZoneAlgo 与区域分析基础",
+          "order": 2,
+          "filename": "u5-l2-zonealgo.md",
+          "level": "intermediate",
+          "topic": "讲解 ZoneAlgo 如何在『时间区域（zone）』上分析标量/数组值的生命周期，为 DeLICM 等需要 lifeness 信息的变换提供通用基础设施。",
+          "learning_goals": [
+            "理解 zone（时间区间）与 lifeness 的多面体建模",
+            "掌握 ZoneAlgo 作为 DeLICM 基础设施的角色",
+            "能解释数组元素的生命周期如何被表示"
+          ],
+          "source_files": [
+            "include/polly/ZoneAlgo.h",
+            "lib/Transform/ZoneAlgo.cpp"
+          ],
+          "minimal_modules": [
+            "生命周期分析",
+            "ISL 时间域"
+          ],
+          "practice_task": "阅读 ZoneAlgo，说明它如何把『值的定义点与使用点之间的时间段』表示为 ISL 集合，并写出它向上层（如 DeLICM）暴露的关键接口。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "预优化变换",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Simplify：冗余访问消除",
+          "order": 1,
+          "filename": "u6-l1-simplify.md",
+          "level": "intermediate",
+          "topic": "讲解 Simplify 如何移除冗余/无效的 MemoryAccess（如写后写、等价访问合并），为后续变换精简多面体表示。",
+          "learning_goals": [
+            "理解冗余访问的判定与消除",
+            "掌握 Simplify 在流水线中跑两次的原因",
+            "能评估 Simplify 对后续变换的帮助"
+          ],
+          "source_files": [
+            "include/polly/Simplify.h",
+            "lib/Transform/Simplify.cpp"
+          ],
+          "minimal_modules": [
+            "写后写/冗余访问",
+            "多面体表示精简"
+          ],
+          "practice_task": "构造一个含冗余写或可合并访问的循环，用 -passes='polly<simplify>' 对比 simplify 前后的 -polly-print-scops，指出被移除的访问。",
+          "depends_on": [
+            "u4-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "ForwardOpTree：操作数树前推",
+          "order": 2,
+          "filename": "u6-l2-forwardoptree.md",
+          "level": "intermediate",
+          "topic": "讲解 ForwardOpTree 如何把语句的计算（操作数树）前推到使用点，减少标量依赖、扩大可优化空间。",
+          "learning_goals": [
+            "理解操作数树前推的收益与边界",
+            "掌握前推对依赖结构的影响",
+            "能识别何时前推可行"
+          ],
+          "source_files": [
+            "include/polly/ForwardOpTree.h",
+            "lib/Transform/ForwardOpTree.cpp"
+          ],
+          "minimal_modules": [
+            "数据流前推",
+            "标量依赖消除"
+          ],
+          "practice_task": "选一个含可前推中间计算的例子，运行 optree 前后对比 -polly-print-scops，确认某条标量计算被搬到了使用语句内。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "DeLICM：标量循环携带依赖消除",
+          "order": 3,
+          "filename": "u6-l3-delicm.md",
+          "level": "intermediate",
+          "topic": "讲解 DeLICM 如何利用 ZoneAlgo 的生命期信息，把标量值的临时存储映射到数组元素，从而消除标量循环携带依赖、扩展可并行性。",
+          "learning_goals": [
+            "理解标量循环携带依赖为何阻碍并行",
+            "掌握 DeLICM 的『标量→数组』映射思想",
+            "能解释 DeLICM 与 ZoneAlgo 的协作"
+          ],
+          "source_files": [
+            "include/polly/DeLICM.h",
+            "lib/Transform/DeLICM.cpp",
+            "include/polly/ZoneAlgo.h"
+          ],
+          "minimal_modules": [
+            "循环携带依赖",
+            "标量→数组映射"
+          ],
+          "practice_task": "对一个 LICM 难处理的标量依赖循环，运行 -passes='polly<delicm>' 后用 -polly-print-deps 观察依赖变化，说明被消除的标量依赖。",
+          "depends_on": [
+            "u5-l2",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "DCE、MSE 与 PruneUnprofitable",
+          "order": 4,
+          "filename": "u6-l4-dce-mse-prune.md",
+          "level": "intermediate",
+          "topic": "讲解 DeadCodeElimination（基于依赖删除无效语句）、MaximalStaticExpansion（展开依赖消除的数组别名）与 PruneUnprofitable（跳过不值得优化的 SCoP）。",
+          "learning_goals": [
+            "掌握基于依赖的死代码删除",
+            "理解 MSE 的别名消除与代价",
+            "理解『可获利性』判定对编译时间的意义"
+          ],
+          "source_files": [
+            "include/polly/DeadCodeElimination.h",
+            "lib/Transform/DeadCodeElimination.cpp",
+            "include/polly/MaximalStaticExpansion.h",
+            "lib/Transform/MaximalStaticExpansion.cpp",
+            "include/polly/PruneUnprofitable.h",
+            "lib/Analysis/PruneUnprofitable.cpp"
+          ],
+          "minimal_modules": [
+            "死代码删除",
+            "别名展开",
+            "可获利性分析"
+          ],
+          "practice_task": "分别用 -passes='polly<dce>' 和 'polly<mse>' 跑同一用例，记录两者对 -polly-print-scops 的影响，并解释 PruneUnprofitable 如何提前终止一个低价值 SCoP。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "调度优化",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "调度优化总览与 ScheduleTreeOptimizer",
+          "order": 1,
+          "filename": "u7-l1-schedule-tree-optimizer.md",
+          "level": "advanced",
+          "topic": "讲解 runIslScheduleOptimizer 与 ScheduleTreeOptimizer 类的整体结构：基于 ISL 调度器（Pluto 风格 reschedule）在调度树上做 band 判定与变换。",
+          "learning_goals": [
+            "理解 ISL 调度与调度树节点模型",
+            "掌握 ScheduleTreeOptimizer 的遍历与变换框架",
+            "看懂 -polly-reschedule 等开关"
+          ],
+          "source_files": [
+            "include/polly/ScheduleOptimizer.h",
+            "lib/Transform/ScheduleOptimizer.cpp"
+          ],
+          "minimal_modules": [
+            "ISL 调度树",
+            "Pluto 调度算法"
+          ],
+          "practice_task": "阅读 ScheduleTreeOptimizer，列出它判定的 band 节点类型（isTileableBandNode/isPMOptimizableBandNode）及在每类节点上执行的变换，画出变换后的调度树示意。",
+          "depends_on": [
+            "u5-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "Tiling、Register Tiling 与向量化预处理",
+          "order": 2,
+          "filename": "u7-l2-tiling-and-prevector.md",
+          "level": "advanced",
+          "topic": "讲解一/二级 tiling、register tiling 与 prevector（strip-mine 内层供向量化器）的实现与开关（-polly-tiling、-polly-register-tiling、-polly-vectorizer）。",
+          "learning_goals": [
+            "掌握分块（tiling）的调度树实现",
+            "理解 register tiling 与向量化预处理的衔接",
+            "能调整分块/向量化参数观察性能"
+          ],
+          "source_files": [
+            "lib/Transform/ScheduleOptimizer.cpp"
+          ],
+          "minimal_modules": [
+            "循环分块",
+            "向量化预处理"
+          ],
+          "practice_task": "对矩阵乘用 -polly-vectorizer=stripmine 与不同 tile size 编译，对比 IslAst 输出的循环结构，解释 strip-mine 出的内层如何被向量化器利用。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "FlattenSchedule 与 ScheduleTreeTransform",
+          "order": 3,
+          "filename": "u7-l3-flatten-and-tree-transform.md",
+          "level": "advanced",
+          "topic": "讲解 FlattenSchedule/FlattenAlgo 如何把多 band 调度拍平以利于优化，以及 ScheduleTreeTransform 提供的通用调度树操作原语。",
+          "learning_goals": [
+            "理解调度拍平的动机与方法",
+            "掌握调度树通用变换原语",
+            "能判断拍平对后续 tiling 的影响"
+          ],
+          "source_files": [
+            "include/polly/FlattenSchedule.h",
+            "lib/Transform/FlattenSchedule.cpp",
+            "include/polly/FlattenAlgo.h",
+            "lib/Transform/FlattenAlgo.cpp",
+            "include/polly/ScheduleTreeTransform.h",
+            "lib/Transform/ScheduleTreeTransform.cpp"
+          ],
+          "minimal_modules": [
+            "调度树拍平",
+            "调度树原语"
+          ],
+          "practice_task": "运行 -passes='polly<flatten>' 前后对比 -polly-print-scops 的 Schedule，说明拍平前后 band 结构差异，并标注 ScheduleTreeTransform 中的一个原语用途。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "ManualOptimizer 与 pragma 驱动变换",
+          "order": 4,
+          "filename": "u7-l4-manual-optimizer.md",
+          "level": "advanced",
+          "topic": "讲解 ManualOptimizer 如何依据源码 pragma（如循环交错/分块/向量化提示）覆盖自动调度，实现用户指定变换。",
+          "learning_goals": [
+            "理解 pragma 到调度变换的映射",
+            "掌握手动优化与自动优化的优先级",
+            "能用 pragma 指导 Polly 应用特定变换"
+          ],
+          "source_files": [
+            "include/polly/ManualOptimizer.h",
+            "lib/Transform/ManualOptimizer.cpp"
+          ],
+          "minimal_modules": [
+            "pragma 元数据",
+            "调度覆盖"
+          ],
+          "practice_task": "在源码中加入循环 pragma 提示，用 -polly-print-opt-isl 观察手动变换是否生效，并对照 ManualOptimizer 解释 pragma 如何改写调度节点。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l5",
+          "title": "MatmulOptimizer：GEMM 微内核与分块",
+          "order": 5,
+          "filename": "u7-l5-matmul-optimizer.md",
+          "level": "advanced",
+          "topic": "讲解 MatmulOptimizer 如何识别矩阵乘模式并生成 GEMM 专用调度（panel/micro-kernel 分块、寄存器分块、累加器布局），获得远超通用调度的性能。",
+          "learning_goals": [
+            "理解 GEMM 优化模式与微内核思想",
+            "掌握 MatmulOptimizer 的模式识别条件",
+            "能解释其相对通用 tiling 的增益来源"
+          ],
+          "source_files": [
+            "include/polly/MatmulOptimizer.h",
+            "lib/Transform/MatmulOptimizer.cpp"
+          ],
+          "minimal_modules": [
+            "GEMM 分块",
+            "微内核与寄存器分块"
+          ],
+          "practice_task": "用一个 float[1536][1536] 矩阵乘触发 MatmulOptimizer，对比它与普通 ISL 调度的 IslAst，列出微内核分块层级并解释其访存局部性。",
+          "depends_on": [
+            "u7-l1",
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "AST 生成与代码生成",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "IslAst 生成与并行性标注",
+          "order": 1,
+          "filename": "u8-l1-islast.md",
+          "level": "advanced",
+          "topic": "讲解 IslAst 如何用 isl_ast_build 从优化调度生成 AST，并在 IslAstInfo 的 payload 上标注 IsParallel/IsInnermostParallel/Reduction 等信息。",
+          "learning_goals": [
+            "理解从 ISL 调度到 AST 的生成",
+            "掌握并行/规约标注的来源",
+            "能读懂 -polly-ast 输出与运行时条件"
+          ],
+          "source_files": [
+            "include/polly/CodeGen/IslAst.h",
+            "lib/CodeGen/IslAst.cpp"
+          ],
+          "minimal_modules": [
+            "isl_ast_build",
+            "依赖→并行性"
+          ],
+          "practice_task": "对一个可并行循环生成 IslAst，找出标注 IsInnermostParallel 的节点，追溯到 Dependences 解释为何判为并行，并说明 buildRunCondition 产生的运行时检查。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "代码生成主流程",
+          "order": 2,
+          "filename": "u8-l2-code-generation.md",
+          "level": "advanced",
+          "topic": "讲解 runCodeGeneration 如何把 IslAst 翻译回 LLVM-IR、生成运行时检查并在满足条件时用优化区域替换原 IR。",
+          "learning_goals": [
+            "理解 SCoP→IR 的端到端回写",
+            "掌握运行时检查与区域替换机制",
+            "看清 codegen 失效 ScopInfo 的原因"
+          ],
+          "source_files": [
+            "include/polly/CodeGen/CodeGeneration.h",
+            "lib/CodeGen/CodeGeneration.cpp",
+            "lib/Pass/PhaseManager.cpp"
+          ],
+          "minimal_modules": [
+            "运行时检查",
+            "区域替换"
+          ],
+          "practice_task": "在 PhaseManager.cpp 中定位 codegen 阶段调用，解释为何 codegen 成功后要 Info.invalidate()，并描述生成的 IR 中『原始块 vs 优化块』的分支结构。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "BlockGenerators 与 IslNodeBuilder",
+          "order": 3,
+          "filename": "u8-l3-block-and-node-builder.md",
+          "level": "advanced",
+          "topic": "讲解 BlockGenerators 如何为语句生成基本块、IslNodeBuilder 如何递归遍历 AST 节点生成循环/条件，以及 IslExprBuilder 如何求值 AST 表达式。",
+          "learning_goals": [
+            "掌握语句基本块的生成与映射",
+            "理解 AST 节点到 IR 的递归生成",
+            "看清表达式求值的实现"
+          ],
+          "source_files": [
+            "include/polly/CodeGen/BlockGenerators.h",
+            "lib/CodeGen/BlockGenerators.cpp",
+            "include/polly/CodeGen/IslNodeBuilder.h",
+            "lib/CodeGen/IslNodeBuilder.cpp",
+            "include/polly/CodeGen/IslExprBuilder.h",
+            "lib/CodeGen/IslExprBuilder.cpp"
+          ],
+          "minimal_modules": [
+            "基本块生成",
+            "AST 遍历与表达式求值"
+          ],
+          "practice_task": "追踪 IslNodeBuilder 对一个 for 节点的访问，说明它如何创建循环并调用 BlockGenerators 生成语句体，并指出 IslExprBuilder 在边界表达式上的角色。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "循环生成与 OpenMP 后端",
+          "order": 4,
+          "filename": "u8-l4-loop-gen-and-openmp.md",
+          "level": "advanced",
+          "topic": "讲解 LoopGenerators 及两个 OpenMP 后端 LoopGeneratorsGOMP（GNU runtime）与 LoopGeneratorsKMP（LLVM/OpenMP runtime）如何为并行 AST 节点生成并行循环调用。",
+          "learning_goals": [
+            "理解并行循环的代码生成",
+            "掌握 -polly-omp-backend=GNU/LLVM 的差异",
+            "看清 OpenMP runtime 调用与调度参数"
+          ],
+          "source_files": [
+            "include/polly/CodeGen/LoopGenerators.h",
+            "lib/CodeGen/LoopGenerators.cpp",
+            "include/polly/CodeGen/LoopGeneratorsGOMP.h",
+            "lib/CodeGen/LoopGeneratorsGOMP.cpp",
+            "include/polly/CodeGen/LoopGeneratorsKMP.h",
+            "lib/CodeGen/LoopGeneratorsKMP.cpp"
+          ],
+          "minimal_modules": [
+            "OpenMP runtime",
+            "并行循环生成"
+          ],
+          "practice_task": "用 -mllvm -polly-parallel 分别配 GOMP 与 KMP 后端编译一个并行循环，对比生成的 IR 中 runtime 调用，并解释 -polly-num-threads/-polly-scheduling 如何影响生成代码。",
+          "depends_on": [
+            "u8-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "交换格式与 ISL 支撑",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "JScop 导入导出格式",
+          "order": 1,
+          "filename": "u9-l1-jscop-exchange.md",
+          "level": "advanced",
+          "topic": "讲解 JSONExporter 如何把 SCoP 的域/访问/调度导出为 JScop（JSON），以及如何通过修改 schedule 再 import 实现外部/手工优化（如 interchange+tiling+stripmine）。",
+          "learning_goals": [
+            "掌握 JScop 文件结构与字段",
+            "理解 import/export 在手工优化流程中的作用",
+            "能手工改写 schedule 描述变换"
+          ],
+          "source_files": [
+            "include/polly/JSONExporter.h",
+            "lib/Exchange/JSONExporter.cpp",
+            "docs/HowToManuallyUseTheIndividualPiecesOfPolly.rst"
+          ],
+          "minimal_modules": [
+            "JScop JSON 格式",
+            "schedule 改写即变换"
+          ],
+          "practice_task": "导出矩阵乘的 JScop，手工改写为 interchange+tiled 的 schedule 文件（加 postfix），用 -polly-import 重新导入并通过 -polly-ast 验证生成的循环结构。",
+          "depends_on": [
+            "u4-l1",
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "ISL 辅助工具层",
+          "order": 2,
+          "filename": "u9-l2-isl-support-layer.md",
+          "level": "advanced",
+          "topic": "讲解 GICHelper（ISL 对象与字符串/流互转）、ISLTools（常用 ISL 操作封装）与 IRBuilder（构造 Polly 所需 IR 的辅助）如何支撑整个流水线。",
+          "learning_goals": [
+            "掌握 ISL 对象在 C++ 侧的封装与调试输出",
+            "理解 ISLTools 提供的复用原语",
+            "看清 IRBuilder 在代码生成中的辅助角色"
+          ],
+          "source_files": [
+            "include/polly/Support/GICHelper.h",
+            "lib/Support/GICHelper.cpp",
+            "include/polly/Support/ISLTools.h",
+            "lib/Support/ISLTools.cpp",
+            "include/polly/CodeGen/IRBuilder.h",
+            "lib/CodeGen/IRBuilder.cpp"
+          ],
+          "minimal_modules": [
+            "ISL C++ 绑定",
+            "IR 构造辅助"
+          ],
+          "practice_task": "在 ScopInfo.cpp 中找出至少 3 处对 GICHelper/ISLTools 的调用，说明它们各自解决什么 ISL 操作，并解释 IRBuilder 如何简化代码生成的 IR 构造。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "测试、诊断与二次开发",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "lit/FileCheck 测试体系",
+          "order": 1,
+          "filename": "u10-l1-lit-filecheck-tests.md",
+          "level": "advanced",
+          "topic": "讲解 test/ 下按阶段组织的 .ll 回归测试、lit.cfg 配置、create_ll.sh 与 FileCheck 模式的写法，以及如何运行某阶段的测试。",
+          "learning_goals": [
+            "掌握 Polly 测试目录的组织与运行方式",
+            "学会读懂与编写 .ll + CHECK 测试",
+            "理解按 phase 切分测试的意义"
+          ],
+          "source_files": [
+            "test/CMakeLists.txt",
+            "test/lit.cfg",
+            "test/create_ll.sh",
+            "test/polly.ll"
+          ],
+          "minimal_modules": [
+            "lit 测试框架",
+            "FileCheck 匹配"
+          ],
+          "practice_task": "阅读 test/ScheduleOptimizer 下一个 .ll 测试，说明它如何用 RUN 行调用 opt 与 FileCheck 验证 IslAst/codegen 输出，并本地运行该测试。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "单元测试与 gtest 框架",
+          "order": 2,
+          "filename": "u10-l2-unittests.md",
+          "level": "advanced",
+          "topic": "讲解 unittests/ 下 Isl/ScheduleOptimizer/DeLICM/Flatten/Support 等 gtest 单元测试的组织方式与覆盖目标。",
+          "learning_goals": [
+            "掌握 Polly 单元测试的结构与运行",
+            "理解各模块单元测试的侧重点",
+            "能为某模块补一个最小单元测试"
+          ],
+          "source_files": [
+            "unittests/CMakeLists.txt",
+            "unittests/Isl/CMakeLists.txt",
+            "unittests/ScheduleOptimizer/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "gtest 框架",
+            "ISL/Schedule 单元测试"
+          ],
+          "practice_task": "阅读 unittests/ScheduleOptimizer 下的一个测试，说明它如何直接构造 ISL 调度并断言优化结果，并尝试为 ScheduleTreeTransform 某原语写一个最小测试骨架。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "诊断、性能监控与调试支持",
+          "order": 3,
+          "filename": "u10-l3-diagnostics-perf-debug.md",
+          "level": "advanced",
+          "topic": "讲解 OptimizationRemark 诊断、PerfMonitor（运行时性能计数与回退）、PollyDebug（POLLY_DEBUG 宏）与 RuntimeDebugBuilder 的调试与可观测性支持。",
+          "learning_goals": [
+            "掌握用 -polly-print-* 与 opt-viewer 观察优化",
+            "理解 PerfMonitor 的运行时守护与回退机制",
+            "学会用 POLLY_DEBUG 与 RuntimeDebugBuilder 排查"
+          ],
+          "source_files": [
+            "include/polly/CodeGen/PerfMonitor.h",
+            "lib/CodeGen/PerfMonitor.cpp",
+            "include/polly/Support/PollyDebug.h",
+            "lib/Support/PollyDebug.cpp",
+            "include/polly/CodeGen/RuntimeDebugBuilder.h",
+            "lib/CodeGen/RuntimeDebugBuilder.cpp"
+          ],
+          "minimal_modules": [
+            "OptimizationRemark/opt-viewer",
+            "运行时回退与调试"
+          ],
+          "practice_task": "用 -polly-print-opt-isl 与 -fsave-optimization-record 收集一个函数的优化 remark，并解释 PerfMonitor 在 SCoP 性能不达标时如何回退到原始 IR。",
+          "depends_on": [
+            "u3-l3",
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l4",
+          "title": "实战：添加自定义 Polly 阶段/变换",
+          "order": 4,
+          "filename": "u10-l4-adding-custom-phase.md",
+          "level": "advanced",
+          "topic": "综合所学，演示如何新增一个 PassPhase：在 PhaseManager.h/cpp 注册、实现 runXxxPass、接入 parsePollyOptions，并补 lit 测试，完成端到端二次开发。",
+          "learning_goals": [
+            "掌握在 Polly 流水线中新增阶段的完整步骤",
+            "理解阶段间依赖与选项注册",
+            "能独立扩展 Polly 的变换能力"
+          ],
+          "source_files": [
+            "include/polly/Pass/PhaseManager.h",
+            "lib/Pass/PhaseManager.cpp",
+            "lib/Support/RegisterPasses.cpp",
+            "lib/Support/PollyPasses.def"
+          ],
+          "minimal_modules": [
+            "阶段扩展机制",
+            "选项解析接入",
+            "lit 回归测试"
+          ],
+          "practice_task": "新增一个最简单的『打印 SCoP 语句数』的 phase：扩展 PassPhase 枚举与 getPhaseName/parsePhase、在 PhaseManager::run 中调用、接入 -passes=polly<myphase>，并写一个 lit 测试验证输出。",
+          "depends_on": [
+            "u2-l1",
+            "u6-l1",
+            "u8-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

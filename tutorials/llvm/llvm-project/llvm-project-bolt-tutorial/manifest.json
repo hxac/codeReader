@@ -1,0 +1,1019 @@
+{
+  "project": "llvm-project-bolt",
+  "head": "abe5aa5cb2336f32dca8e765710ec212a926476c",
+  "rationale": "本大纲按「先认识、再读数据结构、再走主链路、再深入子系统和优化、最后到代码生成/重写/工程实践」的顺序，把 BOLT 这个二进制后链接优化器拆成 9 个单元 31 篇讲义。单元 1 让读者从零认识项目并跑通端到端流程；单元 2 讲清贯穿全工程的四大核心数据结构（BinaryContext、BinaryFunction、BasicBlock/CFG、MCPlus 元数据），它们是后续所有源码阅读的基础；单元 3 顺着 RewriteInstance::run() 的真实调用链讲主处理流程（发现→反汇编→CFG→重定位）；单元 4 专门讲 Profile 子系统，因为 BOLT 是 profile-guided 的，profile 质量直接决定效果；单元 5 建立 pass 框架的心智模型（注册、顺序、并行、DynoStats、VerifyCFG），这是理解单元 6 各优化 pass 的前提；单元 6 是 BOLT 的核心价值所在——block/function 排序、热冷分裂、调用优化、栈帧与寄存器优化；单元 7 讲目标后端抽象与代码生成（发射+ORC 链接）；单元 8 讲二进制重写最难的调试信息重写、运行时库/插桩和元数据/特殊 section 重写；单元 9 收尾于测试体系与辅助工具/性能调优。讲义之间依赖关系严格遵循「先框架后细节、先公共后特化」的原则，每篇只解决一个主题并配一个可操作的源码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 BOLT：项目定位、构建运行与端到端流程",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "BOLT 是什么：后链接二进制优化器的定位与原理",
+          "order": 1,
+          "filename": "u1-l1-bolt-overview.md",
+          "topic": "讲清楚 BOLT 作为 post-link（链接后）profile-guided 二进制优化器的定位：它接收已链接的 ELF 二进制，反汇编重建 CFG，再基于 perf 采样 profile 重新布局代码以提升指令缓存与分支预测表现。",
+          "level": "beginner",
+          "learning_goals": [
+            "理解后链接优化与编译期 PGO 的区别与互补关系",
+            "掌握 BOLT 的输入要求（未 strip、--emit-relocs、X86-64/AArch64 ELF）",
+            "理解 BOLT 优化的核心收益来源（代码布局、热冷分离）"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/GettingStarted.md"
+          ],
+          "minimal_modules": [
+            "BOLT 的定位与历史（CGO'19 论文背景）",
+            "输入二进制要求与限制",
+            "BOLT 优化能带来什么收益"
+          ],
+          "practice_task": "阅读 README.md，用一句话写出 BOLT 与编译器 -O3 优化的本质区别；并列出对输入二进制必须满足的 3 个条件，说明每个条件为什么必要。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建与运行 BOLT：CMake 构建、目标架构与工具一览",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "topic": "讲清楚如何把 BOLT 作为 LLVM 子项目构建出来，理解 CMake 选项与目标架构选择，并认识 bin/ 下产生的各个工具。",
+          "level": "beginner",
+          "learning_goals": [
+            "掌握 -DLLVM_ENABLE_PROJECTS=bolt 的构建流程",
+            "理解 LLVM_TARGETS_TO_BUILD 与 BOLT 支持架构的关系",
+            "认识 llvm-bolt、perf2bolt、merge-fdata、heatmap、bat-dump 等可执行文件"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "README.md",
+            "docs/GettingStarted.md"
+          ],
+          "minimal_modules": [
+            "顶层 CMakeLists.txt 如何挂载为 LLVM 子项目",
+            "构建命令与 ninja bolt 目标",
+            "bin/ 下各工具的用途速览"
+          ],
+          "practice_task": "按照 GettingStarted.md 写出完整的 cmake + ninja 构建命令（含 X86;AArch64 两个目标）；在 CMakeLists.txt 中找到设置 LLVM_SUBPROJECT_TITLE 为 BOLT 的行，说明它如何让 BOLT 成为 LLVM 树的一部分。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "端到端使用流程：从 perf 采集到 BOLT 优化",
+          "order": 3,
+          "filename": "u1-l3-end-to-end-workflow.md",
+          "topic": "通过 OptimizingClang 实操文档讲清 BOLT 的四步标准流程：Step0 emit-relocs 链接、Step1 perf 采集、Step2 perf2bolt 转 fdata、Step3 llvm-bolt 优化。",
+          "level": "beginner",
+          "learning_goals": [
+            "掌握 perf record 采集分支采样（-j any,u / brstack）的方法",
+            "理解 perf2bolt 把 perf.data 聚合为 fdata 的作用",
+            "会用 -reorder-blocks/-reorder-functions/-split-functions 等关键选项运行优化"
+          ],
+          "source_files": [
+            "docs/OptimizingClang.md",
+            "docs/GettingStarted.md",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "四步标准流程",
+            "关键优化选项（reorder-blocks=ext-tsp、reorder-functions、split-functions）",
+            "插桩（-instrument）作为替代采集方式"
+          ],
+          "practice_task": "以一个简单的 hello world 程序为例（或参照 OptimizingClang），写出从 -Wl,-q 链接、perf record 采集、perf2bolt 转换到 llvm-bolt -reorder-blocks=ext-tsp -split-functions -dyno-stats 优化的完整命令序列，并用 -dyno-stats 对比优化前后的指令统计。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "代码目录结构与程序入口",
+          "order": 4,
+          "filename": "u1-l4-directory-and-entry.md",
+          "topic": "讲清 bolt/ 顶层目录划分（lib/include/tools/test/runtime/docs）以及主入口 tools/driver/llvm-bolt.cpp 中 main() 如何根据 argv[0] 分发到 bolt/perf2bolt/boltdiff 三种模式。",
+          "level": "beginner",
+          "learning_goals": [
+            "掌握 bolt/ 下 lib/Core、lib/Passes、lib/Profile、lib/Rewrite、lib/Target 各自职责",
+            "理解 main() 按 argv[0] 名字分发的多模式机制",
+            "理清 ELF 走 RewriteInstance、Mach-O 走 MachORewriteInstance 的入口分流"
+          ],
+          "source_files": [
+            "tools/driver/llvm-bolt.cpp",
+            "README.md",
+            "CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "目录结构与职责速查",
+            "main() 的三种模式分发（boltMode/perf2boltMode/boltDiffMode）",
+            "目标初始化宏 BOLT_TARGET 与 createBinary 后的分流"
+          ],
+          "practice_task": "在 tools/driver/llvm-bolt.cpp 中找到根据 argv[0] 判断 perf2bolt/boltdiff/bolt 模式的代码，画出 main() 从打开二进制到调用 RewriteInstance::run()/MachORewriteInstance::run() 的调用流程图。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心数据结构：BinaryContext、BinaryFunction 与 MCPlus",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "BinaryContext：贯穿全局的中心上下文",
+          "order": 1,
+          "filename": "u2-l1-binary-context.md",
+          "topic": "讲清 BinaryContext 作为全局中枢的角色：它持有所有 BinaryFunction 的映射、MCPlusBuilder、DWARFContext、各 section/symbol/relocation 索引，以及日志流与目标信息。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 BinaryContext 持有哪些全局状态（BinaryFunctions、符号表、DWARFContext）",
+            "掌握 MCPlusBuilder、目标架构判断（isX86/isAArch64/isRISCV）的作用",
+            "理解 createBinaryFunction 与 getBinaryFunctionAtAddress 等查找接口"
+          ],
+          "source_files": [
+            "include/bolt/Core/BinaryContext.h",
+            "lib/Core/BinaryContext.cpp"
+          ],
+          "minimal_modules": [
+            "BinaryContext 的核心成员与职责",
+            "函数映射与符号到函数的索引",
+            "目标/调试信息/日志流接入"
+          ],
+          "practice_task": "在 BinaryContext.h 中找出 BinaryFunctions 容器的类型与 getBinaryFunctions() 访问器，并定位 initializeTarget 如何接收 MCPlusBuilder；写一小段伪代码说明如何通过 BC 遍历所有函数并按地址查找函数。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "BinaryFunction 与状态机：一个函数在 BOLT 中的生命周期",
+          "order": 2,
+          "filename": "u2-l2-binary-function.md",
+          "topic": "讲清 BinaryFunction 如何表示一个被处理的函数：指令表（InstrMapType）、基本块、FunctionLayout、CFI 状态，以及 Empty→Disassembled→CFG 的状态机。",
+          "level": "intermediate",
+          "learning_goals": [
+            "掌握 BinaryFunction::State 状态机（Empty/Disassembled/CFG 等）",
+            "理解指令表（offset→MCInst）与 FunctionLayout 的关系",
+            "理解 isSimple 标志对函数能否被优化的影响"
+          ],
+          "source_files": [
+            "include/bolt/Core/BinaryFunction.h",
+            "lib/Core/BinaryFunction.cpp",
+            "include/bolt/Core/FunctionLayout.h"
+          ],
+          "minimal_modules": [
+            "State 枚举与生命周期",
+            "指令表与 addInstruction",
+            "FunctionLayout 与布局概念",
+            "Simple/非 Simple 函数的区分"
+          ],
+          "practice_task": "在 BinaryFunction.h 中找到 enum class State 的定义并列出各状态；阅读 clearDisasmState()/resetState()，说明当函数反汇编失败时如何回退状态，并解释为什么非 simple 函数不能被常规优化。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "BinaryBasicBlock 与控制流图表示",
+          "order": 3,
+          "filename": "u2-l3-basic-block-and-cfg.md",
+          "topic": "讲清 BinaryBasicBlock 如何作为 CFG 节点：它持有指令范围、后继/前驱边、分支类型、执行计数，以及 BinaryDomTree/BinaryLoop 提供的支配与循环信息。",
+          "level": "intermediate",
+          "learning_goals": [
+            "掌握 BinaryBasicBlock 的指令管理与后继/前驱边维护",
+            "理解分支类型（条件/无条件/直接/间接）的表示",
+            "了解 BinaryDomTree 与 BinaryLoop 提供的分析结构"
+          ],
+          "source_files": [
+            "include/bolt/Core/BinaryBasicBlock.h",
+            "lib/Core/BinaryBasicBlock.cpp",
+            "include/bolt/Core/BinaryDomTree.h",
+            "include/bolt/Core/BinaryLoop.h"
+          ],
+          "minimal_modules": [
+            "BasicBlock 的指令与边",
+            "分支类型与执行计数",
+            "支配树与循环信息"
+          ],
+          "practice_task": "阅读 BinaryBasicBlock 的 addSuccessor/removeSuccessor 相关接口，写一段说明 CFG 边是如何维护双向一致性的；并用 BinaryDomTree/BinaryLoop 说明如何在 BOLT 里获取一个块的支配者与所属循环。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "MCPlus：在 MCInst 之上挂载元数据的扩展机制",
+          "order": 4,
+          "filename": "u2-l4-mcplus-metadata.md",
+          "topic": "讲清 BOLT 的核心创新之一 MCPlus：通过在 MCInst 末尾追加额外 operand 来承载注释（annotation），分为影响语义的一等注释（EH/跳转表）和可丢弃的补充注释（profile/debug）。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 MCPlus 如何用 extra operand 把元数据挂到 MCInst 上",
+            "区分一等注释（影响正确性）与补充注释（可丢弃）",
+            "理解 MCPlusBuilder 作为目标无关接口创建/解析注释的角色"
+          ],
+          "source_files": [
+            "include/bolt/Core/MCPlus.h",
+            "include/bolt/Core/MCPlusBuilder.h",
+            "lib/Core/MCPlusBuilder.cpp"
+          ],
+          "minimal_modules": [
+            "MCPlus 注释的存储原理（kInst operand 标记起点）",
+            "一等注释 vs 补充注释",
+            "MCPlusBuilder 接口与 allocator id"
+          ],
+          "practice_task": "阅读 include/bolt/Core/MCPlus.h 顶部的注释，说明 MCPlus 用哪个 operand 类型标记注释的开始；列出两类注释的例子，并解释为什么把 profile 计数做成补充注释是安全的。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "主处理链路：跟着 RewriteInstance::run() 走",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "RewriteInstance::run() 全流程总览",
+          "order": 1,
+          "filename": "u3-l1-run-pipeline.md",
+          "topic": "通读 RewriteInstance::run() 的完整阶段序列，建立对 BOLT 主链路（发现→反汇编→CFG→profile→优化→发射→重写文件）的整体认知。",
+          "level": "intermediate",
+          "learning_goals": [
+            "掌握 run() 的完整阶段顺序与每个阶段的职责",
+            "理解 DiffOnly/BinaryAnalysisMode/Instrument 等模式如何分流",
+            "建立从输入二进制到输出二进制的全链路心智模型"
+          ],
+          "source_files": [
+            "lib/Rewrite/RewriteInstance.cpp",
+            "include/bolt/Rewrite/RewriteInstance.h"
+          ],
+          "minimal_modules": [
+            "run() 的阶段序列",
+            "模式分流（DiffOnly/BinaryAnalysisMode/Instrument）",
+            "各阶段对应的 NamedRegionTimer 计时"
+          ],
+          "practice_task": "对照 RewriteInstance.cpp 中 run() 的实现，按执行顺序列出所有阶段函数名；标注哪些阶段在 DiffOnly 时被跳过，并说明 -time-rewrite 如何通过 NamedRegionTimer 记录每个阶段耗时。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "二进制发现与特殊 section 解析",
+          "order": 2,
+          "filename": "u3-l2-discovery-and-sections.md",
+          "topic": "讲清 discoverStorage、readSpecialSections、discoverFileObjects 如何从 ELF 中识别函数符号、建立 BinarySection 与 BinaryData、并解析 .eh_frame 等特殊 section。",
+          "level": "intermediate",
+          "learning_goals": [
+            "掌握函数如何从符号表被发现为 BinaryFunction",
+            "理解 BinarySection 的抽象与 section 内容管理",
+            "了解 eh_frame/plt/rela 等特殊 section 的早期解析"
+          ],
+          "source_files": [
+            "lib/Rewrite/RewriteInstance.cpp",
+            "lib/Core/BinarySection.cpp",
+            "include/bolt/Core/BinarySection.h",
+            "lib/Core/BinaryData.cpp"
+          ],
+          "minimal_modules": [
+            "符号→BinaryFunction 的发现",
+            "BinarySection 抽象",
+            "特殊 section 解析（readSpecialSections）"
+          ],
+          "practice_task": "在 RewriteInstance.cpp 中找到 discoverFileObjects()，说明它如何利用 FILE 符号区分同名局部函数；并列出 readSpecialSections() 至少解析的 3 类特殊 section 及其用途。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "反汇编与 CFG 重建：processIndirectBranch 与启发式",
+          "order": 3,
+          "filename": "u3-l3-disassemble-and-cfg.md",
+          "topic": "讲清 BinaryFunction::disassemble() 与 buildCFG() 如何把字节流变成 CFG，重点在间接分支（跳转表/间接跳转）的 processIndirectBranch 启发式判定。",
+          "level": "intermediate",
+          "learning_goals": [
+            "掌握 disassemble() 如何逐指令解码并建立指令表",
+            "理解 buildCFG() 如何切分基本块、连接边",
+            "理解 processIndirectBranch 如何判定跳转表与间接跳转类型"
+          ],
+          "source_files": [
+            "lib/Core/BinaryFunction.cpp",
+            "include/bolt/Core/BinaryFunction.h",
+            "lib/Core/JumpTable.cpp",
+            "include/bolt/Core/JumpTable.h"
+          ],
+          "minimal_modules": [
+            "指令解码与指令表构建",
+            "基本块切分与 CFG 构建",
+            "间接分支启发式（IndirectBranchType）",
+            "跳转表识别"
+          ],
+          "practice_task": "阅读 BinaryFunction::disassemble() 与 buildCFG()，画出从原始字节到 CFG 的转换步骤；列出 processIndirectBranch 返回的 IndirectBranchType 枚举值，并说明为什么间接跳转的识别依赖启发式而非确定算法。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "重定位与 JumpTable：--emit-relocs 的意义",
+          "order": 4,
+          "filename": "u3-l4-relocation-and-jumptable.md",
+          "topic": "讲清 Relocation 抽象与 .rela.text 的作用：emit-relocs 让 BOLT 能安全移动代码与数据；同时讲 JumpTable 如何作为数据/代码混合实体被识别和重写。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解为什么需要 --emit-relocs 才能移动函数",
+            "掌握 Relocation 抽象及其在代码/数据移动时的修正",
+            "理解 JumpTable（代码内的数据）如何被识别与处理"
+          ],
+          "source_files": [
+            "lib/Core/Relocation.cpp",
+            "include/bolt/Core/Relocation.h",
+            "lib/Core/JumpTable.cpp",
+            "lib/Rewrite/RewriteInstance.cpp"
+          ],
+          "minimal_modules": [
+            "Relocation 抽象与类型",
+            "emit-relocs 与代码可移动性",
+            "JumpTable 识别与重写",
+            "scanExternalRefs 的作用"
+          ],
+          "practice_task": "在 README/GettingStarted 中找到关于 --emit-relocs 与 .rela.text 的说明，并在 Relocation.cpp 中定位重定位信息如何被读取与修正；解释如果没有 relocations，BOLT 为什么不能重排函数。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "Profile 子系统：perf、fdata、YAML 与 BAT",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Profile 格式总览与 fdata/DataReader",
+          "order": 1,
+          "filename": "u4-l1-profile-formats.md",
+          "topic": "讲清 BOLT 接受的多种 profile 格式（perf.data、fdata、YAML、BAT）与统一的 ProfileReaderBase 抽象，并深入 fdata 文本格式与 DataReader 的解析。",
+          "level": "intermediate",
+          "learning_goals": [
+            "掌握 BOLT 支持的 profile 格式及其选择逻辑",
+            "理解 setProfile 如何按文件魔数/YAML 选择 reader",
+            "读懂 fdata 文本格式与 DataReader 解析流程"
+          ],
+          "source_files": [
+            "lib/Rewrite/RewriteInstance.cpp",
+            "lib/Profile/DataReader.cpp",
+            "include/bolt/Profile/DataReader.h",
+            "include/bolt/Profile/ProfileReaderBase.h",
+            "docs/profiles.md"
+          ],
+          "minimal_modules": [
+            "Profile 格式与选择（checkPerfDataMagic/isYAML）",
+            "ProfileReaderBase 统一抽象",
+            "fdata 格式与 DataReader 解析"
+          ],
+          "practice_task": "在 RewriteInstance::setProfile 中画出按文件类型选择 DataAggregator/YAMLProfileReader/DataReader 的判定逻辑；手写一个最小 fdata 样例文件并说明每字段的含义。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "perf2bolt 与 DataAggregator：从 perf.data 聚合分支数据",
+          "order": 2,
+          "filename": "u4-l2-perf2bolt-aggregator.md",
+          "topic": "讲清 perf2bolt 模式如何用 DataAggregator 解析 perf.data（brstack/LBR），聚合分支计数，并输出更紧凑稳定的 fdata。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 perf2bolt 模式（AggregateOnly）与 brstack/LBR 的关系",
+            "掌握 DataAggregator 解析 perf.data 的流程",
+            "理解聚合后 fdata 为何更稳定（地址无关）"
+          ],
+          "source_files": [
+            "lib/Profile/DataAggregator.cpp",
+            "include/bolt/Profile/DataAggregator.h",
+            "tools/driver/llvm-bolt.cpp",
+            "docs/GettingStarted.md"
+          ],
+          "minimal_modules": [
+            "perf2bolt 模式与 -ba 选项",
+            "DataAggregator 解析 brstack",
+            "分支数据聚合与 fdata 输出"
+          ],
+          "practice_task": "对照 tools/driver/llvm-bolt.cpp 的 perf2boltMode()，说明 AggregateOnly/ShowDensity 如何被设置；在 DataAggregator 中找到 checkPerfDataMagic，解释为什么可以直接把 perf.data 喂给 llvm-bolt（-p）而跳过 perf2bolt。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Bolt Address Translation（BAT）：从优化后二进制回采 profile",
+          "order": 3,
+          "filename": "u4-l3-bolt-address-translation.md",
+          "topic": "讲清 BAT 机制：BOLT 在输出二进制中插入 .note.bolt_bat，记录地址翻译表，使后续能从 BOLT 优化过的二进制采集 profile 并映射回原始输入二进制再次优化。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 BAT 解决的痛点（迭代优化的 profile 采集）",
+            "掌握 .note.bolt_bat section 的结构与用途",
+            "理解 --enable-bat 与 perf2bolt 的配合"
+          ],
+          "source_files": [
+            "docs/BAT.md",
+            "lib/Profile/BoltAddressTranslation.cpp",
+            "include/bolt/Profile/BoltAddressTranslation.h",
+            "tools/bat-dump/bat-dump.cpp"
+          ],
+          "minimal_modules": [
+            "BAT 的目的与工作流",
+            "BAT section 结构（热/冷函数表）",
+            "BoltAddressTranslation 类的编码与解析",
+            "bat-dump 工具"
+          ],
+          "practice_task": "阅读 docs/BAT.md，用一段话解释为什么没有 BAT 就很难对已优化的二进制再次迭代优化；用 bat-dump 工具的源码（tools/bat-dump/bat-dump.cpp）说明如何读取并展示 BAT section。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "Heatmap 可视化与 Stale Profile Matching",
+          "order": 4,
+          "filename": "u4-l4-heatmap-and-stale-profile.md",
+          "topic": "讲清两个 profile 相关能力：Heatmap 工具/类把 profile 密度可视化为热点地图；StaleProfileMatching 在二进制与采集时已不一致（stale）时尽量匹配 profile。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 Heatmap 如何表达代码热点分布",
+            "掌握 stale profile 的成因与 StaleProfileMatching 的匹配思路",
+            "会用 heatmap 工具与 -dyno-stats 评估 profile 质量"
+          ],
+          "source_files": [
+            "lib/Profile/Heatmap.cpp",
+            "include/bolt/Profile/Heatmap.h",
+            "tools/heatmap/heatmap.cpp",
+            "lib/Profile/StaleProfileMatching.cpp",
+            "docs/Heatmaps.md"
+          ],
+          "minimal_modules": [
+            "Heatmap 热点地图原理",
+            "heatmap 工具用法",
+            "stale profile 成因",
+            "StaleProfileMatching 匹配策略"
+          ],
+          "practice_task": "用 heatmap 工具（参照 docs/Heatmaps.md）对一个带 profile 的二进制生成热点图，并解释横纵坐标的含义；阅读 StaleProfileMatching.cpp 的入口，说明它在什么情况下被触发、用什么策略匹配旧 profile。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "Pass 框架：注册、顺序、并行与统计",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "BinaryFunctionPassManager：pass 框架、顺序与并行",
+          "order": 1,
+          "filename": "u5-l1-pass-framework.md",
+          "topic": "讲清 BOLT 的 pass 基础设施：BinaryFunctionPass 基类、registerPass/runAllPasses 的注册与顺序、runOnFunctions 的并行执行（ParallelUtilities）、DynoStats 与 VerifyCFG。",
+          "level": "intermediate",
+          "learning_goals": [
+            "掌握 BinaryFunctionPass 基类与 runOnFunctions 接口",
+            "理解 runAllPasses 中 pass 的注册顺序即执行顺序",
+            "理解 ParallelUtilities 如何并行、DynoStats/VerifyCFG 如何校验"
+          ],
+          "source_files": [
+            "lib/Rewrite/BinaryPassManager.cpp",
+            "include/bolt/Passes/BinaryPasses.h",
+            "lib/Core/ParallelUtilities.cpp",
+            "include/bolt/Core/ParallelUtilities.h",
+            "lib/Core/DynoStats.cpp",
+            "include/bolt/Core/DynoStats.h"
+          ],
+          "minimal_modules": [
+            "BinaryFunctionPass 基类与打印控制",
+            "registerPass/runPasses/runAllPasses",
+            "并行执行与错误聚合（logBOLTErrorsAndQuitOnFatal）",
+            "DynoStats 与 VerifyCFG 校验"
+          ],
+          "practice_task": "在 BinaryPassManager.cpp 的 runPasses() 中，说明 pass 是否执行取决于注册时的哪个布尔参数；并解释 ParallelUtilities::runOnEachFunctionWithUniqueAllocId 在 disassembleFunctions 中如何避免多线程 MCPlus allocator 冲突。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "基础整理 pass：从 NormalizeCFG 到 FinalizeFunctions",
+          "order": 2,
+          "filename": "u5-l2-tidy-passes.md",
+          "topic": "挑出贯穿管线的基础 pass 讲清它们的作用：NormalizeCFG、ShortenInstructions、RemoveNops、FixupBranches、AssignSections、FinalizeFunctions、InstructionLowering 等。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 NormalizeCFG 如何规整 CFG 以便后续优化",
+            "掌握 FixupBranches 与 FinalizeFunctions 为何要在布局确定后运行",
+            "理解 InstructionLowering 把伪指令落地为真实指令的时机"
+          ],
+          "source_files": [
+            "include/bolt/Passes/BinaryPasses.h",
+            "lib/Rewrite/BinaryPassManager.cpp",
+            "lib/Passes/ReorderAlgorithm.cpp"
+          ],
+          "minimal_modules": [
+            "规整类 pass（Normalize/ShortenInstructions/RemoveNops）",
+            "分支与最终化（FixupBranches/FinalizeFunctions）",
+            "落地类 pass（InstructionLowering/LowerAnnotations/CleanMCState）"
+          ],
+          "practice_task": "在 runAllPasses() 中找出注释里强调'必须最后运行'或'依赖最终布局'的 pass（如 FinalizeFunctions、FixupBranches、CleanMCState），各写一句话说明它们为什么必须在那个位置。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "Identical Code Folding（ICF）：折叠相同函数体",
+          "order": 3,
+          "filename": "u5-l3-identical-code-folding.md",
+          "topic": "讲清 ICF 如何检测字节级/语义级相同的函数并折叠为一个，以减少代码体积；并说明它在管线中运行两次的原因。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 ICF 检测相同函数的原理与安全条件",
+            "掌握 ICF level 选项与正确性约束",
+            "理解为何 ICF 在 Inliner 前后各运行一次"
+          ],
+          "source_files": [
+            "lib/Passes/IdenticalCodeFolding.cpp",
+            "include/bolt/Passes/IdenticalCodeFolding.h",
+            "lib/Rewrite/BinaryPassManager.cpp"
+          ],
+          "minimal_modules": [
+            "相同函数检测算法",
+            "ICF level 与安全性（hash/语义）",
+            "管线中两次 ICF 的位置"
+          ],
+          "practice_task": "阅读 IdenticalCodeFolding.cpp 的入口，说明它用什么粒度（指令序列/重定位/符号）判定两个函数相同；并在 runAllPasses() 中找出 ICF 的两次注册位置，解释为什么 Inliner 之后需要再跑一次。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "核心优化 pass：布局、分裂与调用优化",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "基本块排序与 Ext-TSP 布局算法",
+          "order": 1,
+          "filename": "u6-l1-block-reorder-ext-tsp.md",
+          "topic": "讲清 ReorderBasicBlocks pass 与背后的 ReorderAlgorithm 体系，重点 Ext-TSP（扩展旅行商）算法如何用 profile 在基本块/簇级别最小化分支与缓存代价。",
+          "level": "advanced",
+          "learning_goals": [
+            "掌握 ClusterAlgorithm 与 ReorderAlgorithm 的类层次",
+            "理解 Ext-TSP 评分模型（fall-through、跳转距离、缓存密度）",
+            "理解 -reorder-blocks 各取值如何选择算法"
+          ],
+          "source_files": [
+            "lib/Passes/ReorderAlgorithm.cpp",
+            "include/bolt/Passes/ReorderAlgorithm.h",
+            "lib/Rewrite/BinaryPassManager.cpp"
+          ],
+          "minimal_modules": [
+            "Cluster/Reorder 算法类层次",
+            "ExtTSPReorderAlgorithm 评分模型",
+            "reorder-blocks 选项映射"
+          ],
+          "practice_task": "在 ReorderAlgorithm.h 中列出 ReorderAlgorithm 的所有子类与对应 Cluster 算法；阅读 ExtTSPReorderAlgorithm，用一段话解释它的评分函数如何同时考虑 fall-through 命中率与跳转距离，并说明 ext-tsp 为何是默认选项。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "函数排序：HFSort、Pettis-Hansen、CDSort 与 MCF",
+          "order": 2,
+          "filename": "u6-l2-function-reorder.md",
+          "topic": "讲清 ReorderFunctions pass 与函数级布局算法（HFSort、Pettis-Hansen、CDSort），以及 CallGraph/CallGraphWalker 与 MCF（最小割流）在调用图聚簇中的作用。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解函数级布局为何要用调用图聚簇",
+            "掌握 HFSort/Pettis-Hansen/CDSort 的差异与 -reorder-functions 选项",
+            "理解 CallGraph、CallGraphWalker 与 MCF 的角色"
+          ],
+          "source_files": [
+            "lib/Passes/ReorderFunctions.cpp",
+            "include/bolt/Passes/ReorderFunctions.h",
+            "lib/Passes/HFSort.cpp",
+            "lib/Passes/PettisAndHansen.cpp",
+            "lib/Passes/MCF.cpp",
+            "include/bolt/Passes/MCF.h",
+            "lib/Core/CallGraph.cpp",
+            "lib/Core/CallGraphWalker.cpp"
+          ],
+          "minimal_modules": [
+            "调用图与 CallGraphWalker",
+            "HFSort/Pettis-Hansen/CDSort 比较",
+            "MCF 最小割流算法",
+            "reorder-functions 选项"
+          ],
+          "practice_task": "对比 HFSort.cpp、PettisAndHansen.cpp 与 MCF.cpp 三种聚簇/排序策略的核心思想（各一句）；阅读 ReorderFunctions.cpp，说明它如何根据 -reorder-functions 选择算法，以及 PopulateOutputFunctions 如何把排序结果落地为输出顺序。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "SplitFunctions：热冷分裂与 cdsplit",
+          "order": 3,
+          "filename": "u6-l3-split-functions.md",
+          "topic": "讲清 SplitFunctions 如何把函数的冷基本块拆到独立 .text.cold section，以及为何在 ReorderFunctions 之后会第二次运行（支持 hot-warm-cold 的 cdsplit 策略）。",
+          "level": "advanced",
+          "learning_goals": [
+            "掌握热冷分裂的收益（提升指令缓存局部性）",
+            "理解 FunctionFragment 与分裂的判定阈值",
+            "理解管线中两次 SplitFunctions 的不同目的"
+          ],
+          "source_files": [
+            "lib/Passes/SplitFunctions.cpp",
+            "include/bolt/Passes/SplitFunctions.h",
+            "lib/Rewrite/BinaryPassManager.cpp",
+            "include/bolt/Core/FunctionLayout.h"
+          ],
+          "minimal_modules": [
+            "热冷基本块判定",
+            "FunctionFragment 与 .text.cold",
+            "cdsplit hot-warm-cold 策略",
+            "两次 SplitFunctions 的位置"
+          ],
+          "practice_task": "阅读 SplitFunctions.cpp 的核心逻辑，说明如何根据执行计数判定一个基本块是否冷；在 runAllPasses() 中找到两次 SplitFunctions 注册，解释为什么第二次要在 ReorderFunctions 之后（参考源码注释）。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "调用相关优化：ICP、Inliner、SCTC 与 PLT",
+          "order": 4,
+          "filename": "u6-l4-call-optimizations.md",
+          "topic": "讲清几个直接改造调用图的 pass：IndirectCallPromotion（ICP，热点间接调用转直接）、Inliner、SimplifyConditionalTailCalls（SCTC，条件尾调用转跳转）、PLTCall。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解 ICP 如何用 profile 把热点间接调用转成直接调用梯子",
+            "掌握 BOLT 二进制级 inlining 的特点与限制",
+            "理解 SCTC 如何消除条件尾调用的冗余跳转"
+          ],
+          "source_files": [
+            "lib/Passes/IndirectCallPromotion.cpp",
+            "lib/Passes/Inliner.cpp",
+            "include/bolt/Passes/Inliner.h",
+            "include/bolt/Passes/PLTCall.h",
+            "lib/Rewrite/BinaryPassManager.cpp"
+          ],
+          "minimal_modules": [
+            "IndirectCallPromotion 原理",
+            "二进制 Inliner",
+            "SimplifyConditionalTailCalls（SCTC）",
+            "PLTCall 处理"
+          ],
+          "practice_task": "阅读 IndirectCallPromotion.cpp，说明它如何根据 profile 选择被提升的间接调用目标并构建比较-直接调用梯子；并解释 SCTC 为什么必须放在 ReorderFunctions 之后运行（参考 runAllPasses 注释）。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "栈帧与寄存器优化：FrameOptimizer、RegReAssign、ShrinkWrapping",
+          "order": 5,
+          "filename": "u6-l5-frame-and-reg-optimizations.md",
+          "topic": "讲清依赖数据流分析的进阶 pass：FrameOptimizer（利用栈帧分析省去存取）、RegReAssign（重分配寄存器）、ShrinkWrapping（收缩 prologue/epilogue 范围），以及它们依赖的 FrameAnalysis/LivenessAnalysis。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解 FrameOptimizer 依赖的栈帧数据流分析",
+            "掌握 RegReAssign 如何用 profile 重新分配寄存器",
+            "理解 ShrinkWrapping 收缩 prologue/epilogue 的收益与风险"
+          ],
+          "source_files": [
+            "lib/Passes/FrameOptimizer.cpp",
+            "include/bolt/Passes/FrameOptimizer.h",
+            "lib/Passes/RegReAssign.cpp",
+            "lib/Passes/ShrinkWrapping.cpp",
+            "lib/Passes/FrameAnalysis.cpp",
+            "lib/Passes/LivenessAnalysis.cpp"
+          ],
+          "minimal_modules": [
+            "FrameAnalysis/LivenessAnalysis 数据流基础",
+            "FrameOptimizer 省存取",
+            "RegReAssign 寄存器重分配",
+            "ShrinkWrapping prologue 收缩"
+          ],
+          "practice_task": "在 runAllPasses() 中找到 FrameOptimizerPass 并阅读注释，解释它为何必须依赖 FinalizeFunctions（需要正确放置 CFI）；列出它读取/改写 CFI 所需的栈帧分析来自哪个 pass。",
+          "depends_on": [
+            "u5-l1",
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "目标后端与代码生成：MCPlusBuilder、发射与链接",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "MCPlusBuilder 后端抽象与新增后端",
+          "order": 1,
+          "filename": "u7-l1-target-backends.md",
+          "topic": "讲清 MCPlusBuilder/MCSymbolizer 作为目标无关接口的职责，X86/AArch64/RISCV 三个实现如何差异；并依据 NewBackend.md 讲清如何新增一个 BOLT 后端。",
+          "level": "advanced",
+          "learning_goals": [
+            "掌握 MCPlusBuilder 抽象了哪些目标相关能力（建指令/分析/分支范围）",
+            "理解 X86/AArch64/RISCV 三个实现的差异（如 LongJmp 放松）",
+            "理解新增后端的步骤与必须先落地的公共改动"
+          ],
+          "source_files": [
+            "include/bolt/Core/MCPlusBuilder.h",
+            "lib/Target/X86/X86MCPlusBuilder.cpp",
+            "lib/Target/AArch64/AArch64MCPlusBuilder.cpp",
+            "lib/Target/RISCV/RISCVMCPlusBuilder.cpp",
+            "docs/NewBackend.md"
+          ],
+          "minimal_modules": [
+            "MCPlusBuilder 接口职责",
+            "X86/AArch64/RISCV 实现差异",
+            "MCSymbolizer 角色",
+            "新增后端流程（NewBackend.md）"
+          ],
+          "practice_task": "对照 docs/NewBackend.md，列出新增后端至少要在哪些目录实现什么（MCPlusBuilder、Relocation.cpp 的平台处理、测试）；并说明 RISCV 为何需要 LongJmp/branch relaxation 而 X86 通常不需要。",
+          "depends_on": [
+            "u2-l4",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "BinaryEmitter 与 JITLinkLinker：发射函数与 ORC 链接",
+          "order": 2,
+          "filename": "u7-l2-emit-and-link.md",
+          "topic": "讲清 emitAndLink 阶段：BinaryEmitter 用 MCStreamer 把优化后的函数重新发射为可链接对象，JITLinkLinker 基于 LLVM ORC 把它链接回内存以得到最终地址。",
+          "level": "advanced",
+          "learning_goals": [
+            "掌握 BinaryEmitter 如何遍历 FunctionLayout 发射每个 fragment",
+            "理解 emitFunctionBody 如何处理指令、CFI、行号信息",
+            "理解 JITLinkLinker 基于 ORC 的 loadObject/lookupSymbolInfo 机制"
+          ],
+          "source_files": [
+            "lib/Core/BinaryEmitter.cpp",
+            "include/bolt/Core/BinaryEmitter.h",
+            "lib/Rewrite/JITLinkLinker.cpp",
+            "include/bolt/Core/Linker.h",
+            "docs/RuntimeLibrary.md"
+          ],
+          "minimal_modules": [
+            "BinaryEmitter 与 MCStreamer 发射",
+            "emitFunctionBody/emitFunctions",
+            "BOLTLinker 抽象与 JITLinkLinker（ORC）",
+            "emitAndLink 在 run() 中的位置"
+          ],
+          "practice_task": "阅读 BinaryEmitter::emitAll/emitFunctions，说明它如何按 FunctionLayout 发射主 fragment 与冷 fragment；对照 docs/RuntimeLibrary.md 解释 JITLinkLinker 这个'极简链接器'为什么只能做基本的符号解析（与 freestanding 运行库的限制呼应）。",
+          "depends_on": [
+            "u3-l1",
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "二进制重写细节：调试信息、运行时库与元数据",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "DWARF/调试信息重写：DWARFRewriter 与 DIEBuilder",
+          "order": 1,
+          "filename": "u8-l1-dwarf-rewrite.md",
+          "topic": "讲清 -update-debug-sections 如何在 BOLT 移动代码后修正 DWARF 调试信息：DWARFRewriter、DIEBuilder、DebugData、GDBIndex、AddressMap 如何协同重建 .debug_* 与地址映射。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解移动代码后为何必须重写 DWARF 才能保留可调试性",
+            "掌握 DIEBuilder 如何重建 DIE 树与地址范围",
+            "理解 AddressMap/.gdb_index 等辅助映射的作用"
+          ],
+          "source_files": [
+            "lib/Rewrite/DWARFRewriter.cpp",
+            "include/bolt/Rewrite/DWARFRewriter.h",
+            "lib/Core/DIEBuilder.cpp",
+            "include/bolt/Core/DIEBuilder.h",
+            "lib/Core/DebugData.cpp",
+            "lib/Core/AddressMap.cpp",
+            "include/bolt/Core/AddressMap.h"
+          ],
+          "minimal_modules": [
+            "DWARF 重写的必要性与 DWARF v4/v5 现状",
+            "DIEBuilder 重建 DIE 树",
+            "DebugData/地址范围修正",
+            "AddressMap 与 .gdb_index"
+          ],
+          "practice_task": "在 GettingStarted.md 中找到关于 -update-debug-sections 与 -gdwarf-4 的说明，解释 DWARF v5 支持的现状；阅读 DWARFRewriter 的入口，列出它需要修正的至少 3 类调试 section（如 .debug_info/.debug_line/.debug_ranges）。",
+          "depends_on": [
+            "u3-l1",
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "运行时库与插桩：RuntimeLibrary、Instrumentation 与 Hugify",
+          "order": 2,
+          "filename": "u8-l2-runtime-and-instrumentation.md",
+          "topic": "讲清 BOLT 注入辅助代码的机制：RuntimeLibrary 基类、InstrumentationRuntimeLibrary（-instrument 插桩采集）与 HugifyRuntimeLibrary（大页），以及 runtime/ 下 freestanding 的 C++ 运行库代码。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解运行时库注入的层级（MCPlusBuilder 小改 vs 运行库大改）",
+            "掌握 Instrumentation 如何生成计数并写 /tmp/prof.fdata",
+            "理解 runtime/ 为何要 freestanding（-ffreestanding，无 BSS/无依赖）"
+          ],
+          "source_files": [
+            "include/bolt/RuntimeLibs/RuntimeLibrary.h",
+            "lib/RuntimeLibs/RuntimeLibrary.cpp",
+            "lib/RuntimeLibs/InstrumentationRuntimeLibrary.cpp",
+            "lib/RuntimeLibs/HugifyRuntimeLibrary.cpp",
+            "runtime/instr.cpp",
+            "runtime/hugify.cpp",
+            "runtime/CMakeLists.txt",
+            "lib/Passes/Instrumentation.cpp",
+            "docs/RuntimeLibrary.md"
+          ],
+          "minimal_modules": [
+            "RuntimeLibrary 抽象（emitBinary/link）",
+            "Instrumentation 插桩流程",
+            "Hugify 大页机制",
+            "runtime/ freestanding 代码约束"
+          ],
+          "practice_task": "对照 docs/RuntimeLibrary.md，列出 runtime/ 运行库必须遵守的 freestanding 约束（如无 BSS、无外部依赖、只用裸 .text/.data）；阅读 Instrumentation.cpp，说明 -instrument 模式如何在函数内插入计数代码并最终写出 prof.fdata。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "元数据与特殊 section 重写：MetadataManager 与各类 Rewriter",
+          "order": 3,
+          "filename": "u8-l3-metadata-and-special-rewriters.md",
+          "topic": "讲清 finalizeMetadataPreEmit/updateMetadata/rewriteFile 阶段如何处理非函数的元数据 section：MetadataManager 统一调度 LinuxKernel/RSeq/PseudoProbe/SDT/GNUProperty/BuildID/eh_frame 等重写器。",
+          "level": "advanced",
+          "learning_goals": [
+            "掌握 MetadataManager 如何统一管理元数据重写器的生命周期",
+            "理解 .eh_frame/eh_frame_hdr 异常处理表的重写",
+            "了解 Linux kernel / RSeq / PseudoProbe / SDT 等特殊场景的重写"
+          ],
+          "source_files": [
+            "lib/Rewrite/MetadataManager.cpp",
+            "include/bolt/Rewrite/MetadataManager.h",
+            "include/bolt/Rewrite/MetadataRewriters.h",
+            "lib/Core/Exceptions.cpp",
+            "lib/Rewrite/LinuxKernelRewriter.cpp",
+            "lib/Rewrite/RSeqRewriter.cpp",
+            "lib/Rewrite/PseudoProbeRewriter.cpp"
+          ],
+          "minimal_modules": [
+            "MetadataManager 调度模型",
+            "eh_frame 异常处理重写（Exceptions）",
+            "Linux kernel / RSeq 特殊重写",
+            "PseudoProbe/SDT 重写与 rewriteFile"
+          ],
+          "practice_task": "阅读 include/bolt/Rewrite/MetadataRewriters.h，列出所有元数据重写器类；在 run() 中定位 processMetadataPreCFG/processMetadataPostCFG/finalizeMetadataPreEmit/updateMetadata，说明元数据重写为何分散在多个阶段而非一次完成。",
+          "depends_on": [
+            "u3-l1",
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "工程实践：测试体系与辅助工具",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "测试体系：lit 端到端测试与 GTest 单元测试",
+          "order": 1,
+          "filename": "u9-l1-testing.md",
+          "topic": "讲清 BOLT 的测试组织：test/ 下的 lit 端到端测试（按 X86/AArch64/RISCV 分类，含 Inputs 与 .test/.cpp），以及 unittests/ 下的 GTest 单元测试，并教读者如何为新功能写测试。",
+          "level": "advanced",
+          "learning_goals": [
+            "掌握 lit 测试的结构（.test、RUN/CHECK、lit.cfg.py）与按架构分类",
+            "理解 unittests 的 GTest 组织（Core/Passes/Profile）",
+            "学会为一个新 pass 或新选项添加 lit 测试"
+          ],
+          "source_files": [
+            "test/CMakeLists.txt",
+            "test/lit.cfg.py",
+            "test/X86",
+            "test/AArch64",
+            "unittests/Core/BinaryContext.cpp",
+            "unittests/Passes/LivenessAnalysis.cpp",
+            "unittests/Profile/DataAggregator.cpp"
+          ],
+          "minimal_modules": [
+            "lit 测试结构与 lit.cfg.py",
+            "按架构分类的端到端测试",
+            "GTest 单元测试组织",
+            "如何新增一个 lit 测试"
+          ],
+          "practice_task": "阅读 test/CMakeLists.txt 与 lit.cfg.py，说明 check-bolt 如何发现并运行 lit 测试；选一个现有 .test 文件（如 verify-cfg.test），仿照其 RUN/CHECK 结构，为一个假想的 -print-only 选项写一个最小 lit 测试骨架。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "辅助工具链、性能与并发调优",
+          "order": 2,
+          "filename": "u9-l2-tools-and-performance.md",
+          "topic": "串讲 BOLT 工具链的其余可执行文件（merge-fdata、heatmap、bat-dump、binary-analysis、llvm-boltdiff），并讲清性能调优：ParallelUtilities 并行、NamedRegionTimer 计时、jemalloc/tcmalloc、DynoStats 解读、CommandLineOpts 选项全景。",
+          "level": "advanced",
+          "learning_goals": [
+            "掌握 merge-fdata/heatmap/bat-dump/binary-analysis/boltdiff 的用途",
+            "理解 ParallelUtilities 并行与 timer 计时机制",
+            "学会用 DynoStats 与 -time-rewrite 评估与调优"
+          ],
+          "source_files": [
+            "tools/merge-fdata/merge-fdata.cpp",
+            "tools/heatmap/heatmap.cpp",
+            "tools/bat-dump/bat-dump.cpp",
+            "tools/binary-analysis/binary-analysis.cpp",
+            "lib/Utils/CommandLineOpts.cpp",
+            "include/bolt/Utils/CommandLineOpts.h",
+            "docs/CommandLineArgumentReference.md",
+            "docs/BinaryAnalysis.md"
+          ],
+          "minimal_modules": [
+            "辅助工具一览（merge-fdata/heatmap/bat-dump/binary-analysis/boltdiff）",
+            "并行与计时（ParallelUtilities/NamedRegionTimer）",
+            "内存分配器优化（jemalloc/tcmalloc）",
+            "DynoStats 与命令行选项全景"
+          ],
+          "practice_task": "用一句话分别说明 merge-fdata、heatmap、bat-dump、binary-analysis、llvm-boltdiff 五个工具的用途；参照 docs/CommandLineArgumentReference.md 与 README，列出至少 3 个能显著影响优化效果或耗时的关键选项，并说明 jemalloc/tcmalloc 为何能加速 BOLT。",
+          "depends_on": [
+            "u4-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,416 @@
+# BinaryContext：贯穿全局的中心上下文
+
+## 1. 本讲目标
+
+学完本讲，你应当能够：
+
+- 说清 `BinaryContext` 在 BOLT 中扮演的角色——为什么几乎所有模块都拿着它的引用（`BC`）。
+- 列举 `BinaryContext` 持有哪些全局状态：所有 `BinaryFunction` 的映射、`MCPlusBuilder`、`DWARFContext`、section/symbol/relocation 索引，以及日志流。
+- 看懂 `createBinaryFunction`、`getBinaryFunctionAtAddress`、`getBinaryFunctionContainingAddress`、`getFunctionForSymbol` 等查找/构造接口，知道它们之间用什么数据结构互相映射。
+- 理解目标架构判断（`isX86` / `isAArch64` / `isRISCV`）与 `MCPlusBuilder` 是如何被注入到上下文里的。
+
+本讲是单元 2（核心数据结构）的第一篇，承接 [u1-l4](u1-l4-directory-and-entry.md) 里「`main()` 把控制权交给 `RewriteInstance::run()`」的结论——我们这一讲就来认识 `run()` 及其后所有代码都要用到的「全局中枢」。
+
+## 2. 前置知识
+
+- **上下文对象（Context 模式）**：很多编译器/工具链代码里，会把一大堆「贯穿整个程序生命周期的共享状态」打包进一个对象，传一个引用进去，而不是把这些状态散落成全局变量。LLVM 自己的 `MCContext`、`LLVMContext` 都是这个套路。BOLT 的 `BinaryContext` 也不例外，它就是「一次二进制重写」这个生命周期的上下文。
+- **MC 层（Machine Code layer）**：LLVM 用来表示「已汇编/待反汇编的机器码」的基础设施。`MCInst` 是一条机器指令的抽象，`MCStreamer` 用来发射指令，`MCCodeEmitter` 把指令编码成字节。BOLT 不是从源码出发，而是从字节出发，所以它大量复用 MC 层。
+- **Triple**：LLVM 用一个形如 `x86_64-unknown-linux-gnu` 的字符串（`Triple`）来描述目标平台。从输入 ELF 读出 Triple 后，BOLT 就知道要用哪套反汇编器、寄存器表等。
+- **DWARFContext**：LLVM 解析调试信息（`.debug_*` 段）的入口对象。BOLT 移动代码后要修正调试信息，所以也需要持有它。
+
+如果你对这几样东西还比较陌生，先把它们理解为「BOLT 借来的现成工具箱」即可，本讲不会深入它们的内部，只关心 BOLT 怎么把它们收纳进一个中心对象。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+|------|------|
+| `include/bolt/Core/BinaryContext.h` | `BinaryContext` 类的声明，是本讲的主战场。绝大多数成员和接口都在这里。 |
+| `lib/Core/BinaryContext.cpp` | 上面这些接口的实现，重点是 `createBinaryContext` 工厂、`createBinaryFunction`、几个查找函数。 |
+| `lib/Rewrite/RewriteInstance.cpp` | 真正「new 出一个 `BinaryContext`」并把 `MCPlusBuilder` 注入进去的地方，是理解上下文如何被组装的关键。 |
+| `tools/driver/llvm-bolt.cpp` | `BOLT_TARGET` 宏 + `TargetConfig.def`，决定在编译期选中哪些目标架构，是「目标后端可插拔」的源头。 |
+| `unittests/Core/BinaryContext.cpp` | 一个最小的、用真实 ELF 字节构造 `BinaryContext` 的单元测试，是最好的「最小调用示例」。 |
+
+## 4. 核心概念与源码讲解
+
+### 4.1 BinaryContext 的核心成员与职责
+
+#### 4.1.1 概念说明
+
+`BinaryContext` 是「一次 BOLT 重写」的中枢对象。你可以把它想象成一个**大柜子**：BOLT 在反汇编、优化、发射、重写二进制这几个阶段里需要用到的所有「全局可见」的东西，都被分门别类地塞进这个柜子。
+
+之所以需要这么一个对象，是因为 BOLT 的代码被拆成了 `Core`、`Passes`、`Profile`、`Rewrite`、`Target` 等好几个库，它们都要访问同一批共享状态（函数列表、section 列表、符号表、调试信息、目标信息……）。如果不用一个中心对象收口，就会出现满地全局变量、初始化顺序难控、无法并行等问题。`BinaryContext` 就是这个收口点。
+
+它的大致分类有这几块：
+
+1. **函数集合**：所有从输入二进制发现的函数（`BinaryFunctions`）。
+2. **section / symbol / relocation 索引**：把二进制的段、符号、重定位信息组织成便于按地址、按名字查找的表。
+3. **MC 层工具箱**：`MCContext`、反汇编器 `DisAsm`、指令分析 `MIA`、目标专属的 `MCPlusBuilder`（成员名 `MIB`）等。
+4. **调试信息**：`DWARFContext`、伪探针解码器等。
+5. **运行时元数据/状态标志**：是否 PIC、是否 strip、是否有重定位、大页/页大小、对齐参数、统计计数等。
+6. **日志流**：`outs()` / `errs()`，几乎所有「BOLT-INFO:」输出都从这里走。
+
+#### 4.1.2 核心流程
+
+一个 `BinaryContext` 的生命可以概括为三步：
+
+```
+        ┌─────────────────────────────┐
+        │  1. 工厂构造 createBinaryContext │   读 Triple → 查 Target → 建 MC 层
+        └──────────────┬──────────────┘
+                       │ 返回 unique_ptr<BinaryContext>
+                       ▼
+        ┌─────────────────────────────┐
+        │  2. 注入后端 initializeTarget  │   绑定 X86/AArch64/RISCV 的 MCPlusBuilder
+        └──────────────┬──────────────┘
+                       ▼
+        ┌─────────────────────────────┐
+        │  3. 各阶段通过 BC 引用读/写状态  │   发现、反汇编、优化、发射都拿 BC 当总线
+        └──────────────┬──────────────┘
+                       ▼
+                  析构 ~BinaryContext     释放 section、注入函数、跳转表
+```
+
+- **第 1 步**是静态工厂 `BinaryContext::createBinaryContext`，它根据 Triple 创建所有 MC 层对象，再把这些对象「搬进」构造函数。
+- **第 2 步**在外部完成（`RewriteInstance` 里调用 `BC->initializeTarget(...)`），因为 `MCPlusBuilder` 的创建依赖 `libTarget`，而 `libCore` 不能依赖 `libTarget`（见源码注释解释的「避免循环依赖」）。
+- **第 3 步**贯穿整个 `RewriteInstance::run()`，所有 pass、emitter、rewriter 都通过 `BinaryContext &` 或 `BinaryContext *` 访问共享状态。
+- 析构时由 `~BinaryContext` 统一释放它 owns 的 `BinarySection`、注入函数和跳转表。
+
+#### 4.1.3 源码精读
+
+先看构造函数的签名，注意它把一大堆 `unique_ptr`「搬」进来——这就是「大柜子」装东西的过程：
+
+[include/bolt/Core/BinaryContext.h:913-928](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/include/bolt/Core/BinaryContext.h#L913-L928) —— 构造函数接收 18 个参数，几乎全是 MC 层与调试信息的所有权指针，逐个 move 进成员。
+
+构造函数实现里有两行值得注意，它根据架构设定了**页大小**默认值：
+
+[lib/Core/BinaryContext.cpp:161-163](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/lib/Core/BinaryContext.cpp#L161-L163) —— `RegularPageSize` 在 AArch64 上是 `0x10000`（64K 页），其余（X86）是 `0x1000`；`PageAlign` 默认用大页（`HugePageSize = 0x200000`）除非用户指定 `NoHugePages`。
+
+再看成员变量区。最关键的几类状态都在头文件前 300 行内集中声明。比如它持有的「MC 层工具箱」：
+
+[include/bolt/Core/BinaryContext.h:673-718](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/include/bolt/Core/BinaryContext.h#L673-L718) —— `MCContext Ctx`、`MCObjectFileInfo MOFI`、反汇编器 `DisAsm`、指令分析 `MIA`、目标专属的 `MCPlusBuilder MIB`、调试信息 `DWARFContext DwCtx`、目标描述 `TheTriple` / `TheTarget`，以及日志流 `Logger`，都在这里。
+
+其中 `MIB`（`MCPlusBuilder`）是 BOLT 自己加的一层（[u2-l4](u2-l4-mcplus-metadata.md) 会专门讲），它是「目标后端可插拔」的关键抽象。
+
+然后是一组**状态标志位**，它们记录了「这个二进制长什么样」的全局事实，许多 pass 会据此决定能否运行：
+
+[include/bolt/Core/BinaryContext.h:721-762](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/include/bolt/Core/BinaryContext.h#L721-L762) —— 比如 `IsLinuxKernel`、`HasRelocations`、`IsStripped`、`HasFixedLoadAddress`、`UseLargeCodeModel`、`HasBATSection` 等。
+
+最后是析构函数，体现「谁拥有、谁释放」：
+
+[lib/Core/BinaryContext.cpp:166-174](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/lib/Core/BinaryContext.cpp#L166-L174) —— 析构时手动 `delete` 所有 `BinarySection`、所有注入函数（`InjectedBinaryFunctions`）和所有 `JumpTable`，再 `clearBinaryData()` 释放符号数据。注意「输入函数」不需要在这里 delete，因为它们是存在 `std::map` 里的**值**（见 4.2），map 析构会自动回收。
+
+#### 4.1.4 代码实践
+
+**实践目标**：在头文件里摸清 `BinaryContext` 的「大柜子」到底装了哪几类东西，建立一张心智地图。
+
+**操作步骤**：
+
+1. 打开 `include/bolt/Core/BinaryContext.h`，跳到第 673 行附近的成员变量区。
+2. 给以下成员各写一句话注释，说明它属于 4.1.1 里列的哪一类（函数集合 / section 索引 / MC 工具箱 / 调试信息 / 状态标志 / 日志）：
+   - `MIB`（约 705 行）
+   - `DwCtx`（约 681 行）
+   - `Logger`（约 718 行）
+   - `HasRelocations`（约 724 行）
+   - `Sections`（约 209 行，在文件靠前位置）
+
+**需要观察的现象**：你会发现这些成员并没有按「类别」整齐排列，而是按「先 private 实现细节、再 public 接口、最后一大段 public 状态/工具成员」的顺序摆放。这是 BOLT 头文件的一个写作习惯。
+
+**预期结果**：你能用一张表把 `BinaryContext` 的成员归到约 6 类，并指出 `MIB → MC 工具箱`、`HasRelocations → 状态标志` 等。
+
+**待本地验证**：上述行号基于当前 HEAD，若你在较新代码上阅读请以实际为准。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：`BinaryContext` 的构造函数被声明为 `BinaryContext() = delete;`（约第 191 行），同时提供了一个 18 个参数的公开构造函数。为什么要禁用默认构造？
+
+> **答案**：因为 `BinaryContext` 持有一大批必须由调用方正确创建（依赖 Triple、Target 注册）的对象（MC 层、DWARF 上下文等），没有任何一组合理的「默认值」。禁用默认构造强制外部必须走静态工厂 `createBinaryContext`，保证 MC 层对象被正确组装。
+
+**练习 2**：`~BinaryContext` 里删除了 `Sections`、`InjectedBinaryFunctions`、`JumpTables`，却没有删除 `BinaryFunctions` 里的函数对象，这是不是内存泄漏？
+
+> **答案**：不是。`BinaryFunctions` 的类型是 `std::map<uint64_t, BinaryFunction>`（见 [BinaryContext.h:235](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/include/bolt/Core/BinaryContext.h#L235)），函数是**值**而不是指针，map 析构会自动回收。而 `InjectedBinaryFunctions` 是 `std::vector<BinaryFunction*>`（指针容器），所以必须手动 delete。
+
+---
+
+### 4.2 函数映射与符号到函数的索引
+
+#### 4.2.1 概念说明
+
+「函数」是 BOLT 处理的核心对象。一个输入二进制里有成百上千个函数，BOLT 需要能：
+
+1. **按地址**找到函数（反汇编、跳转目标、重定位都要按地址定位）；
+2. **按符号**（`MCSymbol *`）找到函数（指令里的引用、重定位的符号都走这条路）；
+3. **按名字**找到符号（profile 里是名字、PLT 符号也是名字）；
+4. 遍历**所有**函数（pass 要逐个处理）。
+
+为此，`BinaryContext` 维护了**多套并行的索引**，它们指向同一批 `BinaryFunction` 对象，只是查找键不同：
+
+| 索引 | 类型 | 键 | 值 | 用途 |
+|------|------|----|----|------|
+| `BinaryFunctions` | `std::map<uint64_t, BinaryFunction>` | 起始地址 | 函数对象(值) | 遍历、按起始地址精确查找 |
+| `SymbolToFunctionMap` | `DenseMap<const MCSymbol*, BinaryFunction*>` | 指令符号 | 函数指针 | 按符号查找（含 ICF 折叠后的多符号→一函数） |
+| `GlobalSymbols` | `StringMap<BinaryData*>` | 符号名字 | 符号数据 | 按名字查符号 |
+| `BinaryDataMap` | `std::map<uint64_t, BinaryData*>` | 地址 | 符号数据 | 按地址查符号（含数据对象，不只是函数） |
+
+理解这四张表的关系，是看懂 BOLT 后续所有「定位」逻辑的钥匙。
+
+#### 4.2.2 核心流程
+
+构造一个函数（`createBinaryFunction`）时，会同时维护好几张表，保证「地址、符号、名字」三者互通：
+
+```
+createBinaryFunction(Name, Section, Address, Size, ...)
+        │
+        ├──► BinaryFunctions[Address] = BinaryFunction(...)   // 按地址存（值语义）
+        │       └─ 函数内部会 getSymbol() 得到一个 MCSymbol
+        ├──► registerNameAtAddress(Name, Address, ...)         // 名字↔地址↔BinaryData
+        │       └─ 写入 GlobalSymbols[Name]、BinaryDataMap[Address]
+        └──► setSymbolToFunctionMap(BF->getSymbol(), BF)       // 符号↔函数
+                └─ 写入 SymbolToFunctionMap
+```
+
+查找时则按需求选不同的接口：
+
+- 要「起始地址精确匹配」：`getBinaryFunctionAtAddress`（先查 map，再考虑折叠）。
+- 要「落在函数地址区间内」：`getBinaryFunctionContainingAddress`（用 `upper_bound` 前移一格）。
+- 要「按符号」：`getFunctionForSymbol`（查 `SymbolToFunctionMap`，线程安全）。
+- 要「遍历全部」：`getBinaryFunctions()`（直接拿 `BinaryFunctions` 这个 map）。
+
+#### 4.2.3 源码精读
+
+**主容器**——注意是「地址→函数值」的 map，按地址自动有序：
+
+[include/bolt/Core/BinaryContext.h:234-235](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/include/bolt/Core/BinaryContext.h#L234-L235) —— `std::map<uint64_t, BinaryFunction> BinaryFunctions;`，注释说明「按原始地址排序存储所有函数」。这一点很关键：`std::map` 的有序性让后面的「区间查找」可以只用一次 `upper_bound` 完成。
+
+**访问器**（practice 任务点之一）：
+
+[include/bolt/Core/BinaryContext.h:561-569](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/include/bolt/Core/BinaryContext.h#L561-L569) —— `getBinaryFunctions()` 直接返回内部 map 的引用，所有 pass 都用它来遍历函数。注意有一个 const 重载。
+
+**符号→函数的反向索引**，注意它旁边的互斥锁：
+
+[include/bolt/Core/BinaryContext.h:513-520](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/include/bolt/Core/BinaryContext.h#L513-L520) —— `SymbolToFunctionMap` 注释提到「折叠相同函数后，多个符号会指向同一个 `BinaryFunction`」；旁边专门配了 `SymbolToFunctionMapMutex`，因为这张表会被并行 pass 读/写。
+
+**名字/地址→符号数据**的两张表：
+
+[include/bolt/Core/BinaryContext.h:369-382](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/include/bolt/Core/BinaryContext.h#L369-L382) —— `GlobalSymbols`（名字→`BinaryData*`）和 `BinaryDataMap`（地址→`BinaryData*`）。后者注释特别提醒：反汇编期间不要长期持有 `BinaryData*`，因为一个普通数据对象可能后来被发现其实是跳转表。
+
+**构造函数的实现**——一次写入三张表：
+
+[lib/Core/BinaryContext.cpp:902-913](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/lib/Core/BinaryContext.cpp#L902-L913) —— `createBinaryFunction` 用 `emplace` 把函数放进 `BinaryFunctions`（断言不允许重复地址），然后 `registerNameAtAddress` 建名字/地址索引，最后 `setSymbolToFunctionMap` 建符号索引。这就把 4.2.2 的流程图落地了。
+
+**按起始地址精确查找**——还要处理「函数已被折叠」的情况：
+
+[lib/Core/BinaryContext.cpp:2843-2862](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/lib/Core/BinaryContext.cpp#L2843-L2862) —— 先 `BinaryFunctions.find(Address)`；若没找到，再去查该地址上的 `BinaryData`，看它的符号是否已被折叠到另一个函数（`getFunctionForSymbol`）。注释解释了为什么折叠后这条「兜底」路径仍然必要。
+
+**按区间查找**——利用 map 的有序性，一行 `upper_bound` 搞定：
+
+[lib/Core/BinaryContext.cpp:2827-2841](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/lib/Core/BinaryContext.cpp#L2827-L2841) —— `upper_bound(Address)` 后再 `--FI`，就定位到「地址上 ≤ Address 的最后一个函数」，再判断 Address 是否落在 `[起始, 起始+大小)` 区间内。两个布尔参数 `CheckPastEnd` / `UseMaxSize` 处理「指向函数末尾后一字节」和「用最大尺寸（含 padding）」两种边界情形——这是处理二进制里「函数边界模糊」现实问题的典型设计，头文件里有大段注释解释（[BinaryContext.h:435-461](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/include/bolt/Core/BinaryContext.h#L435-L461)）。
+
+**按符号查找**——注意读锁：
+
+[lib/Core/BinaryContext.cpp:2600-2614](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/lib/Core/BinaryContext.cpp#L2600-L2614) —— `getFunctionForSymbol` 用 `shared_lock` 保护对 `SymbolToFunctionMap` 的读，这是 BOLT 并行处理函数时保证安全的典型手法；可选的 `EntryDesc` 输出参数用于多入口函数的入口判别。
+
+**折叠时如何更新这些索引**——把 `SymbolToFunctionMap` 重定向：
+
+[lib/Core/BinaryContext.cpp:1559-1566](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/lib/Core/BinaryContext.cpp#L1559-L1566) —— `foldFunction` 把子函数的所有符号搬到父函数，并把 `SymbolToFunctionMap` 里这些符号全部指向父函数。注意注释说「不需要更新 `BinaryDataMap` 和 `GlobalSymbols`」——因为那两张表的键是地址/名字，地址没变。
+
+#### 4.2.4 代码实践
+
+**实践目标**：写一小段伪代码，体会「通过 `BC` 遍历所有函数、并按地址反查」的用法。这正是 practice_task 要求的内容。
+
+**操作步骤**：
+
+1. 在 `include/bolt/Core/BinaryContext.h` 中找到 `BinaryFunctions` 容器类型（约 235 行）和 `getBinaryFunctions()` 访问器（约 562 行）。
+2. 参考下面的「示例代码」（**注意：这不是项目里真实存在的代码，是为讲解编写的示意伪代码**）：
+
+```cpp
+// 示例代码：通过 BC 遍历函数并按地址反查（仅为示意，非项目源码）
+BinaryContext &BC = ...;
+
+// (a) 遍历所有函数 —— 直接拿 map，已按地址有序
+for (auto &[Address, BF] : BC.getBinaryFunctions()) {
+  BC.outs() << "0x" << Twine::utohexstr(Address)
+            << " : " << BF.getPrintName() << "\n";
+}
+
+// (b) 给定一个地址，找它落在哪个函数里
+uint64_t PC = 0x401234;
+if (BinaryFunction *BF = BC.getBinaryFunctionContainingAddress(PC)) {
+  // PC 落在 BF 的区间内
+}
+// 若要精确匹配「函数起始地址」：
+if (BinaryFunction *BF = BC.getBinaryFunctionAtAddress(PC)) { /* ... */ }
+
+// (c) 给定一条指令里的符号，反查它对应的函数
+const MCSymbol *Sym = ...;
+if (BinaryFunction *BF = BC.getFunctionForSymbol(Sym)) { /* ... */ }
+```
+
+**需要观察的现象**：
+- `(a)` 拿到的是**引用**而不是拷贝，遍历顺序天然按地址升序。
+- `(b)` 含有 vs 起始于，是两个不同的查找语义，对应两个不同函数。
+- `(c)` 返回的可能是「折叠后的父函数」，不是当初注册的那个。
+
+**预期结果**：你能说清「按地址区间查、按起始地址查、按符号查」分别调用哪个接口、各自走哪张内部表。
+
+**待本地验证**：上述伪代码片段不能直接编译运行，因为它省略了获取 `BC` 和 `Sym` 的上下文；可作为阅读源码时的对照。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`getBinaryFunctionContainingAddress` 为什么用 `upper_bound` 再 `--`，而不是直接 `find`？
+
+> **答案**：`find` 只能匹配「键恰好等于 Address」，而「区间查找」要的是「起始地址 ≤ Address 的最大那个函数」。`upper_bound` 给出第一个 > Address 的迭代器，前移一格就得到 ≤ Address 的最大函数，再判断区间是否真的覆盖 Address。这是有序 map 上做区间定位的标准技巧。
+
+**练习 2**：`foldFunction` 注释说「不需要更新 `BinaryDataMap` 和 `GlobalSymbols`」，但必须更新 `SymbolToFunctionMap`。请解释原因。
+
+> **答案**：`BinaryDataMap`/`GlobalSymbols` 以**地址/名字**为键，折叠不改变函数地址与名字，所以这两张表无需动；而 `SymbolToFunctionMap` 以**`MCSymbol*`** 为键、值为**函数指针**，折叠要把子函数的符号重定向到父函数，所以这张表必须改写值。
+
+**练习 3**：`getBinaryFunctionAtAddress` 在 `BinaryFunctions.find` 失败后，为什么还要再去查 `BinaryData` 和 `getFunctionForSymbol`？
+
+> **答案**：因为 ICF（相同代码折叠）会把子函数从 `BinaryFunctions` 中「逻辑移除」（标记为 folded、不发射），但它在原地址上的符号和数据条目还在；通过该地址的符号查 `SymbolToFunctionMap`，就能拿到它被折叠进的父函数。
+
+---
+
+### 4.3 目标/调试信息/日志流接入
+
+#### 4.3.1 概念说明
+
+`BinaryContext` 不只是个数据仓库，它还是 BOLT 与「外部世界」的**接线板**：
+
+- **目标后端（target）**：BOLT 支持 X86、AArch64、RISCV 三种架构，但同一份 `libCore` 代码要同时服务三种后端。解决办法是把「与目标相关的操作」抽象成 `MCPlusBuilder`，由外部在运行期决定注入哪一个实现。`BinaryContext` 通过成员 `MIB` 持有这个抽象，core 代码只面向接口编程。
+- **调试信息**：BOLT 移动代码会破坏 DWARF 里的地址范围，必须重写调试段。`BinaryContext` 持有 `DWARFContext`、DWO 单元映射、伪探针解码器等，让调试信息重写器（`DWARFRewriter`）能统一取用。
+- **日志流**：所有 `BOLT-INFO:`、`BOLT-WARNING:` 输出都不直接用 `llvm::outs()`，而是走 `BC.outs()` / `BC.errs()`。这层间接（`JournalingStreams`）让 BOLT 能把日志同时写文件和终端、并支持错误汇总。
+
+#### 4.3.2 核心流程
+
+「目标后端注入」是本节重点，它跨越了三个文件，体现了 BOLT 的分层：
+
+```
+编译期  TargetConfig.def  ──►  BOLT_TARGET(X86) / BOLT_TARGET(AArch64) / ...
+        （在 driver/ 和 unittest 里展开成 LLVMInitialize... 注册调用）
+
+运行期  createBinaryContext(Triple)
+        │   读 Triple.getArch()
+        └─► switch: x86_64 / aarch64 / riscv*  →  选 ArchName + FeaturesStr
+            └─► TargetRegistry::lookupTarget → 创建 MRI/AsmInfo/STI/MII/DisAsm...
+
+        BC->initializeTarget( createMCPlusBuilder(Arch, ...) )
+                │
+                └─► 按 Arch 选 createX86MCPlusBuilder / createAArch64... / createRISCV...
+                └─► 装进 BC->MIB
+```
+
+关键设计点：`createMCPlusBuilder` **不在** `libCore` 里实现，而在 `libRewrite/RewriteInstance.cpp` 里。源码注释明确解释了原因——`libCore` 不能依赖 `libTarget`（会产生循环依赖），而 `libRewrite` 可以。
+
+#### 4.3.3 源码精读
+
+**目标架构判断**——三个一行的小函数，被全工程到处调用：
+
+[include/bolt/Core/BinaryContext.h:934-947](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/include/bolt/Core/BinaryContext.h#L934-L947) —— `isELF()`、`isMachO()`、`isAArch64()`、`isX86()`、`isRISCV()`，全部基于 `TheTriple` 判断。注意 `isX86()` 同时覆盖 32/64 位。
+
+**工厂里的架构 switch**——决定用哪套 MC 工具，并为每种架构设定默认特性：
+
+[lib/Core/BinaryContext.cpp:184-214](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/lib/Core/BinaryContext.cpp#L184-L214) —— 例如 x86_64 用 `+nopl` 特性、AArch64 用 `+all`、RISCV 必须从输入文件读 SubtargetFeatures 并**手动加上 `relax`**（注释解释：BOLT 的某些变换依赖放松，而 relax 特性不存于目标文件里）。不认识的架构直接返回致命错误。
+
+**后端注入接口**——一行 move，把外部建好的 builder 装进 `MIB`：
+
+[include/bolt/Core/BinaryContext.h:312-315](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/include/bolt/Core/BinaryContext.h#L312-L315) —— `initializeTarget(std::unique_ptr<MCPlusBuilder>)`，这就是 practice 任务要定位的函数。
+
+**真正调用注入的地方**，以及 `createMCPlusBuilder` 的位置（注意它为何在这里）：
+
+[lib/Rewrite/RewriteInstance.cpp:357-365](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/lib/Rewrite/RewriteInstance.cpp#L357-L365) —— 注释：「这个位置很怪，但放在这里是为了避免 `libCore`（它本该在的地方）与 `libTarget` 的循环依赖」。
+
+[lib/Rewrite/RewriteInstance.cpp:361-382](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/lib/Rewrite/RewriteInstance.cpp#L361-L382) —— `createMCPlusBuilder` 用三个编译期宏 `X86_AVAILABLE` / `AARCH64_AVAILABLE` / `RISCV_AVAILABLE` 决定是否编译进对应后端，再按运行期 `Arch` 分发到 `createX86MCPlusBuilder` 等。
+
+**注入调用本身**：
+
+[lib/Rewrite/RewriteInstance.cpp:463-465](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/lib/Rewrite/RewriteInstance.cpp#L463-L465) —— `BC->initializeTarget(createMCPlusBuilder(BC->TheTriple->getArch(), ...))`。这一行完成了「目标后端 ↔ 中心上下文」的对接。
+
+**调试信息接入**——构造时就传入 `DWARFContext`：
+
+[lib/Rewrite/RewriteInstance.cpp:450-457](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/lib/Rewrite/RewriteInstance.cpp#L450-L457) —— 工厂调用时，第 6 个参数是 `DWARFContext::create(*File, ...)`，构建好的 DWARF 上下文随构造搬进 `BC->DwCtx`（成员见 [BinaryContext.h:681](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/include/bolt/Core/BinaryContext.h#L681)）。
+
+**日志流**——两层间接：
+
+[include/bolt/Core/BinaryContext.h:716-718](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/include/bolt/Core/BinaryContext.h#L716-L718) 与 [include/bolt/Core/BinaryContext.h:1626-1628](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/include/bolt/Core/BinaryContext.h#L1626-L1628) —— `Logger` 是 `JournalingStreams{Out, Err}`，`outs()`/`errs()` 返回其中的流。所以全工程里 `BC.outs() << "BOLT-INFO: ..."` 都被收口到这一处，便于统一重定向和错误汇总（`logBOLTErrorsAndQuitOnFatal`）。
+
+**编译期目标注册**（理解「目标可插拔」的源头）：
+
+[tools/driver/llvm-bolt.cpp:175-183](https://github.com/llvm/llvm-project/blob/abe5aa5cb2336f32dca8e765710ec212a926476c/bolt/tools/driver/llvm-bolt.cpp#L175-L183) —— `BOLT_TARGET(target)` 宏展开成一组 `LLVMInitialize##target##Target()` 等调用，配合 `#include "bolt/Core/TargetConfig.def"`（在构建时生成），让 `main()` 一开始就把编译进来的目标架构注册到 LLVM 的 `TargetRegistry`，这样后面 `lookupTarget` 才能找到它们。
+
+#### 4.3.4 代码实践
+
+**实践目标**：动手确认「后端注入」这条链：从工厂判断架构，到 `initializeTarget` 装入 `MIB`。
+
+**操作步骤**：
+
+1. 在 `include/bolt/Core/BinaryContext.h` 里定位 `initializeTarget`（约 313 行）和 `MIB` 成员（约 705 行）。确认 `initializeTarget` 的实现是 inline 的——它就是把参数 move 进 `MIB`。
+2. 打开 `lib/Rewrite/RewriteInstance.cpp`，定位 `createMCPlusBuilder`（约 361 行），看清它如何用 `#ifdef X86_AVAILABLE` 等宏和运行期 `Arch` 双重决定返回哪个 builder。
+3. 在同一文件找到 `BC->initializeTarget(...)` 调用（约 463 行）。
+4. （可选）阅读 `unittests/Core/BinaryContext.cpp` 的 `initializeBOLT()`（约 45–54 行），它展示了了一个**不经过 RewriteInstance、最小化**地构造 `BinaryContext` 的例子，但注意它**没有**调用 `initializeTarget`，所以那个测试上下文里 `MIB` 是空的——这正好说明「工厂构造」和「后端注入」是两个独立步骤。
+
+**需要观察的现象**：
+- `initializeTarget` 在头文件里 inline 实现，没有任何架构判断——架构判断被推到 `createMCPlusBuilder` 里。
+- 单元测试里构造的 `BC` 没有 `MIB`，意味着任何用到 `MIB` 的接口在那个测试里都不能调。
+
+**预期结果**：你能用一句话回答「为什么 `MCPlusBuilder` 要在外部注入、而不是在 `BinaryContext` 构造函数里直接 new？」——因为 `libCore` 不能依赖 `libTarget`，否则循环依赖。
+
+**待本地验证**：行号基于当前 HEAD；若代码演进请以实际为准。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：`createMCPlusBuilder` 同时使用了「编译期宏（`X86_AVAILABLE`）」和「运行期判断（`Arch == Triple::x86_64`）」两层条件。这两层各起什么作用？
+
+> **答案**：编译期宏决定**这个后端是否被编译进二进制**（受 `BOLT_TARGETS_TO_BUILD` 控制，没编进来就连函数声明都没有）；运行期判断决定**这个具体输入二进制用哪个后端**。前者是「有没有」，后者是「用不用」。
+
+**练习 2**：RISCV 分支里有一行 `Features->AddFeature("relax")`，注释说要手动启用 relax。为什么不依赖目标文件里自带的特性？
+
+> **答案**：因为 `relax`（链接时放松）特性不会被记录进目标文件，但 BOLT 的某些变换（例如把所有 call 提升成 `PseudoCALL` 再让 JITLink 去放松它们）依赖它，所以必须手动加上。
+
+**练习 3**：为什么 BOLT 全工程都用 `BC.outs()` 而不是直接 `llvm::outs()`？
+
+> **答案**：`BC.outs()` 走的是 `JournalingStreams`，BOLT 借此把日志统一收口，支持同时写文件与终端、在多线程/pass 间正确串行化输出，并通过 `logBOLTErrorsAndQuitOnFatal` 汇总致命错误。直接用 `llvm::outs()` 会绕过这套机制。
+
+## 5. 综合实践
+
+把本讲三个模块串起来，完成下面这个「上下文自检」任务：
+
+**任务**：假设你正在为新加入的某个 pass 写调试输出，需要「打印出二进制里函数总数、第一个和最后一个函数的名字与地址、并判断当前是不是 AArch64」。请基于本讲学到的接口，写出对应的调用（伪代码即可），并为每一步注明它用到了 4.1/4.2/4.3 里的哪个知识点。
+
+**参考思路**：
+
+```cpp
+// 示例代码（非项目源码，仅为综合实践示意）
+BinaryContext &BC = ...;
+
+// (1) 函数总数与边界 —— 用 getBinaryFunctions()（4.2），map 有序
+auto &Funcs = BC.getBinaryFunctions();
+BC.outs() << "num functions = " << Funcs.size() << "\n";        // 4.3 日志流
+if (!Funcs.empty()) {
+  auto &First = Funcs.begin()->second;                           // 4.2 按地址有序
+  auto &Last  = Funcs.rbegin()->second;
+  BC.outs() << "first: " << First.getPrintName()
+            << " @ 0x" << Twine::utohexstr(First.getAddress()) << "\n";
+  BC.outs() << "last : " << Last.getPrintName()  << "\n";
+}
+
+// (2) 架构判断 —— isAArch64()（4.3）
+if (BC.isAArch64())
+  BC.outs() << "running on AArch64 backend\n";
+```
+
+**进阶**：再思考一下——如果你要遍历所有函数并对每个调用 `BF.dump()`，而此时正处于并行 pass 中，你需要担心 `BC.outs()` 的并发安全吗？请到 `JournalingStreams` 的相关实现（或 `logBOLTErrorsAndQuitOnFatal`）里寻找答案线索。**待本地验证**。
+
+## 6. 本讲小结
+
+- `BinaryContext` 是「一次 BOLT 重写」的中枢对象，几乎所有模块都通过它的引用 `BC` 访问共享状态。
+- 它持有 6 大类状态：函数集合、section/symbol/relocation 索引、MC 层工具箱、调试信息、运行时状态标志、日志流。
+- 函数有**四套并行索引**：按地址（`BinaryFunctions`，值语义且有序）、按符号（`SymbolToFunctionMap`，含折叠）、按名字（`GlobalSymbols`）、按地址查符号数据（`BinaryDataMap`）。
+- 查找接口语义各异：`getBinaryFunctionAtAddress`（起始精确）、`getBinaryFunctionContainingAddress`（区间，含 `CheckPastEnd`/`UseMaxSize` 边界处理）、`getFunctionForSymbol`（线程安全）。
+- 目标后端通过 `initializeTarget` 在外部注入 `MCPlusBuilder` 到 `MIB`，刻意放在 `libRewrite` 而非 `libCore` 是为避免循环依赖。
+- 日志统一走 `BC.outs()`/`BC.errs()`（`JournalingStreams`），便于收口与错误汇总。
+
+## 7. 下一步学习建议
+
+- 下一篇 [u2-l2 BinaryFunction 与状态机](u2-l2-binary-function.md) 会钻进 `BinaryFunctions` 里的单个 `BinaryFunction` 对象，讲它的 `State` 状态机和指令表——本讲的「函数集合」是容器，下一篇讲容器里的「元素」。
+- 之后 [u2-l3 基本块与 CFG](u2-l3-basic-block-and-cfg.md) 讲函数内部的 CFG，[u2-l4 MCPlus 元数据](u2-l4-mcplus-metadata.md) 讲本讲反复提到的 `MIB`（`MCPlusBuilder`）所支撑的注释机制。
+- 想提前看「上下文如何被实际用起来」的读者，可跳读 `lib/Rewrite/RewriteInstance.cpp` 里 `RewriteInstance` 构造函数之后的 `run()` 流程（单元 3 会系统讲），观察 `BC->` 调用出现的密度——你会直观感受到 `BinaryContext` 的「总线」地位。

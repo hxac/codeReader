@@ -1,7 +1,7 @@
 {
   "project": "llvm-project-lld",
-  "head": "8bdbeac21eccd679489614e0326ab398425d47f1",
-  "rationale": "LLD 是 LLVM 子项目中体积庞大、性能极高的模块化链接器，单一可执行文件内同时包含 ELF、COFF、Mach-O、WebAssembly 四个近乎独立的链接后端。本手册以『从整体到局部、从主线到优化、以 ELF 为主线再横向对比其他后端』为编排原则：第一单元让读者建立项目定位、构建方式与多后端分发的整体认知；第二单元沿 ELF 的 link()→linkerMain→link<ELFT>→Writer 主线把链接全过程一次性走通；第三、四、五单元分别向下深入公共基础设施、输入与符号解析、输出布局与链接脚本三大支柱；第六、七单元进入重定位、目标架构、GC/ICF、LTO 等高阶机制；第八单元横向覆盖 COFF/Mach-O/wasm/MinGW 等其他后端；第九单元回到工程实践层面讲清测试体系、并行与性能剖析以及调试支持。每篇只解决一个相对独立的问题，依赖关系单向收敛，便于读者循序渐进。",
+  "head": "abe5aa5cb2336f32dca8e765710ec212a926476c",
+  "rationale": "LLD 是 LLVM 子项目中体积庞大、性能极高的模块化链接器，单一可执行文件内同时包含 ELF、COFF、Mach-O、WebAssembly 四个近乎独立的链接后端。本手册以『从整体到局部、从主线到优化、以 ELF 为主线再横向对比其他后端』为编排原则：第一单元让读者建立项目定位、构建方式与多后端分发的整体认知；第二单元沿 ELF 的 link()→linkerMain→link<ELFT>→Writer 主线把链接全过程一次性走通；第三、四、五单元分别向下深入公共基础设施、输入与符号解析、输出布局与链接脚本三大支柱；第六、七单元进入重定位、目标架构、GC/ICF、LTO 等高阶机制；第八单元横向覆盖 COFF/Mach-O/wasm/MinGW 等其他后端；第九单元回到工程实践层面讲清测试体系、并行与性能剖析以及调试支持。每篇只解决一个相对独立的问题，依赖关系单向收敛，便于读者循序渐进。本次增量：prev HEAD→cur HEAD 之间 lld/ 仅有一次 NFC 提交（Relocations.cpp 中 replaceWithDefined 的微优化：用 fetch_and 取代整符号拷贝、仅保留 versionId 单成员），只影响引用该文件的 u6-l2（update）；其余讲义源码无变化（keep）。",
   "units": [
     {
       "id": "u1",
@@ -33,7 +33,7 @@
           ],
           "practice_task": "用 `clang -fuse-ld=lld` 链接一个 hello world 程序，用 `readelf --string-dump .comment` 确认输出由 LLD 产生；再对照 docs/index.md 列出 LLD 相对 GNU ld 的三条核心优势。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -60,7 +60,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -88,7 +88,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -116,7 +116,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -152,7 +152,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -180,7 +180,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -206,7 +206,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -233,7 +233,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -269,7 +269,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -297,7 +297,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -325,7 +325,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -354,7 +354,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -389,7 +389,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -416,7 +416,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -443,7 +443,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -470,7 +470,7 @@
           "depends_on": [
             "u4-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -505,7 +505,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -533,7 +533,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -560,7 +560,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l4",
@@ -588,7 +588,7 @@
             "u5-l3",
             "u2-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -624,7 +624,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -632,11 +632,11 @@
           "order": 2,
           "filename": "u6-l2-relocation-scan.md",
           "level": "advanced",
-          "topic": "讲解重定位的两阶段：scanRelocations 先扫描决定是否需要 GOT/PLT/动态重定位、是否为链接期常量；写盘时再由 relocateAlloc 把最终值写回。",
+          "topic": "讲解重定位的两阶段：scanRelocations 先扫描决定是否需要 GOT/PLT/动态重定位、是否为链接期常量；写盘前再由 replaceWithDefined/addCopyRelSymbol 处理 copy relocation 与 canonical PLT，把 SharedSymbol 就地替换为指向 .bss/.plt 的 Defined。",
           "learning_goals": [
             "理解 scanRelocations/RelocScan::process 的扫描阶段职责（分配 GOT/PLT 槽位、判断动态重定位）",
             "掌握 isStaticLinkTimeConstant 如何决定重定位是链接期完成还是留给动态链接器",
-            "了解 maybeReportUndefined 与 TLS（checkTlsLe）的处理"
+            "了解 maybeReportUndefined、TLS（checkTlsLe）以及 replaceWithDefined 的 copy relocation/canonical PLT 就地替换（overwrite 后回填 versionId、用 fetch_and 保留 NEEDS_GOT 标志）"
           ],
           "source_files": [
             "ELF/RelocScan.h",
@@ -645,13 +645,13 @@
           "minimal_modules": [
             "重定位扫描阶段",
             "RelExpr 决策与动态重定位",
-            "未定义符号与 TLS 处理"
+            "copy relocation/canonical PLT 的就地符号替换"
           ],
-          "practice_task": "在 Relocations.cpp 的 RelocScan::process 中找出会触发 GOT/PLT 分配的分支；并解释『链接期常量』与『运行期动态重定位』的区分对输出大小的影响。",
+          "practice_task": "在 Relocations.cpp 的 RelocScan::process 中找出会触发 GOT/PLT 分配的分支；再阅读 replaceWithDefined，解释为何只回填 versionId 并用 fetch_and(NEEDS_GOT) 而非整体拷贝旧 Symbol；并说明『链接期常量』与『运行期动态重定位』的区分对输出大小的影响。",
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u6-l3",
@@ -678,7 +678,7 @@
           "depends_on": [
             "u6-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l4",
@@ -705,7 +705,7 @@
           "depends_on": [
             "u6-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -740,7 +740,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -767,7 +767,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -796,7 +796,7 @@
             "u4-l3",
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -832,7 +832,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -860,7 +860,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -887,7 +887,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -923,7 +923,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -952,7 +952,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",
@@ -980,7 +980,7 @@
           "depends_on": [
             "u2-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }
