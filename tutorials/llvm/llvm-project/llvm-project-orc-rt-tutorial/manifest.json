@@ -1,0 +1,1030 @@
+{
+  "project": "llvm-project-orc-rt",
+  "head": "3d60487f83797a10a6379669647a139e6823d3d2",
+  "rationale": "本次为增量更新（incremental）：对比上次 HEAD 0e87f69d.. 与当前 HEAD 3d60487f..，整段范围内虽有 16 个提交，但 git diff 显示 orc-rt 目录下的源码文件零变更（include/、lib/executor/、test/、tools/、docs/、CMakeLists.txt 均未改动）。因此所有讲义引用的真实源码文件、行号、接口与机制均未受影响，全部讲义 action 设为 keep，不重写。学习顺序仍沿用「先定位、再建立心智模型、再深入核心、最后扩展」的原有规划：第 1 单元让读者从零认识项目定位、构建方式与目录结构；第 2 单元建立 controller/executor 心智模型并铺垫地址与错误处理两套基础设施；第 3-4 单元进入运行时心脏（Session 生命周期状态机、Service 接口、托管代码与任务分发）；第 5-6 单元讲 RPC 通信层（WrapperFunction 字节缓冲）与 SPS 序列化及 sps-ci 控制接口；第 7 单元覆盖内存/动态库等资源型 Service；第 8 单元讲引导与 C ABI 边界；第 9 单元深挖自定义 RTTI 与 Error/Expected 内部实现及异常互操作；第 10 单元讲并发原语、日志与核心工具；第 11 单元为综合实践。每一层都依赖前一层建立的概念，源码引用以真实文件为准。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "从零开始：认识 orc-rt",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位：orc-rt 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 orc-rt 作为 LLVM ORC JIT 执行端（executor）运行时的定位，解释 controller 与 executor 的关系，以及它在整个 JIT 链路中的位置。",
+          "learning_goals": [
+            "理解 orc-rt 解决什么问题：为执行 JIT 代码的进程提供运行时支持",
+            "区分 controller（编译/链接 JIT 代码的进程）与 executor（运行 JIT 代码的进程）",
+            "了解 orc-rt 目前是实验性项目、ABI/API 尚不稳定"
+          ],
+          "source_files": [
+            "docs/index.md",
+            "docs/Design.md"
+          ],
+          "minimal_modules": [
+            "项目背景与现状",
+            "controller / executor 概念",
+            "平台与编译器要求"
+          ],
+          "practice_task": "阅读 docs/index.md 与 docs/Design.md 的 Background 小节，用自己的话写一段 200 字以内的说明：orc-rt 提供哪些执行端能力、它与 LLVM ORC 库各自运行在哪一侧。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建、配置与测试",
+          "order": 2,
+          "filename": "u1-l2-build-and-config.md",
+          "level": "beginner",
+          "topic": "讲解如何用 CMake 通过 LLVM_ENABLE_RUNTIMES=orc-rt 构建 orc-rt，介绍关键编译选项（RTTI、异常、日志后端/级别）以及如何运行测试套件。",
+          "learning_goals": [
+            "掌握 orc-rt 的 CMake 构建步骤与 runtimes 集成方式",
+            "理解 ORC_RT_ENABLE_RTTI / EXCEPTIONS / LOG_BACKEND / LOG_LEVEL 等选项的作用",
+            "知道如何构建并运行 check-orc-rt 测试"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "docs/Building-orc-rt.md",
+            "include/orc-rt-c/config.h.in"
+          ],
+          "minimal_modules": [
+            "CMake 构建流程",
+            "编译期配置选项与生成的 config.h",
+            "日志后端与级别"
+          ],
+          "practice_task": "在仓库根目录查看 include/orc-rt-c/config.h.in，列出它会生成的所有 ORC_RT_* 宏，并说明若想完全关闭日志应同时设置哪两个 CMake 变量。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与源码布局",
+          "order": 3,
+          "filename": "u1-l3-directory-layout.md",
+          "level": "beginner",
+          "topic": "梳理 orc-rt 的目录组织：C++ API（include/orc-rt）、C API（include/orc-rt-c）、实现（lib/executor）、测试（test）、工具（tools）、文档（docs）。",
+          "learning_goals": [
+            "区分 C++ 头文件目录 orc-rt 与 C 头文件目录 orc-rt-c 的职责",
+            "了解 lib/executor 下的实现组织（含 sps-ci 子目录与 Unix 平台 inc 文件）",
+            "认识 test 下的 unit / regression / tools 三类测试"
+          ],
+          "source_files": [
+            "lib/executor/CMakeLists.txt",
+            "include/CMakeLists.txt",
+            "test/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "头文件分层",
+            "executor 实现目录",
+            "测试与工具目录"
+          ],
+          "practice_task": "浏览 lib/executor/ 目录，将每个 .cpp 文件按职责归入「核心 Session / 错误与 RTTI / 资源服务 / 序列化与控制接口 / 平台与日志」五类，写一张分类表。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心心智模型",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Controller–Executor 架构全景",
+          "order": 1,
+          "filename": "u2-l1-controller-executor-architecture.md",
+          "level": "beginner",
+          "topic": "用 Design.md 把整个 orc-rt 的核心概念串起来：Session、Service、ControllerAccess、WrapperFunction、TaskDispatcher 之间的关系与数据流向。",
+          "learning_goals": [
+            "理解 Session 是执行端 JIT 程序的根对象",
+            "理解 ControllerAccess 负责与 controller 的双向 RPC，且调用不对称（地址 vs tag）",
+            "掌握 WrapperFunction 作为「字节进、字节出」统一调用签名的作用"
+          ],
+          "source_files": [
+            "docs/Design.md",
+            "include/orc-rt/Session.h",
+            "include/orc-rt/Service.h"
+          ],
+          "minimal_modules": [
+            "Session / Service / ControllerAccess",
+            "WrapperFunction 统一签名",
+            "托管代码与关闭顺序"
+          ],
+          "practice_task": "画一张架构图：标出 controller 进程、executor 进程、Session、ControllerAccess、若干 Service，并用箭头表示「controller 调用 executor（按地址）」和「executor 调用 controller（按 tag）」两个方向。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "执行端地址：ExecutorAddr",
+          "order": 2,
+          "filename": "u2-l2-executor-address.md",
+          "level": "beginner",
+          "topic": "讲解用于在执行端表示地址与地址区间的 ExecutorAddr / ExecutorAddrRange，包括 fromPtr/toPtr 转换、Tag/Untag 包装、运算与包含/重叠判定。",
+          "learning_goals": [
+            "掌握 ExecutorAddr 如何在 uint64 与指针间安全转换",
+            "理解 ExecutorAddrRange 的区间运算（contains/overlaps/toSpan）",
+            "了解 Tag/Untag 机制用于支持带标签指针"
+          ],
+          "source_files": [
+            "include/orc-rt/ExecutorAddress.h"
+          ],
+          "minimal_modules": [
+            "ExecutorAddr 与指针互转",
+            "ExecutorAddrRange 区间运算",
+            "Tag/Untag 包装函数"
+          ],
+          "practice_task": "编写一个小程序：用 ExecutorAddr::fromPtr 把一个函数指针转成地址，再用 toPtr 转回并调用它；再构造一个 ExecutorAddrRange 并验证 contains 与 overlaps 的行为。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "错误处理模型概览",
+          "order": 3,
+          "filename": "u2-l3-error-model-overview.md",
+          "level": "beginner",
+          "topic": "概览 orc-rt 的 Error / Expected<T> 错误处理体系：成功值零开销、失败值携带类型化信息、必须被检查、几种消费模式。",
+          "learning_goals": [
+            "理解 Error 表示成功或失败、Expected<T> 表示值或错误",
+            "掌握「错误必须被检查，否则析构 abort」的契约",
+            "学会 make_error、consumeError、handleAllErrors、toString、cantFail 等常用模式"
+          ],
+          "source_files": [
+            "include/orc-rt/Error.h",
+            "docs/ErrorHandling.md"
+          ],
+          "minimal_modules": [
+            "Error / Expected<T> 基本用法",
+            "错误的检查与消费",
+            "常用辅助函数"
+          ],
+          "practice_task": "写一个返回 Expected<int> 的函数：输入为负时返回 make_error<StringError>，否则返回平方值；在调用处用 takeError 与 operator bool 正确处理两种情况。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "运行时心脏：Session",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Session 对象与构造",
+          "order": 1,
+          "filename": "u3-l1-session-object.md",
+          "level": "intermediate",
+          "topic": "讲解 Session 类的构造参数（ExecutorProcessInfo、DispatchFn、ErrorReporterFn）、不可拷贝/移动语义，以及它持有的 ManagedCodeTaskGroup、Services、ControllerAccess 等成员。",
+          "learning_goals": [
+            "理解构造 Session 需要提供的三要素及其作用",
+            "了解 Session 持有的核心成员与 reporter 非同步的约定",
+            "学会读 SessionTest.cpp 里最简单的构造与析构用例"
+          ],
+          "source_files": [
+            "include/orc-rt/Session.h",
+            "lib/executor/Session.cpp",
+            "test/unit/SessionTest.cpp"
+          ],
+          "minimal_modules": [
+            "构造函数与成员",
+            "reportError / Dispatch",
+            "TrivialConstructionAndDestruction 用例"
+          ],
+          "practice_task": "参考 SessionTest 的 TrivialConstructionAndDestruction 与 ReportError，构造一个 Session，注册一个把错误转成字符串保存的 reporter，调用 reportError 并断言收到正确消息。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "生命周期状态机：attach / detach / shutdown",
+          "order": 2,
+          "filename": "u3-l2-session-lifecycle.md",
+          "level": "intermediate",
+          "topic": "深入 Session 的 Start→Attached→Detached→Shutdown 状态机，分析 doAttach、detach、shutdown、proceedToDetach/proceedToShutdown 等方法与 TargetState/CurrentState 的并发协调。",
+          "learning_goals": [
+            "掌握 Session 的四态状态机与 TargetState/CurrentState 协调机制",
+            "理解 shutdown 的三阶段：Detach → Drain 托管代码 → 逆序 onShutdown",
+            "理解为何析构会阻塞直到生命周期完成"
+          ],
+          "source_files": [
+            "include/orc-rt/Session.h",
+            "lib/executor/Session.cpp",
+            "test/unit/SessionTest.cpp"
+          ],
+          "minimal_modules": [
+            "State 枚举与状态转移",
+            "detach / shutdown 的并发处理",
+            "关闭顺序与等待"
+          ],
+          "practice_task": "对照 Session.cpp 给 shutdown 标注三阶段代码位置；编写一个测试：在持有 ManagedCode Token 时发起 shutdown，验证 onShutdown 会被延迟，直到 Token 释放。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Service 接口与注册",
+          "order": 3,
+          "filename": "u3-l3-service-interface.md",
+          "level": "intermediate",
+          "topic": "讲解 Service 抽象接口（onDetach/onShutdown）及其与 Session 的关系，介绍 addService/createService/tryCreateService 三种注册方式与逆序关闭约定。",
+          "learning_goals": [
+            "理解 Service 是管理资源（内存、动态库等）的抽象，由 Session 拥有",
+            "掌握 onDetach 与 onShutdown 的语义差异与调用时机",
+            "区分 addService / createService / tryCreateService 三种注册方式"
+          ],
+          "source_files": [
+            "include/orc-rt/Service.h",
+            "lib/executor/Session.cpp",
+            "test/unit/SessionTest.cpp"
+          ],
+          "minimal_modules": [
+            "Service 接口与回调语义",
+            "三种注册 API",
+            "逆序 onShutdown 约定"
+          ],
+          "practice_task": "实现一个记录 onDetach/onShutdown 调用顺序的 MockService，注册三个实例到 Session，析构后验证 detach 正序、shutdown 逆序（参考 MultipleServices 测试）。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "托管代码与任务分发",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "TaskGroup、Token 与托管代码",
+          "order": 1,
+          "filename": "u4-l1-taskgroup-managed-code.md",
+          "level": "intermediate",
+          "topic": "讲解 TaskGroup 如何用 Token/TokenSource 协议标记「正在执行托管代码」，从而延迟 Session 关闭；以及 Session::callManagedCode 的同步包裹语义。",
+          "learning_goals": [
+            "理解 Token 只覆盖同步执行栈、不能跨异步延续",
+            "掌握 TaskGroup 的 acquireToken/releaseToken/close 与 OnComplete 回调",
+            "理解 shutdown 为何要等待 ManagedCodeTaskGroup 清空"
+          ],
+          "source_files": [
+            "include/orc-rt/TaskGroup.h",
+            "include/orc-rt/Session.h",
+            "test/unit/TaskGroupTest.cpp"
+          ],
+          "minimal_modules": [
+            "TaskGroup 与 Token 生命周期",
+            "callManagedCode 同步包裹",
+            "关闭延迟语义"
+          ],
+          "practice_task": "参考 CallManagedCodeVoidFn/NonVoidFn 测试，用 callManagedCode 调用一个返回值的函数，验证关闭后调用会返回 std::nullopt；再手动从 managedCodeTokenSource 取 Token 复现延迟 shutdown。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "任务分发：DispatchFn 与 Runner",
+          "order": 2,
+          "filename": "u4-l2-task-dispatch.md",
+          "level": "intermediate",
+          "topic": "讲解 Session 的 DispatchFn 回调职责，以及两种现成的 Runner：用于无线程环境与单元测试的 QueueingRunner，和用于生产环境的 ThreadPoolRunner。",
+          "learning_goals": [
+            "理解 Session 把每个工作单元封装成 Task 交给 DispatchFn 运行",
+            "掌握 QueueingRunner 的 FIFO/LIFO 抽干模式与测试用途",
+            "了解 ThreadPoolRunner 的线程池模型与生命周期约束"
+          ],
+          "source_files": [
+            "include/orc-rt/QueueingRunner.h",
+            "include/orc-rt/ThreadPoolRunner.h",
+            "include/orc-rt/Session.h"
+          ],
+          "minimal_modules": [
+            "DispatchFn 职责",
+            "QueueingRunner（测试/单线程）",
+            "ThreadPoolRunner（生产）"
+          ],
+          "practice_task": "用 QueueingRunner 和一个 WorkQueue 构造 Session，发起若干会派生 Task 的操作，再调用 runFIFOUntilEmpty 抽干队列，观察 Task 被依次执行。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "RPC 通信层：Wrapper Function",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "WrapperFunctionBuffer 与 C 缓冲类型",
+          "order": 1,
+          "filename": "u5-l1-wrapper-function-buffer.md",
+          "level": "intermediate",
+          "topic": "讲解跨进程传递参数/结果的字节缓冲：C 结构 orc_rt_WrapperFunctionBuffer 的三态（small/large/out-of-band error）及其增删查函数，以及 C++ RAII 封装 WrapperFunctionBuffer。",
+          "learning_goals": [
+            "理解 WrapperFunctionBuffer 的 small/large/error 三种内部状态",
+            "掌握 C 端 init/allocate/copyFrom/dispose 与 out-of-band 错误的编码方式",
+            "学会 C++ WrapperFunctionBuffer 的 move 语义与 release/data/size 用法"
+          ],
+          "source_files": [
+            "include/orc-rt-c/WrapperFunction.h",
+            "include/orc-rt/WrapperFunction.h",
+            "test/unit/SPSWrapperFunctionBufferTest.cpp"
+          ],
+          "minimal_modules": [
+            "C 缓冲三态与生命周期函数",
+            "out-of-band 错误编码",
+            "C++ RAII 封装"
+          ],
+          "practice_task": "用 createOutOfBandError 与 getOutOfBandError 构造并检测一个带外错误缓冲；再用 copyFrom 创建普通缓冲，手动调用 C 端 dispose 确认无泄漏（small 与 large 两种路径）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Wrapper Function 签名与 call/handle",
+          "order": 2,
+          "filename": "u5-l2-wrapper-function-call-handle.md",
+          "level": "intermediate",
+          "topic": "讲解 orc_rt_WrapperFunction 的统一 C 签名，以及 C++ WrapperFunction::call/handle 工具如何用 Caller 与 Serializer 完成序列化、调用与反序列化，包括 AsyncMethod/SyncMethod 适配器。",
+          "learning_goals": [
+            "理解 wrapper function「字节进、字节出」的统一签名与 CallId/Return 回调",
+            "掌握 WrapperFunction::handle 在执行端反序列化并调用业务逻辑的流程",
+            "了解 AsyncMethod/SyncMethod 如何消除方法包装样板"
+          ],
+          "source_files": [
+            "include/orc-rt/WrapperFunction.h",
+            "include/orc-rt-c/WrapperFunction.h",
+            "docs/Design.md"
+          ],
+          "minimal_modules": [
+            "统一签名与回调顺序约定",
+            "handle 的反序列化-执行-序列化",
+            "AsyncMethod/SyncMethod 适配器"
+          ],
+          "practice_task": "阅读 WrapperFunction::handle 实现，画出自定义 Serializer 下「收到 ArgBytes → 反序列化 → 调用 Handler → 序列化结果 → Return」的调用时序，并指出 out-of-band 错误的短路路径。",
+          "depends_on": [
+            "u5-l1",
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "ControllerAccess：执行端↔控制端桥",
+          "order": 3,
+          "filename": "u5-l3-controller-access.md",
+          "level": "intermediate",
+          "topic": "讲解 Session::ControllerAccess 抽象的 connect/disconnect/callController/sendWrapperResult 契约，重点是断开时排空 pending 调用的 drain 协议与三种完成路径。",
+          "learning_goals": [
+            "理解 ControllerAccess 的连接/断开/双向调用契约与 notifyDisconnected 恰好一次要求",
+            "掌握 disconnect 必须先 failPendingControllerCall 再 notify 的 drain 协议",
+            "区分 handleControllerCallResult / failPendingControllerCall / failControllerCallInline 三条完成路径"
+          ],
+          "source_files": [
+            "include/orc-rt/Session.h",
+            "test/unit/SessionTest.cpp",
+            "docs/Design.md"
+          ],
+          "minimal_modules": [
+            "ControllerAccess 抽象与契约",
+            "断开 drain 协议",
+            "三种 callController 完成路径"
+          ],
+          "practice_task": "阅读 SessionTest 的 MockControllerAccess，找出它如何在 disconnect 中用 ShutdownCV 等待 Outstanding 归零、再把 PendingOut 通过 failPendingControllerCall 排空，写出该 drain 的步骤清单。",
+          "depends_on": [
+            "u3-l2",
+            "u5-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "序列化方案：SPS",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Simple Packed Serialization 原理",
+          "order": 1,
+          "filename": "u6-l1-simple-packed-serialization.md",
+          "level": "intermediate",
+          "topic": "讲解 SPS 二进制序列化方案：SPSOutputBuffer/SPSInputBuffer、SPSSerializationTraits 特化、以及 SPSTuple/SPSSequence/SPSString/SPSMap 等标签类型与 wire 格式。",
+          "learning_goals": [
+            "理解 SPS 的紧凑 wire 格式（小端原语、序列为长度+元素）",
+            "掌握用 SPSSerializationTraits 为自定义类型实现 size/serialize/deserialize",
+            "认识常用 SPS 标签类型与 SPSArgList 变参工具"
+          ],
+          "source_files": [
+            "include/orc-rt/SimplePackedSerialization.h",
+            "test/unit/SimplePackedSerializationTest.cpp",
+            "test/unit/SimplePackedSerializationTestUtils.h"
+          ],
+          "minimal_modules": [
+            "Input/Output Buffer",
+            "SerializationTraits 特化",
+            "标签类型与 wire 格式"
+          ],
+          "practice_task": "为一个包含两个 int32_t 与一个 std::string 的结构体特化 SPSSerializationTraits（用 SPSTuple<int32_t,int32_t,SPSString>），并写一个往返序列化/反序列化的单元测试。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "SPSWrapperFunction：类型安全的调用",
+          "order": 2,
+          "filename": "u6-l2-sps-wrapper-function.md",
+          "level": "intermediate",
+          "topic": "讲解 SPSWrapperFunction<SPSSig> 如何在 WrapperFunction 之上提供类型安全的 call/handle，以及 ORC_RT_SPS_WRAPPER 宏的定义方式，用一个 int 相加的完整例子贯穿。",
+          "learning_goals": [
+            "掌握 SPSWrapperFunction<Sig>::handle/call 的类型安全用法",
+            "理解 SPS 签名语法（如 int32_t(int32_t,int32_t)）与 ExecutorAddr 参数",
+            "学会用 ORC_RT_SPS_WRAPPER 宏定义具名 wrapper 函数"
+          ],
+          "source_files": [
+            "include/orc-rt/SPSWrapperFunction.h",
+            "test/unit/SessionTest.cpp",
+            "test/unit/SPSWrapperFunctionTest.cpp"
+          ],
+          "minimal_modules": [
+            "SPSWrapperFunction 模板",
+            "handle/call 类型安全封装",
+            "ORC_RT_SPS_WRAPPER 宏"
+          ],
+          "practice_task": "参考 SessionTest 的 add_sps_wrapper，编写一个 SPS 签名为 int32_t(int32_t,int32_t) 的乘法 wrapper，并写一个调用方通过 controllerCaller 发起调用、断言结果。",
+          "depends_on": [
+            "u5-l2",
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "控制接口（sps-ci）：把处理器注册为符号",
+          "order": 3,
+          "filename": "u6-l3-controller-interface-sps-ci.md",
+          "level": "intermediate",
+          "topic": "讲解 sps-ci（Controller Interface）如何把 SPS wrapper 处理器注册进 SimpleSymbolTable 形成跨进程可调用符号表，并以 call_void_void / call_main 为例。",
+          "learning_goals": [
+            "理解 sps-ci 的作用：将执行端能力以符号形式暴露给 controller",
+            "掌握 addAll/addCall 等注册函数把 wrapper 加入符号表的模式",
+            "了解 call_void_void 与 call_main 的签名与用途"
+          ],
+          "source_files": [
+            "include/orc-rt/sps-ci/AllSPSCI.h",
+            "include/orc-rt/sps-ci/CallSPSCI.h",
+            "lib/executor/sps-ci/CallSPSCI.cpp"
+          ],
+          "minimal_modules": [
+            "sps-ci 注册机制",
+            "addAll / addCall",
+            "call_void_void / call_main 示例"
+          ],
+          "practice_task": "阅读 CallSPSCI.cpp 中 call_main 的实现，说明它如何用 SPSExecutorAddr + SPSSequence<SPSString> 接收函数地址与 argv 并调用之；再说明 addAll 如何聚合各子模块的注册函数。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "资源型 Service",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "SimpleSymbolTable：符号名到地址",
+          "order": 1,
+          "filename": "u7-l1-simple-symbol-table.md",
+          "level": "intermediate",
+          "topic": "讲解 SimpleSymbolTable 这个简单的字符串→指针映射，包括 addUnique 的冲突检测，以及它如何被 Service 用来把自身 API 以符号形式对外暴露。",
+          "learning_goals": [
+            "理解 SimpleSymbolTable 作为暴露 Service API 的符号注册表",
+            "掌握 addUnique 的「冲突即报错」语义",
+            "了解它同时被 BootstrapInfo 用于传递初始符号"
+          ],
+          "source_files": [
+            "include/orc-rt/SimpleSymbolTable.h",
+            "lib/executor/SimpleSymbolTable.cpp",
+            "test/unit/SimpleSymbolTableTest.cpp"
+          ],
+          "minimal_modules": [
+            "字符串→指针映射",
+            "addUnique 冲突检测",
+            "在 Service/BootstrapInfo 中的角色"
+          ],
+          "practice_task": "构造一个 SimpleSymbolTable，用 addUnique 注册若干 (名称,地址)，再编写一个测试验证重复注册同名不同地址会失败、同地址不会。",
+          "depends_on": [
+            "u3-l3",
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "MemoryFlags：内存权限与生命周期",
+          "order": 2,
+          "filename": "u7-l2-memory-flags.md",
+          "level": "intermediate",
+          "topic": "讲解描述 JIT 内存属性的纯数据类型：MemProt（读/写/执行位掩码）、MemLifetime（Standard/Finalize）、AllocGroup 及其映射。",
+          "learning_goals": [
+            "理解 MemProt 位掩码表示的读/写/执行权限",
+            "区分 Standard（显式释放）与 Finalize（自动释放）两种生命周期",
+            "掌握 AllocGroup 如何把权限与生命周期压成一个紧凑值"
+          ],
+          "source_files": [
+            "include/orc-rt/MemoryFlags.h",
+            "include/orc-rt/SPSMemoryFlags.h",
+            "test/unit/MemoryFlagsTest.cpp"
+          ],
+          "minimal_modules": [
+            "MemProt 位掩码",
+            "MemLifetime 策略",
+            "AllocGroup 与映射"
+          ],
+          "practice_task": "用 MemoryFlags 的类型构造几个典型 AllocGroup（如只读数据段、可读写数据段、可执行代码段），并查阅 SPSMemoryFlags.h 说明它如何被序列化。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "SimpleNativeMemoryMap：分配与保护 JIT 内存",
+          "order": 3,
+          "filename": "u7-l3-simple-native-memory-map.md",
+          "level": "intermediate",
+          "topic": "讲解作为 Service 的 SimpleNativeMemoryMap 如何用 mmap/VirtualAlloc 预留、初始化、去初始化、释放内存段，以及它与 AllocAction、MemoryFlags 的协作。",
+          "learning_goals": [
+            "理解 SimpleNativeMemoryMap 作为 Service 提供的 reserve/initialize/release 能力",
+            "掌握 InitializeRequest 中 Segment（含 AllocGroup）与 AllocActionPair 的结构",
+            "了解 initialize 时写内容、改权限、跑 finalize 动作的流程"
+          ],
+          "source_files": [
+            "include/orc-rt/SimpleNativeMemoryMap.h",
+            "lib/executor/SimpleNativeMemoryMap.cpp",
+            "test/unit/SimpleNativeMemoryMapTest.cpp"
+          ],
+          "minimal_modules": [
+            "Service 角色与 reserve/release",
+            "InitializeRequest 结构",
+            "权限切换与 finalize 动作"
+          ],
+          "practice_task": "构造一个 InitializeRequest，包含一段可读可写数据段与一段可执行代码段，调用 initialize 写入内容并切换权限，再调用 deinitialize/release 释放，断言各阶段返回成功。",
+          "depends_on": [
+            "u7-l1",
+            "u7-l2",
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l4",
+          "title": "NativeDylibManager：加载与查找动态库",
+          "order": 4,
+          "filename": "u7-l4-native-dylib-manager.md",
+          "level": "intermediate",
+          "topic": "讲解作为 Service 的 NativeDylibManager 如何用 dlopen/dlsym（或 LoadLibrary）加载动态库、按强弱引用查找符号，并在 Session 关闭时自动卸载。",
+          "learning_goals": [
+            "理解 NativeDylibManager 作为 Service 提供 load/lookup 能力",
+            "掌握 SymbolLookupSet 与 LookupFlags（RequiredSymbol / WeaklyReferencedSymbol）语义",
+            "了解空路径返回全局句柄（如 RTLD_DEFAULT）与关闭时自动卸载"
+          ],
+          "source_files": [
+            "include/orc-rt/NativeDylibManager.h",
+            "lib/executor/NativeDylibManager.cpp",
+            "lib/executor/Unix/NativeDylibAPIs.inc"
+          ],
+          "minimal_modules": [
+            "Service 角色与 load/lookup",
+            "LookupFlags 强弱引用",
+            "全局句柄与自动卸载"
+          ],
+          "practice_task": "用 NativeDylibManager 以空路径打开全局句柄，再查找一个已知 libc 符号（如 printf），验证返回非空地址；再尝试查找一个不存在的符号并观察弱/强引用的行为差异。",
+          "depends_on": [
+            "u7-l1",
+            "u3-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "引导、进程信息与 C ABI",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "BootstrapInfo 与 ExecutorProcessInfo",
+          "order": 1,
+          "filename": "u8-l1-bootstrap-and-process-info.md",
+          "level": "advanced",
+          "topic": "讲解连接时从 executor 传给 controller 的引导数据：BootstrapInfo（符号表 + 值映射、CreateDefault 注册 orc_rt_Session_Instance）与 ExecutorProcessInfo（目标 triple 与页大小检测）。",
+          "learning_goals": [
+            "理解 BootstrapInfo 在 connect 时向 controller 传递初始符号与值",
+            "掌握 CreateDefault 注册 orc_rt_Session_Instance 符号的作用",
+            "了解 ExecutorProcessInfo::Detect 如何检测目标 triple 与页大小"
+          ],
+          "source_files": [
+            "include/orc-rt/BootstrapInfo.h",
+            "lib/executor/BootstrapInfo.cpp",
+            "lib/executor/ExecutorProcessInfo.cpp"
+          ],
+          "minimal_modules": [
+            "BootstrapInfo 符号/值映射",
+            "CreateDefault 与 Session_Instance",
+            "进程 triple/页大小检测"
+          ],
+          "practice_task": "参考 SessionTest 的 BootstrapInfoPassedToConnect，构造带自定义符号与值的 BootstrapInfo，在 MockControllerAccess 的 OnConnect 回调中断言收到的符号与值一致。",
+          "depends_on": [
+            "u5-l3",
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "InProcessControllerAccess：同进程桥",
+          "order": 2,
+          "filename": "u8-l2-in-process-controller-access.md",
+          "level": "advanced",
+          "topic": "讲解当 controller 与 executor 同处一个进程时的 ControllerAccess 实现，重点是 Connection 函数指针表、引用计数、pending 调用管理与 C 兼容入口函数。",
+          "learning_goals": [
+            "理解 InProcessControllerAccess 用函数指针表而非 IPC 实现同进程零拷贝调用",
+            "掌握 Connection 结构与 OnConnect 握手如何建立双向调用",
+            "了解 callWrapperEntry 等静态入口为何要 C 兼容"
+          ],
+          "source_files": [
+            "include/orc-rt/InProcessControllerAccess.h",
+            "lib/executor/InProcessControllerAccess.cpp",
+            "test/unit/InProcessControllerAccessTest.cpp"
+          ],
+          "minimal_modules": [
+            "同进程 Connection 函数指针表",
+            "握手与引用计数",
+            "C 兼容静态入口"
+          ],
+          "practice_task": "对照 InProcessControllerAccess.cpp，画出一次 callController 的同进程调用链：从执行端发起 → 经 Connection 函数指针 → 进入控制器 → 结果回传；标注哪些步骤避免了序列化开销。",
+          "depends_on": [
+            "u5-l3",
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "C API 层与命名约定",
+          "order": 3,
+          "filename": "u8-l3-c-api-layer.md",
+          "level": "advanced",
+          "topic": "讲解 orc-rt-c/ 这一 C ABI 边界层：不透明 Ref 类型（SessionRef/ErrorRef/ControllerHandlerTag）、C 端函数如何委托给 C++ 实现，以及 C API 的命名约定。",
+          "learning_goals": [
+            "理解 C API 作为 ABI 边界与 C++ 实现的桥接方式",
+            "掌握三类不透明 Ref 类型与 wrap/unwrap 的类型双关",
+            "掌握 CodingConventions.md 中 C 符号命名规则（orc_rt_ 前缀、PascalCase/camelBack）"
+          ],
+          "source_files": [
+            "include/orc-rt-c/CoreTypes.h",
+            "include/orc-rt-c/Error.h",
+            "docs/CodingConventions.md"
+          ],
+          "minimal_modules": [
+            "不透明 Ref 类型",
+            "C→C++ 委托与 wrap/unwrap",
+            "C 命名约定"
+          ],
+          "practice_task": "在 include/orc-rt-c/ 中选 3 个函数，说明它们各自委托到哪个 C++ 方法；再按命名约定解释 orc_rt_Error_getTypeId 与 orc_rt_log_formatCheck 的命名结构差异。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "错误处理与 RTTI 深入",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "自定义 RTTI 体系",
+          "order": 1,
+          "filename": "u9-l1-custom-rtti.md",
+          "level": "advanced",
+          "topic": "讲解 orc-rt 自带的可扩展 RTTI（不依赖 -frtti）：RTTIRoot、RTTIExtends<ThisT,ParentT> CRTP、classID/isA/isa<>，它主要服务于错误类型判别。",
+          "learning_goals": [
+            "理解为何 orc-rt 自建 RTTI（兼容 -fno-rtti 构建）",
+            "掌握 RTTIExtends 的 CRTP 用法与 ID/isA/classof 机制",
+            "学会用 isa<T> 做类型查询"
+          ],
+          "source_files": [
+            "include/orc-rt/RTTI.h",
+            "lib/executor/RTTI.cpp",
+            "test/unit/RTTITest.cpp"
+          ],
+          "minimal_modules": [
+            "RTTIRoot 与 ID 机制",
+            "RTTIExtends CRTP",
+            "isa<> 查询"
+          ],
+          "practice_task": "定义一个 MyBase 与两个派生类（均用 RTTIExtends），构造派生实例后用 isa<> 验证基类、正确派生类返回 true、错误派生类返回 false（参考 RTTI.h 注释示例）。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "Error / Expected 内部实现",
+          "order": 2,
+          "filename": "u9-l2-error-expected-internals.md",
+          "level": "advanced",
+          "topic": "深入 Error 的「检查位」指针编码、ErrorInfoBase/ErrorExtends、StringError，以及 handleErrors/handleAllErrors 基于 ErrorHandlerTraits 的分派机制。",
+          "learning_goals": [
+            "理解 Error 用指针最低位编码「已检查」状态与析构 abort 契约",
+            "掌握 ErrorExtends 如何结合 RTTI 定义自定义错误类型",
+            "理解 handleErrors 的可变参数分派与 handleAllErrors 的强保证"
+          ],
+          "source_files": [
+            "include/orc-rt/Error.h",
+            "lib/executor/Error.cpp",
+            "test/unit/ErrorTest.cpp"
+          ],
+          "minimal_modules": [
+            "检查位指针编码",
+            "ErrorExtends 与自定义错误",
+            "handleErrors 分派机制"
+          ],
+          "practice_task": "实现一个继承 ErrorExtends 的自定义错误类型（带错误码字段），构造后用 handleErrors 以该类型 lambda 捕获并断言错误码；再故意不检查一个失败 Error，观察 abort（在测试外验证即可）。",
+          "depends_on": [
+            "u2-l3",
+            "u9-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l3",
+          "title": "异常互操作（ORC_RT_ENABLE_EXCEPTIONS）",
+          "order": 3,
+          "filename": "u9-l3-exception-interop.md",
+          "level": "advanced",
+          "topic": "讲解开启异常时 Error 与异常的双向转换：runCapturingExceptions、Error::throwOnFailure、ExceptionError，以及「库内部不用异常、只在边界转换」的策略。",
+          "learning_goals": [
+            "理解 orc-rt 内部用 Error、异常只作边界互操作的设计",
+            "掌握 runCapturingExceptions 把异常捕获为 Error/Expected 的返回类型推导",
+            "了解 ExceptionError 保留原始异常类型并可重抛"
+          ],
+          "source_files": [
+            "include/orc-rt/Error.h",
+            "docs/ErrorHandling.md",
+            "test/unit/ErrorExceptionInteropTest.cpp"
+          ],
+          "minimal_modules": [
+            "runCapturingExceptions",
+            "throwOnFailure / ExceptionError",
+            "边界转换策略"
+          ],
+          "practice_task": "用 runCapturingExceptions 包裹一个会抛 std::runtime_error 的 lambda，验证返回的 Error 是 ExceptionError；再用 throwOnFailure 重抛并 catch 还原原始类型。",
+          "depends_on": [
+            "u9-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "并发、日志与核心工具",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "LockedAccess 与并发模式",
+          "order": 1,
+          "filename": "u10-l1-locked-access-concurrency.md",
+          "level": "advanced",
+          "topic": "讲解 LockedAccess 这个 RAII 锁访问包装器（仅作临时对象、with_ref 多语句临界区），并结合 Session.cpp 中的 mutex/condition_variable/atomic 使用模式。",
+          "learning_goals": [
+            "掌握 LockedAccess 的临时对象语义与 with_ref 用法",
+            "理解 Session.cpp 用 CurrentState/TargetState + CV 协调状态转移的并发模式",
+            "了解 std::atomic_load/store 管理 shared_ptr<ControllerAccess> 的目的"
+          ],
+          "source_files": [
+            "include/orc-rt/LockedAccess.h",
+            "lib/executor/Session.cpp",
+            "test/unit/LockedAccessTest.cpp"
+          ],
+          "minimal_modules": [
+            "LockedAccess RAII",
+            "Session 状态锁与 CV",
+            "atomic 管理共享指针"
+          ],
+          "practice_task": "用一个被 mutex 保护的内部值实现一个返回 LockedAccess 的访问器；再用 with_ref 在一个表达式内完成「读取-修改-写入」并验证加锁正确。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l2",
+          "title": "日志系统：ORC_RT_LOG 与后端",
+          "order": 2,
+          "filename": "u10-l2-logging-system.md",
+          "level": "advanced",
+          "topic": "讲解 ORC_RT_LOG 宏的用法、编译期后端选择（none/printf/os_log）与级别过滤，以及 ORC_RT_LOG_PUB_S 的隐私语义；并追踪 Logging.cpp / Logging_printf.cpp / Logging_oslog.cpp 的实现。",
+          "learning_goals": [
+            "掌握 ORC_RT_LOG(Level, Category, Fmt, ...) 的使用与编译期类型检查",
+            "理解三种后端（none 全编译掉、printf 写 stderr/文件、os_log 走 Apple 统一日志）",
+            "了解级别 floor 如何在编译期裁剪、参数不应有副作用"
+          ],
+          "source_files": [
+            "include/orc-rt-c/Logging.h",
+            "lib/executor/Logging.cpp",
+            "lib/executor/Logging_printf.cpp"
+          ],
+          "minimal_modules": [
+            "ORC_RT_LOG 宏与级别",
+            "三种后端实现",
+            "编译期裁剪与 PUB_S 隐私"
+          ],
+          "practice_task": "用 printf 后端构建 orc-rt，写一段调用 ORC_RT_LOG(Info, General, ...) 的代码，通过设置 ORC_RT_LOG 环境变量调整运行时级别，观察 debug/info 日志的显隐变化。",
+          "depends_on": [
+            "u1-l2",
+            "u8-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l3",
+          "title": "核心工具：move_only_function 等",
+          "order": 3,
+          "filename": "u10-l3-core-utilities.md",
+          "level": "advanced",
+          "topic": "讲解贯穿全库的基础工具类型：move_only_function（仅移动的可调用对象）、span、bind/bind_front、scope_exit，它们为何被大量用于回调和资源管理。",
+          "learning_goals": [
+            "理解 move_only_function 相对 std::function 的取舍与全库回调中的角色",
+            "掌握 span、scope_exit、bind 的典型用法",
+            "了解这些工具自带的动机（减少依赖、控制语义）"
+          ],
+          "source_files": [
+            "include/orc-rt/move_only_function.h",
+            "include/orc-rt/scope_exit.h",
+            "include/orc-rt/bind.h"
+          ],
+          "minimal_modules": [
+            "move_only_function",
+            "scope_exit / span",
+            "bind / bind_front"
+          ],
+          "practice_task": "用 move_only_function 存放一个捕获 unique_ptr 的回调并触发它；再用 scope_exit 保证一段代码在异常或提前返回时仍执行清理（move_only_function-test.cpp 与 scope_exit-test.cpp 可作参考）。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "扩展运行时（综合实践）",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "编写自定义 Service",
+          "order": 1,
+          "filename": "u11-l1-custom-service.md",
+          "level": "advanced",
+          "topic": "综合实践：实现一个自定义 Service，注册到 Session，正确实现 onDetach/onShutdown，理解其在 attach/detach/shutdown 各阶段的回调时机。",
+          "learning_goals": [
+            "能继承 Service 并实现 onDetach/onShutdown",
+            "理解 Session 在各生命周期阶段对 Service 的通知顺序",
+            "能在 onDetach 中区分 ShutdownRequested 做不同处理"
+          ],
+          "source_files": [
+            "include/orc-rt/Service.h",
+            "lib/executor/Session.cpp",
+            "test/unit/SessionTest.cpp"
+          ],
+          "minimal_modules": [
+            "Service 实现",
+            "注册与回调顺序",
+            "ShutdownRequested 分支"
+          ],
+          "practice_task": "实现一个「计数器 Service」：onDetach 时打印是否将关闭、onShutdown 时打印最终计数；编写测试在 attach 后 detach，再单独 shutdown，断言两次回调都被触发且顺序正确。",
+          "depends_on": [
+            "u3-l3",
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l2",
+          "title": "编写自定义 ControllerAccess",
+          "order": 2,
+          "filename": "u11-l2-custom-controller-access.md",
+          "level": "advanced",
+          "topic": "综合实践：实现一个自定义 ControllerAccess，正确处理 connect/disconnect/callController/sendWrapperResult，并遵守断开时 drain pending 调用的契约。",
+          "learning_goals": [
+            "能继承 Session::ControllerAccess 并实现四个核心方法",
+            "掌握 notifyDisconnected 恰好一次与双向断开的处理",
+            "能在 disconnect 中正确排空 pending 调用"
+          ],
+          "source_files": [
+            "include/orc-rt/Session.h",
+            "test/unit/SessionTest.cpp",
+            "docs/Design.md"
+          ],
+          "minimal_modules": [
+            "ControllerAccess 四方法实现",
+            "恰好一次断开通知",
+            "pending 调用 drain"
+          ],
+          "practice_task": "实现一个最简 ControllerAccess：connect 直接成功、disconnect 调 notifyDisconnected、callController 用 failControllerCallInline 同步失败；用它 attach 一个 Session，验证 callController 收到 'disconnected' 错误（参考 DeadControllerAccess）。",
+          "depends_on": [
+            "u5-l3",
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l3",
+          "title": "暴露新的跨进程 API（sps-ci）",
+          "order": 3,
+          "filename": "u11-l3-new-sps-ci-api.md",
+          "level": "advanced",
+          "topic": "综合实践：定义一个新的 SPS wrapper 处理器，用 sps-ci 机制注册为符号并纳入 BootstrapInfo，使 controller 能跨进程调用它；并介绍 StandaloneMachOUnwindInfoRegistrar 这类真实扩展。",
+          "learning_goals": [
+            "能用 ORC_RT_SPS_WRAPPER + addXxx 注册一个新的跨进程处理器",
+            "理解新 API 如何通过 SimpleSymbolTable 与 BootstrapInfo 暴露给 controller",
+            "了解 StandaloneMachOUnwindInfoRegistrar 作为平台扩展的范例"
+          ],
+          "source_files": [
+            "lib/executor/sps-ci/CallSPSCI.cpp",
+            "include/orc-rt/sps-ci/AllSPSCI.h",
+            "include/orc-rt/StandaloneMachOUnwindInfoRegistrar.h"
+          ],
+          "minimal_modules": [
+            "定义并注册 SPS 处理器",
+            "纳入符号表与 BootstrapInfo",
+            "平台扩展示例"
+          ],
+          "practice_task": "仿照 CallSPSCI.cpp 的 call_void_void，新增一个 SPS 签名为 int64_t(int64_t) 的「加倍」处理器：定义 wrapper、写一个 addToTable 把它加入 SimpleSymbolTable，并写一个本地单元测试验证通过符号地址调用能得到正确结果。",
+          "depends_on": [
+            "u6-l3",
+            "u8-l1",
+            "u7-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
