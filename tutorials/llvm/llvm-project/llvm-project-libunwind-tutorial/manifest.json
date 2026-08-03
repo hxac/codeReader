@@ -1,0 +1,23 @@
+{
+  "project": "llvm-project-libunwind",
+  "head": "abe5aa5cb2336f32dca8e765710ec212a926476c",
+  "rationale": "libunwind 是 LLVM 运行时子项目，专门实现\"栈展开（stack unwinding）\"，既服务于 C++ 异常处理（高级 _Unwind_* API），又提供通用回溯能力（低级 unw_* API）。它是一个\"小而精\"的运行时库，但横跨 15+ 种 CPU 架构和 5 套完全不同的 unwind 机制（DWARF CFI、Compact、SjLj、ARM EHABI、Windows SEH、AIX TBTAB、Wasm），核心难点在于\"如何用一套模板化引擎适配这么多平台\"。因此学习路线采用\"先建立宏观心智模型 → 再深入一条主干链路（DWRAF/CFI） → 最后横向铺开各平台差异与高级主题\"的三段式：第 1-2 单元让读者从零知道它是什么、怎么构建、怎么用、API 分几层；第 3-5 单元纵向吃透本地回溯的主链路（UnwindCursor.step → AddressSpace 定位 unwind 节 → CFI_Parser 解析 CIE/FDE → DwarfInstructions 计算 CFA 并恢复寄存器），这是理解整个库的\"脊椎\"；第 6-7 单元横向展开 Compact/SjLj/EHABI/SEH/AIX/Wasm 等机制差异、寄存器保存恢复汇编、两阶段异常协议、阴影栈（CET/GCS）与返回地址签名（ptrauth）等安全特性、动态/JIT 代码注册扩展，以及测试与调测手段。讲义依赖关系呈清晰 DAG：每一篇都先列出前置讲义，读者可按拓扑顺序循序渐进，从能跑通一个 backtrace，到能读懂 step() 主分发，再到能独立分析任意一种 unwind 机制。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "走进 libunwind：定位、构建与第一次栈回溯",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "libunwind 是什么：项目定位与整体架构",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 libunwind 在 LLVM 运行时体系中的角色、它解决什么问题（栈展开与 C++ 异常），以及它提供"
+        }
+      ]
+    }
+  ]
+}
