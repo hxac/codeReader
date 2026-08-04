@@ -8,6 +8,7 @@
 - 画出 `RequestStatus` 的完整状态机，并解释「为什么只要状态值大于 `PREEMPTED` 就算完成」。
 - 用自己的话描述一个请求从 `add_request` 进入调度器、经过 `WAITING → RUNNING`、可能被抢占成 `PREEMPTED`、最终落到 `FINISHED_*` 的全过程。
 - 理解 `num_computed_tokens` 在 V1 异步调度下「乐观计数」的含义，以及它如何与 KV 缓存分配耦合。
+- 说出 `session_id` 这类请求级标识字段的含义，以及它如何从前端经 `EngineCoreRequest` 透传到内部的 `Request`。
 
 本讲是 u4 单元（调度与 KV 缓存管理）的起点，后续讲义（Scheduler、连续批处理、PagedAttention）都建立在「请求对象长什么样、状态如何流转」的认知之上。
 
@@ -30,18 +31,18 @@
 | 文件 | 作用 |
 |------|------|
 | `vllm/v1/request.py` | **本讲核心**。定义 `Request` 类（请求对象）和 `RequestStatus` 枚举（状态机），以及 `StreamingUpdate`（流式输入更新包）。 |
-| `vllm/v1/engine/__init__.py` | 定义跨进程传输用的 `EngineCoreRequest`（请求的序列化形式）、`FinishReason`（完成原因）、`EngineCoreEvent` / `EngineCoreEventType`（请求事件，用于统计）。 |
+| `vllm/v1/engine/__init__.py` | 定义跨进程传输用的 `EngineCoreRequest`（请求的序列化形式）、`FinishReason`（完成原因）、`EngineCoreEvent` / `EngineCoreEventType`（请求事件，用于统计）。`EngineCoreRequest` 也携带 `session_id` 等请求级字段。 |
 | `vllm/v1/core/sched/scheduler.py` | 调度器。本讲只看它「如何驱动 `Request.status` 与 `num_computed_tokens` 变化」的部分，不深入调度策略本身。 |
 | `vllm/v1/core/sched/request_queue.py` | 请求队列的两种实现（FCFS / 优先级），依赖 `Request.__lt__` 定义排序。 |
 | `vllm/v1/engine/core.py` | EngineCore 的 `add_request` 与请求转换入口。 |
 | `vllm/sequence.py` | **重要说明**：你可能在旧资料里看到请求/序列相关的类在 `vllm/sequence.py`。但在 V1 里这个文件已大幅瘦身，目前只剩一个与流水线并行相关的 `IntermediateTensors` 数据类，不再承载 `Sequence` 或 `Request`。本讲的 `Request` 全部来自 `vllm/v1/request.py`。 |
-| `tests/v1/test_request.py` | 针对 `RequestStatus` 的最小测试，本讲代码实践会用到它。 |
+| `tests/v1/test_request.py` | 针对 `RequestStatus` 的最小测试，以及验证 `session_id` 从 `EngineCoreRequest` 透传到 `Request` 的测试，本讲代码实践会用到它。 |
 
 > 一个容易混淆的点：`vllm/sequence.py` 名字很像「序列的家」，但 V1 的请求对象并不住在那里。记住 **V1 的请求 = `vllm/v1/request.py` 里的 `Request`**。
 
 ## 4. 核心概念与源码讲解
 
-本讲拆成四个最小模块：4.1 `Request` 对象与核心字段、4.2 `RequestStatus` 状态机、4.3 请求生命周期（状态流转全流程）、4.4 `num_computed_tokens` 与进度追踪。
+本讲拆成四个最小模块：4.1 `Request` 对象与核心字段、4.2 `RequestStatus` 状态机、4.3 请求生命周期（状态流转全流程）、4.4 `num_computed_tokens` 与进度追踪。其中 4.1 会专门讲到 `session_id` 等请求级字段。
 
 ### 4.1 Request 对象与核心字段
 
@@ -51,15 +52,17 @@
 
 - **输入**：prompt 的 token id 序列（`prompt_token_ids`）、采样参数（`sampling_params`）、可选的多模态特征、LoRA 请求等。
 - **进度**：已经算了多少 token（`num_computed_tokens`）、已经生成了哪些输出 token（`_output_token_ids`）。
-- **身份与调度**：请求 id、到达时间、优先级、当前状态（`status`）。
+- **身份与调度**：请求 id、到达时间、优先级、当前状态（`status`），以及可选的会话标识 `session_id`。
 - **KV 缓存**：每个 block 的哈希（`block_hashes`），用于前缀缓存命中判定（这一细节留到 u4-l5 讲）。
 
 为什么要把这些都放一个对象里？因为在 V1 的多进程架构下，调度（EngineCore）和执行（GPU Worker）是分离的，调度器需要随时知道每个请求「跑到哪了、要不要继续喂给 GPU、能不能被抢占」。`Request` 就是这个共享的事实来源（single source of truth）。
 
+其中有部分字段属于「请求级标识」，`session_id` 就是典型代表。它是前端（API Server / 客户端）为某个会话打上的标签：引擎本身**不解释它的语义**，但会把原样携带下去——供上层做会话亲和（session affinity）、计费归类或可观测性统计。这种「引擎只搬运、不消费」的字段，正是下面要讲的 `EngineCoreRequest → Request` 透传的典型例子。
+
 注意 `Request` 和跨进程传输用的 `EngineCoreRequest` 是两个东西：
 
-- `EngineCoreRequest`（`msgspec.Struct`，可序列化）是请求从前端进程经 ZMQ 传到 EngineCore 进程时的「信封」。
-- `Request`（普通 Python 类，不可序列化、带可变状态）是 EngineCore 内部真正使用、并不断更新状态的对象。
+- `EngineCoreRequest`（`msgspec.Struct`，可序列化）是请求从前端进程经 ZMQ 传到 EngineCore 进程时的「信封」，`session_id` 等请求级字段就放在信封里。
+- `Request`（普通 Python 类，不可序列化、带可变状态）是 EngineCore 内部真正使用、并不断更新状态的对象，它也持有同一个 `session_id`。
 
 两者通过 `Request.from_engine_core_request` 这个类方法转换。
 
@@ -67,7 +70,7 @@
 
 一个 `Request` 被构造出来时，核心字段是这样初始化的：
 
-1. 记录身份：`request_id`、`arrival_time`（没传就用当前时间）、`priority`。
+1. 记录身份：`request_id`、`arrival_time`（没传就用当前时间）、`priority`、可选的 `session_id`。
 2. 挂载参数：`sampling_params`（生成模型）或 `pooling_params`（embedding/池化模型），二者不能同时为空。
 3. 根据 `sampling_params` 推导 `max_tokens`（最多生成多少 token）。
 4. 设置输入：`prompt_token_ids`、`num_prompt_tokens`（输入长度）。
@@ -85,39 +88,50 @@ num_prompt_tokens       : 4                              # len(prompt)
 num_tokens (属性)       : 6  = len(_all_token_ids)
 num_output_tokens (属性): 2  = len(_output_token_ids)
 num_computed_tokens     : 3  # 已写入 KV 缓存的 token 数（本例正在 prefill 中）
+session_id              : "session-1"  # 可选的会话标识，引擎原样携带
 ```
 
 #### 4.1.3 源码精读
 
 先看 `Request.__init__` 的构造签名与几个最关键的字段初始化：
 
-[vllm/v1/request.py:59-80](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/request.py#L59-L80) —— `Request` 类与构造函数签名。注意参数既支持 `sampling_params` 也支持 `pooling_params`，分别对应生成模型与池化（embedding）模型。
+[vllm/v1/request.py:60-81](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/request.py#L60-L81) —— `Request` 类与构造函数签名。注意参数既支持 `sampling_params` 也支持 `pooling_params`，分别对应生成模型与池化（embedding）模型；第 77 行的 `session_id: str | None = None` 就是新增的会话标识参数。
 
-[vllm/v1/request.py:95-97](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/request.py#L95-L97) —— 设置到达时间，并把初始状态固定为 `WAITING`。**任何新请求一开始都是 WAITING**，这是状态机的起点。
+[vllm/v1/request.py:96-98](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/request.py#L96-L98) —— 设置到达时间，并把初始状态固定为 `WAITING`。**任何新请求一开始都是 WAITING**，这是状态机的起点。
 
-[vllm/v1/request.py:106-129](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/request.py#L106-L129) —— 推导 `max_tokens`：池化模型恒为 1（只算一次池化输出），生成模型取 `sampling_params.max_tokens`。最后一句 `raise ValueError` 保证两者至少有一个。
+[vllm/v1/request.py:107-130](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/request.py#L107-L130) —— 推导 `max_tokens`：池化模型恒为 1（只算一次池化输出），生成模型取 `sampling_params.max_tokens`。最后一句 `raise ValueError` 保证两者至少有一个。
 
-[vllm/v1/request.py:131-148](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/request.py#L131-L148) —— 核心：`prompt_token_ids` 记录输入；`_output_token_ids` 从空列表开始；`_all_token_ids` 通过把 `prompt_token_ids` 拷贝一份来初始化（没有 token id 时则用占位 `0` 填充至 `num_prompt_tokens`）。这意味着**全量 token 一开始就等于 prompt**。
+[vllm/v1/request.py:132-149](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/request.py#L132-L149) —— 核心：`prompt_token_ids` 记录输入；`_output_token_ids` 从空列表开始；`_all_token_ids` 通过把 `prompt_token_ids` 拷贝一份来初始化（没有 token id 时则用占位 `0` 填充至 `num_prompt_tokens`）。这意味着**全量 token 一开始就等于 prompt**。
 
-[vllm/v1/request.py:173](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/request.py#L173) —— `num_computed_tokens = 0`：进度计数器从零开始，表示尚未为任何 token 计算并写入 KV。
+[vllm/v1/request.py:173-174](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/request.py#L173-L174) —— `num_computed_tokens = 0`：进度计数器从零开始，表示尚未为任何 token 计算并写入 KV。
 
 再看输出如何追加，以及只读视图的设计：
 
-[vllm/v1/request.py:249-260](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/request.py#L249-L260) —— `append_output_token_ids`：每生成新 token，同时往 `_output_token_ids` 和 `_all_token_ids` 追加，并刷新 block 哈希。注意它同时改两个列表，所以外部不应绕过它直接 append。
+[vllm/v1/request.py:252-263](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/request.py#L252-L263) —— `append_output_token_ids`：每生成新 token，同时往 `_output_token_ids` 和 `_all_token_ids` 追加，并刷新 block 哈希。注意它同时改两个列表，所以外部不应绕过它直接 append。
 
-[vllm/v1/request.py:179-183](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/request.py#L179-L183) —— `output_token_ids` 和 `all_token_ids` 是 `_output_token_ids` / `_all_token_ids` 的 **`ConstantList` 只读视图**。注释解释：防止外部直接 `append`，因为那会绕过 `_all_token_ids` 的同步更新。
+[vllm/v1/request.py:180-184](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/request.py#L180-L184) —— `output_token_ids` 和 `all_token_ids` 是 `_output_token_ids` / `_all_token_ids` 的 **`ConstantList` 只读视图**。注释解释：防止外部直接 `append`，因为那会绕过 `_all_token_ids` 的同步更新。
+
+接着看请求级标识字段（`trace_headers` 与 `session_id`）：
+
+[vllm/v1/request.py:185-187](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/request.py#L185-L187) —— `trace_headers` 与 `session_id` 都被原样存到实例上。`session_id` 与 `trace_headers` 一样属于「引擎只搬运、不消费」的请求级元数据：它不参与调度或采样决策，只是跟着请求对象一起走完整个生命周期。
+
+`session_id` 的「搬运」要跨过进程边界。它的起点在前端构造的 `EngineCoreRequest` 信封里：
+
+[vllm/v1/engine/__init__.py:148](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/engine/__init__.py#L148) —— `EngineCoreRequest`（一个 `msgspec.Struct`）同样声明了 `session_id: str | None = None`。它随请求一起经 ZMQ 序列化传到 EngineCore 进程。
+
+[vllm/v1/request.py:225-250](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/request.py#L225-L250) —— `from_engine_core_request`：在进程边界把信封拆包成内部 `Request`。第 246 行 `session_id=request.session_id` 正是把信封里的 `session_id` 透传到 `Request` 上——这一行是 `session_id` 从前端落到运行时对象的唯一通道。
 
 最后是与身份相关的属性和排序：
 
-[vllm/v1/request.py:271-281](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/request.py#L271-L281) —— `num_tokens` = 全量 token 数；`num_output_tokens` = 已生成输出数。它们都是基于内部列表长度的只读属性。
+[vllm/v1/request.py:274-284](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/request.py#L274-L284) —— `num_tokens` = 全量 token 数；`num_output_tokens` = 已生成输出数。它们都是基于内部列表长度的只读属性。
 
-[vllm/v1/request.py:334-345](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/request.py#L334-L345) —— `__lt__`：优先级队列排序依据。顺序为 **优先级（小值优先）→ 到达时间（早的优先）→ request_id → 对象 id**。这个方法会被优先级队列直接用来 `heappush/heappop`（见 4.3）。
+[vllm/v1/request.py:337-348](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/request.py#L337-L348) —— `__lt__`：优先级队列排序依据。顺序为 **优先级（小值优先）→ 到达时间（早的优先）→ request_id → 对象 id**。注意 `session_id` 不参与排序，它只是被携带的标签。这个方法会被优先级队列直接用来 `heappush/heappop`（见 4.3）。
 
 #### 4.1.4 代码实践
 
-这个实践**不需要 GPU、不需要下载模型**——我们直接构造一个 `Request` 对象，观察它的内部字段如何随输出追加而变化。
+这个实践**不需要 GPU、不需要下载模型**——我们直接构造一个 `Request` 对象，观察它的内部字段如何随输出追加而变化，并验证 `session_id` 的携带。
 
-**实践目标**：亲手构造 `Request`，验证 `prompt_token_ids`、`_all_token_ids`、`num_computed_tokens` 三者的关系。
+**实践目标**：亲手构造 `Request`，验证 `prompt_token_ids`、`_all_token_ids`、`num_computed_tokens` 三者的关系，并确认 `session_id` 被原样保存。
 
 **操作步骤**（在已按 u1-l2 装好 vLLM 的 `.venv` 里执行）：
 
@@ -132,29 +146,32 @@ req = Request(
     prompt_token_ids=[10, 11, 12, 13],   # 假装这是一段 prompt
     sampling_params=sp,
     pooling_params=None,
+    session_id="session-1",              # 可选的会话标识
 )
 
-print("status            :", req.status)          # WAITING
-print("num_prompt_tokens :", req.num_prompt_tokens)  # 4
-print("num_computed_tokens:", req.num_computed_tokens)  # 0
-print("all_token_ids     :", list(req.all_token_ids))   # [10, 11, 12, 13]
+print("status            :", req.status)               # WAITING
+print("num_prompt_tokens :", req.num_prompt_tokens)    # 4
+print("num_computed_tokens:", req.num_computed_tokens) # 0
+print("all_token_ids     :", list(req.all_token_ids))  # [10, 11, 12, 13]
 print("output_token_ids  :", list(req.output_token_ids))  # []
-print("num_tokens        :", req.num_tokens)        # 4
-print("num_output_tokens :", req.num_output_tokens)  # 0
-print("is_finished       :", req.is_finished())     # False
+print("num_tokens        :", req.num_tokens)           # 4
+print("num_output_tokens :", req.num_output_tokens)    # 0
+print("session_id        :", req.session_id)           # session-1
+print("is_finished       :", req.is_finished())        # False
 
 # 模拟模型生成了两个 token
 req.append_output_token_ids([100, 101])
 print("--- 追加输出后 ---")
-print("all_token_ids     :", list(req.all_token_ids))   # [10,11,12,13,100,101]
-print("num_tokens        :", req.num_tokens)            # 6
-print("num_output_tokens :", req.num_output_tokens)     # 2
+print("all_token_ids     :", list(req.all_token_ids))  # [10,11,12,13,100,101]
+print("num_tokens        :", req.num_tokens)           # 6
+print("num_output_tokens :", req.num_output_tokens)    # 2
 ```
 
 **需要观察的现象**：
 1. 构造后 `status` 是 `WAITING`、`num_computed_tokens` 是 0。
 2. `_all_token_ids` 一开始就等于 `prompt_token_ids` 的拷贝。
 3. 调用 `append_output_token_ids` 后，`all_token_ids` 和 `output_token_ids` 同步增长，而 `num_computed_tokens` **不变**（它由调度器在 `schedule()` 里推进，而不是在这里）。
+4. `session_id` 等于构造时传入的字符串——它只是被存下来，不参与任何计算。
 
 **预期结果**：如注释所示。
 
@@ -164,11 +181,11 @@ print("num_output_tokens :", req.num_output_tokens)     # 2
 
 **练习 1**：为什么 `_all_token_ids` 在构造时就要拷贝一份 `prompt_token_ids`，而不是等生成时再拼？如果 `prompt_token_ids` 传的是 `None`（纯 embedding 输入）会怎样？
 
-**参考答案**：因为 KV 缓存、block 哈希、`num_tokens` 等都按「全量 token 的位置」来索引，prompt 和 output 在位置空间上是连续的，统一用一个 `_all_token_ids` 能让所有「第 i 个 token」的查询 O(1)。当 `prompt_token_ids=None` 时（见 4.1.3 第 131-148 行的 `else` 分支），构造会用 `[0] * num_prompt_tokens` 填充占位，长度对齐到 `num_prompt_tokens`（由 `prompt_embeds` 推导）。
+**参考答案**：因为 KV 缓存、block 哈希、`num_tokens` 等都按「全量 token 的位置」来索引，prompt 和 output 在位置空间上是连续的，统一用一个 `_all_token_ids` 能让所有「第 i 个 token」的查询 O(1)。当 `prompt_token_ids=None` 时（见 4.1.3 第 132-149 行的 `else` 分支），构造会用 `[0] * num_prompt_tokens` 填充占位，长度对齐到 `num_prompt_tokens`（由 `prompt_embeds` 推导）。
 
-**练习 2**：`Request` 和 `EngineCoreRequest` 为什么不合并成一个类？
+**练习 2**：`Request` 和 `EngineCoreRequest` 为什么不合并成一个类？以 `session_id` 为例说明它在两者之间是怎么流动的。
 
-**参考答案**：`EngineCoreRequest` 是 `msgspec.Struct`、`gc=False`、`omit_defaults`，设计目的是**跨进程序列化传输**（ZMQ），要轻量、可编码；而 `Request` 是带大量可变状态（`num_computed_tokens`、`status`、`block_hashes`…）的运行时对象，**不该也不需要被序列化**。两者用 `from_engine_core_request` 在进程边界做一次转换，职责清晰。
+**参考答案**：`EngineCoreRequest` 是 `msgspec.Struct`、`gc=False`、`omit_defaults`，设计目的是**跨进程序列化传输**（ZMQ），要轻量、可编码；而 `Request` 是带大量可变状态（`num_computed_tokens`、`status`、`block_hashes`…）的运行时对象，**不该也不需要被序列化**。`session_id` 同时声明在两者上（`EngineCoreRequest` 在 `vllm/v1/engine/__init__.py:148`，`Request` 在 `vllm/v1/request.py:77`），由 `from_engine_core_request`（`vllm/v1/request.py:246`）在进程边界做一次拷贝完成透传。两者职责清晰，拆分让「序列化信封」与「运行时状态」互不污染。`tests/v1/test_request.py` 里的 `test_request_copies_session_id_from_engine_core_request` 正是对这条透传链的最小回归测试。
 
 ---
 
@@ -210,21 +227,21 @@ print("num_output_tokens :", req.num_output_tokens)     # 2
 
 #### 4.2.3 源码精读
 
-[vllm/v1/request.py:348-367](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/request.py#L348-L367) —— `RequestStatus` 枚举定义。重点看注释 `# Note: anything after PREEMPTED will be considered as a finished status.`，这正是 `is_finished` 实现的依据。`enum.auto()` 从 1 开始依次递增，所以顺序就是值的大小关系。
+[vllm/v1/request.py:351-367](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/request.py#L351-L367) —— `RequestStatus` 枚举定义。重点看注释 `# Note: anything after PREEMPTED will be considered as a finished status.`，这正是 `is_finished` 实现的依据。`enum.auto()` 从 1 开始依次递增，所以顺序就是值的大小关系。
 
-[vllm/v1/request.py:369-375](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/request.py#L369-L375) —— `is_finished` 与 `get_finished_reason` 两个静态方法。`is_finished` 仅一句 `status > RequestStatus.PREEMPTED`。
+[vllm/v1/request.py:372-378](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/request.py#L372-L378) —— `is_finished` 与 `get_finished_reason` 两个静态方法。`is_finished` 仅一句 `status > RequestStatus.PREEMPTED`。
 
-[vllm/v1/request.py:382-390](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/request.py#L382-L390) —— `_FINISHED_REASON_MAP`：完成状态 → `FinishReason` 的映射表。
+[vllm/v1/request.py:385-393](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/request.py#L385-L393) —— `_FINISHED_REASON_MAP`：完成状态 → `FinishReason` 的映射表。
 
-[vllm/v1/engine/__init__.py:43-65](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/engine/__init__.py#L43-L65) —— `FinishReason` 定义。它是 `IntEnum`（紧凑序列化），并在 docstring 里解释了每种原因；`__str__` 通过 `FINISH_REASON_STRINGS` 把整数转成对外的字符串。
+[vllm/v1/engine/__init__.py:43-65](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/engine/__init__.py#L43-L65) —— `FinishReason` 定义。它是 `IntEnum`（紧凑序列化），并在 docstring 里解释了每种原因；`__str__` 通过 `FINISH_REASON_STRINGS` 把整数转成对外的字符串。
 
-[vllm/v1/request.py:304-308](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/request.py#L304-L308) —— `Request.is_finished()` 与 `get_finished_reason()`，都委托给上面的静态方法，是调度器判断请求归宿的入口。
+[vllm/v1/request.py:307-311](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/request.py#L307-L311) —— `Request.is_finished()` 与 `get_finished_reason()`，都委托给上面的静态方法，是调度器判断请求归宿的入口。
 
 #### 4.2.4 代码实践
 
-`tests/v1/test_request.py` 就是专门测状态字符串化的最小用例，直接跑它即可。
+`tests/v1/test_request.py` 就是专门测请求对象的最小用例，直接跑它即可。它现在包含两个测试函数。
 
-**实践目标**：验证 `RequestStatus` 的字符串表示与 `is_finished` 的分水岭行为。
+**实践目标**：验证 `RequestStatus` 的字符串表示与 `is_finished` 的分水岭行为，并确认 `session_id` 的透传。
 
 **操作步骤**：
 
@@ -232,7 +249,9 @@ print("num_output_tokens :", req.num_output_tokens)     # 2
 .venv/bin/python -m pytest tests/v1/test_request.py -v
 ```
 
-**需要观察的现象**：5 个断言全过。测试里 `f"{RequestStatus.WAITING}" == "WAITING"` 依赖枚举的 `__str__` 返回 `self.name`（见 `vllm/v1/request.py:366-367`）。
+**需要观察的现象**：两个测试全部通过：
+- `test_request_status_fmt_str`：5 个断言，验证 `f"{RequestStatus.WAITING}" == "WAITING"` 等。这依赖枚举的 `__str__` 返回 `self.name`（见 `vllm/v1/request.py:369-370`）。
+- `test_request_copies_session_id_from_engine_core_request`：构造一个带 `session_id="session-1"` 的 `EngineCoreRequest`，调用 `Request.from_engine_core_request(...)` 后断言 `request.session_id == "session-1"`——这正是 4.1 讲的「信封 → 运行时对象」透传。
 
 如果想进一步验证 `is_finished` 的分水岭，可写一小段（示例代码）：
 
@@ -262,7 +281,7 @@ for st in [S.WAITING, S.RUNNING, S.PREEMPTED, S.FINISHED_STOPPED, S.FINISHED_ABO
 
 把 4.1 的字段和 4.2 的状态串起来，就能讲清一个请求的完整一生。这一节是本讲的核心。一个请求从外部进来，会经历：**入队（WAITING）→ 被选中运行（RUNNING）→ 计算推进 → （可能抢占 PREEMPTED 再回 WAITING）→ 完成（FINISHED_*）→ 释放资源**。
 
-需要强调的是：状态的每一次变迁都发生在**调度器（Scheduler）**里，而不是 `Request` 自己驱动。`Request` 是被动的数据载体，调度器才是状态机的主人。
+需要强调的是：状态的每一次变迁都发生在**调度器（Scheduler）**里，而不是 `Request` 自己驱动。`Request` 是被动的数据载体，调度器才是状态机的主人。`session_id`、`trace_headers` 这些被搬运的字段会全程伴随请求对象，直到它被释放。
 
 #### 4.3.2 核心流程
 
@@ -303,39 +322,39 @@ for st in [S.WAITING, S.RUNNING, S.PREEMPTED, S.FINISHED_STOPPED, S.FINISHED_ABO
 
 **入队路径**：
 
-[vllm/v1/engine/core.py:439-483](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/engine/core.py#L439-L483) —— `EngineCore.add_request`：做参数校验（request_id 必须是 str、pooling task 是否支持、KV 传输参数是否配了 connector），然后调用 `self.scheduler.add_request(request)`（第 479 行）。
+[vllm/v1/engine/core.py:439-483](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/engine/core.py#L439-L483) —— `EngineCore.add_request`：做参数校验（request_id 必须是 str、pooling task 是否支持、KV 传输参数是否配了 connector），然后调用 `self.scheduler.add_request(request)`（第 479 行）。
 
-[vllm/v1/core/sched/scheduler.py:2213-2235](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/core/sched/scheduler.py#L2213-L2235) —— `Scheduler.add_request`：新请求（`request_id` 不存在）走 `_enqueue_waiting_request` 进等待队列，登记进 `self.requests` 字典，并记一条 `QUEUED` 事件。注意如果是流式可恢复请求还会建一个 `streaming_queue`。
+[vllm/v1/core/sched/scheduler.py:2213-2235](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/core/sched/scheduler.py#L2213-L2235) —— `Scheduler.add_request`：新请求（`request_id` 不存在）走 `_enqueue_waiting_request` 进等待队列，登记进 `self.requests` 字典，并记一条 `QUEUED` 事件。注意如果是流式可恢复请求还会建一个 `streaming_queue`。
 
-[vllm/v1/engine/core.py:983-991](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/engine/core.py#L983-L991) —— 跨进程请求进来后，用 `Request.from_engine_core_request(...)` 把可序列化的 `EngineCoreRequest` 转成内部 `Request`。这就是「信封拆包」的边界。
+[vllm/v1/engine/core.py:983-991](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/engine/core.py#L983-L991) —— 跨进程请求进来后，用 `Request.from_engine_core_request(...)` 把可序列化的 `EngineCoreRequest` 转成内部 `Request`（`session_id` 就在这一步被透传过来）。这就是「信封拆包」的边界。
 
 **选中运行路径**：
 
-[vllm/v1/core/sched/scheduler.py:1055-1075](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/core/sched/scheduler.py#L1055-L1075) —— 把请求 `append` 进 `self.running`，根据它原来是 `WAITING` 还是 `PREEMPTED` 分类（新调度 vs 恢复），最后第 1074 行 `request.status = RequestStatus.RUNNING`、第 1075 行推进 `num_computed_tokens`。
+[vllm/v1/core/sched/scheduler.py:1055-1075](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/core/sched/scheduler.py#L1055-L1075) —— 把请求 `append` 进 `self.running`，根据它原来是 `WAITING` 还是 `PREEMPTED` 分类（新调度 vs 恢复），最后第 1074 行 `request.status = RequestStatus.RUNNING`、第 1075 行推进 `num_computed_tokens`。
 
-[vllm/v1/core/sched/scheduler.py:1056-1059](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/core/sched/scheduler.py#L1056-L1059) —— 记 `SCHEDULED` 事件（仅当 `log_stats` 开启）。
+[vllm/v1/core/sched/scheduler.py:1056-1059](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/core/sched/scheduler.py#L1056-L1059) —— 记 `SCHEDULED` 事件（仅当 `log_stats` 开启）。
 
 **抢占路径**：
 
-[vllm/v1/core/sched/scheduler.py:1287-1309](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/core/sched/scheduler.py#L1287-L1309) —— `_preempt_request`：断言只有 `RUNNING` 能被抢占；释放 KV block 与 encoder cache；第 1293 行置 `PREEMPTED`；第 1294 行 `num_computed_tokens = 0`（抢占后要重算）；第 1309 行 `num_preemptions += 1`。
+[vllm/v1/core/sched/scheduler.py:1287-1309](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/core/sched/scheduler.py#L1287-L1309) —— `_preempt_request`：断言只有 `RUNNING` 能被抢占；释放 KV block 与 encoder cache；第 1293 行置 `PREEMPTED`；第 1294 行 `num_computed_tokens = 0`（抢占后要重算）；第 1309 行 `num_preemptions += 1`。
 
 **完成路径**：
 
-[vllm/v1/core/sched/scheduler.py:1670-1739](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/core/sched/scheduler.py#L1670-L1739) —— `update_from_output` 的开头：遍历每个被调度的请求，处理本步模型产出，准备判断是否停止。
+[vllm/v1/core/sched/scheduler.py:1670-1739](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/core/sched/scheduler.py#L1670-L1739) —— `update_from_output` 的开头：遍历每个被调度的请求，处理本步模型产出，准备判断是否停止。
 
-[vllm/v1/core/sched/scheduler.py:1807-1815](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/core/sched/scheduler.py#L1807-L1815) —— 检测停止：调用 `_update_request_with_output` 判断是否命中停止条件；池化模型一有输出就直接 `FINISHED_STOPPED`。
+[vllm/v1/core/sched/scheduler.py:1807-1815](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/core/sched/scheduler.py#L1807-L1815) —— 检测停止：调用 `_update_request_with_output` 判断是否命中停止条件；池化模型一有输出就直接 `FINISHED_STOPPED`。
 
-[vllm/v1/core/sched/scheduler.py:1895-1907](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/core/sched/scheduler.py#L1895-L1907) —— 若 `stopped`，先抓取 `finish_reason`（在状态可能被 `_handle_stopped_request` 改写之前），再处理停止并视情况 `_free_request` 释放资源。
+[vllm/v1/core/sched/scheduler.py:1895-1907](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/core/sched/scheduler.py#L1895-L1907) —— 若 `stopped`，先抓取 `finish_reason`（在状态可能被 `_handle_stopped_request` 改写之前），再处理停止并视情况 `_free_request` 释放资源。
 
 **主动终止路径**：
 
-[vllm/v1/core/sched/scheduler.py:2237-2298](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/core/sched/scheduler.py#L2237-L2298) —— `finish_requests`：先断言传入的是完成状态；把请求从 running / waiting 队列里移除；第 2295 行把状态置为 `finished_status`；第 2296 行 `_free_request` 释放 KV block（部分场景会延迟释放）。
+[vllm/v1/core/sched/scheduler.py:2237-2298](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/core/sched/scheduler.py#L2237-L2298) —— `finish_requests`：先断言传入的是完成状态；把请求从 running / waiting 队列里移除；第 2295 行把状态置为 `finished_status`；第 2296 行 `_free_request` 释放 KV block（部分场景会延迟释放）。
 
 **请求队列的组织**：
 
-[vllm/v1/core/sched/request_queue.py:75-128](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/core/sched/request_queue.py#L75-L128) —— `FCFSRequestQueue`：先来先服务，底层就是 `deque`。
+[vllm/v1/core/sched/request_queue.py:75-128](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/core/sched/request_queue.py#L75-L128) —— `FCFSRequestQueue`：先来先服务，底层就是 `deque`。
 
-[vllm/v1/core/sched/request_queue.py:131-152](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/core/sched/request_queue.py#L131-L152) —— `PriorityRequestQueue`：基于堆，`heappush/heappop` 直接用 `Request.__lt__`（4.1.3 讲过的 priority→arrival_time→request_id 顺序）。注意它的 docstring：优先级队列里「没有队头概念」，`prepend` 实际等价于 `add`。
+[vllm/v1/core/sched/request_queue.py:131-152](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/core/sched/request_queue.py#L131-L152) —— `PriorityRequestQueue`：基于堆，`heappush/heappop` 直接用 `Request.__lt__`（4.1.3 讲过的 priority→arrival_time→request_id 顺序）。注意它的 docstring：优先级队列里「没有队头概念」，`prepend` 实际等价于 `add`。
 
 #### 4.3.4 代码实践
 
@@ -343,7 +362,7 @@ for st in [S.WAITING, S.RUNNING, S.PREEMPTED, S.FINISHED_STOPPED, S.FINISHED_ABO
 
 **操作步骤**：
 
-1. 打开 `vllm/v1/request.py`，确认构造时 `status = RequestStatus.WAITING`（第 97 行）。
+1. 打开 `vllm/v1/request.py`，确认构造时 `status = RequestStatus.WAITING`（第 98 行）。
 2. 在 `vllm/v1/core/sched/scheduler.py` 中用搜索定位以下三处赋值，记下行号：
    - `request.status = RequestStatus.RUNNING`（应在 1074 行附近）
    - `request.status = RequestStatus.PREEMPTED`（应在 1293 行附近）
@@ -413,17 +432,17 @@ preempt():   num_computed_tokens = 0                                          # 
 
 #### 4.4.3 源码精读
 
-[vllm/v1/request.py:159-166](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/request.py#L159-L166) —— `num_in_flight_tokens` 等计数器的注释，明确说明「异步调度下，`num_computed_tokens` 是乐观计数（counts them optimistically）」。这是理解本字段的最关键注释。
+[vllm/v1/request.py:160-163](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/request.py#L160-L163) —— `num_in_flight_tokens` 等计数器的注释，明确说明「异步调度下，`num_computed_tokens` 是乐观计数（counts them optimistically）」。这是理解本字段的最关键注释。
 
-[vllm/v1/request.py:172-173](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/request.py#L172-L173) —— `spec_token_ids`（推测解码的草稿 token）与 `num_computed_tokens = 0` 的初始化。
+[vllm/v1/request.py:173-174](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/request.py#L173-L174) —— `spec_token_ids`（推测解码的草稿 token）与 `num_computed_tokens = 0` 的初始化。
 
-[vllm/v1/core/sched/scheduler.py:828-832](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/core/sched/scheduler.py#L828-L832) —— 在 `schedule()` 里计算本步的 `num_computed_tokens`（本地已缓存 + 外部 KV 已传来的），并断言它不超过请求总 token 数。
+[vllm/v1/core/sched/scheduler.py:828-832](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/core/sched/scheduler.py#L828-L832) —— 在 `schedule()` 里计算本步的 `num_computed_tokens`（本地已缓存 + 外部 KV 已传来的），并断言它不超过请求总 token 数。
 
-[vllm/v1/core/sched/scheduler.py:1075](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/core/sched/scheduler.py#L1075) —— `request.num_computed_tokens = num_computed_tokens`：在选中运行的同时**乐观推进**进度。
+[vllm/v1/core/sched/scheduler.py:1075](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/core/sched/scheduler.py#L1075) —— `request.num_computed_tokens = num_computed_tokens`：在选中运行的同时**乐观推进**进度。
 
-[vllm/v1/core/sched/scheduler.py:1738-1739](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/core/sched/scheduler.py#L1738-L1739) —— `update_from_output` 里 `request.num_in_flight_tokens -= num_tokens_scheduled`：GPU 结果回来后，把「在飞行」计数兑现。
+[vllm/v1/core/sched/scheduler.py:1738-1739](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/core/sched/scheduler.py#L1738-L1739) —— `update_from_output` 里 `request.num_in_flight_tokens -= num_tokens_scheduled`：GPU 结果回来后，把「在飞行」计数兑现。
 
-[vllm/v1/core/sched/scheduler.py:1294](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/v1/core/sched/scheduler.py#L1294) —— 抢占时 `request.num_computed_tokens = 0`：进度归零，因为 KV 没了，要重新 prefill。
+[vllm/v1/core/sched/scheduler.py:1294](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/v1/core/sched/scheduler.py#L1294) —— 抢占时 `request.num_computed_tokens = 0`：进度归零，因为 KV 没了，要重新 prefill。
 
 #### 4.4.4 代码实践
 
@@ -457,8 +476,8 @@ preempt():   num_computed_tokens = 0                                          # 
 
 **任务**：写一个脚本 `mini_request_lifecycle.py`（示例代码，非项目原有文件），完成以下事情：
 
-1. 用 `SamplingParams(max_tokens=5)` 和一段 `prompt_token_ids=[1,2,3,4,5]` 构造一个 `Request`。
-2. 打印初始状态：确认 `status == WAITING`、`num_computed_tokens == 0`、`num_tokens == 5`。
+1. 用 `SamplingParams(max_tokens=5)` 和一段 `prompt_token_ids=[1,2,3,4,5]` 构造一个 `Request`，并传入 `session_id="demo-session"`。
+2. 打印初始状态：确认 `status == WAITING`、`num_computed_tokens == 0`、`num_tokens == 5`、`session_id == "demo-session"`。
 3. 模拟调度器选中它：手动 `req.status = RequestStatus.RUNNING`，并把 `req.num_computed_tokens` 设为 5（假装 prefill 完成）。
 4. 模拟 3 次 decode：每次 `req.append_output_token_ids([x])`，并把 `num_computed_tokens` 自增。打印每次的 `num_tokens`、`num_output_tokens`、`num_computed_tokens`。
 5. 模拟命中 `max_tokens`：把状态设为 `RequestStatus.FINISHED_LENGTH_CAPPED`，调用 `req.is_finished()` 与 `req.get_finished_reason()` 验证。
@@ -475,10 +494,12 @@ req = Request(
     prompt_token_ids=[1, 2, 3, 4, 5],
     sampling_params=SamplingParams(max_tokens=5),
     pooling_params=None,
+    session_id="demo-session",
 )
 assert req.status == RequestStatus.WAITING
 assert req.num_computed_tokens == 0
 assert req.num_tokens == 5
+assert req.session_id == "demo-session"
 
 # 模拟被调度运行 + prefill 完成
 req.status = RequestStatus.RUNNING
@@ -501,6 +522,7 @@ print("finish_reason str:", req.get_finished_reason())   # str -> "length"
 **验收标准**：
 - 跑通后能看到 `num_tokens` 从 5 增长到 8，`num_output_tokens` 从 0 增长到 3。
 - `is_finished()` 最终为 `True`，`get_finished_reason()` 的字符串形式是 `"length"`。
+- `session_id` 全程不变，确认它只是被携带、不被计算逻辑改动。
 
 **进阶（可选）**：在步骤 4 中间插入一次「抢占」——把 `status` 设成 `PREEMPTED`、`num_computed_tokens` 清零，再恢复回 `RUNNING`，观察 `is_finished()` 始终为 `False`（因为 `PREEMPTED` 在分水岭之前）。
 
@@ -513,6 +535,7 @@ print("finish_reason str:", req.get_finished_reason())   # str -> "length"
 - 一个请求的典型生命周期是 `WAITING → RUNNING → FINISHED_*`，中间可能经历 `RUNNING → PREEMPTED → WAITING` 的抢占循环；每一次状态变迁都发生在调度器里，`Request` 本身是被动的。
 - `num_computed_tokens` 在 V1 异步调度下是「乐观计数」：`schedule()` 阶段就推进，靠 `num_in_flight_tokens` 等簿记量在结果回来后兑现，抢占时清零重算。
 - `Request` 与可序列化的 `EngineCoreRequest` 通过 `from_engine_core_request` 在进程边界转换；`vllm/sequence.py` 在 V1 已不再承载请求/序列类，只剩 `IntermediateTensors`。
+- `Request` 还携带若干「引擎只搬运、不消费」的请求级字段，如 `session_id` 与 `trace_headers`：`session_id` 由前端经 `EngineCoreRequest`（`vllm/v1/engine/__init__.py`）透传，在 `from_engine_core_request` 中落到 `Request.session_id`，全程伴随请求对象但不参与调度或采样决策。
 - 优先级队列直接复用 `Request.__lt__`（优先级 → 到达时间 → request_id）排序。
 
 ## 7. 下一步学习建议

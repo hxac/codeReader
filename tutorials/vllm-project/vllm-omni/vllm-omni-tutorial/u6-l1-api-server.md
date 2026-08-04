@@ -1,0 +1,454 @@
+# API Server：FastAPI 应用构建
+
+## 1. 本讲目标
+
+本讲聚焦 vLLM-Omni 在线服务的「HTTP 外壳」——`api_server.py`。学完后你应当能够：
+
+- 说清一次 `vllm serve --omni` 从命令行到监听端口之间，FastAPI 应用是如何被「借用上游 + 改写两处」拼装出来的。
+- 在源码里定位每一个 OpenAI 兼容端点（chat / images / videos / speech / audio / realtime）对应的处理函数，并知道它由谁提供（dependency provider）。
+- 理解 API 层是如何把 `AsyncOmni` 这个引擎对象，通过 `app.state` 注入到各 serving 模块（`OmniOpenAIServingChat` 等）的。
+- 区分「纯扩散模式（pure diffusion）」与「LLM / 多阶段模式」两套不同的 app state 初始化路径。
+
+本讲是 U6（在线服务与 OpenAI 兼容 API）的第一篇，承接入门篇 u1-l5（`vllm serve --omni` 的 CLI 拦截）与进阶篇 u3-l1（`AsyncOmni` 多阶段架构），回答「拦截之后、引擎之上，FastAPI 应用这一层到底做了什么」。
+
+## 2. 前置知识
+
+本讲需要你先建立几个概念，它们都不难，但缺一不可：
+
+- **FastAPI 与 APIRouter**：FastAPI 是基于 Starlette 的异步 Web 框架。路由（route）可以用 `@app.get(...)` 直接挂在应用上，也可以先集中挂在一个 `APIRouter()` 上，再用 `app.include_router(router)` 一次性并入应用。vLLM-Omni 的 `api_server.py` 用的就是后者——模块级定义一个 `router`，启动时并入应用。
+- **OpenAI 兼容 API**：指 OpenAI 官方对外约定的那套 REST 接口形状，例如 `POST /v1/chat/completions`、`POST /v1/images/generations`、`GET /v1/models`。兼容它意味着已有的 OpenAI 客户端 / `curl` / SDK 可以几乎不改代码地对接你的服务。vLLM-Omni 在此基础上做了大量「扩展字段」（如 `extra_body` 透传扩散采样参数）。
+- **ASGI 与 uvicorn**：ASGI 是 Python 异步 Web 的标准协议；uvicorn 是跑 ASGI 应用的服务器。`serve_http(...)` 就是把组装好的 ASGI app 交给 uvicorn 去监听 socket。
+- **依赖注入（Depends）**：FastAPI 的 `Depends(...)` 让你把「从 `request.app.state` 取出某个 serving 模块」写成可复用的函数。本讲会看到 `Omnichat(raw_request)` 这类薄包装就是为此而生。
+- **回顾 u1-l5 / u3-l1**：u1-l5 讲了 `main.py` 如何用 `"--omni" in sys.argv` 拦截命令、`serve.py` 的 `cmd_init → cmd → uvloop.run(omni_run_server)` 生命周期，以及 `omni_run_server` 是统一入口；u3-l1 讲了 `AsyncOmni` 是不做推理的「薄代理」，真正推理在后台 Orchestrator 线程与 stage 子进程里。本讲就是从 `omni_run_server` 往下展开 FastAPI 这一层的细节。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+| --- | --- |
+| [vllm_omni/entrypoints/openai/api_server.py](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py) | 在线服务的主体：应用构建、路由注册、引擎绑定、全部多模态端点的处理函数。本讲的「主战场」。 |
+| [vllm_omni/entrypoints/openai/__init__.py](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/__init__.py) | 包入口，对外暴露 `omni_run_server` / `build_async_omni` / `omni_init_app_state` / `OmniOpenAIServingChat` 四个关键符号。 |
+| [vllm_omni/entrypoints/openai/utils.py](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/utils.py) | serving 层共用的小工具：`get_stage_type`（跨 dict/omegaconf/对象判断 stage 类型）、`parse_lora_request`（请求级 LoRA 解析）、`is_single_stage_diffusion`（纯扩散判定）等。 |
+| [vllm_omni/entrypoints/openai/serving_chat.py](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/serving_chat.py) | `OmniOpenAIServingChat` 所在，提供 `for_diffusion` 与标准两条构造路径，是路由处理函数最常调用的 serving 模块。 |
+| [vllm_omni/config/endpoint_policy.py](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/../config/endpoint_policy.py) | `shutdown_unsupported_routes`：按模型能力把不支持的端点改成「拒绝处理器」。 |
+
+> 提示：讲义中的永久链接均指向当前 HEAD（`900a7f08...`），行号随源码当前状态。
+
+## 4. 核心概念与源码讲解
+
+本讲拆成四个最小模块：①应用构建与启动总流程；②路由注册与上游路由改写；③`AsyncOmni` 与 serving 模块的绑定；④OpenAI 兼容协议扩展（纯扩散模式、错误处理与端点裁剪）。
+
+### 4.1 应用构建与启动总流程
+
+#### 4.1.1 概念说明
+
+你可能会以为 vLLM-Omni 自己从零写了一个 FastAPI 应用构建函数 `build_app`——其实没有。它的策略和 u2-l1 讲的 patch 机制一脉相承：**「借用上游、只改两处」**。
+
+- 「借用上游」：直接 `from vllm.entrypoints.openai.api_server import build_app as build_openai_app`，把上游 vLLM 的应用构建器拿来用。这样所有上游已有的路由（embeddings、tokenize、transcription、anthropic 等）都自动可用，omni 不必重造。
+- 「只改两处」：上游的 `/v1/chat/completions` 和 `/v1/models` 两个路由必须替换成 omni 版本——因为上游版本假设「单一 `AsyncLLM` + 单 EngineCore」，而 omni 是多阶段编排，行为语义不同。所以先把这两个上游路由删掉，再把 omni 自己的 `router` 并入。
+
+统一入口是 `omni_run_server`（u1-l5 已提到它由 `serve.py` 的 `cmd` 段用 `uvloop.run` 启动）。它的职责是「编排一次启动的时序」，真正干活的是 `omni_run_server_worker`。
+
+#### 4.1.2 核心流程
+
+`omni_run_server → omni_run_server_worker` 的一次启动可以拆成下面这条流水线（关键步骤均带行号，下文 4.1.3 精读）：
+
+```text
+omni_run_server(args)
+  │  setup_openai_server(args)            # 借上游：解析 host/port、创建 socket
+  ▼
+omni_run_server_worker(listen_address, sock, args)
+  │  ① 工具/reasoning 解析器插件预导入
+  │  ② async with build_async_omni(args) as engine_client:   # 构造 AsyncOmni
+  │  ③ supported_tasks = await engine_client.get_supported_tasks()
+  │  ④ app = build_openai_app(args, supported_tasks)          # 借上游 build_app
+  │  ⑤ _remove_route_from_app(app, "/v1/chat/completions")    # 删上游 chat
+  │     _remove_route_from_app(app, "/v1/models")             # 删上游 models
+  │  ⑥ app.include_router(router)                             # 并入 omni 路由
+  │  ⑦ _register_omni_exception_handlers(app)                 # 改写错误处理
+  │  ⑧ omni_init_app_state(engine_client, app.state, args)    # 绑定引擎到 serving 模块
+  │  ⑨ shutdown_unsupported_routes(app, ...)                  # 按模型能力裁端点
+  │  ⑩ STORAGE_MANAGER.start(); 条件挂载 profiler_router
+  │  ⑪ serve_http(_TimestampMiddleware(app), sock=sock, ...)  # uvicorn 监听
+  ▼
+HTTP 请求进入 → router 上的处理函数 → app.state.* 里的 serving 模块 → AsyncOmni
+```
+
+要点是：**应用对象 `app` 和引擎对象 `engine_client` 在同一个 `async with` 块里被装配在一起**，引擎先于应用存在（因为 `build_app` 需要 `supported_tasks`，而它来自引擎）。
+
+#### 4.1.3 源码精读
+
+入口 `omni_run_server` 很薄，只做日志装饰和 socket 准备，随后委托给 worker：
+
+[api_server.py:439-458](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L439-L458) —— `omni_run_server` 调上游 `setup_openai_server` 拿到监听地址与 socket，再进入 worker。注释里点明「Unified entry point that automatically handles both LLM and Diffusion models through AsyncOmni」。
+
+worker 中真正体现「借上游 + 改两处」的是这三行（顺序至关重要）：
+
+[api_server.py:501-510](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L501-L510) —— 先 `build_openai_app`（上游），再 `_remove_route_from_app` 删掉 chat 与 models 两个上游路由，再 `app.include_router(router)` 并入 omni 路由，最后注册 omni 的异常处理器。注意删必须在 `include_router` 之前，否则同路径路由会「叠加」而不是「替换」。
+
+引擎对象的构造发生在 worker 顶部的 `async with build_async_omni(args) as engine_client:`：
+
+[api_server.py:596-633](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L596-L633) —— `build_async_omni` 是一个 `@asynccontextmanager`，内部再委托给 `build_async_omni_from_stage_config`，`yield` 出来的就是 `AsyncOmni` 实例，`finally` 里负责 `async_omni.shutdown()` 清理。
+
+[api_server.py:691-703](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L691-L703) —— 真正实例化：`async_omni = AsyncOmni(model=model, **kwargs)`，并用 `try/finally` 兜底关闭。这个 `async_omni` 就是后面注入到 `app.state.engine_client` 的对象。
+
+应用启动的最后一环是包一层 ASGI 中间件后交给 uvicorn：
+
+[api_server.py:545-563](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L545-L563) —— `_TimestampMiddleware` 是「最外层纯 ASGI 包装」，只为 HTTP 请求打上 `request_timestamp`（供指标计算用），WebSocket 与 lifespan 直接放行。
+
+[api_server.py:565-584](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L565-L584) —— `serve_http(_TimestampMiddleware(app), sock=sock, ...)` 把组装好的 app 交给上游的 `serve_http`（内部用 uvicorn）去监听 socket。
+
+> 小结：`omni_run_server_worker` = 上游 `build_app` + 删两路由 + 并 omni router + 改错误处理 + 绑引擎 + 裁端点 + uvicorn 监听。omni 没有重写 `build_app`，只在「应用装配完成之后」做外科手术式改写。
+
+#### 4.1.4 代码实践
+
+**目标**：跟踪 `omni_run_server_worker` 的 11 步装配顺序，在源码中标注每一步对应的行号。
+
+**操作步骤**：
+
+1. 打开 [api_server.py](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py)，定位 `async def omni_run_server_worker`（约第 461 行）。
+2. 沿函数体自上而下，给每一步（工具插件导入 / `build_async_omni` / `get_supported_tasks` / `build_openai_app` / 两次 `_remove_route_from_app` / `include_router` / `_register_omni_exception_handlers` / `omni_init_app_state` / `shutdown_unsupported_routes` / `STORAGE_MANAGER.start` / `serve_http`）写下当前行号。
+3. 特别注意 [第 501-510 行](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L501-L510)：确认「删上游路由」严格发生在「并入 omni router」之前。
+
+**需要观察的现象**：你会发现 omni 没有自定义 `build_app`，而是复用 `build_openai_app`（从 `vllm.entrypoints.openai.api_server` 导入，见 [第 39 行](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L39)）。
+
+**预期结果**：得到一份「步骤 ↔ 行号」对照表，证明应用装配是「上游 build_app + 运行时改写」两段式。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 `build_async_omni`（引擎构造）必须发生在 `build_openai_app`（应用构造）之前？
+
+> 参考答案：因为 `build_openai_app` 的第二参 `supported_tasks` 来自 `engine_client.get_supported_tasks()`（[第 490-501 行](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L490-L501)），而 `supported_tasks` 又决定上游要不要挂 chat / completion / embedding 等路由。没有引擎就没有 tasks，没有 tasks 就没法正确构建应用。
+
+**练习 2**：`build_async_omni` 是普通函数还是上下文管理器？退出时会发生什么？
+
+> 参考答案：它是 `@asynccontextmanager` 装饰的异步上下文管理器（[第 596 行](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L596)）。`yield` 出 `AsyncOmni`，`finally` 中调用 `async_omni.shutdown()`（[第 701-703 行](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L701-L703)），保证无论正常退出还是异常都释放后台 Orchestrator 与 stage 子进程。
+
+### 4.2 路由注册：APIRouter 与上游路由改写
+
+#### 4.2.1 概念说明
+
+omni 把自己所有的端点集中挂在一个模块级 `router = APIRouter()` 上（[第 155 行](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L155)）。这样做有两个好处：
+
+1. 启动时一次性 `app.include_router(router)` 即可挂上全部 omni 端点；
+2. 与上游 vLLM 的路由物理隔离——omni 端点全在 `router` 里，上游端点全在 `build_openai_app` 产出的 `app` 里。
+
+但有两类「同路径冲突」需要处理：
+
+- **上游已注册、omni 要接管**：`/v1/chat/completions`、`/v1/models`、`/health`、`/v1/audio/speech`。这些路径上游也注册了同名路由。omni 的做法是先把上游/旧版删掉，再注册自己的。
+- **上游根本不支持的 omni 新端点**：`/v1/images/generations`、`/v1/videos`、`/v1/audio/generate`、`/v1/audio/voices`、`/v1/omni/sleep` 等，这些直接 `@router.post(...)` 注册即可，不会冲突。
+
+#### 4.2.2 核心流程
+
+omni 用了两个不同的「删路由」函数，分别针对两个时机：
+
+```text
+┌─ 模块导入期（router 内部去重）──────────────────────────────┐
+│  _remove_route_from_router(router, "/v1/audio/speech")     │  ← 第 1237 行
+│  _remove_route_from_router(router, "/health")              │  ← 第 1683 行
+│  _remove_route_from_router(router, "/v1/models")           │  ← 第 1714 行
+│  紧接着用 @router 重新注册 omni 版本                        │
+└────────────────────────────────────────────────────────────┘
+
+┌─ 应用启动期（从上游 app 里剔除）───────────────────────────┐
+│  _remove_route_from_app(app, "/v1/chat/completions", POST) │  ← 第 504 行
+│  _remove_route_from_app(app, "/v1/models", GET)            │  ← 第 505 行
+│  app.include_router(router)                                │  ← 第 506 行
+└────────────────────────────────────────────────────────────┘
+```
+
+两者签名不同、目标对象不同（`router.routes` vs `app.routes`），但都按 `path`（可选 `methods`）匹配删除。
+
+#### 4.2.3 源码精读
+
+**omni 的多模态端点全貌**（按类别整理，行号对应 `@router.*` 装饰器所在处）：
+
+| 类别 | 路径 | 方法 | 处理函数 | 行号 |
+| --- | --- | --- | --- | --- |
+| 对话 | `/v1/chat/completions` | POST | `create_chat_completion` | [L1162](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1162-L1174) |
+| 图像 | `/v1/images/generations` | POST | `generate_images` | [L1767](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1767-L1779) |
+| 图像 | `/v1/images/edits` | POST | `edit_images` | [L1986](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1986-L1995) |
+| 视频 | `/v1/videos` | POST | `create_video`（异步任务） | [L3146](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L3146-L3155) |
+| 视频 | `/v1/videos/sync` | POST | `create_video_sync`（阻塞直返 mp4） | [L3189](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L3189-L3198) |
+| 视频 | `/v1/videos` | GET | `list_videos` | [L3268](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L3268-L3269) |
+| 视频 | `/v1/videos/{video_id}` | GET / DELETE | `retrieve_video` / `delete_video` | [L3305](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L3305-L3306) / [L3333](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L3333-L3334) |
+| 视频 | `/v1/videos/{video_id}/content` | GET | `download_video` | [L3385](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L3385-L3386) |
+| 语音(TTS) | `/v1/audio/speech` | POST | `create_speech` | [L1240](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1240-L1252) |
+| 语音(TTS) | `/v1/audio/speech/batch` | POST | `create_speech_batch` | [L1292](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1292-L1304) |
+| 扩散音频 | `/v1/audio/generate` | POST | `create_audio_generate` | [L1335](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1335-L1347) |
+| 音色克隆 | `/v1/audio/voices` | GET / POST | `list_voices` / `upload_voice` | [L1373](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1373-L1382) / [L1427](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1427-L1436) |
+| 音色克隆 | `/v1/audio/voices/{name}` | DELETE | `delete_voice` | [L1515](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1515-L1524) |
+| 实时/WebSocket | `/v1/audio/speech/stream` | WS | `streaming_speech` | [L1571](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1571-L1572) |
+| 实时/WebSocket | `/v1/video/chat/stream` | WS | `streaming_video_chat` | [L1593](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1593-L1594) |
+| 实时/WebSocket | `/v1/realtime/video` | WS | `streaming_video_output` | [L1610](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1610-L1611) |
+| 实时/WebSocket | `/v1/realtime` | WS | `realtime_websocket` | [L1627](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1627-L1628) |
+| 实时/WebSocket | `/v1/realtime/robot/openpi` | WS | `realtime_robot_openpi` | [L1649](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1649-L1650) |
+| 实时/WebSocket | `/v1/duplex` | WS | `duplex_websocket` | [L1666](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1666-L1667) |
+| 系统 | `/health` | GET | `health` | [L1686](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1686-L1687) |
+| 系统 | `/v1/models` | GET | `show_available_models` | [L1717](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1717-L1718) |
+| 运维 | `/v1/omni/sleep` `/v1/omni/wakeup` | POST | `omni_sleep` / `omni_wakeup` | [L3485](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L3485-L3486) / [L3497](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L3497-L3498) |
+| 性能剖析 | `/start_profile` `/stop_profile` | POST | （独立 `profiler_router`，按需挂载） | [L3424](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L3424-L3425) / [L3450](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L3450-L3451) |
+
+**删路由的两个函数**：
+
+[api_server.py:264-276](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L264-L276) —— `_remove_route_from_app(app, path, methods)`：遍历 `app.routes`，删掉匹配 `path`（及可选 `methods`）的 Starlette `Route`。注释明确写着「OMNI: used to override upstream /v1/chat/completions with omni behavior」，这正是 4.1 提到的「改两处」的实现工具。
+
+[api_server.py:239-252](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L239-L252) —— `_remove_route_from_router(router, path, methods)`：作用对象是 `APIRouter.routes`，用于模块导入期对 omni 自己的 `router` 去重（见 [第 1237](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1237)、[1683](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1683)、[1714 行](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1714) 的三次调用，紧跟其后用 `@router` 注册 omni 版本）。
+
+**两个代表性的端点处理函数**（路由如何接到 serving 模块）：
+
+[api_server.py:1686-1709](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1686-L1709) —— `health`：先从 `app.state` 取引擎（`engine_client` 或 `diffusion_engine`），再 `await engine_client.check_health()`；正常返 `{"status": "healthy"}`，捕获 `EngineDeadError` 则返 503。注意它兼容 LLM 与扩散两种模式。
+
+[api_server.py:1717-1728](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1717-L1728) —— `show_available_models`：委托 `state.openai_serving_models.show_available_models()`。这个 `openai_serving_models` 在 LLM 模式是上游的 `OpenAIServingModels`，在纯扩散模式是 omni 自定义的 `_DiffusionServingModels`（见 4.4）。
+
+#### 4.2.4 代码实践
+
+**目标**：启动一个真实的 `--omni` 服务，用 HTTP 探测验证可用路由，并把响应对应回源码处理函数。
+
+**操作步骤**：
+
+1. 安装并启动服务（u1-l2 / u1-l5 已述）：
+
+   ```bash
+   vllm serve Tongyi-MAI/Z-Image-Turbo --omni --port 8091
+   ```
+
+2. 另开终端，探测健康与模型列表：
+
+   ```bash
+   curl -s http://localhost:8091/health
+   curl -s http://localhost:8091/v1/models | jq
+   ```
+
+3. 发起一次文生图（沿用 quickstart 的 curl）：
+
+   ```bash
+   curl -s http://localhost:8091/v1/chat/completions \
+     -H "Content-Type: application/json" \
+     -d '{
+       "messages": [{"role": "user", "content": "a cup of coffee on the table"}],
+       "extra_body": {"height": 1024, "width": 1024, "num_inference_steps": 50, "guidance_scale": 4.0, "seed": 42}
+     }' | jq -r '.choices[0].message.content[0].image_url.url' | cut -d',' -f2 | base64 -d > coffee.png
+   ```
+
+4. 把上面的 `/health`、`/v1/models`、`/v1/chat/completions` 三个请求，分别对应到源码的 `health`（[L1687](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1687)）、`show_available_models`（[L1718](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1718)）、`create_chat_completion`（[L1174](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1174)）。
+
+**需要观察的现象**：`/health` 返回 `{"status":"healthy"}`；`/v1/models` 返回一个含 `Z-Image-Turbo` 的 `data` 数组；`/v1/chat/completions` 的响应里图像藏在 `choices[0].message.content[0].image_url.url`（`data:image/png;base64,...`）。
+
+**预期结果**：每个 curl 都能在 `api_server.py` 的路由表里找到唯一对应的处理函数；若没有 GPU/模型，启动阶段就会失败——此时按 4.4 的 `_register_omni_exception_handlers` 阅读错误如何被包装成 OpenAI 兼容错误体。如本机无法运行，明确标注「待本地验证」。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`/v1/audio/speech` 在 omni 里被「先删后注册」了两次（删除在 [L1237](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1237)，注册在 [L1240](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1240)），为什么需要删？
+
+> 参考答案：因为 omni 的 `api_server.py` 在文件顶部 `from vllm.entrypoints.openai.api_server import ...` 时，可能间接把上游已注册的 `/v1/audio/speech` 带进 `router` 的导入链路；用 `_remove_route_from_router` 先清掉潜在的旧路由，再注册 omni 自己的 `create_speech`，保证「omni 版本一定生效、不会同路径叠加」。
+
+**练习 2**：`create_video`（`POST /v1/videos`）与 `create_video_sync`（`POST /v1/videos/sync`）都是生成视频，行为有何本质区别？
+
+> 参考答案：`create_video` 是异步任务模式：立刻返回 `VideoResponse(status=QUEUED)`，用 `asyncio.create_task(_run_video_generation_job(...))` 在后台跑，客户端靠 `GET /v1/videos/{id}` 轮询状态、`GET /v1/videos/{id}/content` 下载。`create_video_sync` 是阻塞直返：`await asyncio.wait_for(handler.generate_video_bytes(...))` 跑完直接把 mp4 字节流作为 `Response(media_type="video/mp4")` 返回（注释里写明「Designed for benchmark and testing scenarios」）。
+
+### 4.3 AsyncOmni 与 serving 模块的绑定
+
+#### 4.3.1 概念说明
+
+路由处理函数本身只是「瘦壳」，真正干活的是各 serving 模块（`OmniOpenAIServingChat`、`OmniOpenAIServingVideo`、`OmniOpenAIServingSpeech` 等）。这些 serving 模块需要持有引擎对象才能调用推理。问题是：FastAPI 的请求处理函数是无状态的，引擎只有一个全局实例，怎么传进去？
+
+omni 的答案分两步：
+
+1. **启动时装配 `app.state`**：`omni_init_app_state(engine_client, app.state, args)` 把引擎和一堆 serving 模块塞进 FastAPI 的全局状态对象 `app.state`。
+2. **请求时取用**：每个处理函数通过一个小依赖函数（dependency provider），从 `request.app.state.*` 取出对应 serving 模块。
+
+这就是 FastAPI「依赖注入 + 应用级单例」的典型用法。引擎对象 `AsyncOmni` 自始至终只有一个，被所有 serving 模块共享。
+
+#### 4.3.2 核心流程
+
+```text
+启动期（omni_init_app_state）：
+  app.state.engine_client   = AsyncOmni(...)           # 唯一引擎
+  app.state.stage_configs   = engine_client.stage_configs
+  app.state.openai_serving_chat   = OmniOpenAIServingChat(...)
+  app.state.openai_serving_video  = OmniOpenAIServingVideo(...)
+  app.state.openai_serving_speech = OmniOpenAIServingSpeech(...)
+  app.state.openai_serving_audio_generate = ...
+  ...
+
+请求期（依赖提供者）：
+  def Omnichat(request): return request.app.state.openai_serving_chat
+
+  @router.post("/v1/chat/completions")
+  async def create_chat_completion(request, raw_request):
+      handler = Omnichat(raw_request)      # 取出 serving 模块
+      return await handler.create_chat_completion(request, raw_request)
+```
+
+注意 `omni_init_app_state` 内部还有「纯扩散 vs LLM/多阶段」两条分支，分别走轻量与完整两套初始化（详见 4.4）。
+
+#### 4.3.3 源码精读
+
+**依赖提供者（dependency providers）**——四个一行函数，把 `app.state` 上的 serving 模块暴露给路由处理函数：
+
+[api_server.py:1146-1159](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1146-L1159) —— `Omnivideo` / `Omnichat` / `Omnispeech` / `OmniAudioGenerate`，各自 `return request.app.state.openai_serving_*`。它们就是处理函数取引擎/serving 模块的入口。
+
+以 chat 为例看处理函数如何用依赖提供者：
+
+[api_server.py:1174-1186](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1174-L1186) —— `create_chat_completion` 先 `handler = Omnichat(raw_request)` 取出 chat serving 模块；若 `handler is None`（模型不支持 chat），回退到 `serving_tokenization` 造一个 404/错误响应；否则 `await handler.create_chat_completion(request, raw_request)`。
+
+**`omni_init_app_state` 的两条分支入口**：
+
+[api_server.py:706-749](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L706-L749) —— 函数开头先把公共字段写进 `state`：`engine_client`、`log_stats`、`args`、`sleeping_stages`、`stage_configs`。其中 `sleeping_stages` 是配合 `/v1/omni/sleep` `/v1/omni/wakeup` 的「正在睡眠的 stage 集合」。
+
+**纯扩散分支**（单 stage 且 stage_type=="diffusion"）：
+
+[api_server.py:727-808](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L727-L808) —— 当只有一个 diffusion stage 时走轻量初始化：`vllm_config=None`、`serving_tokenization=None`，各 serving 模块用 `for_diffusion` 类方法构造，`OpenAIServingModels` 用 omni 的 `_DiffusionServingModels` 替代。
+
+[api_server.py:764-796](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L764-L796) —— `OmniOpenAIServingChat.for_diffusion(diffusion_engine=..., model_name=...)`、`OmniOpenAIServingVideo.for_diffusion(...)`、`OmniOpenAIServingSpeech.for_diffusion(...)`、`OmniOpenAIServingAudioGenerate.for_diffusion(...)`。
+
+**LLM / 多阶段分支**（完整初始化）：
+
+[api_server.py:810-1143](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L810-L1143) —— 这是「标准」路径：构造真正的 `OpenAIServingModels`、`OnlineRenderer`，再按 `supported_tasks` 条件性地实例化 `OmniOpenAIServingChat` / `OpenAIServingCompletion` / `ServingPooling` / 嵌入/打分/分类等一整套上游 serving 模块。
+
+[api_server.py:942-968](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L942-L968) —— LLM 模式下 `OmniOpenAIServingChat(...)` 用标准构造器（传 `engine_client`、`openai_serving_models`、`online_renderer`、各种 chat 模板参数），并在构造后 `state.openai_serving_chat.warmup()` 预热以降低首请求延迟。
+
+**两条构造路径的对照（在 serving 模块内部）**：
+
+[serving_chat.py:285-313](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/serving_chat.py#L285-L313) —— `for_diffusion` 是 `@classmethod`，用 `cls.__new__(cls)` 绕过父类 `OpenAIServingChat.__init__`（因为父类初始化依赖 LLM 专属的 model_config 等），手工设置 `_diffusion_mode=True`、`_diffusion_engine=...`、`engine_client=None`。`OmniOpenAIServingChat` 同时继承上游 `OpenAIServingChat` 与 `AudioMixin`（[serving_chat.py:148](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/serving_chat.py#L148)），所以同一个类既能服务 LLM 文本对话，也能服务扩散文生图。
+
+> 小结：引擎单例 → `app.state` → 依赖提供者 → 路由处理函数 → serving 模块 → `AsyncOmni`。`omni_init_app_state` 是「把引擎钉进 app.state」的那一步，是连接 HTTP 层与引擎层的关键铆点。
+
+#### 4.3.4 代码实践
+
+**目标**：用源码阅读型实践，追踪「一次 `/v1/chat/completions` 请求如何从 HTTP 抵达 `AsyncOmni`」。
+
+**操作步骤**：
+
+1. 从 [create_chat_completion（L1174）](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1174) 出发。
+2. 看 `handler = Omnichat(raw_request)`（[L1176](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1176)）→ 跳到依赖提供者 `Omnichat`（[L1150](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1150)）→ 它返回 `request.app.state.openai_serving_chat`。
+3. 回到 `omni_init_app_state`，确认 `state.openai_serving_chat` 是怎么被赋值的：纯扩散模式在 [L765](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L765)，LLM 模式在 [L942](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L942)。
+4. 打开 serving_chat.py，确认 `OmniOpenAIServingChat.create_chat_completion`（[L426](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/serving_chat.py#L426)）最终会调用 `self._diffusion_engine`（纯扩散）或 `self.engine_client`（LLM），而它们都是同一个 `AsyncOmni`。
+
+**需要观察的现象**：你会发现引擎对象在「`build_async_omni` 产出 → `app.state.engine_client` → serving 模块的 `engine_client`/`_diffusion_engine`」这条链上始终保持同一个实例引用，没有复制。
+
+**预期结果**：画出一张「请求 → 依赖提供者 → serving 模块 → AsyncOmni」的调用铆点图，每个箭头标注源码行号。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：`OmniOpenAIServingChat.for_diffusion` 为什么用 `cls.__new__(cls)` 而不是 `cls(...)` 正常构造？
+
+> 参考答案：因为父类 `OpenAIServingChat.__init__` 需要很多 LLM 专属参数（model_config、tokenizer 等），纯扩散模式下这些并不存在/不需要。用 `__new__` 跳过父类 `__init__`，再手工设置扩散模式所需的几个属性（`_diffusion_engine`、`_diffusion_model_name` 等），既复用了类的多模态方法，又避免触发 LLM 初始化（见 [serving_chat.py:303-313](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/serving_chat.py#L303-L313)）。
+
+**练习 2**：依赖提供者 `Omnichat(request)` 返回 `None` 时，`create_chat_completion` 会发生什么？
+
+> 参考答案：`handler is None` 分支（[L1177-1184](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1177-L1184)）会回退到 `serving_tokenization`，若它也为 `None` 则抛 `HTTPException(404, "The model does not support Chat Completions API")`，否则用 tokenization 模块造一个错误响应。这就是「模型不支持某端点」时的优雅降级。
+
+### 4.4 OpenAI 兼容协议扩展：纯扩散模式、错误处理与端点裁剪
+
+#### 4.4.1 概念说明
+
+这一节讲 omni 为了「既兼容 OpenAI 协议、又支持多模态/多阶段」而做的三处协议层扩展：
+
+- **纯扩散模式（pure diffusion）**：当模型只有一个 diffusion stage（如 Z-Image-Turbo、Qwen-Image），整个服务不需要 LLM 那套 tokenizer/生成协议，omni 用更轻量的初始化与一个「最小实现」的 `_DiffusionServingModels` 来兜底 `/v1/models` 这类被上游强制要求的接口。
+- **多阶段感知的错误处理**：上游 `EngineDeadError` 处理器是给单一 EngineCore 设计的；omni 是多阶段编排，引擎挂掉的语义不同，所以注册了自己的处理器，附带 `error_stage_id`、orchestrator 存活等诊断信息。
+- **端点裁剪（endpoint policy）**：某些模型不支持某些端点（如 omni 尚未支持批量 chat）。omni 提供 `shutdown_unsupported_routes`，把这些路由替换成「拒绝处理器」，返回 400 而非 500。
+
+#### 4.4.2 核心流程
+
+```text
+纯扩散检测：stage_configs 仅 1 个且 stage_type=="diffusion"
+  → 用 utils.is_single_stage_diffusion / get_stage_type 判定
+  → 走 _DiffusionServingModels + 各 for_diffusion 类方法
+
+错误处理改写：
+  EngineGenerateError / EngineDeadError
+    → omni_engine_error_handler
+    → _build_engine_error_payload (附加 request_id / error_stage_id)
+    → _create_engine_error_json_response (EngineDeadError 时记 orchestrator 诊断)
+    → 返回 OpenAI 兼容 JSON
+
+端点裁剪：
+  engine_client.endpoint_restrictions + UNSUPPORTED_ROUTES
+    → shutdown_unsupported_routes(app, ...)
+    → 对每个受限路由 _remove_route_from_app + app.add_api_route(拒绝处理器)
+```
+
+#### 4.4.3 源码精读
+
+**纯扩散模式的「最小 serving models」**：
+
+[api_server.py:386-433](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L386-L433) —— `_DiffusionServingModels`：上游 `/v1/models` 路由要求 `app.state.openai_serving_models.show_available_models()` 存在；纯扩散模式下没有真正的 `OpenAIServingModels`（它依赖 LLM 处理器），于是 omni 提供这个轻量替身，只实现 `show_available_models()` 返回基础模型卡，其余方法访问一律抛 `NotImplementedError`。辅助函数 [utils.py:86-91](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/utils.py#L86-L91) 的 `is_single_stage_diffusion` 与 [utils.py:11-20](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/utils.py#L11-L20) 的 `get_stage_type` 是判定 stage 类型的小工具。
+
+**多阶段感知的错误处理器**：
+
+[api_server.py:279-304](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L279-L304) —— `_register_omni_exception_handlers` 用 `app.exception_handler(...)` 注册一个统一的 `omni_engine_error_handler`，同时接管 `EngineGenerateError` 与 `EngineDeadError`。文档字符串点明原因：上游处理器面向单一 `AsyncLLM`，omni 多阶段编排的「健康」语义不同。
+
+[api_server.py:326-351](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L326-L351) —— `_create_engine_error_json_response`：`EngineDeadError` 时记录 `orchestrator_alive`、`errored`、`request_id`、`error_stage_id`（来自异常对象 `getattr(exc, "error_stage_id", None)`），然后调上游 `terminate_if_errored` 触发关闭，最后返 OpenAI 风格错误 JSON。`error_stage_id` 就是「在第几个 stage 挂了」的多阶段诊断字段。
+
+[api_server.py:311-323](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L311-L323) —— `_build_engine_error_payload`：在标准错误体上额外注入 `request_id` 与 `error_stage_id`，这是 omni 对 OpenAI 错误协议的扩展。
+
+**端点裁剪策略**：
+
+[api_server.py:514-518](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L514-L518) —— 在 `omni_init_app_state` 之后调用 `shutdown_unsupported_routes(app, engine_client.endpoint_restrictions)`，按模型自身声明的限制裁端点。
+
+[endpoint_policy.py:65-91](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/config/endpoint_policy.py#L65-L91) —— `shutdown_unsupported_routes`：把模型级 `endpoint_restrictions` 与全局 `UNSUPPORTED_ROUTES`（如批量 chat，[L44-49](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/config/endpoint_policy.py#L44-L49)）合并，对每条限制先 `_remove_route_from_app` 删原路由，再用 `app.add_api_route(path, rejection_handler, methods=...)` 挂上一个返 400 的处理器。这样客户端调用不支持的端点会得到「明确拒绝」而不是「500 内部错误」。
+
+> 小结：协议扩展 = 纯扩散轻量初始化 + 多阶段错误体（`error_stage_id`）+ 按模型能力裁端点。三者共同保证「任何 OpenAI 客户端都能得到一个可解释的响应」。
+
+#### 4.4.4 代码实践
+
+**目标**：构造一次「引擎错误」场景，观察 omni 错误处理器产出的多阶段诊断字段（源码阅读型）。
+
+**操作步骤**：
+
+1. 阅读 `_create_engine_error_json_response`（[L326-351](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L326-L351)）与 `_build_engine_error_payload`（[L311-323](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L311-L323)）。
+2. 假设 Qwen3-Omni 的 stage 1（Talker）在推理中崩溃：推断返回的 JSON 里会多出哪两个字段。
+3. 阅读 [endpoint_policy.py:44-49](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/config/endpoint_policy.py#L44-L49)，确认 `POST /v1/chat/completions/batch` 会被全局拒绝。
+4. 若有本地环境，可手动 kill 某个 stage 子进程模拟崩溃，再 `curl /v1/chat/completions` 观察错误体；否则标注「待本地验证」。
+
+**需要观察的现象**：错误 JSON 的 `error` 对象除 `message`/`code` 外，会出现 `request_id` 与 `error_stage_id`；`/v1/chat/completions/batch` 调用会返回 400 且 message 说明「Batched chat completions are not yet supported by vLLM Omni」。
+
+**预期结果**：能用一句话说明 omni 错误体相对标准 OpenAI 错误体的两处扩展字段，以及它们为何对多阶段调试至关重要。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：为什么纯扩散模式不能用上游的 `OpenAIServingModels`？
+
+> 参考答案：上游 `OpenAIServingModels` 依赖 LLM 专属的处理器（input_processor、model_config、tokenizer 等），纯扩散服务没有也不需要这些。强行实例化会失败或拖入无谓的重依赖。`_DiffusionServingModels`（[L386-433](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L386-L433)）只实现 `/v1/models` 必需的 `show_available_models()`，其余访问统一抛 `NotImplementedError`，既满足协议要求又不引入 LLM 依赖。
+
+**练习 2**：`shutdown_unsupported_routes` 把端点改成「拒绝处理器」而非直接删除，有什么好处？
+
+> 参考答案：直接删除会让客户端得到 Starlette 默认的 404，且无法区分「端点不存在」与「该模型不支持此端点」。改成拒绝处理器（[endpoint_policy.py:52-62](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/config/endpoint_policy.py#L52-L62)）后，返回 400 + 模型相关的 `reason` 说明（如「Batched chat completions are not yet supported by vLLM Omni」），对客户端更友好、更可诊断。
+
+## 5. 综合实践
+
+**任务**：为一次 `POST /v1/chat/completions`（文生图）请求，绘制一张贯穿四层的「端到端流转图」，并标注每层的源码位置。
+
+要求覆盖以下四层，并把本讲的四个最小模块串起来：
+
+1. **CLI/入口层**：`vllm serve --omni` → `omni_run_server` → `omni_run_server_worker`（4.1）。指出「借上游 `build_openai_app` + 删 `/v1/chat/completions` + 并 omni `router`」的三连发生在哪几行。
+2. **路由层**：请求命中 `@router.post("/v1/chat/completions")` 的 `create_chat_completion`（4.2，[L1174](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/entrypoints/openai/api_server.py#L1174)）。
+3. **绑定层**：`Omnichat(raw_request)` → `app.state.openai_serving_chat`，回溯到 `omni_init_app_state` 中 `OmniOpenAIServingChat.for_diffusion`（纯扩散）或标准构造器（LLM）的赋值点（4.3）。
+4. **引擎层**：serving 模块调用 `AsyncOmni`（`_diffusion_engine` / `engine_client`）下沉到 Orchestrator（u3-l1/u3-l2）。
+
+**交付物**：
+
+- 一张箭头图（文字版即可），从 HTTP 请求一路画到 `AsyncOmni.generate`。
+- 一张表，列出图上每个节点对应的「文件:行号」。
+- 在图上特别标出：如果 stage 1 崩溃，错误会沿哪条路径返回，`error_stage_id` 在哪里被注入（4.4）。
+
+完成此任务后，你应当能脱离讲义，独立向他人解释「一张 `coffee.png` 是怎么通过 omni 的 API server 被生成出来的」。
+
+## 6. 本讲小结
+
+- omni **没有自写 `build_app`**，而是复用上游 `build_openai_app`，再在运行时删掉 `/v1/chat/completions`、`/v1/models` 两个上游路由、并入自己的 `router`——这是「借上游 + 改两处」的 patch 哲学在应用层的延续（4.1）。
+- 所有 omni 多模态端点（chat / images / videos / speech / audio / realtime / sleep 等）集中挂在模块级 `router = APIRouter()` 上，由 `app.include_router(router)` 一次性并入；同路径冲突用 `_remove_route_from_router`（router 级，导入期）与 `_remove_route_from_app`（app 级，启动期）两个函数分别处理（4.2）。
+- 引擎对象 `AsyncOmni` 是全局单例：`build_async_omni` 产出 → `omni_init_app_state` 钉进 `app.state.engine_client` / `stage_configs` → 依赖提供者 `Omnichat/Omnivideo/...` 在请求期取用 → serving 模块持有并调用（4.3）。
+- `omni_init_app_state` 有两条分支：纯扩散（单 diffusion stage，轻量初始化 + `_DiffusionServingModels` + `for_diffusion` 类方法）与 LLM/多阶段（完整 `OpenAIServingModels` + `OnlineRenderer` + 条件性 serving 模块），由 `stage_configs` 长度与 `stage_type` 判定（4.3 / 4.4）。
+- 协议层三处扩展：纯扩散最小 serving models、多阶段感知错误处理器（注入 `request_id`/`error_stage_id`）、`shutdown_unsupported_routes` 把不支持端点改成 400 拒绝处理器（4.4）。
+- 启动顺序的关键铁律：「删上游路由」必须在「并入 omni router」之前；「引擎构造」必须在「应用构造」之前（后者需要 `supported_tasks`）。
+
+## 7. 下一步学习建议
+
+本讲只讲了「外壳」——路由、app.state、引擎绑定。serving 模块内部如何把 OpenAI 请求翻译成多阶段生成请求，留给后续讲义：
+
+- **u6-l2 多模态端点**：深入 `serving_chat` / `serving_video` / `serving_speech` / `serving_audio_generate`，看 chat 的多模态 content 如何解析、video 的参考音视频如何处理、TTS adapter 如何归一化参数。
+- **u6-l3 流式输出与实时/全双工**：深入 `/v1/realtime`、`/v1/video/chat/stream`、`/v1/duplex` 等 WebSocket 端点，理解 `RealtimeConnection`、`StreamingVideoHandler` 与 `should_enable_duplex_endpoint`。
+- **复习 u3-l1 / u3-l2**：当你想搞清「serving 模块调用 `AsyncOmni` 之后，请求是怎么在 stage 间流转的」，回到多阶段运行时讲义看 Orchestrator 的编排主循环。
+- **若关心错误处理**：可顺带阅读 u3-l5（OmniCoordinator 心跳与副本健康），与本讲的 `EngineDeadError` 处理互为补充——前者管分布式副本存活，后者管单请求级错误响应。

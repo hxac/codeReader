@@ -1,7 +1,7 @@
 {
   "project": "vllm",
-  "head": "f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8",
-  "rationale": "vLLM 是一个体量巨大的高吞吐 LLM 推理与服务引擎，采用 V1 多进程架构（API Server → EngineCore → GPU Worker）。因此学习路线从「认知与上手」起步：先讲清项目定位、构建安装与仓库目录，再让读者跑通离线推理和 vllm serve。进入进阶层后，沿着「请求如何流动」的主线推进——配置体系（VllmConfig）→ V1 进程架构 → 调度与 PagedAttention KV 缓存 → 引擎核心主循环与模型执行链路（EngineCore/Worker/ModelRunner）→ 模型注册与并行核心层（Linear/Embedding/Attention）→ 采样与多模态。专家层聚焦性能与扩展内核：注意力后端、CUDA Graphs 与 torch.compile、量化、Fused MoE；分布式（TP/PP/DP）、推测解码、LoRA、结构化输出等扩展能力；最后落到平台抽象、可观测性与测试贡献流程。单元按「先认识整体、再沿数据流深入、最后攻扩展与工程化」的顺序排列，每篇讲义只解决一个独立主题，并通过 depends_on 串成清晰依赖链，确保读者由浅入深、结合真实源码与可操作实践任务逐步掌握 vLLM。大型项目按规则拆为 30 篇以上讲义。",
+  "head": "c2881ce60302b5455867d2c29cdfae5fbeddecac",
+  "rationale": "本次增量（f0de1a6 → c2881ce）以缺陷修复与小功能为主，未改变 V1 主架构（API Server → EngineCore → GPU Worker），因此学习路线的整体单元划分与依赖链保持不变，绝大多数讲义标记为 keep。需 update 的 6 篇均因其直接引用的源码文件发生局部改动：u4-l1（Request 新增 session_id 字段并在 from_params 中透传）、u3-l4（AsyncLLM/EngineClient.generate 新增 session_id 参数）、u5-l5（input_processor 透传 session_id）、u3-l2（VllmConfig 校验列表移除已被启用 #50721 的 routed experts capture）、u5-l3（gpu_model_runner 中 routed experts 捕获逻辑重构为 bind_routed_experts_capturer / get_routed_experts，移除 clear_buffer 调用与 _get_attention_kv_cache_gid）、u6-l1（models/__init__.py 新增模型注册项）。本区间还出现 MRv2/ModelRunnerV2 的 gpu/ 子目录完善（routed-experts capture 启用、Mamba 混合状态 int32 修复）、ROCm AITER/RDNA 与 MXFP4/NVFP4 量化、Triton windowed prefill 与 NIXL 连接器兼容性校验、Ray utils 等改进，但它们或属尚未纳入 V1 主线的并行实现，或未触及各讲义所引用的具体源码文件（如 u8-l4 引用的 fp8.py 未变、u8-l5 引用的 fused_moe.py/layer.py 未变、u9-l2 引用的三个 executor 未变、u9-l3 引用的 eagle/ngram/rejection_sampler 未变），故不新增讲义、不重建；session_id 作为跨切面的小型前端能力亦不单列讲义，而是在上述请求/引擎讲义中以 update 方式融入。整体仍遵循「先认识整体、再沿数据流深入、最后攻扩展与工程化」的顺序。",
   "units": [
     {
       "id": "u1",
@@ -34,7 +34,7 @@
           ],
           "practice_task": "阅读 README，列举 vLLM 相比朴素 HuggingFace 推理的 3 项关键性能优化，并用自己的话简述 PagedAttention 解决了什么内存问题。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -65,7 +65,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -95,7 +95,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -125,7 +125,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -162,7 +162,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -191,7 +191,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -218,7 +218,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -248,7 +248,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -286,7 +286,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -294,7 +294,7 @@
           "order": 2,
           "filename": "u3-l2-vllm-config-system.md",
           "level": "intermediate",
-          "topic": "讲解作为引擎级全局状态的 VllmConfig，以及它如何聚合各子配置并被各处传递。",
+          "topic": "讲解作为引擎级全局状态的 VllmConfig，以及它如何聚合各子配置并被各处传递。注意 VllmConfig 的不支持特性校验列表随版本演进（如 routed experts capture 已随 #50721 启用并移出 unsupported）。",
           "learning_goals": [
             "理解 VllmConfig 作为统一配置对象的设计动机",
             "掌握 ModelConfig 等核心子配置的作用",
@@ -314,7 +314,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u3-l3",
@@ -342,7 +342,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -350,7 +350,7 @@
           "order": 4,
           "filename": "u3-l4-async-llm-engine-client.md",
           "level": "intermediate",
-          "topic": "讲解 AsyncLLM 作为 EngineClient 如何向 API Server 暴露异步接口，以及它与 EngineCore 进程的协作。",
+          "topic": "讲解 AsyncLLM 作为 EngineClient 如何向 API Server 暴露异步接口，以及它与 EngineCore 进程的协作（含 session_id 等请求级元数据的透传）。",
           "learning_goals": [
             "理解 AsyncLLM 的异步请求处理模型",
             "掌握 add_request / generate 的异步用法",
@@ -358,7 +358,8 @@
           ],
           "source_files": [
             "vllm/v1/engine/async_llm.py",
-            "vllm/v1/engine/core_client.py"
+            "vllm/v1/engine/core_client.py",
+            "vllm/engine/protocol.py"
           ],
           "minimal_modules": [
             "AsyncLLM",
@@ -370,7 +371,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -386,10 +387,10 @@
           "order": 1,
           "filename": "u4-l1-request-lifecycle.md",
           "level": "intermediate",
-          "topic": "讲解 v1 内部的 Request 对象、序列状态与一个请求从加入到完成的生命周期。",
+          "topic": "讲解 v1 内部的 Request 对象、序列状态与一个请求从加入到完成的生命周期（含 session_id 等新增的请求级字段）。",
           "learning_goals": [
             "理解 Request 的核心字段与状态机",
-            "掌握 prompt_token_ids、采样参数等如何挂载在请求上",
+            "掌握 prompt_token_ids、采样参数、session_id 等如何挂载在请求上",
             "认识请求在各阶段（waiting/running/finished）的流转"
           ],
           "source_files": [
@@ -400,13 +401,14 @@
             "Request",
             "RequestStatus",
             "prompt_token_ids",
-            "num_computed_tokens"
+            "num_computed_tokens",
+            "session_id"
           ],
           "practice_task": "阅读 request.py，列举 Request 的关键字段，并描述一个请求从 add_request 到 finish 的状态变化序列。",
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u4-l2",
@@ -434,7 +436,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -461,7 +463,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -490,7 +492,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l5",
@@ -518,7 +520,7 @@
           "depends_on": [
             "u4-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -554,7 +556,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -582,7 +584,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -590,7 +592,7 @@
           "order": 3,
           "filename": "u5-l3-model-runner.md",
           "level": "intermediate",
-          "topic": "讲解 GPU ModelRunner 如何准备输入张量、捕获 cudagraph、执行模型并产出 logits。",
+          "topic": "讲解 GPU ModelRunner 如何准备输入张量、捕获 cudagraph、执行模型并产出 logits。注意 routed experts 捕获逻辑已重构为独立的 bind_routed_experts_capturer 与 get_routed_experts 辅助接口。",
           "learning_goals": [
             "理解 ModelRunner 在准备输入与执行 forward 中的作用",
             "掌握 input_batch 的组织方式",
@@ -610,7 +612,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u5-l4",
@@ -638,7 +640,7 @@
           "depends_on": [
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l5",
@@ -646,7 +648,7 @@
           "order": 5,
           "filename": "u5-l5-input-processing.md",
           "level": "intermediate",
-          "topic": "讲解 InputProcessor 如何做 tokenization 与多模态数据预处理，以及 detokenizer 如何把 token 还原为文本。",
+          "topic": "讲解 InputProcessor 如何做 tokenization 与多模态数据预处理，以及 detokenizer 如何把 token 还原为文本（含 session_id 等请求级元数据的透传）。",
           "learning_goals": [
             "理解 API/引擎层对输入的预处理位置",
             "掌握 tokenizer 注册与使用方式",
@@ -666,7 +668,7 @@
           "depends_on": [
             "u3-l4"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -682,7 +684,7 @@
           "order": 1,
           "filename": "u6-l1-model-registry.md",
           "level": "intermediate",
-          "topic": "讲解 _ModelRegistry 如何通过架构名映射到模型实现类，以及懒注册机制。",
+          "topic": "讲解 _ModelRegistry 如何通过架构名映射到模型实现类，以及懒注册机制（models/__init__.py 随版本新增模型注册项）。",
           "learning_goals": [
             "理解 HF 架构名到 vLLM 模型类的映射机制",
             "掌握 _LazyRegisteredModel 等懒注册设计",
@@ -702,7 +704,7 @@
           "depends_on": [
             "u5-l3"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u6-l2",
@@ -730,7 +732,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -758,7 +760,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l4",
@@ -785,7 +787,7 @@
           "depends_on": [
             "u6-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l5",
@@ -812,7 +814,7 @@
           "depends_on": [
             "u6-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -847,7 +849,7 @@
           "depends_on": [
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -874,7 +876,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -901,7 +903,7 @@
           "depends_on": [
             "u6-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l4",
@@ -927,7 +929,7 @@
           "depends_on": [
             "u7-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -963,7 +965,7 @@
           "depends_on": [
             "u6-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -990,7 +992,7 @@
           "depends_on": [
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -1019,7 +1021,7 @@
           "depends_on": [
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l4",
@@ -1046,7 +1048,7 @@
           "depends_on": [
             "u6-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l5",
@@ -1074,7 +1076,7 @@
           "depends_on": [
             "u6-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1110,7 +1112,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -1139,7 +1141,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",
@@ -1168,7 +1170,7 @@
           "depends_on": [
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l4",
@@ -1195,7 +1197,7 @@
           "depends_on": [
             "u6-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l5",
@@ -1223,7 +1225,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1258,7 +1260,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -1286,7 +1288,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l3",
@@ -1315,7 +1317,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l4",
@@ -1345,7 +1347,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

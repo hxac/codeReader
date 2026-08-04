@@ -24,13 +24,13 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| [vllm/config/__init__.py](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/__init__.py) | 配置包的总出口，把所有子配置类重新导出，供 `from vllm.config import VllmConfig` 使用。 |
-| [vllm/config/vllm.py](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/vllm.py) | 定义 `VllmConfig` 这个聚合对象本身，含字段声明、跨配置校验（`__post_init__`）、哈希与「当前配置」上下文管理。 |
-| [vllm/config/model.py](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/model.py) | 定义 `ModelConfig`，描述「用什么模型、什么精度、多长上下文」等模型本身的信息。 |
-| [vllm/config/utils.py](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/utils.py) | 提供 `@config` 装饰器、`replace`（不可变更新）、哈希归一化等所有配置类的公共工具。 |
-| [vllm/model_executor/model_loader/utils.py](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/model_executor/model_loader/utils.py) | `initialize_model` 是模型构造的统一入口，展示 `vllm_config` + `prefix` 约定如何被实际调用。 |
-| [vllm/model_executor/models/llama.py](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/model_executor/models/llama.py) | Llama 模型实现，作为「新式构造签名」的真实范例。 |
-| [docs/design/arch_overview.md](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/docs/design/arch_overview.md) | 架构总览，明确写出 Extensibility / Uniformity / Sharding at init 三大设计取舍。 |
+| [vllm/config/__init__.py](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/__init__.py) | 配置包的总出口，把所有子配置类重新导出，供 `from vllm.config import VllmConfig` 使用。 |
+| [vllm/config/vllm.py](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/vllm.py) | 定义 `VllmConfig` 这个聚合对象本身，含字段声明、跨配置校验（`__post_init__`）、哈希与「当前配置」上下文管理。 |
+| [vllm/config/model.py](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/model.py) | 定义 `ModelConfig`，描述「用什么模型、什么精度、多长上下文」等模型本身的信息。 |
+| [vllm/config/utils.py](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/utils.py) | 提供 `@config` 装饰器、`replace`（不可变更新）、哈希归一化等所有配置类的公共工具。 |
+| [vllm/model_executor/model_loader/utils.py](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/model_executor/model_loader/utils.py) | `initialize_model` 是模型构造的统一入口，展示 `vllm_config` + `prefix` 约定如何被实际调用。 |
+| [vllm/model_executor/models/llama.py](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/model_executor/models/llama.py) | Llama 模型实现，作为「新式构造签名」的真实范例。 |
+| [docs/design/arch_overview.md](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/docs/design/arch_overview.md) | 架构总览，明确写出 Extensibility / Uniformity / Sharding at init 三大设计取舍。 |
 
 ## 4. 核心概念与源码讲解
 
@@ -63,7 +63,7 @@ vLLM 的解法是：**把所有配置打包进一个对象 `VllmConfig`，整个
 
 `VllmConfig` 类用 `@config` 装饰，内部聚合了十余块子配置：
 
-[声明 VllmConfig 与第一批子配置字段 — vllm/config/vllm.py:L330-L352](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/vllm.py#L330-L352)
+[声明 VllmConfig 与第一批子配置字段 — vllm/config/vllm.py:L330-L352](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/vllm.py#L330-L352)
 
 这段代码做了三件值得注意的事：
 
@@ -73,29 +73,44 @@ vLLM 的解法是：**把所有配置打包进一个对象 `VllmConfig`，整个
 
 `compute_hash` 体现了「哪些配置会影响计算图」这一关键认知——它把 model/cache/parallel/scheduler/device/load/compilation/kernel 等子配置的哈希拼起来：
 
-[把影响计算图的子配置汇总成指纹 — vllm/config/vllm.py:L431-L537](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/vllm.py#L431-L537)
+[把影响计算图的子配置汇总成指纹 — vllm/config/vllm.py:L431-L537](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/vllm.py#L431-L537)
 
 注意其中 `quant_config` 那一行是 `pass`——注释说明量化信息已经通过 `model_config.quantization` 间接计入，避免重复。这种「在哈希层面也要保持一致性」的细节，正是把 `VllmConfig` 当成单一事实源（single source of truth）的体现。
 
 `__post_init__` 是配置「自我协调」的中枢，几百行都在做跨配置校验与派生。一个典型例子是：当用户没显式给 `quant_config` 时，由 `model_config` + `load_config` 推导出来：
 
-[`__post_init__ 中按需推导 quant_config — vllm/config/vllm.py:L1028-L1031](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/vllm.py#L1028-L1031)
+[`__post_init__ 中按需推导 quant_config — vllm/config/vllm.py:L1028-L1031](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/vllm.py#L1028-L1031)
 
 它调用的静态方法 `_get_quantization_config` 会读取设备能力、校验激活精度是否被支持：
 
-[`_get_quantization_config 推导与校验量化配置 — vllm/config/vllm.py:L705-L739](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/vllm.py#L705-L739)
+[`_get_quantization_config 推导与校验量化配置 — vllm/config/vllm.py:L705-L739](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/vllm.py#L705-L739)
+
+`__post_init__` 还会在确定使用 V2 model runner 时（[vllm/config/vllm.py:L1494-L1495](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/vllm.py#L1494-L1495)）调用 `_validate_v2_model_runner`，后者借助一份「V2 model runner 尚不支持特性」清单来把关——命中清单的特性会让 `use_v2_model_runner` 回退到 V1，或在强制 V2 时直接报错：
+
+[_get_v2_model_runner_unsupported_features 汇总 V2 未支持特性 — vllm/config/vllm.py:L2170-L2253](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/vllm.py#L2170-L2253)
+
+这份清单会随版本演进。**本版本（[#50721](https://github.com/vllm-project/vllm/pull/50721)）已把 routed experts capture（路由专家捕获）从清单中移除**，意味着该功能在 V2 model runner 下被正式启用。被删掉的就是原本夹在 `enable_elastic_ep` 检查与 logits-processor 检查之间的这一段（原占位 PR 为 #38163）：
+
+```python
+# 已删除：
+# if model_config is not None and model_config.enable_return_routed_experts:
+#     # Will be added by https://github.com/vllm-project/vllm/pull/38163
+#     unsupported.append("routed experts capture")
+```
+
+对照当前代码——`enable_elastic_ep` 之后直接进入 `has_logitsproc_plugins`，中间不再有 routed experts 那行（见 [vllm/config/vllm.py:L2225-L2231](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/vllm.py#L2225-L2231)）。这体现了一条贯穿本讲的规律：**`VllmConfig` 的校验逻辑会随能力落地而松绑**——某功能从「不支持」变为「支持」，往往就是这份清单里少掉一行；与之配套的「V2 是否可用」决策也跟着改变。
 
 最后，「全局当前配置」靠一个上下文管理器实现，它把 `VllmConfig` 存进模块级变量 `_current_vllm_config`，离开上下文时还原：
 
-[set_current_vllm_config 临时设置全局配置 — vllm/config/vllm.py:L2377-L2402](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/vllm.py#L2377-L2402)
+[set_current_vllm_config 临时设置全局配置（含 finally 中的还原） — vllm/config/vllm.py:L2373-L2425](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/vllm.py#L2373-L2425)
 
 对应的读取函数会在配置未设置时给出清晰的报错，并提示测试用 `default_vllm_config` 这个 pytest fixture：
 
-[get_current_vllm_config 读取或报错 — vllm/config/vllm.py:L2438-L2448](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/vllm.py#L2438-L2448)
+[get_current_vllm_config 读取或报错 — vllm/config/vllm.py:L2434-L2444](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/vllm.py#L2434-L2444)
 
 在 `vllm/config/__init__.py` 里，所有这些类与函数被集中重新导出，所以业务代码只需 `from vllm.config import VllmConfig`：
 
-[配置包总出口重新导出 VllmConfig 及其助手 — vllm/config/__init__.py:L54-L61](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/__init__.py#L54-L61)
+[配置包总出口重新导出 VllmConfig 及其助手 — vllm/config/__init__.py:L54-L61](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/__init__.py#L54-L61)
 
 #### 4.1.4 代码实践
 
@@ -126,7 +141,7 @@ vLLM 的解法是：**把所有配置打包进一个对象 `VllmConfig`，整个
 
 **预期结果**：前几行打印 `CacheConfig` / `ParallelConfig` / `SchedulerConfig`，`model_config is None`，最后一行打印一个 10 字符哈希。**待本地验证**：不同 vLLM 版本下默认字段值可能微调，哈希值也会随之变化。
 
-> 进阶：想体会 `set_current_vllm_config` 的作用，可参照测试 fixture `default_vllm_config`（[tests/conftest.py:L254-L263](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/tests/conftest.py#L254-L263)），它正是用 `VllmConfig()` + `set_current_vllm_config` 让脱离引擎上下文的单元测试也能读到「当前配置」。
+> 进阶：想体会 `set_current_vllm_config` 的作用，可参照测试 fixture `default_vllm_config`（[tests/conftest.py:L254-L263](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/tests/conftest.py#L254-L263)），它正是用 `VllmConfig()` + `set_current_vllm_config` 让脱离引擎上下文的单元测试也能读到「当前配置」。
 
 #### 4.1.5 小练习与答案
 
@@ -135,6 +150,9 @@ vLLM 的解法是：**把所有配置打包进一个对象 `VllmConfig`，整个
 
 **练习 2**：`compute_hash()` 里为什么对 `quant_config` 直接 `pass`？
 **参考答案**：量化信息已经通过 `model_config.quantization` 间接计入指纹（量化方法名来自模型配置）。如果再把 `quant_config` 单独哈希一次，就会重复计入同一信息，可能让本应命中的编译缓存失配。
+
+**练习 3**：本版本把 routed experts capture 从 `_get_v2_model_runner_unsupported_features` 的清单里删掉了。从「配置即契约」的角度，这一删改会带来什么可见影响？
+**参考答案**：在此版本之前，开启 `enable_return_routed_experts` 的模型会因命中该清单而回退到 V1 model runner（或强制 V2 时报错）；删除之后，这类模型可以在 V2 model runner 下直接运行 routed experts capture。这同时说明：`VllmConfig` 的「不支持特性」清单不是一成不变的契约，而是随 V2 能力落地逐步缩短的白名单反面——读源码时应把它当作「当前版本的能力边界」，而非永久事实。
 
 ---
 
@@ -159,7 +177,7 @@ vLLM 的解法是：**把所有配置打包进一个对象 `VllmConfig`，整个
 
 `ModelConfig` 同样用 `@config` 装饰，关键字段示例：
 
-[ModelConfig 类声明与若干关键字段 — vllm/config/model.py:L121-L176](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/model.py#L121-L176)
+[ModelConfig 类声明与若干关键字段 — vllm/config/model.py:L121-L176](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/model.py#L121-L176)
 
 几个初学者容易忽略的点：
 
@@ -172,11 +190,11 @@ vLLM 的解法是：**把所有配置打包进一个对象 `VllmConfig`，整个
 
 模型属性的读取大多封装成只读 property，便于上层使用且避免重复计算：
 
-- 解析出的「vLLM 实际使用的架构名」：[architecture property — vllm/config/model.py:L963-L966](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/model.py#L963-L966)
-- 与并行配置的交叉校验（典型：注意力头数必须能被 TP 整除）：[verify_with_parallel_config — vllm/config/model.py:L1309-L1320](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/model.py#L1309-L1320)
-- 是否 MoE、是否量化：[is_moe / is_quantized — vllm/config/model.py:L2006-L2012](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/model.py#L2006-L2012)
+- 解析出的「vLLM 实际使用的架构名」：[architecture property — vllm/config/model.py:L963-L966](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/model.py#L963-L966)
+- 与并行配置的交叉校验（典型：注意力头数必须能被 TP 整除）：[verify_with_parallel_config — vllm/config/model.py:L1309-L1320](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/model.py#L1309-L1320)
+- 是否 MoE、是否量化：[is_moe / is_quantized — vllm/config/model.py:L2006-L2012](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/model.py#L2006-L2012)
 
-注意 `verify_with_parallel_config` 是在 `VllmConfig.__post_init__` 里被调用的——这再次体现「`VllmConfig` 是协调中心，子配置之间的一致性由它来组织」（见 [vllm/config/vllm.py:L983-L984](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/vllm.py#L983-L984)）。
+注意 `verify_with_parallel_config` 是在 `VllmConfig.__post_init__` 里被调用的——这再次体现「`VllmConfig` 是协调中心，子配置之间的一致性由它来组织」（见 [vllm/config/vllm.py:L983-L984](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/vllm.py#L983-L984)）。
 
 #### 4.2.4 代码实践
 
@@ -188,7 +206,7 @@ vLLM 的解法是：**把所有配置打包进一个对象 `VllmConfig`，整个
 2. 用 `Grep` 在 `vllm/` 下搜索这些属性的调用点，例如 `model_config.is_moe`、`get_hidden_size()`。
 3. 记录至少 3 个「消费方」：谁在读这些属性、读到之后做了什么决策。
 
-**需要观察的现象**：你会发现 `is_moe` 同时影响 `VllmConfig.needs_dp_coordinator`（是否需要 DP Coordinator 进程，见 [vllm/config/vllm.py:L660-L681](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/vllm.py#L660-L681)）与 `__post_init__` 里 `parallel_config.is_moe_model` 的赋值（[vllm/config/vllm.py:L987](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/vllm.py#L987)）。
+**需要观察的现象**：你会发现 `is_moe` 同时影响 `VllmConfig.needs_dp_coordinator`（是否需要 DP Coordinator 进程，见 [vllm/config/vllm.py:L660-L681](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/vllm.py#L660-L681)）与 `__post_init__` 里 `parallel_config.is_moe_model` 的赋值（[vllm/config/vllm.py:L987](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/vllm.py#L987)）。
 
 **预期结果**：能写出类似「`ModelConfig.is_moe` → 决定是否起 DP Coordinator」「`get_hidden_size()` → 用于序列并行阈值计算」「`architecture` → 决定是否默认走 V2 model runner」这样的链条。**待本地验证**：随版本演进调用点会增减。
 
@@ -240,31 +258,31 @@ def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
 
 文档把这条约定写得很明确：
 
-[arch_overview 关于 Uniformity 与统一构造签名的说明 — docs/design/arch_overview.md:L229-L248](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/docs/design/arch_overview.md#L229-L248)
+[arch_overview 关于 Uniformity 与统一构造签名的说明 — docs/design/arch_overview.md:L229-L248](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/docs/design/arch_overview.md#L229-L248)
 
 以及 Sharding-at-init 与 `prefix` 用途的说明：
 
-[arch_overview 关于初始化时分片/量化与 prefix 的说明 — docs/design/arch_overview.md:L282-L301](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/docs/design/arch_overview.md#L282-L301)
+[arch_overview 关于初始化时分片/量化与 prefix 的说明 — docs/design/arch_overview.md:L282-L301](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/docs/design/arch_overview.md#L282-L301)
 
 统一入口 `initialize_model` 实现：
 
-[initialize_model 按签名分派新式/旧式构造 — vllm/model_executor/model_loader/utils.py:L41-L64](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/model_executor/model_loader/utils.py#L41-L64)
+[initialize_model 按签名分派新式/旧式构造 — vllm/model_executor/model_loader/utils.py:L41-L64](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/model_executor/model_loader/utils.py#L41-L64)
 
 注意第 59–62 行：只要 `__init__` 同时含 `vllm_config` 和 `prefix`，就走新式分支，并在 `set_current_vllm_config(..., prefix=prefix)` 上下文里构造——这也解释了为什么自定义算子能在模型构造期间读到「当前配置」。
 
 真实模型范例——Llama 的顶层模型类：
 
-[LlamaForCausalLM 统一构造签名 — vllm/model_executor/models/llama.py:L466-L482](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/model_executor/models/llama.py#L466-L482)
+[LlamaForCausalLM 统一构造签名 — vllm/model_executor/models/llama.py:L466-L482](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/model_executor/models/llama.py#L466-L482)
 
 可以看到它从 `vllm_config` 里取出 `hf_config` 和 `quant_config`，然后用 `maybe_prefix(prefix, "model")` / `maybe_prefix(prefix, "lm_head")` 把 prefix 一路向下传给子模型与输出头。`maybe_prefix` 的语义很简单：
 
-[maybe_prefix：非空才拼接 — vllm/model_executor/models/utils.py:L870-L880](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/model_executor/models/utils.py#L870-L880)
+[maybe_prefix：非空才拼接 — vllm/model_executor/models/utils.py:L870-L880](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/model_executor/models/utils.py#L870-L880)
 
 这样每层都拿到自己在 checkpoint 里对应的名字（如 `model.layers.3.self_attn.qkv_proj`），分片/量化时就能精准定位。这便是 arch_overview 所说「`prefix` 一般与该模块在 checkpoint state dict 中的名字对齐」的代码落地。
 
 `@config` 装饰器本身定义在公共工具里，所有配置类共用：
 
-[@config 装饰器：默认禁止多余字段 — vllm/config/utils.py:L51-L80](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/utils.py#L51-L80)
+[@config 装饰器：默认禁止多余字段 — vllm/config/utils.py:L51-L80](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/utils.py#L51-L80)
 
 其中 `merged_config = ConfigDict(extra="forbid")` 意味着配置类不接受未声明的字段——拼错字段名会直接报错，这对「配置即契约」的稳定性至关重要。
 
@@ -274,9 +292,9 @@ def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
 
 **操作步骤（源码阅读型）**：
 
-1. 阅读 [docs/design/arch_overview.md:L229-L301](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/docs/design/arch_overview.md#L229-L301)，重点理解 Extensibility / Uniformity / Sharding at init 三段。
-2. 打开 [vllm/model_executor/model_loader/utils.py:L41-L64](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/model_executor/model_loader/utils.py#L41-L64)，确认「统一入口只认 `vllm_config` + `prefix`」。
-3. 打开 [vllm/model_executor/models/llama.py:L466-L482](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/model_executor/models/llama.py#L466-L482)，观察 `maybe_prefix(prefix, "model")` 如何把 prefix 逐层下传。
+1. 阅读 [docs/design/arch_overview.md:L229-L301](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/docs/design/arch_overview.md#L229-L301)，重点理解 Extensibility / Uniformity / Sharding at init 三段。
+2. 打开 [vllm/model_executor/model_loader/utils.py:L41-L64](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/model_executor/model_loader/utils.py#L41-L64)，确认「统一入口只认 `vllm_config` + `prefix`」。
+3. 打开 [vllm/model_executor/models/llama.py:L466-L482](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/model_executor/models/llama.py#L466-L482)，观察 `maybe_prefix(prefix, "model")` 如何把 prefix 逐层下传。
 4. 用 `Grep` 在 `vllm/model_executor/layers/quantization/` 下搜索 `prefix` 的使用（例如 FP8 等量化层如何按 prefix 决定每层是否量化、用什么方案）。
 
 **需要回答的问题（用中文写出你的解释）**：
@@ -292,7 +310,7 @@ def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
 #### 4.3.5 小练习与答案
 
 **练习 1**：如果把一个旧式模型（构造签名是 `__init__(self, config, cache_config=None, ...)`）注册进来，`initialize_model` 会怎么处理？
-**参考答案**：`inspect.signature` 发现它不同时含 `vllm_config` 和 `prefix`，于是发出 `DeprecationWarning`，并尝试按旧式参数名（`config`/`cache_config`/`quant_config`/`lora_config` 等）从 `vllm_config` 里取值拼成 `kwargs` 来兼容调用（见 [model_loader/utils.py:L66-L97](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/model_executor/model_loader/utils.py#L66-L97)）。官方建议尽快迁移到新式签名。
+**参考答案**：`inspect.signature` 发现它不同时含 `vllm_config` 和 `prefix`，于是发出 `DeprecationWarning`，并尝试按旧式参数名（`config`/`cache_config`/`quant_config`/`lora_config` 等）从 `vllm_config` 里取值拼成 `kwargs` 来兼容调用（见 [model_loader/utils.py:L66-L97](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/model_executor/model_loader/utils.py#L66-L97)）。官方建议尽快迁移到新式签名。
 
 **练习 2**：`maybe_prefix("", "lm_head")` 返回什么？`maybe_prefix("language", "lm_head")` 又返回什么？为什么这个行为对权重加载很重要？
 **参考答案**：分别返回 `"lm_head"` 和 `"language.lm_head"`。这样拼接出的名字与权重 checkpoint 里该参数的 state dict key 一致，加载权重时才能正确匹配；也正因如此，`prefix` 能让量化/分片逻辑「认出」每一层是谁。
@@ -305,7 +323,7 @@ def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
 把本讲三个模块串起来，完成一个「**追踪一份配置从无到有、再到驱动模型构造**」的小任务：
 
 1. **构造默认配置**：在解释器里 `from vllm.config import VllmConfig; cfg = VllmConfig()`，确认它不下载模型、`model_config` 为 `None`、各子配置有默认值（对应 4.1）。
-2. **挂上模型信息**：阅读 [VllmConfig.with_hf_config](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/vllm.py#L753-L809)（`vllm/config/vllm.py:L753-L809`），理解它是如何在不重新下载模型的前提下，把一个 `hf_config` 装回 `model_config` 并返回一个新的 `VllmConfig`（用 `replace` 做不可变更新，见 [vllm/config/utils.py:L119-L127](https://github.com/vllm-project/vllm/blob/f0de1a604cad003379e5bb4dfc3cc5d2a1f25fa8/vllm/config/utils.py#L119-L127)）。
+2. **挂上模型信息**：阅读 [VllmConfig.with_hf_config](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/vllm.py#L753-L809)（`vllm/config/vllm.py:L753-L809`），理解它是如何在不重新下载模型的前提下，把一个 `hf_config` 装回 `model_config` 并返回一个新的 `VllmConfig`（用 `replace` 做不可变更新，见 [vllm/config/utils.py:L119-L127](https://github.com/vllm-project/vllm/blob/c2881ce60302b5455867d2c29cdfae5fbeddecac/vllm/config/utils.py#L119-L127)）。
 3. **走到模型构造**：顺着 `initialize_model` → `LlamaForCausalLM.__init__` → `maybe_prefix`，画出「`VllmConfig` 如何被拆解成子配置、`prefix` 如何被逐层下传」的调用链（对应 4.2 与 4.3）。
 4. **一句话总结**：用「`VllmConfig` 是引擎级全局状态 + 统一构造签名 + 初始化时分片/量化」这三点，解释为什么新增一个只影响模型某层的量化选项时，**不必修改 model runner、worker、engine 的任何构造函数**。
 
@@ -315,6 +333,7 @@ def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
 
 - `VllmConfig` 是聚合了 model/cache/parallel/scheduler/load/compilation/quant 等十余块子配置的**引擎级全局状态**，被所有 vLLM 类共享；新增配置项只需在它上面加字段，不必改中间层构造函数（Extensibility）。
 - 它是 Pydantic dataclass（经 `@config` 装饰，默认 `extra="forbid"`），`__post_init__` 承担跨配置校验与派生（如自动推导 `quant_config`、决定 cudagraph 尺寸），`compute_hash` 为编译缓存提供指纹。
+- `__post_init__` 还会经 `_validate_v2_model_runner` 比对一份「V2 未支持特性」清单来决定是否回退 V1；这份清单会随能力落地而缩短（本版本已把 routed experts capture 移出，对应 #50721），属「当前版本的能力边界」而非永久不变。
 - `model_config` 字段默认 `None`，所以 `VllmConfig()` 不触发下载，可作单元测试的默认配置；`set_current_vllm_config` 让脱离参数链的模块（如 CustomOp）也能读到「当前配置」。
 - `ModelConfig` 描述模型本身（`model`/`dtype`/`max_model_len`/`quantization`/`hf_config`…），并通过 `is_moe`、`architecture`、`verify_with_parallel_config` 等属性驱动调度与并行决策。
 - 所有 vLLM 模型构造签名被统一成 `__init__(*, vllm_config, prefix)`（Uniformity），使 model runner 能用同一句话创建任意模型，也让组合 VL 模型变得简单。
