@@ -1,7 +1,7 @@
 {
   "project": "vllm-omni",
-  "head": "900a7f0813d0482811b0e4dfd3cf7deabbe2429f",
-  "rationale": "vLLM-Omni 是在 vLLM 基础上扩展的「全模态（omni-modality）推理与服务框架」，其核心特色是 AR+DiT 多阶段、全解耦（OmniConnector + Orchestrator）的运行时。学习路线遵循「先会用 → 再懂机制 → 后能扩展」的递进。入门层 U1 从项目定位、安装、源码地图到离线/在线快速上手，让读者先跑通第一个模型；U2 讲清 vLLM-Omni 如何通过 patch.py、配置体系、输入输出数据结构扩展 vLLM，这是理解整个项目的地基。进阶层用三个单元分别拆解三大核心子系统：U3 多阶段运行时与编排（AsyncOmniEngine/Orchestrator/Stage 进程/OmniConnector/OmniCoordinator），U4 AR 模块（scheduler/worker/model runner/多模态输出），U5 Diffusion 模块（engine/sched/executor/worker/pipeline），对应架构图中的 Entrypoints、AR、Diffusion、OmniConnector；U6 讲在线服务 API。专家层 U7 集中讲 Diffusion 加速（注意力后端/并行注意力/缓存/并行策略/请求级与连续批处理），U8 讲量化、多硬件平台与性能剖析，U9 讲三类模型（Diffusion / Omni 多阶段 / TTS）的扩展开发与实验特性，U10 讲 L1–L5 测试体系与 CI 工程实践。讲义间依赖按「入门→机制→子系统→加速→扩展→工程」串成线性主干，每个加速/扩展主题都依赖其对应的子系统讲义，确保读者始终结合真实源码循序渐进。",
+  "head": "5215e03a91adecbb5ffece29aa74360a7569d0c5",
+  "rationale": "vLLM-Omni 是在 vLLM 基础上扩展的「全模态（omni-modality）推理与服务框架」，其核心特色是 AR+DiT 多阶段、全解耦（OmniConnector + Orchestrator）的运行时。学习路线遵循「先会用 → 再懂机制 → 后能扩展」的递进。入门层 U1 从项目定位、安装、源码地图到离线/在线快速上手，让读者先跑通第一个模型；U2 讲清 vLLM-Omni 如何通过 patch.py、配置体系、输入输出数据结构扩展 vLLM，这是理解整个项目的地基。进阶层用三个单元分别拆解三大核心子系统：U3 多阶段运行时与编排（AsyncOmniEngine/Orchestrator/Stage 进程/OmniConnector/OmniCoordinator），U4 AR 模块（scheduler/worker/model runner/多模态输出/解码加速），U5 Diffusion 模块（engine/sched/executor/worker/pipeline），对应架构图中的 Entrypoints、AR、Diffusion、OmniConnector；U6 讲在线服务 API。专家层 U7 集中讲 Diffusion 加速（注意力后端/并行注意力/缓存/并行策略/请求级与连续批处理），U8 讲量化、多硬件平台与性能剖析，U9 讲三类模型（Diffusion / Omni 多阶段 / TTS）的扩展开发与实验特性，U10 讲 L1–L5 测试体系与 CI 工程实践。讲义间依赖按「入门→机制→子系统→加速→扩展→工程」串成线性主干，每个加速/扩展主题都依赖其对应的子系统讲义，确保读者始终结合真实源码循序渐进。本次增量（900a7f0 → 5215e03a）共 4 个 PR：#5715 将版本对齐到 v0.26.0 并更新 README/安装文档（新增 MiniMax H3、MiniCPM-o 4.5、全双工实时服务、NPU 安装步骤改写），影响 u1-l1、u1-l2，作 update；#5461「[1/N] Scheduler 重构」将 OmniARScheduler/OmniGenerationScheduler 的重复逻辑上提到共享的 OmniSchedulerMixin 并建立显式生命周期契约（两调度器类与各自的快路径/富化概念均保留），故 u4-l2 作 update 并补充 mixin；#5610 新增「Async Omni Output Materialization」设计文档，把 OmniModelRunnerOutput 的 CPU 侧构造移出 AR 解码关键路径（后台 builder + D2H 重叠），属新增重要机制，故在 U4 新增 u4-l4；#5740 仅修复 MiniMax H3 测试 URL，无讲义影响。其余讲义对应代码在本次窗口未变，全部 keep。",
   "units": [
     {
       "id": "u1",
@@ -27,13 +27,13 @@
             "vllm_omni/__init__.py"
           ],
           "minimal_modules": [
-            "README About / Latest News",
+            "README About / Latest News（含 v0.26.0 发布条目与版本对齐节奏说明）",
             "architecture_overview.md 的 Goals 与 Key Components",
             "vllm_omni/__init__.py 的模块说明注释"
           ],
           "practice_task": "阅读 architecture_overview.md 后，用自己的话画出一张 AR+DiT 模型（如 Qwen3-Omni）在 vLLM-Omni 中的请求流转草图，标出 Thinker/Talker/Code2wav 与 Orchestrator 的位置。",
           "depends_on": [],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u1-l2",
@@ -44,7 +44,7 @@
           "topic": "讲解在不同硬件（CUDA/ROCm/NPU/XPU）上的安装方式、Python 与 vLLM 版本对齐要求，以及 setup.py/pyproject.toml 的关键约定。",
           "learning_goals": [
             "掌握 CUDA 与 ROCm 下从源码安装 vLLM-Omni 的命令",
-            "理解 vLLM 与 vLLM-Omni 主次版本必须对齐的原因及版本告警机制",
+            "理解 vLLM 与 vLLM-Omni 主次版本必须对齐的原因及版本告警机制（0.26.x 对齐 vLLM 0.26.x）",
             "了解 pyproject.toml 中 console_script（vllm-omni）与可选依赖的组织方式"
           ],
           "source_files": [
@@ -54,15 +54,15 @@
             "setup.py"
           ],
           "minimal_modules": [
-            "quickstart.md 的 Installation 段",
+            "installation/README.md 的版本对齐提示与 0.26.0 源码安装段",
             "pyproject.toml 的 [project.scripts] 与依赖声明",
-            "vllm_omni/version.py 的版本对齐告警逻辑"
+            "cuda.inc.md 的 Docker BASE_IMAGE 与 npu.inc.md 的 vllm-ascend releases/v0.26.0rc 构建步骤"
           ],
           "practice_task": "在本机（或容器）按 quickstart 完成 CUDA 源码安装，运行 `python -c \"import vllm_omni; print(vllm_omni.__version__)\"` 确认版本，并故意装一个版本不匹配的 vLLM 观察告警。",
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u1-l3",
@@ -89,7 +89,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -118,7 +118,7 @@
             "u1-l2",
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l5",
@@ -146,7 +146,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -181,7 +181,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -210,7 +210,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -239,7 +239,7 @@
             "u1-l4",
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -277,7 +277,7 @@
             "u1-l4",
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -305,7 +305,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -334,7 +334,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -365,7 +365,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l5",
@@ -394,7 +394,7 @@
           "depends_on": [
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -424,14 +424,14 @@
           ],
           "minimal_modules": [
             "ar_module.md 的继承层次图",
-            "GPUARModelRunner 的两阶段执行",
+            "GPUARModelRunner 的两阶段执行（execute_model + sample_tokens）",
             "OmniGPUModelRunner 的 prompt_embeds overlay 与 additional_information"
           ],
           "practice_task": "对照 ar_module.md 的类图，列出 GPUARModelRunner 相对 vLLM GPUModelRunner 新增/重写的方法，并说明每个方法服务的多模态能力。",
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -439,27 +439,30 @@
           "order": 2,
           "filename": "u4-l2-ar-schedulers.md",
           "level": "intermediate",
-          "topic": "讲解两种 AR 调度器：OmniARScheduler 用 OmniNewRequestData 富化请求，OmniGenerationScheduler 为单步完成的基础异构架构提供快路径。",
+          "topic": "讲解两种 AR 调度器：OmniARScheduler 用 OmniNewRequestData 富化请求，OmniGenerationScheduler 为单步完成的基础异构架构提供快路径；并讲解两者共享的 OmniSchedulerMixin 如何在 [1/N] 重构中提取重复逻辑、建立显式的输入/输出生命周期契约（含 full-payload input_coordinator 与 async chunk 适配）。",
           "learning_goals": [
             "理解 OmniARScheduler.schedule 如何把 NewRequestData 重包装为 OmniNewRequestData 并附加 prompt_embeds/additional_information",
             "掌握 OmniGenerationScheduler 一次性分配全部 token 的快路径与 update_from_output 立即结束的逻辑",
-            "理解 AR 模块请求流：InputProcessor → Scheduler → Worker → ModelRunner → OutputProcessor"
+            "理解 AR 模块请求流：InputProcessor → Scheduler → Worker → ModelRunner → OutputProcessor",
+            "理解 OmniSchedulerMixin 作为 AR/Generation 调度器共享基类，集中了 I/O 调度状态初始化、OmniSchedulerOutput 构造与 full-payload/async-chunk 生命周期契约"
           ],
           "source_files": [
             "vllm_omni/core/sched/omni_ar_scheduler.py",
             "vllm_omni/core/sched/omni_generation_scheduler.py",
+            "vllm_omni/core/sched/omni_scheduler_mixin.py",
             "vllm_omni/core/sched/omni_scheduling_coordinator.py"
           ],
           "minimal_modules": [
-            "OmniARScheduler.schedule 的重包装逻辑",
+            "OmniARScheduler.schedule 的重包装逻辑与 update_from_output",
             "OmniGenerationScheduler 的单步快路径",
-            "OmniNewRequestData 富化字段"
+            "OmniSchedulerMixin 的 _init_omni_io_scheduling_state 与共享调度/输出 helper",
+            "OmniNewRequestData 富化字段与 output.py 的 OmniSchedulerOutput"
           ],
-          "practice_task": "比较 OmniARScheduler 与 OmniGenerationScheduler 的 schedule/update_from_output，写出两者在「token 分配」和「请求何时 finished」上的差异表。",
+          "practice_task": "比较 OmniARScheduler 与 OmniGenerationScheduler 的 schedule/update_from_output，写出两者在「token 分配」和「请求何时 finished」上的差异表；再指出两者各自复用了 OmniSchedulerMixin 中的哪些共享 helper。",
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u4-l3",
@@ -486,6 +489,37 @@
           "practice_task": "为一个跨多步产出音频 latent 的 AR 阶段，画出张量从「逐步累积为 list」到「最终 torch.cat 拼接」的时序，并定位对应代码行。",
           "depends_on": [
             "u4-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "AR 解码加速：异步输出实例化（Async Output Materialization）",
+          "order": 4,
+          "filename": "u4-l4-async-output-materialization.md",
+          "level": "advanced",
+          "topic": "基于新增设计文档，讲解 Async Omni Output Materialization 如何把 OmniModelRunnerOutput 的 CPU 侧构造（D2H 拷贝、张量切片、payload 拼装）移出 AR 解码关键路径，让第 N 步 payload 构造与第 N+1 步 GPU 解码重叠，并配合 async_chunk 提升吞吐。",
+          "learning_goals": [
+            "理解 sample_tokens 关键路径上同步构造 OmniModelRunnerOutput 的开销，以及异步实例化如何只保留下一步解码所需工作、其余推迟到后台线程",
+            "掌握 OmniAsyncGPUModelRunnerOutput 的输出生命周期：快照 step-local 状态 → clone 输出张量 → 专用 CUDA stream D2H → 后台 builder 构造 payload → get_output join 收尾",
+            "理解该特性依赖 async_chunk 自动启用、Thinker/Talker/Code2Wav 各 stage 的差异化行为，以及 Ascend NPU 因走独立 NPUARModelRunner 仍同步构造的原因"
+          ],
+          "source_files": [
+            "docs/design/feature/omni_async_output_materialization.md",
+            "vllm_omni/worker/gpu_ar_model_runner.py",
+            "vllm_omni/platforms/npu/worker/npu_ar_model_runner.py",
+            "vllm_omni/deploy/qwen3_omni_moe.yaml"
+          ],
+          "minimal_modules": [
+            "async output materialization 文档的 Architecture / Output Lifecycle / Safe State Snapshots 段",
+            "OmniAsyncGPUModelRunnerOutput 的快照、clone、后台 builder 与 get_output 边界",
+            "Qwen3-Omni deploy YAML 的 async_chunk 与各 stage async_scheduling 设置",
+            "NPU 走 NPUARModelRunner 同步路径的兜底说明"
+          ],
+          "practice_task": "对照文档中的「GPU 解码路径 / 后台输出路径」时序图，在 gpu_ar_model_runner.py 中定位 sample_tokens → clone 输出张量 → D2H → 后台 builder → get_output join 的代码位置；并解释为什么 Talker 必须先 eager 执行 decode-state postprocess、再把 codec payload 构造推迟到后台，而 Code2Wav 不走该路径。",
+          "depends_on": [
+            "u4-l1",
+            "u4-l3"
           ],
           "action": "new"
         }
@@ -523,7 +557,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -552,7 +586,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -580,7 +614,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l4",
@@ -608,7 +642,7 @@
           "depends_on": [
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l5",
@@ -636,7 +670,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -673,7 +707,7 @@
             "u1-l5",
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -703,7 +737,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -732,7 +766,7 @@
           "depends_on": [
             "u6-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -769,7 +803,7 @@
           "depends_on": [
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -799,7 +833,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -829,7 +863,7 @@
           "depends_on": [
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l4",
@@ -860,7 +894,7 @@
             "u5-l1",
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l5",
@@ -891,7 +925,7 @@
             "u5-l1",
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -930,7 +964,7 @@
             "u5-l3",
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -959,7 +993,7 @@
           "depends_on": [
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -989,7 +1023,7 @@
           "depends_on": [
             "u1-l5"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1025,7 +1059,7 @@
           "depends_on": [
             "u5-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -1054,7 +1088,7 @@
             "u3-l1",
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",
@@ -1083,7 +1117,7 @@
             "u6-l2",
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l4",
@@ -1114,7 +1148,7 @@
             "u3-l1",
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1151,7 +1185,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -1180,7 +1214,7 @@
           "depends_on": [
             "u10-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

@@ -33,11 +33,11 @@
 
 | 文件 | 作用 | 本讲用到哪一部分 |
 | --- | --- | --- |
-| [README.md](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/README.md) | 项目的门面：定位、最新动态、支持的模型、快速入口 | About 段、Latest News |
-| [docs/design/architecture_overview.md](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/docs/design/architecture_overview.md) | 官方架构总览文档，是后续所有讲义的「设计依据」 | Goals、Representative models、Key Components |
-| [vllm_omni/__init__.py](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/__init__.py) | 整个 Python 包的入口，定义了扩展哲学与初始化顺序 | 顶部模块注释、import 顺序、`__all__` |
+| [README.md](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/README.md) | 项目的门面：定位、最新动态、支持的模型、快速入口 | About 段、Latest News |
+| [docs/design/architecture_overview.md](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/design/architecture_overview.md) | 官方架构总览文档，是后续所有讲义的「设计依据」 | Goals、Representative models、Key Components |
+| [vllm_omni/__init__.py](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/vllm_omni/__init__.py) | 整个 Python 包的入口，定义了扩展哲学与初始化顺序 | 顶部模块注释、import 顺序、`__all__` |
 
-另外会顺带提到 [vllm_omni/version.py](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/version.py)（版本对齐告警），帮助你理解「vLLM 与 vLLM-Omni 必须版本对齐」这件事在代码层面是怎么落地的。
+另外会顺带提到 [vllm_omni/version.py](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/vllm_omni/version.py)（版本对齐告警），帮助你理解「vLLM 与 vLLM-Omni 必须版本对齐」这件事在代码层面是怎么落地的。
 
 ---
 
@@ -80,15 +80,15 @@
 
 README 的 About 段直接列出了 vLLM-Omni 扩展的三个方向：
 
-- [README.md:33-37](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/README.md#L33-L37)：说明 vLLM 的原始定位，以及 vLLM-Omni 的三条扩展——**Omni-modality（全模态）、Non-autoregressive Architectures（非自回归结构）、Heterogeneous outputs（异构输出）**。
+- [README.md:29-33](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/README.md#L29-L33)：说明 vLLM 的原始定位，以及 vLLM-Omni 的三条扩展——**Omni-modality（全模态）、Non-autoregressive Architectures（非自回归结构）、Heterogeneous outputs（异构输出）**。
 
-紧接着 README 还强调了「快」和「易用」的来源，这三点其实就是 vLLM-Omni 的技术卖点，后续进阶讲义会逐一拆解：
+紧接着 README 还强调了「快」和「易用」的来源，这两点其实就是 vLLM-Omni 的技术卖点，后续进阶讲义会逐一拆解：
 
-- [README.md:45-49](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/README.md#L45-L49)：列出 vLLM-Omni 的三个性能来源——**复用 vLLM 的高效 KV Cache、流水线化的阶段执行重叠（pipelined stage execution overlapping）、基于 OmniConnector 的全解耦与跨阶段动态资源分配**。
+- [README.md:41-45](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/README.md#L41-L45)：列出 vLLM-Omni 的三个性能来源——**复用 vLLM 的高效 KV Cache、流水线化的阶段执行重叠（pipelined stage execution overlapping）、基于 OmniConnector 的全解耦与跨阶段动态资源分配**。
 
 包入口文件的顶部注释，则用一句话总结了它的身份：
 
-- [vllm_omni/__init__.py:1-13](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/__init__.py#L1-L13)：模块文档字符串写明——「vLLM-Omni：带非自回归结构的多模态模型推理与服务，本包把 vLLM 从传统的文本自回归生成，扩展到支持多模态、非自回归结构和非文本输出」。
+- [vllm_omni/__init__.py:1-13](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/vllm_omni/__init__.py#L1-L13)：模块文档字符串写明——「vLLM-Omni：带非自回归结构的多模态模型推理与服务，本包把 vLLM 从传统的文本自回归生成，扩展到支持多模态、非自回归结构和非文本输出」。
 
 #### 4.1.4 代码实践
 
@@ -96,19 +96,22 @@ README 的 About 段直接列出了 vLLM-Omni 扩展的三个方向：
 
 **操作步骤**：
 
-1. 打开 [README.md 的 Latest News 段（第 18-27 行）](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/README.md#L18-L27)。
-2. 找到最新一个版本（写作本讲时为 `0.24.0`，发布于 2026/07）。
-3. 注意它的措辞：「aligned with the vLLM 0.24 release line」——即 vLLM-Omni `0.24.0` 与 vLLM `0.24.x` 对齐。
+1. 打开 [README.md 的 Latest News 段（第 18-23 行）](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/README.md#L18-L23)。
+2. 找到最新一个版本（写作本讲时为 `0.26.0`，发布于 2026/08）。
+3. 注意它的措辞：「aligned with the vLLM 0.26 release line」——即 vLLM-Omni `0.26.0` 与 vLLM `0.26.x` 对齐。
+4. 再看第 21 行那条「历史节奏说明」：它明确写道，**从 `0.14.0` 起，vLLM-Omni 会对齐上游 vLLM 的每一个偶数次版本（minor version）发布一个稳定版**——`0.16.0 / 0.18.0 / 0.20.0 / 0.22.0` 都延续这一节奏。
 
-**需要观察的现象**：几乎每条 release 都会写明它「对齐了哪个 vLLM 版本」。
+**需要观察的现象**：几乎每条 release 都会写明它「对齐了哪个 vLLM 版本」，而且这个对齐节奏（对齐偶数 minor）是被写进 README 的「正式约定」，不是巧合。
 
-**预期结果**：你会得出一条结论——**vLLM-Omni 的版本号紧跟 vLLM 的主次版本（major.minor）**。这不是巧合，而是强约束（下一模块会看到对应代码）。
+**预期结果**：你会得出一条结论——**vLLM-Omni 的版本号紧跟 vLLM 的主次版本（major.minor），并对齐偶数次 minor 版本**。这是强约束（下一模块会看到对应代码）。
+
+> 📌 顺带留意 `0.26.0` 这条新闻里的几个关键词，它们都对应后续讲义：**MiniMax H3 联合音视频生成**（Diffusion，u5）、**MiniCPM-o 4.5 的实验性全双工实时运行时**（在线服务，u6）、**分布式 layerwise diffusion offload**（Diffusion 加速，u7）。本讲只要「眼熟」即可，不用深究。
 
 #### 4.1.5 小练习与答案
 
 **练习 1**：vLLM-Omni 是「重写一个推理引擎」还是「在 vLLM 上做扩展」？请用一句话说明依据。
 
-> **参考答案**：是「在 vLLM 上做扩展」。依据是 README 第 33 行的措辞「vLLM-Omni is a framework that **extends** its support」，以及包注释里「This package **extends** vLLM」的表述。
+> **参考答案**：是「在 vLLM 上做扩展」。依据是 README 第 29 行的措辞「vLLM-Omni is a framework that **extends** its support」，以及包注释里「This package **extends** vLLM」的表述。
 
 **练习 2**：README 提到 vLLM-Omni 「快」的三个来源是什么？
 
@@ -166,9 +169,9 @@ README 的 About 段直接列出了 vLLM-Omni 扩展的三个方向：
 
 架构文档专门用一节讲「目标」和「代表模型」，是我们理解项目定位的最权威依据：
 
-- [architecture_overview.md:12-19](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/docs/design/architecture_overview.md#L12-L19)：**Goals 段**，列出上面 4 条目标，其中前 3 条（Non-textual Output / Non-Autoregressive Structure / Integration with vLLM Core）与 README 的三大扩展一一对应。
+- [architecture_overview.md:12-19](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/design/architecture_overview.md#L12-L19)：**Goals 段**，列出上面 4 条目标，其中前 3 条（Non-textual Output / Non-Autoregressive Structure / Integration with vLLM Core）与 README 的三大扩展一一对应。
 
-- [architecture_overview.md:22-54](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/docs/design/architecture_overview.md#L22-L54)：**Representative omni-modality models 段**，把主流模型分成三类，并各配一张架构图：
+- [architecture_overview.md:22-54](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/design/architecture_overview.md#L22-L54)：**Representative omni-modality models 段**，把主流模型分成三类，并各配一张架构图：
   - 第 26-27 行：**DiT 为主 + AR 文本编码器**（例：Qwen-Image），强调复杂文字渲染和精细图像编辑。
   - 第 36-37 行：**AR 为主 + DiT 多模态生成器**（例：BAGEL），统一理解与生成，输出 CoT 文本和视觉生成。
   - 第 46-47 行：**AR + DiT**（例：Qwen-Omni），端到端的全模态 LLM，多模态输入、文本/音频输出。
@@ -181,9 +184,10 @@ README 的 About 段直接列出了 vLLM-Omni 扩展的三个方向：
 
 **操作步骤**：
 
-1. 打开 README 的 [支持模型清单（第 59-64 行）](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/README.md#L59-L64)。
+1. 打开 README 的 [支持模型清单（第 58-61 行）](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/README.md#L58-L61)。
 2. 找到这三类模型各一个例子：`Qwen-Image`（Diffusion 段）、`BAGEL`（Omni-modality 段）、`Qwen3-Omni`（Omni-modality 段）。
 3. 对照架构文档的三类分类，给每个模型标注它属于「DiT 为主 / AR 为主 / AR+DiT」中的哪一类。
+4. 额外留心 `0.26.0` 新进清单的模型：**MiniMax H3**（Diffusion 段，联合音视频生成）与 **MiniCPM-o 4.5**（Omni-modality 段），观察它们被归到哪一类。
 
 **预期结果**：你能把 README 提到的模型归到架构文档的三个类别里，并说出它的「主结构」是什么。
 
@@ -249,9 +253,9 @@ README 的 About 段直接列出了 vLLM-Omni 扩展的三个方向：
 
 官方架构文档用一张表精确定义了 5 个组件，并紧接着用 Qwen3-Omni 给出了具体的阶段示例：
 
-- [architecture_overview.md:65-75](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/docs/design/architecture_overview.md#L65-L75)：**Key Components 表格**。逐行定义了 OmniRouter（智能路由）、EntryPoints（离线/在线 API + `AsyncOmniEngine`/`Orchestrator` 协调多阶段）、AR（继承 vLLM 的 cache 管理）、Diffusion（原生加速实现）、OmniConnector（基于 E/P/D/G 的全解耦）。
+- [architecture_overview.md:65-75](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/design/architecture_overview.md#L65-L75)：**Key Components 表格**。逐行定义了 OmniRouter（智能路由）、EntryPoints（离线/在线 API + `AsyncOmniEngine`/`Orchestrator` 协调多阶段）、AR（继承 vLLM 的 cache 管理）、Diffusion（原生加速实现）、OmniConnector（基于 E/P/D/G 的全解耦）。
 
-- [architecture_overview.md:75](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/docs/design/architecture_overview.md#L75)：紧接的一句话非常关键——「解耦的阶段通过 stage configuration 管理；在 Qwen3-Omni 中，**Thinker/Talker/Code2wav 被声明为各自独立的已配置阶段，运行时路由由 `Orchestrator` 经由 `StageEngineCoreClient` / `StageDiffusionClient` 完成**」。这句话把「配置声明（stage config）」和「运行时路由（Orchestrator + Client）」两件事点透了。
+- [architecture_overview.md:75](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/design/architecture_overview.md#L75)：紧接的一句话非常关键——「解耦的阶段通过 stage configuration 管理；在 Qwen3-Omni 中，**Thinker/Talker/Code2wav 被声明为各自独立的已配置阶段，运行时路由由 `Orchestrator` 经由 `StageEngineCoreClient` / `StageDiffusionClient` 完成**」。这句话把「配置声明（stage config）」和「运行时路由（Orchestrator + Client）」两件事点透了。
 
 #### 4.3.4 代码实践
 
@@ -260,7 +264,7 @@ README 的 About 段直接列出了 vLLM-Omni 扩展的三个方向：
 **操作步骤**：
 
 1. 先记住上面表格里 5 个组件的职责。
-2. 打开包目录浏览（本机执行 `ls vllm_omni/`，或直接看仓库 [vllm_omni/](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/__init__.py)），你会看到这些一级目录：`entrypoints`、`engine`、`diffusion`、`distributed`、`worker`、`core`、`config`、`platforms`、`quantization` 等。
+2. 打开包目录浏览（本机执行 `ls vllm_omni/`，或直接看仓库 [vllm_omni/](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/vllm_omni/__init__.py)），你会看到这些一级目录：`entrypoints`、`engine`、`diffusion`、`distributed`、`worker`、`core`、`config`、`platforms`、`quantization` 等。
 3. 尝试把每个组件映射到目录（先自己猜，再看下表对答案）。
 
 **预期结果**：你能大致建立下面的映射（细节在后续讲义展开，本讲只求「眼熟」）：
@@ -321,21 +325,21 @@ vLLM-Omni 既然是「在 vLLM 之上扩展」，那么它到底是怎么改的�
 
 包入口的每一段都对应上面流程的一步，下面给出精确行号：
 
-- [vllm_omni/__init__.py:9-13](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/__init__.py#L9-L13)：**扩展哲学的官方表述**——「🟡 Modified: 为支持多模态而修改的 vLLM 组件；🔴 Added: 为多模态和非自回归处理新增的组件」。
+- [vllm_omni/__init__.py:9-13](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/vllm_omni/__init__.py#L9-L13)：**扩展哲学的官方表述**——「🟡 Modified: 为支持多模态而修改的 vLLM 组件；🔴 Added: 为多模态和非自回归处理新增的组件」。
 
-- [vllm_omni/__init__.py:15-19](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/__init__.py#L15-L19)：**第 1 步——尽早导入 version**。注释说明：之所以要先导入 version，是因为它会在「vLLM / vLLM-Omni 主次版本不一致」时发出告警；而这件事必须在打 patch 之前做，因为版本不一致时 patch 里的 vLLM 导入可能抛错。
+- [vllm_omni/__init__.py:15-19](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/vllm_omni/__init__.py#L15-L19)：**第 1 步——尽早导入 version**。注释说明：之所以要先导入 version，是因为它会在「vLLM / vLLM-Omni 主次版本不一致」时发出告警；而这件事必须在打 patch 之前做，因为版本不一致时 patch 里的 vLLM 导入可能抛错。
 
-- [vllm_omni/__init__.py:21-27](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/__init__.py#L21-L27)：**第 2 步——应用 patch**。注意它用 `try/except ModuleNotFoundError` 包起来：如果当前环境没装 vLLM（比如只是构建文档），就允许 `patch = None` 而不报错。
+- [vllm_omni/__init__.py:21-27](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/vllm_omni/__init__.py#L21-L27)：**第 2 步——应用 patch**。注意它用 `try/except ModuleNotFoundError` 包起来：如果当前环境没装 vLLM（比如只是构建文档），就允许 `patch = None` 而不报错。
 
-- [vllm_omni/__init__.py:29-37](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/__init__.py#L29-L37)：**第 3 步——尽早注册自定义 configs/parsers**，让 HuggingFace 的 `AutoConfig` / `AutoTokenizer` 能识别 vLLM-Omni 关心的模型。
+- [vllm_omni/__init__.py:29-37](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/vllm_omni/__init__.py#L29-L37)：**第 3 步——尽早注册自定义 configs/parsers**，让 HuggingFace 的 `AutoConfig` / `AutoTokenizer` 能识别 vLLM-Omni 关心的模型。
 
-- [vllm_omni/__init__.py:39](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/__init__.py#L39)：**第 4 步——暴露 `OmniModelConfig`**，这是后续 u2-l2（配置体系）的主角。
+- [vllm_omni/__init__.py:39](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/vllm_omni/__init__.py#L39)：**第 4 步——暴露 `OmniModelConfig`**，这是后续 u2-l2（配置体系）的主角。
 
-- [vllm_omni/__init__.py:42-56](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/__init__.py#L42-L56)：**第 5 步——`__getattr__` 懒加载**。`Omni` / `AsyncOmni` 不会在 `import vllm_omni` 时就加载，而是在你真正访问它们时才 import。注释解释了原因：避免在包导入时就拉入重量级依赖（vllm model_loader → fused_moe → pynvml），从而防止那些没有 CUDA 上下文的轻量子进程崩溃（参见 issue #1793）。
+- [vllm_omni/__init__.py:42-56](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/vllm_omni/__init__.py#L42-L56)：**第 5 步——`__getattr__` 懒加载**。`Omni` / `AsyncOmni` 不会在 `import vllm_omni` 时就加载，而是在你真正访问它们时才 import。注释解释了原因：避免在包导入时就拉入重量级依赖（vllm model_loader → fused_moe → pynvml），从而防止那些没有 CUDA 上下文的轻量子进程崩溃（参见 issue #1793）。
 
 版本对齐的告警逻辑则在另一个文件里：
 
-- [vllm_omni/version.py:27-58](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/version.py#L27-L58)：`warn_if_misaligned_vllm_version()` 取 vLLM 与 vLLM-Omni 各自版本的前两位（major.minor）做比较，不一致就发出 `RuntimeWarning`，提示「这很可能导致兼容性问题」。这个函数在该模块被导入时自动执行——这就是为什么 `__init__.py` 要「先 version、再 patch」。
+- [vllm_omni/version.py:26-58](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/vllm_omni/version.py#L26-L58)：`warn_if_misaligned_vllm_version()` 取 vLLM 与 vLLM-Omni 各自版本的前两位（major.minor）做比较，不一致就发出 `RuntimeWarning`，提示「这很可能导致兼容性问题」。这个函数在该模块被导入时自动执行——这就是为什么 `__init__.py` 要「先 version、再 patch」。这与 README 第 21 行那条「对齐偶数 minor」的发布约定互为印证：版本对齐既是文档承诺，也是代码里的强制检查。
 
 > 📌 这一小节其实是 **u2-l1（patch 机制）** 和 **u2-l2（配置体系）** 的预告。如果你现在还看不懂 patch 具体改了什么，完全没关系——本讲只要知道「patch 是 🟡 Modified 的总入口」即可。
 
@@ -353,14 +357,14 @@ vLLM-Omni 既然是「在 vLLM 之上扩展」，那么它到底是怎么改的�
    ```bash
    python -W all -c "import vllm_omni"
    ```
-3. 阅读 [vllm_omni/version.py:27-58](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/version.py#L27-L58)，找到「比较 major.minor」的那两行代码。
+3. 阅读 [vllm_omni/version.py:26-48](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/vllm_omni/version.py#L26-L48)，找到「比较 major.minor」的那几行代码（第 33-40 行：取 `__version_tuple__[:2]`，在第 40 行做 `omni_ver != vllm_ver` 判断）。
 
 **需要观察的现象**：
 
 - 若 vLLM 与 vLLM-Omni 的主次版本一致，则无告警。
 - 若不一致，会看到一条 `RuntimeWarning: vLLM and vLLM-Omni appear to have mismatched major/minor versions ...`。
 
-**预期结果**：你能在 `version.py` 第 40-50 行附近，看到「取 `__version_tuple__[:2]` 做比较、不一致则 warn」的逻辑，从而印证「vLLM-Omni 强约束主次版本对齐」这件事在代码里是真实存在的。
+**预期结果**：你能在 `version.py` 第 33-48 行附近，看到「取 `__version_tuple__[:2]` 做比较、不一致则 warn」的逻辑，从而印证「vLLM-Omni 强约束主次版本对齐」这件事在代码里是真实存在的。
 
 **待本地验证**：是否真的触发告警，取决于你本地安装的 vLLM 版本；如果两者恰好对齐，你只会看到「无输出」，这也是正确现象。
 
@@ -384,14 +388,14 @@ vLLM-Omni 既然是「在 vLLM 之上扩展」，那么它到底是怎么改的�
 
 本讲的综合实践，是把前面 4 个模块串成一张图。**这是一道「源码阅读 + 画图」型任务**，不需要运行任何模型。
 
-**任务**：阅读 [docs/design/architecture_overview.md](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/docs/design/architecture_overview.md) 后，用自己的话画出一张 **Qwen3-Omni（AR+DiT 联合）在 vLLM-Omni 中的请求流转草图**。
+**任务**：阅读 [docs/design/architecture_overview.md](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/design/architecture_overview.md) 后，用自己的话画出一张 **Qwen3-Omni（AR+DiT 联合）在 vLLM-Omni 中的请求流转草图**。
 
 **要求**：
 
 1. 草图里必须出现这些节点：`EntryPoints`、`AsyncOmniEngine`、`Orchestrator`、`Thinker`、`Talker`、`Code2wav`、`OmniConnector`。
 2. 用箭头标出「一个多模态请求（例如「看一段视频并用语音回答」）从进入到产出音频」的流转方向。
 3. 在 `Thinker → Talker → Code2wav` 三个阶段之间，标注「阶段间数据由 OmniConnector 流转」。
-4. 在图旁用一句话注明：这些阶段是「由 stage configuration 声明、由 Orchestrator 在运行时路由」的（依据 [architecture_overview.md:75](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/docs/design/architecture_overview.md#L75)）。
+4. 在图旁用一句话注明：这些阶段是「由 stage configuration 声明、由 Orchestrator 在运行时路由」的（依据 [architecture_overview.md:75](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/design/architecture_overview.md#L75)）。
 
 **参考画法**（你可以用自己的工具重画，文字版示意如下）：
 
@@ -428,7 +432,7 @@ vLLM-Omni 既然是「在 vLLM 之上扩展」，那么它到底是怎么改的�
 - 主流全模态模型可归为 **AR 与 DiT 的三种组合**：DiT 为主（Qwen-Image）、AR 为主（BAGEL）、AR+DiT（Qwen-Omni）。
 - 五大核心组件各司其职：**OmniRouter 路由、EntryPoints 提供入口并协调、AR 继承 vLLM、Diffusion 原生加速、OmniConnector 做全解耦**。
 - 在 Qwen3-Omni 中，**Thinker/Talker/Code2wav 被声明为独立 stage，由 Orchestrator 经由 Stage 客户端在运行时路由**。
-- 包入口用 **「🟡 修改 / 🔴 新增」** 二分法组织所有扩展，并严格规定 `version → patch → 注册 configs → 暴露 config → 懒加载 Omni/AsyncOmni` 的初始化顺序。
+- 包入口用 **「🟡 修改 / 🔴 新增」** 二分法组织所有扩展，并严格规定 `version → patch → 注册 configs → 暴露 config → 懒加载 Omni/AsyncOmni` 的初始化顺序；版本对齐既是 README 的发布约定（对齐偶数 minor，最新 `0.26.0` 对齐 vLLM 0.26），也是 `version.py` 里的强制检查。
 
 ## 7. 下一步学习建议
 
@@ -437,4 +441,4 @@ vLLM-Omni 既然是「在 vLLM 之上扩展」，那么它到底是怎么改的�
 1. **u1-l2 安装与环境**：先把 vLLM-Omni 在本地装起来，亲手触发一次版本对齐告警，把本讲 4.4 节的理论变成体验。
 2. **u1-l3 源码地图**：系统梳理 `vllm_omni/` 下的一级目录，把本讲 4.3.4 节那张「粗映射表」升级成精确的目录职责表。
 3. **u1-l4 / u1-l5**：分别跑通一次离线推理（`Omni.generate`）和在线服务（`vllm serve --omni`），让本讲的「请求流转草图」有真实的输入输出可对照。
-4. 想深入「为什么这么设计」，可以直接精读 [docs/design/architecture_overview.md](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/docs/design/architecture_overview.md) 的 Main features 与 CFG Companion Flow 两段——它们是后续 u3/u7 的设计源头。
+4. 想深入「为什么这么设计」，可以直接精读 [docs/design/architecture_overview.md](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/design/architecture_overview.md) 的 Main features 与 CFG Companion Flow 两段——它们是后续 u3/u7 的设计源头。

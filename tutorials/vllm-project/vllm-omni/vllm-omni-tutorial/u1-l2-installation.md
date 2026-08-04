@@ -4,7 +4,7 @@
 
 学完本讲后，你应当能够：
 
-- 在 NVIDIA CUDA 与 AMD ROCm 环境下，按照官方 quickstart 从源码完成 vLLM-Omni 的安装；
+- 在 NVIDIA CUDA 与 AMD ROCm 环境下，按照官方 quickstart 从源码完成 vLLM-Omni 的安装，并了解 NPU（华为昇腾）下「vLLM + vLLM-Ascend + vLLM-Omni」三方钉版本的特殊流程；
 - 说清楚「为什么 vLLM 与 vLLM-Omni 的主版本（major）与次版本（minor）必须一一对应」，并能在版本不一致时识别告警；
 - 看懂 `setup.py` 是如何根据硬件（CUDA/ROCm/NPU/XPU/MUSA/CPU）自动选择依赖文件的；
 - 读懂 `pyproject.toml` 中的包元数据、`console_script`（`vllm-omni`）与可选依赖（extras）的组织方式；
@@ -44,22 +44,23 @@ Python 包通常用 `setuptools` 打包。现代做法是把「包的描述信�
 | XPU    | Intel             | `torch.xpu.is_available()`           |
 | MUSA   | 摩尔线程          | `torch.musa.is_available()`          |
 
-vLLM-Omni 需要为不同硬件安装不同的依赖，这正是 `setup.py` 要解决的核心问题。
+vLLM-Omni 需要为不同硬件安装不同的依赖，这正是 `setup.py` 要解决的核心问题。其中 NPU 比较特殊——它的 vLLM 能力由独立的 `vllm-ascend` 项目提供，所以 NPU 上要装的东西更多（见 4.1.3）。
 
 ## 3. 本讲源码地图
 
-本讲涉及的关键文件如下：
+本讲涉及的关键文件如下（永久链接均指向当前 HEAD `5215e03a`）：
 
 | 文件 | 作用 |
 |------|------|
-| [docs/getting_started/quickstart.md](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/docs/getting_started/quickstart.md) | 官方快速上手文档，给出 CUDA/ROCm 的标准安装命令与版本对齐说明。 |
-| [docs/getting_started/installation/README.md](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/docs/getting_started/installation/README.md) | 安装总览，按硬件平台（GPU/NPU）分流到具体子文档。 |
-| [docs/getting_started/installation/gpu/cuda.inc.md](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/docs/getting_started/installation/gpu/cuda.inc.md) | CUDA 下的硬件要求、wheel、源码、Docker 安装细节。 |
-| [docs/getting_started/installation/gpu/rocm.inc.md](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/docs/getting_started/installation/gpu/rocm.inc.md) | ROCm 下的安装细节（gfx942、`--no-build-isolation` 等）。 |
-| [pyproject.toml](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/pyproject.toml) | 包的静态元数据：名字、Python 版本、可选依赖、`console_script`、插件入口。 |
-| [setup.py](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/setup.py) | 动态安装脚本：检测硬件、选择依赖文件、生成带设备后缀的版本号。 |
-| [vllm_omni/version.py](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/version.py) | 读取 `_version.py`，并在导入时自动检查 vLLM 与 vLLM-Omni 版本是否对齐。 |
-| [vllm_omni/__init__.py](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/__init__.py) | 包入口，规定了「先做版本检查，再打 patch」的导入顺序。 |
+| [docs/getting_started/quickstart.md](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/getting_started/quickstart.md) | 官方快速上手文档，给出 CUDA/ROCm 的标准安装命令与版本对齐说明。 |
+| [docs/getting_started/installation/README.md](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/getting_started/installation/README.md) | 安装总览，按硬件平台（GPU/NPU）分流到具体子文档；顶部用一条 `!!! important` 写明版本对齐铁律（v0.26.0 新增）。 |
+| [docs/getting_started/installation/gpu/cuda.inc.md](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/getting_started/installation/gpu/cuda.inc.md) | CUDA 下的硬件要求、wheel、源码、Docker 安装细节；Docker `BASE_IMAGE` 已对齐到 v0.26.0。 |
+| [docs/getting_started/installation/gpu/rocm.inc.md](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/getting_started/installation/gpu/rocm.inc.md) | ROCm 下的安装细节（gfx942、`--no-build-isolation` 等）。 |
+| [docs/getting_started/installation/npu/npu.inc.md](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/getting_started/installation/npu/npu.inc.md) | NPU 下的安装细节，含「vLLM v0.26.0 + vLLM-Ascend `releases/v0.26.0rc` + vLLM-Omni」三方从源码构建步骤（v0.26.0 更新）。 |
+| [pyproject.toml](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/pyproject.toml) | 包的静态元数据：名字、Python 版本、可选依赖、`console_script`、插件入口。 |
+| [setup.py](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/setup.py) | 动态安装脚本：检测硬件、选择依赖文件、生成带设备后缀的版本号。 |
+| [vllm_omni/version.py](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/vllm_omni/version.py) | 读取 `_version.py`，并在导入时自动检查 vLLM 与 vLLM-Omni 版本是否对齐。 |
+| [vllm_omni/__init__.py](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/vllm_omni/__init__.py) | 包入口，规定了「先做版本检查，再打 patch」的导入顺序。 |
 
 ## 4. 核心概念与源码讲解
 
@@ -74,6 +75,8 @@ vLLM-Omni 需要为不同硬件安装不同的依赖，这正是 `setup.py` 要�
 vLLM-Omni 的安装可以概括成一句话：**先装对齐版本的 vLLM，再把 vLLM-Omni 以可编辑模式（`-e`）装进同一个环境**。
 
 为什么要「可编辑模式」？因为 vLLM-Omni 还在快速演进，官方明确建议从源码安装，方便你随时 `git pull` 拿到最新代码、改动后立即生效，而不必反复重新打包。
+
+从 v0.14.0 起，vLLM-Omni 形成了固定的发布节奏：**每个偶数号的 vLLM 次版本都对应一个 vLLM-Omni 稳定版**（0.16、0.18、0.20、0.22、0.26……）。因此「安装前先确认 vLLM-Omni 的版本，再装同主次的 vLLM」是第一条铁律——vLLM-Omni 0.26.x 必须配 vLLM 0.26.x。这一点在 v0.26.0 里被写进了安装文档最显眼的位置（见 4.1.3 的 `!!! important` 提示）。
 
 #### 4.1.2 核心流程
 
@@ -92,6 +95,8 @@ clone("https://github.com/vllm-project/vllm-omni.git")
 install_editable(".")                            # 触发 setup.py 的硬件感知逻辑
 ```
 
+> **NPU（华为昇腾）略有不同**：它不是「vLLM + vLLM-Omni」两步，而是「vLLM + vLLM-Ascend + vLLM-Omni」三方都要钉在同一个 v0.26 发布线上。这是因为 NPU 上的 vLLM 能力由独立的 `vllm-ascend` 项目提供，vLLM-Omni 在其之上再叠加。具体命令见 4.1.3 的 NPU 源码段。
+
 #### 4.1.3 源码精读
 
 quickstart 文档给出了完整的安装命令。注意它对 CUDA 与 ROCm 分别给了一行 `vllm` 安装命令：
@@ -104,18 +109,62 @@ uv pip install vllm==0.26.0 --torch-backend=auto
 uv pip install vllm==0.26.0+rocm723 --extra-index-url https://wheels.vllm.ai/rocm/0.26.0/rocm723
 ```
 
-参见 [docs/getting_started/quickstart.md:L13-L30](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/docs/getting_started/quickstart.md#L13-L30)，这段代码做了什么：列出从建环境、装 vLLM 到克隆并 `uv pip install -e .` 安装 vLLM-Omni 的完整流程。
+参见 [docs/getting_started/quickstart.md:L13-L30](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/getting_started/quickstart.md#L13-L30)，这段代码做了什么：列出从建环境、装 vLLM 到克隆并 `uv pip install -e .` 安装 vLLM-Omni 的完整流程。
 
-前置条件明确要求 Linux + Python 3.12，见 [docs/getting_started/quickstart.md:L8-L12](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/docs/getting_started/quickstart.md#L8-L12)：
+前置条件明确要求 Linux + Python 3.12，见 [docs/getting_started/quickstart.md:L8-L12](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/getting_started/quickstart.md#L8-L12)：
 
 ```text
 - OS: Linux
 - Python: 3.12
 ```
 
-紧接着的注释说明了版本对齐的重要性，见 [docs/getting_started/quickstart.md:L34-L37](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/docs/getting_started/quickstart.md#L34-L37)：这段提示「vLLM 与 vLLM-Omni 必须主次版本一致，否则导入时会看到告警」，并指出 `--omni` 标志失效通常源于 vLLM 版本过低。
+紧接着的注释说明了版本对齐的重要性，见 [docs/getting_started/quickstart.md:L34-L37](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/getting_started/quickstart.md#L34-L37)：这段提示「vLLM 与 vLLM-Omni 必须主次版本一致，否则导入时会看到告警」，并指出 `--omni` 标志失效通常源于 vLLM 版本过低（vLLM Omni 0.26.0 起不再劫持 vLLM 入口，必须 vLLM ≥ 0.26.0）。
 
-CUDA 的硬件要求是「计算能力 7.0 及以上」，见 [docs/getting_started/installation/gpu/cuda.inc.md:L1-L5](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/docs/getting_started/installation/gpu/cuda.inc.md#L1-L5)；ROCm 则验证在 gfx942（MI300 系列），见 [docs/getting_started/installation/gpu/rocm.inc.md:L1-L5](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/docs/getting_started/installation/gpu/rocm.inc.md#L1-L5)。
+**版本对齐政策（v0.26.0 新增）**：安装总览文档现在在最顶部用一条 `!!! important` 提示明确写出对齐要求，见 [docs/getting_started/installation/README.md:L3-L4](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/getting_started/installation/README.md#L3-L4)：
+
+```text
+vLLM-Omni is released against the matching upstream vLLM major/minor version.
+vLLM-Omni 0.26.x requires vLLM 0.26.x; the stable v0.26.0 instructions pin vLLM 0.26.0.
+```
+
+这段代码做了什么：把「主次版本对齐」从一句口口相传的经验，升级成安装文档的醒目开场白，并明确「稳定版 v0.26.0 的安装步骤一律 pin vLLM 0.26.0」。CUDA 子文档开头也把原来的「vLLM-Omni depends vLLM」改写成了「depends on the matching major/minor release of vLLM」（vLLM-Omni 0.26.x release line uses vLLM 0.26.x），与这条铁律呼应。
+
+CUDA 的硬件要求是「计算能力 7.0 及以上」，见 [docs/getting_started/installation/gpu/cuda.inc.md:L1-L5](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/getting_started/installation/gpu/cuda.inc.md#L1-L5)；ROCm 则验证在 gfx942（MI300 系列），见 [docs/getting_started/installation/gpu/rocm.inc.md:L1-L5](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/getting_started/installation/gpu/rocm.inc.md#L1-L5)。
+
+**CUDA Docker 构建**：如果想自定义底层 vLLM 版本构建镜像，`BASE_IMAGE` 现在指向 v0.26.0，见 [docs/getting_started/installation/gpu/cuda.inc.md:L122-L129](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/getting_started/installation/gpu/cuda.inc.md#L122-L129)：
+
+```bash
+DOCKER_BUILDKIT=1 docker build \
+  -f docker/Dockerfile.cuda \
+  --build-arg BASE_IMAGE=vllm/vllm-openai:v0.26.0 \
+  -t vllm-omni-cuda .
+```
+
+这段代码做了什么：`vllm-omni` 的 CUDA Dockerfile 以官方 `vllm-openai` 镜像为底座，再在其上装 vLLM-Omni。把 `BASE_IMAGE` 对齐到 v0.26.0，就是保证底座 vLLM 与要叠加的 vLLM-Omni 0.26.x 主次版本一致——又是同一条铁律在 Docker 层面的体现。
+
+**NPU 从源码构建（v0.26.0 更新）**：NPU 上要先把 vLLM 与 vLLM-Ascend 都钉到 v0.26 发布线，再装 vLLM-Omni。注意 vLLM-Ascend 用的是 `releases/v0.26.0rc` 分支，见 [docs/getting_started/installation/npu/npu.inc.md:L55-L73](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/getting_started/installation/npu/npu.inc.md#L55-L73)：
+
+```bash
+# Pin vLLM and vLLM-Ascend to the v0.26 release line
+git clone -b v0.26.0 https://github.com/vllm-project/vllm.git
+cd vllm
+VLLM_TARGET_DEVICE=empty pip install -v -e .
+cd ..
+
+git clone -b releases/v0.26.0rc https://github.com/vllm-project/vllm-ascend.git
+cd vllm-ascend
+pip install -v -e .
+cd ..
+
+# Install vLLM-Omni from the latest main branch
+git clone https://github.com/vllm-project/vllm-omni.git
+cd vllm-omni
+pip install -v -e . --no-build-isolation
+# or VLLM_OMNI_TARGET_DEVICE=npu pip install -v -e .
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+```
+
+这段代码做了什么：vLLM 用 `VLLM_TARGET_DEVICE=empty` 做一次「空设备」可编辑安装（只为提供 Python 包，不编译任何后端 kernel），真正的 NPU 适配由 `vllm-ascend`（`releases/v0.26.0rc`）提供，最后才轮到 vLLM-Omni 以 `--no-build-isolation` 复用当前环境来构建。三方同处一条 v0.26 线，正是 4.4 节版本对齐检查在 NPU 上也能成立的前提。v0.26.0 还把旧版里写死的 `cd /vllm-workspace/vllm-omni` 改成了更通用的 `cd vllm-omni`，并补上了 `cd vllm` / `cd vllm-ascend` / `cd ..` 的目录切换，让三段克隆互不干扰。
 
 #### 4.1.4 代码实践
 
@@ -153,9 +202,11 @@ uv pip install -e .
 python -c "import vllm_omni; print(vllm_omni.__version__)"
 ```
 
-例如当前仓库 `git describe` 为 `v0.26.0-3-g900a7f08`，装在 CUDA 上后版本号大致形如 `0.26.0.post3+g900a7f08`（CUDA 不加设备后缀，详见 4.3 节）。具体以本机实际输出为准。
+例如当前仓库 `git describe` 为 `v0.26.0-7-g5215e03a`，装在 CUDA 上后版本号大致形如 `0.26.0.post7+g5215e03a`（CUDA 不加设备后缀，详见 4.3 节）。具体以本机实际输出为准。
 
 > 如果运行环境没有 GPU，可通过 `VLLM_OMNI_TARGET_DEVICE=cpu uv pip install -e .` 强制按 CPU 依赖安装，用于阅读源码。
+>
+> 若在 NPU 上，则改走 4.1.3 的三方安装；安装日志同样会打印 `Detected NPU backend` 与 `Loading requirements from: .../requirements/npu.txt`。**待本地验证**。
 
 #### 4.1.5 小练习与答案
 
@@ -166,6 +217,10 @@ python -c "import vllm_omni; print(vllm_omni.__version__)"
 **练习 2**：官方为什么推荐 `uv pip install -e .`（带 `-e`）而不是普通安装？
 
 **参考答案**：vLLM-Omni 迭代很快，可编辑模式让你 `git pull` 后改动立即生效、改源码调试也无需重新打包。
+
+**练习 3**：在 NPU 上，为什么 vLLM 要用 `VLLM_TARGET_DEVICE=empty` 安装，而不是直接 `pip install -e .`？
+
+**参考答案**：NPU 上真正的算子后端由 `vllm-ascend` 提供，vLLM 本体只需以「空设备」模式装出 Python 包即可，不必（也无法在普通环境里）编译 CUDA/ROCm kernel。如果让 vLLM 默认探测设备，会试图编译不匹配的后端。所以先用 `VLLM_TARGET_DEVICE=empty` 装一个「壳」，再由 `vllm-ascend` 注入 NPU 能力，最后装 vLLM-Omni。见 [docs/getting_started/installation/npu/npu.inc.md:L57-L60](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/getting_started/installation/npu/npu.inc.md#L57-L60)。
 
 ---
 
@@ -204,7 +259,7 @@ load_requirements(file)                   # 支持文件内的 -r common.txt 递
 
 #### 4.2.3 源码精读
 
-`detect_target_device()` 的优先级 1 是环境变量覆盖，见 [setup.py:L55-L63](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/setup.py#L55-L63)：
+`detect_target_device()` 的优先级 1 是环境变量覆盖，见 [setup.py:L55-L64](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/setup.py#L55-L64)：
 
 ```python
 target_device = os.environ.get("VLLM_OMNI_TARGET_DEVICE")
@@ -216,9 +271,9 @@ if target_device:
 
 这段代码做了什么：读取 `VLLM_OMNI_TARGET_DEVICE`，若有效（属于 6 个合法设备之一）就直接采用，允许用户强制指定平台。
 
-优先级 1.5 是 ReadTheDocs 特判，见 [setup.py:L67-L69](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/setup.py#L67-L69)：文档构建机器没有 GPU 且内存受限（1GB 上限），用 CPU 依赖避免拉入约 2GB 的 CUDA 库把构建拖进 swap。
+优先级 1.5 是 ReadTheDocs 特判，见 [setup.py:L67-L69](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/setup.py#L67-L69)：文档构建机器没有 GPU 且内存受限（1GB 上限），用 CPU 依赖避免拉入约 2GB 的 CUDA 库把构建拖进 swap。
 
-优先级 2 是 torch 后端探测，见 [setup.py:L74-L120](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/setup.py#L74-L120)，按 cuda → rocm → npu → xpu → musa 顺序逐个判断。其中 ROCm 分支还会顺手卸载与 ROCm 冲突的 `onnxruntime`，见 [setup.py:L82-L86](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/setup.py#L82-L86)：
+优先级 2 是 torch 后端探测，见 [setup.py:L74-L120](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/setup.py#L74-L120)，按 cuda → rocm → npu → xpu → musa 顺序逐个判断。其中 ROCm 分支还会顺手卸载与 ROCm 冲突的 `onnxruntime`，见 [setup.py:L82-L86](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/setup.py#L82-L86)：
 
 ```python
 if torch.version.hip is not None:
@@ -226,11 +281,11 @@ if torch.version.hip is not None:
     return "rocm"
 ```
 
-依赖加载函数 `get_install_requires()` 见 [setup.py:L220-L239](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/setup.py#L220-L239)：用检测到的设备拼接出 `requirements/{device}.txt` 路径，再交给 `load_requirements()`。
+依赖加载函数 `get_install_requires()` 见 [setup.py:L220-L239](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/setup.py#L220-L239)：用检测到的设备拼接出 `requirements/{device}.txt` 路径，再交给 `load_requirements()`。
 
-`load_requirements()` 见 [setup.py:L185-L217](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/setup.py#L185-L217)，这段代码做了什么：逐行读依赖文件，跳过空行与注释，并支持 `-r common.txt` 这种递归 include 指令——这就是平台文件能复用公共依赖的原因。
+`load_requirements()` 见 [setup.py:L185-L217](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/setup.py#L185-L217)，这段代码做了什么：逐行读依赖文件，跳过空行与注释，并支持 `-r common.txt` 这种递归 include 指令——这就是平台文件能复用公共依赖的原因。
 
-实际依赖文件示例。公共依赖（所有平台共享）见 [requirements/common.txt:L1-L36](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/requirements/common.txt#L1-L36)，其中关键几行：
+实际依赖文件示例。公共依赖（所有平台共享）见 [requirements/common.txt:L1-L36](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/requirements/common.txt#L1-L36)，其中关键几行：
 
 ```text
 transformers >= 5.5.3
@@ -239,7 +294,7 @@ accelerate==1.12.0
 cache-dit==1.3.0
 ```
 
-CUDA 专属依赖见 [requirements/cuda.txt:L1-L5](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/requirements/cuda.txt#L1-L5)：
+CUDA 专属依赖见 [requirements/cuda.txt:L1-L5](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/requirements/cuda.txt#L1-L5)：
 
 ```text
 -r common.txt
@@ -247,7 +302,7 @@ onnxruntime>=1.23.2
 fa3-fwd==0.0.3
 ```
 
-ROCm 专属依赖见 [requirements/rocm.txt:L1-L2](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/requirements/rocm.txt#L1-L2)，把 `onnxruntime` 换成了 ROCm 版本：
+ROCm 专属依赖见 [requirements/rocm.txt:L1-L2](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/requirements/rocm.txt#L1-L2)，把 `onnxruntime` 换成了 ROCm 版本：
 
 ```text
 -r common.txt
@@ -260,7 +315,7 @@ onnxruntime-rocm>=1.22.2
 
 **操作步骤**：
 
-1. 打开 `setup.py`，定位 `detect_target_device()`（[setup.py:L43](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/setup.py#L43)）。
+1. 打开 `setup.py`，定位 `detect_target_device()`（[setup.py:L43](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/setup.py#L43)）。
 2. 假设你的机器是 NVIDIA GPU，沿着代码走一遍：`torch.version.cuda is not None` 命中 → 返回 `"cuda"`。
 3. 跟着 `get_install_requires()` 走：它会去读 `requirements/cuda.txt`，而该文件第一行 `-r common.txt` 又把公共依赖拉进来。
 4. 对比 `requirements/rocm.txt` 与 `requirements/cuda.txt` 的差异（前者用 `onnxruntime-rocm`，后者用 `onnxruntime` + `fa3-fwd`）。
@@ -279,11 +334,11 @@ onnxruntime-rocm>=1.22.2
 
 **练习 1**：在一台没有 GPU 的文档构建服务器上安装 vLLM-Omni，会走哪个分支？为什么？
 
-**参考答案**：会走 CPU 分支。原因是 ReadTheDocs 环境会设置 `READTHEDOCS` 环境变量，`detect_target_device()` 优先级 1.5 直接返回 `"cpu"`，避免拉入约 2GB 的 CUDA 库把受限内存的文档构建拖垮。见 [setup.py:L67-L69](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/setup.py#L67-L69)。
+**参考答案**：会走 CPU 分支。原因是 ReadTheDocs 环境会设置 `READTHEDOCS` 环境变量，`detect_target_device()` 优先级 1.5 直接返回 `"cpu"`，避免拉入约 2GB 的 CUDA 库把受限内存的文档构建拖垮。见 [setup.py:L67-L69](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/setup.py#L67-L69)。
 
 **练习 2**：为什么 ROCm 分支里要调用 `uninstall_onnxruntime()`？
 
-**参考答案**：普通版 `onnxruntime` 与 ROCm 依赖冲突，ROCm 平台需要 `onnxruntime-rocm`。`setup.py` 在检测到 ROCm 时主动卸载普通版，避免后续冲突。见 [setup.py:L18-L40](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/setup.py#L18-L40) 与 [setup.py:L82-L86](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/setup.py#L82-L86)。
+**参考答案**：普通版 `onnxruntime` 与 ROCm 依赖冲突，ROCm 平台需要 `onnxruntime-rocm`。`setup.py` 在检测到 ROCm 时主动卸载普通版，避免后续冲突。见 [setup.py:L18-L40](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/setup.py#L18-L40) 与 [setup.py:L82-L86](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/setup.py#L82-L86)。
 
 ---
 
@@ -306,7 +361,7 @@ onnxruntime-rocm>=1.22.2
 git tag (例如 v0.26.0)
    │  setuptools-scm 推导
    ▼
-base version (例如 0.26.0.post3+g900a7f08)
+base version (例如 0.26.0.post7+g5215e03a)
    │  追加设备后缀
    ▼
 final version (CUDA: 不加后缀; ROCm: .rocm; NPU: .npu; ...)
@@ -321,7 +376,7 @@ vllm_omni/_version.py  →  __version__ / __version_tuple__
 - 否则用 `+`；
 - CUDA 特殊：**不加任何后缀**（与上游 vLLM 保持一致）。
 
-docstring 给出的示例见 [setup.py:L129-L132](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/setup.py#L129-L132)：
+docstring 给出的示例见 [setup.py:L129-L132](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/setup.py#L129-L132)：
 
 ```text
 - 0.14.0+cuda
@@ -331,7 +386,7 @@ docstring 给出的示例见 [setup.py:L129-L132](https://github.com/vllm-projec
 
 #### 4.3.3 源码精读
 
-`get_vllm_omni_version()` 的设备后缀逻辑见 [setup.py:L123-L182](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/setup.py#L123-L182)。其中分隔符与后缀追加见 [setup.py:L154-L175](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/setup.py#L154-L175)：
+`get_vllm_omni_version()` 的设备后缀逻辑见 [setup.py:L123-L182](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/setup.py#L123-L182)。其中分隔符与后缀追加见 [setup.py:L154-L175](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/setup.py#L154-L175)：
 
 ```python
 sep = "+" if "+" not in version else "."
@@ -350,7 +405,7 @@ elif device == "npu":
 
 包元数据（`pyproject.toml`）要点：
 
-- 构建系统与动态字段。`version` 与 `dependencies` 都是动态的，分别由 setuptools-scm 与 setup.py 提供，见 [pyproject.toml:L1-L11](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/pyproject.toml#L1-L11)：
+- 构建系统与动态字段。`version` 与 `dependencies` 都是动态的，分别由 setuptools-scm 与 setup.py 提供，见 [pyproject.toml:L1-L11](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/pyproject.toml#L1-L11)：
 
 ```toml
 [build-system]
@@ -362,23 +417,23 @@ name = "vllm-omni"
 dynamic = ["version", "dependencies"]
 ```
 
-- Python 版本约束。注意 `requires-python` 允许 `>=3.10,<3.14`，但官方 quickstart **推荐 3.12**，见 [pyproject.toml:L14](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/pyproject.toml#L14) 与 [docs/getting_started/quickstart.md:L8-L12](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/docs/getting_started/quickstart.md#L8-L12)。
-- 可选依赖（extras）。提供 `dev`（测试/类型检查）、`demo`（Gradio 演示）、`docs`（文档构建）、`quack`（Blackwell FP8）、`fa4`（FlashAttention-4）等，见 [pyproject.toml:L36-L125](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/pyproject.toml#L36-L125)。
-- console_script（命令行入口）。注册了 `vllm-omni` 命令，指向 CLI 主入口，见 [pyproject.toml:L133-L134](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/pyproject.toml#L133-L134)：
+- Python 版本约束。注意 `requires-python` 允许 `>=3.10,<3.14`，但官方 quickstart **推荐 3.12**，见 [pyproject.toml:L14](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/pyproject.toml#L14) 与 [docs/getting_started/quickstart.md:L8-L12](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/docs/getting_started/quickstart.md#L8-L12)。
+- 可选依赖（extras）。提供 `dev`（测试/类型检查）、`demo`（Gradio 演示）、`docs`（文档构建）、`quack`（Blackwell FP8）、`fa4`（FlashAttention-4）等，见 [pyproject.toml:L36-L125](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/pyproject.toml#L36-L125)。
+- console_script（命令行入口）。注册了 `vllm-omni` 命令，指向 CLI 主入口，见 [pyproject.toml:L133-L134](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/pyproject.toml#L133-L134)：
 
 ```toml
 [project.scripts]
 vllm-omni = "vllm_omni.entrypoints.cli.main:main"
 ```
 
-- vLLM 插件入口。这是安装层面一个关键设计：把「注册 omni 模型」挂到 vLLM 的 `general_plugins` 上，使那些**只 import 了 vllm、没 import vllm_omni 的子进程**也能自动加载 omni 架构，见 [pyproject.toml:L140-L141](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/pyproject.toml#L140-L141)：
+- vLLM 插件入口。这是安装层面一个关键设计：把「注册 omni 模型」挂到 vLLM 的 `general_plugins` 上，使那些**只 import 了 vllm、没 import vllm_omni 的子进程**也能自动加载 omni 架构，见 [pyproject.toml:L140-L141](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/pyproject.toml#L140-L141)：
 
 ```toml
 [project.entry-points."vllm.general_plugins"]
 vllm_omni_register_models = "vllm_omni.engine.arg_utils:register_omni_models_to_vllm"
 ```
 
-- setuptools-scm 配置仅需出现即启用，见 [pyproject.toml:L151-L152](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/pyproject.toml#L151-L152)。
+- setuptools-scm 配置仅需出现即启用，见 [pyproject.toml:L151-L152](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/pyproject.toml#L151-L152)。
 
 #### 4.3.4 代码实践
 
@@ -386,8 +441,8 @@ vllm_omni_register_models = "vllm_omni.engine.arg_utils:register_omni_models_to_
 
 **操作步骤**：
 
-1. 在仓库根目录执行 `git describe --tags`，你会看到类似 `v0.26.0-3-g900a7f08`（标签 `v0.26.0` 之后有 3 个提交）。
-2. 打开 `setup.py` 的 [get_vllm_omni_version()](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/setup.py#L123-L182)，对照「sep 选择 + 设备后缀」逻辑，推导 CUDA 下最终版本号。
+1. 在仓库根目录执行 `git describe --tags`，你会看到类似 `v0.26.0-7-g5215e03a`（标签 `v0.26.0` 之后有 7 个提交）。
+2. 打开 `setup.py` 的 [get_vllm_omni_version()](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/setup.py#L123-L182)，对照「sep 选择 + 设备后缀」逻辑，推导 CUDA 下最终版本号。
 3. 注意 `_version.py` 在源码里**不存在**（它被 `.gitignore` 忽略，仅在安装/构建时由 setuptools-scm 写出）。可以用 `ls vllm_omni/_version.py` 确认；安装后它才会出现。
 
 **需要观察的现象**：
@@ -403,11 +458,11 @@ vllm_omni_register_models = "vllm_omni.engine.arg_utils:register_omni_models_to_
 
 **练习 1**：为什么 CUDA 不加 `+cuda` 后缀，而 ROCm/NPU 要加？
 
-**参考答案**：为了与上游 vLLM 保持一致——vLLM 的 CUDA 版本号本身不带后缀。vLLM-Omni 在 CUDA 上刻意不加后缀，便于版本对齐检查时直接比较主次版本；而 ROCm/NPU 等平台加上后缀以区分二进制来源。见 [setup.py:L160-L163](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/setup.py#L160-L163)。
+**参考答案**：为了与上游 vLLM 保持一致——vLLM 的 CUDA 版本号本身不带后缀。vLLM-Omni 在 CUDA 上刻意不加后缀，便于版本对齐检查时直接比较主次版本；而 ROCm/NPU 等平台加上后缀以区分二进制来源。见 [setup.py:L160-L163](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/setup.py#L160-L163)。
 
 **练习 2**：`[project.entry-points."vllm.general_plugins"]` 这一段解决了什么问题？
 
-**参考答案**：vLLM 会在自身 `load_general_plugins()` 中加载所有声明在该入口的插件。vLLM-Omni 通过它把「注册 omni 模型」注册进去，使得那些只 import 了 vllm 的 worker 子进程（它们并不 import vllm_omni）也能自动发现并加载 omni 架构。这是「vLLM-Omni 扩展而非重写 vLLM」在打包层面的体现。见 [pyproject.toml:L136-L141](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/pyproject.toml#L136-L141)。
+**参考答案**：vLLM 会在自身 `load_general_plugins()` 中加载所有声明在该入口的插件。vLLM-Omni 通过它把「注册 omni 模型」注册进去，使得那些只 import 了 vllm 的 worker 子进程（它们并不 import vllm_omni）也能自动发现并加载 omni 架构。这是「vLLM-Omni 扩展而非重写 vLLM」在打包层面的体现。见 [pyproject.toml:L136-L141](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/pyproject.toml#L136-L141)。
 
 ---
 
@@ -417,7 +472,7 @@ vllm_omni_register_models = "vllm_omni.engine.arg_utils:register_omni_models_to_
 
 vLLM-Omni 与 vLLM 是「贴身扩展」关系：vLLM-Omni 内部大量代码直接调用 vLLM 的内部函数、改写 vLLM 的类。一旦两者的主次版本（major.minor）不一致，运行时很容易出现「函数签名变了」「类被删了」之类的崩溃。
 
-为此，vLLM-Omni 在**包被导入的最早期**就做一次版本对齐检查：如果发现 vLLM 的主次版本和自己不一致，就抛出一个 `RuntimeWarning`，提醒用户先对齐版本。这是你在本讲实践任务里要故意触发的那个告警。
+为此，vLLM-Omni 在**包被导入的最早期**就做一次版本对齐检查：如果发现 vLLM 的主次版本和自己不一致，就抛出一个 `RuntimeWarning`，提醒用户先对齐版本。这是你在本讲实践任务里要故意触发的那个告警。这条检查与 4.1 节「偶数次版本对齐发布节奏」互为表里：发布节奏保证「有对齐的版本可装」，运行时检查则保证「装错了能立刻被发现」。
 
 #### 4.4.2 核心流程
 
@@ -445,7 +500,7 @@ elif omni_major_minor != vllm_major_minor:
 
 #### 4.4.3 源码精读
 
-`version.py` 先尝试从自动生成的 `_version.py` 读取版本，失败则兜底为 `"dev"`，见 [vllm_omni/version.py:L10-L23](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/version.py#L10-L23)：
+`version.py` 先尝试从自动生成的 `_version.py` 读取版本，失败则兜底为 `"dev"`，见 [vllm_omni/version.py:L10-L23](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/vllm_omni/version.py#L10-L23)：
 
 ```python
 try:
@@ -456,7 +511,7 @@ except ImportError as e:
     __version_tuple__ = (0, 0, "dev")
 ```
 
-核心对齐函数 `warn_if_misaligned_vllm_version()` 见 [vllm_omni/version.py:L26-L48](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/version.py#L26-L48)：
+核心对齐函数 `warn_if_misaligned_vllm_version()` 见 [vllm_omni/version.py:L26-L48](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/vllm_omni/version.py#L26-L48)：
 
 ```python
 omni_ver = __version_tuple__[:2]
@@ -475,7 +530,7 @@ if omni_ver != vllm_ver:
 
 这段代码做了什么：只比较主版本与次版本（即 `version_tuple` 的前两位），不一致就发 `RuntimeWarning`。
 
-该函数在模块导入时自动执行，见 [vllm_omni/version.py:L54-L58](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/version.py#L54-L58)：
+该函数在模块导入时自动执行，见 [vllm_omni/version.py:L54-L58](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/vllm_omni/version.py#L54-L58)：
 
 ```python
 try:
@@ -484,7 +539,7 @@ except ModuleNotFoundError:
     pass                         # vLLM 未安装（如文档构建），静默跳过
 ```
 
-「先做版本检查再打 patch」的顺序约束，明确写在 `__init__.py` 的注释里，见 [vllm_omni/__init__.py:L15-L27](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/__init__.py#L15-L27)：
+「先做版本检查再打 patch」的顺序约束，明确写在 `__init__.py` 的注释里，见 [vllm_omni/__init__.py:L15-L27](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/vllm_omni/__init__.py#L15-L27)：
 
 ```python
 # We import version early, because it will warn if vLLM / vLLM Omni
@@ -548,11 +603,11 @@ This will likely cause compatibility issues.
 
 **练习 1**：为什么对齐检查只比较 `version_tuple[:2]`（主.次），而不是完整版本号？
 
-**参考答案**：补丁版本（patch，即第三位）通常只含 bug 修复，API 兼容；而主版本、次版本的变更才可能改动公开/内部接口。vLLM-Omni 紧贴 vLLM 内部实现，因此只需保证主次版本对齐即可。见 [vllm_omni/version.py:L33-L40](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/version.py#L33-L40)。
+**参考答案**：补丁版本（patch，即第三位）通常只含 bug 修复，API 兼容；而主版本、次版本的变更才可能改动公开/内部接口。vLLM-Omni 紧贴 vLLM 内部实现，因此只需保证主次版本对齐即可。见 [vllm_omni/version.py:L33-L40](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/vllm_omni/version.py#L33-L40)。
 
 **练习 2**：如果把 `__init__.py` 里「先 import version、再 import patch」的顺序颠倒，会有什么后果？
 
-**参考答案**：版本不一致时，`import patch` 阶段对 vLLM 的导入可能直接抛异常，导致程序在打印版本告警之前就崩溃；用户因此看不到「版本不匹配」的友好提示，更难定位问题。这正是注释强调顺序的原因。见 [vllm_omni/__init__.py:L15-L19](https://github.com/vllm-project/vllm-omni/blob/900a7f0813d0482811b0e4dfd3cf7deabbe2429f/vllm_omni/__init__.py#L15-L19)。
+**参考答案**：版本不一致时，`import patch` 阶段对 vLLM 的导入可能直接抛异常，导致程序在打印版本告警之前就崩溃；用户因此看不到「版本不匹配」的友好提示，更难定位问题。这正是注释强调顺序的原因。见 [vllm_omni/__init__.py:L15-L19](https://github.com/vllm-project/vllm-omni/blob/5215e03a91adecbb5ffece29aa74360a7569d0c5/vllm_omni/__init__.py#L15-L19)。
 
 ---
 
@@ -572,13 +627,15 @@ This will likely cause compatibility issues.
 **验收标准**：
 
 - 能复现「正常安装无告警」与「版本不匹配有告警」两种状态；
-- 能在源码中指出「设备检测、依赖路由、版本生成、版本对齐」分别由哪个文件的哪段代码负责。
+- 能在源码中指出「设备检测、依赖路由、版本生成、版本对齐」分别由哪个文件的哪段代码负责；
+- 能说清楚 NPU 与 CUDA 安装流程的关键差异（三方钉版本 vs 两步安装）。
 
-> 若本机没有 GPU，可全程用 `VLLM_OMNI_TARGET_DEVICE=cpu` 完成步骤 1–4 与版本对齐实验（步骤 5），同样能覆盖本讲全部知识点。
+> 若本机没有 GPU，可全程用 `VLLM_OMNI_TARGET_DEVICE=cpu` 完成步骤 1–4 与版本对齐实验（步骤 5），同样能覆盖本讲除 NPU 三方安装外的全部知识点。
 
 ## 6. 本讲小结
 
-- vLLM-Omni 必须**先装对齐版本的 vLLM，再以可编辑模式从源码安装**，官方推荐 Python 3.12 + Linux + 干净环境。
+- vLLM-Omni 必须**先装对齐版本的 vLLM，再以可编辑模式从源码安装**，官方推荐 Python 3.12 + Linux + 干净环境；从 v0.14.0 起每个偶数号 vLLM 次版本都对应一个 vLLM-Omni 稳定版（0.26.x ↔ vLLM 0.26.x）。
+- v0.26.0 把这条「主次版本对齐」铁律写进了安装文档顶部（`!!! important`），并把 CUDA Docker `BASE_IMAGE` 与 NPU 的 vLLM/vLLM-Ascend 都对齐到 v0.26 发布线。
 - `setup.py` 通过 `detect_target_device()` 按「环境变量 → READTHEDOCS → torch 后端探测 → CPU 兜底」的优先级判定硬件，再从 `requirements/{device}.txt` 加载平台依赖，实现了「一句 `pip install` 自动适配 CUDA/ROCm/NPU/XPU/MUSA」。
 - 版本号由 setuptools-scm 从 git 标签推导，并按设备追加后缀（CUDA 不加、其余加 `+rocm`/`+npu` 等），写入自动生成的 `_version.py`。
 - `pyproject.toml` 定义了包元数据、可选依赖（dev/demo/docs/quack/fa4 等）、`vllm-omni` console_script，以及把 omni 模型注册挂到 vLLM 的 `general_plugins` 入口。

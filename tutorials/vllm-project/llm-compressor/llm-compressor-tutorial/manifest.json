@@ -1,0 +1,891 @@
+{
+  "project": "llm-compressor",
+  "head": "2d7a7ea058793447faa40b75d285c7ce2111c11f",
+  "rationale": "本手册按「先认识、再读引擎、再读量化校准、再读算法、最后读规模化与扩展」的顺序设计为三层六单元。第一单元(begenner)让读者从零理解项目定位、装好环境、跑通第一个 oneshot 量化，并建立目录与入口的总体印象。第二单元进入核心引擎：CompressionSession/State/Lifecycle/Event 是贯穿全库的骨架，Modifier 基类与 ModifierFactory、Recipe、parse_args 是理解任何压缩流程的前置知识，因此放在最前面讲。第三单元是项目最核心的量化与校准管线，先讲 QuantizationModifier 与方案、再讲 QuantizationMixin 如何把方案挂到模块、再讲 observers/calibration，最后讲 CalibrationPipeline 的选择与 sequential/independent/basic/datafree 四种管线。第四单元按算法逐个拆解 GPTQ/AWQ/SmoothQuant/AutoRound/剪枝，它们都依赖第三单元的量化与校准机制。第五单元讲数据构建、MoE 建模线性化、无模型定义量化(model_free_ptq)这三条特殊数据/建模链路。第六单元(advanced)面向二次开发与工程化：DDP 分布式、大模型逐层加载与磁盘 offloading、保存为 compressed-tensors 格式、以及自定义 Modifier/Observer 两个扩展点、最后是测试与贡献流程。讲义之间通过 depends_on 形成清晰的有向依赖，每个讲义只解决一个主题并配套一个可操作的代码实践任务，所有 source_files 均为真实存在的源码。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "从零认识 llm-compressor",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与核心概念",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 llm-compressor 是什么：面向 vLLM 部署的 LLM 压缩(量化/剪枝)库，输出 compressed-tensors 格式，以及它支持的精度与算法总览。",
+          "learning_goals": [
+            "理解 llm-compressor 的定位、解决什么问题、与 vLLM/compressed-tensors 的关系",
+            "了解支持的量化精度(W8A8/FP8/NVFP4/W4A16 等)与算法(GPTQ/AWQ/SmoothQuant/AutoRound/REAP)",
+            "建立 recipe/modifier/oneshot 三个核心概念的初步印象"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/steps/why-llmcompressor.md",
+            "docs/steps/choosing-scheme.md"
+          ],
+          "minimal_modules": [
+            "docs/steps"
+          ],
+          "practice_task": "阅读 README 与 why-llmcompressor，用自己的话写出 llm-compressor 输入(模型+recipe)到输出(可被 vLLM 加载的量化 checkpoint)的数据流，并列出你感兴趣的一种精度方案。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "安装与第一次量化实践",
+          "order": 2,
+          "filename": "u1-l2-install-and-first-quantization.md",
+          "level": "beginner",
+          "topic": "安装 llmcompressor，跟着 Quick Tour 用 QuantizationModifier + oneshot 把一个小模型量化为 FP8，并用 vLLM 推理验证。",
+          "learning_goals": [
+            "完成 pip install 并确认依赖",
+            "跑通 README Quick Tour 的 FP8 量化最小示例",
+            "理解 oneshot(model=..., recipe=...) 的最小调用形态"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/getting-started/install.md",
+            "examples/quantization_w8a8_fp8/README.md"
+          ],
+          "minimal_modules": [
+            "llmcompressor",
+            "llmcompressor.entrypoints"
+          ],
+          "practice_task": "选一个极小模型(如 tiny 风格的本地或 HF 小模型)，用 QuantizationModifier(scheme=\"FP8\") + oneshot 完成量化并保存到磁盘，记录压缩前后模型体积变化。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与库入口",
+          "order": 3,
+          "filename": "u1-l3-directory-and-library-entry.md",
+          "level": "beginner",
+          "topic": "梳理 src/llmcompressor 下的顶层模块(entrypoints/core/modifiers/pipelines/recipe/datasets/observers/modeling/utils)，并说明包入口 __init__.py 暴露了哪些 API。",
+          "learning_goals": [
+            "掌握 src/llmcompressor 的顶层目录划分与各自职责",
+            "理解 llmcompressor/__init__.py 暴露的 oneshot/model_free_ptq/active_session 等 API",
+            "知道每个功能大致对应哪个子包，便于后续源码定位"
+          ],
+          "source_files": [
+            "src/llmcompressor/__init__.py",
+            "src/llmcompressor/entrypoints/__init__.py"
+          ],
+          "minimal_modules": [
+            "llmcompressor",
+            "llmcompressor.entrypoints"
+          ],
+          "practice_task": "画出 src/llmcompressor 的目录树，为 entrypoints/core/modifiers/pipelines/recipe/datasets/observers/modeling 各写一句话职责说明，并标注 oneshot 函数定义所在的文件。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "oneshot 入口与三阶段生命周期",
+          "order": 4,
+          "filename": "u1-l4-oneshot-entrypoint-lifecycle.md",
+          "level": "beginner",
+          "topic": "精读 Oneshot 类与 oneshot() 函数：__init__ 解析参数与 pre_process、__call__ 构建校准 dataloader 并 apply_recipe_modifiers、最后 post_process 保存。",
+          "learning_goals": [
+            "理解 Oneshot 的预处理(pre_process)、校准(apply_recipe_modifiers)、后处理(post_process)三阶段",
+            "掌握 oneshot() 的主要参数(model/recipe/dataset/pipeline 等)含义",
+            "理解 oneshot 如何与 active_session、CalibrationPipeline 协作"
+          ],
+          "source_files": [
+            "src/llmcompressor/entrypoints/oneshot.py",
+            "src/llmcompressor/entrypoints/utils.py",
+            "docs/guides/entrypoints/oneshot.md"
+          ],
+          "minimal_modules": [
+            "llmcompressor.entrypoints.oneshot",
+            "llmcompressor.entrypoints.utils"
+          ],
+          "practice_task": "在 oneshot 源码中标注 pre_process/apply_recipe_modifiers/post_process 三个阶段的代码行，并写一段脚本调用 oneshot 时分别传入不同 dataset 和 num_calibration_samples，观察日志变化。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心引擎：Session / Lifecycle / Modifier",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "CompressionSession 与 State",
+          "order": 1,
+          "filename": "u2-l1-session-and-state.md",
+          "level": "intermediate",
+          "topic": "讲解全局 CompressionSession 如何持有 lifecycle 与 state，State 如何保存 model/optimizer/data/hardware，以及 active_session 全局会话函数。",
+          "learning_goals": [
+            "理解 CompressionSession 作为压缩会话容器的作用与 initialize/finalize/event/reset 方法",
+            "掌握 State dataclass 中 model/data/hardware/loss 等字段的意义",
+            "理解 active_session/create_session/reset_session 等全局会话函数"
+          ],
+          "source_files": [
+            "src/llmcompressor/core/session.py",
+            "src/llmcompressor/core/state.py",
+            "src/llmcompressor/core/session_functions.py",
+            "src/llmcompressor/core/__init__.py"
+          ],
+          "minimal_modules": [
+            "llmcompressor.core.session",
+            "llmcompressor.core.state",
+            "llmcompressor.core.session_functions"
+          ],
+          "practice_task": "写一段代码：create_session 后用 active_session() 拿到会话，打印其 state 的类型与默认字段，并对比 reset() 前后 lifecycle 状态变化。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "CompressionLifecycle 与事件系统",
+          "order": 2,
+          "filename": "u2-l2-lifecycle-and-events.md",
+          "level": "intermediate",
+          "topic": "精读 CompressionLifecycle 的 initialize/finalize/event 实现、事件顺序校验，以及 Event/EventType 的定义与触发时机。",
+          "learning_goals": [
+            "掌握 lifecycle.initialize/finalize/event 如何驱动每个 modifier 的对应方法",
+            "理解 EventType(BATCH_START/CALIBRATION_START/SEQUENTIAL_EPOCH_END 等)与事件顺序校验机制",
+            "理解 global_step 在生命周期中的作用"
+          ],
+          "source_files": [
+            "src/llmcompressor/core/lifecycle.py",
+            "src/llmcompressor/core/events/event.py",
+            "src/llmcompressor/core/__init__.py"
+          ],
+          "minimal_modules": [
+            "llmcompressor.core.lifecycle",
+            "llmcompressor.core.events"
+          ],
+          "practice_task": "枚举 EventType 的所有取值，并用表格说明每个事件由哪个 pipeline 在什么时机触发；尝试故意乱序调用 session.event 观察校验报错。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "Modifier 基类生命周期",
+          "order": 3,
+          "filename": "u2-l3-modifier-base-lifecycle.md",
+          "level": "intermediate",
+          "topic": "精读 Modifier 抽象基类：initialize/finalize/update_event 模板方法，on_initialize/on_calibration_start/on_sequential_epoch_end/on_calibration_end 等钩子，以及 start/end/should_start 的训练生命周期。",
+          "learning_goals": [
+            "掌握 Modifier 基类的双生命周期：训练(on_start/on_update/on_end)与校准(on_calibration_start/on_sequential_epoch_end/on_calibration_end)",
+            "理解 initialized_/finalized_/started_/ended_ 状态标志与 requires_calibration_data 的作用",
+            "知道子类必须实现 on_initialize、可选实现其它钩子"
+          ],
+          "source_files": [
+            "src/llmcompressor/modifiers/modifier.py",
+            "src/llmcompressor/modifiers/interface.py",
+            "src/llmcompressor/modifiers/utils/hooks.py"
+          ],
+          "minimal_modules": [
+            "llmcompressor.modifiers.modifier",
+            "llmcompressor.modifiers.interface"
+          ],
+          "practice_task": "基于 Modifier 基类写一个空壳子类(只实现 on_initialize 打印日志)，构造一个 State 调用 initialize/update_event/finalize，观察各钩子的触发顺序。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "ModifierFactory 自动发现与注册",
+          "order": 4,
+          "filename": "u2-l4-modifier-factory.md",
+          "level": "intermediate",
+          "topic": "讲解 ModifierFactory 如何遍历 llmcompressor.modifiers 包自动收集所有 *Modifier 类、排除 deprecated 包，以及 create/register 机制。",
+          "learning_goals": [
+            "理解 ModifierFactory 通过遍历子包收集以 Modifier 结尾的类的发现机制",
+            "掌握 main/experimental/registered 三个注册表与 deprecated 包过滤",
+            "理解 Recipe.from_dict 如何用工厂按名字实例化 modifier"
+          ],
+          "source_files": [
+            "src/llmcompressor/modifiers/factory.py",
+            "src/llmcompressor/modifiers/__init__.py"
+          ],
+          "minimal_modules": [
+            "llmcompressor.modifiers.factory",
+            "llmcompressor.modifiers"
+          ],
+          "practice_task": "调用 ModifierFactory.refresh() 后打印 _main_registry 的所有 modifier 名字；再用 register() 注册一个自定义 modifier 名字并在 _registered_registry 中确认。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "Recipe 编码压缩指令",
+          "order": 5,
+          "filename": "u2-l5-recipe.md",
+          "level": "intermediate",
+          "topic": "精读 Recipe 模型：create_instance 支持从文件/字符串/Modifier 实例/Recipe 对象创建，from_dict 解析 stage/group，yaml 序列化与合并，以及 AWQ 必须后接量化 modifier 的校验。",
+          "learning_goals": [
+            "掌握 Recipe 的多种创建路径(文件/YAML 字符串/Modifier 列表)",
+            "理解 from_dict 中 stage/group/modifier 的命名约定(_stage/_modifiers 后缀)",
+            "理解 Recipe 的序列化与合并、以及 modifier 顺序校验"
+          ],
+          "source_files": [
+            "src/llmcompressor/recipe/recipe.py",
+            "src/llmcompressor/recipe/utils.py"
+          ],
+          "minimal_modules": [
+            "llmcompressor.recipe.recipe",
+            "llmcompressor.recipe.utils"
+          ],
+          "practice_task": "手写一段 YAML recipe(含 QuantizationModifier)，用 Recipe.create_instance 解析并打印其 modifiers 列表，再调用 .yaml() 序列化回字符串对比。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "参数系统 parse_args",
+          "order": 6,
+          "filename": "u2-l6-arguments-system.md",
+          "level": "intermediate",
+          "topic": "讲解 oneshot 的 kwargs 如何被 parse_args 拆分为 ModelArguments/DatasetArguments/RecipeArguments 与 output_dir。",
+          "learning_goals": [
+            "理解 parse_args 把 kwargs 路由到 model_args/dataset_args/recipe_args/output_dir 的机制",
+            "掌握 ModelArguments/DatasetArguments/RecipeArguments 各自承载哪些关键字段",
+            "理解参数类与 oneshot() 签名参数的一一对应"
+          ],
+          "source_files": [
+            "src/llmcompressor/args/__init__.py",
+            "src/llmcompressor/args/utils.py",
+            "src/llmcompressor/args/model_arguments.py",
+            "src/llmcompressor/args/recipe_arguments.py",
+            "src/llmcompressor/args/dataset_arguments.py"
+          ],
+          "minimal_modules": [
+            "llmcompressor.args",
+            "llmcompressor.args.utils",
+            "llmcompressor.args.model_arguments"
+          ],
+          "practice_task": "跟踪 oneshot 的一个真实调用，列出 parse_args 后 model_args/dataset_args/recipe_args 各自被赋了哪些值，并解释 pipeline/sequential_targets 字段属于哪一组。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "量化与校准管线",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "QuantizationModifier 与量化方案",
+          "order": 1,
+          "filename": "u3-l1-quantization-modifier-and-scheme.md",
+          "level": "intermediate",
+          "topic": "精读 QuantizationModifier：config_groups/targets/ignore/scheme/kv_cache_scheme 等字段，以及它如何复用 QuantizationMixin 完成初始化与校准起止。",
+          "learning_goals": [
+            "理解 QuantizationModifier 的核心字段 targets/ignore/scheme/config_groups/kv_cache_scheme",
+            "掌握 scheme 预设(如 FP8_BLOCK/W4A16)与 config_groups 的关系",
+            "理解 RTN(round-to-nearest) 量化在 on_initialize/on_calibration_start/on_sequential_epoch_end/on_calibration_end 四个钩子中的执行点"
+          ],
+          "source_files": [
+            "src/llmcompressor/modifiers/quantization/quantization/base.py",
+            "docs/guides/compression_schemes.md",
+            "docs/steps/choosing-scheme.md"
+          ],
+          "minimal_modules": [
+            "llmcompressor.modifiers.quantization.quantization.base",
+            "llmcompressor.modifiers.quantization"
+          ],
+          "practice_task": "用不同 scheme(FP8_DYNAMIC vs W4A16)分别构造 QuantizationModifier 跑 oneshot，比较生成模型 config.json 中 quantization_config 的差异。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "QuantizationMixin 把方案挂到模块",
+          "order": 2,
+          "filename": "u3-l2-quantization-mixin.md",
+          "level": "intermediate",
+          "topic": "精读 QuantizationMixin：initialize_quantization 给目标模块挂 scheme 与 observer，start_calibration 挂校准 hook 并启用量化，end_calibration 移除 hook 并冻结量化参数。",
+          "learning_goals": [
+            "理解 QuantizationMixin.initialize_quantization 如何把 QuantizationScheme 应用到具体 nn.Module",
+            "掌握 start_calibration/end_calibration 控制量化开关与校准 hook 的挂载/卸载",
+            "理解为何 QuantizationMixin 自身不更新 scale/zero_point，而交由子类显式调用 observe+update_qparams"
+          ],
+          "source_files": [
+            "src/llmcompressor/modifiers/quantization/quantization/mixin.py",
+            "src/llmcompressor/modifiers/quantization/group_size_validation.py"
+          ],
+          "minimal_modules": [
+            "llmcompressor.modifiers.quantization.quantization.mixin",
+            "llmcompressor.modifiers.quantization.group_size_validation"
+          ],
+          "practice_task": "在一个 Linear 模块上手动调用 QuantizationMixin 的 initialize_quantization/start_calibration，打印模块挂载 quantization_scheme 与 observer 前后的属性变化。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "校准、Observers 与 Hooks",
+          "order": 3,
+          "filename": "u3-l3-calibration-observers-hooks.md",
+          "level": "intermediate",
+          "topic": "讲解 calibration.py 中的 observe/update_qparams/freeze_module_quantization，以及 observers 包(MinMax/MSE/IMatrix)如何收集张量统计并融合。",
+          "learning_goals": [
+            "理解 observe() 与 update_qparams() 如何从 observer 统计计算 scale/zero_point 并写回模块",
+            "掌握 MinMaxObserver/MSEObserver/IMatrixObserver 的不同统计策略",
+            "理解 ACTIVATION_OBS/WEIGHT_OBS 与 fusion(多 rank 融合)的机制"
+          ],
+          "source_files": [
+            "src/llmcompressor/modifiers/quantization/calibration.py",
+            "src/llmcompressor/observers/base.py",
+            "src/llmcompressor/observers/min_max.py",
+            "src/llmcompressor/observers/mse.py",
+            "src/llmcompressor/observers/fusion.py"
+          ],
+          "minimal_modules": [
+            "llmcompressor.modifiers.quantization.calibration",
+            "llmcompressor.observers.min_max",
+            "llmcompressor.observers.base"
+          ],
+          "practice_task": "对同一组校准激活分别用 MinMax 与 MSE observer 计算 scale/zero_point，比较两者得到的量化参数与量化误差。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "校准管线选择与 CalibrationPipeline",
+          "order": 4,
+          "filename": "u3-l4-calibration-pipeline-registry.md",
+          "level": "intermediate",
+          "topic": "精读 CalibrationPipeline 基类与 from_modifiers：根据 modifier 的 requires_calibration_data 自动推断 sequential/datafree，并允许用户覆盖。",
+          "learning_goals": [
+            "理解 _infer_pipeline 根据 requires_calibration_data 在 sequential 与 datafree 间选择",
+            "掌握 from_modifiers 中 user 指定与 inferred 推断的优先级与告警逻辑",
+            "理解 RegistryMixin 注册机制如何让 independent/sequential/basic/datafree 四种管线可被 load_from_registry"
+          ],
+          "source_files": [
+            "src/llmcompressor/pipelines/registry.py",
+            "src/llmcompressor/pipelines/sequential/pipeline.py",
+            "src/llmcompressor/pipelines/independent/pipeline.py"
+          ],
+          "minimal_modules": [
+            "llmcompressor.pipelines.registry",
+            "llmcompressor.pipelines"
+          ],
+          "practice_task": "构造 requires_calibration_data 分别为 True/False 的两个假 modifier，调用 CalibrationPipeline.from_modifiers 验证推断出的管线名，并测试传入 user=\"independent\" 的告警行为。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "SequentialPipeline 逐层校准深析",
+          "order": 5,
+          "filename": "u3-l5-sequential-pipeline.md",
+          "level": "intermediate",
+          "topic": "精读 SequentialPipeline：将模型切分为子图、逐子图两遍前向(触发校准 hook + 捕获量化后激活)、用 IntermediatesCache 在 CPU/GPU 间缓存中间激活以节省显存。",
+          "learning_goals": [
+            "理解 sequential_targets 推断与 trace_subgraphs 把模型切成子图的过程",
+            "掌握每个子图两遍前向的作用(触发校准 hook 与捕获量化后激活)",
+            "理解 IntermediatesCache 如何在 batch 与子图之间 offload/onload 中间激活以节省显存"
+          ],
+          "source_files": [
+            "src/llmcompressor/pipelines/sequential/pipeline.py",
+            "src/llmcompressor/pipelines/sequential/helpers.py",
+            "src/llmcompressor/pipelines/cache.py",
+            "src/llmcompressor/utils/pytorch/module.py"
+          ],
+          "minimal_modules": [
+            "llmcompressor.pipelines.sequential.pipeline",
+            "llmcompressor.pipelines.sequential.helpers",
+            "llmcompressor.pipelines.cache"
+          ],
+          "practice_task": "跑一次 GPTQ 量化并用日志/断点确认 sequential pipeline 把模型切成多少子图、每个子图执行了几遍前向；尝试改 sequential_offload_device 观察显存变化。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "Independent / Basic / DataFree 管线",
+          "order": 6,
+          "filename": "u3-l6-independent-basic-datafree-pipelines.md",
+          "level": "intermediate",
+          "topic": "讲解 IndependentPipeline(每个 modifier 独立一个校准 epoch)、BasicPipeline、DataFreePipeline 的差异与适用场景。",
+          "learning_goals": [
+            "理解 IndependentPipeline 如何为每个 modifier 单独选择并运行子管线",
+            "掌握 DataFreePipeline 适用于无需校准数据(RTN)的场景",
+            "理解三种管线在 recipe 包含多个 modifier 时的组合行为"
+          ],
+          "source_files": [
+            "src/llmcompressor/pipelines/independent/pipeline.py",
+            "src/llmcompressor/pipelines/basic/pipeline.py",
+            "src/llmcompressor/pipelines/data_free/pipeline.py"
+          ],
+          "minimal_modules": [
+            "llmcompressor.pipelines.independent.pipeline",
+            "llmcompressor.pipelines.basic.pipeline",
+            "llmcompressor.pipelines.data_free.pipeline"
+          ],
+          "practice_task": "用一个含 QuantizationModifier 的 recipe 分别以 pipeline=\"independent\" 与默认推断运行 oneshot，对比日志中实际使用的管线与校准 epoch 数。",
+          "depends_on": [
+            "u3-4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "压缩算法实现",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "GPTQ 算法实现",
+          "order": 1,
+          "filename": "u4-l1-gptq-algorithm.md",
+          "level": "intermediate",
+          "topic": "精读 GPTQModifier：用激活校准 Hessian、calibrate_module hook 累积 Hessian、on_sequential_epoch_end 调 quantize_weight 按 block_size 逐列量化，以及 actorder/dampening_frac 参数。",
+          "learning_goals": [
+            "理解 GPTQModifier 校准阶段如何用输入激活累积 Hessian 矩阵",
+            "掌握 quantize_weight 中 block_size/dampening_frac/actorder 的作用",
+            "理解 GPTQ 与 QuantizationMixin 的协作：先挂量化方案与 observer，再用 Hessian 校准权重"
+          ],
+          "source_files": [
+            "src/llmcompressor/modifiers/gptq/base.py",
+            "src/llmcompressor/modifiers/gptq/gptq_quantize.py"
+          ],
+          "minimal_modules": [
+            "llmcompressor.modifiers.gptq.base",
+            "llmcompressor.modifiers.gptq.gptq_quantize"
+          ],
+          "practice_task": "用 GPTQModifier 对一个小模型量化(int4 group=128)，分别设置 dampening_frac 高低两档，比较量化后权重误差或简单 perplexity 变化。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "AWQ 缩放变换",
+          "order": 2,
+          "filename": "u4-l2-awq-transform.md",
+          "level": "intermediate",
+          "topic": "讲解 AWQModifier 作为变换(transform)modifier：为关键权重通道计算缩放因子并重排权重，必须后接 QuantizationModifier 才能完成量化。",
+          "learning_goals": [
+            "理解 AWQ 作为 transform modifier 在量化前对权重做缩放重排的思想",
+            "掌握 AWQModifier 与 QuantizationModifier 在 recipe 中的顺序依赖与 Recipe 校验",
+            "理解 duo_scaling 等 AWQ 特有参数"
+          ],
+          "source_files": [
+            "src/llmcompressor/modifiers/transform/awq/base.py",
+            "src/llmcompressor/modifiers/transform/awq/mappings.py",
+            "src/llmcompressor/modifiers/awq/__init__.py"
+          ],
+          "minimal_modules": [
+            "llmcompressor.modifiers.transform.awq.base",
+            "llmcompressor.modifiers.transform.awq.mappings"
+          ],
+          "practice_task": "构造 [AWQModifier, QuantizationModifier(scheme=\"W4A16_ASYM\")] 的 recipe 跑量化，再故意把 QuantizationModifier 删掉观察 Recipe 报的校验错误。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "SmoothQuant 平滑激活",
+          "order": 3,
+          "filename": "u4-l3-smoothquant.md",
+          "level": "intermediate",
+          "topic": "讲解 SmoothQuant 通过把激活的离群值平滑迁移到权重，使后续 W8A8 量化更友好。",
+          "learning_goals": [
+            "理解 SmoothQuant 用校准统计的激活最大值与权重最大值计算平滑因子",
+            "掌握 SmoothQuant 作为 transform modifier 与量化 modifier 的配合",
+            "理解 smoothquant/base.py 与 transform/smoothquant/base.py 的分工"
+          ],
+          "source_files": [
+            "src/llmcompressor/modifiers/smoothquant/base.py",
+            "src/llmcompressor/modifiers/transform/smoothquant/base.py",
+            "src/llmcompressor/modifiers/smoothquant/utils.py"
+          ],
+          "minimal_modules": [
+            "llmcompressor.modifiers.smoothquant.base",
+            "llmcompressor.modifiers.transform.smoothquant.base"
+          ],
+          "practice_task": "用 SmoothQuant + W8A8 Int8 量化对比直接 W8A8 Int8 量化的激活量化误差，体会平滑带来的收益。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "AutoRound 量化",
+          "order": 4,
+          "filename": "u4-l4-autoround.md",
+          "level": "intermediate",
+          "topic": "讲解 AutoRoundModifier 如何用轻量优化(可学习 round/clip)逐层搜索最优量化权重，支持 wNa16/w4a4 等多种方案。",
+          "learning_goals": [
+            "理解 AutoRound 用少量步数的逐层优化替代直接 round-to-nearest 的思路",
+            "掌握 AutoRoundModifier 的主要参数与它如何接管逐层校准",
+            "理解 sequential pipeline 中 AutoRoundModifier 不传播量化误差的特殊处理"
+          ],
+          "source_files": [
+            "src/llmcompressor/modifiers/autoround/base.py",
+            "src/llmcompressor/modifiers/autoround/utils.py"
+          ],
+          "minimal_modules": [
+            "llmcompressor.modifiers.autoround.base",
+            "llmcompressor.modifiers.autoround.utils"
+          ],
+          "practice_task": "用 AutoRoundModifier 对一个小模型做 w4a16 量化，对比相同方案下 GPTQModifier 的结果(权重误差或简单指标)。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "剪枝算法 SparseGPT / Wanda / Magnitude / REAP",
+          "order": 5,
+          "filename": "u4-l5-pruning-modifiers.md",
+          "level": "intermediate",
+          "topic": "概览剪枝类 modifier：SparseGPT 与 Wanda 的逐层稀疏化、Magnitude 的幅度剪枝、以及面向 MoE 的 REAP 专家剪枝。",
+          "learning_goals": [
+            "理解 SparseGPTModifier 与 WandaModifier 基于校准数据计算稀疏掩码的区别",
+            "掌握 MagnitudePruningModifier 的无数据幅度剪枝",
+            "理解 REAP 针对 MoE 模型按 saliency 剪掉专家的机制"
+          ],
+          "source_files": [
+            "src/llmcompressor/modifiers/pruning/sparsegpt/base.py",
+            "src/llmcompressor/modifiers/pruning/wanda/base.py",
+            "src/llmcompressor/modifiers/pruning/magnitude/base.py",
+            "src/llmcompressor/modifiers/pruning/reap/base.py",
+            "src/llmcompressor/modifiers/pruning/reap/utils.py"
+          ],
+          "minimal_modules": [
+            "llmcompressor.modifiers.pruning.sparsegpt.base",
+            "llmcompressor.modifiers.pruning.wanda.base",
+            "llmcompressor.modifiers.pruning.magnitude.base",
+            "llmcompressor.modifiers.pruning.reap.base"
+          ],
+          "practice_task": "用 WandaModifier 对一个稠密小模型做 50% 稀疏剪枝并保存，检查保存后权重的零值比例；若环境允许，尝试 REAP 对一个 MoE 小模型剪枝。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "数据、建模与特殊流程",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "校准数据集与 DataLoader 构建",
+          "order": 1,
+          "filename": "u5-l1-calibration-datasets.md",
+          "level": "intermediate",
+          "topic": "讲解 get_calibration_dataloader 如何把 dataset 名称/Dataset/DataLoader 统一成校准 DataLoader，以及 transformers/data 下内置数据集(c4/wikitext/gsm8k 等)与格式化。",
+          "learning_goals": [
+            "理解 get_calibration_dataloader 对 str/Dataset/DataLoader 三种输入的统一处理",
+            "掌握 num_calibration_samples/max_seq_length/shuffle/pad_to_max_length 等采样与 tokenize 参数",
+            "理解内置数据集 transformers/data 的注册与 format_calibration_data 的作用"
+          ],
+          "source_files": [
+            "src/llmcompressor/datasets/utils.py",
+            "src/llmcompressor/transformers/data/c4.py",
+            "src/llmcompressor/transformers/data/base.py",
+            "src/llmcompressor/transformers/data/wikitext.py"
+          ],
+          "minimal_modules": [
+            "llmcompressor.datasets.utils",
+            "llmcompressor.transformers.data.c4",
+            "llmcompressor.transformers.data.base"
+          ],
+          "practice_task": "分别用 \"open_platypus\" 数据集名和自定义 Dataset 两种方式调用 oneshot 的 dataset 参数，打印校准 dataloader 一个 batch 的形状与 dtype。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "MoE 建模与线性化",
+          "order": 2,
+          "filename": "u5-l2-moe-modeling.md",
+          "level": "intermediate",
+          "topic": "讲解 MoE 模型的线性化(linearize_moe/load_quantizable_moe)、专家感知校准上下文(moe_calibration_context)与架构映射，使 MoE 能被 sequential 管线正确校准。",
+          "learning_goals": [
+            "理解为何 MoE 模型在 oneshot 前需要 linearize_moe 线性化专家",
+            "掌握 moe_calibration_context 与 moe_calibrate_all_experts 的作用",
+            "理解 conversion_mappings 为 Llama4/GraniteMoE 等架构提供的专家线性化映射"
+          ],
+          "source_files": [
+            "src/llmcompressor/modeling/moe/linearize.py",
+            "src/llmcompressor/modeling/moe/context.py",
+            "src/llmcompressor/modeling/moe/conversion_mappings.py"
+          ],
+          "minimal_modules": [
+            "llmcompressor.modeling.moe.linearize",
+            "llmcompressor.modeling.moe.context",
+            "llmcompressor.modeling.moe.conversion_mappings"
+          ],
+          "practice_task": "加载一个 MoE 模型，调用 linearize_moe 前后分别用 get_non_linearized_moes 检查未线性化的 MoE 数量，体会 oneshot 中的回退警告含义。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "无模型定义量化 model_free_ptq",
+          "order": 3,
+          "filename": "u5-l3-model-free-ptq.md",
+          "level": "intermediate",
+          "topic": "讲解 model_free_ptq 入口：在没有 HuggingFace 模型定义的情况下，直接对 safetensors 权重文件做权重量化(RTN)，适用于超大模型。",
+          "learning_goals": [
+            "理解 model_free_ptq 与 oneshot 的根本区别(无需实例化完整模型)",
+            "掌握 model_free_ptq 对 safetensors 权重逐文件校准/量化的流程",
+            "理解 microscale 方案与 reindex 在 model-free 流程中的处理"
+          ],
+          "source_files": [
+            "src/llmcompressor/entrypoints/model_free/__init__.py",
+            "src/llmcompressor/entrypoints/model_free/process.py",
+            "src/llmcompressor/entrypoints/model_free/lifecycle.py",
+            "docs/guides/entrypoints/model-free-ptq.md"
+          ],
+          "minimal_modules": [
+            "llmcompressor.entrypoints.model_free.process",
+            "llmcompressor.entrypoints.model_free.lifecycle"
+          ],
+          "practice_task": "用一个已有的小模型 safetensors checkpoint，调用 model_free_ptq 做 FP8 权重量化，对比它与 oneshot 量化产物在 config 与权重上的异同。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "规模化、扩展与工程化",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "DDP 分布式量化",
+          "order": 1,
+          "filename": "u6-l1-ddp-distributed.md",
+          "level": "advanced",
+          "topic": "讲解多卡 DDP 量化机制：Hessian/observer 统计的 all-reduce、权重的 greedy_bin_packing 分配与 broadcast_qparams_and_cleanup，使各 rank 得到一致量化参数。",
+          "learning_goals": [
+            "理解 sequential pipeline 在 DDP 下于子图边界同步 observer 激活统计",
+            "掌握 GPTQ/Quantization modifier 用 greedy_bin_packing 把模块按大小分配到各 rank 并广播量化参数",
+            "理解 broadcast_qparams_and_cleanup 的通信与清理流程"
+          ],
+          "source_files": [
+            "src/llmcompressor/modifiers/gptq/base.py",
+            "src/llmcompressor/modifiers/quantization/quantization/base.py",
+            "src/llmcompressor/utils/dist.py"
+          ],
+          "minimal_modules": [
+            "llmcompressor.utils.dist",
+            "llmcompressor.modifiers.gptq.base"
+          ],
+          "practice_task": "阅读 dist.py 中 broadcast_qparams_and_cleanup 的实现画出通信时序；若有多卡环境，跑一次 DDP GPTQ 并对比单卡结果是否一致。",
+          "depends_on": [
+            "u3-l5",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "大模型内存策略：逐层加载与磁盘 offloading",
+          "order": 2,
+          "filename": "u6-l2-big-model-memory.md",
+          "level": "advanced",
+          "topic": "讲解压缩超大模型时的内存策略：sequential onloading(逐层把权重搬到 GPU)、disk offloading(中间激活落盘)、offload_hessians，以及 norm_calibration_context 与 sequential_prefetch。",
+          "learning_goals": [
+            "理解 sequential onloading 如何逐子图在 GPU/CPU 间搬运权重降低峰值显存",
+            "掌握 disk offloading 把中间激活写到磁盘的机制与适用场景",
+            "理解 offload_hessians 与 sequential_prefetch 等 memory/speed 权衡开关"
+          ],
+          "source_files": [
+            "src/llmcompressor/pipelines/sequential/pipeline.py",
+            "src/llmcompressor/utils/dev.py",
+            "src/llmcompressor/modeling/offset_norm.py",
+            "docs/guides/big_models_and_distributed/sequential_onloading.md"
+          ],
+          "minimal_modules": [
+            "llmcompressor.pipelines.sequential.pipeline",
+            "llmcompressor.utils.dev",
+            "llmcompressor.modeling.offset_norm"
+          ],
+          "practice_task": "用 sequential_offload_device 与 offload_hessians 两个开关组合，量化同一个模型并记录峰值显存与耗时，体会 memory/speed 权衡。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "保存与 compressed-tensors 格式",
+          "order": 3,
+          "filename": "u6-l3-saving-and-compressed-tensors.md",
+          "level": "advanced",
+          "topic": "讲解 post_process 如何把量化模型保存为 compressed-tensors 格式、save_compressed 对稀疏模型的压缩保存，以及与 vLLM 加载的兼容性约定。",
+          "learning_goals": [
+            "理解 post_process/model.save_pretrained 写出 config.json 中 quantization_config 的流程",
+            "掌握 compressed-tensors 格式中 quantization_config/safetensors 的关键约定",
+            "理解 save_compressed 与 compressed_tensors_utils 对稀疏权重压缩的作用"
+          ],
+          "source_files": [
+            "src/llmcompressor/entrypoints/utils.py",
+            "src/llmcompressor/transformers/compression/compressed_tensors_utils.py",
+            "docs/guides/saving_a_model.md"
+          ],
+          "minimal_modules": [
+            "llmcompressor.entrypoints.utils",
+            "llmcompressor.transformers.compression.compressed_tensors_utils"
+          ],
+          "practice_task": "量化一个模型并保存，打开其 config.json 找到 quantization_config 字段，逐字段解释其含义；再用 vLLM(或 vLLM 加载逻辑)确认可被加载。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "扩展点一：自定义 Modifier",
+          "order": 4,
+          "filename": "u6-l4-custom-modifier.md",
+          "level": "advanced",
+          "topic": "以 REAP 或现有 modifier 为模板，讲解如何继承 Modifier/QuantizationMixin、实现 on_initialize/on_sequential_epoch_end、并通过 ModifierFactory.register 或 recipe 注册使用。",
+          "learning_goals": [
+            "掌握自定义 Modifier 的最小实现：继承 Modifier 并实现必要钩子",
+            "理解如何复用 QuantizationMixin 让自定义 modifier 具备量化能力",
+            "掌握通过 ModifierFactory.register 注册并在 recipe 中使用自定义 modifier"
+          ],
+          "source_files": [
+            "src/llmcompressor/modifiers/modifier.py",
+            "src/llmcompressor/modifiers/interface.py",
+            "src/llmcompressor/modifiers/factory.py",
+            "src/llmcompressor/modifiers/pruning/reap/base.py",
+            "docs/developer-tutorials/add-modifier.md"
+          ],
+          "minimal_modules": [
+            "llmcompressor.modifiers.modifier",
+            "llmcompressor.modifiers.interface",
+            "llmcompressor.modifiers.factory"
+          ],
+          "practice_task": "实现一个简单自定义 modifier(例如 on_calibration_end 时把所有 Linear 权重置零一半作为演示)，注册到工厂后用 oneshot+recipe 验证它被调用。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "扩展点二：自定义 Observer",
+          "order": 5,
+          "filename": "u6-l5-custom-observer.md",
+          "level": "advanced",
+          "topic": "以 MinMax/MSE/IMatrix observer 为模板，讲解如何实现自定义 observer 收集张量统计、如何在 QuantizationModifier 的 weight_observer/input_observer 中指定使用。",
+          "learning_goals": [
+            "掌握自定义 Observer 的接口：如何收集统计并计算 scale/zero_point",
+            "理解 observer 与 calibration hook、update_qparams 的协作",
+            "掌握在 modifier 中通过 observer 字段指定自定义 observer 的方法"
+          ],
+          "source_files": [
+            "src/llmcompressor/observers/base.py",
+            "src/llmcompressor/observers/mse.py",
+            "src/llmcompressor/observers/min_max.py",
+            "src/llmcompressor/observers/imatrix.py",
+            "docs/developer-tutorials/add-observer.md"
+          ],
+          "minimal_modules": [
+            "llmcompressor.observers.base",
+            "llmcompressor.observers.mse",
+            "llmcompressor.observers.min_max"
+          ],
+          "practice_task": "实现一个自定义 observer(例如基于百分位的统计)，把它挂到一个 QuantizationModifier 上量化一个 Linear，对比与 MinMax 的 scale 差异。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l6",
+          "title": "测试与贡献流程",
+          "order": 6,
+          "filename": "u6-l6-testing-and-contributing.md",
+          "level": "advanced",
+          "topic": "讲解项目的测试体系(pytest marker: smoke/sanity/regression/integration/multi_gpu)、Makefile/CI 入口、代码风格(ruff/mypy)与贡献流程。",
+          "learning_goals": [
+            "掌握项目 pytest marker 的分类与本地运行测试的方式",
+            "理解 Makefile 与 CI(.buildkite)如何组织 GPU/transformers/xpu 测试",
+            "理解 ruff/mypy 风格约束与 CONTRIBUTING 中的贡献流程"
+          ],
+          "source_files": [
+            "Makefile",
+            "pyproject.toml",
+            "docs/DEVELOPMENT.md",
+            "CONTRIBUTING.md",
+            "src/llmcompressor/modifiers/utils/constants.py"
+          ],
+          "minimal_modules": [
+            "Makefile",
+            "pyproject.toml"
+          ],
+          "practice_task": "在本地跑一组 smoke/unit marker 的测试并阅读其输出；按 CONTRIBUTING 流程为一个已有 modifier 补一个最小的单元测试并确认 ruff/mypy 通过。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
