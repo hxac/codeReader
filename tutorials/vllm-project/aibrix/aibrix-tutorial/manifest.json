@@ -1,0 +1,1193 @@
+{
+  "project": "aibrix",
+  "head": "af135690430bcf85bb5607c1b79c0fda30d5ff69",
+  "rationale": "AIBrix 是一个大型多云原生 GenAI 推理基础设施，由四大相对独立的子系统组成：Go 实现的 Kubernetes 控制平面（控制器+CRD+Webhook）、Go 实现的 Envoy ExtProc LLM 网关（路由算法+限流+状态同步）、Python 实现的运行时边车（引擎生命周期+指标+下载），以及 Python+C++/CUDA 实现的分布式 KV Cache。学习路线据此自底向上设计：先让读者从零理解项目定位、目录、构建与部署（单元 1），再切入控制平面通用框架（单元 2，控制器注册与 Feature Gate、CRD、Webhook），随后分主题深入三大核心能力——自动伸缩（单元 3）、模型适配与激活（单元 4）、分布式推理与拓扑编排（单元 5）。单元 6 讲清作为网关与伸缩器公共依赖的中央缓存与 Pod 发现，为单元 7 的网关核心和单元 8 的高级路由策略做铺垫。单元 9-10 转向 Python 运行时与分布式 KV Cache。最后单元 11 覆盖前端、测试基准与可观测性等横向能力。本次增量主要受 #2434（Valkey 作为 OSS 元数据存储、外部托管端点支持）影响：standalone 与 K8s 部署新增了 Redis/Valkey 的可切换元数据存储（u1-l4、u1-l5 小幅更新），同时 Go 侧 KVCache 控制器（pkg/controller/kvcache）此前未被任何讲义覆盖、且本次新增了外部托管连接、校验与残留资源清理等较重机制，故在单元 5 新增 u5-l3 专门讲解 KVCache 控制器与分布式缓存后端编排（含 distributed/hpkv/infinistore/vineyard 后端与元数据存储在内置 Redis 与外部托管 Valkey/Redis 之间的 reconcile）。SimpleQueue 的改动仅为测试确定性（af135690），队列源码与语义未变，故 u7-l5 保持不变。讲义之间通过 depends_on 显式声明依赖，保证读者可按拓扑顺序循序渐进；每个单元聚焦一个独立主题，每篇讲义绑定 1-6 个真实源码文件并配一个可操作的实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：项目概览与环境搭建",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "AIBrix 是什么：项目定位与整体架构",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 AIBrix 的定位（云原生 GenAI 推理基础设施）、核心特性、整体架构与各组件分工。",
+          "learning_goals": [
+            "理解 AIBrix 解决的问题与关键特性（网关路由、自动伸缩、LoRA、分布式推理、KV Cache）",
+            "看清控制平面、网关、运行时、KV Cache 四大子系统的关系"
+          ],
+          "source_files": [
+            "README.md",
+            "PROJECT",
+            "docs/source/features"
+          ],
+          "minimal_modules": [
+            "项目定位与设计目标",
+            "四大子系统架构总览",
+            "核心特性矩阵"
+          ],
+          "practice_task": "阅读 README 与架构图，用自己的话画出 AIBrix 的组件关系图（控制器、网关、运行时、Redis、KV Cache），标注每个组件的职责与通信方向。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构与多语言代码组织",
+          "order": 2,
+          "filename": "u1-l2-repository-structure.md",
+          "level": "beginner",
+          "topic": "讲解仓库根目录布局，区分 Go（控制平面与网关）与 Python（运行时与 KV Cache）代码的组织方式。",
+          "learning_goals": [
+            "掌握 cmd/、pkg/、api/、python/、config/、samples/ 等顶层目录的职责",
+            "理解 Go 模块与 Python 包如何各自组织"
+          ],
+          "source_files": [
+            "go.mod",
+            "cmd/controllers/main.go",
+            "python/aibrix/aibrix/runtime/model_runtime.py"
+          ],
+          "minimal_modules": [
+            "顶层目录职责速查",
+            "Go 代码组织（cmd/pkg/api）",
+            "Python 代码组织（aibrix / aibrix_kvcache）"
+          ],
+          "practice_task": "在仓库根目录用树形结构列出 cmd/、pkg/、api/、python/ 四个目录的两级子目录，并为每个子目录写一句话用途说明。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建系统、依赖与 Makefile 任务",
+          "order": 3,
+          "filename": "u1-l3-build-and-makefile.md",
+          "level": "beginner",
+          "topic": "讲解 Go 模块依赖、Makefile 构建目标与代码生成（controller-gen / deepcopy）流程。",
+          "learning_goals": [
+            "掌握 build / docker-build / manifests / generate 等常用 Make 目标",
+            "理解 CRD 与 deepcopy 代码是如何生成的"
+          ],
+          "source_files": [
+            "Makefile",
+            "go.mod",
+            ".golangci.yml"
+          ],
+          "minimal_modules": [
+            "Makefile 目标分类",
+            "代码生成机制（manifests/generate）",
+            "Docker 镜像构建"
+          ],
+          "practice_task": "运行 make build 与 make manifests（或只阅读目标定义），记录控制器二进制、CRD YAML 分别由哪些目标产生，并说明 manifests 目标依赖的工具。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "Kubernetes 部署与 CRD 安装流程",
+          "order": 4,
+          "filename": "u1-l4-k8s-deployment-and-crd.md",
+          "level": "beginner",
+          "topic": "讲解 config/ 下的 kustomize 目录结构与在集群中安装依赖、CRD、组件的流程，并介绍元数据存储层（内置 Redis 或 OSS 的 Valkey）的配置选择。",
+          "learning_goals": [
+            "理解 config/dependency、config/crd、config/default、config/metadata 四层 kustomize 的作用",
+            "掌握 stable 与 nightly 两种安装方式，以及 Redis/Valkey 元数据存储如何切换"
+          ],
+          "source_files": [
+            "config/crd",
+            "config/default",
+            "config/dependency",
+            "config/metadata",
+            "samples/quickstart/model.yaml"
+          ],
+          "minimal_modules": [
+            "kustomize 目录分层",
+            "CRD 与组件安装顺序",
+            "元数据存储选择（Redis/Valkey）与 quickstart 示例 CR"
+          ],
+          "practice_task": "对照 README 的 Quick Start，写出 dependency → crd → default 三步安装命令的作用，并解释为什么 CRD 要与 operator 分开安装；再说明如何用 config/metadata/valkey.yaml 替换默认 Redis 元数据存储。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u1-l5",
+          "title": "本地 Standalone 部署快速体验",
+          "order": 5,
+          "filename": "u1-l5-standalone-deployment.md",
+          "level": "beginner",
+          "topic": "讲解 deployment/standalone 下的 docker-compose 本地部署方式，以及通过 REDIS_IMAGE/REDIS_SERVER_CMD/REDIS_CLI_CMD 等环境变量在 Redis 与 Valkey 元数据存储之间切换。",
+          "learning_goals": [
+            "掌握 standalone 模式的组件编排与启动脚本",
+            "理解 standalone 与 K8s 部署的差异与适用场景",
+            "掌握通过环境变量将元数据存储从 Redis 切换为 OSS 的 Valkey"
+          ],
+          "source_files": [
+            "deployment/standalone/docker-compose.yml",
+            "deployment/standalone/start.sh",
+            "deployment/standalone/README.md"
+          ],
+          "minimal_modules": [
+            "docker-compose 服务编排",
+            "启动脚本与配置",
+            "Redis/Valkey 元数据存储切换与 standalone 适用场景"
+          ],
+          "practice_task": "阅读 docker-compose.yml，列出 standalone 模式启动了哪些服务（网关、运行时、Redis 等），并说明 start.sh 做了哪些初始化；再写出一行使用 Valkey 替代 Redis 启动 standalone 的命令。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "update"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "入门：控制器框架与扩展机制",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "控制器管理器入口与启动流程",
+          "order": 1,
+          "filename": "u2-l1-controller-manager-entry.md",
+          "level": "beginner",
+          "topic": "讲解 cmd/controllers/main.go 的启动流程与 pkg/controller/controller.go 借鉴 Kruise 的控制器注册机制。",
+          "learning_goals": [
+            "理解 controller-runtime Manager 的构建与 scheme 注册",
+            "掌握 controllerAddFuncs 注册模式与 SetupWithManager 流程"
+          ],
+          "source_files": [
+            "cmd/controllers/main.go",
+            "pkg/controller/controller.go"
+          ],
+          "minimal_modules": [
+            "Manager 与 Scheme 初始化",
+            "控制器注册（Initialize / SetupWithManager）",
+            "领导选举与健康检查"
+          ],
+          "practice_task": "在 controller.go 中新增一个空操作的控制器的注册分支（仅阅读与仿写，不修改源码），描述它需要修改哪几处以及为何要以 Feature Gate 包裹。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Feature Gates 控制器开关机制",
+          "order": 2,
+          "filename": "u2-l2-feature-gates.md",
+          "level": "beginner",
+          "topic": "讲解 pkg/features/features.go 如何用逗号分隔的控制器列表启用/禁用各个控制器。",
+          "learning_goals": [
+            "理解 EnabledControllers 映射与 InitControllers 解析逻辑",
+            "掌握 *、前缀 - 等开关语法与校验"
+          ],
+          "source_files": [
+            "pkg/features/features.go",
+            "pkg/controller/controller.go"
+          ],
+          "minimal_modules": [
+            "控制器开关数据结构",
+            "InitControllers / IsControllerEnabled",
+            "启用全部与排除语法"
+          ],
+          "practice_task": "写出一个 --controllers 参数示例（如启用 PodAutoscaler 与 ModelClaim、禁用 KVCache），并追踪代码说明它如何作用于 Initialize 函数。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "自定义资源 (CRD) 数据模型设计",
+          "order": 3,
+          "filename": "u2-l3-crd-data-models.md",
+          "level": "intermediate",
+          "topic": "讲解 api/ 下 model、autoscaling、orchestration 三组 CRD 的 Spec/Status 设计与 kubebuilder 标记。",
+          "learning_goals": [
+            "理解 PodAutoscaler、ModelAdapter、ModelClaim 等 CR 的字段结构",
+            "掌握 kubebuilder 注解与 printcolumn 的作用"
+          ],
+          "source_files": [
+            "api/autoscaling/v1alpha1/podautoscaler_types.go",
+            "api/model/v1alpha1/modelclaim_types.go",
+            "api/model/v1alpha1/modeladapter_types.go",
+            "api/orchestration/v1alpha1/groupversion_info.go"
+          ],
+          "minimal_modules": [
+            "三组 API 分组与版本",
+            "Spec/Status 字段设计",
+            "kubebuilder 标记与代码生成"
+          ],
+          "practice_task": "为 PodAutoscaler 和 ModelClaim 各画一张 Spec/Status 字段表，标注每个关键字段的含义，并指出哪些字段会被 printcolumn 显示在 kubectl 输出中。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "Admission Webhook 与边车注入",
+          "order": 4,
+          "filename": "u2-l4-webhooks-and-sidecar.md",
+          "level": "intermediate",
+          "topic": "讲解 pkg/webhook 下各类准入 webhook（默认值设置、校验、边车注入）的职责。",
+          "learning_goals": [
+            "理解 mutating/validating webhook 在控制器体系中的作用",
+            "掌握 sidecar 注入与 PodAutoscaler webhook 的逻辑"
+          ],
+          "source_files": [
+            "pkg/webhook/sidecar_injection.go",
+            "pkg/webhook/podautoscaler_webhook.go",
+            "pkg/webhook/modeladapter_webhook.go"
+          ],
+          "minimal_modules": [
+            "webhook 类型与触发时机",
+            "边车注入流程",
+            "默认值与校验"
+          ],
+          "practice_task": "阅读 sidecar_injection.go，描述运行时 sidecar 是如何被注入到推理 Pod 的，并列出它修改了 Pod 的哪些字段。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：LLM 应用级自动伸缩",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "PodAutoscaler 控制器与伸缩总览",
+          "order": 1,
+          "filename": "u3-l1-podautoscaler-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 PodAutoscaler 控制器的 reconcile 主循环与 DefaultAutoScaler 编排伸缩管线的流程。",
+          "learning_goals": [
+            "理解 PodAutoscaler CR 与控制器 reconcile 的关系",
+            "掌握 ComputeDesiredReplicas 与 executeScalingPipeline 的管线"
+          ],
+          "source_files": [
+            "pkg/controller/podautoscaler/podautoscaler_controller.go",
+            "pkg/controller/podautoscaler/autoscaler.go",
+            "api/autoscaling/v1alpha1/podautoscaler_types.go"
+          ],
+          "minimal_modules": [
+            "reconcile 主循环",
+            "DefaultAutoScaler 接口与实现",
+            "伸缩管线编排"
+          ],
+          "practice_task": "追踪一次 reconcile：从 Spec.MetricsSources 到 ComputeDesiredReplicas，画出数据流，并说明算法缓存（algorithmCache）为何可以安全复用。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "伸缩算法 APA / HPA / KPA",
+          "order": 2,
+          "filename": "u3-l2-scaling-algorithms.md",
+          "level": "intermediate",
+          "topic": "讲解 algorithm 包中 ScalingAlgorithm 抽象与 APA、HPA、KPA 三种策略的实现差异。",
+          "learning_goals": [
+            "理解 ScalingAlgorithm 接口与策略工厂",
+            "区分 APA、HPA、KPA 三种伸缩策略的适用场景"
+          ],
+          "source_files": [
+            "pkg/controller/podautoscaler/algorithm/algorithm.go",
+            "pkg/controller/podautoscaler/algorithm/apa.go",
+            "pkg/controller/podautoscaler/algorithm/hpa.go",
+            "pkg/controller/podautoscaler/algorithm/kpa.go"
+          ],
+          "minimal_modules": [
+            "ScalingAlgorithm 接口",
+            "三种策略实现对比",
+            "策略选择逻辑"
+          ],
+          "practice_task": "实现一个最小的自定义 ScalingAlgorithm（仅阅读接口并写出伪代码），说明它需要实现哪些方法、如何注册到 NewScalingAlgorithm 工厂。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "指标采集、聚合与监控管线",
+          "order": 3,
+          "filename": "u3-l3-metrics-collection.md",
+          "level": "intermediate",
+          "topic": "讲解 podautoscaler 的 metrics 采集器、aggregation 聚合器与 monitor 如何为伸缩决策提供数据。",
+          "learning_goals": [
+            "理解 collector / fetcher / client 三层指标获取结构",
+            "掌握 aggregator 如何合并多来源指标"
+          ],
+          "source_files": [
+            "pkg/controller/podautoscaler/metrics/collector.go",
+            "pkg/controller/podautoscaler/metrics/fetcher.go",
+            "pkg/controller/podautoscaler/aggregation/aggregator.go"
+          ],
+          "minimal_modules": [
+            "指标采集链路",
+            "聚合器逻辑",
+            "监控循环"
+          ],
+          "practice_task": "描述一个自定义指标从外部源（如 Prometheus）到 ComputeDesiredReplicas 的完整路径，标注经过哪些 collector/fetcher/aggregator 方法。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "工作负载伸缩与 HPA 资源映射",
+          "order": 4,
+          "filename": "u3-l4-workload-scaling.md",
+          "level": "intermediate",
+          "topic": "讲解 workload_scale 与 hpa_resources 如何把期望副本数应用到 Deployment 并与原生 HPA 资源交互。",
+          "learning_goals": [
+            "理解期望副本数如何落盘到实际工作负载",
+            "掌握 AIBrix 伸缩与 Kubernetes 原生 HPA 的关系"
+          ],
+          "source_files": [
+            "pkg/controller/podautoscaler/workload_scale.go",
+            "pkg/controller/podautoscaler/hpa_resources.go"
+          ],
+          "minimal_modules": [
+            "工作负载副本应用",
+            "HPA 资源映射与冲突处理",
+            "伸缩边界（min/max）"
+          ],
+          "practice_task": "说明当 PodAutoscaler 与同名原生 HPA 同时存在时的行为，并指出 hpa_resources.go 如何处理二者关系。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "进阶：模型适配与模型激活",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "ModelAdapter 与 LoRA 适配器管理",
+          "order": 1,
+          "filename": "u4-l1-modeladapter-lora.md",
+          "level": "intermediate",
+          "topic": "讲解 ModelAdapter 控制器如何管理高密度 LoRA 适配器的加载与生命周期。",
+          "learning_goals": [
+            "理解 ModelAdapter CR 与控制器 reconcile 流程",
+            "掌握 lora_client 与推理引擎交互加载/卸载适配器的方式"
+          ],
+          "source_files": [
+            "pkg/controller/modeladapter/modeladapter_controller.go",
+            "pkg/controller/modeladapter/lora_client.go",
+            "pkg/controller/modeladapter/resources.go",
+            "pkg/controller/modeladapter/README.md"
+          ],
+          "minimal_modules": [
+            "ModelAdapter reconcile 主循环",
+            "LoRA 加载/卸载客户端",
+            "资源管理"
+          ],
+          "practice_task": "追踪一个 LoRA 适配器从 CR 创建到被加载进引擎的过程，列出 lora_client 调用的关键方法与对应的引擎 API。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "ModelAdapter 调度策略",
+          "order": 2,
+          "filename": "u4-l2-modeladapter-scheduling.md",
+          "level": "intermediate",
+          "topic": "讲解 scheduling 包中 Scheduler 抽象与 bin_pack、least_adapters、least_latency、least_throughput、random 等调度策略。",
+          "learning_goals": [
+            "理解 Scheduler 接口与策略可插拔设计",
+            "区分五种调度策略的目标函数"
+          ],
+          "source_files": [
+            "pkg/controller/modeladapter/scheduling/scheduler.go",
+            "pkg/controller/modeladapter/scheduling/bin_pack.go",
+            "pkg/controller/modeladapter/scheduling/least_adapters.go",
+            "pkg/controller/modeladapter/scheduling/least_latency.go"
+          ],
+          "minimal_modules": [
+            "Scheduler 接口",
+            "各策略打分逻辑",
+            "策略选择与切换"
+          ],
+          "practice_task": "为给定一组适配器与候选 Pod，分别用 bin_pack 与 least_latency 策略推算选择结果，并解释两者在负载分布上的差异。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "ModelClaim 模型激活与池化策略",
+          "order": 3,
+          "filename": "u4-l3-modelclaim-activation.md",
+          "level": "intermediate",
+          "topic": "讲解 ModelClaim 控制器如何在引擎上激活/停用模型，以及 pool_policy、placement 等池化与放置策略。",
+          "learning_goals": [
+            "理解 ModelClaim 驱动运行时激活模型的生命周期",
+            "掌握 pool_policy 与 placement 的放置决策"
+          ],
+          "source_files": [
+            "pkg/controller/modelclaim/modelclaim_controller.go",
+            "pkg/controller/modelclaim/pool_policy.go",
+            "pkg/controller/modelclaim/placement.go",
+            "pkg/controller/modelclaim/runtime_client.go"
+          ],
+          "minimal_modules": [
+            "ModelClaim reconcile 与激活协议",
+            "池化策略",
+            "放置算法"
+          ],
+          "practice_task": "描述 ModelClaim 控制器通过 runtime_client 调用运行时激活模型的请求/响应流程，并说明 pool_policy 如何影响候选 Pod 集合。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "进阶：分布式推理与拓扑编排",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "分布式推理与 KubeRay 集成",
+          "order": 1,
+          "filename": "u5-l1-distributed-inference-kuberay.md",
+          "level": "intermediate",
+          "topic": "讲解 RayClusterReplicaSet 与 RayClusterFleet 控制器如何基于 KubeRay 编排多节点分布式推理。",
+          "learning_goals": [
+            "理解分布式推理的 CR 模型与 KubeRay 集成方式",
+            "掌握 ReplicaSet 与 Fleet 的分层抽象"
+          ],
+          "source_files": [
+            "pkg/controller/rayclusterreplicaset",
+            "pkg/controller/rayclusterfleet",
+            "api/orchestration/v1alpha1/rayclusterfleet_types.go",
+            "api/orchestration/v1alpha1/rayclusterreplicaset_types.go"
+          ],
+          "minimal_modules": [
+            "KubeRay CRD 依赖检测",
+            "ReplicaSet/Fleet 控制循环",
+            "分布式推理拓扑"
+          ],
+          "practice_task": "说明 controller.go 中为何要先检测 rayclusters.ray.io CRD 是否存在，并描述 ReplicaSet 与 Fleet 之间的层级关系。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "StormService 拓扑与 Prefill/Decode 解耦编排",
+          "order": 2,
+          "filename": "u5-l2-stormservice-topology.md",
+          "level": "intermediate",
+          "topic": "讲解 StormService、RoleSet、PodSet 三类 CR 如何协同描述 Prefill/Decode 解耦的推理拓扑。",
+          "learning_goals": [
+            "理解 StormService 拓扑策略的三个 CR 角色",
+            "掌握 roleset/podset/stormservice 的协同 reconcile"
+          ],
+          "source_files": [
+            "pkg/controller/stormservice",
+            "pkg/controller/roleset",
+            "pkg/controller/podset",
+            "api/orchestration/v1alpha1/stormservice_types.go"
+          ],
+          "minimal_modules": [
+            "拓扑 CR 三件套",
+            "角色与副本编排",
+            "解耦推理拓扑"
+          ],
+          "practice_task": "用一个 Prefill/Decode 分离的例子，画出 StormService → RoleSet → PodSet 的归属关系，并说明每个控制器分别负责什么。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "KVCache 控制器与分布式缓存后端编排",
+          "order": 3,
+          "filename": "u5-l3-kvcache-controller-backends.md",
+          "level": "intermediate",
+          "topic": "讲解 Go 侧 KVCache 控制器如何编排分布式 KV 缓存后端（distributed/hpkv/infinistore/vineyard），以及元数据存储如何在内置 Redis 与外部托管 Valkey/Redis 端点之间选择与校验。",
+          "learning_goals": [
+            "理解 KVCache CR 的 Spec 模型（MetadataSpec、ExternalConnectionConfig）与 reconcile 主循环",
+            "掌握 BackendReconciler/KVCacheBackend 抽象与 distributed/hpkv/infinistore/vineyard 等后端实现差异",
+            "理解元数据存储在内置 Redis 与外部托管端点（Valkey/Redis）之间的 reconcile、地址与 PasswordSecretRef 校验、残留资源清理逻辑"
+          ],
+          "source_files": [
+            "api/orchestration/v1alpha1/kvcache_types.go",
+            "pkg/controller/kvcache/kvcache_controller.go",
+            "pkg/controller/kvcache/backends/reconciler.go",
+            "pkg/controller/kvcache/backends/distributed.go",
+            "pkg/controller/kvcache/backends/common.go",
+            "pkg/controller/kvcache/backends/hpkv.go"
+          ],
+          "minimal_modules": [
+            "KVCache CR 模型与按注解分发的 reconcile 主循环",
+            "backends 抽象与多后端实现（distributed/hpkv/infinistore/vineyard）",
+            "元数据存储：内置 Redis vs 外部托管 Valkey/Redis",
+            "外部连接校验与残留内置 Redis 资源清理"
+          ],
+          "practice_task": "描述当 KVCache 配置了 Metadata.Redis.ExternalConnection 时，reconcileRedisService 如何跳过内置 Redis 部署、校验 host:port 地址与 PasswordSecretRef（secretName/key）、清理旧的内置 Redis Pod/Service，并说明 buildRedisWatcherEnvVars 如何把外部地址与密码（SecretKeyRef）注入 watcher Pod。",
+          "depends_on": [
+            "u5-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "进阶：中央缓存与 Pod 发现",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "pkg/cache 中央缓存架构",
+          "order": 1,
+          "filename": "u6-l1-central-cache.md",
+          "level": "intermediate",
+          "topic": "讲解 pkg/cache 作为网关与伸缩器公共依赖的中央内存缓存：初始化、informers、API 与快照。",
+          "learning_goals": [
+            "理解中央缓存的生命周期与初始化流程",
+            "掌握 informers 订阅与 cache_api 提供的查询能力"
+          ],
+          "source_files": [
+            "pkg/cache/cache_impl.go",
+            "pkg/cache/cache_init.go",
+            "pkg/cache/informers.go",
+            "pkg/cache/cache_api.go",
+            "pkg/cache/README.md"
+          ],
+          "minimal_modules": [
+            "缓存初始化与运行",
+            "informers 订阅机制",
+            "快照与查询 API"
+          ],
+          "practice_task": "说明 pkg/cache 如何被网关插件与 PodAutoscaler 同时复用，并指出 cache_gateway_snapshot.go 提供了哪些网关所需的快照视图。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "Pod 发现、模型画像与输出预测",
+          "order": 2,
+          "filename": "u6-l2-discovery-and-profiling.md",
+          "level": "intermediate",
+          "topic": "讲解 discovery 子包的 Pod 发现机制，以及 model_gpu_profile、output_predictor 等画像与预测能力。",
+          "learning_goals": [
+            "理解推理 Pod 的发现与健康状态收集",
+            "掌握 GPU 画像与输出长度预测如何辅助调度与路由"
+          ],
+          "source_files": [
+            "pkg/cache/discovery",
+            "pkg/cache/model_gpu_profile.go",
+            "pkg/cache/output_predictor.go",
+            "pkg/cache/pod.go"
+          ],
+          "minimal_modules": [
+            "Pod 发现与状态",
+            "GPU 画像",
+            "输出预测器"
+          ],
+          "practice_task": "描述 output_predictor 如何预估请求的输出 token 数，并说明该预测结果会被哪些路由算法（如 vtc）消费。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "进阶：LLM 网关核心",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "Envoy ExtProc 网关插件入口",
+          "order": 1,
+          "filename": "u7-l1-gateway-extproc-entry.md",
+          "level": "intermediate",
+          "topic": "讲解 cmd/plugins 的 gRPC 服务入口与 gateway.go 如何以 Envoy External Processing 协议处理请求。",
+          "learning_goals": [
+            "理解 Envoy ExtProc 协议在 AIBrix 网关中的角色",
+            "掌握 gateway.go 的请求处理阶段与路由调用点"
+          ],
+          "source_files": [
+            "cmd/plugins/main.go",
+            "pkg/plugins/gateway/gateway.go",
+            "pkg/plugins/gateway/types.go"
+          ],
+          "minimal_modules": [
+            "ExtProc gRPC 服务启动",
+            "请求处理阶段",
+            "路由调用集成点"
+          ],
+          "practice_task": "在一个请求的生命周期中标注 ExtProc 回调（请求头/请求体/响应体）触发的 gateway.go 方法，并指出路由决策发生在哪个阶段。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "请求/响应处理链与 API Key 认证",
+          "order": 2,
+          "filename": "u7-l2-request-response-auth.md",
+          "level": "intermediate",
+          "topic": "讲解请求体/响应体的解析与改写链，以及 api_key_auth 的认证逻辑。",
+          "learning_goals": [
+            "理解请求/响应 body 与 header 的处理顺序",
+            "掌握 API Key 认证与限流的入口"
+          ],
+          "source_files": [
+            "pkg/plugins/gateway/gateway_req_body.go",
+            "pkg/plugins/gateway/gateway_rsp_body.go",
+            "pkg/plugins/gateway/api_key_auth.go",
+            "pkg/plugins/gateway/gateway_req_headers.go"
+          ],
+          "minimal_modules": [
+            "请求/响应处理链",
+            "API Key 认证",
+            "Header 处理"
+          ],
+          "practice_task": "追踪一次流式 chat 请求经过的 body 处理方法，说明 gateway_req_body 与 gateway_rsp_body 分别在何时被调用。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "路由抽象 RouterManager 与多策略路由",
+          "order": 3,
+          "filename": "u7-l3-router-manager.md",
+          "level": "intermediate",
+          "topic": "讲解 types.Router 接口、RouterManager 注册中心与 algorithms/router.go 的多策略评分路由。",
+          "learning_goals": [
+            "理解 Router/RouterProvider 抽象与工厂注册",
+            "掌握 multiStrategyRouter 的评分、归一化与排序"
+          ],
+          "source_files": [
+            "pkg/types/router.go",
+            "pkg/plugins/gateway/algorithms/router.go",
+            "pkg/plugins/gateway/algorithms/scorer.go",
+            "pkg/plugins/gateway/algorithms/model_router_factory.go"
+          ],
+          "minimal_modules": [
+            "Router 接口体系",
+            "RouterManager 注册与选择",
+            "多策略评分与归一化"
+          ],
+          "practice_task": "用一个多策略配置（如 least_load + throughput）说明 scoreAndRank 如何把不同极性的分数归一化并排序选出目标 Pod。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l4",
+          "title": "基础负载感知路由算法",
+          "order": 4,
+          "filename": "u7-l4-basic-routing-algos.md",
+          "level": "intermediate",
+          "topic": "讲解 least_load、random、throughput、least_latency、power_of_two 等基础路由算法的实现。",
+          "learning_goals": [
+            "理解各基础算法的打分依据与适用场景",
+            "掌握算法如何向 RouterManager 注册"
+          ],
+          "source_files": [
+            "pkg/plugins/gateway/algorithms/least_load.go",
+            "pkg/plugins/gateway/algorithms/random.go",
+            "pkg/plugins/gateway/algorithms/throughput.go",
+            "pkg/plugins/gateway/algorithms/least_latency.go",
+            "pkg/plugins/gateway/algorithms/power_of_two.go"
+          ],
+          "minimal_modules": [
+            "负载/吞吐/延迟打分",
+            "随机与 power-of-two 选择",
+            "算法注册"
+          ],
+          "practice_task": "实现一个最小的自定义 Router（阅读 RouterProvider 接口后写出注册与 Route 方法伪代码），并说明它如何被 model_router_factory 发现。",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l5",
+          "title": "限流与请求排队",
+          "order": 5,
+          "filename": "u7-l5-ratelimit-and-queue.md",
+          "level": "intermediate",
+          "topic": "讲解 ratelimiter（含 Redis 实现）与 queue（simple/slo）两套流量治理机制。",
+          "learning_goals": [
+            "理解网关层限流的实现与 Redis 协调",
+            "掌握 simple_queue 与 slo_queue 的排队语义"
+          ],
+          "source_files": [
+            "pkg/plugins/gateway/ratelimiter/rate_limiter.go",
+            "pkg/plugins/gateway/ratelimiter/redis.go",
+            "pkg/plugins/gateway/queue/simple_queue.go",
+            "pkg/plugins/gateway/queue/slo_queue.go",
+            "pkg/plugins/gateway/ratelimiter/README.md"
+          ],
+          "minimal_modules": [
+            "限流器接口与实现",
+            "Redis 分布式限流",
+            "排队策略"
+          ],
+          "practice_task": "描述一个超限请求在限流器与排队之间的流转，并说明 slo_queue 与 simple_queue 在优先级处理上的差异。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "专家：高级路由策略",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "Prefix Cache 感知路由",
+          "order": 1,
+          "filename": "u8-l1-prefix-cache-routing.md",
+          "level": "advanced",
+          "topic": "讲解 prefix_cache 与 prefix_cache_preble 路由如何基于前缀缓存命中率选择目标 Pod。",
+          "learning_goals": [
+            "理解前缀缓存感知路由的打分模型",
+            "掌握 Preble 变体的增强点与指标"
+          ],
+          "source_files": [
+            "pkg/plugins/gateway/algorithms/prefix_cache.go",
+            "pkg/plugins/gateway/algorithms/prefix_cache_preble.go",
+            "pkg/plugins/gateway/algorithms/prefix_cache_readme.md"
+          ],
+          "minimal_modules": [
+            "前缀缓存命中率建模",
+            "Preble 增强策略",
+            "相关指标"
+          ],
+          "practice_task": "给定两个候选 Pod 的缓存状态与一个带公共前缀的请求，推算 prefix_cache 路由的选择结果，并解释命中率如何转化为分数。",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "Prefill/Decode 解耦路由",
+          "order": 2,
+          "filename": "u8-l2-pd-disaggregation-routing.md",
+          "level": "advanced",
+          "topic": "讲解 pd 目录下 Prefill/Decode 解耦路由：scorer、engine 注册、transfer 传输后端与 selector。",
+          "learning_goals": [
+            "理解 PD 解耦路由的整体结构与角色分工",
+            "掌握 transfer 后端（nixl/mooncake/shfs）的可插拔设计"
+          ],
+          "source_files": [
+            "pkg/plugins/gateway/algorithms/pd_disaggregation.go",
+            "pkg/plugins/gateway/algorithms/pd/prefill_scorer.go",
+            "pkg/plugins/gateway/algorithms/pd/decode_scorer.go",
+            "pkg/plugins/gateway/algorithms/pd/transfer/registry.go",
+            "pkg/plugins/gateway/algorithms/pd_readme.md"
+          ],
+          "minimal_modules": [
+            "PD 解耦总览",
+            "Prefill/Decode 评分",
+            "传输后端注册"
+          ],
+          "practice_task": "画出一个请求在 PD 解耦模式下从 prefill Pod 路由到 decode Pod 的完整路径，标注 transfer 后端在 KV 迁移中的作用。",
+          "depends_on": [
+            "u8-l1",
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "Token 感知 (VTC) 与会话亲和 / SLO 路由",
+          "order": 3,
+          "filename": "u8-l3-vtc-session-slo.md",
+          "level": "advanced",
+          "topic": "讲解 vtc（虚拟 token 容量）token 感知路由，以及 simple_session_affinity 与 slo 路由。",
+          "learning_goals": [
+            "理解 VTC 的 token 估计与追踪机制",
+            "掌握会话亲和与 SLO 感知路由的决策依据"
+          ],
+          "source_files": [
+            "pkg/plugins/gateway/algorithms/vtc/vtc_router.go",
+            "pkg/plugins/gateway/algorithms/vtc/token_estimator.go",
+            "pkg/plugins/gateway/algorithms/vtc/token_tracker.go",
+            "pkg/plugins/gateway/algorithms/simple_session_affinity.go",
+            "pkg/plugins/gateway/algorithms/slo.go"
+          ],
+          "minimal_modules": [
+            "VTC token 估计与追踪",
+            "会话亲和",
+            "SLO 感知路由"
+          ],
+          "practice_task": "说明 token_tracker 如何维护每个 Pod 的在途 token 数，并解释该信息如何影响 VTC 路由的打分。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l4",
+          "title": "Redis 状态同步与配置画像",
+          "order": 4,
+          "filename": "u8-l4-redis-statesync-configprofile.md",
+          "level": "advanced",
+          "topic": "讲解 statesync 通过 Redis 在多网关副本间同步路由状态，以及 configprofiles 的配置画像机制。",
+          "learning_goals": [
+            "理解多网关副本间的状态同步需求与 Redis 方案",
+            "掌握 configprofiles 如何参数化模型路由配置"
+          ],
+          "source_files": [
+            "pkg/plugins/gateway/statesync/redissync.go",
+            "pkg/plugins/gateway/statesync/README.md",
+            "pkg/plugins/gateway/configprofiles/configprofiles.go"
+          ],
+          "minimal_modules": [
+            "Redis 状态同步",
+            "状态一致性",
+            "配置画像"
+          ],
+          "practice_task": "描述当水平扩容出第二个网关副本时，redissync 如何保证两者看到一致的 Pod 计数与会话状态。",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "进阶：Python 运行时与边车",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "AI Runtime 边车与引擎生命周期",
+          "order": 1,
+          "filename": "u9-l1-runtime-engine-lifecycle.md",
+          "level": "intermediate",
+          "topic": "讲解 Python runtime 边车的引擎生命周期管理（activate/deactivate/list）与可插拔引擎启动器。",
+          "learning_goals": [
+            "理解 runtime 与控制平面之间的激活协议",
+            "掌握 engine_registry 与 model_runtime 的职责"
+          ],
+          "source_files": [
+            "python/aibrix/aibrix/runtime/model_runtime.py",
+            "python/aibrix/aibrix/runtime/engine_registry.py",
+            "python/aibrix/aibrix/runtime/model_runtime_api.py"
+          ],
+          "minimal_modules": [
+            "引擎激活协议",
+            "engine_registry 注册",
+            "可插拔启动器（MockEngineLauncher）"
+          ],
+          "practice_task": "追踪 ModelClaim 控制器调用 runtime 激活模型时，model_runtime_api 暴露的接口与 model_runtime 内部执行的步骤。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "模型下载器与存储后端",
+          "order": 2,
+          "filename": "u9-l2-model-downloader.md",
+          "level": "intermediate",
+          "topic": "讲解 downloader 包如何从 HuggingFace、S3、TOS 等后端下载模型权重。",
+          "learning_goals": [
+            "理解下载器的抽象与多后端实现",
+            "掌握下载任务的入口与实体模型"
+          ],
+          "source_files": [
+            "python/aibrix/aibrix/downloader/base.py",
+            "python/aibrix/aibrix/downloader/huggingface.py",
+            "python/aibrix/aibrix/downloader/s3.py",
+            "python/aibrix/aibrix/downloader/__main__.py"
+          ],
+          "minimal_modules": [
+            "下载器抽象基类",
+            "多后端实现",
+            "下载入口"
+          ],
+          "practice_task": "实现一个最小的新下载后端（阅读 base.py 后写出类骨架），说明它需要实现哪些方法、如何被 __main__.py 选择。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l3",
+          "title": "指标采集标准化与元数据服务",
+          "order": 3,
+          "filename": "u9-l3-metrics-and-metadata.md",
+          "level": "intermediate",
+          "topic": "讲解 Python metrics 的指标采集与标准化规则，以及 metadata 元数据服务。",
+          "learning_goals": [
+            "理解指标采集器与标准化规则如何把多引擎指标统一",
+            "掌握 metadata 服务的存储与 API 结构"
+          ],
+          "source_files": [
+            "python/aibrix/aibrix/metrics/metrics.py",
+            "python/aibrix/aibrix/metrics/standard_rules.py",
+            "python/aibrix/aibrix/metrics/http_collector.py",
+            "python/aibrix/aibrix/metadata/app.py",
+            "python/aibrix/aibrix/metadata/store.py"
+          ],
+          "minimal_modules": [
+            "指标采集与标准化",
+            "HTTP collector",
+            "元数据服务"
+          ],
+          "practice_task": "描述一个 vLLM 原生指标如何经 standard_rules 标准化后暴露给 PodAutoscaler 与网关使用。",
+          "depends_on": [
+            "u9-l1",
+            "u3-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "专家：分布式 KV Cache",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "分布式 KV Cache 架构与缓存管理器",
+          "order": 1,
+          "filename": "u10-l1-kvcache-architecture.md",
+          "level": "advanced",
+          "topic": "讲解 aibrix_kvcache 包的整体架构：cache_manager、cache_handle、L1/L2 两级缓存与 spec。",
+          "learning_goals": [
+            "理解分布式 KV Cache 的两级缓存模型",
+            "掌握 cache_manager 与 cache_handle 的职责"
+          ],
+          "source_files": [
+            "python/aibrix_kvcache/aibrix_kvcache/cache_manager.py",
+            "python/aibrix_kvcache/aibrix_kvcache/cache_handle.py",
+            "python/aibrix_kvcache/aibrix_kvcache/l1",
+            "python/aibrix_kvcache/aibrix_kvcache/l2",
+            "python/aibrix_kvcache/aibrix_kvcache/spec.py"
+          ],
+          "minimal_modules": [
+            "两级缓存架构",
+            "cache_manager/handle",
+            "spec 与配置"
+          ],
+          "practice_task": "画出一个 KV 块从本地 L1 缓存未命中到查询远程 L2 的流程，标注 cache_manager 调用的关键方法。",
+          "depends_on": [
+            "u9-l1",
+            "u8-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l2",
+          "title": "内存管理与跨引擎传输层",
+          "order": 2,
+          "filename": "u10-l2-memory-and-transport.md",
+          "level": "advanced",
+          "topic": "讲解 memory 子包的内存区域与张量池分配，以及 transport 跨引擎传输层。",
+          "learning_goals": [
+            "理解内存区域与张量池分配器的设计",
+            "掌握传输层抽象与连接器继承关系"
+          ],
+          "source_files": [
+            "python/aibrix_kvcache/aibrix_kvcache/memory",
+            "python/aibrix_kvcache/aibrix_kvcache/transport",
+            "python/aibrix_kvcache/aibrix_kvcache/config.py",
+            "python/aibrix_kvcache/aibrix_kvcache/envs.py"
+          ],
+          "minimal_modules": [
+            "内存区域与张量池",
+            "传输层抽象",
+            "连接器实现"
+          ],
+          "practice_task": "描述一次跨引擎 KV 传输在 transport 层的调用路径，并说明内存如何在 memory 子包中分配与回收。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l3",
+          "title": "CUDA 扩展内核与算子绑定",
+          "order": 3,
+          "filename": "u10-l3-cuda-kernels.md",
+          "level": "advanced",
+          "topic": "讲解 csrc 下 CUDA 内核（cache_kernels、attention、quantization）与 torch_bindings 的算子绑定。",
+          "learning_goals": [
+            "理解 KV Cache 相关 CUDA 内核的职责",
+            "掌握 torch_bindings.cpp 如何把内核暴露为 PyTorch 算子"
+          ],
+          "source_files": [
+            "python/aibrix_kvcache/csrc/cache_kernels.cu",
+            "python/aibrix_kvcache/csrc/cache.h",
+            "python/aibrix_kvcache/csrc/torch_bindings.cpp",
+            "python/aibrix_kvcache/csrc/attention",
+            "python/aibrix_kvcache/csrc/quantization"
+          ],
+          "minimal_modules": [
+            "cache_kernels 内核",
+            "attention/quantization 子模块",
+            "torch 算子绑定"
+          ],
+          "practice_task": "说明一个自定义算子（如缓存写入）从 cache_kernels.cu 实现到被 Python 调用的绑定链路，标注 torch_bindings.cpp 中的注册点。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "专家：前端、测试与可观测性",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "OpenAI 兼容前端服务",
+          "order": 1,
+          "filename": "u11-l1-openai-frontend.md",
+          "level": "advanced",
+          "topic": "讲解 Python openai_frontend 如何以 FastAPI 提供 OpenAI 兼容的 chat/completions/embeddings 接口。",
+          "learning_goals": [
+            "理解前端服务的路由与中间件结构",
+            "掌握 OpenAI 协议适配与模型管理接口"
+          ],
+          "source_files": [
+            "python/aibrix/aibrix/openai_frontend/main.py",
+            "python/aibrix/aibrix/openai_frontend/frontend/fastapi_frontend.py",
+            "python/aibrix/aibrix/openai_frontend/frontend/fastapi/routers/chat.py",
+            "python/aibrix/aibrix/openai_frontend/frontend/fastapi/routers/completions.py"
+          ],
+          "minimal_modules": [
+            "FastAPI 路由组织",
+            "OpenAI 协议适配",
+            "中间件与可观测性路由"
+          ],
+          "practice_task": "追踪一次 /v1/chat/completions 请求在前端的处理路径，标注经过的中间件与路由处理器。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l2",
+          "title": "测试体系与 brixbench 性能基准",
+          "order": 2,
+          "filename": "u11-l2-tests-and-brixbench.md",
+          "level": "advanced",
+          "topic": "讲解 test/ 的单元/集成/e2e 测试分层，以及 brixbench 性能基准框架。",
+          "learning_goals": [
+            "理解 AIBrix 的测试分层与运行方式",
+            "掌握 brixbench 基准的目标与组织"
+          ],
+          "source_files": [
+            "test/e2e",
+            "test/integration",
+            "test/run-e2e-tests.sh",
+            "brixbench/README.md",
+            "brixbench/benchmark"
+          ],
+          "minimal_modules": [
+            "测试分层与运行",
+            "envtest 与 ginkgo",
+            "brixbench 基准"
+          ],
+          "practice_task": "写出一个新增网关路由算法的最小测试清单（单元 + 集成），说明应分别放在哪些目录、用哪种框架运行。",
+          "depends_on": [
+            "u7-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l3",
+          "title": "可观测性、Tracing 与二次开发指南",
+          "order": 3,
+          "filename": "u11-l3-observability-and-extension.md",
+          "level": "advanced",
+          "topic": "讲解 observability（Grafana/monitor）、Go 端 metrics 与 tracing，以及整体的二次开发扩展点。",
+          "learning_goals": [
+            "理解指标暴露、OpenTelemetry tracing 的接入方式",
+            "掌握控制器/网关/运行时/KV Cache 四类扩展点"
+          ],
+          "source_files": [
+            "observability/grafana",
+            "observability/monitor",
+            "pkg/metrics/metrics.go",
+            "pkg/cache/cache_trace.go",
+            "CONTRIBUTING.md"
+          ],
+          "minimal_modules": [
+            "指标与 tracing 接入",
+            "Grafana 监控面板",
+            "二次开发扩展点总览"
+          ],
+          "practice_task": "总结 AIBrix 的可扩展点（自定义控制器、路由算法、下载后端、KV 传输后端、CUDA 算子），为每类写一句话的扩展入口与注意事项。",
+          "depends_on": [
+            "u7-l4",
+            "u9-l3",
+            "u10-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
