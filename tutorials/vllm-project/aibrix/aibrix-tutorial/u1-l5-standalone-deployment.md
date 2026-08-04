@@ -9,9 +9,10 @@ AIBrix 的「正式」部署形态是 Kubernetes（见上一讲 u1-l4）。但�
 学完本讲，你应当能够：
 
 - 说出 Standalone 模式启动了哪些服务、它们各自扮演什么角色；
-- 读懂 `docker-compose.yml` 的服务编排逻辑（依赖、健康检查、profile、锚点复用）；
+- 读懂 `docker-compose.yml` 的服务编排逻辑（依赖、健康检查、profile、锚点复用，以及 Redis 服务的参数化镜像）；
 - 读懂 `start.sh` 启动脚本做了哪些初始化与校验；
-- 理解 Standalone 与 Kubernetes 两种部署形态的本质差异与各自的适用场景，并能解释为什么 Standalone 模式下网关插件要走 `--standalone` 分支。
+- 理解 Standalone 与 Kubernetes 两种部署形态的本质差异与各自的适用场景，并能解释为什么 Standalone 模式下网关插件要走 `--standalone` 分支；
+- **掌握如何通过 `REDIS_IMAGE` / `REDIS_SERVER_CMD` / `REDIS_CLI_CMD` 三个环境变量，把元数据存储在内置 Redis 与开源（BSD-3）的 Valkey 之间一行切换**。
 
 ## 2. 前置知识
 
@@ -21,6 +22,7 @@ AIBrix 的「正式」部署形态是 Kubernetes（见上一讲 u1-l4）。但�
 - **Envoy 与 ext_proc**（上一讲与 u1-l1 已铺垫）：AIBrix 的网关不是独立 HTTP 服务器，而是一个被 Envoy 通过 External Processing（ext_proc）gRPC 协议调用的插件。Envoy 负责接收请求，把请求交给插件做「选哪个后端」的决策，再按插件返回的目标地址转发。
 - **vLLM**：一个高性能的大模型推理引擎，对外暴露 OpenAI 兼容的 HTTP 接口（`/v1/chat/completions`、`/health` 等）。Standalone 模式直接用官方 `vllm/vllm-openai` 镜像作为推理后端。
 - **CRD 与 K8s 控制平面**（上一讲）：知道在 K8s 模式下，AIBrix 靠控制器、CRD、Informers 来「发现」推理 Pod。本讲会告诉你 Standalone 模式如何用一个静态 YAML 文件替代这一整套发现机制。
+- **Redis 与 Valkey 的关系**（上一讲 u1-l4 已铺垫）：Redis 自 2024 年起改为 SSPL/RSALv2 双协议（非 OSI 认可的开源协议），社区分叉出 **Valkey**（Linux Foundation 托管，BSD-3-Clause，与 Redis 线缆兼容）。AIBrix 在 K8s 部署里已支持用 Valkey 替代内置 Redis；本讲会讲 Standalone 模式下的等价切换。
 
 一个关键直觉：**Standalone 不是 K8s 部署的「阉割版」，而是把同一个数据平面（网关 + 引擎）换了一种编排方式**。网关插件的二进制是同一个，只是通过一个 `--standalone` 开关切换了「后端从哪里来」。
 
@@ -30,14 +32,14 @@ AIBrix 的「正式」部署形态是 Kubernetes（见上一讲 u1-l4）。但�
 
 | 文件 | 作用 |
 | --- | --- |
-| [deployment/standalone/docker-compose.yml](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/docker-compose.yml) | 服务编排核心：定义 redis、metadata-service、envoy、vllm、prefill/decode 引擎、gateway 六类服务 |
-| [deployment/standalone/start.sh](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/start.sh) | 启动脚本：参数解析、环境检查、按模式切换配置、拉镜像、起服务、轮询健康检查 |
-| [deployment/standalone/README.md](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/README.md) | 使用说明、架构图、环境变量表、与 K8s 的对比 |
-| [deployment/standalone/.env.example](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/.env.example) | 所有可配置环境变量的模板（端口、模型、GPU、路由算法等） |
-| [deployment/standalone/configs/envoy.yaml](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/configs/envoy.yaml) | Envoy 配置：监听 80 端口、挂载 ext_proc 过滤器、定义到各后端的 cluster |
-| [deployment/standalone/configs/endpoints.yaml](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/configs/endpoints.yaml) | 简单模式的后端清单（一个模型 → 一个 vllm 端点） |
-| [deployment/standalone/configs/endpoints-pd.yaml](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/configs/endpoints-pd.yaml) | P/D 解耦模式的后端清单（一个模型 → prefill + decode 两个角色） |
-| [cmd/plugins/main.go](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/cmd/plugins/main.go) | 网关插件入口：`--standalone` 开关在这里分流，决定用文件发现还是 K8s 发现 |
+| [deployment/standalone/docker-compose.yml](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/docker-compose.yml) | 服务编排核心：定义 redis（镜像可切换 Redis/Valkey）、metadata-service、envoy、vllm、prefill/decode 引擎、gateway 六类服务 |
+| [deployment/standalone/start.sh](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/start.sh) | 启动脚本：参数解析、环境检查、按模式切换配置、拉镜像、起服务、轮询健康检查 |
+| [deployment/standalone/README.md](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/README.md) | 使用说明、架构图、环境变量表、Valkey 切换命令、与 K8s 的对比 |
+| [deployment/standalone/.env.example](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/.env.example) | 所有可配置环境变量的模板（端口、模型、GPU、路由算法等） |
+| [deployment/standalone/configs/envoy.yaml](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/configs/envoy.yaml) | Envoy 配置：监听 80 端口、挂载 ext_proc 过滤器、定义到各后端的 cluster |
+| [deployment/standalone/configs/endpoints.yaml](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/configs/endpoints.yaml) | 简单模式的后端清单（一个模型 → 一个 vllm 端点） |
+| [deployment/standalone/configs/endpoints-pd.yaml](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/configs/endpoints-pd.yaml) | P/D 解耦模式的后端清单（一个模型 → prefill + decode 两个角色） |
+| [cmd/plugins/main.go](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/cmd/plugins/main.go) | 网关插件入口：`--standalone` 开关在这里分流，决定用文件发现还是 K8s 发现 |
 
 ## 4. 核心概念与源码讲解
 
@@ -51,7 +53,7 @@ Standalone 模式一共有 6 类服务，对应 AIBrix 数据平面的不同角�
 
 | 服务 | 角色 | 对应 AIBrix 哪个子系统 |
 | --- | --- | --- |
-| `redis` | 共享状态存储（限流计数、会话、路由状态） | 网关的公共依赖 |
+| `redis` | 共享状态/元数据存储（限流计数、API Key 认证、会话、路由状态）；镜像可切换为 OSS 的 Valkey | 网关与 metadata-service 的公共依赖 |
 | `metadata-service` | 模型注册表与文件管理（`/v1/models`、`/v1/files`） | Python 运行时 |
 | `envoy` | L7 入口代理，挂载 ext_proc 过滤器 | 网关的数据通道 |
 | `gateway` | ext_proc gRPC 插件，做路由/限流/追踪 | 网关的大脑 |
@@ -65,7 +67,7 @@ Standalone 模式一共有 6 类服务，对应 AIBrix 数据平面的不同角�
 服务之间存在明确的**启动依赖（depends_on）**，形成一条健康检查驱动的启动链：
 
 ```text
-redis (healthcheck: redis-cli ping)
+redis (healthcheck: redis-cli / valkey-cli ping)
    └─► metadata-service (healthcheck: /healthz，依赖 redis healthy)
    └─► gateway         (依赖 redis healthy，无健康检查：distroless 无 shell)
    └─► envoy           (依赖 metadata-service healthy + gateway started)
@@ -85,27 +87,38 @@ Docker Compose 用两种机制实现这条链：
 
 #### 4.1.3 源码精读
 
-**Redis 服务**——用官方 alpine 镜像，开启 AOF 持久化，限内存 256MB + LRU 淘汰，挂一个命名卷 `redis-data` 做持久化：
+**Redis 服务（默认 Redis，可切换 Valkey）**——用官方 alpine 镜像，开启 AOF 持久化，限内存 256MB + LRU 淘汰，挂一个命名卷 `redis-data` 做持久化：
 
-[deployment/standalone/docker-compose.yml:L32-L50](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/docker-compose.yml#L32-L50)
+[deployment/standalone/docker-compose.yml:L33-L51](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/docker-compose.yml#L33-L51)
 
-这段定义了网关做分布式限流、会话亲和、状态同步时所依赖的共享存储（与 u8-l4 Redis 状态同步、u7-l5 限流对应）。`restart: unless-stopped` 保证容器异常退出后会自愈。
+这段定义了网关做分布式限流、会话亲和、状态同步，以及 metadata-service 存模型注册表时所依赖的共享存储（与 u8-l4 Redis 状态同步、u7-l5 限流对应）。`restart: unless-stopped` 保证容器异常退出后会自愈。
+
+> **本次更新的关键变化**：以上三个字段都改成了带默认值的变量插值——
+> - 镜像：`image: ${REDIS_IMAGE:-redis:7.4-alpine}`
+> - 服务进程：`command: ${REDIS_SERVER_CMD:-redis-server} ...`
+> - 健康检查 CLI：`test: ["CMD", "${REDIS_CLI_CMD:-redis-cli}", "ping"]`
+>
+> 不设变量时行为与原来完全一致（仍是 Redis）；覆盖这三个变量即可切换到 Valkey（详见 4.3）。这是 6 个服务里**唯一**把镜像/命令参数化的服务，因为它是唯一一个「换协议兼容实现」就够用、且不影响消费者的组件。
+
+文件头部的用法注释里也新增了一行 Valkey 模式示例：
+
+[deployment/standalone/docker-compose.yml:L6-L13](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/docker-compose.yml#L6-L13)
 
 **metadata-service 服务**——AIBrix 自家镜像，连 Redis，把推理引擎地址以环境变量 `INFERENCE_ENGINE_ENDPOINT: "http://vllm:8000"` 注入，对外提供模型注册与文件管理：
 
-[deployment/standalone/docker-compose.yml:L56-L76](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/docker-compose.yml#L56-L76)
+[deployment/standalone/docker-compose.yml:L57-L77](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/docker-compose.yml#L57-L77)
 
-注意 `depends_on.redis.condition: service_healthy`——它必须等 Redis 真正能 `ping` 通才启动。
+注意 `depends_on.redis.condition: service_healthy`——它必须等 Redis 真正能 `ping` 通才启动。也注意它通过 `REDIS_HOST: redis`（服务名）连存储，所以后端换成 Valkey 时它无需改动。
 
 **Envoy 服务**——入口代理，把宿主机 80 端口映射到容器 80，把本地 `configs/envoy.yaml` 只读挂载进容器：
 
-[deployment/standalone/docker-compose.yml:L82-L102](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/docker-compose.yml#L82-L102)
+[deployment/standalone/docker-compose.yml:L83-L103](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/docker-compose.yml#L83-L103)
 
 Envoy 同时 `depends_on` metadata-service（healthy）与 gateway（started）——这保证入口就绪时，元数据服务和路由插件都已在线。
 
 **vLLM 单引擎服务（默认模式）**——这是最关键的推理后端。它请求 GPU（合并了 `*common-gpu` 锚点），把 HuggingFace 缓存目录挂进容器，启动命令里带了一长串 vLLM 参数：
 
-[deployment/standalone/docker-compose.yml:L108-L139](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/docker-compose.yml#L108-L139)
+[deployment/standalone/docker-compose.yml:L109-L140](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/docker-compose.yml#L109-L140)
 
 几个要点：
 
@@ -116,15 +129,15 @@ Envoy 同时 `depends_on` metadata-service（healthy）与 gateway（started）�
 
 **P/D 解耦引擎（profile=pd）**——两个几乎镜像对称的服务，区别在 GPU 编号、显存利用率与最大并发序列数（prefill 给了较小的 `MAX_SEQS=64`，decode 给了较大的 `256`）：
 
-[deployment/standalone/docker-compose.yml:L145-L177](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/docker-compose.yml#L145-L177) （prefill）
+[deployment/standalone/docker-compose.yml:L146-L178](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/docker-compose.yml#L146-L178) （prefill）
 
-[deployment/standalone/docker-compose.yml:L179-L211](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/docker-compose.yml#L179-L211) （decode）
+[deployment/standalone/docker-compose.yml:L180-L212](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/docker-compose.yml#L180-L212) （decode）
 
 两者都带 `profiles: ["pd"]`，默认不启动。`PREFILL_GPU` 默认 0、`DECODE_GPU` 默认 1，即两块 GPU 分别承担 prefill 与 decode，对应 README 里的 PD 拓扑图。
 
 **Gateway 插件服务**——AIBrix 的路由大脑，即 `cmd/plugins` 编译出的 `gateway-plugins` 二进制：
 
-[deployment/standalone/docker-compose.yml:L218-L249](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/docker-compose.yml#L218-L249)
+[deployment/standalone/docker-compose.yml:L219-L250](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/docker-compose.yml#L219-L250)
 
 三个关键点：
 
@@ -134,7 +147,7 @@ Envoy 同时 `depends_on` metadata-service（healthy）与 gateway（started）�
 
 最后，**网络与卷**的定义：
 
-[deployment/standalone/docker-compose.yml:L251-L260](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/docker-compose.yml#L251-L260)
+[deployment/standalone/docker-compose.yml:L252-L261](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/docker-compose.yml#L252-L261)
 
 所有服务挂在同一个 `aibrix-network` 桥接网络（固定子网 `172.28.0.0/16`），服务名即主机名；Redis 用命名卷 `redis-data` 持久化。
 
@@ -144,17 +157,18 @@ Envoy 同时 `depends_on` metadata-service（healthy）与 gateway（started）�
 
 **操作步骤**：
 
-1. 打开 [docker-compose.yml](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/docker-compose.yml)。
+1. 打开 [docker-compose.yml](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/docker-compose.yml)。
 2. 对每个服务，找到它的 `depends_on` 字段，记录它依赖哪个服务、依赖条件是 `service_healthy` 还是 `service_started`。
 3. 对每个服务，找到它的 `healthcheck.test`，记录它用什么命令判定自己健康。
 4. 列出 `gateway` 服务 `command:` 里的全部 flag，并标注哪些 flag 与「发现后端」相关。
+5. 找到 `redis` 服务，记录它有哪三个字段用了 `${VAR:-default}` 形式的变量插值（这是切换 Valkey 的入口，详见 4.3）。
 
 **需要观察的现象（在纸面上推导）**：
 
 - 如果 Redis 启动失败，哪些服务会因此无法启动？（应能推出 metadata-service、gateway、进而 envoy）
 - 默认 `docker compose up` 时，哪几个服务**不会**启动？（应能推出 prefill-engine、decode-engine，因为它们带 `profiles: ["pd"]`）
 
-**预期结果**：你应当得到一张包含 6 类服务、若干 `depends_on` 边的有向图，并能指出 gateway 的健康检查为何是 `["NONE"]`。
+**预期结果**：你应当得到一张包含 6 类服务、若干 `depends_on` 边的有向图，能指出 gateway 的健康检查为何是 `["NONE"]`，并说出 redis 服务的镜像、`command`、健康检查 CLI 都是被环境变量参数化的。
 
 > 是否真正运行：本实践为「源码阅读型」，不需要启动容器即可完成推导。若你想在本地实跑，需具备 Docker + NVIDIA GPU 环境，模型加载耗时较长，属「待本地验证」。
 
@@ -180,6 +194,8 @@ Envoy 同时 `depends_on` metadata-service（healthy）与 gateway（started）�
 2. **环境准备与校验**：检查 `.env` 是否存在（不存在则从 `.env.example` 复制）、检查 docker / docker compose / NVIDIA runtime 是否就绪、检查模型缓存目录。
 3. **按模式切换配置**：根据是否 `--pd`，导出不同的 `ENDPOINTS_CONFIG` 与 `ROUTING_ALGORITHM` 环境变量，并拼出对应的 `--profile` 参数。
 4. **编排 + 轮询就绪**：拉镜像、`docker compose up -d`、然后用一个 `wait_for_service` 函数轮询各服务的健康端点，直到全部就绪或超时。
+
+> 说明：`start.sh` 本身**不**感知 Redis/Valkey 的切换——那是由调用者在 `docker compose up` 时通过 `REDIS_IMAGE` 等环境变量传入的（见 4.3）。`start.sh` 只负责「选路由模式」，不负责「选元数据存储实现」。
 
 理解 `start.sh` 的关键，是看清它**如何把 `--pd` 这个用户开关，翻译成 docker-compose 层面的 profile 与 gateway 层面的 endpoints 配置**。
 
@@ -221,47 +237,47 @@ docker compose $PROFILES up -d
 
 **参数解析**——标准的 `while + case` 循环，把 `--pd` 映射成 `PD_MODE=true`：
 
-[deployment/standalone/start.sh:L30-L76](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/start.sh#L30-L76)
+[deployment/standalone/start.sh:L30-L76](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/start.sh#L30-L76)
 
 **`.env` 自动生成与导入**——首次运行时从模板复制，然后用 `set -a; source .env; set +a` 把变量导出为环境变量（`set -a` 让此后所有赋值都自动 export）：
 
-[deployment/standalone/start.sh:L101-L124](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/start.sh#L101-L124)
+[deployment/standalone/start.sh:L101-L124](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/start.sh#L101-L124)
 
 **前置检查**——校验 docker、docker compose v2、NVIDIA Container Runtime、模型缓存目录。注意 NVIDIA runtime 检查失败时只是 `!` 警告，不 `exit`（因为理论上可以 CPU 跑小模型，虽不推荐）：
 
-[deployment/standalone/start.sh:L130-L170](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/start.sh#L130-L170)
+[deployment/standalone/start.sh:L130-L170](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/start.sh#L130-L170)
 
 **按模式切换配置**——这是脚本的核心逻辑分支，把 `--pd` 翻译成 endpoints 文件、路由算法：
 
-[deployment/standalone/start.sh:L212-L230](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/start.sh#L212-L230)
+[deployment/standalone/start.sh:L212-L230](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/start.sh#L212-L230)
 
 **起服务 + P/D 模式下停掉默认 vllm**——因为 P/D 模式下不希望单引擎 `vllm` 也在跑，所以显式 `stop` 并 `rm` 它（用 `2>/dev/null || true` 容错，因为默认模式时它可能本来就一起起了）：
 
-[deployment/standalone/start.sh:L255-L265](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/start.sh#L255-L265)
+[deployment/standalone/start.sh:L255-L265](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/start.sh#L255-L265)
 
 **轮询等待就绪**——`wait_for_service` 函数用 `curl -sf` 反复探测一个 URL，直到成功或超时。注意 vLLM 的超时给到了 600 秒（10 分钟），因为模型加载很慢：
 
-[deployment/standalone/start.sh:L276-L320](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/start.sh#L276-L320)
+[deployment/standalone/start.sh:L276-L320](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/start.sh#L276-L320)
 
 **endpoints 配置文件**——简单模式只有一个模型指向 `vllm:8000`：
 
-[deployment/standalone/configs/endpoints.yaml:L11-L15](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/configs/endpoints.yaml#L11-L15)
+[deployment/standalone/configs/endpoints.yaml:L11-L15](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/configs/endpoints.yaml#L11-L15)
 
 P/D 模式则把同一模型组织成一个 `roleset`，分别列出 prefill 和 decode 端点：
 
-[deployment/standalone/configs/endpoints-pd.yaml:L14-L21](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/configs/endpoints-pd.yaml#L14-L21)
+[deployment/standalone/configs/endpoints-pd.yaml:L14-L21](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/configs/endpoints-pd.yaml#L14-L21)
 
 这两个文件就是网关在 Standalone 模式下的「后端清单」——它替代了 K8s 模式下的 Informers 发现机制。
 
 **网关入口的 `--standalone` 分支**——最后把视线拉到 Go 代码。`docker-compose.yml` 里 gateway 服务带的 `--standalone` 和 `--endpoints-config` 两个 flag，在 `cmd/plugins/main.go` 里触发分流：
 
-[cmd/plugins/main.go:L68-L70](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/cmd/plugins/main.go#L68-L70) 定义了这两个 flag；
+[cmd/plugins/main.go:L68-L70](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/cmd/plugins/main.go#L68-L70) 定义了这两个 flag；
 
-[cmd/plugins/main.go:L85-L88](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/cmd/plugins/main.go#L85-L88) 校验：standalone 模式下 `--endpoints-config` 是必填的；
+[cmd/plugins/main.go:L85-L88](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/cmd/plugins/main.go#L85-L88) 校验：standalone 模式下 `--endpoints-config` 是必填的；
 
-[cmd/plugins/main.go:L90-L96](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/cmd/plugins/main.go#L90-L96) Redis 在 standalone 模式下是**可选的**（缺失只告警，不致命），而在 K8s 模式下是必需的；
+[cmd/plugins/main.go:L90-L96](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/cmd/plugins/main.go#L90-L96) Redis 在 standalone 模式下是**可选的**（缺失只告警，不致命），而在 K8s 模式下是必需的；
 
-[cmd/plugins/main.go:L123-L126](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/cmd/plugins/main.go#L123-L126) 真正的分流点：standalone 用 `discovery.NewStaticProvider(endpointsConfig)`（基于文件的静态发现），否则走 K8s 客户端 + Informers（动态发现）。
+[cmd/plugins/main.go:L123-L126](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/cmd/plugins/main.go#L123-L126) 真正的分流点：standalone 用 `discovery.NewStaticProvider(endpointsConfig)`（基于文件的静态发现），否则走 K8s 客户端 + Informers（动态发现）。
 
 这一段是理解「同一份网关二进制、两种部署形态」的钥匙：**`--standalone` 切换的不是路由算法，而是「后端 Pod 从哪里被发现」**。
 
@@ -271,10 +287,10 @@ P/D 模式则把同一模型组织成一个 `roleset`，分别列出 prefill 和
 
 **操作步骤**：
 
-1. 阅读 [start.sh 的模式切换分支](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/start.sh#L212-L230)，确认 `--pd` 会 `export` 哪两个变量、分别赋什么值。
-2. 回到 [docker-compose.yml 的 gateway 服务](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/docker-compose.yml#L218-L249)，确认这两个变量分别被用于 `${ENDPOINTS_CONFIG:-...}`（挂载文件）和 `${ROUTING_ALGORITHM:-...}`（注入 `AIBRIX_ROUTING_ALGORITHM` 环境变量）。
-3. 打开 [endpoints-pd.yaml](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/configs/endpoints-pd.yaml)，确认它列出了 prefill 与 decode 两个角色的端点。
-4. 打开 [cmd/plugins/main.go:L123-L126](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/cmd/plugins/main.go#L123-L126)，确认这个 endpoints 文件最终被 `discovery.NewStaticProvider` 读取。
+1. 阅读 [start.sh 的模式切换分支](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/start.sh#L212-L230)，确认 `--pd` 会 `export` 哪两个变量、分别赋什么值。
+2. 回到 [docker-compose.yml 的 gateway 服务](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/docker-compose.yml#L219-L250)，确认这两个变量分别被用于 `${ENDPOINTS_CONFIG:-...}`（挂载文件）和 `${ROUTING_ALGORITHM:-...}`（注入 `AIBRIX_ROUTING_ALGORITHM` 环境变量）。
+3. 打开 [endpoints-pd.yaml](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/configs/endpoints-pd.yaml)，确认它列出了 prefill 与 decode 两个角色的端点。
+4. 打开 [cmd/plugins/main.go:L123-L126](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/cmd/plugins/main.go#L123-L126)，确认这个 endpoints 文件最终被 `discovery.NewStaticProvider` 读取。
 
 **需要观察的现象（推导）**：
 
@@ -293,13 +309,107 @@ P/D 模式则把同一模型组织成一个 `roleset`，分别列出 prefill 和
 
 **练习 2**：`cmd/plugins/main.go` 中，为什么 standalone 模式下 Redis 缺失只告警而不退出，K8s 模式下却 `klog.Fatal`？
 
-**参考答案**：Standalone 定位是单机开发/测试，应当尽量「能跑就跑」。Redis 主要支撑分布式限流、用户认证、多副本状态同步等增强能力，缺失时这些功能降级即可（告警提示），核心的单机路由仍可工作。而 K8s 模式面向生产多副本，Redis 是多 gateway 副本协调状态的硬依赖，缺失会导致状态不一致，因此直接致命退出。
+**参考答案**：Standalone 定位是单机开发/测试，应当尽量「能跑就跑」。Redis（或 Valkey）主要支撑分布式限流、用户认证、多副本状态同步等增强能力，缺失时这些功能降级即可（告警提示），核心的单机路由仍可工作。而 K8s 模式面向生产多副本，存储是多 gateway 副本协调状态的硬依赖，缺失会导致状态不一致，因此直接致命退出。注意：这里的「Redis」是协议层面的，换成 Valkey 同理——`cmd/plugins/main.go` 只检查能否连上 6379，不关心后端具体实现。
 
 ---
 
-### 4.3 Standalone 适用场景与与 K8s 部署的差异
+### 4.3 Redis/Valkey 元数据存储切换
 
 #### 4.3.1 概念说明
+
+在 Standalone 模式下，`redis` 服务不只是网关的限流计数器，它同时也是 **metadata-service 的模型注册表存储**。换言之，它是「网关 + 元数据服务」共同依赖的**中央元数据/状态存储**。
+
+这个角色默认由 Redis 扮演。但自 2024 年起 Redis 改为 SSPL/RSALv2 双协议（不再是 OSI 认可的开源协议），社区随后分叉出 **Valkey**（Linux Foundation 托管，BSD-3-Clause）。两者**线缆兼容（wire-compatible）**：监听同样的 6379 端口、用同样的 RESP 协议、`PING`/`GET`/`SET` 等命令完全一致。
+
+AIBrix 因此允许你用一个开关把内置 Redis 换成 Valkey——这正是上一讲 u1-l4 在 K8s 部署里引入的能力（`config/metadata/valkey.yaml`）。本模块讲 **Standalone 模式下的等价切换**。
+
+关键直觉：**因为 Valkey 与 Redis 协议兼容，切换不需要改任何「消费方」**。metadata-service 和 gateway 都通过 Docker 服务名 `redis` 连接 6379（见 [docker-compose.yml:L57-L77](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/docker-compose.yml#L57-L77) 与 [docker-compose.yml:L219-L250](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/docker-compose.yml#L219-L250)），它们看到的是「服务名 + 端口」，根本不关心容器里跑的是 redis-server 还是 valkey-server。**只有 redis 服务本身的镜像、启动命令、健康检查 CLI 这三样需要换。**
+
+#### 4.3.2 核心流程
+
+`docker-compose.yml` 把 redis 服务的三个「可变量」全部参数化（带 `:-` 默认值），从而把「换实现」降维成「换三个环境变量」：
+
+| 字段 | 默认值（Redis） | 切换 Valkey 时 |
+| --- | --- | --- |
+| `image` | `redis:7.4-alpine` | `valkey/valkey:8-alpine` |
+| `command`（服务进程） | `redis-server` | `valkey-server` |
+| `healthcheck.test`（CLI） | `redis-cli` | `valkey-cli` |
+
+切换只需在 `docker compose up` 前覆盖这三个变量（**示例命令**，取自 README）：
+
+```bash
+REDIS_IMAGE=valkey/valkey:8-alpine REDIS_SERVER_CMD=valkey-server REDIS_CLI_CMD=valkey-cli docker compose up -d
+```
+
+**为什么是三个变量而不是一个？** 因为镜像名、容器内的服务进程可执行文件名、健康检查用的 CLI 名，在两种实现里都不同（`redis-server` ↔ `valkey-server`，`redis-cli` ↔ `valkey-cli`）。只换镜像但保留 `redis-server` 命令，valkey 镜像里没有该可执行文件，容器会启动失败；只换进程名但不换健康检查 CLI，健康检查会失败导致 `service_healthy` 永不满足、metadata-service 起不来。三者必须一致替换。而 `--appendonly yes`、`--maxmemory 256mb`、`--maxmemory-policy allkeys-lru` 这些配置参数两者都支持，无需改。
+
+可以把「是否启用 Valkey」建模为一个布尔决策变量 \(v \in \{0,1\}\)。当 \(v=1\) 时，三个变量取 Valkey 值；否则取默认（Redis）值。决策依据是开源协议合规偏好（要求 OSI/BSD 开源则选 Valkey），与功能无关——两者在 AIBrix 里的行为完全一致。
+
+#### 4.3.3 源码精读
+
+**redis 服务的参数化定义**——三处 `${VAR:-default}` 插值是切换的全部入口（同 4.1.3）：
+
+[deployment/standalone/docker-compose.yml:L33-L51](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/docker-compose.yml#L33-L51)
+
+**compose 文件头部的用法注释**——本次新增了一行 `Valkey mode` 用法示例，与 Default/P/D 模式并列：
+
+[deployment/standalone/docker-compose.yml:L6-L13](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/docker-compose.yml#L6-L13)
+
+**README 的特性说明**——Redis 一行现在标注了 Valkey 作为 OSS（BSD-3）的替代选项：
+
+[deployment/standalone/README.md:L5-L12](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/README.md#L5-L12)
+
+**README 的服务表**——redis 行标注了「set `REDIS_IMAGE=valkey/valkey:8-alpine` for Valkey」：
+
+[deployment/standalone/README.md:L137](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/README.md#L137)
+
+**README 的启停命令块**——本次新增了一行 Valkey 启动命令：
+
+[deployment/standalone/README.md:L166-L174](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/README.md#L166-L174)
+
+**消费者对切换无感**——metadata-service 与 gateway 都写死了 `REDIS_HOST: redis`、`REDIS_PORT: "6379"`，连接的是服务名而非镜像名，所以后端换成 Valkey 时它们零改动（见 4.3.3 前两个链接）。
+
+#### 4.3.4 代码实践
+
+**实践目标**：写出一行使用 Valkey 替代 Redis 启动 Standalone 的命令，并验证消费者无感。
+
+**操作步骤**：
+
+1. 阅读 [docker-compose.yml:L33-L51](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/docker-compose.yml#L33-L51)，确认 redis 服务的镜像、`command`、健康检查 CLI 这三处都是 `${VAR:-default}` 形式。
+2. 写出切换命令（**示例命令**，取自 [README:L166-L174](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/README.md#L166-L174)）：
+
+   ```bash
+   REDIS_IMAGE=valkey/valkey:8-alpine REDIS_SERVER_CMD=valkey-server REDIS_CLI_CMD=valkey-cli docker compose up -d
+   ```
+
+3. 启动后用 `docker compose ps` 观察 `aibrix-redis` 容器，确认其 `IMAGE` 列显示 `valkey/valkey:8-alpine` 而非 `redis:7.4-alpine`。
+4. `docker compose exec redis valkey-cli ping`，期望返回 `PONG`（说明健康检查用的 CLI 也匹配）。
+5. `docker compose logs metadata-service`，确认它正常连上 `redis:6379`，无报错——证明切换对消费者透明。
+
+**需要观察的现象**：
+
+- `aibrix-redis` 容器跑的是 valkey 镜像，但 `metadata-service` / `gateway` 的日志里没有任何连接异常；
+- 健康检查仍通过（因为把 `REDIS_CLI_CMD` 也换成了 `valkey-cli`），否则 `wait_for_service` 与 `depends_on.condition: service_healthy` 会卡住。
+
+**预期结果**：你应当能得出结论——在 Standalone 模式下，元数据存储从 Redis 切换到 Valkey 是**纯环境变量级别的一行操作**，对网关与元数据服务完全透明。
+
+> 是否真正运行：本实践需 Docker 环境，属「待本地验证」。仅做命令阅读与推导也可完成核心目标。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么换成 Valkey 不需要改 `metadata-service` 或 `gateway` 的任何配置？
+
+**参考答案**：因为它们通过 Docker 服务名 `redis`（即 redis 容器在 `aibrix-network` 里的主机名）和端口 6379 连接，而不是直接绑死 Redis 镜像或可执行文件名。Valkey 与 Redis 线缆兼容、监听同端口、协议一致，所以容器内部换成哪个实现都不影响这两个消费者。这正是「服务名 + 端口」解耦带来的好处，与 K8s 里用 Service 名而非 IP 访问后端是同一个道理。
+
+**练习 2**：为什么切换需要覆盖**三个**变量（`REDIS_IMAGE` / `REDIS_SERVER_CMD` / `REDIS_CLI_CMD`），而不是只覆盖一个镜像名？
+
+**参考答案**：因为镜像名、服务进程可执行文件名、健康检查 CLI 名在两种实现里都不同。只换镜像（`REDIS_IMAGE`）但保留默认的 `redis-server` 命令，valkey 镜像里没有 `redis-server` 这个可执行文件，容器启动即失败；只换进程名但不换 `REDIS_CLI_CMD`，健康检查会调 `redis-cli` 而 valkey 镜像里只有 `valkey-cli`，健康检查失败、`service_healthy` 不满足，进而 `metadata-service`、`gateway`、`envoy` 都起不来。三者必须一致替换。
+
+---
+
+### 4.4 Standalone 适用场景与与 K8s 部署的差异
+
+#### 4.4.1 概念说明
 
 理解了「怎么部署」，还要理解「什么时候该用它」。Standalone 与 Kubernetes 两种形态不是互相替代的产品，而是面向不同场景的两种编排方式，背后跑的**数据平面（网关 + 引擎）几乎一样**。
 
@@ -309,7 +419,9 @@ P/D 模式则把同一模型组织成一个 `roleset`，分别列出 prefill 和
 2. **后端怎么被发现**：K8s 模式靠 Informers 监听带 `model.aibrix.ai/name` 标签的 Pod（动态、随伸缩变化）；Standalone 靠一个静态 `endpoints.yaml` 文件（固定，改后端要改文件并重启 gateway）。
 3. **多节点与高可用**：Standalone 是单机单 Compose，无法跨节点；K8s 天然多节点、可滚动升级、可自愈。
 
-#### 4.3.2 核心流程
+补充一个与上一模块呼应的维度：**元数据存储的可选性**。两种形态都默认内置 Redis、都可切 Valkey（u1-l4 讲 K8s 的 `config/metadata/valkey.yaml`，4.3 讲 Standalone 的环境变量切换）。差异在于——Standalone 下这个存储是单机的，仅服务于同机的一个 gateway 副本；K8s 下它要支撑多副本协调状态。
+
+#### 4.4.2 核心流程
 
 README 给出了一张清晰的对比表，把两种形态的差异归纳为六个维度：
 
@@ -327,46 +439,46 @@ README 给出了一张清晰的对比表，把两种形态的差异归纳为六�
 形式化地，定义权重 \(w_\text{multi} = \mathbf{1}[\text{需多节点}]\)、\(w_\text{scale} = \mathbf{1}[\text{需自动伸缩}]\)、\(w_\text{ha} = \mathbf{1}[\text{需生产高可用}]\)，则
 
 \[
-\text{choose K8s} \iff w_\text{multi} + w_\text{scale} + w_\text{ha} \ge 1
+\text{choose K8s} \iff w_\text{multi} + w_\text{scale} + w_\text{ha} \geq 1
 \]
 
 否则选 Standalone。这不是项目代码里的公式，只是一个帮你做技术选型的直觉判断（**示例模型**，非项目实现）。
 
-#### 4.3.3 源码精读
+#### 4.4.3 源码精读
 
 README 开头一句点明了 Standalone 的定位：
 
-[deployment/standalone/README.md:L1-L3](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/README.md#L1-L3) ——「Simplified single-node AIBrix deployment without Kubernetes complexity. Perfect for development, testing, and single-GPU/multi-GPU inference workloads.」
+[deployment/standalone/README.md:L1-L3](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/README.md#L1-L3) ——「Simplified single-node AIBrix deployment without Kubernetes complexity. Perfect for development, testing, and single-GPU/multi-GPU inference workloads.」
 
 它的特性清单也呼应了「只保留数据平面」的事实：
 
-[deployment/standalone/README.md:L5-L12](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/README.md#L5-L12)
+[deployment/standalone/README.md:L5-L12](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/README.md#L5-L12)
 
 注意这里**没有**列出自动伸缩、LoRA 高密度调度、分布式编排等控制平面特性——因为这些在 Standalone 下不参与。
 
 两种模式各自的架构图，把「Envoy 是唯一入口、其他服务并列其后」的拓扑画得很清楚：
 
-[deployment/standalone/README.md:L65-L85](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/README.md#L65-L85) （Simple Mode）
+[deployment/standalone/README.md:L65-L85](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/README.md#L65-L85) （Simple Mode）
 
-[deployment/standalone/README.md:L87-L107](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/README.md#L87-L107) （P/D Mode）
+[deployment/standalone/README.md:L87-L107](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/README.md#L87-L107) （P/D Mode）
 
 正式的对比表与「生产请用 Helm」的建议：
 
-[deployment/standalone/README.md:L270-L284](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/README.md#L270-L284)
+[deployment/standalone/README.md:L273-L287](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/README.md#L273-L287)
 
-README 还提供了一条**完全脱离 Docker 的本地开发路径**——用 mock vLLM server + 本地编译的 gateway-plugins + 本地 Envoy，专门给「想调试网关插件但不碰 GPU」的开发者。注意它要求往 `/etc/hosts` 加 `127.0.0.1 gateway vllm metadata-service`，因为 `envoy.yaml` 用的是 Docker 服务名作主机名：
+README 还提供了一条**完全脱离 Docker 的本地开发路径**——用 mock vLLM server + 本地编译的 gateway-plugins + 本地 Envoy，专门给「想调试网关插件但不碰 GPU」的开发者。注意它要求往 `/etc/hosts` 加 `127.0.0.1 gateway vllm metadata-service`，因为 `envoy.yaml` 用的是 Docker 服务名作主机名。这条路径同样支持用 Valkey 替代 Redis（`brew install valkey && valkey-server`）：
 
-[deployment/standalone/README.md:L286-L358](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/README.md#L286-L358)
+[deployment/standalone/README.md:L289-L337](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/README.md#L289-L337)
 
 这一段把 Standalone 的「开发友好」属性发挥到极致——连 Docker 都可以不要。
 
-#### 4.3.4 代码实践
+#### 4.4.4 代码实践
 
 **实践目标**：判断几种典型需求应该选 Standalone 还是 K8s，并给出依据。
 
 **操作步骤**：
 
-1. 阅读 [README 的对比表](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/README.md#L270-L284)。
+1. 阅读 [README 的对比表](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/README.md#L273-L287)。
 2. 针对下面三个场景，分别给出选择与一句理由：
    - 场景 A：在你的笔记本上试用 AIBrix，跑一个 1.5B 小模型，验证 `/v1/chat/completions` 能通。
    - 场景 B：公司要在生产环境部署，要求根据 QPS 自动扩缩推理副本。
@@ -387,34 +499,36 @@ README 还提供了一条**完全脱离 Docker 的本地开发路径**——用 
 
 > 是否真正运行：本实践为「选型判断型」，无需运行任何命令。
 
-#### 4.3.5 小练习与答案
+#### 4.4.5 小练习与答案
 
 **练习 1**：Standalone 模式下，如果想让 gateway 路由到两个不同的 vLLM 引擎（而不是一个），最少要改哪些地方？
 
-**参考答案**：改 [endpoints.yaml](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/configs/endpoints.yaml)，在同一个模型的 `endpoints` 列表下再加一个端点（如 `vllm2:8000`），并在 `docker-compose.yml` 里新增一个对应的 vLLM 服务容器（服务名与 endpoints 里一致）。然后重启 gateway 容器让它重新读取文件。注意：这是静态发现，新增/下线后端都要改文件，不像 K8s 那样自动感知。
+**参考答案**：改 [endpoints.yaml](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/configs/endpoints.yaml)，在同一个模型的 `endpoints` 列表下再加一个端点（如 `vllm2:8000`），并在 `docker-compose.yml` 里新增一个对应的 vLLM 服务容器（服务名与 endpoints 里一致）。然后重启 gateway 容器让它重新读取文件。注意：这是静态发现，新增/下线后端都要改文件，不像 K8s 那样自动感知。
 
-**练习 2**：为什么 Standalone 模式仍然保留了 Redis？去掉它行不行？
+**练习 2**：为什么 Standalone 模式仍然保留了 Redis（或 Valkey）？去掉它行不行？
 
-**参考答案**：Redis 在网关里承担分布式限流、API Key 认证、会话亲和、多副本状态同步等职责（对应 u7-l5、u8-l3、u8-l4）。单机单 gateway 副本时，去掉 Redis 这些增强功能会降级（`cmd/plugins/main.go` 里会告警「rate limiting and user auth disabled」），但基础路由仍能工作。所以技术上「能去掉」，但会失去限流与认证能力，不推荐。
+**参考答案**：Redis/Valkey 在网关里承担分布式限流、API Key 认证、会话亲和、多副本状态同步等职责（对应 u7-l5、u8-l3、u8-l4），在 metadata-service 里充当模型注册表存储。单机单 gateway 副本时，去掉它这些增强功能会降级（`cmd/plugins/main.go` 里会告警「rate limiting and user auth disabled」），但基础路由仍能工作。所以技术上「能去掉」，但会失去限流、认证与模型注册能力，不推荐。
 
 ---
 
 ## 5. 综合实践
 
-**综合任务**：为 Standalone 模式绘制一份完整的「请求生命周期 + 服务依赖」总图，把本讲三个最小模块的知识串起来。
+**综合任务**：为 Standalone 模式绘制一份完整的「请求生命周期 + 服务依赖 + 元数据存储」总图，把本讲四个最小模块的知识串起来。
 
 具体要求：
 
 1. **画服务依赖图**：以 `redis / metadata-service / gateway / envoy / vllm` 为节点，用箭头标出 `depends_on` 关系（标注条件是 `service_healthy` 还是 `service_started`）。
-2. **画一次 `/v1/chat/completions` 请求的数据流**：从 Client → Envoy（80）→ ext_proc 过滤器 → gateway 插件（50052，做路由决策）→ 返回 `target-pod` → Envoy 转发到 `vllm_backend` cluster（vllm:8000）→ 响应回流。可参考 [envoy.yaml 的 ext_proc 配置](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/configs/envoy.yaml#L159-L178) 与 [路由表](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/configs/envoy.yaml#L62-L100)。
+2. **画一次 `/v1/chat/completions` 请求的数据流**：从 Client → Envoy（80）→ ext_proc 过滤器 → gateway 插件（50052，做路由决策）→ 返回 `target-pod` → Envoy 转发到 `vllm_backend` cluster（vllm:8000）→ 响应回流。可参考 [envoy.yaml 的 ext_proc 配置](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/configs/envoy.yaml#L159-L178) 与 [路由表](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/configs/envoy.yaml#L62-L100)。
 3. **标注配置传递链**：在图旁写出 `start.sh` 的 `--pd` 是如何一路传到 gateway 二进制的 `discovery.NewStaticProvider` 的（参考 4.2.4 的追踪）。
-4. **写一句选型结论**：根据这张图，说明 Standalone 缺失了 K8s 模式下的哪一类能力（提示：控制平面），并指出这会影响哪些 AIBrix 特性（自动伸缩、LoRA 调度、分布式编排）。
+4. **标注元数据存储的切换点**：在 redis 节点上标出三个可插值变量（`REDIS_IMAGE` / `REDIS_SERVER_CMD` / `REDIS_CLI_CMD`），并写出一行切到 Valkey 的命令；说明为何 metadata-service 与 gateway 对此无感（参考 4.3）。
+5. **写一句选型结论**：根据这张图，说明 Standalone 缺失了 K8s 模式下的哪一类能力（提示：控制平面），并指出这会影响哪些 AIBrix 特性（自动伸缩、LoRA 调度、分布式编排）。
 
 **验收标准**：
 
 - 依赖图中能正确反映「envoy 等 metadata-service healthy + gateway started」；
 - 数据流图中能指出「路由决策发生在 ext_proc 阶段、由 gateway 插件完成」；
 - 配置链中能写出至少三个传递环节（命令行 → shell export → compose 插值 → 容器环境变量/挂载 → Go 代码读取）；
+- 元数据存储部分能写出三个变量名与一行 Valkey 命令，并解释「服务名解耦使切换透明」；
 - 选型结论能联系到本课程后续单元（u3 自动伸缩、u4 模型适配、u5 分布式编排）。
 
 > 是否真正运行：本任务为「文档绘制 + 源码追踪型」，不要求启动集群。若你想真正发一个请求验证数据流，可在具备 GPU 的机器上 `./start.sh` 后用 README 里的 `curl /v1/chat/completions` 示例，属「待本地验证」。
@@ -425,7 +539,8 @@ README 还提供了一条**完全脱离 Docker 的本地开发路径**——用 
 - 它**只编排数据平面，不含控制平面**——因此没有自动伸缩、LoRA 调度控制器、分布式编排控制器，这些是 K8s 控制平面的职责。
 - 服务之间存在 `depends_on` + `healthcheck` 驱动的启动链；同一份 YAML 用 `profiles: ["pd"]` 同时描述「单引擎」和「P/D 双引擎」两种拓扑。
 - `start.sh` 在 compose 之上加了参数解析、环境校验、按模式切换配置、轮询就绪四层封装；它通过 `export ENDPOINTS_CONFIG/ROUTING_ALGORITHM` 与 compose 文件达成环境变量契约。
-- 网关二进制是同一个，靠 `cmd/plugins/main.go` 里的 `--standalone` 开关分流：Standalone 走 `discovery.NewStaticProvider`（文件发现），K8s 走 Informers（动态发现）；且 Standalone 下 Redis 可选、K8s 下必需。
+- 网关二进制是同一个，靠 `cmd/plugins/main.go` 里的 `--standalone` 开关分流：Standalone 走 `discovery.NewStaticProvider`（文件发现），K8s 走 Informers（动态发现）；且 Standalone 下 Redis/Valkey 可选、K8s 下必需。
+- **元数据存储在内置 Redis 与开源 Valkey 之间一行切换**：`redis` 服务的镜像、`command`、健康检查 CLI 被 `${REDIS_IMAGE}` / `${REDIS_SERVER_CMD}` / `${REDIS_CLI_CMD}` 三个带默认值的环境变量参数化；因 Valkey 与 Redis 协议兼容且消费者用服务名 `redis` 访问，切换对 metadata-service 与 gateway 完全透明。
 - 选型上：本地开发/测试/单 GPU 体验用 Standalone；需要多节点、自动伸缩、生产高可用时用 Kubernetes + Helm。
 
 ## 7. 下一步学习建议
@@ -435,4 +550,5 @@ README 还提供了一条**完全脱离 Docker 的本地开发路径**——用 
 - **进入控制平面**：学 [u2-l1 控制器管理器入口与启动流程](u2-l1-controller-manager-entry.md)，理解 K8s 模式下 operator 是如何注册和启动的——这是 Standalone 故意省略的那一层。
 - **理解后端发现的对偶**：本讲提到的 `discovery.NewStaticProvider`（静态文件发现）将在 [u6 Pod 发现、模型画像与输出预测](u6-l2-discovery-and-profiling.md) 中与 K8s 的动态 Informers 发现形成完整对照。
 - **深入网关内部**：本讲把 gateway 当作黑盒（一个 ext_proc 插件），后续 [u7 LLM 网关核心](u7-l1-gateway-extproc-entry.md) 会打开这个黑盒，讲解 Envoy ExtProc 协议与路由决策的具体实现。
-- **如需继续阅读源码**：建议先把 [envoy.yaml](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/deployment/standalone/configs/envoy.yaml) 的 listener/filter/cluster 三段读熟，它是最直观的「Envoy + ext_proc」入门样例。
+- **理解元数据存储的全貌**：本讲的 Redis/Valkey 切换是单机版；K8s 版的等价能力见上一讲 u1-l4 的 `config/metadata/valkey.yaml`，后续 [u9 Python 运行时与元数据服务](u9-l3-metrics-and-metadata.md) 会展开 metadata-service 如何使用这个存储。
+- **如需继续阅读源码**：建议先把 [envoy.yaml](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/deployment/standalone/configs/envoy.yaml) 的 listener/filter/cluster 三段读熟，它是最直观的「Envoy + ext_proc」入门样例。

@@ -1,7 +1,7 @@
 {
   "project": "aibrix",
-  "head": "774f93f88ba3fd942489c7d2ec9db415fbb90b55",
-  "rationale": "AIBrix 是一个大型多云原生 GenAI 推理基础设施，由四大相对独立的子系统组成：Go 实现的 Kubernetes 控制平面（控制器+CRD+Webhook）、Go 实现的 Envoy ExtProc LLM 网关（路由算法+限流+状态同步）、Python 实现的运行时边车（引擎生命周期+指标+下载），以及 Python+C++/CUDA 实现的分布式 KV Cache。学习路线据此自底向上设计：先让读者从零理解项目定位、目录、构建与部署（单元 1），再切入控制平面通用框架（单元 2，控制器注册与 Feature Gate、CRD、Webhook），随后分主题深入三大核心能力——自动伸缩（单元 3）、模型适配与激活（单元 4）、分布式推理与拓扑编排（单元 5）。单元 6 讲清作为网关与伸缩器公共依赖的中央缓存与 Pod 发现，为单元 7 的网关核心和单元 8 的高级路由策略做铺垫。单元 9-10 转向 Python 运行时与分布式 KV Cache。最后单元 11 覆盖前端、测试基准与可观测性等横向能力。讲义之间通过 depends_on 显式声明依赖，保证读者可按拓扑顺序循序渐进；每个单元聚焦一个独立主题，每篇讲义绑定 1-6 个真实源码文件并配一个可操作的实践任务。",
+  "head": "af135690430bcf85bb5607c1b79c0fda30d5ff69",
+  "rationale": "AIBrix 是一个大型多云原生 GenAI 推理基础设施，由四大相对独立的子系统组成：Go 实现的 Kubernetes 控制平面（控制器+CRD+Webhook）、Go 实现的 Envoy ExtProc LLM 网关（路由算法+限流+状态同步）、Python 实现的运行时边车（引擎生命周期+指标+下载），以及 Python+C++/CUDA 实现的分布式 KV Cache。学习路线据此自底向上设计：先让读者从零理解项目定位、目录、构建与部署（单元 1），再切入控制平面通用框架（单元 2，控制器注册与 Feature Gate、CRD、Webhook），随后分主题深入三大核心能力——自动伸缩（单元 3）、模型适配与激活（单元 4）、分布式推理与拓扑编排（单元 5）。单元 6 讲清作为网关与伸缩器公共依赖的中央缓存与 Pod 发现，为单元 7 的网关核心和单元 8 的高级路由策略做铺垫。单元 9-10 转向 Python 运行时与分布式 KV Cache。最后单元 11 覆盖前端、测试基准与可观测性等横向能力。本次增量主要受 #2434（Valkey 作为 OSS 元数据存储、外部托管端点支持）影响：standalone 与 K8s 部署新增了 Redis/Valkey 的可切换元数据存储（u1-l4、u1-l5 小幅更新），同时 Go 侧 KVCache 控制器（pkg/controller/kvcache）此前未被任何讲义覆盖、且本次新增了外部托管连接、校验与残留资源清理等较重机制，故在单元 5 新增 u5-l3 专门讲解 KVCache 控制器与分布式缓存后端编排（含 distributed/hpkv/infinistore/vineyard 后端与元数据存储在内置 Redis 与外部托管 Valkey/Redis 之间的 reconcile）。SimpleQueue 的改动仅为测试确定性（af135690），队列源码与语义未变，故 u7-l5 保持不变。讲义之间通过 depends_on 显式声明依赖，保证读者可按拓扑顺序循序渐进；每个单元聚焦一个独立主题，每篇讲义绑定 1-6 个真实源码文件并配一个可操作的实践任务。",
   "units": [
     {
       "id": "u1",
@@ -32,7 +32,7 @@
           ],
           "practice_task": "阅读 README 与架构图，用自己的话画出 AIBrix 的组件关系图（控制器、网关、运行时、Redis、KV Cache），标注每个组件的职责与通信方向。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -59,7 +59,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -86,7 +86,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -94,27 +94,28 @@
           "order": 4,
           "filename": "u1-l4-k8s-deployment-and-crd.md",
           "level": "beginner",
-          "topic": "讲解 config/ 下的 kustomize 目录结构与在集群中安装依赖、CRD、组件的流程。",
+          "topic": "讲解 config/ 下的 kustomize 目录结构与在集群中安装依赖、CRD、组件的流程，并介绍元数据存储层（内置 Redis 或 OSS 的 Valkey）的配置选择。",
           "learning_goals": [
-            "理解 config/dependency、config/crd、config/default 三层 kustomize 的作用",
-            "掌握 stable 与 nightly 两种安装方式"
+            "理解 config/dependency、config/crd、config/default、config/metadata 四层 kustomize 的作用",
+            "掌握 stable 与 nightly 两种安装方式，以及 Redis/Valkey 元数据存储如何切换"
           ],
           "source_files": [
             "config/crd",
             "config/default",
             "config/dependency",
+            "config/metadata",
             "samples/quickstart/model.yaml"
           ],
           "minimal_modules": [
             "kustomize 目录分层",
             "CRD 与组件安装顺序",
-            "quickstart 示例 CR"
+            "元数据存储选择（Redis/Valkey）与 quickstart 示例 CR"
           ],
-          "practice_task": "对照 README 的 Quick Start，写出 dependency → crd → default 三步安装命令的作用，并解释为什么 CRD 要与 operator 分开安装。",
+          "practice_task": "对照 README 的 Quick Start，写出 dependency → crd → default 三步安装命令的作用，并解释为什么 CRD 要与 operator 分开安装；再说明如何用 config/metadata/valkey.yaml 替换默认 Redis 元数据存储。",
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u1-l5",
@@ -122,10 +123,11 @@
           "order": 5,
           "filename": "u1-l5-standalone-deployment.md",
           "level": "beginner",
-          "topic": "讲解 deployment/standalone 下的 docker-compose 本地部署方式，便于脱离 K8s 快速体验。",
+          "topic": "讲解 deployment/standalone 下的 docker-compose 本地部署方式，以及通过 REDIS_IMAGE/REDIS_SERVER_CMD/REDIS_CLI_CMD 等环境变量在 Redis 与 Valkey 元数据存储之间切换。",
           "learning_goals": [
             "掌握 standalone 模式的组件编排与启动脚本",
-            "理解 standalone 与 K8s 部署的差异与适用场景"
+            "理解 standalone 与 K8s 部署的差异与适用场景",
+            "掌握通过环境变量将元数据存储从 Redis 切换为 OSS 的 Valkey"
           ],
           "source_files": [
             "deployment/standalone/docker-compose.yml",
@@ -135,13 +137,13 @@
           "minimal_modules": [
             "docker-compose 服务编排",
             "启动脚本与配置",
-            "standalone 适用场景"
+            "Redis/Valkey 元数据存储切换与 standalone 适用场景"
           ],
-          "practice_task": "阅读 docker-compose.yml，列出 standalone 模式启动了哪些服务（网关、运行时、Redis 等），并说明 start.sh 做了哪些初始化。",
+          "practice_task": "阅读 docker-compose.yml，列出 standalone 模式启动了哪些服务（网关、运行时、Redis 等），并说明 start.sh 做了哪些初始化；再写出一行使用 Valkey 替代 Redis 启动 standalone 的命令。",
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -175,7 +177,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -201,7 +203,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -230,7 +232,7 @@
             "u1-l4",
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -257,7 +259,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -292,7 +294,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -320,7 +322,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -347,7 +349,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -373,7 +375,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -409,7 +411,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -437,7 +439,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -466,7 +468,7 @@
             "u4-l1",
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -503,7 +505,7 @@
             "u2-l1",
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -530,6 +532,39 @@
           "practice_task": "用一个 Prefill/Decode 分离的例子，画出 StormService → RoleSet → PodSet 的归属关系，并说明每个控制器分别负责什么。",
           "depends_on": [
             "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "KVCache 控制器与分布式缓存后端编排",
+          "order": 3,
+          "filename": "u5-l3-kvcache-controller-backends.md",
+          "level": "intermediate",
+          "topic": "讲解 Go 侧 KVCache 控制器如何编排分布式 KV 缓存后端（distributed/hpkv/infinistore/vineyard），以及元数据存储如何在内置 Redis 与外部托管 Valkey/Redis 端点之间选择与校验。",
+          "learning_goals": [
+            "理解 KVCache CR 的 Spec 模型（MetadataSpec、ExternalConnectionConfig）与 reconcile 主循环",
+            "掌握 BackendReconciler/KVCacheBackend 抽象与 distributed/hpkv/infinistore/vineyard 等后端实现差异",
+            "理解元数据存储在内置 Redis 与外部托管端点（Valkey/Redis）之间的 reconcile、地址与 PasswordSecretRef 校验、残留资源清理逻辑"
+          ],
+          "source_files": [
+            "api/orchestration/v1alpha1/kvcache_types.go",
+            "pkg/controller/kvcache/kvcache_controller.go",
+            "pkg/controller/kvcache/backends/reconciler.go",
+            "pkg/controller/kvcache/backends/distributed.go",
+            "pkg/controller/kvcache/backends/common.go",
+            "pkg/controller/kvcache/backends/hpkv.go"
+          ],
+          "minimal_modules": [
+            "KVCache CR 模型与按注解分发的 reconcile 主循环",
+            "backends 抽象与多后端实现（distributed/hpkv/infinistore/vineyard）",
+            "元数据存储：内置 Redis vs 外部托管 Valkey/Redis",
+            "外部连接校验与残留内置 Redis 资源清理"
+          ],
+          "practice_task": "描述当 KVCache 配置了 Metadata.Redis.ExternalConnection 时，reconcileRedisService 如何跳过内置 Redis 部署、校验 host:port 地址与 PasswordSecretRef（secretName/key）、清理旧的内置 Redis Pod/Service，并说明 buildRedisWatcherEnvVars 如何把外部地址与密码（SecretKeyRef）注入 watcher Pod。",
+          "depends_on": [
+            "u5-l1",
+            "u2-l3"
           ],
           "action": "new"
         }
@@ -568,7 +603,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -596,7 +631,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -631,7 +666,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -659,7 +694,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -687,7 +722,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l4",
@@ -716,7 +751,7 @@
           "depends_on": [
             "u7-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l5",
@@ -745,7 +780,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -780,7 +815,7 @@
           "depends_on": [
             "u7-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -810,7 +845,7 @@
             "u8-l1",
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -839,7 +874,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l4",
@@ -866,7 +901,7 @@
           "depends_on": [
             "u7-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -901,7 +936,7 @@
           "depends_on": [
             "u4-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -929,7 +964,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",
@@ -959,7 +994,7 @@
             "u9-l1",
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -997,7 +1032,7 @@
             "u9-l1",
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -1025,7 +1060,7 @@
           "depends_on": [
             "u10-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l3",
@@ -1054,7 +1089,7 @@
           "depends_on": [
             "u10-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1090,7 +1125,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l2",
@@ -1119,7 +1154,7 @@
           "depends_on": [
             "u7-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l3",
@@ -1150,7 +1185,7 @@
             "u9-l3",
             "u10-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

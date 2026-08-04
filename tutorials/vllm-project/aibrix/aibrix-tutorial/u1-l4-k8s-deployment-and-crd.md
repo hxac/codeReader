@@ -9,6 +9,7 @@
 3. 说明 AIBrix 为什么**故意把 CRD 与 operator 拆成两份独立清单**安装（这是本讲最关键的一个设计决策）。
 4. 区分 **nightly（本地源码）** 与 **stable（发布预构建清单）** 两种安装方式。
 5. 读懂 `samples/quickstart/model.yaml`，理解一个真实推理工作负载是如何被 AIBrix 发现的。
+6. 说明 AIBrix 元数据存储层默认用内置 Redis，以及如何用 `config/metadata/valkey.yaml` 把它换成开源的 Valkey（并能解释为什么这种替换「不用改一行连接配置」）。
 
 ## 2. 前置知识
 
@@ -31,6 +32,9 @@
 | `config/crd/kustomization.yaml` | 聚合 AIBrix 自己的三大类 CRD（autoscaling / model / orchestration） |
 | `config/crd/{autoscaling,model,orchestration}/` | 真正的 CRD 定义 YAML（由 controller-gen 生成，见 u1-l3） |
 | `config/default/kustomization.yaml` | 顶层「全部组件接线完成」的清单：namespace、RBAC、manager、gateway、webhook 等 |
+| `config/metadata/kustomization.yaml` | 元数据服务 + 元数据存储（内置 Redis，可切换 Valkey）的装配入口 |
+| `config/metadata/metadata.yaml` | metadata-service 的 Deployment/Service，通过 `REDIS_HOST` 连接存储 |
+| `config/metadata/redis.yaml` / `valkey.yaml` | 元数据存储后端：默认内置 Redis，可选开源 Valkey（BSD-3，drop-in 替换） |
 | `config/manager/manager.yaml` | operator 的 Deployment 与 metrics Service |
 | `config/overlays/release/kustomization.yaml` | 把 nightly 配置改写成 stable 发布版的 overlay |
 | `samples/quickstart/model.yaml` | 一个用 vLLM 跑 DeepSeek-R1-Distill 的 Deployment 示例 |
@@ -80,19 +84,19 @@ config/default/kustomization.yaml
 
 顶层清单的全局变换与资源清单：
 
-[config/default/kustomization.yaml:4-12](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/config/default/kustomization.yaml#L4-L12) —— 这里定义了 `namespace: aibrix-system` 和 `namePrefix: aibrix-`，是整个部署「统一换 namespace、统一加前缀」的源头。
+[config/default/kustomization.yaml:4-12](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/default/kustomization.yaml#L4-L12) —— 这里定义了 `namespace: aibrix-system` 和 `namePrefix: aibrix-`，是整个部署「统一换 namespace、统一加前缀」的源头。
 
-[config/default/kustomization.yaml:25-38](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/config/default/kustomization.yaml#L25-L38) —— `config/default` 拉进来的全部子目录（namespace、rbac、manager、gateway、metadata、gpu-optimizer、kuberay-operator、webhook、internalcert）。注意它**没有**引用 `../crd`，原因见 4.2。
+[config/default/kustomization.yaml:25-38](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/default/kustomization.yaml#L25-L38) —— `config/default` 拉进来的全部子目录（namespace、rbac、manager、gateway、metadata、gpu-optimizer、kuberay-operator、webhook、internalcert）。注意它**没有**引用 `../crd`，原因见 4.2。
 
-[config/crd/kustomization.yaml:4-8](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/config/crd/kustomization.yaml#L4-L8) —— CRD 层只聚合三个子目录 `autoscaling`、`model`、`orchestration`，对应自动伸缩、模型适配、分布式编排三类自定义资源。
+[config/crd/kustomization.yaml:4-8](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/crd/kustomization.yaml#L4-L8) —— CRD 层只聚合三个子目录 `autoscaling`、`model`、`orchestration`，对应自动伸缩、模型适配、分布式编排三类自定义资源。
 
-[config/dependency/kustomization.yaml:3-7](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/config/dependency/kustomization.yaml#L3-L7) —— 依赖层装的是 Envoy Gateway 和 KubeRay 的三类 CRD（rayclusters / rayjobs / rayservices）。Envoy Gateway 的清单是直接从一个远程 GitHub release URL 拉下来的：
+[config/dependency/kustomization.yaml:3-7](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/dependency/kustomization.yaml#L3-L7) —— 依赖层装的是 Envoy Gateway 和 KubeRay 的三类 CRD（rayclusters / rayjobs / rayservices）。Envoy Gateway 的清单是直接从一个远程 GitHub release URL 拉下来的：
 
-[config/dependency/envoy-gateway/kustomization.yaml:3-4](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/config/dependency/envoy-gateway/kustomization.yaml#L3-L4) —— `resources:` 里直接写 `https://github.com/envoyproxy/gateway/releases/download/v1.2.8/install.yaml`，kustomize 会联网把它拉进来再做 patch，这是「引用别人现成清单」的典型写法。
+[config/dependency/envoy-gateway/kustomization.yaml:3-4](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/dependency/envoy-gateway/kustomization.yaml#L3-L4) —— `resources:` 里直接写 `https://github.com/envoyproxy/gateway/releases/download/v1.2.8/install.yaml`，kustomize 会联网把它拉进来再做 patch，这是「引用别人现成清单」的典型写法。
 
 operator 本身的 Deployment 定义在：
 
-[config/manager/manager.yaml:25-35](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/config/manager/manager.yaml#L25-L35) —— operator 容器跑 `/manager` 二进制，启动参数含 `--leader-elect`、`--health-probe-bind-address=:8081`、`--enable-runtime-sidecar` 等。注意 `namespace: system` 是占位符，会被 `config/default` 的 `namespace` 字段替换成真正的 `aibrix-system`。
+[config/manager/manager.yaml:25-35](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/manager/manager.yaml#L25-L35) —— operator 容器跑 `/manager` 二进制，启动参数含 `--leader-elect`、`--health-probe-bind-address=:8081`、`--enable-runtime-sidecar` 等。注意 `namespace: system` 是占位符，会被 `config/default` 的 `namespace` 字段替换成真正的 `aibrix-system`。
 
 #### 4.1.4 代码实践
 
@@ -173,15 +177,15 @@ kubectl delete -k config/crd       # 这一步才会真正删表（需用户显�
 
 这段注释是整个决策的「白纸黑字」，非常重要：
 
-[config/default/kustomization.yaml:20-24](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/config/default/kustomization.yaml#L20-L24) —— 注释明确写道：「CRDs are intentionally NOT included here. They are shipped as a separate manifest (aibrix-core-crds-${tag}.yaml) so that uninstalling the AIBrix operator does not cascade-delete user CRs (StormService, RoleSet, PodAutoscaler, ModelAdapter, etc.). See vllm-project/aibrix#2062.」并给出单独安装命令 `kubectl apply -k config/crd --server-side`。
+[config/default/kustomization.yaml:20-24](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/default/kustomization.yaml#L20-L24) —— 注释明确写道：「CRDs are intentionally NOT included here. They are shipped as a separate manifest (aibrix-core-crds-${tag}.yaml) so that uninstalling the AIBrix operator does not cascade-delete user CRs (StormService, RoleSet, PodAutoscaler, ModelAdapter, etc.). See vllm-project/aibrix#2062.」并给出单独安装命令 `kubectl apply -k config/crd --server-side`。
 
 CRD 的三个子目录里放的就是真实的 CRD 定义，例如 orchestration 下有六种：
 
-[config/crd/orchestration/kustomization.yaml:1-7](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/config/crd/orchestration/kustomization.yaml#L1-L7) —— 这里能看到 `rayclusterreplicasets`、`rayclusterfleets`、`kvcaches`、`stormservices`、`rolesets`、`podsets` 六个 CRD 文件，它们正是上面注释里担心被级联删掉的用户 CR 类型。这些 YAML 是由 controller-gen 生成的，生成与同步流程见 [u1-l3 构建系统](u1-l3-build-and-makefile.md)（相关 Makefile 目标 `manifests` / `sync-crds`）。
+[config/crd/orchestration/kustomization.yaml:1-7](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/crd/orchestration/kustomization.yaml#L1-L7) —— 这里能看到 `rayclusterreplicasets`、`rayclusterfleets`、`kvcaches`、`stormservices`、`rolesets`、`podsets` 六个 CRD 文件，它们正是上面注释里担心被级联删掉的用户 CR 类型。这些 YAML 是由 controller-gen 生成的，生成与同步流程见 [u1-l3 构建系统](u1-l3-build-and-makefile.md)（相关 Makefile 目标 `manifests` / `sync-crds`）。
 
 `config/crd` 顶层的说明也提示了它的定位：
 
-[config/crd/kustomization.yaml:1-3](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/config/crd/kustomization.yaml#L1-L3) —— 注释说「This kustomization.yaml is not intended to be run by itself ... It should be run by config/default」，但同时它又被当作**独立安装步骤**使用。这种「既可被引用、也可独立 apply」的双用途正是 kustomize 分层带来的灵活性。
+[config/crd/kustomization.yaml:1-3](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/crd/kustomization.yaml#L1-L3) —— 注释说「This kustomization.yaml is not intended to be run by itself ... It should be run by config/default」，但同时它又被当作**独立安装步骤**使用。这种「既可被引用、也可独立 apply」的双用途正是 kustomize 分层带来的灵活性。
 
 #### 4.2.4 代码实践
 
@@ -256,13 +260,13 @@ aibrix-dependency-v0.7.0.yaml    （对应 nightly 的 config/dependency）
 
 release overlay 把 nightly 改写成 stable 的关键：
 
-[config/overlays/release/kustomization.yaml:6-8](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/config/overlays/release/kustomization.yaml#L6-L8) —— release overlay 直接 `resources: ../../default`，即在 nightly 总装清单之上再叠加，并额外加入 `pdb.yaml`（PodDisruptionBudget，给生产用）。
+[config/overlays/release/kustomization.yaml:6-8](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/overlays/release/kustomization.yaml#L6-L8) —— release overlay 直接 `resources: ../../default`，即在 nightly 总装清单之上再叠加，并额外加入 `pdb.yaml`（PodDisruptionBudget，给生产用）。
 
-[config/overlays/release/kustomization.yaml:14-29](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/config/overlays/release/kustomization.yaml#L14-L29) —— `images:` 段把 `aibrix/controller-manager`、`aibrix/gateway-plugins`、`aibrix/metadata-service`、`aibrix/runtime` 的 tag 全部从 `nightly` 覆盖成 `v0.7.0`（同时 KubeRay operator 也换成 `aibrix/kuberay-operator` 的固定 patch 版本）。这就是「同一份配置、不同版本」的实现。
+[config/overlays/release/kustomization.yaml:14-29](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/overlays/release/kustomization.yaml#L14-L29) —— `images:` 段把 `aibrix/controller-manager`、`aibrix/gateway-plugins`、`aibrix/metadata-service`、`aibrix/runtime` 的 tag 全部从 `nightly` 覆盖成 `v0.7.0`（同时 KubeRay operator 也换成 `aibrix/kuberay-operator` 的固定 patch 版本）。这就是「同一份配置、不同版本」的实现。
 
 对照 nightly 自身的镜像设置：
 
-[config/default/kustomization.yaml:69-87](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/config/default/kustomization.yaml#L69-L87) —— nightly 里所有 AIBrix 镜像的 `newTag` 都是 `nightly`。release overlay 正是覆盖这里的 tag 来产出 stable。
+[config/default/kustomization.yaml:69-87](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/default/kustomization.yaml#L69-L87) —— nightly 里所有 AIBrix 镜像的 `newTag` 都是 `nightly`。release overlay 正是覆盖这里的 tag 来产出 stable。
 
 #### 4.3.4 代码实践
 
@@ -327,19 +331,19 @@ release overlay 把 nightly 改写成 stable 的关键：
 
 发现标签与命名一致性提示：
 
-[samples/quickstart/model.yaml:4-7](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/samples/quickstart/model.yaml#L4-L7) —— 注释直接点明：标签值 `model.aibrix.ai/name` 必须与 Service 名一致；端口标签 `model.aibrix.ai/port` 标成 `8000`。
+[samples/quickstart/model.yaml:4-7](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/samples/quickstart/model.yaml#L4-L7) —— 注释直接点明：标签值 `model.aibrix.ai/name` 必须与 Service 名一致；端口标签 `model.aibrix.ai/port` 标成 `8000`。
 
 vLLM 启动参数中的「服务名」约定：
 
-[samples/quickstart/model.yaml:31-35](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/samples/quickstart/model.yaml#L31-L35) —— `--served-model-name` 被设为 `deepseek-r1-distill-llama-8b`，注释再次强调它必须与 Service 名、Deployment 标签三者匹配。
+[samples/quickstart/model.yaml:31-35](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/samples/quickstart/model.yaml#L31-L35) —— `--served-model-name` 被设为 `deepseek-r1-distill-llama-8b`，注释再次强调它必须与 Service 名、Deployment 标签三者匹配。
 
 GPU 资源申请：
 
-[samples/quickstart/model.yaml:44-48](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/samples/quickstart/model.yaml#L44-L48) —— 通过 `nvidia.com/gpu: "1"` 申请 1 张 GPU（requests 与 limits 都设）。这意味着要跑通本示例，节点上需要有 GPU 与对应 device plugin。
+[samples/quickstart/model.yaml:44-48](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/samples/quickstart/model.yaml#L44-L48) —— 通过 `nvidia.com/gpu: "1"` 申请 1 张 GPU（requests 与 limits 都设）。这意味着要跑通本示例，节点上需要有 GPU 与对应 device plugin。
 
 镜像与模型：
 
-[samples/quickstart/model.yaml:38-40](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/samples/quickstart/model.yaml#L38-L40) —— 使用 `vllm/vllm-openai:v0.11.0`，容器名 `vllm-openai`，启动命令是 `vllm serve ... --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B`。
+[samples/quickstart/model.yaml:38-40](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/samples/quickstart/model.yaml#L38-L40) —— 使用 `vllm/vllm-openai:v0.11.0`，容器名 `vllm-openai`，启动命令是 `vllm serve ... --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B`。
 
 #### 4.4.4 代码实践
 
@@ -375,6 +379,109 @@ GPU 资源申请：
 
 ---
 
+### 4.5 元数据存储层：内置 Redis 与可选的 Valkey
+
+#### 4.5.1 概念说明
+
+讲到这里你可能注意到 `config/default` 的 resources 里有一项 `../metadata`。它装的是两样东西：AIBrix 的「元数据服务（metadata-service）」以及该服务依赖的一个内存数据库。这个数据库是 AIBrix 数据平面里的公共依赖——网关多副本之间用它同步路由状态、做分布式限流，metadata-service 用它存模型与适配器元数据（详见 [u8-l4 Redis 状态同步](u8-l4-redis-statesync-configprofile.md) 与 [u9-l3 指标与元数据](u9-l3-metrics-and-metadata.md)）。
+
+默认情况下，AIBrix 用 `config/metadata/redis.yaml` 在集群内置部署一个 Redis。但从许可证角度看，Redis 自 7.4 起改为双源许可（RSALv2 / SSPLv1），对一些只接受 OSI 认可开源许可证的企业不够友好。**Valkey** 是 Redis 的 BSD-3 开源分支，与 Redis「线路兼容（wire-compatible）」——说同样的 RESP 协议、用同样的 go-redis 客户端、读同样的环境变量，因此可以**直接替换（drop-in）**。本次更新（PR #2434）正是为 AIBrix 增加了用 Valkey 替代内置 Redis 的选项（同时还在 Go 侧 KVCache 控制器引入了外部托管 Valkey/Redis 端点，那部分见 [u5-l3 KVCache 控制器](u5-l3-kvcache-controller-backends.md)，本讲只看 K8s 元数据存储这一层）。
+
+本模块要回答两个问题：默认的 Redis 是怎么被部署、被其它组件发现的？换成 Valkey 只改一处就够，背后靠的是什么约定？
+
+#### 4.5.2 核心流程
+
+关键在于一个贯穿全栈的「服务名约定」。整个机制可以拆成四步：
+
+1. `config/metadata/redis.yaml` 部署一个 Deployment，外加一个名为 `redis-master`、监听 6379 的 Service。
+2. `config/default` 的 `namePrefix: aibrix-` 会给所有资源名加前缀，于是集群里真实的 Service 名变成 `aibrix-redis-master`。
+3. metadata-service 在 `metadata.yaml` 里通过环境变量 `REDIS_HOST=aibrix-redis-master`、`REDIS_PORT=6379` 去连接它。
+4. 换 Valkey 时，Valkey 的 Deployment 改用 `valkey/valkey:8-alpine` 镜像，但 **Service 名仍叫 `redis-master`**（只是 label 从 `app=redis` 换成 `app=valkey`）。名字没变 → 前缀加工后仍是 `aibrix-redis-master` → metadata-service 的 `REDIS_HOST` 一行都不用改。这就是「drop-in 替换」的全部秘密。
+
+切换操作只需改 `config/metadata/kustomization.yaml` 的 resources：
+
+```yaml
+resources:
+- metadata.yaml
+# - redis.yaml          # 注释掉默认的内置 Redis
+- valkey.yaml            # 改用 Valkey
+```
+
+⚠️ 一条硬约束：**不要同时 apply redis.yaml 和 valkey.yaml**——两者都声明同名 Service `redis-master`，会冲突。Valkey 是「替代」而非「并存」，resources 里只能二选一。
+
+用伪代码总结：
+
+```
+默认:     resources = [metadata.yaml, redis.yaml]    → 集群跑 Redis
+切 Valkey: resources = [metadata.yaml, valkey.yaml]  → 集群跑 Valkey（同名 Service）
+两种情况下: metadata-service 的 REDIS_HOST 都指向 aibrix-redis-master，无需改动
+```
+
+#### 4.5.3 源码精读
+
+config/metadata 的 kustomization 默认只装 redis.yaml，并用注释给出切 Valkey 的方法：
+
+[config/metadata/kustomization.yaml:1-5](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/metadata/kustomization.yaml#L1-L5) —— `resources` 默认列 `metadata.yaml` + `redis.yaml`；注释行 `# - valkey.yaml` 提示：要用 Valkey（BSD-3 开源替代）就把 redis.yaml 换成 valkey.yaml。
+
+默认的内置 Redis 是一个最小 Deployment + Service：
+
+[config/metadata/redis.yaml:23-31](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/metadata/redis.yaml#L23-L31) —— Redis 容器用官方 `image: redis`，暴露 6379 端口。
+
+[config/metadata/redis.yaml:33-49](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/metadata/redis.yaml#L33-L49) —— Service 名定为 `redis-master`，selector 匹配 `app=redis`。记住这个名字——它是后面 drop-in 约定的关键。
+
+metadata-service 通过环境变量连这个 Service，且有一个 initContainer 等它就绪：
+
+[config/metadata/metadata.yaml:67-70](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/metadata/metadata.yaml#L67-L70) —— initContainer `init-redis` 用 busybox 反复 `nc aibrix-redis-master 6379` 探测，收到 PONG 才放行。这里的地址 `aibrix-redis-master` 正是「namePrefix `aibrix-` + 源文件里的 `redis-master`」加工后的真实名字，印证了前缀机制如何串起两个目录。
+
+[config/metadata/metadata.yaml:98-102](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/metadata/metadata.yaml#L98-L102) —— 环境变量 `REDIS_HOST=aibrix-redis-master`、`REDIS_PORT=6379`。Valkey 与 Redis 共用这组变量名（valkey.yaml 头部注释也强调了 same env vars），所以连接方完全不感知后端换没换。
+
+Valkey 版本最关键的设计——Service 名保持不变：
+
+[config/metadata/valkey.yaml:1-16](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/metadata/valkey.yaml#L1-L16) —— 头部注释明确：Valkey 是 Redis 的 BSD-3 开源替代，wire-compatible（RESP 协议、同样的 `REDIS_HOST`/`REDIS_PORT`/`REDIS_PASSWORD`、同样的 go-redis 客户端），并分别给出 kustomize 与 standalone 两种用法，以及「不要与 redis.yaml 同时使用」的告警。
+
+[config/metadata/valkey.yaml:38-46](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/metadata/valkey.yaml#L38-L46) —— Valkey 容器用 `image: valkey/valkey:8-alpine`，同样暴露 6379。
+
+[config/metadata/valkey.yaml:48-64](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/metadata/valkey.yaml#L48-L64) —— **Service 名仍叫 `redis-master`**（只是 label 换成 `app=valkey`）。正因为名字没变，经 `aibrix-` 前缀加工后仍是 `aibrix-redis-master`，metadata-service 一行配置都不用改——这就是 drop-in 替换能在源码层面成立的依据。
+
+#### 4.5.4 代码实践
+
+**实践目标**：验证「Redis → Valkey 切换后 Service 名不变，因此 metadata-service 的连接地址无需改动」（无需集群，纯渲染验证）。
+
+**操作步骤**：
+
+1. 渲染默认（Redis）配置，提取 Deployment/Service 名与镜像（注意：单独 `kustomize config/metadata` 不会加 `aibrix-` 前缀，因为前缀是在 config/default 层施加的，所以这里看到的是原始名）：
+
+   ```shell
+   kubectl kustomize config/metadata | grep -E "name: (redis-master|valkey-master)|image: (redis|valkey/.*)"
+   ```
+
+2. 模拟切换：把 kustomization 里的 `redis.yaml` 换成 `valkey.yaml` 后再渲染（用临时副本，不改源码）：
+
+   ```shell
+   TMP=$(mktemp -d) && cp -r config/metadata/. "$TMP"/
+   sed -i 's/^- redis.yaml$/# - redis.yaml\n- valkey.yaml/' "$TMP"/kustomization.yaml
+   kubectl kustomize "$TMP" | grep -E "name: (redis-master|valkey-master)|image: (redis|valkey/.*)"
+   ```
+
+**需要观察的现象**：
+
+- 步骤 1（默认）：Deployment 名 `redis-master`、image `redis`、Service 名 `redis-master`。
+- 步骤 2（切换后）：Deployment 名变成 `valkey-master`、image 变成 `valkey/valkey:8-alpine`，但 **Service 名仍是 `redis-master`**。
+
+**预期结果**：Service 名在两种配置下都是 `redis-master`，证明 Valkey 是 drop-in 替换——经 namePrefix 加工后两者都叫 `aibrix-redis-master`，metadata-service 的 `REDIS_HOST` 无需任何改动。若无法运行命令，标注「待本地验证」。
+
+#### 4.5.5 小练习与答案
+
+**练习 1**：为什么 `valkey.yaml` 故意把 Service 名仍写成 `redis-master`，而不是改成 `valkey-master`？
+
+**参考答案**：为了让前缀加工后的地址 `aibrix-redis-master` 保持不变，metadata-service 等所有通过 `REDIS_HOST` 连接存储的组件一行都不用改，从而实现「换镜像、不换接线」的 drop-in 替换。如果改了 Service 名，就得同步修改 `metadata.yaml` 的 `REDIS_HOST` 以及所有引用方，破坏兼容性，Valkey 也就不成其为「替代品」了。
+
+**练习 2**：能否同时 apply `redis.yaml` 和 `valkey.yaml`，让 Redis 和 Valkey 都跑起来给不同组件用？
+
+**参考答案**：不能。两者都声明同名 Service `redis-master`（前缀加工后同为 `aibrix-redis-master`），apply 时会因 Service 名冲突而失败；即便绕过名字，metadata-service 的 `REDIS_HOST` 也只指向同一个地址，无法分流。Valkey 的设计定位是「替代」Redis，kustomization 的 resources 里只能二选一。
+
+---
+
 ## 5. 综合实践
 
 把本讲的三层结构、安装顺序、CRD 分离设计串起来，完成下面这个任务（即本讲规格指定的核心实践）：
@@ -383,7 +490,7 @@ GPU 资源申请：
 
 **第 1 件：写出三步安装命令各自的作用**。
 
-参照 [README.md:56-63](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/README.md#L56-L63) 的 nightly 三步，按下表填写：
+参照 [README.md:56-63](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/README.md#L56-L63) 的 nightly 三步，按下表填写：
 
 | 步骤 | 命令 | 作用 | 为什么在这个顺序 |
 | --- | --- | --- | --- |
@@ -399,7 +506,7 @@ GPU 资源申请：
 
 **第 2 件：解释为什么 CRD 要与 operator 分开安装**。
 
-要求结合 [config/default/kustomization.yaml:20-24](https://github.com/vllm-project/aibrix/blob/774f93f88ba3fd942489c7d2ec9db415fbb90b55/config/default/kustomization.yaml#L20-L24) 的注释，给出两层理由：
+要求结合 [config/default/kustomization.yaml:20-24](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/default/kustomization.yaml#L20-L24) 的注释，给出两层理由：
 
 1. Kubernetes 的级联删除规则：删 CRD 会删掉该类型下所有 CR 实例。
 2. 因此把 CRD 放进单独清单（`aibrix-core-crds-*.yaml`），使得 `kubectl delete -k config/default` 只卸载 operator 而保留用户的 CR 数据（对应 issue #2062）。
@@ -412,7 +519,16 @@ kubectl -n aibrix-system get pods         # 确认组件已起
 kubectl apply -f samples/quickstart/model.yaml   # 部署示例模型
 ```
 
-观察每一步的前置依赖关系。若无集群，至少完成第 1、2 件的书写与 `kubectl kustomize` 渲染验证，并标注「集群部分待本地验证」。
+观察每一步的前置依赖关系。
+
+**第 4 件：说明如何用 `config/metadata/valkey.yaml` 替换默认 Redis 元数据存储**。
+
+要求结合 4.5 的源码，完成两点说明：
+
+1. **怎么换**：在 `config/metadata/kustomization.yaml` 里把 `resources` 中的 `- redis.yaml` 注释掉、改为 `- valkey.yaml`，然后照常 `kubectl apply -k config/default`。指出为什么不能两者并存（同名 Service `redis-master` 冲突）。
+2. **为什么「不用改连接配置」**：valkey.yaml 把 Service 名仍设为 `redis-master`（见 [config/metadata/valkey.yaml:48-64](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/metadata/valkey.yaml#L48-L64)），经 namePrefix 加工后仍是 `aibrix-redis-master`，与 metadata-service 的 `REDIS_HOST`（[config/metadata/metadata.yaml:98-102](https://github.com/vllm-project/aibrix/blob/af135690430bcf85bb5607c1b79c0fda30d5ff69/config/metadata/metadata.yaml#L98-L102)）一致，且 Valkey 与 Redis wire-compatible（同 RESP 协议、同环境变量），故 metadata-service 无需任何改动。
+
+若无集群，至少完成第 1、2、4 件的书写与 `kubectl kustomize` 渲染验证，并标注「集群部分待本地验证」。
 
 ## 6. 本讲小结
 
@@ -421,11 +537,13 @@ kubectl apply -f samples/quickstart/model.yaml   # 部署示例模型
 - **CRD 与 operator 故意拆成两份清单**（源码注释指向 issue #2062），核心原因是避免卸载 operator 时级联删除用户的 CR 实例（StormService、RoleSet、PodAutoscaler、ModelAdapter 等）。
 - 安装 CRD/依赖统一带 `--server-side`，以规避大对象的客户端注解体积上限问题。
 - **nightly** 用本地 `config/` 目录、镜像 tag 为 `nightly`；**stable** 用 GitHub Releases 预构建 YAML、镜像 tag 为固定版本（如 `v0.7.0`），二者经 `config/overlays/release` overlay 衔接。
+- 元数据存储层默认用 `config/metadata/redis.yaml` 在集群内置一个 Redis（经 namePrefix 后 Service 名为 `aibrix-redis-master`，与 metadata-service 的 `REDIS_HOST` 对应）；要换成开源的 Valkey，只需在 `config/metadata/kustomization.yaml` 把 `redis.yaml` 换成 `valkey.yaml`——因为 valkey.yaml 把 Service 名仍设为 `redis-master` 且 wire-compatible，metadata-service 无需任何改动（不能与 redis.yaml 并存）。
 - `samples/quickstart/model.yaml` 是一个普通 Deployment，靠 `model.aibrix.ai/name` 标签与 Service/`--served-model-name` 三者一致被 AIBrix 发现，演示了「安装 operator → 部署工作负载 → 被发现」的最短路径。
 
 ## 7. 下一步学习建议
 
 - 想看 operator 启动后内部到底注册了哪些控制器、怎么受 Feature Gate 开关控制，进入 **u2-l1 控制器管理器入口与启动流程**、**u2-l2 Feature Gates**。
 - 想深入 CRD 的字段设计（Spec/Status、kubebuilder 标记），进入 **u2-l3 自定义资源 (CRD) 数据模型设计**。
-- 想脱离 K8s 快速体验 AIBrix 全栈，进入 **u1-l5 本地 Standalone 部署快速体验**（docker-compose 方式）。
+- 想脱离 K8s 快速体验 AIBrix 全栈，进入 **u1-l5 本地 Standalone 部署快速体验**（docker-compose 方式，那里同样可以通过 `REDIS_IMAGE` 等环境变量把元数据存储换成 Valkey）。
+- 想知道本讲这个元数据存储（Redis/Valkey）到底被谁用，进入 **u8-l4 Redis 状态同步与配置画像**（多网关副本经 Redis 同步路由状态）与 **u9-l3 指标采集标准化与元数据服务**（metadata-service 如何存模型元数据）。
 - 若你想直接看模型部署后如何被自动伸缩，可跳读 **u3-l1 PodAutoscaler 控制器与伸缩总览**（依赖 u2-l3）。
