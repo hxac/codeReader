@@ -1,0 +1,1317 @@
+{
+  "project": "vllm-ascend",
+  "head": "7201c97a61a17425b558b6b5e53ab0d30ae8151d",
+  "rationale": "本次增量更新基于 3829122..7201c97a 之间的 3 个提交，核心是 #12852「分层 prefill KV 缓冲复用（layerwise prefill KV buffer reuse）」：在 ascend_store 的 layerwise prefill 卸载路径下，原本为每个 transformer 层独立分配设备 KV 缓冲，本特性改为让多个层分时复用一组有限物理缓冲（新增 layerwise_cache_layout.py 的 LayerwiseCacheLayout 规划），逻辑布局不变、回收 HBM 放大可用 KV 容量。由于改动横跨 ascend_store 数据面（pool_worker/pool_scheduler/config_data/kv_transfer 的大幅调整与新增 layerwise_cache_layout 模块）、worker.py 的可用 KV 显存按 num_layers/num_tensors 因子放大、model_runner_v1.py 在分配前调用 apply_layerwise_kv_cache_plan 重排张量描述，以及 sfa_v1.py 把 record_attention_compute_start 前移使无 indexer 的 SFA 层（如 GLM-5.2）也能打开 prefetch gate，体量与 u10-l6 稀疏卸载相当，因此新增 u10-l7 专讲分层缓冲复用，依赖 u10-l2（ascend_store 连接器）与 u5-l2（SFA）。ascend_store 连接器本身的小改动（consumer_is_to_put：layerwise 下 load-only consumer 也发布 KV）并入 u10-l2 update；worker.py、model_runner_v1.py、sfa_v1.py 的局部改动分别驱动 u4-l1、u4-l2、u5-l2 update。另两个提交为 CI 与文档：#13442 新增 A5 夜间测试流水线（schedule_nightly_test_a5.yaml）与一批 ascend_store/layerwise 单测，使 u11-l4 update；#13488 仅澄清 fine-grained TP 文档、无源码改动。envs、platform、patch、ops、csrc、parallel_state、device_communicators、compilation、model_loader、quantization、lora、xlite、310p、sparse_kv_offload 等核心稳定区未受影响，相关讲义保持 keep。新增 u10-l7 后手册变为 11 单元 44 篇，依赖关系维持「注册→配置→打补丁→执行→注意力→算子→并行→编译→加载→特性→扩展」。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门与全景认知",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位：vLLM Ascend 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "讲清楚 vllm-ascend 是一个把 vLLM 运行到昇腾 NPU 上的社区维护硬件插件，以及它遵循的「可插拔硬件」RFC 设计思想。",
+          "learning_goals": [
+            "理解 vllm-ascend 的定位、支持的硬件型号与软件依赖（CANN / torch-npu / vLLM）",
+            "理解「硬件插件」如何让 Ascend 与 vLLM 解耦",
+            "了解版本与分支策略（main / releases）"
+          ],
+          "source_files": [
+            "README.md",
+            "README.zh.md"
+          ],
+          "minimal_modules": [
+            "项目说明",
+            "依赖与分支"
+          ],
+          "practice_task": "阅读 README 与支持矩阵，用自己的话写一段 200 字说明：vllm-ascend 解决了什么问题、它和上游 vLLM 是什么关系。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "源码地图：目录结构与模块总览",
+          "order": 2,
+          "filename": "u1-l2-source-map.md",
+          "level": "beginner",
+          "topic": "从顶层目录出发，梳理 vllm_ascend/ 各子目录（platform、patch、worker、attention、ops、distributed、compilation 等）的职责。",
+          "learning_goals": [
+            "记住 vllm_ascend/ 的主要子目录与其职责",
+            "区分 Python 层代码与 csrc/ C++ 内核",
+            "定位到关键顶层文件 platform.py / ascend_config.py / utils.py"
+          ],
+          "source_files": [
+            "vllm_ascend/__init__.py",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "目录结构",
+            "模块划分"
+          ],
+          "practice_task": "画出一张 vllm_ascend/ 的二级目录树，并给每个一级子目录标注一句话职责。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "环境准备与安装构建",
+          "order": 3,
+          "filename": "u1-l3-build-and-install.md",
+          "level": "beginner",
+          "topic": "讲解 CANN / torch-npu 依赖、envs.py 中的构建相关环境变量，以及 setup.py + CMakeLists.txt 如何编译 C++ 自定义算子。",
+          "learning_goals": [
+            "理解编译期与运行期依赖（CANN、torch-npu、triton-ascend）",
+            "了解构建环境变量 SOC_VERSION / ASCEND_HOME_PATH / COMPILE_CUSTOM_KERNELS",
+            "理解 setup.py 调用 CMake 构建 csrc 内核的流程"
+          ],
+          "source_files": [
+            "setup.py",
+            "CMakeLists.txt",
+            "requirements.txt",
+            "vllm_ascend/envs.py"
+          ],
+          "minimal_modules": [
+            "构建系统",
+            "环境变量"
+          ],
+          "practice_task": "在无 NPU 的 UT 环境下，说明需要设置哪些环境变量才能跳过自定义内核编译（COMPILE_CUSTOM_KERNELS），并解释原因。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "快速上手：运行第一个推理",
+          "order": 4,
+          "filename": "u1-l4-quickstart-inference.md",
+          "level": "beginner",
+          "topic": "通过 examples/offline_inference_npu.py 等示例，让读者跑通一次离线推理与在线服务，建立从代码到结果的直观感受。",
+          "learning_goals": [
+            "会用 LLM / SamplingParams 跑通离线推理示例",
+            "理解示例里设置 VLLM_WORKER_MULTIPROC_METHOD=spawn 的原因",
+            "了解 examples 目录覆盖的典型场景（tp2、embedding、sleep mode 等）"
+          ],
+          "source_files": [
+            "examples/offline_inference_npu.py",
+            "examples/offline_inference_npu_tp2.py",
+            "examples/offline_inference_sleep_mode_npu.py"
+          ],
+          "minimal_modules": [
+            "推理示例",
+            "多卡与特性示例"
+          ],
+          "practice_task": "把 offline_inference_npu.py 改成读取你自己的一段 prompt 并打印生成结果（无需 NPU，可只写出代码与预期）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l5",
+          "title": "插件入口：注册机制与发现流程",
+          "order": 5,
+          "filename": "u1-l5-plugin-entry-and-registration.md",
+          "level": "beginner",
+          "topic": "讲解 vllm_ascend/__init__.py 的 register()/register_connector() 等回调，以及 vLLM 如何通过 entry points 发现并加载该插件。",
+          "learning_goals": [
+            "理解 vLLM 可插拔硬件接口的发现与加载流程",
+            "掌握 register() 返回 NPUPlatform 路径的含义",
+            "理解 _ensure_global_patch / triton 兼容桩的作用"
+          ],
+          "source_files": [
+            "vllm_ascend/__init__.py",
+            "setup.py"
+          ],
+          "minimal_modules": [
+            "插件入口",
+            "注册回调"
+          ],
+          "practice_task": "追踪从 vLLM 启动到 NPUPlatform 被选中的链路，画出「插件发现→register→平台选中」的时序草图。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "平台层与配置体系",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "NPUPlatform：平台核心能力",
+          "order": 1,
+          "filename": "u2-l1-npuplatform-core.md",
+          "level": "intermediate",
+          "topic": "深入 vllm_ascend/platform.py 的 NPUPlatform 类，理解它如何重写设备能力、配置校验、注意力后端选择、编译后端等关键钩子；并说明 #13484 重构后 _fix_incompatible_config / _validate_parallel_config / _prune_capture_sizes_for_950 等助手已从类方法移到模块级函数，类内方法顺序也做了逻辑重组，但不改变功能。",
+          "learning_goals": [
+            "掌握 NPUPlatform 继承 Platform 后实现了哪些关键方法",
+            "理解 check_and_update_config / apply_config_platform_defaults 的配置改写时机",
+            "理解 get_attn_backend_cls / get_compile_backend / get_pass_manager_cls 的作用，并区分类方法与重构后抽出的模块级助手函数"
+          ],
+          "source_files": [
+            "vllm_ascend/platform.py"
+          ],
+          "minimal_modules": [
+            "NPUPlatform",
+            "平台钩子"
+          ],
+          "practice_task": "列出 NPUPlatform 至少 5 个对上游 Platform 的重写方法，并指出哪些配置校验逻辑在 #13484 后变成了模块级函数（如 _validate_parallel_config、_fix_incompatible_config）。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "配置体系：AscendConfig 与 envs",
+          "order": 2,
+          "filename": "u2-l2-ascend-config-and-envs.md",
+          "level": "intermediate",
+          "topic": "讲解 AscendConfig 如何解析 additional_config，以及 envs.py 如何集中管理 VLLM_ASCEND_* 环境变量（含惰性求值）；并说明新增的 SparseKVOffloadConfig 子配置项（enabled / topk_buffer_size / dram_size_per_dp_GB / keep_device_kv_cache）及其与 enable_sparse_sfa_c8 的互斥校验。",
+          "learning_goals": [
+            "掌握通过 --additional-config 传 JSON 给 vllm-ascend 的机制",
+            "理解 AscendConfig 的子配置（AscendCompilationConfig / EplbConfig / SchedulerConfig / SparseKVOffloadConfig 等）",
+            "掌握 envs.py 的 env_variables 字典与 __getattr__ 惰性求值模式"
+          ],
+          "source_files": [
+            "vllm_ascend/ascend_config.py",
+            "vllm_ascend/envs.py"
+          ],
+          "minimal_modules": [
+            "AscendConfig",
+            "环境变量管理"
+          ],
+          "practice_task": "写一段 JSON additional-config 同时开启 balance scheduling 与 sparse_kv_offload_config.enabled，并解释 AscendConfig 在哪一步读取它、为何 sparse kv offload 要求模型具备 index_topk。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "前向上下文与 MoE 通信类型",
+          "order": 3,
+          "filename": "u2-l3-forward-context-and-moe-comm.md",
+          "level": "intermediate",
+          "topic": "讲解 ascend_forward_context.py 的 MoECommType、forward context 注入，以及它如何驱动 MoE/FlashComm 的运行期行为选择。",
+          "learning_goals": [
+            "理解 MoECommType（ALLGATHER/MC2/ALLTOALL/FUSED_MC2）的含义与选择逻辑",
+            "理解 _EXTRA_CTX 在算子间传递运行期信息的机制",
+            "了解 MegaMoe / dispatch_ffn_combine 的可用条件判定"
+          ],
+          "source_files": [
+            "vllm_ascend/ascend_forward_context.py"
+          ],
+          "minimal_modules": [
+            "前向上下文",
+            "MoE 通信类型"
+          ],
+          "practice_task": "说明 ALLTOALL 与 MC2 两种 MoE 通信方式的差异，并指出决定走哪条路径的关键变量。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "Patch 机制：核心集成策略",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Patch 机制总览与两阶段应用",
+          "order": 1,
+          "filename": "u3-l1-patch-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 patch/__init__.py 的整体设计、adapt_patch 的两阶段（platform patch vs worker patch），以及文档化规范；并补充本次新增的两个 worker/v2 Triton 补丁说明（apply_penalties 大形状重写、get_num_nans libdevice 重绑定到 cann）。",
+          "learning_goals": [
+            "理解为什么 vllm-ascend 大量使用 Monkey-patch 而非直接改 vLLM",
+            "掌握 platform patch（全局、引擎核心子进程）与 worker patch（每个 worker）的区别与时机",
+            "读懂 patch/__init__.py 里「What/Why/How/Future Plan」的补丁描述规范，并对照新增的 apply_penalties / num_nans libdevice 两条记录"
+          ],
+          "source_files": [
+            "vllm_ascend/patch/__init__.py",
+            "vllm_ascend/utils.py"
+          ],
+          "minimal_modules": [
+            "Patch 框架",
+            "两阶段补丁"
+          ],
+          "practice_task": "在 patch/__init__.py 中挑一个补丁（推荐本次新增的 apply_penalties 或 num_nans libdevice），整理出它「补了什么 / 为什么 / 上游 PR / 何时可移除」四要素。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Platform Patch 实战解析",
+          "order": 2,
+          "filename": "u3-l2-platform-patches.md",
+          "level": "intermediate",
+          "topic": "解析 patch/platform/ 下影响调度、分布式、MoE、KV 缓存的平台级补丁，理解它们在引擎核心生效的原因；其中 patch_fused_moe 因 MoE 路由抽取（#13417）而调整了工厂重定向逻辑。",
+          "learning_goals": [
+            "理解 patch_fused_moe 如何把 FusedMoE 工厂重定向到 Ascend 路由器（router_factory）",
+            "理解 patch_kv_cache_utils / patch_mamba_config 等 KV 与 Mamba 相关补丁",
+            "理解 patch_distributed / patch_use_v2_model_runner 等平台行为改写"
+          ],
+          "source_files": [
+            "vllm_ascend/patch/platform/patch_fused_moe.py",
+            "vllm_ascend/patch/platform/patch_kv_cache_utils.py",
+            "vllm_ascend/patch/platform/patch_distributed.py",
+            "vllm_ascend/patch/platform/patch_use_v2_model_runner.py"
+          ],
+          "minimal_modules": [
+            "平台级补丁",
+            "配置与调度改写"
+          ],
+          "practice_task": "选择 patch_fused_moe.py，画出「模型导入 FusedMoE → 被重定向到 Ascend 路由器（router_factory.create_ascend_fused_moe_router）」的执行时序。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Worker Patch 实战解析",
+          "order": 3,
+          "filename": "u3-l3-worker-patches.md",
+          "level": "intermediate",
+          "topic": "解析 patch/worker/ 下与模型前向、投机解码、Triton 算子、CUDA Graph 相关的 worker 级补丁。",
+          "learning_goals": [
+            "理解 patch_deepseek_v2 / patch_eagle3_init 等模型专属前向补丁",
+            "理解 patch_triton / patch_rejection_sampler 等 NPU 算子替换补丁",
+            "理解 patch_cudagraph 与 patch_v2 系列在 NPU 图模式下的作用"
+          ],
+          "source_files": [
+            "vllm_ascend/patch/worker/__init__.py",
+            "vllm_ascend/patch/worker/patch_deepseek_v2.py",
+            "vllm_ascend/patch/worker/patch_triton.py",
+            "vllm_ascend/patch/worker/patch_cudagraph.py"
+          ],
+          "minimal_modules": [
+            "Worker 级补丁",
+            "模型与算子替换"
+          ],
+          "practice_task": "选一个 worker patch，写一段说明它在 worker.__init__ 里何时被导入、替换了哪个上游方法。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "Worker 与模型执行主链路",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "NPUWorker 生命周期",
+          "order": 1,
+          "filename": "u4-l1-npuworker-lifecycle.md",
+          "level": "intermediate",
+          "topic": "讲解 worker/worker.py 的 NPUWorker：设备初始化、权重传输引擎、execute_model、健康检查与睡眠/唤醒；并说明 #13337 中 MTP 场景下在线权重更新时保留 MoE weight loader 的处理，以及 #12852 开启分层 KV 缓冲复用时按 num_layers/num_tensors 因子放大 available_kv_cache_memory_bytes 的可用 KV 显存核算。",
+          "learning_goals": [
+            "掌握 NPUWorker 的初始化与分布式环境建立流程",
+            "理解 execute_model 从调度输出到模型前向的衔接",
+            "理解睡眠模式（sleep/wake_up）与权重在线更新的钩子，以及 MTP 下 MoE weight loader 的保留逻辑",
+            "理解 #12852 分层 KV 缓冲复用下，按 num_layers/num_tensors 因子放大 available_kv_cache_memory_bytes 的内存核算"
+          ],
+          "source_files": [
+            "vllm_ascend/worker/worker.py"
+          ],
+          "minimal_modules": [
+            "NPUWorker",
+            "执行与生命周期"
+          ],
+          "practice_task": "梳理 NPUWorker 从 init_device 到 execute_model 的方法调用顺序，标注每一步的关键副作用；指出在线权重更新路径中 MoE weight loader 为何不能被丢弃，并说明开启分层缓冲复用时 available_kv_cache_memory_bytes 为何要乘以复用因子。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u4-l2",
+          "title": "NPUModelRunner v1 主链路",
+          "order": 2,
+          "filename": "u4-l2-model-runner-v1.md",
+          "level": "intermediate",
+          "topic": "深入 worker/model_runner_v1.py 的 NPUModelRunner：prepare_inputs、execute_model、attention metadata 构建与 ACL Graph 调度；并说明 #12852 在 initialize_kv_cache 中调用 apply_layerwise_kv_cache_plan 重排 KV 张量描述以支持分层缓冲复用。",
+          "learning_goals": [
+            "掌握 NPUModelRunner 继承 GPUModelRunner 后重写的执行主链路",
+            "理解 _prepare_inputs / _build_attention_metadata 如何为 NPU 适配输入",
+            "理解 execute_model 中采样与投机解码草稿生成的衔接",
+            "理解 apply_layerwise_kv_cache_plan 在 KV 张量分配前重排描述符的时机与作用"
+          ],
+          "source_files": [
+            "vllm_ascend/worker/model_runner_v1.py"
+          ],
+          "minimal_modules": [
+            "NPUModelRunner v1",
+            "输入准备与执行"
+          ],
+          "practice_task": "画出一次 execute_model 内部「更新状态→准备输入→构建 attention metadata→前向→采样」的数据流；并说明 initialize_kv_cache 中 apply_layerwise_kv_cache_plan 在哪一步介入、为何要在分配前重排。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u4-l3",
+          "title": "NPUModelRunner v2 新架构",
+          "order": 3,
+          "filename": "u4-l3-model-runner-v2.md",
+          "level": "advanced",
+          "topic": "讲解 worker/v2/ 下基于 use_v2_model_runner 的新执行架构：model_states、input_batch、pcp_manager、states；并说明 #13159 / #13382 中 num_nans_kernel 与 apply_penalties 的 Triton 修复，以及投机解码未激活时跳过 D2H 拷贝与同步的优化。",
+          "learning_goals": [
+            "理解 v2 model runner 与 v1 在状态管理上的差异",
+            "掌握 model_states/default.py 与 input_batch.py 的职责",
+            "理解 pcp_manager（Prefill Context Parallel）在 v2 中的作用，以及 v2 特有的 Triton（num_nans/penalties）兼容修复"
+          ],
+          "source_files": [
+            "vllm_ascend/worker/v2/model_runner.py",
+            "vllm_ascend/worker/v2/model_states/default.py",
+            "vllm_ascend/worker/v2/input_batch.py",
+            "vllm_ascend/worker/v2/pcp_manager.py"
+          ],
+          "minimal_modules": [
+            "v2 ModelRunner",
+            "状态与上下文并行"
+          ],
+          "practice_task": "对比 v1 与 v2 model runner 的初始化差异，列出 v2 独有的模块并说明其用途；并解释为何投机解码未激活时要跳过 D2H 拷贝。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "采样器与拒绝采样",
+          "order": 4,
+          "filename": "u4-l4-sampler-and-rejection.md",
+          "level": "intermediate",
+          "topic": "讲解 sample/ 目录的 AscendSampler、rejection_sampler 与 penalties，以及它们在投机解码中的作用。",
+          "learning_goals": [
+            "理解 AscendSampler 如何在 NPU 上完成采样",
+            "理解 rejection_sampler 在投机解码验证阶段的作用",
+            "了解 penalties 的 NPU 实现"
+          ],
+          "source_files": [
+            "vllm_ascend/sample/sampler.py",
+            "vllm_ascend/sample/rejection_sampler.py",
+            "vllm_ascend/sample/penalties.py"
+          ],
+          "minimal_modules": [
+            "采样器",
+            "拒绝采样"
+          ],
+          "practice_task": "说明在投机解码开启时，target token 与 draft token 是如何在 rejection_sampler 中被对齐验证的。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "注意力后端",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "AscendAttentionBackend 注册与元数据",
+          "order": 1,
+          "filename": "u5-l1-attention-backend.md",
+          "level": "intermediate",
+          "topic": "讲解 attention/attention_v1.py 的 AscendAttentionBackend 注册、impl/builder 选择、AscendMetadata 与 AttentionMaskBuilder；并说明本次 attention_v1.py / utils.py 的小幅调整（含稀疏注意力相关 mask 构建工具）。",
+          "learning_goals": [
+            "理解 AscendAttentionBackend 如何作为 CUSTOM/ASCEND 后端注册到 vLLM",
+            "掌握 get_impl_cls / get_builder_cls 的分支逻辑",
+            "理解 AscendMetadata 与 KV cache 形状 (2, num_blocks, block_size, ...) 的约定"
+          ],
+          "source_files": [
+            "vllm_ascend/attention/attention_v1.py",
+            "vllm_ascend/attention/attention_mask.py",
+            "vllm_ascend/attention/utils.py"
+          ],
+          "minimal_modules": [
+            "注意力后端",
+            "注意力元数据"
+          ],
+          "practice_task": "说明 AscendAttentionBackend.get_kv_cache_shape 返回的形状各维度含义，以及为何是 2。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "MLA / SFA / DSA 与稀疏注意力",
+          "order": 2,
+          "filename": "u5-l2-mla-sfa-dsa.md",
+          "level": "advanced",
+          "topic": "讲解 mla_v1/sfa_v1/dsa_v1/fa3_v1 与 indexer 稀疏注意力的实现差异与适用场景；并说明 sfa_v1.py 的调整（#12849 AscendSFAIndexerCacheSpec 改为继承 MLAAttentionSpec、#13456 fiaV2 在 GQA 下的 contiguous 修复），以及 #12852 把 record_attention_compute_start 前移，使无 indexer 的 SFA 层（如 GLM-5.2）也能打开 prefetch gate。",
+          "learning_goals": [
+            "理解 MLA（DeepSeek）、SFA、DSA 三类注意力的实现差异",
+            "理解 indexer 稀疏/索引注意力的工作原理与 cache spec 继承关系",
+            "了解 fa3_v1 等新后端的接入方式",
+            "理解为何要把 record_attention_compute_start 前移，使无 indexer 的 SFA 层也打开 prefetch gate"
+          ],
+          "source_files": [
+            "vllm_ascend/attention/mla_v1.py",
+            "vllm_ascend/attention/sfa_v1.py",
+            "vllm_ascend/attention/dsa_v1.py",
+            "vllm_ascend/attention/indexer.py",
+            "vllm_ascend/attention/abstract.py"
+          ],
+          "minimal_modules": [
+            "MLA/SFA/DSA 注意力",
+            "稀疏注意力"
+          ],
+          "practice_task": "为三类注意力（MLA/SFA/DSA）整理一张「适用模型 / kv 压缩 / 是否共享 kv」对照表；说明 SFA indexer 的 cache spec 为何要继承 MLAAttentionSpec，并解释 record_attention_compute_start 前移对无 indexer 层的意义。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u5-l3",
+          "title": "上下文并行注意力（CP）",
+          "order": 3,
+          "filename": "u5-l3-context-parallel-attention.md",
+          "level": "advanced",
+          "topic": "讲解 attention/context_parallel/ 下的 DCP、MLA-CP、SFA-CP、DSA-CP 如何把长序列切分到多个 NPU 上并行计算；并说明 sfa_cp.py 的同步细节调整。",
+          "learning_goals": [
+            "理解 Decode Context Parallel（DCP）的设计目标与元数据构建",
+            "理解 MLA-CP / SFA-CP / DSA-CP 的分片与通信策略",
+            "了解 common_cp.py 提供的公共能力"
+          ],
+          "source_files": [
+            "vllm_ascend/attention/context_parallel/attention_cp.py",
+            "vllm_ascend/attention/context_parallel/common_cp.py",
+            "vllm_ascend/attention/context_parallel/mla_cp.py"
+          ],
+          "minimal_modules": [
+            "上下文并行",
+            "CP 元数据"
+          ],
+          "practice_task": "说明 enable_dcp() 为真时 get_impl_cls 会切换到哪个实现，并解释为何 MLA/SWA-MLA 可以分别做 CP。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "自定义算子三层体系",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Python 算子注册与 Custom Op",
+          "order": 1,
+          "filename": "u6-l1-python-custom-ops.md",
+          "level": "intermediate",
+          "topic": "讲解 ops/__init__.py 与 register_custom_ops.py 如何用 direct_register_custom_op 注册 NPU 算子并参与序列并行/FlashComm。",
+          "learning_goals": [
+            "掌握 direct_register_custom_op 注册算子的 impl/wrap 模式",
+            "理解 _maybe_chunk_residual / _maybe_all_gather 等 SP 辅助算子",
+            "理解 register_ascend_customop 与 dummy fusion op 的用途"
+          ],
+          "source_files": [
+            "vllm_ascend/ops/__init__.py",
+            "vllm_ascend/ops/register_custom_ops.py",
+            "vllm_ascend/utils.py"
+          ],
+          "minimal_modules": [
+            "Python 算子",
+            "算子注册"
+          ],
+          "practice_task": "按 direct_register_custom_op 的模式，写出一个返回张量两倍的占位自定义算子注册片段。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "Triton 算子集",
+          "order": 2,
+          "filename": "u6-l2-triton-ops.md",
+          "level": "advanced",
+          "topic": "讲解 ops/triton/ 下的 rmsnorm、rope、fused_qkv_rmsnorm_rope、fla chunk、mamba、kda、spec_decode 等 Triton 内核。",
+          "learning_goals": [
+            "理解为何 vllm-ascend 用 Triton 重写部分算子（性能/适配）",
+            "掌握 split_qkv_rmsnorm_rope 等融合内核的输入输出",
+            "了解 fla（线性注意力）/ mamba / kda 等子算子集的职责"
+          ],
+          "source_files": [
+            "vllm_ascend/ops/triton/rms_norm.py",
+            "vllm_ascend/ops/triton/linearnorm/split_qkv_rmsnorm_rope.py",
+            "vllm_ascend/ops/triton/fla/chunk.py",
+            "vllm_ascend/ops/triton/mamba/lightning_attn.py"
+          ],
+          "minimal_modules": [
+            "Triton 内核",
+            "融合算子"
+          ],
+          "practice_task": "选 split_qkv_rmsnorm_rope，说明它把哪几个上游算子融合为一个 kernel，以及带来的收益。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "C++/AscendC 内核与构建",
+          "order": 3,
+          "filename": "u6-l3-cpp-ascendc-kernels.md",
+          "level": "advanced",
+          "topic": "讲解 csrc/ 的 AscendC 内核（attention/moe/mc2/mla_preprocess/gmm）与 op_host/op_kernel 结构及 CMake 构建。",
+          "learning_goals": [
+            "理解 AscendC 算子的 op_host/op_kernel 双文件结构",
+            "掌握 CMakeLists.txt 如何收集 KERNEL_FILES 并链接 CANN",
+            "理解 attention/moe/mc2 等内核分类与用途"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "csrc/attention",
+            "csrc/moe",
+            "csrc/mc2",
+            "csrc/mla_preprocess"
+          ],
+          "minimal_modules": [
+            "AscendC 内核",
+            "CMake 构建"
+          ],
+          "practice_task": "在 csrc 下任选一个算子目录，说明 op_host 与 op_kernel 各自承担什么职责，并指出它被哪个 Python 路径调用（待确认）。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "分布式、MoE 与专家负载均衡",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "并行组与 parallel_state",
+          "order": 1,
+          "filename": "u7-l1-parallel-state.md",
+          "level": "intermediate",
+          "topic": "讲解 distributed/parallel_state.py 如何建立 Ascend 的 TP/EP/DP/PP/PCP 及细粒度分组（MLP_TP/OTP 等）。",
+          "learning_goals": [
+            "理解 Ascend 模型并行组的排布 ExternalDP*EP 及多维 reshape",
+            "掌握 TP/EP/DP/PP/PCP 分组的含义",
+            "了解 MLP_TP/OTP/LMTP/EMBED_TP 等细粒度组的用途"
+          ],
+          "source_files": [
+            "vllm_ascend/distributed/parallel_state.py",
+            "vllm_ascend/distributed/utils.py"
+          ],
+          "minimal_modules": [
+            "并行状态",
+            "并行组"
+          ],
+          "practice_task": "给定 TP=2, DP=2, PP=2，画出 init_ascend_model_parallel 里 all_ranks 的 reshape 形状与各 rank 归属。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "NPUCommunicator 与 HCCL",
+          "order": 2,
+          "filename": "u7-l2-npu-communicator-hccl.md",
+          "level": "advanced",
+          "topic": "讲解 device_communicators/ 的 NPUCommunicator 与 pyhccl 封装，以及 NPU 不支持 all2all 的处理。",
+          "learning_goals": [
+            "理解 NPUCommunicator 继承 DeviceCommunicatorBase 后的定制",
+            "掌握 pyhccl/pyhccl_wrapper 如何封装 HCCL 通信",
+            "理解 NPU 用 mc2/all_gather 替代 all2all 的原因"
+          ],
+          "source_files": [
+            "vllm_ascend/distributed/device_communicators/npu_communicator.py",
+            "vllm_ascend/distributed/device_communicators/pyhccl.py",
+            "vllm_ascend/distributed/device_communicators/pyhccl_wrapper.py"
+          ],
+          "minimal_modules": [
+            "NPU 通信器",
+            "HCCL 封装"
+          ],
+          "practice_task": "说明 _NpuAll2AllManager 为何是 no-op，以及 NPU 的 MoE 通信实际走哪条路径。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "Fused MoE 引擎与路由器",
+          "order": 3,
+          "filename": "u7-l3-fused-moe-engine.md",
+          "level": "advanced",
+          "topic": "讲解 ops/fused_moe/ 的 AscendMoE 全链路：routed_experts、moe_mlp、token_dispatcher、experts_selector、MC2/alltoall 通信；并重点说明 #13417 把专家路由（expert routing）抽取为独立 router/ 包后的结构——fused_topk_router / grouped_topk_router 两类路由器由 router_factory.create_ascend_fused_moe_router 统一创建。",
+          "learning_goals": [
+            "理解 routed_experts / moe_mlp 如何与上游 FusedMoE 衔接并被 patch_fused_moe 重定向",
+            "掌握 token_dispatcher 与 experts_selector 的分工",
+            "理解 #13417 后 AscendFusedTopKRouter（即 AscendFusedMoERouter）/ grouped_topk_router 由 router_factory 创建的路由选择流程，以及 ALLTOALL / MC2 / FUSED_MC2 的通信流程"
+          ],
+          "source_files": [
+            "vllm_ascend/ops/fused_moe/routed_experts.py",
+            "vllm_ascend/ops/fused_moe/token_dispatcher.py",
+            "vllm_ascend/ops/fused_moe/experts_selector.py",
+            "vllm_ascend/ops/fused_moe/comm_utils.py",
+            "vllm_ascend/ops/fused_moe/router/__init__.py",
+            "vllm_ascend/ops/fused_moe/router/router_factory.py",
+            "vllm_ascend/ops/fused_moe/router/fused_topk_router.py",
+            "vllm_ascend/ops/fused_moe/router/grouped_topk_router.py"
+          ],
+          "minimal_modules": [
+            "MoE 引擎",
+            "路由器与 token 分发"
+          ],
+          "practice_task": "画出一次 MoE 前向「gate→router_factory 创建 topk/grouped 路由→topk→dispatch→expert 计算→combine」在 ALLTOALL 模式下的数据与通信流，并说明路由逻辑为何被移出 routed_experts 成为独立 router 类。",
+          "depends_on": [
+            "u5-l2",
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l4",
+          "title": "EPLB 专家负载均衡",
+          "order": 4,
+          "filename": "u7-l4-eplb.md",
+          "level": "advanced",
+          "topic": "讲解 eplb/ 如何在运行期把 MoE 专家在多 NPU 间重新均衡（policy、worker、adaptor、updator）。",
+          "learning_goals": [
+            "理解 EPLB 的目标与 log2phy 专家映射机制",
+            "掌握不同 policy（default/flashlb/swift_balancer/random）的差异",
+            "理解 eplb_updator 独立进程与 vllm_adaptor 的衔接"
+          ],
+          "source_files": [
+            "vllm_ascend/eplb/core/eplb_worker.py",
+            "vllm_ascend/eplb/core/policy/policy_factory.py",
+            "vllm_ascend/eplb/eplb_updator.py",
+            "vllm_ascend/eplb/adaptor/vllm_adaptor.py"
+          ],
+          "minimal_modules": [
+            "EPLB",
+            "专家重均衡"
+          ],
+          "practice_task": "说明 EPLB 触发一次更新时，logical→physical 专家映射如何被生成并下发给各 worker。",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "图编译与 ACL Graph",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "编译接口与 Fusion Pass 框架",
+          "order": 1,
+          "filename": "u8-l1-compiler-interface.md",
+          "level": "advanced",
+          "topic": "讲解 compilation/compiler_interface.py 的 AscendCompilerInterface 与 graph_fusion_pass_manager 如何接入 vLLM 的 torch.compile；并对照 #13484 后 NPUPlatform.get_compile_backend / get_pass_manager_cls 的实现位置变化。",
+          "learning_goals": [
+            "理解 compile_fx / fusion_pass_compile 的编译入口",
+            "掌握 AscendCompilationConfig 如何控制编译行为",
+            "理解 GraphFusionPassManager 的注册与执行流程"
+          ],
+          "source_files": [
+            "vllm_ascend/compilation/compiler_interface.py",
+            "vllm_ascend/compilation/graph_fusion_pass_manager.py",
+            "vllm_ascend/platform.py"
+          ],
+          "minimal_modules": [
+            "编译接口",
+            "融合 Pass 管理"
+          ],
+          "practice_task": "说明 NPUPlatform.get_compile_backend / get_pass_manager_cls 如何把 Ascend 编译后端接入 vLLM，并指出这两个方法在 #13484 重构后的归属。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "torch.fx 融合 Pass 实战",
+          "order": 2,
+          "filename": "u8-l2-fusion-passes.md",
+          "level": "advanced",
+          "topic": "讲解 compilation/passes/ 下的融合 pass：norm_quant、qknorm_rope、allgather_chunk_noop、muls_add、sequence_parallelism 等；并说明本次 norm_quant_fusion_pass 的小幅调整（量化 dtype 内联后的适配）。",
+          "learning_goals": [
+            "理解 base_pattern 的图模式匹配框架",
+            "掌握 norm_quant_fusion / qknorm_rope_fusion 等典型融合策略",
+            "理解 sequence_parallelism / sequence_parallelism_moe 的 SP 改写"
+          ],
+          "source_files": [
+            "vllm_ascend/compilation/passes/base_pattern.py",
+            "vllm_ascend/compilation/passes/norm_quant_fusion_pass.py",
+            "vllm_ascend/compilation/passes/qknorm_rope_fusion_pass.py",
+            "vllm_ascend/compilation/passes/sequence_parallelism.py"
+          ],
+          "minimal_modules": [
+            "融合 Pass",
+            "序列并行改写"
+          ],
+          "practice_task": "选一个融合 pass（推荐 norm_quant_fusion_pass），描述它匹配的子图模式与改写后的等价算子图，并说明量化 dtype 内联后对其的影响。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "ACL Graph 捕获与回放",
+          "order": 3,
+          "filename": "u8-l3-aclgraph.md",
+          "level": "advanced",
+          "topic": "讲解 compilation/acl_graph.py 的 ACL Graph（NPU 版 CUDA Graph）捕获、工作区管理与回放，以及 graph_params。",
+          "learning_goals": [
+            "理解 ACL Graph 与 CUDA Graph 的对应关系与差异",
+            "掌握 get_graph_params / update_graph_params_workspaces 的用途",
+            "理解 encoder_acl_graph 与图模式（FULL/PIECEWISE）的选择"
+          ],
+          "source_files": [
+            "vllm_ascend/compilation/acl_graph.py",
+            "vllm_ascend/worker/encoder_acl_graph.py",
+            "vllm_ascend/patch/worker/patch_cudagraph.py"
+          ],
+          "minimal_modules": [
+            "ACL Graph",
+            "图捕获与回放"
+          ],
+          "practice_task": "说明 prune_capture_sizes_for_950 为何要裁剪 capture sizes，并解释 FULL 与 PIECEWISE 图模式的取舍。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "模型加载与权重传输",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "模型加载器注册与默认流程",
+          "order": 1,
+          "filename": "u9-l1-model-loader-basics.md",
+          "level": "intermediate",
+          "topic": "讲解 model_loader/ 的注册机制、BaseModelLoader 流程与 register_model()/register_model_loader()。",
+          "learning_goals": [
+            "理解 vllm-ascend 如何通过 register_model_loader 注册自定义加载器",
+            "掌握 process_weights_after_loading 的加载后权重处理流程",
+            "理解 DSAAttention 等插件层为何需要补丁参与加载后处理"
+          ],
+          "source_files": [
+            "vllm_ascend/model_loader/__init__.py",
+            "vllm_ascend/__init__.py",
+            "vllm_ascend/patch/worker/patch_process_weights_after_loading.py"
+          ],
+          "minimal_modules": [
+            "模型加载器",
+            "加载后处理"
+          ],
+          "practice_task": "追踪 register_model_loader 被调用的时机，列出 vllm-ascend 注册了哪几种加载器。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "RFork 加载器（进程 Fork 快速加载）",
+          "order": 2,
+          "filename": "u9-l2-rfork-loader.md",
+          "level": "advanced",
+          "topic": "讲解 model_loader/rfork/ 的 RFork 加载器：seed 协议、seed server、transfer backend、rfork_worker。",
+          "learning_goals": [
+            "理解 RFork 通过进程 fork 共享已加载权重加速启动的原理",
+            "掌握 seed_protocol / seed_server / transfer_backend 的协作",
+            "理解 rfork_worker 与 MTP 配置的判断逻辑"
+          ],
+          "source_files": [
+            "vllm_ascend/model_loader/rfork/rfork_loader.py",
+            "vllm_ascend/model_loader/rfork/seed_server.py",
+            "vllm_ascend/model_loader/rfork/seed_protocol.py",
+            "vllm_ascend/model_loader/rfork/transfer_backend.py"
+          ],
+          "minimal_modules": [
+            "RFork 加载器",
+            "种子协议"
+          ],
+          "practice_task": "说明 RFork 相比默认加载在多卡大模型场景下的启动加速原理，并指出 seed server 的角色。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l3",
+          "title": "弹性网络加载器（Netloader）",
+          "order": 3,
+          "filename": "u9-l3-netloader.md",
+          "level": "advanced",
+          "topic": "讲解 model_loader/netloader/ 的弹性加载：elastic_load、executor、interaction 与多 rank 协作。",
+          "learning_goals": [
+            "理解 netloader 的弹性（elastic）加载目标与流程",
+            "掌握 executor/elastic_load.py 与 interaction/elastic.py 的协作",
+            "理解 netloader_pg 的进程组作用"
+          ],
+          "source_files": [
+            "vllm_ascend/model_loader/netloader/netloader.py",
+            "vllm_ascend/model_loader/netloader/load.py",
+            "vllm_ascend/model_loader/netloader/executor/elastic_load.py",
+            "vllm_ascend/model_loader/netloader/interaction/elastic.py"
+          ],
+          "minimal_modules": [
+            "网络加载器",
+            "弹性加载"
+          ],
+          "practice_task": "描述 netloader 在多 rank 间协作加载权重的流程，并指出 ElasticServer 的职责。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l4",
+          "title": "在线权重传输引擎",
+          "order": 4,
+          "filename": "u9-l4-weight-transfer.md",
+          "level": "advanced",
+          "topic": "讲解 distributed/weight_transfer/ 的 HCCL 与 NPU IPC 权重传输引擎，用于训练侧到推理 worker 的在线权重广播；并说明 #13337 中 MTP 场景下在线更新时 NPUWorker 保留 MoE weight loader 的衔接。",
+          "learning_goals": [
+            "理解 weight transfer engine 在在线学习/热更新中的作用",
+            "掌握 hccl_engine 与 npu_ipc_engine 的差异与选择",
+            "理解 patch_weight_transfer_engine 把 'nccl'/'ipc' 映射到 Ascend 引擎的原因，以及 MTP 下 MoE weight loader 的保留逻辑"
+          ],
+          "source_files": [
+            "vllm_ascend/distributed/weight_transfer/hccl_engine.py",
+            "vllm_ascend/distributed/weight_transfer/npu_ipc_engine.py",
+            "vllm_ascend/distributed/weight_transfer/packed_tensor.py",
+            "vllm_ascend/worker/worker.py"
+          ],
+          "minimal_modules": [
+            "权重传输引擎",
+            "在线更新"
+          ],
+          "practice_task": "结合 NPUWorker 的 init_weight_transfer_engine/update_weights，说明一次在线权重更新的端到端流程，并指出 MTP 模型更新时为何要保留 MoE weight loader。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "进阶推理特性",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "量化方法体系",
+          "order": 1,
+          "filename": "u10-l1-quantization.md",
+          "level": "advanced",
+          "topic": "讲解 quantization/ 的量化方法注册、quant_parser 解析与 fp8/w8a8/w4a8/w4a4 等方法实现；并说明 #13447 移除 device/mxfp_compat.py 兼容垫片、把 mxfp dtype 引用内联到各 method 后的影响。",
+          "learning_goals": [
+            "理解 Ascend 量化方法 registry 与 method_adapters 的适配机制",
+            "掌握 quant_parser / quant_type 如何解析与归类量化类型",
+            "了解 w8a8/w4a8/w4a4/fp8/mxfp 等方法在 NPU 上的实现要点，以及 mxfp_compat 垫片移除后 dtype 的内联方式"
+          ],
+          "source_files": [
+            "vllm_ascend/quantization/quant_parser.py",
+            "vllm_ascend/quantization/methods/registry.py",
+            "vllm_ascend/quantization/methods/w8a8_dynamic.py",
+            "vllm_ascend/quantization/methods/w4a8.py",
+            "vllm_ascend/quantization/methods/base.py",
+            "vllm_ascend/quantization/method_adapters.py"
+          ],
+          "minimal_modules": [
+            "量化体系",
+            "量化方法"
+          ],
+          "practice_task": "给定一个 w8a8 模型，说明 quant_parser 如何确定量化方法并路由到对应 method 实现；并解释移除 mxfp_compat 后这些 mxfp 方法如何直接引用正确的 dtype。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l2",
+          "title": "PD 分离与 KV 传输连接器",
+          "order": 2,
+          "filename": "u10-l2-pd-disagg-kv-transfer.md",
+          "level": "advanced",
+          "topic": "讲解 distributed/kv_transfer/ 的 Prefill/Decode 分离连接器：mooncake P2P、ascend_store、lmcache 等；并说明 ascend_store 连接器在 layerwise 模式下的 consumer_is_to_put 行为（layerwise 下 load-only consumer 也会发布 KV），其分层缓冲复用机制见 u10-l7。",
+          "learning_goals": [
+            "理解 PD 分离（Prefill/Decode disaggregation）的整体架构",
+            "掌握 mooncake / ascend_store / lmcache 等连接器的差异",
+            "理解 register_connector 的注册与 connector 选择机制",
+            "理解 ascend_store 连接器在 layerwise 模式下 consumer_is_to_put 的行为"
+          ],
+          "source_files": [
+            "vllm_ascend/distributed/kv_transfer/__init__.py",
+            "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_connector.py",
+            "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/ascend_store_connector.py",
+            "vllm_ascend/distributed/kv_transfer/kv_pool/lmcache_ascend_connector.py"
+          ],
+          "minimal_modules": [
+            "PD 分离",
+            "KV 传输连接器"
+          ],
+          "practice_task": "对比 mooncake P2P 与 ascend_store 两种 KV 传输后端的适用场景与数据通路；并说明 ascend_store 在 layerwise 模式下为何 load-only consumer 也需要发布 KV。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u10-l3",
+          "title": "KV 卸载与睡眠模式",
+          "order": 3,
+          "filename": "u10-l3-kv-offload-and-sleep.md",
+          "level": "advanced",
+          "topic": "讲解 kv_offload/、simple_kv_offload/ 与 device_allocator/ 如何在 CPU/NPU 间卸载 KV 并支持睡眠唤醒。",
+          "learning_goals": [
+            "理解 CPU↔NPU KV 卸载的拷贝后端与内存操作",
+            "掌握 device_allocator（camem / sleep_mem_optimized）的睡眠模式内存管理",
+            "理解 recompute_cpu_offload 与 simple_cpu_offload 两种策略差异"
+          ],
+          "source_files": [
+            "vllm_ascend/kv_offload/npu.py",
+            "vllm_ascend/simple_kv_offload/worker.py",
+            "vllm_ascend/device_allocator/sleep_mem_optimized.py",
+            "vllm_ascend/distributed/kv_transfer/kv_pool/recompute_cpu_offload/recompute_cpu_offload_connector.py"
+          ],
+          "minimal_modules": [
+            "KV 卸载",
+            "睡眠模式"
+          ],
+          "practice_task": "结合 NPUWorker.sleep/wake_up，说明睡眠模式下显存如何被释放与恢复。",
+          "depends_on": [
+            "u10-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l4",
+          "title": "投机解码（Speculative Decoding）",
+          "order": 4,
+          "filename": "u10-l4-speculative-decoding.md",
+          "level": "advanced",
+          "topic": "讲解 spec_decode/ 与 worker/v2/spec_decode/ 的多种 proposer（eagle/ngram/mtp/dflash/dspark）及 v2 speculator，以及新增的 llm_base_proposer 公共基类。",
+          "learning_goals": [
+            "理解投机解码的 proposer/target 协作框架",
+            "掌握 eagle / ngram / mtp / dflash / dspark 等 proposer 的差异",
+            "理解 v2 speculator 与 ACL Graph 管理器的结合，以及 llm_base_proposer 抽出的公共逻辑"
+          ],
+          "source_files": [
+            "vllm_ascend/spec_decode/eagle_proposer.py",
+            "vllm_ascend/spec_decode/ngram_proposer.py",
+            "vllm_ascend/spec_decode/llm_base_proposer.py",
+            "vllm_ascend/worker/v2/spec_decode/eagle/speculator.py",
+            "vllm_ascend/worker/v2/spec_decode/mtp/speculator.py"
+          ],
+          "minimal_modules": [
+            "投机解码",
+            "Proposer 与 Speculator"
+          ],
+          "practice_task": "对比 eagle 与 mtp 两种 drafter 的输入输出，并指出它们在 v1/v2 runner 中的差异。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l5",
+          "title": "LoRA 支持",
+          "order": 5,
+          "filename": "u10-l5-lora.md",
+          "level": "advanced",
+          "topic": "讲解 lora/ 的 NPU LoRA 算子、punica_npu 与 fused_moe LoRA 适配；并对照 #13484 后 NPUPlatform.get_punica_wrapper 的实现位置。",
+          "learning_goals": [
+            "理解 NPU 上 LoRA 算子的实现与 punica 集成",
+            "掌握 LoRA 与 MoE 结合时的适配逻辑",
+            "了解 NPUPlatform.get_punica_wrapper 的接入点（重构后位置）"
+          ],
+          "source_files": [
+            "vllm_ascend/lora/lora_ops.py",
+            "vllm_ascend/lora/punica_npu.py",
+            "vllm_ascend/lora/fused_moe.py",
+            "vllm_ascend/platform.py"
+          ],
+          "minimal_modules": [
+            "LoRA 算子",
+            "MoE-LoRA"
+          ],
+          "practice_task": "说明 get_punica_wrapper 返回的类如何让 vLLM 的 LoRA 路径在 NPU 上生效，并指出该方法在 #13484 平台重构后的归属。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l6",
+          "title": "稀疏 KV 缓存卸载（Sparse KV Offload）",
+          "order": 6,
+          "filename": "u10-l6-sparse-kv-offload.md",
+          "level": "advanced",
+          "topic": "讲解 #13026 引入的稀疏 KV 缓存卸载：对 SFA/Indexer 稀疏注意力模型，把主 KV 缓存卸载到主机内存，decode 期不再驻留 NPU 主 KV，仅按 top-k 把命中行 H2D 回载到常驻缓冲再跑单次 SFA 注意力。覆盖 attention/sfa_kv_offload.py 独立 SFA 后端、distributed/kv_transfer/sparse_kv_offload/ 的 SparseKVOffloadManager 与 C++ 内核，以及 SparseKVOffloadConfig 的约束。",
+          "learning_goals": [
+            "理解稀疏 KV 卸载的 prefill/decode 数据面：prefill 时 D2H 提交 KV 行、decode 时 top-k miss 由 H2D 回载到 resident 缓冲",
+            "掌握 SparseKVOffloadManager 的 register_kv_caches / offload_new_kv / onload_topk_kv 流程及其与底层 C++ 内核的协作",
+            "理解该特性要求稀疏注意力模型（具备 index_topk）、不支持 CP/PP、且仅在 PD 分离（kv_transfer is_kv_consumer）或 keep_device_kv_cache 场景下可用的配置约束"
+          ],
+          "source_files": [
+            "vllm_ascend/attention/sfa_kv_offload.py",
+            "vllm_ascend/distributed/kv_transfer/sparse_kv_offload/sparse_kv_offload_manager.py",
+            "vllm_ascend/distributed/kv_transfer/sparse_kv_offload/sparse_kv_offload.cpp",
+            "vllm_ascend/ascend_config.py"
+          ],
+          "minimal_modules": [
+            "稀疏 KV 卸载",
+            "SFA 数据面"
+          ],
+          "practice_task": "说明开启 sparse_kv_offload 后，decode 期一次 top-k miss 的 KV 如何从主机内存回载到 NPU 常驻缓冲并完成单次 resident SFA 注意力；并解释该特性为何要求模型具备 index_topk，且默认只能在 PD 分离场景使用。",
+          "depends_on": [
+            "u10-l2",
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l7",
+          "title": "分层 prefill KV 缓冲复用（Layerwise Prefill KV Buffer Reuse）",
+          "order": 7,
+          "filename": "u10-l7-layerwise-prefill-kv-buffer-reuse.md",
+          "level": "advanced",
+          "topic": "讲解 #12852 引入的「分层 prefill KV 缓冲复用」：在 ascend_store 的 layerwise prefill 卸载路径下，原本为每个 transformer 层独立分配设备 KV 缓冲；本特性让多个层分时复用一组有限物理设备缓冲（新增 layerwise_cache_layout.py 的 LayerwiseCacheLayout 规划），逻辑 KV 布局不变，从而回收 HBM、放大可用 KV 容量。覆盖 model_runner_v1 的 apply_layerwise_kv_cache_plan 在分配前重排张量描述、worker 的可用 KV 显存按 num_layers/num_tensors 因子放大、pool_worker/pool_scheduler 的「回载再复用、保存完成后才复用」时序、config_data/kv_transfer 的 partial GVA 与错误传播改动，以及 sfa_v1 把 prefetch gate 前移使无 indexer 的 SFA 层也能正确触发。",
+          "learning_goals": [
+            "理解分层 prefill 卸载为何要复用设备 KV 缓冲，以及 LayerwiseCacheLayout（num_shared_buffers / prefetch_layer_map / storage_indices / has_layer_reuse）如何把逻辑层映射到有限物理缓冲",
+            "掌握 apply_layerwise_kv_cache_plan 在 KV cache 张量分配前重排描述符的时机，以及 NPUWorker 按 num_layers/num_tensors 因子放大 available_kv_cache_memory_bytes 的内存核算",
+            "理解 pool_worker/pool_scheduler 在缓冲复用下的「回载再复用、上一层保存完成后才复用」时序，以及 config_data 的 partial_save/partial_load GVA 与 kv_transfer 的错误传播（raise 替代 log）改动",
+            "理解 sfa_v1 把 record_attention_compute_start 前移，使 GLM-5.2 等无 indexer 的 SFA 层也能打开 prefetch gate"
+          ],
+          "source_files": [
+            "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/layerwise_cache_layout.py",
+            "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py",
+            "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_scheduler.py",
+            "vllm_ascend/worker/worker.py",
+            "vllm_ascend/worker/model_runner_v1.py",
+            "vllm_ascend/attention/sfa_v1.py"
+          ],
+          "minimal_modules": [
+            "分层 KV 缓冲复用",
+            "ascend_store layerwise 数据面"
+          ],
+          "practice_task": "说明开启 layerwise_num_shared_buffers 后，NPUWorker 如何按 num_layers/num_tensors 放大可用 KV 显存、apply_layerwise_kv_cache_plan 如何让多个 transformer 层共享有限物理缓冲；并解释为何要在「上一层保存完成」后才复用同一缓冲、以及无 indexer 的 SFA 层为何需要把 prefetch gate 前移。",
+          "depends_on": [
+            "u10-l2",
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "特定模型落地与二次开发",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "新模型实现与 models/ 目录",
+          "order": 1,
+          "filename": "u11-l1-new-models.md",
+          "level": "advanced",
+          "topic": "讲解 vllm_ascend/models/ 下的新模型/层实现（deepseek_v4、minimax_m3、qwen3_dspark）与 register_model 注册。",
+          "learning_goals": [
+            "理解 vllm-ascend 何时直接实现模型而非打补丁",
+            "掌握 register_model 的注册与 layer/attention 的复用",
+            "了解 deepseek_v4 / minimax_m3 / qwen3_dspark 的实现特点"
+          ],
+          "source_files": [
+            "vllm_ascend/models/__init__.py",
+            "vllm_ascend/models/deepseek_v4.py",
+            "vllm_ascend/models/minimax_m3/minimax_m3.py",
+            "vllm_ascend/models/layer/attention/layer.py"
+          ],
+          "minimal_modules": [
+            "新模型实现",
+            "模型注册"
+          ],
+          "practice_task": "对比「用 patch 改上游模型」与「在 models/ 直接实现模型」两种方式的取舍，给出各自的适用场景。",
+          "depends_on": [
+            "u3-l3",
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l2",
+          "title": "Ascend 310P 适配",
+          "order": 2,
+          "filename": "u11-l2-310p-adaptation.md",
+          "level": "advanced",
+          "topic": "讲解 _310p/ 子树：310P 专属 worker、model_runner、ops、attention、量化与 is_310p 分支；并说明本次 _310p/fused_moe（experts_selector、fused_moe、新增 grouped_topk_router）与 w8a8_dynamic 的调整。",
+          "learning_goals": [
+            "理解 310P 与 A2/A3 硬件能力差异带来的代码分支",
+            "掌握 _310p/model_runner_310p.py 与 worker_310p.py 的职责",
+            "了解 310P 专属算子/注意力/量化实现，以及 310P 下 fused_moe 路由（grouped_topk_router）的适配"
+          ],
+          "source_files": [
+            "vllm_ascend/_310p/model_runner_310p.py",
+            "vllm_ascend/_310p/worker_310p.py",
+            "vllm_ascend/_310p/ops/layernorm.py",
+            "vllm_ascend/_310p/fused_moe/grouped_topk_router.py",
+            "vllm_ascend/utils.py"
+          ],
+          "minimal_modules": [
+            "310P 适配",
+            "硬件分支"
+          ],
+          "practice_task": "说明 is_310p() 如何驱动 patch/worker/__init__.py 的分支，并列举 310P 与非 310P 加载的不同补丁，以及 310P fused_moe 路由器的差异。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l3",
+          "title": "XLite 分层推理",
+          "order": 3,
+          "filename": "u11-l3-xlite.md",
+          "level": "advanced",
+          "topic": "讲解 xlite/ 的分层/分块推理机制及其 model_runner 与 worker 的集成方式；重点说明 #13378/#11213 后 XLite 已支持 MLA 与 DSA 注意力（DeepseekV3ForCausalLM、DeepseekV32ForCausalLM、GlmMoeDsaForCausalLM），并修复了 DP metadata 与跨 DP rank 最大 token 数的传递。",
+          "learning_goals": [
+            "理解 XLite 的分层推理目标与适用场景",
+            "掌握 xlite_worker / xlite_model_runner 的集成方式，以及 MLA/DSA 注意力的接入",
+            "了解 XliteGraphConfig 配置项与 DP metadata 在 collective communication 中的正确传递"
+          ],
+          "source_files": [
+            "vllm_ascend/xlite/xlite.py",
+            "vllm_ascend/xlite/xlite_worker.py",
+            "vllm_ascend/xlite/xlite_model_runner.py",
+            "vllm_ascend/ascend_config.py"
+          ],
+          "minimal_modules": [
+            "XLite",
+            "分层推理"
+          ],
+          "practice_task": "说明 XLite 与普通 ModelRunner 在执行上的差异，指出其配置入口，并描述 XLite 现在如何支持 MLA/DSA 类模型（DeepseekV3/V32、GlmMoeDsa）。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l4",
+          "title": "测试与 CI 体系",
+          "order": 4,
+          "filename": "u11-l4-tests-and-ci.md",
+          "level": "intermediate",
+          "topic": "讲解 tests/ut、tests/e2e、benchmarks 与 .github/workflows 的测试分层与 CI 编排；并说明 #13442 新增的 A5 夜间测试流水线（schedule_nightly_test_a5.yaml）与 ascend_store/layerwise 缓冲复用相关单测。",
+          "learning_goals": [
+            "理解 UT/ST/Nightly 测试分层与目录约定",
+            "掌握 pytest marker（e2e_model/e2e_coverage）与测试选择脚本",
+            "了解 CI 镜像构建、测试调度与覆盖率收集流程",
+            "了解 A5 夜间测试流水线（schedule_nightly_test_a5.yaml）的编排与新增的 layerwise 单测归属"
+          ],
+          "source_files": [
+            "tests/ut/ops/test_prepare_finalize.py",
+            "tests/ut/distributed/ascend_store/test_layerwise_cache_layout.py",
+            "AGENTS.md",
+            ".github/workflows/pr_test.yaml",
+            ".github/workflows/schedule_nightly_test_a5.yaml",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "测试体系",
+            "CI 编排"
+          ],
+          "practice_task": "写一条命令在本地运行某个 UT 文件并解释输出，再说明该 UT 在 CI 中属于哪一层；并指出 A5 夜间流水线相对普通 PR 测试的差异。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u11-l5",
+          "title": "二次开发实战：贡献一个新补丁",
+          "order": 5,
+          "filename": "u11-l5-contribute-new-patch.md",
+          "level": "advanced",
+          "topic": "结合 AGENTS.md 的规范，实战演示如何新增一个 platform/worker patch、写测试、过 lint 并提交 PR。",
+          "learning_goals": [
+            "掌握新增 patch 的规范（命名、文档化、why/how/future plan）",
+            "理解 envs.py 集中管理环境变量与 NPU 性能注意事项（item() 同步）",
+            "掌握 format.sh / ruff / markdownlint / Conventional Commits 提交流程"
+          ],
+          "source_files": [
+            "AGENTS.md",
+            "vllm_ascend/patch/__init__.py",
+            "vllm_ascend/patch/platform/patch_distributed.py",
+            "format.sh",
+            ".pre-commit-config.yaml"
+          ],
+          "minimal_modules": [
+            "贡献规范",
+            "补丁开发实战"
+          ],
+          "practice_task": "按规范新增一个最小 platform patch（仅打印日志），并在 patch/__init__.py 补全其文档描述，再写出对应的 commit message。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
