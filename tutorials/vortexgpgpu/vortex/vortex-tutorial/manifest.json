@@ -1,0 +1,1472 @@
+{
+  "project": "vortex",
+  "head": "d76b7f24e658867ab57e3942d7c648c3e6af072d",
+  "rationale": "Vortex 是一个全栈开源 RISC-V GPGPU（主机运行时→驱动后端→SimX 仿真器→RTL→FPGA），体量大、子系统多，因此按\"先认清全栈与运行方式，再沿软件栈下行到模拟器/RTL/内存，最后深入加速器、图形、虚拟内存、上层 API 与工程化\"的顺序组织成 14 个单元、约 46 篇讲义。入门层（U1）让读者从零跑通 demo 并建立全栈心智模型；进阶层（U2–U8）沿\"配置系统→主机运行时/驱动→设备内核 API→SimX 框架→核心流水线(SimX)→核心流水线(RTL)→内存/缓存\"这条自顶向下的主链路展开，强调 SimX 与 RTL 的模型一致性这条贯穿主线；专家层（U9–U14）覆盖张量核/DXA、图形/光追、虚拟内存/原子/命令处理器、OpenCL/Vulkan/HIP 上层栈，以及测试调试、性能、FPGA/综合与二次开发。每篇讲义只解决一个主题、绑定真实源码与一个可操作的实践任务，并通过 depends_on 形成清晰的可学习 DAG。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：项目总览与首次运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "Vortex 是什么：全栈开源 RISC-V GPGPU",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Vortex 的定位、全栈构成（sim/RTL/FPGA 多后端驱动）、SIMT 执行模型与 RISC-V ISA 扩展（TMC/WSPAWN/SPLIT/JOIN/BAR）。",
+          "learning_goals": [
+            "理解 Vortex 全栈从主机运行时到 FPGA 的分层构成",
+            "掌握 SIMT 下的 thread/warp/socket/cluster 层次模型",
+            "了解 Vortex 对 RISC-V 做了哪些类 GPU 的 ISA 扩展"
+          ],
+          "source_files": [
+            "README.md",
+            "AGENTS.md",
+            "docs/designs/microarchitecture.md"
+          ],
+          "minimal_modules": [
+            "README Specifications",
+            "Microarchitecture 执行模型与 ISA 扩展"
+          ],
+          "practice_task": "阅读 README 与 microarchitecture 文档，画一张『主机→驱动后端→模拟器/RTL/FPGA』的全栈分层图，并标注每一层对应的仓库目录（sw/runtime、sim、hw、ci）。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构地图",
+          "order": 2,
+          "filename": "u1-l2-repo-layout.md",
+          "level": "beginner",
+          "topic": "用 docs/codebase.md 作为地图，逐一对应 hw/sw/sim/tests/ci/docs/perf 各目录的职责。",
+          "learning_goals": [
+            "记住仓库一级目录与各自职责",
+            "区分 hw/rtl 下的 core/cache/mem/cp/tcu/dxa/rtu/gfx 等子系统",
+            "理解 tests 下不同测试套件的定位"
+          ],
+          "source_files": [
+            "docs/codebase.md",
+            "docs/index.md"
+          ],
+          "minimal_modules": [
+            "codebase 目录布局",
+            "docs 文档索引"
+          ],
+          "practice_task": "对照 docs/codebase.md，在本地仓库中找到 hw/sw/sim/tests/ci 目录，为每个一级目录写一句话职责说明，并标记你最感兴趣的一个子系统。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建系统、configure 与工具链",
+          "order": 3,
+          "filename": "u1-l3-build-and-configure.md",
+          "level": "beginner",
+          "topic": "讲解 out-of-tree 构建、configure 脚本如何生成可运行树、toolchain 安装，以及『改了 toml/Makefile 必须重新 configure』这条核心规则。",
+          "learning_goals": [
+            "掌握 build 目录与 configure 的关系",
+            "理解 configure 如何生成 config.mk/common.mk 并嵌入工具路径",
+            "知道为何 VX_config.toml 改动后必须重新 configure"
+          ],
+          "source_files": [
+            "configure",
+            "Makefile.in",
+            "ci/toolchain_install.sh.in",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "configure 脚本",
+            "AGENTS.md 第 2 节构建规则"
+          ],
+          "practice_task": "在 build 目录执行 ../configure --xlen=64，打开生成的 config.mk 与某 domain common.mk，找到 Verilator/RISC-V 工具的绝对路径，并解释为何多棵 Vortex 树可以共存。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "首次运行：用 blackbox.sh 跑通 demo",
+          "order": 4,
+          "filename": "u1-l4-first-run.md",
+          "level": "beginner",
+          "topic": "用 ci/blackbox.sh 作为统一启动器，以 demo 为例跑通 SimX，并介绍 --cores/--warps/--threads/--driver 等常用旋钮。",
+          "learning_goals": [
+            "能够用 blackbox.sh 在 SimX 上跑通一个程序",
+            "理解 --driver 与架构覆盖参数的含义",
+            "认识 CONFIGS=-DVX_CFG_* 与架构宏的关系"
+          ],
+          "source_files": [
+            "ci/blackbox.sh",
+            "tests/regression/demo",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "blackbox.sh 启动器",
+            "tests/regression/demo"
+          ],
+          "practice_task": "运行 ./ci/blackbox.sh --driver=simx --app=demo，再用 --cores=2 --warps=4 --threads=4 改变配置重跑，记录程序退出码与输出变化。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "硬件配置系统",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "TOML 配置：唯一的真相来源",
+          "order": 1,
+          "filename": "u2-l1-config-toml.md",
+          "level": "intermediate",
+          "topic": "讲解 VX_config.toml（硬件构建配置）与 VX_types.toml（软件 ABI 契约）两个真相来源，以及 VX_CFG_*/VX_MEM_*/VX_CSR_* 宏命名空间。",
+          "learning_goals": [
+            "区分 VX_config.toml 与 VX_types.toml 的职责",
+            "理解 VX_CFG_* 宏命名空间的含义",
+            "掌握 _ENABLE 与自动生成的 _ENABLED 镜像关系"
+          ],
+          "source_files": [
+            "VX_config.toml",
+            "VX_types.toml",
+            "docs/designs/build_configuration_system.md"
+          ],
+          "minimal_modules": [
+            "VX_config.toml 关键段",
+            "build_configuration_system §1-3"
+          ],
+          "practice_task": "在 VX_config.toml 中找到 NUM_CORES/NUM_WARPS/NUM_THREADS 三个参数并记录其值，然后阅读 build_configuration_system.md §3 解释 _ENABLE/_ENABLED 的区别。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "gen_config.py 与配置值流",
+          "order": 2,
+          "filename": "u2-l2-config-generator.md",
+          "level": "intermediate",
+          "topic": "讲解 ci/gen_config.py 如何把一个 toml 解析为 cflags/cpp/verilog 三种输出，configure 如何驱动它生成 .h/.vh。",
+          "learning_goals": [
+            "掌握 gen_config.py 的三种输出格式",
+            "理解配置值如何流到 RTL/sim/runtime/kernel",
+            "知道 expr: 表达式与 [[builtin]] 变量的解析"
+          ],
+          "source_files": [
+            "ci/gen_config.py",
+            "configure",
+            "docs/designs/build_configuration_system.md"
+          ],
+          "minimal_modules": [
+            "gen_config.py",
+            "build_configuration_system §2 值流图"
+          ],
+          "practice_task": "手动运行 gen_config.py 对 VX_config.toml 生成 cflags、cpp、verilog 三种输出并 diff，观察同一参数在三种格式下的不同表示。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "硬件/软件分层与边界检查",
+          "order": 3,
+          "filename": "u2-l3-config-boundary.md",
+          "level": "intermediate",
+          "topic": "讲解 VX_config(HW/sim 私有) 与 VX_types(共享 ABI) 的分层，以及两个 CI 边界检查脚本如何强制 sw/kernel 与 hw/sim 双向隔离。",
+          "learning_goals": [
+            "理解为何公共运行时头文件不能 include VX_config.h",
+            "掌握 sw/{kernel,runtime} 与 hw/sim 的双向隔离规则",
+            "会使用 check_config_boundary.sh / check_sw_sim_boundary.sh"
+          ],
+          "source_files": [
+            "ci/check_config_boundary.sh",
+            "ci/check_sw_sim_boundary.sh",
+            "hw/rtl/VX_define.vh",
+            "sw/runtime/include/vortex2.h"
+          ],
+          "minimal_modules": [
+            "两个 boundary 检查脚本",
+            "build_configuration_system §2 分层"
+          ],
+          "practice_task": "运行两个 boundary 检查脚本，然后在 sw/kernel 下故意 #include 一个 hw/ 头文件，观察 check_sw_sim_boundary.sh 如何报错。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "软件栈：主机运行时与驱动",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "运行时公开 API",
+          "order": 1,
+          "filename": "u3-l1-runtime-api.md",
+          "level": "intermediate",
+          "topic": "讲解 sw/runtime/include/vortex.h 暴露的设备/缓冲区/内核启动 API，对齐 CUDA/OpenCL 风格的主机接口。",
+          "learning_goals": [
+            "掌握 vx_dev_open/close、vx_mem_alloc、vx_start、vx_ready_wait 的用法",
+            "理解 vx_upload_kernel_file 与 vx_mpm_query 的作用",
+            "能读懂一份典型主机程序的控制流"
+          ],
+          "source_files": [
+            "sw/runtime/include/vortex.h",
+            "docs/designs/vortex_runtime_api.md"
+          ],
+          "minimal_modules": [
+            "vortex.h 公共 API",
+            "vortex_runtime_api 设计"
+          ],
+          "practice_task": "阅读 vortex.h，用伪代码写出『打开设备→分配缓冲→拷入数据→上传内核→启动→等待→拷回结果→关闭』的完整主机调用序列。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "设备、缓冲区与内存管理",
+          "order": 2,
+          "filename": "u3-l2-runtime-device-mem.md",
+          "level": "intermediate",
+          "topic": "深入 runtime/common 的 device.cpp/buffer.cpp/vm.cpp，理解设备句柄、缓冲区对象与设备虚拟内存管理的关系。",
+          "learning_goals": [
+            "理解 device 与 buffer 对象的内部结构",
+            "掌握 vx_copy_to_dev/vx_copy_from_dev 的数据通路",
+            "了解设备侧地址空间与 vm 的关系"
+          ],
+          "source_files": [
+            "sw/runtime/common/device.cpp",
+            "sw/runtime/common/buffer.cpp",
+            "sw/runtime/common/vm.cpp"
+          ],
+          "minimal_modules": [
+            "device.cpp",
+            "buffer.cpp",
+            "vm.cpp"
+          ],
+          "practice_task": "跟踪 vx_mem_alloc 到底层，画出 device↔buffer↔vm 的对象关系图，并标注一次 copy_to_dev 经过哪些对象。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "驱动后端与 stub 动态分发",
+          "order": 3,
+          "filename": "u3-l3-runtime-drivers.md",
+          "level": "intermediate",
+          "topic": "讲解 libvortex.so 的 stub 分发机制：首次 vx_dev_open 时按 $VORTEX_DRIVER dlopen 后端库（simx/rtlsim/opae/xrt/gem5）。",
+          "learning_goals": [
+            "理解 stub/vortex.cpp 如何用 dlopen 选择后端",
+            "掌握 callbacks_t 分发表与 dispatcher.h 的契约",
+            "认识五种驱动后端的定位差异"
+          ],
+          "source_files": [
+            "sw/runtime/stub/vortex.cpp",
+            "sw/runtime/common/dispatcher.h",
+            "sw/runtime/simx/vortex.cpp"
+          ],
+          "minimal_modules": [
+            "stub/vortex.cpp",
+            "dispatcher.h"
+          ],
+          "practice_task": "阅读 stub/vortex.cpp，解释 VORTEX_DRIVER 环境变量如何决定加载哪个 .so，并列出 simx 后端需要实现的关键回调。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "主机→设备启动流程与 .vxbin 加载",
+          "order": 4,
+          "filename": "u3-l4-runtime-launch.md",
+          "level": "intermediate",
+          "topic": "讲解 module.cpp 如何解析 .vxbin 的 VXSYMTAB 多入口符号表，以及 vx_start 如何把 kernel+arguments 程序进 KMU。",
+          "learning_goals": [
+            "理解 .vxbin 单入口与多入口格式的兼容设计",
+            "掌握 vx_module_get_kernel 的名字→PC 解析",
+            "了解 vx_start 到命令处理器/KMU 的衔接"
+          ],
+          "source_files": [
+            "sw/runtime/common/module.cpp",
+            "docs/designs/kernel_entry_and_dispatch.md",
+            "docs/designs/command_processor.md"
+          ],
+          "minimal_modules": [
+            "module.cpp 加载器",
+            "kernel_entry_and_dispatch §2"
+          ],
+          "practice_task": "跟踪 vx_upload_kernel_file → vx_start 的调用链，画出从主机加载 .vxbin 到 KMU 收到启动 PC 的完整数据流。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "设备内核 API",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "内核运行时启动与入口模型",
+          "order": 1,
+          "filename": "u4-l1-kernel-startup.md",
+          "level": "intermediate",
+          "topic": "讲解 sw/kernel/src/vx_start.S 的统一 CTA prologue __vx_cta_entry，以及 vxbin.py 的多入口符号表机制。",
+          "learning_goals": [
+            "理解 __vx_cta_entry 如何设置 SATP/gp/sp/tp 并用 s11 派发",
+            "掌握 kernel_main 的 .weak 模型与 .vx_entry 段",
+            "了解 VXSYMTAB footer 的磁盘布局"
+          ],
+          "source_files": [
+            "sw/kernel/src/vx_start.S",
+            "sw/kernel/scripts/vxbin.py",
+            "docs/designs/kernel_entry_and_dispatch.md"
+          ],
+          "minimal_modules": [
+            "vx_start.S 入口",
+            "vxbin.py 符号表"
+          ],
+          "practice_task": "阅读 vx_start.S 的 __vx_cta_entry，写出它依次做了哪些寄存器/段设置，并解释为何 dispatch 的 jalr 要 .option norvc。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "SIMT 控制指令与 warp 调度 API",
+          "order": 2,
+          "filename": "u4-l2-kernel-intrinsics.md",
+          "level": "intermediate",
+          "topic": "讲解 vx_intrinsics.h 与 vx_spawn.h 暴露的 TMC/WSPAWN/SPLIT/JOIN/PRED 等 warp 控制内联函数，及其与 SIMT 模型的对应。",
+          "learning_goals": [
+            "掌握 warp 派生（WSPAWN）与线程激活（TMC）API",
+            "理解分支发散的 SPLIT/JOIN 与 IPDOM 栈",
+            "能在一个真实 kernel 中识别这些控制指令"
+          ],
+          "source_files": [
+            "sw/kernel/include/vx_intrinsics.h",
+            "sw/kernel/include/vx_spawn.h",
+            "sw/kernel/src/vx_spawn.c",
+            "docs/designs/microarchitecture.md"
+          ],
+          "minimal_modules": [
+            "vx_intrinsics.h",
+            "vx_spawn.h"
+          ],
+          "practice_task": "阅读 tests/regression/demo 的 kernel 源码，找出 warp 派生与线程激活调用，画出 grid/block/warp 的派生关系图。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "printf、barrier 与系统调用",
+          "order": 3,
+          "filename": "u4-l3-kernel-services.md",
+          "level": "intermediate",
+          "topic": "讲解设备侧的 vx_printf（COUT 环）、vx_barrier 同步，以及 vx_syscalls.c 提供的轻量系统调用服务。",
+          "learning_goals": [
+            "理解 vx_printf 如何通过 COUT 环输出到主机",
+            "掌握 vx_barrier 的栅栏语义",
+            "了解内核侧 syscall 的最小实现"
+          ],
+          "source_files": [
+            "sw/kernel/include/vx_print.h",
+            "sw/kernel/include/vx_barrier.h",
+            "sw/kernel/src/vx_syscalls.c",
+            "sw/kernel/src/tinyprintf.c"
+          ],
+          "minimal_modules": [
+            "vx_print.h",
+            "vx_barrier.h",
+            "vx_syscalls.c"
+          ],
+          "practice_task": "在 tests/regression/printf 中增加一个 vx_printf 调用，在 SimX 上运行并观察输出，解释 CoutDrainer 如何在 main.cpp 中排空 COUT 环。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "SimX 模拟器框架",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "SimObject/SimChannel/SimPlatform 基元",
+          "order": 1,
+          "filename": "u5-l1-simx-framework.md",
+          "level": "intermediate",
+          "topic": "讲解 simobject.h 的三大基元：CRTP 的 SimObject、带延迟与背压的 SimChannel、以及驱动 tick 的 SimPlatform 时序轮。",
+          "learning_goals": [
+            "掌握 SimObject 的 on_tick/on_reset 钩子",
+            "理解 SimChannel 的 send/delay 与容量背压",
+            "了解 SimPlatform 的 timing wheel + delta 事件"
+          ],
+          "source_files": [
+            "sim/common/simobject.h",
+            "docs/simobject.md"
+          ],
+          "minimal_modules": [
+            "simobject.h",
+            "simobject.md §1-2"
+          ],
+          "practice_task": "阅读 simobject.h 与 simobject.md，用一段话解释『channel 就是流水线』的含义，并说明一个流水线单元为何不需要内部 stage deque。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "SimX 入口与处理器层次",
+          "order": 2,
+          "filename": "u5-l2-simx-processor.md",
+          "level": "intermediate",
+          "topic": "讲解 main.cpp 的独立 CLI 驱动，以及 processor→cluster→socket→core 的 GPU 实例化层次。",
+          "learning_goals": [
+            "掌握 main.cpp 的启动流程（建 RAM、attach、写 DCR、load image、tick）",
+            "理解 Processor 如何持有 clusters 与单一 Memory",
+            "了解 core→socket→cluster 的层次关系"
+          ],
+          "source_files": [
+            "sim/simx/main.cpp",
+            "sim/simx/processor.cpp",
+            "sim/simx/core.cpp",
+            "sim/simx/cluster.cpp",
+            "sim/simx/socket.cpp"
+          ],
+          "minimal_modules": [
+            "main.cpp",
+            "processor.cpp",
+            "core.cpp"
+          ],
+          "practice_task": "跟踪 main.cpp 的启动序列，列出 KMU 启动相关的 DCR 写入（STARTUP_ADDR、GRID/BLOCK_DIM 等），并解释 any_running() 何时为假。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "基数规则与模块分解",
+          "order": 3,
+          "filename": "u5-l3-simx-cardinal-rule.md",
+          "level": "intermediate",
+          "topic": "讲解『模块只通过 channel 通信』的基数规则，以及 SimX v3 模块分解（语义与时序同居一处）如何成为 RTL 的预言机。",
+          "learning_goals": [
+            "理解基数规则为何不可违反",
+            "掌握 SimX 与 RTL 逐模块对应的关系",
+            "认识 MemReq/MemRsp 在 types.h 中的数据载荷定义"
+          ],
+          "source_files": [
+            "docs/simobject.md",
+            "docs/designs/simx_simulator_architecture.md",
+            "sim/simx/types.h"
+          ],
+          "minimal_modules": [
+            "simobject.md 基数规则",
+            "simx_simulator_architecture §1-3"
+          ],
+          "practice_task": "在 types.h 中找到 MemReq/MemRsp 结构，解释为何 LOAD 响应必须携带 line 数据载荷（而非通过 core->mem_read 后门）。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "GPU 执行模型与核心流水线（SimX 视角）",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Warp 调度器、CTA 派发与屏障",
+          "order": 1,
+          "filename": "u6-l1-simx-scheduler.md",
+          "level": "intermediate",
+          "topic": "讲解 scheduler/cta_dispatcher/barrier_unit 如何管理 warp 生命周期、把 CTA 拆成 warp 并处理屏障。",
+          "learning_goals": [
+            "掌握 warp 的 PC/tmask/IPDOM 状态管理",
+            "理解 CTA→warp 的 block/grid 映射",
+            "了解 BAR 屏障的到达与释放"
+          ],
+          "source_files": [
+            "sim/simx/scheduler.cpp",
+            "sim/simx/cta_dispatcher.cpp",
+            "sim/simx/barrier_unit.cpp",
+            "docs/designs/cta_clustering_and_dispatch.md"
+          ],
+          "minimal_modules": [
+            "scheduler.cpp",
+            "cta_dispatcher.cpp",
+            "barrier_unit.cpp"
+          ],
+          "practice_task": "跟踪一个 CTA 如何被拆成多个 warp、分配 PC 与 tmask，并用 IPDOM 栈解释一次分支发散后的汇聚。",
+          "depends_on": [
+            "u5-l3",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "取指、解压、译码与微操作展开",
+          "order": 2,
+          "filename": "u6-l2-simx-frontend.md",
+          "level": "intermediate",
+          "topic": "讲解 decode/decompressor/sequencer：RVC 解压、RISC-V 译码成 Instr、以及 sequencer 把 TCU WGMMA 展开为多微操作。",
+          "learning_goals": [
+            "掌握 RVC 压缩指令的解压流程",
+            "理解 Instr 解码结构",
+            "了解 sequencer 的微操作展开（多 uop 的 WMMA/WGMMA）"
+          ],
+          "source_files": [
+            "sim/simx/decode.cpp",
+            "sim/simx/decompressor.cpp",
+            "sim/simx/sequencer.cpp",
+            "docs/designs/compressed_instruction_support.md"
+          ],
+          "minimal_modules": [
+            "decode.cpp",
+            "decompressor.cpp",
+            "sequencer.cpp"
+          ],
+          "practice_task": "解释一条 RVC 压缩指令从 fetch 到 decode 的流程，并以 WGMMA 为例说明 sequencer 为何需要展开成多个微操作。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "发射、记分板与操作数收集",
+          "order": 3,
+          "filename": "u6-l3-simx-issue.md",
+          "level": "intermediate",
+          "topic": "讲解 scoreboard/opc_unit/operands/dispatcher：ibuffer、寄存器冒险检测、每 warp 寄存器堆与写回。",
+          "learning_goals": [
+            "掌握 ibuffer 的按 warp 队列与发射门控",
+            "理解 scoreboard 的寄存器冒险跟踪与顺序完成",
+            "了解 OpcUnit 如何持有每 warp 寄存器堆并完成写回"
+          ],
+          "source_files": [
+            "sim/simx/scoreboard.cpp",
+            "sim/simx/opc_unit.cpp",
+            "sim/simx/operands.cpp",
+            "sim/simx/dispatcher.cpp"
+          ],
+          "minimal_modules": [
+            "scoreboard.cpp",
+            "opc_unit.cpp",
+            "operands.cpp",
+            "dispatcher.cpp"
+          ],
+          "practice_task": "解释 scoreboard 如何判断一条指令能否发射，并画出 operands→OpcUnit 读寄存器→dispatcher 派发到 FU 的数据通路。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "功能单元 ALU/FPU/LSU/SFU",
+          "order": 4,
+          "filename": "u6-l4-simx-funcunits.md",
+          "level": "intermediate",
+          "topic": "讲解 FuncUnit<NUM_BLOCKS> CRTP 基类，以及 ALU/FPU/LSU/SFU 各自私有 execute() 如何承载 ISA 语义。",
+          "learning_goals": [
+            "掌握 FuncUnit CRTP 基类的 Inputs/Outputs channel 模型",
+            "理解 ALU/FPU 私有 execute 的语义归属",
+            "了解 SFU 作为分派器路由到 WCTL/CSR/TEX/RASTER/DXA/OM 子单元"
+          ],
+          "source_files": [
+            "sim/simx/alu_unit.cpp",
+            "sim/simx/fpu_unit.cpp",
+            "sim/simx/lsu_unit.cpp",
+            "sim/simx/sfu_unit.cpp",
+            "sim/simx/func_unit.h"
+          ],
+          "minimal_modules": [
+            "func_unit.h",
+            "alu_unit.cpp",
+            "lsu_unit.cpp",
+            "sfu_unit.cpp"
+          ],
+          "practice_task": "阅读 func_unit.h，写出一个新 FuncUnit 需要实现哪些 channel 与钩子，并解释 SFU 为何是分派器而非单一执行单元。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "核心流水线 RTL",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "Vortex 顶层与 socket/cluster RTL",
+          "order": 1,
+          "filename": "u7-l1-rtl-top.md",
+          "level": "intermediate",
+          "topic": "讲解 Vortex.sv 顶层与 VX_socket.sv/VX_cluster.sv 的实例化层次，以及 VX_gpu_pkg.sv 的作用。",
+          "learning_goals": [
+            "掌握 Vortex 顶层模块的实例化结构",
+            "理解 socket（共享 L1）与 cluster（共享 L2）的 RTL 组织",
+            "了解 VX_gpu_pkg.sv 与 VX_define.vh 的关系"
+          ],
+          "source_files": [
+            "hw/rtl/Vortex.sv",
+            "hw/rtl/VX_socket.sv",
+            "hw/rtl/VX_cluster.sv",
+            "hw/rtl/VX_gpu_pkg.sv"
+          ],
+          "minimal_modules": [
+            "Vortex.sv",
+            "VX_socket.sv",
+            "VX_cluster.sv"
+          ],
+          "practice_task": "阅读 Vortex.sv，画出 socket→cluster→core 的实例化层次，并标注 L1/L2 缓存的共享边界。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "核心流水线各级 RTL",
+          "order": 2,
+          "filename": "u7-l2-rtl-core-pipeline.md",
+          "level": "intermediate",
+          "topic": "对照 SimX 的 6 级流水线，在 hw/rtl/core 中找到 fetch/decode/issue/execute/commit 各级对应模块。",
+          "learning_goals": [
+            "掌握 VX_core.sv 的流水线组织",
+            "能在 RTL 中定位 schedule/fetch/decode/issue/execute/commit",
+            "理解 RTL 与 SimX 的级间对应"
+          ],
+          "source_files": [
+            "hw/rtl/core/VX_core.sv",
+            "hw/rtl/core/VX_fetch.sv",
+            "hw/rtl/core/VX_decode.sv",
+            "hw/rtl/core/VX_issue.sv",
+            "hw/rtl/core/VX_execute.sv",
+            "hw/rtl/core/VX_commit.sv"
+          ],
+          "minimal_modules": [
+            "VX_core.sv",
+            "VX_fetch.sv",
+            "VX_issue.sv",
+            "VX_execute.sv",
+            "VX_commit.sv"
+          ],
+          "practice_task": "对照 microarchitecture 的 6 级流水线，在 RTL 中逐一找到对应模块并填写一张『流水级→RTL 模块→SimX 模块』对照表。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "调度器与 warp 控制 RTL",
+          "order": 3,
+          "filename": "u7-l3-rtl-scheduler.md",
+          "level": "intermediate",
+          "topic": "讲解 VX_scheduler/VX_ibuffer/VX_scoreboard/VX_split_join/VX_ipdom_stack 如何实现 warp 调度与分支发散/汇聚。",
+          "learning_goals": [
+            "掌握 RTL 调度器与 ibuffer 的配合",
+            "理解 split/join + IPDOM 栈的发散与汇聚机制",
+            "了解 scoreboard 在 RTL 中的实现"
+          ],
+          "source_files": [
+            "hw/rtl/core/VX_scheduler.sv",
+            "hw/rtl/core/VX_ibuffer.sv",
+            "hw/rtl/core/VX_scoreboard.sv",
+            "hw/rtl/core/VX_split_join.sv",
+            "hw/rtl/core/VX_ipdom_stack.sv"
+          ],
+          "minimal_modules": [
+            "VX_scheduler.sv",
+            "VX_split_join.sv",
+            "VX_ipdom_stack.sv"
+          ],
+          "practice_task": "解释 VX_split_join 与 VX_ipdom_stack 如何协作完成一次 divergent branch 的 SPLIT/JOIN，画出 tmask 的保存与恢复过程。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "SimX↔RTL 模型一致性（model parity）",
+          "order": 4,
+          "filename": "u7-l4-model-parity.md",
+          "level": "intermediate",
+          "topic": "讲解 model_parity CI 门控：同一 app/args/configs 在 simx 与 rtlsim 上退休指令精确一致、周期误差在容差内。",
+          "learning_goals": [
+            "理解为何 SimX 必须与 RTL 保持时序/功能同步",
+            "掌握 model_parity 门控的判定标准",
+            "了解『绝不能放宽容差来吸收差异』的纪律"
+          ],
+          "source_files": [
+            "AGENTS.md",
+            "docs/designs/continuous_integration.md",
+            "docs/debugging.md"
+          ],
+          "minimal_modules": [
+            "AGENTS.md §4 测试规则",
+            "continuous_integration model_parity"
+          ],
+          "practice_task": "阅读 AGENTS.md §4 中关于 SimX-RTL lockstep 的规则，解释一次 RTL 流水线改动为何必须同时更新 SimX 时序模型。",
+          "depends_on": [
+            "u7-l3",
+            "u6-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "内存层次与缓存子系统",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "内存层次与缓存子系统总览",
+          "order": 1,
+          "filename": "u8-l1-mem-cache-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 L1/L2/L3/本地内存/DRAM 的层次与共享关系（socket 共享 L1、cluster 共享 L2），以及可选缓存配置。",
+          "learning_goals": [
+            "掌握 Vortex 的多级缓存与本地内存层次",
+            "理解 socket/cluster 与 L1/L2 的共享边界",
+            "了解缓存可选性与配置开关"
+          ],
+          "source_files": [
+            "docs/designs/cache_subsystem.md",
+            "docs/designs/microarchitecture.md",
+            "sim/simx/mem/cache_cluster.cpp"
+          ],
+          "minimal_modules": [
+            "cache_subsystem.md",
+            "microarchitecture 缓存段"
+          ],
+          "practice_task": "画出 Vortex 完整内存层次图，标注 LSU→L1→L2→L3→DRAM 的路径与各级共享范围，并标出本地内存的位置。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "缓存标签、MSHR、替换与数据通路",
+          "order": 2,
+          "filename": "u8-l2-cache-internals.md",
+          "level": "intermediate",
+          "topic": "深入对比 RTL 与 SimX 的 cache 实现：tags、MSHR、替换策略与数据通路。",
+          "learning_goals": [
+            "掌握 VX_cache.sv 的内部模块划分",
+            "理解 MSHR 如何处理多重未命中",
+            "能对比 RTL cache 与 SimX cache 的实现"
+          ],
+          "source_files": [
+            "hw/rtl/cache/VX_cache.sv",
+            "hw/rtl/cache/VX_cache_tags.sv",
+            "hw/rtl/cache/VX_cache_mshr.sv",
+            "hw/rtl/cache/VX_cache_repl.sv",
+            "sim/simx/mem/cache.cpp"
+          ],
+          "minimal_modules": [
+            "VX_cache.sv",
+            "VX_cache_mshr.sv",
+            "cache.cpp"
+          ],
+          "practice_task": "对比 RTL 与 SimX 的 cache，解释 MSHR 在两个实现中如何承载未命中请求与 line 数据，并说明替换策略模块的职责。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "访存合并、本地内存与 DRAM 模型",
+          "order": 3,
+          "filename": "u8-l3-mem-fabric.md",
+          "level": "intermediate",
+          "topic": "讲解 mem_coalescer 的访存合并、local_mem 共享内存，以及 memory.cpp 用 ramulator2 建模的 DRAM。",
+          "learning_goals": [
+            "掌握 LSU 请求如何被 coalescer 合并",
+            "理解本地内存（共享内存）的组织",
+            "了解 DRAM 模型与 line 数据的传输"
+          ],
+          "source_files": [
+            "sim/simx/mem/mem_coalescer.cpp",
+            "sim/simx/mem/local_mem.cpp",
+            "sim/simx/mem/memory.cpp",
+            "sim/common/dram_sim.cpp",
+            "hw/rtl/mem/VX_local_mem.sv"
+          ],
+          "minimal_modules": [
+            "mem_coalescer.cpp",
+            "local_mem.cpp",
+            "memory.cpp"
+          ],
+          "practice_task": "解释一个 warp 内多个线程的 load 如何被 coalescer 合并成更少的 cache line 请求，并说明 memory.cpp 如何用 ramulator2 提供时序。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "LSU 流水线设计",
+          "order": 4,
+          "filename": "u8-l4-lsu-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 LSU 流水线：AGU 地址生成、slice 处理，以及与缓存层次的衔接。",
+          "learning_goals": [
+            "掌握 VX_lsu_unit 的流水线结构",
+            "理解 AGU 的地址生成与 packed load",
+            "了解 store/load 从 LSU 到缓存的路径"
+          ],
+          "source_files": [
+            "hw/rtl/core/VX_lsu_unit.sv",
+            "hw/rtl/core/VX_lsu_agu.sv",
+            "hw/rtl/core/VX_lsu_slice.sv",
+            "sim/simx/lsu_unit.cpp",
+            "docs/designs/lsu_pipeline_design.md"
+          ],
+          "minimal_modules": [
+            "VX_lsu_unit.sv",
+            "VX_lsu_agu.sv",
+            "lsu_unit.cpp"
+          ],
+          "practice_task": "跟踪一次 store 从 AGU 地址生成到进入缓存层次的完整过程，并解释 packed load 的 LsuUopGen 在 SimX 中的作用。",
+          "depends_on": [
+            "u8-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "高级 ISA 扩展：张量核与异步拷贝",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "张量核 WGMMA 引擎",
+          "order": 1,
+          "filename": "u9-l1-tcu-wgmma.md",
+          "level": "advanced",
+          "topic": "讲解 TCU 的 WGMMA 分块矩阵乘加、2:4 结构化稀疏与 MX 缩放，及其 kernel API vx_tensor.h。",
+          "learning_goals": [
+            "掌握 WGMMA 的分块矩阵乘加语义",
+            "理解 2:4 结构化稀疏与 MX 数据类型支持",
+            "了解 tcu_unit/tcu_tbuf 的 SimX 建模"
+          ],
+          "source_files": [
+            "sim/simx/tcu/tcu_unit.cpp",
+            "sim/simx/tcu/tcu_tbuf.cpp",
+            "sw/kernel/include/vx_tensor.h",
+            "docs/designs/tensor_core_wgmma_engine.md"
+          ],
+          "minimal_modules": [
+            "tcu_unit.cpp",
+            "vx_tensor.h",
+            "tensor_core_wgmma_engine.md"
+          ],
+          "practice_task": "阅读 vx_tensor.h 与 tests/regression/sgemm_tcu_wg，解释 WGMMA 一次操作的分块形状，并说明 2:4 结构化稀疏如何减少有效计算量。",
+          "depends_on": [
+            "u6-l4",
+            "u8-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "DXA 异步拷贝与多播",
+          "order": 2,
+          "filename": "u9-l2-dxa-async.md",
+          "level": "advanced",
+          "topic": "讲解 DXA 作为异步数据传输加速器（DMA），支持一份数据多播到多个集群，及其 kernel API vx_dxa.h。",
+          "learning_goals": [
+            "掌握 DXA 的异步拷贝（DMA）模型",
+            "理解多播（multicast）如何分发数据到多个 cluster",
+            "了解 dxa_unit/dxa_core 的 SimX 建模"
+          ],
+          "source_files": [
+            "sim/simx/dxa/dxa_unit.cpp",
+            "sim/simx/dxa/dxa_core.cpp",
+            "sw/kernel/include/vx_dxa.h",
+            "docs/designs/dxa_async_copy_multicast.md"
+          ],
+          "minimal_modules": [
+            "dxa_unit.cpp",
+            "vx_dxa.h",
+            "dxa_async_copy_multicast.md"
+          ],
+          "practice_task": "阅读 tests/regression/dxa_copy_mcast 与 sgemm2_dxa_mcast，解释一次多播 DMA 如何把一份数据同时送到多个集群的本地内存。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "图形与光线追踪",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "图形硬件栈（RASTER/TEX/OM）",
+          "order": 1,
+          "filename": "u10-l1-graphics-hw.md",
+          "level": "advanced",
+          "topic": "讲解图形固定功能流水线：光栅化（raster）、纹理（tex）、输出合并（om）在 RTL 与 SimX 中的实现。",
+          "learning_goals": [
+            "掌握图形固定功能流水线的三段",
+            "理解 RASTER/TEX/OM 的职责",
+            "能在 RTL 与 SimX 中定位对应模块"
+          ],
+          "source_files": [
+            "hw/rtl/VX_graphics.sv",
+            "hw/rtl/raster/VX_raster_core.sv",
+            "sim/simx/raster",
+            "docs/designs/graphics_hardware_stack.md"
+          ],
+          "minimal_modules": [
+            "VX_graphics.sv",
+            "VX_raster_core.sv",
+            "graphics_hardware_stack.md"
+          ],
+          "practice_task": "对照图形固定功能流水线文档，在 hw/rtl 与 sim/simx 中分别找到 raster/tex/om 对应模块，并写出每段流水线的输入输出。",
+          "depends_on": [
+            "u8-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "图形软件栈与软件发射器",
+          "order": 2,
+          "filename": "u10-l2-graphics-sw.md",
+          "level": "advanced",
+          "topic": "讲解 sw/gfx 与 sw/common/gfx_ff_model 在主机侧模拟固定功能单元的软件发射器（software emitters）机制。",
+          "learning_goals": [
+            "理解 gfx_ff_model 如何在主机侧模拟固定功能",
+            "掌握软件发射器的作用与 ABI",
+            "了解 sw/common 中 gfx 相关头文件的分层"
+          ],
+          "source_files": [
+            "sw/gfx/gfx_sw_abi.cpp",
+            "sw/gfx/gfx_frontend_k.h",
+            "sw/common/gfx_ff_model.cpp",
+            "sw/common/gfx_sw.h",
+            "docs/designs/graphics_software_stack.md"
+          ],
+          "minimal_modules": [
+            "gfx_ff_model.cpp",
+            "gfx_sw.h",
+            "graphics_software_stack.md"
+          ],
+          "practice_task": "解释 gfx_ff_model 如何在主机侧模拟光栅化/纹理，使得图形测试在没有完整固定功能硬件时也能运行。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "硬件光线追踪单元（RTU）",
+          "order": 3,
+          "filename": "u10-l3-raytracing.md",
+          "level": "advanced",
+          "topic": "讲解 RTU 的 BVH 遍历、ray-box/ray-triangle 相交测试的硬件实现，及其 kernel API vx_raytrace.h。",
+          "learning_goals": [
+            "掌握 BVH 遍历的硬件流程",
+            "理解 ray-box 与 ray-triangle 相交测试",
+            "了解 rtu_walker/rtu_isect 的 SimX 建模"
+          ],
+          "source_files": [
+            "sim/simx/rtu/rtu_unit.cpp",
+            "sim/simx/rtu/rtu_walker.cpp",
+            "sim/simx/rtu/rtu_isect.cpp",
+            "sw/kernel/include/vx_raytrace.h",
+            "docs/designs/ray_tracing_unit.md"
+          ],
+          "minimal_modules": [
+            "rtu_unit.cpp",
+            "rtu_walker.cpp",
+            "rtu_isect.cpp",
+            "ray_tracing_unit.md"
+          ],
+          "practice_task": "阅读 ray_tracing_unit.md，画出一条射线从发射到命中三角形的 RTU 处理流程，标注 BVH walker 与相交测试模块。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "虚拟内存、原子操作与命令处理器",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "虚拟内存子系统",
+          "order": 1,
+          "filename": "u11-l1-virtual-memory.md",
+          "level": "advanced",
+          "topic": "讲解 Sv32/Sv39 页表遍历、TLB，以及主机运行时如何为设备建立页表（vm.cpp / vm_types.h）。",
+          "learning_goals": [
+            "掌握 Vortex 的页表格式与 PTW",
+            "理解 TLB 的作用与 miss 处理",
+            "了解主机运行时如何为设备分配并建立页表"
+          ],
+          "source_files": [
+            "sim/simx/mem/mmu.cpp",
+            "sim/simx/mem/mmu_tlb.cpp",
+            "sw/common/vm_types.h",
+            "sw/runtime/common/vm.cpp",
+            "docs/designs/virtual_memory_subsystem.md"
+          ],
+          "minimal_modules": [
+            "mmu.cpp",
+            "mmu_tlb.cpp",
+            "vm.cpp",
+            "virtual_memory_subsystem.md"
+          ],
+          "practice_task": "解释 Sv32 页表遍历的过程，并说明主机运行时 vm.cpp 如何把设备虚拟地址映射到物理内存（注意 RTL 当前仍硬编码 Sv32 的待确认点）。",
+          "depends_on": [
+            "u8-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "原子内存操作与多缓存一致性",
+          "order": 2,
+          "filename": "u11-l2-amo-coherence.md",
+          "level": "advanced",
+          "topic": "讲解 AMO 的 read-modify-write 在缓存层次中的实现，以及多缓存间的 AMO 一致性保证。",
+          "learning_goals": [
+            "掌握 AMO 在缓存中的 RMW 实现",
+            "理解多缓存 AMO 一致性的仲裁",
+            "了解 amo_unit 在 SimX 与 RTL 的对应"
+          ],
+          "source_files": [
+            "sim/simx/amo/amo_unit.cpp",
+            "hw/rtl/cache/VX_amo_unit.sv",
+            "hw/rtl/cache/VX_cache_amo.sv",
+            "docs/designs/atomic_memory_operations.md",
+            "docs/designs/multicache_amo_coherence.md"
+          ],
+          "minimal_modules": [
+            "amo_unit.cpp",
+            "VX_amo_unit.sv",
+            "atomic_memory_operations.md"
+          ],
+          "practice_task": "用 tests/regression/amo 中的例子解释一次原子加如何在多缓存环境下保持正确性，并说明 AMO 为何要被路由到特定缓存点。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "命令处理器与 KMU",
+          "order": 3,
+          "filename": "u11-l3-command-processor.md",
+          "level": "advanced",
+          "topic": "讲解一次 kernel launch 从主机 DCR 写入，到 CP（VX_cp_core/VX_cp_launch）解包，再到 KMU 分发 CTA 的完整路径。",
+          "learning_goals": [
+            "掌握命令处理器 CP 的 AXI-L 寄存器接口与解包",
+            "理解 KMU 如何根据 grid/block/cluster 维度派发 CTA",
+            "了解 SimX kmu.cpp 与 RTL CP 的对应"
+          ],
+          "source_files": [
+            "hw/rtl/cp/VX_cp_core.sv",
+            "hw/rtl/cp/VX_cp_launch.sv",
+            "sim/simx/kmu/kmu.cpp",
+            "sim/common/cmd_processor.cpp",
+            "docs/designs/command_processor.md"
+          ],
+          "minimal_modules": [
+            "VX_cp_core.sv",
+            "VX_cp_launch.sv",
+            "kmu.cpp",
+            "command_processor.md"
+          ],
+          "practice_task": "跟踪一次 vx_start 触发的 launch：主机写 DCR→CP 解包→KMU 派发 CTA，画出完整的控制流并标注 grid/block/cluster 维度的来源。",
+          "depends_on": [
+            "u3-l4",
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "上层软件栈：OpenCL / Vulkan / HIP",
+      "level": "advanced",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "OpenCL 支持（PoCL）",
+          "order": 1,
+          "filename": "u12-l1-opencl-pocl.md",
+          "level": "advanced",
+          "topic": "讲解 Vortex 通过 PoCL 提供 OpenCL 1.2 支持，PoCL 如何把 OpenCL 程序映射到 Vortex 运行时与 VOLT 编译器。",
+          "learning_goals": [
+            "掌握 OpenCL 经 PoCL 运行在 Vortex 的路径",
+            "理解 PoCL→vortex runtime 的衔接",
+            "了解 tests/opencl 测试套件的组织"
+          ],
+          "source_files": [
+            "docs/software.md",
+            "tests/opencl",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "software.md",
+            "tests/opencl"
+          ],
+          "practice_task": "用 blackbox 或 tests/opencl 跑一个 OpenCL kernel（如 copybuf 或 backprop），解释 OpenCL API 调用如何最终落到 vortex.h 的运行时接口。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l2",
+          "title": "Vulkan 支持（vortexpipe / mesa）",
+          "order": 2,
+          "filename": "u12-l2-vulkan-mesa.md",
+          "level": "advanced",
+          "topic": "讲解 mesa-vortex 驱动与 vortexpipe 架构如何把 Vulkan 映射到 Vortex 的图形/计算栈。",
+          "learning_goals": [
+            "掌握 Vulkan 经 mesa-vortex 运行的架构",
+            "理解 vortexpipe 的分层职责",
+            "了解图形软件栈与 Vulkan 的衔接"
+          ],
+          "source_files": [
+            "docs/designs/vortexpipe_architecture.md",
+            "docs/designs/graphics_software_stack.md",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "vortexpipe_architecture.md",
+            "graphics_software_stack.md"
+          ],
+          "practice_task": "阅读 vortexpipe_architecture.md，画出 Vulkan API → mesa-vortex 驱动 → Vortex 图形/计算栈的映射路径。",
+          "depends_on": [
+            "u12-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l3",
+          "title": "HIP 支持（chipStar）",
+          "order": 3,
+          "filename": "u12-l3-hip-chipstar.md",
+          "level": "advanced",
+          "topic": "讲解 Vortex 通过 chipStar 提供 HIP 支持，HIP 程序如何经 SPIR-V 编译并运行在 Vortex 上。",
+          "learning_goals": [
+            "掌握 HIP 经 chipStar 运行的路径",
+            "理解 SPIR-V 在编译链中的作用",
+            "了解 tests/hip 测试套件"
+          ],
+          "source_files": [
+            "docs/designs/hip_on_vortex_chipstar.md",
+            "tests/hip",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "hip_on_vortex_chipstar.md",
+            "tests/hip"
+          ],
+          "practice_task": "阅读 hip_on_vortex_chipstar.md，用 tests/hip 中的 sgemm/vecadd 例子解释 HIP kernel 如何被编译并在 Vortex 上执行。",
+          "depends_on": [
+            "u12-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u13",
+      "title": "测试、调试与性能分析",
+      "level": "advanced",
+      "order": 13,
+      "lectures": [
+        {
+          "id": "u13-l1",
+          "title": "测试与回归流程",
+          "order": 1,
+          "filename": "u13-l1-testing-regression.md",
+          "level": "advanced",
+          "topic": "讲解 tests 套件组织、make run-simx/run-rtlsim 回归，以及 ci/regression.sh 与声明式 testcases 目录。",
+          "learning_goals": [
+            "掌握 tests 下各类测试套件的定位",
+            "会用 make run-simx 与 ci/regression.sh 跑回归",
+            "理解 CONFIGS 与架构宏在测试中的作用"
+          ],
+          "source_files": [
+            "docs/testing.md",
+            "docs/continuous_integration.md",
+            "ci/regression.sh.in",
+            "ci/testcases",
+            "tests/regression/Makefile"
+          ],
+          "minimal_modules": [
+            "testing.md",
+            "regression.sh.in",
+            "ci/testcases"
+          ],
+          "practice_task": "运行 make -C tests/regression run-simx 跑一类回归，再用 ci/regression.sh --test <category> 选择一个测试类别并记录结果。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l2",
+          "title": "调试追踪与 SimX-as-oracle",
+          "order": 2,
+          "filename": "u13-l2-debugging.md",
+          "level": "advanced",
+          "topic": "讲解 --debug 生成运行时 trace、trace_csv.py 解析、Perfetto 分析，以及 RTL 调试卡住时的 SimX-as-oracle 模式。",
+          "learning_goals": [
+            "会用 --debug 生成 trace 并用 trace_csv.py 解析",
+            "掌握源码级 kernel 调试（GDB/OpenOCD）",
+            "理解 SimX-as-oracle 的 trace diff 调试法"
+          ],
+          "source_files": [
+            "docs/debugging.md",
+            "ci/trace_csv.py",
+            "docs/kernel_debugging.md",
+            "docs/perfetto_analysis.md"
+          ],
+          "minimal_modules": [
+            "debugging.md",
+            "trace_csv.py",
+            "kernel_debugging.md"
+          ],
+          "practice_task": "用 --debug=3 运行一个程序生成 trace，用 trace_csv.py 解析并定位某条指令的执行记录；说明 SimX-as-oracle 模式的三个步骤。",
+          "depends_on": [
+            "u13-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l3",
+          "title": "性能计数器与 roofline 分析",
+          "order": 3,
+          "filename": "u13-l3-perf-analysis.md",
+          "level": "advanced",
+          "topic": "讲解 --perf=1 收集的性能计数器（调度器利用率、流水线停顿、指令混合、内存延迟）与 perf/roofline.py 的 roofline 分析。",
+          "learning_goals": [
+            "掌握 --perf=1 暴露的关键性能计数器",
+            "会用 perf/roofline.py 生成 roofline 图",
+            "理解性能基线（perf_gate）的不可手改纪律"
+          ],
+          "source_files": [
+            "sw/runtime/common/perf.cpp",
+            "perf/roofline.py",
+            "docs/perfetto_analysis.md",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "perf.cpp",
+            "roofline.py",
+            "perfetto_analysis.md"
+          ],
+          "practice_task": "用 --perf=1 运行 sgemm，跑 roofline.py 生成 roofline 图，并用计数器解释调度器利用率与流水线停顿的来源。",
+          "depends_on": [
+            "u13-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l4",
+          "title": "持续集成与 model_parity 门控",
+          "order": 4,
+          "filename": "u13-l4-ci-parity.md",
+          "level": "advanced",
+          "topic": "讲解 CI pytest 框架（conftest/test_runner/testcase）与 model_parity 门控如何自动验证 simx↔rtlsim 一致性。",
+          "learning_goals": [
+            "掌握 CI catalog 与 pytest 运行机制",
+            "理解 model_parity 案例的判定标准",
+            "了解 perf_gate 基线与 known_issue 的纪律"
+          ],
+          "source_files": [
+            "docs/designs/continuous_integration.md",
+            "ci/conftest.py",
+            "ci/test_runner.py",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "continuous_integration.md",
+            "conftest.py",
+            "test_runner.py"
+          ],
+          "practice_task": "阅读一个 model_parity 测试用例 YAML，解释它如何在 simx 与 rtlsim 上跑同一 app/args/configs 并断言退休指令一致、周期在容差内。",
+          "depends_on": [
+            "u7-l4",
+            "u13-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u14",
+      "title": "FPGA、综合与二次开发",
+      "level": "advanced",
+      "order": 14,
+      "lectures": [
+        {
+          "id": "u14-l1",
+          "title": "FPGA AFU 外壳与驱动",
+          "order": 1,
+          "filename": "u14-l1-fpga-afu.md",
+          "level": "advanced",
+          "topic": "讲解 OPAE（Intel）与 XRT（Xilinx）两种 FPGA 驱动，以及 AFU 外壳如何把 Vortex 接到 PCIe。",
+          "learning_goals": [
+            "掌握 OPAE 与 XRT 驱动的差异",
+            "理解 AFU 外壳在 PCIe 集成中的角色",
+            "了解 runtime/opae 与 runtime/xrt 后端的定位"
+          ],
+          "source_files": [
+            "hw/rtl/afu/opae",
+            "hw/rtl/afu/xrt",
+            "sw/runtime/opae",
+            "sw/runtime/xrt",
+            "docs/designs/fpga_afu_shell.md",
+            "docs/fpga_setup.md"
+          ],
+          "minimal_modules": [
+            "fpga_afu_shell.md",
+            "fpga_setup.md",
+            "runtime/opae",
+            "runtime/xrt"
+          ],
+          "practice_task": "对比 OPAE 与 XRT 两条 FPGA 路径，画出 Vortex RTL → AFU 外壳 → PCIe → 主机驱动的集成示意，并说明各自支持的 FPGA 板卡。",
+          "depends_on": [
+            "u3-l3",
+            "u11-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u14-l2",
+          "title": "综合流程与 PPA 分析",
+          "order": 2,
+          "filename": "u14-l2-synthesis.md",
+          "level": "advanced",
+          "topic": "讲解 hw/syn 下 Altera/Xilinx/Synopsys/Yosys 各厂商综合脚本，以及 PPA（性能/面积/功耗）报告的生成。",
+          "learning_goals": [
+            "掌握四类综合流程的脚本组织",
+            "理解 PPA 报告的关键指标",
+            "了解综合与配置系统的关系"
+          ],
+          "source_files": [
+            "docs/synthesis_analysis.md",
+            "hw/syn",
+            "docs/designs/build_configuration_system.md"
+          ],
+          "minimal_modules": [
+            "synthesis_analysis.md",
+            "hw/syn 各厂商目录"
+          ],
+          "practice_task": "阅读 hw/syn 下某一厂商（如 xilinx 或 altera）的综合脚本入口，说明从 RTL 到比特流/网表的流程，以及 PPA 报告在何处生成。",
+          "depends_on": [
+            "u14-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u14-l3",
+          "title": "扩展 Vortex：自定义 ISA 扩展与开发指南",
+          "order": 3,
+          "filename": "u14-l3-extending-vortex.md",
+          "level": "advanced",
+          "topic": "讲解如何为 Vortex 新增一个功能单元/自定义加速器，列出在 SimX、RTL、kernel、config 各层需要协同改动的地方。",
+          "learning_goals": [
+            "掌握新增 FuncUnit 的 SimX 扩展点",
+            "理解 RTL/kernel/config 的配套改动",
+            "了解编码规范与基数规则对扩展的约束"
+          ],
+          "source_files": [
+            "docs/designs/custom_accelerator_isa_extensions.md",
+            "docs/coding_guidelines_cpp.md",
+            "docs/coding_guidelines_verilog.md",
+            "docs/designs/simx_simulator_architecture.md"
+          ],
+          "minimal_modules": [
+            "custom_accelerator_isa_extensions.md",
+            "coding_guidelines_cpp.md",
+            "coding_guidelines_verilog.md"
+          ],
+          "practice_task": "设计一个『新增一个自定义加速器 FuncUnit』的方案，列出在 SimX（新增 unit + channel 接线）、RTL（新增 .sv + 流水线接入）、kernel（新增 vx_*.h 内联函数）、config（新增 VX_CFG_* 开关）四层各自的改动清单。",
+          "depends_on": [
+            "u6-l4",
+            "u7-l3",
+            "u14-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
