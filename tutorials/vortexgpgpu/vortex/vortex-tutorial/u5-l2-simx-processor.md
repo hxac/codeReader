@@ -1,0 +1,416 @@
+# SimX 入口与处理器层次
+
+## 1. 本讲目标
+
+学完本讲，你应当能够：
+
+- 说清 `sim/simx/main.cpp` 这个独立可执行程序从「拿到一个镜像文件」到「打印退出码」的完整启动序列；
+- 解释 `Processor` 顶层对象持有哪些部件（KMU、唯一的 `Memory`/DRAM、L3、若干 `Cluster`），以及它如何把 DCR 写入路由到正确的子系统；
+- 画出 `Processor → Cluster → Socket → Core` 这条 GPU 实例化层次，并标注每一层共享的缓存边界；
+- 准确说出 `any_running()` 在什么条件下返回假（即程序何时被认为「跑完了」）。
+
+本讲是 u5-l1（SimObject/SimChannel/SimPlatform 三大基元）的下游：u5-l1 讲的是「零件怎么造、怎么连线、怎么 tick」，本讲讲的是「谁把这些零件组装成一台 GPU、谁在 main 里按下启动键」。
+
+## 2. 前置知识
+
+- **SimObject / SimChannel / SimPlatform**：SimX 里所有硬件块都是 `SimObject`，块之间只通过 `SimChannel` 连线，`SimPlatform::instance().tick()` 是驱动整个仿真器前进一个周期的唯一引擎（详见 u5-l1）。本讲你会看到大量「创建 SimObject → 用 channel 把它们绑起来」的代码，这正是 u5-l1 基数规则的落地。
+- **DCR（Device Control Register）**：主机侧用来配置设备的寄存器。在 SimX 里，主机并不真实存在，`main.cpp` 直接代替主机往处理器里「写 DCR」来配置一次 kernel 启动。KMU 相关的 DCR 编号定义在 `VX_types.toml` 的 `[dcr_kmu]` 段（是软硬件共享的 ABI 契约，见 u2-l1）。
+- **KMU（Kernel Management Unit）**：负责把一次 kernel launch（grid/block/cluster 维度）拆成一个一个 CTA（Cooperative Thread Array），喂给核心去执行。本讲只看它「接收 DCR、向外吐 CTA」的接口，CTA→warp 的细节留给 u6-l1。
+- **配置宏 `VX_CFG_*`**：如 `VX_CFG_NUM_CORES`、`VX_CFG_NUM_CLUSTERS`、`VX_CFG_SOCKET_SIZE` 等，全部来自 `VX_config.toml`（见 u2-l1/u2-l2）。本讲里所有「几个 cluster、几个 socket、几个 core」都由这些编译期常量决定。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+|------|------|
+| [sim/simx/main.cpp](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/main.cpp) | SimX 的独立 CLI 入口：解析参数、建 RAM、建 Processor、写 DCR、加载镜像、tick 循环、读退出码。 |
+| [sim/simx/processor.cpp](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor.cpp) + [processor.h](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor.h) + [processor_impl.h](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor_impl.h) | GPU 顶层持有者：拥有 KMU、唯一的 DRAM（`Memory`）、L3 cache 和一组 `Cluster`；聚合性能计数器；暴露 `cycle()`/`run()`/`any_running()`/`dcr_write()`。 |
+| [sim/simx/cluster.cpp](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/cluster.cpp) | Cluster：持有若干 `Socket`、共享的 L2 cache、可选的图形/光追/DXA 扩展引擎、全局屏障。 |
+| [sim/simx/socket.cpp](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/socket.cpp) | Socket：持有若干 `Core` 和被这些 core 共享的 L1 icache/dcache 簇。 |
+| [sim/simx/core.cpp](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/core.cpp) | Core：把流水线各级（scheduler/decode/scoreboard/ibuffer/operands/dispatcher/功能单元/本地内存/合并器/MMU）接线成一个完整的核。 |
+| [sim/simx/kmu/kmu.cpp](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp) | KMU：保存 kernel 描述符，按 `step()` 一个一个产出 CTA 请求。 |
+| [sim/simx/constants.h](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/constants.h) | 派生常量，例如 `NUM_SOCKETS = NUM_CORES / SOCKET_SIZE`。 |
+
+## 4. 核心概念与源码讲解
+
+### 4.1 main.cpp：SimX 的独立 CLI 入口与启动序列
+
+#### 4.1.1 概念说明
+
+SimX 有两种被使用的方式：一是作为库被外部仿真器（SST、gem5）嵌入，由它们驱动时钟；二是编译成一个独立的可执行程序 `simx`，自己就是一个最小的「主机 + GPU」一体环境。`main.cpp` 就是后者的全部实现。
+
+它要做的事，和真实世界里一个 CUDA 主机程序做的事几乎一一对应，只是主机被简化成了几行 C++：
+
+1. 「插上显卡」——创建 `RAM` 和 `Processor`；
+2. 「分配设备内存、设置启动参数」——往处理器写一组 KMU DCR；
+3. 「把 kernel 镜像加载到设备」——根据文件后缀加载 ELF/vxbin/bin/hex；
+4. 「启动并等待」——tick 循环，直到设备不再运行；
+5. 「读回结果与退出码」——刷缓存、读退出码。
+
+#### 4.1.2 核心流程
+
+`main.cpp` 的执行顺序如下（伪代码）：
+
+```
+parse_args(argc, argv)            # 解析 -s/-d/-p/-V 与程序路径
+ram = RAM(0, VX_VM_PAGE_SIZE)     # 建主机可见的镜像内存
+processor = Processor()           # 建 GPU 顶层（内部已建好 KMU/DRAM/cluster 树）
+processor.attach_ram(&ram)        # 把 RAM 接到 DRAM 模型上（数据的真正归宿）
+
+# 写一组 KMU DCR，配置「默认启动」
+processor.dcr_write(KMU_STARTUP_ADDR0/1, 0x80000000)
+processor.dcr_write(KMU_STARTUP_ARG0/1, 0)
+processor.dcr_write(KMU_GRID_DIM_X/Y/Z, 1)      # grid = 1x1x1
+processor.dcr_write(KMU_BLOCK_DIM_X/Y/Z, 1)     # block = 1x1x1
+processor.dcr_write(KMU_CLUSTER_DIM_X/Y/Z, 1)
+processor.dcr_write(KMU_WARP_STEP_X, NUM_THREADS)
+... (LMEM_SIZE=0, BLOCK_SIZE=1)
+
+# 加载镜像（按后缀分流）
+if ELF:  loadElfImage(...) 并用 img.entry 覆盖 STARTUP_ADDR
+elif vxbin: ram.loadVxImage(...)
+elif bin:  ram.loadBinImage(...)
+elif hex:  ram.loadHexImage(...)
+
+# 三选一的运行模式
+if debug_mode:   OpenOCD/RBB 调试循环
+elif HTIF(ELF tohost): while (processor.cycle()) monitor.tick()
+else (普通):     CoutDrainer 每个 cycle 排空 COUT 环；while (processor.cycle())
+
+# 普通模式收尾
+对所有 cid 写 VX_DCR_BASE_CACHE_FLUSH 刷缓存
+ram.read(&exitcode, VX_MEM_IO_EXIT_CODE, 4)
+return exitcode
+```
+
+注意一个关键点：`main.cpp` 用的是 `processor.cycle()`（单步）而不是 `processor.run()`（一把跑完）。`cycle()` 每次调用前进一个周期并返回「是否还有事要做」，这让 main 能在每次 tick 之间插入自己的逻辑（排空 COUT 环、检查 tohost）。
+
+#### 4.1.3 源码精读
+
+入口与对象创建——`main` 先建 RAM 与 Processor，再把 RAM 挂上去：
+
+[sim/simx/main.cpp:86-99](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/main.cpp#L86-L99) —— `Processor processor;` 在构造时就已经把整棵 cluster 树、KMU、DRAM 都建好了（详见 4.2）；`attach_ram` 只是把「数据到底存哪儿」接上。
+
+接下来是本讲实践任务的核心——一组 KMU DCR 写入，配置一次「最小的单 CTA 启动」：
+
+[sim/simx/main.cpp:101-122](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/main.cpp#L101-L122) —— `startup_addr = 0x80000000` 是 flat-image（vxbin/bin/hex）的加载地址；grid/block/cluster 维度全设成 1，意味着只派发一个 CTA、一个 warp。注意 `VX_DCR_KMU_STARTUP_ADDR1` 只在 64 位（`VX_CFG_XLEN==64`）下写高 32 位——这正是 u2-l1 讲过的、`VX_CFG_XLEN` 作为 `[[enum]]` 在 cflags 里必须显式传入的体现。
+
+镜像加载按后缀分流，ELF 会用自己的入口地址覆盖默认 startup 地址：
+
+[sim/simx/main.cpp:124-149](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/main.cpp#L124-L149) —— ELF 还会附着一个 `HostMonitor`（用来读 riscv-tests 的 `tohost` 通过/失败符号）；其余格式一律落到默认 `0x80000000`。
+
+普通运行模式与收尾（最常见的路径）：
+
+[sim/simx/main.cpp:223-243](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/main.cpp#L223-L243) —— `CoutDrainer cout(ram)` 在构造时复位 COUT 环；循环体 `while (processor.cycle())` 每次 tick 后排空设备打印；循环结束后，对每一个全局 core id 写一次 `VX_DCR_BASE_CACHE_FLUSH`（触发缓存回写，见 4.2），最后从 IO 区 `VX_MEM_IO_EXIT_CODE` 读出退出码。这里的 `cid` 上限是 `VX_CFG_NUM_CORES * VX_CFG_NUM_CLUSTERS`，即全局 core 总数。
+
+> 补充：`-d` 调试模式（[main.cpp:154-213](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/main.cpp#L154-L213)）会显式 `processor.reset(); processor.start_kmu();` 并把 warp 0 的 PC 直接设到 startup 地址，再起一个 remote-bitbang 服务等 OpenOCD 连接。它之所以要手动做这两步，是因为它绕过了 `cycle()` 的懒初始化（见 4.4）。
+
+#### 4.1.4 代码实践
+
+**实践目标**：把 main.cpp 写入的 KMU DCR 一张表整理出来，理解每个字段对 CTA 派发的影响。
+
+**操作步骤**：
+
+1. 打开 [sim/simx/main.cpp:101-122](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/main.cpp#L101-L122)，逐行抄下每个 `processor.dcr_write(...)`。
+2. 对照 [sim/simx/kmu/kmu.cpp:47-71](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp#L47-L71) 的 `Kmu::dcr_write`，确认每个 DCR 编号落到 KMU 的哪个成员变量。
+3. 再对照 [VX_types.toml 的 `[dcr_kmu]` 段](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/VX_types.toml#L62-L84)，记下每个寄存器的编号。
+
+**预期结果（你应整理出类似下表）**：
+
+| DCR | main.cpp 写入的值 | KMU 内部落点 | 含义 |
+|-----|------------------|-------------|------|
+| `KMU_STARTUP_ADDR0/1` | `0x80000000` | `PC_` | 镜像基址 / 启动 PC |
+| `KMU_STARTUP_ARG0/1` | `0` | `param_` | 传给 kernel 的参数指针 |
+| `KMU_GRID_DIM_X/Y/Z` | `1,1,1` | `grid_dim_[]` | grid 维度（CTA 网格） |
+| `KMU_BLOCK_DIM_X/Y/Z` | `1,1,1` | `block_dim_[]` | block 维度（每 CTA 线程数） |
+| `KMU_CLUSTER_DIM_X/Y/Z` | `1,1,1` | `cluster_dim_[]` | cluster 组维度 |
+| `KMU_LMEM_SIZE` | `0` | `lmem_size_` | 每 CTA 本地内存大小 |
+| `KMU_BLOCK_SIZE` | `1` | `block_size_` | 每 CTA 的 warp 数 |
+| `KMU_WARP_STEP_X` | `NUM_THREADS` | `warp_step_[0]` | warp 间线程步长 |
+
+**需要观察的现象**：`grid=block=cluster=1` 且 `block_size=1` 意味着 KMU 只会派发**一个 CTA、一个 warp**。把这组和 `Kmu::start()` 的使能条件（[kmu.cpp:73-86](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp#L73-L86)，要求 `block_size_>0` 且各维度 `>0`）对照，就能理解为何这些「全 1」是能跑通的最小配置。如果你把 `KMU_GRID_DIM_X` 改成 0 重新编译运行（**待本地验证**），预期 KMU 永不 `running_`、程序立即结束。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 `VX_DCR_KMU_STARTUP_ADDR1` 的写入被 `#if (VX_CFG_XLEN == 64)` 包住？
+> **答**：因为 startup 地址是 64 位，`STARTUP_ADDR0` 装低 32 位、`STARTUP_ADDR1` 装高 32 位。32 位平台（`XLEN==32`）下地址只有 32 位，高半段无意义，故编译期裁掉。这也保证了 32/64 位两套构建互不干扰。
+
+**练习 2**：普通模式下，main 是怎么拿到设备打印的字符的？
+> **答**：通过 `CoutDrainer cout(ram)`。它每个 cycle 读取设备 IO 区的 COUT 环（设备侧 `vx_putchar` 写入的那个环形缓冲），把 `[rd, wr)` 之间的字节拷出来打到主机 stdout。没有它，COUT 环一旦写满，设备侧 `vx_printf` 就会丢字节（见 u4-l3）。
+
+### 4.2 Processor：GPU 顶层持有者（KMU + 单一 Memory + clusters + L3）
+
+#### 4.2.1 概念说明
+
+`Processor` 是「一台 GPU」在 SimX 里的根对象。它的设计有两个要点：
+
+- **它持有全局唯一的 DRAM**：整个 GPU 不管有多少 cluster，最终都接到同一个 `Memory`（DRAM 模型，底层用 ramulator2 提供时序，详见 u8-l3）。这与「每个 cluster 有自己的 L2、每个 socket 有自己的 L1」形成对比——内存是全局共享的。
+- **它持有 KMU**：KMU 不属于任何 cluster，而是处理器全局的「kernel 派发器」，因为一次 launch 的 CTA 网格要跨所有 cluster 调度。
+
+`Processor` 用了 **Pimpl（指针实现）模式**：公开类 `Processor`（[processor.h](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor.h)）只是一组转发到 `ProcessorImpl*` 的薄壳（[processor.cpp:342-401](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor.cpp#L342-L401)），真正的状态都在 `ProcessorImpl`（[processor_impl.h](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor_impl.h)）。这样做是为了把 `Kmu`/`Memory`/`Cluster` 这些带完整定义的类挡在头文件之外，减少编译依赖。
+
+#### 4.2.2 核心流程
+
+`ProcessorImpl` 的构造顺序就是「组装一台 GPU」的顺序：
+
+```
+SimPlatform::initialize()             # 初始化平台单例
+kmu_       = Kmu::Create("kmu")       # 1. 建 kernel 派发器
+memsim_    = Memory::Create("dram")   # 2. 建唯一 DRAM
+for i in NUM_CLUSTERS:
+    clusters_[i] = Cluster::Create()  # 3. 建所有 cluster（递归建 socket/core）
+l3cache_   = Cache::Create("l3cache") # 4. 建唯一的 L3
+# 5. 接线：cluster.mem_req_out  → l3cache.core_req_in
+#          l3cache.mem_req_out   → memsim.mem_req_in
+# 6. 装内存性能计数 callback
+this->reset()                         # 7. 复位整棵树
+```
+
+L3 在这里的角色很有意思：**当 L3 使能时它是真正的 LLC（末级缓存）；当 L3 不使能时，它退化成一个「透明旁路仲裁器」**，此时 LLC 落到 L2（或 L1）。这个选择由 `Cache::Config` 的第一个参数 `!VX_CFG_L3_ENABLED`（bypass 位）控制。
+
+#### 4.2.3 源码精读
+
+构造函数里创建四大部件：
+
+[sim/simx/processor.cpp:36-60](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor.cpp#L36-L60) —— 注意 `Memory::Config` 用的 `VX_CFG_PLATFORM_MEMORY_NUM_BANKS`、`MEM_CLOCK_RATIO` 等，DRAM 是被参数化的时序模型。`clusters_` 的大小直接等于 `VX_CFG_NUM_CLUSTERS`。
+
+创建 L3 并把 cluster 与 DRAM 串起来的接线：
+
+[sim/simx/processor.cpp:62-115](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor.cpp#L62-L115) —— `l3cache_` 的 `is_llc` 标志（构造参数最后一项）是 `VX_CFG_L3_ENABLED != 0`；bypass 位（第一项）是 `!VX_CFG_L3_ENABLED`，两者互补。104-109 行把每个 cluster 的 `mem_req_out` 绑到 L3 的 core 侧端口（这是 u5-l1 基数规则的标准做法：模块只通过 channel 通信）；112-115 行把 L3 的 mem 侧绑到 DRAM。
+
+DCR 写入的路由——这是理解「主机写一个寄存器，到底谁收」的关键：
+
+[sim/simx/processor.cpp:286-299](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor.cpp#L286-L299) —— KMU 的 DCR（地址落在 `[VX_DCR_KMU_STATE_BEGIN, VX_DCR_KMU_STATE_END)`）**只发给 KMU、不广播**；其余 DCR 广播给所有 cluster（cluster 再广播给 socket、socket 再按 tag 选 core）。这就解释了 main.cpp 写的 KMU DCR 为何能精准落到 KMU 上。
+
+DCR 读的特殊路径——刷缓存：
+
+[sim/simx/processor.cpp:301-316](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor.cpp#L301-L316) —— 读 `VX_DCR_BASE_CACHE_FLUSH` 时，不是真去读某个寄存器，而是触发 `flush_caches()`（[processor.cpp:156-221](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor.cpp#L156-L221)），由内向外把 L1→L2→L3 的脏行全部回写到 DRAM，然后返回 0。这正是 main.cpp 末尾「读回结果前先刷缓存」的实现。
+
+#### 4.2.4 代码实践
+
+**实践目标**：验证「KMU DCR 不广播、其余 DCR 广播」这条路由规则。
+
+**操作步骤**：
+
+1. 读 [processor.cpp:286-299](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor.cpp#L286-L299) 的 `dcr_write`，找到判定 `is_kmu_dcr` 的区间端点。
+2. 在 [VX_types.toml 的 `[dcr_kmu]` 段](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/VX_types.toml#L62-L84) 确认 `VX_DCR_KMU_STATE_BEGIN=0x010`、`VX_DCR_KMU_STATE_END=0x024`。
+3. 跟踪 `cluster->dcr_write`（[cluster.cpp:531-586](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/cluster.cpp#L531-L586)），看非 KMU 的 DCR 如何先匹配扩展引擎（DXA/TEX/OM/RASTER）再落回 socket。
+
+**预期结果**：你会确认一条完整的 DCR 路由链——`Processor.dcr_write` → 若是 KMU 区间则 `kmu_->dcr_write`；否则 `Cluster.dcr_write` → 若命中扩展引擎区间则交给对应 `*_core_`；否则 `Socket.dcr_write` → `Core.dcr_write`。
+
+**需要观察的现象**：`Core::dcr_write`（[core.cpp:1051-1056](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/core.cpp#L1051-L1056)）实际上是空操作（注释明说「KMU DCRs 在 ProcessorImpl 层处理，永远到不了这里」）。这说明路由是逐层「截留」的：每一层先认领属于自己的 DCR，剩下的才往下传。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么 KMU 放在 `Processor` 层而不是某个 `Cluster` 里？
+> **答**：因为一次 kernel launch 的 grid 是跨所有 cluster 的全局调度，CTA 要按 cluster 组维度分布到不同 cluster。如果 KMU 在 cluster 内，就无法表达「这一组 CTA 必须共驻在相邻 cluster」的聚类语义。所以 KMU 是全局唯一的。
+
+**练习 2**：L3 不使能时，`l3cache_` 这个对象还存在吗？它干什么？
+> **答**：还在。它的 bypass 位被置 1，退化成一个透明仲裁器，只把 cluster 的请求转交给 DRAM，不做缓存。这样上层的接线代码（cluster→L3→DRAM）不用因 L3 是否使能而分叉，`is_llc` 标志则下移给 L2 或 L1。
+
+### 4.3 处理器实例化层次：Cluster → Socket → Core
+
+#### 4.3.1 概念说明
+
+Vortex 的可扩展性靠的是一条规整的实例化层次：
+
+```
+Processor
+ └─ Cluster[NUM_CLUSTERS]          共享 L2（+ 扩展引擎 + 全局屏障）
+     └─ Socket[NUM_SOCKETS]        共享 L1（icache/dcache 簇）
+         └─ Core[SOCKET_SIZE]      6 级流水线 + 本地内存
+```
+
+其中 `NUM_SOCKETS` 是派生量，不是 toml 里直接配的：
+
+\[ \texttt{NUM\_SOCKETS} = \lceil \texttt{NUM\_CORES} / \texttt{SOCKET\_SIZE} \rceil \]
+
+定义在 [sim/simx/constants.h:66](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/constants.h#L66)（`__UP` 是「向上取整，且把 0 当成 1」的宏）。于是「共享边界」就清楚了：**socket 内的 core 共享 L1，cluster 内的 socket 共享 L2，所有 cluster 共享 L3/DRAM**——这正好对应 u1-l1 里讲的硬件聚类层次。
+
+每一层的 id 也是按这条层次计算的，全局 core id 的公式是：
+
+\[ \texttt{global\_core\_id} = \texttt{cluster\_id}\cdot(\texttt{NUM\_SOCKETS}\cdot\texttt{SOCKET\_SIZE}) + \texttt{socket\_id}\cdot\texttt{SOCKET\_SIZE} + \texttt{core\_idx} \]
+
+#### 4.3.2 核心流程
+
+三层的构造套路高度一致，都是「先建子对象、再建共享缓存、最后用 channel 把子对象接到缓存上」：
+
+- **Cluster**：建 `NUM_SOCKETS` 个 socket → 建 L2 → （可选）建扩展引擎 → 接 L2 fan-in 仲裁器 → 把 L2 的 mem 侧暴露给上层（Processor 的 L3）。
+- **Socket**：建 L1 icache 簇 + L1 dcache 簇 → 建 `SOCKET_SIZE` 个 core → 把 core 的 icache/dcache 端口绑到 L1 簇 → 把 L1 的 mem 侧暴露给上层（Cluster 的 L2）。
+- **Core**：建流水线各级 SimObject（scheduler/decoder/scoreboard/ibuffer/operands/dispatcher/功能单元）→ 建本地内存与合并器 → （可选）建 MMU → 把 icache/dcache 端口暴露给上层（Socket 的 L1）。
+
+#### 4.3.3 源码精读
+
+**Cluster** 创建 socket 与 L2：
+
+[sim/simx/cluster.cpp:48-91](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/cluster.cpp#L48-L91) —— `sockets_` 大小是 `NUM_SOCKETS`；socket_id 按 `cluster_id * sockets_per_cluster + i` 编号（行 65），正是上面公式的中间层。L2 的 `is_llc` 是 `(L2_ENABLED && !L3_ENABLED)`——只有当 L2 使能且 L3 不使能时，L2 才是末级缓存。
+
+**Socket** 创建 L1 簇与 core，并把二者接起来：
+
+[sim/simx/socket.cpp:22-121](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/socket.cpp#L22-L121) —— icache/dcache 用 `CacheCluster` 包装（一个簇里多个 cache 实例，对应多个 core）；core_id 按 `socket_id * cores_per_socket + i` 编号（行 106）。112-120 行把每个 core 的 icache/dcache 端口绑到对应 cache 实例——这是「socket 内 core 共享 L1」的物理实现。
+
+**Core** 的构造展示了它对外暴露的内存端口与对内组装的流水线：
+
+[sim/simx/core.cpp:976-989](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/core.cpp#L976-L989) —— `Core` 作为 SimObject，在构造签名里就声明了对外 channel：`icache_req_out(1, this)`（1 个取指端口）、`dcache_req_out(VX_CFG_DCACHE_NUM_REQS, this)`（多个数据端口）。这些就是上层 Socket 要绑的目标。
+
+Core 内部流水线各级的创建（部分）：
+
+[sim/simx/core.cpp:80-108](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/core.cpp#L80-L108) —— scheduler（内含 CTA dispatcher 与 barrier unit）、decoder、（可选）RVC decompressor、scoreboard、每 warp 的 sequencer，都是通过 `SimPlatform::instance().create_object<T>` 登记到平台的 SimObject。这正是 u5-l1 讲的「对象须经 Create 工厂登记」。
+
+Core 的 `tick()` 把流水线各级逆序调用一遍（逆序是为了在一个周期内让数据「从后往前」就绪，模拟组合逻辑的传播）：
+
+[sim/simx/core.cpp:294-304](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/core.cpp#L294-L304) —— `commit → execute → issue → decode → fetch → schedule`。这 6 步就是 u1-l1 讲的 6 级流水线在 SimX 里的实现骨架，后续 u6 系列会逐级精读。
+
+值得注意的是层次中「空的 on_tick」：[socket.cpp:214-215](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/socket.cpp#L214-L215) 和 [cluster.cpp:726-728](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/cluster.cpp#L726-L728) 的 `on_tick` 都是空的。它们只是「容器/布线」对象，真正的周期推进发生在 Core 和各级缓存内部——这呼应了 u5-l1「被动模块零开销」的设计。
+
+#### 4.3.4 代码实践
+
+**实践目标**：用一张「层次 → 数量公式 → 共享缓存」对照表，把实例化层次钉死。
+
+**操作步骤**：
+
+1. 在 [constants.h:66-69](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/constants.h#L66-L69) 读出 `NUM_SOCKETS`、`VX_CFG_L2_NUM_REQS`、`VX_CFG_L3_NUM_REQS` 的公式。
+2. 在你本地 build 目录生成的 `VX_config.h`（或 `VX_config.toml`）里查出 `NUM_CORES`、`SOCKET_SIZE`、`NUM_CLUSTERS` 的实际值。
+3. 代入公式算出 `NUM_SOCKETS` 与全局 core 总数。
+
+**预期结果**（以默认配置为例，具体值**待本地验证**）：
+
+| 层级 | 数量 | 公式 | 该层共享的缓存 |
+|------|------|------|--------------|
+| Cluster | `NUM_CLUSTERS` | toml 直配 | L2（+扩展引擎） |
+| Socket | `NUM_SOCKETS` | `NUM_CORES / SOCKET_SIZE` | L1 icache/dcache 簇 |
+| Core | `SOCKET_SIZE` | toml 直配 | （无，是流水线最底） |
+| 全局 core | `NUM_CLUSTERS * NUM_CORES` | 上面三者相乘 | L3 / DRAM |
+
+**需要观察的现象**：main.cpp 末尾刷缓存时的循环上限 `VX_CFG_NUM_CORES * VX_CFG_NUM_CLUSTERS`（[main.cpp:236](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/main.cpp#L236)）应当与你算出的「全局 core 总数」一致——这就是「全局 core id」的真实取值范围。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：如果把 `SOCKET_SIZE` 调大到等于 `NUM_CORES`，拓扑会怎样变？
+> **答**：`NUM_SOCKETS` 变成 1，每个 cluster 只剩一个 socket，所有 core 共享同一份 L1。L2 的 fan-in 端口数（`VX_CFG_L2_NUM_REQS = NUM_SOCKETS * L1_MEM_PORTS`）也会随之减少。这演示了 socket 是「L1 共享域」的可调旋钮。
+
+**练习 2**：为什么 Socket 和 Cluster 的 `on_tick` 是空的？
+> **答**：因为它们只负责「在构造时把子对象和缓存用 channel 接好」，自身没有周期性状态要更新。所有时序行为都在 Core、Cache 这些被登记的 SimObject 内部，由 `SimPlatform` 统一 tick。空的 `on_tick` 在 u5-l1 的被动模块机制下不会增加任何开销。
+
+### 4.4 运行循环：cycle()、any_running() 与程序终止判定
+
+#### 4.4.1 概念说明
+
+main.cpp 的 `while (processor.cycle())` 何时退出？答案藏在两个函数里：
+
+- `Processor::cycle()`：前进一个周期，返回「是否还有事在做」；
+- `Processor::any_running()`：判断「是否还有事在做」。
+
+「还有事在做」包含**两个独立的条件**，缺一不可：
+
+1. **某个核心还在运行**（沿 `Cluster.running → Socket.running → Core.running` 一路或起来）；
+2. **或者还有 channel 包在路上**（`SimChannelBase::inflight_count() != 0`）。
+
+第二个条件尤其重要：即使所有核心都退休了，但还有一个 cache 回写包没到 DRAM，程序就**不算结束**。这保证了 main 读回结果时，所有写操作都已落地。
+
+#### 4.4.2 核心流程
+
+`cycle()` 有一个「懒初始化」技巧。正常模式下 main 不显式调用 `reset()` 和 `start_kmu()`，而是在第一次 `cycle()` 里隐式完成：
+
+```
+cycle():
+  if 还没初始化:
+      reset()                      # 复位整棵树
+      kmu_->start()                # 让 KMU 开始派发 CTA
+      forward_delegated_launch()   # （图形）转发委托 launch
+      标记已初始化
+  SimPlatform::instance().tick()   # 推进一个周期
+  return any_running()             # 返回是否还有事在做
+```
+
+这让外部驱动者（main、SST、gem5）只需反复调 `cycle()`，不必关心「先 reset 再 start」的编排。`reset()` 会清掉「已初始化」标志，所以连续两次 launch 之间调一次 `reset()` 就能重新派发。
+
+`any_running()` 的判定链：
+
+```
+Processor.any_running():
+  for each cluster: if cluster.running() return true
+  return (inflight_count() != 0)        # 还有在路上包 → true
+
+Cluster.running():  for each socket: if socket.running() return true
+Socket.running():   for each core:   if core.running()   return true
+Core.running():     return scheduler.running() OR pending_instrs 非空
+```
+
+只有当「所有 core 都不运行」**且**「没有任何在路上包」时，`any_running()` 才返回假，`cycle()` 返回假，main 的循环才退出。
+
+#### 4.4.3 源码精读
+
+`cycle()` 的懒初始化与单步推进：
+
+[sim/simx/processor.cpp:270-284](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor.cpp#L270-L284) —— 注释明说这是为了「镜像 run() 的顶部序列，让外部驱动者不必自己编排 reset + kmu start」。对比 `run()`（[processor.cpp:223-249](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor.cpp#L223-L249)）可以看到两者顶部完全一致，区别只是 `run()` 自带 do-while 循环、`cycle()` 把循环交给调用者。
+
+`any_running()` 的双条件：
+
+[sim/simx/processor.cpp:323-328](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor.cpp#L323-L328) —— 先查 cluster，再查 inflight 包。注意这里把 `SimChannelBase::inflight_count()` 作为「全仿真器范围」的全局包计数，因为所有 channel 共享这个静态计数（u5-l1 讲过 channel 的背压正是基于此）。
+
+Core 级的 running 判定——最底层的「忙」定义：
+
+[sim/simx/core.cpp:770-775](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/core.cpp#L770-L775) —— 一个 core「在运行」= scheduler 还在运行（还有活跃 warp）**或** `pending_instrs_` 非空（还有已发射但未提交的指令）。这两者覆盖了「流水线里还有货」的全部情况。
+
+至于「谁把 CTA 喂给 core」——`CtaDispatcher::step` 直接从 KMU 拉 CTA：
+
+[sim/simx/cta_dispatcher.cpp:72-78](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/cta_dispatcher.cpp#L72-L78) —— `kmu_->step(&pending_cta_)` 返回假表示 KMU 的 CTA 网格已经发完（[kmu.cpp:88-166](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp#L88-L166) 里 `running_=false` 的那一刻）。当所有 CTA 都派完、所有 warp 都退休、所有在途包都送达，`any_running()` 才终于为假。
+
+#### 4.4.4 代码实践
+
+**实践目标**：解释 `any_running()` 何时为假，并能在源码里指出每一层判定点。
+
+**操作步骤**：
+
+1. 从 [processor.cpp:323-328](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor.cpp#L323-L328) 出发，沿 `cluster->running()` → [cluster.cpp:460-466](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/cluster.cpp#L460-L466) → `socket->running()` → [socket.cpp:123-129](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/socket.cpp#L123-L129) → `core->running()` → [core.cpp:770-775](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/core.cpp#L770-L775) 走一遍调用链。
+2. 在每一层标注「这一层在什么情况下返回 false」。
+3. 单独解释 `SimChannelBase::inflight_count()` 这个条件为何不能省。
+
+**预期结果（判定链表）**：
+
+| 层级 | 函数 | 返回 false 的条件 |
+|------|------|------------------|
+| Core | `running()` | scheduler 不运行 **且** `pending_instrs_` 空 |
+| Socket | `running()` | 所有 core 都不运行 |
+| Cluster | `running()` | 所有 socket 都不运行 |
+| Processor | `any_running()` | 所有 cluster 都不运行 **且** inflight 包数 == 0 |
+
+**需要观察的现象**：假设一个程序的最后一个 warp 已经退休（所有 core 都 `running()==false`），但它发出的最后一个 store 还在 L2→L3→DRAM 的 channel 上没送达。此时 `inflight_count() != 0`，`any_running()` 仍为真，main 循环继续——直到这个包落地。这就是「绝不能在数据没落地前读回结果」的保证。如果你去掉 `any_running()` 里的 inflight 判断（**示例代码，请勿改源码**），预期会在 flaky 的回读里偶发读到旧值（**待本地验证**）。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：`cycle()` 为什么要做懒初始化，而不是要求调用者先 `reset()` 再 `start_kmu()`？
+> **答**：为了让外部时钟驱动者（main、SST、gem5）的代码尽可能简单——它们只需 `while (cycle()) {}`。`reset()` 会清除「已初始化」标志，于是连续两次 launch 之间只需调一次 `reset()`，下一次 `cycle()` 就会重新启动 KMU。
+
+**练习 2**：为什么「所有 core 都不运行」还不足以判定程序结束？
+> **答**：因为流水线和缓存层次里可能还有未送达的包（比如一个 store 的回写还在路上）。如果此时就停，主机读回的会是旧数据。`inflight_count()==0` 这个补充条件确保所有写操作都已落到 DRAM。
+
+## 5. 综合实践
+
+把本讲四个最小模块串起来，完成一次「全链路走查」：
+
+**任务**：以 [sim/simx/main.cpp](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/main.cpp) 普通模式为脚本，画一张「从按下回车到读出退出码」的完整时序图，要求标注：
+
+1. **对象创建阶段**：`RAM`、`Processor`（内部递归建 KMU/DRAM/Cluster/Socket/Core/L3/L2/L1）、`attach_ram`。
+2. **配置阶段**：main 写的每一组 KMU DCR，以及它经 [processor.cpp:286-299](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor.cpp#L286-L299) 落到 `Kmu::dcr_write` 的路径。
+3. **启动阶段**：第一次 `cycle()` 触发的懒初始化（reset + `kmu_->start()`），KMU 开始派发 CTA（`Kmu::step`），CTA 经 `CtaDispatcher` 激活 warp。
+4. **运行阶段**：每个周期 `SimPlatform::tick()` → Core 的 6 级流水线（commit→...→schedule）推进；`CoutDrainer` 排空 COUT 环。
+5. **终止阶段**：KMU 派发完所有 CTA、所有 warp 退休、所有在途包送达 → `any_running()` 为假 → 循环退出。
+6. **收尾阶段**：对每个全局 core id 写 `VX_DCR_BASE_CACHE_FLUSH`（触发 `flush_caches()` 回写脏行）→ 从 `VX_MEM_IO_EXIT_CODE` 读退出码。
+
+**验证方式**：在 SimX 上用 `--debug=3`（见 u13-l2）跑一个简单程序，对照运行时 trace，确认你在图上标的每个事件都能在 trace 里找到对应的行。运行命令的准确写法与参数含义见 u1-l4 的 `ci/blackbox.sh`。
+
+## 6. 本讲小结
+
+- `main.cpp` 是 SimX 的「主机+GPU」一体入口，按「建 RAM/Processor → 写 KMU DCR → 加载镜像 → `while(cycle())` → 刷缓存 → 读退出码」推进，其中 KMU DCR 配置了 startup 地址、grid/block/cluster 维度等启动参数。
+- `Processor` 是 GPU 顶层，用 Pimpl 模式持有全局唯一的 KMU、唯一的 DRAM（`Memory`）、唯一的 L3 和一组 `Cluster`；DCR 写入按地址区间路由——KMU DCR 只发给 KMU，其余广播给 cluster 树。
+- 实例化层次是 `Processor → Cluster → Socket → Core`，其中 `NUM_SOCKETS = NUM_CORES / SOCKET_SIZE`；socket 内共享 L1、cluster 内共享 L2、全局共享 L3/DRAM。
+- `cycle()` 用懒初始化把 `reset + kmu->start` 隐藏在首次调用里；`any_running()` 在「所有 core 不运行 **且** 无在途 channel 包」时才返回假，从而保证读回结果前所有写操作已落地。
+- Socket/Cluster 的 `on_tick` 为空，它们只是布线容器，真正的周期推进发生在 Core 与各级缓存内部（呼应 u5-l1 的被动模块零开销）。
+
+## 7. 下一步学习建议
+
+- **u5-l3（基数规则与模块分解）**：本讲多次出现「模块只通过 channel 通信」的接线，下一讲会把这条基数规则正式化，并讲清 SimX 与 RTL 逐模块对应的关系。
+- **u6 系列（GPU 执行模型与核心流水线）**：本讲只看到 Core 的 `tick()` 调用 6 级流水线函数，u6-l1 起 会从 scheduler/CTA dispatcher/barrier 深入到 warp 生命周期，把「CTA 怎么变成 warp、warp 怎么跑」讲透。
+- **u8 系列（内存层次与缓存）**：本讲提到的 L1/L2/L3/DRAM 接线，会在 u8 系列里深入到 tags/MSHR/合并器/本地内存的内部实现。
+- 若你想立刻看到「一次 launch 的 CTA 如何被 KMU 算出来」，可直接精读 [sim/simx/kmu/kmu.cpp:88-166](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp#L88-L166) 的 `Kmu::step` 三重循环。
