@@ -1,0 +1,546 @@
+# UART 子系统与 IMEM 在线编程
+
+## 1. 本讲目标
+
+学完本讲，你应当能够：
+
+- 说清这条 UART 为什么是「双用途」的：平时是字符 CLI 的人机通道，进入「特殊模式」后又变成二进制的「烧写 / 调试」通道。
+- 读懂 `uart.sv` 里那台 42 状态的有限状态机（FSM），并讲清 `IMPR` / `IMWR` / `BUSR` / `BUSW` 四条命令各自做什么。
+- 解释「IMEM 在线编程」为什么能省掉一次漫长的重新综合——以及它和 `imem.INIT.vh` 那条「焊死进比特流」的路径（见 u1-l4）是什么互补关系。
+- 理解 `BUSR` / `BUSW` 是如何通过「接管 `bus.vld`」把 CPU 挡在总线外面，从而实现对 DMEM/CSR 的**原子**读写的。
+- 手工算出一次 `IMPR` 烧写的字节序列与 8 位校验和，并说清超时机制的时间常数是怎么来的。
+
+本讲承接 u2-l4 建立的 `soc_if` 总线、地址译码与 CPU/UART 双主机仲裁认知，把焦点收拢到「UART 这个从机如何反过来当主机用」这一件事上。
+
+## 2. 前置知识
+
+在进入源码前，先用大白话过一遍几个会反复出现的概念。
+
+- **UART（通用异步收发传输器）**：两根线（RX 接收、TX 发送）、无共享时钟的串口。本项目把所有串口参数写死在硬件里：115200 bps、8 数据位、1 停止位、无校验。一个比特的位周期约 8.68 µs。
+- **有限状态机（FSM）**：用「状态 + 状态转移」描述时序逻辑。本讲的 FSM 用两段式写法：一个 `always_ff` 寄存当前状态，一个 `always_comb` 算下一状态 `state_next`。
+- **握手总线 vld/rdy**：u2-l4 讲过，`vld`（有效）与 `rdy`（就绪）同拍为 1，这一拍就完成一次访问。本讲里 UART 会以 `soc_if.MST` 的身份「主控」这条总线。
+- **校验和（checksum）**：把一串字节按字节相加、丢弃进位取低 8 位，得到一个「指纹」字节。收发双方各算一遍，对得上就认为传输无误。
+- **原子访问（atomic access）**：一次访问中途不会被别人打断。本讲里靠「让 CPU 抢不到总线」来实现。
+- **哈佛架构**：指令存储器（IMEM）与数据存储器（DMEM）分开。CPU 取指走 IMEM，load/store 走总线访问 DMEM/CSR——这一点是理解「为什么挡住总线就能停住 CPU」的关键。
+
+## 3. 本讲源码地图
+
+| 文件 | 角色 |
+|------|------|
+| [1.hw/ip.infra/uart.sv](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv) | 本讲主角。一个模块里塞了三套逻辑：UART 收/移位、UART 发/移位、以及 IMEM/BUS 特殊模式 FSM。 |
+| [1.hw/top.sv](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/top.sv) | 顶层。实例化 `u_uart`，把它的 `bus` 主口接到 `u_fabric`，把 `imem_*` 烧写口接到 `u_cpu`。 |
+| [1.hw/ip.infra/soc_fabric.sv](https://github.com/chili-chips-ba-wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/soc_fabric.sv) | 中央互联。CPU 与 UART 的双主机仲裁就在这里，是「原子访问」的物理基础。 |
+| [1.hw/ip.infra/soc_if.sv](https://github.com/chili-chips-ba-wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/soc_if.sv) | 总线接口定义（`MST`/`SLV` modport）。UART 用 `MST` 一侧。 |
+| [3.build/imem.UART.py](https://github.com/chili-chips-ba-wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/3.build/imem.UART.py) | PC 端的 `IMPR` 烧写脚本，是 FSM 协议的「对端」参考实现。 |
+| [3.build/csr_build/csr.rdl](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/3.build/csr_build/csr.rdl) | UART 的 CSR 寄存器（`rx`/`tx`/触发器）规格，定义了「字符模式」下 CPU 如何读写串口。 |
+| [1.hw/README.md](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/README.md) | 用四张时序图图文并茂地讲了 `IMPR`/`IMWR`/`BUSR`/`BUSW` 的过程（图非逐周期精确，但相对时序清楚）。 |
+
+## 4. 核心概念与源码讲解
+
+### 4.1 UART 双用途：字符 CLI 与二进制特殊模式
+
+#### 4.1.1 概念说明
+
+同一根 UART 线，要同时承担两种完全不同的工作：
+
+1. **字符模式（默认）**：PC 与板上 CPU 之间收发**可打印字符**，支撑 u1-l5 里那套 `(wireguard-fpga)#` CLI。此时 UART 是 CPU 的一个外设：CPU 通过 CSR 寄存器读写它。
+2. **特殊模式**：PC 与 FPGA SoC 之间收发**二进制命令与数据**，用来在线烧写 IMEM 或直接读写 DMEM/CSR。此时 UART「反客为主」，自己当总线主机，CPU 被晾在一边。
+
+这两种模式靠一个唯一的「入口字符」`C_SOP`（Start Of Procedure，值 `0x12`）切换。一旦 UART 在字符流里认出 `0x12`，它就立刻进入特殊模式，直到收到 `C_EOP`（`0x14`）才退出。
+
+「双用途」之所以能在一根线上共存，是因为 `0x12` 在正常的 ASCII CLI 文本里几乎不会作为有意义字符出现——它是一个非打印控制字符（DC2）。于是它成了一把廉价而可靠的「钥匙」。
+
+#### 4.1.2 核心流程
+
+整个 `uart` 模块内部其实有三套并行的逻辑：
+
+```text
+                  ┌─────────────────────────────────────┐
+uart_rx ──┐       │  ① Rx 移位/采样 FSM（总是工作）        │
+          ├──────▶│     产出 rx_shift（一个字节）          │
+          │       └──────────────┬──────────────────────┘
+          │                      │ uart_rx_valid（收齐一字节）
+          │                      ▼
+          │       ┌─────────────────────────────────────┐
+          │       │  ③ 特殊模式 FSM（IMEM/BUS）           │
+          │       │   消费 uart_rx_data，产出            │
+          │       │   imem_* 烧写信号 / bus 主口信号     │
+          │       │   以及 uart_tx_data（ACK/校验和）    │
+          │       └──────────────┬──────────────────────┘
+          │                      │
+          │   bus_vld=1（特殊模式）选通 ③；否则选通 CPU(CSR)
+          ▼                      ▼
+       RxFIFO（给 CPU CLI 用）   TxFIFO ──▶ ② Tx 移位 FSM ──▶ uart_tx
+```
+
+关键在最后一步的「多路选择」：`bus_vld` 这个信号是两种模式的分水岭。它为 0（字符模式）时，收到的字节进 RxFIFO 给 CPU 读、发送字节来自 CPU 写的 CSR；它为 1（特殊模式）时，收到的字节被 FSM 吃掉、发送字节由 FSM 生成（ACK、校验和、读回数据）。
+
+#### 4.1.3 源码精读
+
+模块端口已经把「双用途」写在了脸上：上半部分是普通的 CSR 外设接口（`from_csr`/`to_csr`），下半部分是 IMEM 烧写口和一个 **`soc_if.MST bus`** 总线主口。
+
+UART 收齐一字节后，`rx_fifo_we` 会拉高（[1.hw/ip.infra/uart.sv:277](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L277)）。但这个写使能并不直接进 RxFIFO，而是先被 `~bus_vld` 「盖一个章」——这正是双用途的分流点：
+
+```systemverilog
+// RxFIFO：只在字符模式（bus_vld=0）时把字节喂给 CPU
+sync_fifo_ram #(...) u_rx_fifo (
+   .din (rx_shift),
+   .we  (~bus_vld & rx_fifo_we),   // 特殊模式时，CLI 侧不再收数据
+   .re  (from_csr.uart.rx.data.swacc),
+   ...
+);
+```
+
+对应 [1.hw/ip.infra/uart.sv:379-401](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L389)。TxFIFO 那边对称：发送数据与写使能都由 `bus_vld ? <FSM给> : <CPU给>` 三目运算选择，见 [1.hw/ip.infra/uart.sv:567-569](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L567-L569)。
+
+而 `bus_vld` 何时为 1？就在 FSM 识别到 `C_SOP` 的那一拍——这是整个特殊模式的总开关：
+
+```systemverilog
+T_STATES_WAIT_SOP: begin
+   if ((uart_rx_valid == 1'b1) && (uart_rx_data == C_SOP)) begin
+      bus_vld_next = 1'b1;                 // 接管总线，进入特殊模式
+      state_next  = T_STATES_WAIT_CMD;
+   end
+end
+```
+
+见 [1.hw/ip.infra/uart.sv:665-670](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L665-L670)。相应地，收到 `C_EOP` 时把 `bus_vld` 清 0、回到 `WAIT_SOP`，见 [1.hw/ip.infra/uart.sv:691-694](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L691-L694)。
+
+字符模式下 CPU 如何读写串口，由 CSR 规格定义：`rx.valid`/`rx.oflow`/`rx.data`（`swacc` 读清）以及 `tx.busy`/`tx.data`（`swmod` 写触发），见 [3.build/csr_build/csr.rdl:308-382](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/3.build/csr_build/csr.rdl#L308-L382)。两个 `trigger` 寄存器是 PeakRDL 生成的「内部触发位」，README 也叮嘱「don't try to read or write」。
+
+#### 4.1.4 代码实践
+
+**实践目标**：在源码里亲眼看一次「同一个收到的字节，在两种模式下走了两条不同的路」。
+
+**操作步骤**：
+
+1. 打开 `1.hw/ip.infra/uart.sv`，定位 `bus_vld` 的声明（[L600](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L600)）与它的置位点（[L667](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L667)）。
+2. 跟着 `bus_vld` 找到 RxFIFO 的 `.we(~bus_vld & rx_fifo_we)`（[L389](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L389)）和 TxFIFO 的 `.din`/`.we`（[L567-L569](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L567-L569)）。
+3. 画出一张表：`bus_vld=0` 与 `bus_vld=1` 时，「RX 字节去向」「TX 字节来源」分别是什么。
+
+**需要观察的现象**：`bus_vld` 是唯一的一根「模式选择线」；它在 RxFIFO、TxFIFO 两处同时做了二选一。
+
+**预期结果**：
+
+| `bus_vld` | RX 字节去向 | TX 字节来源 |
+|-----------|------------|------------|
+| 0（字符模式） | RxFIFO → CPU 经 CSR 读取 | CPU 经 CSR 写 `tx.data` |
+| 1（特殊模式） | FSM 消费（`uart_rx_data`） | FSM 生成（`uart_tx_data`，即 ACK/校验和/读回值） |
+
+> 待本地验证：若你在仿真里向 `uart_rx` 注入 `0x12`，应观察到 `bus_vld` 翻 1、RxFIFO 不再增长。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么选 `0x12` 作为 `C_SOP`，而不是 `0x41`（字母 'A'）？
+**答案**：`0x12` 是非打印控制字符（DC2），正常的 CLI 文本里几乎不会出现；而 'A' 是常用输入，用作钥匙会与正常字符冲突，造成误触发。
+
+**练习 2**：进入特殊模式后，PC 这时若再敲一个普通字符（比如回车），CPU 的 CLI 会收到吗？
+**答案**：不会。特殊模式下 `bus_vld=1`，RxFIFO 的写使能被 `~bus_vld` 关断，所有收到的字节都进了 FSM，CLI 侧的 RxFIFO 不再增长。
+
+---
+
+### 4.2 IMPR/IMWR 命令：IMEM 在线编程
+
+#### 4.2.1 概念说明
+
+回顾 u1-l4：正常情况下，固件二进制是在**综合期**通过 `` `include "imem.INIT.vh" `` 焊死进 IMEM 的，改一行代码就得重跑一遍 CSR→SW→HW、重新综合布局布线、重烧比特流——动辄几十分钟。
+
+`IMPR`（IMEM Program，整片编程）与 `IMWR`（IMEM Write，写单条指令）这对命令，提供了一条**绕开重新综合**的捷径：比特流不动，只通过 UART 把新的指令字节直接写进片内 IMEM。区别在于：
+
+- **`IMPR`**：整片重写，开始时**拉低 `cpu_rstn` 把 CPU 按住**，写完再放开，让 CPU 从头跑新程序。这是 `imem.UART.py` 日常用的那条路径。
+- **`IMWR`**：只换某一条指令，**不复位 CPU**，于是可以在程序运行中实时打补丁——典型用途是塞一个软件断点（breakpoint）做调试。
+
+两者都往同一个 IMEM 写端口（`imem_we`/`imem_waddr`/`imem_wdat`）写，只是地址来源不同：`IMPR` 用自增计数器，`IMWR` 用 PC 给的 2 字节地址。
+
+#### 4.2.2 核心流程
+
+`IMPR` 的握手过程（PC 视角）：
+
+```text
+PC ──▶ 0x12 (SOP)                 // 进入特殊模式，bus_vld=1
+PC ──▶ 0x05 (IMPR)                // 选 IMEM 编程；FPGA 立刻 cpu_rstn=0
+PC ◀── (读最多 32 字节残渣)         // 倒空 RxFIFO 里残留的 CLI 文本
+PC ──▶ LEN_LB, LEN_HB             // 要烧的 32 位字数（低字节、高字节）
+      对每个字 i = 0 .. LEN-1:
+PC ──▶ DATA0, DATA1, DATA2, DATA3 // 一个 32 位字的 4 个字节
+PC ◀── 0x06 (ACK)                 // FPGA 收完一个字回 ACK（最后一个字除外）
+PC ◀── CHECKSUM                   // 全部写完后，FPGA 回 8 位校验和
+PC ──▶ 0x14 (EOP)                 // 退出特殊模式；FPGA 已在 IMPR_DONE 放开 cpu_rstn
+```
+
+`IMWR` 更短：`SOP → IMWR → ADDR0, ADDR1 → DATA0..DATA3 → CHECKSUM → EOP`，全程不复位 CPU。注意它的地址只有 2 字节（字地址，14 位有效），正好覆盖 16384 字的 IMEM。
+
+字节序约定：FPGA 端重组规则是 `ram_data[7:0]=DATA0 … [31:24]=DATA3`（[L729-L775](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L727-L789)），即**先收到的字节进低位**，是典型的小端 / 最低字节先发。PC 脚本里那段 `invert = li[6:8]+li[4:6]+li[2:4]+li[0:2]` 就是把 hex 文件里的字反转成这个发送顺序。
+
+#### 4.2.3 源码精读
+
+命令字与 FSM 状态都用 `localparam` / `typedef` 集中声明，是全篇的「字典」：
+
+```systemverilog
+localparam [7:0] C_SOP  = 8'h12;  // Enter special mode
+localparam [7:0] C_EOP  = 8'h14;  // Exit special mode
+localparam [7:0] C_IMPR = 8'h05;  // Enter IMEM programming mode
+localparam [7:0] C_ACK  = 8'h06;  // ACK for IMEM programming mode
+localparam [7:0] C_TOUT = 8'h07;  // Timeout in IMEM programming mode
+localparam [7:0] C_IMWR = 8'h1A;  // Enter IMEM write-single-instruction mode
+```
+
+见 [1.hw/ip.infra/uart.sv:133-140](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L133-L140)；全部 42 个状态见 [L84-L126](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L84-L126)。
+
+`WAIT_CMD` 是命令分发的十字路口，四条命令各走各的；收到 `C_IMPR` 时**先把 CPU 复位拉低**：
+
+```systemverilog
+if ((uart_rx_valid == 1'b1) && (uart_rx_data == C_IMPR)) begin
+   cpu_rstn_next = 1'b0;            // 按住 CPU，准备整片重写
+   data_cnt_next = '0;
+   checksum_next = '0;
+   state_next = T_STATES_IMPR_WAIT_LEN_LB;
+end
+```
+
+见 [1.hw/ip.infra/uart.sv:673-678](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L673-L678)。
+
+每收齐一个 32 位字（`DATA3` 那拍），FSM 把字写进 IMEM、自增计数器、回一个 `C_ACK`：
+
+```systemverilog
+T_STATES_IMPR_WAIT_DATA3: if (uart_rx_valid == 1'b1) begin
+   data_cnt_next   = data_cnt + 1;
+   ram_data_next[31:24] = uart_rx_data;
+   checksum_next   = checksum + uart_rx_data;
+   ram_addr_next   = {14'd0, data_cnt, 2'd0};  // 字地址→字节地址（左移2）
+   ram_wen_next    = 1'b1;                      // 本拍写 IMEM
+   uart_tx_data_next = C_ACK;                   // 回 ACK
+   uart_tx_valid_next= 1'b1;
+   state_next = T_STATES_IMPR_CHECKSUM;
+end
+```
+
+见 [1.hw/ip.infra/uart.sv:772-789](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L772-L789)。注意地址 `ram_addr = {14'd0, data_cnt, 2'd0}`：`data_cnt` 是字序号，末尾补 `2'd0` 相当于 ×4，转成字节地址。
+
+`CHECKSUM` 状态做「收尾或继续」的判断——计数器到了就回校验和并放开 CPU，没到就回去等下一个字：
+
+```systemverilog
+T_STATES_IMPR_CHECKSUM: begin
+   if (data_cnt == data_length) begin           // 最后一个字已写
+      ram_wen_next      = 1'b0;
+      uart_tx_data_next = checksum;             // 回 8 位校验和
+      uart_tx_valid_next= 1'b1;
+      state_next = T_STATES_IMPR_DONE;
+   end else begin                               // 还有字要收
+      ram_wen_next      = 1'b0;
+      uart_tx_valid_next= 1'b0;                 // 本字 ACK 已发，关掉
+      timeout_next      = '0;
+      state_next = T_STATES_IMPR_WAIT_DATA0;    // 回去等下一字
+   end
+end
+```
+
+见 [1.hw/ip.infra/uart.sv:791-803](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L791-L803)。`IMPR_DONE`（[L805-L809](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L805-L809)）把 `cpu_rstn` 放回 1，CPU 这才从新程序的第一条指令开始跑。
+
+`IMWR` 的写逻辑几乎一样，区别是地址来自 PC 给的 2 字节、写完不复位、不回 ACK 只回校验和，见 [1.hw/ip.infra/uart.sv:1071-1172](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L1071-L1172)。
+
+最后，所有写信号经 `assign` 引到模块口，再由顶层接进 `u_cpu`：
+
+```systemverilog
+assign imem_cpu_rstn    = cpu_rstn;
+assign imem_we          = ram_wen;
+assign imem_waddr[31:2] = ram_addr[31:2];
+assign imem_wdat        = ram_data;
+```
+
+见 [1.hw/ip.infra/uart.sv:1203-1206](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L1203-L1206)；顶层把它们连到 `u_cpu` 的烧写口，见 [1.hw/top.sv:176-179](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/top.sv#L176-L179) 与 [1.hw/top.sv:216-219](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/top.sv#L216-L219)。
+
+PC 端 `imem.UART.py` 是这套协议的参考对端：先发 `SOP`+`IMPR`（[L52-L56](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/3.build/imem.UART.py#L52-L56)），倒空残渣（[L58](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/3.build/imem.UART.py#L58)），发长度（[L60-L64](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/3.build/imem.UART.py#L60-L64)），逐字发送并在每字后读 `ACK` 校验（[L70-L94](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/3.build/imem.UART.py#L70-L94)），最后读回校验和、发 `EOP`（[L97-L104](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/3.build/imem.UART.py#L97-L104)）。
+
+#### 4.2.4 代码实践（本讲主实践）
+
+**实践目标**：用 `imem.UART.py` 的协议，手工排出一次「烧写 1 条指令」的完整字节序列，并算出校验和。
+
+**设定**：要烧 1 个 32 位字（`length = 1`）。PC 实际发到线上的 4 个数据字节依次为 `DATA0=0x78, DATA1=0x56, DATA2=0x34, DATA3=0x12`（最低字节先发，FPGA 重组为 `0x12345678`）。
+
+**第 1 步：排出字节流**（PC→FPGA 用 ▶，FPGA→PC 用 ◀）：
+
+| # | 方向 | 字节 | 含义 | 计入校验和？ |
+|---|------|------|------|------------|
+| 1 | ▶ | `0x12` | `C_SOP`，进特殊模式 | 否 |
+| 2 | ▶ | `0x05` | `C_IMPR`，整片编程；FPGA 拉低 `cpu_rstn` | 否 |
+| 3 | ◀ | ≤32B | 倒空 RxFIFO 残渣 | — |
+| 4 | ▶ | `0x01` | `LEN_LB`（字数低字节 = 1） | **是** |
+| 5 | ▶ | `0x00` | `LEN_HB`（字数高字节 = 0） | **是** |
+| 6 | ▶ | `0x78` | `DATA0` | **是** |
+| 7 | ▶ | `0x56` | `DATA1` | **是** |
+| 8 | ▶ | `0x34` | `DATA2` | **是** |
+| 9 | ▶ | `0x12` | `DATA3`；FPGA 写字到 IMEM[0] | **是** |
+| 10 | ◀ | `0x06` | `C_ACK`（FPGA 收完一字回执） | — |
+| 11 | ◀ | `0x15` | `CHECKSUM`（见下方计算） | — |
+| 12 | ▶ | `0x14` | `C_EOP`，退出特殊模式 | 否 |
+
+**第 2 步：手算校验和**（范围：从 `LEN` 到最后一个 `DATA`，对 `SOP/IMPR/EOP` 不计入，这与 FSM 里从 `WAIT_LEN_LB` 才开始累加一致）：
+
+\[ \text{CHECKSUM} = (0x01 + 0x00 + 0x78 + 0x56 + 0x34 + 0x12) \bmod 256 \]
+
+逐步累加：`0x01 → 0x01 → 0x79 → 0xCF → 0x03（0xCF+0x34=0x103，截断）→ 0x15`。
+
+总和 = 1+0+120+86+52+18 = 277 = `0x115`，取低 8 位 = `0x15`。
+
+**第 3 步：核对**。PC 这边也按同样口径算出 `ECS = 0x15`（[imem.UART.py:67-97](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/3.build/imem.UART.py#L67-L97)），读回 FPGA 的 `RCS`；两者都应是 `0x15`，对得上即说明这一字无误地落进了 IMEM。
+
+**需要观察的现象**：第 11 步 FPGA 回的 `RCS` 与 PC 自算的 `ECS` 相等；第 12 步 `EOP` 之后 `bus_vld` 归 0、`cpu_rstn` 早已在 `IMPR_DONE` 归 1，CPU 开始执行 `0x12345678` 这条新指令。
+
+> 待本地验证：以上字节序基于「最低字节先发」的小端约定（与 `imem.INIT.py` 的小端打包一致）。`main.hex` 的具体存储顺序需在本地用真实产物核对一次；若发现重组值与预期相反，调整 `invert` 的方向即可，校验和算法本身不受影响。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`IMPR` 为什么要先拉低 `cpu_rstn`，而 `IMWR` 不拉？
+**答案**：`IMPR` 整片重写，IMEM 内容在写入中途是不完整的，必须把 CPU 按在复位态以免它执行半截程序；写完再放开，从新程序起点跑。`IMWR` 只换一条指令、其余指令仍有效，不复位才能保持程序现场，便于实时插断点。
+
+**练习 2**：`ram_addr_next = {14'd0, data_cnt, 2'd0}` 里那个 `2'd0` 是做什么的？
+**答案**：`data_cnt` 是**字**序号，IMEM 写口 `imem_waddr` 是**字节**地址（`[31:2]`）。末尾补 2 位 0 等于把字序号乘 4，得到对应字节地址，与「每字 4 字节」对齐。
+
+**练习 3**：IMEM 容量是 16384 字（见 [top.sv:156](https://github.com/chili-chips-ba-wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/top.sv#L156)）。`IMWR` 只给 2 字节地址够用吗？
+**答案**：够。2 字节 = 16 位，但 `imem_waddr[31:2]` 只用到其中的 `[15:2]` 共 14 位有效字地址，\(2^{14}=16384\)，正好覆盖整个 IMEM。
+
+---
+
+### 4.3 BUSR/BUSW 命令：DMEM/CSR 原子读写
+
+#### 4.3.1 概念说明
+
+`BUSW`（Bus Write）和 `BUSR`（Bus Read）让 PC 能越过 CPU，直接对 DMEM 或 CSR 地址空间做一次 32 位读 / 写。用途有两类：
+
+- **调试**：在线查看 CPU 的 DMEM 变量、CSR 寄存器现状。
+- **软件在环（SIL）协同仿真**：在一次特殊模式里连续做多次读 / 写，把整块内存搬进搬出（README 明确提到这点）。
+
+但这里有个根本性的麻烦：DMEM/CSR 是 CPU 的「私家地盘」，CPU 随时可能来读改写。如果 UART 正改到一半、CPU 也来插一脚，数据就乱了。所以必须做到**原子**——在一次 `BUSR`/`BUSW` 期间（乃至整个特殊模式期间），CPU 不能碰总线。
+
+#### 4.3.2 核心流程
+
+原子的关键，是 4.1 里那个 `bus_vld`：它一旦在 `SOP` 时拉高，就驱动 UART 的总线主口 `bus.vld`，并**在整个特殊模式期间保持 1**，直到 `EOP`。而在 `soc_fabric` 里有一条仲裁规则：UART 只要占着总线，CPU 就抢不进来。
+
+CPU 被挡住的原理，可以拆成两步：
+
+```text
+① UART 占线：bus_vld=1 → bus.vld=1 持续
+        │
+        ▼
+② fabric 仲裁：uart_busy 锁存为 1（一旦 UART 拿到总线就持有到做完）
+        │
+        ▼
+③ cpu_ack = cpu.vld & ~uart_busy   // CPU 的访问被判定无效
+        │
+        ▼
+④ CPU 的 bus.rdy 不返回 → CPU 的 load/store 停滞 → 实质性停机
+```
+
+为什么「停滞 load/store」≈「停机」？因为这是哈佛架构：CPU 取指走独立的 IMEM，但任何 `lw`/`sw` 都要走总线访问 DMEM。真实程序里 load/store 极其频繁，挡住总线就等于把 CPU 冻住。于是 UART 可以从容地多次读改写 DMEM/CSR，而不用担心 CPU 来捣乱——这就是 README 说的「accesses to DMEM/CSR are atomic」。
+
+`BUSW` 一次事务 = 4 字节地址 + 4 字节数据 + 1 字节 `we`（按字节写使能，支持子字写入）+ 校验和。`BUSR` 一次事务 = 4 字节地址，然后等总线返回数据，回传 4 字节数据 + 校验和。两条命令结束后都回 `WAIT_CMD`，可以连发多次，直到 `EOP`。
+
+#### 4.3.3 源码精读
+
+UART 的总线主控输出，就是把 FSM 内部的 `bus_*` 寄存器接到 `soc_if.MST`：
+
+```systemverilog
+assign bus.vld        = bus_vld;
+assign bus.we         = bus_we;        // 4 位按字节写使能；全 0 表示读
+assign bus.addr[31:2] = bus_addr[31:2];
+assign bus.wdat       = bus_wdat;
+```
+
+见 [1.hw/ip.infra/uart.sv:1208-1211](https://github.com/chili-chips-ba-wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L1208-L1211)。注意 `bus.we` 用的是 u2-l4 讲过的 `soc_we_t`（4 位按字节写使能），`BUSW` 的 `WAIT_WE` 状态直接把收到的字节低 4 位赋给它（[L931-L944](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L931-L944)），所以能做字节级写入。
+
+`BUSR` 收齐 4 字节地址后，进入 `WAIT_DATA` 等 `bus.rdy`——这一拍总线访问真正完成，数据锁存进 `bus_rdat`：
+
+```systemverilog
+T_STATES_BUSR_WAIT_DATA: begin
+   if (bus.rdy == 1'b1) begin
+      bus_rdat_next = bus.rdat;        // 锁存读回值
+      timeout_next  = '0;
+      state_next = T_STATES_BUSR_DATA0;
+   end
+   else if (timeout[21:21] == 1'b1) begin ... end   // 超时
+   else if (tick_1us == 1'b1) timeout_next = timeout + 1;
+end
+```
+
+见 [1.hw/ip.infra/uart.sv:1018-1030](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L1018-L1030)。随后 `DATA0..DATA3` 把读回值逐字节发回 PC，最后发校验和（[L1032-L1064](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L1032-L1064)）。
+
+原子的「魔法」全在 `soc_fabric` 的仲裁段。`uart_busy` 是核心锁存器——UART 一旦开始用总线，就持有到事务结束：
+
+```systemverilog
+always_ff @(negedge cpu.arst_n or posedge cpu.clk) begin
+   if (cpu.arst_n == 1'b0) uart_busy <= 1'b0;
+   else begin
+      uart_busy <= uart_busy
+                 ? ~uart_done | uart.vld      // 占着就不放，直到做完且不再请求
+                 : ({cpu.vld, uart.vld} == 2'b01); // CPU 空闲时 UART 才上手
+   end
+end
+assign uart_done = (dmem_sel & dmem.rdy) | (csr_sel & csr.rdy);
+assign cpu_ack   = cpu.vld & ~uart_busy;      // CPU 被 UART 挤走时 ack=0
+```
+
+见 [1.hw/ip.infra/soc_fabric.sv:124-144](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/soc_fabric.sv#L124-L144)。因为特殊模式期间 `uart.vld` 恒为 1，UART 拿到总线后 `uart_busy` 一直为 1，于是 `cpu_ack` 恒为 0，CPU 的每次总线访问都拿不到 `rdy`——被有效冻结。
+
+顶层的连线证明 UART 与 CPU 是对等的两个总线主机，都从 `SLV` 侧进 fabric：
+
+```systemverilog
+soc_fabric u_fabric (
+   .cpu  (bus_cpu),   //SLV
+   .uart (bus_uart),  //SLV   ← UART 作为第二个主机
+   .dmem (bus_dmem),  //MST
+   .csr  (bus_csr)    //MST
+);
+```
+
+见 [1.hw/top.sv:183-189](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/top.sv#L183-L189)；`bus_uart` 的声明与 UART 实例分别见 [1.hw/top.sv:160](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/top.sv#L160) 与 [1.hw/top.sv:206-222](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/top.sv#L206-L222)。
+
+#### 4.3.4 代码实践
+
+**实践目标**：用 `BUSW` 往一个 CSR 寄存器写一个 32 位字，并解释为什么这期间 CPU 改不了它。
+
+**操作步骤**：
+
+1. 在 `csr.rdl` 里挑一个可写的 CSR 字（例如 `csr.gpio`，[L384 起](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/3.build/csr_build/csr.rdl#L384)），从 `link_map.lds` / fabric 译码规则确定其总线地址（CSR 段 `0x2000_0000` 起，见 u2-l4）。
+2. 排出 `BUSW` 字节流：`0x12(SOP) → 0x0E(BUSW) → ADDR0..3 → DATA0..3 → WE(0x0F 全写) → ◀CHECKSUM → 0x14(EOP)`。
+3. 紧接着用一次 `BUSR` 把同一地址读回来，验证写入生效。
+
+**需要观察的现象**：`BUSW` 与 `BUSR` 可以在一次特殊模式（一个 `SOP`…`EOP`）里连发，中间不必退出；每次都只回一个校验和字节。
+
+**预期结果**：`BUSR` 读回的 4 字节 = 刚才 `BUSW` 写入的 4 字节；且在整个过程里，CPU 对同一 CSR 的访问因 `uart_busy=1` 而 `cpu_ack=0`，被挡在总线外——这就是「原子」。
+
+> 待本地验证：实际地址需对照生成的 `csr_hw.h` 与 `link_map.lds` 确认；`we` 取 `0x0F` 表示 4 字节全写，若只想改某字节可只置对应位。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：特殊模式期间 CPU 真的「完全停机」了吗？
+**答案**：不完全是。CPU 取指仍从 IMEM 走，能执行不涉总线的指令；但任何 `lw`/`sw`（访问 DMEM/CSR）都因 `rdy` 不返回而停滞。由于真实程序里 load/store 极频繁，宏观上等价于冻住，足以保证 DMEM/CSR 访问的原子性。
+
+**练习 2**：`BUSW` 比 `BUSR` 多发一个 `WE` 字节。它的校验和覆盖范围是什么？
+**答案**：按 RTL（[L931-L951](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L931-L951)），`BUSW` 校验和 = 4 字节地址 + 4 字节数据 + 1 字节 `we` 的 8 位和。`BUSR` 没有 `we`，校验和 = 4 字节地址 + 4 字节读回数据。
+
+---
+
+### 4.4 校验和与超时机制
+
+#### 4.4.1 概念说明
+
+UART 是慢速、易受扰动的链路（115200 bps，烧几千字要好几秒）。两个安全网不可少：
+
+- **校验和**：每条命令结束时，FPGA 把「参与传输的关键字节」按字节求和取低 8 位，回送给 PC。PC 自己也算一遍，两者比对即知传输是否完整。它抓的是「整段丢失 / 错位」，抓不了单比特翻转（那是更复杂校验的任务，本项目没用）。
+- **超时**：FSM 在每个「等 PC 字节」的状态里挂一个倒计时；若 PC 迟迟不发下一个字节（线断了、脚本崩了），FSM 不会傻等，而是回一个 `C_TOUT`、清理现场、回到 `WAIT_SOP`，把系统从一个半截事务里救出来。
+
+#### 4.4.2 核心流程
+
+各命令的校验和范围（FPGA 端累加起点对应 FSM 里 `checksum` 清 0 之后第一个累加的状态）：
+
+| 命令 | 校验和覆盖的字节 |
+|------|----------------|
+| `IMPR` | `LEN_LB + LEN_HB +` 每个字的 `DATA0..DATA3` |
+| `IMWR` | `ADDR0 + ADDR1 + DATA0..DATA3` |
+| `BUSW` | `ADDR0..3 + DATA0..3 + WE` |
+| `BUSR` | `ADDR0..3 +` 读回的 `DATA0..DATA3` |
+
+注意 `SOP` / 命令字 / `EOP` **不计入**校验和——它们是「控制字节」，不是「数据」。
+
+超时的实现是一个 22 位计数器 `timeout`，每个 1 µs tick 自增；当最高位 `timeout[21]` 翻 1 时判超时：
+
+\[ T_{\text{timeout}} = 2^{21}\,\mu s = 2\,097\,152\,\mu s \approx 2.10\,s \]
+
+即约 **2.1 秒**内没收到下一个字节就超时。
+
+#### 4.4.3 源码精读
+
+`checksum` 与 `timeout` 寄存器在 FSM 寄存器段声明（[1.hw/ip.infra/uart.sv:605-L606](https://github.com/chili-chips-ba-wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L605-L606)）。每个「等待字节」状态都是同一个三段式结构——以 `IMPR_WAIT_LEN_LB` 为例：
+
+```systemverilog
+T_STATES_IMPR_WAIT_LEN_LB: begin
+   if (uart_rx_valid == 1'b1) begin              // ① 收到字节：累加校验和、前进
+      data_length_next[7:0] = uart_rx_data;
+      checksum_next = checksum + uart_rx_data;
+      timeout_next  = '0;                        // 收到就清超时
+      state_next = T_STATES_IMPR_WAIT_LEN_HB;
+   end
+   else if (timeout[21:21] == 1'b1) begin         // ② 超时：回 C_TOUT，进 TIMEOUT
+      uart_tx_data_next  = C_TOUT;
+      uart_tx_valid_next = 1'b1;
+      state_next = T_STATES_TIMEOUT;
+   end
+   else if (tick_1us == 1'b1) begin               // ③ 没收到、没超时：计时
+      timeout_next = timeout + 22'd1;
+   end
+end
+```
+
+见 [1.hw/ip.infra/uart.sv:697-L710](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L697-L710)。这套「收到 / 超时 / 计时」三段式在 `IMPR`/`BUSW`/`BUSR`/`IMWR` 的每个等待状态里重复出现，是整段 FSM 最规整的部分。
+
+超时后的清理在 `T_STATES_TIMEOUT`：关写使能、放开 CPU 复位、释放总线、回到起点：
+
+```systemverilog
+T_STATES_TIMEOUT: begin
+   uart_tx_valid_next = 1'b0;
+   ram_wen_next       = 1'b0;
+   cpu_rstn_next      = 1'b1;   // 别让 CPU 一直被按在复位
+   bus_vld_next       = 1'b0;   // 释放总线
+   state_next = T_STATES_WAIT_SOP;
+end
+```
+
+见 [1.hw/ip.infra/uart.sv:1174-L1180](https://github.com/chili-chips-ba-wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L1174-L1180)。注意它把 `cpu_rstn` 放回 1——很重要，否则一次失败的 `IMPR` 会让 CPU 永久复位。
+
+PC 端校验和的计算口径与 FPGA 完全一致：从长度开始累加，每发送一字节就加进去，最后 `& 0xFF`（[imem.UART.py:67](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/3.build/imem.UART.py#L67)、[L75-L88](https://github.com/chili-chips-ba-wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/3.build/imem.UART.py#L75-L88)、[L97](https://github.com/chili-chips-ba-wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/3.build/imem.UART.py#L97)）。因为「逐字节 mod 256 累加」与「总和再 mod 256」等价，两侧算法形式不同但结果相同。
+
+#### 4.4.4 代码实践
+
+**实践目标**：从计数器位宽反推超时时长，并验证一段伪造字节流的校验和。
+
+**操作步骤**：
+
+1. 在 [1.hw/ip.infra/uart.sv:606](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L606) 看到 `logic [21:0] timeout`，在 [L703](https://github.com/chili-chips-ba-wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/uart.sv#L703) 看到判据 `timeout[21:21]==1`。
+2. 用上面的公式算出超时 ≈ 2.1 s。
+3. 设一段 `IMPR` 字节流：`LEN_LB=0x10, LEN_HB=0x00`，随后 16 个数据字节任意（比如全 `0xFF`）。手算校验和。
+
+**需要观察的现象**：判据用 `timeout[21]`（第 22 位）而非比较器，是因为 \(2^{21}\) 恰好是「最高位翻 1」的时刻——用位检测比比较器省逻辑。
+
+**预期结果**：`0x10 + 0x00 + 16×0xFF = 0x10 + 0xFF0 = 0x1000`，取低 8 位 = `0x00`。FPGA 应回 `0x00`。
+
+> 待本地验证：超时的真实值还受 1 µs tick 精度影响；可在仿真里数 `tick_1us` 脉冲个数核对。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：为什么 `T_STATES_TIMEOUT` 要把 `cpu_rstn_next = 1'b1`？
+**答案**：`IMPR` 进入时会拉低 `cpu_rstn`。若烧写中途超时退出而不复位该信号，CPU 会一直停留在复位态、永不运行。所以无论怎么退出，都要把 `cpu_rstn` 还原成 1。
+
+**练习 2**：这套 8 位校验和能发现「`DATA0` 少发一个字节、后续整体前移」的错误吗？
+**答案**：能发现。少一个字节会让长度对不上、`data_cnt` 到不了 `data_length`，最终要么超时（少字节）要么校验和错位（字节流整体错位后累加值不同）。但它不能发现「某个字节里翻了 1 个比特且校验和字节同时翻成一致」的极小概率错误。
+
+---
+
+## 5. 综合实践
+
+把本讲四件事串起来：**用 UART 在线给运行中的板子换一个固件版本，并验证它真的换了**。
+
+1. **构建固件**：按 u1-l4 走 CSR→SW，得到 `sw_build/main.hex`（不必重新综合 HW，这正是本讲的意义）。
+2. **烧写**：运行 `python3 3.build/imem.UART.py`（[源码](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/3.build/imem.UART.py)）。对照本讲 4.2.4 的字节序列表，逐拍解释终端打印的 `SOP / CMD / LEN1 / LEN2 / xxx_n / ACK / ECS / RCS / EOP` 各行：
+   - `ECS`（PC 自算）与 `RCS`（FPGA 回送）是否相等；
+   - 为何 `ACK` 每个字都出现一次、唯独最后一个字之后换成了 `RCS`。
+3. **在线验证**：烧写完成后，板子应自动从新固件启动（`IMPR_DONE` 已放开 `cpu_rstn`）。连上 CLI（u1-l5）确认新版本行为。
+4. **调试演练**：在特殊模式里用一次 `BUSR` 读回 IMEM 的某几个字（若工具支持），或读一个已知 CSR（如硬件 ID `0xCCBA`），核对值是否合理——这练习了 4.3 的「原子读」与 4.4 的「校验和」。
+5. **故意制造一次超时**：在 `IMPR` 烧写到一半时拔掉串口线（或 `Ctrl-C` 中断脚本），等约 2.1 秒，观察板子是否自行回 `C_TOUT`（`0x07`）并恢复正常（CPU 仍在跑旧程序或复位后的状态）——这验证 4.4 的超时自救。
+
+> 待本地验证：步骤 2–5 均需真实硬件 / 串口；若无硬件，可在 u7 的 VProc 仿真环境里用 `VUserMain0` 模拟 PC 端注入相同字节序列，观察 `bus_vld`、`imem_we`、`cpu_rstn` 的波形。
+
+## 6. 本讲小结
+
+- 一根 UART 线承担「字符 CLI」与「二进制特殊模式」双重职责，靠非打印字符 `C_SOP`(0x12) 切换；`bus_vld` 是两种模式的唯一分水岭，在收/发 FIFO 处做二选一。
+- `IMPR` 整片烧写 IMEM 并复位 CPU，`IMWR` 单条改指令不复位——二者都绕开了 u1-l4 那条「综合期焊死」的慢路径，是快速迭代固件的关键。
+- `BUSR`/`BUSW` 让 PC 越过 CPU 直接读写 DMEM/CSR；原子性来自 `bus_vld` 持续为 1 → fabric 的 `uart_busy` 锁存 → `cpu_ack=0` 冻住 CPU 的总线访问。
+- 每条命令都以一个 8 位校验和收尾（覆盖范围因命令而异），PC 与 FPGA 各算一遍比对；每个等待状态都挂约 2.1 秒超时，超时回 `C_TOUT` 并清理现场（含还原 `cpu_rstn`）。
+- 顶层把 UART 的 `bus` 主口与 CPU 并列接入 `soc_fabric`，把 `imem_*` 烧写口接入 `u_cpu`——UART 在这里是「第二个 CPU」兼「在线烧写器」。
+- `imem.UART.py` 是协议的参考对端，它的字节顺序（`invert` 反转）与校验和口径必须与 RTL 完全对齐，否则双方握不上手。
+
+## 7. 下一步学习建议
+
+- **横向**：本讲的「UART 当总线主机」是控制面的一种「旁路入口」。下一单元 Unit 3 会从 `csr.rdl` 出发，系统讲 CSR 这座软硬件唯一桥梁——你会看到 `BUSR`/`BUSW` 能读写的那些寄存器到底是怎么从一份规格自动生成 RTL+HAL 的（先读 [u3-l1](#)）。
+- **纵向**：若你对「IMEM 在线编程」如何配合仿真验证感兴趣，可跳到 Unit 7 的 [u7-l2 VProc 协同仿真](#)——VProc 的 `VUserMain0` 用 C++ 的 `read`/`write`/`tick` 驱动同一条 `soc_if` 总线，本质上是本讲 `BUSR`/`BUSW` 的「仿真版高阶替身」。
+- **源码延伸**：想更透彻理解仲裁，重读 [soc_fabric.sv:124-144](https://github.com/chili-chips-ba/wireguard-fpga/blob/9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf/1.hw/ip.infra/soc_fabric.sv#L124-L144) 的 `uart_busy`/`cpu_ack` 逻辑，并思考：如果 CPU 正在一个多周期的 DMEM 访问中途，UART 的 `SOP` 到来会发生什么？（提示：`{cpu.vld, uart.vld}==2'b01` 这个上手条件。）

@@ -1,0 +1,1036 @@
+{
+  "project": "wireguard-rs",
+  "head": "7d84ef9064559a29b23ab86036f7ef62b450f90c",
+  "rationale": "wireguard-rs 是 WireGuard VPN 协议的纯 Rust 实现，架构上清晰地分为三大块：握手（Noise IK，纯密码学）、路由器（cryptokey 数据面，纯加解密+路由）、以及把它们与具体 IO 绑定在一起的 WireGuard 胶水层，之上再叠一层配置/UAPI 接口和平台抽象。据此设计三层学习路径：第 1 单元带读者从零认识项目、构建运行并走通 main 生命周期；第 2 单元讲平台抽象（TUN/UDP/UAPI 的 trait 边界与 Linux/dummy 实现），这是理解“可移植的纯协议核心”的前提；第 3 单元先给“全局视角”，讲 WireGuard 胶水层与 TUN/UDP 工作线程如何把报文分流，把握手模块和路由器先当黑盒；第 4、5 单元再分别深入两个纯引擎（握手 Noise 协议、路由器数据面），它们是依赖最少的叶子模块；第 6 单元讲构建在核心之上的配置接口与 UAPI 文本协议；第 7 单元收尾跨模块的高级主题（定时器状态机、密钥清零安全、zerocopy 零拷贝、测试策略）。讲义顺序遵循“先全局后局部、先叶子后胶水、入门到专家”的原则，每篇只解决一个主题并配一个可操作的源码实践任务，依赖关系与真实架构层次一致。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识项目与上手运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位：WireGuard 与 wireguard-rs",
+          "order": 1,
+          "filename": "u1-l1-overview.md",
+          "level": "beginner",
+          "topic": "介绍 WireGuard 是什么、wireguard-rs 这个仓库的定位（用户态 Rust 实现，对标内核模块），以及它如何与 wg(8)/ip(8) 配合工作。",
+          "learning_goals": [
+            "理解 WireGuard 的核心思想：握手与数据面分离、Noise IK 协议、UDP 隧道",
+            "说清 wireguard-rs 相对内核模块的差异与适用场景",
+            "看懂 README 中描述的运行方式与架构图"
+          ],
+          "source_files": [
+            "README.md",
+            "src/main.rs"
+          ],
+          "minimal_modules": [
+            "README 的 Usage/Architecture 段",
+            "握手与路由器分离的总体架构"
+          ],
+          "practice_task": "阅读 README 与 architecture.svg 描述，用一段文字画出 wireguard-rs 的三大模块（platform/configuration/wireguard）数据流向图，并标注 TUN、UDP、UAPI 三个外部接口的位置。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建与运行",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解项目的依赖、feature、构建方式（nightly/stable、cargo build --release），以及如何以 wireguard-rs wg0 启动并用 wg(8) 配置。",
+          "learning_goals": [
+            "读懂 Cargo.toml 的依赖与 features（profiler、start_up）",
+            "掌握从克隆到 cargo build --release 的完整构建流程",
+            "理解运行所需的权限（创建 TUN、绑定 /var/run/wireguard 套接字）"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "[package] 与 [dependencies] 段",
+            "[features] profiler/start_up"
+          ],
+          "practice_task": "运行 cargo build --release 编译项目，记录依赖中哪些用于密码学（ring、chacha20poly1305、x25519-dalek、blake2）、哪些用于并发（crossbeam-channel、parking_lot、dashmap、spin）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与模块地图",
+          "order": 3,
+          "filename": "u1-l3-directory-map.md",
+          "level": "beginner",
+          "topic": "通览 src/ 目录：main.rs、util.rs、configuration/、platform/、wireguard/（含 handshake 与 router 子树）的职责划分与相互引用关系。",
+          "learning_goals": [
+            "建立 src/ 目录到功能模块的映射",
+            "区分平台相关代码（platform/linux）与纯协议代码（wireguard/）",
+            "识别三个顶层模块之间的依赖方向"
+          ],
+          "source_files": [
+            "src/main.rs",
+            "src/platform/mod.rs",
+            "src/configuration/mod.rs",
+            "src/wireguard/mod.rs"
+          ],
+          "minimal_modules": [
+            "main.rs 的 mod 声明",
+            "platform/mod.rs、configuration/mod.rs、wireguard/mod.rs 的子模块列表"
+          ],
+          "practice_task": "对照源码为 src/ 下每个目录写一句中文说明，并用箭头标出 configuration → wireguard → (handshake, router) → platform 的依赖关系。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "程序入口 main.rs 与运行生命周期",
+          "order": 4,
+          "filename": "u1-l4-main-entry.md",
+          "level": "beginner",
+          "topic": "逐段精读 main()：解析命令行参数、绑定 UAPI、创建 TUN、创建 WireGuard 设备、启动 Tun 事件线程与 UAPI 服务线程、wg.wait() 阻塞。",
+          "learning_goals": [
+            "理清 main.rs 从启动到阻塞的完整步骤",
+            "理解 plt::UAPI、plt::Tun 平台别名的作用",
+            "看懂 TUN 事件（Up/Down）如何驱动 cfg.up/down，以及 UAPI 连接如何分发到 configuration::uapi::handle"
+          ],
+          "source_files": [
+            "src/main.rs",
+            "src/platform/mod.rs"
+          ],
+          "minimal_modules": [
+            "main() 参数解析",
+            "WireGuard::new / add_tun_reader",
+            "Tun 事件线程与 UAPI 服务线程",
+            "wg.wait()"
+          ],
+          "practice_task": "在 main.rs 的参数解析处增加一个 --version/-V 选项，打印 Cargo.toml 中的 version 字段后退出，并为该解析逻辑补充一个单元测试。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "特权降级与守护进程化",
+          "order": 5,
+          "filename": "u1-l5-privileges-daemon.md",
+          "level": "beginner",
+          "topic": "讲解 util.rs：daemonize() 的双 fork + setsid，以及 drop_privileges() 的 chroot(/tmp)、切换到 nobody 用户、umask，理解为何以及如何放弃 root 权限。",
+          "learning_goals": [
+            "理解 Unix 守护进程化的双 fork 原理",
+            "掌握降权到 nobody 与 chroot 的安全意义",
+            "看懂 main.rs 中 drop_privileges/daemonize 的调用时机与失败处理"
+          ],
+          "source_files": [
+            "src/util.rs",
+            "src/main.rs"
+          ],
+          "minimal_modules": [
+            "daemonize (fork_and_exit + setsid)",
+            "drop_privileges (chroot/setuid/setgid/umask)",
+            "DaemonizeError"
+          ],
+          "practice_task": "在 util.rs 中为 drop_privileges 增加日志，记录是否处于 root（getuid==0）以及最终切换到的 uid/gid，并在不真正降权时（--disable-drop-privileges）验证日志路径。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "平台抽象层",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "平台抽象 trait 设计",
+          "order": 1,
+          "filename": "u2-l1-platform-traits.md",
+          "level": "intermediate",
+          "topic": "讲解 platform 模块如何用 trait（Tun/UDP/UAPI/Endpoint 及其 Platform* 变体）把纯协议核心与具体操作系统 IO 解耦，以及关联类型的设计动机。",
+          "learning_goals": [
+            "理解 Tun、udp::UDP、uapi::PlatformUAPI、Endpoint 等 trait 的方法与关联类型",
+            "说清 PlatformTun::create / PlatformUDP::bind 返回的 (readers, writer, owner/status) 三元组语义",
+            "理解为何用泛型+关联类型而非运行时 trait 对象"
+          ],
+          "source_files": [
+            "src/platform/mod.rs",
+            "src/platform/tun.rs",
+            "src/platform/udp.rs",
+            "src/platform/uapi.rs",
+            "src/platform/endpoint.rs"
+          ],
+          "minimal_modules": [
+            "Tun/Writer/Reader/Status/PlatformTun",
+            "UDP/Reader/Writer/Owner/PlatformUDP",
+            "PlatformUAPI/BindUAPI",
+            "Endpoint trait (from_address/into_address/clear_src)"
+          ],
+          "practice_task": "为一个假想的 macOS 平台写出 PlatformTun 与 PlatformUDP trait 的空实现骨架（用 todo!() 占位方法），说明每个关联类型对应 macOS 上什么概念。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Linux TUN 设备实现",
+          "order": 2,
+          "filename": "u2-l2-linux-tun.md",
+          "level": "intermediate",
+          "topic": "精读 platform/linux/tun.rs：通过 /dev/net/tun + TUNSETIFF ioctl 创建网卡，用 netlink (NETLINK_ROUTE) 监听 Up/Down 与 MTU 事件，以及 read/write 的原始 libc 调用。",
+          "learning_goals": [
+            "掌握用 ioctl(TUNSETIFF) 创建 TUN 设备的流程与 Ifreq 布局",
+            "理解通过 RTM_NEWLINK netlink 消息感知接口 Up/Down 并读取 MTU",
+            "看懂 LinuxTunReader/Writer/Status 如何实现 platform::tun 的 trait"
+          ],
+          "source_files": [
+            "src/platform/linux/tun.rs",
+            "src/platform/tun.rs"
+          ],
+          "minimal_modules": [
+            "LinuxTun::create (open clone device + ioctl)",
+            "LinuxTunStatus::event (netlink recv + IfInfomsg 解析)",
+            "get_mtu (SIOCGIFMTU ioctl)",
+            "LinuxTunReader/Writer 的 read/write"
+          ],
+          "practice_task": "在 LinuxTunStatus::event 中加入对 ifi_flags 其它位（如 IFF_RUNNING）的日志输出，并写一个注释说明为何只关心 ifi_index 匹配的本接口事件。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "Linux UDP 绑定与 sticky socket",
+          "order": 3,
+          "filename": "u2-l3-linux-udp-sticky.md",
+          "level": "intermediate",
+          "topic": "精读 platform/linux/udp.rs：bind4/bind6 创建双栈 UDP 套接字，利用 IP_PKTINFO/IPV6_PKTINFO 实现 sticky source（源地址绑定），sendmsg/recvmsg 的辅助数据，以及 fwmark (SO_MARK)。",
+          "learning_goals": [
+            "理解为何分别绑定 IPv4/IPv6 并复用同一端口",
+            "掌握 IP_PKTINFO 辅助数据如何实现 WireGuard 的 sticky socket 行为",
+            "看懂 LinuxEndpoint 的 from_address/into_address/clear_src 与发送失败时的清源重试"
+          ],
+          "source_files": [
+            "src/platform/linux/udp.rs",
+            "src/platform/udp.rs",
+            "src/platform/endpoint.rs"
+          ],
+          "minimal_modules": [
+            "bind4/bind6 (socket + setsockopt + bind + getsockname)",
+            "LinuxUDPReader::read4/read6 (recvmsg + pktinfo)",
+            "LinuxUDPWriter::write4/write6 (sendmsg + EINVAL 清源重试)",
+            "LinuxOwner::set_fwmark (SO_MARK)"
+          ],
+          "practice_task": "写一段注释解释 EndpointV4 中 info.ipi_spec_dst 的作用，并说明 write4 在 errno==EINVAL 时为何要清空辅助数据重发（对应 WireGuard sticky socket 失效场景）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "Dummy 纯测试平台",
+          "order": 4,
+          "filename": "u2-l4-dummy-platform.md",
+          "level": "intermediate",
+          "topic": "讲解 platform/dummy：TunTest、PairBind、UnitEndpoint 如何在不触及真实操作系统的前提下实现平台 trait，使整个 WireGuard 协议核心可在单元测试中端到端跑通。",
+          "learning_goals": [
+            "理解 dummy 平台在单元测试中的角色（无副作用、可连接两个实例）",
+            "看懂 PairBind::pair 如何用通道把两个 WG 实例的读写对接",
+            "掌握用 dummy 编写纯软件握手+收发测试的方法"
+          ],
+          "source_files": [
+            "src/platform/dummy/mod.rs",
+            "src/platform/dummy/tun/mod.rs",
+            "src/platform/dummy/udp.rs",
+            "src/platform/dummy/endpoint.rs"
+          ],
+          "minimal_modules": [
+            "TunTest (create/write/read)",
+            "PairBind::pair",
+            "UnitEndpoint"
+          ],
+          "practice_task": "参照 wireguard/tests.rs，用 dummy::TunTest 与 dummy::PairBind 搭建两个 WireGuard 实例，仅完成密钥配置（不发送数据），断言双方 peer 被成功添加。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "WireGuard 核心与 IO 工作线程",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "WireGuard 胶水层与设备状态",
+          "order": 1,
+          "filename": "u3-l1-wireguard-glue.md",
+          "level": "intermediate",
+          "topic": "精读 wireguard/wireguard.rs：WireGuard<T,B> 与 WireguardInner 的字段（peers、router、queue、runner、mtu），new/up/down/add_peer/add_tun_reader/add_udp_reader，以及 WaitCounter 与工作线程的启动。",
+          "learning_goals": [
+            "理解 WireGuard 如何把 handshake::Device 与 router::Device 组合在一起",
+            "掌握 up/down 对 router 与各 peer 定时器的影响",
+            "看懂 ParallelQueue 与 handshake 工作线程池的创建（线程数=CPU 核数）"
+          ],
+          "source_files": [
+            "src/wireguard/wireguard.rs",
+            "src/wireguard/mod.rs",
+            "src/wireguard/peer.rs",
+            "src/wireguard/queue.rs"
+          ],
+          "minimal_modules": [
+            "WireguardInner 字段",
+            "WireGuard::new/up/down/add_peer",
+            "add_tun_reader/add_udp_reader",
+            "WaitCounter (wait/increase/decrease)",
+            "ParallelQueue::new"
+          ],
+          "practice_task": "为 WireGuard::add_peer 添加一段日志，打印新增 peer 的 id 与当前 peer 总数，并解释为何插入时要取 enabled 的读锁。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "TUN 工作线程：出站加密入口",
+          "order": 2,
+          "filename": "u3-l2-tun-worker.md",
+          "level": "intermediate",
+          "topic": "精读 workers.rs 的 tun_worker：从 TUN 读 IP 包、按 MTU 填充对齐、调用 wg.router.send 进入加密发送管道。",
+          "learning_goals": [
+            "理解出站数据从 TUN 读取到交给路由器的流程",
+            "掌握 padding() 函数对载荷按 16 字节对齐且不超过 MTU 的逻辑",
+            "看懂 msg 缓冲区为何预留 SIZE_MESSAGE_PREFIX 前缀空间"
+          ],
+          "source_files": [
+            "src/wireguard/workers.rs",
+            "src/wireguard/router/mod.rs"
+          ],
+          "minimal_modules": [
+            "tun_worker",
+            "padding (const fn)",
+            "wg.router.send"
+          ],
+          "practice_task": "为 padding() 编写一组断言测试，验证不同 payload/mtu 组合下返回值满足对齐且 ≤ MTU，并补一个 mtu=0 时 tun_worker 直接 continue 的说明。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "UDP 工作线程：入站消息分用",
+          "order": 3,
+          "filename": "u3-l3-udp-worker.md",
+          "level": "intermediate",
+          "topic": "精读 workers.rs 的 udp_worker：从 UDP 读取报文，按消息类型字段分用为握手（入队 HandshakeJob）或传输（wg.router.recv），以及 pending 计数。",
+          "learning_goals": [
+            "理解入站报文如何按 type 字段分流到握手队列或路由器",
+            "掌握 TYPE_INITIATION/RESPONSE/COOKIE_REPLY 与 TYPE_TRANSPORT 的区别",
+            "看懂 wg.pending 原子计数与 queue.send 的配合"
+          ],
+          "source_files": [
+            "src/wireguard/workers.rs",
+            "src/wireguard/router/mod.rs"
+          ],
+          "minimal_modules": [
+            "udp_worker",
+            "消息类型分用 (LittleEndian::read_u32)",
+            "wg.pending.fetch_add / wg.queue.send",
+            "wg.router.recv"
+          ],
+          "practice_task": "在 udp_worker 中对未知消息类型增加 debug 日志计数（用线程局部或原子计数器），并说明 mtu==0 时为何 continue 而非 return。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "握手与 Noise 协议",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "握手消息与线路格式",
+          "order": 1,
+          "filename": "u4-l1-handshake-messages.md",
+          "level": "intermediate",
+          "topic": "讲解 handshake/messages.rs：Initiation/Response/CookieReply 及其内部 NoiseInitiation/NoiseResponse/MacsFooter 的 repr(packed) 布局、零拷贝 parse，以及类型常量。",
+          "learning_goals": [
+            "掌握三类握手消息的字段布局与字节大小",
+            "理解 zerocopy 的 FromBytes/AsBytes/LayoutVerified 在零拷贝解析中的作用",
+            "看懂消息类型常量与 MAX_HANDSHAKE_MSG_SIZE 的推导"
+          ],
+          "source_files": [
+            "src/wireguard/handshake/messages.rs",
+            "src/wireguard/handshake/mod.rs"
+          ],
+          "minimal_modules": [
+            "Initiation/Response/CookieReply 结构",
+            "NoiseInitiation/NoiseResponse/MacsFooter",
+            "TYPE_INITIATION/RESPONSE/COOKIE_REPLY",
+            "parse() 零拷贝方法",
+            "MAX_HANDSHAKE_MSG_SIZE"
+          ],
+          "practice_task": "计算并断言 Initiation、Response、CookieReply 三种消息的字节长度，写出推导过程，并解释 f_static、f_timestamp 为何是「明文长度+SIZE_TAG」。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "握手 Device 与 peer 管理",
+          "order": 2,
+          "filename": "u4-l2-handshake-device.md",
+          "level": "intermediate",
+          "topic": "精读 handshake/device.rs：Device<O> 的 pk_map/id_map/keyst/limiter，set_sk 重新计算共享密钥，add/remove/set_psk，以及 receiver id 的分配与 process 的总体分用。",
+          "learning_goals": [
+            "理解 Device 如何以公钥和 receiver id 双向映射 peer",
+            "掌握 set_sk 时为何要为每个 peer 重算 DH 共享密钥并释放中止握手",
+            "看懂 allocate() 的拒绝采样 id 分配与 process() 对三类消息的分用入口"
+          ],
+          "source_files": [
+            "src/wireguard/handshake/device.rs",
+            "src/wireguard/handshake/peer.rs",
+            "src/wireguard/handshake/types.rs"
+          ],
+          "minimal_modules": [
+            "Device<O> 字段 (keyst/pk_map/id_map/limiter)",
+            "set_sk/update_ss",
+            "add/remove/set_psk/get_psk",
+            "allocate/lookup_id/lookup_pk",
+            "begin/process"
+          ],
+          "practice_task": "为 Device::allocate 写一个并发测试：多线程同时分配 id，断言 id_map 中无重复 key，并解释 DashMap 相对 RwLock<HashMap> 的优势（参见最近提交）。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Noise IK 握手核心",
+          "order": 3,
+          "filename": "u4-l3-noise-ik-core.md",
+          "level": "advanced",
+          "topic": "精读 handshake/noise.rs：Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s 的 create/consume initiation 与 response，HASH/HMAC/KDF1-3/SEAL/OPEN 宏，链密钥与哈希转录的推进，以及派生 KeyPair。",
+          "learning_goals": [
+            "掌握 Noise IK 握手每一步的 DH/HKDF/AEAD 操作与转录哈希更新",
+            "理解 create/consume_initiation 与 create/consume_response 的对称结构",
+            "看懂从链密钥最终 KDF2 派生收发密钥并构造 KeyPair 的过程"
+          ],
+          "source_files": [
+            "src/wireguard/handshake/noise.rs",
+            "src/wireguard/types.rs"
+          ],
+          "minimal_modules": [
+            "INITIAL_CK/INITIAL_HS 预计算常量",
+            "HASH/HMAC/KDF1/KDF2/KDF3/SEAL/OPEN 宏",
+            "create_initiation/consume_initiation",
+            "create_response/consume_response",
+            "shared_secret (零共享密钥检查)",
+            "KeyPair 派生"
+          ],
+          "practice_task": "结合 noise.rs 末尾的测试向量，写一段注释把 create_initiation 的每一步对应到 Noise 规范的符号（C、H、E、DH、Aead），并解释为何要 clear_stack_on_return_fnone。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "抗拒绝服务：MAC/Cookie 与速率限制",
+          "order": 4,
+          "filename": "u4-l4-dos-cookie-ratelimit.md",
+          "level": "advanced",
+          "topic": "讲解握手层的 DoS 防御：macs.rs 的 mac1/mac2 与 cookie 机制（Validator/Generator、CookieReply、XChaCha20Poly1305），以及 ratelimiter.rs 的令牌桶与 GC 线程，说明 under-load 触发条件。",
+          "learning_goals": [
+            "理解 mac1（基于对端公钥）与 mac2（基于 cookie）的两层认证作用",
+            "掌握 CookieReply 如何在 under-load 时让对端获取 cookie 并填入 mac2",
+            "看懂令牌桶 RateLimiter 的 token 计算、突发量与按 IP 的 GC"
+          ],
+          "source_files": [
+            "src/wireguard/handshake/macs.rs",
+            "src/wireguard/handshake/ratelimiter.rs",
+            "src/wireguard/handshake/device.rs",
+            "src/wireguard/constants.rs"
+          ],
+          "minimal_modules": [
+            "Validator (check_mac1/check_mac2/create_cookie_reply)",
+            "Generator (generate/process)",
+            "RateLimiter::allow (令牌桶)",
+            "PACKETS_PER_SECOND/PACKETS_BURSTABLE",
+            "under-load 阈值常量"
+          ],
+          "practice_task": "复用 macs.rs 测试中的 new_validator_generator，编写一个流程：生成 mac1 → 校验 → 创建 cookie reply → 处理 → 生成并校验 mac2，断言 mac2 在无 cookie 时为全零。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "时间戳、重放与洪泛防护",
+          "order": 5,
+          "filename": "u4-l5-timestamp-replay.md",
+          "level": "advanced",
+          "topic": "讲解 handshake/peer.rs 的 Peer 状态机（State::Reset/InitiationSent）与 timestamp.rs 的 TAI64N，以及 check_replay_flood 如何防重放与防洪泛。",
+          "learning_goals": [
+            "掌握 TAI64N 时间戳的构造与比较",
+            "理解 State::InitiationSent 保存的链密钥/哈希/临时私钥/local id",
+            "看懂 check_replay_flood 对时间戳重放与 TIME_BETWEEN_INITIATIONS 洪泛的防护"
+          ],
+          "source_files": [
+            "src/wireguard/handshake/peer.rs",
+            "src/wireguard/handshake/timestamp.rs"
+          ],
+          "minimal_modules": [
+            "Peer<O> 字段 (state/timestamp/last_initiation_consumption/ss/psk)",
+            "State 枚举",
+            "check_replay_flood",
+            "reset_state",
+            "timestamp::now/compare",
+            "TAI64_EPOCH"
+          ],
+          "practice_task": "为 timestamp::compare 编写测试，覆盖「新时间戳更大返回 true、相等或更小返回 false」的边界，并解释为何相等也视为旧（防重放）。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l6",
+          "title": "握手工作线程：驱动状态机",
+          "order": 6,
+          "filename": "u4-l6-handshake-worker.md",
+          "level": "advanced",
+          "topic": "精读 workers.rs 的 handshake_worker：从队列取 HandshakeJob，检测 under-load，调用 device.process/begin，更新对端端点、收发字节、定时器回调与新增 keypair。",
+          "learning_goals": [
+            "理解 HandshakeJob::Message 与 HandshakeJob::New 两种任务的处理",
+            "掌握 under-load 的两种判定（超阈值 / 近期曾 under-load）",
+            "看懂握手成功后如何把新 keypair 交给 peer、释放旧 id 并触发定时器回调"
+          ],
+          "source_files": [
+            "src/wireguard/workers.rs",
+            "src/wireguard/handshake/device.rs",
+            "src/wireguard/peer.rs"
+          ],
+          "minimal_modules": [
+            "handshake_worker",
+            "HandshakeJob 枚举",
+            "under-load 判定 (THRESHOLD_UNDER_LOAD/DURATION_UNDER_LOAD)",
+            "device.process / device.begin",
+            "peer.add_keypair / device.release",
+            "定时器回调钩子"
+          ],
+          "practice_task": "画一张握手时序图，标注 initiation→response→首个数据包确认 key 的过程中 handshake_worker 各分支的触发顺序，并指出哪一步会产生 confirmed 与 unconfirmed keypair。",
+          "depends_on": [
+            "u4-l2",
+            "u4-l3",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "路由器与数据面",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "路由器总览与并发任务模型",
+          "order": 1,
+          "filename": "u5-l1-router-overview.md",
+          "level": "advanced",
+          "topic": "精读 router/device.rs 与 router/worker.rs：DeviceHandle 的状态（inbound/outbound/recv/table/work），工作线程池，EncryptionState/DecryptionState，以及 send/recv 的入口。",
+          "learning_goals": [
+            "理解路由器如何用 ParallelQueue<JobUnion> 派发 Inbound/Outbound 任务给线程池",
+            "掌握 send（出站）与 recv（入站）的入口逻辑",
+            "看懂 EncryptionState/DecryptionState 与 recv 表（receiver id → 解密状态）的关系"
+          ],
+          "source_files": [
+            "src/wireguard/router/device.rs",
+            "src/wireguard/router/worker.rs",
+            "src/wireguard/router/mod.rs",
+            "src/wireguard/router/types.rs"
+          ],
+          "minimal_modules": [
+            "DeviceInner 字段",
+            "DeviceHandle::new/send/recv/new_peer",
+            "JobUnion 与 worker 函数",
+            "EncryptionState/DecryptionState",
+            "Callbacks trait / RouterError"
+          ],
+          "practice_task": "写一段说明，解释为何 worker 处理完 parallel_work 后要调用 queue().consume()，以及 Drop for DeviceHandle 如何优雅关闭线程池。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "发送管道：加密（SendJob）",
+          "order": 2,
+          "filename": "u5-l2-send-pipeline.md",
+          "level": "advanced",
+          "topic": "精读 router/send.rs：SendJob 的 parallel_work（用 ring 的 ChaCha20-Poly1305 原地加密、构造 nonce、写 TransportHeader）与 sequential_work（发送并触发 Callbacks::send）。",
+          "learning_goals": [
+            "掌握 transport 消息的头格式与 nonce 由 counter 构造的方式",
+            "理解 parallel_work（加密）与 sequential_work（发送+回调）的职责划分",
+            "看懂 counter 不能超过 REJECT_AFTER_MESSAGES 的约束"
+          ],
+          "source_files": [
+            "src/wireguard/router/send.rs",
+            "src/wireguard/router/messages.rs",
+            "src/wireguard/router/peer.rs"
+          ],
+          "minimal_modules": [
+            "SendJob::parallel_work (seal_in_place_separate_tag)",
+            "TransportHeader (f_type/f_receiver/f_counter)",
+            "nonce 构造 ([0u8;4] || counter)",
+            "SendJob::sequential_work + C::send 回调",
+            "Peer::send (nonce 分配与 staged)"
+          ],
+          "practice_task": "为 nonce 构造写注释说明为何前 4 字节为零、后 8 字节为 counter，并计算 REJECT_AFTER_MESSAGES 下单个密钥最多可加密多少报文。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "接收管道：解密（ReceiveJob）",
+          "order": 3,
+          "filename": "u5-l3-receive-pipeline.md",
+          "level": "advanced",
+          "topic": "精读 router/receive.rs：ReceiveJob 的 parallel_work（AEAD 解密、计数上限与 cryptokey 路由校验，失败则截断缓冲区）与 sequential_work（防回放、确认密钥、更新端点、写入 TUN、触发 Callbacks::recv）。",
+          "learning_goals": [
+            "理解解密为何放在并行阶段、防回放为何放在串行阶段",
+            "掌握认证失败时截断缓冲区以防误用的设计",
+            "看懂首个成功报文如何确认 next keypair 并写入 TUN"
+          ],
+          "source_files": [
+            "src/wireguard/router/receive.rs",
+            "src/wireguard/router/peer.rs",
+            "src/wireguard/router/ip.rs"
+          ],
+          "minimal_modules": [
+            "ReceiveJob::parallel_work (open_in_place + check_route)",
+            "ReceiveJob::sequential_work (AntiReplay.update + confirm_key)",
+            "peer.device.inbound.write",
+            "C::recv 回调",
+            "inner_length 判定 keepalive"
+          ],
+          "practice_task": "解释为何 cryptokey 路由校验（check_route）放在并行阶段、而防回放 update 放在串行阶段，并指出 keepalive 报文在写入 TUN 前如何被识别丢弃。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "有序队列 Queue：并行加密、有序发送",
+          "order": 4,
+          "filename": "u5-l4-ordered-queue.md",
+          "level": "advanced",
+          "topic": "精读 router/queue.rs：SequentialJob/ParallelJob trait，以及 Queue 用 contenders 原子计数实现「多线程并行做 parallel_work、单线程按序做 sequential_work」的互斥机制。",
+          "learning_goals": [
+            "理解 ParallelJob 与 SequentialJob 的分工",
+            "掌握 contenders fetch_add 实现的无锁互斥与临界区重入逻辑",
+            "看懂为何只有队首 ready 的任务才会被顺序处理（保序）"
+          ],
+          "source_files": [
+            "src/wireguard/router/queue.rs",
+            "src/wireguard/router/worker.rs"
+          ],
+          "minimal_modules": [
+            "SequentialJob/ParallelJob trait",
+            "Queue::push/consume",
+            "contenders fetch_add 互斥",
+            "INORDER_QUEUE_SIZE"
+          ],
+          "practice_task": "参照 queue.rs 的 test_consume_queue，编写一个测试：多个生产者并发 push、多个消费者并发 consume，最终断言所有任务被恰好执行一次且顺序符合入队顺序。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "Cryptokey 路由表与 IP 解析",
+          "order": 5,
+          "filename": "u5-l5-cryptokey-routing.md",
+          "level": "advanced",
+          "topic": "精读 router/route.rs 与 router/ip.rs：基于 treebitmap 的 IPv4/IPv6 最长前缀匹配表，get_route（按目的地址选 peer）与 check_route（按源地址验证归属），以及 IP 头解析。",
+          "learning_goals": [
+            "掌握 allowed-ips 如何用 IpLookupTable 实现最长前缀匹配",
+            "理解出站按目的地址路由、入站按源地址反查防伪造",
+            "看懂 IPv4Header/IPv6Header 的 zerocopy 解析与 inner_length"
+          ],
+          "source_files": [
+            "src/wireguard/router/route.rs",
+            "src/wireguard/router/ip.rs"
+          ],
+          "minimal_modules": [
+            "RoutingTable (ipv4/ipv6 IpLookupTable)",
+            "insert/get_route/check_route/list/remove",
+            "IPv4Header/IPv6Header",
+            "inner_length",
+            "VERSION_IP4/IP6"
+          ],
+          "practice_task": "编写一个测试：向 RoutingTable 插入重叠前缀（如 192.168.0.0/16 与 192.168.1.0/24 属于不同 peer），断言 get_route 返回最长匹配的 peer。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l6",
+          "title": "密钥轮转 KeyWheel 与 Peer 生命周期",
+          "order": 6,
+          "filename": "u5-l6-keywheel-peer.md",
+          "level": "advanced",
+          "topic": "精读 router/peer.rs：Peer/PeerHandle/PeerInner，KeyWheel（next/current/previous）三密钥轮转，staged_packets 暂存，add_keypair/confirm_key，以及 allowed-ips、端点、Drop 清理。",
+          "learning_goals": [
+            "理解 next/current/previous 三密钥的语义与轮转时机",
+            "掌握无可用密钥时暂存 staged_packets 并触发 need_key 回调",
+            "看懂 initiator 与非 initiator 在 add_keypair 时的不同处理与确认机制"
+          ],
+          "source_files": [
+            "src/wireguard/router/peer.rs",
+            "src/wireguard/router/device.rs"
+          ],
+          "minimal_modules": [
+            "KeyWheel (next/current/previous/retired)",
+            "Peer::send/send_staged",
+            "confirm_key",
+            "add_keypair",
+            "PeerHandle Drop 清理 (table.remove + recv 释放)",
+            "EncryptionState::new"
+          ],
+          "practice_task": "画一张 KeyWheel 状态转移图，标注 initiator 握手成功后 current→previous、新密钥入 current，以及非 initiator 时新密钥入 next 等待首个报文确认的过程。",
+          "depends_on": [
+            "u5-l1",
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l7",
+          "title": "防回放窗口（RFC 6479）",
+          "order": 7,
+          "filename": "u5-l7-anti-replay.md",
+          "level": "advanced",
+          "topic": "精读 router/anti_replay.rs：基于 2048 位滑动位图的防回放过滤器，check/update_store 的位运算，窗口大小与字长的关系。",
+          "learning_goals": [
+            "掌握滑动位图防回放的基本原理与窗口大小推导",
+            "理解 check 与 update_store 中 index/bit_location 的位运算",
+            "看懂 update 在并发串行阶段如何保证报文不因乱序被误丢"
+          ],
+          "source_files": [
+            "src/wireguard/router/anti_replay.rs",
+            "src/wireguard/router/receive.rs"
+          ],
+          "minimal_modules": [
+            "AntiReplay (bitmap/last)",
+            "BITMAP_BITLEN/WINDOW_SIZE/REDUNDANT_BIT_SHIFTS",
+            "check/update_store/update",
+            "32/64 位字长适配"
+          ],
+          "practice_task": "基于 anti_replay.rs 自带的测试，补充一个用例：连续 update 0..N 后，断言窗口外（last-WINDOW_SIZE 之前）的序号被拒绝、窗口内未出现过的序号被接受。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "配置接口与 UAPI 协议",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Configuration 抽象与 WireGuardConfig",
+          "order": 1,
+          "filename": "u6-l1-config-interface.md",
+          "level": "intermediate",
+          "topic": "精读 configuration/config.rs：Configuration trait（设备级与 peer 级配置方法）、WireGuardConfig 如何隐藏 IO 泛型、PeerState 快照、start_listener 绑定 UDP。",
+          "learning_goals": [
+            "理解 Configuration trait 如何把复杂实现类型对宿主应用隐藏",
+            "掌握 set_listen_port/set_fwmark 与 start_listener 的重新绑定流程",
+            "看懂 get_peers 如何聚合各 peer 的 PeerState"
+          ],
+          "source_files": [
+            "src/configuration/config.rs",
+            "src/configuration/mod.rs",
+            "src/configuration/error.rs"
+          ],
+          "minimal_modules": [
+            "Configuration trait",
+            "WireGuardConfig/Inner",
+            "PeerState",
+            "start_listener (B::bind + set_writer + add_udp_reader)",
+            "up/down/set_listen_port/set_fwmark"
+          ],
+          "practice_task": "为 Configuration trait 的 set_listen_port 写一个调用流程说明：当设备已绑定时，它如何释放旧 bind 并用新端口重建 listener。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "UAPI 协议处理框架",
+          "order": 2,
+          "filename": "u6-l2-uapi-protocol.md",
+          "level": "intermediate",
+          "topic": "精读 configuration/uapi/mod.rs：handle() 按行读取文本协议，分用 get=1/set=1 操作，逐行解析 key=value，最终回写 errno。",
+          "learning_goals": [
+            "掌握 UAPI 文本协议的行格式与 get/set 两大操作",
+            "理解 readline 的最大行长保护与 keypair 拆分",
+            "看懂操作结束后如何统一回写 errno=0\\n\\n"
+          ],
+          "source_files": [
+            "src/configuration/uapi/mod.rs",
+            "src/platform/linux/uapi.rs",
+            "src/platform/uapi.rs"
+          ],
+          "minimal_modules": [
+            "handle (readline/keypair/operation)",
+            "get=1/set=1 分用",
+            "errno 回写",
+            "MAX_LINE_LENGTH",
+            "LinuxUAPI (UnixListener 绑定 /var/run/wireguard)"
+          ],
+          "practice_task": "写一个最小测试：构造一段 set 配置文本（含 private_key、public_key、allowed_ip），喂给 handle 并用内存流捕获回写的 errno，断言为 0。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "UAPI set 配置解析器",
+          "order": 3,
+          "filename": "u6-l3-uapi-set-parser.md",
+          "level": "intermediate",
+          "topic": "精读 configuration/uapi/set.rs：LineParser 的 Interface/Peer 状态机，逐行解析 private_key/listen_port/fwmark/public_key/allowed_ip 等，flush_peer 提交配置。",
+          "learning_goals": [
+            "掌握 LineParser 在 Interface 与 Peer 状态间的切换",
+            "理解 replace_peers/update_only/remove/replace_allowed_ips 等控制字段语义",
+            "看懂 flush_peer 如何把累积的 ParsedField 批量下发到 Configuration"
+          ],
+          "source_files": [
+            "src/configuration/uapi/set.rs"
+          ],
+          "minimal_modules": [
+            "LineParser/ParserState",
+            "ParsedPeer 字段",
+            "parse_line (Interface/Peer 分支)",
+            "flush_peer",
+            "各 key 的十六进制/数值解析"
+          ],
+          "practice_task": "扩展 LineParser，使其在遇到未知 key 时记录一条 warning 日志而非直接报错（仅当 key 以 x- 实验前缀开头时），并补一个解析用例。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "UAPI get 状态序列化",
+          "order": 4,
+          "filename": "u6-l4-uapi-get-serializer.md",
+          "level": "intermediate",
+          "topic": "精读 configuration/uapi/get.rs：serialize() 把设备与各 peer 的状态序列化为 UAPI 文本（private_key、listen_port、fwmark、各 peer 的 rx/tx_bytes、last_handshake_time、allowed_ip 等）。",
+          "learning_goals": [
+            "掌握 get 操作输出的字段顺序与格式",
+            "理解 last_handshake_time 拆为 sec/nsec 两个字段",
+            "看懂 allowed_ip 序列化为 ip/cidr 形式"
+          ],
+          "source_files": [
+            "src/configuration/uapi/get.rs",
+            "src/configuration/config.rs"
+          ],
+          "minimal_modules": [
+            "serialize (write 闭包)",
+            "接口级字段序列化",
+            "peer 级字段序列化 (rx_bytes/tx_bytes/last_handshake_time/endpoint/allowed_ip)"
+          ],
+          "practice_task": "编写一个测试：构造一个含 1 个 peer 与若干 allowed_ip 的 PeerState 列表，调用 serialize 写入缓冲，断言输出包含预期的 public_key、rx_bytes、allowed_ip 行。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "定时器、密钥安全与测试",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "定时器状态机与 Callbacks",
+          "order": 1,
+          "filename": "u7-l1-timers-state-machine.md",
+          "level": "advanced",
+          "topic": "精读 wireguard/timers.rs：Timers 的五个定时器（retransmit/keepalive/persistent_keepalive/new_handshake/zero_key_material），基于 hjul Runner 的时间轮，以及为 PeerInner 实现的 Callbacks（send/recv/need_key/key_confirmed）。",
+          "learning_goals": [
+            "掌握 WireGuard 各定时器对应的协议事件与触发时机",
+            "理解 hjul Runner 时间轮（tick/slots/capacity）与 TIMERS_* 常量",
+            "看懂 Callbacks 如何在路由器收发时驱动密钥刷新与握手重试"
+          ],
+          "source_files": [
+            "src/wireguard/timers.rs",
+            "src/wireguard/constants.rs",
+            "src/wireguard/router/types.rs",
+            "src/wireguard/peer.rs"
+          ],
+          "minimal_modules": [
+            "Timers 字段与五个 Timer",
+            "Timers::new (宏 fetch_peer/fetch_timers)",
+            "timers_* 事件方法",
+            "REKEY_*/REJECT_*/KEEPALIVE_* 常量",
+            "impl Callbacks for PeerInner (send/recv/need_key/key_confirmed)",
+            "keep_key_fresh"
+          ],
+          "practice_task": "列出 keep_key_fresh（发送侧）触发重新握手的两个条件，并解释 sent_lastminute_handshake 标志在接收侧防止重复握手的作用。",
+          "depends_on": [
+            "u3-l1",
+            "u5-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "密钥材料的清零与安全",
+          "order": 2,
+          "filename": "u7-l2-key-material-security.md",
+          "level": "advanced",
+          "topic": "讲解密钥安全：types.rs 的 Key::Drop 清零、noise.rs 的 clear_stack_on_return_fnone 与 clear_on_drop，以及 shared_secret 的零值检查和 State::Drop 清除转录。",
+          "learning_goals": [
+            "理解为何对密钥材料实现 Drop 清零",
+            "掌握 clear_stack_on_return_fnone 清除栈上敏感数据的用途",
+            "看懂共享密钥为零时的拒绝与常时间比较 (subtle::ct_eq)"
+          ],
+          "source_files": [
+            "src/wireguard/types.rs",
+            "src/wireguard/handshake/noise.rs",
+            "src/wireguard/handshake/peer.rs"
+          ],
+          "minimal_modules": [
+            "Key::Drop (clear)",
+            "KeyPair",
+            "clear_stack_on_return_fnone/CLEAR_PAGES",
+            "shared_secret 零检查",
+            "State::Drop (hs/ck clear)",
+            "ct_eq 常时间比较"
+          ],
+          "practice_task": "审计 noise.rs 中所有敏感局部变量，列出哪些会被 clear_stack_on_return_fnone 或 Drop 清零，并指出 ephemeral 私钥由谁负责清除。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "零拷贝报文解析：zerocopy 与 LayoutVerified",
+          "order": 3,
+          "filename": "u7-l3-zerocopy-parsing.md",
+          "level": "advanced",
+          "topic": "汇总 zerocopy 在项目中的贯穿使用：握手消息的 FromBytes/AsBytes、传输报文 TransportHeader、收发管道的 LayoutVerified::new_from_prefix、IP 头解析，避免拷贝与对齐问题。",
+          "learning_goals": [
+            "掌握 LayoutVerified 如何把字节切片安全转写为结构化视图",
+            "理解 repr(packed) + zerocopy 在网络报文解析中的配合",
+            "看懂 send/receive 中就地构造/改写报文头与密文的零拷贝模式"
+          ],
+          "source_files": [
+            "src/wireguard/router/send.rs",
+            "src/wireguard/router/receive.rs",
+            "src/wireguard/router/ip.rs",
+            "src/wireguard/router/messages.rs",
+            "src/wireguard/handshake/messages.rs"
+          ],
+          "minimal_modules": [
+            "LayoutVerified::new_from_prefix",
+            "AsBytes/FromBytes/U32/U64",
+            "TransportHeader 就地写入",
+            "IPv4Header/IPv6Header 视图",
+            "send 中 extend tag 后就地加密"
+          ],
+          "practice_task": "写一段说明，对比「先反序列化到结构体再处理」与「LayoutVerified 直接视图」在本项目高吞吐场景下的差异，并指出 new_from_prefix 失败时返回的 RouterError。",
+          "depends_on": [
+            "u4-l1",
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "测试策略与纯软件回归",
+          "order": 4,
+          "filename": "u7-l4-testing-strategy.md",
+          "level": "advanced",
+          "topic": "讲解项目的测试体系：wireguard/tests.rs 用 dummy 平台做端到端纯软件回归、handshake 与 router 的单元/属性测试（proptest）、queue 的并发模糊测试、router/tests 的 bench。",
+          "learning_goals": [
+            "掌握如何用 dummy 平台搭建两个互连 WG 实例做端到端测试",
+            "理解 proptest 在握手/cookie/防回放中的属性测试用法",
+            "看懂 make_packet 构造 IPv4/IPv6 测试报文的方法"
+          ],
+          "source_files": [
+            "src/wireguard/tests.rs",
+            "src/wireguard/router/tests/mod.rs",
+            "src/wireguard/handshake/tests.rs",
+            "src/platform/dummy/mod.rs"
+          ],
+          "minimal_modules": [
+            "test_pure_wireguard (双实例握手+收发)",
+            "make_packet (pnet 构造 IP 报文)",
+            "dummy::TunTest/PairBind",
+            "proptest 用例 (cookie/handshake)",
+            "Queue 并发模糊测试"
+          ],
+          "practice_task": "基于 test_pure_wireguard，编写一个新的端到端测试：仅发送大于 MTU 一半的报文，验证 padding 对齐后仍能正确按序送达对端。",
+          "depends_on": [
+            "u2-l4",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

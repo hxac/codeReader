@@ -2,557 +2,477 @@
 
 ## 1. 本讲目标
 
-本讲把 u3-l4（主机→设备启动流程）留下的「命令如何送达设备」与 u6-l1（warp 调度器、CTA 派发）入口处的「第一个 warp 从哪来」两端接起来，讲清横亘其间的**命令处理器（Command Processor，CP）**与**内核管理单元（Kernel Management Unit，KMU）**。
+本讲把前面几讲里反复出现的「主机写一组 DCR、然后启动内核」这件事，从黑盒彻底打开。读完本讲，你应当能够：
 
-学完后你应当能够：
+- 说清 **命令处理器（Command Processor，CP）** 的整体结构：AXI-Lite 寄存器接口、主机驻留命令环（command ring）、命令格式，以及它把每条命令分流到「KMU / DMA / DCR / EVENT」四个共享资源的机制。
+- 画出每队列引擎（CPE）的状态机 `IDLE→DECODE→BID→WAIT_DONE→RETIRE`，并解释完成号（seqnum）如何安全地回写主机。
+- 解释 **KMU（Kernel Management Unit，内核管理单元）** 如何从一次 `CMD_LAUNCH` 进展到「脉冲 start → 等 busy 拉高 → 等 busy 拉低（drain）」的完整生命周期。
+- 看懂 KMU 如何根据 `grid/block/cluster` 维度把一个网格遍历成一串 CTA 请求，并理解 `cta_id`、`block_idx`、`is_first_of_cluster` 这些字段的来源。
+- 对照 RTL CP（`hw/rtl/cp/`）与仿真 CP（`sim/common/cmd_processor.cpp`）两套实现，知道它们的对应关系与当前已知的分歧点（VM、QMD launch 等）。
 
-- 说清一次 `vx_start`/`vx_enqueue_launch` 引发的完整控制流：主机写 DCR → CP 解包 → KMU 派发 CTA；
-- 掌握 CP 的 AXI-Lite 寄存器接口、命令格式与「引擎 FSM + 四资源仲裁」的执行模型；
-- 理解 KMU 如何用 `group_origin + intra_offset` 的双层计数器遍历 grid、按 cluster_dim 分组产出 CTA；
-- 区分 RTL CP（`VX_cp_core.sv`/`VX_cp_launch.sv`）与仿真 CP（`cmd_processor.cpp`/`kmu.cpp`）这两套 model parity 的对应实现。
-
----
+本讲承接 u3-l4（主机如何加载 `.vxbin` 并写 KMU DCR）与 u6-l1（CTA 如何被拆成 warp），把二者之间那条「命令处理器 → KMU → CTA」的控制链路补齐。
 
 ## 2. 前置知识
 
-- **CTA 与 grid/block**：Vortex 沿用 CUDA 术语，一个 kernel 启动一个 grid，grid 切成若干 block（Vortex 称 CTA，Cooperative Thread Array），每个 CTA 含若干 warp，每个 warp 含 `NUM_THREADS` 个 thread。这是 u6-l1 已建立的层次。
-- **DCR（Device Control Register）**：设备控制寄存器，主机用来配置/查询设备的统一通道。KMU 有专属的 `VX_DCR_KMU_*` 地址段（如 `STARTUP_ADDR`、`KERNEL_ENTRY`、`GRID_DIM_X` 等），见 u3-l4。
-- **AXI-Lite / AXI4**：ARM 总线协议。AXI-Lite 是轻量控制通路（一次一字），AXI4 是带突发（burst）的数据通路。CP 用 AXI-Lite 作控制面、AXI4 作数据面。
-- **model parity**：SimX 与 RTL 必须功能与时序一致（u7-l4）。CP 也不例外——RTL CP 与仿真 CP 是同一架构的两种实现。
-- **主机运行时的 stub 分发**（u3-l3）：`libvortex.so` 按 `$VORTEX_DRIVER` 加载后端，但 CP 之上的命令编码、队列、事件都是后端无关的 `common/` 代码。
+在进入源码前，先建立三个直觉。
 
-> 一句话定位：**CP 是主机提交工作到 GPU 的唯一控制平面；KMU 是 CP 内部专门负责「把一次 kernel launch 展开成一串 CTA」的状态机。** CP 是「邮局」，KMU 是邮局里专管「分拣包裹（CTA）派给各邮递员（core）」的柜台。
+**（1）主机从不直接写设备内存，也从不直接启动核。** 回顾 u3-l2：主机与设备之间唯一的控制通路是 **CP（命令处理器）**，唯一的搬运工是 **CP 的 DMA 引擎**。主机做的事只有两类：往 CP 的 AXI-Lite 寄存器里写控制字、往「CP 可见的主机内存」里写命令环。真正去戳设备 DCR、去搬数据、去拉起内核的，是 CP 自己。所以「启动一次内核」本质上是「主机往环里写一串命令，再敲一下门铃（doorbell）」。
 
----
+**（2）命令环在主机内存里，不在设备里。** 这是一个工程取舍：环放在主机 pin 住的内存里，CP 通过它独占的 `axi_host` 端口去取（一次取一个 64 字节 cache line）。这样做的好处是主机追加命令就是普通的 `memcpy`，不需要每条命令都做一次 MMIO；坏处是 CP 必须有读主机内存的能力。这条决策记录在设计文档里（见 [command_processor.md:427-432](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/docs/designs/command_processor.md#L427-L432)，明确说「设备内存环 + 每命令 DMA」的旧方案被废弃）。
+
+**（3）CTA 是 GPU 的调度单位。** 一个 CTA（Cooperative Thread Array，对应 CUDA 的 thread block）是一组会共享本地内存（LMEM）和屏障的线程。主机用 `grid_dim × block_dim` 描述一次 launch：`block_dim` 是一个 CTA 内的线程数，`grid_dim` 是 CTA 的个数。KMU 的职责就是把 `grid` 这个三维计数空间**展开成一串 CTA 请求**，每个 CTA 带着自己的 `block_idx`。注意本讲里的 **cluster**（`cluster_dim`）是 **CTA 簇**——一组协作的 CTA，用于 DXA 多播与跨 CTA 屏障（参见 u9-l2），**不要**和 u7-l1/u8-l1 里「cluster 共享 L2」的内存层次 cluster 混淆，两者同名但含义不同。
+
+| 术语 | 全称 | 含义 |
+|---|---|---|
+| CP | Command Processor | 设备侧命令处理器，唯一控制通路 |
+| CPE | CP Engine | 每队列一个的命令引擎 |
+| KMU | Kernel Management Unit | 内核管理单元，展开 grid 为 CTA |
+| CTA | Cooperative Thread Array | 线程块，GPU 调度单位 |
+| DCR | Device Control Register | 设备控制寄存器 |
+| doorbell | — | 主机写 `Q_TAIL` 通知 CP「有新命令了」 |
+| seqnum | sequence number | 每条命令退休时递增的完成号 |
 
 ## 3. 本讲源码地图
 
-| 文件 | 角色 |
+| 文件 | 作用 |
 |---|---|
-| [`hw/rtl/cp/VX_cp_core.sv`](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_core.sv) | RTL CP 顶层：寄存器堆 + N 个引擎 + 4 个仲裁器 + 5 个资源单元 + 双 AXI xbar |
-| [`hw/rtl/cp/VX_cp_launch.sv`](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_launch.sv) | RTL 中 KMU 资源的 start/busy 握手包装器 |
-| [`hw/rtl/cp/VX_cp_engine.sv`](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_engine.sv) | RTL 每队列引擎 FSM，opcode→资源分类 |
-| [`hw/rtl/cp/VX_cp_pkg.sv`](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_pkg.sv) | opcode、`cmd_t`、`cpe_state_t`、资源枚举等共享定义 |
-| [`sim/simx/kmu/kmu.cpp`](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp) / [`kmu.h`](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.h) | SimX 的 KMU：持有内核描述符、遍历 grid 逐拍产 CTA |
-| [`sim/common/cmd_processor.cpp`](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp) | 仿真 CP 的功能 C++ 孪生体（simx/rtlsim/gem5 共用） |
-| [`sw/runtime/common/queue.cpp`](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sw/runtime/common/queue.cpp) | 主机侧 launch 编码：算 warp_step、发 ~18 条 CMD_DCR_WRITE + CMD_LAUNCH |
-| [`sw/runtime/common/device.cpp`](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sw/runtime/common/device.cpp) | `cp_init`/`cp_submit_*`：把命令打包进环、敲门铃、轮询 seqnum |
-| [`docs/designs/command_processor.md`](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/docs/designs/command_processor.md) | CP 设计总文档（架构、命令格式、寄存器表、未竟事项） |
+| [hw/rtl/cp/VX_cp_core.sv](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_core.sv) | RTL CP 顶层：寄存器堆 + N×(fetch+engine) + 4 个仲裁器 + 5 个资源单元 + 双 AXI xbar |
+| [hw/rtl/cp/VX_cp_pkg.sv](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_pkg.sv) | CP 的公共定义：opcode、`cmd_t` 结构、资源枚举、命令字节长度表 |
+| [hw/rtl/cp/VX_cp_engine.sv](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_engine.sv) | 每队列引擎 FSM：分类 opcode→资源、竞标、等完成、退休 |
+| [hw/rtl/cp/VX_cp_launch.sv](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_launch.sv) | KMU 启动包装器：脉冲 start、握 busy、drain 后发 done |
+| [sim/simx/kmu/kmu.cpp](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp) | SimX 的 KMU 模型：保存内核描述符、遍历 grid 产出 CTA |
+| [sim/simx/kmu/kmu.h](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.h) | `kmu_req_t` 结构与 `Kmu` 类声明 |
+| [sim/common/cmd_processor.cpp](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp) | 仿真 CP 的 C++ 功能模型，RTL CP 的功能孪生 |
+| [sim/simx/cta_dispatcher.cpp](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/cta_dispatcher.cpp) | 每核 CTA 分派器：从 KMU 拉 CTA、切成 warp |
+| [sw/runtime/common/queue.cpp](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sw/runtime/common/queue.cpp) | 主机运行时：把一次 launch 编码成一串 `CMD_DCR_WRITE` + `CMD_LAUNCH` |
+| [docs/designs/command_processor.md](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/docs/designs/command_processor.md) | CP 设计文档（架构、寄存器图、已知 gap） |
 
 ---
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 CP 总体架构：唯一控制平面
+### 4.1 CP 顶层架构与命令格式
 
 #### 4.1.1 概念说明
 
-CP 是主机向 GPU 提交工作的**唯一控制平面**：内存搬运、DCR 编程、内核启动、栅栏、事件、缓存维护全都经它。在 FPGA 目标（XRT/OPAE）上，它更是**唯一**的 launch/DCR 路径——旧的 AP_CTRL 启动状态机已被移除（见 command_processor.md 开头）。
+CP 是 Vortex 的**单一控制平面**：主机提交给 GPU 的所有工作——内存搬运、DCR 编程、内核启动、栅栏、事件、缓存维护——都走这一条路。在 FPGA 目标（XRT / OPAE）上它甚至是**唯一**的 launch/DCR 通路，旧的 AP_CTRL 启动状态机已被移除（见 [command_processor.md:17-21](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/docs/designs/command_processor.md#L17-L21)）。
 
-CP 的核心结构是「**N 个并行命令引擎**（每队列一个）喂给**四个轮转仲裁器**，仲裁器串行化对四个共享资源的访问」：
-
-- **KMU launch**：内核启动；
-- **DMA**：主机↔设备、设备↔设备拷贝；
-- **DCR bus**：DCR 读写（含 cache flush 扫描）；
-- **event unit**：事件计数器 signal/wait。
-
-命令环（command ring）放在**主机内存**里；CP 用一个专用 AXI 主端口去取指（一次取一个 64B cache line），完成后把序号（seqnum）写回主机内存的完成槽。主机侧 therefore 只需「往环里写命令 → 敲门铃（写 tail） → 轮询 seqnum」。
-
-默认配置 `NUM_QUEUES=1`、环大小 64 KiB（`RING_SIZE_LOG2=16`）、每个 64B 行最多 5 条命令。
+CP 的设计可以用一句话概括：**N 个并行命令引擎（每队列一个），喂给 4 个轮转仲裁器，仲裁器串行化对 4 个共享资源的访问**——内核管理单元（KMU 启动）、DMA 引擎、DCR 总线、事件单元。命令环在主机内存里；CP 用独占的 AXI 主端口去取环、去写完成号。
 
 #### 4.1.2 核心流程
 
-CP 一拍的宏观流程（以一条 CMD_LAUNCH 为例）：
+主机侧一次「提交命令」的全流程：
 
-```
-主机 runtime
-  │ 1. 把命令打包进 64B CL，memcpy 进主机环
-  │ 2. 写 Q_TAIL_LO/HI 敲门铃（HI 字原子提交）
-  ▼
-VX_cp_axil_regfile  ←─── AXI-Lite 从机（唯一控制口）
-  │  更新该队列的 tail
-  ▼
-VX_cp_fetch（每队列一个环游走器）
-  │  AR 一条 64B CL：ring_base + (head & mask)
-  ▼
-VX_cp_unpack（按偏移逐条解包命令）
-  ▼
-VX_cp_engine FSM：IDLE→DECODE→BID→WAIT_DONE→RETIRE
-  │  classify(LAUNCH) = RES_KMU → 向 KMU 仲裁器出价
-  ▼
-VX_cp_arbiter(RES_KMU)（轮转，单队列时必胜）
-  ▼
-VX_cp_launch：脉冲 start，等 busy 起、等 busy 落 → done
-  ▼
-VX_cp_completion：写 8B seqnum 到 cmpl_addr → 主机轮询 Q_SEQNUM 命中
-```
+1. 运行时的每队列 worker 线程把若干命令编码进**一个 64 字节 cache line**，`memcpy` 进主机驻留的环缓冲。
+2. 主机写 `Q_TAIL_LO` 暂存、写 `Q_TAIL_HI` **原子提交**（doorbell）。
+3. CP 的 `VX_cp_fetch` 发现 `head < tail`，通过 `axi_host` 取回一个 64B line。
+4. `VX_cp_unpack` 按 opcode 的字节长度逐条解出 `cmd_t`。
+5. 该队列的 `VX_cp_engine` 把每条命令分类到一个资源，向对应仲裁器竞标（bid）。
+6. 仲裁器轮转授权一个引擎，资源单元执行命令。
+7. 命令完成后，`VX_cp_completion` 把 8 字节 seqnum 写回主机驻留的 `cmpl_addr`，seqnum 递增。
+8. 主机 busy-poll `Q_SEQNUM`，看到它前进就知道命令已完成。
 
 #### 4.1.3 源码精读
 
-RTL 顶层 `VX_cp_core` 的端口与数据面注释一上来就点明了「双数据面」设计：
+**顶层 `VX_cp_core`** 把所有零件拼起来。它的端口里最关键的是两个 AXI 主端口——`axi_host`（到主机内存）和 `axi_dev`（到设备内存），以及一个 AXI-Lite 从端口（到主机的 MMIO 寄存器）：
 
-[hw/rtl/cp/VX_cp_core.sv:L89-L107](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_core.sv#L89) — `axil_s`（控制面 AXI-Lite 从机）、`axi_host`（到主机内存的 AXI4 主机，命令环与每次上传/下载的主机端）、`axi_dev`（到设备内存的 AXI4 主机）、`gpu_if`（面向 Vortex 的 DCR + start/busy 握手）。注释说明 DMA 引擎跨在两个 xbar 上，按 opcode 选择读源/写目的端口。
+- 顶层模块声明与双 AXI 端口：[VX_cp_core.sv:77-98](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_core.sv#L77-L98)——说明 CP 对外就这三条路：一条 Lite 接收主机寄存器写、两条 AXI 取环/搬数据。
+- 唯一的 AXI-Lite 从模块 `VX_cp_axil_regfile`：[VX_cp_core.sv:135](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_core.sv#L135)——全局寄存器 + 每队列块都在这里，doorbell 在 `Q_TAIL_HI` 写时原子提交。
+- 每队列一对 `VX_cp_fetch` + `VX_cp_engine`：[VX_cp_core.sv:186-197](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_core.sv#L186-L197)。
+- 四个资源各一个轮转仲裁器：[VX_cp_core.sv:276-291](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_core.sv#L276-L291)。
+- 双 AXI xbar：host xbar（fetch+completion+DMA(host)→`axi_host`）在 [VX_cp_core.sv:389](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_core.sv#L389)，device xbar（DMA(dev)+event→`axi_dev`）在 [VX_cp_core.sv:440](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_core.sv#L440)。
 
-顶层把零件拼成「regfile + N×(fetch+engine) + 4 仲裁器 + 5 资源单元 + 双 xbar」：
+**命令格式**定义在 `VX_cp_pkg.sv`。一条命令 = 4 字节头 + opcode 特定载荷，打包进 64 字节 cache line（每行最多 5 条，零头终止本行）：
 
-[hw/rtl/cp/VX_cp_core.sv:L184-L229](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_core.sv#L184) — generate 循环为每个队列实例化一个 `VX_cp_fetch`（带内嵌 unpack）和一个 `VX_cp_engine`。注意 L209-215：四个 `*_done` 脉冲是**广播**给所有 CPE 的，只有正处在 `S_WAIT_DONE` 且持有授权的那个 CPE 才会接收——这是单资源一次只服务一个命令的硬件体现。
+- opcode 枚举：[VX_cp_pkg.sv:63-75](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_pkg.sv#L63-L75)——`CMD_LAUNCH = 0x06` 是本讲主角。
+- 4 字节头 `{reserved[16], flags[8], opcode[8]}`：[VX_cp_pkg.sv:84-88](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_pkg.sv#L84-L88)。
+- 解码后的命令记录 `cmd_t`（头 + 三个 64 位 arg + 可选 profile 槽）：[VX_cp_pkg.sv:97-103](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_pkg.sv#L97-L103)。
+- 每个 opcode 的在线字节长度表：[VX_cp_pkg.sv:183-201](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_pkg.sv#L183-L201)——注意 `CMD_LAUNCH` 只有 12 字节（头 + 一个 8B arg），这是它「轻量脉冲」性质的体现：真正的内核参数已经通过前面的 `CMD_DCR_WRITE` 写进 KMU 寄存器了，`CMD_LAUNCH` 只负责「点火」。
 
-四个轮转仲裁器各管一个资源：
-
-[hw/rtl/cp/VX_cp_core.sv:L276-L291](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_core.sv#L276) — `u_arb_kmu/dma/dcr/event`，每个 `VX_cp_arbiter #(.N(NUM_QUEUES))`。设计文档指出 `bid_priority` 输入目前**未使用**（command_processor.md §4），即纯轮转。
-
-`cp_busy` 聚合给主机一个总状态位：
-
-[hw/rtl/cp/VX_cp_core.sv:L482-L490](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_core.sv#L482) — 任意 CPE 有命令在途，或任意资源被授权，`cp_busy` 即拉高。
+> **为何 launch 只有 12 字节？** 因为当前架构下，一次 launch 被编码成「约 18 条 `CMD_DCR_WRITE`（写满 KMU 的 STARTUP_ADDR/KERNEL_ENTRY/ARG/grid/block/cluster 等 DCR）+ 1 条 `CMD_LAUNCH`」。`CMD_LAUNCH` 自身不带参数，只是脉冲。设计文档把「用一条带内联参数的原子 `CMD_LAUNCH_QMD` 替代这 18 条 DCR 写」列为未来改进（见 4.5 节与 [command_processor.md:397-400](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/docs/designs/command_processor.md#L397-L400)）。
 
 #### 4.1.4 代码实践
 
-**实践目标**：在 RTL 顶层建立「数据面/控制面/资源面」三视图。
+**目标**：建立「命令 = 头 + 载荷、打包进 64B 行」的直觉，并验证 RTL 与仿真两边用的是同一张命令表。
 
 **操作步骤**：
 
-1. 打开 `VX_cp_core.sv`，定位三个 AXI 接口（`axil_s`/`axi_host`/`axi_dev`）与一个 GPU 接口（`gpu_if`）。
-2. 找到 L388-478 的两个 xbar（host xbar、dev xbar），数清各自的源（host xbar = fetch[N] + completion + DMA(host)；dev xbar = DMA(dev) + event）。
-3. 在文件里数 `VX_cp_*` 子模块实例化次数，确认是「1 regfile + N×(fetch+engine) + 4 仲裁器 + launch/dcr/dma/event/completion 五资源单元」。
+1. 打开 [VX_cp_pkg.sv:183-201](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_pkg.sv#L183-L201) 的 `cmd_size_bytes` 表，记下每个 opcode 的字节数。
+2. 打开仿真侧的对应实现 [cmd_processor.cpp:241-256](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L241-L256) 的 `decode_cmd_bytes` 里的 `switch (out.opcode)`。
+3. 逐行对照两张表。
 
-**需要观察的现象**：fetch 是每个 CPE 里**唯一**的 AXI 用户（L179-181 注释），其余资源（DMA/event/completion）各自挂在自己的 xbar 源槽上。
+**需要观察的现象**：两边的字节数应当**逐 opcode 一致**（NOP=4、LAUNCH=12、FENCE=8、DCR_*=20、MEM_*/EVENT_WAIT=28）。仿真侧多了 `OP_LAUNCH_QMD`(0x0B) 和 `OP_DRAW`(0x0C) 两个 opcode（都是 12 字节），这是仿真 CP 已实现、RTL CP 尚未镜像的功能（见 4.5）。
 
-**预期结果**：你能画出一张「左侧 AXI-Lite 控制口 → 中间引擎阵列 → 右侧四资源 → 上下两个 AXI 数据主口」的方框图。
+**预期结果**：你能填出下面这张对照表，并指出仿真侧多出哪两个 opcode。
+
+| opcode | RTL 字节 | 仿真字节 |
+|---|---|---|
+| CMD_LAUNCH | 12 | 12 |
+| CMD_DCR_WRITE | ? | ? |
+| CMD_MEM_WRITE | ? | ? |
+
+（待本地验证：你填的 `?` 应分别是 20、28。）
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么命令环放在主机内存而不是设备内存？
-**答**：主机 runtime 可以直接通过环的 host 指针 `memcpy` 写命令，无需逐条 DMA（`cp_init` 注释 device.cpp:233）；CP 只需一个 AXI 主端口取指、一个写完成槽，硬件路径最简。这是对早期「设备内存环 + 逐命令 DMA」方案的取代（command_processor.md §11）。
+**练习 1**：为什么命令环要放在主机内存而不是设备内存？如果放在设备内存，主机追加命令的开销会变成什么？
 
-**练习 2**：四个仲裁器为什么要分开，而不是一个大仲裁器？
-**答**：因为四个资源（KMU/DMA/DCR/EVT）相互独立，一个队列等 KMU 时不该阻塞另一个队列发 DMA。分资源仲裁让不同资源可并行被授权（command_processor.md §1）。
+> **参考答案**：环放主机内存时，主机追加命令是一次普通 `memcpy`，零 MMIO；CP 用 `axi_host` 主动取。若放设备内存，主机每追加一条命令都要做一次 MMIO/DMA 写设备，开销高且 CP 仍要一段设备可见缓冲。设计文档明确废弃了「设备内存环 + 每命令 DMA」的旧方案（[command_processor.md:428-429](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/docs/designs/command_processor.md#L428-L429)）。
+
+**练习 2**：一条 64 字节的 cache line 最多能装几条 `CMD_LAUNCH`？装几条 `CMD_MEM_WRITE`？
+
+> **参考答案**：`CMD_LAUNCH` = 12 字节，\( \lfloor 64/12 \rfloor = 5 \) 条，正好是 `MAX_CMDS_PER_CL`；`CMD_MEM_WRITE` = 28 字节，\( \lfloor 64/28 \rfloor = 2 \) 条（剩余 8 字节放不下第三条，会被零头终止或填 NOP）。
 
 ---
 
-### 4.2 命令格式与 AXI-Lite 寄存器接口
+### 4.2 引擎 FSM、资源仲裁与完成回写
 
 #### 4.2.1 概念说明
 
-主机与 CP 之间有两层契约：
+每个队列有一个 **CPE（CP Engine）**，它是「消费命令、竞标资源、等完成、退休」的状态机。CP 之所以能支持多队列并发，是因为多个 CPE 可以同时手里各攥一条命令；而它之所以不会在共享资源上打架，是因为每个资源前面挡着一个**轮转仲裁器**——同一时刻只授权一个 CPE 使用该资源。
 
-1. **控制面**（AXI-Lite 寄存器）：主机写「环基址/大小/head/cmpl 地址、tail 门铃、使能位」，读「状态、能力寄存器、seqnum、DCR 读回值」。
-2. **数据面**（命令环）：每条命令是「4 字节头 + opcode 特定载荷」，打包进 64B cache line（最多 5 条/行，零头作终止哨兵）。
-
-命令头是 `{reserved[15:0], flags[7:0], opcode[7:0]}`。关键 opcode 与在线尺寸：`CMD_DCR_WRITE`(0x04, 20B)、`CMD_LAUNCH`(0x06, 12B)、`CMD_MEM_WRITE`(0x01, 28B)、`CMD_FENCE`(0x07, 8B)、`CMD_CACHE_FLUSH`(0x0A, 12B) 等。
+命令「做完」的标志不是 CPE 自己说了算，而是**资源单元**发回一个 `done` 脉冲。退休（retire）时，CPE 通过 valid/ready 握手把 seqnum 交给 `VX_cp_completion`，由后者统一写回主机——这个握手保证多个 CPE 同周期退休时不会丢号。
 
 #### 4.2.2 核心流程
 
-寄存器地图（AXI-Lite）：
+CPE 的状态机 `IDLE→DECODE→BID→WAIT_DONE→RETIRE`：
 
-- **全局** `0x000–0x024`：`CP_CTRL`、`CP_STATUS`、只读能力寄存器 `GPU_DEV_CAPS`/`GPU_ISA_CAPS`。
-- **每队列块** 在 `0x100 + qid*0x40`：`Q_RING_BASE`、`Q_HEAD_ADDR`、`Q_CMPL_ADDR`、`Q_RING_SIZE_LOG2`、`Q_CONTROL`、门铃 `Q_TAIL_LO/HI`、`Q_SEQNUM`、`Q_LAST_DCR_RSP`。
+```
+IDLE      --cmd_in_valid-->  拿到一条解码后的 cmd
+DECODE    --classify-->      把 opcode 映射到 RES_KMU/DMA/DCR/EVT（或标记 no_resource）
+BID       --grant-->         对所选资源抬 bid，等仲裁器授权
+WAIT_DONE --done pulse-->    等资源单元发回 done
+RETIRE    --retire_ready-->  握手把 seqnum 送出，seqnum+1，回 IDLE
+```
 
-门铃的原子语义：写 `Q_TAIL_LO` 只是暂存，**写 `Q_TAIL_HI` 才原子提交**整个 64 位 tail——这避免了主机更新 tail 时 CP 看到半新半旧的撕裂值。
+opcode → 资源的映射是确定的（组合逻辑）：
 
-命令解包：`VX_cp_unpack` 按偏移逐条解码，靠 `cmd_size_bytes(opcode)` 跳过已消费命令，遇到零头（opcode=0 && flags=0）停止本行。
+| opcode | 资源 |
+|---|---|
+| `CMD_LAUNCH` | RES_KMU |
+| `CMD_DCR_WRITE/READ`、`CMD_CACHE_FLUSH` | RES_DCR |
+| `CMD_MEM_WRITE/READ/COPY` | RES_DMA |
+| `CMD_EVENT_SIGNAL/WAIT` | RES_EVT |
+| `CMD_NOP`、`CMD_FENCE` | 无资源（直接退休） |
 
 #### 4.2.3 源码精读
 
-命令头与解码记录的定义：
+**`VX_cp_engine` 的状态机**：[VX_cp_engine.sv:80-86](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_engine.sv#L80-L86) 定义五态；[VX_cp_engine.sv:126-185](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_engine.sv#L126-L185) 是 FSM 主体。注意 `S_BID` 里按 `cur_res` 选四条 bid 线之一等授权，`S_WAIT_DONE` 里按 `cur_res` 选四个 done 脉冲之一：
 
-[hw/rtl/cp/VX_cp_pkg.sv:L84-L103](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_pkg.sv#L84) — `cmd_header_t`（4B）与 `cmd_t`（头 + arg0/arg1/arg2 各 8B + 可选 8B profile_slot）。最坏载荷 28B（`CMD_MEM_*`/`CMD_EVENT_WAIT`/`CMD_DCR_READ`）。
+```systemverilog
+S_BID: begin
+  case (cur_res)
+    RES_KMU:   if (bid_kmu.grant)   fsm <= S_WAIT_DONE;
+    RES_DMA:   if (bid_dma.grant)   fsm <= S_WAIT_DONE;
+    RES_DCR:   if (bid_dcr.grant)   fsm <= S_WAIT_DONE;
+    RES_EVT:   if (bid_event.grant) fsm <= S_WAIT_DONE;
+    ...
+```
 
-每队列持久状态（主机通过 AXI-Lite 写入这些字段）：
+**opcode→资源分类函数 `classify`**：[VX_cp_engine.sv:97-114](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_engine.sv#L97-L114)——未知 opcode 置 `skip=1`，直接走退休（当 NOP 处理）。
 
-[hw/rtl/cp/VX_cp_pkg.sv:L130-L141](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_pkg.sv#L130) — `cpe_state_t` 含 `ring_base`、`ring_size_mask`、`head_addr`、`cmpl_addr`、`tail`、`head`、`seqnum`、`prio`、`enabled`、`profile_en`。一个实例住进每个 `VX_cp_engine`。
+**完成回写的握手**——这是防丢号的关键：[VX_cp_engine.sv:173-181](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_engine.sv#L173-L181)。`S_RETIRE` 会一直停在那里、持续抬 `retire_evt`，直到 `retire_ready_i` 被观测到才让 `seqnum_r` 自增并回 IDLE。这样即使两个 CPE 同周期想退休，`VX_cp_completion` 的 per-source 锁存也能逐个接住（参见设计文档 [command_processor.md:247-250](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/docs/designs/command_processor.md#L247-L250)）。
 
-仿真 CP 的门铃原子提交逻辑（与 RTL regfile 对应）：
+**资源枚举与 done 脉冲广播**：`cp_resource_e` 定义在 [VX_cp_pkg.sv:149-154](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_pkg.sv#L149-L154)。注释里有一句很关键的说明（[VX_cp_engine.sv:116-120](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_engine.sv#L116-L120)）：done 脉冲是**广播**给所有 CPE 的，但因为「仲裁器同一时刻只授权一个 CPE、资源一次只处理一条命令」，所以只有那个正在 `S_WAIT_DONE` 的 CPE 会消费它，其余 CPE 忽略。
 
-[sim/common/cmd_processor.cpp:L79-L98](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L79) — 队列 0 偏移 `0x20` 写 `tail_lo_staging`，偏移 `0x24` 写 HI 字时执行 `tail = (HI<<32) | staging` 完成原子提交。`Q_SEQNUM`/`Q_ERROR` 是只读。
-
-主机侧 `cp_init` 把这些寄存器编程好：
-
-[sw/runtime/common/device.cpp:L232-L265](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sw/runtime/common/device.cpp#L232) — 分配环/head/cmpl 三块 CP 可见主机内存，写它们的地址、`Q_RING_SIZE_LOG2`、`Q_CONTROL=0x1`、`CP_REG_CTRL=0x1`。
+> **单队列退化**：默认 `VX_CP_NUM_QUEUES=1`（[VX_cp_pkg.sv:31-33](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_pkg.sv#L31-L33)），此时唯一的 CPE 永远赢仲裁，FSM 退化为顺序执行。仿真 CP 的 `tick_engine` 也注释了这一点（[cmd_processor.cpp:438-439](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L438-L439)：「Single-queue means we always win the arbiter」）。多队列并发是未来工作。
 
 #### 4.2.4 代码实践
 
-**实践目标**：手工对齐「主机打包 → 在线布局 → CP 解码」三处对命令格式的描述。
+**目标**：在仿真侧跟踪一条 `CMD_LAUNCH` 走完引擎 FSM 的全过程，验证它与 RTL 的五态一一对应。
 
 **操作步骤**：
 
-1. 读 `cp_submit_dcr_write`（device.cpp:489-499）：`p32[0]=opcode(0x04)`、`p32[1]=addr`（arg0）、`p32[3]=value`（arg1，注意 p32[2] 是 arg0 的高 32 位，故 value 落在字节 16-19）。
-2. 对照 `cmd_processor.cpp` 的 `decode_cmd_bytes`（L223-257），看它如何从 `off+0` 读 opcode、`off+4` 读 arg0、`off+12` 读 arg1、`off+20` 读 arg2，并按 opcode 返回尺寸（`OP_DCR_WRITE` 返回 20）。
-3. 验证 `CMD_LAUNCH` 三处一致：device.cpp:503-507（opcode 0x06，仅头 12B）、`decode_cmd_bytes` 的 `OP_LAUNCH` 返回 12、`VX_cp_pkg.sv` 的尺寸表。
+1. 读 [cmd_processor.cpp:389-588](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L389-L588) 的 `tick_engine`，对照 `EngState` 枚举 [cmd_processor.h:126-127](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.h#L126-L127)。
+2. 找到 `case EngState::Bid` 里对 `OP_LAUNCH` 的处理：[cmd_processor.cpp:440-448](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L440-L448)——它把 launch 子状态机置为 `PulseStart`，然后转 `WaitDone`。
+3. 找到 `case EngState::WaitDone`：[cmd_processor.cpp:550-555](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L550-L555)——等 launch 子 FSM 回 Idle。
+4. 找到 `case EngState::Retire`：[cmd_processor.cpp:581-586](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L581-L586)——`seqnum+1`、`publish_completion()`、回 Idle。
 
-**需要观察的现象**：CL 剩余字节填零，零头就是 unpacker 的终止哨兵（cmd_processor.cpp:268）。
+**需要观察的现象**：仿真侧的 `Idle→Decode→Bid→WaitDone→Retire` 与 RTL 的 `S_IDLE→S_DECODE→S_BID→S_WAIT_DONE→S_RETIRE` 是逐态对应的；唯一差别是仿真侧把 launch 的「脉冲/等 busy/等 drain」拆进了一个独立的 `LaunchState` 子 FSM（4.3 节精读），而 RTL 把它拆进了 `VX_cp_launch` 模块。
 
-**预期结果**：你能默写出 CMD_DCR_WRITE 与 CMD_LAUNCH 的字节布局。
+**预期结果**：你能画出仿真侧 `EngState` × `LaunchState` 两层 FSM 的状态转移图。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么 `Q_TAIL_HI` 写入才提交，而不是 `Q_TAIL_LO`？
-**答**：多字节值跨多次 MMIO 写传送，必须有一个「最终提交点」。把 HI 字定为提交点，保证 CP 看到的 tail 是完整的 64 位值，不会在小端序下先看到低 32 位更新而误以为有新命令（cmd_processor.cpp:90-94）。
+**练习 1**：`CMD_NOP` 和 `CMD_FENCE` 为什么不竞标任何资源？
 
-**练习 2**：能力寄存器 `GPU_DEV_CAPS`/`GPU_ISA_CAPS` 为什么放在 CP 里？
-**答**：让每个后端通过**同一份** CP regfile 暴露设备/ISA 能力，运行时在 `cp_init` 后用统一的 `decode_caps()` 读取（command_processor.md §6），消除了各 AFU shell 里重复的能力块。
+> **参考答案**：它们不需要动 KMU/DMA/DCR/EVENT 任何一个。`classify` 对它们之外的已知 opcode 才映射资源；仿真侧在 `load_next_cmd` 里把 NOP/FENCE 标记为 `cur_is_no_resource_`（[cmd_processor.cpp:409-412](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L409-L412)），引擎直接跳到 Retire。注意 RTL 当前把 FENCE 当 NOP 处理，真正的栅栏语义是已知 gap（[command_processor.md:388-390](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/docs/designs/command_processor.md#L388-L390)）。
+
+**练习 2**：如果两个 CPE 同周期都到了 `S_RETIRE`，seqnum 会不会丢？
+
+> **参考答案**：不会。`S_RETIRE` 用 valid/ready 握手（`retire_evt` 持续抬起直到 `retire_ready_i`），`VX_cp_completion` 有 per-source 1 深锁存 + 共享排空 FIFO（[command_processor.md:247-250](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/docs/designs/command_processor.md#L247-L250)）。seqnum 只在真正离开 `S_RETIRE` 那拍自增，所以每个 CPE 呈现的号是稳定值，不会被覆盖。
 
 ---
 
-### 4.3 引擎 FSM 与四资源仲裁
+### 4.3 KMU launch 包装器：start / busy / drain
 
 #### 4.3.1 概念说明
 
-每个队列的命令由一个 `VX_cp_engine` 驱动，它跑一个五态 FSM，并把每条命令**分类**到四个资源之一，向对应仲裁器出价（bid）。这套机制把「取指解包」与「执行资源」解耦：引擎只管按序把命令递给资源，资源干完回一个 done 脉冲，引擎再退休。
+`CMD_LAUNCH` 被分类到 `RES_KMU` 资源。这个资源对应的单元是 `VX_cp_launch`——它本身**不做网格遍历**（那是 KMU 内核描述符的事），它只是一个**启动握手包装器**：脉冲一下 `start`，然后握住 `busy` 信号直到内核跑完（drain）。它的存在让 CPE 的「等 done」语义变成「等这次启动彻底排空」。
 
-分类规则（`classify`）：
-
-- `CMD_LAUNCH` → `RES_KMU`
-- `CMD_DCR_WRITE/READ`、`CMD_CACHE_FLUSH` → `RES_DCR`
-- `CMD_MEM_WRITE/READ/COPY` → `RES_DMA`
-- `CMD_EVENT_SIGNAL/WAIT` → `RES_EVT`
-- `CMD_NOP`/`CMD_FENCE` → 跳过仲裁，直接退休
+为什么要「彻底排空」？因为当前实现里，一个队列**串行化自己的 launch**：`VX_cp_launch` 抓到授权后会一直占着 KMU 仲裁器的 bid，直到 `busy` 落下才释放，下一个 CPE 才能轮到。这保证了同队列前后两次 launch 不会重叠。
 
 #### 4.3.2 核心流程
 
-引擎 FSM（RTL `VX_cp_engine` 与仿真 `tick_engine` 逐态对应）：
+`VX_cp_launch` 的四态 FSM：
 
 ```
-IDLE      ──cmd_in_valid──▶ DECODE
-DECODE    ──classify──▶ skip? RETIRE : BID
-BID       ──对应资源 grant──▶ WAIT_DONE
-WAIT_DONE ──对应资源 done 脉冲──▶ RETIRE
-RETIRE    ──retire_ready 握手──▶ seqnum+1, 回 IDLE
+IDLE         --grant-->        刚拿到 KMU 仲裁器授权
+PULSE_START  --(一拍)-->       抬 start 一拍，通知 Vortex 启动
+WAIT_BUSY    --gpu_busy=1-->   等 Vortex 真的把 busy 拉高（内核开始执行）
+WAIT_DRAIN   --gpu_busy=0-->   等 Vortex 把 busy 拉低（内核结束）→ 发 done，回 IDLE
 ```
 
-退休要经 `VX_cp_completion` 的 valid/ready 握手，保证同一拍多个引擎同时退休时不丢 seqnum。
+关键时序细节：`start` 脉冲后的**下一拍** Vortex 才可能抬 busy，所以需要单独的 `WAIT_BUSY` 态等这个上升沿，而不是一脉冲完就直接等下降。
 
 #### 4.3.3 源码精读
 
-资源枚举：
+整个模块很短，是本讲最值得逐行读的 RTL：
 
-[hw/rtl/cp/VX_cp_pkg.sv:L149-L154](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_pkg.sv#L149) — `RES_KMU/RES_DMA/RES_DCR/RES_EVT`。
+- 模块端口与注释：[VX_cp_launch.sv:23-31](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_launch.sv#L23-L31)——输入 `grant`（来自 KMU 仲裁器）、`gpu_busy`（来自 Vortex）；输出 `start`（脉冲给 Vortex）、`done`（回给引擎）。
+- 四态 FSM 主体：[VX_cp_launch.sv:42-64](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_launch.sv#L42-L64)。注意 `S_WAIT_BUSY` 等的是 `gpu_busy` 为真，`S_WAIT_DRAIN` 等的是 `gpu_busy` 为假：
 
-分类函数与 FSM：
+```systemverilog
+S_WAIT_BUSY: begin
+  // Vortex's busy might rise the next cycle after `start` fires;
+  // we wait for that rising edge.
+  if (gpu_busy) state <= S_WAIT_DRAIN;
+end
+S_WAIT_DRAIN: begin
+  if (!gpu_busy) state <= S_IDLE;
+end
+```
 
-[hw/rtl/cp/VX_cp_engine.sv:L97-L114](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_engine.sv#L97) — `classify` 把 opcode 映射到资源，`skip` 标记 NOP/FENCE。
+- 组合输出：[VX_cp_launch.sv:66-69](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_launch.sv#L66-L69)——`start = (state == S_PULSE_START)`，`done = (state == S_WAIT_DRAIN) && !gpu_busy`。
 
-[hw/rtl/cp/VX_cp_engine.sv:L153-L172](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_engine.sv#L153) — `S_BID` 等本资源授权，`S_WAIT_DONE` 等对应资源 done 脉冲（`kmu_done_i`/`dma_done_i`/`dcr_done_i`/`event_done_i`）。
+**仿真侧的孪生**是 `CommandProcessor::tick_launch`：[cmd_processor.cpp:370-387](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L370-L387)，状态枚举 `LaunchState { Idle, PulseStart, WaitBusy, WaitDrain }` 在 [cmd_processor.h:130](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.h#L130)。两者逐态对应：`PulseStart` 调 `hooks_.vortex_start()`、`WaitBusy` 等 `vortex_busy()` 为真、`WaitDrain` 等它为假。
 
-仿真 CP 的等价 FSM：
-
-[sim/common/cmd_processor.cpp:L422-L556](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L422) — `EngState::Idle/Decode/Bid/WaitDone/Retire`。单队列时总赢仲裁，故 `Bid` 直接处理。`OP_LAUNCH`/`OP_LAUNCH_QMD` 进入 `launch_state_` 子状态机并转 `WaitDone`；`OP_DCR_WRITE` 立即调 `vortex_dcr_write` hook 后退休。
+> **`busy` 来自哪里？** 在 SimX 里，`hooks_.vortex_busy` 最终查的是 `Processor::any_running()`（u5-l2 讲过：所有 core 不运行且无在途 channel 包时为假）。也就是说，`done` 拉高 ⇔ 整个 GPU 空闲且所有访存包落地——这正是「drain」的严格含义，保证主机读回结果前所有写已落地。
 
 #### 4.3.4 代码实践
 
-**实践目标**：跟踪一条 CMD_DCR_WRITE 走完引擎 FSM。
+**目标**：在仿真侧观察一次 launch 的四态时序，理解 `WAIT_BUSY` 那一拍的存在意义。
 
 **操作步骤**：
 
-1. 在 `VX_cp_engine.sv` L136-185 模拟：`S_IDLE` 收到 `cmd_in` → `S_DECODE`。
-2. `classify(CMD_DCR_WRITE)` 返回 `RES_DCR`，`skip=0` → `S_BID`。
-3. L203-205：`bid_dcr.valid=1`，等 `bid_dcr.grant` → `S_WAIT_DONE`。
-4. `VX_cp_dcr_proxy` 执行写后发 `dcr_done` → L168 `S_RETIRE` → `retire_ready` 时 `seqnum+1`。
+1. 在一个已 configure 好的 build 目录跑 demo：`./ci/blackbox.sh --driver=simx --app=demo --debug=2`（`--debug` 生成运行时 trace，参见 u13-l2）。
+2. 在生成的 trace 里定位 KMU/launch 相关的事件行（待本地验证具体 trace 字段名；可参考 `ci/trace_csv.py`）。
+3. 对照 [cmd_processor.cpp:370-387](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L370-L387) 的四态，确认 `PulseStart` 与 `WaitBusy` 之间确实隔了至少一拍。
 
-**需要观察的现象**：`S_RETIRE` 会**停留**直到 `retire_ready_i`（L177），保证 completion 模块收到。
+**需要观察的现象**：`start` 脉冲之后，`busy` 不是同拍拉高，而是下一拍（或更晚）才高；`done` 只在 `busy` 完全落下后出现。
 
-**预期结果**：理解「引擎只出价与等 done，不亲自执行」的解耦。
+**预期结果**：你能从 trace 数出 `PulseStart→WaitBusy→WaitDrain` 各占多少周期。若无法运行 trace，明确标注「待本地验证」，转而用源码阅读法：解释为何 `S_PULSE_START` 之后不能直接合并进 `S_WAIT_DRAIN`。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：done 脉冲是广播的，为什么只有授权的 CPE 会响应？
-**答**：只有赢得仲裁、处在 `S_WAIT_DONE` 的那个 CPE 才在 case 语句里匹配对应资源的 done；非授权 CPE 此刻不在 `S_WAIT_DONE`，忽略该脉冲（VX_cp_engine.sv:116-120 注释）。
+**练习 1**：为什么 `VX_cp_launch` 要占着 KMU 仲裁器的 bid 直到 drain，而不是脉冲完 `start` 就放手？
 
-**练习 2**：`CMD_FENCE` 当前如何处理？有何隐患？
-**答**：当前被 `classify` 当 NOP 直接退休（command_processor.md §10 第 3 条），并未真正实施 `FENCE_DMA_BIT`/`FENCE_GPU_BIT` 的排序语义——这是一个已知的待修复项。
+> **参考答案**：因为「放手」意味着下一个 CPE 可以立刻发起下一次 launch，两次 launch 会重叠。当前架构要求同队列 launch 串行（一次跑完再跑下一次），所以授权必须握到 `busy` 落下。注释里写得很明白（[VX_cp_launch.sv:9-17](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_launch.sv#L9-L17)）：「KMU arbitration holds for the entire duration of a launch」。
+
+**练习 2**：把 `S_WAIT_BUSY` 态删掉、直接从 `S_PULSE_START` 跳到 `S_WAIT_DRAIN`，会有什么风险？
+
+> **参考答案**：`start` 脉冲当拍 `gpu_busy` 还没来得及拉高，`S_WAIT_DRAIN` 的退出条件是 `!gpu_busy`——若直接进入，会在 `busy` 还没起来的瞬间看到 `!gpu_busy` 为真，立刻误判「内核已结束」并发 `done`，于是内核实际还没开始就被宣告完成。`S_WAIT_BUSY` 就是用来锁死这个上升沿窗口的。
 
 ---
 
-### 4.4 VX_cp_launch：KMU 启动握手
+### 4.4 KMU 网格遍历器：从 DCR 到 CTA 派发
 
 #### 4.4.1 概念说明
 
-KMU 资源单元的执行件是 `VX_cp_launch`——一个极小的四态状态机，专门处理「启动一次内核」的 start/busy 握手。它的核心职责是：**在内核整个运行期间持续占用 KMU 仲裁器**，直到内核跑完（drain），这保证一个队列串行化自己的 launch。
+到这里，「点火」已经讲完。但 GPU 不会只跑一个 CTA——主机声明的 `grid_dim` 可能是成百上千个 CTA。把这些 CTA 实际**产生出来**并派发到各核的，是 **KMU 内核管理单元**。可以把 KMU 想成一个「展开器」：主机给它一组维度参数（写进它的 DCR），它每次被 `step()` 调一次就吐出下一个 CTA 的完整描述（`kmu_req_t`），直到网格走完。
 
-它不负责展开 CTA——那是 KMU 自己的事。它只是「按一下启动按钮，然后等 GPU 说忙完了」。
+KMU 的状态分两部分：
+- **内核描述符**（`PC_`、`entry_`、`param_`、`block_dim_`、`grid_dim_`、`cluster_dim_` 等）：由主机在 launch 前通过 `CMD_DCR_WRITE` 写入，**跨 reset 保留**。
+- **遍历游标**（`cta_id_`、`group_origin_`、`intra_offset_`）：由 `start()` 清零、由 `step()` 推进，reset 时清零。
+
+每个核有一个 `CtaDispatcher`，它主动调 `kmu->step()` 拉下一个 CTA（KMU 是所有核共享的单例），再把该 CTA 按 `block_size/num_threads` 切成若干 warp——这条「CTA→warp」的切分在 u6-l1 已讲过，本讲只关心「grid→CTA」这一段。
 
 #### 4.4.2 核心流程
 
+**写描述符**（主机侧，launch 前）：主机用 `CMD_DCR_WRITE` 往一组 `VX_DCR_KMU_*` 寄存器里写值，KMU 的 `dcr_write` 按 addr 分流存进对应字段。
+
+**启动**（`CMD_LAUNCH` 触发）：`start()` 检查 `block_size_/grid_dim_/cluster_dim_` 都大于 0，置 `running_=true`，清零游标。
+
+**遍历**（每个核的 dispatcher 调 `step()`）：
 ```
-IDLE         ──grant──▶ 获得仲裁
-PULSE_START  ──▶ 给 gpu_if.start 一个一周期脉冲
-WAIT_BUSY    ──gpu_busy↑──▶ 等 GPU 真正启动
-WAIT_DRAIN   ──gpu_busy↓──▶ 内核跑完，发 done，回 IDLE（释放仲裁）
+block_idx[axis] = group_origin_[axis] + intra_offset_[axis]   // 实际块坐标
+填 req 的所有字段（PC/entry/param/cta_id/block_idx/grid_dim/...）
+按 (X, Y, Z) 顺序推进 intra_offset_：
+  先走 cluster 内偏移（填满一个 cluster），
+  cluster 满了再推进 group_origin_（跳到下一个 cluster 起点），
+  三轴都走完 → running_=false。
 ```
 
-`grant` 是 KMU 仲裁器各 CPE 授权的 OR；`done` 释放出价，让下一个 CTE 轮到。
+这里的关键是**两层嵌套计数器**：`intra_offset_` 在一个 cluster 内走（`cluster_dim` 步），`group_origin_` 标记当前 cluster 的起点。这样 CTA 的发射顺序天然按 cluster 分组——同一个 cluster 的 CTA 占连续的 `cta_id`，这正是 DXA 多播（u9-l2）和跨 CTA 屏障（u4-l3）所需要的「共驻连续槽位」。
 
 #### 4.4.3 源码精读
 
-[hw/rtl/cp/VX_cp_launch.sv:L33-L69](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_launch.sv#L33) — 四态枚举 `S_IDLE/S_PULSE_START/S_WAIT_BUSY/S_WAIT_DRAIN`。L50-51 `PULSE_START` 仅一拍；L53-57 等 `gpu_busy` 上升沿（注释指出 start 后 busy 可能下一拍才起）；L58-59 等 `busy` 落下。L66-69 组合输出 `start = (state==PULSE_START)`、`done = (state==WAIT_DRAIN) && !gpu_busy`。
+**`kmu_req_t`——一个 CTA 的完整描述**：[kmu.h:22-35](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.h#L22-L35)。注意它携带：`PC`（镜像基址，每个 warp 都从这里开始执行 `__vx_cta_entry`）、`entry`（kernel 入口 PC）、`param`（参数指针，进 a0）、`cta_id`、`block_idx[3]`、`block_dim/grid_dim/cluster_dim[3]`，以及 `is_first_of_cluster`（标记一个 cluster 的第一个 CTA，供 dispatcher 预留连续槽位）。
 
-仿真 CP 有完全对应的子状态机：
+**`dcr_write`——主机写描述符**：[kmu.cpp:47-71](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp#L47-L71)。注意 64 位字段（`PC_`、`entry_`、`param_`）都拆成 `*0/*1` 两个 32 位 DCR 写（低字、高字），这是 32 位 DCR 总线的必然结果：
 
-[sim/common/cmd_processor.cpp:L370-L387](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L370) — `LaunchState::PulseStart`（调 `hooks_.vortex_start`）/`WaitBusy`（等 `vortex_busy()` 为真）/`WaitDrain`（等其为假）。
+```cpp
+case VX_DCR_KMU_STARTUP_ADDR0: PC_ = (PC_ & ~uint64_t(0xFFFFFFFF)) | value; break;
+case VX_DCR_KMU_STARTUP_ADDR1: PC_ = (PC_ &  uint64_t(0xFFFFFFFF)) | (uint64_t(value) << 32); break;
+```
+
+**DCR 路由**——`Processor::dcr_write` 把 KMU DCR 与其它 DCR 分开：[processor.cpp:286-299](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor.cpp#L286-L299)。落在 `[VX_DCR_KMU_STATE_BEGIN, VX_DCR_KMU_STATE_END)` 区间的只发给 KMU，不广播给核；其余 DCR 广播给所有 cluster。这正是 u3-l4 提到的「主机写 KMU DCR」的落点。
+
+**`start()`——armed 检查 + 清零游标**：[kmu.cpp:73-86](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp#L73-L86)。`running_` 仅当 `block_size_>0` 且三轴 `grid_dim_/cluster_dim_` 都 `>0` 时才置真。
+
+**`step()`——网格遍历核心**：[kmu.cpp:88-166](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp#L88-L166)。三个关键点：
+
+1. **实际块坐标 = cluster 起点 + cluster 内偏移**（[kmu.cpp:91-96](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp#L91-L96)）：`block_idx = group_origin_ + intra_offset_`。
+2. **`is_first_of_cluster`**（[kmu.cpp:119-121](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp#L119-L121)）：当三轴 `intra_offset_` 全为 0 时为真。
+3. **嵌套推进**（[kmu.cpp:125-163](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp#L125-L163)）：先 `++cta_id_`，再按 X→Y→Z 顺序推进 `intra_offset_`；cluster 走完后按 X→Y→Z 推进 `group_origin_`（每次加 `cluster_dim`）；三轴 `group_origin_` 都归零时 `running_=false`。
+
+CTA 总数与 cluster 总数：
+
+\[
+\text{CTA 总数} = \text{grid\_dim}_x \times \text{grid\_dim}_y \times \text{grid\_dim}_z
+\]
+
+\[
+\text{cluster 总数} = \prod_{a\in\{x,y,z\}} \left\lceil \frac{\text{grid\_dim}_a}{\text{cluster\_dim}_a} \right\rceil
+\]
+
+**dispatcher 消费 `step()`**：[cta_dispatcher.cpp:72-119](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/cta_dispatcher.cpp#L72-L119)。第 76 行 `kmu_->step(&pending_cta_)` 拉 CTA；第 100-109 行，当 `is_first_of_cluster` 时一次预留 `cluster_dim_x*cluster_dim_y*cluster_dim_z` 个连续槽位——这就是「cluster 成员占连续槽以支撑多播」的落地（u9-l2 已展开）。注意 `step()` 是所有核共享同一个 KMU 调用的，所以 `cta_id` 是全局单调递增的。
+
+> **delegated launch（图形委托启动）**：当三轴 `grid_dim` 全为 0 时，`launch_delegated()` 为真（[kmu.h:53-55](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.h#L53-L55)），KMU 不产 CTA，而是把帧踢（frame_kick）转发给光栅引擎（[processor.cpp:251-259](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor.cpp#L251-L259)）。这是图形 draw 路径的特殊情况，计算 launch 不会走这里。
 
 #### 4.4.4 代码实践
 
-**实践目标**：理解 start/busy 的异步握手时序。
+**目标**：用一组小维度手算 KMU 的 CTA 发射顺序，再用源码验证。
 
 **操作步骤**：
 
-1. 读 `VX_cp_launch.sv` 的注释 L9-21，注意「CPE 在所有四态里都保持出价」。
-2. 思考：为什么需要 `WAIT_BUSY` 这一步，而不是 `PULSE_START` 后直接进 `WAIT_DRAIN`？
+1. 假设 `grid_dim=(2,2,1)`、`cluster_dim=(2,1,1)`。手算 `step()` 会产出几个 CTA、各自的 `cta_id`、`block_idx`、`is_first_of_cluster`。
+2. 用公式算：CTA 总数 = \(2\times2\times1=4\)；cluster 总数 = \(\lceil2/2\rceil\times\lceil2/1\rceil\times1 = 1\times2\times1=2\)。
+3. 对照 [kmu.cpp:125-163](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp#L125-L163) 的推进逻辑，逐 CTA 填下表。
 
-**需要观察的现象**：`start` 是单周期脉冲，但 `busy` 可能滞后一拍才升高，所以中间必须插一个 `WAIT_BUSY` 等上升沿，否则 `WAIT_DRAIN` 会因为 `!gpu_busy` 立刻误判完成（L54-56 注释）。
+**需要观察的现象**：CTA 的发射顺序应是「先把一个 cluster 的成员连续发完，再发下一个 cluster」。第 1 个 CTA `is_first_of_cluster=true`；cluster 切换处（第 3 个 CTA）再次 `is_first_of_cluster=true`。
 
-**预期结果**：说清「start 脉冲 → busy 迟一拍升高 → 跑完 busy 落下 → done」的四拍关系。
+**预期结果**（待本地用源码核对）：
 
-**待本地验证**：在 SimX trace 里观察一次 launch 前后 `gpu_if.start`/`gpu_if.busy` 的逐拍跳变，确认上述时序。
+| cta_id | group_origin | intra_offset | block_idx | is_first_of_cluster |
+|---|---|---|---|---|
+| 0 | (0,0,0) | (0,0,0) | (0,0,0) | true |
+| 1 | (0,0,0) | (1,0,0) | (1,0,0) | false |
+| 2 | (2,0,0) | (0,0,0) | (2,0,0) | true |
+| 3 | (2,0,0) | (1,0,0) | (3,0,0) | false |
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：为什么 launch 要「持有仲裁器直到 drain」，而不能启动后立刻释放？
-**答**：若启动后立刻释放，同一队列的下一条命令（可能是下一次 launch 或相关 DCR 写）会抢在本次内核跑完前执行，破坏顺序语义。持有到 drain 等价于「launch 是一个隐式栅栏」（command_processor.md §7）。
+**练习 1**：为什么 `block_idx` 要用 `group_origin + intra_offset` 两层相加，而不是直接用一个游标？
 
-**练习 2**：`VX_cp_launch` 与 KMU 的 CTA 展开是什么关系？
-**答**：`VX_cp_launch` 只发 start 信号并等整个内核 drain；CTA 的具体展开由 KMU（RTL 侧的 Vortex KMU / SimX 的 `Kmu`）在收到 start 后自行完成。本模块是「按钮」，KMU 是「分拣柜台」。
+> **参考答案**：因为 cluster 是网格的一个子块，`group_origin` 标记当前 cluster 在网格里的起点，`intra_offset` 标记 CTA 在 cluster 内的位置。两层相加既得到全局 `block_idx`，又天然让同一 cluster 的 CTA 连续发射（`intra_offset` 先走完），满足 DXA 多播与跨 CTA 屏障对「共驻连续槽位」的要求（u9-l2）。
+
+**练习 2**：`PC_`（STARTUP_ADDR）和 `entry_`（KERNEL_ENTRY）有什么区别？分别被设备侧的什么机制消费？
+
+> **参考答案**：`PC_` 是程序镜像基址，每个 warp 都从这里开始执行统一的 CTA 入口 `__vx_cta_entry`（u4-l1）；`entry_` 是本次要派发的 kernel 入口 PC。设备侧 prologue 从 `VX_CSR_CTA_ENTRY` 取 `entry_`、从 `VX_CSR_MSCRATCH` 取 `param_` 来派发到具体 kernel（u4-l1、u3-l4）。`startup_pc()` 还会被 fragment 工作分发器复用为注入 fragment warp 的启动 PC（[kmu.h:57-60](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.h#L57-L60)）。
 
 ---
 
-### 4.5 KMU：内核描述符与 CTA 网格遍历
+### 4.5 主机启动编码与 SimX/RTL 模型对应
 
 #### 4.5.1 概念说明
 
-KMU（Kernel Management Unit）持有一份「在飞内核描述符」（kernel descriptor），并根据 grid/block/cluster 维度逐拍产出 CTA。在 SimX 里它就是 `Kmu` 类（`sim/simx/kmu/kmu.cpp`）；在 RTL 里它住进 Vortex 顶层（由 `gpu_if.start` 触发）。两边 model parity。
+最后把整条链路的首尾接上。主机运行时如何把一次 `vx_start`（或异步的 `vx_enqueue_launch`）变成环里的命令？答案在 `queue.cpp`：它用一组 `CMD_DCR_WRITE` 把 KMU 的所有描述符字段写满，最后跟一条 `CMD_LAUNCH` 点火。
 
-内核描述符由一组 `VX_DCR_KMU_*` DCR 装载：
-
-- `STARTUP_ADDR`（PC）：程序镜像基址，每个 warp 从 `__vx_cta_entry` 开始（即 u4-l1 的统一 prologue）；
-- `KERNEL_ENTRY`：实际 kernel 入口 PC；
-- `STARTUP_ARG`（param）：参数指针，送入设备侧 `a0`/`VX_CSR_MSCRATCH`；
-- `BLOCK_DIM_X/Y/Z`、`GRID_DIM_X/Y/Z`、`CLUSTER_DIM_X/Y/Z`：网格几何；
-- `BLOCK_SIZE`（CTA 内线程总数）、`LMEM_SIZE`（每 CTA 本地内存大小）、`WARP_STEP_X/Y/Z`（warp 内线程到 threadIdx 坐标的步长）。
-
-KMU 用一个**双层嵌套计数器**遍历 grid：`block_idx = group_origin + intra_offset`。`intra_offset` 在一个 cluster 内走（步长 1），走完一个 cluster 后 `group_origin` 按步长 `cluster_dim` 推进。这种「先填满 cluster，再跳到下一个 cluster」的遍历顺序，是 u9-l2 DXA 多播要求 cluster 成员**连续驻留**的数学基础。
+更重要的是，CP 有**两套实现**：RTL CP（`hw/rtl/cp/`）是上 FPGA 的硬件；仿真 CP（`sim/common/cmd_processor.cpp`）是 simx/rtlsim/gem5 共用的 C++ 功能模型。两者必须保持行为一致（这是 u7-l4 model_parity 主线的一部分），但目前存在若干**已知且被记录的分歧**——仿真 CP 领先于 RTL CP（VM 感知 DMA、QMD launch、device-orchestrated draw 已在仿真侧实现，RTL 侧尚在路线图上）。
 
 #### 4.5.2 核心流程
 
-CTA 总数为：
-
-\[
-\text{num\_ctas} = \text{grid\_dim}_x \cdot \text{grid\_dim}_y \cdot \text{grid\_dim}_z
-\]
-
-KMU 的遍历等价于两层嵌套循环（按 X、Y、Z 内层到外层）：
+主机 launch 编码（`queue.cpp`）：
 
 ```
-for oz in 步长 cluster_dim_z 遍历 grid_z:        # group_origin 推进
-  for oy ... grid_y:
-    for ox ... grid_x:
-      for iz in [0, cluster_dim_z):              # intra_offset 填 cluster
-        for iy in [0, cluster_dim_y):
-          for ix in [0, cluster_dim_x):
-            block_idx = (group_origin + intra_offset)
-            emit CTA(block_idx, is_first_of_cluster=(intra_offset==0))
+1. （可选）把 kernel-args blob 暂存进设备 scratch 槽，得到 args_addr
+2. 一串 CMD_DCR_WRITE（经 cp_submit_dcr_write 进环）：
+     STARTUP_ADDR0/1  = program_pc      （镜像基址）
+     KERNEL_ENTRY0/1  = kernel_pc       （kernel 入口）
+     STARTUP_ARG0/1   = args_addr       （参数指针）
+     BLOCK_DIM_X/Y/Z, GRID_DIM_X/Y/Z, LMEM_SIZE, BLOCK_SIZE,
+     WARP_STEP_X/Y/Z, CLUSTER_DIM_X/Y/Z
+3. cp_submit_launch()  →  发 CMD_LAUNCH + 轮询 Q_SEQNUM 直到退休
 ```
 
-每拍 `step()` 填一个 `kmu_req_t` 并自增计数器，grid 耗尽时 `running_=false`。`is_first_of_cluster` 在 `intra_offset` 全零时拉高，告诉下游 CtaDispatcher「为这个 cluster 预留 K 个连续 LMEM 槽位」。
+仿真 CP 的 `tick_engine` 收到 `CMD_LAUNCH` 后（[cmd_processor.cpp:440-448](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L440-L448)）驱动 `LaunchState` 子 FSM，最终调 `hooks_.vortex_start()`——这个钩子在 simx 后端里触发 `Processor::start_kmu()` → `kmu_->start()`，于是 4.4 节的网格遍历开始。
 
 #### 4.5.3 源码精读
 
-`kmu_req_t` 载荷——一个 CTA 的全部上下文：
+**主机侧 KMU DCR 编程**：[queue.cpp:401-427](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sw/runtime/common/queue.cpp#L401-L427)。`WR` 宏（[queue.cpp:391-400](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sw/runtime/common/queue.cpp#L391-L400)）把每条 `CMD_DCR_WRITE` 提交进环。可以清楚看到 `program_pc`→`STARTUP_ADDR`、`kernel_pc`→`KERNEL_ENTRY`、`args_addr`→`STARTUP_ARG`、`eff_block`→`BLOCK_DIM`、`grid_in`→`GRID_DIM`、`lg_in`→`CLUSTER_DIM` 的映射——这些字段与 `kmu_req_t`（4.4 节）一一对应。最后 [queue.cpp:435](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sw/runtime/common/queue.cpp#L435) 的 `cp_submit_launch()` 发 `CMD_LAUNCH` 并轮询 `Q_SEQNUM`。
 
-[sim/simx/kmu/kmu.h:L22-L35](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.h#L22) — 含 `PC/entry/param`（每 CTA 都带，供 prologue 取入口与参数）、`cta_id`、`block_idx[3]`、`block_dim[3]`、`grid_dim[3]`、`lmem_size`、`block_size`、`warp_step[3]`、`cluster_dim[3]`、`is_first_of_cluster`。这正是设备侧 `__vx_cta_entry` 经 CSR 取到的全部信息。
+**CP 队列初始化**：[device.cpp:256-264](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sw/runtime/common/device.cpp#L256-L264)——主机在 `cp_init` 时写 `Q_RING_BASE/HEAD_ADDR/CMPL_ADDR/RING_SIZE_LOG2/CONTROL` 和全局 `CP_REG_CTRL=1`，把环与完成槽的地址告诉 CP。
 
-DCR 装载描述符：
+**仿真 CP 的 MMIO 面**：[cmd_processor.cpp:67-100](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L67-L100)（写）与 [:102-151](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L102-L151)（读）。注意 [:90-94](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L90-L94) 的 doorbell 原子提交：写 `Q_TAIL_HI` 时把暂存的 `tail_lo_staging` 拼成完整 64 位 tail——与 RTL regfile 的 `Q_TAIL_HI` 提交语义一致（[command_processor.md:193-194](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/docs/designs/command_processor.md#L193-L194)）。
 
-[sim/simx/kmu/kmu.cpp:L47-L71](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp#L47) — 每个 `VX_DCR_KMU_*` case 把 value 装进对应字段；64 位字段（PC/entry/param）用 LO/HI 两次写拼装。注意 `on_reset()`（L36-45）刻意**不**清描述符，只清运行进度——因为描述符在 `start()` 之前由 DCR 写好，须跨 reset 存活。
+**两套实现的已知分歧**（设计文档 §8、§10）——这是本讲必须如实交代的「未完成项」：
 
-启动判定：
+| 分歧点 | 仿真 CP | RTL CP | 来源 |
+|---|---|---|---|
+| VM 感知 DMA（CP_SATP + 页表遍历） | 已实现（[cmd_processor.cpp:157-201](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L157-L201)） | 无 CP_SATP 寄存器，DMA 不翻译 | [command_processor.md:197-201](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/docs/designs/command_processor.md#L197-L201) |
+| `CMD_LAUNCH_QMD`（带内联参数的原子 launch） | 已实现（[cmd_processor.cpp:308-322](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L308-L322)） | 未实现（仍走 ~18 条 DCR 写） | [command_processor.md:115-122](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/docs/designs/command_processor.md#L115-L122) |
+| `CMD_DRAW`（设备编排的 draw） | 已实现，`SUPPORTS_DRAW=1` | 未镜像，`SUPPORTS_DRAW=0`，运行时回退到逐命令环批 | [command_processor.md:223-228](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/docs/designs/command_processor.md#L223-L228) |
+| DMA 字节精确性 | 字节精确 | 按 64B 向上取整（可能多写） | [command_processor.md:376-382](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/docs/designs/command_processor.md#L376-L382) |
 
-[sim/simx/kmu/kmu.cpp:L73-L86](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp#L73) — `start()` 要求 `block_size>0` 且 grid、cluster 各维都 >0 才置 `running_=true`，并复位进度计数器。`launch_delegated()`（kmu.h:53-55）则相反：grid 全零时这是图形 draw launch，KMU 不产 CTA，由处理器转交 raster 引擎。
-
-逐拍遍历——核心嵌套计数：
-
-[sim/simx/kmu/kmu.cpp:L88-L166](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp#L88) — `step()` 先把当前 `block_idx = group_origin + intra_offset` 装进 req（L91-121），再推进计数器。L126-128 先自增 `intra_offset[0]`，x 包卷则进 y、y 包卷则进 z；z 也包卷（L136-140）说明一个 cluster 走完，于是 L142-160 按 `cluster_dim` 步长推进 `group_origin`（X→Y→Z），全部 grid 走完时 `running_=false`（L151）。`is_first_of_cluster` 在 L119-121 计算。
-
-KMU DCR 的路由——只进 KMU，不广播给核：
-
-[sim/simx/processor.cpp:L286-L299](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor.cpp#L286) — `addr` 落在 `[VX_DCR_KMU_STATE_BEGIN, VX_DCR_KMU_STATE_END)` 时只调 `kmu_->dcr_write()`，不转发 cluster 树。这正是 CP 的 `CMD_DCR_WRITE` 经 `vortex_dcr_write` hook 抵达 KMU 的落点。
-
-下游消费 CTA：
-
-[sim/simx/cta_dispatcher.cpp:L72-L104](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/cta_dispatcher.cpp#L72) — `CtaDispatcher::step` 在无待处理 CTA 时调 `kmu_->step(&pending_cta_)`（L76），按 `lmem_size` 步长做固定槽分配；`is_first_of_cluster` 为真时（L101）预留 `cluster_dim` 连乘个连续槽位（L102-113），随后成员落进预留槽。这里把 KMU 的几何输出转成 u6-l1 调度器能消费的 warp。
+> **能力寄存器统一**：尽管有上述分歧，设备/ISA 能力是通过 CP 的只读寄存器 `GPU_DEV_CAPS/GPU_ISA_CAPS`（仿真侧 [:27-46](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L27-L46)、`:126-129`）单一来源暴露的，运行时在所有后端上用同一份 `decode_caps()` 解码（[command_processor.md:205-221](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/docs/designs/command_processor.md#L205-L221)）。`SUPPORTS_DRAW` 这一位就是运行时决定「发一条 CMD_DRAW 还是发等价的多命令环批」的依据。
 
 #### 4.5.4 代码实践
 
-**实践目标**：用一组小维度手算 KMU 的遍历顺序。
+**目标**：把「主机写 DCR → CP 解包 → KMU 派发 CTA」这条完整控制流画出来，并标注每个维度的来源。
 
 **操作步骤**：
 
-设 `grid_dim = (2,1,1)`、`cluster_dim = (2,1,1)`、`block_dim = (4,1,1)`、`NUM_THREADS=2`（故每 CTA 2 个 warp）。
+1. 读 [queue.cpp:401-427](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sw/runtime/common/queue.cpp#L401-L427)，列出每个 `VX_DCR_KMU_*` 寄存器对应的主机变量（`program_pc`/`kernel_pc`/`args_addr`/`eff_block`/`grid_in`/`lg_in` 等）。
+2. 读 [kmu.cpp:47-71](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp#L47-L71) 的 `dcr_write`，确认每个 DCR 落进 KMU 的哪个字段。
+3. 读 [kmu.cpp:88-121](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp#L88-L121) 的 `step()`，确认这些字段如何填进 `kmu_req_t`。
+4. 画一张控制流图：`vx_start` → `cp_submit_dcr_write ×N` → 环 → `tick_engine` 解码 → `dcr_write` 写 KMU → `cp_submit_launch` → `CMD_LAUNCH` → `tick_launch` 脉冲 start → `kmu_->start()` → 各核 `step()` 产 CTA。
 
-1. 推演 `step()` 序列：
-   - 第 1 拍：`group_origin=(0,0,0)`、`intra_offset=(0,0,0)` → `block_idx=(0,0,0)`，`is_first_of_cluster=true`。
-   - 第 2 拍：`intra_offset=(1,0,0)` → `block_idx=(1,0,0)`，`is_first_of_cluster=false`；intra x 包卷（1+1==cluster_dim[0]=2）→ cluster 完，`group_origin` 推进到 (2,0,0)？但 `grid_dim[0]=2`，故 `ox=0+2==2==grid_dim[0]` → 全部走完。
-2. 验证：共 2 个 CTA，`cta_id` 从 0 到 1，第 2 个 CTA 后 `running_=false`。
+**需要观察的现象**：`grid/block/cluster` 三个维度全部源自主机运行时（`queue.cpp` 的 `grid_in`、`eff_block`、`lg_in`），经过环命令、CP 解码、DCR 路由，最终落到 KMU 的 `grid_dim_/block_dim_/cluster_dim_` 字段，再由 `step()` 展开成每个 CTA 的 `block_idx`。
 
-**需要观察的现象**：两个 CTA 同属一个 cluster（因 cluster_dim[0]=2 且 grid_dim[0]=2），第 1 个 CTA 带 `is_first_of_cluster=true`，CtaDispatcher 会为它预留 2 个连续 LMEM 槽。
-
-**预期结果**：你画出的 `block_idx` 序列是 `(0,0,0) → (1,0,0)`，与「先填 cluster 再跳」一致。
-
-**待本地验证**：在 SimX 加一行日志打印 `kmu_->step` 每拍的 `block_idx` 与 `is_first_of_cluster`（见综合实践），用 `--cores=1 --warps=2 --threads=2` 跑一个 grid=(2,1,1) 的小 kernel 对照。
+**预期结果**：你能指着图说出「`block_idx` 的 X 分量来自主机 `grid_in[0]` 与 `eff_block[0]` 共同决定的网格，`is_first_of_cluster` 来自主机 `lg_in`（cluster_dim）」。若某段无法在源码里定位，标注「待确认」。
 
 #### 4.5.5 小练习与答案
 
-**练习 1**：`WARP_STEP_X/Y/Z` 是怎么算出来的？它影响什么？
-**答**：主机侧 queue.cpp 由 `num_threads(tpw)` 与 `block_dim` 算：`ws_x = tpw % bx`、`ws_y = (tpw/bx) % by`、`ws_z = (tpw/(bx*by)) % bz`（queue.cpp:354-360）。它定义 warp 内一个 lane（线程）映射到哪个 `threadIdx` 坐标，是 CTA→warp 切片（u6-l1）的坐标步长。
+**练习 1**：为什么运行时在所有后端上都用同一份 `decode_caps()` 读能力，而不是各后端各自硬编码？
 
-**练习 2**：为什么 grid 全零被当成「delegated draw launch」？
-**答**：图形 draw 不走 CTA 模型，而是由 raster 引擎自驱动（u10-l1）。KMU 用 grid 全零作哨兵，`launch_delegated()` 返回真，处理器便把 frame kick 转发各 cluster 的 raster_core 而不产 CTA（processor.cpp:251-259、kmu.h:53-55）。
+> **参考答案**：因为能力是「单一真相来源」——通过 CP 的只读寄存器暴露（[command_processor.md:205-209](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/docs/designs/command_processor.md#L205-L209)）。这样 config-agnostic 的 `libvortex.so` 能在 open 时发现 VM 是否启用、是否支持 draw 等，而不必为每个后端编一份。这也呼应 u2-l3 的边界隔离纪律。
 
----
+**练习 2**：`CMD_LAUNCH_QMD` 相比当前的「18 条 DCR 写 + CMD_LAUNCH」有什么本质优势？为什么它是实现多队列并发的前提？
 
-### 4.6 主机→CP→KMU→CTA 的完整启动路径
-
-#### 4.6.1 概念说明
-
-把前五个模块串成一条端到端的路径，并看清 RTL CP 与仿真 CP 在 model parity 下的对应关系。一次 `vx_start`/`vx_enqueue_launch` 实际引发的不是「一条命令」，而是「约 18 条 `CMD_DCR_WRITE`（编程 KMU 描述符）+ 1 条 `CMD_LAUNCH`（触发）」的命令批。
-
-#### 4.6.2 核心流程
-
-完整路径（标注 grid/block/cluster 维度的来源）：
-
-```
-① 主机 vx_enqueue_launch（queue.cpp）
-   │  查询 NUM_THREADS/NUM_WARPS → 算 warp_step
-   │  暂存参数 blob 到设备 scratch
-   │  WR() 宏发 ~18 条 CMD_DCR_WRITE：
-   │     STARTUP_ADDR0/1  ← program_pc（.vxbin 基址，来自 Module 镜像）
-   │     KERNEL_ENTRY0/1   ← kernel_pc（来自 Kernel 名字→PC，u3-l4）
-   │     STARTUP_ARG0/1    ← args_addr（参数 blob 地址）
-   │     BLOCK_DIM_X/Y/Z   ← eff_block（主机传入的 block_in）
-   │     GRID_DIM_X/Y/Z    ← grid_in（主机传入）
-   │     LMEM_SIZE/BLOCK_SIZE/WARP_STEP_X/Y/Z
-   │     CLUSTER_DIM_X/Y/Z ← lg_in（主机传入的 cluster 维度）
-   │  cp_submit_launch()：1 条 CMD_LAUNCH + CMD_CACHE_FLUSH
-   ▼
-② device.cpp：cp_submit_dcr_write / cp_submit_launch
-   │  打包 CL，memcpy 进环，写 Q_TAIL_LO/HI 门铃，轮询 Q_SEQNUM
-   ▼
-③ CP（RTL VX_cp_core / 仿真 cmd_processor.cpp）
-   │  fetch CL → unpack → engine FSM
-   │  CMD_DCR_WRITE → RES_DCR → dcr_proxy → DCR 总线
-   │  CMD_LAUNCH   → RES_KMU → VX_cp_launch → 脉冲 start
-   ▼
-④ KMU（仿真 Kmu / RTL Vortex KMU）
-   │  dcr_write() 已装好描述符；start() 武装
-   │  step() 按 grid×cluster 遍历产 CTA
-   ▼
-⑤ CtaDispatcher → Scheduler（u6-l1）
-   │  每 CTA 切成 ceil(block_size/NUM_THREADS) 个 warp
-   │  分 LMEM 槽、装 warp 状态、派发
-   ▼
-⑥ 内核 drain（busy 落）→ launch done → engine 退休 → seqnum 写回 → 主机轮询命中
-```
-
-维度来源小结：
-
-| 维度 | 来源 |
-|---|---|
-| `STARTUP_ADDR` (PC) | `.vxbin` 镜像基址 `program_pc`（module.cpp 加载） |
-| `KERNEL_ENTRY` | kernel 名字经 `vx_module_get_kernel` 解析出的 PC（u3-l4） |
-| `STARTUP_ARG` | 主机暂存的参数 blob 设备地址 |
-| `BLOCK_DIM` | 主机 `vx_enqueue_launch` 的 `block_in` 参数 |
-| `GRID_DIM` | 主机的 `grid_in` 参数 |
-| `CLUSTER_DIM` | 主机的 `lg_in`（cluster group）参数 |
-| `WARP_STEP` | 运行时按 `NUM_THREADS`/`NUM_WARPS` 与 block_dim 推导 |
-| `BLOCK_SIZE` | block_dim 各维连乘 |
-| `LMEM_SIZE` | kernel 编译期上报的本地内存需求 |
-
-#### 4.6.3 源码精读
-
-主机侧的 launch 编码——WR 宏与全部 DCR：
-
-[sw/runtime/common/queue.cpp:L391-L428](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sw/runtime/common/queue.cpp#L391) — `WR(addr, val)` 展开为 `cp_submit_dcr_write`；依次写 PC/entry/arg/block/grid/lmem/block_size/warp_step/cluster_dim，末尾 `cp_submit_launch()`。
-
-CMD_LAUNCH 的打包与尾部一致性：
-
-[sw/runtime/common/device.cpp:L502-L520](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sw/runtime/common/device.cpp#L502) — 仅写 opcode 0x06，随后强制跟一条 `CMD_CACHE_FLUSH`（ACQUIRE_MEM 模型，保证主机读到一致的内核结果），再排空 COUT 环。
-
-仿真后端把 CP 的 start hook 接到处理器的 `run()`：
-
-[sw/runtime/simx/vortex.cpp:L144-L160](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sw/runtime/simx/vortex.cpp#L144) — `vortex_dcr_write` 调 `processor_.dcr_write`（→ KMU 装描述符）；`vortex_start` 用 `std::async` 跑 `processor_.run()`（→ `reset()` + `kmu_->start()` + tick 循环）；`vortex_busy` 查 future 是否就绪。这就是 CP launch 到 KMU start 的桥。
-
-`ProcessorImpl::run()` 武装 KMU 并跑到 drain：
-
-[sim/simx/processor.cpp:L223-L249](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/processor.cpp#L223) — `reset()` → `kmu_->start()` → `forward_delegated_launch()` → 循环 `tick()` 直到「所有 cluster 不 running 且无在途 channel 包」。结束条件里的 `inflight_count()==0` 保证所有写已落地，主机读回的结果一致（与 u5-l2 一致）。
-
-#### 4.6.4 代码实践：跟踪一次真实 launch
-
-**实践目标**：在一个真实 demo 上画出从主机到 CTA 的完整控制流。
-
-**操作步骤**：
-
-1. 用 blackbox（u1-l4）跑一个小 kernel：
-   ```
-   ./ci/blackbox.sh --driver=simx --app=demo --cores=1 --warps=2 --threads=4
-   ```
-2. 在 `sim/simx/kmu/kmu.cpp` 的 `step()` 入口临时加一行打印（**示例代码，仅供阅读型实践，不要提交**）：
-   ```cpp
-   // 示例代码：在 step() 开头打印
-   printf("[KMU] cta_id=%u block_idx=(%u,%u,%u) first_of_cluster=%d\n",
-          cta_id_, block_idx[0], block_idx[1], block_idx[2],
-          (int)req->is_first_of_cluster);
-   ```
-3. 在 `sw/runtime/common/queue.cpp` 的 WR 宏处（L401 起）按 `addr` 名字加打印，观察 ~18 条 DCR 写的顺序与值。
-4. 重跑，收集两份日志。
-
-**需要观察的现象**：
-- WR 日志显示 `GRID_DIM_X/Y/Z`、`BLOCK_DIM_X/Y/Z`、`CLUSTER_DIM_X/Y/Z` 的值——这就是「grid/block/cluster 维度的来源」；
-- KMU 日志显示 CTA 的产出顺序，验证 4.5.4 的遍历规则。
-
-**预期结果**：你能把 ①主机 WR 的维度 → ②KMU step 的 block_idx → ③CtaDispatcher 的 warp 切片三层对上号，画出完整的控制流图。
-
-**待本地验证**：实际 `block_idx` 序列与 CTA 总数取决于 demo kernel 的启动维度；若不便改源码，可改为用 `--debug` 生成 trace 后用 `ci/trace_csv.py`（u13-l2）检索 CTA 派发记录。
-
-#### 4.6.5 小练习与答案
-
-**练习 1**：为什么一次 launch 要发约 18 条 `CMD_DCR_WRITE` 而不是一条命令？
-**答**：当前 launch 是「DCR 写 dance + CMD_LAUNCH」的经典编码（command_processor.md §10 第 5 条）。未来 `CMD_LAUNCH_QMD`（opcode 0x0B，仿真 CP 已支持，RTL 待镜像）会把描述符折叠成内存里一份 QMD 列表、用一条命令 replay，把这 ~18 条压成 1 条（cmd_processor.cpp:303-322 的 `apply_qmd_`）。
-
-**练习 2**：仿真 CP 与 RTL CP 目前有哪些已知差异？
-**答**：① 仿真 CP 有 `CP_SATP` 与 `cp_translate` 页表遍历（DMA 感知 MMU），RTL CP 尚无；② 仿真 CP 是字节精确 DMA，RTL CP 把尺寸向上取整到 64B 倍数；③ 仿真 CP 解码 `CMD_DRAW`/`CMD_LAUNCH_QMD`（`SUPPORTS_DRAW`/`SUPPORTS_QMD`=1），RTL CP 暂清零并回退到环批次。这些都记在 command_processor.md §10。
+> **参考答案**：当前 launch 要占环里 ~18 条命令的位置，且这 18 条 DCR 写与那条 launch 之间必须保序，导致一次 launch 在环里是一个长序列，多队列难以真正并发。QMD 把整组参数压成「一条命令 + 一个内存里的描述符」，CP 设备侧一次原子读取并回放（[cmd_processor.cpp:308-322](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L308-L322)），把 launch 在环里的足迹缩到 1 条命令，这是真正 per-queue 并发的前提（[command_processor.md:397-400](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/docs/designs/command_processor.md#L397-L400)）。
 
 ---
 
 ## 5. 综合实践
 
-**任务：画出一次 `vx_start` 的完整时序图并标注「谁拥有 grid/block/cluster 维度」。**
+**任务**：跟踪一次真实的 `vx_start`，把「主机 → CP → KMU → CTA → warp」的完整控制流画成一张端到端时序图，并解释每个维度参数的来源与流向。
 
-要求：
+**建议步骤**：
 
-1. 选一个 `tests/regression` 下的小程序（如 `demo`），用 `ci/blackbox.sh` 在 SimX 上跑通。
-2. 画一张纵向时序图，包含这些泳道：**主机 runtime**、**CP（fetch/engine/launch）**、**KMU**、**CtaDispatcher/Scheduler**。
-3. 在图上标出三类关键事件：
-   - 主机发出的 `CMD_DCR_WRITE` 批（标注哪些写 grid/block/cluster 维度、值是多少）；
-   - `CMD_LAUNCH` 抵达、`VX_cp_launch` 的 start 脉冲与 busy 起/落；
-   - KMU 产出的 CTA 序列（标注 `block_idx` 与 `is_first_of_cluster`）。
-4. 用一句话回答：**如果只把 `GRID_DIM_X` 改成 2 倍，图里哪一段会变长？**（答：KMU 产 CTA 的拍数与 CtaDispatcher 派发的 warp 数翻倍，CP 的 `WAIT_DRAIN` 拉长，但主机 WR 批与 start 脉冲不变。）
+1. 选一个最小例子：`tests/regression/demo`（向量加，u1-l4 跑过）或 `tests/regression/sgemm`。在已 configure 的 build 目录用 `./ci/blackbox.sh --driver=simx --app=demo --cores=2 --warps=4 --threads=4 --debug=2` 跑一次，生成 trace。
+2. **主机段**：对照 [queue.cpp:401-435](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sw/runtime/common/queue.cpp#L401-L435)，列出这次 launch 写了哪些 KMU DCR、各自的值。注意 `--cores=2` 不会直接进 KMU DCR（核数是设备查询的），但会影响主机算出的 `grid_in`。
+3. **CP 段**：对照 [cmd_processor.cpp:389-588](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L389-L588)，追踪这串命令如何被 `tick_engine` 逐条退休，以及最后的 `CMD_LAUNCH` 如何驱动 `tick_launch`（[:370-387](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L370-L387)）。
+4. **KMU 段**：对照 [kmu.cpp:88-166](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp#L88-L166)，列出 `step()` 产出的 CTA 序列（参考 4.4.4 的表格式）。
+5. **warp 段**：对照 [cta_dispatcher.cpp:72-139](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/cta_dispatcher.cpp#L72-L139)，说明每个 CTA 如何被切成 `block_size/num_threads` 个 warp（这一步的细节在 u6-l1）。
 
-进阶：阅读 command_processor.md §10 第 5 条「QMD-style atomic CMD_LAUNCH」，思考把 ~18 条 DCR 写压成一条 `CMD_LAUNCH_QMD` 后，你的时序图哪一段会消失。
+**交付物**：一张图 + 一张表。图含五个泳道（主机运行时 / CP 引擎 / CP launch / KMU / CTA dispatcher），箭头标出 `CMD_DCR_WRITE`、doorbell、`CMD_LAUNCH`、`vortex_start()`、`kmu->step()`、`activate_warp` 等事件。表里标注 `grid_dim/block_dim/cluster_dim` 各自从哪个主机变量流到 KMU 的哪个字段、再到 `kmu_req_t` 的哪个成员。
 
----
+**若无法运行**：转为纯源码阅读型实践——不运行 blackbox，而是手工「执行」一遍 `step()`（像 4.4.4 那样填表），并把「待本地验证」明确标注在 trace 相关步骤上。
 
 ## 6. 本讲小结
 
-- **CP 是唯一控制平面**：主机经 AXI-Lite 编程环与门铃，CP 从主机内存的命令环取指，经引擎 FSM 分类到 KMU/DMA/DCR/EVT 四资源，串行化访问。
-- **命令 = 4B 头 + opcode 载荷**：每 64B 行最多 5 条，零头终止；门铃在 `Q_TAIL_HI` 原子提交；完成靠写回 seqnum、主机轮询 `Q_SEQNUM`。
-- **引擎 FSM（IDLE→DECODE→BID→WAIT_DONE→RETIRE）**：`classify` 把 opcode 映射到资源，done 脉冲广播但只有授权 CPE 接收；退休经 completion 握手防丢 seqnum。
-- **`VX_cp_launch` 是 start/busy 握手包装器**：四态机在内核整个运行期持有 KMU 仲裁器，start 脉冲 → 等 busy 升 → 等 busy 落 → done，是 launch 的隐式栅栏。
-- **KMU 用 `group_origin + intra_offset` 双层计数器遍历 grid**：先填 cluster 内、再按 `cluster_dim` 步长推进 group，使 cluster 成员连续驻留（DXA 多播的基础）；`is_first_of_cluster` 触发下游预留连续 LMEM 槽。
-- **完整路径**：主机 WR 约 18 条 `CMD_DCR_WRITE`（装 PC/entry/param/各维）+ `CMD_LAUNCH` → CP 解包 → KMU 武装与遍历 → CtaDispatcher 切 warp → Scheduler；RTL CP 与仿真 CP 是该路径的 model parity 双实现。
-
----
+- **CP 是单一控制平面**：主机所有工作（搬运/DCR/launch/栅栏/事件/缓存维护）都走命令环；环在主机内存，CP 用 `axi_host` 取、用 AXI-Lite 收 doorbell。顶层结构是「N 个引擎 + 4 个轮转仲裁器 + 5 个资源单元 + 双 AXI xbar」（[VX_cp_core.sv](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_core.sv)）。
+- **命令 = 4B 头 + opcode 载荷**，打包进 64B cache line；`CMD_LAUNCH` 只有 12B，因为内核参数已由前面的 `CMD_DCR_WRITE` 写进 KMU，它只负责点火（[VX_cp_pkg.sv](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_pkg.sv)）。
+- **引擎 FSM** `IDLE→DECODE→BID→WAIT_DONE→RETIRE` 把 opcode 分类到 KMU/DMA/DCR/EVENT 四资源；退休用 valid/ready 握手防丢号（[VX_cp_engine.sv](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_engine.sv)）。
+- **`VX_cp_launch`** 是 start/busy/drain 的四态握手包装器，占着 KMU 仲裁器直到内核排空，保证同队列 launch 串行（[VX_cp_launch.sv](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/cp/VX_cp_launch.sv)）。
+- **KMU 是网格展开器**：用 `group_origin + intra_offset` 两层游标按 cluster 分组发射 CTA，`is_first_of_cluster` 让 cluster 成员占连续槽以支撑 DXA 多播（[kmu.cpp](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/kmu/kmu.cpp)）。
+- **RTL CP 与仿真 CP 主体一致，但仿真侧领先**：VM 感知 DMA、QMD launch、CMD_DRAW 已在仿真侧实现，RTL 侧是已知 gap；能力寄存器是单一来源，让运行时按位回退（[command_processor.md](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/docs/designs/command_processor.md) §8/§10）。
 
 ## 7. 下一步学习建议
 
-- **内存侧的 cache flush**：本讲看到 `CMD_LAUNCH` 后强制 `CMD_CACHE_FLUSH`，它的硬件落点是 `VX_cp_dcr_proxy` 扫描 `VX_DCR_BASE_CACHE_FLUSH`——这是 u8-l1/u8-l2 的内容，建议接着读以理解「为何 launch 后必须 flush 才能读回结果」。
-- **多队列并发与 QMD launch**：command_processor.md §10 第 5、6 条描述了 `CMD_LAUNCH_QMD` 与多队列并发的未来方向，是理解 CP 性能演进的关键。
-- **CP 的 DMA 与虚拟内存**：仿真 CP 的 `cp_translate` 页表遍历（cmd_processor.cpp:157-201）连接到 u11-l1（虚拟内存子系统）；RTL CP 尚未实现 VM walker，是 model parity 的待补点。
-- **RTL CP 单元测试**：`hw/unittest/cp_*` 下有 `cp_launch`、`cp_engine`、`cp_core` 等 Verilator 单测，是验证你理解的最好材料——尝试跑通 `cp_launch` 单测，对照本讲 4.4 节。
+- **向下接 u6-l1**：本讲止步于「CTA 请求产出」，CTA 如何被切成 warp、warp 如何拿到 PC/tmask 并进入流水线，是 u6-l1（scheduler/cta_dispatcher/barrier）的主题。建议接着读 `cta_dispatcher.cpp` 的 `activate_warp` 之后的部分。
+- **横向接 u11-l1/u11-l2**：本讲的 CP DMA 是「搬运工」，而它搬的数据落进虚拟内存子系统（u11-l1）和原子操作通路（u11-l2）。特别地，CP DMA 的 VM 感知（仿真侧 `cp_translate`）与核内 MMU 是同一个 Sv32/Sv39 页表，理解 u11-l1 后再回头看 [cmd_processor.cpp:157-201](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/common/cmd_processor.cpp#L157-L201) 会更顺。
+- **向上接 u10-l2/u9-l2**：`CMD_DRAW` 与 `launch_delegated` 把图形 draw 与 CP 绑在一起（u10-l2），`cluster_dim` 与 `is_first_of_cluster` 是 DXA 多播的基础（u9-l2）。读完这两讲再回看 KMU 的 cluster 遍历，能理解「为什么 CTA 必须按 cluster 连续发射」。
+- **工程化接 u14-l1**：CP 在 FPGA 上是唯一 launch/DCR 通路，XRT/OPAE AFU 外壳如何把 AXI-Lite 与 `axi_host` 接到 PCIe，是 u14-l1 的内容。
+- **继续阅读的源码**：`hw/rtl/cp/VX_cp_completion.sv`（完成回写的 per-source 锁存）、`VX_cp_dcr_proxy.sv`（DCR 代理 + cache flush 扫描）、`VX_cp_axil_regfile.sv`（寄存器图与 doorbell 原子提交），以及设计文档 [command_processor.md §10](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/docs/designs/command_processor.md) 列出的全部「已提案未实现」项——它们是参与 CP 后续开发的路标。

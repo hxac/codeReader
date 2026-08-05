@@ -1,0 +1,1190 @@
+{
+  "project": "wireguard-fpga",
+  "head": "9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf",
+  "rationale": "本手册按\"先见森林、再见树木\"的顺序组织，共 8 个单元、39 篇讲义，对应这个多学科大型项目。U1 让读者从零认识项目定位、六大子目录、构建流程与上板 CLI 运行；U2 拆解 SoC 顶层、三个时钟域、互联总线与 UART 在线编程；U3 聚焦 CSR（SystemRDL/PeakRDL 自动生成 RTL+HAL）这一软硬件唯一桥梁，是理解全系统的钥匙；U4 进入数据面引擎 DPE 的轮询复用/解复用/TCAM 最长前缀路由查找/WG 封装解封装链；U5 攻坚最难部分——用 PipelineC(C)/Pypeline(Python) 生成的 ChaCha20-Poly1305 加解密硬件与资源共享流水线；U6 讲运行在 picoRV32 上的软件控制面、bare-metal 启动与加密原语库；U7 介绍基于 VProc 虚拟处理器/rv32 RISC-V ISS/udpIpPg 以太网 VIP 的协同仿真验证体系；U8 覆盖 Vivado/openXC7 双工具链、外部以太网库与两节点实网验证。单元间依赖单向递进，单元内部由总到分；每篇讲义控制为 1 个独立主题 + 2-5 个最小模块 + 1 个可操作实践，源码引用均来自已确认存在的真实文件。需特别说明：当前 HEAD 处于 Phase1 PoC 阶段——DPE 实际编入 top.filelist 的是 dpe_dummy_switch（直通），完整的 WG 解封装/加解密/路由查找链已写好但被注释未上线，本手册在 U4 相关讲义中如实标注这一现状。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门层：项目全景与上手",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位、背景与开源技术栈",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 wireguard-fpga 是什么——开源、FPGA、低成本(Artix-7 AX7201)的 WireGuard VPN 实现；为何要做；用到了 PipelineC/PeakRDL/RISC-V/VProc/OpenXC7/sv2v/verilog-ethernet 等哪些开源技术，以及它们各自扮演的角色。",
+          "learning_goals": [
+            "理解项目的目标、定位与 Proof-of-Concept 范围",
+            "认识六大开源技术各自在本项目中的用途",
+            "了解与 Blackwire(100G 专有) 及软件 WireGuard 实现的对比"
+          ],
+          "source_files": [
+            "README.md",
+            "0.doc/0.README.txt"
+          ],
+          "minimal_modules": [
+            "项目背景与动机",
+            "开源技术栈角色",
+            "Phase1 范围与挑战"
+          ],
+          "practice_task": "阅读 README 后，绘制一张『开源技术 → 在本项目中的具体用途』对照表（如 PipelineC 用于生成 ChaCha20-Poly1305 硬件）。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构与六大子系统导航",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "level": "beginner",
+          "topic": "讲清顶层目录 0.doc/1.hw/2.sw/3.build/4.sim/5.lint/6.test/99.warmup 各自的职责与相互关系，帮助读者建立全局地图。",
+          "learning_goals": [
+            "记住六大子系统的职责分工",
+            "理解 HW/SW/Build/Sim 代码的组织方式",
+            "找到每个子系统的入口 README"
+          ],
+          "source_files": [
+            "README.md",
+            "1.hw/README.md",
+            "3.build/README.md"
+          ],
+          "minimal_modules": [
+            "顶层目录职责",
+            "子系统相互关系",
+            "入口文档索引"
+          ],
+          "practice_task": "本地克隆仓库后，画出顶层目录树并为每个目录写一句话职责说明，标注哪三个目录构成 HW/SW/Build 主干。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "硬件平台 Alinx AX7201 与四口千兆以太网",
+          "order": 3,
+          "filename": "u1-l3-hardware-platform.md",
+          "level": "beginner",
+          "topic": "介绍目标硬件平台 Artix-7 AX7201、四个 1000Base-T 以太网口、UART/LED/按键，以及为何选择廉价且支持开源工具的硬件。",
+          "learning_goals": [
+            "了解目标 FPGA 型号与板卡资源",
+            "理解四口以太网的物理连接与 GMII/MDIO 接口存在",
+            "认识自包含(无需 PC 主机)运行的设计目标"
+          ],
+          "source_files": [
+            "README.md",
+            "0.doc/Alinx/0.README.txt"
+          ],
+          "minimal_modules": [
+            "板卡与器件资源",
+            "四口以太网物理接口",
+            "外设(UART/LED/Key)"
+          ],
+          "practice_task": "查阅 AX7201 资料，列出本项目用到的 4 个以太网口 + UART + LED + 按键各自属于哪类 FPGA 引脚约束。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "构建流程总览：CSR → SW → HW → bitstream",
+          "order": 4,
+          "filename": "u1-l4-build-overview.md",
+          "level": "beginner",
+          "topic": "概述三步构建：CSR(由 SystemRDL 生成 RTL+HAL)、SW(RISC-V 交叉编译生成 IMEM)、HW(综合 PnR 生成 bitstream)，并介绍 Vivado 与 openXC7 两条工具链以及 SW 必须先于 HW 构建的依赖。",
+          "learning_goals": [
+            "理解三步构建的顺序与相互依赖",
+            "认识 SW 必须先于 HW 构建(生成 imem.INIT.vh)",
+            "了解 Vivado 与 openXC7 两条可选工具链"
+          ],
+          "source_files": [
+            "3.build/README.md",
+            "3.build/MakefileCSR",
+            "3.build/MakefileSW",
+            "3.build/MakefileHW"
+          ],
+          "minimal_modules": [
+            "CSR 构建步骤",
+            "SW 构建步骤",
+            "HW 构建步骤",
+            "工具链选择"
+          ],
+          "practice_task": "跟随 README 记录 MakefileCSR/MakefileSW/MakefileHW 三者各自的输入与输出文件清单，并标注构建先后顺序。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "实验室运行：上板、CLI 配置与端到端验证",
+          "order": 5,
+          "filename": "u1-l5-lab-run-cli.md",
+          "level": "beginner",
+          "topic": "讲解烧写 bitstream、通过 UART(minicom) 连接 CLI、用 config network/routes/cryptokeys 三类命令配置节点，并用 ping 在两节点拓扑下验证加密隧道。",
+          "learning_goals": [
+            "学会上板与 UART CLI 连接",
+            "掌握 network/routes/cryptokeys 三类配置命令",
+            "理解两节点 ping 验证与 Wireshark 抓包确认加密"
+          ],
+          "source_files": [
+            "6.test/README.md",
+            "1.hw/README.md"
+          ],
+          "minimal_modules": [
+            "上板与串口连接",
+            "CLI 配置命令",
+            "两节点验证拓扑"
+          ],
+          "practice_task": "按两节点拓扑写出左/右节点的完整 CLI 配置脚本，并解释为何两节点的加密/解密密钥必须互为镜像。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "入门→进阶：SoC 硬件架构与顶层集成",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "HW/SW 分区：控制面与数据面",
+          "order": 1,
+          "filename": "u2-l1-hw-sw-partition.md",
+          "level": "beginner",
+          "topic": "讲解控制面(软 CPU 跑 WireGuard 协议、握手、路由管理)与数据面(RTL 线速转发+加解密)的两层架构，二者通过 CSR HAL 连接，并区分控制流量与数据流量。",
+          "learning_goals": [
+            "理解 HW/SW 分区的动机与边界",
+            "区分握手控制流量与用户数据流量",
+            "认识 CSR HAL 是两个平面的桥梁"
+          ],
+          "source_files": [
+            "1.hw/README.md",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "控制面职责",
+            "数据面职责",
+            "CSR HAL 桥梁"
+          ],
+          "practice_task": "画出控制面/数据面数据流框图，分别标注握手包与用户数据包在系统中的路径。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "top.sv 顶层模块与实例化结构",
+          "order": 2,
+          "filename": "u2-l2-top-module.md",
+          "level": "intermediate",
+          "topic": "解读 top.sv 的端口(4 路以太网 GMII/UART/按键/LED)与内部 clk_rst_gen→CPU 子系统→DPE→ethernet_mac/phy 的实例化与连线，并说明 top.filelist 如何组装设计文件。",
+          "learning_goals": [
+            "读懂 top.sv 的端口与子模块层次",
+            "理解 top.filelist 如何列举并组织源文件",
+            "认识 to_csr/from_csr 这对 CSR 总线"
+          ],
+          "source_files": [
+            "1.hw/top.sv",
+            "1.hw/top.filelist"
+          ],
+          "minimal_modules": [
+            "顶层端口定义",
+            "子模块实例化",
+            "filelist 组装规则"
+          ],
+          "practice_task": "在 top.sv 中追踪一个以太网接收包从 e1_rxd 进入到 from_eth_1 的信号路径，标注沿途经过的实例。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "时钟复位与三个时钟域",
+          "order": 3,
+          "filename": "u2-l3-clock-reset-domains.md",
+          "level": "intermediate",
+          "topic": "讲解 clk_rst_gen 生成 sys_clk(80M)/eth_gtx(125M)，以及 DPE 三个时钟域(125M@8bit 接 MAC、80M@32bit CSR/CPU、80M@128bit 流水线)的划分依据与跨域 FIFO 的必要性。",
+          "learning_goals": [
+            "理解三个时钟域的频率与位宽选择依据",
+            "认识 PLL 与复位同步机制",
+            "理解为何需要跨时钟域 FIFO 做位宽/时钟转换"
+          ],
+          "source_files": [
+            "1.hw/ip.infra/clk_rst_gen.sv",
+            "1.hw/fpgatech_lib/XILINX/fpga_pll_80M.sv",
+            "1.hw/fpgatech_lib/XILINX/fpga_pll_125M.sv"
+          ],
+          "minimal_modules": [
+            "PLL 时钟生成",
+            "复位同步",
+            "三时钟域划分",
+            "跨域 FIFO"
+          ],
+          "practice_task": "列表对比三个时钟域的频率/位宽/用途，并核算 README 中 4Gbps 加密速率与 6Mpps 包速率的来源计算。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "SoC 互联 fabric 与 soc_if 总线",
+          "order": 4,
+          "filename": "u2-l4-soc-fabric-bus.md",
+          "level": "intermediate",
+          "topic": "讲解 soc_fabric 把 CPU 主口译码到 uart/dmem/csr 三个从口，soc_if 定义总线握手(vld/rdy/addr/data)，soc_pkg 汇总公共类型。",
+          "learning_goals": [
+            "理解 SoC 总线的地址译码逻辑",
+            "读懂 soc_if 接口的握手信号定义",
+            "认识 CPU↔DMEM↔CSR 的访问路径"
+          ],
+          "source_files": [
+            "1.hw/ip.infra/soc_fabric.sv",
+            "1.hw/ip.infra/soc_if.sv",
+            "1.hw/ip.infra/soc_pkg.sv"
+          ],
+          "minimal_modules": [
+            "地址译码",
+            "总线握手接口",
+            "公共包定义"
+          ],
+          "practice_task": "在 soc_fabric 中找到 DMEM 与 CSR 的地址译码条件，写出 CPU 访问某个 CSR 寄存器时的译码判定。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "UART 子系统与 IMEM 在线编程",
+          "order": 5,
+          "filename": "u2-l5-uart-imem-programming.md",
+          "level": "intermediate",
+          "topic": "讲解 UART 的双用途(字符 CLI + 二进制特殊模式)：IMPR/IMWR/BUSR/BUSW 四种命令实现 IMEM 在线烧写与 DMEM/CSR 原子读写，以及校验和与超时机制。",
+          "learning_goals": [
+            "理解 UART 特殊模式的 FSM 与校验和",
+            "认识 IMEM 在线编程省去重综合的意义",
+            "理解 BUSR/BUSW 暂停 CPU 实现原子访问"
+          ],
+          "source_files": [
+            "1.hw/ip.infra/uart.sv",
+            "1.hw/README.md",
+            "3.build/imem.UART.py"
+          ],
+          "minimal_modules": [
+            "UART 双用途",
+            "IMPR/IMWR 命令",
+            "BUSR/BUSW 命令",
+            "校验和与超时"
+          ],
+          "practice_task": "用 imem.UART.py 描述一次 IMPR 烧写的字节序列，并手工计算其校验和。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：CSR——软硬件的唯一桥梁",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "SystemRDL 寄存器规格 csr.rdl",
+          "order": 1,
+          "filename": "u3-l1-systemrdl-spec.md",
+          "level": "intermediate",
+          "topic": "讲解用 SystemRDL 描述 cpu_fifo/uart/gpio/ethernet/dpe/routing_table/cryptokey_table 等寄存器与 external 表，作为软硬件的唯一真源(single source of truth)。",
+          "learning_goals": [
+            "读懂 SystemRDL 的 addrmap/regfile/reg/field 语法",
+            "理解 sw/hw 读写属性与 singlepulse 触发",
+            "认识 routing_table/cryptokey_table 为 external regfile"
+          ],
+          "source_files": [
+            "3.build/csr_build/csr.rdl"
+          ],
+          "minimal_modules": [
+            "SystemRDL 语法",
+            "字段读写属性",
+            "external 表声明"
+          ],
+          "practice_task": "在 csr.rdl 中定位 cpu_fifo.rx.control 的各字段位域，并解释 tuser_dst 各取值的含义。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "PeakRDL 自动生成 RTL 与 HAL",
+          "order": 2,
+          "filename": "u3-l2-peakrdl-generation.md",
+          "level": "intermediate",
+          "topic": "讲解 peakrdl c-header 与 systemrdl-compiler 从同一 csr.rdl 生成 csr.sv/csr_pkg.sv(RTL) 与 csr_hw.h/csr_cosim.h(硬件/协同仿真 HAL)，由 MakefileCSR 与 sysrdl_cosim.py 编排，单一真源→多产物。",
+          "learning_goals": [
+            "理解单一真源生成多产物的流程",
+            "认识 HAL 的层级指针访问 API",
+            "理解 VPROC 宏切换硬件/协同仿真头"
+          ],
+          "source_files": [
+            "3.build/README.md",
+            "3.build/MakefileCSR",
+            "3.build/sysrdl_cosim.py",
+            "3.build/csr_build/generated-files/wireguard_regs.h"
+          ],
+          "minimal_modules": [
+            "peakrdl c-header",
+            "systemrdl-compiler",
+            "HAL 头生成",
+            "VPROC 宏切换"
+          ],
+          "practice_task": "运行 make -f MakefileCSR 后，对比 csr.sv 与 csr_hw.h 中同一寄存器的命名，说明 HAL 如何映射到 RTL 信号。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "CPU FIFO：AXIS 到 CSR 的映射",
+          "order": 3,
+          "filename": "u3-l3-cpu-fifo-axis-csr.md",
+          "level": "intermediate",
+          "topic": "讲解 cpu_fifo 把 128 位 AXIS(TDATA/TKEEP/TLAST/TUSER)拆成 32 位 CSR 寄存器，CPU 用约 10 步读/写收发 16 字节段，singlepulse 触发 TVALID/TREADY，并 8 位对齐避免 RMW。",
+          "learning_goals": [
+            "理解 128↔32 位宽拆分与 8 位对齐避免 RMW",
+            "读懂 CPU 收发包的 10 步流程",
+            "估算约 170Mbps 的 CPU 接口吞吐上限"
+          ],
+          "source_files": [
+            "1.hw/ip.infra/cpu_fifo.sv",
+            "3.build/csr_build/csr.rdl",
+            "2.sw/README.md"
+          ],
+          "minimal_modules": [
+            "AXIS→CSR 位宽拆分",
+            "singlepulse 触发",
+            "10 步收发流程",
+            "吞吐估算"
+          ],
+          "practice_task": "写出 CPU 发送一个 16 字节段的 CSR 读写序列，并说明为何该接口不能跑满 1G datapath 但够用于握手。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "FCR 流控寄存器与原子更新",
+          "order": 4,
+          "filename": "u3-l4-fcr-atomic-update.md",
+          "level": "intermediate",
+          "topic": "讲解用 Flow Control Register(pause/idle) 协调 CPU 与 DPE 的优雅暂停，替代昂贵的 Write-Buffered Register(WBR) 实现路由表等寄存器的原子更新。",
+          "learning_goals": [
+            "理解为何不能用 AXI stall(TREADY) 做暂停",
+            "读懂 FCR 8 步原子更新握手",
+            "认识 pause→idle 的轮询机制"
+          ],
+          "source_files": [
+            "2.sw/README.md",
+            "1.hw/ip.dpe/dpe.sv",
+            "1.hw/ip.dpe/dpe_multiplexer.sv"
+          ],
+          "minimal_modules": [
+            "FCR pause/idle",
+            "WBR 替代方案",
+            "原子更新握手"
+          ],
+          "practice_task": "用时序图描述 CPU 写 pause=1 到检测 idle=1 期间 DPE 各级状态的变化，以及更新完成后 pause=0 的恢复过程。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "进阶→专家：数据面引擎 DPE",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "DPE 总体结构与 AXIS 元数据",
+          "order": 1,
+          "filename": "u4-l1-dpe-overview-axis.md",
+          "level": "intermediate",
+          "topic": "讲解 dpe.sv 把多路复用器→流水线→解复用器串起来，dpe_if 用 AXIS 标准信号 + TUSER 路由指令(bypass_all/bypass_stage/src/dst) + TID 承载 peer index 的元数据编码。",
+          "learning_goals": [
+            "读懂 DPE 的 mux/pipeline/demux 框架",
+            "理解 TUSER/TID 元数据编码含义",
+            "认识网络头(大端)与 WG 头(小端)的字节序差异"
+          ],
+          "source_files": [
+            "1.hw/ip.dpe/dpe.sv",
+            "1.hw/ip.infra/dpe_if.sv",
+            "1.hw/ip.infra/dpe_pkg.sv",
+            "1.hw/README.md"
+          ],
+          "minimal_modules": [
+            "DPE 总体框架",
+            "AXIS 接口",
+            "TUSER/TID 元数据",
+            "字节序约定"
+          ],
+          "practice_task": "解析一个数据包的 TUSER 各比特，写出它的 src/dst 取值与是否 bypass_all/bypass_stage。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "轮询多路复用器与暂停流控",
+          "order": 2,
+          "filename": "u4-l2-round-robin-mux.md",
+          "level": "intermediate",
+          "topic": "讲解 dpe_multiplexer 按 per-packet 轮询服务 5 个输入(CPU + 4 eth)，响应 FCR.pause 在完成当前队列后进入 PAUSED 状态并回报 idle。",
+          "learning_goals": [
+            "理解 per-packet 轮询仲裁",
+            "读懂 pause/idle 状态机",
+            "认识当前 HEAD 用 dpe_dummy_switch 的 PoC 现状"
+          ],
+          "source_files": [
+            "1.hw/ip.dpe/dpe_multiplexer.sv",
+            "1.hw/ip.dpe/dpe.sv",
+            "1.hw/top.filelist"
+          ],
+          "minimal_modules": [
+            "轮询仲裁",
+            "pause/idle 状态机",
+            "PoC 现状(dummy_switch)"
+          ],
+          "practice_task": "在多路复用器代码中标注轮询顺序，以及进入/退出 PAUSED 状态的条件，并说明当前为何用 dummy_switch。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "解复用器 dpe_demultiplexer",
+          "order": 3,
+          "filename": "u4-l3-demultiplexer.md",
+          "level": "intermediate",
+          "topic": "讲解 dpe_demultiplexer 依据包类型与目的元数据(tuser_dst)把包分发到 CPU/eth1-4 的 Tx FIFO，与多路复用器对称。",
+          "learning_goals": [
+            "理解按 tuser_dst 的分发逻辑",
+            "认识 demux 与 mux 的对称结构",
+            "理解 broadcast 目的(7) 的处理"
+          ],
+          "source_files": [
+            "1.hw/ip.dpe/dpe_demultiplexer.sv",
+            "1.hw/ip.infra/dpe_pkg.sv"
+          ],
+          "minimal_modules": [
+            "目的元数据分发",
+            "demux 对称结构",
+            "广播处理"
+          ],
+          "practice_task": "追踪一个 tuser_dst=2 的包从 demux 输入到 to_eth_2 的完整路径。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "TCAM 最长前缀路由查找",
+          "order": 4,
+          "filename": "u4-l4-tcam-ip-lookup.md",
+          "level": "advanced",
+          "topic": "讲解 dpe_route_mem 用并行 CAM 比较 (ip&mask)==(prefix&mask) 实现最长前缀匹配，dpe_egress_ip_lookup 协调 CSR 配置、包缓冲(跨 128bit beat)与元数据赋值；表按前缀长度降序保证首匹配即最长。",
+          "learning_goals": [
+            "理解 TCAM/LPM 原理与 64 条目并行比较",
+            "读懂按前缀长度降序排序保证首匹配即最长前缀",
+            "认识包头跨 128bit beat 的循环缓冲设计"
+          ],
+          "source_files": [
+            "1.hw/ip.dpe/dpe_egress_ip_lookup.sv",
+            "1.hw/ip.dpe/dpe_route_mem.sv",
+            "1.hw/ip.dpe/README.md"
+          ],
+          "minimal_modules": [
+            "TCAM 并行比较",
+            "最长前缀匹配",
+            "包缓冲与元数据赋值"
+          ],
+          "practice_task": "给定 3 条按前缀长度降序的路由表项，手工模拟一次目的 IP 的命中过程并选出 best_idx。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "WireGuard 封装/解封装与加解密数据流",
+          "order": 5,
+          "filename": "u4-l5-wg-encap-decap.md",
+          "level": "advanced",
+          "topic": "讲解 header_parser/disassembler/decryptor/encryptor/assembler 构成的完整 WG 数据包处理链；如实说明当前 HEAD 中这些块存在于源码但被 top.filelist 注释、由 dummy_switch 替代的 Phase1 现状。",
+          "learning_goals": [
+            "理解 WG 数据包的解封装→解密→路由→加密→封装流程",
+            "认识 Phase1 PoC 用 dummy_switch 的现状与 filelist 注释",
+            "理解这些块尚未上线的原因"
+          ],
+          "source_files": [
+            "1.hw/ip.dpe/dpe_wg_disassembler.sv",
+            "1.hw/ip.dpe/dpe_wg_encryptor.sv",
+            "1.hw/ip.dpe/dpe_wg_decryptor.sv",
+            "1.hw/top.filelist"
+          ],
+          "minimal_modules": [
+            "WG 解封装",
+            "WG 加解密",
+            "WG 封装",
+            "PoC 现状与 filelist"
+          ],
+          "practice_task": "对照 README 的 55 步包处理分析，标注哪些步骤对应 disassembler/decryptor/encryptor/assembler，并指出当前实际跑通的是哪些。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l6",
+          "title": "路由表与密钥表的 tdp_ram 实现",
+          "order": 6,
+          "filename": "u4-l6-routing-cryptokey-tdpram.md",
+          "level": "intermediate",
+          "topic": "讲解 dpe.sv 用两个 tdp_ram 实例化 routing_table(8 位地址)与 cryptokey_table(11 位地址)，A 端接 CSR 读写、B 端预留给数据面查找，配 req/ack 握手。",
+          "learning_goals": [
+            "理解 external regfile 在 RTL 中由 tdp_ram 实现",
+            "读懂双口 RAM 的 A(CSR)/B(数据面)端口连接",
+            "认识 req/ack 握手与读写应答"
+          ],
+          "source_files": [
+            "1.hw/ip.dpe/dpe.sv",
+            "1.hw/ip.infra/tdp_ram.sv",
+            "3.build/csr_build/csr.rdl"
+          ],
+          "minimal_modules": [
+            "external regfile→tdp_ram",
+            "双口连接",
+            "req/ack 握手"
+          ],
+          "practice_task": "计算两条表各占多少字节，并解释 cryptokey_table 为何需要 11 位地址(64 条目 × 每条目字数)。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "专家：ChaCha20-Poly1305 加密硬件",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "AEAD/ChaCha20-Poly1305 原理与 RFC8439",
+          "order": 1,
+          "filename": "u5-l1-aead-chacha-poly-theory.md",
+          "level": "intermediate",
+          "topic": "讲清 ChaCha20 流密码 + Poly1305 MAC 的 AEAD(加密-后-认证)构造、AAD||密文||长度 的认证数据格式、256 位 key/96 位 nonce/16 字节 tag 的关系。",
+          "learning_goals": [
+            "理解 AEAD 加密-后-认证构造",
+            "读懂 Poly1305 认证数据的组装格式",
+            "认识 key/nonce/tag 的长度与作用"
+          ],
+          "source_files": [
+            "2.sw/app/chacha20poly1305.c",
+            "2.sw/app/chacha20.c",
+            "2.sw/app/poly1305.c",
+            "3.build/pipelinec_build/src/chacha20poly1305/chacha20poly1305.h"
+          ],
+          "minimal_modules": [
+            "ChaCha20 流密码",
+            "Poly1305 MAC",
+            "AEAD 认证数据格式"
+          ],
+          "practice_task": "用软件库对一个短明文做 ChaCha20-Poly1305 加密，并对照 RFC8439 §2.8.2 已知答案测试向量验证密文与 tag。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "PipelineC HLS 工作流与三种设计变体",
+          "order": 2,
+          "filename": "u5-l2-pipelinec-workflow.md",
+          "level": "advanced",
+          "topic": "讲解 PipelineC 把 C 编译为可综合 Verilog 的 HLS 工作流；三种设计变体(独立加密/独立解密/共享)；pragma MAIN_MHZ/PART、DECL_INPUT/OUTPUT、#define 实例化模式、SIMULATION 宏等约定。",
+          "learning_goals": [
+            "理解 PipelineC 的 HLS 工作流与 Verilog 输出",
+            "认识三种设计变体的差异与用途",
+            "读懂 MAIN pragma 与 #define 实例化模式"
+          ],
+          "source_files": [
+            "3.build/pipelinec_build/CLAUDE.md",
+            "3.build/pipelinec_build/README.md",
+            "3.build/pipelinec_build/build_verilog.sh",
+            "3.build/pipelinec_build/src/chacha20poly1305_encrypt.c"
+          ],
+          "minimal_modules": [
+            "PipelineC HLS 流程",
+            "三种设计变体",
+            "pragma 与实例化约定"
+          ],
+          "practice_task": "运行 build_verilog.sh 生成加密 Verilog，记录生成的顶层端口以及 axis128/axis512 位宽转换的位置。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "加密数据流",
+          "order": 3,
+          "filename": "u5-l3-encrypt-datapath.md",
+          "level": "advanced",
+          "topic": "讲解加密 datapath：明文→chacha20→[密文分叉]→prep_auth_data→poly1305_mac→append_auth_tag；密文直通输出，旁路算 tag 后追加为最后一 word。",
+          "learning_goals": [
+            "读懂加密数据流的分叉与汇合",
+            "理解 prep_auth_data 的 AAD/密文/长度 FSM",
+            "认识 append_tag 抑制再恢复 tlast 的处理"
+          ],
+          "source_files": [
+            "3.build/pipelinec_build/src/chacha20poly1305/encrypt_dataflow.c",
+            "3.build/pipelinec_build/src/prep_auth_data/prep_auth_data.c",
+            "3.build/pipelinec_build/src/auth_tag/append_auth_tag.c",
+            "3.build/pipelinec_build/src/chacha20/chacha20.c"
+          ],
+          "minimal_modules": [
+            "密文分叉",
+            "prep_auth_data FSM",
+            "append_auth_tag tlast"
+          ],
+          "practice_task": "画出加密 datapath 框图，标注每级 FSM 的状态与 tlast 的抑制/恢复时机。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "解密与验证数据流",
+          "order": 4,
+          "filename": "u5-l4-decrypt-verify-datapath.md",
+          "level": "advanced",
+          "topic": "讲解解密 datapath：密文+tag→strip_auth_tag→[密文分叉]→chacha20→wait_to_verify，以及 prep_auth_data→poly1305_mac→poly1305_verify→wait_to_verify；128 字 FIFO 缓冲明文直到 tag 比对完成。",
+          "learning_goals": [
+            "理解 strip_tag 的 early-tlast look-ahead 缓冲",
+            "读懂 verify 的 128 位原子比对 FSM",
+            "认识 wait_to_verify 验证失败丢弃明文的安全意义"
+          ],
+          "source_files": [
+            "3.build/pipelinec_build/src/chacha20poly1305/decrypt_dataflow.c",
+            "3.build/pipelinec_build/src/auth_tag/strip_auth_tag.c",
+            "3.build/pipelinec_build/src/auth_tag/wait_to_verify.c",
+            "3.build/pipelinec_build/src/poly1305/poly1305_verify_decrypt.c"
+          ],
+          "minimal_modules": [
+            "strip_auth_tag early-tlast",
+            "poly1305_verify 比对",
+            "wait_to_verify FIFO"
+          ],
+          "practice_task": "解释为何解密时明文先于 tag 产生，wait_to_verify 如何防止未验证明文流出芯片。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "资源共享：共享 ChaCha20/Poly1305 流水线",
+          "order": 5,
+          "filename": "u5-l5-shared-pipeline.md",
+          "level": "advanced",
+          "topic": "讲解 chacha20_pipeline_shared/poly1305_pipeline_shared 用 1 位 is_encrypt 标签穿越 64 级流水线，输入端 round-robin 复用、输出端按 ID 解复用，从而共享一条昂贵流水线节省面积。",
+          "learning_goals": [
+            "理解资源复用的 ID 标签穿越流水线机制",
+            "读懂 round-robin 输入复用与 ID 解复用",
+            "认识背压(ready)在共享下的处理"
+          ],
+          "source_files": [
+            "3.build/pipelinec_build/src/chacha20/chacha20_pipeline_shared.c",
+            "3.build/pipelinec_build/src/poly1305/poly1305_pipeline_shared.c",
+            "3.build/pipelinec_build/src/chacha20poly1305/encrypt_shared.c"
+          ],
+          "minimal_modules": [
+            "ID 标签传播",
+            "round-robin 输入复用",
+            "ID 解复用与背压"
+          ],
+          "practice_task": "描述加密与解密请求同时到达共享 ChaCha20 流水线时的调度顺序与结果路由过程。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l6",
+          "title": "Pypeline Python 前端与 RFC 修正",
+          "order": 6,
+          "filename": "u5-l6-pypeline-python-port.md",
+          "level": "advanced",
+          "topic": "讲解 pypeline_build 用 Python 前端重写 C 设计，修复了 C 版 Poly1305 的 320 位 limb 数学三连 bug(uint320_mul 截断、mod_prime 掩码错误、丢弃 limb)与密文长度 padding，达到 RFC8439 一致；并用 aead_ref_model 自校验。",
+          "learning_goals": [
+            "理解 Pypeline 相对 C 的接线(Feedback/接口)改进",
+            "认识 Poly1305 三个数学 bug 及其修正",
+            "理解独立参考模型(cryptography 包)做已知答案自校验的方法"
+          ],
+          "source_files": [
+            "3.build/pypeline_build/README.md",
+            "3.build/pypeline_build/src/poly1305/poly1305.py",
+            "3.build/pypeline_build/src/chacha20/chacha20.py",
+            "3.build/pypeline_build/src/chacha20poly1305/aead_ref_model.py"
+          ],
+          "minimal_modules": [
+            "Pypeline 接线改进",
+            "Poly1305 数学 bug 修正",
+            "参考模型自校验"
+          ],
+          "practice_task": "对比 C 与 Pypeline 的 poly1305 实现，定位三处数学差异并说明为何 C 版产生的 tag 无法与合规 peer 互通。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "进阶：软件控制面",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "软件架构、bare-metal 启动与内存映射",
+          "order": 1,
+          "filename": "u6-l1-sw-arch-boot-memmap.md",
+          "level": "intermediate",
+          "topic": "讲解控制面组件总览(WireGuard Agent + curve25519/chacha20poly1305/blake2s/hkdf/rng/timer 等)、boot_crt.s 启动流程、link_map.lds 内存映射(IMEM/DMEM/CSR 区间)。",
+          "learning_goals": [
+            "认识控制面全部组件及其职责",
+            "理解 bare-metal 启动流程",
+            "读懂 IMEM/DMEM/CSR 的地址区间映射"
+          ],
+          "source_files": [
+            "2.sw/README.md",
+            "2.sw/boot_crt.s",
+            "2.sw/link_map.lds",
+            "2.sw/app/wireguard_libs.h"
+          ],
+          "minimal_modules": [
+            "控制面组件总览",
+            "bare-metal 启动",
+            "内存映射"
+          ],
+          "practice_task": "从 link_map.lds 找到 IMEM/DMEM/CSR 地址区间，并与 csr.rdl 的 wireguard addrmap 对照确认一致。",
+          "depends_on": [
+            "u2-l4",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "软件加密原语库",
+          "order": 2,
+          "filename": "u6-l2-sw-crypto-primitives.md",
+          "level": "intermediate",
+          "topic": "讲解 curve25519(TweetNaCl X25519 常时间标量乘)、blake2s、hkdf(Noise KDF)、chacha20poly1305、random(rdcycle 熵 + BLAKE2s 混合)、timer 的可移植 C 实现，及对 bare-metal RV32 的适配。",
+          "learning_goals": [
+            "理解各原语在 Noise 协议中的角色",
+            "认识常时间标量乘与无动态分配的设计",
+            "理解 rdcycle 作为熵源的原理与局限"
+          ],
+          "source_files": [
+            "2.sw/app/curve25519.c",
+            "2.sw/app/blake2s.c",
+            "2.sw/app/hkdf.c",
+            "2.sw/app/random.c",
+            "99.warmup/7.curve25519/main.c"
+          ],
+          "minimal_modules": [
+            "curve25519/X25519",
+            "blake2s/hkdf",
+            "random/timer"
+          ],
+          "practice_task": "用 warmup 中的 curve25519 测试，对一对已知密钥验证共享密钥计算结果正确。",
+          "depends_on": [
+            "u6-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "网络栈与 CLI",
+          "order": 3,
+          "filename": "u6-l3-network-stack-cli.md",
+          "level": "intermediate",
+          "topic": "讲解 ethernet.c/network.c/string_bare.c 实现 IP/UDP/ARP/ICMP 基本处理与无 libc 的字符串工具，以及 CLI 通过 UART 提供 config network/routes/cryptokeys 等命令。",
+          "learning_goals": [
+            "理解 bare-metal 最小网络栈实现",
+            "认识 CLI 命令与配置项",
+            "理解为何自实现 string_bare(无 libc)"
+          ],
+          "source_files": [
+            "2.sw/app/ethernet.c",
+            "2.sw/app/network.c",
+            "2.sw/app/string_bare.c",
+            "6.test/README.md"
+          ],
+          "minimal_modules": [
+            "IP/UDP/ARP/ICMP 处理",
+            "无 libc 字符串",
+            "CLI 命令"
+          ],
+          "practice_task": "追踪一个收到的 ICMP echo 在软件中的处理路径，并说明 CLI config routes 最终如何写入硬件路由表。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "软件控制流：收发包与表更新",
+          "order": 4,
+          "filename": "u6-l4-sw-control-flow.md",
+          "level": "intermediate",
+          "topic": "串联 CPU 经 cpu_fifo 的 10 步收发包流程与握手后的表更新：WireGuard Agent 处理握手，Routing DB Updater 经 HAL 更新 routing/cryptokey 表，并用 FCR 做原子更新。",
+          "learning_goals": [
+            "串联收发包流程与表更新时序",
+            "理解控制面只处理握手、不参与线速转发",
+            "认识 KMM/路由更新的 HAL 调用序列"
+          ],
+          "source_files": [
+            "2.sw/README.md",
+            "2.sw/app/main.cpp",
+            "2.sw/app/wireguard_libs.cpp"
+          ],
+          "minimal_modules": [
+            "收发包流程",
+            "握手处理",
+            "表更新与 FCR"
+          ],
+          "practice_task": "写出握手响应处理完成后，CPU 经 HAL 更新 cryptokey 表(含 FCR pause/idle)的调用序列。",
+          "depends_on": [
+            "u6-l3",
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "进阶→专家：仿真协同验证",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "仿真测试台总体架构",
+          "order": 1,
+          "filename": "u7-l1-sim-testbench-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 4.sim 用 Verilator + VProc 构建测试台：tb.sv 例化 top + 可替换 soc_cpu(VPROC/RTL) + bfm_ethernet/bfm_uart/bfm_phy_mdio，MakefileVProc.mk 编排编译与运行。",
+          "learning_goals": [
+            "理解测试台整体结构与可替换 CPU 策略",
+            "认识 Verilator + VProc 协同仿真思路",
+            "读懂 MakefileVProc.mk 的主要变量与目标"
+          ],
+          "source_files": [
+            "4.sim/README.md",
+            "4.sim/tb.sv",
+            "4.sim/MakefileVProc.mk",
+            "4.sim/models/README.md"
+          ],
+          "minimal_modules": [
+            "测试台结构",
+            "可替换 soc_cpu",
+            "Makefile 编排"
+          ],
+          "practice_task": "用 make -f MakefileVProc.mk run 跑默认 VUserMain0，记录输出并解释 soc_cpu 组件的自动选择机制。",
+          "depends_on": [
+            "u2-l2",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "VProc 虚拟处理器协同仿真",
+          "order": 2,
+          "filename": "u7-l2-vproc-cosim.md",
+          "level": "advanced",
+          "topic": "讲解 soc_cpu.VPROC 用 VProc 的 C++ API(write/read/tick) 驱动 soc_if 总线，VUserMain0 作为 node 0 入口替代 main，配合 cosim 库与协同仿真 HAL。",
+          "learning_goals": [
+            "理解 VProc 虚拟处理器原理",
+            "读懂 VUserMain0 中 read/write/tick 的用法",
+            "认识协同仿真 HAL 的抽象层"
+          ],
+          "source_files": [
+            "4.sim/models/soc_cpu.VPROC.sv",
+            "4.sim/usercode/VUserMain0.cpp",
+            "4.sim/models/cosim/README.md"
+          ],
+          "minimal_modules": [
+            "VProc API",
+            "VUserMain0 入口",
+            "cosim HAL 抽象"
+          ],
+          "practice_task": "修改 VUserMain0 对一个 CSR 寄存器先写后读回，运行仿真并通过 VPrint 观察结果是否一致。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "rv32 RISC-V ISS 与软件集成",
+          "order": 3,
+          "filename": "u7-l3-rv32-iss-integration.md",
+          "level": "advanced",
+          "topic": "讲解 rv32 指令集模拟器在 VProc 上运行真实 RISC-V 二进制：用 -x/-X 划定送入 HDL 的外部访问区(如 CSR)，其余用 mem_model；可用 timing model 模拟 picoRV32/IBEX/eduBOS5 周期，由 vusermain.cfg 配置。",
+          "learning_goals": [
+            "理解 ISS 替代 RTL CPU 以加速仿真",
+            "读懂外部访问区与内部 mem_model 的分工",
+            "认识 timing model 的选择与配置"
+          ],
+          "source_files": [
+            "4.sim/README.md",
+            "4.sim/models/rv32/README.md",
+            "4.sim/models/rv32/usercode/VUserMain0.cpp"
+          ],
+          "minimal_modules": [
+            "rv32 ISS 集成",
+            "外部访问区划分",
+            "timing model 配置"
+          ],
+          "practice_task": "配置 vusermain.cfg 用 -x/-X 把 CSR 区路由到 HDL、其余内存用 mem_model，并跑 BUILD=ISS 仿真观察输出。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "以太网 VIP udpIpPg 与 BFM",
+          "order": 4,
+          "filename": "u7-l4-udpippg-ethernet-vip.md",
+          "level": "advanced",
+          "topic": "讲解 bfm_ethernet 基于 udpIpPg 在 4 个 GMII 口生成/接收 UDP-IPv4 包：genUdpIpPkt/UdpVpSendRawEthFrame/registerUsrRxCbFunc 等 API，以及 bfm_phy_mdio 响应 MDIO 事务。",
+          "learning_goals": [
+            "理解 udpIpPg 的包生成与回调接收机制",
+            "读懂 4 个节点(node1-4)的以太网驱动",
+            "认识 MDIO slave 模型与寄存器映射"
+          ],
+          "source_files": [
+            "4.sim/models/udpIpPg/bfm_ethernet.sv",
+            "4.sim/usercode/VUserMainUdp.cpp",
+            "4.sim/models/udpIpPg/README.md"
+          ],
+          "minimal_modules": [
+            "包生成 API",
+            "接收回调",
+            "MDIO slave 模型"
+          ],
+          "practice_task": "用 udpIpPg API 写一段代码骨架：构造并发送一个 UDP 包，再用回调函数打印收到包的源地址与载荷。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l5",
+          "title": "mem_model 稀疏内存、PCAP 回放与逐模块测试台",
+          "order": 5,
+          "filename": "u7-l5-mem-model-pcap-module-tb.md",
+          "level": "advanced",
+          "topic": "讲解 mem_model 的 64 位稀疏内存在 VProc 与 HDL 间共享；VUserMainPcap 用 PCAP 回放/录制做端到端以太网验证；以及 4.sim/rtl 下对 dpe/mux/demux/wg_encryptor/chacha 等的逐模块单元测试台。",
+          "learning_goals": [
+            "理解稀疏内存在仿真中的跨域共享作用",
+            "认识 PCAP 回放/录制的端到端验证方法",
+            "了解逐模块单元测试台的组织与用途"
+          ],
+          "source_files": [
+            "4.sim/models/cosim/README.md",
+            "4.sim/usercode/VUserMainPcap.cpp",
+            "4.sim/rtl/dpe/tb.sv",
+            "4.sim/rtl/README.md"
+          ],
+          "minimal_modules": [
+            "mem_model 稀疏内存",
+            "PCAP 回放/录制",
+            "逐模块测试台"
+          ],
+          "practice_task": "用 gen_udp_pcap.py 生成测试 PCAP，跑 VUserMainPcap 仿真，并比较 TX→RX 的开始到开始延迟。",
+          "depends_on": [
+            "u7-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "专家：构建工具链与系统集成",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "Vivado 构建与顶层约束",
+          "order": 1,
+          "filename": "u8-l1-vivado-build-constraints.md",
+          "level": "advanced",
+          "topic": "讲解 MakefileHW 调用 Vivado 完成综合/PnR/烧写，top.xdc 的引脚与时序约束，ILA 调试，以及目标器件 xc7a200t；top.filelist 如何把源文件喂给综合。",
+          "learning_goals": [
+            "理解 Vivado 构建流程与产物",
+            "读懂 top.xdc 的引脚约束类别",
+            "认识 filelist 与综合的衔接"
+          ],
+          "source_files": [
+            "3.build/README.md",
+            "3.build/MakefileHW",
+            "1.hw/constraints/top.xdc",
+            "1.hw/top.filelist"
+          ],
+          "minimal_modules": [
+            "Vivado 构建流程",
+            "引脚/时序约束",
+            "filelist 衔接"
+          ],
+          "practice_task": "在 top.xdc 中定位 4 个以太网口与 UART 的引脚约束，核对与 top.sv 端口名一致。",
+          "depends_on": [
+            "u2-l2",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "openXC7 开源工具链与 sv2v 转换",
+          "order": 2,
+          "filename": "u8-l2-openxc7-sv2v.md",
+          "level": "advanced",
+          "topic": "讲解 openXC7(Yosys/nextpnr/Project X-Ray) + sv2v 把 SystemVerilog 转 Verilog 再综合的开源路径；IBUFGDS/BUFGMUX 等缺失原语的适配；extract_modules.py 拆分统一输出为单个模块文件。",
+          "learning_goals": [
+            "理解开源工具链替代 Vivado 的路径与产物",
+            "认识 sv2v 批量转换与模块拆分流程",
+            "理解缺失原语(如 BUFGMUX)导致的时序问题"
+          ],
+          "source_files": [
+            "3.build/README.md",
+            "3.build/hw_build.openXC7/extract_modules.py",
+            "3.build/hw_build.openXC7/converted/extracted/EXTRACTION_REPORT.txt"
+          ],
+          "minimal_modules": [
+            "openXC7 工具链",
+            "sv2v 转换",
+            "原语适配",
+            "模块拆分"
+          ],
+          "practice_task": "运行 make convert，比较 all_converted.v 与 extracted/ 下的模块数量，并记录 EXTRACTION_REPORT 的统计。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "外部库 verilog-ethernet/axis 与以太网 MAC/PHY",
+          "order": 3,
+          "filename": "u8-l3-external-lib-eth-mac-phy.md",
+          "level": "advanced",
+          "topic": "讲解 external_lib 复用 alexforencich 的 verilog-axis(FIFO/adapter/register 等) 与 verilog-ethernet(eth_mac_1g/gmii/rgmii/arp/ip)；自研 ethernet_mac/ethernet_phy 包装 MAC 收发与 PHY 的 MDIO 配置及 link 监测。",
+          "learning_goals": [
+            "认识外部库在本项目的复用范围",
+            "理解 MAC 1G GMII 收发与 FCS 计算",
+            "读懂 PHY MDIO 初始化与 link up/down 监测"
+          ],
+          "source_files": [
+            "1.hw/ip.infra/ethernet_mac.sv",
+            "1.hw/ip.infra/ethernet_phy.sv",
+            "1.hw/external_lib/ethernet/eth_mac_1g_gmii.v",
+            "1.hw/external_lib/ethernet/eth_mac_1g_gmii_fifo.v"
+          ],
+          "minimal_modules": [
+            "外部库复用",
+            "MAC GMII 收发",
+            "PHY MDIO 配置"
+          ],
+          "practice_task": "在 top.filelist 中区分哪些是外部库文件、哪些是自研，并说明 ethernet_mac 如何桥接 GMII 与 AXIS FIFO。",
+          "depends_on": [
+            "u2-l2",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "两节点实验室端到端验证",
+          "order": 4,
+          "filename": "u8-l4-two-node-lab-validation.md",
+          "level": "advanced",
+          "topic": "讲解两台 AX7201 按拓扑连线，各自经 CLI 配置 network/routes/cryptokeys(加解密密钥互为镜像)，用 ping 验证加密隧道并在 Wireshark 抓包确认加密；并与仿真 PCAP 验证对应。",
+          "learning_goals": [
+            "掌握两节点完整配置与验证流程",
+            "理解加解密密钥的镜像关系",
+            "认识仿真 PCAP 与实网抓包的对应"
+          ],
+          "source_files": [
+            "6.test/README.md",
+            "1.hw/README.md",
+            "4.sim/usercode/VUserMainPcap.cpp"
+          ],
+          "minimal_modules": [
+            "两节点拓扑配置",
+            "密钥镜像关系",
+            "实网与仿真对照"
+          ],
+          "practice_task": "写出左右节点 cryptokeys 中 encrypt_key 与 decrypt_key 的对应关系，并解释为何必须交叉镜像才能互通。",
+          "depends_on": [
+            "u1-l5",
+            "u8-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
