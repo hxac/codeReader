@@ -7,6 +7,7 @@ vllm-ascend 最核心的「集成武器」不是重写模型，而是**打补丁
 1. 说清楚 **为什么** vllm-ascend 要大量使用 Monkey-patch，而不是直接修改上游 vLLM 的源码。
 2. 掌握 `adapt_patch()` 这个「总闸」如何把补丁分成 **platform patch（平台级、全局、引擎核心子进程生效）** 与 **worker patch（每个 worker 进程生效）** 两个阶段，并理解各自的应用**时机**。
 3. 读懂 `vllm_ascend/patch/__init__.py` 这份「补丁登记簿」里的 `What / Why / How / Related PR / Future Plan` 文档化规范，并能照着规范为一个补丁整理出「四要素」。
+4. 对照本次（`646684f → 3829122`）新增的两条 `worker/patch_v2/patch_triton.py` 登记——`apply_penalties` 大形状重写、`get_num_nans` 的 libdevice 重绑定到 CANN——理解「补丁登记簿随补丁演进、持续追加条目」的维护方式。
 
 本讲是单元 3（Patch 机制）的总纲，后续 u3-l2、u3-l3 会分别深入 platform 与 worker 两类补丁的具体实现。
 
@@ -37,7 +38,8 @@ vllm-ascend 最核心的「集成武器」不是重写模型，而是**打补丁
 | `vllm_ascend/__init__.py` | 插件入口：`register()` / `register_connector()` 等，内含 `_ensure_global_patch()` 幂等闸门。 |
 | `vllm_ascend/platform.py` | `NPUPlatform.pre_register_and_update()` 在平台选中后调用 `adapt_patch(True)`。 |
 | `vllm_ascend/worker/worker.py` | `NPUWorker.__init__` 在初始化早期调用 `adapt_patch()`（默认 worker 阶段）。 |
-| `vllm_ascend/patch/platform/patch_fused_moe.py` | 一个典型补丁实例：把 vLLM 的 `FusedMoE` 工厂重定向到 `AscendMoERunner`。 |
+| `vllm_ascend/patch/platform/patch_fused_moe.py` | 一个典型补丁实例：把 vLLM 的 `FusedMoE` 工厂重定向到 `AscendMoERunner`，并通过 `create_ascend_fused_moe_router` 创建 Ascend 路由器。 |
+| `vllm_ascend/patch/worker/patch_v2/patch_triton.py` | 本次新增讲解的补丁实例：重写 `apply_penalties` 支持大形状、把 `libdevice` 重绑定到 CANN（一个文件挂多条登记）。 |
 
 ## 4. 核心概念与源码讲解
 
@@ -91,19 +93,19 @@ vllm-ascend 面对这些「上游没有留接口、但又必须改行为」的�
 
 先看文件顶部的注释，它讲清楚了「为什么要这么早打补丁」：
 
-[vllm_ascend/patch/platform/patch_fused_moe.py:L18-L29](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_fused_moe.py#L18-L29) —— 说明 vLLM 的 `FusedMoE` 是**工厂函数**（不是类），模型在 `from vllm.model_executor.layers.fused_moe import FusedMoE` 时就直接拿到绑定，所以必须在任何模型被 import 之前就把绑定替换掉。
+[vllm_ascend/patch/platform/patch_fused_moe.py:L18-L28](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_fused_moe.py#L18-L28) —— 说明 vLLM 的 `FusedMoE` 是**工厂函数**（不是类），模型在 `from vllm.model_executor.layers.fused_moe import FusedMoE` 时就直接拿到绑定，所以必须在任何模型被 import 之前就把绑定替换掉。
 
 接着是「捕获原始对象」：
 
-[vllm_ascend/patch/platform/patch_fused_moe.py:L32-L53](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_fused_moe.py#L32-L53) —— `import` 上游的 fused_moe 包与 layer 模块，并保存 `_original_FusedMoE = _fused_moe_layer.FusedMoE`（第 39 行）。同时根据 `is_310p()` 选择不同的 Ascend Runner 实现。
+[vllm_ascend/patch/platform/patch_fused_moe.py:L30-L58](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_fused_moe.py#L30-L58) —— `import` 上游的 fused_moe 包与 layer 模块，并保存 `_original_FusedMoE = _fused_moe_layer.FusedMoE`（第 43 行）。同时根据 `is_310p()` 选择不同的 Ascend Runner 实现。注意第 36、39 行还额外 import 了上游的 `FusedMoERouter` 类型与 vllm-ascend 的 `create_ascend_fused_moe_router` 工厂——这是 `#13417` 把专家路由抽取为独立 `router/` 包后引入的，下文细讲。
 
 然后是「定义替换实现」：
 
-[vllm_ascend/patch/platform/patch_fused_moe.py:L56-L97](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_fused_moe.py#L56-L97) —— `_ascend_FusedMoE` 这个新工厂函数：当调用方没指定 `runner_cls` 时，默认换成 `AscendMoERunner`；处理 EPLB 冗余专家、`tid2eid` 等 Ascend 专属参数；最后**仍然调用原始工厂** `_original_FusedMoE(...)`（第 90 行）来真正构造对象。这是一个典型的「包装（wrap）」而非「推翻」的补丁。
+[vllm_ascend/patch/platform/patch_fused_moe.py:L61-L151](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_fused_moe.py#L61-L151) —— `_ascend_FusedMoE` 这个新工厂函数做三件事：（1）当调用方没指定 `runner_cls` 时，默认换成 `AscendMoERunner`；（2）当调用方没指定 `router` 时（第 105-121 行），调 `create_ascend_fused_moe_router(...)` 构造一个 Ascend 路由器——这正是 `#13417` 的核心变化，路由逻辑不再写死在 `routed_experts` 内部，而是由独立的 router 工厂创建；（3）处理 EPLB 冗余专家、`tid2eid` 等 Ascend 专属参数后，**仍然调用原始工厂** `_original_FusedMoE(...)`（第 127 行）来真正构造对象。这是一个典型的「包装（wrap）」而非「推翻」的补丁。
 
 最后是「重绑定」：
 
-[vllm_ascend/patch/platform/patch_fused_moe.py:L100-L101](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_fused_moe.py#L100-L101) —— 同时改写 `_fused_moe_layer.FusedMoE` 和 `_fused_moe_pkg.FusedMoE` 两处绑定。为什么要改两处？因为有的模型写 `from vllm.model_executor.layers.fused_moe import FusedMoE`（从包拿），有的写 `from ...fused_moe.layer import FusedMoE`（从子模块拿）。两处都改，才能保证无论哪种 import 路径拿到的都是替换后的版本。
+[vllm_ascend/patch/platform/patch_fused_moe.py:L154-L155](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_fused_moe.py#L154-L155) —— 同时改写 `_fused_moe_layer.FusedMoE` 和 `_fused_moe_pkg.FusedMoE` 两处绑定。为什么要改两处？因为有的模型写 `from vllm.model_executor.layers.fused_moe import FusedMoE`（从包拿），有的写 `from ...fused_moe.layer import FusedMoE`（从子模块拿）。两处都改，才能保证无论哪种 import 路径拿到的都是替换后的版本。
 
 #### 4.1.4 代码实践（源码阅读型）
 
@@ -111,7 +113,7 @@ vllm-ascend 面对这些「上游没有留接口、但又必须改行为」的�
 
 **操作步骤**：
 
-1. 打开 `vllm_ascend/worker/worker.py` 第 107-113 行，注意 `adapt_patch()`（worker 阶段补丁）在 `from vllm_ascend import ops` 与模型加载**之前**被调用。
+1. 打开 `vllm_ascend/worker/worker.py` 第 111-117 行，注意 `adapt_patch()`（worker 阶段补丁）在 `from vllm_ascend import ops` 与模型加载**之前**被调用。
 2. 再回到 `patch_fused_moe.py` 顶部注释列出的「Import order in worker.__init__」三步。
 3. 想象如果把 `adapt_patch()` 移到模型加载之后会发生什么。
 
@@ -186,33 +188,33 @@ vLLM 启动
 
 先看「总闸」本体，非常简洁：
 
-[vllm_ascend/utils.py:L533-L537](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/utils.py#L533-L537) —— `adapt_patch(is_global_patch=False)`：`is_global_patch=True` 时 import `vllm_ascend.patch.platform`，否则 import `vllm_ascend.patch.worker`。整个函数只做一件事——**决定触发哪个子包**。补丁的实际副作用藏在子包 `__init__.py` 的 import 链里。
+[vllm_ascend/utils.py:L533-L537](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/utils.py#L533-L537) —— `adapt_patch(is_global_patch=False)`：`is_global_patch=True` 时 import `vllm_ascend.patch.platform`，否则 import `vllm_ascend.patch.worker`。整个函数只做一件事——**决定触发哪个子包**。补丁的实际副作用藏在子包 `__init__.py` 的 import 链里。
 
 再看平台阶段的两处触发点。
 
 第一处：`NPUPlatform.pre_register_and_update`：
 
-[vllm_ascend/platform.py:L183-L187](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/platform.py#L183-L187) —— 平台被选中后最早的钩子之一，直接调用 `adapt_patch(is_global_patch=True)`。
+[vllm_ascend/platform.py:L261-L265](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/platform.py#L261-L265) —— 平台被选中后最早的钩子之一，直接调用 `adapt_patch(is_global_patch=True)`。注意 `#13484` 对 `NPUPlatform` 做了一次「不改功能、仅重排」的组织性重构，把这个方法的位置整体后移（原 L183-L187 → 现 L261-L265）；本讲引用以新行号为准。
 
 第二处：通用插件回调（`register_connector` / `register_model_loader` / `register_service_profiling`）经 `_ensure_global_patch` 触发：
 
-[vllm_ascend/__init__.py:L56-L70](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/__init__.py#L56-L70) —— `_ensure_global_patch()` 用模块级 `_GLOBAL_PATCH_APPLIED` 标志做**每进程一次的幂等闸门**：已打过就直接返回，否则调 `adapt_patch(is_global_patch=True)` 再置位。注释解释了原因——vLLM 在 engine-core 子进程里加载通用插件，而 E2E 测试的 conftest 钩子不会在那里运行，所以全局补丁必须也通过这些插件入口补打一次。
+[vllm_ascend/__init__.py:L56-L70](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/__init__.py#L56-L70) —— `_ensure_global_patch()` 用模块级 `_GLOBAL_PATCH_APPLIED` 标志做**每进程一次的幂等闸门**：已打过就直接返回，否则调 `adapt_patch(is_global_patch=True)` 再置位。注释解释了原因——vLLM 在 engine-core 子进程里加载通用插件，而 E2E 测试的 conftest 钩子不会在那里运行，所以全局补丁必须也通过这些插件入口补打一次。
 
-[vllm_ascend/__init__.py:L79-L86](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/__init__.py#L79-L86) —— `register_connector` 第一行就是 `_ensure_global_patch()`，确保连接器、权重传输引擎相关的平台补丁已就绪。
+[vllm_ascend/__init__.py:L79-L86](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/__init__.py#L79-L86) —— `register_connector` 第一行就是 `_ensure_global_patch()`，确保连接器、权重传输引擎相关的平台补丁已就绪。
 
 再看 worker 阶段的触发点：
 
-[vllm_ascend/worker/worker.py:L107-L113](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/worker/worker.py#L107-L113) —— `NPUWorker.__init__` 在打印 `COMPILE_CUSTOM_KERNELS` 警告之后、`from vllm_ascend import ops` 与模型加载之前，调用 `adapt_patch()`（注意这里没传参，`is_global_patch` 默认 `False`，即 worker 阶段）。这个位置保证了模型加载时所有 worker 补丁已生效。
+[vllm_ascend/worker/worker.py:L111-L117](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L111-L117) —— `NPUWorker.__init__` 在打印 `COMPILE_CUSTOM_KERNELS` 警告之后、`from vllm_ascend import ops` 与模型加载之前，调用 `adapt_patch()`（注意这里没传参，`is_global_patch` 默认 `False`，即 worker 阶段）。这个位置保证了模型加载时所有 worker 补丁已生效。
 
 最后，两个子包 `__init__.py` 的 import 链展示了「import 即打补丁」的批量触发，并且都带有**条件分支**：
 
-[vllm_ascend/patch/platform/__init__.py:L19-L46](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/__init__.py#L19-L46) —— 平台补丁聚合入口。注意三个条件分支：
+[vllm_ascend/patch/platform/__init__.py:L19-L46](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/__init__.py#L19-L46) —— 平台补丁聚合入口。注意三个条件分支：
 
 - 第 26-29 行：按 `is_310p()` 在 `patch_mamba_config`（非 310P）与 `patch_mamba_config_310`（310P）之间二选一。
 - 第 37-38 行：仅当 `DYNAMIC_EPLB` 或 `EXPERT_MAP_RECORD` 环境变量打开时才 import `patch_multiproc_executor`（否则不需要改子进程 daemon 行为）。
 - 其余补丁无条件 import。
 
-[vllm_ascend/patch/worker/__init__.py:L22-L49](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/worker/__init__.py#L22-L49) —— worker 补丁聚合入口。同样有条件分支：
+[vllm_ascend/patch/worker/__init__.py:L22-L49](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/worker/__init__.py#L22-L49) —— worker 补丁聚合入口。同样有条件分支：
 
 - 第 22-24 行：仅当 `HAS_TRITON` 为真时才打 Triton 相关补丁（CPU-UT 或 310P 无 Triton 环境下跳过）。
 - 第 35-40 行：按 `is_310p()` 二选一地 import `patch_qwen3_5/patch_qwen3_dflash/patch_qwen3vl` 或 `patch_idex_310`。
@@ -225,7 +227,7 @@ vLLM 启动
 **操作步骤**：
 
 1. 读 `vllm_ascend/__init__.py` 第 56-70 行 `_ensure_global_patch` 的 docstring，找出它解释「为什么要在 engine-core 子进程里通过插件入口补打」的那句话。
-2. 读 `vllm_ascend/worker/worker.py` 第 107-110 行，确认 worker 阶段补丁是在「每个 worker 自己的进程」里调用的。
+2. 读 `vllm_ascend/worker/worker.py` 第 111-114 行，确认 worker 阶段补丁是在「每个 worker 自己的进程」里调用的。
 3. 对照两处：平台补丁由引擎核心进程（经插件回调）触发，worker 补丁由 worker 进程（经 `__init__`）触发，二者进程不同。
 
 **需要观察的现象**：你会看到平台补丁与 worker 补丁的触发点位于**不同的进程角色**里。
@@ -281,19 +283,34 @@ patch/__init__.py
 
 先看登记簿的「总说明」，它一句话点明两个子目录的分工与调用点：
 
-[vllm_ascend/patch/__init__.py:L17-L27](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/__init__.py#L17-L27) —— 说明 `platform/` 由 `adapt_patch(is_global_patch=True)` 在 `NPUPlatform.pre_register_and_update()` 中触发；`worker/` 由 `adapt_patch(is_global_patch=False)` 在每个 worker 的 `__init__` 中触发；并要求**新增补丁时必须同步在此登记**。
+[vllm_ascend/patch/__init__.py:L17-L27](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/__init__.py#L17-L27) —— 说明 `platform/` 由 `adapt_patch(is_global_patch=True)` 在 `NPUPlatform.pre_register_and_update()` 中触发；`worker/` 由 `adapt_patch(is_global_patch=False)` 在每个 worker 的 `__init__` 中触发；并要求**新增补丁时必须同步在此登记**。
 
 再看平台补丁段的开头与一个完整条目：
 
-[vllm_ascend/patch/__init__.py:L29-L33](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/__init__.py#L29-L33) —— 平台补丁段标题，并注明「按文件名字母序」排列。
+[vllm_ascend/patch/__init__.py:L29-L33](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/__init__.py#L29-L33) —— 平台补丁段标题，并注明「按文件名字母序」排列。
 
-[vllm_ascend/patch/__init__.py:L87-L104](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/__init__.py#L87-L104) —— `patch_fused_moe.py` 的完整登记。注意它如何把五要素写齐：What（`FusedMoE` 工厂被重定向到 `AscendMoERunner`）、Why（FusedMoE 是工厂函数、模型直接 import 调用，必须在 import 前重定向）、How（同时改包与 layer 两处绑定，并说明 worker 侧 `patch_fused_moe.py` 复用此补丁以避免重复包装）、Related PR（无，vllm-ascend 专属集成）、Future Plan（等上游暴露 MoE runner 后端分发钩子后移除）。
+[vllm_ascend/patch/__init__.py:L87-L104](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/__init__.py#L87-L104) —— `patch_fused_moe.py` 的完整登记。注意它如何把五要素写齐：What（`FusedMoE` 工厂被重定向到 `AscendMoERunner`）、Why（FusedMoE 是工厂函数、模型直接 import 调用，必须在 import 前重定向）、How（同时改包与 layer 两处绑定，并说明 worker 侧 `patch_fused_moe.py` 复用此补丁以避免重复包装）、Related PR（无，vllm-ascend 专属集成）、Future Plan（等上游暴露 MoE runner 后端分发钩子后移除）。
 
 最后看 worker 补丁段的开头与一个典型条目：
 
-[vllm_ascend/patch/__init__.py:L560-L562](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/__init__.py#L560-L562) —— worker 补丁段标题，同样按文件名字母序。
+[vllm_ascend/patch/__init__.py:L560-L562](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/__init__.py#L560-L562) —— worker 补丁段标题，同样按文件名字母序。
 
-[vllm_ascend/patch/__init__.py:L564-L576](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/__init__.py#L564-L576) —— `patch_cudagraph.py` 登记：What（替换 `CudagraphDispatcher._create_padded_batch_descriptor`）、Why（vLLM FULL 模式会报错，打补丁绕过后才能开启 FULL）、How（运行时替换该方法并改 if 条件）、Related PR（vLLM #34880）、Future Plan（上游合并后移除）。这是一个简洁标准的五要素范例。
+[vllm_ascend/patch/__init__.py:L564-L576](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/__init__.py#L564-L576) —— `patch_cudagraph.py` 登记：What（替换 `CudagraphDispatcher._create_padded_batch_descriptor`）、Why（vLLM FULL 模式会报错，打补丁绕过后才能开启 FULL）、How（运行时替换该方法并改 if 条件）、Related PR（vLLM #34880）、Future Plan（上游合并后移除）。这是一个简洁标准的五要素范例。
+
+最后，对照**本次新增**的两条登记，体会「同一个补丁文件随上游演进、持续追加条目」的维护方式。它们都挂在 `worker/patch_v2/patch_triton.py` 这个文件名下：
+
+[vllm_ascend/patch/__init__.py:L1164-L1197](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/__init__.py#L1164-L1197) —— `patch_v2/patch_triton.py` 的整段登记，包含两个条目：
+
+- **条目 1（L1166-L1179）**：替换 `vllm.v1.worker.gpu.sample` 下的 `logprob` / `penalties.apply_penalties` / `gumbel.gumbel_sample` 等一批 Triton 算子。本次（`#13159`）给 Why / How 各补了一句——`apply_penalties` 在**大输入形状**下会因 Triton kernel 限制而失败，所以「以最小改动重写 `apply_penalties` kernel 以支持大形状」，并新增 `Test:` 字段指向 `tests/e2e/nightly/.../triton/test_penality.py`。
+- **条目 2（L1181-L1197，全新）**：替换 `vllm.v1.worker.gpu.metrics.logits.libdevice`。Why：上游 `get_num_nans` 这个 Triton kernel 从默认的 **CUDA 导向** libdevice 模块导入函数，在 Ascend 上会让 Triton 去解析 CUDA libdevice 符号而非 CANN 等价物，导致 kernel 编译失败。How：把 `metrics.logits.libdevice` 重绑定到 `triton.language.extra.cann.libdevice`，于是 sampler 与 rejection_sampler 里对 `get_num_nans` 的引用在编译时就走 CANN libdevice。Future Plan：等 vLLM 通过后端分发机制选择 Triton libdevice 后移除。
+
+这两条登记的「重绑定」实际落在补丁文件的两行代码上，可以对照阅读：
+
+[vllm_ascend/patch/worker/patch_v2/patch_triton.py:L20](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/worker/patch_v2/patch_triton.py#L20) —— `penalties.apply_penalties = apply_penalties`：把上游 `apply_penalties` 重绑定到 vllm-ascend 重写的、支持大形状的实现（条目 1）。
+
+[vllm_ascend/patch/worker/patch_v2/patch_triton.py:L37](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/worker/patch_v2/patch_triton.py#L37) —— `metrics_logits.libdevice = triton.language.extra.cann.libdevice`：把上游模块级 `libdevice` 重指向 CANN 版（条目 2）。这正是 4.1 讲过的「重绑定」手法，只不过这次替换的不是函数，而是一个被 Triton kernel 在编译期 `import` 的**模块属性**。
+
+> 维护启示：`patch_triton.py` 这个文件名下挂着两个条目，说明登记簿的粒度是「补丁文件」而非「被替换的单个符号」。一个文件补多处、就追加多个条目；只要任何一条还没等上游修好，整个文件就不能删。
 
 #### 4.3.4 代码实践（本讲核心实践任务）
 
@@ -301,13 +318,13 @@ patch/__init__.py
 
 **操作步骤**：
 
-1. 打开 `vllm_ascend/patch/__init__.py`，在 Platform Patch 或 Worker Patch 段中**任选一个**补丁条目（例如上面的 `patch_cudagraph.py`，或 `patch_kv_cache_utils.py`、`patch_rejection_sampler.py` 等）。
+1. 打开 `vllm_ascend/patch/__init__.py`，在 Platform Patch 或 Worker Patch 段中**任选一个**补丁条目。推荐选本次新增的 `worker/patch_v2/patch_triton.py` 条目 2（`get_num_nans` 的 libdevice 重绑定，见 L1181-L1197），因为它最短、最聚焦；也可以选条目 1（`apply_penalties` 大形状重写）、`patch_cudagraph.py`、`patch_kv_cache_utils.py`、`patch_rejection_sampler.py` 等。
 2. 阅读该条目的注释，提炼出四要素：**补了什么（What）/ 为什么（Why）/ 关联上游 PR（Related PR）/ 何时可移除（Future Plan）**。
-3. 再打开对应的补丁源文件（如 `vllm_ascend/patch/worker/patch_cudagraph.py`），核对登记簿描述与实际代码是否一致。
+3. 再打开对应的补丁源文件（如 `vllm_ascend/patch/worker/patch_v2/patch_triton.py`），核对登记簿描述与实际代码是否一致——对条目 2 即第 37 行 `metrics_logits.libdevice = ...`。
 
 **需要观察的现象**：登记簿里的 Why/Future Plan 与代码里的实际替换目标应当对应得上。
 
-**预期结果**：产出一张类似下面的小卡片（以 `patch_cudagraph.py` 为例）：
+**预期结果**：产出一张类似下面的小卡片。这里给出两张范例——一张是 `patch_cudagraph.py`，一张是本次新增的 `patch_triton.py` 条目 2（libdevice 重绑定），供你照着整理条目 1（`apply_penalties`）：
 
 ```text
 补丁：worker/patch_cudagraph.py
@@ -317,7 +334,15 @@ patch/__init__.py
 - 何时可移除：当 vLLM 合并该 PR 后即可删除
 ```
 
-**注意**：不要假装运行了命令；本实践是源码阅读型，结论来自对注释与代码的对照阅读。
+```text
+补丁：worker/patch_v2/patch_triton.py（条目 2）
+- 补了什么：把 vllm.v1.worker.gpu.metrics.logits.libdevice 重绑定到 triton.language.extra.cann.libdevice
+- 为什么：上游 get_num_nans 的 Triton kernel 从默认 CUDA 导向 libdevice 导入，在 Ascend 上会解析到 CUDA 符号导致编译失败
+- 关联 PR：无（Triton-Ascend 后端兼容问题，登记簿已解释）
+- 何时可移除：等 vLLM 通过后端分发机制选择 Triton libdevice 后即可删除
+```
+
+**注意**：不要假装运行了命令；本实践是源码阅读型，结论来自对注释与代码（如 `patch_triton.py` 第 37 行）的对照阅读。
 
 #### 4.3.5 小练习与答案
 
@@ -348,7 +373,7 @@ patch/__init__.py
 - vllm-ascend 用 **Monkey-patch** 在运行时替换上游 vLLM 的函数/类，实现「上游零侵入」的 NPU 适配；每个补丁遵循「捕获原对象 → 定义替换实现 → 重绑定到原模块」三步，且 `import` 补丁模块即生效。
 - 补丁通过 **`adapt_patch(is_global_patch)`** 这个总闸分两阶段：`True` 触发 **platform 补丁**（引擎核心子进程、影响调度/配置等全局逻辑），`False` 触发 **worker 补丁**（每个 worker 子进程的 `__init__`、影响前向/算子）。
 - 之所以要两阶段，是因为 vLLM 多进程架构下 `spawn` 出的 worker 是全新解释器、不继承父进程补丁，且不同进程关心的逻辑不同；`_ensure_global_patch` 提供「同进程一次」的幂等保证。
-- `patch/__init__.py` 是补丁**登记簿**，每个补丁必须登记 **What / Why / How / Related PR / Future Plan** 五要素，既给读者当地图，也给维护者当退场清单；`AGENTS.md` 要求新补丁经过严格评审。
+- `patch/__init__.py` 是补丁**登记簿**，每个补丁必须登记 **What / Why / How / Related PR / Future Plan** 五要素，既给读者当地图，也给维护者当退场清单；`AGENTS.md` 要求新补丁经过严格评审。登记粒度是「补丁文件」——一个文件补多处就追加多个条目（如本次 `worker/patch_v2/patch_triton.py` 下新增的 `apply_penalties` 大形状重写、`get_num_nans` libdevice 重绑定到 CANN 两条）。
 - 补丁的**时机**至关重要：必须在「上游真正取用该符号之前」完成替换，例如 `adapt_patch()` 在 `NPUWorker.__init__` 中早于 `from vllm_ascend import ops` 与模型加载。
 - 子包 `__init__.py` 用 `is_310p()` / `HAS_TRITON` / 环境变量 / `try-except` 等条件分支，按硬件与运行环境**选择性**地触发补丁。
 

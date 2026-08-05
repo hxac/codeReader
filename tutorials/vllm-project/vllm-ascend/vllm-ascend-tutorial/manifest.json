@@ -1,7 +1,7 @@
 {
   "project": "vllm-ascend",
-  "head": "646684f43ce4bdc737203a8df1149e37ea2ff824",
-  "rationale": "vllm-ascend 是一个把 vLLM 运行到华为昇腾 NPU 上的「硬件插件」，它不重写模型，而是通过「可插拔硬件接口 + 大量 Monkey-patch + 继承重写 + NPU 自定义算子」把上游 vLLM 的 CUDA/CPU 路径改造为 Ascend 路径。因此学习路线必须先让读者理解插件如何被 vLLM 发现与注册（u1、u2），再深入它最核心的集成武器——Patch 机制（u3），然后顺着一次推理的真实执行链路依次讲解 Worker/ModelRunner（u4）、注意力后端（u5）、自定义算子三层（Python/Triton/C++ AscendC，u6）、分布式与 MoE/EPLB（u7）、图编译与 ACL Graph（u8）、模型加载与权重传输（u9），最后覆盖量化、PD 分离、KV 卸载、投机解码、LoRA 等进阶推理特性（u10），以及新模型落地、310P 适配、测试与二次开发实战（u11）。单元之间按「注册→配置→打补丁→执行→注意力→算子→并行→编译→加载→特性→扩展」的依赖关系组织，前序单元为后续提供必要的概念基础（如先理解 Patch 与 Platform 才能看懂 ModelRunner 如何与上游对接）。这是一个大型项目（含 C++ 内核、Triton、众多模型与特性），因此安排 11 个单元、42 篇讲义，由浅入深、每篇聚焦一个相对独立主题并配真实源码与可操作实践任务。",
+  "head": "3829122510c00dfc6b4b94d6f96c947a7590043c",
+  "rationale": "本次增量更新基于 646684f..3829122 之间的 13 个提交。最大的变化有三类：（1）新增「稀疏 KV 缓存卸载（Sparse KV Offload）」特性（#13026），它把 SFA/Indexer 稀疏注意力的 KV 卸载到主机内存，仅在 decode 期按 top-k 回载，并依赖 PD 分离场景，因此新增 u10-l6 专门讲解其 attention/sfa_kv_offload.py 数据面、sparse_kv_offload_manager.py 管理器与 C++ 内核、以及 SparseKVOffloadConfig 配置约束；（2）MoE 路由逻辑被抽取为独立的 router/ 包（#13417），路由器分为 fused_topk / grouped_topk 两类并由 router_factory 创建，因此 u7-l3 需更新以纳入新结构；（3）量化层移除 mxfp_compat 兼容垫片并内联 dtype（#13447），影响 u10-l1。此外 NPUPlatform 做了一次「不改功能、仅重排」的组织性重构（#13484）：方法重排、_fix_incompatible_config/_validate_parallel_config 等助手移到模块级，导致引用 platform.py 行号的讲义（u2-l1、u8-l1、u10-l5）需要 update。其余如 worker.py（MTP MoE 权重加载器 #13337）、model_runner_v1/v2（num_nans/penalties 修复 #13159 #13382）、attention 的 sfa_v1/utils/attention_v1（fiaV2 GQA #13456、SFA indexer cache spec #12849）、patch/__init__.py（新增 apply_penalties 与 num_nans libdevice 两个补丁文档）、ascend_config.py（SparseKVOffloadConfig）、xlite（MLA/DSA 支持 #13378）、310P fused_moe 与 w8a8_dynamic、norm_quant_fusion_pass 等均为局部改动，对应讲义标记 update。envs.py、examples、setup.py、CMakeLists、csrc、parallel_state、device_communicators、eplb、lora、model_loader（rfork/netloader）、acl_graph、AGENTS.md/CI 框架等核心稳定区未受影响，相关讲义保持 keep。新增讲义后手册变为 11 单元 43 篇，依赖关系维持「注册→配置→打补丁→执行→注意力→算子→并行→编译→加载→特性→扩展」，u10-l6 依赖 u10-l2（PD 分离）与 u5-l2（SFA 注意力）。",
   "units": [
     {
       "id": "u1",
@@ -31,7 +31,7 @@
           ],
           "practice_task": "阅读 README 与支持矩阵，用自己的话写一段 200 字说明：vllm-ascend 解决了什么问题、它和上游 vLLM 是什么关系。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -57,7 +57,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -85,7 +85,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -112,7 +112,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l5",
@@ -138,7 +138,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -154,11 +154,11 @@
           "order": 1,
           "filename": "u2-l1-npuplatform-core.md",
           "level": "intermediate",
-          "topic": "深入 vllm_ascend/platform.py 的 NPUPlatform 类，理解它如何重写设备能力、配置校验、注意力后端选择、编译后端等关键钩子。",
+          "topic": "深入 vllm_ascend/platform.py 的 NPUPlatform 类，理解它如何重写设备能力、配置校验、注意力后端选择、编译后端等关键钩子；并说明 #13484 重构后 _fix_incompatible_config / _validate_parallel_config / _prune_capture_sizes_for_950 等助手已从类方法移到模块级函数，类内方法顺序也做了逻辑重组，但不改变功能。",
           "learning_goals": [
             "掌握 NPUPlatform 继承 Platform 后实现了哪些关键方法",
             "理解 check_and_update_config / apply_config_platform_defaults 的配置改写时机",
-            "理解 get_attn_backend_cls / get_compile_backend / get_pass_manager_cls 的作用"
+            "理解 get_attn_backend_cls / get_compile_backend / get_pass_manager_cls 的作用，并区分类方法与重构后抽出的模块级助手函数"
           ],
           "source_files": [
             "vllm_ascend/platform.py"
@@ -167,11 +167,11 @@
             "NPUPlatform",
             "平台钩子"
           ],
-          "practice_task": "列出 NPUPlatform 至少 5 个对上游 Platform 的重写方法，并说明各自在推理启动的哪个阶段被调用。",
+          "practice_task": "列出 NPUPlatform 至少 5 个对上游 Platform 的重写方法，并指出哪些配置校验逻辑在 #13484 后变成了模块级函数（如 _validate_parallel_config、_fix_incompatible_config）。",
           "depends_on": [
             "u1-l5"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u2-l2",
@@ -179,10 +179,10 @@
           "order": 2,
           "filename": "u2-l2-ascend-config-and-envs.md",
           "level": "intermediate",
-          "topic": "讲解 AscendConfig 如何解析 additional_config，以及 envs.py 如何集中管理 VLLM_ASCEND_* 环境变量（含惰性求值）。",
+          "topic": "讲解 AscendConfig 如何解析 additional_config，以及 envs.py 如何集中管理 VLLM_ASCEND_* 环境变量（含惰性求值）；并说明新增的 SparseKVOffloadConfig 子配置项（enabled / topk_buffer_size / dram_size_per_dp_GB / keep_device_kv_cache）及其与 enable_sparse_sfa_c8 的互斥校验。",
           "learning_goals": [
             "掌握通过 --additional-config 传 JSON 给 vllm-ascend 的机制",
-            "理解 AscendConfig 的子配置（AscendCompilationConfig / EplbConfig / SchedulerConfig 等）",
+            "理解 AscendConfig 的子配置（AscendCompilationConfig / EplbConfig / SchedulerConfig / SparseKVOffloadConfig 等）",
             "掌握 envs.py 的 env_variables 字典与 __getattr__ 惰性求值模式"
           ],
           "source_files": [
@@ -193,11 +193,11 @@
             "AscendConfig",
             "环境变量管理"
           ],
-          "practice_task": "写一段 JSON additional-config 同时开启 balance scheduling 与某个 ascend_compilation_config 选项，并解释 AscendConfig 在哪一步读取它。",
+          "practice_task": "写一段 JSON additional-config 同时开启 balance scheduling 与 sparse_kv_offload_config.enabled，并解释 AscendConfig 在哪一步读取它、为何 sparse kv offload 要求模型具备 index_topk。",
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u2-l3",
@@ -222,7 +222,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -238,11 +238,11 @@
           "order": 1,
           "filename": "u3-l1-patch-overview.md",
           "level": "intermediate",
-          "topic": "讲解 patch/__init__.py 的整体设计、adapt_patch 的两阶段（platform patch vs worker patch），以及文档化规范。",
+          "topic": "讲解 patch/__init__.py 的整体设计、adapt_patch 的两阶段（platform patch vs worker patch），以及文档化规范；并补充本次新增的两个 worker/v2 Triton 补丁说明（apply_penalties 大形状重写、get_num_nans libdevice 重绑定到 cann）。",
           "learning_goals": [
             "理解为什么 vllm-ascend 大量使用 Monkey-patch 而非直接改 vLLM",
             "掌握 platform patch（全局、引擎核心子进程）与 worker patch（每个 worker）的区别与时机",
-            "读懂 patch/__init__.py 里「What/Why/How/Future Plan」的补丁描述规范"
+            "读懂 patch/__init__.py 里「What/Why/How/Future Plan」的补丁描述规范，并对照新增的 apply_penalties / num_nans libdevice 两条记录"
           ],
           "source_files": [
             "vllm_ascend/patch/__init__.py",
@@ -252,11 +252,11 @@
             "Patch 框架",
             "两阶段补丁"
           ],
-          "practice_task": "在 patch/__init__.py 中挑一个补丁，整理出它「补了什么 / 为什么 / 上游 PR / 何时可移除」四要素。",
+          "practice_task": "在 patch/__init__.py 中挑一个补丁（推荐本次新增的 apply_penalties 或 num_nans libdevice），整理出它「补了什么 / 为什么 / 上游 PR / 何时可移除」四要素。",
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u3-l2",
@@ -264,9 +264,9 @@
           "order": 2,
           "filename": "u3-l2-platform-patches.md",
           "level": "intermediate",
-          "topic": "解析 patch/platform/ 下影响调度、分布式、MoE、KV 缓存的平台级补丁，理解它们在引擎核心生效的原因。",
+          "topic": "解析 patch/platform/ 下影响调度、分布式、MoE、KV 缓存的平台级补丁，理解它们在引擎核心生效的原因；其中 patch_fused_moe 因 MoE 路由抽取（#13417）而调整了工厂重定向逻辑。",
           "learning_goals": [
-            "理解 patch_fused_moe 如何把 FusedMoE 工厂重定向到 AscendMoERunner",
+            "理解 patch_fused_moe 如何把 FusedMoE 工厂重定向到 Ascend 路由器（router_factory）",
             "理解 patch_kv_cache_utils / patch_mamba_config 等 KV 与 Mamba 相关补丁",
             "理解 patch_distributed / patch_use_v2_model_runner 等平台行为改写"
           ],
@@ -280,11 +280,11 @@
             "平台级补丁",
             "配置与调度改写"
           ],
-          "practice_task": "选择 patch_fused_moe.py，画出「模型导入 FusedMoE → 被重定向到 AscendMoERunner」的执行时序。",
+          "practice_task": "选择 patch_fused_moe.py，画出「模型导入 FusedMoE → 被重定向到 Ascend 路由器（router_factory.create_ascend_fused_moe_router）」的执行时序。",
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u3-l3",
@@ -312,7 +312,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -328,11 +328,11 @@
           "order": 1,
           "filename": "u4-l1-npuworker-lifecycle.md",
           "level": "intermediate",
-          "topic": "讲解 worker/worker.py 的 NPUWorker：设备初始化、权重传输引擎、execute_model、健康检查与睡眠/唤醒。",
+          "topic": "讲解 worker/worker.py 的 NPUWorker：设备初始化、权重传输引擎、execute_model、健康检查与睡眠/唤醒；并说明 #13337 中 MTP 场景下在线权重更新时保留 MoE weight loader 的处理。",
           "learning_goals": [
             "掌握 NPUWorker 的初始化与分布式环境建立流程",
             "理解 execute_model 从调度输出到模型前向的衔接",
-            "理解睡眠模式（sleep/wake_up）与权重在线更新的钩子"
+            "理解睡眠模式（sleep/wake_up）与权重在线更新的钩子，以及 MTP 下 MoE weight loader 的保留逻辑"
           ],
           "source_files": [
             "vllm_ascend/worker/worker.py"
@@ -341,11 +341,11 @@
             "NPUWorker",
             "执行与生命周期"
           ],
-          "practice_task": "梳理 NPUWorker 从 init_device 到 execute_model 的方法调用顺序，标注每一步的关键副作用。",
+          "practice_task": "梳理 NPUWorker 从 init_device 到 execute_model 的方法调用顺序，标注每一步的关键副作用，并指出在线权重更新路径中 MoE weight loader 为何不能被丢弃。",
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u4-l2",
@@ -370,7 +370,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u4-l3",
@@ -378,11 +378,11 @@
           "order": 3,
           "filename": "u4-l3-model-runner-v2.md",
           "level": "advanced",
-          "topic": "讲解 worker/v2/ 下基于 use_v2_model_runner 的新执行架构：model_states、input_batch、pcp_manager、states。",
+          "topic": "讲解 worker/v2/ 下基于 use_v2_model_runner 的新执行架构：model_states、input_batch、pcp_manager、states；并说明 #13159 / #13382 中 num_nans_kernel 与 apply_penalties 的 Triton 修复，以及投机解码未激活时跳过 D2H 拷贝与同步的优化。",
           "learning_goals": [
             "理解 v2 model runner 与 v1 在状态管理上的差异",
             "掌握 model_states/default.py 与 input_batch.py 的职责",
-            "理解 pcp_manager（Prefill Context Parallel）在 v2 中的作用"
+            "理解 pcp_manager（Prefill Context Parallel）在 v2 中的作用，以及 v2 特有的 Triton（num_nans/penalties）兼容修复"
           ],
           "source_files": [
             "vllm_ascend/worker/v2/model_runner.py",
@@ -394,11 +394,11 @@
             "v2 ModelRunner",
             "状态与上下文并行"
           ],
-          "practice_task": "对比 v1 与 v2 model runner 的初始化差异，列出 v2 独有的模块并说明其用途。",
+          "practice_task": "对比 v1 与 v2 model runner 的初始化差异，列出 v2 独有的模块并说明其用途；并解释为何投机解码未激活时要跳过 D2H 拷贝。",
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u4-l4",
@@ -425,7 +425,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -441,7 +441,7 @@
           "order": 1,
           "filename": "u5-l1-attention-backend.md",
           "level": "intermediate",
-          "topic": "讲解 attention/attention_v1.py 的 AscendAttentionBackend 注册、impl/builder 选择、AscendMetadata 与 AttentionMaskBuilder。",
+          "topic": "讲解 attention/attention_v1.py 的 AscendAttentionBackend 注册、impl/builder 选择、AscendMetadata 与 AttentionMaskBuilder；并说明本次 attention_v1.py / utils.py 的小幅调整（含稀疏注意力相关 mask 构建工具）。",
           "learning_goals": [
             "理解 AscendAttentionBackend 如何作为 CUSTOM/ASCEND 后端注册到 vLLM",
             "掌握 get_impl_cls / get_builder_cls 的分支逻辑",
@@ -460,7 +460,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u5-l2",
@@ -468,10 +468,10 @@
           "order": 2,
           "filename": "u5-l2-mla-sfa-dsa.md",
           "level": "advanced",
-          "topic": "讲解 mla_v1/sfa_v1/dsa_v1/fa3_v1 与 indexer 稀疏注意力的实现差异与适用场景。",
+          "topic": "讲解 mla_v1/sfa_v1/dsa_v1/fa3_v1 与 indexer 稀疏注意力的实现差异与适用场景；并说明本次 sfa_v1.py 的调整（#12849 AscendSFAIndexerCacheSpec 改为继承 MLAAttentionSpec、#13456 fiaV2 在 GQA 下的 contiguous 修复）。",
           "learning_goals": [
             "理解 MLA（DeepSeek）、SFA、DSA 三类注意力的实现差异",
-            "理解 indexer 稀疏/索引注意力的工作原理",
+            "理解 indexer 稀疏/索引注意力的工作原理与 cache spec 继承关系",
             "了解 fa3_v1 等新后端的接入方式"
           ],
           "source_files": [
@@ -485,11 +485,11 @@
             "MLA/SFA/DSA 注意力",
             "稀疏注意力"
           ],
-          "practice_task": "为三类注意力（MLA/SFA/DSA）整理一张「适用模型 / kv 压缩 / 是否共享 kv」对照表。",
+          "practice_task": "为三类注意力（MLA/SFA/DSA）整理一张「适用模型 / kv 压缩 / 是否共享 kv」对照表，并说明 SFA indexer 的 cache spec 为何要继承 MLAAttentionSpec。",
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u5-l3",
@@ -497,7 +497,7 @@
           "order": 3,
           "filename": "u5-l3-context-parallel-attention.md",
           "level": "advanced",
-          "topic": "讲解 attention/context_parallel/ 下的 DCP、MLA-CP、SFA-CP、DSA-CP 如何把长序列切分到多个 NPU 上并行计算。",
+          "topic": "讲解 attention/context_parallel/ 下的 DCP、MLA-CP、SFA-CP、DSA-CP 如何把长序列切分到多个 NPU 上并行计算；并说明 sfa_cp.py 的同步细节调整。",
           "learning_goals": [
             "理解 Decode Context Parallel（DCP）的设计目标与元数据构建",
             "理解 MLA-CP / SFA-CP / DSA-CP 的分片与通信策略",
@@ -516,7 +516,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -551,7 +551,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -579,7 +579,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -608,7 +608,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -642,7 +642,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -669,36 +669,40 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
-          "title": "Fused MoE 引擎与通信",
+          "title": "Fused MoE 引擎与路由器",
           "order": 3,
           "filename": "u7-l3-fused-moe-engine.md",
           "level": "advanced",
-          "topic": "讲解 ops/fused_moe/ 的 AscendMoERunner 全链路：experts_selector、token_dispatcher、routed/shared experts、MC2/alltoall 通信。",
+          "topic": "讲解 ops/fused_moe/ 的 AscendMoE 全链路：routed_experts、moe_mlp、token_dispatcher、experts_selector、MC2/alltoall 通信；并重点说明 #13417 把专家路由（expert routing）抽取为独立 router/ 包后的结构——fused_topk_router / grouped_topk_router 两类路由器由 router_factory.create_ascend_fused_moe_router 统一创建。",
           "learning_goals": [
-            "理解 AscendMoERunner 如何替换上游 FusedMoE 工厂",
+            "理解 routed_experts / moe_mlp 如何与上游 FusedMoE 衔接并被 patch_fused_moe 重定向",
             "掌握 token_dispatcher 与 experts_selector 的分工",
-            "理解 ALLTOALL / MC2 / FUSED_MC2 在 MoE 前向中的通信流程"
+            "理解 #13417 后 AscendFusedTopKRouter（即 AscendFusedMoERouter）/ grouped_topk_router 由 router_factory 创建的路由选择流程，以及 ALLTOALL / MC2 / FUSED_MC2 的通信流程"
           ],
           "source_files": [
-            "vllm_ascend/ops/fused_moe/fused_moe.py",
+            "vllm_ascend/ops/fused_moe/routed_experts.py",
             "vllm_ascend/ops/fused_moe/token_dispatcher.py",
             "vllm_ascend/ops/fused_moe/experts_selector.py",
-            "vllm_ascend/ops/fused_moe/comm_utils.py"
+            "vllm_ascend/ops/fused_moe/comm_utils.py",
+            "vllm_ascend/ops/fused_moe/router/__init__.py",
+            "vllm_ascend/ops/fused_moe/router/router_factory.py",
+            "vllm_ascend/ops/fused_moe/router/fused_topk_router.py",
+            "vllm_ascend/ops/fused_moe/router/grouped_topk_router.py"
           ],
           "minimal_modules": [
             "MoE 引擎",
-            "token 分发与通信"
+            "路由器与 token 分发"
           ],
-          "practice_task": "画出一次 MoE 前向「gate→topk→dispatch→expert 计算→combine」在 ALLTOALL 模式下的数据与通信流。",
+          "practice_task": "画出一次 MoE 前向「gate→router_factory 创建 topk/grouped 路由→topk→dispatch→expert 计算→combine」在 ALLTOALL 模式下的数据与通信流，并说明路由逻辑为何被移出 routed_experts 成为独立 router 类。",
           "depends_on": [
             "u5-l2",
             "u6-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u7-l4",
@@ -726,7 +730,7 @@
           "depends_on": [
             "u7-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -742,7 +746,7 @@
           "order": 1,
           "filename": "u8-l1-compiler-interface.md",
           "level": "advanced",
-          "topic": "讲解 compilation/compiler_interface.py 的 AscendCompilerInterface 与 graph_fusion_pass_manager 如何接入 vLLM 的 torch.compile。",
+          "topic": "讲解 compilation/compiler_interface.py 的 AscendCompilerInterface 与 graph_fusion_pass_manager 如何接入 vLLM 的 torch.compile；并对照 #13484 后 NPUPlatform.get_compile_backend / get_pass_manager_cls 的实现位置变化。",
           "learning_goals": [
             "理解 compile_fx / fusion_pass_compile 的编译入口",
             "掌握 AscendCompilationConfig 如何控制编译行为",
@@ -757,11 +761,11 @@
             "编译接口",
             "融合 Pass 管理"
           ],
-          "practice_task": "说明 NPUPlatform.get_compile_backend / get_pass_manager_cls 如何把 Ascend 编译后端接入 vLLM。",
+          "practice_task": "说明 NPUPlatform.get_compile_backend / get_pass_manager_cls 如何把 Ascend 编译后端接入 vLLM，并指出这两个方法在 #13484 重构后的归属。",
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u8-l2",
@@ -769,7 +773,7 @@
           "order": 2,
           "filename": "u8-l2-fusion-passes.md",
           "level": "advanced",
-          "topic": "讲解 compilation/passes/ 下的融合 pass：norm_quant、qknorm_rope、allgather_chunk_noop、muls_add、sequence_parallelism 等。",
+          "topic": "讲解 compilation/passes/ 下的融合 pass：norm_quant、qknorm_rope、allgather_chunk_noop、muls_add、sequence_parallelism 等；并说明本次 norm_quant_fusion_pass 的小幅调整（量化 dtype 内联后的适配）。",
           "learning_goals": [
             "理解 base_pattern 的图模式匹配框架",
             "掌握 norm_quant_fusion / qknorm_rope_fusion 等典型融合策略",
@@ -785,11 +789,11 @@
             "融合 Pass",
             "序列并行改写"
           ],
-          "practice_task": "选一个融合 pass，描述它匹配的子图模式与改写后的等价算子图。",
+          "practice_task": "选一个融合 pass（推荐 norm_quant_fusion_pass），描述它匹配的子图模式与改写后的等价算子图，并说明量化 dtype 内联后对其的影响。",
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u8-l3",
@@ -816,7 +820,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -851,7 +855,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -879,7 +883,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",
@@ -907,7 +911,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l4",
@@ -915,11 +919,11 @@
           "order": 4,
           "filename": "u9-l4-weight-transfer.md",
           "level": "advanced",
-          "topic": "讲解 distributed/weight_transfer/ 的 HCCL 与 NPU IPC 权重传输引擎，用于训练侧到推理 worker 的在线权重广播。",
+          "topic": "讲解 distributed/weight_transfer/ 的 HCCL 与 NPU IPC 权重传输引擎，用于训练侧到推理 worker 的在线权重广播；并说明 #13337 中 MTP 场景下在线更新时 NPUWorker 保留 MoE weight loader 的衔接。",
           "learning_goals": [
             "理解 weight transfer engine 在在线学习/热更新中的作用",
             "掌握 hccl_engine 与 npu_ipc_engine 的差异与选择",
-            "理解 patch_weight_transfer_engine 把 'nccl'/'ipc' 映射到 Ascend 引擎的原因"
+            "理解 patch_weight_transfer_engine 把 'nccl'/'ipc' 映射到 Ascend 引擎的原因，以及 MTP 下 MoE weight loader 的保留逻辑"
           ],
           "source_files": [
             "vllm_ascend/distributed/weight_transfer/hccl_engine.py",
@@ -931,11 +935,11 @@
             "权重传输引擎",
             "在线更新"
           ],
-          "practice_task": "结合 NPUWorker 的 init_weight_transfer_engine/update_weights，说明一次在线权重更新的端到端流程。",
+          "practice_task": "结合 NPUWorker 的 init_weight_transfer_engine/update_weights，说明一次在线权重更新的端到端流程，并指出 MTP 模型更新时为何要保留 MoE weight loader。",
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -951,27 +955,29 @@
           "order": 1,
           "filename": "u10-l1-quantization.md",
           "level": "advanced",
-          "topic": "讲解 quantization/ 的量化方法注册、quant_parser 解析与 fp8/w8a8/w4a8/w4a4 等方法实现。",
+          "topic": "讲解 quantization/ 的量化方法注册、quant_parser 解析与 fp8/w8a8/w4a8/w4a4 等方法实现；并说明 #13447 移除 device/mxfp_compat.py 兼容垫片、把 mxfp dtype 引用内联到各 method 后的影响。",
           "learning_goals": [
             "理解 Ascend 量化方法 registry 与 method_adapters 的适配机制",
             "掌握 quant_parser / quant_type 如何解析与归类量化类型",
-            "了解 w8a8/w4a8/w4a4/fp8 等方法在 NPU 上的实现要点"
+            "了解 w8a8/w4a8/w4a4/fp8/mxfp 等方法在 NPU 上的实现要点，以及 mxfp_compat 垫片移除后 dtype 的内联方式"
           ],
           "source_files": [
             "vllm_ascend/quantization/quant_parser.py",
             "vllm_ascend/quantization/methods/registry.py",
             "vllm_ascend/quantization/methods/w8a8_dynamic.py",
-            "vllm_ascend/quantization/methods/w4a8.py"
+            "vllm_ascend/quantization/methods/w4a8.py",
+            "vllm_ascend/quantization/methods/base.py",
+            "vllm_ascend/quantization/method_adapters.py"
           ],
           "minimal_modules": [
             "量化体系",
             "量化方法"
           ],
-          "practice_task": "给定一个 w8a8 模型，说明 quant_parser 如何确定量化方法并路由到对应 method 实现。",
+          "practice_task": "给定一个 w8a8 模型，说明 quant_parser 如何确定量化方法并路由到对应 method 实现；并解释移除 mxfp_compat 后这些 mxfp 方法如何直接引用正确的 dtype。",
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u10-l2",
@@ -999,7 +1005,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l3",
@@ -1027,7 +1033,7 @@
           "depends_on": [
             "u10-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l4",
@@ -1035,15 +1041,16 @@
           "order": 4,
           "filename": "u10-l4-speculative-decoding.md",
           "level": "advanced",
-          "topic": "讲解 spec_decode/ 与 worker/v2/spec_decode/ 的多种 proposer（eagle/ngram/mtp/dflash/dspark）及 v2 speculator。",
+          "topic": "讲解 spec_decode/ 与 worker/v2/spec_decode/ 的多种 proposer（eagle/ngram/mtp/dflash/dspark）及 v2 speculator，以及新增的 llm_base_proposer 公共基类。",
           "learning_goals": [
             "理解投机解码的 proposer/target 协作框架",
             "掌握 eagle / ngram / mtp / dflash / dspark 等 proposer 的差异",
-            "理解 v2 speculator 与 ACL Graph 管理器的结合"
+            "理解 v2 speculator 与 ACL Graph 管理器的结合，以及 llm_base_proposer 抽出的公共逻辑"
           ],
           "source_files": [
             "vllm_ascend/spec_decode/eagle_proposer.py",
             "vllm_ascend/spec_decode/ngram_proposer.py",
+            "vllm_ascend/spec_decode/llm_base_proposer.py",
             "vllm_ascend/worker/v2/spec_decode/eagle/speculator.py",
             "vllm_ascend/worker/v2/spec_decode/mtp/speculator.py"
           ],
@@ -1055,7 +1062,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u10-l5",
@@ -1063,11 +1070,11 @@
           "order": 5,
           "filename": "u10-l5-lora.md",
           "level": "advanced",
-          "topic": "讲解 lora/ 的 NPU LoRA 算子、punica_npu 与 fused_moe LoRA 适配。",
+          "topic": "讲解 lora/ 的 NPU LoRA 算子、punica_npu 与 fused_moe LoRA 适配；并对照 #13484 后 NPUPlatform.get_punica_wrapper 的实现位置。",
           "learning_goals": [
             "理解 NPU 上 LoRA 算子的实现与 punica 集成",
             "掌握 LoRA 与 MoE 结合时的适配逻辑",
-            "了解 NPUPlatform.get_punica_wrapper 的接入点"
+            "了解 NPUPlatform.get_punica_wrapper 的接入点（重构后位置）"
           ],
           "source_files": [
             "vllm_ascend/lora/lora_ops.py",
@@ -1079,9 +1086,38 @@
             "LoRA 算子",
             "MoE-LoRA"
           ],
-          "practice_task": "说明 get_punica_wrapper 返回的类如何让 vLLM 的 LoRA 路径在 NPU 上生效。",
+          "practice_task": "说明 get_punica_wrapper 返回的类如何让 vLLM 的 LoRA 路径在 NPU 上生效，并指出该方法在 #13484 平台重构后的归属。",
           "depends_on": [
             "u6-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u10-l6",
+          "title": "稀疏 KV 缓存卸载（Sparse KV Offload）",
+          "order": 6,
+          "filename": "u10-l6-sparse-kv-offload.md",
+          "level": "advanced",
+          "topic": "讲解 #13026 引入的稀疏 KV 缓存卸载：对 SFA/Indexer 稀疏注意力模型，把主 KV 缓存卸载到主机内存，decode 期不再驻留 NPU 主 KV，仅按 top-k 把命中行 H2D 回载到常驻缓冲再跑单次 SFA 注意力。覆盖 attention/sfa_kv_offload.py 独立 SFA 后端、distributed/kv_transfer/sparse_kv_offload/ 的 SparseKVOffloadManager 与 C++ 内核，以及 SparseKVOffloadConfig 的约束。",
+          "learning_goals": [
+            "理解稀疏 KV 卸载的 prefill/decode 数据面：prefill 时 D2H 提交 KV 行、decode 时 top-k miss 由 H2D 回载到 resident 缓冲",
+            "掌握 SparseKVOffloadManager 的 register_kv_caches / offload_new_kv / onload_topk_kv 流程及其与底层 C++ 内核的协作",
+            "理解该特性要求稀疏注意力模型（具备 index_topk）、不支持 CP/PP、且仅在 PD 分离（kv_transfer is_kv_consumer）或 keep_device_kv_cache 场景下可用的配置约束"
+          ],
+          "source_files": [
+            "vllm_ascend/attention/sfa_kv_offload.py",
+            "vllm_ascend/distributed/kv_transfer/sparse_kv_offload/sparse_kv_offload_manager.py",
+            "vllm_ascend/distributed/kv_transfer/sparse_kv_offload/sparse_kv_offload.cpp",
+            "vllm_ascend/ascend_config.py"
+          ],
+          "minimal_modules": [
+            "稀疏 KV 卸载",
+            "SFA 数据面"
+          ],
+          "practice_task": "说明开启 sparse_kv_offload 后，decode 期一次 top-k miss 的 KV 如何从主机内存回载到 NPU 常驻缓冲并完成单次 resident SFA 注意力；并解释该特性为何要求模型具备 index_topk，且默认只能在 PD 分离场景使用。",
+          "depends_on": [
+            "u10-l2",
+            "u5-l2"
           ],
           "action": "new"
         }
@@ -1120,7 +1156,7 @@
             "u3-l3",
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l2",
@@ -1128,27 +1164,28 @@
           "order": 2,
           "filename": "u11-l2-310p-adaptation.md",
           "level": "advanced",
-          "topic": "讲解 _310p/ 子树：310P 专属 worker、model_runner、ops、attention、量化与 is_310p 分支。",
+          "topic": "讲解 _310p/ 子树：310P 专属 worker、model_runner、ops、attention、量化与 is_310p 分支；并说明本次 _310p/fused_moe（experts_selector、fused_moe、新增 grouped_topk_router）与 w8a8_dynamic 的调整。",
           "learning_goals": [
             "理解 310P 与 A2/A3 硬件能力差异带来的代码分支",
             "掌握 _310p/model_runner_310p.py 与 worker_310p.py 的职责",
-            "了解 310P 专属算子/注意力/量化实现"
+            "了解 310P 专属算子/注意力/量化实现，以及 310P 下 fused_moe 路由（grouped_topk_router）的适配"
           ],
           "source_files": [
             "vllm_ascend/_310p/model_runner_310p.py",
             "vllm_ascend/_310p/worker_310p.py",
             "vllm_ascend/_310p/ops/layernorm.py",
+            "vllm_ascend/_310p/fused_moe/grouped_topk_router.py",
             "vllm_ascend/utils.py"
           ],
           "minimal_modules": [
             "310P 适配",
             "硬件分支"
           ],
-          "practice_task": "说明 is_310p() 如何驱动 patch/worker/__init__.py 的分支，并列举 310P 与非 310P 加载的不同补丁。",
+          "practice_task": "说明 is_310p() 如何驱动 patch/worker/__init__.py 的分支，并列举 310P 与非 310P 加载的不同补丁，以及 310P fused_moe 路由器的差异。",
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u11-l3",
@@ -1156,11 +1193,11 @@
           "order": 3,
           "filename": "u11-l3-xlite.md",
           "level": "advanced",
-          "topic": "讲解 xlite/ 的分层/分块推理机制及其 model_runner 与 worker 的集成方式（待确认细节）。",
+          "topic": "讲解 xlite/ 的分层/分块推理机制及其 model_runner 与 worker 的集成方式；重点说明 #13378/#11213 后 XLite 已支持 MLA 与 DSA 注意力（DeepseekV3ForCausalLM、DeepseekV32ForCausalLM、GlmMoeDsaForCausalLM），并修复了 DP metadata 与跨 DP rank 最大 token 数的传递。",
           "learning_goals": [
             "理解 XLite 的分层推理目标与适用场景",
-            "掌握 xlite_worker / xlite_model_runner 的集成方式",
-            "了解 XliteGraphConfig 配置项"
+            "掌握 xlite_worker / xlite_model_runner 的集成方式，以及 MLA/DSA 注意力的接入",
+            "了解 XliteGraphConfig 配置项与 DP metadata 在 collective communication 中的正确传递"
           ],
           "source_files": [
             "vllm_ascend/xlite/xlite.py",
@@ -1172,11 +1209,11 @@
             "XLite",
             "分层推理"
           ],
-          "practice_task": "说明 XLite 与普通 ModelRunner 在执行上的差异，并指出其配置入口（待确认）。",
+          "practice_task": "说明 XLite 与普通 ModelRunner 在执行上的差异，指出其配置入口，并描述 XLite 现在如何支持 MLA/DSA 类模型（DeepseekV3/V32、GlmMoeDsa）。",
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u11-l4",
@@ -1204,7 +1241,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l5",
@@ -1233,7 +1270,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

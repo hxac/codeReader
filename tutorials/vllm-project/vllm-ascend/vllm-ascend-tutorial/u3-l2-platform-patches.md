@@ -5,10 +5,12 @@
 学完本讲后，读者应该能够：
 
 - 说清楚 `patch/platform/` 下的补丁在**引擎核心子进程**的哪个阶段被触发、为什么必须在那里触发。
-- 用源码讲明白 `patch_fused_moe.py` 是如何把上游 `FusedMoE` 工厂重定向到 `AscendMoERunner` 的，并能画出从「模型导入」到「拿到 Ascend runner」的时序。
+- 用源码讲明白 `patch_fused_moe.py` 是如何把上游 `FusedMoE` 工厂重定向到 Ascend 的：既注入默认的 `AscendMoERunner`/`AscendRoutedExperts`，又通过 `router_factory.create_ascend_fused_moe_router` 构造一个独立的**路由器（router）**对象，并能画出从「模型导入」到「拿到 Ascend runner + Ascend router」的时序。
 - 读懂 `patch_kv_cache_utils.py` 与 `patch_mamba_config.py` 这类「KV 缓存 + Mamba 相关」补丁的改写逻辑。
 - 读懂 `patch_distributed.py` 与 `patch_use_v2_model_runner.py` 这类「平台行为改写」补丁的意图。
 - 理解「platform 补丁」与「worker 补丁」共享逻辑时如何复用以避免重复包装。
+
+> **本次更新（update）说明**：上一版本基于 HEAD `646684f`。本次（HEAD `3829122`）有两处影响本讲的改动：① PR [#13417](https://github.com/vllm-project/vllm-ascend/pull/13417)「Move expert routing into router classes」把 MoE 的**专家路由逻辑**从散落在工厂/runner 里抽取成独立的 router 类，由 `router_factory.create_ascend_fused_moe_router` 统一创建，`patch_fused_moe.py` 的工厂重定向逻辑随之调整——这是本讲 **4.2 节**重写的核心；② PR [#13484](https://github.com/vllm-project/vllm-ascend/pull/13484) 对 `NPUPlatform` 做了组织性重构（不改功能），使 `pre_register_and_update` 等方法的行号下移。其余补丁（KV/Mamba/分布式/v2 runner）逻辑未变，本次仅刷新链接 head 与行号。
 
 ## 2. 前置知识
 
@@ -24,14 +26,15 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| [patch/platform/\_\_init\_\_.py](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/__init__.py) | platform 补丁的「总开关」：import 它即触发全部 platform 补丁。 |
-| [patch/platform/patch_fused_moe.py](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_fused_moe.py) | 把上游 `FusedMoE` 工厂重定向到 `AscendMoERunner`。本讲的主角。 |
-| [patch/platform/patch_kv_cache_utils.py](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_kv_cache_utils.py) | 放宽上游对「混合 KV cache + 上下文并行」的限制，并接管 DeepSeek V4 的张量布局规划。 |
-| [patch/platform/patch_mamba_config.py](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_mamba_config.py) | 在 NPU 上把 Mamba/注意力块大小对齐到 128 token 内核约束。 |
-| [patch/platform/patch_distributed.py](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_distributed.py) | 310P 上用 `all_gather` 模拟 `broadcast`/`all_reduce`，解决张量对齐问题。 |
-| [patch/platform/patch_use_v2_model_runner.py](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_use_v2_model_runner.py) | 让 `VllmConfig.use_v2_model_runner` 只由环境变量决定，绕过上游的模型架构白名单。 |
-| [patch/\_\_init\_\_.py](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/__init__.py) | 全部补丁的登记簿（What/Why/How/PR/Future Plan）。 |
-| [utils.py](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/utils.py) | 定义两阶段补丁的总闸 `adapt_patch`。 |
+| [patch/platform/\_\_init\_\_.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/__init__.py) | platform 补丁的「总开关」：import 它即触发全部 platform 补丁。 |
+| [patch/platform/patch_fused_moe.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_fused_moe.py) | 把上游 `FusedMoE` 工厂重定向：注入 `AscendMoERunner`/`AscendRoutedExperts`，并用 `create_ascend_fused_moe_router` 构造独立路由器。本讲的主角。 |
+| [ops/fused_moe/router/router_factory.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/ops/fused_moe/router/router_factory.py) | `create_ascend_fused_moe_router` 路由器工厂：按硬件与 gating 配置选用 `AscendFusedTopKRouter`/`AscendGroupedTopKRouter`/`CustomRoutingRouter`。#13417 新增。 |
+| [patch/platform/patch_kv_cache_utils.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_kv_cache_utils.py) | 放宽上游对「混合 KV cache + 上下文并行」的限制，并接管 DeepSeek V4 的张量布局规划。 |
+| [patch/platform/patch_mamba_config.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_mamba_config.py) | 在 NPU 上把 Mamba/注意力块大小对齐到 128 token 内核约束。 |
+| [patch/platform/patch_distributed.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_distributed.py) | 310P 上用 `all_gather` 模拟 `broadcast`/`all_reduce`，解决张量对齐问题。 |
+| [patch/platform/patch_use_v2_model_runner.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_use_v2_model_runner.py) | 让 `VllmConfig.use_v2_model_runner` 只由环境变量决定，绕过上游的模型架构白名单。 |
+| [patch/\_\_init\_\_.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/__init__.py) | 全部补丁的登记簿（What/Why/How/PR/Future Plan）。 |
+| [utils.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/utils.py) | 定义两阶段补丁的总闸 `adapt_patch`。 |
 
 > 阅读提示：`patch/platform/__init__.py` 本身几乎没有逻辑代码，它的全部「魔力」来自「import 某个补丁模块，该模块在被 import 的瞬间就在模块顶层完成重绑定」。所以理解 platform 补丁的关键是**逐个打开补丁文件看它的模块级代码**，而不是看 `__init__.py`。
 
@@ -39,7 +42,7 @@
 
 本讲拆成四个最小模块：
 1. Platform 补丁的生效时机与登记规范
-2. `patch_fused_moe`：MoE 工厂重定向（主角）
+2. `patch_fused_moe`：MoE 工厂重定向 + 路由器构造（主角）
 3. KV 缓存与 Mamba 相关补丁
 4. 平台行为改写类补丁（分布式 / v2 runner）
 
@@ -76,7 +79,7 @@ vLLM 启动
 
 总闸 `adapt_patch` 非常简洁，它只做一件事：按标志位 import 对应的子包，import 的副作用就是打补丁。
 
-[utils.py:533-537](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/utils.py#L533-L537) — `adapt_patch` 的全部实现：取 `True` 就 import `platform` 包，取 `False`（默认）就 import `worker` 包：
+[utils.py:533-537](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/utils.py#L533-L537) — `adapt_patch` 的全部实现：取 `True` 就 import `platform` 包，取 `False`（默认）就 import `worker` 包：
 
 ```python
 def adapt_patch(is_global_patch: bool = False):
@@ -86,17 +89,17 @@ def adapt_patch(is_global_patch: bool = False):
         from vllm_ascend.patch import worker  # noqa: F401
 ```
 
-[platform.py:182-187](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/platform.py#L182-L187) — `NPUPlatform.pre_register_and_update` 是 platform 补丁的第一触发点：
+[platform.py:261-266](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/platform.py#L261-L266) — `NPUPlatform.pre_register_and_update` 是 platform 补丁的第一触发点（#13484 重构后位置下移到这里，但逻辑不变）：
 
 ```python
 @classmethod
-def pre_register_and_update(cls, parser=None) -> None:
+def pre_register_and_update(cls, parser: FlexibleArgumentParser | None = None) -> None:
     # Adapt the global patch here.
     from vllm_ascend.utils import adapt_patch
     adapt_patch(is_global_patch=True)
 ```
 
-[\_\_init\_\_.py:56-70](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/__init__.py#L56-L70) — `_ensure_global_patch` 是幂等闸门，被各通用插件回调调用，确保 engine-core 子进程也能打上平台补丁：
+[\_\_init\_\_.py:53-70](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/__init__.py#L53-L70) — `_ensure_global_patch` 是幂等闸门，被各通用插件回调调用，确保 engine-core 子进程也能打上平台补丁：
 
 ```python
 _GLOBAL_PATCH_APPLIED = False
@@ -110,7 +113,7 @@ def _ensure_global_patch():
     _GLOBAL_PATCH_APPLIED = True
 ```
 
-[patch/platform/\_\_init\_\_.py:17-46](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/__init__.py#L17-L46) — 这里逐行 import 了全部 platform 补丁，注意有几条带条件分支（310P 与非 310P 加载不同 Mamba 补丁；`patch_multiproc_executor` 仅在开启动态 EPLB 时加载）。读这段就能知道当前到底打了哪些 platform 补丁：
+[patch/platform/\_\_init\_\_.py:19-46](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/__init__.py#L19-L46) — 这里逐行 import 了全部 platform 补丁，注意有几条带条件分支（310P 与非 310P 加载不同 Mamba 补丁；`patch_multiproc_executor` 仅在开启动态 EPLB 时加载）。读这段就能知道当前到底打了哪些 platform 补丁：
 
 ```python
 import vllm_ascend.patch.platform.patch_distributed  # noqa
@@ -129,14 +132,14 @@ import vllm_ascend.patch.platform.patch_dp_device_ids  # noqa
 
 > 细节：`import` 语句的顺序本身是有意义的——比如 `patch_fused_moe` 必须在任何模型被 import **之前**打上，否则模型会先拿到未替换的 `FusedMoE`。这一点在 4.2 节会展开。
 
-关于登记规范，[patch/\_\_init\_\_.py:87-104](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/__init__.py#L87-L104) 给出了 `patch_fused_moe` 的五要素示例：What 是 `FusedMoE` 工厂、Why 是因为模型会直接 import 并调用它、How 是同时替换包 `__init__` 与 layer 模块两处绑定、Future Plan 是「等上游暴露后端分发钩子后移除」。本讲后续每个补丁都会回扣这套规范。
+关于登记规范，[patch/\_\_init\_\_.py:87-106](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/__init__.py#L87-L106) 给出了 `patch_fused_moe` 的五要素示例：What 是 `FusedMoE` 工厂、Why 是因为模型会直接 import 并调用它、How 是同时替换包 `__init__` 与 layer 模块两处绑定（worker 侧复用以避免二次包装）、Future Plan 是「等上游暴露后端分发钩子后移除」。本讲后续每个补丁都会回扣这套规范。
 
 #### 4.1.4 代码实践
 
 1. **实践目标**：确认 platform 补丁确实在「模型 import 之前」生效。
 2. **操作步骤**（源码阅读型）：
-   - 打开 [patch/platform/patch_fused_moe.py:18-28](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_fused_moe.py#L18-L28) 头部注释，它写明了 worker `__init__` 的三步 import 顺序。
-   - 再对照 [worker/worker.py:108-113](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/worker/worker.py#L108-L113)，确认顺序确实是「先 `adapt_patch()` 再 `from vllm_ascend import ops`，最后才模型加载」。
+   - 打开 [patch_fused_moe.py:18-28](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_fused_moe.py#L18-L28) 头部注释，它写明了 worker `__init__` 的三步 import 顺序。
+   - 再对照 [worker/worker.py:112-117](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L112-L117)，确认顺序确实是「先 `adapt_patch()` 再 `from vllm_ascend import ops`，最后才模型加载」。
 3. **需要观察的现象**：注释里标注的 `adapt_patch() → FusedMoE patched → ops → 模型加载拿到 patched FusedMoE` 这条因果链。
 4. **预期结果**：你能解释「为什么补丁必须在模型 import 之前打」——因为模型模块顶层 `from vllm.model_executor.layers.fused_moe import FusedMoE` 是在 import 时就把名字绑定到本地命名空间，补晚了本地绑定已经是旧对象，替换无效。
 5. 待本地验证（无 NPU 也可完成，纯源码阅读）。
@@ -153,26 +156,30 @@ import vllm_ascend.patch.platform.patch_dp_device_ids  # noqa
 
 ---
 
-### 4.2 patch_fused_moe：MoE 工厂重定向（主角）
+### 4.2 patch_fused_moe：MoE 工厂重定向 + 路由器构造（主角）
 
 #### 4.2.1 概念说明
 
-这是整个 `patch/platform/` 里最经典、也最值得吃透的一个补丁，因为它同时示范了三个高难度问题：
+这是整个 `patch/platform/` 里最经典、也最值得吃透的一个补丁，因为它同时示范了四个高难度问题：
 
-1. **被补对象是「工厂函数」而不是「类」**。上游 vLLM 的 `FusedMoE` 其实是一个**工厂函数**（factory function），它在内部 `return FusedMoELayer(...)`，并接受 `runner_cls`、`routed_experts_cls` 等参数来决定用哪个 MoE runner。
+1. **被补对象是「工厂函数」而不是「类」**。上游 vLLM 的 `FusedMoE` 其实是一个**工厂函数**（factory function），它在内部 `return FusedMoELayer(...)`，并接受 `runner_cls`、`routed_experts_cls`、`router` 等参数来决定用哪个 MoE runner 与路由器。
 2. **模型是「按名字直接 import」它的**。DeepSeek 等模型在源码顶部写 `from vllm.model_executor.layers.fused_moe import FusedMoE`，import 的瞬间就把 `FusedMoE` 这个名字绑定到了**模型模块自己的命名空间**。
 3. **同一个名字存在于两个地方**。`FusedMoE` 既出现在包的 `__init__`（即 `vllm.model_executor.layers.fused_moe`），也出现在 layer 模块（`vllm.model_executor.layers.fused_moe.layer`）。模型 `from ... import FusedMoE` 拿到的是包 `__init__` 里 re-export 的那个名字。
+4. **#13417 之后，工厂还要负责「构造一个独立的路由器对象」**。专家路由（top-k 选专家）原本散落在工厂与 runner 里，现在被抽成了一组 router 类（`AscendFusedTopKRouter`/`AscendGroupedTopKRouter` 等），由 `router_factory.create_ascend_fused_moe_router(...)` 按硬件与 gating 配置统一创建。补丁在调用上游工厂前，先把这个 router 对象造好，再同时塞给「上游工厂」和「`routed_experts_args`」两处。
 
-所以 vllm-ascend 必须在**模型被 import 之前**，把这两处的 `FusedMoE` 绑定**都**替换成自己的 `_ascend_FusedMoE`，否则模型拿到的还是原版工厂，永远走不到 Ascend runner。
+所以 vllm-ascend 必须在**模型被 import 之前**，把两处的 `FusedMoE` 绑定**都**替换成自己的 `_ascend_FusedMoE`，否则模型拿到的还是原版工厂，永远走不到 Ascend runner/router。
 
-补丁的最终效果是：当模型调用 `FusedMoE(...)` 时，实际进入 `_ascend_FusedMoE`，它把默认的 `runner_cls` 改成 `AscendMoERunner`、`routed_experts_cls` 改成 `AscendRoutedExperts`，其余参数原样交给捕获的原工厂。
+补丁的最终效果是：当模型调用 `FusedMoE(...)` 时，实际进入 `_ascend_FusedMoE`，它做三件事——①把默认的 `runner_cls` 改成 `AscendMoERunner`、`routed_experts_cls` 改成 `AscendRoutedExperts`；②当调用方没自带 `router` 时，用 `create_ascend_fused_moe_router(...)` 构造一个 Ascend 路由器；③把 router 透传下去，其余参数原样交给捕获的原工厂。
+
+> **为什么要把路由抽成独立 router 类？** 把「选哪些专家」这件事收口到一个可插拔的 router 对象里，有几个好处：不同路由策略（fused top-k / grouped top-k / 自定义 / 310P 专用）可以在一个工厂里集中选择，而不是在多处 `if/else`；它也跟上了上游 vLLM 引入 `FusedMoERouter` 抽象的趋势；后续要在 u7-l3 看到，token 分发（dispatch）、专家计算（expert compute）、通信（combine）都能拿到同一个 router 对象，职责更清晰。这个抽取动作本身不改模型行为，是「重构」，但它要求 `patch_fused_moe` 多承担一步「造 router」。
 
 #### 4.2.2 核心流程
 
 `_ascend_FusedMoE` 替换函数的内部决策流程（伪代码）：
 
 ```text
-def _ascend_FusedMoE(*args, runner_cls=None, routed_experts_cls=None, **kwargs):
+def _ascend_FusedMoE(num_experts, top_k, *, runner_cls=None,
+                     routed_experts_cls=None, router=None, **配置参数):
     if runner_cls is None:                  # 调用方没显式指定 runner
         runner_cls = AscendMoERunner        #   → 默认走 Ascend runner
     if routed_experts_cls is None:          # 调用方没显式指定 experts
@@ -181,19 +188,34 @@ def _ascend_FusedMoE(*args, runner_cls=None, routed_experts_cls=None, **kwargs):
     # EPLB（专家负载均衡）相关：把冗余专家数透传给上游工厂
     if 开启了动态 EPLB 或指定了 expert_map:
         校验 vLLM 与 Ascend 的冗余专家数不冲突
-        kwargs["enable_eplb"] = True
-        kwargs["num_redundant_experts"] = 配置值
+        enable_eplb = True
+        num_redundant_experts = 配置值
 
-    kwargs.pop("hash", None)                # DeepSeek V4 专属，进厂前已消费
-    tid2eid = kwargs.pop("tid2eid", None)   # Ascend 专属，属于 RoutedExperts
+    if router is None:                       # 调用方没自带路由器（#13417 新增）
+        router = create_ascend_fused_moe_router(
+            top_k=..., global_num_experts=num_experts + num_redundant_experts,
+            scoring_func=..., ...)
+
+    routed_experts_args["router"] = router   # router 注入 experts（#13417 新增）
     routed_experts_args["n_shared_experts"] = ...
     if tid2eid is not None:
         routed_experts_args["tid2eid"] = tid2eid
 
-    return _original_FusedMoE(              # 调用捕获的原工厂
-        *args, runner_cls=runner_cls,
+    return _original_FusedMoE(               # 调用捕获的原工厂，router 也透传进去
+        ..., runner_cls=runner_cls, router=router,
         routed_experts_cls=routed_experts_cls,
         routed_experts_args=routed_experts_args, **kwargs)
+```
+
+而 `create_ascend_fused_moe_router` 内部的路由器选择流程（伪代码，详见 4.2.3）：
+
+```text
+def create_ascend_fused_moe_router(top_k, global_num_experts, scoring_func, ...):
+    if 自定义路由函数:        return CustomRoutingRouter(...)
+    if is_310p():            return AscendGroupedTopKRouter310(...)
+    if check_npu_moe_gating_top_k(...):   # softmax/sigmoid/sqrtsoftplus 且 renorm 合法
+                              return AscendFusedTopKRouter(...)   # (= AscendFusedMoERouter)
+    return AscendGroupedTopKRouter(...)
 ```
 
 完整时序（见 4.2.4 实践的图）：
@@ -212,15 +234,16 @@ def _ascend_FusedMoE(*args, runner_cls=None, routed_experts_cls=None, **kwargs):
   模型层 __init__: self.mlp = FusedMoE(...)
     └─ 进入 _ascend_FusedMoE
        └─ runner_cls 默认填 AscendMoERunner
+       └─ router 为空 → create_ascend_fused_moe_router(...) 造出 Ascend router ✓
        └─ 调用 _original_FusedMoE(...) 构造真正的 FusedMoELayer
-          └─ 该层的 runner 实例是 AscendMoERunner ✓
+          └─ 该层的 runner 是 AscendMoERunner、router 是 Ascend router ✓
 ```
 
 #### 4.2.3 源码精读
 
-先看头部注释，它本身就是一份迷你设计文档，写明了 import 顺序约束和「为什么两处都要替换」：
+先看头部注释，它本身就是一份迷你设计文档，写明了 import 顺序约束和「为什么两处都要替换」（#13417 没有改动这段注释）：
 
-[patch_fused_moe.py:18-28](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_fused_moe.py#L18-L28) — 设计说明：
+[patch_fused_moe.py:18-28](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_fused_moe.py#L18-L28) — 设计说明：
 
 ```python
 # Patch vllm's FusedMoE factory to use AscendMoERunner by default.
@@ -230,20 +253,31 @@ def _ascend_FusedMoE(*args, runner_cls=None, routed_experts_cls=None, **kwargs):
 # well as the layer module before any model is imported.
 ```
 
+#13417 新增的两个关键 import——一个是上游路由器基类 `FusedMoERouter`（用于类型标注），一个是 Ascend 自己的路由器工厂：
+
+[patch_fused_moe.py:36-39](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_fused_moe.py#L36-L39) — 引入路由器基类与工厂：
+
+```python
+from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
+...
+from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router
+```
+
 捕获原对象——必须在替换之前把「真身」存下来，否则替换后再也拿不回来了：
 
-[patch_fused_moe.py:39](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_fused_moe.py#L39-L39) — 捕获原始工厂：
+[patch_fused_moe.py:43](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_fused_moe.py#L43-L43) — 捕获原始工厂：
 
 ```python
 _original_FusedMoE = _fused_moe_layer.FusedMoE
 ```
 
-选择默认 runner——根据是否 310P 走不同实现，这体现了「同一段抽象，不同硬件不同实现」：
+选择默认 runner——根据是否 310P 走不同实现（#13417 把 `is_310p()` 的结果缓存到模块级 `_IS_310P` 避免重复调用），这体现了「同一段抽象，不同硬件不同实现」：
 
-[patch_fused_moe.py:43-53](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_fused_moe.py#L43-L53) — 按硬件选默认 runner/experts：
+[patch_fused_moe.py:46-58](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_fused_moe.py#L46-L58) — 按硬件选默认 runner/experts：
 
 ```python
-if is_310p():
+_IS_310P = is_310p()
+if _IS_310P:
     from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310, AscendRoutedExperts310
     _DefaultAscendMoERunner = AscendMoERunner310
     _DefaultAscendRoutedExperts = AscendRoutedExperts310
@@ -255,16 +289,14 @@ else:
 ```
 
 被重定向到的两个真实类定义在：
-- [ops/fused_moe/fused_moe.py:32](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/ops/fused_moe/fused_moe.py#L32-L32) — `class AscendMoERunner(MoERunner)`。
-- [ops/fused_moe/routed_experts.py:256](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/ops/fused_moe/routed_experts.py#L256-L256) — `class AscendRoutedExperts(RoutedExperts)`。
+- [ops/fused_moe/fused_moe.py:32](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/ops/fused_moe/fused_moe.py#L32-L32) — `class AscendMoERunner(MoERunner)`。
+- [ops/fused_moe/routed_experts.py:186](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/ops/fused_moe/routed_experts.py#L186-L186) — `class AscendRoutedExperts(RoutedExperts)`。
 
-替换函数的核心：默认值注入 + EPLB 透传 + Ascend 专属参数剥离：
+替换函数的核心，现在有了**三段**：①默认值注入 + EPLB 透传；②#13417 新增的「构造路由器」；③把 router 注入 `routed_experts_args` 并调用原工厂。注意 #13417 把原来的 `*args, **kwargs` 改成了**显式命名参数**——这样 `hash`（DeepSeek V4 专属）、`tid2eid`（Ascend 专属）等都能被精准捕获，而不再依赖 `kwargs.pop`：
 
-[patch_fused_moe.py:56-97](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_fused_moe.py#L56-L97) — `_ascend_FusedMoE` 全文（关键片段）：
+[patch_fused_moe.py:88-126](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_fused_moe.py#L88-L126) — `_ascend_FusedMoE` 关键片段（默认值 → EPLB → 造 router → 注入）：
 
 ```python
-def _ascend_FusedMoE(*args, runner_cls=None, runner_args=None,
-                     routed_experts_cls=None, routed_experts_args=None, **kwargs):
     if runner_cls is None:
         runner_cls = _DefaultAscendMoERunner
     if routed_experts_cls is None:
@@ -273,24 +305,54 @@ def _ascend_FusedMoE(*args, runner_cls=None, runner_args=None,
     eplb_config = get_ascend_config().eplb_config
     if eplb_config.dynamic_eplb or eplb_config.expert_map_path is not None:
         ...
-        kwargs["enable_eplb"] = True
-        kwargs["num_redundant_experts"] = configured_redundancy or upstream_redundancy
-    kwargs.pop("hash", None)                 # DeepSeek V4 专属
-    tid2eid = kwargs.pop("tid2eid", None)    # Ascend 专属
-    routed_experts_args = dict(routed_experts_args) if routed_experts_args else {}
+        enable_eplb = True
+        num_redundant_experts = configured_redundancy or upstream_redundancy
+    if router is None:                       # #13417：调用方没自带路由器时构造 Ascend router
+        router = create_ascend_fused_moe_router(
+            top_k=top_k,
+            global_num_experts=num_experts + num_redundant_experts,
+            renormalize=renormalize,
+            use_grouped_topk=use_grouped_topk,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor if not apply_routed_scale_to_output else 1.0,
+            e_score_correction_bias=e_score_correction_bias,
+            zero_expert_type=zero_expert_type,
+            num_logical_experts=num_experts,
+            hash_indices_table=hash_indices_table,
+            tid2eid=tid2eid,
+        )
+    routed_experts_args = dict(routed_experts_args) if routed_experts_args is not None else {}
+    routed_experts_args["router"] = router   # router 交给 AscendRoutedExperts 持有
     routed_experts_args["n_shared_experts"] = n_shared_experts
     if tid2eid is not None:
         routed_experts_args["tid2eid"] = tid2eid
-    return _original_FusedMoE(*args, runner_cls=runner_cls,
+    return _original_FusedMoE(..., router=router, runner_cls=runner_cls,
                               routed_experts_cls=routed_experts_cls,
-                              routed_experts_args=routed_experts_args, **kwargs)
+                              routed_experts_args=routed_experts_args, ...)
 ```
 
-> 读懂 `runner_cls=None` 这个判断：只有当**模型没显式指定** runner 时才注入 Ascend 默认值。这意味着如果某个模型明确传了 `runner_cls=XXX`，补丁会尊重它——这是一种「非破坏式默认值」设计，避免误伤需要特殊 runner 的模型。
+> 读懂 `runner_cls=None` 和 `router is None` 这两个判断：只有当**模型没显式指定** runner/router 时才注入 Ascend 默认值。这意味着如果某个模型明确传了 `runner_cls=XXX` 或自带 `router=`，补丁会尊重它——这是一种「非破坏式默认值」设计，避免误伤需要特殊 runner/router 的模型。
 
-最后是两处重绑定——这是整个补丁「生效」的关键动作：
+路由器工厂本身位于一个独立的 `router/` 包，它按「自定义 / 310P / fused top-k / grouped top-k」逐级选择实现。`AscendFusedTopKRouter` 在包 `__init__` 里被别名导出为 `AscendFusedMoERouter`：
 
-[patch_fused_moe.py:100-101](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_fused_moe.py#L100-L101) — 同时替换 layer 模块与包 `__init__`：
+[ops/fused_moe/router/router_factory.py:36-114](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/ops/fused_moe/router/router_factory.py#L36-L114) — `create_ascend_fused_moe_router` 的路由器选择（伪代码化）：
+
+```python
+def create_ascend_fused_moe_router(top_k, global_num_experts, scoring_func="softmax", ...):
+    if custom_routing_function is not None:
+        return CustomRoutingRouter(...)
+    if is_310p():
+        return AscendGroupedTopKRouter310(...)
+    if check_npu_moe_gating_top_k(...):     # 校验 scoring_func/renorm/topk_group 合法
+        return AscendFusedMoERouter(...)    # 即 AscendFusedTopKRouter
+    return AscendGroupedTopKRouter(...)
+```
+
+其中 `check_npu_moe_gating_top_k`（[router_factory.py:15-34](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/ops/fused_moe/router/router_factory.py#L15-L34)）判定当前 gating 配置（`sigmoid + renormalize=False`、自定义路由函数、`topk_group > num_expert_group` 等情形）是否可走 NPU 的融合 top-k 内核，不能就走通用 grouped top-k。这张「能融合 / 不能融合」的决策表，正是路由被抽成独立类后才能集中表达的东西。
+
+最后是两处重绑定——这是整个补丁「生效」的关键动作（#13417 后因前面代码增长而下移到文件尾部）：
+
+[patch_fused_moe.py:154-155](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_fused_moe.py#L154-L155) — 同时替换 layer 模块与包 `__init__`：
 
 ```python
 _fused_moe_layer.FusedMoE = _ascend_FusedMoE
@@ -299,7 +361,7 @@ _fused_moe_pkg.FusedMoE   = _ascend_FusedMoE
 
 为什么 worker 侧也有一个 `patch_fused_moe` 却只有一行 import？为了避免「二次包装」：worker 是全新进程，会重新 import 上游 `FusedMoE`，如果 worker 再写一份替换逻辑，就会把已经替换过的 `_ascend_FusedMoE` 当成「原始对象」再包一层。解决办法是 worker 直接复用 platform 补丁：
 
-[patch/worker/patch_fused_moe.py:18-20](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/worker/patch_fused_moe.py#L18-L20) — worker 复用 platform 补丁：
+[patch/worker/patch_fused_moe.py:18-20](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/worker/patch_fused_moe.py#L18-L20) — worker 复用 platform 补丁：
 
 ```python
 # Reuse the platform patch. Keeping the monkey patch in one module avoids
@@ -309,9 +371,9 @@ import vllm_ascend.patch.platform.patch_fused_moe  # noqa: F401
 
 #### 4.2.4 代码实践（本讲主实践）
 
-1. **实践目标**：画出「模型导入 `FusedMoE` → 被重定向到 `AscendMoERunner`」的完整执行时序，并标注每一步发生在哪个进程、哪行代码。
+1. **实践目标**：画出「模型导入 `FusedMoE` → 被重定向到 `AscendMoERunner` + Ascend 路由器（`router_factory.create_ascend_fused_moe_router`）」的完整执行时序，并标注每一步发生在哪个进程、哪行代码。
 2. **操作步骤**：
-   - 阅读 [patch_fused_moe.py](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_fused_moe.py) 全文。
+   - 阅读 [patch_fused_moe.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_fused_moe.py) 全文，以及 [router_factory.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/ops/fused_moe/router/router_factory.py) 的 `create_ascend_fused_moe_router`。
    - 在纸上画出下面这张时序图（进程用泳道区分）：
 
      ```text
@@ -333,12 +395,15 @@ import vllm_ascend.patch.platform.patch_fused_moe  # noqa: F401
          → 模型层 self.mlp = FusedMoE(...)
               → 进入 _ascend_FusedMoE
                  → runner_cls=AscendMoERunner, routed_experts_cls=AscendRoutedExperts
-                 → _original_FusedMoE(...) 构造真层，runner 即 AscendMoERunner ✓
+                 → router 为空 → create_ascend_fused_moe_router(...)
+                      → (非310P, gating 合法) → AscendFusedMoERouter ✓
+                 → routed_experts_args["router"] = router
+                 → _original_FusedMoE(...) 构造真层，runner/router 即 Ascend 实现 ✓
      ```
-   - 在图上用三种颜色/标记区分：①捕获原对象 ②两处重绑定 ③模型取到替换后的对象。
-3. **需要观察的现象**：模型拿到的 `FusedMoE` 名字，在 worker 进程里到底是 `_ascend_FusedMoE` 还是原版。
-4. **预期结果**：是 `_ascend_FusedMoE`。因为 worker 进程通过 `worker/patch_fused_moe` 复用了 platform 补丁，import 模型时包 `__init__` 的 `FusedMoE` 已被重绑定。
-5. 待本地验证（如能在 NPU 环境打断点，可在 `_ascend_FusedMoE` 入口打印 `runner_cls` 确认为 `AscendMoERunner`；无 NPU 则以源码阅读结论为准）。
+   - 在图上用标记区分：①捕获原对象 ②两处重绑定 ③模型取到替换后的对象 ④#13417 新增的「造 router + 注入」。
+3. **需要观察的现象**：模型拿到的 `FusedMoE` 名字，在 worker 进程里到底是 `_ascend_FusedMoE` 还是原版；以及该层最终持有的 `router` 是不是 Ascend 实现的 `FusedMoERouter`。
+4. **预期结果**：名字是 `_ascend_FusedMoE`（worker 经 `worker/patch_fused_moe` 复用了 platform 补丁）；当模型未自带 `router` 时，该层的 router 由 `create_ascend_fused_moe_router` 创建（典型为 `AscendFusedMoERouter`）。
+5. 待本地验证（如能在 NPU 环境打断点，可在 `_ascend_FusedMoE` 入口打印 `runner_cls` 与 `type(router)` 确认；无 NPU 则以源码阅读结论为准）。
 
 #### 4.2.5 小练习与答案
 
@@ -346,13 +411,17 @@ import vllm_ascend.patch.platform.patch_fused_moe  # noqa: F401
 
 > **参考答案**：模型写的是 `from vllm.model_executor.layers.fused_moe import FusedMoE`，取的是**包 `__init__`**（`_fused_moe_pkg`）里 re-export 的那个名字。如果只替换 layer 模块而没替换包 `__init__`，模型 import 时拿到的仍是包里那个**旧**的 `FusedMoE`，补丁对它完全无效。这就是注释强调「must patch the binding in the package `__init__` as well as the layer module」的原因。
 
-**练习 2**：为什么 `_ascend_FusedMoE` 要 `kwargs.pop("hash", None)` 和 `kwargs.pop("tid2eid", None)`？
+**练习 2**：#13417 之前用 `kwargs.pop("hash", None)` / `kwargs.pop("tid2eid", None)` 来剥离参数，#13417 之后改成了显式命名参数 `hash` / `tid2eid`。这两种写法的差别和 `tid2eid` 的去向分别是什么？
 
-> **参考答案**：`hash` 是 DeepSeek V4 的专属参数，在调用 `FusedMoE` 之前就已经被消费，原版工厂不认识它，留着会报「意外参数」错；`tid2eid` 是 Ascend 专属、属于 `AscendRoutedExperts` 而非上游工厂的字段，所以要从 `kwargs` 里取出，转而塞进 `routed_experts_args`。两者都是「在交给上游工厂前，先把上游不认识的参数剥离/转放」。
+> **参考答案**：显式命名参数比 `kwargs.pop` 更安全、更可读——它能在函数签名层面就声明这些参数，避免拼写错误或漏 pop 导致「意外参数」错。`hash` 是 DeepSeek V4 的专属标志，在调用 `FusedMoE` 前已消费，原版工厂不认识它，所以 `_ascend_FusedMoE` 用命名参数把它「吃掉」、不再向下传（看 `_original_FusedMoE(...)` 的实参里没有 `hash`）。`tid2eid` 是 Ascend 专属字段，它有**两个去向**：既传给 `create_ascend_fused_moe_router(...)` 供路由器使用，也塞进 `routed_experts_args["tid2eid"]` 交给 `AscendRoutedExperts`——这正是「同一份 Ascend 专属信息，路由与专家两处都要」。
 
 **练习 3**：为什么 worker 侧不直接复制一份 `_ascend_FusedMoE`，而是 import 复用 platform 补丁？
 
 > **参考答案**：worker 是 spawn 出的全新进程，会重新执行 `import vllm.model_executor.layers.fused_moe`。如果 worker 自己再写一份替换，`_original_FusedMoE = _fused_moe_layer.FusedMoE` 捕获到的可能已经是被 platform 补丁替换过的 `_ascend_FusedMoE`，于是会出现「包装了已包装的工厂」的二次嵌套。把替换逻辑集中在一个模块、worker 只 import 它，既保证幂等，又让逻辑只有一处真相源。
+
+**练习 4**：`create_ascend_fused_moe_router` 在什么条件下会**不**返回 `AscendFusedMoERouter`（即 `AscendFusedTopKRouter`）？
+
+> **参考答案**：有四种情况会落到别的实现：①提供了 `custom_routing_function` → 返回 `CustomRoutingRouter`；②`is_310p()` 为真 → 返回 `AscendGroupedTopKRouter310`；③`check_npu_moe_gating_top_k` 判定当前 gating 配置不被融合 top-k 内核支持（如 `sigmoid + renormalize=False`、非 softmax/sigmoid/sqrtsoftplus 的 scoring_func、`topk_group` 越界等）→ 返回通用 `AscendGroupedTopKRouter`。只有这三条都不命中，才返回 `AscendFusedMoERouter`。
 
 ---
 
@@ -393,7 +462,7 @@ def _ascend_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config):
 
 #### 4.3.3 源码精读
 
-[patch_kv_cache_utils.py:23-56](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_kv_cache_utils.py#L23-L56) — `_ascend_resolve_kv_cache_block_sizes`，多组 + DCP 用 LCM 替代上游的报错：
+[patch_kv_cache_utils.py:23-56](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_kv_cache_utils.py#L23-L56) — `_ascend_resolve_kv_cache_block_sizes`，多组 + DCP 用 LCM 替代上游的报错：
 
 ```python
 def _ascend_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config):
@@ -415,7 +484,7 @@ def _ascend_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config):
 
 补丁尾部还替换了多个函数，且特别处理了 vLLM v0.24.0 的重命名问题——上游把 `_get_kv_cache_config_deepseek_v4` 改名成 `_get_kv_cache_config_packed`，于是补丁两个名字都打上：
 
-[patch_kv_cache_utils.py:248-259](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_kv_cache_utils.py#L248-L259) — 多处重绑定，含 engine/core 的直接引用：
+[patch_kv_cache_utils.py:248-260](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_kv_cache_utils.py#L248-L260) — 多处重绑定，含 engine/core 的直接引用：
 
 ```python
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
@@ -432,13 +501,13 @@ vllm.v1.engine.core.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_bloc
 
 再看 Mamba 配置补丁。它在配置校验阶段（`verify_and_update_config`）重算块大小，核心约束是「Ascend 内核要求 128 对齐」：
 
-[patch_mamba_config.py:58](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_mamba_config.py#L58-L58) — 写死内核块对齐常量：
+[patch_mamba_config.py:58](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_mamba_config.py#L58-L58) — 写死内核块对齐常量：
 
 ```python
 kernel_block_size = 128
 ```
 
-[patch_mamba_config.py:78-97](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_mamba_config.py#L78-L97) — 以 ssm 块大小为基准对齐注意力块大小，并断言两者页大小相等：
+[patch_mamba_config.py:90-98](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_mamba_config.py#L90-L98) — 以 ssm 块大小为基准对齐注意力块大小，并断言两者页大小相等：
 
 ```python
 # NOTE(zxr): 受 Ascend 硬件限制，需让所有 cache 张量连续，
@@ -452,13 +521,13 @@ assert attn_single_token_k_page_size * attn_block_size == ssm_block_page_size, (
 
 最后完成重绑定（用 `@classmethod` 包装后替换）：
 
-[patch_mamba_config.py:149](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_mamba_config.py#L149-L149) — 替换上游类方法：
+[patch_mamba_config.py:149](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_mamba_config.py#L149-L149) — 替换上游类方法：
 
 ```python
 vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config = verify_and_update_config
 ```
 
-登记规范方面，[patch/\_\_init\_\_.py:149-159](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/__init__.py#L149-L159) 说明：Why 是「上游默认 block size 16 在 Ascend 不支持」，How 是「在 NPU 上设为 128」，Future Plan 是「等上游合并 PR 后移除」。注意 310P 走的是另一个补丁 `patch_mamba_config_310.py`（见 [patch/platform/\_\_init\_\_.py:26-29](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/__init__.py#L26-L29) 的分支）。
+登记规范方面，[patch/\_\_init\_\_.py:149-161](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/__init__.py#L149-L161) 说明：Why 是「上游默认 block size 16 在 Ascend 不支持」，How 是「在 NPU 上设为 128」，Future Plan 是「等上游合并 PR 后移除」。注意 310P 走的是另一个补丁 `patch_mamba_config_310.py`（见 [patch/platform/\_\_init\_\_.py:26-29](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/__init__.py#L26-L29) 的分支）。
 
 #### 4.3.4 代码实践
 
@@ -521,7 +590,7 @@ def _patched_use_v2_model_runner(self) -> bool:
 
 #### 4.4.3 源码精读
 
-[patch_distributed.py:33-54](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_distributed.py#L33-L54) — 用 `all_gather` 模拟 `broadcast`：
+[patch_distributed.py:33-54](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_distributed.py#L33-L54) — 用 `all_gather` 模拟 `broadcast`：
 
 ```python
 def communication_adaptation_310p():
@@ -549,7 +618,7 @@ def communication_adaptation_310p():
 
 > 注意这里用了「装饰器工厂」`broadcast310p_wrapper(fn)`：它捕获原函数 `fn`，返回一个新函数。这种写法的好处是 broadcast 和底层 `distributed_c10d.broadcast` 可以复用同一套替换逻辑，只各自传入自己的原函数。
 
-[patch_distributed.py:88-89](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_distributed.py#L88-L89) — 只在 310P 时才打补丁（模块级条件执行）：
+[patch_distributed.py:88-89](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_distributed.py#L88-L89) — 只在 310P 时才打补丁（模块级条件执行）：
 
 ```python
 if get_ascend_device_type() == AscendDeviceType._310P:
@@ -560,7 +629,7 @@ if get_ascend_device_type() == AscendDeviceType._310P:
 
 再看 v2 runner 补丁，这是本讲最小的补丁：
 
-[patch_use_v2_model_runner.py:5-20](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_use_v2_model_runner.py#L5-L20) — 把属性改写成「只读环境变量」：
+[patch_use_v2_model_runner.py:5-20](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_use_v2_model_runner.py#L5-L20) — 把属性改写成「只读环境变量」：
 
 ```python
 def _patched_use_v2_model_runner(self) -> bool:
@@ -582,14 +651,14 @@ VllmConfig.use_v2_model_runner = property(_patched_use_v2_model_runner)
 
 > 关键点：这里补的不是普通方法，而是用 `property(...)` 替换 `VllmConfig.use_v2_model_runner`。因为上游把它实现成了**属性**（property），补丁必须也用 property 替换，签名里多了一个 `self`。这种「按上游的访问形式（方法/属性/类方法）来决定补丁形态」是写补丁的基本功。
 
-与 4.2 节呼应，worker 侧也有一个 `patch_v2/patch_use_v2_model_runner.py`，它同样只是复用 platform 补丁（见登记 [patch/\_\_init\_\_.py:1177-1191](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/__init__.py#L1177-L1191)），保证 EngineCore 子进程与 worker 子进程行为一致。
+与 4.2 节呼应，worker 侧也有一个 `patch_v2/patch_use_v2_model_runner.py`，它同样只是复用 platform 补丁（见登记 [patch/\_\_init\_\_.py:1199-1205](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/__init__.py#L1199-L1205)），保证 EngineCore 子进程与 worker 子进程行为一致。
 
 #### 4.4.4 代码实践
 
 1. **实践目标**：对比「属性补丁」与「函数补丁」的写法差异。
 2. **操作步骤**：
-   - 打开 [patch_use_v2_model_runner.py:20](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_use_v2_model_runner.py#L20-L20)，看到它用 `VllmConfig.use_v2_model_runner = property(_patched_use_v2_model_runner)`。
-   - 再对比 [patch_mamba_config.py:149](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_mamba_config.py#L149-L149)，那里是直接赋值一个 `@classmethod`。
+   - 打开 [patch_use_v2_model_runner.py:20](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_use_v2_model_runner.py#L20-L20)，看到它用 `VllmConfig.use_v2_model_runner = property(_patched_use_v2_model_runner)`。
+   - 再对比 [patch_mamba_config.py:149](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_mamba_config.py#L149-L149)，那里是直接赋值一个 `@classmethod`。
 3. **需要观察的现象**：两种替换的右侧表达式形态不同（`property(...)` vs 直接函数/类方法）。
 4. **预期结果**：你能总结出规律——补一个**属性**要用 `property()`，补一个**实例方法**直接赋函数，补一个**类方法**要 `@classmethod` 包装，补一个**模块级函数**直接对模块属性赋值。选错形态会导致 `self`/`cls` 错位或访问报错。
 5. 待本地验证（无 NPU 可纯源码对比）。
@@ -613,17 +682,18 @@ VllmConfig.use_v2_model_runner = property(_patched_use_v2_model_runner)
 **任务背景**：假设你给 vllm-ascend 新加了一个 MoE 模型，启动后发现它的 MoE 层用的还是**上游原版** runner（没走到 `AscendMoERunner`），导致前向在 NPU 上报算子错误。请按下面的步骤定位并解释。
 
 1. **第一步（4.1）**：确认补丁有没有被打上。说明你会检查哪两个文件、哪两行来验证 `_ascend_FusedMoE` 是否完成了两处重绑定。
-   - 参考：[patch_fused_moe.py:100-101](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_fused_moe.py#L100-L101)。
-2. **第二步（4.2）**：如果补丁打上了但模型仍拿原版，最可能的原因是「补丁比模型 import 晚」。请引用 [patch_fused_moe.py:18-28](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_fused_moe.py#L18-L28) 的注释说明 import 顺序约束，并指出应该在哪一行（[worker/worker.py:108-113](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/worker/worker.py#L108-L113)）确保 `adapt_patch()` 早于模型加载。
-3. **第三步（4.2）**：如果模型是「显式传了 `runner_cls=XXX`」的新模型，`_ascend_FusedMoE` 会不会注入 `AscendMoERunner`？为什么？引用 [patch_fused_moe.py:64-67](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/patch/platform/patch_fused_moe.py#L64-L67) 说明。
+   - 参考：[patch_fused_moe.py:154-155](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_fused_moe.py#L154-L155)。
+2. **第二步（4.2）**：如果补丁打上了但模型仍拿原版，最可能的原因是「补丁比模型 import 晚」。请引用 [patch_fused_moe.py:18-28](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_fused_moe.py#L18-L28) 的注释说明 import 顺序约束，并指出应该在哪一行（[worker/worker.py:112-117](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L112-L117)）确保 `adapt_patch()` 早于模型加载。
+3. **第三步（4.2）**：如果模型是「显式传了 `runner_cls=XXX` 或自带 `router=`」的新模型，`_ascend_FusedMoE` 会不会注入 `AscendMoERunner` / 构造 Ascend router？为什么？引用 [patch_fused_moe.py:88-91](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_fused_moe.py#L88-L91) 与 [patch_fused_moe.py:105-106](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/patch/platform/patch_fused_moe.py#L105-L106) 说明。
 4. **产出**：写一段 150 字左右的「诊断结论」，说明这个 MoE 模型没走到 Ascend runner 的可能原因（至少列两种），以及各自的修复方向。
 
-> 参考诊断方向：①补丁未被触发（确认是否走了 platform/worker 补丁链路）；②补丁晚于模型 import；③模型显式指定了非 Ascend runner；④该模型走的是 `models/` 目录下的直接实现而非 patch 路径（参见 u11-l1）。
+> 参考诊断方向：①补丁未被触发（确认是否走了 platform/worker 补丁链路）；②补丁晚于模型 import；③模型显式指定了非 Ascend runner、或自带了 `router=`；④该模型走的是 `models/` 目录下的直接实现而非 patch 路径（参见 u11-l1）。
 
 ## 6. 本讲小结
 
 - **platform 补丁在引擎核心子进程生效**：由 `NPUPlatform.pre_register_and_update` → `adapt_patch(is_global_patch=True)` → `import patch.platform` 触发，影响调度/配置/KV 等全局逻辑；`_ensure_global_patch` 提供每进程一次的幂等保证。
 - **`patch_fused_moe` 是最经典的工厂补丁**：被补对象是工厂函数且模型按名字直接 import，所以必须**捕获原对象**并**同时重绑定包 `__init__` 与 layer 模块两处**，且必须在模型 import 之前完成；`runner_cls=None` 时才注入 Ascend 默认值，是非破坏式默认。
+- **#13417 让工厂多承担一步「造路由器」**：当调用方没自带 `router` 时，`_ascend_FusedMoE` 用 `router_factory.create_ascend_fused_moe_router(...)` 按硬件/gating 选出 `AscendFusedTopKRouter`/`AscendGroupedTopKRouter` 等独立 router 类，再注入 `routed_experts_args["router"]` 与上游工厂；原本散落的路由逻辑被收口到可插拔的 router 对象。
 - **worker 侧通过复用 platform 补丁避免二次包装**：`worker/patch_fused_moe.py` 只有一行 import，既保证幂等又让逻辑只有一处真相源。
 - **KV/Mamba 补丁修正的是「CUDA 假设」**：`patch_kv_cache_utils` 用 LCM×dcp 放宽多组+DCP 限制（回退分支保持上游行为）；`patch_mamba_config` 按 128 内核对齐重算块大小。
 - **平台行为补丁要按上游访问形态来补**：`patch_distributed` 用装饰器工厂同时替换上下两层入口且只在 310P 生效；`patch_use_v2_model_runner` 用 `property()` 替换属性、只认环境变量。
@@ -632,6 +702,6 @@ VllmConfig.use_v2_model_runner = property(_patched_use_v2_model_runner)
 ## 7. 下一步学习建议
 
 - 下一讲 **u3-l3《Worker Patch 实战解析》** 会进入 `patch/worker/` 目录，讲解模型前向、投机解码、Triton 算子、CUDA Graph 相关的 worker 级补丁。建议先对照本讲的 `worker/patch_fused_moe.py` 复用模式，带着「worker 补丁为什么不能直接复制 platform 逻辑」这个问题去读。
-- 想深入理解被重定向到的 `AscendMoERunner` 全链路，可继续读 **u7-l3《Fused MoE 引擎与通信》**。
+- 想深入理解被重定向到的 `AscendMoERunner` 全链路、以及本讲新引入的独立路由器，可继续读 **u7-l3《Fused MoE 引擎与路由器》**，那里会完整讲 `router_factory` 的两类路由器与 token dispatch/combine 流程。
 - 想理解 KV/Mamba 补丁背后的 MLA/DSA 注意力，可读 **u5-l2《MLA / SFA / DSA 与稀疏注意力》**。
 - 想亲手贡献一个新补丁，直接跳到 **u11-l5《二次开发实战：贡献一个新补丁》**，那里有命名、文档化、lint、提交的完整规范。

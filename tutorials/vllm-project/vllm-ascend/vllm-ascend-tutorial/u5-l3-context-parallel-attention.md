@@ -57,7 +57,7 @@ vllm-ascend 实现的是其中的 **Decode Context Parallel（DCP）**，它在 
 
 > Decode Context Parallel shards the KV cache along the sequence dimension across devices in a Tensor Parallel (TP) group. It eliminates redundant KV-cache storage without adding devices to the process world.
 
-参见 [docs/source/developer_guide/Design_Documents/context_parallel.md:1-5](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/docs/source/developer_guide/Design_Documents/context_parallel.md#L1-L5)（说明 DCP 的目标与边界：Prefill Context Parallel 不被支持，文档只讲 DCP 与 DSA-CP）。
+参见 [docs/source/developer_guide/Design_Documents/context_parallel.md:1-5](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/docs/source/developer_guide/Design_Documents/context_parallel.md#L1-L5)（说明 DCP 的目标与边界：Prefill Context Parallel 不被支持，文档只讲 DCP 与 DSA-CP）。
 
 代价是：每个 rank 只能看到一段 KV，单卡算出的注意力是「局部」的，必须跨 rank 通信合并。如何用尽量少的通信得到与单卡完全等价的结果，是 DCP 全部复杂度的来源。
 
@@ -74,13 +74,13 @@ KV 的 interleave 布局是理解后续一切元数据的基础。设计文档�
 - 虚拟块大小 \(= B \cdot D\)（一个虚拟块横跨所有 DCP rank）；
 - 对 token \(x\)：`virtual_block_index = x // (B*D)`，`offset = x % (B*D)`，`local_block_index = offset // I`，`target_rank = local_block_index % D`。
 
-参见 [docs/source/developer_guide/Design_Documents/context_parallel.md:7-18](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/docs/source/developer_guide/Design_Documents/context_parallel.md#L7-L18)。直观地说：token 被轮流分给各个 rank，每个 rank 拿一「条」宽度为 \(I\) 的数据。默认 \(I=1\) 时就是最朴素的逐 token 交错。
+参见 [docs/source/developer_guide/Design_Documents/context_parallel.md:7-18](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/docs/source/developer_guide/Design_Documents/context_parallel.md#L7-L18)。直观地说：token 被轮流分给各个 rank，每个 rank 拿一「条」宽度为 \(I\) 的数据。默认 \(I=1\) 时就是最朴素的逐 token 交错。
 
 #### 4.1.3 源码精读：开关与三类后端的分发点
 
 **① 全局开关 `enable_dcp()`**：用 `lru_cache` 缓存，只看 `decode_context_parallel_size` 是否大于 1。
 
-[vllm_ascend/attention/utils.py:181-184](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/utils.py#L181-L184) —— 读取并行配置判定 DCP 是否开启：
+[vllm_ascend/attention/utils.py:189-192](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/utils.py#L189-L192) —— 读取并行配置判定 DCP 是否开启：
 
 ```python
 @lru_cache(maxsize=1)
@@ -91,7 +91,7 @@ def enable_dcp():
 
 **② GQA（标准 MHA）后端的分发**：这是普通 Transformer 模型走的后端。
 
-[vllm_ascend/attention/attention_v1.py:84-97](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/attention_v1.py#L84-L97) —— 开启 DCP 时返回 GQA 的 CP 实现与构建器：
+[vllm_ascend/attention/attention_v1.py:84-97](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/attention_v1.py#L84-L97) —— 开启 DCP 时返回 GQA 的 CP 实现与构建器：
 
 ```python
 @staticmethod
@@ -111,19 +111,21 @@ def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
 
 **③ MLA 后端的分发**（DeepSeek 类）：
 
-[vllm_ascend/attention/mla_v1.py:81-105](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/mla_v1.py#L81-L105) —— MLA 后端同样用 `enable_dcp()` 切换到 `AscendMlaDCPImpl` / `AscendMlaDCPMetadataBuilder`。
+[vllm_ascend/attention/mla_v1.py:81-105](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/mla_v1.py#L81-L105) —— MLA 后端同样用 `enable_dcp()` 切换到 `AscendMlaDCPImpl` / `AscendMlaDCPMetadataBuilder`。
 
-**④ SFA 后端的分发**（GLM-5.2 类，稀疏 + SWA）：注意它的门控不是 `enable_dcp()`，而是 `enable_sfa_dcp_replicated_indexer()`。
+**④ SFA 后端的分发**（GLM-5.2 类，稀疏 + SWA）：它的 CP 门控不是 `enable_dcp()`，而是 `enable_sfa_dcp_replicated_indexer()`。但要注意一个**优先级**变化：本次更新后，`get_builder_cls` / `get_impl_cls` 里最前面新增了对 `sparse_kv_offload_config.enabled` 的判断——若开启了「稀疏 KV 卸载」（见 u10-l6），SFA 后端会**优先**切到 `AscendSFAKVOffloadImpl` / `AscendSFAKVOffloadMetadataBuilder`，CP（DCP）分支排在它之后：
 
-[vllm_ascend/attention/sfa_v1.py:122-146](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/sfa_v1.py#L122-L146) —— SFA 后端按「复制 indexer」策略切换到 `AscendSFADCPImpl` / `AscendSFADCPMetadataBuilder`。
+[vllm_ascend/attention/sfa_v1.py:126-158](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/sfa_v1.py#L126-L158) —— SFA 后端的分发：先判 sparse_kv_offload，再判 `enable_sfa_dcp_replicated_indexer()`，最后回退普通 SFA。DCP 分支按「复制 indexer」策略切换到 `AscendSFADCPImpl` / `AscendSFADCPMetadataBuilder`。
+
+> 本讲只聚焦 CP（DCP）分支。sparse_kv_offload 是另一条与 CP 正交的路径，详见 u10-l6。对 CP 而言，只要没开 sparse_kv_offload，SFA 仍然走 `enable_sfa_dcp_replicated_indexer()` 这条 DCP 路径，行为与上一版一致。
 
 而 `enable_sfa_dcp_replicated_indexer()` 本质上也是「SFA 稀疏模型 且 `decode_context_parallel_size > 1`」：
 
-[vllm_ascend/utils.py:122-129](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/utils.py#L122-L129) —— SFA DCP 的启用条件。
+[vllm_ascend/utils.py:122-129](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/utils.py#L122-L129) —— SFA DCP 的启用条件。
 
 **⑤ 平台层如何把模型路由到对应后端**：`NPUPlatform.get_attn_backend_cls` 用 `(use_mla, use_sparse, use_compress)` 三元组查 `backend_map`，决定一个模型用 MLA / SFA / DSA / 标准 GQA 后端中的哪一个。每个被选中的后端再各自决定是否走 CP。
 
-[vllm_ascend/platform.py:803-822](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/platform.py#L803-L822) —— `backend_map` 把模型特征映射到具体后端类路径（返回的是字符串路径，由 vLLM 延迟 import）。
+[vllm_ascend/platform.py:215-242](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/platform.py#L215-L242) —— `get_attn_backend_cls` 把模型特征映射到具体后端类路径（返回的是字符串路径，由 vLLM 延迟 import）。注意 #13484 平台重构后该方法连同 `backend_map` 已从文件后段上移到模块前段（约 215 行附近），方法体逻辑不变；进入函数后先做一次 FA3 特判（`_validate_fa3_backend`，仅用于训练-推理数值对齐），再查 `backend_map`，310P 走单独的 `backend_map_310`：
 
 ```python
 backend_map = {
@@ -134,7 +136,7 @@ backend_map = {
 }
 ```
 
-> 关键结论：**CP 不是独立的后端，而是每个后端内部的一个「变体」**。设计文档把这一点表述为「DCP 是相应 v1 后端的特化（specialization），而不是它的平行副本」。参见 [docs/source/developer_guide/Design_Documents/context_parallel.md:24-39](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/docs/source/developer_guide/Design_Documents/context_parallel.md#L24-L39)。
+> 关键结论：**CP 不是独立的后端，而是每个后端内部的一个「变体」**。设计文档把这一点表述为「DCP 是相应 v1 后端的特化（specialization），而不是它的平行副本」。参见 [docs/source/developer_guide/Design_Documents/context_parallel.md:24-39](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/docs/source/developer_guide/Design_Documents/context_parallel.md#L24-L39)。
 
 #### 4.1.4 代码实践：开启 DCP 跑长序列
 
@@ -145,7 +147,7 @@ backend_map = {
 1. 阅读 `examples/offline_inference_npu_long_seq.py`，它是 vllm-ascend 自带的长序列 DCP 示例。
 2. 找到开启 DCP 的关键参数：
 
-[vllm_ascend-tutorial 示例引用 —— examples/offline_inference_npu_long_seq.py:44-53](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/examples/offline_inference_npu_long_seq.py#L44-L53) —— 同时设置 TP 与 DCP：
+[vllm_ascend-tutorial 示例引用 —— examples/offline_inference_npu_long_seq.py:44-53](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/examples/offline_inference_npu_long_seq.py#L44-L53) —— 同时设置 TP 与 DCP：
 
 ```python
 llm = LLM(
@@ -211,7 +213,7 @@ DCP 把 TP 组再按序列维度划分出一个 **DCP group**（即上游 vLLM �
 
 **① interleave 本地长度计算** `get_dcp_local_seq_lens`：
 
-[vllm_ascend/attention/context_parallel/common_cp.py:11-29](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/context_parallel/common_cp.py#L11-L29) —— 向量化实现上面的本地长度公式，返回形状 `[num_reqs, dcp_size]`（每个请求在**每个** rank 上的长度），各 rank 再用 `[:, self.dcp_rank]` 取自己的那一列。
+[vllm_ascend/attention/context_parallel/common_cp.py:11-29](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/context_parallel/common_cp.py#L11-L29) —— 向量化实现上面的本地长度公式，返回形状 `[num_reqs, dcp_size]`（每个请求在**每个** rank 上的长度），各 rank 再用 `[:, self.dcp_rank]` 取自己的那一列。
 
 ```python
 def get_dcp_local_seq_lens(seq_lens, dcp_size, interleave_size):
@@ -224,20 +226,20 @@ def get_dcp_local_seq_lens(seq_lens, dcp_size, interleave_size):
 
 **② 元数据构建 Mixin** `DCPMetadataBuilderMixin`：负责发现 DCP group，并从公共元数据里取出 DCP 专属字段（`context_parallel_metadata`）。
 
-[vllm_ascend/attention/context_parallel/common_cp.py:32-82](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/context_parallel/common_cp.py#L32-L82) —— 提供 `_require_dcp_metadata`（断言 DCP 元数据已填充）、`_get_dcp_context_lens`（取出 `[num_reqs, dcp_size]` 的本地长度矩阵）、`_get_dcp_rank_context_lens`（取本 rank 列）。GQA/MLA/SFA 的 CP 构建器都继承它，从而共享同一套「取本地长度」逻辑。
+[vllm_ascend/attention/context_parallel/common_cp.py:32-82](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/context_parallel/common_cp.py#L32-L82) —— 提供 `_require_dcp_metadata`（断言 DCP 元数据已填充）、`_get_dcp_context_lens`（取出 `[num_reqs, dcp_size]` 的本地长度矩阵）、`_get_dcp_rank_context_lens`（取本 rank 列）。GQA/MLA/SFA 的 CP 构建器都继承它，从而共享同一套「取本地长度」逻辑。
 
 **③ 通信 Mixin** `DCPImplMixin`：负责 DCP 集合通信与结果合并。
 
-[vllm_ascend/attention/context_parallel/common_cp.py:85-136](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/context_parallel/common_cp.py#L85-L136) —— 提供 `_dcp_all_gather`（沿某维 all-gather，dcp_size==1 时直通）、`_dcp_all_gather_fragments`（把多个张量拼接后一次 all-gather 再拆回，省通信次数）、`_merge_dcp_attention_output`（合并局部输出与 LSE）。
+[vllm_ascend/attention/context_parallel/common_cp.py:85-136](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/context_parallel/common_cp.py#L85-L136) —— 提供 `_dcp_all_gather`（沿某维 all-gather，dcp_size==1 时直通）、`_dcp_all_gather_fragments`（把多个张量拼接后一次 all-gather 再拆回，省通信次数）、`_merge_dcp_attention_output`（合并局部输出与 LSE）。
 
 **④ LSE 合并的两个底层函数**：
 
-- [vllm_ascend/attention/context_parallel/common_cp.py:139-165](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/context_parallel/common_cp.py#L139-L165) `_process_attn_out_lse` —— 把 `attn_output` 与 `softmax_lse` 拼成 `[bs, num_heads, v_head_dim+1]`，转置后用 `dist.all_to_all_single` 在 DCP 组内交换，让每个 rank 拿到「全部 head、本 rank 序列段」的数据。
-- [vllm_ascend/attention/context_parallel/common_cp.py:168-195](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/context_parallel/common_cp.py#L168-L195) `_npu_attention_update` —— reshape 后调用 `torch_npu.npu_attention_update(lse_list, out_list, 0)`，由 CANN 算子在 NPU 上完成在线 softmax 合并。
+- [vllm_ascend/attention/context_parallel/common_cp.py:139-165](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/context_parallel/common_cp.py#L139-L165) `_process_attn_out_lse` —— 把 `attn_output` 与 `softmax_lse` 拼成 `[bs, num_heads, v_head_dim+1]`，转置后用 `dist.all_to_all_single` 在 DCP 组内交换，让每个 rank 拿到「全部 head、本 rank 序列段」的数据。
+- [vllm_ascend/attention/context_parallel/common_cp.py:168-195](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/context_parallel/common_cp.py#L168-L195) `_npu_attention_update` —— reshape 后调用 `torch_npu.npu_attention_update(lse_list, out_list, 0)`，由 CANN 算子在 NPU 上完成在线 softmax 合并。
 
 另外还有一个纯 PyTorch 的等价实现 `_update_out_and_lse`，可作为理解数学的参考：
 
-[vllm_ascend/attention/context_parallel/common_cp.py:222-233](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/context_parallel/common_cp.py#L222-L233) —— 这段几乎就是第 2 节公式的直译：
+[vllm_ascend/attention/context_parallel/common_cp.py:222-233](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/context_parallel/common_cp.py#L222-L233) —— 这段几乎就是第 2 节公式的直译：
 
 ```python
 def _update_out_and_lse(out_list, lse_list):
@@ -248,7 +250,7 @@ def _update_out_and_lse(out_list, lse_list):
 
 **⑤ 元数据从哪里来**：在 model runner 侧，`dcp_utils.py` 的 `generate_dcp_metadata` 把每个请求的 `context_len`（已计算 token 数）喂给 `get_dcp_local_seq_lens`，得到 `num_computed_tokens_of_dcp`（即每个请求在每个 rank 上的本地长度矩阵），打包成 `AscendDCPMetadata`。
 
-[vllm_ascend/worker/dcp_utils.py:619-627](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/worker/dcp_utils.py#L619-L627) —— 构造 DCP 元数据的核心：
+[vllm_ascend/worker/dcp_utils.py:619-627](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/dcp_utils.py#L619-L627) —— 构造 DCP 元数据的核心：
 
 ```python
 local_seq_lens = self._get_dcp_local_seq_lens(torch.tensor(context_lens))
@@ -319,13 +321,13 @@ print(get_dcp_local_seq_lens(torch.tensor([5]), dcp_size=2, interleave_size=1))
 | SFA | all-gather Q 片段 + 重映射 sparse 索引 + all-to-all 合并 | 压缩 block table 后 all-gather 引用到的 KV 块 | `_merge_dcp_outputs`（softmax 加权） |
 | DSA-CP | 沿 token 切，all-to-all 还原 head | full-gather `o_proj` 权重做全 head 输出投影 | TP all-to-all 还原 |
 
-设计文档对 GQA 与 MLA 的 prefill/decode 流程有图示说明，参见 [docs/source/developer_guide/Design_Documents/context_parallel.md:41-54](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/docs/source/developer_guide/Design_Documents/context_parallel.md#L41-L54)。
+设计文档对 GQA 与 MLA 的 prefill/decode 流程有图示说明，参见 [docs/source/developer_guide/Design_Documents/context_parallel.md:41-54](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/docs/source/developer_guide/Design_Documents/context_parallel.md#L41-L54)。
 
 #### 4.3.3 源码精读：三条路径的关键方法
 
 **① GQA DCP decode**：`AscendAttentionDCPImpl._forward_decode_dcp`
 
-[vllm_ascend/attention/context_parallel/attention_cp.py:278-300](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/context_parallel/attention_cp.py#L278-L300) —— all-gather query heads，把 head 数放大 `dcp_size` 倍，本地 KV 用 `num_computed_tokens_of_dcp[:, dcp_rank]` 作为 `actual_seq_lengths_kv`：
+[vllm_ascend/attention/context_parallel/attention_cp.py:278-300](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/context_parallel/attention_cp.py#L278-L300) —— all-gather query heads，把 head 数放大 `dcp_size` 倍，本地 KV 用 `num_computed_tokens_of_dcp[:, dcp_rank]` 作为 `actual_seq_lengths_kv`：
 
 ```python
 if self.dcp_size > 1:
@@ -335,25 +337,25 @@ else:
     num_heads = self.num_heads
 ```
 
-随后调用 CANN `npu_fused_infer_attention_score` 得到 `(attn_out, attn_lse)`，最后交给公共的 `_merge_dcp_attention_output` 合并（见 [attention_cp.py:389-393](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/context_parallel/attention_cp.py#L389-L393)）。
+随后调用 CANN `npu_fused_infer_attention_score` 得到 `(attn_out, attn_lse)`，最后交给公共的 `_merge_dcp_attention_output` 合并（见 [attention_cp.py:389-393](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/context_parallel/attention_cp.py#L389-L393)）。
 
 GQA 的完整 `forward_impl` 把 decode 与 chunked-prefill 拼在一起，并用独立 stream 做「计算-通信重叠」：
 
-[vllm_ascend/attention/context_parallel/attention_cp.py:546-610](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/context_parallel/attention_cp.py#L546-L610) —— 注意注释里画的双流时序：current_stream 跑当前 chunk 的 head/tail 注意力，`cp_chunkedprefill_comm_stream` 跑 Q 的 all-gather 与输出的 all-to-all，两者重叠。
+[vllm_ascend/attention/context_parallel/attention_cp.py:548-604](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/context_parallel/attention_cp.py#L548-L604) —— 注意注释里画的双流时序：current_stream 跑当前 chunk 的 head/tail 注意力，`cp_chunkedprefill_comm_stream` 跑 Q 的 all-gather 与输出的 all-to-all，两者重叠。
 
 **② MLA DCP decode 与 KV reorg**：
 
-[vllm_ascend/attention/context_parallel/mla_cp.py:283-308](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/context_parallel/mla_cp.py#L283-L308) —— MLA decode：query 片段经 `reorg_decode_q`（即 `_dcp_all_gather_fragments`）gather，`actual_seq_lengths_kv` 用本 rank 的 `cp_seq_len`（本地上下文长度），KV 在 `kv_lora_rank` 隐空间。
+[vllm_ascend/attention/context_parallel/mla_cp.py:283-308](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/context_parallel/mla_cp.py#L283-L308) —— MLA decode：query 片段经 `reorg_decode_q`（即 `_dcp_all_gather_fragments`）gather，`actual_seq_lengths_kv` 用本 rank 的 `cp_seq_len`（本地上下文长度），KV 在 `kv_lora_rank` 隐空间。
 
 prefill（chunked）时 MLA 需要把跨 rank gather 来的 KV「恢复成请求连续顺序」，这正是 `_reorg_kvcache` 的职责，其文档注释给了清晰的例子：
 
-[vllm_ascend/attention/context_parallel/mla_cp.py:452-486](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/context_parallel/mla_cp.py#L452-L486) —— 例：rank0 的 KV 是 `[T0_0,T0_1,T0_2,T0_3,T1_0,...]`，rank1 是 `[T0_4,T0_5,pad,pad,...]`，all-gather 后要重排成请求连续的 `[T0_0..T0_5, T1_0..]`。
+[vllm_ascend/attention/context_parallel/mla_cp.py:453-487](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/context_parallel/mla_cp.py#L453-L487) —— 例：rank0 的 KV 是 `[T0_0,T0_1,T0_2,T0_3,T1_0,...]`，rank1 是 `[T0_4,T0_5,pad,pad,...]`，all-gather 后要重排成请求连续的 `[T0_0..T0_5, T1_0..]`。
 
 **③ SFA DCP：复制 indexer + 索引重映射**
 
 SFA 的关键难题是：indexer 要在全序列上选 sparse top-k 块，但大头的 SFA KV 又想分片省显存。解法是 indexer 缓存复制、SFA KV 分片，再把 indexer 选出的「全局索引」重映射为「本地索引」。
 
-[vllm_ascend/attention/context_parallel/sfa_cp.py:533-567](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/context_parallel/sfa_cp.py#L533-L567) `_remap_sparse_indices` —— 把复制 indexer 视图下的 top-k 索引，按 interleave/dcp_size 规则换算成本地 KV 的索引，并丢弃不属于本 rank 的索引：
+[vllm_ascend/attention/context_parallel/sfa_cp.py:533-567](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/context_parallel/sfa_cp.py#L533-L567) `_remap_sparse_indices` —— 把复制 indexer 视图下的 top-k 索引，按 interleave/dcp_size 规则换算成本地 KV 的索引，并丢弃不属于本 rank 的索引：
 
 ```python
 local_block_indices = torch.floor(topk_indices_fp32 / interleave_size)
@@ -364,13 +366,17 @@ local_owner_mask = (topk_indices_fp32 >= 0) & (local_owner == self.dcp_rank)
 
 而 builder 侧负责临时构造「复制视图」的 block table 与 slot mapping，让 indexer 以为它看到的是完整序列：
 
-[vllm_ascend/attention/context_parallel/sfa_cp.py:171-205](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/context_parallel/sfa_cp.py#L171-L205) `_build_block_table_replicated_view` —— 由 DCP-local block table 派生出 indexer 用的「复制视图」。
+[vllm_ascend/attention/context_parallel/sfa_cp.py:171-205](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/context_parallel/sfa_cp.py#L171-L205) `_build_block_table_replicated_view` —— 由 DCP-local block table 派生出 indexer 用的「复制视图」。
+
+**sfa_cp.py 的同步细节调整（本次更新）**：`AscendSFADCPImpl` 重写的 `_execute_sparse_flash_attention_process` 本次新增了一个 `block_table=None` 形参，用于把「异步 gather 出来的 block table」透传给底层 sparse flash attention 算子：
+
+[vllm_ascend/attention/context_parallel/sfa_cp.py:733-760](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/context_parallel/sfa_cp.py#L733-L760) —— prefill 分支里先取 `dcp_context.gather_context`（跨 rank 异步 gather KV 的句柄），调用 `_finish_dcp_gather` 等它完成，再从 `dcp_context.kv_gather_block_table` 取出 gather 后的 block_table，连同已 gather 好的 KV 一起喂给 `DeviceOperator.execute_sparse_flash_attention_process`。代码注释说明：正常前向路径会在「KV 写入之后」启动这个 gather 以便与 indexer 选择重叠，因此这里还保留了一个**同步回退**——当调用方不在那条正常路径上（`gather_context is None`）时，先就地同步执行 `_record_dcp_kv_gather_context` 再继续。这个 `block_table` 形参与基类 `AscendSFAImpl._execute_sparse_flash_attention_process`（`sfa_v1.py`）新增的同名形参对齐，是本次「sfa_cp 同步细节」的核心改动。
 
 **④ DSA-CP：按 token 切 + o_proj 全权重**
 
-DSA-CP 把序列沿 token 维切到各 rank，需要 SP（FlashComm1）支持，开启门控见 [vllm_ascend/utils.py:1371-1391](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/utils.py#L1371-L1391)（`enable_dsa_cp` 要求 `enable_sp()`）。元数据构建的核心是 `_build_local_token_metadata`，它把扁平的 token 流均匀切到各 TP rank，其文档注释里有完整数值示例：
+DSA-CP 把序列沿 token 维切到各 rank，需要 SP（FlashComm1）支持，开启门控见 [vllm_ascend/utils.py:1371-1391](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/utils.py#L1371-L1391)（`enable_dsa_cp` 要求 `enable_sp()`）。元数据构建的核心是 `_build_local_token_metadata`，它把扁平的 token 流均匀切到各 TP rank，其文档注释里有完整数值示例：
 
-[vllm_ascend/attention/context_parallel/dsa_cp.py:808-833](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/context_parallel/dsa_cp.py#L808-L833) —— 给出 TP=3 时 9 个请求、45 个 token 如何切到 rank 1（`local_start=15, local_end=30`）的例子。
+[vllm_ascend/attention/context_parallel/dsa_cp.py:808-833](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/context_parallel/dsa_cp.py#L808-L833) —— 给出 TP=3 时 9 个请求、45 个 token 如何切到 rank 1（`local_start=15, local_end=30`）的例子。
 
 #### 4.3.4 代码实践：`enable_dcp()` 为真时切换到哪个实现？为何 MLA/SWA-MLA 可分别做 CP？
 
@@ -383,17 +389,17 @@ DSA-CP 把序列沿 token 维切到各 rank，需要 SP（FlashComm1）支持，
 
 **操作步骤**：
 
-1. 打开 [vllm_ascend/attention/attention_v1.py:84-89](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/attention_v1.py#L84-L89)：标准 GQA 后端在 `enable_dcp()` 为真时返回 `AscendAttentionDCPImpl`。
-2. 打开 [vllm_ascend/attention/mla_v1.py:100-104](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/mla_v1.py#L100-L104)：MLA 后端返回 `AscendMlaDCPImpl`。
-3. 打开 [vllm_ascend/attention/sfa_v1.py:141-146](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/sfa_v1.py#L141-L146)：SFA（SWA-MLA）后端返回 `AscendSFADCPImpl`。
-4. 再看平台路由 [vllm_ascend/platform.py:803-808](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/platform.py#L803-L808)：`use_mla=True,use_sparse=False` → MLA 后端；`use_mla=True,use_sparse=True` → SFA 后端。**一个模型只会被路由到其中一个后端**。
+1. 打开 [vllm_ascend/attention/attention_v1.py:84-89](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/attention_v1.py#L84-L89)：标准 GQA 后端在 `enable_dcp()` 为真时返回 `AscendAttentionDCPImpl`。
+2. 打开 [vllm_ascend/attention/mla_v1.py:100-104](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/mla_v1.py#L100-L104)：MLA 后端返回 `AscendMlaDCPImpl`。
+3. 打开 [vllm_ascend/attention/sfa_v1.py:148-158](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/sfa_v1.py#L148-L158)：SFA（SWA-MLA）后端的 `get_impl_cls` 最前面有一个 sparse_kv_offload 特判，未开启它时落到 DCP 分支返回 `AscendSFADCPImpl`。
+4. 再看平台路由 [vllm_ascend/platform.py:215-242](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/platform.py#L215-L242)：`use_mla=True,use_sparse=False` → MLA 后端；`use_mla=True,use_sparse=True` → SFA 后端。**一个模型只会被路由到其中一个后端**。
 
 **参考答案（你要写出自己的版本）**：
 
 > 当 `enable_dcp()` 为真时：
 > - 普通 GQA 模型走 `AscendAttentionBackend`，`get_impl_cls` 返回 **`AscendAttentionDCPImpl`**（位于 `attention_cp.py`）；
 > - MLA 模型走 `AscendMLABackend`，返回 **`AscendMlaDCPImpl`**（位于 `mla_cp.py`）；
-> - SFA（SWA-MLA）模型走 `AscendSFABackend`，门控是 `enable_sfa_dcp_replicated_indexer()`，返回 **`AscendSFADCPImpl`**（位于 `sfa_cp.py`）。
+> - SFA（SWA-MLA）模型走 `AscendSFABackend`：本次更新后其 `get_impl_cls` 最前面多了 sparse_kv_offload 特判，**若开启了稀疏 KV 卸载则优先走 `AscendSFAKVOffloadImpl`（u10-l6）**；否则门控仍是 `enable_sfa_dcp_replicated_indexer()`，返回 **`AscendSFADCPImpl`**（位于 `sfa_cp.py`）。本讲只关心 CP，故默认 sparse_kv_offload 关闭时答案是后者。
 >
 > MLA 与 SWA-MLA（SFA）能分别独立做 CP，原因有二：
 > 1. **路由独立**：平台 `backend_map` 按 `(use_mla, use_sparse)` 把模型分到不同后端类，每个后端类各自定义自己的 `get_impl_cls`/`get_builder_cls` 与各自的 CP 门控，互不共享代码路径。

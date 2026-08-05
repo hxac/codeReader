@@ -9,6 +9,7 @@
 - 读懂 `get_impl_cls` / `get_builder_cls` 的分支逻辑，理解上下文并行（DCP）如何切换实现。
 - 解释 `get_kv_cache_shape` 返回的 `(2, num_blocks, block_size, num_kv_heads, head_size)` 每一维的含义，尤其「为什么是 2」。
 - 理解 `AscendMetadata`、`AscendAttentionState` 状态机，以及 `AttentionMaskBuilder` 如何缓存注意力掩码。
+- 了解本次小幅调整的影响：平台钩子新增的 FA3 选择分支、fiaV2 路径对 K/V 的 `.contiguous()` 修复，以及 `utils.py` 里为稀疏注意力 / 稀疏 KV 卸载新增的掩码工具与请求标识字段。
 
 本讲是 u5 注意力后端单元的总纲，后续 u5-l2（MLA/SFA/DSA）、u5-l3（上下文并行）都建立在本讲的注册与元数据机制之上。
 
@@ -35,8 +36,8 @@
 |------|------|
 | `vllm_ascend/attention/attention_v1.py` | 本讲主角：`AscendAttentionBackend`（后端身份）、`AscendAttentionBackendImpl`（真正算注意力的实现）、`AscendAttentionMetadataBuilder`（元数据构建器）、`AscendMetadata`（每层元数据）、`AscendAttentionState`（状态枚举）。 |
 | `vllm_ascend/attention/attention_mask.py` | `AttentionMaskBuilder`：单例掩码构建器，缓存因果掩码、MLA 掩码、splitfuse 掩码。 |
-| `vllm_ascend/attention/utils.py` | `AscendCommonAttentionMetadata`（通用元数据）、`enable_dcp()`（是否开启上下文并行的开关）、`split_decodes_and_prefills`（把批次拆成 decode/prefill）等辅助函数。 |
-| `vllm_ascend/platform.py` | `NPUPlatform.get_attn_backend_cls`：运行期选中本后端的平台钩子（见 4.1）。 |
+| `vllm_ascend/attention/utils.py` | `AscendCommonAttentionMetadata`（通用元数据）、`enable_dcp()`（是否开启上下文并行的开关）、`split_decodes_and_prefills`（把批次拆成 decode/prefill）等辅助函数；本次新增 `build_valid_topk_mask`（SFA top-k 有效行掩码）以及 `req_ids_tensor` / `token_to_req`（稀疏 KV 卸载用的请求标识字段）。 |
+| `vllm_ascend/platform.py` | `NPUPlatform.get_attn_backend_cls`：运行期选中本后端的平台钩子（见 4.1）。#13484 平台重构后该方法下移至模块靠前位置（L216），FA3 选择助手 `_validate_fa3_backend` 移到模块级（L1089）。 |
 
 ## 4. 核心概念与源码讲解
 
@@ -78,23 +79,25 @@ vLLM 启动
 
 **① 用装饰器登记后端。** 类定义正上方的装饰器把它登记进 vLLM 注册表，登记键为 `AttentionBackendEnum.CUSTOM`，附加标识为字符串 `"ASCEND"`：
 
-注册后端并声明身份：[vllm_ascend/attention/attention_v1.py:72-74](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/attention_v1.py#L72-L74)。这里 `@register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")` 表示这是一个「自定义（树外）后端」，`class AscendAttentionBackend(AttentionBackend)` 表示它实现了上游的注意力后端接口，`accept_output_buffer: bool = True` 告诉 vLLM「本后端接受外部预分配的输出缓冲」。
+注册后端并声明身份：[vllm_ascend/attention/attention_v1.py:72-74](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/attention_v1.py#L72-L74)。这里 `@register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")` 表示这是一个「自定义（树外）后端」，`class AscendAttentionBackend(AttentionBackend)` 表示它实现了上游的注意力后端接口，`accept_output_buffer: bool = True` 告诉 vLLM「本后端接受外部预分配的输出缓冲」。
 
 **② `get_name`：对外的后端名字（含一个 HACK）。** vLLM 在某些路径会断言注意力名字，因此这里要小心：
 
-[vllm_ascend/attention/attention_v1.py:76-81](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/attention_v1.py#L76-L81)。默认返回 `"CUSTOM"`；但当启用 v2 model runner（`VLLM_USE_V2_MODEL_RUNNER`）时返回 `"FLASH_ATTN"`。注释说明：v2 model runner 的 `initialize_kv_cache` 会做注意力名字断言，临时伪装成 `FLASH_ATTN` 绕过，待上游去掉该断言后再改回。这是一个典型的「插件为绕过上游假设而做的兼容处理」。
+[vllm_ascend/attention/attention_v1.py:76-81](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/attention_v1.py#L76-L81)。默认返回 `"CUSTOM"`；但当启用 v2 model runner（`VLLM_USE_V2_MODEL_RUNNER`）时返回 `"FLASH_ATTN"`。注释说明：v2 model runner 的 `initialize_kv_cache` 会做注意力名字断言，临时伪装成 `FLASH_ATTN` 绕过，待上游去掉该断言后再改回。这是一个典型的「插件为绕过上游假设而做的兼容处理」。
 
 **③ `get_impl_cls` / `get_builder_cls`：按是否上下文并行分流。** 这两个方法各自根据 `enable_dcp()` 在「普通实现」与「上下文并行实现」间二选一：
 
-[vllm_ascend/attention/attention_v1.py:83-97](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/attention_v1.py#L83-L97)。两段逻辑完全对称：`enable_dcp()` 为真时返回 `AscendAttentionDCPImpl` 与 `AscendAttentionDCPMetadataBuilder`（来自 `context_parallel` 子包，u5-l3 详讲），否则返回本文件的 `AscendAttentionBackendImpl` 与 `AscendAttentionMetadataBuilder`。注意返回的是**类**（type）而非实例，由 vLLM 负责实例化；并且这两个 import 写在函数体内（延迟 import），避免在模块加载时就把 CP 相关重型模块拉进来。
+[vllm_ascend/attention/attention_v1.py:83-97](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/attention_v1.py#L83-L97)。两段逻辑完全对称：`enable_dcp()` 为真时返回 `AscendAttentionDCPImpl` 与 `AscendAttentionDCPMetadataBuilder`（来自 `context_parallel` 子包，u5-l3 详讲），否则返回本文件的 `AscendAttentionBackendImpl` 与 `AscendAttentionMetadataBuilder`。注意返回的是**类**（type）而非实例，由 vLLM 负责实例化；并且这两个 import 写在函数体内（延迟 import），避免在模块加载时就把 CP 相关重型模块拉进来。
 
 **④ `enable_dcp`：开关本身。** 它判断「解码上下文并行尺寸是否大于 1」：
 
-[vllm_ascend/attention/utils.py:181-184](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/utils.py#L181-L184)。`@lru_cache(maxsize=1)` 保证它在进程内只算一次（配置不变），读取的是 `parallel_config.decode_context_parallel_size`。这就是 ③ 中分流的总开关。
+[vllm_ascend/attention/utils.py:190-192](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/utils.py#L190-L192)。`@lru_cache(maxsize=1)` 保证它在进程内只算一次（配置不变），读取的是 `parallel_config.decode_context_parallel_size`。这就是 ③ 中分流的总开关。
 
 **⑤ 平台钩子：在多个已登记后端里挑中本后端。** `get_impl_cls` 解决「本后端内部用哪个实现」，而「vLLM 一开始怎么挑到本后端」由平台钩子回答：
 
-[vllm_ascend/platform.py:796-822](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/platform.py#L796-L822)。它构造一张 `backend_map`，键是三元组 `(use_mla, use_sparse, use_compress)`，值是类路径字符串。标准注意力 `(False, False, False)` 对应本讲的 `vllm_ascend.attention.attention_v1.AscendAttentionBackend`；MLA/SFA/DSA 各有对应后端（u5-l2）。注意它返回的是**字符串**而非类——这是 vLLM 的延迟 import 约定，避免在一启动就触发重型 import（见 u2-l1 关于钩子统一返回类路径字符串的说明）。310P 硬件另有一张更小的 `backend_map_310`（见 u11-l2）。
+[vllm_ascend/platform.py:216-242](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/platform.py#L216-L242)。它构造一张 `backend_map`，键是三元组 `(use_mla, use_sparse, use_compress)`，值是类路径字符串。标准注意力 `(False, False, False)` 对应本讲的 `vllm_ascend.attention.attention_v1.AscendAttentionBackend`；MLA/SFA/DSA 各有对应后端（u5-l2）。注意它返回的是**字符串**而非类——这是 vLLM 的延迟 import 约定，避免在一启动就触发重型 import（见 u2-l1 关于钩子统一返回类路径字符串的说明）。310P 硬件另有一张更小的 `backend_map_310`（见 u11-l2）。
+
+> 本次变化（#13484 平台重构）：该方法从文件深处上移到 L216，属「重排不改功能」——这正是该 PR 的主题：把 `NPUPlatform` 的无状态助手（如 `_validate_fa3_backend`，现位于模块级 [platform.py:1089-1109](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/platform.py#L1089-L1109)）抽出，让类聚焦钩子契约。同时在「选中」逻辑里新增一条 FA3（FlashAttention-3）短路分支：当上游选中的是 `FLASH_ATTN` 且 `_validate_fa3_backend(...)` 通过时（即处于训练-推理一致性场景 `use_batch_invariant`、非 MLA/SFA、且已安装 `flash_attn_npu_v3`），直接返回 `vllm_ascend.attention.fa3_v1.AscendFABackend`（[platform.py:220-221](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/platform.py#L220-L221)）。这是本次「选中」逻辑唯一的功能性新增：标准注意力之外多了一种可选后端。
 
 #### 4.1.4 代码实践
 
@@ -103,7 +106,7 @@ vLLM 启动
 **操作步骤**：
 
 1. 打开 `vllm_ascend/attention/attention_v1.py:72`，确认 `AscendAttentionBackend` 头顶的 `@register_backend(...)` 装饰器——这是「登记」。
-2. 打开 `vllm_ascend/platform.py:803-808`，确认标准注意力 `(False, False, False)` 这一项指向 `AscendAttentionBackend`——这是「选中」。
+2. 打开 `vllm_ascend/platform.py:223-228`，确认标准注意力 `(False, False, False)` 这一项指向 `AscendAttentionBackend`——这是「选中」。
 3. 打开 `vllm_ascend/attention/mla_v1.py`、`sfa_v1.py`、`dsa_v1.py` 的类定义处，确认它们**各自**也有 `@register_backend` 装饰器，但平台钩子在标准注意力场景下不会选中它们。
 
 **需要观察的现象**：你会看到至少 4 个 Ascend 注意力后端类都被登记，但一次推理只会被选中一个。
@@ -161,25 +164,27 @@ vLLM 分配 KV cache 前
 
 **① 形状定义本身。**
 
-[vllm_ascend/attention/attention_v1.py:99-107](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/attention_v1.py#L99-L107)。返回 `(2, num_blocks, block_size, num_kv_heads, head_size)`——本模块要解释的对象。注意它**忽略了** `cache_dtype_str` 参数（数据类型不参与形状），形状只与几何尺寸有关。
+[vllm_ascend/attention/attention_v1.py:99-107](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/attention_v1.py#L99-L107)。返回 `(2, num_blocks, block_size, num_kv_heads, head_size)`——本模块要解释的对象。注意它**忽略了** `cache_dtype_str` 参数（数据类型不参与形状），形状只与几何尺寸有关。
 
 **② 「为什么是 2」的证据一：`copy_blocks` 按 `[0]`/`[1]` 拆 K/V。** 块复制（用于 prefix caching 复用）时，正是用第一维区分 K 和 V：
 
-[vllm_ascend/attention/attention_v1.py:123-135](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/attention_v1.py#L123-L135)。`key_caches = kv_cache[0]`、`value_caches = kv_cache[1]`——`[0]` 取出 Key，`[1]` 取出 Value，再分别做块级别的 `dst = src` 复制。这就是第一维为 2 的直接用途。
+[vllm_ascend/attention/attention_v1.py:123-135](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/attention_v1.py#L123-L135)。`key_caches = kv_cache[0]`、`value_caches = kv_cache[1]`——`[0]` 取出 Key，`[1]` 取出 Value，再分别做块级别的 `dst = src` 复制。这就是第一维为 2 的直接用途。
 
 **③ 「为什么是 2」的证据二：块交换（swap）同样按 `[0]`/`[1]`。** KV 跨设备搬运时（PD 分离等场景），按相同约定拆分：
 
-[vllm_ascend/attention/attention_v1.py:109-121](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/attention_v1.py#L109-L121)。`src_key_cache, src_value_cache = src_kv_cache[0], src_kv_cache[1]`，与 ② 完全一致。
+[vllm_ascend/attention/attention_v1.py:109-121](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/attention_v1.py#L109-L121)。`src_key_cache, src_value_cache = src_kv_cache[0], src_kv_cache[1]`，与 ② 完全一致。
 
 **④ 「为什么是 2」的证据三：实现类里反复 `kv_cache[0]/[1]` 拆分。** 真正算注意力时，`forward` 入口就把 KV cache 拆成两份：
 
-[vllm_ascend/attention/attention_v1.py:1646-1654](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/attention_v1.py#L1646-L1654)。`self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]`——再次印证 `[0]` 是 Key、`[1]` 是 Value。而 `forward` 的文档字符串也把形状白纸黑字写了出来：
+[vllm_ascend/attention/attention_v1.py:1646-1654](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/attention_v1.py#L1646-L1654)。`self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]`——再次印证 `[0]` 是 Key、`[1]` 是 Value。而 `forward` 的文档字符串也把形状白纸黑字写了出来：
 
-[vllm_ascend/attention/attention_v1.py:1625-1627](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/attention_v1.py#L1625-L1627)。注释明确：`kv_cache: shape = [2, num_blocks, block_size, num_kv_heads, head_size]`。
+[vllm_ascend/attention/attention_v1.py:1625-1626](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/attention_v1.py#L1625-L1626)。注释明确：`kv_cache: shape = [2, num_blocks, block_size, num_kv_heads, head_size]`。
+
+> 本次小幅调整（#13456）：在 `forward` 内部走 fiaV2（`npu_fused_infer_attention_score_v2`）的分支里，传给算子的 K/V 现在显式 `.contiguous()`——[attention_v1.py:1315-1320](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/attention_v1.py#L1315-L1320) 把 `key` / `value` 换成 `key.contiguous()` / `value.contiguous()`。这是为修复 GQA（分组查询注意力）下 K/V 张量非连续导致的报错：v2 算子对内存布局更严格，先确保连续再调用可避免形状校验失败。这是本讲里 `attention_v1.py` 唯一的功能性改动。
 
 **⑤ 支持的块大小。** 本后端只接受一种内核块大小：
 
-[vllm_ascend/attention/attention_v1.py:137-139](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/attention_v1.py#L137-L139)。返回 `[128]`——即 NPU 注意力算子按 128 个 token 一块来组织 KV cache。这也是为什么元数据构建器里用 `get_supported_kernel_block_sizes()[0]` 来估算「每个序列最多需要多少块」（见 4.3.3）。
+[vllm_ascend/attention/attention_v1.py:137-139](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/attention_v1.py#L137-L139)。返回 `[128]`——即 NPU 注意力算子按 128 个 token 一块来组织 KV cache。这也是为什么元数据构建器里用 `get_supported_kernel_block_sizes()[0]` 来估算「每个序列最多需要多少块」（见 4.3.3）。
 
 > 小结：第一维的 2 不是「两份副本」，而是「Key 与 Value 两个分量」的叠放维度。所有读写 KV cache 的代码都通过这一维取 K 或取 V。
 
@@ -258,19 +263,21 @@ print("Key 与 Value 形状一致，第一维 2 用于区分二者：", kv_cache
 
 **① 状态枚举：五种注意力形态。**
 
-[vllm_ascend/attention/attention_v1.py:142-147](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/attention_v1.py#L142-L147)。`PrefillNoCache`（首次 prefill、无需读 cache）、`PrefillCacheHit`（prefill 且命中已有 cache）、`DecodeOnly`（纯解码）、`ChunkedPrefill`（分块 prefill，可能混 decode）、`SpecDecoding`（投机解码）。实现类 `_get_fia_params` 等方法就是按 `attn_state` 分支选择不同的算子参数（见 u4-l2 关于状态机的说明）。
+[vllm_ascend/attention/attention_v1.py:142-147](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/attention_v1.py#L142-L147)。`PrefillNoCache`（首次 prefill、无需读 cache）、`PrefillCacheHit`（prefill 且命中已有 cache）、`DecodeOnly`（纯解码）、`ChunkedPrefill`（分块 prefill，可能混 decode）、`SpecDecoding`（投机解码）。实现类 `_get_fia_params` 等方法就是按 `attn_state` 分支选择不同的算子参数（见 u4-l2 关于状态机的说明）。
 
 **② `AscendMetadata`：每层元数据。** 这是一个 dataclass，字段分两类——基础属性与 KV cache 相关属性：
 
-[vllm_ascend/attention/attention_v1.py:150-201](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/attention_v1.py#L150-L201)。重点字段：`attn_mask`（掩码张量）、`attn_state`（当前形态）、`num_actual_tokens`/`num_decode_tokens`/`num_prefills`/`num_decodes`（token 与请求计数）、`seq_lens`/`seq_lens_cpu`/`seq_lens_list`（序列长度的 device/CPU/list 三种表示，注释也承认它们冗余、待统一）、`actual_seq_lengths_q`（每段 query 的累积长度，喂给 FIA 的 `actual_seq_lengths`）、`block_tables`（块表）、`slot_mapping`（新 K/V 写入哪些槽）、`causal`（是否因果）。这些就是每层算注意力需要的全部上下文。
+[vllm_ascend/attention/attention_v1.py:150-201](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/attention_v1.py#L150-L201)。重点字段：`attn_mask`（掩码张量）、`attn_state`（当前形态）、`num_actual_tokens`/`num_decode_tokens`/`num_prefills`/`num_decodes`（token 与请求计数）、`seq_lens`/`seq_lens_cpu`/`seq_lens_list`（序列长度的 device/CPU/list 三种表示，注释也承认它们冗余、待统一）、`actual_seq_lengths_q`（每段 query 的累积长度，喂给 FIA 的 `actual_seq_lengths`）、`block_tables`（块表）、`slot_mapping`（新 K/V 写入哪些槽）、`causal`（是否因果）。这些就是每层算注意力需要的全部上下文。
 
 **③ 通用元数据 `AscendCommonAttentionMetadata`。** 它继承上游 `CommonAttentionMetadata`，补上 NPU 专属字段：
 
-[vllm_ascend/attention/utils.py:199-243](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/utils.py#L199-L243)。注意它显式保留了 `seq_lens_cpu`、`num_computed_tokens_cpu`、`actual_seq_lengths_q`、`positions_cpu`、`graph_pad_size`、`context_parallel_metadata` 等 CPU 端/图/CP 字段。类的 docstring 点明设计意图：「For many of the tensors we keep both NPU and CPU versions」——同一信息常备 device 与 host 两份，host 份用于喂给需要 Python list 的 NPU 算子。
+[vllm_ascend/attention/utils.py:208-254](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/utils.py#L208-L254)。注意它显式保留了 `seq_lens_cpu`、`num_computed_tokens_cpu`、`actual_seq_lengths_q`、`positions_cpu`、`graph_pad_size`、`context_parallel_metadata` 等 CPU 端/图/CP 字段。类的 docstring 点明设计意图：「For many of the tensors we keep both NPU and CPU versions」——同一信息常备 device 与 host 两份，host 份用于喂给需要 Python list 的 NPU 算子。
+
+本次为「稀疏 KV 卸载」（Sparse KV Offload，详见 u10-l6）新增了两个请求标识字段：`req_ids_tensor`（按请求存放、用 adler32 哈希过的请求 id）与 `token_to_req`（每个 token 到所属请求的映射，[utils.py:251-254](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/utils.py#L251-L254)）。它们支撑 decode 期 top-k 命中检查时的「常驻 LRU」机制；在 `unpadded` 切片时这两个字段也被同步裁剪（[utils.py:310-311](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/utils.py#L310-L311)）。对标准注意力后端而言这两个字段可空、不影响本讲的计算路径。
 
 **④ builder 的核心：`build`。** 这是把通用元数据翻译成 `AscendMetadata` 的主方法，逻辑较长但脉络清晰：
 
-[vllm_ascend/attention/attention_v1.py:291-395](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/attention_v1.py#L291-L395)。关键步骤：
+[vllm_ascend/attention/attention_v1.py:291-395](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/attention_v1.py#L291-L395)。关键步骤：
 
 - L301-303：调 `split_decodes_and_prefills` 把批次拆成 decode/prefill，得到四元组（请求数、token 数）。
 - L308-313：**优先用 `_seq_lens_cpu`**（注释说它在 draft 迭代期间也总可用），其次 `seq_lens_cpu`，最后才退回 device 的 `seq_lens`——体现「优先 host、避免同步」原则。
@@ -280,13 +287,17 @@ print("Key 与 Value 形状一致，第一维 2 用于区分二者：", kv_cache
 
 **⑤ 掩码构建器 `AttentionMaskBuilder`（单例，缓存掩码）。** 它用 `@singleton` 装饰，进程内只有一个实例，生成的掩码会被缓存复用：
 
-[vllm_ascend/attention/attention_mask.py:33-49](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/attention_mask.py#L33-L49)。`@singleton`（实现见 `vllm_ascend/utils.py:1359-1367`，按类缓存实例）保证全局唯一；`get_attn_mask` 在「还没缓存」或「需要更长序列」时才重新生成下三角因果掩码，并按 `max_seq_len` 切片返回。底层 `_generate_attn_mask`（[attention_mask.py:21-30](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/attention_mask.py#L21-L30)）构造下三角矩阵，fp16 用 `-inf`、其他用 1 标记被遮蔽位置。
+[vllm_ascend/attention/attention_mask.py:33-49](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/attention_mask.py#L33-L49)。`@singleton`（实现见 `vllm_ascend/utils.py:1359-1367`，按类缓存实例）保证全局唯一；`get_attn_mask` 在「还没缓存」或「需要更长序列」时才重新生成下三角因果掩码，并按 `max_seq_len` 切片返回。底层 `_generate_attn_mask`（[attention_mask.py:21-30](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/attention_mask.py#L21-L30)）构造下三角矩阵，fp16 用 `-inf`、其他用 1 标记被遮蔽位置。
 
 对外入口 `get_attention_mask` 按场景选不同掩码：
 
-[vllm_ascend/attention/attention_mask.py:68-81](https://github.com/vllm-project/vllm-ascend/blob/646684f43ce4bdc737203a8df1149e37ea2ff824/vllm_ascend/attention/attention_mask.py#L68-L81)。非因果（双向）注意力返回 `None`（注释解释：FIA 在 `sparse_mode=0` 下会把上三角也遮掉，对双向注意力是错的，所以干脆不传掩码）；pooling 模型用 `get_attn_mask(2048, bool)`；生成式模型用 `get_splitfuse_attn_mask()`。这正是 builder 在 ④ L327 调用的方法。
+[vllm_ascend/attention/attention_mask.py:68-81](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/attention_mask.py#L68-L81)。非因果（双向）注意力返回 `None`（注释解释：FIA 在 `sparse_mode=0` 下会把上三角也遮掉，对双向注意力是错的，所以干脆不传掩码）；pooling 模型用 `get_attn_mask(2048, bool)`；生成式模型用 `get_splitfuse_attn_mask()`。这正是 builder 在 ④ L327 调用的方法。
 
 > 串起来：`build()` → `attn_mask_builder.get_attention_mask(...)` →（按需缓存）→ 返回掩码，最终塞进 `AscendMetadata.attn_mask`，供算子使用。
+
+**⑥ 本次新增的稀疏注意力掩码工具：`build_valid_topk_mask`。** 上面 `AttentionMaskBuilder` 管的是标准/MLA/splitfuse 的「注意力因果掩码」；而稀疏注意力（SFA/Indexer，u5-l2）还需要另一种掩码——在 top-k 选出的若干 KV 行里，标记哪些是「真正有效、已写入」的位置（剔除 padding 与尚未写入的尾部块）。本次在 `utils.py` 新增的小工具就是干这件事：
+
+[vllm_ascend/attention/utils.py:25-30](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/utils.py#L25-L30)。`build_valid_topk_mask(topk_indices, seq_len_thresholds)` 返回 `(topk_indices >= 0) & (topk_indices < seq_len_thresholds)` 的布尔掩码——`topk_indices >= 0` 排除 padding 占位（用 -1 填充），`< seq_len_thresholds` 排除越界的未写入尾部块。它服务于 SFA 稀疏注意力的「只对有效 KV 行计算」语义，是标准注意力后端之外的稀疏分支（u5-l2、u10-l6）会用到的公共工具，因此放在 `utils.py` 而非某个具体后端文件里。
 
 #### 4.3.4 代码实践
 
@@ -316,7 +327,7 @@ print("Key 与 Value 形状一致，第一维 2 用于区分二者：", kv_cache
 
 把本讲三个模块串起来，完成一个「后端选择 + KV cache 形状 + 元数据」的综合阅读任务：
 
-1. **注册与选中**：从 `NPUPlatform.get_attn_backend_cls`（platform.py:796）出发，确认标准注意力场景返回 `AscendAttentionBackend` 的类路径；再进入该类，列出它作为「工厂」对外提供的四个关键静态方法（`get_name`、`get_impl_cls`、`get_builder_cls`、`get_kv_cache_shape`）。
+1. **注册与选中**：从 `NPUPlatform.get_attn_backend_cls`（platform.py:216）出发，确认标准注意力场景返回 `AscendAttentionBackend` 的类路径；再进入该类，列出它作为「工厂」对外提供的四个关键静态方法（`get_name`、`get_impl_cls`、`get_builder_cls`、`get_kv_cache_shape`）。
 2. **KV cache 形状**：写出 `(2, num_blocks, block_size, num_kv_heads, head_size)` 各维含义；在源码里找出**三处**用 `kv_cache[0]`/`kv_cache[1]` 区分 K/V 的代码，作为「为什么是 2」的证据。
 3. **元数据链路**：画出 `AscendCommonAttentionMetadata` → `AscendAttentionMetadataBuilder.build` → `AscendMetadata` 的数据流，并标注掩码来自单例 `AttentionMaskBuilder`。
 
@@ -332,9 +343,10 @@ print("Key 与 Value 形状一致，第一维 2 用于区分二者：", kv_cache
 - 注意力元数据分两层：`AscendCommonAttentionMetadata`（含 NPU 必需的 CPU 端字段）经 `build()` 翻译成 `AscendMetadata`（喂给每层算子）；`AscendAttentionState` 五种枚举驱动算子分支选择。
 - `AttentionMaskBuilder` 是进程级单例（`@singleton`），按需生成并缓存因果/MLA/splitfuse 掩码，避免每步重算。
 - `get_name()` 在 v2 model runner 下伪装成 `"FLASH_ATTN"` 以绕过上游断言，是一个典型的兼容 HACK。
+- 本次（#13484 / #13456 / #13026 相关）小幅更新：平台钩子 `get_attn_backend_cls` 重排到 L216 且新增 FA3 选择分支；`forward` 的 fiaV2 路径对 K/V 显式 `.contiguous()` 修复 GQA 布局问题；`utils.py` 新增稀疏注意力掩码工具 `build_valid_topk_mask`，并为稀疏 KV 卸载在通用元数据里补了 `req_ids_tensor` / `token_to_req` 两个请求标识字段。
 
 ## 7. 下一步学习建议
 
 - **u5-l2 MLA / SFA / DSA 与稀疏注意力**：本讲只讲了标准注意力后端；下一讲深入 `mla_v1`/`sfa_v1`/`dsa_v1` 这些被同一平台钩子选中的「兄弟后端」，理解它们与 `AscendAttentionBackend` 的实现差异。
 - **u5-l3 上下文并行注意力（CP）**：本讲反复出现的 `enable_dcp()` 分流，下一讲详细展开 DCP/MLA-CP/SFA-CP 如何把长序列切分到多卡。
-- **延伸阅读**：`AscendAttentionBackendImpl.forward` 及其 `_get_fia_params`、`forward_fused_infer_attention` 等方法（attention_v1.py:849 起）展示了 `AscendMetadata` 与 `attn_state` 如何真正驱动 NPU 注意力算子（`npu_fused_infer_attention_score`），可作为进阶阅读。
+- **延伸阅读**：`AscendAttentionBackendImpl`（实现类，attention_v1.py:420 起）及其 `_get_fia_params`、`forward_fused_infer_attention`（attention_v1.py:1212 起）展示了 `AscendMetadata` 与 `attn_state` 如何真正驱动 NPU 注意力算子（`npu_fused_infer_attention_score`），可作为进阶阅读。
