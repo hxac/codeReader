@@ -29957,8 +29957,8 @@
     },
     "vortexgpgpu/vortex": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-08-05T13:02:13Z",
+      "last_error": null,
+      "last_run_at": "2026-08-05T18:02:16Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -30213,76 +30213,505 @@
           "error": null
         },
         "u11-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.381733,
+          "error": null
+        },
+        "u12-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.237974,
+          "error": null
+        },
+        "u12-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.647922,
+          "error": null
+        },
+        "u12-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.2253200000000002,
+          "error": null
+        },
+        "u13-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.42742,
+          "error": null
+        },
+        "u13-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.181935,
+          "error": null
+        },
+        "u13-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.644774,
+          "error": null
+        },
+        "u13-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.2874240000000001,
+          "error": null
+        },
+        "u14-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.4245720000000002,
+          "error": null
+        },
+        "u14-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.677232,
+          "error": null
+        },
+        "u14-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.52805,
+          "error": null
+        }
+      },
+      "manifest_head": "d76b7f24e658867ab57e3942d7c648c3e6af072d",
+      "prev_head": null,
+      "phase": "done",
+      "mode": "full",
+      "tutorial_path": "tutorials/vortexgpgpu/vortex/vortex-tutorial",
+      "last_head": "d76b7f24e658867ab57e3942d7c648c3e6af072d",
+      "abandoned": []
+    },
+    "chili-chips-ba/wireguard-fpga": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "quota exhausted; will resume next window",
+      "last_run_at": "2026-08-05T18:02:16Z",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.754042,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.100359,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.006235,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.828775,
+          "error": null
+        },
+        "u1-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3016379999999999,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.938895,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.919789,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.057584,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.827779,
+          "error": null
+        },
+        "u2-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.34871,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.008809,
+          "error": null
+        },
+        "u3-l2": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"3bb556e1-e31c-4efc-802a-a58e15ac5c97\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"936bd870-906d-490c-82bd-5992f6180298\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
-        "u12-l1": {
+        "u3-l3": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u12-l2": {
+        "u3-l4": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u12-l3": {
+        "u4-l1": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u13-l1": {
+        "u4-l2": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u13-l2": {
+        "u4-l3": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u13-l3": {
+        "u4-l4": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u13-l4": {
+        "u4-l5": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u14-l1": {
+        "u4-l6": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u14-l2": {
+        "u5-l1": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u14-l3": {
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l4": {
           "status": "pending",
           "action": "new",
           "retries": 0
         }
       },
-      "manifest_head": "d76b7f24e658867ab57e3942d7c648c3e6af072d",
+      "manifest_head": "9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf",
       "prev_head": null,
       "phase": "workers",
       "mode": "full",
-      "tutorial_path": "tutorials/vortexgpgpu/vortex/vortex-tutorial",
-      "last_head": "d76b7f24e658867ab57e3942d7c648c3e6af072d"
+      "tutorial_path": "tutorials/chili-chips-ba/wireguard-fpga/wireguard-fpga-tutorial",
+      "last_head": "9887a3b39a1bb6aff9642f3a21ea4a8863f3dfaf"
     },
-    "chili-chips-ba/wireguard-fpga": {
+    "WireGuard/wireguard-rs": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\n_creation_input_tokens\":0,\"cache_read_input_tokens\":475136,\"output_tokens\":4853,\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iteration",
-      "last_run_at": "2026-08-05T13:02:13Z"
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.750637,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"734a4de6-9507-46c5-95ff-9b254c07ca1c\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+        },
+        "u1-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u1-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u1-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l7": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "7d84ef9064559a29b23ab86036f7ef62b450f90c",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/WireGuard/wireguard-rs/wireguard-rs-tutorial",
+      "last_head": "7d84ef9064559a29b23ab86036f7ef62b450f90c",
+      "last_run_at": "2026-08-05T18:02:16Z",
+      "last_error": "quota exhausted; will resume next window"
     },
-    "WireGuard/wireguard-rs": {},
     "google/xls": {},
     "ZipCPU/zipcpu": {},
     "mpskex/chisel-npu": {},
@@ -41202,7 +41631,7 @@
     "vllm-project/semantic-router": {
       "prompt_hash": "b21aef51792b02df",
       "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-08-05T13:02:13Z",
+      "last_run_at": "2026-08-05T18:02:16Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -41282,61 +41711,81 @@
           "error": null
         },
         "u4-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 5.52292,
+          "error": null
+        },
+        "u4-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.23888,
+          "error": null
+        },
+        "u4-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.080877,
+          "error": null
+        },
+        "u5-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.2267040000000002,
+          "error": null
+        },
+        "u5-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.2179510000000002,
+          "error": null
+        },
+        "u5-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.4034069999999998,
+          "error": null
+        },
+        "u6-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0797860000000001,
+          "error": null
+        },
+        "u6-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.174594,
+          "error": null
+        },
+        "u6-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.406799,
+          "error": null
+        },
+        "u7-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.231535,
+          "error": null
+        },
+        "u7-l2": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"8f34887c-e6c8-459e-9c6b-8a5bd9908099\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
-        },
-        "u4-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"a71827f8-2b5d-439e-a144-d81e8e85b7e0\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
         "u7-l3": {
           "status": "pending",
@@ -41990,7 +42439,7 @@
     "ai-dynamo/dynamo": {},
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-05T13:02:13Z"
+      "last_run_at": "2026-08-05T18:02:16Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
