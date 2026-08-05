@@ -1,7 +1,7 @@
 {
   "project": "vllm-ascend",
-  "head": "3829122510c00dfc6b4b94d6f96c947a7590043c",
-  "rationale": "本次增量更新基于 646684f..3829122 之间的 13 个提交。最大的变化有三类：（1）新增「稀疏 KV 缓存卸载（Sparse KV Offload）」特性（#13026），它把 SFA/Indexer 稀疏注意力的 KV 卸载到主机内存，仅在 decode 期按 top-k 回载，并依赖 PD 分离场景，因此新增 u10-l6 专门讲解其 attention/sfa_kv_offload.py 数据面、sparse_kv_offload_manager.py 管理器与 C++ 内核、以及 SparseKVOffloadConfig 配置约束；（2）MoE 路由逻辑被抽取为独立的 router/ 包（#13417），路由器分为 fused_topk / grouped_topk 两类并由 router_factory 创建，因此 u7-l3 需更新以纳入新结构；（3）量化层移除 mxfp_compat 兼容垫片并内联 dtype（#13447），影响 u10-l1。此外 NPUPlatform 做了一次「不改功能、仅重排」的组织性重构（#13484）：方法重排、_fix_incompatible_config/_validate_parallel_config 等助手移到模块级，导致引用 platform.py 行号的讲义（u2-l1、u8-l1、u10-l5）需要 update。其余如 worker.py（MTP MoE 权重加载器 #13337）、model_runner_v1/v2（num_nans/penalties 修复 #13159 #13382）、attention 的 sfa_v1/utils/attention_v1（fiaV2 GQA #13456、SFA indexer cache spec #12849）、patch/__init__.py（新增 apply_penalties 与 num_nans libdevice 两个补丁文档）、ascend_config.py（SparseKVOffloadConfig）、xlite（MLA/DSA 支持 #13378）、310P fused_moe 与 w8a8_dynamic、norm_quant_fusion_pass 等均为局部改动，对应讲义标记 update。envs.py、examples、setup.py、CMakeLists、csrc、parallel_state、device_communicators、eplb、lora、model_loader（rfork/netloader）、acl_graph、AGENTS.md/CI 框架等核心稳定区未受影响，相关讲义保持 keep。新增讲义后手册变为 11 单元 43 篇，依赖关系维持「注册→配置→打补丁→执行→注意力→算子→并行→编译→加载→特性→扩展」，u10-l6 依赖 u10-l2（PD 分离）与 u5-l2（SFA 注意力）。",
+  "head": "7201c97a61a17425b558b6b5e53ab0d30ae8151d",
+  "rationale": "本次增量更新基于 3829122..7201c97a 之间的 3 个提交，核心是 #12852「分层 prefill KV 缓冲复用（layerwise prefill KV buffer reuse）」：在 ascend_store 的 layerwise prefill 卸载路径下，原本为每个 transformer 层独立分配设备 KV 缓冲，本特性改为让多个层分时复用一组有限物理缓冲（新增 layerwise_cache_layout.py 的 LayerwiseCacheLayout 规划），逻辑布局不变、回收 HBM 放大可用 KV 容量。由于改动横跨 ascend_store 数据面（pool_worker/pool_scheduler/config_data/kv_transfer 的大幅调整与新增 layerwise_cache_layout 模块）、worker.py 的可用 KV 显存按 num_layers/num_tensors 因子放大、model_runner_v1.py 在分配前调用 apply_layerwise_kv_cache_plan 重排张量描述，以及 sfa_v1.py 把 record_attention_compute_start 前移使无 indexer 的 SFA 层（如 GLM-5.2）也能打开 prefetch gate，体量与 u10-l6 稀疏卸载相当，因此新增 u10-l7 专讲分层缓冲复用，依赖 u10-l2（ascend_store 连接器）与 u5-l2（SFA）。ascend_store 连接器本身的小改动（consumer_is_to_put：layerwise 下 load-only consumer 也发布 KV）并入 u10-l2 update；worker.py、model_runner_v1.py、sfa_v1.py 的局部改动分别驱动 u4-l1、u4-l2、u5-l2 update。另两个提交为 CI 与文档：#13442 新增 A5 夜间测试流水线（schedule_nightly_test_a5.yaml）与一批 ascend_store/layerwise 单测，使 u11-l4 update；#13488 仅澄清 fine-grained TP 文档、无源码改动。envs、platform、patch、ops、csrc、parallel_state、device_communicators、compilation、model_loader、quantization、lora、xlite、310p、sparse_kv_offload 等核心稳定区未受影响，相关讲义保持 keep。新增 u10-l7 后手册变为 11 单元 44 篇，依赖关系维持「注册→配置→打补丁→执行→注意力→算子→并行→编译→加载→特性→扩展」。",
   "units": [
     {
       "id": "u1",
@@ -171,7 +171,7 @@
           "depends_on": [
             "u1-l5"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -197,7 +197,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -256,7 +256,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -284,7 +284,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -328,11 +328,12 @@
           "order": 1,
           "filename": "u4-l1-npuworker-lifecycle.md",
           "level": "intermediate",
-          "topic": "讲解 worker/worker.py 的 NPUWorker：设备初始化、权重传输引擎、execute_model、健康检查与睡眠/唤醒；并说明 #13337 中 MTP 场景下在线权重更新时保留 MoE weight loader 的处理。",
+          "topic": "讲解 worker/worker.py 的 NPUWorker：设备初始化、权重传输引擎、execute_model、健康检查与睡眠/唤醒；并说明 #13337 中 MTP 场景下在线权重更新时保留 MoE weight loader 的处理，以及 #12852 开启分层 KV 缓冲复用时按 num_layers/num_tensors 因子放大 available_kv_cache_memory_bytes 的可用 KV 显存核算。",
           "learning_goals": [
             "掌握 NPUWorker 的初始化与分布式环境建立流程",
             "理解 execute_model 从调度输出到模型前向的衔接",
-            "理解睡眠模式（sleep/wake_up）与权重在线更新的钩子，以及 MTP 下 MoE weight loader 的保留逻辑"
+            "理解睡眠模式（sleep/wake_up）与权重在线更新的钩子，以及 MTP 下 MoE weight loader 的保留逻辑",
+            "理解 #12852 分层 KV 缓冲复用下，按 num_layers/num_tensors 因子放大 available_kv_cache_memory_bytes 的内存核算"
           ],
           "source_files": [
             "vllm_ascend/worker/worker.py"
@@ -341,7 +342,7 @@
             "NPUWorker",
             "执行与生命周期"
           ],
-          "practice_task": "梳理 NPUWorker 从 init_device 到 execute_model 的方法调用顺序，标注每一步的关键副作用，并指出在线权重更新路径中 MoE weight loader 为何不能被丢弃。",
+          "practice_task": "梳理 NPUWorker 从 init_device 到 execute_model 的方法调用顺序，标注每一步的关键副作用；指出在线权重更新路径中 MoE weight loader 为何不能被丢弃，并说明开启分层缓冲复用时 available_kv_cache_memory_bytes 为何要乘以复用因子。",
           "depends_on": [
             "u2-l1"
           ],
@@ -353,11 +354,12 @@
           "order": 2,
           "filename": "u4-l2-model-runner-v1.md",
           "level": "intermediate",
-          "topic": "深入 worker/model_runner_v1.py 的 NPUModelRunner：prepare_inputs、execute_model、attention metadata 构建与 ACL Graph 调度。",
+          "topic": "深入 worker/model_runner_v1.py 的 NPUModelRunner：prepare_inputs、execute_model、attention metadata 构建与 ACL Graph 调度；并说明 #12852 在 initialize_kv_cache 中调用 apply_layerwise_kv_cache_plan 重排 KV 张量描述以支持分层缓冲复用。",
           "learning_goals": [
             "掌握 NPUModelRunner 继承 GPUModelRunner 后重写的执行主链路",
             "理解 _prepare_inputs / _build_attention_metadata 如何为 NPU 适配输入",
-            "理解 execute_model 中采样与投机解码草稿生成的衔接"
+            "理解 execute_model 中采样与投机解码草稿生成的衔接",
+            "理解 apply_layerwise_kv_cache_plan 在 KV 张量分配前重排描述符的时机与作用"
           ],
           "source_files": [
             "vllm_ascend/worker/model_runner_v1.py"
@@ -366,7 +368,7 @@
             "NPUModelRunner v1",
             "输入准备与执行"
           ],
-          "practice_task": "画出一次 execute_model 内部「更新状态→准备输入→构建 attention metadata→前向→采样」的数据流。",
+          "practice_task": "画出一次 execute_model 内部「更新状态→准备输入→构建 attention metadata→前向→采样」的数据流；并说明 initialize_kv_cache 中 apply_layerwise_kv_cache_plan 在哪一步介入、为何要在分配前重排。",
           "depends_on": [
             "u4-l1"
           ],
@@ -398,7 +400,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -460,7 +462,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -468,11 +470,12 @@
           "order": 2,
           "filename": "u5-l2-mla-sfa-dsa.md",
           "level": "advanced",
-          "topic": "讲解 mla_v1/sfa_v1/dsa_v1/fa3_v1 与 indexer 稀疏注意力的实现差异与适用场景；并说明本次 sfa_v1.py 的调整（#12849 AscendSFAIndexerCacheSpec 改为继承 MLAAttentionSpec、#13456 fiaV2 在 GQA 下的 contiguous 修复）。",
+          "topic": "讲解 mla_v1/sfa_v1/dsa_v1/fa3_v1 与 indexer 稀疏注意力的实现差异与适用场景；并说明 sfa_v1.py 的调整（#12849 AscendSFAIndexerCacheSpec 改为继承 MLAAttentionSpec、#13456 fiaV2 在 GQA 下的 contiguous 修复），以及 #12852 把 record_attention_compute_start 前移，使无 indexer 的 SFA 层（如 GLM-5.2）也能打开 prefetch gate。",
           "learning_goals": [
             "理解 MLA（DeepSeek）、SFA、DSA 三类注意力的实现差异",
             "理解 indexer 稀疏/索引注意力的工作原理与 cache spec 继承关系",
-            "了解 fa3_v1 等新后端的接入方式"
+            "了解 fa3_v1 等新后端的接入方式",
+            "理解为何要把 record_attention_compute_start 前移，使无 indexer 的 SFA 层也打开 prefetch gate"
           ],
           "source_files": [
             "vllm_ascend/attention/mla_v1.py",
@@ -485,7 +488,7 @@
             "MLA/SFA/DSA 注意力",
             "稀疏注意力"
           ],
-          "practice_task": "为三类注意力（MLA/SFA/DSA）整理一张「适用模型 / kv 压缩 / 是否共享 kv」对照表，并说明 SFA indexer 的 cache spec 为何要继承 MLAAttentionSpec。",
+          "practice_task": "为三类注意力（MLA/SFA/DSA）整理一张「适用模型 / kv 压缩 / 是否共享 kv」对照表；说明 SFA indexer 的 cache spec 为何要继承 MLAAttentionSpec，并解释 record_attention_compute_start 前移对无 indexer 层的意义。",
           "depends_on": [
             "u5-l1"
           ],
@@ -516,7 +519,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "update"
+          "action": "keep"
         }
       ]
     },
@@ -702,7 +705,7 @@
             "u5-l2",
             "u6-l1"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u7-l4",
@@ -765,7 +768,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -793,7 +796,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -939,7 +942,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "update"
+          "action": "keep"
         }
       ]
     },
@@ -977,7 +980,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -985,11 +988,12 @@
           "order": 2,
           "filename": "u10-l2-pd-disagg-kv-transfer.md",
           "level": "advanced",
-          "topic": "讲解 distributed/kv_transfer/ 的 Prefill/Decode 分离连接器：mooncake P2P、ascend_store、lmcache 等。",
+          "topic": "讲解 distributed/kv_transfer/ 的 Prefill/Decode 分离连接器：mooncake P2P、ascend_store、lmcache 等；并说明 ascend_store 连接器在 layerwise 模式下的 consumer_is_to_put 行为（layerwise 下 load-only consumer 也会发布 KV），其分层缓冲复用机制见 u10-l7。",
           "learning_goals": [
             "理解 PD 分离（Prefill/Decode disaggregation）的整体架构",
             "掌握 mooncake / ascend_store / lmcache 等连接器的差异",
-            "理解 register_connector 的注册与 connector 选择机制"
+            "理解 register_connector 的注册与 connector 选择机制",
+            "理解 ascend_store 连接器在 layerwise 模式下 consumer_is_to_put 的行为"
           ],
           "source_files": [
             "vllm_ascend/distributed/kv_transfer/__init__.py",
@@ -1001,11 +1005,11 @@
             "PD 分离",
             "KV 传输连接器"
           ],
-          "practice_task": "对比 mooncake P2P 与 ascend_store 两种 KV 传输后端的适用场景与数据通路。",
+          "practice_task": "对比 mooncake P2P 与 ascend_store 两种 KV 传输后端的适用场景与数据通路；并说明 ascend_store 在 layerwise 模式下为何 load-only consumer 也需要发布 KV。",
           "depends_on": [
             "u4-l1"
           ],
-          "action": "keep"
+          "action": "update"
         },
         {
           "id": "u10-l3",
@@ -1062,7 +1066,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u10-l5",
@@ -1090,7 +1094,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u10-l6",
@@ -1115,6 +1119,38 @@
             "SFA 数据面"
           ],
           "practice_task": "说明开启 sparse_kv_offload 后，decode 期一次 top-k miss 的 KV 如何从主机内存回载到 NPU 常驻缓冲并完成单次 resident SFA 注意力；并解释该特性为何要求模型具备 index_topk，且默认只能在 PD 分离场景使用。",
+          "depends_on": [
+            "u10-l2",
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l7",
+          "title": "分层 prefill KV 缓冲复用（Layerwise Prefill KV Buffer Reuse）",
+          "order": 7,
+          "filename": "u10-l7-layerwise-prefill-kv-buffer-reuse.md",
+          "level": "advanced",
+          "topic": "讲解 #12852 引入的「分层 prefill KV 缓冲复用」：在 ascend_store 的 layerwise prefill 卸载路径下，原本为每个 transformer 层独立分配设备 KV 缓冲；本特性让多个层分时复用一组有限物理设备缓冲（新增 layerwise_cache_layout.py 的 LayerwiseCacheLayout 规划），逻辑 KV 布局不变，从而回收 HBM、放大可用 KV 容量。覆盖 model_runner_v1 的 apply_layerwise_kv_cache_plan 在分配前重排张量描述、worker 的可用 KV 显存按 num_layers/num_tensors 因子放大、pool_worker/pool_scheduler 的「回载再复用、保存完成后才复用」时序、config_data/kv_transfer 的 partial GVA 与错误传播改动，以及 sfa_v1 把 prefetch gate 前移使无 indexer 的 SFA 层也能正确触发。",
+          "learning_goals": [
+            "理解分层 prefill 卸载为何要复用设备 KV 缓冲，以及 LayerwiseCacheLayout（num_shared_buffers / prefetch_layer_map / storage_indices / has_layer_reuse）如何把逻辑层映射到有限物理缓冲",
+            "掌握 apply_layerwise_kv_cache_plan 在 KV cache 张量分配前重排描述符的时机，以及 NPUWorker 按 num_layers/num_tensors 因子放大 available_kv_cache_memory_bytes 的内存核算",
+            "理解 pool_worker/pool_scheduler 在缓冲复用下的「回载再复用、上一层保存完成后才复用」时序，以及 config_data 的 partial_save/partial_load GVA 与 kv_transfer 的错误传播（raise 替代 log）改动",
+            "理解 sfa_v1 把 record_attention_compute_start 前移，使 GLM-5.2 等无 indexer 的 SFA 层也能打开 prefetch gate"
+          ],
+          "source_files": [
+            "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/layerwise_cache_layout.py",
+            "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py",
+            "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_scheduler.py",
+            "vllm_ascend/worker/worker.py",
+            "vllm_ascend/worker/model_runner_v1.py",
+            "vllm_ascend/attention/sfa_v1.py"
+          ],
+          "minimal_modules": [
+            "分层 KV 缓冲复用",
+            "ascend_store layerwise 数据面"
+          ],
+          "practice_task": "说明开启 layerwise_num_shared_buffers 后，NPUWorker 如何按 num_layers/num_tensors 放大可用 KV 显存、apply_layerwise_kv_cache_plan 如何让多个 transformer 层共享有限物理缓冲；并解释为何要在「上一层保存完成」后才复用同一缓冲、以及无 indexer 的 SFA 层为何需要把 prefetch gate 前移。",
           "depends_on": [
             "u10-l2",
             "u5-l2"
@@ -1185,7 +1221,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u11-l3",
@@ -1213,7 +1249,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u11-l4",
@@ -1221,27 +1257,30 @@
           "order": 4,
           "filename": "u11-l4-tests-and-ci.md",
           "level": "intermediate",
-          "topic": "讲解 tests/ut、tests/e2e、benchmarks 与 .github/workflows 的测试分层与 CI 编排。",
+          "topic": "讲解 tests/ut、tests/e2e、benchmarks 与 .github/workflows 的测试分层与 CI 编排；并说明 #13442 新增的 A5 夜间测试流水线（schedule_nightly_test_a5.yaml）与 ascend_store/layerwise 缓冲复用相关单测。",
           "learning_goals": [
             "理解 UT/ST/Nightly 测试分层与目录约定",
             "掌握 pytest marker（e2e_model/e2e_coverage）与测试选择脚本",
-            "了解 CI 镜像构建、测试调度与覆盖率收集流程"
+            "了解 CI 镜像构建、测试调度与覆盖率收集流程",
+            "了解 A5 夜间测试流水线（schedule_nightly_test_a5.yaml）的编排与新增的 layerwise 单测归属"
           ],
           "source_files": [
             "tests/ut/ops/test_prepare_finalize.py",
+            "tests/ut/distributed/ascend_store/test_layerwise_cache_layout.py",
             "AGENTS.md",
             ".github/workflows/pr_test.yaml",
+            ".github/workflows/schedule_nightly_test_a5.yaml",
             "pyproject.toml"
           ],
           "minimal_modules": [
             "测试体系",
             "CI 编排"
           ],
-          "practice_task": "写一条命令在本地运行某个 UT 文件并解释输出，再说明该 UT 在 CI 中属于哪一层。",
+          "practice_task": "写一条命令在本地运行某个 UT 文件并解释输出，再说明该 UT 在 CI 中属于哪一层；并指出 A5 夜间流水线相对普通 PR 测试的差异。",
           "depends_on": [
             "u1-l3"
           ],
-          "action": "keep"
+          "action": "update"
         },
         {
           "id": "u11-l5",

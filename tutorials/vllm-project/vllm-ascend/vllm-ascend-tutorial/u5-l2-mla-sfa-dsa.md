@@ -8,17 +8,20 @@
 - 理解平台层如何用一个三元组 `(use_mla, use_sparse, use_compress)` 把模型路由到正确的后端；
 - 掌握 MLA 的「隐式 KV 压缩 + 权重吸收」原理，以及它在 NPU 上的实现要点；
 - 理解 SFA / DSA 的「indexer 稀疏选择」与「分层压缩 + 滑窗」机制；
-- 说清 `AscendSFAIndexerCacheSpec` 为什么在 #12849 之后改为继承 `MLAAttentionSpec`（本讲重点更新）；
+- 说清 `AscendSFAIndexerCacheSpec` 为什么改为继承 `MLAAttentionSpec`（#12849）；
+- **理解为什么 #12852 要把 `record_attention_compute_start()` 前移到 `forward` 主体，使无 indexer 的 SFA 层（如 GLM-5.2）也能打开 prefetch gate**（本讲本次更新重点）；
 - 了解 `fa3_v1` 等新后端的接入方式，以及 indexer 缓存占位后端的作用。
 
-> **本次更新（`646684f` → `3829122`）影响本讲的改动**：
-> - **#12849**：`AscendSFAIndexerCacheSpec` 的父类从 `FullAttentionSpec` 改为 `MLAAttentionSpec`（见 4.3）。
-> - **#13484**：`NPUPlatform` 重构，`get_attn_backend_cls` 仍在类内（行号变动），但 FA3 特判 `_validate_fa3_backend` 已下移为**模块级函数**（见 4.1）。
-> - **#13456**：CANN 9.1.0 要求 FIAV2 算子的 K/V 连续，标准 fiaV2 后端补了 `.contiguous()`（见 4.2.3 末尾说明）。
-> - **#13026**：SFA 后端新增「稀疏 KV 卸载」分流分支（详见 u10-l6），本讲只点出挂载点。
-> - **#13447**：SFA 内的 mxfp 量化 dtype 由兼容垫片 `FLOAT8_E8M0FNU_DTYPE` 内联为 `torch_npu.float8_e8m0fnu`。
+> **本次更新（`3829122` → `7201c97a6`）影响本讲的改动**：
+> - **#12852（本讲新增重点）**：SFA 把 `record_attention_compute_start()` 从 `indexer_select_post_process` 内部**前移**到 `forward` 主体、`skip_topk` 分支之前——目的是让**无 indexer 的 SFA 层（如 GLM-5.2 复用 top-k 的层）也能打开 prefetch gate**（见 4.3.3「prefetch gate 与无 indexer 层」）。
+> - 其余文件（`mla_v1.py`、`dsa_v1.py`、`abstract.py`、`indexer.py`、`platform.py`、`utils.py`、`kv_cache_interface.py`、`attention_v1.py`、`fa3_v1.py`）在本次区间**未改动**，仅刷新永久链接 HEAD 与个别行号。
 >
-> `mla_v1.py`、`dsa_v1.py`、`abstract.py`、`indexer.py` 在本次区间内**未改动**，仅刷新永久链接的 HEAD。
+> **前序区间（`646684f → 3829122`）已纳入本讲、仍然有效**的改动：
+> - **#12849**：`AscendSFAIndexerCacheSpec` 的父类从 `FullAttentionSpec` 改为 `MLAAttentionSpec`（见 4.3）。
+> - **#13484**：`NPUPlatform` 重构，`get_attn_backend_cls` 仍在类内，但 FA3 特判 `_validate_fa3_backend` 已下移为**模块级函数**（见 4.1）。
+> - **#13456**：CANN 9.1.0 要求 FIAV2 算子的 K/V 连续，标准 fiaV2 后端补了 `.contiguous()`（见 4.2.3）。
+> - **#13026**：SFA 后端新增「稀疏 KV 卸载」分流分支（详见 u10-l6），本讲只点出挂载点。
+> - **#13447**：SFA 内的 mxfp 量化 dtype 由兼容垫片内联为 `torch_npu.float8_e8m0fnu`。
 
 ## 2. 前置知识
 
@@ -58,15 +61,16 @@ u5-l1 提到，标准后端 `AscendAttentionBackend` 的 KV 缓存形状带一�
 
 | 文件 | 作用 |
 | --- | --- |
-| [vllm_ascend/platform.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/platform.py) | 平台钩子 `get_attn_backend_cls`（行 215），用三元组分发到 MLA/SFA/DSA 后端；FA3 特判 `_validate_fa3_backend`（行 1089，#13484 后为模块级函数） |
-| [vllm_ascend/attention/mla_v1.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/mla_v1.py) | MLA 后端：`AscendMLABackend` + `AscendMLAImpl`（隐式 KV 压缩） |
-| [vllm_ascend/attention/sfa_v1.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/sfa_v1.py) | SFA 后端：`AscendSFABackend`（行 116）+ `AscendSFAImpl`（行 504）；本次新增稀疏 KV 卸载分流与 mxfp dtype 内联 |
-| [vllm_ascend/attention/dsa_v1.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/dsa_v1.py) | DSA 后端：`AscendDSABackend` + `AscendDSAImpl`（分层压缩 + SWA + indexer） |
-| [vllm_ascend/attention/abstract.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/abstract.py) | DSA 实现的抽象基类 `DSAAttentionImpl` |
-| [vllm_ascend/attention/indexer.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/indexer.py) | `AscendSFAIndexerBackend`：SFA 索引缓存的「占位后端」 |
-| [vllm_ascend/core/kv_cache_interface.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/core/kv_cache_interface.py) | KV 缓存规格：`AscendMLAAttentionSpec`（行 18）与 `AscendSFAIndexerCacheSpec`（行 97，#12849 改继承 `MLAAttentionSpec`） |
-| [vllm_ascend/attention/fa3_v1.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/fa3_v1.py) | `AscendFABackend`：基于 flash_attn_npu_v3 的训练-推理一致性后端 |
-| [vllm_ascend/utils.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/utils.py) | `model_uses_sfa_sparse`（行 111）、`enable_dsa_cp`（行 1371）等判定函数 |
+| [vllm_ascend/platform.py](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/platform.py) | 平台钩子 `get_attn_backend_cls`，用三元组分发到 MLA/SFA/DSA 后端；FA3 特判 `_validate_fa3_backend`（#13484 后为模块级函数） |
+| [vllm_ascend/attention/mla_v1.py](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/mla_v1.py) | MLA 后端：`AscendMLABackend` + `AscendMLAImpl`（隐式 KV 压缩） |
+| [vllm_ascend/attention/sfa_v1.py](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/sfa_v1.py) | SFA 后端：`AscendSFABackend`（行 116）+ `AscendSFAImpl`（行 504）；#12852 把 `record_attention_compute_start` 前移到 `forward`（行 2029） |
+| [vllm_ascend/attention/dsa_v1.py](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/dsa_v1.py) | DSA 后端：`AscendDSABackend` + `AscendDSAImpl`（分层压缩 + SWA + indexer） |
+| [vllm_ascend/attention/abstract.py](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/abstract.py) | DSA 实现的抽象基类 `DSAAttentionImpl` |
+| [vllm_ascend/attention/indexer.py](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/indexer.py) | `AscendSFAIndexerBackend`：SFA 索引缓存的「占位后端」 |
+| [vllm_ascend/memcache_comm_fence.py](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/memcache_comm_fence.py) | `AttentionComputeStartGate` 与 `record_attention_compute_start`：layerwise 预取的「注意力起点 gate」（#12852 重点） |
+| [vllm_ascend/core/kv_cache_interface.py](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/core/kv_cache_interface.py) | KV 缓存规格：`AscendMLAAttentionSpec` 与 `AscendSFAIndexerCacheSpec`（#12849 改继承 `MLAAttentionSpec`） |
+| [vllm_ascend/attention/fa3_v1.py](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/fa3_v1.py) | `AscendFABackend`：基于 flash_attn_npu_v3 的训练-推理一致性后端 |
+| [vllm_ascend/utils.py](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/utils.py) | `model_uses_sfa_sparse`、`enable_dsa_cp` 等判定函数 |
 
 ## 4. 核心概念与源码讲解
 
@@ -108,7 +112,7 @@ vllm-ascend 不在模型代码里硬编码「我用 MLA 还是 SFA」，而是�
 
 #### 4.1.3 源码精读
 
-路由表与 FA3 特判在 [vllm_ascend/platform.py:215-242](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/platform.py#L215-L242)。注意 #13484 重构后，FA3 特判 `_validate_fa3_backend` 已从类方法下移为**模块级函数**，故这里直接 `_validate_fa3_backend(...)` 调用，而非 `cls._validate_fa3_backend(...)`：
+路由表与 FA3 特判在 [vllm_ascend/platform.py:215-242](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/platform.py#L215-L242)。注意 #13484 重构后，FA3 特判 `_validate_fa3_backend` 已从类方法下移为**模块级函数**，故这里直接 `_validate_fa3_backend(...)` 调用，而非 `cls._validate_fa3_backend(...)`：
 
 ```python
 # 平台钩子：用三元组查表返回后端类路径
@@ -131,7 +135,7 @@ def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads:
     return backend_map[(attn_selector_config.use_mla, attn_selector_config.use_sparse, use_compress)]
 ```
 
-三元组的两个维度由辅助函数从 HF 配置推断。`use_sparse` 的判定逻辑很关键——它要求「有 `index_topk` 但没有 `compress_ratios`」，这正是 SFA 与 DSA 的分水岭，见 [vllm_ascend/utils.py:111-119](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/utils.py#L111-L119)：
+三元组的两个维度由辅助函数从 HF 配置推断。`use_sparse` 的判定逻辑很关键——它要求「有 `index_topk` 但没有 `compress_ratios`」，这正是 SFA 与 DSA 的分水岭，见 [vllm_ascend/utils.py:111-119](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/utils.py#L111-L119)：
 
 ```python
 def model_uses_sfa_sparse(model_config):
@@ -145,7 +149,7 @@ def model_uses_sfa_sparse(model_config):
     )
 ```
 
-而 `use_compress` 在模型运行器初始化时根据 `hf_config` 是否含 `compress_ratios` 一次性确定，见 [vllm_ascend/worker/model_runner_v1.py:276-278](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/model_runner_v1.py#L276-L278)（必须在 `super().__init__()` 之前设置，因为父类初始化分配 KV 张量时会读取它）：
+而 `use_compress` 在模型运行器初始化时根据 `hf_config` 是否含 `compress_ratios` 一次性确定，见 [vllm_ascend/worker/model_runner_v1.py:296-298](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/model_runner_v1.py#L296-L298)（必须在 `super().__init__()` 之前设置，因为父类初始化分配 KV 张量时会读取它）：
 
 ```python
 self.use_compress = (
@@ -153,7 +157,7 @@ self.use_compress = (
 )
 ```
 
-FA3 后端的特判 `_validate_fa3_backend` 在 #13484 重构后位于 [vllm_ascend/platform.py:1089-1113](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/platform.py#L1089-L1113)（**模块级函数**，不再是 `NPUPlatform` 的方法）：它要求「batch invariant（训练-推理一致性）」、`key == (False, False)`（非 MLA 非 SFA）、且 `flash_attn_npu_v3` 可导入并提供 `flash_attn_with_kvcache`。FA3 主要用于和训练侧对齐数值，性能通常不如默认 FIA 后端，故仅在一致性场景启用。
+FA3 后端的特判 `_validate_fa3_backend` 在 #13484 重构后位于 [vllm_ascend/platform.py:1089-1113](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/platform.py#L1089-L1113)（**模块级函数**，不再是 `NPUPlatform` 的方法）：它要求「batch invariant（训练-推理一致性）」、`key == (False, False)`（非 MLA 非 SFA）、且 `flash_attn_npu_v3` 可导入并提供 `flash_attn_with_kvcache`。FA3 主要用于和训练侧对齐数值，性能通常不如默认 FIA 后端，故仅在一致性场景启用。
 
 #### 4.1.4 代码实践
 
@@ -161,8 +165,8 @@ FA3 后端的特判 `_validate_fa3_backend` 在 #13484 重构后位于 [vllm_asc
 
 操作步骤（源码阅读型，无需 NPU）：
 
-1. 打开 [vllm_ascend/platform.py:223-228](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/platform.py#L223-L228)，确认四条映射。
-2. 打开 [vllm_ascend/utils.py:111-119](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/utils.py#L111-L119)，理解 SFA 的判定门槛。
+1. 打开 [vllm_ascend/platform.py:223-228](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/platform.py#L223-L228)，确认四条映射。
+2. 打开 [vllm_ascend/utils.py:111-119](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/utils.py#L111-L119)，理解 SFA 的判定门槛。
 3. 阅读三个后端的 `get_kv_cache_shape`（4.2–4.4 会给出行号），体会 KV 缓存形状的差异。
 4. 完成综合实践 Task 1 的对照表（参考答案见第 5 节）。
 
@@ -221,7 +225,7 @@ MLA 后端对 prefill（长序列、多 token）和 decode（每序列 1 token�
 
 #### 4.2.3 源码精读
 
-后端类声明 KV 缓存为 4 维，且按 `enable_dcp()` 在普通实现与上下文并行实现间分流，见 [vllm_ascend/attention/mla_v1.py:71-109](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/mla_v1.py#L71-L109)：
+后端类声明 KV 缓存为 4 维，且按 `enable_dcp()` 在普通实现与上下文并行实现间分流，见 [vllm_ascend/attention/mla_v1.py:71-109](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/mla_v1.py#L71-L109)：
 
 ```python
 class AscendMLABackend(AttentionBackend):
@@ -247,7 +251,7 @@ class AscendMLABackend(AttentionBackend):
 
 > 这段代码说明：MLA 后端返回的 KV 形状是 `(num_blocks, block_size, num_kv_heads, head_size)`，其中 `head_size` 实际承载的是隐向量维度（`kv_lora_rank`），而非完整头维度。这就是 MLA 省 KV 的物理来源。
 
-权重吸收发生在查询投影里，见 [vllm_ascend/attention/mla_v1.py:895-907](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/mla_v1.py#L895-L907)：
+权重吸收发生在查询投影里，见 [vllm_ascend/attention/mla_v1.py:895-907](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/mla_v1.py#L895-L907)：
 
 ```python
 # _q_proj_and_k_up_proj：把 W_UK 吸收进查询
@@ -262,9 +266,9 @@ def _q_proj_and_k_up_proj(self, x):
     return ql_nope.transpose(0, 1), q_pe
 ```
 
-对应的 \(W_{UK}\)、\(W_{UV}\) 是在 `process_weights_after_loading` 里从 `kv_b_proj` 权重**预先拆分并转置**好的（`W_UV`、`W_UK_T`），见 [vllm_ascend/attention/mla_v1.py:909-942](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/mla_v1.py#L909-L942)。这正是「吸收」能在运行期廉价执行的缘故——重排工作在加载后一次性完成。
+对应的 \(W_{UK}\)、\(W_{UV}\) 是在 `process_weights_after_loading` 里从 `kv_b_proj` 权重**预先拆分并转置**好的（`W_UV`、`W_UK_T`），见 [vllm_ascend/attention/mla_v1.py:909-942](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/mla_v1.py#L909-L942)。这正是「吸收」能在运行期廉价执行的缘故——重排工作在加载后一次性完成。
 
-注意力算完后用 \(W_{UV}\) 投影回输出维度，见 [vllm_ascend/attention/mla_v1.py:871-878](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/mla_v1.py#L871-L878)：
+注意力算完后用 \(W_{UV}\) 投影回输出维度，见 [vllm_ascend/attention/mla_v1.py:871-878](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/mla_v1.py#L871-L878)：
 
 ```python
 def _v_up_proj(self, x):
@@ -274,9 +278,9 @@ def _v_up_proj(self, x):
     return x
 ```
 
-decode 主算子在 [vllm_ascend/attention/mla_v1.py:1375-1579](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/mla_v1.py#L1375-L1579)（`_forward_decode`），它根据是否投机解码、是否 `fa_quant`、是否 NZ 布局选用不同的 `input_layout`（如 `BNSD_NBSD`、`TND_NTD`），再调 `npu_fused_infer_attention_score_v2`，并支持 ACL Graph 捕获。prefill 主算子在 [vllm_ascend/attention/mla_v1.py:1226-1296](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/mla_v1.py#L1226-L1296)（`_forward_prefill`），用 TND 布局展开完整 K/V 算注意力。整体 `forward` 把 decode/prefill 结果拼回 `o_proj_input` 再做输出投影，见 [vllm_ascend/attention/mla_v1.py:1701-1776](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/mla_v1.py#L1701-L1776)。
+decode 主算子在 [vllm_ascend/attention/mla_v1.py:1375-1579](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/mla_v1.py#L1375-L1579)（`_forward_decode`），它根据是否投机解码、是否 `fa_quant`、是否 NZ 布局选用不同的 `input_layout`（如 `BNSD_NBSD`、`TND_NTD`），再调 `npu_fused_infer_attention_score_v2`，并支持 ACL Graph 捕获。prefill 主算子在 [vllm_ascend/attention/mla_v1.py:1226-1296](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/mla_v1.py#L1226-L1296)（`_forward_prefill`），用 TND 布局展开完整 K/V 算注意力。整体 `forward` 把 decode/prefill 结果拼回 `o_proj_input` 再做输出投影，见 [vllm_ascend/attention/mla_v1.py:1701-1776](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/mla_v1.py#L1701-L1776)。
 
-> **#13456 关联说明（FIAV2 连续性约束）**：MLA decode 与标准注意力都最终落到 CANN 的 `npu_fused_infer_attention_score_v2`（FIAV2）算子。CANN 升级到 9.1.0 后，该算子新增「K/V 必须连续」的约束；在 GQA（分组查询注意力）等场景下，K/V 张量经头分组后可能非连续，会触发错误。#13456 的修复点落在标准 fiaV2 后端 `AscendAttentionBackendImpl` 里，对入参显式 `.contiguous()`，见 [vllm_ascend/attention/attention_v1.py:1314-1317](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/attention_v1.py#L1314-L1317)：
+> **#13456 关联说明（FIAV2 连续性约束）**：MLA decode 与标准注意力都最终落到 CANN 的 `npu_fused_infer_attention_score_v2`（FIAV2）算子。CANN 升级到 9.1.0 后，该算子新增「K/V 必须连续」的约束；在 GQA（分组查询注意力）等场景下，K/V 张量经头分组后可能非连续，会触发错误。#13456 的修复点落在标准 fiaV2 后端 `AscendAttentionBackendImpl` 里，对入参显式 `.contiguous()`，见 [vllm_ascend/attention/attention_v1.py:1314-1317](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/attention_v1.py#L1314-L1317)：
 >
 > ```python
 > attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
@@ -287,7 +291,7 @@ decode 主算子在 [vllm_ascend/attention/mla_v1.py:1375-1579](https://github.c
 > )
 > ```
 >
-> MLA/SFA 的 decode 路径如果遇到同样的非连续布局，也遵循同一约束（本区间内该修复登记在标准后端，是 FIAV2 家族的统一处理）。
+> MLA/SFA 的 decode 路径如果遇到同样的非连续布局，也遵循同一约束（该修复登记在标准后端，是 FIAV2 家族的统一处理）。
 
 #### 4.2.4 代码实践
 
@@ -295,7 +299,7 @@ decode 主算子在 [vllm_ascend/attention/mla_v1.py:1375-1579](https://github.c
 
 操作步骤（源码阅读型，无需 NPU）：
 
-1. 从 [vllm_ascend/attention/mla_v1.py:1701](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/mla_v1.py#L1701) 的 `forward` 入手，确认它调用 `_mla_preprocess`（第 1630 行）。
+1. 从 [vllm_ascend/attention/mla_v1.py:1701](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/mla_v1.py#L1701) 的 `forward` 入手，确认它调用 `_mla_preprocess`（第 1630 行）。
 2. 进入 `mla_preprocess_decode`（第 1606 行），找到 `_q_proj_and_k_up_proj`（第 895 行）——这里是「吸收」。
 3. 跟到 `_forward_decode`（第 1375 行），找到对 `npu_fused_infer_attention_score_v2` 的调用（第 1569、1575 行）——这里是「隐向量注意力」。
 4. 注意 `forward` 末尾 `_v_up_proj`（第 871 行）的返回被写进 `o_proj_input`——这里是「重建」。
@@ -329,24 +333,25 @@ SFA（Sparse Flash Attention）服务「带 indexer、但无分层压缩」的�
 
 再对选中的主 KV 块执行稀疏注意力（`npu_kv_quant_sparse_flash_attention` 一类算子）。这样长上下文下既省算力，又保留对关键信息的精确访问。
 
-> 术语提示：SFA 里 `indexer` 是模型层的对象（含 `wq_b`、`wk_weights_proj`、`k_norm` 等）；`topk_indices` 是 indexer 选出的块号；`skip_topk` 表示某层复用别层的 top-k（IndexCache 机制）。
+> 术语提示：SFA 里 `indexer` 是模型层的对象（含 `wq_b`、`wk_weights_proj`、`k_norm` 等）；`topk_indices` 是 indexer 选出的块号；`skip_topk` 表示某层复用别层的 top-k（IndexCache 机制），这样的层**自己没有 indexer**——这一点在 4.3.3 的 prefetch gate 里很关键。
 
 #### 4.3.2 核心流程
 
 SFA 的 `forward` 分「融合预处理」与「原生预处理」两条路：
 
-1. **选择预处理类型** `PreprocessType`（`NATIVE` / `PROLOG_V3` / `MLAPO`）：根据量化方式、是否 KV consumer、是否 DSA-CP 决定能否走融合算子。见 [vllm_ascend/attention/sfa_v1.py:755](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/sfa_v1.py#L755)（`_resolve_preprocess_type`）与 [vllm_ascend/attention/sfa_v1.py:786](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/sfa_v1.py#L786)（`_get_fused_type_unsupported_reasons` 收集降级原因）。
+1. **选择预处理类型** `PreprocessType`（`NATIVE` / `PROLOG_V3` / `MLAPO`）：根据量化方式、是否 KV consumer、是否 DSA-CP 决定能否走融合算子。见 [vllm_ascend/attention/sfa_v1.py:755](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/sfa_v1.py#L755)（`_resolve_preprocess_type`）与 [vllm_ascend/attention/sfa_v1.py:786](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/sfa_v1.py#L786)（`_get_fused_type_unsupported_reasons` 收集降级原因）。
 2. **indexer 预处理 `indexer_select_pre_process`**：算出索引键 \(k_{li}\)，做 RoPE，必要时做 C8 量化后写入 indexer 缓存。
 3. **主 KV 预处理**：NATIVE 路径用 `exec_kv`（`npu_kv_rmsnorm_rope_cache`）把隐向量 RMSNorm+RoPE+写缓存；融合路径用 `npu_mla_prolog_v3` / `mla_preprocess` 一次完成。
-4. **indexer 选择 `indexer_select_post_process`**：算索引查询 \(q_{li}\)，调用 `DeviceOperator.indexer_select_post_process` 得到 top-k 块号（除非 `skip_topk`）。
-5. **稀疏注意力 `_execute_sparse_flash_attention_process`**：把 `ql_nope`、`q_pe`、top-k 块号交给 `DeviceOperator.execute_sparse_flash_attention_process`。
-6. **`_v_up_proj` + `o_proj`**：还原输出并做输出投影。
+4. **打开 prefetch gate（#12852 前移点）**：在选 top-k **之前**调 `record_attention_compute_start()`，标记本层注意力即将在计算流上发射（见 4.3.3）。
+5. **选 top-k**：`skip_topk=True` 时复用缓存（`_get_indexcache_topk_indices`），否则调 `indexer_select_post_process` 算出块号。
+6. **稀疏注意力 `_execute_sparse_flash_attention_process`**：把 `ql_nope`、`q_pe`、top-k 块号交给 `DeviceOperator.execute_sparse_flash_attention_process`。
+7. **`_v_up_proj` + `o_proj`**：还原输出并做输出投影。
 
 SFA 还要处理「主缓存」与「indexer 缓存」的拼装：`_compose_sfa_kv_cache` 把分散分配的主缓存和 indexer 缓存拼成内核期望的元组（C8 量化时布局会变）；开启稀疏 KV 卸载时，主缓存会被注册成 6 元组，需要先剥离出 NPU 上的前两个张量（见 4.3.3）。
 
 #### 4.3.3 源码精读
 
-SFA 后端与 MLA 后端结构同构。**本次 #13026 之后，`get_builder_cls` / `get_impl_cls` 在最前面新增了「稀疏 KV 卸载」分流**：当 `sparse_kv_offload_config.enabled` 时，换用专门的 `AscendSFAKVOffloadMetadataBuilder` / `AscendSFAKVOffloadImpl`（该特性的数据面与配置约束详见 u10-l6）。其余仍按 `enable_sfa_dcp_replicated_indexer()` 在普通实现与 DCP 实现间分流，见 [vllm_ascend/attention/sfa_v1.py:116-162](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/sfa_v1.py#L116-L162)：
+SFA 后端与 MLA 后端结构同构。**#13026 之后，`get_builder_cls` / `get_impl_cls` 在最前面新增了「稀疏 KV 卸载」分流**：当 `sparse_kv_offload_config.enabled` 时，换用专门的 `AscendSFAKVOffloadMetadataBuilder` / `AscendSFAKVOffloadImpl`（该特性的数据面与配置约束详见 u10-l6）。其余仍按 `enable_sfa_dcp_replicated_indexer()` 在普通实现与 DCP 实现间分流，见 [vllm_ascend/attention/sfa_v1.py:116-162](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/sfa_v1.py#L116-L162)：
 
 ```python
 class AscendSFABackend(AttentionBackend):
@@ -375,9 +380,9 @@ class AscendSFABackend(AttentionBackend):
         return AscendSFAImpl
 ```
 
-> 顺带一提 #13447：本文件内 indexer 量化分支原本引用兼容垫片 `FLOAT8_E8M0FNU_DTYPE`（来自 `vllm_ascend/device/mxfp_compat.py`），现已内联为 `torch_npu.float8_e8m0fnu`，见 [vllm_ascend/attention/sfa_v1.py:1471-1473](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/sfa_v1.py#L1471-L1473)。垫片被移除后，量化 dtype 直接引用 CANN 真实类型，少一层间接。
+> 顺带一提 #13447：本文件内 indexer 量化分支原本引用兼容垫片 `FLOAT8_E8M0FNU_DTYPE`（来自 `vllm_ascend/device/mxfp_compat.py`），现已内联为 `torch_npu.float8_e8m0fnu`，见 [vllm_ascend/attention/sfa_v1.py:1471-1473](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/sfa_v1.py#L1471-L1473)。垫片被移除后，量化 dtype 直接引用 CANN 真实类型，少一层间接。
 
-预处理类型枚举见 [vllm_ascend/attention/sfa_v1.py:79-82](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/sfa_v1.py#L79-L82)：
+预处理类型枚举见 [vllm_ascend/attention/sfa_v1.py:79-82](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/sfa_v1.py#L79-L82)：
 
 ```python
 class PreprocessType(enum.Enum):
@@ -386,7 +391,7 @@ class PreprocessType(enum.Enum):
     MLAPO = "mlapo"        # A3 融合算子（W8A8，≤1024 token）
 ```
 
-indexer 的核心——选 top-k——在 `indexer_select_post_process`，见 [vllm_ascend/attention/sfa_v1.py:1439-1522](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/sfa_v1.py#L1439-L1522)。它先用 `wq_b` 把 `q_c` 投影成索引查询 `q_li`、做 RoPE，再交给 `DeviceOperator.indexer_select_post_process` 输出块号：
+indexer 的核心——选 top-k——在 `indexer_select_post_process`，见 [vllm_ascend/attention/sfa_v1.py:1439-1521](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/sfa_v1.py#L1439-L1521)。它先用 `wq_b` 把 `q_c` 投影成索引查询 `q_li`、做 RoPE，再交给 `DeviceOperator.indexer_select_post_process` 输出块号：
 
 ```python
 def indexer_select_post_process(self, x, q_c, kv_cache, attn_metadata, cos, sin, ...):
@@ -399,9 +404,38 @@ def indexer_select_post_process(self, x, q_c, kv_cache, attn_metadata, cos, sin,
     )                                         # → top-k 块号
 ```
 
-稀疏注意力本体在 [vllm_ascend/attention/sfa_v1.py:1548-1567](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/sfa_v1.py#L1548-L1567)（`_execute_sparse_flash_attention_process`，本次为支持稀疏 KV 卸载新增了 `block_table=None` 形参），整体 `forward` 的编排（含 PROLOG_V3/MLAPO/NATIVE 三路、DSA-CP、o_proj 处理）见 [vllm_ascend/attention/sfa_v1.py:1816-2081](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/sfa_v1.py#L1816-L2080)。
+稀疏注意力本体在 [vllm_ascend/attention/sfa_v1.py:1547-1568](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/sfa_v1.py#L1547-L1568)（`_execute_sparse_flash_attention_process`，为支持稀疏 KV 卸载新增了 `block_table=None` 形参），整体 `forward` 的编排（含 PROLOG_V3/MLAPO/NATIVE 三路、prefetch gate、skip_topk 分支、DSA-CP、o_proj 处理）见 [vllm_ascend/attention/sfa_v1.py:1815-2084](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/sfa_v1.py#L1815-L2084)。
 
-**缓存拼装与稀疏 KV 卸载的衔接**：`_compose_sfa_kv_cache` 负责把主缓存与 indexer 缓存拼成内核元组。开启稀疏 KV 卸载时，主 MLA 缓存会被注册成 6 元组 `(k_npu, v_npu, k_cpu, v_cpu, topk_buffer_k, topk_buffer_v)`，而注意力内核只消费前两个 NPU 张量，故需先剥离，见 [vllm_ascend/attention/sfa_v1.py:1791-1795](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/sfa_v1.py#L1791-L1795)：
+**prefetch gate 与无 indexer 层（本次更新 #12852 重点）**
+
+`record_attention_compute_start()` 是 **layerwise 分层缓冲复用**（#12852，详见 u10-l7）的一个同步原语，来自 [vllm_ascend/memcache_comm_fence.py:86-92](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/memcache_comm_fence.py#L86-L92)。要理解为什么要把它「前移」，先看它打开的是哪扇门：
+
+- 在 layerwise prefill 卸载里，多个 transformer 层**分时复用一组有限的物理设备缓冲**。当前层 L 把自己的 KV 存进一个共享缓冲并跑注意力时，MemCache 后台线程要为**下一层 L+1** 预取（H2D 回载）KV 到另一个刚释放的缓冲。
+- 为了保证「预取」不和「L 还在读缓冲」冲突，预取任务在提交时拿走**当前层对应的 gate**——`reset_attention_compute_start_gate()` 每层建一个新 gate，见 [vllm_ascend/memcache_comm_fence.py:64-75](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/memcache_comm_fence.py#L64-L75)；随后阻塞在 `AttentionComputeStartGate.wait()` 上，见 [vllm_ascend/memcache_comm_fence.py:53-61](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/memcache_comm_fence.py#L53-L61)。
+- 当 L 的注意力**真正要在计算流上发射**时，调用 `record_attention_compute_start()` 记录一个 NPU event 并打开 gate，见 [vllm_ascend/memcache_comm_fence.py:41-51](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/memcache_comm_fence.py#L41-L51)；后台线程被唤醒，才开始提交 H2D。这样「预取」严格晚于「L 开始用缓冲」。
+
+> 一句话：**gate 把「下一层的 H2D 预取」闸在「当前层注意力开始发射」之后**，避免覆盖仍在被读的共享缓冲。
+
+**#12852 之前的 bug**：`record_attention_compute_start()` 原本写在 `indexer_select_post_process` 末尾、紧贴 `return DeviceOperator.indexer_select_post_process(...)`。也就是说，**只有真正跑了 indexer 的层才会打开 gate**。但有些 SFA 层（如 GLM-5.2）设置 `skip_topk=True`、复用别层缓存的 top-k、本身**没有 indexer**——它们在 `forward` 里走的是 `_get_indexcache_topk_indices` 分支，**根本不会进入 `indexer_select_post_process`**，于是这层对应的 gate 永远关闭，后台预取线程一直阻塞到超时，layerwise 复用时序被打破。
+
+**修复**：把 `record_attention_compute_start()` 从 indexer 内部删掉，前移到 `forward` 主体、`skip_topk` 分支**之前**，见 [vllm_ascend/attention/sfa_v1.py:2026-2033](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/sfa_v1.py#L2026-L2033)：
+
+```python
+# Open the prefetch gate for every SFA layer. Some GLM-5.2 layers
+# reuse cached top-k indices and have no indexer, so recording this
+# inside indexer_select_post_process would leave their gate closed.
+record_attention_compute_start()
+
+if self.skip_topk:
+    topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)   # 无 indexer 层走这里
+else:
+    ...
+    topk_indices = self.indexer_select_post_process(...)                 # 有 indexer 层走这里
+```
+
+这样**每一层 SFA**（无论有没有 indexer）都会在注意力发射前打开自己的 gate，layerwise 预取时序对所有层一致。
+
+**缓存拼装与稀疏 KV 卸载的衔接**：`_compose_sfa_kv_cache`（[vllm_ascend/attention/sfa_v1.py:1757](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/sfa_v1.py#L1757)）负责把主缓存与 indexer 缓存拼成内核元组。开启稀疏 KV 卸载时，主 MLA 缓存会被注册成 6 元组 `(k_npu, v_npu, k_cpu, v_cpu, topk_buffer_k, topk_buffer_v)`，而注意力内核只消费前两个 NPU 张量，故需先剥离，见 [vllm_ascend/attention/sfa_v1.py:1790-1794](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/sfa_v1.py#L1790-L1794)：
 
 ```python
 # Sparse KV offload registers the main MLA cache as a 6-tuple
@@ -411,12 +445,12 @@ if len(main_cache) == OFFLOAD_KV_CACHE_TUPLE_LEN:
     main_cache = (main_cache[OFFLOAD_K_CACHE_NPU_INDEX], main_cache[OFFLOAD_V_CACHE_NPU_INDEX])
 ```
 
-**indexer 的「占位后端」与缓存规格（本讲重点）**
+**indexer 的「占位后端」与缓存规格**
 
 SFA 的 indexer 缓存是一个独立的物理张量，需要两件东西配合才能被 KV 缓存规划器正确分配：
 
-1. **占位后端 `AscendSFAIndexerBackend`**（[vllm_ascend/attention/indexer.py:14-55](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/indexer.py#L14-L55)）：它不参与真正的前向（`build()` 直接返回 `None`），只是「缓存可见性」的载体——让规划器为 indexer 单独分配一块物理张量，并与主 MLA 缓存**共享 block id**。
-2. **缓存规格 `AscendSFAIndexerCacheSpec`**（[vllm_ascend/core/kv_cache_interface.py:96-103](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/core/kv_cache_interface.py#L96-L103)）：描述这块 indexer 缓存的形状、dtype、scale 布局等。
+1. **占位后端 `AscendSFAIndexerBackend`**（[vllm_ascend/attention/indexer.py:14-55](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/indexer.py#L14-L55)）：它不参与真正的前向（`build()` 直接返回 `None`），只是「缓存可见性」的载体——让规划器为 indexer 单独分配一块物理张量，并与主 MLA 缓存**共享 block id**。
+2. **缓存规格 `AscendSFAIndexerCacheSpec`**（[vllm_ascend/core/kv_cache_interface.py:96-103](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/core/kv_cache_interface.py#L96-L103)）：描述这块 indexer 缓存的形状、dtype、scale 布局等。
 
 **#12849 的关键改动**：`AscendSFAIndexerCacheSpec` 的父类从 `FullAttentionSpec` 改为 `MLAAttentionSpec`：
 
@@ -433,23 +467,24 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):   # 改动前: FullAttentionS
 **为什么改继承 `MLAAttentionSpec`**（详见 4.3.5 练习与第 5 节综合实践）：
 
 - **语义对齐**：indexer 的 K 缓存本质是一块「跨头共享、按 block 组织、带 `compress_ratio` 的单一隐式张量」，正是 `MLAAttentionSpec` 建模的对象；而 `FullAttentionSpec` 描述的是标准「K/V 各一份」的注意力，过于宽泛。
-- **保留 block-id 共享**：`MLAAttentionSpec` 本身是 `FullAttentionSpec` 的子类，所以 indexer 缓存仍是「full-attention-compatible」，依旧和主 MLA 缓存落入同一个 `UniformType` 组、共享 block id（二者注册时的 `uniform_type_base_spec` 都是 `FullAttentionSpec`，见 [vllm_ascend/core/kv_cache_interface.py:213-223](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/core/kv_cache_interface.py#L213-L223)）。
-- **继承 MLA 的内存核算**：`MLAAttentionSpec` 携带 `compress_ratio` 字段，其 `max_memory_usage_bytes` 按 `cdiv(max_model_len, block_size*compress_ratio)` 计页（见 [vllm_ascend/core/kv_cache_interface.py:86-93](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/core/kv_cache_interface.py#L86-L93)）；`FullAttentionSpec` 没有这一字段，无法正确规划这类 MLA 系单张量缓存的显存。
+- **保留 block-id 共享**：`MLAAttentionSpec` 本身是 `FullAttentionSpec` 的子类，所以 indexer 缓存仍是「full-attention-compatible」，依旧和主 MLA 缓存落入同一个 `UniformType` 组、共享 block id（二者注册时的 `uniform_type_base_spec` 都是 `FullAttentionSpec`，见 [vllm_ascend/core/kv_cache_interface.py:213-223](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/core/kv_cache_interface.py#L213-L223)）。
+- **继承 MLA 的内存核算**：`MLAAttentionSpec` 携带 `compress_ratio` 字段，其 `max_memory_usage_bytes` 按 `cdiv(max_model_len, block_size*compress_ratio)` 计页（见 [vllm_ascend/core/kv_cache_interface.py:86-93](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/core/kv_cache_interface.py#L86-L93)）；`FullAttentionSpec` 没有这一字段，无法正确规划这类 MLA 系单张量缓存的显存。
 
-> 顺带一提：#13026 还给主 MLA 规格 `AscendMLAAttentionSpec` 增加了 `store_on_host: bool = False` 字段（[vllm_ascend/core/kv_cache_interface.py:33](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/core/kv_cache_interface.py#L33)）及其 merge 校验，用于标记「主 KV 驻留主机」的稀疏卸载场景——同样详见 u10-l6。
+> 顺带一提：#13026 还给主 MLA 规格 `AscendMLAAttentionSpec` 增加了 `store_on_host: bool = False` 字段（[vllm_ascend/core/kv_cache_interface.py:33](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/core/kv_cache_interface.py#L33)）及其 merge 校验，用于标记「主 KV 驻留主机」的稀疏卸载场景——同样详见 u10-l6。
 
 #### 4.3.4 代码实践
 
-> **实践目标**：理解 indexer 缓存为何需要「占位后端 + MLA 系缓存规格」两件套，并验证 #12849 的继承改动。
+> **实践目标**：理解 prefetch gate 前移（#12852）与 indexer 缓存「占位后端 + MLA 系缓存规格」两件套。
 
 操作步骤（源码阅读型）：
 
-1. 打开 [vllm_ascend/attention/indexer.py:14-55](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/indexer.py#L14-L55)，读 `AscendSFAIndexerBackend` 的类文档字符串，确认它「只让缓存可见、不参与前向」。
-2. 打开 [vllm_ascend/core/kv_cache_interface.py:96-157](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/core/kv_cache_interface.py#L96-L157)，确认 `AscendSFAIndexerCacheSpec(MLAAttentionSpec)` 的父类、它的 `merge()` 断言与 `real_page_size_bytes`。
-3. 回到 SFA `forward` 的 [vllm_ascend/attention/sfa_v1.py:1816](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/sfa_v1.py#L1816)，看 `_compose_sfa_kv_cache`（第 1758 行）如何把主缓存与 `self.indexer.k_cache.kv_cache` 拼成元组。
-4. 思考：如果没有占位后端 + 独立缓存规格，KV 缓存规划器如何知道要为 indexer 分配一块独立张量、又如何与主缓存共享 block id？
+1. 打开 [vllm_ascend/memcache_comm_fence.py:27-61](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/memcache_comm_fence.py#L27-L61)，读 `AttentionComputeStartGate` 的类文档字符串与 `record`/`wait`，确认「gate 在注意力发射时打开、MemCache 线程等它」。
+2. 打开 [vllm_ascend/attention/sfa_v1.py:2026-2033](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/sfa_v1.py#L2026-L2033)，看 `record_attention_compute_start()` 现在位于 `skip_topk` 分支**之前**；对照 [vllm_ascend/attention/sfa_v1.py:1439-1521](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/sfa_v1.py#L1439-L1521) 确认它已从 `indexer_select_post_process` 中移除。
+3. 思考：若 `skip_topk=True` 的层仍走旧路径（gate 在 indexer 内），它的 gate 会怎样？
+4. 打开 [vllm_ascend/attention/indexer.py:14-55](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/indexer.py#L14-L55)，确认 `AscendSFAIndexerBackend`「只让缓存可见、不参与前向」。
+5. 打开 [vllm_ascend/core/kv_cache_interface.py:96-157](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/core/kv_cache_interface.py#L96-L157)，确认 `AscendSFAIndexerCacheSpec(MLAAttentionSpec)` 的父类、`merge()` 断言与 `real_page_size_bytes`。
 
-预期结果：能解释「占位后端 = 让规划器分配独立物理缓存；MLA 系缓存规格 = 描述其形状并共享 block id；前向仍由真正的 `*.attn` 层驱动」这一设计。运行结果：待本地验证（需要带 indexer 的模型与 NPU 环境）。
+预期结果：能解释「gate 前移 = 让无 indexer 层也打开预取闸门，避免 MemCache 预取线程阻塞超时」；以及「占位后端 = 让规划器分配独立物理缓存；MLA 系缓存规格 = 描述其形状并共享 block id；前向仍由真正的 `*.attn` 层驱动」这一设计。运行结果：待本地验证（需要带 indexer 的模型与 NPU 环境）。
 
 #### 4.3.5 小练习与答案
 
@@ -461,9 +496,13 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):   # 改动前: FullAttentionS
 
 **参考答案**：`PROLOG_V3`、`MLAPO` 这类融合算子有前提（特定量化、KV consumer、token 数上限、非 DSA-CP 等）。当模型/配置不满足前提（如未量化、或 token 数超过 `MLAPO_MAX_SUPPORTED_TOKENS=1024`），必须回退到逐步执行的 `NATIVE` 路径以保证正确性。`_resolve_preprocess_type` 与 `_get_fused_type_unsupported_reasons` 负责收集不支持原因并降级。
 
-**练习 3**（本次更新）：`AscendSFAIndexerCacheSpec` 为什么从 `FullAttentionSpec` 改继承 `MLAAttentionSpec`？改了之后还能和主 MLA 缓存共享 block id 吗？
+**练习 3**（#12849）：`AscendSFAIndexerCacheSpec` 为什么从 `FullAttentionSpec` 改继承 `MLAAttentionSpec`？改了之后还能和主 MLA 缓存共享 block id 吗？
 
 **参考答案**：改继承是因为 indexer 的 K 缓存语义上就是一块「跨头共享、带 `compress_ratio`、按 block 组织的单一隐式张量」，与 `MLAAttentionSpec` 一致；`FullAttentionSpec` 描述的是标准 K/V 注意力，且缺少 `compress_ratio`，无法正确核算这类缓存的显存（`max_memory_usage_bytes` 依赖 `compress_ratio`）。改继承后**仍能共享 block id**：因为 `MLAAttentionSpec` 本身是 `FullAttentionSpec` 的子类，indexer 缓存依旧「full-attention-compatible」，与主 MLA 缓存（`AscendMLAAttentionSpec`）落入同一 `UniformType` 组（二者 `uniform_type_base_spec` 都是 `FullAttentionSpec`），从而共享 block id。
+
+**练习 4**（本次更新 #12852）：为什么 `record_attention_compute_start()` 不能继续留在 `indexer_select_post_process` 里？把它前移到 `forward`、`skip_topk` 分支之前解决了什么问题？
+
+**参考答案**：留在 indexer 里意味着「只有跑 indexer 的层才打开 prefetch gate」。但 GLM-5.2 等模型的某些 SFA 层设 `skip_topk=True`、复用别层的 top-k、**没有 indexer**，在 `forward` 里走 `_get_indexcache_topk_indices` 分支，根本不进 `indexer_select_post_process`，于是这些层的 gate 永远关闭，layerwise 预取的后台线程（`AttentionComputeStartGate.wait()`）一直阻塞到超时，缓冲复用时序被打破。前移到 `skip_topk` 分支之前，保证**每一层**（不管有没有 indexer）都在注意力发射前打开自己的 gate，layerwise 复用时序对所有层一致。
 
 ---
 
@@ -479,7 +518,7 @@ DSA 服务「带 `compress_ratios`」的模型（如 DeepSeek-V4）。它在 SFA
 
 `compress_ratio` 取值决定缓存元组里有多少张量：`=1` 只有 SWA；`=4` 有「attn + compressor 状态 + indexer compressor 状态 + indexer k + SWA」；`=128` 有「attn + compressor 状态 + SWA」。DSA 还引入了 Hadamard 旋转（`rotate_activation`）等数值技巧。
 
-> 术语提示：DSA 实现的抽象基类是 `DSAAttentionImpl`（[abstract.py:18](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/abstract.py#L18)），它的 `forward` 签名与 MLA 不同（接受 `kv_c_normed`、`k_pe` 等），所以平台用 `DSAAttentionImpl` 而非 `MLAAttentionImpl` 作为基类。
+> 术语提示：DSA 实现的抽象基类是 `DSAAttentionImpl`（[abstract.py:18](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/abstract.py#L18)），它的 `forward` 签名与 MLA 不同（接受 `kv_c_normed`、`k_pe` 等），所以平台用 `DSAAttentionImpl` 而非 `MLAAttentionImpl` 作为基类。
 
 #### 4.4.2 核心流程
 
@@ -502,7 +541,7 @@ forward
 
 #### 4.4.3 源码精读
 
-DSA 后端声明了**多种 kernel block size**（2/4/8/…/128，区别于 MLA/SFA 只支持 128），并提供 `get_scale_shape`（给压缩状态的 scale 缓存），见 [vllm_ascend/attention/dsa_v1.py:191-231](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/dsa_v1.py#L191-L231)：
+DSA 后端声明了**多种 kernel block size**（2/4/8/…/128，区别于 MLA/SFA 只支持 128），并提供 `get_scale_shape`（给压缩状态的 scale 缓存），见 [vllm_ascend/attention/dsa_v1.py:191-231](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/dsa_v1.py#L191-L231)：
 
 ```python
 class AscendDSABackend(AttentionBackend):
@@ -526,9 +565,9 @@ class AscendDSABackend(AttentionBackend):
         return AscendDSAImpl
 ```
 
-> `enable_dsa_cp()`（[vllm_ascend/utils.py:1371-1391](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/utils.py#L1371-L1391)）要求模型有 indexer 且显式开启 `additional_config["enable_dsa_cp"]` 并启用 SP（FlashComm），三者全满足才走 DSA-CP 实现。
+> `enable_dsa_cp()`（[vllm_ascend/utils.py:1371-1391](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/utils.py#L1371-L1391)）要求模型有 indexer 且显式开启 `additional_config["enable_dsa_cp"]` 并启用 SP（FlashComm），三者全满足才走 DSA-CP 实现。
 
-`forward` 按 `compress_ratio` 解包缓存与元数据，见 [vllm_ascend/attention/dsa_v1.py:1939-1958](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/dsa_v1.py#L1939-L1958)：
+`forward` 按 `compress_ratio` 解包缓存与元数据，见 [vllm_ascend/attention/dsa_v1.py:1939-1958](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/dsa_v1.py#L1939-L1958)：
 
 ```python
 (compress_kv_cache, swa_kv_cache, state_cache, indexer_k_cache,
@@ -547,7 +586,7 @@ else:  # ratio == 1：只有 SWA
     (swa_metadata,) = attn_metadata
 ```
 
-`build_prefill_metadata` 里按 `compress_ratio` 选 `cmp_ratio`（1/4/128）和掩码模式（滑窗/causal）调 `metadata_op`，见 [vllm_ascend/attention/dsa_v1.py:815-893](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/dsa_v1.py#L815-L893)（`ori_mask_mode=4` 表示滑窗）。稀疏注意力本体在 `_forward_prefill`，`compress_ratio<=1` 时直接对 SWA 缓存算稀疏注意力，见 [vllm_ascend/attention/dsa_v1.py:2049-2070](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/dsa_v1.py#L2049-L2070)：
+`build_prefill_metadata` 里按 `compress_ratio` 选 `cmp_ratio`（1/4/128）和掩码模式（滑窗/causal）调 `metadata_op`，见 [vllm_ascend/attention/dsa_v1.py:815-893](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/dsa_v1.py#L815-L893)（`ori_mask_mode=4` 表示滑窗）。稀疏注意力本体在 `_forward_prefill`，`compress_ratio<=1` 时直接对 SWA 缓存算稀疏注意力，见 [vllm_ascend/attention/dsa_v1.py:2049-2070](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/dsa_v1.py#L2049-L2070)：
 
 ```python
 attn_op = DeviceOperator.get_dsa_sparse_attn_op()
@@ -569,7 +608,7 @@ return attn_op(
 )[0]
 ```
 
-输出投影 `_forward_o_proj` 支持四种路径（A5 的 FP8 量化 bmm、`oproj_tp_enable` 的 OTP all-to-all/reduce-scatter、`olora_tp_enable`、普通 bmm），见 [vllm_ascend/attention/dsa_v1.py:1652-1759](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/dsa_v1.py#L1652-L1759)，这是 DSA 在张量并行下区别于 MLA 的地方。
+输出投影 `_forward_o_proj` 支持四种路径（A5 的 FP8 量化 bmm、`oproj_tp_enable` 的 OTP all-to-all/reduce-scatter、`olora_tp_enable`、普通 bmm），见 [vllm_ascend/attention/dsa_v1.py:1652-1759](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/dsa_v1.py#L1652-L1759)，这是 DSA 在张量并行下区别于 MLA 的地方。
 
 #### 4.4.4 代码实践
 
@@ -577,8 +616,8 @@ return attn_op(
 
 操作步骤（源码阅读型）：
 
-1. 读 [vllm_ascend/attention/dsa_v1.py:1939-1958](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/dsa_v1.py#L1939-L1958)，记下 ratio=1/4/128 各自解包的元组长度。
-2. 读 [vllm_ascend/attention/dsa_v1.py:815-893](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/dsa_v1.py#L815-L893)，注意三种 ratio 下 `cmp_ratio`、`ori_mask_mode`、`cmp_mask_mode` 的差异。
+1. 读 [vllm_ascend/attention/dsa_v1.py:1939-1958](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/dsa_v1.py#L1939-L1958)，记下 ratio=1/4/128 各自解包的元组长度。
+2. 读 [vllm_ascend/attention/dsa_v1.py:815-893](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/dsa_v1.py#L815-L893)，注意三种 ratio 下 `cmp_ratio`、`ori_mask_mode`、`cmp_mask_mode` 的差异。
 3. 列一张表：ratio / 缓存元组内容 / 是否有 compressor 状态 / 掩码模式。
 
 预期结果：能说清「ratio=1 纯 SWA；ratio=4 引入 compressor 状态 + indexer；ratio=128 进一步压缩」的层级关系。运行结果：待本地验证（需 DeepSeek-V4 类带 `compress_ratios` 的模型与 NPU）。
@@ -597,7 +636,7 @@ return attn_op(
 
 ## 5. 综合实践
 
-把本讲的知识串起来，完成下面的「三类注意力对照表」与两次推理。
+把本讲的知识串起来，完成下面的「三类注意力对照表」与三次推理。
 
 **任务 1：填表（本讲指定实践任务）**
 
@@ -608,7 +647,7 @@ return attn_op(
 | KV 压缩 | 隐式压缩为隐向量 `kv_lora_rank`；V 不存，由 \(W_{UV}\) 重建 | MLA 隐式压缩 + indexer 选 top-k 块（不压序列长度） | 分层压缩（compressor ratio 4/128）+ SWA 近窗 + indexer |
 | 是否共享 KV | 是（隐向量跨头共享，MQA 风格） | 主 KV 跨头共享；indexer 维护独立索引键 | 多块缓存分层；SWA / 状态 / indexer 各自独立 |
 | 后端类 | `AscendMLABackend` | `AscendSFABackend` | `AscendDSABackend` |
-| 实现基类 | `MLAAttentionImpl` | `MLAAttentionImpl` | `DSAAttentionImpl`（[abstract.py:18](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/attention/abstract.py#L18)） |
+| 实现基类 | `MLAAttentionImpl` | `MLAAttentionImpl` | `DSAAttentionImpl`（[abstract.py:18](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/abstract.py#L18)） |
 | KV 缓存形状 | `(num_blocks, block_size, num_kv_heads, head_size)` | 同左（+ indexer 缓存占位） | 同左（+ scale 形状 + 多块元组） |
 
 **任务 2：选型推理**。假设你拿到一个新模型，其 `config.json` 片段如下，判断它会走哪个后端，并给出推理链：
@@ -629,27 +668,36 @@ return attn_op(
 3. 命中 `backend_map[(True, False, True)]` → **DSA**（`AscendDSABackend`）。
 4. 因 `compress_ratios=[4,128]`，前向会按层在 `compress_ratio=4` 与 `=128` 间切换缓存布局。
 
-**任务 3：缓存规格继承推理（本次更新 #12849）**。回答两个问题：(a) SFA indexer 的 `AscendSFAIndexerCacheSpec` 现在继承自哪个类？(b) 为什么要从旧的 `FullAttentionSpec` 改成它？改了之后还能否与主 MLA 缓存共享 block id？
+**任务 3：缓存规格继承推理（#12849）**。回答两个问题：(a) SFA indexer 的 `AscendSFAIndexerCacheSpec` 现在继承自哪个类？(b) 为什么要从旧的 `FullAttentionSpec` 改成它？改了之后还能否与主 MLA 缓存共享 block id？
 
 参考答案：
 
-(a) 继承自 **`MLAAttentionSpec`**（[kv_cache_interface.py:97](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/core/kv_cache_interface.py#L97)）。
+(a) 继承自 **`MLAAttentionSpec`**（[kv_cache_interface.py:97](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/core/kv_cache_interface.py#L97)）。
 
-(b) 三点原因：① indexer 的 K 缓存语义上是一块「跨头共享、带 `compress_ratio`、按 block 组织的单一隐式张量」，与 `MLAAttentionSpec` 一致，`FullAttentionSpec`（标准 K/V）过于宽泛；② `MLAAttentionSpec` 携带 `compress_ratio`，其显存核算 `max_memory_usage_bytes` 依赖它（[kv_cache_interface.py:86-93](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/core/kv_cache_interface.py#L86-L93)），`FullAttentionSpec` 缺该字段，无法正确规划显存。改继承后**仍能共享 block id**：`MLAAttentionSpec ⊂ FullAttentionSpec`，indexer 缓存依旧「full-attention-compatible」，与主 MLA 缓存落入同一 `UniformType` 组（二者 `uniform_type_base_spec` 都是 `FullAttentionSpec`，[kv_cache_interface.py:213-223](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/core/kv_cache_interface.py#L213-L223)）。
+(b) 三点原因：① indexer 的 K 缓存语义上是一块「跨头共享、带 `compress_ratio`、按 block 组织的单一隐式张量」，与 `MLAAttentionSpec` 一致，`FullAttentionSpec`（标准 K/V）过于宽泛；② `MLAAttentionSpec` 携带 `compress_ratio`，其显存核算 `max_memory_usage_bytes` 依赖它（[kv_cache_interface.py:86-93](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/core/kv_cache_interface.py#L86-L93)），`FullAttentionSpec` 缺该字段，无法正确规划显存。改继承后**仍能共享 block id**：`MLAAttentionSpec ⊂ FullAttentionSpec`，indexer 缓存依旧「full-attention-compatible」，与主 MLA 缓存落入同一 `UniformType` 组（二者 `uniform_type_base_spec` 都是 `FullAttentionSpec`，[kv_cache_interface.py:213-223](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/core/kv_cache_interface.py#L213-L223)）。
+
+**任务 4：prefetch gate 前移推理（本次更新 #12852）**。结合 [memcache_comm_fence.py:27-61](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/memcache_comm_fence.py#L27-L61) 与 [sfa_v1.py:2026-2033](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/attention/sfa_v1.py#L2026-L2033) 回答：`record_attention_compute_start()` 打开的「prefetch gate」控制的是谁等谁？为什么把它放在 `skip_topk` 分支**之前**，而不是放在 `indexer_select_post_process` 里？
+
+参考答案：
+
+- **谁等谁**：MemCache 后台预取线程（要为下一层 L+1 把 KV 从主机 H2D 回载到刚释放的共享缓冲）阻塞在 `AttentionComputeStartGate.wait()` 上，等的是**当前层 L 的注意力开始在计算流上发射**这件事（由 `record_attention_compute_start()` 记录的 NPU event 标记）。目的是保证「下一层的回载」晚于「当前层开始读缓冲」，避免覆盖仍在被读的共享缓冲。
+- **为什么放 `skip_topk` 之前**：放在 `indexer_select_post_process` 里意味着只有「真正跑 indexer 的层」才打开 gate。但 GLM-5.2 等模型的某些 SFA 层 `skip_topk=True`、复用别层 top-k、**没有 indexer**，走 `_get_indexcache_topk_indices` 分支、根本不进 `indexer_select_post_process`，gate 永不打开 → 预取线程阻塞超时。放在 `skip_topk` 分支**之前**，保证**每一层**（无论有没有 indexer）都打开 gate，layerwise 缓冲复用时序对所有层一致。
 
 ## 6. 本讲小结
 
-- 平台用三元组 `(use_mla, use_sparse, use_compress)` 在 [platform.py:223-228](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/platform.py#L223-L228) 把模型路由到 MLA/SFA/DSA 后端；`use_sparse` 要求「有 `index_topk` 无 `compress_ratios`」，`use_compress` 看 `compress_ratios`。#13484 后 FA3 特判 `_validate_fa3_backend` 是模块级函数（[platform.py:1089](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/platform.py#L1089)）。
+- 平台用三元组 `(use_mla, use_sparse, use_compress)` 在 [platform.py:223-228](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/platform.py#L223-L228) 把模型路由到 MLA/SFA/DSA 后端；`use_sparse` 要求「有 `index_topk` 无 `compress_ratios`」，`use_compress` 看 `compress_ratios`（#13484 后 FA3 特判 `_validate_fa3_backend` 是模块级函数）。
 - MLA（`AscendMLABackend`）做隐式 KV 压缩：缓存隐向量而非 K/V，decode 时把 \(W_{UK}\) 吸收进查询、注意力在小维度隐空间完成、再用 \(W_{UV}\) 重建，是省 KV 的物理来源。其 decode 依赖的 FIAV2 算子在 CANN 9.1.0 起要求 K/V 连续（#13456，标准后端已加 `.contiguous()`）。
 - 三类后端的 `get_kv_cache_shape` 都返回 4 维、无前导 `2`，区别于标准注意力；多块缓存用**元组**表达。
 - SFA（`AscendSFABackend`）在 MLA 隐空间之上加 indexer 选 top-k 块；`indexer.py` 的 `AscendSFAIndexerBackend` 是为 indexer 缓存单独分配物理张量的「占位后端」；**#12849 后其缓存规格 `AscendSFAIndexerCacheSpec` 改继承 `MLAAttentionSpec`**（语义对齐 + 继承 compress_ratio 显存核算 + 仍可共享 block id）。
+- **#12852：SFA 把 `record_attention_compute_start()` 从 `indexer_select_post_process` 前移到 `forward` 的 `skip_topk` 分支之前**，使无 indexer 的 SFA 层（如 GLM-5.2）也能打开 layerwise 预取的 prefetch gate（`memcache_comm_fence.py` 的 `AttentionComputeStartGate`），否则 MemCache 预取线程会因 gate 永不打开而阻塞超时。layerwise 缓冲复用全貌见 u10-l7。
 - SFA 后端本次还新增「稀疏 KV 卸载」分流（`get_builder_cls`/`get_impl_cls` 顶部、`_compose_sfa_kv_cache` 剥离 6 元组），数据面与配置约束详见 u10-l6；mxfp 量化 dtype 已内联（#13447）。
 - DSA（`AscendDSABackend`，基类 `DSAAttentionImpl`）再加一层 compressor 分层压缩 + SWA 滑窗，按 `compress_ratio`(1/4/128) 切换缓存元组布局，输出投影支持 OTP/olora_tp 等多种 TP 路径。
 - `AscendFABackend`（`fa3_v1.py`）仅在「训练-推理一致性 + 非 MLA/SFA + 已装 flash_attn_npu_v3」时启用，用于数值对齐而非极致性能。
 
 ## 7. 下一步学习建议
 
-- **稀疏 KV 卸载（u10-l6）**：本讲多次出现 #13026 的 `sparse_kv_offload_config.enabled` 分流与 `store_on_host` 字段。下一阶段 u10-l6 会专讲 `attention/sfa_kv_offload.py` 独立 SFA 后端、`SparseKVOffloadManager` 与 C++ 内核如何把主 KV 卸载到主机、decode 期按 top-k 回载，建议接着读。
+- **分层 prefill KV 缓冲复用（u10-l7）**：本讲的 #12852 prefetch gate 正是 layerwise 复用的同步原语。下一阶段 u10-l7 会专讲 `layerwise_cache_layout.py` 的 `LayerwiseCacheLayout`、`pool_worker`/`pool_scheduler` 的「回载再复用、上一层保存完成后才复用」时序，以及 `record_attention_compute_start` 如何在其中闸住预取，建议接着读。
+- **稀疏 KV 卸载（u10-l6）**：本讲多次出现 #13026 的 `sparse_kv_offload_config.enabled` 分流与 `store_on_host` 字段。u10-l6 会专讲 `attention/sfa_kv_offload.py` 独立 SFA 后端、`SparseKVOffloadManager` 与 C++ 内核如何把主 KV 卸载到主机、decode 期按 top-k 回载。
 - **上下文并行（CP）**：本讲多次出现 `enable_dcp()` / `enable_dsa_cp()` 的分流。下一讲 u5-l3 会专讲 MLA-CP / SFA-CP / DSA-CP 如何把长序列切分到多卡，建议接着读 `vllm_ascend/attention/context_parallel/` 下的 `mla_cp.py`、`sfa_cp.py`、`dsa_cp.py`。
 - **融合算子**：若对 `MLAPO` / `PROLOG_V3` / `fa_quant` 这类融合预处理感兴趣，可读 u6（自定义算子三层）与 `vllm_ascend/device/device_op.py` 里 `mla_preprocess_only_decode`、`execute_sparse_flash_attention_process` 的分发。
 - **KV 缓存规划**：想理解 indexer「占位后端 + MLA 系缓存规格」如何参与 KV 规划，可读 `vllm_ascend/core/kv_cache_interface.py` 里的 `AscendMLAAttentionSpec` / `AscendSFAIndexerCacheSpec` 与 `register_ascend_kv_cache_specs`（行 213-223）。

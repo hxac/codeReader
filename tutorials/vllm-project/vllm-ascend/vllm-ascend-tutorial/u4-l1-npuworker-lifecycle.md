@@ -7,7 +7,8 @@
 - 说出 `NPUWorker` 在 vLLM 进程模型中的位置（它是引擎核心 spawn 出的「单卡 worker 子进程」的主角）。
 - 梳理出一个 worker 从「构造 → 设备初始化 → 模型加载 → 编译预热 → KV 缓存就绪 → 推理循环 → 睡眠/唤醒/在线更新 → 健康检查 → 关闭」的完整方法调用顺序，并能标注每一步的关键副作用。
 - 理解 `execute_model` 如何把调度器的输出（`SchedulerOutput`）转交给 `NPUModelRunner` 完成一次前向，以及流水线并行（PP）下中间张量如何在 rank 间收发。
-- 理解睡眠模式（`sleep`/`wake_up`）如何释放并恢复显存，以及在线权重更新（`start_weight_update`/`update_weights`/`finish_weight_update`）的状态机；并说清本次更新（#13337）里 `wake_up` 为何改用 `replace_parameter`、为何要把 MTP 草稿模型一并恢复，从而让后续在线更新不丢失 MoE 权重的 `weight_loader`。
+- 理解睡眠模式（`sleep`/`wake_up`）如何释放并恢复显存，以及在线权重更新（`start_weight_update`/`update_weights`/`finish_weight_update`）的状态机；并说清 `wake_up` 为何改用 `replace_parameter`、为何要把 MTP 草稿模型一并恢复，从而让后续在线更新不丢失 MoE 权重的 `weight_loader`。
+- 理解 #12852「分层 prefill KV 缓冲复用」下，`determine_available_memory` 为何要按 `num_layers / num_tensors` 因子把可用 KV 显存预算放大——这是 worker 侧的「显存核算」一环。
 
 本讲承接 u2-l1 的 `NPUPlatform`：平台层负责「告诉 vLLM 这是 NPU、该走哪些后端」，而 `NPUWorker` 负责「在每一张 NPU 上真正把一次推理跑起来」。
 
@@ -26,13 +27,14 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| [vllm_ascend/worker/worker.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py) | **本讲主角**。定义 `NPUWorker`，是每个 worker 子进程的核心对象，串联设备初始化、分布式环境、模型加载、推理执行、睡眠唤醒、在线更新与健康检查。 |
-| [vllm_ascend/device_allocator/camem.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/device_allocator/camem.py) | `CaMemAllocator` 单例，基于 CANN 可插拔分配器实现睡眠模式的显存卸载/丢弃/恢复。被 `sleep`/`wake_up`/`load_model` 调用。 |
-| [vllm_ascend/device_allocator/sleep_mem_optimized.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/device_allocator/sleep_mem_optimized.py) | `SleepWakeupManager`，睡眠时额外清理 HCCL 进程组与 ACL Graph 工作区，唤醒时重建。 |
-| [vllm_ascend/utils.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/utils.py) | 提供 `adapt_patch()`（重打 worker 补丁）、`register_ascend_customop()`（注册自定义算子）、`setup_ascend_local_comm_res()`（A5 本地通信资源）等初始化帮手。 |
-| [vllm_ascend/distributed/parallel_state.py](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/distributed/parallel_state.py) | `init_ascend_model_parallel()`，建立 Ascend 的 TP/EP/DP/PP/PCP 并行分组。 |
+| [vllm_ascend/worker/worker.py](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py) | **本讲主角**。定义 `NPUWorker`，是每个 worker 子进程的核心对象，串联设备初始化、分布式环境、模型加载、推理执行、睡眠唤醒、在线更新与健康检查。 |
+| [vllm_ascend/device_allocator/camem.py](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/device_allocator/camem.py) | `CaMemAllocator` 单例，基于 CANN 可插拔分配器实现睡眠模式的显存卸载/丢弃/恢复。被 `sleep`/`wake_up`/`load_model` 调用。 |
+| [vllm_ascend/device_allocator/sleep_mem_optimized.py](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/device_allocator/sleep_mem_optimized.py) | `SleepWakeupManager`，睡眠时额外清理 HCCL 进程组与 ACL Graph 工作区，唤醒时重建。 |
+| [vllm_ascend/utils.py](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/utils.py) | 提供 `adapt_patch()`（重打 worker 补丁）、`register_ascend_customop()`（注册自定义算子）、`setup_ascend_local_comm_res()`（A5 本地通信资源）等初始化帮手。 |
+| [vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/layerwise_cache_layout.py](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/layerwise_cache_layout.py) | #12852 新增。`LayerwiseCacheLayout` 数据类与 `build_layerwise_cache_layout`/`get_gva_layerwise_config`，规划「哪些 transformer 层共享哪个物理 KV 缓冲」。本讲只用到它的 `storage_indices`/`has_layer_reuse` 来做显存核算。 |
+| [vllm_ascend/distributed/parallel_state.py](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/distributed/parallel_state.py) | `init_ascend_model_parallel()`，建立 Ascend 的 TP/EP/DP/PP/PCP 并行分组。 |
 
-> 本次更新说明：本讲义基于 `646684f → 3829122` 的 diff 更新。`worker.py` 受两个 PR 影响——#13337 让 `wake_up` 在恢复权重布局时改用 `replace_parameter` 并覆盖 MTP 草稿模型（见 4.5）；#13026（稀疏 KV 卸载）在 `determine_available_memory` 与 `get_kv_cache_spec` 里加了显存额度调整钩子（见 4.3 的补充说明），其完整机制在 u10-l6 专讲。
+> 本次更新说明：本讲义基于 `3829122 → 7201c97a` 的 diff 更新。`worker.py` 受一个 PR 影响——**#12852（分层 prefill KV 缓冲复用）**：新增 `layerwise_cache_layout` 的 import，并在 `determine_available_memory` 的慢路径里，于算出传统 KV 预算之后、按 `num_layers/num_tensors` 因子把 `available_kv_cache_memory_bytes` 放大（见 4.3）。此前已覆盖的 #13337（`wake_up` 改用 `replace_parameter`、MTP 草稿同恢复，见 4.5）与 #13026（稀疏 KV 卸载的显存额度钩子，见 4.3 的补充说明）内容不变，仅随行号刷新。**#12852 的完整数据面（缓冲规划、回载再复用时序、GVA partial save/load）在 u10-l7 专讲**，本讲只讲 worker 侧的「显存核算」。
 
 ## 4. 核心概念与源码讲解
 
@@ -42,7 +44,7 @@
 
 `NPUWorker` 继承自上游 vLLM v1 的 `WorkerBase`：
 
-[vllm_ascend/worker/worker.py:93-93](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L93-L93) —— 声明 `class NPUWorker(WorkerBase)`。
+[vllm_ascend/worker/worker.py:97-97](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L97-L97) —— 声明 `class NPUWorker(WorkerBase)`。
 
 它的职责可以一句话概括：**在单张 NPU 上，按执行器要求的方法调用顺序，把一次推理所需的「设备、分布式、模型、显存、图」全部准备好，并在每次请求时执行一次前向**。它本身不做前向计算——前向委托给 `self.model_runner`（`NPUModelRunner`），worker 层主要负责「资源管理与生命周期编排」。
 
@@ -82,13 +84,13 @@
 
 `__init__` 的开头有一句很能体现项目整体策略的话——**每个 worker 进程都要重新打补丁**：
 
-[vllm_ascend/worker/worker.py:111-128](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L111-L128) 说明：先 `adapt_patch()`（默认 `is_global_patch=False`，触发 worker 级补丁），再注册 dummy fusion op、注册 ATB 扩展与 Ascend 自定义算子，并 `init_ascend_config` 解析 `additional_config`。这正是 u3-l3 讲过的「spawn 子进程不继承父进程补丁，每个 worker 必须重打」的落点。
+[vllm_ascend/worker/worker.py:115-128](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L115-L128) 说明：先 `adapt_patch()`（默认 `is_global_patch=False`，触发 worker 级补丁），再注册 dummy fusion op、注册 ATB 扩展与 Ascend 自定义算子，并 `init_ascend_config` 解析 `additional_config`。这正是 u3-l3 讲过的「spawn 子进程不继承父进程补丁，每个 worker 必须重打」的落点。
 
-[vllm_ascend/utils.py:533-537](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/utils.py#L533-L537) 说明：`adapt_patch(is_global_patch)` 的分发逻辑——True 走 platform 补丁，False 走 worker 补丁。
+[vllm_ascend/utils.py:533-537](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/utils.py#L533-L537) 说明：`adapt_patch(is_global_patch)` 的分发逻辑——True 走 platform 补丁，False 走 worker 补丁。
 
 随后 `__init__` 建立睡眠管理器与权重引擎占位：
 
-[vllm_ascend/worker/worker.py:147-155](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L147-L155) 说明：开睡眠模式时建 `_sleep_saved_buffers` 与 `SleepWakeupManager`；`weight_transfer_engine` 先置 `None`、`_weight_update_active` 置 `False`——后者是在线权重更新状态机的初始态（见 4.5）。
+[vllm_ascend/worker/worker.py:151-159](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L151-L159) 说明：开睡眠模式时建 `_sleep_saved_buffers` 与 `SleepWakeupManager`；`weight_transfer_engine` 先置 `None`、`_weight_update_active` 置 `False`——后者是在线权重更新状态机的初始态（见 4.5）。
 
 #### 4.1.4 代码实践
 
@@ -152,23 +154,23 @@ init_device()
 
 设备绑定的核心两句：
 
-[vllm_ascend/worker/worker.py:426-429](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L426-L429) 说明：用平台层 `current_platform.logical_device_id_to_visible_device_id` 把逻辑 local_rank 映射为物理卡号，再 `torch.npu.set_device(device)` 绑定。这里体现了与 `NPUPlatform` 的协作——平台提供映射规则，worker 执行绑定。
+[vllm_ascend/worker/worker.py:430-433](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L430-L433) 说明：用平台层 `current_platform.logical_device_id_to_visible_device_id` 把逻辑 local_rank 映射为物理卡号，再 `torch.npu.set_device(device)` 绑定。这里体现了与 `NPUPlatform` 的协作——平台提供映射规则，worker 执行绑定。
 
 DP 设备号偏移：
 
-[vllm_ascend/worker/worker.py:380-402](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L380-L402) 说明：注释解释上游 vLLM PR #45026 取消了 DP worker 的自动设备隔离，vllm-ascend 镜像 `gpu_worker.py` 的做法，把 `local_rank` 按 `dp_local_rank * tp_pp_world_size` 平移，使每个 DP 组绑定到不同 NPU；但若用户用 `--device-ids` 预分配（`assigned_physical_gpu_ids` 非 None）则跳过平移，否则会越界断言。
+[vllm_ascend/worker/worker.py:384-406](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L384-L406) 说明：注释解释上游 vLLM PR #45026 取消了 DP worker 的自动设备隔离，vllm-ascend 镜像 `gpu_worker.py` 的做法，把 `local_rank` 按 `dp_local_rank * tp_pp_world_size` 平移，使每个 DP 组绑定到不同 NPU；但若用户用 `--device-ids` 预分配（`assigned_physical_gpu_ids` 非 None）则跳过平移，否则会越界断言。
 
 内存基准与校验：
 
-[vllm_ascend/worker/worker.py:447-459](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L447-L459) 说明：记录 `init_snapshot`，按 `gpu_memory_utilization` 算出 `requested_memory`；若启动时空闲显存已不足预期用量，直接抛错并给出「调低 utilization」的建议。
+[vllm_ascend/worker/worker.py:450-463](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L450-L463) 说明：记录 `init_snapshot`，按 `gpu_memory_utilization` 算出 `requested_memory`；若启动时空闲显存已不足预期用量，直接抛错并给出「调低 utilization」的建议。
 
 分布式环境建立：
 
-[vllm_ascend/worker/worker.py:1006-1019](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L1006-L1019) 说明：`_init_worker_distributed_environment` 先 `init_batch_invariance()`，再用后端字符串 `"hccl"` 调上游 `init_distributed_environment`，随后 `ensure_model_parallel_initialized` 建立 TP/PP/PCP/DCP 分组，`init_ascend_model_parallel` 建立 Ascend 专属细粒度组（如 MLP_TP/OTP），最后 `ensure_ec_transfer_initialized` 建立专家通信传输。
+[vllm_ascend/worker/worker.py:1025-1038](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L1025-L1038) 说明：`_init_worker_distributed_environment` 先 `init_batch_invariance()`，再用后端字符串 `"hccl"` 调上游 `init_distributed_environment`，随后 `ensure_model_parallel_initialized` 建立 TP/PP/PCP/DCP 分组，`init_ascend_model_parallel` 建立 Ascend 专属细粒度组（如 MLP_TP/OTP），最后 `ensure_ec_transfer_initialized` 建立专家通信传输。
 
 对外入口与 ModelRunner 建造：
 
-[vllm_ascend/worker/worker.py:484-503](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L484-L503) 说明：`init_device` 调 `_init_device` 拿到 device，建 workspace 管理器，再按 `use_v2_model_runner` 选择 v1（`NPUModelRunner`）或 v2（开发中的 `NPUModelRunnerV2`）建造 model_runner；只有 `rank==0` 上报 usage 统计。
+[vllm_ascend/worker/worker.py:488-507](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L488-L507) 说明：`init_device` 调 `_init_device` 拿到 device，建 workspace 管理器，再按 `use_v2_model_runner` 选择 v1（`NPUModelRunner`）或 v2（开发中的 `NPUModelRunnerV2`）建造 model_runner；只有 `rank==0` 上报 usage 统计。
 
 #### 4.2.4 代码实践
 
@@ -176,8 +178,8 @@ DP 设备号偏移：
 
 **操作步骤**：
 
-1. 阅读第 380–402 行的注释链，回答：在 TP=2、DP=2、单机 4 卡、不使用 `--device-ids`、非 ray 的场景下，4 个 worker 的 `local_rank` 在偏移后分别变成几号？
-2. 找到第 476 行 `_init_worker_distributed_environment` 调用，确认它发生在「设备绑定之后、模型加载之前」。
+1. 阅读第 384–406 行的注释链，回答：在 TP=2、DP=2、单机 4 卡、不使用 `--device-ids`、非 ray 的场景下，4 个 worker 的 `local_rank` 在偏移后分别变成几号？
+2. 找到第 480 行 `_init_worker_distributed_environment` 调用，确认它发生在「设备绑定之后、模型加载之前」。
 
 **需要观察的现象**：偏移公式为 `self.local_rank += dp_local_rank * tp_pp_world_size`。TP=2、PP=1 时 `tp_pp_world_size=2`；DP0 的两个 worker 为 0、1，DP1 的两个 worker 偏移为 2、3——正好覆盖 4 张卡，互不重叠。
 
@@ -185,11 +187,11 @@ DP 设备号偏移：
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么第 431–438 行的 `import torch_npu._inductor` 要在 `torch.npu.set_device` 之后？
+**练习 1**：为什么第 435–442 行的 `import torch_npu._inductor` 要在 `torch.npu.set_device` 之后？
 **参考答案**：注释写明这是「惰性导入」，避免在补丁流程里触发 `torch_npu` 重复初始化 / 重复 `set_device`；放在 set_device 之后能确保图模式依赖的设备上下文已就绪。
 
 **练习 2**：`_init_worker_distributed_environment` 用的通信后端字符串是什么？为什么不是 `"nccl"`？
-**参考答案**：是 `"hccl"`（见第 1010 行）。NPU 上集合通信走 HCCL 而非 NCCL，这是把 CUDA/NCCL 路径改道到 Ascend/HCCL 的典型改写。
+**参考答案**：是 `"hccl"`（见第 1029 行）。NPU 上集合通信走 HCCL 而非 NCCL，这是把 CUDA/NCCL 路径改道到 Ascend/HCCL 的典型改写。
 
 ---
 
@@ -209,7 +211,9 @@ DP 设备号偏移：
 - **ACL Graph**：昇腾的图捕获/回放机制，对应 CUDA Graph，用于消除每次前向的算子下发开销（详见 u8-l3）。
 - **profile_run**：用 dummy 输入跑一次前向，让框架把真实激活显存测出来。
 
-> 本次更新补充（#13026 稀疏 KV 卸载）：`determine_available_memory` 现在会在「算出可用 KV 额度」之后，再调一个新方法 `update_available_memory_for_sparse_kv_offload` 做一次额度调整；`get_kv_cache_spec` 也会在开启稀疏卸载时把 spec 缓存到 `self.kv_cache_spec`。这两处只是「留口子」——把设备 KV 额度按「主机内存（KV）/ 设备内存（indexer）」的比例放大，让后续能在不改动 vLLM 原 `kv_spec` 的前提下分配 indexer 缓存块。**完整机制（数据面、管理器、C++ 内核、配置约束）在 u10-l6 专讲**，本讲只需知道这两个钩子存在于生命周期中。
+> 本次更新补充（#12852 分层 prefill KV 缓冲复用）：在 ascend_store 的 layerwise prefill 卸载路径下，原本每个 transformer 层都各占一份设备 KV 缓冲。该特性让多个层**分时复用**一组有限的物理设备缓冲（由新模块 `layerwise_cache_layout.py` 的 `LayerwiseCacheLayout` 规划：`num_shared_buffers` 份共享缓冲 + 若干独立层，每份缓冲背后承载多个逻辑层）。逻辑 KV 布局（哪层引用哪个缓冲）不变，但物理上只分配 `num_tensors` 份缓冲（`len(layout.storage_indices)`）。于是同样的 HBM 能容纳多得多的「逻辑 KV」——等效于把可用 KV 显存预算放大 `num_layers / num_tensors` 倍。`determine_available_memory` 因此在算完传统 KV 预算后、按这个因子把 `available_kv_cache_memory_bytes` 放大。**完整机制（缓冲规划 `storage_indices`、回载再复用时序、GVA partial save/load）在 u10-l7 专讲**，本讲只需理解 worker 侧的「显存核算」这一环。
+
+> 此前补充（#13026 稀疏 KV 卸载）：`determine_available_memory` 现在会在「算出可用 KV 额度」之后，再调 `update_available_memory_for_sparse_kv_offload` 做一次额度调整；`get_kv_cache_spec` 也会在开启稀疏卸载时把 spec 缓存到 `self.kv_cache_spec`。这两处只是「留口子」——把设备 KV 额度按「主机内存（KV）/ 设备内存（indexer）」的比例放大。**完整机制（数据面、管理器、C++ 内核、配置约束）在 u10-l6 专讲**。
 
 #### 4.3.2 核心流程
 
@@ -232,7 +236,8 @@ determine_available_memory()
   ├── 快路径：用户已指定 kv_cache_memory_bytes → 只跑 profile_run 编译，直接返回
   │           （#13026: 返回前经 update_available_memory_for_sparse_kv_offload 调整）
   └── 慢路径：memory_profiling 上下文里 profile_run，扣除非 KV 内存，得到可用额度
-              （#13026: 返回前同样经 update_available_memory_for_sparse_kv_offload 调整）
+              （#12852: 若开启分层缓冲复用，按 num_layers/num_tensors 因子放大预算）
+              （#13026: 返回前经 update_available_memory_for_sparse_kv_offload 调整）
 
 initialize_from_config(kv_cache_config)
   ├── ensure_kv_transfer_initialized(...)
@@ -245,47 +250,71 @@ initialize_from_config(kv_cache_config)
 
 `load_model` 的睡眠池包裹与权重引擎创建：
 
-[vllm_ascend/worker/worker.py:691-714](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L691-L714) 说明：开睡眠模式时用 `CaMemAllocator.use_memory_pool(tag="weights")` 包裹加载，使权重分配进可卸载池；加载后若配置了 `weight_transfer_config`，用工厂创建权重传输引擎，把模型对象传进去（这正是 4.1 说的「要等模型存在才能建引擎」）。
+[vllm_ascend/worker/worker.py:710-733](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L710-L733) 说明：开睡眠模式时用 `CaMemAllocator.use_memory_pool(tag="weights")` 包裹加载，使权重分配进可卸载池；加载后若配置了 `weight_transfer_config`，用工厂创建权重传输引擎，把模型对象传进去（这正是 4.1 说的「要等模型存在才能建引擎」）。
 
 编译预热的图捕获与显存建议：
 
-[vllm_ascend/worker/worker.py:736-742](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L736-L742) 说明：对 `warmup_sizes` 倒序跑 `_dummy_run` 编译预热；非 eager 时调 `capture_model()` 捕获 ACL Graph 并记下其显存占用 `npugraph_memory_bytes`。
+[vllm_ascend/worker/worker.py:755-761](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L755-L761) 说明：对 `warmup_sizes` 倒序跑 `_dummy_run` 编译预热；非 eager 时调 `capture_model()` 捕获 ACL Graph 并记下其显存占用 `npugraph_memory_bytes`。
 
-[vllm_ascend/worker/worker.py:744-783](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L744-L783) 说明：未预设 `kv-cache-memory` 且探测过激活显存时，把权重/激活/非 torch/图显存相加并留 150 MiB 余量，算出「适配 requested」与「吃满 free」两个建议值，写进日志供用户下次直接用 `--kv-cache-memory`。
+[vllm_ascend/worker/worker.py:763-802](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L763-L802) 说明：未预设 `kv-cache-memory` 且探测过激活显存时，把权重/激活/非 torch/图显存相加并留 150 MiB 余量，算出「适配 requested」与「吃满 free」两个建议值，写进日志供用户下次直接用 `--kv-cache-memory`。
 
-显存探测（含稀疏 KV 卸载的额度调整钩子）：
+显存探测整体（含 #12852 分层放大与 #13026 稀疏卸载额度调整）：
 
-[vllm_ascend/worker/worker.py:506-580](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L506-L580) 说明：`determine_available_memory`。快路径直接返回用户指定值（第 519–533 行），但**返回前**会先经 `update_available_memory_for_sparse_kv_offload` 调整（第 532 行）；慢路径在 `memory_profiling` 上下文里跑 `profile_run()`，记录「图捕获前」的 torch peak（避免把图池算成激活），最后 `available_kv_cache_memory_bytes = requested_memory - non_kv_cache_memory`（第 570 行），同样在返回前经稀疏卸载钩子调整（第 576–578 行）。
+[vllm_ascend/worker/worker.py:510-599](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L510-L599) 说明：`determine_available_memory`。快路径直接返回用户指定值（第 523–537 行），但**返回前**会先经 `update_available_memory_for_sparse_kv_offload` 调整（第 536 行）；慢路径在 `memory_profiling` 上下文里跑 `profile_run()`，记录「图捕获前」的 torch peak（避免把图池算成激活），最后 `available_kv_cache_memory_bytes = requested_memory - non_kv_cache_memory`（第 574 行）。
 
-[vllm_ascend/worker/worker.py:582-614](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L582-L614) 说明：`update_available_memory_for_sparse_kv_offload`。未开启稀疏卸载则原样返回；开启后按 `keep_device_kv_cache` 决定是否把「主机侧需要的额外 DRAM」加进 `available_memory`，并校验不超过用户配置的 `dram_size_per_dp_GB`。这是 #13026 给 KV 额度计算留的扩展点。
+#12852 的核心改动——按复用因子放大可用 KV 预算：
 
-[vllm_ascend/worker/worker.py:904-909](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L904-L909) 说明：`get_kv_cache_spec` 在开启稀疏卸载时把 spec 缓存到 `self.kv_cache_spec`，供上面第 598 行 `update_available_memory_for_sparse_kv_offload` 在需要时复用（避免重复探测）。
+[vllm_ascend/worker/worker.py:576-589](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L576-L589) 说明：先用 `get_gva_layerwise_config(kv_transfer_config)` 取出 layerwise 配置；若非 None，按真实层数 `num_layers` 调 `build_layerwise_cache_layout` 构造布局，**仅当 `layout.has_layer_reuse`（被复用的层多于共享缓冲数）时**才放大预算：取物理缓冲份数 `num_tensors = len(layout.storage_indices)`，令 `factor = num_layers / num_tensors`，把 `available_kv_cache_memory_bytes` 整体乘以 `factor`。这段依赖的 import 见 [worker.py:65-68](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L65-L68)。
+
+**放大因子的数学直觉**：vLLM 下游按块计容量：
+
+\[
+\text{num\_blocks}=\frac{\text{available\_memory}}{\text{per\_block\_per\_layer}\times\text{num\_layers}}
+\]
+
+分层复用后物理上只有 `num_tensors` 份缓冲，但逻辑上仍看作 `num_layers` 层。把预算放大 \( \text{factor}=\text{num\_layers}/\text{num\_tensors} \) 后代入：
+
+\[
+\text{num\_blocks}=\frac{\text{available\_memory}\times(\text{num\_layers}/\text{num\_tensors})}{\text{per\_block\_per\_layer}\times\text{num\_layers}}=\frac{\text{available\_memory}}{\text{per\_block\_per\_layer}\times\text{num\_tensors}}
+\]
+
+结果恰好按「物理缓冲数」计块——每份物理缓冲背后承载 `num_layers/num_tensors` 个逻辑层，**逻辑每层容量不变、物理占用却只有原来的** \( \text{num\_tensors}/\text{num\_layers} \)。这就是「同样 HBM 放大可用 KV 容量」的核算依据。另一半——把 `num_layers` 个逻辑层张量描述合并为 `num_tensors` 个共享缓冲——由 `NPUModelRunner` 在分配前调 `apply_layerwise_kv_cache_plan` 完成（详见 u4-l2 / u10-l7）。
+
+[vllm_ascend/worker/worker.py:601-633](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L601-L633) 说明：`update_available_memory_for_sparse_kv_offload`。未开启稀疏卸载则原样返回（第 611–612 行）；开启后按 `keep_device_kv_cache` 决定是否把「主机侧需要的额外 DRAM」加进 `available_memory`，并校验不超过用户配置的 `dram_size_per_dp_GB`。这是 #13026 给 KV 额度计算留的扩展点。
+
+[vllm_ascend/worker/worker.py:923-928](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L923-L928) 说明：`get_kv_cache_spec` 在开启稀疏卸载时把 spec 缓存到 `self.kv_cache_spec`，供上面 `update_available_memory_for_sparse_kv_offload`（第 617 行）在需要时复用（避免重复探测）。
 
 KV 缓存分配与 eagle3 零初始化保护：
 
-[vllm_ascend/worker/worker.py:924-955](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L924-L955) 说明：`initialize_from_config` 先初始化 KV 传输，再在 `kv_cache` 池里分配 KV 缓存；针对 eagle3 + mamba 混合且 `num_speculative_tokens>1` 的特殊情形调 `_init_kv_zero_meta()`——注释解释了为何此处要对 KV 块做零初始化以规避 NaN（草稿模型复用脏块 + stale seq_lens 导致的问题）。
+[vllm_ascend/worker/worker.py:943-974](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L943-L974) 说明：`initialize_from_config` 先初始化 KV 传输，再在 `kv_cache` 池里分配 KV 缓存；针对 eagle3 + mamba 混合且 `num_speculative_tokens>1` 的特殊情形调 `_init_kv_zero_meta()`——注释解释了为何此处要对 KV 块做零初始化以规避 NaN（草稿模型复用脏块 + stale seq_lens 导致的问题）。
 
 #### 4.3.4 代码实践
 
-**实践目标**：理解 `requested_memory` 如何一路传递到 KV 缓存额度的计算，并定位 #13026 加的两个钩子。
+**实践目标**：理解 `requested_memory` 如何一路传递到 KV 缓存额度的计算，并定位 #12852 的放大逻辑与 #13026 的调整钩子。
 
 **操作步骤**：
 
 1. 在 `worker.py` 里搜索 `requested_memory`、`non_kv_cache_memory`、`available_kv_cache_memory_bytes` 三个量的赋值点。
 2. 画出它们的数据流：`init_snapshot.total_memory * gpu_memory_utilization → requested_memory`；`requested_memory - non_kv_cache_memory → available_kv_cache_memory_bytes`。
-3. 找到第 532、576–578 行的 `update_available_memory_for_sparse_kv_offload` 调用，确认：若 `sparse_kv_offload_config.enabled` 为 False，这个方法是否原样返回？（是的，见第 592–593 行。）
+3. 找到第 576–589 行的 #12852 放大块，回答：若 `layout.has_layer_reuse` 为 False（即每层独占缓冲，没有复用），这段是否会改变预算？（不会，见 `if layout.has_layer_reuse:` 守卫。）
+4. 找到第 536、595–597 行的 `update_available_memory_for_sparse_kv_offload` 调用，确认：若 `sparse_kv_offload_config.enabled` 为 False，这个方法是否原样返回？（是的，见第 611–612 行。）
 
-**预期结果**：能解释「为什么先要 `init_snapshot`（设备初始化时记），再在 profile 后扣除非 KV 部分」，并指出 #13026 的额度调整是「在算完传统 KV 额度之后、返回之前」的纯加法扩展，默认关闭时不影响旧行为。`non_kv_cache_memory` = 非 torch 增量 + torch peak 增量 + 权重显存（第 552–554 行）。
+**需要观察的现象**：当模型有 80 层、配置 `layerwise_num_shared_buffers=8` 且存在复用时，`num_tensors`（`len(storage_indices)`）约为 9（8 份共享缓冲 + 1 个默认独立层），`factor ≈ 80/9 ≈ 8.9`，可用 KV 预算被放大约 8.9 倍——这正是回收 HBM、放大 KV 容量的来源。
+
+**预期结果**：能解释「为什么先要 `init_snapshot`（设备初始化时记），再在 profile 后扣除非 KV 部分」，并指出 #12852 的放大是「在算完传统 KV 预算之后、稀疏卸载调整之前」的纯乘法扩展，`has_layer_reuse` 为 False 时整体退化为旧行为。`non_kv_cache_memory` = 非 torch 增量 + torch peak 增量 + 权重显存（第 556–558 行）。
 
 > 若无法运行真实 NPU，这是「源码阅读型实践」：跟踪数据流即可，不必跑通。
 
 #### 4.3.5 小练习与答案
 
 **练习 1**：`determine_available_memory` 的「快路径」何时触发？快路径下还会跑 `profile_run` 吗？
-**参考答案**：用户显式指定了 `--kv-cache-memory`（`kv_cache_memory_bytes` 非 None）时触发。快路径仍会跑 `profile_run`（为了让模型完成编译，见第 520 行），但**跳过**显存探测计算，直接返回用户指定值（见第 519–533 行），返回前同样经过稀疏卸载的额度调整钩子（第 532 行）。
+**参考答案**：用户显式指定了 `--kv-cache-memory`（`kv_cache_memory_bytes` 非 None）时触发。快路径仍会跑 `profile_run`（为了让模型完成编译，见第 524 行），但**跳过**显存探测计算，直接返回用户指定值（见第 523–537 行），返回前同样经过稀疏卸载的额度调整钩子（第 536 行）。注意：#12852 的放大只在慢路径里做，快路径不放大（用户已显式给定预算）。
 
-**练习 2**：为什么 `compile_or_warm_up_model` 末尾要再次 `set_random_seed`？
-**参考答案**：预热/探测会消费随机数、改变全局随机状态，末尾重置种子能保证「初始化与探测不污染正式推理的随机性」（第 799 行）。
+**练习 2**：#12852 为什么用 `num_layers / num_tensors` 作为放大因子，而不是别的数？
+**参考答案**：因为复用的本质是「`num_layers` 个逻辑层共享 `num_tensors` 份物理缓冲」。把预算放大 `num_layers/num_tensors` 后，vLLM 的 `num_blocks = available_memory / (per_block_per_layer × num_layers)` 恰好等价于按物理缓冲数计块（`available_memory / (per_block_per_layer × num_tensors)`），逻辑每层容量保持不变，而物理占用降为原来的 `num_tensors/num_layers`。
+
+**练习 3**：为什么 `compile_or_warm_up_model` 末尾要再次 `set_random_seed`？
+**参考答案**：预热/探测会消费随机数、改变全局随机状态，末尾重置种子能保证「初始化与探测不污染正式推理的随机性」（第 816 行）。
 
 ---
 
@@ -331,15 +360,15 @@ execute_model(scheduler_output)
 
 上一步异步发送的回收：
 
-[vllm_ascend/worker/worker.py:624-627](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L624-L627) 说明：每次 `execute_model` 开头先 `wait()` 上一轮存下的 PP 发送句柄，保证「发送完成」先于「下一轮复用缓冲」。
+[vllm_ascend/worker/worker.py:643-646](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L643-L646) 说明：每次 `execute_model` 开头先 `wait()` 上一轮存下的 PP 发送句柄，保证「发送完成」先于「下一轮复用缓冲」。
 
 PP 中间张量的接收（带 SP 分支）：
 
-[vllm_ascend/worker/worker.py:630-646](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L630-L646) 说明：`forward_pass` 判定是否真有 token 要算；非首 rank 时，按 `enable_sp()` 决定 `all_gather_group`（SP 开则置 `None` 以兼容 flashcomm1），调 `irecv_tensor_dict` 异步收上一阶段中间张量，包成 `AsyncIntermediateTensors`。
+[vllm_ascend/worker/worker.py:649-665](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L649-L665) 说明：`forward_pass` 判定是否真有 token 要算；非首 rank 时，按 `enable_sp()` 决定 `all_gather_group`（SP 开则置 `None` 以兼容 flashcomm1），调 `irecv_tensor_dict` 异步收上一阶段中间张量，包成 `AsyncIntermediateTensors`。
 
 前向委托与返回值分流：
 
-[vllm_ascend/worker/worker.py:651-685](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L651-L685) 说明：第 651 行把前向真正交给 `model_runner.execute_model`；若返回 `ModelRunnerOutput/Async/None`（末 rank 的最终结果）直接返回；若是 `IntermediateTensors`（PP 中间阶段），则 `isend_tensor_dict` 把张量异步发给下一阶段并存入 `_pp_send_work`，v2 runner 直接 return None，v1 路径继续处理 KV 连接器透传。
+[vllm_ascend/worker/worker.py:670-704](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L670-L704) 说明：第 670 行把前向真正交给 `model_runner.execute_model`；若返回 `ModelRunnerOutput/Async/None`（末 rank 的最终结果）直接返回；若是 `IntermediateTensors`（PP 中间阶段），则 `isend_tensor_dict` 把张量异步发给下一阶段并存入 `_pp_send_work`，v2 runner 直接 return None，v1 路径继续处理 KV 连接器透传。
 
 #### 4.4.4 代码实践
 
@@ -348,7 +377,7 @@ PP 中间张量的接收（带 SP 分支）：
 **操作步骤**：
 
 1. 假设 PP=3（rank0 首、rank1 中、rank2 末），分别追踪它们在本方法里：是否调 `irecv_tensor_dict`？是否调 `isend_tensor_dict`？返回值是 `IntermediateTensors` 还是 `ModelRunnerOutput`？
-2. 对照第 631 行 `not get_pp_group().is_first_rank` 与第 657 行 `not get_pp_group().is_last_rank`。
+2. 对照第 650 行 `not get_pp_group().is_first_rank` 与第 676 行 `not get_pp_group().is_last_rank`。
 
 **预期结果**：
 
@@ -361,7 +390,7 @@ PP 中间张量的接收（带 SP 分支）：
 #### 4.4.5 小练习与答案
 
 **练习 1**：开启序列并行（SP）时，为什么 `irecv_tensor_dict`/`isend_tensor_dict` 的 `all_gather_group` 要置 `None`？
-**参考答案**：SP 用 flashcomm1 时，其内部已有 all-gather 操作；若再传 TP 组作 all_gather_group，会与 flashcomm1 的 all-gather 冲突（注释见第 632–633、658–659 行），故 SP 开启时传 `None` 关掉这层 all-gather。
+**参考答案**：SP 用 flashcomm1 时，其内部已有 all-gather 操作；若再传 TP 组作 all_gather_group，会与 flashcomm1 的 all-gather 冲突（注释见第 651–652、677–678 行），故 SP 开启时传 `None` 关掉这层 all-gather。
 
 **练习 2**：`_pp_send_work` 为什么是个 list 且在 `execute_model` 开头统一 wait？
 **参考答案**：PP 发送是异步的，句柄可能跨多轮积累；在每轮开头统一 `wait()` 既能保证上一批发送完成、释放缓冲，又能在睡眠/健康检查前确保没有悬挂的异步通信（`HcclSleepWakeupManager.sleep` 也会先 wait 它，见 sleep_mem_optimized.py）。
@@ -378,7 +407,7 @@ PP 中间张量的接收（带 SP 分支）：
 - **在线权重更新**：RL/在线学习场景下，训练侧把新权重逐层推给推理 worker。`NPUWorker` 暴露 `init_weight_transfer_engine` / `start_weight_update` / `update_weights` / `finish_weight_update` 四步，用 `_weight_update_active` 布尔量维护一个简易状态机，防止乱序调用。
 - **健康检查（check_health）**：周期性调外部命令 `npu-smi info -i <rank> -t health` 查询 NPU 卡健康状态，解析输出里 `Health: OK`；超时/工具缺失/异常都降级为 warning，只有健康状态非 OK 才抛错。
 
-> 本次更新的关键点（#13337）：睡眠唤醒常与 RL 在线更新**连用**（睡觉省显存、醒来接新权重）。`wake_up` 在恢复权重时会把 Ascend MoE 的「执行期布局」`transpose` 回「可加载布局」。过去这里用 `torch.nn.Parameter(new_data)` + `setattr` 重建参数，会**丢掉原参数上的 `weight_loader` 属性**——而在线更新正是逐层调每个参数的 `weight_loader` 来灌权重，丢掉它后续更新就会失败。因此本次改为 `replace_parameter`（来自 `vllm.model_executor.utils`，见 `worker.py` 第 44 行 import），它在替换数据的同时保留原参数的全部附加属性；并且当投机方法为 MTP 时，**草稿模型**也要走同样的恢复流程。
+> 关键点（#13337）：睡眠唤醒常与 RL 在线更新**连用**（睡觉省显存、醒来接新权重）。`wake_up` 在恢复权重时会把 Ascend MoE 的「执行期布局」`transpose` 回「可加载布局」。过去这里用 `torch.nn.Parameter(new_data)` + `setattr` 重建参数，会**丢掉原参数上的 `weight_loader` 属性**——而在线更新正是逐层调每个参数的 `weight_loader` 来灌权重，丢掉它后续更新就会失败。因此改为 `replace_parameter`（来自 `vllm.model_executor.utils`），它在替换数据的同时保留原参数的全部附加属性；并且当投机方法为 MTP 时，**草稿模型**也要走同样的恢复流程。
 
 #### 4.5.2 核心流程
 
@@ -429,17 +458,17 @@ check_health()
 
 `sleep` 的两级卸载：
 
-[vllm_ascend/worker/worker.py:216-239](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L216-L239) 说明：记录睡前后空闲显存；level 2 先把 `named_buffers()` 搬 CPU；可选触发 `SleepWakeupManager.sleep()`（清 HCCL 与 ACL Graph 工作区）；调 `CaMemAllocator.sleep(offload_tags=("weights",) if level==1 else tuple())`——level 1 只卸载权重，tuple() 表示全卸载。
+[vllm_ascend/worker/worker.py:220-243](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L220-L243) 说明：记录睡前后空闲显存；level 2 先把 `named_buffers()` 搬 CPU；可选触发 `SleepWakeupManager.sleep()`（清 HCCL 与 ACL Graph 工作区）；调 `CaMemAllocator.sleep(offload_tags=("weights",) if level==1 else tuple())`——level 1 只卸载权重，tuple() 表示全卸载。
 
 `wake_up` 的恢复与权重布局修正（**#13337 改动落点**）：
 
-[vllm_ascend/worker/worker.py:241-297](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L241-L297) 说明：先校验 `weight_nz_mode`（NZ 分形在 RL 下有精度风险，禁止）；`CaMemAllocator.wake_up` remap 显存并把权重从 CPU 搬回 NPU；对非量化模型的 `w2_weight`/`w13_weight` 做 `transpose(1,2)` 恢复权重布局。
+[vllm_ascend/worker/worker.py:245-301](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L245-L301) 说明：先校验 `weight_nz_mode`（NZ 分形在 RL 下有精度风险，禁止）；`CaMemAllocator.wake_up` remap 显存并把权重从 CPU 搬回 NPU；对非量化模型的 `w2_weight`/`w13_weight` 做 `transpose(1,2)` 恢复权重布局。
 
 其中本次更新的两处关键：
 
-[vllm_ascend/worker/worker.py:254-260](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L254-L260) 说明：当 `speculative_config.method == "mtp"` 时，把草稿模型（`self.model_runner.drafter.model`）也加进 `weight_models` 列表——MTP 草稿是独立模型，在 RL 场景同样会被在线更新，必须与 target 走完全一致的唤醒准备。
+[vllm_ascend/worker/worker.py:258-264](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L258-L264) 说明：当 `speculative_config.method == "mtp"` 时，把草稿模型（`self.model_runner.drafter.model`）也加进 `weight_models` 列表——MTP 草稿是独立模型，在 RL 场景同样会被在线更新，必须与 target 走完全一致的唤醒准备。
 
-[vllm_ascend/worker/worker.py:266-283](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L266-L283) 说明：遍历 `weight_models`，对每个模型的 `w2_weight`/`w13_weight` 调 `replace_parameter(parent_module, param_name, w2_data)`（注释明写「Preserve weight_loader for subsequent online updates」）。
+[vllm_ascend/worker/worker.py:270-287](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L270-L287) 说明：遍历 `weight_models`，对每个模型的 `w2_weight`/`w13_weight` 调 `replace_parameter(parent_module, param_name, w2_data)`（注释明写「Preserve weight_loader for subsequent online updates」）。
 
 `replace_parameter` vs 旧写法的差别示意（示例代码，说明原理，非项目逐字原文）：
 
@@ -455,19 +484,19 @@ replace_parameter(parent_module, param_name, w2_data)
 
 > **为什么 MoE weight loader 不能丢**：Ascend 的非量化 MoE 在 `process_weights_after_loading` 里把权重排成「执行期布局」（供 kernel 高效读取），而在线权重更新需要先把权重按「可加载布局」灌进来再重排。`wake_up` 的 `transpose(1,2)` 就是把执行期布局翻回可加载布局。如果这一步用 `setattr` 重建 Parameter，新对象上没有 `weight_loader`，引擎在 `update_weights` 时就找不到「如何把外部权重切分填进该张量」的回调，更新失败。`replace_parameter` 在换底层数据的同时把这个回调原样保留，于是「睡眠唤醒 → 在线更新」链路才完整。MTP 草稿模型同理——它也是会被在线更新的独立模型。
 
-> 对照 `CaMemAllocator.sleep`/`wake_up` 的实现 [vllm_ascend/device_allocator/camem.py:180-249](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/device_allocator/camem.py#L180-L249)：sleep 时对 `offload_tags` 内的分配创建 CPU 备份并 `memcpy` 搬走、其余直接 unmap 释放；wake_up 时 `create_and_map` 重新映射、有备份的再 `memcpy` 搬回。`sleep_persistent_tag` 的分配跨睡醒周期不被释放。
+> 对照 `CaMemAllocator.sleep`/`wake_up` 的实现 [vllm_ascend/device_allocator/camem.py:180-249](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/device_allocator/camem.py#L180-L249)：sleep 时对 `offload_tags` 内的分配创建 CPU 备份并 `memcpy` 搬走、其余直接 unmap 释放；wake_up 时 `create_and_map` 重新映射、有备份的再 `memcpy` 搬回。`sleep_persistent_tag` 的分配跨睡醒周期不被释放。
 
 在线权重更新状态机：
 
-[vllm_ascend/worker/worker.py:320-359](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L320-L359) 说明：`start_weight_update` 把 `_weight_update_active` 置 True 并校验 NZ 关闭；`update_weights` 要求必须先 start，异常时回退 active 标志；`finish_weight_update` 置回 False 并触发逐层后处理。三者都先 `_check_weight_transfer_engine`（第 299–303 行），引擎未配置则报错。
+[vllm_ascend/worker/worker.py:324-363](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L324-L363) 说明：`start_weight_update` 把 `_weight_update_active` 置 True 并校验 NZ 关闭；`update_weights` 要求必须先 start，异常时回退 active 标志；`finish_weight_update` 置回 False 并触发逐层后处理。三者都先 `_check_weight_transfer_engine`（第 303–307 行），引擎未配置则报错。
 
 健康检查与外部命令解析：
 
-[vllm_ascend/worker/worker.py:1036-1069](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L1036-L1069) 说明：`check_health` 用 `subprocess.run` 调 `npu-smi`，10 秒超时；超时/`FileNotFoundError`/异常都只 warning，唯解析出 `Health` 非 `OK` 才抛 `RuntimeError`（`parse_text_output`）。
+[vllm_ascend/worker/worker.py:1055-1078](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L1055-L1078) 说明：`check_health` 用 `subprocess.run` 调 `npu-smi`，10 秒超时；超时/`FileNotFoundError`/异常都只 warning，唯解析出 `Health` 非 `OK` 才抛 `RuntimeError`（解析逻辑在紧随其后的 `parse_text_output`，第 1081–1088 行）。
 
 优雅关闭：
 
-[vllm_ascend/worker/worker.py:361-374](https://github.com/vllm-project/vllm-ascend/blob/3829122510c00dfc6b4b94d6f96c947a7590043c/vllm_ascend/worker/worker.py#L361-L374) 说明：`shutdown` 依次关闭 KV 传输连接器、profiler、权重传输引擎、model_runner（若各自存在），收尾资源。
+[vllm_ascend/worker/worker.py:365-378](https://github.com/vllm-project/vllm-ascend/blob/7201c97a61a17425b558b6b5e53ab0d30ae8151d/vllm_ascend/worker/worker.py#L365-L378) 说明：`shutdown` 依次关闭 KV 传输连接器、profiler、权重传输引擎、model_runner（若各自存在），收尾资源。
 
 #### 4.5.4 代码实践
 
@@ -476,30 +505,30 @@ replace_parameter(parent_module, param_name, w2_data)
 **操作步骤**：
 
 1. 在 `worker.py` 与 `camem.py` 里追踪一次 `sleep(level=1)`：worker 记 free → `CaMemAllocator.sleep(("weights",))` → 对每个权重分配建 CPU 备份 + memcpy + unmap。问：level 1 时 KV 缓存（tag=`kv_cache`）会被怎样处理？
-2. 对照第 241–297 行的 `wake_up`，回答 #13337 的两个问题：
-   - （a）第 273–275、281–283 行为什么从 `setattr(..., torch.nn.Parameter(...))` 改成 `replace_parameter(...)`？
-   - （b）第 254–260 行在什么条件下会把 `draft_model` 也加进 `weight_models`？
-3. 阅读 `start_weight_update`/`update_weights`/`finish_weight_update`（第 320–359 行），回答：如果直接调 `update_weights` 而没先 `start_weight_update` 会发生什么？
+2. 对照第 245–301 行的 `wake_up`，回答 #13337 的两个问题：
+   - （a）第 278–279、286–287 行为什么从 `setattr(..., torch.nn.Parameter(...))` 改成 `replace_parameter(...)`？
+   - （b）第 258–264 行在什么条件下会把 `draft_model` 也加进 `weight_models`？
+3. 阅读 `start_weight_update`/`update_weights`/`finish_weight_update`（第 324–363 行），回答：如果直接调 `update_weights` 而没先 `start_weight_update` 会发生什么？
 
 **需要观察的现象**：
 
 - level 1 的 `offload_tags=("weights",)` 只搬权重；KV 缓存 tag 不在卸载集合内，会走「丢弃」（unmap 不备份）分支，醒来后 KV 数据为空——这正是睡眠后 KV 需要「重算或重新填充」的原因（参考 u10-l3）。
 - （a）`replace_parameter` 在替换参数数据时**保留原参数的 `weight_loader`**，而旧的 `setattr + torch.nn.Parameter` 会新建对象、丢掉这个回调；在线更新（`update_weights`）逐层调每个参数的 `weight_loader`，丢了它后续更新就失败。这就是「在线权重更新路径中 MoE weight loader 不能被丢弃」的原因。
 - （b）条件是 `speculative_config.method == "mtp"` 且草稿模型存在且与 target 不是同一个对象——MTP 草稿是独立模型，同样会被在线更新，必须走同样的布局恢复。
-- 直接调 `update_weights` 不 start 会在第 341–342 行抛 `RuntimeError("start_weight_update must be called before update_weights.")`。
+- 直接调 `update_weights` 不 start 会在第 345–346 行抛 `RuntimeError("start_weight_update must be called before update_weights.")`。
 
 **预期结果**：能说出 level 1 vs level 2 的差别（level 2 还保存 buffers、`offload_tags=()` 表示全卸载），解释状态机为何用单一布尔量 + 前置校验来防乱序，并讲清 `replace_parameter` 相对 `setattr` 在「保留 `weight_loader`」上的优势。
 
 #### 4.5.5 小练习与答案
 
 **练习 1**：`wake_up` 开头为什么要检查 `weight_nz_mode` 并在开启时抛错？
-**参考答案**：FRACTAL_NZ 分形布局在 RL 在线更新场景会导致权重精度问题（第 242–247 行），所以睡眠唤醒（常伴随 RL 热更新）时若检测到 NZ 开启就主动报错，提示用户设 `weight_nz_mode=0`。
+**参考答案**：FRACTAL_NZ 分形布局在 RL 在线更新场景会导致权重精度问题（第 246–251 行），所以睡眠唤醒（常伴随 RL 热更新）时若检测到 NZ 开启就主动报错，提示用户设 `weight_nz_mode=0`。
 
-**练习 2**：#13337 后，`wake_up` 对权重的恢复为什么必须同时覆盖 target 模型与 MTP 草稿模型？
-**参考答案**：MTP（多 token 预测）的草稿是独立模型对象，在 RL 场景里和 target 一样会被在线更新；若只恢复 target 而漏掉草稿，草稿模型的 `w2/w13` 权重布局没翻回可加载布局、`weight_loader` 也可能不对，后续 `update_weights` 对草稿的更新就会出错或精度受损。所以两者都要进 `weight_models` 循环（第 254–283 行）。
+**练习 2**：`wake_up` 对权重的恢复为什么必须同时覆盖 target 模型与 MTP 草稿模型？
+**参考答案**：MTP（多 token 预测）的草稿是独立模型对象，在 RL 场景里和 target 一样会被在线更新；若只恢复 target 而漏掉草稿，草稿模型的 `w2/w13` 权重布局没翻回可加载布局、`weight_loader` 也可能不对，后续 `update_weights` 对草稿的更新就会出错或精度受损。所以两者都要进 `weight_models` 循环（第 258–287 行）。
 
 **练习 3**：`check_health` 的设计为什么对「超时/工具缺失」只 warning，而对「健康非 OK」抛错？
-**参考答案**：前者属于环境/工具问题，不一定代表硬件坏，降级为 warning 可避免误杀正常进程；后者是明确的硬件不健康信号，必须上报让引擎判定 worker 失效（第 1048–1068 行）。
+**参考答案**：前者属于环境/工具问题，不一定代表硬件坏，降级为 warning 可避免误杀正常进程；后者是明确的硬件不健康信号，必须上报让引擎判定 worker 失效（第 1055–1088 行）。
 
 ## 5. 综合实践
 
@@ -513,7 +542,7 @@ replace_parameter(parent_module, param_name, w2_data)
 | 设备 | `init_device` | — | ? | `self.device`, `self.model_runner` |
 | 模型 | `load_model` | — | ? | 模型上卡；权重引擎就绪 |
 | 编译 | `compile_or_warm_up_model` | — | ? | `CompilationTimes` |
-| 探测 | `determine_available_memory` | — | ?（含 #13026 的稀疏卸载额度调整钩子） | KV 可用字节数 |
+| 探测 | `determine_available_memory` | — | ?（含 #12852 的 layerwise 放大、#13026 的稀疏卸载额度调整） | KV 可用字节数 |
 | KV 分配 | `initialize_from_config` | `kv_cache_config` | ? | KV 缓存已分配 |
 | 推理 | `execute_model` | `scheduler_output` | ? | `ModelRunnerOutput` / `IntermediateTensors` |
 | 健康检查 | `check_health` | — | 调 `npu-smi` | 无返回（异常即抛错） |
@@ -522,24 +551,28 @@ replace_parameter(parent_module, param_name, w2_data)
 | 在线更新 | `start_weight_update` → `update_weights` → `finish_weight_update` | `init_info`/`update_info` | ? | `_weight_update_active` 状态翻转 |
 | 关闭 | `shutdown` | — | 关闭各子系统 | — |
 
-**验收标准**：能不看源码填出「?」处至少各一条副作用，并能解释「为什么补丁在 `__init__`、为什么权重引擎在 `load_model`、为什么 KV 分配在 `determine_available_memory` 之后」这三个时序问题；并能说清「为什么 `wake_up` 要用 `replace_parameter`、为什么 MTP 草稿也要一并恢复」这一条 #13337 带来的新约束。
+**验收标准**：能不看源码填出「?」处至少各一条副作用，并能解释「为什么补丁在 `__init__`、为什么权重引擎在 `load_model`、为什么 KV 分配在 `determine_available_memory` 之后」这三个时序问题；说清「为什么 `wake_up` 要用 `replace_parameter`、为什么 MTP 草稿也要一并恢复」这一条 #13337 带来的约束；并说清「为什么开启分层缓冲复用时 `available_kv_cache_memory_bytes` 要乘以 `num_layers/num_tensors`」这一条 #12852 的核算逻辑。
 
 ## 6. 本讲小结
 
 - `NPUWorker(WorkerBase)` 是每个 worker 子进程的核心对象，负责单卡资源管理与生命周期编排，前向本身委托给 `NPUModelRunner`。
 - 构造期 `__init__` 必须先 `adapt_patch()` 重打 worker 级补丁（spawn 子进程不继承父进程补丁），再注册算子、建 `AscendConfig` 与 `SleepWakeupManager`，并初始化 `_weight_update_active=False`。
 - 设备初始化 `_init_device`/`init_device` 处理 DP 设备号偏移、NPU 绑定、HCCL 分布式世界与并行组建立、随机种子与 Triton 设备属性，并建造 v1/v2 ModelRunner。
-- `load_model` → `compile_or_warm_up_model`（含 ACL Graph 捕获、ATB 预热、CPU 绑核）→ `determine_available_memory` → `initialize_from_config` 四步接力把模型装上卡、调好图、留好 KV 空间；睡眠模式下权重与 KV 分别进 `weights`/`kv_cache` 内存池；#13026 在显存额度计算处留了稀疏 KV 卸载的调整钩子（详见 u10-l6）。
+- `load_model` → `compile_or_warm_up_model`（含 ACL Graph 捕获、ATB 预热、CPU 绑核）→ `determine_available_memory` → `initialize_from_config` 四步接力把模型装上卡、调好图、留好 KV 空间；睡眠模式下权重与 KV 分别进 `weights`/`kv_cache` 内存池。
+- **#12852**：开启分层 KV 缓冲复用时，`determine_available_memory` 在算出传统 KV 预算后、按 `factor = num_layers / num_tensors` 把 `available_kv_cache_memory_bytes` 放大（仅当 `has_layer_reuse`），使下游按物理缓冲数计块、逻辑每层容量不变而物理占用降低；另一半「张量描述合并」由 model_runner 的 `apply_layerwise_kv_cache_plan` 完成（详见 u4-l2 / u10-l7）。
+- #13026 在显存额度计算处留了稀疏 KV 卸载的调整钩子（详见 u10-l6）。
 - `execute_model` 是 PP/SP 衔接层：非首 rank 收中间张量、委托前向、非末 rank 发中间张量，异步发送句柄靠 `_pp_send_work` 跨轮回收。
 - 睡眠/唤醒靠 `CaMemAllocator`（按 tag 卸载/丢弃/恢复显存）与 `SleepWakeupManager`（清/重建 HCCL 与 ACL Graph）；在线权重更新是 `_weight_update_active` 驱动的三步状态机；`check_health` 调 `npu-smi` 查硬件。
 - **#13337**：`wake_up` 恢复 MoE 权重布局改用 `replace_parameter`（而非 `setattr + torch.nn.Parameter`）以保留 `weight_loader`，并在 MTP 场景把草稿模型一同恢复——保证「睡眠唤醒 → 在线权重更新」链路中逐层 `weight_loader` 不丢失。
 
 ## 7. 下一步学习建议
 
-- **下一讲 u4-l2 NPUModelRunner v1 主链路**：本讲的 `execute_model` 把前向交给了 `model_runner.execute_model`，下一讲深入 `NPUModelRunner` 的 `_prepare_inputs`、`_build_attention_metadata` 与采样衔接，看一次前向的输入如何被准备好。
+- **下一讲 u4-l2 NPUModelRunner v1 主链路**：本讲的 `execute_model` 把前向交给了 `model_runner.execute_model`，下一讲深入 `NPUModelRunner` 的 `_prepare_inputs`、`_build_attention_metadata` 与采样衔接；同时讲解 #12852 另一半——`initialize_kv_cache` 中 `apply_layerwise_kv_cache_plan` 如何在分配前把 `num_layers` 个张量描述合并为 `num_tensors` 个共享缓冲。
 - **u4-l3 NPUModelRunner v2 新架构**：本讲已遇到 `use_v2_model_runner` 分支，下一讲对比 v1/v2 状态管理差异。
 - **u8-l3 ACL Graph**：本讲的 `capture_model`、`npugraph_memory_bytes`、睡眠唤醒里的图重捕获，都依赖 ACL Graph，建议在读 v2 前后结合 u8-l3 理解图捕获机制。
 - **u9-l4 在线权重传输**：本讲的权重传输引擎只是 worker 侧的「调用方」，其 HCCL/NPU IPC 实现在 u9-l4 详讲；#13337 保留的 `weight_loader` 正是给这条在线更新链路用的。
+- **u10-l2 PD 分离与 KV 传输连接器**：`get_gva_layerwise_config` 读取的 `kv_transfer_config` 正来自 ascend_store 连接器，该讲讲解连接器选择与 layerwise 模式下的 `consumer_is_to_put` 行为。
 - **u10-l3 KV 卸载与睡眠模式**：本讲对睡眠的 worker 侧编排已讲透，但 KV 在睡眠后的「重算/重填充」策略与 device_allocator 细节在 u10-l3 展开。
 - **u10-l6 稀疏 KV 缓存卸载**：本讲 4.3 提到的 `update_available_memory_for_sparse_kv_offload` 与 `get_kv_cache_spec` 缓存只是它的「额度计算钩子」，完整的数据面、管理器与 C++ 内核在该讲专讲。
-- **建议继续阅读的源码**：`vllm_ascend/device_allocator/camem.py`（可插拔分配器）、`vllm_ascend/device_allocator/sleep_mem_optimized.py`（HCCL/Graph 睡眠管理），以补全睡眠机制的实现细节。
+- **u10-l7 分层 prefill KV 缓冲复用**：本讲 4.3 只讲了 worker 侧的「显存核算」（放大因子），完整的 `LayerwiseCacheLayout` 缓冲规划、pool_worker/pool_scheduler 的「回载再复用、上一层保存完成后才复用」时序、GVA partial save/load，以及 sfa_v1 把 prefetch gate 前移，全部在该讲专讲。
+- **建议继续阅读的源码**：`vllm_ascend/device_allocator/camem.py`（可插拔分配器）、`vllm_ascend/device_allocator/sleep_mem_optimized.py`（HCCL/Graph 睡眠管理）、`vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/layerwise_cache_layout.py`（#12852 缓冲规划），以补全睡眠与分层复用机制的实现细节。

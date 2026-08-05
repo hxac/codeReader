@@ -355,7 +355,7 @@ packed load 微操作生成：[lsu_unit.cpp:37-72](https://github.com/vortexgpgp
 
 响应处理与不变量：[lsu_unit.cpp:218-269](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/lsu_unit.cpp#L218-L269)。每条响应 fragment 按 `tag` 找回 `pending_reqs` 里的在途项，按 width 做符号扩展/NaN-box 后写入对应 thread 的目的数据；[L231](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/lsu_unit.cpp#L231) 的断言 `LOAD response must carry line payload` 正是 u5-l3 讲过的「LOAD 响应必须携带 line 数据」不变量的运行时守卫。
 
-每块状态：[lsu_unit.h:128-148](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/hw/rtl/../sim/simx/lsu_unit.h#L128-L148) 定义 `lsu_state_t`，含 `req_queue`（深度 `LSU_QUEUE_IN_SIZE`，对应 RTL 请求队列）、`pending_reqs`（深度 `LSU_PENDING_SIZE`，对应 index buffer）、`fence`（`FenceController`，对应 `fence_lock`）、`addr_list`/`remain_addrs`（批次派发游标）。
+每块状态：[lsu_unit.h:128-148](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/lsu_unit.h#L128-L148) 定义 `lsu_state_t`，含 `req_queue`（深度 `LSU_QUEUE_IN_SIZE`，对应 RTL 请求队列）、`pending_reqs`（深度 `LSU_PENDING_SIZE`，对应 index buffer）、`fence`（`FenceController`，对应 `fence_lock`）、`addr_list`/`remain_addrs`（批次派发游标）。
 
 fence 控制器：[lsu_unit.h:46-74](https://github.com/vortexgpgpu/vortex/blob/d76b7f24e658867ab57e3942d7c648c3e6af072d/sim/simx/lsu_unit.h#L46-L74)，`try_release` 仅在「pending 表空 且 输出 channel 可接受」时才解锁并转发 trace——与 RTL「排空在途响应后才清 fence_lock」语义一致。
 
