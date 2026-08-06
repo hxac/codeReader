@@ -1,7 +1,7 @@
 {
   "project": "semantic-router",
-  "head": "7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246",
-  "rationale": "本项目是面向 LLM 推理的 Envoy ExtProc 控制面（Go 路由器为核心，辅以 Python CLI、推理绑定、K8s Operator、React 面板、E2E 与仿真），体量大、跨语言，因此采用「先全局后内核、先概念后源码」的三层路径。入门层（U1–U3）先让读者建立 Mixture-of-Models + 信号-投影-决策的心智模型，再掌握 vllm-sr CLI 的运行方式与 v0.3 配置/Recipe 体系，建立可直接跑起来的能力。进阶层（U4–U9）沿着真实请求主链路 Envoy→ExtProc→分类信号→投影→决策→选择→后端 展开，并深入向量检索、语义缓存与记忆等运行时子系统，同时讲解可把 YAML 与 DSL 互转的路由 DSL。专家层（U10–U14）覆盖插件链、控制面 API、可观测性、多后端适配、Operator/CRD 与推理绑定、面板、E2E 与仿真、训练评估等扩展与工程化主题。单元之间遵循「概念→配置→启动→请求链路→决策选择→DSL→信号→存储缓存→插件→控制面→部署→面板→测试」的依赖顺序，每篇讲义只解决一个独立主题、引用 1–6 个真实源码文件并给出可操作的实践任务。",
+  "head": "e7cbab82503022721fe31f34b8408cb1c66c40d8",
+  "rationale": "本项目是面向 LLM 推理的 Envoy ExtProc 控制面（Go 路由器为核心，辅以 Python CLI、推理绑定、K8s Operator、React 面板、E2E 与仿真），体量大、跨语言，因此采用「先全局后内核、先概念后源码」的三层路径。入门层（U1–U3）先让读者建立 Mixture-of-Models + 信号-投影-决策的心智模型，再掌握 vllm-sr CLI 的运行方式与 v0.3 配置/Recipe 体系，建立可直接跑起来的能力。进阶层（U4–U9）沿着真实请求主链路 Envoy→ExtProc→分类信号→投影→决策→选择→后端 展开，并深入向量检索、语义缓存与记忆等运行时子系统，同时讲解可把 YAML 与 DSL 互转的路由 DSL。专家层（U10–U14）覆盖插件链、控制面 API、可观测性、多后端适配、Operator/CRD 与推理绑定、面板、E2E 与仿真、训练评估等扩展与工程化主题。单元之间遵循「概念→配置→启动→请求链路→决策选择→DSL→信号→存储缓存→插件→控制面→部署→面板→测试」的依赖顺序，每篇讲义只解决一个独立主题、引用 1–6 个真实源码文件并给出可操作的实践任务。本轮增量（7a77e1e1→e7cbab82）改动很小：仅 E2E 通过 profile 的 LocalImages 能力用 checkout 构建 dashboard 镜像（e2e/profiles/all/imports.go、imports_test.go、dashboard-deployment.yaml）以及文档站点的博客搜索插件（website/，不触及项目源码），核心请求链路与架构未变；因此已生成的 32 篇讲义标记 keep、尚未生成的 17 篇保持 new，其中 u14-l1（E2E 框架）顺带修正了上一版不存在的 framework.go 引用，改用真实的 profile_registry.go 并纳入发生变更的 imports.go，以反映新增的 profile 能力声明机制。",
   "units": [
     {
       "id": "u1",
@@ -33,7 +33,7 @@
           ],
           "practice_task": "阅读 README 与 intro.md，用自己的话写一段：项目放在客户端与模型后端之间的什么位置、它解决了哪三类现实痛点，并列出 5 个核心研究问题中的一个尝试回答。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -60,7 +60,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -88,7 +88,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -116,7 +116,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -152,7 +152,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -179,7 +179,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -207,7 +207,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -234,7 +234,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -271,7 +271,7 @@
             "u2-l1",
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -299,7 +299,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -328,7 +328,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -392,7 +392,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -420,7 +420,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -455,7 +455,7 @@
           "depends_on": [
             "u4-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -484,7 +484,7 @@
             "u5-l1",
             "u2-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -510,7 +510,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -545,7 +545,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -575,7 +575,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -604,7 +604,7 @@
           "depends_on": [
             "u6-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -641,7 +641,7 @@
             "u2-l1",
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -670,7 +670,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -698,7 +698,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -734,7 +734,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -761,7 +761,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -788,7 +788,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l4",
@@ -814,7 +814,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -849,7 +849,7 @@
           "depends_on": [
             "u8-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -879,7 +879,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",
@@ -908,7 +908,7 @@
           "depends_on": [
             "u9-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l4",
@@ -936,7 +936,7 @@
           "depends_on": [
             "u9-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -972,7 +972,7 @@
           "depends_on": [
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -1001,7 +1001,7 @@
           "depends_on": [
             "u10-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l3",
@@ -1421,24 +1421,26 @@
           "order": 1,
           "filename": "u14-l1-e2e-framework.md",
           "level": "advanced",
-          "topic": "讲解 e2e 的 kind/Kubernetes 端到端框架：测试矩阵、profile、framework 与 testcases 如何覆盖路由正确性。",
+          "topic": "讲解 e2e 的 kind/Kubernetes 端到端框架：测试矩阵、profile 注册与能力声明（如 LocalImages 本地镜像构建）、framework runner 与 testcases 如何覆盖路由正确性。",
           "learning_goals": [
             "理解 e2e 框架的 cluster/stacks/fixtures 组织",
             "理解 testmatrix 与 profiles 的覆盖策略",
-            "了解 testcases 的契约断言组织"
+            "理解 profile 的能力声明（ProfileCapabilities）与 LocalImages 如何让 E2E 用 checkout 构建镜像而非可变镜像标签"
           ],
           "source_files": [
             "e2e/README.md",
-            "e2e/pkg/framework/framework.go",
+            "e2e/pkg/framework/profile_registry.go",
+            "e2e/profiles/all/imports.go",
             "e2e/testcases/anthropic_messages_request.go",
             "e2e/cmd/e2e/main.go"
           ],
           "minimal_modules": [
             "框架组织",
             "测试矩阵/profile",
+            "profile 能力与本地镜像",
             "契约断言"
           ],
-          "practice_task": "选择一个 testcase（如 anthropic_messages_request），描述它如何在 kind 集群中部署栈并发起断言；并说明 `make e2e-test` 的入口。",
+          "practice_task": "选择一个 testcase（如 anthropic_messages_request），描述它如何在 kind 集群中部署栈并发起断言；说明 `make e2e-test` 的入口，并解释 dashboard profile 如何通过 LocalImages 用 checkout 构建 backend 镜像。",
           "depends_on": [
             "u5-l3"
           ],
