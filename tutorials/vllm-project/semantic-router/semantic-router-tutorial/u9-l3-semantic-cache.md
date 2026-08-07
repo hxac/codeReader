@@ -1,0 +1,347 @@
+# 语义缓存
+
+## 1. 本讲目标
+
+本讲讲解 vLLM Semantic Router（SR）的**语义缓存（semantic cache）**子系统。学完后你应当掌握：
+
+- 理解 `CacheBackend` 接口如何把「按查询嵌入相似度缓存请求-响应对」抽象成统一契约，以及 `FindSimilarWithThreshold` 相似度查找的语义。
+- 理解 Hybrid 两级缓存（内存 HNSW + Milvus）如何把「快速检索」与「海量持久化」组合在一起，并掌握它与纯内存缓存在查找路径上的差异。
+- 理解用户作用域隔离（HMAC 命名空间 + 硬作用域门控）如何用密码学手段保证一个用户永远收不到另一个用户的缓存响应。
+
+本讲承接 u9-l2（向量存储与多后端）。u9-l2 讲的是「文档→切块→嵌入→写入向量库」的检索能力；本讲把同样的向量检索能力用到一个更敏感的场景——**直接复用别人或自己历史请求的完整响应**，因此多了一整套安全隔离机制。
+
+## 2. 前置知识
+
+- **嵌入向量（embedding）**：把一段文本映射成一个固定维度的浮点向量（如 384 维），语义相近的文本在向量空间里距离也近。SR 使用的嵌入已做 L2 归一化，因此两向量的**余弦相似度**等于它们的**点积**：
+
+\[
+\text{cosine}(a, b) = \frac{a \cdot b}{\lVert a\rVert \lVert b\rVert} = a \cdot b \quad (\text{当 } \lVert a\rVert=\lVert b\rVert=1)
+\]
+
+- **HNSW**：分层可导航小世界图索引，近似最近邻（ANN）检索算法。u9-l1 已详细讲过它的 `M`/`efConstruction`/`efSearch` 参数。语义缓存的内存后端就用它做 O(log n) 检索。
+- **缓存命中阈值（similarity threshold）**：只有当候选缓存项与新查询的相似度 ≥ 阈值（默认 0.8）时才算命中。阈值越高越严格、误命中率低；越低越激进、可能返回语义相近但并非同一问题的答案。
+- **HMAC（基于哈希的消息认证码）**：用一个**密钥**对一段消息做带密钥哈希。与普通哈希的区别在于：没有密钥就无法重现，因此能抵抗「拿候选用户名离线暴力试算」的攻击。本讲的用户作用域隔离就用它。
+
+## 3. 本讲源码地图
+
+本讲涉及的核心源码文件（均位于 `src/semantic-router/pkg/cache/` 与 `pkg/extproc/`）：
+
+| 文件 | 作用 |
+| --- | --- |
+| `cache/cache_interface.go` | 定义 `CacheEntry`、`CacheBackend` 接口、`SimilarityTracker`、后端类型枚举与 `CacheConfig`。是所有缓存实现的契约层。 |
+| `cache/cache.go` | 缓存工具函数：从 OpenAI 请求体抽取查询、用户作用域隔离（`ScopeQueryToUser`/HMAC 命名空间）、作用域解析与比较。 |
+| `cache/cache_factory.go` | `NewCacheBackend` 工厂：按配置的 `backend_type` 创建六种后端实例。 |
+| `cache/inmemory_cache.go` + `inmemory_cache_search.go` | 纯内存语义缓存：嵌入存在内存、用 HNSW 或线性扫描检索。 |
+| `cache/hybrid_cache.go` + `hybrid_cache_lookup.go` | Hybrid 两级缓存：内存 HNSW 只存向量做检索、Milvus 存全部文档做回取。 |
+| `extproc/req_filter_cache.go` | 请求处理主链路里的缓存接入点：抽取查询 → 加用户作用域 → 查缓存 → 命中则直接回包。 |
+
+## 4. 核心概念与源码讲解
+
+### 4.1 缓存接口（CacheBackend）
+
+#### 4.1.1 概念说明
+
+语义缓存要解决的问题是：**当一个新请求和某个历史请求在语义上几乎相同时，直接返回历史的响应，省掉一次模型推理**。这能同时降低延迟与成本，是 SR「按需省钱」理念的关键设施。
+
+但语义缓存比传统 KV 缓存难做得多。传统缓存按**精确键**命中，键要么相等要么不等；语义缓存按**相似度**命中，必须：
+
+1. 把查询文本变成向量；
+2. 在所有历史向量里找最相似的；
+3. 判断相似度是否过阈值；
+4. 还要保证返回的是「同一模型、同一用户、未过期」的响应。
+
+`pkg/cache` 把这一切抽象成一个统一接口 `CacheBackend`，底下接六种后端实现，使上层路由代码完全不关心向量存在内存还是 Milvus/Redis/Qdrant/Valkey。
+
+#### 4.1.2 核心流程
+
+一次缓存交互被拆成两阶段（对应请求阶段与响应阶段）：
+
+```text
+请求阶段：
+  extractQuery(body) ──► (model, query)
+  ScopeQueryToUser(query, userID) ──► scopedQuery   # 加用户命名空间
+  FindSimilarWithThreshold(model, scopedQuery, threshold)
+      ├── 命中 ──► 直接回 ImmediateResponse（不再调后端模型）
+      └── 未命中 ──► AddPendingRequest(...)           # 登记一个待完成项
+
+响应阶段：
+  UpdateWithResponse(requestID, responseBody)         # 用真实响应把待完成项补全
+```
+
+注意一个关键事实（u5-l3 已讲过）：**缓存命中发生在请求阶段，命中后用 `ImmediateResponse` 直接回包，根本不进入响应体阶段**。只有未命中时才会登记 `AddPendingRequest`，等后端模型返回后在响应阶段 `UpdateWithResponse` 补全成可复用的完整条目。
+
+#### 4.1.3 源码精读
+
+**CacheEntry**：一条缓存项就是一个完整的「请求-响应对」加元数据。
+
+[cache_interface.go:11-24](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/cache_interface.go#L11-L24)：`CacheEntry` 持有请求体、响应体、模型名、查询文本、嵌入向量、时间戳、命中计数与每条目的 TTL。其中 `TTLSeconds` 用三态约定：`0` 表示不缓存、`-1` 表示用缓存默认 TTL、`>0` 表示具体秒数。
+
+**CacheBackend 接口**：所有后端必须实现的契约。
+
+[cache_interface.go:27-68](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/cache_interface.go#L27-L68)：注意几个要点——
+
+- `model` 是**精确分区键**（`AddPendingRequest`/`FindSimilar*` 的文档注释明确写「entries from another model partition must never be considered」），即不同模型的缓存项互不可见；
+- `FindSimilarWithThreshold` 允许传入分类专属阈值，使不同路由可以有不同的相似度严格度；
+- `LastSimilarity()` 返回最近一次查找的相似度，供上层写进 `x-vsr-cache-similarity` 响应头做可观测性。
+
+**SimilarityTracker**：一个可嵌入的线程安全「最近相似度」记录器，用原子地存 `float32` 的位模式实现。
+
+[cache_interface.go:70-85](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/cache_interface.go#L70-L85)：各后端只需 `Embed SimilarityTracker` 并在命中时调用 `StoreSimilarity`，即可免费满足 `LastSimilarity()` 方法。这是 Go 里「用嵌入给接口方法提供默认实现」的典型用法。
+
+**六种后端类型**：
+
+[cache_interface.go:99-117](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/cache_interface.go#L99-L117)：定义了 `memory`/`milvus`/`redis`/`valkey`/`hybrid`/`qdrant` 六种 `CacheBackendType`。前五种由 `NewCacheBackend` 工厂直接创建（见 4.1 末尾）。
+
+**OpenAI 查询抽取**：缓存的输入不是整个请求体，而是从请求体里抽出的「用户最后一句话」。
+
+[cache.go:31-56](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/cache.go#L31-L56)：`ExtractQueryFromOpenAIRequest` 用官方 `openai-go` SDK 解析请求，遍历所有 user 消息，取**最后一条**非空 user 文本作为查询。它同时返回模型名，模型名后来成为缓存分区键。`extractUserContent` 还兼容多模态内容数组（纯字符串与 `OfArrayOfContentParts` 两种 union 变体）。
+
+**工厂**：把配置翻译成具体后端实例。
+
+[cache_factory.go:11-100](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/cache_factory.go#L11-L100)：`NewCacheBackend` 先 `ValidateCacheConfig`（阈值必须在 0~1、TTL 不能为负、各后端的专有配置不能缺），再按 `BackendType` `switch` 创建。未启用时返回一个 `Enabled:false` 的空内存后端，使上层 `IsEnabled()` 短路——这就是「禁用缓存」从不报错的原因。默认配置见 [cache_factory.go:179-187](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/cache_factory.go#L179-L187)：内存后端、阈值 0.8、1000 条、TTL 3600 秒。
+
+#### 4.1.4 代码实践
+
+**实践目标**：从真实请求体出发，跟踪查询抽取与缓存查找的接入点。
+
+**操作步骤**：
+
+1. 打开 [req_filter_cache.go:43-75](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/extproc/req_filter_cache.go#L43-L75) 的 `handleCaching`，确认它先 `ExtractQueryFromOpenAIRequest`，再 `ScopeQueryToUser`，最后分流到 `performCacheLookup`（查）或 `storePendingCacheRequest`（写）。
+2. 注意第 47-50 行的 `decisionWillPersonalize` 早退：若命中决策带 RAG 或 memory 插件，则**整条缓存路径（读与写）都被跳过**——因为读会返回过时的通用答案、写会把个性化答案泄漏给他人。
+3. 跟到 [req_filter_cache.go:122-193](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/extproc/req_filter_cache.go#L122-L193) 的 `performCacheLookup`，找到第 142 行 `r.Cache.FindSimilarWithThreshold(partition, cacheQuery, threshold)`，确认 `partition` 来自 `semanticCachePartition`（4.3 会讲为何要把 recipe 名揉进分区键）。
+
+**需要观察的现象**：日志里会出现 `FindSimilarWithThreshold returned: found=...` 与查找耗时 `lookupTime`；命中时 `ctx.VSRCacheHit=true` 并把 `LastSimilarity()` 存进 `ctx.VSRCacheSimilarity`。
+
+**预期结果**：你能复述「抽取查询 → 加作用域 → 查缓存 → 命中直接回包 / 未命中登记 pending」这条最短路径，并解释为何个性化决策必须绕过缓存。
+
+> 本实践为源码阅读型，运行结果待本地验证。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：`CacheEntry.TTLSeconds` 取 `0`、`-1`、`>0` 分别表示什么？为什么禁用缓存时不直接返回 `nil` 而要返回一个 `Enabled:false` 的后端？
+
+**答案**：`0` = 不缓存该条；`-1` = 用缓存实例的默认 TTL；`>0` = 具体存活秒数。禁用时返回 `Enabled:false` 的空后端，是为了让上层用 `IsEnabled()` 统一短路，避免到处写 `if cache != nil` 的判空。
+
+**练习 2**：为什么 `model` 被设计成「精确分区键」而不是参与相似度计算的一个字段？
+
+**答案**：不同模型对同一提示词的回答风格、能力完全不同，把 A 模型的回答当成 B 模型的缓存返回是语义错误。所以模型必须做硬分区（完全不可见），而相似度只在「同模型、同用户」的分区内计算。
+
+---
+
+### 4.2 Hybrid 两级缓存（HNSW + Milvus）
+
+#### 4.2.1 概念说明
+
+纯内存缓存（4.2 末尾讲）快但**重启即失、容量受内存限制**；纯 Milvus 缓存可持久化、可扩到百万级但**每次查找要走网络往返**。Hybrid 缓存把两者优点叠加：
+
+- **内存层（HNSW）只存向量，负责快速检索**——给出候选的 Milvus ID；
+- **Milvus 层存全部文档（请求体/响应体），负责回取**——按 ID 把完整响应拉回来。
+
+这样既保留了 O(log n) 的检索速度，又不必把所有大块响应体塞进内存，支持百万级条目。SR 把它注册为 `hybrid` 后端类型。
+
+#### 4.2.2 核心流程
+
+**写入（write-through 双写）**：
+
+```text
+AddEntry(query, responseBody):
+  embedding ← generateEmbedding(query)
+  milvusCache.AddEntry(...)          # 1. 先写 Milvus（权威存储）
+  若内存满 ──► evictOneUnsafe()       #    FIFO 淘汰最旧
+  embeddings.append(embedding)        # 2. 再写内存向量切片
+  idMap[index] = requestID            #    维护「内存索引 → Milvus ID」映射
+  addNodeHybridOrRebuild(...)         # 3. 把向量加入 HNSW 图
+```
+
+**查找（HNSW 先行，Milvus 兜底）**：
+
+```text
+findSimilar(model, query, threshold):
+  q ← generateEmbedding(query)
+  candidates ← HNSW.searchKNN(q)            # 内存图检索，返回候选索引
+  candidates ← 过滤 similarity ≥ threshold 的
+  for each candidate:
+      resp ← milvusCache.GetByID(id, model) # 按 ID 去 Milvus 回取，并做精确 model 过滤
+      if resp ≠ nil ──► 命中返回
+  # 内存图可能返回别的 model 分区的近邻，回退到 Milvus 的分区向量检索
+  return milvusCache.FindSimilarWithThreshold(model, query, threshold)
+```
+
+关键设计点：**HNSW 图是全局的、不带 model 过滤**（它只按向量近邻）。所以内存图返回的候选可能属于别的 model 分区，必须靠 Milvus 的 `GetByID(id, model)` 做精确分区校验；若全部候选都落空，再回退到 Milvus 自带的分区向量检索，避免漏掉内存索引里没有的条目。
+
+#### 4.2.3 源码精读
+
+**HybridCache 结构**：
+
+[hybrid_cache.go:68-101](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/hybrid_cache.go#L68-L101)：内存侧只有 `hnswIndex`（图）、`embeddings`（向量切片）、`idMap`（索引→Milvus ID 映射）三件——**故意不存响应体**；外部存储是 `milvusCache`。`hnswNeedsRebuild` 标志位很关键：淘汰会让所有索引移位、整张图作废，此时不立即重建而是标记，等下次 `add` 时再整体重建（避免每次淘汰都付一次 O(n) 重建）。
+
+**NewHybridCache 与启动重建**：
+
+[hybrid_cache.go:129-217](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/hybrid_cache.go#L129-L217)：构造时默认调 `RebuildFromMilvus` 从 Milvus 把所有向量重新灌进内存图（5 分钟超时），使进程**重启后内存索引可恢复**。重建失败只告警不致命，带着空索引继续跑。`maxMemoryEntries` 默认 10 万。重建完后还启动一个后台 TTL 回收 goroutine，把 Milvus 已过期的条目从内存图里摘掉，让图跟踪「活跃工作集」而非历史最高水位。
+
+**写入路径**：
+
+[hybrid_cache.go:439-493](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/hybrid_cache.go#L439-L493)：`AddEntry` 严格按「生成嵌入 → 写 Milvus → 满则淘汰 → 写内存向量与 idMap → 加图节点」顺序，是典型的 write-through。注意 `ttlSeconds==0` 直接跳过（第 447-450 行）。
+
+**淘汰与延迟重建**：
+
+[hybrid_cache.go:626-666](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/hybrid_cache.go#L626-L666)：`evictOneUnsafe` 用最简单的 FIFO（淘汰 `embeddings[0]`），但淘汰会让 `embeddings` 切片整体前移、所有索引失真，因此置 `hnswNeedsRebuild=true` 并 `markStale()`。下一次 `addNodeHybridOrRebuild`（[hybrid_cache.go:672-678](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/hybrid_cache.go#L672-L678)）发现标志位即触发 `rebuildHNSWFromEmbeddings` 整图重建。注释点明了动机：若不重建，图在容量上限时会退化成「只剩最后一个节点」、命中率趋近 0。
+
+**查找路径**：
+
+[hybrid_cache_lookup.go:31-87](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/hybrid_cache_lookup.go#L31-L87)：`findSimilar` 先生成查询向量，再 `searchCandidates` 拿内存候选；候选为空直接记 miss。否则 `fetchResponseFromCandidates` 逐个去 Milvus 按 `(milvusID, model)` 回取（带 2 秒超时）。这里最精妙的是第 69-83 行的**回退**：当所有内存候选在 Milvus 里都查不到（说明它们属于别的 model 分区，被 Milvus 的精确 model 过滤挡掉了），就回退到 `milvusCache.FindSimilarWithThreshold` 让 Milvus 自己做分区向量检索。回退命中时相似度取自 `milvusCache.LastSimilarity()`。
+
+[hybrid_cache_lookup.go:116-138](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/hybrid_cache_lookup.go#L116-L138)：`fetchResponseFromCandidates` 的 `GetByID(fetchCtx, candidate.milvusID, model)` 第二个参数 `model` 就是精确分区门控——即便内存图把别的模型的近邻送来，这里也会因 model 不符返回 nil。
+
+#### 4.2.4 代码实践
+
+**实践目标**：对比纯内存缓存与 Hybrid 缓存在查找路径上的差异。
+
+**操作步骤**：
+
+1. 读纯内存查找 [inmemory_cache_search.go:133-159](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/inmemory_cache_search.go#L133-L159) 的 `FindSimilarWithThreshold`，再读 Hybrid 查找 [hybrid_cache_lookup.go:31-87](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/hybrid_cache_lookup.go#L31-L87)。
+2. 画两张序列图，标注「向量从哪来」「响应体从哪取」「model 过滤在哪一步做」。
+3. 重点对比两点：
+   - 内存缓存把**向量与响应体都放在进程内**（`c.entries[i].Embedding` 与 `ResponseBody` 同住），命中后零网络；Hybrid 把**向量留内存、响应体留 Milvus**，命中要多一次 `GetByID` 网络回取。
+   - 内存缓存的 model 过滤发生在 [inmemory_cache_search.go:50-66](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/inmemory_cache_search.go#L50-L66) 的 `entryEligible`（4.3 详述）；Hybrid 的 model 过滤发生在 Milvus 的 `GetByID` 与回退检索里。
+
+**需要观察的现象**：在日志里，内存命中是 `cache_hit` 且 `backend=memory`；Hybrid 命中是 `hybrid_cache_hit` 且 `source=milvus`（见 [hybrid_cache_lookup.go:140-158](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/hybrid_cache_lookup.go#L140-L158) 的 `recordLookupHit`），点明响应体最终来自 Milvus。
+
+**预期结果**：你能用一句话说清——**内存缓存是「单层、向量+响应同宿主、model 靠内存字段过滤」；Hybrid 是「双层、向量在内存图、响应在 Milvus、model 靠 Milvus 回取时过滤，失败回退 Milvus 自检索」**。
+
+> 本实践为源码阅读型，运行结果待本地验证。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么 Hybrid 的 HNSW 图不按 model 分多张，而要用一张全局图再在回取时过滤？
+
+**答案**：维护多张图（每模型一张）会让内存与建图成本随模型数线性膨胀，且新增模型要新建图。单张全局图简单且检索效率高；代价是候选可能跨分区，但这由 Milvus 回取时的精确 model 过滤兜住，必要时再回退 Milvus 分区检索。
+
+**练习 2**：`hnswNeedsRebuild` 为什么不在淘汰时立刻重建图，而是延迟到下次 `add`？
+
+**答案**：淘汰（FIFO 移首位）会让整个 `embeddings` 切片前移、所有节点索引失效，立即重建是 O(n)。若短时间内连续淘汰，每次都重建会退化成 O(n²)。延迟到下次写入才重建一次，把多次淘汰的代价摊销成一次。
+
+---
+
+### 4.3 用户作用域隔离（HMAC 命名空间）
+
+#### 4.3.1 概念说明
+
+语义缓存有一个独有的安全风险：**跨用户泄漏**。假如 Alice 问了一个长问题，Bob 后来问了语义上极其相近的问题，相似度超过阈值，Bob 就可能直接收到 **Alice 的历史响应**——而那可能含 Alice 的隐私数据。
+
+SR 用两层防线堵住这个口子：
+
+1. **软隔离（嵌入前缀）**：在把查询送进嵌入模型前，给查询前面拼一段「用户命名空间」token，让不同用户的相同问题在向量空间里被推到不同区域，自然降低跨用户相似度。
+2. **硬隔离（作用域门控）**：即便软隔离失效（长查询里大量正文稀释了前缀权重，相似度仍超阈值），检索后还要做一次**命名空间精确相等**校验，不等就丢弃。
+
+软隔离降低概率、硬隔离保证确定性，二者缺一不可。注释里明确记录了这个 bug 的来历：曾在阈值 0.8、实测相似度 ~0.91 时观察到活生生的跨租户泄漏（见 [cache_scope_isolation_test.go:42-53](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/cache_scope_isolation_test.go#L42-L53)）。
+
+#### 4.3.2 核心流程
+
+**命名空间生成（HMAC）**：
+
+```text
+userID ──HMAC-SHA256(secret, userID)──► 取前 8 字节 ──► hex 编码 ──► namespace(16 hex 字符)
+```
+
+用 HMAC 而非普通 SHA256 的原因：用户名常是可预测的（邮箱、自增 ID），普通哈希可被离线暴力试算还原；加了密钥的 HMAC 则无法在不知道 `USER_SCOPE_NAMESPACE_SECRET` 的情况下重现。
+
+**软隔离前缀拼接**：
+
+```text
+scopedQuery = "cache-scope " + namespace + " " + namespace + " " + namespace + " " + query
+                       └──────────── 重复 3 次 ────────────┘
+```
+
+namespace token 重复 3 次是为了**放大它在嵌入里的权重**，使不同用户的相同长查询落到向量空间的不同区域。
+
+**硬隔离门控**：检索拿到候选后，解析候选查询里的 namespace，与请求者的 namespace 做精确字符串比较；不等则不视为命中。
+
+#### 4.3.3 源码精读
+
+**ScopeQueryToUser / ScopeQueryToNamespace**：作用域化的入口。
+
+[cache.go:64-87](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/cache.go#L64-L87)：若 `namespaceID` 为空或查询为空，原样返回（向后兼容，对应「全局/匿名」作用域）。否则把 namespace 重复 `scopeNamespaceRepeat=3` 次（[cache.go:62](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/cache.go#L62)），用 `cacheScopePrefix="cache-scope "` 起头拼成单行前缀。注释说明单行是为了让日志/追踪消费者不会看到来自用户文本的原始换行。
+
+**userScopeNamespace（HMAC 核心）**：
+
+[cache.go:132-156](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/cache.go#L132-L156)：密钥从环境变量 `USER_SCOPE_NAMESPACE_SECRET` 读取（用 `sync.Once` 只读一次）。有密钥则走 HMAC-SHA256，取前 8 字节 hex（16 字符）；无密钥则回退到普通 SHA256（仅为不破坏既有部署，生产环境强烈建议配密钥）。关键安全性质：**只有 hex 摘要进入存储，原始租户名/profile 名永不落盘**——因为各后端只比较 HMAC，不存原名。
+
+**作用域解析与硬比较**：
+
+[cache.go:94-125](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/cache.go#L94-L125)：`CacheScopeNamespaceOf` 从 `"cache-scope <ns> <ns> <ns> <query>"` 里取前缀后的第一个空格分隔 token 还原 namespace；`SameCacheScope` 则是 namespace 的精确相等比较。注释强调这是**独立于嵌入相似度的硬相等校验**，且点出一个重要实现差异——
+
+> in-memory 搜索路径**故意不用** `SameCacheScope`：它一次性用 `CacheScopeNamespaceOf` 解析出请求者的 namespace，再与每个候选比较，而不是对每条候选都重新解析两边查询。
+
+**内存路径的硬门控**：
+
+[inmemory_cache_search.go:50-66](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/inmemory_cache_search.go#L50-L66)：`entryEligible` 是安全关键函数，注释明确列出四步**有先后次序**的校验：①无响应体不可匹配；②`entry.Model != model` 丢弃（精确 model 分区）；③**硬用户作用域门控**——`CacheScopeNamespaceOf(entry.Query) != scopeNamespace` 则丢弃，且必须放在过期检查**之前**，使越界条目不计入过期统计；④过期则不可匹配但回报 `expired=true`。线性扫描 [inmemory_cache_search.go:99-125](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/inmemory_cache_search.go#L99-L125) 与 HNSW 扫描 [inmemory_cache_search.go:68-97](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/inmemory_cache_search.go#L68-L97) 共用同一个 `entryEligible`，保证两条路径的门控逻辑完全一致、谁也不会悄悄漏掉。
+
+**上层如何取 userID**：
+
+[user_id_header.go:55-62](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/extproc/user_id_header.go#L55-L62)（及后续）：`cacheScopeUserID` 优先从鉴权头解析用户 ID，否则回退到环境变量 `SEMANTIC_CACHE_FALLBACK_USER_HEADER` 指定的备用头。这个 ID 就是 `ScopeQueryToUser` 的 `userID` 入参，最终变成 HMAC namespace。
+
+**为何还要把 recipe 名揉进分区键**：
+
+[req_filter_cache.go:96-105](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/extproc/req_filter_cache.go#L96-L105)：`semanticCachePartition` 用 `config.RoutingNamespaceKey(ctx.Routing.RecipeName(), model)` 把 recipe 名拼进分区键，使命名 recipe 之间互不可见缓存项，而 default recipe 保留旧 model 键以维持向后兼容的相似度行为。
+
+#### 4.3.4 代码实践
+
+**实践目标**：解释 `ScopeQueryToUser` 如何用 HMAC 实现多租户隔离，并验证硬门控的确定性。
+
+**操作步骤**：
+
+1. 读 [cache.go:64-87](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/cache.go#L64-L87) 与 [cache.go:132-156](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/cache.go#L132-L156)，用自己的话写清「userID → HMAC → namespace → 重复 3 次前缀 → 拼进查询」这条链路。
+2. 读测试 [cache_scope_isolation_test.go:20-40](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/cache_scope_isolation_test.go#L20-L40)（`TestCacheScopeNamespaceOfAndSameScope`）与 [cache_scope_isolation_test.go:42-68](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/cache_scope_isolation_test.go#L42-L68)（`TestSearchEnforcesUserScope`），确认四条不变式：
+   - 不同用户 (`alice` vs `bob`) 不共享作用域；
+   - 同用户两次作用域化共享作用域；
+   - 作用域化查询与未作用域化查询不匹配；
+   - 即便嵌入是最近邻，硬门控也会丢弃越界条目（线性与 HNSW 两路径都测）。
+3. （可选，待本地验证）设置 `USER_SCOPE_NAMESPACE_SECRET=test-secret`，对同一查询分别用 `alice`、`bob` 调 `ScopeQueryToUser`，用 `CacheScopeNamespaceOf` 解析后断言两者不等、与 `SameCacheScope` 结果为 false。
+
+**需要观察的现象**：在不设密钥时，namespace 是 userID 的纯 SHA256 前 8 字节；设密钥后变成 HMAC，两者摘要完全不同，证明密钥改变了命名空间。
+
+**预期结果**：你能说清——软隔离靠「重复 3 次的 HMAC 前缀」把不同用户推远，硬隔离靠检索后 `entryEligible`/`SameCacheScope` 的精确 namespace 比较兜底，两层共同保证跨租户泄漏在数学上不可能发生。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么 namespace token 要重复 3 次而不是只拼 1 次？
+
+**答案**：长查询的正文向量会稀释短前缀的权重，使两个问相同长问题的不同用户仍可能落到近邻位置。重复 3 次放大了 namespace token 在嵌入里的占比，把不同用户的相同问题推到向量空间的不同区域，降低跨用户相似度（这是「软」隔离，仍需硬门控兜底）。
+
+**练习 2**：`entryEligible` 里为什么把「用户作用域门控」放在「过期检查」之前？
+
+**答案**：作用域门控是安全边界，越界的条目根本「不属于这个用户」，不应计入该用户的任何统计（包括过期计数）。先做作用域校验能保证一个越界条目既不会被返回、也不会污染请求者的过期指标。
+
+**练习 3**：未配置 `USER_SCOPE_NAMESPACE_SECRET` 时系统会怎样？生产环境为何不推荐？
+
+**答案**：回退到普通 SHA256，功能仍可用（namespace 仍唯一），但普通摘要对可预测用户名（邮箱、自增 ID）易被离线暴力试算还原，削弱隔离强度。生产环境配密钥后用 HMAC，无密钥则无法重现 namespace。
+
+## 5. 综合实践
+
+**任务**：把本讲三个模块串起来，复原一次完整的语义缓存请求，并指出每一层防线各挡掉了什么。
+
+请按顺序完成：
+
+1. **接入点**：从 [req_filter_cache.go:43-75](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/extproc/req_filter_cache.go#L43-L75) 的 `handleCaching` 出发，写出「抽查询 → 作用域化 → 查/写」三步对应的函数名。
+2. **接口契约**：在 [cache_interface.go:27-68](https://github.com/vllm-project/semantic-router/blob/7a77e1e1b1d5711d0b94e3c75bcea694a1d1f246/src/semantic-router/pkg/cache/cache_interface.go#L27-L68) 里圈出 `FindSimilarWithThreshold` 与 `LastSimilarity`，说明它们如何被 `performCacheLookup` 用来填 `x-vsr-cache-similarity` 头。
+3. **查找路径对比**：画一张表，对比内存后端与 Hybrid 后端在「向量存储位置」「响应体存储位置」「model 过滤发生处」「是否需网络回取」「重启后是否存活」五列上的差异。
+4. **隔离复核**：构造一个场景——Alice 与 Bob 问了语义高度相似的长问题，分别指出**软隔离**（HMAC 前缀重复 3 次）与**硬隔离**（`entryEligible`/Milvus model 过滤）各自在哪一步把对方的响应挡在了门外。
+5. **交付物**：写一段 200 字以内的总结，说明语义缓存为何必须在「相似度查找」之上额外叠加「model 精确分区」与「用户作用域 HMAC」两道硬隔离。
+
+> 综合实践以源码阅读与设计推演为主；若本地有运行中的 SR，可用 `vllm-sr` 跑两次相近请求并观察 `x-vsr-cache-*` 响应头验证命中行为，运行结果待本地验证。
+
+## 6. 本讲小结
+
+- 语义缓存按**查询嵌入相似度**缓存完整请求-响应对，命中发生在请求阶段并以 `ImmediateResponse` 直接回包，未命中才登记 pending、等响应阶段补全。
+- `CacheBackend` 是统一契约：`model` 是**精确分区键**、`FindSimilarWithThreshold` 支持分类专属阈值、`LastSimilarity` 供可观测性；工厂 `NewCacheBackend` 接六种后端（内存/Milvus/Redis/Valkey/Hybrid/Qdrant）。
+- Hybrid 是**两级缓存**：内存 HNSW 图只存向量做 O(log n) 检索、Milvus 存全部响应体做按 ID 回取，write-through 双写，启动时从 Milvus 重建内存图；淘汰用 FIFO 且延迟到下次 add 才整图重建。
+- Hybrid 查找走「内存图找候选 → Milvus 按 `(id, model)` 回取做精确分区 → 全落空则回退 Milvus 分区向量检索」，因为全局图不带 model 过滤。
+- 用户隔离是**两层防线**：软隔离靠 HMAC namespace 重复 3 次的前缀把不同用户在向量空间推远，硬隔离靠检索后 `entryEligible`（内存）或 Milvus model 过滤（Hybrid）做 namespace/model 精确相等校验，共同杜绝跨租户泄漏。
+- 命中 RAG/memory 等个性化插件时整条缓存路径被跳过，避免读返回过时通用答案、写泄漏个性化数据。
+
+## 7. 下一步学习建议
+
+- **u9-l4 智能体记忆（Agentic Memory）**：记忆系统与语义缓存同源（都靠嵌入检索 + 多后端），但记忆分语义/程序/情景三类并做 BM25 混合重排，是缓存思想的进一步演化。
+- **回看 u9-l1/u9-l2**：本讲的 HNSW 与多后端抽象直接复用自这两讲，若对图参数或向量库流水线仍有疑问可对照重读。
+- **延伸阅读**：`pkg/cache/hybrid_cache_reclaim.go`（后台 TTL 回收如何让内存图跟踪活跃工作集）、`pkg/cache/inmemory_embedding_memo.go`（同一次 miss 请求里查与写两次嵌入的去重缓存），可作为理解生产化细节的进阶材料。

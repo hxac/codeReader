@@ -1,0 +1,1510 @@
+{
+  "project": "semantic-router",
+  "head": "e7cbab82503022721fe31f34b8408cb1c66c40d8",
+  "rationale": "本项目是面向 LLM 推理的 Envoy ExtProc 控制面（Go 路由器为核心，辅以 Python CLI、推理绑定、K8s Operator、React 面板、E2E 与仿真），体量大、跨语言，因此采用「先全局后内核、先概念后源码」的三层路径。入门层（U1–U3）先让读者建立 Mixture-of-Models + 信号-投影-决策的心智模型，再掌握 vllm-sr CLI 的运行方式与 v0.3 配置/Recipe 体系，建立可直接跑起来的能力。进阶层（U4–U9）沿着真实请求主链路 Envoy→ExtProc→分类信号→投影→决策→选择→后端 展开，并深入向量检索、语义缓存与记忆等运行时子系统，同时讲解可把 YAML 与 DSL 互转的路由 DSL。专家层（U10–U14）覆盖插件链、控制面 API、可观测性、多后端适配、Operator/CRD 与推理绑定、面板、E2E 与仿真、训练评估等扩展与工程化主题。单元之间遵循「概念→配置→启动→请求链路→决策选择→DSL→信号→存储缓存→插件→控制面→部署→面板→测试」的依赖顺序，每篇讲义只解决一个独立主题、引用 1–6 个真实源码文件并给出可操作的实践任务。本轮增量（7a77e1e1→e7cbab82）改动很小：仅 E2E 通过 profile 的 LocalImages 能力用 checkout 构建 dashboard 镜像（e2e/profiles/all/imports.go、imports_test.go、dashboard-deployment.yaml）以及文档站点的博客搜索插件（website/，不触及项目源码），核心请求链路与架构未变；因此已生成的 32 篇讲义标记 keep、尚未生成的 17 篇保持 new，其中 u14-l1（E2E 框架）顺带修正了上一版不存在的 framework.go 引用，改用真实的 profile_registry.go 并纳入发生变更的 imports.go，以反映新增的 profile 能力声明机制。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门与定位",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览与定位：什么是 vLLM Semantic Router",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 vLLM Semantic Router 作为面向 LLM 推理的可编程路由层，解释 Mixture-of-Models、信号驱动路由与 Envoy ExtProc 控制面的定位与价值。",
+          "learning_goals": [
+            "理解项目要解决的问题：质量、成本、延迟、隐私、安全的可编程路由",
+            "理解 Mixture-of-Models 与把路由逻辑从应用代码下沉到控制面的理念",
+            "了解项目的核心研究问题（信号捕获、信号组合、模型协作、Token 经济、安全可观测）"
+          ],
+          "source_files": [
+            "README.md",
+            "website/docs/intro.md",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "项目定位",
+            "Mixture-of-Models 理念",
+            "Envoy ExtProc 控制面"
+          ],
+          "practice_task": "阅读 README 与 intro.md，用自己的话写一段：项目放在客户端与模型后端之间的什么位置、它解决了哪三类现实痛点，并列出 5 个核心研究问题中的一个尝试回答。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与目录组织",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "level": "beginner",
+          "topic": "讲解 monorepo 的资产边界与核心子系统划分：Go 路由器、Python CLI、推理绑定、配置、部署、面板、E2E 与工具。",
+          "learning_goals": [
+            "掌握 src/semantic-router、src/vllm-sr、config、deploy、dashboard、e2e、tools 等目录的职责",
+            "理解仓库没有根 docs/scripts catch-all 的边界约定",
+            "能定位每个子系统对应的入口目录"
+          ],
+          "source_files": [
+            "tools/agent/docs/repo-map.md",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "仓库资产边界",
+            "核心子系统映射",
+            "入口目录定位"
+          ],
+          "practice_task": "对照 repo-map.md，绘制一张目录到职责的映射表，并标注哪几个目录属于「高变更风险区（High-Risk Areas）」。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "安装与本地运行",
+          "order": 3,
+          "filename": "u1-l3-install-and-run.md",
+          "level": "beginner",
+          "topic": "讲解通过 install.sh 与 Makefile 目标在 cpu/amd/nvidia 三种环境下的本地构建与运行方式。",
+          "learning_goals": [
+            "掌握 cpu-local / amd-local / nvidia-local 三种本地环境的启动命令",
+            "理解 Makefile 通过 tools/make/*.mk 组合 sub-makefile 的设计",
+            "了解本地镜像流（local image flow）的开发约定"
+          ],
+          "source_files": [
+            "Makefile",
+            "install.sh",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "安装方式",
+            "Make 目标体系",
+            "本地环境矩阵"
+          ],
+          "practice_task": "执行 `make vllm-sr-dev` 完成本地镜像构建，并记录构建产物；用 install.sh 走一遍交互式安装流程并截图关键步骤。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "vllm-sr CLI 命令体系",
+          "order": 4,
+          "filename": "u1-l4-vllm-sr-cli.md",
+          "level": "beginner",
+          "topic": "讲解 Python CLI（vllm-sr）的命令组：serve、validate、config、model、rag、eval、status、logs、dashboard 等，以及本地服务编排入口。",
+          "learning_goals": [
+            "掌握 vllm-sr 的命令组结构与 click group 组织方式",
+            "理解 serve 命令在本地启动整套服务栈的作用",
+            "了解 core.py / runtime.py 承担的本地服务生命周期管理"
+          ],
+          "source_files": [
+            "src/vllm-sr/cli/main.py",
+            "src/vllm-sr/cli/commands/runtime.py",
+            "src/vllm-sr/cli/core.py"
+          ],
+          "minimal_modules": [
+            "CLI 命令注册",
+            "serve 编排",
+            "服务生命周期"
+          ],
+          "practice_task": "运行 `vllm-sr --help` 与 `vllm-sr serve --help`，列出所有子命令；用 `vllm-sr status` 查看本地服务状态并解读输出字段。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心概念模型：信号-投影-决策",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "信号-投影-决策路由心智模型",
+          "order": 1,
+          "filename": "u2-l1-routing-mental-model.md",
+          "level": "beginner",
+          "topic": "建立整体数据流心智模型：请求进入后先抽取信号、投影协调匹配证据、决策规则求值选出路由、再驱动插件与模型分发。",
+          "learning_goals": [
+            "理解 Signals→Projections→Decisions→Models+Plugins 的端到端数据流",
+            "理解投影如何协调竞争匹配并产出命名路由带",
+            "能在概念层面描述一次请求被路由的全过程"
+          ],
+          "source_files": [
+            "website/docs/intro.md",
+            "config/recipes/balance/recipe.dsl"
+          ],
+          "minimal_modules": [
+            "信号层",
+            "投影层",
+            "决策层",
+            "插件与模型分发"
+          ],
+          "practice_task": "用 balance recipe.dsl 为素材，画一张从 SIGNAL 到 ROUTE 再到 MODEL 的依赖关系图，标注每个 ROUTE 用到了哪几类信号与投影。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Signals：16 个信号族",
+          "order": 2,
+          "filename": "u2-l2-signals.md",
+          "level": "beginner",
+          "topic": "讲解 authz/context/keyword/language/structure/complexity/domain/embedding/kb/modality/fact-check/jailbreak/pii/preference/reask/user-feedback 等信号族的含义与表达方式。",
+          "learning_goals": [
+            "识别 16 个维护信号族及其抽取角色",
+            "理解 keyword/embedding/domain/complexity/context 等典型信号的写法",
+            "了解信号如何携带 confidence 与 value"
+          ],
+          "source_files": [
+            "config/recipes/balance/recipe.dsl",
+            "src/semantic-router/pkg/config/signal_config.go"
+          ],
+          "minimal_modules": [
+            "信号族总览",
+            "典型信号写法",
+            "信号置信度"
+          ],
+          "practice_task": "在 balance recipe.dsl 中挑选 keyword、embedding、domain、complexity、context 各一类信号，解释其判定条件；并到 config/signal/ 目录下找出对应信号族的配置片段。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "Projections：分区/评分/映射",
+          "order": 3,
+          "filename": "u2-l3-projections.md",
+          "level": "beginner",
+          "topic": "讲解 partition（softmax 互斥分区）、score（加权和评分）、mapping（阈值分带）三类投影如何把信号协调成命名路由带。",
+          "learning_goals": [
+            "理解 partition 的 softmax_exclusive 语义与 default 兜底",
+            "理解 score 的 weighted_sum 加权组合方法",
+            "理解 mapping 的 threshold_bands 与 sigmoid_distance 校准"
+          ],
+          "source_files": [
+            "config/recipes/balance/recipe.dsl",
+            "src/semantic-router/pkg/projectiontrace/trace.go"
+          ],
+          "minimal_modules": [
+            "partition 分区",
+            "score 评分",
+            "mapping 分带",
+            "投影追踪"
+          ],
+          "practice_task": "解析 balance 的 difficulty_score 评分投影，列出它用到的全部输入及其权重正负含义；再解释 difficulty_band 把分数切成哪几段命名带。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "Decisions/Routes/Models：决策路由与模型",
+          "order": 4,
+          "filename": "u2-l4-decisions-routes-models.md",
+          "level": "beginner",
+          "topic": "讲解 ROUTE 上的 WHEN 布尔规则、PRIORITY/TIER 优先级、MODEL 选择与 reasoning/effort 参数，以及决策如何映射到模型候选。",
+          "learning_goals": [
+            "理解 ROUTE 的 WHEN 规则在信号/投影上的 AND/OR/NOT 组合",
+            "理解 PRIORITY 与 TIER 如何决定路由命中顺序与兜底",
+            "理解 MODEL 声明与 capabilities/quality_score/tags 的作用"
+          ],
+          "source_files": [
+            "config/recipes/balance/recipe.dsl",
+            "src/semantic-router/pkg/config/decision_config.go"
+          ],
+          "minimal_modules": [
+            "ROUTE 规则树",
+            "优先级与兜底",
+            "MODEL 元数据"
+          ],
+          "practice_task": "为 balance 中的 fast_qa 与 casual_chat 两条路由写一段：它们各自的 WHEN 条件、优先级差异，以及为什么 casual_chat 作为最终兜底没有 WHEN。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "配置体系与 Recipe",
+      "level": "beginner",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "config.yaml v0.3 整体结构",
+          "order": 1,
+          "filename": "u3-l1-config-yaml-structure.md",
+          "level": "beginner",
+          "topic": "讲解 v0.3 运行时配置的顶层结构：version、listeners、providers、routing、entrypoints、recipes、global 各段职责。",
+          "learning_goals": [
+            "掌握 config.yaml 的七大顶层段落及其作用",
+            "理解 entrypoints 与 recipes 的请求面到配方的映射关系",
+            "了解 global 段承载的全局控制项"
+          ],
+          "source_files": [
+            "config/config.yaml",
+            "config/README.md"
+          ],
+          "minimal_modules": [
+            "listeners/providers",
+            "routing",
+            "entrypoints/recipes",
+            "global"
+          ],
+          "practice_task": "在 config/config.yaml 中定位七大顶层段，统计 routing 段下 decisions、signals、projections、plugins 各有多少条目，并解释 entrypoints 如何把请求指到 recipe。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Recipes：可用的路由配方",
+          "order": 2,
+          "filename": "u3-l2-recipes.md",
+          "level": "beginner",
+          "topic": "讲解 config/recipes 下 balance/accuracy/agent/privacy/knowledge/feedback/multi-objective 等配方的用途与四件套交付契约（config.yaml/recipe.dsl/probes.yaml/README.md）。",
+          "learning_goals": [
+            "理解每个 recipe 解决的一个用户结果场景",
+            "掌握 recipe 的四文件交付契约与契约校验",
+            "了解 multi-objective 多入口配方的设计"
+          ],
+          "source_files": [
+            "config/recipes/README.md",
+            "config/recipes/balance/README.md",
+            "config/recipes/multi-objective/README.md"
+          ],
+          "minimal_modules": [
+            "配方目录",
+            "四文件契约",
+            "配方校验命令"
+          ],
+          "practice_task": "对比 balance 与 privacy 两个配方的 README，总结它们的路由策略差异；运行 `vllm-sr validate --config config/recipes/balance/config.yaml` 并记录校验结果。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "配置加载与校验",
+          "order": 3,
+          "filename": "u3-l3-config-loading-validation.md",
+          "level": "intermediate",
+          "topic": "讲解 Go 端配置加载（Parse/Load/Replace）、规范化与语义校验机制，以及全局热替换的入口。",
+          "learning_goals": [
+            "理解 config.Parse/Load 如何把 YAML 解析为 RouterConfig",
+            "理解 validator 的语义校验职责与家族化拆分约定",
+            "了解 config.Replace 在热重载/K8s 配置更新中的作用"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/config/config.go",
+            "src/semantic-router/pkg/config/loader.go",
+            "src/semantic-router/pkg/config/validator.go"
+          ],
+          "minimal_modules": [
+            "配置解析",
+            "规范化",
+            "语义校验",
+            "全局热替换"
+          ],
+          "practice_task": "阅读 loader.go 与 config.go，梳理 RouterConfig 的核心字段；找一个 validator 的校验规则，描述它阻止了哪类错误配置。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "路由器启动与 ExtProc 服务",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "启动主流程：main.go 启动序列",
+          "order": 1,
+          "filename": "u4-l1-startup-sequence.md",
+          "level": "intermediate",
+          "topic": "逐段讲解 cmd/main.go 的启动序列：解析选项、加载配置、建 Registry、起 API Server、下载模型、初始化依赖、起 ExtProc、热身、标记就绪。",
+          "learning_goals": [
+            "掌握 main() 中各初始化步骤的顺序与依赖关系",
+            "理解 API Server 提前启动以暴露 /startup-status 的设计",
+            "了解模型下载进度上报与 startup 状态机"
+          ],
+          "source_files": [
+            "src/semantic-router/cmd/main.go",
+            "src/semantic-router/cmd/runtime_bootstrap.go"
+          ],
+          "minimal_modules": [
+            "选项解析",
+            "配置加载",
+            "API 提前启动",
+            "模型下载",
+            "ExtProc 起服"
+          ],
+          "practice_task": "把 main() 的启动步骤画成时序图，并标注哪一步会让 /startup-status 可用、哪一步会因模型下载失败而 fatal。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Runtime Registry：运行时依赖容器",
+          "order": 2,
+          "filename": "u4-l2-runtime-registry.md",
+          "level": "intermediate",
+          "topic": "讲解 routerruntime.Registry 作为 ExtProc 与 API Server 之间共享的线程安全依赖容器，托管分类服务、记忆、向量库、模型选择与学习运行时。",
+          "learning_goals": [
+            "理解 Registry 承载的运行时依赖种类",
+            "理解 ExtProc 与 API Server 共享运行时依赖的方式",
+            "了解学习运行时（LearningRuntime）等窄接口缝"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/routerruntime/registry.go",
+            "src/semantic-router/pkg/routerruntime/vectorstore_runtime.go"
+          ],
+          "minimal_modules": [
+            "Registry 容器",
+            "共享依赖",
+            "学习运行时接口"
+          ],
+          "practice_task": "列出 Registry 暴露的 Set*/Get* 方法，说明 ExtProc 与 API Server 分别会注入/读取哪些依赖。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "ExtProc gRPC 服务与 Router",
+          "order": 3,
+          "filename": "u4-l3-extproc-server.md",
+          "level": "intermediate",
+          "topic": "讲解 pkg/extproc 的 Server 生命周期与 OpenAIRouter 核心状态机，以及 Envoy ExtProc 的 headers/body 交互模型。",
+          "learning_goals": [
+            "理解 ExtProc Server 的 NewServer/Start/GetRouter 生命周期",
+            "理解 OpenAIRouter 作为请求处理状态机的角色",
+            "了解 Envoy 通过 ExtProc gRPC 传递 headers→body→response 的交互"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/extproc/server.go",
+            "src/semantic-router/pkg/extproc/router.go",
+            "src/semantic-router/pkg/extproc/processor_core.go"
+          ],
+          "minimal_modules": [
+            "ExtProc Server",
+            "OpenAIRouter 状态机",
+            "gRPC 交互模型"
+          ],
+          "practice_task": "阅读 server.go 与 router.go，说明 Process(stream) 是如何被 Envoy 调用的，并描述 OpenAIRouter 持有哪些核心状态字段。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "请求处理主链路",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "请求体处理与入口解析",
+          "order": 1,
+          "filename": "u5-l1-request-body-entrypoint.md",
+          "level": "intermediate",
+          "topic": "讲解 handleRequestBody 解析 OpenAI 请求体、resolveEntrypointForRequest 解析配方/入口，并进入决策求值前的准备。",
+          "learning_goals": [
+            "理解请求体如何被解析出 model/content",
+            "理解 entrypoint/recipe 解析与 passthrough 的区别",
+            "了解决策求值前的信号输入构建"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/extproc/processor_req_body.go",
+            "src/semantic-router/pkg/extproc/req_filter_entrypoint.go"
+          ],
+          "minimal_modules": [
+            "请求体解析",
+            "入口/配方解析",
+            "信号输入构建"
+          ],
+          "practice_task": "跟踪一次 /v1/chat/completions 请求，描述它在 processor_req_body.go 中从解析 body 到确定 recipe 的调用顺序。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "决策求值管线：信号→决策",
+          "order": 2,
+          "filename": "u5-l2-decision-evaluation-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 performDecisionEvaluation 如何准备信号、求值信号、调用决策引擎并选出匹配路由，是请求链路的内核。",
+          "learning_goals": [
+            "理解 prepareSignalEvaluationInput 与 evaluateSignalsForDecision 的衔接",
+            "理解 runDecisionEngine 调用决策引擎得到 DecisionResult",
+            "理解决策方法到选择算法的解析"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/extproc/req_filter_classification.go",
+            "src/semantic-router/pkg/decision/engine.go"
+          ],
+          "minimal_modules": [
+            "信号准备",
+            "信号求值",
+            "决策引擎调用",
+            "方法解析"
+          ],
+          "practice_task": "在 req_filter_classification.go 中找到 performDecisionEvaluation 的主体，列出它调用的关键子步骤；并用 decision/engine.go 解释 EvaluateDecisionsWithSignals 的输入输出。",
+          "depends_on": [
+            "u5-l1",
+            "u2-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "响应体处理与插件回调",
+          "order": 3,
+          "filename": "u5-l3-response-body-plugins.md",
+          "level": "intermediate",
+          "topic": "讲解 handleResponseBody 的响应体编排：provider 归一化、流式处理、缓存/重放写入与响应告警。",
+          "learning_goals": [
+            "理解响应体处理如何归一化不同 provider 的响应",
+            "理解流式响应的处理方式",
+            "了解响应阶段如何回写缓存与重放记录"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/extproc/processor_res_body.go"
+          ],
+          "minimal_modules": [
+            "provider 归一化",
+            "流式处理",
+            "缓存/重放回写"
+          ],
+          "practice_task": "梳理 processor_res_body.go 中响应处理的主要分支，说明流式与非流式响应分别走哪条路径，以及缓存命中的请求在响应阶段如何处理。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "决策引擎与模型选择",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "决策引擎：布尔规则求值与置信度",
+          "order": 1,
+          "filename": "u6-l1-decision-engine.md",
+          "level": "intermediate",
+          "topic": "深入 decision/engine.go：递归求值 RuleCombination 规则树、按信号类型匹配、AND/OR/NOT 布尔语义与置信度聚合，以及按 tier/confidence/priority 选择最佳决策。",
+          "learning_goals": [
+            "理解 evalNode 递归求值规则树的过程",
+            "理解 matchesSignalType 的存在性匹配与 domain 别名匹配",
+            "理解 AND 平均置信度、OR 取最佳置信度的聚合规则"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/decision/engine.go"
+          ],
+          "minimal_modules": [
+            "规则树求值",
+            "信号匹配",
+            "置信度聚合",
+            "最佳决策选择"
+          ],
+          "practice_task": "构造一条含 AND/OR/NOT 的决策规则，手工推演它在给定信号匹配下的求值结果与聚合置信度；解释三种选择策略的差异。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "选择算法注册表：Elo/Hybrid 等",
+          "order": 2,
+          "filename": "u6-l2-selection-algorithms.md",
+          "level": "intermediate",
+          "topic": "讲解 pkg/selection 的 Selector 接口、Registry 与多种算法实现（Elo、Hybrid、AutoMix、Session-aware、Static 等）及工厂。",
+          "learning_goals": [
+            "理解 Selector 接口与 SelectionContext/SelectionResult",
+            "理解 Registry 注册多种选择方法的方式",
+            "了解 Elo（Bradley-Terry）与 Hybrid 组合算法的思路"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/selection/selector.go",
+            "src/semantic-router/pkg/selection/elo.go",
+            "src/semantic-router/pkg/selection/hybrid.go",
+            "src/semantic-router/pkg/selection/factory.go"
+          ],
+          "minimal_modules": [
+            "Selector 接口",
+            "算法 Registry",
+            "Elo/Hybrid 实现",
+            "算法工厂"
+          ],
+          "practice_task": "列出 factory.go 注册的所有选择方法；选择 Elo 算法，解释它如何用 Bradley-Terry 模型给候选模型打分并选出胜者。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "模型运行时、库存与定价",
+          "order": 3,
+          "filename": "u6-l3-model-runtime-pricing.md",
+          "level": "intermediate",
+          "topic": "讲解 modelruntime 的嵌入模型初始化与热身、modelinventory 的外部模型目录类型、modelpricing 的成本计算。",
+          "learning_goals": [
+            "理解 PrepareRouterRuntime/WarmupRouter 如何初始化嵌入并加载工具/知识库",
+            "理解外部模型库存（ExternalModelConfig）的用途",
+            "了解 modelpricing 如何支撑成本感知路由"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/modelruntime/router_runtime.go",
+            "src/semantic-router/pkg/modelinventory/types.go",
+            "src/semantic-router/pkg/modelpricing/modelpricing.go"
+          ],
+          "minimal_modules": [
+            "嵌入运行时初始化",
+            "模型热身",
+            "外部模型库存",
+            "成本定价"
+          ],
+          "practice_task": "描述 PrepareRouterRuntime 返回的 EmbeddingRuntimeState 中 AnyReady/ToolsReady 的含义；并说明 modelpricing 在一次选择中可能如何影响候选排序。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "路由 DSL",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "DSL 语法与 AST",
+          "order": 1,
+          "filename": "u7-l1-dsl-syntax-ast.md",
+          "level": "intermediate",
+          "topic": "讲解路由 DSL 的 SIGNAL/PROJECTION/MODEL/PLUGIN/ROUTE/RECIPE/ENTRYPOINT/TEST 块语法，以及 parser.go 到 ast.go 的 AST 结构。",
+          "learning_goals": [
+            "掌握 DSL 各类块的定义语法",
+            "理解 Program/RouteDecl/SignalDecl/BoolExpr 等 AST 节点",
+            "理解 WHEN 布尔表达式（BoolAnd/BoolOr/BoolNot/SignalRefExpr）"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/dsl/parser.go",
+            "src/semantic-router/pkg/dsl/ast.go",
+            "config/recipes/balance/recipe.dsl"
+          ],
+          "minimal_modules": [
+            "DSL 块语法",
+            "AST 节点",
+            "布尔表达式"
+          ],
+          "practice_task": "用 DSL 语法手写一个包含 1 个 SIGNAL、1 个 PROJECTION 和 1 个 ROUTE（含 AND/NOT）的最小策略，并对照 ast.go 说明它会解析成哪些节点。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "DSL 编译与反编译（YAML 往返）",
+          "order": 2,
+          "filename": "u7-l2-dsl-compile-decompile.md",
+          "level": "intermediate",
+          "topic": "讲解 compiler.go 把 AST 编译为 RouterConfig、compiler_routes/signals 的逐块编译，以及 decompiler/emitter_yaml 把配置反编译回 DSL/YAML 的往返能力。",
+          "learning_goals": [
+            "理解 Compile/CompileAST 把 AST 变成 RouterConfig 的流程",
+            "理解 ROUTE→Decision、SIGNAL→规则 的编译映射",
+            "理解 decompiler/emitter_yaml 实现的 YAML↔DSL 往返"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/dsl/compiler.go",
+            "src/semantic-router/pkg/dsl/compiler_routes.go",
+            "src/semantic-router/pkg/dsl/decompiler.go",
+            "src/semantic-router/pkg/dsl/emitter_yaml.go"
+          ],
+          "minimal_modules": [
+            "AST→Config 编译",
+            "逐块编译",
+            "反编译与 YAML 往返"
+          ],
+          "practice_task": "把 balance 的 recipe.dsl 编译为 config.yaml，再把生成的 config.yaml 反编译回 DSL，对比两者是否一致并解释任何差异来源。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "dsl 命令行工具",
+          "order": 3,
+          "filename": "u7-l3-dsl-cli.md",
+          "level": "intermediate",
+          "topic": "讲解 cmd/dsl 提供的 validate/compile/generate/test 子命令，作为编写与校验 recipe DSL 的开发者入口。",
+          "learning_goals": [
+            "掌握 dsl validate/compile 的命令用法",
+            "理解 test_runner 如何运行 DSL 内嵌的 TEST 块",
+            "了解 generate 的代码生成用途"
+          ],
+          "source_files": [
+            "src/semantic-router/cmd/dsl/main.go",
+            "src/semantic-router/cmd/dsl/generate.go",
+            "src/semantic-router/cmd/dsl/test_runner.go"
+          ],
+          "minimal_modules": [
+            "validate/compile 子命令",
+            "TEST 块运行",
+            "代码生成"
+          ],
+          "practice_task": "对 config/recipes/<use-case>/recipe.dsl 运行 `go run ./cmd/dsl validate` 与 `compile`，记录输出；再为一个 ROUTE 编写一个 TEST 块并运行 test_runner。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "分类信号系统",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "分类编排与信号求值",
+          "order": 1,
+          "filename": "u8-l1-classification-orchestration.md",
+          "level": "intermediate",
+          "topic": "讲解 pkg/classification 的 Classifier 编排所有分类后端、EvaluateAllSignals 抽取全部信号，以及把信号桥接到决策引擎的过程。",
+          "learning_goals": [
+            "理解 Classifier 编排的各类分类后端",
+            "理解 EvaluateAllSignals 产出 SignalResults 的结构",
+            "理解 classifier_signal_decision 如何桥接到决策引擎"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/classification/classifier.go",
+            "src/semantic-router/pkg/classification/classifier_signal_eval.go",
+            "src/semantic-router/pkg/classification/classifier_signal_decision.go"
+          ],
+          "minimal_modules": [
+            "Classifier 编排",
+            "信号求值",
+            "信号→决策桥接"
+          ],
+          "practice_task": "梳理 EvaluateAllSignals 会触发哪些分类器，并说明 SignalResults 中的 MatchedKeywordRules/MatchedDomainRules/SignalConfidences 是如何被决策引擎消费的。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "域/类别分类器",
+          "order": 2,
+          "filename": "u8-l2-domain-category-classifier.md",
+          "level": "intermediate",
+          "topic": "讲解 domain/category 分类如何用嵌入与熵分析做多类别匹配，以及 KB 增强的类别分类。",
+          "learning_goals": [
+            "理解 category_classifier 的熵感知多类别输出",
+            "理解 domain 与 category 的别名/MMLU 映射",
+            "了解 KB 增强类别分类（category_kb）"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/classification/category_classifier.go",
+            "src/semantic-router/pkg/classification/category_kb_classifier.go"
+          ],
+          "minimal_modules": [
+            "类别匹配",
+            "熵分析",
+            "KB 增强分类"
+          ],
+          "practice_task": "用一段示例文本解释 category_classifier 如何输出多类别概率；说明为什么 domain('health') 在决策里能匹配到 health 类别。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "PII 与越狱检测",
+          "order": 3,
+          "filename": "u8-l3-pii-jailbreak.md",
+          "level": "intermediate",
+          "topic": "讲解 PII token 分类与 allow-list、以及 BERT+对比学习的越狱检测，它们构成请求路径上的安全治理信号。",
+          "learning_goals": [
+            "理解 PII 检测的 token 分类与 allow-list 强制",
+            "理解越狱检测的 BERT+对比学习方法",
+            "了解两类信号如何驱动安全路由"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/classification/classifier_pii_ops.go",
+            "src/semantic-router/pkg/classification/classifier_signal_jailbreak.go"
+          ],
+          "minimal_modules": [
+            "PII token 分类",
+            "allow-list",
+            "越狱检测"
+          ],
+          "practice_task": "构造一条含 PII 与一条疑似越狱的输入，描述两类分类器分别输出什么信号，并指出在 privacy recipe 中这些信号如何改变路由结果。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l4",
+          "title": "嵌入提供者（Embedding Provider）",
+          "order": 4,
+          "filename": "u8-l4-embedding-provider.md",
+          "level": "intermediate",
+          "topic": "讲解 pkg/embedding 的 Provider 接口与工厂，作为分类、缓存、记忆、工具检索共用的嵌入能力抽象。",
+          "learning_goals": [
+            "理解 Provider 接口的 Embed/EmbedBatch/Dimension/Backend",
+            "理解从 RouterConfig 构造 Provider 的方式",
+            "了解嵌入在多子系统中的复用"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/embedding/provider.go"
+          ],
+          "minimal_modules": [
+            "Provider 接口",
+            "提供者工厂",
+            "跨子系统复用"
+          ],
+          "practice_task": "说明 NewProviderFromRouterConfig 如何根据配置选择本地或远程嵌入后端；列出至少 3 个消费 Provider 的子系统。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "向量检索、语义缓存与记忆",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "HNSW 向量索引",
+          "order": 1,
+          "filename": "u9-l1-hnsw-index.md",
+          "level": "intermediate",
+          "topic": "讲解 pkg/hnsw 的纯 Go HNSW 近邻检索实现，包括图参数、增删查与 SIMD 距离优化。",
+          "learning_goals": [
+            "理解 HNSW 的 M/efConstruction/efSearch 参数",
+            "理解 Add/Search 的图检索流程",
+            "了解 SIMD（AVX2/AVX-512）点积优化"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/hnsw/hnsw.go",
+            "src/semantic-router/pkg/hnsw/simd_distance_amd64.go"
+          ],
+          "minimal_modules": [
+            "HNSW 图结构",
+            "增删查",
+            "SIMD 距离"
+          ],
+          "practice_task": "用 hnsw.NewIndex 构建一个小索引，插入若干向量并执行 Search，对比不同 efSearch 下的召回率与耗时。",
+          "depends_on": [
+            "u8-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "向量存储与多后端",
+          "order": 2,
+          "filename": "u9-l2-vectorstore-backends.md",
+          "level": "intermediate",
+          "topic": "讲解 pkg/vectorstore 的 OpenAI 兼容向量库 API、文档摄入流水线（切块→嵌入→写入）与多后端（内存/Milvus/Qdrant/Valkey/LlamaStack），以及 pkg/milvus 的连接与集合生命周期。",
+          "learning_goals": [
+            "理解 VectorStoreBackend 接口与切块/嵌入/写入流水线",
+            "理解多后端可替换的存储抽象",
+            "了解 milvus 的连接、集合 ensure/load 与重试"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/vectorstore/types.go",
+            "src/semantic-router/pkg/vectorstore/manager.go",
+            "src/semantic-router/pkg/vectorstore/pipeline.go",
+            "src/semantic-router/pkg/milvus/lifecycle.go"
+          ],
+          "minimal_modules": [
+            "向量库 API",
+            "摄入流水线",
+            "多后端抽象",
+            "Milvus 生命周期"
+          ],
+          "practice_task": "描述一次文档摄入从上传到可检索的完整流水线；并说明在内存与 Milvus 两种后端下，VectorStoreBackend 的实现差异。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l3",
+          "title": "语义缓存",
+          "order": 3,
+          "filename": "u9-l3-semantic-cache.md",
+          "level": "intermediate",
+          "topic": "讲解 pkg/cache 的语义缓存：按查询嵌入相似度缓存请求-响应对、多后端（内存 HNSW/Milvus/Qdrant/Redis/Valkey/Hybrid）、用户作用域隔离与 OpenAI 查询抽取。",
+          "learning_goals": [
+            "理解 CacheBackend 接口与相似度查找",
+            "理解 hybrid 两级缓存（HNSW+Milvus）",
+            "理解用户作用域隔离（HMAC 命名空间）"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/cache/cache_interface.go",
+            "src/semantic-router/pkg/cache/cache.go",
+            "src/semantic-router/pkg/cache/hybrid_cache.go",
+            "src/semantic-router/pkg/cache/inmemory_cache.go"
+          ],
+          "minimal_modules": [
+            "缓存接口",
+            "Hybrid 两级缓存",
+            "用户作用域隔离"
+          ],
+          "practice_task": "解释 ScopeQueryToUser 如何用 HMAC 实现多租户隔离；并对比 inmemory 与 hybrid 两种缓存的查找路径。",
+          "depends_on": [
+            "u9-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l4",
+          "title": "智能体记忆（Agentic Memory）",
+          "order": 4,
+          "filename": "u9-l4-agentic-memory.md",
+          "level": "intermediate",
+          "topic": "讲解 pkg/memory 的记忆系统：语义/程序/情景记忆类型、嵌入检索、自适应阈值、混合 BM25 重排与多后端存储。",
+          "learning_goals": [
+            "理解 Store 接口与 Memory/MemoryType 类型",
+            "理解记忆的嵌入检索与混合重排",
+            "了解记忆过滤器（MemoryFilter）的后处理"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/memory/store.go",
+            "src/semantic-router/pkg/memory/types.go",
+            "src/semantic-router/pkg/memory/milvus_store.go"
+          ],
+          "minimal_modules": [
+            "Store 接口",
+            "记忆类型",
+            "混合检索重排"
+          ],
+          "practice_task": "说明语义/程序/情景三种记忆的区别；描述一次 Retrieve 如何结合嵌入相似度与 BM25 重排选出最终记忆。",
+          "depends_on": [
+            "u9-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "插件链与扩展机制",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "插件链架构与配置",
+          "order": 1,
+          "filename": "u10-l1-plugin-chain.md",
+          "level": "advanced",
+          "topic": "讲解插件链（semantic-cache/jailbreak/pii/system_prompt/header_mutation/hallucination/router_replay/rag 等）的配置片段、按 decision 启停与在请求/响应阶段的执行。",
+          "learning_goals": [
+            "理解插件类型目录与 config/plugin 下的配置片段",
+            "理解插件按 decision 启停与链式处理",
+            "了解 rag_plugin 等插件配置热点"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/config/rag_plugin.go",
+            "src/semantic-router/pkg/extproc/processor_req_body.go",
+            "config/plugin/router-replay/README.md"
+          ],
+          "minimal_modules": [
+            "插件类型目录",
+            "按 decision 启停",
+            "链式处理"
+          ],
+          "practice_task": "在 config/plugin 下选择两个插件，说明它们的配置字段；并解释 router_replay 如何在请求与响应阶段捕获 body。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l2",
+          "title": "Prompt 压缩",
+          "order": 2,
+          "filename": "u10-l2-prompt-compression.md",
+          "level": "advanced",
+          "topic": "讲解 pkg/promptcompression 的无 LLM 压缩：TextRank、位置加权（Lost in the Middle）、TF-IDF、新颖度四信号打分选句。",
+          "learning_goals": [
+            "理解四信号打分的句子选择机制",
+            "理解 TextRank 在句子邻接矩阵上的 PageRank",
+            "理解位置加权为何呈 U 形"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/promptcompression/compressor.go",
+            "src/semantic-router/pkg/promptcompression/textrank.go",
+            "src/semantic-router/pkg/promptcompression/position.go"
+          ],
+          "minimal_modules": [
+            "四信号打分",
+            "TextRank",
+            "位置加权",
+            "TF-IDF"
+          ],
+          "practice_task": "用 DefaultConfig 对一段长文本运行 Compress，对比压缩前后 token 数；调整四类权重观察选句变化。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l3",
+          "title": "工具检索与 MCP",
+          "order": 3,
+          "filename": "u10-l3-tools-mcp.md",
+          "level": "advanced",
+          "topic": "讲解 pkg/tools 的语义工具库（嵌入检索 top-k 工具）与 pkg/mcp 的 Model Context Protocol 客户端（stdio/HTTP 传输、工具过滤）。",
+          "learning_goals": [
+            "理解 ToolsDatabase 的嵌入检索与点积打分",
+            "理解 MCPClient 接口与 stdio/HTTP 传输",
+            "了解工具过滤（allow/block）"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/tools/tools.go",
+            "src/semantic-router/pkg/tools/retriever.go",
+            "src/semantic-router/pkg/mcp/interface.go",
+            "src/semantic-router/pkg/mcp/factory.go"
+          ],
+          "minimal_modules": [
+            "语义工具库",
+            "MCP 客户端",
+            "传输与过滤"
+          ],
+          "practice_task": "描述 FindSimilarToolsWithScores 如何按查询嵌入检索工具；并说明一个 stdio 类型 MCP 服务如何被 factory 创建并连接。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l4",
+          "title": "多后端适配（OpenAI/Anthropic/Response API/ImageGen）",
+          "order": 4,
+          "filename": "u10-l4-backend-adapters.md",
+          "level": "advanced",
+          "topic": "讲解 OpenAI↔Anthropic 格式互转、Response API 状态化翻译、OpenAI 文件/向量库客户端与图像生成后端工厂。",
+          "learning_goals": [
+            "理解 Anthropic 请求/响应互转与 passthrough 字段",
+            "理解 Response API 的 previous_response_id 链式翻译",
+            "理解 imagegen 的后端工厂与请求参数"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/anthropic/client.go",
+            "src/semantic-router/pkg/responseapi/translator.go",
+            "src/semantic-router/pkg/imagegen/interface.go"
+          ],
+          "minimal_modules": [
+            "Anthropic 互转",
+            "Response API 翻译",
+            "图像生成工厂"
+          ],
+          "practice_task": "用一个 OpenAI chat 请求体说明 ToAnthropicRequestBody 做了哪些字段转换；并描述 Response API 如何把 previous_response_id 还原成完整上下文。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "控制面与可观测性",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "API Server 管理 API",
+          "order": 1,
+          "filename": "u11-l1-apiserver.md",
+          "level": "advanced",
+          "topic": "讲解 pkg/apiserver 提供的管理面 HTTP API：配置部署/ETag、分类与评估路由、知识库与嵌入、鉴权与 OpenAPI 规范。",
+          "learning_goals": [
+            "理解管理 API 的路由组织与中间件",
+            "理解配置部署与运行时同步（ETag）",
+            "了解 classify/eval/kbs/embeddings 等能力端点"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/apiserver/config.go",
+            "src/semantic-router/pkg/apiserver/route_classify.go",
+            "src/semantic-router/pkg/apiserver/route_kbs.go",
+            "src/semantic-router/pkg/apiserver/openapi_spec.go",
+            "src/semantic-router/pkg/apiserver/auth.go"
+          ],
+          "minimal_modules": [
+            "管理 API 路由",
+            "配置部署/ETag",
+            "能力端点",
+            "鉴权与 OpenAPI"
+          ],
+          "practice_task": "梳理 apiserver 暴露的主要路由前缀，并说明配置部署如何通过 ETag 实现运行时同步；用 OpenAPI spec 找到 classify 端点的入参。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "投影追踪与可解释性",
+          "order": 2,
+          "filename": "u11-l2-projection-trace.md",
+          "level": "advanced",
+          "topic": "讲解 projectiontrace 的版本化 JSON：分区解析（softmax 胜者与边际）、评分分解（加权贡献）、映射决策（阈值带与边界距离），供分类/重放/面板消费。",
+          "learning_goals": [
+            "理解 Trace 的 schema 版本与三大组成",
+            "理解 PartitionResolution/ScoreBreakdown/MappingDecision 字段",
+            "了解投影追踪在可解释性与面板中的复用"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/projectiontrace/trace.go"
+          ],
+          "minimal_modules": [
+            "分区解析",
+            "评分分解",
+            "映射决策",
+            "可解释复用"
+          ],
+          "practice_task": "构造一个投影追踪 JSON 示例，解释 difficulty_score 的 ScoreBreakdown 中各输入的贡献，以及 difficulty_band 的 MappingDecision 选择了哪段带。",
+          "depends_on": [
+            "u5-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "限流、在途、延迟与授权",
+          "order": 3,
+          "filename": "u11-l3-governance-controls.md",
+          "level": "advanced",
+          "topic": "讲解请求路径上的治理控制：ratelimit 多 provider 链式（Envoy RLS/本地，RPM+TPM）、inflight 在途计数自愈、latency 缓存热度估计、authz 授权分类。",
+          "learning_goals": [
+            "理解 ratelimit 的 Provider 链与首拒语义",
+            "理解 inflight 的自愈老化与负载感知",
+            "理解 latency 的 TTFT 缓存热度估计与 authz 授权"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/ratelimit/provider.go",
+            "src/semantic-router/pkg/ratelimit/chain.go",
+            "src/semantic-router/pkg/inflight/tracker.go",
+            "src/semantic-router/pkg/latency/warmth.go",
+            "src/semantic-router/pkg/classification/authz_classifier.go"
+          ],
+          "minimal_modules": [
+            "限流链",
+            "在途计数",
+            "缓存热度",
+            "授权"
+          ],
+          "practice_task": "说明 ratelimit 链式多 provider 的首拒语义；并解释 inflight 在漏掉 End 调用时如何自愈、latency 如何用 TTFT 估计缓存命中概率。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l4",
+          "title": "可观测性：日志、指标、追踪",
+          "order": 4,
+          "filename": "u11-l4-observability.md",
+          "level": "advanced",
+          "topic": "讲解 pkg/observability 的三大子能力（结构化日志、Prometheus 指标、OpenTelemetry 追踪）及其在 main 启动序列中的接入。",
+          "learning_goals": [
+            "理解结构化日志事件（ComponentEvent）的组织",
+            "理解 Prometheus 指标与 windowed metrics",
+            "理解 OpenTelemetry tracing 的初始化与采样"
+          ],
+          "source_files": [
+            "src/semantic-router/pkg/observability/logging/logging.go",
+            "src/semantic-router/pkg/observability/metrics/metrics.go",
+            "src/semantic-router/pkg/observability/tracing/tracing.go",
+            "src/semantic-router/cmd/main.go"
+          ],
+          "minimal_modules": [
+            "结构化日志",
+            "Prometheus 指标",
+            "OpenTelemetry 追踪"
+          ],
+          "practice_task": "在 main.go 中定位 initializeTracing 与 startMetricsServerIfEnabled，说明指标端口与追踪初始化的时机；并解读 startup_complete 日志事件包含哪些字段。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "本地编排与部署",
+      "level": "advanced",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "vllm-sr 容器与运行时编排",
+          "order": 1,
+          "filename": "u12-l1-vllm-sr-orchestration.md",
+          "level": "advanced",
+          "topic": "讲解 Python CLI 如何编排本地容器栈：容器镜像/服务管理、运行时拓扑、生命周期与 K8s 后端抽象。",
+          "learning_goals": [
+            "理解 container_cli 的镜像/服务 barrel 设计",
+            "理解 runtime_stack/runtime_topology 的栈编排",
+            "了解 k8s_backend 与 deployment_backend 的后端抽象"
+          ],
+          "source_files": [
+            "src/vllm-sr/cli/container_cli.py",
+            "src/vllm-sr/cli/core.py",
+            "src/vllm-sr/cli/runtime_stack.py",
+            "src/vllm-sr/cli/k8s_backend.py"
+          ],
+          "minimal_modules": [
+            "容器 barrel",
+            "栈编排",
+            "后端抽象"
+          ],
+          "practice_task": "跟踪 `vllm-sr serve` 在 core.py/runtime_stack.py 中的调用链，说明它如何拉起 Envoy、router、模型后端等服务并管理其生命周期。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l2",
+          "title": "Helm / Kubernetes / 本地部署",
+          "order": 2,
+          "filename": "u12-l2-deploy-artifacts.md",
+          "level": "advanced",
+          "topic": "讲解 deploy/ 下创建与配置部署目标的产物：Helm chart、Kubernetes 清单、KServe、OpenShift 与本地代理清单。",
+          "learning_goals": [
+            "理解 deploy 的资产边界（只做创建/配置部署目标）",
+            "理解 Helm chart 与 Kubernetes 清单的组织",
+            "了解 local/openshift/kserve 等部署变体"
+          ],
+          "source_files": [
+            "deploy/README.md",
+            "deploy/helm/README.md",
+            "deploy/kubernetes/README.md"
+          ],
+          "minimal_modules": [
+            "部署资产边界",
+            "Helm chart",
+            "K8s 清单",
+            "部署变体"
+          ],
+          "practice_task": "在 deploy/helm 中找到 router 的 Deployment/Service 模板，说明 Envoy 与 ExtProc router 是如何被编排在一起的；记录关键可配置项。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l3",
+          "title": "Operator 与 CRD",
+          "order": 3,
+          "filename": "u12-l3-operator-crd.md",
+          "level": "advanced",
+          "topic": "讲解 deploy/operator 的 Kubernetes Operator：CRD schema（SemanticRouter）、控制器调和流程、canonical config 构建与后端发现、Envoy/Gateway 集成。",
+          "learning_goals": [
+            "理解 SemanticRouter CRD 的 schema 字段",
+            "理解 controller 的 reconcile 流程与资源构建",
+            "理解 canonical_config_builder 的配置翻译热点"
+          ],
+          "source_files": [
+            "deploy/operator/main.go",
+            "deploy/operator/api/v1alpha1/semanticrouter_types.go",
+            "deploy/operator/controllers/semanticrouter_controller.go",
+            "deploy/operator/controllers/canonical_config_builder.go"
+          ],
+          "minimal_modules": [
+            "CRD schema",
+            "Reconcile 流程",
+            "配置翻译",
+            "后端发现"
+          ],
+          "practice_task": "阅读 semanticrouter_types.go 列出 CRD 的核心字段；并在 canonical_config_builder.go 中找到把 CRD spec 翻译为 router config 的关键步骤。",
+          "depends_on": [
+            "u12-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l4",
+          "title": "推理绑定（candle/ml/nlp/onnx/openvino）",
+          "order": 4,
+          "filename": "u12-l4-inference-bindings.md",
+          "level": "advanced",
+          "topic": "讲解 Rust/C 支撑的推理绑定如何在 Go 中通过 CGO 暴露嵌入/分类/NLP/ONNX 能力，支撑本地推理。",
+          "learning_goals": [
+            "理解各 binding 的 Go 入口与职责",
+            "理解 candle/ml/nlp/onnx/openvino 的分工",
+            "了解本地推理后端的可替换性"
+          ],
+          "source_files": [
+            "candle-binding/semantic-router.go",
+            "ml-binding/ml_binding.go",
+            "nlp-binding/nlp_binding.go",
+            "onnx-binding/semantic-router.go"
+          ],
+          "minimal_modules": [
+            "CGO 绑定入口",
+            "各后端分工",
+            "后端可替换"
+          ],
+          "practice_task": "对比 candle-binding 与 onnx-binding 的 Go 入口签名，说明它们各自提供哪类推理能力；并解释 EMBEDDING_BACKEND_OVERRIDE=candle 时 main.go 做了哪些环境调优。",
+          "depends_on": [
+            "u8-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u13",
+      "title": "管理面板",
+      "level": "advanced",
+      "order": 13,
+      "lectures": [
+        {
+          "id": "u13-l1",
+          "title": "面板后端（Go）",
+          "order": 1,
+          "filename": "u13-l1-dashboard-backend.md",
+          "level": "advanced",
+          "topic": "讲解 dashboard/backend 的 Go 管理后端：配置读写、部署应用、容器探活与状态合成等 handler，强调保持 HTTP 传输薄的约定。",
+          "learning_goals": [
+            "理解后端 handler 的职责划分（config/deploy/status）",
+            "理解文件改写、运行时应用、容器探活的边界",
+            "了解后端控制热点与拆分约定"
+          ],
+          "source_files": [
+            "dashboard/backend/handlers/config.go",
+            "dashboard/backend/handlers/deploy.go",
+            "dashboard/backend/handlers/status.go"
+          ],
+          "minimal_modules": [
+            "config handler",
+            "deploy handler",
+            "status handler"
+          ],
+          "practice_task": "梳理后端三类 handler 各自处理的 HTTP 端点；说明配置改写如何与 apiserver 的运行时同步协作。",
+          "depends_on": [
+            "u11-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l2",
+          "title": "面板前端（React）",
+          "order": 2,
+          "filename": "u13-l2-dashboard-frontend.md",
+          "level": "advanced",
+          "topic": "讲解 dashboard/frontend 的 React 应用：路由壳（App.tsx）、鉴权/安装门控、概览页与配置页的组织。",
+          "learning_goals": [
+            "理解 App.tsx 路由壳与鉴权/安装门控",
+            "理解 DashboardPage 的概览数据塑造",
+            "理解 ConfigPage 配置编辑页的结构"
+          ],
+          "source_files": [
+            "dashboard/frontend/src/App.tsx",
+            "dashboard/frontend/src/pages/DashboardPage.tsx",
+            "dashboard/frontend/src/pages/ConfigPage.tsx"
+          ],
+          "minimal_modules": [
+            "路由壳",
+            "门控",
+            "概览页",
+            "配置页"
+          ],
+          "practice_task": "在 App.tsx 中梳理主要路由与门控逻辑；并说明 DashboardPage 如何获取并展示路由统计与模型状态。",
+          "depends_on": [
+            "u13-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l3",
+          "title": "可视化配置与 DSL 编辑器",
+          "order": 3,
+          "filename": "u13-l3-visual-dsl-editor.md",
+          "level": "advanced",
+          "topic": "讲解 BuilderPage 可视化路由构建器与 DslEditorPage DSL 编辑/导入，它们把 signals/projections/routes/models 以可视化与文本两种方式编辑。",
+          "learning_goals": [
+            "理解 BuilderPage 的实体表单与路由编辑组织",
+            "理解 DslEditorPage 的 DSL 编辑与导入",
+            "了解可视化编辑与 DSL 的双向关系"
+          ],
+          "source_files": [
+            "dashboard/frontend/src/pages/BuilderPage.tsx",
+            "dashboard/frontend/src/pages/DslEditorPage.tsx",
+            "dashboard/frontend/src/pages/ConfigPageRecipePolicyEditor.tsx"
+          ],
+          "minimal_modules": [
+            "可视化构建器",
+            "DSL 编辑器",
+            "双向编辑"
+          ],
+          "practice_task": "在 BuilderPage 中尝试可视化新增一条 ROUTE，导出为 DSL；再用 DslEditorPage 导入并验证一致性，记录双向编辑中的任何归一化处理。",
+          "depends_on": [
+            "u13-l2",
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u14",
+      "title": "测试、E2E 与仿真",
+      "level": "advanced",
+      "order": 14,
+      "lectures": [
+        {
+          "id": "u14-l1",
+          "title": "E2E 测试框架",
+          "order": 1,
+          "filename": "u14-l1-e2e-framework.md",
+          "level": "advanced",
+          "topic": "讲解 e2e 的 kind/Kubernetes 端到端框架：测试矩阵、profile 注册与能力声明（如 LocalImages 本地镜像构建）、framework runner 与 testcases 如何覆盖路由正确性。",
+          "learning_goals": [
+            "理解 e2e 框架的 cluster/stacks/fixtures 组织",
+            "理解 testmatrix 与 profiles 的覆盖策略",
+            "理解 profile 的能力声明（ProfileCapabilities）与 LocalImages 如何让 E2E 用 checkout 构建镜像而非可变镜像标签"
+          ],
+          "source_files": [
+            "e2e/README.md",
+            "e2e/pkg/framework/profile_registry.go",
+            "e2e/profiles/all/imports.go",
+            "e2e/testcases/anthropic_messages_request.go",
+            "e2e/cmd/e2e/main.go"
+          ],
+          "minimal_modules": [
+            "框架组织",
+            "测试矩阵/profile",
+            "profile 能力与本地镜像",
+            "契约断言"
+          ],
+          "practice_task": "选择一个 testcase（如 anthropic_messages_request），描述它如何在 kind 集群中部署栈并发起断言；说明 `make e2e-test` 的入口，并解释 dashboard profile 如何通过 LocalImages 用 checkout 构建 backend 镜像。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u14-l2",
+          "title": "Fleet 仿真器",
+          "order": 2,
+          "filename": "u14-l2-fleet-simulator.md",
+          "level": "advanced",
+          "topic": "讲解 src/fleet-sim 的舰队仿真：GPU/硬件画像、工作负载、路由策略与优化器，用于规划 GPU 舰队与评估路由策略。",
+          "learning_goals": [
+            "理解 fleet-sim 的 core/routing/optimizer 组织",
+            "理解 GPU 画像与工作负载建模",
+            "了解优化器的分析 sizing 与 DES 验证"
+          ],
+          "source_files": [
+            "src/fleet-sim/README.md",
+            "src/fleet-sim/run_sim.py",
+            "src/fleet-sim/server.py",
+            "src/fleet-sim/fleet_sim/optimizer/base.py"
+          ],
+          "minimal_modules": [
+            "仿真核心",
+            "硬件/工作负载建模",
+            "优化器"
+          ],
+          "practice_task": "运行 run_sim.py 跑一次仿真，说明输入的 GPU 画像与工作负载如何影响输出；并指出 optimizer/base.py 的职责边界。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u14-l3",
+          "title": "训练与评估",
+          "order": 3,
+          "filename": "u14-l3-training-eval.md",
+          "level": "advanced",
+          "topic": "讲解 src/training 的分类器/embedding 后训练与评估脚本，以及 perf/bench 的性能与基准评测，支撑模型与路由策略迭代。",
+          "learning_goals": [
+            "理解训练子目录（model_classifier/embeddings/eval/selection）的分工",
+            "理解评估如何驱动选择模型与路由策略",
+            "了解 perf 与 bench 的性能基准用途"
+          ],
+          "source_files": [
+            "src/training/model_classifier/README.md",
+            "src/training/model_eval/README.md",
+            "src/training/model_selection/README.md",
+            "perf/README.md"
+          ],
+          "minimal_modules": [
+            "后训练脚本",
+            "评估流程",
+            "性能基准"
+          ],
+          "practice_task": "在 src/training 下选择一个训练子目录，描述其输入数据、产出模型与评估指标；并说明训练产物如何被 Go 端 binding 加载。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
