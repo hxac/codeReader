@@ -2,102 +2,107 @@
 
 ## 1. 本讲目标
 
-前两讲（u2-l1、u2-l2）我们学会了「读」一条 32 位指令：知道 opcode 选家族、funct3 选子操作、funct7 带属性，也知道 funct7 里 width/round/sat/dtype 各占哪几个比特。但写测试、写示例时，我们不可能每次都手动算「VE 宽度、RTZ 舍入、饱和、FP 这四个属性拼成的 funct7 到底是几」。
+前两讲（u2-l1、u2-l2）我们学会了「读」一条 32 位指令：知道 `opcode` 选家族、`funct3` 选子操作、`funct7` 带属性，也知道普通 R 型 `funct7` 里 `width / round / sat / dtype` 各占哪几个比特、`vcvt` 家族的 `funct7` 又另有一套布局。
 
-本讲解决的是「**写**」的问题：如何用 Scala 程序生成一条合法的 32 位指令字。学完后你应当能够：
+但到了**写测试、写示例**的时候，问题反过来了：我们手里只有「我想做一条 VX 宽度、不饱和的加法」这样的意图，怎么把它变成一个能 poke 进硬件的 32 位字？总不能每次都手算「VE 宽度 + RTZ 舍入 + 饱和 + FP」拼出来的 `funct7` 是几。
 
-- 说清 `encR / encI / encS` 三个原语各自拼哪些字段、为什么都用 `Long` 中间量。
-- 用 `f7 / f7Cvt` 把两类 funct7 属性打包成 7 位整数。
-- 解释为什么所有助手都返回 Scala `Int`，而当 bit31 为 1 时它会是负数、必须用 `toLong & 0xFFFFFFFFL` 还原成无符号 32 位再 `.U`。
-- 直接调用 `vadd(...)`、`vcvt_s8_f32(...)` 等命名助手生成指令字。
+本讲的主角 [`NpuAssembler`](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L21-L249) 就是解决这个问题的 Scala 端汇编器。读完本讲，你应当能够：
 
-一句话定位：`NpuAssembler` 是 chisel-npu 仿真与端到端测试的「汇编器」，把人类可读的 `vadd(rd=1, rs1=2, rs2=3, width=VX)` 翻译成可以 `poke` 进硬件的 32 位字。
+1. 掌握 `encR / encI / encS` 三个位拼接原语的参数与字段拼接方式。
+2. 会用 `f7 / f7Cvt` 两个打包器构造普通 R 型与 CVT 型的 `funct7`。
+3. 理解为什么所有助手都返回 Scala `Int`，而位 31 置位时要用 `toLong & 0xFFFFFFFFL` 才能安全交给 Chisel。
+4. 能直接调用 `vadd / vcvt_s8_f32` 等命名助手，生成一条可读、可验证的 32 位指令字。
+
+> 本讲是 u2-l5（译码器 `InstrDecoder`）的对偶：译码器把 32 位字「拆」成字段，汇编器把字段「拼」成 32 位字。两边用的位段规则完全一致。
+
+---
 
 ## 2. 前置知识
 
-本讲承接 u2-l1（R/I/S 三种 32 位格式与 `InstrBits` 位段）和 u2-l2（13 个 opcode 家族、funct3/funct7 三层译码）。开始前请确认你已理解：
+本讲假设你已经掌握 u2-l1 与 u2-l2 的内容，这里只做最简回顾：
 
-- **三种格式共享低位字段**：`opcode[6:0]`、`rd[11:7]`、`funct3[14:12]`、`rs1[19:15]` 在 R/I/S 三种格式里位置完全一致，区别只在高位 `[31:20]`。
-- **funct7 是属性包**：普通 R 型用 width/round/sat/dtype 四个属性；CVT（类型转换）家族换用 src/sat/round/bf8 布局。两者位布局不同，不能混用。
-- **三类寄存器 VX/VE/VR**：一条指令通过 funct7 的 width 字段选择操作哪类寄存器。
-- **Scala `Int` 是 32 位有符号整数**：最高位（bit31）是符号位。这条常识是本讲「符号陷阱」一节的根因。
+- **三种格式**（见 [instrFormat.scala 的注释](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/instrFormat.scala#L11-L15)）：R 型高位是 `funct7 | rs2`，I 型高位是 12 位立即数 `imm`，S 型（仅融合乘加用）高位是 `rs3 | rnd`。三者低位完全一样：`opcode[6:0] | rd[11:7] | funct3[14:12] | rs1[19:15]`。
+- **三层译码**：`opcode` 选家族、`funct3` 选子操作、`funct7` 带属性。
+- **`funct7` 有两套布局**：普通 R 型切成 `width[1:0] / round[3:2] / sat[4] / dtype[6:5]`；`vcvt` 家族换成 `src[2:0] / sat[3] / round[5:4] / bf8variant[6]`。
+- 这两套布局在 Scala 侧分别由 `Funct7Attrs` 与 `CvtFunct7` 两个 `case class` 的 `encode` 方法负责打包（[instrFormat.scala:L117-L135](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/instrFormat.scala#L117-L135)）。本讲的 `f7 / f7Cvt` 就是它们的「函数式替身」。
 
-如果你对上述任何一点模糊，请先回到 u2-l1、u2-l2 复习。本讲不重复它们的细节，只讲「如何用 Scala 把这些位段拼起来」。
+还有一个 Scala 语言层面的小知识：`Int` 是 32 位**有符号**整数，取值范围是 \([-2^{31},\,2^{31}-1]\)；而一条 32 位指令字在概念上是**无符号**的，取值范围是 \([0,\,2^{32}-1]\)。这个「有符号 vs 无符号」的错位，是本讲第 4.2 节要专门处理的坑。
+
+---
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
-|:---|:---|
-| [src/main/scala/isa/NpuAssembler.scala](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala) | **本讲主角**。一个 Scala `object`，提供常量、`encR/encI/encS`、`f7/f7Cvt` 和大量命名助手。 |
-| [src/main/scala/isa/instrFormat.scala](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/instrFormat.scala) | 位段常量 `InstrBits`、`VecWidth`/`VecRound` 枚举、`Funct7Attrs`/`CvtFunct7` 两个 case class。汇编器里的 `f7/f7Cvt` 就是它们 `encode` 方法的薄封装。 |
-| [src/main/scala/isa/instSetArch.scala](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/instSetArch.scala) | `OpFamily` 枚举与每家族的 funct3 表。命名助手里的 `0x10`、`0x14` 等 opcode 数字就来自这里。 |
-| [src/test/scala/isa/InstrDecoderSpec.scala](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/isa/InstrDecoderSpec.scala) | 汇编器的「真实用法范本」：用 `NpuAssembler` 构造指令，再 `poke` 进译码器验证字段。本讲的实践大量参照它的写法。 |
+| --- | --- |
+| [src/main/scala/isa/NpuAssembler.scala](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala) | **本讲主角**。一个 `object`，内含常量词表、`encR/encI/encS` 原语、`f7/f7Cvt` 打包器、几十个命名助手，以及一个把 `Int` 桥接成 Chisel `UInt` 的隐式类。 |
+| [src/main/scala/isa/instrFormat.scala](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/instrFormat.scala) | 位段常量 `InstrBits`，以及 RTL 侧的枚举 `VecWidth / VecRound / VecDtypeCls / FmtCode`，还有 `Funct7Attrs / CvtFunct7` 两个参考打包器。汇编器的数值必须与这里对齐。 |
+| [src/main/scala/isa/instSetArch.scala](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/instSetArch.scala) | `OpFamily`（opcode 家族）与各家族的 `Funct3*` 子操作枚举。汇编器里写死的 `0x10 / 0x14` 等 opcode、`0/1/2` 等 funct3 都来自这里。 |
+| [src/test/scala/isa/InstrDecoderSpec.scala](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/isa/InstrDecoderSpec.scala) | 汇编器的「真实用户」。它 `import NpuAssembler._` 后用 `vadd(...)` 构造指令、再 poke 进译码器验证，是本讲代码实践的范本。 |
+
+---
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 NpuAssembler 常量：把 funct7 属性「命名化」
+### 4.1 NpuAssembler 常量：汇编器的「助记词表」
 
 #### 4.1.1 概念说明
 
-u2-l2 讲过 funct7 是属性包，但要让 `f7(width=VX)` 这样的写法成立，必须先把 `VX` 定义成一个 Scala 名字。`NpuAssembler` 第一步就是给 funct7 的每个子段值取一个可读的名字：
-
-- **width 选择**：`VX=0 / VE=1 / VR=2`，对应 funct7[1:0]。
-- **舍入模式**：`RNE/RTZ/FLOOR/CEIL`，对应 funct7[3:2]。
-- **数据类型大类**：`INT/FP/BF`，对应 funct7[6:5]。
-- **CVT 格式码**：`S8/S16/S32/F32/BF16/BF8`，是 3 位 src/dst 格式选择（见 u2-l2 的 `FmtCode`）。
-
-注意：这些是**普通的 Scala `Int` 常量**，不是 Chisel 硬件类型。它们只活在「生成指令字」的 Scala 世界里，elaborate 时不会变成硬件。
+如果汇编器里到处写 `width=0`、`round=1`、`dtype=2`，读者就得不停翻 u2-l2 的表格才能看懂含义。所以 `NpuAssembler` 第一件事就是把这些魔数起成可读的名字，集中放在文件开头。这些常量就是汇编器的「词表」——你用它们拼装意图，汇编器替你把意图翻译成比特。
 
 #### 4.1.2 核心流程
 
-四个常量组的对应关系：
+词表分四组，分别对应 `funct7` / `funct3` 里四种语义字段：
 
-| 常量组 | 取值 | funct7 位段 | 含义 |
-|:---|:---|:---:|:---|
-| `VX/VE/VR` | 0 / 1 / 2 | [1:0] | 操作的寄存器类（width） |
-| `RNE/RTZ/FLOOR/CEIL` | 0 / 1 / 2 / 3 | [3:2] | 舍入模式 |
-| `INT/FP/BF` | 0 / 1 / 2 | [6:5] | 数据类型大类（dtype） |
-| `S8/S16/S32/F32/BF16/BF8` | 0 / 1 / 2 / 3 / 4 / 5 | CVT 的 src/dst | 格式码 |
+| 组 | 成员 | 对应字段 | 数值 |
+| --- | --- | --- | --- |
+| 宽度选择子 | `VX / VE / VR` | 普通 R 型 `funct7[1:0]` | 0 / 1 / 2 |
+| 舍入模式 | `RNE / RTZ / FLOOR / CEIL` | `funct7[3:2]` | 0 / 1 / 2 / 3 |
+| dtype 类 | `INT / FP / BF` | `funct7[6:5]` | 0 / 1 / 2 |
+| vcvt 格式码 | `S8 / S16 / S32 / F32 / BF16 / BF8` | `funct3`(目的) 或 `funct7[2:0]`(源) | 0 / 1 / 2 / 3 / 4 / 5 |
 
-前三组服务于普通 R 型（`f7`）；第四组服务于 CVT 家族（`f7Cvt`）。
+一个关键约束：**这些常量的数值必须与 RTL 侧的 ChiselEnum 一一对应**，否则汇编器拼出的字会被译码器理解成另一个含义。例如 `NpuAssembler.VE == 1` 必须等于 `VecWidth.VE == Value(1.U)`，`NpuAssembler.BF8 == 5` 必须等于 `FmtCode.BF8 == 5.U(3.W)`。
 
 #### 4.1.3 源码精读
 
-常量集中定义在文件开头的注释块之后：
+常量定义在 [NpuAssembler.scala:L23-L47](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L23-L47)，关键片段：
 
-[.src/main/scala/isa/NpuAssembler.scala:25-47](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L25-L47) 定义了上面四组常量，注释里直接标明了它们落在 funct7 的哪一段（如「Width selectors (funct7[1:0])」）。
+```scala
+// Width selectors (funct7[1:0])
+val VX = 0  // N(bits)-wide lanes
+val VE = 1  // 2N-wide lanes
+val VR = 2  // 4N-wide lanes
+...
+// Format codes for vcvt (funct3 = dst, funct7[2:0] = src)
+val S8   = 0
+...
+val BF8  = 5   // BF8 variant (E4M3 vs E5M2) from bf8E5M2 parameter
+```
 
-这些数字并非凭空捏造，而是和硬件侧 `instrFormat.scala` 的枚举严格对齐。例如：
+对照 RTL 侧：`VecWidth` 枚举里 `VE = Value(1.U(2.W))`（[instrFormat.scala:L72-L77](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/instrFormat.scala#L72-L77)），`FmtCode` 里 `BF8 = 5.U(3.W)`（[instrFormat.scala:L102-L111](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/instrFormat.scala#L102-L111)）。两边数值一致，这正是汇编器产出合法指令的基础。
 
-[.src/main/scala/isa/instrFormat.scala:72-77](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/instrFormat.scala#L72-L77) 把 `VecWidth` 定义为 `VX=Value(0) / VE=Value(1) / VR=Value(2)`，与汇编器的 `VX=0/VE=1/VR=2` 完全一致。汇编器只是把硬件枚举的值「镜像」成 Scala `Int`，便于在测试里直接当参数传。
+> 注意：词表里**故意没有「保留值」常量**（例如宽度 `3=reserved`、`RSV6/RSV7` 格式码）。因为保留值会被译码器判为非法指令（见 u2-l5），汇编器不应主动帮人生成非法字。
 
 #### 4.1.4 代码实践
 
-1. **实践目标**：确认汇编器常量的值，并与 `instrFormat.scala` 的枚举对齐。
-2. **操作步骤**：进入开发容器后启动 Scala REPL（详见 u1-l2 的构建方式），导入汇编器：
+**实践目标**：核对词表与 RTL 枚举是否对齐。
 
-   ```scala
-   // 在容器内执行：make container，然后 sbt console
-   import isa.NpuAssembler._
-   println(VX, VE, VR)        // (0, 1, 2)
-   println(RNE, RTZ, FLOOR, CEIL)  // (0, 1, 2, 3)
-   println(INT, FP, BF)       // (0, 1, 2)
-   println(S8, S16, S32, F32, BF16, BF8)  // (0, 1, 2, 3, 4, 5)
-   ```
+**操作步骤**：
 
-3. **观察现象**：打印出的数字应与上表一致。
-4. **预期结果**：`(0,1,2)`、`(0,1,2,3)`、`(0,1,2)`、`(0,1,2,3,4,5)`。
-5. 上述值由源码常量直接给出，可在本地用 `sbt console` 验证。
+1. 打开 [NpuAssembler.scala:L23-L47](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L23-L47)，记下 `BF8` 的值。
+2. 打开 [instrFormat.scala:L102-L111](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/instrFormat.scala#L102-L111)，记下 `FmtCode.BF8` 的值。
+3. 同法核对 `VE` ↔ `VecWidth.VE`、`RTZ` ↔ `VecRound.RTZ`。
+
+**需要观察的现象 / 预期结果**：四组常量的数值应当与对应枚举完全相同（`BF8=5`、`VE=1`、`RTZ=1`）。这是一份「待本地验证」的纯阅读核对，无需运行仿真。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 `VX/VE/VR` 只取 0/1/2 而把 3 留空？
+**练习 1**：一条指令想要「VR 宽度、RTZ 舍入、饱和、FP dtype」，写出对应的常量组合。
 
-**参考答案**：3 是 funct7[1:0] 的保留值（u2-l2 的 `VecWidth.VW_RSV=3`）。译码器遇到 width=3 会判定为非法指令。汇编器不提供 `3` 这个具名常量，正是为了从源头避免生成非法 width。
+**参考答案**：`width = VR`、`round = RTZ`、`sat = true`、`dtype = FP`。
 
-**练习 2**：`BF8` 常量值为 5，但 funct7 里 BF8 还有 E4M3/E5M2 两种变体，这个变体由谁携带？
+**练习 2**：为什么词表里没有宽度 `3`（保留）这个常量？
 
-**参考答案**：由 CVT 家族的 funct7[6]（`bf8E5M2`）携带。`BF8=5` 只选定了「BF8 这种格式」，至于具体是哪种变体，要看 `f7Cvt` 的 `bf8E5M2` 参数（见 4.3）。
+**参考答案**：保留宽度会被译码器判为非法（详见 u2-l5 的 `widthIllegal`）。汇编器只应产出合法指令，因此不暴露会触发非法的常量。
 
 ---
 
@@ -105,300 +110,328 @@ u2-l2 讲过 funct7 是属性包，但要让 `f7(width=VX)` 这样的写法成�
 
 #### 4.2.1 概念说明
 
-三种指令格式对应三个「位拼接原语」，它们做的事完全一样：把各字段按 RISC-V 位段左移到正确位置，再按位或（`|`）拼成一个 32 位字。区别只在于各自接收哪些字段：
-
-- `encR`：R 型，接收 opcode/funct3/funct7/rd/rs1/rs2。
-- `encI`：I 型，把 funct7+rs2 这 12 位替换成 12 位立即数 `imm`。
-- `encS`：S 型（仅融合乘加 FMA 用），把 funct7 拆成 `rs3[31:27]` 和舍入位 `rnd[26:25]`。
+「原语（primitive）」是汇编器最底层的三个函数，干同一件事：**把分散的字段按位段拼成一个 32 位字**。之所以要三个，是因为 R/I/S 三种格式在高位 `[31:20]` 的解释不同（见 u2-l1）：R 型放 `funct7 + rs2`，I 型放 12 位立即数，S 型放 `rs3 + rnd`。三个原语分别对应这三种高位的摆法。
 
 #### 4.2.2 核心流程
 
-三种格式的位段布局（承接 u2-l1）：
+`encR` 的拼接公式（字段 → 位段）：
 
-```
-R-type  [funct7(7) | rs2(5) | rs1(5) | funct3(3) | rd(5) | opcode(7)]
-I-type  [    imm[11:0](12) | rs1(5) | funct3(3) | rd(5) | opcode(7)]
-S-type  [rs3(5)|rnd(2)| rs2(5) | rs1(5) | funct3(3) | rd(5) | opcode(7)]
-```
+\[
+\text{word} = \text{opcode}_{[6:0]} \;\big|\; \text{rd}_{[11:7]} \;\big|\; \text{funct3}_{[14:12]} \;\big|\; \text{rs1}_{[19:15]} \;\big|\; \text{rs2}_{[24:20]} \;\big|\; \text{funct7}_{[31:25]}
+\]
 
-三个原语的拼接伪代码（以 `encR` 为例）：
+用位运算实现，就是把每个字段左移到它的起始位再「或」起来。`encI` 把 `funct7+rs2` 那段换成 12 位立即数（放在 `[31:20]`）；`encS` 把那段换成 `rnd[26:25] + rs3[31:27]`。
 
-```
-word = (opcode & 0x7F)            // [6:0]
-     | ((rd     & 0x1F) << 7)     // [11:7]
-     | ((funct3 & 0x7)  << 12)    // [14:12]
-     | ((rs1    & 0x1F) << 15)    // [19:15]
-     | ((rs2    & 0x1F) << 20)    // [24:20]
-     | ((funct7 & 0x7F) << 25)    // [31:25]
-```
+这里有一个**必须处理的问题**：`funct7` 占据最高 7 位 `[31:25]`，当它的最高位（bit 6，对应整字的 bit 31）被置 1 时，拼出来的 32 位字 ≥ \(2^{31}\)，超过了 Scala `Int` 的正数上界 \(2^{31}-1\)。如果直接用 `Int` 算术，会出现有符号溢出、产生负数，容易出错。原语的做法是：
 
-`& 0x7F` / `& 0x1F` 这类掩码是「防呆」：即使你不小心传了超出位宽的值，也只截取低位，保证字段不越界污染相邻字段。
+1. 先把每个字段 `.toLong` 提升到 64 位 `Long` 再左移、或运算——`Long` 范围足够大，绝不会溢出。
+2. 算完后用 `& 0xFFFFFFFFL` 把结果**掩码到低 32 位**，丢掉任何越界的高位。
+3. 最后 `.toInt` 转回 `Int`。这步之后 `Int` 可能是个负数（因为 bit 31 被当成符号位），但**32 位的位模式是完全正确的**。
 
-**为什么用 `Long` 中间量？** 这是本讲最重要的一个细节。Scala 的 `Int` 是 32 位有符号数，当 funct7 落在 bit[31:25] 且其最高位（bit6，即字的 bit31）为 1 时，整个 `word` 的 bit31 就是 1，`Int` 会把它解释成负数。如果全程用 `Int` 计算，左移到 bit25 以上时符号位会干扰结果。三个原语统一先转 `toLong`、在 64 位空间里或运算，最后再 `(w & 0xFFFFFFFFL).toInt` 截成 32 位返回。这样无论 bit31 是 0 还是 1，拼出来的「位模式」都正确。
+> 一句话：**在 `Long` 里算，掩成 32 位，用 `Int` 装（可能为负），由下游重新解释为无符号。** 代码里 `encR/encI/encS` 三个函数的最后一行都是同一句 `(w & 0xFFFFFFFFL).toInt`。
 
 #### 4.2.3 源码精读
 
-`encR` 把六个字段拼成 R 型字，注意每行都 `.toLong`：
+`encR` 的实现（[NpuAssembler.scala:L60-L68](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L60-L68)）：
 
-[.src/main/scala/isa/NpuAssembler.scala:59-68](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L59-L68) 这段代码做了三件事：每个字段先 `toLong` 再左移、按位或；用掩码限定每个字段的位宽；最后 `(w & 0xFFFFFFFFL).toInt` 把 64 位结果截成 32 位、以（可能是负的）`Int` 返回。注释里写明了「returns Long to avoid signed-int overflow at bit 31」的设计意图。
+```scala
+def encR(opcode: Int, funct3: Int, funct7: Int, rd: Int, rs1: Int, rs2: Int): Int = {
+  val w = (opcode.toLong & 0x7F) |
+          ((rd.toLong & 0x1F) << 7) |
+          ((funct3.toLong & 0x7) << 12) |
+          ((rs1.toLong & 0x1F) << 15) |
+          ((rs2.toLong & 0x1F) << 20) |
+          ((funct7.toLong & 0x7F) << 25)
+  (w & 0xFFFFFFFFL).toInt  // keep 32 bits, return as (possibly signed) Int
+}
+```
 
-`encI` 用 12 位立即数替换 funct7+rs2 的高位：
+注意每个字段都先 `&` 上自己的位宽掩码（`0x7F / 0x1F / 0x7`）再做 `.toLong`——这能挡住「传进来的值超范围」的情况，只取有效位。
 
-[.src/main/scala/isa/NpuAssembler.scala:70-79](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L70-L79) 关键是 `imm12 = imm.toLong & 0xFFF`：只取立即数低 12 位，再放到 `[31:20]`。负立即数（如 `imm = -1`）会变成 `0xFFF`，从而把字的 bit31 置 1——这正是 4.4 节符号陷阱的来源。
+`encI`（[NpuAssembler.scala:L71-L79](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L71-L79)）与 `encS`（[NpuAssembler.scala:L82-L91](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L82-L91)）结构完全一样，只是高位字段不同。值得留意 `encI` 对立即数的处理：
 
-`encS` 处理 FMA 的双高位字段（rs3 与 rnd）：
+```scala
+val imm12 = imm.toLong & 0xFFF    // 只取低 12 位
+...
+(imm12 << 20)                     // 放到 [31:20]
+```
 
-[.src/main/scala/isa/NpuAssembler.scala:81-91](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L81-L91) 与 `encR` 相比，funct7 的 7 位被拆成 `round`（2 位，[26:25]）和 `rs3`（5 位，[31:27]）。因为 S 型需要第四个操作数寄存器 rs3 来表达 `rd = rs1*rs2 ± rs3`。
+它**只取 `imm` 的低 12 位**，并不做符号扩展。符号扩展发生在**译码端**——译码器读 `[31:20]` 时调用 `.asSInt`（[instrDecoder.scala:L56](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/instrDecoder.scala#L56)）。所以汇编器只负责「放对 12 个比特」，至于它代表有符号还是无符号，是读的人决定的。
 
 #### 4.2.4 代码实践
 
-1. **实践目标**：手算一条 `vadd` 的 R 型字，验证你对位段的理解。
-2. **操作步骤**：`vadd(rd=0, rs1=1, rs2=2, width=VX)` 等价于 `encR(0x10, funct3=0, funct7=f7(VX), rd=0, rs1=1, rs2=2)`，其中 `f7(VX)=0`（见 4.3）。手动把每个字段填进位段表：
+**实践目标**：手算一条 `vadd(rd=0, rs1=1, rs2=2, width=VX, sat=false)` 的 32 位十六进制值，体会位拼接。
 
-   ```
-   [31:25] funct7 = 0000000   (0)
-   [24:20] rs2    = 00010     (2)
-   [19:15] rs1    = 00001     (1)
-   [14:12] funct3 = 000
-   [11:7]  rd     = 00000     (0)
-   [6:0]   opcode = 0010000   (0x10)
-   ```
-3. **观察现象**：拼成 32 位 `0000 0000 0010 0000 1000 0000 0001 0000`。
-4. **预期结果**：十六进制为 `0x00208010`。这个值由位段手填得出，可在 `sbt console` 里 `println(f"%08x".format(vadd(0,1,2,VX)))` 验证是否一致。
-5. 待本地验证：实际 console 输出应打印 `00208010`。
+**操作步骤**：`vadd` 内部其实只是 `encR(0x10, 0, f7(VX, sat=false), 0, 1, 2)`（见 4.4.3）。先算 `f7`：`VX=0, round=RNE=0, sat=false, dtype=INT=0`，所以 `f7 = 0`。再代入 `encR`，逐字段移位：
+
+| 字段 | 值 | 移位 | 贡献 |
+| --- | --- | --- | --- |
+| opcode | 0x10 | — | 0x00000010 |
+| rd | 0 | <<7 | 0 |
+| funct3 | 0 | <<12 | 0 |
+| rs1 | 1 | <<15 | 0x00008000 |
+| rs2 | 2 | <<20 | 0x00200000 |
+| funct7 | 0 | <<25 | 0 |
+
+**预期结果**：相加得 `0x00208010`，即 `vadd(rd=0, rs1=1, rs2=2)` 的十六进制为 `208010`。bit 31 未置位，所以作为 `Int` 它是个正数 `2134096`。
+
+**需要观察的现象**：这正是 [InstrDecoderSpec.scala:L46-L48](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/isa/InstrDecoderSpec.scala#L46-L48) 里那条 `vadd(rd=1, rs1=2, rs2=3, width=VX)` 测试的同类指令；你可以在本地用 4.4.4 的 `sbt console` 方法打印 `vadd(rd=0, rs1=1, rs2=2).toHexString`，预期看到 `208010`（待本地验证）。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：`encR` 里为什么每个字段都先 `.toLong`？如果全程用 `Int` 会出什么错？
+**练习 1**：手算 `vadd(rd=0, rs1=0, rs2=0, width=VX)` 的十六进制值。
 
-**参考答案**：因为 funct7 落在字的高位 [31:25]。当 funct7 的 bit6 为 1 时，字的 bit31 为 1，`Int` 会把整个字当成负数，左移到高位时符号位会污染计算。先转 `Long`（64 位有符号，bit31 不是符号位）在更大空间里或运算，再 `& 0xFFFFFFFFL` 截断，能保证位模式正确。
+**参考答案**：所有字段为 0，只剩 opcode `0x10`，结果为 `0x10`。
 
-**练习 2**：`encI` 为什么对 imm 做 `& 0xFFF`？
+**练习 2**：`encR` 为什么先在 `Long` 里算、最后又 `.toInt` 回到 `Int`，而不是全程用 `Int`？
 
-**参考答案**：I 型立即数只有 12 位（[31:20]）。`& 0xFFF` 只保留低 12 位，既支持负数（如 `-1` → `0xFFF`，符号扩展进 12 位全 1），又防止调用者传入超范围值污染高位字段。
-
-**练习 3**：`encS` 与 `encR` 的参数列表差在哪？为什么？
-
-**参考答案**：`encS` 多了 `rs3`，并把 `funct7` 换成了 `round`（2 位）。因为 FMA 需要 `rd = rs1*rs2 ± rs3` 这第四个寄存器操作数，必须占用 funct7 的高 5 位 [31:27] 给 rs3，剩下的 [26:25] 只够放 2 位舍入模式。
+**参考答案**：32 位指令字是无符号的，当 bit 31 置位时其值 ≥ \(2^{31}\)，超出 `Int` 正数范围。在 `Long`（64 位）里计算可避免有符号溢出，`& 0xFFFFFFFFL` 保证只保留低 32 位，最后 `.toInt` 以「可能为负的 `Int`」承载正确的位模式，交由下游（`asUInt` 或 `toLong & 0xFFFFFFFFL`）重新解释为无符号。
 
 ---
 
-### 4.3 f7 / f7Cvt：打包两种 funct7 布局
+### 4.3 f7 / f7Cvt：funct7 属性打包器
 
 #### 4.3.1 概念说明
 
-u2-l2 强调过：普通 R 型和 CVT 家族的 funct7 **位布局不同**。`f7` 与 `f7Cvt` 就是分别打包这两种布局的两个小函数。它们各自就是 `instrFormat.scala` 里 `Funct7Attrs.encode` 和 `CvtFunct7.encode` 的薄封装——汇编器只是把 case class 调用改写成了带默认参数的函数，用起来更轻。
+`funct7` 不是单一数值，而是一个 7 位的「属性包」，里头挤着好几个独立开关（宽度、舍入、饱和、dtype……）。`f7` 和 `f7Cvt` 就是两个**打包器**：吃进几个有名字的属性，吐出一个拼好的 7 位 `funct7` 整数。它们对应 u2-l2 讲过的两套 `funct7` 布局——普通 R 型用 `f7`，`vcvt` 家族用 `f7Cvt`。
 
-两种布局对比：
-
-| 比特 | 普通 R 型（`f7`） | CVT（`f7Cvt`） |
-|:---:|:---|:---|
-| [1:0] | width（VX/VE/VR） | — |
-| [2:0] | — | src 格式码（S8/S16/…/BF8） |
-| [3:2] | round | — |
-| [3] | — | sat（饱和） |
-| [4] | sat | — |
-| [5:4] | — | round |
-| [6:5] | dtype（INT/FP/BF） | — |
-| [6] | — | bf8 变体（0=E4M3, 1=E5M2） |
+> 它们与 `instrFormat.scala` 里的 `Funct7Attrs.encode` / `CvtFunct7.encode`（[L117-L135](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/instrFormat.scala#L117-L135)）是**同一套位布局的两种写法**：后者是面向对象风格（先构造 `case class` 再 `.encode`），`f7/f7Cvt` 是函数式风格（直接传参）。两者的位运算完全一致，可以互相印证。
 
 #### 4.3.2 核心流程
 
-`f7` 的打包公式（对应 funct7[1:0]/[3:2]/[4]/[6:5]）：
+普通 R 型 `funct7` 的位布局（与 [instrFormat.scala:L18-L22](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/instrFormat.scala#L18-L22) 一致）：
 
-\[ \text{funct7} = (\text{width}\,\&\,3) \;\big|\; ((\text{round}\,\&\,3)\ll 2) \;\big|\; (\text{sat}\ll 4) \;\big|\; ((\text{dtype}\,\&\,3)\ll 5) \]
+| funct7 位 | 含义 | 打包方式 |
+| --- | --- | --- |
+| `[1:0]` | width（VX/VE/VR） | `width & 3` |
+| `[3:2]` | round（RNE/RTZ/…） | `(round & 3) << 2` |
+| `[4]` | sat（0=回绕, 1=饱和） | `(if (sat) 1 else 0) << 4` |
+| `[6:5]` | dtype（INT/FP/BF） | `(dtype & 3) << 5` |
 
-`f7Cvt` 的打包公式（对应 funct7[2:0]/[3]/[5:4]/[6]）：
+`vcvt` 家族 `funct7` 布局则不同（与 [instrFormat.scala:L24-L28](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/instrFormat.scala#L24-L28) 一致）：
 
-\[ \text{funct7}_{cvt} = (\text{src}\,\&\,7) \;\big|\; (\text{sat}\ll 3) \;\big|\; ((\text{round}\,\&\,3)\ll 4) \;\big|\; (\text{bf8E5M2}\ll 6) \]
+| funct7 位 | 含义 | 打包方式 |
+| --- | --- | --- |
+| `[2:0]` | 源格式 srcFmt（S8/…/BF8） | `srcFmt & 7` |
+| `[3]` | sat | `(if (sat) 1 else 0) << 3` |
+| `[5:4]` | round | `(round & 3) << 4` |
+| `[6]` | BF8 变体（0=E4M3, 1=E5M2） | `(if (bf8E5M2) 1 else 0) << 6` |
 
-可以看到同一个「sat」「round」语义在两种布局里位置完全不同，所以绝不能用 `f7` 去拼 CVT 指令、反之亦然。
+注意 `sat` 和 `round` 在两套布局里的**位置不同**：R 型 sat 在 bit 4、round 在 `[3:2]`；CVT 型 sat 在 bit 3、round 在 `[5:4]`。这就是为什么要分两个打包器，不能混用。
 
 #### 4.3.3 源码精读
 
-`f7` 用默认参数让 width/round/sat/dtype 都可省略：
+`f7`（[NpuAssembler.scala:L51-L53](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L51-L53)）：
 
-[.src/main/scala/isa/NpuAssembler.scala:51-53](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L51-L53) 这三行就是上面第一个公式的直译。`if (sat) 1 else 0` 把 Scala `Boolean` 转成 0/1 再左移到 bit4。
+```scala
+def f7(width: Int = VX, round: Int = RNE, sat: Boolean = false, dtype: Int = INT): Int =
+  (width & 3) | ((round & 3) << 2) | ((if (sat) 1 else 0) << 4) | ((dtype & 3) << 5)
+```
 
-`f7Cvt` 用 CVT 专属的位段：
+`f7Cvt`（[NpuAssembler.scala:L55-L57](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L55-L57)）：
 
-[.src/main/scala/isa/NpuAssembler.scala:55-57](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L55-L57) 注意 src 在 [2:0]（3 位，能表示 8 种格式）、sat 在 [3]、round 在 [5:4]、bf8 变体在 [6]。
+```scala
+def f7Cvt(srcFmt: Int, sat: Boolean = true, round: Int = RNE, bf8E5M2: Boolean = false): Int =
+  (srcFmt & 7) | ((if (sat) 1 else 0) << 3) | ((round & 3) << 4) | ((if (bf8E5M2) 1 else 0) << 6)
+```
 
-它们与硬件侧 case class 的对应关系——`Funct7Attrs.encode` 与 `f7` 逐位相同：
+**一个值得品味的复用**：MMA（矩阵乘）家族的 `keep`（累加使能）信号，并没有独立的编码位，而是**复用了普通 R 型 `funct7` 的 `sat` 位（bit 4）**。看 `mma` 助手（[NpuAssembler.scala:L228-L229](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L228-L229)）：
 
-[.src/main/scala/isa/instrFormat.scala:117-125](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/instrFormat.scala#L117-L125) `Funct7Attrs` 的 `encode` 方法与汇编器 `f7` 的表达式完全一致，只是 `f7` 把它包装成带默认参数的函数。`CvtFunct7.encode`（[同文件:127-135](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/instrFormat.scala#L127-L135)）同理对应 `f7Cvt`。
+```scala
+def mma(rd: Int, rs1: Int, rs2: Int, keep: Boolean = true): Int =
+  encR(0x03, 0, f7(VR, sat=keep), rd, rs1, rs2)
+```
+
+它把 `keep` 塞进 `f7` 的 `sat` 槽位；译码器那边读到 `funct7[4]` 后并不叫它「饱和」，而叫它 `mma_keep`（[instrDecoder.scala:L256](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/instrDecoder.scala#L256)）。同一段比特在不同家族里含义不同——这正是 u2-l2 强调的「家族特异性」，也是 `f7` 作为通用打包器能被多处复用的原因。
 
 #### 4.3.4 代码实践
 
-1. **实践目标**：手算一个带满属性的 funct7，体会属性如何落位。
-2. **操作步骤**：在 `sbt console` 里执行：
+**实践目标**：手算两个 `funct7`，验证你对两套布局的理解。
 
-   ```scala
-   import isa.NpuAssembler._
-   // 「VE 宽度、RTZ 舍入、饱和、FP」的 R 型 funct7
-   println(f"%02x".format(f7(width=VE, round=RTZ, sat=true, dtype=FP)))
-   // 「src=S32、饱和、RNE、E4M3」的 CVT funct7
-   println(f"%02x".format(f7Cvt(srcFmt=S32, sat=true, round=RNE, bf8E5M2=false)))
-   ```
-3. **观察现象**：手算第一个：`f7(VE=1, RTZ=1, sat=true, FP=1) = 1 | (1<<2) | (1<<4) | (1<<5) = 1|4|16|32 = 53 = 0x35`。
-4. **预期结果**：第一行打印 `35`。第二行 `f7Cvt(S32=2, sat=true, RNE=0, E4M3=false) = 2 | (1<<3) | 0 | 0 = 2|8 = 10 = 0x0a`，打印 `0a`。
-5. 待本地验证：实际 console 输出应分别是 `35` 与 `0a`。
+**操作步骤**：
+
+1. 算 `f7(VR, dtype=FP)`（例如 FP32 运算的属性包）：`width=VR=2`、`round=RNE=0`、`sat=false`、`dtype=FP=1`。
+   \[
+   \text{f7} = (2\,\&\,3)\;|\;(0<<2)\;|\;(0<<4)\;|\;((1\,\&\,3)<<5) = 2\;|\;32 = \text{0x22}
+   \]
+2. 算 `f7Cvt(F32, bf8E5M2=true)`（CVT 家族、源是 BF8 的 E5M2 变体）：`srcFmt=F32=3`、`sat=false`、`round=0`、`bf8E5M2=true`。
+   \[
+   \text{f7Cvt} = (3\,\&\,7)\;|\;(0<<3)\;|\;(0<<4)\;|\;(1<<6) = 3\;|\;64 = \text{0x45}
+   \]
+
+**预期结果**：分别为 `0x22` 与 `0x45`。
+
+**需要观察的现象**：注意第二个例子里 `0x45` 的最高位（bit 6）是 1——当这个 `funct7` 被 `encR` 放到 `[31:25]` 后，整字的 **bit 31 会被置位**，于是拼出的指令字作为 Scala `Int` 会是**负数**。这正是 4.2 节那个 `toLong & 0xFFFFFFFFL` 机制要对付的情形（下一节 4.4 会给出完整例子）。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：如果误把 `f7(dtype=BF)` 用到 CVT 指令上，会发生什么？
+**练习 1**：计算 `f7(VX, round=RTZ, sat=true, dtype=INT)`。
 
-**参考答案**：`f7` 把 dtype 放在 [6:5]，而 CVT 期望 [6:5] 是 round、[6] 是 bf8 变体。混用会让译码器把 dtype 的比特解释成完全不同的语义，导致 src 格式、舍入模式、BF8 变体全部错位，通常直接被判非法或算出错误结果。这正是需要两个独立函数 `f7/f7Cvt` 的原因。
+**参考答案**：`(0&3) | (1<<2) | (1<<4) | (0<<5) = 4 | 16 = 0x14`。
 
-**练习 2**：`f7Cvt` 里 `srcFmt & 7` 为什么用 `& 7` 而 `f7` 里 width 用 `& 3`？
+**练习 2**：MMA 里 `keep=true` 时，`funct7[4]` 是几？为什么能复用 `sat` 位？
 
-**参考答案**：CVT 的 src 格式码占 3 位（[2:0]，8 种格式 S8…BF8+保留），所以掩码是 `& 7`；普通 width 只占 2 位（[1:0]，4 种 VX/VE/VR/保留），所以是 `& 3`。掩码宽度等于字段位宽。
+**参考答案**：是 1（因为 `mma` 调用 `f7(VR, sat=keep)`）。MMA 家族本身不需要「饱和」语义，bit 4 在该家族被译码器读作 `mma_keep`；复用同一段比特节省了编码空间，是 ISA 里常见的「家族特异复用」。
 
 ---
 
-### 4.4 命名助手与 Int → UInt 的符号陷阱
+### 4.4 命名助手与 Int → UInt 桥接
 
 #### 4.4.1 概念说明
 
-有了常量、原语和 funct7 打包器，最后一步是把它们组合成「一条指令」级别的命名助手，比如 `vadd(rd, rs1, rs2, width, sat)`。每个助手做的事情很简单：**填好该家族的 opcode 和 funct3，再调对应的原语**。例如 `vadd` 就是 `encR(0x10, funct3=0, f7(width, sat=sat), rd, rs1, rs2)`——它替你记住了「算术家族 opcode=0x10、加法 funct3=0」。
+「命名助手」是汇编器面向用户的最高层 API。`encR + f7` 虽然万能，但调用者得自己记住「加法的 opcode 是 `0x10`、funct3 是 `0`」。命名助手把这些常量固定下来，提供 `vadd(rd, rs1, rs2, width=VX, sat=false)` 这样**像汇编指令一样可读**的函数。本质上是「opcode + funct3 + 默认 f7」的薄封装。
 
-所有助手都返回 Scala `Int`（一个 32 位位模式）。这里有一个贯穿全测试套件的**符号陷阱**：当拼出的字 bit31 为 1 时（例如带负立即数的 I 型、或 dtype/imm 让高位为 1 的字），Scala `Int` 把它当成负数。直接 `.U` 进 Chisel 时，Chisel 会把负数字面量当成错误。因此 poke 前必须先用 `(instr.toLong & 0xFFFFFFFFL).U` 把它还原成无符号 32 位。这也是 AGENTS.md 反复强调的 gotcha。
+另一个收尾问题：所有助手都返回 Scala `Int`，但我们要把它 poke 进 Chisel 的 `UInt(32.W)` 端口。`Int`（有符号、可能为负）到 `UInt`（无符号 32 位）需要一个桥接——这就是文件末尾的隐式类 `IntToUInt`，提供 `asUInt` 方法。
 
 #### 4.4.2 核心流程
 
-命名助手与原语的关系（以 VALU_ARITH 家族为例）：
+从意图到硬件的完整调用链：
 
 ```
-vadd(rd,rs1,rs2,width,sat)  ──► encR(opcode=0x10, funct3=0, f7(width,sat), rd,rs1,rs2)
-vsub(...)                   ──► encR(opcode=0x10, funct3=1, ...)
-...
-vfma(rd,rs1,rs2,rs3,round)  ──► encS(opcode=0x17, funct3=0, rd,rs1,rs2,rs3,round)   // S 型
-vcvt(rd,rs1,dstFmt,srcFmt)  ──► encR(opcode=0x14, dstFmt, f7Cvt(srcFmt,...), rd,rs1,0)
+读者意图
+  └─ 命名助手 (vadd / vcvt_s8_f32 / ...)      # 固定 opcode+funct3，调 f7/f7Cvt
+      └─ encR / encI / encS + f7 / f7Cvt       # 拼成 32 位字
+          └─ Scala Int (可能为负，位模式正确)
+              └─ asUInt  或  (x.toLong & 0xFFFFFFFFL).U   # 桥接
+                  └─ Chisel UInt(32.W)   →   dut.io.instr.poke(...)
 ```
 
-把 `Int` 安全喂进 Chisel 的两条等价路径：
-
-```
-路径 A（测试套件惯用）：  dut.io.instr.poke((instr.toLong & 0xFFFFFFFFL).U)
-路径 B（汇编器自带的隐式类）：instr.asUInt   // 展开为 (instr.toLong & 0xFFFFFFFFL).U(32.W)
-```
-
-`NpuAssembler` 在文件末尾提供了一个 `IntToUInt` 隐式类来支持路径 B；但项目现有测试（如 `InstrDecoderSpec`）一律采用路径 A 的显式写法，本讲实践也遵循这一约定。
+下游有两种等价的桥接写法：用助手的 `asUInt`（`instr.asUInt`），或像测试那样手写 `(instr.toLong & 0xFFFFFFFFL).U`。两者**完全等价**，都是先把 `Int` 提升成正 `Long`、掩码到 32 位、再 `.U` 成无符号。
 
 #### 4.4.3 源码精读
 
-`vadd` 等算术助手都是 `encR` 的一行封装：
+最典型的命名助手 `vadd`（[NpuAssembler.scala:L99-L100](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L99-L100)），一行就说完：
 
-[.src/main/scala/isa/NpuAssembler.scala:99-100](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L99-L100) 这一行替你固定了 opcode=`0x10`（VALU_ARITH）和 funct3=`0`（ADD），只暴露语义参数 `rd/rs1/rs2/width/sat`。同家族的 `vsub…vrsub` 只是 funct3 从 0 递增到 7（[文件:99-114](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L99-L114)）。
+```scala
+def vadd (rd: Int, rs1: Int, rs2: Int, width: Int = VX, sat: Boolean = false): Int =
+  encR(0x10, 0, f7(width, sat=sat), rd, rs1, rs2)
+```
 
-CVT 助手用 `f7Cvt` 而非 `f7`，且 funct3 装的是 dst 格式码：
+`0x10` 是 `VALU_ARITH` 家族（[instSetArch.scala:L37](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/instSetArch.scala#L37)），funct3 `0` 是 `Funct3Arith.ADD`（[instSetArch.scala:L56](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/instSetArch.scala#L56)）。其余 8 个算术助手（`vsub/vmul/vneg/...`）只是改了 funct3，结构一模一样（[L99-L114](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L99-L114)）。
 
-[.src/main/scala/isa/NpuAssembler.scala:158-162](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L158-L162) 注意 `vcvt` 把 `dstFmt` 放进 funct3、`srcFmt` 放进 `f7Cvt`。配套的便捷别名 `vcvt_s8_f32`（[文件:170](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L170)）命名规则是 `vcvt_<dst>_<src>`，即 `vcvt_s8_f32` 表示 **INT8→FP32**（窄输入、宽输出，结果落 VR）。
+`vcvt` 家族更值得看，因为它同时用到了 `f7Cvt`（[NpuAssembler.scala:L158-L162](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L158-L162)）：
 
-FMA 助手走 S 型原语 `encS`：
+```scala
+def vcvt(rd: Int, rs1: Int,
+         dstFmt: Int, srcFmt: Int,
+         sat: Boolean = true, round: Int = RNE,
+         bf8E5M2: Boolean = false): Int =
+  encR(0x14, dstFmt, f7Cvt(srcFmt, sat, round, bf8E5M2), rd, rs1, 0)
+```
 
-[.src/main/scala/isa/NpuAssembler.scala:207-208](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L207-L208) `vfma` 是少数用 `encS` 的助手，因为它要表达 `rd = rs1*rs2 + rs3`，需要 rs3 这个第四操作数。
+注意这里 `funct3` 槽位放的是**目的格式 `dstFmt`**（CVT 家族用 funct3 表目的格式，见 u2-l2），而源格式进了 `f7Cvt`。在此基础上又有一层「便利别名」（[L165-L176](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L165-L176)），把常用转换固化成名字：
 
-符号陷阱的「官方解法」与隐式类：
+```scala
+def vcvt_s8_f32 (rd: Int, rs1: Int, sat: Boolean = true, round: Int = RNE): Int =
+  vcvt(rd, rs1, S8, F32, sat, round)
+```
 
-[.src/main/scala/isa/NpuAssembler.scala:245-248](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L245-L248) `asUInt` 把 `Int` 经 `toLong & 0xFFFFFFFFL` 还原成无符号 32 位再 `.U(32.W)`。
+于是读者既可以写底层的 `vcvt(rd, rs1, S8, F32)`，也可以直接写 `vcvt_s8_f32(rd, rs1)`——后者更像传统汇编的 `cvt.s8.f32`。
 
-测试套件实际怎么用（路径 A 的真实范例）：
+最后是桥接用的隐式类（[NpuAssembler.scala:L244-L248](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/NpuAssembler.scala#L244-L248)）：
 
-[.src/test/scala/isa/InstrDecoderSpec.scala:25](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/isa/InstrDecoderSpec.scala#L25) `check` 助手里 `dut.io.instr.poke((instr.toLong & 0xFFFFFFFFL).U)`——这就是全项目喂指令字的标准姿势。`InstrDecoderSpec` 用 `vadd(rd=1, rs1=2, rs2=3, width=VX)` 构造指令、再校验译码字段（[文件:44-50](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/isa/InstrDecoderSpec.scala#L44-L50)）。
+```scala
+implicit class IntToUInt(val v: Int) {
+  // Convert to UInt treating the int as an unsigned 32-bit bit pattern
+  def asUInt: chisel3.UInt = (v.toLong & 0xFFFFFFFFL).U(32.W)
+}
+```
 
-#### 4.4.4 代码实践（符号陷阱演示）
+测试里的真实用法（[InstrDecoderSpec.scala:L25](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/isa/InstrDecoderSpec.scala#L25)）正是手写了同一套掩码：
 
-1. **实践目标**：亲眼看到 bit31=1 时 `Int` 变成负数，并验证 `toLong & 0xFFFFFFFFL` 能还原。
-2. **操作步骤**：在 `sbt console` 里构造一条带负立即数的 `vmovi`：
+```scala
+dut.io.instr.poke((instr.toLong & 0xFFFFFFFFL).U)
+```
 
-   ```scala
-   import isa.NpuAssembler._
-   val w = vmovi(rd=0, imm=-1)        // imm=-1 → imm12=0xFFF → bit31=1
-   println(w)                          // 一个负数
-   println(f"%08x".format(w.toLong & 0xFFFFFFFFL))  // 还原成无符号 32 位
-   ```
-3. **观察现象**：`vmovi(0,-1)` = `encI(0x18, 1, 0, 0, -1)`，其中 `imm12 = (-1).toLong & 0xFFF = 0xFFF`，于是字的高 12 位 `[31:20]` 全 1，bit31=1。
-4. **预期结果**：第一行打印一个**负整数**（bit31=1 所致）；第二行打印 `fff01018`（opcode `0x18` 与 funct3 `1<<12=0x1000` 都在低位）。把 `w` 直接 `.U` 会触发 Chisel 负数字面量错误，而 `(w.toLong & 0xFFFFFFFFL).U` 正常。
-5. 待本地验证：实际 console 第一行的负数数值请本地确认；第二行的十六进制应为 `fff01018`。
+> 为什么不直接 `instr.U`？当 `instr` 的 bit 31 置位时它是个负 `Int`，直接交给 Chisel 的隐式转换其符号语义并不直观；先用 `toLong & 0xFFFFFFFFL` 规范化成一个落在 \([0, 2^{32})\) 的正 `Long`，再 `.U(32.W)`，语义最明确、最不会踩坑。这就是 `asUInt` 存在的全部理由。
+
+#### 4.4.4 代码实践
+
+**实践目标**：用 `vadd` 构造一条「VX 宽度、不饱和」的加法指令，打印其 32 位十六进制值；再用 `encR + f7` 手动拼接同一条指令，验证两者完全一致。
+
+**操作步骤**（在项目容器内，`make container` 进入后执行 `sbt console`）：
+
+```scala
+// 示例代码（在 sbt console 中执行）
+import isa.NpuAssembler._
+
+val a = vadd(rd = 0, rs1 = 1, rs2 = 2, width = VX, sat = false)   // 命名助手
+val b = encR(0x10, 0, f7(width = VX, sat = false), 0, 1, 2)       // 手动拼接
+
+println(a.toHexString)   // 预期 208010
+println(a == b)          // 预期 true
+```
+
+**预期结果**：
+
+- `a.toHexString` 输出 `208010`（与 4.2.4 手算一致）。
+- `a == b` 为 `true`——因为 `vadd` 的函数体本来就是那句 `encR(0x10, 0, f7(width, sat=sat), rd, rs1, rs2)`，两者在数学上恒等，这条「验证」其实是在读一行源码。
+
+**需要观察的现象**：把 `width` 改成 `VR`、`sat` 改成 `true` 再打印，会看到十六进制值变大（`funct7` 不再是 0）；若构造一条会置位 bit 31 的指令（例如 `vcvt_f32_bf8(rd=0, rs1=0, e5m2=true)`，其 `funct7=0x45` 会让 bit 31 置位），直接 `println(x)` 会看到一个**负的十进制数**，但 `x.toHexString` 仍是正确的 8 位无符号十六进制 `8a003014`（待本地验证）。这正好演示了「`Int` 可能为负、但位模式正确」的现象，以及为什么交给 Chisel 时必须走 `asUInt` / `toLong & 0xFFFFFFFFL`。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：`vadd` 和 `vfadd` 都叫「加法」，它们走的原语和 funct7 有什么不同？
+**练习 1**：写出 `vcvt_s32_f32(rd=1, rs1=0)` 生成的指令字的 `opcode / funct3 / funct7` 三个字段。
 
-**参考答案**：`vadd` 走 `encR`、opcode `0x10`（VALU_ARITH）、`f7(width, …)` 带 width 属性，操作 VX/VE/VR 整数；`vfadd` 也走 `encR` 但 opcode `0x16`（VALU_FP）、`f7(VR, dtype=FP)`，width 固定 VR、dtype 固定 FP，做的是 FP32 浮点加法。
+**参考答案**：`opcode = 0x14`（`VALU_CVT`）；`funct3 = S32 = 2`（目的格式）；`funct7 = f7Cvt(srcFmt=F32=3, sat=true, round=RNE=0, bf8E5M2=false) = (3&7)|(1<<3) = 0xB`。
 
-**练习 2**：为什么所有命名助手都返回 `Int` 而不是直接返回 Chisel `UInt`？
+**练习 2**：为什么测试里 poke 写成 `(instr.toLong & 0xFFFFFFFFL).U`，而不是 `instr.U`？
 
-**参考答案**：汇编器是纯 Scala 工具，运行在 elaborate 之外的「测试/脚本」世界，那时还没有 Chisel 硬件上下文。返回 `Int`（位模式）最通用：既能在 `sbt console` 里直接打印，也能在测试里经 `toLong & 0xFFFFFFFFL` 转成 `UInt` poke 进硬件。返回 `UInt` 反而会绑定到 Chisel 上下文、失去纯计算的灵活性。
-
-**练习 3**：`vcvt_s8_f32` 和 `vcvt_f32_s8` 哪个是「窄输出」？窄输出结果落到哪类寄存器？
-
-**参考答案**：命名规则是 `vcvt_<dst>_<src>`。`vcvt_f32_s8` 是 FP32←INT8，dst 是 FP32（宽），这是「宽输出」落 VR；`vcvt_s8_f32` 是 INT8←FP32，dst 是 INT8（窄），是「窄输出」落 VX。（写回时序与 backend 的 `isNarrowCvtOut` 修正在 u6-l2 详讲。）
+**参考答案**：`instr` 是 Scala `Int`，bit 31 置位时为负数。先 `toLong & 0xFFFFFFFFL` 把它规范化为 \([0, 2^{32})\) 内的正 `Long`，再 `.U` 成 32 位无符号 `UInt`，语义明确无歧义；这正是 `asUInt` 帮你封装的同一段逻辑。
 
 ---
 
 ## 5. 综合实践
 
-把本讲四个模块串起来，完成规格里要求的核心任务：**用命名助手 `vadd` 构造一条指令，再用 `encR + f7` 手动拼接验证两者一致**，并把指令喂进译码器。
+把本讲四个模块串起来，手工汇编一条真实指令，并说明它如何进入硬件。
 
-**步骤 1 — 进入环境**。按 u1-l2 的方式进入开发容器并启动 REPL：
+**任务**：手工计算 `vsub(rd=4, rs1=5, rs2=6, width=VE, sat=true)` 的 32 位十六进制值，并写出把它 poke 进译码器的 Chisel 语句。
 
-```bash
-make container        # 进入 fangruil/chisel-dev 镜像，仓库挂在 /workspace
-sbt console           # Scala REPL，main 源码已在 classpath 上
-```
+**第一步——查词表（4.1）**：`VE=1`、`RNE=0`、`INT=0`、`sat=true`。
 
-**步骤 2 — 用命名助手构造指令**。在 REPL 中：
+**第二步——打包 funct7（4.3）**：
 
-```scala
-import isa.NpuAssembler._
-val a = vadd(rd=0, rs1=1, rs2=2, width=VX, sat=false)   // 「VX 宽度、不饱和」加法
-println(f"%08x".format(a.toLong & 0xFFFFFFFFL))         // 打印 32 位十六进制
-```
+\[
+\text{f7}(1, 0, \text{true}, 0) = (1\,\&\,3)\;|\;(0<<2)\;|\;(1<<4)\;|\;(0<<5) = 1\;|\;16 = \text{0x11}
+\]
 
-由 4.2.4 的位段手算，`vadd(0,1,2,VX)` 的 funct7=`f7(VX)=0`，整字应为 `0x00208010`。
+**第三步——位拼接（4.2）**：`vsub` 是 `encR(0x10, funct3=1, f7, rd, rs1, rs2)`，其中 funct3 `1` 来自 `Funct3Arith.SUB`。逐字段移位：
 
-**步骤 3 — 用 `encR + f7` 手动拼接同一条指令**：
+| 字段 | 值 | 贡献 |
+| --- | --- | --- |
+| opcode | 0x10 | 0x00000010 |
+| rd | 4 (<<7) | 0x00000200 |
+| funct3 | 1 (<<12) | 0x00001000 |
+| rs1 | 5 (<<15) | 0x00028000 |
+| rs2 | 6 (<<20) | 0x00600000 |
+| funct7 | 0x11 (<<25) | 0x22000000 |
 
-```scala
-val b = encR(opcode=0x10, funct3=0, funct7=f7(width=VX, sat=false), rd=0, rs1=1, rs2=2)
-println(a == b)        // 期望 true
-println(f"%08x".format(b.toLong & 0xFFFFFFFFL))   // 也应打印 00208010
-```
+相加得 **`0x22629210`**。bit 31 未置位（`0x22...`），作为 `Int` 是正数 `576661552`。
 
-**步骤 4 — （进阶）喂进译码器，参照真实测试**。退出 REPL，参考 [InstrDecoderSpec:44-50](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/isa/InstrDecoderSpec.scala#L44-L50) 的写法，确认这条字能被合法译码：
+**第四步——桥接进硬件（4.4）**：要么 `vsub(4,5,6,VE,sat=true).asUInt`，要么照测试写法：
 
 ```scala
-// 在一个 spec 里
-import isa.NpuAssembler._
-simulate(new InstrDecoder) { dut =>
-  dut.io.instr.poke((vadd(rd=0, rs1=1, rs2=2, width=VX).toLong & 0xFFFFFFFFL).U)
-  dut.clock.step(0)
-  assert(!dut.io.illegal.peek().litToBoolean)   // 合法
-  dut.io.decoded.rs1.expect(1.U)
-  dut.io.decoded.rs2.expect(2.U)
-}
+dut.io.instr.poke((vsub(rd=4, rs1=5, rs2=6, width=VE, sat=true).toLong & 0xFFFFFFFFL).U)
 ```
 
-可以用 `tool/test-specific-spec.sh isa.InInstrDecoderSpec`（u9-l2 会讲）单跑该 spec。
+**验收**：在 `sbt console` 里 `println(vsub(4,5,6,VE,sat=true).toHexString)` 应输出 `22629210`（待本地验证）；再对照 [InstrDecoderSpec.scala:L67-L72](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/isa/InstrDecoderSpec.scala#L67-L72) 里 `vsub(rd=1, rs1=2, rs2=3)` 的同类测试，确认你的手算与汇编器输出、与译码器期望三者一致。这条任务用到了词表（4.1）、`f7`（4.3）、`encR`（4.2）和 `asUInt`（4.4）四个模块，是本讲知识的完整闭环。
 
-**预期结果**：步骤 2 和步骤 3 打印的都是 `00208010`，且 `a == b` 为 `true`。这同时验证了三件事：命名助手 `vadd` 确实只是 `encR` 的封装；你对手工位段的理解正确；`(x.toLong & 0xFFFFFFFFL)` 的符号还原对 bit31=0 的字同样无害。
-
-> 待本地验证：以上十六进制结果由位段手算得出；实际 `sbt console` 与仿真输出请在本机容器内运行确认。
+---
 
 ## 6. 本讲小结
 
-- `NpuAssembler` 是纯 Scala 汇编器，把 `vadd(rd,rs1,rs2,width,sat)` 这类可读调用翻译成 32 位指令字，供仿真 `poke` 与端到端测试使用。
-- 三个原语 `encR / encI / encS` 分别拼 R/I/S 三种格式；它们都用 `Long` 中间量并 `& 0xFFFFFFFFL` 截断，以规避 Scala `Int` 在 bit31 的符号溢出。
-- `f7` 与 `f7Cvt` 打包两种**互不兼容**的 funct7 布局（普通 R 型 vs CVT），分别是 `Funct7Attrs.encode` / `CvtFunct7.encode` 的薄封装。
-- 命名助手（`vadd`、`vcvt_s8_f32`、`vfma` 等）只是把家族的 opcode/funct3 固定好、再调对应原语；命名规则如 `vcvt_<dst>_<src>`。
-- **关键 gotcha**：助手返回的 `Int` 在 bit31=1 时是负数，poke 前必须 `(instr.toLong & 0xFFFFFFFFL).U` 还原成无符号 32 位；项目测试一律采用这一显式写法。
+- `NpuAssembler` 是一个纯 Scala 的 `object`，提供「意图 → 32 位指令字」的汇编能力，产出可直接 poke 进 `NeuralCoreMicroOp.word`（仿真）或下游译码器。
+- 四组**常量词表**（`VX/VE/VR`、`RNE/RTZ/...`、`INT/FP/BF`、`S8/.../BF8`）把魔数换成可读名字，且数值与 RTL 侧的 `VecWidth / FmtCode` 等枚举严格对齐。
+- 三个原语 **`encR / encI / encS`** 分别拼 R/I/S 三种格式的高位段；它们统一在 `Long` 里计算、用 `& 0xFFFFFFFFL` 掩码到 32 位、再 `.toInt` 返回——这是为了正确处理 bit 31 置位时的「有符号 `Int`」问题。
+- 两个打包器 **`f7 / f7Cvt`** 对应普通 R 型与 CVT 型两套 `funct7` 布局，`sat/round` 在两者中位置不同，不可混用；MMA 的 `keep` 还复用了 `f7` 的 `sat` 位。
+- **命名助手**（`vadd / vcvt_s8_f32 / ...`）是 `encR + f7` 的薄封装，把 opcode/funct3 固化成可读 API；**`asUInt`** 隐式类负责把（可能为负的）`Int` 安全桥接成 Chisel `UInt(32.W)`。
+
+---
 
 ## 7. 下一步学习建议
 
-本讲让你掌握了「**生成**」指令字的能力。下一讲 **u2-l5（组合译码器 InstrDecoder）** 讲「**解析**」指令字——它正是本讲 `InstrDecoderSpec` 里那个把 32 位字变回 `DecodedMicroOp` 的模块。建议：
+下一讲 **u2-l5：组合译码器 `InstrDecoder`** 是本讲的严格对偶——汇编器把字段「拼」成字，译码器把字「拆」回字段。建议：
 
-1. 直接进入 u2-l5，学习 `InstrDecoder` 如何反向切字段、如何判定 `illegal`（保留 opcode、非法 funct3、保留 width=3、CVT src==dst）。
-2. 阅读 [src/test/scala/isa/InstrDecoderSpec.scala](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/isa/InstrDecoderSpec.scala) 全文，它既是本讲的练习底稿，也是 u2-l5 的最佳预习材料。
-3. 进阶可继续到 u3-l1，看 `DecodedMicroOp` 如何拆成 `NCoreVALUBundle` / `NCoreMMALUCtrlBundle` 喂给计算单元——那时你会真正看到本讲生成的指令字如何驱动硬件。
+1. 读 [instrDecoder.scala](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/main/scala/isa/instrDecoder.scala)，对照本讲的位段，看它如何用 `InstrBits` 常量切出 `opcode/funct3/funct7`。
+2. 重点看 `illegal` 信号在哪些条件下被置位（保留 opcode、保留 funct3、保留 width、`vcvt` 源==目的）——验证本讲「词表故意不含保留值」的设计动机。
+3. 跑一遍 [InstrDecoderSpec.scala](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/isa/InstrDecoderSpec.scala)，这是本讲汇编器与下一讲译码器的「合体验收」。
