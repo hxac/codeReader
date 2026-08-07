@@ -1,0 +1,920 @@
+{
+  "project": "chisel-npu",
+  "head": "3e0d1314e9572c17fb40f206f0d1e7a72a80b663",
+  "rationale": "chisel-npu 是一个用 Chisel 6.7.0 实现的开源 NPU,核心是 NCoreBackend(译码器 + 多宽度寄存器堆 + 脉动矩阵乘 MMALU + 向量 ALU VALU),上层有 RISC-V 风格 32 位 ISA,下层有 Kintex-7 FPGA 验证平台与 Python/Linux 用户态驱动。学习路线据此按\"由外到内、由计算单元到系统集成、由 RTL 到平台\"的顺序分三层组织:入门层(U1)先让读者跑通项目并掌握贯穿全局的 N/L/K 参数;进阶层(U2-U6)按数据流方向逐层拆解——先 ISA 指令接口,再控制/存储基础(Bundle+寄存器堆),再两个计算单元 MMALU 与 VALU,最后回到 NCoreBackend 看它们如何连线与分发;专家层(U7-U9)上升到端到端量化流水线、FPGA 平台与驱动、以及测试与 CI。单元划分对应物理边界(ISA / 存储 / 矩阵引擎 / 向量引擎 / 集成 / 流水线 / 平台 / 测试),每篇讲义只解决一个问题并附一个可在容器内验证的代码实践,依赖关系保证读者随时知道每个模块的前置知识来自哪里。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门:认识 chisel-npu 项目",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 chisel-npu 是什么、解决什么问题、技术栈与核心亮点,以及它在开源 NPU 中的定位。",
+          "learning_goals": [
+            "理解 chisel-npu 是一个 Chisel 6 实现的开源 NPU RTL 设计",
+            "说出 MMALU、VALU、多宽度寄存器堆三大核心组件的作用",
+            "识别项目的主要技术栈(Chisel/Scala/sbt/firtool/Vivado)",
+            "区分 docs 文档与 src 源码的阅读入口"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/index.md",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "README Highlights",
+            "docs/index.md 记号表",
+            "NCoreBackend 组件图"
+          ],
+          "practice_task": "阅读 README 与 docs/index.md,画出一张包含 Frontend→InstrDecoder→(RegisterFile, MMALU, VALU) 的数据流框图,并在图中标注 N(bits)/L/K 三个全局参数出现的位置。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "开发环境与构建运行方式",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解基于 Docker 的开发容器、Makefile 目标、sbt 构建脚本与所需工具链(firtool/verilator/SystemC)。",
+          "learning_goals": [
+            "掌握 make image/container/test/build/build-sc/docs 各目标的作用",
+            "理解 build.sbt 中 Chisel 6.7.0 与 Scala 2.13.12 的依赖配置",
+            "知道为何优先用 Docker 而非裸机 sbt",
+            "了解 Vivado FPGA 构建目标 build-fpga 的入口"
+          ],
+          "source_files": [
+            "Makefile",
+            "build.sbt",
+            "docker/dockerfile",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "Makefile 目标定义",
+            "build.sbt root project",
+            "docker 环境变量"
+          ],
+          "practice_task": "执行 make test(或在容器内 sbt test)观察测试运行,然后修改 build.sbt 中一处无关紧要的注释,重新 make build 确认 top.sv 能重新生成,记录 sbt run 实际产出的文件名。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "源码目录结构与顶层入口",
+          "order": 3,
+          "filename": "u1-l3-source-layout-and-top.md",
+          "level": "beginner",
+          "topic": "梳理 src/main/scala 下的目录组织,定位 top.Main 入口,理解 Chisel 如何 elaborate 成 SystemVerilog。",
+          "learning_goals": [
+            "说出 alu/isa/sram/backend/top/utils 各目录的职责",
+            "找到顶层入口 top.Main 并理解它 elaborate 的对象",
+            "理解 ChiselStage.emitSystemVerilog 的产物链路",
+            "区分 main 源码与 test 源码的组织方式"
+          ],
+          "source_files": [
+            "src/main/scala/top/top.scala",
+            "AGENTS.md",
+            "docs/index.md"
+          ],
+          "minimal_modules": [
+            "top.Main",
+            "ChiselStage.emitSystemVerilog",
+            "MMALU 实例化"
+          ],
+          "practice_task": "打开 src/main/scala/top/top.scala,将 MMALU 的 n 参数从 32 改为 8,运行 make build,对比改动前后 top.sv 中 PE 实例的数量,理解 elaborate 的规模如何随参数变化。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "全局参数 N/L/K 与寄存器类概念",
+          "order": 4,
+          "filename": "u1-l4-params-nlk-and-regclass.md",
+          "level": "beginner",
+          "topic": "讲清贯穿全代码的三个符号 N(bits)、L、K 的含义,以及 VX/VE/VR 三类寄存器在同一物理存储上的别名关系。",
+          "learning_goals": [
+            "准确说出 N(bits)、L、K 各自的含义与默认值",
+            "理解 K 在 backend 边界等于 MMALU 阵列边长 n 的约束",
+            "掌握 VX/VE/VR 三类寄存器的位数与别名关系",
+            "理解 L 必须被 4 整除的原因"
+          ],
+          "source_files": [
+            "docs/index.md",
+            "src/main/scala/isa/instrFormat.scala",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "docs/index.md 记号表",
+            "VecWidth 枚举",
+            "寄存器类别名表"
+          ],
+          "practice_task": "假设 N=8、L=32、K=8,计算 VX/VE/VR 各自的寄存器数量、每寄存器位宽与总物理存储字节数,并在 instrFormat.scala 中找到编码 width 选择的 funct7 位段,写出 VE[i] 与 VR[i] 对应的 VX 别名下标公式。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "指令集架构 ISA",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "32 位指令编码格式 R/I/S",
+          "order": 1,
+          "filename": "u2-l1-instruction-formats.md",
+          "level": "beginner",
+          "topic": "讲解 RISC-V 风格的三种指令格式及其在 32 位字中的位段定义。",
+          "learning_goals": [
+            "掌握 R/I/S 三种格式的字段布局与位段边界",
+            "理解 opcode/funct3/funct7/rd/rs1/rs2/rs3 的作用",
+            "能用 InstrBits 常量定位任意字段",
+            "理解 I 型立即数的符号扩展与 S 型 FMA 的 rs3/rnd 字段"
+          ],
+          "source_files": [
+            "src/main/scala/isa/instrFormat.scala",
+            "docs/designs/01.isa.md"
+          ],
+          "minimal_modules": [
+            "InstrBits 位段常量",
+            "指令格式注释",
+            "Funct7Attrs/CvtFunct7"
+          ],
+          "practice_task": "给定一个 32 位指令字,手写提取 opcode、funct3、funct7、rd、rs1、rs2 的位运算表达式,并用 InstrBits 中的常量核对你的掩码与移位值是否一致。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "opcode 家族与 funct3/funct7 属性",
+          "order": 2,
+          "filename": "u2-l2-opcode-families-attrs.md",
+          "level": "intermediate",
+          "topic": "讲解 13 个 opcode 家族的分配、funct3 子操作划分与 funct7 属性编码(width/round/sat/dtype)。",
+          "learning_goals": [
+            "列出所有 opcode 家族及其编码值",
+            "理解 opcode 选家族、funct3 选子操作、funct7 带属性的分层设计",
+            "掌握 funct7 中 width/round/saturate/dtype 的位段",
+            "理解 vcvt 家族复用 funct7 的特殊编码"
+          ],
+          "source_files": [
+            "src/main/scala/isa/instSetArch.scala",
+            "src/main/scala/isa/instrFormat.scala",
+            "docs/designs/01.isa.md"
+          ],
+          "minimal_modules": [
+            "OpFamily 枚举",
+            "funct7 属性布局注释",
+            "FmtCode"
+          ],
+          "practice_task": "在 instSetArch.scala 中统计所有 opcode 家族,自制一张表记录每家族的 opcode 值、典型 funct3 子操作与典型用途;再用 Funct7Attrs.encode 推算一个'VE、RTZ、饱和、FP'指令的 funct7 值。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "装载存储指令与数据类型",
+          "order": 3,
+          "filename": "u2-l3-ldst-and-datatype.md",
+          "level": "intermediate",
+          "topic": "讲解 LD/ST 家族的传输宽度编码、内存设计意图以及 LD/ST 携带的打包数据类型 Bundle。",
+          "learning_goals": [
+            "理解 LD/ST 用 funct3 表示传输宽度",
+            "了解 docs/designs/02.memory.md 的内存模型设想",
+            "认识 dataType.scala 中的 U8C4/S8C4/U16C2/S16C2 打包格式",
+            "理解 memMicroCode 定义的访存微操作字段"
+          ],
+          "source_files": [
+            "src/main/scala/isa/dataType.scala",
+            "docs/designs/02.memory.md",
+            "src/main/scala/isa/micro_op/memMicroCode.scala"
+          ],
+          "minimal_modules": [
+            "U8C4Input/S8C4Input 等 Bundle",
+            "MemMicroCode",
+            "memory 设计文档"
+          ],
+          "practice_task": "阅读 dataType.scala,画出 U8C4Input 与 S16C2Input 的字节布局图;然后在 docs/designs/02.memory.md 中找到 LD/ST 传输宽度的设想,写一段说明为何 NPU 需要把 4 个 INT8 打包成一个传输单元。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "Scala 汇编器 NpuAssembler",
+          "order": 4,
+          "filename": "u2-l4-npu-assembler.md",
+          "level": "intermediate",
+          "topic": "讲解 Scala 端汇编器如何用 encR/encI/encS 与命名助手构造 32 位指令字。",
+          "learning_goals": [
+            "掌握 encR/encI/encS 三个原语的参数与拼接方式",
+            "会用 f7/f7Cvt 构造 R 型与 CVT 型的 funct7",
+            "理解为何助手返回 Int 且 bit31 为负时要用 toLong & 0xFFFFFFFFL",
+            "能调用 vadd/vcvt_s8_f32 等命名助手生成指令字"
+          ],
+          "source_files": [
+            "src/main/scala/isa/NpuAssembler.scala"
+          ],
+          "minimal_modules": [
+            "NpuAssembler 常量",
+            "encR/encI/encS",
+            "f7/f7Cvt"
+          ],
+          "practice_task": "在 sbt console 或测试中 import isa.NpuAssembler._,用 vadd 构造一条'VX 宽度、不饱和'的加法指令,打印其 32 位十六进制值,并用 encR + f7 手动拼接同样的指令字验证两者一致。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "组合译码器 InstrDecoder",
+          "order": 5,
+          "filename": "u2-l5-instr-decoder.md",
+          "level": "intermediate",
+          "topic": "讲解 InstrDecoder 如何把 32 位字组合译码为 DecodedMicroOp,以及非法指令的判定规则。",
+          "learning_goals": [
+            "理解译码器是组合逻辑、输入 instr 输出 DecodedMicroOp",
+            "掌握 DecodedMicroOp 的关键字段(family、valu、mma_keep 等)",
+            "理解 illegal 在哪些情况下被置位(保留 opcode、非法 funct3、保留 width 等)",
+            "理解 CVT src==dst 也被判非法"
+          ],
+          "source_files": [
+            "src/main/scala/isa/instrDecoder.scala",
+            "src/main/scala/isa/instrFormat.scala",
+            "src/main/scala/isa/instSetArch.scala"
+          ],
+          "minimal_modules": [
+            "InstrDecoder 模块",
+            "DecodedMicroOp Bundle",
+            "illegal 判定逻辑"
+          ],
+          "practice_task": "参考 InstrDecoderSpec 的写法,用 NpuAssembler 构造一条合法 vadd 和一条故意填错 funct3 的非法指令,在仿真中分别 poke 进译码器,验证 legal/illegal 输出与 family 字段是否符合预期。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "控制与存储基础",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "微操作与控制 Bundle",
+          "order": 1,
+          "filename": "u3-l1-microop-and-ctrl-bundles.md",
+          "level": "intermediate",
+          "topic": "讲解连接译码器、MMALU、VALU 的控制 Bundle:NCoreVALUBundle、NCoreMMALUCtrlBundle 与 VecOp 枚举。",
+          "learning_goals": [
+            "理解 DecodedMicroOp 如何把译码结果拆成 valu/mma 控制字段",
+            "掌握 NCoreVALUBundle 的字段(op、regCls、dtype、sat、round、imm)",
+            "掌握 NCoreMMALUCtrlBundle 的 keep/use_accum/busy 三位控制",
+            "了解 VecOp ChiselEnum 的取值范围与位宽约束"
+          ],
+          "source_files": [
+            "src/main/scala/isa/micro_op/VALUMicroCode.scala",
+            "src/main/scala/isa/micro_op/MMALUMicroCode.scala",
+            "src/main/scala/isa/instrDecoder.scala"
+          ],
+          "minimal_modules": [
+            "NCoreVALUBundle",
+            "NCoreMMALUCtrlBundle",
+            "VecOp 枚举",
+            "DecodedMicroOp"
+          ],
+          "practice_task": "在 VALUMicroCode.scala 中列出 VecOp 的所有成员并核对最大值是否仍能用 7 位表示;然后说明 regCls 字段(原 width)为何被改名,以及它在 NCoreVALUBundle 中如何指导写回端口选择。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "多宽度寄存器堆 MultiWidthRegisterBlock",
+          "order": 2,
+          "filename": "u3-l2-multiwidth-register-file.md",
+          "level": "intermediate",
+          "topic": "讲解 VX/VE/VR 在同一物理字节数组上的别名实现、读写端口布局与冲突规则。",
+          "learning_goals": [
+            "理解物理存储为 L×K×N/8 字节,VX/VE/VR 三种视图共享",
+            "掌握写 VR[i] 原子更新 4 行 VX 的字节级别名机制",
+            "理清 vx/ve/vr 各自的读写端口数量与用途",
+            "理解 ext 读写端口与 last-writer-wins 的冲突规则"
+          ],
+          "source_files": [
+            "src/main/scala/sram/multiWidthRegister.scala",
+            "docs/implementations/Registers.md"
+          ],
+          "minimal_modules": [
+            "MultiWidthRegisterBlock",
+            "地址宽度计算",
+            "端口 Bundle"
+          ],
+          "practice_task": "参考 MultiWidthRegisterSpec,写一个测试场景:先写 VR[0],再分别读 VE[0]、VX[0..3],验证别名关系正确;并解释为何 ext_r_addr 必须被驱动(否则 firtool 报 uninitialized sink)。",
+          "depends_on": [
+            "u1-l4",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "矩阵乘法引擎 MMALU",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "处理单元 PE:累加与 keep 控制",
+          "order": 1,
+          "filename": "u4-l1-processing-element.md",
+          "level": "intermediate",
+          "topic": "讲解 MMPE 处理单元的乘加结构、BasePE 抽象与 keep 控制如何实现流式累加。",
+          "learning_goals": [
+            "理解 PE 是 NPU 最核心的计算单元,执行 in_a * in_b + 累加",
+            "掌握 keep=true 时累加、keep=false 时覆盖的语义",
+            "理解 BasePE trait 抽象使 PE 可替换(可注入自定义 PE)",
+            "理解 accum_nbits 远大于 nbits 是为了不溢出累加"
+          ],
+          "source_files": [
+            "src/main/scala/alu/pe/procElem.scala",
+            "src/main/scala/alu/pe/basePE.scala",
+            "docs/implementations/ProcessingElement.md"
+          ],
+          "minimal_modules": [
+            "MMPE",
+            "BasePE",
+            "keep 控制逻辑"
+          ],
+          "practice_task": "参考 PESpec,构造一个 MMPE,连续两拍喂入 (2,3) 与 (4,5) 且第二拍 keep=true,验证累加结果为 2*3+4*5=26;再写一拍 keep=false 验证结果被覆盖为 4*5。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "二维脉动阵列 SystolicArray2D",
+          "order": 2,
+          "filename": "u4-l2-systolic-array.md",
+          "level": "intermediate",
+          "topic": "讲解 n×n 脉动阵列如何用水平/垂直移位寄存器把输入向量馈送到每个 PE。",
+          "learning_goals": [
+            "理解 reg_h/reg_v 两组移位寄存器实现数据脉动传播",
+            "掌握 vec_a 从左、vec_b 从顶的输入方向",
+            "理解 out_a/out_b 给 n×n 个 PE 提供错拍的数据",
+            "理解脉动阵列在多拍内完成矩阵乘的数据复用"
+          ],
+          "source_files": [
+            "src/main/scala/alu/mma/sa/systolicArray.scala",
+            "docs/implementations/SystolicArray.md"
+          ],
+          "minimal_modules": [
+            "SystolicArray2D",
+            "reg_h/reg_v",
+            "边界输入逻辑"
+          ],
+          "practice_task": "对 n=2 的 SystolicArray2D,手推前 2 拍 vec_a/vec_b 的值如何经移位寄存器到达 4 个 PE 的 out_a/out_b,画出每拍的数据位置图,说明为何对角线 PE 在同一拍拿到同一组输入。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "数据馈送器与收集器",
+          "order": 3,
+          "filename": "u4-l3-data-feeder-collector.md",
+          "level": "intermediate",
+          "topic": "讲解 DataFeeder 如何把寄存器向量排布进阵列、DataCollector 如何收集 PE 输出与累加器。",
+          "learning_goals": [
+            "理解 DataFeeder 把 in_a/in_b/in_accum 适配为阵列输入",
+            "掌握 DataCollector 的 accum_in/use_accum/dat_clct 控制",
+            "理解收集时机与 keep 信号的配合",
+            "了解 DataFeederSpec/DataCollectorSpec 的验证方式"
+          ],
+          "source_files": [
+            "src/main/scala/alu/mma/sa/dataFeeder.scala",
+            "src/main/scala/alu/mma/sa/dataCollector.scala"
+          ],
+          "minimal_modules": [
+            "DataFeeder",
+            "DataCollector",
+            "累加器路径"
+          ],
+          "practice_task": "阅读 DataFeeder 与 DataCollector 的端口,说明 in_accum 如何进入 collector、dat_clct 在哪一拍拉高才会把 PE 输出写入结果,并参考 DataCollectorSpec 设计一个最小用例验证 collector 的输出顺序。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "控制单元 ControlUnit",
+          "order": 4,
+          "filename": "u4-l4-mma-control-unit.md",
+          "level": "intermediate",
+          "topic": "讲解 ControlUnit 如何用一维脉动方式分发控制信号,并用 OR 门汇总 collect 信号。",
+          "learning_goals": [
+            "理解控制信号也走脉动阵列(reg 一维移位)",
+            "掌握 cbus_out 按对角线 i+j 广播给 n×n 个 PE",
+            "理解 ORGate 把所有 keep 汇总成 cbus_dat_clct",
+            "理解 clct/busy 取自最末级寄存器代表全局完成"
+          ],
+          "source_files": [
+            "src/main/scala/alu/mma/cu/controlUnit.scala",
+            "src/main/scala/utils/gates.scala"
+          ],
+          "minimal_modules": [
+            "ControlUnit",
+            "ORGate",
+            "对角线广播"
+          ],
+          "practice_task": "对 n=2 推演 ControlUnit 的 reg 在前 3 拍的内容,标出每拍哪些 cbus_out 会被更新,并解释为何用 OR 汇总 keep 能正确产生 dat_clct(只要任一拍在累加就继续收集)。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "MMALU 顶层集成与流式归约",
+          "order": 5,
+          "filename": "u4-l5-mma-top-and-streaming.md",
+          "level": "intermediate",
+          "topic": "讲解 MMALU 如何组装上述组件、为何插入流水寄存器修时序,以及 M×K 流式归约机制。",
+          "learning_goals": [
+            "理解 MMALU 把 SA+PE+Feeder+Collector+ControlUnit 组装的完整链路",
+            "掌握 pipe_a/pipe_b/pipe_ctrl 等流水寄存器为修 200MHz 时序而加",
+            "理解延迟从 3n-2 变为 3n-1 的代价",
+            "掌握 ctrl.keep=true 实现 M×K 流式归约、每 K 拍输出累积和"
+          ],
+          "source_files": [
+            "src/main/scala/alu/mma/mma.scala",
+            "docs/implementations/SystolicArray.md"
+          ],
+          "minimal_modules": [
+            "MMALU",
+            "流水寄存器 pipe_*",
+            "ctrl.keep 流式归约"
+          ],
+          "practice_task": "参考 MMALUStreamReduceSpec,设置 ctrl.keep=true 连续喂入超过 K 拍的数据,验证每 K 拍边界输出一个累积 K×K 部分和;再用一句话说明为何流式归约只需一条 keep=true 指令。",
+          "depends_on": [
+            "u4-l1",
+            "u4-l2",
+            "u4-l3",
+            "u4-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "向量 ALU VALU",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "VALU 多宽度数据通路",
+          "order": 1,
+          "filename": "u5-l1-valu-datapath.md",
+          "level": "intermediate",
+          "topic": "讲解 K 通道 VALU 如何对 VX/VE/VR 三种宽度执行算术/逻辑/移动操作并单拍输出。",
+          "learning_goals": [
+            "理解 VALU(K,N) 三宽度输入与三宽度寄存输出的结构",
+            "掌握 ctrl.regCls 选择当前有效的输入/输出宽度",
+            "理解算术、逻辑、移动等家族的通路复用",
+            "理解 1 拍输出寄存器延迟"
+          ],
+          "source_files": [
+            "src/main/scala/alu/vec/vec.scala",
+            "docs/implementations/VectorALU.md"
+          ],
+          "minimal_modules": [
+            "VALU",
+            "三宽度 IO Bundle",
+            "ctrl 选择逻辑"
+          ],
+          "practice_task": "参考 VALUArithSpec,用 K=8 对 VX 宽度构造一条 vadd,把两个含正负值的 INT8 向量相加并验证逐通道结果;再改成 VE 宽度观察位宽变化。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "可编程查找表 LUT 与激活函数",
+          "order": 2,
+          "filename": "u5-l2-programmable-lut.md",
+          "level": "intermediate",
+          "topic": "讲解 Qfmt 参考表、双 bank 可编程 LUT 与 vlut/vsetlut 的查表激活机制。",
+          "learning_goals": [
+            "理解 Qfmt 用 SQ1.6/UQ0.8 定点格式生成 exp/recip/tanh/erf 表",
+            "掌握双 bank LUT 支持一个 vlut 服务、另一个 vsetlut 预装",
+            "理解 vsetlut 只写 VALU 内部 bank 不触碰寄存器堆",
+            "了解 VALUActivationSpec 的验证方式"
+          ],
+          "source_files": [
+            "src/main/scala/alu/vec/vec.scala",
+            "docs/implementations/VectorALU.md"
+          ],
+          "minimal_modules": [
+            "Qfmt 对象",
+            "LUT bank 寄存器",
+            "vlut/vsetlut 路径"
+          ],
+          "practice_task": "用 Qfmt.lutExp 计算输入 0 对应的表项值,验证它约为 exp(0)=1 的定点表示;然后说明在 backend 中为何 vsetlut 必须抑制所有 RF 写端口。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "FP32/BF16/BF8 浮点运算",
+          "order": 3,
+          "filename": "u5-l3-floating-point.md",
+          "level": "advanced",
+          "topic": "讲解 fp.scala 中 IEEE754 组合逻辑如何实现 FP32/BF16/BF8 的算术与转换,以及 FTZ/饱和等取舍。",
+          "learning_goals": [
+            "理解 Tier-2 设计:RNE 默认、FTZ、无 NaN、溢出饱和",
+            "掌握 BF8 的 E4M3/E5M2 两种变体",
+            "理解 fp.scala 仅组合逻辑、VALU 在外围加 1 拍寄存器",
+            "了解 FpRef Scala 参考用于 bit-exact 测试"
+          ],
+          "source_files": [
+            "src/main/scala/alu/vec/fp.scala",
+            "docs/implementations/VectorALU.md"
+          ],
+          "minimal_modules": [
+            "IEEE754 对象",
+            "BF8 变体常量",
+            "FpRef 参考"
+          ],
+          "practice_task": "阅读 IEEE754 字段常量,手算一个 FP32 值 1.0 的位模式(符号/指数/尾数);然后参考 VALUFP32Spec 设计一个 fadd 用例,并说明 FTZ 对极小输入的影响。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "水平归约与广播",
+          "order": 4,
+          "filename": "u5-l4-reduce-and-broadcast.md",
+          "level": "advanced",
+          "topic": "讲解 vsum/vrmax/vrmin 水平归约把多通道压缩成 VR 宽度广播结果,以及 vbcast 广播指令。",
+          "learning_goals": [
+            "理解水平归约结果总是 VR 宽度并广播到 K 通道",
+            "掌握归约指令在 funct7 里编码的是输入宽度而非输出宽度",
+            "理解 isReduceToVR 在 backend 中的修正作用",
+            "掌握 vbcast reg/imm 两种广播方式"
+          ],
+          "source_files": [
+            "src/main/scala/alu/vec/vec.scala"
+          ],
+          "minimal_modules": [
+            "归约路径",
+            "广播路径",
+            "out_vr 广播"
+          ],
+          "practice_task": "参考 VALUReduceSpec 与 VALUCastSpec,构造一个 vsum.vx 把 8 通道 INT8 归约为一个广播到 VR 的结果;再说明若 backend 不做 isReduceToVR 修正会发生什么写回错误。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "神经核心集成 NCoreBackend",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "NCoreBackend 总体连线",
+          "order": 1,
+          "filename": "u6-l1-ncore-backend-wiring.md",
+          "level": "intermediate",
+          "topic": "讲解 NCoreBackend 如何把译码器、多宽度寄存器堆、MMALU、VALU 连成一个流水线后端。",
+          "learning_goals": [
+            "理解 NCoreBackend 的四个核心子模块实例化与参数约束(K==mmalu.n)",
+            "掌握寄存器堆读写端口到 MMALU/VALU 的分配表",
+            "理解 MMALU 结果直写 VR(无截断)、VALU 按宽度写回",
+            "理清外部读写端口(ext)与 VR 读取端口的用途"
+          ],
+          "source_files": [
+            "src/main/scala/backend/SimpleBackend.scala",
+            "docs/implementations/NeuralCore.md"
+          ],
+          "minimal_modules": [
+            "NCoreBackend",
+            "rf 端口分配",
+            "MMALU/VALU 实例化"
+          ],
+          "practice_task": "对照 SimpleBackend 顶部的端口分配注释,画出一张从 io.instr 到 MMALU/VALU 输出再写回寄存器堆的完整连线图,标出 VX 读端口 0..3 各自驱动谁。",
+          "depends_on": [
+            "u2-l5",
+            "u3-l1",
+            "u3-l2",
+            "u4-l5",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "指令分发与写回时序",
+          "order": 2,
+          "filename": "u6-l2-dispatch-and-writeback.md",
+          "level": "advanced",
+          "topic": "讲解 backend 如何按译码 family 分发、写回端口的使能条件,以及归约/CVT/vsetlut 等边界处理。",
+          "learning_goals": [
+            "掌握 isVALU 判定覆盖的 9 个 family 与 MMA 分支",
+            "理解 vx/ve/vr 写回使能的 regCls 守卫条件",
+            "掌握 isNarrowCvtOut/isWideCvtOut/isReduceToVR/isSetLut 的修正逻辑",
+            "理解 VALU 1 拍输出寄存器导致的 2 拍写回时序"
+          ],
+          "source_files": [
+            "src/main/scala/backend/SimpleBackend.scala"
+          ],
+          "minimal_modules": [
+            "isVALU 分支",
+            "写回使能守卫",
+            "CVT/归约/LUT 修正辅助函数"
+          ],
+          "practice_task": "追踪一条 vcvt_f32_s8(窄输出)与一条 vsum.vx(归约到 VR)在 backend 中的写回路径,解释为何这两条指令需要 isNarrowCvtOut 与 isReduceToVR 特殊处理,否则会写错寄存器类。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "量化与端到端流水线",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "后量化流水线 MMA→vcvt→vfma→vcvt",
+          "order": 1,
+          "filename": "u7-l1-quantization-pipeline.md",
+          "level": "advanced",
+          "topic": "讲解矩阵乘后的 INT8 再量化流水线,以及如何用 Scala java.lang.Float 参考 bit-exact 验证。",
+          "learning_goals": [
+            "理解 MMA 输出 INT32 累加结果后转 FP32 再缩放再转回 INT8 的流程",
+            "掌握 vcvt 在量化链中'宽输出→VR'与'窄输出→VX'的方向",
+            "理解 vfma 用于乘缩放因子再加偏置",
+            "理解 NCoreBackendQuantSpec 用 Scala 参考 bit-exact 校验"
+          ],
+          "source_files": [
+            "docs/implementations/Quantization.md",
+            "src/test/scala/backend/NCoreBackendQuantSpec.scala",
+            "src/main/scala/backend/SimpleBackend.scala"
+          ],
+          "minimal_modules": [
+            "量化链步骤",
+            "vcvt 方向约定",
+            "QuantSpec 参考模型"
+          ],
+          "practice_task": "阅读 NCoreBackendQuantSpec,列出量化链中每条指令的 regCls 与输出宽度;然后手算一个最小输入(INT8 a/b 累加→FP32→×scale→INT8)的期望值,说明参考模型为何选 java.lang.Float。",
+          "depends_on": [
+            "u6-l2",
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "GEMM + Softmax 端到端教程",
+          "order": 2,
+          "filename": "u7-l2-gemm-softmax-tutorial.md",
+          "level": "advanced",
+          "topic": "讲解用归约、可编程 LUT 激活与全量化链实现 transformer 注意力 softmax 的端到端示例。",
+          "learning_goals": [
+            "理解 softmax 需要的 exp(激活)、归约求和、逐通道除法/缩放",
+            "掌握 vlut/vsetlut 在激活函数中的应用",
+            "理解数值稳定性与量化误差的处理",
+            "理解 NCoreBackendGemmSoftmaxSpec 的端到端验证"
+          ],
+          "source_files": [
+            "docs/tutorials/gemm_softmax_quantization.md",
+            "src/test/scala/backend/NCoreBackendGemmSoftmaxSpec.scala"
+          ],
+          "minimal_modules": [
+            "softmax 计算步骤",
+            "LUT 激活应用",
+            "GemmSoftmaxSpec 验证"
+          ],
+          "practice_task": "按 docs/tutorials/gemm_softmax_quantization.md 的步骤,用 NpuAssembler 写出一段实现'GEMM→vlut(exp)→vsum→vfma(缩放)'的指令序列伪代码,并指出每步结果落在哪类寄存器(VX/VE/VR)。",
+          "depends_on": [
+            "u7-l1",
+            "u5-l2",
+            "u5-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "FPGA 平台与驱动",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "FPGA 验证平台 xc7k480t",
+          "order": 1,
+          "filename": "u8-l1-fpga-xc7k480t.md",
+          "level": "advanced",
+          "topic": "讲解 Kintex-7 xc7k480t 上的 PCIe Gen2×8 + 双 DDR3 + K=32 MMALU 参考平台与时序收敛史。",
+          "learning_goals": [
+            "理解参考平台的硬件构成(芯片、PCIe、DDR3、时钟域)",
+            "掌握 fabric 200MHz / NPU 250MHz 的时钟划分",
+            "理解 MMALU 插入流水寄存器修 WNS 的时序收敛过程",
+            "了解 build-fpga 的 Vivado 批处理流程"
+          ],
+          "source_files": [
+            "docs/implementations/FPGA_XC7K480T.md",
+            "Makefile"
+          ],
+          "minimal_modules": [
+            "平台拓扑",
+            "时钟域",
+            "时序收敛记录",
+            "build-fpga 目标"
+          ],
+          "practice_task": "阅读 FPGA_XC7K480T.md,整理出 WNS=-0.151ns 的违例路径与插入流水寄存器后的改善结果;并解释为何加 1 拍延迟换取时序收敛在 NPU 设计中是合理取舍。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "Linux XDMA 内核驱动与 C 工具",
+          "order": 2,
+          "filename": "u8-l2-linux-xdma-driver.md",
+          "level": "advanced",
+          "topic": "讲解 Xilinx XDMA 内核驱动(xdma.ko)及其 C 工具(reg_rw/dma_to_device 等)如何访问 NPU。",
+          "learning_goals": [
+            "理解 /dev/xdma0_* 设备节点与 h2c/c2h/bypass 通道",
+            "掌握 reg_rw 读写控制寄存器、dma_to_device/from_device 搬运数据",
+            "理解 ctrl_lite + DMA staging 的协议与 C 工具一致",
+            "了解 driver/linux 的测试脚本组织"
+          ],
+          "source_files": [
+            "driver/linux/README.md",
+            "driver/linux/tools/reg_rw.c",
+            "driver/linux/tools/dma_to_device.c"
+          ],
+          "minimal_modules": [
+            "XDMA 设备节点",
+            "reg_rw",
+            "dma_to_device",
+            "ctrl_lite 协议"
+          ],
+          "practice_task": "阅读 driver/linux/README.md 与 reg_rw.c,说明一次完整 MMALU 计算在 C 工具层面需要哪几步(staging A/B/ACCUM→kick→wait→read OUT),并指出 ctrl_lite 控制字在 bypass BAR 中的访问方式。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "Python 用户态驱动 chisel_npu_py",
+          "order": 3,
+          "filename": "u8-l3-python-driver.md",
+          "level": "advanced",
+          "topic": "讲解 chisel_npu_py 如何以 pybind11 边界封装地址、用 numpy 优先的 API 驱动 NPU。",
+          "learning_goals": [
+            "理解 ChiselNPU.mmalu 的 stage→kick→wait→collect 四步",
+            "掌握 XDMADevice 按名字(write_staged/read_staged)寻址operand",
+            "理解 CtrlLite 的 start/done/busy 位协议与 wait_done",
+            "理解 pybind11 C++ 模块独占所有 fd/地址/transfer 的安全边界"
+          ],
+          "source_files": [
+            "drivers/chisel_npu_py/src/chisel_npu_py/npu.py",
+            "drivers/chisel_npu_py/src/chisel_npu_py/backend.py",
+            "drivers/chisel_npu_py/src/chisel_npu_py/ctrl.py",
+            "docs/implementations/PythonDriver.md"
+          ],
+          "minimal_modules": [
+            "ChiselNPU",
+            "XDMADevice",
+            "CtrlLite",
+            "pybind11 边界"
+          ],
+          "practice_task": "阅读 npu.py 与 backend.py,写出 ChiselNPU.mmalu(A,B,ACCUM) 的调用序列,并解释为何 Python 侧永远看不到 DDR 地址;再参考 tests/test_loopback.py 说明如何用 mock native 在无硬件时测试驱动。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "测试体系与 CI",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "Chisel 6 仿真测试框架",
+          "order": 1,
+          "filename": "u9-l1-chisel6-sim-framework.md",
+          "level": "advanced",
+          "topic": "讲解项目用 chisel3.simulator.EphemeralSimulator(而非 chiseltest)的测试方式、共享工具与 ChiselEnum 比较技巧。",
+          "learning_goals": [
+            "理解 EphemeralSimulator 与 chiseltest 的区别",
+            "掌握 testUtil 包(printHelper/widthHelper)的用法",
+            "理解 poke enum 有效但 expect enum 无效、需 peek litValue 比较",
+            "了解现代 spec 用 NpuAssembler 构造指令字而非直接 poke bundle"
+          ],
+          "source_files": [
+            "src/test/scala/alu/vec/VALUArithSpec.scala",
+            "src/test/scala/utils/printHelper.scala",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "EphemeralSimulator 用法",
+            "testUtil 共享工具",
+            "ChiselEnum peek 技巧"
+          ],
+          "practice_task": "参考 VALUArithSpec 的写法,用 EphemeralSimulator 写一个对 SystolicArray2D(n=2) 的最小测试,peek out_a/out_a 的 litValue 验证移位逻辑;注意不要用 expect 比较 ChiselEnum 字段。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "测试套件组织与 CI 流水线",
+          "order": 2,
+          "filename": "u9-l2-test-suite-and-ci.md",
+          "level": "advanced",
+          "topic": "讲解 src/test/scala 下按模块组织的测试套件(MMALU/VALU/ISA/backend),以及 GitHub Actions CI 的运行方式。",
+          "learning_goals": [
+            "掌握测试目录与源码目录的镜像组织(ALU/ISA/SRAM/backend)",
+            "理解单元测试与集成测试(NCoreBackend*Spec)的分层",
+            "掌握 tool/test-specific-spec.sh 单测快捷方式",
+            "理解 CI 在 fangruil/chisel-dev:amd64 中跑 sbt run + sbt test"
+          ],
+          "source_files": [
+            "src/test/scala/backend/NCoreBackendQuantSpec.scala",
+            "src/test/scala/isa/InstrDecoderSpec.scala",
+            ".github/workflows/actions.yml",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "测试目录组织",
+            "test-specific-spec.sh",
+            "actions.yml CI 步骤"
+          ],
+          "practice_task": "用 tool/test-specific-spec.sh 单独运行 InstrDecoderSpec 与 NCoreBackendQuantSpec,对比单测与集成测试的耗时;然后阅读 actions.yml 说明 CI 在 push 到 main 时执行的确切命令序列。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

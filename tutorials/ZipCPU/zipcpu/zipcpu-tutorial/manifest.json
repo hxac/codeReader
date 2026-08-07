@@ -1,0 +1,893 @@
+{
+  "project": "zipcpu",
+  "head": "42606d2d6ef55df313772232977621b2d72f0159",
+  "rationale": "本手册按\"先理解项目全貌→再读 ISA 规范→再深入 RTL 实现→再掌握总线与外设整合→最后到调试、验证与二次开发\"的顺序组织。第1单元带读者跑通构建、模拟器并理解四种顶层封装；第2单元以 doc/src/spec.tex 规范为主线，讲清 CPU 要做什么（寄存器/状态/指令格式/编码/条件执行/中断双寄存器组）；第3单元再讲怎么实现（zipcore 流水线，以及取指/译码/ALU/乘除/访存各模块族与冒险停顿）；第4单元讲三种总线封装（Wishbone/AXI/AXI-Lite）、ZipSystem 整合、rtl/ex 总线支持模块、外设（中断/定时/计数/Jiffies/看门狗）、DMA 与 MMU；第5单元覆盖调试端口、SymbiYosys 形式化验证、Verilator 与 C++ 仿真、GCC 工具链与 ABI、构建参数，并以自定义 SoC 集成收尾。各讲义为单主题、含可操作实践任务，依赖关系沿实现层次递进。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 ZipCPU：项目定位、目录结构与运行方式",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览：ZipCPU 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 ZipCPU 的定位——一个 32 位 RISC 软核 CPU，及其核心设计目标（精简、load/store、可条件执行、双模式、开源）。",
+          "learning_goals": [
+            "理解 ZipCPU 的核心设计目标与架构特点",
+            "区分它与传统 RISC-V 或其它 ISA 的不同",
+            "了解仓库包含哪些主要部分（RTL/工具链/规范/仿真）"
+          ],
+          "source_files": [
+            "README.md",
+            "INSTALL.md",
+            "doc/src/spec.tex"
+          ],
+          "minimal_modules": [
+            "README 中的设计目标清单",
+            "doc/src/spec.tex Introduction/Key Features 章节"
+          ],
+          "practice_task": "阅读 README 与 INSTALL，写一段话说明 ZipCPU 的三条最关键设计目标，并指出它为何不是 RISC-V；列出仓库顶层 5 个目录各自的作用。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构与顶层构建系统",
+          "order": 2,
+          "filename": "u1-l2-repo-layout-and-build.md",
+          "level": "beginner",
+          "topic": "讲解 rtl/sw/sim/bench/doc 各目录职责，以及顶层 Makefile 的 rtl/sw/sim/bench/test/formal/doc 等目标。",
+          "learning_goals": [
+            "掌握仓库的整体目录组织",
+            "理解顶层 Makefile 各构建目标的作用",
+            "知道如何构建 RTL、工具链与模拟器"
+          ],
+          "source_files": [
+            "Makefile",
+            "INSTALL.md",
+            "sw/Makefile",
+            "sim/Makefile"
+          ],
+          "minimal_modules": [
+            "顶层 Makefile 的 all/rtl/sw/sim/bench/test/formal 目标",
+            "INSTALL.md 的依赖与安装步骤"
+          ],
+          "practice_task": "运行 `make rtl` 仅构建 Verilator RTL 目标，记录产物路径；列举 bench/asm、bench/formal、bench/cpp 三个子目录分别产出什么。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "RTL 顶层与四种封装",
+          "order": 3,
+          "filename": "u1-l3-rtl-top-wrappers.md",
+          "level": "beginner",
+          "topic": "讲解 rtl/ 下的四种顶层封装：zipsystem（带外设）、zipbones（精简）、zipaxi（AXI）、zipaxil（AXI-Lite），它们都包裹同一个 zipcore。",
+          "learning_goals": [
+            "理解 zipcore 与四种顶层封装的关系",
+            "区分 Zipsystem/Zipbones/ZipAXI/ZipAXILite 的适用场景",
+            "学会按总线需求选择顶层封装"
+          ],
+          "source_files": [
+            "rtl/zipsystem.v",
+            "rtl/zipbones.v",
+            "rtl/zipaxil.v",
+            "rtl/zipaxi.v"
+          ],
+          "minimal_modules": [
+            "zipsystem 顶层端口",
+            "zipbones 顶层端口",
+            "zipaxil 顶层端口",
+            "zipaxi 顶层端口"
+          ],
+          "practice_task": "对比 rtl/zipsystem.v 与 rtl/zipbones.v 的 module 端口列表，列出 Zipsystem 比 Zipbones 多出来的接口（外设/调试相关），并说明各自适合什么项目。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "跑起来：模拟器与第一个程序",
+          "order": 4,
+          "filename": "u1-l4-first-simulation.md",
+          "level": "beginner",
+          "topic": "介绍两套模拟器（sim/cpp 独立指令级模拟器、sim/verilator 基于 RTL 的模拟器），并用 sim/zipsw/hello.c 跑第一个程序。",
+          "learning_goals": [
+            "理解 C++ ISS 与 Verilator 模拟器的区别",
+            "学会用模拟器加载并运行 ELF 程序",
+            "能编译并运行 sim/zipsw 示例程序"
+          ],
+          "source_files": [
+            "sim/verilator/Makefile",
+            "sim/verilator/zipcpu_tb.cpp",
+            "sim/zipsw/hello.c",
+            "sim/zipsw/Makefile"
+          ],
+          "minimal_modules": [
+            "sim/verilator 默认构建目标 zipsys_tb/zipbones_tb",
+            "sim/zipsw 的 hello 程序"
+          ],
+          "practice_task": "在 sim/zipsw 下 `make hello` 编译 hello.c，再用 sim/verilator 的测试台加载运行，观察串口输出的 'Hello' 字样并确认 HALT 表示成功。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "指令集架构（ISA）规范",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "ISA 概览：寄存器组与状态寄存器",
+          "order": 1,
+          "filename": "u2-l1-isa-overview-regs-status.md",
+          "level": "beginner",
+          "topic": "以 spec 规范为主线，介绍 ZipCPU 的寄存器组（用户/监管两套）、状态寄存器 CC 的各位含义，以及 supervisor/user 双模式。",
+          "learning_goals": [
+            "掌握 16 个通用寄存器与两套寄存器组",
+            "理解状态寄存器 CC 各条件位与控制位含义",
+            "区分用户模式与监管模式的访问级别"
+          ],
+          "source_files": [
+            "doc/src/spec.tex",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "spec.tex 的 Register Set 子节",
+            "spec.tex 的 Status Register CC 子节",
+            "spec.tex 的 Operating Modes 子节"
+          ],
+          "practice_task": "在 spec.tex 的 CC 定义表中找出 GIE、SLEEP、STEP 各位的位号与含义，写出从用户态进入监管态时哪些寄存器会被切换。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "指令格式与编码",
+          "order": 2,
+          "filename": "u2-l2-instruction-format-encoding.md",
+          "level": "intermediate",
+          "topic": "讲解 ZipCPU 的 32 位指令格式、操作码字段、条件字段、寄存器/立即数字段编码，并对照 sw/zasm/zopcodes.h 的编码常量。",
+          "learning_goals": [
+            "理解 32 位指令的字段划分",
+            "读懂 zopcodes.h 中 ZIP_REGFIELD/ZIP_IMMFIELD 等编码常量",
+            "能根据编码表手工解析一条指令"
+          ],
+          "source_files": [
+            "doc/src/spec.tex",
+            "sw/zasm/zopcodes.h",
+            "sw/zasm/zopcodes.cpp"
+          ],
+          "minimal_modules": [
+            "spec.tex Instruction Format 子节",
+            "spec.tex Instruction OpCodes 子节",
+            "zopcodes.h 的 ZIP_BITFIELD/ZIP_REGFIELD/ZIP_IMMFIELD 宏"
+          ],
+          "practice_task": "在 sw/zasm/zopcodes.cpp 中选一条指令（如 SUB），写出它的操作码与各字段位宽，并手工编码一条 'SUB R1,R2' 指令为 32 位十六进制。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "寻址方式与 Load/Store/Mov",
+          "order": 3,
+          "filename": "u2-l3-addressing-load-store.md",
+          "level": "intermediate",
+          "topic": "讲解 ZipCPU 的 load/store 架构、支持的寻址方式、MOV 指令的 operand B 形式，以及读写内存时的字节/半字/字选项。",
+          "learning_goals": [
+            "理解 load/store 架构只有访存指令访问内存",
+            "掌握地址模式与偏移立即数的使用",
+            "理解 MOV 指令的多种 operand B 形式"
+          ],
+          "source_files": [
+            "doc/src/spec.tex",
+            "rtl/core/memops.v"
+          ],
+          "minimal_modules": [
+            "spec.tex Address Modes / Move Operands 子节",
+            "spec.tex Memory Architecture 子节",
+            "memops.v 中对读/写、字节使能的处理"
+          ],
+          "practice_task": "用汇编写出把内存地址 0x1000 处的字加载到 R1、再加立即数 5 后写回的序列；指出对应 memops.v 中 o_wb_cyc/o_wb_stb 信号如何表达该次访问。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "条件执行机制",
+          "order": 4,
+          "filename": "u2-l4-conditional-execution.md",
+          "level": "intermediate",
+          "topic": "讲解 ZipCPU 几乎所有指令都可条件执行的特性、4 位条件码字段、条件求值与派生指令（汇编器把条件 LDI 转成 BREV+LDILO 等）。",
+          "learning_goals": [
+            "理解条件码字段如何决定指令是否执行",
+            "掌握常见条件码与 CC 标志位的关系",
+            "理解派生指令的由来"
+          ],
+          "source_files": [
+            "doc/src/spec.tex",
+            "sw/zasm/zopcodes.cpp"
+          ],
+          "minimal_modules": [
+            "spec.tex Conditional Instructions / Modifying Conditions 子节",
+            "spec.tex Derived Instructions 子节",
+            "zopcodes.cpp 中条件码定义"
+          ],
+          "practice_task": "写一段汇编：用条件指令实现 if(R1!=0) R2=R2+1（不用分支指令），并说明汇编器对条件 LDI 做了什么转换。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "中断处理与双寄存器组",
+          "order": 5,
+          "filename": "u2-l5-interrupts-dual-regset.md",
+          "level": "intermediate",
+          "topic": "讲解 ZipCPU 没有中断向量表、而是通过用户/监管双寄存器组切换来保存上下文的中断模型，以及可选中断外设。",
+          "learning_goals": [
+            "理解双寄存器组如何替代中断向量",
+            "掌握中断进入/返回时 CC 与寄存器组的切换",
+            "了解 icontrol 中断控制器的作用"
+          ],
+          "source_files": [
+            "doc/src/spec.tex",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "spec.tex Interrupt Handling 子节",
+            "spec.tex Traditional Interrupt Handling / Context Switch 子节"
+          ],
+          "practice_task": "描述一次中断发生时 CPU 自动完成的动作序列（CC 保存、GIE 清零、切到监管寄存器组），并对比传统向量中断模型说明它的优势。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "CPU 核心与流水线实现",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "zipcore 总体结构与流水线阶段",
+          "order": 1,
+          "filename": "u3-l1-zipcore-structure-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 zipcore.v 的核心参数（OPT_MPY/OPT_DIV/OPT_CIS 等）与五级流水线（取指/译码/读操作数/执行访存合级/写回）的整体数据流。",
+          "learning_goals": [
+            "理解 zipcore 的关键构建参数",
+            "掌握五级流水线各阶段的职责",
+            "建立从源码视角看 CPU 数据流的地图"
+          ],
+          "source_files": [
+            "rtl/core/zipcore.v",
+            "doc/src/spec.tex",
+            "rtl/core/README.md"
+          ],
+          "minimal_modules": [
+            "zipcore module 参数列表",
+            "zipcore 内部寄存器与流水线阶段",
+            "spec.tex Pipeline Operation 子节"
+          ],
+          "practice_task": "在 zipcore.v 中找出每个流水线阶段对应的主要 always 块或信号前缀，画一张从取指到写回的信号流草图，并标注 OPT_CIS 参数控制什么。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "取指模块族：prefetch/dblfetch/pfcache",
+          "order": 2,
+          "filename": "u3-l2-prefetch-family.md",
+          "level": "intermediate",
+          "topic": "讲解 rtl/core 下多种取指实现的演进与取舍：单条取指 prefetch、双取 dblfetch、当前推荐的指令缓存 pfcache/pffifo，以及历史弃用的 pipefetch。",
+          "learning_goals": [
+            "理解不同取指策略对流水线吞吐的影响",
+            "掌握 pfcache 缓存命中/缺失的处理",
+            "能根据是否流水线选择合适的取指模块"
+          ],
+          "source_files": [
+            "rtl/core/README.md",
+            "rtl/core/prefetch.v",
+            "rtl/core/dblfetch.v",
+            "rtl/core/pfcache.v",
+            "rtl/core/pffifo.v"
+          ],
+          "minimal_modules": [
+            "prefetch 单条取指状态机",
+            "pfcache 缓存逻辑",
+            "pffifo 预取 FIFO"
+          ],
+          "practice_task": "对比 prefetch.v 与 pfcache.v 的端口，说明 pfcache 多出来的缓存接口信号；估算对一段连续指令，pfcache 相比 prefetch 的吞吐提升来自哪里。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "指令译码 idecode",
+          "order": 3,
+          "filename": "u3-l3-instruction-decode.md",
+          "level": "intermediate",
+          "topic": "讲解 idecode.v 如何把 32 位指令字解析为操作码、寄存器号、条件码、立即数等控制信号，并配合 OPT_CIS 压缩指令。",
+          "learning_goals": [
+            "理解译码器输出的控制信号集合",
+            "掌握寄存器号与立即数字段的提取",
+            "了解压缩指令（CIS）的译码差异"
+          ],
+          "source_files": [
+            "rtl/core/idecode.v",
+            "sw/zasm/zopcodes.cpp"
+          ],
+          "minimal_modules": [
+            "idecode 输出信号 o_op/o_reg/o_cond/o_imm 等",
+            "zopcodes.cpp 操作码表"
+          ],
+          "practice_task": "在 idecode.v 中找出 o_op、o_cond、o_imm 的赋值逻辑，写出一给定的 32 位指令字经过译码后这些输出的预期值。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "ALU 运算单元 cpuops",
+          "order": 4,
+          "filename": "u3-l4-alu-cpuops.md",
+          "level": "intermediate",
+          "topic": "讲解 cpuops.v 实现的算术/逻辑/移位运算、条件码计算，以及 OPT_SHIFTS 控制的移位实现。",
+          "learning_goals": [
+            "掌握 ALU 支持的运算类型与输出",
+            "理解条件码（Z/N/C/V）如何由运算结果产生",
+            "了解移位指令的实现选项"
+          ],
+          "source_files": [
+            "rtl/core/cpuops.v",
+            "rtl/core/zipcore.v"
+          ],
+          "minimal_modules": [
+            "cpuops 运算与标志位生成",
+            "zipcore 中对 cpuops 的实例化"
+          ],
+          "practice_task": "在 cpuops.v 中跟踪一次 ADD 运算如何同时产生 Z/N/C/V 四个标志，并用一组合并测试验证你的理解。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "乘法与除法单元",
+          "order": 5,
+          "filename": "u3-l5-multiply-divide.md",
+          "level": "intermediate",
+          "topic": "讲解乘法实现 mpyop.v（按硬件支持选择）与软件回退 slowmpy.v，以及 div.v 除法单元的迭代算法。",
+          "learning_goals": [
+            "理解 OPT_MPY 如何选择乘法实现",
+            "掌握 slowmpy 多周期乘法的迭代思路",
+            "理解 div.v 除法的算法与时序"
+          ],
+          "source_files": [
+            "rtl/core/mpyop.v",
+            "rtl/core/slowmpy.v",
+            "rtl/core/div.v"
+          ],
+          "minimal_modules": [
+            "mpyop 多种乘法实现选择",
+            "slowmpy 32 周期乘法",
+            "div 除法状态机"
+          ],
+          "practice_task": "对比 mpyop.v 与 slowmpy.v 的端口与周期数；阅读 div.v 估算一次 32 位除法大致需要多少个时钟周期。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "访存模块族：memops/pipemem/dcache",
+          "order": 6,
+          "filename": "u3-l6-memory-access-family.md",
+          "level": "intermediate",
+          "topic": "讲解数据访存的多种实现：单次访存 memops、流水线批量访存 pipemem、数据缓存 dcache，以及何时用哪个。",
+          "learning_goals": [
+            "理解 pipemem 如何合并连续访问提升吞吐",
+            "掌握 dcache 命中/缺失与写回策略",
+            "能根据 OPT_PIPELINED_BUS_ACCESS/OPT_DCACHE 选择访存模块"
+          ],
+          "source_files": [
+            "rtl/core/memops.v",
+            "rtl/core/pipemem.v",
+            "rtl/core/dcache.v"
+          ],
+          "minimal_modules": [
+            "memops 单次访存状态机",
+            "pipemem 流水线访存",
+            "dcache 缓存逻辑"
+          ],
+          "practice_task": "写一段对连续内存地址做 4 次 LW 的汇编，说明在 pipemem 下相比 memops 节省的时钟来自何处，并指出 dcache 在其中扮演的角色。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l7",
+          "title": "流水线冒险与停顿",
+          "order": 7,
+          "filename": "u3-l7-hazards-writeback-stalls.md",
+          "level": "intermediate",
+          "topic": "讲解 zipcore 中数据冒险/控制冒险/结构冒险的处理、流水线停顿（stall）机制，以及写回阶段的提交逻辑。",
+          "learning_goals": [
+            "识别三类流水线冒险",
+            "理解停顿与清空的触发条件",
+            "掌握写回阶段如何保证寄存器正确更新"
+          ],
+          "source_files": [
+            "rtl/core/zipcore.v",
+            "doc/src/spec.tex"
+          ],
+          "minimal_modules": [
+            "zipcore 的 stall/flush 控制逻辑",
+            "spec.tex Pipeline Stalls 子节",
+            "写回阶段寄存器写使能"
+          ],
+          "practice_task": "在 zipcore.v 中找出 stall 信号的产生条件，举一个会产生 RAW 数据冒险的两条指令序列，说明 CPU 如何用停顿解决。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "总线封装、系统整合与外设",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Wishbone 封装 zipwb 与 zipbones",
+          "order": 1,
+          "filename": "u4-l1-wishbone-wrapper-zipwb.md",
+          "level": "intermediate",
+          "topic": "讲解 zipwb.v 如何实例化取指与访存控制器并把两者仲裁合并成单一 Wishbone 出口，以及 zipbones 的精简封装。",
+          "learning_goals": [
+            "理解 zipwb 合并指令/数据访问的仲裁",
+            "掌握 Wishbone 主端口信号时序",
+            "区分 zipwb 与 zipbones 的关系"
+          ],
+          "source_files": [
+            "rtl/core/zipwb.v",
+            "rtl/zipbones.v"
+          ],
+          "minimal_modules": [
+            "zipwb 内部仲裁逻辑",
+            "zipbones 顶层端口"
+          ],
+          "practice_task": "在 zipwb.v 中找出合并指令与数据访问的仲裁器，说明两条访问同时发生时谁优先；列出 zipbones 暴露的 Wishbone 主端口信号。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2",
+            "u3-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "ZipSystem 整合：核心+外设+调试",
+          "order": 2,
+          "filename": "u4-l2-zipsystem-integration.md",
+          "level": "intermediate",
+          "topic": "讲解 zipsystem.v 如何把 zipcore、中断控制器、定时器、计数器、Jiffies、看门狗、DMA、MMU 与调试端口挂到一条内部 Wishbone 总线上。",
+          "learning_goals": [
+            "理解 ZipSystem 的内部总线拓扑与地址映射",
+            "掌握各外设如何挂接到内部总线",
+            "了解调试端口与 CPU 的连接方式"
+          ],
+          "source_files": [
+            "rtl/zipsystem.v",
+            "doc/src/spec.tex"
+          ],
+          "minimal_modules": [
+            "zipsystem 内部 wbpriarbiter 仲裁",
+            "zipsystem 中外设实例化",
+            "spec.tex ZipSystem Registers/Peripherals 章节"
+          ],
+          "practice_task": "在 zipsystem.v 中画出内部总线拓扑：CPU 取指/访存经仲裁后接到包含哪些外设的地址译码总线上，并列出每个外设的基地址。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "AXI 与 AXI-Lite 封装",
+          "order": 3,
+          "filename": "u4-l3-axi-axilite-wrappers.md",
+          "level": "intermediate",
+          "topic": "讲解 zipaxil.v 与 zipaxi.v 顶层封装，以及对应的 AXI/AXI-Lite 取指（axilfetch/axiicache）、访存（axilops/axipipe、axiops/axipipe）与数据缓存（axidcache）模块。",
+          "learning_goals": [
+            "理解 AXI-Lite 与 AXI 封装的差异",
+            "掌握 axilfetch 的 FETCH_LIMIT 取指模式",
+            "了解 AXI 版取指/访存/缓存模块的对应关系"
+          ],
+          "source_files": [
+            "rtl/zipaxil.v",
+            "rtl/zipaxi.v",
+            "rtl/core/axilfetch.v",
+            "rtl/core/axilpipe.v",
+            "rtl/core/axidcache.v"
+          ],
+          "minimal_modules": [
+            "zipaxil 顶层端口",
+            "axilfetch 取指模式",
+            "axilpipe 流水线访存"
+          ],
+          "practice_task": "对比 zipaxil.v 与 zipbones.v 的端口，说明 AXI-Lite 封装相比 Wishbone 在指令/数据总线分离上的不同；列出 axilfetch 在 FETCH_LIMIT=1/2/>2 时分别采用哪种策略。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "总线支持模块 rtl/ex",
+          "order": 4,
+          "filename": "u4-l4-bus-support-modules.md",
+          "level": "intermediate",
+          "topic": "讲解 rtl/ex 下的总线辅助模块：总线延迟 busdelay、优先级仲裁 wbpriarbiter、双优先仲裁、FIFO sfifo、skidbuffer，以及用于形式化的 fwb_master/slave 属性封装。",
+          "learning_goals": [
+            "掌握总线仲裁器的优先级与公平性",
+            "理解 sfifo 与 skidbuffer 在流水线总线中的作用",
+            "了解 fwb_master/slave 是形式化属性而非功能逻辑"
+          ],
+          "source_files": [
+            "rtl/ex/busdelay.v",
+            "rtl/ex/wbpriarbiter.v",
+            "rtl/ex/sfifo.v",
+            "rtl/ex/skidbuffer.v",
+            "rtl/ex/fwb_master.v"
+          ],
+          "minimal_modules": [
+            "wbpriarbiter 优先级仲裁",
+            "sfifo/skidbuffer 缓冲",
+            "fwb_master 形式化封装"
+          ],
+          "practice_task": "阅读 wbpriarbiter.v 说明两个主设备同时请求时如何仲裁；指出 sfifo.v 与 skidbuffer.v 解决的是同一种问题（背压）还是不同问题。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "外设：中断控制器、定时器、计数器与 Jiffies",
+          "order": 5,
+          "filename": "u4-l5-peripherals-timer-counter-irq.md",
+          "level": "intermediate",
+          "topic": "讲解与 CPU 紧密集成的外设：中断控制器 icontrol、定时器 ziptimer、计数器 zipcounter、Jiffies zipjiffies、看门狗 wbwatchdog，及它们的中断机制。",
+          "learning_goals": [
+            "掌握中断控制器如何合并多路外部中断",
+            "理解定时器/计数器/Jiffies 的工作与中断方式",
+            "了解看门狗的复位/中断行为"
+          ],
+          "source_files": [
+            "rtl/peripherals/icontrol.v",
+            "rtl/peripherals/ziptimer.v",
+            "rtl/peripherals/zipcounter.v",
+            "rtl/peripherals/zipjiffies.v",
+            "rtl/peripherals/wbwatchdog.v"
+          ],
+          "minimal_modules": [
+            "icontrol 中断合并",
+            "ziptimer 倒计时中断",
+            "zipjiffies 正计时比较中断"
+          ],
+          "practice_task": "写一段说明：要让 CPU 每 N 个时钟收到一次中断，应配置哪个外设、写入哪个寄存器；并指出 zipcounter 与 ziptimer 的本质区别。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l6",
+          "title": "DMA 控制器：wbdmac 与 zipdma",
+          "order": 6,
+          "filename": "u4-l6-dma-controllers.md",
+          "level": "intermediate",
+          "topic": "讲解两套 DMA：Wishbone 上的简单 wbdmac（仅 32 位搬运），以及 AXI 上的 scatter-gather zipdma（含 mm2s/s2mm/gears 子模块）。",
+          "learning_goals": [
+            "掌握 wbdmac 的源/目的地址递增与中断触发搬运",
+            "理解 zipdma 的 scatter-gather 与 mm2s/s2mm 数据通路",
+            "区分两套 DMA 的适用总线与能力"
+          ],
+          "source_files": [
+            "rtl/peripherals/wbdmac.v",
+            "rtl/zipdma/zipdma.v",
+            "rtl/zipdma/zipdma_mm2s.v",
+            "rtl/zipdma/zipdma_s2mm.v"
+          ],
+          "minimal_modules": [
+            "wbdmac 搬运状态机",
+            "zipdma 顶层与子模块划分",
+            "mm2s/s2mm 读写通路"
+          ],
+          "practice_task": "阅读 wbdmac.v 写出触发一次内存块搬运需要配置哪些寄存器；对比 zipdma.v 说明 scatter-gather DMA 相比简单 DMA 多了什么能力。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l7",
+          "title": "MMU 内存管理单元",
+          "order": 7,
+          "filename": "u4-l7-mmu.md",
+          "level": "intermediate",
+          "topic": "讲解实验性的 zipmmu.v：虚拟到物理地址翻译、页表结构，以及它尚未完全集成进新 ZipCore 的现状。",
+          "learning_goals": [
+            "理解 MMU 的地址翻译机制",
+            "掌握页表查找与缺失处理",
+            "了解 MMU 当前集成的局限（基于物理地址缓存）"
+          ],
+          "source_files": [
+            "rtl/peripherals/zipmmu.v",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "zipmmu 地址翻译",
+            "页表查找逻辑",
+            "README 中关于 MMU 未集成的说明"
+          ],
+          "practice_task": "阅读 zipmmu.v 描述一次虚拟地址翻译的流程，并结合 README 说明为何作者计划把 MMU 放在 ZipCore 与总线封装之间。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "调试、验证、工具链与二次开发",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "调试接口与调试端口寄存器",
+          "order": 1,
+          "filename": "u5-l1-debug-interface-port.md",
+          "level": "advanced",
+          "topic": "讲解 ZipCPU 的调试接口：通过调试端口读写 CPU 寄存器、单步、断点、暂停，以及对应的调试端口寄存器映射和 zipdbg 调试器。",
+          "learning_goals": [
+            "掌握调试端口如何 halt/step/读写寄存器",
+            "理解调试端口寄存器地址映射",
+            "了解 zipdbg 调试器的工作原理"
+          ],
+          "source_files": [
+            "doc/src/spec.tex",
+            "rtl/zipsystem.v",
+            "sw/zipdbg/zipdbg.cpp"
+          ],
+          "minimal_modules": [
+            "spec.tex Debug Interface / Debug Register Addressing 章节",
+            "zipsystem 调试端口逻辑",
+            "zipdbg 调试器主流程"
+          ],
+          "practice_task": "在 spec.tex 中列出调试端口寄存器表，写出一组调试端口写操作序列实现：暂停 CPU→读 R0..R15→单步一条指令→恢复运行。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "形式化验证体系（SymbiYosys）",
+          "order": 2,
+          "filename": "u5-l2-formal-verification.md",
+          "level": "advanced",
+          "topic": "讲解 bench/formal 下用 SymbiYosys（.sby）对各模块做形式化证明的体系，以及 fwb_master/slave 等 Wishbone 属性封装的作用。",
+          "learning_goals": [
+            "理解 .sby 证明配置与 TESTS 列表覆盖范围",
+            "掌握 fwb 属性封装如何断言总线契约",
+            "学会为一个模块添加或运行形式化证明"
+          ],
+          "source_files": [
+            "bench/formal/Makefile",
+            "bench/formal/prefetch.sby",
+            "rtl/ex/fwb_master.v",
+            "rtl/ex/fwb_slave.v"
+          ],
+          "minimal_modules": [
+            "bench/formal Makefile 的 TESTS",
+            "prefetch.sby 证明配置",
+            "fwb_master/slave 属性"
+          ],
+          "practice_task": "运行 `make formal` 中的一个子证明（如 prefetch），解读其通过/失败含义；并说明 fwb_master.v 为何只含断言而无功能逻辑。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "Verilator 测试框架与组件测试台",
+          "order": 3,
+          "filename": "u5-l3-verilator-testbench.md",
+          "level": "advanced",
+          "topic": "讲解 sim/verilator 下基于 RTL 的模拟器：zipsys_tb/zipbones_tb 测试台、ELF 加载、以及 div_tb/mpy_tb/pfcache_tb 等独立组件测试台。",
+          "learning_goals": [
+            "掌握 Verilator 测试台如何加载 ELF 并驱动 CPU",
+            "理解 step 模式与连续运行模式测试",
+            "了解组件级测试台（div_tb 等）的用途"
+          ],
+          "source_files": [
+            "sim/verilator/zipcpu_tb.cpp",
+            "sim/verilator/Makefile",
+            "sim/verilator/div_tb.cpp",
+            "sim/verilator/pfcache_tb.cpp"
+          ],
+          "minimal_modules": [
+            "zipcpu_tb 测试台主流程",
+            "Makefile 的 stest/itest/test 目标",
+            "div_tb 组件测试台"
+          ],
+          "practice_task": "运行 `make stest` 并解释 HALT/BUSY 分别表示什么；为 div_tb 设计一个额外测试用例描述（输入与预期），说明如何加进去。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "C++ 指令级模拟器（ISS）",
+          "order": 4,
+          "filename": "u5-l4-cpp-iss-simulator.md",
+          "level": "advanced",
+          "topic": "讲解 sim/cpp 下独立于 RTL 的 C++ 指令级模拟器：SIMBUS/SIMDEV 设备模型、ZIPMACHINE 指令解释、以及 zipelf ELF 加载。",
+          "learning_goals": [
+            "理解 ISS 如何逐条解释 ZipCPU 指令",
+            "掌握 SIMBUS 设备挂接模型",
+            "了解 ELF 加载与入口启动"
+          ],
+          "source_files": [
+            "sim/cpp/zsim.cpp",
+            "sim/cpp/zipelf.cpp",
+            "sim/cpp/twoc.cpp"
+          ],
+          "minimal_modules": [
+            "ZIPMACHINE 指令解释循环",
+            "SIMBUS/SIMDEV 设备模型",
+            "zipelf ELF 装载"
+          ],
+          "practice_task": "在 zsim.cpp 中跟踪一条指令从取指到执行的过程，描述 ZIPMACHINE 如何更新 PC 与条件码；并说明它相比 Verilator 模拟器快在哪里、又丢失了什么。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "软件工具链与 ABI",
+          "order": 5,
+          "filename": "u5-l5-toolchain-abi.md",
+          "level": "advanced",
+          "topic": "讲解 sw/ 下的工具链构成（binutils/GCC/newlib 补丁）、遗留汇编器 zasm、可执行文件格式、调用约定与链接脚本。",
+          "learning_goals": [
+            "理解工具链如何通过补丁加入 ZipCPU 后端",
+            "掌握 ABI 的调用约定、栈布局与寄存器用途",
+            "了解链接脚本与启动流程（CRT0/Bootloader）"
+          ],
+          "source_files": [
+            "sw/README.md",
+            "sw/Makefile",
+            "sw/zasm/zasm.y",
+            "doc/src/spec.tex"
+          ],
+          "minimal_modules": [
+            "sw 顶层 Makefile 的工具链构建步骤",
+            "spec.tex Tool Suite and ABI 章节",
+            "spec.tex Linker Scripts 子节"
+          ],
+          "practice_task": "阅读 spec.tex ABI 章节写出函数调用时参数如何传递、返回值放哪；并对照 sw/Makefile 说明构建 GCC 后端依赖哪几个补丁文件。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l6",
+          "title": "构建参数与集成选项",
+          "order": 6,
+          "filename": "u5-l6-build-parameters-options.md",
+          "level": "advanced",
+          "topic": "讲解 ZipCPU 的构建期参数（OPT_MPY/OPT_DIV/OPT_CIS/OPT_DCACHE/OPT_USERMODE/RESET_ADDRESS 等）及其对面积、性能、功能的影响。",
+          "learning_goals": [
+            "掌握主要 OPT_* 参数的含义与取舍",
+            "理解参数如何裁剪出不同规模的 CPU",
+            "了解时钟域与 I/O 端口配置"
+          ],
+          "source_files": [
+            "doc/src/spec.tex",
+            "rtl/core/zipcore.v",
+            "rtl/zipaxil.v"
+          ],
+          "minimal_modules": [
+            "spec.tex Integration / ZipCPU Parameters 章节",
+            "zipcore 参数列表",
+            "zipaxil 顶层参数"
+          ],
+          "practice_task": "为一个资源受限的 FPGA 设计选择一组 OPT_* 参数（去掉 FPU/DCACHE/USERMODE 等），说明每项裁剪省下了什么、失去了什么。",
+          "depends_on": [
+            "u3-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l7",
+          "title": "二次开发：把 ZipCPU 集成进自定义 SoC",
+          "order": 7,
+          "filename": "u5-l7-custom-soc-integration.md",
+          "level": "advanced",
+          "topic": "综合所学，讲解如何把 ZipCPU 封装、地址译码、总线互连（wbxbar/addrdecode）与外设组合成一个自定义 SoC，并在模拟器中验证。",
+          "learning_goals": [
+            "掌握地址译码与总线互连的搭建",
+            "理解如何挂接自定义外设到 ZipSystem",
+            "学会在 sim 中验证自定义 SoC"
+          ],
+          "source_files": [
+            "rtl/zipaxil.v",
+            "sim/rtl/addrdecode.v",
+            "sim/rtl/wbxbar.v",
+            "sim/rtl/wbscope.v",
+            "sim/zipsw/board.h"
+          ],
+          "minimal_modules": [
+            "addrdecode 地址译码",
+            "wbxbar 总线互连",
+            "zipaxil 顶层与 board.h 地址定义"
+          ],
+          "practice_task": "设计一个最小 SoC：用 zipaxil 作 CPU、wbxvar 作互连、addrdecode 把 RAM/ROM/UART 映射到不同地址，写出地址映射表并在 sim/zipsw/board.h 中对应配置后跑通 hello。",
+          "depends_on": [
+            "u4-l2",
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
