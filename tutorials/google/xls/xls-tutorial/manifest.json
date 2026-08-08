@@ -1,7 +1,7 @@
 {
   "project": "xls",
-  "head": "e796ea8aeea3875362c7dbeb11a850f3854a9116",
-  "rationale": "XLS 是 Google 的高层综合（HLS）工具链，整体是一条清晰的「DSLX 前端 → XLS IR → 优化 Pass → 流水线调度 → 代码生成（Verilog）」主干流水线，外加解释器/JIT 执行引擎、Verilog 仿真、形式化验证、模糊测试与 Bazel 构建规则等支撑设施。因此学习顺序严格沿这条主干展开：第一单元（入门）让读者从零认识项目定位、构建方式、目录布局，并用 gcd.x 等示例把 interpreter→ir_convert→opt→codegen 整条命令链亲手跑通；第二单元深入 DSLX 前端（类型系统、解析器/AST、类型推导、constexpr 求值、字节码解释器）；第三单元落到作为整个编译器枢纽的 XLS IR（Package/Function/Node/Value、运算符体系、文本格式、DSLX→IR 转换、Proc/Channel 状态通信）；第四单元讲运行在 IR 之上的优化 Pass 框架、代表性优化 Pass、查询/分析引擎、延迟模型与流水线调度；第五单元讲代码生成（Block 转换、组合/流水线生成器、模块签名、VAST Verilog AST）；第六单元讲下游执行与验证（IR 解释器、LLVM JIT、Verilog 仿真与测试台、Z3 形式化验证、网表分析）；第七单元收尾讲 Proc 进阶、Bazel 构建规则与宏、Fuzzer 多引擎交叉验证、高层流程编排与贡献规范。依赖关系遵循「前端→IR→优化→调度→codegen→执行/验证→工程」的单向主线，每个单元只在前置单元完成后展开，符合由浅入深、每篇只解决一个独立主题并结合真实源码的设计原则。XLS 属大型项目，故规划 7 个单元、共 33 篇讲义。",
+  "head": "ccd2a0636fc675febe35822d09dc7baf28ab1527",
+  "rationale": "XLS 是 Google 的高层综合（HLS）工具链，整体是一条清晰的「DSLX 前端 → XLS IR → 优化 Pass → 流水线调度 → 代码生成（Verilog）」主干流水线，外加解释器/JIT 执行引擎、Verilog 仿真、形式化验证、模糊测试与 Bazel 构建规则等支撑设施。因此学习顺序严格沿这条主干展开：第一单元（入门）让读者从零认识项目定位、构建方式、目录布局，并用 gcd.x 等示例把 interpreter→ir_convert→opt→codegen 整条命令链亲手跑通；第二单元深入 DSLX 前端（类型系统、解析器/AST、类型推导、constexpr 求值、字节码解释器）；第三单元落到作为整个编译器枢纽的 XLS IR（Package/Function/Node/Value、运算符体系、文本格式、DSLX→IR 转换、Proc/Channel 状态通信）；第四单元讲运行在 IR 之上的优化 Pass 框架、代表性优化 Pass、查询/分析引擎、延迟模型与流水线调度；第五单元讲代码生成（Block 转换、组合/流水线生成器、模块签名、VAST Verilog AST）；第六单元讲下游执行与验证（IR 解释器、LLVM JIT、Verilog 仿真与测试台、Z3 形式化验证、网表分析）；第七单元收尾讲 Proc 进阶、Bazel 构建规则与宏、Fuzzer 多引擎交叉验证、高层流程编排与贡献规范。依赖关系遵循「前端→IR→优化→调度→codegen→执行/验证→工程」的单向主线，每个单元只在前置单元完成后展开，符合由浅入深、每篇只解决一个独立主题并结合真实源码的设计原则。本次增量更新（HEAD ccd2a0636）只引入了一处需要新增讲义的变化：dev_tools/proc_constancy_checker_main 这一新工具及其依赖的 NonSynthRemovalPass 与 proc_testutils 的 UnrollProc 激活展开机制——它用 Z3 在 Proc 上发现 opt 未能识别为字面量的「可证明常量」节点，恰好衔接 u6-l4（Z3 形式化验证）与 u3-l5（Proc），故作为 u6-l6 新增于第六单元末尾。其余 33 篇讲义所涉源码与核心概念均未受本次代码变化影响：新增的 non_synth_removal Pass 虽已注册但并未加入标准 optimization_pass_pipeline；codegen v1.5 的 ir_dump_path 透传修复位于独立的 v1.5 流水线，不影响主讲义对主 codegen 流水线的讲解；proc_testutils 的扩展也不在 u3-l5 的源码范围内。故既有 33 篇全部保持不变，讲义总数由 33 篇增至 34 篇。",
   "units": [
     {
       "id": "u1",
@@ -31,7 +31,7 @@
           ],
           "practice_task": "阅读 README 的 Stack Diagram 与目录说明，用自己的话写出 XLS 的输入、输出以及它区别于传统 HDL 的三个特点，并指出两条前端入口分别是什么。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -58,7 +58,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -84,7 +84,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -110,7 +110,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l5",
@@ -138,7 +138,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -173,7 +173,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -201,7 +201,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -229,7 +229,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -256,7 +256,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l5",
@@ -284,7 +284,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -322,7 +322,7 @@
           "depends_on": [
             "u1-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -350,7 +350,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -377,7 +377,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -406,7 +406,7 @@
             "u2-l3",
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l5",
@@ -435,7 +435,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -471,7 +471,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -501,7 +501,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -529,7 +529,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -557,7 +557,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l5",
@@ -587,7 +587,7 @@
             "u4-l1",
             "u4-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -624,7 +624,7 @@
             "u4-l5",
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -652,7 +652,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -679,7 +679,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l4",
@@ -707,7 +707,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -744,7 +744,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -773,7 +773,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -801,7 +801,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l4",
@@ -831,7 +831,7 @@
             "u3-l2",
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l5",
@@ -858,6 +858,39 @@
           "practice_task": "用一个简单结构化 Verilog 加伪单元库，解析为 netlist 对象，列出其中的 cell 与连线，说明它如何作为 LEC 的网表侧输入。",
           "depends_on": [
             "u6-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l6",
+          "title": "Proc 常量性检查：用 Z3 发现可证明常量的节点",
+          "order": 6,
+          "filename": "u6-l6-proc-constancy-checker.md",
+          "level": "advanced",
+          "topic": "讲解新引入的 dev_tools/proc_constancy_checker_main：它把 Proc 按激活（activation）展开为函数，先用 NonSynthRemovalPass 剥离 assert/trace/cover 等不可综合节点，再用 Z3 逐节点证明其在所有激活中取值恒定（provably constant），从而发现 opt 未能识别为字面量的常量节点。",
+          "learning_goals": [
+            "理解「可证明常量（provably constant）」节点的概念及其对优化的意义",
+            "掌握 proc_testutils 的 UnrollProc 如何把 Proc 按激活展开为函数并保留节点到展开副本的映射",
+            "理解 NonSynthRemovalPass 如何剥离不可综合操作（assert/trace/cover）及其专属中间依赖",
+            "了解 proc_constancy_checker_main 如何用 Z3 逐位证明某节点跨激活恒定，以及 --fail_on_constants、--unroll_count 等选项与报告"
+          ],
+          "source_files": [
+            "xls/dev_tools/proc_constancy_checker.h",
+            "xls/dev_tools/proc_constancy_checker_main.cc",
+            "xls/passes/non_synth_removal_pass.h",
+            "xls/ir/proc_testutils.h",
+            "xls/solvers/z3_ir_translator.h",
+            "xls/dev_tools/testdata/constancy_test.x"
+          ],
+          "minimal_modules": [
+            "Proc 激活展开（UnrollProc）",
+            "NonSynthRemovalPass",
+            "Z3 常量性证明"
+          ],
+          "practice_task": "用 proc_constancy_checker_main 对 dev_tools/testdata/constancy_test.x 编译出的 Proc 进行检查，阅读其输出中被判定为「constant」的节点及证明原因；再尝试加上 --fail_on_constants 让工具在发现常量时返回非零退出码，并说明该工具为何能发现普通 opt 难以识别为字面量的常量节点。",
+          "depends_on": [
+            "u6-l4",
+            "u3-l5"
           ],
           "action": "new"
         }
@@ -897,7 +930,7 @@
             "u3-l5",
             "u4-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -926,7 +959,7 @@
           "depends_on": [
             "u1-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -955,7 +988,7 @@
             "u6-l1",
             "u6-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l4",
@@ -984,7 +1017,7 @@
           "depends_on": [
             "u1-l5"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

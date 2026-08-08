@@ -1,0 +1,578 @@
+{
+  "project": "P-tuning-v2",
+  "head": "b1520c9aa177ffe539a77b80fd8bca992e76513e",
+  "rationale": "本项目包含两大相对独立的部分：根目录的主 P-tuning v2 实现（冻结 BERT/RoBERTa/DeBERTa 主干，对分类、序列标注、抽取式问答做深度提示调优）与 PT-Retrieval（把 P-tuning v2 迁移到 DPR/ColBERT 稠密检索，强调跨域泛化与校准）。学习顺序据此分三层推进：入门层（U1）先讲清项目定位、环境与主入口，让读者能跑起来；进阶层（U2–U5）围绕唯一核心机制展开——PrefixEncoder 生成 past_key_values 并逐层注入，再串联配置体系、模型工厂、各类任务数据处理与训练/评估/超参搜索，形成「从一次 forward 到一次完整训练」的闭环；专家层（U6–U8）覆盖进阶任务模型（问答、多选、Token 分类）、PT-Retrieval 检索扩展（双编码器前缀集成、训练与检索、校准评估），最后做架构总览与二次开发。单元内讲义遵循「先机制后任务、先读码后实践」的依赖链，每篇只解决一个主题并配一个动手任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "从零认识 P-tuning v2",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与深度提示调优原理",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 P-tuning v2 解决什么问题：冻结预训练主干，用深度连续提示（每层注入）逼近全量微调效果，并说明其与 v1、Prefix Tuning、Lester 等参数高效方法的关系。",
+          "learning_goals": [
+            "理解参数高效微调与深度提示调优的动机",
+            "区分 P-tuning v2 的「冻结主干 + 逐层 prefix」与全量微调",
+            "对照论文结果表，建立对项目能力的整体认知"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "deep prompt tuning 概念",
+            "冻结主干与可训练 prefix 参数",
+            "论文复现结果概览"
+          ],
+          "practice_task": "阅读 README 中的 Implemented Results 表格，用自己的话写一段 100 字总结：在不同任务（分类/标注/问答）和不同主干（BERT-large/RoBERTa-large）上，P-tuning v2 达到了怎样的指标，说明它为什么「可比拟微调」。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "环境搭建与首次复现实验",
+          "order": 2,
+          "filename": "u1-l2-setup-and-first-run.md",
+          "level": "beginner",
+          "topic": "讲解依赖与 conda 环境搭建，并通过一个真实运行脚本（如 RoBERTa 在 RTE 上训练）演示如何启动一次 P-tuning v2 训练。",
+          "learning_goals": [
+            "根据 requirements.txt 与 README 搭建 pt2 环境",
+            "看懂 run_script 中关键超参（pre_seq_len、learning_rate、--prefix）",
+            "成功发起一次训练命令并理解输出目录结构"
+          ],
+          "source_files": [
+            "requirements.txt",
+            "README.md",
+            "run_script/run_rte_roberta.sh",
+            "run_script/run_conll04_bert.sh"
+          ],
+          "minimal_modules": [
+            "依赖版本（transformers/datasets/seqeval）",
+            "运行脚本变量（bs/lr/dropout/psl/epoch）",
+            "--prefix 开关与 output_dir"
+          ],
+          "practice_task": "在不具备 GPU 的环境下，仅运行 run_rte_roberta.sh 到「数据下载 + 模型加载」阶段（可用极小的 max_train_samples 和 num_train_epochs=1）观察日志；记录日志中打印的 total param 数值，体会 prefix 参数量远小于主干。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与主入口 run.py",
+          "order": 3,
+          "filename": "u1-l3-entry-and-dispatch.md",
+          "level": "beginner",
+          "topic": "梳理项目目录（model/、training/、tasks/、run_script/、search_script/），并逐段读懂 run.py 如何根据 task_name 分派到对应 get_trainer、完成训练与评估。",
+          "learning_goals": [
+            "画出顶层目录与职责划分",
+            "理解 run.py 的参数解析、任务分派与训练/评估主流程",
+            "建立「入口→任务→模型→训练器」的整体心智模型"
+          ],
+          "source_files": [
+            "run.py",
+            "tasks/utils.py"
+          ],
+          "minimal_modules": [
+            "get_args 返回四元组",
+            "task_name/dataset_name 断言与分派",
+            "TASKS/DATASETS 常量"
+          ],
+          "practice_task": "在 run.py 中找到根据 task_name 动态 import get_trainer 的 if-elif 分支，画一张流程图：命令行参数 → get_args → 任务分派 → get_trainer → trainer.train。说明若新增一个任务类型需要改动哪几处。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "P-tuning v2 核心机制",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "PrefixEncoder——前缀编码器",
+          "order": 1,
+          "filename": "u2-l1-prefix-encoder.md",
+          "level": "intermediate",
+          "topic": "精读 model/prefix_encoder.py：两种前缀编码方式（直接 Embedding 或两层 MLP 投影），输入输出形状，以及 prefix_projection 开关的含义。",
+          "learning_goals": [
+            "理解前缀从 token id 到 past_key_values 的映射",
+            "区分 prefix_projection=True/False 两种实现",
+            "掌握输出维度 2*layers*hidden 的来源与用途"
+          ],
+          "source_files": [
+            "model/prefix_encoder.py"
+          ],
+          "minimal_modules": [
+            "torch.nn.Embedding",
+            "prefix_projection MLP",
+            "输出形状 (bsz, pre_seq_len, 2*layers*hidden)"
+          ],
+          "practice_task": "构造一个 dummy config（pre_seq_len=4, num_hidden_layers=12, num_attention_heads=12, hidden_size=768, prefix_projection=False），实例化 PrefixEncoder 并对 batch=2 的输入前向，打印输出 tensor 的 shape，验证最后一维是否等于 2*12*768。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "前缀注入主流程：get_prompt 与 forward",
+          "order": 2,
+          "filename": "u2-l2-prompt-injection-forward.md",
+          "level": "intermediate",
+          "topic": "以 BertPrefixForSequenceClassification 为例，精读 get_prompt 的 view/permute/split 重排与 forward 中扩展 attention_mask 并把 past_key_values 传入冻结的 BERT。",
+          "learning_goals": [
+            "理解 past_key_values 的形状重排：permute + split(2) 得到每层 key/value",
+            "掌握 attention_mask 拼接前缀长度的原因",
+            "看清主干参数被冻结、仅 prefix 可训练的事实"
+          ],
+          "source_files": [
+            "model/sequence_classification.py",
+            "model/prefix_encoder.py"
+          ],
+          "minimal_modules": [
+            "get_prompt 重排逻辑",
+            "prefix_attention_mask 拼接",
+            "past_key_values 注入冻结的 bert"
+          ],
+          "practice_task": "对照代码，解释 get_prompt 中 permute([2,0,3,1,4]).split(2) 之后得到的 list 结构为什么恰好是每层 (key, value) 对；用注释的方式在源码每一行旁标出当前 tensor 的 5 个维度含义。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "三种调优模式对比：Prefix / Prompt / FullFineTune",
+          "order": 3,
+          "filename": "u2-l3-prefix-vs-prompt-vs-finetune.md",
+          "level": "intermediate",
+          "topic": "对比 Prefix（深层 key/value 注入）、Prompt（仅嵌入层浅层提示）和全量微调三套实现，理解它们在参数量、注入位置与表征能力上的差异。",
+          "learning_goals": [
+            "区分 BertPrefix 与 BertPrompt 两类模型的注入位置",
+            "理解浅层 Prompt 模式如何裁剪 pre_seq_len 段输出并重建 pooler",
+            "对照 get_model 的三种分支与参数量打印"
+          ],
+          "source_files": [
+            "model/utils.py",
+            "model/sequence_classification.py"
+          ],
+          "minimal_modules": [
+            "get_model 的 prefix/prompt/else 三分支",
+            "Prompt 模式的 inputs_embeds 拼接与切片",
+            "可训练参数量统计"
+          ],
+          "practice_task": "在 sequence_classification.py 中找到 BertPromptForSequenceClassification，对比它与 BertPrefix 版本：列出两者在「提示生成」「输入方式」「pooler 重建」三处实现差异，写一张对照表。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "配置体系与模型工厂",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "参数体系与配置流转",
+          "order": 1,
+          "filename": "u3-l1-arguments-and-config.md",
+          "level": "intermediate",
+          "topic": "精读 arguments.py：ModelArguments/DataTrainingArguments/TrainingArguments/QuestionAnwseringArguments 四组 dataclass，以及 pre_seq_len、prefix_projection 等如何写入 config。",
+          "learning_goals": [
+            "理解 HfArgumentParser 将 dataclass 转命令行参数的机制",
+            "追踪 --pre_seq_len/--prefix/--prefix_projection 到 config 的写入路径",
+            "区分模型参数、数据参数与训练参数"
+          ],
+          "source_files": [
+            "arguments.py",
+            "model/utils.py"
+          ],
+          "minimal_modules": [
+            "四组 dataclass 参数",
+            "config.pre_seq_len / config.prefix_projection 赋值",
+            "get_args 返回四元组"
+          ],
+          "practice_task": "运行 `python run.py --help`（或在代码中追踪），找出控制「是否启用 P-tuning v2」「前缀长度」「是否加 MLP 头」对应的命令行参数；用一条命令把它们全部显式指定出来。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "模型工厂 get_model 与任务注册表",
+          "order": 2,
+          "filename": "u3-l2-model-factory-and-registry.md",
+          "level": "intermediate",
+          "topic": "精读 model/utils.py 的 PREFIX_MODELS/PROMPT_MODELS/AUTO_MODELS 注册表与 get_model 分发逻辑，理解模型类型 × 任务类型如何路由到具体模型类。",
+          "learning_goals": [
+            "掌握 (model_type, task_type) → model_class 的二维注册表设计",
+            "理解 TaskType 枚举与四类任务的对应",
+            "看清 get_model 中 fix_bert 控制主干是否冻结"
+          ],
+          "source_files": [
+            "model/utils.py",
+            "tasks/utils.py"
+          ],
+          "minimal_modules": [
+            "PREFIX_MODELS/PROMPT_MODELS/AUTO_MODELS",
+            "TaskType 枚举",
+            "get_model 路由与 fix_bert"
+          ],
+          "practice_task": "回答：当 task_name=superglue、dataset_name=copa、--prefix、model_type=roberta 时，get_model 最终会返回哪个类？在注册表中手动追踪这条路径并给出类名。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "数据处理与任务适配",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "分类任务数据集：SuperGLUE 与 GLUE",
+          "order": 1,
+          "filename": "u4-l1-classification-datasets.md",
+          "level": "intermediate",
+          "topic": "精读 superglue/glue 的 dataset.py：load_dataset 加载、task_to_keys 模板、preprocess_function 分词、compute_metrics 与 data_collator 选择。",
+          "learning_goals": [
+            "理解 task_to_keys 模板如何把不同数据集对齐到统一分词流程",
+            "掌握 COPA/ReCoRD 等特殊数据集的多选/实体占位预处理",
+            "看清 pad_to_max_length 与 fp16 下 data_collator 的差异"
+          ],
+          "source_files": [
+            "tasks/superglue/dataset.py",
+            "tasks/glue/dataset.py",
+            "tasks/superglue/get_trainer.py"
+          ],
+          "minimal_modules": [
+            "task_to_keys 模板映射",
+            "preprocess_function 分词",
+            "compute_metrics 与 test_key"
+          ],
+          "practice_task": "以 RTE（premise/hypothesis）为例，手写一段伪代码模拟 preprocess_function 的输入输出：给定两条样例，输出 input_ids/attention_mask 的结构；再说明 COPA 为什么走特殊分支。",
+          "depends_on": [
+            "u3-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "序列标注数据对齐：NER",
+          "order": 2,
+          "filename": "u4-l2-ner-token-alignment.md",
+          "level": "intermediate",
+          "topic": "精读 NER dataset.py 的 tokenize_and_align_labels：子词切分下如何用 word_ids 与 -100 对齐标签，以及 seqeval 指标计算。",
+          "learning_goals": [
+            "理解 is_split_into_words 下标签对齐与 -100 忽略机制",
+            "掌握自定义 word_ids 构造（按 encode 长度复制）的原因",
+            "看清 NER 用 ExponentialTrainer 与 test_key=f1"
+          ],
+          "source_files": [
+            "tasks/ner/dataset.py",
+            "tasks/ner/get_trainer.py",
+            "tasks/utils.py"
+          ],
+          "minimal_modules": [
+            "tokenize_and_align_labels",
+            "word_ids 与 -100",
+            "seqeval F1 指标"
+          ],
+          "practice_task": "取一句话 `New York` 标注为 B-LOC/E-LOC，模拟 tokenizer 切成多个子词，写出对齐后的 labels 序列（标注哪些位置是 -100），并解释为何首个子词保留标签、其余设为 -100。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "训练流程与超参搜索",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "BaseTrainer 与最佳指标追踪",
+          "order": 1,
+          "filename": "u5-l1-base-trainer-best-metrics.md",
+          "level": "intermediate",
+          "topic": "精读 trainer_base.py：BaseTrainer 继承 HF Trainer，重写 _maybe_log_save_evaluate，在验证集提升时记录 best_epoch/best_eval 并可选地跑 test。",
+          "learning_goals": [
+            "理解 BaseTrainer 如何扩展 HF Trainer 的评估回调",
+            "掌握 best_metrics 的更新条件与 test_key 机制",
+            "看清 log_best_metrics 与 checkpoints 目录的写入"
+          ],
+          "source_files": [
+            "training/trainer_base.py",
+            "run.py"
+          ],
+          "minimal_modules": [
+            "_maybe_log_save_evaluate 重写",
+            "best_metrics 更新",
+            "test_key 驱动的 best 指标"
+          ],
+          "practice_task": "阅读 _maybe_log_save_evaluate，回答：当 eval 指标没有超过历史最好值时，是否还会运行 predict？请结合代码中 if 条件给出准确判断，并说明这种设计对节省训练时间的意义。",
+          "depends_on": [
+            "u1-l3",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "ExponentialTrainer 与超参搜索",
+          "order": 2,
+          "filename": "u5-l2-exptrainer-and-hp-search.md",
+          "level": "intermediate",
+          "topic": "讲解 ExponentialTrainer 的指数学习率调度，以及 search_script/search.py 如何网格搜索 lr/psl/epoch 并从 best_results.json 选最优。",
+          "learning_goals": [
+            "理解 ExponentialLR(gamma=0.95) 调度器的作用",
+            "掌握三重 for 循环网格搜索的组织方式",
+            "看清 search.py 汇总 best_results.json 选最优试验"
+          ],
+          "source_files": [
+            "training/trainer_exp.py",
+            "search.py",
+            "search_script/search_copa_roberta.sh"
+          ],
+          "minimal_modules": [
+            "create_scheduler 指数衰减",
+            "网格搜索脚本结构",
+            "best_results.json 汇总"
+          ],
+          "practice_task": "仿照 search_copa_roberta.sh，为一个新数据集编写一份只搜索 lr ∈ {1e-2, 5e-3} 和 psl ∈ {16, 64} 的精简搜索脚本，并说明运行后应如何用 search.py 提取最佳配置。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "进阶任务模型",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "抽取式问答模型与 SQuAD",
+          "order": 1,
+          "filename": "u6-l1-question-answering.md",
+          "level": "advanced",
+          "topic": "讲解问答任务如何复用 prefix 注入：模型输出 start/end logits，QuestionAnsweringTrainer 负责 post_processing 与 best f1/em 追踪。",
+          "learning_goals": [
+            "理解抽取式问答在 prefix 模型下的前向输出结构",
+            "掌握 QuestionAnsweringTrainer 的 post_process_function 流程",
+            "看清问答专用 best_metrics（f1/exact_match）"
+          ],
+          "source_files": [
+            "tasks/qa/get_trainer.py",
+            "tasks/qa/dataset.py",
+            "model/question_answering.py",
+            "training/trainer_qa.py"
+          ],
+          "minimal_modules": [
+            "start/end logits",
+            "QuestionAnsweringTrainer 后处理",
+            "best f1/em 追踪"
+          ],
+          "practice_task": "对比 qa/get_trainer.py 与 superglue/get_trainer.py：列出问答任务在「config(num_labels=2)、数据集类、训练器类、best_metrics 键」上的不同，说明为什么 QA 不用 test_key=f1 而用专用 best_metrics。",
+          "depends_on": [
+            "u3-l2",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "多选题与 Token 分类模型变体",
+          "order": 2,
+          "filename": "u6-l2-multiple-choice-token-cls.md",
+          "level": "advanced",
+          "topic": "精读 multiple_choice.py 与 token_classification.py 的 Prefix 变体：多选如何把 (bsz, num_choices, seq) 折叠再注入前缀；Token 分类如何在每层注入后输出 per-token logits。",
+          "learning_goals": [
+            "理解多选任务输入 reshape 后注入 prefix 的方式",
+            "掌握 Token 分类 active_loss 掩码下的交叉熵",
+            "看清两类模型同样复用 get_prompt 机制"
+          ],
+          "source_files": [
+            "model/multiple_choice.py",
+            "model/token_classification.py",
+            "model/sequence_classification.py"
+          ],
+          "minimal_modules": [
+            "多选 reshape 与 classifier(hidden,1)",
+            "Token 分类 active_loss 掩码",
+            "统一的 get_prompt 复用"
+          ],
+          "practice_task": "在 multiple_choice.py 的 BertForMultipleChoice.forward 中找到把 (batch, num_choices, seq) 折叠成 2D 的代码；解释为什么折叠后 prefix 注入逻辑能直接复用单句分类的实现思路。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "PT-Retrieval 检索扩展",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "PT-Retrieval 概览与 DPR 前缀集成",
+          "order": 1,
+          "filename": "u7-l1-pt-retrieval-dpr-prefix.md",
+          "level": "advanced",
+          "topic": "介绍 PT-Retrieval 子项目目标（参数高效提示调优使检索器更通用、更校准），精读 dpr/models/prefix.py：BertModelModifed 支持 past_key_values、BertPrefixModel 复用 get_prompt。",
+          "learning_goals": [
+            "理解 PT-Retrieval 的研究动机与五类训练模式",
+            "掌握 BertModelModifed 为何要改写 forward 传入 past_key_values",
+            "看清 BertPrefixModel 与主项目 prefix 模型的一致性"
+          ],
+          "source_files": [
+            "PT-Retrieval/README.md",
+            "PT-Retrieval/dpr/models/prefix.py",
+            "PT-Retrieval/dpr/models/hf_models.py"
+          ],
+          "minimal_modules": [
+            "五类训练模式（prefix/bitfit/adapter/prompt/finetune）",
+            "BertModelModifed 改写",
+            "get_prompt 复用"
+          ],
+          "practice_task": "对比根目录 model/prefix_encoder.py 与 PT-Retrieval/dpr/models/prefix.py 中的 PrefixEncoder，列出两者在字段命名（prefix_projection vs prefix_mlp）与结构上的异同，说明迁移时需要适配的点。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "双编码器训练与稠密检索",
+          "order": 2,
+          "filename": "u7-l2-biencoder-train-retrieve.md",
+          "level": "advanced",
+          "topic": "讲解 BiEncoder 双塔结构（question/ctx encoder 各自带 prefix）、train_dense_encoder 训练入口，以及 dense_retriever 如何编码问题向量并经 faiss 索引检索 top-k。",
+          "learning_goals": [
+            "理解 BiEncoder 的双编码器与 in-batch 对比学习",
+            "掌握 prefix 模式下两个编码器各自注入前缀",
+            "看清生成问题向量→faiss 检索→top-k 校验的推理链路"
+          ],
+          "source_files": [
+            "PT-Retrieval/dpr/models/biencoder.py",
+            "PT-Retrieval/train_dense_encoder.py",
+            "PT-Retrieval/dense_retriever.py",
+            "PT-Retrieval/run_scripts/run_train_dpr_multidata_ptv2.sh"
+          ],
+          "minimal_modules": [
+            "BiEncoder 双塔与 dot_product_scores",
+            "train_dense_encoder 训练入口",
+            "DenseRetriever 编码与 faiss 检索"
+          ],
+          "practice_task": "阅读 dense_retriever.py 的 generate_question_vectors，画出从原始问题文本到 query 向量、再到 get_top_docs 返回 top-k 的完整数据流；标注 prefix 编码器在哪一步被调用。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "跨域泛化与校准评估",
+          "order": 3,
+          "filename": "u7-l3-generalization-calibration.md",
+          "level": "advanced",
+          "topic": "讲解 PT-Retrieval 的评估与校准：BEIR 跨域评测、OAG-QA 主题级评测，以及 calibration 模块计算 ECE 并绘制校准曲线。",
+          "learning_goals": [
+            "理解参数高效方法带来的跨域/跨主题泛化优势",
+            "掌握 BEIR 评测脚本的调用方式",
+            "看清 ECE 校准指标与校准曲线的含义"
+          ],
+          "source_files": [
+            "PT-Retrieval/README.md",
+            "PT-Retrieval/beir_eval/evaluate_dpr_on_beir.py",
+            "PT-Retrieval/calibration/calibration_ece_openqa.py"
+          ],
+          "minimal_modules": [
+            "BEIR 跨域评测",
+            "OAG-QA 主题评测",
+            "ECE 校准指标与曲线"
+          ],
+          "practice_task": "根据 README 列出 PT-Retrieval 支持的三类评测数据（OpenQA/BEIR/OAG-QA）及其对应脚本命令；写一段话解释为什么 prefix 调优相比全量微调在跨域检索上可能更校准（结合可训练参数少的特性）。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "架构总览与二次开发",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "全局架构回顾与扩展实践",
+          "order": 1,
+          "filename": "u8-l1-architecture-recap-and-extension.md",
+          "level": "advanced",
+          "topic": "综合回顾「入口分派→任务数据→模型工厂→prefix 注入→训练器→评估搜索」全链路，并给出二次开发指南：如何新增一个任务、一个主干模型或一个评测指标。",
+          "learning_goals": [
+            "在脑中复现 P-tuning v2 的端到端主链路",
+            "掌握新增任务/模型需要改动的扩展点",
+            "理解该实现相对 HF 原生 Trainer 的定制取舍"
+          ],
+          "source_files": [
+            "run.py",
+            "model/utils.py",
+            "model/sequence_classification.py",
+            "training/trainer_base.py",
+            "tasks/utils.py"
+          ],
+          "minimal_modules": [
+            "端到端主链路回顾",
+            "扩展点清单（任务/模型/指标）",
+            "定制 Trainer 的取舍"
+          ],
+          "practice_task": "设计一个新任务（如情感三分类）的接入方案：列出需要在 tasks/utils.py、新建 tasks/xxx/、model/utils.py 注册表、run.py 分派中分别做哪些改动，并说明能否直接复用现有 SequenceClassification 的 prefix 模型。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l2",
+            "u4-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

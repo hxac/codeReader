@@ -1,0 +1,1143 @@
+{
+  "project": "quack",
+  "head": "60d88082272a256fa9b3b2ab631c82cfa78337c6",
+  "rationale": "QuACK 是一个用 NVIDIA CuTe-DSL（Python→CUDA）编写的高性能内核集合，体量大、层次多：归约内核（rmsnorm/softmax/cross_entropy）相对独立、自包含，是学习 DSL 内核写作的最佳入口；GEMM 体系（gemm.py/gemm_interface.py/gemm_sm90/100/120.py/epilogue/）极其庞大，按\"主机侧→设备侧→epilogue→量化/变换/分布式\"分层递进最易吸收。因此学习路线设计为：第 1 单元从零认识项目与 DSL 模型；第 2 单元用归约内核做 DSL 实战入门；第 3 单元补齐拷贝/布局/调度/流水线等被一切内核依赖的核心工具；第 4 单元讲 GEMM 主机侧的编译、计划缓存与公共 API；第 5 单元深入各 SM 的 GEMM 设备侧内核；第 6 单元讲可组合 epilogue 系统；第 7 单元讲量化、算子变换与分布式 AllGather；第 8 单元收束于自动调优、.o 缓存与异步编译池、Split-K、高层融合算子与测试方法。讲义之间用 depends_on 串成清晰 DAG，每篇只解决一个问题、2-5 个最小模块、一个可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门：从零认识 QuACK",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "QuACK 是什么：项目定位与内核清单",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 QuACK 的定位、用 CuTe-DSL 编写 CUDA 内核的思路，以及它提供的 rmsnorm/softmax/cross_entropy/gemm 等内核清单。",
+          "learning_goals": [
+            "理解 QuACK 的定位与目标硬件（SM90/SM100/SM120）",
+            "了解包名 quack-kernels 与 CuTe-DSL 的关系",
+            "记住内核清单与公开导出 rmsnorm/softmax/cross_entropy"
+          ],
+          "source_files": [
+            "README.md",
+            "pyproject.toml",
+            "quack/__init__.py"
+          ],
+          "minimal_modules": [
+            "README 项目说明与内核清单",
+            "pyproject 依赖与可选 extras",
+            "__init__ 公开导出"
+          ],
+          "practice_task": "克隆仓库并阅读 README，列出 QuACK 支持的三类目标 GPU 与七个内核；用一句话写出 quack-kernels 与 CuTe-DSL 的依赖关系。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "安装、构建与运行测试",
+          "order": 2,
+          "filename": "u1-l2-install-build-test.md",
+          "level": "beginner",
+          "topic": "讲解 pip 安装、开发环境搭建、pytest 运行方式与单测调试技巧，以及 conftest 测试夹具的作用。",
+          "learning_goals": [
+            "掌握 dev 安装与 pre-commit 初始化",
+            "会用 pytest 运行单测、用 -k 过滤参数化用例",
+            "理解 --async-compile 与 -n 并行的用途"
+          ],
+          "source_files": [
+            "pyproject.toml",
+            "AGENTS.md",
+            "tests/conftest.py"
+          ],
+          "minimal_modules": [
+            "pip 安装与 dev 环境",
+            "pytest 运行方式与单测命令",
+            "conftest 测试夹具"
+          ],
+          "practice_task": "执行 pip install -e '.[dev]'，然后运行 pytest tests/test_softmax.py -x -k 'bfloat16' 观察一次完整编译与数值校验过程。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与模块地图",
+          "order": 3,
+          "filename": "u1-l3-directory-map.md",
+          "level": "beginner",
+          "topic": "通览 quack 包及其子包（epilogue/gemm_runtime/blockscaled/operand_transform/distributed/spec/cache/dsl 等），建立整体模块地图。",
+          "learning_goals": [
+            "掌握 quack 顶层包结构与各子包职责",
+            "区分公共 API 层、内核层与工具层",
+            "能根据功能定位到对应目录"
+          ],
+          "source_files": [
+            "quack/__init__.py",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "quack 包结构与顶层模块",
+            "子包职责划分",
+            "入口导出与导入链"
+          ],
+          "practice_task": "画一张模块依赖草图，标注 rmsnorm/softmax/gemm 分别依赖哪些核心工具模块（如 copy_utils、reduce、reduction_base）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "CuTe-DSL 编程模型入门",
+          "order": 4,
+          "filename": "u1-l4-cute-dsl-model.md",
+          "level": "beginner",
+          "topic": "介绍 @cute.jit/@cute.kernel 装饰器、const_expr 编译期常量、控制流限制与 getsourcelines 的注意点。",
+          "learning_goals": [
+            "理解 @cute.jit 与 @cute.kernel 的区别",
+            "掌握 const_expr / range_constexpr / range 的语义",
+            "了解 DSL 控制流限制与源码必须落盘的约束"
+          ],
+          "source_files": [
+            "docs/dsl_control_flow.rst",
+            "docs/limitations.rst",
+            "quack/reduce.py"
+          ],
+          "minimal_modules": [
+            "@cute.jit / @cute.kernel 装饰器",
+            "const_expr 与编译期常量",
+            "控制流限制与源码落盘要求"
+          ],
+          "practice_task": "对照 docs/dsl_control_flow.rst，在 reduce.py 的 warp_reduce 中找出 const_expr、range_constexpr 的用法，并解释为何这些值必须是编译期可知的。",
+          "depends_on": [],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "归约内核：DSL 内核写作入门实战",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "ReductionBase 共享基类",
+          "order": 1,
+          "filename": "u2-l1-reduction-base.md",
+          "level": "intermediate",
+          "topic": "讲解 rmsnorm/softmax/cross_entropy 共同继承的 ReductionBase：线程数、cluster_n、tiled_copy、reduction buffer 与 mbarrier 的配置逻辑。",
+          "learning_goals": [
+            "理解 ReductionBase 抽象了哪些共享逻辑",
+            "掌握 _get_tiled_copy 与 tiler_mn 的推导",
+            "理解 reduction buffer 布局与 mbarrier 同步"
+          ],
+          "source_files": [
+            "quack/reduction_base.py",
+            "quack/copy_utils.py"
+          ],
+          "minimal_modules": [
+            "ReductionBase 类与配置方法",
+            "tiled_copy 与 tiler_mn 推导",
+            "reduction buffer 与 mbarrier 分配"
+          ],
+          "practice_task": "阅读 _cap_cluster_n 的注释，解释为何要限制 cluster_n 使每个 peer CTA 拥有非空 N-tile，并用一组具体 N 值推算 cluster_n 上限。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Softmax 前向内核逐行解读",
+          "order": 2,
+          "filename": "u2-l2-softmax-fwd.md",
+          "level": "intermediate",
+          "topic": "逐行拆解 Softmax 类：__call__ 启动配置、kernel 中的 gmem→smem→register 拷贝、谓词与 online softmax 归约。",
+          "learning_goals": [
+            "读懂一个完整 CuTe-DSL 归约内核的结构",
+            "掌握 local_tile、partition_S/D、predicate 的用法",
+            "理解 online softmax 的两阶段归约"
+          ],
+          "source_files": [
+            "quack/softmax.py",
+            "quack/reduce.py"
+          ],
+          "minimal_modules": [
+            "Softmax.__call__ 配置与启动",
+            "kernel 的加载、谓词与 OOB 填充",
+            "online_softmax_reduce 调用"
+          ],
+          "practice_task": "在 Softmax.kernel 中标注每个阶段（TMA/cp.async 加载、smem→register、归约、store），并说明 is_even_N 为 False 时如何用 predicate 处理边界。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "Softmax 反向与 autograd 集成",
+          "order": 3,
+          "filename": "u2-l3-softmax-bwd-autograd.md",
+          "level": "intermediate",
+          "topic": "讲解 SoftmaxBackward 内核的 dot 归约与梯度计算，以及 SoftmaxFunction 如何把前向/反向接入 torch.autograd。",
+          "learning_goals": [
+            "理解 softmax 反向的数学公式 dx=y*(dy-dot)",
+            "掌握 SoftmaxBackward 的双输入加载与归约",
+            "学会用 torch.autograd.Function 包装内核"
+          ],
+          "source_files": [
+            "quack/softmax.py"
+          ],
+          "minimal_modules": [
+            "SoftmaxBackward kernel",
+            "SoftmaxFunction autograd 集成",
+            "softmax 公共 API"
+          ],
+          "practice_task": "对照 SoftmaxFunction.forward/backward，写出 softmax 反向所需的 saved_tensors，并解释为何要先 torch.cuda.synchronize() 再取 autograd.grad。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "归约原语：warp/row/online",
+          "order": 4,
+          "filename": "u2-l4-reduce-primitives.md",
+          "level": "intermediate",
+          "topic": "深入 reduce.py 的 warp_reduce、row_reduce、online_softmax_reduce 三个核心原语，理解 redux.sync、shuffle 蝶形与跨 warp 归约。",
+          "learning_goals": [
+            "理解 warp_reduce 如何选择 redux.sync 或 shuffle 蝶形",
+            "掌握 row_reduce 的跨 warp mbarrier 同步与 hook_fn",
+            "理解 online softmax 的 max/sum 耦合归约"
+          ],
+          "source_files": [
+            "quack/reduce.py"
+          ],
+          "minimal_modules": [
+            "warp_reduce 的 redux/shuffle 选择",
+            "row_reduce 跨 warp 归约与 hook",
+            "online_softmax_reduce 耦合归约"
+          ],
+          "practice_task": "在 row_reduce 中找出 cluster_n>1 时如何用 mbar 与 cluster_wait 做跨 CTA 归约，画出两阶段（warp 内 + 跨 warp/cluster）数据流。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "RMSNorm 前向与反向",
+          "order": 5,
+          "filename": "u2-l5-rmsnorm.md",
+          "level": "intermediate",
+          "topic": "解读旗舰归约内核 RMSNorm/RMSNormBackward，以及 drop-in 替换 torch.nn.RMSNorm 的 QuackRMSNorm 模块。",
+          "learning_goals": [
+            "理解 RMSNorm 的 rms 计算与 weight/bias/residual 融合",
+            "掌握反向内核对 x、rstd、w 的梯度计算",
+            "学会用 QuackRMSNorm 作为 torch.nn.RMSNorm 的替换"
+          ],
+          "source_files": [
+            "quack/rmsnorm.py",
+            "quack/rmsnorm_config.py",
+            "quack/rms_final_reduce.py"
+          ],
+          "minimal_modules": [
+            "RMSNorm 前向 kernel",
+            "RMSNormBackward 反向 kernel",
+            "QuackRMSNorm nn 模块"
+          ],
+          "practice_task": "比较 RMSNorm 与 Softmax 共享的 ReductionBase 配置差异（stage、reduction_dtype），并解释 RMSNorm 反向为何需要额外的 rstd 缓冲。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "cute_op 自定义算子与编译缓存",
+          "order": 6,
+          "filename": "u2-l6-cute-op-and-jit-cache.md",
+          "level": "intermediate",
+          "topic": "讲解 @cute_op 如何把内核注册为 torch.library 自定义算子，以及 jit_cache 如何用 .o 文件缓存编译结果。",
+          "learning_goals": [
+            "理解 @cute_op 与 torch.library 的注册机制",
+            "掌握 compile 静态方法与 fake tensor 的作用",
+            "理解 jit_cache 的内存/磁盘两级缓存"
+          ],
+          "source_files": [
+            "quack/dsl/torch_library_op.py",
+            "quack/cache/jit.py",
+            "quack/softmax.py"
+          ],
+          "minimal_modules": [
+            "@cute_op torch.library 注册",
+            "compile 静态方法与符号张量",
+            "jit_cache 两级缓存"
+          ],
+          "practice_task": "跟踪 Softmax.compile 到 cute.compile，解释 fake_tensor（符号 batch 维）如何让编译产物对任意 batch 复用，并定位 .o 缓存目录的生成逻辑。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "核心工具层：拷贝、布局、调度与流水线",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "copy_utils 拷贝工具",
+          "order": 1,
+          "filename": "u3-l1-copy-utils.md",
+          "level": "intermediate",
+          "topic": "讲解 copy_utils.py 中的 tiled_copy、异步 cp.async、TMA 拷贝与边界谓词等被所有内核复用的拷贝原语。",
+          "learning_goals": [
+            "掌握 tiled_copy_2d/1d 的构造与 get_slice 分区",
+            "理解 cp.async 与 TMA 两种异步拷贝路径",
+            "学会用 predicate_k 处理非整除边界"
+          ],
+          "source_files": [
+            "quack/copy_utils.py",
+            "quack/reduction_base.py"
+          ],
+          "minimal_modules": [
+            "tiled_copy_2d / tiled_copy_1d",
+            "异步 cp.async 与 TMA 拷贝",
+            "谓词 predicate_k 与 fill_oob"
+          ],
+          "practice_task": "在 copy_utils 中找到 tiled_copy_2d 的定义，解释 threads_per_row、num_threads、vecsize 如何决定 tiler_mn，并复现 reduction_base._get_tiled_copy 的推导。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "layout_utils 布局代数",
+          "order": 2,
+          "filename": "u3-l2-layout-utils.md",
+          "level": "intermediate",
+          "topic": "讲解 layout_utils.py 的 transpose/select/expand/permute、zero-stride 变换与 gated C 寄存器重排等布局代数工具。",
+          "learning_goals": [
+            "掌握 CuTe Layout 的组合与变换操作",
+            "理解 zero-stride 布局在归约中的应用",
+            "了解 gated 输出的寄存器 permute"
+          ],
+          "source_files": [
+            "quack/layout_utils.py"
+          ],
+          "minimal_modules": [
+            "transpose/select/expand/permute",
+            "concat/zero-stride 变换",
+            "gated C 寄存器重排"
+          ],
+          "practice_task": "找到 convert_layout_zero_stride 的用法，解释它如何让 row/col 向量归约在寄存器里正确累加，并手算一个 (4,4) zero-stride 布局的索引。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "cute_dsl_utils 与 compile_utils",
+          "order": 3,
+          "filename": "u3-l3-cute-dsl-utils.md",
+          "level": "intermediate",
+          "topic": "讲解 dtype 映射、设备能力查询、ParamsBase 基类与 make_fake_tensor 符号张量构造等通用 DSL 工具。",
+          "learning_goals": [
+            "掌握 torch2cute_dtype_map 与 get_device_capacity",
+            "理解 ParamsBase 参数基类的作用",
+            "学会用 make_fake_tensor 构造编译期符号张量"
+          ],
+          "source_files": [
+            "quack/cute_dsl_utils.py",
+            "quack/compile_utils.py"
+          ],
+          "minimal_modules": [
+            "torch2cute_dtype_map 与设备能力",
+            "ParamsBase 参数基类",
+            "make_fake_tensor 符号张量"
+          ],
+          "practice_task": "用 get_device_capacity 解释 SM 编号（8/9/10/12）如何驱动内核选择，并构造一个 (sym, N) 的 fake tensor 说明 divisibility 参数的作用。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "tile_scheduler 持久化内核调度",
+          "order": 4,
+          "filename": "u3-l4-tile-scheduler.md",
+          "level": "intermediate",
+          "topic": "讲解 TileScheduler 如何为持久化 GEMM 分配 tile，包括动态/静态调度与 Varlen 变长序列调度。",
+          "learning_goals": [
+            "理解持久化内核与 tile 调度的关系",
+            "掌握动态 persistent（CLC）与静态调度的区别",
+            "理解 Varlen 变长调度对 cu_seqlens 的处理"
+          ],
+          "source_files": [
+            "quack/tile_scheduler.py",
+            "quack/varlen_utils.py"
+          ],
+          "minimal_modules": [
+            "TileScheduler 持久化调度",
+            "动态/静态调度模式",
+            "Varlen 变长调度"
+          ],
+          "practice_task": "比较 is_dynamic_persistent=True/False 两种模式的 tile 分配方式，并解释 VarlenMTileScheduler 如何用 cu_seqlens 跳过空序列。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "异步流水线与同步原语",
+          "order": 5,
+          "filename": "u3-l5-pipeline-sync.md",
+          "level": "intermediate",
+          "topic": "讲解 pipeline.py 的 TMA/cp.async 异步流水线、sync/barrier.py 的 mbarrier/Semaphore，以及归约用的 PipelineStasAsync。",
+          "learning_goals": [
+            "理解多级流水线 producer/consumer 的 mbarrier 协作",
+            "掌握 PipelineTmaAsync 与 PipelineTmaCpAsync 的差异",
+            "理解 Semaphore 在 split-K/持久化中的作用"
+          ],
+          "source_files": [
+            "quack/pipeline.py",
+            "quack/sync/barrier.py"
+          ],
+          "minimal_modules": [
+            "PipelineTmaAsync / CpAsync",
+            "mbarrier / Semaphore 同步",
+            "PipelineStasAsync 归约流水线"
+          ],
+          "practice_task": "在 pipeline.py 中找到 producer/consumer 的 mbarrier arrive/wait 模式，画出三级流水线的 stage 循环时序图。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "GEMM 主机侧：编译、计划与公共接口",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "GEMM 编译与计划缓存",
+          "order": 1,
+          "filename": "u4-l1-gemm-plan-cache.md",
+          "level": "intermediate",
+          "topic": "讲解 gemm.py 的 _compile_gemm 编译签名、gemm 公共入口的 metadata key 缓存，以及 _build_gemm_plan/run_gemm_plan 的分层。",
+          "learning_goals": [
+            "理解 _GemmPlan 计划对象与计划缓存",
+            "掌握 gemm 入口的 key 构造与缓存命中逻辑",
+            "理解编译（_compile_gemm）与启动（run_gemm_plan）的分离"
+          ],
+          "source_files": [
+            "quack/gemm.py"
+          ],
+          "minimal_modules": [
+            "_compile_gemm 编译签名与 SM 选类",
+            "gemm 入口与 metadata key 缓存",
+            "_build_gemm_plan / run_gemm_plan"
+          ],
+          "practice_task": "跟踪一次 gemm 调用：列出 _gemm_plan_cache 的 key 包含哪些字段，并解释为何把编译与启动拆成 build/run 两个函数。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "GemmConfig 配置空间",
+          "order": 2,
+          "filename": "u4-l2-gemm-config.md",
+          "level": "intermediate",
+          "topic": "讲解 gemm_config.py 的 GemmConfig 数据类、各 SM 的 autotune 配置空间、默认配置与 SplitKMode 枚举。",
+          "learning_goals": [
+            "理解 GemmConfig 各字段（tile/cluster/pingpong 等）的含义",
+            "掌握各 SM 配置空间的生成方式",
+            "理解 SplitKMode 三种模式与 blockscaled 配置约束"
+          ],
+          "source_files": [
+            "quack/gemm_config.py"
+          ],
+          "minimal_modules": [
+            "GemmConfig 数据类与字段",
+            "各 SM 配置空间生成",
+            "默认配置与 blockscaled 约束"
+          ],
+          "practice_task": "对比 _get_sm90_configs 与 _get_sm100_configs，解释为何 SM100 没有 pingpong，并说明 default_config 如何按 device_capacity 选择。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "公共 GEMM API 表面",
+          "order": 3,
+          "filename": "u4-l3-gemm-interface.md",
+          "level": "intermediate",
+          "topic": "讲解 gemm_interface.py 的高层 API：gemm、gemm_act、gemm_gated、gemm_symmetric、gemm_norm_act 等变体及其融合能力。",
+          "learning_goals": [
+            "掌握 gemm 主入口的参数语义（out/bias/varlen/split_k）",
+            "理解融合激活（gemm_act/gated）与对称 GEMM",
+            "了解 quantized output 与 blockscaled 输入的接入"
+          ],
+          "source_files": [
+            "quack/gemm_interface.py",
+            "quack/gemm_iface.py"
+          ],
+          "minimal_modules": [
+            "gemm 主入口与参数",
+            "gemm_act / gemm_gated 融合",
+            "gemm_symmetric / gemm_norm_act"
+          ],
+          "practice_task": "对比 gemm 与 gemm_act 的签名，解释 fused activation 如何避免额外的 kernel launch，并指出 concat_layout 在 gated 场景的用途。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "TVM-FFI 编译启动与 fake 张量",
+          "order": 4,
+          "filename": "u4-l4-tvm-ffi-utils.md",
+          "level": "intermediate",
+          "topic": "讲解 gemm_tvm_ffi_utils.py 的 fake 张量构造、compile_gemm_kernel 编译与 launch_gemm 启动等跨越 FFI 边界的工具。",
+          "learning_goals": [
+            "理解 make_fake_gemm_tensors 如何构造符号 GEMM 张量",
+            "掌握 compile_gemm_kernel 的编译流程",
+            "理解 launch_gemm 如何把 per-call 张量送入编译产物"
+          ],
+          "source_files": [
+            "quack/gemm_tvm_ffi_utils.py",
+            "quack/gemm.py"
+          ],
+          "minimal_modules": [
+            "make_fake_gemm_tensors 符号张量",
+            "compile_gemm_kernel 编译",
+            "launch_gemm 启动与 scalar_mode"
+          ],
+          "practice_task": "解释 make_fake_gemm_tensors 为何要用 cute.sym_int 表示 batch/M/K 维，并跟踪 scalar_mode 如何把 alpha/beta 的三种形式（缺省/标量/指针）编码进编译 key。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "VariantSpec 变体接口机制",
+          "order": 5,
+          "filename": "u4-l5-variant-spec.md",
+          "level": "intermediate",
+          "topic": "讲解 gemm_iface.py 的 VariantSpec 如何用统一机制描述各 GEMM 变体的操作数角色、规范化规则与接口计划。",
+          "learning_goals": [
+            "理解 VariantSpec 的操作数角色（a/b/mn/row/col）",
+            "掌握操作数规范化（b_kn、swap_ab、dense-2D）",
+            "理解 IfacePlan 接口计划的构建与缓存"
+          ],
+          "source_files": [
+            "quack/gemm_iface.py",
+            "quack/gemm_interface.py"
+          ],
+          "minimal_modules": [
+            "VariantSpec 角色与 epilogue 字段",
+            "操作数规范化规则",
+            "IfacePlan 接口计划"
+          ],
+          "practice_task": "找出 gemm_act 与 gemm_gated 各自的 VariantSpec 差异，解释 role 'mn'/'row'/'col' 在 swap_ab 下如何互换，并说明 dense-2D 快捷路径的条件。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "GEMM 设备侧：各架构内核实现",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "GemmBase 共享主循环与 epilogue 驱动",
+          "order": 1,
+          "filename": "u5-l1-gemm-base.md",
+          "level": "advanced",
+          "topic": "讲解 gemm_base.py 的 GemmBase：各 SM 共享的主循环（mainloop）、epilogue 驱动与 store 钩子编排。",
+          "learning_goals": [
+            "理解 GemmBase 抽象的共享结构与各 SM 子类的职责",
+            "掌握 mainloop 中 A/B 加载与 MMA 累加的编排",
+            "理解 epilogue 驱动如何调用各 EpiOp 的 store 钩子"
+          ],
+          "source_files": [
+            "quack/gemm_base.py",
+            "quack/pipeline.py"
+          ],
+          "minimal_modules": [
+            "GemmBase 公共结构",
+            "mainloop 主循环",
+            "epilogue 驱动与 store 钩子"
+          ],
+          "practice_task": "在 gemm_base.py 中定位 epilogue 驱动循环，列出它依次调用的 EpiOp 钩子（store_setup/store_convert/store_r2s），并解释 NamedBarrierGemm 的用途。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l1",
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "SM90（Hopper）GEMM",
+          "order": 2,
+          "filename": "u5-l2-gemm-sm90.md",
+          "level": "advanced",
+          "topic": "讲解 gemm_sm90.py 的 GemmSm90：TMA 加载、WGMMA 矩阵乘、cluster 协作与 epilogue 分区。",
+          "learning_goals": [
+            "掌握 Hopper 的 TMA 加载与 WGMMA 指令",
+            "理解 cluster 协作 MMA 的 tile 划分",
+            "了解 sm90_utils.partition_for_epilogue"
+          ],
+          "source_files": [
+            "quack/gemm_sm90.py",
+            "quack/sm90_utils.py"
+          ],
+          "minimal_modules": [
+            "GemmSm90 类与配置",
+            "TMA 加载与 WGMMA",
+            "partition_for_epilogue"
+          ],
+          "practice_task": "对比 SM90 的 coop 与 pingpong 两种主循环模式，解释 cluster=(1,2)/(2,1) 如何影响 tile 分配，并指出 dynamic persistent 在 SM90 默认关闭的原因。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "SM100（Blackwell）GEMM 与 TMEM",
+          "order": 3,
+          "filename": "u5-l3-gemm-sm100.md",
+          "level": "advanced",
+          "topic": "讲解 gemm_sm100.py 的 GemmSm100：2-CTA tcgen05 MMA、TMEM 累加器与 cluster MMA 机制。",
+          "learning_goals": [
+            "掌握 Blackwell 的 tcgen05 MMA 与 2-CTA 模式",
+            "理解 TMEM（张量内存）累加器的布局与回收",
+            "了解 use_2cta_instrs 与 cta_tile_shape_m 的关系"
+          ],
+          "source_files": [
+            "quack/gemm_sm100.py",
+            "quack/sm100_utils.py",
+            "quack/spec/tmem.py"
+          ],
+          "minimal_modules": [
+            "GemmSm100 2-CTA MMA",
+            "tcgen05 与 TMEM 累加器",
+            "cluster MMA 与 tile 折半"
+          ],
+          "practice_task": "结合 cta_tile_shape_m（gemm_config.py）解释 SM100 上 cluster_m 为偶数且 tile_m∈{128,256} 时为何 per-CTA M tile 折半，并说明 TMEM 累加器相比寄存器的优势。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "SM120（GeForce）与 SM80 GEMM",
+          "order": 4,
+          "filename": "u5-l4-gemm-sm120-sm80.md",
+          "level": "advanced",
+          "topic": "讲解 gemm_sm120.py 的 warp-MMA pingpong 路径与 gemm_sm80.py 的无 cluster 基础路径，作为消费级与前代架构的对照。",
+          "learning_goals": [
+            "掌握 SM120 的 warp MMA 与 CLC 调度",
+            "理解 SM120 99KB SMEM 的约束",
+            "了解 SM80 的 cp.async 基础 GEMM 路径"
+          ],
+          "source_files": [
+            "quack/gemm_sm120.py",
+            "quack/gemm_sm80.py",
+            "quack/sm80_utils.py"
+          ],
+          "minimal_modules": [
+            "GemmSm120 warp MMA pingpong",
+            "CLC 调度与 SMEM 约束",
+            "SM80 基础 cp.async 路径"
+          ],
+          "practice_task": "比较 SM120 与 SM100 在 blockscaled GEMM 上的默认配置差异（见 blockscaled_default_config），解释 SM120 为何用 warp MMA 而非 tcgen05。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "spec 层：TMA、MMA、TMEM、TensorSpec",
+          "order": 5,
+          "filename": "u5-l5-spec-layer.md",
+          "level": "advanced",
+          "topic": "讲解 spec/ 子包如何封装 TMA descriptor、MMA 指令、TMEM 布局与 TensorSpec，为各 SM 内核提供统一的描述符抽象。",
+          "learning_goals": [
+            "理解 TMA descriptor 的构造与多维描述",
+            "掌握 MMA 指令封装与 atom 布局",
+            "了解 TensorSpec 作为张量元描述的作用"
+          ],
+          "source_files": [
+            "quack/spec/tma.py",
+            "quack/spec/mma.py",
+            "quack/spec/tmem.py",
+            "quack/spec/tensor_spec.py"
+          ],
+          "minimal_modules": [
+            "TMA descriptor 构造",
+            "MMA 指令与 atom 布局",
+            "TMEM 布局与 TensorSpec"
+          ],
+          "practice_task": "在 spec/tma.py 中找到 TMA descriptor 的构造方式，解释它如何把张量的 shape/stride/swizzle 编码给硬件，并说明 TensorSpec 与 fake tensor 的区别。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "可组合 Epilogue 系统",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "ComposableEpiMixin 与 EpiOp 生命周期",
+          "order": 1,
+          "filename": "u6-l1-epi-mixin-lifecycle.md",
+          "level": "advanced",
+          "topic": "讲解 epilogue/mixin.py 的 ComposableEpiMixin 与 ops.py 的 EpiOp 基类：smem 分配、begin/begin_loop/end 钩子与 EpiContext。",
+          "learning_goals": [
+            "理解可组合 epilogue 的整体设计理念",
+            "掌握 EpiOp 的生命周期钩子协议",
+            "理解 EpiContext 如何传递共享上下文"
+          ],
+          "source_files": [
+            "quack/epilogue/mixin.py",
+            "quack/epilogue/ops.py"
+          ],
+          "minimal_modules": [
+            "ComposableEpiMixin 组合机制",
+            "EpiOp 生命周期钩子",
+            "EpiContext 共享上下文"
+          ],
+          "practice_task": "在 EpiOp 中列出 host 侧（host_arg_key/host_fake_arg）与 device 侧（begin/begin_loop/end）两套钩子，解释 inactive op 如何被过滤出编译产物。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "EpiOp 词汇表",
+          "order": 2,
+          "filename": "u6-l2-epi-op-vocabulary.md",
+          "level": "advanced",
+          "topic": "系统讲解 ops.py 的具体 EpiOp：Scalar、RowVecLoad/ColVecLoad、TileStore/DStore/TileLoad、VecReduce 行列归约。",
+          "learning_goals": [
+            "掌握标量与广播向量加载 op",
+            "理解 tile 级存储/加载 op 与量化 codec",
+            "掌握行/列向量归约 op 的 butterfly 协议"
+          ],
+          "source_files": [
+            "quack/epilogue/ops.py"
+          ],
+          "minimal_modules": [
+            "Scalar / VecLoad 广播向量",
+            "TileStore / DStore / TileLoad",
+            "VecReduce 行列归约"
+          ],
+          "practice_task": "对比 TileStore 与 DStore：解释为何 D 的主机侧管线由内核拥有而非 _epi_ops，并说明 ColVecReduce 的跨 lane/warp 蝶形归约协议。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "默认线性 epilogue",
+          "order": 3,
+          "filename": "u6-l3-default-linear-epilogue.md",
+          "level": "advanced",
+          "topic": "讲解 gemm_default_epi.py 的 apply_linear_epilogue（D=alpha*D+beta*C+rowvec+colvec）与 GemmDefaultEpiMixin，作为手写 epilogue 的逃生出口。",
+          "learning_goals": [
+            "理解 apply_linear_epilogue 的逐项数学",
+            "掌握 GemmDefaultEpiMixin 与各 SM 类的组合",
+            "理解 EpilogueArguments NamedTuple 的字段"
+          ],
+          "source_files": [
+            "quack/gemm_default_epi.py",
+            "quack/epilogue/ops.py"
+          ],
+          "minimal_modules": [
+            "apply_linear_epilogue 数学",
+            "GemmDefaultEpiMixin 与 SM 组合",
+            "EpilogueArguments 字段"
+          ],
+          "practice_task": "跟踪 _epi_ops 列表，解释 alpha/beta 为何用 Scalar op 表示，并说明 apply_linear_epilogue 如何在 split-K staged 归约中复用以保证 bitwise 一致。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "@gemm_epilogue 函数式创作",
+          "order": 4,
+          "filename": "u6-l4-gemm-epilogue-fn.md",
+          "level": "advanced",
+          "topic": "讲解 epilogue/frontend.py 与 visit.py 的 @gemm_epilogue 函数式前端：fn_port 值端口协议与 library.py 的注册机制。",
+          "learning_goals": [
+            "理解 @gemm_epilogue fn 的逐元素数据流创作模型",
+            "掌握 fn_port（row/col/tile/scalar/value/apply/sink）协议",
+            "了解 minted kernel class 的生成与注册"
+          ],
+          "source_files": [
+            "quack/epilogue/frontend.py",
+            "quack/epilogue/visit.py",
+            "quack/epilogue/library.py"
+          ],
+          "minimal_modules": [
+            "@gemm_epilogue fn 前端",
+            "fn_port 值端口协议",
+            "library 注册与 minted class"
+          ],
+          "practice_task": "用一个简单的 @gemm_epilogue fn（如 y=acc+bias）说明 fn_port 'row' 如何把一个 RowVecLoad op 接入逐元素数据流，并对比它与手写 mixin 的取舍。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "领域 epilogue：rotary、scaled_exp、量化输出",
+          "order": 5,
+          "filename": "u6-l5-domain-epilogues.md",
+          "level": "advanced",
+          "topic": "讲解 epilogue 领域模块：rotary 旋转位置编码、scaled_exp/LSE、head_rmsnorm 与 quantize_out 量化输出。",
+          "learning_goals": [
+            "理解 rotary epilogue 的旋转应用",
+            "掌握 scaled_exp 与 LSE 归约输出",
+            "理解 quantize_out 的 SF 生成与存储"
+          ],
+          "source_files": [
+            "quack/epilogue/rotary.py",
+            "quack/epilogue/scaled_exp.py",
+            "quack/epilogue/head_rmsnorm.py",
+            "quack/epilogue/quantize_out.py"
+          ],
+          "minimal_modules": [
+            "rotary 旋转位置",
+            "scaled_exp / LSE 归约",
+            "quantize_out 量化输出"
+          ],
+          "practice_task": "选 quantize_out.py，解释 BlockScaleFactorStore 如何在 store 前对最终 D fragment 做量化并写出 blocked scale factors，并指出它与 DStore 的协作关系。",
+          "depends_on": [
+            "u6-4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "量化、算子变换与分布式",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "Blockscaled 操作数与格式",
+          "order": 1,
+          "filename": "u7-l1-blockscaled-operand.md",
+          "level": "advanced",
+          "topic": "讲解 blockscaled/ 的 BlockScaledOperand/BlockScaledFormat 抽象与 MXFP8/NVFP4/MXFP6 量化格式及量化工具。",
+          "learning_goals": [
+            "理解 BlockScaledOperand 容器与 SF 布局",
+            "掌握 MXFP8/NVFP4/MXFP6 格式的差异",
+            "了解 quantize.py 的量化工具"
+          ],
+          "source_files": [
+            "quack/blockscaled/operand.py",
+            "quack/blockscaled/quantize.py",
+            "quack/blockscaled/utils.py"
+          ],
+          "minimal_modules": [
+            "BlockScaledOperand / Format",
+            "MXFP8/NVFP4/MXFP6 格式",
+            "量化工具"
+          ],
+          "practice_task": "对比 mxfp8 与 nvfp4 的 scale factor 向量长度（32 vs 16），并解释 BlockScaledOperand 如何把权重值与 blocked SF 绑定为一个容器传给 GEMM。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "量化 GEMM 输出与 W4 权重",
+          "order": 2,
+          "filename": "u7-l2-quant-output-w4.md",
+          "level": "advanced",
+          "topic": "讲解量化输出（SFD 列/行方向 SF 生成）与 gemm_w4.py 的 4-bit 权重 GEMM 路径。",
+          "learning_goals": [
+            "理解 quantized output 的 SFD/SFDCol 语义",
+            "掌握 out_quant_dim 与 out_transposed 的作用",
+            "了解 W4 权重 GEMM 的反量化路径"
+          ],
+          "source_files": [
+            "quack/epilogue/quantize_out.py",
+            "quack/gemm_w4.py",
+            "quack/gemm_interface.py"
+          ],
+          "minimal_modules": [
+            "BlockScaleFactorStore 输出量化",
+            "SFD/SFDCol 与 out_transposed",
+            "W4 权重 GEMM"
+          ],
+          "practice_task": "解释 out_transposed+out_quant_dim=-2 如何通过 swapped GEMM（D^T=B^T A^T）得到行量化输出，并说明它为何对反向消费者更友好。",
+          "depends_on": [
+            "u6-l2",
+            "u6-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "A 算子变换：dequant、dropout",
+          "order": 3,
+          "filename": "u7-l3-operand-transform.md",
+          "level": "advanced",
+          "topic": "讲解 operand_transform/ 的 A 操作数变换：transform/kinds 内核侧、@a_transform 前端与 host bundle（含 W4 规则与 formats）。",
+          "learning_goals": [
+            "理解 A 操作数变换（反量化/dropout/value fn）的接入点",
+            "掌握 @a_transform 前端与 handle 机制",
+            "了解 host bundle 与 W4 配置规则"
+          ],
+          "source_files": [
+            "quack/operand_transform/transform.py",
+            "quack/operand_transform/kinds.py",
+            "quack/operand_transform/frontend.py",
+            "quack/operand_transform/host.py"
+          ],
+          "minimal_modules": [
+            "transform / kinds 内核侧",
+            "@a_transform 前端与 handle",
+            "host bundle 与 W4 规则"
+          ],
+          "practice_task": "对比 operand_transform 与 epilogue：解释为何 dequant 是 A 侧变换而非 epilogue，并说明 formats/qtip.py 这类 packed-weight 解码格式的作用。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "AllGather + GEMM",
+          "order": 4,
+          "filename": "u7-l4-all-gather-gemm.md",
+          "level": "advanced",
+          "topic": "讲解 distributed/all_gather_gemm.py 的 AllGather+GEMM 融合：shard-major 旋转调度、load-warp 到达门与 flags/epoch 同步。",
+          "learning_goals": [
+            "理解 AllGatherArguments 的字段语义",
+            "掌握 shard-major 旋转 decode 调度",
+            "理解 load-warp 到达门与 flags/epoch 同步"
+          ],
+          "source_files": [
+            "quack/distributed/all_gather_gemm.py",
+            "quack/gemm.py"
+          ],
+          "minimal_modules": [
+            "AllGatherArguments 参数",
+            "shard-major 旋转调度",
+            "load-warp 到达门与同步"
+          ],
+          "practice_task": "解释 AllGather+GEMM 如何在 A 仍在被 copy stream 填充时就开始计算，并说明 flags[shard*num_chunks+c]>=epoch 这个门控如何避免读到未就绪的 tile。",
+          "depends_on": [
+            "u5-l1",
+            "u3-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "自动调优、缓存、Split-K、融合与测试",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "自动调优",
+          "order": 1,
+          "filename": "u8-l1-autotuning.md",
+          "level": "advanced",
+          "topic": "讲解 autotuner.py 的 autotune 装饰器、gemm_interface.gemm_tuned 调优路径与 prune_invalid_gemm_configs 剪枝。",
+          "learning_goals": [
+            "理解 autotune 装饰器的测量与缓存机制",
+            "掌握 gemm_tuned 如何选择最优 GemmConfig",
+            "理解配置剪枝的结构性约束"
+          ],
+          "source_files": [
+            "quack/autotuner.py",
+            "quack/gemm_interface.py",
+            "quack/gemm_runtime/autotune.py"
+          ],
+          "minimal_modules": [
+            "autotune 装饰器与测量",
+            "gemm_tuned 调优路径",
+            "prune_invalid_gemm_configs 剪枝"
+          ],
+          "practice_task": "结合 config_supports 与 blockscaled_config_ok 解释剪枝如何剔除非法配置，并说明 autotune 结果如何缓存以避免重复测量。",
+          "depends_on": [
+            "u4-l2",
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": ".o JIT 缓存与异步编译池",
+          "order": 2,
+          "filename": "u8-l2-jit-cache-async.md",
+          "level": "advanced",
+          "topic": "深入 cache/jit.py 的两级缓存与文件锁，以及 cache/async_compile.py 的多 worker 并行编译池。",
+          "learning_goals": [
+            "理解 jit_cache 的内存/磁盘两级缓存与 flock",
+            "掌握 async_compile 编译池的 CompilePending 机制",
+            "了解 QUACK_CACHE 系列环境变量与源码指纹"
+          ],
+          "source_files": [
+            "quack/cache/jit.py",
+            "quack/cache/async_compile.py",
+            "quack/cache/__init__.py"
+          ],
+          "minimal_modules": [
+            "jit_cache 两级缓存与文件锁",
+            "async_compile 编译池与 CompilePending",
+            "缓存环境变量与源码指纹"
+          ],
+          "practice_task": "解释 _compute_source_fingerprint 为何要把整个 quack 包哈希进缓存 key，并说明 --async-compile=N 如何让冷编译与测试并行重叠。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "Split-K 归约",
+          "order": 3,
+          "filename": "u8-l3-split-k.md",
+          "level": "advanced",
+          "topic": "讲解 split_k_reduce.py 与 SplitKMode 三种模式（SERIAL/PARALLEL/SEPARATE）的 partials 工作区与最终化逻辑。",
+          "learning_goals": [
+            "理解 Split-K 为何沿 K 维切分及三种合并模式",
+            "掌握 SERIAL/PARALLEL 的 per-tile 信号量与 partials",
+            "理解 SEPARATE 的独立归约内核与 epilogue 路由"
+          ],
+          "source_files": [
+            "quack/split_k_reduce.py",
+            "quack/gemm_config.py",
+            "quack/gemm.py"
+          ],
+          "minimal_modules": [
+            "SplitKMode 三种模式",
+            "split_k_reduce 归约内核",
+            "staged partials 工作区"
+          ],
+          "practice_task": "对比 SERIAL（确定性）与 PARALLEL（最快但不确定）的实现差异，并解释 SEPARATE 为何要把 alpha/beta/bias 全部路由到归约内核而非 GEMM。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "高层融合算子：Linear、MLP、fused CE",
+          "order": 4,
+          "filename": "u8-l4-fused-ops.md",
+          "level": "advanced",
+          "topic": "讲解 linear.py、mlp.py、linear_cross_entropy.py 如何在 GEMM API 之上构建高层融合神经网络算子。",
+          "learning_goals": [
+            "理解 Linear 的前向/反向与 grad accum 融合",
+            "掌握 MLP 的 gated 融合（gemm_gated/dgated）",
+            "了解 fused linear-cross-entropy 的优势"
+          ],
+          "source_files": [
+            "quack/linear.py",
+            "quack/mlp.py",
+            "quack/linear_cross_entropy.py"
+          ],
+          "minimal_modules": [
+            "Linear 前向/反向与 grad accum",
+            "MLP gated 融合",
+            "fused linear-cross-entropy"
+          ],
+          "practice_task": "对照 linear.py 的反向，解释 fuse_grad_accum 如何用 gemm_add_inplace 把 dweight 累加进 .grad 以省一次 kernel，并说明其与 torch.compile 的兼容性限制。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l5",
+          "title": "测试方法与基准协议",
+          "order": 5,
+          "filename": "u8-l5-testing-bench.md",
+          "level": "advanced",
+          "topic": "讲解测试方法论：数值正确性参考实现、pytest 参数化与 -k 过滤，以及 bench_utils 的基准测量协议。",
+          "learning_goals": [
+            "掌握数值正确性测试的写法（vs PyTorch 参考）",
+            "理解 pytest 参数化矩阵与跳过策略",
+            "了解基准测量的 L2 旋转、burner、时钟等注意事项"
+          ],
+          "source_files": [
+            "tests/conftest.py",
+            "tests/test_softmax.py",
+            "tests/test_gemm_functional.py",
+            "quack/bench/bench_utils.py"
+          ],
+          "minimal_modules": [
+            "数值正确性参考实现",
+            "pytest 参数化与 -k 过滤",
+            "bench 基准协议"
+          ],
+          "practice_task": "以 test_softmax.py 为模板，为一个新内核写一个数值正确性测试：包含参考实现、tolerance 表、use_compile 双路径，并说明为何必须比较数值而非仅 shape。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
