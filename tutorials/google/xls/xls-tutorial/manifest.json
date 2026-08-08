@@ -1,0 +1,1025 @@
+{
+  "project": "xls",
+  "head": "ccd2a0636fc675febe35822d09dc7baf28ab1527",
+  "rationale": "XLS 是 Google 的高层综合（HLS）工具链，整体是一条清晰的「DSLX 前端 → XLS IR → 优化 Pass → 流水线调度 → 代码生成（Verilog）」主干流水线，外加解释器/JIT 执行引擎、Verilog 仿真、形式化验证、模糊测试与 Bazel 构建规则等支撑设施。因此学习顺序严格沿这条主干展开：第一单元（入门）让读者从零认识项目定位、构建方式、目录布局，并用 gcd.x 等示例把 interpreter→ir_convert→opt→codegen 整条命令链亲手跑通；第二单元深入 DSLX 前端（类型系统、解析器/AST、类型推导、constexpr 求值、字节码解释器）；第三单元落到作为整个编译器枢纽的 XLS IR（Package/Function/Node/Value、运算符体系、文本格式、DSLX→IR 转换、Proc/Channel 状态通信）；第四单元讲运行在 IR 之上的优化 Pass 框架、代表性优化 Pass、查询/分析引擎、延迟模型与流水线调度；第五单元讲代码生成（Block 转换、组合/流水线生成器、模块签名、VAST Verilog AST）；第六单元讲下游执行与验证（IR 解释器、LLVM JIT、Verilog 仿真与测试台、Z3 形式化验证、网表分析）；第七单元收尾讲 Proc 进阶、Bazel 构建规则与宏、Fuzzer 多引擎交叉验证、高层流程编排与贡献规范。依赖关系遵循「前端→IR→优化→调度→codegen→执行/验证→工程」的单向主线，每个单元只在前置单元完成后展开，符合由浅入深、每篇只解决一个独立主题并结合真实源码的设计原则。本次增量更新（HEAD ccd2a0636）只引入了一处需要新增讲义的变化：dev_tools/proc_constancy_checker_main 这一新工具及其依赖的 NonSynthRemovalPass 与 proc_testutils 的 UnrollProc 激活展开机制——它用 Z3 在 Proc 上发现 opt 未能识别为字面量的「可证明常量」节点，恰好衔接 u6-l4（Z3 形式化验证）与 u3-l5（Proc），故作为 u6-l6 新增于第六单元末尾。其余 33 篇讲义所涉源码与核心概念均未受本次代码变化影响：新增的 non_synth_removal Pass 虽已注册但并未加入标准 optimization_pass_pipeline；codegen v1.5 的 ir_dump_path 透传修复位于独立的 v1.5 流水线，不影响主讲义对主 codegen 流水线的讲解；proc_testutils 的扩展也不在 u3-l5 的源码范围内。故既有 33 篇全部保持不变，讲义总数由 33 篇增至 34 篇。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 XLS 并跑通工具链",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "XLS 是什么：高层综合（HLS）项目总览",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 XLS 的定位、要解决的问题（软硬协同设计、EoML 时代专用化），以及从高层描述生成可综合 Verilog 的整体思路。",
+          "learning_goals": [
+            "理解 XLS 作为 HLS 工具链的目标与软件/硬件协同价值",
+            "了解 DSLX 与 C++(xlscc) 两条入口路径",
+            "建立对「同一设计既能跑主机软件、又能生成硬件」的核心理念的直观认识"
+          ],
+          "source_files": [
+            "README.md",
+            "docs_src/tutorials/hello_xls.md"
+          ],
+          "minimal_modules": [
+            "README 项目定位",
+            "HLS 概念背景"
+          ],
+          "practice_task": "阅读 README 的 Stack Diagram 与目录说明，用自己的话写出 XLS 的输入、输出以及它区别于传统 HDL 的三个特点，并指出两条前端入口分别是什么。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "从源码构建与运行 XLS",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解如何用 Bazel 从源码构建 XLS、依赖安装、Docker 构建，以及关键工具二进制的获取方式。",
+          "learning_goals": [
+            "掌握用 Bazel 构建 XLS 的命令与常见选项（含 DSLX-only 与含 C++ 前端的差异）",
+            "了解 Docker 构建与二进制 Release 两种替代获取方式",
+            "知道 disk cache 等加速构建的手段"
+          ],
+          "source_files": [
+            "README.md",
+            "WORKSPACE",
+            "Dockerfile-ubuntu-22.04"
+          ],
+          "minimal_modules": [
+            "Bazel 构建系统",
+            "依赖安装说明"
+          ],
+          "practice_task": "在本机按文档安装 Bazel 与依赖，执行一次 `bazel build -c opt //xls/dslx:interpreter_main`，记录构建耗时，并运行 `interpreter_main --version` 确认产物可用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与项目布局",
+          "order": 3,
+          "filename": "u1-l3-directory-structure.md",
+          "level": "beginner",
+          "topic": "对照 Stack Diagram，逐一介绍 xls/ 下各子目录（dslx、ir、passes、scheduling、codegen、interpreter、jit、simulation、solvers、netlist、tools、fuzzer 等）的职责。",
+          "learning_goals": [
+            "建立 xls/ 顶层目录到编译流水线各阶段的心智地图",
+            "区分前端、IR、优化、调度、代码生成与执行/验证各层",
+            "能在源码中快速定位每个功能对应的目录"
+          ],
+          "source_files": [
+            "README.md",
+            "xls/BUILD"
+          ],
+          "minimal_modules": [
+            "顶层目录职责表",
+            "编译阶段分层"
+          ],
+          "practice_task": "列出 dslx、ir、passes、scheduling、codegen 五个目录分别对应流水线的哪个阶段，并为每个目录挑出一个代表性源文件并说明其作用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "用 DSLX 写第一个硬件函数",
+          "order": 4,
+          "filename": "u1-l4-first-dslx-function.md",
+          "level": "beginner",
+          "topic": "以 gcd.x 为例，讲解 DSLX 函数定义、类型标注、for 循环、match、测试与 quickcheck 属性的写法。",
+          "learning_goals": [
+            "读懂一个完整的 DSLX 模块（函数、测试、quickcheck）",
+            "理解 DSLX 的不可变、表达式式、定长数据流风格",
+            "学会用 #[test] 和 #[quickcheck] 为硬件函数编写测试"
+          ],
+          "source_files": [
+            "xls/examples/gcd.x",
+            "docs_src/tutorials/hello_xls.md"
+          ],
+          "minimal_modules": [
+            "DSLX 函数语法",
+            "测试与 quickcheck"
+          ],
+          "practice_task": "仿照 gcd.x 编写一个 DSLX 函数判断 u8 是否为偶数，并配一个 #[test] 与一个 #[quickcheck] 性质测试，运行 interpreter_main 确认全部通过。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l5",
+          "title": "完整工具链走一遍：DSLX → IR → 优化 → Verilog",
+          "order": 5,
+          "filename": "u1-l5-full-toolchain-walkthrough.md",
+          "level": "beginner",
+          "topic": "按官方 Quick Start，串起 interpreter_main、ir_converter_main、opt_main、codegen_main 四个工具，把一个 .x 文件最终变成 .v 文件。",
+          "learning_goals": [
+            "掌握 XLS 的端到端命令行工作流",
+            "理解每一步工具的输入输出（.x → .ir → .opt.ir → .v）",
+            "能够解释 opt 前后 IR 的差异与 codegen 产出的 Verilog"
+          ],
+          "source_files": [
+            "docs_src/tools_quick_start.md",
+            "xls/tools/codegen_main.cc",
+            "xls/tools/opt_main.cc",
+            "xls/dslx/ir_convert/ir_converter_main.cc"
+          ],
+          "minimal_modules": [
+            "工具链命令",
+            "各阶段产物"
+          ],
+          "practice_task": "新建 /tmp/simple_add.x（含一个可被优化掉的 `+ u32:0`），依次执行解释、IR 转换、opt 优化、codegen 生成 1 级流水线 Verilog，用 diff 观察优化前后 IR 的变化，并阅读生成的 .v 文件。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "DSLX 语言与前端",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "DSLX 类型系统与核心表达式",
+          "order": 1,
+          "filename": "u2-l1-dslx-types-and-expressions.md",
+          "level": "intermediate",
+          "topic": "讲解 DSLX 的类型：任意位宽的 uN[N]/sN[N]、bits、数组、元组、枚举、结构体，以及 let、if、match、for 等核心表达式。",
+          "learning_goals": [
+            "掌握 DSLX 的硬件友好类型（任意位宽、定长）",
+            "理解不可变表达式式数据流与 for 循环的归纳语义",
+            "能区分值类型与类型注解的写法"
+          ],
+          "source_files": [
+            "docs_src/dslx_reference.md",
+            "xls/examples/gcd.x",
+            "docs_src/tutorials/intro_to_parametrics.md"
+          ],
+          "minimal_modules": [
+            "基础类型与位宽",
+            "核心表达式"
+          ],
+          "practice_task": "编写一个 DSLX 函数，输入 uN[16] 返回其高低字节组成的元组，再写一个 match 表达式根据符号位分支，并用 #[test] 验证。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "DSLX 前端：扫描、解析与 AST",
+          "order": 2,
+          "filename": "u2-l2-dslx-frontend-parser-ast.md",
+          "level": "intermediate",
+          "topic": "深入 dslx/frontend，理解从源码文本到 AST 的过程：词法扫描、递归下降解析器 parser、AST 节点体系与 Module 组织。",
+          "learning_goals": [
+            "理解 DSLX 源码如何被解析为 AST 节点树",
+            "熟悉 ast.h 中函数、参数、表达式、语句等核心 AST 节点",
+            "了解 Module 作为顶层编译单元的结构"
+          ],
+          "source_files": [
+            "xls/dslx/frontend/parser.h",
+            "xls/dslx/frontend/ast.h",
+            "xls/dslx/frontend/module.h"
+          ],
+          "minimal_modules": [
+            "解析器 parser",
+            "AST 节点",
+            "Module"
+          ],
+          "practice_task": "在 parser.cc 中找到一个解析 let 或 match 的函数，跟踪它如何构造对应的 AST 节点，画出 `let (a, b) = ...` 这一句对应的 AST 子树草图。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "DSLX 类型推导与检查",
+          "order": 3,
+          "filename": "u2-l3-dslx-type-system.md",
+          "level": "intermediate",
+          "topic": "讲解 dslx/type_system 如何对 AST 做类型推导与检查，包括 type、type_info、参数化（parametric）泛型实例化机制。",
+          "learning_goals": [
+            "理解类型推导如何为每个 AST 节点关联类型信息",
+            "掌握 parametric 泛型函数的实例化与环境",
+            "了解类型检查失败时如何定位错误"
+          ],
+          "source_files": [
+            "xls/dslx/type_system/type.h",
+            "xls/dslx/type_system/type_info.h",
+            "xls/dslx/type_system/parametric_env.h"
+          ],
+          "minimal_modules": [
+            "类型表示 type",
+            "类型信息 type_info",
+            "参数化环境"
+          ],
+          "practice_task": "跟踪一个 parametric 函数（如 gcd.x 里的 `gcd_euclidean<N: u32>`）的实例化过程，说明 type_info 如何记录 N 取不同值时各表达式的类型。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "编译期求值（constexpr）",
+          "order": 4,
+          "filename": "u2-l4-constexpr-evaluation.md",
+          "level": "intermediate",
+          "topic": "讲解 constexpr_evaluator 如何在编译期对常量表达式求值，支撑位宽推导、默认参数、数组大小等需要编译期常量的场景。",
+          "learning_goals": [
+            "理解哪些 DSLX 表达式必须在编译期求值",
+            "掌握 constexpr 求值器与类型系统的协作",
+            "能区分运行期与编译期求值边界"
+          ],
+          "source_files": [
+            "xls/dslx/constexpr_evaluator.h",
+            "xls/dslx/constexpr_evaluator.cc",
+            "xls/examples/const_for.x"
+          ],
+          "minimal_modules": [
+            "constexpr 求值器",
+            "编译期常量场景"
+          ],
+          "practice_task": "阅读 const_for.x，跟踪其常量 for 循环如何在编译期被 constexpr_evaluator 展开，并构造一个依赖编译期求值来确定数组大小的 DSLX 函数。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l5",
+          "title": "DSLX 字节码解释器",
+          "order": 5,
+          "filename": "u2-l5-dslx-bytecode-interpreter.md",
+          "level": "intermediate",
+          "topic": "讲解 DSLX 的字节码（bytecode）与字节码解释器，理解 #[test]/#[quickcheck] 的执行引擎。",
+          "learning_goals": [
+            "理解 DSLX AST 如何被编译为字节码",
+            "掌握字节码解释器的栈帧（frame）执行模型",
+            "了解解释器在交互式开发与测试中的作用"
+          ],
+          "source_files": [
+            "xls/dslx/bytecode/bytecode.h",
+            "xls/dslx/bytecode/bytecode_emitter.h",
+            "xls/dslx/bytecode/bytecode_interpreter.h"
+          ],
+          "minimal_modules": [
+            "字节码定义",
+            "字节码发射",
+            "字节码解释器"
+          ],
+          "practice_task": "为一个简单 DSLX 函数手工推导其字节码序列，再在 bytecode_emitter 中确认实际发射的字节码，比较二者。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "XLS IR：编译器的枢纽",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "IR 总览：Package、Function、Node、Value",
+          "order": 1,
+          "filename": "u3-l1-ir-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 XLS IR 的核心数据结构：Package 作为顶层容器，Function/Proc 作为可计算单元，Node 作为数据流图节点，Value/Bits 作为运行期值。",
+          "learning_goals": [
+            "建立 XLS IR 是「数据流图 + 类型化值」的整体认识",
+            "掌握 Package、Function、Node 三层关系",
+            "理解 Value 与 Bits 如何表示任意位宽的数据"
+          ],
+          "source_files": [
+            "docs_src/ir_overview.md",
+            "xls/ir/package.h",
+            "xls/ir/function.h",
+            "xls/ir/node.h",
+            "xls/ir/value.h"
+          ],
+          "minimal_modules": [
+            "Package 容器",
+            "Function 与 Node",
+            "Value/Bits"
+          ],
+          "practice_task": "用 ir_converter_main 把一个简单函数转成 .ir，在输出中标注出 package、fn、参数节点与运算节点，并说明 Node 之间的数据流边。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "IR 运算符体系",
+          "order": 2,
+          "filename": "u3-l2-ir-operations.md",
+          "level": "intermediate",
+          "topic": "讲解 op.h / op_list.h 中定义的全部 IR 运算符分类（算术、比较、位运算、选择、数组、元组等）及对应的 nodes.h 节点类。",
+          "learning_goals": [
+            "掌握 IR 运算符的类别与命名约定",
+            "理解如何从 Op 枚举定位到具体的 Node 子类",
+            "了解运算符的属性（结合律、交换律、副作用）"
+          ],
+          "source_files": [
+            "xls/ir/op.h",
+            "xls/ir/op_list.h",
+            "xls/ir/nodes.h"
+          ],
+          "minimal_modules": [
+            "Op 枚举",
+            "运算符分类",
+            "Node 子类"
+          ],
+          "practice_task": "从 op_list.h 列出所有比较类运算符，在 nodes.h 中找到它们对应的 Node 类，并用 ir 文本写一段包含 kAdd、kEq、kArrayIndex 的 IR。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "IR 文本格式：解析与打印",
+          "order": 3,
+          "filename": "u3-l3-ir-text-format.md",
+          "level": "intermediate",
+          "topic": "讲解 XLS IR 的人类可读文本格式及其解析器 ir_parser、格式化器，理解 .ir 文件的读写往返。",
+          "learning_goals": [
+            "能读懂并手写简单的 IR 文本",
+            "理解 Parser 如何把文本重建为 Package 内存结构",
+            "了解 IR 文本格式与可视化工具的关系"
+          ],
+          "source_files": [
+            "xls/ir/ir_parser.h",
+            "xls/ir/package.h",
+            "docs_src/ir_overview.md"
+          ],
+          "minimal_modules": [
+            "IR 文本语法",
+            "解析器 ir_parser"
+          ],
+          "practice_task": "手写一个两数相乘再取高位的 .ir 文件，用 opt_main 解析并回打验证能正确往返，再故意制造一个语法错误观察解析器报错。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "从 DSLX 到 IR 的转换",
+          "order": 4,
+          "filename": "u3-l4-dslx-to-ir-conversion.md",
+          "level": "intermediate",
+          "topic": "讲解 dslx/ir_convert 如何把类型检查后的 AST 转换为 IR：function_converter 逐节点翻译、ir_converter 顶层驱动、conversion_info 记录产物。",
+          "learning_goals": [
+            "理解 AST 节点到 IR Node 的映射策略",
+            "掌握 for/match 等高层结构如何被 lowering 为 IR",
+            "了解转换产物与导入（import）机制"
+          ],
+          "source_files": [
+            "xls/dslx/ir_convert/function_converter.h",
+            "xls/dslx/ir_convert/ir_converter.h",
+            "xls/dslx/ir_convert/conversion_info.h"
+          ],
+          "minimal_modules": [
+            "function_converter",
+            "ir_converter 驱动",
+            "转换产物"
+          ],
+          "practice_task": "在 function_converter 中跟踪一个 if/match 表达式如何被翻译成 kSelect 节点，并用 ir_converter_main 生成 IR 对照确认。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l5",
+          "title": "Proc、Channel 与状态化通信",
+          "order": 5,
+          "filename": "u3-l5-proc-channel-state.md",
+          "level": "intermediate",
+          "topic": "讲解 XLS 的 Proc（有状态、可并发的进程）与 Channel（进程间通信）机制，这是区别于纯函数的关键抽象。",
+          "learning_goals": [
+            "理解 Proc 的状态、recv/send 通信模型",
+            "掌握 Channel 的方向与数据类型",
+            "能区分 Function（纯组合）与 Proc（时序状态）的适用场景"
+          ],
+          "source_files": [
+            "docs_src/tutorials/what_is_a_proc.md",
+            "xls/ir/channel.h",
+            "xls/ir/proc.h",
+            "xls/examples/proc_iota.x"
+          ],
+          "minimal_modules": [
+            "Proc 定义",
+            "Channel 通信",
+            "状态寄存器"
+          ],
+          "practice_task": "阅读 proc_iota.x，画出 Proc 的状态变量与 recv/send 交互时序，并解释为何 Proc 能表达「随时间归纳」的计算。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "优化与调度",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "优化 Pass 框架",
+          "order": 1,
+          "filename": "u4-l1-optimization-pass-framework.md",
+          "level": "intermediate",
+          "topic": "讲解 passes/ 下的 Pass 基础设施：pass_base 抽象、optimization_pass 及其注册表、optimization_pass_pipeline 如何编排标准优化管线。",
+          "learning_goals": [
+            "理解 Pass 的统一接口与不变式（fixedpoint 迭代）",
+            "掌握优化管线如何组合与注册 Pass",
+            "能用 opt_main --list_passes 观察实际管线"
+          ],
+          "source_files": [
+            "xls/passes/pass_base.h",
+            "xls/passes/optimization_pass.h",
+            "xls/passes/optimization_pass_pipeline.h"
+          ],
+          "minimal_modules": [
+            "Pass 基类",
+            "优化管线",
+            "Pass 注册表"
+          ],
+          "practice_task": "运行 `opt_main --list_passes` 列出所有 Pass，挑选三个查阅其 short_name/long_name，并说明 optimization_pass_pipeline 中它们的相对顺序。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "关键优化 Pass 详解",
+          "order": 2,
+          "filename": "u4-l2-key-optimization-passes.md",
+          "level": "intermediate",
+          "topic": "选取几个代表性优化 Pass 深入讲解：算术化简、公共子表达式消除（CSE）、死代码消除（DCE）、常量折叠、内联。",
+          "learning_goals": [
+            "理解每个代表性 Pass 做的图变换与收益",
+            "掌握判断 Pass 是否改动图（changed）的机制",
+            "能解释优化前后的 IR 差异来源"
+          ],
+          "source_files": [
+            "xls/passes/arith_simplification_pass.h",
+            "xls/passes/cse_pass.h",
+            "xls/passes/dce_pass.h",
+            "xls/passes/constant_folding_pass.h",
+            "xls/passes/inlining_pass.h"
+          ],
+          "minimal_modules": [
+            "算术化简",
+            "CSE/DCE",
+            "常量折叠与内联"
+          ],
+          "practice_task": "构造一段含重复子表达式与可折叠常量的 IR，用 `opt_main` 优化，逐一对照每类 Pass 带来的图变化。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "查询与分析引擎",
+          "order": 3,
+          "filename": "u4-l3-query-analysis-engines.md",
+          "level": "intermediate",
+          "topic": "讲解为优化提供精确信息的分析引擎：BDD 查询引擎（位级已知位/范围）、前向传播查询引擎、范围分析等。",
+          "learning_goals": [
+            "理解查询引擎如何为 Pass 提供每个 Node 的位级信息",
+            "掌握 BDD 表示已知位与区间集合的原理",
+            "了解分析与优化的解耦设计"
+          ],
+          "source_files": [
+            "xls/passes/bdd_query_engine.h",
+            "xls/passes/forwarding_query_engine.h",
+            "xls/ir/interval_set.h"
+          ],
+          "minimal_modules": [
+            "BDD 查询引擎",
+            "前向查询引擎",
+            "区间集合分析"
+          ],
+          "practice_task": "用一个含 mask 比较与位拼接的 IR，说明 bdd_query_engine 如何推断出某些位恒为 0，从而触发对应的化简 Pass。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "延迟模型与估算",
+          "order": 4,
+          "filename": "u4-l4-delay-model-estimation.md",
+          "level": "intermediate",
+          "topic": "讲解 estimators/delay_model 如何描述与插值每个 IR 运算在目标工艺下的延迟，这是调度的输入。",
+          "learning_goals": [
+            "理解延迟模型的作用与表征数据来源",
+            "掌握 DelayEstimator 接口与可选模型",
+            "了解延迟如何影响流水线划分"
+          ],
+          "source_files": [
+            "xls/estimators/delay_model/delay_estimator.h",
+            "xls/estimators/delay_model/delay_estimators.h",
+            "docs_src/delay_estimation.md"
+          ],
+          "minimal_modules": [
+            "延迟估算接口",
+            "延迟模型选择",
+            "关键路径延迟"
+          ],
+          "practice_task": "用 delay_info_main（或对应工具）查看给定 IR 在 unit 模型与某真实模型下的关键路径延迟，对比两者差异。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l5",
+          "title": "流水线调度",
+          "order": 5,
+          "filename": "u4-l5-pipeline-scheduling.md",
+          "level": "intermediate",
+          "topic": "讲解 scheduling/ 如何把 IR 操作分配到流水线级：ASAP 调度器、最小割调度器、pipeline_schedule 与调度选项。",
+          "learning_goals": [
+            "理解调度问题（依赖约束 + 延迟约束 + 级数约束）",
+            "掌握 ASAP 与 min-cut 两种策略的差异",
+            "了解 pipeline_schedule 如何表达每个操作所在的级"
+          ],
+          "source_files": [
+            "xls/scheduling/asap_scheduler.h",
+            "xls/scheduling/min_cut_scheduler.h",
+            "xls/scheduling/pipeline_schedule.h",
+            "xls/scheduling/scheduling_options.h"
+          ],
+          "minimal_modules": [
+            "ASAP 调度器",
+            "最小割调度器",
+            "调度结果表示"
+          ],
+          "practice_task": "对同一 IR 分别用不同 pipeline_stages / delay_model 调度，导出 schedule 文本，比较同一操作被分到的流水线级变化。",
+          "depends_on": [
+            "u4-l1",
+            "u4-l4"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "代码生成：从 IR 到 Verilog",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "代码生成 Pass 与 Block 转换",
+          "order": 1,
+          "filename": "u5-l1-codegen-block-conversion.md",
+          "level": "advanced",
+          "topic": "讲解 codegen 如何先把 IR 的 Function/Proc 转换为带寄存器、端口、时钟的 Block，以及 codegen_pass_pipeline 的整体流程。",
+          "learning_goals": [
+            "理解从数据流 IR 到时序 Block 的转换（寄存器插入、流水线寄存器）",
+            "掌握 codegen Pass 管线的阶段划分",
+            "了解 Block 作为代码生成中间表示的作用"
+          ],
+          "source_files": [
+            "xls/codegen/block_conversion.h",
+            "xls/codegen/codegen_pass_pipeline.h",
+            "xls/ir/block.h"
+          ],
+          "minimal_modules": [
+            "Block 转换",
+            "codegen Pass 管线",
+            "Block IR"
+          ],
+          "practice_task": "对一个 pipeline 函数运行 codegen_main 并导出 block IR（--output_block_ir_path），标注其中的输入端口、流水线寄存器与输出端口。",
+          "depends_on": [
+            "u4-l5",
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "组合逻辑与流水线生成器",
+          "order": 2,
+          "filename": "u5-l2-combinational-pipeline-generators.md",
+          "level": "advanced",
+          "topic": "讲解两类代码生成器：combinational_generator（纯组合）与 pipeline_generator（带流水线/FSM），以及 unified_generator 的统一抽象。",
+          "learning_goals": [
+            "区分组合生成器与流水线生成器的输出结构",
+            "理解流水线生成器如何处理握手、停顿、寄存器",
+            "了解 unified_generator 如何统一不同生成策略"
+          ],
+          "source_files": [
+            "xls/codegen/combinational_generator.h",
+            "xls/codegen/pipeline_generator.h",
+            "xls/codegen/unified_generator.h"
+          ],
+          "minimal_modules": [
+            "组合生成器",
+            "流水线生成器",
+            "统一生成器"
+          ],
+          "practice_task": "分别用 --generator=combinational 与 --generator=pipeline 对同一 IR 生成 Verilog，对比两份 .v 在端口与寄存器上的差异。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "模块签名与接口",
+          "order": 3,
+          "filename": "u5-l3-module-signature-interface.md",
+          "level": "advanced",
+          "topic": "讲解 module_signature 如何描述生成模块的对外接口（端口、宽度、方向、流水线信号），以及 module_builder 如何据此搭建模块。",
+          "learning_goals": [
+            "理解模块签名 proto 对接口的精确描述",
+            "掌握输入/输出端口与流水线控制信号的建模",
+            "了解 module_builder 如何把 Block 映射为模块结构"
+          ],
+          "source_files": [
+            "xls/codegen/module_signature.h",
+            "xls/codegen/module_builder.h"
+          ],
+          "minimal_modules": [
+            "模块签名",
+            "端口建模",
+            "模块搭建"
+          ],
+          "practice_task": "用 codegen_main 导出模块签名（--output_signature_path），解读其中每个端口的宽度、方向与流水线相关字段。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l4",
+          "title": "VAST：Verilog AST 与文本生成",
+          "order": 4,
+          "filename": "u5-l4-vast-verilog-ast.md",
+          "level": "advanced",
+          "topic": "讲解 codegen/vast 下的 Verilog AST（VAST），理解 XLS 如何以结构化方式生成 SystemVerilog 文本而非字符串拼接。",
+          "learning_goals": [
+            "理解 VAST 作为可结构化操作的 Verilog 抽象语法树",
+            "掌握模块、always 块、赋值等 VAST 节点",
+            "了解从 VAST 到最终 .v 文本的打印流程"
+          ],
+          "source_files": [
+            "xls/codegen/vast/vast.h",
+            "xls/codegen/module_builder.h",
+            "docs_src/vast.md"
+          ],
+          "minimal_modules": [
+            "VAST 节点体系",
+            "Verilog 结构化生成",
+            "文本打印"
+          ],
+          "practice_task": "在 VAST 中定位表示 module 与连续赋值（assign）的节点类型，并说明 pipeline_generator 产出的某段 Verilog 由哪些 VAST 节点构成。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "执行引擎与形式化验证",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "IR 解释器",
+          "order": 1,
+          "filename": "u6-l1-ir-interpreter.md",
+          "level": "advanced",
+          "topic": "讲解 interpreter/ 下的 IR 解释器：function_interpreter 解释函数、proc_interpreter 与 serial_proc_runtime 解释 Proc，用于调试与正确性验证。",
+          "learning_goals": [
+            "理解 IR 解释器的求值模型与事件（events/trace）",
+            "掌握 Proc 运行时如何驱动多进程 recv/send",
+            "了解解释器与 JIT、仿真之间的关系"
+          ],
+          "source_files": [
+            "xls/interpreter/ir_interpreter.h",
+            "xls/interpreter/function_interpreter.h",
+            "xls/interpreter/proc_interpreter.h",
+            "xls/interpreter/serial_proc_runtime.h"
+          ],
+          "minimal_modules": [
+            "函数解释器",
+            "Proc 解释器",
+            "串行 Proc 运行时"
+          ],
+          "practice_task": "用 eval_ir_main（或 eval_proc_main）对一个 IR 函数/Proc 输入若干值，观察输出与 trace 事件，对照解释器的执行过程。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "LLVM JIT 执行",
+          "order": 2,
+          "filename": "u6-l2-llvm-jit.md",
+          "level": "advanced",
+          "topic": "讲解 jit/ 如何基于 LLVM 把 IR 编译为本机代码以获得接近原生的执行速度：function_jit、ir_builder_visitor、llvm_compiler。",
+          "learning_goals": [
+            "理解 JIT 相对解释器的性能优势与用途",
+            "掌握 ir_builder_visitor 如何把 IR Node 翻译为 LLVM IR",
+            "了解 JIT 运行时与缓冲区管理"
+          ],
+          "source_files": [
+            "xls/jit/function_jit.h",
+            "xls/jit/ir_builder_visitor.h",
+            "xls/jit/llvm_compiler.h",
+            "docs_src/ir_jit.md"
+          ],
+          "minimal_modules": [
+            "function_jit",
+            "IR→LLVM 翻译",
+            "LLVM 编译器"
+          ],
+          "practice_task": "对比同一函数在解释器与 JIT 下的执行（如通过 eval_ir_main 的引擎选项），并简述 ir_builder_visitor 对 kAdd 的处理逻辑。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "Verilog 仿真与测试台",
+          "order": 3,
+          "filename": "u6-l3-verilog-simulation-testbench.md",
+          "level": "advanced",
+          "topic": "讲解 simulation/ 如何用 iverilog 等仿真器验证 codegen 生成的 Verilog：module_simulator、测试台（testbench）生成、默认仿真器封装。",
+          "learning_goals": [
+            "理解生成 Verilog 后的仿真验证闭环",
+            "掌握 module_testbench 如何驱动输入、采集输出",
+            "了解 default_verilog_simulator 对仿真器的封装"
+          ],
+          "source_files": [
+            "xls/simulation/module_simulator.h",
+            "xls/simulation/module_testbench.h",
+            "xls/simulation/default_verilog_simulator.h"
+          ],
+          "minimal_modules": [
+            "模块仿真器",
+            "测试台生成",
+            "仿真器封装"
+          ],
+          "practice_task": "用 simulate_module_main（或 module_simulator）对生成的 Verilog 模块跑一组输入，对比其输出与 IR 解释器输出是否一致。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l4",
+          "title": "形式化验证：Solver 与等价性检查",
+          "order": 4,
+          "filename": "u6-l4-formal-verification-solvers.md",
+          "level": "advanced",
+          "topic": "讲解 solvers/ 如何把 IR 翻译为 SMT 求解器输入（Z3/Bitwuzla），用于 IR 等价性证明与 IR↔网表逻辑等价检查（LEC）。",
+          "learning_goals": [
+            "理解 IR→SMT 翻译如何支持形式化证明",
+            "掌握 ir_equivalence 做函数等价性检查的方法",
+            "了解 z3_lec 做 IR 与网表等价检查的流程"
+          ],
+          "source_files": [
+            "xls/solvers/z3_ir_translator.h",
+            "xls/solvers/ir_equivalence.h",
+            "xls/solvers/z3_lec.h",
+            "docs_src/solvers.md"
+          ],
+          "minimal_modules": [
+            "IR→Z3 翻译",
+            "IR 等价性",
+            "网表 LEC"
+          ],
+          "practice_task": "用 lec_main 或 ir_equivalence 工具证明一个优化前后 IR 的等价性（或两段功能等价的 IR），解读求解器返回的 sat/unsat 结论。",
+          "depends_on": [
+            "u3-l2",
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l5",
+          "title": "网表分析",
+          "order": 5,
+          "filename": "u6-l5-netlist-analysis.md",
+          "level": "advanced",
+          "topic": "讲解 netlist/ 如何解析与分析结构化 Verilog 网表（单元库、网表、逻辑云提取），为 LEC 与下游综合提供基础。",
+          "learning_goals": [
+            "理解网表与单元库（cell library）的数据表示",
+            "掌握 netlist_parser 如何解析结构化 Verilog",
+            "了解网表在 LEC 与综合流程中的作用"
+          ],
+          "source_files": [
+            "xls/netlist/netlist.h",
+            "xls/netlist/netlist_parser.h",
+            "xls/netlist/cell_library.h"
+          ],
+          "minimal_modules": [
+            "网表数据结构",
+            "网表解析",
+            "单元库"
+          ],
+          "practice_task": "用一个简单结构化 Verilog 加伪单元库，解析为 netlist 对象，列出其中的 cell 与连线，说明它如何作为 LEC 的网表侧输入。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l6",
+          "title": "Proc 常量性检查：用 Z3 发现可证明常量的节点",
+          "order": 6,
+          "filename": "u6-l6-proc-constancy-checker.md",
+          "level": "advanced",
+          "topic": "讲解新引入的 dev_tools/proc_constancy_checker_main：它把 Proc 按激活（activation）展开为函数，先用 NonSynthRemovalPass 剥离 assert/trace/cover 等不可综合节点，再用 Z3 逐节点证明其在所有激活中取值恒定（provably constant），从而发现 opt 未能识别为字面量的常量节点。",
+          "learning_goals": [
+            "理解「可证明常量（provably constant）」节点的概念及其对优化的意义",
+            "掌握 proc_testutils 的 UnrollProc 如何把 Proc 按激活展开为函数并保留节点到展开副本的映射",
+            "理解 NonSynthRemovalPass 如何剥离不可综合操作（assert/trace/cover）及其专属中间依赖",
+            "了解 proc_constancy_checker_main 如何用 Z3 逐位证明某节点跨激活恒定，以及 --fail_on_constants、--unroll_count 等选项与报告"
+          ],
+          "source_files": [
+            "xls/dev_tools/proc_constancy_checker.h",
+            "xls/dev_tools/proc_constancy_checker_main.cc",
+            "xls/passes/non_synth_removal_pass.h",
+            "xls/ir/proc_testutils.h",
+            "xls/solvers/z3_ir_translator.h",
+            "xls/dev_tools/testdata/constancy_test.x"
+          ],
+          "minimal_modules": [
+            "Proc 激活展开（UnrollProc）",
+            "NonSynthRemovalPass",
+            "Z3 常量性证明"
+          ],
+          "practice_task": "用 proc_constancy_checker_main 对 dev_tools/testdata/constancy_test.x 编译出的 Proc 进行检查，阅读其输出中被判定为「constant」的节点及证明原因；再尝试加上 --fail_on_constants 让工具在发现常量时返回非零退出码，并说明该工具为何能发现普通 opt 难以识别为字面量的常量节点。",
+          "depends_on": [
+            "u6-l4",
+            "u3-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "Proc 进阶、工具链与工程实践",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "Proc 进阶：并发状态机与运行时",
+          "order": 1,
+          "filename": "u7-l1-advanced-proc-runtime.md",
+          "level": "advanced",
+          "topic": "深入 Proc 的执行与调度：proc_state_legalization_pass 如何合法化状态、proc_runtime 如何驱动进程层级（proc hierarchy）并发执行。",
+          "learning_goals": [
+            "理解 Proc 状态的合法化与初始化机制",
+            "掌握多 Proc 组成层级时的并发执行模型",
+            "了解 Proc 在调度与代码生成中的特殊处理"
+          ],
+          "source_files": [
+            "xls/scheduling/proc_state_legalization_pass.h",
+            "xls/interpreter/proc_runtime.h",
+            "xls/interpreter/serial_proc_runtime.h",
+            "docs_src/tutorials/how_to_use_procs.md"
+          ],
+          "minimal_modules": [
+            "状态合法化 Pass",
+            "Proc 运行时",
+            "进程层级"
+          ],
+          "practice_task": "阅读一个多 Proc 交互的示例（如含 send/recv 的 proc），跟踪 proc_state_legalization_pass 如何处理其状态，并用 serial_proc_runtime 思考其单步推进顺序。",
+          "depends_on": [
+            "u3-l5",
+            "u4-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "Bazel 构建规则与宏",
+          "order": 2,
+          "filename": "u7-l2-bazel-build-rules.md",
+          "level": "advanced",
+          "topic": "讲解 build_rules/ 下的 Bazel 宏如何把 DSLX/IR/代码生成封装为可复用目标：dslx_test、dslx_library、codegen 规则等。",
+          "learning_goals": [
+            "理解 XLS 自定义 Bazel 规则封装的编译产物",
+            "掌握 dslx 测试与库规则的用法",
+            "了解 codegen 规则如何把 Verilog 生成纳入构建"
+          ],
+          "source_files": [
+            "xls/build_rules/xls_dslx_rules.bzl",
+            "xls/build_rules/xls_codegen_rules.bzl",
+            "xls/build_rules/xls_build_defs.bzl",
+            "docs_src/build_system.md"
+          ],
+          "minimal_modules": [
+            "DSLX 规则",
+            "codegen 规则",
+            "构建定义"
+          ],
+          "practice_task": "为前面写的 DSLX 函数添加一个 BUILD 目标，使用 dslx_test 规则将其测试纳入 Bazel，运行 `bazel test` 验证通过。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "Fuzzer：多引擎交叉验证",
+          "order": 3,
+          "filename": "u7-l3-fuzzer-cross-engine-checking.md",
+          "level": "advanced",
+          "topic": "讲解 fuzzer/ 如何在 DSL 层自动生成程序，并交叉比较 DSL 解释器、IR 解释器、IR JIT、生成的 Verilog 仿真器四套引擎的一致性。",
+          "learning_goals": [
+            "理解 Fuzzer 生成-翻译-多引擎比对的总体策略",
+            "掌握 ast_generator 生成合法 DSLX 的思路",
+            "了解 cpp_sample_runner 如何驱动单一样本的多引擎执行"
+          ],
+          "source_files": [
+            "xls/fuzzer/ast_generator.h",
+            "xls/fuzzer/cpp_sample_runner.cc",
+            "docs_src/fuzzer.md"
+          ],
+          "minimal_modules": [
+            "AST 生成器",
+            "样本运行器",
+            "多引擎比对"
+          ],
+          "practice_task": "阅读 cpp_sample_runner，列出它依次调用哪些引擎并如何比较结果，设计一个会触发某引擎差异的假想输入特征。",
+          "depends_on": [
+            "u6-l1",
+            "u6-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l4",
+          "title": "高层流程编排与贡献指南",
+          "order": 4,
+          "filename": "u7-l4-flows-contributing.md",
+          "level": "advanced",
+          "topic": "讲解 flows/ir_wrapper 等高层编排如何串联工具链，并结合 xls_style.md 与贡献文档介绍代码风格、测试规范与二次开发入口。",
+          "learning_goals": [
+            "理解如何在代码中以库形式编排 XLS 工具链",
+            "掌握 XLS 的代码风格与提交规范",
+            "了解为项目贡献、扩展 Pass 或生成器的入口"
+          ],
+          "source_files": [
+            "xls/flows/ir_wrapper.h",
+            "docs_src/xls_style.md",
+            "CONTRIBUTING.md",
+            "docs_src/contributing.md"
+          ],
+          "minimal_modules": [
+            "IR 包装器编排",
+            "代码风格",
+            "贡献流程"
+          ],
+          "practice_task": "基于 ir_wrapper 写一小段示例，演示如何用 C++ API 依次完成解析、优化、代码生成，并对照 xls_style.md 检查命名与格式是否符合规范。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
