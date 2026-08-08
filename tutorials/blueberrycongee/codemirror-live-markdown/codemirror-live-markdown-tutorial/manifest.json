@@ -1,0 +1,802 @@
+{
+  "project": "codemirror-live-markdown",
+  "head": "f1438ab14f4641b761af40ccf764653624c923f1",
+  "rationale": "学习路线围绕一条主线展开：shouldShowSource 决策函数 + 两种装饰策略（Decoration.mark 配 CSS 隐藏标记 vs Decoration.replace 配 Widget 替换渲染）。第一单元从零开始，讲清项目定位、源码目录、库入口、构建运行 demo 和第一次集成；第二单元铺开 Live Preview 的核心机制（CodeMirror 6 概念、shouldShowSource、Facet/mouseSelecting/checkUpdateAction、livePreviewPlugin、markdownStylePlugin），这是理解一切的基础；第三单元以数学公式为范例引入 WidgetType+Decoration.replace 的渲染模式，并说明行内用 ViewPlugin、块级必须用 StateField 的关键区别；第四单元按\"解析↔序列化↔渲染↔可编辑\"的顺序讲表格子系统；第五单元把代码块放到专家层，因为它是当前最复杂的模块（auto/toggle/inline 三种交互、Canvas 点击定位、HAST 高亮、源码模式切换）；第六单元讲图片（异步加载+双缓存+路径安全）与链接（URL 净化+Wiki 链接）；最后第七单元回到主题、测试、整体架构取舍与自定义插件开发。依赖关系设计为先核心机制后特性模块，先简单（math/table）后复杂（codeBlock），代码块作为压轴专家内容。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识项目并跑起来",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与功能总览",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 codemirror-live-markdown 是什么：一个为 CodeMirror 6 提供 Obsidian 风格 Live Preview 的模块化插件集合，以及它的核心功能、版本演进和模块化设计理念。",
+          "learning_goals": [
+            "理解 Live Preview（实时预览）与源码模式、阅读模式的区别",
+            "掌握项目的模块化、零强制依赖、按需引入的核心理念",
+            "了解项目从 v0.1 到 v0.5 的功能演进路线"
+          ],
+          "source_files": [
+            "README.md",
+            "ROADMAP.md",
+            "CHANGELOG.md"
+          ],
+          "minimal_modules": [
+            "Live Preview 概念",
+            "模块化插件集合",
+            "版本路线与功能矩阵"
+          ],
+          "practice_task": "阅读 README 的功能矩阵表，列出当前版本支持的全部特性，并用一句话说明每个特性对应的扩展点（core 还是 optional）。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "源码目录结构与库入口",
+          "order": 2,
+          "filename": "u1-l2-source-structure-and-entry.md",
+          "level": "beginner",
+          "topic": "讲解 src 目录的组织（core/plugins/widgets/utils/theme）以及 src/index.ts 作为统一导出入口如何把所有扩展、工具、类型汇聚给使用者。",
+          "learning_goals": [
+            "熟悉 src 下 core/plugins/widgets/utils/theme 五个分层各自的职责",
+            "看懂 src/index.ts 如何分类导出（Core / Plugins / Theme / Utils）",
+            "理解 peerDependencies 与可选依赖（katex/lowlight）的作用"
+          ],
+          "source_files": [
+            "src/index.ts",
+            "package.json",
+            "tsconfig.json"
+          ],
+          "minimal_modules": [
+            "src 分层结构",
+            "index.ts 统一导出",
+            "peerDependencies 与可选依赖"
+          ],
+          "practice_task": "在 src/index.ts 中追踪 livePreviewPlugin、mathPlugin、codeBlockField、imageField 分别来自哪个子模块文件，画一张导出关系图。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建、测试与运行 demo",
+          "order": 3,
+          "filename": "u1-l3-build-test-run-demo.md",
+          "level": "beginner",
+          "topic": "讲解如何使用 npm scripts 进行开发：tsup 构建（ESM+CJS+dts）、Vitest 测试（jsdom 环境）、以及如何启动 demo 查看真实效果，并介绍 CI 流程。",
+          "learning_goals": [
+            "掌握 npm run dev/build/test/typecheck/lint 各脚本的作用",
+            "理解 tsup 配置如何产出多格式包并 external 掉 CodeMirror 依赖",
+            "学会在本地跑起 demo 看到五种编辑器配置"
+          ],
+          "source_files": [
+            "package.json",
+            "tsup.config.ts",
+            "vitest.config.ts",
+            ".github/workflows/ci.yml"
+          ],
+          "minimal_modules": [
+            "tsup 构建配置",
+            "Vitest + jsdom",
+            "CI 矩阵（Node 18/20）"
+          ],
+          "practice_task": "运行 npm install && npm test 确认测试通过，再进入 demo 目录运行 npm run dev，在浏览器中打开页面确认 5 个编辑器都能渲染。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "快速集成：搭建第一个 Live Preview 编辑器",
+          "order": 4,
+          "filename": "u1-l4-first-live-preview-editor.md",
+          "level": "beginner",
+          "topic": "基于 README 的 Quick Start 和 demo/main.ts，讲解如何在任意 CodeMirror 6 编辑器中接入库，重点说明 collapseOnSelectionFacet、mouseSelectingField 与 mousedown/mouseup 派发 setMouseSelecting 的必备接线。",
+          "learning_goals": [
+            "掌握核心扩展的最小组合（livePreviewPlugin + markdownStylePlugin + editorTheme + facet + mouseSelectingField）",
+            "理解为什么必须手动监听 mousedown/mouseup 并派发 setMouseSelecting",
+            "学会用 Compartment 在 Live/Source 模式间动态切换"
+          ],
+          "source_files": [
+            "README.md",
+            "demo/main.ts",
+            "demo/vite.config.ts",
+            "demo/index.html"
+          ],
+          "minimal_modules": [
+            "EditorState + EditorView 初始化",
+            "扩展组合",
+            "mouseSelecting 接线"
+          ],
+          "practice_task": "仿照 demo/main.ts，新建一个最小 HTML 页面，挂载一个 CodeMirror 编辑器，启用 livePreviewPlugin 并正确接线 mouseSelecting，输入 **粗体** 观察标记在光标进入时显隐。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "Live Preview 核心机制",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "CodeMirror 6 核心概念速览",
+          "order": 1,
+          "filename": "u2-l1-codemirror6-core-concepts.md",
+          "level": "intermediate",
+          "topic": "为后续读源码铺垫 CodeMirror 6 的核心概念：EditorState、EditorView、Transaction、Decoration（mark/replace/widget/line）、StateField、ViewPlugin、Facet、Compartment，以及 Lezer 语法树 syntaxTree。",
+          "learning_goals": [
+            "理解 EditorState 不可变模型与 Transaction 更新机制",
+            "区分 ViewPlugin 与 StateField 提供装饰的两种方式",
+            "掌握 Decoration 的四种类型（mark/replace/widget/line）及各自用途",
+            "了解 syntaxTree 节点迭代如何驱动 Markdown 解析"
+          ],
+          "source_files": [
+            "CODEMIRROR_LIVE_PREVIEW_DESIGN.md",
+            "src/index.ts"
+          ],
+          "minimal_modules": [
+            "EditorState/View/Transaction",
+            "Decoration 四类型",
+            "ViewPlugin vs StateField",
+            "syntaxTree"
+          ],
+          "practice_task": "阅读设计文档的架构概览章节，写一段话解释：为什么块级装饰（block decoration）必须通过 StateField 而不能通过 ViewPlugin 提供。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "shouldShowSource：显示源码还是渲染",
+          "order": 2,
+          "filename": "u2-l2-should-show-source.md",
+          "level": "intermediate",
+          "topic": "深入讲解整个 Live Preview 的决策核心函数 shouldShowSource：它依据 collapseOnSelectionFacet 是否启用、mouseSelectingField 是否在拖拽、选区是否与目标区间相交，决定一段 Markdown 是显示源码还是渲染结果。",
+          "learning_goals": [
+            "读懂 shouldShowSource 的三个判定步骤及其短路逻辑",
+            "理解光标/选区与元素区间的相交判定（range.from <= to && range.to >= from）",
+            "明白拖拽时返回 false（不显示源码）以避免闪烁的原因"
+          ],
+          "source_files": [
+            "src/core/shouldShowSource.ts",
+            "src/core/__tests__/shouldShowSource.test.ts"
+          ],
+          "minimal_modules": [
+            "collapseOnSelectionFacet",
+            "mouseSelectingField",
+            "选区相交判定"
+          ],
+          "practice_task": "编写一个独立的小函数测试：给定文档 'Hello **world** test'，构造光标分别在位置 5、10、以及选区 4-12 的 EditorState，断言 shouldShowSource 对区间 (6,15) 的返回值符合预期。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "状态支撑：Facet、mouseSelecting 与 checkUpdateAction",
+          "order": 3,
+          "filename": "u2-l3-facet-mouseSelecting-updatehelper.md",
+          "level": "intermediate",
+          "topic": "讲解支撑 Live Preview 的三块核心状态：collapseOnSelectionFacet（开关）、mouseSelectingField（拖拽状态 StateField + setMouseSelecting Effect）、checkUpdateAction（统一判断 ViewPlugin 何时 rebuild/skip/none）。",
+          "learning_goals": [
+            "掌握 Facet.define 的 combine 用法与开关语义",
+            "理解 StateField + StateEffect 的拖拽状态追踪模式",
+            "读懂 checkUpdateAction 如何用 docChanged/viewportChanged/drag/selection 推导更新动作"
+          ],
+          "source_files": [
+            "src/core/facets.ts",
+            "src/core/mouseSelecting.ts",
+            "src/core/pluginUpdateHelper.ts",
+            "src/core/__tests__/pluginUpdateHelper.test.ts"
+          ],
+          "minimal_modules": [
+            "Facet",
+            "StateField + StateEffect",
+            "checkUpdateAction 更新决策"
+          ],
+          "practice_task": "在 checkUpdateAction 的基础上，写一个表格说明：面对「文档改变/拖拽中/拖拽刚结束/选区改变/配置重置」五种情况时，函数分别返回什么动作，并解释理由。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "livePreviewPlugin：用 CSS 动画隐藏标记",
+          "order": 4,
+          "filename": "u2-l4-live-preview-plugin.md",
+          "level": "intermediate",
+          "topic": "讲解 livePreviewPlugin 如何遍历语法树找到标记节点（EmphasisMark/StrikethroughMark/CodeMark/HeaderMark/ListMark/QuoteMark），用 Decoration.mark 套 CSS 类，结合 shouldShowSource 决定是否加 visible 类，实现平滑显隐动画。",
+          "learning_goals": [
+            "理解标记节点（mark node）与内容节点的区别",
+            "掌握用 syntaxTree.iterate 过滤特定 node.name 的写法",
+            "看懂 isInsideSkippedParent 如何跳过 FencedCode/CodeBlock 内部的标记",
+            "理解为什么用 Decoration.mark+CSS 而非 Decoration.replace 来隐藏标记"
+          ],
+          "source_files": [
+            "src/plugins/livePreview.ts",
+            "src/core/shouldShowSource.ts",
+            "src/plugins/__tests__/livePreview.test.ts"
+          ],
+          "minimal_modules": [
+            "syntaxTree.iterate",
+            "Decoration.mark + CSS 类切换",
+            "isInsideSkippedParent"
+          ],
+          "practice_task": "修改（或在本地说明如何修改）livePreviewPlugin，新增对某个未处理的标记类型（如列表项的 '+' 标记）的隐藏，要求复用 shouldShowSource 与 CSS 类切换逻辑。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "markdownStylePlugin：为内容节点加样式",
+          "order": 5,
+          "filename": "u2-l5-markdown-style-plugin.md",
+          "level": "intermediate",
+          "topic": "讲解 markdownStylePlugin 如何遍历语法树为内容节点（ATXHeading1-6、StrongEmphasis、Emphasis、Strikethrough、InlineCode、Link）套样式类（cm-header-1、cm-strong 等），与 livePreviewPlugin 的职责分工，以及标题额外用 Decoration.line 装饰整行。",
+          "learning_goals": [
+            "理解 styleMap 如何把语法树节点名映射到 CSS 类",
+            "掌握 markdownStylePlugin 与 livePreviewPlugin 的关注点分离（内容样式 vs 标记隐藏）",
+            "看懂标题同时用 mark 和 line 两种装饰的写法"
+          ],
+          "source_files": [
+            "src/plugins/markdownStyle.ts",
+            "src/plugins/__tests__/markdownStyle.test.ts"
+          ],
+          "minimal_modules": [
+            "styleMap 节点→CSS 类映射",
+            "Decoration.mark 与 Decoration.line",
+            "职责分离"
+          ],
+          "practice_task": "参考 styleMap，新增一个样式映射（例如为 Task 列表项 - [ ] 套一个 cm-task 类），并说明 markdownStylePlugin 为什么不需要依赖 shouldShowSource。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "Widget 渲染机制与数学公式",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "WidgetType 与 Decoration.replace 渲染模式",
+          "order": 1,
+          "filename": "u3-l1-widgettype-and-decoration-replace.md",
+          "level": "intermediate",
+          "topic": "以 mathWidget 为范例，系统讲解 Live Preview 的第二种渲染策略：用 Decoration.replace 把一段 Markdown 替换成 WidgetType.toDOM 生成的真实 DOM，介绍 eq、ignoreEvent、block 等关键点。",
+          "learning_goals": [
+            "掌握 WidgetType 子类必须实现的 eq/toDOM/ignoreEvent",
+            "理解 Decoration.replace({widget, block}) 的用法与 block 装饰限制",
+            "明白 eq 为何能避免无谓重渲染"
+          ],
+          "source_files": [
+            "src/widgets/mathWidget.ts",
+            "src/plugins/math.ts"
+          ],
+          "minimal_modules": [
+            "WidgetType 生命周期",
+            "Decoration.replace + block",
+            "eq 相等性优化"
+          ],
+          "practice_task": "实现一个最简 WidgetType 子类（如把 ===text=== 替换成带下划线的 <u> 元素），正确实现 eq 与 toDOM，并用 Decoration.replace 应用它。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "mathPlugin：行内数学公式",
+          "order": 2,
+          "filename": "u3-l2-inline-math-plugin.md",
+          "level": "intermediate",
+          "topic": "讲解 mathPlugin 这个 ViewPlugin 如何识别行内公式（借助 InlineCode 节点且文本形如 `$...$` 的技巧），结合 shouldShowSource 在渲染 Widget 与显示源码（cm-math-source 标记）之间切换。",
+          "learning_goals": [
+            "理解为什么行内公式复用 InlineCode 节点而非自定义语法",
+            "掌握用 checkUpdateAction 驱动 ViewPlugin 更新的写法",
+            "看懂渲染态用 Decoration.replace、编辑态用 Decoration.mark 的双模式"
+          ],
+          "source_files": [
+            "src/plugins/math.ts",
+            "src/widgets/mathWidget.ts",
+            "src/core/shouldShowSource.ts"
+          ],
+          "minimal_modules": [
+            "InlineCode 节点技巧",
+            "ViewPlugin + checkUpdateAction",
+            "渲染/编辑双模式"
+          ],
+          "practice_task": "追踪代码：当光标进入一行内公式时，mathPlugin 会产出什么装饰？退出时又产出什么？用表格对照说明。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "blockMathField 与 mathCache：块级公式与 KaTeX 缓存",
+          "order": 3,
+          "filename": "u3-l3-block-math-and-cache.md",
+          "level": "intermediate",
+          "topic": "讲解块级公式用 StateField（blockMathField）而非 ViewPlugin 的原因，如何识别 ```math 围栏块并逐行加 cm-math-source-block 装饰，以及 mathCache 如何用 Map 缓存 KaTeX 渲染结果提升性能。",
+          "learning_goals": [
+            "理解块级装饰为何必须用 StateField（ViewPlugin 无法处理 block）",
+            "掌握 CodeInfo/CodeText 子节点提取围栏语言与代码文本的方法",
+            "看懂 mathCache 的键设计（'inline:src'/'block:src'）与缓存收益"
+          ],
+          "source_files": [
+            "src/plugins/math.ts",
+            "src/utils/mathCache.ts",
+            "src/widgets/mathWidget.ts"
+          ],
+          "minimal_modules": [
+            "blockMathField StateField",
+            "CodeInfo/CodeText 子节点",
+            "KaTeX 缓存键设计"
+          ],
+          "practice_task": "实现一个 clearMathCache 后的基准对照：在一份含重复公式的文档里，说明首次渲染与缓存命中时 renderMath 的调用路径差异，并解释为何缓存命中能显著降低 KaTeX 开销。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "表格子系统",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "tableParser 与 tableSerializer：表格的解析与序列化",
+          "order": 1,
+          "filename": "u4-l1-table-parser-and-serializer.md",
+          "level": "intermediate",
+          "topic": "讲解纯函数式的表格解析与序列化：parseMarkdownTable 把 GFM 表格文本解析成 TableData（headers/alignments/rows），serializeMarkdownTable 反向序列化，处理对齐、转义管道符、列数补齐。",
+          "learning_goals": [
+            "掌握 GFM 表格三要素（表头行/分隔行/数据行）的解析规则",
+            "理解对齐分隔行（:--- / ---: / :---: / ---）的解析与生成",
+            "看懂转义管道符 \\| 的占位替换处理与列数补齐逻辑"
+          ],
+          "source_files": [
+            "src/utils/tableParser.ts",
+            "src/utils/tableSerializer.ts",
+            "src/utils/__tests__/tableParser.test.ts"
+          ],
+          "minimal_modules": [
+            "parseMarkdownTable",
+            "serializeMarkdownTable",
+            "对齐与转义处理"
+          ],
+          "practice_task": "为一个不规整表格（某行单元格数多于表头）写出 parse→serialize 往返的预期输出，并验证序列化结果是否规整对齐。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "tableField：只读 GFM 表格渲染",
+          "order": 2,
+          "filename": "u4-l2-table-field-read-only.md",
+          "level": "intermediate",
+          "topic": "讲解 tableField（StateField）如何遍历语法树找 Table 节点，解析表格源码，结合 shouldShowSource 在 TableWidget 渲染与逐行 cm-table-source 源码态之间切换，以及 TableWidget 用 renderInlineMarkdown 渲染单元格内联格式。",
+          "learning_goals": [
+            "理解 tableField 的更新策略（docChanged/drag/selection 触发重建）",
+            "掌握 TableWidget.toDOM 构建 thead/tbody 并套用对齐样式的写法",
+            "了解 renderInlineMarkdown 工具如何在单元格内渲染粗体/斜体/行内代码"
+          ],
+          "source_files": [
+            "src/plugins/table.ts",
+            "src/widgets/tableWidget.ts",
+            "src/utils/inlineMarkdown.ts"
+          ],
+          "minimal_modules": [
+            "tableField StateField",
+            "TableWidget DOM 构建",
+            "renderInlineMarkdown"
+          ],
+          "practice_task": "说明：当光标进入一个表格时，装饰如何从 TableWidget 切换为逐行 cm-table-source？追踪 buildTableDecorations 的两个分支。",
+          "depends_on": [
+            "u3-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "tableEditorPlugin：可编辑表格与 source mode 切换",
+          "order": 3,
+          "filename": "u4-l3-table-editor-plugin.md",
+          "level": "intermediate",
+          "topic": "讲解 tableEditorPlugin 的可编辑表格方案：tableSourceModeField 用 setTableSourceMode Effect 跟踪每张表的源码态，TableEditorWidget 用 contenteditable 单元格，编辑后通过 commit 回调→serializeMarkdownTable→view.dispatch 把改动写回文档。",
+          "learning_goals": [
+            "掌握 setTableSourceMode StateEffect 与 rangesOverlap/addRange/removeRange 区间管理",
+            "理解 contenteditable 单元格的 focus/blur/Enter 提交时机",
+            "看懂单元格编辑如何经 serialize→dispatch 写回 Markdown 文档"
+          ],
+          "source_files": [
+            "src/plugins/tableEditor.ts",
+            "src/plugins/tableEditorEffects.ts",
+            "src/widgets/tableEditorWidget.ts",
+            "src/plugins/__tests__/tableEditor.test.ts"
+          ],
+          "minimal_modules": [
+            "tableSourceModeField + setTableSourceMode",
+            "contenteditable 单元格提交",
+            "序列化写回文档"
+          ],
+          "practice_task": "梳理一次单元格编辑的完整数据流：用户聚焦单元格→输入→失焦，列出每一步触发的回调、产生的 Effect/changes，以及最终文档如何被替换。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "代码块子系统（专家级）",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "codeHighlight：lowlight 集成与懒加载",
+          "order": 1,
+          "filename": "u5-l1-code-highlight-lowlight.md",
+          "level": "advanced",
+          "topic": "讲解 codeHighlight 工具如何用懒加载方式集成 lowlight：initHighlighter 异步初始化、isHighlighterAvailable 检查、highlightCode 返回 HTML、registerLanguage 注册额外语言，以及未安装 lowlight 时的优雅降级。",
+          "learning_goals": [
+            "理解 lowlight 模块的懒加载（动态 import）与同步/异步初始化策略",
+            "掌握 highlightCode 与 highlightCodeHast 的区别（HTML vs HAST）",
+            "看懂语言未注册或 lowlight 不可用时的降级处理"
+          ],
+          "source_files": [
+            "src/utils/codeHighlight.ts",
+            "src/utils/__tests__/codeHighlight.test.ts"
+          ],
+          "minimal_modules": [
+            "lowlight 懒加载",
+            "highlightCode vs highlightCodeHast",
+            "registerLanguage"
+          ],
+          "practice_task": "参照 README，编写一段调用 initHighlighter() 与 registerLanguage 注册一个新语言（如 rust）的代码，并说明在 lowlight 缺失时 highlightCode 会返回什么。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "codeBlockField：三种交互模式 auto/toggle/inline",
+          "order": 2,
+          "filename": "u5-l2-codeblock-field-interaction-modes.md",
+          "level": "advanced",
+          "topic": "讲解 codeBlockField 如何识别 FencedCode 节点、跳过 math 等特殊语言，并支持三种 interaction：auto（光标进入显示源码）、toggle（显式 MD/Code 按钮切换）、inline（保留围栏内代码可原生编辑），以及 codeBlockSourceModeField 跟踪源码态。",
+          "learning_goals": [
+            "理解 CodeInfo 提取语言、SKIP_LANGUAGES 跳过 math 的机制",
+            "掌握三种 interaction 模式的渲染与更新差异（auto 依赖 selection，toggle/inline 不重建）",
+            "看懂 setCodeBlockSourceMode Effect 与 codeBlockSourceModeField 的区间映射"
+          ],
+          "source_files": [
+            "src/plugins/codeBlock.ts",
+            "src/plugins/codeBlockEffects.ts"
+          ],
+          "minimal_modules": [
+            "FencedCode 识别与 SKIP_LANGUAGES",
+            "三种 interaction 模式",
+            "codeBlockSourceModeField"
+          ],
+          "practice_task": "对比 codeBlockField({interaction:'auto'}) 与 codeBlockEditorPlugin()（即 toggle），在文档变化、选区变化、拖拽时各自的 update 是否重建装饰，写一张决策表。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "codeBlockWidget：DOM 渲染、复制按钮与点击定位",
+          "order": 3,
+          "filename": "u5-l3-codeblock-widget-dom-interaction.md",
+          "level": "advanced",
+          "topic": "深入 codeBlockWidget 的 toDOM 实现：工具栏（MD/Code/Copy 按钮）、按行渲染带 data-line-index 的代码、ignoreEvent 与 mousedown/mouseup/click 冒泡控制、以及用 Canvas 二分查找精确计算点击落在源码的字符位置。",
+          "learning_goals": [
+            "掌握代码块 Widget 的 DOM 结构与按行高亮渲染",
+            "理解 ignoreEvent 与 stopBubbleForBody 如何控制事件冒泡以兼顾按钮点击与编辑",
+            "看懂 measureClickOffset 用 Canvas measureText + 二分查找把点击坐标映射到源码位置"
+          ],
+          "source_files": [
+            "src/widgets/codeBlockWidget.ts",
+            "src/widgets/__tests__/codeBlockWidget.test.ts"
+          ],
+          "minimal_modules": [
+            "toDOM 工具栏与按行渲染",
+            "事件冒泡控制",
+            "Canvas 点击定位"
+          ],
+          "practice_task": "说明 measureClickOffset 在 Canvas 不可用时如何退化为按字号估算字符宽度，并解释为什么需要把点击位置精确映射回源码 pos 才能让光标落在正确字符。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "inline 模式：保留 contentDOM 的可编辑高亮",
+          "order": 4,
+          "filename": "u5-l4-inline-mode-hast-highlight.md",
+          "level": "advanced",
+          "topic": "讲解 inline 交互模式的特殊性：只替换围栏行而把代码内容留在 contentDOM 内可原生编辑，用 highlightCodeHast 产出 HAST 树再经 hastToMarkDecorations 转成 Decoration.mark 高亮，并用 codeBlockSelectionPlugin 给选区加 cm-codeblock-sel 标记。",
+          "learning_goals": [
+            "理解 inline 模式为何只替换围栏行、保留代码文本在 contentDOM",
+            "掌握 highlightCodeHast + hastToMarkDecorations 把语法树节点转成 mark 装饰的递归遍历",
+            "看懂 codeBlockSelectionPlugin 如何用 Decoration.mark 处理行内选区高亮"
+          ],
+          "source_files": [
+            "src/plugins/codeBlock.ts",
+            "src/widgets/codeBlockWidget.ts",
+            "src/utils/codeHighlight.ts"
+          ],
+          "minimal_modules": [
+            "inline 装饰策略",
+            "HAST → mark 装饰",
+            "codeBlockSelectionPlugin"
+          ],
+          "practice_task": "对比 inline 模式与 auto 模式：分别说明代码内容是存在于 Widget DOM 还是 contentDOM，以及高亮是通过 innerHTML 还是 Decoration.mark 实现，列出各自优劣。",
+          "depends_on": [
+            "u5-l2",
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "图片与链接",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "imageField：图片预览与加载状态",
+          "order": 1,
+          "filename": "u6-l1-image-field-preview.md",
+          "level": "intermediate",
+          "topic": "讲解 imageField（StateField）如何用正则解析 ![alt](url) 语法，结合 shouldShowSource 在 ImageWidget 渲染与 cm-image-source 源码态之间切换，以及 ImageWidget 的 loading/error 状态与异步加载渲染。",
+          "learning_goals": [
+            "理解 parseImageSyntax 的正则与 isLocal 判定",
+            "掌握 ImageWidget.toDOM 的 loading→loaded/error 状态机",
+            "看懂 shouldShowSource 控制图片渲染态与源码态切换"
+          ],
+          "source_files": [
+            "src/plugins/image.ts",
+            "src/widgets/imageWidget.ts",
+            "src/plugins/__tests__/image.test.ts"
+          ],
+          "minimal_modules": [
+            "imageField StateField",
+            "ImageWidget 状态机",
+            "shouldShowSource 双模式"
+          ],
+          "practice_task": "追踪一张远程图片从被解析到加载完成的完整过程：列出 parseImageSyntax、createImageWidget、loadImage 各自的职责与触发顺序。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "imageLoader：异步加载、双缓存与路径安全",
+          "order": 2,
+          "filename": "u6-l2-image-loader-cache-security.md",
+          "level": "intermediate",
+          "topic": "讲解 imageLoader 工具：loadImage 的异步加载与超时保护、双缓存（imageCache 成功结果 + loadingPromises 去重）、resolveImagePath 对相对路径与路径穿越（../）的净化处理，以及为何失败结果不缓存。",
+          "learning_goals": [
+            "理解双缓存如何避免重复请求与重复渲染",
+            "掌握 resolveImagePath 对 data:/http(s) 与相对路径的不同处理及安全净化",
+            "看懂失败不缓存、允许重试的设计取舍"
+          ],
+          "source_files": [
+            "src/utils/imageLoader.ts",
+            "src/utils/__tests__/imageLoader.test.ts"
+          ],
+          "minimal_modules": [
+            "loadImage + 超时",
+            "双缓存（结果 + Promise）",
+            "resolveImagePath 路径安全"
+          ],
+          "practice_task": "设计一个测试场景：连续两次 loadImage 同一 src，验证第二次命中 imageCache；再对含 ../ 的相对路径调用 resolveImagePath，说明净化后的输出。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "linkPlugin：链接渲染、Wiki 链接与 URL 安全",
+          "order": 3,
+          "filename": "u6-l3-link-plugin-and-security.md",
+          "level": "intermediate",
+          "topic": "讲解 linkPlugin（ViewPlugin）如何渲染标准链接 [text](url) 与 Lezer 不支持的 Wiki 链接 [[target|display]]（用正则全文扫描），跳过代码块，并用 isSafeUrl/sanitizeUrl 拦截 javascript:/vbscript: 等危险协议。",
+          "learning_goals": [
+            "理解标准链接与 Wiki 链接的两种解析路径（语法树 vs 正则扫描）",
+            "掌握 SKIP_PARENT_TYPES 跳过代码块/行内代码的范围收集",
+            "看懂 URL 危险协议过滤与 encodeURI 净化的安全实践"
+          ],
+          "source_files": [
+            "src/plugins/link.ts",
+            "src/widgets/linkWidget.ts",
+            "src/plugins/__tests__/link.test.ts"
+          ],
+          "minimal_modules": [
+            "标准链接 vs Wiki 链接解析",
+            "skipRanges 代码块跳过",
+            "URL 净化与危险协议拦截"
+          ],
+          "practice_task": "构造三个链接测试用例（含 javascript: 危险协议、普通 http 链接、Wiki 链接），分别说明 parseLinkSyntax/parseWikiLink 与 sanitizeUrl 的处理结果。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "主题、测试、架构与二次开发",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "editorTheme：CSS 变量主题与标记动画",
+          "order": 1,
+          "filename": "u7-l1-editor-theme-css-variables.md",
+          "level": "advanced",
+          "topic": "讲解 editorTheme 如何用 EditorView.theme 定义样式：基于 HSL CSS 变量（--md-heading/--md-bold/--md-link 等，带 fallback）实现可定制主题，以及标记的 max-width/font-size 过渡动画、图片 spinner 与公式淡入动画。",
+          "learning_goals": [
+            "掌握 EditorView.theme 的对象式样式定义语法",
+            "理解 CSS 变量 + fallback 如何让主题可外部定制（含暗色模式由外部覆盖变量）",
+            "看懂行内/块级标记用 max-width/font-size 过渡而非 display:none 的动画技巧"
+          ],
+          "source_files": [
+            "src/theme/default.ts",
+            "src/theme/__tests__/default.test.ts"
+          ],
+          "minimal_modules": [
+            "EditorView.theme",
+            "HSL CSS 变量与 fallback",
+            "标记过渡动画"
+          ],
+          "practice_task": "通过覆盖 CSS 变量实现一套暗色主题（修改 --foreground/--background/--primary 等），说明为什么不需要改动 editorTheme 源码即可换肤。",
+          "depends_on": [
+            "u2-l4",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "测试策略：用 Vitest + jsdom 测试 ViewPlugin 与 Widget",
+          "order": 2,
+          "filename": "u7-l2-testing-strategy-vitest-jsdom.md",
+          "level": "advanced",
+          "topic": "讲解项目的测试方法：Vitest + jsdom 环境，如何构造 EditorView、用捕获装饰的插件验证 ViewPlugin 行为、mock navigator.clipboard 与 loadImage、以及用 widget.eq 验证重渲染优化。",
+          "learning_goals": [
+            "掌握在 jsdom 中创建 EditorView 并验证装饰的测试套路",
+            "理解如何 mock clipboard 与异步 loadImage 以获得确定性测试",
+            "看懂 widget.eq 相等性测试如何对应 CodeMirror 的重渲染优化"
+          ],
+          "source_files": [
+            "vitest.config.ts",
+            "src/widgets/__tests__/codeBlockWidget.test.ts",
+            "src/plugins/__tests__/livePreview.test.ts",
+            "src/core/__tests__/shouldShowSource.test.ts"
+          ],
+          "minimal_modules": [
+            "Vitest + jsdom",
+            "EditorView 构造与装饰捕获",
+            "mock clipboard/loadImage",
+            "widget.eq 测试"
+          ],
+          "practice_task": "为 renderInlineMarkdown 或 parseLinkSyntax 选一个，参考现有 __tests__ 风格补一个边界用例测试（如空输入、危险协议），运行 npm test 确认通过。",
+          "depends_on": [
+            "u2-l4",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "整体架构与设计取舍",
+          "order": 3,
+          "filename": "u7-l3-architecture-and-tradeoffs.md",
+          "level": "advanced",
+          "topic": "基于设计文档回顾整体架构：三种视图模式（reading/live/source）、数据流（用户动作→Transaction→State→装饰→DOM）、Decoration 两种策略的取舍、ViewPlugin vs StateField 的选择、以及性能优化（拖拽跳过重建、KaTeX/图片缓存）。",
+          "learning_goals": [
+            "掌握整个库从输入到 DOM 的数据流与各层职责",
+            "理解 mark+CSS 与 replace+Widget 两种装饰策略的适用场景与取舍",
+            "总结 ViewPlugin/StateField/Widget/Facet 各自承担的架构角色"
+          ],
+          "source_files": [
+            "CODEMIRROR_LIVE_PREVIEW_DESIGN.md",
+            "src/index.ts",
+            "src/core/shouldShowSource.ts"
+          ],
+          "minimal_modules": [
+            "三视图模式与数据流",
+            "两种装饰策略取舍",
+            "性能优化手段"
+          ],
+          "practice_task": "写一篇 300 字左右的小结：如果要用一句话概括这个库的架构核心，你会怎么说？并指出 shouldShowSource 在其中扮演的",
+          "依赖": "节点",
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "二次开发：编写自己的 Live Preview 插件",
+          "order": 4,
+          "filename": "u7-l4-custom-plugin-development.md",
+          "level": "advanced",
+          "topic": "综合前述知识，指导读者编写一个自定义 Live Preview 插件：复用 shouldShowSource/checkUpdateAction/WidgetType 与现有工具，从识别语法节点到产出装饰，完整走一遍开发流程。",
+          "learning_goals": [
+            "掌握自定义插件从需求分析到装饰产出的完整步骤",
+            "学会复用 core 机制（shouldShowSource、checkUpdateAction、mouseSelecting）保证与原生体验一致",
+            "理解如何在 src/index.ts 导出并在 demo 中验证自定义扩展"
+          ],
+          "source_files": [
+            "src/plugins/livePreview.ts",
+            "src/plugins/link.ts",
+            "src/widgets/linkWidget.ts",
+            "src/core/shouldShowSource.ts"
+          ],
+          "minimal_modules": [
+            "自定义插件开发流程",
+            "复用 core 机制",
+            "导出与 demo 验证"
+          ],
+          "practice_task": "实现一个自定义 Live Preview 插件：把 Markdown 的 ==高亮== 文本用 Decoration.replace 替换成 <mark> 元素，光标进入时显示源码，并复用 shouldShowSource 与 checkUpdateAction；在 demo 中接入验证。",
+          "depends_on": [
+            "u7-l3",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
