@@ -2,305 +2,330 @@
 
 ## 1. 本讲目标
 
-本讲是测试单元 U9 的第二篇，承接 u9-l1（你已经知道项目用 Chisel 6 的 `EphemeralSimulator` 而非 `chiseltest`，也熟悉了 `testUtil` 共享工具和 ChiselEnum 的 `peek` 技巧）。本讲把视角从「怎么写一个 spec」拉远到「整个测试套件长什么样、怎么只跑其中一个、远端 CI 又是怎么自动跑全部的」。
+上一讲(u9-l1)我们掌握了**怎么写**一个 Chisel 6 测试:`EphemeralSimulator`、`poke/step/peek/expect` 四原语、ChiselEnum 用 `peek().litValue` 间接比较、用 `NpuAssembler` 构造指令字。
 
-学完后你应该能够：
+本讲把视角从「单条测试」拉到「整个测试体系」和「自动化流水线」。读完本讲你应当能够:
 
-- 看懂 `src/test/scala` 下「与源码目录镜像」的测试组织方式，并区分单元测试与集成测试。
-- 用 `tool/test-specific-spec.sh` 只跑某个 Spec，并借助 `-oDT` 输出对比不同 spec 的耗时。
-- 逐行解释 `.github/workflows/actions.yml`，说出 CI 在 push 到 `main` 时执行的确切命令序列。
-- 区分「CI 里直接调 sbt」与「本地用 make 包一层 docker」这两条路径的差异。
+1. 看懂 `src/test/scala` 下测试目录与 `src/main/scala` 源码目录的**镜像组织**,知道某个模块的测试该放哪、去哪找。
+2. 区分**单元测试**(如 `InstrDecoderSpec`)与**集成测试**(如 `NCoreBackendQuantSpec`),理解二者在 elaborate(精细化)成本上的巨大差距。
+3. 用 `tool/test-specific-spec.sh <全限定类名>` 只跑一个 Spec,并用 `-oDT` 输出对比单测与集成测试的耗时。
+4. 逐行读懂 `.github/workflows/actions.yml`,说出 push 到 `main` 时 CI 执行的确切命令序列,并知道如何在本地复现 CI 失败。
 
 ## 2. 前置知识
 
-- **EphemeralSimulator**：Chisel 6 自带的「用完即弃」仿真器，每次 `simulate(new Module)` 都会现场 elaborate → firtool 编译 → verilator 仿真（详见 u9-l1）。这带来一个重要后果：**每个 `simulate(...)` 调用都有一笔固定的「编译 + elaborate」开销**，被测模块越大，这笔开销越高。本讲讲耗时对比时，根因就在这里。
-- **sbt（Scala Build Tool）**：项目的构建工具。`sbt run` 运行 `top.Main` 把设计 elaborate 成 `top.sv`；`sbt test` 编译并运行所有 `*Spec`；`sbt "testOnly <类名>"` 只跑指定的 Spec。
-- **Docker 镜像 `fangruil/chisel-dev:amd64`**：打包好 firtool 1.62.1、verilator v5.036、SystemC 3.0.1 以及 `publishLocal` 过的 Chisel 6.7.0，保证「同一套工具链」在任何机器上可复现（详见 u1-l2）。
-- **GitHub Actions**：GitHub 内置的 CI（持续集成）服务，用 YAML 文件描述「什么事件触发、在什么环境里跑哪些命令」。
+- **sbt**:Scala 的构建工具,chisel-npu 用它编译 Scala/Chisel、跑测试。`sbt test` 跑全部测试,`sbt "testOnly <类名>"` 只跑指定类。
+- **elaborate(精细化)成本**:上一讲讲过,`EphemeralSimulator` 是「用完即弃」的——每个 `simulate(new Module){...}` 都要现场把 Chisel 翻译成 FIRRTL、再经 `firtool` 编译成 Verilog、再由 verilator 编译成可仿真二进制。**DUT(被测设计)越大,这一次 elaborate 越慢**。这是本讲理解「单测快、集成测试慢」的根本原因。
+- **AnyFlatSpec**:ScalaTest 提供的测试风格,`"X" should "Y" in { ... }` 是一个测试用例。chisel-npu 全部 Spec 都继承自它。
+- **GitHub Actions**:GitHub 内置的 CI 服务,用一个 YAML 文件描述「什么事件触发、跑哪些步骤」。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
 |:---|:---|
-| `src/test/scala/isa/InstrDecoderSpec.scala` | 译码器单元测试，本讲作为「单测」代表逐段精读 |
-| `src/test/scala/backend/NCoreBackendQuantSpec.scala` | 后量化集成测试，本讲作为「集成测试」代表逐段精读 |
-| `.github/workflows/actions.yml` | CI 流水线定义：触发条件 + Lint/Build/Test 三个 job |
-| `tool/test-specific-spec.sh` | 只跑某一个 Spec 的快捷脚本 |
-| `tool/test-all.sh` | 跑全部测试（等价于 `make test`） |
-| `build.sbt` | 含 `-oDT` 测试选项，控制 spec 耗时输出 |
-| `Makefile` | 本地 `test` 目标，把 sbt 包进 docker |
-| `AGENTS.md` | 仓库给 agent 的权威说明，含测试与 CI 段落 |
+| `src/test/scala/**/*.scala` | 整个测试树,本讲关注它的**目录组织**而非单个实现 |
+| `src/test/scala/isa/InstrDecoderSpec.scala` | 单元测试样板:只 elaborate 小模块、纯组合、多 `simulate` 块 |
+| `src/test/scala/backend/NCoreBackendQuantSpec.scala` | 集成测试样板:elaborate 整个 `NCoreBackend`,把所有子用例**合并进一个** `simulate` 块以省 elaborate 成本 |
+| `build.sbt` | 定义 `-oDT` 测试选项(按耗时排序打印每条用例) |
+| `tool/test-specific-spec.sh` | 单测快捷脚本:`docker run ... sbt "testOnly $1"` |
+| `tool/test-all.sh` | 等价于 `make test`:`docker run ... sbt test` |
+| `.github/workflows/actions.yml` | CI 流水线定义:Lint→Build→Test 三段 |
+| `AGENTS.md` | 仓库的「防猜错」说明,其中 `Single-test shortcut`(L24)与 `CI`(L130)两节是本讲的权威摘要 |
+| `Makefile` | 本地开发的薄封装,把 sbt 命令包进 `docker run` |
 
 ## 4. 核心概念与源码讲解
 
-本讲按三个最小模块展开：先看测试套件的目录组织与分层（4.1），再看只跑单测的快捷方式与耗时输出（4.2），最后解析 CI 流水线（4.3）。
-
-### 4.1 测试套件的镜像目录组织与分层
+### 4.1 测试目录与源码目录的镜像组织
 
 #### 4.1.1 概念说明
 
-一个 NPU 项目写到 20 个测试文件时，最怕的不是测试本身，而是「找」。chisel-npu 用一个非常朴素但有效的约定解决这个问题：**测试目录树和源码目录树长得一模一样（镜像）**。
+chisel-npu 的测试代码**不是**随便堆在一个 `test/` 里,而是严格**镜像**`src/main/scala` 的目录结构:源码在 `src/main/scala/alu/vec/vec.scala`,它的测试就放在 `src/test/scala/alu/vec/` 下;源码在 `src/main/scala/backend/SimpleBackend.scala`,测试就在 `src/test/scala/backend/` 下。
 
-源码里 `src/main/scala/alu/pe/procElem.scala` 定义了 PE，那么它的测试就放在 `src/test/scala/alu/pe/PESpec.scala`——把 `main` 换成 `test`，文件名换成 `<模块名>Spec.scala`，路径其余部分保持不变。这样你看到任何一个源文件，闭着眼睛也能推出它的测试在哪里（如果有的话）。
+这种镜像约定有两个好处:
 
-在镜像之上，还有一条「**分层**」的隐含约定：能被某个模块单独验证的，写成**单元测试（unit test）**；只有把多个模块组装起来才能验证的，写成**集成测试（integration test）**。这两层落在不同的目录里。
+- **可发现性**:想找某个模块的测试,直接把路径里的 `main` 换成 `test` 即可;反之看测试就知道它在测哪个源码模块。
+- **包名一致性**:Scala 的 `package` 声明要和目录路径对应。镜像目录保证了被测类与测试类在同一个 Scala 包里,测试可以直接访问包内成员,无需跨包导入。
+
+注意一个细节:`src/main/scala/top/top.scala`(顶层 elaborate 入口)和 `src/main/scala/utils/gates.scala`、`src/main/scala/sram/spm.scala`、`sreg.scala` 在测试侧**没有对应 Spec**——不是所有源码都必须有测试,但有的模块(如 `top`)本身只是组装、不值得单独测。
 
 #### 4.1.2 核心流程
 
-镜像与分层的判定流程：
+镜像目录下的文件分两类:
 
-1. 拿到一个源码文件，比如 `src/main/scala/alu/vec/vec.scala`。
-2. 想找它的测试 → 去掉 `main`，改成 `src/test/scala/alu/vec/`，找 `VALU*Spec.scala`。
-3. 判断它是单元还是集成：
-   - 若被测对象是**单个模块**（PE、DataFeeder、VALU、InstrDecoder、MultiWidthRegisterBlock、MMALU），即单元测试。
-   - 若被测对象是**完整后端 `NCoreBackend`**（译码器 + 寄存器堆 + MMALU + VALU 全部连起来），即集成测试，固定落在 `backend/` 目录。
-4. 没有可测逻辑的（如 `top/top.scala` 只负责 elaborate）就不写测试。
+1. **Spec 类**:文件名以 `Spec` 结尾,含 `class XxxSpec extends AnyFlatSpec`,是真正的可执行测试。sbt 会自动发现并运行它们。
+2. **共享工具**:不含 `Spec`,是被各 Spec `import` 的辅助代码。chisel-npu 把它们放在 `src/test/scala/utils/` 下,归入 `testUtil` 包。
 
-用一张表概括整个 `src/test/scala` 树（共 20 个 `*Spec.scala`）：
+按目录清点的镜像关系(只列子目录,展示「源码→测试」一一对应):
 
-| 镜像源码目录 | 对应测试文件 | 层级 | 被测对象 |
-|:---|:---|:---:|:---|
-| `alu/pe/` | `PESpec.scala` | 单元 | 单个 PE（乘累加） |
-| `alu/mma/` | `MMALUSpec.scala`、`MMALUStreamReduceSpec.scala` | 单元 | MMALU 顶层（含 K×K 阵列） |
-| `alu/mma/sa/` | `DataFeederSpec.scala`、`DataCollectorSpec.scala` | 单元 | 阵列的数据馈送/收集 |
-| `alu/mma/cu/` | `CUSpec.scala` | 单元 | 控制单元 |
-| `alu/vec/` | 8 个 `VALU*Spec.scala`（Arith/Logic/MinMax/Reduce/Cast/FP32/Cvt/Activation/ProgrammableLut） | 单元 | VALU（K=8） |
-| `isa/` | `InstrDecoderSpec.scala` | 单元 | 组合译码器 |
-| `sram/` | `MultiWidthRegisterSpec.scala`、`RegisterSpec.scala` | 单元 | 多宽度寄存器堆 |
-| `backend/` | `NCoreBackendQuantSpec.scala`、`NCoreBackendGemmSoftmaxSpec.scala` | **集成** | 完整 `NCoreBackend` |
-| `utils/` | `printHelper.scala`、`widthHelper.scala` | — | 共享测试工具（**不是 Spec**） |
-| `top/` | （无） | — | `top.scala` 仅 elaborate，无可测逻辑 |
-
-注意两点：`utils/` 里的文件以 `Helper` 结尾而非 `Spec`，它们是 `testUtil` 包里的工具（见 u9-l1），sbt 不会把它们当测试跑；`top/` 在测试侧是空的，因为 `top.scala` 只做 elaborate、没有可断言的行为。
+```
+src/main/scala/                 src/test/scala/
+├── alu/                         ├── alu/
+│   ├── pe/   (procElem,basePE)  │   ├── pe/   (PESpec)
+│   ├── vec/  (vec,fp)           │   ├── vec/  (VALU*Spec × 9)
+│   └── mma/  (mma + sa/ + cu/)  │   └── mma/  (MMALU*Spec + sa/ + cu/)
+├── backend/ (SimpleBackend)     ├── backend/ (NCoreBackend*Spec × 2)
+├── isa/      (*Format/Decoder…)  ├── isa/      (InstrDecoderSpec)
+├── sram/     (register/…)        ├── sram/     (*RegisterSpec × 2)
+└── (utils, top: 无对应测试)       └── utils/    (共享工具,非 Spec)
+```
 
 #### 4.1.3 源码精读
 
-**单元测试代表：`InstrDecoderSpec`。** 它只实例化一个纯组合译码器 `InstrDecoder`，每一拍 `poke` 一个 32 位指令字、`step(0)` 求组合逻辑、再 `expect` 各字段。被测对象单一、规模小，是典型的单元测试。
+整个测试树一眼可见其规模与组织:[src/test/scala](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala) 目录下按 `alu / backend / isa / sram / utils` 五大子目录铺开,与源码侧一一对应。
 
-[src/test/scala/isa/InstrDecoderSpec.scala:11-24](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/isa/InstrDecoderSpec.scala#L11-L24) — 类继承 `AnyFlatSpec`，导入 `NpuAssembler._` 用汇编器构造指令字；`check` 辅助函数封装「poke 指令 → step(0) → 检查 illegal 与各解码字段」的标准套路。
+两个样板 Spec 的包声明印证了镜像约定:
 
-[src/test/scala/isa/InstrDecoderSpec.scala:44-50](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/isa/InstrDecoderSpec.scala#L44-L50) — 第一个测试用例「decode vadd VX」：在一个 `simulate(new InstrDecoder)` 里验证 `vadd` 的宽度、rd、rs1、rs2 被正确解码。
+- [src/test/scala/isa/InstrDecoderSpec.scala:L4-L4](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/isa/InstrDecoderSpec.scala#L4) —— `package isa`,与被测的 `src/main/scala/isa/instrDecoder.scala` 同包。
+- [src/test/scala/backend/NCoreBackendQuantSpec.scala:L11-L11](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/backend/NCoreBackendQuantSpec.scala#L11) —— `package backend`,与 `src/main/scala/backend/SimpleBackend.scala` 同包。
 
-[src/test/scala/isa/InstrDecoderSpec.scala:238-245](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/isa/InstrDecoderSpec.scala#L238-L245) — 「非法指令」测试：poke 一个保留 opcode `0x7F`，断言 `illegal` 被拉高。整个文件有二十多个这样的 `"X" should "Y" in` 用例，但每次只 elaborate 一个极小的组合模块。
-
-**集成测试代表：`NCoreBackendQuantSpec`。** 它不再测单个模块，而是实例化完整的 `NCoreBackend`（译码器 + 多宽度寄存器堆 + MMALU + VALU 全部连起来），通过外部读写端口灌数据、发指令、读结果，验证一条端到端流水线。
-
-[src/test/scala/backend/NCoreBackendQuantSpec.scala:1-9](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/backend/NCoreBackendQuantSpec.scala#L1-L9) — 文件头注释直接写明了集成测试要验证的七步后量化流水线（INT8 经 MMA 累加 → FP32 → 缩放加偏置 → 回 INT8），这正是「只有把模块组装起来才能验证」的场景。
-
-[src/test/scala/backend/NCoreBackendQuantSpec.scala:142-153](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/backend/NCoreBackendQuantSpec.scala#L142-L153) — 只有一个 `simulate(new NCoreBackend(K, N, 32))` 调用，却把 7 个子用例合并进同一个 DUT 实例（用 `withClue` 给每段标上下文）。被测对象是整颗后端，规模远大于译码器。
-
-一个需要诚实指出的细节：`runFullQuantSequence` 目前只断言整条量化流水线的每条指令**译码合法**（`!illegal_out`），并没有在 DUT 上做整条链的 bit-exact 数值比对；真正做 bit-exact 校验的是文件末尾那段**纯 Scala、无 DUT** 的属性测试：
-
-[src/test/scala/backend/NCoreBackendQuantSpec.scala:157-182](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/backend/NCoreBackendQuantSpec.scala#L157-L182) — 用 `FpRef`（封装 `java.lang.Float`）在纯 Scala 里镜像硬件的量化计算，断言与黄金参考在 1 ULP 内一致。它不经过仿真器，因此是「集成测试里的数值正确性兜底」。理解这一点有助于你正确估计集成测试的实际覆盖（承接 u7-l1 的结论）。
+而 `utils/` 下是工具不是测试:[src/test/scala/utils/printHelper.scala](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/utils/printHelper.scala) 与 `widthHelper.scala` 归在 `testUtil` 包,供各 Spec 共享(上一讲已介绍)。
 
 #### 4.1.4 代码实践
 
-**实践目标**：用「镜像约定」在源码与测试之间双向导航。
-
-1. 打开本仓库，找到 `src/main/scala/alu/mma/sa/dataFeeder.scala`。
-2. 按镜像约定推断它的测试文件路径（把 `main` 换成 `test`）。
-3. 打开推断出的路径，确认 `DataFeederSpec.scala` 确实存在。
-4. 反向练习：看到 `src/test/scala/sram/MultiWidthRegisterSpec.scala`，推出它测的是 `src/main/scala/` 下哪个文件。
-5. **需要观察的现象**：每一条推断都能在文件系统里命中，不需要搜索。
-6. **预期结果**：`dataFeeder.scala` → `src/test/scala/alu/mma/sa/DataFeederSpec.scala`；`MultiWidthRegisterSpec.scala` → `src/main/scala/sram/multiWidthRegister.scala`。
+1. **实践目标**:亲手验证镜像约定,养成「源码↔测试」来回跳转的肌肉记忆。
+2. **操作步骤**:
+   - 在仓库里打开 `src/main/scala/alu/vec/vec.scala`(VALU 源码)。
+   - 把路径中的 `main` 改成 `test`,进入 `src/test/scala/alu/vec/`,数一数这里有几个 `VALU*Spec`。
+   - 再对 `src/main/scala/alu/mma/` → `src/test/scala/alu/mma/` 做同样练习,注意 `mma/` 下还有 `sa/`、`cu/` 子目录的镜像。
+3. **需要观察的现象**:源码侧 `alu/vec/` 下只有 2 个 `.scala`(`vec.scala`、`fp.scala`),而测试侧 `alu/vec/` 下有 9 个 `VALU*Spec`——**测试粒度比源码更细**,一个源码模块可由多个 Spec 从不同角度覆盖。
+4. **预期结果**:能说出 VALU 的 9 个测试分别覆盖算术(`VALUArithSpec`)、逻辑、归约、LUT、激活、广播、FP32、CVT 等子能力。
+5. 命令耗时「待本地验证」。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 `top/` 在测试侧是空的？
+**练习 1**:`src/main/scala/sram/` 下有 `register.scala` 和 `multiWidthRegister.scala`,测试侧应该有几个 Spec?分别叫什么?
+**答案**:2 个——`src/test/scala/sram/RegisterSpec.scala`(测老的 `RegisterBlock`)和 `MultiWidthRegisterSpec.scala`(测 VX/VE/VR 别名的 `MultiWidthRegisterBlock`)。
 
-<details><summary>参考答案</summary>
-
-因为 `top.scala` 里的 `object Main` 只调用 `ChiselStage.emitSystemVerilog` 把设计 elaborate 成 `top.sv`，本身没有任何可断言的运行时行为（没有输入输出端口可以 poke/expect）。对一个「只做 elaborate」的对象写仿真测试没有意义，因此没有对应 Spec。
-</details>
-
-**练习 2**：`NCoreBackendQuantSpec` 为什么算集成测试而不是单元测试？
-
-<details><summary>参考答案</summary>
-
-它实例化的是 `new NCoreBackend(K, N, 32)`——完整的后端，内部把译码器、多宽度寄存器堆、MMALU、VALU 全部连起来。它要验证的是「这些模块组装后能否协同完成一条端到端量化流水线」，这种「跨模块协作」正是集成测试的职责；单元测试则只针对单个模块（如 `InstrDecoderSpec` 只测译码器）。
-</details>
+**练习 2**:为什么 `src/test/scala/utils/printHelper.scala` 不会在 `sbt test` 里被当成一个测试用例跑?
+**答案**:因为它的类名不以 `Spec` 结尾、也不 `extends AnyFlatSpec`,它只是 `testUtil` 包里的共享工具;sbt 只自动发现并运行符合约定的 Spec 类。
 
 ---
 
-### 4.2 单测快捷方式：test-specific-spec.sh 与耗时输出
+### 4.2 单元测试与集成测试的分层
 
 #### 4.2.1 概念说明
 
-`make test`（等价于 `sbt test`）会跑**全部** 20 个 Spec。但开发时你通常只想验证自己刚改的那个模块——比如改完译码器只想跑 `InstrDecoderSpec`。每次跑全套既慢又浪费，因为 EphemeralSimulator 对每个 `simulate(...)` 都要现场编译。
+chisel-npu 的测试自然分两层:
 
-项目提供了两个 shell 脚本解决这个问题。`tool/test-specific-spec.sh` 接收一个**全限定类名**（fully-qualified class name，即「包名.类名」），只跑那一个 Spec；`tool/test-all.sh` 则跑全部。
+- **单元测试**:只 elaborate 一个**小模块**(如 `InstrDecoder`、单个 `PE`、`VALU`),用例小、跑得快,定位精准。它们直接 `poke` 模块的 `io` 端口或 `ctrl` bundle。
+- **集成测试**:elaborate **多个模块连起来的整体**(如 `NCoreBackend` = 译码器 + 寄存器堆 + MMALU + VALU),验证它们协作的端到端行为。这类测试集中在 `src/test/scala/backend/`,以 `NCoreBackend*` 开头。
 
-此外，`build.sbt` 里悄悄配了一个测试选项 `-oDT`，它会在测试结束后**按耗时从慢到快打印每个用例的耗时**——这正是后面「对比单测与集成测试耗时」实践的数据来源。
+由于 `EphemeralSimulator` 每次 `simulate{}` 都要重新 elaborate + 编译,**集成测试的 DUT 远大于单元测试,elaborate 成本是主要的耗时来源**。这是本讲最重要的性能直觉,也直接决定了下一节「为什么要用单测快捷方式」。
 
 #### 4.2.2 核心流程
 
-只跑单测的执行链路：
+对比两种 Spec 的 elaborate 规模:
 
-1. 你在命令行敲：`tool/test-specific-spec.sh <全限定类名>`。
-2. 脚本把参数 `$1` 拼进 `sbt "testOnly $1"`。
-3. 整条命令在 `fangruil/chisel-dev:amd64` 容器里执行（容器内已备好 firtool/verilator/Chisel）。
-4. sbt 只编译并运行你指定的那一个 Spec 类。
-5. 测试结束后，`-oDT` 把该 Spec 内各用例的耗时排序输出。
+| 维度 | `InstrDecoderSpec`(单元) | `NCoreBackendQuantSpec`(集成) |
+|:---|:---|:---|
+| DUT | `new InstrDecoder`(纯组合译码器) | `new NCoreBackend(K=8, N=8, 32)`(完整后端,含 8×8 MMALU) |
+| 含寄存器/状态 | 无(组合逻辑) | 大量(寄存器堆 + PE 累加器 + 移位寄存器) |
+| 用例驱动 | 直接 poke `io.instr`,`step(0)` 看组合输出 | 写寄存器堆、发指令、`step()` 推进多拍、回读结果 |
+| elaborate 成本 | 极低 | 高(DUT 大几十倍) |
+| 典型耗时 | 秒级 | 显著更长 |
 
-关键点：传给脚本的必须是**全限定类名**，由 Scala 源文件顶部的 `package` 声明决定。比如 `InstrDecoderSpec.scala` 第 4 行 `package isa` → 全限定名 `isa.InstrDecoderSpec`；`NCoreBackendQuantSpec.scala` `package backend` → `backend.NCoreBackendQuantSpec`。
+集成测试为了对抗 elaborate 成本,有一个关键设计:**把所有子用例塞进同一个 `simulate{}` 块**,只为整个 `NCoreBackend` 付一次 elaborate 钱。单元测试则相反,每个用例自己开一个 `simulate{}` 也无所谓——因为它的 DUT 太小,elaborate 几乎免费。
 
 #### 4.2.3 源码精读
 
-[tool/test-specific-spec.sh:1](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/tool/test-specific-spec.sh#L1) — 整个脚本就一行：`docker run --rm --env SBT_OPTS="-Xmx8G -Xss2M" -v ${PWD}:/workspace/ fangruil/chisel-dev:amd64 sbt "testOnly $1"`。`$1` 是你传入的全限定类名；`--rm` 表示跑完即删容器；`-Xmx8G` 给 JVM 8GB 堆（大规模 elaborate 很吃内存）。
+**单元测试样板** —— `InstrDecoderSpec` 每个用例都独立 `simulate` 一个小译码器,且只做组合求值:
 
-[tool/test-all.sh:1](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/tool/test-all.sh#L1) — 同样一行，但跑的是 `sbt test`（全部），与 `Makefile` 的 `test` 目标等价。
+[src/test/scala/isa/InstrDecoderSpec.scala:L44-L50](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/isa/InstrDecoderSpec.scala#L44-L50) —— 一个典型用例:新建译码器、用 `NpuAssembler` 构造指令、poke 进去。
 
-[build.sbt:25](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/build.sbt#L25) — `Test / testOptions += Tests.Argument(TestFrameworks.ScalaTest, "-oDT")`。`-oDT` 是 ScalaTest 的 reporter 参数：`-o` 输出到标准输出，`D` 显示每个测试的 Duration（耗时），`T` 按耗时排序（慢的在前）。这一行决定了无论你跑单测还是全套，都能看到「谁最慢」。
+[src/test/scala/isa/InstrDecoderSpec.scala:L25-L30](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/isa/InstrDecoderSpec.scala#L25-L30) —— 用例的核心:`step(0)` 只求值组合逻辑(不推进寄存器),随即检查 `illegal` 标志。整个 Spec 有二十来个这样的小 `simulate` 块,因 DUT 极小而毫无压力。
 
-为什么 `NCoreBackendQuantSpec` 即便用例数少，单次 `simulate` 也很可能比 `InstrDecoderSpec` 的单次 `simulate` 慢得多？根因回到 EphemeralSimulator 的「按需现场编译」：`simulate(new NCoreBackend(8,8,32))` 要 elaborate 一颗含 8×8 脉动阵列、VALU、多宽度寄存器堆的完整后端，DUT 规模远大于 `simulate(new InstrDecoder)` 的单个组合模块，elaborate + firtool + verilator 三步的编译代价因此高得多。`-oDT` 会把这个差距量化出来。
+**集成测试样板** —— `NCoreBackendQuantSpec` 把全部子用例合并进**唯一一个** `simulate` 块:
+
+[src/test/scala/backend/NCoreBackendQuantSpec.scala:L142-L153](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/backend/NCoreBackendQuantSpec.scala#L142-L153) —— 只 `simulate(new NCoreBackend(K, N, 32))` **一次**,然后在里面依次调用 7 个 `runXxx` 子函数。每两个子用例之间用 `resetAddrs` 清零地址输入,防止状态串味。
+
+[src/test/scala/backend/NCoreBackendQuantSpec.scala:L32-L43](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/src/test/scala/backend/NCoreBackendQuantSpec.scala#L32-L43) —— `resetAddrs` 在子用例间复位所有地址输入,这是「共用一个 DUT」必须付出的纪律。
+
+此外该 Spec 还含一个**无 DUT 的纯 Scala 属性测试**(L157 起),完全绕开 elaborate,用 `FpRef` 参考模型校验量化数学——这是分层测试的另一种形态:把数值正确性与硬件仿真解耦。
+
+> 关于「量化链每步结果落在哪类寄存器」的细节,属于 u7-l1 的内容,本讲不展开,只关注它的**测试工程结构**。
 
 #### 4.2.4 代码实践
 
-**实践目标**：只跑单个 Spec，并用 `-oDT` 输出对比单元测试与集成测试的耗时。
-
-1. 确认本机已装 Docker（脚本依赖它），或已在容器/镜像内（见 u1-l2）。
-2. 跑译码器单测（全限定类名 `isa.InstrDecoderSpec`）：
-   ```
-   tool/test-specific-spec.sh isa.InstrDecoderSpec
-   ```
-3. 跑后量化集成测试（全限定类名 `backend.NCoreBackendQuantSpec`）：
-   ```
-   tool/test-specific-spec.sh backend.NCoreBackendQuantSpec
-   ```
-4. **需要观察的现象**：两次运行的末尾，ScalaTest 都会打印一段按耗时排序的用例列表（`-oDT` 的效果）。
-5. **预期结果**：
-   - 两条命令都应 PASS。
-   - `NCoreBackendQuantSpec` 里那条 `simulate(new NCoreBackend(...))` 的耗时，明显大于 `InstrDecoderSpec` 里单个 `simulate(new InstrDecoder)` 的耗时——因为前者的 DUT（完整后端含 8×8 阵列）规模大得多。
-   - 若你的环境无 Docker / 无 firtool，本步骤无法实际运行，标注「待本地验证」，但你仍可从「被测模块规模」推断耗时排序的合理性。
-
-> 提示：若想一次只跑某个 Spec 里的**某个用例**，可绕过脚本直接用 sbt 选择器，例如 `sbt "testOnly isa.InstrDecoderSpec -- -z "decode vadd VX""`（`-z` 按测试名子串过滤）。这是脚本未封装、但 sbt 原生支持的能力。
+1. **实践目标**:体会「共用 DUT」这一集成测试优化为何必要。
+2. **操作步骤**:
+   - 打开 `NCoreBackendQuantSpec.scala`,确认 L142 的 `simulate(new NCoreBackend(...))` 只出现一次,L145–L151 的 7 个子用例都在它内部。
+   - 在脑中做一个反事实推演:如果像 `InstrDecoderSpec` 那样给每个 `runXxx` 各开一个 `simulate(new NCoreBackend(...))`,会触发几次 elaborate?
+3. **需要观察的现象**:每多一次 `simulate(new NCoreBackend(...))`,就要重新 elaborate + firtool + verilator 编译一次完整后端(8×8 PE 阵列 + VALU + 寄存器堆)。
+4. **预期结果**:得出结论——7 次独立 elaborate 会让该 Spec 慢约一个数量级,所以作者把子用例合并;这是「DUT 越大、越要复用 elaborate」的通用策略。
+5. 实际耗时「待本地验证」(见 4.3 的计时实践)。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：你想只跑 `VALUArithSpec`，应该传给脚本的字符串是什么？依据是什么？
+**练习 1**:`InstrDecoderSpec` 里每个用例都新建一个 `simulate(new InstrDecoder){...}`,为什么这里不怕 elaborate 成本?
+**答案**:因为 `InstrDecoder` 是纯组合的小模块,无寄存器、无阵列,elaborate 与编译都几乎瞬时;而可读性上每个用例独立、互不污染状态,反而更清晰。
 
-<details><summary>参考答案</summary>
-
-`alu.vec.VALUArithSpec`。依据是该 Spec 源文件顶部的 `package` 声明（`package alu.vec`）加上类名 `VALUArithSpec`。sbt 的 `testOnly` 需要全限定类名来定位。
-</details>
-
-**练习 2**：如果不传任何参数直接跑 `tool/test-specific-spec.sh`，会发生什么？
-
-<details><summary>参考答案</summary>
-
-`$1` 为空，sbt 收到的命令变成 `sbt "testOnly "`，sbt 会报「没有指定测试」之类的错误而不会跑任何测试。脚本不做参数校验，需要调用者自己保证传入合法的全限定类名。
-</details>
+**练习 2**:为什么 `NCoreBackendQuantSpec` 要专门写一个 `resetAddrs` 并在子用例间调用它?
+**答案**:因为它让 7 个子用例共用同一个已 elaborate 的 DUT。前一个用例 poke 进去的地址/数据会残留在 DUT 的输入上,`resetAddrs` 把它们清零,避免「上一个用例的地址」污染下一个用例的行为。
 
 ---
 
-### 4.3 GitHub Actions CI 流水线解析
+### 4.3 tool/test-specific-spec.sh 单测快捷方式
 
 #### 4.3.1 概念说明
 
-CI（持续集成）的目标是：每次有人往仓库 push 代码、或提 PR，远端就自动在一个干净环境里把项目构建并测一遍，让「坏代码」在合并前就被挡住，而不是等下次某人本地 `make test` 时才暴雷。
+开发时跑 `sbt test`(全量)要编译并运行全部 20 个 Spec,其中集成测试很慢。绝大多数时候你只改了一个模块,只想跑**那一个** Spec。chisel-npu 提供了 `tool/test-specific-spec.sh`,一行命令在 Docker 里只跑指定的 Spec。
 
-chisel-npu 的 CI 定义在 `.github/workflows/actions.yml`，结构非常精简：三个按顺序执行的 job——**Lint**（检出冒烟）、**Build**（elaborate 出 SystemVerilog）、**Test**（跑全部测试）。后两个 job 在项目自带的 `fangruil/chisel-dev:amd64` 容器里直接调用 sbt，**不经过 `make`**——因为容器里已经把工具链备齐了，`make` 那层「docker 包装」是给开发者裸机用的。
+关键点:它接收的是**全限定类名**(fully qualified name),即「包名.类名」。因为 sbt 的 `testOnly` 是按类名匹配的,而 Scala 的类名必须连同包名才能唯一确定。
 
 #### 4.3.2 核心流程
 
-CI 在 push 到 `main`（或 `releases/**`）时的执行序列：
-
-1. **触发**：GitHub 检测到 `push` 到 `main`（或 `releases/**` 分支），也接受到这些分支的 `pull_request`。
-2. **Lint job**：在普通 `ubuntu-latest` 上 checkout 代码（一个轻量冒烟检查，确保仓库可检出）。
-3. **Build job**（依赖 Lint 成功）：在容器 `fangruil/chisel-dev:amd64` 里跑 `sbt run`——即 elaborate `top.Main` 生成 `top.sv`，验证「设计至少能综合出来」。
-4. **Test job**（依赖 Build 成功）：在同一容器里跑 `sbt test`——运行全部 20 个 Spec。
-5. 三个 job 由 `needs` 串成链：Lint → Build → Test，前一个失败后一个就不跑，实现「失败快速止损」。
+脚本本体只有一行,就是把 `sbt "testOnly $1"` 装进和 CI 一致的 Docker 镜像里执行:
 
 ```
-push/PR 到 main 或 releases/**
-        │
-        ▼
-   ┌────────┐  needs   ┌────────┐  needs   ┌────────┐
-   │  Lint  │ ───────▶ │ Build  │ ───────▶ │  Test  │
-   │ checkout│          │sbt run │          │sbt test│
-   │ (无容器) │          │(chisel │          │(chisel │
-   └────────┘           │ -dev容器)│          │ -dev容器)│
-                        └────────┘          └────────┘
+docker run --rm --env SBT_OPTS="-Xmx8G -Xss2M" \
+  -v ${PWD}:/workspace/ fangruil/chisel-dev:amd64 \
+  sbt "testOnly $1"
 ```
 
-一个设计要点：Build 先于 Test。这样如果改动把 elaborate 弄坏了（比如参数非法、Chisel 语法错），会在 Build 阶段快速失败，不必浪费时间去编译和跑那些注定跑不通的测试。
+调用方式(注意全限定类名):
+
+| 命令 | 跑什么 |
+|:---|:---|
+| `tool/test-specific-spec.sh isa.InstrDecoderSpec` | 只跑译码器单元测试 |
+| `tool/test-specific-spec.sh backend.NCoreBackendQuantSpec` | 只跑量化集成测试 |
+| `tool/test-all.sh`(或 `make test`) | 跑全部 Spec |
+
+配合 `build.sbt` 里的一项设置,sbt 还会**按耗时降序**打印每条用例的耗时,让你一眼看到谁最慢:
+
+[build.sbt:L25-L25](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/build.sbt#L25) —— `Test / testOptions += Tests.Argument(TestFrameworks.ScalaTest, "-oDT")`。其中 `-oDT` 让 ScalaTest 输出每条测试的耗时并排序(`D`=duration,`T`=按耗时排序),这正是本讲实践任务对比耗时的依据。
+
+AGENTS.md 把这个脚本作为权威的「日常单测」入口记录在案:
+
+[AGENTS.md:L24-L26](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/AGENTS.md#L24-L26) —— 「Single-test shortcut」一节:`tool/test-specific-spec.sh <fully.qualified.Spec>` 等价于镜像内的 `sbt "testOnly <Spec>"`。
 
 #### 4.3.3 源码精读
 
-[.github/workflows/actions.yml:1-10](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/.github/workflows/actions.yml#L1-L10) — 工作流名 `Chisel CI`；触发条件 `on: push` 到 `main` 与 `releases/**`，以及到这些分支的 `pull_request`。这意味着往 `main` 推、或在 PR 里改代码都会触发 CI。
+[tool/test-specific-spec.sh:L1-L1](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/tool/test-specific-spec.sh#L1) —— 整个脚本:用 `fangruil/chisel-dev:amd64` 镜像、把当前目录挂到 `/workspace`、设 `SBT_OPTS` 给 JVM 8G 堆内存,执行 `sbt "testOnly $1"`。`$1` 就是你传入的全限定类名。
 
-[.github/workflows/actions.yml:12-17](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/.github/workflows/actions.yml#L12-L17) — **Lint job**：跑在 `ubuntu-latest`，没有 `container` 字段，唯一的步骤是 `actions/checkout@v4`。它不构建也不测试，只是一个「仓库能被检出」的冒烟关卡。
+对照 [tool/test-all.sh:L1-L1](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/tool/test-all.sh#L1) —— 几乎相同,只是把 `sbt "testOnly $1"` 换成 `sbt test`,所以它等价于 `make test`。
 
-[.github/workflows/actions.yml:19-27](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/.github/workflows/actions.yml#L19-L27) — **Build job**：`needs: Lint`（Lint 过了才跑）；`container.image: fangruil/chisel-dev:amd64`（在项目自带镜像里跑）；步骤为 checkout 后执行 `sbt run`。这一步把 `top.Main` 跑出来、生成 `top.sv`，验证设计能 elaborate。
-
-[.github/workflows/actions.yml:29-37](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/.github/workflows/actions.yml#L29-L37) — **Test job**：`needs: Build`（Build 过了才跑）；同样在 `fangruil/chisel-dev:amd64` 容器里；步骤为 checkout 后执行 `sbt test`，运行全部 Spec。
-
-注意 CI 与本地的差异：CI 在容器内**直接** `sbt run` / `sbt test`；而本地的 `make test` / `make build` 是在宿主机上用 `docker run` 把 sbt 包一层（见 [Makefile:27-28](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/Makefile#L27-L28)）。这是因为 CI 的 job 本身就已经跑在那个容器里，不必再嵌一层；本地开发者则用 make 自动套上 docker。两条路径最终执行的 sbt 命令一致，所以「CI 能过、本地也能过」的可复现性由此保证。
-
-[AGENTS.md:130-132](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/AGENTS.md#L130-L132) — AGENTS.md 的 CI 段落把这条流水线总结为一句话：在 push/PR 到 `main` 或 `releases/**` 时，于 `fangruil/chisel-dev:amd64` 内先 `sbt run` 后 `sbt test`，并提示用 `make container` + `sbt run`/`sbt test` 本地复现失败。
+这两个脚本是 `Makefile` 的补充:`make test`(Makefile L27–L28)会跑全部测试,而你想只跑一个时就用 `test-specific-spec.sh`。
 
 #### 4.3.4 代码实践
 
-**实践目标**：逐行解释 CI 在 push 到 `main` 时执行的确切命令序列。
-
-1. 打开 `.github/workflows/actions.yml`。
-2. 假设你刚 `git push origin main`，按 job 顺序写下 GitHub Actions 实际执行的命令。
-3. 对每个 job，标明：运行环境（是否有 `container`）、依赖哪个前置 job、执行的 shell 命令。
-4. **需要观察的现象**：你能用一张表完整还原命令序列，不依赖任何额外文档。
-5. **预期结果**：
-
-   | 顺序 | Job | 依赖 | 运行环境 | 关键命令 |
-   |:---:|:---|:---|:---|:---|
-   | 1 | Lint | 无 | `ubuntu-latest`（无容器） | `actions/checkout@v4` |
-   | 2 | Build | Lint | 容器 `fangruil/chisel-dev:amd64` | `sbt run` |
-   | 3 | Test | Build | 容器 `fangruil/chisel-dev:amd64` | `sbt test` |
-
-6. 若想本地复现某个失败：`make container` 进入镜像交互式 shell，再手动跑 `sbt run` 或 `sbt test`（与 CI 同环境）。
+1. **实践目标**:对比单元测试与集成测试的实际耗时,亲眼验证 4.2 的 elaborate 成本论断。
+2. **操作步骤**(在仓库根目录执行,首次会拉取/加载 Docker 镜像):
+   ```bash
+   tool/test-specific-spec.sh isa.InstrDecoderSpec
+   tool/test-specific-spec.sh backend.NCoreBackendQuantSpec
+   ```
+3. **需要观察的现象**:命令结尾,ScalaTest 因 `-oDT` 会打印一段按耗时降序排列的用例列表。注意两个数字:(a) 该命令的**总墙钟时间**(从启动 sbt 到结束);(b) 各条用例的耗时。重点关注 sbt 启动后「Compiling / Elaborating」阶段在两条命令间的差异。
+4. **预期结果**:`NCoreBackendQuantSpec` 的总时间显著大于 `InstrDecoderSpec`,差额主要来自 elaborate + 编译 `NCoreBackend`(8×8 MMALU)这一步,而非用例本身的逻辑。若你看到 `NCoreBackendQuantSpec` 把 7 个子用例合并在一个 `simulate` 里、整体却仍比译码器慢很多,就印证了「大 DUT 的 elaborate 是主要开销」。
+5. 具体耗时数字「待本地验证」(取决于机器与首次编译缓存)。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：如果你的改动只动了测试文件、没动 RTL，CI 仍会跑 `sbt run`（Build job）吗？为什么？
+**练习 1**:如果你写了一个新 Spec,包声明是 `package isa`,类名是 `MyDecoderSpec`,该用什么命令只跑它?
+**答案**:`tool/test-specific-spec.sh isa.MyDecoderSpec`。必须带包名前缀 `isa.`,因为 sbt `testOnly` 按(全限定)类名匹配。
 
-<details><summary>参考答案</summary>
+**练习 2**:`build.sbt` 里的 `-oDT` 去掉 `D` 或 `T` 分别会怎样?
+**答案**:`-oT`(只排序不打印耗时)失去耗时数字、只剩排序;`-oD`(只打印耗时不排序)能看到每条用例耗时但输出顺序按运行顺序而非耗时顺序。两个字母合用才同时满足「打印耗时 + 按耗时排序」,最便于定位慢测试。
 
-会。CI 没有按「是否改动 RTL」做条件判断，只要触发条件（push/PR 到 `main`/`releases/**`）满足，Lint→Build→Test 三步都会跑。Build 的 `sbt run` 仍会执行 elaborate。这是一种「不聪明的全量验证」：牺牲一点时间换取「绝不漏检」的确定性。
-</details>
+---
 
-**练习 2**：为什么 CI 在容器里直接 `sbt test`，而本地却要 `make test`？
+### 4.4 GitHub Actions CI 流水线(actions.yml)
 
-<details><summary>参考答案</summary>
+#### 4.4.1 概念说明
 
-因为 CI 的 job 通过 `container.image: fangruil/chisel-dev:amd64` 直接运行在该镜像内，firtool/verilator/Chisel 已经备好，sbt 可以裸跑；而本地开发者的宿主机通常没有这些工具，所以 `make test` 用 `docker run ... sbt test` 在宿主机上自动套一层容器（见 Makefile）。两者执行的 sbt 命令相同，只是「套不套 docker」的差别，保证环境一致。
-</details>
+chisel-npu 用一个 GitHub Actions 配置文件 `.github/workflows/actions.yml` 实现持续集成:每次往 `main`(或 `releases/**`)推送、或针对这些分支提 PR,都会自动在云端跑一遍「构建 + 测试」,失败则拦截合并。
+
+它和本地开发的关系是:**CI 直接在 `fangruil/chisel-dev:amd64` 镜像里跑原生 sbt 命令,不走 Makefile**。Makefile 是给本地开发者把 sbt 包进 Docker 的便利层;CI 因为本身就指定了 `container:`,所以直接 `sbt run` / `sbt test`。两者用的是**同一个镜像**,因此「本地复现 CI」非常容易。
+
+#### 4.4.2 核心流程
+
+整条流水线分三个**串行** job,后一个依赖前一个成功:
+
+```
+触发(push/PR → main | releases/**)
+        │
+        ▼
+  ① Lint   (ubuntu-latest, 仅 checkout —— 当前是个占位/门禁)
+        │  needs: Lint
+        ▼
+  ② Build  (container: fangruil/chisel-dev:amd64, 跑 sbt run → elaborate 出 top.sv)
+        │  needs: Build
+        ▼
+  ③ Test   (container: fangruil/chisel-dev:amd64, 跑 sbt test → 全部 20 个 Spec)
+```
+
+要点:
+
+- **触发条件**:`push` 到 `main` 或 `releases/**` 分支;`pull_request` 针对 `main` 或 `releases/**`。两个事件都覆盖,保证 PR 合并前必跑。
+- **串行依赖**:`Build needs: Lint`、`Test needs: Build`。Lint 不过就不构建,构建不过就不测试,节省资源。
+- **镜像一致**:Build 与 Test 都用 `fangruil/chisel-dev:amd64`,与本地 `make container`/`tool/*.sh` 完全一致,内含 firtool 1.62.1、verilator、SystemC 与 `publishLocal` 过的 Chisel 6.7.0。
+- **两条 sbt 命令**:`sbt run`(elaborate `top.Main` 产出 `top.sv`,验证至少能编译通过并生成 RTL)、`sbt test`(跑全部 Spec)。
+
+#### 4.4.3 源码精读
+
+[.github/workflows/actions.yml:L1-L10](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/.github/workflows/actions.yml#L1-L10) —— 文件名 `Chisel CI` 与触发器:`on: push` 到 `main`/`releases/**`,`pull_request` 同样针对这两个分支。
+
+[.github/workflows/actions.yml:L13-L17](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/.github/workflows/actions.yml#L13-L17) —— `Lint` job:跑在 `ubuntu-latest`,唯一的 step 是 `actions/checkout@v4`。**注意它没有真正的 lint 命令**,当前更像一个「占位 + 串行门禁」,为后续接 scalafmt/lint 预留。
+
+[.github/workflows/actions.yml:L19-L27](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/.github/workflows/actions.yml#L19-L27) —— `Build` job:`needs: Lint`、`container: fangruil/chisel-dev:amd64`,checkout 后执行 `sbt run`。
+
+[.github/workflows/actions.yml:L29-L37](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/.github/workflows/actions.yml#L29-L37) —— `Test` job:`needs: Build`、同样用 `fangruil/chisel-dev:amd64` 镜像,执行 `sbt test`。
+
+AGENTS.md 的 CI 段是对这份文件的精确人话摘要:
+
+[AGENTS.md:L130-L132](https://github.com/mpskex/chisel-npu/blob/3e0d1314e9572c17fb40f206f0d1e7a72a80b663/AGENTS.md#L130-L132) —— 「on push/PR to main or releases/**, runs `sbt run` then `sbt test` inside `fangruil/chisel-dev:amd64`. Reproduce failures locally with `make container` + `sbt run` / `sbt test`.」
+
+#### 4.4.4 代码实践
+
+1. **实践目标**:逐行说清 push 到 `main` 时云端到底跑了什么,并验证本地可复现。
+2. **操作步骤**:
+   - 读 `.github/workflows/actions.yml`,按 L1→L37 顺序写下确切命令序列(见下方预期结果)。
+   - 本地复现:执行 `make container`(进入镜像交互式 shell),然后在 shell 里依次 `sbt run` 与 `sbt test`,观察与 CI 等价的输出。
+3. **需要观察的现象**:CI 是把 `sbt run` 与 `sbt test` 放在**两个独立 job、两次独立 sbt 启动**里;而 `make container` 里你可以连续跑两条命令、共享一次 sbt 会话(更快)。注意这个差异。
+4. **预期结果**:push 到 `main` 时 CI 的确切序列为——
+   1. `Lint`:checkout 仓库(无实质 lint)。
+   2. `Build`(若 Lint 过):在 `fangruil/chisel-dev:amd64` 中 `sbt run`。
+   3. `Test`(若 Build 过):在同一镜像中 `sbt test`,跑全部 20 个 Spec。
+   三个 job 串行,任一失败则整条流水线失败。
+5. 本地复现的具体耗时「待本地验证」。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**:为什么 CI 用两个独立 job 分别跑 `sbt run` 和 `sbt test`,而不是合在一个 job 里连跑?
+**答案**:独立 job 好处是**失败定位与资源节省**——构建失败(编译/elaborate 出错)与测试失败(行为不对)在 GitHub UI 里分开展示,且 `Test needs: Build` 保证构建不过就不浪费资源跑测试。代价是两次 sbt 启动/JVM 预热与 Coursier 依赖解析,但在 CI 上这点开销远不如可观测性重要。
+
+**练习 2**:CI 跑的是 `fangruil/chisel-dev:amd64`,你的本地机器是 Apple Silicon(arm64),CI 能复现吗?
+**答案**:CI 写死了 `:amd64`,在云端 x86 runner 上一致;本地 arm64 若也跑 `:amd64` 会走 QEMU 模拟、偏慢。本地应优先用对应架构镜像——`make container` 会按 `uname -m` 自动选 `:arm64`/`:amd64`(见 Makefile 的 arch 分支),与 CI 用同一份 Dockerfile 构建,工具链版本一致,故行为可复现。
+
+---
 
 ## 5. 综合实践
 
-把本讲三个模块串起来，完成一次「模拟 CI」的全流程演练。
+把本讲三个要点(镜像目录、单测快捷方式、CI 自动发现)串成一个**「新增一个最小 Spec 并确认它能被 CI 跑到」**的小任务:
 
-**任务**：假设你刚改动了 `NCoreBackendQuantSpec`，准备 push。请按 CI 的逻辑，先在本地用单测脚本快速验证，再说明远端 CI 会如何继续。
+1. **实践目标**:写一个极简 Spec,放对目录、用对包名,验证它既能被 `test-specific-spec.sh` 单跑、也会被 `sbt test`(即 CI 的 Test job)自动发现。
+2. **操作步骤**:
+   - 选一个已有源码模块,例如 `src/main/scala/utils/gates.scala` 里的某个简单门(如 `ORGate`)。
+   - 在**镜像目录**下新建 `src/test/scala/utils/GatesSpec.scala`,顶部声明 `package utils`(若它原属别的包则与之对齐),写 `class GatesSpec extends AnyFlatSpec`,用 `EphemeralSimulator` 写一两个最小 `poke/peek/expect`。
+   - 单跑:`tool/test-specific-spec.sh utils.GatesSpec`(若包名不是 `utils` 就换成实际包名),确认通过。
+   - 全量:`make test`,在 `-oDT` 输出里找到你的 `GatesSpec`,确认它被自动纳入。
+   - 推理 CI:由于 CI 的 Test job 跑的就是 `sbt test`,而 sbt 按约定自动发现所有 `*Spec`,你的新 Spec **无需改动 `actions.yml`** 就会被 CI 跑到——前提是它放在了 `src/test/scala/` 下且类名符合约定。
+3. **需要观察的现象**:新 Spec 是否出现在 `sbt test` 的运行清单里;它的耗时与同目录其他 Spec 相比如何(验证「DUT 越小 elaborate 越快」)。
+4. **预期结果**:新 Spec 被 `testOnly` 与全量 `test` 都能发现并执行;无需动 CI 配置即可被云端覆盖。
+5. 运行结果「待本地验证」。
 
-1. **先只跑改动相关的单测**（模块 4.2）：
-   ```
-   tool/test-specific-spec.sh backend.NCoreBackendQuantSpec
-   ```
-   观察 `-oDT` 输出的耗时，确认那条 `simulate(new NCoreBackend(...))` 是该 Spec 里最慢的用例之一。
-2. **对照耗时，反思分层**（模块 4.1）：写下「为什么这条集成测试单次 simulate 比 `InstrDecoderSpec` 的单次 simulate 慢」，用「DUT 规模 = 完整后端 vs 单个组合模块 + EphemeralSimulator 现场编译」来解释。
-3. **模拟 CI 全流程**（模块 4.3）：在本地 `make container` 进入镜像，依次执行 `sbt run`（对应 Build job）和 `sbt test`（对应 Test job），确认本地环境与 CI 一致。
-4. **写出 push 到 `main` 后 CI 的确切序列**：Lint（checkout）→ Build（容器内 `sbt run`）→ Test（容器内 `sbt test`），三步串行、前缀失败即止。
-5. **需要观察的现象**：本地单测先快速反馈；本地 `sbt run`+`sbt test` 与远端 CI 行为一致；耗时排序符合「集成 > 单元」。
-6. **预期结果**：你能独立解释「为什么先单测、再全套、为什么 CI 要 Build 在 Test 前」，并能复现 CI 的命令序列。若本机无 Docker，第 3 步标「待本地验证」，但第 4 步的序列说明可不依赖运行直接完成。
+> 提示:本任务把「目录镜像约定(4.1)→ 单测快捷方式(4.3)→ CI 自动发现(4.4)」串成了闭环;它不要求改源码,只新增测试文件,符合 worker 守则(不修改源码)。
 
 ## 6. 本讲小结
 
-- `src/test/scala` 与 `src/main/scala` **镜像组织**：把 `main` 换成 `test`、文件名换成 `<模块>Spec.scala` 即可定位测试；`utils/` 放共享工具（非 Spec），`top/` 无测试。
-- 测试分**单元层**（单模块：PE/VALU/译码器/寄存器堆/MMALU）与**集成层**（`backend/` 下的 `NCoreBackend*Spec`，测完整后端）。
-- `tool/test-specific-spec.sh <全限定类名>` 只跑一个 Spec（内部是 `sbt "testOnly $1"` 在 `fangruil/chisel-dev:amd64` 里跑）；`tool/test-all.sh` 跑全部。
-- `build.sbt` 的 `-oDT` 选项按耗时从慢到快打印每个用例，是对比单测/集成测试耗时的数据来源；集成测试慢的根因是 EphemeralSimulator 对更大的 DUT 要现场 elaborate+编译。
-- CI（`.github/workflows/actions.yml`）在 push/PR 到 `main` 或 `releases/**` 时，串行跑 Lint（checkout）→ Build（容器内 `sbt run`）→ Test（容器内 `sbt test`），前一个失败后一个不跑。
-- CI 在容器内**直接**调 sbt，本地则用 `make` 套一层 docker——两条路径执行的 sbt 命令一致，保证可复现。
+- chisel-npu 的测试目录 `src/test/scala/` **严格镜像**源码目录 `src/main/scala/`(alu/backend/isa/sram/utils),换路径中的 `main` 为 `test` 即可定位;`utils/` 下放共享工具、其余 `*Spec` 才是真测试。
+- 测试分**两层**:单元测试(如 `InstrDecoderSpec`,elaborate 小模块、多 `simulate` 块、组合求值)与集成测试(如 `NCoreBackendQuantSpec`,elaborate 整个 `NCoreBackend`)。
+- 集成测试因 DUT 大、elaborate 贵,会把所有子用例**合并进一个 `simulate` 块**只为付一次 elaborate 钱,并用 `resetAddrs` 在子用例间清状态。
+- `tool/test-specific-spec.sh <全限定类名>` 在 `fangruil/chisel-dev:amd64` 里跑 `sbt "testOnly <类名>"`,是日常只跑一个 Spec 的入口;`build.sbt` 的 `-oDT` 按耗时排序打印每条用例。
+- CI 由 `.github/workflows/actions.yml` 定义:push/PR 到 `main`/`releases/**` 时,在 `fangruil/chisel-dev:amd64` 里**串行**跑 Lint→Build(`sbt run`)→Test(`sbt test`),与本地用同一镜像,可用 `make container` 复现。
+- CI 直接跑原生 sbt、不经 Makefile;Makefile 与 `tool/*.sh` 是本地把 sbt 包进 Docker 的便利层。
 
 ## 7. 下一步学习建议
 
-- **回到端到端语义**：本讲只看了 `NCoreBackendQuantSpec` 的「外壳」（怎么组织、怎么跑）。若想理解它内部七步量化流水线的真正含义，去读 u7-l1（后量化流水线）与 u7-l2（GEMM+Softmax），那里的数值细节会反过来让你看懂这个集成测试在断言什么。
-- **补齐 Chisel 6 仿真的底层**：如果对「为什么 `expect` ChiselEnum 不合法」「为什么每个 simulate 都要重新编译」还有疑问，复习 u9-l1。
-- **动手扩展测试**：挑一个目前只有单元测试、没有集成覆盖的场景（例如给 `MultiWidthRegisterBlock` 写一个与 VALU 联动的 backend 级用例），按本讲的「镜像 + 分层」约定放置文件，用 `test-specific-spec.sh` 调试，最后观察 CI 是否在你的 PR 上自动跑通——这是把本讲知识变成肌肉记忆的最快路径。
+- **回看一条完整测试链**:挑 `NCoreBackendGemmSoftmaxSpec`(最大的集成测试),用本讲的「合并 simulate」视角重读,体会端到端 GEMM+Softmax 流水线如何被一条 Spec 覆盖(数值细节见 u7-l2)。
+- **动手优化测试体验**:试着在 `actions.yml` 的 `Lint` job 里接入真正的 `scalafmtCheckAll`(若项目引入 scalafmt),把当前的占位门禁变成实质 lint;注意保持与本地 `make` 工作流一致。
+- **进阶到平台测试**:本讲覆盖的是软件仿真层(Chisel→verilator)。若对上板验证感兴趣,可阅读 `tool/hw/` 下的 bringup 脚本(`bringup_full.sh`、`program_bitstream.sh` 等),那是 FPGA 硬件侧的「测试与烧录流水线」,与本讲的软件 CI 互补。
+- 若尚未读 u9-l1,建议先回看,本讲的 `EphemeralSimulator`、`peek().litValue`、`NpuAssembler` 构字等基础均来自该讲。
