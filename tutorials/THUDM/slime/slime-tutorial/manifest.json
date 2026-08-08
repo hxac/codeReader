@@ -1,0 +1,1119 @@
+{
+  "project": "slime",
+  "head": "06ffdbe22be068b52f9ed0fc318c473f7030197e",
+  "rationale": "slime 是一个把 Megatron 训练与 SGLang 推理缝合进「采样→训练→权重同步」闭环的大模型 RL 后训练框架（约 3 万行代码、支撑 GLM-5.x 发布），体量大且模块边界清晰，因此采用「8 单元 / 38 讲」的三层结构。学习顺序遵循自顶向下的认知曲线：U1–U2 先建立全局认知（项目定位、目录、运行方式、训练主循环 train.py、training/rollout/data-buffer 三模块与 Ray 编排），让读者先会\"跑起来\"再读源码；U3–U4 进入闭环的两条主链路——数据生成（rollout）层（Sample 结构、generate_rollout、DataSource、rm_hub、动态采样）与 Megatron 训练后端（actor 生命周期、train_one_step、数据打包、RL 损失与优势估计）；U5 解决两条链路之间的桥梁——权重同步（nccl/disk/delta）与 SGLang 引擎封装，这是 slime 区别于普通训练框架的核心机制；U6–U8 为专家层，依次讲透定制化 hook 体系与 RL 算法选择、智能体 RL（adapter/多分段 fan-out/流式异步）、以及部署拓扑（sglang-config/PD/外部引擎）、参数体系、可观测性、模型插件与低精度、测试与 CI。每讲只解决一个独立问题、引用 1–6 个真实源码文件、并配一个可操作的代码实践，讲义间通过 depends_on 构成有向依赖，确保读者按序学习时每一步都有前置知识支撑。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 slime 并跑起第一个训练",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：slime 是什么",
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "order": 1,
+          "topic": "介绍 slime 的定位：连接 Megatron 训练与 SGLang 推理的 LLM RL 后训练框架，及其高吞吐训练与灵活数据生成两大核心能力。",
+          "learning_goals": [
+            "理解 slime 解决的问题：RL scaling 的训练-推理闭环",
+            "区分三大模块 training(Megatron) / rollout(SGLang+router) / data buffer 的职责",
+            "了解 slime 的生产验证背景（GLM 系列、Qwen、DeepSeek 等）"
+          ],
+          "source_files": [
+            "README.md",
+            "README_zh.md",
+            "docs/en/blogs/introducing_slime.md"
+          ],
+          "minimal_modules": [
+            "README 项目定位",
+            "架构总览章节",
+            "introducing_slime 博客"
+          ],
+          "practice_task": "阅读 README 后，用自己的话写一段 200 字说明 slime 与单一训练框架（如纯 Megatron）的区别，并指出三大模块各自读写的对象。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与代码地图",
+          "filename": "u1-l2-directory-map.md",
+          "level": "beginner",
+          "order": 2,
+          "topic": "梳理 slime 仓库的顶层目录与 slime/ 包的子模块划分，建立读源码时的导航地图。",
+          "learning_goals": [
+            "掌握顶层目录：slime/、slime_plugins/、tools/、scripts/、examples/、tests/、docs/",
+            "区分 slime/ 下 ray/、backends/、rollout/、utils/、agent/ 五大子包的职责",
+            "知道 train.py / train_async.py 是入口，arguments.py 是参数中枢"
+          ],
+          "source_files": [
+            "slime/__init__.py",
+            "pyproject.toml",
+            "setup.py"
+          ],
+          "minimal_modules": [
+            "slime 包目录结构",
+            "slime_plugins 插件目录",
+            "scripts 与 tools"
+          ],
+          "practice_task": "用树状图列出 slime/ 下每个子包，并标注每个子包对应的责任（训练/编排/推理/工具），输出到笔记中。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "环境搭建与安装",
+          "filename": "u1-l3-environment-setup.md",
+          "level": "beginner",
+          "order": 3,
+          "topic": "讲解 slime 的依赖与安装方式：官方 Docker 镜像、conda 构建、pip 可编辑安装及其硬件支持。",
+          "learning_goals": [
+            "了解 Docker 镜像 slimerl/slime:latest 的使用与启动参数",
+            "理解 build_conda.sh / requirements.txt / setup.py 各自的作用",
+            "知道 slime 依赖 Megatron-LM（通过 PYTHONPATH）和 SGLang"
+          ],
+          "source_files": [
+            "requirements.txt",
+            "setup.py",
+            "build_conda.sh",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "requirements 依赖列表",
+            "setup 打包配置",
+            "build_conda 环境"
+          ],
+          "practice_task": "在一个干净环境执行 pip install -e . --no-deps 并确认 import slime 不报错；记录 setup.py 中 python_requires 与版本号。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "运行第一个训练：脚本与参数",
+          "filename": "u1-l4-first-training-run.md",
+          "level": "beginner",
+          "order": 4,
+          "topic": "以 scripts/run-qwen3-4B.sh 为例，逐段解析 MODEL_ARGS/CKPT_ARGS/ROLLOUT_ARGS/PERF_ARGS 等参数组与 ray job submit 启动方式。",
+          "learning_goals": [
+            "看懂 run 脚本的参数分组结构与 ray job submit 启动流程",
+            "理解 rollout-batch-size × n-samples-per-prompt = global-batch-size × num-steps-per-rollout 的供需约束",
+            "认识 colocate（训练推理共卡）与显存配比 --sglang-mem-fraction-static"
+          ],
+          "source_files": [
+            "scripts/run-qwen3-4B.sh",
+            "scripts/models/qwen3-4B.sh",
+            "docs/en/get_started/quick_start.md"
+          ],
+          "minimal_modules": [
+            "run-qwen3-4B 启动脚本",
+            "models 模型配置",
+            "quick_start 文档"
+          ],
+          "practice_task": "复制 run-qwen3-4B.sh 并修改 num-rollout 与 rollout-batch-size，验证供需平衡公式是否满足，若不满足说明 slime 如何报错或自动设置 global-batch-size。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "模型权重转换：HF 与 Megatron torch_dist 互转",
+          "filename": "u1-l5-weight-conversion.md",
+          "level": "beginner",
+          "order": 5,
+          "topic": "讲解 Megatron 无法直接读 HF 检查点的约束，以及 tools 下的 HF↔torch_dist 双向转换脚本用法。",
+          "learning_goals": [
+            "理解 Megatron torch_dist 格式与自动并行分片的优势",
+            "会用 convert_hf_to_torch_dist.py 与 convert_torch_dist_to_hf.py",
+            "知道为何需要 scripts/models/*.sh 提供 Megatron 模型参数"
+          ],
+          "source_files": [
+            "tools/convert_hf_to_torch_dist.py",
+            "tools/convert_torch_dist_to_hf.py",
+            "docs/en/get_started/quick_start.md"
+          ],
+          "minimal_modules": [
+            "convert_hf_to_torch_dist 入口",
+            "convert_torch_dist_to_hf 入口",
+            "model_provider 模型构建"
+          ],
+          "practice_task": "用 convert_hf_to_torch_dist.py 把一个小模型（如 Qwen3-0.6B）转成 torch_dist，再用 convert_torch_dist_to_hf.py 转回，对比 vocab size 是否一致。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l6",
+          "title": "训练主循环 train.py 全景",
+          "filename": "u1-l6-train-loop-overview.md",
+          "level": "beginner",
+          "order": 6,
+          "topic": "逐行精读 train.py，展示「rollout 采样→actor/critic 训练→save→update_weights→eval」的完整循环结构。",
+          "learning_goals": [
+            "掌握 train.py 的主循环：generate → async_train → save_model → update_weights → eval",
+            "理解 train.py 与 train_async.py 的区别（异步提前发起下一轮 rollout）",
+            "认识 offload_rollout / offload_train 与 colocate 的协作"
+          ],
+          "source_files": [
+            "train.py",
+            "train_async.py"
+          ],
+          "minimal_modules": [
+            "train.py 主循环",
+            "train_async.py 异步循环",
+            "should_run_periodic_action 周期调度"
+          ],
+          "practice_task": "在 train.py 中标注每一行属于「采样/训练/保存/同步/评估」哪一阶段，并画出循环时序图。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心架构：三模块与 Ray 编排",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "三模块架构总览",
+          "filename": "u2-l1-architecture-overview.md",
+          "level": "beginner",
+          "order": 1,
+          "topic": "结合架构图讲解 training / rollout / data buffer 三模块如何通过 Data Buffer 串联成闭环，以及权重同步的方向。",
+          "learning_goals": [
+            "理解三模块的数据流：rollout 产数据→buffer→train 消费→同步权重回 rollout",
+            "认识 slime 选择单 rollout 后端(SGLang)的权衡",
+            "建立后续源码阅读的整体框架"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/en/blogs/introducing_slime.md",
+            "imgs/arch.png"
+          ],
+          "minimal_modules": [
+            "架构章节",
+            "introducing_slime 博客",
+            "架构图"
+          ],
+          "practice_task": "画一张闭环图，标注每个箭头上的数据载体（Sample / 权重 / 指标），并说明权重同步为何是训练→推理单向。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Ray 编排：placement group 与资源分配",
+          "filename": "u2-l2-ray-placement-group.md",
+          "level": "beginner",
+          "order": 2,
+          "topic": "解析 slime/ray/placement_group.py 如何用 Ray placement group 分配训练卡与推理卡，处理 colocate、debug 模式与 GPU 物理映射。",
+          "learning_goals": [
+            "理解 create_placement_groups 与 _get_placement_group_layout 的分配逻辑",
+            "掌握 PACK 策略、bundle 规格（每 bundle 1 GPU）与 rollout_offset",
+            "认识 colocate 模式下 actor/rollout 共卡导致的 needs_offload"
+          ],
+          "source_files": [
+            "slime/ray/placement_group.py",
+            "slime/ray/utils.py"
+          ],
+          "minimal_modules": [
+            "create_placement_groups",
+            "_get_placement_group_layout",
+            "InfoActor GPU 发现"
+          ],
+          "practice_task": "给定 actor-num-nodes=1, actor-num-gpus-per-node=4, rollout-num-gpus=4，手算 total_gpus 与 rollout_offset；再算 colocate 情况。",
+          "depends_on": [
+            "u1-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "三大对象：actor / critic / rollout_manager",
+          "filename": "u2-l3-three-model-objects.md",
+          "level": "beginner",
+          "order": 3,
+          "topic": "讲解 create_training_models / create_rollout_manager 如何创建 RayTrainGroup 与 RolloutManager，以及它们对外暴露的统一接口。",
+          "learning_goals": [
+            "理解 RayTrainGroup(async_train/update_weights/save_model) 与 RolloutManager(generate/eval/save) 的封装",
+            "认识 TrainRayActor 抽象基类与 MegatronTrainRayActor 子类",
+            "看清 train.py 调用的 actor_model/critic_model/rollout_manager 真身"
+          ],
+          "source_files": [
+            "slime/ray/placement_group.py",
+            "slime/ray/actor_group.py",
+            "slime/ray/rollout.py",
+            "slime/ray/train_actor.py"
+          ],
+          "minimal_modules": [
+            "RayTrainGroup",
+            "RolloutManager",
+            "TrainRayActor 抽象"
+          ],
+          "practice_task": "在一张表里列出 actor_model / critic_model / rollout_manager 各自可调用的方法名，并标注方法返回的是 Ray ObjectRef 还是同步结果。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "数据生成（Rollout）层",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Sample 数据结构与生命周期",
+          "filename": "u3-l1-sample-data-structure.md",
+          "level": "intermediate",
+          "order": 1,
+          "topic": "精读 Sample dataclass 的字段（tokens/response/loss_mask/reward/rollout_log_probs 等）与 Status 状态机，它是贯穿全框架的核心数据载体。",
+          "learning_goals": [
+            "掌握 Sample 的关键字段及其在训练/奖励计算中的用途",
+            "理解 Status 状态机：PENDING/COMPLETED/TRUNCATED/ABORTED/FAILED",
+            "认识 RolloutFnTrainOutput / RolloutFnEvalOutput 的产出结构"
+          ],
+          "source_files": [
+            "slime/utils/types.py",
+            "slime/rollout/base_types.py"
+          ],
+          "minimal_modules": [
+            "Sample dataclass",
+            "Sample.Status 枚举",
+            "RolloutFn 输出 dataclass"
+          ],
+          "practice_task": "手工构造一个 Sample 对象，填入 prompt/tokens/response/loss_mask/reward，并说明每个字段会被哪个阶段（rollout/logprob/loss）读取。",
+          "depends_on": [
+            "u1-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "默认 rollout 函数 generate_rollout 全流程",
+          "filename": "u3-l2-default-rollout-flow.md",
+          "level": "intermediate",
+          "order": 2,
+          "topic": "拆解 slime/rollout/sglang_rollout.py 的默认 generate_rollout：取 prompt→调 SGLang 生成→算 logprob→算奖励→返回训练样本的异步流程。",
+          "learning_goals": [
+            "理解 generate_rollout_async 的主循环与 over-sampling 批次控制",
+            "掌握 generate / generate_and_rm / generate_and_rm_group 的分工",
+            "认识 abort 机制与 partial rollout 的衔接"
+          ],
+          "source_files": [
+            "slime/rollout/sglang_rollout.py",
+            "slime/rollout/base_types.py"
+          ],
+          "minimal_modules": [
+            "generate_rollout",
+            "generate_and_rm_group",
+            "abort"
+          ],
+          "practice_task": "在 sglang_rollout.py 中追踪一个 prompt 组从 get_samples 到进入返回 list[list[Sample]] 的完整调用链，画出函数调用图。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "数据源 DataSource 与缓冲区",
+          "filename": "u3-l3-data-source-and-buffer.md",
+          "level": "intermediate",
+          "order": 3,
+          "topic": "讲解 DataSource 基类与 RolloutDataSourceWithBuffer 的 get_samples/add_samples/save/load，以及 partial rollout 缓冲如何工作。",
+          "learning_goals": [
+            "掌握 DataSource 抽象的四个必须方法与 __len__",
+            "理解 RolloutDataSourceWithBuffer 的 buffer + buffer_filter(pop_first) 机制",
+            "认识数据状态如何随 checkpoint save/load 持久化"
+          ],
+          "source_files": [
+            "slime/rollout/data_source.py"
+          ],
+          "minimal_modules": [
+            "DataSource 基类",
+            "RolloutDataSourceWithBuffer",
+            "pop_first buffer filter"
+          ],
+          "practice_task": "继承 DataSource 写一个返回固定 10 条假数据的自定义数据源类，实现全部必需方法并在本地实例化调用 get_samples(2)。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "奖励模型 rm_hub 与内置奖励类型",
+          "filename": "u3-l4-reward-model-hub.md",
+          "level": "intermediate",
+          "order": 4,
+          "topic": "解析 rm_hub 如何按 rm_type 分发到 deepscaler/math/f1/gpqa/remote_rm 等，以及 boxed_ 前缀与自定义奖励路径的优先级。",
+          "learning_goals": [
+            "掌握 async_rm 的分发优先级与 rm_type→函数映射",
+            "理解 deepscaler/math_utils 的答案抽取与判等逻辑",
+            "认识 custom_rm_path、group_rm 两种奖励调用模式"
+          ],
+          "source_files": [
+            "slime/rollout/rm_hub/__init__.py",
+            "slime/rollout/rm_hub/deepscaler.py",
+            "slime/rollout/rm_hub/math_utils.py"
+          ],
+          "minimal_modules": [
+            "async_rm 分发",
+            "get_deepscaler_rule_based_reward",
+            "extract_boxed_answer"
+          ],
+          "practice_task": "写一个返回长度相关奖励的 custom_rm 函数，签名 async def rm(args, sample)->float，并用 rm_hub 的逻辑说明它如何被调用。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "动态采样、过采样与过滤",
+          "filename": "u3-l5-dynamic-sampling-filters.md",
+          "level": "intermediate",
+          "order": 5,
+          "topic": "讲解 DAPO 风格动态采样：over-sampling-batch-size、dynamic_sampling_filter_path、DynamicFilterOutput 与触发再采样的阈值。",
+          "learning_goals": [
+            "理解 over_sampling 与 dynamic filter 的协同与再采样触发条件",
+            "掌握 DynamicFilterOutput 的 keep/reason/keep_when_insufficient",
+            "认识 check_reward_nonzero_std 等内置过滤器的判据"
+          ],
+          "source_files": [
+            "slime/rollout/filter_hub/dynamic_sampling_filters.py",
+            "slime/rollout/filter_hub/base_types.py",
+            "slime/rollout/sglang_rollout.py"
+          ],
+          "minimal_modules": [
+            "check_reward_nonzero_std",
+            "DynamicFilterOutput",
+            "should_drop 逻辑"
+          ],
+          "practice_task": "实现一个自定义动态过滤器：当一组样本平均响应长度低于阈值时丢弃，返回正确的 DynamicFilterOutput。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "训练后端（Megatron）层",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "MegatronTrainRayActor 训练工人生命周期",
+          "filename": "u4-l1-megatron-actor-lifecycle.md",
+          "level": "intermediate",
+          "order": 1,
+          "topic": "精读 backends/megatron_utils/actor.py：init/train/train_actor/save_model/update_weights 如何驱动一个 Megatron 训练工人。",
+          "learning_goals": [
+            "掌握 MegatronTrainRayActor 的 init 到 train 的生命周期",
+            "理解 train_actor 内部：算 ref/teacher logp→算 advantage→train 步",
+            "认识 with_ref(KL)/with_opd_teacher 两种辅助模型加载"
+          ],
+          "source_files": [
+            "slime/backends/megatron_utils/actor.py",
+            "slime/ray/train_actor.py"
+          ],
+          "minimal_modules": [
+            "MegatronTrainRayActor",
+            "train_actor",
+            "update_weights"
+          ],
+          "practice_task": "列出 train_actor 方法内部的执行步骤顺序，并标注每步调用了 model.py / loss.py 的哪个函数。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "train_one_step 与 pipeline 前后向",
+          "filename": "u4-l2-train-one-step.md",
+          "level": "intermediate",
+          "order": 2,
+          "topic": "解析 model.py 的 train_one_step / train / forward_only：Megatron 流水线前后向、梯度检查、optimizer.step 与学习率调度。",
+          "learning_goals": [
+            "理解 train_one_step 的 zero_grad→forward_backward→grad_norm 检查→step 流程",
+            "掌握 forward_only 如何只前向算 logprob/entropy（用于优势估计与评估）",
+            "认识 NaN/Inf 梯度检测与跳过 step 的容错"
+          ],
+          "source_files": [
+            "slime/backends/megatron_utils/model.py"
+          ],
+          "minimal_modules": [
+            "train_one_step",
+            "train",
+            "forward_only"
+          ],
+          "practice_task": "对照 Megatron-LM 的 get_forward_backward_func，说明 slime 如何在一个 micro-batch 内完成前后向并累积梯度。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "数据打包、微批调度与 loss mask",
+          "filename": "u4-l3-data-packing-microbatch.md",
+          "level": "intermediate",
+          "order": 3,
+          "topic": "讲解 data.py 的 DataIterator/get_batch 如何把变长 Sample 打包成 Megatron 微批，处理 CP（zigzag/allgather）、动态批与 loss mask 对齐。",
+          "learning_goals": [
+            "理解动态批(use-dynamic-batch-size/max-tokens-per-gpu)的打包逻辑",
+            "掌握 loss mask 与 next-token 预测的对齐（左 pad prompt_len-1）",
+            "认识 context parallel 下 cu_seqlens/PackedSeqParams 的 THD 布局"
+          ],
+          "source_files": [
+            "slime/backends/megatron_utils/data.py",
+            "slime/utils/dp_schedule.py"
+          ],
+          "minimal_modules": [
+            "DataIterator",
+            "get_batch",
+            "dp_schedule 微批切分"
+          ],
+          "practice_task": "给定 3 条不同长度样本与 max_tokens_per_gpu，手算动态批如何分微批；再说明开启 CP=2 后每条序列如何被切成两半。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "RL 损失与优势估计（loss.py 核心）",
+          "filename": "u4-l4-rl-loss-and-advantage.md",
+          "level": "intermediate",
+          "order": 4,
+          "topic": "精读 loss.py 的 policy_loss / compute_advantages_and_returns：PPO clip、KL、entropy、TIS、GSPO KL 与优势白化。",
+          "learning_goals": [
+            "掌握 policy_loss_function 的 PPO clip + KL loss + entropy 组合",
+            "理解 compute_advantages_and_returns 如何按 advantage_estimator 分发",
+            "认识 sum_of_sample_mean 归约与 per-token/per-sample loss 的区别"
+          ],
+          "source_files": [
+            "slime/backends/megatron_utils/loss.py",
+            "slime/utils/ppo_utils.py"
+          ],
+          "minimal_modules": [
+            "policy_loss_function",
+            "compute_advantages_and_returns",
+            "get_log_probs_and_entropy"
+          ],
+          "practice_task": "对照 advantage_estimator=grpo 的代码路径，写一段伪代码说明 reward 如何变成 per-token advantage。",
+          "depends_on": [
+            "u4-l2",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "模型构建、并行初始化与参数冻结",
+          "filename": "u4-l5-model-provider-and-init.md",
+          "level": "intermediate",
+          "order": 5,
+          "topic": "讲解 model_provider.py 如何构建 GPT/MoE 模型与 critic 输出头、freeze_model_params 的白/黑名单冻结，以及 initialize.py 的分布式初始化。",
+          "learning_goals": [
+            "理解 get_model_provider_func 对 MoE/自定义 layer spec/critic 输出层的处理",
+            "掌握 only-train/freeze-params-name-list 的正则冻结机制",
+            "认识 init() 中 TP/PP/CP/EP/DP 通信组与 tokenizer/seed 初始化"
+          ],
+          "source_files": [
+            "slime/backends/megatron_utils/model_provider.py",
+            "slime/backends/megatron_utils/initialize.py"
+          ],
+          "minimal_modules": [
+            "get_model_provider_func",
+            "freeze_model_params",
+            "init 分布式初始化"
+          ],
+          "practice_task": "写一段 --only-train-params-name-list 正则，只训练模型的 attention 投影层，其余冻结，并说明如何验证冻结生效。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "权重同步与推理后端",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "权重同步全景：训练参数如何抵达推理引擎",
+          "filename": "u5-l1-weight-sync-overview.md",
+          "level": "intermediate",
+          "order": 1,
+          "topic": "纵览 update_weight 模块的设计：full/delta 模式 × nccl/disk 传输的组合，以及 common.py 的参数 all-gather 工具。",
+          "learning_goals": [
+            "理解 update_weight 在闭环中的位置与触发时机（train 后 update_weights）",
+            "掌握 full/delta 与 nccl/disk 四种组合的适用场景",
+            "认识 all_gather_param 如何把 TP/EP 分片参数聚合回完整张量"
+          ],
+          "source_files": [
+            "slime/backends/megatron_utils/update_weight/common.py",
+            "slime/backends/megatron_utils/update_weight/__init__.py"
+          ],
+          "minimal_modules": [
+            "update_weight 模块入口",
+            "all_gather_param",
+            "named_params_and_buffers"
+          ],
+          "practice_task": "画一张表，列出四种 (mode, transport) 组合分别适合什么集群规模与显存/带宽条件，并说明 slime 默认使用哪种。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "三种权重传输：tensor / disk full / disk delta",
+          "filename": "u5-l2-weight-transport-modes.md",
+          "level": "intermediate",
+          "order": 2,
+          "topic": "分别精读 from_tensor（NCCL/IPC）、from_disk（整ckpt）、from_disk_delta（增量+xor）与 expert_routing 的实现差异。",
+          "learning_goals": [
+            "理解 UpdateWeightFromTensor 的 NCCL 组与 colocate IPC 通路",
+            "掌握 delta 模式的 baseline 快照、diff 编码（xor/overwrite）与校验和",
+            "认识 expert_routing 在 PP=1/EP>1 下的 rank-local 专家传输优化"
+          ],
+          "source_files": [
+            "slime/backends/megatron_utils/update_weight/update_weight_from_tensor.py",
+            "slime/backends/megatron_utils/update_weight/update_weight_from_disk_delta.py",
+            "slime/backends/megatron_utils/update_weight/expert_routing.py",
+            "slime/utils/disk_delta.py"
+          ],
+          "minimal_modules": [
+            "UpdateWeightFromTensor",
+            "UpdateWeightFromDiskDelta",
+            "expert_routing"
+          ],
+          "practice_task": "对照 disk_delta.py 的 overwrite_encode，说明增量编码如何从两次全量权重的差异中只写出变化部分，并指出 xor 与 overwrite 的可逆性差别。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "SGLang 引擎封装与生命周期",
+          "filename": "u5-l3-sglang-engine-wrapper.md",
+          "level": "intermediate",
+          "order": 3,
+          "topic": "解析 sglang_engine.py 的 SGLangEngine Ray actor：启动服务、注册 router、update_weights、pause/continue、flush_cache 与健康检查。",
+          "learning_goals": [
+            "理解 SGLangEngine.init 如何 launch_server_process 并注册到 router",
+            "掌握 update_weights_from_tensor/disk/distributed 三条 HTTP/NCCL 路径",
+            "认识 pause_generation/flush_cache 在权重更新期间的作用"
+          ],
+          "source_files": [
+            "slime/backends/sglang_utils/sglang_engine.py",
+            "slime/backends/sglang_utils/server_control.py"
+          ],
+          "minimal_modules": [
+            "SGLangEngine.init",
+            "update_weights_*",
+            "abort_server_until_idle"
+          ],
+          "practice_task": "梳理一次 update_weights 期间 SGLangEngine 的方法调用顺序（pause→flush→update→continue），并说明为何要先 flush_cache。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "Megatron 权重服务端：/generate 与 /update_weights_from_disk",
+          "filename": "u5-l4-megatron-weight-server.md",
+          "level": "intermediate",
+          "order": 4,
+          "topic": "解析 server/megatron_server.py 暴露的 HTTP 端点与 logprob_utils.py 的 TP 感知 logprob 采样，这是 slime 反向复用 Megatron 的关键。",
+          "learning_goals": [
+            "理解 /generate（logprob 采样）与 /update_weights_from_disk 两个核心端点",
+            "掌握 SampleManager 的请求队列与流水线收集",
+            "认识 sample_from_vocab_parallel_logits_without_full_gather 的两阶段 TP 采样"
+          ],
+          "source_files": [
+            "slime/backends/megatron_utils/server/megatron_server.py",
+            "slime/backends/megatron_utils/server/logprob_utils.py"
+          ],
+          "minimal_modules": [
+            "run_megatron_dp_models_loop_worker",
+            "/generate 端点",
+            "compute_logp"
+          ],
+          "practice_task": "说明 slime 如何在不重启 SGLang 的前提下，用 Megatron 服务端替推理引擎提供 logprob/采样能力，并指出这种设计带来的好处与代价。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "定制化接口与 RL 算法",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "定制化接口总览：21+ 个 function-path hook",
+          "filename": "u6-l1-customization-overview.md",
+          "level": "advanced",
+          "order": 1,
+          "topic": "系统梳理 customization 文档列出的全部 --xxx-path 接口及其触发阶段，建立「在哪一层插自定义逻辑」的全景。",
+          "learning_goals": [
+            "掌握 rollout-function/custom-generate/custom-rm/data-source 四个主接口的层级关系",
+            "理解 sample-filter/buffer-filter/dynamic-filter/reward-postprocess 的分工",
+            "认识 load_function 如何把 import path 字符串解析成可调用对象"
+          ],
+          "source_files": [
+            "docs/en/get_started/customization.md",
+            "slime/utils/misc.py"
+          ],
+          "minimal_modules": [
+            "customization 接口表",
+            "load_function 路径解析",
+            "plugin_contracts 契约测试"
+          ],
+          "practice_task": "把所有接口按「rollout 阶段 / 训练阶段」分成两大列，标注每个接口的默认实现或默认值，输出为表格。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "自定义生成函数（custom-generate）",
+          "filename": "u6-l2-custom-generate-function.md",
+          "level": "advanced",
+          "order": 2,
+          "topic": "以 search-r1 多轮检索为例，讲解如何用 --custom-generate-function-path 注入工具调用循环与正确的 loss mask。",
+          "learning_goals": [
+            "掌握 async def generate(args, sample, sampling_params) 的契约与返回",
+            "理解多轮交互中模型生成 token(loss_mask=1) 与工具观测 token(loss_mask=0) 的标注",
+            "认识返回 list[Sample] 的 fan-out 用法与 rollout_id 同源约束"
+          ],
+          "source_files": [
+            "docs/en/get_started/quick_start.md",
+            "examples/search-r1/generate_with_search.py"
+          ],
+          "minimal_modules": [
+            "custom_generate 签名",
+            "loss mask 标注",
+            "search-r1 示例"
+          ],
+          "practice_task": "仿照 search-r1 写一个最小 custom_generate：模型生成→调用一个假工具→拼回历史，并正确设置 loss_mask。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "自定义奖励与样本→训练数据转换",
+          "filename": "u6-l3-custom-reward-and-conversion.md",
+          "level": "advanced",
+          "order": 3,
+          "topic": "讲解 --custom-rm-path（含 batch group_rm）与 --custom-convert-samples-to-train-data-path，打通奖励计算到训练输入的最后一步。",
+          "learning_goals": [
+            "掌握单样本与 batch 两种 reward 函数签名与启用方式",
+            "理解 convert_samples_to_train_data 返回字典的标准字段",
+            "认识 reward-postprocess 在优势计算前的介入点"
+          ],
+          "source_files": [
+            "docs/en/get_started/customization.md",
+            "slime/rollout/rm_hub/__init__.py"
+          ],
+          "minimal_modules": [
+            "custom_rm 签名",
+            "convert_samples_to_train_data",
+            "reward_post_process"
+          ],
+          "practice_task": "写一个 batched custom_rm（--group-rm）对一组样本返回 list[float]，并说明它接收到的 samples 与单样本模式的区别。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "优势估计器与 RL 算法选择",
+          "filename": "u6-l4-advantage-estimators.md",
+          "level": "advanced",
+          "order": 4,
+          "topic": "精读 ppo_utils.py 的全部估计器：GRPO/GSPO/RLOO/ReMax/REINFORCE++/PPO 及 GAE、chunked_gae 的实现与适用场景。",
+          "learning_goals": [
+            "掌握各 advantage_estimator 的数学差异与是否需要 critic",
+            "理解 GAE 的 vanilla 与 chunked（前缀扫描）两种实现",
+            "认识 compute_approx_kl 的 k1/k2/k3(low_var_kl) 三种 KL 估计"
+          ],
+          "source_files": [
+            "slime/utils/ppo_utils.py",
+            "slime/backends/megatron_utils/loss.py"
+          ],
+          "minimal_modules": [
+            "get_advantages_and_returns_batch",
+            "chunked_gae",
+            "compute_approx_kl"
+          ],
+          "practice_task": "对比 GRPO 与 PPO(带 critic) 在 compute_advantages_and_returns 中的代码分支，写出两者所需输入字段的差异。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "自定义损失、TIS 与 off-policy 修正",
+          "filename": "u6-l5-custom-loss-offpolicy.md",
+          "level": "advanced",
+          "order": 5,
+          "topic": "讲解 --custom-loss-function-path、--custom-tis-function-path、OPSM 掩码与 CISPO，处理异步/过期样本带来的 off-policy 问题。",
+          "learning_goals": [
+            "掌握 custom_loss 与 loss-type custom_loss 的接驳方式",
+            "理解 TIS（截断重要性采样）ratio 的计算与 vanilla_tis_function",
+            "认识 OPSM（优势为负且序列 KL 过大时掩码）与 GSPO/CISPO 的稳定性作用"
+          ],
+          "source_files": [
+            "slime/backends/megatron_utils/loss.py",
+            "slime/utils/ppo_utils.py"
+          ],
+          "minimal_modules": [
+            "custom_loss_function",
+            "vanilla_tis_function",
+            "compute_opsm_mask"
+          ],
+          "practice_task": "对照 train_infer_mismatch_helper 示例，说明 --custom-tis-function-path 如何用 rollout 与训练两次 logp 修正 off-policy，写出 ratio 表达式。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "智能体 RL 与高级数据流",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "智能体 RL 路线图与接口选择",
+          "filename": "u7-l1-agentic-rl-roadmap.md",
+          "level": "advanced",
+          "order": 1,
+          "topic": "基于 agent.md 路线图，讲解 slime 如何把多轮工具/沙箱/环境反馈接入标准 rollout-buffer 循环而非独立框架。",
+          "learning_goals": [
+            "掌握 agentic 工作流首选 custom-generate + custom-rm 的组合",
+            "理解何时需要升级到 rollout-function-path（自定义调度/全异步）",
+            "认识 token-based 训练目标与 loss_mask 区分模型输出/环境文本的原则"
+          ],
+          "source_files": [
+            "docs/en/get_started/agent.md",
+            "docs/en/get_started/customization.md"
+          ],
+          "minimal_modules": [
+            "agent 路线图表",
+            "custom-generate 入口",
+            "token-based 训练目标"
+          ],
+          "practice_task": "为「带沙箱执行的代码 agent」选择合适的接口组合并说明理由；指出哪一步需要 fan-out 返回多 Sample。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "Agent 运行时适配器（Anthropic / OpenAI）",
+          "filename": "u7-l2-agent-runtime-adapters.md",
+          "level": "advanced",
+          "order": 2,
+          "topic": "解析 slime/agent/adapters 如何把 Anthropic/OpenAI 协议适配成「消息进、采样 token 出」的可训练轨迹段。",
+          "learning_goals": [
+            "理解 Adapter 渲染 chat template、用 input_ids + return_logprob 调 SGLang 的契约",
+            "掌握 session_id 作为 X-SMG-Routing-Key 的前缀缓存路由作用",
+            "认识 finish_session 导出 token/logprob 轨迹段的方式"
+          ],
+          "source_files": [
+            "slime/agent/adapters/common.py",
+            "slime/agent/adapters/anthropic.py",
+            "slime/agent/adapters/openai.py"
+          ],
+          "minimal_modules": [
+            "Adapter 通用基类",
+            "AnthropicAdapter",
+            "OpenAIAdapter"
+          ],
+          "practice_task": "用 AnthropicAdapter 写一个最小 custom_generate 框架：open_session→（外部 client 调用）→finish_session，并说明如何拿到可训练 token。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "多样本 fan-out 与轨迹分段训练",
+          "filename": "u7-l3-multi-sample-fanout.md",
+          "level": "advanced",
+          "order": 3,
+          "topic": "讲解一次 rollout 拆成多段可训练 Sample（subagent/compaction）时，rollout_id 同源约束与 reward 分摊模式。",
+          "learning_goals": [
+            "理解 generate 返回 list[Sample] 时兄弟样本必须共享 rollout_id 的契约",
+            "掌握 train-step 如何按 rollout_id 聚合分段、避免重复计 rollout 数",
+            "认识 coding_agent_rl 把一条轨迹切成 subagent/wipe/final 段的实现"
+          ],
+          "source_files": [
+            "slime/agent/trajectory.py",
+            "docs/en/get_started/customization.md",
+            "examples/multi_agent/rollout_with_multi_agents.py"
+          ],
+          "minimal_modules": [
+            "trajectory 轨迹管理",
+            "fan-out rollout_id 约束",
+            "multi_agent 示例"
+          ],
+          "practice_task": "设计一个把一条轨迹拆成 K 段并把总 reward/K 分摊到每段的 generate 函数骨架，确保所有段 rollout_id 相同。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "流式、全异步与部分回滚 rollout",
+          "filename": "u7-l4-streaming-async-partial.md",
+          "level": "advanced",
+          "order": 4,
+          "topic": "对比 sglang_streaming_rollout（SSE 边生成边缓存）、fully_async_rollout（后台线程池）与 partial rollout（半成品下轮续）三种高级数据流。",
+          "learning_goals": [
+            "理解 streaming 如何在 abort 时保留已生成 partial 状态",
+            "掌握 fully_async 的 AsyncRolloutWorker 后台池与重入队逻辑",
+            "认识 partial-rollout + buffer-filter(pop_first) 如何跨 rollout 续传"
+          ],
+          "source_files": [
+            "slime/rollout/sglang_streaming_rollout.py",
+            "slime/rollout/fully_async_rollout.py",
+            "slime/rollout/data_source.py"
+          ],
+          "minimal_modules": [
+            "generate_streaming",
+            "generate_rollout_fully_async",
+            "partial rollout buffer"
+          ],
+          "practice_task": "对比三种模式在「长尾样本耗时差异大」场景下的优劣，写一段说明何时选 fully_async、何时选 partial-rollout。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "部署拓扑、性能、可观测性与工程实践",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "SGLang 拓扑与 sglang-config",
+          "filename": "u8-l1-sglang-config-topology.md",
+          "level": "advanced",
+          "order": 1,
+          "topic": "解析 sglang_config.py 的 YAML 扩展：异构 server group、多模型服务、placeholder 组与 per-group override 如何映射到 ServerGroupConfig/ModelConfig。",
+          "learning_goals": [
+            "理解 --sglang-config 如何描述 prefill/decode/encoder 等异构组",
+            "掌握 ServerGroupConfig 的 worker_type 与 num_gpus_per_engine 语义",
+            "认识多模型（actor/reference/reward）各自独立 router 的拓扑"
+          ],
+          "source_files": [
+            "slime/backends/sglang_utils/sglang_config.py",
+            "docs/en/advanced/sglang-config.md"
+          ],
+          "minimal_modules": [
+            "SglangConfig/ModelConfig",
+            "ServerGroupConfig",
+            "异构组拓扑"
+          ],
+          "practice_task": "写一个 sglang-config YAML：一个模型含 TP=2 的 prefill 组与 TP=4 的 decode 组，并说明 router 如何在二者间路由。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "PD 分离与外部推理引擎",
+          "filename": "u8-l2-pd-disagg-external-engines.md",
+          "level": "advanced",
+          "order": 2,
+          "topic": "讲解 prefill/decode 分离、--prefill-num-servers、session affinity 路由，以及外部托管引擎（external.py）的发现与对接。",
+          "learning_goals": [
+            "理解 PD 分离对多轮/长尾 agent 的吞吐收益",
+            "掌握 consistent_hashing 路由与前缀缓存复用",
+            "认识 external 模式下 slime 只起 router、用 /server_info 发现外部引擎"
+          ],
+          "source_files": [
+            "slime/backends/sglang_utils/external.py",
+            "docs/en/advanced/pd-disaggregation.md",
+            "docs/en/advanced/external-rollout-engines.md"
+          ],
+          "minimal_modules": [
+            "discover_external_engines",
+            "ExternalRolloutServer",
+            "PD 分离拓扑"
+          ],
+          "practice_task": "描述一个「推理由外部独立集群托管、训练集群只跑 Megatron」的部署，列出 slime 端需要配置的关键参数。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "参数体系全景：Megatron / SGLang / slime 三族",
+          "filename": "u8-l3-argument-system.md",
+          "level": "advanced",
+          "order": 3,
+          "topic": "精读 utils/arguments.py 的 parse_args 如何把 Megatron 参数、--sglang- 透传参数与 slime 专属参数合并与校验。",
+          "learning_goals": [
+            "掌握 parse_args 三阶段：sglang 独立解析→megatron+slime→合并校验",
+            "理解 --sglang- 前缀透传与 --router- 路由参数的处理",
+            "认识 slime_validate/megatron_validate/sglang_validate 的分工"
+          ],
+          "source_files": [
+            "slime/utils/arguments.py",
+            "slime/backends/sglang_utils/arguments.py"
+          ],
+          "minimal_modules": [
+            "parse_args 合并逻辑",
+            "add_sglang_arguments",
+            "slime_validate_args"
+          ],
+          "practice_task": "追踪一个 --sglang-mem-fraction-static 参数从命令行到 SGLang ServerArgs 的完整流转路径，指出在哪一步被去掉前缀。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "可观测性：Tracing、指标与 Profiling",
+          "filename": "u8-l4-observability-trace-metrics.md",
+          "level": "advanced",
+          "order": 4,
+          "topic": "讲解 trace_utils.py 的 TraceHandle/Span、metric_utils 与 tools/analyze_profile.py 如何支撑 RL 训练的调试与性能剖析。",
+          "learning_goals": [
+            "理解 TraceHandle/Span 的上下文式追踪与 SGLang 元数据采集",
+            "掌握 rollout/train 阶段关键指标（response_len/repetition/throughput）的计算",
+            "认识 analyze_profile.py 对 rollout/profile 的解读方式"
+          ],
+          "source_files": [
+            "slime/utils/trace_utils.py",
+            "slime/utils/metric_utils.py",
+            "tools/analyze_profile.py"
+          ],
+          "minimal_modules": [
+            "TraceHandle/Span",
+            "compute_metrics_from_samples",
+            "analyze_profile"
+          ],
+          "practice_task": "说明在「某 rollout 步骤吞吐异常」时，如何用 trace + 指标 + profile 三件套定位瓶颈（KV cache/prefill/排队）。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l5",
+          "title": "模型插件与低精度（fp8 / int4）",
+          "filename": "u8-l5-model-plugins-low-precision.md",
+          "level": "advanced",
+          "order": 5,
+          "topic": "讲解 slime_plugins/models 如何注册自定义模型结构，以及 bf16 训练 + fp8/int4 推理与权重后处理的实现。",
+          "learning_goals": [
+            "理解 custom_model_provider_path 与 slime_plugins/models 的模型插件机制",
+            "掌握 fp8/int4 推理权重的转换与 post_process_weights 钩子",
+            "认识 megatron_to_hf/processors 里的量化处理器"
+          ],
+          "source_files": [
+            "slime_plugins/models/__init__.py",
+            "slime_plugins/models/glm4.py",
+            "tools/convert_hf_to_fp8.py",
+            "slime/backends/megatron_utils/megatron_to_hf/processors/quantizer_fp8.py"
+          ],
+          "minimal_modules": [
+            "模型插件 provider",
+            "fp8/int4 权重转换",
+            "quantizer_fp8 处理器"
+          ],
+          "practice_task": "说明 bf16 训练 + fp8 推理时，为何 Megatron 检查点仍需 bf16 转换，以及 fp8 权重在 update_weight 哪一步被生成。",
+          "depends_on": [
+            "u4-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l6",
+          "title": "测试、契约测试与 CI",
+          "filename": "u8-l6-tests-contracts-ci.md",
+          "level": "advanced",
+          "order": 6,
+          "topic": "讲解 tests/ 的 CPU 单测、plugin_contracts 契约测试与 GPU 端到端测试，以及 CI 如何按标签（run-ci-cpu-unittest 等）组织。",
+          "learning_goals": [
+            "掌握 plugin_contracts 四类契约测试覆盖的 hook 形状",
+            "理解如何用 SLIME_CONTRACT_* 环境变量验证自定义实现",
+            "认识 pyproject 的 pytest markers 与 CI 标签体系"
+          ],
+          "source_files": [
+            "tests/plugin_contracts/test_plugin_generate_contracts.py",
+            "tests/plugin_contracts/test_plugin_rollout_contracts.py",
+            "docs/en/developer_guide/ci.md",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "plugin 契约测试",
+            "run-ci 标签",
+            "pytest markers"
+          ],
+          "practice_task": "为你写的 custom_generate 写一个最小契约自检：用 SLIME_CONTRACT_CUSTOM_GENERATE_FUNCTION_PATH 指向它并跑通对应契约测试，记录断言点。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
