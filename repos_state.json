@@ -30832,8 +30832,221 @@
     },
     "google/xls": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\nens\":512640,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.6560900000000001,\"contextWindow\":1000000,\"maxOutputTokens\":32000,\"canonicalModel\":\"glm-5.2[1m]\",\"provider\":\"firstParty\"},\"claude-opus-5[1m]\":{\"inputTokens\":287004,\"outputTokens\":15985,\"cacheReadInputTokens\"",
-      "last_run_at": "2026-08-07T18:02:55Z"
+      "last_error": "quota exhausted; will resume next window",
+      "last_run_at": "2026-08-07T23:02:18Z",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.5166489999999999,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0640370000000001,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8071579999999999,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.833849,
+          "error": null
+        },
+        "u1-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9035030000000001,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.038475,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.4773130000000003,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.219456,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.2844870000000002,
+          "error": null
+        },
+        "u2-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.459127,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.226712,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1128339999999999,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.1188089999999997,
+          "error": null
+        },
+        "u3-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.909835,
+          "error": null
+        },
+        "u3-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.2898539999999996,
+          "error": null
+        },
+        "u4-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.300617,
+          "error": null
+        },
+        "u4-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.582112,
+          "error": null
+        },
+        "u4-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.7387290000000002,
+          "error": null
+        },
+        "u4-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.373606,
+          "error": null
+        },
+        "u4-l5": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"ff770973-ab3b-41d2-9039-7322de4b832a\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+        },
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "e796ea8aeea3875362c7dbeb11a850f3854a9116",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/google/xls/xls-tutorial",
+      "last_head": "e796ea8aeea3875362c7dbeb11a850f3854a9116"
     },
     "ZipCPU/zipcpu": {
       "prompt_hash": "b21aef51792b02df",
@@ -31014,41 +31227,50 @@
           "error": null
         },
         "u5-l3": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"c5f5d214-958b-421d-a16f-d51043015e09\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "cost": 1.206517,
+          "error": null
         },
         "u5-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.265266,
+          "error": null
         },
         "u5-l5": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.2501380000000002,
+          "error": null
         },
         "u5-l6": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.012806,
+          "error": null
         },
         "u5-l7": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.3063660000000001,
+          "error": null
         }
       },
       "manifest_head": "42606d2d6ef55df313772232977621b2d72f0159",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/ZipCPU/zipcpu/zipcpu-tutorial",
       "last_head": "42606d2d6ef55df313772232977621b2d72f0159",
-      "last_run_at": "2026-08-07T18:02:55Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-08-07T23:02:18Z",
+      "last_error": null,
+      "abandoned": []
     },
     "mpskex/chisel-npu": {
       "prompt_hash": "b21aef51792b02df",
@@ -31250,24 +31472,137 @@
           "error": null
         },
         "u9-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"abedbbcb-d650-4b9f-9b7c-a01113001c1f\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "cost": 1.268645,
+          "error": null
         }
       },
       "manifest_head": "3e0d1314e9572c17fb40f206f0d1e7a72a80b663",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/mpskex/chisel-npu/chisel-npu-tutorial",
       "last_head": "3e0d1314e9572c17fb40f206f0d1e7a72a80b663",
-      "last_run_at": "2026-08-07T18:02:55Z",
+      "last_run_at": "2026-08-07T23:02:18Z",
+      "last_error": null,
+      "abandoned": []
+    },
+    "THUDM/slime": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\n\n{\"is_error\":true,\"duration_api_ms\":329888,\"num_turns\":1,\"stop_reason\":null,\"session_id\":\"cea6b9f6-1be1-417a-858b-988105e099c4\",\"total_cost_usd\":3.197529,\"usage\":{\"input_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":0,\"server_tool_use\":{\"web",
+      "last_run_at": "2026-08-07T23:02:18Z"
+    },
+    "z-lab/dflash": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.501597,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.585646,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.6262730000000001,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9010119999999999,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.878576,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.840121,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9898199999999999,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.568756,
+          "error": null
+        },
+        "u2-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8053889999999999,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.98395,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.28498,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.072602,
+          "error": null
+        },
+        "u3-l4": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"ffcb17d7-58a6-4da2-b339-0dafbf1e07bd\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+        },
+        "u3-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "94e4abc5e0c31b67bc1a9d30f1cc34ece28a8756",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/z-lab/dflash/dflash-tutorial",
+      "last_head": "94e4abc5e0c31b67bc1a9d30f1cc34ece28a8756",
+      "last_run_at": "2026-08-07T23:02:18Z",
       "last_error": "quota exhausted; will resume next window"
     },
-    "THUDM/slime": {},
-    "z-lab/dflash": {},
     "THUDM/P-tuning-v2": {},
     "Dao-AILab/quack": {},
     "blueberrycongee/codemirror-live-markdown": {},
@@ -42981,7 +43316,7 @@
     "ai-dynamo/dynamo": {},
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-07T18:02:55Z"
+      "last_run_at": "2026-08-07T23:02:18Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
