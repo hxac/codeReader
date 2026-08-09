@@ -32475,7 +32475,7 @@
     "analogdevicesinc/hdl": {
       "prompt_hash": "b21aef51792b02df",
       "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-08-08T23:02:21Z",
+      "last_run_at": "2026-08-09T15:50:37Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -32608,7 +32608,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"9c889f79-a075-4ade-894d-7e8f5c8a7794\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"8d980c97-4eb8-469d-b591-5e7a86a19595\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
         "u6-l1": {
           "status": "pending",
@@ -32777,7 +32777,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"065568eb-dd48-4311-959f-606fa032f39d\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"acc026cd-6e5f-4c05-ba62-74687ed887b3\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
         "u5-l3": {
           "status": "pending",
@@ -32826,7 +32826,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/ahmedshahein/DSP-RTL-Lib/DSP-RTL-Lib-tutorial",
       "last_head": "6bc926f160bd55aab7b77a088e71f9655bbc85ad",
-      "last_run_at": "2026-08-08T23:02:21Z",
+      "last_run_at": "2026-08-09T15:50:37Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "enclustra/en_cl_fix": {},
@@ -34458,7 +34458,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"09e4770e-f765-4b8b-b885-f6dec512a66e\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"c8151679-195b-4ef2-9e3b-bbbcd6505b6c\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
         "u3-l6": {
           "status": "pending",
@@ -34472,7 +34472,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/gitlab.upt.ro/elisei.ilies/CIC-filters.git/CIC-filters-tutorial",
       "last_head": "e49b263d702c6fb0d4ea1d5b8390d307e6ba43d1",
-      "last_run_at": "2026-08-08T23:02:21Z",
+      "last_run_at": "2026-08-09T15:50:37Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "deepseek-ai/DeepSpec": {},
@@ -44651,7 +44651,7 @@
     "ai-dynamo/dynamo": {},
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-08T23:02:21Z"
+      "last_run_at": "2026-08-09T15:50:37Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
