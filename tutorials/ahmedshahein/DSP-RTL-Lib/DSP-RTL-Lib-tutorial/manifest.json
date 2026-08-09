@@ -1,0 +1,720 @@
+{
+  "project": "DSP-RTL-Lib",
+  "head": "6bc926f160bd55aab7b77a088e71f9655bbc85ad",
+  "rationale": "DSP-RTL-Lib（DRL）是一个面向 ASIC/FPGA 的可综合 DSP RTL 模块库，核心价值在于「可参数化 RTL + SystemVerilog 测试平台 + Octave 黄金参考模型（GRM）比特真验证」三位一体。因此学习路线按「先认识工程与运行方式 → 打好定点数与共享原语地基 → 逐模块族深入（FIR→CIC→多相→信号生成器）→ 掌握验证方法学与扩展实践」的顺序展开。单元 1 让读者从零跑通 demo 并理解统一接口约定；单元 2 集中讲解贯穿全库的定点位宽推导与 dff/shift_register/upsample 原语，是后续所有模块的依赖；单元 3-6 按「由简到繁、数据流由直观到复杂」排列模块族——FIR 最直观，CIC 引入多速率与双时钟，多相引入换向器与乘加树，信号生成器引入迭代/展开式算法与查表重构；单元 7 抽象出验证方法学与新模块脚手架，把零散知识固化为可复用工程能力。每篇讲义只聚焦一个主题、引用真实源码、并给出可操作的实践任务，讲义间通过 depends_on 形成清晰的前置链。全库共 8 个模块，属于中大型项目，故规划 7 单元 23 篇讲义。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目认识与运行环境",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：DSP-RTL-Lib 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 DRL 的定位、目标受众、mix-and-match 设计理念，以及 RTL+GRM 双模型的工程哲学。",
+          "learning_goals": [
+            "理解 DRL 解决的问题：提供可参数化、可综合的通用 DSP 模块",
+            "掌握 RTL(Verilog 2001) + 测试台(SystemVerilog 2012) + Octave GRM 三位一体架构",
+            "了解模块清单与各模块稳定/规划状态"
+          ],
+          "source_files": [
+            "README.md",
+            "LICENSE"
+          ],
+          "minimal_modules": [
+            "项目定位与 M&M 理念",
+            "RTL/GRM/测试台三位一体架构",
+            "模块清单与状态表"
+          ],
+          "practice_task": "阅读 README，列出当前已 Stable 的模块与 Planned 模块；用自己的话写一段 100 字说明 DRL 相比手写 DSP 的优势，并指出 GRM 在验证中的作用。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与目录组织",
+          "order": 2,
+          "filename": "u1-l2-repository-structure.md",
+          "level": "beginner",
+          "topic": "讲解顶层目录（.drl_src_code 模板库、.drl_param 参数模板、构建脚本、PDF 手册）与每个模块内部的 rtl/octave/sim/log 标准子目录结构。",
+          "learning_goals": [
+            "看懂顶层布局：源码模板库、参数库、构建脚本",
+            "掌握每个模块 log/octave/rtl/sim/testbench/testcases 的标准目录约定",
+            "理解源码模板与生成产物的区别"
+          ],
+          "source_files": [
+            "README.md",
+            "dsp_rtl_lib.sh"
+          ],
+          "minimal_modules": [
+            "顶层目录布局",
+            "模块标准子目录结构",
+            "源码模板与构建产物"
+          ],
+          "practice_task": "对照 README 的 Folder Structure 章节，画出 filt_cicd 模块的完整目录树；标出哪些目录存放源码模板、哪些目录在构建后才会被填充文件。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "工具链与构建运行流程",
+          "order": 3,
+          "filename": "u1-l3-toolchain-and-build-flow.md",
+          "level": "beginner",
+          "topic": "讲解 dsp_rtl_lib.sh 的命令行参数（-chk/-git/-d/-s/-demo/-dev）、.param 文件格式，以及从参数到 RTL 再到回归仿真的完整流水线。",
+          "learning_goals": [
+            "掌握 dsp_rtl_lib.sh 各子命令的用途与退出码含义",
+            "理解 .param 键值文件格式与 sed 参数注入机制",
+            "跑通 -demo 并理解 design→octave→iverilog→比对 的完整链路"
+          ],
+          "source_files": [
+            "dsp_rtl_lib.sh",
+            ".drl_param/filt_cicd_1.param"
+          ],
+          "minimal_modules": [
+            "命令行参数解析",
+            ".param 文件格式与 sed 注入",
+            "design 仿真流水线"
+          ],
+          "practice_task": "在安装了 iverilog 与 octave 的环境执行 ./dsp_rtl_lib.sh -demo，记录 CIC 抽取滤波器回归仿真的 PASSED/FAILED 结果；然后修改 filt_cicd_1.param 中的 gp_order 重新生成，观察输出位宽变化。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "统一编码风格与接口约定",
+          "order": 4,
+          "filename": "u1-l4-coding-style-and-interface.md",
+          "level": "beginner",
+          "topic": "讲解全库统一的时序约定（异步低有效复位、同步高有效使能、上升沿）与命名规范（gp_/c_/r_/w_ 前缀），以 dff.v 为范本。",
+          "learning_goals": [
+            "掌握异步低有效复位 + 同步高有效使能 + 上升沿的统一时序模板",
+            "理解 gp_(参数)/c_(常量)/r_(寄存器)/w_(线网) 命名约定",
+            "能识别并复用 dff 的标准端口与时序块写法"
+          ],
+          "source_files": [
+            "README.md",
+            ".drl_src_code/filt_cicd/rtl/dff.v"
+          ],
+          "minimal_modules": [
+            "统一时序约定",
+            "命名前缀规范",
+            "dff 标准接口范本"
+          ],
+          "practice_task": "以 dff.v 为模板，按相同风格手写一个带使能的 12 位寄存器模块 my_dff，要求保留 i_rst_an/i_ena/i_clk 接口与 gp_data_width 参数，并加上中文注释。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "定点数运算与共享原语",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Verilog 定点数与位宽推导",
+          "order": 1,
+          "filename": "u2-l1-fixed-point-bitwidth.md",
+          "level": "intermediate",
+          "topic": "讲解二进制补码定点表示、符号扩展、乘法/加法位宽增长，以及 $clog2 与 MSB 填充在全库位宽自动推导中的用法。",
+          "learning_goals": [
+            "掌握有符号补码乘法与累加的位宽增长规律",
+            "理解 $signed、$clog2、{fill{sign}} 符号扩展的用法",
+            "看懂各模块 localparam 如何自动推导输出位宽"
+          ],
+          "source_files": [
+            ".drl_src_code/filt_fir/rtl/filt_fir.v",
+            ".drl_src_code/filt_cicd/rtl/filt_cicd.v",
+            ".drl_src_code/filt_ppd/rtl/mul_add.v"
+          ],
+          "minimal_modules": [
+            "补码定点与符号扩展",
+            "乘加位宽增长",
+            "$clog2 自动位宽推导"
+          ],
+          "practice_task": "给定 gp_inp_width=8、gp_coeff_width=12、gp_coeff_length=17，手算 filt_fir 的 c_mul_oup_width、c_add_oup_width、gp_oup_width；再用 iverilog elaborate 一个最小实例打印这些 localparam 验证。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "dff.v — 基础寄存器原语",
+          "order": 2,
+          "filename": "u2-l2-dff-primitive.md",
+          "level": "beginner",
+          "topic": "逐行精读 dff.v：参数化位宽、异步复位、同步使能、上升沿 always 块，说明它是全库所有时序单元的原子构建块。",
+          "learning_goals": [
+            "完全掌握 dff 的参数 gp_data_width 与端口语义",
+            "理解 posedge i_clk or negedge i_rst_an 的异步复位写法",
+            "明白全库寄存器、延迟线、换向器都复用 dff"
+          ],
+          "source_files": [
+            ".drl_src_code/filt_cicd/rtl/dff.v"
+          ],
+          "minimal_modules": [
+            "dff 参数与端口",
+            "异步复位时序块",
+            "作为全库原子构建块"
+          ],
+          "practice_task": "用 dff 原语搭建一个 3 级串行移位寄存器（不使用现成 shift_register），给出顶层例化代码并用 iverilog 编译通过。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "shift_register 与 upsample 原语",
+          "order": 3,
+          "filename": "u2-l3-shift-register-and-upsample.md",
+          "level": "intermediate",
+          "topic": "精读 shift_register.v（级联 dff + shift_done 标志）与 upsample.v（零插值上采样器），讲解它们在 CIC/多相模块中的角色。",
+          "learning_goals": [
+            "掌握 shift_register 用 generate 级联 dff 的实现与 o_shift_done 标志",
+            "理解 upsample 零插值与相位偏移 gp_phase 的实现",
+            "看清两个原语如何被 CIC 与多相滤波器复用"
+          ],
+          "source_files": [
+            ".drl_src_code/filt_cicd/rtl/shift_register.v",
+            ".drl_src_code/filt_cici/rtl/upsample.v"
+          ],
+          "minimal_modules": [
+            "shift_register 级联与完成标志",
+            "upsample 零插值与相位",
+            "原语在多速率模块中的复用"
+          ],
+          "practice_task": "为 shift_register 增加一个并行输出端口，使其同时暴露所有中间级数据（而不只是末级），用于调试；编写一个最小测试平台验证 gp_nr_stages=4 时各级波形。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "FIR 滤波器",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "FIR 原理与 filt_fir 接口结构",
+          "order": 1,
+          "filename": "u3-l1-fir-structure.md",
+          "level": "intermediate",
+          "topic": "讲解 FIR 卷积原理，精读 filt_fir 的参数表、端口、localparam 与 filt_coeff.v 系数包含机制，以及 gen_coeffs.m 如何生成系数文件。",
+          "learning_goals": [
+            "理解 FIR 抽头-延迟线-乘加的卷积结构",
+            "掌握 filt_fir 的参数集与自动位宽推导",
+            "看懂 gen_coeffs.m 生成 filt_coeff.v 的机制"
+          ],
+          "source_files": [
+            ".drl_src_code/filt_fir/rtl/filt_fir.v",
+            ".drl_src_code/filt_fir/octave/gen_coeffs.m"
+          ],
+          "minimal_modules": [
+            "FIR 卷积结构",
+            "filt_fir 参数与位宽",
+            "filt_coeff.v 系数生成"
+          ],
+          "practice_task": "用 Octave 设计一个 17 抽头低通 FIR（如 fir1），调用 gen_coeffs.m 生成 filt_coeff.v；说明 c_coeff 数组长度为何在 gp_symm=1 时取半。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "转置型与直接型 FIR 结构",
+          "order": 2,
+          "filename": "u3-l2-fir-tf-df-topology.md",
+          "level": "intermediate",
+          "topic": "精读 filt_fir 中 generate 块对转置型(TF)与直接型(DF)的分支实现，对比两种结构的延迟线位置、关键路径与吞吐特性。",
+          "learning_goals": [
+            "区分转置型与直接型 FIR 的数据流与寄存器位置",
+            "掌握 generate + if(gp_tf_df) 的参数化结构选择",
+            "理解两种结构在关键路径与流水上的取舍"
+          ],
+          "source_files": [
+            ".drl_src_code/filt_fir/rtl/filt_fir.v"
+          ],
+          "minimal_modules": [
+            "转置型乘加链",
+            "直接型延迟线",
+            "generate 结构选择"
+          ],
+          "practice_task": "在同一参数下分别令 gp_tf_df=1 和 0 综合/仿真 filt_fir，对比两种拓扑的输出首个有效样本延迟差，并用文字解释为何 TF 型寄存器在乘加链之间。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "对称系数优化",
+          "order": 3,
+          "filename": "u3-l3-fir-symmetric-coefficients.md",
+          "level": "intermediate",
+          "topic": "讲解线性相位 FIR 的对称性如何把乘法器数量减半，精读 filt_fir 的 gp_symm 分支与镜像抽头索引，并引出 filt_mac 的预加法器思路。",
+          "learning_goals": [
+            "理解对称系数的预加 (x[n]+x[N-1-n]) 节省乘法器原理",
+            "看懂 filt_fir 中 c_coeff_2 与镜像索引 gp_coeff_length-1-i",
+            "建立与 filt_mac 预加法器的联系"
+          ],
+          "source_files": [
+            ".drl_src_code/filt_fir/rtl/filt_fir.v",
+            ".drl_src_code/filt_mac/rtl/filt_mac.v"
+          ],
+          "minimal_modules": [
+            "对称系数预加",
+            "镜像抽头索引",
+            "乘法器减半"
+          ],
+          "practice_task": "手动追踪 gp_symm=1、gp_coeff_length=17 时 c_coeff_2 的取值与每个 i 选用的系数索引，画出对称配对表；说明中间抽 tap 在奇偶长度下的特殊处理。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "filt_mac — 资源共享型 MAC FIR",
+          "order": 4,
+          "filename": "u3-l4-filt-mac.md",
+          "level": "intermediate",
+          "topic": "精读 filt_mac：用单个乘法器+累加器分时复用实现 FIR，包括延迟线、抽头计数器、对称预加、done/load 标志与吞吐权衡。",
+          "learning_goals": [
+            "掌握单 MAC 分时复用 FIR 的延迟线与计数器控制",
+            "理解对称预加与中间抽头 c_even_odd_symm 处理",
+            "看清 w_done/o_done 节拍与面积-吞吐取舍"
+          ],
+          "source_files": [
+            ".drl_src_code/filt_mac/rtl/filt_mac.v",
+            ".drl_src_code/filt_mac/octave/gen_coeffs.m"
+          ],
+          "minimal_modules": [
+            "延迟线与抽头计数器",
+            "单乘加累加器",
+            "done/load 节拍控制"
+          ],
+          "practice_task": "对比 filt_fir（并行多乘法器）与 filt_mac（单 MAC 复用）在同一抽头数下的资源与吞吐；估算 17 抽头时 filt_mac 输出一个有效样本所需时钟周期数。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "CIC 滤波器",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "CIC 原理与 filt_cicd 抽取滤波器",
+          "order": 1,
+          "filename": "u4-l1-cicd-decimation.md",
+          "level": "intermediate",
+          "topic": "讲解 CIC 抽取原理（积分器→下采样→微分器），精读 filt_cicd 的环形计数器、积分器级联、下采样相位与微分器级联。",
+          "learning_goals": [
+            "理解 CIC 抽取器积分-抽取-微分的三段数据流",
+            "掌握环形计数器实现下采样相位选择 w_sclk",
+            "看清积分器与微分器级联的 generate 实现"
+          ],
+          "source_files": [
+            ".drl_src_code/filt_cicd/rtl/filt_cicd.v",
+            ".drl_src_code/filt_cicd/rtl/dff.v",
+            ".drl_src_code/filt_cicd/rtl/shift_register.v"
+          ],
+          "minimal_modules": [
+            "积分器级联",
+            "环形计数器下采样",
+            "微分器级联",
+            "MSB 符号扩展填充"
+          ],
+          "practice_task": "令 gp_decimation_factor=4、gp_order=3，在草稿纸上追踪一个单位脉冲通过积分器→下采样→微分器的各级值；再用 ./dsp_rtl_lib.sh -d 生成并仿真验证。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "filt_cici 插值滤波器与双时钟",
+          "order": 2,
+          "filename": "u4-l2-cici-interpolation.md",
+          "level": "intermediate",
+          "topic": "精读 filt_cici：微分器→上采样→积分器的反向数据流，讲解 upsample 零插值与 i_clk/i_fclk 双时钟域的协同。",
+          "learning_goals": [
+            "理解 CIC 插值器微分-上采样-积分的反向结构",
+            "掌握 upsample 零插值在 i_fclk 快时钟上的运行",
+            "看清 i_clk（慢）与 i_fclk（快）的时钟分配"
+          ],
+          "source_files": [
+            ".drl_src_code/filt_cici/rtl/filt_cici.v",
+            ".drl_src_code/filt_cici/rtl/upsample.v"
+          ],
+          "minimal_modules": [
+            "微分器级联",
+            "upsample 零插值",
+            "双时钟 i_clk/i_fclk",
+            "积分器级联"
+          ],
+          "practice_task": "对比 filt_cicd 与 filt_cici 的模块顺序与所用时钟，画出两者数据流框图；说明为何插值器积分器跑在快时钟 i_fclk 上。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "CIC 位宽推导与黄金参考模型",
+          "order": 3,
+          "filename": "u4-l3-cic-bitwidth-and-grm.md",
+          "level": "intermediate",
+          "topic": "讲解 Hogenauer CIC 位宽增长公式 gp_oup_width 的推导，并精读 Octave CICFilter.m 黄金参考模型如何产出比特真响应。",
+          "learning_goals": [
+            "掌握 CIC 输出位宽 gp_order*$clog2(dec*diff_delay) 增长公式",
+            "理解 stimuli.m 中增益缩放因子 SF 的含义",
+            "看懂 CICFilter.m 作为比特真 GRM 的接口"
+          ],
+          "source_files": [
+            ".drl_src_code/filt_cicd/rtl/filt_cicd.v",
+            ".drl_src_code/filt_cicd/octave/CICFilter.m",
+            ".drl_src_code/filt_cicd/octave/stimuli.m"
+          ],
+          "minimal_modules": [
+            "Hogenauer 位宽公式",
+            "增益缩放因子 SF",
+            "CICFilter.m 黄金模型"
+          ],
+          "practice_task": "对 gp_decimation_factor=17、gp_order=8、gp_diff_delay=1、gp_inp_width=2 手算 gp_oup_width 与 SF；运行 octave stimuli.m 查看 BG/SF 输出并解释 SF 落在 [1,2) 的原因。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "多相滤波器",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "多相分解原理与 filt_ppd 顶层",
+          "order": 1,
+          "filename": "u5-l1-ppd-top-level.md",
+          "level": "intermediate",
+          "topic": "讲解多相分解思想，精读 filt_ppd 顶层如何把换向器(commutator)与乘加引擎(mul_add)组合成抽取滤波器。",
+          "learning_goals": [
+            "理解多相分解把长 FIR 拆成 M 路并行支路的思想",
+            "掌握 filt_ppd 顶层 commutator+mul_add 的数据流",
+            "看清 o_sclk 慢时钟脉冲的作用"
+          ],
+          "source_files": [
+            ".drl_src_code/filt_ppd/rtl/filt_ppd.v"
+          ],
+          "minimal_modules": [
+            "多相分解思想",
+            "commutator+mul_add 数据流",
+            "o_sclk 慢时钟脉冲"
+          ],
+          "practice_task": "对照 filt_ppd 参数表，说明 gp_decimation_factor、gp_coeff_length、gp_tf_df 各自控制什么；画出 comm_data 宽度与 s_clk 节拍的关系。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "commutator 换向器（抽取）",
+          "order": 2,
+          "filename": "u5-l2-commutator-decimation.md",
+          "level": "intermediate",
+          "topic": "精读 filt_ppd 的 commutator.v：环形计数器顺时针/逆时针、相位对齐 shift_register、按相捕获数据并输出并行字。",
+          "learning_goals": [
+            "掌握环形计数器 CW/CCW 两种方向实现",
+            "理解 gp_phase 相位对齐与 shift_register 用法",
+            "看清按相位用 r_ring_cnt[x] 作时钟捕获数据的机制"
+          ],
+          "source_files": [
+            ".drl_src_code/filt_ppd/rtl/commutator.v",
+            ".drl_src_code/filt_ppd/rtl/shift_register.v"
+          ],
+          "minimal_modules": [
+            "环形计数器 CW/CCW",
+            "相位对齐 shift_register",
+            "按相位并行捕获"
+          ],
+          "practice_task": "追踪 gp_decimation_factor=4、gp_comm_ccw=1、gp_phase=0 时环形计数器一个完整周期的 r_ring_cnt 演化，画出每个 dff 捕获输入的时刻表。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "mul_add 多相乘加引擎",
+          "order": 3,
+          "filename": "u5-l3-mul-add-engine.md",
+          "level": "advanced",
+          "topic": "精读 mul_add.v：系数矩阵化、TF/DF 与 CW/CCW 四象限的乘法器输入编排、加法树与流水累加器，是最复杂的核心模块。",
+          "learning_goals": [
+            "理解 c_row_x_col 系数矩阵化与 c_col 列划分",
+            "掌握 TF/DF × CW/CCW 四种乘法输入索引编排",
+            "看清加法树 w_add_tree 与流水累加 w_sum 的实现"
+          ],
+          "source_files": [
+            ".drl_src_code/filt_ppd/rtl/mul_add.v"
+          ],
+          "minimal_modules": [
+            "系数矩阵化与列划分",
+            "TF/DF×CW/CCW 乘法编排",
+            "加法树与流水累加器"
+          ],
+          "practice_task": "对 gp_decimation_factor=4、gp_coeff_length=15，手算 c_col、c_row_x_col；画出加法树 w_add_tree 的层级结构并标注每层位宽。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "filt_ppi 多相插值与反向数据流",
+          "order": 4,
+          "filename": "u5-l4-ppi-interpolation.md",
+          "level": "advanced",
+          "topic": "精读 filt_ppi：先 mul_add 后 commutator 的反向数据流，对比 PPI 版 commutator（索引输出 o_data）与 PPD 版的差异。",
+          "learning_goals": [
+            "理解插值器 mul_add→commutator 的反向数据流",
+            "掌握 PPI commutator 用 r_idx 索引并行输出的机制",
+            "对比 PPD/PPI 两个 commutator 版本的设计差异"
+          ],
+          "source_files": [
+            ".drl_src_code/filt_ppi/rtl/filt_ppi.v",
+            ".drl_src_code/filt_ppi/rtl/commutator.v",
+            ".drl_src_code/filt_ppi/rtl/mul_add.v"
+          ],
+          "minimal_modules": [
+            "mul_add→commutator 反向流",
+            "PPI commutator 索引输出",
+            "PD/PPI commutator 差异"
+          ],
+          "practice_task": "对比 filt_ppd 与 filt_ppi 的 commutator.v，列出端口、参数与输出选择逻辑（ring_cnt 捕获 vs r_idx 索引）的三点关键差异，并解释为何插值器需要索引式输出。",
+          "depends_on": [
+            "u5-l1",
+            "u5-l2",
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "信号生成器",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "sgen_cordic — CORDIC 算法与 RTL 实现",
+          "order": 1,
+          "filename": "u6-l1-cordic-algorithm.md",
+          "level": "advanced",
+          "topic": "讲解 CORDIC 移位-相加旋转原理，精读 sgen_cordic 的旋转/矢量模式与展开式(unrolled)/迭代式(iterative)两种实现。",
+          "learning_goals": [
+            "理解 CORDIC 通过移位相加逼近三角/旋转的原理",
+            "掌握旋转模式与矢量模式的判决方向 d[i]",
+            "看清展开式（纯组合）与迭代式（资源复用寄存器组）两种架构"
+          ],
+          "source_files": [
+            ".drl_src_code/sgen_cordic/rtl/sgen_cordic.v"
+          ],
+          "minimal_modules": [
+            "CORDIC 移位相加原理",
+            "旋转/矢量模式",
+            "展开式 vs 迭代式架构"
+          ],
+          "practice_task": "令 gp_nr_iter=16，对比 gp_impl_unrolled_iterative=1 与 0 两种实现的资源（乘法/加法/寄存器数量）与延迟；说明迭代式资源复用如何用 r_count_iter 控制。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "CORDIC 增益补偿与 atan LUT 生成",
+          "order": 2,
+          "filename": "u6-l2-cordic-gain-and-lut.md",
+          "level": "advanced",
+          "topic": "精读 sgen_cordic.v 的 cordic_gain 增益补偿模块与 gen_atan_lut.m 如何生成 atan_lut.v 查找表。",
+          "learning_goals": [
+            "理解 CORDIC 增益 0.6072 与 cordic_gain 的定点补偿",
+            "掌握 atan_lut 表 atan(2^-i) 的定点量化方法",
+            "看懂 gen_atan_lut.m 生成 atan_lut.v 的流程"
+          ],
+          "source_files": [
+            ".drl_src_code/sgen_cordic/rtl/sgen_cordic.v",
+            ".drl_src_code/sgen_cordic/octave/gen_atan_lut.m"
+          ],
+          "minimal_modules": [
+            "CORDIC 增益补偿",
+            "atan_lut 定点量化",
+            "gen_atan_lut.m 生成流程"
+          ],
+          "practice_task": "用 Octave 调用 gen_atan_lut.m(16, 16) 生成 atan_lut.v，检查前 4 个表值是否对应 atan(1)、atan(0.5)、atan(0.25)、atan(0.125) 的定点量化；计算 cordic_gain 在 gp_gain_width=12 时的 c_1_gain 常数。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "sgen_nco — NCO 相位累加与象限重构",
+          "order": 3,
+          "filename": "u6-l3-nco-and-rom-reconstruction.md",
+          "level": "advanced",
+          "topic": "精读 sgen_nco：相位累加器、四分之一波长 ROM 与象限重构（符号/正余弦互换/镜像）还原完整正余弦；对照 nco.m GRM。",
+          "learning_goals": [
+            "理解相位累加器 r_phase_accu + 频率控制字 i_fcw 的 DDS 原理",
+            "掌握四分之一波长 ROM + 象限重构还原完整正余弦",
+            "看清 gen_sinusoidal_rom.m 生成 ROM 与 nco.m GRM 的对应"
+          ],
+          "source_files": [
+            ".drl_src_code/sgen_nco/rtl/sgen_nco.v",
+            ".drl_src_code/sgen_nco/octave/gen_sinusoidal_rom.m",
+            ".drl_src_code/sgen_nco/octave/nco.m"
+          ],
+          "minimal_modules": [
+            "相位累加器与 FCW",
+            "四分之一波长 ROM",
+            "象限重构 case 表",
+            "nco.m 黄金模型"
+          ],
+          "practice_task": "说明 w_ctrl 三位如何决定 sin/cos 的符号、正余弦互换与镜像；对照 nco.m 解释 RTL 用单象限 ROM 复原全周期正余弦为何能保持比特真。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "验证方法学与工程实践",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "比特真验证方法论",
+          "order": 1,
+          "filename": "u7-l1-bittrue-verification.md",
+          "level": "intermediate",
+          "topic": "讲解 Octave GRM 生成 stimuli/response/defines → SystemVerilog TB 文本 IO 逐样本比对 → error_count 判定的完整比特真验证闭环。",
+          "learning_goals": [
+            "掌握 GRM 生成 .dat 激励与响应、defines.sv 注入参数的机制",
+            "理解 TB 用 $fscanf 读激励、在 s_clk 边沿比对响应的节拍",
+            "看清 error_count 与 PASSED/FAILED 判定逻辑"
+          ],
+          "source_files": [
+            ".drl_src_code/filt_cicd/sim/testbench/filt_cicd_tb.sv",
+            ".drl_src_code/filt_cicd/octave/stimuli.m",
+            ".drl_src_code/filt_cicd/octave/gen_defines.m"
+          ],
+          "minimal_modules": [
+            "GRM 生成激励/响应/defines",
+            "TB 文本 IO 逐样本比对",
+            "PASSED/FAILED 判定"
+          ],
+          "practice_task": "阅读 filt_cicd_tb.sv，说明复位/使能时序、s_clk 采样边沿与 data_ready 结束条件三者如何配合；指出激励读入在 posedge i_clk、响应比对在 posedge s_clk 的原因。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "九测试用例激励设计模式",
+          "order": 2,
+          "filename": "u7-l2-testcase-stimuli-pattern.md",
+          "level": "intermediate",
+          "topic": "精读 stimuli.m 的 switch-case 九测试用例（脉冲/阶跃/斜坡/chirp/随机/正弦/含噪正弦），讲解覆盖度导向的激励设计。",
+          "learning_goals": [
+            "理解 9 个测试用例覆盖的功能与边界场景",
+            "掌握 quantize/quantizer 定点量化在激励中的应用",
+            "学会为新模块设计类似的多场景激励集"
+          ],
+          "source_files": [
+            ".drl_src_code/filt_cicd/octave/stimuli.m"
+          ],
+          "minimal_modules": [
+            "9 用例场景覆盖",
+            "定点量化 quantize",
+            "激励/响应/defines 生成流程"
+          ],
+          "practice_task": "为某个新 DSP 模块设计一组 6 个测试用例（至少含直流、满量程、随机、带通信号），仿照 stimuli.m 写出 switch-case 框架，并说明每个用例针对验证什么缺陷。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "dev 模式 — 脚手架创建新模块",
+          "order": 3,
+          "filename": "u7-l3-dev-mode-scaffolding.md",
+          "level": "advanced",
+          "topic": "讲解 dsp_rtl_lib.sh -dev 如何用 heredoc 生成 RTL 与测试台模板并创建标准目录，作为二次开发的起点。",
+          "learning_goals": [
+            "掌握 -dev 的 -design/-folder/-author 三参数用法",
+            "理解模板 RTL 与 TB 的脚手架结构（端口、时序、TEXTIO）",
+            "学会基于脚手架扩展自定义 DSP 模块"
+          ],
+          "source_files": [
+            "dsp_rtl_lib.sh"
+          ],
+          "minimal_modules": [
+            "-dev 参数解析",
+            "heredoc RTL/TB 模板",
+            "标准目录脚手架"
+          ],
+          "practice_task": "执行 ./dsp_rtl_lib.sh -dev -author \"Your Name\" -folder \"filt_avg\" -design \"filt_avg\"，检查生成的目录结构与模板文件；在模板基础上把 filt_avg 实现为一个简单滑动平均滤波器并跑通一次仿真。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

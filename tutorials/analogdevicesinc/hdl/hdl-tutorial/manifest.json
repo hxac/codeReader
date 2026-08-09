@@ -1,0 +1,907 @@
+{
+  "project": "hdl",
+  "head": "e57851ffcea3d92d821a38c908c909d61db4a492",
+  "rationale": "本仓库是 Analog Devices 的 FPGA HDL 参考设计库，体量庞大（约 97 个 library IP 模块、约 99 个 projects 参考设计，并支持 AMD Xilinx / Intel / Lattice 三家工具链）。学习路线按\"先看清全貌、再拆构建系统、再读 IP 库与数据通路、最后做扩展与移植\"的认知顺序设计为 8 个单元 28 篇讲义。第 1、2 单元（beginner）解决\"它是什么、目录怎么组织、怎么把它跑起来、单工程由哪些文件构成\"这一从零起步问题；第 3、4 单元（intermediate）拆解贯穿全仓的两套核心机制——基于 GNU Make + Tcl 的工程/库构建流水线（projects/scripts 与 library/scripts）以及多厂商 IP 打包与寄存器映射（up_axi）；第 5、6 单元（intermediate）深入数据通路（axi_dmac、数据转换器 IP、util 工具 IP）与两大框架（JESD204、SPI Engine）；第 7、8 单元（advanced）面向二次开发与质量保障，覆盖移植、新建工程、多厂商构建、仿真测试、编码规范、收发器与时序、Boot 镜像与发布。讲义之间用 depends_on 显式织成依赖链，确保读者总能按拓扑顺序逐篇推进；每篇均只讲一个独立主题，并给出基于真实源码的可操作实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门与项目定位",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "ADI HDL 项目总览：它是什么、为谁服务",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Analog Devices HDL 参考设计库的整体定位：用 Verilog/VHDL 与 Tcl 脚本为各类 ADI 评估板生成可在 AMD Xilinx、Intel、Lattice FPGA 上综合的参考设计。",
+          "learning_goals": [
+            "理解仓库提供的是参考设计与可复用 IP 库，而非单一应用",
+            "区分 library（IP 库）与 projects（参考设计）两大组成部分",
+            "了解 ADI HDL 与 no-OS / Linux 软件仓库的协作关系"
+          ],
+          "source_files": [
+            "README.md",
+            "projects/Readme.md",
+            "docs/index.rst"
+          ],
+          "minimal_modules": [
+            "项目定位与目标用户",
+            "library 与 projects 的分工",
+            "软硬件配套（no-OS / Linux）"
+          ],
+          "practice_task": "阅读 README.md 与 docs/index.rst，用一段话写出本仓库解决的三个具体问题；列出仓库顶层目录中哪些属于构建脚本、哪些属于源码或文档，并标注每个目录的作用。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库与目录结构导览",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "level": "beginner",
+          "topic": "系统讲解仓库顶层布局：library/、projects/、projects/scripts/、library/scripts/、docs/、scripts/ 各自承担的职责与内部组织规律。",
+          "learning_goals": [
+            "掌握 library 与 projects 目录的命名与组织规律",
+            "识别构建脚本（Makefile/Tcl）与设计源码（Verilog/VHDL）的位置",
+            "理解 projects/common 与 projects/<eval>/common 的区别"
+          ],
+          "source_files": [
+            "README.md",
+            "projects/Readme.md",
+            "projects/common/README.md",
+            "docs/index.rst"
+          ],
+          "minimal_modules": [
+            "顶层目录职责",
+            "library 与 projects 的子目录约定",
+            "构建脚本目录的定位"
+          ],
+          "practice_task": "浏览 library/ 与 projects/ 目录，挑选一个 library 模块和一个 project，分别记录其包含的文件类型（.v/.tcl/Makefile 等），并对比两者目录构成的异同。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建环境与工具链版本",
+          "order": 3,
+          "filename": "u1-l3-build-environment.md",
+          "level": "beginner",
+          "topic": "讲解构建所需的 AMD Xilinx Vivado / Intel Quartus / Lattice Radiant 工具链、GNU Make，以及 scripts/adi_env.tcl 如何集中管理工具版本与环境变量。",
+          "learning_goals": [
+            "了解各工具链的必需版本与版本检查机制",
+            "理解 ADI_HDL_DIR、ADI_IGNORE_VERSION_CHECK 等关键环境变量",
+            "学会用 adi_env.tcl 定位当前分支要求的工具版本"
+          ],
+          "source_files": [
+            "README.md",
+            "scripts/adi_env.tcl",
+            "library/scripts/lattice_tool_set.mk"
+          ],
+          "minimal_modules": [
+            "工具链前置条件",
+            "adi_env.tcl 版本与环境变量",
+            "QUARTUS_PRO_ISUSED 等自动探测逻辑"
+          ],
+          "practice_task": "阅读 scripts/adi_env.tcl，列出当前分支要求的 Vivado、Quartus、Quartus Std、Lattice 版本号；并说明 ADI_IGNORE_VERSION_CHECK 在何种调试场景下会被使用。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "构建第一个工程：从 make 到比特流",
+          "order": 4,
+          "filename": "u1-l4-first-build.md",
+          "level": "beginner",
+          "topic": "以 fmcomms2/zcu102 为例，演示 cd 到工程目录后执行 make 的完整入口流程，并理解 Makefile 如何声明库依赖并触发 Vivado。",
+          "learning_goals": [
+            "掌握顶层 make 与单工程 make 的调用方式",
+            "看懂工程 Makefile 中 LIB_DEPS / M_DEPS 的含义",
+            "理解 make 最终如何调用 vivado -source system_project.tcl"
+          ],
+          "source_files": [
+            "README.md",
+            "Makefile",
+            "projects/fmcomms2/zcu102/Makefile",
+            "projects/fmcomms2/zcu102/system_project.tcl",
+            "projects/scripts/project-xilinx.mk"
+          ],
+          "minimal_modules": [
+            "make 入口与子目录递归",
+            "工程 Makefile 中的 LIB_DEPS / M_DEPS",
+            "system_project.tcl 作为 Vivado 入口"
+          ],
+          "practice_task": "对照 projects/fmcomms2/zcu102/Makefile 与 system_project.tcl，画出从用户敲下 make 到 vivado 启动之间发生的关键步骤；指出该工程依赖了哪些 library 模块。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "工程架构与文件剖析",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "三层工程架构：载板 / 评估板 / 系统",
+          "order": 1,
+          "filename": "u2-l1-three-layer-architecture.md",
+          "level": "beginner",
+          "topic": "依据官方 architecture.rst，讲解每个参考设计如何由 carrier 基设计、eval 基设计与系统特化设计三层叠加而成，以及 system_bd.tcl 如何依次 source 它们。",
+          "learning_goals": [
+            "理解载板（carrier-dependent）与评估板（carrier-independent）设计的分离",
+            "掌握 system_bd.tcl 中 source 两层基设计的固定模式",
+            "理解 system_wrapper 模块由哪几部分共同描述"
+          ],
+          "source_files": [
+            "docs/user_guide/architecture.rst",
+            "projects/fmcomms2/zcu102/system_bd.tcl",
+            "projects/fmcomms2/common/fmcomms2_bd.tcl",
+            "projects/common/zcu102/zcu102_system_bd.tcl"
+          ],
+          "minimal_modules": [
+            "三层设计模型",
+            "carrier 与 eval 基设计的分离原则",
+            "system_bd.tcl 的 source 顺序"
+          ],
+          "practice_task": "阅读 architecture.rst 的三层模型，并在 fmcomms2/zcu102/system_bd.tcl 中找出 source 载板设计与评估板设计的两行 Tcl，说明它们分别对应三层中的哪一层。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "单个工程的文件剖析",
+          "order": 2,
+          "filename": "u2-l2-project-file-anatomy.md",
+          "level": "beginner",
+          "topic": "逐一讲解 Xilinx 工程的标准五件套：Makefile、system_project.tcl、system_bd.tcl、system_constr.xdc、system_top.v，以及它们之间的协作关系。",
+          "learning_goals": [
+            "理解 system_top.v 如何例化 system_wrapper 与 IO 缓冲",
+            "区分 system_project.tcl（建工程跑综合）与 system_bd.tcl（搭块设计）的职责",
+            "看懂 system_constr.xdc 在引脚与时序约束上的作用"
+          ],
+          "source_files": [
+            "docs/user_guide/architecture.rst",
+            "projects/fmcomms2/zcu102/system_project.tcl",
+            "projects/fmcomms2/zcu102/system_top.v",
+            "projects/fmcomms2/zcu102/system_constr.xdc",
+            "projects/common/zcu102/zcu102_system_constr.xdc"
+          ],
+          "minimal_modules": [
+            "system_top.v 顶层职责",
+            "system_project.tcl 与 system_bd.tcl 分工",
+            "xdc 约束文件的作用"
+          ],
+          "practice_task": "在 system_top.v 中找到对 system_wrapper 的例化以及 LVDS/IO 缓冲相关的逻辑，写一份该模块端口到物理 FPGA 引脚的数据流向说明。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "文档体系导航",
+          "order": 3,
+          "filename": "u2-l3-documentation-guide.md",
+          "level": "beginner",
+          "topic": "导览 docs/ 下的 Sphinx 文档结构：user_guide（架构/构建/移植/规范/发布）、library（各 IP 文档）、projects（参考设计清单）、regmap（寄存器表），并说明本地构建文档的方法。",
+          "learning_goals": [
+            "快速定位架构、构建、移植、编码规范等关键文档",
+            "学会查阅单个 IP 的 block_diagram 与寄存器表",
+            "掌握本地 sphinx 构建文档的步骤"
+          ],
+          "source_files": [
+            "docs/index.rst",
+            "docs/user_guide/architecture.rst",
+            "docs/library/index.rst",
+            "docs/projects/index.rst",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "docs 目录结构",
+            "user_guide 与 library 文档的用途",
+            "本地文档构建流程"
+          ],
+          "practice_task": "在 docs/ 中查找并记录：架构说明、构建指南、移植指南、HDL 编码规范各对应哪个 rst 文件；并尝试按 README 步骤在本地生成一次文档（或写出完整命令清单）。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "构建系统：Make 与 Tcl 流水线",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "GNU Make 的整体编排",
+          "order": 1,
+          "filename": "u3-l1-make-orchestration.md",
+          "level": "intermediate",
+          "topic": "讲解顶层 Makefile 如何自动发现 projects/ 子目录与 SUBPROJECTS，结合 quiet.mk 的 build/clean/skip_if_missing 宏，以及 project-toplevel.mk 的递归子目录机制。",
+          "learning_goals": [
+            "理解 SUBPROJECTS 与 proj.board 命名规则的自动生成",
+            "掌握 quiet.mk 中 build/clean/skip_if_missing 三个宏的作用",
+            "理解 project-toplevel.mk 的递归子目录模式"
+          ],
+          "source_files": [
+            "Makefile",
+            "quiet.mk",
+            "projects/Makefile",
+            "projects/scripts/project-toplevel.mk",
+            "library/Makefile"
+          ],
+          "minimal_modules": [
+            "顶层 Makefile 的目录自动发现",
+            "quiet.mk 的构建宏与日志",
+            "递归子目录构建"
+          ],
+          "practice_task": "在顶层 Makefile 中找出 SUBPROJECTS 的生成逻辑，预测 `make fmcomms2.zcu102` 实际会进入哪个子目录执行 make；并解释 quiet.mk 如何让缺少外部依赖的工程被优雅跳过。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "工程构建 Makefile 内部：project-xilinx.mk",
+          "order": 2,
+          "filename": "u3-l2-project-build-makefile.md",
+          "level": "intermediate",
+          "topic": "深入 project-xilinx.mk：如何把 LIB_DEPS 转成 component.xml 目标、用 flock 保证 IP 并行打包安全、处理 CFG 参数化与增量编译 MODE。",
+          "learning_goals": [
+            "理解 component.xml 目标如何驱动库 IP 打包",
+            "掌握 flock 串行化与 REQUIRED_VIVADO_VERSION 透传机制",
+            "理解增量编译（MODE=incr）的 reference.dcp 逻辑"
+          ],
+          "source_files": [
+            "projects/scripts/project-xilinx.mk",
+            "projects/scripts/project-toplevel.mk",
+            "projects/fmcomms2/zcu102/Makefile"
+          ],
+          "minimal_modules": [
+            "component.xml 依赖与 IP 打包触发",
+            "flock 并行安全与版本透传",
+            "CFG 参数化与增量编译"
+          ],
+          "practice_task": "阅读 project-xilinx.mk，画出从 LIB_DEPS 到 component.xml 再到 system_top.xsa 的依赖链；说明 flock 锁文件为何能避免多工程并行打包同一 IP 时出错。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Tcl 工程助手：adi_project_xilinx.tcl",
+          "order": 3,
+          "filename": "u3-l3-tcl-project-helpers.md",
+          "level": "intermediate",
+          "topic": "讲解 adi_project / adi_project_create / adi_project_files / adi_project_run 等过程，理解它们如何封装 Vivado 的建工程、加文件、综合实现流程。",
+          "learning_goals": [
+            "掌握 adi_project 系列过程的调用顺序",
+            "理解 adi_project_create 如何按设备/板卡配置工程",
+            "了解 adi_project_run 内部综合实现的封装"
+          ],
+          "source_files": [
+            "projects/scripts/adi_project_xilinx.tcl",
+            "projects/fmcomms2/zcu102/system_project.tcl",
+            "projects/scripts/adi_env.tcl"
+          ],
+          "minimal_modules": [
+            "adi_project / adi_project_create",
+            "adi_project_files / adi_project_run",
+            "工程创建与运行的封装流程"
+          ],
+          "practice_task": "在 adi_project_xilinx.tcl 中定位 adi_project_create 的实现，列出它接收的关键参数；并对照 system_project.tcl 说明 adi_project_run 之前需要完成哪些前置调用。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "板级连线助手 Tcl：adi_board.tcl",
+          "order": 4,
+          "filename": "u3-l4-board-tcl-helpers.md",
+          "level": "intermediate",
+          "topic": "讲解 adi_board.tcl 提供的块设计连线原语：ad_connect、ad_ip_instance、ad_cpu_interconnect、ad_cpu_interrupt、ad_mem_hp*_interconnect 等，理解它们如何抽象 Vivado BD 操作。",
+          "learning_goals": [
+            "掌握 ad_connect 的网表连接语义与自动类型推断",
+            "理解 ad_cpu_interconnect 如何把外设挂到 CPU 地址空间",
+            "了解 ad_ip_instance / ad_cpu_interrupt 等常用原语"
+          ],
+          "source_files": [
+            "projects/scripts/adi_board.tcl",
+            "projects/fmcomms2/common/fmcomms2_bd.tcl",
+            "projects/common/zcu102/zcu102_system_bd.tcl"
+          ],
+          "minimal_modules": [
+            "ad_connect 连线原语",
+            "ad_cpu_interconnect 地址映射",
+            "ad_ip_instance / ad_cpu_interrupt 等封装"
+          ],
+          "practice_task": "在 fmcomms2_bd.tcl 中找出至少三处使用 ad_connect / ad_cpu_interconnect 的代码，解释每处把哪个 IP 的哪个接口连到了哪里；总结这些助手相对于手写 Vivado Tcl 的简化效果。",
+          "depends_on": [
+            "u3-l3",
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "IP 库系统：多厂商打包与寄存器",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "库结构与多厂商依赖：library.mk",
+          "order": 1,
+          "filename": "u4-l1-library-structure.md",
+          "level": "intermediate",
+          "topic": "讲解单个 library 模块的 Makefile 如何用 GENERIC_DEPS / XILINX_DEPS / INTEL_DEPS / LATTICE_DEPS 区分厂商，以及 library.mk 的 intel/xilinx/lattice 三套目标与跨库依赖。",
+          "learning_goals": [
+            "理解单库 Makefile 的多厂商依赖分组",
+            "掌握 library.mk 中 component.xml、.timestamp_intel、ltt 三类目标",
+            "理解 XILINX_LIB_DEPS 跨库依赖的传递"
+          ],
+          "source_files": [
+            "library/scripts/library.mk",
+            "library/axi_dmac/Makefile",
+            "library/Makefile",
+            "library/scripts/lattice_tool_set.mk"
+          ],
+          "minimal_modules": [
+            "多厂商依赖分组",
+            "library.mk 的三厂商目标",
+            "跨库依赖传递"
+          ],
+          "practice_task": "以 axi_dmac 为例，分别列出它的 GENERIC/XILINX/INTEL/LATTICE 依赖文件，并说明 `make xilinx` 与 `make intel` 在 library.mk 中触发的目标有何不同。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Xilinx IP 打包：adi_ip_xilinx.tcl 与 *_ip.tcl",
+          "order": 2,
+          "filename": "u4-l2-xilinx-ip-packaging.md",
+          "level": "intermediate",
+          "topic": "讲解如何用 adi_ip_create / adi_ip_files / adi_ip_properties 把 Verilog 打包成 Vivado IP，包括接口推断、总线声明、bd.tcl 与 ttcl 约束的关联。",
+          "learning_goals": [
+            "掌握 *_ip.tcl 打包 IP 的标准流程",
+            "理解 adi_ip_infer_streaming_interfaces 等接口自动推断",
+            "了解 adi_add_bus / adi_if_define 等总线与接口定义原语"
+          ],
+          "source_files": [
+            "library/scripts/adi_ip_xilinx.tcl",
+            "library/axi_dmac/axi_dmac_ip.tcl",
+            "library/axi_dmac/bd/bd.tcl",
+            "library/axi_dmac/axi_dmac_constr.ttcl"
+          ],
+          "minimal_modules": [
+            "adi_ip_create / adi_ip_files / adi_ip_properties",
+            "接口与总线的自动推断与声明",
+            "bd.tcl 与 ttcl 约束的关联"
+          ],
+          "practice_task": "阅读 axi_dmac_ip.tcl，列出 adi_ip_create 之后依次调用了哪些打包原语；并说明 adi_ip_bd 与 bd/bd.tcl 在 IP 被拖入块设计时各自的作用。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Intel 与 Lattice 的 IP 打包",
+          "order": 3,
+          "filename": "u4-l3-intel-lattice-ip-packaging.md",
+          "level": "intermediate",
+          "topic": "对比讲解 Intel 侧的 *_hw.tcl（adi_ip_intel.tcl）与 Lattice 侧的 *_ltt.tcl（adi_ip_lattice.tcl），理解同一 IP 在三家工具链下打包方式的差异。",
+          "learning_goals": [
+            "理解 Intel hw.tcl 的打包模型与约束（sdc）",
+            "理解 Lattice ltt.tcl 与 Radiant/Propel 的关系",
+            "对比三家工具链 IP 打包的共性与差异"
+          ],
+          "source_files": [
+            "library/scripts/adi_ip_intel.tcl",
+            "library/scripts/adi_ip_lattice.tcl",
+            "library/axi_dmac/axi_dmac_hw.tcl",
+            "library/axi_dmac/axi_dmac_ltt.tcl",
+            "library/axi_dmac/axi_dmac_constr.sdc"
+          ],
+          "minimal_modules": [
+            "Intel hw.tcl 打包模型",
+            "Lattice ltt.tcl 与工具链",
+            "三厂商打包差异对比"
+          ],
+          "practice_task": "对比 axi_dmac 的 ip.tcl（Xilinx）、hw.tcl（Intel）、ltt.tcl（Lattice），整理一份表格说明三者各自声明了哪些源文件、约束与参数，指出共用与厂商专属部分。",
+          "depends_on": [
+            "u4-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "公共工具库 library/common",
+          "order": 4,
+          "filename": "u4-l4-common-utilities.md",
+          "level": "intermediate",
+          "topic": "介绍 library/common 下被广泛复用的基础 Verilog 模块，如 IO 缓冲 ad_iobuf、存储工具 ad_mem/ad_mem_asym、时钟与数据格式化等，理解它们如何支撑各 IP。",
+          "learning_goals": [
+            "认识 library/common 作为全仓基础工具集的角色",
+            "理解 ad_iobuf 在 IO 缓冲中的典型用法",
+            "了解 ad_mem / ad_mem_asym 等存储原语的复用"
+          ],
+          "source_files": [
+            "library/common/ad_iobuf.v",
+            "library/common/ad_mem.v",
+            "library/common/ad_mem_asym.v",
+            "library/axi_dmac/Makefile"
+          ],
+          "minimal_modules": [
+            "library/common 的角色",
+            "ad_iobuf IO 缓冲",
+            "ad_mem 系列存储原语"
+          ],
+          "practice_task": "在仓库中检索 ad_iobuf 与 ad_mem_asym 被哪些 library / project 引用，统计其复用范围；并选择其中一个模块，结合注释用一段话描述它的功能与端口含义。",
+          "depends_on": [
+            "u1-l2",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "寄存器映射与 up_axi 微处理器接口",
+          "order": 5,
+          "filename": "u4-l5-register-map-up-axi.md",
+          "level": "intermediate",
+          "topic": "讲解 up_axi.v 如何把 AXI4-Lite 转成内部寄存器访问，结合 *_regmap.v 与 docs/regmap 的寄存器表，理解软件如何读写 IP 寄存器。",
+          "learning_goals": [
+            "理解 up_axi 作为 AXI-Lite 到内部寄存器桥的角色",
+            "掌握 *_regmap.v 与 docs/regmap 文本的对应关系",
+            "理解 CPU 地址偏移如何受 FPGA 架构影响"
+          ],
+          "source_files": [
+            "library/common/up_axi.v",
+            "library/axi_dmac/axi_dmac_regmap.v",
+            "docs/user_guide/architecture.rst",
+            "docs/regmap/adi_regmap_axi_adc_template.txt"
+          ],
+          "minimal_modules": [
+            "up_axi 桥接原理",
+            "regmap.v 与寄存器表对应",
+            "CPU 地址架构偏移"
+          ],
+          "practice_task": "对照 axi_dmac_regmap.v 与 docs/regmap 中对应 IP 的寄存器表（或 axi_adc_template），挑选 3 个寄存器说明其地址、位域与软件读写语义；并解释 architecture.rst 中 Zynq 与 ZynqMP 的地址偏移差异。",
+          "depends_on": [
+            "u3-l4",
+            "u4-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "数据通路与数据转换 IP",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "DMA 引擎 axi_dmac 深入",
+          "order": 1,
+          "filename": "u5-l1-axi-dmac.md",
+          "level": "intermediate",
+          "topic": "以 axi_dmac 为例剖析 ADI 的 AXI DMA 引擎：data_mover、request/response generator、src/dest 通道（AXI-MM/AXI-Stream/FIFO）、2D 与 scatter-gather 传输。",
+          "learning_goals": [
+            "理解 axi_dmac 的整体架构与 src/dest 抽象",
+            "掌握 data_mover 与请求/响应管理器的协作",
+            "了解 2D 传输与 SG（scatter-gather）模式"
+          ],
+          "source_files": [
+            "library/axi_dmac/axi_dmac.v",
+            "library/axi_dmac/data_mover.v",
+            "library/axi_dmac/src_axi_mm.v",
+            "library/axi_dmac/dest_axi_stream.v",
+            "library/axi_dmac/dmac_sg.v"
+          ],
+          "minimal_modules": [
+            "axi_dmac 顶层架构",
+            "data_mover 与请求/响应管理",
+            "src/dest 通道与 2D/SG"
+          ],
+          "practice_task": "阅读 axi_dmac.v，画出 src 到 dest 的数据通路（含 request_generator、data_mover、response_handler）；说明 src_axi_mm 与 dest_axi_stream 两种通道配置分别适用于什么场景。",
+          "depends_on": [
+            "u4-l5",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "数据转换器 IP 模式：以 axi_ad9361 为例",
+          "order": 2,
+          "filename": "u5-l2-data-converter-ip.md",
+          "level": "intermediate",
+          "topic": "讲解 ADI 射频/数据转换器 IP（如 axi_ad9361）的典型结构：寄存器接口、ADC/DAC 数据通路、delay 校准 Tcl，以及它与 pack/unpack、dmac 的级联方式。",
+          "learning_goals": [
+            "理解数据转换器 IP 的寄存器+数据双通路结构",
+            "掌握 ADC 数据 capture 与 DAC 数据 playback 的级联",
+            "了解 axi_ad9361_delay.tcl 之类的校准脚本作用"
+          ],
+          "source_files": [
+            "library/axi_ad9361/axi_ad9361.v",
+            "projects/fmcomms2/common/fmcomms2_bd.tcl",
+            "projects/fmcomms2/zcu102/system_project.tcl",
+            "docs/library/index.rst"
+          ],
+          "minimal_modules": [
+            "数据转换器 IP 双通路",
+            "capture/playback 级联",
+            "delay 校准脚本"
+          ],
+          "practice_task": "在 fmcomms2_bd.tcl 中追踪 axi_ad9361 的 ADC 发送通道如何连到 util_cpack2 再到 axi_dmac；写出从 RF 采样到 PS DDR 的完整数据流向，并说明 delay 校准 Tcl 在何时被 source。",
+          "depends_on": [
+            "u5-l1",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "util 工具 IP：FIFO、CDC、pack/unpack",
+          "order": 3,
+          "filename": "u5-l3-util-ips.md",
+          "level": "intermediate",
+          "topic": "介绍 util_* 系列可复用工具 IP：util_axis_fifo、util_cdc、util_pack/util_cpack2/util_upack2、util_rfifo/util_wfifo 等，理解它们在数据通路中的胶合作用。",
+          "learning_goals": [
+            "掌握 AXIS FIFO 与跨时钟域（CDC）原语的使用",
+            "理解 cpack2/upack2 通道打包/解包的作用",
+            "了解 rfifo/wfifo 在不同时钟域 FIFO 场景的选用"
+          ],
+          "source_files": [
+            "library/util_axis_fifo/util_axis_fifo.v",
+            "library/util_cdc/sync_bits.v",
+            "library/util_pack/util_cpack2/util_cpack2.v",
+            "library/util_pack/util_upack2/util_upack2.v",
+            "library/axi_dmac/Makefile"
+          ],
+          "minimal_modules": [
+            "AXIS FIFO 与 CDC",
+            "cpack2/upack2 打包解包",
+            "rfifo/wfifo 时钟域 FIFO"
+          ],
+          "practice_task": "挑选 util_cpack2 与 util_upack2，结合注释说明它们如何把多路窄通道打包成一路宽 AXIS（及反向）；并指出 axi_dmac 的 Makefile 依赖了哪些 util 模块。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "JESD204 与 SPI Engine 框架",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "JESD204 框架",
+          "order": 1,
+          "filename": "u6-l1-jesd204-framework.md",
+          "level": "intermediate",
+          "topic": "讲解 library/jesd204 的组成：axi_jesd204_rx/tx、jesd204_rx/tx 链路层、transport 层（tpl_adc/dac）与 soft PCS，理解高速串行数据传输的分层结构。",
+          "learning_goals": [
+            "理解 JESD204 链路层与传输层的分离",
+            "掌握 axi_jesd204_rx/tx 的寄存器控制接口",
+            "了解 tpl_adc/tpl_dac transport 层与数据通路的衔接"
+          ],
+          "source_files": [
+            "library/jesd204/axi_jesd204_rx/axi_jesd204_rx.v",
+            "library/jesd204/axi_jesd204_tx/axi_jesd204_tx.v",
+            "library/jesd204/jesd204_rx/jesd204_rx.v",
+            "library/jesd204/ad_ip_jesd204_tpl_adc",
+            "docs/library/index.rst"
+          ],
+          "minimal_modules": [
+            "JESD204 分层结构",
+            "axi_jesd204_rx/tx 控制接口",
+            "transport 层 tpl_adc/tpl_dac"
+          ],
+          "practice_task": "浏览 library/jesd204 子目录，整理出链路层（rx/tx）、transport 层（tpl_*）、soft PCS 三类模块的清单；并用一段话描述一个 JESD204 ADC 接收通路从 GT 串行到 parallel 数据的分层流转。",
+          "depends_on": [
+            "u4-l5",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "SPI Engine 框架",
+          "order": 2,
+          "filename": "u6-l2-spi-engine-framework.md",
+          "level": "intermediate",
+          "topic": "讲解 library/spi_engine 的组成：execution/interconnect/offload 子模块与 axi_spi_engine 顶层，理解 ADI 用于控制低速器件的可编程 SPI 框架。",
+          "learning_goals": [
+            "理解 SPI Engine 的指令执行模型（execution）",
+            "掌握 interconnect 多片选与 offload 卸载的作用",
+            "了解 axi_spi_engine 作为 AXI 顶层的封装"
+          ],
+          "source_files": [
+            "library/spi_engine/axi_spi_engine/axi_spi_engine.v",
+            "library/spi_engine/spi_engine_execution/spi_engine_execution.v",
+            "library/spi_engine/spi_engine_interconnect/spi_engine_interconnect.v",
+            "library/spi_engine/spi_engine_offload/spi_engine_offload.v",
+            "docs/library/index.rst"
+          ],
+          "minimal_modules": [
+            "SPI Engine 执行模型",
+            "interconnect 与 offload",
+            "axi_spi_engine 顶层封装"
+          ],
+          "practice_task": "阅读 spi_engine_execution 与 spi_engine_offload，说明 SPI Engine 如何把一条软件下发的指令序列执行成实际 SCK/MOSI 波形；并指出 offload 模式相对普通模式带来的吞吐优势。",
+          "depends_on": [
+            "u4-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "扩展与移植：二次开发实践",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "移植工程到新载板",
+          "order": 1,
+          "filename": "u7-l1-porting-project.md",
+          "level": "advanced",
+          "topic": "依据 porting_project.rst，讲解将一个 FMC 评估板设计移植到非官方支持载板的流程：FMC 标准兼容性检查、base design 制作、system_bd/constr 改写。",
+          "learning_goals": [
+            "掌握 FMC（LPC/HPC/FMC+）兼容性快速检查清单",
+            "理解新建 carrier base design 的步骤与文件",
+            "了解移植时 system_bd.tcl 与约束的改动点"
+          ],
+          "source_files": [
+            "docs/user_guide/porting_project.rst",
+            "projects/common/zcu102/zcu102_system_bd.tcl",
+            "projects/common/zcu102/system_top.v",
+            "projects/common/zcu102/zcu102_system_constr.xdc",
+            "docs/user_guide/architecture.rst"
+          ],
+          "minimal_modules": [
+            "FMC 兼容性检查",
+            "carrier base design 制作",
+            "system_bd 与约束改写"
+          ],
+          "practice_task": "以 zcu102 的 base design 为模板，列出移植到一个假设的新 ZynqMP 载板时需要新建/修改哪些文件；写出 system_bd.tcl 中需要 source 的两层脚本及 VADJ、时钟专用引脚等关键检查项。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "创建与定制新工程",
+          "order": 2,
+          "filename": "u7-l2-customize-new-project.md",
+          "level": "advanced",
+          "topic": "依据 customize_hdl.rst 与 projects/common 模板，讲解如何新建一个评估板工程、复用已有 IP 与 base design、调整参数化（CFG）并补充 README。",
+          "learning_goals": [
+            "掌握从模板新建评估板工程的文件骨架",
+            "理解工程参数化（CFG / 参数覆盖）机制",
+            "了解 README 模板与文档维护规范"
+          ],
+          "source_files": [
+            "docs/user_guide/customize_hdl.rst",
+            "projects/common/README.md",
+            "projects/common/template_readme_evalboard.md",
+            "projects/common/template1_readme_carrier.md",
+            "projects/fmcomms2/zcu102/Makefile"
+          ],
+          "minimal_modules": [
+            "新工程文件骨架",
+            "CFG 参数化机制",
+            "README 与文档模板"
+          ],
+          "practice_task": "参照 fmcomms2/zcu102 与模板，为一个假设的新 ADC FMC 板起草一个最小工程所需的文件清单与 Makefile 中 LIB_DEPS/M_DEPS 的填写示例；并用 template_readme_evalboard.md 写出该工程 README 的骨架。",
+          "depends_on": [
+            "u7-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "多厂商构建：Intel 与 Lattice 工程",
+          "order": 3,
+          "filename": "u7-l3-multi-vendor-build.md",
+          "level": "advanced",
+          "topic": "讲解 Intel（Quartus/Qsys）与 Lattice（Radiant/Propel）工程的构建差异：project-intel.mk / project-lattice.mk、system_qsys.tcl / system_pb.tcl、不同约束文件后缀。",
+          "learning_goals": [
+            "理解 Intel 工程的 system_qsys.tcl 与 sdc 约束",
+            "理解 Lattice 工程的 system_project_pb.tcl / system_pb.tcl 流程",
+            "掌握三家厂商在工程文件命名与构建脚本上的差异"
+          ],
+          "source_files": [
+            "projects/scripts/project-intel.mk",
+            "projects/scripts/project-lattice.mk",
+            "projects/scripts/adi_project_intel.tcl",
+            "projects/scripts/adi_project_lattice.tcl",
+            "docs/user_guide/architecture.rst"
+          ],
+          "minimal_modules": [
+            "Intel Qsys 工程构建",
+            "Lattice Radiant/Propel 构建",
+            "三厂商工程文件差异"
+          ],
+          "practice_task": "对比 project-xilinx.mk、project-intel.mk、project-lattice.mk，整理三者在入口脚本、约束后缀（xdc/sdc/pdc）、块设计脚本（bd/qsys/pb）上的差异；指出 architecture.rst 中 Intel 与 Lattice 工程各自的标准文件清单。",
+          "depends_on": [
+            "u3-l2",
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "测试、规范与高级主题",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "仿真与测试平台",
+          "order": 1,
+          "filename": "u8-l1-simulation-testbench.md",
+          "level": "advanced",
+          "topic": "讲解 library 模块 tb/ 目录的测试平台组织（以 axi_dmac 为例），包括 tb_base、AXI slave 模型、regmap/transfer 等专项测试与仿真流程。",
+          "learning_goals": [
+            "理解 tb/ 目录的测试平台组织与命名",
+            "掌握 AXI slave 模型在仿真中的使用",
+            "了解 regmap / dma_read / dma_write 等专项测试"
+          ],
+          "source_files": [
+            "library/axi_dmac/tb/tb_base.v",
+            "library/axi_dmac/tb/dma_read_tb.v",
+            "library/axi_dmac/tb/dma_write_tb.v",
+            "library/axi_dmac/tb/regmap_tb.v",
+            "library/axi_dmac/tb/axi_slave.v"
+          ],
+          "minimal_modules": [
+            "tb 目录组织",
+            "AXI slave 仿真模型",
+            "专项测试（regmap/dma）"
+          ],
+          "practice_task": "阅读 dma_read_tb.v 与 regmap_tb.v，说明它们分别验证了 axi_dmac 的什么行为；并基于 tb_base.v 与 axi_slave.v 描述一个最小仿真如何被搭建起来（或写出仿真运行的命令思路）。",
+          "depends_on": [
+            "u5-l1",
+            "u4-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "HDL 编码规范与贡献流程",
+          "order": 2,
+          "filename": "u8-l2-coding-guidelines-contributing.md",
+          "level": "advanced",
+          "topic": "讲解仓库的 HDL 编码规范、CI 检查（guideline rules/lint）以及贡献流程（CONTRIBUTING.md），理解如何向项目提交合规改动。",
+          "learning_goals": [
+            "掌握 ADI HDL 编码规范的核心要求",
+            "理解 CI 的 guideline 与 lint 检查机制",
+            "了解 fork/分支/PR 的贡献流程"
+          ],
+          "source_files": [
+            "docs/user_guide/hdl_coding_guidelines.rst",
+            "docs/user_guide/contributing.rst",
+            "CONTRIBUTING.md",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "HDL 编码规范",
+            "CI guideline/lint 检查",
+            "贡献与 PR 流程"
+          ],
+          "practice_task": "阅读 hdl_coding_guidelines.rst 与 CONTRIBUTING.md，归纳出 5 条最关键的编码/提交规范；并据此对任意一个 .v 文件做一次自检，列出可能不合规之处。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "收发器、时钟与时序约束",
+          "order": 3,
+          "filename": "u8-l3-transceivers-clock-timing.md",
+          "level": "advanced",
+          "topic": "讲解高速收发器相关机制：adi_board.tcl 的 ad_xcvrcon/ad_xcvrpll、gtwizard_generator.tcl 生成 GT、以及 auto_timing_fix_xilinx.tcl 与 xdc/sdc 时序约束。",
+          "learning_goals": [
+            "理解 ad_xcvrcon 如何连接 JESD204 与 GT 收发器",
+            "掌握 gtwizard_generator.tcl 自动生成 GT 的流程",
+            "了解 auto_timing_fix 与约束文件的时序收敛作用"
+          ],
+          "source_files": [
+            "projects/scripts/adi_board.tcl",
+            "projects/scripts/gtwizard_generator.tcl",
+            "projects/scripts/auto_timing_fix_xilinx.tcl",
+            "projects/fmcomms2/zcu102/system_constr.xdc",
+            "library/axi_dmac/axi_dmac_constr.sdc"
+          ],
+          "minimal_modules": [
+            "ad_xcvrcon 收发器连线",
+            "gtwizard 自动生成",
+            "时序约束与自动修复"
+          ],
+          "practice_task": "在 adi_board.tcl 中阅读 ad_xcvrcon 的参数列表，说明它如何把 lane 时钟、device 时钟与 JESD 接口关联；并解释 auto_timing_fix_xilinx.tcl 作为 POST_ROUTE_SCRIPT 的作用。",
+          "depends_on": [
+            "u3-l4",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "Boot 镜像生成与发布管理",
+          "order": 4,
+          "filename": "u8-l4-boot-image-releases.md",
+          "level": "advanced",
+          "topic": "讲解如何用 adi_make_boot_bin.tcl 把比特流与 FSBL/U-Boot 打包成 BOOT.BIN，结合 releases.rst 理解分支、版本与已构建文件的使用策略。",
+          "learning_goals": [
+            "掌握从 xsa/bitstream 生成 BOOT.BIN 的流程",
+            "理解 adi_make_boot_bin.tcl 的输入与依赖",
+            "了解 release 分支、版本对应与预构建文件策略"
+          ],
+          "source_files": [
+            "projects/scripts/adi_make_boot_bin.tcl",
+            "projects/scripts/adi_make.tcl",
+            "docs/user_guide/build_boot_bin.rst",
+            "docs/user_guide/releases.rst",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "BOOT.BIN 生成流程",
+            "adi_make_boot_bin.tcl 依赖",
+            "release 与版本策略"
+          ],
+          "practice_task": "阅读 adi_make_boot_bin.tcl 与 build_boot_bin.rst，列出生成 BOOT.BIN 所需的输入文件（bitstream/xsa、FSBL、u-boot 等）；并结合 releases.rst 说明为何官方推荐使用最新 release 分支而非 main 的预构建文件。",
+          "depends_on": [
+            "u1-l4",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
