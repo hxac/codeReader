@@ -1,0 +1,351 @@
+{
+  "project": "fft-dit-fpga",
+  "head": "ff02d3d19ef4c74d4f672ab43645443173d41ae9",
+  "rationale": "本项目是一个用 Verilog 实现的「按时域抽取（DIT）基-2 FFT」小型硬件工程，核心代码集中在 dit.v、butterfly.v，辅以 Python 生成旋转因子与 MyHDL 协同仿真验证。整体规模小但密度高（FSM、地址位运算、定点流水线、协同仿真交织），因此学习路线按「先认识与运行 → 再拆解核心计算单元 → 再吃透 dit 主模块 → 最后仿真验证与扩展」四层递进。第一单元让读者从零建立项目全局观并跑通测试；第二单元聚焦蝶形运算的数学与流水线，因为它是整个 FFT 的计算原子；第三单元专门攻克 dit.v 中的双缓冲、控制状态机和蝶形地址计算这三块最复杂的逻辑；第四单元上升到协同仿真机制、Python 参考模型、定点量化误差验证与参数化扩展，使读者具备二次开发能力。讲义之间通过 depends_on 形成清晰 DAG，每篇只解决一个主题并配一个可操作的源码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "初识 fft-dit-fpga",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：用 FPGA 实现的 DIT 基-2 FFT",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍项目要解决的问题（在 FPGA 上实现按时域抽取的基-2 FFT），整体文件构成与每个文件的职责，帮助读者建立全局地图。",
+          "learning_goals": [
+            "理解 FFT 与按时域抽取（DIT）的基本概念",
+            "掌握项目目录中每个源码文件的作用",
+            "看懂 README 描述的 dit / butterfly / twiddlefactors 模块组成"
+          ],
+          "source_files": [
+            "README.txt",
+            "dit.v",
+            "butterfly.v"
+          ],
+          "minimal_modules": [
+            "dit",
+            "butterfly",
+            "twiddlefactors"
+          ],
+          "practice_task": "阅读 README.txt 与三个 Verilog 文件的模块声明，画出 dit 顶层如何例化 butterfly 与 twiddlefactors 的结构框图，并标注出 README 中提到的 buffer.v 对应实际哪个文件。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "如何构建与运行测试",
+          "order": 2,
+          "filename": "u1-l2-build-and-run-tests.md",
+          "level": "beginner",
+          "topic": "说明运行项目所需的工具链（Icarus Verilog、MyHDL、numpy、jinja2），以及测试前先用 generate_twiddlefactors 生成旋转因子 Verilog 文件这一前置步骤。",
+          "learning_goals": [
+            "了解运行测试所需的依赖与安装",
+            "理解测试前先生成 twiddlefactors_N.v 的流程",
+            "看懂 TestBench.prepare 中 iverilog 编译命令如何拼接多个源文件"
+          ],
+          "source_files": [
+            "qa_dit.py",
+            "generate_twiddlefactors.py"
+          ],
+          "minimal_modules": [
+            "TestBench.prepare",
+            "make_twiddle_factor_file"
+          ],
+          "practice_task": "在本地准备 iverilog 与 MyHDL 环境，尝试调用 make_twiddle_factor_file(16, 16) 生成 twiddlefactors_16.v 并检查其内容；若 Verilog 仿真环境受限，至少完成旋转因子文件生成这一步。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心计算单元",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "定点复数表示与旋转因子生成",
+          "order": 1,
+          "filename": "u2-l1-fixed-point-and-twiddle-factors.md",
+          "level": "intermediate",
+          "topic": "讲解项目中复数如何用定点整数编码（实部高位、虚部低位、幅度限制在 ±1），以及 generate_twiddlefactors.py 配合 jinja2 模板把 exp(-2πik/N) 量化为 Verilog 旋转因子查表模块的过程。",
+          "learning_goals": [
+            "掌握复数在固定位宽整数中的编码与范围限制",
+            "理解 f_to_istr 的量化与正负号处理",
+            "看懂模板生成的 twiddlefactors 模块的 case 查表结构"
+          ],
+          "source_files": [
+            "generate_twiddlefactors.py",
+            "twiddlefactors_N.v.t",
+            "qa_dit.py"
+          ],
+          "minimal_modules": [
+            "f_to_istr",
+            "make_twiddle_factor_file",
+            "twiddlefactors",
+            "c_to_int"
+          ],
+          "practice_task": "编写小脚本调用 make_twiddle_factor_file(8, 8) 生成 twiddlefactors_8.v，手算其中一个旋转因子（如 k=1）的量化整数值，与生成的 Verilog 文件内容核对。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "蝶形运算：从复数方程到端口",
+          "order": 2,
+          "filename": "u2-l2-butterfly-math-and-ports.md",
+          "level": "intermediate",
+          "topic": "以 butterfly.v 为核心，讲解基-2 蝶形运算 YA = XA + W·XB、YB = XA − W·XB 的含义，复数实虚部拆分，以及 m_in/m_out 旁路数据、x_nd/y_nd 握手时序。",
+          "learning_goals": [
+            "理解基-2 蝶形的输入输出关系",
+            "看懂复数乘法拆成实部/虚部乘减的推导",
+            "掌握 m_in 旁路信号与 x_nd/y_nd 握手的作用"
+          ],
+          "source_files": [
+            "butterfly.v"
+          ],
+          "minimal_modules": [
+            "butterfly"
+          ],
+          "practice_task": "对照 butterfly.v 端口，在纸上对一组给定的 XA、XB、W 计算理论 YA、YB，并标出 w_re/w_im/xa_re 等内部 wire 的取值。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "蝶形单元的流水线：四级时序与乘法器复用",
+          "order": 3,
+          "filename": "u2-l3-butterfly-pipeline.md",
+          "level": "intermediate",
+          "topic": "深入 butterfly.v 的 always 块，逐级讲解 STAGE 1~4 如何通过 x_nd_old 延迟链复用乘法器、为什么输入不能连续两拍到达，以及 zbw_re/zbw_im 的右移定标处理。",
+          "learning_goals": [
+            "理解四级流水线的时序与延迟链",
+            "明白乘法器复用如何节省硬件资源",
+            "理解定点乘法后的右移定标与防溢出思路"
+          ],
+          "source_files": [
+            "butterfly.v"
+          ],
+          "minimal_modules": [
+            "butterfly"
+          ],
+          "practice_task": "针对两次有效输入（x_nd 序列为 1,0,1）画出 za_re[0]/zb_re/ww_re/zbw_m1 等关键寄存器逐拍取值的时序图，说明乘法器如何被两路计算分时复用。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "dit 主模块：数据与控制",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "dit 主模块：输入输出与工作缓冲",
+          "order": 1,
+          "filename": "u3-l1-dit-buffers.md",
+          "level": "intermediate",
+          "topic": "讲解 dit.v 中 bufferin0/bufferin1 输入双缓存、bufferX/bufferY 工作缓存、bufferout 输出缓存的用途，bufferin_full 的 A/B 翻转机制，以及 updatedX/updatedY 防止读未写数据的作用。",
+          "learning_goals": [
+            "理解多级缓冲在 FFT 流水中的作用",
+            "掌握双缓存 full 标志 A/B 翻转的原理",
+            "明白 updatedX/updatedY 如何保证读写顺序"
+          ],
+          "source_files": [
+            "dit.v"
+          ],
+          "minimal_modules": [
+            "dit"
+          ],
+          "practice_task": "在 dit.v 中标注一次完整 FFT 中数据从 bufferin 流经 bufferX/bufferY 再到 bufferout 的路径，并解释双缓存如何让输入接收与计算并行进行。",
+          "depends_on": [
+            "u1-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "dit 控制状态机：INIT/IDLE/CALC/SEND",
+          "order": 2,
+          "filename": "u3-l2-dit-control-fsm.md",
+          "level": "intermediate",
+          "topic": "讲解 dit.v 中控制 FSM 四个状态的转移条件、如何驱动 tf_addr_nd/x_nd、何时切换 stage 与读写缓存，以及 finished 信号的作用。",
+          "learning_goals": [
+            "读懂 FSM 四状态转移逻辑",
+            "理解每个状态对 x_nd/tf_addr_nd 的驱动",
+            "掌握何时推进到下一级 stage 与切换缓存"
+          ],
+          "source_files": [
+            "dit.v"
+          ],
+          "minimal_modules": [
+            "dit"
+          ],
+          "practice_task": "依据 dit.v 的 case 块画出 FSM 状态转移图，标注每个转移的触发条件（如 bufferin_read_full、&(out1_addr)、updated0&updated1）。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "地址计算：如何为蝶形选址与旋转因子选址",
+          "order": 3,
+          "filename": "u3-l3-dit-address-calculation.md",
+          "level": "intermediate",
+          "topic": "结合 dit.v 顶部数学注释与 assign 语句，讲解 out0_addr、in0_addr、in1_addr、out1_addr、tf_addr 的位运算推导，以及 series_bits 与 S 寄存器如何在每个 stage 之间演化。",
+          "learning_goals": [
+            "理解 DIT 各 stage 的地址映射关系",
+            "看懂 series_bits/S/out0_addr 的逐级更新",
+            "掌握 tf_addr 如何选择对应旋转因子"
+          ],
+          "source_files": [
+            "dit.v"
+          ],
+          "minimal_modules": [
+            "dit"
+          ],
+          "practice_task": "取 N=8，分别列出第一级（S=4）与最后一级（S=1）若干个蝶形的 in0/in1/out0/out1/tf 地址，验证 assign 表达式的正确性。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "仿真验证与扩展",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "MyHDL 协同仿真：dut_dit 与 VPI 桥接",
+          "order": 1,
+          "filename": "u4-l1-myhdl-cosimulation.md",
+          "level": "advanced",
+          "topic": "讲解 dut_dit.v 如何用 $from_myhdl/$to_myhdl 暴露端口、myhdl.vpi 与 vvp 如何运行编译后的 Verilog，以及 qa_dit.py 中 Cosimulation 的端口绑定方式，建立 Python 与 Verilog 的数据通路认识。",
+          "learning_goals": [
+            "理解 dut_dit.v 包装层的作用",
+            "看懂 $from_myhdl/$to_myhdl 的方向约定",
+            "掌握 Cosimulation 的端口绑定与时钟驱动"
+          ],
+          "source_files": [
+            "dut_dit.v",
+            "qa_dit.py"
+          ],
+          "minimal_modules": [
+            "dut_dit",
+            "TestBench.simulate"
+          ],
+          "practice_task": "阅读 dut_dit.v 与 qa_dit.py 的 simulate 方法，画出 Python 信号（clk/rst_n/din/din_nd/dout/dout_nd/overflow）与 Verilog 端口之间的方向对应关系图。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "pyfft：分阶段的 DIT 参考实现",
+          "order": 2,
+          "filename": "u4-l2-pyfft-reference-model.md",
+          "level": "advanced",
+          "topic": "讲解 pyfft.py 中 fftstages 的递归 DIT 实现，它如何输出每一级中间结果，以及 dit.v 顶部注释中 E_k/O_k 与 X_k 的数学推导如何与之对应，用于逐级调试比对。",
+          "learning_goals": [
+            "理解递归 DIT 把序列拆成偶/奇子序列的原理",
+            "看懂 fftstages 返回的各级中间结果结构",
+            "建立 Python 参考模型与 Verilog stage 的对应关系"
+          ],
+          "source_files": [
+            "pyfft.py",
+            "dit.v"
+          ],
+          "minimal_modules": [
+            "fftstages"
+          ],
+          "practice_task": "用 pyfft.py 的 fftstages 处理一个长度为 8 的复数序列，打印每一级输出，并对照 dit.v 顶部注释解释偶/奇子序列如何合并为下一级。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "测试台设计：输入激励与 numpy 比对",
+          "order": 3,
+          "filename": "u4-l3-testbench-and-quantization.md",
+          "level": "advanced",
+          "topic": "讲解 qa_dit.py 中 TestBench 的时钟驱动、control 激励（sendnth 与 overflow 检测），以及 test_basic 如何把输出按 N 分组、除以 N 后与 numpy.fft.fft 逐点比对，分析定点量化误差容限。",
+          "learning_goals": [
+            "理解测试台的激励生成与节流机制",
+            "掌握输出除以 N 的防溢出含义",
+            "看懂 assertAlmostEqual 的精度判定与定点误差来源"
+          ],
+          "source_files": [
+            "qa_dit.py",
+            "generate_twiddlefactors.py"
+          ],
+          "minimal_modules": [
+            "TestBench.control",
+            "TestFFT.test_basic",
+            "int_to_c"
+          ],
+          "practice_task": "调整 test_basic 中的 nlog2 或 x_width（例如降到更低位宽），运行测试并观察 assertAlmostEqual 的通过情况与误差变化，解释定点位宽对精度的影响。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "参数化扩展：改变 N 与位宽",
+          "order": 4,
+          "filename": "u4-l4-parameterization-and-extension.md",
+          "level": "advanced",
+          "topic": "总结 dit/butterfly/twiddlefactors 的参数化方式（N、NLOG2、X_WDTH、TF_WDTH）及其约束（TF_WDTH 必须等于 X_WDTH、N 必须为 2 的幂），讲解 overflow、DEBUGMODE、防溢出右移等扩展点与二次开发注意事项。",
+          "learning_goals": [
+            "掌握各模块的可调参数及其约束",
+            "理解 overflow 与防溢出机制",
+            "能够规划一次小的功能扩展并避开已知陷阱"
+          ],
+          "source_files": [
+            "dit.v",
+            "butterfly.v",
+            "qa_dit.py"
+          ],
+          "minimal_modules": [
+            "dit",
+            "butterfly",
+            "twiddlefactors"
+          ],
+          "practice_task": "尝试把 FFT 长度从 N=16 改为 N=8（同步修改 NLOG2 并重新生成 twiddlefactors），运行 qa_dit.py 验证功能仍正确，记录所有需要同步修改的参数与文件。",
+          "depends_on": [
+            "u3-l3",
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
