@@ -1,0 +1,452 @@
+# 公共 GEMM API 表面
+
+## 1. 本讲目标
+
+本讲是 GEMM 主机侧系列的第二讲。上一篇（u4-l1）讲了 `gemm.py` 内部「编译—计划—启动」三层，以及 `_GemmPlan` 缓存如何把命中路径压到微秒级。本讲往上走一层，看**用户真正调用的函数**长什么样。
+
+读完本讲，你应当能够：
+
+1. 读懂 `quack.gemm_interface.gemm` 主入口的全部参数语义，尤其是 `out`、`bias`、`cu_seqlens_*`/`A_idx`（变长/gather）、`split_k`/`split_k_mode`，以及它在 eager / `torch.compile` / 量化输出三种场景下的三条执行路径。
+2. 理解 `gemm_act`（`gemm_gated`）如何把激活函数**融合进同一次 kernel 启动**，从而省掉一次额外的内存往返与 kernel launch。
+3. 理解 `gemm_symmetric` 与 `gemm_norm_act` 这类「变体」如何借助 `gemm_iface.py` 的 `VariantSpec` 声明式机制共享规范化与计划缓存。
+4. 了解量化输入（blockscaled，MXFP8/NVFP4 等）与量化输出（`out_dtype` 为 `BlockScaledFormat`）是如何接入 `gemm` 的。
+
+> 本讲的 API 都是「PyTorch 张量进、PyTorch 张量出」的纯 Python 函数，不涉及设备侧 kernel；它们最终都汇聚到上一篇讲过的 `gemm_dispatch`/`run_gemm_plan`。
+
+## 2. 前置知识
+
+本讲默认你已经掌握以下概念（来自前置讲义）：
+
+- **计划缓存的两层**（u4-l1、u2-l6）：编译产物 `.o` 用「形状无关的签名」缓存；`_GemmPlan` 用「形状相关的 key」缓存启动计划。本讲的接口层在其上又加了一层 `_GemmIfacePlan`。
+- **GemmConfig**（u4-l2）：描述一次 GEMM 的几何与策略（tile/cluster/pingpong/swap_ab/split_k 等）。
+- **`@cute_op` 自定义算子与 fake/meta**（u2-l6）：`gemm` 在 `torch.compile` 下要走 `torch.library.custom_op` 边界，于是需要 schema 类型化、fake 张量。本讲会看到大量为这条边界服务的辅助代码。
+- **`scalar_mode`**：一个标量的编译期模式——`0`=缺省（epilogue op 被编译掉）、`1`=host 常量、`2`=device 指针。它是计划 key 的一部分，因为不同模式会选出不同的编译产物。
+- **`tensor_key`**：一个张量的元数据键（`dtype, shape, stride`），不含数据指针，用于计划缓存命中判断。
+
+通俗地说：本讲讲的每个函数都是「**把用户的张量参数，规整成内核能消化的形状/角色，再交给底层计划层启动**」的薄壳；融合算力的真正实现（epilogue）在 u6 详解。
+
+## 3. 本讲源码地图
+
+| 文件 | 角色 |
+| --- | --- |
+| [quack/gemm_interface.py](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py) | 公共 GEMM API 表面：`gemm`、`gemm_act`/`gemm_gated`、`gemm_symmetric`、`gemm_norm_act` 等用户函数，以及配套的 custom_op、参考实现、blockscaled/量化输出处理。本讲主角。 |
+| [quack/gemm_iface.py](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_iface.py) | 变体接口机器：`VariantSpec`、`canonicalize`、`IfacePlan`、`run_variant`，把各变体共享的「操作数规范化 + 计划缓存 + 热路径」抽到一处声明式描述。 |
+| [quack/gemm_tvm_ffi_utils.py](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_tvm_ffi_utils.py) | 提供 `tensor_key` 与 `scalar_mode`，被接口层用来构造计划缓存键。 |
+
+辅助：`quack/gemm.py`（u4-l1 讲过的 `gemm_dispatch`/`run_gemm_plan`）、`quack/gemm_config.py`（u4-l2）、`quack/gemm_symmetric.py`（对称 GEMM 的设备侧入口）。
+
+## 4. 核心概念与源码讲解
+
+### 4.1 gemm 主入口：参数语义与三条执行路径
+
+#### 4.1.1 概念说明
+
+`gemm` 是最基础的稠密矩阵乘入口，语义是：
+
+\[
+D = \alpha \cdot (A @ B) + \text{bias}
+\]
+
+其中 `A` 形如 `(M, K)` 或 `(L, M, K)`，`B` 形如 `(K, N)` 或 `(L, K, N)`。它是「公共 API 表面」的根——其他变体（`gemm_add`、`gemm_act`、`gemm_norm_act` 等）都在它的能力之上叠加 epilogue。
+
+这个函数之所以「厚」，是因为它同时承担四类职责：
+
+1. **输入规整**：解包 blockscaled 容器、折算 per-tensor scale、把 1-D bias 升维、决定是否走 dense-2D 快路径。
+2. **输出分配**：`out=None` 时按形状/dtype 分配；量化输出时还要分配 SF（scale factor）缓冲。
+3. **路径选择**：在「eager 计划热路径」「`torch.compile` custom_op」「量化输出 custom_op」「eager 冷路径（含 autotune）」之间分流。
+4. **空输入快路径**：`M=0`/`N=0`/`K=0` 时跳过 kernel，直接写 `beta*C+bias` 或零。
+
+#### 4.1.2 核心流程
+
+`gemm` 一次调用的决策流可概括为：
+
+```text
+gemm(A, B, out=None, bias, alpha, out_dtype, cu_seqlens_*, A_idx, split_k, ...)
+  │
+  ├─ (1) out_transposed + 量化输出？ → 递归走 swapped GEMM（D^T = B^T A^T）
+  ├─ (2) _unpack_operand(A/B)：拆出 (data, sf, format, per_tensor_scale, quant_dim)
+  ├─ (3) _prep_blockscaled：校验 SF 配对、量化轴；_fold_per_tensor_scales 把 NVFP4 scale 折进 alpha
+  │
+  ├─ (4) 能否构造 plan_key？(非 compile 且无 varlen/gather/permute/concat/quant_out)
+  │       是 → 查 _gemm_iface_plan_cache
+  │            命中 → 分配 out → 直接 _gemm_execute(dispatch_plan=plan) → return   ★热路径
+  │
+  ├─ (5) out is None？→ 按 varlen/dense 计算形状并分配（量化输出另算 SF）
+  │
+  ├─ (6) 空输入？→ _empty_k_matmul_into(out, bias=bias) → return            ★快路径
+  │
+  └─ (7) 分流到三条真实执行路径之一：
+          • 量化输出(fmt_d)        → gemm_quant_out custom_op
+          • torch.compiler.is_compiling() → gemm_out custom_op（schema 类型化）
+          • 否则(eager)           → gemm_tuned(...)，并把结果记录进 plan_cache  ★冷路径
+```
+
+「热路径—冷路径」之分是性能关键：热路径只换数据指针，跳过校验与 autotune；冷路径做完整校验并可能触发 autotune，再把决策烘焙进 `_GemmIfacePlan` 供下次热路径命中。
+
+#### 4.1.3 源码精读
+
+**主签名与参数语义**——注意每个参数的形状注释：
+
+[quack/gemm_interface.py:974-1015](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L974-L1015) 定义了 `gemm` 的完整参数表。几个要点：
+
+- `A`/`B` 既可是普通 `Tensor`，也可是 `BlockScaledOperand` 容器（携带 qdata + blocked SF）。
+- `out` 可为 `None`（内部分配）或 `BlockScaledOperand`（量化输出）。
+- `out_dtype` 若是 `BlockScaledFormat`（或其名字），则**请求量化输出**：kernel 在写 fp8/fp4 值的同时写出 blocked SF，调用返回 `BlockScaledOperand`。
+- `out_quant_dim`（`-1` 沿 N / `-2` 沿 M）、`out_transposed`、`out_per_tensor_scale` 三者专用于量化输出的方向与二级缩放。
+- `cu_seqlens_m`/`cu_seqlens_k`/`A_idx`/`batch_idx_permute` 是变长序列与 gather 的入口。
+- `split_k`（`None`=让 autotuner 选因子）/`split_k_mode`（SERIAL/SEPARATE/PARALLEL）控制 K 维切分。
+
+**操作数解包与 blockscaled 校验**——任何变体都复用这两个小函数：
+
+[quack/gemm_interface.py:190-200](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L190-L200) `_unpack_operand` 把 `A`/`B` 拆成 `_Operand(data, sf, fmt, per_tensor_scale, quant_dim)`；`BlockScaledOperand` 容器走第一支，裸张量走末支，`(data, scale)` 元组被显式拒绝并提示用 `from_parts` 包装。
+
+[quack/gemm_interface.py:203-235](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L203-L235) `_prep_blockscaled` 校验「A、B 必须同时带或不带 SF」、用 `mma_kind_for_pair` 判定格式配对是否硬件可表达，并断言量化轴必须是各自的收缩轴（A 的末维、B 的倒数第二维）——这能在 `K==N` 这种形状巧合下也抓出错误转置。
+
+**eager 计划热路径**——这是接口层最关键的性能设计：
+
+[quack/gemm_interface.py:1090-1153](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L1090-L1153) 构造 `plan_key`（由各张量的 `tensor_key`、`bs_format`、`quant_dim`、设备、`out_dtype`、`tuned`、`dynamic_scheduler`、`rounding_mode`、`split_k`、`split_k_mode`、`scalar_mode(alpha)`、`sr_seed` 是否张量等组成）；命中则直接 `_gemm_execute(..., dispatch_plan=plan.dispatch_plan)`。注意注释强调：key 必须覆盖 dispatch 层 key 的一切，因为捕获的 dispatch_plan 依赖这些决策（尤其 alpha/sr 模式会选不同的编译 epilogue）。
+
+计划记录在冷路径完成后：[quack/gemm_interface.py:1299-1307](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L1299-L1307) 把 `(config, split_k_resolved, dynamic_resolved, out_shape, out_dtype, dispatch_plan)` 存进 `_GemmIfacePlan`。
+
+**空输入快路径**：
+
+[quack/gemm_interface.py:1204-1209](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L1204-L1209)——`out.numel()==0`（M=0 或 N=0）直接返回；`A.numel()==0`（K=0）用 `_empty_k_matmul_into` 写 `bias`（因为 `A@B` 贡献 0）。该 helper 见 [quack/gemm_interface.py:46-67](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L46-L67)。
+
+**三条真实路径**：量化输出走 `gemm_quant_out`（[1210-1239](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L1210-L1239)）；`torch.compile` 走 `gemm_out`（[1240-1273](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L1240-L1273)，把 alpha/sr_seed 按类型拆分、concat_layout 串化、e8m0 SF 转 uint8 视图）；eager 走 `gemm_tuned`（[1274-1298](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L1274-L1298)）。
+
+> **为什么 eager 不走 custom_op？** 见 [quack/gemm_interface.py:172-179](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L172-L179) `_launch`：custom-op 边界（autograd 包装 + 每次调用 `mutates_args` 别名检查）约 85µs，只在 `torch.compile`/fake 张量下才划算；eager 直接取 `_init_fn` 绕过。
+
+#### 4.1.4 代码实践
+
+**实践目标**：亲眼看到 `_gemm_iface_plan_cache` 在第二次调用时命中，并理解 key 里有哪些字段。
+
+**操作步骤**（源码阅读 + 本地运行，**待本地验证**——需要 SM90+ GPU）：
+
+1. 阅读 [quack/gemm_interface.py:1090-1120](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L1090-L1120)，手写出 `plan_key` 的全部字段。
+2. 写一个小脚本，连续两次调用相同形状的 `gemm`，在两次调用之间打印缓存大小：
+
+```python
+import torch
+from quack import gemm_interface as gi
+A = torch.randn(512, 512, dtype=torch.bfloat16, device="cuda") / 16
+B = torch.randn(512, 512, dtype=torch.bfloat16, device="cuda") / 16
+_ = gi.gemm(A, B)          # 冷路径：编译 + 记录计划
+print(len(gi._gemm_iface_plan_cache))   # 预期 1
+_ = gi.gemm(A, B)          # 热路径：命中计划
+print(len(gi._gemm_iface_plan_cache))   # 仍为 1（命中，不新增）
+B2 = torch.randn(512, 768, dtype=torch.bfloat16, device="cuda") / 16
+_ = gi.gemm(A, B2)         # 形状变 → key 变 → 冷路径，新增一条
+print(len(gi._gemm_iface_plan_cache))   # 预期 2
+```
+
+**需要观察的现象**：第二次调用（同形状）不触发新编译；第三次（`B` 列数变了）触发新计划。
+
+**预期结果**：缓存条目数依次为 `1 → 1 → 2`。若把 `alpha` 从默认 `1.0` 改成一个张量（device 标量），由于 `scalar_mode(alpha)` 从 `0` 变为 `2`，key 改变，应再新增一条。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：`gemm` 的 eager 热路径为什么要求 `cu_seqlens_m is None and A_idx is None`？也就是说，为什么变长/gather 调用不能命中计划缓存？
+
+**参考答案**：变长/gather 的「总长度」与索引内容是每次调用都可能变化的动态量；`tensor_key` 只编码 `dtype/shape/stride`，无法表达 `cu_seqlens` 的具体取值或 `A_idx` 的排列。注释 [1084-1098](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L1084-L1098) 明确：这些调用永远走通用路径（落到 dispatch 层自己的 key）。
+
+**练习 2**：`_empty_k_matmul_into(out, bias=bias)` 在 `K=0` 时写出什么？
+
+**参考答案**：`A@B` 贡献零矩阵，于是只剩 `bias`（广播）；无 `bias` 则把 `out` 清零。见 [46-67](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L46-L67)。
+
+---
+
+### 4.2 gemm_act / gemm_gated：融合激活
+
+#### 4.2.1 概念说明
+
+神经网络里，线性层后几乎总跟着一个激活：`PostAct = act(A @ B + bias)`。朴素做法是两次 kernel：先 `gemm` 写出 `preact`，再读回算 `act`。这要一次显存写 + 一次显存读，带宽与延迟都浪费。
+
+`gemm_act` 把激活**融合进 epilogue**：矩阵乘的累加器（fp32）在写回显存前，就地施加激活，再写出 `postact`。一次 kernel 同时产出（可选的）`preact` 与 `postact`。
+
+\[
+\text{preact} = \alpha \cdot (A @ B) + C + \text{bias},\qquad
+\text{postact} = \text{act}(\text{preact})
+\]
+
+`gemm_gated` 不是独立函数——它是 `gemm_act` 的别名（见下文），靠 `activation` 名字是否落在 `gated_to_pytorch_fn_map` 里来切换门控语义。门控激活吃两路输入（gate、up）：
+
+\[
+\text{postact} = f_{\text{gated}}(\text{gate},\ \text{up}),\qquad
+\text{gate}=\text{preact}_{::2},\ \text{up}=\text{preact}_{1::2}
+\]
+
+所以门控时 `postact` 的最后一维只有 `preact` 的一半。
+
+#### 4.2.2 核心流程
+
+```text
+gemm_act(A, B, C, bias, activation, alpha, preact_out, postact_out, concat_layout, ...)
+  │
+  ├─ (1) _check_split_k_unsupported：gemm_act 暂不支持 split_k>1
+  ├─ (2) 解包 blockscaled / 折算 per-tensor scale（同 gemm）
+  ├─ (3) is_gated = activation ∈ gated_to_pytorch_fn_map
+  │      postact_shape = (..., N//2) if is_gated else (..., N)
+  ├─ (4) out=None → 分配 preact_out / postact_out
+  ├─ (5) 空输入 → 两个输出都置零（对所有支持的激活 act(0)=0）→ return
+  └─ (6) 分流：
+         • torch.compile → gemm_act_out / gemm_gated_out custom_op
+         • eager        → _gemm_act_call → linear_act_mod(...).gemm(...)
+```
+
+`_gemm_act_call` 的真正工作交给 `quack.epilogue.library.linear_act_mod`——一个按 `(activation, gated, has_c, has_rowvec, has_alpha)` 工厂化生成的 epilogue 对象（u6 详解）。接口层只负责「把 bias/alpha/concat_layout 绑定到正确的 epilogue 端口」。
+
+#### 4.2.3 源码精读
+
+**激活字典与类型别名**：
+
+[quack/gemm_interface.py:81-102](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L81-L102) 定义两套映射：`act_to_pytorch_fn_map`（普通激活，如 `silu`/`relu`/`gelu_tanh_approx`）与 `gated_to_pytorch_fn_map`（门控激活，如 `swiglu`/`reglu`/`geglu`，函数签名是 `(gate, up) -> postact`）。`Activation` Literal（[115-130](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L115-L130)）合并两者，是 `gemm_act` 的 `activation` 参数合法值。
+
+**`gemm_act` 主体**：
+
+[quack/gemm_interface.py:2123-2236](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L2123-L2236)。关键点：
+
+- [2161](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L2161) `is_gated = activation in gated_to_pytorch_fn_map`——一个名字同时驱动「是否门控」与「输出形状折半」。
+- [2174](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L2174) `postact_shape = (*out_shape[:-1], out_shape[-1] // 2) if is_gated else out_shape`。
+- [2187-2215](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L2187-L2215) compile 路径按 `is_gated` 选 `gemm_gated_out`/`gemm_act_out`。
+- [2216-2235](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L2216-L2235) eager 路径调 `_gemm_act_call`，且**仅门控时**把 `concat_layout` 透传（非门控传 `None`）。
+
+**别名**：
+
+[quack/gemm_interface.py:2239](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L2239) `gemm_gated = gemm_act`——名副其实的别名，调用方语义靠 `activation` 区分。
+
+**`_gemm_act_call` 如何把参数绑到 epilogue 端口**：
+
+[quack/gemm_interface.py:807-872](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L807-L872)——构造 `linear_act_mod(activation, gated=is_gated, has_c=C is not None, has_rowvec=bias is not None, has_alpha=has_alpha)`，把 `postact_out` 绑到 `mAuxOut` 端口、`preact_out`（若要存）绑到 `D` 端口、bias 绑到 `mRowVecBroadcast`、alpha 绑到 `alpha` 端口。这就是「融合」的本质：bias 与激活都成了同一次 kernel 启动里的 epilogue op，而非独立 kernel。
+
+**concat_layout 在门控场景的用途**：
+
+MLP 的权重常以 `[gate_weight; up_weight]` 拼接形式存储（沿某非连续维交错）。`concat_layout` 是一个元组，告诉 kernel「哪些张量的某个维度其实是 gate/up 的拼接」，使其按交错顺序读取，免去显式 deinterleave 拷贝。见 [quack/gemm_interface.py:142-145](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L142-L145) `_concat_interleave`（`[first; second] → [f0, s0, f1, ...]`）与门控 bias 的专门处理 [875-891](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L875-L891)（宽 fp32 bias 走广播端口重标、16-bit bias 物化成交错形式）。
+
+#### 4.2.4 代码实践
+
+**实践目标**（本讲指定实践任务）：对比 `gemm` 与 `gemm_act` 的签名，解释融合激活如何省掉额外 kernel launch，并指出 `concat_layout` 在门控场景的用途。
+
+**操作步骤**：
+
+1. 打开 [quack/gemm_interface.py:974-1015](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L974-L1015)（`gemm` 签名）与 [quack/gemm_interface.py:2123-2145](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L2123-L2145)（`gemm_act` 签名），逐项对照下表（自行填写「来源」）：
+
+   | 关注点 | `gemm` | `gemm_act` |
+   | --- | --- | --- |
+   | 是否有 `C`（残差） | 否（仅 bias） | 是（可选残差，加在激活前） |
+   | 是否有 `activation` | 否 | 是（决定普通/门控） |
+   | 输出个数 | 1（`out`） | 2（`preact_out`、`postact_out`） |
+   | `alpha` 语义 | 缩放 `A@B` | 缩放激活**前**的累加器 |
+   | 是否支持 `split_k>1` | 是 | 否（`_check_split_k_unsupported`） |
+
+2. 解释「融合省一次 launch」：在 `_gemm_act_call`（[807-872](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L807-L872)）中，`mAuxOut`(=postact) 与可选的 `D`(=preact) 都在同一次 `mod(...)` 调用里写出——一次 kernel 启动即可；若用 `gemm`+单独激活，则需要一次写 `preact` 的 GEMM kernel + 一次读 `preact`、写 `postact` 的逐元素 kernel。
+
+3. 解释 `concat_layout` 门控用途：当 `B`（权重）以 `[gate; up]` 拼接存储时，`concat_layout=("B",)` 让 kernel 直接按交错列读，省一次 `B` 的 deinterleave 拷贝；门控 bias 同理（`_act_concat_bias`）。
+
+**预期结果**：你能用一句话说出「`gemm_act` = `gemm` + 把激活/bias/C 绑成同一次 kernel 的 epilogue 端口」，并指出门控场景下 `concat_layout` 让拼接权重免拷贝。
+
+> 若要在 GPU 上验证数值，可参考 [tests/test_gemm_epilogue.py:622-662](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/tests/test_gemm_epilogue.py#L622-L662) 的 `test_epi_mod_gated_swiglu`：它把 `postact` 与 `einsum + silu(gate)*up` 的参考逐元素比对。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么 `gemm_act` 用 `_check_split_k_unsupported` 拒绝 `split_k>1`，而 `gemm` 允许？
+
+**参考答案**：见 [133-139](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L133-L139)。split-K 的合并（partials 归约）与融合激活 epilogue 的交互尚未实现；目前只有 `gemm`/`gemm_add`/`gemm_add_inplace` 支持 split-K（u8-l3 详讲）。
+
+**练习 2**：门控激活时，`preact_out` 与 `postact_out` 的最后一维分别是什么？
+
+**参考答案**：`preact` 是 `N`（含 gate+up 两路交错），`postact` 是 `N//2`（gate、up 合并后）。见 [2174](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L2174)。
+
+---
+
+### 4.3 gemm_symmetric 与 gemm_norm_act：声明式变体接口
+
+#### 4.3.1 概念说明
+
+除了 `gemm`/`gemm_act`，接口层还有一批「变体」：`gemm_symmetric`（保证输出对称的方阵乘）、`gemm_norm_act`（乘 + 按行归一化 + 激活）、`gemm_rms`（乘 + RMS 统计）等。它们结构高度相似：都要做操作数规范化、计划缓存、热/冷路径分流。
+
+`gemm_iface.py` 把这些共享逻辑抽成一套**声明式机器**：每个变体只需提供一个 `VariantSpec`（操作数角色表 + 冷/热启动钩子 + 少量规则），规范化、计划记录、热路径重放都由机器统一完成。`gemm_symmetric` 是这条机器的典型用户。
+
+- **`gemm_symmetric`**：\(D = \alpha \cdot A @ B + \beta \cdot C\)，其中 `B = A.mT`，输出 `(M, M)` 保证对称（用于注意力分数之类的对称矩阵）。它用固定的「方阵 tile」配置。
+- **`gemm_norm_act`**：\(\text{PostAct} = \text{act}\big((A @ B + C) \cdot \text{rstd}\big)\)，`rstd` 是列向量 `(M,)`。`gemm_norm_gated` 同样是其别名。
+
+#### 4.3.2 核心流程
+
+`VariantSpec` 机器的一次调用（以 `gemm_symmetric` 为例）：
+
+```text
+gemm_symmetric(A, B=A.mT, C, out, alpha, beta)
+  │
+  ├─ 解包 blockscaled / 折算 scale（同 gemm）
+  ├─ 构造 plan_key → 查 _gemm_symmetric_iface_plan_cache
+  │     命中 → alloc_outputs → plan.replay(...) → return            ★热路径
+  ├─ 空输入 → _empty_k_matmul_into(out, C=C, beta=beta) → return
+  └─ 冷路径：
+       _gemm_symmetric_execute → run_variant(_SYMMETRIC_SPEC, ...)
+         │
+         ├─ canonicalize(spec, named, sm90_plus, varlen_m, swap_ab)
+         │     按角色 ('a'/'b'/'mn'/'row'/'col') 做 b_kn/.mT/unsqueeze/swap 规整
+         ├─ semaphore = spec.semaphore(...)   （动态调度才分配）
+         └─ spec.cold(canon, semaphore, config, dynamic, ctx)
+              → gemm_symmetric_dispatch(...)   返回 dispatch_plan
+       → make_iface_plan(...) 记录 IfacePlan（含 replay 闭包）→ 缓存
+```
+
+#### 4.3.3 源码精读
+
+**`VariantSpec`——变体的声明式配方**：
+
+[quack/gemm_iface.py:51-90](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_iface.py#L51-L90)。核心字段：
+
+- `tensor_roles`：`((operand_name, role), ...)`，角色取 `'a'`/`'b'`/`'mn'`（M×N epilogue 张量）/`'row'`/`'col'`。
+- `cold`/`warm`：冷/热启动钩子。
+- `b_kn_rule`：B 是否保持调用方 `(K,N)` 形状（trace 期重标）还是就地 `.mT`。
+- `dense_2d_ok`/`semaphore`/`warm_slots`/`warm_epi`：dense-2D 直通、信号量分配、声明式热路径映射等规则。
+
+**`canonicalize`——共享规范化规则**：
+
+[quack/gemm_iface.py:102-154](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_iface.py#L102-L154)。逐角色处理：`'b'`（非 b_kn 时 `.mT`、必要时 unsqueeze 批次维）、`'a'`/`'mn'`（必要时 unsqueeze）、`'row'`/`'col'`（1-D 升维），并在 `swap_ab` 下把 `'mn'` 张量 `.mT`。函数顶部的 docstring（[22-38](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_iface.py#L22-L38)）逐条列出了这些规则，是该模块的「契约」。
+
+**`run_variant`——冷/热分发**：
+
+[quack/gemm_iface.py:319-353](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_iface.py#L319-L353)：规范化后，热路径（`dispatch_plan is not None`）调 `spec.warm`，冷路径调 `spec.cold`。
+
+**`gemm_symmetric` 如何使用机器**：
+
+[quack/gemm_interface.py:2649-2659](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L2649-L2659) 定义 `_SYMMETRIC_SPEC`：角色 `(("A","a"),("B","b"),("out","mn"),("C","mn"))`，`b_kn_rule` 恒为 `False`（对称 dispatch 取 B 为 `(M,K)` 形状，总是重标），并自定义 `semaphore`（动态调度且非热路径时才分配）。
+
+冷/热钩子见 [2604-2646](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L2604-L2646)：`_symmetric_cold` 按 SM 查方阵 tile 配置（[2549-2561](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L2549-L2561)，如 SM100 用 `256×256, cluster_m=2`）再调 `gemm_symmetric_dispatch`。
+
+`gemm_symmetric` 主体 [2698-2823](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L2698-L2823)：与 `gemm` 同构——解包、计划热路径（[2728-2760](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L2728-L2760)）、空输入快路径、compile/eager 分流；eager 冷路径把 dispatch_plan 用 `make_iface_plan` 记录成 `IfacePlan`（[2814-2822](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L2814-L2822)）。
+
+**`gemm_norm_act` 对照**：
+
+[quack/gemm_interface.py:3492-3586](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L3492-L3586)。它**没有**用 `VariantSpec`（语义是「乘 + rstd 缩放 + 激活」三者融合，交给 `norm_act_mod`），但外壳结构与 `gemm_act` 几乎一致：`rstd` 当列向量绑到 `mColVecBroadcast` 端口（见 `_gemm_norm_act_call` [3351-3403](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L3351-L3403)）。`gemm_norm_gated = gemm_norm_act`（[3589](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L3589)），同样是别名。
+
+#### 4.3.4 代码实践
+
+**实践目标**：把 `gemm_symmetric` 当作 `VariantSpec` 机器的样本，验证它的「方阵 tile」配置与对称语义。
+
+**操作步骤**（源码阅读为主；**待本地验证**数值部分）：
+
+1. 读 [quack/gemm_interface.py:2549-2561](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L2549-L2561)，填出各 SM 的 `(tile_m, tile_n, cluster_m, pingpong)`：
+   - SM80：`(128,128,1,False)`
+   - SM90：`(128,256,2,False)`
+   - SM100/110：`(256,256,2,False)`
+   - SM120：`(128,128,1,True)`
+2. 读测试 [tests/test_gemm_symmetric.py:16-58](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/tests/test_gemm_symmetric.py#L16-L58)：注意调用 `gemm_symmetric(a, a.transpose(-2, -1), C=C, alpha=..., beta=...)`，参考用 `torch.baddbmm` 算 `alpha*A@A^T + beta*C`，并断言 `out` 与 fp32 参考的误差小于 `2*(半精度参考误差) + 1e-6`。
+
+**需要观察的现象**：`B` 是 `A` 的转置；输出 `(L, M, M)`；`scalar_kind="tensor"` 时 alpha/beta 是 0-d CUDA 张量也能正确缩放（回归用例）。
+
+**预期结果**：在 SM90+ 上跑通 `test_symmetric_gemm` 的一组参数化（如 `bf16, L=1, M=512, K=512, has_C=False, alpha=1.0, scalar_kind="float"`），断言通过。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：`_SYMMETRIC_SPEC` 的 `b_kn_rule` 为什么恒返回 `False`？
+
+**参考答案**：对称 dispatch 的设备侧入口 `gemm_symmetric_dispatch` 期望 B 是调用方形状 `(M, K)`（注释 [2654](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L2654)），所以总是需要规范化层把 B 转成该朝向，不走「保持 `(K,N)` trace 期重标」的快路径。
+
+**练习 2**：`gemm_norm_act` 与 `gemm_act` 的最大区别是什么？
+
+**参考答案**：`gemm_act` 在激活前只加 `C + bias`；`gemm_norm_act` 在激活前还乘了一个列向量 `rstd`（按行缩放），即 `act((A@B + C) * rstd)`，且 `rstd` 绑到列向量端口 `mColVecBroadcast`。
+
+---
+
+### 4.4 量化输入与量化输出的接入
+
+#### 4.4.1 概念说明
+
+本模块回应学习目标里「了解 quantized output 与 blockscaled 输入的接入」。两类量化在 `gemm` 里是**正交**的：
+
+- **量化输入（blockscaled）**：`A`/`B` 是 `BlockScaledOperand` 容器，携带低比特 qdata（MXFP8/NVFP4/MXFP6 等）+ blocked scale factors（SF）。kernel 在 MMA 时按块反量化。
+- **量化输出**：`out_dtype` 是一个 `BlockScaledFormat`（或名字）。kernel 在写回前对结果做块量化，同时写出 SF，调用返回 `BlockScaledOperand`，可直接喂给下一层 blockscaled GEMM。
+
+二者可同时出现：blockscaled 输入 + blockscaled 输出。
+
+#### 4.4.2 核心流程
+
+```text
+gemm(A: BlockScaledOperand, B: BlockScaledOperand, out_dtype=BlockScaledFormat("nvfp4"))
+  │
+  ├─ _unpack_operand → (qdata, sf, fmt, per_tensor_scale, quant_dim)
+  ├─ _prep_blockscaled → 校验配对/量化轴 → (SFA, SFB, fmt_a, fmt_b)
+  ├─ _fold_per_tensor_scales(alpha, ...) → NVFP4 的 per-tensor scale 折进 alpha
+  ├─ _sf_batch_canonicalize → 给 5-D SF 按需补批次维
+  ├─ 若 out_dtype 是 BlockScaledFormat：
+  │     _alloc_blockscaled_out → 分配 (out qdata, out_sf blocked 缓冲)
+  │     构造 out_op = BlockScaledOperand(qdata=out, scale=out_sf, ...)
+  └─ 走 gemm_quant_out custom_op（量化输出专用路径）
+```
+
+#### 4.4.3 源码精读
+
+**量化输入校验**：`_unpack_operand`（[190-200](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L190-L200)）与 `_prep_blockscaled`（[203-235](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L203-L235)）已在 4.1 讲过。`_fold_per_tensor_scales`（[238-247](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L238-L247)）把 NVFP4 的二级 per-tensor scale 折进 alpha（无 host 同步）。
+
+**量化输出解析与分配**：
+
+- [262-269](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L262-L269) `_resolve_blockscaled_out`：把 `out_dtype` 解析成 `BlockScaledFormat`（普通 dtype 返回 `None`）。
+- [272-300](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L272-L300) `_alloc_blockscaled_out`：分配量化值缓冲（fp4 按 `N/2` 字节打包）与 blocked `(rm, rk, 32, 4, 4)` SF 缓冲。
+- `gemm` 主体里 [1056-1078](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L1056-L1078) 校验方向（`out_quant_dim`）、容器格式/方向匹配，并把容器拆成 `out_sf, out`。
+
+**e8m0 跨边界的 uint8 视图**：[332-355](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L332-L355) `_sf_encode`/`_sf_decode`。上游 PyTorch bug：`float8_e8m0fnu` 输入会让 Inductor 的 functionalization pass 崩，故编译期把 e8m0 SF 零拷贝 view 成 uint8 过边界，op 内部再按格式名还原 dtype。
+
+**专门的量化输出 op**：[1379-1449](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L1379-L1449) `gemm_quant_out`（`mutates_args=("out","SFD")`）。`gemm` 在 [1210-1239](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L1210-L1239) 调用它——量化输出无论 compile/eager 都走这条（因为它要 marshal SFD/norm-const 等额外参数）。
+
+#### 4.4.4 代码实践
+
+**实践目标**：跟踪一次 blockscaled 输入 + 量化输出的 `gemm` 调用，看清 SF 如何在边界上编码/解码。
+
+**操作步骤**（源码阅读）：
+
+1. 假设 `A`、`B` 是 NVFP4 的 `BlockScaledOperand`，`out_dtype="mxfp8"`。从 [1047-1054](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L1047-L1054) 开始，依次标注：`_unpack_operand` → `_prep_blockscaled` 返回的 `(SFA, SFB, fmt_a, fmt_b)` → `_fold_per_tensor_scales` 折算后的 `alpha`。
+2. 在 [1213-1238](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L1213-L1238) 找到 `_sf_encode(out_sf)` 的调用点，解释它为何只在 `torch.compiler.is_compiling()` 时把 e8m0 view 成 uint8。
+3. 在 `gemm_quant_out` 内部 [1425](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L1425) `_sf_decode(SFD, bs_format_d)`，确认它用**格式名**（而非嗅探 dtype）还原 SF dtype。
+
+**预期结果**：你能画出 `BlockScaledOperand(A) → SFA/SFB/alpha → gemm_quant_out → _sf_decode → out_op` 的数据流，并指出 e8m0 的 uint8 view 只为绕过 Inductor bug。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：为什么 `gemm_quant_out` 的 `mutates_args` 是 `("out","SFD")` 而不是返回新张量？
+
+**参考答案**：量化输出需要同时写值缓冲 `out` 与 SF 缓冲 `SFD`；torch.library 的 schema 无法表达 `(Tensor, Tensor)` 元组返回，故用两个被原地修改的张量参数（注释 [1388-1395](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L1388-L1395)）。`gemm` 在外层把它们包回 `BlockScaledOperand` 返回。
+
+**练习 2**：`_sf_decode` 为什么必须用 `bs_format` 名字、而不是直接 `SF.view(torch.float8_e8m0fnu)`？
+
+**参考答案**：uint8 视图本身不携带原 dtype 信息；NVFP4 的 e4m3 SF 和 MX 系的 e8m0 SF 在 uint8 下不可区分。用格式名查 descriptor 得到正确的 `scale_dtype`，才能避免「把 e4m3 当 e8m0 解」的静默错误（[349-355](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/gemm_interface.py#L349-L355)）。
+
+---
+
+## 5. 综合实践
+
+把本讲四个模块串起来：在 `quack` 里实现一个**最小 MLP 前向**的对照实验，体会「融合」带来的 kernel 数差异。
+
+**任务**：给定 `x: (L, M, K)`、门控权重 `W_gate: (N, K)`、`W_up: (N, K)`，计算 `silu(x @ W_gate^T) * (x @ W_up^T)`。
+
+**三种实现**：
+
+1. **朴素（两次 GEMM + 逐元素）**：用 `quack.gemm` 跑两次，再手动 `F.silu(...)*...`。统计 kernel launch 次数（应为 3 类：两次 GEMM + 一次逐元素融合）。
+2. **拼接 + 门控融合（一次 GEMM）**：把 `[W_gate; W_up]` 沿 N 拼成 `(2N, K)`，调 `gemm_gated(x, W_concat.mT, activation="swiglu", concat_layout=("B",))`。理想情况下只需 **1 次** kernel 启动。
+3. **参考**：用 `torch.einsum` + `F.silu` 算 fp32 参考，与实现 2 的 `postact` 做相对误差比对（参考 [tests/test_gemm_epilogue.py:645-648](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/tests/test_gemm_epilogue.py#L645-L648) 的写法）。
+
+**需要观察与解释**：
+
+- 实现比 2 的 `postact` 最后一维是 `N`（而非 `2N`），因为门控把 gate/up 合并了。
+- `concat_layout=("B",)` 让拼接权重免 deinterleave 拷贝——若去掉它且不做手动交错，结果会错（gate/up 错位）。
+- 用 `torch.profiler` 或 `CUDA_LAUNCH_BLOCKING=1` 数 launch：融合路径应明显少于朴素路径。
+
+> 若无 GPU，本任务退化为「源码阅读型」：在 [quack/mlp.py](https://github.com/Dao-AILab/quack/blob/60d88082272a256fa9b3b2ab631c82cfa78337c6/quack/mlp.py)（u8-l4 详讲）里找到 QuACK 自家 MLP 如何用 `gemm_gated`/`dgated`，对照你的三种实现画调用图。
+
+## 6. 本讲小结
+
+- `gemm` 是公共 API 的根，语义 \(D=\alpha(A@B)+\text{bias}\)，靠 `_GemmIfacePlan` 缓存把 eager 热路径压到「只换数据指针」；冷路径做校验、autotune 并记录计划。
+- 它有**三条真实执行路径**：量化输出（`gemm_quant_out`）、`torch.compile`（`gemm_out`，schema 类型化）、eager（`gemm_tuned`）；eager 用 `_launch` 绕过 ~85µs 的 custom-op 边界。
+- `gemm_act`/`gemm_gated`（同一函数、靠 `activation` 名字区分）把激活/bias/C **融合进一次 kernel 的 epilogue**，省掉额外的显存往返与 launch；门控时 `postact` 维度折半。
+- `concat_layout` 告诉 kernel 哪些张量的非连续维是 `[gate; up]` 拼接，使其免拷贝按交错顺序读取，是门控 MLP 的关键优化。
+- `gemm_symmetric` 用 `gemm_iface.py` 的 `VariantSpec` 声明式机器共享规范化与计划缓存；`gemm_norm_act` 则把「乘 + rstd 缩放 + 激活」三者融合交给 `norm_act_mod`。
+- blockscaled 输入（`BlockScaledOperand` 容器）与量化输出（`out_dtype=BlockScaledFormat`）正交可组合；e8m0 SF 跨 compile 边界时用 uint8 view 绕过 Inductor bug。
+
+## 7. 下一步学习建议
+
+- **纵向（深入 epilogue）**：本讲的「融合」都落在 epilogue 上。建议进入 u6-l1（`ComposableEpiMixin` 与 `EpiOp` 生命周期）和 u6-l2（`EpiOp` 词汇表），看 `linear_act_mod`/`norm_act_mod` 这些 mod 是如何用 `EpiOp` 拼出来的。
+- **横向（变体接口机器）**：u4-l5（`VariantSpec` 变体接口机制）会专门拆 `gemm_iface.py` 的 `canonicalize`/`IfacePlan`/`make_iface_plan`，与本讲 4.3 紧密衔接。
+- **量化方向**：u7-l1（Blockscaled 操作数与格式）与 u7-l2（量化 GEMM 输出与 W4 权重）会展开本讲 4.4 的 SF 布局、格式差异与 `out_transposed` 行量化输出。
+- **上层使用者**：u8-l4（高层融合算子：Linear/MLP/fused CE）会展示 `linear.py`/`mlp.py` 如何在 `gemm`/`gemm_gated` 之上构建带 autograd 的神经网络层。
