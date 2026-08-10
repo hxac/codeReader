@@ -33518,7 +33518,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"7d2c32c6-1bcf-46bd-9413-c0705530897c\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"8574e3ef-d3df-43c4-9908-7d6e50d208c7\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
         "u6-l1": {
           "status": "pending",
@@ -33542,7 +33542,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/automatesolutions/FPGA_FIR-FILTER/FPGA_FIR-FILTER-tutorial",
       "last_head": "3f7aef90f4d34fa62f00ca72c260fc49c3c04a8c",
-      "last_run_at": "2026-08-09T23:02:23Z",
+      "last_run_at": "2026-08-10T15:50:40Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "damdoy/fpga_image_processing": {
@@ -33665,7 +33665,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"63e0f27d-0ae8-4ac8-b588-fe30759473e5\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"30824072-1df5-4769-b7be-b4527dce4a41\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
         "u5-l3": {
           "status": "pending",
@@ -33709,7 +33709,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/damdoy/fpga_image_processing/fpga_image_processing-tutorial",
       "last_head": "b1d7480cd804e53a53af48e95850bbf61088f40f",
-      "last_run_at": "2026-08-09T23:02:23Z",
+      "last_run_at": "2026-08-10T15:50:40Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "suisuisi/FPGA_Library": {
@@ -33720,7 +33720,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"188b0370-f4b9-4ac2-bcbf-07b373c9d502\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"c40579c2-5ea8-431b-be65-b4824f649872\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
         "u1-l2": {
           "status": "pending",
@@ -33904,7 +33904,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/suisuisi/FPGA_Library/FPGA_Library-tutorial",
       "last_head": "1e33525198872d63ced48e8f0cebaa2419b9eb22",
-      "last_run_at": "2026-08-09T23:02:23Z",
+      "last_run_at": "2026-08-10T15:50:40Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "nselvara/HDL-Core-Library": {},
@@ -45725,7 +45725,7 @@
     "ai-dynamo/dynamo": {},
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-09T23:02:23Z"
+      "last_run_at": "2026-08-10T15:50:40Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
