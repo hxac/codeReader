@@ -1,0 +1,538 @@
+{
+  "project": "fpga-fft",
+  "head": "411062734ac2bdc2d08968c639bb7bec630a9e10",
+  "rationale": "fpga-fft 是一个用 Verilog HDL 实现的「实时流水线 FFT」处理器，采用单路延迟反馈（SDF）思路：把 Cooley-Tukey 的每一级都做成一个独立硬件模块（fft_2 ~ fft_16k），再由 fft_top 把它们首尾串成一条数据流水线，每级内部由「蝶形运算 → RAM 延时 → 旋转因子 ROM → 复数乘法」四部分组成。学习顺序因此按「先看全貌、再学算子、再学时序与存储、再逐级爬升、最后验证与移植」来设计。第 1 单元让读者建立项目定位、仓库结构、DFT/FFT 算法基础与流水线总览；第 2 单元拆解两个核心运算算子（蝶形、复数乘法）与定点表示；第 3 单元讲解两个关键的存储/时序机制（旋转因子 ROM、RAM 延时反馈）以及跨级握手时序对齐；第 4 单元从小点数层 fft_2/4 一路讲到通用 butterfly_general 与参数化的高层模块 fft_1k/16k；第 5 单元用 MATLAB 做黄金参考、跑仿真 testbench、讲 Xilinx/Anlogic 双平台移植与 IP 依赖，最后做架构反思（含未实现的 bit-reverse 倒序）。依赖关系保证读者先掌握算子与时序，再理解高层模块的复用，最后进入验证与移植。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门：认识 fpga-fft 实时流水线 FFT",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与整体架构：什么是实时流水线 FFT",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 fpga-fft 是什么、解决什么问题（大点数 FFT 在通用处理器上难以实时处理，用 FPGA 流水线结构实现实时计算），以及它的整体设计动机与研究背景。",
+          "learning_goals": [
+            "理解 DFT/FFT 在信号处理中的作用，以及为什么要在 FPGA 上做实时 FFT",
+            "了解 SDF（单路延迟反馈）流水线 FFT 的基本思想：每一级做成一个独立硬件模块串行流水",
+            "认识项目的目标场景：嵌入式边缘端、语音/音频等实时信号处理"
+          ],
+          "source_files": [
+            "README.md",
+            "scheme/参数和问题.md",
+            "scheme/FFT.md"
+          ],
+          "minimal_modules": [
+            "README",
+            "scheme/参数和问题.md"
+          ],
+          "practice_task": "阅读 README 与 scheme/参数和问题.md，用自己的话写一段 200 字以内的说明：本项目为什么要用 FPGA 流水线而不是 CPU 来做 FFT，并指出流水线结构相对逐帧批处理的优势。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与文件组织：src / tb / matlab / scheme",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "level": "beginner",
+          "topic": "讲解整个仓库的目录划分：src 放 Verilog 源码、tb 放仿真测试、matlab 放算法参考脚本、scheme 放设计文档，以及各类文件如何配合。",
+          "learning_goals": [
+            "看懂 src 目录中 fft_2~fft_16k 各级模块、butterfly/delay/multiplier/Rotator 等基础模块的命名规律",
+            "区分设计源码 src、仿真测试 tb、算法参考 matlab、设计文档 scheme 四类目录的职责",
+            "了解设计文档（README、FFT.md、参数和问题.md）在理解项目中的作用"
+          ],
+          "source_files": [
+            "README.md",
+            "scheme/FFT.md",
+            "src/fft_top.v"
+          ],
+          "minimal_modules": [
+            "src 目录",
+            "tb 目录",
+            "matlab 目录",
+            "scheme 目录"
+          ],
+          "practice_task": "用表格或树状图列出 src 目录下所有文件，并按「各级 fft 模块 / 基础算子模块 / 旋转因子模块 / 数据生成模块」四类归类，标注每个文件的大致作用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "算法基础：DFT、Cooley-Tukey 与旋转因子",
+          "order": 3,
+          "filename": "u1-l3-fft-algorithm-foundation.md",
+          "level": "beginner",
+          "topic": "结合 scheme/FFT.md 和 MATLAB 脚本，推导 DFT 定义、旋转因子的对称性与周期性、Cooley-Tukey 分治推导，以及 bit-reverse 倒序，为后续硬件实现打下算法基础。",
+          "learning_goals": [
+            "掌握 DFT 的定义式 X(k)=Σx(n)W_N^{nk} 与旋转因子 W_N=e^{-j2π/N}",
+            "理解旋转因子的共轭对称性（频谱镜像）和周期性，以及它们如何降低计算量",
+            "理解 Cooley-Tukey 分治：N 点 DFT 拆成两个 N/2 点 DFT，递归到单点，计算量为 NlogN",
+            "理解 bit-reverse 倒序在 DIT/DIF 流程中的位置"
+          ],
+          "source_files": [
+            "scheme/FFT.md",
+            "matlab/FFT_iterative_DIF.m",
+            "matlab/FFT_iterative_DIT.m",
+            "matlab/DFT_original.m"
+          ],
+          "minimal_modules": [
+            "scheme/FFT.md",
+            "matlab/FFT_iterative_DIF.m"
+          ],
+          "practice_task": "在 MATLAB 中运行 matlab/FFT_iterative_DIF.m，手算 x=[1 2 -3 -1] 的 4 点 DFT 并与脚本输出比对；再画一张图说明 Cooley-Tukey 是如何把 8 点 DFT 逐级拆分的。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "数据流总览：fft_top 顶层模块如何串起整条流水线",
+          "order": 4,
+          "filename": "u1-l4-pipeline-and-fft-top.md",
+          "level": "beginner",
+          "topic": "精读 fft_top.v，理解它如何把 fft_16k→fft_8k→...→fft_2 共 14 级模块首尾相连，数据与 start/start_next/end 握手信号如何在级间传递，最终输出为什么是倒序的。",
+          "learning_goals": [
+            "看懂 fft_top 的对外接口（clk/rst/start/data_real/data_img/out_real/out_img 等）",
+            "理解流水线的连接方式：上一级 data_out 喂给下一级 data_in，start_next 触发下一级启动",
+            "理解大点数层（16k）在流水线最前、fft_2 在最后，以及因此输出需要 bit-reverse 倒序"
+          ],
+          "source_files": [
+            "src/fft_top.v",
+            "src/fft_16.v",
+            "src/fft_2.v"
+          ],
+          "minimal_modules": [
+            "src/fft_top.v"
+          ],
+          "practice_task": "画出 fft_top 的级联框图（从 fft_16k 到 fft_2），标出每一级的 data_in/data_out/start_next 信号走向；并回答：为什么最大的延时层要放在流水线最前面？",
+          "depends_on": [
+            "u1-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心算子：蝶形运算与复数乘法",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "蝶形运算单元 butterfly.v：加减与 S 控制信号",
+          "order": 1,
+          "filename": "u2-l1-butterfly-unit.md",
+          "level": "beginner",
+          "topic": "精读 butterfly.v，理解 radix-2 蝶形的硬件实现：当 S=1 时计算 A+C 与 C-A，加减运算占用一个时钟所以需要打一拍缓存，以及 B/D 输出在 S_1d 下的选择逻辑。",
+          "learning_goals": [
+            "看懂 butterfly 的端口 A/C 输入、B/D 输出、S 和 enable 控制信号",
+            "理解蝶形运算的数学含义：上支求和（A+C）、下支求差（C-A），对应 DIF 蝶形",
+            "理解为什么加减结果要寄存一拍（r_x_added/r_x_subtracted），以及 S_1d 延时对齐"
+          ],
+          "source_files": [
+            "src/butterfly.v",
+            "src/fft_2.v"
+          ],
+          "minimal_modules": [
+            "src/butterfly.v"
+          ],
+          "practice_task": "对照 butterfly.v，画出一个时钟周期内当 S 从 0 切到 1 时，A_real/C_real/B_real/D_real 四个信号的变化时序图，标注寄存器打拍的延迟。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "复数乘法器 multiplier.v：四乘法器实现 (a+jb)(c+jd)",
+          "order": 2,
+          "filename": "u2-l2-complex-multiplier.md",
+          "level": "beginner",
+          "topic": "精读 multiplier.v，理解复数乘法 (a+jb)(c+jd)=(ac-bd)+j(ad+bc) 如何用 4 个 mult2 乘法器 IP 实现，以及结果的右移和截断。",
+          "learning_goals": [
+            "看懂 multiplier 的端口：32 位 a/b 数据、18 位 c/d 旋转因子、截断后的 32 位输出",
+            "理解复数乘法拆成 ac、bd、bc、ad 四个实数乘法再加减的原理",
+            "理解乘法器使用 Xilinx mult2 IP、流水线打拍后输出"
+          ],
+          "source_files": [
+            "src/multiplier.v",
+            "src/fft_4.v"
+          ],
+          "minimal_modules": [
+            "src/multiplier.v"
+          ],
+          "practice_task": "在 fft_4.v 中找到 multiplier 的例化，写出它的四个输入（w_D_real_tmp/w_D_img_tmp/r_rorator_real/r_rorator_img）分别对应公式里的 a/b/c/d 哪一项，并解释为什么 rstn 取反 rst。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "定点数表示与旋转因子量化",
+          "order": 3,
+          "filename": "u2-l3-fixed-point-and-twiddle-quantization.md",
+          "level": "beginner",
+          "topic": "讲解硬件中如何用定点数表示小数：数据 32 位、旋转因子 18 位且左移 16 位做定点放大，cos45°≈0.707 量化为 46341，乘法后右移 16 位再截断还原。",
+          "learning_goals": [
+            "理解为什么 FPGA 不支持小数运算，需要用定点放大（左移 16 位）来表示 [-1,1] 的旋转因子",
+            "掌握旋转因子的量化：1→65536、cos45°→46341（46341/65536≈0.707）",
+            "理解 multiplier 右移 16 位（>>16）再截断到 32 位是为了抵消定点放大、保持精度"
+          ],
+          "source_files": [
+            "src/RotatorMemory8.v",
+            "src/multiplier.v",
+            "matlab/FFT_figures.m"
+          ],
+          "minimal_modules": [
+            "src/RotatorMemory8.v",
+            "src/multiplier.v"
+          ],
+          "practice_task": "计算 cos(π/4)、cos(π/8) 量化到 Q16（放大 65536 倍）后的整数值，与 RotatorMemory8.v 里的 cos45_18=46341 比对；并说明乘法后为什么要 >>16。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "存储与时序：旋转因子 ROM 与 RAM 延时反馈",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "旋转因子 ROM：Rotator16 / RotatorMemory8 / Rotator_address",
+          "order": 1,
+          "filename": "u3-l1-rotator-twiddle-rom.md",
+          "level": "intermediate",
+          "topic": "讲解旋转因子如何存储与寻址：RotatorMemory8 用硬编码常量、Rotator16 用 ROM IP（rotator_16_real/img）、Rotator_address 生成参数化的 ROM 读地址和 select 信号。",
+          "learning_goals": [
+            "理解旋转因子用两个 ROM 分别存实部和虚部（.coe 初始化）",
+            "看懂 Rotator_address 如何按 layer 参数生成地址 r_addra[layer-1:0] 和 select 选择信号",
+            "理解 select 信号的作用：每周期前半段读 ROM、后半段补 W=1（实部 1<<16，虚部 0）"
+          ],
+          "source_files": [
+            "src/Rotator16.v",
+            "src/RotatorMemory8.v",
+            "src/Rotator_address.v",
+            "src/fft_32.v"
+          ],
+          "minimal_modules": [
+            "src/Rotator_address.v",
+            "src/Rotator16.v"
+          ],
+          "practice_task": "对照 fft_32.v 中的 Rotator_address 例化（layer=5），写出当 rotator_valid 有效时地址计数器如何从 0 计到 15，以及 select 信号在哪半段为 1，从而选择是读 ROM 还是输出 W=1。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "延时单元 delay.v：基于 RAM 的移位寄存器反馈",
+          "order": 2,
+          "filename": "u3-l2-delay-ram-shift-register.md",
+          "level": "intermediate",
+          "topic": "精读 delay.v，理解 SDF 结构的核心：用双口 RAM（Delay IP）实现「先写后读」的可配置延时（2^(layer-1) 个时钟），以及 IDLE/DELAY/OUT/TAIL/END 五状态机如何控制读写地址。",
+          "learning_goals": [
+            "理解延时量 DELAY_TIME=2^(layer-1)，对 n 级 layer 输出比输入延时 2^(n-1)-1 个时钟",
+            "看懂双口 RAM 写地址 r_addra、读地址 r_addrb 的生成，以及写使能 wea 的作用",
+            "理解状态机如何区分「延时建立」「正常输出」「尾部排空」三个阶段，并产生 out_first/out_last 脉冲"
+          ],
+          "source_files": [
+            "src/delay.v",
+            "src/delay_1k_plus.v",
+            "src/butterfly_general.v"
+          ],
+          "minimal_modules": [
+            "src/delay.v"
+          ],
+          "practice_task": "以 layer=4（fft_16 用的延时）为例，计算 DELAY_TIME 和 required_delay_in_state_machine 的值；并画出状态机从 IDLE→DELAY→OUT→TAIL→END 的转移条件。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "时序对齐与跨级握手：rotator_valid、start_next、HALT",
+          "order": 3,
+          "filename": "u3-l3-timing-alignment-and-handshake.md",
+          "level": "intermediate",
+          "topic": "讲解整个流水线最难的时序对齐问题：rotator_valid 何时拉高让旋转因子与蝶形输出对齐，HALT_FOR_NEXT_LAYER 如何决定下一级 start 的时机，以及 anlogic 与 vivado 两个版本的差异。",
+          "learning_goals": [
+            "理解 WAIT_FOR_ROTATOR 计数器如何让旋转因子输出与蝶形 D 输出在同一拍对齐",
+            "理解 HALT_FOR_NEXT_LAYER=6+PERIOD/2 的含义，以及 start_next 触发下一级的时机",
+            "理解注释中 HALT_FOR_NEXT_LAYER-2（anlogic）与 -3（vivado）的差异来自 ROM 读取延迟不同"
+          ],
+          "source_files": [
+            "src/butterfly_general.v",
+            "src/fft_8.v",
+            "src/fft_16.v"
+          ],
+          "minimal_modules": [
+            "src/butterfly_general.v"
+          ],
+          "practice_task": "在 fft_16.v 中追踪 r_count_rotator 与 r_rotator_valid 的产生过程，说明旋转因子为什么要在蝶形开始后等待 WAIT_FOR_ROTATOR-1 拍才有效；并解释 HALT_FOR_NEXT_LAYER-3 中那个 -3 的来源。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "逐级解析：从小点数层到参数化高层模块",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "小点数层 fft_2 与 fft_4：寄存器延时与状态机",
+          "order": 1,
+          "filename": "u4-l1-small-point-layers-fft2-fft4.md",
+          "level": "intermediate",
+          "topic": "精读 fft_2.v 和 fft_4.v，理解最简单两层的实现：用寄存器（而非 RAM）做延时，S 控制信号在每个 PERIOD 内翻转，fft_4 还内置了简单的旋转因子（1 和 -j）。",
+          "learning_goals": [
+            "看懂 fft_2/fft_4 的状态机 IDLE/START/PROCESSING/END 与 start2/start4 启动逻辑",
+            "理解 S4/S8 计数器在 PERIOD/2-1 和 PERIOD-1 处翻转，实现上下支切换",
+            "理解 fft_2 不需要乘法器（W=1），fft_4 用内置旋转因子（实部 1/0、虚部 0/-1）"
+          ],
+          "source_files": [
+            "src/fft_2.v",
+            "src/fft_4.v"
+          ],
+          "minimal_modules": [
+            "src/fft_2.v",
+            "src/fft_4.v"
+          ],
+          "practice_task": "对照 fft_4.v，说明它的 PERIOD=4、S4 在哪两个计数值翻转，以及它的旋转因子序列（real: 1 1 1 0、img: 0 0 0 -1）如何对应 4 点 FFT 需要的 W_N^k。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "fft_8 与 fft_16：从寄存器延时过渡到 RAM 延时",
+          "order": 2,
+          "filename": "u4-l2-fft8-fft16-transition.md",
+          "level": "intermediate",
+          "topic": "精读 fft_8.v 和 fft_16.v，理解这两层是从「简单层」到「通用层」的过渡：fft_8 用多级寄存器 latch 做延时 + RotatorMemory8 硬编码因子，fft_16 开始用 RAM delay + Rotator16 ROM。",
+          "learning_goals": [
+            "理解 fft_8 用 B_real_1d/2d/C_real 三级寄存器实现 4 拍延时（替代 RAM）",
+            "看懂 fft_16 改用 delay #(.layer(4)) 的 RAM 延时和 Rotator16 ROM 旋转因子",
+            "理解 fft_16 是第一个具备完整「butterfly+delay+rotator+multiplier」四件套的层级"
+          ],
+          "source_files": [
+            "src/fft_8.v",
+            "src/fft_16.v",
+            "src/RotatorMemory8.v",
+            "src/Rotator16.v"
+          ],
+          "minimal_modules": [
+            "src/fft_8.v",
+            "src/fft_16.v"
+          ],
+          "practice_task": "比较 fft_8（寄存器延时）与 fft_16（RAM 延时）的延时实现差异，说明为什么 16 点开始就必须用 RAM 而不能用寄存器 latch（提示：寄存器数量与延时深度的关系）。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "通用蝶形 butterfly_general.v：参数化封装 layer",
+          "order": 3,
+          "filename": "u4-l3-butterfly-general.md",
+          "level": "intermediate",
+          "topic": "精读 butterfly_general.v，理解它如何用一个 layer 参数把「状态机 + S 控制 + RAM 延时 + 下一级启动 + rotator_valid」封装成通用模块，供 fft_32 及以上所有高层复用。",
+          "learning_goals": [
+            "看懂 butterfly_general 的 layer 参数：PERIOD=1<<layer，延时 delay #(.layer(current_layer))",
+            "理解它内部集成了状态机、butterfly、delay 三个部分，对外只暴露 data_in/next_level_start/rotator_valid",
+            "理解 fft_32 起的所有高层模块都只是「butterfly_general + Rotator_address + ROM + multiplier」的组合"
+          ],
+          "source_files": [
+            "src/butterfly_general.v",
+            "src/fft_32.v"
+          ],
+          "minimal_modules": [
+            "src/butterfly_general.v"
+          ],
+          "practice_task": "对照 butterfly_general.v 和 fft_32.v，画出 fft_32 内部的连接框图：butterfly_general 的 D_real/D_img 输出接到哪里，rotator_valid 又接到 Rotator_address 的哪个端口，最后乘法器的输出如何成为 data_out。",
+          "depends_on": [
+            "u4-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "高层模块 fft_32~fft_16k 与参数化复用",
+          "order": 4,
+          "filename": "u4-l4-high-layer-modules-parameterization.md",
+          "level": "intermediate",
+          "topic": "对比 fft_32、fft_1k、fft_16k 三个代表，理解所有高层模块结构高度同构，只差 layer 参数（5/10/14）和对应的旋转因子 ROM 名字；以及大点数延时为何用 delay_1k_plus。",
+          "learning_goals": [
+            "理解 fft_1k(current_layer=10)、fft_16k(current_layer=14) 等高层模块只是改 layer 参数和 ROM 实例名",
+            "看懂 fft_top 中 14 个高层模块的同构级联，理解参数化如何避免重复代码",
+            "理解 delay 与 delay_1k_plus 的区别（地址位宽、tail_cnt 位宽）以适应不同延时深度"
+          ],
+          "source_files": [
+            "src/fft_1k.v",
+            "src/fft_16k.v",
+            "src/fft_32.v",
+            "src/delay_1k_plus.v"
+          ],
+          "minimal_modules": [
+            "src/fft_1k.v",
+            "src/fft_32.v"
+          ],
+          "practice_task": "对比 fft_32.v 与 fft_1k.v，列出两者除了 layer 参数和 ROM 实例名（rotator_32_real vs rotator_1k_real）外还有哪些不同；并解释 fft_top 里为什么需要 14 个这样的模块。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "验证、仿真与平台移植",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "MATLAB 黄金参考：DIF/DIT 迭代实现与中间结果",
+          "order": 1,
+          "filename": "u5-l1-matlab-golden-reference.md",
+          "level": "advanced",
+          "topic": "讲解 MATLAB 脚本如何作为硬件的「黄金参考」：FFT_iterative_DIF/DIT 逐级保存中间结果 X_FFT_middle_result，bitrevorder 做倒序，最后与 matlab 内置 fft 比对误差。",
+          "learning_goals": [
+            "理解 MATLAB 迭代 FFT 的双层 for 循环如何对应硬件的逐级流水",
+            "看懂 X_FFT_middle_result 矩阵如何保存每一级的中间结果，便于与硬件各级输出逐拍比对",
+            "理解 DIF 先算后倒序、DIT 先倒序后算的区别，以及与 matlab 内置 fft 的误差校验"
+          ],
+          "source_files": [
+            "matlab/FFT_iterative_DIF.m",
+            "matlab/FFT_iterative_DIT.m",
+            "matlab/DFT_original.m",
+            "matlab/fft_testing.m"
+          ],
+          "minimal_modules": [
+            "matlab/FFT_iterative_DIF.m",
+            "matlab/FFT_iterative_DIT.m"
+          ],
+          "practice_task": "运行 FFT_iterative_DIF.m，导出某一级（如第 3 级）的 X_FFT_middle_result 中间向量，作为后续与硬件 fft_8 仿真输出逐拍比对的黄金参考数据。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "仿真与 testbench：data_gen 激励与逐级验证",
+          "order": 2,
+          "filename": "u5-l2-simulation-and-testbench.md",
+          "level": "advanced",
+          "topic": "讲解 tb 目录下的仿真结构：data_gen 生成周期性测试激励与 start/over 握手，fft_8_tb / fft_general_tb / fft_top_tb 分别验证单级、高层与整条流水线。",
+          "learning_goals": [
+            "看懂 data_gen 如何用 layer 参数生成 valid/start/over 握手信号和递增的 data_real 激励",
+            "理解 testbench 的时钟/复位初始化、例化被测模块和 data_gen 的标准套路",
+            "理解从 fft_8_tb（单级）到 fft_top_tb（全链路）的分级验证策略"
+          ],
+          "source_files": [
+            "tb/fft_8_tb.v",
+            "tb/fft_general_tb.v",
+            "src/data_gen.v"
+          ],
+          "minimal_modules": [
+            "tb/fft_8_tb.v",
+            "src/data_gen.v"
+          ],
+          "practice_task": "基于 tb/fft_8_tb.v 的结构，仿写一个 fft_4_tb 的仿真框架，正确设置 data_gen 的 layer 参数和 fft_4 的端口连接，并说明如何用波形观察 out_real4/out_img4 的输出时序。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "Xilinx / Anlogic 双平台移植与 IP 依赖",
+          "order": 3,
+          "filename": "u5-l3-platform-porting-and-ip.md",
+          "level": "advanced",
+          "topic": "梳理项目对厂商 IP 的依赖（mult2 乘法器、Delay 双口 RAM、rotator_*_real/img 旋转因子 ROM、blk_mem_gen_0），以及源码注释里 Xilinx 与 Anlogic 两套版本的差异和移植要点。",
+          "learning_goals": [
+            "识别项目中所有厂商 IP 依赖：mult2、Delay、rotator_*_real/img、blk_mem_gen_0、addr_ctrl",
+            "理解 delay.v 中注释掉的 anlogic 版 RAM 与启用的 xilinx 版 RAM 的接口差异",
+            "理解 ROM 读取延迟不同导致 HALT_FOR_NEXT_LAYER 的 -2（anlogic）vs -3（vivado）差异，移植时需验证"
+          ],
+          "source_files": [
+            "src/delay.v",
+            "src/multiplier.v",
+            "src/rom.v",
+            "src/butterfly_general.v"
+          ],
+          "minimal_modules": [
+            "src/delay.v",
+            "src/multiplier.v"
+          ],
+          "practice_task": "列出项目移植到一块新 FPGA（如 Anlogic 或 Intel）时需要重新生成或替换的所有 IP 核，并针对 delay.v 写出移植 checklist：要替换哪些 IP、要重新校准哪个 HALT 常量、要验证 ROM 读取延迟是几个时钟。",
+          "depends_on": [
+            "u4-l4",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "架构反思与扩展：SDF 取舍、倒序缺失与改进方向",
+          "order": 4,
+          "filename": "u5-l4-architecture-review-and-extensions.md",
+          "level": "advanced",
+          "topic": "从整体上反思这套设计的架构取舍：为何选 SDF 流水线、资源/吞吐/延迟的权衡，已知缺陷（bit-reverse 倒序尚未实现、data_config 未启用），以及可能的改进与二次开发方向。",
+          "learning_goals": [
+            "理解 SDF（单路延迟反馈）相对其他流水线结构（MDF、并行）在资源和吞吐上的取舍",
+            "识别项目已知未完成点：输出倒序（Reverse）未实现、data_config 配置级数未启用",
+            "能提出改进方向：实现 bit-reverse 输出、参数化点数、支持连续流式输入、块浮点防溢出"
+          ],
+          "source_files": [
+            "src/fft_top.v",
+            "scheme/参数和问题.md",
+            "scheme/FFT.md",
+            "src/butterfly_general.v"
+          ],
+          "minimal_modules": [
+            "src/fft_top.v",
+            "scheme/参数和问题.md"
+          ],
+          "practice_task": "撰写一份 1 页的架构评估：说明本设计是 DIF 还是 DIT 流水（结合蝶形加减与旋转因子相乘顺序给出判断依据），指出 bit-reverse 缺失对实际使用的影响，并提出一个最小可行的倒序输出改进方案（如输出端加一级 RAM 重排）。",
+          "depends_on": [
+            "u4-l4",
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
