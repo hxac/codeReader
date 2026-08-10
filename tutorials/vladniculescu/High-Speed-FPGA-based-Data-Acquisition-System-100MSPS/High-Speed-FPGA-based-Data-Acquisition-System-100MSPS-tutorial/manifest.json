@@ -1,0 +1,599 @@
+{
+  "project": "High-Speed-FPGA-based-Data-Acquisition-System-100MSPS",
+  "head": "72db951d9cf596d9fc44f222d1434cb5d5ed5503",
+  "rationale": "本项目是一个基于 Nexys 4 DDR 的混合语言(Verilog+VHDL)FPGA 高速数据采集系统，核心是 TOP.v 顶层编排器，内部包含三套状态机(主采集 FSM、ADC 域触发/斜率 FSM、发送打包 FSM)，外部串联 ADC→三块 RAM→FFT→平方求和→开方→UART 的完整信号链。学习路线据此分三层六单元：入门层(Unit1)先建立项目定位、仓库结构与整体数据流的全景；进阶层(Unit2~4)自底向上拆解时钟与存储前端、FFT/幅度计算信号链、UART 收发三大子系统，每个子系统都先讲封装模块再讲时序；专家层(Unit5~6)聚焦 TOP 的三态机编排、混合语言与 Xilinx IP 集成、PC 协议/LabVIEW/硬件前端以及扩展方向。讲义顺序遵循“先看懂模块、再串成链路、最后理解全局编排与取舍”的认知梯度，依赖关系上 Unit1 之后各进阶单元可并行展开，专家层则以 TOP 主状态机为枢纽汇聚前面所有知识。心率/GSR 功能主要在模拟前端 PCB 而非 HDL，相关讲义如实标注“待确认”，不臆造模块。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：项目定位与系统全貌",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：它是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍这是一个基于 Nexys 4 DDR FPGA 的高速数据采集系统，集成了示波器(含 FFT、最高 100MSPS)、心率测量(体积描记法)、皮电响应(GSR)三大功能，并说明作者团队与 Xilinx 竞赛背景。",
+          "learning_goals": [
+            "了解项目定位与三大功能",
+            "了解目标开发板 Nexys 4 DDR 与 Vivado 工具链版本",
+            "了解作者团队与竞赛背景(XIL-23991)"
+          ],
+          "source_files": [
+            "readme.md"
+          ],
+          "minimal_modules": [
+            "README 项目说明"
+          ],
+          "practice_task": "阅读 readme.md，用自己的话写一段不超过 150 字的项目摘要，并指出系统三大功能各自依赖的硬件(模拟前端板/ADC/FPGA/PC GUI)。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与复现方式",
+          "order": 2,
+          "filename": "u1-l2-repo-structure-and-reproduction.md",
+          "level": "beginner",
+          "topic": "讲解仓库目录结构(verilog files / vhdl files / FPGA bit file / LabView GUI / Electronic boards design / 文档)与从比特流到 GUI 的三步复现流程。",
+          "learning_goals": [
+            "识别仓库中可读源码(Verilog/VHDL)与二进制产物(比特流/PCB/LabVIEW)",
+            "掌握 readme 中给出的三步复现流程(烧 bitstream→复现 PCB→打开 GUI)",
+            "理解混合语言工程的组织方式"
+          ],
+          "source_files": [
+            "readme.md",
+            "verilog files/TOP.v"
+          ],
+          "minimal_modules": [
+            "目录结构识别",
+            "复现三步法"
+          ],
+          "practice_task": "列出 verilog files 与 vhdl files 下所有文件，标注每个属于 Verilog 还是 VHDL，并指出顶层模块文件是哪一个。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "系统总体架构与数据流",
+          "order": 3,
+          "filename": "u1-l3-system-architecture-and-dataflow.md",
+          "level": "beginner",
+          "topic": "基于 TOP.v 头部注释的算法说明与模块例化列表，画出从 ADC 采集→RAM→FFT→幅度→开方→UART 的完整数据流框图。",
+          "learning_goals": [
+            "理解 TOP.v 注释里描述的 8 步采集/处理流程",
+            "能从例化语句中识别系统功能模块与互连关系",
+            "区分 ram1/ram2/ram3 三块存储的职责"
+          ],
+          "source_files": [
+            "verilog files/TOP.v"
+          ],
+          "minimal_modules": [
+            "数据流 8 步算法",
+            "模块例化清单"
+          ],
+          "practice_task": "画出系统数据流框图:ADC→ram1→FFT→(平方+求和)→ram2→开方→ram3→UART，标注每一步使用的模块名与时钟域。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：时钟、存储与模拟前端",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "时钟生成与多时钟域",
+          "order": 1,
+          "filename": "u2-l1-clock-generation-and-domains.md",
+          "level": "intermediate",
+          "topic": "讲解 pll_loop 如何把 100MHz 板载晶振倍频出 50/100/200MHz 多路时钟，以及 ADC_clock_mux 与 Transcoder 如何选择/分频 ADC 时基。",
+          "learning_goals": [
+            "理解 pll_loop 对 Xilinx PLL IP 的封装与多路时钟输出",
+            "理解 ADC_clock_mux 的二选一时钟选择",
+            "理解 Transcoder 把 4 位 timebase 编码为分频值"
+          ],
+          "source_files": [
+            "verilog files/pll_loop.v",
+            "verilog files/ADC_clock_mux.v",
+            "verilog files/Transcodor.v",
+            "verilog files/TOP.v"
+          ],
+          "minimal_modules": [
+            "pll_loop",
+            "ADC_clock_mux",
+            "Transcoder"
+          ],
+          "practice_task": "在 TOP.v 中追踪 clk_100/clk/clk_50/clk_UART 四路时钟各自喂给了哪些模块，并说明为什么 FFT 用 100MHz 而 UART 用 50MHz(波特率计算待确认)。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "采样存储与三块 RAM",
+          "order": 2,
+          "filename": "u2-l2-sram-storage-and-three-rams.md",
+          "level": "intermediate",
+          "topic": "讲解 SRAM/SRAM2/SRAM3(ram2) 三块双端口寄存器 RAM 的结构、地址/数据位宽与 carry 满标志。",
+          "learning_goals": [
+            "读懂 Verilog 寄存器数组内存(mem[0:2047])的读写时序",
+            "理解写地址/读地址分离的双端口结构",
+            "区分 ram1(10bit 采样)/ram2(21bit 幅度平方)/ram3(10bit 幅度)"
+          ],
+          "source_files": [
+            "verilog files/SRAM.v",
+            "verilog files/ram2.v",
+            "verilog files/SRAM3.v",
+            "verilog files/TOP.v"
+          ],
+          "minimal_modules": [
+            "SRAM",
+            "SRAM2",
+            "SRAM3"
+          ],
+          "practice_task": "对比三块 RAM 的数据位宽(10/21/10)与各自在数据流中的位置，解释 ram2 为什么需要 21 位而 ram3 只需 10 位。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "ADC 接口与 AD9215 时钟分频",
+          "order": 3,
+          "filename": "u2-l3-adc-interface-and-clock-divider.md",
+          "level": "intermediate",
+          "topic": "讲解 VHDL 的 read_adc(custom_adc_ad9215) 模块如何生成 ADC 时钟、控制 power-down、并以 10 位并行总线读取 AD9215 数据。",
+          "learning_goals": [
+            "读懂 VHDL 进程与 generic 参数 M 实现的时钟分频",
+            "理解 adc_enable/adc_pwdn/clk_adc 控制信号",
+            "理解 AD9215 10 位并行数据如何进入 FPGA"
+          ],
+          "source_files": [
+            "vhdl files/custom_adc_ad9215.vhd",
+            "vhdl files/defs.vhd",
+            "verilog files/TOP.v"
+          ],
+          "minimal_modules": [
+            "read_adc",
+            "defs 包"
+          ],
+          "practice_task": "阅读 custom_adc_ad9215.vhd，说明 generic M=2 时 clk_adc 相对输入 clk 的分频关系，并指出 adc_read[9:0] 10 位数据如何映射到 TOP 的 adc_read 端口。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "二进制偏移与二进制补码转换",
+          "order": 4,
+          "filename": "u2-l4-binary-offset-to-twos-complement.md",
+          "level": "intermediate",
+          "topic": "讲解 decoder + MUX_converter 如何把 ADC 的二进制偏移(binary offset)编码转成 FFT 需要的二进制补码(two's complement)，以及 MUX 的复用逻辑。",
+          "learning_goals": [
+            "理解二进制偏移编码与二进制补码的差异",
+            "读懂 decoder 利用最高位做符号、用 MUX_converter 做条件取反的逻辑",
+            "理解为什么 FFT 核需要带符号补码输入"
+          ],
+          "source_files": [
+            "verilog files/decoder.v",
+            "verilog files/MUX_converter.v",
+            "verilog files/MUX.v"
+          ],
+          "minimal_modules": [
+            "decoder",
+            "MUX_converter",
+            "MUX"
+          ],
+          "practice_task": "对一个 ADC 读数(如 10'b1_100000000)，手动用 decoder/MUX_converter 的规则算出转换后的补码值，并画出符号位翻转的逻辑。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：FFT 与幅度计算信号链",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "FFT 核封装与握手时序",
+          "order": 1,
+          "filename": "u3-l1-fft-core-wrapper-and-handshake.md",
+          "level": "intermediate",
+          "topic": "讲解 Fourier 模块如何封装 Xilinx FFT IP，及其 start/rfd/done/edone/dv 握手时序与 scale_sch 缩放。",
+          "learning_goals": [
+            "理解 Fourier 对 Xilinx FFT IP(fft)的封装与端口映射",
+            "理解加载(rfd/xn_index)与卸载(dv/xk_index)握手",
+            "理解 scale_sch 缩放系数 12'b001010101011 的作用"
+          ],
+          "source_files": [
+            "verilog files/Fourier.v",
+            "verilog files/TOP.v"
+          ],
+          "minimal_modules": [
+            "Fourier (FFT 核封装)"
+          ],
+          "practice_task": "在 TOP.v 中找出 fft_state 到 fft_write_state 的转换条件(edone/index_out)，描述一次 FFT 从 start 到 done 的完整握手过程。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "幅度平方与求和",
+          "order": 2,
+          "filename": "u3-l2-magnitude-square-and-sum.md",
+          "level": "intermediate",
+          "topic": "讲解 Square(乘法 IP)与 Sum(加法 IP)如何把 FFT 输出的实部/虚部算成 re²+im²。",
+          "learning_goals": [
+            "理解 Square 对 Xilinx 乘法器 IP(mult)的封装与 10×10→20 位位宽扩展",
+            "理解 Sum 加法器 20+20→21 位",
+            "理解 re²+im² 的组合逻辑链与 ram2 写入"
+          ],
+          "source_files": [
+            "verilog files/Square.v",
+            "verilog files/Sum.v",
+            "verilog files/TOP.v"
+          ],
+          "minimal_modules": [
+            "Square (乘法器封装)",
+            "Sum (加法器封装)"
+          ],
+          "practice_task": "追踪 FFT 输出 xk_re/xk_im(各 10 位)经两个 Square 与一个 Sum 后变成 21 位 sum 写入 ram2 的路径，解释位宽从 10 扩展到 21 的原因。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "开方与流水线时序",
+          "order": 3,
+          "filename": "u3-l3-square-root-and-pipeline-timing.md",
+          "level": "intermediate",
+          "topic": "讲解 Root_square(Radical) 模块封装 Xilinx CORDIC 开方 IP，及其 8 拍流水线延迟与 sclr/rdy 握手。",
+          "learning_goals": [
+            "理解 Root_square 对开方 IP(Root)的封装",
+            "理解 20 位输入→11 位输出与 8 拍延迟",
+            "理解 TOP 中 square_state1~5 五个状态如何配合流水线节拍与 rdy 标志"
+          ],
+          "source_files": [
+            "verilog files/Radical.v",
+            "verilog files/TOP.v"
+          ],
+          "minimal_modules": [
+            "Root_square (开方封装)"
+          ],
+          "practice_task": "阅读 TOP.v 中 square_state/square_state2~5 这组状态，画出从 ram2 读出→开方→写 ram3 的逐拍时序，标注 sqr_rdy 何时拉高。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "信号处理链整体串联",
+          "order": 4,
+          "filename": "u3-l4-dsp-chain-end-to-end.md",
+          "level": "intermediate",
+          "topic": "以一个采样帧为例，完整走一遍 ram1→FFT→平方求和→ram2→开方→ram3 的处理链，串联前几讲的模块与时序。",
+          "learning_goals": [
+            "把 FFT/平方求和/开方三段串成完整幅度谱计算链",
+            "理解三块 RAM 在链中作为级间缓冲的作用",
+            "能解释为什么开方放在最后、幅度谱存入 ram3"
+          ],
+          "source_files": [
+            "verilog files/TOP.v",
+            "verilog files/Fourier.v",
+            "verilog files/Square.v",
+            "verilog files/Sum.v",
+            "verilog files/Radical.v"
+          ],
+          "minimal_modules": [
+            "整条 DSP 信号链"
+          ],
+          "practice_task": "写一段时序叙述:一帧 2048 点从 acq_state 采集完成，到 ram3 存满幅度谱，中间依次经过哪些模块、各耗时多少拍(待确认部分标注)。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "进阶：UART 通信",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "UART 接收机",
+          "order": 1,
+          "filename": "u4-l1-uart-receiver.md",
+          "level": "intermediate",
+          "topic": "讲解 VHDL serial_rx 的 s_waiting/s_start/s_bit/s_stop 状态机，以及 16×过采样的 rs_tick 波特率节拍。",
+          "learning_goals": [
+            "读懂 UART 帧格式(起始位/8 数据位/停止位)",
+            "理解 rs_tick 由 generic M 分频产生波特率采样节拍",
+            "理解 d_avail/d_out 握手如何把一个字节交给 TOP"
+          ],
+          "source_files": [
+            "vhdl files/serial_rx.vhd",
+            "verilog files/TOP.v"
+          ],
+          "minimal_modules": [
+            "serial_rx"
+          ],
+          "practice_task": "计算 clk_UART=50MHz、M=2 时 rs_tick 的频率与对应波特率(待确认)，并说明 serial_rx 如何用 counter=15 实现 16×过采样的中点对齐。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "UART 发射机",
+          "order": 2,
+          "filename": "u4-l2-uart-transmitter.md",
+          "level": "intermediate",
+          "topic": "讲解 serialt 控制器如何把 16 位 status 拆成高低两字节，调用 serial_tx 逐位串行发送，以及 tx_busy/start/counter 握手。",
+          "learning_goals": [
+            "理解 serialt 用 counter 把 16 位数据分两次发给 serial_tx",
+            "读懂 serial_tx 的 s_waiting_i/s_start/s_bit/s_stop/s_stop2 状态机",
+            "理解 tx_busy 忙信号与两字节切换"
+          ],
+          "source_files": [
+            "vhdl files/serialt.vhd",
+            "vhdl files/serial_tx.vhd",
+            "verilog files/TOP.v"
+          ],
+          "minimal_modules": [
+            "serialt (发送控制器)",
+            "serial_tx (字节发送 FSM)"
+          ],
+          "practice_task": "追踪 TOP 中 aggregated[15:0] 一个值经 serialt→serial_tx 发出的全过程:counter 如何切换高/低字节，每个字节经历哪些状态位。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "专家：TOP 编排与三态机",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "主采集状态机与命令协议",
+          "order": 1,
+          "filename": "u5-l1-main-fsm-and-command-protocol.md",
+          "level": "advanced",
+          "topic": "讲解 TOP 主状态机 init/wait/trig/acq/fft/fft_write/square/send 等状态，以及 wait_state 里 P/A/B/C/D 命令协议的解析。",
+          "learning_goals": [
+            "读懂 TOP 主 FSM 的状态参数与转移条件",
+            "理解 PC 通过串口字符(P 触发采集、A 时基、B 触发电平、C 斜率、D 增益)的配置协议",
+            "理解 conf_index 两步式命令解析"
+          ],
+          "source_files": [
+            "verilog files/TOP.v"
+          ],
+          "minimal_modules": [
+            "TOP 主状态机 (state)",
+            "命令协议解析"
+          ],
+          "practice_task": "列出主 FSM 的全部状态及其跳转条件，并用一张表说明收到 A/B/C/D/P 后系统分别进入什么行为、是否需要再收一个字节。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "触发与斜率子状态机",
+          "order": 2,
+          "filename": "u5-l2-trigger-and-slope-subfsm.md",
+          "level": "advanced",
+          "topic": "讲解 clock_adc_out 域下的 state2(s1~s4) 子状态机:它同时负责把采样写入 ram1、计算相邻样本斜率 slope、并按 timebase 分频寻址。",
+          "learning_goals": [
+            "理解 state2 在 ADC 时钟域独立运行、与主 FSM 解耦",
+            "理解 trig1/trig2/slope 的边沿触发判别",
+            "理解 divider+Transcoder(out_trans)实现可变时基采样间隔"
+          ],
+          "source_files": [
+            "verilog files/TOP.v",
+            "verilog files/Transcodor.v"
+          ],
+          "minimal_modules": [
+            "ADC 采集子 FSM (state2)",
+            "触发/斜率判别"
+          ],
+          "practice_task": "解释 trig_state 如何用 slope 与 slope_adj 判定上升/下降沿触发，以及 trigger_counter 超时后强制采集的作用;标注 state2 中 ADR 写地址如何随 out_trans 分频递增。",
+          "depends_on": [
+            "u5-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "发送打包子状态机与 LED 调试",
+          "order": 3,
+          "filename": "u5-l3-tx-packing-subfsm-and-leds.md",
+          "level": "advanced",
+          "topic": "讲解 posedge start 触发的 state3 子状态机如何给波形数据加 F/T 帧头字节，以及 always(state) 驱动的 LED 调试指示。",
+          "learning_goals": [
+            "理解 state3 在 send/final/send2 之间如何用 s3_1~s3_4 插入帧头并把 buffer(波形)/data_send(谱)装入 aggregated",
+            "理解 cnt/cnt_waveform 寻址",
+            "理解 LED 状态指示的调试用途"
+          ],
+          "source_files": [
+            "verilog files/TOP.v"
+          ],
+          "minimal_modules": [
+            "发送打包子 FSM (state3)",
+            "LED 调试指示"
+          ],
+          "practice_task": "还原一帧上行数据的字节顺序(帧头 + 波形样本 + 谱样本)，说明 state3 如何在波形与 FFT 数据之间切换并保持同步。",
+          "depends_on": [
+            "u5-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "专家：集成、硬件与扩展",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "混合语言集成与 Xilinx IP",
+          "order": 1,
+          "filename": "u6-l1-mixed-language-and-xilinx-ip.md",
+          "level": "advanced",
+          "topic": "讲解 Verilog 顶层如何例化 VHDL 模块(serial_rx/serialt/read_adc)与 Xilinx IP 核(fft/mult/adder/Root/pll)，以及 defs/aux 包的作用。",
+          "learning_goals": [
+            "理解 Vivado 下 Verilog+VHDL 混合语言工程的模块例化与命名约定",
+            "识别哪些模块是 Xilinx IP 的薄封装(Fourier/Square/Sum/Root_square/pll_loop)",
+            "理解 defs 包(slv8array)与 aux 包(ASCII 转换)的用途，及 aux 实际未在 TOP 中使用"
+          ],
+          "source_files": [
+            "verilog files/TOP.v",
+            "verilog files/Fourier.v",
+            "verilog files/Radical.v",
+            "vhdl files/defs.vhd",
+            "vhdl files/aux_vlad.vhd"
+          ],
+          "minimal_modules": [
+            "混合语言例化",
+            "Xilinx IP 封装层",
+            "defs/aux 包"
+          ],
+          "practice_task": "把 TOP 例化的所有模块分成三类:本工程自研 Verilog、自研 VHDL、Xilinx IP 封装，并列出每个 IP 封装模块背后调用的 IP 原语名(fft/mult/adder/Root/pll)。",
+          "depends_on": [
+            "u1-l3",
+            "u3-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "PC 命令协议与 LabVIEW GUI 集成",
+          "order": 2,
+          "filename": "u6-l2-pc-protocol-and-labview-gui.md",
+          "level": "advanced",
+          "topic": "站在系统层面讲解 FPGA 串口命令协议(P/A/B/C/D)与上行帧(F/T 头+数据)如何对应到上位机 LabVIEW GUI(nexys_serial_XUP.vi)的显示。",
+          "learning_goals": [
+            "理解上位机→FPGA 的控制字符协议与 FPGA→上位机的数据帧格式",
+            "理解 LabVIEW GUI 通过串口收发并绘制波形/频谱的角色",
+            ".vi 为二进制工程文件，具体实现待确认"
+          ],
+          "source_files": [
+            "verilog files/TOP.v",
+            "readme.md",
+            "LabView GUI/nexys_serial_XUP.vi"
+          ],
+          "minimal_modules": [
+            "串口命令/帧协议",
+            "LabVIEW 上位机(二进制,待确认)"
+          ],
+          "practice_task": "根据协议设计一份上位机测试脚本(伪代码即可):依次发送 P 触发采集、用 A+字节切换时基、接收并按 F/T 帧头解析波形与频谱。",
+          "depends_on": [
+            "u5-l1",
+            "u5-l3",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "硬件前端与多板系统",
+          "order": 3,
+          "filename": "u6-l3-hardware-front-end-and-multiboard.md",
+          "level": "advanced",
+          "topic": "讲解 Electronic boards design 下的四块 PCB(示波器板/心率板/MCP2200 USB 板/电源板)与模拟前端、adj 增益调节、AD9215 的关系。",
+          "learning_goals": [
+            "理解系统由多块 PCB + Nexys FPGA 组成",
+            "理解 TOP 的 adj[2:0] 输出如何控制模拟前端放大/衰减",
+            "理解 MCP2200 提供 USB↔串口、电源板供电;.PcbDoc/.SchDoc 为 Altium 二进制,细节待确认"
+          ],
+          "source_files": [
+            "readme.md",
+            "verilog files/TOP.v"
+          ],
+          "minimal_modules": [
+            "多板系统组成",
+            "adj 模拟前端控制"
+          ],
+          "practice_task": "阅读 readme.md 与 TOP.v 的端口(adj/adc_read/serial_in/serial_out)，画出从传感器→模拟前端板→ADC→FPGA→MCP2200→PC 的硬件信号通路。",
+          "depends_on": [
+            "u1-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "扩展实践与改进方向",
+          "order": 4,
+          "filename": "u6-l4-extensions-and-improvements.md",
+          "level": "advanced",
+          "topic": "综合评估项目局限(固定 1024 点 FFT、单通道、开方 8 拍延迟、UART 带宽)，并讨论心率/GSR 功能与可扩展点。",
+          "learning_goals": [
+            "识别当前 HDL 实现的局限与可优化点",
+            "理解心率(体积描记)/皮电(GSR)功能主要在模拟前端而非 HDL",
+            "能提出 1~2 个扩展方向(多通道、更高波特率、流水线优化)"
+          ],
+          "source_files": [
+            "verilog files/TOP.v",
+            "readme.md"
+          ],
+          "minimal_modules": [
+            "局限与优化评估",
+            "心率/GSR 功能定位"
+          ],
+          "practice_task": "写一份改进提案(300 字以内):选择一个方向(如把开方改成全流水线、或增加第二路 ADC 通道)，说明要改动哪些模块与状态。",
+          "depends_on": [
+            "u5-l1",
+            "u6-l1",
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
