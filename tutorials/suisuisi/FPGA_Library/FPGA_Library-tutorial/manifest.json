@@ -1,0 +1,1102 @@
+{
+  "project": "FPGA_Library",
+  "head": "1e33525198872d63ced48e8f0cebaa2419b9eb22",
+  "rationale": "本仓库 suisuisi/FPGA_Library（又名 Xilinx_Library）是一个 FPGA 设计示例的聚合仓库，横跨三大领域：自研 HDL（AES 加密核心，封装为 AXI IP）、HLS 高层综合（2D 中值滤波）、以及第三方合集（projf-explore 教程库、ISO/IEC 18033-3 标准分组密码、hardwarebee 与 digilent IP）。学习路线按「先认识仓库 → 读最完整的自研 HDL → 理解 IP 封装与软硬协同 → 切换到 HLS 范式 → 学习 projf 可复用 Verilog 库 → 进阶图形/显示 → 进阶数学运算 → 拓展第三方资源」的顺序设计。Unit 1 帮助读者从零认识项目定位、目录与 Vivado 工作流；Unit 2-3 深入最有教学价值的 AES 核心（数据通路 + AXI 封装），是全手册主线；Unit 4 引入完全不同的 HLS 设计范式；Unit 5-7 系统学习 projf-explore 这座「迷你 FPGA 大学」（基础库 → 图形/显示 → 数学运算），由易到难；Unit 8 作为拓展，导览第三方密码/IO/Demo 资源并做综合实践。讲义按逻辑拆分，每篇聚焦一个独立主题并配可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "仓库总览与 FPGA 开发入门",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与 FPGA 库定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 suisuisi/FPGA_Library 是什么、收录了哪些 FPGA 设计、面向什么读者，以及它在 Xilinx/Vivado 生态中的定位。",
+          "learning_goals": [
+            "说出仓库的总体定位与三大组成部分（HDL/HLS/ThreePart）",
+            "了解仓库收录的设计类型（加密、图像处理、图形、数学、IO 外设）",
+            "理解 FPGA、HDL、IP、HLS 等基本概念的关系"
+          ],
+          "source_files": [
+            "README.md",
+            "HLS/2D-median-filter-algorithm-HLS/README.md",
+            "ThreePart/projf-explore/README.md",
+            "ThreePart/ISOIEC18033-3StandardBlock/README.md"
+          ],
+          "minimal_modules": [
+            "仓库根 README",
+            "各子项目 README"
+          ],
+          "practice_task": "浏览仓库根目录与三个顶层目录（HDL/HLS/ThreePart），用一句话分别概括每个顶层目录的作用，并写出你认为最适合作为入门的子项目及理由。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与模块地图",
+          "order": 2,
+          "filename": "u1-l2-directory-map.md",
+          "level": "beginner",
+          "topic": "逐层拆解仓库目录结构，建立整体地图：HDL 下的 AES 核心、HLS 下的中值滤波、ThreePart 下的 projf-explore / ISO 密码 / hardwarebee / digilent IP。",
+          "learning_goals": [
+            "绘制仓库三层目录结构图",
+            "定位 AES 核心、HLS 滤波、projf 库等关键源码位置",
+            "区分自研源码与第三方合集"
+          ],
+          "source_files": [
+            "README.md",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/readme.md",
+            "ThreePart/projf-explore/lib/README.md",
+            "ThreePart/digilent_ip/README.md",
+            "ThreePart/hardwarebee/README.md"
+          ],
+          "minimal_modules": [
+            "顶层目录划分",
+            "各子项目目录组织"
+          ],
+          "practice_task": "为仓库制作一张模块地图（树状图或表格），标注每个主要子项目的路径、语言/范式、用途和许可证来源。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "Vivado 工程模板与版本化工作流",
+          "order": 3,
+          "filename": "u1-l3-vivado-project-template.md",
+          "level": "beginner",
+          "topic": "讲解 AES 核心随附的 Vivado 工程模板：如何用 create_project.tcl 重建工程、Save/(Re)Load 工作流、以及哪些文件纳入版本控制。",
+          "learning_goals": [
+            "理解 Vivado 工程最小化版本控制的思想（参考 Xilinx UG892）",
+            "掌握用 create_project.tcl 重建工程、用 cleanup 脚本清理的流程",
+            "知道 src/proj/repo/sdk/hw_handoff 各目录的作用"
+          ],
+          "source_files": [
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/readme.md",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/proj/create_project.tcl",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/proj/cleanup.sh",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/proj/cleanup.cmd"
+          ],
+          "minimal_modules": [
+            "create_project.tcl",
+            "cleanup 脚本",
+            "工程目录约定"
+          ],
+          "practice_task": "阅读 create_project.tcl，写出它依次执行的关键步骤；然后尝试在本机用 Vivado Tcl 控制台 source 该脚本重建工程（或画出重建流程图）。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "AES 加密核心数据通路",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Verilog 基础与 AES 顶层架构",
+          "order": 1,
+          "filename": "u2-l1-aes-top-architecture.md",
+          "level": "beginner",
+          "topic": "通过 aes_top.v 学习 Verilog 基础语法，并理解 AES-128 加解密的轮函数数据通路与顶层模块如何串联各变换。",
+          "learning_goals": [
+            "掌握 Verilog 模块、端口、wire/reg、参数化宏定义等基础语法",
+            "理解 AES-128 的 10 轮结构与 AddRoundKey/SubBytes/ShiftRows/MixColumns 顺序",
+            "看懂 aes_top.v 中加密/解密的多路选择与轮计数逻辑"
+          ],
+          "source_files": [
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/src/aes_top.v",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/src/aes_include.v",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/utils/aes_types.v"
+          ],
+          "minimal_modules": [
+            "aes_top",
+            "aes_include（宏定义）"
+          ],
+          "practice_task": "画出 aes_top.v 的数据通路框图，标明 text_in/key 输入、各寄存级（reg_data_in_lvl/reg_sub_byte_lvl/reg_mix_col_lvl）、轮计数器与 4 个 MixColumns 实例的数据流向。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "SubBytes 与 ShiftRows：字节替换与行移位",
+          "order": 2,
+          "filename": "u2-l2-aes-subbytes-shiftrows.md",
+          "level": "intermediate",
+          "topic": "讲解 AES 的 SubBytes（S-Box 字节替换）与 ShiftRows（行移位）两个字节级变换的 Verilog 实现，含加密/解密复用。",
+          "learning_goals": [
+            "理解 S-Box 在加/解密中分别做正向/逆向替换",
+            "看懂 aes_sbox128.v 如何对 16 字节并行替换",
+            "理解 ShiftRows 的行循环移位方向与加/解密差异"
+          ],
+          "source_files": [
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/src/aes_sub_byte.v",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/src/aes_s_box.v",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/src/aes_sbox128.v",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/src/aes_shift_rows.v"
+          ],
+          "minimal_modules": [
+            "aes_sub_byte",
+            "aes_sbox128",
+            "aes_shift_rows"
+          ],
+          "practice_task": "给定一段 128 位状态和一个 encrypt 选择信号，手算并验证 aes_sbox128 与 aes_shift_rows 的输出（可用标准 AES S-Box 表对照）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "MixColumns 与 GF(2^8) 乘法运算",
+          "order": 3,
+          "filename": "u2-l3-aes-mixcolumns-gf.md",
+          "level": "intermediate",
+          "topic": "讲解 MixColumns 列混淆的数学原理：在伽罗瓦域 GF(2^8) 上做矩阵乘法，以及 Verilog 中 xtime（×2）等运算的实现。",
+          "learning_goals": [
+            "理解 GF(2^8) 上的多项式运算与不可约多项式",
+            "看懂 MixColumns 固定矩阵乘法在硬件上的展开实现",
+            "理解 x_times.v / x_time_square.v 如何实现乘 2 与约简"
+          ],
+          "source_files": [
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/src/aes_mix_columns.v",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/utils/aes_mix_columns_mul.v",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/utils/x_times.v",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/utils/x_time_square.v"
+          ],
+          "minimal_modules": [
+            "MixColumns",
+            "aes_mix_columns_mul",
+            "x_times"
+          ],
+          "practice_task": "实现一个 GF(2^8) 乘法的小函数（C 或 Python），对照 aes_mix_columns_mul 的逻辑，验证 MixColumns 对一列 (0xdb,0x13,0x53,0x45) 的输出。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "密钥扩展 Key Schedule",
+          "order": 4,
+          "filename": "u2-l4-aes-key-schedule.md",
+          "level": "intermediate",
+          "topic": "讲解 AES-128 的轮密钥扩展：W0..W3 字的递推、function_g（RotWord/SubWord/Rcon）以及轮常数的作用。",
+          "learning_goals": [
+            "理解 AES 密钥扩展中 4 个 32 位字 W0~W3 的异或递推关系",
+            "看懂 function_g 中 RotWord、SubWord 与 Rcon 的组合",
+            "理解加密/解密共用同一密钥扩展流程"
+          ],
+          "source_files": [
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/src/aes_key_schedule.v",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/utils/aes_function_g.v",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/utils/aes_round_constants.v"
+          ],
+          "minimal_modules": [
+            "key_schedule",
+            "function_g",
+            "aes_round_constants"
+          ],
+          "practice_task": "以一个 128 位密钥为输入，手动推出前 2 轮的轮密钥（W4~W11），并对照 aes_key_schedule.v 与 function_g 的逻辑验证结果一致。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "S-Box 的复合域 GF(2^4) 高效实现",
+          "order": 5,
+          "filename": "u2-l5-aes-sbox-composite-field.md",
+          "level": "advanced",
+          "topic": "讲解如何用复合域 GF((2^4)^2) 运算高效实现 S-Box（求逆 + 仿射变换），而非使用查表，从而节省面积、抗侧信道。",
+          "learning_goals": [
+            "理解为什么用复合域实现 S-Box 而非纯查表",
+            "看懂 gf_inv/gf_mul/gf_scl 系列模块如何递归构造 GF(2^8) 求逆",
+            "理解平方、标量乘等子运算在 gf_s_box 中的层次组合"
+          ],
+          "source_files": [
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/gf_s_box/gf_inv_8.v",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/gf_s_box/gf_inv_4.v",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/gf_s_box/gf_mul_4.v",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/gf_s_box/gf_scl_4.v",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/src/aes_s_box.v",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/tb/tb_s_box.v"
+          ],
+          "minimal_modules": [
+            "gf_inv_8 / gf_inv_4",
+            "gf_mul_4",
+            "gf_scl_4",
+            "aes_s_box"
+          ],
+          "practice_task": "梳理 gf_s_box 目录下各模块的调用层次（gf_inv_8 调用 gf_inv_4/gf_mul_4/gf_scl_4…），画出 GF(2^8) 求逆的递归分解树，并说明每个 gf_* 模块对应的数学运算。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "AXI-Lite IP 封装与软硬件协同",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Vivado 自定义 IP 结构与打包流程",
+          "order": 1,
+          "filename": "u3-l1-vivado-ip-structure.md",
+          "level": "intermediate",
+          "topic": "讲解如何把 AES 核心封装成 Vivado 自定义 IP：component.xml 描述、顶层包装、IP 目录（ip_repo）结构与 XGUI 参数化。",
+          "learning_goals": [
+            "理解 Vivado 自定义 IP 的 ip_repo 目录结构（hdl/drivers/xgui/component.xml）",
+            "看懂 component.xml 如何声明 IP 版本、接口与文件",
+            "理解顶层 AesCryptoCore_v1_0.v 如何包装用户逻辑并暴露 AXI 接口"
+          ],
+          "source_files": [
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/ip_repo/AesCryptoCore_1.0/component.xml",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/ip_repo/AesCryptoCore_1.0/hdl/AesCryptoCore_v1_0.v",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/ip_repo/AesCryptoCore_1.0/xgui/AesCryptoCore_v1_0.tcl"
+          ],
+          "minimal_modules": [
+            "component.xml",
+            "AesCryptoCore_v1_0（顶层包装）",
+            "xgui tcl"
+          ],
+          "practice_task": "阅读 component.xml，列出该 IP 声明的所有源文件、总线接口与版本号；然后说明 AesCryptoCore_v1_0.v 中例化了哪两个 AXI 子模块。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "AXI4-Lite 从机接口实现",
+          "order": 2,
+          "filename": "u3-l2-axi-lite-slave.md",
+          "level": "intermediate",
+          "topic": "深入 AXI4-Lite 从机模块 AesCryptoCore_v1_0_S00_AXI.v：五个通道（AW/W/B/AR/R）握手、寄存器读写与用户逻辑接入点。",
+          "learning_goals": [
+            "理解 AXI4-Lite 五个通道的握手时序与 valid/ready 信号",
+            "看懂 S00_AXI 模块如何把寄存器读写映射到地址",
+            "识别 \"Add user logic here\" 接入点，理解如何挂接 AES 核心"
+          ],
+          "source_files": [
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/ip_repo/AesCryptoCore_1.0/hdl/AesCryptoCore_v1_0_S00_AXI.v",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/ip_repo/AesCryptoCore_1.0/hdl/AesCryptoCore_v1_0.v"
+          ],
+          "minimal_modules": [
+            "AesCryptoCore_v1_0_S00_AXI",
+            "AXI4-Lite 通道握手",
+            "寄存器映射"
+          ],
+          "practice_task": "在 AesCryptoCore_v1_0_S00_AXI.v 中定位 slv_reg0~3 的读写逻辑，画出一次 32 位寄存器写事务（AW+W+B）和读事务（AR+R）的时序波形图。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "AXI 中断接口与寄存器映射",
+          "order": 3,
+          "filename": "u3-l3-axi-interrupt.md",
+          "level": "intermediate",
+          "topic": "讲解 AXI 中断从机 S_AXI_INTR：中断使能/挂起/确认寄存器、irq 输出，以及如何把 AES 运算完成事件通知处理器。",
+          "learning_goals": [
+            "理解 AXI 中断接口的寄存器（IPIER/IPIER/GIE/ISR/IAR）",
+            "看懂 irq 信号如何由挂起与使能逻辑产生",
+            "理解中断触发敏感度（电平/边沿）参数"
+          ],
+          "source_files": [
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/ip_repo/AesCryptoCore_1.0/hdl/AesCryptoCore_v1_0_S_AXI_INTR.v",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/ip_repo/AesCryptoCore_1.0/hdl/AesCryptoCore_v1_0.v"
+          ],
+          "minimal_modules": [
+            "AesCryptoCore_v1_0_S_AXI_INTR",
+            "中断寄存器组",
+            "irq 生成"
+          ],
+          "practice_task": "梳理 S_AXI_INTR 模块中的中断使能、挂起与确认寄存器，画出从 \"用户逻辑拉高中断源\" 到 \"处理器读 ISR 并写 IAR 清除\" 的完整时序。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "软件驱动与自检程序",
+          "order": 4,
+          "filename": "u3-l4-software-driver.md",
+          "level": "intermediate",
+          "topic": "讲解 Vivado 自动生成的裸机 C 驱动：寄存器访问 API、自检程序 selftest，以及如何在处理器侧控制 AES IP。",
+          "learning_goals": [
+            "理解驱动头文件中的寄存器基地址与读写宏",
+            "看懂 selftest 程序如何验证寄存器读写正常",
+            "掌握在 SDK/Vitis 中调用驱动控制 IP 的基本范式"
+          ],
+          "source_files": [
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/ip_repo/AesCryptoCore_1.0/drivers/AesCryptoCore_v1_0/src/AesCryptoCore.h",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/ip_repo/AesCryptoCore_1.0/drivers/AesCryptoCore_v1_0/src/AesCryptoCore.c",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/ip_repo/AesCryptoCore_1.0/drivers/AesCryptoCore_v1_0/src/AesCryptoCore_selftest.c",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/ip_repo/AesCryptoCore_1.0/drivers/AesCryptoCore_v1_0/src/Makefile"
+          ],
+          "minimal_modules": [
+            "AesCryptoCore.h/.c",
+            "AesCryptoCore_selftest.c"
+          ],
+          "practice_task": "基于驱动 API 写一段伪代码：初始化 AES IP、写入密钥与明文、触发加密、等待中断/轮询完成、读回密文。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "仿真验证与 SystemVerilog 验证环境",
+          "order": 5,
+          "filename": "u3-l5-simulation-verification.md",
+          "level": "intermediate",
+          "topic": "讲解 AES 核心的验证方法：单元级 Verilog testbench（tb 目录）与基于 SystemVerilog 的验证环境（VE_sv 目录，含类、接口、覆盖率）。",
+          "learning_goals": [
+            "看懂 gf 系列与 s_box 的单元 testbench 如何施加激励与比对",
+            "理解 VE_sv 中 class/env/interface 的 OOP 验证结构",
+            "理解 AlreadyComputed 等模块在功能覆盖率中的作用"
+          ],
+          "source_files": [
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/tb/tb_s_box.v",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/tb/tb_gf_inv_8.v",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/VE_sv/ve_AES_env.sv",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/VE_sv/ve_AES_Core.sv",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/VE_sv/ve_AES_interface.sv",
+            "HDL/AesCryptoCore_1.0/PROJECT/Vivado_project/hdl/VE_sv/test_program.sv"
+          ],
+          "minimal_modules": [
+            "tb_s_box / tb_gf_inv_8",
+            "ve_AES_env",
+            "ve_AES_interface",
+            "test_program"
+          ],
+          "practice_task": "用 Icarus/Verilator 或 Vivado 仿真器运行 tb_s_box.v，观察波形并确认 S-Box 输出正确；总结 VE_sv 环境中 test_program 如何驱动 ve_AES_env。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "HLS 高层综合与图像处理",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "HLS 概念与 Vivado HLS 工作流",
+          "order": 1,
+          "filename": "u4-l1-hls-workflow.md",
+          "level": "intermediate",
+          "topic": "介绍高层综合（HLS）的概念、C 仿真→综合→协同仿真的工作流，以及本项目中值滤波的工程文件组织。",
+          "learning_goals": [
+            "理解 HLS 把 C/C++ 综合成 RTL 的基本流程",
+            "看懂 Vivado HLS 工程文件（vivado_hls.app）与测试激励组织",
+            "理解 C 仿真、综合、协同仿真三阶段的目的"
+          ],
+          "source_files": [
+            "HLS/2D-median-filter-algorithm-HLS/README.md",
+            "HLS/2D-median-filter-algorithm-HLS/vivado_hls.app",
+            "HLS/2D-median-filter-algorithm-HLS/main_test.c",
+            "HLS/2D-median-filter-algorithm-HLS/MedianFilter.h"
+          ],
+          "minimal_modules": [
+            "vivado_hls.app",
+            "main_test.c",
+            "MedianFilter.h"
+          ],
+          "practice_task": "阅读 README 与 main_test.c，写出该 HLS 项目的性能目标（时延、资源占比），并描述从 C 仿真到协同仿真的完整步骤。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "2D 中值滤波 C 算法实现",
+          "order": 2,
+          "filename": "u4-l2-median-filter-c.md",
+          "level": "intermediate",
+          "topic": "逐函数讲解 MedianFilter.c：零填充、3×3 滑窗、排序取中值，以及数组类型定义在硬件综合中的含义。",
+          "learning_goals": [
+            "理解 2D 中值滤波的算法步骤（pad → 滑窗 → 排序 → 取中值）",
+            "看懂 ZeroPad/Window_and_Sort/Sort 三个函数的协作",
+            "理解固定尺寸数组与 typedef 在 HLS 综合中如何变成 RAM/寄存器"
+          ],
+          "source_files": [
+            "HLS/2D-median-filter-algorithm-HLS/MedianFilter.c",
+            "HLS/2D-median-filter-algorithm-HLS/MedianFilter.h"
+          ],
+          "minimal_modules": [
+            "TwoD_MedianFilter",
+            "ZeroPad",
+            "Window_and_Sort",
+            "Sort"
+          ],
+          "practice_task": "在本地用 gcc 编译 MedianFilter.c + main_test.c 运行 C 仿真（用 noisy.csv 作为输入），观察去噪效果；记录对一个 3×3 窗口取中值的过程。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "HLS 优化与资源/时延权衡",
+          "order": 3,
+          "filename": "u4-l3-hls-optimization.md",
+          "level": "advanced",
+          "topic": "讲解如何用任意精度数据类型、循环 pragma（pipeline/unroll/array_partition）等手段优化中值滤波，在时延与资源间权衡。",
+          "learning_goals": [
+            "理解 uint8 等任意精度类型如何节省资源",
+            "看懂代码中的循环标号（如 Sort_label2）如何作为 pragma 锚点",
+            "掌握 pipeline/unroll/array_partition 对时延与资源的影响"
+          ],
+          "source_files": [
+            "HLS/2D-median-filter-algorithm-HLS/MedianFilter.c",
+            "HLS/2D-median-filter-algorithm-HLS/MedianFilter.h",
+            "HLS/2D-median-filter-algorithm-HLS/README.md"
+          ],
+          "minimal_modules": [
+            "循环标号与 pragma",
+            "任意精度类型",
+            "资源/时延报告解读"
+          ],
+          "practice_task": "为 Window_and_Sort 的内层循环添加 PIPELINE pragma，预测并对比优化前后的估计时延与 BRAM/DSP 资源变化（可参考 README 中 13% 资源、12ms 的目标）。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "projf-explore Verilog 库基础模块",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Verilog 库总览与 SystemVerilog 风格",
+          "order": 1,
+          "filename": "u5-l1-verilog-library-overview.md",
+          "level": "beginner",
+          "topic": "导览 Project F 的 Verilog 库（projf-explore/lib）：七个分区（clock/display/essential/graphics/maths/memory/uart）及其 SystemVerilog 风格与厂商中立思想。",
+          "learning_goals": [
+            "了解 projf 库的分区与各自职责",
+            "理解 logic/always_comb/always_ff/$clog2/enum 等 SystemVerilog 特性的好处",
+            "理解对 XC7 与 iCE40 两种 FPGA 架构的厂商中立支持"
+          ],
+          "source_files": [
+            "ThreePart/projf-explore/lib/README.md",
+            "ThreePart/projf-explore/README.md",
+            "ThreePart/projf-explore/lib/maths/div.sv",
+            "ThreePart/projf-explore/lib/essential/debounce.sv"
+          ],
+          "minimal_modules": [
+            "lib 分区",
+            "SystemVerilog 子集",
+            "厂商中立"
+          ],
+          "practice_task": "浏览 lib 下七个目录，制作一张表：目录名 / 职责 / 代表模块 / 依赖的厂商原语（如 BUFG、SB_IO）。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "时钟生成与跨时钟域同步器",
+          "order": 2,
+          "filename": "u5-l2-clock-domain-crossing.md",
+          "level": "intermediate",
+          "topic": "讲解 projf clock 模块：用 PLL（MMCME2_BASE/SB_PLL40_PAD）生成像素时钟，以及跨时钟域的同步器（xd.sv）。",
+          "learning_goals": [
+            "理解 PLL/MMCM 生成多路时钟的基本原理",
+            "看懂 xd.sv 跨时钟域同步器的打两拍结构",
+            "理解亚稳态与同步器降低 MTBF 的作用"
+          ],
+          "source_files": [
+            "ThreePart/projf-explore/lib/clock/xd.sv",
+            "ThreePart/projf-explore/lib/clock/README.md"
+          ],
+          "minimal_modules": [
+            "xd（同步器）",
+            "PLL 原语"
+          ],
+          "practice_task": "阅读 xd.sv，画出两级触发器同步器结构；解释为什么单级触发器在跨时钟域时不安全。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "存储器：ROM/RAM 与 BRAM 推断",
+          "order": 3,
+          "filename": "u5-l3-memory-rom-ram-bram.md",
+          "level": "intermediate",
+          "topic": "讲解 projf memory 模块：同步/异步 ROM、简单双口 BRAM（bram_sdp），以及如何写出可被综合工具推断为 Block RAM 的代码。",
+          "learning_goals": [
+            "理解 rom_sync 与 rom_async 的区别与时序",
+            "看懂 bram_sdp 的读/写口与寄存器输出结构",
+            "掌握让综合工具推断 BRAM 的代码写法"
+          ],
+          "source_files": [
+            "ThreePart/projf-explore/lib/memory/bram_sdp.sv",
+            "ThreePart/projf-explore/lib/memory/rom_sync.sv",
+            "ThreePart/projf-explore/lib/memory/rom_async.sv",
+            "ThreePart/projf-explore/lib/memory/README.md"
+          ],
+          "minimal_modules": [
+            "bram_sdp",
+            "rom_sync",
+            "rom_async"
+          ],
+          "practice_task": "写一个小 testbench 对 bram_sdp 写入若干数据再读回，观察读延迟；并用综合工具查看其是否被推断为 Block RAM。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "UART 串口收发",
+          "order": 4,
+          "filename": "u5-l4-uart-tx-rx.md",
+          "level": "intermediate",
+          "topic": "讲解 projf uart 模块：波特率发生器（uart_baud）、发送器（uart_tx）与接收器（uart_rx）的有限状态机与起始位/停止位采样。",
+          "learning_goals": [
+            "理解 UART 帧格式（起始位、数据位、停止位）",
+            "看懂 uart_tx 按比特移位输出的状态机",
+            "理解 uart_rx 用过采样定位比特中央的机制"
+          ],
+          "source_files": [
+            "ThreePart/projf-explore/lib/uart/uart_tx.sv",
+            "ThreePart/projf-explore/lib/uart/uart_rx.sv",
+            "ThreePart/projf-explore/lib/uart/uart_baud.sv",
+            "ThreePart/projf-explore/lib/uart/README.md"
+          ],
+          "minimal_modules": [
+            "uart_tx",
+            "uart_rx",
+            "uart_baud"
+          ],
+          "practice_task": "用 uart_tx 向 PC 发送一个字符（如 'A'），用逻辑分析仪或仿真观察起始位/8 数据位/停止位时序；计算给定时钟与波特率的分频系数。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "基础模块：消抖与公用逻辑",
+          "order": 5,
+          "filename": "u5-l5-essential-debounce.md",
+          "level": "intermediate",
+          "topic": "以 essential/debounce.sv 为例讲解按键消抖，并扩展讨论 essential 区其他公用模块的设计思路。",
+          "learning_goals": [
+            "理解机械按键抖动现象与消抖必要性",
+            "看懂 debounce.sv 用计数器稳定信号的同步+计时结构",
+            "掌握可复用公用模块的参数化设计"
+          ],
+          "source_files": [
+            "ThreePart/projf-explore/lib/essential/debounce.sv",
+            "ThreePart/projf-explore/lib/essential/README.md"
+          ],
+          "minimal_modules": [
+            "debounce",
+            "同步+计数消抖"
+          ],
+          "practice_task": "为 debounce.sv 写一个 testbench，模拟带抖动的按键输入，验证输出只在信号稳定若干毫秒后才翻转。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "FPGA 图形与显示系统",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "显示时序与 VGA/720p 信号生成",
+          "order": 1,
+          "filename": "u6-l1-display-timing.md",
+          "level": "intermediate",
+          "topic": "讲解 projf display 模块如何生成显示时序：行/场同步、消隐期、有效区，以 480p/720p 为例产生同步与坐标信号。",
+          "learning_goals": [
+            "理解显示时序中的 active/sync/front-porch/back-porch",
+            "看懂 simple_480p/720p 模块如何产生 hs/vs 与 sx/sy 坐标",
+            "理解像素时钟频率与时序参数的关系"
+          ],
+          "source_files": [
+            "ThreePart/projf-explore/lib/display/display_480p.sv",
+            "ThreePart/projf-explore/lib/display/display_720p.sv",
+            "ThreePart/projf-explore/lib/display/display_24x18.sv",
+            "ThreePart/projf-explore/lib/display/README.md"
+          ],
+          "minimal_modules": [
+            "display_480p",
+            "display_720p",
+            "显示时序参数"
+          ],
+          "practice_task": "阅读 display_480p.sv，列出 800×600@60Hz（或其使用的时序）的 ACTIVE/SYNC/FP/BP 参数，画出在一行内 sync 与 active 信号的时间关系。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "DVI/HDMI 输出与 TMDS 编码",
+          "order": 2,
+          "filename": "u6-l2-dvi-hdmi-tmds.md",
+          "level": "advanced",
+          "topic": "讲解如何用 TMDS 编码（tmds_encoder_dvi）与差分原语（OBUFDS/OSERDES 或 SB_IO）在 FPGA 上输出 DVI/HDMI 视频。",
+          "learning_goals": [
+            "理解 TMDS 8b/10b 编码与直流平衡原理",
+            "看懂 tmds_encoder_dvi 对像素与控制信号的编码",
+            "理解 XC7（OSERDES2/OBUFDS）与 iCE40（SB_IO）的差分输出实现差异"
+          ],
+          "source_files": [
+            "ThreePart/projf-explore/lib/display/tmds_encoder_dvi.sv",
+            "ThreePart/projf-explore/lib/display/README.md"
+          ],
+          "minimal_modules": [
+            "tmds_encoder_dvi",
+            "差分原语",
+            "DVI/HDMI 信号链"
+          ],
+          "practice_task": "梳理 TMDS 编码器对一个 8 位像素的编码流程（异或/异或非选择、计数器直流平衡、控制字符），解释为什么需要 10 位传输。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "绘图原语：线与几何形状",
+          "order": 3,
+          "filename": "u6-l3-graphics-primitives.md",
+          "level": "intermediate",
+          "topic": "讲解 projf graphics 模块的绘图原语：直线（Bresenham）、三角形、矩形、圆的填充与轮廓算法。",
+          "learning_goals": [
+            "理解 draw_line 用 Bresenham 算法画无乘法直线",
+            "看懂 draw_rectangle/draw_triangle/draw_circle 的填充判断",
+            "理解 \"绘制即比较坐标、命中则置色\" 的硬件绘图思想"
+          ],
+          "source_files": [
+            "ThreePart/projf-explore/lib/graphics/draw_line.sv",
+            "ThreePart/projf-explore/lib/graphics/draw_rectangle_fill.sv",
+            "ThreePart/projf-explore/lib/graphics/draw_triangle_fill.sv",
+            "ThreePart/projf-explore/lib/graphics/draw_circle.sv",
+            "ThreePart/projf-explore/lib/graphics/README.md"
+          ],
+          "minimal_modules": [
+            "draw_line",
+            "draw_rectangle_fill",
+            "draw_circle"
+          ],
+          "practice_task": "用 draw_line.sv 的 Bresenham 逻辑手算从 (0,0) 到 (5,3) 的像素序列；再用 draw_circle 解释圆轮廓的 x²+y²≤r² 比较如何工作。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "帧缓冲与硬件精灵",
+          "order": 4,
+          "filename": "u6-l4-framebuffer-sprites.md",
+          "level": "advanced",
+          "topic": "讲解两种主流图像生成方式：基于 BRAM 的帧缓冲（framebuffers 示例）与硬件精灵叠加（hardware-sprites 的 sprite_rom/sprite_inline）。",
+          "learning_goals": [
+            "理解帧缓冲如何在每帧把像素写入/读出 BRAM",
+            "看懂精灵（sprite）如何按坐标叠加到背景",
+            "理解 linebuffer 在精灵/帧缓冲中的作用"
+          ],
+          "source_files": [
+            "ThreePart/projf-explore/graphics/framebuffers/xc7/top_david_mono.sv",
+            "ThreePart/projf-explore/graphics/framebuffers/README.md",
+            "ThreePart/projf-explore/graphics/hardware-sprites/sprite.sv",
+            "ThreePart/projf-explore/graphics/hardware-sprites/sprite_rom.sv",
+            "ThreePart/projf-explore/graphics/hardware-sprites/README.md"
+          ],
+          "minimal_modules": [
+            "framebuffer (BRAM)",
+            "sprite / sprite_rom",
+            "linebuffer"
+          ],
+          "practice_task": "对比帧缓冲与硬件精灵两种方案：分别画出数据流，并说明各自适合的场景（全屏位图 vs 少量可移动图形）。",
+          "depends_on": [
+            "u6-l1",
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "FPGA Pong 完整实战",
+          "order": 5,
+          "filename": "u6-l5-fpga-pong.md",
+          "level": "advanced",
+          "topic": "以 FPGA Pong 为综合案例，串联显示时序、绘图、碰撞检测与计分，展示一个完整硬件游戏的实现。",
+          "learning_goals": [
+            "理解如何用 simple_480p/720p + 比较坐标绘制球拍与球",
+            "看懂碰撞检测与球速更新的组合/时序逻辑",
+            "理解 simple_score 如何用字形 ROM 显示分数"
+          ],
+          "source_files": [
+            "ThreePart/projf-explore/graphics/pong/simple_480p.sv",
+            "ThreePart/projf-explore/graphics/pong/simple_720p.sv",
+            "ThreePart/projf-explore/graphics/pong/simple_score.sv",
+            "ThreePart/projf-explore/graphics/pong/README.md"
+          ],
+          "minimal_modules": [
+            "simple_480p/720p",
+            "simple_score",
+            "碰撞与运动逻辑"
+          ],
+          "practice_task": "在开发板上运行 Pong（或仿真 top），定位控制球拍移动、球反弹与计分加一的三段逻辑，并尝试修改球速或球拍大小。",
+          "depends_on": [
+            "u6-l3",
+            "u6-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l6",
+          "title": "Hello 示例：从零点亮开发板",
+          "order": 6,
+          "filename": "u6-l6-hello-blink-board.md",
+          "level": "beginner",
+          "topic": "以 projf hello-arty/hello-nexys 三部曲为最易上手入口，讲解 LED 闪烁、开关读取到首个显示输出的完整流程。",
+          "learning_goals": [
+            "理解最简单的 top 模块如何驱动 LED 与读开关",
+            "掌握约束文件（xdc）与引脚绑定的作用",
+            "完成从源码到上板 bitstream 的第一次完整流程"
+          ],
+          "source_files": [
+            "ThreePart/projf-explore/hello/hello-arty/README.md",
+            "ThreePart/projf-explore/hello/hello-arty/A/top.sv",
+            "ThreePart/projf-explore/hello/hello-arty/B/top.sv",
+            "ThreePart/projf-explore/hello/hello-arty/C/top.sv",
+            "ThreePart/projf-explore/hello/hello-nexys/README.md"
+          ],
+          "minimal_modules": [
+            "top (A/B/C)",
+            "LED/开关",
+            "xdc 约束"
+          ],
+          "practice_task": "选择 Arty 或 Nexys，跟随 README 的三部曲，让 LED 闪烁并读开关控制 LED，完成你的第一次 FPGA 上板实验。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "FPGA 数学运算",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "Verilog 数的表示与定点数",
+          "order": 1,
+          "filename": "u7-l1-number-representation.md",
+          "level": "intermediate",
+          "topic": "讲解 Verilog 中的数：有符号/无符号、位宽、定点数（整数位+小数位）表示法，以及为何 FPGA 常用定点而非浮点。",
+          "learning_goals": [
+            "理解 signed/unsigned 与位宽截断/扩展",
+            "理解定点数 Q 格式（WIDTH 与 FBITS）的含义",
+            "看懂 projf maths 模块中参数化定点数的约定"
+          ],
+          "source_files": [
+            "ThreePart/projf-explore/lib/maths/README.md",
+            "ThreePart/projf-explore/lib/maths/div.sv",
+            "ThreePart/projf-explore/lib/maths/mul.sv"
+          ],
+          "minimal_modules": [
+            "定点数 Q 格式",
+            "signed 语义",
+            "WIDTH/FBITS 参数"
+          ],
+          "practice_task": "用 WIDTH=8/FBITS=4 表示 +1.5 与 -2.25，写出其二进制补码；并说明两个定点数相加/相乘时小数位如何对齐。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "有符号定点除法器",
+          "order": 2,
+          "filename": "u7-l2-signed-division.md",
+          "level": "advanced",
+          "topic": "深入 projf div.sv：恢复余数法迭代、符号处理、高斯舍入与溢出/除零检测的完整状态机。",
+          "learning_goals": [
+            "理解 div.sv 中 INIT/CALC/ROUND/SIGN 状态机",
+            "看懂迭代式除法的累加器与商位移逻辑",
+            "理解高斯舍入与符号修正如何得到最终商"
+          ],
+          "source_files": [
+            "ThreePart/projf-explore/lib/maths/div.sv",
+            "ThreePart/projf-explore/lib/maths/divu.sv",
+            "ThreePart/projf-explore/lib/maths/divu_int.sv"
+          ],
+          "minimal_modules": [
+            "div（状态机）",
+            "divu",
+            "舍入与符号修正"
+          ],
+          "practice_task": "跟踪 div.sv 计算 (+1.5)/(-0.5) 的全过程：列出每拍的 acc、quo、state，验证最终商与符号是否正确。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "平方根与 DSP 乘法",
+          "order": 3,
+          "filename": "u7-l3-sqrt-multiply.md",
+          "level": "advanced",
+          "topic": "讲解 projf 的整数/定点平方根（sqrt/sqrt_int）迭代算法，以及高效乘法 mul.sv 如何利用 FPGA DSP 单元。",
+          "learning_goals": [
+            "理解逐位求平方根的迭代原理",
+            "看懂 sqrt 与 sqrt_int 在定点/整数上的差异",
+            "理解 signed 乘法如何映射到 DSP48 并保证符号正确"
+          ],
+          "source_files": [
+            "ThreePart/projf-explore/lib/maths/sqrt.sv",
+            "ThreePart/projf-explore/lib/maths/sqrt_int.sv",
+            "ThreePart/projf-explore/lib/maths/mul.sv",
+            "ThreePart/projf-explore/lib/maths/README.md"
+          ],
+          "minimal_modules": [
+            "sqrt / sqrt_int",
+            "mul (DSP)",
+            "迭代求根"
+          ],
+          "practice_task": "为 sqrt_int.sv 写一个 testbench，对若干输入求整数平方根并验证；用综合报告确认 mul.sv 被映射到 DSP 单元而非 LUT。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "LFSR 伪随机与正弦查找表",
+          "order": 4,
+          "filename": "u7-l4-lfsr-sine-table.md",
+          "level": "intermediate",
+          "topic": "讲解 projf 的 LFSR 伪随机数发生器（斐索/伽罗瓦反馈）与正弦查找表（sine_table）的设计。",
+          "learning_goals": [
+            "理解 LFSR 的反馈多项式与最大周期（m 序列）",
+            "看懂 lfsr.sv 的参数化与抽头选择",
+            "理解 sine_table 如何用 ROM 存储四分之一周期正弦样本"
+          ],
+          "source_files": [
+            "ThreePart/projf-explore/lib/maths/lfsr.sv",
+            "ThreePart/projf-explore/lib/maths/sine_table.sv",
+            "ThreePart/projf-explore/lib/maths/README.md"
+          ],
+          "minimal_modules": [
+            "lfsr",
+            "sine_table",
+            "反馈多项式"
+          ],
+          "practice_task": "选一个 16 位 LFSR 抽头多项式，仿真若干拍验证其伪随机输出；再用 sine_table 生成一段正弦波形并观察。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l5",
+          "title": "Mandelbrot 集与数学 demo",
+          "order": 5,
+          "filename": "u7-l5-mandelbrot-maths-demo.md",
+          "level": "advanced",
+          "topic": "以 Mandelbrot 集 demo 为综合案例，串联定点数、复数迭代（z=z²+c）、逃逸时间染色，展示数学算法的硬件化。",
+          "learning_goals": [
+            "理解 Mandelbrot 集的 z=z²+c 迭代与逃逸时间",
+            "看懂 mandelbrot.sv 用定点复数实现的迭代核心",
+            "理解如何把逃逸迭代次数映射为颜色并逐像素渲染"
+          ],
+          "source_files": [
+            "ThreePart/projf-explore/demos/mandelbrot/mandelbrot.sv",
+            "ThreePart/projf-explore/demos/mandelbrot/render_mandel.sv",
+            "ThreePart/projf-explore/demos/mandelbrot/README.md",
+            "ThreePart/projf-explore/maths/demo/README.md"
+          ],
+          "minimal_modules": [
+            "mandelbrot（迭代核心）",
+            "render_mandel",
+            "复数定点运算"
+          ],
+          "practice_task": "梳理 mandelbrot.sv 的迭代核心：标出复数乘法、模长平方比较与最大迭代次数判断；说明如何放大某一区域（修改坐标范围）。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "第三方 IP 资源与综合实践",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "ISO/IEC 18033-3 标准分组密码",
+          "order": 1,
+          "filename": "u8-l1-iso-block-ciphers.md",
+          "level": "intermediate",
+          "topic": "导览 ISO/IEC 18033-3 标准分组密码 HDL 合集（东北大学学术核心），与自研 AES 核心做设计风格对比。",
+          "learning_goals": [
+            "了解 ISO/IEC 18033-3 收录的算法（AES/Camellia/SEED 等）",
+            "理解学术密码核心的来源、引用方式与 zip 分发形式",
+            "对比学术核心与自研 AES 核心在接口/风格上的差异"
+          ],
+          "source_files": [
+            "ThreePart/ISOIEC18033-3StandardBlock/README.md"
+          ],
+          "minimal_modules": [
+            "ISO/IEC 18033-3 算法集",
+            "学术核心来源",
+            "待确认：zip 内具体文件"
+          ],
+          "practice_task": "解压 JWIS2007.zip 浏览其目录结构，记录其中包含的密码算法与顶层模块名；与 Unit 2 的 AES 核心对比接口风格（数据/密钥/控制信号）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "hardwarebee 开源 IP 集合导览",
+          "order": 2,
+          "filename": "u8-l2-hardwarebee-ip.md",
+          "level": "intermediate",
+          "topic": "导览 hardwarebee 收录的杂项开源 IP：浮点乘法器、CIC/DDS、SPI 从机、数字钟、七段译码等（含 VHDL 片段与 zip 工程）。",
+          "learning_goals": [
+            "了解 hardwarebee 目录收录的 IP 类型",
+            "通过 axi.vhd.txt/spi_slave.vhd/fm.vhd 等片段了解常见外设 IP",
+            "理解 zip 形式工程与裸 VHDL 片段的差异"
+          ],
+          "source_files": [
+            "ThreePart/hardwarebee/README.md",
+            "ThreePart/hardwarebee/spi_slave.vhd",
+            "ThreePart/hardwarebee/fm.vhd",
+            "ThreePart/hardwarebee/square_root.vhd.txt",
+            "ThreePart/hardwarebee/seven_segment.vhd.txt"
+          ],
+          "minimal_modules": [
+            "SPI 从机",
+            "数字钟/七段译码",
+            "浮点乘法器/CIC/DDS（zip）"
+          ],
+          "practice_task": "选择 spi_slave.vhd 或 seven_segment.vhd.txt，阅读并说明其模块功能、端口与工作原理；列出 hardwarebee 中你最感兴趣的 3 个 zip 工程及理由。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "Digilent Pmod IP 库使用",
+          "order": 3,
+          "filename": "u8-l3-digilent-pmod.md",
+          "level": "intermediate",
+          "topic": "讲解 Digilent Vivado IP 库（digilent_ip）的安装与使用：如何加入 IP Catalog、Pmod 外设 IP 的结构，以及与 AXI 接口的衔接。",
+          "learning_goals": [
+            "掌握把 digilent_ip 加入 Vivado IP Catalog 的两种方式",
+            "了解 Pmod 系列 IP（OLED/NAV/GPS/KYPD 等）的用途",
+            "理解 Pmod IP 如何通过 AXI/接口与处理器交互"
+          ],
+          "source_files": [
+            "ThreePart/digilent_ip/README.md",
+            "ThreePart/digilent_ip/ip/Pmods/PmodOLED_v1_0/README.md",
+            "ThreePart/digilent_ip/ip/Pmods/PmodKYPD_v1_0/README.md",
+            "ThreePart/digilent_ip/ip/Pmods/PmodNAV_v1_0/README.md"
+          ],
+          "minimal_modules": [
+            "IP Catalog 安装",
+            "Pmod 外设 IP",
+            "AXI 衔接"
+          ],
+          "practice_task": "选一个 Pmod（如 PmodOLED 或 PmodKYPD），阅读其 README，写出：它是什么外设、需要哪些物理引脚、以及如何在 Vivado 块设计中把它连到处理器。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "Demos 综合分析：生命游戏与视觉特效",
+          "order": 4,
+          "filename": "u8-l4-demos-analysis.md",
+          "level": "advanced",
+          "topic": "综合分析 projf demos：Conway 生命游戏（life-on-screen）、星空/精灵（ad-astra）、正弦滚动（sinescroll）、彩条（rasterbars），看它们如何复用 lib 库搭建。",
+          "learning_goals": [
+            "理解 life.sv 如何用二维网格与邻域计数实现元胞自动机",
+            "看懂 starfield/sprite 如何实现滚动与精灵绘制",
+            "总结 demos 对 lib（display/graphics/maths/memory）的复用模式"
+          ],
+          "source_files": [
+            "ThreePart/projf-explore/demos/life-on-screen/life.sv",
+            "ThreePart/projf-explore/demos/life-on-screen/xc7/top_life.sv",
+            "ThreePart/projf-explore/demos/ad-astra/starfield.sv",
+            "ThreePart/projf-explore/demos/sinescroll/render_sinescroll.sv",
+            "ThreePart/projf-explore/demos/life-on-screen/README.md",
+            "ThreePart/projf-explore/demos/ad-astra/README.md"
+          ],
+          "minimal_modules": [
+            "life（元胞自动机）",
+            "starfield",
+            "render_sinescroll",
+            "top_life"
+          ],
+          "practice_task": "选 life-on-screen 或 ad-astra：梳理其 top 模块如何复用 lib 中的 display/graphics/memory 模块，画出实例化层次图，并说明如果要把分辨率从 480p 改成 720p 需要改动哪些地方。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

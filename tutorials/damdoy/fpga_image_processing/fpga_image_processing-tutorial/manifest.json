@@ -1,0 +1,749 @@
+{
+  "project": "fpga_image_processing",
+  "head": "b1d7480cd804e53a53af48e95850bbf61088f40f",
+  "rationale": "本项目是一个用 Verilog 在低端 FPGA（iCE40 UltraPlus）上实现图像处理的系统，核心难点在于「硬件状态机 + 命令协议 + 双后端（Verilator 仿真 / iCE40 硬件）」。因此学习路线按「先看清全貌与运行方式 → 理解主机侧抽象与命令协议 → 深入核心 HDL 模块与存储模型 → 逐类剖析各类运算的状态机实现 → 攻克最复杂的 3x3 卷积 → 拆解仿真与硬件两条后端的软硬件实现 → 综合实践」的顺序展开。第 1 单元让读者从零认识项目、目录与两种运行方式；第 2 单元建立「抽象接口 + 命令报文」这一贯穿全项目的契约；第 3 单元进入核心 image_processing.v 的端口、双缓冲存储与主状态机；第 4 单元按运算类型（逐像素/定点/双图）拆解处理状态机；第 5 单元单独攻克卷积（行缓冲流水线，全项目最复杂的部分）；第 6 单元分别讲解 Verilator 仿真后端与 iCE40 硬件后端（顶层、SPI 从机、FTDI 主机软件）；第 7 单元做端到端总结与扩展实践。依赖关系严格遵循「先有抽象契约，再讲实现」的原则，保证每篇讲义只解决一个独立主题，并结合真实源码与可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识项目：定位、目录与运行方式",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：用 Verilog 在 FPGA 上做图像处理",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍项目定位：一个用 Verilog 实现简单图像处理（加减、阈值、卷积等）的硬件模块，目标平台是低功耗低成本的 iCE40 UltraPlus FPGA，同时提供 Verilator 仿真与真实硬件两种运行形态。",
+          "learning_goals": [
+            "理解项目要解决的核心问题：在资源受限的 FPGA 上做图像处理",
+            "掌握「核心 HDL 模块 + 仿真/硬件双后端」的整体架构思想",
+            "了解项目支持的操作类别（逐像素、双图、卷积）与双缓冲模型"
+          ],
+          "source_files": [
+            "README.md",
+            "software/main.cpp"
+          ],
+          "minimal_modules": [
+            "项目定位与目标平台",
+            "双后端架构（仿真 / 硬件）",
+            "支持的图像操作清单",
+            "双缓冲（input / storage）模型概览"
+          ],
+          "practice_task": "阅读 README 的 Architecture 章节与命令表，画出「主机软件 → image_processing.hpp 抽象层 → 仿真后端/硬件后端 → 核心 HDL 模块」的数据流框图，并用自己的话写出该项目为什么选择在 FPGA 而非 CPU 上做图像处理。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与文件分工",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "level": "beginner",
+          "topic": "讲解仓库目录组织：hdl/ 放核心模块，simulation/ 与 ice40/ 分别放仿真与硬件两套后端，software/ 放主机程序与抽象接口及测试图像。",
+          "learning_goals": [
+            "记住项目目录的三段式划分（核心 HDL / 仿真 / 硬件）",
+            "能说出每个关键文件归属于哪个子系统",
+            "理解为什么仿真和硬件代码被物理隔离在不同目录"
+          ],
+          "source_files": [
+            "README.md",
+            "software/main.cpp",
+            "software/image_processing.hpp"
+          ],
+          "minimal_modules": [
+            "hdl 核心模块目录",
+            "simulation 仿真后端目录",
+            "ice40 硬件后端目录",
+            "software 主机程序与图像资源目录"
+          ],
+          "practice_task": "使用 git ls-files 列出全部文件，制作一张表格，把每个源码文件归类到「核心 HDL / 仿真后端 / 硬件后端 / 主机软件 / 资源与脚本」其中之一，并标注它会被哪个 build 脚本编译。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建并运行：Verilator 仿真模式",
+          "order": 3,
+          "filename": "u1-l3-build-run-simulation.md",
+          "level": "beginner",
+          "topic": "讲解如何用 build_simulation.sh 调用 Verilator 把 image_processing.v 编译成 C++ 仿真模型，再运行 simu 生成 output.dat，并用 run_gnuplot.sh 以灰度图查看结果。",
+          "learning_goals": [
+            "掌握 Verilator 将 Verilog 编译为 C++ 模型的基本流程",
+            "理解 -DSIMULATION 宏如何切换后端",
+            "能用 gnuplot 把数值输出可视化为图像"
+          ],
+          "source_files": [
+            "build_simulation.sh",
+            "run_gnuplot.sh",
+            "software/main.cpp"
+          ],
+          "minimal_modules": [
+            "verilator 编译命令",
+            "obj_dir 与 Vimage_processing 生成物",
+            "SIMULATION 宏开关",
+            "output.dat 与 gnuplot 可视化"
+          ],
+          "practice_task": "在本地（或阅读脚本）走查 build_simulation.sh 的两条命令，说明 verilator --exe 把哪几个 .cpp 与 .v 连在一起、make 阶段用 -DSIMULATION 做了什么，然后解释 run_gnuplot.sh 中 set yrange [] reverse 与 set cbrange [0:255] 分别为什么能让矩阵数据正确显示为灰度图。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "构建并运行：iCE40 硬件模式",
+          "order": 4,
+          "filename": "u1-l4-build-run-ice40.md",
+          "level": "beginner",
+          "topic": "讲解硬件模式的工具链：在 ice40/hdl 用 yosys+arachne-pnr+icepack 生成比特流、iceprog 烧录，再用 build_ice40.sh 编译主机软件 soft_ice40 通过 FTDI 与 FPGA 通信。",
+          "learning_goals": [
+            "了解 iCE40 开发流程（综合→布局布线→打包→烧录）",
+            "理解 ice40 模式下主机软件与 FPGA 通过 SPI 通信",
+            "区分 iceprog -S（SRAM）与 prog_flash（FLASH）两种烧录"
+          ],
+          "source_files": [
+            "ice40/hdl/Makefile",
+            "build_ice40.sh",
+            "ice40/hdl/io.pcf"
+          ],
+          "minimal_modules": [
+            "yosys 综合与 synth_ice40",
+            "arachne-pnr 布局布线 (-d 5k -P sg48)",
+            "icepack 与 iceprog",
+            "io.pcf 引脚约束"
+          ],
+          "practice_task": "阅读 Makefile 与 io.pcf，说明 LED_R/LED_G/LED_B、clk 以及 SPI 四根信号线分别绑定到哪个引脚，并解释 build_ice40.sh 中 -DICE40 宏如何让 main.cpp 选择 Image_processing_ice40 后端、为什么链接时需要 -lftdi。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "主机程序入口与测试流程",
+          "order": 5,
+          "filename": "u1-l5-host-main-flow.md",
+          "level": "beginner",
+          "topic": "讲解 software/main.cpp 的整体流程：读取 .h 图像、用 #ifdef 选择后端、调用一串 test_* 函数完成 send_params→send_image→运算→read_image→写 output.dat 的典型链路。",
+          "learning_goals": [
+            "掌握主机程序的端到端调用顺序",
+            "理解 .h 图像如何被解析成灰度像素数组",
+            "看清 send_params/send_image/read_image/wait_end_busy 等接口如何串起一次完整运算"
+          ],
+          "source_files": [
+            "software/main.cpp",
+            "software/images/image_fruits_8.h"
+          ],
+          "minimal_modules": [
+            "main 主流程",
+            "图像 .h 解析（HEADER_PIXEL 宏）",
+            "test_* 测试函数集合",
+            "output.dat 输出格式"
+          ],
+          "practice_task": "以 test_add_threshold 为例，逐步列出它对 img_proc 发出的接口调用序列（send_params→send_image→switch_buffers→send_add→wait_end_busy→send_threshold→switch_buffers→read_image），并说明每一步对应硬件侧发生了什么（设置尺寸 / 载入图像 / 切换缓冲 / 执行加法 / 等待完成）。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "命令接口与主机软件抽象",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "抽象基类与命令枚举：贯穿全项目的契约",
+          "order": 1,
+          "filename": "u2-l1-abstract-interface.md",
+          "level": "intermediate",
+          "topic": "讲解 software/image_processing.hpp 定义的纯虚基类 Image_processing 与 Commands 枚举，它是仿真后端与硬件后端共同实现的统一接口，也是主机代码与底层解耦的关键。",
+          "learning_goals": [
+            "理解抽象基类如何让 main.cpp 用同一份代码驱动仿真和硬件",
+            "记住每个虚函数对应的硬件命令含义",
+            "看懂 Commands 枚举值与硬件侧 COMMAND_* 参数的对应关系"
+          ],
+          "source_files": [
+            "software/image_processing.hpp",
+            "software/main.cpp"
+          ],
+          "minimal_modules": [
+            "Image_processing 纯虚接口",
+            "Commands 枚举",
+            "image_width/image_height 受保护成员",
+            "多态后端选择（#ifdef）"
+          ],
+          "practice_task": "把 image_processing.hpp 中的全部纯虚函数列成一张表，每个函数标注：它发送哪个 COMMAND_*、参数含义、是否需要后续 wait_end_busy。再解释 send_clear 为什么被实现为「send_threshold(0, value, true)」的复用。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "命令协议与报文格式",
+          "order": 2,
+          "filename": "u2-l2-command-protocol.md",
+          "level": "intermediate",
+          "topic": "讲解「1 字节操作码 + 变长参数」的命令报文格式，参数用小端 16 位整数表示，并对照 simulation/ice40 两端如何把高层调用打包成字节流。",
+          "learning_goals": [
+            "掌握命令报文「opcode + 参数」的结构与小端字节序",
+            "理解参数位打包技巧（如 (absolute_diff<<1)+clamp）",
+            "能对照两套后端确认打包逻辑一致"
+          ],
+          "source_files": [
+            "software/image_processing.hpp",
+            "simulation/image_processing_simulation.cpp",
+            "ice40/software/image_processing_ice40.cpp"
+          ],
+          "minimal_modules": [
+            "命令操作码定义",
+            "16bit 小端参数编码",
+            "位打包（clamp/source/abs_diff/add_to_output）",
+            "卷积 3x3 矩阵的符号扩展"
+          ],
+          "practice_task": "以 send_binary_sub(true, true) 和 send_convolution(kernel, true, false, true) 为例，分别写出 simulation 后端与 ice40 后端实际压入/发送的字节序列，验证两者得到的参数字节完全一致。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "图像数据格式：从 GIMP .h 到灰度像素",
+          "order": 3,
+          "filename": "u2-l3-image-data-format.md",
+          "level": "intermediate",
+          "topic": "讲解 GIMP 导出的 C 头图像格式：RGB 像素被编码成可打印字符，HEADER_PIXEL 宏把它解包成 3 字节 RGB，主机只取一个通道作为灰度像素送入硬件。",
+          "learning_goals": [
+            "理解 .h 图像头里字符串化编码与 (data[i]-33) 解码原理",
+            "看清 HEADER_PIXEL 宏如何从 4 个字符解出 3 个 RGB 字节",
+            "明白主机为何只取 pixel[0] 作为单通道灰度值"
+          ],
+          "source_files": [
+            "software/images/image_fruits_8.h",
+            "software/main.cpp"
+          ],
+          "minimal_modules": [
+            "image_width/image_height 声明",
+            "header_data 字符串编码",
+            "HEADER_PIXEL 解包宏",
+            "RGB→单通道灰度取值"
+          ],
+          "practice_task": "阅读 HEADER_PIXEL 宏，推导它为什么每 4 个字符能解出 3 个字节（即 6 比特×4 = 24 比特 = 3 字节），并解释 main.cpp 中循环 image_width*image_height 次只保存 pixel[0] 的做法会把一幅 RGB 图降为单通道灰度图。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "核心 HDL 模块与存储模型",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "image_processing.v 的端口与两大接口",
+          "order": 1,
+          "filename": "u3-l1-hdl-module-ports.md",
+          "level": "intermediate",
+          "topic": "讲解核心模块 image_processing.v 的端口：时钟复位、存储器接口（addr/wr_en/rd_en/data_read/data_write，16 位字宽）、通信接口（comm_cmd/comm_data_in/out 及 valid/free 握手信号）。",
+          "learning_goals": [
+            "记住模块的两类端口：存储器接口与通信接口",
+            "理解 16 位存储字宽意味着每字存 2 个像素",
+            "看清 comm 侧 valid/free 握手时序"
+          ],
+          "source_files": [
+            "hdl/image_processing.v"
+          ],
+          "minimal_modules": [
+            "模块端口声明",
+            "存储器接口（16bit 字）",
+            "通信接口（cmd/data_in/data_out + 握手）",
+            "clk/reset"
+          ],
+          "practice_task": "画出 image_processing 模块的端口框图，把存储器接口和通信接口分别框出来，并标注每个信号的方向与位宽；再说明 data_read_valid 与 comm_data_out_free 这两个握手信号分别由谁置位、模块如何据此推进。",
+          "depends_on": [
+            "u1-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "双缓冲存储模型与 16 位像素打包",
+          "order": 2,
+          "filename": "u3-l2-double-buffer-memory.md",
+          "level": "intermediate",
+          "topic": "讲解 128KB 存储被切成两个 64KB 缓冲（input / storage），地址 buffer_input_address 与 buffer_storage_address 可通过 COMMAND_SWITCH_BUFFERS 互换，且每 16 位字打包 2 个像素以提升吞吐。",
+          "learning_goals": [
+            "理解 MEMORY_SIZE=128KB 与 BUFFER_SIZE/ BUFFER2_LOCATION 的划分",
+            "掌握 input/storage 双缓冲的用途与切换机制",
+            "看清 16 位字打包 2 像素如何影响地址递增（步长 2）"
+          ],
+          "source_files": [
+            "hdl/image_processing.v"
+          ],
+          "minimal_modules": [
+            "MEMORY_SIZE/BUFFER_SIZE/BUFFER2_LOCATION 参数",
+            "buffer_input_address/buffer_storage_address",
+            "COMMAND_SWITCH_BUFFERS 互换逻辑",
+            "16bit 打包与偶/奇地址处理"
+          ],
+          "practice_task": "说明 COMMAND_PARAM 命令为什么把 buffer_storage_address 初始化为 BUFFER2_LOCATION 而 buffer_input_address 初始化为 0；再追踪 STATE_SEND_IMG 中根据 memory_addr_counter[0] 把字节写入 data_write[7:0] 或 [15:8] 的逻辑，解释为什么必须两个字节凑齐才置 wr_en=1。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "主命令处理状态机：STATE_WAIT_COMMAND 派发",
+          "order": 3,
+          "filename": "u3-l3-command-fsm.md",
+          "level": "intermediate",
+          "topic": "讲解 image_processing.v 用 parameter 定义的命令与状态机：主 state（命令解析）与 state_processing（运算执行）两条并行 FSM，STATE_WAIT_COMMAND 根据 comm_cmd 派发到各读参数状态。",
+          "learning_goals": [
+            "理解两条并行状态机（命令解析 / 运算执行）的分工",
+            "掌握 COMMAND_* 参数与 state 的命名映射",
+            "看清命令如何触发 state_processing 进入运算态"
+          ],
+          "source_files": [
+            "hdl/image_processing.v"
+          ],
+          "minimal_modules": [
+            "state / state_processing 双 FSM",
+            "COMMAND_* parameter 枚举",
+            "STATE_WAIT_COMMAND 派发 case",
+            "processing_command 寄存器"
+          ],
+          "practice_task": "列出 STATE_WAIT_COMMAND 这一 case 中每个 COMMAND 分支跳转到的下一个 state，并说明 COMMAND_APPLY_ADD 这类运算命令是如何同时设置 state_processing<=STATE_PROC_UNARY 和 processing_command 的，从而让运算 FSM 接管。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "图像发送/接收与参数读取状态",
+          "order": 4,
+          "filename": "u3-l4-send-receive-states.md",
+          "level": "intermediate",
+          "topic": "讲解 STATE_SEND_IMG、STATE_READ_IMG、STATE_GET_STATUS 以及各 *_READ_PARAM 状态如何按字节计数器读取变长参数并把图像按 16 位字读写回存储。",
+          "learning_goals": [
+            "掌握 counter_read 计数器驱动的变长参数读取模式",
+            "理解 STATE_READ_IMG 中读存储→缓冲→逐字节输出的两级流水",
+            "看清 STATE_GET_STATUS 如何回传 4 字节且 bit0 表示 busy"
+          ],
+          "source_files": [
+            "hdl/image_processing.v"
+          ],
+          "minimal_modules": [
+            "counter_read 计数器",
+            "STATE_SEND_IMG / STATE_READ_IMG",
+            "mem_data_buffer 缓冲与 mem_data_buffer_full",
+            "STATE_GET_STATUS 与 busy 位"
+          ],
+          "practice_task": "追踪 STATE_READ_IMG 的完整时序：何时发起 rd_en、何时把 data_read 存入 mem_data_buffer、何时通过 comm_data_out 依次输出低/高字节，并解释为什么读地址 memory_addr_counter 只在输出高字节时才 +1。",
+          "depends_on": [
+            "u3-l3",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "处理运算的状态机实现",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "逐像素运算：STATE_PROC_UNARY",
+          "order": 1,
+          "filename": "u4-l1-unary-operations.md",
+          "level": "intermediate",
+          "topic": "讲解 STATE_PROC_UNARY 如何对 storage 缓冲做逐像素处理（add/threshold/invert/mult），利用 16 位字一次处理 2 个像素，并通过 processing_command 选择具体运算。",
+          "learning_goals": [
+            "掌握单端口 RAM 读取→运算→写回的两拍流水（奇偶地址切换）",
+            "理解 16 位字同时处理高低两个像素的并行技巧",
+            "看清 add/threshold/invert/mult 四种分支的运算差异"
+          ],
+          "source_files": [
+            "hdl/image_processing.v"
+          ],
+          "minimal_modules": [
+            "STATE_PROC_UNARY",
+            "proc_memory_addr_counter 奇偶切换",
+            "processing_command 分支",
+            "data_read→data_write 写回"
+          ],
+          "practice_task": "说明 STATE_PROC_UNARY 中为什么用 proc_memory_addr_counter[0] 区分「发起读」与「运算写回」两个阶段，并以 COMMAND_APPLY_INVERT 为例解释 data_write <= ~data_read 如何同时对两个像素求反。",
+          "depends_on": [
+            "u3-l3",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "定点数运算与钳位函数",
+          "order": 2,
+          "filename": "u4-l2-fixed-point-clamp.md",
+          "level": "intermediate",
+          "topic": "讲解项目用 8 位定点数（1 符号 + 3 整数 + 4 小数）表示实数，配合 apply_clamp 与 apply_clamp_fixed16 两个 function 做钳位与取整，主机侧 send_mult 把 float 转成定点字节。",
+          "learning_goals": [
+            "理解 1.3.4 定点格式（范围 -7.0~7.0，精度 1/16）",
+            "掌握 apply_clamp 与 apply_clamp_fixed16 的差异（后者取 [11:4] 做四舍五入）",
+            "看清主机 send_mult 如何把 float 量化为定点字节"
+          ],
+          "source_files": [
+            "hdl/image_processing.v",
+            "simulation/image_processing_simulation.cpp"
+          ],
+          "minimal_modules": [
+            "8bit 定点格式 (1.3.4)",
+            "apply_clamp function",
+            "apply_clamp_fixed16 function（取 [11:4]）",
+            "send_mult 的 float→定点量化循环"
+          ],
+          "practice_task": "解释 apply_clamp_fixed16 为何取 in[11:4] 等价于把 16 位定点乘积右移 4 位（即除以 16 还原小数）；再手算 send_mult(0.5f) 在主机侧得到的定点字节值，并验证它在硬件里会让像素乘以 0.5。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "双图运算：STATE_PROC_BINARY",
+          "order": 3,
+          "filename": "u4-l3-binary-operations.md",
+          "level": "intermediate",
+          "topic": "讲解 STATE_PROC_BINARY 如何同时读 input 与 storage 两个缓冲做 add/sub/mult 并写回 storage，包含 binary_read_buffer 两步读取与 operation_step 两拍运算的时序处理。",
+          "learning_goals": [
+            "掌握从两个缓冲分别读取像素再写回的多拍时序",
+            "理解 binary_read_buffer 标志位与 operation_step 的作用",
+            "看清 binary_sub 中 absolute_diff 取绝对差的实现"
+          ],
+          "source_files": [
+            "hdl/image_processing.v"
+          ],
+          "minimal_modules": [
+            "STATE_PROC_BINARY",
+            "binary_read_buffer 两步读",
+            "operation_step 两拍运算",
+            "absolute_diff 绝对差"
+          ],
+          "practice_task": "说明 STATE_PROC_BINARY 为什么要先用 binary_read_buffer 读 storage、再读 input（注释提到写回时序约束），并解释 operation_step 把运算拆成两拍（先算低字节 [7:0] 再算高字节 [15:8]）的原因；追踪 COMMAND_BINARY_SUB 在 absolute_diff=1 时如何把负结果取反。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "3x3 卷积引擎",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "卷积原理与卷积状态机总览",
+          "order": 1,
+          "filename": "u5-l1-convolution-overview.md",
+          "level": "advanced",
+          "topic": "讲解 3x3 卷积在硬件中的总体设计：source_input/add_to_result/clamp 三个参数位的含义、卷积核的定点格式、以及 PROC_CONVOLUTION→CALCULATION→WRITEBACK 三段状态机的职责分工。",
+          "learning_goals": [
+            "理解卷积参数位（clamp/source_input/add_to_result）的作用",
+            "掌握卷积三段状态机的总体流水（读→算→写回）",
+            "看清 add_to_result 如何支持边缘检测的多核累加"
+          ],
+          "source_files": [
+            "hdl/image_processing.v",
+            "software/main.cpp"
+          ],
+          "minimal_modules": [
+            "STATE_CONVOLUTION_READ_PARAM 参数解析",
+            "STATE_PROC_CONVOLUTION（读+预取）",
+            "STATE_PROC_CONVOLUTION_CALCULATION（9 拍累加）",
+            "WRITEBACK_1/2（行缓冲写回）"
+          ],
+          "practice_task": "阅读 STATE_CONVOLUTION_READ_PARAM，说明 9 个 kernel 字节如何被符号扩展存入 convolution_matrix[0..8]，并解释 convolution_source_input 如何决定读地址是 buffer_input_address 还是 buffer_storage_address、convolution_add_to_result 又如何在写回时把卷积结果叠加到原 storage 内容上。",
+          "depends_on": [
+            "u4-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "行缓冲与卷积计算流水线",
+          "order": 2,
+          "filename": "u5-l2-convolution-line-buffer.md",
+          "level": "advanced",
+          "topic": "深入讲解卷积的行缓冲（convolution_buffer 双行 + convolution_previous_read）如何凑出 3x3 邻域、读地址与写地址的偏移、边界像素置 0、以及 CALCULATION 用 matrix_convolution_counter 分 9 拍累加并左右两像素并行计算。",
+          "learning_goals": [
+            "理解用两行缓冲 + 上一次读取凑齐 3 行邻域的技巧",
+            "掌握读地址与写地址（counter_convolution_x/y 与 _write）之间的偏移关系",
+            "看清 CALCULATION 把 9 个 kernel 乘加分 9 拍完成、并对左右两像素同步计算"
+          ],
+          "source_files": [
+            "hdl/image_processing.v"
+          ],
+          "minimal_modules": [
+            "convolution_buffer 双行缓冲（推断 SPRAM）",
+            "convolution_buffer_local 4x3 局部矩阵",
+            "calc_left_buf/calc_right_buf 累加器",
+            "读/写计数器偏移与边界置 0"
+          ],
+          "practice_task": "解释为什么卷积需要 convolution_previous_read 暂存「上一次读取」、并且 WRITEBACK_2 中要把它移位（[1]<= [0]）——即因为每拍读 2 个像素但 3x3 邻域需要奇数对齐；再说明 CALCULATION 同时维护 calc_left_buf 与 calc_right_buf 是如何让一个 16 位字的左右两像素各用错开一列的邻域并行计算的。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "卷积核实践：高斯模糊与边缘检测",
+          "order": 3,
+          "filename": "u5-l3-convolution-kernels.md",
+          "level": "advanced",
+          "topic": "结合 main.cpp 的 test_gaussian_blur 与 test_simple_edge_detection，讲解如何用定点位移构造卷积核（如 (1)<<4 表示 1.0），以及边缘检测如何用 4 个方向梯度核 + add_to_result 累加实现。",
+          "learning_goals": [
+            "掌握用 (1)<<4 / (1)<<3 等位移构造定点卷积核的方法",
+            "理解高斯模糊核（中心和为 1）的归一化思想",
+            "看清边缘检测用多方向梯度核 + add_to_result 累加的流程"
+          ],
+          "source_files": [
+            "software/main.cpp"
+          ],
+          "minimal_modules": [
+            "test_gaussian_blur 核构造",
+            "test_simple_edge_detection 四方向梯度",
+            "add_to_output=true 累加写回",
+            "switch_buffers 后 read_image"
+          ],
+          "practice_task": "在 main.cpp 中实现一个新的卷积测试函数 test_sharpen，构造一个锐化核（中心 5、四邻 -1，其余 0，用 (n)<<4 定点表示），先发一次卷积（add_to_result=false）得到锐化结果，再仿照 test_simple_edge_detection 的结构调用 send_convolution 并 wait_end_busy，最后 switch_buffers + read_image 输出。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "仿真与硬件两条后端",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Verilator 仿真后端",
+          "order": 1,
+          "filename": "u6-l1-verilator-backend.md",
+          "level": "advanced",
+          "topic": "讲解 simulation/image_processing_simulation.cpp 如何用 FIFO_OP 把高层调用排队成 Operation，再由 main_loop_clk() 手动翻转时钟、喂入命令/数据并模拟存储读写，从而驱动 Verilator 生成的 Vimage_processing 模型。",
+          "learning_goals": [
+            "理解 FIFO_OP/fifo_in/fifo_out 命令队列的设计",
+            "掌握 main_loop_clk 手动时钟翻转 + eval 的仿真驱动方式",
+            "看清仿真侧如何模拟单端口 RAM 读写（rd_en/wr_en→memory[]）"
+          ],
+          "source_files": [
+            "simulation/image_processing_simulation.cpp",
+            "simulation/image_processing_simulation.hpp"
+          ],
+          "minimal_modules": [
+            "Operation 结构与 FIFO_OP 队列",
+            "main_loop_clk 时钟驱动",
+            "comm_data_out_free 反压模拟",
+            "memory[] 读写模拟"
+          ],
+          "practice_task": "说明 main_loop_clk 中 counter_free==3 的反压模拟了什么物理现象（通信线被占满），并解释为什么 send_image 在入队后要循环 image_width*image_height+500 次 main_loop_clk 才能确保所有像素被消费；再说明 fifo_out 是在哪里被填充的。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "iCE40 硬件顶层与 SPRAM 接口",
+          "order": 2,
+          "filename": "u6-l2-ice40-hardware-top.md",
+          "level": "advanced",
+          "topic": "讲解 ice40/hdl/top.v 如何把 image_processing、ram_interface、spi_interface 三个实例连线，以及 ram_interface.v 用 4 片 SB_SPRAM256KA 拼 128KB、并通过 output_mux/rd_en_buffer 流水线匹配读延迟。",
+          "learning_goals": [
+            "掌握 top.v 中三类接口信号（mem/comm/spi）的互连",
+            "理解 4 片 16K×16bit SPRAM 用 addr[16:15] 选片的拼装",
+            "看清 ram_interface 用两级 rd_en_buffer 检测读有效、对齐读延迟"
+          ],
+          "source_files": [
+            "ice40/hdl/top.v",
+            "ice40/hdl/ram_interface.v"
+          ],
+          "minimal_modules": [
+            "top 顶层例化与连线",
+            "SB_SPRAM256KA 原语",
+            "addr[16:15] 片选",
+            "读延迟流水（output_mux/rd_en_buffer）"
+          ],
+          "practice_task": "解释 ram_interface 为什么用 rd_en_buffer[2]==0 && rd_en_buffer[1]==1 来置 data_read_valid（即检测 rd_en 的下降沿以对齐 SPRAM 的读延迟），并说明 output_mux 两级寄存如何保证 data_read 取自正确的那片 SPRAM；再计算 4 片 16K×2B 为何正好等于 128KB。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "SPI 从机接口与 SB_SPI 硬件块",
+          "order": 3,
+          "filename": "u6-l3-spi-interface-hardware.md",
+          "level": "advanced",
+          "topic": "讲解 ice40/hdl/spi_interface.v 用 iCE40 内置 SB_SPI 原语做从机，先初始化 SPI 控制寄存器，再在 SPI_WAIT_RECEPTION/READ_OPCODE 状态里把主机来的 SPI 包（如 RECEIVE_CMD/RECEIVE_DATA/SEND_DATA32）翻译成 image_processing 的 comm_cmd/comm_data_out 接口。",
+          "learning_goals": [
+            "理解 SB_SPI 原语的 stb/rw/adr/dati/ack 寄存器访问方式",
+            "掌握 SPI 从机初始化序列（SPICR0~SPICSR）",
+            "看清 SPI 包到 comm 接口的翻译（含 SEND_DATA32 批量读回）"
+          ],
+          "source_files": [
+            "ice40/hdl/spi_interface.v"
+          ],
+          "minimal_modules": [
+            "SB_SPI 原语例化",
+            "SPI 控制寄存器初始化序列",
+            "RECEIVE_CMD/DATA/DATA32 状态翻译",
+            "buffer_full/spi_data_in_free 反压"
+          ],
+          "practice_task": "说明 SPI_WAIT_RECEPTION 中根据 is_spi_init 与 spi_dato[3]（数据可用位）分别跳到 SPI_READ_INIT 或 SPI_WAIT_TRANSMIT_READY 的含义；再解释 SPI_TRANSMIT 在 counter_send==0 时发送的状态字节里 buffer_full 位的作用，以及 SEND_DATA32 如何在一次 32 字节事务里把 image_processing 的输出批量回传给主机。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "主机 SPI 软件：FTDI 与命令封装",
+          "order": 4,
+          "filename": "u6-l4-spi-host-software.md",
+          "level": "advanced",
+          "topic": "讲解 ice40/software 一侧：image_processing_ice40.cpp 把高层调用翻译成 SPI_SEND_CMD/SPI_SEND_DATA 等事务，spi_lib.c 通过 FTDI 的 MPSSE 引擎（源自 iceprog）完成底层 SPI 收发，并用 STATUS_FPGA_RECV_MASK 做重试确认。",
+          "learning_goals": [
+            "掌握 image_processing_ice40 如何把每个高层调用映射为若干 SPI 事务",
+            "理解 FTDI MPSSE 命令（xfer_spi/send_spi/read_spi）驱动 SPI 的原理",
+            "看清 STATUS_FPGA_RECV_MASK 重试机制如何保证 FPGA 真正收到数据"
+          ],
+          "source_files": [
+            "ice40/software/image_processing_ice40.cpp",
+            "ice40/software/spi_lib/spi_lib.c",
+            "ice40/software/spi_lib/spi_lib.h"
+          ],
+          "minimal_modules": [
+            "SPI_INIT/SEND_CMD/SEND_DATA/READ_DATA32 命令",
+            "FTDI MPSSE 底层（xfer_spi/set_gpio）",
+            "spi_command_send_recv 重试确认",
+            "32 字节批量收发（send_image/read_image）"
+          ],
+          "practice_task": "对照 spi_interface.v 与 spi_lib.c，说明主机 spi_command_send_recv 重试循环里检查的 STATUS_FPGA_RECV_MASK（bit6）对应 FPGA 侧哪个状态（SPI_TRANSMIT 发出的状态字节 bit6）；再解释 send_image 为何用 SPI_SEND_DATA32 每次 32 字节批量发送、而剩余不足 32 字节的部分回退到逐字节 SPI_SEND_DATA。",
+          "depends_on": [
+            "u2-l1",
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "综合实践与扩展",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "端到端数据通路与架构取舍",
+          "order": 1,
+          "filename": "u7-l1-end-to-end-pipeline.md",
+          "level": "advanced",
+          "topic": "从全局视角梳理一次完整图像处理的数据通路：主机→（FIFO 或 SPI）→comm 接口→命令 FSM→存储/运算 FSM→双缓冲→回读，并讨论项目中的关键架构取舍（16 位打包、双缓冲、定点数、单端口 RAM 两拍流水）。",
+          "learning_goals": [
+            "能把仿真与硬件两条通路在一张图上完整串起来",
+            "理解每一步的握手与反压点（valid/free/recv_mask）",
+            "评估项目中各项硬件取舍的得失（面积 vs 吞吐 vs 精度）"
+          ],
+          "source_files": [
+            "hdl/image_processing.v",
+            "simulation/image_processing_simulation.cpp",
+            "ice40/hdl/top.v",
+            "ice40/software/image_processing_ice40.cpp"
+          ],
+          "minimal_modules": [
+            "端到端数据流",
+            "握手与反压汇总",
+            "架构取舍清单（16bit打包/双缓冲/定点/单口RAM）",
+            "仿真与硬件通路对比"
+          ],
+          "practice_task": "写一份端到端时序说明：以「主机发送 COMMAND_APPLY_ADD 并等待完成」为例，分别画出仿真模式（FIFO + main_loop_clk）与硬件模式（FTDI→SPI→SB_SPI→comm→FSM）两套通路上每个关键信号的跳变顺序，并指出两套通路在「反压」机制上的本质差异。",
+          "depends_on": [
+            "u6-l1",
+            "u6-l2",
+            "u3-l3",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "扩展实践：添加一个新的图像处理操作",
+          "order": 2,
+          "filename": "u7-l2-extend-new-operation.md",
+          "level": "advanced",
+          "topic": "作为 capstone，引导读者完整地新增一个运算（例如 COMMAND_APPLY_GAMMA 或亮度调整）：同时修改命令枚举、主机抽象接口、仿真与 ice40 两套后端、以及核心 HDL 的状态机分支，体会扩展点的全链路影响。",
+          "learning_goals": [
+            "掌握新增一条命令需要触达的全部代码位置",
+            "理解接口层（hpp）、两套后端（cpp）、硬件层（v）的联动修改",
+            "能用 wait_end_busy + 状态机分支完整跑通一个新运算"
+          ],
+          "source_files": [
+            "software/image_processing.hpp",
+            "simulation/image_processing_simulation.cpp",
+            "ice40/software/image_processing_ice40.cpp",
+            "hdl/image_processing.v",
+            "software/main.cpp"
+          ],
+          "minimal_modules": [
+            "Commands 枚举扩展",
+            "Image_processing 接口新增虚函数",
+            "两套后端实现",
+            "HDL 状态机新增分支与状态"
+          ],
+          "practice_task": "新增一个 COMMAND_APPLY_GAMMA 运算（近似 gamma 校正：对每个像素做查表式或分段近似映射），按顺序修改：①image_processing.hpp 加枚举值与纯虚 send_gamma；②simulation 与 ice40 两套后端实现打包发送；③image_processing.v 在 STATE_WAIT_COMMAND 加分支、必要时新增一个处理状态（可复用 STATE_PROC_UNARY + processing_command）；④main.cpp 写 test_gamma 调用并在仿真模式下用 run_gnuplot.sh 验证输出图像。",
+          "depends_on": [
+            "u4-l1",
+            "u5-l1",
+            "u3-l3",
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

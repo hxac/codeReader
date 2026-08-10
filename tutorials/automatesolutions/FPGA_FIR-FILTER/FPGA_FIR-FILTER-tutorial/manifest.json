@@ -1,0 +1,501 @@
+{
+  "project": "FPGA_FIR-FILTER",
+  "head": "3f7aef90f4d34fa62f00ca72c260fc49c3c04a8c",
+  "rationale": "本项目是一个面向视频图像锐化（边缘增强）的 FPGA FIR 滤波器：用 Octave 设计算法与系数，用 VHDL 在 Cyclone V 上实现，再用自校验 testbench 验证。整体源码规模偏小但层次清晰，因此学习路径按“先看懂、再读核心、最后扩展”三层推进。\\n\\n单元划分遵循项目的真实组成：U1 入门层（项目定位、目录、Quartus 工程与目标平台）让读者从零跑起来；U2 仍属入门层，先在 Octave 里讲清图像锐化与可分离 FIR 的数学原理和系数设计，为读懂硬件打基础；U3 进阶层进入硬件顶层，按数据通路讲解 sharp.vhd 顶层、sharp_control 时序同步、sharp_slice 二维数据流；U4 进阶层深入两个核心模块 sharp_linemem（行存储/循环缓冲）与 sharp_arith（定点乘加与饱和截断）；U5 进阶层讲仿真验证，覆盖 PPM 图像 testbench、自校验逐像素比对和 Octave 测试图生成；U6 专家层讲 QSF 引脚/物理约束、SDC 74.25MHz 时序约束，并以架构取舍和二次开发收尾。\\n\\n讲义之间用 depends_on 串成依赖链：算法(U2)→顶层(U3)→核心模块(U4)→验证(U5)→约束与扩展(U6)，保证读者始终在已掌握的基础上推进。每篇讲义只解决一个问题、引用真实源码文件、并配一个可动手的实践任务，符合“由浅入深、结合源码”的目标。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识项目并跑起来",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览：用 FPGA FIR 滤波器做图像锐化",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍项目定位：在 FPGA 上用 7 抽头 FIR 滤波器对 720p 视频做边缘增强（锐化），以及 Octave 算法设计 + VHDL 实现 + 仿真验证的整体工作流。",
+          "learning_goals": [
+            "理解 FIR 滤波器用于图像锐化的目标与视频处理场景",
+            "说清 Octave 设计、VHDL 实现、仿真验证三者如何配合",
+            "知道项目来源（FPGA Vision Remote Lab）与可用的远程实验室资源"
+          ],
+          "source_files": [
+            "README.md",
+            "FPGA-FIR-Filter-master/README.md",
+            "FPGA-FIR-Filter-master/Docs/FPGA_Vision_Experiments_FIR-Filter.pdf"
+          ],
+          "minimal_modules": [
+            "项目定位与背景",
+            "Octave+VHDL 协同工作流",
+            "远程实验室资源"
+          ],
+          "practice_task": "在本地安装 GNU Octave 并加载 signal/image 包，运行 Octave/sharp_image_filter.m 对一张测试图做锐化，观察并对比输入与输出图像。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构与三大组成",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "level": "beginner",
+          "topic": "梳理仓库目录结构，把项目拆成 FPGA-Design（VHDL 设计+Quartus 工程）、Verification（testbench+测试图脚本）、Octave（算法/系数）、Docs 四部分，并建立文件到职责的映射。",
+          "learning_goals": [
+            "说出四个顶层目录各放什么、互相什么关系",
+            "把每个 .vhd 设计文件对应到它在数据通路中的职责",
+            "区分源码文件与 Quartus 生成的 db/incremental_db/output_files 产物"
+          ],
+          "source_files": [
+            "FPGA-FIR-Filter-master/FPGA-Design/FIR.qsf",
+            "FPGA-FIR-Filter-master/FPGA-Design/sharp.vhd",
+            "FPGA-FIR-Filter-master/FPGA-Design/sharp_slice.vhd",
+            "FPGA-FIR-Filter-master/Verification/sim_sharp.vhd"
+          ],
+          "minimal_modules": [
+            "FPGA-Design 设计源码",
+            "Verification 仿真验证",
+            "Octave 算法脚本",
+            "生成产物目录"
+          ],
+          "practice_task": "列出 FPGA-Design 下 5 个 sharp*.vhd 文件，用一句话写出每个文件的职责，并标注哪个是顶层、哪些是被例化的子模块。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "Quartus 工程与目标平台 Cyclone V",
+          "order": 3,
+          "filename": "u1-l3-quartus-and-cyclone-v.md",
+          "level": "beginner",
+          "topic": "讲解如何用 Quartus Prime 打开 FIR.qpf 工程，目标器件 Cyclone V (5CEBA2F17C6)、顶层实体 sharp、74.25MHz/720p 视频时钟，以及编译与下载到 EduPow 板的整体流程。",
+          "learning_goals": [
+            "理解目标器件、顶层实体、时钟与视频格式等工程基本设置",
+            "知道如何在 Quartus 中打开工程、加入 VHDL 文件并编译",
+            "了解从 RTL 到下载到远程实验板的流程"
+          ],
+          "source_files": [
+            "FPGA-FIR-Filter-master/FPGA-Design/FIR.qpf",
+            "FPGA-FIR-Filter-master/FPGA-Design/FIR.qsf",
+            "FPGA-FIR-Filter-master/FPGA-Design/sharp.sdc"
+          ],
+          "minimal_modules": [
+            "Quartus 工程文件 (.qpf/.qsf)",
+            "Cyclone V 器件与 EduPow 板",
+            "编译与下载流程"
+          ],
+          "practice_task": "在 Quartus Prime 中打开 FIR.qpf，确认顶层实体为 sharp、器件为 5CEBA2F17C6，执行一次编译，并查看 Fitter 报告中的逻辑单元与存储资源占用。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "入门：算法与滤波器系数设计（Octave）",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "图像锐化与可分离 FIR 滤波原理",
+          "order": 1,
+          "filename": "u2-l1-fir-sharpening-principle.md",
+          "level": "beginner",
+          "topic": "讲解锐化滤波的卷积原理，以及本项目用同一个 7 抽头核先做垂直、再做水平，构成可分离二维滤波的思路，并用 Octave 验证效果与频率响应。",
+          "learning_goals": [
+            "理解图像锐化/边缘增强的卷积含义",
+            "掌握把二维核拆成垂直+水平两次一维卷积（可分离滤波）",
+            "会读 sharp_frequency_response.m 给出的滤波器频率响应"
+          ],
+          "source_files": [
+            "FPGA-FIR-Filter-master/Octave/sharp_image_filter.m",
+            "FPGA-FIR-Filter-master/Octave/sharp_frequency_response.m"
+          ],
+          "minimal_modules": [
+            "图像卷积与锐化",
+            "可分离二维滤波",
+            "频率响应 freqz"
+          ],
+          "practice_task": "运行 sharp_image_filter.m，分别增大/减小 f_hor 的中心系数 48，观察输出图像锐化强度的变化，并解释原因。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "用 fir1 设计定点滤波器系数",
+          "order": 2,
+          "filename": "u2-l2-fixed-point-coefficients.md",
+          "level": "beginner",
+          "topic": "讲解如何用 fir1(8,0.5,\"high\") 设计高通锐化核，再放大 32 倍并取整，得到定点系数 [1,0,-9,48,-9,0,1]/32，并对照硬件 sharp_arith.vhd 中的系数注释。",
+          "learning_goals": [
+            "会用 Octave fir1 生成高通 FIR 系数",
+            "理解把浮点系数量化为定点（乘 32 取整）的过程与误差",
+            "把 Octave 系数与 VHDL 硬件实现里的系数一一对应"
+          ],
+          "source_files": [
+            "FPGA-FIR-Filter-master/Octave/sharp_filter_coefficients.m",
+            "FPGA-FIR-Filter-master/Octave/sharp_frequency_response.m",
+            "FPGA-FIR-Filter-master/FPGA-Design/sharp_arith.vhd"
+          ],
+          "minimal_modules": [
+            "fir1 高通设计",
+            "定点量化（×32 取整）",
+            "系数软硬件对照"
+          ],
+          "practice_task": "在 Octave 中复现 round(32*fir1(8,0.5,\"high\"))，把结果与硬件注释里的 [1,0,-9,48,-9,0,1] 对比，并讨论 m2/p2 系数为 0 带来的简化。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：顶层架构与数据通路",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "顶层 sharp.vhd：视频输入输出与模块例化",
+          "order": 1,
+          "filename": "u3-l1-top-level-sharp.md",
+          "level": "intermediate",
+          "topic": "逐段精读顶层 sharp.vhd：输入寄存器把 std_logic 转成 0-255 整数、并行例化三个 sharp_slice（RGB）与 sharp_control、输出寄存器把整数转回 std_logic_vector。",
+          "learning_goals": [
+            "看懂顶层的输入/输出寄存器与类型转换逻辑",
+            "理解为何对 R/G/B 三通道各例化一个 sharp_slice",
+            "理清顶层到子模块的端口映射关系"
+          ],
+          "source_files": [
+            "FPGA-FIR-Filter-master/FPGA-Design/sharp.vhd",
+            "FPGA-FIR-Filter-master/FPGA-Design/sharp_slice.vhd",
+            "FPGA-FIR-Filter-master/FPGA-Design/sharp_control.vhd"
+          ],
+          "minimal_modules": [
+            "输入寄存器与类型转换",
+            "RGB 三通道并行例化",
+            "输出寄存器与同步"
+          ],
+          "practice_task": "在 sharp.vhd 中追踪一个像素：从 r_in 进入，经过哪些寄存器/模块到达 r_out，列出该像素经过的寄存器级数与延迟来源。",
+          "depends_on": [
+            "u1-l2",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "视频时序与 sharp_control 同步延迟",
+          "order": 2,
+          "filename": "u3-l2-video-sync-control.md",
+          "level": "intermediate",
+          "topic": "讲解 vs/hs/de 视频时序信号的含义，以及 sharp_control.vhd 如何用移位寄存器把同步信号延迟固定拍数（generic delay=6），使其与数据经过滤波器后的延迟对齐。",
+          "learning_goals": [
+            "理解 vs/hs/de 三个视频时序信号的作用",
+            "看懂用数组实现的移位寄存器延迟链",
+            "明白为何同步信号延迟要与数据通路延迟匹配"
+          ],
+          "source_files": [
+            "FPGA-FIR-Filter-master/FPGA-Design/sharp_control.vhd",
+            "FPGA-FIR-Filter-master/FPGA-Design/sharp.vhd"
+          ],
+          "minimal_modules": [
+            "视频时序信号 vs/hs/de",
+            "移位寄存器延迟链",
+            "数据/同步对齐"
+          ],
+          "practice_task": "修改 sharp_control 的 generic delay 取值（例如改为 3 或 9），重新仿真，观察输出 de_out 与像素数据在时序上是否仍然对齐，并解释为何顶层传入的是 6。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "颜色通道切片 sharp_slice 的二维滤波数据流",
+          "order": 3,
+          "filename": "u3-l3-sharp-slice-dataflow.md",
+          "level": "intermediate",
+          "topic": "精读 sharp_slice.vhd：先用 6 个 sharp_linemem 级联得到 7 个垂直抽头送入 sharp_arith（垂直滤波），再用一组水平移位寄存器得到 7 个水平抽头送入第二个 sharp_arith（水平滤波），完成可分离二维滤波。",
+          "learning_goals": [
+            "看懂 v_tap 通过级联 linemem 形成 7 个垂直抽头的过程",
+            "看懂 h_tap 移位寄存器形成 7 个水平抽头的过程",
+            "理解垂直与水平两次 sharp_arith 如何串成二维滤波"
+          ],
+          "source_files": [
+            "FPGA-FIR-Filter-master/FPGA-Design/sharp_slice.vhd",
+            "FPGA-FIR-Filter-master/FPGA-Design/sharp_linemem.vhd",
+            "FPGA-FIR-Filter-master/FPGA-Design/sharp_arith.vhd"
+          ],
+          "minimal_modules": [
+            "垂直抽头链 (linemem 级联)",
+            "水平抽头链 (移位寄存器)",
+            "两次 arith 串联"
+          ],
+          "practice_task": "在纸上画出 sharp_slice 内部 7 个垂直 tap（v_tap 0..6）与 7 个水平 tap（h_tap 0..6）的数据流图，标注每个 tap 与中心像素的相对位置。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "进阶：核心存储与运算模块",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "行存储器 sharp_linemem 的循环缓冲",
+          "order": 1,
+          "filename": "u4-l1-line-memory-circular-buffer.md",
+          "level": "intermediate",
+          "topic": "精读 sharp_linemem.vhd：用 1280 项 RAM（一行 720p 有效像素）做循环缓冲，写当前像素同时读上一行同列像素，实现“延迟一行”以支撑垂直滤波抽头。",
+          "learning_goals": [
+            "理解为何行延迟需要 1280 项 RAM",
+            "看懂 wr_address/rd_address 循环递增与回绕逻辑",
+            "理解写使能 write_en=de_in 与读改写的时序配合"
+          ],
+          "source_files": [
+            "FPGA-FIR-Filter-master/FPGA-Design/sharp_linemem.vhd",
+            "FPGA-FIR-Filter-master/FPGA-Design/sharp_slice.vhd"
+          ],
+          "minimal_modules": [
+            "行存储 RAM 阵列",
+            "循环读写地址管理",
+            "写使能与行延迟"
+          ],
+          "practice_task": "把 sharp_linemem 的 ram_array 容量从 1280 改成一个明显更小的值（如 640），仿真一张测试图，观察垂直方向出现的错位/重影，并解释为何 1280 对应 720p。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "滤波运算 sharp_arith 的定点乘加与饱和截断",
+          "order": 1,
+          "filename": "u4-l2-sharp-arith-fixed-point.md",
+          "level": "intermediate",
+          "topic": "精读 sharp_arith.vhd：实现 7 抽头 FIR 的定点乘加 sum=(tap_m3-9*tap_m1+48*tap_00-9*tap_p1+tap_p3+16)/32，含 +16 四舍五入与饱和截断到 0-255，并说明 m2/p2 系数为 0 被省略。",
+          "learning_goals": [
+            "看懂 7 抽头 FIR 的定点乘加表达式与系数来源",
+            "理解 +16 再除以 32 的四舍五入技巧",
+            "掌握把结果饱和截断到 0-255 的限幅逻辑"
+          ],
+          "source_files": [
+            "FPGA-FIR-Filter-master/FPGA-Design/sharp_arith.vhd",
+            "FPGA-FIR-Filter-master/Octave/sharp_filter_coefficients.m"
+          ],
+          "minimal_modules": [
+            "定点乘加运算",
+            "四舍五入 (+16)",
+            "饱和截断限幅"
+          ],
+          "practice_task": "分别做两个实验：(a) 去掉表达式里的 +16，(b) 把饱和上限改成 200，重新仿真并对比输出图像的亮度与溢出表现，说明舍入与限幅的作用。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "进阶：仿真与验证",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "PPM 图像仿真测试台 sim_sharp",
+          "order": 1,
+          "filename": "u5-l1-ppm-image-testbench.md",
+          "level": "intermediate",
+          "topic": "精读 sim_sharp.vhd：用 textio 读 PPM 输入图、生成时钟与 vs/hs/de 时序驱动顶层 sharp、把输出像素写回 PPM，理解激励进程与响应进程的协作。",
+          "learning_goals": [
+            "看懂用 textio 读写 ASCII PPM(P3) 图像的流程",
+            "理解 testbench 如何重建 vs/hs/de 时序与水平消隐",
+            "掌握激励进程与响应进程如何通过 end_tb 信号同步结束"
+          ],
+          "source_files": [
+            "FPGA-FIR-Filter-master/Verification/sim_sharp.vhd",
+            "FPGA-FIR-Filter-master/FPGA-Design/sharp.vhd"
+          ],
+          "minimal_modules": [
+            "textio 读写 PPM",
+            "视频时序激励生成",
+            "激励/响应双进程"
+          ],
+          "practice_task": "把 sim_sharp.vhd 中硬编码的 Windows 路径改成你本地的相对路径，准备一张 PPM 测试图，跑通仿真并查看输出的锐化 PPM 图。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "自校验测试台与逐像素比对",
+          "order": 2,
+          "filename": "u5-l2-self-checking-testbench.md",
+          "level": "intermediate",
+          "topic": "精读 sim_sharp_self-checking.vhd：同时读输入图与期望图，把仿真输出与期望像素逐个比对，跳过图像边缘，累计 mismatch 数量并在仿真结束时报告通过/失败。",
+          "learning_goals": [
+            "理解期望图像(response/expected)的比对机制",
+            "看懂为何要补偿 3 行垂直偏移并跳过图像边缘",
+            "掌握 mismatch 计数与最终通过/失败断言"
+          ],
+          "source_files": [
+            "FPGA-FIR-Filter-master/Verification/sim_sharp_self-checking.vhd"
+          ],
+          "minimal_modules": [
+            "期望图像逐像素比对",
+            "垂直偏移补偿与边缘跳过",
+            "mismatch 计数与报告"
+          ],
+          "practice_task": "在自校验测试台中调整边缘跳过范围（x_pos/y_pos 的判断边界），故意让一个系数偏离正确值，运行仿真并确认 mismatch 计数大于 0；再恢复后确认报告 EVERYTHING OK。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "用 Octave 生成测试图像与期望结果",
+          "order": 3,
+          "filename": "u5-l3-octave-test-images.md",
+          "level": "intermediate",
+          "topic": "讲解 sharp_generate_testbench_images.m 与 write_ascii_ppm.m：用 Octave 对输入图做可分离滤波得到软件参考结果，并写成 testbench 需要的输入 PPM 与期望 PPM。",
+          "learning_goals": [
+            "理解测试图生成脚本如何产出输入与期望两份 PPM",
+            "看懂 write_ascii_ppm 输出 P3 格式 PPM 的细节",
+            "把 Octave 软件参考结果与硬件自校验流程打通"
+          ],
+          "source_files": [
+            "FPGA-FIR-Filter-master/Verification/sharp_generate_testbench_images.m",
+            "FPGA-FIR-Filter-master/Verification/write_ascii_ppm.m",
+            "FPGA-FIR-Filter-master/Octave/sharp_image_filter.m"
+          ],
+          "minimal_modules": [
+            "软件参考滤波生成期望图",
+            "ASCII PPM 写出函数",
+            "软硬件结果对接"
+          ],
+          "practice_task": "用 sharp_generate_testbench_images.m 对你自己的 1280×720 测试图生成输入 PPM 与 expected PPM，再用自校验测试台验证硬件输出与之匹配。",
+          "depends_on": [
+            "u2-l2",
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "专家：约束、时序与二次开发",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "引脚分配与物理约束（QSF）",
+          "order": 1,
+          "filename": "u6-l1-pin-assignments-qsf.md",
+          "level": "advanced",
+          "topic": "精读 FIR.qsf 中的关键约束：Cyclone V 器件、顶层实体、5 个 VHDL 文件清单、视频输入/输出与 enable/reset/led 的引脚分配、3.3-V LVTTL IO 标准。",
+          "learning_goals": [
+            "看懂 set_location_assignment 引脚分配如何对应硬件连接",
+            "理解 3.3-V LVTTL IO 标准与 RGB/时序/使能信号分组",
+            "掌握如何在 QSF 中新增/修改信号约束与文件清单"
+          ],
+          "source_files": [
+            "FPGA-FIR-Filter-master/FPGA-Design/FIR.qsf"
+          ],
+          "minimal_modules": [
+            "器件与顶层设置",
+            "引脚分配",
+            "IO 标准与文件清单"
+          ],
+          "practice_task": "为顶层新增一个 enable 开关信号，在 FIR.qsf 中为它分配一个空闲引脚并设置 3.3-V LVTTL IO 标准，重新编译确认无引脚冲突。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "时序约束与 74.25MHz 时钟（SDC）",
+          "order": 2,
+          "filename": "u6-l2-timing-constraints-sdc.md",
+          "level": "advanced",
+          "topic": "精读 sharp.sdc：用 create_clock 约束 13.46ns（74.25MHz）输入时钟、create_generated_clock 派生输出时钟、set_input_delay/set_output_delay 定义 IO 延迟，并讨论时序收敛。",
+          "learning_goals": [
+            "理解 13.46ns 周期与 720p/74.25MHz 视频时钟的对应",
+            "看懂 create_clock/create_generated_clock 的用法",
+            "掌握 input/output delay 与 derive_clock_uncertainty 的作用"
+          ],
+          "source_files": [
+            "FPGA-FIR-Filter-master/FPGA-Design/sharp.sdc",
+            "FPGA-FIR-Filter-master/FPGA-Design/FIR.qsf"
+          ],
+          "minimal_modules": [
+            "输入/输出时钟约束",
+            "IO 延迟约束",
+            "时钟不确定度"
+          ],
+          "practice_task": "把 create_clock 的周期改小（例如 10ns 对应 100MHz），重新运行 Quartus 时序分析（TimeQuest/STA），找出是否出现时序违例（negative slack），并解释原因。",
+          "depends_on": [
+            "u1-l3",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "架构取舍与二次开发实践",
+          "order": 3,
+          "filename": "u6-l3-architecture-tradeoffs-extensions.md",
+          "level": "advanced",
+          "topic": "综合讨论可分离滤波、定点运算、行存储资源等架构取舍，并以把锐化核改成边缘检测或平滑核为案例，演示系数修改、抽头结构、仿真验证的完整二次开发流程。",
+          "learning_goals": [
+            "权衡可分离滤波、定点精度与片上存储资源的取舍",
+            "掌握修改系数实现新滤波效果（边缘检测/平滑）的方法",
+            "能把系数、硬件、仿真验证串成一个完整的二次开发闭环"
+          ],
+          "source_files": [
+            "FPGA-FIR-Filter-master/FPGA-Design/sharp_slice.vhd",
+            "FPGA-FIR-Filter-master/FPGA-Design/sharp_arith.vhd",
+            "FPGA-FIR-Filter-master/FPGA-Design/sharp_linemem.vhd",
+            "FPGA-FIR-Filter-master/Octave/sharp_filter_coefficients.m",
+            "FPGA-FIR-Filter-master/Verification/sharp_generate_testbench_images.m"
+          ],
+          "minimal_modules": [
+            "架构取舍分析",
+            "系数与抽头修改",
+            "二次开发闭环验证"
+          ],
+          "practice_task": "把滤波器从锐化改成一个 3×3 均值平滑核：在 Octave 重新设计系数，更新 sharp_arith.vhd 的乘加表达式（必要时调整 sharp_slice 抽头数），用自校验测试台验证新效果。",
+          "depends_on": [
+            "u3-l3",
+            "u4-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
