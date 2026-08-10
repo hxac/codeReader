@@ -1,0 +1,540 @@
+{
+  "project": "FIR_x2",
+  "head": "a06376b3aa726029e95f94f88236372533e650be",
+  "rationale": "FIR_x2 是一个面向数字音频的 FPGA 过采样 FIR 滤波器（2 倍过采样），采用单时钟 MCLK 的流水线结构，信号通路为「输入数据缓冲 → 系数 ROM → 乘法 → 累加 → 输出饱和」。仓库目录已被编号为 01~11，天然对应数据通路的推进顺序，因此本大纲沿用「先见全貌、再沿信号流逐级下钻」的教学顺序：第 1 单元让读者从零认识项目定位、目录结构与仿真运行方式；第 2 单元剖析顶层模块与音频时钟模型，建立整体数据通路与时序对齐概念；第 3、4 单元分别沿「输入数据通路」和「系数/过采样时钟通路」自顶向下讲解控制器与底层存储原语；第 5 单元讲解乘法、累加与输出饱和定点处理；第 6 单元上升到进阶主题，包括系数生成（Python + 多相奇偶分解）、十六进制存储文件与定点量化、PSL 断言与覆盖率验证、以及厂商移植与开发板示例。层级划分由入门→进阶→专家递进，依赖关系严格遵循信号流，每篇讲义只解决一个主题并配以可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：项目定位、目录结构与仿真运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "FIR_x2 是什么：PCM 过采样 FIR 滤波器总览",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 FIR_x2 的项目定位：在 FPGA 上实现 PCM 音频 2 倍过采样 FIR 滤波器，以及它在数字音频 DIY 链路中的作用。",
+          "learning_goals": [
+            "理解过采样（oversampling）与 FIR 滤波在数字音频中的意义",
+            "掌握 FIR_x2 的输入（MCLK/BCK/LRCK/DATA）与输出（BCKx2/LRCKx2/DATA）信号含义",
+            "了解项目所支持的 FPGA 器件与开源硬件许可（CERN-OHL-W）"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "项目定位与音频背景",
+            "I2S/PCM 时钟与数据信号",
+            "许可与适用器件"
+          ],
+          "practice_task": "阅读 README 后，用自己的话写出 FIR_x2 在一条音频信号链中的位置，并指出滤波器抽头数与 MCLK/采样频率之间的关系。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构：编号目录与模块地图",
+          "order": 2,
+          "filename": "u1-l2-repository-structure.md",
+          "level": "beginner",
+          "topic": "讲解 01~11 各编号目录的职责，建立从控制器、存储原语、运算单元到顶层与工具脚本的完整模块地图。",
+          "learning_goals": [
+            "识别 01_DPRAM_CONT 到 07_FIR_x2 的核心 RTL 目录划分",
+            "区分底层存储原语（SPROM/SDPRAM）与上层控制器",
+            "了解 08_hex/09_txt 数据文件、10_Example 开发板工程与 11_fir_gen 系数生成工具的用途"
+          ],
+          "source_files": [
+            "README.md",
+            "07_FIR_x2/Questa/FIR_x2.bat"
+          ],
+          "minimal_modules": [
+            "编号目录约定",
+            "控制器与原语层级",
+            "数据文件与示例工程"
+          ],
+          "practice_task": "对照 FIR_x2.bat 的编译列表，画出 7 个核心模块之间的实例依赖关系草图，标注哪些是被顶层直接实例化的子模块。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "如何运行仿真：Questa 仿真流程与测试激励",
+          "order": 3,
+          "filename": "u1-l3-simulation-flow.md",
+          "level": "beginner",
+          "topic": "讲解如何用 Questa 仿真顶层 FIR_x2，包括批处理脚本、波形 do 文件、存储初始化文件与测试信号文件的作用。",
+          "learning_goals": [
+            "掌握 vlib/vlog/vsim 编译与仿真流程及模块编译顺序",
+            "理解 run.do 中波形添加与覆盖率报告的用法",
+            "区分 .hex（存储初始化）与 .txt（测试 PCM 信号）两类数据文件"
+          ],
+          "source_files": [
+            "07_FIR_x2/FIR_x2_TB.v",
+            "07_FIR_x2/Questa/FIR_x2.bat",
+            "07_FIR_x2/Questa/run.do",
+            "07_FIR_x2/Questa/PCM_1kHz_44100fs_32bit.txt"
+          ],
+          "minimal_modules": [
+            "测试激励与时钟生成",
+            "批处理与 do 文件",
+            "存储与信号数据文件"
+          ],
+          "practice_task": "按照 FIR_x2.bat 与 run.do 的步骤在本地 Questa 中跑通顶层仿真，并在波形中找到 LRCK_I 与过采样后的 LRCKx2_O，验证后者频率约为前者的 2 倍。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "顶层架构与音频时钟模型",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "顶层 FIR_x2 模块：端口、参数与实例化图谱",
+          "order": 1,
+          "filename": "u2-l1-top-module-architecture.md",
+          "level": "intermediate",
+          "topic": "剖析 FIR_x2.v 的端口、参数与四大子模块实例，建立完整的数据通路与内部连线视图。",
+          "learning_goals": [
+            "理解 DATA_WIDTH/COEF_WIDTH/WADDR_WIDTH/COEF_INIT 等参数的含义与派生关系（如 RADDR_WIDTH、MULT_WIDTH）",
+            "梳理 DATA_BUFFER→FIR_COEF→MULT→ADD 的实例化与内部 wire 连接",
+            "理解最终流水线寄存器与输出赋值的整体结构"
+          ],
+          "source_files": [
+            "07_FIR_x2/FIR_x2.v"
+          ],
+          "minimal_modules": [
+            "端口与参数定义",
+            "子模块实例化图谱",
+            "内部连线与输出赋值"
+          ],
+          "practice_task": "在 FIR_x2.v 中追踪一个输入 PCM 样点依次经过哪些模块与内部 wire，最终到达 DATA_O，画出标注了位宽的完整数据通路图。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "音频时钟模型：MCLK/BCK/LRCK 与 2 倍过采样概念",
+          "order": 2,
+          "filename": "u2-l2-audio-clock-model.md",
+          "level": "intermediate",
+          "topic": "通过测试激励中的计数器分频，理解 MCLK、BCK、LRCK 的产生方式与 2 倍过采样时钟（BCKx2/LRCKx2）的来源。",
+          "learning_goals": [
+            "掌握 MCLK_CNT 计数器分频得到 BCK(cnt[2])、LRCK(cnt[8]) 的方法",
+            "理解单时钟域（MCLK）设计与 BCK/LRCK 同步关系",
+            "建立 2 倍过采样输出时钟 LRCKx2/BCKx2 频率翻倍的直观认识"
+          ],
+          "source_files": [
+            "07_FIR_x2/FIR_x2_TB.v",
+            "01_DPRAM_CONT/DPRAM_CONT_TB.v"
+          ],
+          "minimal_modules": [
+            "计数器分频时钟生成",
+            "单时钟域设计",
+            "过采样时钟概念"
+          ],
+          "practice_task": "基于 FIR_x2_TB.v 的分频关系，计算 MCLK_CNT[2] 与 MCLK_CNT[8] 对应的分频比，并推断在 22.579MHz MCLK 下 BCK 与 LRCK 的频率。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "输入数据通路：环形缓冲与双口 RAM",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "DATA_BUFFER：输入 PCM 数据缓冲封装",
+          "order": 1,
+          "filename": "u3-l1-data-buffer-wrapper.md",
+          "level": "intermediate",
+          "topic": "讲解 DATA_BUFFER 如何把控制器 DPRAM_CONT 与存储原语 SDPRAM 组合，形成带读写地址的输入数据缓冲。",
+          "learning_goals": [
+            "理解 DATA_BUFFER 的参数（ADDR_WIDTH/DATA_WIDTH/OUTPUT_REG/RAM_INIT_FILE）",
+            "掌握控制器与存储原语的连线方式（WEN/WADDR/REN/RADDR/RDATA）",
+            "理解输出寄存器 OUTPUT_REG 对读数据延迟的影响"
+          ],
+          "source_files": [
+            "02_DATA_BUFFER/DATA_BUFFER.v",
+            "02_DATA_BUFFER/Questa/BUFFER_INIT.hex"
+          ],
+          "minimal_modules": [
+            "缓冲模块封装",
+            "控制器与原语连线",
+            "输出寄存器配置"
+          ],
+          "practice_task": "在 DATA_BUFFER.v 中标注每一根内部 wire 连接到 DPRAM_CONT 与 SDPRAM 的哪个端口，并说明 OUTPUT_REG=\"TRUE\" 时读数据相比地址滞后几个 MCLK。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "DPRAM_CONT：环形缓冲地址控制器",
+          "order": 2,
+          "filename": "u3-l2-dpram-ring-buffer-controller.md",
+          "level": "intermediate",
+          "topic": "深入 DPRAM_CONT 的 RTL，理解它如何基于 LRCK 上升沿生成写地址、读地址、写使能与读使能，实现环形缓冲。",
+          "learning_goals": [
+            "理解 LRCK 上升沿检测（LRCK_I & ~LRCK_REG）驱动写地址更新的逻辑",
+            "掌握 ADDR_PTR/WADDR/RADDR 的递推与读地址领先写地址的关系",
+            "理解复位期间预填充 RAM 的特殊写时序"
+          ],
+          "source_files": [
+            "01_DPRAM_CONT/DPRAM_CONT.v",
+            "01_DPRAM_CONT/DPRAM_CONT_TB.v"
+          ],
+          "minimal_modules": [
+            "上升沿检测",
+            "环形地址递推",
+            "复位预填充时序"
+          ],
+          "practice_task": "用 DPRAM_CONT_TB 跑仿真，观察一次 LRCK 上升沿前后 WADDR、RADDR、WEN 的变化，并解释为什么 REN_O = ~(WEN & WADDR==RADDR)。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "SDPRAM_SINGLECLK：简单双口 RAM 原语",
+          "order": 3,
+          "filename": "u3-l3-sdpram-primitive.md",
+          "level": "intermediate",
+          "topic": "讲解底层 Simple Dual-Port RAM 原语的写口、读口、$readmemh 初始化与 1 级/2 级输出寄存器 generate 选择。",
+          "learning_goals": [
+            "理解双口 RAM 的写优先/读优先结构与 MEMORY_DEPTH=2**ADDR_WIDTH",
+            "掌握 $readmemh 初始化 RAM 的用法",
+            "理解 OUTPUT_REG 控制单级（1P）或两级（2P）读寄存器的 generate 分支"
+          ],
+          "source_files": [
+            "02_DATA_BUFFER/SDPRAM_SINGLECLK.v"
+          ],
+          "minimal_modules": [
+            "双口 RAM 读写时序",
+            "$readmemh 初始化",
+            "输出寄存器 generate"
+          ],
+          "practice_task": "为 SDPRAM_SINGLECLK 增加一段注释，说明当 OUTPUT_REG=\"FALSE\" 时 RDATA_O 来自 RDATA_REG_1P、读延迟为 1 拍；并在仿真中通过修改参数验证两级寄存器路径。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "系数通路与 2 倍过采样时钟生成",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "FIR_COEF：滤波器系数 ROM 封装",
+          "order": 1,
+          "filename": "u4-l1-fir-coef-wrapper.md",
+          "level": "intermediate",
+          "topic": "讲解 FIR_COEF 如何把 SPROM_CONT 与 SPROM 组合，输出系数并同时派生带流水线延迟的 LRCKx2/BCKx2。",
+          "learning_goals": [
+            "理解 FIR_COEF 的参数与 SPROM_CONT/SPROM 的连线",
+            "掌握 LRCKx2/BCKx2 经过 p1/p2 两级寄存器对齐系数读出延迟的设计",
+            "理解 OUTPUT_REG 影响过采样时钟取 p1 还是 p2 的 generate 分支"
+          ],
+          "source_files": [
+            "04_FIR_COEF/FIR_COEF.v"
+          ],
+          "minimal_modules": [
+            "系数 ROM 封装",
+            "过采样时钟流水线对齐",
+            "generate 时钟选择"
+          ],
+          "practice_task": "在 FIR_COEF.v 中追踪从 SPROM_CONT 的 LRCKx_O 到输出 LRCKx2_O 经过了几级寄存器，并说明为何要与 SPROM 的 2 级读延迟对齐。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "SPROM_CONT：系数地址与过采样时钟的核心生成逻辑",
+          "order": 2,
+          "filename": "u4-l2-sprom-cont-polyphase-clock.md",
+          "level": "intermediate",
+          "topic": "深入 SPROM_CONT，理解系数地址如何在奇偶抽头间切换（多相分解），并由地址高位派生 LRCKx2 与 BCKx2。",
+          "learning_goals": [
+            "理解 CADDR_REG 通过 (高段+1, LRCK_I) 实现奇偶抽头交替的多相寻址",
+            "掌握 CADDRO_REG = 全1 - CADDR_REG 的反向地址映射与 LRCKx_REG 的产生",
+            "理解 BCKx_REG/BCKx_O 依 ROM_ADDR_WIDTH 阈值选择不同生成方式的原因"
+          ],
+          "source_files": [
+            "03_SPROM_CONT/SPROM_CONT.v",
+            "03_SPROM_CONT/SPROM_CONT_TB.v"
+          ],
+          "minimal_modules": [
+            "奇偶抽头多相寻址",
+            "反向地址映射",
+            "过采样时钟派生"
+          ],
+          "practice_task": "用 SPROM_CONT_TB 仿真，记录若干个 MCLK 周期内 CADDR_REG、CADDRO_REG 与 LRCKx_O 的波形，说明 LRCKx_O 翻转一次对应输出一个过采样样点。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "SPROM：单口 ROM 原语",
+          "order": 3,
+          "filename": "u4-l3-sprom-primitive.md",
+          "level": "intermediate",
+          "topic": "讲解单口 ROM 原语的只读结构、$readmemh 系数加载与 1 级/2 级输出寄存器选择，并与 SDPRAM 对比。",
+          "learning_goals": [
+            "理解 SPROM 与 SDPRAM 在端口结构（只读 vs 读写）上的差异",
+            "掌握 ROM 初始化文件 FIR512_x2_48000.hex 的加载方式",
+            "理解两级读寄存器如何与下游乘法时序对齐"
+          ],
+          "source_files": [
+            "04_FIR_COEF/SPROM.v",
+            "04_FIR_COEF/Questa/FIR512_x2_48000.hex"
+          ],
+          "minimal_modules": [
+            "单口 ROM 只读时序",
+            "$readmemh 系数加载",
+            "与 SDPRAM 的对比"
+          ],
+          "practice_task": "打开 FIR512_x2_48000.hex 前若干行，结合 SPROM 的 $readmemh，说明每个十六进制项对应一个 16 位有符号系数；并对比 SDPRAM 列出两者端口差异表。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "运算通路：乘法、累加与输出饱和",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "MULT：有符号乘法器与流水线寄存",
+          "order": 1,
+          "filename": "u5-l1-mult-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 MULT 模块如何对输入数据与系数做有符号乘法，并用输入/输出寄存器构建流水线并传递过采样时钟。",
+          "learning_goals": [
+            "理解 DATA_WIDTH+COEF_WIDTH 乘积位宽与有符号乘法 MULT_WIRE 的实现",
+            "掌握输入寄存（DATAI_p1/COEF_p1）与输出寄存（DATAO_p1）构成的流水线",
+            "理解 LRCKx2/BCKx2 在乘法级继续延迟寄存以保持时序对齐"
+          ],
+          "source_files": [
+            "05_MULT/MULT.v",
+            "05_MULT/MULT_TB.v"
+          ],
+          "minimal_modules": [
+            "有符号乘法与位宽扩展",
+            "输入/输出流水线寄存",
+            "过采样时钟延迟传递"
+          ],
+          "practice_task": "在 MULT.v 中标注乘法运算从 DATA_I/COEF_I 输入到 DATA_O 输出经历的寄存器级数，并解释为何用 assign 而非 always 实现乘法（联系厂商 HDL 指南）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "ADD：累加积分器与 LRCKx2 复位",
+          "order": 2,
+          "filename": "u5-l2-add-accumulator.md",
+          "level": "intermediate",
+          "topic": "讲解 ADD 模块如何累加乘积结果，并在 LRCKx2 下降沿复位累加器以输出每个过采样样点的卷积和。",
+          "learning_goals": [
+            "理解 ADD_REG + MULT_REG 的累加递推与 MULT_REG 输入寄存",
+            "掌握 LRCKx2 下降沿（~LRCKx2_I & LRCKx2_REG）触发累加器复位的机制",
+            "理解 ADDO_REG 输出寄存与复位值选择（NRST_I）的关系"
+          ],
+          "source_files": [
+            "06_ADD/ADD.v",
+            "06_ADD/ADD_TB.v"
+          ],
+          "minimal_modules": [
+            "累加递推时序",
+            "LRCKx2 下降沿复位",
+            "复位值选择"
+          ],
+          "practice_task": "用 ADD_TB 仿真，观察一个 LRCKx2 周期内 ADD_REG 如何逐步累加 MULT_I，并在下降沿将累加和送入 ADDO_REG 后清零重新开始。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "输出饱和与定点舍入：顶层最后一级流水线",
+          "order": 3,
+          "filename": "u5-l3-output-saturation-rounding.md",
+          "level": "intermediate",
+          "topic": "讲解 FIR_x2.v 最后一段 always 块如何对累加结果做饱和判断与定点舍入，截取到目标输出位宽。",
+          "learning_goals": [
+            "理解 ADD_DATA[MULT_WIDTH-2] 与 [MULT_WIDTH-3] 的符号/溢出位判断逻辑",
+            "掌握饱和时用符号位扩展、未饱和时直接截取高位的数据通路",
+            "理解 BCKx2O_REG/LRCKx2O_REG/DATAO_REG 构成的最终输出流水线"
+          ],
+          "source_files": [
+            "07_FIR_x2/FIR_x2.v"
+          ],
+          "minimal_modules": [
+            "饱和溢出判断",
+            "定点截位舍入",
+            "输出流水线寄存"
+          ],
+          "practice_task": "针对 FIR_x2.v 第 171 行的三元表达式，构造一个会触发饱和的输入情况（最高有效位与次高位符号相反），说明此时输出如何被钳位到最大/最小值。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "进阶：系数生成、量化、验证与移植",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "FIR 系数生成：firwin 与多相奇偶抽头分解",
+          "order": 1,
+          "filename": "u6-l1-fir-coefficient-generation.md",
+          "level": "advanced",
+          "topic": "讲解 fir_gen.py 如何用 scipy.signal.firwin 设计低通 FIR、做奇偶抽头多相分解并进行定点量化与溢出检查。",
+          "learning_goals": [
+            "理解 firwin + Hann 窗设计低通滤波器与 /2 多相分解的原理",
+            "掌握浮点系数量化为 16 位有符号整数的公式与补零对齐偶数抽头",
+            "理解奇/偶抽头和的溢出检查（MAX_TOTAL）与硬件稳定性的关系"
+          ],
+          "source_files": [
+            "11_fir_gen/fir_gen.py",
+            "11_fir_gen/README.md"
+          ],
+          "minimal_modules": [
+            "firwin 低通设计",
+            "多相奇偶分解与定点量化",
+            "抽头和溢出检查"
+          ],
+          "practice_task": "运行 fir_gen.py 生成一组系数，修改截止频率 FC 或抽头数 TAPS，观察奇偶抽头和的溢出检查结果如何变化，并解释为何要保证和值不超过 MAX_TOTAL。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "十进制转十六进制：dec2hex.awk 与存储文件格式",
+          "order": 2,
+          "filename": "u6-l2-dec2hex-memory-files.md",
+          "level": "advanced",
+          "topic": "讲解 dec2hex.awk 如何把有符号十进制系数转为二补码十六进制，以及 .hex/.data 存储文件在不同厂商下的格式差异。",
+          "learning_goals": [
+            "理解 awk 脚本中二补码转换（负数 max_val+dec）与定宽十六进制格式化",
+            "掌握 .hex（Questa $readmemh）与 Vivado 下 .data 文件格式的差异",
+            "了解 08_hex 与 04_FIR_COEF/Questa 中各类系数文件的组织"
+          ],
+          "source_files": [
+            "11_fir_gen/dec2hex.awk",
+            "08_hex/FIR512_x2_48000.hex",
+            "11_fir_gen/README.md"
+          ],
+          "minimal_modules": [
+            "二补码十六进制转换",
+            "存储文件格式与位宽",
+            "厂商文件差异（hex/data）"
+          ],
+          "practice_task": "用 dec2hex.awk 将 fir_gen.py 输出的 .txt 系数转为 4 位宽十六进制 .data 文件，并在 Vivado 与 Questa 两种工具下说明需要分别使用哪种文件扩展名。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "形式验证：PSL 断言与覆盖率报告",
+          "order": 3,
+          "filename": "u6-l3-psl-assertions-coverage.md",
+          "level": "advanced",
+          "topic": "讲解 DPRAM_CONT 中的 PSL 断言、Questa 覆盖率收集与 report.txt 的解读，理解如何用形式化手段验证时序正确性。",
+          "learning_goals": [
+            "理解 DPRAM_CONT 中三条 psl assert 注释断言（REN/WEN/RADDR 关系）的意图",
+            "掌握 run.do 中 coverage report 各选项（-assert/-cvg/-codeAll）的用途",
+            "学会解读 report.txt 中 Branches/Conditions/Statements/Assertions 覆盖率"
+          ],
+          "source_files": [
+            "01_DPRAM_CONT/DPRAM_CONT.v",
+            "07_FIR_x2/Questa/run.do",
+            "07_FIR_x2/Questa/report.txt"
+          ],
+          "minimal_modules": [
+            "PSL 断言语义",
+            "覆盖率收集与报告",
+            "时序不变式验证"
+          ],
+          "practice_task": "阅读 report.txt，确认 DPRAM_CONT 的 3 条断言与 FIR_x2 的分支/条件覆盖均达 100%，并尝试为 SPROM_CONT 的奇偶地址切换设计一条新的 PSL 断言草案。",
+          "depends_on": [
+            "u1-l3",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "FPGA 移植与开发板示例工程",
+          "order": 4,
+          "filename": "u6-l4-fpga-porting-examples.md",
+          "level": "advanced",
+          "topic": "讲解将 FIR_x2 移植到不同厂商 FPGA 的要点：替换厂商存储 IP、调整 MCLK/BCK 参数、以及使用 10_Example 中的开发板工程。",
+          "learning_goals": [
+            "理解用厂商官方 IP（Block RAM/ROM）替换 SPROM/SDPRAM 的必要性",
+            "掌握根据音频数据设置调整 MCLK/BCK 频率与滤波器长度的方法",
+            "了解 10_Example 下 7 款开发板（Altera/Efinix/AMD/Gowin）工程的组织与工具版本"
+          ],
+          "source_files": [
+            "README.md",
+            "07_FIR_x2/FIR_x2.v",
+            "07_FIR_x2/Questa/FIR_x2.bat"
+          ],
+          "minimal_modules": [
+            "厂商存储 IP 替换",
+            "时钟与滤波器长度参数调整",
+            "开发板示例工程"
+          ],
+          "practice_task": "选定一款 10_Example 中的开发板工程，列出移植 FIR_x2 到该平台需要替换的存储原语、需要调整的参数（MCLK/BCK/WADDR_WIDTH/COEF_INIT），以及对应工具链版本。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
