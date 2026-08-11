@@ -1,0 +1,429 @@
+{
+  "project": "ImageStitchBasedOnFPGA",
+  "head": "8728b11c25af93dd1b4f7606aca64433827adfd5",
+  "rationale": "本项目是一个基于 FPGA 的七路摄像头实时图像拼接系统，代码量小（约 8 个核心源文件），但横跨 Verilog 硬件实现与 C++/OpenCV 软件参考实现，且核心算法（圆柱面投影、定点化、突发存储、动态规划缝合线）相互关联。因此学习路线设计为\"先定位、再热身、算法先行、硬件随后、最后系统整合\"。\n\n单元划分遵循三个层次：第 1 单元（入门）让读者从 README 与目录结构建立全局认识，并用最独立、最简单的 UART 状态机作为 Verilog 阅读热身；第 2 单元（进阶）是全书的算法主线，按\"软件参考实现（OpenCV 流水线 → 投影数学 → 双线性插值与查表）→ 硬件定点实现\"的顺序讲清浮点算法到 RTL 的映射；第 3 单元（进阶）聚焦存储子系统，从 DDR3 突发控制器到读写验证，再到 README 中描述的 24bit→64bit 异步 FIFO（实现代码未收录于仓库，故标注待确认）；第 4 单元（专家）讲解带综合问题的动态规划缝合线模块，培养读\"半成品/有问题 RTL\"的能力；第 5 单元（专家）做深度与整合，包括定点位宽推导、CORDIC/MIG/时钟 IP 集成，以及系统级架构取舍与遗留问题改进。\n\n讲义顺序严格保证依赖关系：先读完软件算法（u2-l1~l3）再读硬件（u2-l4），存储控制器（u3）为缝合线（u4）和 IP 集成（u5-l2）提供基础，最终系统整合（u5-l3）汇合前面所有内容。每篇讲义只解决一个主题、引用 1~5 个真实源码文件，并配一个可操作的实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：项目定位、结构导航与Verilog热身",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：基于FPGA的七路摄像头图像拼接",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍项目目标——用FPGA实时完成多路摄像头图像拼接，说明硬件实现相对软件实现的意义，并梳理README中总结的关键工程难点。",
+          "learning_goals": [
+            "理解图像拼接的应用场景与七路摄像头全景拼接的整体目标",
+            "理解硬件(实时、并行)实现相对OpenCV软件实现的意义",
+            "梳理README中列出的关键工程难点(采集、融合、24→64位FIFO、圆柱面投影、缝合线时序)"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "项目说明",
+            "README工程要点"
+          ],
+          "practice_task": "阅读README，分别列出项目'做得不好'与'需要注意'的要点各三条，并用一段话写出你对项目定位的理解。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与模块导航",
+          "order": 2,
+          "filename": "u1-l2-repo-navigation.md",
+          "level": "beginner",
+          "topic": "逐个介绍仓库中的目录与文件（圆柱面投影.cpp/.v、DDR3控制、UART串口通信、动态规划缝合线），讲清软件参考实现与硬件实现的对应关系。",
+          "learning_goals": [
+            "掌握仓库目录结构与每个文件的作用",
+            "理解各模块在整个拼接流水线中的角色",
+            "建立'软件算法→硬件实现'的模块对应关系"
+          ],
+          "source_files": [
+            "README.md",
+            "圆柱面投影.cpp",
+            "圆柱面投影.v",
+            "DDR3控制/mem_burst.v"
+          ],
+          "minimal_modules": [
+            "仓库结构",
+            "模块导航"
+          ],
+          "practice_task": "画一张模块关系图，标注数据从摄像头采集→DDR3存储→圆柱面投影→缝合线→融合输出的流向，并标注每个环节对应的源码文件。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "Verilog状态机热身：UART串口收发",
+          "order": 3,
+          "filename": "u1-l3-uart-fsm.md",
+          "level": "beginner",
+          "topic": "以独立、简单的UART收发模块为切入点，学习Verilog模块结构、参数化、波特率分频与三段式状态机，为后续阅读复杂状态机打基础。",
+          "learning_goals": [
+            "理解Verilog模块端口与parameter参数化",
+            "掌握波特率分频CYCLE的计算原理",
+            "理解UART起始位/数据位/停止位的接收与发送状态机以及边沿检测"
+          ],
+          "source_files": [
+            "UART串口通信/uart_rx.v",
+            "UART串口通信/uart_tx.v"
+          ],
+          "minimal_modules": [
+            "uart_rx",
+            "uart_tx",
+            "波特率分频"
+          ],
+          "practice_task": "将uart_rx的BAUD_RATE改为9600并重新计算CYCLE；写一段说明rx_negedge(下降沿检测)在接收状态机中的作用。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：圆柱面投影算法与软件参考实现",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "图像拼接算法全景：OpenCV拼接流水线",
+          "order": 1,
+          "filename": "u2-l1-opencv-stitching-pipeline.md",
+          "level": "intermediate",
+          "topic": "通过阅读圆柱面投影.cpp的main函数，梳理OpenCV图像拼接的完整流程：特征提取、特征匹配、相机参数估计、光束平差、投影变换、曝光补偿、缝合线、融合。",
+          "learning_goals": [
+            "理解图像拼接的整体算法流水线及各阶段顺序",
+            "识别OpenCV各模块(OrbFeaturesFinder、BestOf2NearestMatcher、HomographyBasedEstimator、BundleAdjusterRay、CylindricalWarper、GraphCutSeamFinder、FeatherBlender)的作用",
+            "理解为何要把这套软件流水线中的关键环节移植到FPGA"
+          ],
+          "source_files": [
+            "圆柱面投影.cpp"
+          ],
+          "minimal_modules": [
+            "main",
+            "拼接流水线"
+          ],
+          "practice_task": "在main函数中标注每个阶段对应的代码区间，并写出每个阶段的输入与输出数据类型。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "圆柱面投影的数学原理：映射变换与相机参数",
+          "order": 2,
+          "filename": "u2-l2-cylindrical-projection-math.md",
+          "level": "intermediate",
+          "topic": "讲解圆柱面投影的mapForward/mapBackward映射公式，相机内参K、旋转矩阵R、R*K^-1与K*R^-1的含义，以及scale=2707.47的作用。",
+          "learning_goals": [
+            "理解圆柱面投影的正向/反向映射公式",
+            "理解K、R矩阵及R*K^-1、K*R^-1在投影中的作用",
+            "理解detectResultRoi如何确定目标图像范围(dst_tl/dst_br)"
+          ],
+          "source_files": [
+            "圆柱面投影.cpp"
+          ],
+          "minimal_modules": [
+            "mapForward",
+            "mapBackward",
+            "setCameraParams",
+            "buildMaps",
+            "detectResultRoi"
+          ],
+          "practice_task": "给定一组K、R手算某一像素的mapForward结果并对照代码验证；说明为什么反向映射(remap)比正向映射更适合图像变换。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "双线性插值与地址/权重表生成",
+          "order": 3,
+          "filename": "u2-l3-bilinear-interpolation-tables.md",
+          "level": "intermediate",
+          "topic": "讲解warp函数中如何为每个目标像素生成4个相邻源像素地址(addr表)与4个双线性插值权重(weight表)，以及如何导出FPGA查表用的.coe系数文件。",
+          "learning_goals": [
+            "理解双线性插值的地址与权重计算方法",
+            "理解addr表(col*8)与weight表(col*4)的内存组织方式",
+            "理解.coe系数文件如何作为FPGA查表系数"
+          ],
+          "source_files": [
+            "圆柱面投影.cpp"
+          ],
+          "minimal_modules": [
+            "warp",
+            "addr地址表",
+            "weight权重表"
+          ],
+          "practice_task": "用伪代码重写地址表生成逻辑，并说明四个权重分别对应哪四个相邻像素。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "圆柱面投影的硬件实现：定点Verilog",
+          "order": 4,
+          "filename": "u2-l4-cylindrical-projection-hardware.md",
+          "level": "intermediate",
+          "topic": "对照圆柱面投影.v讲解如何用定点数在硬件中实现圆柱面投影：CORDIC计算sin/cos、k_inv矩阵乘法、生成双线性插值四个权重，并扫描dst_tl/dst_br目标区域。",
+          "learning_goals": [
+            "理解浮点算法到定点硬件的映射思路",
+            "理解CORDIC IP(cordic_0)的相位输入与sin/cos输出",
+            "理解k_inv0~k_inv8定点系数与C++中K*R^-1的对应关系",
+            "理解weight_x/y的floor/ceil计算与扫描时序"
+          ],
+          "source_files": [
+            "圆柱面投影.v",
+            "圆柱面投影.cpp"
+          ],
+          "minimal_modules": [
+            "project模块",
+            "cordic_0",
+            "k_inv矩阵",
+            "weight权重生成"
+          ],
+          "practice_task": "将k_inv0的21位定点二进制还原为十进制，验证其与C++中对应矩阵元素是否一致；说明phase_tdata[15:0]与CORDIC相位输入的关系。",
+          "depends_on": [
+            "u2-l3",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：DDR3存储子系统与数据位宽转换",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "DDR3突发传输控制器 mem_burst",
+          "order": 1,
+          "filename": "u3-l1-ddr3-mem-burst.md",
+          "level": "intermediate",
+          "topic": "讲解mem_burst.v如何封装MIG IP的应用接口(app_cmd/app_addr/app_en/app_wdf_*)，用状态机实现DDR3的突发读写。",
+          "learning_goals": [
+            "理解Xilinx MIG的应用层接口信号(app_*系列)",
+            "理解mem_burst的状态机(IDLE/MEM_READ/MEM_READ_WAIT/MEM_WRITE/...)",
+            "理解突发读写的地址递增规则与app_rdy/app_wdf_rdy数据握手"
+          ],
+          "source_files": [
+            "DDR3控制/mem_burst.v"
+          ],
+          "minimal_modules": [
+            "mem_burst",
+            "MIG应用接口",
+            "突发读写状态机"
+          ],
+          "practice_task": "画出mem_burst读突发的状态转移图，标注app_rdy、app_rd_data_valid与状态切换的对应关系。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "DDR3读写验证 mem_test",
+          "order": 2,
+          "filename": "u3-l2-ddr3-mem-test.md",
+          "level": "intermediate",
+          "topic": "讲解mem_test.v如何先写一组递增模式数据再读回比对，验证mem_burst控制器的正确性，并理解error信号的产生。",
+          "learning_goals": [
+            "理解DDR3写后读回的环回验证方法",
+            "理解写数据模式{(MEM_DATA_BITS/8){wr_cnt}}的构造",
+            "理解error比较逻辑与读地址/写地址的关系"
+          ],
+          "source_files": [
+            "DDR3控制/mem_test.v",
+            "DDR3控制/mem_burst.v"
+          ],
+          "minimal_modules": [
+            "mem_test",
+            "验证状态机",
+            "error检测"
+          ],
+          "practice_task": "编写一个testbench的激励思路，驱动mem_test并观察error是否保持为0；说明rd_burst_addr为何要等于wr_burst_addr。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "24bit到64bit异步FIFO数据位宽转换",
+          "order": 3,
+          "filename": "u3-l3-24to64-async-fifo.md",
+          "level": "intermediate",
+          "topic": "根据README总结的设计要点，讲解为何需要把采集的24bit像素转换为DDR3的64bit接口，以及用二维寄存器数组实现异步FIFO、读指针+3/写指针+8、跨时钟域处理的思路。",
+          "learning_goals": [
+            "理解24bit到64bit数据位宽转换异步FIFO的需求",
+            "理解为何不能用Block RAM而用二维寄存器数组",
+            "理解读/写指针非1递增时格雷码失效的应对方法",
+            "理解FIFO的width/depth与DDR3突发长度的关系"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "24bit→64bit异步FIFO(实现代码未收录于仓库，README中描述，待确认)"
+          ],
+          "practice_task": "根据README描述，写出该异步FIFO的端口列表与数据流说明；分析'写端200MHz出错、100MHz可用'的可能原因。(实现代码待确认)",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "专家：动态规划法寻找最佳缝合线",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "动态规划法寻找最佳缝合线 DynamicSeam",
+          "order": 1,
+          "filename": "u4-l1-dynamic-seam.md",
+          "level": "advanced",
+          "topic": "讲解DynamicSeam.v如何从DDR3读取两幅图像重叠区的行数据(row1/row2)，用动态规划最小代价路径寻找最佳缝合线，分析其状态机(IDLE/READ/SeamFind)与cost/coordinate数组。",
+          "learning_goals": [
+            "理解重叠区缝合线动态规划算法的硬件映射",
+            "理解cost/coordinate数组的最小代价路径更新逻辑",
+            "识别该模块中存在的综合性问题(localparam/parameter误用、行号复用)及其'外部代码不能综合'的影响"
+          ],
+          "source_files": [
+            "动态规划法寻找最佳缝合线/DynamicSeam.v"
+          ],
+          "minimal_modules": [
+            "DynamicSeam",
+            "缝合线DP",
+            "cost/coordinate数组",
+            "clk_wiz_0/mig_7series_0"
+          ],
+          "practice_task": "指出DynamicSeam.v中三处会导致综合失败的写法并说明原因；用一段RTL思路描述正确的cost更新时序应如何重新设计。",
+          "depends_on": [
+            "u2-l4",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "专家：定点运算、IP集成与系统架构",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "定点数运算与位宽设计深入",
+          "order": 1,
+          "filename": "u5-l1-fixed-point-arithmetic.md",
+          "level": "advanced",
+          "topic": "以圆柱面投影.v为主线，深入讲解定点数表示(Q格式、整数位/小数位)、乘法位宽扩展与截断、coe/k_inv定点系数的推导，以及溢出与时序风险。",
+          "learning_goals": [
+            "掌握定点数Q格式与位宽推导方法",
+            "理解tmp1/tmp2/tmp3等中间变量的位宽来源(整数位+小数位)",
+            "理解取整(weight_y/x的floor/ceil)与高位截取的对应关系"
+          ],
+          "source_files": [
+            "圆柱面投影.v",
+            "圆柱面投影.cpp"
+          ],
+          "minimal_modules": [
+            "定点系数推导",
+            "位宽推导",
+            "coe/k_inv"
+          ],
+          "practice_task": "完整推导从C++浮点scale、K*R^-1矩阵到Verilog中coe与k_inv定点二进制的过程，列出每一步的整数位和小数位。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "CORDIC与MIG/时钟IP的集成",
+          "order": 2,
+          "filename": "u5-l2-cordic-mig-ip-integration.md",
+          "level": "advanced",
+          "topic": "讲解项目中如何集成Xilinx IP核：CORDIC(cordic_0)计算三角函数、时钟向导(clk_wiz_0)生成系统时钟、MIG(mig_7series_0)驱动DDR3，以及IP在Verilog中的例化与端口连接。",
+          "learning_goals": [
+            "理解CORDIC的相位输入与sin/cos输出映射",
+            "理解clk_wiz差分时钟输入与sys_clk生成",
+            "理解MIG应用接口与mem_burst/DynamicSeam的对接方式"
+          ],
+          "source_files": [
+            "圆柱面投影.v",
+            "动态规划法寻找最佳缝合线/DynamicSeam.v",
+            "DDR3控制/mem_burst.v"
+          ],
+          "minimal_modules": [
+            "cordic_0",
+            "clk_wiz_0",
+            "mig_7series_0"
+          ],
+          "practice_task": "写出三个IP核各自需要的输入时钟来源，并说明ui_clk/sys_clk/mem_clk在系统中的频率关系。(具体IP配置待确认)",
+          "depends_on": [
+            "u2-l4",
+            "u3-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "系统集成、架构取舍与工程实践",
+          "order": 3,
+          "filename": "u5-l3-system-integration-tradeoffs.md",
+          "level": "advanced",
+          "topic": "综合全项目，讨论七路摄像头拼接的整体系统架构、双线性vs最近邻插值的资源/质量取舍、Block RAM资源占用、时序收敛，以及README中遗留问题的改进方向。",
+          "learning_goals": [
+            "建立完整系统的数据通路与控制时序视图",
+            "理解插值方法、存储结构在FPGA资源与图像质量间的权衡",
+            "能针对README列出的遗留问题提出可落地的改进思路"
+          ],
+          "source_files": [
+            "README.md",
+            "圆柱面投影.v",
+            "圆柱面投影.cpp",
+            "DDR3控制/mem_burst.v",
+            "动态规划法寻找最佳缝合线/DynamicSeam.v"
+          ],
+          "minimal_modules": [
+            "系统架构",
+            "资源取舍",
+            "遗留问题改进"
+          ],
+          "practice_task": "撰写一份系统设计改进建议，针对'小数权重融合''白平衡采集''插值方法选择'三个方向各提出一个可落地的FPGA实现思路。",
+          "depends_on": [
+            "u4-l1",
+            "u5-l1",
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
