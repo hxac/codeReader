@@ -1,0 +1,638 @@
+{
+  "project": "IKA32010",
+  "head": "51bc1f05a2a08a61c8815a9643d08a42e99779c6",
+  "rationale": "本项目是用 SystemVerilog 实现的 TI TMS32010 DSP 软核，核心文件 src/IKA32010.sv 近 2000 行，包含顶层模块与 ALU/RAM/Stack/Multiplier 四个子模块，外加助记符常量、反汇编、testbench 三个配套文件。学习路线按“先整体后局部、先数据通路后控制（微码）”的顺序设计：入门层（u1）帮助读者建立项目定位、端口、时钟与仿真的整体认识；进阶层（u2）自底向上拆解内部写总线、程序计数器、外部总线控制器、辅助寄存器/数据页指针、数据 RAM、硬件堆栈、ALU 与乘法器等数据通路模块；专家层（u3）先讲清以组合 casez 实现的“微码”译码框架与多周期/中断时序，再按指令分组（控制/辅助寄存器、累加器算术、分支子程序、乘法器与 I/O）逐组剖析译码逻辑，最后覆盖反汇编调试与 FPGA 综合集成。依赖关系遵循“硬件通路 → 指令译码 → 系统集成”的递进，确保每篇只解决一个相对独立的主题，并配套可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门：认识 IKA32010",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：IKA32010 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 IKA32010 项目的定位——用 SystemVerilog 实现的 TI TMS32010 DSP 软核，BSD 许可、半周期精确、已在 FPGA 上验证。",
+          "learning_goals": [
+            "了解 IKA32010 实现的是哪款历史 DSP 芯片及其用途",
+            "理解“半周期精确(semi-cycle-accurate)”与“FPGA proven”的含义",
+            "知道项目的验证方式：街机游戏 Twin Cobra、Sky Shark、Wardner"
+          ],
+          "source_files": [
+            "README.md",
+            "LICENSE",
+            "src/IKA32010.sv"
+          ],
+          "minimal_modules": [
+            "顶层模块 IKA32010",
+            "子模块概览（ALU/RAM/Stack/Multiplier）"
+          ],
+          "practice_task": "阅读 README，整理出 IKA32010 模块实例化所需的全部输入/输出端口清单，并为每个端口标注方向（输入/输出）与有效极性（高/低有效）。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构、源码与文档导航",
+          "order": 2,
+          "filename": "u1-l2-repo-layout-and-docs.md",
+          "level": "beginner",
+          "topic": "讲解仓库的目录组织——src/ 下四个源文件的分工、docs/ 下 TMS32010 官方手册与指令表，以及它们如何配合阅读。",
+          "learning_goals": [
+            "记住 src/ 下四个文件各自的角色与相互包含关系",
+            "知道 docs/ 中 TMS32010 用户手册 PDF 与 opcode table 如何作为权威参考",
+            "建立从官方文档到源码的对照阅读习惯"
+          ],
+          "source_files": [
+            "README.md",
+            "src/IKA32010.sv",
+            "src/IKA32010_mnemonics.sv",
+            "src/IKA32010_disasm.sv"
+          ],
+          "minimal_modules": [
+            "src 目录",
+            "docs 目录"
+          ],
+          "practice_task": "对照 docs 中的 TMS32010 用户手册与 opcode table，列出源码实际实现了哪些指令组，并标注是否存在尚未实现或留作待确认的指令。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "顶层模块端口与引脚定义",
+          "order": 3,
+          "filename": "u1-l3-top-module-ports.md",
+          "level": "beginner",
+          "topic": "逐个讲解 IKA32010 顶层模块端口列表的含义，包括时钟、复位、总线控制、地址/数据、BIO、中断等信号。",
+          "learning_goals": [
+            "读懂顶层端口声明，区分输入/输出与有效极性",
+            "理解 i_EMUCLK、i_CLKIN_PCEN、o_CLKOUT 三者的关系",
+            "掌握 o_MEN_n / o_DEN_n / o_WE_n / o_DOUT_OE 等总线控制信号的用途"
+          ],
+          "source_files": [
+            "src/IKA32010.sv",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "顶层端口声明",
+            "时钟与总线控制端口"
+          ],
+          "practice_task": "画一张 IKA32010 与外部程序 ROM、数据 I/O 端口的连线示意图，标出每个引脚连接的对象及其有效极性。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "时钟分频与周期计数器",
+          "order": 4,
+          "filename": "u1-l4-clock-and-cycle-counter.md",
+          "level": "beginner",
+          "topic": "讲解 cyclecntr 周期计数器如何把 EMUCLK 四分频为一个 DSP 机器周期，以及 PCEN/NCEN 两个时钟使能的含义。",
+          "learning_goals": [
+            "理解为什么需要 4 个 EMUCLK 周期对应一个 DSP 周期",
+            "弄清 cyc_pcen / cyc_ncen / o_CLKOUT 的时序关系",
+            "知道 i_CLKIN_PCEN 在多时钟域系统中的作用"
+          ],
+          "source_files": [
+            "src/IKA32010.sv"
+          ],
+          "minimal_modules": [
+            "时钟模块(cyclecntr)",
+            "clock enable 信号(cyc_pcen/cyc_ncen)"
+          ],
+          "practice_task": "画出在一个 DSP 周期内 cyclecntr 从 0 到 3 时，EMUCLK、o_CLKOUT、o_CLKOUT_PCEN、o_CLKOUT_NCEN 的时序波形图。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "仿真与 testbench 入门",
+          "order": 5,
+          "filename": "u1-l5-simulation-and-testbench.md",
+          "level": "beginner",
+          "topic": "通过 IKA32010_tb.v 讲解如何搭建仿真环境：时钟产生、复位/中断激励、ROM 加载、外部总线驱动。",
+          "learning_goals": [
+            "看懂 testbench 中的时钟分频与复位/中断激励时序",
+            "理解 $readmemh 加载程序 ROM 的方式",
+            "掌握用 MEN_n/DEN_n 选择读数据源的总线复用"
+          ],
+          "source_files": [
+            "src/IKA32010_tb.v",
+            "src/IKA32010.sv"
+          ],
+          "minimal_modules": [
+            "testbench 时钟产生",
+            "ROM 模型与总线复用"
+          ],
+          "practice_task": "编写一个最小 testbench（或修改现有 tb），喂入几条 NOP/LACK 指令，借助反汇编输出观察 PC 的推进与累加器变化。",
+          "depends_on": [
+            "u1-l3",
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心数据通路与存储",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "内部写总线 reg_wrbus 与数据源选择",
+          "order": 1,
+          "filename": "u2-l1-internal-write-bus.md",
+          "level": "intermediate",
+          "topic": "讲解作为全局数据汇流的 reg_wrbus 写总线，以及 7 个数据源（SHB/RAM/AR/STACK/IMM/FLAG/INLATCH）如何被 register_wrbus_source_sel 选择。",
+          "learning_goals": [
+            "理解 reg_wrbus 作为核心内部数据通道的作用",
+            "掌握 7 种 WRBUS_SOURCE_* 常量的含义",
+            "弄清组合逻辑 MUX 如何由微码驱动选源"
+          ],
+          "source_files": [
+            "src/IKA32010.sv",
+            "src/IKA32010_mnemonics.sv"
+          ],
+          "minimal_modules": [
+            "reg_wrbus",
+            "register_wrbus_source_sel MUX",
+            "WRBUS_SOURCE 常量"
+          ],
+          "practice_task": "在源码中追踪 reg_wrbus 在一条 ADD 指令和一条 LACK 指令中分别来自哪个数据源，画出各自的数据流向图。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "程序计数器 PC 与取指",
+          "order": 2,
+          "filename": "u2-l2-program-counter.md",
+          "level": "intermediate",
+          "topic": "讲解 12 位程序计数器 if_pc 的更新机制与多种工作模式（HOLD/INCREASE/LOAD_IMMEDIATE/LOAD_INTERRUPT/LOAD_WRBUS/RESET），以及取指时序。",
+          "learning_goals": [
+            "理解 if_pc_modesel 如何控制 PC 行为",
+            "弄清 opcode 在 cyclecntr==3 时锁存进 if_opcodereg 的取指时序",
+            "知道 PC 回绕（0xFFF→0）与中断向量地址 0x002"
+          ],
+          "source_files": [
+            "src/IKA32010.sv",
+            "src/IKA32010_mnemonics.sv"
+          ],
+          "minimal_modules": [
+            "if_pc",
+            "if_pc_modesel",
+            "if_opcodereg",
+            "PC 模式常量"
+          ],
+          "practice_task": "追踪一次 CALL→RET 过程中 if_pc 与 if_pc_modesel 的取值序列，解释栈与 PC 如何协作完成调用与返回。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "外部总线控制器 Bus Controller",
+          "order": 3,
+          "filename": "u2-l3-bus-controller.md",
+          "level": "intermediate",
+          "topic": "讲解总线控制器如何根据 busctrl_req 产生外部总线时序，区分指令读、表读、表写、IN、OUT 五种事务及 MEN_n/DEN_n/WE_n 在四个相位上的电平。",
+          "learning_goals": [
+            "理解 busctrl_mode 的低 3 位（事务类型）与第 4 位（地址 MUX）",
+            "掌握每种事务在 cyclecntr 0~3 相位上的控制信号时序",
+            "弄清 o_AOUT 地址如何根据模式在 PC 与外设口 PA 间切换"
+          ],
+          "source_files": [
+            "src/IKA32010.sv",
+            "src/IKA32010_mnemonics.sv"
+          ],
+          "minimal_modules": [
+            "busctrl_mode/busctrl_req",
+            "地址 MUX",
+            "o_MEN_n/o_DEN_n/o_WE_n 时序"
+          ],
+          "practice_task": "为“指令读”和“OUT 输出”两种事务分别列出 cyclecntr 0~3 期间 MEN_n/DEN_n/WE_n/DOUT_OE 的电平时序表。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "辅助寄存器 ARP/AR 与数据页指针 DP",
+          "order": 4,
+          "filename": "u2-l4-aux-registers-and-dp.md",
+          "level": "intermediate",
+          "topic": "讲解 ARP 辅助寄存器指针、AR[0:1] 两个辅助寄存器与 DP 数据页指针的存储及 set/rst/inc/dec 更新机制。",
+          "learning_goals": [
+            "理解 ARP/AR/DP 作为寻址寄存器的作用",
+            "掌握 set/rst 锁存与 inc/dec 更新的组合模式",
+            "弄清 AR 低 9 位增减与官方手册页 2-9 的对应关系"
+          ],
+          "source_files": [
+            "src/IKA32010.sv",
+            "src/IKA32010_mnemonics.sv"
+          ],
+          "minimal_modules": [
+            "reg_arp / reg_ar[0:1]",
+            "reg_dp",
+            "set/rst/inc/dec 控制逻辑"
+          ],
+          "practice_task": "在源码中找出所有驱动 reg_ar_inc/dec 与 reg_arp_set/rst 的微码片段，总结这些控制信号由指令字的哪些位决定。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "数据 RAM 与寻址方式",
+          "order": 5,
+          "filename": "u2-l5-data-ram-and-addressing.md",
+          "level": "intermediate",
+          "topic": "讲解 IKA32010_ram 子模块（256×16 双口 RAM）及其直接寻址（DP+位移）与间接寻址（AR 低 8 位）、DMOV 数据搬移机制。",
+          "learning_goals": [
+            "理解 ram_addr 如何由直接或间接寻址生成",
+            "掌握 DMOV 把当前单元内容搬移到下一高地址的特殊写时序",
+            "弄清 RAM 读写端口的寄存输出时序"
+          ],
+          "source_files": [
+            "src/IKA32010.sv",
+            "src/IKA32010_mnemonics.sv"
+          ],
+          "minimal_modules": [
+            "IKA32010_ram",
+            "ram_addr 生成逻辑",
+            "DMOV 搬移逻辑"
+          ],
+          "practice_task": "编写一段激励，分别用直接寻址和间接寻址向 RAM 写入并读回数据，用波形或反汇编验证地址生成与 DMOV 行为正确。",
+          "depends_on": [
+            "u2-l4",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "硬件堆栈 IKA32010_stack",
+          "order": 6,
+          "filename": "u2-l6-hardware-stack.md",
+          "level": "intermediate",
+          "topic": "讲解 4 级硬件堆栈子模块 IKA32010_stack 的 push/pop/hold 行为，以及它与 PC、ACC 的数据选择（stk_data_sel）。",
+          "learning_goals": [
+            "理解 4 级堆栈的移位式 push/pop 实现",
+            "掌握 stk_data_sel 在 PC 与 ACC 间选择栈数据来源",
+            "弄清堆栈在 CALL/RET/中断响应中的作用"
+          ],
+          "source_files": [
+            "src/IKA32010.sv",
+            "src/IKA32010_mnemonics.sv"
+          ],
+          "minimal_modules": [
+            "IKA32010_stack",
+            "stk_push/stk_pop/stk_data_sel",
+            "STACK_DATA 常量"
+          ],
+          "practice_task": "追踪一次嵌套 CALL（两层子程序调用）过程中栈内容 stack[0..3] 的变化，画出每一步的栈状态。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "ALU、移位器、累加器与标志位",
+          "order": 7,
+          "filename": "u2-l7-alu-shifters-accumulator.md",
+          "level": "intermediate",
+          "topic": "讲解 IKA32010_alu 子模块的 AND/OR/XOR/ABS/ADD/SUB/SUBC 七种运算、移位器 A/B、累加器、OVM 饱和以及 Z/N/V 标志。",
+          "learning_goals": [
+            "理解 ALU 端口 A/B 的生成与 adder_cin 进位逻辑",
+            "掌握移位器 A（输入定标）与移位器 B（累加器输出定标）的作用",
+            "弄清 OVM 饱和模式、SUBC 条件减法除法与 Z/N/V 标志更新"
+          ],
+          "source_files": [
+            "src/IKA32010.sv",
+            "src/IKA32010_mnemonics.sv"
+          ],
+          "minimal_modules": [
+            "IKA32010_alu",
+            "移位器 A/B (sha/shb)",
+            "标志 Z/N/V 与 reg_ovm"
+          ],
+          "practice_task": "追踪一条 SUBC 指令在两个周期内 subc_divided/prev_subc/累加器的变化，解释其除法原理并验证 OVM 饱和时的输出值。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l8",
+          "title": "16×16 乘法器与 T/P 寄存器",
+          "order": 8,
+          "filename": "u2-l8-multiplier-and-tp-regs.md",
+          "level": "intermediate",
+          "topic": "讲解 IKA32010_multiplier 子模块（有符号 16×16→32 乘法、DSP 块映射）、T 寄存器与 P 寄存器及操作数来源选择。",
+          "learning_goals": [
+            "理解 T 寄存器锁存与 P 寄存器乘积输出的时序",
+            "掌握 mul_op1_source_sel 在 RAM 数据与立即数（MPYK）间选择并做符号扩展",
+            "了解乘法器如何被综合工具映射为 FPGA 的 DSP 块"
+          ],
+          "source_files": [
+            "src/IKA32010.sv",
+            "src/IKA32010_mnemonics.sv"
+          ],
+          "minimal_modules": [
+            "IKA32010_multiplier",
+            "reg_t / reg_p",
+            "mul_op1_source_sel"
+          ],
+          "practice_task": "编写激励执行 LT+MPYK 序列，观察 T 寄存器与 P 寄存器的值，并核对有符号乘积结果是否正确。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "微码、指令系统与集成",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "微码架构总览：组合译码与默认值",
+          "order": 1,
+          "filename": "u3-l1-microcode-architecture.md",
+          "level": "advanced",
+          "topic": "讲解顶层那个大 always @(*) 微码块的设计思想：先赋默认值，再用 casez(if_opcodereg) 覆盖，以及复位态与中断检查的前置处理。",
+          "learning_goals": [
+            "理解“默认值 + casez 覆盖”的水平微码风格",
+            "掌握微码块驱动的一整套控制信号集合",
+            "弄清复位态 ex_state==0 与正常态的分支结构"
+          ],
+          "source_files": [
+            "src/IKA32010.sv",
+            "src/IKA32010_mnemonics.sv"
+          ],
+          "minimal_modules": [
+            "微码 always @(*) 块",
+            "默认值赋值区",
+            "casez(if_opcodereg) 框架"
+          ],
+          "practice_task": "整理出微码块顶部为所有控制信号赋予的“默认值表”，并解释为何大多数指令只需覆盖其中少数信号即可工作。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "多周期指令时序与状态机",
+          "order": 2,
+          "filename": "u3-l2-multicycle-timing-and-state.md",
+          "level": "advanced",
+          "topic": "讲解 ex_inst_cycle 指令周期计数器、ex_inst_cycle_rst、复位延迟（rs_n_z/zz）与 ex_state 状态转移，以及多周期指令如何分相位执行。",
+          "learning_goals": [
+            "理解 ex_inst_cycle 计数器如何为多周期指令分相位",
+            "掌握复位释放延迟 rs_n_z/zz 与 ex_state 的转移条件",
+            "弄清多周期指令（如 TBLR、IN）在 cycle 0/1/2 各自做什么"
+          ],
+          "source_files": [
+            "src/IKA32010.sv"
+          ],
+          "minimal_modules": [
+            "ex_inst_cycle / ex_inst_cycle_rst",
+            "rs_n_z / rs_n_zz 复位延迟",
+            "ex_state 状态机"
+          ],
+          "practice_task": "以 TBLR 指令为例，画出 cycle 0/1/2 三个相位里 busctrl_req、if_pc_modesel、栈操作与 ram_wr 的取值表。",
+          "depends_on": [
+            "u3-l1",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "中断机制",
+          "order": 3,
+          "filename": "u3-l3-interrupt-mechanism.md",
+          "level": "advanced",
+          "topic": "讲解 i_INT_n 的多级同步与下降沿检测、int_latched 锁存、int_rq 中断请求、内部 IACK 操作码、INTM 使能及中断向量 0x002。",
+          "learning_goals": [
+            "理解 int_n_z/zz/zzz 三级同步与下降沿检测",
+            "掌握 int_latched、int_rq 与 reg_intm（DINT/EINT）的关系",
+            "弄清内部 IACK 操作码如何完成中断应答与跳转到 0x002"
+          ],
+          "source_files": [
+            "src/IKA32010.sv",
+            "src/IKA32010_mnemonics.sv"
+          ],
+          "minimal_modules": [
+            "int_n_z/zz/zzz 同步链",
+            "int_latched / int_rq",
+            "reg_intm 与 IACK"
+          ],
+          "practice_task": "追踪一次完整中断过程：从 i_INT_n 拉低、int_latched 置位、PC 跳到 0x002、压栈到 IACK 应答与 int_latched 清零，画出时序。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "控制类与辅助寄存器类指令译码",
+          "order": 4,
+          "filename": "u3-l4-control-and-aux-instructions.md",
+          "level": "advanced",
+          "topic": "剖析控制类指令（NOP/DINT/EINT/LST/POP/PUSH/SOVM/ROVM/SSR）与辅助寄存器类指令（LAR/LARK/MAR/LARP/LDP/LDPK/SAR）的微码译码。",
+          "learning_goals": [
+            "理解控制类指令如何通过 set/rst 信号修改状态位",
+            "掌握 LAR/LARK 加载辅助寄存器与 SAR 存储的译码",
+            "弄清 LST/SSR 对状态寄存器各位的读写映射"
+          ],
+          "source_files": [
+            "src/IKA32010.sv",
+            "src/IKA32010_mnemonics.sv"
+          ],
+          "minimal_modules": [
+            "控制类指令 casez 分支",
+            "辅助寄存器类指令 casez 分支",
+            "状态位 set/rst 控制"
+          ],
+          "practice_task": "为 LST 与 SSR 两条指令分别列出它们读写的状态位（V/OVM/INTM/ARP/DP），核对源码实现与用户手册描述是否一致。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l4",
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "累加器算术逻辑类指令译码",
+          "order": 5,
+          "filename": "u3-l5-accumulator-instructions.md",
+          "level": "advanced",
+          "topic": "剖析累加器类指令（ABS/ADD/ADDH/ADDS/AND/LAC/LACK/OR/SACH/SACL/SUB/SUBC/SUBH/SUBS/XOR/ZAC/ZALH/ZALS）如何驱动 ALU、移位器与 RAM。",
+          "learning_goals": [
+            "理解算术指令如何设置 alu_modesel/sha_amt/alu_acc_ld",
+            "掌握逻辑指令（AND/OR/XOR）对 port B 低字的掩码选择",
+            "弄清 SACH/SACL 等存储指令如何用移位器 B 与 ram_wr 配合"
+          ],
+          "source_files": [
+            "src/IKA32010.sv",
+            "src/IKA32010_mnemonics.sv"
+          ],
+          "minimal_modules": [
+            "累加器类指令 casez 分支",
+            "ALU/移位器控制信号",
+            "RAM 写控制"
+          ],
+          "practice_task": "选择 ADD、LAC、SACH 三条指令，分别列出它们设置的 alu_modesel、sha_amt、alu_paz/pbz、alu_pbdata 与 ram_wr，解释数据如何从 RAM 流到 ACC 再回到 RAM。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "分支与子程序类指令译码",
+          "order": 6,
+          "filename": "u3-l6-branch-and-subroutine-instructions.md",
+          "level": "advanced",
+          "topic": "剖析分支与子程序类指令（B/BANZ/BGEZ/BGZ/BIOZ/BLEZ/BLZ/BNZ/BV/BZ/CALA/CALL/RET）的两相位译码、条件判断与栈操作。",
+          "learning_goals": [
+            "理解分支类指令在 cycle0 取目标地址、cycle1 恢复取指的两相位结构",
+            "掌握各条件分支依据的标志（N/Z/V/AR/BIO）",
+            "弄清 CALL/RET/CALA 如何配合栈完成调用与返回"
+          ],
+          "source_files": [
+            "src/IKA32010.sv",
+            "src/IKA32010_mnemonics.sv"
+          ],
+          "minimal_modules": [
+            "分支类指令 casez 分支",
+            "条件判断逻辑",
+            "栈 push/pop 配合"
+          ],
+          "practice_task": "把 8 条条件分支（BGEZ/BGZ/BLEZ/BLZ/BNZ/BZ/BV/BIOZ）的跳转条件整理成一张“标志取值→是否跳转”的表，并核对源码实现。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2",
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l7",
+          "title": "乘法器与 I/O/数据存储类指令译码",
+          "order": 7,
+          "filename": "u3-l7-multiplier-and-io-instructions.md",
+          "level": "advanced",
+          "topic": "剖析乘法器类指令（APAC/LT/LTA/LTD/MPY/MPYK/PAC/SPAC）与 I/O/数据存储类指令（DMOV/IN/OUT/TBLR/TBLW）的译码。",
+          "learning_goals": [
+            "理解 LT/LTA/LTD/MPY/MPYK 如何驱动乘法器与 T/P 寄存器",
+            "掌握 APAC/PAC/SPAC 如何把 P 寄存器经 ALU 加减到累加器",
+            "弄清 IN/OUT/TBLR/TBLW 如何通过总线控制器与外设/程序区交互"
+          ],
+          "source_files": [
+            "src/IKA32010.sv",
+            "src/IKA32010_mnemonics.sv"
+          ],
+          "minimal_modules": [
+            "乘法器类指令 casez 分支",
+            "I/O/表类指令 casez 分支",
+            "mul_en/总线事务配合"
+          ],
+          "practice_task": "追踪一条 LTD 指令，解释它如何在一个周期内同时完成 LT（加载 T）、APAC（P 加到 ACC）与 DMOV（数据搬移）三件事。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l8",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l8",
+          "title": "反汇编、助记符常量与编译选项",
+          "order": 8,
+          "filename": "u3-l8-disassembly-mnemonics-options.md",
+          "level": "advanced",
+          "topic": "讲解 IKA32010_disasm.sv 的六类反汇编函数、IKA32010_mnemonics.sv 的常量定义，以及 IKA32010_DISASSEMBLY 等编译选项。",
+          "learning_goals": [
+            "理解 disasm_type0~6 各类反汇编函数的适用指令格式",
+            "掌握 mnemonics 文件中 PC/WRBUS/ALU/总线等常量的分类",
+            "弄清 IKA32010_DISASSEMBLY / SHOWID / DEVICE_ID 等宏的开关作用"
+          ],
+          "source_files": [
+            "src/IKA32010_disasm.sv",
+            "src/IKA32010_mnemonics.sv",
+            "src/IKA32010.sv",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "disasm_type0~6 反汇编函数",
+            "mnemonics 常量定义",
+            "条件编译宏定义块"
+          ],
+          "practice_task": "为一条尚未被反汇编函数覆盖的指令（或 INVALID 分支）补写一条 $display 调用，使其在仿真中能打印 PC 与操作码，并验证输出。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l9",
+          "title": "FPGA 综合、外设接口与系统集成",
+          "order": 9,
+          "filename": "u3-l9-fpga-synthesis-and-integration.md",
+          "level": "advanced",
+          "topic": "讲解如何把 IKA32010 集成进更大的 SoC/FPGA 系统：资源占用、乘法器的 DSP 块映射、IN/OUT 外设接口、多 DSP 系统下的 DEVICE_ID 调试。",
+          "learning_goals": [
+            "了解在 Altera/Intel 与 Xilinx FPGA 上的资源占用与 fmax",
+            "理解乘法器与 BRAM 如何被综合工具映射为硬核单元",
+            "掌握用 IN/OUT 端口 PA 地址与外设交互、用 DEVICE_ID 区分多片 DSP"
+          ],
+          "source_files": [
+            "README.md",
+            "src/IKA32010.sv",
+            "src/IKA32010_tb.v"
+          ],
+          "minimal_modules": [
+            "顶层实例化与端口",
+            "IKA32010_multiplier (DSP 映射)",
+            "IN/OUT 外设寻址"
+          ],
+          "practice_task": "在一个新顶层中实例化 IKA32010，外接一段程序 ROM 和一个简单的输出端口（PA），编写一段 DSP 程序用 OUT 指令输出数据并在仿真中观察端口波形。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l3",
+            "u2-l8"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
