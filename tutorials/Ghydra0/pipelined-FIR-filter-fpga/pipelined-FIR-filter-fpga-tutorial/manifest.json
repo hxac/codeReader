@@ -1,0 +1,82 @@
+{
+  "project": "pipelined-FIR-filter-fpga",
+  "head": "4c6aedf850b021e36fcb0a3d86e0902704594eeb",
+  "rationale": "本项目是一个小型的 FPGA 流水线 FIR 滤波器实现（Verilog + Vivado，目标器件 Nexys A7-100T / Artix-7），核心只有 6 个源文件加 TCL 与约束。因此学习手册采用「小型项目 8–15 篇」的规模，共 11 篇讲义，分三层递进：第一层（入门）先让读者从零认识项目定位、克隆运行方式、目录结构与顶层模块的黑盒视图；第二层（进阶）自底向上拆解叶子模块 adder/delay、Q15 定点乘法器 multiplier、单级流水线抽头 fir_tap，再回到顶层解释 generate 块如何把多个 tap 串成一条流水线；第三层（专家）聚焦验证（testbench）、参数化滤波器设计实践、流水线时序与延迟分析，以及 FPGA 约束与综合。这样安排遵循「先整体后局部、先组合逻辑后时序逻辑、先模块后链路、先读懂后动手改」的认知顺序，依赖关系清晰：顶层接口 → 叶子模块 → 单级 tap → tap 链 → 验证/扩展/综合。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识项目与运行方式",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览与 FIR 滤波器入门",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍项目是什么（FPGA 上的流水线 FIR 滤波器）、如何克隆与运行，并用最直白的方式解释 FIR 滤波器在做什么。",
+          "learning_goals": [
+            "理解项目的定位：用 Verilog 在 FPGA 上实现一个流水线 FIR 滤波器",
+            "掌握从 README 获取的运行方式（Vivado TCL 重建或直接添加源文件）",
+            "能用一句话讲清 FIR 滤波器（加权求和）的基本含义"
+          ],
+          "source_files": [
+            "README.md",
+            "Fir_filter.tcl"
+          ],
+          "minimal_modules": [
+            "项目定位",
+            "运行方式",
+            "FIR 滤波器概念"
+          ],
+          "practice_task": "克隆仓库，从 README 中找出顶层模块名、默认滤波器类型（moving average）与默认系数；用一句中文写出 FIR 滤波器对输入序列做了什么运算。",
+          "depends_on": [],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：核心模块与流水线数据流",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "目录结构与 Vivado 工程构建",
+          "order": 2,
+          "filename": "u1-l2-build-and-structure.md",
+          "level": "beginner",
+          "topic": "讲解项目目录组织（srcs/sources_1、constrs_1）、Vivado 工程如何用 Fir_filter.tcl 重建、目标器件与 XDC 约束文件的作用。",
+          "learning_goals": [
+            "了解 srcs/constrs 目录的组织方式和各源文件的归类",
+            "理解 Fir_filter.tcl 如何重建 Vivado 工程（part、top、fileset、runs）",
+            "知道目标器件 xc7a100tcsg324-1（Nexys A7-100T）和 XDC 约束的作用"
+          ],
+          "source_files": [
+            "Fir_filter.tcl",
+            "Fir_filter.srcs/constrs_1/imports/Vivado_projects/Nexys-A7-100T-Master.xdc"
+          ],
+          "minimal_modules": [
+            "目录结构",
+            "TCL 工程重建",
+            "XDC 约束"
+          ],
+          "practice_task": "阅读 Fir_filter.tcl，找出工程使用的目标 part、综合/实现顶层（top=fir_filter）与仿真顶层（top=fir_filter_tb）；说明 XDC 文件中为什么所有约束行都被注释掉。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "专家：验证、扩展与综合",
+      "level": "advanced",
+      "order": 3,
+      "lectures": []
+    }
+  ]
+}
