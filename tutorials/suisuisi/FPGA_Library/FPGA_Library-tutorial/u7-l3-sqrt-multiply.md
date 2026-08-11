@@ -2,444 +2,462 @@
 
 ## 1. 本讲目标
 
-本讲属于「FPGA 数学运算」进阶篇，承接 [u7-l1（定点数与 Q 格式）](u7-l1-number-representation.md)。读完后你应该能够：
+本讲是 Unit 7（FPGA 数学运算）的第三篇，承接 [u7-l1 数的表示与定点数](u7-l1-number-representation.md) 与 [u7-l2 有符号定点除法器](u7-l2-signed-division.md)。学完本讲，你应当能够：
 
-- 说清楚「逐位求平方根（digit-by-digit square root）」的数学递推关系，并解释为什么它必须做成多周期状态机；
-- 对照 [sqrt_int.sv](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt_int.sv)（整数版）与 [sqrt.sv](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt.sv)（定点版），讲出两者在迭代次数 `ITER` 上的关键差异及其原因；
-- 看懂 [mul.sv](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/mul.sv) 如何用一行 `a1 * b1` 让综合工具推断出 DSP48 硬核乘法器，并理解它如何完成定点缩放、高斯舍入与溢出检测。
-
-一句话定位：**平方根靠「迭代」一拍出一位、与除法同族；乘法靠「DSP」单拍出结果、但需要补上定点舍入与溢出处理。** 这一对比是本讲的主线。
+- 说清楚**逐位迭代求根**（digit-recurrence square root）的数学原理：为什么每次处理被开方数的 2 个比特、为什么试减项是 \(4q+1\)。
+- 读懂 projf 的整数平方根 `sqrt_int.sv` 与定点平方根 `sqrt.sv`，并解释两者**只在迭代次数公式上差一行**的原因。
+- 读懂 `mul.sv` 的 `IDLE/CALC/TRUNC/ROUND` 四状态机，理解有符号定点乘法如何截位、做高斯舍入（round half to even）与溢出检测。
+- 解释为什么 Verilog 里一句 `a * b`（有符号）会被综合工具自动映射到 Xilinx 的 **DSP48** 硬核，而不是用 LUT 拼出一个乘法器。
+- 为 `sqrt_int.sv` 写一个能自检的 testbench，并用综合报告确认 `mul.sv` 走的是 DSP 通路。
 
 ## 2. 前置知识
 
-本讲默认你已掌握 u7-l1 的概念，这里做一次最小回顾：
+本讲默认你已经掌握 u7-l1 与 u7-l2 的内容。这里快速回顾几个会反复用到的概念：
 
-- **二进制补码与 `signed`**：同一串比特在无符号与有符号下数值不同；`signed` 关键字改变运算语义（符号扩展、算术比较）。projf 库把算术端口统一标 `signed`。
-- **Q 格式定点数**：用 `WIDTH`（总位宽）与 `FBITS`（小数位）约定，整数位 `IBITS = WIDTH − FBITS`（含一位符号）。小数点只是设计者心中的隐含位置，底层全是整数运算。本讲的两个模块（sqrt、mul）都带 `FBITS` 参数。
-- **乘法的小数位翻倍**：两个 Q(WIDTH).(FBITS) 数相乘，乘积是 Q(2·WIDTH).(2·FBITS)，小数位翻倍，必须截回原格式。
-- **高斯舍入（round half to even，向偶舍入）**：当被丢弃部分恰好等于 0.5 ULP 时，向「最近的偶数」舍入，以消除统计偏差。u7-l2 的除法器也用了同一套舍入。
+- **二进制补码与符号扩展**：同一个比特串在 `unsigned` 和 `signed` 下数值不同；有符号数扩展靠复制符号位。
+- **定点数 Q 格式**：用 `WIDTH`（总位宽）与 `FBITS`（小数位）约定，整数位 `IBITS = WIDTH - FBITS`（含符号位）。小数点只是设计者心中的隐含位置，底层全是整数运算。
+- **乘法后小数位翻倍**：两个 `FBITS` 小数位的定点数相乘，乘积有 `2*FBITS` 个小数位，必须右移截回原格式；u7-l2 的除法器用「高斯舍入」消除统计偏差，本讲的乘法器沿用同一套舍入思想。
+- **多周期状态机**：除法、开方这类「逐位产生结果」的运算不能一拍算完，必须做成多周期状态机（u7-l2 的 `div.sv` 已经见过 `IDLE/INIT/CALC/ROUND/SIGN`）。
+- **DSP48**：Xilinx 7 系列 FPGA 内置的硬核乘加单元，含一个 \(18\times25\)（部分模式 \(18\times18\)）有符号乘法器与累加器。用 LUT 拼乘法器又慢又费资源，所以工程上几乎总是让乘法走 DSP。
 
-此外请回忆一个常识：**FPGA 里乘法和除法实现成本天差地别**。Xilinx 7 系列 FPGA 每片内建大量 DSP48E1 切片，自带一个 25×18 位有符号硬件乘法器，做一次乘法只要一拍；而除法、开方没有专用硬核，必须用移位-比较的迭代状态机一拍出一位。本讲正是围绕这一不对称展开。
+一个总纲性的认知：**除法、开方是「迭代型」运算（必须多周期），乘法是「组合型」运算（一拍可完成，但通常打一拍寄存以改善时序）**。本讲的主角恰好各占一类。
 
 ## 3. 本讲源码地图
 
-本讲四个最小模块全部来自 projf 库的 `lib/maths/` 分区，外加两个现成 testbench：
+本讲全部源码都在 projf 数学库 `ThreePart/projf-explore/lib/maths/` 下：
 
-| 文件 | 作用 | 本讲对应模块 |
-|------|------|--------------|
-| `ThreePart/projf-explore/lib/maths/sqrt_int.sv` | 整数平方根，逐位迭代 | 4.2 |
-| `ThreePart/projf-explore/lib/maths/sqrt.sv` | 定点平方根，多迭代位补小数 | 4.3 |
-| `ThreePart/projf-explore/lib/maths/mul.sv` | 有符号定点乘法，高斯舍入，映射 DSP48 | 4.4 |
-| `ThreePart/projf-explore/lib/maths/README.md` | maths 分区模块清单与博客索引 | 全讲索引 |
-| `ThreePart/projf-explore/lib/maths/xc7/sqrt_int_tb.sv` | 整数平方根的 Vivado/Icarus testbench | 4.2 实践 |
-| `ThreePart/projf-explore/lib/maths/xc7/sqrt_tb.sv` | 定点平方根（Q8.8）testbench | 4.3 实践 |
-| `ThreePart/projf-explore/lib/maths/test/mul.py` + `mul.mk` | mul 的 cocotb（Python）功能测试 | 4.4 实践 |
+| 文件 | 作用 | 行数 |
+| --- | --- | --- |
+| [sqrt_int.sv](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt_int.sv) | 整数平方根（逐位迭代求根） | 59 行 |
+| [sqrt.sv](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt.sv) | 定点平方根（与 `sqrt_int` 同构，仅迭代次数不同） | 62 行 |
+| [mul.sv](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/mul.sv) | 有符号定点乘法 + 高斯舍入 + 溢出检测 | 105 行 |
+| [README.md](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/README.md) | 数学库总览，列出所有模块、测试与配套博客 | 58 行 |
 
-贯穿全讲的「迭代求根」数学原理（模块 4.1）不对应单个文件，而是 4.2/4.3 两个 `.sv` 文件共享的算法内核。
+配套的验证资产（实践环节会用到）：
+
+| 文件 | 作用 |
+| --- | --- |
+| [xc7/sqrt_int_tb.sv](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/xc7/sqrt_int_tb.sv) | 整数平方根的 Vivado testbench，用 `$monitor` 打印 6 组激励 |
+| [xc7/sqrt_tb.sv](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/xc7/sqrt_tb.sv) | 定点平方根 testbench（WIDTH=16, FBITS=8） |
+| [test/mul.py](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/test/mul.py) | 乘法器的 cocotb 测试，含舍入、溢出等用例 |
+| [test/mul.mk](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/test/mul.mk) | 乘法器 cocotb 的 Makefile（设 WIDTH=9, FBITS=4） |
+
+> 提示：projf 的 `README.md` 明确说开方原理详见博客 [Square Root](https://projectf.io/posts/square-root-in-verilog/)，乘法/除法的配套博客是 [Verilog Library](https://projectf.io/verilog-lib/)。本讲只基于仓库内真实源码讲解，博客作为延伸阅读。
 
 ---
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 逐位求平方根的数学原理（迭代求根）
+### 4.1 逐位迭代求根：整数平方根 sqrt_int
 
 #### 4.1.1 概念说明
 
-求一个数的平方根，在软件里通常直接调 `sqrt()`；但在硬件里没有「开方硬核」，必须自己算。最经典、最适合硬件的方法是 **逐位求平方根（digit-by-digit square root）**，也叫 **不恢复余数法 / 数字递推法**。它和手工做除法的姿势非常像：**从被开方数的最高位开始，每次取 2 个比特，每拍确定 1 个结果比特**。
+开方在硬件里为什么必须做成多周期？因为平方根**没有友好的组合电路**——不像加法一拍就能算完。开方本质上和除法一样，是一个「逐位确定结果」的过程：结果的每一位都要靠一次试减（trial subtraction）来判断是 0 还是 1，所以它必然是一个迭代型状态机。
 
-为什么「每次 2 个比特、每拍 1 个结果比特」？因为一个 N 位的数，其平方根最多只有 N/2 位（\(\sqrt{2^{N}} = 2^{N/2}\)）。所以每处理被开方数的 2 个比特，正好对应根的 1 个比特。
+回忆十进制下的「笔算开方」（schoolbook square root）：把被开方数从右往左**两位一组**分组，然后像长除法一样一组一组地处理。二进制下完全一样，只是「两位一组」变成「**两比特一组**」——这是因为给一个数补两个低位 0 等于乘以 4，而 \((2q)^2 = 4q^2\)，根翻倍则平方翻 4 倍，正好对上。这就是「每次处理 2 个比特」的数学根源。
 
-这个方法的吸引力在于：**全程只用减法、比较和移位，完全不需要乘法器**——这对没有 DSP 资源的小 FPGA（或想省 DSP 给别处用的设计）非常友好。
+核心代数恒等式（理解整个算法的关键）：
+
+\[
+(2q+1)^2 = 4q^2 + 4q + 1
+\]
+
+设当前已经确定的部分根是 \(q\)（已经处理的比特），剩余的「部分余数」为 \(r\)。当我们再吃进 2 个被开方数比特后，新的待试余数变成 \(4r\)（左移 2 位）。要判断下一位根能否取 1（即新根变成 \(2q+1\)），就看：
+
+\[
+4r - (4q + 1) \;\ge\; 0 \;?
+\]
+
+- 若 \(\ge 0\)：下一位根取 **1**，新部分根为 \(2q+1\)，新余数更新为 \(4r-(4q+1)\)。
+- 若 \(< 0\)：下一位根取 **0**，新部分根为 \(2q\)，余数不变（不试减成功就不动）。
+
+其中那个 \((4q+1)\) 在硬件里就是一个位拼接：`{q, 2'b01}`（把 \(q\) 左移 2 位、末尾补 01，数值上就是 \(4q+1\)）。这就是 `sqrt_int.sv` 里 `ac - {q, 2'b01}` 这一句的全部含义。
+
+由于 WIDTH 位的被开方数最多能开出一个 WIDTH/2 位的根（因为 \((2^{WIDTH/2})^2 = 2^{WIDTH}\)），所以迭代次数恰为：
+
+\[
+\text{ITER} = \text{WIDTH} \div 2
+\]
 
 #### 4.1.2 核心流程
 
-设被开方数为 \(X\)。我们维护两个量：
+`sqrt_int` 是一个不带显式 `enum` 状态机的「隐式两态」设计：靠 `start`/`busy`/`valid` 三个握手信号驱动。流程如下：
 
-- \(p_k\)：第 \(k\) 步结束后已确定的根（高位部分），共 \(k\) 位；
-- \(R_k\)：第 \(k\) 步的 **部分余数**，满足不变式
+1. **启动（`start` 拉高一拍）**：把被开方数 `rad` 装进一个宽移位寄存器 `{ac, x}`，清零部分根 `q` 与计数器 `i`，置 `busy=1`。
+2. **迭代（每拍一次，共 ITER 次）**：
+   - 组合逻辑计算试减结果 `test_res = ac - {q, 2'b01}`；
+   - 看 `test_res` 的最高位（符号位）判断够不够减；
+   - 够减：更新余数、根末位上 1；
+   - 不够减：余数不变、根末位上 0；
+   - 同时 `{ac, x}` 整体左移 2 位，把 `x` 里的下两个被开方数比特「拉下来」喂给 `ac`。
+3. **结束（`i == ITER-1`）**：`busy=0`、`valid=1`，输出最终 `root` 与 `rem`（余数，需撤销最后一次左移）。
 
-\[
-\text{(已处理的 } 2k \text{ 个高位比特)} \;=\; p_k^{\,2} \;+\; R_k
-\]
+一次完整计算的拍数 = 启动 1 拍 + ITER 拍迭代（末拍同时出结果）。对于默认 WIDTH=8，ITER=4，约 5 拍出结果。
 
-即「处理过的那部分被开方数 = 已得根的平方 + 余数」。
+#### 4.1.3 源码精读
 
-每一步把被开方数的下 2 个比特 \(b\)「拉下来」（相当于把已处理部分左移 2 位再补 \(b\)），新的部分余数变为：
+先看端口与参数。模块只有一个参数 `WIDTH`（被开方数位宽），输入 `clk`/`start`/`rad`，输出 `busy`/`valid`/`root`/`rem`——典型的「启动-忙-有效」三握手多周期接口：
 
-\[
-R'_k \;=\; 4\,R_k \;+\; b
-\]
+[sqrt_int.sv:8-16](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt_int.sv#L8-L16) —— `sqrt_int` 的端口与参数声明。注意没有 `rst` 复位端口，复位靠 `start` 重新装初值完成。
 
-然后判断「下一个根比特能否取 1」。若取 1，新根 \(p_{k+1} = 2p_k + 1\)，要求新余数非负：
+接着是工作寄存器。这里有三个关键寄存器，理解它们的位宽与拼法是读懂算法的核心：
 
-\[
-R_{k+1} = R'_k - (4p_k + 1) \;\ge\; 0 \;\;?
-\]
+[sqrt_int.sv:18-24](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt_int.sv#L18-L24) —— 工作寄存器声明。要点：
 
-- **若成立**：这一位根 = 1，\(p_{k+1} = 2p_k + 1\)，\(R_{k+1} = R'_k - (4p_k+1)\)；
-- **若不成立**：这一位根 = 0，\(p_{k+1} = 2p_k\)，\(R_{k+1} = R'_k\)（余数不变）。
+- `x`：被开方数的副本（WIDTH 位），每拍左移 2 位，负责把比特源源不断「喂」给累加器。
+- `q`：正在逐位生长的部分根（WIDTH 位，实际只用低 ITER 位）。
+- `ac`：累加器/部分余数，**比 WIDTH 宽 2 位**（`WIDTH+2`），用来容纳试减时的中间结果与符号位判断。
+- `test_res`：试减的纯组合结果（`WIDTH+2` 位），看它的最高位 `test_res[WIDTH+1]` 判断正负。
+- `ITER = WIDTH >> 1`：迭代次数恰好是位宽的一半。
 
-式子里的 \((4p_k+1)\) 正是判别核心。用伪代码概括：
+核心的试减与根生长逻辑在 `always_comb` 里，只有短短 9 行，但浓缩了 4.1.1 的全部数学：
 
-```
-R = 0; p = 0
-for k = 0 .. N/2-1:
-    b = 取出下 2 个高位比特
-    R = 4*R + b            # 拉下 2 比特（左移）
-    if R >= 4*p + 1:       # 能减吗？
-        R = R - (4*p + 1)  # 够减：本位根 = 1
-        p = 2*p + 1
-    else:                  # 不够减：本位根 = 0
-        p = 2*p            # 余数 R 不变
-return p, R                # 根与最终余数
-```
+[sqrt_int.sv:26-35](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt_int.sv#L26-L35) —— 试减与根生长的组合逻辑。逐句对照：
 
-**关键观察**：判别式里出现的是 \(4p_k+1\)，而 \(4p_k\) 就是把 \(p_k\) 左移 2 位——这正是硬件里 `{q, 2'b01}` 的来历（见 4.2.3）。整个递推只用「移位、减法、比较符号位」，所以能做成面积很小的迭代数据通路。
+- `test_res = ac - {q, 2'b01};` —— 计算 \(4r-(4q+1)\)。`{q, 2'b01}` 就是位拼接的 \(4q+1\)。
+- `if (test_res[WIDTH+1] == 0)` —— 检查最高位（符号位）是否为 0，即结果是否 \(\ge 0\)。
+- 够减分支：`{ac_next, x_next} = {test_res[WIDTH-1:0], x, 2'b0};` —— 新余数取试减结果，`{ac, x}` 整体左移 2 位（把 `x` 的高 2 位挤进 `ac`，`x` 低位补 0）；`q_next = {q[WIDTH-2:0], 1'b1};` —— 根末位上 1（等价于 \(q \leftarrow 2q+1\)）。
+- 不够减分支：余数取旧的 `ac`（不试减），根 `q_next = q << 1;` —— 末位上 0（\(q \leftarrow 2q\)）。
 
-#### 4.1.3 一个完整的手算追踪（rad = 81）
+时序部分用 `always_ff` 维护状态与寄存器更新：
 
-被开方数 81 = `0101_0001`，从最高位每 2 位一组：`01`、`01`、`00`、`01`。逐位求根：
+[sqrt_int.sv:37-43](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt_int.sv#L37-L43) —— `start` 装初值。关键是其中的 `{ac, x} <= {{WIDTH{1'b0}}, rad, 2'b0};`：把 `rad` 放进移位寄存器的中段，`ac` 高位补 0、`x` 低位补 0，并预先把 `rad` 的最高 2 比特送入 `ac` 的低位，为第一次试减做好准备。
 
-| 步 | 拉下的 2 比特 \(b\) | 拉下后余数 \(R'=4R_{prev}+b\) | 判别 \(4p+1\) | 够减？ | 本位根 | 新根 \(p\) | 新余数 \(R\) |
-|----|------|------|------|------|------|------|------|
-| 0 | `01` (1)  | 1  | 4·0+1 = 1   | 1 ≥ 1 是 | 1 | 1  | 0 |
-| 1 | `01` (1)  | 1  | 4·1+1 = 5   | 1 ≥ 5 否 | 0 | 2  | 1 |
-| 2 | `00` (0)  | 4  | 4·2+1 = 9   | 4 ≥ 9 否 | 0 | 4  | 4 |
-| 3 | `01` (1)  | 17 | 4·4+1 = 17  | 17 ≥ 17 是| 1 | 9  | 0 |
+[sqrt_int.sv:44-55](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt_int.sv#L44-L55) —— 迭代主循环。当 `i == ITER-1`（最后一拍）时：`busy<=0; valid<=1;`，把组合逻辑算出的 `q_next` 锁存为最终 `root`，并把 `ac_next[WIDTH+1:2]` 作为 `rem`——这里 `[WIDTH+1:2]` 右舍 2 位正是注释所说的「undo final shift」（撤销最后一次左移 2 位，还原真实余数）。
 
-结果：根 \(p = 9\)，余数 \(R = 0\)，即 \(\sqrt{81} = 9\) 且开尽。验证 \(9^2 = 81\) ✓。这正是 4.2 实践中 testbench 的一个激励（`rad = 8'b01010001`），也是硬件每一拍要做的事。
+**一个具体数字（来自自带 testbench）**：取 `rad = 8'b01011010 = 90`。手算可知 \(9^2=81 \le 90 < 100=10^2\)，所以 `root=9`、`rem=90-81=9`。第一次试减时 `ac` 初值为 1（`rad` 最高 2 比特 `01`），`{q,01}=1`，`test_res=0 \ge 0`，故根的最高位上 1——与「根=9=1001₂，最高位为 1」一致。其余 3 次迭代同理逐位确定剩下的 `001`，最终得到 `root=9, rem=9`。这个结果可直接用 [xc7/sqrt_int_tb.sv:48-50](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/xc7/sqrt_int_tb.sv#L48-L50) 仿真验证。
 
 #### 4.1.4 代码实践
 
-**目标**：用上面递推关系，手算 \(\sqrt{90}\) 并判断余数，为读硬件实现建立直觉。
+> **实践目标**：为 `sqrt_int.sv` 写一个**自检 testbench**，对若干输入求整数平方根并自动断言结果正确。
+
+仓库自带的 [xc7/sqrt_int_tb.sv](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/xc7/sqrt_int_tb.sv) 只用 `$monitor` 打印结果，**不自动判对错**（要靠人眼看波形/日志）。我们改进它，加入 `$error` 断言。
 
 **操作步骤**：
 
-1. 90 = `0101_1010`，2 位一组：`01`、`01`、`10`、`10`。
-2. 按 4.1.3 的表格逐行填出 \(R'\)、判别 \(4p+1\)、本位根、新 \(p\)、新 \(R\)。
-3. 收敛后写出根与余数。
+1. 复制 `xc7/sqrt_int_tb.sv` 为一份新文件（例如 `sqrt_int_selfcheck_tb.sv`，放在你自己的工作目录，**不要改动 projf 源码**）。
+2. 把每个激励改成「施加 `start` → 等待 `valid` → 检查 `root` 与 `rem`」的子任务调用，并用黄金期望值断言。
+3. 期望值提前用任何语言算好（也可心算）：\(\text{root}=\lfloor\sqrt{\text{rad}}\rfloor\)，\(\text{rem}=\text{rad}-\text{root}^2\)。
 
-**需要观察的现象**：根应当落在 9 与 10 之间（整数开方取下整），余数恰好反映 \(90 - 9^2\)。
+下面是**示例代码**（不是 projf 原有文件，仅作参考骨架，参数 WIDTH=8）：
 
-**预期结果**：\(\sqrt{90}\) 整数根 = 9，余数 = \(90 - 81 = 9\)。（待本地验证：可以用 Python `isqrt(90)` 得 9 对照。）
+```verilog
+// 示例代码：sqrt_int 的自检 testbench 骨架
+task automatic do_sqrt(input [7:0] rad_in, input [7:0] exp_root, input [7:0] exp_rem);
+    rad = rad_in; start = 1;
+    @(posedge clk); start = 0;        // start 仅拉高一拍
+    wait (valid == 1);                 // 等待计算完成
+    @(posedge clk);                    // 让 valid 稳定采样
+    if (root !== exp_root || rem !== exp_rem)
+        $error("sqrt(%0d): got root=%0d rem=%0d, expected root=%0d rem=%0d",
+               rad_in, root, rem, exp_root, exp_rem);
+    else
+        $display("sqrt(%0d) = %0d rem %0d  [OK]", rad_in, root, rem);
+endtask
+
+// 在 initial 块里依次调用（期望值已手算）：
+// do_sqrt(8'd0,   8'd0,  8'd0);   // sqrt(0)=0
+// do_sqrt(8'd1,   8'd1,  8'd0);   // sqrt(1)=1
+// do_sqrt(8'd90,  8'd9,  8'd9);   // 9^2=81, rem=9
+// do_sqrt(8'd81,  8'd9,  8'd0);   // 完全平方
+// do_sqrt(8'd121, 8'd11, 8'd0);   // 11^2=121
+// do_sqrt(8'd255, 8'd15, 8'd30);  // 15^2=225, rem=30
+```
+
+**需要观察的现象**：每完成一次开方，`busy` 在计算期间为 1、`valid` 在末拍拉高；日志应打印 6 行 `[OK]`。
+
+**预期结果**：对 WIDTH=8，每次计算约 5 个时钟周期（1 拍启动 + 4 拍迭代）；上表 6 组全部通过。
+
+**如果你无法本地运行仿真**：明确标注「待本地验证」。你也可以退而用 Verilator 或 Icarus Verilog 命令行跑：`iverilog -g2012 -o sim sqrt_int.sv sqrt_int_selfcheck_tb.sv && vvp sim`（`-g2012` 开启 SystemVerilog 子集，因为源码用了 `logic`/`always_comb`/`always_ff`）。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么逐位开方每步处理 2 个被开方数比特、却只产生 1 个根比特？  
-**答**：因为根的最大位宽是被开方数位宽的一半（\(\sqrt{2^N} = 2^{N/2}\)）。2 比特输入恰好对应 1 比特输出，保持数据流平衡。
+**练习 1**：把 `WIDTH` 从 8 改成 16，迭代次数 `ITER` 变成多少？一次计算大约要多少拍？
 
-**练习 2**：把判别条件 \(R' \geq 4p+1\) 改写成「移位 + 减法 + 看符号位」的形式。  
-**答**：计算 `test = R' − {p, 2'b01}`（即 \(R' − (4p+1)\)），看 `test` 的符号位（最高位）：为 0 表示非负、够减、本位根取 1；为 1 表示负、不够减、本位根取 0。这正是 4.2.3 硬件里的 `test_res` 判别。
+> **答案**：`ITER = 16 >> 1 = 8`，约 1+8=9 拍出结果。根最多 8 位（\(\sqrt{65535}\approx255.99\)，最大根 255）。
 
-**练习 3**：这个算法最坏要做多少拍才能算完一个 `WIDTH` 位整数？  
-**答**：`WIDTH/2` 拍（`ITER = WIDTH>>1`）。因为根最多 `WIDTH/2` 位，每拍定 1 位。
+**练习 2**：试减项为什么是 `{q, 2'b01}`（即 \(4q+1\)）而不是 `{q, 2'b11}`（即 \(4q+3\)）？用 4.1.1 的恒等式说明。
+
+> **答案**：由 \((2q+1)^2 = 4q^2 + 4q + 1\)，当部分根从 \(q\) 变成 \(2q+1\) 时，平方值增加了 \(4q+1\)。已处理部分贡献了 \(q^2\)，故新增的待减量正是 \(4q+1\)，对应位拼接 `{q, 2'b01}`。`4q+3` 不对应任何一步的代数增量。
+
+**练习 3**：`rem <= ac_next[WIDTH+1:2];` 为什么要从第 2 位开始截取（而不是从第 0 位）？
+
+> **答案**：最后一拍 `always_comb` 仍对 `{ac, x}` 做了一次左移 2 位，使 `ac_next` 里的余数被放大了 4 倍。截取 `[WIDTH+1:2]`（丢弃最低 2 位）等于除以 4，即注释「undo final shift」，还原真实余数。
 
 ---
 
-### 4.2 sqrt_int：整数平方根的硬件实现
+### 4.2 定点平方根 sqrt：同构不同参
 
 #### 4.2.1 概念说明
 
-[sqrt_int.sv](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt_int.sv) 把 4.1 的递推关系落地为 Verilog。它只接受 **无符号整数** 被开方数，输出整数根与余数。模块接口遵循 projf maths 库统一的「启动-握手」范式：`start` 拉高启动，`busy` 表示计算中，`valid` 拉高表示 `root`/`rem` 可用——和 u7-l2 的除法器完全同构，方便上层用同一套时序逻辑串起来。
+`sqrt.sv` 处理的是**定点数**开方。被开方数是 WIDTH 位、含 FBITS 个小数位的定点数，真实数值为 \(\text{rad}/2^{\text{FBITS}}\)。问题是：定点开方后，小数位会「减半」——\(\sqrt{x}\) 把数值的尺度开方，小数位本应变成 FBITS/2。
+
+projf 的做法是：保持输出仍是 WIDTH 位、FBITS 个小数位的定点格式，那么输出 `root` 表示的数值应满足：
+
+\[
+\left(\frac{\text{root}}{2^{\text{FBITS}}}\right)^2 = \frac{\text{rad}}{2^{\text{FBITS}}}
+\quad\Longrightarrow\quad
+\text{root}^2 = \text{rad} \cdot 2^{\text{FBITS}}
+\]
+
+也就是说，硬件实际要算的是整数 \(\text{rad}\cdot 2^{\text{FBITS}}\) 的平方根。这个「放大 \(2^{\text{FBITS}}\)」在代码里**不靠额外乘法实现**，而是靠「多跑 FBITS/2 次迭代」：因为移位寄存器 `x` 只有 WIDTH 位，当真实的 `rad` 比特被消耗完后，后续迭代会继续从 `x` 拉下 0——这等价于在被开方数末尾补 FBITS 个 0，即乘以 \(2^{\text{FBITS}}\)。于是迭代次数变成：
+
+\[
+\text{ITER} = (\text{WIDTH} + \text{FBITS}) \div 2
+\]
 
 #### 4.2.2 核心流程
 
-模块用 **组合递推 + 时序寄存存结果** 的双 `always` 写法（SystemVerilog 风格，见 [u5-l1](u5-l1-verilog-library-overview.md)）：
-
-1. `start` 一来：把被开方数装入移位寄存器 `{ac, x}`（`ac` 是累加器/余数，`x` 是被开方数副本），清零根 `q` 与计数器 `i`，拉高 `busy`。
-2. 每个时钟沿（`busy` 期间）：组合逻辑算出「试探减法」`test_res = ac − {q, 2'b01}`；
-   - 非负 → 这一位根 = 1，`q` 左移补 1，`ac` 取减后的余数；
-   - 为负 → 这一位根 = 0，`q` 左移补 0，`ac` 不变；
-   - 无论哪种，`{ac, x}` 整体左移 2 位，把 `x` 的下 2 个比特「挤」进 `ac` 工作区（对应 4.1 的「拉下 2 比特」）。
-3. 当 `i == ITER-1`（迭代到位）：`busy` 拉低、`valid` 拉高，锁存最终 `root = q_next`、`rem = ac_next[WIDTH+1:2]`（末次左移要除以 4 还原）。
-
-关键点：`ac`（累加器）比被开方数 **宽 2 位**，既为了容纳符号判别，也为了容纳「拉下 2 比特」时不溢出。
+与 `sqrt_int` **完全相同的试减/根生长/移位流程**，唯一区别是 `ITER` 公式不同。这正呼应了 u6-l1 讲显示时序时见过的「**同构不同参**」设计模式：一份算法骨架、靠参数差异化适配多个场景。
 
 #### 4.2.3 源码精读
 
-模块参数与端口——`WIDTH` 默认 8，输入 `rad`、输出 `root`/`rem` 同宽：
+端口多了一个 `FBITS` 参数：
 
-[sqrt_int.sv:8-16](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt_int.sv#L8-L16) —— 声明 `WIDTH` 位被开方数与同宽的根/余数，以及 `start/busy/valid` 握手。
+[sqrt.sv:8-19](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt.sv#L8-L19) —— `sqrt` 的端口声明，新增 `parameter FBITS=0`。
 
-核心数据通路寄存器与迭代次数：
+**全文唯一与 `sqrt_int` 不同的一行**——迭代次数公式：
 
-[sqrt_int.sv:18-24](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt_int.sv#L18-L24) —— `ac` 宽 `WIDTH+2` 位（注释明确 "2 bits wider"），`ITER = WIDTH>>1`（根的位数），计数器 `i` 用 `$clog2(ITER)` 自动算位宽。
+[sqrt.sv:26](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt.sv#L26) —— `localparam ITER = (WIDTH+FBITS) >> 1;`。对比 [sqrt_int.sv:23](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt_int.sv#L23) 的 `ITER = WIDTH >> 1;`，这正是「定点版多跑 FBITS/2 次迭代」的落点。
 
-试探减法与根位决策（组合逻辑）：
+除此之外，[sqrt.sv:29-38](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt.sv#L29-L38) 的 `always_comb` 与 [sqrt.sv:40-60](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt.sv#L40-L60) 的 `always_ff` 与 `sqrt_int` 逐字相同——读者可自行 diff 对照。
 
-```verilog
-test_res = ac - {q, 2'b01};                 // 4.1 里的 R' − (4p+1)
-if (test_res[WIDTH+1] == 0) begin           // 看最高位(符号位)：0 即非负
-    {ac_next, x_next} = {test_res[WIDTH-1:0], x, 2'b0};  // 够减：余数取 test_res
-    q_next = {q[WIDTH-2:0], 1'b1};          // 本位根 = 1（左移补 1）
-end else begin
-    {ac_next, x_next} = {ac[WIDTH-1:0], x, 2'b0};        // 不够减：余数不变
-    q_next = q << 1;                         // 本位根 = 0（左移补 0）
-end
-```
-
-这正是 4.1.5 练习 2 的答案。完整片段见 [sqrt_int.sv:26-35](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt_int.sv#L26-L35)。
-
-注意 `{ac_next, x_next} = {..., x, 2'b0}` 这一句同时做了两件事：把 `x` 左移 2 位（`x_next = x<<2`，吐出最高 2 比特），并把吐出的 2 比特拼到 `ac_next` 末尾——即硬件版的「拉下下 2 个比特到余数工作区」。
-
-时序控制（启动、迭代、收尾）：
-
-[sqrt_int.sv:37-57](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt_int.sv#L37-L57) —— `start` 时初始化 `{ac,x} <= {0, rad, 2'b0}`；`busy` 中每拍推进 `i`、更新 `x/ac/q`；到 `i==ITER-1` 锁存 `root=q_next`、`rem=ac_next[WIDTH+1:2]`（末次整体左移了 2 位，取 `[WIDTH+1:2]` 相当于除以 4 还原真实余数）。
+**一个具体数字（来自自带 testbench）**：取 WIDTH=16、FBITS=8（Q8.8 格式），`rad = 16'b0000_0010_0000_0000 = 512`，表示定点值 \(512/256 = 2.0\)。期望 \(\sqrt{2.0}\approx 1.4142\)。按 4.2.1，硬件算的是 \(\sqrt{512\cdot 256}=\sqrt{131072}\approx 362.0\)（\(362^2=131044 \le 131072 < 363^2=131769\)）。输出 `root=362`，还原成 Q8.8 为 \(362/256\approx 1.414\)，与期望一致。可用 [xc7/sqrt_tb.sv:43-45](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/xc7/sqrt_tb.sv#L43-L45) 仿真验证（该 testbench 用 `SF = 2.0**-8.0` 把定点值换算回浮点打印）。
 
 #### 4.2.4 代码实践
 
-**目标**：用 Icarus Verilog 跑现成 testbench，验证整数平方根功能（本讲主线实践之一）。
+> **实践目标**：对比 `sqrt_int` 与 `sqrt` 在**同一被开方数比特串**下的输出差异，体会 FBITS 的作用。
 
 **操作步骤**：
 
-```bash
-cd ThreePart/projf-explore/lib/maths
-# -g2012 开启 SystemVerilog 子集（logic/always_comb/$clog2 需要）
-iverilog -g2012 -o sqrt_int_sim.vvp xc7/sqrt_int_tb.sv sqrt_int.sv
-vvp sqrt_int_sim.vvp
-```
+1. 同时打开 [sqrt_int_tb.sv](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/xc7/sqrt_int_tb.sv)（WIDTH=8）与 [sqrt_tb.sv](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/xc7/sqrt_tb.sv)（WIDTH=16,FBITS=8）。
+2. 跟踪 `rad = 16'b0000_0010_0000_0000`（定点 2.0）在 `sqrt_tb` 里的输出，确认 `root` 还原后约为 1.414。
+3. 回答：如果把同一个比特串 `0000_0010_0000_0000`（=512）直接喂给 `sqrt_int`（WIDTH=16），`root` 会是多少？为什么与定点版不同？
 
-`xc7/sqrt_int_tb.sv` 的激励来自 [sqrt_int_tb.sv:29-57](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/xc7/sqrt_int_tb.sv#L29-L57)，依次送入 0、1、121、81、90、255。
+**需要观察的现象**：定点版 `sqrt` 输出 362（Q8.8 ≈ 1.414）；整数版 `sqrt_int` 对 512 开方得 22（\(22^2=484\le512<529=23^2\)）。
 
-**需要观察的现象**：`$monitor` 打印的 `sqrt(rad) = root (rem=...) (V=...)`。每个 `start` 脉冲后约 `ITER+1` 拍 `valid` 变 1、`root/rem` 更新。
-
-**预期结果**（WIDTH=8，待本地验证）：
-
-| rad | root | rem |
-|-----|------|-----|
-| 0   | 0  | 0 |
-| 1   | 1  | 0 |
-| 121 | 11 | 0 |
-| 81  | 9  | 0 |
-| 90  | 9  | 9 |
-| 255 | 15 | 30 |
-
-若你用的是 Vivado，可用 `xc7/vivado/` 下的波形配置查看 `ac/q/x` 每拍的变化。
+**预期结果**：两者数值不同，因为定点版隐式算了 \(\sqrt{512\cdot 256}\)，整数版算的是 \(\sqrt{512}\)。这正是 FBITS 通过「多迭代 = 末尾补零 = 乘 \(2^{\text{FBITS}}\)」实现的尺度变换。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：把 `WIDTH` 改成 16 后，`ITER` 与计算延迟如何变化？  
-**答**：`ITER = 16>>1 = 8`，需要 8 个时钟拍（加上启动/收尾各约 1 拍）才能出结果。位宽翻倍，延迟也大致翻倍——这是迭代算法的固有代价。
+**练习 1**：`sqrt` 默认 `FBITS=0`，此时它与 `sqrt_int` 行为是否一致？
 
-**练习 2**：为什么 `ac` 要比 `rad` 宽 2 位（`[WIDTH+1:0]`）？  
-**答**：一是 `test_res = ac − {q,2'b01}` 需要一个符号位来判正负；二是「拉下 2 比特」时 `ac` 要在原有基础上再并入 `x` 吐出的 2 位而不丢失最高位，故预留 2 位余量。
+> **答案**：一致。`FBITS=0` 时 `ITER=(WIDTH+0)>>1=WIDTH>>1`，与 `sqrt_int` 公式相同，且其余逻辑逐字相同，故两者等价。
 
-**练习 3**：`rem <= ac_next[WIDTH+1:2]` 为什么要取 `[WIDTH+1:2]` 而不是整个 `ac_next`？  
-**答**：收尾这一拍 `{ac,x}` 整体多左移了 2 位（即乘了 4），余数被放大 4 倍。取 `[WIDTH+1:2]`（丢掉最低 2 位）正好抵消这次移位，得到真实余数。
+**练习 2**：为什么定点开方后，结果的「小数位」本应是 FBITS/2，而 projf 却能保持 FBITS 位？
+
+> **答案**：因为硬件实际算的是 \(\sqrt{\text{rad}\cdot 2^{\text{FBITS}}}\)（通过多跑 FBITS/2 次迭代隐式实现）。结果整数 \(=\lfloor\sqrt{\text{rad}\cdot 2^{\text{FBITS}}}\rfloor\)，当它被放回 WIDTH 位、FBITS 小数位的格式时，恰好恢复了 FBITS 个小数位的精度。
 
 ---
 
-### 4.3 sqrt：从整数到定点平方根
+### 4.3 有符号定点乘法 mul 与高斯舍入
 
 #### 4.3.1 概念说明
 
-[sqrt.sv](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt.sv) 几乎与 `sqrt_int` 逐字相同，只多了 `FBITS` 参数，支持 **定点小数** 平方根。这是本讲最巧妙的一处：**它没有改算法，只改了迭代次数 `ITER`，就让整数开方升级为定点开方**。
+`mul.sv` 是 projf 数学库里**唯一一个「组合型」核心运算**——乘法本身一拍就能算完（`a * b`），但模块仍做成了多周期状态机。原因不是乘法慢，而是要**在乘法周围包装截位、舍入、溢出检测**，并把这条长组合链拆成几拍以改善时序，同时把结果寄存输出。
 
-原理：被开方数 `rad` 是 Q(WIDTH).(FBITS) 格式，代表值 \(x = \text{rad} / 2^{FBITS}\)。我们想要的根也是 Q(WIDTH).(FBITS)，即 \(r = \text{root}/2^{FBITS}\) 满足 \(r^2 \approx x\)。等价地：
+回顾 u7-l1：两个 WIDTH 位、FBITS 小数位的有符号定点数相乘：
 
-\[
-\text{root}^{\,2} \;\approx\; \text{rad} \times 2^{FBITS}
-\]
+- 乘积位宽翻倍：\(2\times\text{WIDTH}\) 位；
+- 小数位翻倍：\(2\times\text{FBITS}\) 位；
+- 必须截回 WIDTH 位、FBITS 小数位——这既要「截掉多余的小数位」（取中间的一段窗口），又要决定如何处理被截掉的低位（舍入）。
 
-也就是说，定点开方 = 对「`rad` 后面追加 `FBITS` 个 0」的整数开方。追加 `FBITS` 个 0 相当于把被开方数当成 `WIDTH + FBITS` 位的整数来处理，于是根有 \((WIDTH+FBITS)/2\) 位，这正是 `ITER = (WIDTH+FBITS)>>1` 的来历。
+projf 用的是**高斯舍入（round half to even，向偶数舍入）**：当被截部分恰好是 0.5 时，舍入到最近的**偶数**，从而消除「总是向上舍入」带来的统计偏差（u7-l2 的除法器也用同一策略）。例如 2.5 舍入到 2、3.5 舍入到 4。
 
 #### 4.3.2 核心流程
 
-数据通路、试探减法、握手时序与 `sqrt_int` **完全一致**（参见 4.2.2），唯一区别在初始化与迭代计数：
+四状态机 `IDLE → CALC → TRUNC → ROUND`：
 
-- 端口多了 `parameter FBITS`（默认 0，即退化为整数版）；
-- [sqrt.sv:26](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt.sv#L26) —— `ITER = (WIDTH+FBITS) >> 1`，比整数版多 `FBITS/2` 拍。
+1. **IDLE**：等 `start`。来了之后寄存输入 `a1<=a; b1<=b;`、记录两输入符号差 `sig_diff`、置 `busy=1`，进入 CALC。
+2. **CALC**：算全宽乘积 `prod <= a1 * b1;`（\(2\times\text{WIDTH}\) 位有符号），进入 TRUNC。这一拍是把乘法单独隔离，让综合工具能干净地把它映射成一个 DSP。
+3. **TRUNC**：从 `prod` 里截出 WIDTH 位的 `prod_t`（截位窗口见 4.3.3），同时抽出舍入判定所需的比特：舍入位 `round`、偶数判定 `even`、被截低位 `rbits`，进入 ROUND。
+4. **ROUND**：做高斯舍入得到最终 `val`，做溢出检测决定 `valid`/`ovf`，置 `done=1`（仅高一拍）、`busy=0`，回 IDLE。
 
-那「追加 FBITS 个 0」在硬件里怎么体现？看初始化：`{ac, x} <= {{WIDTH{1'b0}}, rad, 2'b0};`——`rad` 装入 `x` 后，每拍左移 2 位。整数版做到 `WIDTH/2` 拍时 `x` 已被移空、根算完；定点版继续多做 `FBITS/2` 拍，此时 `x` 吐出的全是 0（等效于给 `rad` 追加 0），结果根的低 `FBITS` 位自然就是小数部分。
+一次乘法共 3 拍计算（CALC/TRUNC/ROUND）+ 启动过渡。
 
 #### 4.3.3 源码精读
 
-定点版端口与迭代次数：
+端口是标准的「启动-忙-完成-有效-溢出」握手：
 
-[sqrt.sv:8-19](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt.sv#L8-L19) —— 比 `sqrt_int` 多一个 `FBITS` 参数。
+[mul.sv:8-22](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/mul.sv#L8-L22) —— `mul` 端口声明。注意 `a`/`b`/`val` 都标了 `signed`（承接 u7-l1：projf 把端口统一标 signed 以保证符号语义不被混用破坏），且有 `rst` 同步复位与 `ovf` 溢出标志。
 
-关键差异行：
+截位窗口的三个常量是理解 TRUNC 的钥匙：
 
-```verilog
-localparam ITER = (WIDTH+FBITS) >> 1;  // sqrt_int 里是 WIDTH>>1
-```
+[mul.sv:24-30](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/mul.sv#L24-L30) —— 截位与舍入常量。其中 `IBITS = WIDTH - FBITS`（含符号位的整数位，定义见 u7-l1）。由乘积小数位翻倍、需丢掉 FBITS 位可知：
 
-[sqrt.sv:26](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt.sv#L26) —— 唯一的算法性差异。其余 [组合递推](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt.sv#L29-L38) 与 [时序控制](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sqrt.sv#L40-L60) 与 `sqrt_int` 逐字相同。
+- `LSB = WIDTH - IBITS = FBITS`：截位窗口的下界，正好丢掉多余的 FBITS 个小数位；
+- `MSB = 2*WIDTH - IBITS - 1`：上界；
+- 窗口宽度 \(= \text{MSB}-\text{LSB}+1 = \text{WIDTH}\)：截出的 `prod_t` 恰为 WIDTH 位，格式回到 Q(IBITS.FBITS)。
+- `HALF = {1'b1, {FBITS-1{1'b0}}}`：FBITS 位、值为 \(2^{\text{FBITS}-1}\)，即定点小数里的「恰好 0.5」。
 
-工程美感：**用「迭代次数」这一单一参数，把整数开方推广到任意 Q 格式定点开方**，而数据通路硬件零改动。这是参数化设计的典范。
+CALC 阶段，**全文最关键的一行**：
+
+[mul.sv:45-48](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/mul.sv#L45-L48) —— CALC 状态。`prod <= a1 * b1;` 是一句有符号乘法，综合后会被映射到 DSP48（详见 4.4）。它被单独放在一个状态、单独打一拍寄存，是良好的「让乘法成为一颗 DSP」的写法。
+
+TRUNC 阶段把乘积切片：
+
+[mul.sv:49-56](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/mul.sv#L49-L56) —— TRUNC 状态。要点：
+
+- `prod_t <= prod[MSB:LSB];` —— WIDTH 位截位结果；
+- `rbits <= prod[FBITS-1:0];` —— 被丢掉的 FBITS 位（用来判断「是否恰好半值」）；
+- `round <= prod[FBITS-+:1];` —— 即 `prod[FBITS-1]`，紧贴截位窗口下界的那一位，是「0.5 判定线」；
+- `even <= ~prod[FBITS+:1];` —— 即 `~prod[FBITS]`，截位结果的最低位取反；当 `prod[FBITS]==0` 时 `even=1`，表示截位结果是偶数。
+
+ROUND 阶段做高斯舍入：
+
+[mul.sv:57-64](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/mul.sv#L57-L64) —— ROUND 状态的舍入。`val <= (round && !(even && rbits == HALF)) ? prod_t + 1 : prod_t;` 读作：
+
+- 若「舍入位为 0」→ 不进位，直接取 `prod_t`；
+- 若「舍入位为 1」但**不是**「恰好半值且截位结果为偶」→ 进位 `prod_t+1`（四舍五入的常规情形）；
+- 若「恰好半值（`rbits==HALF`）且截位结果为偶（`even`）」→ **不进位**（向偶数靠，这就是 round half to even）。
+
+同一拍还做溢出检测：
+
+[mul.sv:66-74](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/mul.sv#L66-L74) —— 溢出检测。两个条件同时满足才算「未溢出、结果有效」：
+
+1. `sig_diff == prod_t[WIDTH-1+:1]` —— 输入符号差（异或得到的期望积符号）等于实际结果符号位；若不符，说明乘积连符号都翻了，必然溢出；
+2. `prod[2*WIDTH-1:MSB+1] == '0 || prod[2*WIDTH-1:MSB+1] == '1` —— 截位窗口**之上**的高位必须「全 0 或全 1」（即正确的符号扩展）；若既有 0 又有 1，说明有效位被挤出了 WIDTH 位窗口。
+
+满足则 `valid=1, ovf=0`；否则 `valid=0, ovf=1`（如自带 cocotb 测试里 `8*8`、`5*4`、`-7*3` 这三组期望溢出，见 [test/mul.py:211-300](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/test/mul.py#L211-L300)）。
+
+IDLE 启动与符号差寄存：
+
+[mul.sv:76-85](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/mul.sv#L76-L85) —— IDLE 状态。`sig_diff <= (a[WIDTH-1+:1] ^ b[WIDTH-1+:1]);` 记录两输入符号异或。注意 `sig_diff` **只用于溢出检测的符号校验**，并不参与乘法运算——因为 `a1 * b1` 两边都是 `signed`，乘积的符号天然正确（见 4.4.3）。
+
+末尾的 `ifdef COCOTB_SIM` 块（[mul.sv:98-103](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/mul.sv#L98-L103)）是 projf 数学库统一的「在 cocotb 下导出 VCD 波形」开关，承接 [README.md:29-39](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/README.md#L29-L39) 的说明。
 
 #### 4.3.4 代码实践
 
-**目标**：跑定点版 testbench，体会 Q8.8 开方的数值含义。
+> **实践目标**：用仓库自带的 cocotb 测试套件跑 `mul`，观察高斯舍入与溢出行为。
 
 **操作步骤**：
 
-```bash
-cd ThreePart/projf-explore/lib/maths
-iverilog -g2012 -o sqrt_sim.vvp xc7/sqrt_tb.sv sqrt.sv
-vvp sqrt_sim.vvp
-```
+1. 确认本机有 Python、cocotb、Icarus Verilog 与 `FixedPoint`（`pip install cocotb spfpm`，`apt install iverilog`）。
+2. 进入 `ThreePart/projf-explore/lib/maths/test/`，执行 `make -f mul.mk`。Makefile 见 [test/mul.mk](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/test/mul.mk#L14)，它把 WIDTH 设为 9、FBITS 设为 4（`COMPILE_ARGS += -Pmul.WIDTH=9 -Pmul.FBITS=4`）。
+3. 阅读测试用例 [test/mul.py](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/test/mul.py)，重点关注 `round_1`~`round_4`（2.5/3.5/4.5/5.5 × 2.0625，验证向偶舍入）与 `ovf_1`~`ovf_3`（验证溢出）。
+4. 对照 `test_dut_multiply`（[test/mul.py:24-64](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/test/mul.py#L24-L64)）：它用 Python `FXnum` 做黄金参考模型，断言 `val == model_c`，并检查 `busy/done/valid/ovf` 四个握手信号。
 
-testbench 配置见 [sqrt_tb.sv:10-13](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/xc7/sqrt_tb.sv#L10-L13)：`WIDTH=16, FBITS=8`，缩放因子 `SF = 2^-8`，即 Q8.8（8 位整数 + 8 位小数）。激励见 [sqrt_tb.sv:32-46](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/xc7/sqrt_tb.sv#L32-L46)。
+**需要观察的现象**：`round_1`（2.5×2.0625）与 `round_2`（3.5×2.0625）的乘积真值都落在半值附近，DUT 会按「向偶」选择不同方向；`nonbin_4`（3.6×0.6）等用例标了 `expect_fail=True`，因为非二进制有理数无法精确表示，DUT 与模型可能选到真值两侧（这是已知的设计权衡，不是 bug）；`ovf_1`（8×8）等会触发 `valid=0, ovf=1`。
 
-**需要观察的现象**：`$monitor` 用 `$itor(rad*SF)` 把定点数还原成浮点打印，你能直接读到 `sqrt(232.5625) ≈ 15.25`、`sqrt(0.25) = 0.5`、`sqrt(2.0) ≈ 1.414`（受 Q8.8 精度限制）这类结果。
-
-**预期结果**（待本地验证）：
-
-| rad（Q8.8） | 实数值 | root 实数值 |
-|-------------|--------|-------------|
-| `1110_1000_1001_0000` | 232.5625 | ≈15.25 |
-| `0000_0000_0100_0000` | 0.25     | 0.5 |
-| `0000_0010_0000_0000` | 2.0      | ≈1.414（Q8.8 下的近似） |
-
-注意延迟比整数版长：`ITER = (16+8)/2 = 12` 拍。
+**预期结果**：`make -f mul.mk` 跑完，除明确标注 `expect_fail=True` 的用例外全部通过；溢出用例的 `ovf` 被断言为 1。若无法本地运行，标注「待本地验证」。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么定点版 `ITER = (WIDTH+FBITS)/2` 而不是 `WIDTH/2`？  
-**答**：定点开方等价于对 `rad·2^FBITS` 做整数开方，被开方数有效位变成 `WIDTH+FBITS`，根位数随之变成 `(WIDTH+FBITS)/2`，故需相应迭代次数。
+**练习 1**：在 WIDTH=9、FBITS=4 下，`a=2.5`、`b=2.0625`，乘积真值为 5.15625。截位后 `prod_t` 对应的定点值落在哪两个可表示值之间？舍入位是否为 1？最终进位方向由什么决定？
 
-**练习 2**：`FBITS=0` 时 `sqrt.sv` 和 `sqrt_int.sv` 行为是否一致？  
-**答**：是的。`FBITS=0` 时 `ITER = WIDTH>>1`，与整数版完全相同；`sqrt.sv` 可看作 `sqrt_int` 的超集。
+> **答案**：\(2.5\times2.0625=5.15625\)。FBITS=4 时定点分辨率 \(1/16=0.0625\)。5.15625 落在 \(5.125=81/16\) 与 \(5.1875=83/16\) 之间，且恰为两者中点（半值）。此时舍入位 `round=1`、被截低位 `rbits==HALF`（恰好半值），故是否进位由「向偶」规则决定（截位结果 81 为奇，则向偶数方向进位到 83 这一偶数值）。具体方向以仿真为准——这正是 `round_1` 用例要验证的半值行为。
 
-**练习 3**：Q8.8 下 \(\sqrt{2}\) 为什么得不到精确值？  
-**答**：\(\sqrt{2}\) 是无理数，而 Q8.8 只能表示 \(1/256\) 的整数倍，结果必然是量化近似（约 1.4140625）。这是定点数固有的精度限制，与算法无关。
+**练习 2**：为什么 `sig_diff` 只在溢出检测里用，而不参与 `a1*b1` 的计算？
+
+> **答案**：`a1`、`b1` 都声明为 `signed`，Verilog 的 `*` 对两个有符号数会直接产生正确符号的乘积，无需额外处理符号。`sig_diff` 只是「输入符号的异或」，作为溢出检测里的一道独立符号校验（期望符号 vs 实际结果符号），用于捕捉「乘积太大导致连符号位都被挤翻」的极端溢出。
+
+**练习 3**：截位窗口的高位「全 0 或全 1」为什么能作为「未溢出」的判据？
+
+> **答案**：截位窗口之上的高位理应是 `prod_t` 符号位的符号扩展（正数全 0、负数全 1）。一旦这些高位「既有 0 又有 1」，说明有效数值已经越过 WIDTH 位窗口的上界、侵入了符号扩展区，即发生溢出。
 
 ---
 
-### 4.4 mul：有符号定点乘法与 DSP48 映射
+### 4.4 DSP 单元映射与符号正确性
 
 #### 4.4.1 概念说明
 
-[mul.sv](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/mul.sv) 做 **有符号定点乘法**，带高斯舍入与溢出检测。它与开方/除法形成鲜明对比——**乘法本身在硬件里只有一行 `prod <= a1 * b1`**，因为 Xilinx FPGA 的 DSP48E1 切片内建 25×18 位有符号乘法器，综合工具会把这一行直接推断成一个 DSP48，而不是用 LUT 拼出一个乘法器。
+为什么 FPGA 工程师如此在意「乘法走 DSP」？因为用 LUT（查找表）拼一个乘法器极其昂贵——一个 16×16 乘法器要消耗数百个 LUT 与进位链，且时序差；而 7 系列 FPGA 每个 DSP48E1 slice 内置一个 \(18\times25\) 位有符号乘法器 + 累加器，**一颗 DSP 就能算一个乘法**，速度快、功耗低、资源省。因此，让综合工具把乘法识别并映射到 DSP，是数值密集型设计（滤波器、矩阵、Mandelbrot 等）能否落地的关键。
 
-那为什么 mul.sv 还要写一个 4 状态机（IDLE/CALC/TRUNC/ROUND），而不是直接 `assign val = a*b`？因为它要在「裸乘法」之外补齐三件定点运算必须做的事：
-
-1. **定点缩放**：乘积小数位翻倍，要截回原 Q 格式；
-2. **高斯舍入**：截掉的低位不是简单丢弃，而是 round half to even；
-3. **溢出检测**：两个 Q 格式数相乘可能超出表示范围，要报告 `ovf`。
+projf 的 `mul.sv` 就是「**用最朴素的 `*` 让工具自己推断 DSP**」的典范：它不例化任何 `DSP48E1` 原语，只写了一句有符号 `a1 * b1`，剩下的交给综合器。这种「行为级描述、结构级映射」的分工，是高密度综合（HLS）与手写 RTL 共同推崇的做法。
 
 #### 4.4.2 核心流程
 
-状态机 `enum {IDLE, CALC, TRUNC, ROUND}`（见 [mul.sv:41](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/mul.sv#L41)）：
+综合器推断 DSP 的条件大致是：操作数是有符号（或无符号）的固定位宽乘法、位宽不超过 DSP 的 \(18\times25\) 上限。映射过程：
 
-1. **IDLE**：等 `start`。到来时寄存 `a1<=a, b1<=b`，记录符号是否相反 `sig_diff`，进入 CALC。
-2. **CALC**（1 拍）：`prod <= a1 * b1` —— 这一行被推断为 DSP48，得到 `2*WIDTH` 位全精度有符号乘积。进入 TRUNC。
-3. **TRUNC**（1 拍）：从全精度乘积里截取 WIDTH 位窗口 `prod[MSB:LSB]`（保 `IBITS` 位整数 + `FBITS` 位小数），同时抽出舍入位 `rbits`、舍入判定 `round`、偶数判定 `even`。进入 ROUND。
-4. **ROUND**（1 拍）：按高斯舍入修正 `val`，做溢出检测，拉高 `done`（单拍）与 `valid`/`ovf`，回 IDLE。
+1. 识别 `a1 * b1` 是一个 WIDTH×WIDTH 的乘法；
+2. 检查位宽是否落在 DSP48 输入口径内（7 系列单颗 DSP 支持 \(18\times25\)）；
+3. 若是，把 `a1`、`b1` 分别接到 DSP 的 A、B 端口，乘积从 P 端口输出；
+4. `mul.sv` 把乘积单独打一拍寄存（`prod <= a1 * b1;` 在 CALC 状态），这一拍正好可对应 DSP 内部的输出寄存器（pipelined register），进一步改善时序。
 
-整个乘法 **算 3 拍出结果**（不计 IDLE），其中真正的乘法只占 1 拍（DSP 单拍），其余 2 拍是定点善后。对比 u7-l2 的除法器 CALC 状态要循环 `ITER` 次——这就是「有 DSP 硬核」与「无硬核靠迭代」的本质差别。
+对于符号：DSP48 的乘法器原生支持有符号运算（由输入端口的符号属性决定）。只要 RTL 里两个操作数都是 `signed`，综合器就会配置 DSP 为有符号模式，乘积的最高位就是正确的符号位——这正是 `mul.sv` 无需手工做符号修正的根本原因。
 
 #### 4.4.3 源码精读
 
-参数与窗口计算：
+回顾那一句被单独成拍的乘法：
 
-[mul.sv:25-30](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/mul.sv#L25-L30) —— 关键三式：
+[mul.sv:47](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/mul.sv#L47) —— `prod <= a1 * b1;`。`a1`、`b1` 在 [mul.sv:33](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/mul.sv#L33) 声明为 `logic signed [WIDTH-1:0]`，`prod` 在 [mul.sv:35](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/mul.sv#L35) 声明为 `logic signed [2*WIDTH-1:0]`。两侧都 `signed`，所以：
 
-```verilog
-localparam IBITS = WIDTH - FBITS;        // 输入整数位(含符号)
-localparam MSB   = 2*WIDTH - IBITS - 1;  // 截取窗口上界 = WIDTH+FBITS-1
-localparam LSB   = WIDTH - IBITS;        // 截取窗口下界 = FBITS
-localparam HALF  = {1'b1, {FBITS-1{1'b0}}};  // 0.5 ULP 判别值 = 2^(FBITS-1)
-```
+- 乘积位宽自动为 \(2\times\text{WIDTH}\)；
+- 符号由硬件乘法器原生保证，无需 `sig_diff` 介入；
+- 综合后，这一句被映射为一颗 DSP48（默认 WIDTH=8 时是 \(8\times8\)，cocotb 用例里是 \(9\times9\)，都远在 \(18\times25\) 口径内）。
 
-`prod[MSB:LSB]` = `prod[WIDTH+FBITS-1 : FBITS]`，正好 WIDTH 位，保留乘积顶部的 `IBITS` 个整数位 + `FBITS` 个小数位，丢弃最低 `FBITS` 位（成为舍入依据）。
-
-真正的乘法（映射 DSP48 的那一行）：
-
-[mul.sv:45-48](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/mul.sv#L45-L48) —— `prod <= a1 * b1;`。两个 `signed [WIDTH-1:0]` 相乘得 `signed [2*WIDTH-1:0]`。`signed` 关键字是让综合器用 DSP 的 **二进制补码乘法器**；若漏写，工具可能推断无符号乘法或退化为 LUT 实现。
-
-截取与舍入位抽取：
-
-[mul.sv:49-56](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/mul.sv#L49-L56) —— 取窗口 `prod_t`、被丢弃位 `rbits = prod[FBITS-1:0]`、舍入位 `round = prod[FBITS-1]`（0.5 那一位）、偶数判定 `even = ~prod[FBITS]`（结果最低位为 0 即偶数）。
-
-高斯舍入决策与溢出检测：
-
-```verilog
-// 高斯舍入：round 到最近偶数
-val <= (round && !(even && rbits == HALF)) ? prod_t + 1 : prod_t;
-
-// 溢出：结果符号与输入符号一致，且截掉的高位是合法符号扩展(全0或全1)
-if (sig_diff == prod_t[WIDTH-1+:1] &&
-    (prod[2*WIDTH-1:MSB+1] == '0 || prod[2*WIDTH-1:MSB+1] == '1)) begin
-    valid <= 1; ovf <= 0;
-end else begin
-    valid <= 0; ovf <= 1;
-end
-```
-
-[mul.sv:57-75](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/mul.sv#L57-L75) —— 舍入逻辑：只有当被丢弃部分 > 0.5（`round` 位为 1 且不是恰好 0.5），或 =0.5 但结果为奇数时才进位；恰好 0.5 且结果为偶数则不进位（向偶舍入）。溢出检测要求截掉的高位要么全 0、要么全 1（合法的符号扩展），否则说明整数位不够放、溢出。
-
-**一个高斯舍入实例**（WIDTH=8, FBITS=4，Q4.4）：取 `a = 0.125`（=2）、`b = 0.25`（=4）。乘积 `prod = 8 = 0b...1000`。窗口 `prod[11:4] = 0`，`rbits = prod[3:0] = 1000 = 8 = HALF`，`round = 1`，`even = ~prod[4] = 1`。决策 `round && !(even && rbits==HALF)` = `1 && !(1&&1)` = `0`，故 `val = prod_t = 0`。即 \(0.125 \times 0.25 = 0.03125\) 恰好在 0 与 0.0625 的正中间，按「向偶舍入」取 0（0 是偶数）。这就是高斯舍入区别于「四舍五入」的地方。
+对比 `sqrt_int`/`sqrt`：开方**没有**对应的「单颗硬核」，所以它必须用 LUT/FF 搭出迭代数据通路——这也是开方比乘法「贵」的根本原因（开方贵在迭代逻辑与多周期控制，乘法贵在乘法本身但被 DSP 免单）。
 
 #### 4.4.4 代码实践
 
-**目标 1（功能）**：跑现成 cocotb 测试验证 mul 行为；**目标 2（综合）**：用综合报告确认 `*` 被映射到 DSP48 而非 LUT（本讲主线实践之二）。
+> **实践目标**：用综合报告确认 `mul.sv` 的乘法被映射到 DSP48，而非用 LUT 实现。
 
-**操作步骤（功能测试）**：
+**操作步骤**：
 
-```bash
-cd ThreePart/projf-explore/lib/maths/test
-# 需要 Python + cocotb + Icarus Verilog；mul.mk 把参数设为 WIDTH=9 FBITS=4
-make -f mul.mk
-```
+1. 在 Vivado 里创建一个最小工程，目标器件任选 7 系列（如 `xc7a35tcpg236-1`，Arty 板的器件）。
+2. 加入 [mul.sv](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/mul.sv) 作为设计源（顶层或例化均可，可设默认 WIDTH=8、FBITS=4）。
+3. 跑综合（Run Synthesis）。
+4. 打开综合后的 **Utilization（资源利用）报告**，找到 `DSPs`（或 `DSP48`）一栏。
+5. （可选对照）把 `mul.sv` 复制一份，临时在综合设置里加 `(* use_dsp48 = "no" *)` 属性到 `prod` 的乘法上（或用相关综合选项关闭 DSP 推断），重新综合，对比 LUT 占用变化。
 
-[mul.mk](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/test/mul.mk) 用 `COMPILE_ARGS += -Pmul.WIDTH=9 -Pmul.FBITS=4` 给 Icarus 传参，对应 Python 激励在 [mul.py](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/test/mul.py)（用 spfpm 做定点黄金参考）。
+**需要观察的现象**：标准综合下，`DSP48` 利用数应为 **1**（一颗 DSP 承担整个 \(8\times8\) 或 \(9\times9\) 有符号乘法）；LUT/FF 占用很少（主要是状态机与截位/舍入的少量组合逻辑）。对照实验里关闭 DSP 推断后，`DSP48=0` 而 LUT 数显著上升。
 
-**需要观察的现象（功能）**：测试报告里每个用例的硬件 `val` 与 Python 定点参考值一致，包括需要进位和恰好 0.5 的边界用例。
+**预期结果**：综合报告证实 `mul.sv` 的乘法走 DSP 通路。若你没有 Vivado，可用 Yosys 的 `show` 或读其综合日志中的 `DSP48` 推断信息；无法本地综合时标注「待本地验证」。
 
-**操作步骤（综合验证 DSP）**：
-
-1. 在 Vivado 里新建工程，加入 `lib/maths/mul.sv`，器件选一个 7 系列（如 xc7a100t）。
-2. 设为 top（或包一层 top 把端口引出），跑综合（Synthesis）。
-3. 打开 **Utilization Report → DSPs**，或在 Tcl 控制台 `report_utilization`。
-
-**需要观察的现象（综合）**：
-
-- **预期**：1 个 `DSP48E1` 被使用（对于 WIDTH ≤ 18 的情况），LUT 几乎不增加。
-- **对照实验**：把 `mul.sv` 里的 `prod <= a1 * b1;` 临时改成 `prod <= (a1 + b1);`（加法）再综合，DSP 用量应降为 0、LUT 增加——以此确认是乘法 `*` 触发了 DSP 推断。
-- 也可以在 Tcl 里 `set_property HDL_ATTRIBUTE` 或看综合日志里 "multiplier" 相关的推断信息。
-
-**预期结果**：综合报告显示使用了 1 个 DSP48（待本地验证；具体数量随 WIDTH 而变，WIDTH>18 会级联多个 DSP）。这一步证明：**在 RTL 里写 `signed` 乘法，工具自动推断 DSP 硬核**——这正是 mul 只需 1 拍做乘法的物理基础。
-
-> ⚠️ 注意：修改源码做对照实验后请还原，本讲义不允许把改动留在仓库里。
+> 提示：projf 数学库 [README.md:5-17](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/README.md#L5-L17) 把除法、乘法、开方并列列出，但只有乘法天然走 DSP；除法（u7-l2）与开方（4.1/4.2）都是 LUT 实现的迭代数据通路——这是选型时的关键区别。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：为什么 mul.sv 的 CALC 状态只停 1 拍，而 u7-l2 除法器的 CALC 要循环很多次？  
-**答**：乘法有 DSP48 硬核，单周期给出全精度结果；除法/开方没有硬核，只能移位-比较一拍出一位，必须多周期迭代。这是「有/无专用硬核」的根本差异。
+**练习 1**：如果把 WIDTH 设为 32（仍是 \(32\times32\) 有符号乘法），一颗 7 系列 DSP48（\(18\times25\)）还够吗？综合器会怎么做？
 
-**练习 2**：把 `a1 * b1` 的 `signed` 去掉会怎样？  
-**答**：`signed` 决定了综合器使用补码乘法器（DSP48 的有符号模式）并保证负数语义正确。去掉后端口可能被当无符号处理，负数乘法结果错误，且可能影响 DSP 推断方式。projf 库统一标 `signed` 正是为了避免此坑（见 u7-l1）。
+> **答案**：不够。\(32\times32\) 超过单颗 DSP 的 \(18\times25\) 口径，综合器会把它分解成多颗 DSP（通常 4 颗 \(18\times18\) 拼出 \(32\times32\)，外加加法组合），资源利用从 1 变成多颗。这解释了为什么高位宽乘法要谨慎评估 DSP 预算。
 
-**练习 3**：截取窗口 `prod[MSB:LSB]` 里，`MSB` 与 `LSB` 各由谁决定？为什么这样取？  
-**答**：`LSB = FBITS`（丢掉翻倍后多余的小数位），`MSB = WIDTH+FBITS-1`（保证窗口宽 WIDTH 位，且顶部保留 `IBITS` 个整数位含符号）。这样乘积被截回与输入相同的 Q(WIDTH).(FBITS) 格式。
+**练习 2**：`sqrt_int` 为什么不像 `mul` 那样「免费」吃到一颗硬核？
+
+> **答案**：FPGA 没有内置的「开方硬核」，开方是逐位试减的迭代算法，必须用 LUT/FF 搭出移位寄存器、试减比较器与多周期控制逻辑。只有乘法（以及乘加）有 DSP 这种专用硬核可映射。
+
+**练习 3**：`mul.sv` 为什么把 `a1 * b1` 单独放在 CALC 状态打一拍，而不是和截位逻辑合在一拍？
+
+> **答案**：把乘法单独寄存一拍（对应 DSP 内部输出寄存器）有两大好处——(1) 让综合器干净地把乘法识别成一颗 DSP 并使用其流水寄存器，改善时序；(2) 把「乘法」与「截位+舍入+溢出」这条长组合链切成两段，降低关键路径延迟。这是用状态机给组合逻辑「加缓冲」的常见手法。
 
 ---
 
 ## 5. 综合实践
 
-把本讲三个模块串起来，做一个「定点向量运算」小调研：
+把本讲三个模块串起来，做一个「**定点向量长度计算器**」的小任务。
 
-1. **开方链**：选定 `WIDTH=16, FBITS=8`（Q8.8）。输入 `rad = 4.0`（=`0x0400`）。先 **手算** 期望根（=2.0=`0x0200`），再用 `sqrt.sv` 仿真验证（参考 4.3.4 命令），比对 `root` 与手算值，记录余数。
-2. **乘法链**（同样用 Q8.8）：取 `a = 1.5`（=`0x0180`=384）、`b = 2.0`（=`0x0200`=512），手算期望积（=3.0=`0x0300`=768）；再用自写 testbench（实例化 `mul #(.WIDTH(16), .FBITS(8))`）验证 `val`、确认无溢出（`ovf=0`）。注意 4.4.4 的 cocotb 测试用的是 Q5.4（WIDTH=9,FBITS=4），与此处的 Q8.8 不同，别混用参数。
-3. **对比延迟**：在同一时钟下，记录 `sqrt` 需要多少拍（`ITER=12`）、`mul` 需要多少拍（IDLE→CALC→TRUNC→ROUND，约 3 拍）。把两者延迟比填入一张表，体会「迭代算法 vs DSP 单拍」的成本差。
-4. **（选做）综合对比**：把 `sqrt.sv`、`mul.sv` 分别综合，对比 Utilization Report：`mul` 占 1 个 DSP48、几乎零 LUT；`sqrt` 占若干 LUT/FF、零 DSP。用数据印证「乘法吃 DSP、开方吃逻辑资源」。
+**背景**：给定点 \((x,y)\)，求其到原点的距离 \(r=\sqrt{x^2+y^2}\)（即向量的 2-范数）。这正好把「乘法（算 \(x^2\)、\(y^2\)）」与「开方」串成一条流水线，是图形学、信号处理里极常见的运算。
 
-**交付**：一张表，含 `rad/ab`、期望值、仿真实测值、延迟（拍数）、资源类型（DSP/LUT）。
+**任务**：
+
+1. 用两个 `mul` 实例分别算 \(x^2\) 与 \(y^2\)（取 WIDTH=16、FBITS=8 的定点格式）。
+2. 用一个普通加法器算 \(s = x^2 + y^2\)（注意加法后整数位会进位，需预留位宽或讨论溢出）。
+3. 用一个 `sqrt`（WIDTH=16、FBITS=8）对 \(s\) 开方，得到 \(r\)。
+4. 写一个顶层 testbench：输入几组已知点（如 \((3,4)\to5\)、\((5,12)\to13\)、\((1,1)\to1.414\)），驱动 `start`，等待 `valid`，断言 \(r\) 与期望值的定点误差在 1 个 LSB 以内。
+
+**需要思考与记录的问题**：
+
+- `mul` 输出是 WIDTH 位，两个平方相加可能需要 WIDTH+1 位才能不溢出——你如何把加宽后的 \(s\) 喂给只有 WIDTH 位输入的 `sqrt`？（提示：可右移截位，或改 `sqrt` 的 WIDTH 参数，并讨论精度损失。）
+- 整条流水线的总延迟是多少拍？（两个 `mul` 并行各 3 拍 + 加法 1 拍 + `sqrt` 的 \(1+(\text{WIDTH}+\text{FBITS})/2\) 拍。）
+- 这条数据通路里，哪一段走 DSP？哪一段走 LUT？为什么？
+
+**预期结果**：完成顶层连接与 testbench，对 \((3,4)\) 得到约 5.0、对 \((1,1)\) 得到约 1.414（允许 ±1 LSB 误差）。若无法上板/仿真，至少画出实例化框图与每段延迟，并标注「待本地验证」。
+
+> 进阶：projf 的 Mandelbrot demo（u7-l5）正是反复做「定点复数乘法 + 模长比较」的典型场景，可以对照阅读，体会 `mul` 在真实图形算法里的用法。
+
+---
 
 ## 6. 本讲小结
 
-- **逐位求平方根**用「每步拉下 2 比特、判别 \(R' \geq 4p+1\)、定 1 位根」的递推，只需移位/减法/比较、不用乘法器；一个 `WIDTH` 位整数需 `WIDTH/2` 拍。
-- **sqrt_int.sv** 用 `{ac, x}` 联合移位寄存器 + 试探减法 `test_res = ac − {q,2'b01}` 落地该算法；`ac` 宽 2 位以容纳符号判别与移位。
-- **sqrt.sv** 与整数版硬件零改动，只把 `ITER` 从 `WIDTH/2` 改成 `(WIDTH+FBITS)/2`，靠「多做 `FBITS/2` 拍、移入 0」实现定点开方——参数化设计的典范。
-- **mul.sv** 的核心乘法只有一行 `prod <= a1 * b1`，靠 `signed` 让工具推断 **DSP48 硬核**，单拍出全精度乘积；状态机的其余状态用于定点缩放、高斯舍入与溢出检测。
-- **乘法 vs 开方/除法**的本质：前者有 DSP 硬核（1 拍、占 DSP 资源），后者无硬核靠迭代（多拍、占 LUT/FF）——这是 FPGA 数学运算最核心的资源-延迟权衡直觉。
-- **高斯舍入**（round half to even）在 mul 与 u7-l2 除法器中一致使用，消除「四舍五入」的统计偏差。
+- **开方是迭代型运算**：`sqrt_int` 用逐位试减（digit-recurrence）求根，每次处理被开方数的 2 个比特，试减项 \(\{q,2'b01\}=4q+1\) 来自恒等式 \((2q+1)^2=4q^2+4q+1\)；迭代次数 \(\text{ITER}=\text{WIDTH}/2\)。
+- **定点版 `sqrt` 与整数版同构不同参**：唯一差别是 `ITER=(WIDTH+FBITS)/2`，多跑的 FBITS/2 次迭代等价于在被开方数末尾补 FBITS 个 0（即乘 \(2^{\text{FBITS}}\)），从而保持输出仍有 FBITS 个小数位。
+- **乘法是组合型运算**：`mul.sv` 用 `IDLE/CALC/TRUNC/ROUND` 四状态机包裹一句有符号 `a1*b1`，额外完成截位、高斯舍入（round half to even）与双重溢出检测（符号校验 + 高位符号扩展校验）。
+- **乘法走 DSP、开方走 LUT**：`signed` 操作数上的 `*` 会被综合器自动映射到 DSP48 硬核，符号由乘法器原生保证；开方没有对应硬核，必须用 LUT/FF 搭迭代通路——这是两者资源代价的根本差异。
+- **握手接口统一**：`sqrt_int`/`sqrt`/`mul` 都遵循「`start` 启动 → `busy` 计算 → `valid`/`done` 完成」的多周期握手范式，便于串联成更大流水线（如综合实践的向量长度计算器）。
 
 ## 7. 下一步学习建议
 
-- **横向扩展 maths 库**：本讲只读了 sqrt/mul，建议接着读 [lfsr.sv](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/lfsr.sv)（伪随机）与 [sine_table.sv](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/sine_table.sv)（ROM 查表），对应大纲 u7-l4，把 maths 分区读完。
-- **向上承接 demo**：u7-l5 的 Mandelbrot 集会大量用到本讲的定点乘法（复数 \(z^2\)）与 u7-l1 的定点表示，是用真实图形场景检验本讲知识的最佳去处。
-- **深入 DSP48**：若对 mul 的 DSP 映射感兴趣，可读 Xilinx UG479（7 系列 DSP48E1 Slice）。理解了预加器、累加器、级联，就能解释为什么更大的乘法会自动级联多个 DSP。
-- **对比除法**：回头重读 u7-l2 的 [div.sv](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/maths/div.sv)，把它与本讲的 mul/sqrt 放在一起，你会清楚地看到「迭代（div/sqrt）vs 单拍（mul）」这条主线如何贯穿整个 maths 分区。
+- **继续 Unit 7**：阅读 [u7-l4 LFSR 伪随机与正弦查找表](u7-l4-lfsr-sine-table.md)，看 `lfsr.sv`（反馈多项式）与 `sine_table.sv`（用 u5-l3 的 ROM 存四分之一周期正弦样本），与本讲的 `mul`/`sqrt` 一起，构成 projf 数学库的完整图景。
+- **综合应用**：阅读 [u7-l5 Mandelbrot 集](u7-l5-mandelbrot-maths-demo.md)，看定点复数乘法 \(z^2+c\) 如何在真实图形算法里反复调用本讲的乘法，并体会「定点数 + 多周期运算单元」如何拼成一个完整的硬件算法。
+- **延伸阅读（项目外）**：projf 博客 [Square Root in Verilog](https://projectf.io/posts/square-root-in-verilog/) 与 [Verilog Library](https://projectf.io/verilog-lib/) 给出了开方与乘法的算法推导；Xilinx UG479（7 Series DSP48E1 Slice User Guide）是理解 DSP48 内部结构与推断规则的一手资料。
+- **动手方向**：尝试给本讲的「向量长度计算器」加上流水线化（每拍吞吐一组输入），对比单倍吞吐与流水吞吐下的 DSP/LUT 占用与时延，体会「迭代型运算如何融入流水线设计」的工程权衡。
