@@ -1,0 +1,443 @@
+# 帧缓冲与硬件精灵
+
+## 1. 本讲目标
+
+本讲承接 u6-l1（显示时序）与 u5-l3（ROM/RAM 与 BRAM 推断），回答一个核心问题：**显示时序模块已经会逐像素扫描出坐标 `(sx, sy)`，那么每个像素到底该涂什么颜色？** 颜色数据从哪里来？
+
+学完本讲，你应当能够：
+
+- 说清「帧缓冲（framebuffer）」和「硬件精灵（hardware sprite）」这两种主流图像生成方式的本质区别。
+- 看懂 projf 的 `top_david_mono` 如何用一块 BRAM 存住整幅位图、并在显示扫描时按地址逐像素回放。
+- 理解 `linebuffer_simple` 如何在两个时钟域之间做「逐行缓存 + 水平缩放」，以及它为何是帧缓冲缩放显示的关键桥梁。
+- 看懂 `sprite_rom` / `sprite_inline` / `sprite` 三个精灵模块的状态机：它们如何在每一拍判断「当前像素是否落在精灵矩形内」，并给出位图取色。
+- 独立画出两种方案的数据流图，并判断一个具体应用（全屏位图 vs 少量可移动图形）该选哪种。
+
+---
+
+## 2. 前置知识
+
+本讲默认你已经掌握下面几个概念（均在 u5-l3、u5-l2、u6-l1 建立）：
+
+- **显示时序与坐标**：`display_480p` 等模块逐拍产出带符号坐标 `sx/sy`、有效区标志 `de`、行起始脉冲 `line` 和帧起始脉冲 `frame`（见 u6-l1）。屏幕有效区是 `sx/sy ≥ 0`，消隐期被藏进负坐标。
+- **BRAM 与 `bram_sdp`**：`bram_sdp` 是简单双口 Block RAM，一个同步写口、一个同步读口，读出比地址晚一拍（见 u5-l3）。内容可用 `$readmemh` 从 `.mem` 文件初始化。
+- **同步器 `xd`**：跨时钟域传递单比特标志脉冲的模块（见 u5-l2）。
+- **行优先存储**：一幅 `W×H` 的位图按行存进内存时，像素 `(x, y)` 的线性地址是 `y*W + x`，这是本讲反复出现的寻址公式。
+
+> 一个直觉：显示扫描像一把「读光笔」，从屏幕左上角逐像素扫到右下角。本讲要解决的就是——光笔扫到某个像素时，**去哪个存储位置取这个像素的颜色**。帧缓冲和精灵是两种截然不同的「取色策略」。
+
+---
+
+## 3. 本讲源码地图
+
+本讲涉及的关键文件分属两套示例工程（`framebuffers` 与 `hardware-sprites`）以及它们共同依赖的库模块：
+
+| 文件 | 所属 | 作用 |
+| --- | --- | --- |
+| `framebuffers/xc7/top_david_mono.sv` | 帧缓冲工程 | 最小帧缓冲示例：160×120 单色位图存 BRAM，直接回放显示 |
+| `framebuffers/xc7/top_david_scale.sv` | 帧缓冲工程 | 进阶示例：160×120 位图经 linebuffer 缩放成 640×480 显示 |
+| `framebuffers/README.md` | 帧缓冲工程 | 工程说明、构建方式、demos 列表 |
+| `lib/display/linebuffer_simple.sv` | 库 | 逐行缓存 + 水平缩放，跨 `clk_sys`/`clk_pix` 两时钟域 |
+| `lib/memory/bram_sdp.sv` | 库 | 简单双口 BRAM，帧缓冲与 linebuffer 的存储底座 |
+| `hardware-sprites/sprite_rom.sv` | 精灵工程 | 从 ROM 读位图的精灵（无缩放） |
+| `hardware-sprites/sprite_inline.sv` | 精灵工程 | 位图直接写在 Verilog 里的精灵（无缩放） |
+| `hardware-sprites/sprite.sv` | 精灵工程 | 支持缩放的精灵 |
+| `hardware-sprites/xc7/top_tinyf_inline.sv` | 精灵工程 | 用 `sprite_inline` 在屏幕上画一个黄色字母 F |
+| `hardware-sprites/xc7/top_tinyf_move.sv` | 精灵工程 | 用带缩放的 `sprite` 让字母 F 水平移动 |
+| `hardware-sprites/xc7/sprite_rom_tb.sv` | 精灵工程 | 精灵仿真激励，配合 `display_24x18` 小尺寸时序 |
+| `hardware-sprites/README.md` | 精灵工程 | 工程说明与 demos 列表 |
+
+两套工程都复用 u5/u6 系列的库模块（`clock_480p`、`display_480p`、`bram_sdp`、`xd` 等），体现 projf 一贯的「库 + 示例」分层。
+
+---
+
+## 4. 核心概念与源码讲解
+
+### 4.1 帧缓冲：用 BRAM 存住并回放整幅位图
+
+#### 4.1.1 概念说明
+
+**帧缓冲（framebuffer）** 的思路最直白：在 FPGA 的 Block RAM 里开辟一块连续存储区，**把整幅图像的每个像素颜色都存下来**；显示扫描时，用一个地址计数器随 `(sx, sy)` 推进，逐像素把 BRAM 里的颜色读出来送显示器。
+
+类比：它就像一块「画好图的画布」，显示模块只是机械地把画布从头到尾念一遍。要换图，就改写画布内容。
+
+帧缓冲的特点：
+
+- **适合全屏位图**：照片、复杂背景、任意像素都可不同的画面。
+- **存储开销大**：每个屏幕像素都要一比特/几比特存储。640×480×12bit ≈ 4500 Kbit，对小 FPGA 是沉重负担，故 projf 的帧缓冲示例都刻意用小尺寸位图（160×120）。
+- **位置固定**：图像坐标和存储地址一一对应，没有「移动」概念——要移动只能改写 BRAM 内容。
+
+#### 4.1.2 核心流程
+
+`top_david_mono` 是最小帧缓冲示例，数据流为：
+
+```
+display_480p → (sx,sy) → 地址计数器 fb_addr_read → bram_sdp → fb_colr_read → 涂色 → VGA
+```
+
+关键设计点：
+
+1. **帧缓冲尺寸独立于屏幕尺寸**。位图只有 160×120，而屏幕是 640×480。本例把小位图摆在屏幕左上角（有效区 `sx<160 && sy<120` 范围内），其余区域填背景色 `BG_COLR`。
+2. **地址在每帧行进式自增**。不是用乘法算 `sy*W+sx`，而是用一个计数器 `fb_addr_read`：进入绘制区就 `+1`，每帧开头 `frame` 脉冲清零。这避免了昂贵的乘法器。
+3. **读延迟补偿 `LAT`**。BRAM 同步读晚一拍，故读地址要提前 `LAT=2` 拍给出，才能让颜色数据在像素真正到达显示口时刚好可用。
+
+#### 4.1.3 源码精读
+
+帧缓冲参数定义，注意 `FB_DATAW=1`（单色，每像素 1 比特）、地址宽度由 `$clog2` 自动算出：
+
+[framebuffers/xc7/top_david_mono.sv:57-68](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/framebuffers/xc7/top_david_mono.sv#L57-L68) —— 帧缓冲尺寸 160×120、总像素 19200、地址宽 15 位、每像素 1 比特，位图文件 `david_1bit.mem`。
+
+帧缓冲存储体本身，例化库里的 `bram_sdp`，用 `david_1bit.mem` 初始化，写口悬空（只读回放）：
+
+[framebuffers/xc7/top_david_mono.sv:71-87](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/framebuffers/xc7/top_david_mono.sv#L71-L87) —— 把 BRAM 配成 1 比特宽、19200 深，从 `.mem` 文件装入大卫像，只在 `clk_pix` 域读、不写。
+
+地址计数与延迟补偿——本模块最关键的一段逻辑：
+
+[framebuffers/xc7/top_david_mono.sv:90-99](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/framebuffers/xc7/top_david_mono.sv#L90-L99) —— `read_fb` 把读窗口整体左移 `LAT=2` 拍提前发地址；`frame` 清零、`read_fb` 自增，靠事件计数器代替乘法寻址。
+
+最后把单比特颜色「广播」成 RGB 三通道并裁剪到有效区：
+
+[framebuffers/xc7/top_david_mono.sv:102-107](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/framebuffers/xc7/top_david_mono.sv#L102-L107) —— `paint_area` 限定 160×120 绘制区；区内把 1 比特 `fb_colr_read` 复制成 12 位（白/黑），区外用背景色。
+
+BRAM 存储底座的同步读时序（u5-l3 已精读，这里只回顾关键两行）：
+
+[lib/memory/bram_sdp.sv:37-40](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/memory/bram_sdp.sv#L37-L40) —— 端口 B 同步读：地址在时钟沿送入，数据**下一拍**才出现在 `data_out`，这正是 `top_david_mono` 必须做 `LAT` 提前量补偿的原因。
+
+#### 4.1.4 代码实践
+
+**实践目标**：验证「地址自增 + 延迟补偿」这条帧缓冲主链。
+
+**操作步骤**：
+
+1. 打开 [framebuffers/xc7/top_david_mono.sv](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/framebuffers/xc7/top_david_mono.sv)，找到第 90–99 行的 `read_fb` 与 `fb_addr_read` 逻辑。
+2. 做一次「思想实验」：把 `localparam LAT = 2;` 改成 `LAT = 0;`，预测画面会怎样。
+3. 若有 Vivado，按 [framebuffers/README.md:56-64](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/framebuffers/README.md#L56-L64) 描述的流程 `source create_project.tcl` 建工程，综合实现后上板（或用 Verilator+SDL 仿真，见 README 仿真章节）观察。
+
+**需要观察的现象 / 预期结果**：
+
+- `LAT=2` 正确时，大卫像完整、端正地停在屏幕左上 160×120 区域。
+- 把 `LAT` 改小（如 0）后，图像会整体**向右错位**——因为颜色数据晚了拍才到，涂到了更靠右的像素上。
+- 结论：`LAT` 必须精确等于「读地址寄存 + BRAM 读出」的总流水级数（本例 `read_fb` 一级 + BRAM 一级 = 2）。若你在本机无法运行，明确标注「待本地验证」。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：`FB_PIXELS=19200`，`$clog2(19200)` 等于多少？为什么地址宽是 15 而不是 14？
+
+> **答案**：`$clog2(19200)` = 15，因为 2¹⁴=16384 < 19200 ≤ 2¹⁵=32768，要给 19200 个单元编址至少需 15 位。
+
+**练习 2**：若把帧缓冲改成 16 色（每像素 4 比特）、尺寸仍是 160×120，存储容量增大几倍？地址宽变不变？
+
+> **答案**：容量从 19200 比特增到 19200×4=76800 比特（4 倍）。地址宽仍由「像素总数」决定，是 15 位不变——变的只是 `FB_DATAW`（每个地址处的数据宽度）。
+
+---
+
+### 4.2 linebuffer：跨时钟域的逐行缓存与缩放
+
+#### 4.2.1 概念说明
+
+`top_david_mono` 把 160×120 的小图「原尺寸」摆在 640×480 屏幕一角，浪费了大部分屏幕。`top_david_scale` 想把小图**放大** 4 倍填满 640×480（160×4=640，120×4=480）。这带来两个新难题：
+
+1. **跨时钟域**：放大显示需要更高的数据吞吐，工程引入了独立的系统时钟 `clk_sys` 来读帧缓冲，而显示扫描仍走像素时钟 `clk_pix`。两者异步。
+2. **缩放**：水平和垂直方向都要把 1 个源像素重复 4 次。
+
+**linebuffer（行缓冲）** 正是为这两件事设计的中间件：它本质是「一行像素长度的 BRAM」，在 `clk_sys` 域把帧缓冲的一行像素**写进去**，在 `clk_pix` 域按显示节拍**读出来**，读出时通过计数器实现水平放大；垂直放大则由上层逻辑决定「同一行源数据连读几遍」。
+
+类比：linebuffer 像一条「装配履带」——上游（帧缓冲）按自己的节奏把一行零件码上履带，下游（显示器）按像素节拍从履带上取零件，必要时把同一个零件取多次（放大）。
+
+#### 4.2.2 核心流程
+
+`top_david_scale` 的数据流比 mono 版复杂一截：
+
+```
+clk_sys 域:  帧缓冲 BRAM --(fb_colr_read)--> linebuffer 写口
+                                                   │ (一行 BRAM)
+clk_pix 域:                                   linebuffer 读口 --(lb_colr_out)--> CLUT --> 涂色 --> VGA
+```
+
+关键控制信号（全部由顶层计算后喂给 `linebuffer_simple`）：
+
+- **垂直缩放**：`cnt_lb_line` 在 0..FB_SCALE-1 之间循环，只有 `cnt_lb_line==0` 那行才让帧缓冲前进地址、向 linebuffer 写入新一行的 160 个像素；其余 3 行重复用同一份 linebuffer 内容，从而每行源数据纵向重复 4 次。
+- **水平缩放**：linebuffer 内部的读地址计数器每 `scale` 拍才 `+1`，于是同一像素颜色横向重复 `scale` 次。
+- **跨时钟域握手**：`frame`/`line` 脉冲本来在 `clk_pix` 域，用 3 个 `xd` 同步器搬进 `clk_sys` 域，分别得 `frame_sys`/`line_sys`/`line0_sys`，保证「哪一行该读、从哪开始」两个域认识一致。
+
+#### 4.2.3 源码精读
+
+先把显示控制信号从像素域同步到系统域——`frame`、`line`、`line && sy==0` 各过一个 `xd`：
+
+[framebuffers/xc7/top_david_scale.sv:113-118](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/framebuffers/xc7/top_david_scale.sv#L113-L118) —— 三个 `xd` 跨时钟域同步器，把 `frame`、`line`、首行标志搬进 `clk_sys` 域，作为帧缓冲读取与 linebuffer 写入的时间基准。
+
+垂直缩放计数器——决定「这一屏行要不要刷新 linebuffer」：
+
+[framebuffers/xc7/top_david_scale.sv:121-127](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/framebuffers/xc7/top_david_scale.sv#L121-L127) —— `cnt_lb_line` 每过 `FB_SCALE` 行归零；只有它为 0 的那行才会真正触发帧缓冲地址前进，等效于纵向把每行重复 `FB_SCALE` 次。
+
+linebuffer 写使能——「在正确的那几行、且尚未写满 160 像素时」才打开写口：
+
+[framebuffers/xc7/top_david_scale.sv:136-139](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/framebuffers/xc7/top_david_scale.sv#L136-L139) —— `lb_en_in` 三条件合取：处于缩放后的有效纵向带、是 `cnt_lb_line==0` 的源行、水平计数器 `cnt_lbx < FB_WIDTH`。
+
+linebuffer 实例化——把帧缓冲颜色送写口、把缩放后颜色从读口接出：
+
+[framebuffers/xc7/top_david_scale.sv:162-175](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/framebuffers/xc7/top_david_scale.sv#L162-L175) —— 例化 `linebuffer_simple`，宽度 4 比特、长度 160，`scale` 接 `FB_SCALE=4`；输入侧在 `clk_sys`、输出侧在 `clk_pix`。
+
+再看 linebuffer 内部如何做水平缩放——读侧每 `scale` 拍地址才加一：
+
+[lib/display/linebuffer_simple.sv:27-38](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/display/linebuffer_simple.sv#L27-L38) —— `cnt_h` 从 0 数到 `scale-1` 才让 `addr_out` 前进一格，于是同一存储单元被连续读 `scale` 次，水平方向放大 `scale` 倍。
+
+linebuffer 的存储体仍是 `bram_sdp`，写口在 `clk_sys`、读口在 `clk_pix`，天然双时钟：
+
+[lib/display/linebuffer_simple.sv:53-64](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/lib/display/linebuffer_simple.sv#L53-L64) —— linebuffer 的存储底座就是一块 `bram_sdp`，写时钟 `clk_sys`、读时钟 `clk_pix`，跨域安全。
+
+> 旁注：linebuffer 读出后还过了一级 `clut_simple`（颜色查找表），把 4 比特「颜色索引」翻译成 12 比特真彩——这就是为何 `top_david_scale` 能显示 16 色灰度大卫像（见第 178–191 行）。
+
+#### 4.2.4 代码实践
+
+**实践目标**：理解 linebuffer「垂直放大靠重复读、水平放大靠慢走地址」的两条独立机制。
+
+**操作步骤**：
+
+1. 阅读 [framebuffers/xc7/top_david_scale.sv:80-86](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/framebuffers/xc7/top_david_scale.sv#L80-L86)，确认 `FB_SCALE=4`、位图 `david.mem`、调色板 `grey16_4b.mem`。
+2. 在纸上推演：屏幕第 0–3 行（`sy=0..3`）对应源图第 0 行，`cnt_lb_line` 取值依次是 0、1、2、3，其中只有 `cnt_lb_line==0` 那行刷新 linebuffer。
+3. 把 `FB_SCALE` 从 4 改成 2，预测画面尺寸。
+
+**需要观察的现象 / 预期结果**：
+
+- `FB_SCALE=4`：160×120 被放大到 640×480，填满屏。
+- `FB_SCALE=2`：放大成 320×240，停在屏幕左上四分之一，其余是背景色——因为 linebuffer 长度仍是 160，只放大不补齐。
+- 水平方向：屏幕每 4 个连续像素（`scale=4`）颜色相同，肉眼看是「马赛克块」，对应源图 1 个像素。
+- 若无硬件，可用 Verilator SDL 仿真（README 有说明）观察，否则标「待本地验证」。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么 linebuffer 的存储深度是 `LEN=FB_WIDTH=160`，而不是整幅图的 19200？
+
+> **答案**：因为 linebuffer 只缓存「一行」像素。显示器逐行扫描，当前行只需要当前这一行源数据；存整幅图是帧缓冲的职责，linebuffer 只做行级中转，故深度等于一行像素数。
+
+**练习 2**：如果完全去掉 linebuffer、让 `clk_pix` 域直接读帧缓冲 BRAM 来做 4 倍放大，会有什么麻烦？
+
+> **答案**：一是跨时钟域——帧缓冲想在 `clk_sys` 写/管理，显示器在 `clk_pix` 读，直接接会引入亚稳态风险；二是 `clk_pix`（约 25 MHz）可能不够快地在每行开头把 160 个像素现读现取，linebuffer 提前在 `clk_sys` 域把整行装好，是「空间换时间」的标准做法。
+
+---
+
+### 4.3 硬件精灵：sprite_rom 与 sprite_inline
+
+#### 4.3.1 概念说明
+
+帧缓冲要为**每个屏幕像素**都备好颜色存储，做全屏图很合适，但做个「在背景上飞来飞去的小飞船」就太浪费——大部分屏幕其实是同一片纯色背景。**硬件精灵（hardware sprite）** 反其道而行：
+
+- **不存整屏**，背景直接用一个常数颜色组合逻辑给出。
+- **只存小图形本身**（比如 8×8 的字母 F），存在一块极小的 ROM 或直接写在 Verilog 里。
+- 每个像素时钟，精灵模块实时判断：当前 `(sx, sy)` 是否落在精灵的矩形内？落在内部就取精灵位图对应像素颜色，否则输出「透明」。
+
+精灵的特点与帧缓冲正好互补：
+
+- **适合少量、可移动的图形**：游戏角色、光标、分数。要移动只需改 `sprx/spry` 坐标，完全不动存储。
+- **存储极省**：一个 8×8 单色精灵只要 64 比特。
+- **天然支持「叠加」**：背景在底层，精灵在前景，靠 `drawing` 标志在两者间二选一；多个精灵可按优先级串联。
+
+#### 4.3.2 核心流程
+
+projf 的精灵模块（`sprite_rom`/`sprite_inline`/`sprite` 共享同一套状态机骨架）输出两根信号：
+
+- `pix`：当前像素在精灵位图里的取值（颜色索引）。
+- `drawing`：当前 `(sx, sy)` 是否处于「正在画精灵」的状态。
+
+顶层用一句组合逻辑把精灵叠到背景上（以 `top_tinyf_inline` 为例）：
+
+```
+paint_r = (drawing && pix) ? 黄色 : 背景色;
+```
+
+精灵状态机每根扫描线的处理节奏如下（6 个状态）：
+
+```
+line 脉冲 → REG_POS（锁存 sprx/spry）
+        → ACTIVE（判断 sy 是否落在精灵纵向带内）
+        → 若 active: WAIT_POS（等 sx 走到精灵左缘）
+                     → SPR_LINE（逐像素取位图、drawing=1）
+                     → WAIT_DATA（补偿读延迟）→ IDLE
+        → 若不 active: 直接 IDLE 等下一行
+```
+
+核心寻址公式（行优先）：当扫描到精灵内的像素 `(sx, sy)` 时，它对应位图坐标 `(cx, cy) = (sx - sprx, sy - spry)`，ROM 地址为：
+
+\[
+\text{addr} = \text{cy} \times \text{SPR\_WIDTH} + \text{cx}
+\]
+
+这正是 `sprite_rom` 里 `spr_rom_addr = (sy - spry_r) * SPR_WIDTH + (sx - sprx_r) + SX_OFFS` 的来源（`SX_OFFS` 是为补偿流水延迟引入的小偏移）。
+
+#### 4.3.3 源码精读
+
+先看最直观的 `sprite_inline`——位图直接写成 Verilog 数组，连 ROM 都省了。下面是字母 F 的 8×8 单色位图定义：
+
+[hardware-sprites/sprite_inline.sv:22-37](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/hardware-sprites/sprite_inline.sv#L22-L37) —— `bmap` 是 8 行×8 列的位数组，每行一个 8 位字，1 表示该像素点亮；这就是字母 F 的点阵。
+
+`sprite_inline` 的状态判定逻辑（纯组合）——判断「这一行要不要画精灵」「这一拍要不要开始」「画到精灵右边缘没」：
+
+[hardware-sprites/sprite_inline.sv:51-58](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/hardware-sprites/sprite_inline.sv#L51-L58) —— `spr_active` 看 `sy` 是否在精灵纵向带内；`spr_begin` 看 `sx` 是否到达精灵左缘；`spr_end`/`line_end` 标记画到精灵右边或行尾。
+
+`SPR_LINE` 状态——逐像素从位图取色，注意取色用的是「上一拍算好的 `bmap_x/bmap_y`」，这就是为何后面要 `WAIT_DATA`：
+
+[hardware-sprites/sprite_inline.sv:92-97](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/hardware-sprites/sprite_inline.sv#L92-L97) —— 每拍 `bmap_x+1`、`pix <= bmap[bmap_y][bmap_x]`、`drawing <= 1`；到精灵右边或行尾转 `WAIT_DATA`。
+
+再看 `sprite_rom`——和 inline 几乎一样，只是把位图换成一块异步 ROM `rom_async`，并用乘法算 ROM 地址：
+
+[hardware-sprites/sprite_rom.sv:30-37](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/hardware-sprites/sprite_rom.sv#L30-L37) —— 用 `rom_async`（u5-l3 讲过的组合读 ROM）存精灵位图，地址由状态机算出后送入。
+
+`WAIT_POS` 状态算 ROM 起始地址——本模块的寻址核心：
+
+[hardware-sprites/sprite_rom.sv:82-90](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/hardware-sprites/sprite_rom.sv#L82-L90) —— 到达精灵左缘那拍，按行优先公式 `cy*SPR_WIDTH+cx` 一次算出起始 ROM 地址，之后每拍 `+1` 顺序读完整行。
+
+最后看顶层怎么把精灵叠到背景——`top_tinyf_inline` 的涂色逻辑：
+
+[hardware-sprites/xc7/top_tinyf_inline.sv:78-82](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/hardware-sprites/xc7/top_tinyf_inline.sv#L78-L82) —— 当 `drawing && pix` 同时为真（在精灵内且该像素点亮）涂黄色，否则涂蓝色背景；这就是「精灵叠加」的全部魔法。
+
+#### 4.3.4 代码实践
+
+**实践目标**：用现成 testbench 跑通精灵渲染，看清 `drawing`/`pix` 与坐标的关系。
+
+**操作步骤**：
+
+1. 打开 [hardware-sprites/xc7/sprite_rom_tb.sv](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/hardware-sprites/xc7/sprite_rom_tb.sv)，注意它为了加速仿真用的是 `display_24x18`（24×18 的小屏，见 u6-l1），不是 480p。
+2. 阅读激励：[sprite_rom_tb.sv:69-93](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/hardware-sprites/xc7/sprite_rom_tb.sv#L69-L93) 把精灵先后放在 `(0,0)`、`(-7,-7)`（部分出屏）、`(20,4)`、`(20,16)`（部分出底），观察精灵如何被屏幕边界裁剪。
+3. 用 Icarus Verilog / Verilator / Vivado 仿真该 testbench（README 第 67–85 行说明了在 Vivado 里 `launch_simulation` 并切换 `top` 到 `sprite_rom_tb` 的方法）。
+
+**需要观察的现象 / 预期结果**：
+
+- `drawing` 在每个扫描行内、精灵矩形覆盖的那 8 个像素处为高电平 1。
+- `pix` 在那 8 拍里输出字母 F 对应位图行（如顶行 `1111_1100`）。
+- 当 `sprx/spry` 为负，精灵一部分落在 `sx/sy<0` 的消隐区，状态机的 `spr_active`/`spr_begin` 仍按公式判断，等扫描进入有效区才开始画，自然实现「出屏裁剪」。
+- 若本机无仿真器，标注「待本地验证」，但应能用纸笔在第 82–90 行的公式上推出 `drawing` 窗口。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：`sprite_inline` 和 `sprite_rom` 行为几乎相同，为什么要提供两个版本？
+
+> **答案**：`sprite_inline` 把位图硬编码在 RTL 里，无需 `.mem` 文件、综合后是纯逻辑/LUTRAM，适合固定不变的小图形（如示例的字母 F）；`sprite_rom` 把位图放异步 ROM、内容来自文件，换图不用改代码、便于用不同素材实验。两者是「固定 vs 灵活」的取舍。
+
+**练习 2**：精灵模块输出 `drawing` 但**没有**输出「背景色」，那背景色从哪来？
+
+> **答案**：背景色由**顶层**（如 `top_tinyf_inline`）自己用组合逻辑给出。精灵模块只负责说「我在不在画、画的是前景的哪一像素」，顶层的 `paint_r/g/b` 三元表达式在 `(drawing && pix)` 为真时选精灵前景色、否则选背景色。职责分离让精灵模块可复用于任何背景。
+
+---
+
+### 4.4 带缩放与运动的精灵：sprite 模块
+
+#### 4.4.1 概念说明
+
+`sprite_rom`/`sprite_inline` 是 1:1 原尺寸渲染。`sprite.sv` 在它们基础上加了**缩放（scaling）**：用一个 `SPR_SCALE` 参数（0=1×，1=2×，2=4×，3=8×…）把小位图放大整数倍显示。配合顶层 `top_tinyf_move` 里每帧更新 `sprx/spry` 的运动逻辑，就得到一个在屏幕上横向飞行的放大字母 F。
+
+缩放的核心思路与 linebuffer 类似但更简单（单时钟域）：
+
+- **水平放大**：用计数器 `cnt_x`，每数满 `2^SPR_SCALE` 拍才让位图地址 `+1`，于是同一列像素横向重复多次。
+- **垂直放大**：把 `sy - spry` 算术右移 `SPR_SCALE` 位再与 `SPR_HEIGHT` 比较，等效于把多个屏幕行映射到同一位图行。
+
+#### 4.4.2 核心流程
+
+`sprite.sv` 的状态机与前两个模块同构（IDLE/REG_POS/ACTIVE/WAIT_POS/SPR_LINE/WAIT_DATA），区别全在 `ACTIVE` 与 `SPR_LINE`：
+
+```
+ACTIVE:  spr_diff = (sy - spry_r) >>> SPR_SCALE;   // 垂直缩放后的位图行号
+         spr_active = (spr_diff >= 0) && (spr_diff < SPR_HEIGHT);
+
+SPR_LINE: 若 cnt_x 数满 2^SPR_SCALE-1 才前进位图地址   // 水平缩放
+```
+
+运动逻辑在顶层 `top_tinyf_move`，每帧 `frame` 脉冲更新一次坐标：
+
+```
+frame 到来: 若向右且未撞右墙 → sprx += SPR_SPX
+           若撞墙 → 反向 dx
+```
+
+#### 4.4.3 源码精读
+
+`sprite.sv` 的端口与缩放参数——注意 `SPR_SCALE` 和位图文件参数：
+
+[hardware-sprites/sprite.sv:8-25](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/hardware-sprites/sprite.sv#L8-L25) —— 参数化坐标宽、屏宽、位图尺寸、`SPR_SCALE`（缩放幂次）、每像素位宽；输出 `pix`/`drawing` 与前两个精灵模块一致。
+
+垂直缩放判定——用算术右移把屏幕行映射到位图行：
+
+[hardware-sprites/sprite.sv:55-63](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/hardware-sprites/sprite.sv#L55-L63) —— `spr_diff = (sy - spry_r) >>> SPR_SCALE` 实现垂直下采样，`SPR_SCALE=3` 时每 8 个屏幕行对应 1 个位图行，纵向放大 8 倍。
+
+水平缩放——`SPR_LINE` 状态里用 `cnt_x` 控制位图地址推进节奏：
+
+[hardware-sprites/sprite.sv:98-110](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/hardware-sprites/sprite.sv#L98-L110) —— 只有 `cnt_x == 2**SPR_SCALE-1` 那拍才让 `spr_rom_addr+1`、`bmap_x+1`，否则只累加 `cnt_x`，横向把每个位图像素重复 `2^SPR_SCALE` 次。
+
+顶层的运动逻辑——每帧更新精灵坐标、撞墙反弹：
+
+[hardware-sprites/xc7/top_tinyf_move.sv:69-84](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/hardware-sprites/xc7/top_tinyf_move.sv#L69-L84) —— 在 `frame` 脉冲沿根据方向 `dx` 增减 `sprx`，超出 `H_RES` 边界（含余量）就反向；复位时把精灵摆到屏幕正中。注意只动 `sprx`，`spry` 固定——所以是水平往返。
+
+> 关键观察：**移动精灵完全不需要改写任何存储**。`top_tinyf_move` 每帧只改一个寄存器 `sprx`，`sprite.sv` 下个扫描行立刻按新坐标渲染。这正是精灵方案相对帧缓冲的最大优势——移动是「免费的」。
+
+#### 4.4.4 代码实践
+
+**实践目标**：动手调一个会动的精灵，理解「缩放 + 运动」两个参数的作用。
+
+**操作步骤**：
+
+1. 阅读 [top_tinyf_move.sv:55-62](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/hardware-sprites/xc7/top_tinyf_move.sv#L55-L62)，确认 `SPR_SCALE=3`（8 倍）、`SPR_SPX=4`（每帧移 4 像素）、位图 `letter_f.mem`。
+2. 改造练习 A：把 `SPR_SPX` 从 4 改成 1，预测移动快慢。
+3. 改造练习 B：把运动逻辑里的 `sprx` 增减同步复制到 `spry`（加一个垂直方向 `dy`），让精灵斜向飞行并四壁反弹。
+4. 若有 Arty 板，按 [hardware-sprites/README.md:56-65](https://github.com/suisuisi/FPGA_Library/blob/1e33525198872d63ced48e8f0cebaa2419b9eb22/ThreePart/projf-explore/graphics/hardware-sprites/README.md#L56-L65) 的 Tcl 流程建工程上板。
+
+**需要观察的现象 / 预期结果**：
+
+- 原 `SPR_SPX=4`：F 较快横移，每秒约 60×4=240 像素（60 fps）。
+- `SPR_SPX=1`：明显变慢，约 60 像素/秒。
+- 加垂直运动后：F 沿对角线飞行，在四壁反弹（若实现正确）。
+- 缩放 `SPR_SCALE=3` 时 F 是 64×64 的马赛克块；改 `SPR_SCALE=1` 变 16×16 更精细。
+- 无硬件则标注「待本地验证」。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：`sprite.sv` 的水平缩放为什么用 `cnt_x == 2**SPR_SCALE-1` 而不是 `cnt_x == SPR_SCALE-1`？
+
+> **答案**：因为缩放是「放大倍数」而非「位数」。`SPR_SCALE` 是 2 的幂次：`SPR_SCALE=3` 表示放大 `2³=8` 倍。计数器要数 0..7 共 8 个值，故比较对象是 `2**3-1=7`，而不是 `3-1=2`。
+
+**练习 2**：`top_tinyf_move` 复位时把精灵坐标设为 `H_RES/2 - SPR_DRAWW/2`（第 80 行），为什么减去 `SPR_DRAWW/2`？
+
+> **答案**：`sprx/spry` 是精灵的**左上角**坐标，要让精灵几何中心落在屏幕中心，左上角必须从「屏幕中心减去精灵半宽/半高」处开始。`SPR_DRAWW = SPR_WIDTH * 2^SPR_SCALE` 是缩放后的实际显示宽度。
+
+---
+
+## 5. 综合实践
+
+**任务：对比帧缓冲与硬件精灵，画出两种方案的数据流图并选型。**
+
+请完成以下三步：
+
+1. **画帧缓冲数据流**（参考 4.1）。以 `top_david_scale` 为蓝本，画出从 `display_480p` 的 `(sx,sy)` 出发，经地址计数器、`bram_sdp`（帧缓冲）、`linebuffer_simple`、`clut_simple` 到 VGA 输出的完整方块图，并标注 `clk_sys` 与 `clk_pix` 两个时钟域的分界。
+
+2. **画精灵数据流**（参考 4.3/4.4）。以 `top_tinyf_move` 为蓝本，画出 `(sx,sy)` + `(sprx,spry)` 进入 `sprite` 模块、输出 `drawing`/`pix`、再与背景色二选一送 VGA 的方块图。注意它**全程在单一 `clk_pix` 域**、且无大块 BRAM。
+
+3. **选型论证**。针对下面三个场景，分别选择帧缓冲或精灵方案，并用一句话说明理由：
+   - (a) 显示一张 320×240 的照片；
+   - (b) 在纯色背景上做一个会弹跳的小球与分数显示；
+   - (c) 复刻一个《吃豆人》棋盘（固定迷宫 + 可移动角色）。
+
+**参考结论**：
+
+- (a) **帧缓冲**——整屏每像素都不同，精灵的「背景纯色」前提不成立。
+- (b) **精灵**——背景纯色、只有少量可移动对象，精灵存储极省且移动免费。
+- (c) **混合**——固定迷宫用帧缓冲（或 ROM 背景图）存底图，吃豆人和幽灵用精灵叠加，这正是 80 年代街机硬件的经典架构，也是 u6-l5（FPGA Pong）和 u8-l4（demos 综合）会继续展开的思路。
+
+> 进阶：如果你把 (c) 的精灵放到帧缓冲**之上**，就得到「背景图 + 前景精灵」的两层架构。试着在纸上把帧缓冲的 `fb_pix_colr` 和精灵的 `drawing/pix` 用一句优先级三目表达式合并（精灵 drawing 时盖住背景）。
+
+---
+
+## 6. 本讲小结
+
+- **帧缓冲**把整幅图像存进 BRAM，显示扫描时按地址逐像素回放，适合全屏位图，代价是存储大；`top_david_mono` 用事件计数器（`frame` 清零、`read_fb` 自增）代替乘法寻址，并用 `LAT` 补偿 BRAM 同步读延迟。
+- **linebuffer** 是「一行像素长的双时钟域 BRAM」，在 `clk_sys` 写、`clk_pix` 读，靠读地址慢走实现水平缩放、靠 `cnt_lb_line` 重复读实现垂直缩放，是帧缓冲缩放显示的关键中间件。
+- **硬件精灵**不存整屏，只存小图形 + 实时判断 `(sx,sy)` 是否落在精灵矩形内，输出 `pix`/`drawing`，背景色由顶层组合逻辑给出，存储极省且移动「免费」。
+- 三个精灵模块 `sprite_inline`/`sprite_rom`/`sprite` 共享同一套 6 状态机（IDLE/REG_POS/ACTIVE/WAIT_POS/SPR_LINE/WAIT_DATA），核心寻址公式是行优先 `cy*SPR_WIDTH+cx`；`sprite` 额外用算术右移和 `cnt_x` 计数器实现垂直/水平整数倍缩放。
+- **选型口诀**：全屏位图用帧缓冲，少量可移动图形用精灵，复杂游戏用「帧缓冲背景 + 精灵前景」的混合两层架构。
+- 两种方案都建立在 u6-l1 的显示时序（`sx/sy/de/line/frame`）和 u5-l3 的 BRAM/ROM 之上——projf 的图形栈是层层叠加的。
+
+---
+
+## 7. 下一步学习建议
+
+- **u6-l5 FPGA Pong 完整实战**：把本讲的精灵（球拍、球）与 u6-l3 的绘图原语、碰撞检测串成一个完整游戏，是精灵方案的综合演练。
+- **u8-l4 Demos 综合分析**：`life-on-screen`（康威生命游戏）用帧缓冲存细胞网格、`ad-astra`（星空）用精灵画星星，正好对比本讲两种方案在真实 demo 里的运用。
+- **继续阅读源码**：如果想看「写可变帧缓冲」，读 `framebuffers/xc7/top_david_fizzle.sv`（fizzle fade 效果，会动态改写 BRAM）；想看多精灵叠加，可尝试在 `top_tinyf_inline` 基础上例化第二个 `sprite_inline` 并用优先级合并两者的 `drawing`。
+- **ProjF 原文**：[Framebuffers](https://projectf.io/posts/framebuffers/) 与 [Hardware Sprites](https://projectf.io/posts/hardware-sprites/) 两篇博客有更细的图文讲解，可作为本讲的图文补充。
