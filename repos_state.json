@@ -33945,7 +33945,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"c64a98a2-5414-41eb-af2a-f998dc07bcef\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"640b7faa-54f4-44f9-958f-ad8297b3f17e\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
         "u7-l4": {
           "status": "pending",
@@ -33984,7 +33984,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/suisuisi/FPGA_Library/FPGA_Library-tutorial",
       "last_head": "1e33525198872d63ced48e8f0cebaa2419b9eb22",
-      "last_run_at": "2026-08-10T23:02:22Z",
+      "last_run_at": "2026-08-11T15:51:06Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "nselvara/HDL-Core-Library": {
@@ -34457,7 +34457,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"1e1dbef1-b076-4a5e-8266-1a3dd9fb4f1d\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"1915cf6a-098a-4cce-b3fc-f54ccdb700ff\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
         "u2-l8": {
           "status": "pending",
@@ -34516,7 +34516,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/ika-musume/IKA32010/IKA32010-tutorial",
       "last_head": "51bc1f05a2a08a61c8815a9643d08a42e99779c6",
-      "last_run_at": "2026-08-10T23:02:22Z",
+      "last_run_at": "2026-08-11T15:51:06Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "mhhai/ImageStitchBasedOnFPGA": {
@@ -34604,7 +34604,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"6b7db59a-5b30-471f-a0fd-1e1b8590a7ca\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"41f5400b-27e2-4bc7-9f39-aa9e780f73b3\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
         "u5-l2": {
           "status": "pending",
@@ -34623,7 +34623,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/mhhai/ImageStitchBasedOnFPGA/ImageStitchBasedOnFPGA-tutorial",
       "last_head": "8728b11c25af93dd1b4f7606aca64433827adfd5",
-      "last_run_at": "2026-08-10T23:02:22Z",
+      "last_run_at": "2026-08-11T15:51:06Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "aolofsson/oh": {},
@@ -46440,7 +46440,7 @@
     "ai-dynamo/dynamo": {},
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-10T23:02:22Z"
+      "last_run_at": "2026-08-11T15:51:06Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
