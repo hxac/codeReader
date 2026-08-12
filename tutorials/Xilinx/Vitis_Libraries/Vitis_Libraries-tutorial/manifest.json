@@ -1,0 +1,1251 @@
+{
+  "project": "Vitis_Libraries",
+  "head": "629b2c979f65561f07e4e87b860f306cb480895e",
+  "rationale": "本仓库是 AMD Vitis 加速库的单体多库集合（9 个活跃库），核心抽象有三层：L1（HLS C++ 头件原语）/L2（内核+xclbin）/L3（多内核应用流水线），以及两条硬件路线：PL（FPGA/Alveo/Zynq，HLS→RTL）与 AIE（Versal AI Engine，ADF 图）。因此学习路径按\"先共后分、先浅后深\"组织：第 1-2 单元让读者从零认识项目定位、单仓库配置与 L1/L2/L3+PL/AIE 心智模型，并跑通第一个 HLS 用例；第 3-5 单元建立贯穿所有库的两个核心心智模型——HLS 流式内核模型与主机端 XRT/OpenCL 编程模型，以及 L2/L3 系统构建流程；第 6-11 单元按依赖与领域逐库深入（utils/data_mover 是底层，dsp/solver/blas 为数值计算，vision/security 为信号处理，motor_control/ultrasound 为垂直领域），每个库只用真实源码；第 12-15 单元进入专家层，覆盖性能与数据流架构、AIE 编程模型、测试与 CI 基础设施、二次开发与完整部署。讲义依赖关系沿\"基础设施→机制→领域→进阶\"递进，依赖图（utils←data_mover←dsp←solver）决定了领域库的讲解顺序。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "仓库导览：Vitis 加速库是什么",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与加速库全景",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "topic": "介绍 Vitis_Libraries 的定位、覆盖的 9 个活跃库（blas/dsp/vision/security/solver/utils/data_mover/motor_control/ultrasound）、已废弃库，以及 PL 与 AIE 两条加速路线与目标硬件。",
+          "level": "beginner",
+          "learning_goals": [
+            "说出 Vitis 加速库的整体定位与价值",
+            "列举 9 个活跃库及其领域",
+            "区分 PL（FPGA）与 AIE（AI Engine）两条加速路线和各自的目标硬件"
+          ],
+          "source_files": [
+            "README.md",
+            "dsp/README.md",
+            "vision/README.md",
+            "utils/README.md"
+          ],
+          "minimal_modules": [
+            "顶层 README",
+            "库清单与废弃说明",
+            "目标平台（Alveo U200/U250/U280/U50、Versal VCK190/VEK280、Zynq）"
+          ],
+          "practice_task": "通读顶层 README，绘制一张表：把 9 个活跃库按",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "单仓库结构与跨库配置",
+          "order": 2,
+          "filename": "u1-l2-monorepo-layout.md",
+          "topic": "讲解单仓库目录组织、每个库共有的 library.json/README/Jenkinsfile，以及顶层 dependency.json（库间依赖）与 platform_map.json（逻辑平台名到 xpfm 的映射）。",
+          "level": "beginner",
+          "learning_goals": [
+            "理解单仓库的目录约定与各库的共有文件",
+            "读懂 library.json 中 include 路径、id、name 的含义",
+            "用 dependency.json 画出库之间的依赖关系图"
+          ],
+          "source_files": [
+            "dependency.json",
+            "platform_map.json",
+            "utils/library.json",
+            "Jenkinsfile",
+            "dsp/library.json"
+          ],
+          "minimal_modules": [
+            "library.json 结构",
+            "dependency.json 依赖图",
+            "platform_map.json 平台映射",
+            "Jenkinsfile CI 入口"
+          ],
+          "practice_task": "依据 dependency.json 画出 9 个库的依赖拓扑（注意 utils 是多数库的根依赖，solver 依赖 dsp 与 utils），并指出dsp 间接依赖哪些库。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "L1/L2/L3 设计哲学与 PL/AIE 两种范式",
+          "order": 3,
+          "filename": "u1-l3-l1l2l3-and-pl-aie.md",
+          "topic": "讲解贯穿所有库的 L1/L2/L3 三层抽象（原语→内核→应用）各自解决的问题与产物，以及 PL（HLS→RTL→xclbin）与 AIE（ADF 图）两条开发范式的区别。",
+          "level": "beginner",
+          "learning_goals": [
+            "解释 L1/L2/L3 三层各自的目标、目录与产物",
+            "区分 csim/csynth/cosim 与 sw_emu/hw_emu/hw 两套流程",
+            "理解 PL 与 AIE 的适用场景与典型库"
+          ],
+          "source_files": [
+            "utils/README.md",
+            "blas/README.md",
+            "dsp/README.md",
+            "vision/README.md"
+          ],
+          "minimal_modules": [
+            "L1/L2/L3 目录与流程",
+            "HLS TARGET 流程",
+            "Vitis sw_emu/hw_emu/hw 流程",
+            "PL vs AIE 范式"
+          ],
+          "practice_task": "为 dsp 库列出 L1/L2/L3 目录里分别有哪些子目录，并判断 FFT 在哪一层既有 PL 实现又有 AIE 实现。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "环境搭建与首次运行",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "搭建 Vitis/XRT 开发环境",
+          "order": 1,
+          "filename": "u2-l1-setup-environment.md",
+          "topic": "讲解如何 source Vitis settings64.sh 与 XRT setup.sh、设置 PLATFORM_REPO_PATHS、确认 v++/vivado/vitis-run 可用，以及操作系统与 C++14 要求。",
+          "level": "beginner",
+          "learning_goals": [
+            "正确 source Vitis 与 XRT 环境脚本",
+            "理解 PLATFORM / PLATFORM_REPO_PATHS / XPART 的作用",
+            "验证 v++、vivado、vitis-run 工具链可用"
+          ],
+          "source_files": [
+            "utils/README.md",
+            "security/README.md",
+            "blas/README.md",
+            "platform_map.json"
+          ],
+          "minimal_modules": [
+            "settings64.sh 与 setup.sh",
+            "PLATFORM_REPO_PATHS",
+            "平台选择与 platform_map.json"
+          ],
+          "practice_task": "在自己的环境执行 source 与 export，运行 v++ --version 与 vitis-run --help，确认工具链就绪，并记录当前可用的平台名。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "运行第一个 HLS L1 用例：stream_dup",
+          "order": 2,
+          "filename": "u2-l2-first-hls-case.md",
+          "topic": "以 utils/L1/tests/stream_dup 为例，完整跑通一个 L1 HLS 用例：进入目录、make run TARGET=csim、查看 PASS/FAIL 输出，理解 test.cpp+Makefile+description.json 三件套。",
+          "level": "beginner",
+          "learning_goals": [
+            "跑通第一个 L1 用例并看到 PASS",
+            "理解 L1 用例的 test.cpp/Makefile/description.json 结构",
+            "认识 extern \"C\" 的 DUT 封装与 main 测试入口"
+          ],
+          "source_files": [
+            "utils/L1/tests/stream_dup/test.cpp",
+            "utils/L1/tests/stream_dup/Makefile",
+            "utils/L1/tests/stream_dup/description.json",
+            "utils/L1/include/xf_utils_hw/stream_dup.hpp"
+          ],
+          "minimal_modules": [
+            "L1 用例目录结构",
+            "make run TARGET=csim",
+            "test.cpp 的 DUT 与 main",
+            "description.json 元数据"
+          ],
+          "practice_task": "在 utils/L1/tests/stream_dup 下执行 make run TARGET=csim，把 NUM_COPY 改为 8 重新运行，确认仍然 PASS 并解释为什么。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "HLS TARGET 流程与综合报告解读",
+          "order": 3,
+          "filename": "u2-l3-hls-targets-and-reports.md",
+          "topic": "讲解 csim/csynth/cosim/vivado_syn/vivado_impl 五个 TARGET 的含义、产物与代价，以及如何阅读综合报告中的 latency、II、资源利用率。",
+          "level": "beginner",
+          "learning_goals": [
+            "区分五个 HLS TARGET 及其产物",
+            "通过 Makefile 理解 vitis-run --mode hls 的调用方式",
+            "读懂综合报告里的 II、latency、资源估计"
+          ],
+          "source_files": [
+            "utils/L1/tests/stream_dup/Makefile",
+            "utils/L1/tests/stream_dup/hls_config.tmpl",
+            "utils/README.md",
+            "blas/README.md"
+          ],
+          "minimal_modules": [
+            "五个 TARGET 含义",
+            "hls_config.cfg 生成与 vitis-run",
+            "综合报告关键字段"
+          ],
+          "practice_task": "对 stream_dup 用例依次跑 csim 与 csynth，打开生成的 test.prj 综合报告，记录 streamDup 的 II 与 BRAM/LUT/FF 估计值。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "HLS 内核与流式数据模型",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "hls::stream、ap_int 与 DUT 封装约定",
+          "order": 1,
+          "filename": "u3-l1-hls-stream-and-dut.md",
+          "topic": "讲解 Vitis 库通用的数据传递约定：hls::stream、伴随的 end-flag 流（e_istrm）、ap_int 宽类型，以及把模板函数包成 extern \"C\" DUT 的模式。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 hls::stream 与 end-flag 流的配对约定",
+            "掌握 ap_int 宽位类型的使用",
+            "学会把模板内核封装为可综合的 DUT"
+          ],
+          "source_files": [
+            "utils/L1/include/xf_utils_hw/stream_dup.hpp",
+            "utils/L1/tests/stream_dup/test.cpp",
+            "utils/L1/include/xf_utils_hw/types.hpp",
+            "utils/L1/include/xf_utils_hw/common.hpp"
+          ],
+          "minimal_modules": [
+            "hls::stream 读写",
+            "end-flag 约定",
+            "ap_int 类型",
+            "extern C DUT 封装"
+          ],
+          "practice_task": "仿照 stream_dup，为 utils 的 stream_split 写一个最小 DUT 封装（extern \"C\" 函数 + hls::stream 接口），并解释每个流为何要带 end flag。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "HLS pragma 如何映射硬件",
+          "order": 2,
+          "filename": "u3-l2-hls-pragmas.md",
+          "topic": "通过真实头件讲解 #pragma HLS pipeline II= / unroll / dataflow 等指令如何决定吞吐、并行度与面积，并以 stream_dup 的循环展开为例。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 pipeline II 对吞吐的影响",
+            "理解 unroll 对并行度与资源的影响",
+            "认识 STATIC_ASSERT 等编译期约束的作用"
+          ],
+          "source_files": [
+            "utils/L1/include/xf_utils_hw/stream_dup.hpp",
+            "utils/L1/include/xf_utils_hw/common.hpp",
+            "utils/L1/include/xf_utils_hw/stream_combine.hpp"
+          ],
+          "minimal_modules": [
+            "pipeline II=1",
+            "unroll 展开",
+            "dataflow 任务级流水",
+            "静态断言约束"
+          ],
+          "practice_task": "在 stream_dup.hpp 里把 II 从 1 改为 2，跑 csynth，对比 latency 与资源变化，说明 II 变大对吞吐的影响。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "utils 流式原语目录",
+          "order": 3,
+          "filename": "u3-l3-utils-streaming-catalog.md",
+          "topic": "系统介绍 utils 库提供的流式原语全家桶：axi_to_stream/stream_to_axi、stream_dup、stream_combine、multiplexer、stream_split、stream_reorder、stream_sync、stream_discard、uram_array、cache，以及它们在数据分发/收集中的角色。",
+          "level": "intermediate",
+          "learning_goals": [
+            "掌握 utils 各流式原语的功能",
+            "理解 AXI↔stream 转换的意义",
+            "学会用这些原语组合数据分发/收集结构"
+          ],
+          "source_files": [
+            "utils/L1/include/xf_utils_hw/axi_to_stream.hpp",
+            "utils/L1/include/xf_utils_hw/stream_to_axi.hpp",
+            "utils/L1/include/xf_utils_hw/stream_combine.hpp",
+            "utils/L1/include/xf_utils_hw/multiplexer.hpp",
+            "utils/L1/include/xf_utils_hw/stream_split.hpp",
+            "utils/L1/include/xf_utils_hw/uram_array.hpp"
+          ],
+          "minimal_modules": [
+            "axi_to_stream/stream_to_axi",
+            "stream_dup/combine/split",
+            "multiplexer/reorder/sync",
+            "uram_array/cache"
+          ],
+          "practice_task": "浏览 utils/L1/tests 下与这些原语同名的用例目录，挑一个（如 stream_combine）跑 csim，并用一句话描述其数据流语义。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "主机端编程：OpenCL 与原生 XRT",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "xcl2 OpenCL 主机辅助库",
+          "order": 1,
+          "filename": "u4-l1-xcl2-helper.md",
+          "topic": "讲解 ext/xcl2 这个跨库共用的 OpenCL 主机辅助库：aligned_allocator 页对齐分配、find_binary_file 查找 xclbin、get_xil_devices 获取设备、is_emulation 判断仿真模式。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 aligned_allocator 为何要页对齐",
+            "掌握 xclbin 的查找路径约定",
+            "学会用 xcl::get_xil_devices 枚举设备"
+          ],
+          "source_files": [
+            "utils/ext/xcl2/xcl2.hpp",
+            "utils/ext/xcl2/xcl2.cpp",
+            "utils/ext/README.md"
+          ],
+          "minimal_modules": [
+            "aligned_allocator",
+            "find_binary_file 查找顺序",
+            "get_xil_devices",
+            "is_emulation/is_hw_emulation"
+          ],
+          "practice_task": "写一段最小 OpenCL 主机代码，用 xcl::get_xil_devices() 找到设备并打印设备名，再说明 find_binary_file 会按哪些路径查找 xclbin。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "原生 XRT C++ API（xrt::device/kernel/bo/run）",
+          "order": 2,
+          "filename": "u4-l2-native-xrt-api.md",
+          "topic": "以 dsp/L2 vss_fft_ifft_1d 的 host.cpp 为例，讲解现代原生 XRT C++ API：xrt::device、load_xclbin、xrt::kernel、xrt::run、set_arg/start/wait 的完整调用链。",
+          "level": "intermediate",
+          "learning_goals": [
+            "掌握 xrt::device 加载 xclbin 的流程",
+            "理解 xrt::kernel 与 xrt::run 的关系",
+            "学会用 set_arg/start/wait 驱动一次内核执行"
+          ],
+          "source_files": [
+            "dsp/L2/examples/vss_fft_ifft_1d/host.cpp",
+            "dsp/L2/examples/vss_fft_ifft_1d/example.mk"
+          ],
+          "minimal_modules": [
+            "xrt::device/load_xclbin",
+            "xrt::kernel",
+            "xrt::run/set_arg/start/wait",
+            "xrt::bo 缓冲对象"
+          ],
+          "practice_task": "阅读 host.cpp，按顺序列出主机加载 xclbin 后控制 mm2s/s2mm 内核的 API 调用序列，并解释 start()/wait() 的并发含义。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "buffer object、同步与存储分区",
+          "order": 3,
+          "filename": "u4-l3-bo-sync-and-memory.md",
+          "topic": "讲解 xrt::bo 的创建、map 映射、sync 同步方向，以及 group_id 如何决定缓冲挂到哪个 DDR/HBM bank，从而影响带宽。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 bo 的 map 与 sync 方向（to/from device）",
+            "掌握 group_id 与存储端口的对应关系",
+            "认识 DDR/HBM 多 bank 对带宽的意义"
+          ],
+          "source_files": [
+            "dsp/L2/examples/vss_fft_ifft_1d/host.cpp",
+            "dsp/L2/examples/vss_fft_ifft_1d/system.cfg",
+            "utils/ext/xcl2/xcl2.hpp"
+          ],
+          "minimal_modules": [
+            "xrt::bo/map/sync",
+            "group_id 与端口",
+            "XCL_BO_SYNC 方向",
+            "DDR/HBM bank"
+          ],
+          "practice_task": "在 host.cpp 中定位 s2mm_bo 的创建与 sync 调用，说明为何要在读取结果前执行 XCL_BO_SYNC_BO_FROM_DEVICE，以及 group_id(0) 决定了什么。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "系统构建：L2/L3 流程",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "v++ L2 构建流程：XO→xsa→xclbin",
+          "order": 1,
+          "filename": "u5-l1-vpp-l2-build.md",
+          "topic": "以 example.mk 为例讲解 v++ -c 编译内核为 XO、v++ -l 链接为 xsa、再用 --package 生成 xclbin/SD 卡，以及 sw_emu/hw_emu/hw 三种 target 的区别。",
+          "level": "intermediate",
+          "learning_goals": [
+            "掌握 v++ -c/-l/--package 三段流程",
+            "理解 XO、xsa、xclbin 产物的关系",
+            "区分 sw_emu/hw_emu/hw 及其代价"
+          ],
+          "source_files": [
+            "dsp/L2/examples/vss_fft_ifft_1d/example.mk",
+            "dsp/L2/examples/vss_fft_ifft_1d/utils.mk",
+            "dsp/L2/examples/vss_fft_ifft_1d/system.cfg",
+            "dsp/L2/examples/vss_fft_ifft_1d/Makefile"
+          ],
+          "minimal_modules": [
+            "v++ -c 编译 XO",
+            "v++ -l 链接 xsa",
+            "v++ --package 打包",
+            "system.cfg 连接配置"
+          ],
+          "practice_task": "对照 example.mk，列出从 XO 到能上板 xclbin 的三条 v++ 命令，并说明 system.cfg 在链接阶段的作用。",
+          "depends_on": [
+            "u2-l3",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "数据搬运器与 DDR↔AIE 桥接",
+          "order": 2,
+          "filename": "u5-l2-data-movers.md",
+          "topic": "讲解 mm2s/s2mm PL 数据搬运内核如何把 DDR 数据变成流喂给 AIE/PL 内核，以及 data_mover 库提供的通用 4D 搬运器与 URAM 缓存。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 mm2s/s2mm 在系统中的桥接角色",
+            "掌握 data_mover 库的 pl_data_mover/pl_4d_data_mover 用法",
+            "认识 URAM 缓存与 bi_dm 双向搬运"
+          ],
+          "source_files": [
+            "dsp/L1/tests/hw/mm2s/mm2s.cpp",
+            "dsp/L1/tests/hw/s2mm/s2mm.cpp",
+            "data_mover/L1/include/xf_data_mover/pl_data_mover.hpp",
+            "data_mover/L1/include/xf_data_mover/pl_4d_data_mover.hpp",
+            "data_mover/L1/include/xf_data_mover/load_master_to_stream.hpp"
+          ],
+          "minimal_modules": [
+            "mm2s/s2mm 流式搬运",
+            "pl_data_mover",
+            "4D 数据搬运",
+            "URAM 缓存"
+          ],
+          "practice_task": "在 host.cpp 中找到 mm2s/s2mm 的内核名与连接关系，再从 data_mover 库选一个搬运器头件，描述它的模板参数如何控制维度与位宽。",
+          "depends_on": [
+            "u3-l3",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "多内核流水线组合（L3）",
+          "order": 3,
+          "filename": "u5-l3-l3-pipelines.md",
+          "topic": "讲解 L3 如何把多个内核串成应用流水线，以 vision L3 与 blas L3 GEMM 为例说明 examples/tests/benchmarks 的组织与构建。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 L3 相对 L2 的组合价值",
+            "掌握多内核流水线的 host 控制方式",
+            "认识 L3 的 benchmarks 用途"
+          ],
+          "source_files": [
+            "vision/L3/README.md",
+            "blas/L3/tests/gemm/gemm_test.cpp",
+            "vision/L2/README.md",
+            "blas/L3/README.md"
+          ],
+          "minimal_modules": [
+            "L3 流水线组合",
+            "多内核 host 控制",
+            "benchmarks 评测目录"
+          ],
+          "practice_task": "浏览 vision/L3/examples 目录挑一个流水线示例（如 colordetect），描述它串联了哪些内核，并说明它与单个 L2 内核的区别。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "DSP 库：从 HLS FFT 到 AIE 图",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "L1 HLS FFT（vitis_fft / 2dfft）",
+          "order": 1,
+          "filename": "u6-l1-hls-fft.md",
+          "topic": "讲解 dsp L1 的 HLS FFT 实现：vitis_fft 与 vitis_2dfft 的目录结构、内核接口与对应 L1 测试（1dfft/2dfft/ssr_fft）。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 dsp L1 HLS FFT 的组织",
+            "掌握 FFT 内核的流式接口与 SSR 概念",
+            "学会跑通一个 FFT L1 测试"
+          ],
+          "source_files": [
+            "dsp/L1/include/hw/vitis_fft",
+            "dsp/L1/include/hw/vitis_2dfft",
+            "dsp/L1/tests/hw/1dfft",
+            "dsp/L1/tests/hw/2dfft",
+            "dsp/L1/tests/hw/ssr_fft",
+            "dsp/L1/README.md"
+          ],
+          "minimal_modules": [
+            "vitis_fft 内核",
+            "2D FFT",
+            "SSR 并行",
+            "L1 测试流程"
+          ],
+          "practice_task": "进入 dsp/L1/tests/hw/1dfft 跑 csim，记录输入输出位宽与点数，并说明 SSR 如何影响并行度。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "L2 AIE 内核全景（FFT/DDS/FIR/GeMM/排序/卷积）",
+          "order": 2,
+          "filename": "u6-l2-aie-kernel-catalog.md",
+          "topic": "系统介绍 dsp L1/include/aie 与 L2/tests/aie 下的 AIE 内核家族：mixed_radix_fft、dds_mixer、FIR 全家桶（sym/asym/hb/decimate/interpolate/resampler）、matrix_mult、bitonic_sort/merge_sort、conv_corr、cumsum、widget 等。",
+          "level": "intermediate",
+          "learning_goals": [
+            "掌握 dsp AIE 内核家族的类别",
+            "理解 traits/utils 三件式组织（kernel+traits+utils）",
+            "学会按 L2/tests/aie 找到对应测试"
+          ],
+          "source_files": [
+            "dsp/L1/include/aie/mixed_radix_fft.hpp",
+            "dsp/L1/include/aie/dds_mixer.hpp",
+            "dsp/L1/include/aie/fir_sr_asym.hpp",
+            "dsp/L1/include/aie/matrix_mult.hpp",
+            "dsp/L1/include/aie/bitonic_sort.hpp",
+            "dsp/L2/tests/aie/mixed_radix_fft"
+          ],
+          "minimal_modules": [
+            "FFT/DDS/FIR AIE 内核",
+            "matrix_mult GeMM",
+            "排序/卷积",
+            "traits/utils 配套"
+          ],
+          "practice_task": "在 dsp/L2/tests/aie 下选一个内核（如 dds_mixer 或 matrix_mult），描述其目录与构建入口，并列出该内核的 traits 头文件里有哪些模板参数。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "端到端 AIE 示例：vss_fft_ifft_1d",
+          "order": 3,
+          "filename": "u6-l3-vss-fft-ifft-example.md",
+          "topic": "以 vss_fft_ifft_1d 为完整案例，串起 AIE 图源码（aie.cpp/aie.hpp）、参数配置（my_params.cfg）、PL 搬运、主机控制与打包运行的全流程。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解一个完整 AIE 系统的文件构成",
+            "掌握 my_params.cfg 参数如何驱动代码生成",
+            "贯通 PL 搬运+AIE 图+主机控制的端到端流程"
+          ],
+          "source_files": [
+            "dsp/L2/include/vss/vss_fft_ifft_1d/aie.cpp",
+            "dsp/L2/include/vss/vss_fft_ifft_1d/aie.hpp",
+            "dsp/L2/include/vss/vss_fft_ifft_1d/vss_fft_ifft_1d.mk",
+            "dsp/L2/examples/vss_fft_ifft_1d/host.cpp",
+            "dsp/L2/examples/vss_fft_ifft_1d/my_params.cfg",
+            "dsp/L2/examples/vss_fft_ifft_1d/example.mk"
+          ],
+          "minimal_modules": [
+            "AIE 图 main/init/run/end",
+            "参数配置与代码生成",
+            "vss .mk 构建",
+            "端到端打包运行"
+          ],
+          "practice_task": "修改 my_params.cfg 里的 POINT_SIZE 或 SSR，按 example.mk 的说明重新生成 vss 并解释该参数对流的数量与图结构的影响。",
+          "depends_on": [
+            "u6-l2",
+            "u4-l2",
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "Solver 库：矩阵分解与求解器",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "稠密矩阵分解 HLS 内核",
+          "order": 1,
+          "filename": "u7-l1-solver-hls.md",
+          "topic": "讲解 solver L1/include/hw 的 HLS 内核：Cholesky、LU、QR、SVD 分解与三角求解、矩阵求逆，以及对应的 L1 测试。",
+          "level": "intermediate",
+          "learning_goals": [
+            "掌握 solver 提供的矩阵分解种类",
+            "理解 Cholesky/QR 内核的接口与数据类型（含 cfloat 变体）",
+            "学会跑通一个分解 L1 测试"
+          ],
+          "source_files": [
+            "solver/L1/include/hw/cholesky.hpp",
+            "solver/L1/include/hw/qr_inverse.hpp",
+            "solver/L1/include/hw/cholesky_inverse.hpp",
+            "solver/L1/include/hw/back_substitute.hpp",
+            "solver/README.md"
+          ],
+          "minimal_modules": [
+            "Cholesky/LU/QR/SVD 分解",
+            "三角求解与求逆",
+            "cfloat 变体",
+            "L1 测试"
+          ],
+          "practice_task": "在 solver/L1 里找 cholesky 相关测试，跑 csim 并说明该内核对矩阵性质（如正定对称）的要求。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "Solver AIE 内核与 L2 基准",
+          "order": 2,
+          "filename": "u7-l2-solver-aie-benchmarks.md",
+          "topic": "讲解 solver 的 AIE 实现（aie 目录下 cholesky、qrd 等）以及 L2/benchmarks 如何在 Alveo 上评测分解与求解器性能。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 solver 在 AIE 上的分解实现",
+            "掌握 qrd/cholesky 的 traits/utils 组织",
+            "学会用 L2/benchmarks 评测性能"
+          ],
+          "source_files": [
+            "solver/L1/include/aie/cholesky.hpp",
+            "solver/L1/include/aie/qrd.hpp",
+            "solver/L1/include/aie/qrd_kernel.hpp",
+            "solver/L2/benchmarks/gesvj",
+            "solver/L2/benchmarks/gesvdj"
+          ],
+          "minimal_modules": [
+            "AIE cholesky/qrd",
+            "traits/utils 配套",
+            "L2 benchmarks 评测"
+          ],
+          "practice_task": "浏览 solver/L2/benchmarks 选一个（如 gesvj），描述其构建与运行入口，并说明它与 L1 单内核测试在目标上的差别。",
+          "depends_on": [
+            "u7-l1",
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "BLAS 库：三级抽象与 GEMM",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "BLAS 三级抽象与 GEMM",
+          "order": 1,
+          "filename": "u8-l1-blas-levels-gemm.md",
+          "topic": "讲解 blas 库的 module/kernel/software-API 三级抽象、L1/include/hw 的 xf_blas 模块、L3 GEMM 软件接口，以及 run_test.py 测试总线的使用。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 BLAS 的 module/kernel/API 三级定位",
+            "掌握 GEMM 从 L1 模块到 L3 API 的层级关系",
+            "学会用 run_test.py 驱动 blas 测试"
+          ],
+          "source_files": [
+            "blas/README.md",
+            "blas/L1/include/hw/xf_blas.hpp",
+            "blas/L1/include/hw/xf_blas",
+            "blas/L3/tests/gemm/gemm_test.cpp",
+            "blas/L1/tests/run_test.py",
+            "blas/L1/tests/blas_gen.mk"
+          ],
+          "minimal_modules": [
+            "三级抽象",
+            "xf_blas 模块",
+            "GEMM L3 API",
+            "run_test.py 总线"
+          ],
+          "practice_task": "阅读 run_test.py 与 blas_gen.mk，说明它们如何批量生成/运行 L1 测试，并指出 GEMM 在哪一级提供",
+          "depends_on": [
+            "u3-l2",
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "Vision 库：OpenCV 加速与 AIE-ML",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "Vision 组织与 OpenCV 映射",
+          "order": 1,
+          "filename": "u9-l1-vision-organization.md",
+          "topic": "讲解 vision 库的目录组织（core/imgproc/features/video/dnn + aie/aie-ml）、与 OpenCV 的 API 映射关系、对 OpenCV 4.4.0 的依赖与平台覆盖。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 vision 的目录与功能域划分",
+            "掌握 vision 内核与 OpenCV 的对应关系",
+            "认识 PL/AIE/AIE-ML 三类内核的存放位置"
+          ],
+          "source_files": [
+            "vision/README.md",
+            "vision/L1/README.md",
+            "vision/L1/include/core/xf_arithm.hpp",
+            "vision/L1/include/core/xf_mean_stddev.hpp",
+            "vision/L1/include/aie",
+            "vision/L1/include/aie-ml"
+          ],
+          "minimal_modules": [
+            "core/imgproc/features/video/dnn 划分",
+            "OpenCV 映射",
+            "aie/aie-ml 目录",
+            "OpenCV 4.4.0 依赖"
+          ],
+          "practice_task": "在 vision/L1/include 里挑一个与 OpenCV 同名的内核（如 mean_stddev），对照说明 vision 版本的接口与数据类型差异。",
+          "depends_on": [
+            "u3-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "PL 视觉内核与 L2 示例流程",
+          "order": 2,
+          "filename": "u9-l2-vision-pl-l2.md",
+          "topic": "讲解一个 PL 视觉内核从 L1 头件到 L2 examples/tests 的完整流程，包括 xcl2 主机与 hw_emu/hw 构建、OpenCV 输入输出处理。",
+          "level": "intermediate",
+          "learning_goals": [
+            "掌握 PL 视觉内核的 L1→L2 流程",
+            "理解 L2 examples 的 host + 内核 + makefile 组织",
+            "认识 OpenCV 图像作为输入输出的处理方式"
+          ],
+          "source_files": [
+            "vision/L2/README.md",
+            "vision/L2/examples/accumulate",
+            "vision/L1/include/imgproc",
+            "vision/ext/xcl2/xcl2.hpp"
+          ],
+          "minimal_modules": [
+            "L1 内核到 L2 示例",
+            "host + makefile",
+            "OpenCV 图像 IO",
+            "hw_emu 构建"
+          ],
+          "practice_task": "在 vision/L2/examples 选一个示例（如 accumulate），列出其 host、内核源、makefile 三件，并说明输入图像如何加载到 bo。",
+          "depends_on": [
+            "u9-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "AIE-ML 视觉函数与 L3 流水线",
+          "order": 3,
+          "filename": "u9-l3-vision-aie-ml-l3.md",
+          "topic": "讲解 vision 的 AIE-ML 内核（L1/include/aie-ml 与 L2/tests/aie-ml）、其在 VEK280 上的仿真流程，以及 L3 多内核图像处理流水线。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 AIE-ML 视觉内核的组织与定位",
+            "掌握 AIE 仿真/x86 仿真/hw_emu 流程",
+            "认识 L3 图像处理流水线"
+          ],
+          "source_files": [
+            "vision/L1/include/aie-ml",
+            "vision/L2/tests",
+            "vision/L3/examples/colordetect",
+            "vision/L3/README.md",
+            "vision/README.md"
+          ],
+          "minimal_modules": [
+            "AIE-ML 内核目录",
+            "aie/x86/hw_emu 仿真",
+            "L3 流水线示例"
+          ],
+          "practice_task": "阅读 vision README 的 AIE 部分，说明 AIE-ML 函数在哪块板子验证，并挑一个 L3 流水线示例描述它串了哪些内核。",
+          "depends_on": [
+            "u9-l2",
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "Security 库：密码学原语",
+      "level": "intermediate",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "密码学原语目录与基准",
+          "order": 1,
+          "filename": "u10-l1-security-primitives.md",
+          "topic": "讲解 security L1 提供的 HLS 密码学原语全家桶：对称（AES/DES/RC4/ChaCha20）、模式（CBC/CFB/CTR/ECB/GCM/CCM/XTS/OFB）、哈希（SHA/MD/BLAKE2b/Keccak/SHA3）、MAC（HMAC/GMAC）、非对称（RSA/DSA/EdDSA）与 VDF，以及 L1/benchmarks。",
+          "level": "intermediate",
+          "learning_goals": [
+            "掌握 security 原语的分类",
+            "理解 AES 各模式（如 aes256Gcm）的命名与组合方式",
+            "学会用 L1/benchmarks 评测加密吞吐"
+          ],
+          "source_files": [
+            "security/README.md",
+            "security/L1/include/xf_security_L1.hpp",
+            "security/L1/include/xf_security/aes.hpp",
+            "security/L1/include/xf_security/gcm.hpp",
+            "security/L1/include/xf_security/sha224_256.hpp",
+            "security/L1/include/xf_security/hmac.hpp",
+            "security/L1/benchmarks/crc32"
+          ],
+          "minimal_modules": [
+            "对称/非对称/哈希/MAC 分类",
+            "AES 模式组合命名",
+            "xf_security_L1.hpp 汇总",
+            "L1 benchmarks"
+          ],
+          "practice_task": "从 README 的函数表里选一个（如 aes256GcmEncrypt），在 xf_security 下找到其实现头件，并跑 L1/benchmarks 中一个（如 crc32）的 csim。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "领域专用：电机控制与超声",
+      "level": "intermediate",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "电机控制：FOC/SVPWM/PWM_GEN/QEI",
+          "order": 1,
+          "filename": "u11-l1-motor-control.md",
+          "topic": "讲解 motor_control 库的 4 个 L1 算法 API（FOC、SVPWM_DUTY、PWM_GEN、QEI）、其 AXI 配置接口与 IPI 集成方式，以及 models_fp FP32 模型分支。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 4 个电机控制 API 的职责与前后端关系（SVPWM_DUTY 前端 + PWM_GEN 后端）",
+            "掌握 AXI 配置接口与 IPI 集成",
+            "认识 models_fp 与 tests_fp32 的 FP32 精度测试"
+          ],
+          "source_files": [
+            "motor_control/README.md",
+            "motor_control/L1/include/hw",
+            "motor_control/L1/include/models_fp",
+            "motor_control/L1/tests"
+          ],
+          "minimal_modules": [
+            "FOC 磁场定向控制",
+            "SVPWM_DUTY/PWM_GEN 前后端",
+            "QEI 正交编码",
+            "AXI 接口与 FP32 模型"
+          ],
+          "practice_task": "阅读 README，说明 SVPWM_DUTY 与 PWM_GEN 如何配合完成空间矢量调制，并指出 models_fp 相对默认实现的差异。",
+          "depends_on": [
+            "u1-l3",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "超声波束合成器：L1→L2→L3 组合",
+          "order": 2,
+          "filename": "u11-l2-ultrasound-beamformer.md",
+          "topic": "讲解 ultrasound 库如何由 L1 向量/BLAS 运算（absV/mulMM/sumVV 等）组合出 L2 波束合成功能单元（kernel_apodization/delay/focusing/interpolation/sample），再构成 L3 完整 Beamformer（PW/SA/Scanline）。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解超声库的三层组合逻辑",
+            "掌握 L1 向量运算与 L2 kernel 的关系",
+            "认识 L3 完整 Beamformer 的三种模式"
+          ],
+          "source_files": [
+            "ultrasound/README.md",
+            "ultrasound/L1/include/kernels.hpp",
+            "ultrasound/L1/include/kernel_apodization.hpp",
+            "ultrasound/L1/include/kernel_delay.hpp",
+            "ultrasound/L1/include/kernel_focusing.hpp",
+            "ultrasound/L1/include/kernel_interpolation.hpp"
+          ],
+          "minimal_modules": [
+            "L1 向量运算",
+            "L2 波束合成 kernel",
+            "L3 Beamformer 模式",
+            "层层组合"
+          ],
+          "practice_task": "梳理 ultrasound L1/include 里 kernel_* 与底层向量运算（mulMM/sumVV 等）的依赖，画出 L1→L2 的组合关系图。",
+          "depends_on": [
+            "u8-l1",
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "性能与数据流架构",
+      "level": "advanced",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "dataflow、SSR、datawidth 与 II 调优",
+          "order": 1,
+          "filename": "u12-l1-dataflow-ssr-ii.md",
+          "topic": "从工程角度讲解 DATAFLOW 任务级流水、SSR（streaming split-radix）并行、datawidth 位宽取舍与 II 调优如何共同决定吞吐，结合 dsp/utils 真实内核。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解 DATAFLOW 与函数级并行的关系",
+            "掌握 SSR 如何线性扩展吞吐",
+            "学会用 datawidth 与 II 权衡面积/性能"
+          ],
+          "source_files": [
+            "utils/L1/include/xf_utils_hw/stream_dup.hpp",
+            "dsp/L1/include/aie/mixed_radix_fft.hpp",
+            "dsp/L2/include/vss/vss_fft_ifft_1d/aie.hpp",
+            "dsp/L2/examples/vss_fft_ifft_1d/my_params.cfg"
+          ],
+          "minimal_modules": [
+            "DATAFLOW 任务流水",
+            "SSR 并行扩展",
+            "datawidth 位宽",
+            "II 调优"
+          ],
+          "practice_task": "以 my_params.cfg 的 SSR 参数为例，定量分析把 SSR 从 2 改到 4 对流的数量与理论吞吐的影响，并指出代价。",
+          "depends_on": [
+            "u3-l2",
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l2",
+          "title": "资源/时序：URAM、HBM/DDR 分区与报告",
+          "order": 2,
+          "filename": "u12-l2-resource-memory-banking.md",
+          "topic": "讲解 URAM 数组与缓存（utils uram_array/cache）、DDR/HBM 多 bank 分区对带宽的影响，以及如何读综合/实现报告定位资源与时序瓶颈。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解 URAM 的使用场景与收益",
+            "掌握 DDR/HBM bank 分区对带宽的影响",
+            "学会从实现报告定位 II/时序/资源瓶颈"
+          ],
+          "source_files": [
+            "utils/L1/include/xf_utils_hw/uram_array.hpp",
+            "utils/L1/include/xf_utils_hw/cache.hpp",
+            "dsp/L2/examples/vss_fft_ifft_1d/system.cfg",
+            "utils/L1/tests/cache_ro_2DDR_with_e",
+            "utils/L1/tests/uram_array"
+          ],
+          "minimal_modules": [
+            "URAM 数组/缓存",
+            "DDR/HBM 分区",
+            "多 DDR 用例",
+            "报告瓶颈定位"
+          ],
+          "practice_task": "对比 utils/L1/tests 下 cache_ro_1DDR_with_e 与 cache_ro_2DDR_with_e 两个用例，说明双 DDR 如何提升只读缓存的带宽。",
+          "depends_on": [
+            "u12-l1",
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u13",
+      "title": "AIE 编程模型深入",
+      "level": "advanced",
+      "order": 13,
+      "lectures": [
+        {
+          "id": "u13-l1",
+          "title": "ADF 图、窗口/流与 PL↔AIE 边界",
+          "order": 1,
+          "filename": "u13-l1-adf-graph-boundary.md",
+          "topic": "讲解 ADF 图的构成（graph、kernel、连接）、窗口（window）与流（stream）两类数据交换、PL↔AIE 边界由 mm2s/s2mm 与 GMIO 桥接，结合 vss aie.hpp/aie.cpp。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解 ADF 图的 graph/kernel/connect 结构",
+            "区分 window 与 stream 两种 AIE 数据交换",
+            "掌握 PL↔AIE 边界的桥接方式"
+          ],
+          "source_files": [
+            "dsp/L2/include/vss/vss_fft_ifft_1d/aie.hpp",
+            "dsp/L2/include/vss/vss_fft_ifft_1d/aie.cpp",
+            "dsp/L2/include/vss/vss_fft_ifft_1d/vss_fft_ifft_1d_params.cfg",
+            "dsp/L1/tests/hw/mm2s/mm2s.cpp",
+            "dsp/L1/tests/hw/s2mm/s2mm.cpp"
+          ],
+          "minimal_modules": [
+            "ADF graph/kernel/connect",
+            "window vs stream",
+            "PL↔AIE 桥接",
+            "mm2s/s2mm/GMIO"
+          ],
+          "practice_task": "阅读 aie.hpp/aie.cpp，标出图中 PL 内核（mm2s/s2mm）与 AIE 内核的连接点，说明数据如何跨 PL↔AIE 边界。",
+          "depends_on": [
+            "u6-l3",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l2",
+          "title": "AIE 图主机控制与 SD 卡打包",
+          "order": 2,
+          "filename": "u13-l2-aie-host-packaging.md",
+          "topic": "讲解用 xrt::graph 控制 AIE 图（reset/run/end）、system.cfg 连接描述、v++ --package 生成 SD 卡（rootfs/Image/launch 脚本）与 hw_emu 启动流程。",
+          "level": "advanced",
+          "learning_goals": [
+            "掌握 xrt::graph 的 reset/run/end 控制",
+            "理解 system.cfg 的连接描述作用",
+            "学会用 v++ --package 生成 SD 卡并启动 hw_emu"
+          ],
+          "source_files": [
+            "dsp/L2/examples/vss_fft_ifft_1d/host.cpp",
+            "dsp/L2/examples/vss_fft_ifft_1d/system.cfg",
+            "dsp/L2/examples/vss_fft_ifft_1d/example.mk",
+            "dsp/L2/examples/vss_fft_ifft_1d/run_script.sh",
+            "dsp/L2/examples/vss_fft_ifft_1d/scripts_mk/run.sh"
+          ],
+          "minimal_modules": [
+            "xrt::graph 控制",
+            "system.cfg",
+            "v++ --package SD 卡",
+            "hw_emu 启动"
+          ],
+          "practice_task": "对照 example.mk 的 example_sd_card/example_run 目标，解释 v++ --package 生成了哪些 SD 卡文件，以及 launch_hw_emu.sh 如何启动整个系统。",
+          "depends_on": [
+            "u13-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u14",
+      "title": "测试、CI 与二次开发",
+      "level": "advanced",
+      "order": 14,
+      "lectures": [
+        {
+          "id": "u14-l1",
+          "title": "测试基础设施与 CI",
+          "order": 1,
+          "filename": "u14-l1-test-infra-ci.md",
+          "topic": "讲解 L1 用例的 description.json（flow/platform_allowlist/topfunction/clock）、hls_config.tmpl/.cfg 生成、blas run_test.py 批量驱动，以及顶层 Jenkinsfile 如何串起各库 CI。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解 description.json 如何声明用例的流程与平台",
+            "掌握 hls_config 由模板生成的机制",
+            "认识 run_test.py 与 Jenkinsfile 的 CI 作用"
+          ],
+          "source_files": [
+            "utils/L1/tests/stream_dup/description.json",
+            "utils/L1/tests/stream_dup/hls_config.tmpl",
+            "utils/L1/tests/stream_dup/Makefile",
+            "blas/L1/tests/run_test.py",
+            "Jenkinsfile"
+          ],
+          "minimal_modules": [
+            "description.json 元数据",
+            "hls_config 模板生成",
+            "run_test.py 批量驱动",
+            "Jenkinsfile CI"
+          ],
+          "practice_task": "为一个新的假想 L1 用例手写一份 description.json，指定 flow=hls、平台白名单与 topfunction，并说明它如何被 CI 识别。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u14-l2",
+          "title": "从零编写自己的 L1 内核",
+          "order": 2,
+          "filename": "u14-l2-write-your-own-kernel.md",
+          "topic": "以 utils 风格为模板，手把手设计一个新 L1 流式内核：模板化头件 + DUT 封装 + test.cpp 测试台 + Makefile/description.json，并跑通 csim/csynth。",
+          "level": "advanced",
+          "learning_goals": [
+            "独立设计一个符合规范的 L1 流式内核",
+            "编写配套 testbench 与 makefile",
+            "跑通 csim 与 csynth 并读懂报告"
+          ],
+          "source_files": [
+            "utils/L1/include/xf_utils_hw/stream_dup.hpp",
+            "utils/L1/tests/stream_dup/test.cpp",
+            "utils/L1/tests/stream_dup/Makefile",
+            "utils/L1/tests/stream_dup/description.json",
+            "utils/L1/include/xf_utils_hw/common.hpp"
+          ],
+          "minimal_modules": [
+            "模板化头件设计",
+            "DUT 封装与 end flag",
+            "testbench 编写",
+            "makefile/description.json"
+          ],
+          "practice_task": "实现一个 stream_double（把输入流每元素乘 2 输出）的完整 L1 用例，包含 hpp/test.cpp/Makefile/description.json，并跑通 csim。",
+          "depends_on": [
+            "u14-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u14-l3",
+          "title": "基准评测与对标 CPU/参考",
+          "order": 3,
+          "filename": "u14-l3-benchmarking.md",
+          "topic": "讲解各库 benchmarks 目录的组织（blas/solver/security/dsp/vision）、如何与 CPU/参考模型对标（如 dsp host.cpp 的 ref_output 比对与误差阈值），以及性能指标解读。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解 benchmarks 目录的组织与用途",
+            "掌握与参考模型比对的误差判定方式",
+            "学会解读吞吐/延迟性能指标"
+          ],
+          "source_files": [
+            "solver/L2/benchmarks/gesvj",
+            "security/L1/benchmarks/crc32",
+            "dsp/L2/examples/vss_fft_ifft_1d/data/ref_output.txt",
+            "dsp/L2/examples/vss_fft_ifft_1d/host.cpp",
+            "blas/README.md"
+          ],
+          "minimal_modules": [
+            "benchmarks 组织",
+            "参考模型比对",
+            "误差阈值",
+            "性能指标"
+          ],
+          "practice_task": "阅读 dsp host.cpp 的结果校验段，说明它如何用 ref_output.txt 与误差 level 判定 PASS/FAIL，并讨论为何参考模型不是 bit 精确。",
+          "depends_on": [
+            "u4-l2",
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u15",
+      "title": "集成与部署",
+      "level": "advanced",
+      "order": 15,
+      "lectures": [
+        {
+          "id": "u15-l1",
+          "title": "依赖图与跨库组合",
+          "order": 1,
+          "filename": "u15-l1-cross-library-composition.md",
+          "topic": "讲解 dependency.json 表达的跨库依赖（utils←data_mover←dsp←solver 等），如何在同一工程里同时包含多个库的 include 路径，以及 solver 复用 dsp、dsp 复用 utils/data_mover 的实例。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解跨库依赖在工程上的体现",
+            "掌握多库 include 路径的组织方式",
+            "认识 solver↔dsp↔utils 的复用关系"
+          ],
+          "source_files": [
+            "dependency.json",
+            "utils/library.json",
+            "dsp/library.json",
+            "solver/library.json",
+            "data_mover/library.json",
+            "solver/L1/include/aie/qrd_kernel.hpp"
+          ],
+          "minimal_modules": [
+            "dependency.json 依赖图",
+            "多库 include 路径",
+            "solver 复用 dsp",
+            "dsp 复用 utils/data_mover"
+          ],
+          "practice_task": "设计一个同时用到 utils 与 dsp 的工程，写出需要的 -I include 路径列表，并依据 dependency.json 推断若要用 solver 还需额外引入哪些库。",
+          "depends_on": [
+            "u1-l2",
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u15-l2",
+          "title": "完整部署：hw 构建、SD 卡与已知问题",
+          "order": 2,
+          "filename": "u15-l2-full-deployment.md",
+          "topic": "讲解从 hw_emu 到真实 hw 构建的代价与流程、嵌入式平台的 SD 卡/Common Image/sysroot 依赖、平台重定向（platform_map.json），以及 README 中记录的已知问题与废弃库的处理。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解 hw 构建的代价与产出",
+            "掌握嵌入式平台 sysroot/Common Image/SD 卡依赖",
+            "学会用 platform_map.json 重定向平台并规避已知问题"
+          ],
+          "source_files": [
+            "vision/README.md",
+            "dsp/L2/examples/vss_fft_ifft_1d/example.mk",
+            "dsp/L2/examples/vss_fft_ifft_1d/scripts_mk/sdt_lopper.sh",
+            "platform_map.json",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "hw 构建代价",
+            "sysroot/Common Image",
+            "SD 卡打包",
+            "平台重定向与已知问题"
+          ],
+          "practice_task": "依据 platform_map.json 把 vck190 映射到具体 xpfm，并说明嵌入式 hw 构建需要额外准备 sysroot/Image/rootfs 的原因。",
+          "depends_on": [
+            "u15-l1",
+            "u13-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
