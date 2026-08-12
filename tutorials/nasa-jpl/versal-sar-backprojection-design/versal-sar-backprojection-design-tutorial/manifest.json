@@ -1,0 +1,835 @@
+{
+  "project": "versal-sar-backprojection-design",
+  "head": "79534466f6ae6a84894d14eff225b4f897e5d259",
+  "rationale": "本项目是 NASA JPL 在 AMD Versal ACAP (VCK190) 上实现的聚束模式 SAR 反投影设计，属于典型的“异构三域”系统：ARM Cortex-A72 主机（控制/数据编排）、PL 可编程逻辑（HLS DMA 包路由器）、AI Engine 阵列（核心反投影计算）。学习路线因此按“由外到内、由整体到细节”展开。第 1 单元让读者从零认识项目定位、目录、构建方式与全局配置；第 2 单元补齐 Versal 平台与 AIE 编程模型这一阅读源码的前置知识；第 3 单元进入主机应用，理解端到端控制流与数据流；第 4 单元拆解 ADF 图拓扑（图/子图、包交换、端口与布线）；第 5 单元深入三类 AIE 内核（数据广播、像素解复用、图像重建），其中图像重建因算法阶段复杂拆成三讲；第 6 单元讲解 PL 包路由器内核及其仿真；第 7 单元回到系统级，讲清 system.cfg 生成、XSA 链接打包、三个分支的差异与硬件部署；第 8 单元覆盖仿真、性能/功耗度量与未来优化。依赖关系上，先平台后应用、先拓扑后内核、先内核后 PL，最后才进入集成、部署与度量，保证每篇讲义的前置知识都已就绪。共 8 个单元 28 篇讲义，规模与“中型偏大、多域异构”的项目体量匹配。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：项目定位、目录与构建",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：SAR 反投影与 Versal ACAP 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍合成孔径雷达(SAR)与聚束模式反投影的原理，以及为什么要把这个算法放到 AMD Versal ACAP 上做星载/机载处理。",
+          "learning_goals": [
+            "理解 SAR 成像、相位历史数据与反投影重建的基本概念",
+            "认识 Versal ACAP 的三引擎异构架构及其在星载处理中的价值",
+            "明白本仓库实现的边界（聚束模式、GOTCHA 数据集、main 分支）"
+          ],
+          "source_files": [
+            "README.md",
+            "doc/sections/intro.tex"
+          ],
+          "minimal_modules": [
+            "SAR/聚束模式反投影背景",
+            "Versal 三引擎(Scalar/Adaptable/Intelligent)",
+            "on-board processing 目标"
+          ],
+          "practice_task": "阅读 README 与 intro.tex 后，用自己的话写出一段话说明：反投影为何要对每个像素计算双程时延并做相位对齐相干累加，以及 Versal 的哪一部分负责哪件事。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与 GOTCHA 测试数据",
+          "order": 2,
+          "filename": "u1-l2-repo-structure-and-test-data.md",
+          "level": "beginner",
+          "topic": "讲解仓库目录树（design/aie、design/pl、design/host、doc、helper_scripts）、各目录职责，以及测试用的 GOTCHA 数据集与 Git LFS。",
+          "learning_goals": [
+            "掌握仓库各顶层目录的职责与归属域（AIE/PL/Host）",
+            "了解设计/文档/部署脚本的分层组织",
+            "知道如何用 Git LFS 拉取 GOTCHA 测试数据"
+          ],
+          "source_files": [
+            "README.md",
+            "design/test_data/gotcha_slowtime_pass1_360deg_HH.csv",
+            "design/test_data/gotcha_phdata_512-out-of-424-rc-samples_pass1_360deg_HH.csv"
+          ],
+          "minimal_modules": [
+            "目录树与域归属",
+            "GOTCHA 数据集(slowtime/phdata)",
+            "Git LFS 拉取流程"
+          ],
+          "practice_task": "对照 README 的目录表，在本地画出仓库目录树并标注每个目录属于 AIE、PL、Host 还是工具/文档；尝试 git lfs pull 并确认 CSV 数据已实际下载。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建系统与 Makefile 目标",
+          "order": 3,
+          "filename": "u1-l3-build-system-and-makefile.md",
+          "level": "beginner",
+          "topic": "逐段讲解根 Makefile 的变量、校验、直接目标与间接目标，弄清 aie/pl/host/package/run/metrics 等命令如何分别构建并链接整个设计。",
+          "learning_goals": [
+            "理解 TARGET(hw/hw_emu/sw_emu) 与 PLATFORM 等构建变量",
+            "掌握各 make 目标(aie/pl/host/package/run/metrics/clean)的作用与产物路径",
+            "理清 libadf.a、dma_pkt_router.xo、.elf、.xsa 之间的依赖与链接顺序"
+          ],
+          "source_files": [
+            "Makefile",
+            "design/host/Makefile",
+            "helper_scripts/env_setup.sh"
+          ],
+          "minimal_modules": [
+            "TARGET/PLATFORM 变量与校验",
+            "aie/pl/host/package/run/metrics 目标",
+            "v++ 与 aiesimulator 调用链"
+          ],
+          "practice_task": "在 Makefile 中标注每条间接规则(libadf.a、dma_pkt_router.xo、HOST_EXE、XSA)的输入与输出；说明为什么 host 目标依赖 aie 产物(aie_control_xrt.cpp)。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "全局配置中心：design/common.h",
+          "order": 4,
+          "filename": "u1-l4-common-config-header.md",
+          "level": "beginner",
+          "topic": "讲解 common.h 中的核心宏(PULSES、RC_SAMPLES、AIE_SWITCHES、IMG_SOLVERS)与雷达物理常数，以及它们如何被三域源码共享并约束彼此。",
+          "learning_goals": [
+            "掌握决定设计规模的关键宏及其必须整除的约束方程",
+            "理解雷达物理常数(C、MIN_FREQ、RANGE_FREQ_STEP、RANGE_RES)的来源与用途",
+            "明白 common.h 为何要跨 Host/AIE/PL 三域同步"
+          ],
+          "source_files": [
+            "design/common.h"
+          ],
+          "minimal_modules": [
+            "PULSES/RC_SAMPLES/AIE_SWITCHES/IMG_SOLVERS 宏",
+            "(RC_SAMPLES*PULSES)/(IMG_SOLVERS) 整除约束",
+            "雷达物理常数与 RANGE_RES"
+          ],
+          "practice_task": "计算当 AIE_SWITCHES=7、IMG_SOLVERS_PER_SWITCH=32、RC_SAMPLES=512、PULSES=602 时每个图像重建内核处理多少像素；验证其必须为整数，并解释若改 PULSES 为质数会发生什么。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "前置知识：Versal 平台与 AIE 编程模型",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Versal ACAP 异构架构与 NoC",
+          "order": 1,
+          "filename": "u2-l1-versal-acap-architecture.md",
+          "level": "beginner",
+          "topic": "讲解 Versal 的 Scalar(ARM)/Adaptable(PL)/Intelligent(AIE+DSP) 三引擎、片上网络 NoC，以及各域时钟与数据如何互联。",
+          "learning_goals": [
+            "理解 Versal 三类引擎的分工与本项目对应的 Host/PL/AIE 映射",
+            "认识 NoC 在跨域数据搬运中的枢纽作用",
+            "了解各域典型时钟频率与 AIE tile 局部存储规格"
+          ],
+          "source_files": [
+            "doc/sections/versal_overview.tex",
+            "doc/sections/intro.tex"
+          ],
+          "minimal_modules": [
+            "三引擎与异构分工",
+            "NoC 跨域互联",
+            "时钟域与 tile 局部存储(32KB)"
+          ],
+          "practice_task": "画一张 Versal 功能框图，标注本项目里 ARM、PL、AIE、DDR、NoC 各自的位置，并用箭头表示一次完整反投影的数据通路（从 DDR 读入到 DDR 写回）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "AI Engine 数据搬运：GMIO、PLIO、缓冲、流与 RTP",
+          "order": 2,
+          "filename": "u2-l2-aie-data-movement.md",
+          "level": "intermediate",
+          "topic": "讲解 AIE tile 的多种数据机制：局部存储、邻居共享、cascade、AXI4-Stream、PLIO/GMIO 端口、同步/异步 buffer 以及运行时参数 RTP。",
+          "learning_goals": [
+            "区分 buffer 端口与 stream 端口及其同步语义",
+            "理解 GMIO(DDR↔AIE) 与 PLIO(PL↔AIE) 端口的带宽与位宽特征",
+            "掌握 RTP 如何在运行时向内核传参"
+          ],
+          "source_files": [
+            "doc/sections/versal_overview.tex",
+            "design/common.h"
+          ],
+          "minimal_modules": [
+            "buffer(同步/异步)与 stream 端口",
+            "GMIO/PLIO 端口规格",
+            "RTP 运行时参数"
+          ],
+          "practice_task": "在本项目的 graph.h 中找出 GMIO、PLIO、buffer、stream、RTP 各自对应的端口或连线，列表说明每种在本设计里搬运的是什么数据（slowtime/rc/像素/图像）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "ADF 图与数据流执行模型",
+          "order": 3,
+          "filename": "u2-l3-adf-graph-and-dataflow.md",
+          "level": "intermediate",
+          "topic": "讲解用 ADF API 编写的数据流图：kernel、port、connect、runtime ratio、源文件绑定，以及 Kahn 进程网络式数据驱动执行如何带来并发。",
+          "learning_goals": [
+            "理解 ADF graph 中 kernel/port/connect 的抽象",
+            "掌握 runtime ratio、source()、ping-pong 缓冲如何影响调度",
+            "明白数据驱动(Kahn)执行如何让多内核并发流水"
+          ],
+          "source_files": [
+            "doc/sections/versal_overview.tex",
+            "design/aie/graph.h"
+          ],
+          "minimal_modules": [
+            "graph/kernel/port/connect 抽象",
+            "runtime ratio 与 source 绑定",
+            "Kahn 数据驱动执行"
+          ],
+          "practice_task": "阅读 graph.h，列出 BackProjectionGraph 里所有 kernel 对象及其 source() 绑定，并说明 runtime ratio=1.0 的含义；画出内核之间粗粒度的数据依赖。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "主机应用：ARM Cortex-A72 控制与编排",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "主机应用流程与 main.cpp",
+          "order": 1,
+          "filename": "u3-l1-host-application-flow.md",
+          "level": "intermediate",
+          "topic": "讲解 host/main.cpp 的命令行参数与五阶段流程（初始化→取数→生成像素→运行图→反投影→写图），以及每阶段的计时埋点。",
+          "learning_goals": [
+            "掌握主机应用的命令行参数与整体阶段划分",
+            "理解每阶段对应的 SARBackproject 方法调用顺序",
+            "认识 CLOCK_MONOTONIC 计时埋点的用途"
+          ],
+          "source_files": [
+            "design/host/main.cpp",
+            "design/exec_scripts/run_script_hw.sh"
+          ],
+          "minimal_modules": [
+            "main() 参数解析",
+            "五阶段调用链",
+            "startTime/endTime/printTimeDiff 计时"
+          ],
+          "practice_task": "对照 main.cpp，写出一个时序表列出每个阶段的输入、调用的方法、耗时埋点；并解释 run_script_hw.sh 如何把命令行参数转交给 sar_backproject.elf。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "SARBackproject 类与 XRT 初始化",
+          "order": 2,
+          "filename": "u3-l2-sarbackproject-xrt-init.md",
+          "level": "intermediate",
+          "topic": "讲解 SARBackproject 类的成员与构造函数：如何用 XRT 打开 device、加载 xclbin、分配 buffer 对象、建立 graph 与 PL kernel 句柄。",
+          "learning_goals": [
+            "理解 xrt::device、load_xclbin、xrt::bo 缓冲对象的创建与映射",
+            "掌握 xrt::graph 句柄与 dma_pkt_router xrt::kernel/run 句柄的建立",
+            "明白 buffer 大小如何由 common.h 宏决定"
+          ],
+          "source_files": [
+            "design/host/sar_backproject.h",
+            "design/host/sar_backproject.cpp"
+          ],
+          "minimal_modules": [
+            "SARBackproject 类成员",
+            "device/load_xclbin/xrt::bo 构造",
+            "xrt::graph 与 xrt::kernel 句柄"
+          ],
+          "practice_task": "在构造函数中标注每个 xrt::bo 的大小公式（基于 PULSES/RC_SAMPLES/BC_ELEMENTS），并说明 m_img_buffers 为何用 kernel.group_id(1) 选择 DDR bank。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "从 CSV 读取雷达数据",
+          "order": 3,
+          "filename": "u3-l3-ingesting-radar-data.md",
+          "level": "intermediate",
+          "topic": "讲解 fetchRadarData() 如何解析 slowtime 与距离压缩(RC)两类 CSV，重点是用正则解析 a+bi 形式的复数并存入 cfloat 数组。",
+          "learning_goals": [
+            "掌握 slowtime(4 列)与 RC(复数列)两种 CSV 的解析方式",
+            "理解复数正则匹配与 std::stof 的使用",
+            "认识数据如何写入映射后的 device buffer 数组"
+          ],
+          "source_files": [
+            "design/host/sar_backproject.cpp",
+            "design/host/main.cpp"
+          ],
+          "minimal_modules": [
+            "fetchRadarData() CSV 解析",
+            "复数正则与 real/imag 提取",
+            "broadcast_data_array/rc_array 写入"
+          ],
+          "practice_task": "写一段说明：为什么 RC 数据用复数正则而 slowtime 不用；并估算 602 脉冲×512 RC 样本×8 字节大约占多少 DDR（解释性能文档里‘取数 35 分钟’的成因）。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "目标像素生成与方位角解卷绕",
+          "order": 4,
+          "filename": "u3-l4-target-pixels-and-unwrapping.md",
+          "level": "intermediate",
+          "topic": "讲解 genTargetPixels() 与 unwrap()：如何由天线方位角计算方位分辨率与场景宽度，进而生成 X/Y/Z 目标像素网格。",
+          "learning_goals": [
+            "理解 atan2 + unwrap 得到连续方位角序列",
+            "掌握 az_res、half_az_width、dr/dx 分辨率的推导",
+            "明白目标像素如何按 (rng_idx, pulse_idx) 排布成网格"
+          ],
+          "source_files": [
+            "design/host/sar_backproject.cpp"
+          ],
+          "minimal_modules": [
+            "unwrap() 角度解卷绕",
+            "az_res/half_az_width/分辨率公式",
+            "xyz_px_array 网格生成"
+          ],
+          "practice_task": "用 Python/NumPy 复现 unwrap() 的逻辑并对一组随时间的 atan2 角度做解卷绕；说明若不解卷绕，total_az 与后续分辨率会如何出错。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "用 XRT 编排 AIE 图与 PL 内核",
+          "order": 5,
+          "filename": "u3-l5-orchestrating-aie-and-pl.md",
+          "level": "intermediate",
+          "topic": "讲解 runGraphs() 与 bp()：如何用 graph.run(0) 持续运行、用 GMIO async 同步把数据送进 AIE、用 RTP 通知 dump、再启动 PL 内核并把结果从 DDR 同步回主机。",
+          "learning_goals": [
+            "掌握 GMIO async(XCL_BO_SYNC_BO_GMIO_TO_AIE) 的逐脉冲投递模式",
+            "理解 RTP update(rtp_dump_img_in) 如何控制图像 dump 时机",
+            "明白 PL 内核 set_arg/start 与最终 sync(FROM_DEVICE) 的配合"
+          ],
+          "source_files": [
+            "design/host/sar_backproject.cpp",
+            "design/host/main.cpp"
+          ],
+          "minimal_modules": [
+            "runGraphs()/graph.run(0)",
+            "bp() 中 GMIO async 与 RTP update",
+            "PL set_arg/start + sync FROM_DEVICE"
+          ],
+          "practice_task": "画出 bp() 双层循环(pulse × switch × kern)的时序，说明为何最后一脉冲才把 RTP 置 1，以及 PL 内核启动与 AIE 输出流如何对齐到同一 img buffer。",
+          "depends_on": [
+            "u3-l2",
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "AIE 图拓扑：图、子图与布线",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "图与子图架构总览",
+          "order": 1,
+          "filename": "u4-l1-graph-subgraph-architecture.md",
+          "level": "intermediate",
+          "topic": "讲解 BackProjectionGraph（顶层，含 Data Broadcast 与 AIE_SWITCHES 个 bpCluster）与 BackProjectionSubgraph（含 Pixel Demux 与 IMG_SOLVERS_PER_SWITCH 个图像重建内核）的层次结构。",
+          "learning_goals": [
+            "理解顶层图与子图的分工与实例计数",
+            "掌握 bpCluster 数组如何按 AIE_SWITCHES 扩展并行度",
+            "认识 Data Broadcast 在顶层、解复用/重建在子图的职责划分"
+          ],
+          "source_files": [
+            "design/aie/graph.h",
+            "design/aie/graph.cpp"
+          ],
+          "minimal_modules": [
+            "BackProjectionGraph 顶层",
+            "BackProjectionSubgraph/bpCluster",
+            "data_bc_km 与 img_rec_km 数组"
+          ],
+          "practice_task": "按 main 分支默认配置(AIE_SWITCHES=7、IMG_SOLVERS_PER_SWITCH=32)统计：顶层有几个 Data Broadcast、几个 Pixel Demux、几个 Image Reconstruction 内核，并画出顶层↔子图的包含关系。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "包交换、内核实例化与 tile 布局",
+          "order": 2,
+          "filename": "u4-l2-pktswitch-instantiation-placement.md",
+          "level": "intermediate",
+          "topic": "讲解 pktsplit/pktmerge 包交换对象、用 create_object 给每个重建内核传唯一 id、location area_group 约束把每个 bpCluster 限定到 7 列×7 行 tile 区域。",
+          "learning_goals": [
+            "理解 pktsplit/pktmerge 最多 32 路的约束与作用",
+            "掌握 create_object<ImgReconstruct> 如何传入唯一实例 id",
+            "明白 location<graph> area_group 如何把子图约束到固定 tile 区域"
+          ],
+          "source_files": [
+            "design/aie/graph.h"
+          ],
+          "minimal_modules": [
+            "pktsplit/pktmerge 包交换",
+            "create_object 实例化与 id 传递",
+            "location area_group tile 约束"
+          ],
+          "practice_task": "在 graph.h 中追踪 bp_subgraph_insts 与 bp_graph_insts 两个计数器如何为 GMIO/PLIO 端口和内核实例生成唯一命名；解释为何 col_start 随子图实例递增 7。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "GMIO/PLIO 端口与广播布线",
+          "order": 3,
+          "filename": "u4-l3-ports-and-broadcast-wiring.md",
+          "level": "intermediate",
+          "topic": "讲解 input_gmio（slowtime/rc/像素）、output_plio（输出到 PL 包路由器）端口的创建，以及 connect/single_buffer 如何把广播数据扇出到每个重建内核。",
+          "learning_goals": [
+            "掌握 GMIO/PLIO 端口的命名、位宽与数据文件绑定",
+            "理解 single_buffer 对广播 buffer 的作用",
+            "理清 Data Broadcast 输出扇出到全部 IMG_SOLVERS 的连线"
+          ],
+          "source_files": [
+            "design/aie/graph.h",
+            "design/aie/graph.cpp"
+          ],
+          "minimal_modules": [
+            "input_gmio/output_plio 创建",
+            "connect 与 single_buffer",
+            "广播扇出连线"
+          ],
+          "practice_task": "列出 gmio_in_st、gmio_in_rc、gmio_in_xyz_px、plio_pkt_rtr_out 四类端口各自的数据来源/去向，并说明为何 slowtime/rc 的 connect 用 single_buffer 而像素流用包交换。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "AIE 内核实现：广播、解复用与图像重建",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Data Broadcast 内核",
+          "order": 1,
+          "filename": "u5-l1-data-broadcast-kernel.md",
+          "level": "intermediate",
+          "topic": "讲解 data_broadcast_kern：如何把 slowtime 从 stream 转出以触发广播机制，并把 RC 数据按 16 个 cfloat 一组从 buffer 拷出供所有重建内核共享。",
+          "learning_goals": [
+            "理解 readincr/writeincr 流读写与 readincr_v<4> 向量读取",
+            "掌握 aie::begin_vector<16> 迭代器对 RC buffer 的逐块搬运",
+            "明白为何要把 slowtime 经 stream 转出以利用广播"
+          ],
+          "source_files": [
+            "design/aie/backprojection.cc",
+            "design/aie/custom_kernels.h"
+          ],
+          "minimal_modules": [
+            "data_broadcast_kern 流/缓冲搬运",
+            "readincr_v<4>/begin_vector<16>",
+            "广播触发原理"
+          ],
+          "practice_task": "说明 data_broadcast_kern 两个输出端口(slowtime_out 流、rc_out 缓冲)分别扇出到多少个重建内核；并解释 RC_SAMPLES/16 这个循环次数的由来。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Pixel Demux 内核与包头部",
+          "order": 2,
+          "filename": "u5-l2-pixel-demux-kernel.md",
+          "level": "intermediate",
+          "topic": "讲解 px_demux_kern：如何读取目标像素流，按 getPacketid 为每个重建内核构造 AXI4-Stream 包头(writeHeader)并把对应像素数据写出入包流。",
+          "learning_goals": [
+            "掌握 output_pktstream 包流与 getPacketid/writeHeader 的用法",
+            "理解 px_components_per_ai 的计算与 tlast 标志",
+            "明白像素如何被分发到 IMG_SOLVERS_PER_SWITCH 个内核"
+          ],
+          "source_files": [
+            "design/aie/backprojection.cc"
+          ],
+          "minimal_modules": [
+            "px_demux_kern 包分发",
+            "getPacketid/writeHeader 包头",
+            "px_components_per_ai 与 tlast"
+          ],
+          "practice_task": "计算 px_components_per_ai 的值并说明每个包携带多少像素的 X/Y/Z；解释 tlast 在 px_idx==(px_components_per_ai-1) 时置位的意义。",
+          "depends_on": [
+            "u4-l2",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "图像重建(一)：像素提取与差分距离",
+          "order": 3,
+          "filename": "u5-l3-imgrecon-differential-range.md",
+          "level": "intermediate",
+          "topic": "讲解 img_reconstruct_kern 前段：从包流读入并 reinterpret_cast 还原 X/Y/Z 像素，再用 aie::sub/mul_square/sqrt 计算 16 像素并行的差分距离与范围索引。",
+          "learning_goals": [
+            "理解包流像素以 int 传输需 reinterpret_cast 还原为 float",
+            "掌握 aie::vector<float,16> 的 SIMD 差分距离计算",
+            "明白差分距离除以 RANGE_RES 并偏移 half_size 得到范围索引"
+          ],
+          "source_files": [
+            "design/aie/backprojection.cc",
+            "design/aie/custom_kernels.h"
+          ],
+          "minimal_modules": [
+            "ImgReconstruct 类与 m_img 累加缓冲",
+            "reinterpret_cast 像素还原",
+            "aie::sub/mul_square/sqrt 差分距离"
+          ],
+          "practice_task": "用 NumPy 复现对 16 个像素的差分距离计算(sqrt((x_ant-x)^2+...)-r0)，并对照代码说明 INV_RANGE_RES 与 half_size 偏移如何把距离映射到 rc 缓冲索引。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "图像重建(二)：相位校正与 sincos",
+          "order": 4,
+          "filename": "u5-l4-imgrecon-phase-correction.md",
+          "level": "advanced",
+          "topic": "讲解 img_reconstruct_kern 中段：如何用 ph_corr_coef 计算相位角，再通过 2π 折叠把角度规整到 [-π,π] 以便 sincos_complex 输出正确的复数相位校正。",
+          "learning_goals": [
+            "理解相位校正系数 ph_corr_coef=(4π·MIN_FREQ)/C 的由来",
+            "掌握用 INV_TWO_PI 折叠 + 取整把角度限制到 [-π,π] 的技巧",
+            "明白 sincos_complex 要求输入域否则会饱和的原因"
+          ],
+          "source_files": [
+            "design/aie/backprojection.cc"
+          ],
+          "minimal_modules": [
+            "ph_corr_coef 相位系数",
+            "2π 折叠与 to_fixed 取整",
+            "sincos_complex 域限制与饱和"
+          ],
+          "practice_task": "在纸上对一个大相位角(如 100 弧度)走一遍折叠流程，得到 [-π,π] 内的等效角；并说明若不做折叠直接调用 sincos_complex 会得到什么错误结果。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "图像重建(三)：插值、累加与 SIMD/流水",
+          "order": 5,
+          "filename": "u5-l5-imgrecon-interpolation-accumulation.md",
+          "level": "advanced",
+          "topic": "讲解 img_reconstruct_kern 后段：用低/高索引做线性插值取 RC 样本、乘相位校正后累加到 m_img，最后一脉冲由 RTP 触发把图像打包写出，并贯穿 chess_prepare_for_pipelining 的流水优化。",
+          "learning_goals": [
+            "理解为何 RC 缓冲只能标量逐元素索引(性能瓶颈)而做线性插值",
+            "掌握 m_img 跨多次内核调用持久累加、最终由 RTP 触发 dump 的机制",
+            "认识 chess_prepare_for_pipelining 指令对循环流水的意义"
+          ],
+          "source_files": [
+            "design/aie/backprojection.cc"
+          ],
+          "minimal_modules": [
+            "标量索引线性插值",
+            "m_img 跨调用累加与 RTP dump",
+            "chess_prepare_for_pipelining 流水"
+          ],
+          "practice_task": "定位插值那段标量 for 循环，说明它为何无法 SIMD 向量化(动态索引)；并提出一个初步的改进设想(对应 future_work 中的 dynamic buffer indexing)。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "PL DMA 包路由器：HLS 内核与仿真",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "PL 包路由器 HLS 内核",
+          "order": 1,
+          "filename": "u6-l1-packet-router-hls-kernel.md",
+          "level": "intermediate",
+          "topic": "讲解 dma_pkt_router HLS 内核：AXI-Stream(axis) 输入与 m_axi DDR 输出的接口 pragma，以及如何解析包头部、用 instance_id 计算 DDR 偏移把合并后乱序的图像数据写回连续内存。",
+          "learning_goals": [
+            "理解 packet merger 乱序问题与包路由器存在的必要性",
+            "掌握 ap_axiu<128> AXI-Stream 与 m_axi/s_axilite 接口 pragma",
+            "明白包头部(pkt_id/instance_id)解析与 DDR 偏移计算"
+          ],
+          "source_files": [
+            "design/pl/dma_pkt_router.cpp",
+            "design/pl/dma_pkt_router.h"
+          ],
+          "minimal_modules": [
+            "HLS INTERFACE pragma(axis/m_axi/s_axilite)",
+            "包头部字段(pkt_id/instance_id)",
+            "ddr_offset 计算"
+          ],
+          "practice_task": "对照 AMD UG1079 包头位域表，逐位说明 metadata.data.range(31,0) 里 pkt_id、pkt_type、源行列、奇偶校验的位置；并解释 ddr_offset=instance_id*SAMPLES_PER_KERN 如何保证图像连续。",
+          "depends_on": [
+            "u5-l5",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "PL 包路由器仿真与 testbench",
+          "order": 2,
+          "filename": "u6-l2-packet-router-testbench.md",
+          "level": "intermediate",
+          "topic": "讲解 dma_pkt_router_tb.cpp 与 run_dma_pkt_router_tb.tcl：如何把 aiesim 产出的 CSV 流数据喂入 hls::stream、调用内核、再把 DDR 结果写成 output_img.csv 验证重排正确性。",
+          "learning_goals": [
+            "掌握 testbench 如何将 aiesim CSV 解析为 ap_axiu<128> 流",
+            "理解 csim/cosim 流程与 VCK190 器件/312.5MHz 时钟设置",
+            "明白 PL 仿真依赖 aiesim 先产出 aie_to_plio_switch_*.csv 的链路"
+          ],
+          "source_files": [
+            "design/pl/tb/dma_pkt_router_tb.cpp",
+            "design/pl/tb/run_dma_pkt_router_tb.tcl",
+            "design/pl/pkt_router_config.cfg"
+          ],
+          "minimal_modules": [
+            "testbench CSV→stream 解析",
+            "csim/cosim 与 set_part/create_clock",
+            "plsim_router 目标的依赖链"
+          ],
+          "practice_task": "追踪 Makefile 中 plsim_router 目标：说明它为何在 CSV 不存在时先调 aiesim，以及最终 output_img.csv 与主机 writeImg() 输出在格式上的一致性。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "系统集成、多分支与硬件部署",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "系统集成：system.cfg、XSA 链接与打包",
+          "order": 1,
+          "filename": "u7-l1-system-integration-packaging.md",
+          "level": "advanced",
+          "topic": "讲解 Makefile 如何从 common.h 读取 AIE_SWITCHES 自动生成 system.cfg(nk/stream_connect/sp)，再用 v++ -l 链接 libadf.a 与 dma_pkt_router.xo 生成 XSA，最后 v++ -p 打包含 DTB/内核/rootfs 的启动镜像。",
+          "learning_goals": [
+            "理解 system.cfg 中 nk/stream_connect/sp 连接指令如何被自动生成",
+            "掌握 v++ -g -l 链接 AIE+PL 生成 XSA 的流程",
+            "明白 v++ -p 打包 BOOT.BIN/SD 卡镜像所需的各类 --package 选项"
+          ],
+          "source_files": [
+            "Makefile",
+            "design/pl/pkt_router_config.cfg",
+            "design/system_cfgs/.gitkeep"
+          ],
+          "minimal_modules": [
+            "system.cfg 自动生成(nk/stream_connect/sp)",
+            "v++ -l 链接生成 XSA",
+            "v++ -p 打包与 --package 选项"
+          ],
+          "practice_task": "手动写出 AIE_SWITCHES=2 时 system.cfg 应包含的 nk、stream_connect、sp 行；并说明 system_cfgs/.gitkeep 为何用 .gitkeep 占位（system.cfg 是构建产物）。",
+          "depends_on": [
+            "u1-l3",
+            "u4-l3",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "三个分支：main / host_stride / pl_stride",
+          "order": 2,
+          "filename": "u7-l2-three-branches-comparison.md",
+          "level": "advanced",
+          "topic": "对比三个分支在‘输入侧数据预排序’职责上的划分（AIE 自排/ARM 预排/PL stride 控制器预排），并说明后处理恒由 PL 包路由器承担、pl_stride 当前受 AIE_SWITCHES=1 限制。",
+          "learning_goals": [
+            "理解三个分支在输入预处理职责上的取舍",
+            "掌握 PL DMA Stride Controller 的作用与本仓库未含该内核的原因",
+            "明白后处理为何始终在 PL(packet merger 乱序)"
+          ],
+          "source_files": [
+            "doc/sections/implementation.tex",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "main/host_stride/pl_stride 职责划分",
+            "DMA Stride Controller(跨分支)",
+            "后处理恒在 PL"
+          ],
+          "practice_task": "画三张系统数据通路图分别对应三个分支，标出‘谁负责输入排序’；并说明 pl_stride 为何当前只能 AIE_SWITCHES=1(system.cfg 无法表达数组化 AXI-Stream 端口)。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "硬件部署：Yocto、NFS/TFTP 与 JTAG 烧写",
+          "order": 3,
+          "filename": "u7-l3-hardware-deployment.md",
+          "level": "advanced",
+          "topic": "讲解从 Yocto 构建 SDK/镜像、通过 NFS 共享 rootfs、TFTP 传内核与 pxelinux、再到 xsct 经 JTAG 烧写 BOOT.BIN 的完整上板流程。",
+          "learning_goals": [
+            "理解 Yocto SDK 导出与 sysroot 对主机交叉编译的作用",
+            "掌握 NFS(rootfs)+TFTP(内核/pxelinux)+pxelinux bootargs 的网络启动链",
+            "明白 flash_bootbin_xsct.tcl 经 JTAG 烧写 BOOT.BIN 的步骤"
+          ],
+          "source_files": [
+            "README.md",
+            "helper_scripts/env_setup.sh",
+            "helper_scripts/flash_bootbin_xsct.tcl",
+            "helper_scripts/pxelinux.cfg/default-arm-versal"
+          ],
+          "minimal_modules": [
+            "Yocto SDK/sysroot",
+            "NFS/TFTP/pxelinux 网络启动",
+            "xsct JTAG 烧写 BOOT.BIN"
+          ],
+          "practice_task": "按 README 列出从‘make 完成’到‘板卡跑起 sar_backproject.elf’所需拷贝的文件清单(1_copy_tftpboot_files.sh、2_copy_nfs_files.sh、3_copy_app_files.sh)，并解释 bootargs 中 nfsroot/ip 各字段的含义。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "仿真、度量与优化展望",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "AIE 与 PL 仿真流程",
+          "order": 1,
+          "filename": "u8-l1-aie-pl-simulation.md",
+          "level": "advanced",
+          "topic": "讲解 aiesim/aiesim_profile/aiesim_xpe 与 plsim_router 目标，以及 graph.cpp 中 __AIESIM__/__X86SIM__ 宏保护的仿真 main 如何用 GMIO 驱动图并配合 sw_emu/hw_emu。",
+          "learning_goals": [
+            "掌握 aiesimulator 的 --profile/--dump-vcd 与 xpe 生成用途",
+            "理解 graph.cpp 仿真 main 如何读 CSV、驱动图、跑 PULSES 次",
+            "明白 sw_emu(x86sim)/hw_emu/hw 三种 TARGET 的区别与 Makefile 校验"
+          ],
+          "source_files": [
+            "Makefile",
+            "design/aie/graph.cpp",
+            "design/exec_scripts/run_script_sw_emu.sh"
+          ],
+          "minimal_modules": [
+            "aiesim/aiesim_profile/aiesim_xpe 目标",
+            "graph.cpp 仿真 main(__AIESIM__)",
+            "sw_emu/hw_emu/hw TARGET 区别"
+          ],
+          "practice_task": "说明为什么 Makefile 禁止 aiesim 配合 sw_emu、禁止 run 配合 hw；并追踪 graph.cpp 仿真 main 里 gm2aie_nb 的调用顺序与真实主机 bp() 的对应关系。",
+          "depends_on": [
+            "u5-l2",
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "性能与功耗度量",
+          "order": 2,
+          "filename": "u8-l2-performance-and-power-metrics.md",
+          "level": "advanced",
+          "topic": "讲解性能度量手段：CLOCK_MONOTONIC 分段计时、Vivado report_metrics.tcl 的资源/功耗报告、XPE 理论功耗、以及 INA226 实测电流/电压，并对照性能文档里的三组测试结果。",
+          "learning_goals": [
+            "掌握主机分段计时与 AIE 执行时间的测量口径",
+            "理解 XPE 理论功耗与 INA226 实测功耗的差别",
+            "能读懂性能文档中三组测试(5.1°/6.1°/0.8°)的配置与结果对比"
+          ],
+          "source_files": [
+            "design/vivado_metrics_scripts/report_metrics.tcl",
+            "Makefile",
+            "doc/sections/performance_metrics.tex",
+            "design/profiling_cfgs/xrt.ini"
+          ],
+          "minimal_modules": [
+            "CLOCK_MONOTONIC 分段计时",
+            "Vivado report_metrics/XPE",
+            "INA226 实测功耗与 xrt.ini trace"
+          ],
+          "practice_task": "对照性能文档，解释为何‘Populating data buffers’耗时数十分钟能代表 CSV 取数的瓶颈、而 AIE 反投影本身只需数百毫秒；并讨论用高速接口流式输入会如何改变这一比例。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "优化机会与未来工作",
+          "order": 3,
+          "filename": "u8-l3-optimization-and-future-work.md",
+          "level": "advanced",
+          "topic": "梳理 future_work：ILP 进一步优化、动态 buffer 索引瓶颈、选择性 RC 分发、内部 RTP 生成像素、DSP 引擎做 FFT/iFFT、全 360° 孔径与 stripmap 模式、pl_stride 多流扩展及与 AMD XD100 参考设计对比。",
+          "learning_goals": [
+            "理解当前算法的主要性能瓶颈(标量动态索引、全量 RC 广播)",
+            "掌握 PL stride 多流受 system.cfg 限制的根因与候选解法",
+            "认识全孔径、stripmap、DSP 脉冲压缩等扩展方向"
+          ],
+          "source_files": [
+            "doc/sections/future_work.tex",
+            "doc/sections/implementation.tex"
+          ],
+          "minimal_modules": [
+            "ILP/动态索引/选择性 RC 优化",
+            "pl_stride 多流限制与解法",
+            "DSP FFT/全孔径/stripmap/XD100 对比"
+          ],
+          "practice_task": "从 future_work 中挑出‘动态 buffer 索引’与‘选择性 RC 分发’两项，分别评估它们对 m_img 累加循环和 Data Broadcast 带宽的影响，并写出一条你认为最值得优先做的改进路线。",
+          "depends_on": [
+            "u5-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
