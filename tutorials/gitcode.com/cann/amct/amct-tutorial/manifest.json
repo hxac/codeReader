@@ -1,0 +1,1004 @@
+{
+  "project": "amct",
+  "head": "ba53a0fdd6f3ed91a2d4875141d02aff746191a3",
+  "rationale": "AMCT 是昇腾 NPU 原生的模型量化压缩工具包，体量大、模块多，核心是「LLM 训练后量化（PTQ）工程主链路」，辅以经典图压缩与 NPU 自定义算子两条支线。学习路线按「先认识、再走通主链路、最后深挖机制与扩展」三层递进设计。第 1 单元带读者从零认识项目并跑通四条 CLI 命令；第 2 单元补齐量化和数据类型的基础概念（避免读者直接读源码时被术语卡住）；第 3-5 单元为进阶层，按「工程编排骨架 → PTQ 四阶段流程 → 模型适配与数据流」的顺序拆解主链路，对应实际使用顺序 eval→extract_ptq_data→ptq→deploy；第 6-7 单元进入算法机制与量化模块/数据类型的实现细节；第 8 单元单独讲 NPU 自定义算子 amct_ops（与主流程职责分离、独立构建）；第 9 单元覆盖经典图压缩、实验特性与测试规范等专家向扩展。讲义之间通过 depends_on 形成清晰依赖链：概念→工程→流程→算法/模块→扩展，每篇只讲一个独立主题并配一个可操作的实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门：从零认识 AMCT",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "AMCT 项目概览与架构定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 AMCT 是什么、解决什么问题、整体部署架构与核心特性，建立全局认知。",
+          "learning_goals": [
+            "理解 AMCT 作为昇腾 NPU 原生模型压缩工具包的定位与价值",
+            "掌握 AMCT 支持的量化精度（INT8/INT4/MXFP8/MXFP4/HiFloat8）与性能收益",
+            "了解 AMCT 的三大亮点：硬件亲和、多精度全栈、大模型就绪"
+          ],
+          "source_files": [
+            "README.md",
+            "AGENTS.md",
+            "README_en.md"
+          ],
+          "minimal_modules": [
+            "README 概述与核心特性",
+            "部署架构与性能收益表"
+          ],
+          "practice_task": "阅读 README，用自己的话画出 AMCT 的部署架构图（浮点模型 → AMCT 量化 → 昇腾 NPU 低比特推理），并列出五种支持的量化精度格式各自带来的体积收益。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "环境准备、源码构建与安装",
+          "order": 2,
+          "filename": "u1-l2-build-and-install.md",
+          "level": "beginner",
+          "topic": "讲解 AMCT 的依赖要求、build.sh 构建选项、setup.py 打包机制以及如何安装并验证。",
+          "learning_goals": [
+            "掌握 AMCT 的运行依赖（Python/PyTorch/CANN/GCC）与版本要求",
+            "理解 build.sh 的 --torch/--pkg/--experimental 等构建选项的区别",
+            "学会从源码构建分发包并用 pip 安装、验证 import amct_pytorch"
+          ],
+          "source_files": [
+            "build.sh",
+            "setup.py",
+            "requirements.txt",
+            "AGENTS.md",
+            "docs/zh/quick_install.md"
+          ],
+          "minimal_modules": [
+            "build.sh 构建选项与产物",
+            "setup.py 包发现与版本/平台设置",
+            "requirements.txt 依赖清单"
+          ],
+          "practice_task": "执行 bash build.sh --help 查看所有构建选项；尝试 bash build.sh --torch 构建 amct_pytorch 分发包，并在 build_out/ 中找到产物 tar.gz 文件名，记录其 version 与 arch 字段。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库目录结构与代码组织",
+          "order": 3,
+          "filename": "u1-l3-directory-structure.md",
+          "level": "beginner",
+          "topic": "梳理 AMCT 仓库的整体目录结构，说明各顶层目录的职责，帮读者建立代码地图。",
+          "learning_goals": [
+            "掌握 amct_pytorch/amct_ops/examples/tests/docs 等顶层目录的职责分工",
+            "理解 amct_pytorch 内部 algorithms/cli/common/configs/quantization/workflows 的分层",
+            "区分 LLM PTQ 主流程目录与 classic 经典图压缩目录"
+          ],
+          "source_files": [
+            "README.md",
+            "AGENTS.md",
+            "amct_pytorch/__init__.py"
+          ],
+          "minimal_modules": [
+            "README 目录结构图",
+            "AGENTS.md 目录用途表",
+            "amct_pytorch 包导出与懒加载"
+          ],
+          "practice_task": "对照 README 的目录结构图，在本地仓库用 tree 或 ls 列出 amct_pytorch 下的二级目录，并标注每个目录对应 README 中描述的用途，输出一张自己的目录速查表。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "一站式量化初体验：四条 CLI 命令",
+          "order": 4,
+          "filename": "u1-l4-first-quant-cli.md",
+          "level": "beginner",
+          "topic": "通过 examples 脚本和顶层模块入口，演示 eval/extract_ptq_data/ptq/deploy 四条命令如何串联一次完整 LLM 量化。",
+          "learning_goals": [
+            "理解 AMCT LLM 量化的四阶段：评估→数据提取→PTQ→部署导出",
+            "掌握 python -m amct_pytorch.<cmd> 的调用方式与 examples 脚本对应关系",
+            "能看懂一条 ptq 命令的关键参数（model/quant_target/quant_dtype/bit_config/algos）"
+          ],
+          "source_files": [
+            "examples/extract_ptq_data.sh",
+            "examples/eval.sh",
+            "examples/ptq_single_npu.sh",
+            "examples/deploy.sh",
+            "amct_pytorch/ptq.py",
+            "amct_pytorch/eval.py"
+          ],
+          "minimal_modules": [
+            "examples/*.sh 四阶段脚本",
+            "顶层 -m 模块入口（ptq.py 等）"
+          ],
+          "practice_task": "按 examples 目录下四个 .sh 脚本的顺序，把一次端到端量化的命令按 eval→extract_ptq_data→ptq→deploy 排列，并为每条命令写一句话说明它产出什么、给下一阶段用什么。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "量化压缩基础概念",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "模型压缩与量化的基本原理",
+          "order": 1,
+          "filename": "u2-l1-compression-basics.md",
+          "level": "beginner",
+          "topic": "讲解量化、稀疏、蒸馏等压缩概念，重点区分训练后量化（PTQ）与量化感知训练（QAT）。",
+          "learning_goals": [
+            "理解模型压缩的目标：减小体积、降低时延、提升推理效率",
+            "区分 PTQ（训练后量化）与 QAT（量化感知训练）的适用场景",
+            "理解 AMCT 将量化与模型转换分开、对可量化算子独立量化的设计"
+          ],
+          "source_files": [
+            "docs/zh/compression_concepts.md"
+          ],
+          "minimal_modules": [
+            "量化运行原理",
+            "PTQ vs QAT 概念"
+          ],
+          "practice_task": "阅读 compression_concepts.md 的「训练后量化」与「量化感知训练」两节，写一段对比说明：什么场景该用 PTQ、什么场景必须上 QAT，并各举一个典型例子。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "量化数据类型全览：INT / MXFP / HiFloat8",
+          "order": 2,
+          "filename": "u2-l2-quant-dtypes-overview.md",
+          "level": "beginner",
+          "topic": "系统介绍 AMCT 支持的低比特数据类型（INT8/INT4、MXFP8/MXFP4、HiFloat8/FP8）的格式、取值范围与适用场景。",
+          "learning_goals": [
+            "掌握 INT8/INT4 整数量化的基本思想与精度/体积权衡",
+            "理解 Microscaling 格式 MXFP8/MXFP4 的 shared exponent 机制",
+            "了解华为自研 HiFloat8 的 Dot 位、锥形精度与大动态范围特点"
+          ],
+          "source_files": [
+            "docs/zh/compression_concepts.md",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "compression_concepts.md 数据类型概念节",
+            "README 性能收益表"
+          ],
+          "practice_task": "制作一张数据类型对照表：列出 INT8/INT4/MXFP8/MXFP4/HiFloat8 的位数、是否浮点、体积收益和一句话适用场景，并说明 MXFP 相比 FP 多了什么（shared exponent）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "PTQ 算法选型矩阵",
+          "order": 3,
+          "filename": "u2-l3-algorithm-selection.md",
+          "level": "beginner",
+          "topic": "基于算法支持矩阵，讲解 AWQ/GPTQ/SmoothQuant/Min-Max 等算法的核心思路与选型建议。",
+          "learning_goals": [
+            "理解各算法（Min-Max/AWQ/GPTQ/SmoothQuant/FlatQuant/MXQuant 等）的核心思想",
+            "能根据权重(W)或全量化(W+A)、目标精度选择合适算法",
+            "掌握 README FAQ 给出的算法选型建议与精度下降处理路径"
+          ],
+          "source_files": [
+            "docs/zh/algorithm_brief.md",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "algorithm_brief.md 算法支持矩阵",
+            "README FAQ 算法选择"
+          ],
+          "practice_task": "对照 algorithm_brief.md 的两张支持矩阵，回答：要对一个大模型做 INT4 权重量化，可选哪些算法？做 W8A8 全量化又推荐哪个？给出你的选择理由。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "LLM 量化工程主链路",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "CLI 参数体系与命令分发",
+          "order": 1,
+          "filename": "u3-l1-cli-args.md",
+          "level": "intermediate",
+          "topic": "深入 amct_pytorch/cli/llm/args.py，解析 parser_gen 定义的命令行参数与 BitPolicy 初始化逻辑。",
+          "learning_goals": [
+            "掌握 parser_gen 中 model/quant_target/quant_dtype/bit_config/algos 等核心参数",
+            "理解 quant_target 的四个取值（mlp/moe/attn-linear/attn-cache）含义",
+            "了解 args.bit_policy 如何由 bit_config yaml 初始化"
+          ],
+          "source_files": [
+            "amct_pytorch/cli/llm/args.py",
+            "amct_pytorch/cli/llm/eval.py",
+            "amct_pytorch/cli/llm/ptq.py",
+            "amct_pytorch/cli/llm/deploy.py"
+          ],
+          "minimal_modules": [
+            "args.py parser_gen 参数定义",
+            "_validate_eval_mode 校验",
+            "cli 子命令 main 入口"
+          ],
+          "practice_task": "阅读 args.py，列出所有参数及其默认值；解释为什么 eval_mode=bf16 时要求 bit_config 中没有低于 16-bit 的条目（结合 _validate_eval_mode）。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Workflow 编排骨架与运行模式",
+          "order": 2,
+          "filename": "u3-l2-workflow-skeleton.md",
+          "level": "intermediate",
+          "topic": "剖析 amct_pytorch/workflows/ 下四个 Workflow 类的统一 setup/run 结构与 granularity（block/model/tensor）分发。",
+          "learning_goals": [
+            "理解 LlmPtqWorkflow/LlmEvalWorkflow/LlmDeployWorkflow 的 setup→run 编排模式",
+            "掌握 granularity（block/model/tensor）如何决定走 blockwise 还是其它路径",
+            "理解 _register_components 在运行前注册算法/模型/dtype/solver 的时机"
+          ],
+          "source_files": [
+            "amct_pytorch/workflows/llm_ptq.py",
+            "amct_pytorch/workflows/llm_eval.py",
+            "amct_pytorch/workflows/llm_deploy.py",
+            "amct_pytorch/workflows/llm_extract_ptq_data.py"
+          ],
+          "minimal_modules": [
+            "LlmPtqWorkflow setup/run",
+            "granularity 分发逻辑",
+            "_register_components 注册时机"
+          ],
+          "practice_task": "对比四个 Workflow 类的 run() 方法，画出它们共用的「setup→按 granularity 分发→移除日志 sink」控制流，并指出 PTQ workflow 独有的断点续跑（已存在 param 文件则跳过）逻辑在哪个方法里。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "注册表驱动的插件架构",
+          "order": 3,
+          "filename": "u3-l3-registry-architecture.md",
+          "level": "intermediate",
+          "topic": "讲解 Registry 基类与 MODEL/SOLVER/DTYPE/ALGO 四大注册表，理解 AMCT 的插件化设计。",
+          "learning_goals": [
+            "掌握 Registry 基类的 register/get/get_item/list_all 接口与装饰器用法",
+            "理解四大注册表（模型/求解器/数据类型/算法）各自的注册时机与用途",
+            "能看懂 register_llm_models/register_algorithms/register_dtype/register_solvers 的副作用注册模式"
+          ],
+          "source_files": [
+            "amct_pytorch/common/utils/registry_factory.py",
+            "amct_pytorch/common/models/__init__.py",
+            "amct_pytorch/common/optimization/__init__.py",
+            "amct_pytorch/algorithms/quant/__init__.py",
+            "amct_pytorch/quantization/dtypes/__init__.py"
+          ],
+          "minimal_modules": [
+            "Registry 基类与 RegistryItem",
+            "各 __init__ 的全局注册表与注册函数",
+            "_REGISTERED 幂等保护"
+          ],
+          "practice_task": "基于 registry_factory.py 的 Registry 类，写一段伪代码：自定义一个简单函数并用 @MY_REGISTRY.register(name=..., description=...) 注册，再演示 get/list_all 的调用与重复注册时的报错行为。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "BitPolicy 位宽配置与 yaml 模板",
+          "order": 4,
+          "filename": "u3-l4-bit-policy-config.md",
+          "level": "intermediate",
+          "topic": "剖析 bit_policy.py 的 BitPolicy 类与 configs/*.yaml，理解分组位宽解析与逐层覆盖机制。",
+          "learning_goals": [
+            "掌握 BitPolicy 如何从 yaml 解析 w_bits/a_bits 及 attn-linear/mlp/moe/attn-cache 分组",
+            "理解 linear_bits 的「从最具体叶子到最粗组」逐级回退解析规则",
+            "能读懂 example_w4a8.yaml 中 per-layer override 与 moe routed/shared 子块"
+          ],
+          "source_files": [
+            "amct_pytorch/quantization/bit_policy.py",
+            "amct_pytorch/configs/w8a8.yaml",
+            "amct_pytorch/configs/example_w4a8.yaml",
+            "amct_pytorch/configs/w4a8.yaml",
+            "amct_pytorch/configs/bf16.yaml"
+          ],
+          "minimal_modules": [
+            "BitPolicy.from_yaml 与校验",
+            "linear_bits 逐级回退解析",
+            "_GroupBits 下标代理"
+          ],
+          "practice_task": "参考 example_w4a8.yaml，自己写一份 bit_config：全局 W8A8，但把 attn-linear 的 o_proj 提升到 W16A16、mlp 的 down_proj 设为 W4A8，并用 BitPolicy.from_yaml 在本地加载打印 summary() 验证解析结果。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "PTQ 核心流程剖析",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "校准数据提取 extract_ptq_data",
+          "order": 1,
+          "filename": "u4-l1-extract-ptq-data.md",
+          "level": "intermediate",
+          "topic": "剖析 LlmExtractPtqDataWorkflow，讲解如何用 pileval 数据逐 block 前向捕获 PTQ 校准所需的中间激活。",
+          "learning_goals": [
+            "理解 extract_ptq_data 如何选择 attn/ffn 的 hook_name 并做 embedding→block 前向",
+            "掌握 get_pileval 加载校准样本与 do_embedding_forward/do_block_forward 的衔接",
+            "理解捕获的中间 IO 如何保存供后续 ptq 阶段复用"
+          ],
+          "source_files": [
+            "amct_pytorch/workflows/llm_extract_ptq_data.py",
+            "amct_pytorch/common/datasets/preproc.py",
+            "amct_pytorch/common/datasets/ptq_io.py"
+          ],
+          "minimal_modules": [
+            "LlmExtractPtqDataWorkflow._run_blockwise",
+            "hook_name 选择逻辑",
+            "do_embedding_forward/do_block_forward 调用"
+          ],
+          "practice_task": "阅读 _run_blockwise，解释：为什么 attn-linear/attn-cache 目标用 input_layernorm 作为 hook，而 mlp/moe 用 post_attention_layernorm？并说明 sharded_block 标志的作用。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "PTQ 训练后量化主流程",
+          "order": 2,
+          "filename": "u4-l2-ptq-main-flow.md",
+          "level": "intermediate",
+          "topic": "深入 LlmPtqWorkflow._run_blockwise，讲解 PtqUnit 划分、数据 batch 构建与逐 unit 求解的完整链路。",
+          "learning_goals": [
+            "理解 build_quant_block 与 iter_ptq_units 如何把一层切分为可量化的 PTQ 单元",
+            "掌握 _prepare_unit_batch 如何加载输入、生成 ground truth、构建 DataLoader",
+            "理解逐 unit 求解→finalize→保存 .pt 参数→断点续跑的完整循环"
+          ],
+          "source_files": [
+            "amct_pytorch/workflows/llm_ptq.py",
+            "amct_pytorch/common/models/llm/common/ptq_units.py",
+            "amct_pytorch/common/datasets/ptq_provider.py"
+          ],
+          "minimal_modules": [
+            "LlmPtqWorkflow._run_blockwise",
+            "PtqUnit 数据类与 iter_ptq_units",
+            "LlmPtqDataProvider.build_unit_batch/materialize_gt"
+          ],
+          "practice_task": "追踪一个 moe 目标的 PTQ 单元：说明 iter_ptq_units 如何用 iter_indexed_units 为每个 expert 生成 PtqUnit，以及 _unit_result_path 如何为每层每 unit 生成 .pt 文件名实现断点续跑。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "块级重建优化 BlockwiseSolver",
+          "order": 3,
+          "filename": "u4-l3-blockwise-solver.md",
+          "level": "intermediate",
+          "topic": "剖析 BlockwiseSolver 如何用重建损失（MSE）对可学习量化参数做逐块优化训练。",
+          "learning_goals": [
+            "理解 BaseSolver 的优化循环骨架与 BlockwiseSolver 的 block 粒度实现",
+            "掌握 _collect_trainable_param_groups 如何收集各模块 trainable_params 并设学习率",
+            "理解 _reconstruction_loss 用量化输出逼近 float ground truth 的训练目标"
+          ],
+          "source_files": [
+            "amct_pytorch/common/optimization/blockwise_solver.py",
+            "amct_pytorch/common/optimization/base_solver.py",
+            "amct_pytorch/common/optimization/factory.py"
+          ],
+          "minimal_modules": [
+            "BlockwiseSolver.solve/_optimize_block",
+            "_collect_trainable_param_groups",
+            "_reconstruction_loss 与 optimizer/lr_scheduler 构建"
+          ],
+          "practice_task": "阅读 solve() 与 _optimize_block()，解释：为什么用 loss = loss / loss.clone().detach() 这种归一化？ trainable_params 机制如何保证只训练算法参数而冻结原始权重？",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "部署导出 deploy",
+          "order": 4,
+          "filename": "u4-l4-deploy-export.md",
+          "level": "intermediate",
+          "topic": "剖析 LlmDeployWorkflow 的 block/tensor 两种导出模式，讲解 safetensors 分片与 quantization_config 生成。",
+          "learning_goals": [
+            "理解 block 粒度导出如何逐层 export_block_deploy 并重写 weight index",
+            "掌握 generate_quant_config 生成 compressed-tensors 格式量化配置的规则",
+            "理解 tensor 粒度导出如何做 FP8→bf16 反量化与 int/mxfp 的 quant_payload"
+          ],
+          "source_files": [
+            "amct_pytorch/workflows/llm_deploy.py",
+            "amct_pytorch/common/models/llm/common/deploy_export.py"
+          ],
+          "minimal_modules": [
+            "LlmDeployWorkflow._run_blockwise/_run_tensorwise",
+            "export_block_deploy 与 generate_quant_config",
+            "_refresh_weight_index/convert_state_dict/quant_payload"
+          ],
+          "practice_task": "对照 _run_blockwise，说明导出时如何区分「已被量化的 QuantLinear」与「需忽略的 PlainLinear/原始 Linear」（参考 get_quant_ignore_linear_names），并解释 generate_quant_config 中 is_mx 如何决定 qtype=float/int。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "模型适配与量化挂载",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "LLM 模型适配基类 BaseModel",
+          "order": 1,
+          "filename": "u5-l1-base-model-pipeline.md",
+          "level": "intermediate",
+          "topic": "剖析 common/models/llm/common/base.py 的 BaseModel，理解逐层加载、block 前向、PTQ 单元划分等核心抽象。",
+          "learning_goals": [
+            "理解 BaseModel 如何用 AutoConfig/AutoTokenizer/AutoModelForCausalLM 加载模型与逐层权重",
+            "掌握 do_embedding_forward/do_block_forward/do_head_forward 的逐层流水线",
+            "理解 iter_ptq_units 根据 quant_target 划分 attn/mlp/moe 单元的策略"
+          ],
+          "source_files": [
+            "amct_pytorch/common/models/llm/common/base.py",
+            "amct_pytorch/common/models/llm/common/capture.py",
+            "amct_pytorch/common/models/llm/common/ptq_params.py"
+          ],
+          "minimal_modules": [
+            "BaseModel.__init__ 与权重加载",
+            "do_embedding_forward/do_block_forward",
+            "iter_ptq_units/iter_deploy_bindings"
+          ],
+          "practice_task": "阅读 do_block_forward，解释 Catcher（capture.py）在 embedding 阶段如何捕获 position_ids/attention_mask/position_embeddings 并保存为 kwargs，供后续逐层前向复用。",
+          "depends_on": [
+            "u3-l2",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "模型注册与多模型适配",
+          "order": 2,
+          "filename": "u5-l2-model-adapters.md",
+          "level": "intermediate",
+          "topic": "讲解 register_llm_models 注册的 DeepSeek/Qwen/LongCat/GLM/HyV3 等适配器，理解如何为新模型接入 AMCT。",
+          "learning_goals": [
+            "掌握 MODEL_REGISTRY 如何按 model_name 路由到具体适配器类",
+            "理解 qwen/deepseek/longcat/glm/hyv3 等家族的目录组织与 MoE/dense 变体",
+            "了解适配器需要覆写的关键方法（attn_norm_name/ffn_norm_name/get_layer_weight_prefix 等）"
+          ],
+          "source_files": [
+            "amct_pytorch/common/models/llm/__init__.py",
+            "amct_pytorch/common/models/llm/qwen/moe_common.py",
+            "amct_pytorch/common/models/llm/qwen/qwen3/qwen3.py",
+            "amct_pytorch/common/models/llm/hyv3/hyv3.py"
+          ],
+          "minimal_modules": [
+            "register_llm_models 注册清单",
+            "qwen moe_common 与 qwen3 适配",
+            "hyv3 适配示例"
+          ],
+          "practice_task": "对照 register_llm_models 的注册清单，说明一个新模型（如某 Qwen 变体）要接入 AMCT 需要在哪些地方实现：继承 BaseModel、覆写哪些 norm 名/权重前缀、并在 register_llm_models 中补一行 import。",
+          "depends_on": [
+            "u5-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "量化算子挂载 quant_apply",
+          "order": 3,
+          "filename": "u5-l3-quant-apply.md",
+          "level": "intermediate",
+          "topic": "剖析 quant_apply.py 如何把原始 Linear/MLP/Attention 包装成量化对应物（QuantGatedMLP、PlainLinear 等）。",
+          "learning_goals": [
+            "理解 apply_quant_to_moe_mlp 如何按位置把 mlp/experts/shared_experts 包装到不同 group",
+            "掌握 QuantGatedMLP 如何用 BitPolicy 为 gate/up/down_proj 选位宽并挂激活量化器",
+            "理解 PlainLinear 为何要兼容 structure_transform kwarg 以匹配 QuantLinear 签名"
+          ],
+          "source_files": [
+            "amct_pytorch/common/models/llm/common/quant_apply.py",
+            "amct_pytorch/quantization/modules/quant_linear.py",
+            "amct_pytorch/quantization/modules/quant_base.py"
+          ],
+          "minimal_modules": [
+            "apply_quant_to_moe_mlp/apply_quant_to_attn",
+            "QuantGatedMLP 包装与 group 选取",
+            "PlainLinear 签名兼容"
+          ],
+          "practice_task": "阅读 QuantGatedMLP.forward，画出 gate/up/down 三个投影的量化数据流（input_transform→input_quant→up/gate_proj→act_fn→hidden_quant→down_proj），并说明 group 如何决定每个投影的位宽。",
+          "depends_on": [
+            "u5-l1",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "校准数据加载与 PTQ 数据 Provider",
+          "order": 4,
+          "filename": "u5-l4-calib-data-provider.md",
+          "level": "intermediate",
+          "topic": "讲解 datasets 模块如何加载 pileval 校准数据、持久化 PTQ 中间 IO，并构建可迭代的训练 batch。",
+          "learning_goals": [
+            "理解 preproc.get_pileval 如何预处理并截取 nsamples×seq_len 校准样本",
+            "掌握 ptq_io 的 save_ptq_inps/save_ptq_kwargs/load_ptq_inps 持久化格式",
+            "理解 LlmPtqDataProvider 如何把单元输入与 ground truth 包装成 DataLoader"
+          ],
+          "source_files": [
+            "amct_pytorch/common/datasets/ptq_provider.py",
+            "amct_pytorch/common/datasets/ptq_io.py",
+            "amct_pytorch/common/datasets/preproc.py"
+          ],
+          "minimal_modules": [
+            "LlmPtqDataProvider.build_unit_batch/materialize_gt",
+            "ptq_io 存取函数",
+            "preproc.get_pileval"
+          ],
+          "practice_task": "追踪校准数据生命周期：从 get_pileval 取样 → extract_ptq_data 阶段 save_ptq_inps 落盘 → ptq 阶段 load_ptq_inps 读回 → materialize_gt 生成 ground truth → build_unit_batch 构建 DataLoader，画出数据流图。",
+          "depends_on": [
+            "u4-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "量化算法机制",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "QuantAlgorithmBase 与 is_observe 通路",
+          "order": 1,
+          "filename": "u6-l1-algo-base-observe.md",
+          "level": "advanced",
+          "topic": "剖析 QuantAlgorithmBase 基类与 is_observe 开关，理解算法在校准/训练/推理三种通路下的行为切换。",
+          "learning_goals": [
+            "掌握 QuantAlgorithmBase 的 calib_forward/forward/trainable_params/export_ptq_params 接口契约",
+            "理解 is_observe 标志如何区分校准态（统计）与量化态（伪量化）",
+            "了解 set_model_to_observe 如何批量切换模块通路"
+          ],
+          "source_files": [
+            "amct_pytorch/algorithms/quant/base.py",
+            "amct_pytorch/common/models/llm/common/quant_apply.py",
+            "amct_pytorch/algorithms/quant/auto_clip.py"
+          ],
+          "minimal_modules": [
+            "QuantAlgorithmBase 抽象接口",
+            "is_observe 通路控制",
+            "set_model_to_observe 与 calib_forward"
+          ],
+          "practice_task": "以 LAC 算法为例，对照 calib_forward 与 forward 说明：校准阶段它做了什么（更新 maxval/minval）、量化阶段又做了什么（apply_clip），并解释 is_observe 如何在 ActivationQuantizer 中决定走哪条路径。",
+          "depends_on": [
+            "u4-l2",
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "算法注册与 target 路由机制",
+          "order": 2,
+          "filename": "u6-l2-algo-target-routing.md",
+          "level": "advanced",
+          "topic": "剖析 ALGO_REGISTRY 的 targets 元数据与 build_algorithms_by_target，理解算法如何按 weight/activation/structure 三类目标挂载。",
+          "learning_goals": [
+            "掌握 @ALGO_REGISTRY.register(targets=(...)) 如何声明算法适用的目标类型",
+            "理解 get_algo_names_by_target/build_algorithms_by_target 的路由逻辑",
+            "区分 weight/activation/structure 三类 target 各自挂在哪里（WeightQuantizer/ActivationQuantizer/QuantGatedMLP）"
+          ],
+          "source_files": [
+            "amct_pytorch/algorithms/registry_factory.py",
+            "amct_pytorch/algorithms/quant/__init__.py",
+            "amct_pytorch/quantization/modules/quant_base.py",
+            "amct_pytorch/algorithms/quant/flatquant.py"
+          ],
+          "minimal_modules": [
+            "QuantAlgorithmRegistry 与 targets 元数据",
+            "build_algorithms_by_target 路由",
+            "三类 target 的挂载点"
+          ],
+          "practice_task": "阅读 quant_base.py 的 build_algorithms_by_target，解释：当 --algos lwc lac flatquant 时，每个算法分别被路由到哪个 target（weight/activation/structure）？structure target 为何只允许一个算法？",
+          "depends_on": [
+            "u6-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "经典权重量化算法 AWQ 实现",
+          "order": 3,
+          "filename": "u6-l3-awq-implementation.md",
+          "level": "advanced",
+          "topic": "剖析 AWQ 算法的 search_scale 网格搜索与 classic/quantize_op 下的量化模块实现。",
+          "learning_goals": [
+            "理解 AWQ 感知激活的权重量化思想：保护显著权重、网格搜索最优缩放因子",
+            "掌握 search_scale 如何用 grids_num 网格遍历 scale 并以 4 次方误差选最优",
+            "了解 classic/quantize_op 下 LinearAWQuant/GPTQuant/SmoothQuant 等模块的定位"
+          ],
+          "source_files": [
+            "amct_pytorch/algorithms/quant/awq.py",
+            "amct_pytorch/classic/quantize_op/linear_awq_module.py",
+            "amct_pytorch/classic/quantize_op/utils.py"
+          ],
+          "minimal_modules": [
+            "awq.search_scale 网格搜索",
+            "process_weights_for_layers/apply_scale",
+            "classic quantize_op 模块定位"
+          ],
+          "practice_task": "阅读 search_scale，推导 scale_awq = inputs_mean.pow(ratio) 的几何含义，并解释为何用 (ori_out - quant_out).pow(4).mean() 作为损失而不是 MSE；再说明 apply_scale 如何把 scale 同时作用到权重（乘）和激活（除）以保持等价。",
+          "depends_on": [
+            "u6-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "可学习算法：LAC/LWC/FlatQuant/OmniQuant",
+          "order": 4,
+          "filename": "u6-l4-learnable-algos.md",
+          "level": "advanced",
+          "topic": "对比剖析 LWC/LAC（可学习截断）、FlatQuant（可学习结构变换）、OmniQuant/AutoRound 等进阶算法的实现差异。",
+          "learning_goals": [
+            "掌握 LWC/LAC 用 sigmoid + clip_factor 学习权重/激活截断边界的机制",
+            "理解 FlatQuant 的可学习正交结构变换（Kronecker 分解）及其 structure target 用途",
+            "了解 OmniQuant/AutoRound 的算法定位与 export_deploy 的支持差异"
+          ],
+          "source_files": [
+            "amct_pytorch/algorithms/quant/auto_clip.py",
+            "amct_pytorch/algorithms/quant/flatquant.py",
+            "amct_pytorch/algorithms/quant/omniquant.py",
+            "amct_pytorch/algorithms/quant/auto_round.py"
+          ],
+          "minimal_modules": [
+            "LWC/LAC 可学习截断",
+            "FlatQuant Kronecker 结构变换",
+            "OmniQuant/AutoRound 定位"
+          ],
+          "practice_task": "对比 LWC（weight target）与 LAC（activation target）的 clip_dim 计算与参数形状差异；再解释 FlatQuant 为何要在结构层做正交变换而不是直接量化（结合 QuantLinear 里 structure_transform 的 inv_t 调用）。",
+          "depends_on": [
+            "u6-l2",
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "量化模块与数据类型实现",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "QuantLinear 与量化器模块",
+          "order": 1,
+          "filename": "u7-l1-quant-modules.md",
+          "level": "advanced",
+          "topic": "剖析 QuantLinear、WeightQuantizer、ActivationQuantizer 三个核心模块的 forward/fake_quant/observe/export_deploy 逻辑。",
+          "learning_goals": [
+            "掌握 QuantLinear 如何在训练/eval 两种模式下处理 weight 与 structure_transform",
+            "理解 WeightQuantizer.algo_forward 如何区分普通算法与带 quantize() hook 的算法",
+            "掌握 ActivationQuantizer 的 calib_forward(observe)/forward(quantize) 双通路"
+          ],
+          "source_files": [
+            "amct_pytorch/quantization/modules/quant_linear.py",
+            "amct_pytorch/quantization/modules/quant_base.py"
+          ],
+          "minimal_modules": [
+            "QuantLinear.forward/export_deploy",
+            "WeightQuantizer.algo_forward/export_deploy",
+            "ActivationQuantizer 双通路"
+          ],
+          "practice_task": "阅读 QuantLinear.forward，解释 eval_mode 下 cached_eval_weight 缓存机制（含 transform_key）为何能避免重复伪量化；再说明 WeightQuantizer.export_deploy 与 forward 在带 quantize_algo 时的分支差异。",
+          "depends_on": [
+            "u6-l1",
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "量化数据类型与 export_deploy 落盘",
+          "order": 2,
+          "filename": "u7-l2-dtypes-export.md",
+          "level": "advanced",
+          "topic": "剖析 dtypes 下的 int/mxfp/hifp 三类量化反量化实现及其 export_deploy 如何产出部署 payload。",
+          "learning_goals": [
+            "掌握 QuantDequantInt/QuantDequantMx/QuantDequantHifp 在 DTYPE_REGISTRY 的注册与 fake_quant",
+            "理解 dynamic_per_token_quant 等 impl 函数的 per-token/per-group 量化粒度",
+            "掌握 export_deploy 产出 {qweight, scale, ...} payload 并被 deploy 阶段写入 safetensors 的链路"
+          ],
+          "source_files": [
+            "amct_pytorch/quantization/dtypes/__init__.py",
+            "amct_pytorch/quantization/dtypes/int.py",
+            "amct_pytorch/quantization/dtypes/int_impl.py",
+            "amct_pytorch/quantization/dtypes/mxfp.py"
+          ],
+          "minimal_modules": [
+            "QuantDequantInt fake_quant",
+            "int_impl dynamic_per_token_quant/weight_quant",
+            "export_deploy payload 结构"
+          ],
+          "practice_task": "追踪一次权重量化的落盘：WeightQuantizer.export_deploy → quant_obj.export_deploy → 产出 qweight 与额外 scale/offset 张量 → deploy_export.export_block_deploy 把它们写成 .weight/.scale_inv 等 key，说明 payload 字典的命名映射规则。",
+          "depends_on": [
+            "u7-l1",
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "双注册表体系：PTQ 注册表 vs Classic 经典注册表",
+          "order": 3,
+          "filename": "u7-l3-dual-registry.md",
+          "level": "advanced",
+          "topic": "对比 LLM PTQ 的 ALGO_REGISTRY 与 classic 经典流程的 AlgorithmRegistry，厘清两套量化体系的边界与联系。",
+          "learning_goals": [
+            "理解 classic AlgorithmRegistry 按 (算法, 模块类型) 映射 (quant_module, deploy_module) 的设计",
+            "掌握 classic quantize_op（伪量化模块）与 deploy_op（NPU 部署模块）的成对关系",
+            "能区分 LLM PTQ 流（ALGO_REGISTRY + quantization 模块）与 classic 流（AlgorithmRegistry + classic 模块）的适用场景"
+          ],
+          "source_files": [
+            "amct_pytorch/algorithms/__init__.py",
+            "amct_pytorch/algorithms/registry_factory.py",
+            "amct_pytorch/classic/quantize_op/linear_awq_module.py",
+            "amct_pytorch/classic/deploy_op/npu_quantization_linear.py",
+            "amct_pytorch/classic/deploy_op/weight_npu_quant_module.py"
+          ],
+          "minimal_modules": [
+            "classic AlgorithmRegistry 注册表",
+            "quantize_op ↔ deploy_op 成对映射",
+            "两套体系边界"
+          ],
+          "practice_task": "对照 algorithms/__init__.py 的 AlgorithmRegistry.register 调用，列出 minmax/awq/gptq/smoothquant 各自对应的伪量化模块与 NPU 部署模块；再说明这套 classic 注册表与 LLM PTQ 的 ALGO_REGISTRY 在 key 设计上的根本区别。",
+          "depends_on": [
+            "u6-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "NPU 自定义算子 amct_ops",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "amct_ops 架构与构建打包",
+          "order": 1,
+          "filename": "u8-l1-amct-ops-architecture.md",
+          "level": "advanced",
+          "topic": "讲解 amct_ops 作为独立 NPU 算子层的定位、与 amct_pytorch 的分工，以及统一构建打包流程。",
+          "learning_goals": [
+            "理解 amct_ops 与 amct_pytorch 的职责分工（算子底层 vs 算法流程编排）",
+            "掌握 ops_build.sh 的 --soc 平台选择（ascend910b/910_93/950）与 wheel 产物",
+            "了解算子通过 amct_ops.<op> 与 torch.ops.amct.<op> 两种接口调用"
+          ],
+          "source_files": [
+            "amct_ops/README.md",
+            "amct_ops/ops_build.sh",
+            "amct_ops/setup.py",
+            "amct_ops/ops_init.py"
+          ],
+          "minimal_modules": [
+            "amct_ops 定位与分工表",
+            "ops_build.sh 构建命令",
+            "setup.py wheel 打包"
+          ],
+          "practice_task": "阅读 amct_ops/README.md，说明 amct_ops 为何做成可独立安装的 wheel 而非打进 amct_pytorch；并执行 bash ops_build.sh --help（或阅读脚本）列出支持的 --soc 平台与默认平台。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "hifloat8_cast 算子实现剖析",
+          "order": 2,
+          "filename": "u8-l2-hifloat8-cast-op.md",
+          "level": "advanced",
+          "topic": "以 hifloat8_cast 为例，剖析一个 NPU 算子从 Ascend C kernel 到 C++ binding 再到 Python 接口的三层结构。",
+          "learning_goals": [
+            "掌握算子目录的 op_kernel/op_extension/python 三层结构",
+            "理解 op_kernel 的 Ascend C kernel 与 tiling、op_extension 的 TORCH_LIBRARY 注册",
+            "了解 python 层 encode_to_hifloat8/decode_from_hifloat8 包装与 torch.ops.amct 调用"
+          ],
+          "source_files": [
+            "amct_ops/hifloat8_cast/README.md",
+            "amct_ops/hifloat8_cast/op_kernel/hifloat8_cast_kernel.cpp",
+            "amct_ops/hifloat8_cast/op_kernel/hifloat8_cast_tiling.h",
+            "amct_ops/hifloat8_cast/op_extension/register.cpp",
+            "amct_ops/hifloat8_cast/python/hifloat8_cast/ops.py"
+          ],
+          "minimal_modules": [
+            "op_kernel Ascend C kernel + tiling",
+            "op_extension TORCH_LIBRARY 注册",
+            "python 接口包装"
+          ],
+          "practice_task": "对照三层结构，说明一次 encode_to_hifloat8(x) 调用从 Python 接口 → C++ binding → Ascend C kernel 的调用链；并解释 register.cpp 中为何要用 TORCH_LIBRARY_FRAGMENT(amct, ...) 注册到 amct 命名空间。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "新增 NPU 算子的开发流程",
+          "order": 3,
+          "filename": "u8-3-new-op-workflow.md",
+          "level": "advanced",
+          "topic": "讲解新增一个 amct_ops 算子的完整流程：目录结构、命名空间约束、自动发现打包与 svd_quant 案例。",
+          "learning_goals": [
+            "掌握新算子目录的标准结构与 ops_build.sh 的自动发现机制",
+            "理解 amct 命名空间唯一性约束与 torch.ops.amct 注册规范",
+            "了解 svd_quant 这类带 op_host（tiling）+ op_kernel 的算子组织方式"
+          ],
+          "source_files": [
+            "amct_ops/README.md",
+            "amct_ops/svd_quant/python/svd_quant/csrc/ops_def_registration.cpp",
+            "amct_ops/svd_quant/op_host/svd_quant_tiling.h",
+            "amct_ops/svd_quant/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "新增算子目录结构规范",
+            "命名空间约束",
+            "svd_quant 案例"
+          ],
+          "practice_task": "参照 README「新增算子」一节，为一个假想的 lowbit_matmul 算子规划目录结构（op_kernel/op_host/op_extension/python 与 CMakeLists.txt），并写出它应注册到的命名空间与 torch.ops 调用名。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "经典图压缩、实验特性与质量保障",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "经典图压缩与算子融合优化流程",
+          "order": 1,
+          "filename": "u9-l1-classic-graph-compression.md",
+          "level": "advanced",
+          "topic": "讲解 classic/optimizer 的图优化 pass 与 classic/graph_based 的图压缩（张量分解等）能力。",
+          "learning_goals": [
+            "理解 model_optimizer 如何编排 insert_quantize_op_pass/replace_npu_quant_pass/base_module_fusion_pass",
+            "掌握图模式下量化算子插入与替换为 NPU 部署算子的流程",
+            "了解 classic/graph_based 的张量分解、蒸馏、通道剪枝等图压缩能力"
+          ],
+          "source_files": [
+            "amct_pytorch/classic/optimizer/model_optimizer.py",
+            "amct_pytorch/classic/optimizer/insert_quantize_op_pass.py",
+            "amct_pytorch/classic/optimizer/replace_npu_quant_pass.py",
+            "amct_pytorch/classic/graph_based/amct_pytorch/auto_channel_prune_search.py"
+          ],
+          "minimal_modules": [
+            "model_optimizer pass 编排",
+            "量化算子插入/替换 pass",
+            "graph_based 图压缩能力"
+          ],
+          "practice_task": "阅读 model_optimizer.py，列出它依次执行的优化 pass 及顺序，并说明 insert_quantize_op_pass（插入伪量化）与 replace_npu_quant_pass（替换为 NPU 算子）两步如何配合完成「训练→部署」的算子替换。",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "实验特性与前沿模型量化",
+          "order": 2,
+          "filename": "u9-l2-experimental-features.md",
+          "level": "advanced",
+          "topic": "讲解 experimental 目录下的 DeepSeek-V4、HiFloat8、FlatQuant、fakequant 等试验特性及端到端样例。",
+          "learning_goals": [
+            "理解 experimental 子包的定位与 --experimental 构建开关的关系",
+            "掌握 deepseek-v4 的 convert_model/mx_quantize 实验量化路径",
+            "了解 examples/models 下 DeepSeek-V4/Qwen3.6 一站式样例的使用方式"
+          ],
+          "source_files": [
+            "amct_pytorch/experimental/deepseek-v4/README.md",
+            "amct_pytorch/experimental/deepseek-v4/convert_model.py",
+            "amct_pytorch/experimental/hifloat8/README.md",
+            "examples/models/deepseekv4/DeepSeekV4-Flash-Walkthrough.md",
+            "examples/models/qwen3.6/Qwen3.6-Moe.md"
+          ],
+          "minimal_modules": [
+            "experimental 子包定位",
+            "deepseek-v4 实验量化",
+            "一站式平台样例"
+          ],
+          "practice_task": "阅读 DeepSeekV4-Flash-Walkthrough.md，梳理在 Atlas A3 一站式平台上完成 DeepSeek-V4 量化的标准启动步骤；并说明为何这些特性放在 experimental 且需要 --experimental 构建开关。",
+          "depends_on": [
+            "u1-l4",
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "测试体系、代码规范与 CI",
+          "order": 3,
+          "filename": "u9-l3-testing-and-quality.md",
+          "level": "advanced",
+          "topic": "讲解 tests 目录的单元测试组织、pytest 配置、pre-commit 与代码风格规范及 CI 流水线。",
+          "learning_goals": [
+            "掌握 tests/unit_test 下按 algorithms/quantization/workflows/classic/cli 的测试组织",
+            "理解 pyproject.toml 的 pytest 标记（cpu/npu/slow）与 coverage 配置",
+            "了解 pre-commit、ruff（Python）与 clang-format（C++）的代码规范要求"
+          ],
+          "source_files": [
+            "pyproject.toml",
+            "tests/unit_test/algorithms/test_awq.py",
+            "tests/unit_test/workflows/test_llm_deploy.py",
+            "tests/unit_test/quantization/test_bit_policy.py",
+            ".pre-commit-config.yaml"
+          ],
+          "minimal_modules": [
+            "pyproject pytest/coverage 配置",
+            "unit_test 测试组织",
+            "pre-commit 代码规范"
+          ],
+          "practice_task": "阅读 pyproject.toml 的 [tool.pytest.ini_options]，说明 cpu/npu/slow 三个标记的用途；并挑选 tests/unit_test/algorithms 下一个测试文件，说明它如何验证对应算法模块的行为（用了哪些标记、测了哪些边界）。",
+          "depends_on": [
+            "u6-l2",
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
