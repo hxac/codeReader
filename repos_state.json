@@ -35166,7 +35166,7 @@
     "Xilinx/Vitis_Libraries": {
       "prompt_hash": "b21aef51792b02df",
       "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-08-12T11:02:40Z",
+      "last_run_at": "2026-08-12T15:06:59Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -35355,7 +35355,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"456c8eb5-9598-49d2-a103-e6af2a6a447b\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"1731f0f5-203c-451f-ad44-a94a13e57545\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{"
         },
         "u12-l1": {
           "status": "pending",
@@ -35610,7 +35610,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/gitcode.com/cann/amct/amct-tutorial",
       "last_head": "ba53a0fdd6f3ed91a2d4875141d02aff746191a3",
-      "last_run_at": "2026-08-12T11:02:40Z",
+      "last_run_at": "2026-08-12T15:06:59Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "gitcode.com/cann/asc-devkit": {
@@ -35795,8 +35795,8 @@
       "mode": "full",
       "tutorial_path": "tutorials/gitcode.com/cann/asc-devkit/asc-devkit-tutorial",
       "last_head": "4952d23d863568f8976789364b7af331909bb993",
-      "last_run_at": "2026-08-12T11:02:40Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-08-12T15:06:59Z",
+      "last_error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"3af3ca3f-4bde-49ca-afa1-e7511066b9e1\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"o"
     },
     "gitcode.com/cann/asc-tools": {},
     "gitcode.com/cann/ascend-transformer-boost": {},
@@ -47606,7 +47606,7 @@
     "ai-dynamo/dynamo": {},
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-12T11:02:40Z"
+      "last_run_at": "2026-08-12T15:06:59Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
