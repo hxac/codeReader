@@ -1,0 +1,972 @@
+{
+  "project": "asc-devkit",
+  "head": "9624e1c4b2d437f7366c4821c98831387a4c442b",
+  "rationale": "本手册面向从零开始学习 Ascend C 算子开发的读者，按「先建立全局认知、再深入各层 API、最后掌握高级机制」组织。入门层（U1-U2）先讲清 asc-devkit 的定位、多层级 API 架构、目录组织与一键构建，再通过 Hello World 和矢量加法样例让读者掌握 .asc 源文件、Host/Device 混合编译、<<<>>> 启动语法与 ACL 运行时这一最基础的编程模型。进阶层（U3-U10）按内存搬运、矢量计算、TPipe/TQue 框架、多核并行与 Tiling、同步机制、语言扩展层 C API、SIMT API、高阶 API 的顺序逐层拆解核心机制与不同 API 层级，每篇都用真实样例源码配套可操作的实践任务。专家层（U11-U16）进入 Cube 矩阵计算与 Tensor API Layout 范式、调试能力、性能优化、SIMD/SIMT 混合编程、编译模式与多芯片适配、测试体系与贡献等高级主题。讲义之间以 depends_on 明确前后依赖，读者可按序逐篇实践。本仓是大型多 API 层级项目，共规划 16 个单元 32 篇讲义，覆盖从入门到二次开发的完整算子开发学习曲线。本次增量更新（4952d23d8→9624e1c4b）仅含一个提交「fix: isolate MC2 task cache symbols」，改动全部集中在 impl/adv_api/detail/hccl 下的私有内部 dlsym 符号隔离实现及一个 UT testcase，未触及任何 include 公共头、examples 样例、docs 文档、README 与 build.sh，且该提交明确说明不改 tag/digest/span/replay/清理协议或跨仓 ABI；现有 32 篇讲义无任何一篇引用 hccl 或 MC2 task cache 路径，故全部标记为 keep，无需重写。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 Ascend C 与 asc-devkit 项目",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与多层级 API 架构",
+          "order": 1,
+          "filename": "u1-l1-project-overview-architecture.md",
+          "level": "beginner",
+          "topic": "介绍 Ascend C 是什么、asc-devkit 在 CANN 中的位置，以及框架编程 API、基础 API、语言扩展层 C API(SIMD/SIMT)、高阶 API、算子模板库这一多层级 API 体系及其设计理念。",
+          "learning_goals": [
+            "理解 Ascend C 的定位与高性能完备性易编程设计目标",
+            "掌握多层级 API 的分层关系与各自的目标用户和适用场景",
+            "能够根据算子类型和性能需求初步选择合适的 API 层级"
+          ],
+          "source_files": [
+            "README.md",
+            "README_en.md",
+            "docs/zh/asc_how_to_choose_api.md"
+          ],
+          "minimal_modules": [
+            "项目概述与设计理念",
+            "多层级 API 体系总览",
+            "API 选择决策"
+          ],
+          "practice_task": "阅读 README 与 API 选择指南，针对给定三个场景（离散矢量算子、C++ Tensor 极致性能、快速算法验证）分别给出推荐的 API 层级并说明理由。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构与源码组织",
+          "order": 2,
+          "filename": "u1-l2-repo-structure-source-layout.md",
+          "level": "beginner",
+          "topic": "讲解 asc-devkit 仓库的顶层目录布局，重点说明 include 与 impl 的镜像关系、各 API 子目录（basic_api/c_api/simt_api/tensor_api/adv_api/aicpu_api/utils）的职责，以及 kernel_operator.h、asc_simd.h 等关键入口头文件。",
+          "learning_goals": [
+            "掌握仓库整体目录结构与各顶层目录的作用",
+            "理解 include 声明与 impl 实现的镜像组织方式",
+            "认识各 API 层级的主入口头文件位置"
+          ],
+          "source_files": [
+            "README.md",
+            "include/kernel_operator.h",
+            "include/c_api/asc_simd.h",
+            "impl/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "顶层目录说明",
+            "include/impl 镜像结构",
+            "关键入口头文件"
+          ],
+          "practice_task": "在仓库中定位并打开 kernel_operator.h 与 asc_simd.h，画出 include 目录到 impl 目录的对应关系图，标注每个 API 子目录的功能。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "开发环境准备与一键编译构建",
+          "order": 3,
+          "filename": "u1-l3-environment-and-build.md",
+          "level": "beginner",
+          "topic": "介绍如何准备 CANN 开发环境（云环境/Docker/DevContainer/手动安装）、配置环境变量，以及使用 build.sh --pkg 一键编译源码生成 run 包、安装覆盖 CANN 中 Ascend C 内容的完整流程。",
+          "learning_goals": [
+            "掌握四种环境准备方式及适用场景",
+            "理解 build.sh 与 CMake 的编译安装流程与产物",
+            "学会配置 set_env.sh 与依赖检查"
+          ],
+          "source_files": [
+            "docs/zh/quick_start.md",
+            "build.sh",
+            "CMakeLists.txt",
+            "version.cmake"
+          ],
+          "minimal_modules": [
+            "环境准备与 CANN 安装",
+            "build.sh 编译参数",
+            "CMake 工程结构"
+          ],
+          "practice_task": "参照 quick_start 在本地或容器中 source set_env.sh，执行 bash build.sh --pkg 完成一次编译，记录 build_out 目录下生成的产物名称。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "第一个算子——编程模型入门",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": ".asc 源文件与 Host/Device 混合编译模型",
+          "order": 1,
+          "filename": "u2-l1-asc-file-host-device-model.md",
+          "level": "beginner",
+          "topic": "讲解 .asc 源文件如何在同一文件中混合编写 Host 侧 C++ 代码与 Device 侧 Kernel 代码，介绍 __global__/__vector__/__cube__ 等 Kernel 限定符与 __gm__/__ubuf__ 等地址空间限定符的含义。",
+          "learning_goals": [
+            "理解 .asc 文件的 Host/Device 混合编译模型",
+            "掌握 Kernel 函数限定符与地址空间限定符",
+            "区分 Host 侧逻辑与 Device 侧 Kernel 逻辑的边界"
+          ],
+          "source_files": [
+            "examples/01_simd_cpp_api/00_introduction/00_quickstart/hello_world/hello_world.asc",
+            "examples/01_simd_cpp_api/00_introduction/01_add/add/add.asc"
+          ],
+          "minimal_modules": [
+            ".asc 文件结构",
+            "Kernel 限定符",
+            "地址空间限定符"
+          ],
+          "practice_task": "阅读 hello_world.asc 与 add.asc，标出每个文件中的 Host 代码段与 Device Kernel 代码段，并解释每个地址空间限定符的作用。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Kernel 启动语法 <<<>>> 与 ACL 运行时",
+          "order": 2,
+          "filename": "u2-l2-kernel-launch-and-acl-runtime.md",
+          "level": "beginner",
+          "topic": "讲解用 <<<numBlocks, threadsPerBlock, dynUbufSize, stream>>> 启动 Kernel 的语法含义，以及 aclrtMalloc/aclrtMemcpy/aclrtSynchronizeStream 等 ACL 运行时接口如何完成 Host 与 Device 的内存管理与同步。",
+          "learning_goals": [
+            "掌握 <<<>>> 启动语法各参数的含义",
+            "理解 ACL 运行时的设备流内存管理接口",
+            "学会 Host 与 Device 之间的数据搬运流程"
+          ],
+          "source_files": [
+            "examples/01_simd_cpp_api/00_introduction/00_quickstart/hello_world/hello_world.asc",
+            "examples/01_simd_cpp_api/00_introduction/01_add/add/add.asc"
+          ],
+          "minimal_modules": [
+            "<<<>>> 启动语法",
+            "ACL 运行时内存接口",
+            "流与同步"
+          ],
+          "practice_task": "在 add.asc 的 kernel_add 函数基础上，修改启动核数为 4 并相应调整每核处理长度，说明这样改对结果和性能的影响。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "端到端跑通第一个矢量加法算子",
+          "order": 3,
+          "filename": "u2-l3-run-first-add-operator.md",
+          "level": "beginner",
+          "topic": "以 add 样例为完整案例，串起 CMakeLists 工程配置、--npu-arch 编译选项、输入数据生成、Kernel 编译运行与结果校验的端到端流程，让读者真正跑通一个算子。",
+          "learning_goals": [
+            "掌握样例工程的 CMakeLists 与 npu-arch 配置",
+            "理解 gen_data/verify_result 的数据生成与校验流程",
+            "能够独立编译并运行一个矢量加法算子样例"
+          ],
+          "source_files": [
+            "examples/01_simd_cpp_api/00_introduction/01_add/add/add.asc",
+            "examples/01_simd_cpp_api/00_introduction/01_add/add/CMakeLists.txt",
+            "examples/01_simd_cpp_api/00_introduction/01_add/README.md"
+          ],
+          "minimal_modules": [
+            "样例工程结构",
+            "编译运行流程",
+            "数据生成与结果校验"
+          ],
+          "practice_task": "按 README 步骤编译运行 add 样例，修改 totalLength 与数据类型后重新生成输入、运行并通过 verify 校验，记录终端输出。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "内存层级与数据搬运",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Ascend 内存层级与地址空间限定符",
+          "order": 1,
+          "filename": "u3-l1-memory-hierarchy-address-spaces.md",
+          "level": "intermediate",
+          "topic": "讲解 Ascend AI Core 的 GM、L1、L0A/L0B/L0C、UB 等内存层级，以及 __gm__/__ubuf__/__cbuf__/__ca__/__cb__/__cc__ 等地址空间限定符与 Vector/Cube 计算单元的对应关系。",
+          "learning_goals": [
+            "理解 AI Core 的多级内存层次结构",
+            "掌握各类地址空间限定符对应的物理存储",
+            "区分 Vector 通路(UB)与 Cube 通路(L1/L0)的数据流"
+          ],
+          "source_files": [
+            "examples/01_simd_cpp_api/00_introduction/01_add/add_tpipe_tque/add_tpipe_tque.asc",
+            "examples/01_simd_cpp_api/00_introduction/02_matrix/matmul_tensor_api/matmul.asc",
+            "include/basic_api/kernel_tensor.h"
+          ],
+          "minimal_modules": [
+            "AI Core 内存层级",
+            "地址空间限定符",
+            "Vector 与 Cube 数据通路"
+          ],
+          "practice_task": "对照 add_tpipe_tque.asc 与 matmul.asc，列出每个 Kernel 用到的地址空间及其所在内存层级，画出各自的数据搬运路径。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "GlobalTensor 与 LocalTensor 数据结构",
+          "order": 2,
+          "filename": "u3-l2-global-local-tensor.md",
+          "level": "intermediate",
+          "topic": "讲解基础 API 中 GlobalTensor（描述 GM 上的地址与长度）与 LocalTensor（描述片上 UB 等本地存储）两类核心数据结构，以及 SetGlobalBuffer、GetSize、SetValue/GetValue 等常用方法。",
+          "learning_goals": [
+            "掌握 GlobalTensor 与 LocalTensor 的作用与区别",
+            "学会用 SetGlobalBuffer 绑定 GM 地址",
+            "理解 Tensor 的长度形状与元素访问方式"
+          ],
+          "source_files": [
+            "include/basic_api/kernel_tensor.h",
+            "examples/01_simd_cpp_api/00_introduction/01_add/add/add.asc"
+          ],
+          "minimal_modules": [
+            "GlobalTensor",
+            "LocalTensor",
+            "Tensor 常用方法"
+          ],
+          "practice_task": "基于 add.asc，把其中一个输入改用 GlobalTensor.GetValue 直接在 GM 上取值（与原搬运到 UB 的方式对比），说明两种方式的差异与适用场景。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "DataCopy 搬运与 LocalMemAllocator 自主内存管理",
+          "order": 3,
+          "filename": "u3-l3-datacopy-and-local-memory-allocator.md",
+          "level": "intermediate",
+          "topic": "讲解用 DataCopy 在 GM 与 UB 之间搬运数据，以及基础 API 下用 LocalMemAllocator<Hardware::UB> 自主分配 LocalTensor 的内存管理方式，对比框架式内存管理。",
+          "learning_goals": [
+            "掌握 DataCopy 的 GM 与 UB 搬运用法",
+            "学会用 LocalMemAllocator 自主分配与管理 UB 内存",
+            "理解基础 API 自主管理内存与同步的编程范式"
+          ],
+          "source_files": [
+            "include/basic_api/kernel_operator_data_copy_intf.h",
+            "examples/01_simd_cpp_api/00_introduction/01_add/add/add.asc"
+          ],
+          "minimal_modules": [
+            "DataCopy 搬运接口",
+            "LocalMemAllocator",
+            "自主内存管理范式"
+          ],
+          "practice_task": "参照 add.asc 用 LocalMemAllocator 申请 UB 缓冲，编写一个将 GM 数据搬运到 UB、原地放大 2 倍后再搬回 GM 的 Kernel，并加入 PipeBarrier。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "基础 API 矢量计算",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "矢量计算接口体系（双目/单目/比较选择）",
+          "order": 1,
+          "filename": "u4-l1-vector-compute-interfaces.md",
+          "level": "intermediate",
+          "topic": "讲解基础 API 的矢量计算接口体系，包括 Add 等双目接口、Exp/Sqrt 等单目接口、Min/Max/比较选择类接口，以及元素个数参数 count 的含义。",
+          "learning_goals": [
+            "掌握双目单目矢量计算接口的用法",
+            "理解矢量计算的元素计数与对齐约束",
+            "能够用基础 API 组合完成多步矢量运算"
+          ],
+          "source_files": [
+            "include/basic_api/kernel_operator_vec_binary_intf.h",
+            "include/basic_api/kernel_operator_vec_unary_intf.h",
+            "examples/01_simd_cpp_api/00_introduction/01_add/add/add.asc"
+          ],
+          "minimal_modules": [
+            "双目计算接口",
+            "单目计算接口",
+            "比较选择类接口"
+          ],
+          "practice_task": "在 add 样例基础上扩展 Kernel，先做 Add 再做 Exp，实现 z=exp(x+y) 的融合计算，验证结果正确性。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "数据类型、内置类型与精度转换",
+          "order": 2,
+          "filename": "u4-l2-data-types-and-precision-conversion.md",
+          "level": "intermediate",
+          "topic": "讲解 Ascend C 支持的 half/float/int 等内置数据类型与 DTYPE 宏，以及 Cast 等精度转换接口（vconv）在不同数据类型之间的转换用法与对齐要求。",
+          "learning_goals": [
+            "掌握 Ascend C 内置数据类型与类型宏",
+            "学会用精度转换接口在 half/float/int 间转换",
+            "理解不同数据类型的对齐与重复 repeat 约束"
+          ],
+          "source_files": [
+            "include/basic_api/kernel_operator_vec_vconv_intf.h",
+            "include/basic_api/kernel_type.h"
+          ],
+          "minimal_modules": [
+            "内置数据类型",
+            "类型宏与约束",
+            "精度转换接口"
+          ],
+          "practice_task": "编写一个 Kernel，将 half 类型的输入搬运到 UB 后 Cast 成 float，做一次乘法再 Cast 回 half 写回 GM，记录各步元素个数与对齐要求。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "TPipe/TQue 框架编程",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "TPipe/TQue 框架与自动同步内存管理",
+          "order": 1,
+          "filename": "u5-l1-tpipe-tque-framework.md",
+          "level": "intermediate",
+          "topic": "讲解用 TPipe 与 TQue(VECIN/VECOUT) 框架自动管理 UB 内存与流水线同步的编程范式，对比 LocalMemAllocator 的自主管理方式，理解 AllocTensor/EnQue/DeQue/FreeTensor 的队列语义。",
+          "learning_goals": [
+            "掌握 TPipe/TQue 框架的队列式编程模型",
+            "理解 EnQue/DeQue 的同步语义与流水线关系",
+            "能够对比框架式与自主式两种内存同步管理方式"
+          ],
+          "source_files": [
+            "include/basic_api/kernel_tpipe.h",
+            "examples/01_simd_cpp_api/00_introduction/01_add/add_tpipe_tque/add_tpipe_tque.asc"
+          ],
+          "minimal_modules": [
+            "TPipe 与 TQue",
+            "InitBuffer 与 AllocTensor",
+            "EnQue/DeQue/FreeTensor 队列语义"
+          ],
+          "practice_task": "将 add 样例分别用 LocalMemAllocator 与 TPipe/TQue 两种方式实现，对比代码量与同步管理复杂度，说明框架如何自动处理同步。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "多核并行与 Tiling",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "多核并行与核间数据切分",
+          "order": 1,
+          "filename": "u6-l1-multi-core-parallel-and-data-tiling.md",
+          "level": "intermediate",
+          "topic": "讲解如何用 GetBlockNum/GetBlockIdx 实现多核并行，按核切分 GM 数据使各核处理互不重叠的分片，以及 <<<numBlocks>>> 启动核数与核内切分的配合。",
+          "learning_goals": [
+            "掌握多核并行的 block_idx 切分模型",
+            "学会用 GetBlockNum/GetBlockIdx 计算每核数据范围",
+            "理解启动核数与数据切分的一致性要求"
+          ],
+          "source_files": [
+            "examples/01_simd_cpp_api/00_introduction/01_add/add_tpipe_tque/add_tpipe_tque.asc",
+            "include/basic_api/kernel_operator_sys_var_intf.h"
+          ],
+          "minimal_modules": [
+            "多核并行模型",
+            "GetBlockNum/GetBlockIdx",
+            "核间数据切分"
+          ],
+          "practice_task": "在 add_tpipe_tque 样例基础上，把启动核数改为 16 并相应调整 blockLength 计算逻辑，保证结果仍正确。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "Tiling 概念与 Tiling Selector",
+          "order": 2,
+          "filename": "u6-l2-tiling-and-tiling-selector.md",
+          "level": "intermediate",
+          "topic": "讲解 Tiling（数据切分策略）的核心概念、tiling_api 提供的切分计算能力，以及 Tiling Selector 如何根据输入数据量与 AI Core 数量自动选择核间核内切分策略。",
+          "learning_goals": [
+            "理解 Tiling 的作用与核间核内两级切分",
+            "掌握 tiling_api 的基本使用方式",
+            "学会用 Tiling Selector 自动生成切分策略"
+          ],
+          "source_files": [
+            "examples/01_simd_cpp_api/02_features/02_tiling_selector/vector_tiling_strategy/vector_tiling_strategy.asc",
+            "include/adv_api/tiling_api.h"
+          ],
+          "minimal_modules": [
+            "Tiling 基本概念",
+            "tiling_api",
+            "Tiling Selector 策略选择"
+          ],
+          "practice_task": "阅读 vector_tiling_strategy 样例，针对一个给定长度的矢量算子，说明 Tiling Selector 如何决定核间切分数与每块大小，并画出切分示意。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "同步机制",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "流水线、PipeBarrier、Mutex 与事件同步",
+          "order": 1,
+          "filename": "u7-l1-synchronization-pipeline-pipebarrier-mutex.md",
+          "level": "intermediate",
+          "topic": "讲解 Ascend C 的同步机制：PIPE_MTE2/PIPE_MTE1/PIPE_M/PIPE_V/PIPE_FIX 等流水线、PipeBarrier 屏障、Mutex 互斥锁，以及事件/标志位（set/wait flag）的核内与跨核同步用法。",
+          "learning_goals": [
+            "理解多流水线的概念与同步需求",
+            "掌握 PipeBarrier 与 Mutex 的使用场景",
+            "学会用事件/标志位完成跨核与跨流水线同步"
+          ],
+          "source_files": [
+            "examples/01_simd_cpp_api/00_introduction/02_matrix/matmul_tensor_api/matmul.asc",
+            "examples/01_simd_cpp_api/03_basic_api/05_sync_control/task_sync/task_sync.asc",
+            "include/basic_api/kernel_operator_block_sync_intf.h"
+          ],
+          "minimal_modules": [
+            "多流水线与 PIPE 系列",
+            "PipeBarrier 与 Mutex",
+            "事件与标志位同步"
+          ],
+          "practice_task": "分析 matmul.asc 中 Mutex::Lock/Unlock 与 PipeBarrier 的成对使用，说明去掉其中某一对同步会导致什么竞争问题；参照 task_sync 实现一个简单的双流水线同步。",
+          "depends_on": [
+            "u3-l3",
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "语言扩展层 C API（SIMD）",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "C API 编程模型（asc_xxx、指针、__ubuf__）",
+          "order": 1,
+          "filename": "u8-l1-c-api-simd-programming-model.md",
+          "level": "intermediate",
+          "topic": "讲解语言扩展层 C API 的编程模型：以 asc_ 前缀 snake_case 命名的指针式接口、用 __ubuf__ 数组声明本地内存、asc_init/asc_get_block_num/asc_get_block_idx 等系统变量接口，以及 asc_simd.h 主入口头文件。",
+          "learning_goals": [
+            "掌握 C API 的指针式编程模型与命名风格",
+            "学会用 __ubuf__ 数组声明本地缓冲",
+            "理解 asc_xxx 接口与基础 API 的对应关系"
+          ],
+          "source_files": [
+            "include/c_api/asc_simd.h",
+            "examples/02_simd_c_api/00_introduction/01_add/c_api_sync_add/c_api_add.asc"
+          ],
+          "minimal_modules": [
+            "C API 编程模型",
+            "__ubuf__ 数组内存",
+            "asc_xxx 接口与系统变量"
+          ],
+          "practice_task": "用 C API 把 c_api_add.asc 改写成一个矢量乘法算子 z=x*y，保持指针式风格与 __ubuf__ 内存声明方式。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "_sync 接口与 repeat/stride 高级搬运计算",
+          "order": 2,
+          "filename": "u8-l2-c-api-sync-and-repeat-stride.md",
+          "level": "intermediate",
+          "topic": "讲解 C API 为易用性提供的带 _sync 后缀的同步接口（如 asc_add_sync、asc_copy_gm2ub_sync），以及面向极致性能的带 repeat/stride 参数的高级搬运与计算接口的差异与选择。",
+          "learning_goals": [
+            "掌握 _sync 后缀接口的便捷同步用法",
+            "理解 repeat/stride 参数对数据布局与计算模式的控制",
+            "学会在易用性与极致性能接口间做取舍"
+          ],
+          "source_files": [
+            "include/c_api/vector_compute/vector_compute.h",
+            "include/c_api/vector_datamove/vector_datamove.h",
+            "examples/02_simd_c_api/00_introduction/01_add/c_api_sync_add/c_api_add.asc"
+          ],
+          "minimal_modules": [
+            "_sync 同步接口",
+            "repeat/stride 高级接口",
+            "搬运与计算接口"
+          ],
+          "practice_task": "先用 asc_add_sync 实现 x+y，再查阅头文件用带 repeat/stride 的高级接口实现等价功能，比较两者的参数设置与潜在性能差异。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "SIMT API 编程",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "SIMT 编程模型（blockIdx/threadIdx/启动语法）",
+          "order": 1,
+          "filename": "u9-l1-simt-programming-model.md",
+          "level": "intermediate",
+          "topic": "讲解 SIMT API 的类业界编程模型：用 blockIdx/threadIdx/blockDim 计算全局线程 ID、grid/block 维度启动、每线程处理离散元素的写法，以及它与 SIMD 批量计算范式的区别与适用场景。",
+          "learning_goals": [
+            "掌握 SIMT 的线程索引与 grid/block 启动模型",
+            "学会用线程 ID 处理离散不规则数据访问",
+            "理解 SIMT 与 SIMD 两种范式的差异与互补"
+          ],
+          "source_files": [
+            "examples/03_simt_api/00_introduction/01_gather/basic_gather/gather_1d/gather_1d.asc"
+          ],
+          "minimal_modules": [
+            "线程索引模型",
+            "grid/block 启动",
+            "离散数据访问"
+          ],
+          "practice_task": "参照 gather_1d 样例，用 SIMT 实现一个 scatter 算子（按 index 把 input 散写到 output），并合理配置 grid/block 维度。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "高阶 API 与算子库",
+      "level": "intermediate",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "高阶 Matmul API（Matmul 类、TCubeTiling、Host 侧 GenerateTiling）",
+          "order": 1,
+          "filename": "u10-l1-advanced-matmul-api.md",
+          "level": "intermediate",
+          "topic": "讲解高阶 Matmul API 的端到端用法：Host 侧用 MultiCoreMatmulTiling 生成 TCubeTiling，Device 侧用 Matmul 模板加 REGIST_MATMUL_OBJ 加 SetTensorA/B 加 IterateAll 加 End 完成矩阵乘。",
+          "learning_goals": [
+            "掌握高阶 Matmul 的 Host/Device 协同流程",
+            "理解 MatmulType 模板参数与 SetAType/BType/CType 的对应",
+            "学会用 tiling 接口生成并下发 TCubeTiling"
+          ],
+          "source_files": [
+            "examples/01_simd_cpp_api/00_introduction/02_matrix/matmul_advanced_api/matmul_advanced_api.asc",
+            "include/adv_api/matmul/matmul_tiling.h"
+          ],
+          "minimal_modules": [
+            "Host 侧 tiling 生成",
+            "Matmul 模板与注册",
+            "SetTensor/IterateAll/End"
+          ],
+          "practice_task": "基于 matmul_advanced_api 样例，修改 M/N/K 维度并重新调用 GenerateTiling，记录 usedCoreNum、singleCoreM/N/K、baseM/N/K 的变化。",
+          "depends_on": [
+            "u6-l2",
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l2",
+          "title": "高阶算子库（Softmax/LayerNorm/Reduce 等）",
+          "order": 2,
+          "filename": "u10-l2-advanced-operator-library.md",
+          "level": "intermediate",
+          "topic": "讲解高阶 API 提供的通用单核算法封装（activation/softmax、normalization/layernorm、reduce/sum 等）的 tiling 接口组织与使用模式，帮助读者复用成熟算法实现快速验证。",
+          "learning_goals": [
+            "了解高阶算子库的覆盖范围与 tiling 接口组织",
+            "掌握高阶算子 Host 侧 tiling 加 Device 侧调用的通用模式",
+            "学会根据算法需求选择并复用合适的高阶算子"
+          ],
+          "source_files": [
+            "include/adv_api/activation/softmax_tiling.h",
+            "include/adv_api/normalization/layernorm_tiling.h"
+          ],
+          "minimal_modules": [
+            "activation 类高阶算子",
+            "normalization 类高阶算子",
+            "reduce 类高阶算子"
+          ],
+          "practice_task": "选取 softmax 或 layernorm 高阶算子，参照其 tiling 头文件梳理 Host 侧需要配置的 tiling 字段，写出一个最小调用骨架说明。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "矩阵计算、Cube 流水线与 Tensor API",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "Cube 计算单元、分形与 L1/L0 内存层级",
+          "order": 1,
+          "filename": "u11-l1-cube-compute-l1-l0-fractal.md",
+          "level": "advanced",
+          "topic": "深入讲解 Cube 矩阵计算通路：数据如何经 GM 到 L1 到 L0A/L0B 在 L0C 累加，NZ/ZN 等分形（fractal）布局的含义，以及 Mmad 累加在 K 轴上的循环结构。",
+          "learning_goals": [
+            "理解 Cube 计算的 L1/L0 数据流与累加原理",
+            "掌握 NZ/ZN 等分形布局的作用",
+            "学会阅读 Mmad 在 K 轴循环的累加逻辑"
+          ],
+          "source_files": [
+            "examples/01_simd_cpp_api/00_introduction/02_matrix/matmul_tensor_api/matmul.asc",
+            "include/tensor_api/algorithm/mmad.h"
+          ],
+          "minimal_modules": [
+            "Cube 通路与 L1/L0",
+            "分形布局 NZ/ZN",
+            "Mmad K 轴累加"
+          ],
+          "practice_task": "对照 matmul_tensor_api 样例，标注 GM 到 L1 到 L0A/L0B 到 L0C 到 GM 的每一步 Copy 与 Mmad，解释 kLoop 循环的作用。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l2",
+          "title": "Tensor API 的 Layout/MakeTensor/MakeCopy 编程范式",
+          "order": 2,
+          "filename": "u11-l2-tensor-api-layout-paradigm.md",
+          "level": "advanced",
+          "topic": "讲解 Tensor API 基于 Layout 的编程范式：用 MakeFrameLayout/NZLayoutPtn 描述布局，MakeTensor 加 MakeMemPtr 构造张量，Slice 切片，MakeCopy 抽象搬运，Mmad 抽象计算，实现统一的数据布局表达。",
+          "learning_goals": [
+            "掌握 Tensor API 的 Layout 抽象与层次化表述",
+            "学会用 MakeTensor/Slice/MakeCopy/Mmad 组合编程",
+            "理解 Tensor API 与基础 API 在表达力上的差异"
+          ],
+          "source_files": [
+            "include/tensor_api/tensor.h",
+            "include/tensor_api/tensor/layout.h",
+            "include/tensor_api/algorithm/copy.h",
+            "examples/01_simd_cpp_api/00_introduction/02_matrix/matmul_tensor_api/matmul.asc"
+          ],
+          "minimal_modules": [
+            "Layout 与 MakeFrameLayout",
+            "MakeTensor 与 Slice",
+            "MakeCopy 与 MakeMmad"
+          ],
+          "practice_task": "用 Tensor API 改写一个简单的 GM 到 UB Copy 流程：定义 ND 布局、构造 Tensor、用 MakeCopy 搬运，说明 Layout 如何屏蔽底层地址计算。",
+          "depends_on": [
+            "u11-l1",
+            "u3-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "调试能力",
+      "level": "advanced",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "printf / DumpTensor / NPU Check / Assert",
+          "order": 1,
+          "filename": "u12-l1-debug-printf-dumptensor-npucheck.md",
+          "level": "advanced",
+          "topic": "讲解 Ascend C 的算子调试能力：printf 打印、DumpTensor 寄存器/张量数据 dump、NPU Check 运行时校验、asc_assert 断言，以及 CPU 仿真调试（ASCENDC_CPU_DEBUG）等定位手段。",
+          "learning_goals": [
+            "掌握 printf 与 DumpTensor 的调试用法",
+            "理解 NPU Check 的运行时校验能力",
+            "学会用断言与 CPU 仿真定位算子问题"
+          ],
+          "source_files": [
+            "include/utils/debug/asc_printf.h",
+            "include/utils/debug/asc_dump.h",
+            "include/utils/debug/asc_assert.h",
+            "include/basic_api/kernel_operator_dump_tensor_intf.h",
+            "examples/01_simd_cpp_api/00_introduction/01_add/add/add.asc"
+          ],
+          "minimal_modules": [
+            "printf 打印",
+            "DumpTensor 数据 dump",
+            "NPU Check 与断言"
+          ],
+          "practice_task": "在 add.asc 中打开被注释的 printf/DumpTensor 调试代码（改为启用），编译运行后观察打印与 dump 输出，并加一处 asc_assert 校验长度。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u13",
+      "title": "性能优化",
+      "level": "advanced",
+      "order": 13,
+      "lectures": [
+        {
+          "id": "u13-l1",
+          "title": "流水线并行与搬运/类型对齐优化",
+          "order": 1,
+          "filename": "u13-l1-perf-pipeline-datacopy-optimization.md",
+          "level": "advanced",
+          "topic": "讲解矢量/矩阵算子的性能优化要点：通过流水线并行隐藏搬运延迟、DataCopy 搬运优化、类型对齐提升搬运效率、双缓冲（double buffer）等常用手段。",
+          "learning_goals": [
+            "理解流水线并行隐藏搬运延迟的原理",
+            "掌握 DataCopy 搬运与类型对齐优化方法",
+            "学会识别并改进算子中的搬运瓶颈"
+          ],
+          "source_files": [
+            "examples/01_simd_cpp_api/05_best_practices/README.md",
+            "docs/zh/asc_950_feature_guide.md",
+            "examples/01_simd_cpp_api/00_introduction/02_matrix/matmul_tensor_api/matmul.asc"
+          ],
+          "minimal_modules": [
+            "流水线并行",
+            "DataCopy 搬运优化",
+            "类型对齐与双缓冲"
+          ],
+          "practice_task": "阅读 05_best_practices 下的搬运/类型对齐样例说明，针对一个朴素搬运算子提出至少两项优化建议并预估收益。",
+          "depends_on": [
+            "u7-l1",
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u13-l2",
+          "title": "Bank 冲突与访存合并优化",
+          "order": 2,
+          "filename": "u13-l2-perf-bank-conflict-memory-coalescing.md",
+          "level": "advanced",
+          "topic": "讲解 UB/DCache 访问中的 bank 冲突、基于 transpose 的访存合并、DCache 访问优化等进阶性能技术，结合 SIMT/SIMD 最佳实践样例说明优化思路。",
+          "learning_goals": [
+            "理解 bank 冲突的产生原因与消除方法",
+            "掌握访存合并（coalescing）的优化手段",
+            "学会结合 SIMT/SIMD 样例应用访存优化"
+          ],
+          "source_files": [
+            "examples/03_simt_api/03_best_practices/README.md",
+            "examples/05_simd_simt_hybrid/02_best_practices/simd_simt_high_performance/floor_mod.asc"
+          ],
+          "minimal_modules": [
+            "Bank 冲突优化",
+            "访存合并",
+            "DCache 访问优化"
+          ],
+          "practice_task": "分析 floor_mod 高性能样例中的访存模式，指出其如何避免 bank 冲突/实现访存合并，并画出数据访问示意。",
+          "depends_on": [
+            "u13-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u14",
+      "title": "SIMD/SIMT 混合编程",
+      "level": "advanced",
+      "order": 14,
+      "lectures": [
+        {
+          "id": "u14-l1",
+          "title": "SIMD 与 SIMT 混合编程模型",
+          "order": 1,
+          "filename": "u14-l1-simd-simt-hybrid-programming.md",
+          "level": "advanced",
+          "topic": "讲解 SIMD 与 SIMT 混合编程：何时在离散场景用 SIMT、连续批量场景用 SIMD，以及如何在一个算子中结合两者发挥各自优势，参考 gather_and_adds 与 floor_mod 高性能样例。",
+          "learning_goals": [
+            "理解 SIMD 与 SIMT 各自的优势场景",
+            "掌握在单一算子中混合使用两种范式的结构",
+            "学会用混合编程提升综合性能"
+          ],
+          "source_files": [
+            "examples/05_simd_simt_hybrid/00_introduction/simd_simt_gather_and_adds/gather_and_adds.asc",
+            "examples/05_simd_simt_hybrid/02_best_practices/simd_simt_high_performance/floor_mod.asc"
+          ],
+          "minimal_modules": [
+            "混合编程动机",
+            "SIMD/SIMT 分工",
+            "高性能混合样例"
+          ],
+          "practice_task": "阅读 gather_and_adds 样例，划分其中 SIMT 部分（gather）与 SIMD 部分（adds）的职责边界，并说明为何这样切分能提升性能。",
+          "depends_on": [
+            "u9-l1",
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u15",
+      "title": "编译工程与多芯片适配",
+      "level": "advanced",
+      "order": 15,
+      "lectures": [
+        {
+          "id": "u15-l1",
+          "title": "编译模式（动态/静态/分离编译、AOT/aclrtc）",
+          "order": 1,
+          "filename": "u15-l1-compile-modes-dynamic-static-separate-aot.md",
+          "level": "advanced",
+          "topic": "讲解 Ascend C 的多种编译模式：基本编译、分离编译、动态库/静态库编译、AOT 预编译与 aclrtc 运行时编译，以及样例 CMakeLists 与 find_package(ASC) 的工程配置方式。",
+          "learning_goals": [
+            "理解各类编译模式的差异与适用场景",
+            "掌握样例工程的 CMake/ASC 配置",
+            "学会选择合适的编译与部署方式"
+          ],
+          "source_files": [
+            "examples/01_simd_cpp_api/02_features/04_compile/README.md",
+            "build.sh",
+            "examples/01_simd_cpp_api/00_introduction/01_add/add/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "基本/分离编译",
+            "动态/静态库编译",
+            "AOT 与 aclrtc"
+          ],
+          "practice_task": "对照 04_compile 目录下的多种编译样例，把 add 样例分别改造为分离编译与静态库编译两种形式，记录 CMakeLists 的关键改动。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u15-l2",
+          "title": "多芯片架构适配（__NPU_ARCH__、dav_xxx 实现）",
+          "order": 2,
+          "filename": "u15-l2-multi-chip-arch-adaptation.md",
+          "level": "advanced",
+          "topic": "讲解如何用 --npu-arch 编译选项与 __NPU_ARCH__ 宏适配不同芯片（如 dav-2201/dav-3510），以及 impl/basic_api 下按 dav_2201/dav_3510/dav_c220 等子目录组织的分架构实现与条件编译机制。",
+          "learning_goals": [
+            "掌握 --npu-arch 选项与 __NPU_ARCH__ 宏的映射",
+            "理解 impl 下按 dav_xxx 子目录的分架构实现组织",
+            "学会用条件编译编写跨芯片兼容的代码"
+          ],
+          "source_files": [
+            "include/c_api/asc_simd.h",
+            "impl/basic_api/CMakeLists.txt",
+            "examples/01_simd_cpp_api/00_introduction/01_add/add/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "npu-arch 与 __NPU_ARCH__",
+            "dav_xxx 分架构实现",
+            "条件编译"
+          ],
+          "practice_task": "把 add 样例的 --npu-arch 从 dav-2201 改为 dav-3510，排查 asc_simd.h 中 reg_compute 等接口的条件分支差异，说明哪些接口在 3510 上额外可用。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u16",
+      "title": "测试体系与二次开发贡献",
+      "level": "advanced",
+      "order": 16,
+      "lectures": [
+        {
+          "id": "u16-l1",
+          "title": "UT 测试体系（tests/api、build.sh 批跑、pytest）",
+          "order": 1,
+          "filename": "u16-l1-unit-test-system.md",
+          "level": "advanced",
+          "topic": "讲解 asc-devkit 的单元测试体系：tests/api 下按 adv_api/basic_api/c_api/simt_api/tensor_api 组织的用例、build.sh --adv_test/--basic_test_one 到 five 批跑命令、覆盖率统计与 pytest 的使用。",
+          "learning_goals": [
+            "掌握 tests/api 的用例组织与批跑命令",
+            "理解 UT 在看护编译正确性中的作用",
+            "学会运行覆盖率统计与 pytest 测试"
+          ],
+          "source_files": [
+            "build.sh",
+            "docs/zh/quick_start.md",
+            "tests/python/asc_opc/test_opc.py"
+          ],
+          "minimal_modules": [
+            "tests/api 用例组织",
+            "build.sh 批跑命令",
+            "覆盖率与 pytest"
+          ],
+          "practice_task": "执行 bash build.sh --adv_test 跑一批 adv_api 用例，阅读结果日志，并对照 tests/api 目录说明用例是如何按 API 模块组织的。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u16-l2",
+          "title": "二次开发与贡献流程",
+          "order": 2,
+          "filename": "u16-l2-contribution-and-extensions.md",
+          "level": "advanced",
+          "topic": "讲解如何基于 asc-devkit 进行二次开发与社区贡献：CONTRIBUTING 中的 PR/Issue 流程、API/文档/样例的分级贡献指南、文档写作规范，以及算子模板库（CATLASS/ATVOSS/ATVC）等扩展生态。",
+          "learning_goals": [
+            "掌握贡献 PR/Issue 的标准流程",
+            "理解 API/文档/样例三级贡献的规范要求",
+            "了解算子模板库等扩展生态入口"
+          ],
+          "source_files": [
+            "CONTRIBUTING.md",
+            "CONTRIBUTING_en.md",
+            "docs/zh/asc_doc_contributing.md"
+          ],
+          "minimal_modules": [
+            "贡献流程",
+            "API/文档/样例贡献规范",
+            "扩展生态"
+          ],
+          "practice_task": "阅读 CONTRIBUTING 与文档贡献指南，针对仓库中一处可改进的样例或文档，草拟一份符合规范的 PR 描述（含改动点、测试方式、影响范围）。",
+          "depends_on": [
+            "u16-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
