@@ -35165,8 +35165,8 @@
     },
     "Xilinx/Vitis_Libraries": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-08-12T15:06:59Z",
+      "last_error": null,
+      "last_run_at": "2026-08-12T18:02:42Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -35351,64 +35351,83 @@
           "error": null
         },
         "u11-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"1731f0f5-203c-451f-ad44-a94a13e57545\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{"
+          "cost": 1.653549,
+          "error": null
         },
         "u12-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.284036,
+          "error": null
         },
         "u12-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.259062,
+          "error": null
         },
         "u13-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.16449,
+          "error": null
         },
         "u13-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.0789929999999999,
+          "error": null
         },
         "u14-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.069285,
+          "error": null
         },
         "u14-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.964089,
+          "error": null
         },
         "u14-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.10846,
+          "error": null
         },
         "u15-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.2544049999999998,
+          "error": null
         },
         "u15-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.3115890000000001,
+          "error": null
         }
       },
       "manifest_head": "629b2c979f65561f07e4e87b860f306cb480895e",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/Xilinx/Vitis_Libraries/Vitis_Libraries-tutorial",
-      "last_head": "629b2c979f65561f07e4e87b860f306cb480895e"
+      "last_head": "629b2c979f65561f07e4e87b860f306cb480895e",
+      "abandoned": []
     },
     "gitcode.com/cann/amct": {
       "prompt_hash": "b21aef51792b02df",
@@ -35512,11 +35531,610 @@
           "error": null
         },
         "u4-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.2145620000000001,
+          "error": null
+        },
+        "u5-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.907747,
+          "error": null
+        },
+        "u5-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.422638,
+          "error": null
+        },
+        "u5-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.057859,
+          "error": null
+        },
+        "u5-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.295746,
+          "error": null
+        },
+        "u6-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.994269,
+          "error": null
+        },
+        "u6-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.061517,
+          "error": null
+        },
+        "u6-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.037005,
+          "error": null
+        },
+        "u6-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.4504949999999999,
+          "error": null
+        },
+        "u7-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.10126,
+          "error": null
+        },
+        "u7-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.127553,
+          "error": null
+        },
+        "u7-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.094416,
+          "error": null
+        },
+        "u8-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.091555,
+          "error": null
+        },
+        "u8-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.214494,
+          "error": null
+        },
+        "u8-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.289202,
+          "error": null
+        },
+        "u9-l1": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
           "error": "quota: API 额度/限流耗尽：\nIgnoring 45 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects"
+        },
+        "u9-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "ba53a0fdd6f3ed91a2d4875141d02aff746191a3",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/gitcode.com/cann/amct/amct-tutorial",
+      "last_head": "ba53a0fdd6f3ed91a2d4875141d02aff746191a3",
+      "last_run_at": "2026-08-12T18:02:42Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
+    "gitcode.com/cann/asc-devkit": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u9-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u10-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u10-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u11-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u11-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u12-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u13-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u13-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u14-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u15-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u15-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u16-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u16-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        }
+      },
+      "manifest_head": "9624e1c4b2d437f7366c4821c98831387a4c442b",
+      "prev_head": "4952d23d863568f8976789364b7af331909bb993",
+      "phase": "done",
+      "mode": "incremental",
+      "tutorial_path": "tutorials/gitcode.com/cann/asc-devkit/asc-devkit-tutorial",
+      "last_head": "9624e1c4b2d437f7366c4821c98831387a4c442b",
+      "last_run_at": "2026-08-12T18:02:42Z",
+      "last_error": null,
+      "abandoned": []
+    },
+    "gitcode.com/cann/asc-tools": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.6418590000000001,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.607115,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9070949999999999,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.880258,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.802279,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.632248,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9050609999999999,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.2000579999999998,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0358239999999999,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.154973,
+          "error": null
+        },
+        "u3-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.374428,
+          "error": null
+        },
+        "u4-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.467626,
+          "error": null
+        },
+        "u4-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.284411,
+          "error": null
+        },
+        "u4-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3955890000000002,
+          "error": null
+        },
+        "u5-l1": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"8506f31f-85fb-48e8-a222-e370c3690c96\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{"
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "c6f35b0cf219c53f3c485fc7cef8581c53c11772",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/gitcode.com/cann/asc-tools/asc-tools-tutorial",
+      "last_head": "c6f35b0cf219c53f3c485fc7cef8581c53c11772",
+      "last_run_at": "2026-08-12T18:02:42Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
+    "gitcode.com/cann/ascend-transformer-boost": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7487250000000001,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.903759,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.95194,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7636620000000001,
+          "error": null
+        },
+        "u1-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.081315,
+          "error": null
+        },
+        "u1-l6": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.89652,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"dec59a8c-6f01-482b-a22a-72955838bcf1\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{"
+        },
+        "u2-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l7": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l8": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
         },
         "u5-l1": {
           "status": "pending",
@@ -35558,6 +36176,11 @@
           "action": "new",
           "retries": 0
         },
+        "u6-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
         "u7-l1": {
           "status": "pending",
           "action": "new",
@@ -35573,233 +36196,26 @@
           "action": "new",
           "retries": 0
         },
-        "u8-l1": {
+        "u7-l4": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u8-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l3": {
+        "u7-l5": {
           "status": "pending",
           "action": "new",
           "retries": 0
         }
       },
-      "manifest_head": "ba53a0fdd6f3ed91a2d4875141d02aff746191a3",
+      "manifest_head": "578daaec1e5cf238ecfa8607a24ccbb606b46b6a",
       "prev_head": null,
       "phase": "workers",
       "mode": "full",
-      "tutorial_path": "tutorials/gitcode.com/cann/amct/amct-tutorial",
-      "last_head": "ba53a0fdd6f3ed91a2d4875141d02aff746191a3",
-      "last_run_at": "2026-08-12T15:06:59Z",
+      "tutorial_path": "tutorials/gitcode.com/cann/ascend-transformer-boost/ascend-transformer-boost-tutorial",
+      "last_head": "578daaec1e5cf238ecfa8607a24ccbb606b46b6a",
+      "last_run_at": "2026-08-12T18:02:42Z",
       "last_error": "quota exhausted; will resume next window"
     },
-    "gitcode.com/cann/asc-devkit": {
-      "prompt_hash": "b21aef51792b02df",
-      "lectures": {
-        "u1-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.7096450000000001,
-          "error": null
-        },
-        "u1-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.6405589999999999,
-          "error": null
-        },
-        "u1-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.823652,
-          "error": null
-        },
-        "u2-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.908405,
-          "error": null
-        },
-        "u2-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.9960600000000001,
-          "error": null
-        },
-        "u2-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.97206,
-          "error": null
-        },
-        "u3-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.6637970000000004,
-          "error": null
-        },
-        "u3-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.1688600000000002,
-          "error": null
-        },
-        "u3-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.783266,
-          "error": null
-        },
-        "u4-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.20413,
-          "error": null
-        },
-        "u4-l2": {
-          "status": "failed",
-          "action": "new",
-          "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"1e5c472d-73ba-473a-b739-7a6cf9ed818f\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{"
-        },
-        "u5-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u10-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u10-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u11-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u11-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u12-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u13-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u13-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u14-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u15-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u15-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u16-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u16-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        }
-      },
-      "manifest_head": "4952d23d863568f8976789364b7af331909bb993",
-      "prev_head": null,
-      "phase": "workers",
-      "mode": "full",
-      "tutorial_path": "tutorials/gitcode.com/cann/asc-devkit/asc-devkit-tutorial",
-      "last_head": "4952d23d863568f8976789364b7af331909bb993",
-      "last_run_at": "2026-08-12T15:06:59Z",
-      "last_error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"3af3ca3f-4bde-49ca-afa1-e7511066b9e1\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"o"
-    },
-    "gitcode.com/cann/asc-tools": {},
-    "gitcode.com/cann/ascend-transformer-boost": {},
     "gitcode.com/cann/atvoss": {},
     "gitcode.com/cann/catlass": {},
     "gitcode.com/cann/driver": {},
@@ -47606,7 +48022,7 @@
     "ai-dynamo/dynamo": {},
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-12T15:06:59Z"
+      "last_run_at": "2026-08-12T18:02:42Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
