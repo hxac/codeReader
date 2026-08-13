@@ -2,321 +2,604 @@
 
 ## 1. 本讲目标
 
-Transformer 的自注意力本身是「顺序无关」的——把一句话的词打乱顺序，注意力算出来的结果几乎一样。要让模型知道词与词的先后位置，必须额外注入位置信息。本讲聚焦 ATB 中负责「旋转位置编码（Rotary Position Embedding，RoPE）」的算子族，学完后你应当能够：
+本讲聚焦 ATB 中与「位置编码」相关的三个算子。读完本讲，你应当能够：
 
-- 说清 RoPE 的数学直觉：为什么不给模型加一个「位置向量」，而是把位置信息编进 Q/K 的「旋转角度」里。
-- 读懂 `RopeOperation` 的参数、校验逻辑与「按芯片选 Runner」的派发树。
-- 理解 `DynamicNTK` 如何在推理序列超过训练长度时动态计算 cos/sin 表，实现长序列外推。
-- 解释 `NormRopeReshape` 这一类融合算子把 RMSNorm + RoPE + 写 KV Cache 三件事压进一个 Kernel 的收益来源。
+- 说清 **旋转位置编码（RoPE）** 的直觉与数学含义，并知道它为什么能让注意力只依赖「相对位置」。
+- 读懂 `RopeOperation` 的参数（`RopeParam`）、输入输出约定、形状校验与双后端（aclnn / ops）Runner 分派。
+- 理解 `DynamicNTKOperation` 如何为长序列「外推」动态生成 cos/sin 位置表，以及它和 `RopeOperation` 的配合关系。
+- 理解 `NormRopeReshapeOperation` 这一融合算子把 `RMSNorm + RoPE + ReshapeAndCache` 三步合一带来的性能收益来源。
 
-本讲承接 [u3-l1 OperationBase 框架基类]：所有算子都继承 `OperationBase`，只重写 `InferShapeImpl` 与 `CreateRunner` 两个钩子，校验外置于 `atb_ops_info.ini`。也用到了 [u4-l2 归一化算子] 中 RMSNorm 的 epsilon 校验、[u4-l5 KV Cache] 中 slotMapping/ReshapeAndCache 的概念。
+本讲依赖 u3-l1（`OperationBase` 骨架）与 u3-l2（Runner 体系），请先建立「`Operation → Runner → KernelGraph → Kernel`」的调用链心智。
 
 ## 2. 前置知识
 
-在读源码前，先用最朴素的方式建立三个直觉。
+### 2.1 为什么需要位置编码
 
-**(1) 为什么是「旋转」位置编码？**
+Transformer 的自注意力机制本身是「顺序无关」的：把句子里两个词调换位置，注意力分数的计算过程几乎不变。为了让模型感知词的先后顺序，需要在送入注意力之前给 Q、K 注入位置信息，这就是**位置编码（Positional Encoding）**。
 
-早期方案（如 BERT 的绝对位置编码）是给每个位置加一段学到的或用正弦公式算出的向量。RoPE 换了个思路：它直接把位置 \(m\) 编码成对 Q/K 向量的一个**旋转角度**，位置越靠后旋转角度越大。这样两个 token 的注意力点积 \(q_m^\top k_n\) 只依赖**相对距离** \(m-n\)，天然具备平移不变性，对长序列更友好。
+早期做法（如原始 Transformer、BERT）是把一个位置向量「加」到词向量上。RoPE 用的是另一种思路——**旋转**。
 
-**(2) 旋转是怎么落到多维向量上的？**
+### 2.2 RoPE 的直觉
 
-把一个 head 维度 \(d\) 的向量看成 \(d/2\) 个二维平面，每个平面做一次角度为 \(m\theta_i\) 的旋转，不同平面用不同频率 \(\theta_i\)。频率 \(\theta_i\) 由一个 base（通常 10000）决定：
+把 Q、K 中每一对相邻的元素看作二维平面的一个向量，按它所在的位置 \(m\) 旋转一个角度。位置越靠后，旋转角度越大。两个向量做内积（注意力分数）时，夹角只取决于它们的「位置差」，于是注意力天然只依赖相对位置——这正是我们想要的。
+
+用数学语言描述，对于位置 \(m\)、第 \(i\) 个二维子空间的旋转角 \(\theta_i\)，有：
 
 \[
-\theta_i = \mathrm{base}^{-2(i-1)/d}, \quad i = 1, 2, \dots, d/2
+\theta_i = \text{base}^{-2i/d}, \quad i = 0,1,\dots,d/2-1
 \]
 
 \[
-\mathrm{cos}_{m,i} = \cos(m\theta_i), \quad \mathrm{sin}_{m,i} = \sin(m\theta_i)
+\begin{pmatrix} q'_{2i} \\ q'_{2i+1} \end{pmatrix}
+=
+\begin{pmatrix} \cos(m\theta_i) & -\sin(m\theta_i) \\ \sin(m\theta_i) & \cos(m\theta_i) \end{pmatrix}
+\begin{pmatrix} q_{2i} \\ q_{2i+1} \end{pmatrix}
 \]
 
-cos/sin 这两张表就是 ATB `Rope` 算子的两个输入。所谓「旋转系数 `rotaryCoeff`」控制的是**这些二维平面如何分组**——`rotaryCoeff=2` 是最常见的「对半旋转（half）」，`4` 是四等分（quarter），取 `headDim/2` 时是「交错（interleave）」。后续源码会精确对应到这三种模式。
-
-**(3) 半旋转（half）的实数公式。**
-
-设 head 向量 \(x = [x_1,\dots,x_d]\)，前半 \(x^{(1)} = x_{1:d/2}\)、后半 \(x^{(2)} = x_{d/2+1:d}\)，则 half 旋转的输出为：
+等价地，写成按通道整体运算的形式：
 
 \[
-\begin{aligned}
-\mathrm{out}^{(1)}_i &= x^{(1)}_i \cos_{m,i} - x^{(2)}_i \sin_{m,i} \\
-\mathrm{out}^{(2)}_i &= x^{(2)}_i \cos_{m,i} + x^{(1)}_i \sin_{m,i}
-\end{aligned}
+q' = q \odot \cos(m\theta) + \mathrm{rotate}(q) \odot \sin(m\theta)
 \]
 
-记住这个「乘 cos、交叉乘 sin」的结构，它在源码 Kernel 里就是反复出现的计算核心。
+其中 \(\odot\) 是逐元素乘，`rotate` 是一种「把向量半部分交换并取负」的重排操作（具体形态见 4.1）。关键性质是：
 
-**(4) NTK 外推是什么？**
+\[
+\langle R_m q,\ R_n k \rangle = \langle q,\ R_{n-m} k \rangle
+\]
 
-当推理序列长度超过训练时见过的最大长度，直接套用上面的 \(\theta_i\) 会让旋转角度过大、模型崩坏。NTK-aware 的做法是不线性缩放位置，而是**改写 base**，让高频部分几乎不变、低频部分被平滑拉伸，从而外推到更长序列。`DynamicNTK` 算子就是按当前实际序列长度动态算出这套新 cos/sin 表。
+即内积只依赖相对位置 \(n-m\)。
+
+### 2.3 术语速查
+
+| 术语 | 含义 |
+|------|------|
+| RoPE | Rotary Position Embedding，旋转位置编码 |
+| cos / sin | 预计算的位置编码表，按位置与维度提供旋转角度 |
+| rotaryCoeff | 旋转系数，决定 `rotate` 的配对方式（2/4/headDim） |
+| NTK | Neural Tangent Kernel，这里指一种频率缩放外推方法（见 4.2） |
+| 融合算子 | 把多个算子合并成一个 Kernel 下发，减少 launch 与中间显存读写 |
 
 ## 3. 本讲源码地图
 
-本讲涉及的关键文件（均在 `src/ops/ops_infer/` 下）：
+本讲涉及的关键文件如下：
 
 | 文件 | 作用 |
 |------|------|
-| `rope/rope_operation.cpp` / `.h` | RoPE 主算子：参数校验、形状推导、按芯片派发 Runner |
-| `rope/rope_ops_runner.cpp` | 非 950 芯片走 `OpsRunner`，组 1 个 `RopeOperation` Kernel 节点 |
-| `rope/rope_aclnn_runner.cpp` | 950 芯片走 aclnn，桥接 CANN 的 `aclnnApplyRotaryPosEmbV2` |
-| `dynamic_ntk/dynamic_ntk_operation.cpp` | 动态 NTK：按实际序列长算 sin/cos 表，用于长序列外推 |
-| `dynamic_ntk/dynamic_ntk_ops_runner.cpp` | 组 1 个 `DynamicNTKOperation` Kernel 节点 |
-| `norm_rope_reshape/norm_rope_reshape_operation.cpp` | 融合算子：RMSNorm + RoPE + ReshapeAndCache（仅 910B） |
-| `norm_rope_reshape/norm_rope_reshape_ops_runner.cpp` | 组 1 个 `RmsNormAndRopeAndReshapeAndCacheOperation` 融合节点 |
-| `include/atb/infer_op_params.h` | 三个 Param 结构定义 |
+| [include/atb/infer_op_params.h](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/include/atb/infer_op_params.h) | 三个 Param（`RopeParam`、`DynamicNTKParam`、`NormRopeReshapeParam`）的定义 |
+| [src/ops/ops_infer/rope/rope_operation.cpp](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/rope/rope_operation.cpp) | `RopeOperation` 的形状推导、校验与 Runner 分派 |
+| [src/ops/ops_infer/rope/rope_ops_runner.cpp](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/rope/rope_ops_runner.cpp) | 非 950 芯片走 `OpsRunner`，组一张单节点 `KernelGraph` |
+| [src/ops/ops_infer/rope/rope_aclnn_runner.cpp](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/rope/rope_aclnn_runner.cpp) | 950 芯片桥接 CANN 官方算子 `aclnnApplyRotaryPosEmbV2` |
+| [src/ops/ops_infer/dynamic_ntk/dynamic_ntk_operation.cpp](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/dynamic_ntk/dynamic_ntk_operation.cpp) | `DynamicNTKOperation`，动态生成 NTK 外推的 cos/sin |
+| [src/ops/ops_infer/norm_rope_reshape/norm_rope_reshape_operation.cpp](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/norm_rope_reshape/norm_rope_reshape_operation.cpp) | `NormRopeReshapeOperation`，三合一融合算子 |
+| [src/ops/ops_infer/norm_rope_reshape/norm_rope_reshape_ops_runner.cpp](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/norm_rope_reshape/norm_rope_reshape_ops_runner.cpp) | 融合算子的 Runner，组一张 `RmsNormAndRopeAndReshapeAndCacheOperation` 节点 |
 
-此外，融合算子的真实 Kernel 在 Kernel 层 `src/kernels/mixkernels/rms_norm_and_rope_and_reshape_and_cache/`，RoPE 单算子 Kernel 在 `src/kernels/mixkernels/rope/`，这是 u3-l4 讲过的「四件套」落点。
+整体关系：`DynamicNTK` 负责生成 cos/sin，`Rope` 用它们旋转 Q/K；而 `NormRopeReshape` 把「归一化 + 旋转 + 写 KV Cache」三步融合成一个 Kernel。
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 RoPE 旋转位置编码：原理与 RopeOperation
+### 4.1 RopeOperation：旋转位置编码算子
 
 #### 4.1.1 概念说明
 
-`RopeOperation` 是 ATB 对标准 RoPE 的实现。它的任务是：给定 query（x1）、key（x2），以及预先算好的 cos（x3）、sin（x4）两张角度表，对 x1、x2 做位置旋转，输出旋转后的 queryEmbedded、keyEmbedded。这两份「带位置信息的 Q/K」再喂给 SelfAttention，注意力点积就自动带上了相对位置。
+`RopeOperation` 是 ATB 对 RoPE 的标准实现：输入 Q、K 和预先算好的 cos、sin 表，输出旋转后的 `qEmbedded`、`kEmbedded`。它的设计哲学与 u4-l1 的 `LinearParam` 一脉相承——**一个 Param 覆盖多种行为**，靠 `rotaryCoeff` 这一个旋钮表达不同的旋转配对方式，而不是拆成多个算子。
 
-注意一个设计要点：RoPE **只旋转 Q 和 K，不旋转 V**。因为位置信息只需要进入 \(q^\top k\) 的点积，V 不参与位置匹配。
+`RopeParam` 的定义非常精简：
+
+```cpp
+// include/atb/infer_op_params.h:1608-1617
+struct RopeParam {
+    int32_t rotaryCoeff = 4;   // 旋转系数，对半旋转是2，支持配置2、4或headDim / 2
+    int32_t cosFormat = 0;     // 训练用参数，支持配置0或1
+    uint8_t rsv[8] = {0};      // 预留参数（版本闸门）
+};
+```
+
+`rotaryCoeff` 的取值决定了 `rotate` 函数如何把 head 维度重排：
+
+- **`rotaryCoeff = 2`（half）**：Llama / GPT-NeoX 风格。把 head 维一分为二，前半与后半交叉配对。这是最常用的模式（CSV 测试里 LLaMA2-7B/13B 用 `{"rotaryCoeff": 2}`）。
+- **`rotaryCoeff = 4`（quarter）**：四等分配对。
+- **`rotaryCoeff = headDim/2`（interleave）**：GPT-J 风格，相邻两元素 `(x_{2i}, x_{2i+1})` 配对。
+
+这三种模式在后端会被翻译成字符串 `"half"` / `"quarter"` / `"interleave"`（见 4.1.3 aclnn 路径）。
 
 #### 4.1.2 核心流程
 
-`RopeOperation` 的执行链路完全沿用 [u3-l1] 的两段式骨架：
+`RopeOperation` 继承自 `OperationBase`，沿用 u3-l1 讲过的「两段式」骨架：
 
-1. **创建**：`CreateOperation<RopeParam>` 先做 `OP_PARAM_RSV_CHECK` 版本闸门校验，950 芯片还会预加载 aclnn 符号并强制 `cosFormat==0`。
-2. **Setup（Host）**：`InferShapeCheckImpl` → `DimCheck`（维度）→ `ParamCheck`（rotaryCoeff、cosFormat 合法性）→ `HiddenSizeCheck`（Q/K/cos 维度整除关系）。
-3. **形状推导**：`InferShapeImpl` 最朴素——`out[0]=in[0]`、`out[1]=in[1]`，旋转不改变形状。
-4. **CreateRunner（首次 Setup 时延迟创建并复用）**：950 → `RopeAclnnRunner`；其它芯片 → 从 `RunnerPool` 复用 `RopeOpsRunner`。
-5. **Execute（Device）**：Runner 内部把算子表达为 KernelGraph 的 1 个节点并下发。
+1. **创建**（`CreateOperation`）：校验 `rsv`、在 950 上预加载 aclnn 算子并检查 `cosFormat`。
+2. **InferShape 阶段**：5 个输入张量、2 个输出张量；输出形状直接透传输入（RoPE 不改变形状）。
+3. **校验阶段**（`InferShapeCheckImpl` → `DimCheck` → `ParamCheck` → `HiddenSizeCheck`）：逐层卡死维度、旋转向量与隐层大小关系。
+4. **CreateRunner**：按芯片分派——950 走 `RopeAclnnRunner`，其它芯片走 `RunnerPool` 复用的 `RopeOpsRunner`。
+5. **Execute**：由 Runner 把任务下发到 Device。
+
+执行的数据流（伪代码）：
+
+```
+inputs:  [qLayer, kLayer, cos, sin, seqLen]   # 5 个
+outputs: [qEmbedded, kEmbedded]               # 2 个
+
+qEmbedded[i] = qLayer[i] * cos + rotate(qLayer[i]) * sin
+kEmbedded[i] = kLayer[i] * cos + rotate(kLayer[i]) * sin
+```
 
 #### 4.1.3 源码精读
 
-**Param 定义**——只有两个字段加 `rsv` 版本闸门（u2-l3 讲过 `rsv` 必须全 0）：
+**输入输出个数**——恒定 5 入 2 出，与 Param 无关（不像 SelfAttention 那样随字段动态变化）：
 
-[RopeParam 定义 — include/atb/infer_op_params.h:1608-1617](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/include/atb/infer_op_params.h#L1608-L1617) — `rotaryCoeff` 默认 4、`cosFormat` 默认 0、`rsv[8]` 预留。
+```cpp
+// rope_operation.cpp:25-26
+static const int32_t IN_TENSOR_NUM = 5;
+static const int32_t OUT_TENSOR_NUM = 2;
+```
 
-**输入输出个数**——固定 5 入 2 出，这是 VariantPack 装填的依据：
+5 个输入依次是 `qLayer`、`kLayer`、`cos`、`sin`、`seqLen`（这与 [rope_ops_runner.cpp:48-52](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/rope/rope_ops_runner.cpp#L48-L52) 的命名一一对应）。
 
-[输入输出个数 — rope_operation.cpp:69-77](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/rope/rope_operation.cpp#L69-L77) — `IN_TENSOR_NUM=5`、`OUT_TENSOR_NUM=2`。对应 5 个输入依次是 query、key、cos、sin、seqLen；2 个输出是旋转后的 query、key。
+**InferShapeImpl——形状透传**：RoPE 只旋转数值、不改变张量形状，所以两个输出分别等于两个对应输入的描述：
 
-**形状推导**——纯透传，旋转不改变张量形状：
+```cpp
+// rope_operation.cpp:79-85
+Status RopeOperation::InferShapeImpl(const SVector<TensorDesc> &inTensorDescs,
+                                     SVector<TensorDesc> &outTensorDescs) const
+{
+    outTensorDescs.at(0) = inTensorDescs.at(0);   // qEmbedded = qLayer
+    outTensorDescs.at(1) = inTensorDescs.at(1);   // kEmbedded = kLayer
+    return NO_ERROR;
+}
+```
 
-[InferShapeImpl — rope_operation.cpp:79-85](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/rope/rope_operation.cpp#L79-L85) — `out[0]=in[0]`、`out[1]=in[1]`。
+**ParamCheck——旋转向量校验**：`rotaryCoeff` 只能取 2、4 或「等于 cos 的第二维」（即 headDim/2 对应 interleave）；同时要求 cos/sin 的第二维能被 `rotaryCoeff` 整除：
 
-**参数校验**——`rotaryCoeff` 只允许取 2、4 或 `cos.dims[1]`（即 headDim/2），且 cos/sin 最后一维必须能被 `rotaryCoeff` 整除；`cosFormat` 只能是 0 或 1：
+```cpp
+// rope_operation.cpp:115-125
+if (param_.rotaryCoeff != ROTARY_COEFF_TWO && param_.rotaryCoeff != ROTARY_COEFF_FOUR &&
+    param_.rotaryCoeff != inTensorDescs.at(PARAM_COS).shape.dims[1]) {
+    // 只支持 rotaryCoeff 为 2、4 或 headDim
+    return ERROR_INVALID_PARAM;
+}
+if (inTensorDescs.at(PARAM_COS).shape.dims[1] % param_.rotaryCoeff != 0 ||
+    inTensorDescs.at(PARAM_SIN).shape.dims[1] % param_.rotaryCoeff != 0) {
+    // cos/sin 的 dim[1] 必须能被 rotaryCoeff 整除
+    return ERROR_INVALID_PARAM;
+}
+```
 
-[ParamCheck — rope_operation.cpp:113-132](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/rope/rope_operation.cpp#L113-L132) — 三选一的 rotaryCoeff 校验 + 整除校验 + cosFormat 校验。
+这正是为什么测试 CSV 里 `wrongParam1` 用 `{"rotaryCoeff": 3}` 期望得到 `ERROR_INVALID_PARAM`（[rope.csv 第 17 行](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/tests/apitest/opstest/csv/rope.csv#L17)）。
 
-**维度校验**——query/key 支持 2 维（`[ntoken, hiddenSize]`）或 4 维（`[B,S,*,*]`），cos/sin 恒为 2 维，seqLen 恒为 1 维；非 950 芯片要求 head 维度落在 `[16, 4096]`：
+**DimCheck——维度与隐层约束**：Q/K 既支持 2 维 `[ntoken, hiddenSize]`，也支持 4 维 `[s,b,headNum,headSize]`；cos/sin 必须是 2 维且形状一致；非 950 芯片还限制 headSize 在 \[16, 4096\] 之间。`HiddenSizeCheck` 进一步要求 `hiddenSizeQ` 是 `hiddenSizeK` 的整数倍、`hiddenSizeK` 是 `headDim` 的整数倍：
 
-[DimCheck — rope_operation.cpp:134-188](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/rope/rope_operation.cpp#L134-L188) — 维度数约束、Q/K 的 ntokens 必须一致、cos/sin 形状必须相同、head_size 上下界。
+```cpp
+// rope_operation.cpp:202-216
+if (hiddenSizeQ % hiddenSizeK != 0) {
+    // hiddenSizeQ 必须是 hiddenSizeK 的整数倍
+    return ERROR_INVALID_TENSOR_SIZE;
+}
+int64_t headDim = inTensorDescs.at(PARAM_COS).shape.dims[1];
+if (hiddenSizeK % headDim != 0) {
+    // hiddenSizeK 必须是 headDim 的整数倍
+    return ERROR_INVALID_TENSOR_DIM;
+}
+```
 
-**Runner 派发树**——这是本算子最关键的决策点，950 与非 950 走两条完全不同的后端（与 u4-l1 的 Linear 同构）：
+这条链路解释了 Param 文档注释里那句「`hiddenSizeQ` 必须是 `hiddenSizeK` 的整数倍且满足 `hiddenSizeQ = headDim * headNum`」。
 
-[CreateRunner — rope_operation.cpp:220-238](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/rope/rope_operation.cpp#L220-L238) — 950 直接 `make_shared<RopeAclnnRunner>`；其它芯片经 `RunnerPool` 复用 `RopeOpsRunner`，池分配失败再降级到新建。
+**CreateRunner——双后端分派**：950（A3）芯片桥接 CANN aclnn 算子，其它芯片走自研 ops 后端并通过 `RunnerPool` 复用（u3-l5）：
 
-**非 950 后端：组 1 个 Kernel 节点。** `RopeOpsRunner::SetupKernelGraph` 把算子建成单节点的 KernelGraph，节点 opDesc 字符串 `"RopeOperation"` 正是 u3-l4 讲过的「注册衔接点」（REG_OPERATION 名 = opDesc 字符串）。注意 `mkiInferShapePreFunc` 把第 5 个输入 seqLen 的 dtype 强制设为 `UINT32`：
+```cpp
+// rope_operation.cpp:220-238
+std::shared_ptr<Runner> RopeOperation::CreateRunner(Context &context) const
+{
+    if (Mki::PlatformInfo::Instance().GetPlatformType() == Mki::PlatformType::ASCEND_950) {
+        return std::make_shared<RopeAclnnRunner>(param_);
+    }
+    // ...非 950：从 RunnerPool 复用 RopeOpsRunner，失败则新建
+    int64_t runnerTypeIdx = RunnerTypeRegister::GetRunnerTypeIdx("RopeOpsRunner");
+    RunnerPool &pool = contextBase->GetRunnerPool(runnerTypeIdx);
+    Runner *runner = pool.MallocRunner<RopeOpsRunner, infer::RopeParam>(param_);
+    ...
+}
+```
 
-[SetupKernelGraph — rope_ops_runner.cpp:40-73](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/rope/rope_ops_runner.cpp#L40-L73) — 单节点组图，inTensors={q,k,cos,sin,seqLen}，`RopeKqView` 把 4 维 Q/K 折叠成 2 维视图。
+**ops 后端组图**：`RopeOpsRunner` 把算子表达为一张只含单个节点的 `KernelGraph`，节点名 `"RopeOperation"` 即是 MKI 注册名（u3-l4 讲过的衔接点）；`RopeKqView` 把 4 维 Q/K「压平」成 2 维供 Kernel 使用；`mkiInferShapePreFunc` 把第 5 个输入 seqLen 的 dtype 设成 UINT32：
 
-**950 后端：桥接 aclnn。** `RopeAclnnRunner` 把 ATB 的 `rotaryCoeff` 映射成 aclnn 的字符串模式，把 layout 映射成枚举，这是理解「rotaryCoeff 到底对应哪种旋转」的最直接证据：
+```cpp
+// rope_ops_runner.cpp:58-70
+kernelGraph_.nodes.resize(1);
+auto &ropeNode = kernelGraph_.nodes.at(0);
+AtbOps::OpParam::Rope ropeParam;
+ropeParam.rotaryCoeff = param_.rotaryCoeff;
+ropeParam.cosFormat = param_.cosFormat;
+ropeNode.opDesc = {0, "RopeOperation", ropeParam};
+ropeNode.inTensors = {&qLayer, &kLayer, &cos, &sin, &seqLen};
+ropeNode.outTensors = {&qEmbedded, &kEmbedded};
+ropeNode.inTensorViewFuncs = {&RopeKqView, &RopeKqView};
+ropeNode.mkiInferShapePreFunc = [](Mki::LaunchParam &launchParam) {
+    launchParam.GetInTensor(4).desc.dtype = Mki::TENSOR_DTYPE_UINT32;
+};
+```
 
-[rotaryMode 映射 — rope_aclnn_runner.cpp:204-216](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/rope/rope_aclnn_runner.cpp#L204-L216) — `rotaryCoeff==2 → "half"`、`==4 → "quarter"`、其它（即 `headDim/2`）→ `"interleave"`；4 维输入 → BSND，2 维输入 → TND。
+**aclnn 后端——三种旋转模式的翻译**：950 路径把 `rotaryCoeff` 翻译成 CANN `aclnnApplyRotaryPosEmbV2` 能识别的 `rotaryMode` 字符串，并把 Q/K 的 2 维/4 维布局映射为 `TND`/`BSND`：
 
-最终调用的是 CANN 的 `aclnnApplyRotaryPosEmbV2`，符号在 `LoadMethod` 里按名加载：
+```cpp
+// rope_aclnn_runner.cpp:204-216
+std::string rotaryMode = "half";
+if (param_.rotaryCoeff == ROTARY_COEFF_HALF) {        // 2
+    rotaryMode = "half";
+} else if (param_.rotaryCoeff == ROTARY_COEFF_QUARTER) { // 4
+    rotaryMode = "quarter";
+} else {
+    rotaryMode = "interleave";
+}
+RotaryLayout layout = RotaryLayout::BSND;
+if (...dimNum == ACLNN_TND_DIM_NUM) { layout = RotaryLayout::TND; }
+```
 
-[LoadMethod — rope_aclnn_runner.cpp:57-68](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/rope/rope_aclnn_runner.cpp#L57-L68) — 加载 `aclnnApplyRotaryPosEmbV2GetWorkspaceSize` 与 `aclnnApplyRotaryPosEmbV2` 两个符号。
+随后调用 CANN 两段式接口（GetWorkspaceSize + Execute），与 u3-l3 讲的 aclnn 协议完全一致：
+
+```cpp
+// rope_aclnn_runner.cpp:218-227
+aclnnStatus ret = RopeAclnnRunner::aclnnGetWorkspaceSizeFunc_(
+    queryRef, keyRef, cos, sin,
+    static_cast<int64_t>(layout),
+    (char *)rotaryMode.c_str(),
+    &(this->atbVariantPack_.workspaceBufferSize),
+    &rawExecutorPtr);
+```
+
+> 这也解释了 `CreateOperation` 里 950 分支为何强校验 `cosFormat == 0`（[rope_operation.cpp:50-53](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/rope/rope_operation.cpp#L50-L53)）：CANN 官方算子不接受非 0 的 cosFormat。
 
 #### 4.1.4 代码实践
 
-**实践目标**：用源码阅读验证「rotaryCoeff 三种取值分别对应 half/quarter/interleave」，并理解 2 维输入被 Reshape 成 3 维的过程。
+**实践目标**：用测试框架的 golden 函数理解 RoPE 的逐元素计算，再对照一个真实测试用例验证输入输出约定。
 
-**操作步骤**：
+**操作步骤（源码阅读型实践）**：
 
-1. 打开 `src/ops/ops_infer/rope/rope_aclnn_runner.cpp`，定位 `SetAclNNWorkspaceExecutor` 中的 `rotaryMode` 分支（约 204–211 行）。
-2. 对照 `rope_operation.cpp` 的 `ParamCheck`（113–132 行）：确认 `rotaryCoeff` 允许的三种取值 2、4、`cos.dims[1]`。
-3. 看 `BuildAclnnVariantPack` 中 `isBSND4D==false` 的分支（约 88–97 行）：query 从 `[ntoken, hiddenSize]` 被改写成 `[ntoken, headNum, headDim]`，即把 hiddenSize 拆成 headNum × headDim。这就是 ATB「2 维输入」与 aclnn「TND 3 维」之间的桥接。
+1. 打开 [tests/apitest/opstest/python/operations/rope/test_rope_operation.py](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/tests/apitest/opstest/python/operations/rope/test_rope_operation.py)，阅读 `TestRopeOperation.golden_calc`（25-50 行）与 `rotate_half`（25-27 行）。
+2. 对照 CSV 用例 `rope1`（[rope.csv 第 1 行](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/tests/apitest/opstest/csv/rope.csv#L1)）：`{"rotaryCoeff": 4}`，Q/K 形状 `4,4096`，cos/sin 形状 `4,128`，seqLen 形状 `1`。
+3. 用 golden 函数手算一个 token 的输出，确认 `q0 = q0*cos0 + rotate_half(q0)*sin0` 这个公式成立。
 
-**需要观察的现象**：
+**需要观察的现象 / 预期结果**：
 
-- `rotaryMode` 的取值完全由 `param_.rotaryCoeff` 决定，与输入张量形状无关。
-- query/key 的 Reshape 只改 `desc.shape`，不改 `deviceData` 指针——这是 u3-l3 讲过的「描述改写、零拷贝」手法。
+- golden 把 head 维 `chunk(2, -1)` 切成 `q0, q1` 两半，cos/sin 也各切两半，分别旋转后再 `concat` 回去——这正是 `rotaryCoeff=4`（quarter）的配对方式。
+- `wrongParam1` 用 `rotaryCoeff=3` 期望 `ERROR_INVALID_PARAM`，对应 `ParamCheck` 的校验。
+- `wrongDim5` 让 Q 的 `ntokens` 与 K 不一致（`4,4098` vs `4,4096`），期望 `ERROR_INVALID_TENSOR_SIZE`，对应 [rope_operation.cpp:153-160](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/rope/rope_operation.cpp#L153-L160) 的 `ntokens` 一致性检查。
 
-**预期结果**：你能用自己的话说出「`rotaryCoeff=2` 即最常见的对半旋转，等价于 aclnn 的 half 模式」。
-
-**待本地验证**：在有 NPU 的环境上，分别用 `rotaryCoeff=2` 和 `=4` 调用 Rope 算子，对比输出的数值差异（仅当本地具备昇腾环境时）。
+若需实际运行：本仓库的 opstest 是 NPU 上执行的，本地无昇腾环境时**待本地验证**。但你可以用上面 golden 的 NumPy/PyTorch 逻辑在 CPU 上复现 RoPE 结果，与 ATB 推理结果对比。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：如果调用方把 `cosFormat` 设成 2，会在哪一步报错？为什么 950 芯片更严？
+**练习 1**：为什么 `RopeOperation` 的 `InferShapeImpl` 是「输出直接等于输入」，而 `SelfAttentionOperation` 的输出形状要重新计算合轴？
 
-答案：会在 `CreateOperation`（950，50–53 行）或 `ParamCheck`（非 950，126–129 行）返回 `ERROR_INVALID_PARAM`。950 在建对象前就强制 `cosFormat==0`，因为 aclnn 后端 `aclnnApplyRotaryPosEmbV2` 只接受单一 cos 排布。
+> **答案**：RoPE 只对每个位置的向量做线性旋转，不改变 head 数、headDim、token 数，所以形状不变；SelfAttention 会把多头的结果在最后一维合并成 `headNum×vHeadSize`，所以需要重新推导。
 
-**练习 2**：为什么 `RopeOperation` 的 `InferShapeImpl` 只是 `out=in` 透传？
+**练习 2**：一个 LLaMA2-7B 模型想用 ATB 的 RoPE，`rotaryCoeff` 该填多少？为什么？
 
-答案：RoPE 是逐元素旋转，对每个元素做「乘 cos、交叉乘 sin」，不改变张量的形状与数据类型，因此输出与输入的 TensorDesc 完全一致。
+> **答案**：填 `2`。LLaMA 系列采用 GPT-NeoX 风格的「半旋转」，对应 half 模式；CSV 里所有 `FromModel=LLaMA2-7B/13B` 的用例都是 `{"rotaryCoeff": 2}`。
 
-**练习 3**：`CreateRunner` 里非 950 分支为什么要 `dynamic_cast<ContextBase*>` 并访问 `RunnerPool`？
+**练习 3**：950 芯片上 `cosFormat` 为什么必须为 0？
 
-答案：为了复用已构造的 `RopeOpsRunner` 对象（含其 KernelGraph），把昂贵的组图开销摊薄为「只换参数」。`MallocRunner` 失败时才降级 `make_shared` 新建，这是 u3-l5 讲过的 RunnerPool 复用机制。
+> **答案**：950 走 `RopeAclnnRunner`，桥接的是 CANN 官方算子 `aclnnApplyRotaryPosEmbV2`，该算子不接受非 0 的 cosFormat，所以 `CreateOperation` 在 950 分支提前拦截并返回 `ERROR_INVALID_PARAM`（[rope_operation.cpp:50-53](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/rope/rope_operation.cpp#L50-L53)）。
 
-### 4.2 DynamicNTK：长序列动态外推
+---
+
+### 4.2 DynamicNTKOperation：长序列外推的位置表生成
 
 #### 4.2.1 概念说明
 
-`DynamicNTKOperation` 解决的是「推理时序列比训练时更长」的外推问题。它的产出**不是**旋转后的 Q/K，而是 **sin/cos 两张角度表本身**——按当前 batch 的实际序列长度动态计算，再喂给 `Rope` 算子。
+`RopeOperation` 需要「预先算好」的 cos/sin 表。当推理序列长度超过训练长度时，cos/sin 里没有对应位置的频率值，模型外推效果变差。**NTK-aware Scaling** 的思路是：不去改位置索引，而是缩放旋转频率的 base，让高频分量保持、低频分量被「拉长」，从而让模型在更长序列上仍能有效 attend。
 
-NTK-aware 的核心思想是改写旋转频率的 base。当实际长度 \(L\) 超过训练长度 \(L_{\text{train}}\) 时，记缩放比相关项，新的等效 base 大致为：
+`DynamicNTKOperation` 就是「按当前序列长度动态生成 NTK 外推后的 cos/sin 表」的算子。它不直接旋转 Q/K，而是产出 cos、sin 两个表，再交给 `RopeOperation` 使用。
 
-\[
-\mathrm{base}' = \mathrm{base} \cdot \left(\mathrm{scale} \cdot \ln\!\left(\frac{L}{L_{\text{train}}}\right) + 1\right)^{d/(d-2)}
-\]
+`DynamicNTKParam` 同样极简：
 
-效果是：高频维度（决定局部精细位置）几乎不变，低频维度（决定长程相对位置）被拉伸，从而平滑外推。`DynamicNTK` 把这套按 batch 内 `seqlens` 动态计算的 cos/sin 直接算出来，省去调用方手算。
+```cpp
+// include/atb/infer_op_params.h:191-198
+struct DynamicNTKParam {
+    aclDataType outDataType = ACL_DT_UNDEFINED;  // 选择输出数据类型
+    uint8_t rsv[12] = {0};
+};
+```
 
 #### 4.2.2 核心流程
 
-1. **输入**：`positionIds`（每个 token 的位置序号，1 维）、`InvFreqIn`（基础逆频率 \(\theta_i\)，形状 `[batch, headDim/2]`）、`seqlens`（每个 batch 的实际长度，1 维）。
-2. **计算**：按 `seqlens` 决定是否触发 NTK 缩放，结合 `positionIds` 与 `InvFreqIn` 算出每个 token 的角度，再取 sin/cos。
-3. **输出**：`sin`、`cos`，形状 `[ntokens, headDim]`（注意是完整 headDim，由 `InvFreqIn.dims[1] * 2` 还原）。
-4. **下游**：这两张表作为 `Rope` 算子的 cos/sin 输入。
+输入 3 个、输出 2 个：
+
+```
+inputs:  [positionIds, InvFreqIn, seqlens]   # 3 个
+outputs: [cos, sin]                          # 2 个，dtype = outDataType
+```
+
+- `positionIds`（1 维）：每个 token 的位置编号。
+- `InvFreqIn`（2 维 `[batch, head_dim/2]`）：逆频率向量 \(\theta_i\)，注意输入尺寸是 `head_dim/2`。
+- `seqlens`（1 维）：每个 batch 的序列长度，用于判断是否触发 NTK 缩放。
+- 输出 `cos`/`sin` 形状为 `[numPositions, head_dim]`（注意最后一维是 `InvFreqIn.dim1 * 2`，即完整的 head_dim）。
+
+数学上，输出的 cos/sin 是位置与频率的外积：
+
+\[
+\text{cos}[m, 2i] = \text{cos}[m, 2i+1] = \cos(m \cdot \theta_i^{\text{NTK}})
+\]
+
+NTK 缩放会根据 `seqlens` 是否超过训练长度，对 \(\theta_i\) 的 base 做动态放大。
 
 #### 4.2.3 源码精读
 
-**Param 与创建校验**——只有一个 `outDataType`（必须 fp16 或 bf16，bf16 仅 910B）：
+**输入输出个数与边界常量**：
 
-[CreateOperation — dynamic_ntk_operation.cpp:30-50](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/dynamic_ntk/dynamic_ntk_operation.cpp#L30-L50) — `outDataType` 合法性校验 + rsv 闸门。
+```cpp
+// dynamic_ntk_operation.cpp:20-27
+static const uint32_t IN_TENSOR_SEQLENS = 2;
+static const uint32_t OUT_TENSOR_NUM = 2;
+static const uint32_t IN_TENSOR_NUM = 3;
+static const uint32_t MAX_BATCH_SIZE = 16;
+static const uint32_t MAX_HEAD_DIM = 2048;
+static const uint32_t MAX_NUM_TOKENS = 256000;
+```
 
-**形状推导**——输出第 0 维取 `positionIds` 的 token 数，第 1 维是 `InvFreqIn.dims[1] * 2`（半频率还原成完整 headDim）：
+**CreateOperation——输出类型约束**：`outDataType` 只能是 `ACL_FLOAT16` 或 `ACL_BF16`，且 bf16 仅 910B 支持：
 
-[InferShapeImpl — dynamic_ntk_operation.cpp:115-125](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/dynamic_ntk/dynamic_ntk_operation.cpp#L115-L125) — 输出 `[ntokens, headDim]`，dtype/format 由 `outDataType` 与 `ACL_FORMAT_ND` 决定。
+```cpp
+// dynamic_ntk_operation.cpp:36-43
+if (opParam.outDataType != ACL_FLOAT16 && opParam.outDataType != ACL_BF16) {
+    return ERROR_INVALID_PARAM;
+}
+if (opParam.outDataType == ACL_BF16 && !GetSingleton<Config>().Is910B()) {
+    return ERROR_INVALID_PARAM;   // bf16 仅 Atlas 800I A2
+}
+```
 
-**容量约束**——batch ≤ 16、ntokens ≤ 256000、headDim ≤ 2048 且必须 32 对齐：
+这对应测试 CSV 里 `outputType=27`（bf16）的用例只在 `SocVersion=Ascend910B` 上运行，而 `outputType=2`（非 fp16/bf16）期望 `ERROR_INVALID_PARAM`。
 
-[InferShapeDimCheck — dynamic_ntk_operation.cpp:70-95](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/dynamic_ntk/dynamic_ntk_operation.cpp#L70-L95) — 四项硬上界与 32 对齐校验。
+**InferShapeImpl——输出形状推导**：输出第一维取 `positionIds` 的长度，第二维是 `InvFreqIn.dim1 * 2`（补全完整 head_dim）：
 
-**组图**——同样是单节点 KernelGraph，opDesc 字符串 `"DynamicNTKOperation"`，`outType` 字段把 fp16/bf16 编码成 0/1：
+```cpp
+// dynamic_ntk_operation.cpp:118-124
+outTensorDescs.at(0).shape.dims[0] = inTensorDescs.at(0).shape.dims[0];        // positionIds 数量
+outTensorDescs.at(0).shape.dims[1] = inTensorDescs.at(1).shape.dims[1] * 2;    // InvFreqIn.dim1 * 2
+outTensorDescs.at(1) = outTensorDescs.at(0);   // sin 与 cos 同形状
+```
 
-[DynamicNTKOpsRunner 构造与组图 — dynamic_ntk_ops_runner.cpp:21-46](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/dynamic_ntk/dynamic_ntk_ops_runner.cpp#L21-L46) — 单节点 `DynamicNTKOperation`，`asdopsParam_.outType = outDataType==ACL_FLOAT16 ? 0 : 1`。
+**InferShapeDimCheck——容量边界**：batch 不超过 16、token 总数不超过 256000、headDim 不超过 2048 且必须 32 对齐：
+
+```cpp
+// dynamic_ntk_operation.cpp:78-93
+int64_t ntokens = inTensorDescs.at(0).shape.dims[0];
+if (ntokens > MAX_NUM_TOKENS) { ... }            // ≤ 256000
+int64_t headDim = inTensorDescs.at(1).shape.dims[1] * 2;
+if (headDim > MAX_HEAD_DIM) { ... }              // ≤ 2048
+if (headDim % ALIGNMENT != 0) { ... }            // 32 对齐
+```
+
+**CreateRunner**：单一后端 `DynamicNTKOpsRunner`，无 aclnn 分流：
+
+```cpp
+// dynamic_ntk_operation.cpp:161-165
+std::shared_ptr<Runner> DynamicNTKOperation::CreateRunner(Context &context) const
+{
+    (void)context;
+    return std::make_shared<DynamicNTKOpsRunner>(param_);
+}
+```
+
+> 小结：`DynamicNTK` 与 `Rope` 是「上下游」关系——前者生产 cos/sin，后者消费它们旋转 Q/K。这种「位置表生成」与「位置编码施加」分离的设计，让外推策略（NTK、YaRN 等）可以独立替换而不影响 RoPE 主体。
 
 #### 4.2.4 代码实践
 
-**实践目标**：理清「DynamicNTK 产出 cos/sin → 喂给 Rope」这条调用链的形状衔接。
+**实践目标**：通过 CSV 用例理解 `DynamicNTKOperation` 的输入输出形状与数据类型约束。
 
-**操作步骤**：
+**操作步骤（源码阅读型实践）**：
 
-1. 读 `InferShapeImpl`（115–125 行），确认输出第 1 维 = `InvFreqIn.dims[1] * 2`。
-2. 回顾 `RopeOperation` 的 `DimCheck`（rope_operation.cpp 178–185 行）：cos/sin 形状必须相同，且与 query/key 的 head 维度匹配。
-3. 画出数据流：`positionIds + InvFreqIn + seqlens → DynamicNTK → (sin, cos) → Rope(cos,sin 输入)`。
+1. 打开 [tests/apitest/opstest/csv/dynamic_ntk.csv](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/tests/apitest/opstest/csv/dynamic_ntk.csv)。
+2. 对照 `CumsumBaseCase1`（第 1 行）：输入 `[128; 1,32; 1]`，输出 `[128,64; 128,64]`，`outputType=27`(bf16)，SocVersion=Ascend910B。
+3. 验证：`InvFreqIn.dim1=32`，则输出第二维 `= 32*2 = 64`，与 `OutShape` 的 `128,64` 吻合。
+4. 观察 `CumsumWrongCase5`（第 11 行）：输入 `seqlens` 形状 `1,32;1` 写成 `2,32;1`（batch 与 positionIds 第一维不一致），期望 `ERROR_INVALID_TENSOR_DIM`，对应 [dynamic_ntk_operation.cpp:72-77](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/dynamic_ntk/dynamic_ntk_operation.cpp#L72-L77) 的 batch 一致性校验。
 
-**预期结果**：你能解释为什么 DynamicNTK 的输出第 1 维要 ×2——因为它把 `headDim/2` 个基础频率还原成完整 headDim 维度的 cos/sin 表，供下游使用。
+**需要观察的现象 / 预期结果**：
 
-**待本地验证**：在不同 `seqlens` 下对比 DynamicNTK 输出的 cos 表数值变化，观察 NTK 缩放触发点。
+- 输出形状的第二维恒等于 `InvFreqIn 第二维 × 2`。
+- `outputType` 不传或传非法值（如 `2`）会触发 `ERROR_INVALID_PARAM`。
+- bf16（27）只在 910B 通过，其它 SocVersion 期望失败。
+
+**待本地验证**：以上为依据源码与 CSV 的推断，实际运行需昇腾 NPU 环境。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：DynamicNTK 与 Rope 是替代关系还是配合关系？
+**练习 1**：`InvFreqIn` 的第二维是 `head_dim/2`，为什么输出 cos 的第二维要乘 2？
 
-答案：配合关系。DynamicNTK 负责「按实际长度动态算 cos/sin 表」，Rope 负责「用 cos/sin 表旋转 Q/K」。前者是后者的输入预处理。
+> **答案**：RoPE 的旋转频率 \(\theta_i\) 只需 `head_dim/2` 个（每个频率对应一个 2 维旋转子空间），但 cos/sin 表要与完整的 head_dim 对齐逐元素相乘，所以每个 \(\theta_i\) 对应的 cos/sin 值要在相邻两维重复，最终表长 `head_dim = InvFreqIn.dim1 * 2`。
 
-**练习 2**：为什么 headDim 必须 32 对齐？
+**练习 2**：为什么 `DynamicNTK` 和 `Rope` 要拆成两个算子，而不是合并？
 
-答案：NPU 上 Cube/Vector 访存按 32 字节（fp16 即 16 个元素）对齐效率最高，Kernel 实现按 32 对齐切分 Tiling，因此强制 headDim 是 32 的倍数（见 `InferShapeDimCheck` 90–93 行）。
+> **答案**：分离关注点——位置表生成（受外推策略影响，随序列长度动态变化）与旋转施加（只依赖 cos/sin 与 Q/K）正交。拆开后，外推策略（NTK/YaRN/线性缩放）可独立替换，且 `Rope` 能复用同一套 Kernel；同时推理框架可以只算一次 cos/sin 再对多层复用。
 
-### 4.3 NormRopeReshape：RMSNorm + RoPE + ReshapeAndCache 融合算子
+---
+
+### 4.3 NormRopeReshapeOperation：RMSNorm + RoPE + ReshapeAndCache 三合一融合
 
 #### 4.3.1 概念说明
 
-`NormRopeReshapeOperation` 是一个**融合算子**：它把 decode 阶段三个连续步骤——RMSNorm 归一化、RoPE 旋转、把结果写入分页 KV Cache（ReshapeAndCache，u4-l5 讲过的 slotMapping 寻址）——压进**一个 Kernel**。注意它只处理 Key 通路（输出 `keycacheout`），且**仅 Atlas 800I A2（910B）支持**。
+在大模型推理的每一层，K（以及 Q）通常要经历三步：先做 RMSNorm 归一化，再做 RoPE 旋转，最后把结果写入分页 KV Cache（ReshapeAndCache，参见 u4-l5）。如果按「单算子」实现，这三步是三个独立的 Kernel launch，中间结果要多次在 Device 显存与片上缓存之间搬移。
 
-为什么值得融合？这是本讲的核心实践议题，先给结论再在 4.3.4 展开：单独三个算子会让中间结果在 HBM（显存）与片上之间来回搬运、且要 launch 三次 Kernel；融合后中间数据留在片上 UB，只 launch 一次，既省访存又省 Host 下发开销。
+`NormRopeReshapeOperation` 把这三步**融合成一个 Kernel**：输入归一化后的特征、gamma、待旋转的 keyRope、cos、sin、slotMapping（写缓存寻址）、keycachein（缓存本体），直接输出写好旋转结果的 keycacheout。它仅支持 Atlas 800I A2（910B）推理产品。
+
+`NormRopeReshapeParam`：
+
+```cpp
+// include/atb/infer_op_params.h:2703-2716
+struct NormRopeReshapeParam {
+    uint32_t precisionMode = 0;   // 精度模式
+    uint32_t rotaryCoeff = 2;     // 算子内 Rope 部分的旋转系数
+    float epsilon = 1e-5;         // 归一化时加在分母上防止除零
+    uint8_t rsv[16] = {0};
+};
+```
 
 #### 4.3.2 核心流程
 
-1. **创建校验**：`OP_PARAM_RSV_CHECK` + epsilon 非零校验（沿用 u4-l2 RMSNorm 的防除零逻辑）+ 强制 910B。
-2. **输入**：7 个——`x`（待归一化的隐藏态）、`gamma`（RMSNorm 缩放）、`keyRope`（待旋转的 key）、`cos`、`sin`、`slotMapping`（写 cache 的槽位映射）、`keycachein`（分页 cache 输入）。
-3. **形状推导**：`out[0] = in[6]`（输出形状跟 keycachein 一致，因为是 in-place 写回 cache）。
-4. **Runner**：组 1 个名为 `RmsNormAndRopeAndReshapeAndCacheOperation` 的融合节点，对应 Kernel 层 `src/kernels/mixkernels/rms_norm_and_rope_and_reshape_and_cache/`。
+输入 7 个、输出 1 个：
+
+```
+inputs:  [x, gamma, keyRope, cos, sin, slotMapping, keycachein]   # 7 个
+outputs: [keycacheout]                                            # 1 个
+```
+
+执行逻辑（伪代码）：
+
+```
+# 1. RMSNorm：对 x 按最后一维归一化，乘 gamma
+normed = x / rms(x + epsilon) * gamma        # rms = sqrt(mean(x^2) + epsilon)
+
+# 2. RoPE：对 keyRope 做旋转
+rotated = keyRope * cos + rotate(keyRope) * sin
+
+# 3. ReshapeAndCache：把 (normed 的非 rope 部分 + rotated) 按 slotMapping 写入 keycachein
+keycacheout = reshape_and_cache(keycachein, concat(normed, rotated), slotMapping)
+```
+
+> 注意第 7 个输入 `keycachein` 既是输入又是输出基底——`InferShapeImpl` 直接让 `out[0] = in[6]`（透传），实际是 in-place 写回缓存（与 u4-l5 讲的 `KvCacheOperation` 同样的 in-place 模式）。
 
 #### 4.3.3 源码精读
 
-**Param 定义**——`precisionMode`、`rotaryCoeff`（默认 2，half）、`epsilon`（默认 1e-5）、`rsv[16]`：
+**CreateOperation——epsilon 与芯片强校验**：epsilon 不能小于 float 最小正值（防除零），且只允许 910B：
 
-[NormRopeReshapeParam — include/atb/infer_op_params.h:2703-2716](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/include/atb/infer_op_params.h#L2703-L2716) — 融合了 RMSNorm 的 epsilon 与 RoPE 的 rotaryCoeff。
+```cpp
+// norm_rope_reshape_operation.cpp:42-49
+if (std::fabs(opParam.epsilon) < THRESHOLD) {
+    ATB_LOG(ERROR) << "Invalid epsilon, it's recommended to init a nonzero value for eps.";
+    return ERROR_INVALID_PARAM;
+}
+if (!GetSingleton<Config>().Is910B()) {
+    ATB_LOG(ERROR) << "NormRopeReshapeOperation only supports Atlas 800I A2 inference products";
+    return ERROR_INVALID_PARAM;
+}
+```
 
-**创建校验**——epsilon 绝对值不能小于 float 最小正值（防除零），且强制 910B：
+其中 `THRESHOLD = std::numeric_limits<float>::min()`（即约 `1.17549e-038`，[norm_rope_reshape_operation.cpp:30](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/norm_rope_reshape_operation.cpp#L30)）。这与 u4-l2 里 RMSNorm 的 epsilon 校验一致——epsilon 是归一化分母的防除零项。
 
-[CreateOperation — norm_rope_reshape_operation.cpp:36-56](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/norm_rope_reshape/norm_rope_reshape_operation.cpp#L36-L56) — `fabs(epsilon) < THRESHOLD` 拒建 + `Is910B()` 限制。
+**输入输出个数**：恒定 7 入 1 出：
 
-**输入输出个数**——7 入 1 出：
+```cpp
+// norm_rope_reshape_operation.cpp:66-74
+uint32_t NormRopeReshapeOperation::GetInputNum() const  { return IN_TENSOR_COUNT_SEVEN; }  // 7
+uint32_t NormRopeReshapeOperation::GetOutputNum() const { return OUT_TENSOR_COUNT_ONE; }   // 1
+```
 
-[GetInputNum/GetOutputNum — norm_rope_reshape_operation.cpp:66-74](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/norm_rope_reshape/norm_rope_reshape_operation.cpp#L66-L74) — `IN_TENSOR_COUNT_SEVEN=7`、`OUT_TENSOR_COUNT_ONE=1`。
+**InferShapeImpl——输出透传第 7 个输入**：
 
-**形状推导**——输出等于第 7 个输入（keycachein），因为融合算子把归一化+旋转后的结果 in-place 写回 cache：
+```cpp
+// norm_rope_reshape_operation.cpp:76-81
+outTensorDescs.at(OUT_TENSOR_ZERO) = inTensorDescs.at(IN_TENSOR_SIX);   // out[0] = keycachein
+```
 
-[InferShapeImpl — norm_rope_reshape_operation.cpp:76-81](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/norm_rope_reshape/norm_rope_reshape_operation.cpp#L76-L81) — `out[0] = in[6]`。
+**CheckDim910B——维度严格约束**：7 个输入的维度分别是 3/1/2/2/2/1/4（x/gamma/keyRope/cos/sin/slotMapping/keycachein）：
 
-**UB 容量约束**——这是一个很有意思的校验：`11 * x.dims[2] * 2 + keycachein.dims[3] * 2 < 196352`。196352 是 910B 的 UB（Unified Buffer，片上缓存）字节上限。它说明融合 Kernel 把 x 的多份中间量与 keycache 一起搬进 UB 计算，必须装得下：
+```cpp
+// norm_rope_reshape_operation.cpp:124-130
+if (inTensorDescs.at(0).shape.dimNum != 3 ||   // x: 3 维
+    inTensorDescs.at(1).shape.dimNum != 1 ||   // gamma: 1 维
+    inTensorDescs.at(2).shape.dimNum != 2 ||   // keyRope: 2 维
+    inTensorDescs.at(3).shape.dimNum != 2 ||   // cos: 2 维
+    inTensorDescs.at(4).shape.dimNum != 2 ||   // sin: 2 维
+    inTensorDescs.at(5).shape.dimNum != 1 ||   // slotMapping: 1 维
+    inTensorDescs.at(6).shape.dimNum != 4) {   // keycachein: 4 维
+```
 
-[InferShapeCheckImpl UB 约束 — norm_rope_reshape_operation.cpp:83-98](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/norm_rope_reshape/norm_rope_reshape_operation.cpp#L83-L98) — UB 容量公式 + 维度与对齐校验。
+**关键形状关系**：`keycachein` 的第 4 维必须等于「x 的第 3 维 + keyRope 的第 2 维」——这正反映了「归一化部分 + 旋转部分」拼接后写入缓存的结构：
 
-**组融合节点**——Runner 把全部 7 入 1 出接到一个 Kernel 节点，opDesc 字符串 `"RmsNormAndRopeAndReshapeAndCacheOperation"`：
+```cpp
+// norm_rope_reshape_operation.cpp:168-174
+if (keycacheInTensorDesc.shape.dims[DIM_THREE] !=
+    xTensorDesc.shape.dims[DIM_TWO] + keyRopeTensorDesc.shape.dims[DIM_ONE]) {
+    // keycachein 的第4维 == x 的第3维 + keyRope 的第2维
+    return false;
+}
+```
 
-[BuildNormRopeReshapeGraph — norm_rope_reshape_ops_runner.cpp:27-50](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/norm_rope_reshape/norm_rope_reshape_ops_runner.cpp#L27-L50) — 单节点融合图，7 个 inTensor 接到同一节点。
+**UB 容量校验**：因为融合 Kernel 把多个中间张量放在 Unified Buffer（UB）里，所以有一个 UB 容量上限校验（`11 * x.dim[2] * 2 + keycachein.dim[3] * 2 < 196352`）：
 
-#### 4.3.4 代码实践（本讲核心实践）
+```cpp
+// norm_rope_reshape_operation.cpp:85-90
+if (ELEVEN * inTensorDescs.at(0).shape.dims[DIM_TWO] * FLOAT16SIZE +
+    inTensorDescs.at(6).shape.dims[DIM_THREE] * FLOAT16SIZE >= MAXUBSIZE) {
+    return ERROR_INVALID_TENSOR_DIM;
+}
+```
 
-**实践目标**：对比 `Rope`（单算子）与 `NormRopeReshape`（融合算子），说清融合的性能优势来源。
+其中 `MAXUBSIZE = 196352` 是 910B AI Core 单核 UB 的字节容量。这条校验本身就在暗示：融合算子把中间结果尽量留在片上 UB，避免落回显存。
 
-**操作步骤**：
+**CreateRunner——单一 ops 后端组图**：组一张只含 `RmsNormAndRopeAndReshapeAndCacheOperation` 节点的图，节点名直接说明它融合了哪三件事：
 
-1. 假设 decode 阶段对 Key 通路要做「RMSNorm → RoPE → 写 KV Cache」三步。若用单算子组合，需要分别创建 `RmsNormOperation`、`RopeOperation`、`ReshapeAndCache`（u4-l5）三个 Operation。
-2. 阅读单算子 `RopeOperation` 的 `CreateRunner`（rope_operation.cpp 220–238 行）：每个单算子各自组 1 个 Kernel 节点、各自 Setup/Execute，各自有 1 次 Kernel launch。
-3. 阅读 `NormRopeReshapeOpsRunner::BuildNormRopeReshapeGraph`（27–50 行）：三个步骤被压成 1 个节点 `RmsNormAndRopeAndReshapeAndCacheOperation`。
-4. 对照 UB 容量约束（83–98 行）：`11*x.dims[2]*2 + keycache.dims[3]*2 < 196352`，说明中间结果被留在片上 UB。
+```cpp
+// norm_rope_reshape_ops_runner.cpp:44-49
+kernelGraph_.nodes.resize(1);
+auto &normRopeReshapeNode = kernelGraph_.nodes.at(0);
+normRopeReshapeNode.opDesc = {0, "RmsNormAndRopeAndReshapeAndCacheOperation", normRopeReshapeParam};
+normRopeReshapeNode.inTensors = {&xTensor, &gammaTensor, &keyRopeTensor, &cosTensor, &sinTensor,
+                                 &slotMappingTensor, &keycacheInTensor};
+normRopeReshapeNode.outTensors = {&keycacheOutTensor};
+```
 
-**需要观察的现象与预期结果**：
+#### 4.3.4 代码实践
 
-融合算子相比单算子组合的三大性能优势来源：
+**实践目标**：对比 `RopeOperation`（单算子）与 `NormRopeReshapeOperation`（融合算子），定位融合带来的性能优势来源。
 
-| 优势 | 单算子组合 | NormRopeReshape 融合 |
-|------|-----------|----------------------|
-| **访存往返** | RMSNorm 输出写回 HBM → RoPE 读回再写出 → 写 cache 再读写，中间结果多次往返 HBM | 中间数据留在片上 UB，省去 2 次 HBM 读写往返（见 UB 容量约束） |
-| **Kernel launch** | 3 次 launch，每次都有 Host 下发开销 | 1 次 launch，缓解 Host Bound（u1-l1 讲过的核心命题） |
-| **写 cache** | 需要单独的 ReshapeAndCache 算子 + slotMapping 寻址 | 旋转完直接按 slotMapping 写回 keycachein，零额外算子 |
+**操作步骤（源码阅读型实践）**：
 
-简言之：**融合的收益 = 省访存 + 省 launch + 省算子**，三者的根因都是「把多个 Kernel 之间的中间数据从 HBM 搬运变成片上直传」。代价是适用范围收窄（仅 910B、维度需 16 对齐、UB 装得下）。
+1. 先回顾「单算子组合」的三步 K 写缓存路径：`RmsNormOperation`（u4-l2）→ `RopeOperation`（本讲 4.1）→ `ReshapeAndCache`（u4-l5）。每一步都是独立的 `Operation`，各自有 Setup/Execute、各自的 KernelGraph 节点、各自从显存读写中间张量。
+2. 打开 [norm_rope_reshape_ops_runner.cpp:44-49](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/norm_rope_reshape/norm_rope_reshape_ops_runner.cpp#L44-L49)，确认融合算子只有 **1 个 KernelGraph 节点**、**1 次 Execute**。
+3. 阅读 UB 容量校验（[norm_rope_reshape_operation.cpp:85-90](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/norm_rope_reshape/norm_rope_reshape_operation.cpp#L85-L90)），理解为什么融合算子要把中间张量留在片上 UB。
+4. 阅读 `tests/apitest/kernelstest/mix/test_rms_norm_and_rope_and_reshape_and_cache.py`（可在仓库中搜索定位），对比其与 `test_rope.py` 的 golden 实现，体会融合后中间结果不再单独可见。
 
-**待本地验证**：在 910B 上分别测单算子组合与融合算子的端到端 decode 耗时，量化收益。
+**需要观察的现象 / 预期结果**（这是本讲的核心实践，要求你回答「融合优势来源」）：
+
+- **减少 Kernel launch**：单算子三步 = 3 次算子 Execute + 3 次 KernelGraph 下发；融合后 = 1 次。每次 launch 都有 Host→Device 的下发开销（u1-l1 讲的 Host Bound），融合直接把这部分摊薄到 1/3。
+- **中间张量不落显存**：单算子组合里，RMSNorm 的输出、RoPE 的输出要写回 Device 显存再被下一步读入；融合算子把它们留在 AI Core 的 UB/寄存器里，省掉「写显存 + 读显存」两轮带宽（UB 容量校验正是为此而设）。
+- **减少 workspace 与中间显存占用**：融合后不需要为中间张量分配独立的 Device 显存。
+
+**待本地验证**：若需量化收益，可在 910B 上用 `prof` 工具（见 u7-l2）分别测三步组合与融合算子的单层耗时对比。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`NormRopeReshapeOperation` 为什么把 `out[0]` 设成 `in[6]`（keycachein）而不是 `in[0]`（x）？
+**练习 1**：为什么 `NormRopeReshapeOperation` 的输出形状是「透传第 7 个输入」而不是像 `RopeOperation` 那样透传前两个输入？
 
-答案：因为它的语义是「归一化 + 旋转后 in-place 写回分页 KV Cache」，输出就是被更新过的 cache 本身，形状与 keycachein 完全一致；x 只是被消费的输入，不作为输出透传。
+> **答案**：融合算子的真正「结果」是写回 KV Cache（keycachein），它是 in-place 更新，所以输出就是缓存本体 `in[6]`；而 `RopeOperation` 的输出是两个独立的旋转后张量，透传 Q/K。两者输出语义不同。
 
-**练习 2**：UB 容量约束（83–90 行）若被违反会怎样？为什么系数是 11？
+**练习 2**：融合算子里的 `rotaryCoeff` 默认是 2，单算子 `RopeParam` 默认是 4，这种默认值差异说明什么？
 
-答案：违反则返回 `ERROR_INVALID_TENSOR_DIM`，因为 Kernel 无法把所需的中间数据全部装入 UB。系数 11 反映 Kernel 内部对 x 的某一维度需要同时缓存多份中间量（如 x、归一化中间态、cos/sin 展开等）的具体实现，是经验性常数，精确含义需对照 Kernel 源码（待确认）。
+> **答案**：融合算子面向的是「RMSNorm + RoPE + 写 Cache」的解码路径，常见于采用 half 旋转的 LLaMA 类模型，故默认 2；单算子 `RopeOperation` 要兼容更多模型（含 quarter 模式的 ChatGLM 等），默认 4 更保守。两者都是可配的，默认值只是各自高频场景的取舍。
+
+**练习 3**：`NormRopeReshapeOperation` 为什么只支持 910B？
+
+> **答案**：融合 Kernel 高度依赖 910B AI Core 的 UB 容量（196352 字节）与 Cube/Vector 协同能力，把 RMSNorm、RoPE、ReshapeAndCache 三段流水塞进单核片上存储；其它芯片的 UB 容量或指令组合不足以支撑这种融合，所以 `CreateOperation` 直接拦截非 910B（[norm_rope_reshape_operation.cpp:46-49](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/ops/ops_infer/norm_rope_reshape/norm_rope_reshape_operation.cpp#L46-L49)）。
 
 ## 5. 综合实践
 
-把本讲三个算子串起来，画一张「带长序列外推的 decode Key 通路」数据流图，并回答：
+**任务**：画一张「大模型单层 K 通路」的算子编排图，分别给出「单算子组合方案」与「融合算子方案」，并标注每条边的张量与每次 Kernel launch。
 
-1. 当推理序列超过训练长度时，`positionIds + InvFreqIn + seqlens` 经 `DynamicNTK` 产出新的 sin/cos。
-2. 若部署在 910B 且追求极致性能，会用 `NormRopeReshape` 一次性完成 RMSNorm + RoPE + 写 cache；若在其它芯片或需要分别调试，则用 `RmsNormOperation` + `RopeOperation`（cos/sin 来自步骤 1）+ `ReshapeAndCache` 三件套。
-3. 在图中标注每条边的张量形状（参考三个算子的 `InferShapeImpl`），并标出哪些数据流经 HBM、哪些留在片上 UB。
+**步骤**：
 
-**进阶**：在 `atb_ops_info.ini` 中找到三个算子的输入输出 dtype/format 约束（`[RopeOperation]`、`[DynamicNTKOperation]`、`[NormRopeReshapeOperation]` 三段），核对它们与 `GetInputNum`/`GetOutputNum` 是否一致，体会 u3-l1 讲过的「IR 配置外置」机制。
+1. **单算子组合方案**：按顺序串联 `DynamicNTKOperation`（生成 cos/sin）→ `RmsNormOperation`（u4-l2，归一化 x）→ `RopeOperation`（旋转 keyRope）→ `ReshapeAndCache`（u4-l5，写 keycachein）。标出每个算子的输入输出张量、形状，统计共几次 Execute / 几次显存读写。
+2. **融合算子方案**：用 `DynamicNTKOperation`（cos/sin 仍需单独生成）+ `NormRopeReshapeOperation`（一步完成 norm+rope+cache）。统计 Execute 次数与显存读写次数。
+3. **对比结论**：写出融合方案在 launch 次数、中间显存读写、workspace 占用三方面的具体节省。
+4. **适用性判断**：在你的图上标注——融合方案仅 910B 可用，单算子组合方案芯片覆盖更广（rope.csv 显示 910B/910A/310P 均可）。当目标芯片不是 910B 时，只能回退到单算子组合。
+
+**预期产出**：一张含两种方案的对比图 + 一段不少于 3 条的性能优势说明（直接回答本讲实践任务：「融合算子相比单算子组合的性能优势来源」）。
+
+> 提示：优势来源可从本讲 4.3.4 的三个结论（减少 launch、中间张量不落显存、减少 workspace）展开，并结合 UB 容量校验说明「融合之所以可行，是因为 910B 片上存储能容纳中间结果」。
 
 ## 6. 本讲小结
 
-- RoPE 把位置 \(m\) 编码成对 Q/K 的旋转角度，使注意力点积天然依赖相对距离；cos/sin 两张表是旋转的角度查表，只旋转 Q/K 不旋转 V。
-- `RopeOperation` 固定 5 入 2 出，`InferShapeImpl` 纯透传；`rotaryCoeff` ∈ {2, 4, headDim/2} 对应 aclnn 的 half/quarter/interleave，950 走 aclnn、其它芯片走 OpsRunner + RunnerPool 复用。
-- `DynamicNTK` 不旋转 Q/K，而是按 batch 实际 `seqlens` 动态算出 NTK 外推后的 sin/cos 表（输出 `[ntokens, headDim]`），再喂给 `Rope`。
-- `NormRopeReshape` 把 RMSNorm + RoPE + 写 KV Cache 融合成单 Kernel（仅 910B），收益来自省访存（中间数据留片上 UB）、省 launch、省算子三方面。
-- 三个算子都遵循 u3-l1 的两段式骨架与「单节点 KernelGraph」组图方式，opDesc 字符串是衔接 Kernel 层注册名的关键。
+- **RoPE 的本质**是按位置旋转 Q/K 的二维子空间，使注意力分数只依赖相对位置；`RopeOperation` 用一个 `rotaryCoeff` 旋钮（2/4/headDim）表达 half/quarter/interleave 三种配对方式，对应 aclnn 后端的 `"half"`/`"quarter"`/`"interleave"`。
+- `RopeOperation` 恒为 **5 入 2 出**（qLayer/kLayer/cos/sin/seqLen → qEmbedded/kEmbedded），形状透传；校验链 `DimCheck → ParamCheck → HiddenSizeCheck` 卡死维度、旋转系数整除性与隐层倍数关系；950 走 `RopeAclnnRunner`，其它芯片走 `RopeOpsRunner`（RunnerPool 复用）。
+- **`DynamicNTKOperation`** 是 `Rope` 的上游：3 入 2 出（positionIds/InvFreqIn/seqlens → cos/sin），按当前序列长度动态生成 NTK 外推的位置表，输出第二维 = `InvFreqIn.dim1 × 2`；把「位置表生成」与「旋转施加」解耦，便于独立替换外推策略。
+- **`NormRopeReshapeOperation`** 是 910B 专属的三合一融合算子（RMSNorm + RoPE + ReshapeAndCache），7 入 1 出，输出 in-place 写回 keycachein；其核心收益是**减少 Kernel launch、中间张量留在片上 UB 不落显存、省去中间 workspace**，UB 容量校验（196352 字节）正是融合可行的硬件前提。
+- 三个算子都沿用 `OperationBase → Runner → KernelGraph → Kernel` 的统一链路，差异仅在 Param、输入输出个数与 Runner 分派策略。
+- 位置编码族体现了 ATB 一贯的设计哲学：**单 Param 覆盖多行为**（`rotaryCoeff`）+ **算子职责正交解耦**（生成 vs 施加）+ **关键路径融合**（NormRopeReshape）。
 
 ## 7. 下一步学习建议
 
-- **继续算子线**：下一讲 [u4-l7 MLA 多头潜在注意力] 会用到本讲的 RoPE 概念（DeepSeek 风格 MLA 对 RoPE 有特殊处理），建议接着读。
-- **下沉 Kernel**：想看 RoPE 的旋转到底怎么在 AI Core 上算，去 `src/kernels/mixkernels/rope/` 读 AscendC Kernel 的 CopyIn/Compute/CopyOut 三段式（u3-l4 基础），重点看它如何用 TQue 双缓冲掩盖 cos/sin 查表的访存延迟。
-- **融合算子范式**：`NormRopeReshape` 是 ATB「把 decode 通路常见三件套融成一个 Kernel」的典型，类似思路可看 `src/kernels/mixkernels/` 下其它融合 Kernel，为 u6 自定义算子开发积累范式。
+- **横向看归一化**：回到 u4-l2（LayerNorm/RMSNorm），对比 `RmsNormOperation` 与本讲融合算子里的 RMSNorm 部分，理解「单算子 vs 融合」在 InferShape 与校验上的差异。
+- **纵向看 KV Cache**：结合 u4-l5（PagedAttention 与 KV Cache），把 `NormRopeReshape` 里的 `slotMapping`、`keycachein` 与 `ReshapeAndCache` 算子串联，建立完整的「写缓存」心智。
+- **深入 Kernel**：若想理解融合 Kernel 内部如何把三段流水塞进一个 AscendC Kernel，可进入 `src/kernels` 下 `RmsNormAndRopeAndReshapeAndCache` 的四件套（u3-l4），阅读其 Tiling 与 CopyIn/Compute/CopyOut。
+- **MLA 衔接**：下一讲 u4-l7 讲 MLA（多头潜在注意力），DeepSeek 风格的 MLA 对 RoPE 有特殊处理（`mlaVHeadSize`、`qKaHeadNum` 等），本讲的 RoPE 基础是理解 MLA 预处理（`MlaPreprocess`）的前提。
+- **性能验证**：学完 u7-l2（日志与 Profiling）后，回到本讲综合实践，用 `prof` 工具实测融合算子与单算子组合的耗时差异，量化 launch 与显存带宽的节省。
