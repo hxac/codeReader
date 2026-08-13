@@ -1,0 +1,1284 @@
+{
+  "project": "ge",
+  "head": "aed3d571e68c9cd40f9c377ad3176e7c249791f8",
+  "rationale": "GE 是华为 CANN 面向昇腾芯片的图编译器与执行器，体量大、链路长（前端/解析 → AscendIR → 四阶段编译 → OM/OM2 产物 → v1/v2 执行）。本手册按「由浅入深、沿真实链路推进」的原则拆为 9 个单元：单元 1-2 为入门层，先建立项目定位、目录与构建的全局认知，再落到 AscendIR 图数据结构这个全栈基石；单元 3-6 为进阶层，沿「解析接入 → 编译四阶段 → 核心编译机制 → 运行时执行」这条真实数据流逐层展开；单元 7-9 为专家层，聚焦内存/流调度优化、Pass/算子/Python/dflow 等二次开发扩展点，以及 profiling/dump/缓存等工程调优实践。本次相对上一版本（4ad52a6d）的主要代码变化集中在 OM2 运行时：新增了完整的 OM2 格式转换子系统（runtime/om2/formats）、运行时变量管理器 Om2RTVarManager（取代旧 om2_var_manager）以及 codegen 模块的增强；此外 compiler/graph/build/memory/memory_block.h 中的 MemoryNoReuseScope 与 OpMemoryType 被重构为 enum class。据此，新增两篇 OM2 讲义挂入单元 6（u6-l6 讲 OM2 模型格式与运行时执行、u6-l7 讲 OM2 格式转换子系统），并将引用 build/memory 的 u7-l1 标记为 update；其余大量 error_code 文档刷新、inputHintValue（已回退）等改动不影响既有讲义概念，统一保持 keep。讲义之间通过 depends_on 严格串接，保证读者能按顺序逐篇上手，且每篇都结合真实源码与可操作的实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门:认识 GE 与项目全貌",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "GE 是什么:定位与系统架构总览",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 GE（Graph Engine）在 CANN 生态中的定位、整体架构，以及从前端框架/模型文件到 AscendIR、再到 OM 产物、最终在昇腾设备执行的一条完整链路。",
+          "learning_goals": [
+            "理解 GE 作为图编译器与执行器的定位",
+            "说清前端适配层、atc、GE Compiler、GE Executor 四大组件的职责",
+            "掌握在线场景与离线场景的区别"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/zh/design/architecture.md"
+          ],
+          "minimal_modules": [
+            "架构总览",
+            "前后端与编译执行链路",
+            "在线/离线两种场景"
+          ],
+          "practice_task": "阅读 README 与架构图，用一段话写出从 ONNX 模型文件到设备执行所经过的 GE 组件，并标注哪些步骤不需要昇腾设备。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "源码目录结构与模块划分",
+          "order": 2,
+          "filename": "u1-l2-directory-structure.md",
+          "level": "beginner",
+          "topic": "对照实际目录讲解 api/base/compiler/runtime/parser/graph_metadef/dflow/examples 等顶层目录的职责与边界，建立对仓库的整体地图。",
+          "learning_goals": [
+            "记住各顶层目录的职责",
+            "区分 GE 仓与外部算子仓的边界",
+            "能在源码中快速定位编译、执行、解析三大主模块"
+          ],
+          "source_files": [
+            "AGENTS.md",
+            "docs/zh/design/architecture.md"
+          ],
+          "minimal_modules": [
+            "顶层目录职责",
+            "GE 与算子仓的解耦",
+            "核心模块导航"
+          ],
+          "practice_task": "在仓库中找到 compiler、runtime、parser、graph_metadef 四个目录，分别为每个目录写一句「它负责什么」并各举一个代表性源文件。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建系统:build.sh 与 CMake 工程组织",
+          "order": 3,
+          "filename": "u1-l3-build-system.md",
+          "level": "beginner",
+          "topic": "讲解 GE 的构建方式，包括 build.sh 的常用参数、--ge_compiler/--ge_executor/--dflow 组件拆分构建、CMake 顶层工程组织以及测试/覆盖率/ASAN 构建选项。",
+          "learning_goals": [
+            "掌握 build.sh 的常用参数与组件化构建",
+            "理解 CMake 顶层工程如何组织多个组件",
+            "知道 Debug/ASAN/覆盖率等构建开关"
+          ],
+          "source_files": [
+            "build.sh",
+            "CMakeLists.txt",
+            "docs/zh/build.md"
+          ],
+          "minimal_modules": [
+            "build.sh 用法",
+            "CMake 顶层组织",
+            "构建选项与产物"
+          ],
+          "practice_task": "运行 bash build.sh --help 查看全部选项，并尝试仅构建 ge_compiler 组件，观察 output 目录产出了哪些库文件。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "端到端快速上手:样例运行与体验",
+          "order": 4,
+          "filename": "u1-l4-quick-start-samples.md",
+          "level": "beginner",
+          "topic": "通过 ACL 样例（如 ResNet50 推理）展示 GE 的端到端使用流程：用 atc 编译模型、再用样例代码加载执行，让读者先有整体感受再深入源码。",
+          "learning_goals": [
+            "了解样例目录的组织方式",
+            "理解 atc 编译 + ACL 加载执行的端到端流程",
+            "能定位并阅读一个推理样例"
+          ],
+          "source_files": [
+            "examples/README.md",
+            "examples/acl/1_sample_resnet50_imagenet_classification/README.md"
+          ],
+          "minimal_modules": [
+            "样例目录概览",
+            "ResNet50 推理样例流程",
+            "LLM 样例入口"
+          ],
+          "practice_task": "阅读 ResNet50 样例 README，列出使用 atc 转换模型所需的命令与样例代码中加载、执行模型的关键步骤。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "基石:AscendIR 图数据结构",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "AscendIR 四层对象模型:Graph/Node/OpDesc/Tensor",
+          "order": 1,
+          "filename": "u2-l1-ascendir-object-model.md",
+          "level": "intermediate",
+          "topic": "讲解 AscendIR 作为 GE 核心 IR 的静态计算图模型，以及 ComputeGraph、Node、OpDesc、Tensor 四层核心对象的关系与职责。",
+          "learning_goals": [
+            "理解 AscendIR 静态图与四层对象模型",
+            "掌握 ComputeGraph、Node 的关键接口",
+            "区分静态图与静态 Shape 图的概念"
+          ],
+          "source_files": [
+            "docs/zh/design/modules/graph_metadef/ascend-ir.md",
+            "inc/graph_metadef/graph/compute_graph.h",
+            "inc/graph_metadef/graph/node.h"
+          ],
+          "minimal_modules": [
+            "四层对象模型",
+            "ComputeGraph 接口",
+            "Node 接口"
+          ],
+          "practice_task": "在 compute_graph.h 与 node.h 中找出添加节点、获取所有节点、拓扑排序的方法，画一张 ComputeGraph-Node-OpDesc-Tensor 的包含关系图。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Anchor 锚点:数据边与控制边的表达",
+          "order": 2,
+          "filename": "u2-l2-anchor-edges.md",
+          "level": "intermediate",
+          "topic": "讲解 GE 用 Anchor（DataAnchor/CtrlAnchor）而非独立 Edge 对象表达连边关系的设计，以及 In/Out 锚点如何维护对端连接。",
+          "learning_goals": [
+            "理解 Anchor 连边机制",
+            "区分 DataAnchor 与 CtrlAnchor",
+            "掌握通过锚点遍历上下游节点的方法"
+          ],
+          "source_files": [
+            "inc/graph_metadef/graph/anchor.h",
+            "inc/graph_metadef/graph/node.h"
+          ],
+          "minimal_modules": [
+            "Anchor 抽象",
+            "数据边与控制边",
+            "对端锚点遍历"
+          ],
+          "practice_task": "在 anchor.h 中找到 DataAnchor 与 CtrlAnchor 的定义，编写伪代码：给定一个 OutDataAnchor，如何得到它所有下游消费节点。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "OpDesc 算子描述:输入输出与属性",
+          "order": 3,
+          "filename": "u2-l3-opdesc-attrs.md",
+          "level": "intermediate",
+          "topic": "讲解 OpDesc 如何描述一个算子的类型、输入输出 TensorDesc 与属性（Attribute），以及 GeTensor 的元信息（shape/dtype/format）。",
+          "learning_goals": [
+            "理解 OpDesc 承载的算子元信息",
+            "掌握属性（Attribute）的存取",
+            "了解 TensorDesc 与 GeTensor 的关系"
+          ],
+          "source_files": [
+            "inc/graph_metadef/graph/op_desc.h",
+            "inc/graph_metadef/graph/ge_tensor.h"
+          ],
+          "minimal_modules": [
+            "OpDesc 结构",
+            "属性存取",
+            "TensorDesc 元信息"
+          ],
+          "practice_task": "在 op_desc.h 中找到设置/获取属性、输入输出描述的方法，写一段伪代码为一个 Node 读取其算子类型与某个属性值。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "算子注册与原型体系",
+          "order": 4,
+          "filename": "u2-l4-op-registry.md",
+          "level": "intermediate",
+          "topic": "讲解 GE 如何通过 register 体系注册算子原型（类型、输入、输出、属性），以及算子定义为何外置于独立算子仓、GE 如何引用。",
+          "learning_goals": [
+            "理解算子注册体系的作用",
+            "了解算子原型（OpProto）的构成",
+            "区分 GE 仓与算子仓的职责边界"
+          ],
+          "source_files": [
+            "graph_metadef/register/opdef",
+            "graph_metadef/graph/opsproto"
+          ],
+          "minimal_modules": [
+            "算子注册机制",
+            "OpProto 原型",
+            "GE 与算子仓协作"
+          ],
+          "practice_task": "在 graph_metadef/register 与 opsproto 目录下找到算子原型注册相关文件，说明一个算子是如何把类型、输入输出、属性登记进系统的。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "前端接入与模型解析",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "解析器框架:工厂模式与统一入口",
+          "order": 1,
+          "filename": "u3-l1-parser-framework.md",
+          "level": "intermediate",
+          "topic": "讲解 parser 模块如何用工厂模式（ParserFactory）支持多种前端模型格式，将外部 IR 统一转换为 AscendIR。",
+          "learning_goals": [
+            "理解 parser 的工厂模式架构",
+            "掌握模型解析的统一入口",
+            "了解 common 转换层的作用"
+          ],
+          "source_files": [
+            "parser/parser/common/parser_factory.cc",
+            "docs/zh/design/modules/graph_metadef/ascend-ir.md"
+          ],
+          "minimal_modules": [
+            "ParserFactory 工厂",
+            "统一解析入口",
+            "common 转换层"
+          ],
+          "practice_task": "阅读 parser_factory.cc，说明多种格式解析器是如何注册并被按格式选择调用的，画出工厂选择解析器的流程。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "ONNX 模型解析实战",
+          "order": 2,
+          "filename": "u3-l2-onnx-parser.md",
+          "level": "intermediate",
+          "topic": "以 ONNX 解析器为例，深入讲解 onnx_parser 如何将 ONNX 节点、权重、子图转换为 AscendIR 的 Node 与图结构。",
+          "learning_goals": [
+            "理解 ONNX 到 AscendIR 的映射",
+            "掌握常量、数据节点、子图的解析",
+            "了解解析过程中的合法性检查"
+          ],
+          "source_files": [
+            "parser/parser/onnx/onnx_parser.cc",
+            "parser/parser/onnx/onnx_data_parser.cc",
+            "parser/parser/onnx/onnx_constant_parser.cc"
+          ],
+          "minimal_modules": [
+            "ONNX 节点映射",
+            "常量与权重解析",
+            "子图适配"
+          ],
+          "practice_task": "在 onnx_parser.cc 中找到主解析入口，说明一个 ONNX 算子节点是如何被转换成 AscendIR 的 Node 的，常量权重走的是哪个 parser。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "ATC 离线编译工具链",
+          "order": 3,
+          "filename": "u3-l3-atc-toolchain.md",
+          "level": "intermediate",
+          "topic": "讲解 atc 工具如何作为离线编译入口，解析模型文件、配置选项并驱动 GE 编译生成 OM，重点看 main_impl 与 omg 主流程。",
+          "learning_goals": [
+            "理解 atc 在离线场景的角色",
+            "掌握 atc 的选项解析与主流程",
+            "了解 omg 如何串联解析与编译"
+          ],
+          "source_files": [
+            "api/atc/main_impl.cc",
+            "api/atc/omg.cc",
+            "api/atc/atc_option_map.cc"
+          ],
+          "minimal_modules": [
+            "atc 入口与选项",
+            "omg 主流程",
+            "离线编译产物"
+          ],
+          "practice_task": "阅读 main_impl.cc 与 omg.cc，梳理 atc 从命令行参数到调用解析器、再到产出 OM 的关键调用顺序。",
+          "depends_on": [
+            "u1-l3",
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "GE 对外 API 与会话生命周期",
+          "order": 4,
+          "filename": "u3-l4-ge-api-session.md",
+          "level": "intermediate",
+          "topic": "讲解 GE 对外公共 API（ge_api.h、ge_ir_build.h）与 Session 体系如何管理图的生命周期（AddGraph → Build → Run）。",
+          "learning_goals": [
+            "理解 GE 对外 API 的核心接口",
+            "掌握 Session 管理图的完整生命周期",
+            "了解在线场景下框架如何调用 GE"
+          ],
+          "source_files": [
+            "inc/external/ge/ge_api.h",
+            "inc/external/ge/ge_ir_build.h",
+            "api/session/session/session_manager.cc"
+          ],
+          "minimal_modules": [
+            "GE 公共 API",
+            "Session 生命周期",
+            "在线/离线调用差异"
+          ],
+          "practice_task": "在 session_manager.cc 与 ge_api.h 中找到 AddGraph/Build/Run 相关接口，写出一个最简的「构图 → 编译 → 执行」调用序列。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "核心:图编译器四阶段流程",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "编译总览:GraphManager 与 CompilerStages",
+          "order": 1,
+          "filename": "u4-l1-compiler-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 GE 编译器如何通过 GraphManager 与 CompilerStages（预处理/图优化/引擎分区/构建）组织多阶段编译流程，建立编译全貌。",
+          "learning_goals": [
+            "掌握编译四阶段的职责划分",
+            "理解 CompilerStages 的组织方式",
+            "理清 AddGraph→Build→Run 的编译触发"
+          ],
+          "source_files": [
+            "docs/zh/design/modules/compiler/compiler.md",
+            "compiler/graph/manager/graph_manager.h",
+            "compiler/graph/manager/graph_manager.cc"
+          ],
+          "minimal_modules": [
+            "CompilerStages 四阶段",
+            "GraphManager 生命周期",
+            "编译触发流程"
+          ],
+          "practice_task": "阅读 compiler.md 与 graph_manager.h，列出四个阶段类（preparer/optimizer/partitioner/builder），并说明它们在编译流程中的先后顺序。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "阶段1:预处理 GraphPrepare",
+          "order": 2,
+          "filename": "u4-l2-graph-prepare.md",
+          "level": "intermediate",
+          "topic": "讲解预处理阶段如何完成图规范化、Shape 推理准备、量化准备与动态 Shape 准备，为后续优化打基础。",
+          "learning_goals": [
+            "理解预处理阶段的职责",
+            "掌握图规范化与 Shape 推理准备",
+            "了解动态 Shape 准备（multi_batch_copy_graph）"
+          ],
+          "source_files": [
+            "compiler/graph/preprocess/graph_prepare.cc",
+            "compiler/graph/preprocess/graph_prepare.h",
+            "compiler/graph/preprocess/multi_batch_copy_graph.cc"
+          ],
+          "minimal_modules": [
+            "图规范化",
+            "Shape 推理准备",
+            "动态 Shape 准备"
+          ],
+          "practice_task": "在 graph_prepare.cc 中梳理预处理主流程依次调用了哪些子步骤，并说明 multi_batch_copy_graph 在动态分档中的作用。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "阶段2:图优化 GraphOptimize",
+          "order": 3,
+          "filename": "u4-l3-graph-optimize.md",
+          "level": "intermediate",
+          "topic": "讲解图优化阶段如何对整图做通用优化与引擎级优化/融合，涵盖 Pass 管理器、优化子目录组织与优化调用链。",
+          "learning_goals": [
+            "理解图优化阶段的整体职责",
+            "掌握 Pass 管理器的组织方式",
+            "了解优化调用链与子目录划分"
+          ],
+          "source_files": [
+            "compiler/graph/optimize/graph_optimize.h",
+            "compiler/graph/passes/pass_manager.cc",
+            "compiler/graph/passes/base_pass.h"
+          ],
+          "minimal_modules": [
+            "图优化职责",
+            "Pass 管理器",
+            "优化调用链"
+          ],
+          "practice_task": "在 graph_optimize.h 与 pass_manager.cc 中找到优化入口与 Pass 注册/执行机制，写出 Pass 是如何被组织并按顺序执行的。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "阶段3:引擎分区 EnginePartitioner",
+          "order": 4,
+          "filename": "u4-l4-engine-partition.md",
+          "level": "intermediate",
+          "topic": "讲解引擎分配与分区阶段如何按算子的执行引擎（如 aicore/aicpu/host_cpu/hccl）将整图划分为多个子图。",
+          "learning_goals": [
+            "理解引擎选择与分区的机制",
+            "掌握 EnginePartitioner 的分区流程",
+            "了解不同引擎类型与子图划分"
+          ],
+          "source_files": [
+            "docs/zh/design/features/engine.md",
+            "compiler/graph/partition/engine_partitioner.h"
+          ],
+          "minimal_modules": [
+            "引擎选择",
+            "组合/原子引擎分区",
+            "子图优化"
+          ],
+          "practice_task": "阅读 engine.md 与 engine_partitioner.h，说明算子是如何被分配到不同引擎并按引擎切分为子图的，画出分区前后的图结构变化。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l5",
+          "title": "阶段4:构建 GraphBuilder",
+          "order": 5,
+          "filename": "u4-l5-graph-builder.md",
+          "level": "intermediate",
+          "topic": "讲解构建阶段如何完成流分配、内存规划、任务生成与模型序列化，最终产出可执行的 model/OM。",
+          "learning_goals": [
+            "理解构建阶段的四大子任务",
+            "掌握 GraphBuilder/ModelBuilder 的职责",
+            "了解 OM 模型序列化"
+          ],
+          "source_files": [
+            "compiler/graph/build/graph_builder.cc",
+            "compiler/graph/build/model_builder.cc",
+            "compiler/graph/build/task_generator.cc"
+          ],
+          "minimal_modules": [
+            "流分配",
+            "内存规划",
+            "任务生成与序列化"
+          ],
+          "practice_task": "在 graph_builder.cc 与 model_builder.cc 中梳理构建阶段的主流程，说明流分配、内存规划、任务生成的先后关系。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "深入:核心编译机制",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "通用图优化:CSE/常量折叠/DCE",
+          "order": 1,
+          "filename": "u5-l1-standard-optimizations.md",
+          "level": "intermediate",
+          "topic": "讲解三类经典通用图优化：公共子表达式消除、常量折叠、死代码消除，结合 standard_optimize 与 constant_folding 源码分析。",
+          "learning_goals": [
+            "理解 CSE、常量折叠、DCE 的原理与作用",
+            "掌握 constant_folding 的实现结构",
+            "了解这些优化在编译流程中的位置"
+          ],
+          "source_files": [
+            "docs/zh/design/features/constant_folding.md",
+            "compiler/graph/passes/standard_optimize/constant_folding/constant_folding_pass.cc",
+            "compiler/graph/passes/standard_optimize"
+          ],
+          "minimal_modules": [
+            "常量折叠",
+            "公共子表达式消除",
+            "死代码消除"
+          ],
+          "practice_task": "阅读 constant_folding_pass.cc，说明常量折叠是如何识别可折叠算子并在编译期求值的，举一个会被折叠的算子组合例子。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Shape 推导与符号化",
+          "order": 2,
+          "filename": "u5-l2-infer-shape.md",
+          "level": "intermediate",
+          "topic": "讲解 InferShape 如何为算子推导输出 shape，区分 OriginShape/StorageShape，以及动态 Shape 下的符号化推导。",
+          "learning_goals": [
+            "理解 Shape 推导的机制与触发",
+            "掌握 OriginShape 与 StorageShape 的区别",
+            "了解动态 Shape 的符号化推导"
+          ],
+          "source_files": [
+            "docs/zh/design/features/infer_shape.md",
+            "graph_metadef/graph/refiner/shape_refiner.cc",
+            "compiler/graph/passes/symbolic"
+          ],
+          "minimal_modules": [
+            "InferShape 机制",
+            "Origin/Storage Shape",
+            "符号化推导"
+          ],
+          "practice_task": "阅读 infer_shape.md 与 shape_refiner.cc，说明 shape 是如何在图上传播推导的，动态 shape 场景下用到了哪种符号化表达。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "融合优化:Pattern 融合 Pass",
+          "order": 3,
+          "filename": "u5-l3-fusion-pattern-pass.md",
+          "level": "intermediate",
+          "topic": "讲解基于 Pattern 的手写融合机制，包括 PatternFusionPass、节点匹配与替换，以及融合在编译流程中的执行。",
+          "learning_goals": [
+            "理解 Pattern-Based 融合的工作方式",
+            "掌握 Pattern 匹配与替换机制",
+            "了解融合 Pass 的注册与执行"
+          ],
+          "source_files": [
+            "docs/zh/design/features/fusion_pattern_pass.md",
+            "compiler/graph/fusion/node_matcher.h",
+            "compiler/graph/fusion/pass/pattern_fusion_run.h"
+          ],
+          "minimal_modules": [
+            "Pattern 融合原理",
+            "节点匹配与替换",
+            "融合 Pass 注册执行"
+          ],
+          "practice_task": "阅读 fusion_pattern_pass.md 与 node_matcher.h，说明一个 Pattern 是如何被匹配并用替换节点完成融合的，写出匹配-替换的关键步骤。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l4",
+          "title": "动态分档 Dynamic Gear",
+          "order": 4,
+          "filename": "u5-l4-dynamic-gear.md",
+          "level": "intermediate",
+          "topic": "讲解动态分档（动态 batch/分辨率/dynamic_dims）机制，GE 如何为多个档位编译并支持运行时切换 shape。",
+          "learning_goals": [
+            "理解动态分档的需求与价值",
+            "掌握 multi_batch 拷贝与档位编译",
+            "了解运行时档位选择"
+          ],
+          "source_files": [
+            "docs/zh/design/features/dynamic_gear.md",
+            "compiler/graph/preprocess/multi_batch_copy_graph.cc",
+            "compiler/graph/passes/multi_batch"
+          ],
+          "minimal_modules": [
+            "动态分档概念",
+            "multi_batch 拷贝",
+            "档位编译与选择"
+          ],
+          "practice_task": "阅读 dynamic_gear.md 与 multi_batch_copy_graph.cc，说明 GE 是如何为多个 batch/分辨率档位生成统一模型的，档位信息从哪里传入。",
+          "depends_on": [
+            "u4-l2",
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l5",
+          "title": "自动融合 Autofusion",
+          "order": 5,
+          "filename": "u5-l5-autofusion.md",
+          "level": "intermediate",
+          "topic": "讲解基于算子分类与计算公式的自动融合（Autofusion），它如何自动分析融合机会并 codegen 生成融合算子。",
+          "learning_goals": [
+            "理解自动融合与手写 Pattern 融合的差异",
+            "掌握 autofuse 模块的作用",
+            "了解 codegen 生成融合算子的思路"
+          ],
+          "source_files": [
+            "compiler/graph/optimize/autofuse",
+            "docs/zh/design/modules/compiler/compiler.md"
+          ],
+          "minimal_modules": [
+            "自动融合原理",
+            "autofuse 模块",
+            "融合算子 codegen"
+          ],
+          "practice_task": "在 compiler/graph/optimize/autofuse 目录中浏览实现，对比 Pattern 融合，写出自动融合的两点优势与一个适用场景。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "执行:运行时执行器",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "运行时双版本架构总览",
+          "order": 1,
+          "filename": "u6-l1-runtime-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 GE 运行时为何同时维护 v1（静态 shape，硬件 Sink）与 v2（动态 shape，Lowering）两套执行架构，以及它们的分工与差异。",
+          "learning_goals": [
+            "理解 v1/v2 双版本并存的设计",
+            "掌握两种执行模型（硬件 Sink vs Host 执行）",
+            "了解各自适用场景"
+          ],
+          "source_files": [
+            "docs/zh/design/modules/runtime/runtime.md"
+          ],
+          "minimal_modules": [
+            "v1 静态执行器",
+            "v2 动态执行器",
+            "架构差异对比"
+          ],
+          "practice_task": "阅读 runtime.md，填写一张对比表：v1 与 v2 在核心抽象、执行模型、适用场景上的差异，并说明为何要双版本并存。",
+          "depends_on": [
+            "u4-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "v1 静态执行器:模型加载与 DavinciModel",
+          "order": 2,
+          "filename": "u6-l2-v1-davinci-model.md",
+          "level": "intermediate",
+          "topic": "讲解 v1 如何加载模型、DavinciModel 如何表示一个模型实例及其资源（算子 bin、权重、Task 序列）。",
+          "learning_goals": [
+            "理解 v1 模型加载流程",
+            "掌握 DavinciModel 的核心职责",
+            "了解模型资源在设备侧的加载"
+          ],
+          "source_files": [
+            "docs/zh/design/features/known_shape_executor.md",
+            "runtime/v1/graph/load/graph_loader.cc",
+            "runtime/v1/graph/load/model_manager/davinci_model.cc"
+          ],
+          "minimal_modules": [
+            "模型加载门面",
+            "DavinciModel 实例",
+            "设备侧资源加载"
+          ],
+          "practice_task": "阅读 graph_loader.cc 与 davinci_model.cc，梳理模型从 OM 文件加载到形成 DavinciModel 实例的关键步骤，DavinciModel 持有哪些资源。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "v1 任务生成与下沉执行",
+          "order": 3,
+          "filename": "u6-l3-v1-task-sink.md",
+          "level": "intermediate",
+          "topic": "讲解 v1 如何把编译产物序列化为 Task、做地址刷新，以及一次 launch 触发整模型硬件 Sink 执行的过程。",
+          "learning_goals": [
+            "理解任务生成（TaskGenerator）与 Task 类型",
+            "掌握地址刷新与下沉执行",
+            "了解同步/异步执行门面"
+          ],
+          "source_files": [
+            "compiler/graph/build/task_generator.cc",
+            "runtime/v1/graph/execute/graph_executor.h",
+            "runtime/v1/graph/load/model_manager/davinci_model.cc"
+          ],
+          "minimal_modules": [
+            "任务生成",
+            "地址刷新",
+            "Sink 执行与同步"
+          ],
+          "practice_task": "在 task_generator.cc 与 graph_executor.h 中梳理 Task 的生成与执行路径，说明一次模型执行为何只需触发一次 launch。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l4",
+          "title": "v2 动态执行器:Lowering 与 ExecuteGraph",
+          "order": 4,
+          "filename": "u6-l4-v2-lowering.md",
+          "level": "advanced",
+          "topic": "讲解 v2 如何通过 Lowering 将 ComputeGraph 转换为 ExecuteGraph，实现更精简、支持动态 shape 的执行路径。",
+          "learning_goals": [
+            "理解 Lowering（ComputeGraph→ExecuteGraph）",
+            "掌握 v2 的执行路径设计",
+            "了解动态 shape 在 v2 的支持"
+          ],
+          "source_files": [
+            "docs/zh/design/features/unknown_shape_executor.md",
+            "docs/zh/design/constraints/rt2_runtime.md",
+            "runtime/v2/lowering/graph_converter.cc"
+          ],
+          "minimal_modules": [
+            "Lowering 转换",
+            "ExecuteGraph 抽象",
+            "动态 shape 执行"
+          ],
+          "practice_task": "阅读 unknown_shape_executor.md 与 graph_converter.cc，说明 v2 的 Lowering 把 ComputeGraph 转成了什么结构，为何更适合动态 shape。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l5",
+          "title": "v2 执行策略与引擎适配",
+          "order": 5,
+          "filename": "u6-l5-v2-executor-engine.md",
+          "level": "advanced",
+          "topic": "讲解 v2 的多种执行策略（顺序/拓扑/多线程拓扑）以及 engine/kernel 适配层如何对接 aicore/aicpu 等后端。",
+          "learning_goals": [
+            "理解 v2 的多种执行策略",
+            "掌握 engine/kernel 适配层",
+            "了解模型执行器构建方式"
+          ],
+          "source_files": [
+            "runtime/v2/core/model_v2_executor.cc",
+            "runtime/v2/core/executor",
+            "runtime/v2/engine"
+          ],
+          "minimal_modules": [
+            "执行策略",
+            "engine 适配",
+            "kernel 执行"
+          ],
+          "practice_task": "在 runtime/v2/core/executor 与 engine 目录中比较顺序执行与拓扑执行的差异，说明 engine 适配层如何把节点分派到 aicore/aicpu。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l6",
+          "title": "OM2 模型格式与运行时执行",
+          "order": 6,
+          "filename": "u6-l6-om2-model-executor.md",
+          "level": "advanced",
+          "topic": "讲解 OM2 作为新一代离线模型格式（codegen 生成 C++ 源码/so、打包为 ZIP 归档）的定位，om2_model_executor 如何通过 so 函数指针加载/运行模型，以及 Om2RTVarManager 如何管理变量设备地址与数据搬运，对比 v1/v2 的差异。",
+          "learning_goals": [
+            "理解 OM2 作为 codegen→so 模型格式的定位与产物形态",
+            "掌握 om2_model_executor 的加载（Create/Load/Run 函数指针）与执行流程",
+            "理解 Om2RTVarManager 对变量地址分配、加载与设备搬运的管理"
+          ],
+          "source_files": [
+            "runtime/om2/om2_model_executor.cc",
+            "runtime/om2/om2_model_manager.h",
+            "runtime/om2/om2_rt_var_manager.h",
+            "base/common/om2/codegen/om2_codegen.h",
+            "runtime/om2/zip_archive_reader.h"
+          ],
+          "minimal_modules": [
+            "OM2 模型格式与 ZIP/so 产物",
+            "om2_model_executor 加载执行",
+            "Om2RTVarManager 运行时变量管理"
+          ],
+          "practice_task": "阅读 om2_model_executor.cc，说明 OM2 模型归档里包含哪些产物（so/json/权重），执行器是如何通过函数指针加载并运行模型的；并对照 om2_rt_var_manager.h 说出变量的设备地址是何时分配、数据如何搬运到设备。",
+          "depends_on": [
+            "u6-l1",
+            "u6-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l7",
+          "title": "OM2 格式转换子系统",
+          "order": 7,
+          "filename": "u6-l7-om2-format-transfer.md",
+          "level": "advanced",
+          "topic": "讲解本次新增的 OM2 格式转换子系统（runtime/om2/formats）：FormatTransfer 抽象、各类 NCHW/NHWC/NC1HWC0/FractalZ 之间互转的实现，以及 register_format_transfer 如何按 (src,dst) 格式对注册并选择转换器。",
+          "learning_goals": [
+            "理解 OM2 FormatTransfer 抽象与转换接口",
+            "掌握常见格式（NCHW/NHWC/NC1HWC0/FractalZ 等）互转的实现",
+            "了解格式转换器的注册与按格式对选择机制"
+          ],
+          "source_files": [
+            "runtime/om2/formats/formats.h",
+            "runtime/om2/formats/register_format_transfer.h",
+            "runtime/om2/formats/format_transfers/format_transfer_nchw_nc1hwc0.h",
+            "runtime/om2/formats/utils/formats_trans_utils.h"
+          ],
+          "minimal_modules": [
+            "FormatTransfer 抽象",
+            "格式互转实现",
+            "转换器注册与选择"
+          ],
+          "practice_task": "阅读 formats.h 与 register_format_transfer.h，说明一个格式对（如 NCHW→NC1HWC0）的转换器是如何被注册并在需要时被选中的；并在 format_transfer_nchw_nc1hwc0 中找出实际的排布变换逻辑要点。",
+          "depends_on": [
+            "u6-l6"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "优化:内存、流与调度",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "内存规划与复用",
+          "order": 1,
+          "filename": "u7-l1-memory-planning.md",
+          "level": "advanced",
+          "topic": "讲解 GE 在静态 shape 图中以整图视角规划与复用张量内存的机制（block_mem、allocator、峰值内存优化）。注意 memory_block.h 中 MemoryNoReuseScope、OpMemoryType 现已重构为 enum class。",
+          "learning_goals": [
+            "理解整图内存规划与复用",
+            "掌握内存块（block）与分配器抽象",
+            "了解峰值内存优化策略"
+          ],
+          "source_files": [
+            "docs/zh/design/constraints/memory-constraints.md",
+            "compiler/graph/build/memory",
+            "runtime/v1/graph/manager"
+          ],
+          "minimal_modules": [
+            "内存规划",
+            "内存块与分配器",
+            "峰值内存优化"
+          ],
+          "practice_task": "阅读 memory-constraints.md 与 compiler/graph/build/memory 目录，说明 GE 是如何判断两个张量可以共享同一块内存的，画出一个简单复用示例；并留意 MemoryNoReuseScope/OpMemoryType 已改为 enum class 的引用方式。",
+          "depends_on": [
+            "u4-l5",
+            "u6-l2"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u7-l2",
+          "title": "内存冲突检测与排布优化",
+          "order": 2,
+          "filename": "u7-l2-memory-conflict.md",
+          "level": "advanced",
+          "topic": "讲解内存读写冲突、Inplace 冲突的检测与消除机制，以及子图地址隔离，避免错误的内存复用。",
+          "learning_goals": [
+            "理解内存读写冲突与 Inplace 冲突",
+            "掌握冲突检测与消除机制",
+            "了解子图地址隔离"
+          ],
+          "source_files": [
+            "docs/zh/design/features/memory_conflict.md",
+            "compiler/graph/optimize/mem_layout_conflict_optimize",
+            "compiler/graph/passes/memory_conflict"
+          ],
+          "minimal_modules": [
+            "读写冲突",
+            "Inplace 冲突",
+            "地址隔离"
+          ],
+          "practice_task": "阅读 memory_conflict.md 与 mem_layout_conflict_optimize 目录，说明一个 Inplace 冲突是如何被识别并消除的，为何要子图地址隔离。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "流分配与多流并行",
+          "order": 3,
+          "filename": "u7-l3-stream-allocation.md",
+          "level": "advanced",
+          "topic": "讲解 Stream Allocator 如何分析图的并发机会，将可并发算子分配到不同 stream，并用 event 做同步以提升并行度。",
+          "learning_goals": [
+            "理解流分配与多流并行",
+            "掌握 event 同步与流复用",
+            "了解流激活机制"
+          ],
+          "source_files": [
+            "docs/zh/design/features/stream_allocator.md",
+            "docs/zh/design/constraints/stream_allocator.md",
+            "compiler/graph/build/stream"
+          ],
+          "minimal_modules": [
+            "流分配",
+            "event 同步",
+            "流复用与激活"
+          ],
+          "practice_task": "阅读 stream_allocator.md 与 compiler/graph/build/stream 目录，说明哪些算子可以被分到不同 stream 并行执行，event 如何保证正确同步。",
+          "depends_on": [
+            "u4-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l4",
+          "title": "零拷贝与变量管理",
+          "order": 4,
+          "filename": "u7-l4-zero-copy-variable.md",
+          "level": "advanced",
+          "topic": "讲解零拷贝（用户输入输出直接对接模型内存）与变量管理（Variable 内存、生命周期、FileConstant、外置权重）机制。",
+          "learning_goals": [
+            "理解零拷贝的原理与收益",
+            "掌握 Variable 的内存与生命周期管理",
+            "了解 FileConstant 与外置权重"
+          ],
+          "source_files": [
+            "docs/zh/design/features/zero_copy.md",
+            "docs/zh/design/features/variable_manager.md",
+            "docs/zh/design/features/external_weight.md"
+          ],
+          "minimal_modules": [
+            "零拷贝",
+            "Variable 管理",
+            "外置权重"
+          ],
+          "practice_task": "阅读 zero_copy.md 与 variable_manager.md，说明零拷贝如何减少用户数据搬运，Variable 的内存何时分配与释放。",
+          "depends_on": [
+            "u7-l1",
+            "u6-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "扩展:二次开发与插件机制",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "自定义融合 Pass 开发实战",
+          "order": 1,
+          "filename": "u8-l1-custom-fusion-pass.md",
+          "level": "advanced",
+          "topic": "通过 examples/fusion_pass 样例，讲解如何用 C++/Python 编写 PatternFusionPass、注册并加载自定义融合规则。",
+          "learning_goals": [
+            "掌握自定义融合 Pass 的开发步骤",
+            "理解 Pattern 匹配、CaptureTensor、Replacement",
+            "了解 Pass 插件加载机制"
+          ],
+          "source_files": [
+            "examples/fusion_pass/README.md",
+            "examples/fusion_pass/pattern_base_pass/1_fuse_matmul_add_pass/cpp/src/fuse_matmul_add_pass.cpp",
+            "examples/fusion_pass/pattern_base_pass/1_fuse_matmul_add_pass/python/src/python_fuse_matmul_add_pass.py"
+          ],
+          "minimal_modules": [
+            "Pattern 融合开发",
+            "匹配与替换",
+            "插件加载"
+          ],
+          "practice_task": "参照 1_fuse_matmul_add_pass 样例，写出一个最简的自定义融合 Pass 的开发与注册步骤，并说明如何让 GE 加载它。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "GE Python 接口与 Python Pass",
+          "order": 2,
+          "filename": "u8-l2-ge-python.md",
+          "level": "advanced",
+          "topic": "讲解 GE-PY Python 模块如何提供 Pythonic 的构图、编译执行、Pass 与自定义算子扩展能力，以及 pyatc 命令行。",
+          "learning_goals": [
+            "理解 GE-PY 的模块组织",
+            "掌握用 Python 构图与编译执行",
+            "了解 Python Pass 扩展"
+          ],
+          "source_files": [
+            "docs/zh/design/modules/ge_python/ge_python.md",
+            "api/python/ge/ge",
+            "api/python/ge/ge/passes"
+          ],
+          "minimal_modules": [
+            "GE-PY 模块结构",
+            "Python 构图与执行",
+            "Python Pass"
+          ],
+          "practice_task": "阅读 ge_python.md 与 api/python/ge/ge 目录，用 Python 接口写一段最简的构图 → 编译 → 执行伪代码，并指出 Python Pass 放在哪个模块。",
+          "depends_on": [
+            "u3-l4",
+            "u5-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "自定义算子入图",
+          "order": 3,
+          "filename": "u8-l3-custom-op.md",
+          "level": "advanced",
+          "topic": "讲解如何开发 AscendC/Triton 自定义算子并使其入图（Graph）参与编译执行，结合 custom_op 样例与算子注册体系。",
+          "learning_goals": [
+            "理解自定义算子入图的整体流程",
+            "掌握算子定义、shape 推导、tiling 注册",
+            "了解 custom_op 样例的结构"
+          ],
+          "source_files": [
+            "examples/custom_op/README.md",
+            "examples/custom_op/ascendc_add_custom",
+            "docs/zh/user_guides/custom_op"
+          ],
+          "minimal_modules": [
+            "自定义算子开发",
+            "算子注册入图",
+            "样例结构"
+          ],
+          "practice_task": "参照 ascendc_add_custom 样例，写出自定义算子从开发到入图编译执行的关键步骤，说明算子定义与注册的作用。",
+          "depends_on": [
+            "u2-l4",
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l4",
+          "title": "ES（Eager Style）构图接口",
+          "order": 4,
+          "filename": "u8-l4-es-graph-build.md",
+          "level": "advanced",
+          "topic": "讲解 ES（Eager Style）构图接口如何用更直观、即时校验的方式构图，以及 eager_style_graph_builder 的实现。",
+          "learning_goals": [
+            "理解 ES 构图相比传统构图的优势",
+            "掌握 ES 的构图方式与即时校验",
+            "了解 eager_style_graph_builder 实现"
+          ],
+          "source_files": [
+            "docs/zh/design/modules/es_graph/design/architecture_design.md",
+            "compiler/graph/eager_style_graph_builder",
+            "examples/es"
+          ],
+          "minimal_modules": [
+            "ES 构图模型",
+            "即时校验",
+            "graph builder 实现"
+          ],
+          "practice_task": "阅读 ES 架构设计文档与 eager_style_graph_builder 目录，对比传统构图接口，写出 ES 构图的两点改进并说明 builder 如何生成图。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l5",
+          "title": "DataFlow 异步流水框架",
+          "order": 5,
+          "filename": "u8-l5-dflow-framework.md",
+          "level": "advanced",
+          "topic": "讲解 dflow 如何以数据驱动的方式串接多个模型、支持异步流水与多实例部署，以及 FlowGraph/FlowNode/ProcessPoint 抽象。",
+          "learning_goals": [
+            "理解 dflow 数据驱动流水的设计",
+            "掌握 FlowGraph/FlowNode/ProcessPoint 抽象",
+            "了解多模型串接与多实例部署"
+          ],
+          "source_files": [
+            "docs/zh/design/modules/dflow/dflow.md",
+            "dflow/flow_graph",
+            "examples/dflow"
+          ],
+          "minimal_modules": [
+            "数据驱动流水",
+            "FlowGraph 抽象",
+            "多模型串接部署"
+          ],
+          "practice_task": "阅读 dflow.md 与 examples/dflow，画出用 FlowGraph/ProcessPoint 串接两个模型的数据流图，说明数据是如何在节点间异步流动的。",
+          "depends_on": [
+            "u6-l1",
+            "u3-l4"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "工程:调优、调试与测试",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "性能采集 Profiling",
+          "order": 1,
+          "filename": "u9-l1-profiling.md",
+          "level": "advanced",
+          "topic": "讲解 GE 如何通过 profiling 采集算子耗时、执行时序等性能数据，辅助定位性能瓶颈与调优。",
+          "learning_goals": [
+            "理解 profiling 的采集机制",
+            "掌握性能数据的种类与用途",
+            "了解性能调优基本思路"
+          ],
+          "source_files": [
+            "docs/zh/design/features/profiling.md",
+            "runtime/v1/common/profiling"
+          ],
+          "minimal_modules": [
+            "profiling 采集",
+            "性能数据种类",
+            "性能调优"
+          ],
+          "practice_task": "阅读 profiling.md，列出 profiling 能采集到的关键性能数据，并写出用其定位某个算子耗时过高的步骤。",
+          "depends_on": [
+            "u6-l3",
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "Dump 数据落盘与异常调试",
+          "order": 2,
+          "filename": "u9-l2-dump-debug.md",
+          "level": "advanced",
+          "topic": "讲解 DataDump 如何把算子输入输出、溢出数据落盘，辅助精度对齐与异常排查。",
+          "learning_goals": [
+            "理解 DataDump 的机制与配置",
+            "掌握正常 dump 与异常 dump",
+            "了解精度对齐与问题定位方法"
+          ],
+          "source_files": [
+            "docs/zh/design/features/datadump.md",
+            "docs/zh/user_guides/dump"
+          ],
+          "minimal_modules": [
+            "DataDump 机制",
+            "溢出与异常 dump",
+            "精度对齐定位"
+          ],
+          "practice_task": "阅读 datadump.md 与 dump 用户指南，写出开启 dump 落盘某个算子输入输出的配置步骤，并说明异常 dump 的触发条件。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l3",
+          "title": "模型缓存 Model Cache",
+          "order": 3,
+          "filename": "u9-l3-model-cache.md",
+          "level": "advanced",
+          "topic": "讲解模型缓存机制如何复用已编译产物（OM/JIT 缓存），减少重复编译开销。",
+          "learning_goals": [
+            "理解模型缓存的命中与失效机制",
+            "掌握缓存对编译加速的价值",
+            "了解缓存配置方式"
+          ],
+          "source_files": [
+            "docs/zh/design/features/model_cache.md",
+            "compiler/graph/build/model_cache.cc"
+          ],
+          "minimal_modules": [
+            "缓存命中与失效",
+            "编译加速",
+            "缓存配置"
+          ],
+          "practice_task": "阅读 model_cache.md 与 model_cache.cc，说明编译缓存是如何判断可复用、何时失效的，写出启用缓存的配置思路。",
+          "depends_on": [
+            "u4-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l4",
+          "title": "外置权重与 SO-in-OM",
+          "order": 4,
+          "filename": "u9-l4-external-weight-so-in-om.md",
+          "level": "advanced",
+          "topic": "讲解外置权重（权重分离落盘）与 SO-in-OM（算子 so 打包进模型，自包含部署）两种产物组织机制。",
+          "learning_goals": [
+            "理解外置权重的工作方式与收益",
+            "掌握 SO-in-OM 的自包含部署",
+            "了解两种机制对部署的影响"
+          ],
+          "source_files": [
+            "docs/zh/design/features/external_weight.md",
+            "docs/zh/design/features/so_in_om.md"
+          ],
+          "minimal_modules": [
+            "外置权重",
+            "SO-in-OM",
+            "产物组织与部署"
+          ],
+          "practice_task": "阅读 external_weight.md 与 so_in_om.md，对比两种机制，分别写出一个适用场景并说明它们如何改变 OM 的部署形态。",
+          "depends_on": [
+            "u7-l4",
+            "u6-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l5",
+          "title": "测试体系:UT/ST 开发与贡献流程",
+          "order": 5,
+          "filename": "u9-l5-testing-and-contribution.md",
+          "level": "advanced",
+          "topic": "讲解 GE 的测试体系（UT 单元测试、ST 系统测试、test 框架）以及如何参与贡献、运行测试。",
+          "learning_goals": [
+            "理解 UT/ST 的组织与 test 框架",
+            "掌握测试用例开发与运行方式",
+            "了解贡献与代码规范流程"
+          ],
+          "source_files": [
+            "tests",
+            "docs/en/contributions/dev_test_guide/UT_testcase_dev_guide.md",
+            "docs/en/contributions/dev_test_guide/ST_testcase_dev_guide.md",
+            "CONTRIBUTING.md"
+          ],
+          "minimal_modules": [
+            "UT/ST 体系",
+            "测试开发与运行",
+            "贡献流程"
+          ],
+          "practice_task": "阅读测试开发指南与 tests 目录，写出一个 UT 用例的最小结构与运行方式，并结合 CONTRIBUTING.md 说出提交流程的关键步骤。",
+          "depends_on": [
+            "u4-l1",
+            "u6-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
