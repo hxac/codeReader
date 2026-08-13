@@ -1,0 +1,1049 @@
+{
+  "project": "ascend-transformer-boost",
+  "head": "578daaec1e5cf238ecfa8607a24ccbb606b46b6a",
+  "rationale": "ATB（Ascend Transformer Boost）是面向昇腾处理器的 Transformer 加速库，体量大（72+ 推理算子、训练算子、Kernel 层、Python 绑定、通信、图算子、插件/自定义算子开发），因此手册按\"认知→调用→框架内核→关键算子→通信与图→自定义开发→工程化\"七层递进设计，共 36 篇讲义、7 个单元。单元 1（beginner）先建立项目定位、目录、构建、核心数据类型、Context 与 Operation 接口的心智模型，这是理解一切的前提；单元 2 用 C++/Python 两种方式把\"调用一个算子\"跑通，并讲清参数体系，建立正反馈；单元 3（intermediate）下沉到 OperationBase→Runner→AclnnRunner→Kernel(MKI)→Context 资源池的执行链路，这是后续所有算子讲义的公共基础，故作为强依赖；单元 4 串讲 Transformer 关键算子（Linear→Norm→Activation→SelfAttention→KVCache→RoPE→MLA→采样/MoE），依赖单元 3 的链路知识；单元 5 讲通信算子(HCCL)与图算子机制（原理→Builder→示例），图算子是对单算子的组合升华；单元 6（advanced）进入插件机制与自定义算子开发（Kernel→框架集成→交付件→ops_customize 独立编译），是最高阶的产出；单元 7 覆盖 Tiling/多流调度、日志性能、测试、编译选项与贡献流程等工程化主题。每篇只讲一个主题、引用 1-6 个已确认存在的源码文件、附带可操作实践任务，依赖关系严格按\"先公共链路后具体算子、先原理后开发\"组织。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 ATB 与快速上手",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位、加速原理与整体架构",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 ATB 是什么、解决什么问题，三大能力（融合算子/图算子/插件机制）以及软件架构分层。",
+          "learning_goals": [
+            "理解 ATB 的定位与适用场景",
+            "掌握融合算子、图算子、插件三种能力的区别",
+            "建立从公共 API 到 Kernel 的整体架构认知"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/ATB加速原理.md",
+            "include/atb/atb_infer.h"
+          ],
+          "minimal_modules": [
+            "公共 API 头文件总览",
+            "架构图与三大能力"
+          ],
+          "practice_task": "阅读 README 与加速原理文档，画出 ATB 的分层架构图，并用自己的话写出融合算子与图算子的区别。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构与代码组织",
+          "order": 2,
+          "filename": "u1-l2-repo-layout.md",
+          "level": "beginner",
+          "topic": "讲解仓库顶层目录、src 子目录（atb/kernels/ops/torch_atb）的职责划分与代码组织约定。",
+          "learning_goals": [
+            "记住仓库主要目录的职责",
+            "理解 src/atb、src/ops、src/kernels、src/torch_atb 之间的分层关系",
+            "能快速定位某一类源码所在位置"
+          ],
+          "source_files": [
+            "README.md",
+            "CMakeLists.txt",
+            "src/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "目录结构说明",
+            "src 子模块划分"
+          ],
+          "practice_task": "在仓库中找到并记录：某个推理算子的代码目录、Kernel 实现目录、Python 绑定目录分别在哪里。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建系统与编译运行",
+          "order": 3,
+          "filename": "u1-l3-build-system.md",
+          "level": "beginner",
+          "topic": "讲解 CMake 构建选项、build.sh 脚本用法、ABI 选择与 set_env.sh 环境变量配置。",
+          "learning_goals": [
+            "掌握 bash scripts/build.sh 的编译流程",
+            "理解 CXX11 ABI、BUILD_PYBIND 等关键编译选项",
+            "学会配置运行环境变量"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "scripts/build.sh",
+            "scripts/set_env.sh",
+            "docs/compile_and_build.md"
+          ],
+          "minimal_modules": [
+            "CMake 选项",
+            "build.sh 流程",
+            "环境变量"
+          ],
+          "practice_task": "阅读 build.sh 与编译文档，列出至少 5 个编译选项及其作用，并说明为何切换 ABI 需要 --clean-first。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "核心数据类型：Tensor、VariantPack 与 SVector",
+          "order": 4,
+          "filename": "u1-l4-core-types.md",
+          "level": "beginner",
+          "topic": "讲解 atb::Tensor、TensorDesc、Dims、VariantPack、SVector、Status/ErrorType 等基础数据结构。",
+          "learning_goals": [
+            "理解 Tensor 的描述信息与 Device/Host 内存模型",
+            "掌握 VariantPack 如何承载输入输出",
+            "了解 Status 与 ErrorType 错误码体系"
+          ],
+          "source_files": [
+            "include/atb/types.h",
+            "include/atb/svector.h"
+          ],
+          "minimal_modules": [
+            "types.h 数据结构",
+            "svector 容器"
+          ],
+          "practice_task": "编写一段伪代码，构造一个输入 Tensor 描述（dtype/format/shape）和一个 VariantPack，并说明每个字段含义。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "Context 上下文与执行流管理",
+          "order": 5,
+          "filename": "u1-l5-context.md",
+          "level": "beginner",
+          "topic": "讲解 Context 的作用、创建销毁、执行流设置、ExecuteType 与 LaunchMode 两种下发模式。",
+          "learning_goals": [
+            "理解 Context 管理的全局资源",
+            "掌握单流与多流设置方法",
+            "区分 EXECUTE_NORMAL/PRELAUNCH/LAUNCH 与 KERNEL/GRAPH 下发模式"
+          ],
+          "source_files": [
+            "include/atb/context.h",
+            "src/atb/context/context.cpp"
+          ],
+          "minimal_modules": [
+            "Context 接口",
+            "ExecuteType/LaunchMode"
+          ],
+          "practice_task": "写出创建 Context、设置执行流并选择整图下发模式的最小代码片段。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l6",
+          "title": "Operation 接口与单算子执行流程",
+          "order": 6,
+          "filename": "u1-l6-operation-interface.md",
+          "level": "beginner",
+          "topic": "讲解 Operation 抽象类的 GetName/InferShape/GetInputNum/Setup/Execute 接口以及 CreateOperation 工厂。",
+          "learning_goals": [
+            "掌握 Operation 的核心虚函数语义",
+            "理解 Setup→Execute 的两段式执行流程",
+            "学会用 CreateOperation 模板创建算子"
+          ],
+          "source_files": [
+            "include/atb/operation.h",
+            "include/atb/types.h"
+          ],
+          "minimal_modules": [
+            "Operation 接口",
+            "CreateOperation/DestroyOperation"
+          ],
+          "practice_task": "对照 operation.h，画出从 CreateOperation 到 Setup、Execute、DestroyOperation 的完整时序图。",
+          "depends_on": [
+            "u1-l4",
+            "u1-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "算子调用实战",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "C++ 单算子调用 Demo 实战",
+          "order": 1,
+          "filename": "u2-l1-cpp-op-demo.md",
+          "level": "beginner",
+          "topic": "以 example/op_demo 中的 faupdate demo 为例，走通 C++ 调用算子的完整流程（资源初始化→建图→Setup→Execute→释放）。",
+          "learning_goals": [
+            "掌握 aclInit/aclrtSetDevice/CreateContext 的初始化套路",
+            "理解 VariantPack 装填与 workspace 分配",
+            "学会用 build.sh 编译运行单算子 demo"
+          ],
+          "source_files": [
+            "example/op_demo/faupdate/faupdate_demo.cpp",
+            "example/op_demo/faupdate/build.sh",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "demo 主流程",
+            "build.sh 编译"
+          ],
+          "practice_task": "在 example/op_demo 中选一个算子 demo，阅读并说明其初始化、Setup、Execute、资源释放四个阶段的代码。",
+          "depends_on": [
+            "u1-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Python（torch_atb）调用算子实战",
+          "order": 2,
+          "filename": "u2-l2-python-torch-atb.md",
+          "level": "beginner",
+          "topic": "讲解 torch_atb 模块的加载机制、用 Python 创建 Param 与 Operation 并在 NPU 上执行算子。",
+          "learning_goals": [
+            "理解 torch_atb 动态库加载与环境初始化",
+            "掌握 Python 端创建 Operation 并 forward 的写法",
+            "了解 .npu() 设备迁移与同步"
+          ],
+          "source_files": [
+            "torch_atb/__init__.py",
+            "README.md",
+            "example/graph_example.py"
+          ],
+          "minimal_modules": [
+            "torch_atb 加载",
+            "Python 调用算子"
+          ],
+          "practice_task": "参照 README 的 Python 示例，写一段用 torch_atb 调用 Linear 算子并打印输出的脚本。",
+          "depends_on": [
+            "u1-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "算子参数体系与公共枚举",
+          "order": 3,
+          "filename": "u2-l3-op-params.md",
+          "level": "beginner",
+          "topic": "讲解 infer_op_params.h 中的 Param 结构约定、InputLayout/QuantType/ActivationType 等公共枚举与 common_op_params。",
+          "learning_goals": [
+            "理解 Param 结构的命名与 rsv 预留字段约定",
+            "掌握数据排布、量化、激活等公共枚举",
+            "能根据算子名找到对应 Param 定义"
+          ],
+          "source_files": [
+            "include/atb/infer_op_params.h",
+            "include/atb/common_op_params.h"
+          ],
+          "minimal_modules": [
+            "infer 命名空间 Param",
+            "公共枚举"
+          ],
+          "practice_task": "在 infer_op_params.h 中找出 LinearParam、SelfAttentionParam 的字段，并解释关键字段含义。",
+          "depends_on": [
+            "u1-l6"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "框架内核与执行链路",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "OperationBase 框架基类",
+          "order": 1,
+          "filename": "u3-l1-operation-base.md",
+          "level": "intermediate",
+          "topic": "讲解 OperationBase 如何实现 Operation 接口、InferShapeImpl/CreateRunner 等钩子函数与 IR 配置。",
+          "learning_goals": [
+            "理解 OperationBase 对 Operation 的模板方法实现",
+            "掌握 InferShapeImpl、SetupCheckImpl、CreateRunner 等钩子",
+            "了解 OperationIr 与参数 JSON 序列化"
+          ],
+          "source_files": [
+            "src/atb/operation/operation_base.h",
+            "src/atb/operation/operation.cpp"
+          ],
+          "minimal_modules": [
+            "OperationBase 接口",
+            "钩子函数"
+          ],
+          "practice_task": "对照 operation_base.h，列出 OperationBase 暴露给子类必须实现的纯虚钩子与可选重写的钩子。",
+          "depends_on": [
+            "u1-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Runner 执行单元体系",
+          "order": 2,
+          "filename": "u3-l2-runner-system.md",
+          "level": "intermediate",
+          "topic": "讲解 Runner 基类、OpsRunner、KernelGraph 的关系，以及 Runner 如何被 Operation 通过 CreateRunner 创建和调度。",
+          "learning_goals": [
+            "理解 Runner 作为 Operation 后端执行单元的定位",
+            "掌握 OpsRunner 与 KernelGraph 的组图机制",
+            "理清 Operation→Runner→Kernel 的调用链"
+          ],
+          "source_files": [
+            "src/atb/runner/runner.h",
+            "src/atb/runner/ops_runner.h",
+            "src/atb/runner/kernel_graph.h"
+          ],
+          "minimal_modules": [
+            "Runner 基类",
+            "OpsRunner/KernelGraph"
+          ],
+          "practice_task": "画出 Operation::Execute 内部到 Runner 再到 KernelGraph 的调用链路图。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "AclnnRunner 与 CANN 算子适配",
+          "order": 3,
+          "filename": "u3-l3-aclnn-runner.md",
+          "level": "intermediate",
+          "topic": "讲解 AclnnRunner 如何把 ATB 的 Tensor/VariantPack 适配为 aclnn 的 aclTensor/aclOpExecutor 并调用 CANN 算子。",
+          "learning_goals": [
+            "理解 aclnn 适配层的作用与 AclNNTensor/AclNNVariantPack",
+            "掌握 ATB Tensor 与 aclTensor 的转换",
+            "了解为何同一算子有 aclnn/ops 多种 runner"
+          ],
+          "source_files": [
+            "src/atb/runner/aclnn_runner.h",
+            "src/ops/ops_infer/linear/linear_aclnn_runner.cpp"
+          ],
+          "minimal_modules": [
+            "AclnnRunner",
+            "aclnn 适配数据结构"
+          ],
+          "practice_task": "阅读 linear_aclnn_runner.cpp，说明它如何把 atb::Tensor 转成 aclTensor 并执行 aclnn 算子。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "Kernel 层与 MKI 框架",
+          "order": 4,
+          "filename": "u3-l4-kernel-mki.md",
+          "level": "intermediate",
+          "topic": "讲解 src/kernels 目录结构、AscendC Kernel 实现、Tiling 机制以及 MKI（KernelBase/OperationBase/注册宏）框架。",
+          "learning_goals": [
+            "理解 op_kernel/tiling/kernel.cpp/operation.cpp 四件套",
+            "掌握 TilingData/BlockDim/TilingKey 概念",
+            "了解 MKI 的 REG_KERNEL_BASE/REG_OPERATION 注册机制"
+          ],
+          "source_files": [
+            "docs/starting_from_a_simple_operator.md",
+            "src/kernels/configs/build_config.json",
+            "src/kernels/include/asdops/params/params.h"
+          ],
+          "minimal_modules": [
+            "Kernel 四件套",
+            "MKI 注册框架"
+          ],
+          "practice_task": "根据开发文档，描述一个新算子的 Kernel 层需要新建哪些文件、各自职责是什么。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "Context 资源池管理",
+          "order": 5,
+          "filename": "u3-l5-context-pools.md",
+          "level": "intermediate",
+          "topic": "讲解 Context 内部的 TilingBufferPool、Allocator、RunnerPool 等资源池如何管理 Device/Host 内存与 Runner 复用。",
+          "learning_goals": [
+            "理解 Host/Device TilingBufferPool 的块管理",
+            "掌握 Allocator 抽象与默认实现",
+            "了解 RunnerPool 的复用机制"
+          ],
+          "source_files": [
+            "src/atb/context/context_base.h",
+            "src/atb/context/tiling_buffer_pool/tiling_buffer_pool.h",
+            "src/atb/context/allocator/default_device_allocator.h",
+            "src/atb/context/runner_pool.h"
+          ],
+          "minimal_modules": [
+            "TilingBufferPool",
+            "Allocator",
+            "RunnerPool"
+          ],
+          "practice_task": "说明 TilingBufferPool 为何要分 Host 与 Device 两个池，以及 CreateContext 的可配参数如何影响它们。",
+          "depends_on": [
+            "u1-l5",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "关键 Transformer 算子精讲",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Linear 算子族",
+          "order": 1,
+          "filename": "u4-l1-linear-family.md",
+          "level": "intermediate",
+          "topic": "讲解 Linear、LinearParallel、LinearSparse 及反量化/einsum 变体的实现与 runner 选择逻辑。",
+          "learning_goals": [
+            "掌握 LinearOperation 的 InferShape 与 runner 创建",
+            "理解并行/稀疏 Linear 的差异",
+            "了解 dequant/einsum 等 Linear 变体"
+          ],
+          "source_files": [
+            "src/ops/ops_infer/linear/linear_operation.cpp",
+            "src/ops/ops_infer/linear/linear_ops_runner.cpp",
+            "src/ops/ops_infer/linear_parallel/linear_parallel_operation.cpp"
+          ],
+          "minimal_modules": [
+            "LinearOperation",
+            "Linear 变体 runner"
+          ],
+          "practice_task": "对比 linear_operation 与 linear_parallel_operation，说明两者在输入输出与 runner 上的差异。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Normalization 算子：LayerNorm 与 RMSNorm",
+          "order": 2,
+          "filename": "u4-l2-normalization.md",
+          "level": "intermediate",
+          "topic": "讲解 LayerNorm、RMSNorm 算子的参数、InferShape 与 runner 实现。",
+          "learning_goals": [
+            "掌握 LayerNorm/RMSNorm 的参数与计算语义",
+            "理解归一化算子的 InferShape 规则",
+            "了解 cohere_layernorm 等变体存在"
+          ],
+          "source_files": [
+            "src/ops/ops_infer/layer_norm/layer_norm_operation.cpp",
+            "src/ops/ops_infer/rms_norm/rms_norm_operation.cpp"
+          ],
+          "minimal_modules": [
+            "LayerNormOperation",
+            "RmsNormOperation"
+          ],
+          "practice_task": "阅读两个 normalization operation，写出它们 InferShapeImpl 的输出推导规则。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "激活与元素级算子",
+          "order": 3,
+          "filename": "u4-l3-activation-elewise.md",
+          "level": "intermediate",
+          "topic": "讲解 Activation（GELU/SiLU/ReLU 等）与 Elewise 元素级算子的实现与激活类型枚举。",
+          "learning_goals": [
+            "掌握 ActivationType 枚举与各类激活函数",
+            "理解 Elewise 元素级运算的实现",
+            "了解激活算子的 runner 选择"
+          ],
+          "source_files": [
+            "src/ops/ops_infer/activation/activation_operation.cpp",
+            "src/ops/ops_infer/elewise/elewise_operation.cpp"
+          ],
+          "minimal_modules": [
+            "ActivationOperation",
+            "ElewiseOperation"
+          ],
+          "practice_task": "在 activation_operation 中找出它如何根据 ActivationType 选择不同 kernel 或 runner。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "Self-Attention 融合算子",
+          "order": 4,
+          "filename": "u4-l4-self-attention.md",
+          "level": "intermediate",
+          "topic": "讲解 SelfAttention 算子的多种 runner（fusion/bypass/encoder、910a 适配）、参数与 BSND/BNSD 排布。",
+          "learning_goals": [
+            "掌握 SelfAttentionParam 关键字段",
+            "理解为何有多个 runner 与 910a 适配",
+            "了解 InputLayout BSND/BNSD 的差异"
+          ],
+          "source_files": [
+            "src/ops/ops_infer/self_attention/self_attention_operation.cpp",
+            "src/ops/ops_infer/self_attention/self_attention_aclnn_runner.cpp"
+          ],
+          "minimal_modules": [
+            "SelfAttentionOperation",
+            "SelfAttention 多 runner"
+          ],
+          "practice_task": "列出 self_attention 目录下的 runner 种类，并说明每种 runner 适用的场景或芯片。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "PagedAttention 与 KV Cache 机制",
+          "order": 5,
+          "filename": "u4-l5-paged-attention-kv-cache.md",
+          "level": "intermediate",
+          "topic": "讲解 PagedAttention 与 KV Cache（kv_cache、reshape_and_cache、paged_cache_load）在大模型推理中的作用。",
+          "learning_goals": [
+            "理解 PagedAttention 的分页 KV 设计",
+            "掌握 KV Cache 写入与加载算子",
+            "了解 prefix encoder 等变体"
+          ],
+          "source_files": [
+            "src/ops/ops_infer/paged_attention/paged_attention_operation.cpp",
+            "src/ops/ops_infer/kv_cache/kv_cache_operation.cpp"
+          ],
+          "minimal_modules": [
+            "PagedAttentionOperation",
+            "KvCacheOperation"
+          ],
+          "practice_task": "说明 PagedAttention 与普通 SelfAttention 在输入（如 KV Cache 指针、block table）上的关键区别。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l6",
+          "title": "RoPE 与位置编码算子",
+          "order": 6,
+          "filename": "u4-l6-rope-positional.md",
+          "level": "intermediate",
+          "topic": "讲解 RoPE 旋转位置编码算子、DynamicNTK 以及 norm_rope_reshape 融合算子。",
+          "learning_goals": [
+            "掌握 RopeParam 与旋转位置编码计算",
+            "理解 DynamicNTK 的长序列外推",
+            "了解 norm_rope_reshape 融合的收益"
+          ],
+          "source_files": [
+            "src/ops/ops_infer/rope/rope_operation.cpp",
+            "src/ops/ops_infer/norm_rope_reshape/norm_rope_reshape_operation.cpp"
+          ],
+          "minimal_modules": [
+            "RopeOperation",
+            "NormRopeReshapeOperation"
+          ],
+          "practice_task": "对比 rope 与 norm_rope_reshape，说明融合算子相比单算子组合的性能优势来源。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l7",
+          "title": "MLA 多头潜在注意力",
+          "order": 7,
+          "filename": "u4-l7-mla.md",
+          "level": "intermediate",
+          "topic": "讲解 MultiLatentAttention、MlaPreprocess 等 DeepSeek 风格 MLA 算子的实现。",
+          "learning_goals": [
+            "理解 MLA 的潜在注意力机制",
+            "掌握 MlaPreprocess 的预处理作用",
+            "了解 ring_mla 多卡场景变体"
+          ],
+          "source_files": [
+            "src/ops/ops_infer/multi_latent_attention/multi_latent_attention_operation.cpp",
+            "src/ops/ops_infer/mla_preprocess/mla_preprocess_operation.cpp"
+          ],
+          "minimal_modules": [
+            "MultiLatentAttentionOperation",
+            "MlaPreprocessOperation"
+          ],
+          "practice_task": "说明 MLA 与标准 MultiHeadAttention 在 KV 压缩维度上的区别，以及 preprocess 算子的作用。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l8",
+          "title": "采样、TopK 与 MoE 融合算子",
+          "order": 8,
+          "filename": "u4-l8-sampling-moe.md",
+          "level": "intermediate",
+          "topic": "讲解 Multinomial、FusedAddTopkDiv、GroupTopk 采样算子以及 Gating、GroupedMatmulWithRouting 等 MoE 相关算子。",
+          "learning_goals": [
+            "掌握采样类算子在生成解码中的作用",
+            "理解 Gating/路由与 GroupedMatmul 的 MoE 流程",
+            "了解融合算子减少 kernel launch 的收益"
+          ],
+          "source_files": [
+            "src/ops/ops_infer/multinomial/multinomial_operation.cpp",
+            "src/ops/ops_infer/fused_add_topk_div/fused_add_topk_div_operation.cpp",
+            "src/ops/ops_infer/gating/gating_operation.cpp",
+            "src/ops/ops_infer/grouped_matmul_with_routing/grouped_matmul_with_routing_operation.cpp"
+          ],
+          "minimal_modules": [
+            "采样算子",
+            "MoE 融合算子"
+          ],
+          "practice_task": "梳理一次 MoE 前向（Gating→TopK 路由→GroupedMatmul）需要调用哪些 ATB 算子及其顺序。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "通信算子与图算子机制",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "通信算子与 HCCL 通信域",
+          "order": 1,
+          "filename": "u5-l1-comm-hccl.md",
+          "level": "intermediate",
+          "topic": "讲解 comm.h 通信域接口、AllReduce/AllGather/AllToAll 等集合通信算子与 HcclRunner。",
+          "learning_goals": [
+            "掌握 HCCL 通信域的创建与使用",
+            "理解 AllReduce/AllGather/AllToAll 算子语义",
+            "了解 HcclRunner 如何下发通信任务"
+          ],
+          "source_files": [
+            "include/atb/comm.h",
+            "src/ops/ops_infer/all_reduce/all_reduce_operation.cpp",
+            "src/ops/ops_infer/all_gather/all_gather_operation.cpp",
+            "src/atb/runner/hccl_runner.h"
+          ],
+          "minimal_modules": [
+            "comm.h 通信域",
+            "集合通信算子",
+            "HcclRunner"
+          ],
+          "practice_task": "写出创建 HCCL 通信域并执行一次 AllReduce 的关键步骤与涉及的接口。",
+          "depends_on": [
+            "u1-l5",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "图算子原理：GraphParam、Node 与 GraphOperation",
+          "order": 2,
+          "filename": "u5-l2-graph-op-principle.md",
+          "level": "intermediate",
+          "topic": "讲解 GraphParam、Node、Chunk、ReshapeFunc 等图结构，以及 GraphOperation 如何把多个单算子组合成图并统一调度。",
+          "learning_goals": [
+            "掌握 GraphParam/Node 的字段与组图规则",
+            "理解 tensorId 编址与中间 Tensor",
+            "了解 GraphOperation 的 InferShape 与 CreateRunner"
+          ],
+          "source_files": [
+            "include/atb/types.h",
+            "src/atb/operation/graph_operation.h",
+            "src/atb/runner/graph_runner.h"
+          ],
+          "minimal_modules": [
+            "GraphParam/Node",
+            "GraphOperation"
+          ],
+          "practice_task": "用 Node、inTensorIds、outTensorIds 描述一个由两个 Linear 串联的最小图算子结构。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "GraphOpBuilder 组图实战",
+          "order": 3,
+          "filename": "u5-l3-graph-op-builder.md",
+          "level": "intermediate",
+          "topic": "讲解 GraphOpBuilder 的 Init/Reshape/AddOperation/Build 接口，以及基于 tensor 名称自动组图的简化方式。",
+          "learning_goals": [
+            "掌握 GraphOpBuilder 的 fluent 组图 API",
+            "理解 Reshape 与 AddOperation 的名称编址",
+            "学会用 Build 生成可执行图算子"
+          ],
+          "source_files": [
+            "include/atb/graph_op_builder.h",
+            "src/atb/operation/graph_op_builder_impl.cpp"
+          ],
+          "minimal_modules": [
+            "GraphOpBuilder 接口",
+            "组图实现"
+          ],
+          "practice_task": "用 GraphOpBuilder 写出把输入经过 SelfAttention 再经过 Linear 的图算子构建伪代码。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "图算子 Python 与 C++ 示例",
+          "order": 4,
+          "filename": "u5-l4-graph-op-examples.md",
+          "level": "intermediate",
+          "topic": "通过 graph_example.py 与 multiStream 多图 demo、atb_aclnn 图示例，演示真实图算子的端到端构建与执行。",
+          "learning_goals": [
+            "掌握 Python Builder 端组图与执行",
+            "理解多流多图（multiStream）场景",
+            "了解 C++ 端图算子的集成方式"
+          ],
+          "source_files": [
+            "example/graph_example.py",
+            "example/multiStream/multiStream_multiGraph_demo.cpp",
+            "src/torch_atb/graph_operation_builder.cpp"
+          ],
+          "minimal_modules": [
+            "Python 图示例",
+            "C++ 多图示例"
+          ],
+          "practice_task": "阅读 graph_example.py，说明它如何 add_input、组算子并最终执行图算子。",
+          "depends_on": [
+            "u5-l3",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "自定义算子与插件开发",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "插件机制：OperationInfra 与 PluginOperation",
+          "order": 1,
+          "filename": "u6-l1-plugin-infra.md",
+          "level": "advanced",
+          "topic": "讲解 OperationInfra 插件基类、PluginOperation 与 PluginRunner，理解用户自定义算子如何嵌入 ATB 执行框架。",
+          "learning_goals": [
+            "理解 OperationInfra 作为插件算子基类的设计",
+            "掌握 PluginOperation/PluginRunner 的桥接作用",
+            "了解插件算子的 streamId 管理"
+          ],
+          "source_files": [
+            "include/atb/operation_infra.h",
+            "src/atb/operation/operation_infra.cpp",
+            "src/atb/operation/plugin_operation.h",
+            "src/atb/runner/plugin_runner.h"
+          ],
+          "minimal_modules": [
+            "OperationInfra",
+            "PluginOperation/PluginRunner"
+          ],
+          "practice_task": "对照源码，说明 OperationInfra、PluginOperation、用户 Operation 三者之间的持有与转发关系。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "自定义算子 Kernel 开发（AscendC 与 Tiling）",
+          "order": 2,
+          "filename": "u6-l2-custom-kernel.md",
+          "level": "advanced",
+          "topic": "以 customize_blockcopy 为例，讲解 AscendC Kernel 的 CopyIn/Compute/CopyOut、Tiling 算法与 Kernel 注册。",
+          "learning_goals": [
+            "掌握 AscendC Kernel 的三段式流水编写",
+            "理解 TilingData/Tiling 算法设计",
+            "了解 KernelBase 与 REG_KERNEL_BASE 注册"
+          ],
+          "source_files": [
+            "docs/starting_from_a_simple_operator.md",
+            "ops_customize/ops/customize_blockcopy/kernel_implement/customize_blockcopy_kernel.cpp",
+            "ops_customize/ops/customize_blockcopy/kernel_implement/op_kernel/customize_blockcopy.cpp"
+          ],
+          "minimal_modules": [
+            "AscendC Kernel",
+            "Tiling",
+            "Kernel 注册"
+          ],
+          "practice_task": "参照 addcustom 文档与 blockcopy 样例，描述一个新 Kernel 从 Tiling 到 CopyIn/Compute/CopyOut 的实现步骤。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "自定义算子的框架集成（Operation + Runner + 注册）",
+          "order": 3,
+          "filename": "u6-l3-custom-integration.md",
+          "level": "advanced",
+          "topic": "讲解如何把 Kernel 集成进 ATB：编写 Operation（InferShape/CreateRunner）与 OpsRunner（SetupKernelGraph），并用 REG 宏注册。",
+          "learning_goals": [
+            "掌握自定义 Operation 的 InferShape 与校验实现",
+            "理解 OpsRunner 的 SetupKernelGraph 组图",
+            "学会 REG_RUNNER_TYPE/REG_OP_PARAM 注册"
+          ],
+          "source_files": [
+            "docs/starting_from_a_simple_operator.md",
+            "ops_customize/ops/customize_blockcopy/operation_implement/customize_block_copy_operation.cpp",
+            "ops_customize/ops/customize_blockcopy/operation_implement/customize_block_copy_ops_runner.cpp"
+          ],
+          "minimal_modules": [
+            "自定义 Operation",
+            "自定义 OpsRunner",
+            "注册宏"
+          ],
+          "practice_task": "梳理把一个新算子接入 ATB 需要新增/修改的 Operation 与 Runner 文件，以及注册点。",
+          "depends_on": [
+            "u6-l2",
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "算子交付件与配置体系",
+          "order": 4,
+          "filename": "u6-l4-deliverables-config.md",
+          "level": "advanced",
+          "topic": "讲解新算子需要的全部交付件：Param 定义、infer_op_params.h、ops_configs ini、param_to_json、测试反序列化等配置。",
+          "learning_goals": [
+            "掌握 atb_ops_info.ini 输入输出规格约束",
+            "理解 Param 的 JSON 序列化与反序列化",
+            "了解 op_list.yaml 等算子清单配置"
+          ],
+          "source_files": [
+            "docs/starting_from_a_simple_operator.md",
+            "ops_configs/atb_ops_info.ini",
+            "include/atb/infer_op_params.h",
+            "src/atb/utils/param_to_json.cpp"
+          ],
+          "minimal_modules": [
+            "ini 规格约束",
+            "Param JSON 化",
+            "测试反序列化"
+          ],
+          "practice_task": "为新算子编写一份 atb_ops_info.ini 段落与 param_to_json 模板特化伪代码。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "ops_customize 独立编译开发流程",
+          "order": 5,
+          "filename": "u6-l5-ops-customize.md",
+          "level": "advanced",
+          "topic": "讲解 ops_customize 目录如何让用户在不重编 ATB 的情况下开发编译自定义算子，包括其 CMake、build.sh 与 ini 配置。",
+          "learning_goals": [
+            "理解 ops_customize 的独立编译价值",
+            "掌握 BUILD_CUSTOMIZE_OPS 编译开关",
+            "了解 customize_ops_info.ini 配置"
+          ],
+          "source_files": [
+            "ops_customize/README.md",
+            "ops_customize/CMakeLists.txt",
+            "ops_customize/build.sh",
+            "ops_customize/customize_ops_configs/customize_ops_info.ini"
+          ],
+          "minimal_modules": [
+            "ops_customize 结构",
+            "独立编译脚本"
+          ],
+          "practice_task": "阅读 ops_customize/README 与 build.sh，写出在已安装 ATB 上独立编译一个自定义算子的命令与流程。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "工程化、调试与贡献",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "Tiling 调度与多流执行",
+          "order": 1,
+          "filename": "u7-l1-tiling-multistream.md",
+          "level": "advanced",
+          "topic": "讲解异步 Tiling 拷贝、多流（SetExecuteStreams）与多图（multiStream）执行、EXECUTE_PRELAUNCH/LAUNCH 两段式下发的进阶用法。",
+          "learning_goals": [
+            "理解异步 TilingCopy 的 stream/event 机制",
+            "掌握多流与 streamId 路由",
+            "了解两段式下发的适用场景"
+          ],
+          "source_files": [
+            "src/atb/context/tiling_buffer_pool/tiling_buffer_pool.h",
+            "include/atb/context.h",
+            "example/multiStream/multiStream_multiGraph_demo.cpp"
+          ],
+          "minimal_modules": [
+            "异步 Tiling",
+            "多流多图",
+            "两段式下发"
+          ],
+          "practice_task": "阅读 multiStream demo，说明它如何用多流并行执行多个图算子并做同步。",
+          "depends_on": [
+            "u3-l5",
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "日志与性能 Profiling",
+          "order": 2,
+          "filename": "u7-l2-logging-profiling.md",
+          "level": "advanced",
+          "topic": "讲解 ATB 日志环境变量、ATB_LOG 宏、LogLevel，以及 torch_atb 的 ProfStats 性能统计接口。",
+          "learning_goals": [
+            "掌握日志级别与环境变量配置",
+            "理解 ATB_LOG 宏的使用",
+            "学会用 ProfStats 采集运行时性能"
+          ],
+          "source_files": [
+            "docs/logging_and_debugging.md",
+            "src/atb/utils/log.h",
+            "src/torch_atb/prof/prof_stats.h"
+          ],
+          "minimal_modules": [
+            "日志环境变量",
+            "ATB_LOG",
+            "ProfStats"
+          ],
+          "practice_task": "列出至少 3 个控制 ATB 日志的环境变量，并说明如何用 ProfStats 获取算子耗时统计。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "测试框架与算子测试",
+          "order": 3,
+          "filename": "u7-l3-test-framework.md",
+          "level": "advanced",
+          "topic": "讲解 tests 目录的测试体系（framework/unittest/infratest/apitest）、operation_funcs 的 JSON 驱动测试与精度/性能测试方法。",
+          "learning_goals": [
+            "理解 tests 各子目录的测试定位",
+            "掌握 operation_funcs 中算子的 JSON 反序列化与注册",
+            "了解精度与性能测试的编写方式"
+          ],
+          "source_files": [
+            "docs/测试框架指南.md",
+            "tests/framework/c++/atb_torch/operation/operation_funcs.cpp",
+            "tests/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "测试目录体系",
+            "operation_funcs",
+            "精度/性能测试"
+          ],
+          "practice_task": "参照 operation_funcs 与开发指南，为一个新算子编写 JSON 驱动的功能测试用例框架。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "编译选项、ABI 与 Sanitizers",
+          "order": 4,
+          "filename": "u7-l4-build-options-abi.md",
+          "level": "advanced",
+          "topic": "深入讲解 USE_CXX11_ABI、BUILD_TEST_FRAMEWORK、USE_ASAN/MSSANITIZER、USE_UNIT_TEST 等编译选项的原理与组合使用。",
+          "learning_goals": [
+            "理解 CXX11 ABI 对链接的影响",
+            "掌握各类测试编译开关",
+            "了解 ASAN/MSAN 内存检测的启用方式"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "scripts/build.sh",
+            "docs/compile_and_build.md"
+          ],
+          "minimal_modules": [
+            "ABI 选项",
+            "测试开关",
+            "Sanitizers"
+          ],
+          "practice_task": "设计一条命令：用单元测试 + ASAN 方式编译 ATB，并解释每个选项的作用。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l5",
+          "title": "版本兼容、贡献流程与常见问题",
+          "order": 5,
+          "filename": "u7-l5-version-contributing.md",
+          "level": "advanced",
+          "topic": "讲解 ATB 的版本兼容性（version.info、ABI 一年兼容）、贡献指南（fork→PR）、pre-commit 与常见问题 FAQ。",
+          "learning_goals": [
+            "理解版本号与依赖版本约束",
+            "掌握贡献代码的标准流程",
+            "学会用 FAQ 排查编译安装问题"
+          ],
+          "source_files": [
+            "docs/contributing.md",
+            "README.md",
+            "version.info",
+            "docs/faq.md"
+          ],
+          "minimal_modules": [
+            "版本兼容",
+            "贡献流程",
+            "FAQ"
+          ],
+          "practice_task": "阅读贡献指南与 version.info，写出一个完整的新算子 PR 检查清单（代码、测试、文档、配置）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
