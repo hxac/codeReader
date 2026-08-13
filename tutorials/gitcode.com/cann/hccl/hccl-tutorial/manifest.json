@@ -1,0 +1,925 @@
+{
+  "project": "hccl",
+  "head": "757867153ef03d005ec8752e6cb8f802cecd1e0a",
+  "rationale": "HCCL 是一个大型 C++ 集合通信库，整体由「算子入口 → 算法选择(Selector) → 算法执行(Executor) → 引擎模板(Template)」四级链路驱动，并通过 dlsym 与独立的 HCOMM 仓解耦。学习顺序据此设计：先用 Unit 1 让读者从零建立项目定位、概念、目录与运行的认知；Unit 2 顺 public API 进入单算子主链路（HcclAllReduce → OpParam → Selector → HcclExecOp）；Unit 3 集中讲透 op_common 四大组件（selector/executor/template/topo）与三套注册表，这是理解整个工程的关键骨架；Unit 4 补齐横切公共基础（AlgType/DevType/环境变量/日志校验），为算法与配置调优打基础；Unit 5 深入三类通信引擎（AICPU/AIV/CCU）的模板与内核下发、任务缓存等专家机制；Unit 6 讲 HCCL↔HCOMM 的 dlsym 解耦与控制面/数据面分离这一架构硬约束；Unit 7 落到二次开发（MC2 自定义算子、图模式、experimental 社区贡献、UT/ST 测试）。讲义之间通过 depends_on 严格按「概念→主链路→组件→基础→引擎→解耦→扩展」递进，确保初学者可循序跟读，同时覆盖源码结合与可操作实践。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 HCCL 与项目全貌",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "HCCL 项目定位与 CANN 软件栈",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "讲清 HCCL 是什么、在 CANN 软件栈中承上启下的位置，以及 hccl 与 hcomm 两个仓库的职责划分与 dlsym 解耦关系。",
+          "learning_goals": [
+            "理解 HCCL 作为昇腾 NPU 集合通信库的定位与核心能力",
+            "说清 HCCL 算子库与 HCOMM 通信基础库的分层职责",
+            "识别项目入口资料：README、AGENTS.md、架构简介"
+          ],
+          "source_files": [
+            "README.md",
+            "AGENTS.md",
+            "docs/zh/architecture/architecture-brief.md"
+          ],
+          "minimal_modules": [
+            "HCCL 概述与核心能力（README）",
+            "仓库定位与 hccl/hcomm 分层（AGENTS.md §1）",
+            "CANN 软件分层逻辑（architecture-brief §3）"
+          ],
+          "practice_task": "阅读 README 与 AGENTS.md，画出 HCCL 在 CANN 栈中的位置图，并用一句话区分本仓 cann/hccl 与 cann/hcomm 各自负责什么，标注两者如何通过 dlsym 解耦。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "集合通信核心概念与算法",
+          "order": 2,
+          "filename": "u1-l2-collective-comm-concepts.md",
+          "level": "beginner",
+          "topic": "建立集合通信领域概念：rank、通信域、通信算子、通信算法、通信引擎，以及 Ring/Mesh/RHD/NHR/Pipeline 等算法与分级通信原理。",
+          "learning_goals": [
+            "掌握 rank、通信域、RankGraph、通信引擎等核心术语",
+            "理解 AllReduce/AllGather/ReduceScatter 等原语的作用",
+            "了解 Server 内/Server 间分级通信流程"
+          ],
+          "source_files": [
+            "docs/zh/user_guide/concepts.md",
+            "docs/zh/architecture/architecture-brief.md",
+            "docs/zh/user_guide/coll_algo_intro/algo_intro.md",
+            "docs/zh/user_guide/coll_algo_intro/hierarchical_comm_principle.md"
+          ],
+          "minimal_modules": [
+            "基本概念与术语缩略语（concepts.md）",
+            "通信模型与通信引擎（architecture-brief §2）",
+            "算法简介与分级通信（algo_intro.md）"
+          ],
+          "practice_task": "用图示表达一次 AllReduce 在节点内/节点间两级拓扑下的 ReduceScatter→AllReduce→AllGather 分级过程，并说明 Ring 与 RHD 各自适合的场景。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "源码目录结构剖析",
+          "order": 3,
+          "filename": "u1-l3-directory-structure.md",
+          "level": "beginner",
+          "topic": "对照 README 与 AGENTS.md 的目录说明，遍历 src/ops、src/ops/op_common 四大组件、src/common、include、experimental、test 的真实目录结构。",
+          "learning_goals": [
+            "识别 src/ops 下每个算子目录与 op_common 四大组件",
+            "区分 src（生产级）与 experimental（社区试验）的边界",
+            "定位 include 对外头文件与 test 测试目录"
+          ],
+          "source_files": [
+            "README.md",
+            "AGENTS.md",
+            "docs/zh/architecture/architecture-brief.md"
+          ],
+          "minimal_modules": [
+            "README 目录结构说明",
+            "AGENTS.md §2 目录结构与分层约束",
+            "architecture-brief §3.2 目标目录结构"
+          ],
+          "practice_task": "在仓库中找到 all_reduce 算子的 selector、executor、template、topo 四类文件各一个，并列出 src/ops/op_common 下的四个子目录及职责。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "构建、安装与运行",
+          "order": 4,
+          "filename": "u1-l4-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解 build.sh 的一键编译能力、关键编译选项、CMake 工程组织与版本配套，以及如何产出并安装 .run 软件包。",
+          "learning_goals": [
+            "掌握 build.sh 的常用选项（--pkg/--full/--static/--asan/-u/-s）",
+            "理解 CMakeLists 与 version.cmake 的工程组织",
+            "了解编译产物与安装/卸载流程"
+          ],
+          "source_files": [
+            "build.sh",
+            "CMakeLists.txt",
+            "version.cmake",
+            "cmake/config.cmake",
+            "docs/zh/build/build.md"
+          ],
+          "minimal_modules": [
+            "build.sh 选项解析与编译函数",
+            "顶层 CMakeLists 与 src/CMakeLists 子目录组织",
+            "源码构建与上板测试流程（build.md）"
+          ],
+          "practice_task": "执行 bash build.sh --pkg 编译 host 包，定位 build_out 下的 .run 产物，并解释 --static 与 --asan 分别改变了什么构建行为。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "第一个 HCCL 程序",
+          "order": 5,
+          "filename": "u1-l5-first-hccl-program.md",
+          "level": "beginner",
+          "topic": "以 AllReduce 示例为主线，串起 HCCL 单算子 API 的完整生命周期：设备初始化、RootInfo、通信域、流、算子下发、同步与资源释放。",
+          "learning_goals": [
+            "掌握 aclInit→HcclGetRootInfo→HcclCommInitRootInfo→HcclAllReduce→Sync 的调用链",
+            "理解 sendBuf/recvBuf/count/dataType/op/comm/stream 参数含义",
+            "学会参照 examples 运行并修改一个集合通信样例"
+          ],
+          "source_files": [
+            "examples/02_collectives/01_allreduce/main.cc",
+            "include/hccl.h",
+            "examples/README.md"
+          ],
+          "minimal_modules": [
+            "AllReduce 示例 Sample/main 逻辑",
+            "HcclAllReduce 公共 API 签名（include/hccl.h）",
+            "examples 目录分类"
+          ],
+          "practice_task": "把 examples/02_collectives/01_allreduce/main.cc 中的 HcclAllReduce 改为 HcclAllGather（参考 examples/02_collectives/03_allgather），调整 recvBuf 大小并验证输出。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "对外 API 与单算子执行主链路",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "对外 API 与通信算子接口",
+          "order": 1,
+          "filename": "u2-l1-public-api-surface.md",
+          "level": "intermediate",
+          "topic": "系统梳理 include/hccl.h 对外暴露的全部通信算子，区分集合通信原语与点对点通信，理解参数规约与数据类型/归约类型。",
+          "learning_goals": [
+            "枚举 hccl.h 中的全部算子并分类（collective vs p2p）",
+            "理解 sendBuf/recvBuf/count/dataType/op/root 等统一参数模型",
+            "区分 AllReduce/AllGather/ReduceScatter/AlltoAll 等语义差异"
+          ],
+          "source_files": [
+            "include/hccl.h",
+            "README.md",
+            "docs/zh/user_guide/framework_integration.md"
+          ],
+          "minimal_modules": [
+            "hccl.h 全部算子声明",
+            "HcclDataType/HcclReduceOp 参数约束",
+            "单算子/图模式/aclgraph 三种执行形态"
+          ],
+          "practice_task": "为 hccl.h 中每个算子制作一张接口速查表（参数、是否需要 root、是否含 counts/displs 变长版本），并指出哪些是点对点算子。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "单算子入口与兼容分发",
+          "order": 2,
+          "filename": "u2-l2-op-entry-dispatch.md",
+          "level": "intermediate",
+          "topic": "以 HcclAllReduce 为例逐行剖析算子入口：版本兼容判断、OutPlace 判定、InitAndCheck、EntryLog，直到进入 OutPlaceCommon 主流程。",
+          "learning_goals": [
+            "掌握 HcclAllReduce 入口的兼容分发逻辑（GetHcommVersion/IsOutPlaceDevice）",
+            "理解 AllReduceInitAndCheck 中环境变量初始化与参数校验顺序",
+            "看清入口到 AllReduceOutPlaceCommon 的衔接"
+          ],
+          "source_files": [
+            "src/ops/all_reduce/all_reduce_op.h",
+            "src/ops/all_reduce/all_reduce_op.cc"
+          ],
+          "minimal_modules": [
+            "HcclAllReduce 入口与兼容分支",
+            "AllReduceInitAndCheck（InitEnvConfig+校验+rank 信息）",
+            "AllReduceEntryLog 接口日志"
+          ],
+          "practice_task": "在 all_reduce_op.cc 中标注 HcclAllReduce 从入口到 Selector 调用之间的每个 CHK_RET 步骤，并解释 count==0 与 rankSize==1 的早退分支。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "OpParam 参数结构与入参校验",
+          "order": 3,
+          "filename": "u2-l3-opparam-and-check.md",
+          "level": "intermediate",
+          "topic": "讲解贯穿整个执行链路的核心数据结构 OpParam（alg_param.h），以及 FillAllReduceOpParam 如何把 API 入参装配进 OpParam，配合 param_check 做合法性校验。",
+          "learning_goals": [
+            "掌握 OpParam 关键字段（opType/engine/opMode/DataDes/inputPtr/outputPtr/tag 等）",
+            "理解 FillAllReduceOpParam 的装配逻辑",
+            "了解 param_check 与 RPT_INPUT_ERR/CHK_RET 校验宏"
+          ],
+          "source_files": [
+            "src/ops/op_common/inc/alg_param.h",
+            "src/ops/all_reduce/all_reduce_op.cc",
+            "src/common/param_check.cc",
+            "src/common/param_check.h"
+          ],
+          "minimal_modules": [
+            "OpParam 结构与 DataDes 联合体",
+            "FillAllReduceOpParam 装配",
+            "param_check 与 RPT_INPUT_ERR/CHK_PTR_NULL"
+          ],
+          "practice_task": "给定一次 HcclAllReduce(sendBuf, recvBuf, count=1024, FP32, SUM) 调用，手写出 FillAllReduceOpParam 填充后的 OpParam 各关键字段值（inputSize、opType、DataDes.count/dataType、reduceType）。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "通信引擎选择与快速路径",
+          "order": 4,
+          "filename": "u2-l4-engine-selection.md",
+          "level": "intermediate",
+          "topic": "讲解 AllReduceOutPlaceCommon 中如何决定执行引擎（AICPU/AIV/CCU）以及 CCU FastLaunch、AIV Cache 等快速路径，进入 Selector 之前的分发逻辑。",
+          "learning_goals": [
+            "理解 HcclGetOpExpansionMode 如何设定 param.engine",
+            "识别 CCU FastLaunch 与 AIV Cache Replay 两条快速路径的触发条件",
+            "了解 CommEngine 枚举与单卡 SingleRankProc 分支"
+          ],
+          "source_files": [
+            "src/ops/all_reduce/all_reduce_op.cc",
+            "src/common/alg_type.h"
+          ],
+          "minimal_modules": [
+            "AllReduceOutPlaceCommon 主流程",
+            "ShouldGoCcuFastLaunch / HcclAivCacheCheckAndReplay",
+            "CommEngine 枚举与 HcclGetOpExpansionMode"
+          ],
+          "practice_task": "梳理 AllReduceOutPlaceCommon 中从 FillAllReduceOpParam 到 Selector() 之间的所有分支（CCU 9.0 老流程、CCU FastLaunch、AIV Cache、单卡），用流程图表达引擎选择优先级。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "op_common 四大通用组件",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "op_common 架构与三大注册表总览",
+          "order": 1,
+          "filename": "u3-l1-opcommon-overview.md",
+          "level": "intermediate",
+          "topic": "总览 op_common 的 selector/executor/template/topo 四大组件及其注册表，建立 Selector→HcclExecOp→Template 的全局数据流认知。",
+          "learning_goals": [
+            "理解 op_common 四大组件的职责与协作",
+            "认识三大注册表（selector/executor/template registry）",
+            "建立从 algName 到 executor/template 的完整调度视图"
+          ],
+          "source_files": [
+            "src/ops/op_common/op_common.h",
+            "src/ops/op_common/op_common.cc",
+            "src/ops/op_common/selector/selector_registry.h",
+            "src/ops/op_common/executor/registry/coll_alg_v2_exec_registry.h",
+            "src/ops/op_common/template/registry/alg_v2_template_register.h"
+          ],
+          "minimal_modules": [
+            "op_common.h/cc 的 HcclExecOp/Selector 入口",
+            "SelectorRegistry / CollAlgExecRegistryV2 / InsAlgTemplateRegistry",
+            "selector→executor→template 数据流"
+          ],
+          "practice_task": "画出一张端到端调度图：HcclAllReduce → Selector 产出 algName → HcclExecOp 查注册表得到 executor → executor 在 Orchestrate 中调用 template，并标注三大注册表各自负责哪一环。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "算法选择器 Selector",
+          "order": 2,
+          "filename": "u3-l2-selector.md",
+          "level": "intermediate",
+          "topic": "深入 selector 子系统：ExecuteSelector 按优先级遍历、AutoSelectorBase 的引擎分发、per-op 选择器（如 AllReduceAutoSelector）如何输出 algName。",
+          "learning_goals": [
+            "掌握 SelectorRegistry 与 REGISTER_SELECTOR_BY_OPTYPE 注册机制",
+            "理解 ExecuteSelector::Run 的优先级遍历与 MATCH 语义",
+            "了解 AutoSelectorBase 到 SelectCcu/Aicpu/Aiv 的引擎分发"
+          ],
+          "source_files": [
+            "src/ops/op_common/selector/selector_registry.h",
+            "src/ops/op_common/selector/selector_registry.cc",
+            "src/ops/op_common/selector/execute_selector.h",
+            "src/ops/op_common/selector/execute_selector.cc",
+            "src/ops/op_common/selector/auto_selector_base.h",
+            "src/ops/all_reduce/selector/all_reduce_auto_selector.h",
+            "src/ops/all_reduce/selector/all_reduce_auto_selector.cc"
+          ],
+          "minimal_modules": [
+            "SelectorRegistry 与 REGISTER_SELECTOR_BY_OPTYPE",
+            "ExecuteSelector::Run 优先级循环",
+            "AutoSelectorBase::Select 引擎分发与 algName 命名"
+          ],
+          "practice_task": "在 all_reduce_auto_selector.cc 中找到 AllReduceAutoSelector 的注册宏与 Select 方法，说明它如何根据 engine 返回类似 AicpuAllReduceSoleNHR / CcuMSAllReduceSoleMesh 的 algName。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "拓扑适配与拓扑信息 Topo",
+          "order": 3,
+          "filename": "u3-l3-topo.md",
+          "level": "intermediate",
+          "topic": "讲解 topo 子系统与 TopoInfo/TopoInfoWithNetLayerDetails 数据结构，以及 topo_match_* 家族如何把网络拓扑匹配成多级子通信域。",
+          "learning_goals": [
+            "理解 TopoInfo 与 TopoInfoWithNetLayerDetails 的字段含义",
+            "掌握 topo_match_* 家族（1d/multilevel/ubx）的 MatchTopo 抽象",
+            "了解 Selector 输出的 AlgHierarchyInfoForAllLevel 如何描述子通信域"
+          ],
+          "source_files": [
+            "src/ops/op_common/inc/alg_param.h",
+            "src/ops/op_common/topo/topo.h",
+            "src/ops/op_common/topo/topo.cc",
+            "src/ops/op_common/topo/topo_host.h",
+            "src/ops/op_common/topo/topo_match_base.h",
+            "src/ops/op_common/topo/topo_match_multilevel.h",
+            "src/ops/op_common/topo/topo_match_1d.h"
+          ],
+          "minimal_modules": [
+            "TopoInfo / TopoInfoWithNetLayerDetails（level0Topo/netLayerDetails）",
+            "TopoMatchBase 抽象与 MatchTopo 接口",
+            "TopoMatchMultilevel 的 TopoForLayer0/1/2"
+          ],
+          "practice_task": "对照 TopoInfoWithNetLayerDetails 字段，说明 topoLevelNums/level0Topo/netLayerDetails 分别描述什么，并解释 TopoMatchMultilevel 如何为 Mesh+NHR 算法产出两级子通信域。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "算法执行器 Executor",
+          "order": 4,
+          "filename": "u3-l4-executor.md",
+          "level": "intermediate",
+          "topic": "深入 executor 子系统：InsCollAlgBase 抽象、CollAlgExecRegistryV2 注册、HcclExecOp 如何经 CalcAlgHierarchyInfo/CalcRes/Orchestrate 完成执行。",
+          "learning_goals": [
+            "掌握 InsCollAlgBase（v2）抽象与 CalcRes/Orchestrate 生命周期",
+            "理解 REGISTER_EXEC_V2 / REGISTER_EXECUTOR_BY_FOUR_TEMPS 注册机制",
+            "看清 HcclExecOp 从 algName 到 executor 实例化的过程"
+          ],
+          "source_files": [
+            "src/ops/op_common/executor/executor_v2_base.h",
+            "src/ops/op_common/executor/executor_v2_base.cc",
+            "src/ops/op_common/executor/registry/coll_alg_v2_exec_registry.h",
+            "src/ops/op_common/executor/registry/coll_alg_v2_exec_registry.cc",
+            "src/ops/op_common/op_common.cc",
+            "src/ops/all_reduce/executor/ins_v2_all_reduce_sequence_executor.h",
+            "src/ops/all_reduce/executor/ins_v2_all_reduce_sequence_executor.cc"
+          ],
+          "minimal_modules": [
+            "InsCollAlgBase 抽象与 CalcAlgHierarchyInfo/CalcRes/Orchestrate",
+            "CollAlgExecRegistryV2 与 REGISTER_EXECUTOR_BY_FOUR_TEMPS",
+            "InsV2AllReduceSequenceExecutor 四模板顺序编排"
+          ],
+          "practice_task": "在 ins_v2_all_reduce_sequence_executor.cc 中定位 REGISTER_EXECUTOR_BY_FOUR_TEMPS 注册，并说明 Orchestrate 中四个 KernelRun 步骤分别对应 ReduceScatter/AllGather 的哪一级（节点内/节点间）。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "算法模板 Template",
+          "order": 5,
+          "filename": "u3-l5-template.md",
+          "level": "intermediate",
+          "topic": "深入 template 子系统：InsAlgTemplateBase 抽象、InsAlgTemplateRegistry、REGISTER_TEMPLATE_V2，以及一个具体模板的 Describe/CalcRes/KernelRun 生命周期。",
+          "learning_goals": [
+            "掌握 InsAlgTemplateBase 的 Describe/CalcRes/KernelRun/GetRes 接口",
+            "理解 REGISTER_TEMPLATE_V2 注册与模板名约定",
+            "了解模板如何被 executor 以模板参数组合（多级流水线）"
+          ],
+          "source_files": [
+            "src/ops/op_common/template/alg_v2_template_base.h",
+            "src/ops/op_common/template/alg_v2_template_base.cc",
+            "src/ops/op_common/template/registry/alg_v2_template_register.h",
+            "src/ops/op_common/template/registry/alg_v2_template_register.cc",
+            "src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_nhr.h",
+            "src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.h"
+          ],
+          "minimal_modules": [
+            "InsAlgTemplateBase 与 CommonAlgTemplateBase",
+            "InsAlgTemplateRegistry 与 REGISTER_TEMPLATE_V2",
+            "具体模板 ins_temp_all_reduce_mesh_1D_one_shot"
+          ],
+          "practice_task": "选取 ins_temp_all_reduce_mesh_1D_one_shot，说明它的 REGISTER_TEMPLATE_V2 注册名，并描述 CalcRes（算 channel/thread/mem）与 KernelRun（下发数据搬移）各自做什么。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "公共基础——类型、设备与配置",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "算法类型 AlgType 与分级选择",
+          "order": 1,
+          "filename": "u4-l1-algtype.md",
+          "level": "intermediate",
+          "topic": "讲解 alg_type.h 的算法类型体系：外部 HcclAlgoType、分级 AlgTypeLevel0/1/2、TagAlgType 三级组合及其字符串表示。",
+          "learning_goals": [
+            "掌握 HcclAlgoType 外部枚举与 Level0/1/2 分级枚举",
+            "理解 TagAlgType 三级组合描述节点内/节点间/超节点间算法",
+            "了解 AlgTypeToStr/TransferAlgType 的字符串转换"
+          ],
+          "source_files": [
+            "src/common/alg_type.h",
+            "src/common/alg_type.cc"
+          ],
+          "minimal_modules": [
+            "HcclAlgoType / AlgTypeLevel0/1/2 枚举",
+            "TagAlgType 三级组合",
+            "AlgTypeToStr / TransferAlgType 转换"
+          ],
+          "practice_task": "给定 AlgTypeToStr 输出 \"level0:ring,level1:pipe,level2:ring\"，解释它对应的三级算法选择，并说明 Level0（节点内）与 Level1（节点间）算法为何可以不同。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "设备类型与能力识别",
+          "order": 2,
+          "filename": "u4-l2-devtype.md",
+          "level": "intermediate",
+          "topic": "讲解 dev_type.h 的 HcclDevType 设备枚举、SOC 名称到设备类型的映射，以及运行期 HcclGetDeviceType 的检测与缓存机制。",
+          "learning_goals": [
+            "掌握 HcclDevType 枚举值（910/910B/950/960 等）",
+            "理解 HCCL_SOC_VER_CONVERT 从 aclrtGetSocName 到 DevType 的映射",
+            "了解 HcclGetDeviceType 的线程局部缓存检测"
+          ],
+          "source_files": [
+            "src/common/dev_type.h",
+            "src/common/dev_type.cc"
+          ],
+          "minimal_modules": [
+            "HcclDevType 枚举",
+            "HCCL_SOC_VER_CONVERT 映射表",
+            "HcclGetDeviceType 运行期检测"
+          ],
+          "practice_task": "列出 HcclDevType 的全部取值，并说明 Ascend950（DEV_TYPE_950）这一设备类型为何会影响 AICPU Task Cache、CCU 等特性的可用性（结合后续 Unit 5）。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "环境变量与算法配置系统",
+          "order": 3,
+          "filename": "u4-l3-env-config.md",
+          "level": "intermediate",
+          "topic": "讲解 alg_env_config 的集中式环境变量解析：AlgEnvConfig 结构、InitEnvConfig 的 Parse 流程、以及 HCCL_ALGO/HCCL_DEBUG_CONFIG 等关键变量。",
+          "learning_goals": [
+            "掌握 AlgEnvConfig 结构与 hcclAlgoConfig 算法覆盖映射",
+            "理解 InitEnvConfig 顺序调用各 Parse 函数的流程",
+            "学会配置 HCCL_ALGO / HCCL_DEBUG_CONFIG / HCCL_EXEC_TIMEOUT"
+          ],
+          "source_files": [
+            "src/common/alg_env_config.h",
+            "src/common/alg_env_config.cc",
+            "docs/zh/user_guide/hccl_env/HCCL_ALGO.md"
+          ],
+          "minimal_modules": [
+            "AlgEnvConfig 结构与 g_algEnvConfig 线程局部实例",
+            "InitEnvConfig 与各 Parse 函数 + GetEnv 封装",
+            "HCCL_ALGO / HCCL_DEBUG_CONFIG / HCCL_DETERMINISTIC"
+          ],
+          "practice_task": "通过设置 HCCL_ALGO 强制 Server 间使用 Ring 算法，并用 AlgEnvConfig 的解析流程解释该值如何最终影响 Selector 的 algName 选择（结合 u3-l2）。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "日志、参数校验与 SAL/ACL 适配",
+          "order": 4,
+          "filename": "u4-l4-log-check-sal.md",
+          "level": "intermediate",
+          "topic": "讲解 common 下的横切工具：日志宏（HCCL_INFO 等）、CHK_* 校验宏、param_check、SAL 适配与 adapter_acl，它们如何被算子代码统一复用。",
+          "learning_goals": [
+            "掌握 HCCL_INFO/HCCL_ERROR 与 CHK_RET/CHK_PTR_NULL 等宏",
+            "理解 param_check 与 RPT_INPUT_ERR/RPT_ENV_ERR 的错误上报",
+            "了解 sal 与 adapter_acl 的适配层作用"
+          ],
+          "source_files": [
+            "src/common/log.h",
+            "src/common/log.cc",
+            "src/common/param_check.cc",
+            "src/common/param_check.h",
+            "src/common/sal.h",
+            "src/common/sal.cc",
+            "src/common/adapter_acl.h",
+            "src/common/adapter_acl.cc"
+          ],
+          "minimal_modules": [
+            "log.h 日志宏与 config_log",
+            "param_check 校验宏与错误码上报",
+            "sal / adapter_acl 适配层"
+          ],
+          "practice_task": "在 all_reduce_op.cc 中收集所有 HCCL_INFO/CHK_RET/RPT_INPUT_ERR 调用，说明它们分别属于日志、返回值校验、错误上报哪一类，并为一个新的假想算子入口补充一组日志与入参校验代码。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "通信引擎模板与内核下发",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "AICPU 模板与 Kernel 下发",
+          "order": 1,
+          "filename": "u5-l1-aicpu-template-kernel.md",
+          "level": "advanced",
+          "topic": "讲解 AICPU_TS 引擎的模板与内核下发：load_kernel 加载通信 kernel、kernel_launch 下发 Task 描述符，以及具体 AICPU 算法模板（如 NHR/Mesh）。",
+          "learning_goals": [
+            "理解 AICPU_TS 引擎通过 Task 描述符下发、不占计算核的特点",
+            "掌握 load_kernel 与 kernel_launch 的加载/下发流程",
+            "了解具体 AICPU 模板如何组织 ReduceScatter/AllGather 步骤"
+          ],
+          "source_files": [
+            "src/ops/op_common/template/aicpu/load_kernel.h",
+            "src/ops/op_common/template/aicpu/load_kernel.cc",
+            "src/ops/op_common/template/aicpu/kernel_launch.h",
+            "src/ops/op_common/template/aicpu/kernel_launch.cc",
+            "src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_nhr.h",
+            "src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_nhr.cc"
+          ],
+          "minimal_modules": [
+            "load_kernel 内核加载",
+            "kernel_launch Task 描述符下发",
+            "ins_temp_all_reduce_nhr 模板"
+          ],
+          "practice_task": "对照架构简介的 AICPU_TS 调度四步（Host 提交 kernel→TS 调度→AICPU 下发 Task→TS 执行），在 load_kernel/kernel_launch 中找到对应代码阶段并说明 Task 描述符是如何被组装与下发的。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "AICPU Task Cache",
+          "order": 2,
+          "filename": "u5-l2-aicpu-task-cache.md",
+          "level": "advanced",
+          "topic": "讲解 AICPU 任务缓存机制：CacheKey 生成、CachePolicy 启用判定、CommManager 单例管理与命中/回放流程，避免重复 kernel 下发。",
+          "learning_goals": [
+            "理解 Task Cache 解决重复 kernel 下发开销的问题",
+            "掌握 CacheKey 的 tag 生成维度与 CachePolicy 的启用条件",
+            "了解 Lookup/Execute/Start/End 的命中与回放流程"
+          ],
+          "source_files": [
+            "src/ops/op_common/template/aicpu/task_cache/aicpu_task_cache_key.h",
+            "src/ops/op_common/template/aicpu/task_cache/aicpu_task_cache_policy.h",
+            "src/ops/op_common/template/aicpu/task_cache/aicpu_task_cache_comm_manager.h",
+            "src/ops/op_common/template/aicpu/task_cache/aicpu_task_cache_comm_manager.cc"
+          ],
+          "minimal_modules": [
+            "AicpuTaskCacheKey（GetAicpuTaskCacheTag）",
+            "AicpuTaskCachePolicy（IsAicpuTaskCacheEnable）",
+            "AicpuTaskCacheCommManager 与 EvictTaskCache"
+          ],
+          "practice_task": "说明 IsAicpuTaskCacheEnable 对设备类型（950）、算子类型、inplace、拓扑的判定条件，并描述一次命中时 HcommAicpuTsTaskCacheLookup→Execute 的回放路径。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "AIV 模板与 Vector Core 通信",
+          "order": 3,
+          "filename": "u5-l3-aiv-template.md",
+          "level": "advanced",
+          "topic": "讲解 AIV 引擎模板：aiv_alg_template_base 抽象、hccl_aiv_utils 工具，以及具体 AIV 模板（如 mesh_1d oneshot/twoshot）如何利用 Vector Core 低延迟搬数据。",
+          "learning_goals": [
+            "理解 AIV 引擎低延迟但占 Vector 核的特点与适用场景",
+            "掌握 aiv_alg_template_base 与 AIV kernel 组织",
+            "了解 oneshot/twoshot AIV 模板的差异"
+          ],
+          "source_files": [
+            "src/ops/op_common/template/aiv/aiv_alg_template_base.h",
+            "src/ops/op_common/template/aiv/aiv_alg_template_base.cc",
+            "src/ops/op_common/template/aiv/hccl_aiv_utils.h",
+            "src/ops/op_common/template/aiv/hccl_aiv_utils.cc",
+            "src/ops/all_reduce/template/aiv/aiv_temp_all_reduce_mesh_1d_oneshot.h",
+            "src/ops/all_reduce/template/aiv/aiv_temp_all_reduce_mesh_1d_oneshot.cc"
+          ],
+          "minimal_modules": [
+            "AivAlgTemplateBase 抽象",
+            "hccl_aiv_utils 工具",
+            "aiv_temp_all_reduce_mesh_1d_oneshot 模板"
+          ],
+          "practice_task": "对比 AIV oneshot 与 twoshot 两个模板，说明它们在小数据低延迟与稍大数据量下的取舍，并解释为何 AIV 路径在 u2-l4 中要先做 AivCacheCheckAndReplay。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "CCU 模板与硬化通信单元",
+          "order": 4,
+          "filename": "u5-l4-ccu-template.md",
+          "level": "advanced",
+          "topic": "讲解 CCU 引擎模板：ccu_kernel_alg_base、ccu_kernel_utils，以及具体 CCU 模板（如 mesh_1D）如何以 Mission 抽象经 URMA 搬移数据。",
+          "learning_goals": [
+            "理解 CCU 作为 IO Die 专用加速单元、Mission 抽象与 URMA 搬数据",
+            "掌握 ccu_kernel_alg_base 与 ccu_kernel_utils 的组织",
+            "了解 CCU 模板的高带宽低时延与资源受限特性"
+          ],
+          "source_files": [
+            "src/ops/op_common/template/ccu/ccu_kernel_alg_base.h",
+            "src/ops/op_common/template/ccu/ccu_kernel_alg_base.cc",
+            "src/ops/op_common/template/ccu/ccu_kernel_utils.h",
+            "src/ops/op_common/template/ccu/ccu_kernel_utils.cc",
+            "src/ops/all_reduce/template/ccu/ccu_temp_all_reduce_mesh_1D.h",
+            "src/ops/all_reduce/template/ccu/ccu_temp_all_reduce_mesh_1D.cc"
+          ],
+          "minimal_modules": [
+            "CcuKernelAlgBase 抽象",
+            "ccu_kernel_utils 工具",
+            "ccu_temp_all_reduce_mesh_1D 模板"
+          ],
+          "practice_task": "对照架构简介 CCU 三步流程（Host 下发 CCU 指令序列→CCU Kernel 调度→CCU 执行指令流+URMA），在 ccu_kernel_alg_base/utils 中定位指令序列组装与下发相关代码并说明其与 AICPU Task 描述符下发的本质区别。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "HCOMM 解耦与通信原语",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "dlsym 动态加载机制",
+          "order": 1,
+          "filename": "u6-l1-dlsym-mechanism.md",
+          "level": "advanced",
+          "topic": "讲解 HCCL 通过 dlsym 动态加载 HCOMM 的解耦机制：HcommDlInit 入口、dlopen libhcomm.so、以及 DEFINE_WEAK_FUNC/INIT_SUPPORT_FLAG 宏模式。",
+          "learning_goals": [
+            "理解 HCCL 与 HCOMM 通过 dlsym 解耦、独立编译演进的架构约束",
+            "掌握 HcommDlInit/dlopen 的加载流程与各子系统 DlInit",
+            "学会 DECL_WEAK_FUNC/DEFINE_WEAK_FUNC/INIT_SUPPORT_FLAG 模式"
+          ],
+          "source_files": [
+            "src/common/hcomm_dlsym/hcomm_dlsym.h",
+            "src/common/hcomm_dlsym/hcomm_dlsym.cc",
+            "src/common/hcomm_dlsym/dlsym_common.h",
+            "src/common/hcomm_dlsym/hccl_res_dl.cc"
+          ],
+          "minimal_modules": [
+            "HcommDlInit 入口与 dlopen libhcomm.so",
+            "dlsym_common.h 宏（DEFINE_WEAK_FUNC/INIT_SUPPORT_FLAG）",
+            "hccl_res_dl 资源符号示例"
+          ],
+          "practice_task": "按 DECL_WEAK_FUNC→DEFINE_WEAK_FUNC→INIT_SUPPORT_FLAG→XxxDlInit 四步，为一个假想的 HCOMM 新符号 NewFunction 写出在 hccl_res_dl.h/.cc 与 hcomm_dlsym.cc 中需要新增的代码骨架。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "资源、原语与拓扑的 dlsym 封装",
+          "order": 2,
+          "filename": "u6-l2-dlsym-wrappers.md",
+          "level": "advanced",
+          "topic": "讲解按域划分的 dlsym 封装：hccl_res_dl（资源）、hcomm_primitives_dl（数据搬移/同步原语）、hccl_rank_graph_dl（拓扑）、host/device_comm_dl。",
+          "learning_goals": [
+            "掌握各 _dl 模块按控制面/数据面域的职责划分",
+            "理解 hcomm_primitives_dl 的 Write/Read/Reduce/Notify 原语",
+            "了解 hccl_rank_graph_dl 如何获取拓扑与 Thread/Channel 资源"
+          ],
+          "source_files": [
+            "src/common/hcomm_dlsym/hccl_res_dl.h",
+            "src/common/hcomm_dlsym/hccl_res_dl.cc",
+            "src/common/hcomm_dlsym/hcomm_primitives_dl.h",
+            "src/common/hcomm_dlsym/hcomm_primitives_dl.cc",
+            "src/common/hcomm_dlsym/hccl_rank_graph_dl.h",
+            "src/common/hcomm_dlsym/hccl_rank_graph_dl.cc",
+            "src/common/hcomm_dlsym/hccl_host_comm_dl.h",
+            "src/common/hcomm_dlsym/hccl_device_comm_dl.h"
+          ],
+          "minimal_modules": [
+            "hccl_res_dl 资源获取",
+            "hcomm_primitives_dl 数据搬移/同步原语",
+            "hccl_rank_graph_dl 拓扑与资源"
+          ],
+          "practice_task": "沿着 template 的 KernelRun → channel → hcomm_primitives_dl 的调用，说明一次远端数据 Write+Notify 是如何经 dlsym 最终落到 HCOMM 基础通信层的，并标注其中哪些属于控制面、哪些属于数据面。",
+          "depends_on": [
+            "u6-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "控制面/数据面分离架构",
+          "order": 3,
+          "filename": "u6-l3-control-data-plane.md",
+          "level": "advanced",
+          "topic": "从架构约束角度讲解控制面（资源管理/拓扑查询）与数据面（Write/Read/Reduce/Notify）的分离，以及 channel 抽象如何串联两端。",
+          "learning_goals": [
+            "理解控制面/数据面分离这一架构硬约束的动机",
+            "掌握 channel（通信通道）= 两端设备+协议+N Notify 的组合模型",
+            "了解 HCCL 算子作为数据面消费方不得耦合 HCOMM 控制面内部"
+          ],
+          "source_files": [
+            "docs/zh/architecture/architecture-brief.md",
+            "AGENTS.md",
+            "src/ops/op_common/executor/channel/channel.h",
+            "src/ops/op_common/executor/channel/channel.cc"
+          ],
+          "minimal_modules": [
+            "架构约束：控制面/数据面分离（AGENTS §3）",
+            "基础通信模型与 Channel（architecture-brief §2.3）",
+            "channel.h 通道计算与 ChannelRequest"
+          ],
+          "practice_task": "把 u6-l2 中的各 _dl 模块与 channel.h 的通道计算归类到控制面或数据面，并写一段说明：为什么 HCCL 算子层引入对 HCOMM 控制面内部实现的耦合会违反架构约束。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "扩展、图模式与测试",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "MC2 自定义通信算子框架",
+          "order": 1,
+          "filename": "u7-l1-mc2-custom-op.md",
+          "level": "advanced",
+          "topic": "讲解 MC2 自定义通信算子框架：HcclOpArgs 结构、Kfc 系列设置接口、HcclCreateOpResCtx 创建资源上下文，结合自定义算子样例。",
+          "learning_goals": [
+            "掌握 HcclOpArgs 结构（dataType/reduceType/count/algConfig/commEngine）",
+            "理解 HcclKfcAllocOpArgs 与各 Setter、HcclCreateOpResCtx 流程",
+            "了解自定义算子样例（p2p / allgather）的工程结构"
+          ],
+          "source_files": [
+            "include/hccl_mc2.h",
+            "src/common/hccl_mc2.cc",
+            "src/common/hccl_common.h",
+            "examples/05_custom_ops_allgather/README.md",
+            "examples/04_custom_ops_p2p/README.md"
+          ],
+          "minimal_modules": [
+            "HcclOpArgs 结构与 Kfc Setter",
+            "HcclCreateOpResCtx 资源上下文创建",
+            "自定义算子样例 op_host/op_kernel 结构"
+          ],
+          "practice_task": "参照 examples/05_custom_ops_allgather，用 HcclKfcAllocOpArgs + Setter 填充一个 HcclOpArgs（指定 FP32、SUM、count、AICPU 引擎与 algConfig），并描述随后 HcclCreateOpResCtx 会如何为其创建资源上下文。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "图模式执行路径",
+          "order": 2,
+          "filename": "u7-l2-graph-mode.md",
+          "level": "advanced",
+          "topic": "讲解图模式（Ascend IR）执行路径：HcclAllReduceGraphMode、calc_resource_graph_mode 资源计算、op_graph proto 与 REG_OP/IMPL_OP_INFERSHAPE 注册。",
+          "learning_goals": [
+            "理解图模式由 GE 提供预分配 streams/scratch、HCCL 只执行的区别",
+            "掌握 calc_resource_graph_mode 的 OpParam 构造与离线/在线资源计算",
+            "了解 op_graph proto 的 REG_OP(HcomAllReduce) 与 IMPL_OP_INFERSHAPE"
+          ],
+          "source_files": [
+            "src/ops/interface_graph_mode/calc_resource_graph_mode.h",
+            "src/ops/interface_graph_mode/calc_resource_graph_mode.cc",
+            "src/ops/all_reduce/op_graph/all_reduce_proto.cc",
+            "src/common/op_graph/ops_proto_hccl.h",
+            "src/ops/all_reduce/all_reduce_op.cc"
+          ],
+          "minimal_modules": [
+            "HcclAllReduceGraphMode 入口与 ResPackGraphMode",
+            "calc_resource_graph_mode（OpParam/离线/在线资源计算）",
+            "ops_proto_hccl.h REG_OP 与 all_reduce_proto IMPL_OP_INFERSHAPE"
+          ],
+          "practice_task": "对比 HcclAllReduce（单算子）与 HcclAllReduceGraphMode（图模式）的参数与资源来源差异，说明图模式下 streams/scratchMemAddr 由谁提供，以及 OpParamGraphMode 在其中的作用。",
+          "depends_on": [
+            "u2-l2",
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "experimental 实验性贡献与运行期开关",
+          "order": 3,
+          "filename": "u7-l3-experimental.md",
+          "level": "advanced",
+          "topic": "讲解 experimental 社区贡献目录的规则、与 src 的边界、运行期开关 HCCL_EXPERIMENTAL_<NAME>，并以 birs ReduceScatter 为完整范例。",
+          "learning_goals": [
+            "掌握 experimental 与 src 的目标/质量/稳定性边界",
+            "理解 HCCL_EXPERIMENTAL_<NAME> + IsXxxEnabled 运行期开关模式",
+            "了解 birs ReduceScatter 的 selector/template 完整结构"
+          ],
+          "source_files": [
+            "experimental/README.md",
+            "experimental/ops/reduce_scatter/reduce_scatter_op_experimental.cc",
+            "experimental/ops/reduce_scatter/birs/reduce_scatter_birs_selector.cc",
+            "experimental/ops/reduce_scatter/birs/template/reduce_scatter_birs.cc"
+          ],
+          "minimal_modules": [
+            "experimental 目录规则与贡献流程",
+            "IsXxxEnabled 运行期开关（常量+环境变量双判）",
+            "birs ReduceScatter 的 selector/executor/template"
+          ],
+          "practice_task": "参照 birs ReduceScather 的结构与 IsXxxEnabled 模式，为一个假想的实验性 AllReduce 变体规划目录（experimental/ops/all_reduce/<algo>/）并写出 IsXxxEnabled() 守卫函数骨架。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "测试体系——UT 与 ST",
+          "order": 4,
+          "filename": "u7-l4-testing.md",
+          "level": "advanced",
+          "topic": "讲解 test 目录的 UT（单元测试，googletest）与 ST（系统测试，testcase + semantics_checker 语义校验）组织，以及如何新增测试。",
+          "learning_goals": [
+            "掌握 test/ut 与 test/st 的目录组织与运行方式（build.sh -u/-s）",
+            "理解 ST 的 testcase 与 hccl_verifier/semantics_check 语义校验机制",
+            "了解如何为一个算子新增 ST testcase 与语义校验"
+          ],
+          "source_files": [
+            "test/st/algorithm/testcase/all_gather_v_testcase.cc",
+            "test/st/algorithm/utils/src/hccl_verifier/semantics_check/reduce_semantics_checker.cc",
+            "test/st/algorithm/utils/ut/testcase/main.cc",
+            "docs/zh/build/build.md"
+          ],
+          "minimal_modules": [
+            "ST testcase 结构（all_gather_v_testcase）",
+            "hccl_verifier semantics_checker 语义校验",
+            "UT 与 ST 运行（build.sh -u/-s）"
+          ],
+          "practice_task": "阅读 all_gather_v_testcase.cc 与 reduce_semantics_checker.cc，说明 ST 如何既驱动真实通信又用 semantics_checker 校验结果正确性，并为一个已有算子补一个最小 testcase 的结构草案。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
