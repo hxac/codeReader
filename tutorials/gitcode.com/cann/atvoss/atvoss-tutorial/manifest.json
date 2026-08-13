@@ -1,0 +1,773 @@
+{
+  "project": "atvoss",
+  "head": "999805358318db9288c6e9e8c2e49e098ad4f8db",
+  "rationale": "ATVOSS 是一套基于 Ascend C 的 Vector 算子模板库，核心难点在于「表达式模板 + 编译期 DAG + 五层分层调度（Device>Kernel>Block>Tile>Basic）」这一贯穿编译期到运行时的设计。因此学习路径采用自顶向下的三段式：入门层（U1）先让读者跑通最简单的 abs 样例、建立对项目定位、目录结构、五层架构和用户编程模型（Config/Compute/PlaceHolder/表达式 + BlockOp/KernelOp/DeviceOp 三级 Builder）的整体认知；进阶层（U2）再逐一拆解表达式模板系统、参数与占位符、运算符库（数学/张量/归约广播）、数据模型与入参构造，以及 Device/Kernel/Block 三层的调度机制，并以 muls 样例收束对「标量、Cast、多 Compute」的理解；专家层（U3）深入编译期内部：求值器系统、Tile 层到 Ascend C API 的映射、DAG 构建、表达式线性化与图优化 Pass、Buffer 双缓冲管理、Reduce 图分析，并通过 rms_norm 级联样例、自定义策略、PyTorch 集成与测试体系覆盖扩展与工程化主题。讲义之间严格按「用户视角→机制→内部实现→扩展」的依赖递进，每篇只解决一个独立主题并配套可操作的源码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门篇：认识 ATVOSS 与跑通第一个算子",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "ATVOSS 是什么：项目定位与价值",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 ATVOSS 的定位：基于 Ascend C 的 Vector 算子模板库，用声明式表达式描述逐元素计算，封装底层 API 与 Tiling，实现极简、高效、高扩展的算子开发。",
+          "learning_goals": [
+            "理解 ATVOSS 解决的问题：降低昇腾 Vector 融合算子的开发复杂度",
+            "了解其核心特性：极简编程、编译期优化、模板可扩展",
+            "明确适用场景与软硬件依赖（Ascend 950PR/DT、CANN 8.5+）"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/summary.md"
+          ],
+          "minimal_modules": [
+            "ATVOSS 项目背景与定位",
+            "Vector 算子与 Ascend C 的关系",
+            "适用场景与软硬件要求"
+          ],
+          "practice_task": "阅读 README 与 summary，用一段话总结「ATVOSS 相比直接用 Ascend C 写算子节省了什么」，并列出它支持的目标芯片型号与最低 CANN 版本。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与构建运行",
+          "order": 2,
+          "filename": "u1-l2-directory-and-build.md",
+          "level": "beginner",
+          "topic": "讲解 atvoss 仓库的目录组织（include/docs/examples/tests/scripts/cmake）与基于 CMake + scripts/build.sh 的编译运行流程，包括 SOC、host_ut、st 等用法。",
+          "learning_goals": [
+            "掌握 include/ 各子目录（common/expression/operators/elewise/graph/utils）的职责划分",
+            "学会用 scripts/build.sh 编译指定 example 并运行或仿真",
+            "理解顶层 CMakeLists.txt 如何串联 examples 与 tests"
+          ],
+          "source_files": [
+            "docs/directory_structure.md",
+            "docs/quick_start.md",
+            "CMakeLists.txt",
+            "scripts/build.sh"
+          ],
+          "minimal_modules": [
+            "目录结构与各模块职责",
+            "build.sh 的 MODE（example/host_ut/st）与 -DSOC 参数",
+            "CMake 编译产物路径 output/bin"
+          ],
+          "practice_task": "执行 bash scripts/build.sh -DSOC=ascend950 abs 编译 abs 样例，记录生成的可执行文件路径，并说明 build.sh 中 MODE 参数的几种取值含义。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "五层架构总览",
+          "order": 3,
+          "filename": "u1-l3-five-layer-architecture.md",
+          "level": "beginner",
+          "topic": "纵览 ATVOSS 自顶向下的五层架构 Device>Kernel>Block>Tile>Basic，说明每层职责、抽象层级以及层级之间的调用关系。",
+          "learning_goals": [
+            "理解五层各自的职责：Device(Host 入口)/Kernel(多核)/Block(单核 Tile)/Tile(API 封装)/Basic(Ascend C)",
+            "理解分层带来的「专注计算逻辑、屏蔽硬件并行调度」的好处",
+            "建立贯穿后续讲义的整体框架认知"
+          ],
+          "source_files": [
+            "docs/summary.md",
+            "include/atvoss.h"
+          ],
+          "minimal_modules": [
+            "五层架构职责对照",
+            "Device/Kernel/Block/Tile/Basic 的核心组件",
+            "atvoss.h 主入口头文件"
+          ],
+          "practice_task": "画出 ATVOSS 的五层架构图，并对应写出每层在 atvoss.h 中 include 的头文件（如 elewise/device、elewise/kernel、elewise/block、elewise/tile）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "从 abs 样例看用户编程模型",
+          "order": 4,
+          "filename": "u1-l4-abs-programming-model.md",
+          "level": "beginner",
+          "topic": "以最简单的 abs 样例为入口，逐行讲解用户编程模型：TileShape、Compute 结构体的 Compute()、PlaceHolder 与 ParamUsage、计算表达式，以及 BlockBuilder/KernelBuilder/DeviceAdapter 三级 Builder 的组装。",
+          "learning_goals": [
+            "掌握一个 ATVOSS 算子的标准骨架：Config 结构体的组成部分",
+            "理解 Compute() 中 PlaceHolder 定义参数与 return 计算表达式的写法",
+            "学会用 BlockBuilder→KernelBuilder→DeviceAdapter 组装出可运行的 DeviceOp"
+          ],
+          "source_files": [
+            "examples/abs/abs.cpp",
+            "examples/abs/README.md",
+            "include/elewise/block/builder.h",
+            "include/elewise/kernel/builder.h",
+            "include/elewise/device/device_adapter.h"
+          ],
+          "minimal_modules": [
+            "TileShape 与 Config 结构体",
+            "Compute() 与 PlaceHolder/ParamUsage",
+            "BlockOp/KernelOp/DeviceOp 三级 Builder 组装"
+          ],
+          "practice_task": "参照 abs.cpp，将 Abs 改写为 Neg（取负，即 out = 0 - in 或 out = -in），定义 NegConfig 并组装出 DeviceOp，说明你修改了哪些部分。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "算子运行时执行流程：ACL 与 Device 调用",
+          "order": 5,
+          "filename": "u1-l5-runtime-flow.md",
+          "level": "beginner",
+          "topic": "以 muls 的 ProcessMuls/Run 流程为模板，讲解算子在 Host 侧的运行时执行步骤：ACL 初始化、设备/上下文/Stream 创建、Host↔Device 内存拷贝、Atvoss::Tensor 与 ArgumentsBuilder 构造、DeviceOp.Run 执行、同步与精度校验。",
+          "learning_goals": [
+            "掌握基于 ACL 的标准算子调用样板代码（aclInit/SetDevice/CreateContext/CreateStream/Malloc/Memcpy）",
+            "理解 example_common.h 提供的 CHECK_ACL_RET、ReleaseSource、VerifyResults 等通用工具",
+            "学会用 Atvoss::Tensor 与 ArgumentsBuilder 构造入参并调用 deviceOp.Run"
+          ],
+          "source_files": [
+            "docs/tutorials/developer_guide.md",
+            "examples/muls/muls.cpp",
+            "examples/common/example_common.h",
+            "include/utils/tensor.h",
+            "include/utils/arguments/arguments.h"
+          ],
+          "minimal_modules": [
+            "ACL 资源初始化与 RAII 释放",
+            "Host↔Device 数据搬运",
+            "Tensor 构造与 ArgumentsBuilder 调用",
+            "精度校验 IsClose/VerifyResults"
+          ],
+          "practice_task": "为 abs 样例补全一个完整的 main()：分配 32 个 float 输入、构造 Atvoss::Tensor、用 ArgumentsBuilder 组装、调用 DeviceOp.Run 并校验输出，画出从 aclInit 到 aclFinalize 的调用时序。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶篇：表达式系统与分层调度机制",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "表达式模板基础",
+          "order": 1,
+          "filename": "u2-l1-expression-template.md",
+          "level": "intermediate",
+          "topic": "深入 include/expression/expr_template.h：Expression<T> 包装、UnaryOp/BinaryOp/TernaryOp 基类、OpAssign/OpAndThen，以及 DeclareUnaryOp/DeclareBinaryOp 宏如何生成 Op 结构体与运算符重载，从而在编译期构建类型化的抽象语法树（AST）。",
+          "learning_goals": [
+            "理解 Expression<T> 如何用类型编码计算表达式、实现零运行时开销",
+            "掌握 UnaryOp/BinaryOp/TernaryOp/OpAssign/OpAndThen 的类型关系",
+            "学会通过 Declare*Op 宏声明新的运算类别"
+          ],
+          "source_files": [
+            "include/expression/expr_template.h",
+            "include/operators/math_expression.h"
+          ],
+          "minimal_modules": [
+            "Expression<T> 与编译期 AST",
+            "UnaryOp/BinaryOp/TernaryOp 基类",
+            "OpAssign 与 OpAndThen 顺序执行",
+            "DeclareUnaryOp/DeclareBinaryOp 宏"
+          ],
+          "practice_task": "在纸上推导表达式 out = (in1 + in1) * in2 展开后的嵌套 Expression<Op...> 类型，并指出每一层对应的 Op 结构体；再说明逗号表达式 (a, b) 如何被 OpAndThen 串联。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "参数、占位符与临时变量",
+          "order": 2,
+          "filename": "u2-l2-placeholder-and-param.md",
+          "level": "intermediate",
+          "topic": "讲解 PlaceHolder、PlaceHolderTmpLike、Param<N,T,Usage,R>、LocalVar<N,T,L> 与 ParamUsage(IN/OUT/IN_OUT)，以及 IsParam/IsLocalVar/IsInVar/IsOutVar 等编译期萃取 trait 如何从 AST 中收集入参与出参。",
+          "learning_goals": [
+            "区分 Param（函数参数占位）与 LocalVar（临时变量）两种节点",
+            "掌握 PlaceHolderTmpLike 如何基于已有 Param 派生同类型临时变量",
+            "理解 ParamUsage 如何驱动入参/出参的类型列表收集"
+          ],
+          "source_files": [
+            "include/expression/expr_template.h",
+            "include/utils/patterns.h"
+          ],
+          "minimal_modules": [
+            "PlaceHolder 与 PlaceHolderTmpLike",
+            "Param/LocalVar 节点结构",
+            "ParamUsage(IN/OUT/IN_OUT)",
+            "InParams/OutParams 类型收集"
+          ],
+          "practice_task": "为一个三输入算子（in1, in2, in3）写出全部 PlaceHolder 声明（含正确的序号 N 与 ParamUsage），再用 PlaceHolderTmpLike 声明一个与 in1 同类型的临时变量 tmp，说明 LocalVar 的序号空间与 Param 是否独立。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "运算符库：数学与张量算子",
+          "order": 3,
+          "filename": "u2-l3-math-tensor-operators.md",
+          "level": "intermediate",
+          "topic": "梳理 math_expression.h（Add/Sub/Mul/Div/Power/Divs/Sqrt/Exp/Abs/Cast/Max）与 tensor_expression.h（OpAlloc/OpFree/OpCopyIn/OpCopyOut/OpCopy），并说明每个 Op 表达式如何与 math_evaluator.h 中的求值器特化配对。",
+          "learning_goals": [
+            "掌握各数学算子的表达式形态与运算符重载（含标量参与）",
+            "理解 Cast 的 castMode 参数与 Divs/Power 的标量模板参数",
+            "建立「表达式声明 ↔ 求值器特化」的配对认知"
+          ],
+          "source_files": [
+            "include/operators/math_expression.h",
+            "include/operators/tensor_expression.h",
+            "include/operators/math_evaluator.h",
+            "docs/api/README.md"
+          ],
+          "minimal_modules": [
+            "数学算子 Add/Mul/Sqrt/Exp/Abs/Cast/Power/Divs",
+            "张量算子 Alloc/Free/CopyIn/CopyOut",
+            "表达式与求值器的配对关系"
+          ],
+          "practice_task": "用 ATVOSS 表达式实现 out = Exp(in1) + Sqrt(in2)，并指出每个运算符最终会匹配到 math_evaluator.h 中的哪个 Evaluator 特化；再尝试用 Cast 把 in1 从 int32 转为 float。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "归约与广播算子",
+          "order": 4,
+          "filename": "u2-l4-reduce-broadcast-operators.md",
+          "level": "intermediate",
+          "topic": "讲解 transcendental_expression.h 中的 ReduceSum/Broadcast 表达式，Pattern 枚举（AR/RA/AB/BA）的含义，以及 transcendental_evaluator.h 如何映射到 Ascend C 的 ReduceSum/Broadcast API。",
+          "learning_goals": [
+            "掌握 ReduceSum<Pattern> 与 Broadcast<Pattern> 的表达式用法",
+            "理解 Pattern::AR/RA（归约方向）与 AB/BA（广播轴）的语义",
+            "了解归约/广播求值器如何调用底层 Ascend C API"
+          ],
+          "source_files": [
+            "include/operators/transcendental_expression.h",
+            "include/operators/transcendental_evaluator.h",
+            "include/utils/patterns.h"
+          ],
+          "minimal_modules": [
+            "ReduceSum/Broadcast 表达式",
+            "Pattern 枚举 AR/RA/AB/BA",
+            "transcendental 求值器到 Ascend C 的映射"
+          ],
+          "practice_task": "用 ReduceSum<Atvoss::Pattern::AR>(in1*in1) 表达「对 in1 平方后整行求和」，再说明如果想改为按列广播回原形状应选用哪个 Pattern，并解释 AR 与 RA 的区别。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "数据模型：Tensor、Shape、Layout 与 Patterns",
+          "order": 5,
+          "filename": "u2-l5-data-model.md",
+          "level": "intermediate",
+          "topic": "讲解 Atvoss::Tensor（设备指针 + 形状）、Shape<int...>（编译期形状）、Layout（OperationShape/FixedRankExtents/TailLayout）以及 patterns.h 中的 Pattern/CastMode/MemMngPolicy/MemLevel 枚举，它们共同构成算子描述的数据基础。",
+          "learning_goals": [
+            "掌握 Atvoss::Tensor 的构造与 shape 访问方式",
+            "理解 Shape<> 编译期整数序列与 TileShape 的关系",
+            "认识 Layout 的 OperationShape(axis0/axis1/axis2) 与 MemLevel 三级内存"
+          ],
+          "source_files": [
+            "include/utils/tensor.h",
+            "include/utils/layout/shape.h",
+            "include/utils/layout/layout.h",
+            "include/utils/patterns.h",
+            "include/common/type_def.h"
+          ],
+          "minimal_modules": [
+            "Atvoss::Tensor 设备张量",
+            "Shape 编译期形状",
+            "Layout 与 OperationShape",
+            "Pattern/CastMode/MemMngPolicy/MemLevel 枚举",
+            "ContextData 上下文数据"
+          ],
+          "practice_task": "为 RMSNorm 设计一个二维 TileShape（如 Shape<1,32>），并说明 axis0/axis1 分别对应什么；再列出 patterns.h 中 MemMngPolicy 的两个取值，推测它们的用途。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "入参构造：ArgumentsBuilder",
+          "order": 6,
+          "filename": "u2-l6-arguments-builder.md",
+          "level": "intermediate",
+          "topic": "深入 include/utils/arguments/arguments.h：ArgumentsBuilder 的 inputOutput/attr/build 链式构造、InputOutputCollector/AttrCollector、AttrMap，以及 build() 产出的 std::tuple<输入输出tuple, 属性tuple> 结构与类型约束。",
+          "learning_goals": [
+            "掌握 ArgumentsBuilder{}.inputOutput(...).attr(...).build() 的链式用法",
+            "理解入参只允许 Atvoss::Tensor 与 scalar 类型的 static_assert 约束",
+            "了解 build() 返回的 tuple 结构如何被 DeviceAdapter 消费"
+          ],
+          "source_files": [
+            "include/utils/arguments/arguments.h",
+            "examples/muls/muls.cpp"
+          ],
+          "minimal_modules": [
+            "ArgumentsBuilder 链式构造",
+            "InputOutputCollector/AttrCollector",
+            "入参类型约束 static_assert",
+            "build() 产物结构"
+          ],
+          "practice_task": "为一个含 2 个 Tensor 输入、1 个 scalar、1 个 Tensor 输出的算子写 ArgumentsBuilder 构造语句，并说明 inputOutput 中参数顺序与 Compute() 里 PlaceHolder 序号 N 的对应关系。",
+          "depends_on": [
+            "u2-l5",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "Device 层：DeviceAdapter 与算子启动",
+          "order": 7,
+          "filename": "u2-l7-device-layer.md",
+          "level": "intermediate",
+          "topic": "讲解 include/elewise/device/ 下 DeviceAdapter::Run 的三步流程（PrepareParams、CalculateTiling、LaunchKernelWithDataTuple）、tiling.h 的 CalculateTiling 如何串联 Kernel 与 Block 的 MakeScheduleConfig，以及 DeviceTensor 的 Host/Device 指针封装。",
+          "learning_goals": [
+            "掌握 DeviceAdapter::Run 的 PrepareParams→CalculateTiling→LaunchKernel 三步",
+            "理解 CalculateTiling 如何同时生成 kernelParam 与 blockParam",
+            "了解 DeviceTensor 与 kernel 启动参数转换"
+          ],
+          "source_files": [
+            "include/elewise/device/device_adapter.h",
+            "include/elewise/device/tiling.h",
+            "include/elewise/device/device_tensor.h"
+          ],
+          "minimal_modules": [
+            "DeviceAdapter::Run 主流程",
+            "CalculateTiling 串联 Kernel/Block 配置",
+            "DeviceTensor 指针封装",
+            "Kernel 启动与 workspace"
+          ],
+          "practice_task": "追踪一次 deviceOp.Run(arguments, stream) 的调用链，列出 Run 内部依次调用的函数，并说明 tiling 计算结果（kernelParam/blockParam）是如何被传递到实际 Kernel 的。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l8",
+          "title": "Kernel 层：多核并行调度",
+          "order": 8,
+          "filename": "u2-l8-kernel-layer.md",
+          "level": "intermediate",
+          "topic": "讲解 include/elewise/kernel/ 的 KernelBuilder、DefaultKernelPolicy/Config（blockNum/unitNumPerCore/moreUnitCoreNum/tailNum 等）、DefaultSegmentPolicy::UniformSegment，以及 DefaultKernelSchedule 的 MakeScheduleConfig（总元素→核数切分）与 Run（CalCurCoreEleCnt/CalGMOffset 多核工作量与偏移分配）。",
+          "learning_goals": [
+            "理解 KernelBuilder 如何把任务均匀切分到多核（UniformSegment）",
+            "掌握 MakeScheduleConfig 中核数、每核单元数、尾数计算的逻辑",
+            "理解 CalCurCoreEleCnt 与 CalGMOffset 如何为每个核分配工作量与 GM 偏移"
+          ],
+          "source_files": [
+            "include/elewise/kernel/builder.h",
+            "include/elewise/kernel/schedule.h",
+            "include/common/arch.h"
+          ],
+          "minimal_modules": [
+            "KernelBuilder 与 DefaultKernelPolicy/Config",
+            "UniformSegment 均匀分段",
+            "MakeScheduleConfig 核数切分",
+            "CalCurCoreEleCnt/CalGMOffset 多核分配",
+            "Arch::DAV_3510 核数与 UB 约束"
+          ],
+          "practice_task": "给定总元素数 100000、ACTUAL_N 与 BASIC_CORE_ELE_NUM，手工模拟 MakeScheduleConfig 推导 blockNum、unitNumPerCore、moreUnitCoreNum、tailNum，并说明 blockNum 为何会被 Arch::CORE_NUM 上限裁剪。",
+          "depends_on": [
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l9",
+          "title": "Block 层：单核 Tile 切分与流水",
+          "order": 9,
+          "filename": "u2-l9-block-layer.md",
+          "level": "intermediate",
+          "topic": "讲解 include/elewise/block/ 的 BlockBuilder、DefaultBlockPolicy<TileShape>/Config（wholeLoop/tileCnt/basicNum/totalElemCnt）、DefaultBlockSchedule 的 Run→Process 如何把单核任务切成多个 Tile 块循环执行 Tile::Evaluate，以及 UB 内存按 IN/OUT/计算区划分与 BlockTensor 的 CopyIn/CopyOut。",
+          "learning_goals": [
+            "理解单核任务如何被切成 wholeLoop 个完整 Tile + 1 个尾 Tile",
+            "掌握 BlockTensor 的 CopyIn/CopyOut 实现 GM↔UB 搬运",
+            "认识 UB 内存按 IN/OUT/计算三段划分的布局（UB_ADDR_IN/OUT/CALC）"
+          ],
+          "source_files": [
+            "include/elewise/block/builder.h",
+            "include/elewise/block/schedule.h",
+            "include/elewise/block/block_info_tile.h"
+          ],
+          "minimal_modules": [
+            "BlockBuilder 与 DefaultBlockPolicy/Config",
+            "Tile 切分 wholeLoop/tileCnt",
+            "Process 循环与 Tile::Evaluate",
+            "UB 内存三段划分",
+            "BlockTensor CopyIn/CopyOut"
+          ],
+          "practice_task": "给定单核 totalElemCnt=10000、TileShape=Shape<1,4096>，推导 wholeLoop 与 tileCnt；并解释 Process 循环里每次迭代构造的 ContextData 中 gmOffset、elementNum、pingPong 三个字段的作用。",
+          "depends_on": [
+            "u2-l8"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l10",
+          "title": "muls 样例深入：标量、Cast 与多 Compute",
+          "order": 10,
+          "filename": "u2-l10-muls-deep-dive.md",
+          "level": "intermediate",
+          "topic": "以 examples/muls/muls.cpp 为对象，深入讲解标量参与运算（in * scalar）、通过 Cast + PlaceHolderTmpLike 处理输入类型转换（int32→float）的 MulsComputePromtIn，以及同一 Config 内定义多套 Compute 并按数据类型选择不同 DeviceOp 的模式。",
+          "learning_goals": [
+            "掌握标量作为 PlaceHolder 参与表达式的方式",
+            "理解 Cast 与 PlaceHolderTmpLike 配合实现临时变量类型转换",
+            "学会在单一 Config 内为不同输入类型提供多套 Compute/DeviceOp 并按 if constexpr 选择"
+          ],
+          "source_files": [
+            "examples/muls/muls.cpp",
+            "examples/muls/README.md"
+          ],
+          "minimal_modules": [
+            "标量 PlaceHolder 用法",
+            "MulsCompute vs MulsComputePromtIn",
+            "Cast + PlaceHolderTmpLike 类型转换",
+            "按类型选择 DeviceOp 的 if constexpr 分支"
+          ],
+          "practice_task": "在 muls.cpp 基础上新增一个 MulsCompute，把输出类型固定为 half（用 Cast 将 float 输入转为 half），并在 Run 中增加对应的 if constexpr 分支，说明三个 Compute 各自的表达式差异。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "专家篇：编译期内部实现与扩展实践",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "求值器系统：从表达式到执行",
+          "order": 1,
+          "filename": "u3-l1-evaluator-system.md",
+          "level": "advanced",
+          "topic": "深入 include/evaluator/eval_base.h：Evaluator<T> 主模板与对 Param/LocalVar/OpAssign/OpAndThen 的特化，递归求值机制，以及 math_evaluator/transcendental_evaluator 如何为各 Op 提供特化、最终落到 Ascend C 计算接口。",
+          "learning_goals": [
+            "理解 Evaluator<T> 模板特化驱动的递归求值模型",
+            "掌握 Param/LocalVar 求值如何从 ContextData 取出对应张量",
+            "理清 OpAssign、OpAndThen 求值与 PipeBarrier 同步的关系"
+          ],
+          "source_files": [
+            "include/evaluator/eval_base.h",
+            "include/operators/math_evaluator.h",
+            "include/operators/transcendental_evaluator.h",
+            "include/common/type_def.h"
+          ],
+          "minimal_modules": [
+            "Evaluator<T> 主模板与特化",
+            "Param/LocalVar 求值取张量",
+            "OpAssign/OpAndThen 递归求值",
+            "math/transcendental 求值器特化"
+          ],
+          "practice_task": "追踪 out = Sqrt(in) 的求值过程：写出 Evaluator<OpAssign<out, OpSqrt<in>>> 调用链中每一步匹配的特化，并指出 PipeBarrier<PIPE_V> 在 OpAndThen 中起什么作用。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Tile 层：Assign 函数到 Ascend C API",
+          "order": 2,
+          "filename": "u3-l2-tile-layer-assign.md",
+          "level": "advanced",
+          "topic": "讲解 include/elewise/tile/ 的 tile_evaluate.h（Evaluate 入口）与 tensor_evaluator.h：OpCopyIn/OpCopyOut/OpAlloc/OpFree/OpCopy 等节点求值器如何映射到 AscendC::DataCopyPad/DataCopy、bufPools.AllocTensor、以及 Mutex 锁与 PIPE_MTE2/MTE3/V 同步。",
+          "learning_goals": [
+            "掌握 Tile::Evaluate 如何驱动整条线性化表达式的执行",
+            "理解 CopyIn/CopyOut 经 DataCopyPad 实现 GM↔UB 搬运",
+            "认识 OpAlloc/OpFree 与 bufPools、Mutex、PIPE 同步的协作"
+          ],
+          "source_files": [
+            "include/elewise/tile/tile_evaluate.h",
+            "include/elewise/tile/tensor_evaluator.h"
+          ],
+          "minimal_modules": [
+            "Tile::Evaluate 执行入口",
+            "CopyIn/CopyOut→DataCopyPad",
+            "OpAlloc/OpFree→bufPools",
+            "Mutex 锁与 PIPE_MTE2/MTE3/V 同步"
+          ],
+          "practice_task": "说明一次 Tile 执行中 OpCopyIn 到 OpCopyOut 之间涉及的 PIPE 同步顺序（MTE2→V→MTE3），并解释 pingPong(bufferId) 在 Mutex Lock/Unlock 中如何避免双缓冲冲突。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l9"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "计算图构建：DAG 与 Bind",
+          "order": 3,
+          "filename": "u3-l3-dag-construction.md",
+          "level": "advanced",
+          "topic": "讲解 include/elewise/graph/ 的 dag.h（FullAutoDag、InplaceParamsProcessor、CopyIn/CopyOut 插入）、node.h（DagNodeInfo、依赖排序）、bind.h（Bind 节点：操作↔赋值目标、入参/出参/入算子分析），说明用户表达式如何被转换为带依赖的 DAG。",
+          "learning_goals": [
+            "理解 FullAutoDag 把表达式列表转换为 Bind 列表与有序算子序列的过程",
+            "掌握 InplaceParamsProcessor 如何拆分 IN_OUT 参数",
+            "认识 DagNodeInfo 如何分析每个节点的入参/出参与内存需求"
+          ],
+          "source_files": [
+            "include/elewise/graph/dag.h",
+            "include/elewise/graph/node.h",
+            "include/elewise/graph/bind.h"
+          ],
+          "minimal_modules": [
+            "FullAutoDag 构建流程",
+            "InplaceParamsProcessor 拆分 INOUT",
+            "Bind 节点结构",
+            "DagNodeInfo 依赖与内存分析"
+          ],
+          "practice_task": "以 out = in1 * in2 为例，描述 FullAutoDag 会插入哪些 OpCopyIn/OpCopyOut，并画出最终 Bind 列表的有向依赖关系，说明为何需要为每个首次使用的入参插入 CopyIn。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "表达式线性化与图优化 Pass",
+          "order": 4,
+          "filename": "u3-l4-linearizer-and-passes.md",
+          "level": "advanced",
+          "topic": "讲解 include/graph/ 的图优化管线：expr_linearizer.h（后序遍历提取 + Simplify 内联单用 LocalVar）、expr_flatten.h（把嵌套表达式展平为 OpAssign 序列）、expr_cast_eliminate.h（冗余 Cast 消除）、compute_preproc.h（AllocInserter/FreeInserter 在首用前/末用后插内存操作）。",
+          "learning_goals": [
+            "理解表达式后序遍历如何生成操作列表",
+            "掌握 Simplify 如何内联只被引用一次的 LocalVar 以减少中间量",
+            "认识冗余 Cast 消除与 Alloc/Free 插入两个关键 Pass"
+          ],
+          "source_files": [
+            "include/graph/expr_linearizer.h",
+            "include/graph/expr_flatten.h",
+            "include/graph/expr_cast_eliminate.h",
+            "include/graph/compute_preproc.h",
+            "include/graph/expr_operations.h"
+          ],
+          "minimal_modules": [
+            "后序遍历提取操作列表",
+            "Simplify 内联单用变量",
+            "冗余 Cast 消除",
+            "Alloc/Free 插入 Pass"
+          ],
+          "practice_task": "给定 tmp = Cast<float>(in); out = tmp*in（其中 in 本身就是 float），分析 expr_cast_eliminate 如何识别并消除这次冗余 Cast，并用 AllocInserter/FreeInserter 的逻辑说明 in 的 OpAlloc 与 OpFree 会被插在哪一步前后。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "Buffer 管理与双缓冲",
+          "order": 5,
+          "filename": "u3-l5-buffer-double-buffering.md",
+          "level": "advanced",
+          "topic": "深入 include/elewise/graph/buffer.h 与 include/utils/buf_pool/：BufType/BufPosInList、ParamBufIdMap 的 ping/pong 缓冲 ID、GenerateBufferIdOrder 按内存级别（MemLevel）分配缓冲、BlockBufferEx/LoopBuf 的 TPipe 管理，以及 ping-pong 双缓冲如何与流水重叠。",
+          "learning_goals": [
+            "理解 buffer.h 中缓冲位置（MTE2/MTE3/Temp）与优先级分配策略",
+            "掌握 ping/pong 双缓冲 ID 映射与 GenerateBufferIdOrder 的生成逻辑",
+            "认识 BlockBufferEx 对 TPipe.InitBuffer/AllocTensor 的封装与 MemLevel 三级内存"
+          ],
+          "source_files": [
+            "include/elewise/graph/buffer.h",
+            "include/utils/buf_pool/block_buf_pool.h",
+            "include/utils/buf_pool/loopbuf.h",
+            "include/elewise/block/schedule.h"
+          ],
+          "minimal_modules": [
+            "BufType/BufPosInList 缓冲位置",
+            "ParamBufIdMap ping/pong ID",
+            "GenerateBufferIdOrder 缓冲分配",
+            "BlockBufferEx/TPipe 与 MemLevel",
+            "ping-pong 双缓冲流水"
+          ],
+          "practice_task": "解释 UB_TILE_SIZE 为何按 Arch::UB_SIZE / MAX_BUFFER_COUNT 计算，并说明双缓冲下第 i 次 Tile 的输入缓冲（ping）与第 i-1 次的计算/输出（pong）如何重叠，从而隐藏 MTE2 搬运延迟。",
+          "depends_on": [
+            "u3-l3",
+            "u2-l9"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "Reduce 模块：归约图分析",
+          "order": 6,
+          "filename": "u3-l6-reduce-module.md",
+          "level": "advanced",
+          "topic": "讲解 include/reduce/graph/ 的 dag.h（InsertCopyIn 在归约边界插入拷贝、归约专用 DAG 构建）、helper.h（IsNodeUsedAfter 节点后续使用分析、缓冲复用判定）与 buffer.h，说明带 ReduceSum/Broadcast 的表达式如何被特殊处理。",
+          "learning_goals": [
+            "理解 Reduce 模块相对 Elewise 模块的差异化图处理",
+            "掌握 InsertCopyIn 在归约输入处插入拷贝的动机",
+            "认识 IsNodeUsedAfter 等分析如何决定节点缓冲能否复用"
+          ],
+          "source_files": [
+            "include/reduce/graph/dag.h",
+            "include/reduce/graph/helper.h",
+            "include/reduce/graph/buffer.h"
+          ],
+          "minimal_modules": [
+            "Reduce 专用 DAG 构建",
+            "InsertCopyIn 归约边界拷贝",
+            "IsNodeUsedAfter 节点使用分析",
+            "归约缓冲复用判定"
+          ],
+          "practice_task": "以 _1 = ReduceSum<AR>(in1*in1) 为例，说明 Reduce 模块为何要在归约算子前后插入额外 CopyIn/Copy，并指出 IsNodeUsedAfter 如何判断 in1 在归约后是否还被使用、从而决定其缓冲释放时机。",
+          "depends_on": [
+            "u3-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l7",
+          "title": "rms_norm 样例：表达式级联",
+          "order": 7,
+          "filename": "u3-l7-rmsnorm-cascade.md",
+          "level": "advanced",
+          "topic": "以 examples/rms_norm/rms_norm.cpp 为综合案例，解析 RmsNormCompute 的级联表达式（ReduceSum→Broadcast→Divs→Sqrt→乘法）如何串成完整算子，二维 TileShape Shape<HEIGHT,WIDTH> 的含义，以及归约+广播在 DAG/Tile 层的协同执行。",
+          "learning_goals": [
+            "掌握 RMSNorm 的数学分解与 ATVOSS 表达式级联写法",
+            "理解二维 TileShape 在归约/广播算子中的作用",
+            "综合运用前述 Reduce 模块与 DAG 知识理解端到端执行"
+          ],
+          "source_files": [
+            "examples/rms_norm/rms_norm.cpp",
+            "examples/rms_norm/README.md",
+            "include/operators/transcendental_expression.h"
+          ],
+          "minimal_modules": [
+            "RMSNorm 数学分解",
+            "ReduceSum→Broadcast→Divs→Sqrt 级联",
+            "二维 TileShape",
+            "归约与广播的端到端执行"
+          ],
+          "practice_task": "把 RMSNorm 表达式里的 Divs<WIDTH> 改为除以一个标量常数，观察并解释这一改动对 ReduceSum→Broadcast 之后计算语义的影响；再说明为何 Broadcast<AB> 能把归约结果还原成与输入同形状。",
+          "depends_on": [
+            "u2-l4",
+            "u3-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l8",
+          "title": "策略与配置定制：自定义 Schedule 与 Policy",
+          "order": 8,
+          "filename": "u3-l8-custom-policy-schedule.md",
+          "level": "advanced",
+          "topic": "讲解如何通过 DefaultBlockPolicy 的 MemMngPolicy(AUTO/MANUAL)、自定义 TileShape、替换 Schedule 模板参数（BlockBuilder/KernelBuilder 的 Schedule 模板形参）、以及 platform_info.h / arch.h 提供的硬件信息来调优与扩展算子。",
+          "learning_goals": [
+            "掌握 MemMngPolicy::AUTO 与 MANUAL 的区别及缓冲冗余测试场景",
+            "理解 Builder 的 Schedule 模板形参如何允许替换默认调度策略",
+            "学会利用 platform_info（vectorCoreNum/ubSize/cacheLineSize）与 ArchTag 做硬件感知调优"
+          ],
+          "source_files": [
+            "include/elewise/block/builder.h",
+            "include/elewise/kernel/builder.h",
+            "include/elewise/block/schedule.h",
+            "include/common/platform_info.h",
+            "include/common/arch.h"
+          ],
+          "minimal_modules": [
+            "MemMngPolicy AUTO/MANUAL",
+            "Builder 的 Schedule 模板形参",
+            "自定义 TileShape 调优",
+            "platform_info/arch 硬件信息"
+          ],
+          "practice_task": "对比 tests/st 中 test_compute_*_with_manupolicy 与 test_compute_*_with_autopolicy 两组用例的预期差异，说明 MemMngPolicy 如何影响缓冲分配；并尝试把 abs 的 TileShape 从 32 调大到 4096，分析对 UB 占用与 Tile 循环次数的影响。",
+          "depends_on": [
+            "u2-l8",
+            "u2-l9"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l9",
+          "title": "PyTorch 集成与算子注册",
+          "order": 9,
+          "filename": "u3-l9-pytorch-integration.md",
+          "level": "advanced",
+          "topic": "以 examples/python_extension 为例，讲解如何用 TORCH_LIBRARY_FRAGMENT 注册算子 schema、Meta 实现与 NPU 实现（abs_npu 中复用 ATVOSS 的 DeviceOp），以及通过 setup.py + cmake 构建 wheel 并在 Python 端调用的完整链路。",
+          "learning_goals": [
+            "掌握 PyTorch C++ Extension 注册算子的 TORCH_LIBRARY 机制",
+            "理解 ATVOSS DeviceOp 如何嵌入 torch_npu 的 OpCommand/Stream 流程",
+            "学会用 python3 -m build 构建 wheel 并在 Python 中调用自定义算子"
+          ],
+          "source_files": [
+            "examples/python_extension/csrc/extension.cpp",
+            "examples/python_extension/csrc/abs/ascend950/abs.cpp",
+            "examples/python_extension/README.md",
+            "examples/python_extension/setup.py"
+          ],
+          "minimal_modules": [
+            "TORCH_LIBRARY schema/Meta/NPU 注册",
+            "abs_npu 复用 ATVOSS DeviceOp",
+            "setup.py + cmake 构建 wheel",
+            "Python 端调用与测试"
+          ],
+          "practice_task": "参照 abs 的 python_extension，规划如何新增一个 muls 的 PyTorch 算子：写出 TORCH_LIBRARY schema、Meta 实现骨架，并说明 abs_npu 中如何把 torch::Tensor 转成 ATVOSS 的 Atvoss::Tensor 并调用 DeviceOp.Run。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l10",
+          "title": "测试体系：UT、ST 与编译性能",
+          "order": 10,
+          "filename": "u3-l10-testing-framework.md",
+          "level": "advanced",
+          "topic": "梳理 tests/ 目录：UT（host 侧 test_arguments/test_expr_linearizer/test_elewise_tiling/test_utility、builtin_kernel、builtin_tiling、compile_perf）与 ST（test_op_*、test_compute_*、test_tile_rms_norm_*、test_block_cast*、test_cast_elimination），说明各测试维度与 build.sh 中 --host_ut/--st 的用法。",
+          "learning_goals": [
+            "掌握 UT 与 ST 的分层定位与覆盖维度",
+            "理解 host_ut 如何脱离 Device 验证入参构造、表达式线性化等编译期逻辑",
+            "认识 compile_perf 测试如何度量表达式模板的编译开销"
+          ],
+          "source_files": [
+            "tests/ut/host/test_arguments.cpp",
+            "tests/ut/host/test_expr_linearizer.cpp",
+            "tests/ut/compile_perf/compile_perf_test.cpp",
+            "tests/st/test_op_adds_lhs.cpp",
+            "tests/st/test_cast_elimination.cpp",
+            "tests/st/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "UT host/builtin_kernel/builtin_tiling/compile_perf",
+            "ST op/compute/tile/block 测试维度",
+            "--host_ut/--st 构建用法",
+            "测试用例的 Config 写法模式"
+          ],
+          "practice_task": "阅读 test_op_adds_lhs.cpp 与一个 test_compute_*.cpp，分别总结 ST 中「单算子功能验证」与「Compute 表达式结构验证」两类用例的写法差异；再用 bash scripts/build.sh -DSOC=ascend950 --host_ut 运行 host 测试并记录结果。",
+          "depends_on": [
+            "u1-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
