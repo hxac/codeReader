@@ -1,0 +1,312 @@
+# 编译选项、ABI 与 Sanitizers
+
+## 1. 本讲目标
+
+本讲是「工程化、调试与贡献」单元的第二篇，承接 u1-l3（构建系统与编译运行）往下深挖。u1-l3 解决的是「怎么把 ATB 编出来」，本讲解决的是「编译开关背后到底改了什么、为什么这么改、怎么组合」。
+
+读完本讲，你应该能够：
+
+- 说清 **CXX11 ABI** 对链接期符号的影响，以及 ATB 为什么要把两套 ABI 产物物理隔离到不同目录。
+- 看懂 `CMakeLists.txt` 里 13 个 `option()` 与 `scripts/build.sh` 子命令的对应关系，并能按需打开各类测试编译开关。
+- 区分 **Host 端 ASAN**（GCC 的 AddressSanitizer）与 **Device 端 MSSANITIZER**（昇腾 CCE 的算子内存检测），知道它们检测的是两套完全不同的内存。
+- 设计出一条「单元测试 + ASAN」的组合编译命令，并逐项解释作用。
+
+## 2. 前置知识
+
+本讲需要你已经掌握 u1-l3 的结论：ATB 构建是「顶层 `CMakeLists.txt` 用 `option()` 声明开关 + `scripts/build.sh` 用 `-D` 参数拨动开关」的两层结构。下面补充三个概念。
+
+**C++ ABI（应用二进制接口）**。它规定了编译后的二进制如何「对接」：函数调用约定、结构体内存布局、名字修饰（name mangling）等。两段 C++ 代码要能链接到一起、在运行期互调，必须 ABI 一致。本讲关注的 **CXX11 ABI** 特指 GCC 5 引入的 libstdc++ 新布局：它重写了 `std::string`、`std::list` 等容器的内存表示，用宏 `_GLIBCXX_USE_CXX11_ABI`（取值 0 或 1）切换。
+
+**Sanitizer（内存/未定义行为检测器）**。编译器在生成目标码时「插桩」，在每次内存访问前后埋检查指令，运行期一旦发现越界、释放后使用（use-after-free）等就立即报错并打印调用栈。GCC/Clang 自带 AddressSanitizer（`-fsanitize=address`）和 UndefinedBehaviorSanitizer（`-fsanitize=undefined`），它们只管 **Host 侧（CPU）内存**。昇腾算子在 AI Core 上跑的 Device 代码用的是另一套 CCE sanitizer。
+
+**Debug 与 Release 构建类型**。CMake 用 `CMAKE_BUILD_TYPE` 区分：Release 带优化 `-O2` 并 strip 符号，Debug 带 `-g -O0` 保留调试信息。Sanitizer 通常需要 Debug 才能给出可读的调用栈，所以启用 sanitizer 时往往同时切到 Debug。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+| --- | --- |
+| [CMakeLists.txt](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/CMakeLists.txt) | 顶层 CMake。声明 13 个 `option()`，设置全局编译/链接标志、ABI 宏、安装目录，按开关条件 `add_subdirectory(tests)`。 |
+| [src/CMakeLists.txt](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/CMakeLists.txt) | 定义 `atb`/`atb_train` 等库的链接关系，`USE_ASAN` 时把 `asan` 链进主库。 |
+| [src/kernels/lcal/src/ascendc.cmake](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/kernels/lcal/src/ascendc.cmake) | AscendC Device 代码（CCE 语言）的编译配置，`USE_MSSANITIZER` 在此注入 Device 侧 sanitizer。 |
+| [src/kernels/lcal/src/CMakeLists.txt](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/kernels/lcal/src/CMakeLists.txt) | 通信/Cube 算子 `lcal` 库构建，消费 `USE_MSSANITIZER` 改编译宏与二进制大小。 |
+| [tests/CMakeLists.txt](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/tests/CMakeLists.txt) | 测试总入口，按 `USE_UNIT_TEST` 等开关 `add_subdirectory` 单元测试与 C 接口测试。 |
+| [scripts/build.sh](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/scripts/build.sh) | 一键编译脚本。把命令行参数（子命令 + `--xxx` 开关）翻译成 CMake `-D` 选项，并负责 ABI 自动对齐、第三方依赖拉取。 |
+| [docs/compile_and_build.md](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/docs/compile_and_build.md) | 官方编译文档，列出全部子命令与开关的一句话说明。 |
+
+---
+
+## 4. 核心概念与源码讲解
+
+### 4.1 ABI 选项：USE_CXX11_ABI
+
+#### 4.1.1 概念说明
+
+CXX11 ABI 问题的根源在 `std::string`。GCC 5 之前，`std::string` 内部用「写时复制 + 引用计数」实现，对象固定占用 32 字节；GCC 5 之后引入新 ABI，`std::string` 改成 SSO（小字符串优化），布局与符号名都变了。两者用宏 `_GLIBCXX_USE_CXX11_ABI` 切换：
+
+- `_GLIBCXX_USE_CXX11_ABI=1`：新 ABI，`std::string` 的符号叫 `std::__cxx11::basic_string...`
+- `_GLIBCXX_USE_CXX11_ABI=0`：旧 ABI，符号叫 `std::basic_string...`
+
+这两套符号在同一个 libstdc++ 里共存，但**一个 `.so` 只能选一套**。如果一个库用新 ABI 编译、另一个用旧 ABI 编译，它们在接口处传 `std::string` 时，按各自布局去解读同一块内存，轻则数据错乱，重则直接链接报「undefined symbol」或运行崩溃。
+
+ATB 的处境是：它的公开接口（如 `atb::Tensor`、`VariantPack`、`Operation`）大量使用 `std::vector`、`std::string`，而 ATB 必须链接 PyTorch、torch_npu、CANN 这些**已经编好、ABI 固定**的库。所以 ATB 的 ABI 不能随便选，必须**与下游对齐**。
+
+#### 4.1.2 核心流程
+
+ATB 处理 ABI 的三步法：
+
+1. **自动探测**：`build.sh` 启动时调用 `torch.compiled_with_cxx11_abi()` 读出 PyTorch 用的 ABI，让 ATB 跟随；用户也可用 `--use_cxx11_abi=0/1` 显式覆盖。
+2. **宏注入**：把探测结果转成 `_GLIBCXX_USE_CXX11_ABI` 编译宏，写进全局 `CMAKE_CXX_FLAGS`。
+3. **目录隔离**：用同一个值派生安装目录名 `cxx_abi_0` 或 `cxx_abi_1`，让两套 ABI 产物在磁盘上物理分开，互不覆盖。
+
+> 关键结论：ABI 不是「选哪个更好」的问题，而是「必须和链上的伙伴一致」的问题。ATB 默认值是 `ON`（新 ABI），因为它假设现代 PyTorch 一般是新 ABI；但真正生效的值由探测决定。
+
+#### 4.1.3 源码精读
+
+**第一步：13 个开关里和 ABI 相关的那一个**。顶层 CMake 用 `option(USE_CXX11_ABI "USE_CXX11_ABI" ON)` 声明，默认 `ON`：
+
+[CMakeLists.txt:31-33](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/CMakeLists.txt#L31-L33) 声明 ABI 与两个 sanitizer 开关（默认全 `ON`/`OFF`）。
+
+**第二步：宏注入 + 目录派生**。这是 ABI 选项的核心落地：
+
+[CMakeLists.txt:70-78](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/CMakeLists.txt#L70-L78) 把 `USE_CXX11_ABI` 同时翻译成「编译宏 `_GLIBCXX_USE_CXX11_ABI`」「本地变量 `cxx_abi`」「安装前缀 `output/atb/cxx_abi_${cxx_abi}`」三处。这一段说明 ABI 的影响是全局的：既改所有 `.cpp` 的编译，又改最终 `.so` 落盘的位置。
+
+**第三步：`build.sh` 自动探测**。如果用户没传 `--use_cxx11_abi`，脚本就让 ATB 跟随 PyTorch：
+
+[scripts/build.sh:446-470](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/scripts/build.sh#L446-L470) `fn_init_env` 先检查 torch 是否安装：未装则 ABI 默认 `ON`；装了则用 `torch.compiled_with_cxx11_abi()` 决定。这样保证 ATB 与 PyTorch 同 ABI，避免链接期 `std::string` 符号不匹配。
+
+**第四步：第三方依赖也得对齐 ABI**。单元测试要静态链接 googletest，所以 build.sh 编 googletest 时也用 `sed` 注入同一个 ABI 宏：
+
+[scripts/build.sh:55-60](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/scripts/build.sh#L55-L60) 给 googletest 的 CMakeLists 注入 `_GLIBCXX_USE_CXX11_ABI`，使其静态库与 ATB 同 ABI，否则 `atb_unittest` 链接 gtest 时会符号冲突。
+
+**第五步：为什么要 `--clean-first`**。切换 ABI 时有三处残留：CMake 缓存里旧的 `CMAKE_CXX_FLAGS`、从 nnal 拷来的 `libtbe_adapter.so`（带固定 ABI）、MKI 第三方库。不清理就会「新 ABI 代码链接旧 ABI 库」。`build.sh` 的 `fn_copy_tbe_adapter` 还做了一道运行期校验：
+
+[scripts/build.sh:287-294](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/scripts/build.sh#L287-L294) 比较「本地目标 ABI」与「依赖库所在目录的 ABI 字符串」，不一致直接报错退出，防止把错的 `libtbe_adapter.so` 拷进来。
+
+#### 4.1.4 代码实践
+
+1. **实践目标**：亲手验证 ABI 探测逻辑与目录隔离效果。
+2. **操作步骤**：
+   - 在装有 PyTorch 的环境执行 `python3 -c 'import torch; print(torch.compiled_with_cxx11_abi())'`，记下返回值。
+   - 执行 `bash scripts/build.sh --use_cxx11_abi=1`（或 `=0`），观察终端里 `fn_init_env` 打印的 `USE_CXX11_ABI=...` 是否与你的 PyTorch 一致。
+   - 构建完成后查看安装目录：`ls output/atb/`，确认存在 `cxx_abi_1`（或 `cxx_abi_0`）子目录。
+3. **需要观察的现象**：终端会打印 `USE_CXX11_ABI=ON/OFF`；产物只在对应 ABI 目录下生成。
+4. **预期结果**：`output/atb/cxx_abi_1/lib/libatb.so` 与 `cxx_abi_0` 互不干扰。若强制用 `--use_cxx11_abi=0` 编完，再用 `=1` 编而**不加** `--clean-first`，很可能在链接阶段出现 `undefined reference to std::__cxx11::...` 之类错误——这就是 ABI 不匹配的典型症状。
+5. **运行结果待本地验证**：具体报错文本与是否复现取决于本机残留状态。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 ATB 默认把 ABI 探测交给 PyTorch，而不是固定一个值？
+**答案**：因为 ATB 的 C++ 接口大量使用 `std::string`/`std::vector`，必须与它链接的 PyTorch、torch_npu 同 ABI 才能正确传递这些对象；PyTorch 的 ABI 由其发行版决定、不可控，所以 ATB 选择跟随而非硬编码。
+
+**练习 2**：`_GLIBCXX_USE_CXX11_ABI` 这个宏是谁认识的、在哪里起作用？
+**答案**：它是 GCC 的 libstdc++ 头文件认识的宏。预处理时，libstdc++ 的 `<string>` 等头文件根据它选择 `std::__cxx11::` 命名空间下的新实现还是旧实现，从而决定符号名与内存布局。
+
+---
+
+### 4.2 测试编译开关：BUILD_TEST_FRAMEWORK 与 USE_*_TEST
+
+#### 4.2.1 概念说明
+
+ATB 有一整套测试体系（详见 u7-l3），但默认编译**不包含任何测试**——产出的 `libatb.so` 是给生产用的，不该带测试符号。测试代码是按需编译的，由一组 `USE_*` 开关控制。
+
+这里要先区分两类「开关」：
+
+- **`BUILD_TEST_FRAMEWORK`**：构建「测试引擎」`libatb_test_framework.so`。它本身不是某个具体测试，而是测试运行依赖的框架库（含 operation 桥接、layer_ops 等）。
+- **`USE_UNIT_TEST` / `USE_PYTHON_TEST` / `USE_CSV_OPS_TEST` / `USE_INFRA_TEST` / `USE_TORCH_ATB_TEST` / `USE_FUZZ_TEST`**：六类具体测试，每类一个开关。其中单元测试类还细分为 `unittest`（框架层 GTest，不依赖 NPU 也能跑一部分）和 `kernelunittest`（Kernel 接口测试）。
+
+用户一般不直接拨这些 CMake 开关，而是通过 `build.sh` 的子命令（如 `unittest`、`csvopstest`）触发，子命令内部再把对应的 `-DUSE_XXX=ON` 传给 CMake。
+
+#### 4.2.2 核心流程
+
+测试编译的决策链：
+
+1. 顶层 CMake 用一个「或」表达式判断是否需要进入 `tests/` 目录：
+   - 任一 `BUILD_TEST_FRAMEWORK`、`USE_UNIT_TEST`、`USE_PYTHON_TEST`、`USE_FUZZ_TEST`、`USE_CSV_OPS_TEST`、`USE_INFRA_TEST`、`USE_ALL_TEST` 为真 → `add_subdirectory(tests)`。
+2. `tests/CMakeLists.txt` 再按更细的开关决定加入哪些子目录：
+   - `USE_UNIT_TEST` 或 `USE_ALL_TEST` → 加入 `unittest/`（产出 `atb_unittest`）和 `cinterface/`（产出 `atb_cinterface`）。
+3. `build.sh` 子命令负责「设开关 + 拉测试第三方依赖 + 编译 + 运行」一气呵成。
+
+> 关键结论：开关是「门」，CMake 用门控制编译范围；子命令是「路线」，build.sh 用路线把门打开并跑完流程。两者通过 `-D` 参数对接。
+
+#### 4.2.3 源码精读
+
+**13 个 option 的全貌**——本讲的全部开关都来自这里：
+
+[CMakeLists.txt:21-33](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/CMakeLists.txt#L21-L33) 一次性声明 `BUILD_TEST_FRAMEWORK`、`BUILD_PYBIND`、`BUILD_CUSTOMIZE_OPS(_TEST)`、六个 `USE_*_TEST`、`USE_CXX11_ABI`、`USE_ASAN`、`USE_MSSANITIZER`，默认值除 `BUILD_PYBIND`/`USE_CXX11_ABI` 为 `ON` 外其余全 `OFF`。这解释了为什么默认 `bash build.sh` 不含测试。
+
+**测试目录的总闸门**：
+
+[CMakeLists.txt:106-112](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/CMakeLists.txt#L106-L112) 一个长「或」条件，任一测试开关为真就 `add_subdirectory(tests)`；并且 `USE_FUZZ_TEST`/`USE_ALL_TEST` 时还会加 `-fprofile-arcs -ftest-coverage` 开覆盖率插桩。注意 `add_subdirectory(src)` 在它之后无条件执行，所以测试目录总能链接到主库。
+
+**单元测试的细分门**：
+
+[tests/CMakeLists.txt:16-19](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/tests/CMakeLists.txt#L16-L19) 只有 `USE_UNIT_TEST` 或 `USE_ALL_TEST` 为真，才编译 `atb_unittest`（纯框架 GTest）和 `atb_cinterface`（C 接口/Kernel 接口测试）两个可执行文件。
+
+**子命令如何把门打开并运行**：
+
+[scripts/build.sh:876-888](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/scripts/build.sh#L876-L888) `unittest` 与 `kernelunittest` 两个子命令都设 `-DUSE_UNIT_TEST=ON`，差别在运行阶段：`unittest` 先跑 `fn_run_kernel_cinterfacetest` 再跑 `fn_run_unittest`，`kernelunittest` 只跑 Kernel 单测。它们都会先调 `fn_build_3rdparty_for_test` 拉 googletest。
+
+**测试子命令清单**——文档把所有路线列在一起：
+
+[docs/compile_and_build.md:41-51](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/docs/compile_and_build.md#L41-L51) 列出 `testframework`/`unittest`/`kernelunittest`/`pythontest`/`kernelpythontest`/`torchatbtest`/`csvopstest`/`infratest`/`hitest`/`fuzztest`/`alltest` 等全部测试子命令，每个都是「构建 + 运行」一条龙。
+
+#### 4.2.4 代码实践
+
+1. **实践目标**：跟踪一个测试子命令从命令行到 CMake 的完整路径。
+2. **操作步骤**：
+   - 阅读 [scripts/build.sh:870-888](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/scripts/build.sh#L870-L888)，对比 `testframework`、`unittest`、`kernelunittest` 三个 case 各自追加的 `-D` 选项。
+   - 在仓库里执行 `bash scripts/build.sh unittest --skip_build`（`--skip_build` 跳过实际编译，只看配置），观察终端打印的 `COMPILE_OPTIONS:...` 是否包含 `-DUSE_UNIT_TEST=ON`。
+3. **需要观察的现象**：`COMPILE_OPTIONS` 字符串里能看到 `-DUSE_UNIT_TEST=ON`，且因为 `--skip_build` 不会真正进入编译。
+4. **预期结果**：三个子命令对应三个不同的 CMake 开关组合；`unittest` 一定会触发 `fn_build_3rdparty_for_test`（拉 googletest），而 `testframework` 不会跑测试只打包。
+5. **运行结果待本地验证**。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`BUILD_TEST_FRAMEWORK` 和 `USE_UNIT_TEST` 有什么区别？能只开后者不开前者吗？
+**答案**：前者构建测试引擎库 `libatb_test_framework.so`（含与 torch/operation 桥接的 layer_ops），后者构建并运行 GTest 单元测试可执行文件。二者独立——`unittest` 子命令只设 `USE_UNIT_TEST=ON` 不设 `BUILD_TEST_FRAMEWORK`，因为单元测试链的是 `atb_test_utils` 而非整个 framework 库。
+
+**练习 2**：为什么默认 `bash build.sh`（`default` 子命令）产出的产物里没有任何测试可执行文件？
+**答案**：`default` 分支不追加任何 `USE_*` 开关，全部为默认 `OFF`，[CMakeLists.txt:106-112](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/CMakeLists.txt#L106-L112) 的「或」条件不成立，`add_subdirectory(tests)` 不执行，自然不产出测试二进制。
+
+---
+
+### 4.3 Sanitizers：USE_ASAN（Host）与 USE_MSSANITIZER（Device）
+
+#### 4.3.1 概念说明
+
+ATB 的代码跑在两个完全不同的内存空间：
+
+- **Host 侧（CPU）**：框架层代码，如 `Context`、`Operation`、`Runner`、`VariantPack`，用普通 C++ 写，跑在服务器 CPU 上，用 `new`/`malloc` 分配内存。
+- **Device 侧（AI Core）**：AscendC Kernel 代码，跑在昇腾 NPU 的核上，用 CCE 语言（类 C++）写，操作的是片上 UB、GM 等 Device 内存。
+
+两套内存的越界、悬空访问要由**两套不同的 sanitizer** 检测，ATB 分别提供了开关：
+
+| 开关 | 检测目标 | 底层机制 | 激活方式 |
+| --- | --- | --- | --- |
+| `USE_ASAN` | Host（CPU）内存 | GCC `-fsanitize=address -fsanitize=undefined` | `--asan`（同时强制 Debug） |
+| `USE_MSSANITIZER` | Device（AI Core）内存 | 昇腾 CCE `--cce-enable-sanitizer` + mssanitizer stub 库 | `--mssanitizer` |
+
+> ⚠️ 易混点：还有个 `--msdebug`（`USE_MSDEBUG`），名字里带 "ms" 容易和 mssanitizer 混。但 `--msdebug` 是 **MSDebug 模式**，用于算子 Kernel 源码级调测（它会把 910c 映射到 910b 以统一 SOC 匹配逻辑），**不是**内存 sanitizer。三者关系：`--asan` 管 Host 内存、`--mssanitizer` 管 Device 内存、`--msdebug` 管 Kernel 源码调试。
+
+#### 4.3.2 核心流程
+
+**ASAN（Host）启用流程**：
+
+1. `--asan` 把 `USE_ASAN=ON` 并把 `CMAKE_BUILD_TYPE` 强制设为 `Debug`（ sanitizer 需要调试符号才能给可读调用栈）。
+2. CMake 检测到 `USE_ASAN`，把 `-fsanitize=address -fsanitize=undefined -fsanitize-coverage=trace-pc` 追加到**全局** `CMAKE_CXX_FLAGS`，意味着所有 `.cpp`（含主库与测试）都被插桩。
+3. `src/CMakeLists.txt` 再把 `asan` 库显式链接进 `atb`/`atb_train`。
+4. 运行期，一旦框架代码出现 Host 内存错误（越界、double-free、UAF、UB），进程被中止并打印栈。
+
+**MSSANITIZER（Device）启用流程**：
+
+1. `--mssanitizer` 把 `USE_MSSANITIZER=ON`。
+2. AscendC 的 CCE 编译配置（`ascendc.cmake`）检测到后，给 Device 代码加 `-g --cce-enable-sanitizer`，并链接昇腾提供的 mssanitizer stub 库。
+3. Kernel 在 AI Core 上跑时，Device 侧内存访问被插桩检查。
+
+> 关键结论：这两个 sanitizer **正交**，可以同时打开——一个查 Host、一个查 Device，互不冲突。它们也都与 `USE_CXX11_ABI` 正交。
+
+#### 4.3.3 源码精读
+
+**ASAN 的编译标志注入**——这是全局生效的关键：
+
+[CMakeLists.txt:58-60](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/CMakeLists.txt#L58-L60) `USE_ASAN` 时一次性追加 AddressSanitizer、UndefinedBehaviorSanitizer 和覆盖率插桩三个标志到全局 `CMAKE_CXX_FLAGS`。因为是追加到全局标志，所以主库和测试可执行文件都会被插桩。
+
+**ASAN 的链接**——编译插桩还不够，链接期也要带上 asan 运行时：
+
+[src/CMakeLists.txt:31-34](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/CMakeLists.txt#L31-L34) `USE_ASAN` 时给 `atb`、`atb_train` 两个主库 `PRIVATE` 链接 `asan` 运行时库。`PRIVATE` 表示只在链接本库时用，不向下游传播。
+
+**`--asan` 命令行处理**：
+
+[scripts/build.sh:793-796](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/scripts/build.sh#L793-L796) `--asan` 同时做两件事：置 `USE_ASAN=ON`、把构建类型强制改成 `Debug`。这与官方文档「启用内存错误检测，并强制设置为 Debug 模式」的描述完全对应。
+
+**MSSANITIZER 的 Device 注入**——与 ASAN 完全不同的机制：
+
+[src/kernels/lcal/src/ascendc.cmake:13-24](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/kernels/lcal/src/ascendc.cmake#L13-L24) `USE_MSSANITIZER` 时给 CCE 编译加 `-g --cce-enable-sanitizer`，并 `--dependent-libraries` 链接 `$ASCEND_HOME_PATH/tools/mssanitizer/lib64/` 下的两个 stub 库（向量核 `vec` 与立方核 `cube` 各一份）。注意这些是昇腾工具链提供的、面向 AI Core 的 sanitizer，不是 GCC 那套。
+
+**MSSANITIZER 还会影响 LCAL 编译宏**：
+
+[src/kernels/lcal/src/CMakeLists.txt:28-37](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/src/kernels/lcal/src/CMakeLists.txt#L28-L37) 开 mssanitizer 时 `add_definitions(-DUSE_MSSANITIZER)`，并把单算子二进制缓冲 `LCAL_1OP_BIN_SIZE` 从 5MB 放大到 128MB（ sanitizer 会显著膨胀 Device 代码体积，需要更大缓冲容纳）。这是一个 sanitizer 影响产物布局的真实例子。
+
+**`--mssanitizer` 命令行处理**：
+
+[scripts/build.sh:828-830](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/scripts/build.sh#L828-L830) 仅置 `USE_MSSANITIZER=ON`，**不**改构建类型（与 `--asan` 不同），因为 Device sanitizer 不依赖 Host Debug 符号。
+
+**`--msdebug`（对比项，非 sanitizer）**：
+
+[scripts/build.sh:809-819](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/scripts/build.sh#L809-L819) `--msdebug` 置 `USE_MSDEBUG=ON`，并通过 `npu-smi` 探测芯片型号，把 910c 映射为 910b 以保持 SOC 匹配逻辑一致，最后追加 `-DUSE_MSDEBUG=ON -DCHIP_TYPE=...`。它是 Kernel 源码调试开关，与前两者目的不同。
+
+**所有 sanitizer 开关如何汇入 CMake**：
+
+[scripts/build.sh:860-862](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/scripts/build.sh#L860-L862) `USE_ASAN`、`USE_MSSANITIZER` 与 `USE_CXX11_ABI`、`CMAKE_BUILD_TYPE` 一起拼进 `COMPILE_OPTIONS`，统一传给 `cmake`。这行是「命令行开关 → CMake 变量」的汇聚点。
+
+#### 4.3.4 代码实践
+
+1. **实践目标**：验证 ASAN 注桩确实生效，并观察它与 Device sanitizer 的差别。
+2. **操作步骤**：
+   - 执行 `bash scripts/build.sh unittest --asan`（详见第 5 节综合实践的命令分解）。
+   - 编译完成后，运行 `$ATB_HOME_PATH/bin/atb_unittest`。
+3. **需要观察的现象**：进程启动时终端可能打印类似 `AddressSanitizer` 字样的运行时初始化信息；若测试或框架代码里有 Host 内存越界，会打印带调用栈的 ASAN 报告并中止进程。
+4. **预期结果**：ASAN 只会在 **Host 侧**内存错误时触发。它**不会**检测 AI Core 上的 Device 内存越界——那是 `--mssanitizer` 的职责。若想同时查 Device 内存，需叠加 `--mssanitizer`。
+5. **运行结果待本地验证**：实际是否打印 ASAN 报告取决于代码中是否存在可被检测到的 Host 内存缺陷。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：`--asan` 为什么要把构建类型强制设为 Debug，而 `--mssanitizer` 不需要？
+**答案**：ASAN 报告需要可读的 Host 调用栈，而 Debug（`-g -O0`）保留符号且不内联优化，栈最准确；`--asan` 自动切 Debug 是为了让报告可用。MSSANITIZER 针对的是 Device（AI Core）代码，其符号体系独立于 Host 的 `CMAKE_BUILD_TYPE`，所以不需要改 Host 构建类型。
+
+**练习 2**：有人说「我开了 `--asan`，应该也能查到算子 Kernel 在 NPU 上的越界」，对吗？
+**答案**：不对。`--asan`（`-fsanitize=address`）只插桩 Host（CPU）代码，监控的是 `new`/`malloc` 的内存。AI Core 上的 Device 内存越界要由 `--mssanitizer`（CCE `--cce-enable-sanitizer`）检测。两者各管一侧。
+
+---
+
+## 5. 综合实践
+
+把本讲三个模块串起来：设计一条「**单元测试 + ASAN**」的组合编译命令，并逐项解释。
+
+### 命令
+
+```bash
+bash scripts/build.sh unittest --asan
+```
+
+### 它是怎么生效的（调用链分解）
+
+`build.sh` 的 `fn_main` 把第一个位置参数当作**子命令**（在 `BUILD_OPTION_LIST` 里查表），后续以 `--` 开头的当作**配置开关**。所以这条命令等价于「子命令 `unittest` + 开关 `--asan`」，执行顺序如下：
+
+1. **解析子命令**：[scripts/build.sh:757-778](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/scripts/build.sh#L757-L778) `unittest` 命中 `BUILD_OPTION_LIST`，`arg1=unittest`。
+2. **解析开关**：`--asan` 在 `until` 循环里被 [scripts/build.sh:793-796](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/scripts/build.sh#L793-L796) 处理，置 `USE_ASAN=ON`、`CMAKE_BUILD_TYPE=Debug`。
+3. **ABI 自动对齐**：[scripts/build.sh:858](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/scripts/build.sh#L858) 调 `fn_init_env`，按 PyTorch 决定 `USE_CXX11_ABI`，并给 googletest 注入同 ABI（`unittest` 会拉测试第三方依赖）。
+4. **汇总 CMake 选项**：[scripts/build.sh:860-862](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/scripts/build.sh#L860-L862) 把 `CMAKE_BUILD_TYPE=Debug`、`USE_CXX11_ABI`、`USE_ASAN=ON`、`USE_MSSANITIZER=OFF` 拼进 `COMPILE_OPTIONS`。
+5. **追加单元测试开关并构建运行**：[scripts/build.sh:876-882](https://github.com/gitcode.com/cann/ascend-transformer-boost/blob/578daaec1e5cf238ecfa8607a24ccbb606b46b6a/scripts/build.sh#L876-L882) 追加 `-DUSE_UNIT_TEST=ON`，拉 googletest，编译，最后跑 `atb_cinterface` 与 `atb_unittest`。
+
+### 每个选项的作用
+
+| 片段 | 类别 | 作用 |
+| --- | --- | --- |
+| `unittest` | 子命令 | 置 `USE_UNIT_TEST=ON` → 编译 `atb_unittest`/`atb_cinterface`；拉 googletest；构建后自动运行测试 |
+| `--asan` | 配置开关 | 置 `USE_ASAN=ON` → 全局加 `-fsanitize=address -fsanitize=undefined`、链接 `asan`；同时强制 `CMAKE_BUILD_TYPE=Debug` |
+| （隐式）ABI 探测 | 自动 | 按已装 PyTorch 决定 `_GLIBCXX_USE_CXX11_ABI`，产物落到 `output/atb/cxx_abi_X/` |
+
+### 进阶变体
+
+- 想连 Device 内存一起查：`bash scripts/build.sh unittest --asan --mssanitizer`（两个 sanitizer 正交叠加）。
+- 之前编过别的 ABI：切换 ABI 时务必加 `--clean-first`，例如 `bash scripts/build.sh unittest --asan --use_cxx11_abi=0 --clean-first`。
+- 只想编译不运行：在 `unittest` 基础上手动去掉运行步骤较繁琐，可改用 `bash scripts/build.sh testframework --asan` 先只出测试框架产物，再用 `--skip_build` 调试配置。
+
+> 说明：本节命令的「能跑通」依赖于一台已安装 CANN（`ASCEND_HOME_PATH` 已 source）与 PyTorch 的昇腾开发机；具体测试用例通过情况与是否触发 ASAN 报告，**待本地验证**。
+
+## 6. 本讲小结
+
+- ATB 用 13 个 `option()` 管全部编译维度，默认除 `BUILD_PYBIND`/`USE_CXX11_ABI` 外全 `OFF`，所以默认产物不含测试、不含 sanitizer。
+- **CXX11 ABI** 不是好坏选择而是「必须与 PyTorch/CANN 对齐」的硬约束：`_GLIBCXX_USE_CXX11_ABI` 宏决定 `std::string` 符号布局，ATB 用 `cxx_abi_0`/`cxx_abi_1` 目录物理隔离两套产物，并用 `torch.compiled_with_cxx11_abi()` 自动跟随；切换 ABI 必须 `--clean-first`。
+- 测试开关分两类：`BUILD_TEST_FRAMEWORK`（测试引擎库）与六个 `USE_*_TEST`（具体测试），由顶层 CMake 的「或」总闸控制是否进入 `tests/`，由 `build.sh` 子命令负责打开并运行。
+- Sanitizer 有两套且正交：`USE_ASAN`（`--asan`）管 **Host/CPU** 内存，靠 GCC `-fsanitize` + 强制 Debug；`USE_MSSANITIZER`（`--mssanitizer`）管 **Device/AI Core** 内存，靠 CCE `--cce-enable-sanitizer`。
+- `--msdebug`（MSDebug）是 Kernel 源码调试开关，**不是** sanitizer，勿与 mssanitizer 混淆。
+- 子命令与 `--` 开关可组合：`bash scripts/build.sh unittest --asan` = 单元测试编译运行 + Host ASAN 插桩 + Debug + 自动 ABI 对齐。
+
+## 7. 下一步学习建议
+
+- 想了解测试体系本身（CSV 驱动、operation_funcs 反序列化、精度/性能测试），继续读 **u7-l3 测试框架与算子测试**。
+- 想在运行期定位性能与日志问题，读 **u7-l2 日志与性能 Profiling**，它与本讲的 sanitizer 互补——一个查「对不对」（内存错误），一个查「快不快」（耗时）。
+- 想看这些编译选项如何服务 CI 与版本发布，读 **u7-l5 版本兼容、贡献流程与常见问题**。
+- 源码延伸阅读：动手改 `CMakeLists.txt` 加一个自定义 `option()`，再到 `build.sh` 的 `BUILD_CONFIGURE_LIST` 与 `case` 里接上，体验一次「加开关」的全流程。
