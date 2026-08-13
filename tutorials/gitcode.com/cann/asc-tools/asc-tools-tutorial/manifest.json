@@ -1,0 +1,873 @@
+{
+  "project": "asc-tools",
+  "head": "c6f35b0cf219c53f3c485fc7cef8581c53c11772",
+  "rationale": "asc-tools 是 CANN Ascend C 的配套调试工具集，由一个 C++ 核心（cpudebug）和四个围绕其产物的 Python 工具（npuchk、msobjdump、show_kernel_debug_data、optype_collector）构成。学习路线按“先整体后局部、先使用后原理、先核心后外围”的顺序设计：第 1 单元让读者建立项目全景并跑通第一个样例；第 2 单元聚焦最核心的 CPU Debug 工具的使用；第 3、4 单元深入 cpudebug 的运行机制（多核 fork 仿真、SIMT、stub 转义、API 校验），因为它是其余工具的数据来源；第 5–8 单元按工具逐个讲解 npu check、msobjdump、show_kernel_debug_data 和算子信息采集/工程模板；第 9–10 单元进入专家层，覆盖构建打包、测试体系与二次开发。单元划分对应“一个工具/一个机制 = 一个单元”，讲义依赖链严格遵循“先用起来→再读源码→最后扩展”的认知顺序，保证读者每一篇都建立在前置知识之上。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门与快速体验",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "asc-tools 项目定位与工具全景",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 asc-tools 是什么、它在 CANN/Ascend C 算子开发链路中的位置，以及 cpu debug、npu check、msobjdump、show_kernel_debug_data、optype_collector 五个工具各自解决什么问题。",
+          "learning_goals": [
+            "理解 Ascend C Tools 的整体定位与价值",
+            "区分五个工具的功能边界与使用场景",
+            "建立“算子开发→CPU 调测→离线分析”的工具链认知"
+          ],
+          "source_files": [
+            "README.md",
+            "README_en.md",
+            "docs/00_quick_start.md"
+          ],
+          "minimal_modules": [
+            "项目概述",
+            "五大工具功能划分",
+            "工具链整体定位"
+          ],
+          "practice_task": "阅读 README，用一句话分别概括五个工具的用途，并画出一张“算子源码→各工具产物”的简单关系图。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与源码组织",
+          "order": 2,
+          "filename": "u1-l2-directory-structure.md",
+          "level": "beginner",
+          "topic": "讲解仓库目录布局：cpudebug（C++ 核心）、npuchk、utils 下的三个 Python 工具、examples、tests、libraries、templates 各自存放什么，以及根 CMakeLists 如何把它们组织在一起。",
+          "learning_goals": [
+            "掌握仓库顶层目录的职责划分",
+            "理解 C++ 工具与 Python 工具在目录上的分离",
+            "能在源码中快速定位某个工具的实现"
+          ],
+          "source_files": [
+            "README.md",
+            "CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "目录结构说明",
+            "CMake 子目录组织",
+            "工具源码定位"
+          ],
+          "practice_task": "对照 README 目录树，在本地仓库为 cpudebug、npuchk、msobjdump、show_kernel_debug_data、optype_collector 各列出其主入口文件路径。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "开发环境搭建与依赖管理",
+          "order": 3,
+          "filename": "u1-l3-environment-setup.md",
+          "level": "beginner",
+          "topic": "讲解编译运行 asc-tools 所需的环境（CANN 包、gcc、cmake、python、ccache 等），以及云开发环境、Docker、DevContainer 三种准备方式的取舍。",
+          "learning_goals": [
+            "了解 asc-tools 的运行态与编译态依赖",
+            "掌握 CANN 包安装与环境变量配置",
+            "能够选择合适的环境准备方式"
+          ],
+          "source_files": [
+            "docs/00_quick_start.md",
+            "install_deps.sh",
+            "install_dep_tar.py"
+          ],
+          "minimal_modules": [
+            "环境准备方式对比",
+            "CANN 包安装",
+            "依赖清单"
+          ],
+          "practice_task": "按照快速入门配置好 CANN 环境变量，并执行 npu-smi info 或查看 ascend_toolkit_install.info 验证安装。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "一键编译与运行第一个样例",
+          "order": 4,
+          "filename": "u1-l4-build-and-first-sample.md",
+          "level": "beginner",
+          "topic": "使用 build.sh 一键编译出 run 包，并以 cpudebug 的 add 样例为入口，体验从编译到运行验证的完整闭环。",
+          "learning_goals": [
+            "掌握 build.sh 的常用参数与产物路径",
+            "能够独立编译并安装 asc-tools run 包",
+            "跑通第一个 CPU 域算子样例"
+          ],
+          "source_files": [
+            "build.sh",
+            "docs/00_quick_start.md",
+            "examples/02_cpudebug/README.md",
+            "examples/02_cpudebug/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "build.sh 用法",
+            "run 包安装",
+            "样例编译运行"
+          ],
+          "practice_task": "执行 bash build.sh --pkg 生成 run 包，并在样例目录用 cmake -DCMAKE_ASC_RUN_MODE=cpu 编译运行 add 样例，观察输出。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "CPU Debug 使用入门",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "CPU Debug 工作原理与使用流程",
+          "order": 1,
+          "filename": "u2-l1-cpudebug-workflow.md",
+          "level": "beginner",
+          "topic": "讲解 CPU Debug 如何让 Ascend C 源码通过 GCC 编译在 CPU 上运行，重点剖析 cpu_debug_launch.h 这个入口头文件与 <<<>>> 核函数调用的转义机制。",
+          "learning_goals": [
+            "理解 CPU 域孪生调试的核心思想",
+            "掌握 cpu_debug_launch.h 的作用与 AscCPUKernelLaunch 流程",
+            "了解 CPU/NPU 模式切换不影响代码的原因"
+          ],
+          "source_files": [
+            "docs/01_cpu_debug.md",
+            "cpudebug/include/cpu_debug_launch.h",
+            "cpudebug/include/tikicpulib.h"
+          ],
+          "minimal_modules": [
+            "CPU Debug 概念",
+            "cpu_debug_launch 入口",
+            "核函数调用转义"
+          ],
+          "practice_task": "在 add 样例源码中找到 #ifdef ASCENDC_CPU_DEBUG 块，说明它为何在 NPU 模式下不生效，并对照 cpu_debug_launch.h 解释 AscCPUKernelLaunch 的参数。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Ascend C 算子源码与 .asc 核函数结构",
+          "order": 2,
+          "filename": "u2-l2-asc-kernel-source.md",
+          "level": "beginner",
+          "topic": "以 add.asc 为例，拆解一个 Ascend C 算子的典型结构：Kernel 类、CopyIn/Compute/CopyOut 三段式、TQue/LocalTensor/GlobalTensor、__global__ 核函数签名。",
+          "learning_goals": [
+            "读懂一个完整的 Ascend C 算子实现",
+            "理解三段式流水与 TQue 内存管理",
+            "掌握核函数 <<<>>> 启动写法"
+          ],
+          "source_files": [
+            "examples/02_cpudebug/add.asc",
+            "examples/02_cpudebug/README.md"
+          ],
+          "minimal_modules": [
+            "Kernel 类结构",
+            "三段式搬运计算",
+            "队列与 Tensor 类型"
+          ],
+          "practice_task": "在 add.asc 基础上把 TILE_NUM 改成不同值，重新编译运行，观察执行结果是否仍验证通过，并解释原因。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "使用 GDB 调试 CPU 域算子",
+          "order": 3,
+          "filename": "u2-l3-gdb-debugging.md",
+          "level": "beginner",
+          "topic": "讲解为何 CPU Debug 要为每个核启动子进程，以及如何用 set follow-fork-mode child 跟踪子进程，在核函数内部断点、单步、查看内存。",
+          "learning_goals": [
+            "理解 fork 子进程模拟多核的设计",
+            "掌握 gdb 跟踪子进程的关键设置",
+            "能在核函数内部进行断点与单步调试"
+          ],
+          "source_files": [
+            "docs/01_cpu_debug.md",
+            "examples/02_cpudebug/README.md"
+          ],
+          "minimal_modules": [
+            "多核 fork 模型对调试的影响",
+            "gdb follow-fork-mode",
+            "断点与单步操作"
+          ],
+          "practice_task": "用 gdb 调试 add 样例，设置 follow-fork-mode child 并在 Compute 函数断点，运行后查看 xLocal/yLocal 的内存内容。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "cpudebug 核心运行机制",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "多核 fork 执行模型",
+          "order": 1,
+          "filename": "u3-l1-fork-execution-model.md",
+          "level": "intermediate",
+          "topic": "深入 kern_fwk.h 中的 RunKernelFunctionOnCpu，剖析它如何用 fork 为每个 block 创建子进程、如何用信号处理与 waitpid 管理子进程生命周期。",
+          "learning_goals": [
+            "理解 RunKernelFunctionOnCpu 的执行流程",
+            "掌握 fork 子进程模拟 NPU 多核的原理",
+            "了解信号处理与进程同步机制"
+          ],
+          "source_files": [
+            "cpudebug/include/kern_fwk.h",
+            "cpudebug/src/regfwk/stub_base.cpp",
+            "cpudebug/utils/kernel_common.h"
+          ],
+          "minimal_modules": [
+            "RunKernelFunctionOnCpu 主流程",
+            "fork 多核模拟",
+            "信号处理与进程管理"
+          ],
+          "practice_task": "在 kern_fwk.h 中追踪 numBlocks 参数如何决定 fork 的子进程数量，并说明 Handler 函数在异常退出时做了哪些清理。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "SIMT 向量化仿真模型",
+          "order": 2,
+          "filename": "u3-l2-simt-vector-sim.md",
+          "level": "intermediate",
+          "topic": "剖析 kernel_simt_cpu.h 如何用 C++ 线程（Warp 类、std::thread、互斥量）在 CPU 上模拟 NPU 的 SIMT/warp 级并行与 warp 内数据交换。",
+          "learning_goals": [
+            "理解 SIMT 模型与 warp 概念在 CPU 上的仿真",
+            "掌握 Warp 类的线程调度与同步",
+            "了解 warp 级共享内存的双片交替设计"
+          ],
+          "source_files": [
+            "cpudebug/include/kernel_simt_cpu.h"
+          ],
+          "minimal_modules": [
+            "SIMT/warp 概念",
+            "Warp 线程调度",
+            "warp 级同步与共享内存"
+          ],
+          "practice_task": "阅读 kernel_simt_cpu.h 中 Warp::WarpOp 与 MEMORY_PIECE 常量，解释双片交替共享内存如何避免 warp 级数据竞争。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Stub 注册与内建函数转义",
+          "order": 3,
+          "filename": "u3-l3-stub-registration.md",
+          "level": "intermediate",
+          "topic": "讲解 stub_reg.cpp 的 StubInit/StubReg 机制：如何通过 dlsym 把 Ascend C 内建函数（如 Add、DataCopy）动态绑定到 CPU 上的 AscendC/cceprint/npuchk 三类 stub 实现。",
+          "learning_goals": [
+            "理解 stub 注册的整体机制",
+            "掌握 dlsym 动态符号绑定的原理",
+            "区分 AscendC/cceprint/npuchk 三类 stub 的职责"
+          ],
+          "source_files": [
+            "cpudebug/src/regfwk/stub_reg.cpp",
+            "cpudebug/src/regfwk/stub_base.cpp",
+            "cpudebug/include/stub_reg.h",
+            "cpudebug/src/regfwk/stub_backtrace.cpp"
+          ],
+          "minimal_modules": [
+            "StubReg/StubInit 流程",
+            "dlsym 动态绑定",
+            "三类 stub 注册项"
+          ],
+          "practice_task": "在 stub_reg.cpp 中追踪 g_regStubs 数组与 IntriFmtGet 的配合，说明一个内建函数符号是如何被解析并加入函数表的。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "浮点数据类型的 CPU 仿真",
+          "order": 4,
+          "filename": "u3-l4-fp-type-simulation.md",
+          "level": "intermediate",
+          "topic": "讲解 cpudebug 如何在 CPU 上仿真 fp16/bf16/fp8/fp4/hif8 等 NPU 专有低精度数据类型，以保证算子在 CPU 域的功能与精度验证可信。",
+          "learning_goals": [
+            "理解低精度浮点类型在 CPU 上的仿真需求",
+            "掌握 kernel_fp16/kernel_bf16 等头文件的作用",
+            "了解 fp8/fp4 等新格式的仿真覆盖"
+          ],
+          "source_files": [
+            "cpudebug/include/kernel_fp16.h",
+            "cpudebug/include/kernel_bf16.h",
+            "cpudebug/include/kernel_vectorized.h",
+            "cpudebug/src/acl_stub/kernel_fp16.cpp"
+          ],
+          "minimal_modules": [
+            "fp16/bf16 仿真",
+            "fp8/fp4 格式",
+            "类型转换实现"
+          ],
+          "practice_task": "对比 kernel_fp16.h 与 kernel_bf16.h 的结构，结合最近提交中 struct half/Bf16T 的 operator-() 改动，说明为这些类型补全一元运算符的意义。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "API 校验框架",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "校验基类与通用检查机制",
+          "order": 1,
+          "filename": "u4-l1-base-check-framework.md",
+          "level": "intermediate",
+          "topic": "剖析 api_check 模块的设计：TikcppBaseCheck 基类、CheckTensorSizeOverflow/CheckTensorScope/CheckMaskArray 等通用校验方法，以及 ASCENDC_CHECK 宏如何报告错误。",
+          "learning_goals": [
+            "理解 api_check 校验框架的分层设计",
+            "掌握基类提供的通用校验方法",
+            "了解错误报告与 ASCENDC_CHECK 宏机制"
+          ],
+          "source_files": [
+            "cpudebug/src/api_check/kernel_base_check.cpp",
+            "cpudebug/src/api_check/inc/kernel_base_check.h",
+            "cpudebug/src/api_check/kernel_check_util.cpp"
+          ],
+          "minimal_modules": [
+            "TikcppBaseCheck 基类",
+            "通用越界/scope/mask 检查",
+            "错误报告宏"
+          ],
+          "practice_task": "在 kernel_base_check.cpp 中找到 CheckTensorSizeOverflow，说明 expectedSize/tensorSize 比较失败时如何上报，以及 ModeType 三种模式的区别。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "DataCopy 搬运类校验",
+          "order": 2,
+          "filename": "u4-l2-datacopy-check.md",
+          "level": "intermediate",
+          "topic": "讲解 DataCopy 及其 pad/slice 变体的校验器如何检查源/目的 Tensor 的范围、对齐、scope 合法性，防止搬运越界。",
+          "learning_goals": [
+            "理解搬运类 API 的校验重点",
+            "掌握 data_copy / pad / slice 校验器的差异",
+            "了解 32 字节对齐等硬件约束的检查"
+          ],
+          "source_files": [
+            "cpudebug/src/api_check/kernel_data_copy_check.cpp",
+            "cpudebug/src/api_check/inc/kernel_data_copy_check.h",
+            "cpudebug/utils/include/utils/kernel_check_data_copy_util.h"
+          ],
+          "minimal_modules": [
+            "DataCopy 校验",
+            "pad/slice 变体校验",
+            "对齐与范围约束"
+          ],
+          "practice_task": "对照 add.asc 中的 DataCopy 调用，说明 kernel_data_copy_check 会检查哪些条件，并尝试构造一个越界用例观察 ASSERT。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "向量计算类校验",
+          "order": 3,
+          "filename": "u4-l3-vector-check.md",
+          "level": "intermediate",
+          "topic": "讲解向量计算类（binary、reduce、broadcast、gather/scatter 等）校验器如何检查 repeat/mask/stride 参数与 Tensor 容量的匹配关系。",
+          "learning_goals": [
+            "理解向量指令 repeat/mask/stride 参数模型",
+            "掌握 binary/reduce/broadcast 等校验器思路",
+            "了解 mask 长度计算与 Tensor 溢出判断"
+          ],
+          "source_files": [
+            "cpudebug/src/api_check/kernel_vec_binary_check.cpp",
+            "cpudebug/src/api_check/inc/kernel_vec_binary_check.h",
+            "cpudebug/utils/include/utils/kernel_check_vec_binary_util.h",
+            "cpudebug/utils/include/utils/kernel_check_vec_reduce_util.h"
+          ],
+          "minimal_modules": [
+            "向量指令参数模型",
+            "binary/reduce 校验",
+            "mask 与溢出判断"
+          ],
+          "practice_task": "阅读 kernel_vec_binary_check 的实现，结合 GetMaskLength，说明一个 repeat 计算所需最小 Tensor 容量是如何推导出来的。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "NPU Check 工具",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "npu check 错误体系与检查机制",
+          "order": 1,
+          "filename": "u5-l1-npuchk-error-system.md",
+          "level": "intermediate",
+          "topic": "讲解 npu check 在 CPU 域执行时同步检查算子实现的机制，以及 ErrorRead/Write/Sync/Leak/Free/Buffer 各类错误的含义与典型场景。",
+          "learning_goals": [
+            "理解 npu check 与 cpu debug 的协作关系",
+            "掌握各类 ErrorXxx 错误的含义",
+            "了解 EnQue/DeQue 与 GM 多核踩踏检查"
+          ],
+          "source_files": [
+            "docs/02_npu_check.md",
+            "npuchk/ascendc_npuchk_report.py",
+            "npuchk/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "npu check 触发机制",
+            "错误类型体系",
+            "EnQue/DeQue 与 GM 踩踏"
+          ],
+          "practice_task": "参照 docs/02 在 add 样例的 CopyIn 中插入一个 FreeTensor 构造错误，运行后用 ascendc_npuchk_report.py 解析，观察报出的 ErrorBuffer2/ErrorWrite1。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "日志解析与源码行定位",
+          "order": 2,
+          "filename": "u5-l2-log-parsing-addr2line.md",
+          "level": "intermediate",
+          "topic": "剖析 ascendc_npuchk_report.py 如何解析 *_npuchk.log：提取错误类型、回溯堆栈，并用 addr2line + c++filt 把二进制地址映射回源码函数与行号。",
+          "learning_goals": [
+            "掌握 npuchk.log 的文本结构",
+            "理解 addr2line/c++filt 的地址到源码映射",
+            "能够独立定位错误到具体源码行"
+          ],
+          "source_files": [
+            "npuchk/ascendc_npuchk_report.py",
+            "docs/02_npu_check.md"
+          ],
+          "minimal_modules": [
+            "parse_log 日志解析",
+            "堆栈回溯提取",
+            "addr2line 源码定位"
+          ],
+          "practice_task": "阅读 parse_log 与 addr_to_line，手动对一条 npuchk.log 的 BackTrace 地址执行 addr2line -f -e，验证解析结果与脚本输出一致。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "msobjdump ELF 解析工具",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Kernel ELF 结构与 meta 信息",
+          "order": 1,
+          "filename": "u6-l1-kernel-elf-meta.md",
+          "level": "intermediate",
+          "topic": "讲解算子编译产出的 ELF 文件结构：.ascend.meta 段的 TLV 元信息（VERSION、KERNEL_TYPE、CROSS_CORE_SYNC、MIX_TASK_RATION 等）与 .aicore_binary 段。",
+          "learning_goals": [
+            "理解 Kernel ELF 的整体结构",
+            "掌握 .ascend.meta TLV 元信息字段含义",
+            "了解融合编译产物 aic/aiv 的区分"
+          ],
+          "source_files": [
+            "docs/03_msobjdump.md",
+            "examples/04_msobjdump/README.md",
+            "cpudebug/include/kernel_elf_parser.h"
+          ],
+          "minimal_modules": [
+            "ELF 文件结构",
+            ".ascend.meta TLV",
+            "kernel 类型与核占比"
+          ],
+          "practice_task": "对照 docs/03 的字段表，说明 KERNEL_TYPE、CROSS_CORE_SYNC、MIX_TASK_RATION 三个字段在融合编译场景下分别表达什么。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "ObjDump 解析流程实现",
+          "order": 2,
+          "filename": "u6-l2-objdump-pipeline.md",
+          "level": "intermediate",
+          "topic": "剖析 msobjdump_main.py 的 ObjDump 类：--dump-elf/--extract-elf/--list-elf 三种模式的处理流程，TLV 解析与 .aicore_binary 自动提取逻辑。",
+          "learning_goals": [
+            "掌握 ObjDump 类的整体流程",
+            "理解 dump/extract/list 三种命令的实现差异",
+            "了解 ELF 段提取与产物落盘逻辑"
+          ],
+          "source_files": [
+            "utils/msobjdump/msobjdump/msobjdump_main.py",
+            "utils/msobjdump/msobjdump/utils.py",
+            "utils/msobjdump/msobjdump/__main__.py"
+          ],
+          "minimal_modules": [
+            "ObjDump 主流程",
+            "三种命令模式实现",
+            "TLV 解析与段提取"
+          ],
+          "practice_task": "在 msobjdump_main.py 中追踪 _dump_elf_process 与 _parse_ascend_kernel_infos，说明 --verbose 如何影响 meta 信息的打印范围。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "show_kernel_debug_data 解析工具",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "Dump 配置与调试数据生成",
+          "order": 1,
+          "filename": "u7-l1-dump-config-generation.md",
+          "level": "intermediate",
+          "topic": "讲解如何通过 acl.json/环境变量配置 Dump（dump_kernel_data、dump_path），以及在 kernel 侧用 DumpTensor/printf/PrintTimeStamp 生成调试 bin 文件。",
+          "learning_goals": [
+            "掌握 Dump 配置的多种方式与优先级",
+            "理解 dump_kernel_data 各类型含义",
+            "能够在算子中生成调试数据"
+          ],
+          "source_files": [
+            "docs/04_show_kernel_debug_data.md",
+            "examples/01_show_kernel_debug_data/acl.json",
+            "examples/01_show_kernel_debug_data/README.md"
+          ],
+          "minimal_modules": [
+            "Dump 配置文件",
+            "环境变量优先级",
+            "kernel 侧调试 API"
+          ],
+          "practice_task": "参照样例 acl.json 配置 dump_kernel_data=tensor,printf，运行后说明 output 目录下 bin 文件命名与核号/索引的对应关系。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "dump bin 文件 TLV 格式解析",
+          "order": 2,
+          "filename": "u7-l2-dump-tlv-format.md",
+          "level": "intermediate",
+          "topic": "剖析 dump_parser.py 的二进制格式：TLV（Type-Length-Value）结构、DumpMessageHeader、BlockInfo，以及如何通过 magic（0xAE86 FIFO / 0x5AA5BCCD workspace）区分文件类型。",
+          "learning_goals": [
+            "理解 dump bin 的 TLV 二进制布局",
+            "掌握 FIFO 与 workspace 两种文件的区分",
+            "了解 parse_dump_bin 的分发逻辑"
+          ],
+          "source_files": [
+            "utils/show_kernel_debug_data/show_kernel_debug_data/dump_parser.py",
+            "utils/show_kernel_debug_data/show_kernel_debug_data/data_converter.py"
+          ],
+          "minimal_modules": [
+            "TLV 结构",
+            "BlockInfo/Header",
+            "magic 分发与文件类型"
+          ],
+          "practice_task": "阅读 parse_dump_bin 与 _read_block_magic_core_id_and_flag，画出根据 magic 值选择 FifoDumpBinFile/DumpBinFile 的判断流程图。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "printf / tensor / timestamp 解析实现",
+          "order": 3,
+          "filename": "u7-l3-printf-tensor-timestamp.md",
+          "level": "intermediate",
+          "topic": "深入 DumpTensor/PrintStruct/TimeStampInfo 等消息类的 parse_from 实现，看懂如何把格式化字符串、Tensor 数据、时间戳还原成可读文本。",
+          "learning_goals": [
+            "掌握 PrintStruct 的格式串与参数解析",
+            "理解 DumpTensor 数据片段的还原",
+            "了解时间戳信息的解析与落盘"
+          ],
+          "source_files": [
+            "utils/show_kernel_debug_data/show_kernel_debug_data/dump_parser.py",
+            "utils/show_kernel_debug_data/show_kernel_debug_data/dump_logger.py"
+          ],
+          "minimal_modules": [
+            "PrintStruct 格式串解析",
+            "DumpTensor 还原",
+            "TimeStamp 解析"
+          ],
+          "practice_task": "对照样例输出，在 dump_parser.py 中追踪 PrintStruct._read_arg 系列方法，说明整型/浮点/字符串参数是如何从二进制中读取的。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "算子信息采集与工程模板",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "optype_collector 采集与冲突检测",
+          "order": 1,
+          "filename": "u8-l1-optype-collector.md",
+          "level": "intermediate",
+          "topic": "剖析 optype_collector_main.py 如何从 built-in/vendors/ASCEND_CUSTOM_OPP_PATH 采集 OpType，扫描 SoC 配置，并检测自定义算子与内置算子、自定义算子之间的重名冲突。",
+          "learning_goals": [
+            "理解 OpType 采集的来源与扫描逻辑",
+            "掌握 SoC 别名展开与配置文件解析",
+            "了解冲突检测的分组与返回码规则"
+          ],
+          "source_files": [
+            "utils/optype_collector/optype_collector/optype_collector_main.py",
+            "docs/05_optype_collector.md"
+          ],
+          "minimal_modules": [
+            "OpType 来源扫描",
+            "SoC 名称映射",
+            "冲突检测与返回码"
+          ],
+          "practice_task": "执行 optype_collector <soc> --all 与 --detect-conflicts，对照代码说明 ConflictReport 如何把重名 OpType 分组并影响返回值。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "msopgen 与算子工程模板",
+          "order": 2,
+          "filename": "u8-l2-msopgen-templates.md",
+          "level": "intermediate",
+          "topic": "讲解 msopgen 如何根据算子原型 json 生成自定义算子工程框架，以及 utils/templates 下 aclnn/customize 两套模板的目录结构与构建脚本职责。",
+          "learning_goals": [
+            "理解 msopgen 的输入输出与生成流程",
+            "掌握算子工程模板的目录组织",
+            "了解 op_host/op_kernel/framework 的分工"
+          ],
+          "source_files": [
+            "examples/03_msopgen/README.md",
+            "examples/03_msopgen/op_dev/add_custom.json",
+            "utils/templates/CMakeLists.txt",
+            "utils/templates/new_op_project_template/custom_op/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "msopgen 生成流程",
+            "工程模板目录结构",
+            "host/kernel/framework 分工"
+          ],
+          "practice_task": "参照样例执行 msopgen gen 生成 custom_op 工程，对比生成前后目录差异，指出模板中 build.sh 与 CMakeLists 的关键配置。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "构建、打包与测试体系",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "CMake 构建系统与多架构产物",
+          "order": 1,
+          "filename": "u9-l1-cmake-multi-arch.md",
+          "level": "advanced",
+          "topic": "剖析根 CMakeLists 与 cpudebug/CMakeLists.txt 如何通过 PRODUCT_TYPE_LIST 为 ascend910/910B1/310p/310B1/950pr 等多架构分别构建 cpudebug_<product> 共享库与架构宏。",
+          "learning_goals": [
+            "掌握 CMake 多目标/多架构构建的组织方式",
+            "理解各产品对应的 __CCE_AICORE__/__DAV_ 宏差异",
+            "了解闭源 model 库与开源 api_check/regfwk 的链接组合"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "cpudebug/CMakeLists.txt",
+            "cmake/dependencies.cmake",
+            "cmake/third_party/cpudebug.cmake"
+          ],
+          "minimal_modules": [
+            "多架构 PRODUCT_TYPE_LIST",
+            "架构宏定义",
+            "闭源库与开源代码链接"
+          ],
+          "practice_task": "在 cpudebug/CMakeLists.txt 中追踪 ascend910B1 目标的编译定义与链接库，说明开源 api_check 源码与 libcpudebug_model.a 是如何合并成 libcpudebug.so 的。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "打包安装与 run 包生成",
+          "order": 2,
+          "filename": "u9-l2-package-install.md",
+          "level": "advanced",
+          "topic": "讲解 build.sh 的 --pkg/--msot/--pkg-type 流程、cmake/package.cmake 的打包配置，以及 install 阶段如何生成软链（libtikcpp_debug.so 等）并产出 cann-asc-tools_*.run 安装包。",
+          "learning_goals": [
+            "掌握 build.sh 打包分支的完整流程",
+            "理解 CMake install 与软链生成",
+            "了解 run 包安装到 CANN 路径的机制"
+          ],
+          "source_files": [
+            "build.sh",
+            "cmake/package.cmake",
+            "cpudebug/CMakeLists.txt",
+            "version.cmake"
+          ],
+          "minimal_modules": [
+            "build.sh 打包流程",
+            "CMake install 与软链",
+            "run 包安装机制"
+          ],
+          "practice_task": "阅读 cpudebug/CMakeLists.txt 的 install(CODE create_symlink ...) 段，列出 libcpudebug.so 与 libtikcpp_debug.so 等软链关系，解释为何要建立这些别名。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "单元测试体系",
+          "order": 3,
+          "filename": "u9-l3-unit-testing.md",
+          "level": "advanced",
+          "topic": "讲解 tests 目录的双语言测试体系：C++ UT（tests/ut，覆盖 acl_stub/regfwk/api_check）与 Python UT（tests/py_ut，覆盖 msobjdump/optype_collector/show_kernel_debug_data），以及 build.sh -t/--cov 的执行方式。",
+          "learning_goals": [
+            "掌握 C++ UT 与 Python UT 的组织结构",
+            "理解 TEST_MOD=cpp/python/all 的分发",
+            "了解覆盖率（--cov）与 ASAN（--asan）选项"
+          ],
+          "source_files": [
+            "tests/CMakeLists.txt",
+            "build.sh",
+            "tests/py_ut/testcase/msobjdump/test_msobjdump.py",
+            "tests/py_ut/testcase/optype_collector/test_optype_collector.py"
+          ],
+          "minimal_modules": [
+            "C++/Python UT 结构",
+            "TEST_MOD 分发",
+            "覆盖率与 ASAN"
+          ],
+          "practice_task": "执行 bash build.sh --python_utest 跑通 Python 部分 UT，并对照 tests/CMakeLists.txt 说明 TEST_MOD 如何控制子目录加入构建。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "扩展实践与贡献",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "扩展 API 校验器与二次开发",
+          "order": 1,
+          "filename": "u10-l1-extend-api-check.md",
+          "level": "advanced",
+          "topic": "以新增一个 API 校验器为目标，串起 api_check 的扩展点：继承基类、在对应 _check.cpp 中实现参数校验、复用通用 util，并说明 cpudebug 闭源/开源边界对二次开发的约束。",
+          "learning_goals": [
+            "掌握 api_check 校验器的扩展方法",
+            "理解如何复用基类通用检查",
+            "了解闭源 model 库对二次开发的边界"
+          ],
+          "source_files": [
+            "cpudebug/src/api_check/kernel_base_check.cpp",
+            "cpudebug/src/api_check/inc/kernel_base_check.h",
+            "cpudebug/src/api_check/kernel_data_copy_check.cpp",
+            "cpudebug/utils/include/utils/kernel_check_data_copy_util.h"
+          ],
+          "minimal_modules": [
+            "校验器扩展点",
+            "通用 util 复用",
+            "闭源/开源边界"
+          ],
+          "practice_task": "参考 kernel_data_copy_check 的写法，为一个搬运类 API 草拟一个新的检查函数骨架，复用 CheckTensorSizeOverflow 并说明它会被哪一层调用。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "贡献流程与代码规范",
+          "order": 2,
+          "filename": "u10-l2-contributing-workflow.md",
+          "level": "advanced",
+          "topic": "讲解向 asc-tools 贡献代码的完整流程：CONTRIBUTING 指引、pre-commit 钩子、OAT 开源合规检查、scripts 下的 presmoke/oat_check 脚本，以及与配套仓（msot/mssanitizer 等）的版本协同约束。",
+          "learning_goals": [
+            "掌握贡献代码的标准流程",
+            "理解 pre-commit 与 OAT 合规检查",
+            "了解 asc-tools 与配套开源仓的版本依赖约束"
+          ],
+          "source_files": [
+            "CONTRIBUTING.md",
+            ".pre-commit-config.yaml",
+            "OAT.xml",
+            "scripts/oat_check.sh",
+            "scripts/run_presmoke.sh"
+          ],
+          "minimal_modules": [
+            "贡献流程",
+            "pre-commit 与 OAT 检查",
+            "配套仓版本约束"
+          ],
+          "practice_task": "阅读 CONTRIBUTING.md 与 .pre-commit-config.yaml，列出提交前需要本地跑通的检查项，并说明 OAT.xml 在合规扫描中的作用。",
+          "depends_on": [
+            "u9-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
