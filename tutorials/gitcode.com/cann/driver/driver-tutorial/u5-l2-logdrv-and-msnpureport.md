@@ -2,603 +2,386 @@
 
 ## 1. 本讲目标
 
-本讲承接 u5-l1（DMC 设备维护组件与 device_monitor 通路）。在上一讲里我们看到，DSMI、logdrv、prof 等 DMC 子模块都复用 device_monitor 提供的「消息收发框架 + HDC 传输」来与设备交互。本讲要回答一个更基础的问题：**这些模块在运行过程中产生的日志，是怎么打出来、又怎么被收集导出的？**
+本讲承接 [u5-l1 DMC 设备维护组件与 device_monitor 通路](u5-l1-dmc-device-monitor.md)，把视线从「消息收发框架」收拢到 DMC 中最贴近日常排障的一块：**日志**。读完本讲，你应当能够：
 
-学完后你应该能够：
+- 说清 driver 的「三层日志模型」——应用类日志、Host 内核态日志、Device 系统类日志——分别由谁产生、由谁读取。
+- 理解 `drv_log_user` 这一用户态日志底座：它如何用一个「函数指针表」决定日志往哪里打，如何把 Linux 的 `errno` 翻译成对外的 `DRV_ERROR_*`。
+- 掌握 `drv_share_log` 的「按通道读取」机制：`SHARE_LOG_ERR` 与 `SHARE_LOG_RUN_INFO` 两条通道如何用固定地址的共享内存把内核态日志搬到用户态。
+- 读懂 `msnpureport` 工具的命令分发与导出链路，知道 `msnpureport -f` 这一行命令在源码里到底经过了哪些函数、最终经 HDC 把设备日志拉回 Host。
 
-- 理解 `logdrv` 子模块如何为整个 HAL 用户态库提供统一的日志打印框架（级别、模块名、输出后端）。
-- 读懂 `drv_log_user` 的「可插拔输出后端」设计：默认写 syslog，上层注册后可改写为 `dlog`。
-- 理解 `drv_share_log` 如何用一块预留虚拟地址 + 环形缓冲，实现 Host↔Device 之间的共享日志，以及真正的「按类型读取」机制。
-- 读懂 `msnpureport` 命令行工具的子命令分发与参数解析。
-- 串起「应用类日志 → dmesg 内核日志 → msnpureport 设备日志」三层调试链路，并能说清 `msnpureport -f` 的导出链路。
-
-> 说明：规划稿里提到的 `log_read_by_type`、`channel_type` 两个名字，在当前源码的 logdrv 目录中并不存在（`channel_type` 只出现在芯片复位的 `dcmi_hot_reset_intf.c` 里，与日志无关）。本讲以**真实源码**为准，把「按类型读取」讲解为 `share_log_read_*` 系列函数与 `enum share_log_type_enum`，不再沿用那两个不存在的符号名。
+> ⚠️ 名词澄清：任务规格里提到的 `log_read_by_type` 在本仓库源码中**并不存在**（全文检索仅命中本讲义与历史转写文件）。本仓库真正实现「按通道读取」的接口是 `drv_share_log.c` 中的 `share_log_read_err` / `share_log_read_run_info` / `share_log_read`，通道类型由 `enum share_log_type_enum` 区分。本讲按真实代码讲解，不杜撰接口。
 
 ## 2. 前置知识
 
-在进入源码前，先建立几个直观概念：
+在进入源码前，先建立两个直觉。
 
-- **syslog / dmesg**：Linux 经典的日志机制。用户态程序用 `vsyslog()` 把日志写到系统日志服务（`rsyslog`，落地到 `/var/log/messages` 或 `/var/log/syslog`）；内核态用 `printk`，可用 `dmesg` 查看。logdrv 用户态默认走的就是 syslog。
-- **构造函数（constructor）**：GCC 扩展 `__attribute__((constructor))` 标记的函数，会在 `main` 执行之前、动态库被加载时自动运行。logdrv 用它在库加载阶段完成日志级别初始化，业务代码无需显式调用。
-- **函数指针表 / 可插拔后端**：把「日志怎么打」抽象成一组成员全是函数指针的结构体，运行时替换成员即可改变行为。这是 logdrv 的核心设计。
-- **预留虚拟地址 + mmap**：在固定的高端虚拟地址（如 `0xE000_0000_0000`）用 `mmap(MAP_PRIVATE|MAP_ANONYMOUS)` 申请一段匿名内存。多个进程映射同一约定地址时，就构成一块「共享黑板」。这是 `share_log` 跨进程/跨态传递日志的物理基础。
-- **环形缓冲（ring buffer）**：用 `read`/`write` 两个下标管理一段定长缓冲，写到末尾绕回头部，无需搬移数据，是日志/队列类场景的标配。`share_log` 就是一个简单的环形缓冲。
-- **TLV（Type-Length-Value）**：一种常见的协议封装格式：先写类型、再写长度、最后写数据体。`msnpureport` 与设备守护进程通信时就用 TLV 封装请求。
-- **HDC 业务频道（serviceType）**：u5-l1 已讲过，HDC 用 `serviceType` 区分不同业务频道并做 QoS 分级。本讲会遇到 `HDC_SERVICE_TYPE_IDE_FILE_TRANS`（文件传输频道）、`HDC_SERVICE_TYPE_LOG`（日志频道）等。
+**直觉一：日志分布在三个不同「世界」里。**昇腾驱动栈横跨 Host 用户态、Host 内核态、Device 侧三个执行环境，日志自然也分三处：
 
-> 与 u5-l1 的衔接：u5-l1 讲的 device_monitor 是「消息收发的公共底座」；本讲的 logdrv 是「日志打印与采集的公共底座」。两者都是 DMC 下被各子模块复用的基础设施，只是职责不同——前者管「把消息送达设备」，后者管「把日志打出来/捞回来」。
+| 日志类别 | 产生位置 | 典型内容 | 查看方式 |
+|---|---|---|---|
+| 应用类日志 | Host 用户态（`libascend_hal.so` 等用户库） | 接口调用、参数校验、内存申请失败 | 系统日志 / slog |
+| Host 内核态日志 | Host 内核态（`drv_*.ko` 内核模块） | 中断、ioctl 失败、PCIe 异常 | `dmesg` 或 `/var/log/messages` |
+| 系统类日志 | Device 侧（NPU 固件/AI 核心） | 固件运行、栈信息、黑匣子 | `msnpureport` 导出 |
+
+`docs/zh/QUICKSTART.md` 的「调试验证」一节明确给出了这个排查顺序：先看应用类日志，再用 `dmesg` 看内核态，最后用 `msnpureport` 导出 Device 日志（详见 [docs/zh/QUICKSTART.md:L143](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/docs/zh/QUICKSTART.md#L143)）。
+
+**直觉二：「日志通路」的核心矛盾是「跨执行环境搬运」。**应用类日志和产生它的代码在同一个进程里，直接 `printf`/`syslog` 即可；但内核态日志在内核地址空间，用户态读不到；Device 日志更是在另一块芯片上。因此 logdrv 要解决的本质问题是：**如何把后两类日志「搬」到用户能看到的地方**。本讲会看到两种搬法——内核态用「共享内存 + 按通道读」，Device 用「HDC 长连接拉文件」。
+
+还需要了解的几个术语：`syslog` 是 Linux 标准日志接口（按 `LOG_ERR/LOG_INFO/LOG_DEBUG` 等优先级分级）；`ioctl` 是用户态陷入内核的系统调用；HDC 是 u5-l1 讲过的主机-设备通信底座。
 
 ## 3. 本讲源码地图
 
 本讲涉及的关键文件如下：
 
 | 文件 | 作用 |
-| --- | --- |
-| [src/ascend_hal/dmc/logdrv/drv_log_user.c](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user.c) | 用户态日志库的构造函数入口，库加载时初始化控制台日志级别。 |
-| [src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c) | 日志框架核心：级别/模块名字符串表、errno→drvError 映射、可插拔输出后端注册、错误消息上报。 |
-| [src/ascend_hal/dmc/logdrv/drv_log_user_common.c](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_common.c) | 对 `kernel_api` 的薄封装层，对外暴露不带 `_inner` 后缀的稳定符号。 |
-| [src/ascend_hal/dmc/logdrv/drv_share_log.c](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_share_log.c) | 基于预留地址的共享日志（环形缓冲）：创建/销毁/按类型读取。 |
-| [src/ascend_hal/inc/dmc/dmc_log_user.h](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/inc/dmc/dmc_log_user.h) | 日志公共头：`DRV_ERR/DRV_WARN/...` 等打印宏定义。 |
-| [src/ascend_hal/inc/dmc/dmc_share_log.h](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/inc/dmc/dmc_share_log.h) | 共享日志公共头：各模块预留地址常量与 `share_log_type_enum`。 |
-| [src/ascend_hal/msnpureport/msnpureport.c](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/msnpureport.c) | msnpureport 工具的 `main` 入口。 |
-| [src/ascend_hal/msnpureport/options/msnpureport_options.c](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/options/msnpureport_options.c) | 子命令（config/report）分发与命令行选项解析。 |
-| [src/ascend_hal/msnpureport/config/msnpureport_config.c](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/config/msnpureport_config.c) | `config` 子命令实现：把请求封装成 TLV，经 HDC 短连接下发设备。 |
-| [src/ascend_hal/msnpureport/report/msnpureport_report.c](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/report/msnpureport_report.c) | `report` 子命令实现：拉取/导出设备日志与黑匣子。 |
-
-补充参考文件：`msnpureport_common.h`（`ArgInfo`/`MsnReq`/`ConfigInfo` 结构体）、`inc/adump/ide_tlv.h`（TLV 请求结构）、`script/hal_log_collect_host.sh`（Host 侧日志一键采集脚本）、`docs/zh/QUICKSTART.md`（三层调试链路说明）。
-
----
+|---|---|
+| [src/ascend_hal/dmc/logdrv/drv_log_user.c](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user.c) | 用户态日志初始化入口（constructor），读取默认控制台日志级别 |
+| [src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c) | 日志底座实现：打印后端函数指针表、级别转换、`errno`→`DRV_ERROR_*` 映射 |
+| [src/ascend_hal/dmc/logdrv/drv_log_user_common.c](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_common.c) | 对外公共 API 薄封装，把 `_inner` 后缀的实现函数转出为无后缀符号 |
+| [src/ascend_hal/dmc/logdrv/drv_share_log.c](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_share_log.c) | 内核态共享日志：固定地址 mmap + 环形缓冲 + 按通道读取 |
+| [src/ascend_hal/inc/dmc/dmc_share_log.h](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/inc/dmc/dmc_share_log.h) | 共享日志的通道枚举与各模块固定地址宏定义 |
+| [src/ascend_hal/inc/dmc/dmc_log_user.h](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/inc/dmc/dmc_log_user.h) | `DRV_ERR/DRV_WARN/DRV_RUN_INFO` 等日志宏定义 |
+| [src/ascend_hal/msnpureport/msnpureport.c](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/msnpureport.c) | `msnpureport` 命令的 main 入口 |
+| [src/ascend_hal/msnpureport/options/msnpureport_options.c](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/options/msnpureport_options.c) | 子命令（config/report）分发与选项解析 |
+| [src/ascend_hal/msnpureport/config/msnpureport_config.c](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/config/msnpureport_config.c) | `config` 子命令实现：经 HDC 短连接下发配置到设备 |
+| [src/ascend_hal/msnpureport/report/msnpureport_report.c](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/report/msnpureport_report.c) | `report` 子命令实现：经 HDC 拉取设备日志/黑匣子并落盘 |
 
 ## 4. 核心概念与源码讲解
 
-本讲拆成 5 个最小模块：日志框架总览 → drv_log_user 用户态接口 → share_log 按类型读取 → msnpureport 子命令分发 → config/report 导出链路。
-
-### 4.1 logdrv 日志框架总览：级别、模块、输出后端
+### 4.1 logdrv 模块总览与三层日志模型
 
 #### 4.1.1 概念说明
 
-`logdrv`（log driver）不是某一条具体的「读日志」接口，而是**整个 HAL 用户态库 `libascend_hal.so` 的日志打印基础设施**。HAL 库里几乎所有模块（SVM、DSMI、HDC、TRS、DMS……）打日志时调用的 `DRV_ERR / DRV_WARN / DRV_INFO` 等宏，最终都落到 logdrv 提供的这套框架上。
+`logdrv`（日志驱动）是 DMC（Device Maintenance Components，u5-l1 讲过的设备维护组件集合）中的一个子模块，位于 [src/ascend_hal/dmc/logdrv/](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/CMakeLists.txt)。与 `device_monitor` 提供「通用消息收发框架」不同，logdrv 专门解决「日志的产生、搬运与导出」问题。
 
-这套框架要解决三个问题：
+logdrv 目录下有四个 `.c` 文件，职责分明：
 
-1. **级别控制**：日志分 EMERG/ALERT/CRIT/ERR/WARNING/NOTICE/INFO/DEBUG 八级（与 POSIX syslog 对齐），运行时按「控制台日志级别」门槛过滤——只有级别号 ≤ 门槛的才真正输出，避免日志洪水。
-2. **模块归属**：每条日志要标明来自哪个子模块（devmm、hdc、tsdrv、dmp……），方便定位。logdrv 用一张「模块类型枚举 → 模块名串」的表来翻译。
-3. **输出后端可替换**：默认后端是 `vsyslog`（写系统日志）；但当本库被上层（如 Runtime/slog 体系）以「工具日志」模式加载时，上层会注册自己的打印函数，把日志改走 `dlog` 体系。这就要求打印后端必须是**可插拔**的。
-
-此外，HAL 大量接口通过 `ioctl` 陷入内核，内核返回的是 POSIX `errno`，而对外要返回统一的 `drvError_t`。logdrv 顺带承担了 **errno → drvError_t 的查表映射**，这也是它的职责之一。
+- `drv_log_user.c`——库加载时的初始化入口，极薄。
+- `drv_log_user_kernel_api.c`——日志底座的真正实现（打印后端、级别转换、错误码映射），文件名带 `kernel_api` 是因为它处理「与内核交互得到的」错误码与级别，并非表示它运行在内核态；它仍是用户态代码。
+- `drv_log_user_common.c`——对外公共封装层，注释里写明 `this file is a common.c`，把带 `_inner` 后缀的实现函数一一转出为不带后缀的对外符号。
+- `drv_share_log.c`——内核态共享日志的按通道读取实现。
 
 #### 4.1.2 核心流程
 
-一条 `DRV_ERR(module, "...")` 的执行过程：
+把 logdrv 放回三层日志模型里，它的定位是「**同时服务于应用类日志与 Host 内核态日志**」，而 Device 系统类日志则由同在 `ascend_hal` 树下的独立工具 `msnpureport` 负责：
 
-1. 宏展开后先比较「本条日志级别」与「当前控制台日志级别门槛」。
-2. 门槛通过，则拼装一行带前缀的日志：`[级别串][时间戳][文件:行号][ascend][pid,tid][drv][模块名][函数名] 正文`。
-3. 调用「当前生效的打印后端函数指针」把这一行送出去（默认 `vsyslog`）。
-4. 若模块是 DMP 或 DEV_MANAGER，额外再走一份兼容的 `dsmi_printf` 输出。
+```
+┌──────────────── Host 用户态 (libascend_hal.so) ────────────────┐
+│  各模块调用 DRV_ERR/DRV_INFO/... 宏                             │
+│        │ (函数指针表 g_log_print_info)                          │
+│        ▼                                                       │
+│  drv_log_user 打印底座 ──→ syslog / 上层注册的 DlogInner        │
+│        ▲                                                       │
+│        │ share_log_read_*() 读取并重新打出                      │
+│  drv_share_log (固定地址 mmap 的环形缓冲)                       │
+└────────────────────────│──────────────────────────────────────┘
+                         │ 共享内存 (同址映射)
+┌────────────────────────▼──────────────────────────────────────┐
+│              Host 内核态 (drv_*.ko)                            │
+│  内核模块把日志写入共享内存环形缓冲                              │
+└───────────────────────────────────────────────────────────────┘
 
-关键在于第 3 步的「打印后端函数指针」是**运行时可替换**的——这就是「可插拔输出后端」。
-
-#### 4.1.3 源码精读
-
-日志级别到字符串的默认表（用于拼前缀 `[ERROR]` 等），位于 [drv_log_user_kernel_api.c:29-32](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c#L29-L32)：
-
-```c
-STATIC const char *drv_log_level_default_str[DRV_LOG_LEVEL_MAX] = {
-    [LOG_EMERG] = "[EMERG]", ... [LOG_ERR] = "[ERROR]",
-    [LOG_WARNING] = "[WARNING]", [LOG_INFO] = "[INFO]", [LOG_DEBUG] = "[DEBUG]",
-};
+┌──────── Device 侧 (NPU) ────────┐     ┌──── Host 用户态工具 ────┐
+│  slog / message / system_info    │ ◀─▶ │  msnpureport            │
+│  stackcore / bbox / event_sched  │ HDC │  (report/config 子命令) │
+└──────────────────────────────────┘     └─────────────────────────┘
 ```
 
-模块类型到模块名串的表，在 `drv_log_get_module_str_inner` 中，[drv_log_user_kernel_api.c:223-260](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c#L223-L260)。它把 `HAL_MODULE_TYPE_DEVMM` 翻译成 `"devmm"`、`HAL_MODULE_TYPE_HDC` 翻译成 `"hdc"` 等，越界返回 `NULL`。这张表就是日志里 `[drv][devmm]` 这种模块前缀的来源。
+要点：应用类日志是「自产自销」，内核态日志是「内核写、用户读」的共享内存协作，Device 日志是「按需经 HDC 拉取」。下面三节分别拆解。
 
-真正的打印逻辑不在 logdrv 里，而在公共头 `DRV_SYSLOG_BASE` 宏中，[dmc_log_user.h:50-66](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/inc/dmc/dmc_log_user.h#L50-L66)。它的核心是这一句：
-
-```c
-(*get_log_Print())(mask, (int32_t)get_log_level_shift((uint32_t)LEVEL),
-    "%s%s[%s:%d]...[drv][%s][%s]" fmt,
-    get_log_get_level_string((uint32_t)LEVEL), get_log_get_print_time(),
-    __FILE__, __LINE__, ..., drv_log_get_module_str(module), __func__, ##__VA_ARGS__);
-```
-
-注意 `get_log_Print()` 返回的是**一个函数指针**，`*` 解码后调用它。级别串、时间戳、模块名都在这里拼好。上层业务代码只需写 `DRV_ERR(HAL_MODULE_TYPE_DEVMM, "alloc failed size=%zu", sz)`，框架自动补齐所有上下文。
-
-各级别宏只是 `DRV_SYSLOG` 的别名，[dmc_log_user.h:73-100](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/inc/dmc/dmc_log_user.h#L73-L100)：`DRV_ERR`→`LOG_ERR`、`DRV_WARN`→`LOG_WARNING`、`DRV_INFO`/`DRV_DEBUG` 类推；另有一组 `DRV_RUN_ERR/DRV_RUN_INFO`「运行日志」走 `DRV_LOG_CMPT`，受 `is_run_log()` 开关控制（默认降级为 `LOG_CRIT`，工具日志模式下才完整输出）。
-
-#### 4.1.4 代码实践
-
-**实践目标**：用源码确认「同一条日志在不同模式下的输出形态」。
-
-**操作步骤**：
-
-1. 打开 [dmc_log_user.h:50-66](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/inc/dmc/dmc_log_user.h#L50-L66)，找到 `DRV_SYSLOG_BASE` 的格式串。
-2. 在 [drv_log_user_kernel_api.c:223-260](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c#L223-L260) 中查出 `HAL_MODULE_TYPE_DMP` 对应的模块名串。
-3. 假设源码里有一句 `DRV_ERR(HAL_MODULE_TYPE_DMP, "reset failed ret=%d", ret)`，手工把宏展开，写出它在 syslog 里实际出现的那一行（含 `[ERROR]`、时间戳、`[drv][dmp][函数名]` 等前缀）。
-
-**需要观察的现象 / 预期结果**：展开后应形如 `[ERROR][2026-08-13-10:00:00:123456][xxx.c:42][ascend][curpid:1234,5678][drv][dmp][some_func] reset failed ret=...`。注意第 58-64 行：当模块是 `DMP` 或 `DEV_MANAGER` 时，还会**额外**用 `dsmi_printf` 再输出一份兼容日志——这是历史兼容设计。
-
-> 本实践为源码阅读型，不需要运行环境。
-
-#### 4.1.5 小练习与答案
-
-**练习 1**：`DRV_INFO` 默认会被打印出来吗？
-**答案**：默认不会。`DRV_SYSLOG` 用 `get_con_log_level()` 作为门槛，而门槛默认是 `LOG_ERR`（见 4.2.3 的 `drv_log_rsyslog_console_level` 初值）。`LOG_INFO` 的级别号大于 `LOG_ERR`，被门槛过滤。只有把控制台日志级别调到 `LOG_INFO` 或更详细时才会打印。
-
-**练习 2**：为什么模块名要用「枚举→串」的表来翻译，而不是直接在调用处写字符串？
-**答案**：用枚举做参数（`HAL_MODULE_TYPE_DEVMM`）让调用方传的是编译期常量、不易写错；集中维护一张表既保证全库模块名统一，又便于统计与按模块过滤。若调用处散落字符串，容易拼写不一致。
-
----
-
-### 4.2 drv_log_user：用户态接口与可插拔输出后端
+### 4.2 drv_log_user：用户态日志打印底座
 
 #### 4.2.1 概念说明
 
-`drv_log_user` 是 logdrv 对外暴露的「用户态日志接口」层，由三个 `.c` 文件分工：
-
-- `drv_log_user.c`：极薄，只放一个构造函数，库加载时把系统当前的 console 日志级别读进来作初值。
-- `drv_log_user_kernel_api.c`：**实现核心**。级别/模块表、errno 映射、输出后端的注册与切换、错误消息上报都在这里。
-- `drv_log_user_common.c`：一层薄封装，把 `_inner` 后缀的内部函数包装成不带后缀的对外符号（如 `errno_to_user_errno` 调 `errno_to_user_errno_inner`），并实现几个参数校验类错误上报函数（`report_arg_null_pointer` 等）。
-
-「可插拔输出后端」是本模块的灵魂。框架定义了一个全是函数指针的结构体 `struct drv_log_print_info`，全局只有一个实例 `g_log_print_info`。打印日志时（`DRV_SYSLOG_BASE`）调用的 `get_log_Print()`、`get_con_log_level()` 等，都是去读这个实例里的指针。**谁改了这些指针，日志就改走谁的后端**。
+整个 HAL 用户库（以及复用它的 DCMI/DSMI）打印日志时，并不会直接调 `printf` 或 `syslog`，而是统一调用 `DRV_ERR`、`DRV_WARN`、`DRV_INFO`、`DRV_RUN_INFO` 等宏。这些宏最终都汇聚到一个「打印后端」——一个由函数指针组成的结构体 `g_log_print_info`。这种设计的好处是：**日志往哪里打（syslog？上层 slog？）可以运行时替换，而调用点的代码完全不用改**。
 
 #### 4.2.2 核心流程
 
-后端切换的两种状态：
-
-- **默认态（rsyslog）**：`g_log_print_info` 的成员指向 `drv_syslog`（调 `vsyslog`）、`drv_get_tm_default`（格式化时间）、`drv_log_get_level_str_default`（级别串）等默认实现，门槛指针指向 `drv_log_rsyslog_console_level`。
-- **工具日志态（tool/dlog）**：当上层调用 `drv_log_out_handle_register` 注册了一个 `log_out_handle`（内含 `DlogInner` 打印函数与 `logLevel`），框架把 `g_log_print_info` 全部成员改指向新后端，并把门槛指针改指向 `drv_log_tool_console_level`，级别做 glibc↔tool 两套词汇表的换算。
-
-注册/注销是一对对称操作：注册即「把默认指针替换为工具后端」，注销即「把指针恢复为默认后端」。
-
-errno 映射则是另一条独立链路：`errno_to_user_errno(errno)` → 查 `user_err[]` 表 → 返回对应的 `DRV_ERROR_*`。
+1. **库加载即初始化**：`libascend_hal.so` 被载入时，GCC `constructor` 属性的 `drv_log_init` 自动执行，向内核管理模块查询默认控制台日志级别并设置。
+2. **打印后端就位**：全局 `g_log_print_info` 装配好默认实现（级别字符串、时间格式、`vsyslog` 打印函数）。
+3. **上层可接管**：若上层（如 CANN 的 slog 系统）想接管日志输出，调 `drv_log_out_handle_register` 注册自己的 `DlogInner` 回调，函数指针表被整体替换。
+4. **调用点打日志**：业务代码调 `DRV_ERR(module, fmt, ...)`，宏经函数指针表落到当前后端。
 
 #### 4.2.3 源码精读
 
-可插拔后端的「函数指针表」定义，[drv_log_user_kernel_api.c:40-46](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c#L40-L46)：
+**初始化入口**——`drv_log_user.c` 中的 constructor，库一加载就执行，向 devdrv_manage 查询默认级别并写入全局变量：
 
-```c
-struct drv_log_print_info {
-    uint32_t *con_log_level;                                        // 当前门槛级别指针
-    const char *(*log_get_level_string)(uint32_t level);            // 级别串
-    const char *(*log_get_print_time)(void);                        // 时间戳
-    uint32_t (*log_level_shift)(uint32_t level);                    // 级别换算
-    void (*log_print)(int32_t module_id, int32_t level, ...);       // 真正打印
-};
-```
+[src/ascend_hal/dmc/logdrv/drv_log_user.c:L14-L24](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user.c#L14-L24)
 
-全局唯一实例，默认指向 rsyslog 后端，[drv_log_user_kernel_api.c:351-359](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c#L351-L359)：
+> 说明：`__attribute__((constructor))` 让 `drv_log_init` 在 `main` 之前运行；`drvMngGetConsoleLogLevel` 取回系统配置的默认级别（默认 `LOG_ERR`），再由 `drv_log_rsyslog_console_level_set` 写入全局 `drv_log_rsyslog_console_level`，作为后续日志过滤的基准。
 
-```c
-STATIC uint32_t drv_log_rsyslog_console_level = LOG_ERR;          // 默认门槛
-STATIC uint32_t drv_log_tool_console_level = LOG_ERR;
-struct drv_log_print_info g_log_print_info = {
-    .con_log_level = &drv_log_rsyslog_console_level,               /* default log level */
-    .log_get_level_string = drv_log_get_level_str_default,
-    .log_get_print_time   = drv_get_tm_default,
-    .log_level_shift      = drv_log_level_shift_default,
-    .log_print            = drv_syslog,                            // 默认走 vsyslog
-};
-```
+**打印后端函数指针表**——这是整个底座的中枢，四个函数指针分别负责「级别字符串、时间串、级别数值转换、真正打印」：
 
-切换到工具后端的注册函数，[drv_log_user_kernel_api.c:363-395](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c#L363-L395)。校验 `handle` 与 `logLevel` 合法后，做四件替换 + 一个换算：
+[src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c:L353-L359](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c#L353-L359)
 
-```c
-g_run_log_status = flag;
-drv_log_tool_console_level = drv_log_level_tool_to_glibc(handle->logLevel); // 工具级别换算成 glibc 级别
-g_log_print_info.con_log_level        = &drv_log_tool_console_level;        // 门槛指针改向
-g_log_print_info.log_get_level_string = drv_log_get_level_str;              // 后端函数全替换
-g_log_print_info.log_get_print_time   = drv_get_tm;
-g_log_print_info.log_level_shift      = drv_log_level_glibc_to_tool;
-g_log_print_info.log_print            = handle->DlogInner;                  // 关键：打印换成上层注入的函数
-```
+> 说明：默认 `log_print` 指向 `drv_syslog`（即 `vsyslog` 封装），`con_log_level` 指向 `drv_log_rsyslog_console_level`。所有 `DRV_*` 宏都经 `get_log_Print()` 等取值函数间接调用这里。
 
-注销则把指针全部还原为默认实现，[drv_log_user_kernel_api.c:403-412](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c#L403-L412)。
+**上层注册接管**——`drv_log_out_handle_register_inner` 把整个函数指针表替换为上层传入的实现，同时完成「工具日志级别 → glibc syslog 级别」的换算：
 
-构造函数入口（库加载即运行），`drv_log_user.c` 全文只有它，[drv_log_user.c:14-24](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user.c#L14-L24)：
+[src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c:L363-L395](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c#L363-L395)
 
-```c
-static void __attribute__((constructor)) drv_log_init(void)
-{
-    uint32_t drv_log_rsyslog_console_level_tmp = LOG_ERR;
-    drvMngGetConsoleLogLevel(&drv_log_rsyslog_console_level_tmp);   // 从设备管理读系统配置的级别
-    drv_log_rsyslog_console_level_set(drv_log_rsyslog_console_level_tmp); // 写入默认门槛
-}
-```
+> 说明：这是「策略可替换」的关键——上层只需传入一个 `log_out_handle`（含 `DlogInner` 回调与 `logLevel`），驱动就把所有日志改走该回调，并记住 `g_run_log_status` 供 `is_run_log()` 判断当前是否处于「运行日志」模式。
 
-它的作用是：进程一加载 `libascend_hal.so`，无需任何业务代码调用，日志门槛就已被初始化为「系统配置的 console 级别」（读不到则保持 `LOG_ERR`）。这就是为什么 HAL 库「开箱即用」能打日志。
+**两套级别体系的换算**——glibc 的 `LOG_ERR/LOG_INFO/...` 与工具侧的 `DLOG_ERROR/DLOG_INFO/...` 是两套词汇表，靠两张表互转：
 
-errno→drvError 映射表 `user_err[]` 是一张以 errno 为下标的数组，[drv_log_user_kernel_api.c:48-191](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c#L48-L191)。查表函数 [drv_log_user_kernel_api.c:193-221](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c#L193-L221)：负数先取绝对值、越界的特殊码（150/151/152）单独处理、`0` 返回 `DRV_ERROR_NONE`、表项为 0 的兜底为 `DRV_ERROR_IOCRL_FAIL`。典型映射：`EINVAL→DRV_ERROR_PARA_ERROR`、`ENOMEM→DRV_ERROR_OUT_OF_MEMORY`、`ETIMEDOUT→DRV_ERROR_WAIT_TIMEOUT`、`EOPNOTSUPP→DRV_ERROR_NOT_SUPPORT`。
+[src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c:L315-L324](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c#L315-L324)
 
-封装层 `drv_log_user_common.c` 把 `_inner` 函数包成对外符号，例如 [drv_log_user_common.c:18-21](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_common.c#L18-L21) 的 `errno_to_user_errno`。该文件还实现了几个参数校验类错误上报函数，如 `report_arg_null_pointer` 用 `REPORT_PREDEFINED_ERR_MSG("EL0017", ...)` 上报标准化错误码，[drv_log_user_common.c:131-137](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_common.c#L131-L137)。
+> 说明：例如 `LOG_WARNING` 对应 `DLOG_WARN`。注册接管后 `log_level_shift` 被设为 `drv_log_level_glibc_to_tool`，保证无论上层用哪套词汇，最终落到的优先级一致。
+
+**`DRV_*` 宏如何走到后端**——在 `dmc_log_user.h` 里，宏展开后调用 `get_log_Print()` 取出当前后端函数并执行，同时拼好级别串、时间串、模块名、文件名行号：
+
+[src/ascend_hal/inc/dmc/dmc_log_user.h:L50-L66](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/inc/dmc/dmc_log_user.h#L50-L66)
+
+> 说明：`DRV_SYSLOG_BASE` 是基础宏，先比较 `LEVEL <= actual_print_level` 决定是否打印（级别过滤就在这里），再调用 `(*get_log_Print())(...)`。`DRV_ERR`/`DRV_WARN`/`DRV_INFO` 只是固定 LEVEL 的快捷方式（见 L73-L75）。值得注意的是，对 `DMP` 和 `DEV_MANAGER` 两个模块，宏还会额外调一次 `dsmi_printf` 做镜像输出，方便管理工具观测。
+
+**错误码映射**——ioctl 失败时内核返回的是 Linux `errno`（如 `EINVAL=22`、`ENOMEM=12`），但驱动对外要返回统一的 `drvError_t`（如 `DRV_ERROR_PARA_ERROR`、`DRV_ERROR_OUT_OF_MEMORY`）。`errno_to_user_errno_inner` 用一张以 `errno` 为下标的查表完成多对一收敛：
+
+[src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c:L193-L221](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c#L193-L221)
+
+> 说明：`user_err[]` 是一张覆盖到 `EHWPOISON+1` 的大表（定义在 L48-L191），每个 `errno` 下标映射到一个 `DRV_ERROR_*`；绝大多数 `errno` 都收敛为 `DRV_ERROR_IOCRL_FAIL`（ioctl 失败），少数有专属码（`ENOMEM→DRV_ERROR_OUT_OF_MEMORY`、`EBUSY→DRV_ERROR_BUSY`、`ETIMEDOUT→DRV_ERROR_WAIT_TIMEOUT`）。超出表范围的三个驱动私有码（150/151/152）单独处理。
 
 #### 4.2.4 代码实践
 
-**实践目标**：验证「可插拔后端」的注册/注销对称性。
+**实践目标**：验证「打印后端可运行时替换」这一设计，并理解错误码映射的收敛行为。
 
-**操作步骤**：
+**操作步骤**（源码阅读型，无需真实 NPU）：
 
-1. 对照 [drv_log_user_kernel_api.c:363-395](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c#L363-L395)（注册）与 [drv_log_user_kernel_api.c:403-412](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c#L403-L412)（注销），逐个成员比对：注册时被替换的 5 个成员，注销时是否各自被还原为同名带 `_default` 后缀的默认实现？
-2. 思考：如果上层只注册、忘记注销，会发生什么？
+1. 打开 `drv_log_user_kernel_api.c`，对比 L353-L359（默认 `g_log_print_info`）与 L363-L395（`drv_log_out_handle_register_inner` 替换后的赋值），圈出四个被替换的字段。
+2. 阅读 L48-L191 的 `user_err[]` 表，统计：有多少个不同的 `errno` 被映射成 `DRV_ERROR_IOCRL_FAIL`？哪些 `errno` 拥有「专属」错误码？
+3. 在 `dmc_log_user.h` 的 L73-L99 中，对比 `DRV_ERR`（普通错误日志）与 `DRV_RUN_INFO`（运行日志）展开路径的差异——后者经 `DRV_LOG_CMPT` 多了一层 `is_run_log()` 判断。
 
-**需要观察的现象 / 预期结果**：
+**需要观察的现象**：
 
-- 注册改写 `con_log_level / log_get_level_string / log_get_print_time / log_level_shift / log_print` 五项；注销把这五项分别还原为 `&drv_log_rsyslog_console_level / drv_log_get_level_str_default / drv_get_tm_default / drv_log_level_shift_default / drv_syslog`，完全对称。
-- 若只注册不注销，进程后续所有日志都会继续走 `DlogInner` 后端，即便上层对象已被释放——这会埋下「使用已释放函数指针」的隐患，所以二者必须成对使用。
+- 替换前后，`con_log_level` 指向的全局变量从 `drv_log_rsyslog_console_level` 切到 `drv_log_tool_console_level`。
+- `user_err[]` 中绝大多数条目都是 `DRV_ERROR_IOCRL_FAIL`，说明对外错误码做了大幅「多对一」收敛。
 
-> 本实践为源码阅读型，「待本地验证」项为：实际运行时可在注册前后各打一条 `DRV_ERR`，观察其输出去向（syslog vs slog）是否确实切换。
+**预期结果**：能口述出「调用点用统一宏 → 函数指针表分发 → 后端可替换」三段式，并能解释为何一次 `ioctl` 返回 `EINVAL` 时，上层拿到的是 `DRV_ERROR_PARA_ERROR`。
+
+> 待本地验证：在真实环境用 `strace` 跟踪一个会失败的 DCMI 调用，对照 `dmesg`/syslog 中驱动打出的 `[ERROR][...][drv][common]...` 日志，确认级别串与时间串由本节这些函数生成。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：`drvMngGetConsoleLogLevel` 在哪里被调用？为什么放在构造函数里？
-**答案**：在 `drv_log_init` 构造函数中调用（[drv_log_user.c:14-24](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user.c#L14-L24)）。放在构造函数里是为了「库一被加载、日志门槛就绪」，业务代码无需关心初始化顺序，避免出现「日志还没就绪就报错却看不到」的情况。
+**练习 1**：为什么 `DRV_ERR` 宏里要同时调用 `get_log_get_level_string()` 和 `get_log_get_print_time()`，而不是直接写死 `"[ERROR]"` 和调用 `localtime()`？
+**答案**：因为打印后端是可替换的——注册接管后，级别字符串与时间串的生成方式也会随之改变（见 `drv_log_out_handle_register_inner` 把 `log_get_level_string` 换成 `drv_log_get_level_str`、`log_get_print_time` 换成 `drv_get_tm`）。直接写死就丧失了这种灵活性。
 
-**练习 2**：`errno_to_user_errno(-EINVAL)` 会返回什么？
-**答案**：返回 `DRV_ERROR_PARA_ERROR`。流程：负数取绝对值得 `EINVAL`（22），`22 < ERROR_NUN_MAX` 且 `user_err[EINVAL] != 0`，故返回表项 `DRV_ERROR_PARA_ERROR`。
+**练习 2**：内核返回 `errno=12 (ENOMEM)` 和 `errno=22 (EINVAL)` 时，上层分别会得到哪个 `drvError_t`？
+**答案**：查 `user_err[]`：`ENOMEM→DRV_ERROR_OUT_OF_MEMORY`，`EINVAL→DRV_ERROR_PARA_ERROR`。
 
----
-
-### 4.3 share_log：预留地址共享日志与「按类型读取」
+### 4.3 drv_share_log：Host 内核态日志的「按通道读取」
 
 #### 4.3.1 概念说明
 
-前面两节讲的是「Host 用户态自己产生的日志怎么打」。但昇腾是 Host↔Device 架构，**设备侧（Device OS、各内核模块）也会产生日志**，这些日志怎么送到 Host？有两条路径：
+应用类日志自己打自己读，但 Host 内核态日志产生在内核里，用户态进程看不到。`drv_share_log` 解决的就是这个搬运问题：**在用户态和内核态之间，用一块预先约定好地址的共享内存当「信箱」**。内核模块把日志写进信箱，用户态库定期把信箱里的内容读出来、重新经 4.2 节的打印底座打一遍，于是内核日志就出现在了 syslog 里。
 
-1. **主动拉取**：Host 用 `msnpureport` 工具经 HDC 把设备日志文件拉回来（见 4.5）。
-2. **共享内存直写**：把一块约定好的虚拟地址同时映射给 Host 与 Device（或同一 Host 的多个进程），写日志的那一方直接往这块内存写，读的那一方直接从这块内存读——无需走消息收发。这就是 `share_log`。
-
-`share_log` 的典型用途是：设备内核态驱动（或同一进程内不同子模块）把「错误日志 / 运行信息」写进共享内存，Host 用户态在合适的时机读出来，转成标准 `DRV_ERR` / `DRV_RUN_INFO` 打印。它**不收发消息**，是 logdrv 里最轻量的日志通道。
-
-「按类型读取」的真正含义就在这里：共享日志分两类——`SHARE_LOG_ERR`（错误类）与 `SHARE_LOG_RUN_INFO`（运行信息类），分别存在同一模块的两段不同预留地址里，读取时按类型调用 `share_log_read_err` 或 `share_log_read_run_info`。
+「按通道读取」里的「通道」（channel），在代码里就是 `enum share_log_type_enum`——区分**错误日志**与**运行信息日志**两条独立通道；再加上「按模块」维度（DEVMM、HDC、TSDRV 等），构成一张二维表。
 
 #### 4.3.2 核心流程
 
-共享日志用**一个简单的环形缓冲**实现：
-
-- 预留地址布局：每个参与模块（devmm/tsdrv/devmng/hdc/esched/xsmem/queue/common/apm）各占两段固定高端地址，分别给 ERR 与 RUN_INFO，见 [dmc_share_log.h](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/inc/dmc/dmc_share_log.h)（如 `DEVMM_SHARE_LOG_START = 0xE0000080000`、`DEVMM_SHARE_LOG_RUNINFO_START = 0xE00000C0000`）。每段上限 `SHARE_LOG_MAX_SIZE = 4KB`。
-- 创建：`mmap` 到约定地址 → 写入魔数 `drvshartlogab90cd78ef56` → 初始化 `record_base / record_size / read=0 / write=0`。
-- 写入：生产方追加字节、推进 `write` 下标。
-- 读取：消费方比较 `write` 与 `read`，若有新数据，把 `[read, write)` 区间拷出，把换行替换成空格，按类型用 `DRV_ERR`（ERR 类）或 `DRV_RUN_INFO`（RUN_INFO 类）打印，再把 `read` 推进到 `write`。
-
-环形缓冲的有效数据长度为 \( \text{write} - \text{read} \)（`share_log` 只处理 `write > read` 的顺序写场景，不做绕回拼接）。
+1. **建信箱**：`share_log_create` 在固定地址（如 `DEVMM_SHARE_LOG_START`）`mmap` 一段匿名内存，写入魔数 `drvshartlogab90cd78ef56`，初始化环形缓冲的 `read`/`write` 游标。
+2. **内核写**：内核模块把日志字节追加到 `record_base + write`，推进 `write` 游标。（内核侧写入逻辑在 sdk_driver 树，本讲聚焦用户侧读取。）
+3. **用户读**：`share_log_read_in_single_module` 校验魔数后，读取 `[read, write)` 区间，把其中的 `\n` 替换成空格（避免一条日志被 syslog 拆成多行），然后按通道用 `DRV_ERR`（错误通道）或 `DRV_RUN_INFO`（运行信息通道）打出，最后把 `read` 推进到 `write`。
+4. **按通道入口**：`share_log_read_err` 只读 `SHARE_LOG_ERR` 通道，`share_log_read_run_info` 只读 `SHARE_LOG_RUN_INFO` 通道，`share_log_read` 等同于 `share_log_read_err`。
 
 #### 4.3.3 源码精读
 
-类型枚举与预留地址常量在公共头 [dmc_share_log.h](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/inc/dmc/dmc_share_log.h)：
+**通道枚举与固定地址**——`dmc_share_log.h` 定义了两条通道和每个模块×通道的固定起始地址（注意 ERR 与 RUN_INFO 各占一段）：
 
-```c
-enum share_log_type_enum {
-    SHARE_LOG_ERR = 0,      // 错误类日志
-    SHARE_LOG_RUN_INFO,     // 运行信息类日志
-    SHARE_LOG_TYPE_MAX,
-};
-```
+[src/ascend_hal/inc/dmc/dmc_share_log.h:L17-L43](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/inc/dmc/dmc_share_log.h#L17-L43)
 
-模块×类型 的二维管理表 `g_module_mng[模块][类型]`，记录每段共享内存的起始地址与初始化标志，[drv_share_log.c:48-67](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_share_log.c#L48-L67)。例如 `HAL_MODULE_TYPE_DEVMM` 的 ERR 段起于 `DEVMM_SHARE_LOG_START`、RUN_INFO 段起于 `DEVMM_SHARE_LOG_RUNINFO_START`。
+> 说明：`SHARE_LOG_ERR=0`、`SHARE_LOG_RUN_INFO=1` 就是两条「通道」；`DEVMM_SHARE_LOG_START=0xE0000080000` 这类地址是用户态与内核态的约定坐标，双方都把同一物理页映射到这个虚拟地址，从而共享。`SHARE_LOG_MAX_SIZE=4KB` 是单个信箱上限。
 
-创建单段共享日志，[drv_share_log.c:71-117](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_share_log.c#L71-L117)。关键步骤：
+**模块×通道二维表**——`drv_share_log.c` 用一张二维表管理所有信箱，行是模块、列是通道，每个单元格存「起始地址 + 是否已初始化」：
 
-```c
-info = (struct share_log_info *)mmap(g_module_mng[...].start, size,
-                                     PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-if (info != (struct share_log_info *)g_module_mng[...].start) { ... return; } // 地址必须精确命中
-(void)memset_s(info, size, 0, size);
-(void)snprintf_s(info->magic, ... , "%s", SHARE_LOG_MAGIC);   // 写魔数，供读端校验
-info->record_base = (char *)start + SHARE_LOG_RECORD_OFFSET;  // 头部 100B 之后才是记录区
-info->record_size = size - SHARE_LOG_RECORD_OFFSET;
-info->read = 0; info->write = 0;
-```
+[src/ascend_hal/dmc/logdrv/drv_share_log.c:L48-L67](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_share_log.c#L48-L67)
 
-注意 `SHARE_LOG_RECORD_OFFSET = 100`——前 100 字节是头部（魔数 + 指针下标），其后才是真正的日志记录区。魔数校验（`share_log_magic_check`）是读端防野指针的护栏。
+> 说明：例如 `g_module_mng[HAL_MODULE_TYPE_DEVMM][SHARE_LOG_ERR]` 的地址是 `DEVMM_SHARE_LOG_START`，而 `[..., SHARE_LOG_RUN_INFO]` 的地址是 `DEVMM_SHARE_LOG_RUNINFO_START`。`init_flag` 防止重复初始化。
 
-读取单模块单类型的核心，[drv_share_log.c:167-225](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_share_log.c#L167-L225)。这就是真正的「按类型读取」。在校验未初始化/魔数不符/无新数据（`write==read`）/越界等条件后，关键逻辑：
+**创建信箱**——`share_log_create_single_type` 在固定地址做 `mmap`，校验返回地址必须等于请求地址（否则视为失败），写入魔数与环形缓冲元数据：
 
-```c
-size_t out_size = (size_t)(tmp_write - tmp_read);
-memcpy_s(read_buff, info->record_size, (char *)info->record_base + tmp_read, out_size);
-for (i = 0; i < out_size - 1; i++) { if (read_buff[i] == '\n') read_buff[i] = ' '; } // 换行转空格
-if (log_type == SHARE_LOG_ERR) {
-    DRV_ERR(module_type, "%s", read_buff);          // ERR 类 → DRV_ERR
-} else {
-    DRV_RUN_INFO(module_type, "%s", read_buff);     // RUN_INFO 类 → DRV_RUN_INFO
-}
-info->read = tmp_write;                              // 读指针推进
-```
+[src/ascend_hal/dmc/logdrv/drv_share_log.c:L71-L117](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_share_log.c#L71-L117)
 
-三个对外读接口只是「按类型 + 固定附带读 COMMON 模块」的组合，[drv_share_log.c:227-243](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_share_log.c#L227-L243)：
+> 说明：`record_base` 指向跳过 100 字节头部的数据区（`SHARE_LOG_RECORD_OFFSET=100`），`record_size = size - 100`。`read`/`write` 两个游标构成一个简易环形缓冲。构造函数 `drv_log_base_init` 会在库加载时为 `HAL_MODULE_TYPE_COMMON` 调一次 `share_log_create`（见同文件 L415-L418）。
 
-```c
-void share_log_read_err(enum devdrv_module_type m) {      // 读错误类
-    share_log_read_in_single_module(SHARE_LOG_ERR, m);
-    share_log_read_in_single_module(SHARE_LOG_ERR, HAL_MODULE_TYPE_COMMON);
-}
-void share_log_read_run_info(enum devdrv_module_type m) { // 读运行信息类
-    share_log_read_in_single_module(SHARE_LOG_RUN_INFO, m);
-    share_log_read_in_single_module(SHARE_LOG_RUN_INFO, HAL_MODULE_TYPE_COMMON);
-}
-```
+**按通道读取（核心）**——`share_log_read_in_single_module` 做了完整的「校验→拷贝→换行处理→按通道打出→推进游标」流程：
 
-每个读接口除了读「指定模块」外，都**额外读一次 `COMMON` 模块**——`COMMON` 是公共缓冲，存放不便归类到具体模块的通用日志。这就是 `share_log_read` 系列的「按类型读取」全貌。
+[src/ascend_hal/dmc/logdrv/drv_share_log.c:L167-L225](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_share_log.c#L167-L225)
 
-`share_log_destroy` 在销毁前会先调一次 `share_log_read(HAL_MODULE_TYPE_COMMON)`，[drv_share_log.c:144](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_share_log.c#L144)——销毁前先把残余日志读出来，避免信息丢失。
+> 说明：这是一段「拷贝出数据后逐字节把 `\n` 改成空格」的处理（L206-L210），目的是让一条内核日志在 syslog 里只占一行；随后按 `log_type` 分流——`SHARE_LOG_ERR` 走 `DRV_ERR`，`SHARE_LOG_RUN_INFO` 走 `DRV_RUN_INFO`（L212-L216），这正是「按通道读取」决定日志级别的体现。读完后 `info->read = tmp_write` 标记已消费。
 
-> 与 errno 映射的呼应：`share_log_read_in_single_module` 把读出的 ERR 类日志用 `DRV_ERR` 打印（[drv_share_log.c:213](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_share_log.c#L213)），而 `DRV_ERR` 最终走的就是 4.2 里那套可插拔后端——两条链路在此汇合。
+**三个对外入口**——按通道类型提供不同入口，内部都落到同一个读取函数：
+
+[src/ascend_hal/dmc/logdrv/drv_share_log.c:L227-L243](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_share_log.c#L227-L243)
+
+> 说明：`share_log_read_err` 固定读 `SHARE_LOG_ERR` 通道，`share_log_read_run_info` 固定读 `SHARE_LOG_RUN_INFO` 通道；两者都会额外读一遍 `HAL_MODULE_TYPE_COMMON` 的公共信箱。
 
 #### 4.3.4 代码实践
 
-**实践目标**：理解 share_log「按类型读取」的两类分流。
+**实践目标**：说清 `share_log_read_*` 如何「按通道」读取内核态日志，并区分它与 Device 日志导出的不同。
 
-**操作步骤**：
+**操作步骤**（源码阅读型）：
 
-1. 阅读 [drv_share_log.c:167-243](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_share_log.c#L167-L243)。
-2. 在 [dmc_share_log.h](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/inc/dmc/dmc_share_log.h) 中查出 `HDC` 模块 ERR 段与 RUN_INFO 段各自的起始地址常量。
-3. 回答：若设备侧 HDC 模块往 ERR 段写了 200 字节日志，Host 调 `share_log_read_err(HAL_MODULE_TYPE_HDC)` 后，这 200 字节最终以哪条 `DRV_*` 宏打印？读完后 `read` 下标变成多少（用 `write` 表示）？
+1. 在 `drv_share_log.c` 中跟踪 `share_log_read_run_info(HAL_MODULE_TYPE_DEVMM)` 的执行：它访问 `g_module_mng[DEVMM][SHARE_LOG_RUN_INFO]`，地址是 `DEVMM_SHARE_LOG_RUNINFO_START`。
+2. 对比 `share_log_read_in_single_module` 中 `DRV_ERR` 与 `DRV_RUN_INFO` 两条分支（L212-L216），解释「通道类型」如何决定最终日志级别。
+3. 结合 4.1 节的三层模型图，回答：这块共享内存搬运的是「Host 内核态日志」还是「Device 日志」？（答：Host 内核态。）
 
-**需要观察的现象 / 预期结果**：
+**需要观察的现象**：当 Host 内核驱动（如 SVM/devmm 模块）产生运行信息时，这些信息先落进 `DEVMM_SHARE_LOG_RUNINFO_START` 信箱，随后被用户库读出并以 `DRV_RUN_INFO` 形式出现在 syslog 中。
 
-- HDC 的 ERR 段 = `HDC_SHARE_LOG_START`，RUN_INFO 段 = `HDC_SHARE_LOG_RUNINFO_START`。
-- 200 字节经 `share_log_read_in_single_module(SHARE_LOG_ERR, HDC)` 读出，因 `log_type == SHARE_LOG_ERR` 而走 `DRV_ERR(HDC, "%s", read_buff)` 打印；读完 `read` 被推进到 `write`（即 `info->read = tmp_write`）。
+**预期结果**：能画出「内核写 `write` 游标 → 用户读 `[read,write)` → 推进 `read`」的环形缓冲消费模型，并指出通道枚举 `SHARE_LOG_ERR/SHARE_LOG_RUN_INFO` 就是「按类型读取」的类型参数。
 
-> 本实践为源码阅读型。实际写日志的一方在内核态/设备侧，单在用户态难以注入数据，故运行验证标注「待本地验证」。
+> 待本地验证：在真实环境运行一个会触发 devmm 运行日志的用例，对比 `dmesg`（内核直接输出）与 syslog 中经 `share_log_read` 转发后的 `[INFO]` 行，确认两者内容一致。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`share_log` 为什么用魔数 `SHARE_LOG_MAGIC` 校验？
-**答案**：预留地址在不同环境/版本里未必都已被本模块 `mmap` 初始化过；读端若直接读未初始化的内存会拿到野值。魔数是一道护栏：只有写端按约定先写入了这个固定字符串，读端才认为这段内存是合法的 share_log（见 `share_log_magic_check`），否则跳过不读。
+**练习 1**：为什么 `share_log_read_in_single_module` 要把读取到的内容里的 `\n` 替换成空格？
+**答案**：因为读出的内容会被 `DRV_ERR`/`DRV_RUN_INFO` 再打一次到 syslog，而 syslog 一条记录通常对应一行；若内核日志内含 `\n`，会被 syslog 拆成多条，破坏「一条日志一行」的可读性，所以预先把 `\n` 改成空格。
 
-**练习 2**：为什么 `share_log_read_err` 要额外再读一次 `COMMON` 模块？
-**答案**：`COMMON` 是公共日志缓冲，承载不归属某个具体模块的通用日志。每次按模块读取时附带读一次 COMMON，保证公共日志被及时消费，不会因为没有显式「读 COMMON」的调用而堆积丢失。
+**练习 2**：`share_log_create_single_type` 里为什么 `mmap` 返回地址必须严格等于请求的固定地址（L88 的判断），否则就视为失败？
+**答案**：因为这块内存的虚拟地址是用户态与内核态**事先约定**的（如 `0xE0000080000`），双方都要用这个地址访问同一物理页。如果内核给了别的虚拟地址，双方就「对不上号」，共享失败，所以必须严格匹配。
 
----
-
-### 4.4 msnpureport：子命令分发与参数解析
+### 4.4 msnpureport：Device 系统类日志导出与配置
 
 #### 4.4.1 概念说明
 
-`msnpureport` 是面向运维/开发的**命令行日志工具**，编译后安装到 `/usr/local/Ascend/driver/tools/msnpureport`（见 QUICKSTART）。它干两类事：
+`msnpureport` 是随驱动安装的命令行工具（安装后位于 `/usr/local/Ascend/driver/tools/msnpureport`），专门负责 Device 侧（NPU）的系统类日志：包括设备 `slog`、`message`、`system_info`、`event_sched`、`stackcore`（栈转储）、`bbox`（黑匣子）等。它有两大子命令：
 
-- `config`：查询/设置设备配置与日志级别（如 `msnpureport config --set --log --global info -d 0`）。
-- `report`：从设备导出日志与黑匣子文件（如 `msnpureport report`、`msnpureport -f`）。
+- `report`：把设备日志**导出**到 Host 的一个时间戳目录里（一次性或持续）。
+- `config`：**查询或设置**设备的配置项与日志级别（如 icache 检查范围、AI 核开关、全局/模块日志级别）。
 
-它支持两套命令语法：**旧语法**（短选项，如 `-f`、`-t`，靠 `getopts` 风格解析，QUICKSTART 里 `msnpureport -f` 即此）与**新语法**（子命令，如 `config`/`report` + `--xxx` 长选项）。入口 `MsnOptions` 会先判别属于哪套，再分别走 `MsnOptionsOld` 或 `MsnOptionsHandle`。
-
-> 本节聚焦新语法的「子命令分发 + 选项表解析」，这是理解后续 config/report 链路的前提。`-f` 旧语法由 `msnpureport_options_old.c` 处理，最终也归并到同一套 `ArgInfo` 结构与 `MsnReport`。
+它的底层通道就是 u5-l1 讲过的 HDC——配置走 HDC「短连接」，日志文件拉取走 HDC「长连接」。
 
 #### 4.4.2 核心流程
 
-新语法主流程：
+`msnpureport` 的整体执行链路：
 
-1. `main`（[msnpureport.c:18-21](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/msnpureport.c#L18-L21)）→ `MsnOptions`。
-2. `MsnOptions` 初始化一个全零的 `ArgInfo`（默认 `cmdType=INVALID_CMD`、`deviceId=MAX_DEV_NUM`）。
-3. 判别新旧语法：参数过少或第二个参数以 `-` 开头 → 旧语法 `MsnOptionsOld`；否则 → 新语法 `MsnOptionsHandle(argc-1, &argv[1])`。
-4. `MsnOptionsHandle` 按 `argv[0]` 分发：`config`→`MsnGetConfigOptions`、`report`→`MsnGetReportOptions`、`help`/`version` 直接处理。
-5. 选项解析用 `mmGetOptLong`（mmpa 提供的跨平台 getopt_long）+ 选项表（`CONFIG_OPTS` / `g_reportOptions`），边解析边填充 `ArgInfo`。
-6. 解析完由 `MsnHandleArgInfo` 按 `cmdType` 二次分发到业务函数：`CONFIG_GET/SET`→`MsnConfig`、`REPORT/REPORT_PERMANENT`→`MsnReport`。
+```
+main (msnpureport.c)
+  └─ MsnOptions (options/msnpureport_options.c)        ← 解析子命令
+       ├─ argv[0]=="config" → MsnGetConfigOptions → MsnConfig (config/msnpureport_config.c)
+       │      └─ MsnGetResult → AdxDevCommShortLink(HDC_SERVICE_TYPE_IDE_FILE_TRANS)  ← 短连接下发
+       └─ argv[0]=="report" → MsnGetReportOptions → MsnReport (report/msnpureport_report.c)
+              ├─ 一次性: SyncDeviceLog → CreateLogRootPath(时间戳目录) → GetHostDrvLog(导出Host内核日志)
+              │            → MsnSyncDeviceLog → SlogStartSyncFile(多线程) + BboxStartSyncFile(黑匣子)
+              │            → GetSpecificLogs → AdxGetDeviceFileTimeout (HDC 拉文件)
+              └─ 持续:   MsnReportPermanent → MsnReportRecvSlogd + MsnReportRecvLogDaemon(长连接线程)
+```
 
-`ArgInfo` 是贯穿全工具的「参数汇总结构」，所有选项最终都填进它，业务函数只读它。
+要点：`report` 一次性导出会先建一个以当前时间戳命名的目录（如 `2026-08-13-10-30-00/`），再分门别类把设备文件拉进来；同时它还会顺带导出 Host 内核日志（`host_kernel.log`）。持续模式（`--permanent`）则常驻两个收发线程，并订阅设备故障事件。
 
 #### 4.4.3 源码精读
 
-入口，[msnpureport.c:18-21](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/msnpureport.c#L18-L21)：
+**main 入口**——极简，直接转交选项处理：
 
-```c
-int MAIN(int argc, char **argv) { return MsnOptions(argc, argv); }
-```
+[src/ascend_hal/msnpureport/msnpureport.c:L18-L21](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/msnpureport.c#L18-L21)
 
-`ArgInfo` 结构（贯穿全工具），[msnpureport_common.h:53-64](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/msnpureport_common.h#L53-L64)：
+> 说明：`MAIN` 宏在 UT 编译时被替换为 `MsnTest`，正常编译时就是 `main`。
 
-```c
-typedef struct {
-    enum CmdType cmdType;     // CONFIG_GET / CONFIG_SET / REPORT / REPORT_PERMANENT / INVALID_CMD
-    uint32_t subCmd;          // 具体子命令（ICACHE_RANGE / LOG_LEVEL / REPORT_FORCE ...）
-    uint16_t deviceId;        // -d 指定的设备号
-    uint16_t valueLen;        // value[] 有效长度
-    int32_t reportType;       // report 的 -t 类型
-    int32_t dockerFlag;       // --docker
-    int32_t printMode;        // --print 0=syslog 1=stdout
-    int32_t selfLogLevel;     // --log_level 工具自身日志级别
-    char value[MAX_VALUE_STR_LEN + 64]; // 携带的值（配置值或日志级别串）
-} ArgInfo;
-```
+**子命令分发**——`MsnOptions` 先按 `argv` 第一个非选项参数分流到 config/report/help/version 四条路径，再做 docker 环境校验，最后交给 `MsnHandleArgInfo` 执行：
 
-顶层分发 `MsnOptions`，[msnpureport_options.c:1028-1080](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/options/msnpureport_options.c#L1028-L1080)。新旧语法判别是关键一句，[msnpureport_options.c:1044](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/options/msnpureport_options.c#L1044)：
+[src/ascend_hal/msnpureport/options/msnpureport_options.c:L1028-L1079](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/options/msnpureport_options.c#L1028-L1079)
 
-```c
-if ((argc < MIN_USER_ARG_LEN) || ((argv[1] != NULL) && (argv[1][0] == '-'))) {
-    // 旧命令：msnpureport -f / -t 1 ...
-    MsnOptionsOld(argc, argv, &argInfo, &flag);
-} else {
-    // 新命令：msnpureport config ... / report ...
-    MsnOptionsHandle(argc - 1, &argv[1], &argInfo);
-}
-```
+> 说明：注意 L1044 有一段「老命令」兼容——当参数过短或以 `-` 开头时走 `MsnOptionsOld`（兼容旧版无子命令的写法）；否则走新式的 `MsnOptionsHandle`（L1055，按子命令 dispatch）。L1070-L1078 设置本工具自身的打印模式与日志级别。
 
-子命令分发 `MsnOptionsHandle`，[msnpureport_options.c:970-1000](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/options/msnpureport_options.c#L970-L1000)，按 `argv[0]` 字符串比较分到 `config`/`report`/`help`/`version`。
+**子命令到执行的桥接**——`MsnHandleArgInfo` 根据 `cmdType` 调 `MsnConfig` 或 `MsnReport`：
 
-`config` 的选项表 `CONFIG_OPTS`，[msnpureport_options.c:54-71](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/options/msnpureport_options.c#L54-L71)，列出 `--get/--set/--icachecheck/--aic_switch/--coreid/--log/--global/--module/--event/-d/-h` 等。解析循环 `MsnGetConfigOptions` 用 `mmGetOptLong` 逐个取选项，分三类 handler：通用（`--get/--set/-d/--docker`，`HandleCommonCmd`）、DFX 设置（`--icachecheck/--aic_switch/...`，`HandleAicErrorCmd`）、日志级别（`--log/--global/--module/--event`，`HandleLogLevelCmd`）。
+[src/ascend_hal/msnpureport/options/msnpureport_options.c:L1002-L1026](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/options/msnpureport_options.c#L1002-L1026)
 
-例如设设备日志级别 `--log --global info`，`MsnSetLogLevel` 把它格式化成字符串 `"SetLogLevel(LOGLEVEL_GLOBAL)[INFO]"` 存进 `argInfo.value`，[msnpureport_options.c:455-487](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/options/msnpureport_options.c#L455-L487)——注意它并不直接改设备，而是把「指令串」原样带给设备侧解析。
+> 说明：`CONFIG_GET/CONFIG_SET` 走 `MsnConfig`；`REPORT/REPORT_PERMANENT` 走 `MsnReport`。失败时统一提示「check syslog for more information」——因为工具自身的诊断日志默认打到 syslog。
 
-业务二次分发 `MsnHandleArgInfo`，[msnpureport_options.c:1002-1026](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/options/msnpureport_options.c#L1002-L1026)：
+**report 子命令支持的选项**——`g_reportOptions` 用结构体数组描述所有长选项，`-f/--force` 就是其中之一：
 
-```c
-switch (argInfo->cmdType) {
-    case CONFIG_GET: case CONFIG_SET: ret = MsnConfig(argInfo); break;   // → 4.5
-    case REPORT: case REPORT_PERMANENT: ret = MsnReport(argInfo); break; // → 4.5
-    ...
-}
-```
+[src/ascend_hal/msnpureport/options/msnpureport_options.c:L101-L126](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/options/msnpureport_options.c#L101-L126)
 
-`report` 的选项表 `g_reportOptions` 与类型枚举，[msnpureport_options.c:73-126](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/options/msnpureport_options.c#L73-L126)。其中 `-a/--all`、`-f/--force`、`-t/--type` 三者互斥（`MsnReportLogCmd` 校验 `subCmd != REPORT_DEFAULT` 报错），`--permanent` 开启持续导出模式。
+> 说明：`-a/--all` 导出全部日志与 bbox 事件；`-f/--force` 在 `-a` 基础上额外导出历史维测信息；`-t/--type` 按类型导出（0 全部、1 slog/message/system_info、2 bbox、3 stackcore、4 vmcore、5 module log，UB 环境还有 6 ub）；`--permanent` 进入持续导出模式。
+
+**config 子命令经 HDC 短连接下发**——`MsnGetResult` 把参数打包成 `TlvReq`/`MsnReq`，经 `AdxDevCommShortLink` 走 HDC 短连接送到设备，超时 120 秒：
+
+[src/ascend_hal/msnpureport/config/msnpureport_config.c:L20-L52](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/config/msnpureport_config.c#L20-L52)
+
+> 说明：`req->type = COMPONENT_MSNPUREPORT` 标识这是 msnpureport 报文；`HDC_SERVICE_TYPE_IDE_FILE_TRANS` 是业务频道号（与 u5-l1 讲过的 HDC serviceType 概念一致）。`MsnConfig`（L62-L102）在 `CONFIG_SET` 时会先校验 root 权限（`IsHaveRootPermission`，L54-L61），这与帮助信息里「Only root user is allowed to execute this command with '--set'」对应。
+
+**report 一次性导出主链路**——`MsnReport` 区分持续与一次性，一次性走 `SyncDeviceLog`：
+
+[src/ascend_hal/msnpureport/report/msnpureport_report.c:L1319-L1335](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/report/msnpureport_report.c#L1319-L1335)
+
+> 说明：根据 `subCmd`/`reportType` 装配 `BboxDumpOpt`（是否导出全部、是否强制、是否 vmcore），然后调 `SyncDeviceLog`。
+
+**建时间戳目录 + 顺带导出 Host 内核日志**——`SyncDeviceLog` 先 `CreateLogRootPath` 建目录，若是 `ALL_LOG` 还会调 `GetHostDrvLog` 把 Host 内核日志也导出一份：
+
+[src/ascend_hal/msnpureport/report/msnpureport_report.c:L842-L864](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/report/msnpureport_report.c#L842-L864)
+
+> 说明：执行前会校验 root 权限（`IsHaveExecPermission`，L844）。注意 L854 `ALL_LOG` 时调的 `GetHostDrvLog`——它把 4.3 节的 Host 内核态日志以文件形式落盘，这就是 QUICKSTART 里 `msnpureport -f` 生成 `./时间戳/slog/host/host_kernel.log` 的源码出处。
+
+**Host 内核日志落盘**——`GetHostDrvLog` 调 HAL 公共接口 `halGetDeviceInfoByBuff`，以 `MODULE_TYPE_LOG`+`INFO_TYPE_HOST_KERN_LOG` 为参数，把内核日志写到 `<logPath>/slog/host`：
+
+[src/ascend_hal/msnpureport/report/msnpureport_report.c:L475-L499](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/report/msnpureport_report.c#L475-L499)
+
+> 说明：`INFO_TYPE_HOST_KERN_LOG` 在 [pkg_inc/ascend_hal_base.h:L401](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/pkg_inc/ascend_hal_base.h#L401) 定义（值 35），`halGetDeviceInfoByBuff` 声明在同文件 [L1353](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/pkg_inc/ascend_hal_base.h#L1353)。若环境不支持，返回 `DRV_ERROR_NOT_SUPPORT`，工具只打一条 warn（L491-L492）。
+
+**按类型拉取设备文件**——`GetSpecificLogs` 经 HDC 把设备上的某类文件拉到本地指定路径：
+
+[src/ascend_hal/msnpureport/report/msnpureport_report.c:L158-L206](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/report/msnpureport_report.c#L158-L206)
+
+> 说明：`AdxGetDeviceFileTimeout` / `AdxGetSpecifiedFile` 是对 HDC 文件传输的封装，业务频道用 `HDC_SERVICE_TYPE_LOG`（或新通道 `HDC_SERVICE_TYPE_PROFILING`，由 `HDC_NEW_CHANNEL` 宏控制，见 L186-L192）。`BLOCK_RETURN_CODE=4` 表示设备发现客户端在 docker 内而拒绝（L197-L198）。
 
 #### 4.4.4 代码实践
 
-**实践目标**：用源码确认新旧语法的分流边界，并预测 `msnpureport -f` 走哪条路径。
+**实践目标**：追踪 `msnpureport -f` 这一行命令的完整配置链路，并能解释它最终生成的目录结构。
 
 **操作步骤**：
 
-1. 阅读 [msnpureport_options.c:1028-1059](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/options/msnpureport_options.c#L1028-L1059)。
-2. 输入命令 `msnpureport -f`：`argc=2`、`argv[1]="-f"`。判断它命中第 1044 行的哪个分支。
-3. 再输入 `msnpureport report --force`：`argv[1]="report"`，判断它命中哪个分支、最终 `argInfo.subCmd` 取何值（参考 [msnpureport_options.c:790-792](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/options/msnpureport_options.c#L790-L792)）。
+1. 从 [msnpureport.c:L18](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/msnpureport.c#L18) 出发，依次跟入 `MsnOptions`（options 文件 L1028）→ 因 `argv[0]="report"` 进入 `MsnGetReportOptions` → `-f` 被解析为 `REPORT_ARGS_REPORT_FORCE`（options 文件 L92/L105）→ `MsnReportLogCmd` 把 `subCmd` 设为 `REPORT_FORCE`（L790-L793）。
+2. 跟入 `MsnHandleArgInfo`（L1002）→ `MsnReport`（report 文件 L1319）→ `SyncDeviceLog`（L842）→ `CreateLogRootPath`（L753，生成时间戳目录）→ `GetHostDrvLog`（L475，导出 host_kernel.log）→ `MsnSyncDeviceLog`（L682）→ `SlogStartSyncFile`（L383，拉 slog/stackcore/message/system_info/event_sched）+ `BboxStartSyncFile`（L451，拉黑匣子）。
+3. 对照 `docs/zh/QUICKSTART.md` 的 [L164-L167](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/docs/zh/QUICKSTART.md#L164-L167)：官方说明执行后生成「以时间戳命名的目录」，Host 内核日志位于 `./时间戳/slog/host/host_kernel.log`——这与源码中 `GetHostDrvLog` 拼出的 `%s/%s/host`（即 `<logPath>/slog/host`）完全对应。
 
-**需要观察的现象 / 预期结果**：
+**需要观察的现象**（在有 NPU 的 root 环境运行时）：
 
-- `msnpureport -f`：`argv[1][0] == '-'` 命中**旧命令**分支，走 `MsnOptionsOld`。这与 QUICKSTART 第 164 行 `/usr/local/Ascend/driver/tools/msnpureport -f` 一致——文档示例用的是旧语法。
-- `msnpureport report --force`：`argv[1]="report"` 不以 `-` 开头，走**新命令**分支 → `MsnOptionsHandle` → `MsnGetReportOptions` → `--force` 命中 `REPORT_ARGS_REPORT_FORCE` → `argInfo.subCmd = REPORT_FORCE`、`reportType = ALL_LOG`（[msnpureport_options.c:790-792](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/options/msnpureport_options.c#L790-L792)）。两条路径最终都汇入 `MsnReport`。
+```
+# /usr/local/Ascend/driver/tools/msnpureport -f
+Start exporting logs and files to path: /root/2026-08-13-10-30-00
+Export finished.
+```
 
-> 本实践为源码阅读型。运行验证（待本地验证）：在已装驱动的机器上分别执行两种写法，观察输出目录是否一致。
+随后在该目录下应能看到 `slog/host/host_kernel.log`（Host 内核日志）、`slog/dev-os-*`（设备 slog）、`system_info/`、`stackcore/`、bbox 等子目录。
+
+**预期结果**：能画出从命令行到 HDC 文件拉取的完整调用链，并指出 `-f` 比 `-a` 多导出了「历史维测信息」（`bboxDumpOpt.force = true`）。若运行环境不支持某类导出（如非 UB 环境的 type 6），相应分支返回 `DRV_ERROR_NOT_SUPPORT` 并打 warn，不影响其他类型。
+
+> 待本地验证：实际目录内容与设备型号、是否 UB 形态有关，本讲无法在无设备环境给出确切的文件清单，请在真实 NPU 上确认。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：`msnpureport config --set --global info -d 0` 缺了哪个关键字会报错？
-**答案**：缺 `--log`。`MsnSetLogLevel` 要求 `argInfo->subCmd == LOG_LEVEL` 才允许设置 `--global/--module/--event`（[msnpureport_options.c:457-460](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/options/msnpureport_options.c#L457-L460)），而 `LOG_LEVEL` 是由 `--log` 置位的，故正确写法是 `--set --log --global info`。
+**练习 1**：`msnpureport config --set` 与 `msnpureport report` 分别走哪种 HDC 连接？为什么？
+**答案**：`config --set/--get` 走 HDC **短连接**（`MsnGetResult` 中的 `AdxDevCommShortLink`，超时 120s），因为它只是一次「下发请求-取回结果」的交互；`report` 拉取日志文件走 HDC **长连接**（`MsnReportCreateLongLink` / `MsnReportServerLongLink`），因为要持续接收大量数据，且持续模式需要常驻收发线程。
 
-**练习 2**：`report -a` 与 `report -f` 能否同时用？
-**答案**：不能。`MsnReportLogCmd` 校验 `argInfo->subCmd != REPORT_DEFAULT` 时报错「only support one option at a time」（[msnpureport_options.c:781-784](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/options/msnpureport_options.c#L781-L784)）。`-a/-f/-t` 三者互斥，一次只能选一个。
-
----
-
-### 4.5 设备日志导出与配置链路（config / report）
-
-#### 4.5.1 概念说明
-
-`config` 与 `report` 是 `msnpureport` 的两个业务子命令，分别对应「查询/设置」与「导出」。二者都最终经 **HDC** 与设备侧守护进程通信，但形态不同：
-
-- **config 是「短连接、一问一答」**：构造一个 TLV 请求，经 HDC 短连接（`AdxDevCommShortLink`）发给设备的 IDE 守护进程，等回一个 `ConfigInfo` 应答，超时 120s。适用于「设置一个值 / 查询一个值」这种轻量交互。
-- **report 是「长连接、批量拉文件」**：建立 HDC 长连接，从设备拉取 slog/message/system_info/bbox/stackcore 等文件，落盘到以时间戳命名的目录。`-f/--force` 还会额外导出历史维测信息。
-
-回顾 QUICKSTART 的三层调试链路（[docs/zh/QUICKSTART.md:143-167](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/docs/zh/QUICKSTART.md#L143-L167)）：应用报错时，先看应用类日志 → 再看 `dmesg` 的 Host 内核日志 → 仍定位不了就用 `msnpureport -f` 导出 Device 侧日志（落到 `./时间戳/slog/host/host_kernel.log`）。本节的 report 链路就是第三层的实现。
-
-#### 4.5.2 核心流程
-
-**config 链路**（`MsnConfig`）：
-
-1. 权限校验：`CONFIG_SET` 必须 root（`IsHaveRootPermission`）。
-2. `MsnGetResult` 构造 TLV 请求：外层 `TlvReq{type=COMPONENT_MSNPUREPORT, devId, len}`，内层 `MsnReq{cmdType, subCmd, valueLen, value}`。
-3. 若 `cmdType==CONFIG_SET`，把 `argInfo.value`（如 `"SetLogLevel(...)[INFO]"`）`memcpy` 进 `MsnReq.value`。
-4. 经 `AdxDevCommShortLink(HDC_SERVICE_TYPE_IDE_FILE_TRANS, req, resultBuf, 120s)` 发给设备，等应答。
-5. 设备回的 `ConfigInfo{len, isError, value}`：`isError` 为真则按 cmdType 打印告警/错误；`CONFIG_GET` 则 `MsnPrintInfo` 格式化打印，否则直接打印 `value`。
-
-**report 链路**（`MsnReport`）：
-
-1. `REPORT_PERMANENT`（持续导出）走 `MsnReportPermanent`：建目录、初始化文件老化管理、订阅故障事件、起 slogd 与 log daemon 接收线程常驻。
-2. 一次性导出走 `SyncDeviceLog`：root 权限校验 → `CreateLogRootPath`（以时间戳建目录）→ 磁盘空间检查 → （`ALL_LOG` 时）`GetHostDrvLog` 取 Host 内核驱动日志 → `MsnSyncDeviceLog` 起线程从设备拉各类日志/bbox。
-3. `-f/--force`：`bboxDumpOpt.force = true`（[msnpureport_report.c:1328-1330](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/report/msnpureport_report.c#L1328-L1330)），导出时含历史维测信息。
-
-#### 4.5.3 源码精读
-
-config 的请求构造与发送，`MsnGetResult`，[msnpureport_config.c:20-52](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/config/msnpureport_config.c#L20-L52)。TLV 二层封装是重点：
-
-```c
-TlvReq *req = (TlvReq *)MsnMalloc(sizeof(TlvReq) + sizeof(struct MsnReq) + argInfo->valueLen);
-req->type = COMPONENT_MSNPUREPORT;          // 外层：标记来自 msnpureport 组件
-req->devId = (int32_t)argInfo->deviceId;
-req->len = sizeof(struct MsnReq) + argInfo->valueLen;
-struct MsnReq *msnReq = (struct MsnReq *)req->value;  // 内层：业务请求体
-msnReq->cmdType = argInfo->cmdType;         // CONFIG_GET / CONFIG_SET
-msnReq->subCmd = argInfo->subCmd;           // ICACHE_RANGE / LOG_LEVEL ...
-msnReq->valueLen = argInfo->valueLen;
-if (argInfo->cmdType == CONFIG_SET) { memcpy_s(msnReq->value, ..., argInfo->value, ...); }
-
-const uint32_t timeout = 120 * 1000;        // 120s
-int32_t ret = AdxDevCommShortLink(HDC_SERVICE_TYPE_IDE_FILE_TRANS, req, resultBuf, bufLen, timeout);
-```
-
-`TlvReq` 结构定义见 [ide_tlv.h:65-70](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/inc/adump/ide_tlv.h#L65-L70)：`{enum cmd_class type; int dev_id; int len; char value[0];}`，`value[0]` 是柔性数组，承载内层 `MsnReq`。`MsnReq`/`ConfigInfo` 见 [msnpureport_common.h:66-77](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/msnpureport_common.h#L66-L77)。
-
-config 的业务入口与应答处理 `MsnConfig`，[msnpureport_config.c:62-102](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/config/msnpureport_config.c#L62-L102)：
-
-```c
-int32_t MsnConfig(const ArgInfo *argInfo) {
-    if (argInfo->cmdType == CONFIG_SET && !IsHaveRootPermission()) { ... return EN_ERROR; } // root 校验
-    char resultBuf[MSG_MAX_LEN] = {0};
-    if (MsnGetResult(argInfo, resultBuf, MSG_MAX_LEN) != EN_OK) return EN_ERROR;
-    struct ConfigInfo *configInfo = (struct ConfigInfo *)resultBuf;
-    if (configInfo->isError) { ... return EN_ERROR; }      // 设备侧返回错误
-    if (argInfo->cmdType == CONFIG_GET) MsnPrintInfo(...); // 查询结果格式化打印
-    else MSNPU_PRINT("%s, device id:%u.", configInfo->value, argInfo->deviceId);
-    return EN_OK;
-}
-```
-
-report 的入口与 force 分支，`MsnReport`，[msnpureport_report.c:1319-1335](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/report/msnpureport_report.c#L1319-L1335)：
-
-```c
-int32_t MsnReport(ArgInfo *argInfo) {
-    if (argInfo->cmdType == REPORT_PERMANENT)
-        return MsnReportPermanent(argInfo->deviceId, (FileAgeingParam *)argInfo->value);
-    struct BboxDumpOpt bboxDumpOpt = { false,false,false,false, argInfo->printMode, argInfo->selfLogLevel };
-    if (argInfo->subCmd == REPORT_ALL)               bboxDumpOpt.all = true;
-    else if ((argInfo->subCmd == REPORT_FORCE) ||
-             ((argInfo->subCmd == REPORT_TYPE) && (argInfo->reportType == HISILOGS_LOG)))
-        bboxDumpOpt.force = true;                    // ← -f / --force 在此置位
-    else if (argInfo->reportType == VMCORE_FILE)     bboxDumpOpt.vmcore = true;
-    return SyncDeviceLog(argInfo->deviceId, &bboxDumpOpt, argInfo->reportType);
-}
-```
-
-一次性导出的主干 `SyncDeviceLog`，[msnpureport_report.c:842-864](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/report/msnpureport_report.c#L842-L864)：root 校验 → 建时间戳根目录 → 磁盘空间检查 → `ALL_LOG` 时调 `GetHostDrvLog` 取 Host 内核日志 → `MsnSyncDeviceLog` 起线程拉取设备日志与 bbox。其中 `GetHostDrvLog` 取 Host 内核日志走的是 HAL 接口 `halGetDeviceInfoByBuff(0, MODULE_TYPE_LOG, INFO_TYPE_HOST_KERN_LOG, path, &len)`，[msnpureport_report.c:489](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/report/msnpureport_report.c#L489)——这正是 QUICKSTART 里 `./时间戳/slog/host/host_kernel.log` 的来源（[QUICKSTART.md:167](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/docs/zh/QUICKSTART.md#L167)）。
-
-> 与 u5-l1 的呼应：config 经 `HDC_SERVICE_TYPE_IDE_FILE_TRANS`、report 的 slogd 接收经 `HDC_SERVICE_TYPE_LOG`（或新通道 `HDC_SERVICE_TYPE_PROFILING`）。这些 HDC 频道正是 u5-l1 讲的「HDC 业务频道 + serviceType」机制的具体落地。logdrv 提供「打印框架 + share_log 共享通道」，msnpureport 提供「HDC 文件/配置通道」，三者合力构成完整的「打日志 + 捞日志」闭环。
-
-#### 4.5.4 代码实践（本讲主实践）
-
-**实践目标**：串起 config 的「参数 → TLV → HDC → 设备应答」完整链路，并对照说明 `msnpureport -f` 的导出链路。
-
-**操作步骤**：
-
-1. **config 链路追踪**：以 `msnpureport config --set --log --global info -d 0` 为例，沿以下顺序阅读源码，画出数据流：
-   - 选项解析：[msnpureport_options.c:455-487](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/options/msnpureport_options.c#L455-L487)（`MsnSetLogLevel` 把 `info` 格式化成 `"SetLogLevel(1)[INFO]"` 写入 `argInfo.value`，`cmdType=CONFIG_SET`、`subCmd=LOG_LEVEL`）。
-   - 业务分发：[msnpureport_options.c:1002-1026](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/options/msnpureport_options.c#L1002-L1026)（`CONFIG_SET` → `MsnConfig`）。
-   - 权限校验：[msnpureport_config.c:66-72](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/config/msnpureport_config.c#L66-L72)（`CONFIG_SET` 需 root）。
-   - TLV 封装与发送：[msnpureport_config.c:20-52](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/config/msnpureport_config.c#L20-L52)（`type=COMPONENT_MSNPUREPORT`，经 `AdxDevCommShortLink` 下发）。
-   - 应答处理：[msnpureport_config.c:79-101](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/config/msnpureport_config.c#L79-L101)（解析 `ConfigInfo` 并打印）。
-2. **`-f` 导出链路对照**：阅读 [msnpureport_report.c:1319-1335](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/report/msnpureport_report.c#L1319-L1335) 与 [msnpureport_report.c:842-864](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/report/msnpureport_report.c#L842-L864)，写出 `msnpureport -f`（等价新语法 `report --force`）从命令行到落盘的步骤。
-
-**需要观察的现象 / 预期结果**：
-
-- config 数据流：`--global info` → `argInfo.value="SetLogLevel(1)[INFO]"`、`cmdType=CONFIG_SET` → root 校验 → 包成 `TlvReq{COMPONENT_MSNPUREPORT, devId=0} + MsnReq{CONFIG_SET, LOG_LEVEL, ...}` → `AdxDevCommShortLink(HDC_SERVICE_TYPE_IDE_FILE_TRANS, 120s)` → 设备回 `ConfigInfo` → 打印 `value`。
-- `-f` 数据流：旧语法 `MsnOptionsOld` 解析出 `cmdType=REPORT`、`subCmd=REPORT_FORCE`（等价新语法 `report --force`）→ `MsnReport` 置 `bboxDumpOpt.force=true`、`reportType=ALL_LOG` → `SyncDeviceLog`：root 校验 → 建时间戳目录 → `GetHostDrvLog` 取 host 内核日志（`halGetDeviceInfoByBuff(..., INFO_TYPE_HOST_KERN_LOG, ...)`）→ 起线程经 HDC 拉设备 slog/bbox 等 → 落盘到 `./时间戳/`。
-
-> 运行验证（待本地验证）：在已安装驱动的环境执行 `msnpureport config --get -d 0`（root），观察返回的配置串；执行 `msnpureport -f`，观察生成的 `./时间戳/slog/host/host_kernel.log` 是否存在。
-
-#### 4.5.5 小练习与答案
-
-**练习 1**：为什么 `CONFIG_SET` 必须是 root，而 `CONFIG_GET` 不要求？
-**答案**：`SET` 会改动设备配置（日志级别、核开关、icache 范围等），属有副作用的写操作，必须限制权限以免误改；`GET` 只是查询无副作用，故放开（见 [msnpureport_config.c:66-72](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/config/msnpureport_config.c#L66-L72)）。同理 `report` 导出也要求 root（[msnpureport_report.c:844-847](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/report/msnpureport_report.c#L844-L847)）。
-
-**练习 2**：config 与 report 都用 HDC，二者用的频道一样吗？
-**答案**：不一样。config 用「短连接」走 `HDC_SERVICE_TYPE_IDE_FILE_TRANS` 频道做一问一答；report 拉 slogd 用长连接走 `HDC_SERVICE_TYPE_LOG`（新通道为 `HDC_SERVICE_TYPE_PROFILING`），拉 log daemon 文件又用 `HDC_SERVICE_TYPE_IDE_FILE_TRANS`。频道（serviceType）区分了不同业务流，避免相互阻塞。
-
-**练习 3**：`msnpureport -f` 比 `msnpureport report` 多导出了什么？
-**答案**：`-f/--force` 使 `bboxDumpOpt.force=true`（[msnpureport_report.c:1328-1330](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/report/msnpureport_report.c#L1328-L1330)），bbox 导出时会额外包含「历史维测与计量信息」（见 report 帮助 [msnpureport_options.c:667-669](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/options/msnpureport_options.c#L667-L669)），信息更全但体积更大。
-
----
+**练习 2**：为什么 `msnpureport report -f` 导出的结果里会包含一个 `host_kernel.log`？它和 Device 日志是同一来源吗？
+**答案**：因为 `SyncDeviceLog` 在 `ALL_LOG` 时会调 `GetHostDrvLog`，经 `halGetDeviceInfoByBuff(... INFO_TYPE_HOST_KERN_LOG ...)` 把 **Host 内核态** 日志也落盘，方便一次性收齐三层日志。它与 Device 日志不是同一来源——前者来自 Host 内核（即 4.3 节共享内存搬运的那批），后者来自 NPU 设备。
 
 ## 5. 综合实践
 
-**任务：绘制 driver「日志产生 → 采集 → 导出」全链路图，并标注每段对应的源码函数。**
+把本讲三个最小模块串起来，完成一次「全链路日志追踪」。
 
-把本讲 5 个模块串起来，画一张覆盖「Host 用户态 / Host 内核态 / Device 侧」三栏的数据流图，至少包含以下 4 条通路，并在每条通路上标出关键函数与文件：
+**场景**：某上层应用调用 DCMI 接口失败，返回了一个 `DRV_ERROR_*` 错误码。请按以下步骤定位：
 
-1. **Host 用户态自产日志**：业务代码 `DRV_ERR(module, ...)` → `DRV_SYSLOG_BASE` 宏（[dmc_log_user.h:50-66](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/inc/dmc/dmc_log_user.h#L50-L66)）→ `g_log_print_info.log_print`（默认 `drv_syslog`→`vsyslog`）→ `/var/log/syslog`。
-2. **Host 用户态日志级别初始化**：库加载 → 构造函数 `drv_log_init`（[drv_log_user.c:14-24](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user.c#L14-L24)）→ `drvMngGetConsoleLogLevel` → 写入门槛。
-3. **共享日志直读**：设备/内核写 share_log 环形缓冲 → Host 调 `share_log_read_err/run_info`（[drv_share_log.c:227-243](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_share_log.c#L227-L243)）→ 按 `SHARE_LOG_ERR/RUN_INFO` 分流到 `DRV_ERR/DRV_RUN_INFO`。
-4. **msnpureport 主动导出**：`msnpureport -f` → `MsnOptions`(旧) / `MsnOptionsHandle`(新) → `MsnReport`（[msnpureport_report.c:1319-1335](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/msnpureport/report/msnpureport_report.c#L1319-L1335)）→ `SyncDeviceLog` → `GetHostDrvLog`(`halGetDeviceInfoByBuff`) + HDC 长连接拉设备日志 → 落盘 `./时间戳/`。
+1. **应用类日志层**：在 syslog 中找到驱动打出的 `[ERROR]...[drv][common]...` 行。结合 4.2 节，说明这行日志是经 `g_log_print_info` 的哪个函数指针打出的（默认是 `drv_syslog`）。
+2. **错误码溯源**：根据应用拿到的 `DRV_ERROR_*`，反查 `drv_log_user_kernel_api.c` 的 `user_err[]` 表（L48-L191），推断底层 `ioctl` 当时可能返回了哪个 Linux `errno`。例如得到 `DRV_ERROR_OUT_OF_MEMORY` → 推断 `errno=ENOMEM`。
+3. **Host 内核态层**：用 `dmesg` 或 `/var/log/messages` 查看同时间点的内核日志；再执行 `msnpureport -f`，打开生成的 `./时间戳/slog/host/host_kernel.log`，对照 4.3 节说明这些内核日志原本是经共享内存（`SHARE_LOG_ERR` 通道）搬到用户态的。
+4. **Device 系统类层**：在同一时间戳目录的 `slog/dev-os-*/` 与 `system_info/` 下查看 Device 侧日志，结合 4.4 节说明这些文件是经 HDC 长连接（`AdxGetDeviceFileTimeout`）从设备拉回的。
 
-完成后再回答一个综合问题：当上层以「工具日志模式」加载 HAL 库（调用 `drv_log_out_handle_register`），上述第 1、3 条通路的「打印后端」会发生什么变化？（提示：`g_log_print_info` 五个成员被整体替换，[drv_log_user_kernel_api.c:386-393](https://github.com/gitcode.com/cann/driver/blob/e29d066fd6ee84cae705e2000a0387d721d3aaa0/src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c#L386-L393)）
+**交付物**：一份调用链图，标注「应用拿到的错误码 ← errno 映射 ← ioctl 失败 ← 内核日志（共享内存搬运）← msnpureport 导出」，并指出每一环对应的源码文件与关键函数。
 
-> 本实践为源码阅读 + 文档型，不涉及修改源码。运行态验证（如实际执行 `msnpureport -f`）标注「待本地验证」。
+> 待本地验证：本实践需要真实 NPU 与可复现的失败用例；若无设备，可降级为纯源码阅读——只完成步骤 2 的查表与步骤 1/3/4 的源码定位，写出预期日志路径即可。
 
 ## 6. 本讲小结
 
-- `logdrv` 是 HAL 用户态库的**日志打印基础设施**：`DRV_ERR/DRV_WARN/...` 等宏都落到它提供的「级别 + 模块名 + 可插拔后端」框架上。
-- 可插拔后端的核心是全局函数指针表 `g_log_print_info`：默认走 `vsyslog`，上层 `drv_log_out_handle_register` 注册后切换到 `dlog`；注册/注销必须成对。构造函数 `drv_log_init` 在库加载即完成门槛初始化。
-- `logdrv` 还兼任 **errno → drvError_t 映射**（`user_err[]` 表）与**标准化错误消息上报**（`REPORT_PREDEFINED_ERR_MSG`）。
-- `share_log` 用「预留高端地址 + mmap + 环形缓冲 + 魔数校验」实现 Host↔Device 共享日志；真正的「按类型读取」是 `share_log_read_err / share_log_read_run_info` 按 `SHARE_LOG_ERR / SHARE_LOG_RUN_INFO` 分流——源码里没有 `log_read_by_type` / `channel_type` 这两个符号。
-- `msnpureport` 同时支持旧短选项语法（`-f`、`-t`）与新子命令语法（`config`/`report`），`MsnOptions` 按 `argv[1]` 是否以 `-` 开头分流；所有选项汇总进 `ArgInfo`，再按 `cmdType` 二次分发到 `MsnConfig` / `MsnReport`。
-- `config` 是「TLV + HDC 短连接」的一问一答（`AdxDevCommShortLink`，120s），`SET` 需 root；`report`（含 `-f`）是「HDC 长连接批量拉文件」，落盘到时间戳目录，`-f/--force` 额外含历史维测信息。二者与 QUICKSTART 的「应用日志 → dmesg → msnpureport」三层调试链路一一对应。
+- driver 的日志分三层：**应用类**（用户库自产自销）、**Host 内核态**（共享内存搬运）、**Device 系统类**（msnpureport 经 HDC 拉取），排查应自上而下逐层下钻。
+- `drv_log_user` 是用户态日志打印底座，核心是一个可运行时替换的函数指针表 `g_log_print_info`；上层可通过 `drv_log_out_handle_register` 接管输出。
+- `drv_log_user_kernel_api.c` 中的 `user_err[]` 表把上百个 Linux `errno` 多对一收敛为对外 `DRV_ERROR_*`，是跨层错误码翻译的关键。
+- `drv_share_log` 用固定地址的共享内存 + 环形缓冲实现 Host 内核日志到用户态的搬运，「按通道读取」即按 `enum share_log_type_enum`（`SHARE_LOG_ERR`/`SHARE_LOG_RUN_INFO`）选择 `share_log_read_err`/`share_log_read_run_info`。（本仓库不存在 `log_read_by_type` 这一接口。）
+- `msnpureport` 用 `config`/`report` 两个子命令分别「配置设备」与「导出日志」；config 走 HDC 短连接，report 走 HDC 长连接拉文件，`-f` 会额外导出历史维测信息与 Host 内核日志。
+- `msnpureport -f` 生成的时间戳目录里，`slog/host/host_kernel.log` 来自 `halGetDeviceInfoByBuff(... INFO_TYPE_HOST_KERN_LOG ...)`，与 Device 日志分属不同来源。
 
 ## 7. 下一步学习建议
 
-- **u5-l3（Profiling 性能采集适配）**：同属 DMC，`prof` 子模块同样复用 HDC 通路（`HDC_SERVICE_TYPE_PROFILING`），可对照本讲理解「日志频道」与「性能频道」的分工。
-- **u8-l1（日志体系与端到端调试验证）**：把本讲的三层调试链路（应用类 / Host 内核态 / Device 系统类日志）放到真实排障场景中演练，结合 `docs/zh/FAQ.md` 定位常见问题。
-- **继续阅读源码**：可深入 `msnpureport/adcore`（HDC 客户端封装 `AdxDevCommShortLink`/`AdxGetDeviceFileTimeout` 等的实现）、`msnpureport/report/msnpureport_file_mgr.c`（导出文件的老化与轮转管理）、以及 `script/hal_log_collect_host.sh`（Host 侧 `/proc`、`/sys`、`dmesg` 一键采集脚本，是 report 之外的补充采集手段）。
+- **继续 DMC 之旅**：下一讲 [u5-3 Profiling 性能采集适配](u5-l3-prof-adapt.md) 讲同一 DMC 家族里的 prof 模块，它会复用本讲提到的 HDC 通道（`HDC_SERVICE_TYPE_PROFILING`），可以对照理解「日志」与「性能数据」如何共用通信底座。
+- **深入黑匣子**：本讲多次提到 bbox（黑匣子），其导出由 `BboxStartDump` 触发，完整机制在 [u7-l6 黑匣子 bbox 与基础设施工具](u7-l6-bbox-and-infrastructure.md) 详解，建议读完 u5 后带着「系统异常时如何保存临终日志」的问题去读。
+- **回到通信底座**：若对 `Adx*`、`HDC_SERVICE_TYPE_*`、短/长连接仍感模糊，可回看 [u5-l1 device_monitor 通路](u5-l1-dmc-device-monitor.md) 与 [u3-l2 HDC 模型](u3-l2-hdc-communication.md)，把 HDC 这一「共用底座」彻底吃透。
+- **端到端调试**：[u8-l1 日志体系与端到端调试验证](u8-l1-logging-and-debugging.md) 会把本讲的三层日志与 FAQ 打通成一套问题排查清单，作为本系列调试主题的总结。
