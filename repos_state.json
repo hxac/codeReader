@@ -36723,264 +36723,205 @@
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
         "u1-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.2109610000000002,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.059691,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.85494,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.8255030000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l5": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.245366,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.9955080000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.629602,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.3820839999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.3894870000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.2381900000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.644735,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.299404,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.267124,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l5": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.8474370000000002,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.232601,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.6243149999999997,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 2.136488,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.817915,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l5": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.915591,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.520895,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.515019,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.4404549999999998,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 2.0358500000000004,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u6-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.278353,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u6-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.7568449999999998,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u6-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 2.376218,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u6-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.8172100000000002,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u6-l5": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.704892,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u7-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.4694019999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u7-l2": {
-          "status": "failed",
-          "action": "new",
-          "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"04040671-ea0b-4eeb-8074-0840d609d6e8\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{"
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u7-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u7-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u7-l5": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u7-l6": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u8-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u8-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u8-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u8-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         }
       },
-      "manifest_head": "e29d066fd6ee84cae705e2000a0387d721d3aaa0",
-      "prev_head": null,
-      "phase": "workers",
-      "mode": "full",
+      "manifest_head": "f280abc33e292aed33e8e31947b994cc95358032",
+      "prev_head": "e29d066fd6ee84cae705e2000a0387d721d3aaa0",
+      "phase": "done",
+      "mode": "incremental",
       "tutorial_path": "tutorials/gitcode.com/cann/driver/driver-tutorial",
-      "last_head": "e29d066fd6ee84cae705e2000a0387d721d3aaa0",
-      "last_run_at": "2026-08-13T23:02:39Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_head": "f280abc33e292aed33e8e31947b994cc95358032",
+      "last_run_at": "2026-08-14T11:02:49Z",
+      "last_error": null,
+      "abandoned": []
     },
     "gitcode.com/cann/ge": {
       "prompt_hash": "b21aef51792b02df",
@@ -37220,168 +37161,403 @@
     "gitcode.com/cann/graph-autofusion": {
       "prompt_hash": "b21aef51792b02df",
       "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-08-13T23:02:39Z",
+      "last_run_at": "2026-08-14T11:02:49Z",
       "lectures": {
         "u1-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.49834599999999996,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.538113,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.8530179999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.962299,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.7897679999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.8676050000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.9375050000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.69172,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.1239919999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.196308,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 3.7781620000000005,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.5368850000000003,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.464401,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.131639,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.142077,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u6-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.060614,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u6-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.033478,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u6-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.386066,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u6-l4": {
           "status": "done",
-          "action": "new",
+          "action": "update",
           "retries": 0,
-          "cost": 1.260715,
+          "cost": 1.442527,
           "error": null
         },
         "u7-l1": {
           "status": "done",
-          "action": "new",
+          "action": "update",
           "retries": 0,
-          "cost": 1.47972,
+          "cost": 1.3446779999999998,
           "error": null
         },
         "u7-l2": {
           "status": "done",
-          "action": "new",
+          "action": "update",
           "retries": 0,
-          "cost": 1.585907,
+          "cost": 1.760138,
           "error": null
         },
         "u7-l3": {
           "status": "done",
-          "action": "new",
+          "action": "update",
           "retries": 0,
-          "cost": 1.7836049999999997,
+          "cost": 1.7099440000000001,
           "error": null
         },
         "u8-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.8055050000000001,
+          "error": null
+        },
+        "u8-l3": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.630464,
+          "error": null
+        },
+        "u9-l1": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.3386029999999998,
+          "error": null
+        },
+        "u9-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u10-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u10-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u10-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u11-l1": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.584423,
+          "error": null
+        },
+        "u11-l2": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.166986,
+          "error": null
+        },
+        "u11-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0339619999999998,
+          "error": null
+        },
+        "u11-l4": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
           "error": "quota: API 额度/限流耗尽：\nIgnoring 41 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects"
+        },
+        "u11-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u12-l1": {
+          "status": "pending",
+          "action": "update",
+          "retries": 0
+        },
+        "u12-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u12-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u12-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        }
+      },
+      "manifest_head": "2b9c5c2a85a249e6407b8d1b845aebe7befd937c",
+      "prev_head": "00627d97bf898d8331ec5189f93a7621294f9121",
+      "phase": "workers",
+      "mode": "incremental",
+      "tutorial_path": "tutorials/gitcode.com/cann/graph-autofusion/graph-autofusion-tutorial",
+      "last_head": "2b9c5c2a85a249e6407b8d1b845aebe7befd937c"
+    },
+    "gitcode.com/cann/hccl": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.236007,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l5": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.2895850000000002,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.850779,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.5297130000000003,
+          "error": null
+        },
+        "u3-l4": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.698615,
+          "error": null
+        },
+        "u3-l5": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.6907270000000003,
+          "error": null
+        },
+        "u4-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.4062080000000001,
+          "error": null
+        },
+        "u4-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.163892,
+          "error": null
+        },
+        "u5-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "failed",
+          "action": "update",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"e09eab3d-1d91-4b25-9571-9678b038c2e1\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{"
+        },
+        "u5-l4": {
+          "status": "pending",
+          "action": "update",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "update",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "update",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u7-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u7-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u7-l4": {
+          "status": "pending",
+          "action": "update",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
         },
         "u8-l2": {
           "status": "pending",
@@ -37393,204 +37569,150 @@
           "action": "new",
           "retries": 0
         },
-        "u9-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u10-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u10-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u10-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u11-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u11-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u12-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u12-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u12-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u12-l4": {
+        "u8-l4": {
           "status": "pending",
           "action": "new",
           "retries": 0
         }
       },
-      "manifest_head": "00627d97bf898d8331ec5189f93a7621294f9121",
-      "prev_head": null,
+      "manifest_head": "b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a",
+      "prev_head": "757867153ef03d005ec8752e6cb8f802cecd1e0a",
       "phase": "workers",
-      "mode": "full",
-      "tutorial_path": "tutorials/gitcode.com/cann/graph-autofusion/graph-autofusion-tutorial",
-      "last_head": "00627d97bf898d8331ec5189f93a7621294f9121"
+      "mode": "incremental",
+      "tutorial_path": "tutorials/gitcode.com/cann/hccl/hccl-tutorial",
+      "last_head": "b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a",
+      "last_run_at": "2026-08-14T11:02:49Z",
+      "last_error": "quota exhausted; will resume next window"
     },
-    "gitcode.com/cann/hccl": {
+    "gitcode.com/cann/hcomm": {
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
         "u1-l1": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.6235389999999998,
+          "cost": 0.497566,
           "error": null
         },
         "u1-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.8574599999999999,
+          "cost": 0.55188,
           "error": null
         },
         "u1-l3": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.89263,
+          "cost": 0.7753230000000001,
           "error": null
         },
         "u1-l4": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.9553389999999999,
-          "error": null
-        },
-        "u1-l5": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.795262,
+          "cost": 0.801737,
           "error": null
         },
         "u2-l1": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.855777,
+          "cost": 1.2986579999999996,
           "error": null
         },
         "u2-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.015967,
+          "cost": 0.7698559999999999,
           "error": null
         },
         "u2-l3": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.266221,
+          "cost": 1.249885,
           "error": null
         },
         "u2-l4": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.3179690000000002,
+          "cost": 0.948534,
+          "error": null
+        },
+        "u2-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.428887,
+          "error": null
+        },
+        "u2-l6": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.7006160000000001,
           "error": null
         },
         "u3-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.3888849999999997,
-          "error": null
-        },
-        "u3-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.5151869999999998,
-          "error": null
-        },
-        "u3-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.5370519999999999,
-          "error": null
-        },
-        "u3-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.2143909999999998,
-          "error": null
-        },
-        "u3-l5": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.543576,
-          "error": null
-        },
-        "u4-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.080115,
-          "error": null
-        },
-        "u4-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.768672,
-          "error": null
-        },
-        "u4-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.4625590000000002,
-          "error": null
-        },
-        "u4-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.4353220000000002,
-          "error": null
-        },
-        "u5-l1": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"ee6c7586-33ce-4ba1-9a3e-9e0a59759568\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"a2ecfb03-6b12-4472-8e17-790939f25b34\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{"
+        },
+        "u3-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l7": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
         },
         "u5-l2": {
           "status": "pending",
@@ -37607,6 +37729,11 @@
           "action": "new",
           "retries": 0
         },
+        "u5-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
         "u6-l1": {
           "status": "pending",
           "action": "new",
@@ -37622,37 +37749,26 @@
           "action": "new",
           "retries": 0
         },
-        "u7-l1": {
+        "u6-l4": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u7-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l4": {
+        "u6-l5": {
           "status": "pending",
           "action": "new",
           "retries": 0
         }
       },
-      "manifest_head": "757867153ef03d005ec8752e6cb8f802cecd1e0a",
+      "manifest_head": "29cd856550383ec133aa2f9259ae9a1f1764e4ec",
       "prev_head": null,
       "phase": "workers",
       "mode": "full",
-      "tutorial_path": "tutorials/gitcode.com/cann/hccl/hccl-tutorial",
-      "last_head": "757867153ef03d005ec8752e6cb8f802cecd1e0a",
-      "last_run_at": "2026-08-13T23:02:39Z",
+      "tutorial_path": "tutorials/gitcode.com/cann/hcomm/hcomm-tutorial",
+      "last_head": "29cd856550383ec133aa2f9259ae9a1f1764e4ec",
+      "last_run_at": "2026-08-14T11:02:49Z",
       "last_error": "quota exhausted; will resume next window"
     },
-    "gitcode.com/cann/hcomm": {},
     "gitcode.com/cann/hixl": {},
     "gitcode.com/cann/metadef": {},
     "gitcode.com/cann/oam-tools": {},
@@ -49452,7 +49568,7 @@
     "ai-dynamo/dynamo": {},
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-13T23:02:39Z"
+      "last_run_at": "2026-08-14T11:02:49Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
