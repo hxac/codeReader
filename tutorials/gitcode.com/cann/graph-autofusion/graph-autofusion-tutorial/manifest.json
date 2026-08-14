@@ -1,1048 +1,1206 @@
 {
+  "head": "2b9c5c2a85a249e6407b8d1b845aebe7befd937c",
   "project": "graph-autofusion",
-  "head": "00627d97bf898d8331ec5189f93a7621294f9121",
-  "rationale": "项目包含两个解耦组件：SuperKernel（减少调度开销的 Python JIT + C++ AOT 运行时）与 Autofuse（缓解 Memory Bound 的自动融合编译器）。学习顺序遵循「先整体后局部、先运行后源码、先浅后深」的原则：入门层（u1-u3）先让读者跑通两个组件并理解定位；进阶层（u4-u9）沿 Autofuse 真实数据流 graph_metadef → ASCIR 注册 → optimize 调度 → att 自动 tiling → codegen 代码生成 → compiler 对外接口逐层展开，单元之间存在明确的源码依赖；专家层（u10-u12）再回到 SuperKernel 的 AOT 运行时与融合决策、v35 平台扩展，以及测试/编码规范/精度一致性等二次开发主题。Autofuse 数据流是手册主线，SuperKernel 作为相对独立的并行组件穿插讲解，避免一开始就陷入编译器细节。共 12 单元 36 讲，依据「每讲一个独立主题、引用 1-6 个真实源码文件、配一个代码实践任务」拆分。",
+  "rationale": "本次增量基于 00627d97..2b9c5c2a 的 153 个文件、约 10k 行插入分析：变更集中在 Autofuse 的 ATT（Reduce R 与尾轴 tiling 平衡、arg_list_reorder 轴重排、NDDMA 精确性能模型）、Codegen（cv tiling wrapper 重写与 dtype 感知融合、Inductor PGO 多阶段稳定化、elewise api_call 调整）、compiler Python 侧（新增 ascir_api.py 全局图元数据管理）以及 v35 平台（IndirectLoad SIMD/SIMT 地址计算优化、chebyshev/hermite/polygamma 等 v2 特殊函数算子注册）。因此 u1-u5、u9-l2、u10、u12-l2~l4 等引用文件未变，全部 keep；u6-l4、u7 全部、u8-l2/l3、u9-l1、u11-l1/l2、u12-l1 因源码局部演进标 update；u8-l1 的 codegen.h/cpp 本身未改动，保持 keep。v35 新增的三块独立机制（NDDMA 性能建模、IndirectLoad 寻址优化、v2 特殊函数注册链路）各成一篇新讲义挂入 u11，保持「每讲一个独立主题」的拆分原则，整体学习主线不变。",
   "units": [
     {
       "id": "u1",
-      "title": "项目概览与上手",
-      "level": "beginner",
-      "order": 1,
       "lectures": [
         {
-          "id": "u1-l1",
-          "title": "graph-autofusion 项目整体概览与定位",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [],
           "filename": "u1-l1-project-overview.md",
-          "topic": "介绍 graph-autofusion 是面向昇腾芯片的融合加速组件集合，讲清 SuperKernel 与 Autofuse 两个组件分别解决什么问题、各自价值。",
+          "id": "u1-l1",
           "learning_goals": [
             "理解 graph-autofusion 的整体定位与开源节奏",
             "区分 SuperKernel（降低调度开销）与 Autofuse（缓解 Memory Bound）的不同目标",
             "了解组件的解耦关系与底层依赖（AscendC + runtime）"
           ],
-          "source_files": [
-            "README.md",
-            "AGENTS.md",
-            "autofuse/README.md"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "组件定位与价值",
             "SuperKernel 与 Autofuse 的关系",
             "融合加速技术总览"
           ],
+          "order": 1,
           "practice_task": "阅读 README 与 AGENTS.md，用自己的话写出 SuperKernel 和 Autofuse 各解决的一个性能问题，并指出二者互不依赖的证据。",
-          "depends_on": [],
-          "action": "new"
+          "source_files": [
+            "README.md",
+            "AGENTS.md",
+            "autofuse/README.md"
+          ],
+          "title": "graph-autofusion 项目整体概览与定位",
+          "topic": "介绍 graph-autofusion 是面向昇腾芯片的融合加速组件集合，讲清 SuperKernel 与 Autofuse 两个组件分别解决什么问题、各自价值。"
         },
         {
-          "id": "u1-l2",
-          "title": "仓库目录结构与组件关系",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
           "filename": "u1-l2-repo-structure.md",
-          "topic": "讲解顶层目录组织：autofuse/、super_kernel/、cmake/、docs/、scripts/ 各自职责，以及顶层 CMakeLists 如何把两个组件串起来。",
+          "id": "u1-l2",
           "learning_goals": [
             "掌握顶层目录布局与各目录用途",
             "理解顶层 CMakeLists 如何 add_subdirectory 两个组件",
             "建立「按目录找代码」的导航能力"
           ],
-          "source_files": [
-            "README.md",
-            "AGENTS.md",
-            "CMakeLists.txt"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "顶层目录划分",
             "CMake 子目录组织",
             "docs/scripts/cmake 辅助目录"
           ],
+          "order": 2,
           "practice_task": "在仓库根目录下画出目录树，标注 autofuse 与 super_kernel 各自的子模块，并指出顶层 CMakeLists 中控制 Autofuse 是否编译的开关。",
-          "depends_on": [
-            "u1-l1"
+          "source_files": [
+            "README.md",
+            "AGENTS.md",
+            "CMakeLists.txt"
           ],
-          "action": "new"
+          "title": "仓库目录结构与组件关系",
+          "topic": "讲解顶层目录组织：autofuse/、super_kernel/、cmake/、docs/、scripts/ 各自职责，以及顶层 CMakeLists 如何把两个组件串起来。"
         },
         {
-          "id": "u1-l3",
-          "title": "一键构建系统 build.sh 与 CMake 工程",
-          "order": 3,
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
           "filename": "u1-l3-build-system.md",
-          "topic": "讲解 build.sh 的选项体系（--pkg/-u/-s/--module/--impl/-j/--no-autofuse）与智能模块选择逻辑，以及 CMake 工程组织。",
+          "id": "u1-l3",
           "learning_goals": [
             "掌握 build.sh 的核心选项与默认行为",
             "理解 -j 并行度限制（Autofuse 编译易 OOM）的原因",
             "理解按变更文件智能跳过模块构建的逻辑"
           ],
-          "source_files": [
-            "build.sh",
-            "CMakeLists.txt",
-            "docs/zh/build.md"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "build.sh 选项解析",
             "模块与实现选择",
             "智能跳过构建",
             "CMake 并行度约束"
           ],
+          "order": 3,
           "practice_task": "运行 sh build.sh --help 阅读所有选项，写出三条命令分别表示：只打包、只跑 superkernel 的 python UT、跳过 autofuse 打包，并说明 -j 8 的必要性。",
-          "depends_on": [
-            "u1-l2"
+          "source_files": [
+            "build.sh",
+            "CMakeLists.txt",
+            "docs/zh/build.md"
           ],
-          "action": "new"
+          "title": "一键构建系统 build.sh 与 CMake 工程",
+          "topic": "讲解 build.sh 的选项体系（--pkg/-u/-s/--module/--impl/-j/--no-autofuse）与智能模块选择逻辑，以及 CMake 工程组织。"
         },
         {
-          "id": "u1-l4",
-          "title": "环境搭建与快速上板运行",
-          "order": 4,
+          "action": "keep",
+          "depends_on": [
+            "u1-l3"
+          ],
           "filename": "u1-l4-quick-start-env.md",
-          "topic": "讲解如何准备 CANN/torch_npu 环境、设置环境变量，以及如何跑通 Autofuse 的 PyTorch 用例。",
+          "id": "u1-l4",
           "learning_goals": [
             "掌握 CANN 与 torch_npu 的安装与环境变量配置",
             "学会用 torch.compile + ascendc 后端使能 Autofuse",
             "理解 driver/toolkit setenv 的作用"
           ],
-          "source_files": [
-            "docs/zh/quick_install.md",
-            "docs/zh/build.md",
-            "autofuse/README.md"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "CANN 环境准备",
             "torch_npu 安装",
             "环境变量设置",
             "运行示例用例"
           ],
+          "order": 4,
           "practice_task": "参照 quick_install 与 autofuse README，编写一段最短的 torch.compile(options={'npu_backend':'ascendc'}) 代码并说明 ASCEND_DEVICE_ID 等关键环境变量。",
-          "depends_on": [
-            "u1-l3"
+          "source_files": [
+            "docs/zh/quick_install.md",
+            "docs/zh/build.md",
+            "autofuse/README.md"
           ],
-          "action": "new"
+          "title": "环境搭建与快速上板运行",
+          "topic": "讲解如何准备 CANN/torch_npu 环境、设置环境变量，以及如何跑通 Autofuse 的 PyTorch 用例。"
         }
-      ]
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "项目概览与上手"
     },
     {
       "id": "u2",
-      "title": "SuperKernel 组件入门",
-      "level": "beginner",
-      "order": 2,
       "lectures": [
         {
-          "id": "u2-l1",
-          "title": "SuperKernel 原理：调度开销与超核融合",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
           "filename": "u2-l1-superkernel-principle.md",
-          "topic": "讲解 SuperKernel 如何把多个子算子融合成一个「超核」以减少 N-1 调度开销，以及 ICache 预加载、Early-Start 等思想。",
+          "id": "u2-l1",
           "learning_goals": [
             "理解调度开销为何成为瓶颈",
             "掌握超核融合的基本思想",
             "了解 ICache 预加载/Early-Start/子核切分等优化"
           ],
-          "source_files": [
-            "super_kernel/README.md",
-            "docs/zh/super_kernel/developer_guide.md"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "调度开销问题",
             "超核融合思想",
             "深度优化手段"
           ],
+          "order": 1,
           "practice_task": "阅读 SuperKernel README，列出至少三种 SuperKernel 应用的深度优化技术，并各用一句话说明其收益来源。",
-          "depends_on": [
-            "u1-l1"
+          "source_files": [
+            "super_kernel/README.md",
+            "docs/zh/super_kernel/developer_guide.md"
           ],
-          "action": "new"
+          "title": "SuperKernel 原理：调度开销与超核融合",
+          "topic": "讲解 SuperKernel 如何把多个子算子融合成一个「超核」以减少 N-1 调度开销，以及 ICache 预加载、Early-Start 等思想。"
         },
         {
-          "id": "u2-l2",
-          "title": "SuperKernel 目录结构与构建产物",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
           "filename": "u2-l2-superkernel-layout.md",
-          "topic": "讲解 super_kernel 的目录结构：src/jit（Python 代码生成）、src/aot（C++ 运行时）、include 公共头、kernel 源与 CMake 构建产物。",
+          "id": "u2-l2",
           "learning_goals": [
             "掌握 super_kernel 的源码分层（jit/aot/include/kernel）",
             "理解 ascendsk 共享库与 superkernel_whl 两个构建目标",
             "区分编译期 JIT 与运行期 AOT 的边界"
           ],
-          "source_files": [
-            "build.sh",
-            "super_kernel/include/super_kernel/super_kernel.h",
-            "super_kernel/src/jit/superkernel/super_kernel_constants.py"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "jit 与 aot 分层",
             "include 公共 C 接口",
             "CMake 目标与 wheel 产物"
           ],
+          "order": 2,
           "practice_task": "在 super_kernel 目录下定位 JIT Python 包与 AOT C++ 源各自所在路径，并指出二者通过哪个公共头/接口对接。",
-          "depends_on": [
-            "u2-l1"
+          "source_files": [
+            "build.sh",
+            "super_kernel/include/super_kernel/super_kernel.h",
+            "super_kernel/src/jit/superkernel/super_kernel_constants.py"
           ],
-          "action": "new"
+          "title": "SuperKernel 目录结构与构建产物",
+          "topic": "讲解 super_kernel 的目录结构：src/jit（Python 代码生成）、src/aot（C++ 运行时）、include 公共头、kernel 源与 CMake 构建产物。"
         },
         {
-          "id": "u2-l3",
-          "title": "JIT 代码生成入口与首个示例",
-          "order": 3,
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
           "filename": "u2-l3-jit-entry-and-example.md",
-          "topic": "讲解 super_kernel.py 的 compile() 入口、op_infos/sub_op_infos 的算子元数据，并跑通 scope 基础示例。",
+          "id": "u2-l3",
           "learning_goals": [
             "理解 compile() 如何生成融合 SuperKernel 的 C++ 代码",
             "掌握 superkernel Python 包中各模块职责",
             "学会运行 superkernel_scope 示例"
           ],
-          "source_files": [
-            "super_kernel/src/jit/superkernel/super_kernel.py",
-            "super_kernel/src/jit/superkernel/super_kernel_op_infos.py",
-            "super_kernel/examples/super_kernel_base/superkernel_scope.py"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "compile() 代码生成入口",
             "op_infos/sub_op_infos 元数据",
             "scope 基础示例"
           ],
+          "order": 3,
           "practice_task": "阅读 superkernel_scope.py 示例，标注它在何处调用 compile()，并说明 op_infos 中至少两类算子元数据字段的作用。",
-          "depends_on": [
-            "u2-l2"
+          "source_files": [
+            "super_kernel/src/jit/superkernel/super_kernel.py",
+            "super_kernel/src/jit/superkernel/super_kernel_op_infos.py",
+            "super_kernel/examples/super_kernel_base/superkernel_scope.py"
           ],
-          "action": "new"
+          "title": "JIT 代码生成入口与首个示例",
+          "topic": "讲解 super_kernel.py 的 compile() 入口、op_infos/sub_op_infos 的算子元数据，并跑通 scope 基础示例。"
         }
-      ]
+      ],
+      "level": "beginner",
+      "order": 2,
+      "title": "SuperKernel 组件入门"
     },
     {
       "id": "u3",
-      "title": "Autofuse 入门与端到端体验",
-      "level": "beginner",
-      "order": 3,
       "lectures": [
         {
-          "id": "u3-l1",
-          "title": "Autofuse 原理：自动融合缓解 Memory Bound",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
           "filename": "u3-l1-autofuse-principle.md",
-          "topic": "讲解 Autofuse 如何自动识别相邻 Vector 算子并融合为一个，消除中间搬运，缓解 Memory Bound。",
+          "id": "u3-l1",
           "learning_goals": [
             "理解 Vector 计算间的 Memory Bound 问题",
             "掌握自动融合范围识别与代码生成思路",
             "了解动态 shape 与混合精度支持"
           ],
-          "source_files": [
-            "autofuse/README.md"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "Memory Bound 问题",
             "自动融合范围识别",
             "动态 shape/混合精度"
           ],
+          "order": 1,
           "practice_task": "用一段文字说明：在没有 Autofuse 时三个相邻 elementwise 算子会产生多少次全局内存搬运，融合后能减少到几次，并指出收益来源。",
-          "depends_on": [
-            "u1-l1"
+          "source_files": [
+            "autofuse/README.md"
           ],
-          "action": "new"
+          "title": "Autofuse 原理：自动融合缓解 Memory Bound",
+          "topic": "讲解 Autofuse 如何自动识别相邻 Vector 算子并融合为一个，消除中间搬运，缓解 Memory Bound。"
         },
         {
-          "id": "u3-l2",
-          "title": "Autofuse 目录结构与六大模块总览",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
           "filename": "u3-l2-autofuse-overview.md",
-          "topic": "讲解 autofuse 子目录（compiler/optimize/codegen/att/ascir/graph_metadef/inc/ascendc/v35）的职责与端到端数据流。",
+          "id": "u3-l2",
           "learning_goals": [
             "掌握 Autofuse 各模块职责",
             "理解图 IR → 注册 → 优化调度 → tiling → 代码生成的数据流",
             "建立后续源码精读的地图"
           ],
-          "source_files": [
-            "autofuse/CMakeLists.txt",
-            "autofuse/README.md"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "模块职责划分",
             "端到端数据流",
             "模块依赖关系"
           ],
+          "order": 2,
           "practice_task": "画出 Autofuse 的端到端数据流图（输入子图 → 各模块 → 输出 kernel），标注 graph_metadef/ascir/optimize/att/codegen/compiler 的先后顺序。",
-          "depends_on": [
-            "u3-l1"
+          "source_files": [
+            "autofuse/CMakeLists.txt",
+            "autofuse/README.md"
           ],
-          "action": "new"
+          "title": "Autofuse 目录结构与六大模块总览",
+          "topic": "讲解 autofuse 子目录（compiler/optimize/codegen/att/ascir/graph_metadef/inc/ascendc/v35）的职责与端到端数据流。"
         },
         {
-          "id": "u3-l3",
-          "title": "框架使能与 DFX 调测",
-          "order": 3,
+          "action": "keep",
+          "depends_on": [
+            "u3-l2"
+          ],
           "filename": "u3-l3-enable-and-dfx.md",
-          "topic": "讲解在 PyTorch/TF 中使能 Autofuse 的方式、autofused_ 编译产物，以及 AUTOFUSE_DFX_FLAGS 等调测环境变量。",
+          "id": "u3-l3",
           "learning_goals": [
             "掌握 torch.compile ascendc 后端使能方式",
             "理解 autofused_ 产物目录与 fallback 原因",
             "学会用 TORCH_COMPILE_DEBUG/AUTOFUSE_DFX_FLAGS 调测"
           ],
-          "source_files": [
-            "autofuse/examples/pytorch/af_pointwise/af_add_ge.py",
-            "autofuse/README.md"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "框架使能方式",
             "autofused_ 产物与 fallback",
             "DFX/Profiling 环境变量"
           ],
+          "order": 3,
           "practice_task": "运行 af_add_ge.py 示例并开启 TORCH_COMPILE_DEBUG，在 torch_compile_debug 目录中定位 autofused_ 产物，写出一条导致 fallback 的可能原因。",
-          "depends_on": [
-            "u3-l2"
+          "source_files": [
+            "autofuse/examples/pytorch/af_pointwise/af_add_ge.py",
+            "autofuse/README.md"
           ],
-          "action": "new"
+          "title": "框架使能与 DFX 调测",
+          "topic": "讲解在 PyTorch/TF 中使能 Autofuse 的方式、autofused_ 编译产物，以及 AUTOFUSE_DFX_FLAGS 等调测环境变量。"
         }
-      ]
+      ],
+      "level": "beginner",
+      "order": 3,
+      "title": "Autofuse 入门与端到端体验"
     },
     {
       "id": "u4",
-      "title": "graph_metadef 图元数据",
-      "level": "intermediate",
-      "order": 4,
       "lectures": [
         {
-          "id": "u4-l1",
-          "title": "ComputeGraph/Node/Operator/OpDesc 核心 IR",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u3-l2"
+          ],
           "filename": "u4-l1-core-graph-ir.md",
-          "topic": "讲解 graph_metadef 的核心图 IR：ComputeGraph、Node、Operator、OpDesc 的结构与关系。",
+          "id": "u4-l1",
           "learning_goals": [
             "理解 ComputeGraphImpl 作为图容器的拓扑管理",
             "掌握 Node/Anchor 如何表达数据与控制边",
             "理解 Operator 与 OpDesc 的职责分工"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ComputeGraph 拓扑与子图",
+            "Node 与 Anchor",
+            "Operator/OpDesc 描述符"
+          ],
+          "order": 1,
+          "practice_task": "阅读 compute_graph.cc 与 node.cc，列出 ComputeGraph 提供的拓扑操作（AddNode/TopologicalSorting 等），并说明 Node 如何通过 Anchor 连接。",
           "source_files": [
             "autofuse/graph_metadef/graph/normal_graph/compute_graph.cc",
             "autofuse/graph_metadef/graph/normal_graph/node.cc",
             "autofuse/graph_metadef/graph/normal_graph/operator.cc",
             "autofuse/graph_metadef/graph/normal_graph/op_desc.cc"
           ],
-          "minimal_modules": [
-            "ComputeGraph 拓扑与子图",
-            "Node 与 Anchor",
-            "Operator/OpDesc 描述符"
-          ],
-          "practice_task": "阅读 compute_graph.cc 与 node.cc，列出 ComputeGraph 提供的拓扑操作（AddNode/TopologicalSorting 等），并说明 Node 如何通过 Anchor 连接。",
-          "depends_on": [
-            "u3-l2"
-          ],
-          "action": "new"
+          "title": "ComputeGraph/Node/Operator/OpDesc 核心 IR",
+          "topic": "讲解 graph_metadef 的核心图 IR：ComputeGraph、Node、Operator、OpDesc 的结构与关系。"
         },
         {
-          "id": "u4-l2",
-          "title": "Tensor/属性/序列化与 ASCIR 桥接",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u4-l1"
+          ],
           "filename": "u4-l2-tensor-attr-ascir.md",
-          "topic": "讲解 GeTensor/GeTensorDesc 的张量描述、属性存储与算子工厂，以及 ASCIR 与 graph_metadef 的衔接点。",
+          "id": "u4-l2",
           "learning_goals": [
             "掌握张量描述（shape/dtype/format）的表示",
             "理解属性存储与算子工厂机制",
             "了解 ASCIR 类型与 AscGraph 的衔接"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "GeTensor/GeTensorDesc",
+            "属性存储与算子工厂",
+            "ASCIR 与 AscGraph 桥接"
+          ],
+          "order": 2,
+          "practice_task": "在 operator_factory.cc 中定位算子注册方式，并在 ascir.h 中找出 ASCIR 与 graph_metadef 图衔接的关键类型，写出二者如何对应。",
           "source_files": [
             "autofuse/graph_metadef/graph/normal_graph/tensor.cc",
             "autofuse/graph_metadef/graph/normal_graph/ge_tensor.cc",
             "autofuse/graph_metadef/graph/normal_graph/operator_factory.cc",
             "autofuse/ascir/meta/ascir.h"
           ],
-          "minimal_modules": [
-            "GeTensor/GeTensorDesc",
-            "属性存储与算子工厂",
-            "ASCIR 与 AscGraph 桥接"
-          ],
-          "practice_task": "在 operator_factory.cc 中定位算子注册方式，并在 ascir.h 中找出 ASCIR 与 graph_metadef 图衔接的关键类型，写出二者如何对应。",
-          "depends_on": [
-            "u4-l1"
-          ],
-          "action": "new"
+          "title": "Tensor/属性/序列化与 ASCIR 桥接",
+          "topic": "讲解 GeTensor/GeTensorDesc 的张量描述、属性存储与算子工厂，以及 ASCIR 与 graph_metadef 的衔接点。"
         }
-      ]
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "graph_metadef 图元数据"
     },
     {
       "id": "u5",
-      "title": "ASCIR 算子注册机制",
-      "level": "intermediate",
-      "order": 5,
       "lectures": [
         {
-          "id": "u5-l1",
-          "title": "ASCIR 算子注册框架",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u4-l2"
+          ],
           "filename": "u5-l1-ascir-registration-framework.md",
-          "topic": "讲解 ASCIR 算子注册框架：注册宏、builtin ops、generator 如何把算子登记进融合体系。",
+          "id": "u5-l1",
           "learning_goals": [
             "理解 ASCIR 算子注册的整体机制",
             "掌握 REGISTERED_OPS 与 builtin ops 的关系",
             "了解 generator 在注册中的作用"
           ],
-          "source_files": [
-            "autofuse/ascir/meta/ascir.h",
-            "autofuse/ascir/generator/ascir_builtin_ops_v1.cpp"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "注册宏与算子列表",
             "builtin ops 注册",
             "generator 代码生成"
           ],
+          "order": 1,
           "practice_task": "在 ascir_builtin_ops_v1.cpp 中列出若干已注册算子，并说明一个算子从注册到被 codegen 可见需要经过哪些环节。",
-          "depends_on": [
-            "u4-l2"
+          "source_files": [
+            "autofuse/ascir/meta/ascir.h",
+            "autofuse/ascir/generator/ascir_builtin_ops_v1.cpp"
           ],
-          "action": "new"
+          "title": "ASCIR 算子注册框架",
+          "topic": "讲解 ASCIR 算子注册框架：注册宏、builtin ops、generator 如何把算子登记进融合体系。"
         },
         {
-          "id": "u5-l2",
-          "title": "reg_func 注册函数详解（reduce/compare）",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u5-l1"
+          ],
           "filename": "u5-l2-regfunc-deep-dive.md",
-          "topic": "以 reduce 与 compare 为例，讲解 reg_func 目录下一个算子注册函数的结构、形状推导与 tiling 占位。",
+          "id": "u5-l2",
           "learning_goals": [
             "掌握 reg_func 注册函数的代码结构",
             "理解算子形状推导与接口约束",
             "了解 tiling/属性占位的写法"
           ],
-          "source_files": [
-            "autofuse/ascir/reg_func/reduce.cpp",
-            "autofuse/ascir/reg_func/compare.cpp"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "reg_func 函数结构",
             "形状推导",
             "tiling/属性占位"
           ],
+          "order": 2,
           "practice_task": "对比 reduce.cpp 与 compare.cpp，写出一个新算子（如 tanh）注册函数应包含的最小要素清单。",
+          "source_files": [
+            "autofuse/ascir/reg_func/reduce.cpp",
+            "autofuse/ascir/reg_func/compare.cpp"
+          ],
+          "title": "reg_func 注册函数详解（reduce/compare）",
+          "topic": "以 reduce 与 compare 为例，讲解 reg_func 目录下一个算子注册函数的结构、形状推导与 tiling 占位。"
+        },
+        {
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u5-l3",
-          "title": "AscendC API 头文件与算子能力",
-          "order": 3,
           "filename": "u5-l3-ascendc-api.md",
-          "topic": "讲解 autofuse/ascendc/api 下各类算子头文件（vector/datacopy/reduce/broadcast 等），它们如何为 codegen 提供算子能力。",
+          "id": "u5-l3",
           "learning_goals": [
             "了解 ascendc/api 的算子分类",
             "理解 reduce/datacopy/broadcast 等关键 API 形态",
             "明白 ascendc/api 与 codegen 的衔接"
           ],
-          "source_files": [
-            "autofuse/ascendc/api/reduce.h",
-            "autofuse/ascendc/api/datacopy.h",
-            "autofuse/ascendc/api/broadcast.h"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "ascendc/api 算子分类",
             "关键 API 形态",
             "与 codegen 的衔接"
           ],
+          "order": 3,
           "practice_task": "在 ascendc/api 下挑选一个 vector 算子头文件，说明它声明的接口签名，并指出 codegen 会如何调用它。",
-          "depends_on": [
-            "u5-l1"
+          "source_files": [
+            "autofuse/ascendc/api/reduce.h",
+            "autofuse/ascendc/api/datacopy.h",
+            "autofuse/ascendc/api/broadcast.h"
           ],
-          "action": "new"
+          "title": "AscendC API 头文件与算子能力",
+          "topic": "讲解 autofuse/ascendc/api 下各类算子头文件（vector/datacopy/reduce/broadcast 等），它们如何为 codegen 提供算子能力。"
         }
-      ]
+      ],
+      "level": "intermediate",
+      "order": 5,
+      "title": "ASCIR 算子注册机制"
     },
     {
       "id": "u6",
-      "title": "Optimize 优化与调度主链路",
-      "level": "intermediate",
-      "order": 6,
       "lectures": [
         {
-          "id": "u6-l1",
-          "title": "Optimizer 总编排",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u4-l1"
+          ],
           "filename": "u6-l1-optimizer-orchestration.md",
-          "topic": "讲解 optimize 模块的 Optimizer 类如何编排 PreProcess/GraphPass/ScheduleTaskGenerator/AutoScheduler/BufQueAlloc 流水线。",
+          "id": "u6-l1",
           "learning_goals": [
             "理解 Optimizer::Optimize 主入口与两个重载",
             "掌握优化调度的完整阶段顺序",
             "理解 hint graph 与 fused graph 的差异"
           ],
-          "source_files": [
-            "autofuse/optimize/optimize.h",
-            "autofuse/optimize/optimize.cpp"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "Optimize 入口与重载",
             "阶段流水线",
             "hint/fused graph"
           ],
+          "order": 1,
           "practice_task": "阅读 optimize.h/cpp，按调用顺序列出 Optimizer 内部各阶段方法，并说明每个阶段的输入输出。",
-          "depends_on": [
-            "u4-l1"
+          "source_files": [
+            "autofuse/optimize/optimize.h",
+            "autofuse/optimize/optimize.cpp"
           ],
-          "action": "new"
+          "title": "Optimizer 总编排",
+          "topic": "讲解 optimize 模块的 Optimizer 类如何编排 PreProcess/GraphPass/ScheduleTaskGenerator/AutoScheduler/BufQueAlloc 流水线。"
         },
         {
-          "id": "u6-l2",
-          "title": "图优化 Pass 体系",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u6-l1"
+          ],
           "filename": "u6-l2-graph-pass-system.md",
-          "topic": "讲解 graph_pass 目录下的 pass runner 与各类图改写 pass（CSE、broadcast、softmax 融合等）。",
+          "id": "u6-l2",
           "learning_goals": [
             "理解 pass runner 的调度机制",
             "掌握若干典型 pass 的改写目的",
             "了解 pass 顺序对结果确定性的影响"
           ],
-          "source_files": [
-            "autofuse/optimize/graph_pass/pass_runner_handler.h"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "pass runner 调度",
             "典型改写 pass",
             "pass 顺序与确定性"
           ],
+          "order": 2,
           "practice_task": "在 graph_pass 目录中找到至少三个具体 pass，分别写出它们的改写目的，并解释为何 pass 顺序需要固定。",
+          "source_files": [
+            "autofuse/optimize/graph_pass/pass_runner_handler.h"
+          ],
+          "title": "图优化 Pass 体系",
+          "topic": "讲解 graph_pass 目录下的 pass runner 与各类图改写 pass（CSE、broadcast、softmax 融合等）。"
+        },
+        {
+          "action": "keep",
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u6-l3",
-          "title": "AutoSchedule 自动调度与 tiling 生成",
-          "order": 3,
           "filename": "u6-l3-autoschedule.md",
-          "topic": "讲解 AutoSchedule 如何进行轴分组、tiling 生成与对齐处理，为任务切分做准备。",
+          "id": "u6-l3",
           "learning_goals": [
             "理解 AutoSchedule 的调度模型",
             "掌握 tiling group 与对齐处理",
             "了解调度与下游 task generator 的衔接"
           ],
-          "source_files": [
-            "autofuse/optimize/autoschedule/autoschedule.h"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "AutoSchedule 调度模型",
             "tiling group",
             "对齐处理"
           ],
+          "order": 3,
           "practice_task": "阅读 autoschedule.h，说明 AutoSchedule 输出的调度结果包含哪些信息，并指出它如何影响后续的 task 切分。",
-          "depends_on": [
-            "u6-l1"
+          "source_files": [
+            "autofuse/optimize/autoschedule/autoschedule.h"
           ],
-          "action": "new"
+          "title": "AutoSchedule 自动调度与 tiling 生成",
+          "topic": "讲解 AutoSchedule 如何进行轴分组、tiling 生成与对齐处理，为任务切分做准备。"
         },
         {
-          "id": "u6-l4",
-          "title": "调度任务生成与内存分配",
-          "order": 4,
+          "action": "update",
+          "depends_on": [
+            "u6-l3"
+          ],
           "filename": "u6-l4-taskgen-and-bufalloc.md",
-          "topic": "讲解 ScheduleTaskGenerator 如何针对 concat/split/reduce/transpose 等场景生成任务，以及 buffer_allocate 的内存分配。",
+          "id": "u6-l4",
           "learning_goals": [
             "掌握 ScheduleTaskGenerator 的任务生成策略",
             "理解不同算子场景（reduce/concat 等）的处理差异",
+            "了解 IndirectLoad 场景的任务生成与 SIMD/SIMT 策略选择",
             "了解 buffer/queue 内存分配机制"
           ],
-          "source_files": [
-            "autofuse/optimize/task_generator/schedule_task_generator.h"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "任务生成策略",
             "算子场景分支",
+            "IndirectLoad 场景生成器",
             "buffer/queue 分配"
           ],
-          "practice_task": "在 task_generator 目录中找出 reduce 与 transpose 两类场景的处理代码，对比它们的任务生成差异，并说明 buffer_allocate 的作用。",
-          "depends_on": [
-            "u6-l3"
+          "order": 4,
+          "practice_task": "在 task_generator 目录中找出 reduce 与 transpose 两类场景的处理代码，对比它们的任务生成差异；再阅读 indirect_load_schedule_case_generator.cpp，说明 IndirectLoad 场景如何生成调度用例，并说明 buffer_allocate 的作用。",
+          "source_files": [
+            "autofuse/optimize/task_generator/schedule_task_generator.h",
+            "autofuse/optimize/task_generator/indirect_load_schedule_case_generator.cpp"
           ],
-          "action": "new"
+          "title": "调度任务生成与内存分配",
+          "topic": "讲解 ScheduleTaskGenerator 如何针对 concat/split/reduce/transpose 等场景生成任务，IndirectLoad 专用场景生成器，以及 buffer_allocate 的内存分配。本次更新补充 IndirectLoad 调度用例生成器的最新逻辑。"
         }
-      ]
+      ],
+      "level": "intermediate",
+      "order": 6,
+      "title": "Optimize 优化与调度主链路"
     },
     {
       "id": "u7",
-      "title": "ATT 自动 Tiling",
-      "level": "intermediate",
-      "order": 7,
       "lectures": [
         {
-          "id": "u7-l1",
-          "title": "ATT 性能建模与 gen_model_info",
-          "order": 1,
-          "filename": "u7-l1-att-perf-modeling.md",
-          "topic": "讲解 ATT 模块如何用性能 cost model（api_perf_register、gen_model_info）建模算子耗时以指导 tiling。",
-          "learning_goals": [
-            "理解 ATT 的性能建模思想",
-            "掌握 gen_model_info 与 api_perf_register 的职责",
-            "了解 parser 如何把图转成建模输入"
-          ],
-          "source_files": [
-            "autofuse/att/gen_model_info/gen_model_info.h"
-          ],
-          "minimal_modules": [
-            "性能建模思想",
-            "gen_model_info 接口",
-            "api_perf_register"
-          ],
-          "practice_task": "阅读 gen_model_info.h，说明 ATT 输入是什么、输出 model_info 包含哪些信息，并指出 cost model 数据来自哪个子模块。",
+          "action": "update",
           "depends_on": [
             "u6-l3"
           ],
-          "action": "new"
+          "filename": "u7-l1-att-perf-modeling.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "理解 ATT 的性能建模思想",
+            "掌握 gen_model_info 与 api_perf_register 的职责",
+            "了解 parser 如何把图转成建模输入",
+            "了解 tuning_space 中轴重排等新增调优维度"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "性能建模思想",
+            "gen_model_info 接口",
+            "api_perf_register",
+            "tuning_space 调优空间"
+          ],
+          "order": 1,
+          "practice_task": "阅读 gen_model_info.h/cpp，说明 ATT 输入是什么、输出 model_info 包含哪些信息，并指出 cost model 数据来自哪个子模块；再对照 tuning_space.h 说明本次新增的调优维度。",
+          "source_files": [
+            "autofuse/att/gen_model_info/gen_model_info.h",
+            "autofuse/att/gen_model_info/gen_model_info.cpp",
+            "autofuse/att/gen_model_info/parser/tuning_space.h"
+          ],
+          "title": "ATT 性能建模与 gen_model_info",
+          "topic": "讲解 ATT 模块如何用性能 cost model（api_perf_register、gen_model_info）建模算子耗时以指导 tiling。本次更新覆盖 gen_model_info 与 tuning_space 的最新改动（新增 Reduce R 与尾轴平衡相关调优维度）。"
         },
         {
-          "id": "u7-l2",
-          "title": "表达式生成与求解器",
-          "order": 2,
-          "filename": "u7-l2-expr-gen-and-solver.md",
-          "topic": "讲解 expr_gen 如何生成 tiling 表达式、buf 占用与执行时间 pass，以及 solver_pass 如何求解最优 tiling。",
-          "learning_goals": [
-            "掌握 tiling 表达式的生成方式",
-            "理解 buf 占用与执行时间 pass",
-            "了解 solver_pass 的求解目标"
-          ],
-          "source_files": [
-            "autofuse/att/gen_model_info/expr_gen/generate_tiling_expr.h",
-            "autofuse/att/gen_model_info/expr_gen/exe_time_pass.h"
-          ],
-          "minimal_modules": [
-            "tiling 表达式生成",
-            "buf 占用/执行时间 pass",
-            "solver 求解"
-          ],
-          "practice_task": "在 expr_gen 目录中梳理表达式生成的流程，说明 exe_time_pass 如何估算耗时，并指出 solver_pass 需要最小化的目标。",
+          "action": "update",
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "filename": "u7-l2-expr-gen-and-solver.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "掌握 tiling 表达式的生成方式",
+            "理解 buf 占用与执行时间 pass",
+            "了解 arg_list_reorder 轴重排如何平衡 Reduce R 轴与尾轴 tiling",
+            "了解 solver_pass 的求解目标"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "tiling 表达式生成",
+            "buf 占用/执行时间 pass",
+            "arg_list_reorder 轴重排",
+            "solver 求解"
+          ],
+          "order": 2,
+          "practice_task": "在 expr_gen 目录中梳理表达式生成的流程，说明 exe_time_pass 如何估算耗时；再阅读 arg_list_reorder.cpp，解释轴重排如何改变 Reduce R 轴与尾轴的 tiling 组合，并指出 solver_pass 需要最小化的目标。",
+          "source_files": [
+            "autofuse/att/gen_model_info/expr_gen/generate_tiling_expr.h",
+            "autofuse/att/gen_model_info/expr_gen/exe_time_pass.h",
+            "autofuse/att/gen_model_info/expr_gen/arg_list_reorder.cpp"
+          ],
+          "title": "表达式生成、轴重排与求解器",
+          "topic": "讲解 expr_gen 如何生成 tiling 表达式、buf 占用与执行时间 pass，arg_list_reorder 轴重排（本次新增的 Reduce R 与尾轴 tiling 平衡机制），以及 solver_pass 如何求解最优 tiling。"
         },
         {
-          "id": "u7-l3",
-          "title": "Tiling 代码生成",
-          "order": 3,
-          "filename": "u7-l3-tiling-codegen.md",
-          "topic": "讲解 ATT generator（tiling_code_generator、cache、extra_info_gen）如何把求解结果落成 tiling 代码。",
-          "learning_goals": [
-            "掌握 tiling_code_generator 的生成流程",
-            "理解 cache 与 extra_info_gen 的作用",
-            "了解 ATT 输出与 codegen 的衔接"
-          ],
-          "source_files": [
-            "autofuse/att/generator/tiling_code_generator.h"
-          ],
-          "minimal_modules": [
-            "tiling 代码生成流程",
-            "cache 处理",
-            "extra info 生成"
-          ],
-          "practice_task": "阅读 tiling_code_generator.h，说明 ATT 最终生成什么产物，并指出这些产物如何被下游 codegen 消费。",
+          "action": "update",
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "filename": "u7-l3-tiling-codegen.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "掌握 tiling_code_generator 的生成流程",
+            "理解 cache 与 extra_info_gen 的作用",
+            "了解 axes_reorder 求解代码如何落入 tiling 产物",
+            "了解 ATT 输出与 codegen 的衔接"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "tiling 代码生成流程",
+            "cache 处理",
+            "extra info 生成",
+            "axes reorder 求解代码"
+          ],
+          "order": 3,
+          "practice_task": "阅读 tiling_code_generator.h 与 tiling_code_gen_impl.cpp，说明 ATT 最终生成什么产物、axes_reorder_solver_code 如何参与其中，并指出这些产物如何被下游 codegen 消费。",
+          "source_files": [
+            "autofuse/att/generator/tiling_code_generator.h",
+            "autofuse/att/generator/tiling_code_gen_impl.cpp"
+          ],
+          "title": "Tiling 代码生成",
+          "topic": "讲解 ATT generator（tiling_code_generator、cache、extra_info_gen）如何把求解结果落成 tiling 代码。本次更新补充 tiling_code_gen_impl 与 axes_reorder 求解代码的衔接。"
         }
-      ]
+      ],
+      "level": "intermediate",
+      "order": 7,
+      "title": "ATT 自动 Tiling"
     },
     {
       "id": "u8",
-      "title": "Codegen 内核代码生成",
-      "level": "intermediate",
-      "order": 8,
       "lectures": [
         {
-          "id": "u8-l1",
-          "title": "Codegen 主类与生成流程",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u6-l4"
+          ],
           "filename": "u8-l1-codegen-main.md",
-          "topic": "讲解 codegen 模块 Codegen 类的 Generate() 主流程，包括 TilingData/Tiling/Kernel 三大分支与 CodegenResult。",
+          "id": "u8-l1",
           "learning_goals": [
             "理解 Codegen::Generate 主入口",
             "掌握 TilingData/Tiling/Kernel 的生成分支",
             "了解 CodegenResult 的结构"
           ],
-          "source_files": [
-            "autofuse/codegen/codegen.h",
-            "autofuse/codegen/codegen.cpp"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "Generate 主流程",
             "三大生成分支",
             "CodegenResult"
           ],
+          "order": 1,
           "practice_task": "阅读 codegen.h/cpp，按顺序列出 Generate() 内部的生成步骤，并说明每一步输出到 CodegenResult 的哪个字段。",
-          "depends_on": [
-            "u6-l4"
+          "source_files": [
+            "autofuse/codegen/codegen.h",
+            "autofuse/codegen/codegen.cpp"
           ],
-          "action": "new"
+          "title": "Codegen 主类与生成流程",
+          "topic": "讲解 codegen 模块 Codegen 类的 Generate() 主流程，包括 TilingData/Tiling/Kernel 三大分支与 CodegenResult。"
         },
         {
-          "id": "u8-l2",
-          "title": "Kernel 代码生成、打印与 Tiling 数据",
-          "order": 2,
-          "filename": "u8-l2-kernel-and-tiling-data.md",
-          "topic": "讲解 codegen_kernel 的 Code/Type/Variable/Axis 抽象、code_printer 打印机制，以及 tiling 数据生成与 PGO/Inductor 后端分支。",
-          "learning_goals": [
-            "掌握 kernel 代码的抽象与打印机制",
-            "理解 tiling 数据的生成方式",
-            "了解 GenerateForInductor 与 GeneratorPgo 的差异"
-          ],
-          "source_files": [
-            "autofuse/codegen/codegen_kernel.h",
-            "autofuse/common/code_printer.h",
-            "autofuse/codegen/codegen_tiling.h"
-          ],
-          "minimal_modules": [
-            "kernel 抽象与打印",
-            "tiling 数据生成",
-            "PGO/Inductor 后端"
-          ],
-          "practice_task": "在 codegen_kernel.h 中找到代码生成的基础抽象类，并说明 code_printer 如何把抽象结构落成 C++ 源码；再指出 PGO 与普通生成的区别。",
+          "action": "update",
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "filename": "u8-l2-kernel-and-tiling-data.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "掌握 kernel 代码的抽象与打印机制",
+            "理解 tiling 数据的生成方式",
+            "掌握 cv tiling wrapper 的复用编译与 dtype 感知融合机制",
+            "了解 GenerateForInductor 多阶段 PGO 候选稳定化"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "kernel 抽象与打印",
+            "tiling 数据生成",
+            "cv tiling wrapper 复用与 dtype 感知融合",
+            "PGO/Inductor 后端"
+          ],
+          "order": 2,
+          "practice_task": "在 codegen_kernel.h 中找到代码生成的基础抽象类，并说明 code_printer 如何把抽象结构落成 C++ 源码；再对比 codegen_tiling.cpp 中 cv tiling wrapper 复用编译前后的差异，说明 dtype 感知融合的触发条件，并指出多阶段 Inductor PGO 与普通生成的区别。",
+          "source_files": [
+            "autofuse/codegen/codegen_kernel.h",
+            "autofuse/common/code_printer.h",
+            "autofuse/codegen/codegen_tiling.h",
+            "autofuse/codegen/codegen_tiling_inductor_topn.cpp"
+          ],
+          "title": "Kernel 代码生成、打印与 Tiling 数据",
+          "topic": "讲解 codegen_kernel 的 Code/Type/Variable/Axis 抽象、code_printer 打印机制，以及 tiling 数据生成与 PGO/Inductor 后端分支。本次更新覆盖 cv tiling wrapper 复用编译与 dtype 感知 cv 融合、多阶段 Inductor PGO 候选稳定化等重大改动。"
         },
         {
-          "id": "u8-l3",
-          "title": "api_call 算子调用生成",
-          "order": 3,
-          "filename": "u8-l3-api-call-gen.md",
-          "topic": "讲解 api_call 目录如何为各类算子（elewise/datacopy/reduce 等）生成 AscendC 调用，以及 ascendc_api_registry 的注册。",
-          "learning_goals": [
-            "理解 api_call 工厂如何选择算子调用生成器",
-            "掌握 elewise unary/binary 调用生成",
-            "了解 ascendc_api_registry 的注册与查询"
-          ],
-          "source_files": [
-            "autofuse/codegen/api_call/elewise/binary_api_call.h",
-            "autofuse/codegen/api_call/elewise/unary_api_call.h",
-            "autofuse/codegen/ascendc_api_registry.h"
-          ],
-          "minimal_modules": [
-            "api_call 工厂",
-            "elewise 调用生成",
-            "ascendc_api_registry"
-          ],
-          "practice_task": "在 api_call 目录中对比 unary 与 binary 两类调用生成器，说明它们的差异，并指出 registry 如何把算子类型映射到对应生成器。",
+          "action": "update",
           "depends_on": [
             "u8-l2"
           ],
-          "action": "new"
+          "filename": "u8-l3-api-call-gen.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "理解 api_call 工厂如何选择算子调用生成器",
+            "掌握 elewise unary/binary/where/compare 调用生成",
+            "了解 api_call_utils 公共工具的最新职责",
+            "了解 ascendc_api_registry 的注册与查询"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "api_call 工厂",
+            "elewise 调用生成",
+            "api_call_utils 公共工具",
+            "ascendc_api_registry"
+          ],
+          "order": 3,
+          "practice_task": "在 api_call 目录中对比 unary 与 binary 两类调用生成器，说明它们的差异；再阅读 where_api_call.cpp 与 api_call_utils.h 中新增的公共接口，说明公共工具如何被多个 api_call 复用，并指出 registry 如何把算子类型映射到对应生成器。",
+          "source_files": [
+            "autofuse/codegen/api_call/elewise/binary_api_call.h",
+            "autofuse/codegen/api_call/elewise/unary_api_call.h",
+            "autofuse/codegen/api_call/elewise/where_api_call.cpp",
+            "autofuse/codegen/api_call/utils/api_call_utils.h",
+            "autofuse/codegen/ascendc_api_registry.h"
+          ],
+          "title": "api_call 算子调用生成",
+          "topic": "讲解 api_call 目录如何为各类算子（elewise/datacopy/reduce 等）生成 AscendC 调用，以及 ascendc_api_registry 的注册。本次更新覆盖 where/compare/logical_not 等 api_call 实现与 api_call_utils 公共工具的演进。"
         }
-      ]
+      ],
+      "level": "intermediate",
+      "order": 8,
+      "title": "Codegen 内核代码生成"
     },
     {
       "id": "u9",
-      "title": "Compiler 对外接口",
-      "level": "intermediate",
-      "order": 9,
       "lectures": [
         {
-          "id": "u9-l1",
-          "title": "pyautofuse 绑定与编译编排",
-          "order": 1,
-          "filename": "u9-l1-pyautofuse-and-adapter.md",
-          "topic": "讲解 pyautofuse.cpp 的 pybind 绑定（Autofuser/Schedule/CodeGen 类与 registered ops）以及 compile_adapter.py 如何编排 host/device 编译。",
-          "learning_goals": [
-            "理解 pyautofuse 暴露的 Python 类与方法",
-            "掌握 compile_adapter 的 host/device 编译拆分",
-            "了解 ascendc_compile 的衔接作用"
-          ],
-          "source_files": [
-            "autofuse/compiler/py_module/pyautofuse.cpp",
-            "autofuse/compiler/python/compile_adapter.py",
-            "autofuse/compiler/python/ascendc_compile.py"
-          ],
-          "minimal_modules": [
-            "pybind 绑定的三类对象",
-            "host/device 编译编排",
-            "ascendc_compile 衔接"
-          ],
-          "practice_task": "阅读 pyautofuse.cpp 找出对外暴露的三个核心类，并在 compile_adapter.py 中追踪一次 Autofuser 调用如何拆成 host 与 device 编译。",
+          "action": "update",
           "depends_on": [
             "u3-l2",
             "u8-l1"
           ],
-          "action": "new"
+          "filename": "u9-l1-pyautofuse-and-adapter.md",
+          "id": "u9-l1",
+          "learning_goals": [
+            "理解 pyautofuse/pyascir 暴露的 Python 类与方法",
+            "掌握 compile_adapter 的 host/device 编译拆分",
+            "了解新增 ascir_api.py 全局图元数据管理模块的作用",
+            "了解 ascendc_compile 的衔接作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "pybind 绑定的三类对象",
+            "host/device 编译编排",
+            "ascir_api.py 图元数据管理",
+            "ascendc_compile 衔接"
+          ],
+          "order": 1,
+          "practice_task": "阅读 pyautofuse.cpp 找出对外暴露的三个核心类，在 compile_adapter.py 中追踪一次 Autofuser 调用如何拆成 host 与 device 编译；再阅读新增的 ascir_api.py，说明 GraphMetadata 如何维护算子计数与 data/output 索引。",
+          "source_files": [
+            "autofuse/compiler/py_module/pyautofuse.cpp",
+            "autofuse/compiler/py_module/pyascir.cpp",
+            "autofuse/compiler/python/compile_adapter.py",
+            "autofuse/compiler/python/ascendc_compile.py",
+            "autofuse/compiler/python/ascir_api.py"
+          ],
+          "title": "pyautofuse 绑定与编译编排",
+          "topic": "讲解 pyautofuse.cpp 的 pybind 绑定（Autofuser/Schedule/CodeGen 类与 registered ops）、pyascir 绑定扩展、新增的 ascir_api.py 全局图元数据管理，以及 compile_adapter.py 如何编排 host/device 编译。"
         },
         {
-          "id": "u9-l2",
-          "title": "inc/ 对 GE 的 C++ 接口",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u3-l2"
+          ],
           "filename": "u9-l2-inc-ge-interface.md",
-          "topic": "讲解 inc/ 目录下对外 C++ 接口（autofuse attrs、fusion decider、backend spec）如何与 Graph Engine（GE）集成。",
+          "id": "u9-l2",
           "learning_goals": [
             "理解 inc/ 作为 GE 集成接口的定位",
             "掌握 autofuse_attrs 等关键类型",
             "了解 fusion decider 与 backend spec 的作用"
           ],
-          "source_files": [
-            "autofuse/inc/fusion/autofuse_attrs.h"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "inc/ 接口定位",
             "autofuse_attrs 类型",
             "fusion decider/backend spec"
           ],
+          "order": 2,
           "practice_task": "在 inc/fusion 目录中找出 Autofuse 属性定义，说明 GE 如何通过这些属性触发 Autofuse，并指出 backend spec 决定什么。",
-          "depends_on": [
-            "u3-l2"
+          "source_files": [
+            "autofuse/inc/fusion/autofuse_attrs.h"
           ],
-          "action": "new"
+          "title": "inc/ 对 GE 的 C++ 接口",
+          "topic": "讲解 inc/ 目录下对外 C++ 接口（autofuse attrs、fusion decider、backend spec）如何与 Graph Engine（GE）集成。"
         }
-      ]
+      ],
+      "level": "intermediate",
+      "order": 9,
+      "title": "Compiler 对外接口"
     },
     {
       "id": "u10",
-      "title": "SuperKernel 深度实现",
-      "level": "advanced",
-      "order": 10,
       "lectures": [
         {
-          "id": "u10-l1",
-          "title": "AOT 运行时架构",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u2-l3"
+          ],
           "filename": "u10-l1-aot-runtime.md",
-          "topic": "讲解 SuperKernel AOT 运行时的入口 aclskOptimize/aclskScopeBegin/End、图与节点表示及资源生命周期。",
+          "id": "u10-l1",
           "learning_goals": [
             "掌握 aclsk 系列公共 C 接口",
             "理解 SuperKernelGraph/Node 的运行时表示",
             "了解资源注册与生命周期管理"
           ],
-          "source_files": [
-            "super_kernel/include/super_kernel/super_kernel.h",
-            "super_kernel/src/aot/super_kernel.cpp"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "aclsk 公共接口",
             "图与节点表示",
             "资源生命周期"
           ],
+          "order": 1,
           "practice_task": "阅读 super_kernel.h 列出 aclsk 系列接口签名，并在 super_kernel.cpp 中追踪 aclskOptimize 的调用链，说明它如何触发融合。",
-          "depends_on": [
-            "u2-l3"
+          "source_files": [
+            "super_kernel/include/super_kernel/super_kernel.h",
+            "super_kernel/src/aot/super_kernel.cpp"
           ],
-          "action": "new"
+          "title": "AOT 运行时架构",
+          "topic": "讲解 SuperKernel AOT 运行时的入口 aclskOptimize/aclskScopeBegin/End、图与节点表示及资源生命周期。"
         },
         {
-          "id": "u10-l2",
-          "title": "SkOptimizer 与 SkTaskBuilder 融合决策",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u10-l1"
+          ],
           "filename": "u10-l2-optimizer-taskbuilder.md",
-          "topic": "讲解 SkOptimizer 门面如何编排融合、SkTaskBuilder 如何构建优化后的 SuperKernel 任务并持久化结果。",
+          "id": "u10-l2",
           "learning_goals": [
             "理解 SkOptimizer 的编排职责",
             "掌握 SkTaskBuilder 的任务构建过程",
             "了解融合结果的持久化方式"
           ],
-          "source_files": [
-            "super_kernel/src/aot/sk_optimizer.cpp",
-            "super_kernel/src/aot/sk_task_builder.cpp"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "SkOptimizer 门面",
             "SkTaskBuilder 任务构建",
             "结果持久化"
           ],
+          "order": 2,
           "practice_task": "在 sk_optimizer.cpp 中定位融合主流程入口，在 sk_task_builder.cpp 中追踪一个 task 如何被构建，并说明结果如何被保存复用。",
-          "depends_on": [
-            "u10-l1"
+          "source_files": [
+            "super_kernel/src/aot/sk_optimizer.cpp",
+            "super_kernel/src/aot/sk_task_builder.cpp"
           ],
-          "action": "new"
+          "title": "SkOptimizer 与 SkTaskBuilder 融合决策",
+          "topic": "讲解 SkOptimizer 门面如何编排融合、SkTaskBuilder 如何构建优化后的 SuperKernel 任务并持久化结果。"
         },
         {
-          "id": "u10-l3",
-          "title": "Scope 调度、选项与候选融合",
-          "order": 3,
+          "action": "keep",
+          "depends_on": [
+            "u10-l2"
+          ],
           "filename": "u10-l3-scope-options-candidates.md",
-          "topic": "讲解 scope kernel 的启动机制、运行时选项管理（aclskOptions）与候选选择/切分逻辑。",
+          "id": "u10-l3",
           "learning_goals": [
             "理解 scope launch 的执行机制",
             "掌握 aclskOptions 的选项体系",
             "了解候选堆与 scope 切分如何影响融合决策"
           ],
-          "source_files": [
-            "super_kernel/src/aot/sk_task_builder.cpp",
-            "super_kernel/src/jit/superkernel/super_kernel_op_infos.py"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "scope launch 机制",
             "选项管理",
             "候选选择与切分"
           ],
+          "order": 3,
           "practice_task": "结合 op_infos 中的算子元数据与 task_builder 逻辑，说明一个 scope 区域内多个子算子如何被选为候选并切分成超核任务。",
-          "depends_on": [
-            "u10-l2"
+          "source_files": [
+            "super_kernel/src/aot/sk_task_builder.cpp",
+            "super_kernel/src/jit/superkernel/super_kernel_op_infos.py"
           ],
-          "action": "new"
+          "title": "Scope 调度、选项与候选融合",
+          "topic": "讲解 scope kernel 的启动机制、运行时选项管理（aclskOptions）与候选选择/切分逻辑。"
         }
-      ]
+      ],
+      "level": "advanced",
+      "order": 10,
+      "title": "SuperKernel 深度实现"
     },
     {
       "id": "u11",
-      "title": "平台适配与 v35 扩展",
-      "level": "advanced",
-      "order": 11,
       "lectures": [
         {
-          "id": "u11-l1",
-          "title": "v35 平台扩展机制",
-          "order": 1,
+          "action": "update",
+          "depends_on": [
+            "u3-l2"
+          ],
           "filename": "u11-l1-v35-extension.md",
-          "topic": "讲解 autofuse/v35 子目录如何为昇腾 950（v35）平台提供 ascendc/ascir/att/codegen/optimize 的专属扩展。",
+          "id": "u11-l1",
           "learning_goals": [
             "理解 v35 子目录与主仓模块的对应关系",
             "掌握平台扩展的组织方式",
+            "了解 v2 版 ascir/att/codegen 与 v1 的差异",
             "了解平台开关与构建集成"
           ],
+          "level": "advanced",
+          "minimal_modules": [
+            "v35 子目录结构",
+            "与主仓模块对应",
+            "v2 版本扩展",
+            "平台开关与构建"
+          ],
+          "order": 1,
+          "practice_task": "对比 v35 子目录与主仓 autofuse 模块，列出 v35 提供了哪些专属扩展（含本次新增的 att/api_perf_register/nddma_model 等），说明 v2 后缀文件与 v1 的关系，并说明它是如何被构建系统按平台启用的。",
           "source_files": [
             "autofuse/v35/CMakeLists.txt",
             "autofuse/v35/ascendc/api_cube/matmul.h"
           ],
-          "minimal_modules": [
-            "v35 子目录结构",
-            "与主仓模块对应",
-            "平台开关与构建"
-          ],
-          "practice_task": "对比 v35 子目录与主仓 autofuse 模块，列出 v35 提供了哪些专属扩展，并说明它是如何被构建系统按平台启用的。",
-          "depends_on": [
-            "u3-l2"
-          ],
-          "action": "new"
+          "title": "v35 平台扩展机制",
+          "topic": "讲解 autofuse/v35 子目录如何为昇腾 950（v35）平台提供 ascendc/ascir/att/codegen/optimize 的专属扩展。本次更新补充 v2 版本扩展（ascir_builtin_ops_v2、ascir_api_perf_v2 等）与新增的 nddma 性能模型子模块。"
         },
         {
-          "id": "u11-l2",
-          "title": "Cube 类算子（matmul/conv2d）与平台优化",
-          "order": 2,
-          "filename": "u11-l2-cube-ops.md",
-          "topic": "讲解 v35 下 batch_matmul/matmul/conv2d 等 cube 类算子的 API 与 tiling，以及平台专属的 optimize/codegen 适配。",
-          "learning_goals": [
-            "掌握 cube 类算子（matmul/conv2d）的 API 形态",
-            "理解 cube 算子的 tiling 关键点",
-            "了解平台专属 optimize/codegen 的适配方式"
-          ],
-          "source_files": [
-            "autofuse/v35/ascendc/api_cube/batch_matmul.h",
-            "autofuse/v35/ascendc/api_cube/conv2d.h"
-          ],
-          "minimal_modules": [
-            "cube 算子 API",
-            "matmul/conv2d tiling",
-            "平台 optimize/codegen 适配"
-          ],
-          "practice_task": "阅读 batch_matmul.h 与 conv2d.h，说明 cube 算子相较 vector 算子在 API 与 tiling 上的特殊之处，并指出 v35 的 optimize/codegen 如何适配它们。",
+          "action": "update",
           "depends_on": [
             "u11-l1"
           ],
-          "action": "new"
+          "filename": "u11-l2-cube-ops.md",
+          "id": "u11-l2",
+          "learning_goals": [
+            "掌握 cube 类算子（matmul/conv2d）的 API 形态",
+            "理解 cube 算子的 tiling 关键点",
+            "掌握 cv（cube-vector）融合的 dtype 感知机制与 tiling wrapper 复用编译",
+            "了解平台专属 optimize/codegen 的适配方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "cube 算子 API",
+            "matmul/conv2d tiling",
+            "cv 融合与 wrapper 复用编译",
+            "平台 optimize/codegen 适配"
+          ],
+          "order": 2,
+          "practice_task": "阅读 batch_matmul.h 与 conv2d.h，说明 cube 算子相较 vector 算子在 API 与 tiling 上的特殊之处；再结合主仓 codegen_tiling_cube_wrapper.h 的重写，说明 cv tiling wrapper 复用编译与 dtype 感知 cv 融合如何工作。",
+          "source_files": [
+            "autofuse/v35/ascendc/api_cube/batch_matmul.h",
+            "autofuse/v35/ascendc/api_cube/conv2d.h",
+            "autofuse/codegen/codegen_tiling_cube_wrapper.h"
+          ],
+          "title": "Cube 类算子（matmul/conv2d）与 cv 融合",
+          "topic": "讲解 v35 下 batch_matmul/matmul/conv2d 等 cube 类算子的 API 与 tiling，以及平台专属的 optimize/codegen 适配。本次更新覆盖 cv tiling wrapper 复用编译与 dtype 感知 cv 融合等重大改动。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u11-l1",
+            "u7-l1"
+          ],
+          "filename": "u11-l3-nddma-perf-model.md",
+          "id": "u11-l3",
+          "learning_goals": [
+            "理解 NDDMA 1D 精确性能模型的特征参数（搬运字节/GM stride/UB stride/dtype/核数）",
+            "掌握 nddma_model 与 api_perf_register 的注册衔接",
+            "理解 raw rank>1 与 kUBFuse 场景回退 legacy 模型的门禁逻辑"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "NDDMA 1D 特征建模",
+            "descriptor 与 Codegen 映射",
+            "回退门禁（is_cv_ub_fusion）"
+          ],
+          "order": 3,
+          "practice_task": "阅读 nddma_model.h/cpp，列出模型输入特征与 Codegen 映射关系（repeats/gm_strides/strides/vectorized_axis/dtype/block_dim），并说明 raw rank 2~5 与 kUBFuse 场景为何回退 legacy 模型。",
+          "source_files": [
+            "autofuse/v35/att/api_perf_register/nddma_model.h",
+            "autofuse/v35/att/api_perf_register/nddma_model.cpp",
+            "autofuse/v35/att/api_perf_register/ascir_api_perf_v2.cpp"
+          ],
+          "title": "v35 NDDMA 1D 精确性能模型",
+          "topic": "讲解本次新增的 NDDMA_1D_MULTICORE_V1 精确性能模型：如何用搬运字节数、GM/UB stride、dtype 与核数刻画 NDDMA 搬运耗时，以及何时回退 legacy 模型。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u11-l1",
+            "u8-l3"
+          ],
+          "filename": "u11-l4-indirect-load-simd-simt.md",
+          "id": "u11-l4",
+          "learning_goals": [
+            "理解 IndirectLoad 的 SIMD/SIMT 两种寻址模式差异",
+            "掌握 indirect_load_simd_policy 的策略选择",
+            "了解 reg_indirect_load_api_call 如何生成寻址与执行代码"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "SIMD/SIMT 寻址模式",
+            "simd_policy 策略",
+            "api_call 代码生成"
+          ],
+          "order": 4,
+          "practice_task": "对比 indirect_load_simd.h 与 indirect_load_simt.h，写出两种模式各自适用的场景；再追踪 reg_indirect_load_api_call.cpp 如何依据 policy 选择并生成地址计算与访存代码。",
+          "source_files": [
+            "autofuse/v35/ascendc/api_regbase/indirect_load_simd.h",
+            "autofuse/v35/ascendc/api_regbase/indirect_load_simt.h",
+            "autofuse/v35/ascendc/api_regbase/indirect_load_simd_policy.h",
+            "autofuse/v35/codegen/reg_api_call/reg_indirect_load_api_call.cpp"
+          ],
+          "title": "IndirectLoad SIMD/SIMT 地址计算与执行",
+          "topic": "讲解本次优化的 IndirectLoad 实现：SIMD/SIMT 两套地址计算与执行路径、策略选择（indirect_load_simd_policy）以及对应 api_call 的代码生成。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u11-l1",
+            "u5-l2"
+          ],
+          "filename": "u11-l5-v2-special-function-ops.md",
+          "id": "u11-l5",
+          "learning_goals": [
+            "掌握 v2 builtin ops 注册函数的完整结构",
+            "理解特殊函数算子（chebyshev/hermite/polygamma 等）的注册要素",
+            "了解 v2_ascir_codegen_impl 对新算子的 codegen 适配"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "v2 builtin ops 注册",
+            "reg_func_v2 注册函数",
+            "v2 codegen 适配",
+            "对应 e2e 用例"
+          ],
+          "order": 5,
+          "practice_task": "以 polygamma_v2.cpp 为模板，写出一个新的特殊函数算子（如 chebyshev_polynomial_t）在 v35 v2 链路上的完整注册清单（builtin ops 注册、reg_func、att/codegen 适配、e2e 用例），并对照仓库中已有的 chebyshev/hermite 用例验证。",
+          "source_files": [
+            "autofuse/v35/ascir/generator/ascir_builtin_ops_v2.cpp",
+            "autofuse/v35/ascir/reg_func/polygamma_v2.cpp",
+            "autofuse/v35/ascir/reg_func/default_reg_func_v2.h",
+            "autofuse/v35/ascir/generator/v2_ascir_codegen_impl.h"
+          ],
+          "title": "v2 特殊函数算子注册链路",
+          "topic": "讲解本次新增的 chebyshev_polynomial_t/u/v/w、hermite_polynomial_h/he、i0/i0e/i1e、log_ndtr、next_after、polygamma 等 v2 特殊函数算子的注册链路：builtin ops 注册、reg_func_v2、codegen 与 att 适配。"
         }
-      ]
+      ],
+      "level": "advanced",
+      "order": 11,
+      "title": "平台适配与 v35 扩展"
     },
     {
       "id": "u12",
-      "title": "测试、规范与精度",
-      "level": "advanced",
-      "order": 12,
       "lectures": [
         {
-          "id": "u12-l1",
-          "title": "Autofuse 测试体系（framework/ascendc_api/e2e）",
-          "order": 1,
-          "filename": "u12-l1-autofuse-tests.md",
-          "topic": "讲解 Autofuse 的三个测试模块（framework/ascendc_api/e2e）、run_autofuse_test.sh 调度与 -u/-s/-c 选项。",
-          "learning_goals": [
-            "掌握 Autofuse 测试模块的划分",
-            "理解 run_autofuse_test.sh 的调度逻辑",
-            "学会用 build.sh 跑指定模块的 UT/ST 与覆盖率"
-          ],
-          "source_files": [
-            "build.sh",
-            "autofuse/CMakeLists.txt"
-          ],
-          "minimal_modules": [
-            "测试模块划分",
-            "run_autofuse_test 调度",
-            "UT/ST/coverage 选项"
-          ],
-          "practice_task": "写出三条 build.sh 命令分别跑 autofuse_framework 的 UT、autofuse_e2e 的 ST、以及带覆盖率，并说明各模块覆盖的范围。",
+          "action": "update",
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "filename": "u12-l1-autofuse-tests.md",
+          "id": "u12-l1",
+          "learning_goals": [
+            "掌握 Autofuse 测试模块的划分",
+            "理解 run_autofuse_test.sh 的调度逻辑",
+            "了解 v35 backend_e2e_v2 用例的组织方式",
+            "学会用 build.sh 跑指定模块的 UT/ST 与覆盖率"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "测试模块划分",
+            "run_autofuse_test 调度",
+            "backend_e2e_v2 用例组织",
+            "UT/ST/coverage 选项"
+          ],
+          "order": 1,
+          "practice_task": "写出三条 build.sh 命令分别跑 autofuse_framework 的 UT、autofuse_e2e 的 ST、以及带覆盖率；再阅读 run_autofuse_test.sh 的最新改动，说明 v35 backend_e2e_v2 新增用例目录（如 chebyshev/hermite/indirect_load）如何被发现与调度。",
+          "source_files": [
+            "build.sh",
+            "scripts/test/run_autofuse_test.sh",
+            "autofuse/CMakeLists.txt"
+          ],
+          "title": "Autofuse 测试体系（framework/ascendc_api/e2e）",
+          "topic": "讲解 Autofuse 的三个测试模块（framework/ascendc_api/e2e）、run_autofuse_test.sh 调度与 -u/-s/-c 选项。本次更新覆盖 run_autofuse_test.sh 的最新调整与 v35 backend_e2e_v2 新增用例。"
         },
         {
-          "id": "u12-l2",
-          "title": "SuperKernel 测试与 golden 校验",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u2-l3"
+          ],
           "filename": "u12-l2-superkernel-tests.md",
-          "topic": "讲解 SuperKernel 的 python ut/st、C++ AOT utest、golden 校验与 coverage 生成。",
+          "id": "u12-l2",
           "learning_goals": [
             "掌握 SuperKernel Python 与 C++ 测试的组织",
             "理解 golden 数据校验机制",
             "学会生成与解读 coverage"
           ],
-          "source_files": [
-            "docs/zh/super_kernel/developer_guide.md",
-            "super_kernel/examples/super_kernel_profiling/superkernel_compare.py"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "Python ut/st",
             "C++ AOT utest",
             "golden 校验与 coverage"
           ],
+          "order": 2,
           "practice_task": "参照 developer_guide，跑一次 superkernel 的 python UT 并说明 golden 文件如何参与结果校验，再指出 coverage 报告的关键目录。",
-          "depends_on": [
-            "u2-l3"
+          "source_files": [
+            "docs/zh/super_kernel/developer_guide.md",
+            "super_kernel/examples/super_kernel_profiling/superkernel_compare.py"
           ],
-          "action": "new"
+          "title": "SuperKernel 测试与 golden 校验",
+          "topic": "讲解 SuperKernel 的 python ut/st、C++ AOT utest、golden 校验与 coverage 生成。"
         },
         {
-          "id": "u12-l3",
-          "title": "编码红线、贡献规范与设计文档",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
           "filename": "u12-l3-coding-redlines-and-contributing.md",
-          "topic": "讲解项目编码红线、跨特性交叉影响检查、贡献规范（clang-format/pre-commit/commit message）与设计文档模板。",
+          "id": "u12-l3",
           "learning_goals": [
             "掌握项目编码红线（ABI/API、图改写确定性等）",
             "理解跨特性交叉影响检查流程",
             "学会按设计文档模板输出方案"
           ],
-          "source_files": [
-            "docs/guidelines/cross_feature_check.md",
-            "CONTRIBUTING.md",
-            "docs/guidelines/design_document_template.md"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "编码红线",
             "跨特性检查",
             "贡献规范与设计文档模板"
           ],
+          "order": 3,
           "practice_task": "阅读编码红线与 cross_feature_check，针对一个假设的「新增 optimize pass」改动，列出需要逐项检查的跨特性影响并给出结论。",
-          "depends_on": [
-            "u1-l2"
+          "source_files": [
+            "docs/guidelines/cross_feature_check.md",
+            "CONTRIBUTING.md",
+            "docs/guidelines/design_document_template.md"
           ],
-          "action": "new"
+          "title": "编码红线、贡献规范与设计文档",
+          "topic": "讲解项目编码红线、跨特性交叉影响检查、贡献规范（clang-format/pre-commit/commit message）与设计文档模板。"
         },
         {
-          "id": "u12-l4",
-          "title": "Autofuse 精度一致性原理与验证",
-          "order": 3,
+          "action": "keep",
+          "depends_on": [
+            "u8-l1"
+          ],
           "filename": "u12-l4-precision-consistency.md",
-          "topic": "讲解 Autofuse 与 Eager 模式的精度一致性边界：为何计算类算子不保证二进制一致但精度不劣化，以及纯搬运算子可位精确。",
+          "id": "u12-l4",
           "learning_goals": [
             "理解二进制一致性无法保证的根因（codegen 路径差异）",
             "掌握「精度不劣于 Eager」的承诺",
             "了解精度验证方法与纯搬运算子的位精确特性"
           ],
-          "source_files": [
-            "docs/zh/autofuse/autofuse_precision_consistency.md",
-            "docs/zh/autofuse/autofuse_precision_test_report.md"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "一致性边界根因",
             "精度承诺",
             "验证方法与位精确算子"
           ],
+          "order": 4,
           "practice_task": "阅读精度一致性文档，解释为何融合后 Add+Exp 的结果可能与 Eager 有微小差异，并说明哪些算子可以做到位精确及其原因。",
-          "depends_on": [
-            "u8-l1"
+          "source_files": [
+            "docs/zh/autofuse/autofuse_precision_consistency.md",
+            "docs/zh/autofuse/autofuse_precision_test_report.md"
           ],
-          "action": "new"
+          "title": "Autofuse 精度一致性原理与验证",
+          "topic": "讲解 Autofuse 与 Eager 模式的精度一致性边界：为何计算类算子不保证二进制一致但精度不劣化，以及纯搬运算子可位精确。"
         }
-      ]
+      ],
+      "level": "advanced",
+      "order": 12,
+      "title": "测试、规范与精度"
     }
   ]
 }

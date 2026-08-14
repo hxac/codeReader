@@ -8,6 +8,7 @@
 - 解释 `src/ops` 下「一个算子一个目录」的组织方式，并能在 `all_reduce` 算子目录里找到 `selector`、`executor`、`template` 三类文件。
 - 说清 `src/ops/op_common` 的四大通用组件（`executor`、`selector`、`template`、`topo`）分别做什么，以及为什么 `topo` 是**全体算子共享**的，而不是每个算子各有一份。
 - 区分 `src`（生产级代码）与 `experimental`（社区试验代码）的边界，理解这条边界背后的架构硬约束。
+- 定位最近一次代码演进新增的目录与文件：`src/common/tuner`（Tuner 插件加载框架）、`src/ops/op_common/selector` 下的代价模型文件（`selector_engine`、`cost_model`、`cost_table` 等）以及 `examples/06_tuner_plugin`（Tuner 插件参考实现）。
 
 本讲不深入任何算法实现，只解决一个问题：**拿到 HCCL 源码后，每个文件该去哪里找**。这是后续所有源码阅读的基础地图。
 
@@ -27,29 +28,32 @@
 | 算子（op） | 一个对外暴露的通信操作，如 `HcclAllReduce` |
 | 算法（alg） | 完成一个算子的具体方法，如 Ring、Mesh |
 | 引擎（engine） | 执行通信任务的硬件抽象，如 AICPU_TS、AIV、CCU |
+| 代价模型（cost model） | 用带宽/时延参数估算每种算法耗时的数学模型，用于「选最便宜的算法」 |
 | 组件（component） | 算子内部按职责拆出的模块，本讲主角是 `selector/executor/template/topo` |
 
 ## 3. 本讲源码地图
 
-本讲只看「目录与文档」，不读算法实现。关键文件如下：
+本讲主要看「目录与文档」，不读算法实现。关键文件如下：
 
 | 文件 | 作用 |
 |------|------|
-| [README.md](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/README.md) | 项目首页，含一版「目录结构说明」 |
-| [AGENTS.md](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/AGENTS.md) | AI Agent 治理主入口，含目录骨架与四条架构硬约束 |
-| [docs/zh/architecture/architecture-brief.md](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/docs/zh/architecture/architecture-brief.md) | 架构简介，3.2 节给出「目标目录结构」 |
-| [experimental/README.md](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/experimental/README.md) | 社区试验目录的规则说明 |
+| [README.md](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/README.md) | 项目首页，含一版「目录结构说明」 |
+| [AGENTS.md](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/AGENTS.md) | AI Agent 治理主入口，含目录骨架与四条架构硬约束 |
+| [docs/zh/architecture/architecture-brief.md](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/docs/zh/architecture/architecture-brief.md) | 架构简介，3.2 节给出「目标目录结构」 |
+| [experimental/README.md](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/experimental/README.md) | 社区试验目录的规则说明 |
+| [examples/06_tuner_plugin/README.md](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/examples/06_tuner_plugin/README.md) | 本轮新增的 Tuner 插件示例说明 |
 
-我们会对照三份文档（README、AGENTS.md、architecture-brief）的目录说明，再用真实目录逐一印证。
+我们会对照三份文档（README、AGENTS.md、architecture-brief）的目录说明，再用真实目录逐一印证，最后补上文档还没来得及收录的「新增目录」。
 
 ## 4. 核心概念与源码讲解
 
-本讲拆成四个最小模块：
+本讲拆成五个最小模块：
 
 - 4.1 顶层目录全貌（README 视角）
 - 4.2 `src` 分层与 AGENTS.md 的架构硬约束
 - 4.3 `src/ops`：算子目录与 `op_common` 四大组件
 - 4.4 `include` / `experimental` / `test`：对外头文件、社区试验与测试的边界
+- 4.5 新增目录：selector 代价模型文件与 `src/common/tuner`
 
 ### 4.1 顶层目录全貌（README 视角）
 
@@ -79,12 +83,17 @@ README 的目录树按「从外到内、从总到分」组织，阅读顺序建�
 
 #### 4.1.3 源码精读
 
-README 的「目录结构说明」从 [README.md:29](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/README.md#L29) 开始，整棵骨架树见 [README.md:33-63](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/README.md#L33-L63)。其中两处最关键：
+README 的「目录结构说明」从 [README.md:30](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/README.md#L30) 开始，整棵骨架树见 [README.md:34-64](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/README.md#L34-L64)。其中两处最关键：
 
-- [README.md:34-36](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/README.md#L34-L36)：说明 `src` 分成 `common`（类型定义、日志模块等通用逻辑）和 `ops`（算子实现）。
-- [README.md:45-49](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/README.md#L45-L49)：第一次点出 `op_common` 下有 `executor`（执行器）、`selector`（算法选择器）、`template`（算法模板）、`topo`（通信域拓扑信息获取和转换）四个子目录——这就是贯穿全本的「四大组件」。
+- [README.md:35-37](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/README.md#L35-L37)：说明 `src` 分成 `common`（类型定义、日志模块等通用逻辑）和 `ops`（算子实现）。
+- [README.md:46-50](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/README.md#L46-L50)：第一次点出 `op_common` 下有 `executor`（执行器）、`selector`（算法选择器）、`template`（算法模板）、`topo`（通信域拓扑信息获取和转换）四个子目录——这就是贯穿全本的「四大组件」。
 
-注意一个细节：README 的目录树里**没有** `experimental` 顶层目录，但真实仓库里它是存在的（见 4.4）。这正说明：README 是面向最终用户的「概览」，AGENTS.md 和 architecture-brief 才是面向开发者的「完整骨架」。
+注意两个细节：
+
+- README 的目录树里**没有** `experimental` 顶层目录，但真实仓库里它是存在的（见 4.4）。
+- README 的目录树也**没有**收列 `src/common/tuner`、`examples/06_tuner_plugin` 等本轮新增内容（见 4.5）。
+
+这两点正说明：README 是面向最终用户的「概览」，AGENTS.md 和 architecture-brief 才是面向开发者的「完整骨架」，而最新落地的代码有时会先于文档出现——读源码时要以仓库真实目录为准。
 
 #### 4.1.4 代码实践
 
@@ -103,10 +112,10 @@ ls -1
 #### 4.1.5 小练习与答案
 
 **练习 1**：README 的目录树里，`test` 下面有哪两个子目录？分别代表什么？
-**答案**：`ut`（单元测试，unit test）和 `st`（系统测试，system test）。对应 [README.md:57-59](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/README.md#L57-L59)。
+**答案**：`ut`（单元测试，unit test）和 `st`（系统测试，system test）。对应 [README.md:58-60](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/README.md#L58-L60)。
 
 **练习 2**：`src` 下只有哪两个子目录？
-**答案**：`common`（通用逻辑）和 `ops`（算子实现）。对应 [README.md:35-36](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/README.md#L35-L36)。
+**答案**：`common`（通用逻辑）和 `ops`（算子实现）。对应 [README.md:35-37](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/README.md#L35-L37)。
 
 ### 4.2 `src` 分层与 AGENTS.md 的架构硬约束
 
@@ -139,14 +148,14 @@ L3  HCOMM 基础通信 (base_comm)           ← 独立仓 cann/hcomm
 
 #### 4.2.3 源码精读
 
-AGENTS.md 第 2 节「目录结构」见 [AGENTS.md:13-27](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/AGENTS.md#L13-L27)，其中骨架树 [AGENTS.md:15-25](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/AGENTS.md#L15-L25) 比 README 多列了两个关键信息：
+AGENTS.md 第 2 节「目录结构」见 [AGENTS.md:13-27](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/AGENTS.md#L13-L27)，其中骨架树 [AGENTS.md:15-25](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/AGENTS.md#L15-L25) 比 README 多列了两个关键信息：
 
-- [AGENTS.md:19](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/AGENTS.md#L19)：点明 `src/common` 下含 `adapter_acl / alg_env_config / log / param_check / sal / hcomm_dlsym / op_graph / utils / hccl_mc2` 等横切模块——这些是后续进阶层（Unit 4、Unit 6）的主角。
-- [AGENTS.md:20-21](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/AGENTS.md#L20-L21)：说明 `experimental` 与 `src` 结构一致但不保证兼容、不编入商用版本；`include` 暴露 `hccl.h` 与 `hccl_mc2.h`。
+- [AGENTS.md:19](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/AGENTS.md#L19)：点明 `src/common` 下含 `adapter_acl / alg_env_config / log / param_check / sal / hcomm_dlsym / op_graph / utils / hccl_mc2` 等横切模块——这些是后续进阶层（Unit 4、Unit 6）的主角。注意本轮演进又新增了 `tuner` 模块（见 4.5），它同样落在 `src/common` 下。
+- [AGENTS.md:20-21](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/AGENTS.md#L20-L21)：说明 `experimental` 与 `src` 结构一致但不保证兼容、不编入商用版本；`include` 暴露 `hccl.h` 与 `hccl_mc2.h`。
 
-四条架构硬约束见 [AGENTS.md:43-50](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/AGENTS.md#L43-L50) 的约束表。其中约束 4「新算子落标准结构」的原文在 [AGENTS.md:50](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/AGENTS.md#L50)，它要求每个新算子都必须提供 `selector`（算法选择）与 `template`（引擎模板），这就是 4.3 节要展开的「算子目录标准结构」的来历。
+四条架构硬约束见 [AGENTS.md:43-50](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/AGENTS.md#L43-L50) 的约束表。其中约束 4「新算子落标准结构」的原文在 [AGENTS.md:50](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/AGENTS.md#L50)，它要求每个新算子都必须提供 `selector`（算法选择）与 `template`（引擎模板），这就是 4.3 节要展开的「算子目录标准结构」的来历。
 
-> 这张约束表还有一个隐藏用途：AGENTS.md 自己声明「架构事实以 architecture-brief.md 为权威来源」（见 [AGENTS.md:31](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/AGENTS.md#L31)）。所以当 README、AGENTS.md、architecture-brief 三者说法有出入时，以 architecture-brief 为准。
+> 这张约束表还有一个隐藏用途：AGENTS.md 自己声明「架构事实以 architecture-brief.md 为权威来源」（见 [AGENTS.md:31](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/AGENTS.md#L31)）。所以当 README、AGENTS.md、architecture-brief 三者说法有出入时，以 architecture-brief 为准。
 
 #### 4.2.4 代码实践
 
@@ -154,7 +163,7 @@ AGENTS.md 第 2 节「目录结构」见 [AGENTS.md:13-27](https://github.com/gi
 - **操作步骤**：
   1. 列出 `src/common` 下所有条目，对照 AGENTS.md §2 的清单。
   2. 特别确认 `hcomm_dlsym` 目录存在——这是「HCCL 调 HCOMM」的唯一合法通道。
-- **需要观察的现象**：`src/common` 下应能看到 `hcomm_dlsym`、`log`、`param_check`、`sal`、`adapter_acl`、`alg_env_config`、`hccl_mc2` 等条目。
+- **需要观察的现象**：`src/common` 下应能看到 `hcomm_dlsym`、`log`、`param_check`、`sal`、`adapter_acl`、`alg_env_config`、`hccl_mc2` 等条目，以及本轮新增的 `tuner`。
 - **预期结果**：你能指出「跨仓调用」相关代码都集中在 `src/common/hcomm_dlsym/`，而不会散落到各算子目录。
 - **命令**：
 
@@ -165,10 +174,10 @@ ls -1 src/common/
 #### 4.2.5 小练习与答案
 
 **练习 1**：四条架构硬约束中，哪一条直接规定了「每个算子目录都要有 selector 和 template」？
-**答案**：第 4 条「新算子落标准结构」。对应 [AGENTS.md:50](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/AGENTS.md#L50)。
+**答案**：第 4 条「新算子落标准结构」。对应 [AGENTS.md:50](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/AGENTS.md#L50)。
 
 **练习 2**：为什么 HCCL 算子不能在编译期直接 `#include` HCOMM 的私有头文件？
-**答案**：因为「HCCL 与 HCOMM 解耦」约束要求两仓独立编译、独立版本演进，跨仓调用必须走 `src/common/hcomm_dlsym/` 的符号表 + `dlsym` 动态加载。对应 [AGENTS.md:49](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/AGENTS.md#L49)。
+**答案**：因为「HCCL 与 HCOMM 解耦」约束要求两仓独立编译、独立版本演进，跨仓调用必须走 `src/common/hcomm_dlsym/` 的符号表 + `dlsym` 动态加载。对应 [AGENTS.md:49](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/AGENTS.md#L49)。
 
 ### 4.3 `src/ops`：算子目录与 `op_common` 四大组件
 
@@ -216,7 +225,7 @@ src/ops/op_common/                 ← 四大组件的通用基类、注册表�
 
 **（1）架构简介的「目标目录结构」**
 
-architecture-brief 3.2 节是最权威的目录说明，见 [architecture-brief.md:200-228](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/docs/zh/architecture/architecture-brief.md#L200-L228)。其中 `op_common` 四大组件的原文在 [architecture-brief.md:215-219](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/docs/zh/architecture/architecture-brief.md#L215-L219)：`executor`（算法执行器）、`selector`（算法选择器）、`template`（算法模板）、`topo`（通信算子的 rankGraph 拓扑信息适配）。
+architecture-brief 3.2 节是最权威的目录说明，见 [architecture-brief.md:200-228](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/docs/zh/architecture/architecture-brief.md#L200-L228)。其中 `op_common` 四大组件的原文在 [architecture-brief.md:215-219](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/docs/zh/architecture/architecture-brief.md#L215-L219)：`executor`（算法执行器）、`selector`（算法选择器）、`template`（算法模板）、`topo`（通信算子的 rankGraph 拓扑信息适配）。
 
 > 对比 README 与 architecture-brief 对四大组件的措辞，能看出层次差异：README 用「执行器 / 算法选择器 / 算法模板 / 拓扑信息获取和转换」，偏用户视角；architecture-brief 用「算法执行器 / 算法选择器 / 算法模板 / rankGraph 拓扑信息适配」，偏开发者视角，明确点出 `topo` 适配的是 rankGraph。
 
@@ -224,10 +233,10 @@ architecture-brief 3.2 节是最权威的目录说明，见 [architecture-brief.
 
 进入 `src/ops/all_reduce`，能看到算子入口与三类组件目录：
 
-- 算子入口：[src/ops/all_reduce/all_reduce_op.h](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/all_reduce_op.h)，对外声明 `HcclAllReduce`，见 [all_reduce_op.h:26-28](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/all_reduce_op.h#L26-L28)。
-- selector 示例：[src/ops/all_reduce/selector/all_reduce_auto_selector.h](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/selector/all_reduce_auto_selector.h)（`all_reduce` 专属的算法选择器）。
-- executor 示例：[src/ops/all_reduce/executor/ins_v2_all_reduce_sequence_executor.h](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/executor/ins_v2_all_reduce_sequence_executor.h)（顺序编排的执行器之一）。
-- template 示例：[src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.h](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.h)（AICPU 引擎上的 Mesh 1D 一次性模板）。
+- 算子入口：[src/ops/all_reduce/all_reduce_op.h](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/all_reduce_op.h)，对外声明 `HcclAllReduce`，见 [all_reduce_op.h:26-28](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/all_reduce_op.h#L26-L28)。
+- selector 示例：[src/ops/all_reduce/selector/all_reduce_auto_selector.h](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/selector/all_reduce_auto_selector.h)（`all_reduce` 专属的算法选择器）。
+- executor 示例：[src/ops/all_reduce/executor/ins_v2_all_reduce_sequence_executor.h](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sequence_executor.h)（顺序编排的执行器之一；同目录下还有 `parallel`、`concurrent`、`omnipipe` 等多种编排模式的执行器）。
+- template 示例：[src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.h](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.h)（AICPU 引擎上的 Mesh 1D 一次性模板）。
 
 注意：`all_reduce` 目录下**没有** `topo/` 子目录——`topo` 是共享组件，要去 `op_common` 找。
 
@@ -235,12 +244,12 @@ architecture-brief 3.2 节是最权威的目录说明，见 [architecture-brief.
 
 四大组件的通用基类与注册表都在这里：
 
-- selector 通用层：[src/ops/op_common/selector/selector_registry.h](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/selector/selector_registry.h)、`execute_selector.h`、`auto_selector_base.h`。
-- executor 通用层：[src/ops/op_common/executor/executor_v2_base.h](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/executor/executor_v2_base.h) 与 `registry/` 注册表目录。
-- template 通用层：[src/ops/op_common/template/alg_v2_template_base.h](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/template/alg_v2_template_base.h) 与 `aicpu/`、`aiv/`、`ccu/`、`registry/` 等子目录。
-- topo（共享）：[src/ops/op_common/topo/topo.h](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/topo/topo.h) 与一整套 `topo_match_*.h`（如 `topo_match_1d.h`、`topo_match_multilevel.h`、`topo_match_ubx.h`）。
+- selector 通用层：[src/ops/op_common/selector/selector_registry.h](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/selector_registry.h)、`execute_selector.h`、`auto_selector_base.h`；以及本轮新增的代价模型文件（`selector_engine.h`、`cost_model.h`、`cost_table.h` 等，见 4.5）。
+- executor 通用层：[src/ops/op_common/executor/executor_v2_base.h](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/executor/executor_v2_base.h) 与 `registry/` 注册表目录。
+- template 通用层：[src/ops/op_common/template/alg_v2_template_base.h](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/alg_v2_template_base.h) 与 `aicpu/`、`aiv/`、`ccu/`、`registry/` 等子目录。
+- topo（共享）：[src/ops/op_common/topo/topo.h](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/topo/topo.h) 与一整套 `topo_match_*.h`（如 `topo_match_1d.h`、`topo_match_multilevel.h`、`topo_match_ubx.h`）。
 
-四个组件的协作总入口在 [src/ops/op_common/op_common.h](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/op_common.h)，其中声明了把 algName 交给执行器的 `HcclExecOp`，见 [op_common.h:35-37](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/op_common.h#L35-L37)。这就是「selector 选算法 → executor 执行」的接缝点。四大组件的内部机制（注册表、优先级遍历、模板生命周期）是 Unit 3 的主题，本讲只要记住它们的目录位置即可。
+四个组件的协作总入口在 [src/ops/op_common/op_common.h](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/op_common.h)，其中声明了把 algName 交给执行器的 `HcclExecOp`，见 [op_common.h:35-37](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/op_common.h#L35-L37)。这就是「selector 选算法 → executor 执行」的接缝点。四大组件的内部机制（注册表、优先级遍历、模板生命周期）是 Unit 3 的主题，本讲只要记住它们的目录位置即可。
 
 #### 4.3.4 代码实践
 
@@ -316,17 +325,17 @@ test/ut  test/st      ── 单元测试 / 系统测试
 
 **（1）`include`：两个对外头文件**
 
-[AGENTS.md:21](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/AGENTS.md#L21) 点明 `include` 暴露 `hccl.h`（算子 API）与 `hccl_mc2.h`（MC2 自定义算子框架）。真实目录只有这两个文件：[include/hccl.h](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/include/hccl.h)、[include/hccl_mc2.h](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/include/hccl_mc2.h)。architecture-brief 的对外 API 分层见 [architecture-brief.md:259-272](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/docs/zh/architecture/architecture-brief.md#L259-L272)。
+[AGENTS.md:21](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/AGENTS.md#L21) 点明 `include` 暴露 `hccl.h`（算子 API）与 `hccl_mc2.h`（MC2 自定义算子框架）。真实目录只有这两个文件：[include/hccl.h](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/include/hccl.h)、[include/hccl_mc2.h](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/include/hccl_mc2.h)。architecture-brief 的对外 API 分层见 [architecture-brief.md:259-272](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/docs/zh/architecture/architecture-brief.md#L259-L272)。
 
 **（2）`experimental`：试验目录的规则**
 
-`experimental/` 的规则见 [experimental/README.md](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/experimental/README.md)，它与 `src` 的对照表说明了边界。architecture-brief 也在目录树里标注：`experimental` 内部结构与 `src` 保持一致，不保证兼容、不编入商用版本，见 [architecture-brief.md:227](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/docs/zh/architecture/architecture-brief.md#L227)。
+`experimental/` 的规则见 [experimental/README.md](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/experimental/README.md)，它与 `src` 的对照表说明了边界。architecture-brief 也在目录树里标注：`experimental` 内部结构与 `src` 保持一致，不保证兼容、不编入商用版本，见 [architecture-brief.md:227](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/docs/zh/architecture/architecture-brief.md#L227)。
 
-真实结构印证了「与 src 一致」：`experimental/ops/` 下有 `op_common`（对应 `src/ops/op_common`）和 `reduce_scatter`（一个试验性算子）。`reduce_scatter` 内部按 `birs/`（一种试验算法）组织，含 `reduce_scatter_birs_selector.cc`、`reduce_scatter_birs_executor.cc`、`template/reduce_scatter_birs.cc`——与 `src` 下算子的 `selector/executor/template` 结构完全对应。这正是 AGENTS.md 约束 4「结构与 src 一致」的实例，详见 [experimental/ops/reduce_scatter](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/experimental/ops/reduce_scatter)。
+真实结构印证了「与 src 一致」：`experimental/ops/` 下有 `op_common`（对应 `src/ops/op_common`）和 `reduce_scatter`（一个试验性算子）。`reduce_scatter` 内部按 `birs/`（一种试验算法）组织，含 `reduce_scatter_birs_selector.cc`、`reduce_scatter_birs_executor.cc`、`template/reduce_scatter_birs.cc`——与 `src` 下算子的 `selector/executor/template` 结构完全对应。这正是 AGENTS.md 约束 4「结构与 src 一致」的实例，详见 [experimental/ops/reduce_scatter](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/experimental/ops/reduce_scatter)。
 
 **（3）`test`：ut 与 st**
 
-README 标注 `test` 下分 `ut`（单元测试）与 `st`（系统测试），见 [README.md:57-59](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/README.md#L57-L59)。真实目录印证：`test/ut` 与 `test/st` 各自独立，`test/st` 下有 `algorithm`（系统测试按算子组织）。两者的运行方式（`build.sh -u` 跑 UT、`build.sh -s` 跑 ST）见 [AGENTS.md:62-71](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/AGENTS.md#L62-L71)，测试体系的深入讲解在 [u7-l4 测试体系——UT 与 ST](./u7-l4-testing.md)。
+README 标注 `test` 下分 `ut`（单元测试）与 `st`（系统测试），见 [README.md:58-60](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/README.md#L58-L60)。真实目录印证：`test/ut` 与 `test/st` 各自独立，`test/st` 下有 `algorithm`（系统测试按算子组织）。本轮演进还在 `test/ut/common/` 下新增了 `alg_parse` 单测目录（配合代价模型体系，见 4.5）。两者的运行方式（`build.sh -u` 跑 UT、`build.sh -s` 跑 ST）见 [AGENTS.md:62-71](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/AGENTS.md#L62-L71)，测试体系的深入讲解在 [u7-l4 测试体系——UT 与 ST](./u7-l4-testing.md)。
 
 #### 4.4.4 代码实践
 
@@ -354,16 +363,102 @@ README 标注 `test` 下分 `ut`（单元测试）与 `st`（系统测试），�
 #### 4.4.5 小练习与答案
 
 **练习 1**：`include` 下有几个对外头文件？分别面向谁？
-**答案**：两个。`hccl.h` 面向 AI 框架适配层（标准算子 API），`hccl_mc2.h` 面向自定义通信算子开发者（MC2 框架）。对应 [AGENTS.md:21](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/AGENTS.md#L21) 与 [architecture-brief.md:263-269](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/docs/zh/architecture/architecture-brief.md#L263-L269)。
+**答案**：两个。`hccl.h` 面向 AI 框架适配层（标准算子 API），`hccl_mc2.h` 面向自定义通信算子开发者（MC2 框架）。对应 [AGENTS.md:21](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/AGENTS.md#L21) 与 [architecture-brief.md:263-269](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/docs/zh/architecture/architecture-brief.md#L263-L269)。
 
 **练习 2**：如果你写了一个还不确定要不要长期维护的新算法，应该放进 `src/ops/` 还是 `experimental/ops/`？为什么？
 **答案**：放进 `experimental/ops/`。因为 `experimental` 不保证 API 稳定、不编入商用版本，适合快速原型验证；待方案成熟、通过 RFC/SIG 评审后再迁入 `src/ops/` 的标准结构。
 
+### 4.5 新增目录：selector 代价模型文件与 `src/common/tuner`
+
+#### 4.5.1 概念说明
+
+本轮代码演进（costmodel 提交）为 HCCL 引入了一套「基于代价模型的算法选择」体系：不再只靠规则式的选择器挑算法，而是为每个候选算法**估算耗时（代价）**，再选代价最小的一个；同时允许用户通过外部 `.so` 插件（Tuner 插件）修改代价表，从而影响算法选择。这套体系落在三个新位置，都还没被 README/AGENTS.md 的骨架树收录，读源码时容易「找不到新东西在哪」，本模块专门补这张地图。
+
+先解释两个术语：
+
+- **代价模型（CostModel）**：用带宽、时延等参数为每种算法建模耗时，形如 \(\text{耗时} = A \cdot n + B \cdot n + C\)（A 建模跨卡传输、B 建模本地拷贝与归约、C 是时延常数）。
+- **Tuner 插件**：一个遵循约定 C ABI 的外部 `.so`，HCCL 在运行期 `dlopen` 它，并在选择算法前回调它，让它有机会改写代价表（对标 NCCL 的 tuner 机制）。
+
+#### 4.5.2 核心流程
+
+新体系的文件分布与数据流：
+
+```text
+① 选择器侧（src/ops/op_common/selector/）
+   selector_engine.h/cc   ← 新选择器入口：按引擎优先级过滤 CostModel，选最小代价
+   cost_model.h/cc        ← 代价建模：A/B/C 参数计算
+   cost_table.h/cc        ← 代价表生成与按算子过滤
+   hccl_algo_dims.h       ← 算法三维命名（engine/executor/template）枚举
+   algo_name_mapper.h/cc  ← 内部 algName ↔ 用户三维配置名 的映射
+   inc/hccl_tuner_plugin.h ← Tuner 插件的 C ABI 约定（对外发布头）
+        │ 选择前回调
+        ▼
+② 加载侧（src/common/tuner/）
+   tuner_setup.h/cc       ← dlopen 插件、dlsym 取函数表、慢调用保护
+   tuner_host_funcs.cc    ← 向插件暴露的 host 工具函数包装
+        │ 被加载
+        ▼
+③ 示例与测试
+   examples/06_tuner_plugin/     ← 参考实现：读 JSON 规则改代价表
+   test/ut/common/alg_parse/     ← HCCL_ALGO 解析与代价模型刷新的单测
+```
+
+一句话概括分工：`selector/` 里是「怎么算代价、怎么选」，`src/common/tuner/` 里是「怎么加载外部插件」，`examples/06_tuner_plugin/` 是「插件长什么样」的样板。
+
+#### 4.5.3 源码精读
+
+**（1）新选择器与代价模型文件**
+
+打开 [src/ops/op_common/selector/selector_engine.h](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/selector_engine.h)，可以看到 `SelectorEngine` 类的完整职责清单，见 [selector_engine.h:25-53](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/selector_engine.h#L25-L53)：`Run` 是入口，`GetEnginePriority` 按拓扑（含 `hostDpuOnly`）给出候选引擎优先级，`FilterCmByEngine` 把不属于候选引擎的算法在 CostModel 里的 count 置 -1，最后由 `SelectMinCost` 挑出代价最小的 algName。注释还明确写着白名单：本迭代仅支持 AllReduce/ReduceScatter/AllGather（[selector_engine.h:31-32](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/selector_engine.h#L31-L32)）。
+
+代价建模在 [src/ops/op_common/selector/cost_model.h](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/cost_model.h)：`CostModelManager` 类从 [cost_model.h:76](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/cost_model.h#L76) 开始，其中 `CalcMeshParam`（[cost_model.h:98](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/cost_model.h#L98)）负责按数据量、网络类型、端口数、rank 数计算带宽参数。代价表在 [src/ops/op_common/selector/cost_table.h](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/cost_table.h)：`CostTableManager` 从 [cost_table.h:46](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/cost_table.h#L46) 开始，核心是 `CostTableGen`（[cost_table.h:53](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/cost_table.h#L53)）生成代价表、按算子过滤（如 `FilterAllReduce`，[cost_table.h:67](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/cost_table.h#L67)）。
+
+**（2）Tuner 插件加载框架**
+
+插件的 ABI 约定发布在 [src/ops/op_common/selector/inc/hccl_tuner_plugin.h](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/inc/hccl_tuner_plugin.h)：它定义了描述通信场景的 `hcclTunerCommInfo_t`（[hccl_tuner_plugin.h:34](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/inc/hccl_tuner_plugin.h#L34)）、算法条目 `hcclTunerAlgoEntry_t`（[hccl_tuner_plugin.h:54](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/inc/hccl_tuner_plugin.h#L54)），以及插件必须导出的符号 `hcclTunerPlugin_v1`（[hccl_tuner_plugin.h:87](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/inc/hccl_tuner_plugin.h#L87)）。
+
+加载侧在 [src/common/tuner/tuner_setup.h](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/common/tuner/tuner_setup.h)：对外接口是 `HcclTunerInit`（[tuner_setup.h:48](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/common/tuner/tuner_setup.h#L48)，加载插件）、`HcclTunerCallGetCollInfo`（[tuner_setup.h:54](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/common/tuner/tuner_setup.h#L54)，回调插件改代价表）和 `HcclTunerDestroy`（[tuner_setup.h:59](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/common/tuner/tuner_setup.h#L59)）。
+
+**（3）示例与单测**
+
+[examples/06_tuner_plugin](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/examples/06_tuner_plugin) 是参考实现：其 README 的「概述」在 [examples/06_tuner_plugin/README.md:3-5](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/examples/06_tuner_plugin/README.md#L3-L5)，说明了「外部 `.so` 插件读取 JSON 配置并修改 cost table，影响 Selector 的算法选择」。核心源文件是 [examples/06_tuner_plugin/plugin.cpp](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/examples/06_tuner_plugin/plugin.cpp) 与 JSON 配置 [examples/06_tuner_plugin/hccl_tuner_config.json](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/examples/06_tuner_plugin/hccl_tuner_config.json)。
+
+配套单测在 [test/ut/common/alg_parse](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/test/ut/common/alg_parse)，含 `alg_parse_test.cc`（HCCL_ALGO 解析）与 `update_cost_model_test.cc`（解析结果刷新 CostModel）。
+
+> 本模块只定位文件与分工。代价模型的 A/B/C 建模细节、三维命名、插件 ABI 与慢调用保护是 Unit 8 四讲的主题：[u8-l1](./u8-l1-selector-engine.md)、[u8-l2](./u8-l2-cost-model-and-table.md)、[u8-l3](./u8-l3-algo-dims-and-parse.md)、[u8-l4](./u8-l4-tuner-plugin.md)。
+
+#### 4.5.4 代码实践
+
+- **实践目标**：亲手确认三个新增位置的存在与分工。
+- **操作步骤**：
+
+  ```bash
+  ls -1 src/ops/op_common/selector/        # 应看到 selector_engine / cost_model / cost_table / hccl_algo_dims / algo_name_mapper / inc/
+  ls -1 src/common/tuner/                  # 应看到 tuner_setup / tuner_host_funcs / CMakeLists.txt
+  ls -1 examples/06_tuner_plugin/          # 应看到 plugin.cpp / hccl_tuner_config.json / README.md / Makefile / test/
+  ```
+
+  然后用 `grep -n "hcclTunerPlugin_v1" src/ops/op_common/selector/inc/hccl_tuner_plugin.h` 确认插件导出符号的声明位置。
+- **需要观察的现象**：三处新文件都存在；`selector/` 目录下「老选择器」（selector_registry/execute_selector/auto_selector_base）与「新选择器」（selector_engine/cost_model/cost_table）并存。
+- **预期结果**：你能回答「如果要写一个影响算法选择的调优插件，该参考哪个目录」（答：`examples/06_tuner_plugin`，ABI 看其引用的 `hccl_tuner_plugin.h`，加载逻辑在 `src/common/tuner`，被影响的选路逻辑在 `src/ops/op_common/selector`）。
+- **待本地验证**：目录内容随版本可能继续演进，以仓库实际 `ls` 输出为准。
+
+#### 4.5.5 小练习与答案
+
+**练习 1**：新选择器体系的「选算法」代码和「加载外部插件」代码分别在哪个目录？
+**答案**：选算法在 `src/ops/op_common/selector/`（selector_engine/cost_model/cost_table 等）；加载外部插件在 `src/common/tuner/`（tuner_setup/tuner_host_funcs）。
+
+**练习 2**：`hccl_tuner_plugin.h` 为什么放在 `src/ops/op_common/selector/inc/` 这个 `inc` 子目录里？
+**答案**：它是发布给外部插件开发者的 C ABI 约定头（插件作者要 `#include` 它来实现 `hcclTunerPlugin_v1`），用独立的 `inc/` 子目录把「对外发布头」与 selector 内部实现头区分开，提示这份头文件是稳定契约。注意它并未进入顶层 `include/`（后者只含 `hccl.h`/`hccl_mc2.h`），说明它面向的是跟随源码构建的插件开发者。
+
+**练习 3**：如果想知道 `HCCL_ALGO` 环境变量如何影响新选择器，应该去哪里找测试作参考？
+**答案**：`test/ut/common/alg_parse/` 下的 `alg_parse_test.cc` 与 `update_cost_model_test.cc`，分别覆盖解析与「解析结果刷新 CostModel」两段逻辑。
+
 ## 5. 综合实践
 
-本讲的综合实践是一个**端到端的文件定位任务**，把四个模块串起来。
+本讲的综合实践是一个**端到端的文件定位任务**，把五个模块串起来。
 
-**任务**：在仓库中找到 `all_reduce` 算子的 `selector`、`executor`、`template` 三类文件各一个，并说明 `topo` 类文件为什么不在 `all_reduce` 目录下、应该去哪里找；最后列出 `src/ops/op_common` 下的四个子目录及各自职责。
+**任务**：在仓库中找到 `all_reduce` 算子的 `selector`、`executor`、`template` 三类文件各一个，并说明 `topo` 类文件为什么不在 `all_reduce` 目录下、应该去哪里找；列出 `src/ops/op_common` 下的四个子目录及各自职责；最后指出 `src/common/tuner` 与 `examples/06_tuner_plugin` 同属本轮新增的哪个功能体系。
 
 **操作步骤**：
 
@@ -397,18 +492,29 @@ README 标注 `test` 下分 `ut`（单元测试）与 `st`（系统测试），�
 
    对照本讲 4.3.1 的表格填写职责：selector 决定算法、executor 编排执行、template 搬运数据、topo 提供拓扑。
 
-**预期产出**：一张包含「类别 → 文件相对路径 → 所属（私有/共享）」的小表，外加一段对「topo 为何共享」的解释。这张表就是你后续阅读 HCCL 任何算子源码时的索引模板——遇到任何算子，都可以照着「入口 `_op` → selector → executor → template（+ 共享 topo）」的顺序找下去。
+4. **识别新增体系**：
+
+   ```bash
+   ls -1 src/common/tuner/
+   ls -1 src/ops/op_common/selector/ | grep -E "cost|engine|dims|mapper"
+   ls -1 examples/ | grep tuner
+   ```
+
+   说明：`src/common/tuner`（插件加载）、`src/ops/op_common/selector` 下的代价模型文件（selector_engine/cost_model/cost_table/hccl_algo_dims/algo_name_mapper + `inc/hccl_tuner_plugin.h`）与 `examples/06_tuner_plugin`（参考实现）共同构成本轮新增的「**代价模型选择器 + Tuner 插件**」功能体系：选择器按代价挑算法，Tuner 插件让用户在外部改代价表影响选择。
+
+**预期产出**：一张包含「类别 → 文件相对路径 → 所属（私有/共享/新增体系）」的小表，外加两段解释（「topo 为何共享」「tuner 三处新文件如何分工」）。这张表就是你后续阅读 HCCL 任何算子源码时的索引模板——遇到任何算子，都可以照着「入口 `_op` → selector → executor → template（+ 共享 topo）」的顺序找下去。
 
 > 待本地验证：文件名可能随版本微调，若上述 `ls` 输出与本讲示例不完全一致，以仓库实际文件为准，目录结构（selector/executor/template + 共享 topo）是稳定的。
 
 ## 6. 本讲小结
 
 - HCCL 顶层分为 `src`（源码）、`include`（对外头文件）、`experimental`（社区试验）、`test`（测试）、`docs`（文档）、`examples`（样例）和 `build.sh`（构建脚本）。
-- `src` 只分 `common`（通用逻辑，含 `hcomm_dlsym` 等横切模块）和 `ops`（算子实现）；跨仓调用统一走 `src/common/hcomm_dlsym/`。
+- `src` 只分 `common`（通用逻辑，含 `hcomm_dlsym`、本轮新增的 `tuner` 等横切模块）和 `ops`（算子实现）；跨仓调用统一走 `src/common/hcomm_dlsym/`。
 - `src/ops` 遵循「一个算子一个目录」，每个算子目录按「入口 `_op` + selector + executor + template」组织，这是架构硬约束（约束 4）规定出来的标准结构。
 - `op_common` 提供四大通用组件：selector（决定算法）、executor（编排执行）、template（搬运数据）、topo（提供拓扑）。
 - 关键区别：selector/executor/template 是每个算子私有，topo 是全体算子共享（在 `src/ops/op_common/topo/`），因为拓扑属于通信域的控制面基础设施。
 - `include` 只有 `hccl.h` 与 `hccl_mc2.h` 两个稳定对外头文件；`experimental` 与 `src` 同构但不保证兼容、不编入商用版本。
+- 本轮新增的「代价模型选择器 + Tuner 插件」体系分布在三处：`src/ops/op_common/selector/`（selector_engine/cost_model/cost_table 等，怎么算代价、怎么选）、`src/common/tuner/`（怎么加载外部插件）、`examples/06_tuner_plugin/`（插件参考实现）。
 
 ## 7. 下一步学习建议
 
@@ -417,4 +523,4 @@ README 标注 `test` 下分 `ut`（单元测试）与 `st`（系统测试），�
 1. **先动手运行一次**：读 [u1-l4 构建、安装与运行](./u1-l4-build-and-run.md)，用 `build.sh` 把 HCCL 编出来，对「目录 → 产物」建立感性认识。
 2. **跑通第一个样例**：读 [u1-l5 第一个 HCCL 程序](./u1-l5-first-hccl-program.md)，对照 `examples/02_collectives/01_allreduce`，把本讲的 `all_reduce_op.cc` 入口与一个能运行的样例对应起来。
 3. **进入主链路**：之后进入 Unit 2（[u2-l2 单算子入口与兼容分发](./u2-l2-op-entry-dispatch.md)），从 `all_reduce_op.cc` 的 `HcclAllReduce` 入口逐行往下读，这时你会发现本讲的目录地图就是那张「在哪个文件里找哪段逻辑」的索引。
-4. **延伸阅读**：想立刻深入四大组件机制，可直接跳到 Unit 3（[u3-l1 op_common 架构与三大注册表总览](./u3-l1-opcommon-overview.md)），但建议先把 Unit 1、Unit 2 走完再读，理解会更顺。
+4. **延伸阅读**：想立刻深入四大组件机制，可直接跳到 Unit 3（[u3-l1 op_common 架构与三大注册表总览](./u3-l1-opcommon-overview.md)）；对 4.5 节的新体系感兴趣，可在学完 Unit 3 后进入 Unit 8（[u8-l1 新选择器 SelectorEngine 与双路径分发](./u8-l1-selector-engine.md) 起的四讲）。建议先把 Unit 1、Unit 2 走完再读，理解会更顺。

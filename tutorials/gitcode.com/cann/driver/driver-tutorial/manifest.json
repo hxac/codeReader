@@ -1,1029 +1,1035 @@
 {
+  "head": "f280abc33e292aed33e8e31947b994cc95358032",
   "project": "driver",
-  "head": "e29d066fd6ee84cae705e2000a0387d721d3aaa0",
-  "rationale": "driver 是华为昇腾 CANN 的驱动模块，体量大、模块多（ascend_hal / sdk_driver / custom 三大源码树、近三十个子模块），因此学习路线按「先定位再编译、先接口再内核、先主链路再扩展」的顺序展开，共 8 个单元 38 篇讲义。单元 1（入门）先让读者建立项目定位（DCMI/HAL/SDK 三层架构）、能编译部署并跑通第一个样例；单元 2 围绕对外最直观的 DCMI/DSMI 设备管理接口，并用 QUICKSTART 的「新增 DSMI 接口」实战打通从用户态到设备的最短路径；单元 3 进入 HAL 层，先讲公共接口与 HDC 主机-设备通信模型，再下沉到 PBL 基础库（UDA/URD/commlib/queryfeature）和 comm/urma 适配，这是后续所有模块的通信地基；单元 4 单独展开旗舰模块 SVM（共享虚拟内存），按初始化→申请释放→VMM→拷贝共享→地址空间分配器的顺序逐层深入；单元 5 覆盖设备维护与管理（DMC 的 device_monitor/logdrv/prof 以及 DMS），讲解日志、性能采集与设备管理主链路；单元 6 跨入内核态 SDK-driver 层，讲 kernel_adapt 内核适配、platform 资源管理、TRS 任务调度、TS Agent 与 esched、FMS 故障管理；单元 7 面向专家层高级特性与定制扩展（RoCE、custom 定制化、HCCN 网络、灵渠与 NDA/NDR、设备虚拟化 vascend/vmng、bbox 与基础设施）；单元 8 收尾于调试、UT 测试、多芯片适配与社区贡献。讲义之间通过 depends_on 形成清晰依赖：接口层依赖公共头文件，内核层依赖 HAL 通信，高级特性依赖前置的通信与内存基础，确保读者由浅入深、循序渐进。",
+  "rationale": "driver 是华为昇腾 CANN 的驱动模块，体量大、模块多（ascend_hal / sdk_driver / custom 三大源码树、近三十个子模块），因此学习路线按「先定位再编译、先接口再内核、先主链路再扩展」的顺序展开，共 8 个单元 38 篇讲义。单元 1（入门）先让读者建立项目定位（DCMI/HAL/SDK 三层架构）、能编译部署并跑通第一个样例；单元 2 围绕对外最直观的 DCMI/DSMI 设备管理接口，并用 QUICKSTART 的「新增 DSMI 接口」实战打通从用户态到设备的最短路径；单元 3 进入 HAL 层，先讲公共接口与 HDC 主机-设备通信模型，再下沉到 PBL 基础库（UDA/URD/commlib/queryfeature）和 comm/urma 适配，这是后续所有模块的通信地基；单元 4 单独展开旗舰模块 SVM（共享虚拟内存），按初始化→申请释放→VMM→拷贝共享→地址空间分配器的顺序逐层深入；单元 5 覆盖设备维护与管理（DMC 的 device_monitor/logdrv/prof 以及 DMS），讲解日志、性能采集与设备管理主链路；单元 6 跨入内核态 SDK-driver 层，讲 kernel_adapt 内核适配、platform 资源管理、TRS 任务调度、TS Agent 与 esched、FMS 故障管理；单元 7 面向专家层高级特性与定制扩展（RoCE、custom 定制化、HCCN 网络、灵渠与 NDA/NDR、设备虚拟化 vascend/vmng、bbox 与基础设施）；单元 8 收尾于调试、UT 测试、多芯片适配与社区贡献。讲义之间通过 depends_on 形成清晰依赖：接口层依赖公共头文件，内核层依赖 HAL 通信，高级特性依赖前置的通信与内存基础，确保读者由浅入深、循序渐进。本次增量（e29d066→f280abc）仅有一个提交「del ut conv cfg」，删除了 UT/ST 门禁分类配置文件 classify_rule.yaml（30 行），该文件未被任何讲义引用为源码，所有 38 篇讲义内容均不受影响，故全部保持 keep。",
   "units": [
     {
       "id": "u1",
-      "title": "入门导览：定位、构建、目录与样例",
-      "level": "beginner",
-      "order": 1,
       "lectures": [
         {
-          "id": "u1-l1",
-          "title": "driver 项目定位与三层架构总览",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [],
           "filename": "u1-l1-project-overview-and-architecture.md",
-          "level": "beginner",
-          "topic": "介绍 driver 仓在 CANN 软件栈中的定位，以及 DCMI、HAL、SDK-driver 三层架构的职责划分与协作关系。",
+          "id": "u1-l1",
           "learning_goals": [
             "理解 driver 模块在昇腾 CANN 软件栈中的作用与定位",
             "区分 DCMI、HAL、SDK-driver 三层各自的职责",
             "建立主机侧（Host）与设备侧（Device）交互的整体心智模型"
           ],
-          "source_files": [
-            "README.md",
-            "docs/zh/QUICKSTART.md"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "DCMI 层",
             "HAL 层",
             "SDK-driver 层"
           ],
+          "order": 1,
           "practice_task": "阅读 README 与架构图，绘制一张三层架构图，标注每一层对应仓库中的源码目录（ascend_hal/sdk_driver/custom），并写一段话说明一个上层应用调用如何自上而下穿过三层。",
-          "depends_on": [],
-          "action": "new"
+          "source_files": [
+            "README.md",
+            "docs/zh/QUICKSTART.md"
+          ],
+          "title": "driver 项目定位与三层架构总览",
+          "topic": "介绍 driver 仓在 CANN 软件栈中的定位，以及 DCMI、HAL、SDK-driver 三层架构的职责划分与协作关系。"
         },
         {
-          "id": "u1-l2",
-          "title": "环境准备、源码编译与部署安装",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
           "filename": "u1-l2-build-and-deploy.md",
-          "level": "beginner",
-          "topic": "讲解 driver 源码编译所需的环境依赖、build.sh 的核心参数（--pkg/--soc/--ube），以及如何生成 run 包并部署安装。",
+          "id": "u1-l2",
           "learning_goals": [
             "掌握 driver 源码编译的依赖软件与系统要求",
             "理解 build.sh 的关键编译参数与三种芯片类型（ascend910b/ascend910_93/ascend950）",
             "学会生成 driver run 包并完成部署安装与卸载"
           ],
-          "source_files": [
-            "build.sh",
-            "CMakeLists.txt",
-            "docs/zh/QUICKSTART.md"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "build.sh",
             "cmake",
             "CMakeLists.txt"
           ],
+          "order": 2,
           "practice_task": "在本机（或容器）中安装编译依赖，执行 bash build.sh --pkg --soc=ascend910b，记录生成的 run 包名称，并描述 build.sh 中 checkopts 如何解析 --soc 参数确定 PRODUCT。",
+          "source_files": [
+            "build.sh",
+            "CMakeLists.txt",
+            "docs/zh/QUICKSTART.md"
+          ],
+          "title": "环境准备、源码编译与部署安装",
+          "topic": "讲解 driver 源码编译所需的环境依赖、build.sh 的核心参数（--pkg/--soc/--ube），以及如何生成 run 包并部署安装。"
+        },
+        {
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u1-l3",
-          "title": "仓库目录结构与三大源码组织",
-          "order": 3,
           "filename": "u1-l3-directory-structure.md",
-          "level": "beginner",
-          "topic": "梳理 driver 仓库的整体目录结构，重点讲解 src 下 ascend_hal、sdk_driver、custom 三大源码目录的子模块划分。",
+          "id": "u1-l3",
           "learning_goals": [
             "掌握仓库根目录各顶层文件与目录的用途",
             "理解 ascend_hal、sdk_driver、custom 三个源码树分别承载什么",
             "能够在源码中快速定位某个功能模块所在的目录"
           ],
-          "source_files": [
-            "README.md",
-            "src/CMakeLists.txt"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "src/ascend_hal",
             "src/sdk_driver",
             "src/custom",
             "pkg_inc"
           ],
+          "order": 3,
           "practice_task": "依据 README 目录结构说明，为 ascend_hal 下的 dmc、hdc、pbl、svm、trs 五个子模块各写一句话用途说明，并指出 sdk_driver 中与之对应的内核侧模块。",
-          "depends_on": [
-            "u1-l1"
+          "source_files": [
+            "README.md",
+            "src/CMakeLists.txt"
           ],
-          "action": "new"
+          "title": "仓库目录结构与三大源码组织",
+          "topic": "梳理 driver 仓库的整体目录结构，重点讲解 src 下 ascend_hal、sdk_driver、custom 三个源码目录的子模块划分。"
         },
         {
-          "id": "u1-l4",
-          "title": "运行第一个样例：DCMI 查询 NPU PCIe 信息",
-          "order": 4,
+          "action": "keep",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
           "filename": "u1-l4-first-dcmi-example.md",
-          "level": "beginner",
-          "topic": "通过 examples/dcmi 查询 PCIe 信息的样例，演示如何编译运行 driver 接口样例，并理解 DCMI 调用的基本流程。",
+          "id": "u1-l4",
           "learning_goals": [
             "掌握样例的编译与运行方式（run.sh）",
             "理解 dcmi_init → dcmi_get_card_num_list → dcmi_get_device_pcie_info 的调用链",
             "学会从样例代码映射到 DCMI 公共接口"
           ],
-          "source_files": [
-            "examples/dcmi/dcmi/1_query_npuinfo/0_get_pcie_info/main.c",
-            "examples/README.md",
-            "examples/utils.h"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "examples/dcmi",
             "dcmi_init",
             "dcmi_get_device_pcie_info"
           ],
+          "order": 4,
           "practice_task": "阅读 get_pcie_info 样例 main.c，参照其结构改写一个新样例：调用 dcmi_init 后遍历所有卡，打印每张卡的 board 信息字段（可参考 1_get_board_info 样例），并说明 dcmi_interface_api.h 中相关结构体的字段含义。",
-          "depends_on": [
-            "u1-l2",
-            "u1-l3"
+          "source_files": [
+            "examples/dcmi/dcmi/1_query_npuinfo/0_get_pcie_info/main.c",
+            "examples/README.md",
+            "examples/utils.h"
           ],
-          "action": "new"
+          "title": "运行第一个样例：DCMI 查询 NPU PCIe 信息",
+          "topic": "通过 examples/dcmi 查询 PCIe 信息的样例，演示如何编译运行 driver 接口样例，并理解 DCMI 调用的基本流程。"
         },
         {
-          "id": "u1-l5",
-          "title": "对外公共头文件与 API 总览",
-          "order": 5,
+          "action": "keep",
+          "depends_on": [
+            "u1-l1",
+            "u1-l3"
+          ],
           "filename": "u1-l5-public-headers-and-api.md",
-          "level": "beginner",
-          "topic": "讲解 pkg_inc 对外头文件与 custom/include 下的 DCMI 接口头文件，梳理 dsmi、dcmi、ascend_hal 三类公共 API 的组织方式。",
+          "id": "u1-l5",
           "learning_goals": [
             "理解 pkg_inc 目录导出的对外头文件体系",
             "区分 dsmi_common_interface、dcmi_interface_api、ascend_hal 三套公共接口",
             "学会通过头文件查找接口签名与错误码定义"
           ],
-          "source_files": [
-            "pkg_inc/ascend_hal.h",
-            "pkg_inc/dsmi_common_interface.h",
-            "src/custom/include/dcmi_interface_api.h",
-            "pkg_inc/ascend_hal_base.h"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "pkg_inc",
             "dcmi_interface_api.h",
             "dsmi_common_interface.h",
             "ascend_hal.h"
           ],
+          "order": 5,
           "practice_task": "在 dsmi_common_interface.h 中找出 3 个设备查询类接口（如 dsmi_get_device_count/dsmi_get_version），在 ascend_hal_base.h 中找出 3 个以 hal 开头的接口，整理成一张「接口名—所属层—用途」对照表。",
-          "depends_on": [
-            "u1-l1",
-            "u1-l3"
+          "source_files": [
+            "pkg_inc/ascend_hal.h",
+            "pkg_inc/dsmi_common_interface.h",
+            "src/custom/include/dcmi_interface_api.h",
+            "pkg_inc/ascend_hal_base.h"
           ],
-          "action": "new"
+          "title": "对外公共头文件与 API 总览",
+          "topic": "讲解 pkg_inc 对外头文件与 custom/include 下的 DCMI 接口头文件，梳理 dsmi、dcmi、ascend_hal 三类公共 API 的组织方式。"
         }
-      ]
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "入门导览：定位、构建、目录与样例"
     },
     {
       "id": "u2",
-      "title": "DCMI 设备管理接口层",
-      "level": "intermediate",
-      "order": 2,
       "lectures": [
         {
-          "id": "u2-l1",
-          "title": "DCMI 接口总览与初始化流程",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u1-l5"
+          ],
           "filename": "u2-l1-dcmi-overview-and-init.md",
-          "level": "intermediate",
-          "topic": "讲解 DCMI 接口的分层实现（interface/inner/init），以及 dcmi_init 初始化如何完成环境判断与基础初始化。",
+          "id": "u2-l1",
           "learning_goals": [
             "理解 custom/dev_prod/user/dcmi 下的目录划分（dcmi_interface/dcmi_inner/dcmi_init）",
             "掌握 dcmi_init 的初始化链路与阶段划分",
             "理解 DCMI 如何做环境与产品形态判断"
           ],
-          "source_files": [
-            "src/custom/include/dcmi_interface_api.h",
-            "src/custom/dev_prod/user/dcmi/dcmi_init/src/dcmi_init_basic.c",
-            "src/custom/dev_prod/user/dcmi/dcmi_inner/src/dcmi_environment_judge.c"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "dcmi_interface",
             "dcmi_inner",
             "dcmi_init"
           ],
+          "order": 1,
           "practice_task": "阅读 dcmi_init_basic.c，画出 dcmi_init 的内部调用顺序（for_card/for_server/for_soc/for_model 等阶段），并说明 dcmi_environment_judge.c 在初始化中起什么作用。",
-          "depends_on": [
-            "u1-l5"
+          "source_files": [
+            "src/custom/include/dcmi_interface_api.h",
+            "src/custom/dev_prod/user/dcmi/dcmi_init/src/dcmi_init_basic.c",
+            "src/custom/dev_prod/user/dcmi/dcmi_inner/src/dcmi_environment_judge.c"
           ],
-          "action": "new"
+          "title": "DCMI 接口总览与初始化流程",
+          "topic": "讲解 DCMI 接口的分层实现（interface/inner/init），以及 dcmi_init 初始化如何完成环境判断与基础初始化。"
         },
         {
-          "id": "u2-l2",
-          "title": "DSMI 设备系统管理接口实现",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
           "filename": "u2-l2-dsmi-interface-impl.md",
-          "level": "intermediate",
-          "topic": "讲解 DSMI（Device System Management Interface）接口的实现结构，以及 dsmi 接口如何通过 dmp command 与设备交互。",
+          "id": "u2-l2",
           "learning_goals": [
             "理解 dsmi_common_interface.c 中接口的实现套路",
             "掌握 dsmi_common.c 与 dsmi_dmp_command.c 的分工",
             "理解 drvGetDevInfo 等 helper 如何获取设备信息并转换为 dmp 命令"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "dsmi_common_interface",
+            "dsmi_common",
+            "dsmi_dmp_command"
+          ],
+          "order": 2,
+          "practice_task": "选取 dsmi_common_interface.c 中的一个查询类接口（如 dsmi_get_host_device_connect_type 相关逻辑），跟踪它如何调用 drvGetDevInfo 并最终通过 dsmi_dmp_command 下发到设备，写出该调用链。",
           "source_files": [
             "pkg_inc/dsmi_common_interface.h",
             "src/ascend_hal/dmc/dsmi/dsmi_common/dsmi_common_interface.c",
             "src/ascend_hal/dmc/dsmi/dsmi_common/dsmi_common.c",
             "src/ascend_hal/dmc/dsmi/dsmi_common/dsmi_dmp_command.c"
           ],
-          "minimal_modules": [
-            "dsmi_common_interface",
-            "dsmi_common",
-            "dsmi_dmp_command"
-          ],
-          "practice_task": "选取 dsmi_common_interface.c 中的一个查询类接口（如 dsmi_get_host_device_connect_type 相关逻辑），跟踪它如何调用 drvGetDevInfo 并最终通过 dsmi_dmp_command 下发到设备，写出该调用链。",
-          "depends_on": [
-            "u2-l1"
-          ],
-          "action": "new"
+          "title": "DSMI 设备系统管理接口实现",
+          "topic": "讲解 DSMI（Device System Management Interface）接口的实现结构，以及 dsmi 接口如何通过 dmp command 与设备交互。"
         },
         {
-          "id": "u2-l3",
-          "title": "实战：从零新增一个 DSMI 接口",
-          "order": 3,
+          "action": "keep",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
           "filename": "u2-l3-add-new-dsmi-interface.md",
-          "level": "intermediate",
-          "topic": "依据 QUICKSTART 开发指南，实践在驱动中新增一个 dsmi 接口的完整流程，打通从代码修改到编译验证的端到端开发。",
+          "id": "u2-l3",
           "learning_goals": [
             "掌握新增 DSMI 接口需要改动的文件与步骤",
             "理解接口参数校验、drvGetDevInfo 调用与错误码返回的规范",
             "学会编译部署并验证自研接口"
           ],
-          "source_files": [
-            "src/ascend_hal/dmc/dsmi/dsmi_common/dsmi_common_interface.c",
-            "docs/zh/QUICKSTART.md",
-            "src/ascend_hal/dmc/dsmi/dsmi_common/dsmi_dmp_command.c"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "dsmi_common_interface.c",
             "dsmi 头文件",
             "build.sh"
           ],
+          "order": 3,
           "practice_task": "参照 QUICKSTART 开发指南，新增一个 dsmi_get_host_device_connect_type 接口（或类似查询接口）：在头文件中声明、在 dsmi_common_interface.c 中实现（含参数校验与 drvGetDevInfo 调用），重新编译部署，并编写一个最小用户态程序调用它验证返回值。",
-          "depends_on": [
-            "u2-l1",
-            "u2-l2"
+          "source_files": [
+            "src/ascend_hal/dmc/dsmi/dsmi_common/dsmi_common_interface.c",
+            "docs/zh/QUICKSTART.md",
+            "src/ascend_hal/dmc/dsmi/dsmi_common/dsmi_dmp_command.c"
           ],
-          "action": "new"
+          "title": "实战：从零新增一个 DSMI 接口",
+          "topic": "依据 QUICKSTART 开发指南，实践在驱动中新增一个 dsmi 接口的完整流程，打通从代码修改到编译验证的端到端开发。"
         },
         {
-          "id": "u2-l4",
-          "title": "DCMI 查询与复位接口实现",
-          "order": 4,
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
           "filename": "u2-l4-dcmi-query-and-reset.md",
-          "level": "intermediate",
-          "topic": "讲解 DCMI 查询类接口（板卡/芯片/运行信息）与芯片复位接口（带内/带外热复位）的实现，并结合样例理解复位流程。",
+          "id": "u2-l4",
           "learning_goals": [
             "理解 dcmi_basic_info_intf/dcmi_running_info_intf 等查询接口的实现方式",
             "掌握芯片热复位的带内（internal）与带外（external）两种模式区别",
             "学会结合 examples/dcmi/2_chip_reset 理解复位调用链"
           ],
-          "source_files": [
-            "src/custom/dev_prod/user/dcmi/dcmi_interface/src/dcmi_basic_info_intf.c",
-            "src/custom/dev_prod/user/dcmi/dcmi_interface/src/dcmi_hot_reset_intf.c",
-            "examples/dcmi/dcmi/2_chip_reset/1_external_reset/main.c"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "dcmi_basic_info_intf",
             "dcmi_hot_reset_intf",
             "dcmi_inner_info_get"
           ],
+          "order": 4,
           "practice_task": "对比 examples 中 0_internal_reset 与 1_external_reset 两个样例，结合 dcmi_hot_reset_intf.c 说明带内复位与带外复位在接口实现上的差异，并指出复位流程依赖的底层通信接口。",
-          "depends_on": [
-            "u2-l1"
+          "source_files": [
+            "src/custom/dev_prod/user/dcmi/dcmi_interface/src/dcmi_basic_info_intf.c",
+            "src/custom/dev_prod/user/dcmi/dcmi_interface/src/dcmi_hot_reset_intf.c",
+            "examples/dcmi/dcmi/2_chip_reset/1_external_reset/main.c"
           ],
-          "action": "new"
+          "title": "DCMI 查询与复位接口实现",
+          "topic": "讲解 DCMI 查询类接口（板卡/芯片/运行信息）与芯片复位接口（带内/带外热复位）的实现，并结合样例理解复位流程。"
         }
-      ]
+      ],
+      "level": "intermediate",
+      "order": 2,
+      "title": "DCMI 设备管理接口层"
     },
     {
       "id": "u3",
-      "title": "HAL 层与主机-设备通信",
-      "level": "intermediate",
-      "order": 3,
       "lectures": [
         {
-          "id": "u3-l1",
-          "title": "HAL 层总览与 ascend_hal 公共接口",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u1-l5"
+          ],
           "filename": "u3-l1-hal-overview-and-api.md",
-          "level": "intermediate",
-          "topic": "讲解 HAL（硬件抽象层）的职责与 ascend_hal.h 系列公共接口的组织，建立对 HAL 用户态库的整体认识。",
+          "id": "u3-l1",
           "learning_goals": [
             "理解 HAL 层在 Host 侧的定位（ascend_hal 动态库）",
             "掌握 ascend_hal.h 聚合的 base/external/dc 等头文件分工",
             "认识 hal 系列接口（内存、流、队列、DMA 等）的分类"
           ],
-          "source_files": [
-            "pkg_inc/ascend_hal.h",
-            "pkg_inc/ascend_hal_base.h",
-            "pkg_inc/ascend_hal_external.h"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "ascend_hal_base",
             "ascend_hal_external",
             "ascend_hal_dc"
           ],
+          "order": 1,
           "practice_task": "浏览 ascend_hal_base.h 与 ascend_hal_external.h，按「内存管理/流与任务/队列事件/通信」四类各归类 2-3 个 hal 接口，说明 HAL 层相比 DCMI 面向的调用者有何不同（Runtime 等上层模块 vs 管理工具）。",
-          "depends_on": [
-            "u1-l5"
+          "source_files": [
+            "pkg_inc/ascend_hal.h",
+            "pkg_inc/ascend_hal_base.h",
+            "pkg_inc/ascend_hal_external.h"
           ],
-          "action": "new"
+          "title": "HAL 层总览与 ascend_hal 公共接口",
+          "topic": "讲解 HAL（硬件抽象层）的职责与 ascend_hal.h 系列公共接口的组织，建立对 HAL 用户态库的整体认识。"
         },
         {
-          "id": "u3-l2",
-          "title": "主机-设备通信：HDC client/server/core 模型",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
           "filename": "u3-l2-hdc-communication.md",
-          "level": "intermediate",
-          "topic": "讲解 HDC（Host-Device Communication）的客户端/服务端/核心三件套模型，以及消息如何经 HDC 在主机与设备间流转。",
+          "id": "u3-l2",
           "learning_goals": [
             "理解 hdc_client/hdc_server/hdc_core 三者的角色与协作",
             "掌握 HDC 基于 epoll 的事件驱动通信机制",
             "理解 HDC 作为 HAL/SDK 各模块共用通信底座的意义"
           ],
-          "source_files": [
-            "src/ascend_hal/hdc/common/hdc_client.c",
-            "src/ascend_hal/hdc/common/hdc_server.c",
-            "src/ascend_hal/hdc/common/hdc_core.c",
-            "src/ascend_hal/hdc/common/hdc_epoll.c"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "hdc_client",
             "hdc_server",
             "hdc_core",
             "hdc_epoll"
           ],
+          "order": 2,
           "practice_task": "阅读 hdc_client.c 与 hdc_core.c，描述一次主机侧发起的请求如何经由 client 封装、core 处理、epoll 收发到达设备侧，并画出 HDC 的客户端-服务端交互时序草图。",
+          "source_files": [
+            "src/ascend_hal/hdc/common/hdc_client.c",
+            "src/ascend_hal/hdc/common/hdc_server.c",
+            "src/ascend_hal/hdc/common/hdc_core.c",
+            "src/ascend_hal/hdc/common/hdc_epoll.c"
+          ],
+          "title": "主机-设备通信：HDC client/server/core 模型",
+          "topic": "讲解 HDC（Host-Device Communication）的客户端/服务端/核心三件套模型，以及消息如何经 HDC 在主机与设备间流转。"
+        },
+        {
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u3-l3",
-          "title": "PBL 基础库：UDA 统一设备接入",
-          "order": 3,
           "filename": "u3-l3-pbl-uda.md",
-          "level": "intermediate",
-          "topic": "讲解 PBL（Public Base Lib）中 UDA（Unified Device Access）模块如何提供统一的设备接入与访问接口。",
+          "id": "u3-l3",
           "learning_goals": [
             "理解 PBL 作为 HAL 基础公共库的定位",
             "掌握 UDA 统一设备接入提供的抽象能力",
             "理解 uda_user 与 uda_user_kernel_api 的用户态/内核态分工"
           ],
-          "source_files": [
-            "src/ascend_hal/pbl/uda/uda_user.c",
-            "src/ascend_hal/pbl/uda/uda_user_kernel_api.c"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "pbl/uda",
             "uda_user",
             "uda_user_kernel_api"
           ],
+          "order": 3,
           "practice_task": "阅读 uda_user.c，找出 UDA 提供的设备打开/关闭/信息获取类函数，说明 UDA 如何屏蔽底层设备访问差异，并写出 UDA 在 HDC 通信链路中可能扮演的角色。",
-          "depends_on": [
-            "u3-l1"
+          "source_files": [
+            "src/ascend_hal/pbl/uda/uda_user.c",
+            "src/ascend_hal/pbl/uda/uda_user_kernel_api.c"
           ],
-          "action": "new"
+          "title": "PBL 基础库：UDA 统一设备接入",
+          "topic": "讲解 PBL（Public Base Lib）中 UDA（Unified Device Access）模块如何提供统一的设备接入与访问接口。"
         },
         {
-          "id": "u3-l4",
-          "title": "PBL：URD 请求转发与 commlib 公共函数",
-          "order": 4,
+          "action": "keep",
+          "depends_on": [
+            "u3-l1",
+            "u3-l3"
+          ],
           "filename": "u3-l4-pbl-urd-commlib.md",
-          "level": "intermediate",
-          "topic": "讲解 URD（User Request Distribute）用户请求转发机制，以及 commlib 公共函数库（含错误码映射）的作用。",
+          "id": "u3-l4",
           "learning_goals": [
             "理解 URD 如何将用户请求转发分发到合适的处理路径",
             "掌握 commlib 中公共接口（drv_comm_intf）与原子/锁等基础设施",
             "理解 drv_error_map 错误码映射机制"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "pbl/urd",
+            "pbl/commlib",
+            "drv_error_map"
+          ],
+          "order": 4,
+          "practice_task": "阅读 urd_user.c 与 drv_comm_intf.c，说明 URD 的请求分发流程；再查阅 drv_error_map.c，解释驱动内部错误码如何映射为对外的 DRV_ERROR_xxx 错误码。",
           "source_files": [
             "src/ascend_hal/pbl/urd/urd_user.c",
             "src/ascend_hal/pbl/commlib/drv_comm_intf.c",
             "src/ascend_hal/pbl/commlib/drv_error_map.c",
             "src/ascend_hal/pbl/commlib/atomic_lock.c"
           ],
-          "minimal_modules": [
-            "pbl/urd",
-            "pbl/commlib",
-            "drv_error_map"
-          ],
-          "practice_task": "阅读 urd_user.c 与 drv_comm_intf.c，说明 URD 的请求分发流程；再查阅 drv_error_map.c，解释驱动内部错误码如何映射为对外的 DRV_ERROR_xxx 错误码。",
-          "depends_on": [
-            "u3-l1",
-            "u3-l3"
-          ],
-          "action": "new"
+          "title": "PBL：URD 请求转发与 commlib 公共函数",
+          "topic": "讲解 URD（User Request Distribute）用户请求转发机制，以及 commlib 公共函数库（含错误码映射）的作用。"
         },
         {
-          "id": "u3-l5",
-          "title": "通信层 comm/urma 适配与 queryfeature 兼容查询",
-          "order": 5,
+          "action": "keep",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
           "filename": "u3-l5-comm-urma-queryfeature.md",
-          "level": "intermediate",
-          "topic": "讲解 comm 目录下的 ascend_urma_adapt 通信适配，以及 queryfeature 模块如何做软件特性查询以实现多芯片兼容适配。",
+          "id": "u3-l5",
           "learning_goals": [
             "理解 ascend_urma_adapt 如何适配 URMA 通信框架",
             "掌握 urma 的 init/dev/ctx/token 等核心概念",
             "理解 queryfeature 特性查询在多芯片兼容中的作用"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "comm/ascend_urma_adapt",
+            "pbl/queryfeature"
+          ],
+          "order": 5,
+          "practice_task": "阅读 ascend_urma_init.c 与 query_feature.c，说明 urma 通信框架如何初始化，以及一个新功能如何通过 queryfeature 判断当前芯片是否支持后再决定是否启用。",
           "source_files": [
             "src/ascend_hal/comm/ascend_urma_adapt/ascend_urma_init.c",
             "src/ascend_hal/comm/ascend_urma_adapt/ascend_urma_dev.c",
             "src/ascend_hal/pbl/queryfeature/query_feature.c"
           ],
-          "minimal_modules": [
-            "comm/ascend_urma_adapt",
-            "pbl/queryfeature"
-          ],
-          "practice_task": "阅读 ascend_urma_init.c 与 query_feature.c，说明 urma 通信框架如何初始化，以及一个新功能如何通过 queryfeature 判断当前芯片是否支持后再决定是否启用。",
-          "depends_on": [
-            "u3-l1",
-            "u3-l2"
-          ],
-          "action": "new"
+          "title": "通信层 comm/urma 适配与 queryfeature 兼容查询",
+          "topic": "讲解 comm 目录下的 ascend_urma_adapt 通信适配，以及 queryfeature 模块如何做软件特性查询以实现多芯片兼容适配。"
         }
-      ]
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "HAL 层与主机-设备通信"
     },
     {
       "id": "u4",
-      "title": "SVM 共享虚拟内存管理",
-      "level": "intermediate",
-      "order": 4,
       "lectures": [
         {
-          "id": "u4-l1",
-          "title": "SVM 模块总览与初始化",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
           "filename": "u4-l1-svm-overview-and-init.md",
-          "level": "intermediate",
-          "topic": "讲解 SVM（Shared Virtual Memory）共享虚拟内存模块的整体职责、v2/v3 版本划分，以及 halMemAgentOpen 初始化流程。",
+          "id": "u4-l1",
           "learning_goals": [
             "理解 SVM 在设备侧内存管理中的核心职责",
             "掌握 SVM v2 与 v3 的目录组织差异",
             "理解 svm_master_init 如何完成 Host 与 Device SVM 模块的交互初始化"
           ],
-          "source_files": [
-            "src/ascend_hal/svm/README.md",
-            "src/ascend_hal/svm/v3/api/master/svm_master_init.c",
-            "src/ascend_hal/svm/v3/common/devmm_svm_init.c"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "svm/v3/api/master",
             "svm_master_init",
             "devmm_svm_init"
           ],
+          "order": 1,
           "practice_task": "阅读 SVM README 与 svm_master_init.c，描述 APP 调用 aclrtSetDevice 时 SVM 模块的初始化流程，说明 Host 侧与 Device 侧 SVM 模块如何建立交互。",
-          "depends_on": [
-            "u3-l1"
+          "source_files": [
+            "src/ascend_hal/svm/README.md",
+            "src/ascend_hal/svm/v3/api/master/svm_master_init.c",
+            "src/ascend_hal/svm/v3/common/devmm_svm_init.c"
           ],
-          "action": "new"
+          "title": "SVM 模块总览与初始化",
+          "topic": "讲解 SVM（Shared Virtual Memory）共享虚拟内存模块的整体职责、v2/v3 版本划分，以及 halMemAgentOpen 初始化流程。"
         },
         {
-          "id": "u4-l2",
-          "title": "内存申请/释放/赋值主链路",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u4-l1"
+          ],
           "filename": "u4-l2-svm-alloc-free.md",
-          "level": "intermediate",
-          "topic": "讲解 halMemAlloc/halMemFree/drvMemsetD8 主链路：从预留虚拟地址分配映射、内核态申请物理页建页表，到释放回收的过程。",
+          "id": "u4-l2",
           "learning_goals": [
             "理解 halMemAlloc 如何分配虚拟地址并 mmap 映射",
             "掌握进入内核态申请物理页、建立页表项的过程",
             "理解 halMemFree 的逆序释放（解页表→释放物理页→归还虚拟地址）"
           ],
-          "source_files": [
-            "src/ascend_hal/svm/v3/api/master/svm_alloc.c",
-            "src/ascend_hal/svm/v3/api/master/svm_mem_ctl.c",
-            "src/ascend_hal/svm/v3/api/master/svm_set.c"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "svm_alloc",
             "svm_mem_ctl",
             "svm_set"
           ],
+          "order": 2,
           "practice_task": "跟踪 svm_alloc.c 中 halMemAlloc 的实现，画出「分配虚拟地址→mmap→内核申请物理页→建页表」的调用链，并说明 halMemFree 为何要按逆序解除映射。",
+          "source_files": [
+            "src/ascend_hal/svm/v3/api/master/svm_alloc.c",
+            "src/ascend_hal/svm/v3/api/master/svm_mem_ctl.c",
+            "src/ascend_hal/svm/v3/api/master/svm_set.c"
+          ],
+          "title": "内存申请/释放/赋值主链路",
+          "topic": "讲解 halMemAlloc/halMemFree/drvMemsetD8 主链路：从预留虚拟地址分配映射、内核态申请物理页建页表，到释放回收的过程。"
+        },
+        {
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u4-l3",
-          "title": "VMM：虚拟/物理地址分离管理",
-          "order": 3,
           "filename": "u4-l3-svm-vmm.md",
-          "level": "intermediate",
-          "topic": "讲解 VMM 接口如何将虚拟地址与物理地址分开申请，并动态建立/解除它们之间的映射关系。",
+          "id": "u4-l3",
           "learning_goals": [
             "理解 halMemAddressReserve/halMemAddressFree 虚拟地址申请释放",
             "掌握 halMemCreate/halMemRelease 物理内存句柄申请释放",
             "理解 halMemMap/halMemUnmap 动态映射机制"
           ],
-          "source_files": [
-            "src/ascend_hal/svm/v3/api/master/svm_vmm.c",
-            "src/ascend_hal/svm/v3/api/master/svm_register.c",
-            "src/ascend_hal/svm/v3/assign/va_allocator/mga.c"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "svm_vmm",
             "svm_register",
             "va_allocator"
           ],
+          "order": 3,
           "practice_task": "阅读 svm_vmm.c，对比「整块申请」与「VMM 分离申请+动态映射」两种方式的差异，写出 VMM 四组接口（reserve/free/create/release/map/unmap）的典型使用顺序。",
-          "depends_on": [
-            "u4-l1"
+          "source_files": [
+            "src/ascend_hal/svm/v3/api/master/svm_vmm.c",
+            "src/ascend_hal/svm/v3/api/master/svm_register.c",
+            "src/ascend_hal/svm/v3/assign/va_allocator/mga.c"
           ],
-          "action": "new"
+          "title": "VMM：虚拟/物理地址分离管理",
+          "topic": "讲解 VMM 接口如何将虚拟地址与物理地址分开申请，并动态建立/解除它们之间的映射关系。"
         },
         {
-          "id": "u4-l4",
-          "title": "内存拷贝与共享机制",
-          "order": 4,
+          "action": "keep",
+          "depends_on": [
+            "u4-l2"
+          ],
           "filename": "u4-l4-svm-copy-and-share.md",
-          "level": "intermediate",
-          "topic": "讲解 halMemcpy 阻塞式内存拷贝（H2D/D2D）与设备间/Host-Device 内存共享（halShmem）机制。",
+          "id": "u4-l4",
           "learning_goals": [
             "理解 halMemcpy 的同步阻塞拷贝语义与传输路径选择",
             "掌握 svm_cpy_host_pool 等拷贝优化机制",
             "理解 halShmemCreateHandle/DestroyHandle 的内存共享模型"
           ],
-          "source_files": [
-            "src/ascend_hal/svm/v3/api/master/svm_cpy.c",
-            "src/ascend_hal/svm/v3/api/master/svm_ipc.c",
-            "src/ascend_hal/svm/v3/api/master/svm_cpy_host_pool.c"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "svm_cpy",
             "svm_ipc",
             "svm_cpy_host_pool"
           ],
+          "order": 4,
           "practice_task": "阅读 svm_cpy.c，说明 H2D 拷贝为何是阻塞式的，并解释 svm_ipc.c 如何实现不同设备间的内存共享句柄传递。",
-          "depends_on": [
-            "u4-l2"
+          "source_files": [
+            "src/ascend_hal/svm/v3/api/master/svm_cpy.c",
+            "src/ascend_hal/svm/v3/api/master/svm_ipc.c",
+            "src/ascend_hal/svm/v3/api/master/svm_cpy_host_pool.c"
           ],
-          "action": "new"
+          "title": "内存拷贝与共享机制",
+          "topic": "讲解 halMemcpy 阻塞式内存拷贝（H2D/D2D）与设备间/Host-Device 内存共享（halShmem）机制。"
         },
         {
-          "id": "u4-l5",
-          "title": "SVM v3 地址空间与分配器架构",
-          "order": 5,
+          "action": "keep",
+          "depends_on": [
+            "u4-l1",
+            "u4-l3"
+          ],
           "filename": "u4-l5-svm-allocator-architecture.md",
-          "level": "advanced",
-          "topic": "深入 SVM v3 的地址空间分配器架构：va_allocator（MGA）、cache_malloc、gen_allocator 等多级分配器如何协同管理虚拟地址空间。",
+          "id": "u4-l5",
           "learning_goals": [
             "理解 SVM v3 的多级分配器（va/cache/gen）分工",
             "掌握 MGA 地址空间管理的实现思路",
             "理解 heaplist、地址预留范围与分配回收的高效设计"
           ],
-          "source_files": [
-            "src/ascend_hal/svm/v3/assign/va_allocator/mga.c",
-            "src/ascend_hal/svm/v3/assign/cache_malloc/cache_allocator.c",
-            "src/ascend_hal/svm/v3/assign/gen_allocator/gen_allocator.c",
-            "src/ascend_hal/svm/v3/assign/malloc_mng/malloc_mng.c"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "va_allocator",
             "cache_malloc",
             "gen_allocator",
             "malloc_mng"
           ],
+          "order": 5,
           "practice_task": "分析 MGA（va_allocator）与 cache_malloc/cache_recycle_seg 的协作，说明虚拟地址如何被快速分配与回收；并结合近期提交「Remove the unnecessary heaplist rescan in svm VA alloc」理解分配器性能优化点。",
-          "depends_on": [
-            "u4-l1",
-            "u4-l3"
+          "source_files": [
+            "src/ascend_hal/svm/v3/assign/va_allocator/mga.c",
+            "src/ascend_hal/svm/v3/assign/cache_malloc/cache_allocator.c",
+            "src/ascend_hal/svm/v3/assign/gen_allocator/gen_allocator.c",
+            "src/ascend_hal/svm/v3/assign/malloc_mng/malloc_mng.c"
           ],
-          "action": "new"
+          "title": "SVM v3 地址空间与分配器架构",
+          "topic": "深入 SVM v3 的地址空间分配器架构：va_allocator（MGA）、cache_malloc、gen_allocator 等多级分配器如何协同管理虚拟地址空间。"
         }
-      ]
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "SVM 共享虚拟内存管理"
     },
     {
       "id": "u5",
-      "title": "设备维护与管理系统（DMC/DMS）",
-      "level": "intermediate",
-      "order": 5,
       "lectures": [
         {
-          "id": "u5-l1",
-          "title": "DMC 设备维护组件与 device_monitor 通路",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
           "filename": "u5-l1-dmc-device-monitor.md",
-          "level": "intermediate",
-          "topic": "讲解 DMC（Device Maintenance Components）的组成，以及 device_monitor 作为 DSMI 消息通路如何与设备交互。",
+          "id": "u5-l1",
           "learning_goals": [
             "理解 DMC 下 device_monitor/dsmi/logdrv/prof/verify_tool 的分工",
             "掌握 device_monitor 的消息通路（dm_hdc/dm_msg）设计",
             "理解 dev_mon_dmp_client 如何作为设备消息客户端工作"
           ],
-          "source_files": [
-            "src/ascend_hal/dmc/device_monitor/include/device_monitor.h",
-            "src/ascend_hal/dmc/device_monitor/msg/dev_mon_dmp_client.c",
-            "src/ascend_hal/dmc/device_monitor/lib/msg/dm_hdc.c"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "device_monitor",
             "dev_mon_dmp_client",
             "dm_hdc"
           ],
+          "order": 1,
           "practice_task": "阅读 dev_mon_dmp_client.c 与 dm_hdc.c，描述 device_monitor 如何通过 HDC 通路接收并处理来自设备侧的消息，并指出 DMC 各子模块共享的消息基础设施。",
-          "depends_on": [
-            "u3-l1",
-            "u3-l2"
+          "source_files": [
+            "src/ascend_hal/dmc/device_monitor/include/device_monitor.h",
+            "src/ascend_hal/dmc/device_monitor/msg/dev_mon_dmp_client.c",
+            "src/ascend_hal/dmc/device_monitor/lib/msg/dm_hdc.c"
           ],
-          "action": "new"
+          "title": "DMC 设备维护组件与 device_monitor 通路",
+          "topic": "讲解 DMC（Device Maintenance Components）的组成，以及 device_monitor 作为 DSMI 消息通路如何与设备交互。"
         },
         {
-          "id": "u5-l2",
-          "title": "日志驱动 logdrv 与 msnpureport 日志导出",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u5-l1"
+          ],
           "filename": "u5-l2-logdrv-and-msnpureport.md",
-          "level": "intermediate",
-          "topic": "讲解 logdrv 日志驱动如何打通 Host/Device 日志通路，以及 msnpureport 工具如何导出设备侧维测日志。",
+          "id": "u5-l2",
           "learning_goals": [
             "理解 drv_log_user 用户态日志接口与内核态 api 的协作",
             "掌握日志通道类型（channel_type）与按类型读取机制",
             "理解 msnpureport 工具的配置与设备日志导出流程"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "logdrv",
+            "drv_log_user",
+            "msnpureport"
+          ],
+          "order": 2,
+          "practice_task": "阅读 drv_log_user.c，说明 log_read_by_type 等接口如何按通道读取设备日志；再结合 msnpureport_config.c 描述 msnpureport -f 导出设备日志的配置链路。",
           "source_files": [
             "src/ascend_hal/dmc/logdrv/drv_log_user.c",
             "src/ascend_hal/dmc/logdrv/drv_log_user_kernel_api.c",
             "src/ascend_hal/msnpureport/config/msnpureport_config.c",
             "src/ascend_hal/msnpureport/options/msnpureport_options.c"
           ],
-          "minimal_modules": [
-            "logdrv",
-            "drv_log_user",
-            "msnpureport"
-          ],
-          "practice_task": "阅读 drv_log_user.c，说明 log_read_by_type 等接口如何按通道读取设备日志；再结合 msnpureport_config.c 描述 msnpureport -f 导出设备日志的配置链路。",
+          "title": "日志驱动 logdrv 与 msnpureport 日志导出",
+          "topic": "讲解 logdrv 日志驱动如何打通 Host/Device 日志通路，以及 msnpureport 工具如何导出设备侧维测日志。"
+        },
+        {
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u5-l3",
-          "title": "Profiling 性能采集适配",
-          "order": 3,
           "filename": "u5-l3-prof-adapt.md",
-          "level": "intermediate",
-          "topic": "讲解 dmc/prof 性能采集适配层如何对接 Host 与 Device 侧的 Profiling 数据通路。",
+          "id": "u5-l3",
           "learning_goals": [
             "理解 prof_adapt 适配层的角色与 host/kernel/user 多场景划分",
             "掌握 prof_hdc 性能数据经 HDC 上报的机制",
             "理解 prof_buff 性能数据缓冲区管理"
           ],
-          "source_files": [
-            "src/ascend_hal/dmc/prof/adapt/prof_adapt.c",
-            "src/ascend_hal/dmc/prof/comm/hdc/prof_hdc.c",
-            "src/ascend_hal/dmc/prof/adapt/prof_buff.c"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "prof_adapt",
             "prof_hdc",
             "prof_buff"
           ],
+          "order": 3,
           "practice_task": "阅读 prof_adapt.c 与 prof_hdc.c，说明 Profiling 数据如何从设备侧采集并经 HDC 适配上报到 Host，并指出 prof_buff 在其中的缓冲作用。",
+          "source_files": [
+            "src/ascend_hal/dmc/prof/adapt/prof_adapt.c",
+            "src/ascend_hal/dmc/prof/comm/hdc/prof_hdc.c",
+            "src/ascend_hal/dmc/prof/adapt/prof_buff.c"
+          ],
+          "title": "Profiling 性能采集适配",
+          "topic": "讲解 dmc/prof 性能采集适配层如何对接 Host 与 Device 侧的 Profiling 数据通路。"
+        },
+        {
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u5-l4",
-          "title": "DMS 设备管理系统（虚拟设备/flash/板级）",
-          "order": 4,
           "filename": "u5-l4-dms-device-management.md",
-          "level": "intermediate",
-          "topic": "讲解 DMS（Device Management System）设备管理系统的子模块：虚拟设备（vdev）、flash、板级（board）、低功耗（lpm）等管理能力。",
+          "id": "u5-l4",
           "learning_goals": [
             "理解 DMS 作为设备管理系统的整体职责",
             "掌握 vdev 虚拟设备管理机制",
             "理解 dms_flash/dms_board/dms_lpm 等板级与存储管理"
           ],
-          "source_files": [
-            "src/ascend_hal/dms/common/dms_user_common.c",
-            "src/ascend_hal/dms/vdev/dms_vdev.c",
-            "src/ascend_hal/dms/flash/dms_flash.c",
-            "src/ascend_hal/dms/board/dms_cc.c"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "dms_user_common",
             "dms_vdev",
             "dms_flash",
             "dms_cc"
           ],
+          "order": 4,
           "practice_task": "浏览 dms 子目录，为 vdev/flash/board/lpm/time 各写一句管理职责说明，并说明 DMS 与 DMC 在设备管理上的分工差异（管理系统 vs 维护组件）。",
-          "depends_on": [
-            "u5-l1"
+          "source_files": [
+            "src/ascend_hal/dms/common/dms_user_common.c",
+            "src/ascend_hal/dms/vdev/dms_vdev.c",
+            "src/ascend_hal/dms/flash/dms_flash.c",
+            "src/ascend_hal/dms/board/dms_cc.c"
           ],
-          "action": "new"
+          "title": "DMS 设备管理系统（虚拟设备/flash/板级）",
+          "topic": "讲解 DMS（Device Management System）设备管理系统的子模块：虚拟设备（vdev）、flash、板级（board）、低功耗（lpm）等管理能力。"
         }
-      ]
+      ],
+      "level": "intermediate",
+      "order": 5,
+      "title": "设备维护与管理系统（DMC/DMS）"
     },
     {
       "id": "u6",
-      "title": "SDK-driver 内核层与任务/故障调度",
-      "level": "advanced",
-      "order": 6,
       "lectures": [
         {
-          "id": "u6-l1",
-          "title": "SDK-driver 层总览与 kernel_adapt 内核适配",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u3-l1",
+            "u1-l2"
+          ],
           "filename": "u6-l1-sdk-driver-and-kernel-adapt.md",
-          "level": "advanced",
-          "topic": "讲解 SDK-driver 层作为内核态驱动（.ko）的定位，以及 kernel_adapt 内核源码适配层如何屏蔽不同内核版本差异。",
+          "id": "u6-l1",
           "learning_goals": [
             "理解 sdk_driver 层与 ascend_hal 层的用户态/内核态关系",
             "掌握 kernel_adapt 的 ka_base/ka_driver/ka_mem/ka_pci 等适配划分",
             "理解 ka_module_init 如何完成内核模块初始化"
           ],
-          "source_files": [
-            "src/sdk_driver/kernel_adapt/ka_module_init.c",
-            "src/sdk_driver/kernel_adapt/base/ka_base.c",
-            "src/sdk_driver/kernel_adapt/driver/ka_driver.c",
-            "src/sdk_driver/kernel_adapt/memory/ka_mem.c"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "kernel_adapt",
             "ka_base",
             "ka_driver",
             "ka_mem"
           ],
+          "order": 1,
           "practice_task": "阅读 ka_module_init.c 与 ka_base.c，说明 kernel_adapt 如何封装内核 API 以适配不同内核版本，并写出 ka_pub 系列公共头文件提供的几类能力（内存/pci/调度/文件系统）。",
-          "depends_on": [
-            "u3-l1",
-            "u1-l2"
+          "source_files": [
+            "src/sdk_driver/kernel_adapt/ka_module_init.c",
+            "src/sdk_driver/kernel_adapt/base/ka_base.c",
+            "src/sdk_driver/kernel_adapt/driver/ka_driver.c",
+            "src/sdk_driver/kernel_adapt/memory/ka_mem.c"
           ],
-          "action": "new"
+          "title": "SDK-driver 层总览与 kernel_adapt 内核适配",
+          "topic": "讲解 SDK-driver 层作为内核态驱动（.ko）的定位，以及 kernel_adapt 内核源码适配层如何屏蔽不同内核版本差异。"
         },
         {
-          "id": "u6-l2",
-          "title": "平台资源管理 platform（中断/预留内存/SOC 平台）",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u6-l1"
+          ],
           "filename": "u6-l2-platform-resource.md",
-          "level": "advanced",
-          "topic": "讲解 platform 模块如何存储与管理芯片资源（中断、预留内存等），以及 soc_platform 如何抽象 SOC 平台差异。",
+          "id": "u6-l2",
           "learning_goals": [
             "理解 platform 作为芯片资源存储库的职责",
             "掌握 drv_platform/tsdrv_parse 的平台资源解析",
             "理解 soc_platform 对 SOC（near）平台的抽象"
           ],
-          "source_files": [
-            "src/sdk_driver/platform/soc_platform/near/soc_platform.c",
-            "src/sdk_driver/platform/dc/drv_platform/ts_platform_host/tsdrv_parse/tsdrv_parse.c"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "platform/soc_platform",
             "platform/dc/drv_platform",
             "tsdrv_parse"
           ],
+          "order": 2,
           "practice_task": "阅读 soc_platform.c 与 tsdrv_parse.c，说明芯片的中断、预留内存等资源如何被解析与存储，并描述 platform 模块为上层驱动的哪些操作提供资源支撑。",
+          "source_files": [
+            "src/sdk_driver/platform/soc_platform/near/soc_platform.c",
+            "src/sdk_driver/platform/dc/drv_platform/ts_platform_host/tsdrv_parse/tsdrv_parse.c"
+          ],
+          "title": "平台资源管理 platform（中断/预留内存/SOC 平台）",
+          "topic": "讲解 platform 模块如何存储与管理芯片资源（中断、预留内存等），以及 soc_platform 如何抽象 SOC 平台差异。"
+        },
+        {
+          "action": "keep",
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u6-l3",
-          "title": "TRS 任务资源调度：SQ/CQ 通信与 mailbox",
-          "order": 3,
           "filename": "u6-l3-trs-sqcq.md",
-          "level": "advanced",
-          "topic": "讲解 TRS（Task Resource Schedule）任务资源调度的 SQ/CQ（提交/完成队列）通信机制，以及 trsdrv 的软件 sqcq 与 mailbox 消息特性。",
+          "id": "u6-l3",
           "learning_goals": [
             "理解 trs_interface/trs_sqcq 提供的 SQ/CQ 通信抽象",
             "掌握 trs_res 资源管理与 trs_cb_event 回调事件机制",
             "理解 trsdrv（trs/trsbase）内核侧 sqcq 与 mailbox 的实现"
           ],
-          "source_files": [
-            "src/ascend_hal/trs/core/trs_interface.c",
-            "src/ascend_hal/trs/core/trs_sqcq.c",
-            "src/ascend_hal/trs/core/trs_res.c",
-            "src/sdk_driver/trsdrv/trs/trs_init.c"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "trs/core",
             "trs_interface",
             "trs_sqcq",
             "trsdrv"
           ],
+          "order": 3,
           "practice_task": "阅读 trs_sqcq.c 与 trs_init.c，描述任务如何通过 SQ 下发、CQ 完成回收，并说明 mailbox 消息在 TRS 通信中的作用。",
-          "depends_on": [
-            "u6-l1"
+          "source_files": [
+            "src/ascend_hal/trs/core/trs_interface.c",
+            "src/ascend_hal/trs/core/trs_sqcq.c",
+            "src/ascend_hal/trs/core/trs_res.c",
+            "src/sdk_driver/trsdrv/trs/trs_init.c"
           ],
-          "action": "new"
+          "title": "TRS 任务资源调度：SQ/CQ 通信与 mailbox",
+          "topic": "讲解 TRS（Task Resource Schedule）任务资源调度的 SQ/CQ（提交/完成队列）通信机制，以及 trsdrv 的软件 sqcq 与 mailbox 消息特性。"
         },
         {
-          "id": "u6-l4",
-          "title": "TS Agent 任务调度代理与 esched 事件调度",
-          "order": 4,
+          "action": "keep",
+          "depends_on": [
+            "u6-l1",
+            "u6-l3"
+          ],
           "filename": "u6-l4-ts-agent-and-esched.md",
-          "level": "advanced",
-          "topic": "讲解 ts_agent（Task Schedule 代理驱动）与 esched（Event Schedule 事件调度）如何协同完成任务调度与事件分发。",
+          "id": "u6-l4",
           "learning_goals": [
             "理解 ts_agent 作为任务调度代理驱动的职责",
             "掌握 ts_agent_vsq_worker 的虚拟 SQ 工作机制",
             "理解 esched 事件调度（event_sched/event_sched_app）模型"
           ],
-          "source_files": [
-            "src/sdk_driver/ts_agent/src/ts_agent_module.c",
-            "src/sdk_driver/ts_agent/src/ts_agent_vsq_worker.c",
-            "src/ascend_hal/esched/comm/event_sched.c",
-            "src/ascend_hal/esched/esched_adapt.c"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "ts_agent",
             "ts_agent_vsq_worker",
             "esched",
             "event_sched"
           ],
+          "order": 4,
           "practice_task": "阅读 ts_agent_module.c 与 event_sched.c，说明 TS Agent 如何代理任务下发、esched 如何分发事件，并描述二者在任务调度链路中的协作关系。",
-          "depends_on": [
-            "u6-l1",
-            "u6-l3"
+          "source_files": [
+            "src/sdk_driver/ts_agent/src/ts_agent_module.c",
+            "src/sdk_driver/ts_agent/src/ts_agent_vsq_worker.c",
+            "src/ascend_hal/esched/comm/event_sched.c",
+            "src/ascend_hal/esched/esched_adapt.c"
           ],
-          "action": "new"
+          "title": "TS Agent 任务调度代理与 esched 事件调度",
+          "topic": "讲解 ts_agent（Task Schedule 代理驱动）与 esched（Event Schedule 事件调度）如何协同完成任务调度与事件分发。"
         },
         {
-          "id": "u6-l5",
-          "title": "FMS 故障管理系统与 soft_fault 软故障处理",
-          "order": 5,
+          "action": "keep",
+          "depends_on": [
+            "u6-l1"
+          ],
           "filename": "u6-l5-fms-and-soft-fault.md",
-          "level": "advanced",
-          "topic": "讲解 FMS（Fault Management System）故障管理系统，以及 soft_fault 软故障处理（含 os_reset、drv_kernel_soft、dms_sensor）机制。",
+          "id": "u6-l5",
           "learning_goals": [
             "理解 FMS 的 smf/dtm 子模块（节点管理）分工",
             "掌握 soft_fault 软故障检测与处理流程",
             "理解 os_reset 重置与 sensor 接口在故障恢复中的作用"
           ],
-          "source_files": [
-            "src/sdk_driver/fms/fms_module.c",
-            "src/sdk_driver/fms/soft_fault/soft_fault.c",
-            "src/sdk_driver/fms/soft_fault/os_reset.c",
-            "src/sdk_driver/fms/soft_fault/dms_sensor_interface.c"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "fms",
             "soft_fault",
             "os_reset",
             "dms_sensor_interface"
           ],
+          "order": 5,
           "practice_task": "阅读 soft_fault.c 与 os_reset.c，描述一次软故障从 sensor 感知到 soft_fault 处理、再到 os_reset 恢复的完整链路；并结合近期提交「Add soft_fault whitelist」理解白名单机制的作用。",
-          "depends_on": [
-            "u6-l1"
+          "source_files": [
+            "src/sdk_driver/fms/fms_module.c",
+            "src/sdk_driver/fms/soft_fault/soft_fault.c",
+            "src/sdk_driver/fms/soft_fault/os_reset.c",
+            "src/sdk_driver/fms/soft_fault/dms_sensor_interface.c"
           ],
-          "action": "new"
+          "title": "FMS 故障管理系统与 soft_fault 软故障处理",
+          "topic": "讲解 FMS（Fault Management System）故障管理系统，以及 soft_fault 软故障处理（含 os_reset、drv_kernel_soft、dms_sensor）机制。"
         }
-      ]
+      ],
+      "level": "advanced",
+      "order": 6,
+      "title": "SDK-driver 内核层与任务/故障调度"
     },
     {
       "id": "u7",
-      "title": "高级特性与定制扩展",
-      "level": "advanced",
-      "order": 7,
       "lectures": [
         {
-          "id": "u7-l1",
-          "title": "RoCE 模块：RDMA Lite 用户态驱动与数据面",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u3-l1",
+            "u4-l1"
+          ],
           "filename": "u7-l1-roce-rdma-lite.md",
-          "level": "advanced",
-          "topic": "讲解 RoCE（RDMA over Converged Ethernet）基于 rdma-core 的定制实现：控制面上下文重建与数据面 WR 直接下发的 lite 接口。",
+          "id": "u7-l1",
           "learning_goals": [
             "理解 RoCE 控制面 lite 接口如何将 Device 内存映射到 Host 重建上下文",
             "掌握数据面 rdma_lite_post_send 等 WR 下发与 CQ 轮询机制",
             "理解 roce_hal_api 的 Device 内存申请接口"
           ],
-          "source_files": [
-            "src/ascend_hal/roce/README.md",
-            "src/ascend_hal/roce/host_lite/rdma_lite.c",
-            "src/ascend_hal/roce/host_lite/hns_roce_lite.c",
-            "src/ascend_hal/roce/roce_hal_api/hns_roce_hal.c"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "roce/host_lite",
             "rdma_lite",
             "hns_roce_lite",
             "roce_hal_api"
           ],
+          "order": 1,
           "practice_task": "阅读 rdma_lite.c 与 RoCE README，说明 lite 接口如何让 Host 侧直接下发 WR 到 Device 队列以提升性能，并描述其在集合通信（如 allgather）场景的应用价值。",
-          "depends_on": [
-            "u3-l1",
-            "u4-l1"
+          "source_files": [
+            "src/ascend_hal/roce/README.md",
+            "src/ascend_hal/roce/host_lite/rdma_lite.c",
+            "src/ascend_hal/roce/host_lite/hns_roce_lite.c",
+            "src/ascend_hal/roce/roce_hal_api/hns_roce_hal.c"
           ],
-          "action": "new"
+          "title": "RoCE 模块：RDMA Lite 用户态驱动与数据面",
+          "topic": "讲解 RoCE（RDMA over Converged Ethernet）基于 rdma-core 的定制实现：控制面上下文重建与数据面 WR 直接下发的 lite 接口。"
         },
         {
-          "id": "u7-l2",
-          "title": "定制化 custom：dev_prod 设备定制与 npucli 命令行",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
           "filename": "u7-l2-custom-devprod-npucli.md",
-          "level": "advanced",
-          "topic": "讲解 custom 定制化特性库中 dev_prod 设备定制管理（含 DCMI 实现、dsmi_product_ext）与 npucli 命令行工具的实现。",
+          "id": "u7-l2",
           "learning_goals": [
             "理解 custom 仓作为定制化特性源码库的定位",
             "掌握 dev_prod/user 下 dcmi/dsmi_product_ext/npucli 的分工",
             "理解 npucli 命令行工具的参数解析与命令分发"
           ],
+          "level": "advanced",
+          "minimal_modules": [
+            "custom/dev_prod",
+            "npucli",
+            "dsmi_product_ext"
+          ],
+          "order": 2,
+          "practice_task": "阅读 npu_cmd_parse.c 与 npu_init.c，描述 npucli 命令行工具如何解析参数并分发到具体子命令（info/set/upgrade 等），并说明 dev_prod 如何承载 DCMI 的具体实现。",
           "source_files": [
             "src/custom/dev_prod/user/npucli/src/npu_init.c",
             "src/custom/dev_prod/user/npucli/src/npu_cmd_parse.c",
             "src/custom/dev_prod/user/npucli/src/npu_info.c",
             "src/custom/dev_prod/user/dsmi_product_ext/dsmi_product_ext.c"
           ],
-          "minimal_modules": [
-            "custom/dev_prod",
-            "npucli",
-            "dsmi_product_ext"
-          ],
-          "practice_task": "阅读 npu_cmd_parse.c 与 npu_init.c，描述 npucli 命令行工具如何解析参数并分发到具体子命令（info/set/upgrade 等），并说明 dev_prod 如何承载 DCMI 的具体实现。",
-          "depends_on": [
-            "u2-l1"
-          ],
-          "action": "new"
+          "title": "定制化 custom：dev_prod 设备定制与 npucli 命令行",
+          "topic": "讲解 custom 定制化特性库中 dev_prod 设备定制管理（含 DCMI 实现、dsmi_product_ext）与 npucli 命令行工具的实现。"
         },
         {
-          "id": "u7-l3",
-          "title": "DCMI 网络接口实现（HCCN/多芯片适配）",
-          "order": 3,
+          "action": "keep",
+          "depends_on": [
+            "u5-l1"
+          ],
           "filename": "u7-l3-custom-network-hccn.md",
-          "level": "advanced",
-          "topic": "讲解 custom/network 如何实现 DCMI 网络接口（HCCN 通信），以及 ascend910B 与 ascend950 两种芯片的网络通信差异适配。",
+          "id": "u7-l3",
           "learning_goals": [
             "理解 network/common 下按芯片分目录（ascend910B/ascend950）的适配方式",
             "掌握 network_comm/hccn_comm 网络通信接口实现",
             "理解 ascend950 通过 dl_hal_function 动态加载 HAL 的机制"
           ],
-          "source_files": [
-            "src/custom/network/common/ascend910B/network_comm.c",
-            "src/custom/network/common/ascend910B/hccn_comm.c",
-            "src/custom/network/common/ascend950/dl_hal_function.c"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "custom/network",
             "network_comm",
             "hccn_comm",
             "dl_hal_function"
           ],
+          "order": 3,
           "practice_task": "对比 ascend910B 与 ascend950 的 network 实现差异，说明 ascend950 为何采用 dl_hal_function 动态加载机制，并指出 HCCN 通信接口在 DCMI 网络管理中的角色。",
-          "depends_on": [
-            "u5-l1"
+          "source_files": [
+            "src/custom/network/common/ascend910B/network_comm.c",
+            "src/custom/network/common/ascend910B/hccn_comm.c",
+            "src/custom/network/common/ascend950/dl_hal_function.c"
           ],
-          "action": "new"
+          "title": "DCMI 网络接口实现（HCCN/多芯片适配）",
+          "topic": "讲解 custom/network 如何实现 DCMI 网络接口（HCCN 通信），以及 ascend910B 与 ascend950 两种芯片的网络通信差异适配。"
         },
         {
-          "id": "u7-l4",
-          "title": "灵渠 lqdrv PCIe 故障检测与 NDA/NDR RDMA 特性",
-          "order": 4,
+          "action": "keep",
+          "depends_on": [
+            "u7-l1"
+          ],
           "filename": "u7-l4-lqdrv-nda-ndr.md",
-          "level": "advanced",
-          "topic": "讲解 lqdrv 灵渠 PCIe 故障检测、nda（ibv_extend 高阶 RoCE 协商）与 ndr（NPU RDMA 直通/peermem）三类定制扩展特性。",
+          "id": "u7-l4",
           "learning_goals": [
             "理解 lqdrv 的用户态 lingqu-dcmi 与内核态 pci-dev PCIe 故障检测",
             "掌握 nda/ibv_extend 的 V3 接口与高阶 RoCE 协商能力",
             "理解 ndr/npu_peermem 的 RDMA 直通特性"
           ],
-          "source_files": [
-            "src/custom/lqdrv/user/src/lingqu-dcmi.c",
-            "src/custom/lqdrv/kernel/pci-dev.c",
-            "src/custom/nda/ibv_extend/ibv_extend.c",
-            "src/custom/ndr/npu_peermem.c"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "custom/lqdrv",
             "lingqu-dcmi",
             "custom/nda/ibv_extend",
             "custom/ndr"
           ],
+          "order": 4,
           "practice_task": "阅读 lingqu-dcmi.c 与 pci-dev.c，说明灵渠如何检测 PCIe 故障；再结合近期提交「支持ibv extend的V3接口；高阶RoCE协商能力与lag port接口」理解 nda ibv_extend 的新增能力。",
-          "depends_on": [
-            "u7-l1"
+          "source_files": [
+            "src/custom/lqdrv/user/src/lingqu-dcmi.c",
+            "src/custom/lqdrv/kernel/pci-dev.c",
+            "src/custom/nda/ibv_extend/ibv_extend.c",
+            "src/custom/ndr/npu_peermem.c"
           ],
-          "action": "new"
+          "title": "灵渠 lqdrv PCIe 故障检测与 NDA/NDR RDMA 特性",
+          "topic": "讲解 lqdrv 灵渠 PCIe 故障检测、nda（ibv_extend 高阶 RoCE 协商）与 ndr（NPU RDMA 直通/peermem）三类定制扩展特性。"
         },
         {
-          "id": "u7-l5",
-          "title": "设备虚拟化：vascend 算力切分与 vmng 虚拟化管理",
-          "order": 5,
+          "action": "keep",
+          "depends_on": [
+            "u6-l1"
+          ],
           "filename": "u7-l5-vascend-vmng.md",
-          "level": "advanced",
-          "topic": "讲解 vascend 昇腾算力切分特性（SR-IOV/vdavinci/domain 管理）与 vmng 设备虚拟化管理（virtmnghost）机制。",
+          "id": "u7-l5",
           "learning_goals": [
             "理解 vascend 算力切分的 vdavinci/domain_manage/schedule 设计",
             "掌握 vascend 的 mmio/cfg_space/vfio_ops 等虚拟化接入方式",
             "理解 vmng/virtmnghost 的设备虚拟化资源管理"
           ],
-          "source_files": [
-            "src/sdk_driver/vascend/interface.c",
-            "src/sdk_driver/vascend/vdavinci.c",
-            "src/sdk_driver/vascend/domain_manage.c",
-            "src/sdk_driver/vmng/phy/host/virtmnghost_ctrl.c"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "vascend",
             "vdavinci",
             "domain_manage",
             "vmng"
           ],
+          "order": 5,
           "practice_task": "阅读 vascend/interface.c 与 vdavinci.c，说明算力切分如何将一个物理 NPU 切分为多个虚拟实例；并描述 vmng/virtmnghost 如何为虚拟机分配与管理设备资源。",
-          "depends_on": [
-            "u6-l1"
+          "source_files": [
+            "src/sdk_driver/vascend/interface.c",
+            "src/sdk_driver/vascend/vdavinci.c",
+            "src/sdk_driver/vascend/domain_manage.c",
+            "src/sdk_driver/vmng/phy/host/virtmnghost_ctrl.c"
           ],
-          "action": "new"
+          "title": "设备虚拟化：vascend 算力切分与 vmng 虚拟化管理",
+          "topic": "讲解 vascend 昇腾算力切分特性（SR-IOV/vdavinci/domain 管理）与 vmng 设备虚拟化管理（virtmnghost）机制。"
         },
         {
-          "id": "u7-l6",
-          "title": "黑匣子 bbox 与基础设施工具（buff/mmpa/seclib）",
-          "order": 6,
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
           "filename": "u7-l6-bbox-and-infrastructure.md",
-          "level": "advanced",
-          "topic": "讲解 bbox 黑匣子（系统临终遗言/异常日志解析导出）、buff 进程间共享内存，以及 mmpa 跨平台适配与 seclib 安全函数库等基础设施。",
+          "id": "u7-l6",
           "learning_goals": [
             "理解 bbox 异常管理（excep_mgr/data_parser/dump_tool）如何保存系统临终信息",
             "掌握 buff 进程间共享内存管理机制",
             "理解 mmpa 跨平台接口库与 seclib 安全函数库的基础设施作用"
           ],
+          "level": "advanced",
+          "minimal_modules": [
+            "bbox",
+            "buff",
+            "mmpa",
+            "seclib"
+          ],
+          "order": 6,
+          "practice_task": "阅读 bbox_adapt.c 与 dump_tool，说明黑匣子如何在系统异常时保存并导出临终日志；再说明 mmpa 与 seclib 作为基础设施工具被哪些上层模块复用。",
           "source_files": [
             "src/ascend_hal/bbox/bbox_adapt.c",
             "src/ascend_hal/bbox/bbox_tools/dump_tool/dump_impl/bbox_dump_process.c",
@@ -1031,124 +1037,124 @@
             "src/ascend_hal/mmpa/src/mmpa_linux.c",
             "src/sdk_driver/seclib/securecmodule.c"
           ],
-          "minimal_modules": [
-            "bbox",
-            "buff",
-            "mmpa",
-            "seclib"
-          ],
-          "practice_task": "阅读 bbox_adapt.c 与 dump_tool，说明黑匣子如何在系统异常时保存并导出临终日志；再说明 mmpa 与 seclib 作为基础设施工具被哪些上层模块复用。",
-          "depends_on": [
-            "u3-l1"
-          ],
-          "action": "new"
+          "title": "黑匣子 bbox 与基础设施工具（buff/mmpa/seclib）",
+          "topic": "讲解 bbox 黑匣子（系统临终遗言/异常日志解析导出）、buff 进程间共享内存，以及 mmpa 跨平台适配与 seclib 安全函数库等基础设施。"
         }
-      ]
+      ],
+      "level": "advanced",
+      "order": 7,
+      "title": "高级特性与定制扩展"
     },
     {
       "id": "u8",
-      "title": "测试、调试与社区贡献",
-      "level": "advanced",
-      "order": 8,
       "lectures": [
         {
-          "id": "u8-l1",
-          "title": "日志体系与端到端调试验证",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u1-l2",
+            "u5-l2"
+          ],
           "filename": "u8-l1-logging-and-debugging.md",
-          "level": "advanced",
-          "topic": "汇总 driver 的三层日志体系（应用类/Host 内核态/Device 系统类日志），以及基于日志与 dmesg 的端到端问题定位方法。",
+          "id": "u8-l1",
           "learning_goals": [
             "区分应用类日志、Host 内核态日志、Device 系统类日志",
             "掌握日志级别设置与 msnpureport 导出方法",
             "学会依据 FAQ 定位编译安装与运行期常见问题"
           ],
-          "source_files": [
-            "docs/zh/QUICKSTART.md",
-            "src/ascend_hal/dmc/logdrv/drv_log_user.c",
-            "docs/zh/FAQ.md"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "logdrv",
             "msnpureport",
             "FAQ"
           ],
+          "order": 1,
           "practice_task": "依据 QUICKSTART 调试验证章节，编写一份「问题排查清单」：当应用报错时，依次查看应用日志→dmesg 内核日志→msnpureport 设备日志的步骤，并对照 FAQ 列出 3 个典型编译安装问题的解决方法。",
-          "depends_on": [
-            "u1-l2",
-            "u5-l2"
+          "source_files": [
+            "docs/zh/QUICKSTART.md",
+            "src/ascend_hal/dmc/logdrv/drv_log_user.c",
+            "docs/zh/FAQ.md"
           ],
-          "action": "new"
+          "title": "日志体系与端到端调试验证",
+          "topic": "汇总 driver 的三层日志体系（应用类/Host 内核态/Device 系统类日志），以及基于日志与 dmesg 的端到端问题定位方法。"
         },
         {
-          "id": "u8-l2",
-          "title": "UT 单元测试体系与覆盖率",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
           "filename": "u8-l2-unit-test.md",
-          "level": "advanced",
-          "topic": "讲解 driver 的 UT 单元测试目录组织、基于 googletest 的测试框架接入，以及 ENABLE_TEST 编译开关与覆盖率生成。",
+          "id": "u8-l2",
           "learning_goals": [
             "理解 test/ut 目录结构与测试入口（main.cc）",
             "掌握 ENABLE_TEST 编译开关如何启用 UT 构建",
             "理解 scripts/ut 覆盖率脚本的用途"
           ],
+          "level": "advanced",
+          "minimal_modules": [
+            "test/ut",
+            "ENABLE_TEST",
+            "scripts/ut"
+          ],
+          "order": 2,
+          "practice_task": "阅读 test/ut/CMakeLists.txt 与 main.cc，说明如何通过 ENABLE_TEST 开关编译 UT；尝试为一个已学模块（如 dsmi 或 pbl）构思一个最小 UT 用例的函数签名与断言点。",
           "source_files": [
             "test/CMakeLists.txt",
             "test/ut/CMakeLists.txt",
             "test/ut/common/main.cc",
             "test/run_test.sh"
           ],
-          "minimal_modules": [
-            "test/ut",
-            "ENABLE_TEST",
-            "scripts/ut"
-          ],
-          "practice_task": "阅读 test/ut/CMakeLists.txt 与 main.cc，说明如何通过 ENABLE_TEST 开关编译 UT；尝试为一个已学模块（如 dsmi 或 pbl）构思一个最小 UT 用例的函数签名与断言点。",
+          "title": "UT 单元测试体系与覆盖率",
+          "topic": "讲解 driver 的 UT 单元测试目录组织、基于 googletest 的测试框架接入，以及 ENABLE_TEST 编译开关与覆盖率生成。"
+        },
+        {
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u8-l3",
-          "title": "多芯片适配与构建特性配置",
-          "order": 3,
           "filename": "u8-l3-multi-chip-and-build-config.md",
-          "level": "advanced",
-          "topic": "讲解 driver 如何通过 build.sh 的 --soc 参数与 cmake/feature_config、driver_config 实现多芯片（ascend910b/ascend910_93/ascend950）适配与特性开关。",
+          "id": "u8-l3",
           "learning_goals": [
             "理解 build.sh --soc 如何驱动 get_product 选定芯片产品",
             "掌握 feature_config.cmake/driver_config.cmake 的特性编译开关机制",
             "理解 ascend950 的 --ube（灵衢超节点）特殊构建路径"
           ],
-          "source_files": [
-            "build.sh",
-            "cmake/feature_config.cmake",
-            "cmake/driver_config.cmake"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "build.sh",
             "feature_config.cmake",
             "driver_config.cmake"
           ],
+          "order": 3,
           "practice_task": "阅读 build.sh 的 get_product 与 feature_config.cmake，说明不同 --soc 取值如何开启不同特性宏；并描述 ascend950 编译时为何需要额外 --ube 参数与 urma 依赖。",
-          "depends_on": [
-            "u1-l2"
+          "source_files": [
+            "build.sh",
+            "cmake/feature_config.cmake",
+            "cmake/driver_config.cmake"
           ],
-          "action": "new"
+          "title": "多芯片适配与构建特性配置",
+          "topic": "讲解 driver 如何通过 build.sh 的 --soc 参数与 cmake/feature_config、driver_config 实现多芯片（ascend910b/ascend910_93/ascend950）适配与特性开关。"
         },
         {
-          "id": "u8-l4",
-          "title": "编码规范与社区贡献流程",
-          "order": 4,
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
           "filename": "u8-l4-coding-standard-and-contributing.md",
-          "level": "advanced",
-          "topic": "讲解 driver 的代码风格规范（.clang-format）、pre-commit 钩子、OAT 许可检查，以及从开发到提交 PR 的社区贡献流程。",
+          "id": "u8-l4",
           "learning_goals": [
             "理解 .clang-format 代码风格规范与各模块的格式化要求",
             "掌握 .pre-commit-config.yaml 钩子与 OAT.xml 许可检查",
             "理解 QUICKSTART 中从开发到 Maintainer 合入的完整贡献流程"
           ],
+          "level": "advanced",
+          "minimal_modules": [
+            "CONTRIBUTING.md",
+            ".clang-format",
+            ".pre-commit-config.yaml",
+            "OAT.xml"
+          ],
+          "order": 4,
+          "practice_task": "阅读 CONTRIBUTING.md 与 QUICKSTART 贡献流程，梳理「开发→编译→验证→提交 PR→CI 门禁→检视合入」各步骤；并说明 .clang-format 与 pre-commit 如何在提交前保证代码风格与许可证合规。",
           "source_files": [
             "CONTRIBUTING.md",
             ".clang-format",
@@ -1156,19 +1162,13 @@
             "OAT.xml",
             "docs/zh/QUICKSTART.md"
           ],
-          "minimal_modules": [
-            "CONTRIBUTING.md",
-            ".clang-format",
-            ".pre-commit-config.yaml",
-            "OAT.xml"
-          ],
-          "practice_task": "阅读 CONTRIBUTING.md 与 QUICKSTART 贡献流程，梳理「开发→编译→验证→提交 PR→CI 门禁→检视合入」各步骤；并说明 .clang-format 与 pre-commit 如何在提交前保证代码风格与许可证合规。",
-          "depends_on": [
-            "u1-l1"
-          ],
-          "action": "new"
+          "title": "编码规范与社区贡献流程",
+          "topic": "讲解 driver 的代码风格规范（.clang-format）、pre-commit 钩子、OAT 许可检查，以及从开发到提交 PR 的社区贡献流程。"
         }
-      ]
+      ],
+      "level": "advanced",
+      "order": 8,
+      "title": "测试、调试与社区贡献"
     }
   ]
 }

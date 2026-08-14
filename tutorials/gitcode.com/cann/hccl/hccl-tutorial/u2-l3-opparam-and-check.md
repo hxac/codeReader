@@ -2,15 +2,17 @@
 
 ## 1. 本讲目标
 
-上一讲（u2-l2）我们跟读了 `HcclAllReduce` 的入口：兼容分发 → `AllReduceInitAndCheck`（环境变量解析 + 入参校验）→ `AllReduceOutPlace` → `AllReduceOutPlaceCommon`。本讲继续往下钻一层，聚焦两件事：
+上一讲（u2-l2）我们跟读了 `HcclAllReduce` 的入口：兼容分发 → `AllReduceInitAndCheck`（环境变量解析 + 入参校验）→ `AllReduceOutPlace` → `AllReduceOutPlaceCommon`。本讲继续往下钻一层，聚焦三件事：
 
 1. **OpParam** —— 这是贯穿「算子入口 → Selector → Executor → Template」整条执行链路的「中央数据结构」。每一级代码都从它身上读取信息、往它身上写入结果。你要能看懂它有哪些字段、按什么逻辑组织。
 2. **入参校验** —— 用户传进来的指针、count、数据类型、归约算子是怎么被校验的，校验用的 `CHK_RET` / `CHK_PTR_NULL` / `RPT_INPUT_ERR` 等宏分别做什么。
+3. **TopoInfoWithNetLayerDetails 与引擎前缀映射** —— 本轮代码演进在 `alg_param.h` 中新增了 `TopoInfoWithNetLayerDetails::hostDpuOnly` 字段（含序列化支持）和 `ENGINE_PREFIX_MAP` / `ENGINE_STR_MAP` 两张映射表，它们是新选择器（代价模型路径）判断「哪些引擎可用」的关键输入。
 
 学完本讲，你应当能够：
 
 - 说出 OpParam 的关键字段（`opType` / `engine` / `opMode` / `DataDes` / `inputPtr`·`outputPtr` / `tag` 等）及其作用；
 - 读懂 `FillAllReduceOpParam` 如何把 API 入参装配进 OpParam；
+- 解释 `TopoInfoWithNetLayerDetails` 的序列化流程、新增的 `hostDpuOnly` 字段如何判定、以及 `ENGINE_PREFIX_MAP` 如何从算法名前缀反推引擎；
 - 区分 HCCL 中两套并存的校验工具（`op_common.cc` 的 `Check*` 与 `param_check.cc` 的 `HcomCheck*`），并掌握 `CHK_RET` / `CHK_PTR_NULL` / `RPT_INPUT_ERR` 校验宏的语义。
 
 ## 2. 前置知识
@@ -21,6 +23,7 @@
 - **算子（op）/ 算法（alg）/ 引擎（engine）三个维度的区别**：engine 分 AICPU / AIV / CCU（u1-l2、u1-l3）。
 - **API 参数模型**：所有算子共享 `sendBuf / recvBuf / count / dataType / op / comm / stream` 参数；`count` 是元素个数而非字节（u2-l1）。
 - **tag 的作用**：形如 `"AllReduce_<commName>"`，作为同一通信域拓扑/资源的缓存键，使多次调用共享同一份 topoInfo（u2-l2）。
+- **RankGraph 分层拓扑**：Server 内（Layer0）快、Server 间（Layer1）慢，这是分级通信的物理依据（u1-l2）。
 
 一个关键直觉：**OpParam 是「函数参数」到「执行状态」的转换层**。C 接口的参数是分散的、扁平的；进入 HCCL 内部后，这些参数被组装成一个结构体对象，随调用链一路传递、被各级代码读写。理解 OpParam，就是理解 HCCL 内部「数据是怎么流动的」。
 
@@ -28,10 +31,12 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| `src/ops/op_common/inc/alg_param.h` | 定义 OpParam 及其内嵌的 DataDes 联合体、数据类型字节表 `DATATYPE_SIZE_TABLE`、众多配套结构体（TopoInfo、AlgResourceCtx 等）。 |
+| `src/ops/op_common/inc/alg_param.h` | 定义 OpParam 及其内嵌的 DataDes 联合体、数据类型字节表 `DATATYPE_SIZE_TABLE`、`TopoInfoWithNetLayerDetails`（含 `hostDpuOnly`）、`ENGINE_PREFIX_MAP` / `ENGINE_STR_MAP` 两张新映射表，以及众多配套结构体（AlgResourceCtx 等）。 |
 | `src/ops/all_reduce/all_reduce_op.cc` | `AllReduceInitAndCheck`（校验 + rank 信息 + tag）、`CheckAllReduceInputPara`（指针非空校验）、`FillAllReduceOpParam`（装配 OpParam）。 |
-| `src/ops/op_common/op_common.cc` | `CheckCount` / `CheckDataType` / `CheckReduceOp` —— AllReduce 入口实际调用的新一代校验函数。 |
+| `src/ops/op_common/op_common.cc` | `CheckCount` / `CheckDataType` / `CheckReduceOp` —— AllReduce 入口实际调用的新一代校验函数；另含 `IsHostDpu` / `IsBarrierHostDpu` 等 hostDpuOnly 场景的判定入口。 |
 | `src/common/param_check.h` / `src/common/param_check.cc` | `HcomCheck*` 系列可复用校验工具（tag/count/dataType/group/stream）。 |
+| `src/ops/op_common/topo/topo_host.cc` | `CalcHostDPUOnly` —— 本轮新增函数，依据拓扑层级与端点位置判定 `hostDpuOnly`。 |
+| `src/ops/op_common/selector/selector_engine.cc` | 新选择器 `SelectorEngine` 消费 `hostDpuOnly` 与 `ENGINE_PREFIX_MAP` 的地方（`GetEnginePriority` / `GetEngineByAlgName`），本讲只看接口，u8-l1 详讲。 |
 | `src/common/log.h` | `CHK_RET` / `CHK_PTR_NULL` / `CHK_PRT_RET` / `CHK_RET_AND_PRINT_IDE` 校验宏。 |
 | `src/common/adapter_error_manager_pub.h` | `RPT_INPUT_ERR` 结构化错误上报宏。 |
 
@@ -70,7 +75,7 @@ OpParam 的字段可以按职责分成几组：
 
 其中 **三个旋钮**（`opMode` / `engine` / `algType`）和 **一个联合体**（`DataDes`）是理解 OpParam 的核心，下面重点讲。
 
-`opMode` 是 `OpMode` 枚举（[alg_param.h:138](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/inc/alg_param.h#L138)）：
+`opMode` 是 `OpMode` 枚举（[alg_param.h:152](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/inc/alg_param.h#L152)）：
 
 ```cpp
 enum class OpMode { OFFLOAD = 0, OPBASE = 1, ACLGRAPH = 2 };
@@ -82,7 +87,7 @@ enum class OpMode { OFFLOAD = 0, OPBASE = 1, ACLGRAPH = 2 };
 
 #### 4.1.3 源码精读
 
-OpParam 的核心定义在 [src/ops/op_common/inc/alg_param.h:559-645](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/inc/alg_param.h#L559-L645)。下面是关键片段（已删减注释与部分字段）：
+OpParam 的核心定义在 [src/ops/op_common/inc/alg_param.h:576-662](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/inc/alg_param.h#L576-L662)。下面是关键片段（已删减注释与部分字段）：
 
 ```cpp
 struct OpParam { // 不申请ctx，每个算子单独下发
@@ -135,7 +140,7 @@ struct OpParam { // 不申请ctx，每个算子单独下发
 
 3. **`engine` 在 OpParam 定义时是 RESERVED**：也就是说 OpParam 构造出来时还不知道用哪个引擎，引擎是后面 `HcclGetOpExpansionMode` 才填进去的（见 u2-l4）。这解释了为什么「装配」和「引擎选择」是两个分开的步骤。
 
-数据类型到字节数的映射由 `DATATYPE_SIZE_TABLE` 提供，定义在 [src/ops/op_common/inc/alg_param.h:43-61](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/inc/alg_param.h#L43-L61)：
+数据类型到字节数的映射由 `DATATYPE_SIZE_TABLE` 提供，定义在 [src/ops/op_common/inc/alg_param.h:43-61](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/inc/alg_param.h#L43-L61)：
 
 ```cpp
 constexpr uint32_t DATATYPE_SIZE_TABLE[HCCL_DATA_TYPE_RESERVED]
@@ -151,7 +156,7 @@ constexpr uint32_t DATATYPE_SIZE_TABLE[HCCL_DATA_TYPE_RESERVED]
 
 **操作步骤**：
 
-1. 打开 [src/ops/op_common/inc/alg_param.h:590-625](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/inc/alg_param.h#L590-L625)，列出 union 中的全部 6 个 struct 成员名。
+1. 打开 [src/ops/op_common/inc/alg_param.h:607-642](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/inc/alg_param.h#L607-L642)，列出 union 中的全部 6 个 struct 成员名。
 2. 用 `Grep` 搜索每个成员名（如 `all2AllDataDes`、`vDataDes`、`batchSendRecvDataDes`），看它们分别在哪个算子的 `Fill*OpParam` 里被赋值。
 3. 对比 `opType` 字段：搜索 `param.opType = HcclCMDType::` 出现的地方，确认每个算子设置了哪个 `HcclCMDType`。
 
@@ -165,7 +170,7 @@ constexpr uint32_t DATATYPE_SIZE_TABLE[HCCL_DATA_TYPE_RESERVED]
 
 **练习 1**：OpParam 注释写「不申请 ctx」，那 device 侧资源上下文存在哪个字段里？
 
-> **答案**：存在 `resCtx` 指针字段（[alg_param.h:634](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/inc/alg_param.h#L634)）。OpParam 自身只是参数容器，真正的 device 资源由后续阶段申请后挂到 `resCtx` 上。
+> **答案**：存在 `resCtx` 指针字段（[alg_param.h:651](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/inc/alg_param.h#L651)）。OpParam 自身只是参数容器，真正的 device 资源由后续阶段申请后挂到 `resCtx` 上。
 
 **练习 2**：为什么 `DataDes` 要做成 union 而不是一个包含所有字段的普通 struct？
 
@@ -205,12 +210,12 @@ constexpr uint32_t DATATYPE_SIZE_TABLE[HCCL_DATA_TYPE_RESERVED]
 
 #### 4.2.3 源码精读
 
-装配函数定义在 [src/ops/all_reduce/all_reduce_op.cc:159-187](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/all_reduce_op.cc#L159-L187)：
+装配函数定义在 [src/ops/all_reduce/all_reduce_op.cc:159-187](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/all_reduce_op.cc#L159-L187)：
 
 ```cpp
 HcclResult FillAllReduceOpParam(
-    void* sendBuf, void* recvBuf, uint64_t count, HcclDataType dataType, HcclReduceOp op,
-    const HcclComm comm, aclrtStream stream, OpMode opMode, OpParam& param)
+    void* sendBuf, void* recvBuf, uint64_t count, HcclDataType dataType, HcclReduceOp op, const HcclComm comm,
+    aclrtStream stream, OpMode opMode, OpParam& param)
 {
     (void)comm;
     u32 perDataSize = DATATYPE_SIZE_TABLE[dataType];
@@ -249,15 +254,17 @@ HcclResult FillAllReduceOpParam(
 - `param.opType = HcclCMDType::HCCL_CMD_ALLREDUCE`：**正是这个字段告诉后续代码「当前 union 有效成员是 DataDes」**。
 - `param.reduceType = op`：注意这一行出现了两次（函数开头和结尾各一次），是冗余赋值，但无害——最终值就是用户传入的 `op`。
 
-它的调用点在 [all_reduce_op.cc:195](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/all_reduce_op.cc#L195)，位于 `AllReduceOutPlaceCommon` 最开头：
+它的调用点在 [all_reduce_op.cc:189-197](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/all_reduce_op.cc#L189-L197)，位于 `AllReduceOutPlaceCommon` 最开头：
 
 ```cpp
 HcclResult AllReduceOutPlaceCommon(/* ... */, OpParam& param)
 {
     HCCL_INFO("Start to execute AllReduceOutPlace");
+
     CHK_RET(FillAllReduceOpParam(sendBuf, recvBuf, count, dataType, op, comm, stream, opMode, param));
+
     CHK_RET(HcclGetOpExpansionMode(comm, param));   // 这里才填 param.engine
-    // ... CCU FastLaunch / AIV Cache / 单卡 / Selector / HcclExecOp
+    // ... CCU 9.0 老流程 / CCU FastLaunch / AIV Cache / 单卡 / Selector / HcclExecOp
 }
 ```
 
@@ -275,7 +282,7 @@ HcclAllReduce(sendBuf, recvBuf, /*count=*/1024, HCCL_DATA_TYPE_FP32, HCCL_REDUCE
 
 **操作步骤**：
 
-1. 查 `DATATYPE_SIZE_TABLE`（[alg_param.h:43-61](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/inc/alg_param.h#L43-L61)）得 FP32（`sizeof(float)`）= 4 字节。
+1. 查 `DATATYPE_SIZE_TABLE`（[alg_param.h:43-61](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/inc/alg_param.h#L43-L61)）得 FP32（`sizeof(float)`）= 4 字节。
 2. 套公式：`outputSize = inputSize = 1024 × 4 = 4096` 字节。
 3. 逐字段对照 `FillAllReduceOpParam` 函数体填写。
 
@@ -306,7 +313,7 @@ HcclAllReduce(sendBuf, recvBuf, /*count=*/1024, HCCL_DATA_TYPE_FP32, HCCL_REDUCE
 
 **练习 1**：如果把 `count=1024` 改成 `count=0`，`FillAllReduceOpParam` 会执行吗？
 
-> **答案**：不会。`HcclAllReduce` 入口在调用 `AllReduceInitAndCheck`（进而装配）之前，有早退分支 `CHK_PRT_RET(count == 0, ..., HCCL_SUCCESS)`（[all_reduce_op.cc:37](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/all_reduce_op.cc#L37)）。count 为 0 直接返回成功，不进入装配与执行（u2-l2 已讲过这条早退）。
+> **答案**：不会。`HcclAllReduce` 入口在调用 `AllReduceInitAndCheck`（进而装配）之前，有早退分支 `CHK_PRT_RET(count == 0, ..., HCCL_SUCCESS)`（[all_reduce_op.cc:37](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/all_reduce_op.cc#L37)）。count 为 0 直接返回成功，不进入装配与执行（u2-l2 已讲过这条早退）。
 
 **练习 2**：为什么 `inputSize = outputSize`？哪种算子不满足这个等式？
 
@@ -318,9 +325,185 @@ HcclAllReduce(sendBuf, recvBuf, /*count=*/1024, HCCL_DATA_TYPE_FP32, HCCL_REDUCE
 
 ---
 
-### 4.3 param_check 与 RPT_INPUT_ERR / CHK_PTR_NULL 校验宏
+### 4.3 TopoInfoWithNetLayerDetails 序列化与 hostDpuOnly（本轮新增）
 
 #### 4.3.1 概念说明
+
+`TopoInfoWithNetLayerDetails` 是「通信域拓扑上下文」：它在基础 `TopoInfo`（rank、serverNum、deviceType 等标量信息）之上，追加了 `topoLevelNums`（逻辑拓扑层级数）、`level0Topo`（第 0 层形状）、`netLayerDetails`（每层网络实例的规模明细）以及一组布尔特征位（`Level0Nhr`、`is2DieFullMesh`、`level0BigClosRange` 等）。Selector 和 CostTable 正是依据这些特征位判断「当前拓扑下哪些算法可行」。
+
+**本轮代码演进给它带来两个变化**：
+
+1. 新增布尔字段 `hostDpuOnly`（[alg_param.h:227](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/inc/alg_param.h#L227)）：标记「本通信域的最外层网络只挂在 Host 侧 DPU 上」——即框间（Server 间）通信只能绕经主机 DPU，device 直连链路不存在。
+2. `Serialize()` / `DeSerialize()` 同步补写了该字段（[alg_param.h:265](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/inc/alg_param.h#L265) 与 [alg_param.h:317](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/inc/alg_param.h#L317)），保证拓扑信息序列化到 device 侧后该标记不丢失。
+
+同文件还新增了两张映射表（[alg_param.h:138-150](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/inc/alg_param.h#L138-L150)）：
+
+```cpp
+// OpExecuteConfig → 算法名前缀映射
+// key=前缀, value=引擎; 逆序遍历可实现长前缀优先匹配
+static const std::map<std::string, OpExecuteConfig> ENGINE_PREFIX_MAP = {
+    {"Aicpu", OpExecuteConfig::AICPU_TS},     {"Aiv", OpExecuteConfig::AIV},     {"CcuMS", OpExecuteConfig::CCU_MS},
+    {"CcuSched", OpExecuteConfig::CCU_SCHED}, {"Dpu", OpExecuteConfig::HOSTCPU},
+};
+
+// OpExecuteConfig → 字符串(用于日志)
+static const std::map<OpExecuteConfig, const char*> ENGINE_STR_MAP = { /* "AICPU_TS" / "AIV" / ... */ };
+```
+
+- **`ENGINE_PREFIX_MAP`**：算法名（algName）→ 引擎的反查表。新选择器产出的算法名都带引擎前缀（如 `AicpuAllReduceSoleNHR`、`CcuMSAllReduceSoleMesh`、`Dpu...`），用这张表即可从名字前缀反推它跑在哪个引擎上。注释点明「逆序遍历可实现长前缀优先匹配」——因为 `std::map` 按 key 字典序排列，`CcuMS` 排在 `CcuSched` 前面，逆序遍历会先尝试更长的 `CcuSched`，避免 `CcuMS` 把 `CcuSchedXxx` 误匹配掉。
+- **`ENGINE_STR_MAP`**：引擎枚举 → 日志字符串，用于代价模型缓存键（如 `COST_MODEL_TAG + "_AICPU_TS"`）与日志输出。
+
+注意这里的 `OpExecuteConfig` 是**新选择器体系**的引擎枚举（AICPU_TS / AIV / CCU_MS / CCU_SCHED / HOSTCPU），与 OpParam 里旧体系的 `CommEngine` 枚举是两套并存的表述——前者服务于代价模型路径，后者服务于旧 Selector 路径。
+
+#### 4.3.2 核心流程
+
+**（1）hostDpuOnly 的判定**发生在拓扑信息计算阶段（`HcclCalcTopoInfo`，结果以 `param.tag` 为键缓存），由本轮新增的 `CalcHostDPUOnly` 完成，判定逻辑是逐层排除：
+
+```
+CalcHostDPUOnly(comm, topoInfo)
+ ├─ serverNum == 1？          → 单服务器，无需 DPU，false
+ ├─ topoLevelNums == 1？      → 只有框内一层，false
+ ├─ 取最外层（topoLevelNums-1）netLayer 的全部 topoInstance
+ │   ├─ topoType != CLOS？    → 跳过该实例
+ │   ├─ rankNum != userRankSize？→ 本 rank 未与全部 rank 连通，跳过
+ │   └─ 遍历该实例的 Endpoint：
+ │       ├─ 存在 DEVICE 位置端点 → 框间还有 device 直连，false（直接返回）
+ │       └─ 全部为 HOST 位置端点 → hostDPU = true
+ └─ hostDPU == true → topoInfo->hostDpuOnly = true
+```
+
+**（2）hostDpuOnly 的消费**发生在新选择器 `SelectorEngine::GetEnginePriority`：`hostDpuOnly == true` 时，候选引擎列表被直接收缩为 `{HOSTCPU}`——只有 Host DPU 引擎可用，AICPU/AIV/CCU 都不参与本次代价比较。此外 `cost_table.cc` 的多条算法过滤规则也以 `!topo->hostDpuOnly` 为前提（如 NHR、三层拓扑算法在 hostDpuOnly 场景下被排除）。
+
+**（3）序列化**：`TopoInfoWithNetLayerDetails::Serialize()` 用 `BinaryStream` 逐字段写入，`hostDpuOnly` 被补写进 `level2Ubg` 与 `level0Symmetric` 之间；`DeSerialize()` 按完全相同的顺序读出。这个结构会被整体嵌入 `AlgResourceCtxSerializable::Serialize()`（先写 `topoInfoSeqSize`，再拼接 topoInfo 的序列化字节），随算法资源上下文一起拷贝到 device 侧执行时使用。
+
+#### 4.3.3 源码精读
+
+**（1）字段与序列化**，[src/ops/op_common/inc/alg_param.h:216-339](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/inc/alg_param.h#L216-L339) 定义了整个结构体。`hostDpuOnly` 字段与其他特征位排在一起（这段代码声明了 `hostDpuOnly` 字段）：
+
+```cpp
+struct TopoInfoWithNetLayerDetails : public TopoInfo { // 通信域拓扑ctx
+    u32 topoLevelNums = 0;
+    Level0Shape level0Topo;
+    bool Level0Nhr{false};
+    // ... 其他特征位
+    bool level2Ubg{false};
+    bool hostDpuOnly{false};        // ← 本轮新增：框间仅 Host DPU 可达
+    bool level0Symmetric{false};
+    // ...
+};
+```
+
+`Serialize()` 中对应的新增写入（[alg_param.h:265](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/inc/alg_param.h#L265) 这一行把 `hostDpuOnly` 写入二进制流）：
+
+```cpp
+binaryStream << level2Ubg;
+binaryStream << hostDpuOnly;    // ← 新增
+binaryStream << level0Symmetric;
+```
+
+`DeSerialize()` 中对应的新增读取在 [alg_param.h:317](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/inc/alg_param.h#L317)，顺序与写入严格一致——**序列化与反序列化必须逐字段对齐**，这是手写序列化代码最容易出错的地方，读源码时可重点检查两边顺序是否同步。
+
+**（2）判定函数 `CalcHostDPUOnly`** 定义在 [src/ops/op_common/topo/topo_host.cc:786-865](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/topo/topo_host.cc#L786-L865)（这段代码实现了 hostDpuOnly 的完整判定逻辑），它在 `HcclCalcTopoInfo` 的特征位计算链末尾被调用（[topo_host.cc:782](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/topo/topo_host.cc#L782)）。关键片段：
+
+```cpp
+HcclResult CalcHostDPUOnly(HcclComm comm, TopoInfoWithNetLayerDetails* topoInfo)
+{
+    topoInfo->hostDpuOnly = false;
+    // 只有一个server，不使用DPU
+    if (topoInfo->serverNum == 1) { return HCCL_SUCCESS; }
+    // 只有一层topo，不使用DPU
+    if (topoInfo->topoLevelNums == 1) { return HCCL_SUCCESS; }
+    // ... 取 netLayers，只校验最外层（topoLevelNums - 1）
+    for (/* 每个 topoInstance */) {
+        if (topoType != COMM_TOPO_CLOS) { continue; }        // 只看 CLOS 拓扑实例
+        if (rankNum != topoInfo->userRankSize) { continue; } // 必须与全部 rank 连通
+        for (/* 每个 Endpoint */) {
+            if (endPointDesc.loc.locType == ENDPOINT_LOC_TYPE_DEVICE) {
+                return HCCL_SUCCESS;  // 框间仍有 device 直连 → 不是 hostDpuOnly
+            } else if (endPointDesc.loc.locType == ENDPOINT_LOC_TYPE_HOST) {
+                hostDPU = true;       // 端点挂在 Host 上
+            }
+        }
+    }
+    if (hostDPU) { topoInfo->hostDpuOnly = true; }
+    return HCCL_SUCCESS;
+}
+```
+
+判定要点：**只检查最外层网络**（框间层）的 CLOS 实例；只要发现任何一个端点位于 device 侧，就说明 NPU 之间还有直通链路，DPU 不是唯一通路；只有当本 rank 与全部 rank 连通、且所有端点都在 Host 侧时，才认定 `hostDpuOnly = true`。
+
+**（3）消费点一：新选择器的引擎优先级**，[src/ops/op_common/selector/selector_engine.cc:68-75](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/selector_engine.cc#L68-L75)（这段代码在 hostDpuOnly 场景下把候选引擎收缩为 HOSTCPU）：
+
+```cpp
+std::vector<OpExecuteConfig>
+SelectorEngine::GetEnginePriority(TopoInfoWithNetLayerDetails* topoInfo, OpExecuteConfig opExecuteConfig)
+{
+    // hostDpuOnly 已在 HcclCalcTopoInfo 中计算并缓存
+    if (topoInfo != nullptr && topoInfo->hostDpuOnly) {
+        HCCL_INFO("[GetEnginePriority] hostDpuOnly=true, return [HOSTCPU].");
+        return {OpExecuteConfig::HOSTCPU};
+    }
+    // ... 正常场景按 CCU_MS → CCU_SCHED → AICPU 等回退链给出候选
+}
+```
+
+**（4）消费点二：算法名前缀反查引擎**，[src/ops/op_common/selector/selector_engine.cc:45-54](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/selector_engine.cc#L45-L54)（这段代码用 `ENGINE_PREFIX_MAP` 逆序遍历实现长前缀优先匹配）：
+
+```cpp
+OpExecuteConfig SelectorEngine::GetEngineByAlgName(const std::string& algName)
+{
+    // 逆序遍历: 长前缀优先(CcuSched > CcuMS)
+    for (auto it = ENGINE_PREFIX_MAP.rbegin(); it != ENGINE_PREFIX_MAP.rend(); ++it) {
+        if (algName.rfind(it->first, 0) == 0) {
+            return it->second;
+        }
+    }
+    return OpExecuteConfig::AICPU_TS;  // 无前缀匹配时默认 AICPU_TS
+}
+```
+
+`algName.rfind(prefix, 0) == 0` 是 C++ 里判断「字符串以 prefix 开头」的惯用写法；配合 `std::map` 的字典序 + 逆序遍历，保证 `CcuSched`（长）先于 `CcuMS`（短）被尝试。
+
+另外，`op_common.cc` 中还有两个复用这一判定的入口（不属于新选择器）：`IsHostDpu`（限 910B 设备，[op_common.cc:3586-3633](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/op_common.cc#L3586-L3633)）与 `IsBarrierHostDpu`（不限设备，供 950 Barrier 新流程使用，[op_common.cc:3637-3672](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/op_common.cc#L3637-L3672)），两者都临时构造一个 `TopoInfoWithNetLayerDetails` 并调用底层 `CheckHostDPUOnly` 完成判定——说明 hostDpuOnly 已经是一个被多条业务线共享的拓扑特征。
+
+#### 4.3.4 代码实践
+
+**实践目标**：把「字段声明 → 序列化 → 判定 → 消费」四个环节串成一条完整的阅读路径，理解一个新拓扑特征位是如何贯穿下去的。
+
+**操作步骤**：
+
+1. 打开 [alg_param.h:216-339](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/inc/alg_param.h#L216-L339)，在 `Serialize()` 与 `DeSerialize()` 里找到 `hostDpuOnly` 的写入行（L265）与读出行（L317），确认两者在各自函数中的字段顺序一致。
+2. 打开 [topo_host.cc:786-865](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/topo/topo_host.cc#L786-L865)，回答：一个 2 台服务器、最外层 CLOS 全连通、但其中一个端点位于 device 侧的集群，`hostDpuOnly` 是 true 还是 false？
+3. 打开 [selector_engine.cc:45-75](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/selector_engine.cc#L45-L75)，对照 `ENGINE_PREFIX_MAP` 手工推演：`GetEngineByAlgName("CcuSchedAllReduceSoleMesh")` 逆序遍历时先命中哪个 key？若用正序遍历会误命中哪个 key？
+
+**需要观察的现象**：`ENGINE_PREFIX_MAP` 在 `std::map` 中的实际存储顺序（字典序：Aicpu < Aiv < CcuMS < CcuSched < Dpu），以及逆序遍历如何让 `CcuSched` 先于 `CcuMS` 被匹配。
+
+**预期结果**：
+
+- 步骤 2：false——只要最外层存在 device 侧端点，函数在遍历 Endpoint 时直接 `return HCCL_SUCCESS`，`hostDpuOnly` 保持初始值 false。
+- 步骤 3：逆序先命中 `"CcuSched"`，返回 `CCU_SCHED`；若正序遍历，`"CcuMS"` 不是 `"CcuSchedAllReduceSoleMesh"` 的前缀（`CcuM` ≠ `CcuS`），本例不会误命中，但对于以 `"CcuMS"` 为前缀的名字（如 `CcuMSAllReduceSoleMesh`），正序和逆序结果一致——逆序遍历是针对「key 互为前缀」场景（如假想的前缀 `Ccu` 与 `CcuMS`）的通用防御写法。
+
+> 待本地验证：`GetEngineByAlgName` 的推演可直接对照代码与映射表核对；真实集群上 hostDpuOnly 的取值需在多机环境观察 `HCCL_INFO` 日志（"Using host dpu trans." / "Not using hostdpu because ..."）确认。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：`hostDpuOnly = true` 时，新选择器还会比较 AICPU / AIV / CCU 引擎算法的代价吗？
+
+> **答案**：不会。`SelectorEngine::GetEnginePriority` 在 `hostDpuOnly == true` 时直接返回 `{HOSTCPU}`（[selector_engine.cc:71-75](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/selector_engine.cc#L71-L75)），候选引擎只剩 Host DPU 一个——因为物理上框间只有 Host DPU 一条通路，其他引擎的算法根本无法执行，比较代价没有意义。
+
+**练习 2**：如果给 `TopoInfoWithNetLayerDetails` 新增一个字段却忘了在 `DeSerialize()` 里补读取，会发生什么？
+
+> **答案**：写入与读取的字段错位：`Serialize` 多写了一个字段，而 `DeSerialize` 从错的偏移开始读，之后所有字段全部错位，反序列化出错误的拓扑信息（且往往不报错，属于静默数据损坏）。这就是为什么手写序列化必须保证 `Serialize` 与 `DeSerialize` 逐字段、同顺序对齐——本轮 `hostDpuOnly` 就是两边同步新增的（写 L265 / 读 L317）。
+
+**练习 3**：`ENGINE_PREFIX_MAP` 为什么用 `std::map`（有序）而不是 `std::unordered_map`？
+
+> **答案**：因为匹配依赖 key 的字典序：逆序遍历有序 map 可实现「长前缀优先」（注释明确写了 `CcuSched > CcuMS`），确保带公共前缀的算法名被最具体的前缀匹配。`unordered_map` 的遍历顺序不确定，无法保证这一语义。
+
+---
+
+### 4.4 param_check 与 RPT_INPUT_ERR / CHK_PTR_NULL 校验宏
+
+#### 4.4.1 概念说明
 
 装配之前，HCCL 必须先确认用户传进来的参数是合法的——空指针、越界 count、不支持的数据类型都必须尽早拦截。这一节讲清楚三件事：
 
@@ -330,7 +513,7 @@ HcclAllReduce(sendBuf, recvBuf, /*count=*/1024, HCCL_DATA_TYPE_FP32, HCCL_REDUCE
 
 一个贯穿始终的原则是 **「廉价优先、尽早失败」**（fail fast）：最便宜的检查（空指针）放在最前面，昂贵的检查（需要查设备/通信域）放在后面；任何一项失败就立即 return，不继续往下走。这样既节省资源，也使错误现场最接近根因。
 
-#### 4.3.2 核心流程
+#### 4.4.2 核心流程
 
 AllReduce 路径上的校验发生在 `AllReduceInitAndCheck` 与 `CheckAllReduceInputPara` 两处，整体顺序（承接 u2-l2，这里展开校验细节）：
 
@@ -350,11 +533,11 @@ AllReduceInitAndCheck
 
 每一行校验都用 `CHK_RET(...)` 包裹，失败即 return。
 
-#### 4.3.3 源码精读
+#### 4.4.3 源码精读
 
-**(1) 校验宏** 定义在 [src/common/log.h:173-227](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/common/log.h#L173-L227)。
+**(1) 校验宏** 定义在 [src/common/log.h:173-227](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/common/log.h#L173-L227)。
 
-`CHK_RET` —— 检查一个返回 `HcclResult` 的调用，失败则打印调用踪迹并向上 propagate 错误码（[log.h:201-212](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/common/log.h#L201-L212)）：
+`CHK_RET` —— 检查一个返回 `HcclResult` 的调用，失败则打印调用踪迹并向上 propagate 错误码：
 
 ```cpp
 #define CHK_RET(call)                                       \
@@ -373,11 +556,11 @@ AllReduceInitAndCheck
 
 要点：`HCCL_E_AGAIN`（可重试）只打 WARNING，其余错误打 ERROR；最终都 `return hcclRet` 把错误向上抛。这是 HCCL 全仓统一的「错误传播」机制——内部函数几乎不直接处理错误，而是用 `CHK_RET` 一路抛到入口。
 
-`CHK_PTR_NULL` —— 检查指针非空，空则返回 `HCCL_E_PTR`（[log.h:173](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/common/log.h#L173)），是 `CheckAllReduceInputPara` 里最常用的检查。
+`CHK_PTR_NULL` —— 检查指针非空，空则返回 `HCCL_E_PTR`（[log.h:173](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/common/log.h#L173)），是 `CheckAllReduceInputPara` 里最常用的检查。
 
 `CHK_PRT_RET(result, exeLog, retCode)` —— 条件分支：若 `result` 为真，执行 `exeLog`（通常是一条日志）后返回 `retCode`。它比 `CHK_RET` 更灵活，可自定义返回码与日志，常用于「业务早退」（如 `count == 0` 返回成功）。
 
-**(2) 结构化错误上报** `RPT_INPUT_ERR` 定义在 [src/common/adapter_error_manager_pub.h:23-28](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/common/adapter_error_manager_pub.h#L23-L28)：
+**(2) 结构化错误上报** `RPT_INPUT_ERR` 定义在 [src/common/adapter_error_manager_pub.h:23-28](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/common/adapter_error_manager_pub.h#L23-L28)：
 
 ```cpp
 #define RPT_INPUT_ERR(result, error_code, key, value)     \
@@ -390,26 +573,24 @@ AllReduceInitAndCheck
 
 它把一条「错误码 + 键值对」诊断信息上报给错误管理器（`RptInputErr` 函数指针）。`key` 通常是 `{"ccl_op", "value", "parameter", "expect"}` 四元标题，`value` 是 `{"算子名", "实际值", "参数名", "期望值"}`。这种结构化上报使得错误日志可以被工具自动解析，而不仅仅是一行文本。
 
-AllReduce 的指针校验集中在这段，[all_reduce_op.cc:135-157](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/all_reduce_op.cc#L135-L157)：
+AllReduce 的指针校验集中在这段，[all_reduce_op.cc:135-157](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/all_reduce_op.cc#L135-L157)：
 
 ```cpp
-HcclResult CheckAllReduceInputPara(const HcclComm comm, const void* sendBuf,
-                                   const void* recvBuf, const aclrtStream stream)
+HcclResult
+CheckAllReduceInputPara(const HcclComm comm, const void* sendBuf, const void* recvBuf, const aclrtStream stream)
 {
-    RPT_INPUT_ERR(stream == nullptr, "EI0003",
-        std::vector<std::string>({"ccl_op", "value", "parameter", "expect"}),
+    RPT_INPUT_ERR(
+        stream == nullptr, "EI0003", std::vector<std::string>({"ccl_op", "value", "parameter", "expect"}),
         std::vector<std::string>({"HcclAllReduce", "nullptr", "stream", "non-null pointer"}));
     CHK_PTR_NULL(stream);
-    RPT_INPUT_ERR(comm == nullptr, "EI0003", /* ... */ {"HcclAllReduce", "nullptr", "comm", "non-null pointer"});
-    CHK_PTR_NULL(comm);
-    // ... 同样模式校验 sendBuf / recvBuf
+    // ... comm / sendBuf / recvBuf 同样模式
     return HCCL_SUCCESS;
 }
 ```
 
 注意这里 **`RPT_INPUT_ERR` 与 `CHK_PTR_NULL` 成对出现** 的固定模式：先用 `RPT_INPUT_ERR` 上报结构化诊断（错误码 `EI0003` 表示输入参数错误），再用 `CHK_PTR_NULL` 真正执行「空则返回」。这是全仓统一的「上报 + 拦截」二段式写法。
 
-**(3) 业务校验函数** —— `CheckCount` / `CheckDataType` / `CheckReduceOp` 定义在 [src/ops/op_common/op_common.cc:2872-2966](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/op_common.cc#L2872-L2966)，由 `AllReduceInitAndCheck` 调用。三者都遵循「判定 → RPT_INPUT_ERR 上报 → HCCL_ERROR 打日志 → 返回错误码」的范式：
+**(3) 业务校验函数** —— `CheckCount` / `CheckDataType` / `CheckReduceOp` 定义在 [src/ops/op_common/op_common.cc:2882-2976](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/op_common.cc#L2882-L2976)，由 `AllReduceInitAndCheck`（[all_reduce_op.cc:128-130](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/all_reduce_op.cc#L128-L130)）调用。三者都遵循「判定 → RPT_INPUT_ERR 上报 → HCCL_ERROR 打日志 → 返回错误码」的范式：
 
 ```cpp
 HcclResult CheckCount(const u64 count)
@@ -422,11 +603,11 @@ HcclResult CheckCount(const u64 count)
 }
 ```
 
-`CheckDataType(dataType, /*needReduce=*/true)`（[op_common.cc:2883-2918](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/op_common.cc#L2883-L2918)）有一个重要参数 `needReduce`：归约类算子（AllReduce）传入 `true`，会额外禁止无意义归约的类型（如 `UINT8` / `FP8` 系列——这些类型做 SUM 没有定义良好的语义）；非归约算子（如 AllGather）传入 `false`，允许更宽的类型集。这解释了为什么 AllReduce 不支持 `FP8` 而 AllGather 可以。
+`CheckDataType(dataType, /*needReduce=*/true)`（[op_common.cc:2893-2928](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/op_common.cc#L2893-L2928)）有一个重要参数 `needReduce`：归约类算子（AllReduce）传入 `true`，会额外禁止无意义归约的类型（如 `UINT8` / `INT128` / FP8 系列）；非归约算子（如 AllGather）传入 `false`，允许更宽的类型集（配套的支持列表见 [GetSupportDataType, op_common.cc:2930-2953](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/op_common.cc#L2930-L2953)）。这解释了为什么 AllReduce 不支持 `FP8` 而 AllGather 可以。
 
-`CheckReduceOp(dataType, op)`（[op_common.cc:2945-2966](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/op_common.cc#L2945-L2966)）专门约束 `HCCL_REDUCE_PROD`（连乘）：连乘只支持 INT8/INT32/INT64/UINT64/FP16/FP32/FP64，否则报错。
+`CheckReduceOp(dataType, op)`（[op_common.cc:2955-2976](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/op_common.cc#L2955-L2976)）专门约束 `HCCL_REDUCE_PROD`（连乘）：连乘只支持 INT8/INT32/INT64/UINT64/FP16/FP32/FP64，否则报错。
 
-**(4) 可复用的 HcomCheck\* 系列** 定义在 [src/common/param_check.cc:18-153](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/common/param_check.cc#L18-L153)（`param_check.h` 声明见 [param_check.h:18-37](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/common/param_check.h#L18-L37)）。它提供按维度组合的校验重载，例如：
+**(4) 可复用的 HcomCheck\* 系列** 定义在 [src/common/param_check.cc:18-153](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/common/param_check.cc#L18-L153)（`param_check.h` 声明见 [param_check.h:18-37](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/common/param_check.h#L18-L37)）。它提供按维度组合的校验重载，例如：
 
 ```cpp
 HcclResult HcomCheckOpParam(const char* tag, const u64 count, const HcclDataType dataType,
@@ -438,15 +619,15 @@ HcclResult HcomCheckOpParam(const char* tag, const u64 count, const HcclDataType
 
 这套 `HcomCheck*` 工具（还有 `HcomCheckTag` / `HcomCheckCount` / `HcomCheckDataType` / `HcomCheckReductionOp` / `HcomCheckGroupName` / `HcomCheckUserRank`）是 **跨算子复用** 的校验库，供不同入口按需组合调用。它和 `op_common.cc` 的 `Check*` 系列功能相近、都使用 `RPT_INPUT_ERR + EI0003` 模式，区别在于 `HcomCheck*` 更通用、按维度正交组合；而 `Check*` 是新一代入口（AllReduce 等新流程）直接调用的版本，额外承担 `needReduce` 等业务语义校验。两者并存，读者遇到时按调用现场理解即可。
 
-`HcomCheckCount`（[param_check.cc:80-89](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/common/param_check.cc#L80-L89)）与 `CheckCount` 逻辑一致（都判 `count > SYS_MAX_COUNT`）；`HcomCheckDataType`（[param_check.cc:91-100](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/common/param_check.cc#L91-L100)）则通过查 `HCOM_DATA_TYPE_STR_MAP` 判枚举合法性。
+`HcomCheckCount`（[param_check.cc:80-89](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/common/param_check.cc#L80-L89)）与 `CheckCount` 逻辑一致（都判 `count > SYS_MAX_COUNT`）；`HcomCheckDataType`（[param_check.cc:91-100](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/common/param_check.cc#L91-L100)）则通过查 `HCOM_DATA_TYPE_STR_MAP` 判枚举合法性。
 
-#### 4.3.4 代码实践
+#### 4.4.4 代码实践
 
 **实践目标**：在 AllReduce 入口代码里辨认三类「校验/上报」写法，并为一个假想新算子补一组等价代码。
 
 **操作步骤**：
 
-1. 打开 [src/ops/all_reduce/all_reduce_op.cc](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/all_reduce_op.cc)，把 `HcclAllReduce`、`AllReduceInitAndCheck`、`CheckAllReduceInputPara` 三段里的 `HCCL_INFO` / `CHK_RET` / `CHK_PTR_NULL` / `CHK_PRT_RET` / `RPT_INPUT_ERR` 调用各收集一处。
+1. 打开 [src/ops/all_reduce/all_reduce_op.cc](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/all_reduce_op.cc)，把 `HcclAllReduce`、`AllReduceInitAndCheck`、`CheckAllReduceInputPara` 三段里的 `HCCL_INFO` / `CHK_RET` / `CHK_PTR_NULL` / `CHK_PRT_RET` / `RPT_INPUT_ERR` 调用各收集一处。
 2. 把它们归类：哪几个属于「日志」、哪几个属于「返回值校验（向上抛错）」、哪几个属于「结构化错误上报」。
 3. 假设你要新增一个算子 `HcclFoo`，参照 `CheckAllReduceInputPara` 的模式，写出它的指针校验骨架（示例代码，非项目原有）：
 
@@ -473,7 +654,7 @@ HcclResult CheckFooInputPara(const HcclComm comm, const void* inBuf,
 
 > 待本地验证：可对照 grep 结果统计 `RPT_INPUT_ERR` 与 `CHK_PTR_NULL` 在同一段代码中出现的次数是否成对。
 
-#### 4.3.5 小练习与答案
+#### 4.4.5 小练习与答案
 
 **练习 1**：`CHK_RET(f())` 和 `RPT_INPUT_ERR(...)` 各自的职责是什么？为什么常常成对出现？
 
@@ -481,7 +662,7 @@ HcclResult CheckFooInputPara(const HcclComm comm, const void* inBuf,
 
 **练习 2**：`CheckDataType(dataType, true)` 中的 `true` 代表什么？为什么 AllReduce 传 `true` 而 AllGather 传 `false`？
 
-> **答案**：`needReduce=true` 表示该算子要做归约，因此额外禁止 `UINT8` / `FP8` 等无意义归约类型。AllReduce 要做 SUM 归约，所以传 `true`；AllGather 只拼接不归约，类型集更宽，所以传 `false`。
+> **答案**：`needReduce=true` 表示该算子要做归约，因此额外禁止 `UINT8` / FP8 等无意义归约类型。AllReduce 要做 SUM 归约，所以传 `true`；AllGather 只拼接不归约，类型集更宽，所以传 `false`。
 
 **练习 3**：`AllReduceInitAndCheck` 里校验顺序是 `CheckAllReduceInputPara`（指针）→ `HcclGetRankSize/RankId`（查通信域）→ `CheckCount/DataType/ReduceOp`（业务校验）。为什么不把业务校验放在最前？
 
@@ -491,7 +672,7 @@ HcclResult CheckFooInputPara(const HcclComm comm, const void* inBuf,
 
 ## 5. 综合实践
 
-**任务**：把本讲三个模块串起来，完成一次「从 API 调用到 OpParam 装配再到校验拦截」的完整推演，并解释一个真实的失败场景。
+**任务**：把本讲四个模块串起来，完成一次「从 API 调用到 OpParam 装配再到校验拦截」的完整推演，并解释一个真实的拓扑特征如何影响引擎选择。
 
 **背景调用**（单进程 2 卡，rank0 调用）：
 
@@ -505,28 +686,33 @@ HcclAllReduce(sendBuf, recvBuf, 2048, HCCL_DATA_TYPE_FP16, HCCL_REDUCE_PROD, com
 1. **校验阶段**：这次调用会在哪一步被拦截？走的是哪个函数、哪个宏？上报的错误码是什么？提示：注意 `sendBuf == nullptr` 与 `CheckReduceOp` 对 `REDUCE_PROD + FP16` 的判定——哪一个先发生？
 2. **装配阶段（假设指针都合法）**：若 `sendBuf` 合法，`FillAllReduceOpParam` 执行后 `inputSize` / `outputSize` / `DataDes.count` / `DataDes.dataType` / `opType` 分别是多少？（FP16 = 2 字节）
 3. **结构理解**：装配完成后，`param.engine` 是什么值？它会在随后的哪一步被赋值（接 u2-l4）？
+4. **拓扑特征（新增）**：假设该通信域部署在 2 台服务器上、最外层为全连通 CLOS、且所有端点都挂在 Host 侧 DPU 上（`hostDpuOnly = true`）。若走新选择器路径（u8-l1），`GetEnginePriority` 会返回什么？这意味着哪类引擎不可用？算法名会带哪个前缀？
 
 **参考答案**：
 
-1. `sendBuf == nullptr` 会在 **`CheckAllReduceInputPara`**（[all_reduce_op.cc:147-150](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/all_reduce_op.cc#L147-L150)）被拦截：先 `RPT_INPUT_ERR` 上报 `EI0003`（ccl_op=HcclAllReduce, parameter=sendBuf, expect=non-null pointer），再 `CHK_PTR_NULL(sendBuf)` 返回 `HCCL_E_PTR`。这一步发生在 `AllReduceInitAndCheck` 的最前面，**早于** `CheckReduceOp`，所以 `REDUCE_PROD + FP16` 的组合问题根本不会被检查到（实际上 FP16 在 `CheckReduceOp` 的 prod 支持列表里，本就合法，但即便非法也轮不到它触发）。
+1. `sendBuf == nullptr` 会在 **`CheckAllReduceInputPara`**（[all_reduce_op.cc:147-150](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/all_reduce_op.cc#L147-L150)）被拦截：先 `RPT_INPUT_ERR` 上报 `EI0003`（ccl_op=HcclAllReduce, parameter=sendBuf, expect=non-null pointer），再 `CHK_PTR_NULL(sendBuf)` 返回 `HCCL_E_PTR`。这一步发生在 `AllReduceInitAndCheck` 的最前面，**早于** `CheckReduceOp`，所以 `REDUCE_PROD + FP16` 的组合问题根本不会被检查到（实际上 FP16 在 `CheckReduceOp` 的 prod 支持列表里，本就合法，但即便非法也轮不到它触发）。
 2. FP16 = 2 字节，所以 `inputSize = outputSize = 2048 × 2 = 4096` 字节；`DataDes.count = 2048`；`DataDes.dataType = HCCL_DATA_TYPE_FP16`；`opType = HCCL_CMD_ALLREDUCE`。
 3. `param.engine` 仍是默认的 `COMM_ENGINE_RESERVED`；它会在 `AllReduceOutPlaceCommon` 中调用 `HcclGetOpExpansionMode(comm, param)` 时被赋值（u2-l4 详解）。
+4. `GetEnginePriority` 直接返回 `{OpExecuteConfig::HOSTCPU}`（[selector_engine.cc:71-75](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/selector_engine.cc#L71-L75)）：AICPU / AIV / CCU 引擎的算法都不参与代价比较，只有 Host DPU 引擎可用；选出的算法名会带 `Dpu` 前缀（对照 `ENGINE_PREFIX_MAP`，`"Dpu"` 映射到 `OpExecuteConfig::HOSTCPU`）。
 
 ## 6. 本讲小结
 
-- **OpParam 是中央数据结构**：定义在 [alg_param.h:559-645](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/inc/alg_param.h#L559-L645)，是「不申请 ctx、每次调用单独构造」的参数容器，贯穿入口 → Selector → Executor → Template 全链路。
+- **OpParam 是中央数据结构**：定义在 [alg_param.h:576-662](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/inc/alg_param.h#L576-L662)，是「不申请 ctx、每次调用单独构造」的参数容器，贯穿入口 → Selector → Executor → Template 全链路。
 - **DataDes 是 union**：由 `opType` 决定当前有效的数据描述成员（AllReduce 用 `DataDes.count/dataType`）；字段默认值统一为「无效值」（RESERVED / INVALID）。
 - **三个旋钮分阶段填充**：`opMode` 在入口确定，`deviceType` 在装配时查询，`engine` 在 `HcclGetOpExpansionMode` 时决定——装配阶段不决定引擎。
 - **`FillAllReduceOpParam` 做字节数换算**：`perDataSize = DATATYPE_SIZE_TABLE[dataType]`，`inputSize = outputSize = count × perDataSize`（AllReduce 输入输出等长）。
+- **本轮新增 `TopoInfoWithNetLayerDetails::hostDpuOnly`**：由 `CalcHostDPUOnly` 依据「多服务器 + 多层拓扑 + 最外层 CLOS 全连通且无 device 端点」判定，序列化/反序列化同步对齐；为 true 时新选择器只保留 HOSTCPU（DPU）引擎。
+- **本轮新增 `ENGINE_PREFIX_MAP` / `ENGINE_STR_MAP`**：算法名前缀 → `OpExecuteConfig` 引擎的反查表（逆序遍历实现长前缀优先）与引擎 → 日志字符串表，服务于代价模型路径的引擎推断与缓存键。
 - **校验遵循「廉价优先、尽早失败」**：先用 `CHK_PTR_NULL` / `RPT_INPUT_ERR(EI0003)` 拦截空指针，再查 rank/设备，最后做 `CheckCount` / `CheckDataType(needReduce)` / `CheckReduceOp` 业务校验。
 - **两套校验工具并存**：`op_common.cc` 的 `Check*`（AllReduce 新流程直接调用，带 `needReduce` 业务语义）与 `param_check.cc` 的 `HcomCheck*`（跨算子按维度正交组合复用），都使用 `RPT_INPUT_ERR + EI0003` 结构化上报。
 
 ## 7. 下一步学习建议
 
-本讲止步于「OpParam 装配完成、`engine` 仍是 RESERVED」。下一讲 **u2-l4 通信引擎选择与快速路径** 将接着讲 `AllReduceOutPlaceCommon` 中 `HcclGetOpExpansionMode` 如何填 `param.engine`，以及 CCU FastLaunch、AIV Cache Replay、单卡 `SingleRankProc` 等快速路径的触发条件。
+本讲止步于「OpParam 装配完成、`engine` 仍是 RESERVED，并认识了拓扑特征位与引擎前缀映射」。下一讲 **u2-l4 通信引擎选择与快速路径** 将接着讲 `AllReduceOutPlaceCommon` 中 `HcclGetOpExpansionMode` 如何填 `param.engine`，以及 CCU FastLaunch、AIV Cache Replay、单卡 `SingleRankProc` 等快速路径的触发条件。
 
 继续深入的建议：
 
+- 想看 `hostDpuOnly` 与 `ENGINE_PREFIX_MAP` 被谁消费，可跳到 **u8-l1（新选择器 SelectorEngine 与双路径分发）**，观察 `GetEnginePriority` → `InitCostModel` → `CostTableGen` → `SelectMinCost` 的完整流程；`cost_table.cc` 中还有多条以 `!topo->hostDpuOnly` 为前提的算法过滤规则。
+- 想系统理解拓扑特征位家族（`Level0Nhr`、`is2DieFullMesh`、`netLayerDetails` 等），可读 **u3-l3（拓扑适配与拓扑信息 Topo）**，`CalcHostDPUOnly` 正是特征位计算链（`topo_host.cc`）的新成员。
 - 想看 OpParam 在更长链路里如何被读写，可跳到 **u3-l1（op_common 四大组件总览）**，观察 Selector 往 `param.algName` 写值、Executor 读 `param.algName` 的过程。
-- 想系统理解 `deviceType` 如何影响特性可用性，可读 **u4-l2（设备类型与能力识别）**。
-- 想理解 `CheckDataType(needReduce)` 背后的类型支持矩阵全貌，可读 [op_common.cc:2883-2943](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/op_common.cc#L2883-L2943) 的 `CheckDataType` 与 `GetSupportDataType`。
+- 想理解 `CheckDataType(needReduce)` 背后的类型支持矩阵全貌，可读 [op_common.cc:2882-2976](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/op_common.cc#L2882-L2976) 的 `CheckCount` / `CheckDataType` / `GetSupportDataType` / `CheckReduceOp`。

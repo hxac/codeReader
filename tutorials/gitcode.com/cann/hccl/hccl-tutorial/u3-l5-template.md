@@ -7,9 +7,11 @@
 本讲就钻进 template 子系统。读完本讲，你应当能够：
 
 1. 说出 template 在「Selector → Executor → **Template**」三级链路中的职责——**按「算法 × 引擎」的具体组合，真正下发数据搬移指令**。
-2. 掌握模板抽象基类 `InsAlgTemplateBase`（及其父类 `CommonAlgTemplateBase`）的生命周期接口：`Describe / CalcRes / KernelRun / GetRes / CalcScratchMultiple / GetThreadNum`，并分清「host 资源计算阶段」与「device 执行阶段」分别调谁。
+2. 掌握模板抽象基类 `InsAlgTemplateBase`（及其父类 `CommonAlgTemplateBase`）的生命周期接口：`Describe / CalcRes / KernelRun / GetRes / CalcScratchMultiple / GetThreadNum`，分清「host 资源计算阶段」与「device 执行阶段」分别调谁；并认识**本轮新增的静态 `CalcCostCoeff` 挂钩与 `TemplateProp` 属性**。
 3. 理解模板注册表 `InsAlgTemplateRegistry` 与 `REGISTER_TEMPLATE_V2` 宏的运行期字符串查表机制，**同时**认清 HCCL 里 template 还有第二条「编译期模板参数绑定」路径，并能区分两者。
-4. 顺着真实源码读完一个具体模板 `InsTempAllReduceMesh1DOneShot`（AICPU 引擎下的 1D Mesh one-shot AllReduce），讲清 `CalcRes`（算 channel/thread/mem）与 `KernelRun`（下发数据搬移）各做了什么。
+4. 顺着真实源码读完一个具体模板 `InsTempAllReduceMesh1DOneShot`（AICPU 引擎下的 1D Mesh one-shot AllReduce），讲清 `CalcRes`（算 channel/thread/mem）与 `KernelRun`（下发数据搬移）各做了什么，并**解读其 `CalcCostCoeff` 中 A / B / C 三段计算分别建模什么开销**。
+
+> **本轮更新提示（相对上一版讲义）**：代价模型（costmodel）提交给模板体系带来三处变化——① 基类 `InsAlgTemplateBase` 新增静态 `CalcCostCoeff`（默认返回空，表示「未标定」）；② 顶层 `CommonAlgTemplateBase` 新增 `TemplateProp` 属性结构体与 `static constexpr props`（如 NHR 模板覆盖 `.isNhr = true` 影响代价模型的组网类型选择）；③ executor 新增 `CalcCostCoeff / GetAlgNetMeta` 虚函数并转发到模板静态方法，同时新增 two_shot / mesh_chunk / mem2mem / 2die 等一大批带标定的模板。本版讲义已全部纳入。
 
 ## 2. 前置知识
 
@@ -18,26 +20,28 @@
 - **三级链路与 algName 字符串契约**：Selector 产出 `algName`（如 `AicpuAllReduceSoleMeshOneShot`），Executor 拿它查注册表得到「已经绑好 template 的 executor 实例」（见 u3-l1、u3-l4）。
 - **引擎（CommEngine）与算法正交**：引擎有 AICPU_TS / AIV / CCU 三类（见 u1-l2、u2-l4）；算法有 Ring / Mesh / NHR 等。template 恰好是「算法 × 引擎」二维表的交叉点——同一个 Mesh 算法，在 AICPU 引擎下有一个模板，在 AIV、CCU 引擎下各有另一个模板。
 - **thread / channel / notify 三类执行资源**（见 u3-l4）：thread 是执行上下文（一条流），channel 是通信通道（两端设备 + 协议 + 若干 notify），notify 是线程间同步信号。模板既要「申请」它们（`CalcRes`），又要「消费」它们（`KernelRun`）。
+- **代价系数 CostModelParam 三元组 (A, B, C)**（见 u3-l4 结尾的预告）：新选择器 SelectorEngine 需要在**不下发真实通信**的前提下估算每个算法的耗时，模板通过静态 `CalcCostCoeff` 把自己的开销模型申报出来。详解见本讲 4.3 与 u8-l2。
 
 两个本讲会反复用到、但尚未细讲的结构：
 
 - `AlgResourceRequest`：模板在 host 阶段产出的「资源需求单」，列出要几个 slave thread、每个 thread 要几个 notify、要哪些 channel、要哪些 CCU kernel。
 - `TemplateDataParams` / `TemplateResource`：executor 在 device 阶段塞给模板的「数据参数」与「已分配好的资源句柄」。
 
-一句话定位：**template 是离硬件最近的软件抽象**——executor 决定「用哪套算法、怎么编排」，template 决定「在这一步里，具体把哪段数据、从哪个地址、经哪条 channel、搬到哪个对端地址」。
+一句话定位：**template 是离硬件最近的软件抽象**——executor 决定「用哪套算法、怎么编排」，template 决定「在这一步里，具体把哪段数据、从哪个地址、经哪条 channel、搬到哪个对端地址」；本轮之后，template 还多了一重身份——**代价模型的「标定数据来源」**。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
 | --- | --- |
-| `src/ops/op_common/template/common_alg_template_base.h` | 模板最顶层抽象 `CommonAlgTemplateBase`，声明全部纯虚生命周期接口。 |
-| `src/ops/op_common/template/alg_v2_template_base.h` / `.cc` | 本仓 template 的核心抽象 `InsAlgTemplateBase`，持有 rank/切片/notify 等公共成员，给出默认（报错）实现。 |
+| `src/ops/op_common/template/common_alg_template_base.h` | 模板最顶层抽象 `CommonAlgTemplateBase`，声明全部纯虚生命周期接口；**本轮新增 `TemplateProp` 属性与 `props` 静态常量**。 |
+| `src/ops/op_common/template/alg_v2_template_base.h` / `.cc` | 本仓 template 的核心抽象 `InsAlgTemplateBase`，持有 rank/切片/notify 等公共成员，给出默认（报错）实现；**本轮新增静态 `CalcCostCoeff`（默认返回空）**。 |
 | `src/ops/op_common/template/registry/alg_v2_template_register.h` / `.cc` | 模板注册表 `InsAlgTemplateRegistry`（单例 + 字符串键 + 工厂）与 `REGISTER_TEMPLATE_V2` 宏。 |
 | `src/ops/op_common/template/dpu/kernel_launch.cc` | DPU 路径下**运行期**按 `templateName` 字符串查表得到模板、再调 `DPUKernelRun` 的入口。 |
-| `src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_nhr.h` | 另一个 AICPU AllReduce 模板（NHR 算法）的头文件，用于对比模板形态。 |
-| `src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.h` / `.cc` | 本讲主角：AICPU 引擎下 1D Mesh one-shot AllReduce 模板的完整实现。 |
-| `src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.h` / `.cc` | 消费上述模板的 executor，演示「编译期把 template 绑成 executor 的模板参数」这条路径。 |
-| `src/ops/op_common/inc/alg_param.h` / `src/ops/op_common/template/template_utils.h` | `AlgResourceRequest`、`ChannelInfo`、`BuffInfo`、`TemplateDataParams`、`TemplateResource` 等结构定义。 |
+| `src/ops/op_common/selector/cost_model.h` | 代价模型参数定义：`CostModelParam`（A/B/C 三元组）、`CalcCostCoeffParam`、`CostModelManager` 的各参数计算接口。**本轮新增，本讲消费其中结构定义**。 |
+| `src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_nhr.h` | 另一个 AICPU AllReduce 模板（NHR 算法）的头文件，用于对比模板形态；本轮也新增了 `CalcCostCoeff` 声明。 |
+| `src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.h` / `.cc` | 本讲主角：AICPU 引擎下 1D Mesh one-shot AllReduce 模板的完整实现（含本轮新增的 `CalcCostCoeff`）。 |
+| `src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.h` / `.cc` | 消费上述模板的 executor，演示「编译期把 template 绑成 executor 的模板参数」这条路径，以及本轮新增的 `CalcCostCoeff / GetAlgNetMeta` 转发。 |
+| `src/ops/op_common/inc/alg_param.h` / `src/ops/op_common/template/template_utils.h` | `AlgResourceRequest`、`ChannelInfo`、`BuffInfo`、`TemplateDataParams`、`TemplateResource` 等结构定义；本轮 template_utils.h 新增 `CalcChannelsPerRankMin`（按最少的通道数取值，用于非对称通道场景）。 |
 
 ## 4. 核心概念与源码讲解
 
@@ -47,19 +51,20 @@
 
 template 子系统采用了**两层抽象**：
 
-- `CommonAlgTemplateBase`：最顶层抽象，只声明「一个通信模板必须能做什么」，不持有任何具体成员。它定义了模板的**生命周期接口契约**。
-- `InsAlgTemplateBase`：继承自上面，是本仓（"v2" 架构）所有具体模板的直接父类。它在契约之上补齐了具体模板都需要的公共数据成员（我是哪个 rank、子通信域长什么样、数据类型、归约算子、主从线程的 notify 索引等），并为部分接口提供了「默认实现」。
+- `CommonAlgTemplateBase`：最顶层抽象，只声明「一个通信模板必须能做什么」，不持有任何具体成员。它定义了模板的**生命周期接口契约**。本轮它还新增了一个**模板属性**机制：`TemplateProp` 结构体 + `static constexpr props`，让子类用极低的成本（一个编译期常量）向外界（主要是代价模型）申报「我是什么类型的算法」。
+- `InsAlgTemplateBase`：继承自上面，是本仓（"v2" 架构）所有具体模板的直接父类。它在契约之上补齐了具体模板都需要的公共数据成员（我是哪个 rank、子通信域长什么样、数据类型、归约算子、主从线程的 notify 索引等），并为部分接口提供了「默认实现」。**本轮它新增了静态方法 `CalcCostCoeff(CalcCostCoeffParam)`，默认实现返回空向量 `{}`——语义是「本模板未标定代价系数」**，新选择器的代价模型会直接跳过这类算法（见 u8-l2）。
 
-模板的生命周期被切成**两个阶段**，理解这一点是理解整个 template 子系统的钥匙：
+模板的生命周期被切成**三个阶段**，理解这一点是理解整个 template 子系统的钥匙：
 
 1. **host 资源计算阶段**：在 host 侧、真正下发任务之前调用。executor 调 `CalcRes(...)`，让模板把「我这套算法要跑起来需要多少 thread / notify / channel / 多大 scratch 显存」算清楚，填进一张资源需求单 `AlgResourceRequest`。这个阶段**不搬任何数据**，纯算术 + 拓扑查询，属控制面。
-2. **device 执行阶段**：资源分配好之后，executor 调 `KernelRun(...)`，模板才真正组织「本地拷贝 → 远端收发 → 本地归约」等数据搬移动作，经 channel 把数据搬过网。这属数据面。
+2. **host 代价标定阶段（本轮新增）**：新选择器启用时，代价模型在初始化期对**每个注册的算法**调用 executor 的 `CalcCostCoeff` → 转发到模板的**静态** `CalcCostCoeff`，拿到 (A, B, C) 三元组。它是一个**纯函数**：不依赖模板实例状态，只看 rankSize / 数据量比例 / 组网类型等入参。
+3. **device 执行阶段**：资源分配好之后，executor 调 `KernelRun(...)`，模板才真正组织「本地拷贝 → 远端收发 → 本地归约」等数据搬移动作，经 channel 把数据搬过网。这属数据面。
 
 此外还有两个辅助接口：`CalcScratchMultiple` 告诉 executor「每个用户数据单位需要几份 scratch 显存」（executor 用它来决定一次循环搬多少、要循环几轮）；`Describe` 返回一段自描述字符串，仅用于日志。
 
 #### 4.1.2 核心流程
 
-模板在三级链路里的位置与两阶段调用：
+模板在三级链路里的位置与三阶段调用：
 
 ```
 Selector 产出 algName
@@ -67,11 +72,17 @@ Selector 产出 algName
         ▼
 Executor（HcclExecOp）按 algName 查注册表 → 得到「已绑好 template 的 executor」
         │
-        ├── host 阶段：executor.CalcRes(...)
+        ├── host 代价标定阶段（仅新选择器启用时，每个算法一次）：
+        │       CostModelManager::InitCostModel
+        │         └→ exec->CalcCostCoeff(...)            （executor 虚函数）
+        │               └→ InsAlgTemplate::CalcCostCoeff(param)  （静态，纯函数）
+        │                     └── 返回 {A, B, C} 代价系数；返回 {} = 未标定、被跳过
+        │
+        ├── host 资源计算阶段：executor.CalcRes(...)
         │       └── 内部 make_shared<Template>() → template.CalcRes(comm, param, topoInfo, resourceRequest)
         │                                              └── 填 AlgResourceRequest（thread/notify/channel/ccuKernel）
         │
-        └── device 阶段：executor.Orchestrate(...) → OrchestrateLoop(...)
+        └── device 执行阶段：executor.Orchestrate(...) → OrchestrateLoop(...)
                 ├── template.CalcScratchMultiple(...)  → 决定单轮数据量、循环轮数
                 └── for 每个数据块 loop:
                         template.KernelRun(param, tempAlgParams, templateResource)
@@ -82,6 +93,8 @@ Executor（HcclExecOp）按 algName 查注册表 → 得到「已绑好 template
 
 | 接口 | 阶段 | 在 `CommonAlgTemplateBase` | 在 `InsAlgTemplateBase` | 含义 |
 | --- | --- | --- | --- | --- |
+| `props`（静态常量） | 编译期 | `TemplateProp{}` 默认 | 继承 | 模板属性（如 `isNhr`），供代价模型判断组网类型 |
+| `CalcCostCoeff(param)`（静态） | host·标定 | —（本轮新增于 InsAlgTemplateBase） | 默认返回 `{}` | 申报代价系数 (A, B, C)；空 = 未标定 |
 | `Describe()` | 调试 | 纯虚 | 纯虚（=0） | 返回自描述字符串 |
 | `CalcRes(...)` | host | 纯虚 | 默认报错 | 算资源，填 `AlgResourceRequest` |
 | `GetRes(...)` | host | 纯虚 | 默认报错 | 取/回填资源（部分模板用） |
@@ -89,49 +102,63 @@ Executor（HcclExecOp）按 algName 查注册表 → 得到「已绑好 template
 | `GetThreadNum()` | host | 纯虚 | 默认返回 0 | 模板期望线程数 |
 | `KernelRun(...)` | device | 纯虚 | 默认报错 | 下发数据搬移 |
 | `FastLaunch(...)` | device | 纯虚 | 默认报错 | CCU 快速回放路径 |
+| `DPUKernelRun(...)` | device | —（InsAlgTemplateBase 新增） | 默认报错 | DPU 路径执行入口 |
 | `GetNotifyIdxMainToSub/SubToMain` | device | —（InsAlgTemplateBase 新增） | 纯虚 | 主从线程 notify 索引 |
 
-注意 `InsAlgTemplateBase` 把 `CalcRes/KernelRun/GetRes` 的默认实现写成**返回 `HCCL_E_INTERNAL` 并打 `HCCL_ERROR("Unsupported interface")`**——这是一种「你不重写我就直接报错」的防御式设计，强制具体模板必须显式实现自己用到的接口。
+注意 `InsAlgTemplateBase` 把 `CalcRes/KernelRun/GetRes/FastLaunch/DPUKernelRun` 的默认实现写成**返回 `HCCL_E_INTERNAL` 并打 `HCCL_ERROR("Unsupported interface")`**——这是一种「你不重写我就直接报错」的防御式设计，强制具体模板必须显式实现自己用到的接口。而 `CalcCostCoeff` 的默认实现是**返回空 `{}` 而非报错**——两者语义不同：前者是「运行期被调到就是 bug」，后者是「合法地声明我还没标定」。
 
 #### 4.1.3 源码精读
 
-先看顶层抽象 `CommonAlgTemplateBase`，它只声明契约、不持有成员：
+先看顶层抽象 `CommonAlgTemplateBase`。本轮它在文件头部新增了模板属性结构体：
 
-[common_alg_template_base.h:19-38](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/template/common_alg_template_base.h#L19-L38) —— 全部为纯虚函数：`Describe/CalcRes/GetRes/GetThreadNum/CalcScratchMultiple/KernelRun/FastLaunch`，外加两个带默认实现的辅助方法 `CalcDataSplitByPortGroup`、`SetchannelsPerRank`，以及一个 protected 成员 `channelsPerRank_`。这是「模板必须能做什么」的契约定义。
+[common_alg_template_base.h:19-22](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/common_alg_template_base.h#L19-L22) —— `struct TemplateProp { bool isNhr = false; }`：目前唯一的属性是「是否为 NHR 算法」，它会影响代价模型把组网类型按 MESH 还是 CLOS 估算。
+
+[common_alg_template_base.h:24-46](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/common_alg_template_base.h#L24-L46) —— `class CommonAlgTemplateBase` 的契约部分：`Describe/CalcRes/GetRes/GetThreadNum/CalcScratchMultiple/KernelRun/FastLaunch` 全部纯虚；外加两个带默认实现的辅助方法 `CalcDataSplitByPortGroup`、`SetchannelsPerRank`。其中 [第 32 行](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/common_alg_template_base.h#L32) `static constexpr TemplateProp props = {};` 是本轮新增的**属性默认值**——子类只需一行 `static constexpr TemplateProp props = {.isNhr = true};` 即可覆盖（真实例子见 [ins_temp_all_gather_nhr.h:21](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_gather/template/aicpu/ins_temp_all_gather_nhr.h#L21)）。
+
+`props` 的真实消费者是 executor 的代价标定代码，例如：
+
+[ins_v2_all_gather_sole_executor.cc:55](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_gather/executor/ins_v2_all_gather_sole_executor.cc#L55) —— `AlgNetType netType = (InsAlgTemplate::props.isNhr || isMultiLevel) ? AlgNetType::CLOS : AlgNetType::MESH;`。executor 在编译期就能读到模板类静态常量，据此决定调 `CalcCostCoeff` 时传 MESH 还是 CLOS 组网。**这就是「模板属性」的用途：把算法类型信息从模板传给代价模型，全程编译期完成、零运行期开销。**
 
 再看本仓核心抽象 `InsAlgTemplateBase` 的类声明：
 
-[alg_v2_template_base.h:18-24](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/template/alg_v2_template_base.h#L18-L24) —— `class InsAlgTemplateBase : public CommonAlgTemplateBase`，构造函数接收 `param`、`rankId`（即 userRank）、`subCommRanks`（子通信域的 rank 列表）。
+[alg_v2_template_base.h:15](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/alg_v2_template_base.h#L15) —— 本轮新增 `#include "cost_model.h"`：模板基类开始感知代价模型类型（`CostModelParam` / `CalcCostCoeffParam`）。
 
-[alg_v2_template_base.h:52-75](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/template/alg_v2_template_base.h#L52-L75) —— protected 成员：`opMode_`（单算子/图模式）、`myRank_`、`templateRankSize_`（本模板参与的 rank 数）、`subCommRanks_`、`buffInfo_`、`threadNum_`、`reduceOp_`、`dataType_`，以及主从线程同步用的 `notifyIdxMainToSub_` / `notifyIdxSubToMain_`。这些都是任何具体模板都要用的公共状态，所以抽到父类。
+[alg_v2_template_base.h:19-28](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/alg_v2_template_base.h#L19-L28) —— `class InsAlgTemplateBase : public CommonAlgTemplateBase`，构造函数接收 `param`、`rankId`（即 userRank）、`subCommRanks`（子通信域的 rank 列表）；[第 28 行](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/alg_v2_template_base.h#L28) 是本轮新增的静态方法 `CalcCostCoeff`，**默认内联实现直接 `return {};`**——即「未标定」。
+
+[alg_v2_template_base.h:55-78](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/alg_v2_template_base.h#L55-L78) —— protected 成员：`opMode_`（单算子/图模式）、`myRank_`、`templateRankSize_`（本模板参与的 rank 数）、`subCommRanks_`、`buffInfo_`、`threadNum_`、`reduceOp_`、`dataType_`，主从线程同步用的 `notifyIdxMainToSub_` / `notifyIdxSubToMain_`，以及 `root_`、`enableDetour_`（绕行开关，从 OpParam 获取）、`enableRemoteMemAccess_`（能否直访对端 input/output 内存）、`supportSymmetricMemory_`（对称内存）等能力开关。这些都是任何具体模板都要用的公共状态，所以抽到父类。
 
 构造函数里有一个值得注意的小算术——如何由 `subCommRanks` 推出 `templateRankSize_`：
 
-[alg_v2_template_base.cc:15-30](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/template/alg_v2_template_base.cc#L15-L30) —— 若 `subCommRanks` 有两级（节点内 + 节点间），则 `templateRankSize_ = level0.size() * level1.size()`；只有一级时取 `level0.size()`。这正是分级通信在模板层的体现：一个模板实例覆盖的 rank 数，等于它所负责的各层子通信域规模之乘积。
+[alg_v2_template_base.cc:15-30](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/alg_v2_template_base.cc#L15-L30) —— 若 `subCommRanks` 有两级（节点内 + 节点间），则 `templateRankSize_ = level0.size() * level1.size()`；只有一级时取 `level0.size()`。这正是分级通信在模板层的体现：一个模板实例覆盖的 rank 数，等于它所负责的各层子通信域规模之乘积。
 
 默认（报错）实现：
 
-[alg_v2_template_base.cc:42-62](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/template/alg_v2_template_base.cc#L42-L62) —— `KernelRun / DPUKernelRun / CalcRes / GetRes` 的默认实现统统 `(void)参数;` 后打 `HCCL_ERROR("Unsupported interface ...")` 并返回 `HCCL_E_INTERNAL`。[alg_v2_template_base.cc:83-85](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/template/alg_v2_template_base.cc#L83-L85) —— `CalcScratchMultiple` 默认返回 0、`GetThreadNum` 默认返回 0。**含义**：具体模板必须重写自己真正用到的接口，否则运行期会以内部错误失败——这是一种「用默认报错代替纯虚」的折中，允许不同模板只实现自己需要的子集。
+[alg_v2_template_base.cc:34-62](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/alg_v2_template_base.cc#L34-L62) —— `FastLaunch / KernelRun / DPUKernelRun / CalcRes / GetRes` 的默认实现统统 `(void)参数;` 后打 `HCCL_ERROR("Unsupported interface ...")` 并返回 `HCCL_E_INTERNAL`。[alg_v2_template_base.cc:83-85](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/alg_v2_template_base.cc#L83-L85) —— `CalcScratchMultiple` 默认返回 0、`GetThreadNum` 默认返回 0。**含义**：具体模板必须重写自己真正用到的接口，否则运行期会以内部错误失败——这是一种「用默认报错代替纯虚」的折中，允许不同模板只实现自己需要的子集。对比之下，`CalcCostCoeff` 的默认「返回空」（在头文件 [第 28 行](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/alg_v2_template_base.h#L28) 内联）不是错误路径，而是合法的「未标定」声明。
 
 #### 4.1.4 代码实践（源码阅读型）
 
-1. **实践目标**：搞清「一个具体模板最少必须重写哪些接口」「哪些可以不重写」。
+1. **实践目标**：搞清「一个具体模板最少必须重写哪些接口」「哪些可以不重写」「本轮新增的 `CalcCostCoeff` / `props` 属于哪一类」。
 2. **操作步骤**：
-   - 打开 [alg_v2_template_base.h](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/template/alg_v2_template_base.h)，把所有 `virtual` 方法分成三类：①`= 0` 的纯虚（必须重写）；②带 `{ }` 或在 `.cc` 里有默认实现的（可重写）；③非虚的普通方法（直接继承）。
-   - 再打开本讲主角 [ins_temp_all_reduce_mesh_1D_one_shot.h](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.h)，对照它的 `override` 列表。
-3. **需要观察的现象**：`Describe`、`GetNotifyIdxMainToSub`、`GetNotifyIdxSubToMain` 是纯虚，必须重写；`KernelRun/CalcRes/CalcScratchMultiple` 它重写了；而 `GetRes`、`GetThreadNum`、`FastLaunch`、`DPUKernelRun` 它**没有**重写——因此继承父类的默认实现（`GetRes` 会返回 `HCCL_E_INTERNAL`，`GetThreadNum` 返回 0）。
-4. **预期结果**：你能列出「mesh_1d_one_shot 实际重写的方法清单」，并解释为什么它不重写 `GetRes` 也不会出问题（因为它的 executor 根本不调 `GetRes`，只调 `CalcRes` 与 `KernelRun`）。
+   - 打开 [alg_v2_template_base.h](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/alg_v2_template_base.h)，把所有 `virtual` / `static` 方法分成四类：①`= 0` 的纯虚（必须重写）；②带默认报错实现的（用到的必须重写）；③带「温和」默认实现的（可重写：`CalcCostCoeff` 返回空、`CalcScratchMultiple` 返回 0）；④非虚的普通方法（直接继承）。
+   - 再打开本讲主角 [ins_temp_all_reduce_mesh_1D_one_shot.h](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.h)，对照它的 `override` 与静态声明列表。
+   - 最后对照 NHR 模板 [ins_temp_all_reduce_nhr.h](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_nhr.h)，以及带 `props` 覆盖的 [ins_temp_all_gather_nhr.h:21](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_gather/template/aicpu/ins_temp_all_gather_nhr.h#L21)。
+3. **需要观察的现象**：`Describe`、`GetNotifyIdxMainToSub`、`GetNotifyIdxSubToMain` 是纯虚，必须重写；`KernelRun/CalcRes/CalcScratchMultiple/CalcCostCoeff` 它重写了；而 `GetRes`、`GetThreadNum`、`FastLaunch`、`DPUKernelRun` 它**没有**重写——因此继承父类的默认实现（`GetRes` 会返回 `HCCL_E_INTERNAL`，`GetThreadNum` 返回 0）。另外注意 AllReduce 的 NHR 模板没有覆盖 `props`（`.isNhr` 覆盖目前出现在 AllGather 的 NHR 模板上）。
+4. **预期结果**：你能列出「mesh_1d_one_shot 实际重写/新增的方法清单」，并解释为什么它不重写 `GetRes` 也不会出问题（因为它的 executor 根本不调 `GetRes`，只调 `CalcRes` 与 `KernelRun`）。
 5. 运行行为属「待本地验证」（本实践为源码阅读，无需运行）。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 `InsAlgTemplateBase` 不把 `KernelRun/CalcRes` 直接写成纯虚 `= 0`，而是给一个返回 `HCCL_E_INTERNAL` 的默认实现？
+**练习 1**：为什么 `InsAlgTemplateBase` 不把 `KernelRun/CalcRes` 直接写成纯虚 `= 0`，而是给一个返回 `HCCL_E_INTERNAL` 的默认实现？`CalcCostCoeff` 为什么又用「返回空」而不是报错？
 
-**参考答案**：因为不同引擎的模板用到的接口子集不同（例如 DPU 模板走 `DPUKernelRun`，CCU 模板走 `FastLaunch`，AICPU 模板走 `KernelRun`）。写成纯虚会强迫每个模板都实现全部接口；写成「默认报错」则允许每个模板只实现自己需要的，调到没实现的接口时以明确的内部错误失败，既灵活又不至于静默出错。
+**参考答案**：前者是因为不同引擎的模板用到的接口子集不同（DPU 模板走 `DPUKernelRun`，CCU 模板走 `FastLaunch`，AICPU 模板走 `KernelRun`），写成纯虚会强迫每个模板都实现全部接口；写成「默认报错」允许各取所需，调到没实现的接口时以明确的内部错误失败。后者是因为 `CalcCostCoeff` 是新引入的标定机制，存量模板暂时没有标定值是**合法状态**而非 bug——返回空让代价模型「跳过该算法」即可，报错反而会把未标定的老算法全部打成故障。
 
 **练习 2**：`templateRankSize_` 与全局通信域的 `rankSize` 有何区别？
 
 **参考答案**：`rankSize` 是整条通信域的总 rank 数；`templateRankSize_` 是**本模板实例**所负责的那一层子通信域的 rank 数（可能只是节点内的一组卡）。分级通信把一个大通信域切成多级子组，每一级由各自的模板实例处理，所以 `templateRankSize_` 通常远小于全局 `rankSize`。
+
+**练习 3**：`TemplateProp::props` 为什么设计成 `static constexpr`，而不是普通成员变量？
+
+**参考答案**：因为它的消费方（executor 的 `CalcCostCoeff`）是在**静态/编译期上下文**里被调用的——executor 类模板通过 `InsAlgTemplate::props.isNhr` 直接读模板类的编译期常量，此时可能根本不存在模板实例。`static constexpr` 让属性零存储、零运行期开销，且能被 `constexpr` 求值路径直接使用。
 
 ---
 
@@ -142,7 +169,7 @@ Executor（HcclExecOp）按 algName 查注册表 → 得到「已绑好 template
 template 与 executor 之间有**两条不同的「绑定点」**，必须分清，否则会误以为「每个模板都注册在一个字符串表里」。这两条路径并存于本仓：
 
 1. **运行期字符串注册表 `InsAlgTemplateRegistry`**：靠 `REGISTER_TEMPLATE_V2(name, ClassName)` 宏，在程序启动时把「字符串名 → 工厂函数」登记进一个单例 map；运行时用 `GetAlgTemplate(name)` 按名字查表、`new` 出实例。典型消费者是 **DPU 路径**：device 侧从共享内存反序列化出一个 `templateName` 字符串，再查表得到模板。
-2. **编译期模板参数绑定**：把 template 类作为**类型参数**直接烘进 executor 类模板（`InsV2AllReduceSoleExecutor<TopoMatch, Template>`），再用 `REGISTER_EXEC_V2(...)` 把 `(opType, algName)` 绑到这个已经实例化好的 executor 类上。这条路径**根本没有运行期字符串查 template 的步骤**——executor 直接 `std::make_shared<Template>()`，类型在编译期就定死了。
+2. **编译期模板参数绑定**：把 template 类作为**类型参数**直接烘进 executor 类模板（`InsV2AllReduceSoleExecutor<TopoMatch, Template>`），再用 `REGISTER_EXEC_V2(...)` 把 `(opType, algName)` 绑到这个已经实例化好的 executor 类上。这条路径**根本没有运行期字符串查 template 的步骤**——executor 直接 `std::make_shared<Template>()`，类型在编译期就定死了。**本轮新增的代价标定也走这条路**：executor 的 `CalcCostCoeff` 虚函数直接调 `InsAlgTemplate::CalcCostCoeff(...)` 静态方法，同样不需要实例。
 
 本讲的主角 `InsTempAllReduceMesh1DOneShot` 走的就是**第二条（编译期绑定）**，所以你在全仓 grep `REGISTER_TEMPLATE_V2` 时**找不到它**——这一点很重要，下面会用源码逐一证实。
 
@@ -162,6 +189,7 @@ template 与 executor 之间有**两条不同的「绑定点」**，必须分清
    编译期：REGISTER_EXEC_V2(cmd, algName, ExecutorClass, TopoMatcher, TemplateClass)
               └→ executor 类被实例化为 ExecutorClass<TopoMatcher, TemplateClass>
    运行期：HcclExecOp 按 (cmd, algName) 查 executor 注册表 → new ExecutorClass<...>
+              ├→（新选择器启用时）exec->CalcCostCoeff(...) → InsAlgTemplate::CalcCostCoeff(param)  静态
               └→ executor 内部 make_shared<TemplateClass>() → CalcRes / KernelRun
 ```
 
@@ -171,48 +199,62 @@ template 与 executor 之间有**两条不同的「绑定点」**，必须分清
 
 先看注册表的类型与工厂：
 
-[alg_v2_template_register.h:22-30](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/template/registry/alg_v2_template_register.h#L22-L30) —— `InsAlgTemplateCreator = std::function<InsAlgTemplateBase*()>` 是工厂函数类型；`DefaultTemplateCreatorV2<P>()` 是个函数模板，带 `static_assert(is_base_of<InsAlgTemplateBase, P>)` 编译期校验，返回 `new (std::nothrow) P()`。
+[alg_v2_template_register.h:22-30](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/registry/alg_v2_template_register.h#L22-L30) —— `InsAlgTemplateCreator = std::function<InsAlgTemplateBase*()>` 是工厂函数类型；`DefaultTemplateCreatorV2<P>()` 是个函数模板，带 `static_assert(is_base_of<InsAlgTemplateBase, P>)` 编译期校验，返回 `new (std::nothrow) P()`。
 
 注册表类与宏：
 
-[alg_v2_template_register.h:32-48](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/template/registry/alg_v2_template_register.h#L32-L48) —— `InsAlgTemplateRegistry`：`Instance()` 取单例、`Register(name, creator)` 登记、`GetAlgTemplate(name)` 按名取实例；内部 `std::map<std::string, InsAlgTemplateCreator> tempCreators_` 加一把 `mutex`。`REGISTER_TEMPLATE_V2(name, insAlgTempBase)` 宏展开为一个静态变量，初始化时调用 `Instance().Register(name, DefaultTemplateCreatorV2<insAlgTempBase>())`。
+[alg_v2_template_register.h:32-48](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/registry/alg_v2_template_register.h#L32-L48) —— `InsAlgTemplateRegistry`：`Instance()` 取单例、`Register(name, creator)` 登记、`GetAlgTemplate(name)` 按名取实例；内部 `std::map<std::string, InsAlgTemplateCreator> tempCreators_` 加一把 `mutex`。`REGISTER_TEMPLATE_V2(name, insAlgTempBase)` 宏展开为一个静态变量，初始化时调用 `Instance().Register(name, DefaultTemplateCreatorV2<insAlgTempBase>())`。
 
 注册表的实现细节：
 
-[alg_v2_template_register.cc:15-45](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/template/registry/alg_v2_template_register.cc#L15-L45) —— `Instance()` 是 Meyers 单例（函数内 `static`）；`Register` 在加锁后检查重名（已存在且非空则报 `HCCL_E_INTERNAL`）；`GetAlgTemplate` 找不到名字或工厂为空时返回 `nullptr`，否则用工厂构造并包成 `unique_ptr` 返回。
+[alg_v2_template_register.cc:15-47](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/registry/alg_v2_template_register.cc#L15-L47) —— `Instance()` 是 Meyers 单例（函数内 `static`）；`Register` 在加锁后检查重名（已存在且非空则报 `HCCL_E_INTERNAL`）；`GetAlgTemplate` 找不到名字或工厂为空时返回 `nullptr`，否则用工厂构造并包成 `unique_ptr` 返回。
 
 **谁在运行期用这张表？** 典型消费者是 DPU kernel 下发：
 
-[kernel_launch.cc:29-42](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/op_common/template/dpu/kernel_launch.cc#L29-L42) —— `HcclLaunchDPUKernel` 从共享内存反序列化出 `DPURunInfo`，取其中的 `dpuRunInfo.templateName` 字符串，调 `InsAlgTemplateRegistry::Instance().GetAlgTemplate(templateName)` 得到模板实例，再调 `templateIns->DPUKernelRun(...)`。这才是 `REGISTER_TEMPLATE_V2` 注册名的真正用途——它必须能被序列化/反序列化、跨进程按名字还原。
+[kernel_launch.cc:29-42](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/dpu/kernel_launch.cc#L29-L42) —— `HcclLaunchDPUKernel` 从共享内存反序列化出 `DPURunInfo`，取其中的 `dpuRunInfo.templateName` 字符串，调 `InsAlgTemplateRegistry::Instance().GetAlgTemplate(templateName)` 得到模板实例，再调 `templateIns->DPUKernelRun(...)`。这才是 `REGISTER_TEMPLATE_V2` 注册名的真正用途——它必须能被序列化/反序列化、跨进程按名字还原。
 
 那么哪些模板真的用了 `REGISTER_TEMPLATE_V2`？以一个 DPU 跨节点模板为例：
 
-[ins_temp_all_gather_nhr_dpu_inter.cc:259](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_gather_nhr_dpu_inter.cc#L259) —— `REGISTER_TEMPLATE_V2("InsTempAllGatherNhrDpuInter", InsTempAllGatherNhrDpuInter);`，注册名与类名一致，供 DPU 路径按字符串查表。
+[ins_temp_all_gather_nhr_dpu_inter.cc:281](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_gather_nhr_dpu_inter.cc#L281) —— `REGISTER_TEMPLATE_V2("InsTempAllGatherNhrDpuInter", InsTempAllGatherNhrDpuInter);`，注册名与类名一致，供 DPU 路径按字符串查表。
 
 **对比：本讲主角走的是编译期绑定，不是字符串注册表。** 看它实际出现在哪里：
 
-[ins_v2_all_reduce_sole_executor.cc:271-273](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L271-L273) —— `REGISTER_EXEC_V2(HCCL_CMD_ALLREDUCE, AicpuAllReduceSoleMeshOneShot, InsV2AllReduceSoleExecutor, TopoMatch1D, InsTempAllReduceMesh1DOneShot);`。这里 `InsTempAllReduceMesh1DOneShot` 是作为**类型实参**传给 executor 类模板的，绑定的字符串 `AicpuAllReduceSoleMeshOneShot` 是 **algName**（executor 注册表的键），**不是** template 注册表的键。换句话说，全仓搜不到 `REGISTER_TEMPLATE_V2("...", InsTempAllReduceMesh1DOneShot)` 这一行——因为它根本没进字符串注册表。
+[ins_v2_all_reduce_sole_executor.cc:298-300](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L298-L300) —— `REGISTER_EXEC_V2(HCCL_CMD_ALLREDUCE, AicpuAllReduceSoleMeshOneShot, InsV2AllReduceSoleExecutor, TopoMatch1D, InsTempAllReduceMesh1DOneShot);`。这里 `InsTempAllReduceMesh1DOneShot` 是作为**类型实参**传给 executor 类模板的，绑定的字符串 `AicpuAllReduceSoleMeshOneShot` 是 **algName**（executor 注册表的键），**不是** template 注册表的键。换句话说，全仓搜不到 `REGISTER_TEMPLATE_V2("...", InsTempAllReduceMesh1DOneShot)` 这一行——因为它根本没进字符串注册表。
 
 executor 类模板本身长这样：
 
-[ins_v2_all_reduce_sole_executor.h:19-23](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.h#L19-L23) —— `template <typename AlgTopoMatch, typename InsAlgTemplate> class InsV2AllReduceSoleExecutor : public InsCollAlgBase`。两个模板参数：拓扑匹配器与模板类。编译期绑定后，executor 内部直接构造该模板类型：
+[ins_v2_all_reduce_sole_executor.h:19-23](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.h#L19-L23) —— `template <typename AlgTopoMatch, typename InsAlgTemplate> class InsV2AllReduceSoleExecutor : public InsCollAlgBase`。两个模板参数：拓扑匹配器与模板类。
 
-[ins_v2_all_reduce_sole_executor.cc:54-59](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L54-L59) —— host 阶段 `CalcRes`：`std::make_shared<InsAlgTemplate>(param, topoInfo->userRank, algHierarchyInfo.infos[0])` 直接 `new` 出模板（类型已定死），再调 `algTemplate->CalcRes(comm, param, topoInfo, resourceRequest)`。
+**本轮新增：executor 把代价标定转发给模板的静态方法。** 上面提到的 `InsCollAlgBase`（u3-l4 讲过）本轮新增了 `CalcCostCoeff` / `GetAlgNetMeta` 两个虚函数（见 [executor_v2_base.h:36-50](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/executor/executor_v2_base.h#L36-L50)，默认实现都返回空，语义同「未标定」）。sole executor 对它们的实现是：
 
-[ins_v2_all_reduce_sole_executor.cc:126-134](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L126-L134) —— device 阶段 `OrchestrateLoop`：同样 `make_shared<InsAlgTemplate>(...)`，然后调 `algTemplate->CalcScratchMultiple(...)` 拿到 scratch 倍数，用来算单轮最大数据量与循环轮数。
+[ins_v2_all_reduce_sole_executor.cc:40-50](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L40-L50) —— `CalcCostCoeff` 从 `topoInfo->userRankSize` 取 rank 数，**以 `1.0f / rankSize` 作为 `n`（每次发送数据量占总量的比例）、MESH 组网、需要本地拷贝**，直接调 `InsAlgTemplate::CalcCostCoeff(...)` 静态方法——注意这里不需要构造模板实例，类型实参在编译期就可见。这就是「模板静态 `CalcCostCoeff` 挂钩」与「executor 代价虚函数」的衔接点。
 
-[ins_v2_all_reduce_sole_executor.cc:165-188](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L165-L188) —— 数据分块循环：按 `loopTimes` 把 `dataCount_` 切成若干块，每块设好 `tempAlgParams`（count、sliceSize、各 baseOff），然后 [第 186 行](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L186) `algTemplate->KernelRun(param, tempAlgParams, templateAlgRes)`。**这就是 template 与 executor 的最终交汇点**：executor 负责切块与循环，template 负责每一块内部的具体搬移。
+[ins_v2_all_reduce_sole_executor.cc:52-65](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L52-L65) —— `GetAlgNetMeta` 申报编排元数据：`netTypes = {MESH}`、组内聚合方式 `SUM`、`groupSizes = {1}`（sole 编排只有一个模板组）。它告诉代价模型「多个模板的代价该求和还是取最大」——这是 u3-l4 引入的 `AlgNetMeta` / `CostAggMode` 概念在 sole 执行器上的取值。
+
+**谁来调 executor 的 `CalcCostCoeff`？** 是代价模型管理器的初始化：
+
+[cost_model.cc:187-189](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/cost_model.cc#L187-L189) —— `CostModelManager::InitCostModel` 遍历算法全集 `AllAlgos` 里的每个算法，逐个调用 `exec->CalcCostCoeff(comm, topoInfo, alg.algName)`；**返回为空就打 WARNING 并跳过该算法**（"CalcCostCoeff uncalibrated, skip"）。也就是说：本轮之后「一个模板没写 `CalcCostCoeff`」的直接后果是——新选择器的候选集里没有它。完整链路在 u8-l2 展开。
+
+编译期绑定后，executor 内部直接构造该模板类型：
+
+[ins_v2_all_reduce_sole_executor.cc:77-87](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L77-L87) —— host 阶段 `CalcRes`：`std::make_shared<InsAlgTemplate>(param, topoInfo->userRank, algHierarchyInfo.infos[0])` 直接 `new` 出模板（类型已定死），再调 `algTemplate->CalcRes(comm, param, topoInfo, resourceRequest)`。
+
+[ins_v2_all_reduce_sole_executor.cc:90-121](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L90-L121) —— device 阶段 `Orchestrate`：同样 `make_shared<InsAlgTemplate>(...)`（[L154-156](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L154-L156)），随后调 `algTemplate->CalcScratchMultiple(...)`（[第 161 行](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L161)）拿到 scratch 倍数，用来算单轮最大数据量与循环轮数。本轮这里还新增了一个特判（[L157-159](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L157-L159)）：`AicpuAllReduceSoleNHRTwoShotMultiLink` 算法在 AICPU 引擎下先调 `SetchannelsPerRank`（配合新增的 `CalcChannelsPerRankMin`，按各对端**最少**通道数取值——应对 dd3c45cd 提交所述「线程按多的通道数申请、通道按少的使用」的非对称场景）。
+
+[ins_v2_all_reduce_sole_executor.cc:165-213](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L165-L213) —— `OrchestrateLoop` 的数据分块循环：按 `loopTimes` 把 `dataCount_` 切成若干块，每块设好 `tempAlgParams`（count、sliceSize、各 baseOff），然后 [第 213 行](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L213) `CHK_RET(algTemplate->KernelRun(param, tempAlgParams, templateAlgRes))`。**这就是 template 与 executor 的最终交汇点**：executor 负责切块与循环，template 负责每一块内部的具体搬移。
+
+顺带一提，本轮 executor 文件里的注册块显著扩容（[L298-L313](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L298-L313)）：在原有的 `MeshOneShot / MeshTwoShot / NHR` 之外，新增绑定了 `AicpuAllReduceSoleMeshChunkTwoShot → InsTempAllReduceMesh1DTwoShotMeshChunk`、`AicpuAllReduceSoleNHRAicpuReduce → InsTempAllReduceAicpuReduceNHR` 等；CCU 侧还新增了 mem2mem / 2die 系列。这正对应本讲主题里「本轮新增 two_shot / mesh_chunk / mem2mem 等大量模板」。
 
 #### 4.2.4 代码实践（源码阅读型）
 
-1. **实践目标**：亲手验证「本讲主角 `InsTempAllReduceMesh1DOneShot` 没有进 `REGISTER_TEMPLATE_V2` 字符串注册表，而是编译期绑进 executor」。
-2. **操作步骤**：
-   - 在仓库根目录执行（只读检索）：
-     - 搜注册宏：`grep -rn "REGISTER_TEMPLATE_V2(" src/` —— 查看哪些模板类被字符串注册。
-     - 搜主角类名：`grep -rn "InsTempAllReduceMesh1DOneShot" src/ | grep -i register` —— 期望**无输出**（即没有字符串注册）。
-     - 搜它在 executor 里的绑定：`grep -rn "InsTempAllReduceMesh1DOneShot" src/ops/all_reduce/executor/` —— 期望命中 `ins_v2_all_reduce_sole_executor.cc` 的 `REGISTER_EXEC_V2`。
-3. **需要观察的现象**：主角类只出现在 executor 的 `REGISTER_EXEC_V2` 里，作为类型实参；而 `REGISTER_TEMPLATE_V2` 的命中都是 `...DpuInter` 之类的 DPU 模板。
-4. **预期结果**：得出结论——AICPU/AIV/CCU 主路径模板走编译期绑定，algName `AicpuAllReduceSoleMeshOneShot` 是 executor 注册表的键而非 template 注册表的键；只有 DPU 等需要跨进程按名字还原的路径才用 `REGISTER_TEMPLATE_V2`。
+1. **实践目标**：亲手验证「本讲主角 `InsTempAllReduceMesh1DOneShot` 没有进 `REGISTER_TEMPLATE_V2` 字符串注册表，而是编译期绑进 executor」，并找出「代价标定链」上每一环。
+2. **操作步骤**（只读检索）：
+   - 搜注册宏：`grep -rn "REGISTER_TEMPLATE_V2(" src/` —— 查看哪些模板类被字符串注册。
+   - 搜主角类名：`grep -rn "InsTempAllReduceMesh1DOneShot" src/ | grep -i register` —— 期望**无输出**（即没有字符串注册）。
+   - 搜它在 executor 里的绑定：`grep -rn "InsTempAllReduceMesh1DOneShot" src/ops/all_reduce/executor/` —— 期望命中 `ins_v2_all_reduce_sole_executor.cc` 的 `REGISTER_EXEC_V2`。
+   - 搜代价标定链：`grep -rn "CalcCostCoeff" src/ops/op_common/ src/ops/all_reduce/executor/` —— 期望看到 `executor_v2_base.h`（虚函数默认）、`ins_v2_all_reduce_sole_executor.cc`（转发）、`cost_model.cc`（消费）三处。
+3. **需要观察的现象**：主角类只出现在 executor 的 `REGISTER_EXEC_V2` 里，作为类型实参；`REGISTER_TEMPLATE_V2` 的命中都是 `...DpuInter` 之类的 DPU 模板；`CalcCostCoeff` 的调用链恰好是「cost_model → executor 虚函数 → 模板静态方法」。
+4. **预期结果**：得出结论——AICPU/AIV/CCU 主路径模板走编译期绑定，algName `AicpuAllReduceSoleMeshOneShot` 是 executor 注册表的键而非 template 注册表的键；只有 DPU 等需要跨进程按名字还原的路径才用 `REGISTER_TEMPLATE_V2`；代价标定复用编译期绑定，连实例都不需要。
 5. 运行行为属「待本地验证」（本实践为只读检索，无需编译/上板）。
 
 #### 4.2.5 小练习与答案
@@ -225,9 +267,13 @@ executor 类模板本身长这样：
 
 **参考答案**：因为存在「device 侧从共享内存反序列化得到模板名、再按名查表构造」的场景（DPU 路径 `HcclLaunchDPUKernel`）。这种场景下构造点的代码看不到具体 C++ 类型（跨进程、跨编译单元），只能靠字符串中转，于是需要运行期注册表。两条路径服务于不同的部署形态。
 
+**练习 3**：为什么 `CalcCostCoeff` 设计成**静态**方法，而 `CalcRes` / `KernelRun` 是实例的虚方法？
+
+**参考答案**：`CalcRes` / `KernelRun` 依赖模板实例状态（`templateRankSize_`、`subCommRanks_`、`myRank_` 等，构造时由 executor 传入），必须先构造实例；而代价标定发生在**算法还没被选中、更没有资源与实例**的阶段——代价模型要为**所有候选算法**统一估算，只拿得到 rankSize / 数据比例 / 拓扑这类「场景参数」。静态方法 + `CalcCostCoeffParam` 入参结构体正好匹配：不依赖实例、可对任意候选算法离线调用（入参结构体还保证了将来加参数不必改所有调用点签名，见 [cost_model.h:127](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/cost_model.h#L127) 的注释）。
+
 ---
 
-### 4.3 具体模板精读：InsTempAllReduceMesh1DOneShot
+### 4.3 具体模板精读：InsTempAllReduceMesh1DOneShot（含 CalcCostCoeff）
 
 #### 4.3.1 概念说明
 
@@ -238,6 +284,12 @@ executor 类模板本身长这样：
 - **AllReduce 的三步**：在本模板里被组织成 ① 本地拷贝（把自己那份数据先放进输出缓冲）→ ② 并发收发（每个 rank 把自己的数据写到所有对端的 cclBuff 槽位）→ ③ 本地归约（把收到的各对端数据累加归约进输出缓冲）。
 
 注意第 ② 步是**写远端 cclBuff**（跨 rank 的中间缓冲），不是直接写远端用户输出；第 ③ 步才在本地把所有槽位归约进自己的 `outputPtr`。这是 Mesh one-shot 的典型数据流。
+
+本轮它新增了静态 `CalcCostCoeff`，用「代价三件套」精确刻画上面这套编排的耗时构成：
+
+- **A（跨卡传输项）**：描述数据经网络/片间链路搬移的耗时随数据量增长的斜率——one-shot 下每对端发一整份，跨卡传输量为「每 rank 整份数据 × 发给 N 个对端」。
+- **B（本地传输项）**：描述本地拷贝与本地归约的耗时——one-shot 下是「1 次本地拷贝 + (N−1) 次本地归约」（每个对端的槽位都要归约一次）。
+- **C（时延常数项）**：与数据量无关的固定启动开销（按任务数估算）。
 
 #### 4.3.2 核心流程
 
@@ -265,8 +317,8 @@ KernelRun(param, tempAlgParams, templateResource)
   ├── [多线程] PostSyncInterThreads  从→主 同步（保证所有收发完成）
   │
   └── PostLocalReduce(...)                      ← 第③步
-        ├── [若 needAicpuReduce_] BatchModeEnd + Join 全部 thread + BatchModeStart
-        │     （插一道同步屏障，切换到 AICPU 归约）
+        ├── [若 needAicpuReduce_] BatchModeEnd + BatchModeStart + Join 全部 thread
+        │     （切换 batch 模式并等所有收发任务落地，再走 AICPU 归约）
         └── for 每个其它 rank：LocalReduce(remote 槽位 → userOut, dataType_, reduceOp_)
 ```
 
@@ -282,53 +334,99 @@ CalcRes(comm, param, topoInfo, resourceRequest)
   └── resourceRequest.channels.push_back(level0Channels)
 ```
 
-资源量与算法形态直接挂钩：one-shot 要「每对端一线程、每线程一 notify」，所以 thread/notify 数都是 N−1；这正解释了为什么数据量一大、N 一多，one-shot 就不划算。
+`CalcCostCoeff` 则是第三个维度——**不上真机、不发数据，用带宽/时延参数把上面两图的开销折算成一个 (A, B, C) 三元组**：
+
+```
+CalcCostCoeff(param)                          ← 静态，param 含 rankSize / n / netType ...
+  ├── rankSize > 8 ？ → 返回 {}（未标定：one-shot 只在小 rank 数下经济）
+  ├── portNum = (netType == CLOS) ? 8 : 1
+  ├── n = param.n * rankSize                  ← 还原「每个 rank 的整份数据量」
+  ├── A：CalcMeshParam(n, netType, portNum, rankSize, A)      ← 跨卡传输项
+  ├── B1：needLocalCopy ? CalcLocalCopyParams(n, AICPU, B1) : 0 ← 本地拷贝项
+  ├── B2：CalcLocalReduceParams(n, AICPU, B2)                  ← 单次本地归约项
+  ├── B = B1 + (rankSize - 1) * B2                             ← 拷贝 1 次 + 归约 N-1 次
+  ├── C：CalcLatencyParams(taskNum=1, AICPU, C)                ← 时延常数项
+  └── return { {A, B, C} }
+```
+
+三段流程的资源量互相印证：one-shot 要「每对端一线程、每线程一 notify」，所以 thread/notify 数都是 N−1；scratch 倍数是 N；而 B 里的 `(rankSize-1)` 正是第③步「归约 N−1 个对端槽位」在代价模型里的镜像。
 
 #### 4.3.3 源码精读
 
 类声明与自描述：
 
-[ins_temp_all_reduce_mesh_1D_one_shot.h:20-33](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.h#L20-L33) —— `class InsTempAllReduceMesh1DOneShot : public InsAlgTemplateBase`。`Describe()` 返回 `"Template of all resduce (one-shot) 1D Mesh with tempRankSize N"`（注：源码原文如此拼写）。私有成员 `needAicpuReduce_`、`processSize_`、`count_`，私有辅助方法 `CalcSlice / RunAllReduce / PostLocalReduce`。
+[ins_temp_all_reduce_mesh_1D_one_shot.h:20-35](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.h#L20-L35) —— `class InsTempAllReduceMesh1DOneShot : public InsAlgTemplateBase`。`Describe()` 返回 `"Template of all resduce (one-shot) 1D Mesh with tempRankSize N"`（注：源码原文如此拼写）；[第 35 行](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.h#L35) 声明静态 `CalcCostCoeff`（本轮新增，遮蔽基类的「返回空」默认实现）。
 
-[ins_temp_all_reduce_mesh_1D_one_shot.h:46-57](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.h#L46-L57) —— 私有方法与状态声明。
+[ins_temp_all_reduce_mesh_1D_one_shot.h:38-59](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.h#L38-L59) —— 重写的 `KernelRun / CalcRes / CalcScratchMultiple / GetNotifyIdx*` 与私有状态（`needAicpuReduce_`、`processSize_`、`count_`）、私有辅助方法 `CalcSlice / RunAllReduce / PostLocalReduce`。
+
+**`CalcCostCoeff`（本轮新增，host 代价标定）：**
+
+先看两个数据结构定义。代价系数三元组：
+
+[cost_model.h:44-48](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/cost_model.h#L44-L48) —— `CostModelParam { float A; float B; float C; }`，注释写明：**A 描述跨卡传输时间随 DataSize 变化的趋势（受 UB 带宽利用率影响）；B 描述本地传输时间随 DataSize 变化的趋势（不受 UB 利用率影响）；C 描述基本时延的常数项**。粗略理解：估算耗时 ≈ A·n + B·n + C（n 为数据量），这与 u1-l2 讲过的 α-β 耗时模型（D = α + nβ + nγ）一脉相承——A/B 扮演 β（含计算 γ），C 扮演 α。
+
+入参结构体：
+
+[cost_model.h:127-137](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/cost_model.h#L127-L137) —— `CalcCostCoeffParam { rankSize, n, netType, needLocalCopy, algName, portNum, comm, topoInfo }`。`n` 是「每次发送数据量占总数据量的比例」；注释明确「新增参数只需在此结构体加成员，无需改动所有调用点签名」。
+
+模板的实现：
+
+[ins_temp_all_reduce_mesh_1D_one_shot.cc:23-52](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L23-L52) —— 逐段解读：
+
+- [L25-27](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L25-L27) `rankSize > 8` 直接返回空——one-shot Mesh 在大 rank 数下不经济（N−1 个线程、N 份 scratch），干脆不标定，让新选择器把它从候选里剔除。
+- [L28](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L28) CLOS 组网按 8 端口、Mesh 按 1 端口估带宽。
+- [L33-34](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L33-L34) 源码注释点破一个协议细节：「executor 层统一传 two-shot 需要的一片数据大小，template 层做特殊处理」——executor 传来的 `n = 1/rankSize`（twoshot 的一片），one-shot 要发**整份**数据，所以乘回 `rankSize`。
+- [L38](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L38) **A 段**：`CalcMeshParam(n, netType, portNum, rankSize, A)`——按 Mesh 组网、端口数与 rank 数折算跨卡传输斜率（对应第②步「把整份数据发给 N−1 个对端」的网路开销）。
+- [L39-45](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L39-L45) **B 段**：源码注释「同时有 localreduce 和 localcopy，所以需要调用两个接口获取两个步骤的 B 并相加」——`B1` 是本地拷贝（第①步 LocalCopy，`needLocalCopy` 为假时可免），`B2` 是单次本地归约（第③步里每个对端槽位归约一次），总 `B = B1 + (rankSize - 1) * B2`。**这个 (N−1) 系数就是 one-shot 编排形态在代价模型里的直接投射**。
+- [L46](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L46) **C 段**：`CalcLatencyParams(taskNum = 1, EngineType::AICPU, C)`——one-shot 一轮收发，任务数按 1 估（源码注释：taskNum 需要「写算法的人预估」，即由模板作者按编排轮数给出）。
+- [L48-51](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L48-L51) 打包成单元素向量 `{A, B, C}` 返回，并打 `HCCL_DEBUG` 日志。
+
+A / B / C 各自的底层带宽参数来自 `CostModelManager`：
+
+[cost_model.h:76-120](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/cost_model.h#L76-L120) —— `CostModelManager`（单例）持有本地拷贝/本地归约/跨片/CCU 各场景的带宽表（单位 GB/s，[L111-119](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/cost_model.h#L111-L119)），对外提供 `CalcMeshParam / CalcNHRParams / CalcLocalCopyParams / CalcLocalReduceParams / CalcLatencyParams`（[L98-L108](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/cost_model.h#L98-L108)）。**注意方向**：模板只是「调用方」，把「数据量 ÷ 带宽」这类换算委托给管理器，自己只负责把算法编排形态（拷几次、归约几次、几轮任务）表达成系数——职责切分干净。
 
 **`CalcRes`（host 阶段，算 channel/thread/notify）：**
 
-[ins_temp_all_reduce_mesh_1D_one_shot.cc:23-38](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L23-L38) —— 注释「mesh 算法只做 level 0 层级的」；`threadNum = templateRankSize_ > 1 ? templateRankSize_ : 1`；`slaveThreadNum = threadNum - 1`（主线程通过传入的 stream 转换，所以少算一个）；每个 slave thread 配 1 个 notify，主线程配 `threadNum - 1` 个 notify；`CalcChannelRequestMesh1D(...)` 算出 Layer0 的 channel 描述列表塞进 `resourceRequest.channels`。这一段就是「算 channel/thread」的全部。
+[ins_temp_all_reduce_mesh_1D_one_shot.cc:54-69](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L54-L69) —— 注释「mesh 算法只做 level 0 层级的」；`threadNum = templateRankSize_ > 1 ? templateRankSize_ : 1`；`slaveThreadNum = threadNum - 1`（主线程通过传入的 stream 转换，所以少算一个）；每个 slave thread 配 1 个 notify，主线程配 `threadNum - 1` 个 notify；`CalcChannelRequestMesh1D(...)` 算出 Layer0 的 channel 描述列表塞进 `resourceRequest.channels`。这一段就是「算 channel/thread」的全部。
 
 **`CalcScratchMultiple`（host 阶段，算 mem 倍数）：**
 
-[ins_temp_all_reduce_mesh_1D_one_shot.cc:40-46](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L40-L46) —— 直接返回 `templateRankSize_`。含义：每个 rank 在 cclBuff 里要占 `templateRankSize_` 个槽位（每个对端一份），所以每份用户数据需要 N 倍 scratch。executor 据此算 `maxDataSizePerLoop = hcclBuff.size / templateScratchMultiplier`，从而决定一次搬多少、循环几轮（见 4.2.3 的 [ins_v2_all_reduce_sole_executor.cc:141-147](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L141-L147)）。
+[ins_temp_all_reduce_mesh_1D_one_shot.cc:71-77](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L71-L77) —— 直接返回 `templateRankSize_`。含义：每个 rank 在 cclBuff 里要占 `templateRankSize_` 个槽位（每个对端一份），所以每份用户数据需要 N 倍 scratch。executor 据此算 `maxDataSizePerLoop = hcclBuff.size / templateScratchMultiplier`，从而决定一次搬多少、循环几轮（见 4.2.3 的 [ins_v2_all_reduce_sole_executor.cc:165-176](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L165-L176)）。
 
 **`CalcSlice`（切片，one-shot 不均分）：**
 
-[ins_temp_all_reduce_mesh_1D_one_shot.cc:48-65](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L48-L65) —— 给每个 rank 切一个等大的切片，`offset` 随 `rankIdx` 线性累加 `dataSize`：`sliceInfoVec[rankIdx][0] = {accumOff, dataSize}`。one-shot 的关键：**每个 rank 拿到的是完整大小的一块**（不是把数据均分成 N 份），因为每个 rank 都要把自己的整份数据发给所有对端。末尾 `CHK_PRT_RET` 校验切片总长恰为 `dataSize * templateRankSize_`。
+[ins_temp_all_reduce_mesh_1D_one_shot.cc:79-96](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L79-L96) —— 给每个 rank 切一个等大的切片，`offset` 随 `rankIdx` 线性累加 `dataSize`：`sliceInfoVec[rankIdx][0] = {accumOff, dataSize}`。one-shot 的关键：**每个 rank 拿到的是完整大小的一块**（不是把数据均分成 N 份），因为每个 rank 都要把自己的整份数据发给所有对端。末尾 `CHK_PRT_RET` 校验切片总长恰为 `dataSize * templateRankSize_`。
 
 **`KernelRun`（device 阶段，下发搬移）：**
 
-[ins_temp_all_reduce_mesh_1D_one_shot.cc:67-101](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L67-L101) —— 依次：读取 `threadNum_ / processSize_ / count_ / dataType_`；[L74-76](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L74-L76) 算 `needAicpuReduce_`（INT64/UINT64/FP64 或 PROD 归约时为真——这些类型/算子需要走 AICPU 归约核）；断言 `threadNum_ == templateRankSize_`；`CalcSlice`；多线程时先 `PreSyncInterThreads`（主→从）；`RunAllReduce`；多线程时 `PostSyncInterThreads`（从→主）；最后 `PostLocalReduce`。
+[ins_temp_all_reduce_mesh_1D_one_shot.cc:98-132](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L98-L132) —— 依次：读取 `threadNum_ / processSize_ / count_ / dataType_`；[L105-107](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L105-L107) 算 `needAicpuReduce_`（INT64/UINT64/FP64 或 PROD 归约时为真——这些类型/算子需要走 AICPU 归约核）；断言 `threadNum_ == templateRankSize_`；`CalcSlice`；多线程时先 `PreSyncInterThreads`（主→从）；`RunAllReduce`；多线程时 `PostSyncInterThreads`（从→主）；最后 `PostLocalReduce`。
 
 **`RunAllReduce`（第①②步：本地拷贝 + 并发收发）：**
 
-[ins_temp_all_reduce_mesh_1D_one_shot.cc:103-160](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L103-L160) —— [L116](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L116) 主线程 `LocalCopy(threads[0], usrInSlices, usrOutSlices)`（第①步：把自己数据放进输出）；[L119-121](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L119-L121) 单 rank 早退；[L124-157](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L124-L157) 循环 `queIdx=1..threadNum-1`：`nextRank = (myRank_ + queIdx) % templateRankSize_`，取该对端的 `linkSend`/`linkRecv` 两条 `ChannelInfo`，构造指向**对端 `remoteCclMem` 对应槽位**的 `txDstSlice`/`rxDstSlice`（注意目标地址 `linkSend.remoteCclMem.addr` + 切片 offset），最后 `SendRecvBatchWrite(sendRecvInfo, threads[queIdx])` 在该 slave thread 上并发收发（第②步）。每个 slave thread 专责一个对端，这正是「one-shot 并发」的体现。
+[ins_temp_all_reduce_mesh_1D_one_shot.cc:134-191](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L134-L191) —— [L147](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L147) 主线程 `LocalCopy(threads[0], usrInSlices, usrOutSlices)`（第①步：把自己数据放进输出）；[L150-152](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L150-L152) 单 rank 早退；[L155-188](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L155-L188) 循环 `queIdx=1..threadNum-1`：`nextRank = (myRank_ + queIdx) % templateRankSize_`，取该对端的 `linkSend`/`linkRecv` 两条 `ChannelInfo`，构造指向**对端 `remoteCclMem` 对应槽位**的 `txDstSlice`/`rxDstSlice`（注意目标地址 `linkSend.remoteCclMem.addr` + 切片 offset），最后 `SendRecvBatchWrite(sendRecvInfo, threads[queIdx])` 在该 slave thread 上并发收发（第②步）。每个 slave thread 专责一个对端，这正是「one-shot 并发」的体现。
 
 **`PostLocalReduce`（第③步：本地归约）：**
 
-[ins_temp_all_reduce_mesh_1D_one_shot.cc:162-197](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L162-L197) —— [L168-175](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L168-L175) 若 `needAicpuReduce_`，先 `HcommBatchModeEnd` + 逐个 `HcommThreadJoin` + `HcommBatchModeStart`——插一道同步屏障，确保前面所有收发任务执行完，再切换到 AICPU 归约模式（因为 64 位/PROD 类型要走 AICPU 归约核）；[L180-195](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L180-L195) 遍历除自身外的每个 rank，从本地 cclBuff 里对应槽位取数据，`LocalReduce(threads[0], curSrcSlice, curDstSlice, dataType_, reduceOp_)` 归约进 `userOut`。归约完毕，每个 rank 的输出里就是全体的归约结果，AllReduce 完成。
+[ins_temp_all_reduce_mesh_1D_one_shot.cc:193-228](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L193-L228) —— [L199-206](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L199-L206) 若 `needAicpuReduce_`，先 `HcommBatchModeEnd` + `HcommBatchModeStart` + 逐个 `HcommThreadJoin`——切换 batch 模式并等待所有 thread 的收发任务执行完（数据都已落到 cclBuff），再走 AICPU 归约（64 位类型/PROD 需要 AICPU 归约核）；[L211-226](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L211-L226) 遍历除自身外的每个 rank，从本地 cclBuff 里对应槽位取数据，`LocalReduce(threads[0], curSrcSlice, curDstSlice, dataType_, reduceOp_)` 归约进 `userOut`。归约完毕，每个 rank 的输出里就是全体的归约结果，AllReduce 完成。注意这一步「归约 N−1 个槽位」正对应 `CalcCostCoeff` 里 B 段的 `(rankSize - 1) * B2`。
 
 > 跨仓边界提醒（承接 u6）：`HcommBatchModeEnd/Start`、`HcommThreadJoin`、channel 里的 `remoteCclMem`、`SendRecvBatchWrite`/`LocalReduce`/`LocalCopy` 等最终都经 `src/common/hcomm_dlsym/` 落到 HCOMM 基础通信层。template 是这些数据面原语的直接消费方，但它只看得到封装好的接口，不耦合 HCOMM 控制面内部。
 
 #### 4.3.4 代码实践（源码阅读型 —— 本讲主实践）
 
-> 本实践直接回应本讲规格里的实践任务。注意：规格原文写的是「说明它的 `REGISTER_TEMPLATE_V2` 注册名」，但据上面 4.2 的查证，**这个模板并没有 `REGISTER_TEMPLATE_V2` 注册名**——它走的是编译期绑定。下面按真实机制作答。
+> 本实践直接回应本讲规格里的实践任务。注意：规格原文写的是「说明它的 `REGISTER_TEMPLATE_V2` 注册名」，但据 4.2 的查证，**这个模板并没有 `REGISTER_TEMPLATE_V2` 注册名**——它走的是编译期绑定。下面按真实机制作答。
 
-1. **实践目标**：为 `InsTempAllReduceMesh1DOneShot` 说清「它怎么被绑定的」+「`CalcRes` 算了什么」+「`KernelRun` 做了什么」。
+1. **实践目标**：为 `InsTempAllReduceMesh1DOneShot` 说清「它怎么被绑定的」+「`CalcRes` 算了什么」+「`KernelRun` 做了什么」+「`CalcCostCoeff` 的 A/B/C 各建模什么」。
 2. **操作步骤与作答**：
-   - **绑定方式 / 名字**：它**没有** `REGISTER_TEMPLATE_V2` 注册名。它作为类型实参在 [ins_v2_all_reduce_sole_executor.cc:271-273](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L271-L273) 被 `REGISTER_EXEC_V2` 编译期绑进 `InsV2AllReduceSoleExecutor<TopoMatch1D, InsTempAllReduceMesh1DOneShot>`，对应的 algName 是 `AicpuAllReduceSoleMeshOneShot`（这是 **executor 注册表**的键，不是 template 字符串注册表的键）。
-   - **`CalcRes`（算 channel/thread/mem）做了什么**：见 [ins_temp_all_reduce_mesh_1D_one_shot.cc:23-38](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L23-L38) 与 [L40-46](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L40-L46)。它产出三类资源：① **thread**：`slaveThreadNum = templateRankSize_ - 1`（主线程复用用户 stream）；② **notify**：每个 slave thread 1 个，主线程 `templateRankSize_ - 1` 个；③ **channel**：`CalcChannelRequestMesh1D` 算出 Layer0 上每对 rank 的 1D Mesh 通道；④ **mem**：`CalcScratchMultiple` 返回 `templateRankSize_`，告诉 executor 每 rank 需 N 份 cclBuff 槽位。
-   - **`KernelRun`（下发数据搬移）做了什么**：见 [L67-101](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L67-L101)。它三步走：① 主线程 `LocalCopy` 把自己数据放进输出；② N−1 个 slave thread 各对接一个对端，经 `SendRecvBatchWrite` 把自己数据写到对端 cclBuff 槽位（one-shot 并发）；③ `PostLocalReduce` 把收到的各对端数据 `LocalReduce` 归约进输出。若数据类型是 INT64/UINT64/FP64 或归约算子是 PROD，第③步前会插 `BatchModeEnd/Join/Start` 屏障切到 AICPU 归约核。
-3. **需要观察的现象**：把上述三段代码连读，应能看到「资源需求（host）」与「数据搬移（device）」严格分离——`CalcRes` 里没有任何数据搬移调用，`KernelRun` 里没有任何资源申请。
-4. **预期结果**：你能向别人讲清「为什么 one-shot Mesh 的 thread 数是 N−1」「为什么 scratch 倍数是 N」「三步搬移分别落在哪几个函数」。
+   - **绑定方式 / 名字**：它**没有** `REGISTER_TEMPLATE_V2` 注册名。它作为类型实参在 [ins_v2_all_reduce_sole_executor.cc:298-300](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L298-L300) 被 `REGISTER_EXEC_V2` 编译期绑进 `InsV2AllReduceSoleExecutor<TopoMatch1D, InsTempAllReduceMesh1DOneShot>`，对应的 algName 是 `AicpuAllReduceSoleMeshOneShot`（这是 **executor 注册表**的键，不是 template 字符串注册表的键）。
+   - **`CalcRes`（算 channel/thread/mem）做了什么**：见 [ins_temp_all_reduce_mesh_1D_one_shot.cc:54-77](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L54-L77)。它产出三类资源：① **thread**：`slaveThreadNum = templateRankSize_ - 1`（主线程复用用户 stream）；② **notify**：每个 slave thread 1 个，主线程 `templateRankSize_ - 1` 个；③ **channel**：`CalcChannelRequestMesh1D` 算出 Layer0 上每对 rank 的 1D Mesh 通道；④ **mem**：`CalcScratchMultiple` 返回 `templateRankSize_`，告诉 executor 每 rank 需 N 份 cclBuff 槽位。
+   - **`KernelRun`（下发数据搬移）做了什么**：见 [L98-132](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L98-L132)。它三步走：① 主线程 `LocalCopy` 把自己数据放进输出；② N−1 个 slave thread 各对接一个对端，经 `SendRecvBatchWrite` 把自己数据写到对端 cclBuff 槽位（one-shot 并发）；③ `PostLocalReduce` 把收到的各对端数据 `LocalReduce` 归约进输出。若数据类型是 INT64/UINT64/FP64 或归约算子是 PROD，第③步前会先 `BatchModeEnd/Start` 并 `Join` 所有线程，确保收发落地后走 AICPU 归约核。
+   - **`CalcCostCoeff` 的 A/B/C（本轮新增）**：见 [L23-52](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L23-L52)，结合 [cost_model.h:44-48](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/cost_model.h#L44-L48) 的定义：
+     - **A（跨卡传输）** = `CalcMeshParam(整份数据量 n, 组网, 端口数, rankSize)`——建模第②步「把整份数据推给 N−1 个对端」的网路/片间传输耗时斜率；CLOS 组网按 8 端口、Mesh 按 1 端口估带宽。
+     - **B（本地传输）** = `B1 + (rankSize-1) × B2`——建模第①步的 1 次本地拷贝（`CalcLocalCopyParams`，`needLocalCopy` 为假时置 0）加第③步的 N−1 次本地归约（每次 `CalcLocalReduceParams`）；系数 (N−1) 与 `KernelRun` 里归约循环的次数严格一致。
+     - **C（时延常数）** = `CalcLatencyParams(taskNum=1, AICPU)`——与数据量无关的固定启动时延，one-shot 一轮收发按 1 个任务估。
+     - 另注意两道闸：`rankSize > 8` 返回空（未标定即被新选择器跳过）；`n = param.n × rankSize`（executor 统一传 twoshot 的一片比例，模板自己乘回整份）。
+3. **需要观察的现象**：把 `CalcCostCoeff`、`CalcRes`、`KernelRun` 三段代码连读，应能看到**同一个编排形态的三种投影**——`KernelRun` 是真实执行、`CalcRes` 是它要的资源（N−1 线程/N−1 notify/N 通道需求/N 份 scratch）、`CalcCostCoeff` 是它的耗时模型（1 次拷贝 + N−1 次归约 + 1 轮网路传输 + 常数时延）。三者的 N−1 / N 系数一一对应。
+4. **预期结果**：你能向别人讲清「为什么 one-shot Mesh 的 thread 数是 N−1」「为什么 scratch 倍数是 N」「为什么 B 里是 (N−1)×B2」「为什么 rankSize>8 不标定」。
 5. 运行行为属「待本地验证」（本实践为源码阅读；若要真跑，需 NPU 环境 + 关闭对自编 AICPU 包的验签，见 u1-l4）。
 
 #### 4.3.5 小练习与答案
@@ -337,38 +435,44 @@ CalcRes(comm, param, topoInfo, resourceRequest)
 
 **参考答案**：因为 one-shot 的语义是「每个 rank 把自己的**整份**数据并发推给所有对端」，每个对端要在自己的 cclBuff 里为每个 rank 留一个完整槽位。所以切片描述的是「第 rankIdx 个 rank 的数据放在 cclBuff 的哪个 offset」，offset = rankIdx × size，每块都是完整大小。均分是 ReduceScatter 的做法，不是 one-shot AllReduce 的。
 
-**练习 2**：`needAicpuReduce_` 在什么条件下为真？为什么为真时要在归约前插 `BatchModeEnd/Join/Start`？
+**练习 2**：`needAicpuReduce_` 在什么条件下为真？为什么为真时要在归约前插 `BatchModeEnd/Start + Join`？
 
-**参考答案**：当 `dataType_` 是 INT64/UINT64/FP64，或 `reduceType` 是 PROD 时为真。这些类型/算子的归约要走 AICPU 归约核（普通 vector 归约不支持）。插 `BatchModeEnd` + `HcommThreadJoin(所有 thread)` + `BatchModeStart` 是一道**同步屏障**：先确保前面所有 slave thread 的收发任务都执行完（数据都已落到 cclBuff），再切换 batch 模式启动 AICPU 归约，避免归约读到未就绪的数据。
+**参考答案**：当 `dataType_` 是 INT64/UINT64/FP64，或 `reduceType` 是 PROD 时为真。这些类型/算子的归约要走 AICPU 归约核（普通 vector 归约不支持）。`HcommBatchModeEnd` + `HcommBatchModeStart` + 逐个 `HcommThreadJoin` 是一道**同步屏障**：先切换 batch 模式并等待前面所有 slave thread 的收发任务执行完（数据都已落到 cclBuff），再启动 AICPU 归约，避免归约读到未就绪的数据。
 
 **练习 3**：数据量很大时，为什么 selector 会避开 one-shot 而选 two-shot 或 NHR？
 
-**参考答案**：one-shot 要占用 N−1 个 slave thread、N 份 cclBuff 槽位，且所有收发并发抢占链路带宽。N 大、数据大时，线程数与 scratch 显存压力、链路拥塞都会使其劣化。two-shot 用两轮流水降低并发度，NHR（Non-stationary Hierarchical Ring）则结合 ReduceScatter + AllGather 降低单步数据量与中间显存占用（见 u3-l2、u1-l2 的 α-β 模型与分级通信）。
+**参考答案**：one-shot 要占用 N−1 个 slave thread、N 份 cclBuff 槽位，代价模型里 B 随 (N−1)×数据量 线性膨胀、A 按整份数据计。N 大、数据大时，线程数与 scratch 显存压力、链路拥塞都会使其劣化（这也是 `CalcCostCoeff` 里 `rankSize > 8` 直接不标定的原因）。two-shot 用两轮流水降低并发度，NHR（Non-stationary Hierarchical Ring）则结合 ReduceScatter + AllGather 降低单步数据量与中间显存占用（见 u3-l2、u1-l2 的 α-β 模型与分级通信）。
+
+**练习 4**：如果让你给一个新模板写 `CalcCostCoeff`，第一步应该做什么？
+
+**参考答案**：先数清自己 `KernelRun` 的编排形态——本地拷贝几次、本地归约几次（各乘上数据比例）、跨卡发几轮/每轮多大数据、任务数（时延常数）几拍；再选对组网类型（必要时在类里覆盖 `static constexpr TemplateProp props`，如 `.isNhr = true`）；最后把这些系数乘到 `CostModelManager` 的 `Calc*Params` 出参上。若该算法在某些场景（如 rankSize 过大）不适用，返回空 `{}` 让新选择器跳过即可。
 
 ## 5. 综合实践
 
-把本讲三块知识串起来，完成一个「端到端跟踪一个 algName 到模板搬数据」的任务：
+把本讲知识串起来，完成一个「端到端跟踪一个 algName 到模板搬数据 + 代价标定」的任务：
 
 1. 选定 algName = `AicpuAllReduceSoleMeshOneShot`。
-2. **跟踪绑定**（用 4.2 的方法）：在 [ins_v2_all_reduce_sole_executor.cc:271-273](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L271-L273) 确认它绑到 `InsV2AllReduceSoleExecutor<TopoMatch1D, InsTempAllReduceMesh1DOneShot>`，并解释为什么这里查不到 `REGISTER_TEMPLATE_V2`。
-3. **跟踪 host 阶段**：从 executor 的 `CalcRes`（[L49-60](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L49-L60)）进入模板的 `CalcRes`（[mesh_1D_one_shot.cc:23-38](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L23-L38)），列出它产出的 thread/notify/channel/mem 需求，并说明这些需求会被资源管理器如何满足（承接 u3-l4）。
-4. **跟踪 device 阶段**：从 executor 的 `OrchestrateLoop`（[L160-188](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L160-L188)）进入模板的 `KernelRun`，画出「LocalCopy → SendRecvBatchWrite(×N−1) → PostLocalReduce」的时序，并标注每一步用的是哪个 thread、哪条 channel、落在 `userOut` 还是 `cclBuff`。
-5. **产出**：一张端到端时序图 + 一份「资源需求清单」。要求图上能回答：algName 如何定位到模板？host 阶段算了哪些资源？device 阶段数据在三块缓冲（userIn / userOut / cclBuff）之间如何流动？
+2. **跟踪绑定**（用 4.2 的方法）：在 [ins_v2_all_reduce_sole_executor.cc:298-300](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L298-L300) 确认它绑到 `InsV2AllReduceSoleExecutor<TopoMatch1D, InsTempAllReduceMesh1DOneShot>`，并解释为什么这里查不到 `REGISTER_TEMPLATE_V2`。
+3. **跟踪代价标定（本轮新增）**：从 [cost_model.cc:187-189](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/selector/cost_model.cc#L187-L189) 出发，经 [ins_v2_all_reduce_sole_executor.cc:40-50](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L40-L50)（executor 转发），到 [ins_temp_all_reduce_mesh_1D_one_shot.cc:23-52](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L23-L52)（模板静态标定），画出「谁调谁、传入什么、返回什么」的调用图，并标注「未标定（返回空）」时这条链在哪一步断开、后果是什么。
+4. **跟踪 host 阶段**：从 executor 的 `CalcRes`（[L77-87](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L77-L87)）进入模板的 `CalcRes`（[mesh_1D_one_shot.cc:54-69](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L54-L69)），列出它产出的 thread/notify/channel/mem 需求，并说明这些需求会被资源管理器如何满足（承接 u3-l4）。
+5. **跟踪 device 阶段**：从 executor 的 `OrchestrateLoop`（[L123-226](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L123-L226)，`KernelRun` 调用在 [L213](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L213)）进入模板的 `KernelRun`，画出「LocalCopy → SendRecvBatchWrite(×N−1) → PostLocalReduce」的时序，并标注每一步用的是哪个 thread、哪条 channel、落在 `userOut` 还是 `cclBuff`。
+6. **产出**：一张端到端时序图 + 一份「资源需求清单」+ 一份「代价系数表（A/B/C 的构成式）」。要求图上能回答：algName 如何定位到模板？代价系数从哪来？host 阶段算了哪些资源？device 阶段数据在三块缓冲（userIn / userOut / cclBuff）之间如何流动？
 
-> 这是源码阅读型综合实践，无需运行；若要在真机验证日志，可在 `KernelRun` 入口（[L77](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L77)）已有的 `HCCL_INFO` 基础上观察 `templateRankSize_`、`threadNum_` 与 loop 轮数的关系，属「待本地验证」。
+> 这是源码阅读型综合实践，无需运行；若要在真机验证日志，可在 `KernelRun` 入口（[L108](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L108)）已有的 `HCCL_INFO` 基础上观察 `templateRankSize_`、`threadNum_` 与 loop 轮数的关系；代价标定侧可开 DEBUG 级日志观察 [L50](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/template/aicpu/ins_temp_all_reduce_mesh_1D_one_shot.cc#L50) 打印的 `A/B/C` 值，属「待本地验证」。
 
 ## 6. 本讲小结
 
-- **template 是三级链路的最后一环**，按「算法 × 引擎」的具体组合下发数据搬移；它是离硬件最近的软件抽象。
-- **两层抽象**：`CommonAlgTemplateBase` 定契约（全纯虚），`InsAlgTemplateBase` 补公共成员并给部分接口「默认报错」实现，强制具体模板显式重写自己用到的接口。
-- **两阶段生命周期**：host 阶段 `CalcRes`/`CalcScratchMultiple` 算资源（thread/notify/channel/mem），属控制面、不搬数据；device 阶段 `KernelRun` 真正搬数据，属数据面。
-- **两条绑定路径并存**：`InsAlgTemplateRegistry` + `REGISTER_TEMPLATE_V2` 是**运行期字符串**查表（DPU 路径用）；`REGISTER_EXEC_V2` 把 template 作**编译期类型参数**烘进 executor（AICPU/AIV/CCU 主路径用）。本讲主角 `InsTempAllReduceMesh1DOneShot` 走的是后者，algName 为 `AicpuAllReduceSoleMeshOneShot`，**没有** `REGISTER_TEMPLATE_V2` 注册名。
+- **template 是三级链路的最后一环**，按「算法 × 引擎」的具体组合下发数据搬移；它是离硬件最近的软件抽象。本轮起它又多一重身份：**代价模型的标定数据来源**。
+- **两层抽象 + 属性机制**：`CommonAlgTemplateBase` 定契约（全纯虚）并新增 `TemplateProp props` 编译期属性（如 NHR 覆盖 `.isNhr = true` 影响代价模型组网选择）；`InsAlgTemplateBase` 补公共成员、给部分接口「默认报错」实现，并**新增静态 `CalcCostCoeff`（默认返回空 = 未标定）**。
+- **三阶段生命周期**：host 代价标定阶段（静态 `CalcCostCoeff`，纯函数、不需实例）；host 资源计算阶段（`CalcRes`/`CalcScratchMultiple` 算 thread/notify/channel/mem，属控制面）；device 执行阶段（`KernelRun` 真正搬数据，属数据面）。
+- **两条绑定路径并存**：`InsAlgTemplateRegistry` + `REGISTER_TEMPLATE_V2` 是**运行期字符串**查表（DPU 路径用）；`REGISTER_EXEC_V2` 把 template 作**编译期类型参数**烘进 executor（AICPU/AIV/CCU 主路径用），代价标定也复用这条路径。本讲主角 `InsTempAllReduceMesh1DOneShot` 走的是后者，algName 为 `AicpuAllReduceSoleMeshOneShot`，**没有** `REGISTER_TEMPLATE_V2` 注册名。
 - **one-shot Mesh AllReduce 的三步搬移**：`LocalCopy`（自己数据进输出）→ `SendRecvBatchWrite`（N−1 个 slave thread 并发把数据写到各对端 cclBuff）→ `PostLocalReduce`（本地把各对端数据归约进输出）。
-- **资源量与算法形态挂钩**：one-shot 的 thread/notify 数都是 N−1、scratch 倍数是 N；这正是它只适合小数据低延迟、大数据要退到 two-shot/NHR 的根因。
+- **资源量、耗时模型与算法形态一一挂钩**：one-shot 的 thread/notify 数都是 N−1、scratch 倍数是 N；`CalcCostCoeff` 里 A 按 Mesh 组网估跨卡传输、B = 1 次拷贝 + (N−1) 次归约、C 按 1 个任务估时延，且 `rankSize > 8` 直接返回未标定——这正是它只适合小 rank 数小数据、大数据要退到 two-shot/NHR 的根因。
 
 ## 7. 下一步学习建议
 
 - **向「下」深入引擎内核**：本讲的 `KernelRun` 调到的 `SendRecvBatchWrite / LocalReduce / LocalCopy` 以及 `load_kernel / kernel_launch` 是 AICPU 引擎把任务真正下发到硬件的细节，这是 Unit 5（u5-l1 AICPU 模板与 Kernel 下发）的主题。建议接着读 `src/ops/op_common/template/aicpu/load_kernel.*` 与 `kernel_launch.*`。
-- **横向对比另两个引擎的模板**：同样一个 Mesh one-shot AllReduce，AIV 引擎下是 `AivTempAllReduceMesh1DOneShot`、CCU 引擎下是 `CcuTempAllReduceMesh1DOneShot`（均见 [ins_v2_all_reduce_sole_executor.cc:291-322](https://github.com/gitcode.com/cann/hccl/blob/757867153ef03d005ec8752e6cb8f802cecd1e0a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L291-L322) 的注册）。对比三者 `KernelRun` 的差异，能直观体会「算法 × 引擎」二维表。这承接 Unit 5 的 u5-l3（AIV）与 u5-l4（CCU）。
+- **向「右」跟进代价模型**：本讲只讲了「模板如何申报 A/B/C」。`CostModelManager` 的带宽参数从哪来、`CostTableManager` 如何用 A/B/C 生成并过滤候选表、`SelectMinCost` 如何挑出最终 algName，是 u8-l1（SelectorEngine 双路径）与 u8-l2（CostModel 与 CostTable）的主题；`AlgNetMeta`/`CostAggMode` 的多模板组聚合语义见 u3-l4 与 u8-l2。
+- **横向对比另两个引擎的模板**：同样一个 Mesh AllReduce，AIV 引擎下是 `AivTempAllReduceMesh1DOneShot/TwoShot`、CCU 引擎下是 `CcuTempAllReduceMesh1D` 及本轮新增的 mem2mem / 2die 系列（注册均见 [ins_v2_all_reduce_sole_executor.cc:298-322](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L298-L322)）。对比三者 `KernelRun` 与 `CalcCostCoeff` 的差异，能直观体会「算法 × 引擎」二维表。这承接 Unit 5 的 u5-l3（AIV）与 u5-l4（CCU）。
 - **向「外」接 HCOMM**：本讲多次出现的 `HcommBatchMode*`、`remoteCclMem`、channel 等都经 dlsym 落到 HCOMM。若想看清 template 如何消费控制面/数据面原语，进入 Unit 6（u6-l1 dlsym 机制、u6-l2 dlsym 封装、u6-l3 控制面/数据面分离）。
-- **动手扩展**：若要新增一个算法变体，按 u3-l1 的「algName 字符串契约」须在两端同步——selector 产出端（u3-l2）写新 algName，executor 注册端（本讲 4.2）用 `REGISTER_EXEC_V2` 绑定新 template 类，并实现 `CalcRes` 与 `KernelRun`。这正是 u7-l3（experimental 实验性贡献）给出的合规扩展路径。
+- **动手扩展**：若要新增一个算法变体，按 u3-l1 的「algName 字符串契约」须两端同步——selector 产出端（u3-l2）写新 algName，executor 注册端（本讲 4.2）用 `REGISTER_EXEC_V2` 绑定新 template 类，实现 `CalcRes` 与 `KernelRun`，并**补一个静态 `CalcCostCoeff`**（否则新选择器看不到它）。这正是 u7-l3（experimental 实验性贡献）给出的合规扩展路径。
