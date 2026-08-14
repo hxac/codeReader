@@ -9,7 +9,7 @@
 3. 掌握 `hccl_aiv_utils` 工具集：`AivOpArgs` 参数包、AIV kernel 二进制的注册与下发、AIV Cache 的数据结构。
 4. 对比 `AivTempAllReduceMesh1DOneShot` 与 `AivTempAllReduceMesh1DTwoShot` 两个模板在小数据低延迟与稍大数据量下的取舍。
 5. 解释为什么 u2-l4 的入口分发链中，AIV 路径要先做 `HcclAivCacheCheckAndReplay`。
-6. 了解本轮演进为 AIV 模板新增的静态代价标定函数 `CalcCostCoeff`（供 u8 的代价模型选择器使用）。
+6. 了解本轮演进为 AIV 模板新增的静态代价标定函数 `CalcCostCoeff` 与编译期属性 `TemplateProp props`（均供 u8 的代价模型选择器使用）。
 
 ## 2. 前置知识
 
@@ -66,6 +66,12 @@ executor 实例化模板（构造函数：拷贝 rank/子通信域/归约类型�
 
 这段代码定义了 AIV 模板契约：`Describe()` 纯虚（自描述字符串）、`CalcRes`/`KernelRun`/`FastLaunch` 等有「报错兜底」的默认实现（[aiv_alg_template_base.cc:L40-L60](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/aiv_alg_template_base.cc#L40-L60) 中默认实现直接返回 `HCCL_E_INTERNAL`，即子类必须覆盖才算合法模板），`PreSync/PostSync` 提供多线程信号量同步的通用实现。
 
+**本轮新增的编译期模板属性 `props`**：
+
+[TemplateProp 定义:src/ops/op_common/template/common_alg_template_base.h#L20-L22](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/common_alg_template_base.h#L20-L22)
+
+基类在 [aiv_alg_template_base.h:L30-L31](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/aiv_alg_template_base.h#L30-L31) 声明了 `static constexpr TemplateProp props = {};`，同时新增了 `cost_model.h` 与 `common_alg_template_base.h` 两个 include（[L20-L21](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/aiv_alg_template_base.h#L20-L21)）。注意这是 `static constexpr` 成员而非虚函数——子类通过「同名遮蔽」而非 override 来申报属性，且申报发生在**编译期**。目前唯一的字段 `isNhr`（是否为 NHR 算法）会影响 u8 代价模型的 `netType` 选择（`CalcMeshParam` 走 NHR 还是 Mesh 组网模型）；AIV 基类默认空属性（`isNhr=false`），而 NHR 系模板会覆盖为 `props = {.isNhr = true}`（例如 [ins_temp_all_gather_nhr.h:L21](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_gather/template/aicpu/ins_temp_all_gather_nhr.h#L21)）。本讲的 Mesh 1D AIV 模板均不覆盖它。
+
 **本轮新增的代价标定挂钩**：
 
 [aiv_alg_template_base.h:L38](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/op_common/template/aiv_alg_template_base.h#L38)
@@ -92,7 +98,7 @@ static std::vector<CostModelParam> CalcCostCoeff(CalcCostCoeffParam param) { ret
 
 1. **实践目标**：弄清「哪些接口子类必须覆盖、哪些可以继承默认实现」。
 2. **操作步骤**：打开 `aiv_alg_template_base.h`，把虚函数分成三列记录在表格里——纯虚（必须覆盖）、默认报错（不覆盖则运行失败）、默认可用（可直接继承）。
-3. **需要观察的现象**：`Describe` 是唯一纯虚函数；`CalcRes/KernelRun/FastLaunch` 默认报错；`CalNumBlocks/CalcScratchMultiple/PreSync/PostSync` 默认可用。
+3. **需要观察的现象**：`Describe` 是唯一纯虚函数；`CalcRes/KernelRun/FastLaunch` 默认报错；`CalNumBlocks/CalcScratchMultiple/PreSync/PostSync` 默认可用；`CalcCostCoeff` 与 `props` 是静态成员，走「同名遮蔽」而非 override。
 4. **预期结果**：得出结论「一个最小合法 AIV 模板 = 实现 Describe + CalcRes + KernelRun」，与 4.4 节 oneshot 模板的 override 列表互相印证。
 
 #### 4.1.5 小练习与答案
@@ -104,6 +110,10 @@ static std::vector<CostModelParam> CalcCostCoeff(CalcCostCoeffParam param) { ret
 **练习 2**：`PreSync/PostSync` 用 `HcommThreadNotifyRecordOnThread/WaitOnThread` 做什么？
 
 **答案**：它们是主流/从流之间的信号量同步（post/wait notify），用于多线程模板中主流通知从流开工（PreSync）与主流等待所有从流收工（PostSync）。但注意本讲 oneshot/twoshot 模板的 `CalcRes` 中 `threadNum = 1`，即单线程执行，这对同步接口在 Mesh 1D AIV 模板里实际不启用。
+
+**练习 3**：本轮在基类新增的 `static constexpr TemplateProp props = {};` 与 `static CalcCostCoeff` 都是静态成员，为什么模板的「身份属性」不走虚函数？
+
+**答案**：`props` 与 `CalcCostCoeff` 都服务于 u8 代价模型选择器的**离线比价**阶段——那时没有模板实例（实例化要走 executor 的编译期绑定与运行期工厂），虚函数表无从谈起。`static constexpr` 属性在编译期就随类型确定，注册宏在向 AllAlgos/执行器登记算法元数据时即可携带；子类用同名遮蔽申报（如 NHR 系模板的 `props = {.isNhr = true}`），运行期通过类作用域直接读取，零开销且不依赖实例状态。
 
 ### 4.2 hccl_aiv_utils：参数包、内核注册与下发
 
@@ -253,7 +263,7 @@ AIV 的痛点：每次 `HcclAllReduce` 调用都要走完整的「入口校验 �
 
 两个模板都实现「单级 Mesh 1D 拓扑上的 AllReduce」，注册于同一个执行器 `InsV2AllReduceSoleExecutor`：
 
-[AIV 模板注册:src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L317-L323](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L317-L323)
+[AIV 模板注册:src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L318-L322](https://github.com/gitcode.com/cann/hccl/blob/b16b2eab48cea3d6d08bfb2e2acc45073d9fa61a/src/ops/all_reduce/executor/ins_v2_all_reduce_sole_executor.cc#L318-L322)
 
 ```cpp
 REGISTER_EXEC_V2(HcclCMDType::HCCL_CMD_ALLREDUCE, AivAllReduceSoleMeshOneShot,
@@ -363,7 +373,7 @@ twoshot 额外设置 `argsType = KernelArgsType::ARGS_TYPE_TWO_SHOT`，使 `Regi
 ## 6. 本讲小结
 
 - AIV 引擎把算法逻辑固化在 Vector Core 上的预编译 kernel 中，Host 侧只做「装配 `AivOpArgs` + launch」，路径短、延迟低，但占用 Vector 核，适合小数据场景。
-- `AivAlgTemplateBase` 定义 AIV 模板契约：`Describe` 纯虚，`CalcRes/KernelRun/FastLaunch` 默认报错强制子类实现，`CalNumBlocks/同步接口` 提供默认实现；本轮新增静态 `CalcCostCoeff` 挂钩，默认空返回表示「未标定、不参与比价」。
+- `AivAlgTemplateBase` 定义 AIV 模板契约：`Describe` 纯虚，`CalcRes/KernelRun/FastLaunch` 默认报错强制子类实现，`CalNumBlocks/同步接口` 提供默认实现；本轮新增静态 `CalcCostCoeff` 挂钩（默认空返回表示「未标定、不参与比价」）与编译期属性 `TemplateProp props`（`isNhr` 影响代价模型 netType 选择，AIV 基类默认空属性）。
 - `hccl_aiv_utils` 三件套：`AivOpArgs` 参数包（Host↔核的全部契约）、`RegisterKernel` 按设备注册 kernel 二进制（键为 cmdType×dataType×argsType）、`ExecuteKernelLaunch` 下发并兼任缓存录制钩子。
 - AIV Cache 以七元组 `(commName, opType, count, dataType, reduceOp, root, numBlocksLimit)` 为键，首次执行录制指令序列存入通信域 ctx，后续命中直接重放——这是 u2-l4 中 `AivCacheCheckAndReplay` 位于 Selector 之前的原因：旁路整条选算法/算资源链路。
 - oneshot（全量直写 + 一次本地归约，scratch=R，taskNum=5）与 twoshot（ReduceScatter+AllGather，scratch=4，taskNum=15，独立 `ARGS_TYPE_TWO_SHOT` kernel 变体）的取舍本质是「步骤数 vs 流量/内存」；本轮两者的 `CalcCostCoeff` 把这一取舍量化为 A/B/C 系数，交给代价模型统一比价。

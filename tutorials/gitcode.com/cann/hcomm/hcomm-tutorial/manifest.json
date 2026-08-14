@@ -1,16 +1,14 @@
 {
-  "head": "29cd856550383ec133aa2f9259ae9a1f1764e4ec",
+  "head": "8afab2759939af957db1b8554bc446406fb532aa",
   "project": "hcomm",
-  "rationale": "HCOMM 是 HCCL 的通信基础库，代码采用控制面（coll_communicator_mgr：通信域/配置/拓扑/资源管理）与数据面（base_comm：endpoint/channel/内存/原语）分层解耦，因此学习路线也按此分层展开：先让读者从零认识项目定位、完成构建并跑通第一个 AllReduce 示例建立体感；再沿\"通信域生命周期→配置→拓扑→资源与 Team\"的调用链读懂控制面；然后进入数据面，按\"资源管理→Endpoint→内存注册→Channel→线程→本地与远端原语\"的顺序逐层拆解；接着深入南向适配（HCCP/RTS/URMA）与实验性 NIC 插件理解多协议支持；之后结合 CCU/AIV/AICPU 三类编程模型讲解通信算子开发这一项目核心用途；最后覆盖 Python 接口、DFX 维测、测试体系、legacy 兼容与错误码等工程化主题。依赖关系上，每个后续单元都建立在前面单元对接口与数据结构的理解之上，符合由浅入深、每讲只解决一个问题的拆分原则。",
+  "rationale": "HCOMM 是 HCCL 的通信基础库，代码采用控制面（coll_communicator_mgr：通信域/配置/拓扑/资源管理）与数据面（base_comm：endpoint/channel/内存/原语）分层解耦，因此学习路线也按此分层展开：先让读者从零认识项目定位、完成构建并跑通第一个 AllReduce 示例建立体感；再沿\"通信域生命周期→配置→拓扑→资源与 Team\"的调用链读懂控制面；然后进入数据面，按\"资源管理→Endpoint→内存注册→Channel→线程→本地与远端原语\"的顺序逐层拆解；接着深入南向适配（HCCP/RTS/URMA）与实验性 NIC 插件理解多协议支持；之后结合 CCU/AIV/AICPU 三类编程模型讲解通信算子开发这一项目核心用途；最后覆盖 Python 接口、DFX 维测、测试体系、legacy 兼容与错误码等工程化主题。依赖关系上，每个后续单元都建立在前面单元对接口与数据结构的理解之上，符合由浅入深、每讲只解决一个问题的拆分原则。本次增量（29cd856→8afab275）仅包含单个提交，改动局限在 src/legacy/ascend910 的 coll_batch_send_recv_group_executor 中非对称超节点场景（isSuPodAsym）下 RDMA slice 排序逻辑的分支处理，属于 legacy 算法执行器内部的局部逻辑调整，未改变任何对外接口、目录结构或各讲义所引用的源码范围；现有 u6-l4 legacy 兼容层讲义讲述的是新旧架构边界的组织方式，不依赖该算法细节，因此全部讲义维持 keep，无需新增或重建。",
   "units": [
     {
+      "filename": "u1-l1-project-overview.md",
       "id": "u1",
-      "title": "入门：认识 HCOMM 并跑通第一个示例",
-      "level": "beginner",
-      "order": 1,
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -36,7 +34,7 @@
           "topic": "介绍 HCOMM（Huawei Communication）作为 HCCL 通信基础库的定位、控制面与数据面分层解耦设计，以及支持的通信引擎与协议。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -64,7 +62,7 @@
           "topic": "讲解 build.sh 的参数、CMake 构建体系、UT/ST 构建开关，以及源码版本与 CANN 版本的配套关系。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -93,7 +91,7 @@
           "topic": "梳理 include（对外头文件）、pkg_inc（包间接口）、src（base_comm/coll_communicator_mgr/legacy）的目录组织，建立代码地图。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1",
             "u1-l2"
@@ -120,16 +118,17 @@
           "title": "快速上手：跑通第一个 AllReduce 示例",
           "topic": "以 examples/01_communicators 三个样例为入口，理解通信域初始化（root info / rank table / 多线程）与 AllReduce 的完整执行流程。"
         }
-      ]
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "入门：认识 HCOMM 并跑通第一个示例"
     },
     {
+      "filename": "u2",
       "id": "u2",
-      "title": "控制面：通信域管理与拓扑",
-      "level": "intermediate",
-      "order": 2,
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l4"
           ],
@@ -156,7 +155,7 @@
           "topic": "讲解 hccl_comm.h 中的通信域初始化/销毁/查询 C 接口，以及 api_c_adpt 适配层如何把 C 接口转接到内部实现。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -183,7 +182,7 @@
           "topic": "深入 communicator 模块，理解 CollComm 核心对象、CollCommMgr 管理器以及独立算子（independent_op）的组织方式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -210,7 +209,7 @@
           "topic": "讲解 config_mgr 的配置加载与校验，以及 HcclConfigGetInfo/HcclSetConfig 等接口背后的配置数据结构。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -238,7 +237,7 @@
           "topic": "讲解 rank_graph 模块与 hccl_rank_graph.h 的分层拓扑查询接口，理解物理拓扑（phy_topo）如何构建为 rank 图。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -265,7 +264,7 @@
           "topic": "讲解通信域初始化时各 rank 之间如何通过 bootstrap IP、socket agent、白名单完成信息交换与连接建立。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -292,16 +291,17 @@
           "title": "Team 机制：HcclWorldTeamCreate 与通道批量创建",
           "topic": "讲解 team 模块的 world/sub team 创建、窗口注册与通道批量创建（HcclTeamChannelsCreate）接口。"
         }
-      ]
+      ],
+      "level": "intermediate",
+      "order": 2,
+      "title": "控制面：通信域管理与拓扑"
     },
     {
+      "filename": "u3",
       "id": "u3",
-      "title": "数据面：基础通信层 base_comm",
-      "level": "intermediate",
-      "order": 3,
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -328,7 +328,7 @@
           "topic": "讲解 base_comm 的组成（common/primitives/resources）与 hcomm_res_mgr 对通信资源的统一管理。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -358,7 +358,7 @@
           "topic": "讲解 hcomm_res.h 中的端点接口（HcommEndpointCreate/Destroy/GetDescs 等）与 endpoints 目录下 HCCS/URMA/ROCE/UB 等多协议端点实现。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -387,7 +387,7 @@
           "topic": "讲解 HcommMemReg/HcommMemImport/HcommMemUnimport 与 reged_mems 模块中各协议的注册内存管理。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l3"
           ],
@@ -414,7 +414,7 @@
           "topic": "讲解 hcomm_channel.h 的 HcommChannelDesc（含 ABI v1/v3 版本演进、roce/hccs/ub 属性 union）与通道配置流程。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -441,7 +441,7 @@
           "topic": "讲解 hccl_res.h 的线程获取接口族（HcclThreadAcquire/WithConfig/WithStream/Dedicated）与 EngineCtx 引擎上下文机制。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l4",
             "u3-l5"
@@ -469,7 +469,7 @@
           "topic": "讲解 hcomm_primitives.h 中的本地操作：HcommLocalCopyOnThread、HcommLocalReduceOnThread、NotifyRecord/Wait 等同步原语。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l6"
           ],
@@ -495,16 +495,17 @@
           "title": "远端单边读写原语：Write/Read 与批量传输",
           "topic": "讲解 HcommWriteOnThread/HcommReadOnThread、带通知变体、Nbi 非阻塞接口与 HcommBatchTransferOnThread 批量传输。"
         }
-      ]
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "数据面：基础通信层 base_comm"
     },
     {
+      "filename": "u4",
       "id": "u4",
-      "title": "南向适配与通信协议",
-      "level": "advanced",
-      "order": 4,
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -532,7 +533,7 @@
           "topic": "讲解 HCCP、RTS、Runtime、URMA 四个南向适配器如何把 base_comm 与底层软件栈和硬件解耦。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -558,7 +559,7 @@
           "topic": "结合架构文档讲解 hccp 资源模块（hccp_service、rdma_agent、rdma_service、netco）如何提供进程间点对点通信能力。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -585,16 +586,17 @@
           "title": "RDMA/URMA 与实验性 NIC 插件扩展",
           "topic": "讲解 URMA 适配、实验性 host CPU RoCE/URMA 通道实现与 nic_plugin 第三方网卡插件机制。"
         }
-      ]
+      ],
+      "level": "advanced",
+      "order": 4,
+      "title": "南向适配与通信协议"
     },
     {
+      "filename": "u5",
       "id": "u5",
-      "title": "CCU 与通信算子开发",
-      "level": "advanced",
-      "order": 5,
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1",
             "u2-l4"
@@ -623,7 +625,7 @@
           "topic": "讲解通信引擎（comm engine）抽象、CCU（通信控制单元）编程模型与 src/base_comm/resources/ccu 的资源组织。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -651,7 +653,7 @@
           "topic": "按照 ccu_comm_op_dev 指南讲解算子接口定义、资源创建、拓扑查询、算法选择与构建部署的完整开发流程。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -680,7 +682,7 @@
           "topic": "精读 include/ccu 下的 C++ 原语头文件（buffer、address、event、launch、loop），理解算子开发者可直接使用的原语集。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -708,7 +710,7 @@
           "topic": "按照 aiv_comm_op_dev 指南讲解核侧（AIV）通信算子的接口定义、算子分发与任务调度开发流程。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -735,16 +737,17 @@
           "title": "AICPU 通信算子与任务缓存",
           "topic": "讲解 AICPU 通信算子开发流程与 HcommAicpuTsTaskCache 系列任务缓存接口（primitives/aicpu 模块）。"
         }
-      ]
+      ],
+      "level": "advanced",
+      "order": 5,
+      "title": "CCU 与通信算子开发"
     },
     {
+      "filename": "u6",
       "id": "u6",
-      "title": "工程化：接口、维测、测试与兼容",
-      "level": "advanced",
-      "order": 6,
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -771,7 +774,7 @@
           "topic": "讲解 python 包如何基于 ctypes 封装 HCCL 通信域管理与 group split 能力。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -799,7 +802,7 @@
           "topic": "讲解 dfx 模块（cluster_monitor、profiling、ns_recovery、taskException）与 hcomm_diag 诊断接口，以及实验性 cluster_link_diag 工具。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -827,7 +830,7 @@
           "topic": "讲解 test/ut 与 test/st 的组织方式、stub 与 device 测试设施，以及如何通过 build.sh 运行测试。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -855,7 +858,7 @@
           "topic": "讲解 src/legacy 下 A2&A3（ascend910）与 A5（ascend950）旧流程兼容代码的组织与在新架构中的位置。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l4",
             "u6-l2"
@@ -883,7 +886,10 @@
           "title": "错误码体系与贡献指南",
           "topic": "讲解错误码文档的组织（EI0001~EI0020）、HcclGetErrorString/GetCommAsyncError 错误处理接口，以及如何参与贡献。"
         }
-      ]
+      ],
+      "level": "advanced",
+      "order": 6,
+      "title": "工程化：接口、维测、测试与兼容"
     }
   ]
 }

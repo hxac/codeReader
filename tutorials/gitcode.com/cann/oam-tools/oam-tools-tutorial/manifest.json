@@ -1,0 +1,876 @@
+{
+  "head": "047c299103c5830ddfc0b6ae6577137c1eb78a4d",
+  "project": "oam-tools",
+  "rationale": "oam-tools 是华为 CANN 的运维工具集，由 asys（故障信息收集）、msaicerr（AI Core Error 分析）、msprof（性能调优）和 hccl_test（HCCL 性能测试）四个相对独立的组件构成，共享一套 CMake + build.sh 构建打包体系。因此学习路线按\"先全局后局部\"设计：入门层先讲项目定位、构建系统和入口文件，让读者从零跑起来；进阶层按组件分单元深入，asys 是纯 Python 且入口链路（asys.py → cmd_parser → 各子命令模块）最完整，作为源码阅读的第一个深读对象；msaicerr 聚焦错误码解析与 Dump 文件解析（含 Python 调用 C++ proto 解析的混合形态）；msprof 是 C++ collector 插件架构，放在更后；hccl_test 是独立的 C++ 测试框架。最后专家层覆盖测试体系、工程规范与二次开发实践，让读者能贡献代码。单元内讲义按\"入口 → 参数与公共设施 → 核心子模块 → 高级机制\"递进，依赖关系显式声明，便于 worker 按序生成。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 asys、msaicerr、msprof、hccl_test 各自的功能定位",
+            "理解工具集覆盖的运维场景与支持的昇腾硬件",
+            "找到各组件的官方文档与仓内文档入口"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README 项目导读",
+            "四大组件功能表",
+            "支持硬件列表"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README 后画出四大组件的功能定位对照表（组件名 / 解决什么问题 / 典型命令各一列），并结合 docs/zh 下对应组件的 README.md 为每个组件补充一条典型使用场景。",
+          "source_files": [
+            "README.md",
+            "docs/zh/asys/README.md",
+            "docs/zh/msaicerr/README.md",
+            "docs/zh/profiling/README.md",
+            "docs/zh/hccl_test/README.md"
+          ],
+          "title": "oam-tools 是什么：项目定位与四大组件",
+          "topic": "介绍 OAM-Tools 作为 CANN 运维工具集的整体定位，梳理 asys、msaicerr、msprof、hccl_test 四大组件各自解决什么问题，以及支持的昇腾硬件型号。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-build-system.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "理解 build.sh 的参数解析与构建主流程",
+            "理解 CMakeLists.txt 如何组织四个组件的构建",
+            "知道第三方库与闭源 bundle 的下载机制"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "build.sh",
+            "CMakeLists.txt",
+            "cmake 模块"
+          ],
+          "order": 2,
+          "practice_task": "在无昇腾设备的环境下执行 bash build.sh -h 列出全部构建参数，并写一段 shell 脚本调用 build.sh 完成'编译 + 打 run 包 + 只跑 asys UT'的组合流程（不要求真实编译成功，重点是参数拼接正确）。",
+          "source_files": [
+            "build.sh",
+            "CMakeLists.txt",
+            "version.cmake",
+            "cmake/download_libs.py"
+          ],
+          "title": "构建与打包：build.sh 与 CMake 体系",
+          "topic": "讲解 oam-tools 如何通过 build.sh 驱动 CMake 完成编译、第三方库下载、闭源 bundle 拉取以及 .run 安装包打包。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-directory-and-entrypoints.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "记住 src 下各组件目录的职责",
+            "定位 asys 与 msaicerr 的 Python 入口文件",
+            "理解软链接 asys 与 .run 包安装释放的关系"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "src/asys/asys.py",
+            "src/msaicerr/msaicerr.py",
+            "目录结构"
+          ],
+          "order": 3,
+          "practice_task": "写出四个组件各自的入口文件绝对路径，并用 grep 在 asys.py 中找到子命令到处理类的映射字典 EXECUTE_CMD_FUNC，列出它支持的 8 个子命令。",
+          "source_files": [
+            "README.md",
+            "src/asys/asys.py",
+            "src/msaicerr/msaicerr.py",
+            "src/hccl_test/Makefile"
+          ],
+          "title": "目录结构与入口文件地图",
+          "topic": "带读者走一遍仓库目录结构，定位四个组件的入口文件（asys.py、msaicerr.py、msprof collector、hccl_test Makefile），理解安装后工具释放到 CANN tools/ 目录的布局。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "filename": "u1-l4-environment-and-run.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "完成 source set_env.sh 环境加载",
+            "用 build.sh -u 跑通组件测试",
+            "按 examples 脚本验证 asys/msaicerr 基本功能"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "quick_install 文档",
+            "examples 脚本",
+            "init_env.sh"
+          ],
+          "order": 4,
+          "practice_task": "在有昇腾设备的环境（或读懂流程后在纸面）执行 examples/asys/run.sh 中的 asys health 命令，并把 asys info、asys collect 各跑一遍，记录三个子命令各自的输出目录结构。",
+          "source_files": [
+            "docs/zh/quick_install.md",
+            "examples/asys/run.sh",
+            "examples/msaicerr/run.sh",
+            "examples/msprof/run.sh",
+            "init_env.sh"
+          ],
+          "title": "环境搭建、安装验证与功能运行示例",
+          "topic": "说明 CANN 环境准备、set_env.sh 加载、.run 包安装验证（build.sh -u）以及 examples 目录中各组件的最小运行示例。"
+        }
+      ],
+      "order": 1,
+      "title": "入门：认识 oam-tools"
+    },
+    {
+      "id": "u2",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l1-asys-entry-flow.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "读懂 asys.py 的四步主流程",
+            "理解 EXECUTE_CMD_FUNC 子命令分发机制",
+            "理解输出目录创建与 tar 压缩时机"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "asys.py",
+            "common/task_common.py",
+            "common/compress_output_dir.py"
+          ],
+          "order": 1,
+          "practice_task": "在 asys.py 中为每一步主流程加注释编号，然后模仿 EXECUTE_CMD_FUNC 的写法，写一个 10 行的最小 Python 程序：用字典把 'a'/'b' 两个命令名映射到两个类并调用 run() 方法。",
+          "source_files": [
+            "src/asys/asys.py",
+            "src/asys/common/task_common.py",
+            "src/asys/common/compress_output_dir.py"
+          ],
+          "title": "asys 入口主流程：asys.py 如何分发子命令",
+          "topic": "逐段阅读 src/asys/asys.py 的 main()：参数去重、命令行解析、环境类型检查、配置加载、输出目录创建、子命令分发执行与结果压缩。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-asys-cmdline-and-params.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "理解 Arg 枚举驱动的 argparse 动态构建",
+            "理解 ArgChecker 的参数校验职责",
+            "理解 ParamDict 作为全局参数容器的用法"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "cmdline/cmd_parser.py",
+            "cmdline/arg_checker.py",
+            "params/param_dict.py"
+          ],
+          "order": 2,
+          "practice_task": "模仿 Arg 枚举的声明格式，为 asys 新增一个假想参数 --mock（int 型、可选、带 help 文案），在 cmd_parser.py 中找到它应该插入的位置并写出来；再为它写一个 ArgChecker 校验函数。",
+          "source_files": [
+            "src/asys/cmdline/cmd_parser.py",
+            "src/asys/cmdline/arg_checker.py",
+            "src/asys/params/param_dict.py"
+          ],
+          "title": "asys 命令行体系：Arg 枚举、ArgChecker 与 ParamDict",
+          "topic": "解析 asys 声明式命令行设计：cmd_parser.py 用 Arg 枚举描述参数，arg_checker.py 做合法性检查，param_dict.py 作为参数全局单例。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l3-asys-common-infra.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "复用 log.py 与 RetCode 进行规范日志与返回值处理",
+            "理解 device.py 对 NPU 设备的封装",
+            "理解 cmd_run.py 执行外部命令的方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "common/log.py",
+            "common/const.py",
+            "common/cmd_run.py",
+            "common/device.py"
+          ],
+          "order": 3,
+          "practice_task": "写一个 30 行以内的小脚本，导入 asys 的 common 模块，用 log_info/log_error 记录两条日志，用 cmd_run.py 提供的能力执行 npu-smi info 并解析其返回码与输出。",
+          "source_files": [
+            "src/asys/common/log.py",
+            "src/asys/common/const.py",
+            "src/asys/common/cmd_run.py",
+            "src/asys/common/device.py",
+            "src/asys/common/file_operate.py"
+          ],
+          "title": "asys 公共设施：日志、常量、设备与命令执行",
+          "topic": "阅读 asys/common 下的基础模块：log.py 日志封装、const.py 常量与返回码、cmd_run.py 外部命令执行、device.py 设备信息、file_operate.py 文件操作。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-asys-chip-adaptation.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "理解 chip_handler.py.in 模板如何生成芯片处理器",
+            "理解 supported_chip.py 的芯片识别流程",
+            "掌握新增一款芯片适配需要动的文件"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "common/supported_chip.py",
+            "chip_handler 模板",
+            "各芯片 handler"
+          ],
+          "order": 4,
+          "practice_task": "对照 ascend950_handler.py 的结构，写出一个假想芯片 ascendXXX_handler.py 的骨架（类名、必须实现的方法签名照抄现有 handler），并在 supported_chip.py 中找到芯片注册点说明如何接入。",
+          "source_files": [
+            "src/asys/common/supported_chip.py",
+            "src/asys/common/chip_handler.py.in",
+            "src/asys/common/ascend910B/ascend910B_handler.py",
+            "src/asys/common/ascend950/ascend950_handler.py"
+          ],
+          "title": "asys 芯片适配层：supported_chip 与各型号 handler",
+          "topic": "分析 asys 如何用模板生成的 chip_handler.py.in 和 supported_chip.py 支持 ascend910B、910_93、910_96、950 等多款芯片的差异化管理。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "filename": "u2-l5-asys-collect.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "理解 asys_collect.py 的采集项调度",
+            "理解 trace/coredump/stackcore 等采集子模块的结构共性",
+            "掌握新增一个采集项的扩展点"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "collect/asys_collect.py",
+            "trace 采集",
+            "日志采集",
+            "stacktrace 采集"
+          ],
+          "order": 5,
+          "practice_task": "任选一个采集子模块（如 trace_collect.py），总结其类的输入输出与依赖的公共设施；然后模仿其目录结构，在纸面设计一个'新增环境变量采集项'的模块骨架。",
+          "source_files": [
+            "src/asys/collect/asys_collect.py",
+            "src/asys/collect/trace/trace_collect.py",
+            "src/asys/collect/log/host_log_collect.py",
+            "src/asys/collect/stacktrace/stacktrace_collect.py",
+            "src/asys/collect/coretrace/coretrace_collect.py"
+          ],
+          "title": "asys collect 子系统：故障信息采集框架",
+          "topic": "深入 src/asys/collect：asys_collect.py 总调度，以及 trace、coredump、stackcore、coretrace、日志、图、data_dump 等各采集子模块的统一组织方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u2-l6-asys-subcommands.md",
+          "id": "u2-l6",
+          "learning_goals": [
+            "理解 AsysLaunch 复跑业务并采集信息的机制",
+            "理解 info/health/diagnose 各自输出什么",
+            "追踪一个子命令从 EXECUTE_CMD_FUNC 到具体实现的调用链"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "launch",
+            "info",
+            "health",
+            "diagnose"
+          ],
+          "order": 6,
+          "practice_task": "任选 asys launch 子命令，从 cmd_parser.py 的 Arg 定义开始，手绘一条'命令行参数 → ParamDict → AsysLaunch.run() → 采集模块'的调用链图，标注经过的每个文件。",
+          "source_files": [
+            "src/asys/launch/asys_launch.py",
+            "src/asys/info/asys_info.py",
+            "src/asys/health/asys_health.py",
+            "src/asys/diagnose/asys_diagnose.py"
+          ],
+          "title": "asys 业务子命令：launch、info、health、diagnose",
+          "topic": "逐个阅读 asys 四个高频子命令的实现：launch（业务复跑+信息收集）、info（软硬件/Device 状态展示）、health（健康检查）、diagnose（综合/组件检测）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u2-l7-asys-analyze.md",
+          "id": "u2-l7",
+          "learning_goals": [
+            "理解 asys analyze 的 run_mode 设计",
+            "理解 AI Core Error 报告解析与 msaicerr 的分工",
+            "理解 coredump 文件解析流程"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "analyze/asys_analyze.py",
+            "analyze/coredump_analyze.py"
+          ],
+          "order": 7,
+          "practice_task": "对照 docs/zh/asys/AI_Core_error_analysis.md 的用户视角流程，在源码中找到 asys analyze 解析 AI Core Error 报告时实际调用的函数链，写一段 200 字的流程说明。",
+          "source_files": [
+            "src/asys/analyze/asys_analyze.py",
+            "src/asys/analyze/coredump_analyze.py",
+            "docs/zh/asys/AI_Core_error_analysis.md",
+            "docs/zh/asys/coredump_files_parsing.md"
+          ],
+          "title": "asys analyze：AI Core Error 与 coredump 分析",
+          "topic": "讲解 asys analyze 子命令如何解析 AI Core Error 故障信息和 coredump 文件，并与 msaicerr 工具形成配合。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l8-asys-profiling-and-config.md",
+          "id": "u2-l8",
+          "learning_goals": [
+            "理解 config_parser.py 如何加载配置文件",
+            "理解 asys config get/set 子命令的实现",
+            "理解 asys profiling 与 msprof 工具的关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "config/config_parser.py",
+            "config_cmd/asys_config.py",
+            "profiling/asys_profiling.py"
+          ],
+          "order": 8,
+          "practice_task": "运行 asys config（或阅读源码梳理）列出 asys 支持的全部可配置项，任选一项用 asys config set 修改后再 get 验证，并在 config_parser.py 中找到该配置的读取代码位置。",
+          "source_files": [
+            "src/asys/profiling/asys_profiling.py",
+            "src/asys/config/config_parser.py",
+            "src/asys/config_cmd/asys_config.py",
+            "src/asys/config_cmd/interface.py"
+          ],
+          "title": "asys profiling 与 config：配置机制与性能数据采集",
+          "topic": "阅读 asys 的配置文件机制（config_parser.py、config_cmd）与 profiling 子命令如何衔接性能数据采集能力。"
+        }
+      ],
+      "order": 2,
+      "title": "asys：故障信息收集工具源码解析"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u3-l1-msaicerr-entry.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "理解 msaicerr.py 三种模式（-p/-d/-e）的分发",
+            "理解全局异常钩子如何保证结果状态正确",
+            "理解 Collection 类的整体职责"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "msaicerr.py",
+            "ms_interface/collection.py"
+          ],
+          "order": 1,
+          "practice_task": "为 msaicerr.py 的 main 流程画一张分支图（-p / -d / -e 三条路径各自调用的类），并用 python3 msaicerr.py -h 验证你总结的参数列表与源码一致。",
+          "source_files": [
+            "src/msaicerr/msaicerr.py",
+            "src/msaicerr/ms_interface/collection.py",
+            "src/msaicerr/ms_interface/constant.py"
+          ],
+          "title": "msaicerr 入口：从命令行参数到分析主流程",
+          "topic": "阅读 src/msaicerr/msaicerr.py：参数解析、tar 包解压、全局异常钩子，以及按 -p（报告目录）/ -d（dump 文件）/ -e（环境检查）三种模式分发到不同处理类。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-aicore-error-parsing.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 AicoreErrorParser 如何解析错误报告目录",
+            "理解错误码到错误描述的映射机制",
+            "理解芯片型号差异对解析流程的影响"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "aicore_error_parser.py",
+            "aic_error_info.py",
+            "ascend_handler.py"
+          ],
+          "order": 2,
+          "practice_task": "构造一个最小的假想错误报告目录（按源码中期望的文件名布局），把 msaicerr.py 指向它跑一次 -p 模式，观察并记录解析走到哪一步、报什么错，从而反推解析流程对输入的要求。",
+          "source_files": [
+            "src/msaicerr/ms_interface/aicore_error_parser.py",
+            "src/msaicerr/ms_interface/aic_error_info.py",
+            "src/msaicerr/ms_interface/ascend_handler.py",
+            "src/msaicerr/ms_interface/constant.py"
+          ],
+          "title": "AI Core Error 报告解析：aicore_error_parser",
+          "topic": "深入 AicoreErrorParser 与 AicErrorInfo：如何从 AI Core Error 报告目录提取错误码、错误信息，并按芯片型号（ascend910_96、ascend950 等）分流到不同 handler。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l3-dump-parsing.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解 dump_data.proto 定义的数据结构",
+            "理解 dump_proto_to_json 的编译与被 Python 调用方式",
+            "理解 -dtype 参数如何影响解析输出"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "dump_data_parser.py",
+            "dump_data.proto",
+            "dump_proto_to_json.cpp"
+          ],
+          "order": 3,
+          "practice_task": "阅读 dump_data.proto 后写出 DumpData 消息的字段清单；再追踪 dump_data_parser.py 中调用 proto 解析二进制（或可执行文件）的那行代码，说明 Python 与 C++ 之间通过什么方式（子进程/so）交互。",
+          "source_files": [
+            "src/msaicerr/ms_interface/dump_data_parser.py",
+            "src/msaicerr/proto_parse/dump_data.proto",
+            "src/msaicerr/proto_parse/dump_proto_to_json.cpp",
+            "docs/zh/msaicerr/Dump_files_parsing.md"
+          ],
+          "title": "Dump 文件解析：Python 与 C++/protobuf 协作",
+          "topic": "分析 dump_data_parser.py 如何借助 proto_parse 目录下的 C++ 工具（dump_proto_to_json，基于 dump_data.proto）把 Dump 文件转成可读 JSON 并做数据类型转换。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l4-msaicerr-env-and-utils.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "理解 dsmi_interface 对 NPU 管理接口的封装",
+            "理解 utils.py 中日志与结果状态管理模式",
+            "理解 -e 环境检查的检查项构成"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "dsmi_interface.py",
+            "utils.py",
+            "environment_check 文档"
+          ],
+          "order": 4,
+          "practice_task": "在真实或模拟环境运行 msaicerr.py -e -dev 0，对照源码列出环境检查实际检查的每一项（CANN 版本、驱动、芯片型号等），标注每项检查对应的函数。",
+          "source_files": [
+            "src/msaicerr/ms_interface/dsmi_interface.py",
+            "src/msaicerr/ms_interface/utils.py",
+            "docs/zh/msaicerr/environment_check.md"
+          ],
+          "title": "msaicerr 环境检查与工具函数：dsmi_interface 与 utils",
+          "topic": "讲解 msaicerr 的运行环境检查（-e 模式）实现：dsmi_interface 与设备交互、utils.py 提供日志与全局结果管理。"
+        }
+      ],
+      "order": 3,
+      "title": "msaicerr：AI Core Error 分析工具源码解析"
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "filename": "u4-l1-msprof-architecture.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "区分 collector（basic/dvvp）与分析 wheel 的职责",
+            "理解 msprof 在 CANN profiler 流水线中的位置",
+            "理解安装包中 profiler_tool 目录的来源"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "CMakeLists.txt",
+            "架构设计文档",
+            "collector 目录结构"
+          ],
+          "order": 1,
+          "practice_task": "结合架构文档画出 msprof 数据流图（业务进程 → collector → 原始数据 → 分析脚本 → 结果），并标注每一步对应的源码目录或外部仓（msprof wheel 子仓）。",
+          "source_files": [
+            "docs/zh/design/profiling/architecture.md",
+            "src/msprof/CMakeLists.txt",
+            "README.md"
+          ],
+          "title": "msprof 总体架构：C++ collector 与分析脚本的分工",
+          "topic": "基于设计文档与源码结构，讲解 msprof 由 C++ 侧 collector（basic、dvvp）与 Python 分析 wheel 组成的整体架构，以及数据如何从采集流向分析。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-msprofbin.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解 msprof_bin.cpp 的启动流程",
+            "理解 input_parser.cpp 如何解析采集配置",
+            "理解 running_mode 区分的采集模式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "msprof_bin.cpp",
+            "input_parser.cpp",
+            "msprof_manager.cpp",
+            "msprof_task.cpp"
+          ],
+          "order": 2,
+          "practice_task": "在 msprof_bin.cpp 中找到 main 函数并梳理初始化顺序（参数解析 → manager 创建 → 任务执行），写出每一步对应的函数调用；对照 docs/zh/profiling/msprof_cmd/msprof_cmd.md 的一条真实命令，标注命令行选项在 input_parser.cpp 中的解析位置。",
+          "source_files": [
+            "src/msprof/collector/dvvp/msprofbin/src/msprof_bin.cpp",
+            "src/msprof/collector/dvvp/msprofbin/src/input_parser.cpp",
+            "src/msprof/collector/dvvp/msprofbin/src/msprof_manager.cpp",
+            "src/msprof/collector/dvvp/msprofbin/src/running_mode.cpp"
+          ],
+          "title": "msprofbin：命令行入口与任务管理",
+          "topic": "阅读 msprofbin 目录：msprof_bin.cpp 入口、input_parser.cpp 参数解析、msprof_manager.cpp / msprof_task.cpp 任务调度、running_mode.cpp 运行模式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-profapi-plugins.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "理解 prof_plugin_manager 的插件加载机制",
+            "区分 acl/cann/runtime/tx 等插件的数据来源",
+            "理解新增数据源插件需要实现的接口"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "prof_plugin_manager.h",
+            "prof_acl_plugin.h",
+            "prof_runtime_plugin.h"
+          ],
+          "order": 3,
+          "practice_task": "整理 profapi/inc 下所有插件头文件清单（插件名 / 负责的数据类型 / 主要回调接口两三列）；然后仿照其中一个插件的接口定义，为一个假想的'自定义算子耗时插件'写出接口头文件骨架。",
+          "source_files": [
+            "src/msprof/collector/dvvp/profapi/inc/prof_plugin_manager.h",
+            "src/msprof/collector/dvvp/profapi/inc/prof_acl_plugin.h",
+            "src/msprof/collector/dvvp/profapi/inc/prof_runtime_plugin.h",
+            "src/msprof/collector/dvvp/profapi/inc/prof_tx_plugin.h"
+          ],
+          "title": "profapi 插件体系：多数据源采集插件",
+          "topic": "分析 profapi 目录下的插件架构：prof_plugin_manager 管理的 acl、cann、runtime、tx、device 等插件如何接入不同数据源。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u4-l4-msprof-analyzers.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "理解 analyzer 基类与派生分析器的职责划分",
+            "理解 hwts/rt/ge 等分析器各自处理的数据类别",
+            "理解 op_desc_parser 对算子描述的解析作用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "analyzer_base.h",
+            "analyzer.h",
+            "analyzer_hwts.h"
+          ],
+          "order": 4,
+          "practice_task": "以 analyzer_base.h 为基准，列一个表格对比各派生 analyzer（数据来源文件、输出内容、关键方法），并写一段说明：如果要支持一种新的原始数据文件，应该从哪个类派生、实现哪些方法。",
+          "source_files": [
+            "src/msprof/collector/dvvp/analyze/inc/analyzer_base.h",
+            "src/msprof/collector/dvvp/analyze/inc/analyzer.h",
+            "src/msprof/collector/dvvp/analyze/inc/analyzer_hwts.h",
+            "src/msprof/collector/dvvp/analyze/inc/analyzer_rt.h",
+            "src/msprof/collector/dvvp/analyze/inc/op_desc_parser.h"
+          ],
+          "title": "analyze 模块：原始性能数据的分类分析器",
+          "topic": "讲解 analyzer 系列头文件设计的分析器体系：analyzer_base 基类与 rt、hwts、ge、ts、ffts 等子类分析器如何处理不同来源的性能数据。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l5-profiling-usage.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "掌握 msprof 采集的三种典型触发方式",
+            "理解 PROFILING_MODE / PROFILING_OPTIONS 的作用",
+            "理解延迟采集与动态采集的差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "msprof_cmd 文档",
+            "环境变量文档",
+            "延迟采集文档"
+          ],
+          "order": 5,
+          "practice_task": "任选一种采集方式（如环境变量方式），为一个 pytorch 训练脚本配置 PROFILING_MODE 与 PROFILING_OPTIONS 并触发采集；若无可运行环境，则写出完整的环境变量取值与预期产物目录结构。",
+          "source_files": [
+            "docs/zh/profiling/msprof_cmd/msprof_cmd.md",
+            "docs/zh/profiling/other_method/with_environment_variables.md",
+            "docs/zh/env-vars/PROFILING_MODE.md",
+            "docs/zh/env-vars/PROFILING_OPTIONS.md",
+            "docs/zh/profiling/msprof_cmd/delayed_mode.md"
+          ],
+          "title": "msprof 用户视角：msprof 命令、环境变量与 acl.json 采集方式",
+          "topic": "从使用者视角梳理 msprof 的多种采集方式：msprof 命令行、ACL/Ascend Graph API、acl.json 配置文件、环境变量（PROFILING_MODE/PROFILING_OPTIONS），以及动态/延迟采集。"
+        }
+      ],
+      "order": 4,
+      "title": "msprof：性能调优工具源码解析"
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u5-l1-hccl-test-overview.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "理解 Makefile 与 CMakeLists 如何联动构建 hccl_test",
+            "理解 hostfile 在多机场景的作用",
+            "列出 opbase_test 支持的全部集合通信算子"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Makefile",
+            "common/hccl_test_main.cc",
+            "hostfile"
+          ],
+          "order": 1,
+          "practice_task": "统计 opbase_test 目录下支持的集合通信算子种类，按'算子名 / 测试文件'列成表；再阅读 Makefile 说明编译产物是什么、链接了哪些 HCCL 相关库。",
+          "source_files": [
+            "src/hccl_test/Makefile",
+            "src/hccl_test/CMakeLists.txt",
+            "src/hccl_test/common/src/hccl_test_main.cc",
+            "src/hccl_test/README.md"
+          ],
+          "title": "hccl_test 总览：构建方式与工程结构",
+          "topic": "介绍 hccl_test 的定位（基于 HCCL 单算子 API 测试集合通信功能与性能）、Makefile/CMake 双构建入口、common 与 opbase_test 的目录组织。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-opbase-test-framework.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "理解 HcclOpbaseRootinfoBase 基类的测试骨架",
+            "理解 rootinfo 在集合通信中的作用",
+            "掌握新增一个算子测试的完整步骤"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "hccl_opbase_rootinfo_base.cc",
+            "hccl_test_common.cc",
+            "hccl_allreduce_rootinfo_test.cc"
+          ],
+          "order": 2,
+          "practice_task": "对照 hccl_allreduce_rootinfo_test.cc 与基类，为一种尚未覆盖的集合通信变体（如带 root 参数的变体算子）编写测试类的 .h/.cc 骨架代码，复用基类提供的公共流程。",
+          "source_files": [
+            "src/hccl_test/common/src/hccl_opbase_rootinfo_base.cc",
+            "src/hccl_test/common/src/hccl_test_common.cc",
+            "src/hccl_test/opbase_test/hccl_allreduce_rootinfo_test.cc",
+            "src/hccl_test/opbase_test/hccl_allreduce_rootinfo_test.h"
+          ],
+          "title": "opbase 测试框架：rootinfo 测试如何组织",
+          "topic": "深入 hccl_opbase_rootinfo_base 基类与 hccl_test_common 公共设施，理解每个集合通信算子测试（如 allreduce、allgather、alltoall）如何复用同一套测试骨架。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-hccl-test-running.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "掌握 hccl_test 的启动方式与关键命令行参数",
+            "理解正确性校验与性能统计的实现位置",
+            "能解读一次带宽测试结果"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "hccl_check_common.cc",
+            "hccl_check_buf_init.cc",
+            "execution 文档"
+          ],
+          "order": 3,
+          "practice_task": "在两卡环境（或纸面）执行一次 allreduce 带宽测试，记录命令、输出结果格式，并在 hccl_test_common.cc 中找到结果中每个统计量（如平均带宽/时延）的计算代码位置。",
+          "source_files": [
+            "src/hccl_test/common/src/hccl_check_common.cc",
+            "src/hccl_test/common/src/hccl_check_buf_init.cc",
+            "docs/zh/hccl_test/execution.md",
+            "docs/zh/hccl_test/cmdline_options_desc.md"
+          ],
+          "title": "hccl_test 运行与结果解读：正确性校验与性能数据",
+          "topic": "结合用户文档与 common 中的校验代码（hccl_check_buf_init、hccl_check_common），讲解如何运行测试、如何校验结果正确性、如何解读带宽与耗时数据。"
+        }
+      ],
+      "order": 5,
+      "title": "hccl_test：HCCL 集合通信测试工具源码解析"
+    },
+    {
+      "id": "u6",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4",
+            "u2-l5"
+          ],
+          "filename": "u6-l1-test-system.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "理解 --component 参数与测试范围的对应关系",
+            "理解 asys/msaicerr 的 pytest 组织方式",
+            "理解 msprof gtest 用例的构建与运行"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "scripts/run_tests.sh",
+            "test/ut/asys",
+            "test/st"
+          ],
+          "order": 1,
+          "practice_task": "挑选 test/ut/asys 下任一测试文件，读懂其测的对象并仿写一个针对 asys 参数校验（arg_checker）的用例，用 bash build.sh -u --component asys 或 pytest 单独跑通自己新加的用例。",
+          "source_files": [
+            "scripts/run_tests.sh",
+            "test/ut/asys",
+            "test/ut/msprof",
+            "test/st/conftest.py"
+          ],
+          "title": "测试体系：UT/ST 组织与 build.sh -u 联动",
+          "topic": "讲解 test/ut（asys、msaicerr、msprof）与 test/st（asys、msaicerr、install、upgrade、uninstall）的组织方式，以及 scripts/run_tests.sh 如何被 build.sh -u 驱动。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-engineering-practice.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "理解 OAT 开源检查与增量代码检查的作用",
+            "理解 pre-commit 钩子链的组成",
+            "掌握一次合格的社区贡献需要的检查项"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "CONTRIBUTING.md",
+            "scripts/oat_check.sh",
+            "scripts/incremental_codecheck.py"
+          ],
+          "order": 2,
+          "practice_task": "在本仓配置好 pre-commit 后随便改动一个文件触发检查，记录每个 hook 的作用；再手动执行一次增量代码检查脚本，解读其输出报告的每一节含义。",
+          "source_files": [
+            "CONTRIBUTING.md",
+            "scripts/oat_check.sh",
+            "scripts/incremental_codecheck.py",
+            "OAT.xml",
+            "AGENTS.md"
+          ],
+          "title": "工程规范：OAT 检查、pre-commit 与增量代码检查",
+          "topic": "介绍贡献代码前的工程检查：OAT.xml 与 oat_check.sh 开源合规检查、pre-commit 钩子、incremental_codecheck.py 增量检查。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u6-l3-packaging-and-install.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "理解 .run 安装包的生成与释放流程",
+            "理解 install/upgrade/uninstall ST 如何验证包行为",
+            "理解 scripts/package 与 version.cmake 的配合"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "scripts/package",
+            "version.cmake",
+            "test/st/install"
+          ],
+          "order": 3,
+          "practice_task": "梳理一次完整发版链路：build.sh 打出 .run → 安装 → 检查 tools/ 目录释放内容 → 升级 → 卸载，把每一步对应的脚本/测试文件写成清单，并标注 test/st 中对应的验证用例。",
+          "source_files": [
+            "scripts/package",
+            "version.cmake",
+            "test/st/install",
+            "test/st/upgrade",
+            "test/st/uninstall"
+          ],
+          "title": "打包与安装升级：.run 包生命周期",
+          "topic": "分析 scripts/package 打包逻辑与 install/upgrade/uninstall 三个 ST 组件如何验证 .run 包的安装、升级和卸载行为。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l5",
+            "u4-l3",
+            "u5-l2"
+          ],
+          "filename": "u6-l4-extension-practice.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "综合运用 asys 采集框架、msprof 插件机制、hccl_test 测试框架的扩展点",
+            "判断一个新需求应该改哪个组件哪个模块",
+            "能规划一次完整的功能贡献（代码 + 测试 + 文档）"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "asys collect 扩展点",
+            "profapi 插件扩展点",
+            "opbase 测试扩展点"
+          ],
+          "order": 4,
+          "practice_task": "任选一个方向完成二次开发实战：为 asys 新增一个采集项（含注册、实现、UT）；或为 opbase_test 新增一个集合通信算子测试；写出改动文件清单、涉及的测试与文档更新点。",
+          "source_files": [
+            "src/asys/collect/asys_collect.py",
+            "src/msprof/collector/dvvp/profapi/inc/prof_plugin_manager.h",
+            "src/hccl_test/common/src/hccl_opbase_rootinfo_base.cc",
+            "test/ut/asys"
+          ],
+          "title": "二次开发实战：为 oam-tools 贡献新功能",
+          "topic": "综合前述知识，梳理三个组件各自的扩展点（新增 asys 采集项、新增 msprof 数据插件、新增 hccl 算子测试），并给出贡献流程的完整路径。"
+        }
+      ],
+      "order": 6,
+      "title": "专家：测试、工程规范与二次开发"
+    }
+  ]
+}

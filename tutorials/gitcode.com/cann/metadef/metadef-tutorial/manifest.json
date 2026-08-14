@@ -1,0 +1,755 @@
+{
+  "head": "0005f5b3b38bed310be5f990f5b174941997bc7d",
+  "project": "metadef",
+  "rationale": "metadef 是 CANN 的基础组件库，核心价值是为 ge 和各算子仓提供共享的数据结构与接口。学习路线按“先认知、再数据结构、再运行时上下文、再算子注册、最后高级机制与工程实践”设计：单元一让读者从零理解项目定位、构建方式和目录布局；单元二覆盖最常被上层使用的 DataType/Format/AscendString/AnyValue/Shape/Tensor 等基础类型，这些是阅读后续所有代码的词汇表；单元三深入本仓最核心的 exe_graph/runtime 执行上下文体系（KernelContext、TilingContext、推理上下文、TilingData），这是算子开发直接打交道的主链路；单元四讲解算子注册链路（OpDef 定义、Factory 注册、OpImplRegistry、opp 包加载、opcheck），揭示算子信息从定义到被框架发现的完整过程；单元五面向二开者讲 ContextBuilder、插件管理、错误管理、ABI 兼容约束与单元测试体系，并以一个综合扩展实践收尾。依赖关系上每个单元建立在前一单元的词汇与机制之上，符合从浅到深的认知顺序。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 metadef 是什么、在 CANN 生态中处于什么位置",
+            "列出 metadef 提供的四类核心功能",
+            "判断一个需求是否应该修改 metadef"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README.md",
+            "docs/zh/api/README.md"
+          ],
+          "order": 1,
+          "practice_task": "绘制一张本地图/算子仓/ge/metadef 的依赖关系草图，并在 README 中找出三条『需要修改 metadef 的典型场景』，用一句话概括每条对应的源码目录。",
+          "source_files": [
+            "README.md",
+            "README_en.md",
+            "docs/zh/README.md"
+          ],
+          "title": "metadef 项目概览：CANN 生态中的基础组件库",
+          "topic": "介绍 metadef 的定位、在 CANN 架构中与 ge 及算子仓的关系、提供的核心功能（基础数据类型、算子注册接口、执行上下文、属性/类型定义），以及什么场景下需要修改本仓。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-build-and-test.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "使用 build.sh 完成 metadef 的本地编译",
+            "使用 tests/run_test.sh 构建并运行单元测试",
+            "理解 CMakeLists.txt 中各子目录的组织方式"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "build.sh",
+            "tests/run_test.sh",
+            "CMakeLists.txt"
+          ],
+          "order": 2,
+          "practice_task": "在本地执行 bash build.sh 完成编译，再执行 bash tests/run_test.sh -u 运行单元测试，记录任一一个失败或成功的测试输出并解释其含义。",
+          "source_files": [
+            "build.sh",
+            "CMakeLists.txt",
+            "tests/run_test.sh",
+            "docs/zh/build.md"
+          ],
+          "title": "源码构建与测试运行",
+          "topic": "讲解如何通过 build.sh 编译 metadef、如何用 tests/run_test.sh 跑单元测试，以及 CMake 工程的整体组织方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-directory-layout.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "区分 inc/external、inc/register、pkg_inc、base 各自的职责",
+            "根据头文件路径推断其可见范围和稳定性",
+            "找到任意一个对外接口的实现文件"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "inc/external/graph/types.h",
+            "base/type/types_impl.cc",
+            "pkg_inc/graph/type_utils.h"
+          ],
+          "order": 3,
+          "practice_task": "以 inc/external/graph/types.h 中声明的接口为例，在 base/ 目录下找到其实现文件，并用树状图整理出『头文件目录 -> 实现目录』的对应关系。",
+          "source_files": [
+            "inc/external/graph/types.h",
+            "inc/register/op_impl_registry_api.h",
+            "pkg_inc/graph/type_utils.h",
+            "base/type/types_impl.cc"
+          ],
+          "title": "目录结构与头文件布局：inc、base、pkg_inc 的分工",
+          "topic": "解析 inc/external（对外稳定接口）、inc/register、inc/common、pkg_inc（打包发布头文件）、base（实现源码）和 tests 的目录分工，理解『头文件与实现分离』的工程组织。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l4-run-example.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "理解示例程序使用的头文件与链接库",
+            "跑通 example 目录下的样例",
+            "从示例反推 metadef 接口的典型用法"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "example/run_example.sh",
+            "example/tc_ge_irrun_open_api_0014/tc_ge_irrun_open_api_0014.cpp"
+          ],
+          "order": 4,
+          "practice_task": "阅读示例 cpp 源码，列出它用到的 metadef 头文件与关键 API，并在有 Ascend 环境时运行 run_example.sh 验证（无环境则写出预期执行流程）。",
+          "source_files": [
+            "example/run_example.sh",
+            "example/tc_ge_irrun_open_api_0014/Makefile",
+            "example/tc_ge_irrun_open_api_0014/tc_ge_irrun_open_api_0014.cpp"
+          ],
+          "title": "官方示例解读与运行",
+          "topic": "分析 example/tc_ge_irrun_open_api_0014 示例的 Makefile 与源码，理解 metadef 接口在真实工程中如何被链接与调用。"
+        }
+      ],
+      "order": 1,
+      "title": "单元一：认识 metadef"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l1-datatype-and-format.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "掌握 DataType、Format 枚举的主要取值",
+            "使用 ge 命名空间下的类型工具函数",
+            "理解 Format 与 C0/sub-format 的关系"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "inc/external/graph/types.h",
+            "base/type/types_impl.cc",
+            "pkg_inc/graph/def_types.h"
+          ],
+          "order": 1,
+          "practice_task": "编写一个小程序：打印若干 DataType 的大小（GetSizeByDataType）并对一组 Format 调用 GetPrimaryFormat/GetSubFormat，验证输出与预期一致。",
+          "source_files": [
+            "inc/external/graph/types.h",
+            "base/type/types_impl.cc",
+            "pkg_inc/graph/def_types.h",
+            "pkg_inc/graph/graph_type_utils.h"
+          ],
+          "title": "DataType 与 Format：基础枚举体系",
+          "topic": "精读 types.h 中的 DataType、Format 枚举及 ge 命名空间提供的类型工具函数（GetSizeByDataType、GetPrimaryFormat、GetSubFormat 等），并对照实现 types_impl.cc。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-ascend-string.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "理解 AscendString 与 std::string 的差异与取舍",
+            "掌握 AscendString 的构造、查找与哈希用法",
+            "明白为何对外接口大量使用 const char_t*"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "inc/external/graph/ascend_string.h",
+            "base/type/ascend_string_impl.cc"
+          ],
+          "order": 2,
+          "practice_task": "参照 tests/ut/base/testcase/ascend_string_unittest.cc 的写法，为新场景（如从 std::string 构造并 Find 子串）补充测试用例并运行验证。",
+          "source_files": [
+            "inc/external/graph/ascend_string.h",
+            "base/type/ascend_string_impl.cc",
+            "tests/ut/base/testcase/ascend_string_unittest.cc"
+          ],
+          "title": "AscendString：跨 ABI 的字符串封装",
+          "topic": "讲解 AscendString 的设计动机（ABI 安全、避免 STL 跨界）、常用接口（GetString、GetLength、Find、Hash）及其实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l3-any-value-and-type-id.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "理解 AnyValue 的类型擦除实现思路",
+            "掌握 TypeId 与 C++ 类型的对应关系",
+            "能用 AnyValue 安全地存取不同类型的值"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "pkg_inc/graph/any_value.h",
+            "pkg_inc/graph/type_id.h",
+            "base/any_value.cc"
+          ],
+          "order": 3,
+          "practice_task": "基于 any_value.h 写一个 demo：向 AnyValue 分别写入 int、double、vector<string> 并读回，再用 AnyValue::IsValid 校验非法读取路径，配合 any_value_ut.cc 的断言方式自测。",
+          "source_files": [
+            "pkg_inc/graph/any_value.h",
+            "pkg_inc/graph/type_id.h",
+            "base/any_value.cc",
+            "tests/ut/base/testcase/any_value_ut.cc"
+          ],
+          "title": "AnyValue 与 TypeId：类型擦除的属性容器",
+          "topic": "剖析 AnyValue 如何用一个统一容器承载多种属性值类型，以及 TypeId 体系如何支撑类型判断与转换。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u2-l3"
+          ],
+          "filename": "u2-l4-shape-stride-tensor.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "掌握 gert::Shape/Stride/Tensor 的构造与查询接口",
+            "理解 ge::Tensor 与 gert::Tensor 的定位差异",
+            "能基于 TensorData 理解数据所有权管理"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "inc/external/exe_graph/runtime/shape.h",
+            "inc/external/exe_graph/runtime/tensor.h",
+            "inc/external/graph/tensor.h"
+          ],
+          "order": 4,
+          "practice_task": "编写程序构造一个 gert::Shape（如 {2,3,4}），计算其元素总数并据此构造 TensorDesc，再参照 tensor_unittest.cc 验证 SetShape/GetShape 行为。",
+          "source_files": [
+            "inc/external/exe_graph/runtime/shape.h",
+            "inc/external/exe_graph/runtime/stride.h",
+            "inc/external/exe_graph/runtime/tensor.h",
+            "inc/external/exe_graph/runtime/runtime_tensor.h",
+            "inc/external/graph/tensor.h",
+            "tests/ut/base/testcase/tensor_unittest.cc"
+          ],
+          "title": "Shape、Stride 与 Tensor：张量描述体系",
+          "topic": "对比 ge::Tensor（inc/external/graph/tensor.h）与 exe_graph 运行时的 gert::Shape/Stride/Tensor/TensorData，理解新旧两套张量描述的设计差异。"
+        }
+      ],
+      "order": 2,
+      "title": "单元二：基础数据结构"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u3-l1-kernel-context.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "理解 KernelContext 的 POD 约束及其原因",
+            "掌握 Chain 的随机访问定位机制",
+            "能读懂 input/output/attr 三类句柄的取值流程"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "inc/external/exe_graph/runtime/kernel_context.h",
+            "tests/ut/base/testcase/kernel_context_unittest.cc"
+          ],
+          "order": 1,
+          "practice_task": "阅读 kernel_context.h 中 Chain 的实现，画出 GetInput/GetOutput/GetAttr 三条调用链的流程图，并解释 static_assert(is_standard_layout) 存在的意义。",
+          "source_files": [
+            "inc/external/exe_graph/runtime/kernel_context.h",
+            "inc/external/exe_graph/runtime/extended_kernel_context.h",
+            "tests/ut/base/testcase/kernel_context_unittest.cc"
+          ],
+          "title": "KernelContext 与 Chain：执行上下文的底层骨架",
+          "topic": "精读 kernel_context.h，理解 POD 布局约束、Chain 链式存储结构以及通过 NodeDefId 访问输入/输出/属性的机制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-extended-context.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "掌握 ExtendedKernelContext 的 with 语义与指针转换",
+            "理解 KernelRunContext 的内存布局约定",
+            "能定位 tiling/infer 等具体上下文的公共基类能力"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "inc/external/exe_graph/runtime/extended_kernel_context.h",
+            "inc/external/exe_graph/runtime/kernel_run_context.h"
+          ],
+          "order": 2,
+          "practice_task": "对照源码列出 ExtendedKernelContext 提供的全部 with* 方法，写一段示意代码展示框架如何在分配好的裸内存上构造 KernelRunContext。",
+          "source_files": [
+            "inc/external/exe_graph/runtime/extended_kernel_context.h",
+            "inc/external/exe_graph/runtime/kernel_run_context.h",
+            "inc/external/exe_graph/runtime/context_extend.h"
+          ],
+          "title": "ExtendedKernelContext 与 KernelRunContext：上下文的扩展层",
+          "topic": "讲解 ExtendedKernelContext 如何在 KernelContext 之上以 protected 继承 + reinterpret_cast 的方式提供类型化访问，以及 KernelRunContext 的内存布局约定。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-tiling-context.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "掌握 TilingContext 获取输入 shape、属性与平台的接口",
+            "理解 TilingContext 的 POD 约束和访问句柄机制",
+            "了解 TilingParseContext 的使用场景"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "inc/external/exe_graph/runtime/tiling_context.h",
+            "inc/external/exe_graph/runtime/tiling_parse_context.h"
+          ],
+          "order": 3,
+          "practice_task": "以一个假想算子为例，写出其 TilingFunc 中通过 TilingContext 读取输入 Shape、ComputeNodeInfo 并写入 TilingData 的伪代码，并标注每步调用的具体接口与所在行号。",
+          "source_files": [
+            "inc/external/exe_graph/runtime/tiling_context.h",
+            "inc/external/exe_graph/runtime/tiling_parse_context.h",
+            "inc/external/exe_graph/runtime/compute_node_info.h",
+            "docs/zh/api/c_api/gert_TilingContextBuilder_SetSimtBlockDim.md"
+          ],
+          "title": "TilingContext：算子 Tiling 阶段的上下文",
+          "topic": "深入 tiling_context.h（本仓最大的单头文件），理解 TilingContext 如何暴露输入输出描述、平台信息、属性以及 TilingData 写入接口，并关联 TilingParseContext。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l4-infer-contexts.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "掌握三种推理上下文的职责边界",
+            "理解 Shape/ShapeRange 的推导接口设计",
+            "能编写一个简单的 shape 推导函数骨架"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "inc/external/exe_graph/runtime/infer_shape_context.h",
+            "inc/external/exe_graph/runtime/range.h"
+          ],
+          "order": 4,
+          "practice_task": "参照 infer_shape_context.h 的接口，为一个 element-wise 算子编写 InferShape 函数：读取输入 0 的 Shape 并 SetOutputShape 到输出 0，写出完整 C++ 函数。",
+          "source_files": [
+            "inc/external/exe_graph/runtime/infer_shape_context.h",
+            "inc/external/exe_graph/runtime/infer_datatype_context.h",
+            "inc/external/exe_graph/runtime/infer_shape_range_context.h",
+            "inc/external/exe_graph/runtime/range.h"
+          ],
+          "title": "推理上下文：InferShape / InferDataType / InferShapeRange",
+          "topic": "对比三种推理上下文的接口设计，理解算子类型推导阶段框架与算子之间的数据交换方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l5-tiling-data.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "掌握 TilingData 的字段定义与序列化机制",
+            "理解 tilingdata_base.h 的底层实现思路",
+            "能手动构造一个简单的 TilingData 结构"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "inc/external/register/tilingdata_base.h",
+            "inc/external/exe_graph/runtime/tiling_data.h"
+          ],
+          "order": 5,
+          "practice_task": "参照 tiling_data_unittest.cc，定义一个包含两个 int32 字段的自定义 TilingData，调用 Append/GetData 完成序列化与反序列化并断言字段一致。",
+          "source_files": [
+            "inc/external/register/tilingdata_base.h",
+            "inc/external/exe_graph/runtime/tiling_data.h",
+            "base/runtime/tiling_data.cc",
+            "tests/ut/base/testcase/tiling_data_unittest.cc"
+          ],
+          "title": "TilingData：tiling 参数的序列化与传递",
+          "topic": "讲解算子 tiling 结果的数据载体 TilingData：字段追加、序列化、从数据反构造，以及 tilingdata_base.h 宏/基类的支撑机制。"
+        }
+      ],
+      "order": 3,
+      "title": "单元三：exe_graph 运行时上下文"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "filename": "u4-l1-register-overview.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "掌握 domi 命名空间下关键类型别名与回调签名",
+            "理解 AutoMapping 系列函数的用途",
+            "梳理 register 模块头文件之间的包含关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "inc/external/register/register.h",
+            "inc/external/register/register_types.h"
+          ],
+          "order": 1,
+          "practice_task": "画出 register.h、register_types.h、register_fmk_types.h 与 graph 头文件的包含关系图，并列出 AutoMappingByOpFn 与 AutoMappingFnDynamic 的参数差异。",
+          "source_files": [
+            "inc/external/register/register.h",
+            "inc/external/register/register_types.h",
+            "inc/external/register/register_fmk_types.h"
+          ],
+          "title": "register 模块总览：算子注册的入口",
+          "topic": "通读 register.h / register_types.h，理解 domi 命名空间、框架类型（FmkType）、AutoMapping 回调以及各注册相关头文件的整体关系。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-op-def.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解 OpDef/OpParamDef 的构建器式 API 设计",
+            "掌握 Input/Output/Attr 的定义方式",
+            "理解动态输入输出与 follow/depend 语义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "inc/external/asc/register/op_def.h",
+            "base/asc/opdef/op_def.cc"
+          ],
+          "order": 2,
+          "practice_task": "参照 op_def.h 的链式 API，为一个假想的 MyAdd 算子写出完整的 OpDef 定义代码：包含 2 个输入、1 个输出、1 个 required attr 和 1 个 optional attr。",
+          "source_files": [
+            "inc/external/asc/register/op_def.h",
+            "base/asc/opdef/op_def.cc",
+            "base/asc/opdef/op_def_param.cc",
+            "docs/zh/user_guides/attrs.md"
+          ],
+          "title": "OpDef：算子原型定义",
+          "topic": "剖析 OpDef/OpParamDef 如何用链式语法定义算子的输入、输出、属性及各类约束（FormatCheckOption、DependScope、FollowType 等），并对照实现 op_def.cc。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-op-def-factory.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "掌握 OpDefFactory 的注册与查询接口",
+            "理解 OpDefRegistry 宏注册的时机与产物",
+            "能追踪一次 GetOpDef 查询的完整调用链"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "inc/external/asc/register/op_def_factory.h",
+            "base/asc/opdef/op_def_factory.cc"
+          ],
+          "order": 3,
+          "practice_task": "阅读 op_def_factory.cc，写出『算子注册 -> 工厂存储 -> 按 opType 查询』的时序说明，并指出工厂如何保证线程安全（如加锁或初始化时机）。",
+          "source_files": [
+            "inc/external/asc/register/op_def_factory.h",
+            "inc/external/asc/register/op_def_registry.h",
+            "base/asc/opdef/op_def_factory.cc",
+            "base/asc/opdef/op_def_factory_impl.cc",
+            "base/asc/opdef/op_config_registry.cc"
+          ],
+          "title": "OpDefFactory 与 OpDefRegistry：算子原型的注册与获取",
+          "topic": "理解算子原型如何通过注册宏进入 OpDefFactory 单例，以及框架按 opType 查询 OpDef 的流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1",
+            "u3-l2"
+          ],
+          "filename": "u4-l4-op-impl-registry.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "理解 op_impl_registry 的分层设计（api/base/holder）",
+            "掌握 op_impl_space_registry_v2 的注册模式",
+            "能描述算子实现函数集（InferShape/Tiling 等）的挂接方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "inc/register/op_impl_registry_api.h",
+            "base/registry/op_impl_registry.cc"
+          ],
+          "order": 4,
+          "practice_task": "梳理 op_impl_functions.cc 中定义的函数指针类型清单，写出一个最小『假算子实现』结构体，把 InferShape 与 Tiling 函数挂到 OpImplFunctions 上并注册到 registry。",
+          "source_files": [
+            "inc/register/op_impl_registry_api.h",
+            "inc/register/op_impl_registry_base.h",
+            "base/registry/op_impl_registry.cc",
+            "base/registry/op_impl_functions.cc",
+            "base/registry/op_impl_register_v2_impl.cc"
+          ],
+          "title": "OpImplRegistry 与 OpImplSpaceRegistry：算子实现注册",
+          "topic": "讲解 op_impl_registry 体系如何按 space 组织算子实现（InferShape、Tiling 等函数集），以及 v2 版注册接口的设计。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "filename": "u4-l5-opp-package.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "理解 opp 包的目录结构与 so 加载流程",
+            "掌握 OpBinInfo 如何描述包内算子",
+            "能定位算子从磁盘到内存注册的入口代码"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "base/registry/opp_so_manager.cc",
+            "base/registry/opp_package_utils.cc"
+          ],
+          "order": 5,
+          "practice_task": "跟踪 opp_so_manager.cc 中 dlopen 到 Init 回调调用的代码路径，画出算子 so 被加载后其注册函数被触发的时序图。",
+          "source_files": [
+            "inc/register/opp_so_manager.h",
+            "base/registry/opp_so_manager.cc",
+            "base/registry/op_bin_info.cc",
+            "base/registry/opp_package_utils.cc"
+          ],
+          "title": "opp 包与 so 加载：算子实现的动态发现",
+          "topic": "分析 opp_so_manager 如何加载算子包共享库、op_bin_info 与 opp_package_utils 如何解析包信息，把静态注册变成运行时可用的算子实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u4-l6-op-check.md",
+          "id": "u4-l6",
+          "learning_goals": [
+            "理解 opcheck 机制的定位与触发场景",
+            "掌握 OpCheckFuncHelper 的注册方式",
+            "能对比 opcheck 与 op_impl_registry 两套注册的异同"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "inc/external/asc/register/op_check_register.h",
+            "base/asc/opcheck/op_check_register_impl.cc"
+          ],
+          "order": 6,
+          "practice_task": "阅读 op_check.cc 的实现，说明 opcheck 注册项最终被谁消费（可在本仓与文档范围内检索），并写出一个自定义 check 函数的注册示例代码。",
+          "source_files": [
+            "inc/external/asc/register/op_check_register.h",
+            "base/asc/opcheck/op_check.cc",
+            "base/asc/opcheck/op_check_register_impl.cc"
+          ],
+          "title": "opcheck：算子正确性校验注册",
+          "topic": "讲解 asc/opcheck 模块：OpCheckFuncHelper、op_check_register 的注册机制与用途。"
+        }
+      ],
+      "order": 4,
+      "title": "单元四：算子注册与发现"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2",
+            "u3-l3"
+          ],
+          "filename": "u5-l1-context-builder.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "理解 Builder 模式构建上下文的内存布局策略",
+            "掌握ContextHolder 与各 Builder 的协作关系",
+            "能复用 builder 构造一个最小 TilingContext"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "inc/external/base/context_builder/op_tiling_context_builder.h",
+            "base/context_builder/op_tiling_context_builder.cc"
+          ],
+          "order": 1,
+          "practice_task": "参照 context_builder_unittest.cc，用 OpTilingContextBuilder 依次 AddInput/AddOutput/AddAttr，构建出 TilingContext 并读取回填的 shape/attr，断言与写入一致。",
+          "source_files": [
+            "inc/external/base/context_builder/op_context_builder_base.h",
+            "inc/external/base/context_builder/op_tiling_context_builder.h",
+            "inc/external/base/context_builder/context_holder.h",
+            "base/context_builder/op_context_builder_impl.cc",
+            "tests/ut/base/testcase/context_builder_unittest.cc"
+          ],
+          "title": "ContextBuilder 体系：上下文的构建与填充",
+          "topic": "讲解 base/context_builder 如何用 Builder 模式在宿主侧组装 TilingContext、InferShapeContext、KernelRunContext 等上下文对象。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l5"
+          ],
+          "filename": "u5-l2-plugin-manager.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "理解插件 so 的搜索与加载策略",
+            "掌握 plugin_manager 的错误处理方式",
+            "能描述插件机制与 opp so 加载的复用关系"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "base/common/plugin/plugin_manager.cc",
+            "tests/ut/base/testcase/plugin_manager_unittest.cc"
+          ],
+          "order": 2,
+          "practice_task": "梳理 plugin_manager.cc 中 so 路径搜索、dlopen、符号解析三个阶段的关键函数，写出每个阶段的入口函数名与返回值处理逻辑。",
+          "source_files": [
+            "inc/common/plugin/plugin_manager.h",
+            "base/common/plugin/plugin_manager.cc",
+            "tests/ut/base/testcase/plugin_manager_unittest.cc"
+          ],
+          "title": "插件管理：动态库加载与符号解析",
+          "topic": "剖析 plugin_manager 的 so 搜索、加载、符号获取与生命周期管理，这是 opp 加载与插件体系的公共底座。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u5-l3-error-manager.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "掌握错误码的分层（graph/register/api 错误码）",
+            "理解 error_manager 的错误上报流程",
+            "能按规范为新接口定义错误码"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "inc/external/graph/error_codes.h",
+            "inc/external/register/register_error_codes.h"
+          ],
+          "order": 3,
+          "practice_task": "任选一个头文件中的错误码宏（如 DECLARE_ERRORMODE 相关），追踪其在实现侧的定义与格式化输出路径，写出该错误码从产生到输出的完整链路。",
+          "source_files": [
+            "inc/external/graph/error_codes.h",
+            "inc/external/graph/ge_error_codes.h",
+            "inc/external/ge_common/api_error_codes.h",
+            "inc/common/util/error_manager/error_manager.h"
+          ],
+          "title": "错误码体系与 error_manager",
+          "topic": "梳理 metadef 的多层错误码（graph 侧、register 侧、api 侧）与 error_manager 工具的协作方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
+          "filename": "u5-l4-abi-compatibility.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "理解 POD/standard_layout 约束在 ABI 中的作用",
+            "掌握 ABI 兼容测试的写法与守护范围",
+            "能在二次开发中判断一处改动是否破坏 ABI"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "tests/ut/base/testcase/abi_compatibility_for_exe_graph_unittest.cc",
+            "inc/external/exe_graph/runtime/kernel_context.h"
+          ],
+          "order": 4,
+          "practice_task": "阅读 abi_compatibility_for_exe_graph_unittest.cc，列出它守护的结构体清单；尝试给其中一个结构体『假想』增加一个虚函数，说明为什么这会破坏 ABI 并被测试拦截（或绕过）。",
+          "source_files": [
+            "tests/ut/base/testcase/abi_compatibility_for_exe_graph_unittest.cc",
+            "inc/external/exe_graph/runtime/kernel_context.h",
+            "inc/external/exe_graph/runtime/extended_kernel_context.h",
+            "README.md"
+          ],
+          "title": "ABI 兼容性设计与守护测试",
+          "topic": "解释 metadef 为何强调 ABI 兼容：POD 约束、头文件目录边界、以及 abi_compatibility 单元测试如何守护对外结构布局。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u5-l4"
+          ],
+          "filename": "u5-l5-unit-test-system.md",
+          "id": "u5-l5",
+          "learning_goals": [
+            "掌握 metadef 单测的目录组织与 gtest 用法惯例",
+            "能新增一个可被 run_test.sh 跑到的测试文件",
+            "理解 ut/stub/sc_check 三类测试设施的分工"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "tests/ut/CMakeLists.txt",
+            "tests/ut/base/testcase/types_unittest.cc"
+          ],
+          "order": 5,
+          "practice_task": "仿照 types_unittest.cc 新增一个测试文件（如验证某个未覆盖的 Format 工具函数），把它挂入 tests/ut/base/CMakeLists.txt 并用 bash tests/run_test.sh -u 跑通。",
+          "source_files": [
+            "tests/run_test.sh",
+            "tests/ut/CMakeLists.txt",
+            "tests/ut/base/CMakeLists.txt",
+            "tests/ut/base/testcase/types_unittest.cc",
+            "tests/ut/base/testcase/func_counter.h"
+          ],
+          "title": "单元测试体系与测试技巧",
+          "topic": "讲解 tests/ut 的组织（base/register/exe_meta_device）、stub 机制与 run_test.sh 的用法，展示如何为新代码补测试。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2",
+            "u4-l4",
+            "u5-l1"
+          ],
+          "filename": "u5-l6-hands-on-extension.md",
+          "id": "u5-l6",
+          "learning_goals": [
+            "综合运用 OpDef 定义、实现注册与上下文构建三类能力",
+            "理解一次扩展需要触碰的全部文件位置",
+            "掌握修改 metadef 前的影响评估清单"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "inc/external/asc/register/op_def.h",
+            "inc/register/op_impl_registry_api.h",
+            "inc/external/base/context_builder/op_tiling_context_builder.h"
+          ],
+          "order": 6,
+          "practice_task": "综合实践：为假想算子 MyAdd 完成端到端代码——OpDef 原型定义、OpImplFunctions 实现（InferShape + Tiling）、通过 OpTilingContextBuilder 构建上下文驱动 Tiling 函数的单测，并用 build.sh 编译、run_test.sh 验证。",
+          "source_files": [
+            "inc/external/asc/register/op_def.h",
+            "inc/register/op_impl_registry_api.h",
+            "inc/external/base/context_builder/op_tiling_context_builder.h",
+            "base/context_builder/op_tiling_context_builder.cc",
+            "README.md",
+            "CONTRIBUTING.md"
+          ],
+          "title": "综合实践：扩展 metadef 的完整闭环",
+          "topic": "以『新增一个带自定义属性类型的算子定义并注册其实现』为例，串联 OpDef、OpImplRegistry、ContextBuilder、单测与构建的全流程，并评估 ABI 影响。"
+        }
+      ],
+      "order": 5,
+      "title": "单元五：进阶机制与工程实践"
+    }
+  ]
+}
