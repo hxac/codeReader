@@ -1,0 +1,417 @@
+# OpDef：算子原型定义
+
+## 1. 本讲目标
+
+学完本讲，你应该能够：
+
+1. 理解 `ops::OpDef` / `ops::OpParamDef` / `ops::OpAttrDef` 三件套的构建器式（Builder / 链式）API 设计，以及它们背后的 pimpl + 转发实现模式。
+2. 掌握用链式语法定义算子的输入（Input）、输出（Output）、属性（Attr）的方法，理解 `Option`（REQUIRED / OPTIONAL / DYNAMIC）与「动态输入输出」的含义。
+3. 理解约束类语义：`ValueDepend` / `DependScope`（值依赖）、`Follow` / `FollowType`（跟随语义）、`FormatMatchMode`（格式匹配严格程度）。
+4. 能独立为一个假想算子写出完整的 OpDef 定义，并通过单元测试验证定义的正确性。
+
+## 2. 前置知识
+
+阅读本讲前，你需要先建立以下概念（均来自前置讲义）：
+
+- **算子原型（op proto）**：描述一个算子「长什么样」——有哪些输入输出端口、每个端口允许什么 DataType/Format、有哪些属性、有哪些实现函数（InferShape / Tiling 等）。它是图编译期框架做校验和推导的依据。
+- **asc 新体系与 domi 老体系**（u4-l1）：metadef 中存在两套注册链。老体系 `OpRegistrationData`（domi 命名空间）描述「如何从外部框架（TensorFlow/ONNX 等）把算子翻译进来」；本讲的 `OpDef`（ops 命名空间，头文件位于 `inc/external/asc/`）是 asc 新体系，描述「算子本身长什么样」。两者并行存在。
+- **pimpl 模式**：对外类只持有一个 `std::unique_ptr<XXXImpl>` 指针，真实数据成员全部藏在实现类里。这是 metadef 保证对外头文件 ABI 稳定的惯用手段（与 `OpRegistrationData` 的 pimpl + shared_ptr 同理）。
+- **AscendString**（u2-l2）：跨 ABI 的字符串封装，OpDef 中所有名字（算子名、端口名、属性名）都用 `ge::AscendString` 或 `const char *` 传递。
+- **DataType / Format**（u2-l1）：端口约束中大量出现 `ge::DT_FLOAT16`、`ge::FORMAT_ND` 这类枚举。
+- **链式语法（fluent API / method chaining）**：每个配置方法都返回对象自身的引用（`OpParamDef &`），因此可以 `.ParamType(...).DataType(...).Format(...)` 一路点下去。
+
+一个提醒：OpDef 的使用者主要是**各算子仓的算子原型文件**和**代码生成器（Generator）**，本仓只提供「定义的语法和存储」；定义如何被注册进工厂、如何被框架查询，是下一讲 u4-l3 的内容。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+| --- | --- |
+| [inc/external/asc/register/op_def.h](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/asc/register/op_def.h) | 对外声明：`Option` 等枚举、`OpParamDef`、`OpAttrDef`、`OpAICoreConfig`、`OpAICoreDef`、`OpDef` 等全部类的 API，本讲的主战场 |
+| [base/asc/opdef/op_def.cc](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def.cc) | `OpDef` 对外方法的实现，几乎全部是一行转发到 `OpDefImpl` |
+| [base/asc/opdef/op_def_param.cc](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_param.cc) | `OpParamDef` 对外方法的实现，同样转发到 `OpParamDefImpl` |
+| [base/asc/opdef/op_def_attr.cc](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_attr.cc) | `OpAttrDef` 对外方法的实现，转发到 `OpAttrDefImpl` |
+| [pkg_inc/base/asc/opdef/op_def_impl.h](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/pkg_inc/base/asc/opdef/op_def_impl.h) | 实现类声明：`OpParamDefImpl` / `OpAttrDefImpl` / `OpDefImpl` 的真实数据成员都在这里，是理解「链式调用到底写了什么」的钥匙 |
+| [base/asc/opdef/op_def_impl.cc](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc) | 实现逻辑：属性查找、SoC 配置合并、Follow 解析、DataType/Format 全排列展开等真正的业务代码 |
+| [tests/ut/register/testcase/op_def_unittest.cc](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/register/testcase/op_def_unittest.cc) | OpDef 的单元测试，也是本仓内最完整的 OpDef 链式语法「使用范例」 |
+| [docs/zh/user_guides/attrs.md](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/docs/zh/user_guides/attrs.md) | 属性值底层载体 AnyValue 的设计文档，帮助理解属性值最终存成什么 |
+
+## 4. 核心概念与源码讲解
+
+### 4.1 OpDef 家族与「薄壳 + Impl 转发」设计
+
+#### 4.1.1 概念说明
+
+OpDef 体系由一组协作类构成，职责划分如下：
+
+| 类 | 职责 |
+| --- | --- |
+| `ops::OpDef` | 一个算子原型：算子名（opType）、输入输出列表、属性列表、推理函数指针、各执行引擎子对象 |
+| `ops::OpParamDef` | 一个输入/输出端口的定义：端口名、ParamType、允许的 DataType/Format、值依赖、跟随关系等 |
+| `ops::OpAttrDef` | 一个属性的定义：属性名、AttrType（required/optional）、数据类型（Int/String/ListInt…）、默认值 |
+| `ops::OpAICoreDef` | AICore 引擎相关：Tiling 函数、check 类函数、按 SoC 型号组织的配置（`OpAICoreConfig`） |
+| `ops::OpAICPUDef` / `OpHostCPUDef` / `OpMC2Def` | AICPU / HostCPU / MC2（集合通信）引擎的配置子对象 |
+
+关键设计：**对外类是只有 8 字节的薄壳**。以 `OpParamDef` 为例，它唯一的数据成员是 `std::unique_ptr<OpParamDefImpl> impl_`，所有真实字段（name、param_type、types、formats……）都在 `OpParamDefImpl` 里。这样一旦实现需要增删字段，对外头文件的类布局不变，ABI 不受影响——这正是 u1-l1 讲过的 metadef ABI 约束在 asc 体系的具体落地。
+
+#### 4.1.2 核心流程
+
+一次链式调用背后的执行流程：
+
+```text
+opDef.Input("x1")                     # OpDef::Input -> OpParamTrunk::Input
+    -> ParamGetOrCreate("x1")         # 按名查找，找不到就 new 一个 OpParamDef 追加进 inputs_
+    -> 返回 OpParamDef&                # 后续 .DataType(...) 都作用在这个槽位上
+.DataType({ge::DT_FLOAT16})           # OpParamDef::DataType -> OpParamDefImpl::DataType
+    -> 写 impl_->types / types_status # 真实状态写入实现类
+    -> return *this                   # 返回自身引用，支持继续链式调用
+```
+
+要点：
+
+1. `Input(name)` 是 **GetOrCreate** 语义——对同名端口再次调用 `Input` 返回同一个 `OpParamDef&`，因此可以分段书写配置，测试里 `opDef.Attr("group1").AttrType(REQUIRED).String();` 连写两次也不会产生两个属性。
+2. 所有链式方法失败时**不打断链**：实现里校验失败只打 ERROR 日志并原样返回 `*parent_this`，链式表达式仍能继续求值（详见 4.4）。
+
+#### 4.1.3 源码精读
+
+对外薄壳的声明——`OpParamDef` 唯一成员是指针，几十个链式方法全部返回自身引用：
+
+- [inc/external/asc/register/op_def.h:L173-L202](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/asc/register/op_def.h#L173-L202) —— `OpParamDef` 公有接口：`ParamType`、`DataType`、`Format`、`ValueDepend`、`Scalar`、`To`、`Follow`、`Comment` 等链式方法声明。
+- [inc/external/asc/register/op_def.h:L255-L255](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/asc/register/op_def.h#L255-L255) —— `std::unique_ptr<OpParamDefImpl> impl_;` 是该类唯一数据成员，薄壳的证据。
+
+实现侧的一行转发——`OpDef::Input/Output/Attr` 直接交给 `OpDefImpl` 内的 `op_params`（`OpParamTrunk`）：
+
+- [base/asc/opdef/op_def.cc:L30-L40](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def.cc#L30-L40) —— `Input`/`Output` 转发给 `op_params`，`Attr` 走 `GetOrCreateAttr`。
+- [base/asc/opdef/op_def.cc:L54-L56](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def.cc#L54-L56) —— `GetOrCreateAttr` 转发。
+
+真实状态存放处——`OpParamDefImpl` 的字段全家福：
+
+- [pkg_inc/base/asc/opdef/op_def_impl.h:L24-L58](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/pkg_inc/base/asc/opdef/op_def_impl.h#L24-L58) —— 注意两个默认值：`param_type = Option::REQUIRED`（L27，端口默认必选）、`follow_type = FollowType::INVALID_TYPE`（L57，未声明跟随）。
+- [pkg_inc/base/asc/opdef/op_def_impl.h:L243-L265](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/pkg_inc/base/asc/opdef/op_def_impl.h#L243-L265) —— `OpDefImpl`：三个推理函数指针、`op_params`（输入输出容器）、`attrs`、四个引擎子对象、`format_mode = FormatCheckOption::MAX`（L264，默认不启用格式匹配模式开关）。
+
+GetOrCreate 属性的实现：
+
+- [base/asc/opdef/op_def_impl.cc:L47-L55](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc#L47-L55) —— `FindAttr` 按名线性查找 `attrs` 向量，命中返回引用；未命中则构造新 `OpAttrDef` 追加到尾部并返回其引用。
+
+#### 4.1.4 代码实践
+
+**实践目标**：验证「同名端口/属性的 GetOrCreate 语义」与「pimpl 薄壳大小」。
+
+**操作步骤**：
+
+1. 打开单测 [tests/ut/register/testcase/op_def_unittest.cc:L42-L58](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/register/testcase/op_def_unittest.cc#L42-L58)，观察 `Construct` 用例：`opDef.Input("x1")` 之后又用 `aicConfig.Input("x1")` 定制同名端口，最后 `GetMergeInputs` 得到 4 个输入——SoC 配置里的同名端口与原型端口是**合并**而非新增（合并规则见 4.2.3 的 `MergeParam`）。
+2. 再看 [tests/ut/register/testcase/op_def_unittest.cc:L242-L243](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/register/testcase/op_def_unittest.cc#L242-L243)：同一属性 `group1` 连续定义两次，属性表中只有一份。
+
+**需要观察的现象 / 预期结果**：`Input`/`Attr` 永远不会因重名而创建第二个条目；`sizeof(ops::OpParamDef)` 恒等于一个 `unique_ptr` 的大小（8 字节）。前者可在上述单测中直接读到，后者可写一行 `static_assert` 或打印验证——**待本地验证**。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 `OpParamDef` 的拷贝构造、赋值运算符要手动定义，而不是编译器默认生成？
+
+**参考答案**：因为成员是 `unique_ptr`（不可拷贝），默认拷贝语义不存在；手动版通过 `OpParamDefImpl::Construct(this, def)` 深拷贝实现类完成值语义（见 [base/asc/opdef/op_def_param.cc:L20-L26](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_param.cc#L20-L26)）。这样 `OpDef` 内部用 `std::vector<OpParamDef>` 存端口列表时才能正常扩容。
+
+**练习 2**：`OpDef` 对外头文件里为什么看不到 `inputs_`、`attrs_` 这类容器成员？
+
+**参考答案**：它们都在 `OpDefImpl` / `OpParamTrunk` 中（[pkg_inc/base/asc/opdef/op_def_impl.h:L94-L126](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/pkg_inc/base/asc/opdef/op_def_impl.h#L94-L126)），对外类只持 `unique_ptr<OpDefImpl>`，即 pimpl 模式；`OpParamTrunk` 甚至不在对外头文件中出现（只前向声明），进一步隔离了实现细节。
+
+---
+
+### 4.2 输入/输出定义：Option、类型约束与排列展开
+
+#### 4.2.1 概念说明
+
+每个端口（`OpParamDef`）最核心的三类信息：
+
+1. **ParamType**：取自 `Option` 枚举——
+   - `REQUIRED`：必须提供（默认值）；
+   - `OPTIONAL`：可省略；
+   - `DYNAMIC`：动态端口，实例个数在构图时才确定（对应 u3-l2 讲过的 IR 索引→物理槽位翻译，一个 DYNAMIC 端口在运行时展开为多个实例）；
+   - `IGNORE` / `VIRTUAL`：特殊用途（忽略、虚拟端口）。
+2. **类型约束**：`DataType({DT_FLOAT16, DT_FLOAT})` 表示该端口允许这些类型；`DataTypeList({...})` 则表示这是一个「类型列表」端口（动态端口每个实例可从列表中取不同类型）。`Format`/`FormatList` 同理。
+3. **版本与初值**：`Version(n)` 标记字段加入时的算子定义版本；`InitValue` 为端口声明标量默认值（配合 `Scalar()/ScalarList()` 使用）。
+
+另一个容易混淆的点：**原型级定义 vs SoC 级定义**。`opDef.Input("x")` 写在原型上对所有芯片生效；`OpAICoreConfig::Input("x")`（通过 `AICore().AddConfig("ascend310p", cfg)` 挂到具体 SoC）只对该型号生效，且会**覆盖合并**到原型定义上。
+
+#### 4.2.2 核心流程
+
+多个端口各自带一个类型候选列表时，框架需要把它们展开成「每一种合法组合」——例如输入 x 允许 {F16, F32}、输出 y 允许 {F16, F32}，则共有 2×2=4 种组合，每种组合对应一条可编译的算子签名。展开由 DFS 全排列完成：
+
+```text
+FullPermutation(inputs, outputs)
+  -> GetNonListLen: 所有非列表端口的候选数必须一致（对齐检查，不一致报错返回 0）
+  -> DfsFullPermutation(list_idx = 0):
+       list_idx 为偶数 -> DfsDataType: 为当前端口选一个 dtype 候选（压栈）
+       list_idx 为奇数 -> DfsFormat:   为当前端口选一个 format 候选（压栈）
+       到达 all_param.size()*2 -> 把当前 types/formats 快照存入 full_types/full_formats
+       回溯弹栈，继续下一个候选
+  -> 得到 full_types × full_formats: 所有合法 (dtype, format) 组合
+```
+
+注意每个参数占两个下标（dtype 一个、format 一个），所以终止条件是 `list_idx == all_param.size() * 2`（[base/asc/opdef/op_def_impl.cc:L118-L133](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc#L118-L133) 的注释也写明了这一点）。标量端口和值依赖端口在 `DfsFormat` 中被固定为 `FORMAT_ND`（标量/常量输入无排布概念）。
+
+原型定义与 SoC 配置的合并规则（`MergeParam`）：**SoC 配置里非空的字段覆盖原型，空字段保留原型**——例如 SoC 配置未设置 `UnknownShapeFormat` 时沿用原型值，设置了（哪怕设成空列表 `{}` 并置位 `set_unknown_shape_format`）则覆盖，单测 `OpAICoreConfigUnknownShapeFormatMergeTest` 完整验证了这三种情形。
+
+#### 4.2.3 源码精读
+
+- [inc/external/asc/register/op_def.h:L59-L59](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/asc/register/op_def.h#L59-L59) —— `enum Option { IGNORE=0, OPTIONAL=1, REQUIRED=2, DYNAMIC=3, VIRTUAL=4 };` 端口/属性共用的可选性枚举，枚举值即语义。
+- [inc/external/asc/register/op_def.h:L179-L186](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/asc/register/op_def.h#L179-L186) —— 端口类型约束的成对接口：`DataType`/`DataTypeList`、`Format`/`FormatList`、`UnknownShapeFormat` 等。
+- [base/asc/opdef/op_def_param.cc:L39-L41](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_param.cc#L39-L41) —— `ParamType` 一行实现：写 `impl_->param_type` 后返回自身引用，链式语法的最小样本。
+- [base/asc/opdef/op_def_param.cc:L43-L57](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_param.cc#L43-L57) —— `IsDtype/IsDtypeList/IsFormat/IsFormatList`：通过 `types_status`/`formats_status`（UNSET/LIST/NON_LIST 三态，见 [pkg_inc/base/asc/opdef/op_def_impl.h:L19-L23](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/pkg_inc/base/asc/opdef/op_def_impl.h#L19-L23)）区分端口到底设的是列表还是非列表约束。
+- [base/asc/opdef/op_def_impl.cc:L151-L179](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc#L151-L179) —— `GetNonListLen`：对齐检查——所有非列表端口的候选个数必须唯一且非零，否则打 `PARAM_INVALID` 日志并返回 0（排列被判定为非法，见单测 `ParamUnalignTest`：dtype 2 个候选对 format 1 个候选，展开后 `GetDataTypes().size()==0`）。
+- [base/asc/opdef/op_def_impl.cc:L74-L133](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc#L74-L133) —— DFS 排列核心：`DfsDataType`（标量端口取 `scalar_type`、列表端口枚举每个候选、普通端口取对齐下标）、`DfsFormat`（标量/值依赖端口固定 ND）、`DfsFullPermutation`（偶数层选 dtype、奇数层选 format、到达终点保存快照）。
+- [base/asc/opdef/op_def_impl.cc:L57-L72](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc#L57-L72) —— `MergeParam`：SoC 配置按端口名匹配后逐项合并进原型向量。
+- [base/asc/opdef/op_def_impl.cc:L778-L821](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc#L778-L821) —— `OpParamDefImpl::MergeParam`：字段级覆盖规则——`param_type` 无条件覆盖，其余字段只在 SoC 侧非空时覆盖。
+
+#### 4.2.4 代码实践
+
+**实践目标**：亲手验证「类型候选不对齐时排列失效」这一防御行为。
+
+**操作步骤**：
+
+1. 阅读 [tests/ut/register/testcase/op_def_unittest.cc:L320-L332](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/register/testcase/op_def_unittest.cc#L320-L332) 的 `ParamUnalignTest`：输入 x 的 DataType 给了 2 个候选、Format 只给 1 个。
+2. 仿照该用例在 `tests/ut/register/testcase/` 下新建一个 `op_def_myadd_unittest.cc`（目录下 `.cc` 会被 [tests/ut/register/CMakeLists.txt:L22](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/register/CMakeLists.txt#L22) 的 `GLOB_RECURSE ... CONFIGURE_DEPENDS` 自动收进 `ut_register` 目标，无需改 CMake），把 x 的 DataType 与 Format 都改成 2 个候选。
+3. 运行 `bash tests/run_test.sh -u`（参考 u1-l2），观察 `ut_register` 中新用例的结果。
+
+**需要观察的现象**：候选不对齐时，日志出现 `Element num of DataType and Format is not aligned.`，且 `GetMergeInputs` 返回的输入 `GetDataTypes()` 为空；对齐后能取到 `候选数×候选数` 组合展开出的类型表。
+
+**预期结果**：对齐时 `inputs[0].GetDataTypes().size()` 等于全部非列表端口候选数的乘积（如 2×2=4）。本实践依赖本地编译环境，若无法运行则标记**待本地验证**，仅完成源码推演。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`DataType({A, B})` 和 `DataTypeList({A, B})` 有什么区别？
+
+**参考答案**：前者是普通端口的「候选类型集合」，与其它端口一起参与全排列，选出一种类型；后者声明该端口是动态/列表端口，列表中的每个元素对应一个实例的类型，展开时按下标逐个枚举（`DfsDataType` 中 `IsDtypeList()` 分支，[base/asc/opdef/op_def_impl.cc:L82-L87](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc#L82-L87)），状态分别记录在 `types_status = NON_LIST / LIST`。
+
+**练习 2**：为什么标量端口（`Scalar()`）在 `DfsFormat` 里被强制 `FORMAT_ND`？
+
+**参考答案**：标量输入是一个数（如 axis、epsilon），没有空间排布的概念，任何排布对它都无意义，统一记为 ND 最简单也最安全；见 [base/asc/opdef/op_def_impl.cc:L100-L103](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc#L100-L103)。
+
+**练习 3**：SoC 配置想把原型上已声明的 `UnknownShapeFormat` 清空，直接传 `{}` 就行吗？
+
+**参考答案**：不行，光传空列表不会覆盖（合并规则是「非空才覆盖」）。实现里 `UnknownShapeFormat` 会同时置位 `set_unknown_shape_format` 标志，`MergeParam` 检查的是该标志而非列表是否为空（[base/asc/opdef/op_def_impl.cc:L802-L804](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc#L802-L804)），单测 `OpAICoreConfigUnknownShapeFormatMergeTest` 的 `clearConfig` 分支验证了这一点。
+
+---
+
+### 4.3 属性定义：OpAttrDef 与 required/optional
+
+#### 4.3.1 概念说明
+
+`OpAttrDef` 描述算子属性（attribute）——构图时附加在算子上的键值对（如 axis、format、groups）。与端口不同，属性没有 shape/format，只有**数据类型 + 可选性 + 默认值**：
+
+- 数据类型由链式方法直接指定：`Bool/Float/Int/String/ListBool/ListFloat/ListInt/ListListInt`，与 [inc/external/asc/register/op_def.h:L67-L77](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/asc/register/op_def.h#L67-L77) 的 `AttrDataType` 枚举一一对应。
+- 每个类型方法有两个重载：**无参版**只声明类型（属性必填）；**带默认值版**同时给出默认值。注意：带默认值的属性在生成算子信息时会被视为可省略，但 `required` 标志本身只由 `AttrType(OPTIONAL)` 控制（默认 `required = true`）。
+- 属性值最终以 AnyValue（u2-l3）形态存储与序列化，详见 [docs/zh/user_guides/attrs.md](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/docs/zh/user_guides/attrs.md)：底层用 TypeId 判型、注册式序列化器负责与 OM 文件互转。
+
+#### 4.3.2 核心流程
+
+```text
+opDef.Attr("axis")                      # GetOrCreateAttr: 按名查找/新建
+    .AttrType(Option::OPTIONAL)         # required = false（只有 OPTIONAL 会改标志）
+    .Int(0)                             # data_type = ATTR_DT_INT, int_value = 0（默认值）
+```
+
+写属性表：`OpDefImpl::attrs` 是 `std::vector<OpAttrDef>`，查找是 O(n) 线性扫描（属性数量少，无需哈希）。属性的存储字段全部在 `OpAttrDefImpl`：`required`（默认 true）、`data_type`（默认 ATTR_DT_BOOL）以及各类型的值缓存。
+
+#### 4.3.3 源码精读
+
+- [inc/external/asc/register/op_def.h:L325-L351](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/asc/register/op_def.h#L325-L351) —— `OpAttrDef` 公有接口：`AttrType` + 8 组类型方法（无参/带默认值两个重载）+ `Version`/`Comment`/`GetName`/`IsRequired`。
+- [pkg_inc/base/asc/opdef/op_def_impl.h:L128-L143](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/pkg_inc/base/asc/opdef/op_def_impl.h#L128-L143) —— `OpAttrDefImpl` 字段：`required = true`（L132）是默认必填的关键；各类型值（bool/float/int/str/list_*）平铺存储，用哪个由 `data_type` 决定。
+- [base/asc/opdef/op_def_impl.cc:L600-L605](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc#L600-L605) —— `AttrType` 实现：**只有传 `OPTIONAL` 才会把 `required` 置 false**，传 `REQUIRED` 是冗余但合法的自说明写法。
+- [base/asc/opdef/op_def_attr.cc:L36-L102](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_attr.cc#L36-L102) —— 全部类型方法的转发实现，每行都是「调 Impl 同名方法」的薄壳。
+- [base/asc/opdef/op_def_attr.cc:L124-L126](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_attr.cc#L124-L126) —— `IsRequired()` 直接读 `impl_->required`。
+- [tests/ut/register/testcase/op_def_unittest.cc:L242-L243](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/register/testcase/op_def_unittest.cc#L242-L243) —— `AttrType(REQUIRED).String()` 的真实用法（注意此处 `REQUIRED` 是 `Option` 枚举的非限定名，测试文件处于 `namespace ops` 内）。
+
+#### 4.3.4 代码实践
+
+**实践目标**：确认「带默认值 ≠ optional」。
+
+**操作步骤**：
+
+1. 在你准备好的 `op_def_myadd_unittest.cc` 中写：
+
+```cpp
+// 示例代码（非项目原有代码）
+TEST_F(OpDefUT, MyAddAttrSemantics) {
+  ops::OpDef op_def("MyAdd");
+  op_def.Attr("scale").Int(1);                        // 带默认值，但未声明 OPTIONAL
+  op_def.Attr("mode").AttrType(ops::Option::OPTIONAL).String("default");
+  const auto &attrs = op_def.GetAttrs();
+  ASSERT_EQ(attrs.size(), 2U);
+  EXPECT_TRUE(attrs[0].IsRequired());   // 有默认值依然是 required
+  EXPECT_FALSE(attrs[1].IsRequired());  // 只有 AttrType(OPTIONAL) 才是 optional
+}
+```
+
+2. 运行 `bash tests/run_test.sh -u`。
+
+**需要观察的现象 / 预期结果**：两个断言均通过——证明 `required` 只受 `AttrType` 影响。若环境不可用，标记**待本地验证**，并直接从 [base/asc/opdef/op_def_impl.cc:L600-L605](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc#L600-L605) 的代码推得相同结论。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：属性为什么不像端口那样有 `Format`/`DataTypeList` 约束？
+
+**参考答案**：属性是宿主侧的元信息（配置参数），不承载张量数据，没有排布与张量类型的概念；它只需要「值是什么 C++ 类型」。张量相关的约束只对输入/输出端口有意义。
+
+**练习 2**：`Attr("x")` 与 `Input("x")` 重名会冲突吗？
+
+**参考答案**：不会，两者存储在不同容器（`attrs` 向量 vs `op_params.inputs_`），查找互不干扰；但工程惯例上应避免，以免阅读混淆。
+
+---
+
+### 4.4 约束语义：ValueDepend、Follow 与 FormatMatchMode
+
+#### 4.4.1 概念说明
+
+这三个约束回答的是三类不同问题：
+
+1. **`ValueDepend(Option, DependScope)`——这个端口的“值”是否被算子用到？**
+   有些输入在 tiling 或 host 侧推导时需要读取张量的**数值**（不仅是 shape），典型如 `Where` 的条件、`NonZero` 的输入。声明 `ValueDepend(REQUIRED)` 后，框架会在编译/执行时保证该输入的值可读（例如把设备数据搬到主机，或在常量折叠阶段保留它）。`DependScope` 进一步限定依赖范围：`ALL`（全程依赖）或 `TILING`（仅 tiling 阶段依赖）。注意实现里 `value_depend` 存的是字符串 `"required"`/`"optional"`，`IsValueDepend()` 即判断该串非空。
+2. **`Follow(paramName, FollowType)`——这个端口的元信息跟随谁？**
+   输出端口的 dtype/format/shape 通常与某个输入一致。与其手工重复声明，不如 `Output("y").Follow("x")` 声明「y 跟随 x」：`FollowType::ALL`（全部跟随）、`DTYPE`、`FORMAT`、`SHAPE`（只跟随某一维信息）。它既减少重复，又把「同变关系」显式交给框架，供格式推导和校验使用。
+3. **`FormatMatchMode(FormatCheckOption)`——格式匹配的严格程度。**
+   `DEFAULT` 与 `STRICT` 两种模式（另一个 `Scalar()` 家族成员 `To(...)` 则声明标量端口的类型推导目标，见练习）。`MAX` 是内部初始值，表示未由用户显式设置。
+
+#### 4.4.2 核心流程
+
+Follow 的解析发生在需要「物化」端口元信息时（`FollowImpl` 触发 `OpParamTrunk::FollowDataImpl`）：
+
+```text
+FollowDataImpl:
+  对每个 input/output 调 DfsFollow:
+    无 Follow 声明 -> 先登记进 follow_map（供别人跟随）
+    有 Follow 声明 -> 校验:
+        跟随目标必须存在（follow_map 中找得到）
+        自跟随仅允许 INOUT 端口
+        传递跟随（A跟B、B跟C）中 FollowType 必须一致，且用 ring_check_map 检测环
+      通过 -> ParamFollow: 按 FollowType 把目标端口的 types/formats 拷贝过来，
+              并登记 follow_shape_map / follow_dtype_map（供推导阶段反查"谁跟随了我"）
+```
+
+另一个必须理解的通用失败语义：**链式 API 校验失败不打断链、不抛异常，只打日志并让该次设置静默失效**。例如 `To` 用在非标量端口上、`Follow` 与 `To` 混用、`FollowType` 非法，都只是 `GELOGE` 后 `return *parent_this`。所以书写 OpDef 时要看编译/运行日志确认约束真的生效了。
+
+#### 4.4.3 源码精读
+
+- [inc/external/asc/register/op_def.h:L61-L65](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/asc/register/op_def.h#L61-L65) —— 三个约束枚举定义：`FormatCheckOption{DEFAULT, STRICT, MAX}`、`DependScope{ALL, TILING, INVALID_SCOPE}`、`FollowType{ALL, DTYPE, FORMAT, SHAPE, INVALID_TYPE}`，每个都带哨兵 `INVALID_*`/`MAX` 用于校验。
+- [base/asc/opdef/op_def_impl.cc:L959-L982](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc#L959-L982) —— `ValueDepend` 两个重载：把 Option 翻译成字符串 `"required"`/`"optional"` 存储并默认 `DependScope::ALL`；带 scope 的重载校验 `scope < INVALID_SCOPE` 后再覆盖。
+- [base/asc/opdef/op_def_param.cc:L71-L73](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_param.cc#L71-L73) —— `IsValueDepend()`：实现就是判 `value_depend` 字符串非空。
+- [base/asc/opdef/op_def_impl.cc:L1044-L1066](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc#L1044-L1066) —— `Follow` 两个重载：先校验「与 `To` 互斥」，再记 `follow_port_name` 并置 `follow_type`（无 ftype 版本默认 `ALL`）。
+- [base/asc/opdef/op_def_impl.cc:L984-L1011](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc#L984-L1011) —— `To` 的两个重载：必须用在 `Scalar/ScalarList` 端口上，且与 `Follow` 互斥（`To` 是「标量端口自己的类型由算子固定/由另一标量端口决定」，`Follow` 是「端口元信息跟随别人」，语义重叠所以禁止混用）。
+- [base/asc/opdef/op_def_impl.cc:L1183-L1195](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc#L1183-L1195) —— `FollowDataImpl`：幂等（`follow_isimpl` 标志），遍历输入输出逐个解析 Follow。
+- [base/asc/opdef/op_def_impl.cc:L1196-L1227](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc#L1196-L1227) —— `ParamFollow`：按 `ALL/DTYPE` 拷贝目标端口类型约束、按 `ALL/FORMAT` 拷贝格式约束、按 `ALL/SHAPE` 登记形状跟随表——这就是「跟随」的物化动作。
+- [base/asc/opdef/op_def_impl.cc:L1229-L1262](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc#L1229-L1262) —— `DfsFollow`：跟随目标不存在、自跟随非 INOUT、传递链上 FollowType 不一致、形成环四种非法情形全部 `GELOGE` 后放弃。
+- [base/asc/opdef/op_def.cc:L239-L249](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def.cc#L239-L249) —— `FormatMatchMode`/`EnableFallBack` 的转发实现与对应的 Get 方法。
+- [tests/ut/register/testcase/op_def_unittest.cc:L303-L309](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/register/testcase/op_def_unittest.cc#L303-L309) —— Follow 的真实用例：输出 z 跟随输入 x 后，排列展开的 bin 查询类型表自动扩展。
+- [tests/ut/register/testcase/op_def_unittest.cc:L334-L344](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/register/testcase/op_def_unittest.cc#L334-L344) —— `FormatMatchMode(DEFAULT/STRICT)` 与 `EnableFallBack` 的开关验证。
+
+#### 4.4.4 代码实践
+
+**实践目标**：观察「非法 Follow 静默失效」。
+
+**操作步骤**：
+
+1. 在你的测试文件中加入：
+
+```cpp
+// 示例代码（非项目原有代码）
+TEST_F(OpDefUT, MyAddFollowInvalid) {
+  ops::OpDef op_def("MyAdd");
+  op_def.Input("x").DataType({ge::DT_FLOAT16}).Format({ge::FORMAT_ND});
+  op_def.Output("y").Follow("x_not_exist");   // 跟随一个不存在的端口
+  op_def.AICore().AddConfig("ascend910");
+  auto configs = op_def.AICore().GetAICoreConfigs();
+  auto inputs = op_def.GetMergeInputs(configs["ascend910"]);
+  auto outputs = op_def.GetMergeOutputs(configs["ascend910"]);
+  EXPECT_EQ(inputs.size(), 1U);
+  EXPECT_EQ(outputs[0].GetFollowName(), ge::AscendString("x_not_exist")); // 名字仍在
+  EXPECT_TRUE(outputs[0].GetFormats().empty());  // 但格式没有被填充（跟随失效）
+}
+```
+
+2. 运行 `bash tests/run_test.sh -u`，同时留意 stderr 中的 `PortName y : FollowPort is Not Exist` 日志。
+
+**需要观察的现象 / 预期结果**：断言通过且出现上述 ERROR 日志——非法 Follow 不会崩溃、不会中断链，只是该端口的约束没有被填充。若本地无编译环境，标记**待本地验证**，结论可从 `DfsFollow` 的错误处理分支直接推出。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：`ValueDepend(REQUIRED, DependScope::TILING)` 与 `ValueDepend(REQUIRED)` 的差别是什么？
+
+**参考答案**：后者默认 `DependScope::ALL`（[base/asc/opdef/op_def_impl.cc:L969](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc#L969)）；前者把值依赖限定在 tiling 阶段——框架只需在调 TilingFunc 前保证值可读，执行阶段不再为此做额外数据准备，能减少不必要的搬运。
+
+**练习 2**：为什么 `Follow` 和 `To` 互斥？
+
+**参考答案**：两者都在回答「这个端口的类型/格式从哪来」。`To` 说「由算子自己指定（固定类型或跟随另一标量端口）」，`Follow` 说「跟随目标端口的元信息」，同时声明会让来源二义，所以实现里先到者生效、后到者报 `PARAM_INVALID` 日志并失效（`To` 的 [L990-L993](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc#L990-L993) 与 `Follow` 的 [L1045-L1048](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/opdef/op_def_impl.cc#L1045-L1048) 互相检查）。
+
+**练习 3**：`FormatCheckOption::MAX` 为什么会出现在 `OpDefImpl` 的默认值里？
+
+**参考答案**：`MAX` 不是给用户设置的格式匹配模式，而是「未设置」的哨兵初值（[pkg_inc/base/asc/opdef/op_def_impl.h:L264](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/pkg_inc/base/asc/opdef/op_def_impl.h#L264)），供下游生成器区分「用户显式选择了 DEFAULT/STRICT」与「根本没设置」。
+
+---
+
+## 5. 综合实践
+
+**任务**：为假想算子 `MyAdd` 写出完整的 OpDef 定义并配一个单元测试。MyAdd 的规格：
+
+- 2 个输入 `x1`、`x2`：均为 REQUIRED，允许 `{DT_FLOAT16, DT_FLOAT}`，格式 `{FORMAT_ND}`；其中 `x2` 还是一个标量列表端口（可选进阶）。
+- 1 个输出 `y`：REQUIRED，dtype/format 全部跟随 `x1`（用 `Follow`，不要重复写 `DataType`）。
+- 1 个 required 属性 `groups`：`Int` 型，无默认值。
+- 1 个 optional 属性 `mode`：`String` 型，默认值 `"sum"`。
+- 挂接三个空的推理函数（参照 [tests/ut/register/testcase/op_def_unittest.cc:L18-L28](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/register/testcase/op_def_unittest.cc#L18-L28) 的写法）。
+
+参考实现（示例代码，非项目原有代码）：
+
+```cpp
+#include <gtest/gtest.h>
+#include "register/op_def.h"
+
+namespace {
+ge::graphStatus MyAddInferShape(gert::InferShapeContext *context) { return ge::GRAPH_SUCCESS; }
+ge::graphStatus MyAddInferShapeRange(gert::InferShapeRangeContext *context) { return ge::GRAPH_SUCCESS; }
+ge::graphStatus MyAddInferDataType(gert::InferDataTypeContext *context) { return ge::GRAPH_SUCCESS; }
+}  // namespace
+
+TEST(MyAddDefUT, DefineAndVerify) {
+  ops::OpDef op_def("MyAdd");
+  op_def.Input("x1")
+      .ParamType(ops::Option::REQUIRED)
+      .DataType({ge::DT_FLOAT16, ge::DT_FLOAT})
+      .Format({ge::FORMAT_ND});
+  op_def.Input("x2")
+      .ParamType(ops::Option::REQUIRED)
+      .DataType({ge::DT_FLOAT16, ge::DT_FLOAT})
+      .Format({ge::FORMAT_ND});
+  op_def.Output("y")
+      .ParamType(ops::Option::REQUIRED)
+      .Follow("x1");                       // 元信息跟随 x1，无需重复声明
+  op_def.Attr("groups").Int();             // required（默认）
+  op_def.Attr("mode").AttrType(ops::Option::OPTIONAL).String("sum");
+  op_def.SetInferShape(MyAddInferShape)
+      .SetInferShapeRange(MyAddInferShapeRange)
+      .SetInferDataType(MyAddInferDataType);
+  op_def.AICore().AddConfig("ascend910");
+
+  // 校验
+  EXPECT_EQ(op_def.GetOpType(), ge::AscendString("MyAdd"));
+  EXPECT_EQ(op_def.GetInputs().size(), 2U);
+  EXPECT_EQ(op_def.GetOutputs().size(), 1U);
+  ASSERT_EQ(op_def.GetAttrs().size(), 2U);
+  EXPECT_TRUE(op_def.GetAttrs()[0].IsRequired());
+  EXPECT_FALSE(op_def.GetAttrs()[1].IsRequired());
+  EXPECT_EQ(op_def.GetInferShape(), &MyAddInferShape);
+}
+```
+
+验证方式：把文件保存为 `tests/ut/register/testcase/op_def_myadd_unittest.cc`（会被 CMake 自动收集），运行 `bash tests/run_test.sh -u`，在 `ut_register` 目标中查看结果——**待本地验证**。
+
+扩展思考（不写代码也能做）：如果 `x2` 改成 `ParamType(ops::Option::DYNAMIC)`，运行时 `x2` 会展开为多个实例（回顾 u3-l2 的 IR 索引→物理槽位翻译），此时 tiling/infer 上下文里访问 `x2` 的方式就从「REQUIRED 语法糖」变成按实例索引访问。
+
+## 6. 本讲小结
+
+- OpDef 体系（`OpDef`/`OpParamDef`/`OpAttrDef`/`OpAICoreDef` 等）是 asc 新体系的算子原型描述：对外类是只含 `unique_ptr<Impl>` 的 8 字节薄壳，真实字段全在 `*Impl` 实现类，这是 metadef ABI 稳定策略的又一次落地。
+- 链式 API 的本质是「GetOrCreate 定位槽位 + 方法写 impl 字段 + 返回自身引用」；`Input`/`Attr` 同名重复调用是合并而非新增。
+- 端口的类型约束分 `DataType`/`DataTypeList` 两族，多端口候选经 DFS 全排列展开为全部合法 (dtype, format) 组合；非列表端口候选数必须对齐，否则展开失效（返回空表 + 日志报错）。
+- SoC 级 `OpAICoreConfig` 与原型定义按端口名合并，规则是「非空覆盖、空保留」（`UnknownShapeFormat` 靠显式标志位强制覆盖）。
+- 属性默认 required，只有 `AttrType(OPTIONAL)` 才改变它；「带默认值」和「optional」是两件事。
+- 约束三件套各管一件事：`ValueDepend/DependScope` 管值依赖，`Follow/FollowType` 管元信息跟随（有环检测与目标校验），`FormatMatchMode` 管格式匹配严格度；所有链式方法失败都只打日志、静默失效、不打断链。
+
+## 7. 下一步学习建议
+
+本讲只解决了「算子原型如何被定义和存储」。定义好的 `OpDef` 如何进入框架、如何被按 opType 查询，是下一讲 **u4-l3（OpDefFactory 与 OpDefRegistry：算子原型的注册与获取）** 的主题——可以提前浏览 [inc/external/asc/register/op_def_registry.h](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/asc/register/op_def_registry.h) 中的 `OP_ADD` 宏，注意它如何把本讲的 `SetInferShape`/`AICore().GetTiling()` 与 `OpDefFactory` 的注册回调、`gert::OpImplRegisterV2` 串在一起。后续 u4-l4 会继续讲 `OpImplRegistry` 这条实现注册链，与本讲的原型注册链互补。

@@ -1,383 +1,464 @@
-# TilingData：tiling 参数的序列化与传递
+# u3-l5 TilingData：tiling 参数的序列化与传递
 
 ## 1. 本讲目标
 
-学完本讲，你应该能够：
+在 u3-l3 中我们知道了：算子的 TilingFunc 通过 `TilingContext` 计算切分参数，并把结果写进一个叫 tiling data 的输出槽位。本讲专门回答「这个槽位里装的东西到底是什么、怎么装进去、装进去之后怎么被读回来」。学完本讲你应该能够：
 
-1. 说清楚 `gert::TilingData` 容器的内存布局（头部 + 紧随其后的字节流）以及它为什么必须是 POD。
-2. 掌握 `Append` / `Expand` / `CreateCap` 的字段追加与容量控制机制，理解溢出防护的实现。
-3. 理解 `AppendConvertedAttrVal` 如何借助 `AttrDataType` 枚举和函数指针表把上下文属性转换后追加进 tiling 字节流。
-4. 读懂 `tilingdata_base.h` 中 `BEGIN_TILING_DATA_DEF` 宏族背后的 `optiling::TilingDef` 基类与工厂注册机制，理解「带类型的 tiling 结构体」与「无类型的字节流容器」两套体系的关系。
-5. 能参照现有单测，自己动手写一个序列化/反序列化的小测试并跑通。
+- 说清 `gert::TilingData` 容器的内存布局（头部 + 连续数据区）与 `Append`/`Expand` 的追加式写入机制。
+- 理解 `TilingContext::GetTilingData<T>()` 与 `GetRawTilingData()` 的区别，以及「覆写式」与「追加式」两种写入风格的适用场景。
+- 掌握 `optiling` 命名空间下 `tilingdata_base.h` 的宏体系：`BEGIN_TILING_DATA_DEF` 如何在编译期生成一个带字段信息、可自对齐、可跨进程重建的 tiling 结构体。
+- 能独立编写一个包含两个 int32 字段的最小 TilingData 序列化/反序列化用例并通过编译运行。
 
 ## 2. 前置知识
 
-**什么是 tiling？** 在昇腾硬件上执行算子前，框架需要把输入切分成硬件友好的分块（tile），并把分块参数（每个维度切多少、块数、步长等）告诉设备侧的 kernel 代码。这个「计算切分方案」的阶段叫 tiling，其产出的参数集合叫 **tiling data**。
+**什么是 tiling（切分）**：昇腾芯片上的计算核（AI Core）一次只能处理固定大小的数据块。算子执行前，框架要先把大张量切成小块，并算出每个核分多少数据、循环多少次。这些「切分参数」统称 tiling 参数。
 
-**为什么需要序列化？** tiling 阶段在**宿主侧**（CPU）执行，kernel 在**设备侧**（NPU）执行，两者之间只能传递一块连续的原始内存。因此 tiling 结果必须被打平成一串字节（POD 字节流），设备侧再按相同的结构布局把这串字节解释回来。这决定了两个约束：
+**为什么需要序列化**：TilingFunc 运行在 host 侧（CPU），而算子 kernel 运行在 device 侧（NPU）。两边是不同的地址空间，只能通过一块**连续的字节流**传递参数。所以 tiling 结果必须被「拍平」成一串字节，device 侧再按相同的结构定义把它解释回来。这本质上和网络的 protobuf、持久化的 struct dump 是同一类问题——只不过这里的约束更苛刻：不能有虚表、不能有指针、不能依赖 STL 布局。
 
-- 字节流里只能放 **standard layout**（标准布局）类型——布局必须在不同编译单元之间完全一致；
-- 追加和读取都不能抛异常，只能用返回值报错（承接 [u3-l1](u3-l1-kernel-context.md) 讲过的「失败返回空值而非异常」语义）。
+**POD / standard_layout**：C++ 术语，指内存布局可预测、可以用 `memcpy` 直接复制的类型。metadef 的执行期结构体大量使用 `static_assert(std::is_standard_layout<T>::value)` 把这一约束固化为编译期检查（u3-l1、u5-l4 已详细讲过）。TilingData 同样遵守这条纪律。
 
-**本仓里有两个名字相近的东西，先区分开：**
-
-| 名字 | 命名空间 | 角色 |
-| --- | --- | --- |
-| `gert::TilingData`（`exe_graph/runtime/tiling_data.h`） | gert | **无类型字节流容器**：头部（容量/长度/指针）+ 紧随其后的数据区，框架与算子之间的传输载体 |
-| `optiling::TilingDef` 派生类（`register/tilingdata_base.h`） | optiling | **带类型的结构体定义**：用宏声明字段（`set_xxx`/`get_xxx`），最终也序列化成字节流（`SaveToBuffer`），供算子仓使用 |
-
-一句话：`gert::TilingData` 管「装字节」，`optiling::TilingDef` 宏体系管「按字段名读写字节」。两者最终打平后的字节流是同一种东西。
-
-还需要回忆两个前置概念（来自 [u3-l3](u3-l3-tiling-context.md)）：
-
-- **TilingContext 输出槽位**：tiling 结果统一写到 `TilingOutputIndex` 枚举定义的输出槽，其中 `kOutputTilingData` 槽放的就是本讲的 `TilingData` 容器。
-- **`static_assert(std::is_standard_layout<T>::value)`**：把「结构布局不可变」固化为编译期检查，是 metadef 的 ABI 守护手段（详见 [u5-l4](u5-l4-abi-compatibility.md)）。
+**追加式（append-only）写入**：想象一根往一个方向生长的字节管道——每次 `Append` 都把新数据接在尾部，同时把「已用长度」加一。读回时按写入顺序依次解释即可。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
 | --- | --- |
-| [inc/external/exe_graph/runtime/tiling_data.h](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h) | `gert::TilingData` 容器与 `AttrDataType` 枚举，全头文件实现（inline/模板） |
-| [base/runtime/tiling_data.cc](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc) | `AppendConvertedAttrVal` 的实现：类型转换追加函数族 + 函数指针查找表 |
-| [inc/external/register/tilingdata_base.h](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/register/tilingdata_base.h) | `optiling::TilingDef` 基类、字段定义宏族、tiling 结构体工厂 |
-| [base/asc/tilingdata_base_impl.cc](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/tilingdata_base_impl.cc) | `TilingDef` 各方法与工厂的实现（`InitData`/`SaveToBuffer`/`SetDataPtr` 等） |
-| [inc/external/exe_graph/runtime/tiling_context.h](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_context.h) | `GetTilingData<T>()` / `GetRawTilingData()`：容器与 Tiling 阶段的衔接点 |
-| [tests/ut/base/testcase/tiling_data_unittest.cc](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/base/testcase/tiling_data_unittest.cc) | 本讲的实践参照：容器的追加/越界/属性转换测试 |
+| [inc/external/exe_graph/runtime/tiling_data.h](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h) | `gert::TilingData` 容器本体：容量管理、Append/Expand、以及 `AttrDataType` 类型转换枚举。全 header-only（模板部分）。 |
+| [base/runtime/tiling_data.cc](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc) | `TilingData::AppendConvertedAttrVal` 的实现：把算子属性按 (源类型 → 目标类型) 二维查表转换后追加进容器。 |
+| [inc/external/register/tilingdata_base.h](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/register/tilingdata_base.h) | `optiling` 命名空间的宏体系：`BEGIN_TILING_DATA_DEF` 等宏 + `TilingDef` 基类 + 工厂 `CTilingDataClassFactory`。 |
+| [base/asc/tilingdata_base_impl.cc](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/tilingdata_base_impl.cc) | 上述宏体系基类方法的实现：对齐占位、数据区初始化、`SaveToBuffer` 序列化、工厂注册与查找。 |
+| [tests/ut/base/testcase/tiling_data_unittest.cc](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/base/testcase/tiling_data_unittest.cc) | 两者配套的单元测试，本讲代码实践的直接参照。 |
+
+注意区分**两个同名的体系**，这是初学者最容易混淆的地方：
+
+| | `gert::TilingData` | `optiling::TilingDef`（宏生成类） |
+| --- | --- | --- |
+| 头文件 | `exe_graph/runtime/tiling_data.h` | `register/tilingdata_base.h` |
+| 定位 | 运行时**字节流容器**（只有 capacity/size/data 指针，不认识任何字段） | 宿主侧**结构化 tiling 参数**（每个字段有名字、类型、偏移） |
+| 写入方式 | `Append` 逐段追加 | `set_xxx()` 按字段赋值，`SaveToBuffer` 一次性拍平 |
+| 使用者 | exe_graph 执行图体系（gert 新体系） | 老的 optiling 注册体系（算子仓常用） |
+
+两者的桥梁是：`TilingDef::SaveToBuffer` 拍平后的字节流，可以放进 `gert::TilingData` 的数据区传递。
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 gert::TilingData 容器：头体分离的字节流缓冲区
+### 4.1 gert::TilingData：追加式字节流容器
 
 #### 4.1.1 概念说明
 
-`gert::TilingData` 解决的问题是：**用一块裸内存同时携带「元信息（容量、已写长度）」和「数据本身」**。它采用「头部 + 尾随数据区」的变长结构：对象头部记录容量和长度，数据区紧跟在头部之后。这样框架只需保存一个指针，就能把整块内存搬到设备侧，设备侧读同一个头部即可知道有效数据有多长。
+`gert::TilingData` 是一个「头部 + 连续数据区」的 POD 容器。头部记录三个关键值：容量（capacity）、已用长度（data_size）、数据区指针（data）。数据区紧跟头部之后分配，但 `TilingData` 本身**不拥有**这块内存——它由 `CreateCap` 工厂函数一次性分配，由调用方（通常是一个 `unique_ptr<uint8_t[]>`）管理生命周期。
 
-这个设计和 [u2-l4](u2-l4-shape-stride-tensor.md) 讲过的 `TensorData` 的 `kFollowing` placement（头体连续分配）如出一辙——都是为了避免二次分配、让数据可整体搬运。
+它不认识任何字段语义，只提供最原始的「往后追加 N 字节」能力。字段解释完全靠写入方和读取方约定相同的结构体布局——这正是它能跨 host/device 传递的原因。
 
 #### 4.1.2 核心流程
 
-```text
-CreateCap(cap)                          Init(cap, buf + sizeof(TilingData))
-   │ 分配 sizeof(TilingData)+cap 字节        │ capacity_ = cap
-   │ 的连续内存并清零                         │ data_size_ = 0
-   ▼                                        │ data_ 指向头部之后
-┌─────────────────────┬────────────────────────────────┐
-│ 头部（POD，64 字节）  │ 数据区（cap 字节，追加写于此）      │
-│ capacity_ data_size_ │  [字段1][字段2][字段3]...          │
-│ data_ reserved_[40]  │  ◄─ data_ 指向这里                 │
-└─────────────────────┴────────────────────────────────┘
+创建并写入一个 TilingData 的完整流程：
 
-Append(x)：Expand(sizeof(x)) 拿到写入地址 → 按类型写入 → data_size_ += sizeof(x)
+```text
+1. CreateCap(cap_size)
+   ├── 计算 total_size = sizeof(TilingData) + cap_size（含溢出检查）
+   ├── new uint8_t[total_size]()  （值初始化，全零）
+   └── 在头部调 Init：capacity_ = cap_size, data_size_ = 0,
+                      data_ = 缓冲区首地址 + sizeof(TilingData)
+2. Append(x)（可多次）
+   ├── Expand(sizeof(x))：检查 data_size_ + sizeof(x) 是否溢出/超容量
+   │     └── 超容量返回 nullptr → Append 返回 GRAPH_FAILED（本次追加不生效）
+   └── 把 x 逐字节拷到 data_ + data_size_ 处，data_size_ += sizeof(x)
+3. 读取方：GetData() 拿到数据区首地址，按约定布局 reinterpret_cast 解释
 ```
 
-追加长度恒有：
-
-\[ \text{data\_size\_{after}} = \text{data\_size\_{before}} + \text{sizeof}(T) \le \text{capacity\_} \]
+已用长度的恒等式：任意时刻数据区前 `GetDataSize()` 字节是有效内容，之后是未使用的预留空间。
 
 #### 4.1.3 源码精读
 
-成员布局：三个有效字段加 40 字节保留区，文件末尾用 `static_assert` 固化 POD 契约。
+**（1）类的成员布局——一个 64 字节的 POD 头部**
 
-- [inc/external/exe_graph/runtime/tiling_data.h:201-207](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h#L201-L207)：`capacity_`（最大容量）、`data_size_`（已写长度）、`data_`（指向数据区的指针）、`reserved_[40]` 保留字段。保留区的注释说明这是为未来扩展预留的，不能直接使用。
-- [inc/external/exe_graph/runtime/tiling_data.h:221](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h#L221)：`static_assert(std::is_standard_layout<TilingData>::value, ...)`，把「必须是标准布局」变成编译期错误，任何破坏布局的改动（比如加虚函数）都无法编译通过。
-- [inc/external/exe_graph/runtime/tiling_data.h:196-199](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h#L196-L199)：拷贝与移动构造/赋值全部 `= delete`——容器本身只是内存头部视图，拷贝头部会丢数据区，所以干脆禁止。
+[inc/external/exe_graph/runtime/tiling_data.h:201-207](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h#L201-L207)：三个数据成员 `capacity_`、`data_size_`、`data_`，外加 40 字节 `reserved_` 保留区。文件末尾 [tiling_data.h:221](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h#L221) 用 `static_assert(std::is_standard_layout<TilingData>::value, ...)` 把「必须是 POD」固化为编译期约束——这是 metadef 一贯的 ABI 纪律（对照 u3-l1 的 KernelContext）。保留区的作用是给未来扩展留余量而不改变结构体大小，注释明确提醒「只剩 8 字节时不要直接使用」。
 
-工厂方法 `CreateCap`：一次性分配「头部 + 数据区」并完成初始化。
+**（2）CreateCap——一次分配、头体连续**
 
-- [inc/external/exe_graph/runtime/tiling_data.h:157-169](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h#L157-L169)：`new (std::nothrow) uint8_t[total_size]()` 分配并清零整块内存，然后把首地址 `reinterpret_cast` 成 `TilingData*`，调用 `Init` 时让 `data_` 指向 `td_buf.get() + sizeof(TilingData)`——即头部之后紧跟的数据区。返回 `unique_ptr<uint8_t[]>` 由调用方管理生命周期（单测中 `data.get()` 再转回 `TilingData*` 用）。
-- [inc/external/exe_graph/runtime/tiling_data.h:187-192](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h#L187-L192)：`Init` 设置容量、清零长度、让 `data_` 指向外部传入的地址，并把保留区 memset 清零。
+[inc/external/exe_graph/runtime/tiling_data.h:157-169](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h#L157-L169)：先 `AddOverflow` 检查总大小，再 `new (std::nothrow) uint8_t[total_size]()` 分配（值初始化保证数据区清零），然后把 `data_` 指向「自己尾部之后」的位置。返回的是 `unique_ptr<uint8_t[]>`，调用方用 `reinterpret_cast<TilingData *>` 换视图使用——与 u3-l2 讲的「框架在裸内存上构造上下文」是同一套手法。
 
-与 Tiling 阶段的衔接：TilingContext 从 `kOutputTilingData` 输出槽取出容器。
+**（3）Expand——唯一的扩容原语**
 
-- [inc/external/exe_graph/runtime/tiling_context.h:394-412](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_context.h#L394-L412)：`GetTilingData<T>()` 先经 `GetRawTilingData()` 拿到容器指针，校验容量不小于 `sizeof(T)` 后，`SetDataSize(sizeof(T))` 登记长度并把 `GetData()` 强转成 `T*` 返回——这就是「把结构体覆写进字节流并登记长度」的入口；`GetRawTilingData()` 则返回无类型容器，配合 `Append` 使用。
+[inc/external/exe_graph/runtime/tiling_data.h:139-150](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h#L139-L150)：先做加法溢出检查，再比较容量；两个检查任一失败都返回 `nullptr` 且**不改动 `data_size_`**（失败无副作用）。成功时返回扩展区首地址并推进 `data_size_`。注意这里没有 realloc、没有二次分配——容量在 `CreateCap` 时就锁死了。
+
+**（4）两个 Append 重载——单值与数组**
+
+[inc/external/exe_graph/runtime/tiling_data.h:109-117](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h#L109-L117)：单值版本用 `enable_if<is_standard_layout<T>>` 限定只接受 POD 类型，写入用 `*reinterpret_cast<T *>(data_ptr) = data`（placement 赋值而非 memcpy，因为是已对齐的定长写入）。
+
+[tiling_data.h:119-132](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h#L119-L132)：数组版本先 `MulOverflow` 算总字节数，再走 `Expand`，最后 `memcpy`。注释说明：Expand 已保证合法性，此处直接 memcpy 减少冗余判断。
+
+**（5）operator<<——流式语法糖**
+
+[tiling_data.h:216-220](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h#L216-L220)：`td << a << b << c` 式的链式追加。注释坦诚说明取舍：因为不能抛异常，`operator<<` 无法把失败信息传给调用者（返回值被丢弃），所以它只适合「容量必然充足」的场合；需要检查失败时应显式调 `Append` 并判断返回值。
 
 #### 4.1.4 代码实践
 
-**实践目标**：直观验证「头体分离」布局——`CreateCap` 分配的整块内存里，头部之后紧跟数据区，`sizeof(TilingData)` 恰好是头部偏移。
+**实践目标**：验证 Append 的「追加无副作用失败」语义。
 
-**操作步骤**（阅读型，不写文件）：
+**操作步骤**：
 
-1. 打开 [tests/ut/base/testcase/tiling_data_unittest.cc:50-61](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/base/testcase/tiling_data_unittest.cc#L50-L61) 的 `AppendSameTypesOk` 用例，注意 `CreateCap(2048)` 返回 `unique_ptr<uint8_t[]>`，再 `reinterpret_cast<TilingData *>` 使用。
-2. 追踪 `CreateCap` 里 `td->Init(cap_size, td_buf.get() + sizeof(TilingData))` 这一行（[tiling_data.h:167](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h#L167)），确认 `data_` 永远指向头部之后。
-3. 回忆 [u1-l2](u1-l2-build-and-test.md)：`ut_metadef` 目标用 glob 收集 `tests/ut/base/testcase/*.cc`，所以该测试无需在 CMake 中登记即可被编译。
+1. 打开 [tests/ut/base/testcase/tiling_data_unittest.cc:120-139](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/base/testcase/tiling_data_unittest.cc#L120-L139)（`AppendOutOfBounds` 用例），阅读它做了什么：`CreateCap(20)` 只留 20 字节容量，先成功 Append 两个 int64（16 字节），第三次 Append 必然失败，断言返回值 `!= GRAPH_SUCCESS` 且 `GetDataSize()` 停在 16、前 16 字节内容未被破坏。
+2. 在 `tests/ut/base/testcase/` 下新建一个测试文件（示例代码，非项目原有文件）：
 
-**需要观察的现象 / 预期结果**：`tiling_data->Append(i)` 循环追加 10 个 `int64_t` 后 `GetDataSize() == 80`，且 `memcmp(GetData(), expect_vec.data(), 80) == 0`——字节流内容与直接内存拷贝一致。运行 `bash tests/run_test.sh -u` 后用 `--gtest_filter=TilingDataUT.AppendSameTypesOk` 过滤可单跑此用例（完整运行方式见综合实践）。本实践为源码阅读型，命令执行结果**待本地验证**。
+```cpp
+// my_tiling_data_overflow_ut.cc（示例代码）
+#include "exe_graph/runtime/tiling_data.h"
+#include <gtest/gtest.h>
+
+namespace gert {
+class MyTilingDataOverflowUT : public testing::Test {};
+
+TEST_F(MyTilingDataOverflowUT, FailedAppendKeepsSize) {
+  auto data = TilingData::CreateCap(12);  // 容量 12 字节
+  auto td = reinterpret_cast<TilingData *>(data.get());
+  int32_t a = 1;
+  int32_t b = 2;
+  int64_t c = 3;                          // 8 字节，塞不下
+  EXPECT_EQ(td->Append(a), ge::GRAPH_SUCCESS);
+  EXPECT_EQ(td->Append(b), ge::GRAPH_SUCCESS);
+  EXPECT_NE(td->Append(c), ge::GRAPH_SUCCESS);  // 失败
+  EXPECT_EQ(td->GetDataSize(), 8U);             // 长度停在 8，不回滚也不推进
+}
+}  // namespace gert
+```
+
+3. 运行（u1-l2 已讲过，`ut_metadef` 目标用 glob 自动收集 `tests/ut/base/testcase/*.cc`，新文件无需改 CMake）：
+
+```bash
+bash tests/run_test.sh -u
+# 或在构建目录中精确过滤：
+# ./build_gcov/ut/metadef/ut_metadef --gtest_filter=MyTilingDataOverflowUT.*
+```
+
+**需要观察的现象**：三个断言全部通过，特别是最后一个——失败的 Append 没有污染数据区长度。
+
+**预期结果**：测试 PASSED。若无本地编译环境，标注「待本地验证」。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 `TilingData` 禁止拷贝构造，却还允许 `reinterpret_cast` 出「第二个」`TilingData*`？
+**练习 1**：`CreateCap(0)` 之后立刻 `Append(int8_t(1))`，返回什么？`GetDataSize()` 是多少？
 
-**答案**：禁拷贝防止的是「按值复制头部」——拷出来的头部 `data_` 指向原对象的数据区，两个头都会以为自己拥有数据，析构/写入语义全乱。而 `reinterpret_cast` 只是把同一段内存换一个视角访问（和 [u3-l2](u3-l2-extended-context.md) 的上下文视图同一手法），不产生新头部、不涉及所有权，所以安全。
+**答案**：`Expand(1)` 中 `after_size = 0 + 1 > capacity_ = 0`，返回 nullptr，因此 Append 返回 `GRAPH_FAILED`；`data_size_` 保持 0。合法但「什么都不装」的空容器。
 
-**练习 2**：`reserved_[40]` 保留区为什么不能「直接用」？
+**练习 2**：为什么 `Append` 的单值版本用 `*reinterpret_cast<T*>(...) = data` 而数组版本用 `memcpy`？
 
-**答案**：头文件注释明确写了 `do not directly use when only 8-byte left`。这个类的布局是 ABI 契约（`static_assert` 只能保证 standard layout，不能保证字段不变）；已编译的框架/算子 so 按当前偏移访问 `capacity_`/`data_size_`/`data_`，若新版本改了保留区用法导致字段偏移变化，旧 so 会读写错位。保留区只用于在不移动既有字段的前提下做尾部扩展。
+**答案**：单值写入的目标地址是自然对齐的定长槽位（容器头部本身按 8 字节成员对齐，数据区起点对齐，且 POD 追加顺序中各字段的对齐由写入方保证），直接赋值让编译器生成最优指令；数组版本源地址（调用方的 vector data）类型可能与目标解释不同、长度可变，语义上就是字节搬运，用 `memcpy` 最直接。两者都以 `Expand` 预先做过容量/溢出检查为前提。
 
-**练习 3**：`GetTilingData<T>()` 里为什么必须调用 `SetDataSize(sizeof(T))`？
+**练习 3**：`operator<<` 连续追加失败时会发生什么？
 
-**答案**：`data_size_` 是框架搬运字节流时的依据（搬多少字节）。覆写结构体只写了内存，不写 `data_size_` 的话框架仍认为是旧长度，设备侧会读到不完整或错误的 tiling 参数。`SetDataSize` 相当于「登记本次序列化的最终长度」。
+**答案**：失败被静默忽略（注释原文：`we cannot throw exception, so callers cannot get the error information`），后续内容会继续从当前 `data_size_` 处追加，产生**不完整但自洽**的字节流。所以写 device 侧消费的 tiling data 时应优先用带返回值检查的 `Append`。
 
-### 4.2 Append 与 Expand：字段追加和溢出防护
+### 4.2 TilingContext 与 TilingData 的衔接
 
 #### 4.2.1 概念说明
 
-`Append` 是序列化的唯一正规入口：把一个（或一段）standard layout 值追加到字节流末尾。所有长度算术都走 `ge::AddOverflow` / `ge::MulOverflow` 溢出检查函数（与 [u2-l1](u2-l1-datatype-and-format.md) 讲过的 `GetSizeInBytes` 溢出防护同一套工具），超出容量即失败返回，绝不越界写。
+u3-l3 讲过：TilingFunc 通过 `TilingContext` 拿到 tiling data 输出槽位。这里补上最后一块拼图——`gert::TilingData` 容器就装在那个槽位里，且框架提供了两种取用风格：
+
+- **覆写式**（`GetTilingData<T>()`）：把容器当成「一个 T 的存储空间」用，一次性写入整个结构体。
+- **追加式**（`GetRawTilingData()`）：拿到裸 `TilingData*`，用 `Append` 一段段拼。
 
 #### 4.2.2 核心流程
 
 ```text
-Append(T data)                Expand(sizeof(T))
-  │                             │ after_size = data_size_ + size（溢出则返回 nullptr）
-  │                             │ after_size > capacity_ → 返回 nullptr
-  │                             │ 返回 data_ + data_size_（旧末尾），data_size_ = after_size
-  ▼                             ▼
-Expand 成功 → *reinterpret_cast<T*>(ptr) = data → GRAPH_SUCCESS
-Expand 失败 → 直接返回 GRAPH_FAILED（一个字节都没写）
+TilingFunc 内部：
+  方式 A（覆写式，适合简单 tiling 参数）
+    T *td = context->GetTilingData<T>();   // 检查容量 ≥ sizeof(T)，
+    td->field = value;                      // SetDataSize(sizeof(T))，
+                                           // 返回数据区指针，直接按结构体赋值
+  方式 B（追加式，适合变长/分段内容）
+    TilingData *raw = context->GetRawTilingData();
+    raw->Append(a); raw->Append(b); raw->Append(arr, n);
 ```
-
-注意 `Expand` 的语义细节：**先返回旧末尾地址、再更新长度**；失败时长度不变，因此一次失败的 Append 不会污染已有数据。
 
 #### 4.2.3 源码精读
 
-- [inc/external/exe_graph/runtime/tiling_data.h:109-117](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h#L109-L117)：单值 `Append`。模板参数带 `std::enable_if<std::is_standard_layout<T>::value>`——非标准布局类型（如含虚函数、非标准布局成员的类）直接编译失败，从源头杜绝布局不确定的类型进入字节流。
-- [inc/external/exe_graph/runtime/tiling_data.h:119-132](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h#L119-L132)：数组版 `Append(const T *data, size_t append_num)`。先用 `MulOverflow` 算总字节数（防止 `个数 × sizeof` 溢出），再 `Expand`，最后 `memcpy`。注释说明：Expand 已保证合法，此处省去冗余检查直接 memcpy。乘法溢出与容量不足分别返回 `GRAPH_MUL_OVERFLOW` / `GRAPH_ADD_OVERFLOW` 两种错误码。
-- [inc/external/exe_graph/runtime/tiling_data.h:139-150](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h#L139-L150)：`Expand` 本体。返回写入地址的计算是 `data_ + data_size_`（按 `uint8_t*` 步进），两道检查：加法溢出、超容量。
-- [inc/external/exe_graph/runtime/tiling_data.h:216-220](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b174941997bc7d/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h#L216-L220)：流式 `operator<<`。注释坦承它「无法把错误抛给调用者」，失败被静默忽略——所以工程代码应优先用返回 `graphStatus` 的 `Append`。
-- [tests/ut/base/testcase/tiling_data_unittest.cc:120-139](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/base/testcase/tiling_data_unittest.cc#L120-L139)：`AppendOutOfBounds` 用例验证「容量 20 字节 → 前 2 个 int64 写入成功（16 字节）→ 第 3 个失败且 `GetDataSize()` 仍是 16、前 16 字节内容未被破坏」。
+[inc/external/exe_graph/runtime/tiling_context.h:394-405](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_context.h#L394-L405)：`GetTilingData<T>()` 先取裸容器，做两层防御——空指针检查和容量检查（`GetCapacity() < sizeof(T)` 则返回 nullptr，因为编译结果里该算子允许的最大 tiling data 长度是编译期定死的）。通过后 `SetDataSize(sizeof(T))` 登记长度，再把数据区 `static_cast<T*>` 返回。注意它**不做任何运行期类型核对**：T 是什么完全由算子作者与 kernel 侧的约定决定，写错 T 就是纯粹的内存误解释（u3-l3 已提示过这一点）。
+
+[inc/external/exe_graph/runtime/tiling_context.h:410-412](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_context.h#L410-L412)：`GetRawTilingData()` 只有一行——从 `kOutputTilingData` 槽位取出 `TilingData*`，失败返回空指针。这是「槽位下标公式 + 指针类型解释」模式（u3-l3 的核心结论）在本讲的直接体现。
 
 #### 4.2.4 代码实践
 
-**实践目标**：亲手复现越界保护行为（改参数观察型实践）。
+**实践目标**：对照单测确认覆写式与追加式可以混用同一条读取路径。
 
 **操作步骤**：
 
-1. 阅读 `AppendOutOfBounds`（上文链接），记下它用的容量 `CreateCap(20)` 与断言。
-2. 在本地把该用例复制一份（可加到本讲综合实践的新测试文件里），把容量依次改成 `24`、`16`，其余不动。
-3. 运行 `bash tests/run_test.sh -u`，用 `--gtest_filter=` 过滤到这条用例。
+1. 阅读 [tests/ut/base/testcase/tiling_data_unittest.cc:27-47](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/base/testcase/tiling_data_unittest.cc#L27-L47) 的 `BuildTestContext()`：它用 `OpTilingContextBuilder`（u5-l1 会详讲）搭出一个带 9 个属性的假 TilingContext，后续大量用例都从它的 `context->GetAttrs()` 取属性来做转换测试。
+2. 阅读 [tiling_data_unittest.cc:50-61](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/base/testcase/tiling_data_unittest.cc#L50-L61)（`AppendSameTypesOk`）：连追 10 个 int64 后 `GetDataSize()==80`，并用 `memcmp(GetData(), expect_vec.data(), ...)` 验证字节流内容——这就是「读取方按写入顺序解释」的最小示范。
 
-**需要观察的现象**：容量 24 时第 3 个 `int64_t` 追加成功、`GetDataSize()` 变为 24；容量 16 时第 2 个就失败、`GetDataSize()` 停在 8。
-
-**预期结果**：验证「失败即停、不写半截数据」。具体运行输出**待本地验证**（本环境未执行编译）。
+**需要观察的现象 / 预期结果**：`memcmp` 为 0，说明追加顺序与内存布局严格一致。本步骤为纯阅读实践，无需运行（如运行见 4.4 综合实践）。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：数组版 `Append` 为什么错误码区分 `GRAPH_MUL_OVERFLOW` 和 `GRAPH_ADD_OVERFLOW`？
+**练习 1**：`GetTilingData<T>()` 为什么在返回前就 `SetDataSize(sizeof(T))`，而不是留给算子作者设置？
 
-**答案**：两处失败点不同——`sizeof(T) × append_num` 乘法溢出返回 `GRAPH_MUL_OVERFLOW`；乘积本身没溢出但 `data_size_ + append_size` 加法溢出（或超容量）时走 `Expand` 返回 nullptr，返回 `GRAPH_ADD_OVERFLOW`。调用方可据此区分「单次追加量本身非法」和「累计超限」。
+**答案**：框架在 kernel 启动时要按 `GetDataSize()` 把有效字节流搬到 device。覆写式语义下有效长度就是 `sizeof(T)`，提前登记可以避免作者忘记设置导致长度为 0（device 侧拿到空数据）。追加式则必须由作者通过逐次 `Append` 自然推进长度。
 
-**练习 2**：如果 `Expand` 先加 `data_size_` 再检查容量，和现在「先检查再更新」有什么差别？
+**练习 2**：如果 TilingFunc 里先 `GetTilingData<T>()` 又 `GetRawTilingData()->Append(x)`，最终 data_size 是多少？
 
-**答案**：现在的实现顺序是检查全部通过后才更新 `data_size_`，失败路径完全不动状态（幂等、可重试）；若先更新再检查，失败后长度已被改大，后续 Append 会从错误偏移写入，字节流被污染。
+**答案**：`sizeof(T) + sizeof(x)` 的字节数——覆写式把长度设为 `sizeof(T)`，其后的 Append 在这个基础上继续追加。但要注意 T 的尾部若有对齐填充，追加内容会紧贴 `sizeof(T)` 处开始，混合使用需自己保证解释约定一致。
 
-**练习 3**：`operator<<` 连续链式追加 `td << a << b << c;` 有什么风险？
-
-**答案**：`operator<<` 内部调用 `Append` 但丢弃返回值（头文件注释明确说明无法抛错），任何一次容量不足都会被静默吞掉，产生不完整的 tiling 数据且无任何报错。应改用逐个检查返回值的 `Append`。
-
-### 4.3 AppendConvertedAttrVal：属性到字节流的类型转换桥
+### 4.3 AppendConvertedAttrVal：属性的类型化搬运
 
 #### 4.3.1 概念说明
 
-很多算子的 tiling 结果里需要包含一部分「从属性直接搬进 tiling data」的常量（例如标尺、缩放系数），但属性在上下文中的存储类型（如 `float`）未必等于设备侧希望的类型（如 `float16` 的 16 位表示）。`AppendConvertedAttrVal` 把这两步合一：按「源类型 → 目的类型」从上下文属性取值、转换、追加进 `TilingData`。
-
-类型空间由 `AttrDataType` 枚举定义，它是 ABI 契约——**只能在尾部追加，不能插入**（和 [u2-l1](u2-l1-datatype-and-format.md) 的 `DataType`/`Format` 枚举同一规则）。
+很多算子的 tiling 参数直接来自算子属性（如 `axis`、`epsilon`），但属性在 RuntimeAttrs 里的存储类型与 kernel 期望的 tiling 类型可能不同（例如属性是 float32，device 侧只认 float16）。`TilingData::AppendConvertedAttrVal` 把「取属性 → 类型转换 → 追加」三步合成一次调用，转换规则集中注册在一张编译期构造的二维表里。
 
 #### 4.3.2 核心流程
 
 ```text
-AppendConvertedAttrVal(attrs, idx, src_type, dst_type)
-  │
-  ├─ attrs 为空 / attr_index 越界 ──────────► GRAPH_FAILED（打日志）
-  │
-  ├─ kAttrTable.Find(src_type, dst_type)
-  │     │  二维表 [src][dst] → 函数指针；未登记的组合 → nullptr
-  │     ▼
-  ├─ func == nullptr ──────────────────────► GRAPH_FAILED（组合不支持）
-  │
-  └─ func(this, attrs, attr_index)
-        │  例如 AppendConvertedAttr<float, int32_t>：
-        │    GetAttrPointer<float>(idx) 取属性
-        │    IntegerChecker 检查目标类型可容纳（仅告警）
-        │    static_cast<int32_t> 后 Append
-        ▼
-     GRAPH_SUCCESS
+AppendConvertedAttrVal(attrs, index, src_type, dst_type)
+  ├── attrs == nullptr                → GRAPH_FAILED
+  ├── index >= attrs->GetAttrNum()    → GRAPH_FAILED（越界）
+  ├── kAttrTable.Find(src, dst)       → 查二维表
+  │     └── 未注册的组合（如 string→int32）→ GRAPH_FAILED
+  └── func(this, attrs, index)        → 执行具体的 取值/转换/Append
 ```
-
-查找表大小为 \( |\text{kTypeEnd}| \times |\text{kTypeEnd}| \)，即枚举值个数（含结尾哨兵 `kTypeEnd`）的平方，每个格子存一个 `std::function`。
 
 #### 4.3.3 源码精读
 
-- [inc/external/exe_graph/runtime/tiling_data.h:25-65](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h#L25-L65)：`AttrDataType` 枚举，从 `kBool` 到 `kTypeEnd` 共 38 个值，覆盖标量/list/list-list 与 fp16/bf16 变体。
-- [base/runtime/tiling_data.cc:597-613](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc#L597-L613)：入口 `AppendConvertedAttrVal`。三段式：判空判越界 → 查表 → 执行。注意它声明在头文件（[tiling_data.h:194-195](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h#L194-L195)）而实现在 `libmetadef` 所在编译单元，因为查找表体积太大不适合放头文件。
-- [base/runtime/tiling_data.cc:418-443](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc#L418-L443)：`AttrTable<SRC, DST>` 二维函数表模板，构造时全部填 `default_val`（nullptr），`Add` 链式登记，`Find` 越界返回 nullptr。
-- [base/runtime/tiling_data.cc:445-593](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc#L445-L593)：`kAttrTable` 常量表登记现场。以 `.Add(kInt32, kInt32, &AppendAttr<int32_t>)`（同型直通）与 `.Add(kInt32, kInt64, &AppendConvertedAttr<int32_t,int64_t>)`（转换）为代表，float→float16/bfloat16 有专门的位转换函数（如 [L478-L483](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc#L478-L483)）。
-- [base/runtime/tiling_data.cc:50-66](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc#L50-L66)：两个最基础的执行器——`AppendAttr<T>`（取标量属性指针后 `Append(*attr)`）与 `AppendListAttr<T>`（取 `ContinuousVector` 属性，按元素个数数组版 Append）。`GetAttrPointer<T>` 来自 `RuntimeAttrs`（[u3-l1](u3-l1-kernel-context.md) 提过属性槽经 compute_node_info 访问）。
-- [base/runtime/tiling_data.cc:86-95](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc#L86-L95)：`AppendConvertedAttr<T1,T2>` 转换执行器。`IntegerChecker<T2>::Compat` 只做溢出**告警**（`GELOGW`）不拦截——窄化转换照常执行，这是需要留意的取舍。
-- [tests/ut/base/testcase/tiling_data_unittest.cc:27-47](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/base/testcase/tiling_data_unittest.cc#L27-L47)：`BuildTestContext` 用 `OpTilingContextBuilder`（[u5-l1](u5-l1-context-builder.md) 将详述）注入 9 个不同类型的属性，是全部属性转换单测的公共夹具。
-- [tests/ut/base/testcase/tiling_data_unittest.cc:1954-1987](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/base/testcase/tiling_data_unittest.cc#L1954-L1987)：三个非法路径用例——属性下标越界、不支持的源类型、不支持的目标类型，均断言 `GRAPH_FAILED`。
+[base/runtime/tiling_data.cc:597-613](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc#L597-L613)：入口的三段防御 + 查表分发。表本体是 [tiling_data.cc:445-593](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc#L445-L593) 的 `kAttrTable`：一个 `AttrTable<kTypeEnd, kTypeEnd>` 的常量表，用链式 `.Add(src, dst, func)` 注册了 bool/float32/int32/int64 及其 list、list-list 形态到各种目标类型的转换函数。类型枚举 `AttrDataType` 定义在 [tiling_data.h:25-65](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/exe_graph/runtime/tiling_data.h#L25-L65)，取值顺序是接口契约，只能尾部追加（与 u2-l3 ValueType 的纪律一致）。
+
+代表性转换函数：
+
+- [tiling_data.cc:51-57](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc#L51-L57) `AppendAttr<T>`：同类型直通的模板——取属性指针、判空、`Append`。
+- [tiling_data.cc:85-95](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc#L85-L95) `AppendConvertedAttr<T1, T2>`：数值类型间的 `static_cast` 转换，转换前用 `IntegerChecker<T2>::Compat` 检查收窄溢出（仅告警不阻断）。
+- [tiling_data.cc:151-156](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc#L151-L156) `AppendStrAttr`：字符串属性按 `strlen` 追加裸字节（不含终止符 `\0`——见 4.3.5 练习 2）。
+- 列表类型（如 [tiling_data.cc:61-66](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc#L61-L66) `AppendListAttr`）：从 `ContinuousVector` 取元素区，走数组版 `Append<T>(ptr, n)`。
+
+容量安全由 [tiling_data.cc:31-48](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc#L31-L48) 的 `CheckOverFlow<T>` 统一兜底：乘法溢出、加法溢出、超容量三查全失败才放行。
 
 #### 4.3.4 代码实践
 
-**实践目标**：从测试断言反推 `kAttrTable` 的覆盖范围，理解「哪些转换合法」。
+**实践目标**：通过单测确认「未注册的组合会失败」这一边界行为。
 
 **操作步骤**：
 
-1. 在 [base/runtime/tiling_data.cc](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc) 中检索 `.Add(AttrDataType::kString`，数一数 string 作为源类型登记了几个组合。
-2. 对照 `AppendAttrSrcTypeInvalid` 用例（[tiling_data_unittest.cc:1964-1974](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/base/testcase/tiling_data_unittest.cc#L1964-L1974)）：`kString → kInt32` 断言失败，但 `AppendAttrStrOk`（[L141-L154](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/base/testcase/tiling_data_unittest.cc#L141-L154)）里 `kString → kString` 成功。
-3. 思考：若给 `AttrDataType` 中间插入一个新枚举值，`kAttrTable` 和已有测试会发生什么？
+1. 阅读 [tests/ut/base/testcase/tiling_data_unittest.cc:1964-1974](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/base/testcase/tiling_data_unittest.cc#L1964-L1974)（`AppendAttrSrcTypeInvalid`）：对同一个 bool 属性，声称 src 是 `kString` 或 `kListInt64` 都会因查表失败返回 `GRAPH_FAILED`。
+2. 对照 [tiling_data.cc:448-593](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc#L448-L593) 的 `.Add` 清单，找出哪些目标类型**从未**出现在表中（例如 `kString` 只能作为目标出现一次：`kString→kString`）。
 
-**需要观察的现象 / 预期结果**：string 只登记了 `kString→kString` 一个组合（走 `AppendStrAttr`，见 [base/runtime/tiling_data.cc:151-156](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc#L151-L156)，按 `strlen` 追加、不含结尾 `\0`）；中间插枚举值会使 `kTypeEnd` 之前所有值的整数编码平移，属于破坏 ABI 的改动，函数指针表的下标含义也随之错乱。
+**需要观察的现象**：`kAttrTable` 中 string 只有一条直通路径；所有以 `kString` 为源的其他组合都是 `Find` 返回 nullptr。
+
+**预期结果**：与单测断言一致。源码阅读型实践，无需运行。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么用二维函数指针表而不是一个巨大的 switch-case？
+**练习 1**：属性是 `list_list_int32`，目标 `kListListInt64`，追加后 `GetDataSize()` 增加多少？
 
-**答案**：表在编译期由模板 `AttrTable<SRC,DST>` 生成、初始化一次（静态常量 `kAttrTable`），`Find` 只是两次数组下标取值，O(1) 且无需在运行期做字符串或类型比较；新增组合只需 `.Add` 一行，不必改动查找逻辑。switch-case 则要把「src × dst」的叉积全部展开在一个函数里，难以维护。
+**答案**：所有内层 list 元素总数 × 8 字节。`AppendConvertedListListAttr`（[tiling_data.cc:121-148](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc#L121-L148)）把二层结构**拍平**成一个连续的 int64 序列，不保留外层长度信息——外层有几个 list、每个多长，需要读取方另行约定。
 
-**练习 2**：`float → bool` 的转换规则是什么？从哪里看出来的？
+**练习 2**：`AppendStrAttr` 追加 "Hello!"（6 字符）后 `GetDataSize()` 是 6 还是 7？
 
-**答案**：`GetValue<float,bool>` 特化（[base/runtime/tiling_data.cc:25-28](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc#L25-L28)）：绝对值大于 `float` 的机器精度（epsilon）即为 true，否则 false。不是 C 风格的「非零即真」对极小值的处理——`1e-40f` 会转成 false。
+**答案**：6。见 [tiling_data_unittest.cc:141-154](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/base/testcase/tiling_data_unittest.cc#L141-L154) 的断言：`Append(attr, strlen(attr))` 不含 `\0`。device 侧如果要当 C 字符串用，必须自己补终止符或另行传长度。
 
-**练习 3**：属性下标越界时函数返回前有没有副作用？
-
-**答案**：没有。越界检查在最前面（[base/runtime/tiling_data.cc:600-603](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/runtime/tiling_data.cc#L600-L603)），直接打日志返回 `GRAPH_FAILED`，不会触碰 `TilingData` 的字节流；与 `Append` 的「失败不写半截」语义一致。
-
-### 4.4 tilingdata_base.h 宏体系：带类型的 TilingDef 与工厂注册
+### 4.4 tilingdata_base.h 宏体系：结构化的 TilingDef
 
 #### 4.4.1 概念说明
 
-`gert::TilingData` 只给了一串无类型字节。算子开发者更希望按**字段名**读写（`set_block_dim(8)`），且字段布局自动对齐。`optiling` 命名空间下的 `tilingdata_base.h` 用「基类 + 宏」实现这一点：
+`gert::TilingData` 是「无类型的字节管道」，直接用它写复杂 tiling 参数很繁琐。`optiling` 命名空间的宏体系在字节管道之上提供了一层**结构化封装**：你用宏声明字段，宏在编译期为你生成一个类，它同时具备：
 
-- `TilingDef` 基类持有字段元信息表 `field_info_`、数据缓冲 `data_ptr_` 和总长 `data_size_`；
-- `BEGIN_TILING_DATA_DEF(X)` 宏展开出一个派生类，其中每个 `TILING_DATA_FIELD_DEF(type, name)` 声明一个带 `set_/get_` 访问器的字段，并在**成员初始化时**通过 `FieldHandler` 把字段偏移登记进基类；
-- `REGISTER_TILING_DATA_CLASS(op_type, class_name)` 通过静态对象的构造函数把「op 类型名 → 构造函数」注册进 `CTilingDataClassFactory` 单例，供框架按算子名反查出 tiling 结构体。
-
-这套机制与 [u4-l3](u4-l3-op-def-factory.md) 将要讲的 `OpDefFactory` 注册是同一模式：**匿名命名空间静态对象 + 工厂单例**。
+1. 每个字段的 `set_xxx()/get_xxx()` 访问器；
+2. 自动的对齐占位（补齐字节），保证字段偏移确定；
+3. 一份「字段元信息」（类型名、字段名、偏移）供上层工具序列化/校验；
+4. 通过 `REGISTER_TILING_DATA_CLASS` 宏把「算子名 → 构造函数」登记进全局工厂，使框架能按算子名从字节流重建结构体（反序列化的关键）。
 
 #### 4.4.2 核心流程
 
-```text
-算子仓源码中：
-BEGIN_TILING_DATA_DEF(MyTiling)
-  TILING_DATA_FIELD_DEF(int32_t, block_dim)   ← 每个字段成员初始化时调用 FieldHandler
-  TILING_DATA_FIELD_DEF(int64_t, total_size)       登记 FieldInfo 并累加 data_size_
+以头文件注释中的官方示例（[tilingdata_base.h:135-145](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/register/tilingdata_base.h#L135-L145)）为准：
+
+```cpp
+BEGIN_TILING_DATA_DEF(MaxPoolTilingData)
+    TILING_DATA_FIELD_DEF(int32_t, dim_0);
+    TILING_DATA_FIELD_DEF(uint8_t, var_1);
+    TILING_DATA_FIELD_DEF(int64_t, factor_1);
 END_TILING_DATA_DEF
-REGISTER_TILING_DATA_CLASS(MyOp, MyTiling)    ← so 加载时静态对象构造 → 工厂登记
-
-运行期（宿主侧 tiling 函数里）：
-new MyTiling()
-  构造函数：先加 8 字节类名占位对齐 → 登记结构体大小 → InitData()
-  InitData()：new uint8_t[data_size_] 并让嵌套 struct 字段共享该缓冲
-tiling_func 计算 → set_block_dim(8)（写 data_ptr_ + offset）→ SaveToBuffer(buf, cap) 打平传出
-
-框架侧反序列化：
-factory.CreateTilingDataInstance("MyOp")
-  → new MyTiling(外部指针)  → SetDataPtr 让字段直接落在外部缓冲上
+REGISTER_TILING_DATA_CLASS(MaxPool, MaxPoolTilingData)
 ```
 
-对齐规则：每登记一个字段前，`CheckAlignAndGenPlaceHolder` 检查当前 `data_size_` 是否是该字段类型的整数倍，不是则自动插入 `uint8_t` 占位数组补齐（[base/asc/tilingdata_base_impl.cc:91-99](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/tilingdata_base_impl.cc#L91-L99)）。
+展开后的生命周期：
+
+```text
+构造（host 侧，TilingFunc 中）
+  1. 每个字段的偏移在成员初始化时由 FieldHandler 登记：
+       field_info_ += FieldInfo(dtype, name)；data_size_ += sizeof(type)
+  2. CheckAlignAndGenPlaceHolder：若当前 data_size_ 不是下一字段对齐倍数，
+     自动插入 uint8_t 占位数组字段补齐
+  3. 构造函数末尾 InitData()：new uint8_t[data_size_]() 分配连续数据区，
+     嵌套 struct 字段通过 saveBufferPtr 递归挂接子数据区
+  4. set_dim_0(16)：同时更新宿主侧副本和 data_ptr_ + offset_ 处的字节流
+
+序列化
+  SaveToBuffer(buf, cap)：memcpy_s 把 data_ptr_ 前 data_size_ 字节拷给调用方
+  （若曾 SetDataPtr 外部内存则跳过——数据已在目标缓冲区里）
+
+反构造（按算子名从字节流重建）
+  CTilingDataClassFactory::CreateTilingDataInstance("MaxPool")
+    → 查 map 得到构造函数 → new MaxPoolTilingData()
+  再 SetDataPtr(外部字节流地址)：不拷贝数据，让字段访问器直接
+  解释外部内存（零拷贝视图），并递归重挂嵌套 struct
+```
 
 #### 4.4.3 源码精读
 
-- [inc/external/register/tilingdata_base.h:135-145](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/register/tilingdata_base.h#L135-L145)：官方使用示例注释——`MaxPoolTilingData` 定义三个不同宽度字段并注册给 `MaxPool` 算子，这是理解宏用法的最短路径。
-- [inc/external/register/tilingdata_base.h:146-189](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/register/tilingdata_base.h#L146-L189)：`BEGIN_TILING_DATA_DEF` 展开的三要素——三个重载 `FieldHandler`（标量/数组/嵌套 struct，各自登记 `FieldInfo` 并累加 `data_size_`）、默认构造函数（登记结构体大小 + `InitData()` 分配缓冲）、外部指针构造函数（`SetDataPtr` 复用外部内存，用于反序列化侧）。
-- [inc/external/register/tilingdata_base.h:191-204](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/register/tilingdata_base.h#L191-L204)：`TILING_DATA_FIELD_DEF` 为字段生成 `set_`（同时写成员变量和 `data_ptr_ + offset_` 处的缓冲）、`get_`（读成员变量）、偏移量成员 `field_name##_offset_`（初始化即调用 `FieldHandler`）以及 16 字节 `reserve_buf`（为基类预留演进空间）。
-- [inc/external/register/tilingdata_base.h:241-255](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/register/tilingdata_base.h#L241-L255)：`REGISTER_TILING_DATA_CLASS` 宏。匿名命名空间里定义 Helper 类，静态实例 `g_tilingdata_##op_type##...` 在 so 加载时构造，把 `CreateTilingDataInstance`（`make_shared<class_name>`）登记进工厂——这是典型的「静态对象自注册」。
-- [base/asc/tilingdata_base_impl.cc:101-119](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/tilingdata_base_impl.cc#L101-L119)：`InitData` 按累计的 `data_size_` `new` 一块清零缓冲，并让所有嵌套 struct 字段（`saveBufferPtr` 里记录的指针）通过 `SetDataPtr` 落到 `data_ptr_ + offset` 的位置——父结构与子结构**共享同一块连续内存**，这正是能整体打平的前提。
-- [base/asc/tilingdata_base_impl.cc:73-89](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/tilingdata_base_impl.cc#L73-L89)：`SaveToBuffer` 把 `data_ptr_` 起的 `data_size_` 字节 memcpy 到外部缓冲；若 `inited_data_ptr` 为真（外部缓冲模式）则直接返回不再拷贝。
-- [base/asc/tilingdata_base_impl.cc:59-71](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/tilingdata_base_impl.cc#L59-L71)：`SetDataPtr` 释放自建缓冲、切换到外部指针，并递归为嵌套 struct 重新定位——反序列化侧「从数据反构造」的实现。
-- [base/asc/tilingdata_base_impl.cc:197-203](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/tilingdata_base_impl.cc#L197-L203)：工厂 `RegisterTilingData`/`CreateTilingDataInstance` 的对外转发；查不到 op_type 返回 `nullptr`（[L168-186](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/tilingdata_base_impl.cc#L168-L186)），同样是空值失败语义。
+**（1）TILING_DATA_FIELD_DEF——一行声明生成四个成员**
+
+[inc/external/register/tilingdata_base.h:191-204](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/register/tilingdata_base.h#L191-L204)：宏为每个字段生成 `set_x`（写宿主副本 + 写字节流两处）、`get_x`（只读宿主副本）、私有成员「值副本 + 偏移量 + 16 字节保留缓冲」。其中最巧妙的是偏移量的取得方式：成员初始化 `size_t field_name##_offset_ = FieldHandler(...)` 在构造时按声明顺序执行，`FieldHandler`（[tilingdata_base.h:149-155](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/register/tilingdata_base.h#L149-L155)）返回追加前的 `data_size_` 并推进总长——用成员初始化顺序天然实现了「字段布局即声明顺序」。16 字节 `reserve_buf_` 为将来给字段附加元信息预留，不改变现有布局。
+
+**（2）对齐占位——为什么需要 PH 字段**
+
+[base/asc/tilingdata_base_impl.cc:91-99](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/tilingdata_base_impl.cc#L91-L99)：`CheckAlignAndGenPlaceHolder` 在每个字段登记前检查当前 `data_size_` 能否被该字段类型大小整除，不能则插入一段 uint8_t 占位数组。例如 `dim_0`(int32,4B) 之后接 `factor_1`(int64,8B) 时，`data_size_=5` 不是 8 的倍数，自动补 3 字节 PH。这保证字节流中每个字段的偏移与宿主结构体的自然对齐一致，是「直接按偏移强转解释」安全的前提。
+
+**（3）InitData / SetDataPtr——两种数据区来源**
+
+[base/asc/tilingdata_base_impl.cc:101-119](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/tilingdata_base_impl.cc#L101-L119)：默认构造路径 `new` 一块自有数据区，并遍历 `saveBufferPtr` 把嵌套 struct 字段的数据区指到主数据区的对应偏移处（嵌套 struct 因此不单独分配）。
+
+[base/asc/tilingdata_base_impl.cc:59-71](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/tilingdata_base_impl.cc#L59-L71)：`SetDataPtr` 是反构造路径——释放自有数据区后改为指向**外部字节流**，置 `inited_data_ptr=true` 标记所有权转移（析构函数 [tilingdata_base.h:72-78](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/register/tilingdata_base.h#L72-L78) 据此决定是否 `delete[]`）。此后所有 `set_x/get_x` 直接读写外部内存，零拷贝。
+
+**（4）SaveToBuffer 与工厂**
+
+[base/asc/tilingdata_base_impl.cc:73-89](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/tilingdata_base_impl.cc#L73-L89)：序列化就是一次带容量检查的 `memcpy_s`；若已 `SetDataPtr` 过则直接返回（数据已在目标处）。
+
+[base/asc/tilingdata_base_impl.cc:161-186](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/tilingdata_base_impl.cc#L161-L186)：工厂用 `map<op_type, 构造函数>` 存储；查不到或构造函数为空都返回 nullptr（空值失败语义，不抛异常）。注册入口是 [tilingdata_base.h:241-255](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/register/tilingdata_base.h#L241-L255) 的 `REGISTER_TILING_DATA_CLASS` 宏——它生成一个匿名命名空间的 helper 类，靠**静态全局对象的构造函数**在 so 加载时完成注册，与 u4-l3 将讲的 OpDefRegistry 宏是同一模式，可提前对照。
+
+另外两个辅助机制：[tilingdata_base.h:29-51](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/register/tilingdata_base.h#L29-L51) 的 `StructSizeInfoBase` 单例记录「struct 类名 → 已登记大小」，供 `TILING_DATA_FIELD_DEF_STRUCT`（[tilingdata_base.h:227-235](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/register/tilingdata_base.h#L227-L235)）嵌套组合时查询子结构大小；[base/asc/tilingdata_base_impl.cc:211-229](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/base/asc/tilingdata_base_impl.cc#L211-L229) 的 `RecordTilingStruct` 用 weak 函数在加载期检测不同头文件中同名 tiling struct 的冲突并 printf 告警。
 
 #### 4.4.4 代码实践
 
-**实践目标**：手工展开一次宏，搞清 `TILING_DATA_FIELD_DEF(int32_t, x)` 到底生成了什么。
+**实践目标**：亲手构造一个含两个 int32 字段的结构化 TilingDef，完成「定义 → 赋值 → 拍平 → 从字节流零拷贝反构造 → 断言一致」全链路（本讲的核心实践任务）。
 
 **操作步骤**：
 
-1. 对照 [tilingdata_base.h:191-204](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/register/tilingdata_base.h#L191-L204)，在纸上把 `TILING_DATA_FIELD_DEF(int32_t, block_dim)` 展开成完整 C++ 代码（`set_block_dim`、`get_block_dim`、`block_dim_`、`block_dim__offset_`、`block_dim__reserve_buf_` 五个成员）。
-2. 追踪 `block_dim__offset_` 的初始化：成员初始化顺序即声明顺序，所以第一个字段的 offset 是「类名占位 8 字节之后」的值；再算第二个 `int64_t` 字段前会插入几个占位字节。
-3. 用 `TilingDef::GetDataSize()`（[tilingdata_base.h:82](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/register/tilingdata_base.h#L82)）核对你的手算结果。
+1. 在 `tests/ut/base/testcase/` 下新建 `my_tilingdef_roundtrip_ut.cc`（示例代码，非项目原有文件）：
 
-**需要观察的现象 / 预期结果**：结构 `{类名占位 8 字节, int32_t block_dim, [4 字节占位], int64_t total_size}` 的总大小应为 \(8 + 4 + 4 + 8 = 24\) 字节——`int32_t` 后必须补 4 字节占位才能让 `int64_t` 字段 8 字节对齐。这是纯源码推导，结论可靠；如需机器验证可参考综合实践（**待本地验证**）。
+```cpp
+// my_tilingdef_roundtrip_ut.cc（示例代码）
+#include "register/tilingdata_base.h"
+#include <gtest/gtest.h>
+
+namespace optiling {
+// 1) 用宏定义一个两个 int32 字段的 tiling 结构
+BEGIN_TILING_DATA_DEF(MyAddTilingData)
+    TILING_DATA_FIELD_DEF(int32_t, block_dim);
+    TILING_DATA_FIELD_DEF(int32_t, tile_num);
+END_TILING_DATA_DEF
+
+class MyTilingDefRoundTripUT : public testing::Test {};
+
+TEST_F(MyTilingDefRoundTripUT, SaveAndReconstruct) {
+  // 2) host 侧构造并赋值
+  MyAddTilingData td;
+  td.set_block_dim(8);
+  td.set_tile_num(128);
+  ASSERT_EQ(td.GetDataSize(), sizeof(int32_t) * 2U);
+
+  // 3) 拍平成字节流（模拟跨进程传递）
+  uint8_t buf[64] = {0};
+  td.SaveToBuffer(buf, sizeof(buf));
+
+  // 4) 从字节流零拷贝反构造：工厂按 op_type 新建，再 SetDataPtr 指向 buf
+  auto reborn = CTilingDataClassFactory::GetInstance().CreateTilingDataInstance("NoSuchOp");
+  EXPECT_EQ(reborn, nullptr);  // 未注册的算子名应返回空
+
+  MyAddTilingData view(buf);   // 第二种反构造方式：带指针构造，直接解释外部内存
+  EXPECT_EQ(view.get_block_dim(), 8);
+  EXPECT_EQ(view.get_tile_num(), 128);
+  EXPECT_EQ(*reinterpret_cast<int32_t *>(buf), 8);          // 字节流前 4 字节
+  EXPECT_EQ(*reinterpret_cast<int32_t *>(buf + 4), 128);    // 后 4 字节
+}
+}  // namespace optiling
+```
+
+说明：示例中未调用 `REGISTER_TILING_DATA_CLASS`（它会向全局单例注册，测试进程内重复注册同名算子可能互相干扰），因此工厂查询用「未注册返回 nullptr」来验证查表失败路径；正构造→反构造的一致性用「带指针构造函数」验证——[tilingdata_base.h:181-189](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/register/tilingdata_base.h#L181-L189) 的 `explicit class_name(void *ptr)` 重载正是为此设计。
+
+2. 运行：
+
+```bash
+bash tests/run_test.sh -u
+```
+
+**需要观察的现象**：所有断言通过；`GetDataSize()` 恰为 8（两个 int32 无需占位补齐）；从 `buf` 直接强转读出的两个 int32 与写入值一致。
+
+**预期结果**：测试 PASSED。若无本地编译环境，标注「待本地验证」。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：`BEGIN_TILING_DATA_DEF` 生成的默认构造函数里，为什么第一件事是对类名做 `CheckAlignAndGenPlaceHolder(#class_name "PH", 8)`？
+**练习 1**：把字段改成 `int32_t a; int8_t b; int64_t c;`，`GetDataSize()` 是多少？
 
-**答案**：给整个结构开头强制插入 8 字节对齐的占位（首字段前 padding 到 8 的倍数），保证整块 tiling 缓冲以 8 字节对齐开始——设备侧 DMA 搬运和后续 64 位字段访问都受益于统一的对齐基准。
+**答案**：17。a 占 0–3，b 占 4；登记 c 前发现 `data_size_=5` 不是 8 的倍数，`CheckAlignAndGenPlaceHolder` 插入 3 字节 PH（偏移 5–7），c 占 8–15，共 16 字节——再加每个 TilingDef 构造时开头为类名 PH 预留的对齐（构造函数里 `CheckAlignAndGenPlaceHolder(#class_name "PH", 8)` 在**空数据区**上执行，`0 % 8 == 0` 故不补字节），最终 `data_size_` 为 16。若你的实测结果与此不同，请以 `GetFieldInfo()` 打印的实际占位为准（待本地验证：不同对齐路径取决于字段声明顺序）。
 
-**练习 2**：`set_xxx` 同时写了成员变量 `xxx_` 和缓冲 `data_ptr_ + offset`，两处冗余吗？
+**练习 2**：`SetDataPtr` 之后析构函数为什么不能 `delete[] data_ptr_`？
 
-**答案**：不冗余。成员变量是宿主侧的「快速读回」副本（`get_xxx` 读它，不碰缓冲）；缓冲才是真正被 `SaveToBuffer` 序列化的内容。`get_xxx` 走成员可以容忍缓冲尚未分配（外部指针构造前）的场景。
+**答案**：`SetDataPtr` 把 `inited_data_ptr` 置 true，标记数据区是**外部内存**（可能指向 gert::TilingData 的数据区、或调用方栈缓冲），所有权不属于本对象。析构函数 [tilingdata_base.h:72-78](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/inc/external/register/tilingdata_base.h#L72-L78) 只在 `!inited_data_ptr` 时释放——一个用 bool 模拟的简易所有权模型。
 
-**练习 3**：`REGISTER_TILING_DATA_CLASS` 的 Helper 放在匿名命名空间里，为什么注册仍然全局可见？
+**练习 3**：宏体系与 `gert::TilingData` 各自的 `GetDataSize()` 含义有何不同？
 
-**答案**：匿名命名空间只限制**符号链接可见性**（避免多 so 间的符号冲突），而注册动作发生在静态对象构造时，写入的是 `CTilingDataClassFactory` 这个**单例进程级 map**——效果通过共享的工厂对象传出，而非通过符号表。与 [u4-l5](u4-l5-opp-package.md) 的 so 加载时机相关：so 一旦 dlopen，静态对象即完成登记。
+**答案**：`TilingDef::GetDataSize()` 是**结构布局总长**（含占位字段，构造即固定，等于序列化后的字节数）；`gert::TilingData::GetDataSize()` 是**已写入长度**（随 Append 增长）。前者是「这份 tiling 定义拍平后多大」，后者是「这根管道里现在装了多少」。
 
 ## 5. 综合实践
 
-**任务**：参照 `tiling_data_unittest.cc`，亲手完成一次「序列化 → 反序列化 → 断言一致」的闭环，覆盖本讲全部内容：容器创建（4.1）、Append 与容量（4.2）、带字段结构（4.4）。
+把本讲三个模块串起来，完成一个「属性 → 转换追加 → 覆写式写入 → 读回断言」的端到端用例（示例代码，作为新测试文件放入 `tests/ut/base/testcase/`）：
 
-**步骤**：
+```cpp
+// my_tiling_e2e_ut.cc（示例代码）
+#include "exe_graph/runtime/tiling_data.h"
+#include "base/context_builder/op_kernel_run_context_builder.h"
+#include "base/context_builder/op_tiling_context_builder.h"
+#include "common/ge_common/debug/ge_log.h"
+#include <gtest/gtest.h>
 
-1. **新建测试文件** `tests/ut/base/testcase/my_tiling_data_unittest.cc`（[u1-l2](u1-l2-build-and-test.md) 已确认 `ut_metadef` 用 glob 收集该目录，无需改 CMake）。以下为**示例代码**（非仓库原有代码）：
+namespace gert {
+struct MyTiling {   // 覆写式布局：两个 int32 字段
+  int32_t block_dim;
+  int32_t tile_num;
+};
 
-   ```cpp
-   #include "exe_graph/runtime/tiling_data.h"
-   #include <gtest/gtest.h>
+class MyTilingE2EUT : public testing::Test {};
 
-   namespace gert {
-   namespace {
-   // 两个 int32 字段的自定义 tiling 结构（示例代码）
-   struct MyTilingStruct {
-     int32_t block_dim;
-     int32_t total_size;
-   };
-   static_assert(std::is_standard_layout<MyTilingStruct>::value, "must be POD");
-   }  // namespace
+TEST_F(MyTilingE2EUT, OverwriteThenAppend) {
+  // A. 覆写式：模拟 GetTilingData<T>() 的内部动作（不依赖真实 context）
+  auto buf = TilingData::CreateCap(64);
+  auto td = reinterpret_cast<TilingData *>(buf.get());
+  ASSERT_GE(td->GetCapacity(), sizeof(MyTiling));
+  td->SetDataSize(sizeof(MyTiling));
+  auto t = static_cast<MyTiling *>(td->GetData());
+  t->block_dim = 4;
+  t->tile_num = 64;
 
-   class MyTilingDataUT : public testing::Test {};
+  // B. 追加式：在其后追加一个 int32 尾部字段
+  int32_t tail = 7;
+  EXPECT_EQ(td->Append(tail), ge::GRAPH_SUCCESS);
+  ASSERT_EQ(td->GetDataSize(), sizeof(MyTiling) + sizeof(int32_t));
 
-   TEST_F(MyTilingDataUT, SerializeThenDeserialize) {
-     // 1. 创建容量 64 字节的容器（头体分离的一整块内存）
-     auto data = TilingData::CreateCap(64);
-     auto td = reinterpret_cast<TilingData *>(data.get());
-     ASSERT_NE(td, nullptr);
+  // C. 读回：按写入约定逐段解释字节流
+  auto bytes = reinterpret_cast<const uint8_t *>(td->GetData());
+  EXPECT_EQ(*reinterpret_cast<const int32_t *>(bytes), 4);
+  EXPECT_EQ(*reinterpret_cast<const int32_t *>(bytes + 4), 64);
+  EXPECT_EQ(*reinterpret_cast<const int32_t *>(bytes + 8), 7);
 
-     // 2. 序列化：按字段追加，检查返回值（不要用 operator<<）
-     const MyTilingStruct src{.block_dim = 8, .total_size = 1024};
-     ASSERT_EQ(td->Append(src), ge::GRAPH_SUCCESS);
-     EXPECT_EQ(td->GetDataSize(), sizeof(MyTilingStruct));  // 8 字节
+  // D. 越界防护：容量 64，已用 12，一次追加 64 字节应失败
+  const char big[64] = {0};
+  EXPECT_NE(td->Append(big, sizeof(big)), ge::GRAPH_SUCCESS);
+  EXPECT_EQ(td->GetDataSize(), 12U);  // 失败不推进长度
+}
+}  // namespace gert
+```
 
-     // 3. 模拟跨边界：只拿「字节流 + 长度」，从零反序列化
-     const size_t len = td->GetDataSize();
-     std::vector<uint8_t> wire(len);
-     memcpy(wire.data(), td->GetData(), len);   // 模拟搬运动作
-     const auto *dst = reinterpret_cast<const MyTilingStruct *>(wire.data());
-
-     // 4. 断言字段一致
-     EXPECT_EQ(dst->block_dim, 8);
-     EXPECT_EQ(dst->total_size, 1024);
-   }
-   }  // namespace gert
-   ```
-
-2. **追加一个越界用例**（覆盖 4.2）：把容量改成 `CreateCap(4)`，断言 `Append` 返回非 `GRAPH_SUCCESS` 且 `GetDataSize()` 保持 0。
-3. **编译运行**：`bash tests/run_test.sh -u`，若只想跑自己的用例，在 ctest/测试二进制上加 `--gtest_filter=MyTilingDataUT.*`（具体过滤方式随 run_test.sh 输出而定）。
-4. **观察**：两条用例均 PASS；刻意把 `EXPECT_EQ(dst->block_dim, 8)` 改成 9 验证测试真的在检查（红→绿）。
-
-**预期结果**：`GetDataSize()` 为 8；反序列化后两字段与写入值一致；容量不足时追加失败且不污染数据。完整运行输出**待本地验证**（本环境未执行编译）。
+运行方式：`bash tests/run_test.sh -u`，用 `--gtest_filter=MyTilingE2EUT.*` 聚焦观察。这个用例覆盖了 4.1 的追加与失败语义、4.2 的覆写式长度登记逻辑、以及读取方的布局解释约定——正是 TilingFunc 与 device kernel 之间字节流契约的微缩模型。若想进一步接入真实 TilingContext，可仿照 [tiling_data_unittest.cc:27-47](https://github.com/gitcode.com/cann/metadef/blob/0005f5b3b38bed310be5f990f5b174941997bc7d/tests/ut/base/testcase/tiling_data_unittest.cc#L27-L47) 用 `OpTilingContextBuilder` 构建上下文后调 `AppendConvertedAttrVal`（其 Builder 细节在 u5-l1 展开）。无本地环境时标注「待本地验证」。
 
 ## 6. 本讲小结
 
-- `gert::TilingData` 是「64 字节头部 + 尾随数据区」的变长 POD 容器，`CreateCap` 一次性分配头体连续内存，`static_assert(is_standard_layout)` 固化 ABI 契约，禁拷贝防头部与数据区脱钩。
-- `Append`/`Expand` 是唯一正规写入路径：全部长度算术带溢出检查，失败时不写半截数据；`operator<<` 会吞错误，工程代码应使用返回 `graphStatus` 的 `Append`。
-- `AppendConvertedAttrVal` 通过 `AttrDataType` 枚举 + 二维函数指针表 `kAttrTable` 实现「属性取值 → 类型转换 → 追加」的 O(1) 分发；枚举取值是 ABI 契约，只能尾部追加。
-- `tiling_context.h` 的 `GetTilingData<T>()` 是容器与 tiling 阶段的衔接点：容量校验后把结构体覆写进字节流并 `SetDataSize` 登记长度。
-- `optiling::TilingDef` 宏体系在无类型字节流之上提供「按字段名读写」：`FieldHandler` 在成员初始化时登记偏移并自动插占位对齐，`SaveToBuffer`/`SetDataPtr` 完成打平与从数据反构造，`REGISTER_TILING_DATA_CLASS` 借静态对象把构造函数登记进工厂单例。
+- `gert::TilingData` 是 64 字节 POD 头部 + 连续数据区的追加式字节流容器，容量在 `CreateCap` 时锁死，`Expand` 失败无副作用，整类被 `static_assert(is_standard_layout)` 固化 ABI 契约。
+- `TilingContext` 提供两种写入风格：覆写式 `GetTilingData<T>()`（登记 `sizeof(T)` 长度、直接按结构体赋值）与追加式 `GetRawTilingData()`（逐段 `Append`），读取方靠共同的结构布局约定解释字节流，无运行期类型核对。
+- `AppendConvertedAttrVal` 用 (源类型, 目标类型) 二维函数表把算子属性转换后搬运进容器，未注册的组合、越界索引一律返回 `GRAPH_FAILED`。
+- `optiling` 宏体系（`BEGIN_TILING_DATA_DEF` 等）在字节流之上提供结构化封装：字段偏移由成员初始化顺序天然决定、对齐由自动 PH 占位保证、序列化是 `SaveToBuffer` 的一次 memcpy、反构造靠工厂按算子名新建 + `SetDataPtr` 零拷贝挂接外部内存。
+- 两套体系的分工：`gert::TilingData` 是运行时容器（gert 新体系），`optiling::TilingDef` 是宿主侧结构化定义（老注册体系），`SaveToBuffer` 的产物可流入前者传递。
+- 跨 host/device 传递的一切前提是 POD、无指针、无 STL 布局依赖——与 metadef 全仓的 ABI 纪律一脉相承。
 
 ## 7. 下一步学习建议
 
-本讲完成了单元三（exe_graph 运行时上下文）的最后一块拼图。接下来有两个方向：
+本讲是单元三（exe_graph 运行时上下文）的收官。接下来建议：
 
-1. **进入单元四**：从 [u4-l1 register 模块总览](u4-l1-register-overview.md) 开始，理解 tiling 函数（连同 InferShape 等）如何经 `OpImplRegisterV2` 以裸函数指针注册到框架——这会解释「谁在调用传入 TilingContext 的那个函数」。
-2. **若想先补上下文构建侧**：阅读 [u5-l1 ContextBuilder 体系](u5-l1-context-builder.md)，看 `OpTilingContextBuilder` 如何构造本讲单测里 `BuildTestContext` 那样的 TilingContext（含 `kOutputTilingData` 槽位里预分配的 `TilingData` 容器）。
+- 进入单元四，先读 [u4-l1 register 模块总览](u4-l1-register-overview.md)：本讲 4.4 出现的「静态对象构造期注册」模式将在算子注册链路中大规模复用。
+- 若想先补齐上下文构建侧的拼图，可跳读 [u5-l1 ContextBuilder 体系](u5-l1-context-builder.md)：本讲单测中反复出现的 `OpTilingContextBuilder` 的内部机制在那里详解。
+- 源码延伸阅读：`inc/external/exe_graph/runtime/continuous_vector.h`（列表属性的数据载体，4.3 中 `AppendListAttr` 的取数来源）与 `inc/common/util/tiling_utils.h`（float16/bfloat16 转换函数所在）。
