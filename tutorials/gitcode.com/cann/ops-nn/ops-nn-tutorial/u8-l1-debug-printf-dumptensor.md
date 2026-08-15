@@ -1,0 +1,275 @@
+# 算子调试定位：printf、DumpTensor 与 Host 日志
+
+## 1. 本讲目标
+
+学完本讲，你应该能够：
+
+1. 掌握 Host 侧日志的获取方式：plog 日志文件的位置、打屏环境变量、`ASCEND_GLOBAL_LOG_LEVEL` 等级控制，以及用 `aclGetRecentErrMsg` 拿到 aclnn 调用的具体报错。
+2. 会在 AI Core kernel 中使用 `AscendC::PRINTF` 打印标量调试信息（如 tiling 字段、核号、切分长度）。
+3. 会在 kernel 中使用 `DumpTensor` 检查中间 Tensor（如 UB 上的 `zLocal`）的实际数据内容。
+4. 建立「症状 → 手段」的调试选型直觉：算子跑飞了先看什么、算子算错了再Inject什么打印。
+
+本讲是调试单元的第一讲，性能采集（msprof op）与无卡仿真（NPU Simulator）分别由 u8-l2、u8-l3 承接。
+
+## 2. 前置知识
+
+在动手之前，先厘清「算子调试」到底在调什么。回顾 u5-l1/u5-l2 建立的模型：一次算子执行分布在两个世界——
+
+- **Host 侧**（CPU 上）：aclnn 适配层做参数校验、登记 executor、由 runtime 把 kernel 下发到设备。这一侧出问题通常是**参数错误、二进制找不到、下发射流失败**，表现形式是错误码（如 u3-l3 讲过的 161xxx/361xxx/561xxx）。
+- **Device 侧**（AI Core 上）：kernel 按 tiling 切分数据、搬入 UB、计算、搬回 GM。这一侧出问题通常是**精度异常（算错了）、越界（算崩了）、卡死**，而且 Device 上没有 gdb 可用。
+
+这就决定了两类调试手段的分工：
+
+| 问题位置 | 典型症状 | 手段 |
+| --- | --- | --- |
+| Host 侧 | aclnn 返回错误码、算子没被调起 | plog 日志、`aclGetRecentErrMsg` |
+| Device 侧·标量 | 切分算错（tiling 字段不对、核号越界） | `AscendC::PRINTF` |
+| Device 侧·数据 | 计算结果不对（某一步 Tensor 内容异常） | `DumpTensor` |
+| Device 侧·卡死/越界 | 程序挂起、报 GM/UB 越界 | msDebug 单步调试（本讲只指路） |
+
+两个前序讲义的关键结论在本讲直接复用：
+
+- u4-l2：TilingData 是 Host 写、Device 按字节读的 POD 契约，kernel 里拿到的 `tilingData->xxx` 字段就是 tiling 阶段算出的切分参数——它们是 PRINTF 的首选打印对象。
+- u1-l2/u1-l4：**改了 op_kernel 源码必须重新 `--pkg` 编译并安装 run 包**，只重跑 `--run_example` 不会生效。本讲的实践全程遵循这个节奏。
+
+另外说明一点：仓库正式算子的 kernel 源码中**不保留** PRINTF/DumpTensor 调用（可以用 Grep 验证，正式代码里搜不到），它们是开发调试期临时注入的手段，调完即删。官方用法出自 `docs/zh/debug/op_debug_prof.md` 与 `docs/QUICKSTART.md` 的「算子调试」章节。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+| --- | --- |
+| [docs/zh/debug/op_debug_prof.md](https://github.com/gitcode.com/cann/ops-nn/blob/0e2eac83d24a7ec29a0647698ed0defe1ff1f8f0/docs/zh/debug/op_debug_prof.md) | 调试调优总文档：Host 日志、printf、DumpTensor、msprof、仿真的官方说明 |
+| [docs/QUICKSTART.md](https://github.com/gitcode.com/cann/ops-nn/blob/0e2eac83d24a7ec29a0647698ed0defe1ff1f8f0/docs/QUICKSTART.md) | 快速入门的「三、算子调试」章节，给出在 add_example 上加打印的具体步骤 |
+| [examples/add_example/op_kernel/add_example.h](https://github.com/gitcode.com/cann/ops-nn/blob/0e2eac83d24a7ec29a0647698ed0defe1ff1f8f0/examples/add_example/op_kernel/add_example.h) | 被调试对象：AddExample 的 Kernel 类，本讲注入打印的位置 |
+| [examples/add_example/op_kernel/add_example_tiling_data.h](https://github.com/gitcode.com/cann/ops-nn/blob/0e2eac83d24a7ec29a0647698ed0defe1ff1f8f0/examples/add_example/op_kernel/add_example_tiling_data.h) | TilingData 结构体定义，PRINTF 要打印的字段清单 |
+
+## 4. 核心概念与源码讲解
+
+### 4.1 Host 侧日志获取：plog 与 aclGetRecentErrMsg
+
+#### 4.1.1 概念说明
+
+Host 侧日志是算子调试的「第一现场」。aclnn 适配层、runtime、算子加载器在出错时都会打日志，这些日志由 CANN 的 plog 组件统一收集。很多时候 aclnn 只返回一个错误码，而对应的 plog 日志里写着具体原因（例如「二进制与 shape 不匹配」「找不到 kernel 入口」）。此外，`aclGetRecentErrMsg` 提供编程式获取最近一次 aclnn 异常信息的能力，不用翻日志文件。
+
+#### 4.1.2 核心流程
+
+1. 程序运行后，到默认路径找 plog 日志文件。
+2. 想实时看日志，设置打屏环境变量后重新运行。
+3. 样例代码里在 aclnn 调用失败分支中 `printf("%s", aclGetRecentErrMsg())` 直接取回错误描述。
+
+#### 4.1.3 源码精读
+
+官方文档给出 plog 文件的默认位置与打屏开关：
+
+- [docs/zh/debug/op_debug_prof.md:L9-L21](https://github.com/gitcode.com/cann/ops-nn/blob/0e2eac83d24a7ec29a0647698ed0defe1ff1f8f0/docs/zh/debug/op_debug_prof.md#L9-L21)：plog 日志默认落在 `$HOME/ascend/log/debug/plog/plog-pid_*.log`；`export ASCEND_SLOG_PRINT_TO_STDOUT=1` 可把日志直接打屏。
+
+编程式获取 aclnn 异常信息的方式：
+
+- [docs/zh/debug/op_debug_prof.md:L25-L37](https://github.com/gitcode.com/cann/ops-nn/blob/0e2eac83d24a7ec29a0647698ed0defe1ff1f8f0/docs/zh/debug/op_debug_prof.md#L25-L37)：用 `printf("%s", aclGetRecentErrMsg())` 取回最近异常，文档给出了打印样例——错误串里带错误类别（如 `AclNN_Parameter_Error(EZ1001)`）和人类可读的原因（"Expected a proper Tensor but got null for argument ..."）。这比一个裸错误码信息量大得多。
+
+顺带两个补充（同一文档的其他章节）：
+
+- AI CPU 算子的 kernel 内日志用 `KERNEL_LOG_DEBUG/INFO/WARN/ERROR` 宏（[L80-L91](https://github.com/gitcode.com/cann/ops-nn/blob/0e2eac83d24a7ec29a0647698ed0defe1ff1f8f0/docs/zh/debug/op_debug_prof.md#L80-L91)），默认只打 ERROR，其余级别需设置 `ASCEND_GLOBAL_LOG_LEVEL`。AI Core 算子不用这套宏，用本讲 4.2/4.3 的手段。
+- `ASCEND_GLOBAL_LOG_LEVEL` 同样是控制 CANN 日志输出等级的通用环境变量，想看到更多 Host 侧细节时调高它。
+
+#### 4.1.4 代码实践
+
+1. **实践目标**：拿到一次真实 aclnn 失败的完整错误信息。
+2. **操作步骤**：
+   - 在 [examples/add_example/examples/test_aclnn_add_example.cpp](https://github.com/gitcode.com/cann/ops-nn/blob/0e2eac83d24a7ec29a0647698ed0defe1ff1f8f0/examples/add_example/examples/test_aclnn_add_example.cpp) 中找到第一段 `aclnnAddExampleGetWorkspaceSize` 的返回值检查分支，在失败分支里加一行 `printf("err: %s\n", aclGetRecentErrMsg());`（示例代码，调完可删）。
+   - 人为制造一次失败：例如把某个输入 aclTensor 构造传成 `nullptr`，或不安装算子包直接跑样例（对应 u3-l3 讲过的 561003 场景）。
+   - 运行前 `export ASCEND_SLOG_PRINT_TO_STDOUT=1`，再执行样例。
+3. **需要观察的现象**：stdout 上出现错误描述串；运行结束后 `$HOME/ascend/log/debug/plog/` 下生成了带进程号的日志文件。
+4. **预期结果**：错误串包含错误类别和原因，能据此判断是参数问题还是环境/安装问题。具体输出内容依赖本机 CANN 版本，**待本地验证**。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：aclnn 返回了 161002，最省事的定位下一步是什么？
+
+**答案**：先在失败分支调 `aclGetRecentErrMsg()` 打印错误串，或翻 `$HOME/ascend/log/debug/plog/` 下对应 pid 的日志。161xxx 是参数类错误（u3-l3 讲过：dtype/format 组合不在 def 候选槽位时常返回 161002），错误串通常会直接点名是哪个参数、期望什么、实际拿到什么。
+
+**练习 2**：为什么 AI Core kernel 里不能用 `KERNEL_LOG_INFO`？
+
+**答案**：`KERNEL_LOG_*` 宏是 AI CPU 算子（跑在 CPU 上、有标准 C 运行环境）的日志手段；AI Core kernel 跑在矢量计算单元上，没有 libc，只能用 Ascend C 提供的专用调测 API（`AscendC::PRINTF` / `DumpTensor`）。
+
+### 4.2 AscendC::PRINTF：kernel 内打印标量
+
+#### 4.2.1 概念说明
+
+`AscendC::PRINTF` 是 Device 侧的 printf：**只支持标量**（整数、字符、布尔等），不支持直接打印 Tensor 内容。它的黄金用途是验证「Host 侧算出的 tiling 参数在 Device 侧读到的值是否符合预期」——回顾 u4-l2 的警告：tiling 取值宏、kernel 枚举、Host 选 key 分支三处人工对齐，错位即静默错数。PRINTF 正是把这种静默错误暴露出来的最低成本手段。
+
+#### 4.2.2 核心流程
+
+1. 在 kernel 代码（Init 或 Process 里）取到 tiling 字段、核号等标量。
+2. 调 `AscendC::PRINTF("fmt %lld\n", value)` 打印，格式串用法与 C printf 一致。
+3. 重新 `--pkg` 编译、安装 run 包、重跑样例。
+4. 从样例输出（或日志）中核对每个核打印出的值。
+
+#### 4.2.3 源码精读
+
+官方示例（文档中的通用写法）：
+
+- [docs/zh/debug/op_debug_prof.md:L43-L53](https://github.com/gitcode.com/cann/ops-nn/blob/0e2eac83d24a7ec29a0647698ed0defe1ff1f8f0/docs/zh/debug/op_debug_prof.md#L43-L53)：从 `tilingData` 取出切分参数后，`AscendC::PRINTF("Tiling blockLength is %llu\n", blockLength_);` 打印当前核的计算块长度。
+- [docs/QUICKSTART.md:L185-L196](https://github.com/gitcode.com/cann/ops-nn/blob/0e2eac83d24a7ec29a0647698ed0defe1ff1f8f0/docs/QUICKSTART.md#L185-L196)：QUICKSTART 版本的同一示例，并明确说明修改位置是 `examples/add_example/op_kernel/add_example.h`。
+
+注意：文档示例中的字段名（`totalLength`、`tileNum`）是通用示意；当前 add_example 的真实 TilingData 字段是这三个：
+
+- [examples/add_example/op_kernel/add_example_tiling_data.h:L19-L23](https://github.com/gitcode.com/cann/ops-nn/blob/0e2eac83d24a7ec29a0647698ed0defe1ff1f8f0/examples/add_example/op_kernel/add_example_tiling_data.h#L19-L23)：`AddExampleTilingData` 只含 `totalNum`、`blockFactor`、`ubFactor` 三个 int64 字段——这就是本讲实践中要打印的真实字段清单。
+
+打印注入点选 Init，因为它恰好消费了全部 tiling 字段：
+
+- [examples/add_example/op_kernel/add_example.h:L56-L70](https://github.com/gitcode.com/cann/ops-nn/blob/0e2eac83d24a7ec29a0647698ed0defe1ff1f8f0/examples/add_example/op_kernel/add_example.h#L56-L70)：Init 从 `tilingData` 读 `totalNum/blockFactor/ubFactor`，结合 `AscendC::GetBlockIdx()`（当前核号）算出本核的 `blockLength_`，再用 `SetGlobalBuffer` 收缩 GM 窗口。在这一段后面加 PRINTF，一次就能看到「核号 × 三字段 → 本核任务量」的完整推导链。
+
+#### 4.2.4 代码实践
+
+1. **实践目标**：观察多核场景下每个核各自分到的任务量，验证核切分逻辑。
+2. **操作步骤**（示例代码，调完删除）：
+   - 在 [add_example.h](https://github.com/gitcode.com/cann/ops-nn/blob/0e2eac83d24a7ec29a0647698ed0defe1ff1f8f0/examples/add_example/op_kernel/add_example.h) 的 `Init` 函数末尾（L70 之前）加入：
+
+     ```cpp
+     // 示例代码：调试打印，验证后删除
+     AscendC::PRINTF("blk=%d total=%lld blockFactor=%lld ubFactor=%lld myLen=%lld\n",
+                     AscendC::GetBlockIdx(), tilingData->totalNum,
+                     tilingData->blockFactor, tilingData->ubFactor, blockLength_);
+     ```
+
+   - 重新编译并安装：`bash build.sh --pkg --soc=${soc_version} --ops=add_example -j16`，安装 `build_out` 下生成的 run 包。
+   - 重跑样例：`bash build.sh --run_example add_example eager cust --vendor_name=custom`。
+3. **需要观察的现象**：样例输出中每个参与计算的核各打印一行，`myLen` 的值反映尾核拿到的余量（`totalNum - blockFactor * (核数-1)`，见 Init L59-L60 的 remainderLength 逻辑）。
+4. **预期结果**：所有核的 `myLen` 之和等于 `totalNum`；除尾核外各核 `myLen == blockFactor`。打印的具体落点（stdout 还是日志文件）与 CANN 版本有关，**待本地验证**。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么 PRINTF 打不出来 `zLocal` 这个 Tensor 的内容？
+
+**答案**：`AscendC::PRINTF` 只支持标量类型（整数、字符、布尔等）。Tensor 内容要用 4.3 的 `DumpTensor`。
+
+**练习 2**：加了 PRINTF 之后只重跑 `--run_example`，输出没有变化，为什么？
+
+**答案**：PRINTF 加在 op_kernel 源码里，属于算子源码变更；`--run_example` 只重新编译执行样例 cpp，不重编算子包。必须重新 `--pkg` 编译并安装 run 包（u1-l2 讲过的「改算子源码 vs 改样例」两条路径）。
+
+### 4.3 DumpTensor：检查中间 Tensor 数据
+
+#### 4.3.1 概念说明
+
+`DumpTensor` 是 Ascend C 的 Tensor 级调测 API：把一个 Tensor（通常是 UB 上的 LocalTensor）的内容 dump 出来，并支持附带自定义标量信息（比如当前行号），便于区分是循环第几轮、哪个核打印的。它解决的是 PRINTF 覆盖不了的问题——**算出来的数不对**。有了它，你可以在流水线的任意中间点（CopyIn 之后、Compute 之后、CopyOut 之前）检查数据，把「错在第几步」二分定位出来。
+
+#### 4.3.2 核心流程
+
+1. 在 kernel 中拿到要检查的 LocalTensor（例如 Compute 里的 `zLocal`）。
+2. 调 `DumpTensor(zLocal, 0, 128)`，文档示例中第二个参数是自定义附加信息（如行号），第三个是打印相关的数量参数（示例取 128）。
+3. 重新编译安装、重跑样例。
+4. 在输出/日志中核对 Tensor 元素值与手算的期望值。
+
+#### 4.3.3 源码精读
+
+官方示例：
+
+- [docs/zh/debug/op_debug_prof.md:L55-L64](https://github.com/gitcode.com/cann/ops-nn/blob/0e2eac83d24a7ec29a0647698ed0defe1ff1f8f0/docs/zh/debug/op_debug_prof.md#L55-L64)：`DumpTensor(zLocal, 0, 128)` 打印 `zLocal` 的内容——文档示例里 `zLocal` 来自 `outputQueueZ.DeQue<T>()`，dump 完接着 DataCopy 回 GM。
+- [docs/QUICKSTART.md:L198-L205](https://github.com/gitcode.com/cann/ops-nn/blob/0e2eac83d24a7ec29a0647698ed0defe1ff1f8f0/docs/QUICKSTART.md#L198-L205)：QUICKSTART 版明确说「在 Compute 中，对已有的 zLocal 打印 Tensor 信息」。
+
+对照当前 add_example 的 Compute，注入点在 `Add` 之后、`EnQue` 之前：
+
+- [examples/add_example/op_kernel/add_example.h:L101-L111](https://github.com/gitcode.com/cann/ops-nn/blob/0e2eac83d24a7ec29a0647698ed0defe1ff1f8f0/examples/add_example/op_kernel/add_example.h#L101-L111)：Compute 从两个输入队列 DeQue 出 `xLocal/yLocal`，从输出队列 AllocTensor 出 `zLocal`，执行 `AscendC::Add(zLocal, xLocal, yLocal, currentNum)` 后 EnQue。注意与文档示例的差异：这里 `zLocal` 是 `AllocTensor` 得到的（QUICKSTART 的写法），而不是 DeQue 出来的——两种写法都合法，dump 的是同一个 UB 缓冲里的数据。
+
+一个工程细节：Compute 由 [Process 的主循环](https://github.com/gitcode.com/cann/ops-nn/blob/0e2eac83d24a7ec29a0647698ed0defe1ff1f8f0/examples/add_example/op_kernel/add_example.h#L113-L123) 驱动，`loopCount` 轮每轮调用一次。直接 dump 会每轮每核都打印，输出量可能很大；定位时通常只想看第一轮，可用 `if (i == 0)` 之类的条件限制——但 Compute 的签名里没有循环变量 `i`，可以打印 `currentNum` 或利用 DumpTensor 的附加信息参数来区分轮次。
+
+#### 4.3.4 代码实践
+
+1. **实践目标**：核对 Compute 阶段 `zLocal` 的真实内容，确认逐元素相加在 UB 上就已正确完成。
+2. **操作步骤**（示例代码，验证后删除）：
+   - 在 [add_example.h](https://github.com/gitcode.com/cann/ops-nn/blob/0e2eac83d24a7ec29a0647698ed0defe1ff1f8f0/examples/add_example/op_kernel/add_example.h) 的 Compute 中，`AscendC::Add(...)`（L107）之后、`outputQueueZ.EnQue<T>(zLocal)`（L108）之前加入：
+
+     ```cpp
+     // 示例代码：dump 中间结果，验证后删除
+     DumpTensor(zLocal, 0, 128);
+     ```
+
+   - 重新 `--pkg` 编译、安装 run 包、`--run_example` 重跑。
+3. **需要观察的现象**：dump 出的 `zLocal` 前 128 个元素值 = 样例输入 x、y 对应元素之和；样例末尾的 result 打印同样正确。
+4. **预期结果**：若 dump 值正确而最终 GM 结果错误，问题锁定在 CopyOut；若 dump 值本身错误，问题在 Compute 或更早的 CopyIn——这就是「二分定位」的用法。dump 输出的具体格式（浮点精度、行宽）依赖 CANN 版本，**待本地验证**。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：dump 出的 `zLocal` 数值正确，但最终 `result` 打印错误，嫌疑范围在哪？
+
+**答案**：锁定在 Compute 之后——CopyOut 的搬回（`DataCopyPad` 参数、GM 偏移 `progress * ubLength_`、尾块 `currentNum`）或更外层的 aclnn 侧取数同步逻辑。
+
+**练习 2**：想分别对比 CopyIn 之后和 Compute 之后的 `xLocal` 与 `zLocal`，代码怎么改？
+
+**答案**：在 Compute 开头 DeQue 出 `xLocal` 后先 `DumpTensor(xLocal, 0, 128)`（附加信息可传不同值便于区分，如分别传 `__LINE__`），再在 `Add` 之后 dump `zLocal`。两次 dump 对比即可判断错误是「搬入时就错了」还是「计算时算错的」。
+
+### 4.4 调试手段选型与边界
+
+#### 4.4.1 概念说明
+
+把本讲三件工具放进一张选型表，并明确它们的边界——什么问题它们管不了、该转向哪里。
+
+#### 4.4.2 核心流程
+
+| 症状 | 第一步 | 不够时的升级路径 |
+| --- | --- | --- |
+| aclnn 报错码 | `aclGetRecentErrMsg` + plog 日志 | 按 u3-l3 的错误码族分类排查 |
+| 算子结果个别值错 | DumpTensor 在中间点二分 | 配合样例输入缩小到具体元素 |
+| 怀疑切分/分发错 | PRINTF 打 tiling 字段 + 核号 | 配合 u7-l1 的 tiling UT 白盒断言 |
+| 算子卡死、GM/UB 越界 | 打印无法到达出错点 | msDebug 单步调试（文档指路见下） |
+| 性能不达标 | 打印无助于此 | u8-l2 的 msprof op |
+
+#### 4.4.3 源码精读
+
+- [docs/zh/debug/op_debug_prof.md:L66](https://github.com/gitcode.com/cann/ops-nn/blob/0e2eac83d24a7ec29a0647698ed0defe1ff1f8f0/docs/zh/debug/op_debug_prof.md#L66)：文档明确指出，对于算子卡死、GM/UB 访问越界等复杂场景，应采用 msDebug 单步调试——PRINTF/DumpTensor 是「打印驱动」的调试，程序都跑不到出错点时打印自然也出不来。
+
+还有两条工程纪律值得强调：
+
+- **调试代码不进主干**：仓库正式算子 kernel 中没有 PRINTF/DumpTensor 残留（可用 `grep -rn "AscendC::PRINTF\|DumpTensor" --include=*.h --include=*.cpp` 验证），调试注入是临时的，提交前删除。要长期留住的对 tiling 的验证，写成 u7-l1 的 tiling UT，而不是留在 kernel 里的打印。
+- **打印本身有开销**：PRINTF/DumpTensor 会占用执行时间与额外带宽，性能数据（u8-l2 的 msprof 采集）必须在删掉调试打印之后采集，否则指标失真。
+
+#### 4.4.4 代码实践
+
+1. **实践目标**：确认仓库正式代码无调试打印残留，建立「调完即删」的习惯认知。
+2. **操作步骤**：在仓库根目录执行 `grep -rn "AscendC::PRINTF" activation/ matmul/ norm/ --include="*.h" --include="*.cpp" | head`，再执行 `grep -rn "DumpTensor(" activation/ --include="*.h" | head`。
+3. **需要观察的现象**：算子源码目录下（docs 除外）没有匹配行。
+4. **预期结果**：验证「正式交付代码不携带调试打印」，打印只出现在 docs 的用法示例中。
+
+#### 4.4.5 小练习与答案
+
+**练习**：同事反馈他的算子在小 shape 下结果正确、大 shape 下崩溃，你会建议怎样的调试顺序？
+
+**答案**：先用 `AscendC::PRINTF` 打印 `totalNum/blockFactor/ubFactor` 和各核 `blockLength_`，重点核对尾核 `remainderLength` 是否可能为负或超过 `blockFactor`（对应 Init L59-L60 的边界）；再用 DumpTensor 检查尾块的 `currentNum` 路径；若崩溃发生在打印可达点之前，转 msDebug。大 shape 独有崩溃最常见根因是切分越界（u4-l1 讲过 blockFactor 反推 usedCoreNum 的动机就是防这类问题）。
+
+## 5. 综合实践
+
+**任务：给 AddExample 建一条「tiling → 中间结果 → 最终结果」的完整观测链。**
+
+1. 按 4.2.4 在 `Init` 末尾注入 PRINTF，打印核号与 `totalNum/blockFactor/ubFactor/blockLength_` 五个标量。
+2. 按 4.3.4 在 `Compute` 的 `Add` 之后注入 `DumpTensor(zLocal, 0, 128)`。
+3. 重新执行完整闭环（对应 u1-l2/u1-l4 的流程）：
+
+   ```bash
+   bash build.sh --pkg --soc=${soc_version} --ops=add_example -j16
+   # 安装 build_out 下生成的 run 包
+   bash build.sh --run_example add_example eager cust --vendor_name=custom
+   ```
+
+4. 收集并整理三类输出：各核的 tiling 打印、dump 的 `zLocal` 数据、样例末尾的 result 打印。
+5. 做一次交叉验证：任取 dump 中一个下标 k，手算 `x[k] + y[k]`（x、y 由样例构造逻辑决定），确认与 dump 值、result 值三方一致。
+6. 再做一次故障演练：把样例输入 shape 改大到跨多核（如 `{8,8,8,8}`，u1-l4 讲过三处长度必须同步改），重复第 3-4 步，观察尾核的 `blockLength_` 与首核不同——这正是核切分余量逻辑（Init L59-L60）的直观体现。
+7. **完成后删除两处调试代码并恢复源码**，重新编译安装，确认样例回到干净状态。
+
+设备相关的具体打印落点与格式**待本地验证**。
+
+## 6. 本讲小结
+
+- Host 侧问题先取日志：plog 默认在 `$HOME/ascend/log/debug/plog/`，`ASCEND_SLOG_PRINT_TO_STDOUT=1` 打屏，`aclGetRecentErrMsg()` 可编程取回最近一次 aclnn 异常的具体原因。
+- `AscendC::PRINTF` 只支持标量，黄金用途是核对 Device 侧读到的 tiling 字段（`totalNum/blockFactor/ubFactor`）与核号、任务量推导链。
+- `DumpTensor` 用于检查中间 Tensor 内容，在流水线中间点（如 Compute 的 `Add` 之后）注入，可把「算错」二分定位到 CopyIn/Compute/CopyOut 某一段。
+- 改 op_kernel 里的调试代码必须走 `--pkg` 重编安装，`--run_example` 只重编样例。
+- 打印是临时手段：正式 kernel 源码中无 PRINTF/DumpTensor 残留，长期验证写成 tiling UT，性能采集前必须删净调试打印。
+- 算子卡死、GM/UB 越界等打印不可达的场景，升级到 msDebug 单步调试。
+
+## 7. 下一步学习建议
+
+- 下一讲 u8-l2「性能采集与调优：msprof op 与流水分析」：在干净的（无调试打印的）算子上用 `msprof op` 采集 Task Duration、Block Dim 等指标，进入性能维度。
+- 之后 u8-l3 介绍无卡环境的 NPU Simulator 仿真调试。
+- 想把本讲的 tiling 打印固化成可回归的验证，回头补 u7-l1 的 tiling UT：用 `ExecuteTestCase` 断言 TilingData 字段，比 kernel 里的 PRINTF 更适合长期维护。
+- 深入 API 细节（DumpTensor 参数含义、printf 支持的完整格式符列表）可查阅文档中引用的《Ascend C API》「算子调测 API」章节。
