@@ -1,0 +1,879 @@
+{
+  "head": "6f9460138514f3a9e8555b8e83a3a4daef666b93",
+  "project": "ops-math",
+  "rationale": "ops-math 是 CANN 数值计算基础算子库，涵盖 conversion/math/random 三大类共数百个算子，每个算子都遵循 op_def 注册、infershape、tiling、kernel、aclnn 适配的固定分层结构，且基于 atvoss 框架（BroadcastSch/OpDag）与 AscendC 编程模型。因此学习路线设计为：第一单元让读者从零认识项目定位、目录结构、编译方式并跑通第一个算子样例；第二单元以最典型的 add 算子为主线，逐层解剖一个算子从注册、形状推导、tiling、kernel 到 aclnn 接口与调用方式的完整链路；第三单元深入 broadcast、数据类型、tiling 框架、atvoss 调度、图模式与多架构适配等横切核心机制；第四单元按算子类别（elementwise、reduction、conversion、random、aicpu）横向对比典型算子的实现差异；第五单元进入工程实践层，覆盖新算子脚手架生成、UT/ST 测试、调试与性能采集、性能调优以及实验目录与贡献流程。本次增量分析（4332f74..6f94601）显示变化集中在三处：多个算子 examples 样例改写为 C++ RAII 资源管理风格、cast 算子的 tiling/kernel 性能重构（tiling 数据简化为 host/device 共享的普通结构体 CastTilingData，kernel 侧 cast_impl.h 大幅重写）、以及 amp_update_scale/div 的局部改动和 CI 脚本优化。所有既有讲义引用的源码文件（add 主线、文档、公共框架、add_example 脚手架等）均未被本次 diff 触及，故全部标记为 keep；同时 cast 作为 conversion 类最典型的算子，其本次重构后的模板化 tiling 策略与精简 tiling 数据结构具有很强的教学价值，因此在单元四新增一篇 cast 算子讲义，依赖 conversion 类算子与 tiling 框架两篇先行内容。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 ops-math 在 CANN 生态中的角色和三大算子类别",
+            "理解本仓与 CANN 商用包、release 标签的配套关系",
+            "知道从哪些文档入口开始学习"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README",
+            "docs 文档中心",
+            "conversion/math/random 三大算子目录"
+          ],
+          "order": 1,
+          "practice_task": "浏览 README 与文档中心目录，列出 conversion、math、random 三个目录中各挑一个算子，用一句话概括其功能，并记录本仓配套的 CANN 版本标签。",
+          "source_files": [
+            "README.md",
+            "docs/README.md",
+            "docs/QUICKSTART.md"
+          ],
+          "title": "ops-math 是什么：项目定位与整体架构",
+          "topic": "介绍 ops-math 作为 CANN 数值计算基础算子库的定位、在 CANN 架构中的位置、conversion/math/random 三大类算子的划分，以及版本配套关系。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-repo-structure.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "画出单个算子目录的标准组成",
+            "区分 op_host、op_kernel、op_api、op_graph、framework、tests 各层职责",
+            "理解 common、examples、experimental 等全局目录的作用"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "算子目录结构",
+            "根目录构建脚本",
+            "文档目录"
+          ],
+          "order": 2,
+          "practice_task": "对照 math/add 目录，手绘（或列出）一个算子的标准目录树，并为 op_host、op_kernel、op_api、op_graph、tests 各写一行职责说明。",
+          "source_files": [
+            "docs/zh/install/dir_structure.md",
+            "classify_rule.yaml",
+            "math/add/CMakeLists.txt"
+          ],
+          "title": "仓库目录结构与算子分类规则",
+          "topic": "讲解仓库根目录布局、单个算子目录（op_host/op_kernel/op_api/op_graph/framework/tests）的标准结构，以及 classify_rule.yaml 的算子分类规则。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-environment-and-build.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "掌握 bash build.sh 的入口流程和常用参数",
+            "理解 build_out 产出的算子包结构",
+            "能够独立完成一次完整编译"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "build.sh",
+            "scripts 构建脚本",
+            "cmake 构建体系"
+          ],
+          "order": 3,
+          "practice_task": "在完成 CANN 环境准备后执行 bash build.sh 编译整个仓库（或仅编译 add_example），记录编译产物在 build_out 中的位置，并尝试用 build.sh 的帮助/参数查看可用选项。",
+          "source_files": [
+            "build.sh",
+            "scripts/build_options.sh",
+            "docs/zh/install/build.md",
+            "docs/zh/install/quick_install.md",
+            "CMakeLists.txt"
+          ],
+          "title": "环境准备与源码编译",
+          "topic": "介绍 NPU 驱动与 CANN 包安装、build.sh 入口脚本与 scripts 下各构建子脚本的分工、CMake 构建体系以及编译产物组织。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-run-first-sample.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "掌握算子包安装与环境变量配置",
+            "理解 aclnn 层调用样例的基本流程",
+            "独立跑通第一个端到端算子样例"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "QUICKSTART 文档",
+            "add 算子 aclnn 调用样例",
+            "add 算子说明"
+          ],
+          "order": 4,
+          "practice_task": "按照 QUICKSTART 编译并运行 AddExample 算子样例，然后修改样例中的输入 shape 或数据，重新编译运行并核对输出结果是否正确。",
+          "source_files": [
+            "docs/QUICKSTART.md",
+            "examples/add_example/README.md",
+            "math/add/examples/test_aclnn_add.cpp",
+            "math/add/README.md"
+          ],
+          "title": "跑通第一个算子：AddExample 快速上手",
+          "topic": "跟随 QUICKSTART 完成编译、安装算子包、配置环境变量并运行 AddExample 样例，建立对算子端到端运行流程的直观认识。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "单元一：初识 ops-math"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l1-operator-readme-spec.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "读懂算子 README 中的规格表",
+            "理解算子输入输出约束与支持产品列表",
+            "掌握通过 README 快速了解任意算子的方法"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "算子 README",
+            "产品支持表",
+            "aclnn 接口文档"
+          ],
+          "order": 1,
+          "practice_task": "阅读 math/add/README.md 与 docs/aclnnAdd.md，总结 add 算子支持的数据类型列表，并回答：输入 x1 为 FLOAT16、x2 为 FLOAT 时输出类型是什么。",
+          "source_files": [
+            "math/add/README.md",
+            "math/add/docs/aclnnAdd.md",
+            "docs/zh/op_api_list.md"
+          ],
+          "title": "算子规格说明书怎么读：以 add 算子 README 为例",
+          "topic": "讲解单个算子 README 的结构：产品支持情况、计算公式、参数说明（输入/输出/属性、数据类型、格式）以及规格约束的含义。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-op-def-registration.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "理解 OpDef 链式 DSL 的写法",
+            "理解输入输出规格与数据类型的对应关系",
+            "能够读懂并修改算子定义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "OpDef 注册",
+            "数据类型/格式声明",
+            "输出 shape 推导注册"
+          ],
+          "order": 2,
+          "practice_task": "阅读 add_def.cpp，画出其输入输出声明的结构图；尝试为 add 算子增加一种 hypothetical 数据类型支持所需的修改点（不实际编译，写出修改位置即可）。",
+          "source_files": [
+            "math/add/op_host/add_def.cpp",
+            "math/add/op_host/add_infershape.cpp"
+          ],
+          "title": "算子定义与注册：op_def 与 OpDef DSL",
+          "topic": "剖析 add_def.cpp 中 OpDef 的链式声明：Input/Output/ParamType/DataType/Format/UnknownShapeFormat 以及 InferShape 等注册回调，理解算子规格如何被注册到 CANN。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-infershape.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "理解 infershape 的执行时机与输入输出",
+            "掌握 broadcast 推导 shape 的调用方式",
+            "能够为一个新算子编写 infershape"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "infershape 实现",
+            "broadcast 推导工具",
+            "公共 infershape 工具头文件"
+          ],
+          "order": 3,
+          "practice_task": "为 add 的 infershape 增加打印日志（或在本地重写一份简化版），验证 (2,3,4) 与 (1,4) 两个输入推导出的输出 shape 为 (2,3,4)。",
+          "source_files": [
+            "math/add/op_host/add_infershape.cpp",
+            "common/inc/op_host/infershape_reduce_util.h",
+            "docs/zh/context/broadcast_relationship.md"
+          ],
+          "title": "形状推导：infershape 的实现",
+          "topic": "讲解 add_infershape.cpp 如何基于 broadcast 规则推导输出 shape，以及 ge::GraphOpErrCodeStatus 的返回约定和公共推导工具的使用。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l4-tiling-basics.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "理解 tiling 在 host 侧的作用与执行时机",
+            "掌握 TilingBaseClass 的关键接口",
+            "理解 tiling 数据如何传递到 kernel"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "tiling 类",
+            "编译信息 coreNum/ubSize",
+            "tiling 序列化"
+          ],
+          "order": 4,
+          "practice_task": "阅读 AddTiling 的实现，梳理 GetTilingData/CalcTilingKey 等关键函数的调用顺序；回答 tiling 中 coreNum 和 ubSize 分别来自哪里、用途是什么。",
+          "source_files": [
+            "math/add/op_host/arch35/add_tiling_arch35.cpp",
+            "math/add/op_host/arch35/add_tiling_arch35.h",
+            "docs/zh/develop/aicore_develop_guide.md"
+          ],
+          "title": "Tiling 初探：数据切分与调度参数计算",
+          "topic": "介绍 tiling 的概念（多核切分、UB 内存规划），并以 AddTiling 为例讲解 TilingBaseClass 框架下 tiling 类的写法、编译信息（coreNum/ubSize）的获取与 tiling 数据序列化。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u2-l5-kernel-basics.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "理解 AscendC kernel 入口签名与 GM_ADDR 参数",
+            "掌握 if constexpr 按 dtype 分支组织 kernel 的模式",
+            "理解 BroadcastSch 封装后的 Process 流程"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "AscendC kernel 入口",
+            "DAG 定义",
+            "调度封装"
+          ],
+          "order": 5,
+          "practice_task": "对照 add.cpp 中的四个分支（bool、mixDtype、needCast、普通），画出每个分支选择的 OpDag 类型；思考若新增 FLOAT8 类型应改动哪些位置。",
+          "source_files": [
+            "math/add/op_kernel/arch35/add.cpp",
+            "math/add/op_kernel/arch35/add_dag.h",
+            "math/add/op_kernel/arch35/add_struct.h"
+          ],
+          "title": "Kernel 实现：AscendC 编程模型与 add kernel",
+          "topic": "剖析 add kernel 的 __global__ __aicore__ 入口、按数据类型编译期分支（bool/混合精度/cast），以及 OpDag 与 BroadcastSch 调度封装的配合方式。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l6-aclnn-api-layer.md",
+          "id": "u2-l6",
+          "learning_goals": [
+            "理解 L0 层无 workspace 接口的设计",
+            "掌握 aclnn 接口三段式流程",
+            "能够读懂 level2_base 中的公共封装"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "aclnn 接口实现",
+            "两段式/三段式接口",
+            "公共 op_api 工具"
+          ],
+          "order": 6,
+          "practice_task": "梳理 aclnnAdd 的调用链：创建 desc、检查约束、执行；然后对照 ut 中的 test_aclnn_add.cpp，写出一个调用 aclnnAdd 的最小代码框架。",
+          "source_files": [
+            "math/add/op_api/aclnn_add.cpp",
+            "math/add/op_api/add.cpp",
+            "math/add/op_api/aclnn_add.h",
+            "common/inc/op_api/level2_base.h",
+            "docs/zh/context/two_phase_api.md"
+          ],
+          "title": "aclnn 适配层：从算子到用户 API",
+          "topic": "讲解 op_api 目录下 add.cpp 与 aclnn_add.cpp 的关系、L0 到 L2 接口的封装层次（level2_base.h）、两段式接口（GetWorkspaceSize + 调用）与返回码约定。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "filename": "u2-l7-invocation-paths.md",
+          "id": "u2-l7",
+          "learning_goals": [
+            "掌握 aclnn 单算子调用的完整流程",
+            "理解 GE 图模式调用与 <<<>>> 异构调用的差异",
+            "能够选择合适的调用方式集成算子"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "aclnn 调用样例",
+            "GE 图模式样例",
+            "算子调用文档"
+          ],
+          "order": 7,
+          "practice_task": "分别编译运行 test_aclnn_add.cpp 与 test_geir_add.cpp 两种调用样例，对比两种方式在算子描述、执行调用上的代码差异并记录。",
+          "source_files": [
+            "math/add/examples/test_aclnn_add.cpp",
+            "math/add/examples/test_geir_add.cpp",
+            "docs/zh/invocation/quick_op_invocation.md",
+            "docs/zh/context/compile_and_run_sample.md"
+          ],
+          "title": "算子调用方式：aclnn 直调、GE 图模式与 <<<>>> 异构调用",
+          "topic": "对比三种调用路径：aclnn 单算子调用、GE 图模式（geir）调用，以及 kernel 侧 <<<>>> 异构调用示例，理解样例代码的编译运行方式。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 2,
+      "title": "单元二：解剖一个算子——add 的完整链路"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u3-l1-broadcast-mechanism.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "掌握 broadcast 的 shape 对齐规则",
+            "理解 broadcast 在 host 推导与 kernel 执行两侧的体现",
+            "能够判断任意两个 shape 能否 broadcast"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "broadcast 规则",
+            "infershape 中的 broadcast 调用",
+            "kernel 广播调度"
+          ],
+          "order": 1,
+          "practice_task": "基于文档规则手算若干 shape 对的 broadcast 结果，再对照 add 的 infershape 实现验证；找出 add_dag.h 中广播相关元素数据结构的位置。",
+          "source_files": [
+            "docs/zh/context/broadcast_relationship.md",
+            "math/add/op_host/add_infershape.cpp",
+            "math/add/op_kernel/arch35/add_dag.h"
+          ],
+          "title": "广播机制：从规则到实现",
+          "topic": "系统讲解 broadcast 的 shape 对齐规则，以及该规则在 infershape（host 推导）与 kernel（BroadcastSch/元素级访存）两侧分别如何落地。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u3-l2-data-type-and-cast.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解低精度类型对计算路径的影响",
+            "掌握 kernel 中按 dtype 的 cast 策略",
+            "理解算子支持类型在 def 与 README 中的对应"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "数据类型体系",
+            "kernel 侧 cast 分支",
+            "类型支持声明"
+          ],
+          "order": 2,
+          "practice_task": "追踪 add kernel 中 AddWithCastCompute 的定义，说明为什么 half/bfloat16 需要 cast 以及 cast 到什么类型计算；再列举一个 README 中支持但你在本地环境未验证过的类型并标注待确认。",
+          "source_files": [
+            "docs/zh/context/data_type.md",
+            "math/add/op_kernel/arch35/add_dag.h",
+            "math/add/op_host/add_def.cpp",
+            "common/inc/op_api/data_type_utils.h"
+          ],
+          "title": "数据类型体系与混合精度 Cast 策略",
+          "topic": "讲解 CANN 数据类型（BOOL/INT8/FLOAT16/BFLOAT16/FLOAT32/FLOAT8/FLOAT4 等）及算子侧的类型支持声明，重点分析 add kernel 中混合精度与 cast 分支的实现策略。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u3-l3-tiling-framework.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解模板化 tiling 复用的设计动机",
+            "掌握按 tiling key 区分实现版本",
+            "能够为一个 elementwise 算子选择复用模板"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "tiling 模板注册",
+            "tiling key 机制",
+            "TilingBaseClass"
+          ],
+          "order": 3,
+          "practice_task": "在 math 目录中再找两个复用同一 tiling 模板的算子（可通过 include 关系搜索），对比它们的 tiling 差异点，总结模板复用的适用条件。",
+          "source_files": [
+            "common/inc/op_host/math_tiling_templates_registry.h",
+            "math/add/op_host/arch35/add_tiling_arch35.cpp",
+            "docs/zh/develop/aicore_develop_guide.md"
+          ],
+          "title": "Tiling 框架深入：模板复用与注册机制",
+          "topic": "讲解 math_tiling_templates_registry.h 提供的 tiling 模板复用机制、tiling key 的区分方式，以及多个算子共享 tiling 实现的工程组织。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u3-l4-atvoss-scheduling.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "理解计算图 DAG 抽象的组成",
+            "掌握 schMode 的含义与选择",
+            "理解 atvoss 与传统手写 CopyIn/Compute/CopyOut 的差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "OpDag 定义",
+            "BroadcastSch 调度",
+            "AscendC kernel"
+          ],
+          "order": 4,
+          "practice_task": "把 add 的 OpDag（AddWithoutCastCompute）展开成等价的手写 CopyIn/Compute/CopyOut 伪代码，对比两种写法的代码量与可读性，写一段对比总结。",
+          "source_files": [
+            "math/add/op_kernel/arch35/add.cpp",
+            "math/add/op_kernel/arch35/add_dag.h",
+            "math/add/op_kernel/arch35/add_struct.h"
+          ],
+          "title": "atvoss 调度框架：OpDag 与 BroadcastSch",
+          "topic": "深入 add_dag.h 中计算图（OpDag）的定义方式与 BroadcastSch 按 schMode 的调度执行流程，理解算子计算逻辑如何被声明式地组织并被调度器执行。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l7"
+          ],
+          "filename": "u3-l5-graph-mode-adaptation.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "理解图模式下算子被如何表示和推导",
+            "掌握融合 pass 的挂载位置",
+            "理解框架插件的适配职责"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "op_proto",
+            "图推导",
+            "融合 pass",
+            "框架适配插件"
+          ],
+          "order": 5,
+          "practice_task": "阅读 add_graph_infer.cpp，列出图模式 infershape 与 host 侧 infershape 的异同；再浏览 experimental 中任一算子的 fusion_pass 目录，说明融合 pass 文件的命名与组织方式。",
+          "source_files": [
+            "math/add/op_graph/add_proto.h",
+            "math/add/op_graph/add_graph_infer.cpp",
+            "math/add/framework/add_tf_plugin.cpp",
+            "common/inc/op_graph/graph_infer_comm_funcs.h"
+          ],
+          "title": "图模式适配：op_proto、graph_infer 与融合",
+          "topic": "讲解算子在图编译模式下的适配层：proto 定义、graph_infer 推导、以及框架插件（tf plugin）的接入方式。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u3-l6-multi-arch-support.md",
+          "id": "u3-l6",
+          "learning_goals": [
+            "理解 arch35 等架构目录的组织意图",
+            "掌握 soc 版本配置文件的作用",
+            "了解算子跨平台迁移的改动范围"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "多架构目录",
+            "算子信息配置",
+            "跨平台迁移文档"
+          ],
+          "order": 6,
+          "practice_task": "在仓库中找一个同时含多个架构子目录的算子（可用 glob 搜索 op_host 下的目录名），对比不同架构 tiling/kernel 的差异并记录；若无则记录仅 arch35 存在并标注待确认。",
+          "source_files": [
+            "math/add/op_host/config/ascend950/add_binary.json",
+            "math/add/op_host/arch35/add_tiling_arch35.h",
+            "docs/zh/develop/cross_platform_migration_guide.md"
+          ],
+          "title": "多芯片架构适配：arch35 与 soc 配置",
+          "topic": "讲解 arch35 架构目录与 config/ascend950 下 soc 配置文件的作用，以及算子在不同芯片架构间迁移时的目录组织与差异管理。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "单元三：核心机制与公共框架"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u4-l1-elementwise-ops.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "掌握 elementwise 算子的通用代码骨架",
+            "理解激活/数值运算算子的特化点",
+            "能够举一反三阅读任意 elementwise 算子"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "broadcast elementwise",
+            "一元激活类算子",
+            "DAG 组合"
+          ],
+          "order": 1,
+          "practice_task": "对比 abs 与 add 的 DAG 定义，写出一元 elementwise 算子与二元 broadcast 算子在调度封装上的差异清单；再选一个如 math/mul 或 math/sub 阅读，验证结论。",
+          "source_files": [
+            "math/abs/README.md",
+            "math/abs/op_kernel/arch35/abs.cpp",
+            "math/add/op_kernel/arch35/add.cpp"
+          ],
+          "title": "逐元素类算子的实现模式",
+          "topic": "以 abs 等一元算子对照 add 二元算子，归纳 elementwise 算子在 tiling、DAG 定义和 kernel 上的共性与差异。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u4-l2-reduction-ops.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解 axes 属性的解析与校验",
+            "掌握 reduction 的 host 推导与 kernel 组织",
+            "理解 cumsum 类算子与 reduce 类算子的区别"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "reduce 算子 host",
+            "公共 reduction 工具",
+            "归约 kernel"
+          ],
+          "order": 2,
+          "practice_task": "阅读 reduce_sum 的 tiling 与 def，回答 axes 为空（全维度归约）时输出 shape 如何推导；再对比 cumsum 的目录结构，列出两者在 op_host 下的文件差异。",
+          "source_files": [
+            "math/reduce_sum/op_host/reduce_sum_def.cpp",
+            "math/reduce_sum/op_host/reduce_sum_infershape.cpp",
+            "common/inc/op_host/infershape_reduce_util.h",
+            "math/cumsum/op_kernel/arch35/cumsum_apt.cpp"
+          ],
+          "title": "归约类算子：reduce_sum 与 cumsum",
+          "topic": "以 reduce_sum 和 cumsum 为例讲解带 axes 属性的归约算子：shape 推导（keepdim）、tiling 切分以及 kernel 侧归约/扫描实现。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u4-l3-conversion-ops.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "理解输出 shape 与输入解耦的推导方式",
+            "掌握 concat 类多输入算子的定义",
+            "能够阅读 slice/pad 类带复杂属性的算子"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "broadcast_to",
+            "concat",
+            "算子规格文档"
+          ],
+          "order": 3,
+          "practice_task": "阅读 broadcast_to 的定义，说明 size 属性如何决定输出 shape；再阅读 concat_d README，写出 N 个输入 concat 时输出 shape 的推导规则，并标注 string 输入张量解析的位置（若无则写待确认）。",
+          "source_files": [
+            "conversion/broadcast_to/README.md",
+            "conversion/concat/README.md",
+            "conversion/concat_d/README.md"
+          ],
+          "title": "形态变换类算子：broadcast_to 与 concat",
+          "topic": "以 conversion 类典型算子为例，讲解 shape/布局变换类算子的实现：输出 shape 由属性决定的推导方式、多输入算子的组织、以及 pad/切片类的通用套路。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3",
+            "u3-l3"
+          ],
+          "filename": "u4-l6-cast-ops.md",
+          "id": "u4-l6",
+          "learning_goals": [
+            "理解 cast 算子按模板（deinter/interleave、寄存器搬运模式）区分实现版本的策略",
+            "掌握重构后 host/device 共享的 CastTilingData 精简结构及其传递方式",
+            "理解 2025 年 cast 性能重构中 tiling 数据从十余个字段精简为 shapeSize/coreNum/ubFormer 三个字段的设计取舍"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "cast tiling 类",
+            "共享 tiling 数据结构体",
+            "cast kernel 模板实现"
+          ],
+          "order": 4,
+          "practice_task": "对比重构前后 cast tiling 字段的变化（可通过 git log/git show 查看 math/cast 的历史提交），回答：重构后 kernel 侧如何自行计算分块循环而不再依赖 tiling 传入的 blockFormer/ubLoop 等字段；再列出 cast_impl.h 中至少两种 CAST_TEMPLATE 模板常量并说明其适用场景。",
+          "source_files": [
+            "math/cast/README.md",
+            "math/cast/op_host/arch35/cast_tiling.cpp",
+            "math/cast/op_host/arch35/cast_tiling.h",
+            "math/cast/op_kernel/arch35/cast_tiling_data.h",
+            "math/cast/op_kernel/arch35/cast_impl.h",
+            "math/cast/op_kernel/cast_apt.cpp"
+          ],
+          "title": "类型转换算子 cast：模板化 tiling 与性能重构",
+          "topic": "以 math/cast 为例讲解类型转换算子的实现：按输入输出类型组合选择 CAST_TEMPLATE 模板（含 deinter/打包等寄存器搬运模式）的策略，以及近期性能重构后 tiling 数据简化为 host/device 共享的普通结构体 CastTilingData、分块循环下沉到 kernel 侧计算的新组织方式。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u4-l4-random-ops.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "理解带 seed/offset 状态的随机算子定义",
+            "掌握 dropout 类算子的 mask 生成与反向结构",
+            "了解 Philox 等随机数机制在本仓的体现（具体实现细节待确认）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "dropout 正反向算子",
+            "stateless 随机数",
+            "随机数生成机制"
+          ],
+          "order": 5,
+          "practice_task": "对照 drop_out_v3 与 drop_out_v3_grad 的 README，列出正反向算子的输入输出对应关系；再阅读 stateless_normal 的算子定义，说明 seed 与 offset 属性的作用。",
+          "source_files": [
+            "random/drop_out_v3/README.md",
+            "random/drop_out_v3_grad/README.md",
+            "random/stateless_normal/README.md",
+            "random/random_common/CMakeLists.txt"
+          ],
+          "title": "随机类算子：drop_out_v3 与 stateless 系列",
+          "topic": "讲解 random 类算子的特殊性：随机数发生器（Philox 等）、seed/offset 状态管理、mask 类算子输出，以及 dropout 前反向的配套组织。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u4-l5-aicpu-kernel-path.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "理解 AICore 与 AICPU 两条 kernel 路径的差异",
+            "掌握 AICPU kernel 的组织与注册方式",
+            "能够判断一个算子为何需要 AICPU 版本"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "AICPU kernel",
+            "算子定义",
+            "AICPU 开发指南"
+          ],
+          "order": 6,
+          "practice_task": "对比 math/add/op_kernel 与 op_kernel_aicpu 两个目录，列出 AICPU 版本 kernel 在文件组成、入口签名上与 AICore 版本的差异，并总结 AICPU 路径适用的场景。",
+          "source_files": [
+            "math/add/op_kernel_aicpu/add_aicpu.cpp",
+            "math/add/op_kernel_aicpu/add_aicpu_def.cpp",
+            "examples/add_example_aicpu/README.md",
+            "docs/zh/develop/aicpu_develop_guide.md"
+          ],
+          "title": "AICPU 算子路径：另一条执行通道",
+          "topic": "讲解 AICPU kernel 的实现路径：与 AICore kernel 的关系、独立目录 op_kernel_aicpu 的组织、以及哪些算子（如复杂控制流或不支持的数据类型）走 AICPU。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "单元四：典型算子类别实现剖析"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l5",
+            "u2-l6"
+          ],
+          "filename": "u5-l1-create-new-operator.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "掌握 --genop 生成算子工程的完整流程",
+            "理解一个最小可运行算子需要哪些文件",
+            "能够从模板出发实现自定义计算逻辑"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "add_example 脚手架",
+            "genop 脚本",
+            "开发指南"
+          ],
+          "order": 1,
+          "practice_task": "使用 bash build.sh --genop=examples/example_ops 生成一个自己的算子工程（math 类，算子名自取），把 kernel 计算改成 x1*x2 或其他简单逻辑，编译并用样例验证结果。",
+          "source_files": [
+            "examples/add_example/op_host/add_example_def.cpp",
+            "examples/add_example/op_host/add_example_tiling.cpp",
+            "examples/add_example/op_kernel/add_example.cpp",
+            "examples/add_example/examples/test_aclnn_add_example.cpp",
+            "scripts/build_genop.sh",
+            "docs/zh/develop/aicore_develop_guide.md"
+          ],
+          "title": "从零开发一个新算子：genop 脚手架与 AddExample",
+          "topic": "以 examples/add_example 完整工程为模板，讲解如何用 build.sh --genop 生成新算子目录，并逐层实现 def、infershape、tiling、kernel 与 aclnn 适配。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-ut-testing.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "掌握 UT 的目录组织与运行方式",
+            "理解 infershape/tiling/kernel 三类 UT 的测试对象",
+            "能够为新算子编写 aclnn UT"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "op_api UT",
+            "op_host UT",
+            "UT 构建脚本"
+          ],
+          "order": 2,
+          "practice_task": "阅读 math/add/tests/ut/op_api/test_aclnn_add.cpp，理解断言与数据构造方式；为你生成的自定义算子仿写一个最小 UT 用例（可只写代码框架）。",
+          "source_files": [
+            "math/add/tests/ut/op_api/test_aclnn_add.cpp",
+            "math/add/tests/ut/op_host/test_add_infershape.cpp",
+            "tests/ut",
+            "scripts/build_ut.sh"
+          ],
+          "title": "单元测试：op_api 与 op_host 的 UT",
+          "topic": "讲解算子 UT 的组织方式：tests/ut 目录下 op_api/op_host 等分类、典型用例的写法（构造输入、调用、校验）以及 UT 的构建与运行。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-st-testing.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "掌握 ST 用例的数据组织方式",
+            "理解 golden 数据与实际输出的比对机制",
+            "能够按规范新增测试数据"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ST 用例",
+            "golden 数据",
+            "QUICKSTART 验证章节"
+          ],
+          "order": 3,
+          "practice_task": "按 QUICKSTART 第四节的方式，修改 add 的 ST 测试输入数据（如更换 shape），重新编译并验证输出是否仍正确；再为某个 bin 文件补充一条你构造的用例。",
+          "source_files": [
+            "math/add/tests/st/aclnnAdd",
+            "math/add/tests/st/arch35",
+            "docs/QUICKSTART.md",
+            "docs/zh/develop/aicore_develop_guide.md"
+          ],
+          "title": "系统测试：st 目录与 aclnn 调用验证",
+          "topic": "讲解算子 ST 的组织：st 目录按接口/架构分类、测试数据文件（输入与 golden 输出）的格式，以及如何按 QUICKSTART 中的方式修改输入并验证。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l4-debugging-and-profiling.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "掌握 kernel 侧打印调试方法",
+            "掌握 msprof 等性能采集流程",
+            "了解 Simulator 仿真调试的适用场景"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "printf 调试",
+            "性能采集",
+            "仿真调试"
+          ],
+          "order": 4,
+          "practice_task": "在自定义算子 kernel 中插入一条打印日志并重新编译运行观察输出；然后按文档流程对 add 样例做一次性能采集，记录算子耗时（无 NPU 环境时可改用 Simulator 流程并注明）。",
+          "source_files": [
+            "docs/zh/debug/op_debug_prof.md",
+            "docs/zh/debug/npu_sim.md",
+            "docs/QUICKSTART.md"
+          ],
+          "title": "算子调试：打印调试与性能采集",
+          "topic": "讲解算子开发中的调试手段：kernel 内 printf 日志、NPU 上的性能数据采集，以及无硬件环境下基于 CANN Simulator 的仿真调试。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "filename": "u5-l5-performance-tuning.md",
+          "id": "u5-l5",
+          "learning_goals": [
+            "理解 tiling 参数对多核利用率的影响",
+            "掌握从性能数据定位瓶颈的方法",
+            "建立对调度框架性能取舍的认知"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "tiling 切分策略",
+            "kernel 计算优化",
+            "性能采集文档"
+          ],
+          "order": 5,
+          "practice_task": "修改自定义算子（或 add_example）的 tiling 参数（如每核处理元素数），对比修改前后的性能采集数据，写一段分析：哪个参数影响了核数利用率与搬运效率。",
+          "source_files": [
+            "examples/add_example/op_host/add_example_tiling.cpp",
+            "math/add/op_host/arch35/add_tiling_arch35.cpp",
+            "docs/zh/debug/op_debug_prof.md"
+          ],
+          "title": "性能调优：tiling 与 kernel 优化思路",
+          "topic": "基于 tiling 切分、内存搬运与计算密度三个维度，讲解 elementwise 算子性能调优的常见手段，并结合性能采集数据分析瓶颈。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l6-experimental-and-contribution.md",
+          "id": "u5-l6",
+          "learning_goals": [
+            "理解 experimental 目录的定位与转正流程",
+            "掌握贡献一个算子需要准备的全部材料",
+            "了解 OAT 合规检查等 CI 环节"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "experimental 目录",
+            "贡献指南",
+            "合规检查"
+          ],
+          "order": 6,
+          "practice_task": "阅读 CONTRIBUTING.md 与 experimental 中任一算子目录，列出把一个实验算子正式贡献到主目录需要满足的检查清单（README、测试、合规等），并核对你的自定义算子工程缺什么。",
+          "source_files": [
+            "CONTRIBUTING.md",
+            "experimental/CMakeLists.txt",
+            "experimental/math",
+            "scripts/oat_check.sh"
+          ],
+          "title": "实验目录与贡献流程：向社区提交算子",
+          "topic": "介绍 experimental 目录的作用（开发者试验自定义算子）以及向本仓正式贡献算子的流程：目录规范、README/测试要求、OAT 合规检查与 PR 流程。"
+        }
+      ],
+      "level": "advanced",
+      "order": 5,
+      "title": "单元五：测试、调试与工程实践"
+    }
+  ]
+}
