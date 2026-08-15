@@ -4,274 +4,357 @@
 
 学完本讲，你应该能够：
 
-1. 说清楚 im2col（image to column）为什么能把卷积变成矩阵乘，以及 PTO 的 `TIMG2COL` 指令与软件 im2col 的本质区别（硬件在 L1→L0A 搬运途中顺手完成展开）。
-2. 掌握卷积通路的三条配置指令 `SETFMATRIX`、`SET_IMG2COL_RPT`、`SET_IMG2COL_PADDING` 的作用，以及 `SetFmatrixMode` 四种模式下「谁负责下发配置」的差异。
-3. 读懂 `ConvTile` 这个"带卷积元数据的 Tile"，理解 `fmapH/fmapW/padList/filter/stride/dilation` 等字段的含义。
-4. 通读 `kernels/manual/a2a3/conv2d_forward` 完整算子，把 u5-l1 的 `TMATMUL` 与 u5-l3 的多级双缓冲、L1 caching 拼成一条完整的卷积前向链路。
-5. 能手算一层卷积的输出尺寸公式，并把它与 kernel 中的编译期常量对应起来。
+1. 说清楚 **im2col（image to column）** 技巧如何把二维卷积等价变换成矩阵乘，以及变换后 M、K 两个维度各自对应什么。
+2. 掌握 PTO 中承载卷积配置的特殊 tile 类型 **ConvTile**，以及展开指令 **TIMG2COL** 的参数、约束与 `posM/posK` 滑窗语义。
+3. 理解 **SETFMATRIX / SET_IMG2COL_RPT / SET_IMG2COL_PADDING** 三条配置指令各自写哪个硬件寄存器，以及 `SetFmatrixMode` 四种模式（A/B × AUTO/MANUAL）的分工。
+4. 读懂 `kernels/manual/a2a3/conv2d_forward` 这个完整算子：多核切分、L1 caching、double buffer 与「TLOAD → TIMG2COL/TEXTRACT → TMATMUL → TSTORE」四级流水。
+5. 能手算一层卷积的输出尺寸，并与 kernel、host 侧、golden 生成脚本三处代码交叉验证。
 
 ## 2. 前置知识
 
-- **卷积与 im2col**：2D 卷积是「卷积核在输入特征图上滑动做加权求和」。经典优化手段 im2col 把每个感受野的元素拷贝成矩阵的一列，卷积就退化成一次 GEMM：`Y = K_mat × X_col`。代价是软件要做大量重复拷贝。
-- **NC1HWC0 / FRACTAL_Z 布局**：昇腾硬件偏好的 5 维特征图布局，C0 固定为 16（`c0=16`），C1 = ceil(C/16)，即通道按 16 个一组摆放；权重则预排成 `FRACTAL_Z` 分形格式，天然就是 Cube 单元想要的矩阵形态。这两个布局在 u2-l2「Tile 编程模型」中已介绍。
-- **Cube 数据通路**（承接 u5-l1）：GM → L1（`TileType::Mat`）→ L0A/L0B（`TileLeft`/`TileRight`）→ 累加器（`TileAcc`）→ 写回。`TMATMUL` 定义在 L0 层。
-- **事件同步与双缓冲**（承接 u2-l3、u5-l3）：`set_flag/wait_flag` 用 `(srcPipe, dstPipe, eventId)` 三元组配对；MTE2（搬入）/MTE1（片上搬移）/M（Cube）/FIX（写回）四条流水线靠事件编排重叠。
-- **输出尺寸公式**（本讲反复使用）：
+### 2.1 二维卷积与输出尺寸公式
 
-  \[ h_{out} = \left\lfloor \frac{h_{in} + pad_{top} + pad_{bottom} - dilation_H \cdot (h_k - 1) - 1}{stride_H} \right\rfloor + 1 \]
+卷积用一个小的权重窗口（卷积核，本讲例子中是 \(h_k \times w_k = 3 \times 3\)）在输入特征图上滑动，每个窗口位置做一次逐元素乘加。四个超参决定滑动方式：
 
-  \[ w_{out} = \left\lfloor \frac{w_{in} + pad_{left} + pad_{right} - dilation_W \cdot (w_k - 1) - 1}{stride_W} \right\rfloor + 1 \]
+- **stride（步长）**：窗口每次移动几个像素；
+- **dilation（膨胀）**：核内采样点之间的间隔（间隔取样，等效放大感受野）；
+- **padding（补边）**：在输入四周补几圈 0，用于控制输出尺寸、保留边界信息。
+
+输出特征图尺寸由下面这个公式决定（本讲会在仓库里看到它在三个文件中同时出现）：
+
+\[
+h_{out} = \frac{h_{in} + pad_{top} + pad_{bottom} - dilation_h \cdot (h_k - 1) - 1}{stride_h} + 1
+\]
+
+\[
+w_{out} = \frac{w_{in} + pad_{left} + pad_{right} - dilation_w \cdot (w_k - 1) - 1}{stride_w} + 1
+\]
+
+### 2.2 im2col：卷积 → 矩阵乘
+
+直接滑窗做卷积难以复用第五讲（u5-l1）学过的 Cube 矩阵乘单元。经典做法是 **im2col**：把每个输出位置对应的输入感受野「拉直成一行/一列」，拼成一个大矩阵，卷积就变成了普通 GEMM：
+
+- 矩阵的 **M 维** = 输出位置数 \(N_{batch} \times H_{out} \times W_{out}\)（每个输出像素是一行）；
+- 矩阵的 **K 维** = 输入通道 × 核空间 \(C_{in} \times h_k \times w_k\)（感受野内所有输入元素是一行内的列）；
+- 权重同样重排成 \([N_{out},\ C_{in} \cdot h_k \cdot w_k]\)，一次 TMATMUL 即得一层卷积。
+
+代价是数据被「展开」后体积膨胀、有重复搬运，所以 PTO 把展开指令放在 **L1→L0A** 这一段（见 4.2），让膨胀只发生在片上。
+
+### 2.3 两种五维布局
+
+本讲的输入输出都用昇腾卷积惯用的 **NC1HWC0** 五维布局：把通道维 \(C\) 按 \(C_0 = 16\)（半精度下 32 字节对齐的最小分形）切块，变成 \([N, C_1, H, W, C_0]\)，其中 \(C = C_1 \times C_0\)。权重则用 **FRACTAL_Z** 分形布局（回顾 u2-l2：NZ 类分形是为 Cube 单元「边搬边摆」准备的摆放方式）。
+
+### 2.4 承接前讲
+
+本讲默认你已掌握：Tile 的位置类型（`Mat`→L1、`TileLeft/TileRight`→L0A/L0B、`TileAcc`→累加器，见 u5-l1）；TMATMUL/TMATMUL_ACC 的累加协议；四级流水（TLOAD→MTE1 切片→M→FIXPIPE 写回）与 `(srcPipe, dstPipe, eventId)` 事件配对（u2-l3、u5-l2/l3）。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
 | :--- | :--- |
-| [include/pto/npu/a2a3/TImg2col.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/TImg2col.hpp) | A2/A3 上 `TIMG2COL` 的 NPU 实现，内部含 `SetFmatrix/SetRepeat/SetPadding` 三个 AUTO 模式辅助函数 |
-| [include/pto/npu/a2a3/SetFmatrix.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/SetFmatrix.hpp) | `SETFMATRIX` 指令实现：把 fmap 尺寸与 pad 打包进 FMATRIX 寄存器 |
-| [include/pto/npu/a2a3/SetImg2colRpt.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/SetImg2colRpt.hpp) | `SET_IMG2COL_RPT` 指令实现：写 repeat 配置寄存器 |
-| [include/pto/npu/a2a3/SetImg2colPadding.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/SetImg2colPadding.hpp) | `SET_IMG2COL_PADDING` 指令实现：写填充值寄存器 |
-| [include/pto/common/pto_tile.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/common/pto_tile.hpp) | `ConvTile` 与 `ConvTileShape` 定义（卷积元数据载体） |
-| [include/pto/common/type.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/common/type.hpp) | `SetFmatrixMode` 枚举 |
-| [include/pto/cpu/TImg2col.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/TImg2col.hpp) | `TIMG2COL` 的 CPU 仿真实现（逐元素重排，语义参考） |
-| [kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp) | 完整 Conv2d 前向算子 kernel（本讲主角） |
-| [kernels/manual/a2a3/conv2d_forward/main.cpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/main.cpp) | host 侧入口：申请内存、下发 kernel、比对 golden |
-| [kernels/manual/a2a3/conv2d_forward/scripts/gen_data.py](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/scripts/gen_data.py) | 造数脚本，内含软件 im2col 参考实现 |
-| [kernels/manual/a2a3/conv2d_forward/README.md](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/README.md) | 算子说明、tiling 参数表与实测性能 |
-| [tests/cpu/st/testcase/timg2col/main.cpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/tests/cpu/st/testcase/timg2col/main.cpp) | `TIMG2COL` 的 CPU ST 用例（本讲实践载体） |
+| [include/pto/common/pto_tile.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/common/pto_tile.hpp) | `ConvTileShape`（最多 6 维的特征图形状）与 `ConvTile`（携带卷积超参的配置+数据 tile）定义 |
+| [include/pto/common/pto_instr.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/common/pto_instr.hpp) | TIMG2COL / SETFMATRIX / SET_IMG2COL_RPT / SET_IMG2COL_PADDING 的公共 API 薄壳 |
+| [include/pto/common/type.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/common/type.hpp) | `SetFmatrixMode` 枚举（A/B × AUTO/MANUAL 四种模式） |
+| [include/pto/npu/a2a3/TImg2col.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/TImg2col.hpp) | A2/A3 真机实现：约束检查、参数下发、`img2colv2_cbuf_to_ca` intrinsic |
+| [include/pto/npu/a2a3/SetFmatrix.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/SetFmatrix.hpp) | SETFMATRIX 真机实现：把 fmap 尺寸与 pad 打包写入 FMATRIX 寄存器 |
+| [include/pto/npu/a2a3/SetImg2colRpt.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/SetImg2colRpt.hpp) / [SetImg2colPadding.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/SetImg2colPadding.hpp) | 写 `l3d_rpt`（repeat 配置）与 `padding`（补边值）寄存器 |
+| [include/pto/cpu/TImg2col.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/TImg2col.hpp) | CPU 仿真实现：逐元素重算 im2col，是理解语义的最佳参考 |
+| [kernels/manual/a2a3/conv2d_forward/](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward) | 完整 Conv2d 前向算子：kernel、host 入口、造数脚本、运行脚本 |
+| [docs/isa/TIMG2COL.md](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/docs/isa/TIMG2COL.md)、[docs/isa/SETFMATRIX.md](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/docs/isa/SETFMATRIX.md) | ISA 语义文档（约束与汇编形式） |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 TIMG2COL：硬件版 im2col 展开指令
+### 4.1 im2col 的行列映射与 ConvTile 配置载体
 
 #### 4.1.1 概念说明
 
-软件 im2col 需要先把特征图展开成一个大矩阵再喂给 GEMM，展开过程本身要额外读写一遍内存。昇腾的 Cube 单元把这一步做进了搬运通路：`TIMG2COL` 直接从 L1 的特征图 tile（`NC1HWC0` 布局的 `ConvTile`，位置 `Mat`）读取数据，一边搬运一边按卷积语义展开，写入 L0A 的 `TileLeft`。也就是说：
-
-- **输入侧**：L1 上的一块特征图（不展开的原始 NC1HWC0 摆放）；
-- **输出侧**：L0A 上已经展开好的 im2col 矩阵（行 = 输出像素 M，列 = \(C_{in} \times h_k \times w_k\) 的 K 维）；
-- **代价**：零额外内存 pass——展开在 MTE1 流水线的搬运途中完成。
-
-与之对照，权重因为已经离线排成 `FRACTAL_Z`（本身就是一个矩阵），不需要 im2col，直接用普通的 `TEXTRACT`（u4-l3 讲过的窗口搬移指令）从 L1 切片到 L0B 即可。这是 conv2d_forward kernel 里「A 路走 TIMG2COL、B 路走 TEXTRACT」不对称设计的根源。
+PTO 没有为卷积提供「一步到位」的指令，而是把它拆成「展开 + 矩阵乘」两步，展开这一步就是 TIMG2COL。要做展开，指令必须知道全部卷积超参（fmap 尺寸、stride、dilation、kernel 尺寸、四边 padding、补边值……）。PTO 的设计是：**把这些超参全部挂在源 tile 自己身上**——这就是 `ConvTile`。它既是数据（L1 上的一段缓冲），又是配置（一组 getter/setter 存的卷积参数），指令执行时直接从 tile 上读取，不必带一长串函数参数。
 
 #### 4.1.2 核心流程
 
-`TIMG2COL(dst, src, posM, posK)` 的语义（以 CPU 仿真实现为规范参考）：
+TIMG2COL 展开矩阵中第 \(m\) 行、第 \(k\) 列的取值规则（CPU 实现即按此公式逐元素计算）：
 
-```text
-对 dst 有效区内每个 (r, c)：
-    mIndex = posM + r          # 展开矩阵的行：全局输出像素编号
-    kIndex = posK + c          # 展开矩阵的列：C0 × hk × wk 中的某个通道×核位置
+1. **行 → 输出像素**：把 \(m\) 按 \(N_{batch} \to D \to H_{out} \to W_{out}\) 的顺序逐层取模分解，得到输出坐标 \((n, h_{out}, w_{out})\)；
+2. **列 → 感受野元素**：把 \(k\) 按 \(C_1 \to (h_k, w_k) \to C_0\) 的顺序分解，得到「哪个 C1 块、核内哪个位置、块内哪个通道」；
+3. **回址取数**：输入地址 \(h_{in} = h_{out} \cdot stride_h + h_k^{off} \cdot dilation_h - pad_{top}\)，\(w_{in}\) 同理；若 \((h_{in}, w_{in})\) 落在特征图外，取 `padValue`，否则读源 tile。
 
-    由 mIndex 逆推出 (n, h_out, w_out)   # 第几个 batch、输出图上哪个像素
-    由 kIndex 逆推出 (c1, c0, kernelH, kernelW)  # 哪个通道、卷积核哪个抽头
-
-    inputH = h_out * strideH + kernelH * dilationH - padTop
-    inputW = w_out * strideW + kernelW * dilationW - padLeft
-    若 (inputH, inputW) 落在特征图内：
-        dst[r][c] = src[n][c1][inputH][inputW][c0]
-    否则：
-        dst[r][c] = padValue     # padding 填充值
-```
-
-两个偏移参数解决「大矩阵分块」问题：一次 `TIMG2COL` 只生成 `[baseM, baseK]` 的一块，`posM/posK` 指明这块在完整 im2col 矩阵中的左上角坐标，循环中逐块生成。
+即整条通路是「输出坐标 + 感受野偏移 → 输入坐标」的纯函数映射，输出尺寸公式自然嵌入其中。
 
 #### 4.1.3 源码精读
 
-先看 NPU（A2/A3）实现。`TIMG2COL_IMPL` 是指令入口，前半段是编译期契约检查：
+**ConvTileShape：最多 6 维的特征图形状模板。** 与普通 `Tile` 的 `Rows × Cols` 不同，ConvTile 的形状直接就是特征图的逻辑形状，`DYNAMIC`（-1）占位的维度在构造时填入运行期值：
 
-[TImg2col.hpp:L91-L108](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/TImg2col.hpp#L91-L108) —— 用 `static_assert` 强制五条硬约束：源必须是 `Mat` 位置的 `ConvTile`（L1）、目的必须是 `Left`（L0A）、源布局必须是 `NC1HWC0`（或 5 维版 `NDC1HWC0`）、源/目的 dtype 一致且属于 `int8_t/half/bfloat16_t/float` 白名单。
+- [include/pto/common/pto_tile.hpp:1128-1151](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/common/pto_tile.hpp#L1128-L1151) — `ConvTileShape` 支持最多 6 维（NDC1HWC0 场景），静态维进类型、动态维进 `shape[]` 数组；这与 u2-l1 学过的 `Shape<DIM_0..DIM_4>` 是同一套混合静态/动态设计。
+- [include/pto/common/pto_tile.hpp:1226-1246](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/common/pto_tile.hpp#L1226-L1246) — `ConvTile` 模板：`Loc`（TileType）、元素类型、`BufferSize`（字节数容量）、`Layout`、`Shape_`，外加编译期 `staticShape[]` 与运行期 `shape[]` 双轨形状。
 
-[TImg2col.hpp:L109-L121](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/TImg2col.hpp#L109-L121) —— 关键分支：若 `FmatrixMode` 是 `*_AUTO`，则在本条指令内部先自动下发三组配置（`SetFmatrix/SetRepeat/SetPadding`），再计算 `stepM = dst 有效行数`、`stepK = 有效列按 c0 对齐`，最后落到真正的硬件原语。注意 `c0Size = 256B / sizeof(DType)`，即按 256 字节块对齐。
+**ConvTile 上的卷积超参存取。** 全部以普通成员变量 + inline getter/setter 实现：
 
-[TImg2col.hpp:L67-L89](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/TImg2col.hpp#L67-L67) —— 最内层函数 `TImg2col` 把 tile 降级为裸指针（`__cbuf__` L1 指针 → `__ca__ L0A 指针），调用 CCE intrinsic `img2colv2_cbuf_to_ca`，把 stepM/stepK/posM/posK/stride/dilation/filter/transpose/channelSize 一次性传给硬件。`filterW/H > 255` 时拆成低 8 位 + 高位标志两个参数，规避 8 位寄存器位宽限制。
+- [include/pto/common/pto_tile.hpp:1314-1354](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/common/pto_tile.hpp#L1314-L1354) — 依次是 `fmapH/fmapW`（特征图高宽）、`padList_[4]`（四边补边）、`filterH/filterW`（核尺寸）、`dilationH/W`、`strideH/W`、`padValue`（补边填充值）、`channelSize`（本次参与展开的通道数）、`repeatStride/repeatTime/repeatMode`（硬件 repeat 配置）、`transpose`。
+- [include/pto/common/pto_tile.hpp:1362-1369](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/common/pto_tile.hpp#L1362-L1369) — 私有成员定义处，`padList_[4]` 默认全 0。
 
-再看 CPU 仿真实现（它就是"指令语义说明书"）：
+**数学参考：golden 脚本里的纯 numpy im2col。** 造数脚本中的 `img2col_nhwc` 就是 4.1.2 行列映射的可执行版：
 
-[cpu/TImg2col.hpp:L78-L108](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/TImg2col.hpp#L78-L108) —— `ExtractImg2ColParams` 从 `ConvTile` 的元数据（shape 各维 + stride/dilation/filter/padList/channelSize）提取出全部卷积参数，并在 L100-L105 用与第 2 节完全相同的公式算出 `outH/outW`。注意 L95-L98 揭示了 **padList 四个槽位的顺序：`[0]=left, [1]=right, [2]=top, [3]=bottom`**。
+- [kernels/manual/a2a3/conv2d_forward/scripts/gen_data.py:52-88](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/scripts/gen_data.py#L52-L88) — 先 `np.pad` 补边，再对每个输出位置 \((n, h_{out}, w_{out})\) 收集感受野列，拼出 `col_matrix`，形状注释写明为 `[C_in*H_k*W_k, N*H_out*W_out]`——即 K×M。第 63-64 行就是输出尺寸公式。
 
-[cpu/TImg2col.hpp:L110-L145](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/TImg2col.hpp#L110-L145) —— CPU 版 `TIMG2COL_IMPL`：纯双层循环。外层把行号 `r` 逆映射回 `(n, d, outRow, outCol)`，内层把列号 `c` 逆映射回 `(c1, c0, kernelH, kernelW)`，然后调 `CalculateValue` 取数或填 padding，写入 dst 的分形偏移。`FmatrixMode` 在 CPU 后端被 `(void)` 忽略——寄存器写放在 CPU 上是空概念。
+#### 4.1.4 代码实践
 
-[cpu/TImg2col.hpp:L147-L166](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/TImg2col.hpp#L147-L166) —— `CalculateValue`：计算 `inputH/inputW`，越界返回 `padValue`，命中则按 NC1HWC0 下标公式从 L1 数据取值。这 20 行就是 im2col 的全部数学。
+**实践目标**：不依赖任何硬件，用 golden 脚本亲眼确认「卷积 → 两个矩阵」的形状映射。
 
-> 提示：NPU 版与 CPU 版对 **dst 布局的 static_assert 措辞不同**（NPU 要求 RowMajor，CPU 要求 ColMajor，见 [TImg2col.hpp:L100-L101](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/TImg2col.hpp#L100-L101) 与 [cpu/TImg2col.hpp:L47-L48](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/TImg2col.hpp#L47-L48)），`TileLeft` 的默认布局在不同后端下解释有差异。写跨后端 kernel 时以所编译后端头文件的断言为准。
-
-#### 4.1.4 代码实践：跑通并改造 timg2col ST 用例
-
-1. **实践目标**：在 CPU 仿真下观察 `TIMG2COL` 的输出，验证你对 posM/posK 与 padding 语义的理解。
-2. **操作步骤**：
-   - 打开 [tests/cpu/st/testcase/timg2col/main.cpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/tests/cpu/st/testcase/timg2col/main.cpp)，重点读第一个用例（L80-L125）：特征图 1×3×4、C0=8，2×2 卷积核，`padList={1,0,1,0}`（左 1、上 1），`padValue=-1.0f`，调用 `TIMG2COL(dst, src, 1, 8)` 从展开矩阵的 (posM=1, posK=8) 处取一块 16×16。
-   - 用 `python3 tests/run_cpu.py` 构建 CPU ST 用例并用它运行 timg2col（可在 `tests/README.md` 确认过滤参数写法；若脚本参数不支持按名过滤，运行全部用例观察 `TImg2colCpuSimTest` 两组用例是否 PASSED）。
-   - 手工推一个元素：展开矩阵第 1 行对应输出像素 (outRow=0, outCol=1)，第 8 列对应 kIndex=8+0 通道维的哪个抽头？对照 L131-L137 的逆映射公式算出 `dst[0][0]` 应取 `src` 的哪个下标，再与 `BuildExpected` 的参考值核对。
-3. **需要观察的现象**：gtest 输出两组用例（`ManualMetadataPath...` 与 `AutoMetadataPath...`）均 PASSED；两者分别覆盖 MANUAL 与 AUTO 两种配置下发路径。
-4. **预期结果**：CPU 仿真输出与 numpy 风格参考实现逐元素一致，误差为 0（`EXPECT_FLOAT_EQ`/`EXPECT_EQ`）。
-5. 以上运行结果**待本地验证**（本讲义写作时未实际执行）。
+1. **操作步骤**：进入 `kernels/manual/a2a3/conv2d_forward/scripts/`，先直接运行 `python3 gen_data.py`（生成 input/golden 二进制）；然后在该目录用 `python3 -c` 交互式导入 `img2col_nhwc`，对一个 \(1 \times 8 \times 8 \times 16\)（NHWC）输入、\(3 \times 3\) 核、padding 全 0 调用它，打印 `col_matrix.shape`。
+2. **需要观察的现象**：col_matrix 形状应为 \((16 \times 3 \times 3,\ 1 \times 6 \times 6) = (144,\ 36)\)；把 padding 改为 \((1,1,1,1)\) 后变为 \((144,\ 64)\)（输出变 \(8 \times 8\)）。
+3. **预期结果**：K = \(C_{in} \cdot h_k \cdot w_k\)、M = \(N \cdot H_{out} \cdot W_{out}\) 与 4.1.2 的分解完全一致；输入体积 \(8 \times 8 \times 16 = 1024\) 元素被展开成 \(144 \times 36 = 5184\)，直观体现 im2col 的膨胀代价。
+4. 若你的 numpy 环境异常无法运行，标注「待本地验证」，改为通读 `img2col_nhwc` 第 75-87 行的双重循环逐行核对。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 conv2d_forward 中权重走 `TEXTRACT` 而特征图走 `TIMG2COL`？
+**练习 1**：默认用例（`hin=16, win=96, hk=wk=3, stride=1, dilation=1, pad=1`）下，展开矩阵的 M 和 K 各是多少？
+**答案**：\(h_{out} = (16+1+1-2-1)/1+1 = 16\)，\(w_{out} = (96+1+1-2-1)/1+1 = 96\)；M = \(4 \times 16 \times 96 = 6144\)，K = \(32 \times 16 \times 3 \times 3 = 4608\)。这与 kernel 模板参数 `m=6144, k=4608`（4.4 节）严丝合缝。
 
-**答案**：权重已离线重排为 `FRACTAL_Z` 格式，本身就是 Cube 想要的矩阵形态，只需从 L1 按行窗口切片到 L0B；特征图是 NC1HWC0 摆放、卷积需要在滑动窗口中重复取数，必须做 im2col 展开——`TIMG2COL` 让展开随搬运免费完成。
+**练习 2**：为什么 `ConvTile` 要把卷积超参挂在自己身上，而不是像 TMATMUL 那样全走函数参数？
+**答案**：卷积超参多达十余个（fmap 尺寸、四边 pad、stride、dilation、核尺寸、padValue、repeat 配置……），塞进函数签名会让每条调用点冗长且易错；挂在 tile 上后，「这块 L1 数据按什么卷积参数解释」与数据本身绑定，TIMG2COL 只需 `(dst, src, posM, posK)` 四个参数，同一 tile 也可在多次展开间复用/微调（如 conv2d_forward 每个 m 块只改 `padList` 的上下边）。
 
-**练习 2**：`posM=1, posK=8` 各自是什么含义？为什么 kernel 主循环里每轮 kIter 要传不同的 posK？
-
-**答案**：`posM/posK` 是本次生成的块在完整 im2col 矩阵（M = N×H_out×W_out，K = C_in×hk×wk）中的行列起始偏移。K 维太长装不进 L0A，kernel 按每轮 `baseK` 切一段，第 i 轮传 `posK = i * baseK`（见后文 `kModStepKa * baseK`），M 维同理按输出像素块推进。
-
-**练习 3**：若把 `padValue` 从 0 改成 -1，输出特征图哪些位置会变化？
-
-**答案**：只有覆盖 padding 区的输出像素（即至少一个抽头落到特征图之外的滑窗位置，如图像第一行/列的输出）会变化，其求和项中越界抽头从 0 变为 -1×对应权重；完全落在图内的滑窗不受影响。
-
-### 4.2 ConvTile 与 SetFmatrix/SetImg2col 配置指令族
+### 4.2 TImg2col 指令：一条指令完成「展开 + L1→L0A 搬运」
 
 #### 4.2.1 概念说明
 
-`TIMG2COL` 的卷积参数（fmap 尺寸、pad、stride、dilation、filter、channelSize）不是作为指令参数逐个传入，而是挂在源 tile 上——这个 tile 类型就是 `ConvTile`：一个"普通数据 + 一包卷积元数据"的结构体。而硬件原语 `img2colv2_cbuf_to_ca` 真正消费的是三个**硬件配置寄存器**：
+朴素 im2col 要先把展开矩阵在内存里物化出来再喂给 Cube，多一次完整搬运。TIMG2COL 把两步合成一步：**源是 L1 上的 ConvTile（原始特征图），目的直接是 L0A 上的 `TileLeft`（展开后的矩阵）**，展开在搬运途中由硬件完成。它等价于「TEXTRACT + im2col」——对比 4.4 节 kernel 里权重走 `TEXTRACT`（纯切片）而特征图走 `TIMG2COL`（切片 + 展开），两条指令挂在同一条 MTE1 流水线上。
 
-| 寄存器 | 写入指令 | 内容 |
-| :--- | :--- | :--- |
-| FMATRIX | `SETFMATRIX` | fmapW(16bit) \| fmapH(16bit) \| padList[4](4×8bit) 打包成 64bit |
-| L3D_RPT | `SET_IMG2COL_RPT` | repeatStride(16bit) \| repeatTime(8bit) \| repeatMode(8bit) |
-| PADDING | `SET_IMG2COL_PADDING` | 按数据位宽(1/2/4 字节)打包的填充值 |
-
-`SetFmatrixMode`（[type.hpp:L339-L344](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/common/type.hpp#L339-L344)）的四个枚举值决定**谁在什么时候写这些寄存器**：
-
-- `FMATRIX_A_MANUAL / A_AUTO`：作用于 A 矩阵（特征图通路），MANUAL 需用户显式调 `SETFMATRIX` 等指令，AUTO 则在每条 `TIMG2COL` 内部自动下发；
-- `FMATRIX_B_MANUAL / B_AUTO`：同上，但走 `set_fmatrix_b`（B 侧寄存器），供双矩阵卷积场景（如卷积反传对权重做 im2col）使用。
-
-选择依据：配置不变时 MANUAL 只写一次、循环内省去重复写寄存器；fmap 参数随行块变化（如 padList 逐块不同）时用 AUTO 让每条指令自带配置更安全。
+`posM/posK` 是滑窗坐标：L1 里缓存的特征图只能展开出 im2col 大矩阵的一个局部，`(posM, posK)` 指明本次要取「全局展开矩阵」中从第 posM 行、第 posK 列开始的子块。
 
 #### 4.2.2 核心流程
 
-```text
-MANUAL 模式（conv2d_forward 采用）：
-    配置 ConvTile 元数据（SetFmapH/SetPadList/...）
-    → SETFMATRIX(convTile) + SET_IMG2COL_PADDING + SET_IMG2COL_RPT   # 只写一次
-    → 循环 { TIMG2COL(dst, src, posM, posK) }                          # 直接用寄存器现值
+公共 API 仍是熟悉的三段式薄壳：
 
-AUTO 模式：
-    循环 { TIMG2COL(dst, src, posM, posK) }   # 每条指令内部先写三组寄存器再执行
+```text
+TIMG2COL(dst, src, posM, posK, events...)
+  ├─ TSYNC(events...)          # 等待传入的依赖事件（u2-l3）
+  ├─ TIMG2COL_IMPL(dst, src, posM, posK)
+  │    ├─ static_assert 编译期契约（类型/布局/位置）
+  │    ├─ [仅 AUTO 模式] 自动 SETFMATRIX/SET_IMG2COL_RPT/SET_IMG2COL_PADDING
+  │    ├─ stepM = dst.GetValidRow()
+  │    ├─ stepK = CeilAlignment(dst.GetValidCol(), c0Size)   # 列数向上对齐到 C0
+  │    └─ img2colv2_cbuf_to_ca(dst, src, stepK, stepM, posK, posM, ...)  # 硬件 intrinsic
+  └─ return RecordEvent
 ```
+
+注意 NPU 实现里 `stepM/stepK` 传给 intrinsic 时顺序是 `(stepK, stepM)`，且 stepK 按 `c0Size`（32 字节块内的元素数）向上对齐——展开矩阵的列必须凑满整个 \(C_0\) 分形，不满处由硬件补齐。
 
 #### 4.2.3 源码精读
 
-**ConvTile 的元数据字段**：[pto_tile.hpp:L1314-L1354](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/common/pto_tile.hpp#L1314-L1354) 是一整组 getter/setter：`FmapH/FmapW`（特征图高宽）、`PadList[4]`、`FilterH/FilterW`、`DilationH/W`、`StrideH/W`、`PadValue`、`ChannelSize`、`RepeatStride/Time/Mode`、`Transpose`。对应的私有成员默认值见 [pto_tile.hpp:L1362-L1386](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/common/pto_tile.hpp#L1362-L1386)（stride/dilation 默认 1）。`ConvTileShape` 则与 `Shape` 同构：静态维进类型、`DYNAMIC(-1)` 维运行期填（[pto_tile.hpp:L1128-L1224](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/common/pto_tile.hpp#L1128-L1224)），最多支持 6 维（多出的 D 维用于 3D 卷积的 `NDC1HWC0`）。
+**公共 API 薄壳。**
 
-**SETFMATRIX**：[SetFmatrix.hpp:L15-L38](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/SetFmatrix.hpp#L15-L38) —— 仅在 MANUAL 模式生效；把 `fmapW` 放 bit 0-15、`fmapH` 放 bit 16-31、`padList[0..3]` 各 8bit 放 bit 32-63，打包成一个 `uint64_t` 写入 `set_fmatrix`（或 B 侧 `set_fmatrix_b`）。这个 64bit 排布与 intrinsic 的硬件寄存器格式一一对应。
+- [include/pto/common/pto_instr.hpp:907-916](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/common/pto_instr.hpp#L907-L916) — `TIMG2COL(dst, src, posM=0, posK=0, events...)`：模板参数 `FmatrixMode` 默认 `FMATRIX_A_MANUAL`，函数体就是 TSYNC + `TIMG2COL_IMPL` 转发，返回 `RecordEvent`。与 TMATMUL 等指令完全同构（u2-l4 的三层结构）。
 
-**SET_IMG2COL_RPT**：[SetImg2colRpt.hpp:L15-L24](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/SetImg2colRpt.hpp#L15-L24) —— 同样仅 MANUAL 模式生效；`repeatStride | repeatTime<<16 | repeatMode<<24` 打包写 `set_l3d_rpt`，控制硬件按 repeat 粒度自动重复搬运（同一行块内多个 16×16 子块的步进方式）。
+**A2/A3 真机实现。**
 
-**SET_IMG2COL_PADDING**：[SetImg2colPadding.hpp:L15-L33](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/SetImg2colPadding.hpp#L15-L33) —— 按数据位宽分支：1 字节类型把同一个字节复制两份（适配硬件一次至少搬 16bit），2/4 字节直接 reinterpret 成整数写 `set_padding`。
+- [include/pto/npu/a2a3/TImg2col.hpp:91-108](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/TImg2col.hpp#L91-L108) — `TIMG2COL_IMPL` 的编译期契约：源必须是 `TileType::Mat`（L1）且布局 `NC1HWC0/NDC1HWC0`；目的必须是 `TileLeft`（L0A）且 SLayout/BLayout 行主序；源目元素类型必须相同；dtype 白名单为 `int8_t/half/bfloat16_t/float`。违反任何一条直接编译失败——回顾 u3-l4 的结论：CPU 仿真检查较松，真机契约在 `*_IMPL` 层拦截。
+- [include/pto/npu/a2a3/TImg2col.hpp:109-113](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/TImg2col.hpp#L109-L113) — **AUTO 模式的核心差异**：若 `FmatrixMode` 为 `FMATRIX_A_AUTO/B_AUTO`，这里自动从 ConvTile 读参并依次调用 `SetFmatrix/SetRepeat/SetPadding` 写硬件寄存器；MANUAL 模式则什么都不做——寄存器由用户自己提前用 4.3 节的配置指令写好。
+- [include/pto/npu/a2a3/TImg2col.hpp:114-120](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/TImg2col.hpp#L114-L120) — `stepM` 取目的 tile 有效行、`stepK` 对齐到 `c0Size` 后，连同 ConvTile 上的 stride/dilation/filter/transpose/channelSize 一起传入底层 `TImg2col` 函数。
+- [include/pto/npu/a2a3/TImg2col.hpp:67-89](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/TImg2col.hpp#L67-L89) — 最内层：取 `__cbuf__`（L1）源指针与 `__ca__`（L0A）目的指针，处理 filterW/H 超过 255 时的高低位拆分，最终落到 `img2colv2_cbuf_to_ca` intrinsic。命名直译就是「cbuf(L1) → ca(L0A) 的 img2col」，印证 4.2.1 的通路判断。
 
-**AUTO 模式的对应实现**就在 TImg2col.hpp 内部：`SetFmatrix` 辅助函数 [TImg2col.hpp:L16-L38](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/TImg2col.hpp#L16-L38) 与 `SetRepeat`（L40-L49）、`SetPadding`（L51-L65）做完全相同的打包，区别只在 `*_AUTO` 模式才编译进来，并在 `TIMG2COL_IMPL` 的 L109-L113 被自动调用。ST 用例 [timg2col/main.cpp:L116-L119](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/tests/cpu/st/testcase/timg2col/main.cpp#L116-L119) 与 [timg2col/main.cpp:L161-L164](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/tests/cpu/st/testcase/timg2col/main.cpp#L161-L164) 分别演示了 `FMATRIX_B_MANUAL`（显式三条 SET 指令 + 裸 TIMG2COL）与 `FMATRIX_B_AUTO`（SET 调用可省）两种等价写法。
+**CPU 仿真实现（语义的金标准）。**
+
+- [include/pto/cpu/TImg2col.hpp:110-145](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/TImg2col.hpp#L110-L145) — CPU 版 `TIMG2COL_IMPL`：对目的有效区逐元素双重循环，行分解 \(mIndex = posM + r\) → \((n, d, outRow, outCol)\)，列分解 \(kIndex = posK + c\) → \((c1, kernelH, kernelW, c0)\)，再调 `CalculateValue` 回址取数。它不写任何寄存器（`(void)FmatrixMode` 直接丢弃模式参数），因为参数就存在 ConvTile 字段里，直接读即可。
+- [include/pto/cpu/TImg2col.hpp:147-166](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/TImg2col.hpp#L147-L166) — `CalculateValue`：默认取 `padValue`；按 \(h_{in} = outRow \cdot stride_h + kernelH \cdot dilation_h - pad_{top}\) 回址，越界（`inputH/inputW` 不在 `[0, fmapH/fmapW)` 内）则保持补边值，否则经 `GetInputOffset` 读源数据。
+- [include/pto/cpu/TImg2col.hpp:78-108](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/TImg2col.hpp#L78-L108) — `ExtractImg2ColParams`：从 ConvTile 抽出全部超参并在第 100-105 行重新实现了一遍输出尺寸公式——**这是公式在仓库里的第 4 处出现**（kernel、main、gen_data、cpu 仿真各一处），四处一致本身就是很好的交叉验证素材。
 
 #### 4.2.4 代码实践
 
-1. **实践目标**：搞清 padList 四元组的真实顺序，避免「top/bottom 填反」这类静默错误。
-2. **操作步骤**：
-   - 在 timg2col ST 用例中，把 L99 的 `padList[] = {1, 0, 1, 0}` 改成 `{0, 0, 1, 0}`（只保留 top=1），重新运行该用例；
-   - 对照 [cpu/TImg2col.hpp:L95-L98](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/TImg2col.hpp#L95-L98) 的 `padLeft=GetPadList(0)...padBottom=GetPadList(3)` 确认改动语义。
-3. **需要观察的现象**：用例仍然 PASSED——因为 golden 是由同一套 `BuildExpected`（读同一个 padList）生成的，改参数正确性不变，但**输出的数值矩阵变了**（第一列的填充分布改变）。如果想看到数值，可在 `TIMG2COL` 调用后临时打印 `dst.data()[i]`。
-4. **预期结果**：padList 槽位 0/1 影响左右边界、2/3 影响上下边界；`padList={1,0,1,0}` 与 `{0,0,1,1}` 产生不同的 im2col 矩阵，尽管 pad 总量相同。
-5. 数值对比部分**待本地验证**。
+**实践目标**：追踪单个元素的映射，确认你真的读懂了行列分解。
+
+1. **操作步骤**：对照 [include/pto/cpu/TImg2col.hpp:122-144](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/TImg2col.hpp#L122-L144)，设 `posM=96, posK=16`，`dst(r=0, c=0)`；手算：`mIndex=96`，在 \(H_{out}=16, W_{out}=96\)（练习 1 的默认用例）下 `mIndex % (16*96) = 96` → `outRow = 96/96 = 1, outCol = 0`；`kIndex=16`，在 \(C_0=16,\ h_k=w_k=3\) 下 `kernelOffset = (16 % 144)/16 = 0, c0Index = 0` → 核内左上角、第 0 通道。
+2. **需要观察的现象**：该元素回址 \(h_{in} = 1 \cdot 1 + 0 \cdot 1 - 1 = 0\)，\(w_{in} = 0\)，即读输入 `(h=0, w=0, ch=0)`——输出第 1 行第 0 列像素的感受野左上角，正是卷积定义。
+3. **预期结果**：换 `posK=32` 再算一次，应得到 `kernelOffset = 1`（核内 (0,1) 位置），\(w_{in} = 1\)。两个手算都对，说明分解顺序 \(C_1 \to (h_k,w_k) \to C_0\) 已被你掌握。
+4. 本实践为纯源码阅读 + 手算，无需运行环境。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：`SETFMATRIX` 与 `TIMG2COL<FMATRIX_A_AUTO>` 都能写 FMATRIX 寄存器，conv2d_forward 为什么选 MANUAL？
+**练习 1**：为什么 TIMG2COL 的目的 tile 必须是 `TileLeft`（L0A），而不能是 `TileType::Vec`（UB）？
+**答案**：TIMG2COL 的产物是 im2col 矩阵，唯一消费者是 Cube 矩阵乘的 A 操作数；而 TMATMUL 要求 A 在 L0A（u5-l1）。让展开直达 L0A，避免了「L1→UB→L0A」的二次搬运，也让 MTE1 流水线（它和 TEXTRACT 一样挂 MTE1）与 Cube 计算可以按事件重叠。
 
-**答案**：该算子中 fmap 的 `fmapH(hinCount)/fmapW` 与 padList 只随外层 mIter 变化，K 循环内几百条 `TIMG2COL` 共享同一配置。MANUAL 在每个 mIter 写一次寄存器（[conv2d_forward_kernel.cpp:L230](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L230)），循环内指令免带配置开销；AUTO 模式每条指令重复写同样的寄存器，浪费指令发射带宽。
+**练习 2**：`posM/posK` 在 4.4 节 kernel 中的实际取值是什么含义？
+**答案**：kernel 中调用为 `TIMG2COL(aTile[flag], fmapMat[idx], woutStart, kModStepKa * baseK)`——`posM = woutStart` 是当前 m 块起始输出像素在整行内的列偏移，`posK = kModStepKa * baseK` 是当前 k 块在 L1 缓存所覆盖的 K 范围内的列偏移；两者合起来把「全局 im2col 矩阵的 [baseM, baseK] 子块」定位出来（见 4.4.3）。
 
-**练习 2**：`ChannelSize` 字段是干什么的？不设会怎样？
-
-**答案**：它告诉硬件本次 im2col 展开覆盖的输入通道数（K 维一段对应的通道区间）。CPU 参考实现里 `channelSize<=0` 时退回 `fmapC1*fmapC0`（[cpu/TImg2col.hpp:L99](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/TImg2col.hpp#L99)）；NPU 上它参与 intrinsic 寻址，设错会导致取数错位。
-
-**练习 3**：64bit FMATRIX 寄存器为什么要留 4 个 8bit 给 padList？
-
-**答案**：卷积四边 padding 可以各不相同（非对称 pad，如 pooling 后的特征图），padList[0..3] 按左/右/上/下各占一个字节，硬件在滑窗寻址时按边分别判断越界。
-
-### 4.3 conv2d_forward：完整卷积算子精读
+### 4.3 SetFmatrix/SetImg2col 系列：三个寄存器与四种模式
 
 #### 4.3.1 概念说明
 
-`kernels/manual/a2a3/conv2d_forward` 把前面所有积木拼成一个生产级算子：输入 `X=[batch,cin,hin,win,c0]`（NC1HWC0）、权重 `K`（FRACTAL_Z）、输出 `Y=[batch,n/c0,hout,wout,c0]`。默认配置为 `X=[4,32,16,96,16]`、`K=[288,384,16,16]`、`Y=[4,384,16,96,16]`，stride/dilation=1、pad 四边=1，在 24 核 A3 上验证。
+A2/A3 硬件执行 img2col 时，卷积超参并不都走指令操作数，有一部分要预先写进三个硬件配置寄存器：
 
-它综合运用四项优化（README「Optimization Details」）：多核切分（4×6 网格，`singleCoreM=1536/singleCoreK=4608/singleCoreN=1024`，K 不切避免核间规约——与 u5-l3 gemm_performance 同一策略）、base block `[128,256,48]`（对 fp16 有更高计算访存比且利于 512B 对齐）、L1 caching（`stepKa=stepKb=3`，一次搬 3 个 K 块）、L1/L0A/L0B 三级双缓冲。
+| 寄存器 | 内容 | 写入指令 |
+| :--- | :--- | :--- |
+| FMATRIX（`set_fmatrix` / `set_fmatrix_b`） | 特征图宽 W(16bit)、高 H(16bit)、四边 padList(4×8bit) | SETFMATRIX |
+| L3D_RPT（`set_l3d_rpt`） | repeatStride(16bit)、repeatTime(8bit)、repeatMode(8bit) | SET_IMG2COL_RPT |
+| PADDING（`set_padding`） | 补边填充值（按数据位宽复制/直通打包） | SET_IMG2COL_PADDING |
 
-注意 K 维的身份：`k = cin*c0*hk*wk = 512*9 = 4608`，即 im2col 矩阵的列数；`baseK=48` 恰好等于 16 通道 × 9 个抽头，故每个 L1 panel 加载 `channelSize = ceil(stepKa*baseK/(hk*wk)) = ceil(144/9) = 16` 个通道的行条带。
+`SetFmatrixMode` 的四值枚举决定**谁来写这些寄存器**：
+
+- `FMATRIX_A_MANUAL`（默认）：用户在 TIMG2COL 前自己调 SETFMATRIX 等三条指令；
+- `FMATRIX_A_AUTO`：TIMG2COL 内部自动从 ConvTile 读参写寄存器，三条 SET 指令变成空操作；
+- `FMATRIX_B_*`：同上两档，但写 `set_fmatrix_b`（B 路寄存器），供需要第二组特征图配置的场景使用，具体场景为后端实现定义。
+
+配置指令的数据来源统一是 ConvTile 的字段——「SET 指令 = 把 tile 上的配置投影到寄存器」。
 
 #### 4.3.2 核心流程
 
-单核内（三级循环 mIter → nIter → kIter）的数据流：
+以 SETFMATRIX 为例，寄存器打包是纯位域拼接：
 
 ```text
-GM 特征图(NC1HWC0) ──TLOAD(MTE2)──> L1 fmapMat[2]      (ConvTile, Mat, 双缓冲)
-GM 权重(FRACTAL_Z) ──TLOAD(MTE2)──> L1 weightMat[2]    (ConvTile, Mat, 双缓冲)
-
-L1 fmapMat   ──TIMG2COL(MTE1)──> L0A aTile[2]   # 边搬边 im2col 展开
-L1 weightMat ──TEXTRACT(MTE1)──> L0B bTile[2]   # 普通行切片
-L0A + L0B    ──TMATMUL/TMATMUL_ACC(M)──> Acc outTile   # 首轮清零、后续累加
-Acc outTile  ──TSTORE(FIX)──> GM 输出(NC1HWC0)
+regFmatrix[63:0]
+  = fmapW[15:0] | fmapH[31:16] | padList[0][39:32] | padList[1][47:40]
+  | padList[2][55:48] | padList[3][63:56]
+        ↓
+  set_fmatrix(regFmatrix)   // 或 set_fmatrix_b
 ```
 
-事件配对（沿用 u5-l3 的模式）：`MTE1→M` 保护「TEXTRACT 完成后才能 TMATMUL」；`M→MTE1` 保护「TMATMUL 用完 L0 半区后才能翻写另一个半区」；`MTE2→MTE1` 保护 L1 槽复用；循环首尾用 `InitSyncFlags/WaitSyncFlags` 补齐反向同步。
+L3D_RPT 同理：`repeatStride[15:0] | repeatTime[23:16] | repeatMode[31:24]`。PADDING 按 `sizeof(DType)` 分三档：1 字节时把同一字节复制成高低两份（适配硬件按 16bit 通道单元取值），2/4 字节时直接整型直通。
 
 #### 4.3.3 源码精读
 
-**核间切分**：[conv2d_forward_kernel.cpp:L59-L74](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L59-L74) —— `InitGMOffsets` 用 `get_block_idx()` 算出本核在 4×6 网格中的 (mCoreIdx, nCoreIdx)，把 GM 指针推到本核负责的 A panel、B panel 与 C tile 起点。各核输出互不相交，全程无需 SyncAll。
+**模式枚举。**
 
-**ConvTile 配置（本讲核心知识的落点）**：[conv2d_forward_kernel.cpp:L215-L232](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L215-L232) —— 每个 mIter 先按输出行窗口推算需要的输入行区间 `[hinStart, hinEnd]`（L208-L213），再配置两个 fmapMat：`SetFmapH(hinCount)/SetFmapW(win)/SetFilterH(3)/SetFilterW(3)`；**padList 的四边是动态计算的**——`SetPadList(0/1, 1)` 是固定的左右 pad，而 `SetPadList(2, Max(0, padTop - houtStart*strideH))`、`SetPadList(3, ...)` 是「本行窗口相对整图的等效上下 pad」：因为 L1 里只装了特征图的一个行条带，窗口第一行距离条带顶部的越界量要重新折算。随后 L230 `SETFMATRIX(fmapMat[0])` 一次性下发配置（MANUAL 模式），L231-L232 用 `TASSIGN` 把两个 L1 panel 摆到不重叠的偏移。
+- [include/pto/common/type.hpp:339-344](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/common/type.hpp#L339-L344) — `enum class SetFmatrixMode` 四个值：`FMATRIX_A_AUTO / FMATRIX_B_AUTO / FMATRIX_A_MANUAL / FMATRIX_B_MANUAL`。
 
-**K 迭代主体**：[conv2d_forward_kernel.cpp:L150-L185](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L150-L185) —— `ProcessKIteration`：每 `stepKa` 轮做一次 TLOAD（L167-L179）：构造 5 维 `GlobalTensor` 视图描述 NC1HWC0 特征图（动态维填 `hinCount`）与 FRACTAL_Z 权重，先 `WaitFlag<PIPE_MTE1, PIPE_MTE2>` 等 L1 槽空闲，再分别 TLOAD 并各挂牌一个 `MTE2→MTE1` 事件（fmap 用 0 号、weight 用 1 号），最后翻转 mte2DBFlag。
+**SETFMATRIX 真机实现：位域打包。**
 
-**TIMG2COL 的调用点**：[conv2d_forward_kernel.cpp:L114-L145](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L114-L145) —— `MacroMatmul` 是一轮 K 的四段流水：① 等 TMATMUL 释放 L0 半区；② **`TIMG2COL(aTile[mte1DBFlag], fmapMat[currMte2Idx], woutStart, kModStepKa * baseK)`**（L129）——posM 传 `woutStart`（本 M 块起始输出像素在行内的列偏移）、posK 传 `kIter % stepKa * baseK`（本块在 L1 panel 内的 K 偏移）；同一条 MTE1 流水上，权重侧用 `TEXTRACT` 切片（L132）；③ 每 stepKa 轮末放行 L1 槽（L134-L137）；④ `TMATMUL`/`TMATMUL_ACC`（L140-L144，首轮清零、后续累加，与 u5-l2 gemm 基线同构，见 L37-L45 的 `MatmulAcc`）。
+- [include/pto/npu/a2a3/SetFmatrix.hpp:15-38](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/SetFmatrix.hpp#L15-L38) — 仅在 MANUAL 两档生效；`fmapW` 占低 16 位、`fmapH` 左移 16、`padList[0..3]` 从第 32 位起每项 8 位；A_MANUAL 走 `set_fmatrix`，B_MANUAL 走 `set_fmatrix_b`。
+- [include/pto/npu/a2a3/SetImg2colRpt.hpp:15-24](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/SetImg2colRpt.hpp#L15-L24) — SET_IMG2COL_RPT 实现：`repeatStride | repeatTime<<16 | repeatMode<<24` 打包写 `set_l3d_rpt`，同样只在 MANUAL 档生效。
+- [include/pto/npu/a2a3/SetImg2colPadding.hpp:15-33](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/SetImg2colPadding.hpp#L15-L33) — SET_IMG2COL_PADDING 实现：按 `sizeof(DataType)` 1/2/4 字节三档打包 `padValue` 写 `set_padding`；int8 场景把单字节复制到高低字节。
 
-**写回**：[conv2d_forward_kernel.cpp:L76-L95](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L76-L95) —— `StoreResult` 用一个 5 维 NC1HWC0 的 `GlobalTensor` 视图描述输出，`TSTORE` 把 Acc tile 写回 GM，前后各一对 `M↔FIX` 事件。
+**公共 API 与架构分档。**
 
-**编译期尺寸推导**：[conv2d_forward_kernel.cpp:L339-L340](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L339-L340) —— `hout/wout` 直接用第 2 节的公式在编译期算出（默认 pad=1、3×3 核、stride=1 时 hout=16、wout=96），再据此推 `m = batch*hout*wout = 6144`。host 侧 [main.cpp:L28-L31](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/main.cpp#L28-L31) 用同一公式计算输出文件大小；golden 侧 [gen_data.py:L63-L64](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/scripts/gen_data.py#L63-L64) 的软件 im2col 也是同一公式——三处必须一致，这正是本讲综合实践的验证点。
+- [include/pto/common/pto_instr.hpp:918-924](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/common/pto_instr.hpp#L918-L924) — `SETFMATRIX(src, events...)` 薄壳，转发 `SETFMATRIX_IMPL`。
+- [include/pto/common/pto_instr.hpp:942-975](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/common/pto_instr.hpp#L942-L975) — `SET_IMG2COL_RPT/PADDING` 按架构用两段 `#if` 各定义一次：A2A3+KirinX90 一套、A5+Kirin9030+`__CPU_SIM` 一套，签名相同。回顾 u2-l4 的「架构 × 后端」互斥编译分层。
 
-#### 4.3.4 代码实践：修改 padding 并手算输出尺寸
+**CPU 仿真端：SET 指令退化为断言。**
 
-1. **实践目标**：验证「改一个 pad，三处尺寸推导必须联动」这一工程事实。
-2. **操作步骤**：
-   - **手算**：默认 `hin=16, win=96, hk=wk=3, stride=1, dilation=1, pad 全 1` 时 `hout=16, wout=96`。现在把 `padTop` 从 1 改为 2，用公式算出 `hout = (16+2+1-2-1)/1+1 = 17`，`wout` 不变 = 96；新 `m = batch*hout*wout = 4*17*96 = 6528`（原 6144）。
-   - **改代码**（三处联动）：① [gen_data.py:L162](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/scripts/gen_data.py#L162) 的 `padding=(1,1,1,1)` 改为 `(2,1,1,1)`；② kernel 侧模板默认值 `padTop = 1`（[conv2d_forward_kernel.cpp:L248](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L248)）改为 2——`hout` 会在 L339 自动重算；③ `launchConv2dForward` 里的 `m=6144`（L309）与 `singleCoreM=1536`（L312）需按新 `m` 重推（`singleCoreM = m/4`，若不能整除还需调整核网格）。
-   - **运行**（需 NPU 环境，CPU 仿真不覆盖本算子工程）：`source ${ASCEND_INSTALL_PATH}/bin/setenv.bash` → `python3 scripts/gen_data.py` → `bash run.sh -r npu -v Ascend910B1`。
-3. **需要观察的现象**：golden 输出文件 `output/golden.bin` 大小变为 `4*384*17*96*16*2` 字节（NC1HWC0、fp16）；程序末尾打印 `test success`。
-4. **预期结果**：kernel 输出与手算尺寸一致、数值与 golden 比对通过（容差 0.001，见 [main.cpp:L80](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/main.cpp#L80)）。
-5. 无 NPU 环境时可做**源码阅读型验证**：只完成手算 + 对照三处公式，标注「待本地验证」。
+- [include/pto/cpu/SetFmatrix.hpp:14-19](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/SetFmatrix.hpp#L14-L19) — CPU 版 `SETFMATRIX_IMPL` 只做 `PTO_CPU_ASSERT(fmapH>0 && fmapW>0)`，不写任何寄存器：CPU 的 TIMG2COL 直接读 ConvTile 字段（4.2.3），寄存器机制纯属真机细节。
+- [include/pto/npu/a2a3/TImg2col.hpp:40-65](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/TImg2col.hpp#L40-L65) — `SetRepeat/SetPadding` 内部函数：AUTO 模式下由 TIMG2COL_IMPL 第 109-113 行调用的正是这两个函数加上文件首部的 `SetFmatrix`（[第 16-38 行](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/TImg2col.hpp#L16-L38)），与 4.3.1 表格中三条 SET 指令的实现体一一对应——AUTO/MANUAL 的差别只是「调用时机在 TIMG2COL 内部还是外部」。
+
+#### 4.3.4 代码实践
+
+**实践目标**：搞清楚选不同 `FmatrixMode` 时你需要多写/少写哪些指令。
+
+1. **操作步骤**：阅读 4.4.3 节将看到的 kernel 写法——`SETFMATRIX(fmapMat[0])` 显式调用一次（MANUAL 风格）。假设把它删掉并把 `TIMG2COL` 的模板实参改成 `FMATRIX_A_AUTO`，列出指令序列的变化。
+2. **需要观察的现象**：MANUAL 档下 SETFMATRIX/SET_IMG2COL_RPT/SET_IMG2COL_PADDING 各自生效写寄存器；AUTO 档下这三条 SET 变空操作（其 IMPL 里的 `if constexpr` 分支不命中），改由 TIMG2COL_IMPL 内部自动完成同样三件事（[TImg2col.hpp:109-113](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/TImg2col.hpp#L109-L113)）。
+3. **预期结果**：结论是两档最终写入的寄存器内容相同；工程上 MANUAL 档可以在「参数不变的多轮循环外只写一次寄存器」来省指令（kernel 正是这么做的，每 m 块 SETFMATRIX 一次、循环内 kIter 多轮复用），AUTO 档胜在不易漏配。CPU 仿真下两种写法结果完全一致（SET 均为空操作/断言），差异只在真机指令数——「待本地验证」于真机。
+4. 本实践为源码阅读型，无需运行。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：kernel 中 `SetPadList(2, Max(0, padTop - houtStart*strideH))` 为什么不能直接写 `padTop`？
+**练习 1**：`regFmatrix` 是 64 位，`fmapH/fmapW` 各占 16 位、`padList` 4 项各 8 位，刚好占满。由此推断 fmapW 的上限是多少？
+**答案**：16 位无符号，上限 65535；这也解释了 [TImg2col.hpp:81-84](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/npu/a2a3/TImg2col.hpp#L81-L84) 为什么对 `filterW/H > 255` 要做高低位拆分——filter 尺寸参数在 intrinsic 里只有 8 位低位通道，超限部分走额外参数传递。
 
-**答案**：L1 里的 fmapMat 只装了特征图的一个行条带 `[hinStart, hinEnd]`，`TIMG2COL` 的越界判断以条带为坐标系。当本 M 块的输出行窗口从条带顶部就引入全局 padding 时（houtStart*strideH < padTop），条带内等效上 pad 是 `padTop - houtStart*strideH` 而非全局 padTop；反之为 0。下边同理。填错会导致条带边缘元素被误当成 padding。
+**练习 2**：为什么 CPU 仿真端保留 SETFMATRIX 的调用形式，却只做断言？
+**答案**：保持 kernel 源码「一份代码、多后端编译」（u2-l4 的核心承诺）。若 CPU 端删掉这个符号，同一份 kernel 在 `__CPU_SIM` 下就编译不过；保留接口、掏空实现，既维持了 API 一致性，又顺手在仿真期拦截 `fmapH/fmapW` 忘配置（=0）这类低级错误。
 
-**练习 2**：`baseK=48` 这个数字是怎么来的？换成 64 会发生什么？
+### 4.4 conv2d_forward 完整算子：四级流水、L1 caching 与 double buffer
 
-**答案**：48 = c0(16) × hk(3) × wk(3) / wk... 更准确地说 48 = c0 × hk × wk / 3？不——48 = 16 通道 × 3×3 抽头 / 3？正解：`stepKa*baseK = 144 = channelSize(16) × hk*wk(9)`，即 baseK=48 恰是 16/3... 实际约束是 `channelSize = ceil(stepKa*baseK/(hk*wk))` 必须取整使 L1 行条带对齐通道组。**参考答案**：baseK 必须与 `c0×hk×wk`（=144 的因子结构）对齐，否则一个 K 块会横跨不完整的通道组，im2col 列映射错位；改成 64 会破坏该对齐，需同步重选 stepKa 使 `stepKa*baseK` 仍为 9 的倍数且通道组完整（待读者结合 L257-L258 的 `channelSize` 推导确认）。
+#### 4.4.1 概念说明
 
-**练习 3**：性能表（README「Measured Performance」）中 TEXTRACT 占比常在 60% 左右且随规模基本不降，瓶颈在哪个流水段？这对 A/B 两条通路分别意味着什么？
+`kernels/manual/a2a3/conv2d_forward` 把本讲三条指令组装成一个生产级卷积前向。它的总骨架与 u5-l3 的 gemm_performance 同源——**卷积在这里就是一次布局特殊的 GEMM**——但 A 矩阵（特征图展开）的 L1→L0 段从 `TEXTRACT` 换成了 `TIMG2COL`。README 总结的四个优化手段：多核切分（24 核 4×6 划 M/N）、base block 选择（`[128, 256, 48]`）、L1 caching（`stepKa=stepKb=3`，一次搬 3 个 k 块）、double buffer（L1/L0A/L0B 三级乒乓）。
 
-**答案**：MTE1（片上搬移）压力主要来自 B 侧 TEXTRACT 与 A 侧 TIMG2COL 共享同一流水线。改善方向是减少 MTE1 指令量：B 侧加大 baseN/stepKb 让每次 TEXTRACT 搬更多；A 侧 TIMG2COL 同理加大 baseK。TMATMUL 占比 90%+ 时接近 Cube 饱和，进一步优化应转向消除 MTE1 气泡。
+#### 4.4.2 核心流程
+
+单个核内一次 m 块的计算（`mLoop × nLoop × kLoop` 三重循环）：
+
+```text
+for mIter:                                  # 沿 M(=batch*hout*wout) 切 baseM=128
+    计算本块覆盖的输出行范围 → 反推输入行窗口 [hinStart, hinEnd]
+    为 fmapMat 填 ConvTile 参数(fmapH/W、filter、四边 pad、channelSize)
+    SETFMATRIX(fmapMat[0])                  # MANUAL 档：寄存器只写一次
+    for nIter:                              # 沿 N 切 baseN=256
+        for kIter:                          # 沿 K(=cin*hk*wk) 切 baseK=48
+            每 stepKa=3 轮才 TLOAD 一次     # MTE2: GM→L1, 一次搬 3 个 k 块
+            TIMG2COL(aTile, fmapMat, woutStart, kModStepKa*baseK)  # MTE1: 展开+切片→L0A
+            TEXTRACT (bTile, weightMat, ...)                         # MTE1: 纯切片→L0B
+            TMATMUL / TMATMUL_ACC          # M: 首轮初始化、后续累加
+        TSTORE                              # FIX: 写回 GM
+```
+
+核间按 `blockIdx` 做 4×6 划分（M 方向 4 组、N 方向 6 组），每核输出互不重叠、零核间同步——与 u5-l2 基线 GEMM 相同的多核哲学。L1 caching 的收益在于：同一片输入特征图被连续 3 个 k 块共用，`TIMG2COL` 用不同的 `posK` 从同一块 L1 数据里三次取数，GM 搬运量摊薄为 1/3。
+
+#### 4.4.3 源码精读
+
+**tile 类型与缓冲摆放。**
+
+- [kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp:257-266](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L257-L266) — `channelSize = Ceil(stepKa*baseK, hk*wk)`（一次 L1 缓存覆盖的通道数），据此定义 `TileMatAData = ConvTile<Mat, U, bufferSizeA, NC1HWC0, ConvTileShape<1, channelSize/c0, -1, win, c0>>`（H 维动态）与 `TileMatBData = ConvTile<Mat, U, bufferSizeB, FRACTAL_Z, ...>`（权重，纯数据用途）。
+- [kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp:270-279](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L270-L279) — `TileLeft/TileRight/TileAccCompact` 分别是 L0A/L0B/累加器 tile；`TASSIGN` 把 L0A/L0B 两个乒乓槽摆在 `0x0` 与 `0x0 + 32KiB`（`L0_PINGPONG_BYTES`，与 u5-l3 相同的 L0 半区约束）。回顾 u3-l2：Manual 模式下摆放地址是开发者的责任。
+
+**ConvTile 参数填充与 SETFMATRIX（4.3 的实战现场）。**
+
+- [kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp:215-231](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L215-L231) — 对每个乒乓槽的 fmapMat：`SetFmapH(hinCount)/SetFmapW(win)/SetChannelSize/SetFilterH(3)/SetFilterW(3)`；四边 pad 中**左右边硬编码 1**（`SetPadList(0,1)/(1,1)`），**上下边按本 m 块与图像边界的关系动态计算**（第 225-226 行：块首行之前的补边、块尾行之后超出图像的补边）——im2col 的 pad 语义被拆到「整图边界」上，块内不重复补。随后 `SETFMATRIX(fmapMat[0])` 一次写寄存器，循环内所有 TIMG2COL 复用。
+- [kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp:204-213](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L204-L213) — m 块 → 输出像素行范围（`mStart/wout → houtStart/houtEnd`）→ 反推输入行窗口 `hinStart/hinEnd` 的换算，`hinStart = Max(0, houtStart*strideH - padTop)` 正是 4.2 回址公式的逆过程。
+
+**主循环：TIMG2COL 与 TEXTRACT 并肩工作。**
+
+- [kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp:146-179](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L146-L179) — `ProcessKIteration`：每 `stepKa=3` 轮 kIter 才构造一次 fmap/weight 的 GlobalTensor 视图并 `TLOAD` 进 L1 乒乓槽（`SetFlag<PIPE_MTE2, PIPE_MTE1>` 用 0/1 两个编号分别标记 A/B 两条搬运完成）；否则直接进入矩阵乘阶段。
+- [kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp:114-145](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L114-L145) — `MacroMatmul`：先 `WaitFlag<PIPE_M, PIPE_MTE1>` 等 Cube 用完 L0 槽；第 129 行 `TIMG2COL(aTile[mte1DBFlag], fmapMat[currMte2Idx], woutStart, kModStepKa*baseK)` 完成「L1 特征图 → L0A 展开子块」，第 132 行 `TEXTRACT` 同期把权重切片进 L0B；之后 `SetFlag/WaitFlag<PIPE_MTE1, PIPE_M>` 握手交棒给 `TMATMUL/TMATMUL_ACC`（`MatmulAcc` 见[第 37-45 行](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L37-L45)，首轮清零、后续累加，即 u5-l1 的 split-K 累加协议）。三条流水（MTE2/MTE1/M）靠事件编号 + 乒乓槽位交替重叠。
+- [kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp:97-113](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L97-L113) — `InitSyncFlags/WaitSyncFlags`：循环首尾补发/补等反向同步事件，保证「最后一次反向等待」有牌可等（u5-l3 同款技巧）。
+
+**写回与 host 侧。**
+
+- [kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp:79-95](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L79-L95) — `StoreResult`：输出按 NC1HWC0 的 5 维 shape/stride 构造 GlobalTensor 视图后 `TSTORE`，`PIPE_M→PIPE_FIX` 事件对保护「累加器未写完不搬运」。
+- [kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp:305-345](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L305-L345) — `launchConv2dForward`：全部 tiling 参数以 `constexpr` 固化（`m=6144, k=4608, n=6144`，与练习 1 手算一致）；第 339-340 行用输出尺寸公式算出 `hout/wout` 再传入 kernel 模板。**注意**：模板实参列表在第 299 行传到 `wout` 为止，`stride/pad` 系列形参走模板默认值 1——想改 padding 生效，只改这里的 constexpr 变量是不够的（见 4.4.4）。
+- [kernels/manual/a2a3/conv2d_forward/main.cpp:28-31](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/main.cpp#L28-L31) 与 [main.cpp:88-104](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/main.cpp#L88-L104) — host 侧用同一公式分配输出内存；golden 比对在第 75-85 行（容差 0.001）。
+
+#### 4.4.4 代码实践（本讲主实践）
+
+**实践目标**：修改 padding 参数并手算一层输出尺寸，与程序输出对比。
+
+**第一层：手算 + 三处代码交叉验证（零依赖，必做）**
+
+1. **操作步骤**：
+   - 用第 2.1 节公式手算两组输出尺寸：
+     - 默认：\(h_{in}=16, w_{in}=96\)，pad 全 1，\(h_k=w_k=3\)，stride/dilation=1 → \(h_{out}=16, w_{out}=96\)；
+     - 改 pad 全 0 → \(h_{out} = (16-2-1)+1 = 14\)，\(w_{out} = (96-2-1)+1 = 94\)。
+   - 在仓库中定位同一公式的四处实现并核对取参：[conv2d_forward_kernel.cpp:339-340](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L339-L340)、[main.cpp:29-30](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/main.cpp#L29-L30)、[gen_data.py:63-64](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/scripts/gen_data.py#L63-L64)、[cpu/TImg2col.hpp:100-105](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/TImg2col.hpp#L100-L105)。
+2. **需要观察的现象**：默认参数下程序各处应一致得到 \(16 \times 96\)；同时确认 \(m = batch \cdot h_{out} \cdot w_{out} = 4 \times 16 \times 96 = 6144\) 与 tiling 表里的 `m=6144` 对应。
+3. **预期结果**：手算、kernel 模板参数、host 内存分配、golden 造数四者闭合；若 pad 改 0，则 \(m\) 应变为 \(4 \times 14 \times 94 = 5264\)——这是第二层改动的检查锚点。
+
+**第二层：本机运行 golden 脚本（有 numpy 即可）**
+
+1. **操作步骤**：把 [gen_data.py:156-164](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/scripts/gen_data.py#L156-L164) 中 case 的 `padding=(1,1,1,1)` 改为 `(0,0,0,0)`，运行 `python3 gen_data.py`；用 `ls -l output/golden.bin` 观察文件大小。
+2. **需要观察的现象**：golden 字节数从 \(4 \cdot 16 \cdot 96 \cdot 6144 \cdot 2\)（fp16，\(N_{out}=6144\)）按 \(h_{out} \times w_{out}\) 的缩减比例 \(14 \times 94 / (16 \times 96)\) 相应变小。
+3. **预期结果**：文件大小比例印证手算的 \(h_{out}=14, w_{out}=94\)。（改完后建议还原 `(1,1,1,1)`，避免影响后续真机运行。）
+
+**第三层：真机/sim 运行 kernel（需 CANN 环境，选做）**
+
+1. **操作步骤**：按 [README.md:109-134](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/README.md#L109-L134)：`source ${ASCEND_INSTALL_PATH}/bin/setenv.bash` → `python3 scripts/gen_data.py` → `bash run.sh -r npu -v Ascend910B1`（`run.sh` 亦接受 `-r sim` 走 CANN 仿真器，见 [run.sh:40-55](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/run.sh#L40-L55)）。若要真正改 padding，需同步修改：① `launchConv2dForward` 的 constexpr pad 值并显式传入 kernel 模板（或改模板默认值）；② `Compute` 内 [SetPadList(0/1) 的硬编码 1](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L223-L224)（左右边）；③ main.cpp 与 gen_data.py 的默认参数；④ `m` 等衍生 tiling 量。
+2. **需要观察的现象**：成功时输出 `test success`（golden 比对通过）；漏改上述任何一处，典型症状是边界行/列数值错或维度不匹配导致比对失败。
+3. **预期结果**：默认参数下 `test success`；padding=0 全链改动正确后同样 `test success`，且输出尺寸为 \(4 \times 384 \times 14 \times 94 \times 16\)。本层结果**待本地验证**（需要昇腾硬件或 C simulator，本次未运行）。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：README 性能表里 TLOAD 占比高达 75%~81%，TSTORE 只有 1.7%~5.6%，说明什么？
+**答案**：与 u5-l3 的判读方法一致——输入侧（特征图 + 权重）是内存瓶颈的主要来源，输出只写一次且被 \(h_k \cdot w_k \cdot C_{in}\) 倍计算摊薄；TMATMUL 占比 86%~91% 说明整体已接近 Cube Bound。TLOAD 高的另一个原因是 im2col 展开使特征图存在感受野重叠（相邻输出行共享输入行），L1 caching（stepKa=3）正是为了摊薄这部分重复搬运。
+
+**练习 2**：为什么特征图走 TIMG2COL 而权重走 TEXTRACT？
+**答案**：权重本来就是 \([C_{in} \cdot h_k \cdot w_k,\ N_{out}]\) 的「矩阵」（FRACTAL_Z 布局），K 迭代只需按行切片——TEXTRACT 足够；特征图是 5-D 图像，必须先做 im2col 展开才成为矩阵，TIMG2COL 把「展开 + 切片 + L1→L0A」合成一条指令，省去物化中间矩阵。
+
+**练习 3**：`Compute` 中 `SetPadList(2, Max(0, padTop - houtStart*strideH))` 为什么可能为 0？
+**答案**：padList 的 top 值描述「本块 L1 缓存的特征图上边界相对整图补边」。当 m 块的起始输出行不在图像第一行（`houtStart*strideH ≥ padTop`）时，L1 窗口上边界落在真实图像内部，无需再补边，故取 0；整图级的 pad 只在覆盖图像边界的块上出现。这体现了「分块后 pad 语义要按窗口重新折算」的实现细节。
 
 ## 5. 综合实践
 
-**任务：给 conv2d_forward 画一张「参数 → 指令」对照表并做一次 stride 修改。**
+**任务：给 conv2d_forward 写一份「卷积 → GEMM」映射说明书，并用 stride=2 验证你的理解。**
 
-1. 画出本算子的四级流水图（GM→L1→L0→Acc→GM），在每条边上标注指令（TLOAD/TIMG2COL/TEXTRACT/TMATMUL/TSTORE）、所属流水线（MTE2/MTE1/M/FIX）与保护它的事件对，重点标出 A 通路与 B 通路在 MTE1 上的分叉。
-2. 整理一张「卷积参数 → PTO 落点」表：`pad* → ConvTile::SetPadList + SETFMATRIX 寄存器 bit32-63`、`stride* → ConvTile::SetStride*（进 intrinsic 参数）`、`hk/wk → SetFilter*（同时决定 k=C*9 的长度）`、`hout/wout → 编译期常量（kernel L339-L340、main.cpp L29-L31、gen_data.py L63-L64 三处联动）`。
-3. 选做（需 NPU）：把 `strideH/W` 从 1 改成 2，重复 4.3.4 的三处联动流程（此时 `hout=(16+2-2*2-1)/2+1` 需重新手算），跑通并记录 `test success`。
-
-预期产出：一张流水线图 + 一张对照表 + 一组手算尺寸（NPU 运行结果待本地验证）。
+1. **画数据流图**：以默认用例为对象，画出从 GM 的 `x1_gm.bin`（NC1HWC0）到最终 `output_z.bin` 的完整数据流，标出每一级存储（GM→L1→L0A/L0B→Acc→GM）、每条边对应的指令（TLOAD/TIMG2COL/TEXTRACT/TMATMUL(_ACC)/TSTORE）及其流水线归属（MTE2/MTE1/M/FIX），并在 L1→L0A 那条边上标注 `posM/posK` 的含义。
+2. **算维度**：把 stride 改为 \(2 \times 2\)（仅手算，不要求改代码），推出新的 \(h_{out}, w_{out}, m\)，以及 M 维分解中 `mIndex → (n, outRow, outCol)` 每步的除数/模数变化。
+3. **验证**：用第 4.1.4 节的方法跑一次 `img2col_nhwc`（stride=(2,2)），确认你推出的 \(H_{out} \times W_{out}\) 与 numpy 输出的列数一致；再对照 [cpu/TImg2col.hpp:122-144](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/TImg2col.hpp#L122-L144) 的分解代码核对第 2 步的除数链。
+4. **思考题（选做）**：若把 `stepKa` 从 3 改为 1，`channelSize`、`bufferSizeA`、TLOAD 次数各怎么变？L1 caching 的收益还在吗？（提示：回到 [conv2d_forward_kernel.cpp:257-266](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/conv2d_forward_kernel.cpp#L257-L266) 的公式，并对照 README 的 TLOAD 占比数据。）
 
 ## 6. 本讲小结
 
-- `TIMG2COL` 是硬件版 im2col：在 MTE1 流水线把 NC1HWC0 特征图从 L1 搬到 L0A 的途中完成展开，`posM/posK` 定位块在完整 im2col 矩阵中的偏移，padding 由硬件按 `padValue` 自动填充——软件 im2col 的整图重排开销被消掉。
-- 卷积参数不进指令参数表，而是挂在 `ConvTile` 的元数据上，由 `SETFMATRIX`（fmap 尺寸+padList 打包 64bit）、`SET_IMG2COL_RPT`（repeat 配置）、`SET_IMG2COL_PADDING`（填充值）三条配置指令写入硬件寄存器；`SetFmatrixMode` 的 AUTO/MANUAL 之分在于配置由指令内部自动下发还是用户显式下发，配置稳定时 MANUAL 更省。
-- padList 顺序是 `[left, right, top, bottom]`；对只装特征图行条带的 L1 panel，上下 pad 必须按窗口位置重算为「条带内等效 pad」，这是 conv2d_forward 中最容易踩的坑。
-- 完整卷积链路 = TLOAD（GM→L1，stepKa/stepKb 批量 caching）→ TIMG2COL/TEXTRACT（L1→L0A/L0B，A 展开 B 切片）→ TMATMUL(_ACC)（首轮清零后续累加）→ TSTORE（NC1HWC0 视图写回），配三级双缓冲与 MTE2/MTE1/M/FIX 四流水线事件编排。
-- 输出尺寸公式在 kernel 编译期、host 侧、golden 造数三处重复出现，修改 padding/stride 必须三处联动，否则连尺寸都对不上。
+- **im2col 把卷积变成 GEMM**：M = \(N_{batch} \cdot H_{out} \cdot W_{out}\)（输出像素），K = \(C_{in} \cdot h_k \cdot w_k\)（感受野元素）；输出尺寸公式在 kernel、host、golden 脚本、CPU 仿真四处出现且一致。
+- **ConvTile 是「数据 + 卷积配置」二合一的 tile**：形状是特征图逻辑形状（最多 6 维、支持 DYNAMIC），fmap 尺寸、四边 pad、stride、dilation、核尺寸、padValue、repeat 配置全部挂在 tile 字段上。
+- **TIMG2COL = im2col 展开 + L1→L0A 搬运**：源是 L1 的 `ConvTile<Mat, NC1HWC0>`，目的必须是 `TileLeft`；`posM/posK` 从 L1 缓存展开出的局部矩阵中定位子块；CPU 实现按「行分解输出坐标、列分解感受野、回址取数」逐元素重算，是语义金标准。
+- **三条 SET 配置指令写三个硬件寄存器**：SETFMATRIX（fmapH/W + padList 打包 64 位写 `set_fmatrix(_b)`）、SET_IMG2COL_RPT（repeat 三件套写 `l3d_rpt`）、SET_IMG2COL_PADDING（补边值写 `padding`）；`SetFmatrixMode` 的 AUTO 档让 TIMG2COL 内部自动写寄存器，MANUAL 档由用户在循环外写一次复用，CPU 仿真下全部退化为空操作/断言。
+- **conv2d_forward = 布局特殊的 GEMM**：多核 4×6 切 M/N、base block [128,256,48]、stepKa/stepKb=3 的 L1 caching、三级 double buffer 与事件编排，整体与 gemm_performance 同构，唯一结构性差异是 A 通路用 TIMG2COL 替代 TEXTRACT。
 
 ## 7. 下一步学习建议
 
-- 下一讲 u5-l5 将进入 MX 混合精度矩阵乘（`TMATMUL_MX`、缩放因子布局与 A5 上的 mxfp4/mxfp8 实现），可对照本讲的 `TMATMUL` 数据通路理解「带 scale 的 Cube」。
-- 想加深事件编排理解，可回读 u6-l2「流水线并行」并对照本讲 `MacroMatmul` 的四对 set/wait。
-- 建议通读 [docs/isa/TIMG2COL.md](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/docs/isa/TIMG2COL.md) 与 [docs/isa/SETFMATRIX.md](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/docs/isa/SETFMATRIX.md) 的 ISA 定义，以及 [kernels/manual/a2a3/conv2d_forward/README.md](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/conv2d_forward/README.md) 的性能表判读方法（承接 u5-l3 的利用率分析）。
+- **u5-l5（MX 混合精度矩阵乘）**：继续 Cube 家族的最后一块拼图，看 TMATMUL_MX 如何在 A5 上把缩放因子引入矩阵乘。
+- **通读 [docs/coding/tutorials/](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/docs/coding/tutorials) 与 [docs/isa/SET_IMG2COL_RPT.md](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/docs/isa/SET_IMG2COL_RPT.md)、[docs/isa/SET_IMG2COL_PADDING.md](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/docs/isa/SET_IMG2COL_PADDING.md)**：补齐本讲两条 SET 指令的 ISA 文档细节。
+- **对比阅读 A5 实现**：`include/pto/npu/a5/` 下的 TImg2col（若存在对应实现，见 include/README.md 的逐指令支持表）——A5 放宽了 dtype 白名单（TIMG2COL 文档 Constraint 一节），正好用 u2-l4 学到的 arch_capability 视角审视代际差异；这也是 u11-l2 架构适配的前菜。
+- **性能侧延伸**：带着本讲「TLOAD 占比高源于感受野重叠」的结论进入 u6-l3 性能优化方法论，练习用利用率表判定 Bound 并设计 tiling。

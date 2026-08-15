@@ -1,0 +1,363 @@
+# 点对点通信与信号同步：TGet/TPut、TNotify/TWait/TTest
+
+## 1. 本讲目标
+
+学完本讲，你应该能够：
+
+1. 说清 TGET/TPUT 的三条核心约束：远端地址从哪来、staging tile 起什么作用、数据通路为什么是「GM→UB→GM」。
+2. 读懂 TGET/TPUT 的单 tile 自动分块（2D sliding）与 ping-pong 双缓冲两种形态，并能判断自己的形状该用哪一种。
+3. 掌握信号同步三兄弟的分工：TNOTIFY（写远端信号）、TWAIT（阻塞等本地信号）、TTEST（非阻塞探测）。
+4. 独立写出「数据搬运 + 信号握手」的跨 NPU 生产者-消费者伪代码，并标出每一步依赖的指令。
+
+本讲是单元七的第二讲。上一讲（u7-l1）已经建立了通信 ISA 的全景图：11 条指令、四大类、staging tile 抽象、「数据与信号分离的两段式握手」。本讲就把其中**同步点对点（TPUT/TGET）**和**信号同步（TNOTIFY/TWAIT/TTEST）**两组指令拆开揉碎，逐行读实现。
+
+## 2. 前置知识
+
+阅读本讲前，请确认理解以下概念（均在前置讲义中讲过，这里只做一句话唤醒）：
+
+- **GlobalTensor 视图**（u2-l1）：`__gm__` 指针 + 5 维 shape/stride 元数据，本身不搬数据，只提供寻址信息。本讲里它会同时出现在「本地端」和「远端端」。
+- **Tile 与 TASSIGN**（u2-l2、u3-l2）：片上 UB 的固定形状缓冲。Tile 变量不自带存储，必须 `TASSIGN(tile, offset)` 显式绑定 UB 偏移。
+- **TLOAD/TSTORE 与事件**（u3-l1、u2-l3）：GM↔UB 的搬运指令，分别挂 MTE2/MTE3 流水线；跨流水线依赖用 `set_flag/wait_flag` 表达。
+- **有效区（valid region）**（u2-l2）：由 `RowMaskInternal/ColMaskInternal` 描述的容量内连续前缀，决定实际搬运范围。
+- **staging tile**（u7-l1）：通信指令复用计算指令的 tile 抽象，远端读写经 UB 中转——本讲的主角之一。
+
+再补充三个本讲特有的基础概念：
+
+1. **远端地址不是凭空来的**。多卡通信依赖 HCCL 的「窗口（window）」机制：host 侧为每个 rank 注册一块对称窗口内存，把各家窗口基址交换给所有 rank；kernel 侧再用一个指针平移函数把「本地的某个偏移」换算成「对端卡上的同一偏移」。本讲会读到它的实现（`CommRemotePtr`）。
+2. **信号量（signal）**。跨卡同步不走事件系统（事件是核内流水线机制，出不了芯片），而是走最朴素的办法：在 GM 上放一个 `int32_t` 变量，一方写、另一方轮询。TNOTIFY/TWAIT/TTEST 就是对这个变量的「写 / 等读 / 试读」三件套。
+3. **缓存维护指令**。NPU 读写 GM 可能经过缓存，跨卡写的字节能不能被对卡「看见」，取决于缓存有没有被清理。两个昇腾 intrinsic 会反复出现：
+   - `dcci`：data cache clean & invalidate，清理并失效指定缓存行（让后续读直达内存）；
+   - `dsb(DSB_DDR)`：数据同步屏障，等到写操作真正落到 DDR 才放行。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+| --- | --- |
+| [include/pto/comm/pto_comm_inst.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/pto_comm_inst.hpp#L26-L142) | 通信指令公共 API 薄壳：TPUT/TGET/TNOTIFY/TWAIT/TTEST 的统一入口 |
+| [include/pto/comm/a2a3/TGet.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TGet.hpp) | TGET 在 A2/A3 真机上的实现（本讲精读主标本） |
+| [include/pto/comm/a2a3/TPut.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TPut.hpp) | TPUT 真机实现，与 TGet.hpp 镜像对称，多出原子写变体 |
+| [include/pto/comm/a2a3/TNotify.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TNotify.hpp) | TNOTIFY 真机实现：向远端 GM 写一个 int32 信号 |
+| [include/pto/comm/a2a3/TWait.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TWait.hpp) | TWAIT 真机实现：自旋轮询本地信号 |
+| [include/pto/comm/a2a3/TTest.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TTest.hpp) | TTEST 真机实现：单次探测，不阻塞 |
+| [include/pto/comm/comm_types.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/comm_types.hpp#L85-L234) | 通信公共类型：NotifyOp/WaitCmp 枚举、Signal/Signal2D 信号视图 |
+| [include/pto/cpu/comm/TGet.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/comm/TGet.hpp) | TGET 的 CPU 仿真实现（直接元素拷贝，无 UB 概念） |
+| [include/pto/cpu/comm/TWait.hpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/comm/TWait.hpp) | TWAIT 的 CPU 仿真实现（带超时的原子轮询） |
+| [kernels/manual/a2a3/tget_bandwidth/tget_bandwidth_kernel.cpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/tget_bandwidth/tget_bandwidth_kernel.cpp#L152-L187) | 带宽对比示例：TGET 与 TGET_ASYNC 的实测工程 |
+| [tests/npu/a2a3/comm/st/testcase/tget/tget_kernel.cpp](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/tests/npu/a2a3/comm/st/testcase/tget/tget_kernel.cpp) | TGET 环形 ST 用例（含 1D/2D/分块/乒乓全形态） |
+| [tests/npu/a2a3/comm/st/testcase/common.hpp](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/tests/npu/a2a3/comm/st/testcase/common.hpp#L305-L315) | `CommRemotePtr`：本地指针 → 对端指针 的换算函数 |
+| [docs/isa/comm/TGET.md](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/docs/isa/comm/TGET.md) 等四篇 | TGET/TPUT/TNOTIFY/TWAIT 的 ISA 权威文档 |
+
+按 u2-l4 建立的路由规则，`pto_comm_instr_impl.hpp` 在真机 + A2A3 时引入 `a2a3/TGet.hpp` 等实现头，在 `__CPU_SIM` 下引入 `cpu/comm/TGet.hpp` 等桩实现，同一份 kernel 源码双端可编译（见 [include/pto/comm/pto_comm_instr_impl.hpp:L16-L34](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/pto_comm_instr_impl.hpp#L16-L34)）。
+
+## 4. 核心概念与源码讲解
+
+### 4.1 TGET/TPUT：经 UB 中转的点对点搬运
+
+#### 4.1.1 概念说明
+
+TGET 是**远读**：把对端 NPU GM 上的数据搬到本卡 GM。TPUT 是**远写**：把本卡 GM 上的数据写到对端 GM。两者的数学语义都只是逐元素赋值：
+
+\[
+\mathrm{dst}_{i,j} = \mathrm{src}_{i,j} \qquad \text{（在有效区内）}
+\]
+
+区别仅在「谁是远端」：
+
+| 指令 | src | dst | 数据通路 |
+| --- | --- | --- | --- |
+| TGET | 远端 GM | 本地 GM | 远端 GM →（TLOAD）→ UB →（TSTORE）→ 本地 GM |
+| TPUT | 本地 GM | 远端 GM | 本地 GM →（TLOAD）→ UB →（TSTORE）→ 远端 GM |
+
+为什么必须经过 UB 中转、不能 GM 直达？因为在 A2/A3 上，AIC 核访问**对端** GM 的普通 load/store 通路并不高效也不稳定，而 MTE 搬运引擎（TLOAD/TSTORE）天然支持跨卡寻址的窗口地址。于是通信指令的落地策略是：**用两条最成熟的搬运指令拼出一条跨卡通路，UB tile 就是中转仓库**。这也正是上一讲说的「staging tile」——通信指令与计算指令共用同一套 tile 抽象，staging tile 本身不参与计算，只做临时落脚。
+
+代价也来自这条路：所有字节都要过一遍 UB，带宽受 UB 吞吐封顶（tget_bandwidth 实测约 4 GB/s；绕开 UB 走 SDMA 的 TGET_ASYNC 可到约 10.5 GB/s，那是 u7-l4 的主题）。
+
+#### 4.1.2 核心流程
+
+TGET 的单次搬运（一个 chunk）由 `TgetTransferOnce` 完成，流程是标准的「搬入-同步-搬出-同步」四拍：
+
+```
+TLOAD(stagingTile, 远端srcView)          # MTE2：远端 GM → UB
+set_flag(MTE2, MTE3, id0) / wait_flag    # 等 UB 里的数据就绪
+pipe_barrier(PIPE_ALL)                   # 全流水线屏障
+TSTORE(本地dstView, stagingTile)          # MTE3：UB → 本地 GM
+set_flag(MTE3, MTE2, id0) / wait_flag    # 等 TSTORE 用完 tile，防止下次 TLOAD 提前覆盖
+```
+
+当 GlobalTensor 比 staging tile 大时，TGET **自动分块（2D sliding）**：
+
+1. 外三维 DIM_0/DIM_1/DIM_2 显式循环，定位到一个「切片组」；
+2. 行维 DIM_3 按 `tileValidRow` 步进、列维 DIM_4 按 `tileValidCol` 步进，逐块搬运；
+3. 尾块不足整 tile 时，把 `chunkRows/chunkCols` 写进 tile 的动态掩码（前提是 Tile 的 ValidRow/ValidCol 声明为 DYNAMIC）；若 Tile 用的是静态 ValidRow/ValidCol，则断言形状必须整除。
+
+乒乓（ping-pong）形态把「上一块的 TSTORE」和「当前块的 TLOAD」重叠：两块等大 staging tile 交替使用，`usePing` 翻转，事件编号在 EVENT_ID0/EVENT_ID1 间轮换——这正是 u6-l2 讲过的 double buffer 三要素在通信指令里的内置版。
+
+#### 4.1.3 源码精读
+
+**① API 薄壳：三个 TGET 重载。** 公共入口仍然是熟悉的「WaitAllEvents → XXX_IMPL → 返回 RecordEvent」骨架：
+
+[include/pto/comm/pto_comm_inst.hpp:L82-L101](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/pto_comm_inst.hpp#L82-L101)——单 tile 版 `TGET(dst, src, stagingTile, events...)` 与乒乓版 `TGET(dst, src, pingTile, pongTile, events...)`。变长参数 `WaitEvents` 让你可以把上游指令的 `RecordEvent` 传进来做前置等待。
+
+[include/pto/comm/pto_comm_inst.hpp:L33-L75](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/pto_comm_inst.hpp#L33-L75)——TPUT 在此之外还有两个重载：编译期原子模板 `TPUT<AtomicType::AtomicAdd>`（L33-L43）与运行期原子参数版（L46-L60，内部 if 分派到两个编译期实例），乒乓版在 L64-L75。
+
+**② 单次搬运的最小闭环。**
+
+[include/pto/comm/a2a3/TGet.hpp:L46-L56](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TGet.hpp#L46-L56)——`TgetTransferOnce` 就是 4.1.2 伪代码的原文：TLOAD → MTE2/MTE3 事件 → `pipe_barrier(PIPE_ALL)` → TSTORE → 反向事件。注意尾部那对 `set_flag(PIPE_MTE3, PIPE_MTE2)/wait_flag`：它保证后续复用同一块 staging tile 的 TLOAD 不会在 TSTORE 读走数据前就把 tile 覆盖掉。
+
+TPUT 侧完全镜像，仅把 TSTORE 换成带原子模板参数的 `TSTORE_IMPL<TileData, DstGT, atomicType>`：[include/pto/comm/a2a3/TPut.hpp:L46-L56](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TPut.hpp#L46-L56)。原子加语义即 \(\mathrm{dst}^{\mathrm{remote}}_{i,j} \mathrel{+}= \mathrm{src}^{\mathrm{local}}_{i,j}\)，是多卡规约「各写各的、硬件帮你加」的基础。
+
+**③ 编译期契约与快路径分派。**
+
+[include/pto/comm/a2a3/TGet.hpp:L248-L284](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TGet.hpp#L248-L284)——`TGET_IMPL`（单 tile 版）先做三条 `static_assert`：src/dst 元素类型一致、tile 元素类型一致、src/dst 布局一致；随后取远端 5 维 shape 与 tile 有效区，若 `totalRemoteRows <= singleTileRows && remoteDims[4] <= singleTileCols` 则一次搬完（L277-L280），否则交给分块路径（L282-L283）。
+
+[include/pto/comm/a2a3/TGet.hpp:L193-L235](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TGet.hpp#L193-L235)——`TgetChunkedDispatch`：静态 ValidRow/ValidCol 时断言整除（L201-L212，错误信息明确提示改用 DYNAMIC 掩码 tile）；L214-L229 是一个有趣的启发式——当 tile 是「Vec + 行主序 + 不分形 + 偶数行」且 chunk 总数 ≥ 8 时，启用 **tile 内乒乓**：把一块 staging tile 对半拆成两个半高 tile（`TgetIntraPingPongOneChunk`，[L59-L89](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TGet.hpp#L59-L89)），在只占一份 UB 的前提下拿到重叠收益。TPUT 侧对应逻辑多一个上限条件 `totalChunkCount <= 16`：[include/pto/comm/a2a3/TPut.hpp:L215-L231](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TPut.hpp#L215-L231)。
+
+**④ 乒乓流水。**
+
+[include/pto/comm/a2a3/TGet.hpp:L286-L332](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TGet.hpp#L286-L332)——`TgetPingPongProcessChunk` 是重叠的核心：有未决块（`pp.hasPending`）时，先 `wait_flag` 上一块的 MTE2→MTE3 事件、把上一块 TSTORE 出去，**同一条流水里紧接着发起当前块的 TLOAD**，再补两组 set/wait（L310-L321）；无未决块时只发起 TLOAD（L322-L325）。状态机由 [L26-L32](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TGet.hpp#L26-L32) 的 `TgetPingPongState`（usePing 翻转位 + 未决块元数据）驱动，循环结束后由 [L334-L356](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TGet.hpp#L334-L356) 的 `TgetPingPongFlush` 冲掉最后一块。乒乓版总入口 `TGET_IMPL(dst, src, ping, pong)` 在 [L415-L467](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TGet.hpp#L415-L467)；TPUT 对应在 [TPut.hpp:L303-L348](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TPut.hpp#L303-L348) 与 [L430-L483](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TPut.hpp#L430-L483)。
+
+**⑤ 远端地址从哪来：一个真实调用点。**
+
+[kernels/manual/a2a3/tget_bandwidth/tget_bandwidth_kernel.cpp:L171-L184](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/tget_bandwidth/tget_bandwidth_kernel.cpp#L171-L184)——root rank 的一次完整 TGET：
+
+```cpp
+__gm__ T* remoteSendShmem = CommRemotePtr(hcclCtx, sendShmem, peerRank); // 本地指针 → 对端指针
+Global recvG(recvShmem, shape, stride);        // 本地落点视图
+Global remoteSendG(remoteSendShmem, shape, stride); // 远端源视图
+pto::comm::TGET(recvG, remoteSendG, stagingTile);
+```
+
+而 `CommRemotePtr` 只有五行——[tests/npu/a2a3/comm/st/testcase/common.hpp:L309-L315](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/tests/npu/a2a3/comm/st/testcase/common.hpp#L309-L315)：
+
+```cpp
+uint64_t localBase = ctx->windowsIn[ctx->rankId];  // 本卡窗口基址
+uint64_t offset = (uint64_t)localPtr - localBase;  // 求本地偏移
+return (__gm__ T*)(ctx->windowsIn[pe] + offset);   // 换对端基址，偏移不变
+```
+
+窗口机制要求各 rank 在**相同偏移**处放对称缓冲，所以「本地指针减本卡基址」得到的偏移，加上对端基址就是对端的等价地址。
+
+**⑥ CPU 仿真端是什么样。**
+
+[include/pto/cpu/comm/TGet.hpp:L21-L67](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/comm/TGet.hpp#L21-L67)——CPU 桩把 TGET 实现成一个五重循环的 `Copy_Data`：按 shape/stride 逐元素 `dst[dstIndex] = src[srcIndex]`，tile 参数被完全忽略（单 tile 与乒乓两个 `TGET_IMPL` 重载都转发到它）。再次印证 u1-l3/u3-l4 的结论：CPU 仿真只验证功能语义，不模拟 UB 中转、分块与乒乓带来的任何时序效应。
+
+#### 4.1.4 代码实践
+
+**实践目标**：把「TGET 读远端 tile」的伪代码写出来并标注每步依赖的指令（这正是本讲规格指定的实践任务的前半部分，TWAIT 部分在综合实践补全）。
+
+**操作步骤**：
+
+1. 通读 [docs/isa/comm/TGET.md](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/docs/isa/comm/TGET.md)（约 100 行），重点看 Constraints 与两个 Examples。
+2. 对照 ST 用例 [tests/npu/a2a3/comm/st/testcase/tget/tget_kernel.cpp:L64-L86](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/tests/npu/a2a3/comm/st/testcase/tget/tget_kernel.cpp#L64-L86)（phase 1 分支），观察它如何先 `TASSIGN(stagingTile, 0x0)`、`TASSIGN(resultTile, 0x10000)` 摆好两块 UB，再 TGET。
+3. 自己写出如下风格的伪代码（**示例代码（伪代码）**，非仓库原有）：
+
+```cpp
+// 目标：本卡从 nextRank 读取一个 rows×cols 的远端 tile 到本地 GM
+using TileT = Tile<TileType::Vec, T, rows, cols, BLayout::RowMajor, DYNAMIC, DYNAMIC>;
+
+TileT stagingTile(rows, cols);
+TASSIGN(stagingTile, 0);                      // ① TASSIGN：staging tile 落 UB
+
+__gm__ T* remotePtr = CommRemotePtr(ctx, sendPtr, nextRank);   // ② 窗口换算远端地址（普通指针运算）
+Global remoteSrc(remotePtr, shape, stride);   // ③ GlobalTensor：远端源视图
+Global localDst(recvPtr, shape, stride);      //    GlobalTensor：本地落点视图
+
+comm::TGET(localDst, remoteSrc, stagingTile); // ④ TGET = TLOAD(远端GM→UB) + TSTORE(UB→本地GM)
+                                             //    内部自带 MTE2/MTE3 事件闭环，返回即可读 localDst
+// ⑤ 若要保证「对端已把数据写好」，需要信号握手：TNOTIFY(对端写) / TWAIT(本端等)，见 4.2/4.3
+```
+
+4. 把①~⑤每步旁注的指令名抄成一张清单，标注该步是「数据面」（TASSIGN/TGET）还是「控制面」（TNOTIFY/TWAIT）。
+
+**需要观察的现象**：伪代码中 TGET 一行展开后实际包含几条 PTO 指令（答案：1 条 TLOAD + 1 条 TSTORE + 4 条 set/wait_flag + 1 个 pipe_barrier，见 `TgetTransferOnce`）。
+
+**预期结果**：能说清「远端地址 = 对端窗口基址 + 本地偏移」「staging tile 是唯一被 TASSIGN 的对象」「TGET 返回后本地 GM 即有效」。真机上运行 tget_bandwidth 验证（`bash kernels/manual/a2a3/tget_bandwidth/run.sh -r npu -v a3`，需 2 卡 + MPICH，命令见 [README.md:L131-L140](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/tget_bandwidth/README.md#L131-L140)），**待本地验证**（本环境无昇腾硬件）。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：TGET 与 TLOAD 都是「把数据搬进本卡」，为什么不直接用 TLOAD 读对端内存？
+**答案**：TLOAD 的源是 GlobalTensor 视图，语义上没有禁止远端地址，但跨卡访问需要窗口注册与稳定的跨卡寻址通路；TGET 把「远端源视图 + UB 中转 + 事件闭环 + 分块/乒乓」整套装订成一条指令，保证行为在各后端一致。本质区别不在单条搬运，而在 TGET 附带的自动 2D 分块、乒乓重叠与双端契约检查。
+
+**练习 2**：GlobalTensor 是 1000×32（float），staging tile 是静态 64×32。直接 `TGET(dst, src, tile)` 会发生什么？怎么改？
+**答案**：1000 不能被 64 整除，静态 ValidRow 触发断言 `remoteDims[3] % singleTileRows == 0` 失败（[TGet.hpp:L201-L206](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TGet.hpp#L201-L206)）。把 Tile 的 ValidRow/ValidCol 声明为 DYNAMIC（`Tile<..., -1, -1>`），断言不再生效，尾块 40 行走动态掩码路径（ST 用例的 IrregularShape 系列即测试此路径，[tget_kernel.cpp:L814-L901](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/tests/npu/a2a3/comm/st/testcase/tget/tget_kernel.cpp#L814-L901)）。
+
+**练习 3**：8 卡 AllReduce 的「各卡把局部和加到 root」场景，用 TPUT 的哪个变体最省事？
+**答案**：`TPUT<AtomicType::AtomicAdd>`。8 张卡对 root 的同一块 GM 各发一次原子加 TPUT，硬件保证累加不互相覆盖，免去「加锁-读-加-写」协议。对应 API 在 [pto_comm_inst.hpp:L33-L43](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/pto_comm_inst.hpp#L33-L43)。
+
+### 4.2 TNOTIFY：向远端写一个信号
+
+#### 4.2.1 概念说明
+
+TNOTIFY 解决的问题是：**「我这边的数据写好了，告诉你一声」**。它不搬数据，只对远端 GM 上的一个 `int32_t` 信号做一次写操作，两种模式：
+
+- `NotifyOp::Set`：直接赋值，\(\mathrm{signal}^{\mathrm{remote}} = \mathrm{value}\)；
+- `NotifyOp::AtomicAdd`：原子加，\(\mathrm{signal}^{\mathrm{remote}} \mathrel{+}= \mathrm{value}\)。
+
+两种模式对应两种协议风格：Set 适合「标志位」（0→1 翻转，一轮一清零）；AtomicAdd 适合「计数器」（8 张卡各 +1，等卡等它到 8，天然支持多生产者）。
+
+信号本体只是 GM 上的普通 int32 变量，类型系统里有现成视图：`comm::Signal`（单元素，全静态 Shape）与 `comm::Signal2D<Rows, Cols>`（信号矩阵，如 4×8 个 worker 各占一格），定义在 [include/pto/comm/comm_types.hpp:L200-L234](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/comm_types.hpp#L200-L234)。枚举 `NotifyOp` 在 [L89-L92](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/comm_types.hpp#L89-L92)。
+
+#### 4.2.2 核心流程
+
+TNOTIFY 的难点不在写，而在**写完之后对端真的能看见**。NPU 的 store 可能停在缓存里，所以真机实现是一套严格的内存序三明治：
+
+```
+Set 分支：        dcci(失效缓存行) → *sigPtr = value → dcci → dsb(DDR) → pipe_barrier
+AtomicAdd 分支：  set_st_atomic_cfg → dcci → st_atomic → dcci → dsb(DDR) → pipe_barrier
+```
+
+- 写前 dcci：失效本地缓存行，防止「缓存里的旧值」与本次写合并回写覆盖新值；
+- 写后 dcci + dsb(DDR)：确保新值落到 DDR（跨卡互连只认 DDR 里的数据），而不是悬在某个核的缓存里；
+- 末尾 `pipe_barrier(PIPE_ALL)`：让本流水线后续指令（比如下一轮循环）不会越过这次信号写乱序发出。
+
+#### 4.2.3 源码精读
+
+[include/pto/comm/a2a3/TNotify.hpp:L37-L61](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TNotify.hpp#L37-L61)——`TNOTIFY_IMPL` 全文仅 20 余行：L40 的 `static_assert` 强制信号类型必须是 int32_t；L44-L50 走 AtomicAdd（配置 `set_st_atomic_cfg(ATOMIC_S32, ATOMIC_SUM)` 后用 `st_atomic` 原子指令）；L51-L58 走 Set（普通 volatile 写）。两个分支都三次调用 [L21-L28](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TNotify.hpp#L21-L28) 封装好的 `detail::DcciSignal`（内嵌 `__asm__ __volatile__("")` 防止编译器把 dcci 与访存指令重排或优化掉）。
+
+API 层 [include/pto/comm/pto_comm_inst.hpp:L108-L113](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/pto_comm_inst.hpp#L108-L113) 返回 void——信号写本身不需要事件返回值，它的「完成信号」就是被写的那个信号量本身。
+
+用法范例可读 ISA 文档的三个示例（基础 Set、原子计数、生产者-消费者）：[docs/isa/comm/TNOTIFY.md:L44-L98](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/docs/isa/comm/TNOTIFY.md#L44-L98)。
+
+#### 4.2.4 代码实践
+
+**实践目标**：数清并解释 TNOTIFY 两个分支里的内存序指令，建立「跨卡可见性要付多少条指令税」的直觉。
+
+**操作步骤**：
+
+1. 打开 [include/pto/comm/a2a3/TNotify.hpp](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TNotify.hpp)，对 Set 与 AtomicAdd 两个分支分别列出指令序列表（列：序号 / 指令 / 作用 / 去掉它会出什么错）。
+2. 回答两个问题：
+   - 为什么写**前**也要一次 dcci？（提示：读 [L52-L53](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TNotify.hpp#L52-L53) 的注释）
+   - `pipe_barrier(PIPE_ALL)`（[L60](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TNotify.hpp#L60)）防的是什么乱序？
+
+**需要观察的现象**：一个 4 字节的信号写，背后是 5~6 条内存序相关指令；对照第 2 讲学的核内 `set_flag/wait_flag`，体会「核内同步靠事件（免费、硬件队列）、跨卡同步靠内存序指令（显式、有开销）」的分层。
+
+**预期结果**：能口述 Set 分支为 `dcci → store → dcci → dsb → pipe_barrier`；能解释写前 dcci 是防止陈旧缓存行回写覆盖新值。本实践为纯源码阅读，无需运行环境。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：8 张卡都要通知 root「我的分片写完了」，用 Set 还是 AtomicAdd？为什么？
+**答案**：AtomicAdd（各 +1，root 用 `TWAIT(counter, 8, WaitCmp::GE)` 等到 8）。若用 Set，8 张卡写同一个值互相覆盖，root 无法区分收到了几份。
+
+**练习 2**：TNOTIFY 之后立刻进入下一轮循环再次 TPUT 数据，会不会出现「信号比数据先到」的错序？
+**答案**：单次调用内不会：TPUT 内部尾部有 MTE3→MTE2 的 wait（数据落稳），TNOTIFY 内部有 dsb + pipe_barrier（信号写透传到 DDR 且流水线不越序）。但要注意信号协议本身的方向：本轮数据对应的信号应在数据通路之后再发。多轮循环复用同一信号量时，需要像 u6-l2 的事件编号一样引入「纪元」思想（如信号值逐轮 +1，用 `WaitCmp::GE` 比较），否则上一轮的旧值会提前满足本轮的等待。
+
+**练习 3**：信号量为什么强制 int32_t 而不允许用 fp16/int8？
+**答案**：原子指令 `st_atomic` 与跨卡写通路按 32 位粒度定义（`ATOMIC_S32`），信号语义（比较、计数）也不需要更窄类型；`static_assert` 在编译期拦截，避免静默截断。见 [TNotify.hpp:L40](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TNotify.hpp#L40)。
+
+### 4.3 TWAIT/TTEST：本地信号的等待与探测
+
+#### 4.3.1 概念说明
+
+TWAIT 是 TNOTIFY 的接收端：**阻塞自旋，直到本卡 GM 上的信号满足比较条件**。TTEST 是它的非阻塞版本：只查一次，立刻返回 bool。比较算子共六种（`WaitCmp` 枚举，[comm_types.hpp:L98-L105](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/comm_types.hpp#L98-L105)）：EQ/NE/GT/GE/LT/LE。
+
+注意方向性：TWAIT 等的是**本卡** GM 的信号（`signalData` 必须是本地地址），这个信号由**对端**通过 TNOTIFY 写入——TWAIT 文档特别强调「local 指 NPU 归属，不是 CCE 地址空间限定符」（[docs/isa/comm/TWAIT.md:L43-L48](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/docs/isa/comm/TWAIT.md#L43-L48)）。
+
+信号可以是单个（`Signal`）也可以是矩阵（`Signal2D<4,8>`）。矩阵语义是**全称量词**——所有元素都满足才算通过：
+
+\[
+\forall\, d_0,d_1,d_2,d_3,d_4:\quad \mathrm{signal}_{d_0,d_1,d_2,d_3,d_4}\;\mathtt{cmp}\;\mathrm{cmpValue}
+\]
+
+#### 4.3.2 核心流程
+
+TWAIT 主循环（每轮）：
+
+```
+for 遍历信号张量全部 5 维下标:
+    dcci(该信号所在缓存行)          # 让读直达 DDR，读到对端写的最新值
+    if not Compare(sig[idx], cmpValue, cmp):
+        本轮失败，跳出
+若本轮全部满足 → 退出循环（返回）
+否则 → 自旋计数 +1；每 64 次失败插一个 pipe_barrier(PIPE_ALL)；
+        计数超过 1e8 → PTO_ASSERT("possible deadlock")
+```
+
+TTEST 是把同一套「遍历 + dcci + 比较」执行**一遍**，任一不满足即返回 false。
+
+TTEST 的价值在于「边等边干活」的轮询式编排：先 TTEST，没好就先做别的计算，回头再试；TWAIT 则是死心塌地等到好。二者常配合成 `while (!TTEST(...)) { do_other_work(); } TWAIT(...)` 的混合模式。
+
+#### 4.3.3 源码精读
+
+[include/pto/comm/a2a3/TWait.hpp:L50-L102](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TWait.hpp#L50-L102)——`TWAIT_IMPL`：L59 静态断言 int32；L62-L66 取 5 维 shape；L68 把信号指针转成 `volatile __gm__ int32_t*`（volatile 防编译器把循环里的重复读优化成一次读——这是自旋等待的经典陷阱）；L75-L101 自旋主循环，其中 L84 每个信号读前一次 dcci，L96 是死锁检测（阈值 `kMaxSpinCount = 100000000`，L74），L97-L99 每 64 轮失败补一个 `pipe_barrier(PIPE_ALL)`。运行期比较算子分派在 [L31-L46](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TWait.hpp#L31-L46) 的 `CompareSignalRuntime`。
+
+[include/pto/comm/a2a3/TTest.hpp:L54-L93](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TTest.hpp#L54-L93)——`TTEST_IMPL`：同样的 5 维遍历 + dcci（L82），唯一的结构差异是没有外层 while——第一个不满足的信号直接 `return false`（L84-L86），遍历完返回 true。比较函数 `TestCompareSignal` 在 [L31-L50](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TTest.hpp#L31-L50)（用 switch 而非 if 链，与 TWait 的 if 链风格略异，功能等价）。
+
+API 层：[pto_comm_inst.hpp:L123-L128](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/pto_comm_inst.hpp#L123-L128)（TWAIT，返回 void）与 [L137-L142](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/pto_comm_inst.hpp#L137-L142)（TTEST，返回 bool）。
+
+**CPU 仿真端的重大差异**（读懂它才不会被骗）：[include/pto/cpu/comm/TWait.hpp:L99-L169](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/comm/TWait.hpp#L99-L169) 的 `TWAIT_IMPL` 用 `std::atomic<int32_t>::load(acquire)` 轮询、每轮失败睡 10 微秒（L166），并且**带超时**：自旋次数超过 `PTO_CPU_SIM_TWAIT_MAX_SPINS`（默认 100000，可用环境变量改，[L52-L66](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/comm/TWait.hpp#L52-L66)）后**直接 return，不报错**（L161-L163）。也就是说：CPU 仿真下「TWAIT 通过」可能只是「等超时了」——同步协议的正确性必须上真机验证，这与 u6-l1 对 SYNCALL 的结论一致。
+
+#### 4.3.4 代码实践
+
+**实践目标**：对比真机与 CPU 仿真两版 TWAIT 的超时行为，明确「CPU 仿真通过了什么、没验证什么」。
+
+**操作步骤**：
+
+1. 并排打开 [include/pto/comm/a2a3/TWait.hpp:L70-L101](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TWait.hpp#L70-L101) 与 [include/pto/cpu/comm/TWait.hpp:L119-L169](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/comm/TWait.hpp#L119-L169)，填一张对比表：轮询对象（volatile GM 指针 vs std::atomic）、缓存维护（dcci vs 无）、失败后退避（pipe_barrier 每 64 轮 vs sleep 10µs）、超时后果（PTO_ASSERT 断言 vs 静默 return）。
+2. 思考题：把环境变量 `PTO_CPU_SIM_TWAIT_MAX_SPINS` 设为 0 是什么含义？（读 [L53-L65](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/cpu/comm/TWait.hpp#L53-L65) 的注释与判断 `maxSpinCount > 0`。）
+3. 给 TWAIT 的信号矩阵场景找一个真实用法：`Signal2D<4, 8>` + `TWAIT(grid, 1, WaitCmp::EQ)` 表示什么？（对照 [docs/isa/comm/TWAIT.md:L76-L90](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/docs/isa/comm/TWAIT.md#L76-L90)。）
+
+**需要观察的现象**：真机版没有 sleep、没有退出条件（除断言外），是「信任协议设计正确」的纯自旋；CPU 版是「防止单机测试挂死」的工程妥协。
+
+**预期结果**：答出——设为 0 表示**禁用超时**（无限等待，最接近真机语义）；`Signal2D<4,8>` 场景表示等 4×8=32 个 worker 信号全部置 1。本实践为源码阅读型，无需运行。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：TWAIT 的循环体里如果不加 `volatile`，C++ 编译器可能做出什么优化？后果是什么？
+**答案**：编译器可能发现循环内 `basePtr[idx]` 的地址不变、且循环体没有写它的语句，把「每次循环重读内存」优化成「读一次存寄存器复用」——于是对端写入的新值永远读不到，自旋变成死循环。[TWait.hpp:L68](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TWait.hpp#L68) 的 `volatile __gm__ int32_t*` 与 L83/L85 的 `__asm__ __volatile__("")` 都是为此设防。
+
+**练习 2**：`TWAIT(sig, 1, WaitCmp::EQ)` 和 `TWAIT(sig, 0, WaitCmp::NE)` 都能表达「等信号非零」，多轮协议里哪个更稳？
+**答案**：看协议。EQ(1) 是「精确等到 1」，若生产者用 AtomicAdd 累加到 2 会永远等不到；NE(0) 是「只要非零」，旧轮次残留的非零值会让它提前通过。多轮复用信号量时通常用「值逐轮递增 + `WaitCmp::GE`」的纪元写法最稳（参考 u6-l1 Soft SyncAll 的 target 计算）。
+
+**练习 3**：为什么 TTEST 每次调用也要做 dcci，明明它「只是读一次」？
+**答案**：因为读的是对端可能刚刚写入的跨卡数据，本核缓存里可能是陈旧行；不做 dcci 就可能拿缓存旧值返回 false（或更糟——返回基于旧值的 true）。见 [TTest.hpp:L81-L83](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/TTest.hpp#L81-L83)。
+
+## 5. 综合实践
+
+**任务：设计并写出「跨 NPU 生产者-消费者」完整的指令序列伪代码，并画出时间线。**
+
+场景：rank A（生产者）算好一块 `rows×cols` 数据，rank B（消费者）要读走它。要求：B 不许在 A 写完之前读（读到旧数据），也不许永远等（协议要能多轮复用）。
+
+**参考伪代码（示例代码，非仓库原有，风格仿照 docs/isa/comm/TNOTIFY.md 的 Producer-Consumer 一节）**：
+
+```cpp
+// ============ rank A（生产者）第 round 轮 ============
+comm::TPUT<AtomicType::AtomicNone>(dstRemoteB, srcLocalA, stagingTile);  // ① 数据面：本卡GM→UB→对端GM
+                                                                          //    TPUT 内部含 MTE2/MTE3 事件闭环
+comm::Signal flagB(flagAddrOnB);                  // ② 控制面：对端 B 上的信号（窗口换算出远端地址）
+comm::TNOTIFY(flagB, round + 1, NotifyOp::Set);   // ③ 写信号：本轮编号 round+1（dcci+dsb 保证晚于数据可见）
+
+// ============ rank B（消费者）第 round 轮 ============
+comm::Signal flagLocal(flagAddrOnB);              // ④ 同一块内存在 B 眼里是本地地址
+comm::TWAIT(flagLocal, round + 1, WaitCmp::GE);   // ⑤ 自旋等待：信号值达到本轮编号（GE 支持多轮累进）
+comm::TGET(dstLocalB, srcRemoteA_or_RecvBuf, stagingTileB);  // ⑥ 数据面：读走数据（远端→UB→本地GM）
+// ⑦ 若用 TPUT 推给 B 的方案，B 端只做 ⑤ + TLOAD(recvBuf) 即可，⑥ 的 TGET 是「拉」模式
+```
+
+**要求完成的交付物**：
+
+1. 标注 ①~⑦ 每步用到的指令名与所属类别（数据面/控制面）。
+2. 画一张两泳道时间线（A 一条、B 一条），标出：A 的 TPUT 数据窗口、A 的 TNOTIFY 时刻、B 的 TWAIT 自旋区间、B 的 TGET 开始时刻；回答「同步点在哪一行」。
+3. 回答两个设计题：
+   - 把 ③ 的 `Set` 换成 `AtomicAdd` + ⑤ 改 `GE(round+1)`，协议还成立吗？什么时候必须用 AtomicAdd？（提示：多个生产者时。）
+   - 若 A、B 各有 8 个核并行推进，⑥ 之前是否还需要 `SYNCALL`（u6-l1）？为什么？
+
+**验证方式**：真机上最接近的可运行参照是 [tget_bandwidth](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/tget_bandwidth/README.md)（数据面 TGET 部分可直接跑通）与 ST 用例 tget/tnotify/twait；完整握手协议**待本地验证**（需 2 卡环境）。参考答案要点：同步点在 ⑤ 通过的瞬间（信号可见 ⟹ ① 的数据已可见，因为 TNOTIFY 的 dsb 晚于 TPUT 的落盘）；AtomicAdd 版本在「多生产者各自 +1、消费者 GE 总数」时成立且必须；多核场景下消费者侧若只有 1 个核执行 TWAIT 则无需 SYNCALL，若多核都要消费则需先 SYNCALL 保证全核到达后再统一放行。
+
+## 6. 本讲小结
+
+- **TGET/TPUT = 「TLOAD + TSTORE + 事件闭环」的跨卡装订**：数据通路 GM→UB→GM，staging tile 必须先 TASSIGN；远端地址由 HCCL 窗口机制 + `CommRemotePtr` 指针平移得到，「本地偏移 + 对端基址」。
+- **大形状自动 2D sliding**：外三维显式循环，DIM_3/DIM_4 按 tile 有效区分块；静态 ValidRow/ValidCol 要求整除，DYNAMIC 掩码支持尾块；乒乓重载（ping/pong 两 tile）或 tile 内对半拆分可把相邻块的 TSTORE 与 TLOAD 重叠。
+- **TPUT 独有原子变体**：`TPUT<AtomicType::AtomicAdd>` 经 `TSTORE_IMPL` 原子累加到远端 GM，是多生产者规约的基石。
+- **信号三件套分工**：TNOTIFY 写远端信号（Set 赋值 / AtomicAdd 计数），TWAIT 阻塞等本地信号（六种比较、信号矩阵全称量词语义），TTEST 非阻塞探测。
+- **跨卡可见性靠内存序指令，不靠事件**：TNOTIFY 的 dcci×2 + dsb + pipe_barrier、TWAIT/TTEST 读前的 dcci，是数据真正「过卡」的保障；这套代价是核内 set_flag 所没有的。
+- **CPU 仿真只保功能**：TGET 退化为纯元素拷贝（无 UB/分块/乒乓效应），TWAIT 带默认 1e5 次自旋超时且超时后静默返回——同步协议正确性必须真机验证。
+
+## 7. 下一步学习建议
+
+下一讲 **u7-l3 集合通信：TReduce、TBroadCast、TGather/TScatter** 将把本讲的点对点原语组装成「一组 rank 的集体动作」：ParallelGroup 如何描述参与方、root 单发多收的协议如何复用 TGET/TPUT、以及 `CollEngine::AIV` 与 `CCU` 两条引擎路径的分野。建议先带着一个问题去读：AllReduce 用「TPUT 原子加到 root」和用「root 逐个 TGET 再加」各有什么代价？
+
+延伸阅读：
+
+- 异步通路：[include/pto/comm/a2a3/async/TGetAsync.hpp](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/a2a3/async/) 与 u7-l4（SDMA/URMA 引擎，绕开 UB 的 13~14 GB/s 通路）。
+- A5 侧同源实现：[include/pto/comm/a5/](https://github.com/gitcode.com/cann-pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/include/pto/comm/)（含 CCU 集合引擎，Kirin/A6 通信不可用，见 u7-l1）。
+- 实战算子：`kernels/manual/a2a3/gemm_ar/`（计算-通信融合，u7-l5 的主标本）与 `kernels/manual/a2a3/moe_dispatch/`（u8-l2）大量使用本讲的信号握手模式。
