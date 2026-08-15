@@ -1,0 +1,302 @@
+# 复杂图像算子案例：grid_sample 双线性与多模式采样
+
+> 本讲为 update 版本：本轮代码变化（提交 394ba763「修复日志质量扫描发现不合理日志」）仅调整了 `aclnn_grid_sampler2d.cpp` 与 `aclnn_grid_sampler3d.cpp` 中 `CheckShape` 的 `OP_LOGE` 日志文案格式（去掉了跨行字符串续行符带来的多余空白），不影响任何执行逻辑；kernel 与 tiling 源码本轮未变。本讲按当前 HEAD 重新核对了全部行号。
+
+## 1. 本讲目标
+
+学完本讲，你应该能够：
+
+1. 说清楚 grid_sample（GridSampler2D/3D）的算子语义：给定输入图像与归一化坐标网格，按插值模式采样得到输出。
+2. 读懂 `aclnnGridSampler2D` / `aclnnGridSampler3D` 的 op_api 实现，特别是「AiCore / RegBase / AiCPU」三路后端选择逻辑。
+3. 理解 op_host 侧 `GridSampleTiling` 如何把 dtype、插值模式、维度、模板类型等信息组装成一个 TilingKey。
+4. 掌握 op_kernel 侧 `grid_sample.cpp` 按 `__CCE_AICORE__`（芯片代次）与 `TILING_KEY_IS`（策略编号）双重分发到 normal / slide_window / fullLoad / nearest / bicubic 等实现变体的机制，理解不同加载策略的取舍。
+
+## 2. 前置知识
+
+- **网格采样（grid sample）**：常见于空间变换网络（STN）、光流 warp、对齐等场景。输入 `x` 是一张图，`grid` 是一组范围归一化到 \([-1, 1]\) 的坐标，输出 `y` 的每个位置 `y[n, c, h, w]` 等于「把 `grid[n, h, w]` 反归一化成 `x` 上的浮点坐标后，按插值模式取值」。
+- **反归一化**：`align_corners=true` 时 \( x' = \frac{grid_x + 1}{2} \times (W_{in} - 1) \)；`align_corners=false` 时 \( x' = \frac{(grid_x + 1) \times W_{in} - 1}{2} \)。y、z 方向同理。
+- **插值模式（interpolationMode）**：0=bilinear（双线性，取邻近 4 点加权）、1=nearest（最近邻，取 1 点）、2=bicubic（双三次，取 16 点加权）。
+- **填充模式（paddingMode）**：坐标出界后的处理方式，0=zeros（补零）、1=border（钉在边界）、2=reflection（镜像反射）。
+- **AiCore 与 AiCPU**：AiCore 是向量/矩阵专用核（本仓 op_kernel 的 Ascend C 实现跑在这里），AiCPU 是通用核（控制流密集、逐点散乱访问的场景适合放这里）。grid_sample 因坐标随机、访存不规整，是典型的「双载体」算子。
+- **TilingKey 与策略分发**：回顾 u3-l4——Host 侧 TilingFunc 用 `SetTilingKey` 写入策略编号，kernel 侧用 `TILING_KEY_IS` 镜像判断。本讲会看到一个真实算子里 20 多个 key 的完整用法。
+- **本讲用到的芯片代号**（来自源码中的 `NpuArch` 枚举）：`DAV_2002` 对应 310P 系（`__CCE_AICORE__ == 200`），`DAV_3002` 对应 310B 系（`__CCE_AICORE__ == 300`），`DAV_2201` 对应 910B/A2 系，`IsRegBase()`（RegBase 集合，目前为 DAV_3510）对应 950 系新架构（u3-l6 讲过）。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+|---|---|
+| `image/grid_sample/op_api/aclnn_grid_sampler2d.cpp` | 2D 版 aclnn 两段式接口：参数校验 + 三路后端分发 |
+| `image/grid_sample/op_api/aclnn_grid_sampler3d.cpp` | 3D 版 aclnn 接口：多了 NCDHW/NDHWC 格式转换与特例场景判断 |
+| `image/grid_sample/op_host/grid_sample_tiling.h` | TilingData 结构、dtype 枚举、常量与 `GridSampleTiling` 类声明 |
+| `image/grid_sample/op_host/grid_sample_tiling.cpp` | Tiling 实现：解析属性、选模板、算 TilingKey、填 TilingData |
+| `image/grid_sample/op_kernel/grid_sample.cpp` | kernel 入口：按芯片代次 + TilingKey 分发到具体实现类 |
+| `image/grid_sample/op_kernel/grid_sampler_2d.h` | 2D bilinear「normal」通用实现（逐点 Gather 取数） |
+| `image/grid_sample/op_kernel/grid_sampler_2d_slide_window.h` | 2D bilinear「滑窗」实现（先把坐标范围圈出来整块搬入 UB） |
+| `image/grid_sample/examples/test_aclnn_grid_sample2_d.cpp` | 2D 样例程序（本讲实践对象） |
+
+同一个 `image/grid_sample/` 工程还包含 `grid_sampler_2d_nearest.h`、`grid_sampler_2d_bicubic.h`、`grid_sampler_2d_fullLoad.h`、`grid_sampler_3d*.h` 以及 310P/310B 专用变体（`*_310p.h`、`*_310b.h`），本讲在分发表中会一并涉及。
+
+## 4. 核心概念与源码讲解
+
+### 4.1 算子语义与 op_api 接口族
+
+#### 4.1.1 概念说明
+
+grid_sample 是一个「接口族」算子：一份工程同时交付 `GridSampler2D`（4 维输入）和 `GridSampler3D`（5 维输入，多一个深度维 D）两个 aclnn 接口。2D 的输入输出约定为：
+
+\[ input: (N, C, H_{in}, W_{in}),\quad grid: (N, H_{out}, W_{out}, 2),\quad output: (N, C, H_{out}, W_{out}) \]
+
+3D 则是 `input: (N, C, D, H, W)`、`grid: (N, D, H, W, 3)`、`output: (N, C, D, H, W)`。grid 最后一维必须是 2（或 3），存放 (x, y)（或 (x, y, z)）归一化坐标。
+
+#### 4.1.2 核心流程
+
+op_api 第一段接口（GetWorkspaceSize）的标准流程：
+
+1. `L2_DFX_PHASE_1` 打点 → `CREATE_EXECUTOR` 创建执行器。
+2. `CheckParams` 四步校验：非空 → dtype → 属性范围 → shape 匹配。
+3. 空tensor 直接返回（kernel 支持）。
+4. `Contiguous` 化两个输入。
+5. **三路后端选择**（详见 4.2）：AiCore 新模板 / RegBase 老模板 / AiCPU。
+6. `ViewCopy` 把结果写到（可能非连续的）`out` 上，返回 workspaceSize。
+
+第二段接口固定一句 `CommonOpExecutorRun`。
+
+#### 4.1.3 源码精读
+
+先看 2D 的属性与 shape 约定。属性合法范围定义为常量，dtype 支持列表集中在 `DTYPE_SUPPORT_LIST`：
+
+- [image/grid_sample/op_api/aclnn_grid_sampler2d.cpp:L39-L53](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_api/aclnn_grid_sampler2d.cpp#L39-L53) 定义了 interpolationMode/paddingMode 的取值范围（0~2）和支持的数据类型列表（float/float16/bf16/double）。
+- [image/grid_sample/op_api/aclnn_grid_sampler2d.cpp:L112-L157](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_api/aclnn_grid_sampler2d.cpp#L112-L157) `CheckShape` 校验三个 tensor 的维度数（必须 4 维）、batch 一致、channel 一致、grid 的 H/W 与 out 的 H/W 一致、输入空间维非空、grid 最后一维必须为 2。其中 L138-L144 的 `OP_LOGE` 就是本轮日志质量修复调整过文案的位置（旧版用反斜杠续行拼接长字符串，新版压成单行格式串，日志内容语义不变）。
+- [image/grid_sample/op_api/aclnn_grid_sampler2d.cpp:L159-L175](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_api/aclnn_grid_sampler2d.cpp#L159-L175) `CheckParams` 把四步校验串起来，这是仓库级的标准套路（对比 u2-l2 讲过的 aclnnResize 六步，步骤可多可少但顺序一致：先指针、再语义、再 dtype、再 shape）。
+
+3D 版的对应校验多了一层格式感知——NCDHW 与 NDHWC 下 D/H/W 位于不同的维度下标：
+
+- [image/grid_sample/op_api/aclnn_grid_sampler3d.cpp:L169-L178](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_api/aclnn_grid_sampler3d.cpp#L169-L178) 3D 的 `CheckShape` 先按 `inputFormat` 算出 deepIndex/heightIndex/widthIndex，再校验 grid 与 out 的 D/H/W 一致；L174-L175 的 `OP_LOGE` 同样是本轮日志文案调整点。
+
+#### 4.1.4 代码实践
+
+源码阅读型实践（无需运行环境）：
+
+1. 打开 `image/grid_sample/README.md`，找到「计算公式」一节的三组反归一化公式。
+2. 对照上面 `CheckShape` 的约束，回答：为什么 grid 最后一维必须是 2/3？为什么 input 与 out 的 C 必须一致而 H/W 不必一致？
+3. 用样例 `examples/test_aclnn_grid_sample2_d.cpp` 中 L86-L88 的三个 shape（`{1,1,5,8}`、`{1,3,3,2}`、`{1,1,3,3}`）逐条验证 `CheckShape` 的五个判断都能通过。
+
+预期结果：H_out/W_out 由 grid 决定而与 input 无关——这正是「任意形变采样」的语义。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：如果把 grid 的 shape 写成 `{1, 3, 3, 3}`（最后一维为 3）传给 `aclnnGridSampler2D`，会在哪一步报错？
+**答案**：在 `CheckShape` 的最后一个判断（`gridShape.GetDim(FOURTH_DIM) != SPATIAL_GRID_LAST_DIM_SIZE`，L151-L155）返回 false，`CheckParams` 把它映射为 `ACLNN_ERR_PARAM_INVALID`。
+
+**练习 2**：interpolationMode 传 3 会发生什么？
+**答案**：`CheckAttrValid`（L94-L110）发现超出 `{0,1,2}` 范围，打印 `interpolationMode 3 should be in support list {0(bilinear), 1(nearest), 2(bicubic)}.` 并返回 `ACLNN_ERR_PARAM_INVALID`。
+
+### 4.2 op_api 层的三路后端分发：AiCore / RegBase / AiCPU
+
+#### 4.2.1 概念说明
+
+grid_sample 的坐标访问是散乱的（取决于 grid 内容），不同芯片代次、不同 dtype、不同插值模式下最优实现完全不同。于是 op_api 层在第一段就做一次「后端选择」：能走 AiCore 新模板就走 AiCore；950 系（RegBase）非 bilinear 场景走老模板注册路径；都不满足再落到 AiCPU（控制流友好）；全部不支持才报参数错误。这与 u3-l1 讲过的「第一段登记、第二段执行」完全一致——这里的选择只决定「往 aclOpExecutor 里登记哪种 l0op 任务」。
+
+#### 4.2.2 核心流程
+
+```
+CheckAiCoreSuppport(input, interpolationMode, paddingMode)?
+ ├── 是 → （310P fullLoad 场景先把 fp16 Cast 成 fp32 计算）
+ │        Transpose NCHW→NHWC（perm = {0,2,3,1}, channelLast=true, schedulerMode=1）
+ │        l0op::GridSample(...)                       ← AiCore 路径，7 参数
+ ├── 否且 CheckRegBaseSuppport → l0op::GridSample(..., false, 0)  ← RegBase 老模板，NCHW
+ ├── 否且 CheckAiCpuSupport（非 bicubic）→ l0op::GridSampler2D(...) ← AiCPU 路径，5 参数
+ └── 否 → paramsNotSupport 报错
+```
+
+注意三条路径调用的 l0op 函数名都不同（`GridSample` 的两种重载 vs `GridSampler2D`），对应三套不同的算子注册名与 kernel 实现。
+
+#### 4.2.3 源码精读
+
+- [image/grid_sample/op_api/aclnn_grid_sampler2d.cpp:L211-L249](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_api/aclnn_grid_sampler2d.cpp#L211-L249) `CheckAiCoreSuppport`：L215-L220 先放行「950 芯片非 bilinear 走老模板」的分支；L229-L231 对 `DAV_2201`（910B 系）无条件放行；L233-L247 则给 310P（`DAV_2002`，要求 fp32+bilinear+C=32+zeros）和 310B（`DAV_3002`，要求 fp16+bilinear+C=32+zeros）开了窄门。
+- [image/grid_sample/op_api/aclnn_grid_sampler2d.cpp:L186-L209](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_api/aclnn_grid_sampler2d.cpp#L186-L209) `Check310PFullLoadSuppport`：310P 上仅当 `C*H*W < 20480`、bilinear、zeros 时允许 fullLoad 模板——这是「输入整图能装进 UB」的量化判据。
+- [image/grid_sample/op_api/aclnn_grid_sampler2d.cpp:L296-L332](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_api/aclnn_grid_sampler2d.cpp#L296-L332) 第一段接口中的三路分发主体：AiCore 分支里 L305-L314 做 NCHW→NHWC 转置并调用 `l0op::GridSample`；L322-L324 是 RegBase 分支（不转置，channelLast=false）；L325-L329 是 AiCPU 分支（`l0op::GridSampler2D`）。
+- [image/grid_sample/op_api/aclnn_grid_sampler2d.cpp:L177-L184](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_api/aclnn_grid_sampler2d.cpp#L177-L184) `CheckAiCpuSupport`：bicubic 不支持 AiCPU，其余插值模式可以。
+- [image/grid_sample/op_api/aclnn_grid_sampler3d.cpp:L277-L312](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_api/aclnn_grid_sampler3d.cpp#L277-L312) 3D 版多了一个 `CheckSpecialCase`：识别出「N=22 或 88、C=4、D=16、H=W=64」的典型视频场景时，走 NHWC 特例模板（免转置），配合 [L250-L275](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_api/aclnn_grid_sampler3d.cpp#L250-L275) 的 `CheckAndTranspose` 决定输入输出是否需要 Transpose。
+
+#### 4.2.4 代码实践
+
+1. 实践目标：理解「同一份输入在不同芯片上走不同后端」。
+2. 操作步骤：假设输入为 fp32、NCHW、bilinear、zeros、C=3。逐条代入 `CheckAiCoreSuppport`，分别在 `DAV_2201`（910B）、`DAV_2002`（310P）、`DAV_3002`（310B）三种架构下求值。
+3. 需要观察的现象：三者的放行路径分别为哪一条 return。
+4. 预期结果：910B 在 L229-L231 直接返回 true；310P 因 C=3 ≠ 32 且 fullLoad 判据要求 bilinear+zeros+C*H*W<20480（C=3 时若 H*W 足够小，`Check310PFullLoadSuppport` 可能成立，注意 L239-L240 是「或」关系）；310B 因 dtype 是 fp32 而非 fp16 被拒，随后落入 AiCPU 分支。若无法在本地确认运行结果，标注「待本地验证」。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么 AiCore 分支要先把输入 Transpose 成 NHWC？
+**答案**：grid_sample 每个输出点要按坐标取 input 的像素，把 C 放到最后一维后，一次 `DataCopy/Gather` 就能搬「一个像素的全部通道」，访存连续；NCHW 下取一个像素需要跨 W*H 的大步长跳转（kernel 源码中 `MTE2ForNHWC`/`MTE2ForNCHW` 两套搬运函数正对应这两种布局）。
+
+**练习 2**：bicubic + double dtype 的请求最终会走到哪里？
+**答案**：AiCore 因 dtype 拒绝（L223-L228 只认 fp16/bf16/fp32），RegBase 同样因 dtype 拒绝（L65-L70），AiCPU 因 bicubic 拒绝（L179-L183），最终落入 `paramsNotSupport`（L251-L264）返回 `ACLNN_ERR_PARAM_INVALID`，日志里明示「double 不支持 bicubic」。
+
+### 4.3 op_host：GridSampleTiling 与 TilingKey 组装
+
+#### 4.3.1 概念说明
+
+tiling 是 Host 侧的「决策中心」：它读出 shape、dtype、属性（插值/填充/align_corners/channelLast/scheduler_mode），决定用哪个模板（normal / fullLoad / C1 / C32 / portrait）、需要多少核、workspace 多大，最后把这一切编码成一个 uint64 的 TilingKey 交给框架选 kernel 二进制。本算子的 tiling 继承自 u3-l3 讲过的 `TilingBaseClass` 公共框架，并使用了 u3-l4 讲过的 `GET_TILINGKEY` 十进制位组装工具。
+
+#### 4.3.2 核心流程
+
+TilingKey 的组装规则（承接 u3-l4 的 \( key = 10^{19} + \sum_i id_i \cdot 10^i \)，再对 \( 10^{12} \) 取模去掉高位魔数）：
+
+```
+GetTilingKey() = GET_TILINGKEY(interpolationMode,   // 10^0 位：0/1/2
+                               dtypeKey,            // 10^1 位：1=fp16, 2=fp32, 3=bf16
+                               dimValue,            // 10^2 位：grid 最后一维 2 或 3
+                               schedulerMode,       // 10^3 位：0 或 1
+                               dimension,           // 10^4 位：0=2D, 1=3D
+                               templateCNum,        // 10^5 位：0/1/2（fullLoad 细分）
+                               tempType)            // 10^6 位：1=通用, 2=fullLoad
+                   % 10^12
+```
+
+据此可解码 kernel 分发表里的 key，例如 `1000220` = tempType 1 + templateCNum 0 + dimension 0 + schedulerMode 0 + dimValue 2 + dtype 2(fp32) + interpolation 0(bilinear)，即「2D 双线性 fp32 通用模板」；`2100220` 则是「fullLoad 且 C=1 小图特化」；`1010321` 是「3D nearest fp32」。
+
+#### 4.3.3 源码精读
+
+- [image/grid_sample/op_host/grid_sample_tiling.h:L39-L58](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_host/grid_sample_tiling.h#L39-L58) `GridSampleTilingData`：与 kernel 共享的纯数据契约，包含 shape（N/C/D/H/W 与 out 侧）、三个模式属性、channelLast 和 needCoreNum。
+- [image/grid_sample/op_host/grid_sample_tiling.h:L62-L96](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_host/grid_sample_tiling.h#L62-L96) dtype 枚举（fp16=1/fp32=2/bf16=3，正是 TilingKey 的 10^1 位）和一组模板判据常量：`X_MAX_HWC_FACTOR=20480`（fullLoad 输入上限）、`C1_X_COUNT=4096`、`NUM_C32=32`、`TILING_HW_FACTOR=1024` 等。
+- [image/grid_sample/op_host/grid_sample_tiling.cpp:L22-L36](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_host/grid_sample_tiling.cpp#L22-L36) `GetTilingKey`：dtype 到枚举的映射 + 七元组 `GET_TILINGKEY` 组装 + 取模，L33 还有一条 `OP_LOGD` 打印 schedulerMode 与 tilingKey，是实践环节观察 key 值的直接入口。
+- [image/grid_sample/op_host/grid_sample_tiling.cpp:L114-L131](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_host/grid_sample_tiling.cpp#L114-L131) 属性解析：def 里注册的 interpolation_mode 是字符串（"bilinear"/"bicubic"/"nearest"），这里 strcmp 成 0/2/1 三个枚举，并禁止 3D 用 bicubic。
+- [image/grid_sample/op_host/grid_sample_tiling.cpp:L160-L189](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_host/grid_sample_tiling.cpp#L160-L189) 2D 分支的模板选择核心：channelLast 且 bilinear 且 \( C \times H \times W \le 20480 \) 时进入 fullLoad（`tempType=2`），再按 `C==1 且 H*W<4096`、`C==32 且 H,W>8` 细分 `templateCNum` 为 1/2。
+- [image/grid_sample/op_host/grid_sample_tiling.cpp:L259-L278](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_host/grid_sample_tiling.cpp#L259-L278) `GetWorkspaceSize`：基础 16MB；fp16/bf16 时按 `核数 × C × 1024 × sizeof(float)` 追加（kernel 用 workspace 存放大输入的中间结果）；fullLoad 再翻倍（double buffer）。
+- [image/grid_sample/op_host/grid_sample_tiling.cpp:L299-L303](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_host/grid_sample_tiling.cpp#L299-L303) 核数收缩：`inN < coreNumVar && outputHW <= hwFactor` 时只申请 inN 个核（batch 很小时空转多核反而亏）。
+- [image/grid_sample/op_host/grid_sample_tiling.cpp:L327-L360](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_host/grid_sample_tiling.cpp#L327-L360) 注册链路：`Tiling4GridSample` 经 `TilingRegistry` 走模板注册表（`REGISTER_OPS_TILING_TEMPLATE(GridSample, GridSampleTiling, 1000)`），`TilingPrepare4GridSample` 在编译期缓存核数、UB 大小与 regBase 标志，最后 `IMPL_OP_OPTILING` 完成挂接。`IsCapable`（L248-L255）在 RegBase+bilinear+非 channelLast 时主动让位给下一个模板——这就是 u3-l3 讲过的「多候选降级」。
+
+#### 4.3.4 代码实践
+
+1. 实践目标：手动解码 TilingKey。
+2. 操作步骤：对以下三组参数分别算出 `GET_TILINGKEY(...) % 10^12` 的结果，并与 4.4 节 kernel 分发表对照：
+   - 2D、fp32、bilinear、通用模板（tempType=1, 其余为 0，dimValue=2）；
+   - 2D、fp32、bilinear、fullLoad 且 C=32 大图（tempType=2, templateCNum=2）；
+   - 3D、fp16、nearest（dimension=1, dimValue=3, dtypeKey=1, tempType=1）。
+3. 需要观察的现象：算出的 key 是否能在 `grid_sample.cpp` 的 `TILING_KEY_IS` 分支里找到唯一归宿。
+4. 预期结果：分别为 `1000220`、`2200220`、`1010311`。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么 `GetTilingKey` 最后要 `% TILING_OFFSET`（10^12）？
+**答案**：`GET_TILINGKEY` 的公共实现带有一个 10^19 量级的高位魔数前缀（用于区分「使用该工具的算子」），各算子取模把它剥掉，只保留自己的低位策略位，避免 key 超出框架约定范围。
+
+**练习 2**：fp16 输入时 workspace 为什么按 `sizeof(float)` 而不是 `sizeof(half)` 估算？
+**答案**：kernel 在 workspace 里存放的是计算中间结果，fp16/bf16 的坐标与权重计算统一升到 fp32 进行（精度要求），所以按 4 字节预留（见 L267-L271 的注释「每个核使用 inC * 512(1024) * dtype(float)」）。
+
+### 4.4 op_kernel：双重分发与三类加载策略
+
+#### 4.4.1 概念说明
+
+kernel 入口 `grid_sample.cpp` 只做一件事：**两级分发**。第一级是编译期常量 `__CCE_AICORE__`（200=310P、300=310B、其他=910B/950 等通用代次），决定 include 哪一组头文件；第二级是运行期的 `TILING_KEY_IS`，决定实例化哪个模板类。之所以要这么多变体，是因为 grid_sample 的瓶颈在「怎么把散乱坐标要的像素搬进 UB」，不同输入形态下的最优搬运方式截然不同：
+
+- **normal（逐点取数）**：每个输出点按坐标直接从 GM 取 4 个邻近像素，通用性最好，坐标完全随机时最稳。
+- **fullLoad（整图装载）**：输入 \( C \times H \times W \le 20480 \) 时干脆把整个输入一次搬进 UB，之后所有采样都在 UB 内完成，GM 只读一遍——代价是只适用于小图，且要额外 workspace/双缓冲。
+- **slide_window（滑窗装载）**：折中方案。先对本批输出坐标做 `ReduceMin/ReduceMax` 求出坐标外接矩形，只把这块「滑动窗口」按行搬入 UB；窗口太大或通道数 > 16 时退化为不做窗口优化。
+
+#### 4.4.2 核心流程
+
+```
+grid_sample(x, grid, y, workspace, tiling)
+ ├─ __CCE_AICORE__ == 200（310P）→ 310P 专用 slide_window / fullLoad
+ ├─ __CCE_AICORE__ == 300（310B）→ fp16_slide_window_310b（+部分架构 slide_window）
+ └─ 通用分支，按 TilingKey：
+     1000220        → GridSampler2D<float>          （2D bilinear fp32 normal）
+     1000221 等      → GridSampler2DNearest<T>       （2D nearest）
+     1000222 等      → GridSamplerBicubic2D<T>       （2D bicubic）
+     1001220        → GridSampler2DSlideWindow<T>   （2D bilinear 滑窗）
+     1000210/1030   → GridSampler2DFP16SlideWindow<T>（fp16/bf16 滑窗）
+     2000220 等      → GridSampler2DFullLoad<T, 0>   （fullLoad 通用）
+     2100xxx        → GridSampler2DFullLoad<T, 1>   （fullLoad C=1 小图）
+     2200xxx        → GridSampler2DFullLoad<T, 2>   （fullLoad C=32 大图）
+     1010xxx        → GridSampler3D / 3DNearest / 3DPortrait（3D 家族）
+```
+
+normal 实现的单核流程（`GridSampler2D::Process`）：按 `blockIDX` 领取若干个「N×HW 分块」→ 每块搬入 512 个 grid 坐标 → 反归一化 + padding 裁剪（zeros/border/reflection 三选一）→ 计算双线性 4 点权重 → 按整数坐标从 GM Gather 像素、加权累加 → 写回 out。
+
+slide_window 实现的差异在于：计算权重之前先执行 `GetNoSlideWindow` 求出坐标外接矩形 `[xMin,xMax]×[yMin,yMax]`，然后用一次 `DataCopyPad` 把这个矩形内的输入按行整块搬进 UB，后续采样全部命中 UB。
+
+#### 4.4.3 源码精读
+
+- [image/grid_sample/op_kernel/grid_sample.cpp:L16-L34](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_kernel/grid_sample.cpp#L16-L34) 第一级分发：按 `__CCE_AICORE__` 条件 include 不同变体头文件，310P/310B 只编入自己需要的两个实现，通用分支编入全部（含 3D）。
+- [image/grid_sample/op_kernel/grid_sample.cpp:L38-L49](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_kernel/grid_sample.cpp#L38-L49) kernel 入口签名：五个 GM_ADDR（x、grid、y、workspace、tiling），取用户 workspace 后 `GET_TILING_DATA` 解包——与 u4-l1 讲过的 add_example 完全同构。
+- [image/grid_sample/op_kernel/grid_sample.cpp:L82-L121](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_kernel/grid_sample.cpp#L82-L121) 通用分支里 2D 部分的分发：L82-L86 是 bilinear normal（`1000220`），L87-L100 是 nearest（fp32/fp16/bf16 三种 dtype 各两个 key），L102-L115 是 bicubic，L117-L121 是 slide window（`1001220`，schedulerMode=1 时）。
+- [image/grid_sample/op_kernel/grid_sample.cpp:L132-L175](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_kernel/grid_sample.cpp#L132-L175) fullLoad 家族：同一个 `GridSampler2DFullLoad<T, N>` 模板用第二个模板参数区分通用(0)/C=1(1)/C=32(2) 三种特化。
+- [image/grid_sample/op_kernel/grid_sample.cpp:L177-L215](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_kernel/grid_sample.cpp#L177-L215) 3D 家族：`GridSampler3D`（bilinear）、`GridSampler3DNearest`、`GridSampler3DPortrait`——portrait 正是 4.2 节 `CheckSpecialCase` 识别出的视频特例（N=22/88、C=4、D=16、H=W=64）的专属实现。
+- [image/grid_sample/op_kernel/grid_sampler_2d.h:L29-L76](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_kernel/grid_sampler_2d.h#L29-L76) normal 实现的类声明：私有方法即流程骨架——`Clip`（padding 裁剪）、`ClipCoordinates`（坐标裁剪+压界）、`MTE2ForNCHW/MTE2ForNHWC`（两套布局的搬运）、`PointBilinear`（逐点双线性）。
+- [image/grid_sample/op_kernel/grid_sampler_2d.h:L159-L185](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_kernel/grid_sampler_2d.h#L159-L185) `ParseTilingData`：把 `GridSampleTilingData` 摊平成成员变量，并现算核间/核内循环切分（`preNUbLoop_`、`preCoreLoop_`、`lastCoreLoop_`，末核尾块处理，与 u3-l3 的 blockFactor/remainder 思路一致，只是这里固定按 512 个输出点一块）。
+- [image/grid_sample/op_kernel/grid_sampler_2d.h:L273-L280](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_kernel/grid_sampler_2d.h#L273-L280) `Clip`：paddingMode 三分支的调度入口，border 用 `Mins/Maxs` 钉边界（L349-L360），reflection 走 `ReflectClip` 的镜像数学。
+- [image/grid_sample/op_kernel/grid_sampler_2d.h:L848-L873](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_kernel/grid_sampler_2d.h#L848-L873) `Process`：空核早退 + 按 `preCoreLoop_` 循环调 `PerLoopCompute`，这是所有 2D 变体共享的调度骨架。
+- [image/grid_sample/op_kernel/grid_sampler_2d_slide_window.h:L31-L50](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_kernel/grid_sampler_2d_slide_window.h#L31-L50) `SlideCoorParam`：滑窗四至（xMin/xMax/yMin/yMax）结构体，滑窗策略的核心状态。
+- [image/grid_sample/op_kernel/grid_sampler_2d_slide_window.h:L1335-L1375](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_kernel/grid_sampler_2d_slide_window.h#L1335-L1375) `GetNoSlideWindow`：用 `ReduceMin/ReduceMax` 求本批坐标的 x/y 极值并压到输入边界内；L1342 的 `inputC_ > SLIDING_WINDOW_C_LIMIT`（常量 16，定义于 L289）说明通道太多时直接放弃滑窗；L1367-L1371 还校验滑窗面积不超过 xBuf 的 UB 预算，防止搬入越界。
+- [image/grid_sample/op_kernel/grid_sampler_2d_slide_window.h:L1377-L1400](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_kernel/grid_sampler_2d_slide_window.h#L1377-L1400) `PointBilinearInSlideWindow`：按行 `DataCopyPad` 把 `[xMin,xMax]×[yMin,yMax]×C` 的输入矩形一次性搬入 UB（`blockCount`=行数、`srcStride` 跳过行尾），之后采样不再访问 GM。
+- [image/grid_sample/op_kernel/grid_sampler_2d_slide_window.h:L1255-L1299](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_kernel/grid_sampler_2d_slide_window.h#L1255-L1299) `CalculateGrid`：grid 反归一化的向量化实现，用 `GatherMask` 的 xPattern/yPattern 把交错存放的 (x,y) 拆成两个独立向量，再按 alignCorners 乘系数减 0.5——正好对应第 2 节的两条公式。
+
+#### 4.4.4 代码实践（本讲主实践）
+
+**实践目标**：验证 bilinear 与 nearest 两种插值模式进入不同的 kernel 实现，并观察 TilingKey 的变化。
+
+**操作步骤**：
+
+1. 按 u1-l4/u2-l3 的流程编译安装 grid_sample 算子包（`bash build.sh --pkg --soc <芯片> --ops GridSample`，soc 与运行环境一致）。
+2. 第一次运行 2D 样例（默认即 bilinear）：
+
+   ```bash
+   bash build.sh --run_example grid_sample eager
+   ```
+
+   样例源码在 [image/grid_sample/examples/test_aclnn_grid_sample2_d.cpp:L83-L88](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/examples/test_aclnn_grid_sample2_d.cpp#L83-L88)：fp32、`interpolationMode=0`（bilinear）、input `{1,1,5,8}`、grid `{1,3,3,2}`。
+3. 修改样例中 L83 的 `interpolationMode` 从 `0` 改为 `1`（nearest），只重编样例（无需重编算子包，见 u1-l4 结论），再次运行。
+4. 打开算子 debug 日志（参考 docs/zh/debug/op_debug_prof.md），关注 [grid_sample_tiling.cpp:L33](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_host/grid_sample_tiling.cpp#L33) 打印的 `schedulerMode:%ld,tilingKey:%zu` 日志。
+
+**需要观察的现象**：
+
+- 两次运行的 tilingKey 日志值；
+- 两次运行的输出数值差异（nearest 输出恰为输入中某像素的原始值，bilinear 是 4 点加权）。
+
+**预期结果**（以 910B、fp32、样例默认 shape 为例）：
+
+- bilinear：`C*H*W = 1*5*8 = 40 ≤ 20480` 且 AiCore 路径 channelLast=true，tiling 走 fullLoad 判据（L174-L176），且 `inC==1 && H*W=40 < 4096` 命中 C1 特化，key 为 `2100220` → 进入 `GridSampler2DFullLoad<float, 1>`（[grid_sample.cpp:L147-L151](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_kernel/grid_sample.cpp#L147-L151)）。
+- nearest：fullLoad 判据要求 bilinear，不满足，tempType 保持默认 1，key 为 `1000221` → 进入 `GridSampler2DNearest<float>`（[grid_sample.cpp:L87-L91](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/grid_sample/op_kernel/grid_sample.cpp#L87-L91)，实现在 `grid_sampler_2d_nearest.h`）。
+
+若在 950 系（RegBase）芯片上运行，bilinear 会经 `IsCapable`（channelLast=1 时仍走本模板）但 nearest 会走 `CheckAiCoreSuppport` L215-L220 的老模板分支，分发结果不同——具体以本机日志为准；无法在本地确认时，标注「待本地验证」。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：把样例 input 改成 `{1, 32, 64, 64}`（fp32、bilinear、channelLast），会命中哪个 key 与实现？
+**答案**：`C*H*W = 32*64*64 = 131072 > 20480`，不满足 fullLoad，tempType=1；fp32+bilinear 通用 → key `1000220`，进入 `GridSampler2D<float>` normal 实现。
+
+**练习 2**：为什么 slide_window 要设 `SLIDING_WINDOW_C_LIMIT = 16` 的通道上限？
+**答案**：滑窗搬入量 ≈ 窗口面积 × C。C 很大时即使窗口很小，搬入量也可能超过 xBuf 的 UB 预算（L1367-L1371 的校验），滑窗优化的收益被整块搬运的成本吃掉，不如直接逐点取数，所以干脆按 C 预判放弃。
+
+**练习 3**：normal 实现里 `MTE2ForNCHW` 与 `MTE2ForNHWC` 两套搬运函数并存的原因是什么？
+**答案**：AiCore 路径在 op_api 层已把输入 Transpose 成 NHWC（4.2 节），但 RegBase 老模板与部分分支仍以 NCHW 进入（channelLast=0）。kernel 必须两种布局都能搬，所以按 `channelLast_` tiling 字段选择对应实现。
+
+## 5. 综合实践
+
+**任务：给 grid_sample 画一张「参数 → 后端 → key → kernel」的全链路决策图。**
+
+1. 选定一块你手上真实的芯片（如 910B），固定 input dtype=fp32、NCHW、zeros、align_corners=false。
+2. 对「bilinear 小图（1×1×5×8）」「bilinear 大图（1×32×64×64）」「nearest 任意 shape」三个场景，分别沿以下链路手工推导并记录：
+   - op_api：`CheckAiCoreSuppport` → 走哪个 l0op、是否 Transpose、channelLast/schedulerMode 传了什么；
+   - op_host：`GetShapeAttrsInfo` 解析出的属性 → fullLoad 判据 → `GetTilingKey` 的七元组 → key 数值；
+   - op_kernel：`grid_sample.cpp` 中该 key 命中的分支与实例化的模板类；
+3. 在真实环境用 `bash build.sh --run_example grid_sample eager` 加 debug 日志验证你的推导（观察 tilingKey 日志与命中分支），无法验证的部分标注「待本地验证」。
+4. 把三个场景的结果整理成一张三行表格（场景 / 后端 / key / kernel 类），作为你后续阅读其他多策略算子（如 resize_bilinear_v2，见 u4-l2）的对照模板。
+
+## 6. 本讲小结
+
+- grid_sample 是一个接口族算子：一份工程交付 `aclnnGridSampler2D`/`3D` 两个 aclnn 接口，共享同一套 tiling 与 kernel 入口。
+- op_api 第一段做三路后端选择（AiCore 新模板 / RegBase 老模板 / AiCPU），本质是往 aclOpExecutor 登记不同的 l0op 任务；AiCore 路径会先把输入 Transpose 成 NHWC 以获得通道连续的访存。
+- tiling 用 `GET_TILINGKEY` 七元组（插值模式、dtype、维度值、调度模式、2D/3D、模板 C 数、模板类型）把全部决策编码进一个 uint64，再 `% 10^12` 剥掉高位魔数。
+- kernel 入口做两级分发：编译期 `__CCE_AICORE__` 区分芯片代次，运行期 `TILING_KEY_IS` 选择实现类；同一 key 集合在 Host 与 Device 两侧必须人工保持一致。
+- 三类加载策略的取舍：normal 逐点取数最通用；fullLoad 整图进 UB 适合 \( C \times H \times W \le 20480 \) 的小图；slide_window 用 `ReduceMin/Max` 求坐标外接矩形折中，通道 >16 或窗口超 UB 预算时退化为不优化。
+- 本轮（394ba763）代码变化仅是 2D/3D 两个 op_api 文件里 `CheckShape` 的 `OP_LOGE` 日志文案格式调整，所有执行逻辑与 kernel/tiling 行为不变。
+
+## 7. 下一步学习建议
+
+- 下一讲 u4-l4 将讲解反向梯度算子（resize_bilinear_v2_grad、grid_sampler2_d_grad），建议先回看本讲 4.1 节的语义定义，思考「采样的梯度应如何回传到 input 与 grid」。
+- 想加深多策略分发的理解，可对照阅读 u4-l2（resize_bilinear_v2 的实现变体）与本讲 4.4 节，比较两者 TilingKey 编码方式的差异（手写常量 vs `GET_TILINGKEY` 工具）。
+- 想了解 950 系新架构的 SMIT 实现路径，可阅读 `image/grid_sample/op_kernel/arch35/grid_sampler_2d_bilinear_smit.h` 与 `op_host/grid_sample_tiling_arch35.cpp`，它们是本讲通用机制的架构特化版本。
