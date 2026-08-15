@@ -39,14 +39,14 @@
 
 | 文件 | 作用 |
 |---|---|
-| [examples/add_example/op_host/add_example_tiling.cpp](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_host/add_example_tiling.cpp) | 本讲主线：AddExample 的完整 TilingFunc 实现与注册 |
-| [examples/add_example/op_kernel/add_example_tiling_data.h](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_kernel/add_example_tiling_data.h) | TilingData 结构体定义，Host 与 Kernel 两侧共享的「契约」 |
-| [common/inc/op_host/tiling_base.h](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/common/inc/op_host/tiling_base.h) | 公共层 `TilingBaseClass`，把 tiling 流程模板化为 8 个虚函数钩子 |
-| [examples/add_example/op_kernel/add_example.cpp](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_kernel/add_example.cpp) | Kernel 入口，展示 TilingData 如何被取回（`GET_TILING_DATA_WITH_STRUCT`） |
-| [examples/add_example/op_kernel/add_example.h](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_kernel/add_example.h) | Kernel 实现，展示 `blockFactor`/`ubFactor` 如何被消费 |
-| [examples/add_example/op_kernel/add_example_tiling_key.h](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_kernel/add_example_tiling_key.h) | TilingKey 模板参数声明（schMode 0/1），u3-l4 会展开 |
+| [examples/add_example/op_host/add_example_tiling.cpp](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_host/add_example_tiling.cpp) | 本讲主线：AddExample 的完整 TilingFunc 实现与注册 |
+| [examples/add_example/op_kernel/add_example_tiling_data.h](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_kernel/add_example_tiling_data.h) | TilingData 结构体定义，Host 与 Kernel 两侧共享的「契约」 |
+| [common/inc/op_host/tiling_base.h](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/common/inc/op_host/tiling_base.h) | 公共层 `TilingBaseClass`，把 tiling 流程模板化为 8 个虚函数钩子 |
+| [examples/add_example/op_kernel/add_example.cpp](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_kernel/add_example.cpp) | Kernel 入口，展示 TilingData 如何被取回（`GET_TILING_DATA_WITH_STRUCT`） |
+| [examples/add_example/op_kernel/add_example.h](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_kernel/add_example.h) | Kernel 实现，展示 `blockFactor`/`ubFactor` 如何被消费 |
+| [examples/add_example/op_kernel/add_example_tiling_key.h](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_kernel/add_example_tiling_key.h) | TilingKey 模板参数声明（schMode 0/1），u3-l4 会展开 |
 
-另外，`add_example_tiling.cpp` 顶部 include 的 `util/math_util.h`、`op_host/tiling_util.h` 中，`Ops::Base::CeilDiv`（向上取整除法）、`FloorDiv`（向下取整除法）、`FloorAlign`（向下对齐）、`GetUbBlockSize`（获取 UB 最小对齐粒度）等工具来自 CANN toolkit 安装目录下的公共头文件，不在本仓库内（本仓库的 [common/inc/op_host/tiling_util.h](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/common/inc/op_host/tiling_util.h#L21-L31) 只提供 `EnsureNotScalar`、`IsRegbaseSocVersion` 等少量函数）。
+另外，`add_example_tiling.cpp` 顶部 include 的 `util/math_util.h`、`op_host/tiling_util.h` 中，`Ops::Base::CeilDiv`（向上取整除法）、`FloorDiv`（向下取整除法）、`FloorAlign`（向下对齐）、`GetUbBlockSize`（获取 UB 最小对齐粒度）等工具来自 CANN toolkit 安装目录下的公共头文件，不在本仓库内（本仓库的 [common/inc/op_host/tiling_util.h](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/common/inc/op_host/tiling_util.h#L21-L31) 只提供 `EnsureNotScalar`、`IsRegbaseSocVersion` 等少量函数）。
 
 ## 4. 核心概念与源码讲解
 
@@ -91,9 +91,9 @@ op_kernel: GET_TILING_DATA_WITH_STRUCT 取回参数 → 照方案执行
 
 注册入口只有一行，在 tiling 文件的最底部：
 
-[examples/add_example/op_host/add_example_tiling.cpp:L264-L267](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_host/add_example_tiling.cpp#L264-L267) —— `IMPL_OP_OPTILING(AddExample)` 把命名空间 `optiling` 下的实现与算子名 AddExample 绑定；`.Tiling(AddExampleTilingFunc)` 注册运行期切分函数；`.TilingParse<AddExampleCompileInfo>(TilingParseForAddExample)` 注册编译期解析函数（这里 `AddExampleCompileInfo` 是空结构体，解析函数直接返回成功，因为 AddExample 没有需要在编译期固化的静态信息）。
+[examples/add_example/op_host/add_example_tiling.cpp:L264-L267](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_host/add_example_tiling.cpp#L264-L267) —— `IMPL_OP_OPTILING(AddExample)` 把命名空间 `optiling` 下的实现与算子名 AddExample 绑定；`.Tiling(AddExampleTilingFunc)` 注册运行期切分函数；`.TilingParse<AddExampleCompileInfo>(TilingParseForAddExample)` 注册编译期解析函数（这里 `AddExampleCompileInfo` 是空结构体，解析函数直接返回成功，因为 AddExample 没有需要在编译期固化的静态信息）。
 
-[examples/add_example/op_host/add_example_tiling.cpp:L259-L262](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_host/add_example_tiling.cpp#L259-L262) —— `TilingParseForAddExample` 的空实现。对比 u3-l1 提到的 resize_bilinear_v2：那里 TilingParse 会在模型加载期读取核数与 UB 大小存进 CompileInfo，供运行期使用；AddExample 无此需求，所以留空。这就是「同一个注册宏、两种用法」的实例。
+[examples/add_example/op_host/add_example_tiling.cpp:L259-L262](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_host/add_example_tiling.cpp#L259-L262) —— `TilingParseForAddExample` 的空实现。对比 u3-l1 提到的 resize_bilinear_v2：那里 TilingParse 会在模型加载期读取核数与 UB 大小存进 CompileInfo，供运行期使用；AddExample 无此需求，所以留空。这就是「同一个注册宏、两种用法」的实例。
 
 #### 4.1.4 代码实践
 
@@ -171,27 +171,27 @@ UB 切分公式：
 
 **第一步：平台信息。**
 
-[examples/add_example/op_host/add_example_tiling.cpp:L79-L97](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_host/add_example_tiling.cpp#L79-L97) —— `GetPlatformInfo` 从 `context->GetPlatformInfo()` 拿到平台信息指针，构造 `platform_ascendc::PlatformAscendC` 包装对象（这是 CANN toolkit 提供的平台查询类），再用 `GetCoreNumAiv()` 取 AIV 核数、`GetCoreMemSize(CoreMemType::UB, ubSize)` 取 UB 字节数。两个值都做了非零校验，失败记 `OP_LOGE` 日志并返回 `GRAPH_FAILED`——这是 tiling 函数的标准容错姿势。
+[examples/add_example/op_host/add_example_tiling.cpp:L79-L97](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_host/add_example_tiling.cpp#L79-L97) —— `GetPlatformInfo` 从 `context->GetPlatformInfo()` 拿到平台信息指针，构造 `platform_ascendc::PlatformAscendC` 包装对象（这是 CANN toolkit 提供的平台查询类），再用 `GetCoreNumAiv()` 取 AIV 核数、`GetCoreMemSize(CoreMemType::UB, ubSize)` 取 UB 字节数。两个值都做了非零校验，失败记 `OP_LOGE` 日志并返回 `GRAPH_FAILED`——这是 tiling 函数的标准容错姿势。
 
 **第二步：shape 与 dtype。**
 
-[examples/add_example/op_host/add_example_tiling.cpp:L112-L153](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_host/add_example_tiling.cpp#L112-L153) —— `GetShapeAttrsInfo` 依次取输入 x（index 0）、输入 y（index 1）、输出 z（index 0）的 `GetStorageShape()`，经过 `EnsureNotScalar` 把标量 shape 统一成 `{1}`（见 [L61-L67](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_host/add_example_tiling.cpp#L61-L67)），然后做两层校验：三维张量都必须是 4 维（`DIMS_LIMIT = 4`），dtype 必须是 `DT_FLOAT` 或 `DT_INT32`。通过后 `totalIdx = inputShapeX.GetShapeSize()` 拿到总元素数。
+[examples/add_example/op_host/add_example_tiling.cpp:L112-L153](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_host/add_example_tiling.cpp#L112-L153) —— `GetShapeAttrsInfo` 依次取输入 x（index 0）、输入 y（index 1）、输出 z（index 0）的 `GetStorageShape()`，经过 `EnsureNotScalar` 把标量 shape 统一成 `{1}`（见 [L61-L67](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_host/add_example_tiling.cpp#L61-L67)），然后做两层校验：三维张量都必须是 4 维（`DIMS_LIMIT = 4`），dtype 必须是 `DT_FLOAT` 或 `DT_INT32`。通过后 `totalIdx = inputShapeX.GetShapeSize()` 拿到总元素数。
 
 注意这里的校验与 u3-l1 讲过的 def 文件白名单是互补关系：def 白名单在更低层拦截不支持的组合，tiling 里的校验则面向具体实现策略（本实现假定 4 维）。
 
 **第三步：workspace。**
 
-[examples/add_example/op_host/add_example_tiling.cpp:L164-L171](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_host/add_example_tiling.cpp#L164-L171) —— `GetWorkspaceSize` 通过 `context->GetWorkspaceSizes(1)` 取到长度为 1 的 workspace 数组并填入 `WS_SYS_SIZE = 0`。AddExample 是纯 elementwise 算子，数据在 GM↔UB 之间直来直去，不需要中间结果暂存区，所以 workspace 为 0。这与 u2-l1 讲过的「workspace 为 0 可跳过申请」正好呼应：样例里 aclnnAddExample 申请的 workspace 大小就是从这里来的。
+[examples/add_example/op_host/add_example_tiling.cpp:L164-L171](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_host/add_example_tiling.cpp#L164-L171) —— `GetWorkspaceSize` 通过 `context->GetWorkspaceSizes(1)` 取到长度为 1 的 workspace 数组并填入 `WS_SYS_SIZE = 0`。AddExample 是纯 elementwise 算子，数据在 GM↔UB 之间直来直去，不需要中间结果暂存区，所以 workspace 为 0。这与 u2-l1 讲过的「workspace 为 0 可跳过申请」正好呼应：样例里 aclnnAddExample 申请的 workspace 大小就是从这里来的。
 
 **第四步：主函数填充 TilingData 并设置 key。**
 
-[examples/add_example/op_host/add_example_tiling.cpp:L189-L247](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_host/add_example_tiling.cpp#L189-L247) —— `AddExampleTilingFunc` 主体。几个关键点：
+[examples/add_example/op_host/add_example_tiling.cpp:L189-L247](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_host/add_example_tiling.cpp#L189-L247) —— `AddExampleTilingFunc` 主体。几个关键点：
 
-- [L208-L213](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_host/add_example_tiling.cpp#L208-L213)：`context->GetTilingData<AddExampleTilingData>()` 拿到框架分配的 TilingData 指针，先 `memset_s` 清零——不清零的话，未赋值字段会带着上一次调用的脏值进 kernel。
-- [L215-L219](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_host/add_example_tiling.cpp#L215-L219)：核切分，注释明确写了策略「优先做核切分，尽量用更多的核并行计算」。
-- [L221-L225](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_host/add_example_tiling.cpp#L221-L225)：UB 切分，`BUFFER_NUM = 6` 的注释解释了 6 的来历（2 输入 + 1 输出 × double buffer）。
-- [L227-L228](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_host/add_example_tiling.cpp#L227-L228)：`SetBlockDim(usedCoreNum)`——这就是最终 kernel 启动的核数。
-- [L230-L244](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_host/add_example_tiling.cpp#L230-L244)：按 dtype 设置 TilingKey，float 走 `GET_TPL_TILING_KEY(ELEMENTWISE_TPL_SCH_MODE_0)`（值为 0），int32 走 `MODE_1`（值为 1）。宏定义见 [examples/add_example/op_kernel/add_example_tiling_key.h:L21-L28](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_kernel/add_example_tiling_key.h#L21-L28)，`GET_TPL_TILING_KEY` 本体由 toolkit 头 `ascendc/host_api/tiling/template_argument.h` 提供。TilingKey 如何被 kernel 侧消费，是 u3-l4 的主题，这里只需知道「float 和 int32 会走不同的模板实例化分支」。
+- [L208-L213](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_host/add_example_tiling.cpp#L208-L213)：`context->GetTilingData<AddExampleTilingData>()` 拿到框架分配的 TilingData 指针，先 `memset_s` 清零——不清零的话，未赋值字段会带着上一次调用的脏值进 kernel。（顺带一提：本版本的一次日志质量修复把这里 `memset_s` 失败分支的日志文案从 `"set tiling data error"` 改成了更规范的 `"Failed to set tiling data"`，属于纯文案调整，不影响逻辑与行号。）
+- [L215-L219](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_host/add_example_tiling.cpp#L215-L219)：核切分，注释明确写了策略「优先做核切分，尽量用更多的核并行计算」。
+- [L221-L225](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_host/add_example_tiling.cpp#L221-L225)：UB 切分，`BUFFER_NUM = 6` 的注释解释了 6 的来历（2 输入 + 1 输出 × double buffer）。
+- [L227-L228](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_host/add_example_tiling.cpp#L227-L228)：`SetBlockDim(usedCoreNum)`——这就是最终 kernel 启动的核数。
+- [L230-L244](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_host/add_example_tiling.cpp#L230-L244)：按 dtype 设置 TilingKey，float 走 `GET_TPL_TILING_KEY(ELEMENTWISE_TPL_SCH_MODE_0)`（值为 0），int32 走 `MODE_1`（值为 1）。宏定义见 [examples/add_example/op_kernel/add_example_tiling_key.h:L21-L28](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_kernel/add_example_tiling_key.h#L21-L28)，`GET_TPL_TILING_KEY` 本体由 toolkit 头 `ascendc/host_api/tiling/template_argument.h` 提供。TilingKey 如何被 kernel 侧消费，是 u3-l4 的主题，这里只需知道「float 和 int32 会走不同的模板实例化分支」。
 
 #### 4.2.4 代码实践
 
@@ -226,7 +226,7 @@ UB 切分公式：
 
 **需要观察的现象**：
 
-- 样例输入为 `8×16×2×2`（见 [examples/add_example/examples/test_aclnn_add_example.cpp](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/examples/test_aclnn_add_example.cpp) 中的 shape 构造），即 `totalNum = 8×16×2×2 = 512`。
+- 样例输入为 `8×16×2×2`（见 [examples/add_example/examples/test_aclnn_add_example.cpp](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/examples/test_aclnn_add_example.cpp) 中的 shape 构造），即 `totalNum = 8×16×2×2 = 512`。
 - 设芯片 AIV 核数为 N，则 `blockFactor = ⌈512/N⌉`、`usedCoreNum = ⌈512/blockFactor⌉`。以 50 核为例：`blockFactor = ⌈512/50⌉ = 11`，`usedCoreNum = ⌈512/11⌉ = 47`——注意 47 < 50，正是「收缩核数」效应。
 - `ubFactor` 是由 UB 大小算出的一个较大定值，与输入 shape 无关；当 `blockFactor < ubFactor` 时，kernel 内 `loopCount` 为 1，一批就搬完。
 
@@ -242,9 +242,9 @@ UB 切分公式：
 
 **练习 2**：为什么 `ubFactor` 公式里除以 6 而不是 3？
 
-**答案**：AddExample 有 2 个输入队列 + 1 个输出队列共 3 个 TQue，每个队列使能 double buffer（`BUFFER_NUM = 2`，见 [add_example.h:L27](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_kernel/add_example.h#L27)），搬运和计算要能重叠进行，所以 3 × 2 = 6 块 UB tensor 必须同时驻留 UB，每块只能分到 1/6。
+**答案**：AddExample 有 2 个输入队列 + 1 个输出队列共 3 个 TQue，每个队列使能 double buffer（`BUFFER_NUM = 2`，见 [add_example.h:L27](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_kernel/add_example.h#L27)），搬运和计算要能重叠进行，所以 3 × 2 = 6 块 UB tensor 必须同时驻留 UB，每块只能分到 1/6。
 
-**练习 3**：如果把 [L225](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_host/add_example_tiling.cpp#L225) 中的 `FloorAlign(..., ubBlockSize)` 的对齐去掉，可能出什么问题？
+**练习 3**：如果把 [L225](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_host/add_example_tiling.cpp#L225) 中的 `FloorAlign(..., ubBlockSize)` 的对齐去掉，可能出什么问题？
 
 **答案**：`ubFactor` 不再是 UB 最小访问粒度（ubBlockSize）的整数倍，`DataCopy` 搬运非对齐长度时性能下降甚至需要走 `DataCopyPad` 的补齐路径，还可能引发队列 buffer 分配失败。对齐是拿少量空间浪费换搬运效率的常规取舍。
 
@@ -268,18 +268,18 @@ Kernel: tilingData->blockFactor / ubFactor 驱动 Init 与 Process
 
 #### 4.3.3 源码精读
 
-[examples/add_example/op_kernel/add_example_tiling_data.h:L19-L23](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_kernel/add_example_tiling_data.h#L19-L23) —— 整个结构体只有三个 `int64_t` 字段，且给了默认值 0。注意它放在 `op_kernel` 目录而非 `op_host`，因为 Device 侧编译单元必须能 include 它（Host 侧也可以跨目录 include，`add_example_tiling.cpp` 第 24 行正是 `#include "../op_kernel/add_example_tiling_data.h"`）。复杂算子的 TilingData 会嵌套更多字段，但「Host/Kernel 共享同一头文件」的约定不变。
+[examples/add_example/op_kernel/add_example_tiling_data.h:L19-L23](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_kernel/add_example_tiling_data.h#L19-L23) —— 整个结构体只有三个 `int64_t` 字段，且给了默认值 0。注意它放在 `op_kernel` 目录而非 `op_host`，因为 Device 侧编译单元必须能 include 它（Host 侧也可以跨目录 include，`add_example_tiling.cpp` 第 24 行正是 `#include "../op_kernel/add_example_tiling_data.h"`）。复杂算子的 TilingData 会嵌套更多字段，但「Host/Kernel 共享同一头文件」的约定不变。
 
-[examples/add_example/op_kernel/add_example.cpp:L36-L57](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_kernel/add_example.cpp#L36-L57) —— kernel 入口函数第 5 个参数 `GM_ADDR tiling` 就是下发到 GM 的 tiling 数据地址。第 40 行 `REGISTER_TILING_DEFAULT(AddExampleTilingData)` 注册结构体类型；第 42 行 `GET_TILING_DATA_WITH_STRUCT(AddExampleTilingData, tilingData, tiling)` 把 GM 数据解包为局部变量 `tilingData`。随后按模板参数 `schMode`（即 Host 侧 `SetTilingKey` 设置的值，由编译系统实例化出不同入口）分发到 `AddExample<float>` 或 `AddExample<int32_t>` 实现。
+[examples/add_example/op_kernel/add_example.cpp:L36-L57](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_kernel/add_example.cpp#L36-L57) —— kernel 入口函数第 5 个参数 `GM_ADDR tiling` 就是下发到 GM 的 tiling 数据地址。第 40 行 `REGISTER_TILING_DEFAULT(AddExampleTilingData)` 注册结构体类型；第 42 行 `GET_TILING_DATA_WITH_STRUCT(AddExampleTilingData, tilingData, tiling)` 把 GM 数据解包为局部变量 `tilingData`。随后按模板参数 `schMode`（即 Host 侧 `SetTilingKey` 设置的值，由编译系统实例化出不同入口）分发到 `AddExample<float>` 或 `AddExample<int32_t>` 实现。
 
-[examples/add_example/op_kernel/add_example.h:L57-L70](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_kernel/add_example.h#L57-L70) —— Kernel 消费 tiling 的方式，值得逐行看：
+[examples/add_example/op_kernel/add_example.h:L57-L70](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_kernel/add_example.h#L57-L70) —— Kernel 消费 tiling 的方式，值得逐行看：
 
 - 第 59 行：`remainderLength = totalNum - blockFactor * (GetBlockIdx() - 1)`——`GetBlockIdx()` 是当前核的编号（从 1 开始），算出「轮到我这核时还剩多少元素」。
 - 第 60 行：`blockLength_ = min(remainderLength, blockFactor)`——非最后一个核取满 `blockFactor`，最后一个核取剩余量。这解释了为什么 tiling 侧的切分只需给出统一的 `blockFactor`，尾块处理由 kernel 自己完成。
 - 第 63-65 行：`SetGlobalBuffer((__gm__ T*)x + blockFactor * GetBlockIdx(), blockLength_)`——注意这里用 `blockFactor * GetBlockIdx()` 计算本核的数据起点，配合第 59 行用 `(GetBlockIdx() - 1)` 算余量，两处下标约定（起点不含 0 号偏移、余量含 1 号起算）是成对出现的，改动任何一处都会引入 off-by-one。
 - 第 67-69 行：`pipe.InitBuffer(..., ubLength_ * sizeof(T))`——用 `ubFactor` 给三个队列分配 UB 空间，正是 Host 侧「UB 除以 6」预留的预算。
 
-[examples/add_example/op_kernel/add_example.h:L113-L123](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_kernel/add_example.h#L113-L123) —— `Process()` 中 `loopCount = ⌈blockLength_ / ubLength_⌉`，把本核的任务再按 `ubFactor` 分批，每批走 CopyIn → Compute → CopyOut 三段流水。核间切分（blockFactor）与核内分批（ubFactor）在此汇合，构成完整的两级切分。
+[examples/add_example/op_kernel/add_example.h:L113-L123](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_kernel/add_example.h#L113-L123) —— `Process()` 中 `loopCount = ⌈blockLength_ / ubLength_⌉`，把本核的任务再按 `ubFactor` 分批，每批走 CopyIn → Compute → CopyOut 三段流水。核间切分（blockFactor）与核内分批（ubFactor）在此汇合，构成完整的两级切分。
 
 #### 4.3.4 代码实践
 
@@ -330,13 +330,13 @@ DoTiling():
 
 #### 4.4.3 源码精读
 
-[common/inc/op_host/tiling_base.h:L59-L101](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/common/inc/op_host/tiling_base.h#L59-L101) —— `DoTiling()` 的返回值语义写在注释里：`GRAPH_SUCCESS` 成功、`GRAPH_FAILED` 中止、`GRAPH_PARAM_INVALID` 表示本类不支持需要继续尝试其他 Tiling 类。这个三态协议是多策略 tiling（u3-l4 的 TilingKey 多分支）在类层面的基础。
+[common/inc/op_host/tiling_base.h:L59-L101](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/common/inc/op_host/tiling_base.h#L59-L101) —— `DoTiling()` 的返回值语义写在注释里：`GRAPH_SUCCESS` 成功、`GRAPH_FAILED` 中止、`GRAPH_PARAM_INVALID` 表示本类不支持需要继续尝试其他 Tiling 类。这个三态协议是多策略 tiling（u3-l4 的 TilingKey 多分支）在类层面的基础。
 
-[common/inc/op_host/tiling_base.h:L107-L123](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/common/inc/op_host/tiling_base.h#L107-L123) —— 8 个纯虚钩子：`IsCapable`/`GetPlatformInfo`/`GetShapeAttrsInfo`/`DoOpTiling`/`DoLibApiTiling`/`GetTilingKey`/`GetWorkspaceSize`/`PostTiling`。对照 4.2 的自由函数四步，会发现 add_example 的子函数拆分正是在模仿这套骨架——学会了 add_example，就等于预习了 `TilingBaseClass` 子类的写法。
+[common/inc/op_host/tiling_base.h:L107-L123](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/common/inc/op_host/tiling_base.h#L107-L123) —— 8 个纯虚钩子：`IsCapable`/`GetPlatformInfo`/`GetShapeAttrsInfo`/`DoOpTiling`/`DoLibApiTiling`/`GetTilingKey`/`GetWorkspaceSize`/`PostTiling`。对照 4.2 的自由函数四步，会发现 add_example 的子函数拆分正是在模仿这套骨架——学会了 add_example，就等于预习了 `TilingBaseClass` 子类的写法。
 
-[common/inc/op_host/tiling_base.h:L125-L141](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/common/inc/op_host/tiling_base.h#L125-L141) —— `DefaultTilingInfoDump()` 把 RawTilingData 按 `uint32_t` 逐个打印成十六进制/十进制串，超 640 字符自动分段。这正是本讲「观察 tiling 字段」实践的官方版本：把日志级别开到 DEBUG，tiling 内容会自动 dump 出来，无需手写 `OP_LOGI`。
+[common/inc/op_host/tiling_base.h:L125-L141](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/common/inc/op_host/tiling_base.h#L125-L141) —— `DefaultTilingInfoDump()` 把 RawTilingData 按 `uint32_t` 逐个打印成十六进制/十进制串，超 640 字符自动分段。这正是本讲「观察 tiling 字段」实践的官方版本：把日志级别开到 DEBUG，tiling 内容会自动 dump 出来，无需手写 `OP_LOGI`。
 
-[common/inc/op_host/tiling_base.h:L35-L57](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/common/inc/op_host/tiling_base.h#L35-L57) —— `AiCoreParams`/`CompileInfoCommon` 两个 POD 结构，集中描述平台资源（UB/L1/L0A/L0B/L0C、AIV/AIC 核数等），是 TilingParse 阶段固化下来的信息载体。
+[common/inc/op_host/tiling_base.h:L35-L57](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/common/inc/op_host/tiling_base.h#L35-L57) —— `AiCoreParams`/`CompileInfoCommon` 两个 POD 结构，集中描述平台资源（UB/L1/L0A/L0B/L0C、AIV/AIC 核数等），是 TilingParse 阶段固化下来的信息载体。
 
 #### 4.4.4 代码实践
 
@@ -389,6 +389,6 @@ DoTiling():
 
 下一讲 **u3-l4（TilingKey 多策略与多架构适配）** 将深入 `tiling_templates_registry.h` 的模板注册宏与 `resize_bilinear_v2` 的 arch35 多架构 tiling，讲清楚一个算子如何用 TilingKey 在「同一份代码」里区分几十种 dtype/shape/芯片组合。建议提前浏览：
 
-- [common/inc/op_host/tiling_templates_registry.h:L318-L341](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/common/inc/op_host/tiling_templates_registry.h#L318-L341) 的 `REGISTER_TILING_TEMPLATE` 系列宏。
+- [common/inc/op_host/tiling_templates_registry.h:L318-L341](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/common/inc/op_host/tiling_templates_registry.h#L318-L341) 的 `REGISTER_TILING_TEMPLATE` 系列宏。
 - `image/resize_bilinear_v2/op_host/arch35/` 下的多架构 tiling 文件，对照本讲的四步骨架找同构之处。
 - 若想先看 kernel 侧如何按 key 分发，可预习 u4-l1 的 `add_example.cpp` 模板分发（本讲 4.3.3 已初见）。

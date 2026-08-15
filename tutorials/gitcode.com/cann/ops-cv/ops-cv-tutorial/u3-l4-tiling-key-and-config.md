@@ -68,7 +68,7 @@ Device 侧（op_kernel/add_example.cpp）
 
 先看 TilingKey 的声明文件，它定义了一个名为 `schMode` 的模板参数，取值只有 0 和 1 两种：
 
-[examples/add_example/op_kernel/add_example_tiling_key.h:L21-L28](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_kernel/add_example_tiling_key.h#L21-L28)
+[examples/add_example/op_kernel/add_example_tiling_key.h:L21-L28](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_kernel/add_example_tiling_key.h#L21-L28)
 
 - `ELEMENTWISE_TPL_SCH_MODE_0/1`：两个策略模式常量（0=浮点，1=int32）。
 - `ASCENDC_TPL_ARGS_DECL(...)`：向框架声明"本算子的 kernel 模板有一个 uint 参数 schMode，合法取值是 {0, 1}"。编译体系据此为每个取值各生成/编译一份 kernel 变体。
@@ -76,15 +76,15 @@ Device 侧（op_kernel/add_example.cpp）
 
 Host 侧在 TilingFunc 尾部按 dtype 取号并写入 context：
 
-[examples/add_example/op_host/add_example_tiling.cpp:L230-L244](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_host/add_example_tiling.cpp#L230-L244)
+[examples/add_example/op_host/add_example_tiling.cpp:L230-L244](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_host/add_example_tiling.cpp#L230-L244)
 
 这段代码在 u3-l3 已经见过 tiling 计算部分，这里聚焦最后几行：`dataType == ge::DT_FLOAT` 走 mode 0，`ge::DT_INT32` 走 mode 1，其它类型直接报错返回失败。
 
 Device 侧的枚举与分发：
 
-[examples/add_example/op_kernel/add_example.cpp:L24-L27](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_kernel/add_example.cpp#L24-L27) 定义了与 Host 侧 mode 对应的枚举（0=浮点、1=int32）；
+[examples/add_example/op_kernel/add_example.cpp:L24-L27](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_kernel/add_example.cpp#L24-L27) 定义了与 Host 侧 mode 对应的枚举（0=浮点、1=int32）；
 
-[examples/add_example/op_kernel/add_example.cpp:L36-L57](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/op_kernel/add_example.cpp#L36-L57) 是 kernel 入口：模板参数 `schMode` 由框架根据 tilingKey 实例化，`if constexpr` 在编译期选定 `AddExample<float>` 或 `AddExample<int32_t>`。
+[examples/add_example/op_kernel/add_example.cpp:L36-L57](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/op_kernel/add_example.cpp#L36-L57) 是 kernel 入口：模板参数 `schMode` 由框架根据 tilingKey 实例化，`if constexpr` 在编译期选定 `AddExample<float>` 或 `AddExample<int32_t>`。
 
 #### 4.1.4 代码实践
 
@@ -137,29 +137,29 @@ Device 侧的枚举与分发：
 
 递归求和与取号入口：
 
-[common/inc/op_host/tiling_key.h:L25-L31](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/common/inc/op_host/tiling_key.h#L25-L31)
+[common/inc/op_host/tiling_key.h:L25-L31](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/common/inc/op_host/tiling_key.h#L25-L31)
 
 `RecursiveSum` 是变参递归：第一个参数落在最低位，之后每个参数乘 10 的幂次抬一位——正是上面公式 \(\sum id_i \cdot 10^i\) 的代码形态。
 
-[common/inc/op_host/tiling_key.h:L47-L52](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/common/inc/op_host/tiling_key.h#L47-L52) 在求和结果上加 `TILINGKEYOFFSET`（\(10^{19}\)），这就是 `GET_TILINGKEY`。
+[common/inc/op_host/tiling_key.h:L47-L52](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/common/inc/op_host/tiling_key.h#L47-L52) 在求和结果上加 `TILINGKEYOFFSET`（\(10^{19}\)），这就是 `GET_TILINGKEY`。
 
-[common/inc/op_host/tiling_key.h:L33-L45](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/common/inc/op_host/tiling_key.h#L33-L45) 的注释以 FlashAttention 为例说明了位域分配约定：从低位到高位依次是 Ub0、Ub1、Block、DataType、Format、Sparse，各占一个十进制位；其它算子可定义自己的位域。这套"每个维度占一个十进制位"的约定，使得 key 可以直接"读"出策略组合。
+[common/inc/op_host/tiling_key.h:L33-L45](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/common/inc/op_host/tiling_key.h#L33-L45) 的注释以 FlashAttention 为例说明了位域分配约定：从低位到高位依次是 Ub0、Ub1、Block、DataType、Format、Sparse，各占一个十进制位；其它算子可定义自己的位域。这套"每个维度占一个十进制位"的约定，使得 key 可以直接"读"出策略组合。
 
 注册表这边，按 soc_version 组织的两级 map：
 
-[common/inc/op_host/tiling_templates_registry.h:L92-L108](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/common/inc/op_host/tiling_templates_registry.h#L92-L108)
+[common/inc/op_host/tiling_templates_registry.h:L92-L108](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/common/inc/op_host/tiling_templates_registry.h#L92-L108)
 
-`registry_map_` 的结构是 `map<soc_version, map<op_type, TilingCases>>`（见 [L189](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/common/inc/op_host/tiling_templates_registry.h#L189)），也就是"先按芯片、再按算子名"找到候选 tiling 类集合。
+`registry_map_` 的结构是 `map<soc_version, map<op_type, TilingCases>>`（见 [L189](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/common/inc/op_host/tiling_templates_registry.h#L189)），也就是"先按芯片、再按算子名"找到候选 tiling 类集合。
 
 按优先级逐个尝试的执行逻辑：
 
-[common/inc/op_host/tiling_templates_registry.h:L39-L54](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/common/inc/op_host/tiling_templates_registry.h#L39-L54)
+[common/inc/op_host/tiling_templates_registry.h:L39-L54](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/common/inc/op_host/tiling_templates_registry.h#L39-L54)
 
 `RunTilingCasesHelper` 遍历所有 case（`std::map` 按 key 升序，priority 越小越先试），只要某个类的 `DoTiling()` 返回值不是 `GRAPH_PARAM_INVALID`（即"我能处理"或"真出错"），就采纳它并返回；全部返回 `GRAPH_PARAM_INVALID`（"我不适合这个输入"）才判定失败。三态返回实现了**多候选降级**。
 
 供算子使用的注册宏：
 
-[common/inc/op_host/tiling_templates_registry.h:L318-L336](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/common/inc/op_host/tiling_templates_registry.h#L318-L336)
+[common/inc/op_host/tiling_templates_registry.h:L318-L336](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/common/inc/op_host/tiling_templates_registry.h#L318-L336)
 
 `REGISTER_TILING_TEMPLATE_WITH_SOCVERSION` 利用全局静态对象在库加载期完成注册（见 u3-l5 将展开的"静态注册"模式），注释明确说明 priority 越小优先级越高。
 
@@ -220,15 +220,17 @@ Device 侧则是镜像的 `TILING_KEY_IS(key)` 判断链，进入对应实现类
 
 #### 4.3.3 源码精读
 
+> 版本说明：与上一版讲义相比，本轮（394ba763）对本文件的唯一改动是 [L241](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp#L241)（`SetDimsByFormat` 内）一处 `OP_LOGI` 日志文案的排版修复（`"scaleW  is"` 双空格改为单空格），属日志质量扫描的清理，不影响任何策略匹配逻辑与本文行号。
+
 **Host 侧的 key 常量表**——"万位分段"清晰可见：
 
-[image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp:L36-L46](https://github.com/gitcode.com/cann-ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp#L36-L46)
+[image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp:L36-L46](https://github.com/gitcode.com/cann-ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp#L36-L46)
 
 10000 段 = C 轴并行；30000 段 = SIMT（按输出元素一维展开、每线程处理若干元素的通用路径，`_IDX64` 后缀表示索引用 uint64 防溢出）；40000 段 = copy/broadcast 特化。
 
 **策略匹配与设 key 的核心函数**：
 
-[image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp:L592-L623](https://github.com/gitcode.com/cann-ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp#L592-L623)
+[image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp:L592-L623](https://github.com/gitcode.com/cann-ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp#L592-L623)
 
 注意三个细节：
 
@@ -238,27 +240,27 @@ Device 侧则是镜像的 `TILING_KEY_IS(key)` 判断链，进入对应实现类
 
 **每个策略专属的 tiling 计算**：
 
-[image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp:L625-L665](https://github.com/gitcode.com/cann-ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp#L625-L665)
+[image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp:L625-L665](https://github.com/gitcode.com/cann-ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp#L625-L665)
 
 `TilingStrategy()` 先匹配 key，再 `switch` 到对应的 `DoTilingXxx()`。对比 u3-l3 的 add_example（只有一种切分方式），这里是"**一种策略一套切分算法**"：AllCopy 按输出总量均分核；PointCopy 做 N/H 两轴 `FindBest2DTiling` 再逐级扩到 W、C 轴；SIMT 只按输出元素一维均分。
 
 **写入框架的收口**：
 
-[image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp:L835-L851](https://github.com/gitcode.com/cann-ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp#L835-L851)
+[image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp:L835-L851](https://github.com/gitcode.com/cann-ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp#L835-L851)
 
-`DoTiling()` 末尾三件套：`SetBlockDim(realCoreNum_)`（用多少核）、`SetTilingKey(tilingKey_)`（用哪份实现）、申报 workspace。此外 `FillTilingData()`（[L667-L697](https://github.com/gitcode.com/cann-ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp#L667-L697)）把 `tilingKey` 也存进了 TilingData 结构本身——所以 kernel 侧既能在分发时用它（框架机制），也能在核内读 `tilingData.tilingKey` 做二级判断。
+`DoTiling()` 末尾三件套：`SetBlockDim(realCoreNum_)`（用多少核）、`SetTilingKey(tilingKey_)`（用哪份实现）、申报 workspace。此外 `FillTilingData()`（[L667-L697](https://github.com/gitcode.com/cann-ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp#L667-L697)）把 `tilingKey` 也存进了 TilingData 结构本身——所以 kernel 侧既能在分发时用它（框架机制），也能在核内读 `tilingData.tilingKey` 做二级判断。
 
 **kernel 侧的镜像分发**：
 
-[image/resize_bilinear_v2/op_kernel/resize_bilinear_v2_apt.cpp:L27-L38](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/image/resize_bilinear_v2/op_kernel/resize_bilinear_v2_apt.cpp#L27-L38) 重新定义了与 Host 侧**同名同值**的常量（还多了一个 Host 侧未使用的 `TILING_KEY_HW_CACHE 20000`，属保留值）。这就是 u3-l1 说的"同名 TilingKey 常量"跨侧约定：两边各自定义、数值必须人工保持一致。
+[image/resize_bilinear_v2/op_kernel/resize_bilinear_v2_apt.cpp:L27-L38](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/resize_bilinear_v2/op_kernel/resize_bilinear_v2_apt.cpp#L27-L38) 重新定义了与 Host 侧**同名同值**的常量（还多了一个 Host 侧未使用的 `TILING_KEY_HW_CACHE 20000`，属保留值）。这就是 u3-l1 说的"同名 TilingKey 常量"跨侧约定：两边各自定义、数值必须人工保持一致。
 
-[image/resize_bilinear_v2/op_kernel/resize_bilinear_v2_apt.cpp:L42-L55](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/image/resize_bilinear_v2/op_kernel/resize_bilinear_v2_apt.cpp#L42-L55) 是 kernel 入口和 ALL_COPY 分支：`GET_TILING_DATA` 解包后，`TILING_KEY_IS(TILING_KEY_ALL_COPY)` 命中则构造 `ResizeBilinearV2AllCopy` 实例执行。
+[image/resize_bilinear_v2/op_kernel/resize_bilinear_v2_apt.cpp:L42-L55](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/resize_bilinear_v2/op_kernel/resize_bilinear_v2_apt.cpp#L42-L55) 是 kernel 入口和 ALL_COPY 分支：`GET_TILING_DATA` 解包后，`TILING_KEY_IS(TILING_KEY_ALL_COPY)` 命中则构造 `ResizeBilinearV2AllCopy` 实例执行。
 
-[image/resize_bilinear_v2/op_kernel/resize_bilinear_v2_apt.cpp:L77-L87](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/image/resize_bilinear_v2/op_kernel/resize_bilinear_v2_apt.cpp#L77-L87) 展示了**key 之内的二级分发**：同为 C_PARALLEL key，核内再按 `tilingData.cFactor < tilingData.lenC` 选择 `ResizeBilinearV2Nc` 还是 `ResizeBilinearV2CParallel`。策略编号不必穷尽所有分支——TilingData 里的字段也能参与运行期选择。
+[image/resize_bilinear_v2/op_kernel/resize_bilinear_v2_apt.cpp:L77-L87](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/resize_bilinear_v2/op_kernel/resize_bilinear_v2_apt.cpp#L77-L87) 展示了**key 之内的二级分发**：同为 C_PARALLEL key，核内再按 `tilingData.cFactor < tilingData.lenC` 选择 `ResizeBilinearV2Nc` 还是 `ResizeBilinearV2CParallel`。策略编号不必穷尽所有分支——TilingData 里的字段也能参与运行期选择。
 
 **多架构绑定在 def 文件**：
 
-[image/resize_bilinear_v2/op_host/resize_bilinear_v2_def.cpp:L63-L69](https://github.com/gitcode.com/cann-ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/image/resize_bilinear_v2/op_host/resize_bilinear_v2_def.cpp#L63-L69)
+[image/resize_bilinear_v2/op_host/resize_bilinear_v2_def.cpp:L63-L69](https://github.com/gitcode.com/cann-ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/resize_bilinear_v2/op_host/resize_bilinear_v2_def.cpp#L63-L69)
 
 `OpAICoreConfig` 通过 `ExtendCfgInfo("opFile.value", "resize_bilinear_v2_apt")` 把算子绑定到 `resize_bilinear_v2_apt.cpp` 这份 kernel 源（这就是 u3-l1 提过的 opFile 绑定），再由 `AddConfig("ascend950", ...)` 与 `AddConfig("mc62", ...)` 声明该实现适用的芯片型号列表。
 
@@ -266,7 +268,7 @@ Device 侧则是镜像的 `TILING_KEY_IS(key)` 判断链，进入对应实现类
 
 1. **实践目标**：验证不同 shape 确实命中不同 TilingKey。
 2. **操作步骤**：
-   - 阅读 [L699-L715](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp#L699-L715) 的 `PrintTilingData()`——它会把 tilingKey 等全部字段打进 INFO 日志。
+   - 阅读 [L699-L715](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp#L699-L715) 的 `PrintTilingData()`——它会把 tilingKey 等全部字段打进 INFO 日志。
    - 准备三组输入（NCHW float32）：① 输入输出同尺寸（如 1×3×8×8 → 1×3×8×8）；② 整数倍缩小且 half_pixel_centers=true（如 1×64×8×8 → 1×64×4×4）；③ 普通任意缩放（如 1×3×17×19 → 1×3×33×40）。
    - 按 u2-l1 的两段式接口分别调用 `aclnnResize`，开启算子 INFO 日志（环境变量方式见 docs/zh/debug/op_debug_prof.md）后过滤 `tilingData is tilingKey:` 关键字。
 3. **需要观察的现象**：三组输入分别打出 tilingKey 40000（all_copy）、40001（point_copy）、30001（simt_nchw）。
@@ -309,13 +311,13 @@ Device 侧则是镜像的 `TILING_KEY_IS(key)` 判断链，进入对应实现类
 
 binary.json 的结构——`op_list` 数组中一项就是一个"二进制变体"：
 
-[image/resize_bilinear_v2/op_host/config/ascend950/resize_bilinear_v2_binary.json:L1-L30](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/image/resize_bilinear_v2/op_host/config/ascend950/resize_bilinear_v2_binary.json#L1-L30)
+[image/resize_bilinear_v2/op_host/config/ascend950/resize_bilinear_v2_binary.json:L1-L30](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/resize_bilinear_v2/op_host/config/ascend950/resize_bilinear_v2_binary.json#L1-L30)
 
 第一项声明：输入 `x` 是 `bfloat16 + NCHW`，输出 `y` 也是 `bfloat16 + NCHW`，对应二进制文件 `ResizeBilinearV2_9880508e9a5b60f059e97cb6e2ca9751`（哈希名）。`"shape": [-2]` 表示任意 shape（-2 是"任意维数"通配）。整个文件共 10 项，覆盖 bfloat16/float16/float32 × NCHW/NHWC ×（同 dtype 或输出 float32）的组合——这与 def 文件里的 dtype 白名单一一对应（u3-l5 详讲）。
 
 simplified_key.ini 的全部内容与注释：
 
-[image/resize_bilinear_v2/op_host/config/ascend950/resize_bilinear_v2_simplified_key.ini:L1-L14](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/image/resize_bilinear_v2/op_host/config/ascend950/resize_bilinear_v2_simplified_key.ini#L1-L14)
+[image/resize_bilinear_v2/op_host/config/ascend950/resize_bilinear_v2_simplified_key.ini:L1-L14](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/resize_bilinear_v2/op_host/config/ascend950/resize_bilinear_v2_simplified_key.ini#L1-L14)
 
 文件头部注释就是权威说明：该文件影响 opc 编译时 `--simplified_key_mode` 选项的取值；`default=0` 表示 ascend950 平台按 mode 0 处理（简化 key 模式关闭，走完整 tiling key 区分二进制）。注释还列出了 default 与各平台配置的优先级规则，以及"自定义 simplified key 时需显式配 None"的特殊情况。
 
@@ -325,7 +327,7 @@ simplified_key.ini 的全部内容与注释：
 2. **操作步骤**：
    - 统计 `resize_bilinear_v2_binary.json` 中 `op_list` 的项数（10 项）。
    - 为每项记录 (x.dtype, x.format, y.dtype) 三元组。
-   - 打开 [image/resize_bilinear_v2/op_host/resize_bilinear_v2_def.cpp](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/image/resize_bilinear_v2/op_host/resize_bilinear_v2_def.cpp) 找到 `valueDataTypeX/valueDataTypeY/resizeBilinearV2Format` 的定义（文件前半部分），核对组合是否闭合。
+   - 打开 [image/resize_bilinear_v2/op_host/resize_bilinear_v2_def.cpp](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/resize_bilinear_v2/op_host/resize_bilinear_v2_def.cpp) 找到 `valueDataTypeX/valueDataTypeY/resizeBilinearV2Format` 的定义（文件前半部分），核对组合是否闭合。
 3. **需要观察的现象**：json 中的组合恰是 def 白名单中 x/y dtype 与 format 的笛卡尔积的有效子集，无多余无遗漏。
 4. **预期结果**：建立"def 白名单（能力）→ binary.json（产物）→ TilingKey（策略）"三层映射的直觉。纯阅读型实践，无需环境。
 
@@ -354,10 +356,10 @@ simplified_key.ini 的全部内容与注释：
 
 步骤：
 
-1. Host 侧条件从 [resize_bilinear_v2_tiling_arch35.cpp:L592-L623](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp#L592-L623) 的匹配链和各 `IsMatchXxx()` 函数（L245-L352）提取。
-2. kernel 侧类名从 [resize_bilinear_v2_apt.cpp](https://github.com/gitcode.com/cann-ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/image/resize_bilinear_v2/op_kernel/resize_bilinear_v2_apt.cpp#L42-L222) 的分发链提取；注意 10000（C_PARALLEL）一项会分裂成两个类（Nc / CParallel），要写成两行并注明核内二级判断条件 `cFactor < lenC`。
+1. Host 侧条件从 [resize_bilinear_v2_tiling_arch35.cpp:L592-L623](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/resize_bilinear_v2/op_host/arch35/resize_bilinear_v2_tiling_arch35.cpp#L592-L623) 的匹配链和各 `IsMatchXxx()` 函数（L245-L352）提取。
+2. kernel 侧类名从 [resize_bilinear_v2_apt.cpp](https://github.com/gitcode.com/cann-ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/resize_bilinear_v2/op_kernel/resize_bilinear_v2_apt.cpp#L42-L222) 的分发链提取；注意 10000（C_PARALLEL）一项会分裂成两个类（Nc / CParallel），要写成两行并注明核内二级判断条件 `cFactor < lenC`。
 3. 检索 `op_kernel/arch35/` 目录确认每个实现类的头文件名（目录下共 10 个 .h，含基类 base.h 和 nc.h）。
-4. 加分项：说明 kernel 侧 [L28](https://github.com/gitcode.com/cann-ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/image/resize_bilinear_v2/op_kernel/resize_bilinear_v2_apt.cpp#L28) 的 `TILING_KEY_HW_CACHE 20000` 为何在 Host 侧没有对应常量（提示：保留位，当前 tiling 实现不产生该 key）。
+4. 加分项：说明 kernel 侧 [L28](https://github.com/gitcode.com/cann-ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/image/resize_bilinear_v2/op_kernel/resize_bilinear_v2_apt.cpp#L28) 的 `TILING_KEY_HW_CACHE 20000` 为何在 Host 侧没有对应常量（提示：保留位，当前 tiling 实现不产生该 key）。
 
 预期成果：一张 11 行左右的对照表，能把"shape 特征 → key → 实现类"一路查到底。这张表也是日后给该算子做性能分析（u7-l3）时的路由地图。
 

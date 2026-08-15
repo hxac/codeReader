@@ -1,0 +1,872 @@
+{
+  "head": "0e2eac83d24a7ec29a0647698ed0defe1ff1f8f0",
+  "project": "ops-nn",
+  "rationale": "ops-nn 是 CANN 高阶神经网络算子库，代码规模大（20+ 算子大类、上千算子目录），核心学习对象不是某个业务主流程，而是\"一个 Ascend C 算子从定义、shape 推导、tiling、kernel 实现到 aclnn 适配、编译打包、调用验证、调试调优\"的标准工程链路。因此大纲以 examples/add_example 这条官方入门样例为主轴贯穿前半部分，让读者先跑通再逐层拆解 op_def/infershape/tiling/op_kernel/op_api 五层交付件；随后按算子大类（activation、matmul 量化融合、vfusion 等）横向扩展视野；最后进入专家层的测试体系（UT/ST）、调试调优（printf/DumpTensor/msprof/仿真）、AI CPU 与图模式、experimental 贡献与跨平台迁移。单元顺序遵循\"运行 → 理解 → 修改 → 扩展 → 贡献\"的递进关系，讲义之间通过 depends_on 显式声明依赖，保证初学者可以零基础跟上。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 ops-nn 在 CANN 生态中的角色和与 CANN 包的版本配套关系",
+            "识别仓库顶层各算子大类目录的含义",
+            "找到官方文档中心和快速入门材料"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README.md",
+            "docs",
+            "examples"
+          ],
+          "order": 1,
+          "practice_task": "浏览 README.md 与 docs/README.md，列出本仓库包含的全部算子大类目录，并写出你所使用环境对应的 CANN 版本与 soc_version 取值。",
+          "source_files": [
+            "README.md",
+            "docs/README.md",
+            "docs/QUICKSTART.md"
+          ],
+          "title": "ops-nn 是什么：CANN 高阶算子库总览",
+          "topic": "介绍 ops-nn 项目定位：CANN 生态中提供神经网络计算能力的高阶算子库，涵盖 matmul、activation 等算子；解读架构图、版本配套关系与仓库顶层目录。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-build-and-run.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "掌握 build.sh 的 --pkg、--soc、--ops 等关键参数",
+            "理解编译产物 run 包的安装位置与 LD_LIBRARY_PATH 配置",
+            "能用 --run_example 验证一个算子"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "build.sh",
+            "install_deps.sh",
+            "cmake"
+          ],
+          "order": 2,
+          "practice_task": "在配套环境中执行 bash build.sh --pkg --soc=${soc_version} --ops=add_example -j16，安装生成的 run 包，并运行 bash build.sh --run_example add_example eager cust --vendor_name=custom 记录输出。",
+          "source_files": [
+            "docs/QUICKSTART.md",
+            "build.sh",
+            "docs/zh/install/compile.md",
+            "docs/zh/install/quick_install.md"
+          ],
+          "title": "环境准备与源码编译：build.sh 单算子构建全流程",
+          "topic": "讲解环境部署前提、CANN 环境变量配置，以及通过 build.sh 进行单算子编译、打包、安装和运行样例的完整流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-op-project-structure.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "说出一个算子工程包含哪些标准子目录及其职责",
+            "区分 op_host、op_kernel、op_api、op_graph 的产物形态",
+            "对照 dir_structure 文档定位任意算子的交付件"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "examples/add_example",
+            "activation",
+            "matmul"
+          ],
+          "order": 3,
+          "practice_task": "以 examples/add_example 和 activation/gelu 为对象，画出两张算子目录结构对比图，标注每个子目录对应的交付物类型。",
+          "source_files": [
+            "docs/zh/install/dir_structure.md",
+            "examples/add_example/CMakeLists.txt",
+            "examples/add_example/README.md"
+          ],
+          "title": "算子工程的目录解剖：op_host、op_kernel、op_api 等五层交付件",
+          "topic": "以 add_example 为样本，剖析一个标准算子工程由 op_host、op_kernel、op_api、op_graph、tests、examples 组成的目录约定，并对照真实算子 activation/gelu 的目录差异。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "filename": "u1-l4-add-example-walkthrough.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "完成 Kernel 修改到结果验证的闭环",
+            "理解样例 cpp 中 aclnn 调用的大致结构",
+            "掌握修改测试输入 shape 与数据的方法"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "examples/add_example/op_kernel",
+            "examples/add_example/examples"
+          ],
+          "order": 4,
+          "practice_task": "按照 QUICKSTART 将 AddExample 的 Add 改为 Mul，重新编译安装并验证输出变为乘法结果；再修改 test_aclnn_add_example.cpp 的输入 shape 为 {8,8,8,8} 并验证。",
+          "source_files": [
+            "docs/QUICKSTART.md",
+            "examples/add_example/op_kernel/add_example.h",
+            "examples/add_example/examples/test_aclnn_add_example.cpp"
+          ],
+          "title": "第一次算子开发实践：修改 AddExample 内核并验证",
+          "topic": "跟随 QUICKSTART 完整走一遍修改 Kernel（Add 改 Mul）、重新编译安装、修改样例输入 shape 验证的全闭环，建立对开发节奏的手感。"
+        }
+      ],
+      "order": 1,
+      "title": "入门：认识 ops-nn 并跑通第一个算子"
+    },
+    {
+      "id": "u2",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l1-aclnn-invocation.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "理解 aclnnXxx 两段式 API 的调用约定与返回码处理",
+            "掌握 aclnn 适配层如何把框架调用转成算子执行",
+            "能独立编写一个调用已有算子的 C++ 样例"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "activation/gelu/op_api",
+            "examples/add_example/examples"
+          ],
+          "order": 1,
+          "practice_task": "仿照 test_aclnn_add_example.cpp，编写并运行一个调用 aclnnGelu 的最小样例，对一份随机 float 数据验证 GELU 输出与 CPU 参考值一致。",
+          "source_files": [
+            "docs/zh/invocation/quick_op_invocation.md",
+            "activation/gelu/op_api/aclnn_gelu.cpp",
+            "examples/add_example/examples/test_aclnn_add_example.cpp"
+          ],
+          "title": "aclnn API 调用算子：两段式接口与调用流程",
+          "topic": "讲解 aclnn 两段式接口设计（GetWorkspaceSize + 执行），结合 gelu 的 aclnn 适配源码与 add_example 调用样例理解 Host 侧调用链。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-ge-graph-invocation.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "理解图模式下算子如何被组织与下发",
+            "看懂 op_graph 目录中 proto 定义的作用",
+            "能运行并修改 GE 图模式样例"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "examples/add_example/op_graph",
+            "examples/add_example/examples"
+          ],
+          "order": 2,
+          "practice_task": "运行 test_geir_add_example.cpp 对应样例，并在图中再串接一个 AddExample 节点观察两次相加的结果。",
+          "source_files": [
+            "docs/zh/develop/graph_develop_guide.md",
+            "examples/add_example/examples/test_geir_add_example.cpp",
+            "examples/add_example/op_graph/add_example_proto.h"
+          ],
+          "title": "GE 图模式调用算子：从图构建到算子执行",
+          "topic": "介绍通过 Graph Engine 图模式（GEIR）调用算子的方式，对比 aclnn eager 调用的差异，理解 op_graph 交付件的作用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l3-torch-extension.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "理解 torch_extension 的目录组织与 setup.py 构建",
+            "掌握 PyTorch API 与 aclnn 底层的对应关系",
+            "能编译并用 Python 调用一个 ops-nn 算子"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "torch_extension",
+            "activation/gelu/op_api"
+          ],
+          "order": 3,
+          "practice_task": "编译 torch_extension，在 Python 中调用一个已封装算子，与 torch 原生实现对比结果与输出 shape。",
+          "source_files": [
+            "torch_extension/README.md",
+            "torch_extension/setup.py",
+            "docs/zh/develop/torch_extension_develop_guide.md"
+          ],
+          "title": "PyTorch 扩展方式调用算子：torch_extension 工程",
+          "topic": "讲解 torch_extension/cann_ops_nn 如何把 ops-nn 算子封装成 PyTorch 可用的 Python API，实现业务应用集成。"
+        }
+      ],
+      "order": 2,
+      "title": "算子调用方式：aclnn、GE 图模式与 PyTorch 扩展"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u3-l1-op-def.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "看懂 Input/Output 的 ParamType、DataType、Format 声明",
+            "理解 DynamicShapeSupportFlag 等编译开关的含义",
+            "理解 OP_ADD 宏注册算子到算子库的机制"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "examples/add_example/op_host",
+            "activation/gelu/op_host"
+          ],
+          "order": 1,
+          "practice_task": "为 AddExample 增加 DT_INT16 数据类型支持（同步修改 def/tiling/kernel 中的类型处理），编译并验证 INT16 输入可正确执行。",
+          "source_files": [
+            "examples/add_example/op_host/add_example_def.cpp",
+            "activation/gelu/op_host/gelu_def.cpp",
+            "docs/zh/develop/aicore_develop_guide.md"
+          ],
+          "title": "算子原型定义：OpDef 与输入输出规格",
+          "topic": "解读 op_host 下的 *_def.cpp：如何用 OpDef 声明输入输出、支持的数据类型与格式，以及针对不同 SOC 版本的 AI Core 编译配置。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-infershape.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 Infershape 在算子执行流程中的位置与触发时机",
+            "掌握基于输入 shape、广播规则推导输出 shape 的写法",
+            "能编写并运行 infershape UT 用例"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "examples/add_example/op_host",
+            "examples/add_example/tests"
+          ],
+          "order": 2,
+          "practice_task": "为 AddExample 编写一个新的 infershape UT 用例：构造两组不同 shape 的输入（含标量与 4 维），断言输出 shape 推导正确。",
+          "source_files": [
+            "examples/add_example/op_host/add_example_infershape.cpp",
+            "examples/add_example/tests/ut/op_host/test_add_example_infershape.cpp",
+            "docs/zh/context/broadcast_relationship.md"
+          ],
+          "title": "Shape 推导：Infershape 的实现与验证",
+          "topic": "讲解 *_infershape.cpp 如何根据输入 shape 推导输出 shape，结合广播规则等上下文概念理解推导关系。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l3-dtype-format-concepts.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "掌握 ND/NZ/FRAC 等常见格式含义",
+            "理解非连续 Tensor 对算子实现的影响与 AutoContiguous 的作用",
+            "能根据文档判断一个算子支持的类型与格式组合"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "examples/add_example/op_host",
+            "docs"
+          ],
+          "order": 3,
+          "practice_task": "整理一份类型-格式支持矩阵：选取 add_example 与任一 matmul 类算子，从 def 文件提取支持的 dtype/format 列表并对比差异。",
+          "source_files": [
+            "docs/zh/context/data_type.md",
+            "docs/zh/context/data_format.md",
+            "docs/zh/context/non_contiguous_tensor.md",
+            "examples/add_example/op_host/add_example_def.cpp"
+          ],
+          "title": "数据类型、格式与公共上下文概念",
+          "topic": "补充算子开发必备的背景知识：数据类型、数据格式、非连续 Tensor、aclnn 返回码等公共概念，为后续阅读算子源码打基础。"
+        }
+      ],
+      "order": 3,
+      "title": "算子定义与 Shape 推导"
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u4-l1-tiling-basics.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "理解 core 切分与 UB 切分两级 tiling 的计算方法",
+            "掌握通过 TilingContext 获取平台信息与 shape 的方法",
+            "理解 SetBlockDim/SetTilingKey 的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "examples/add_example/op_host"
+          ],
+          "order": 1,
+          "practice_task": "修改 AddExampleTilingFunc，打印（或用 UT 断言）不同 totalIdx 下的 blockFactor、ubFactor 与 usedCoreNum，观察核切分随规模的变化。",
+          "source_files": [
+            "examples/add_example/op_host/add_example_tiling.cpp",
+            "docs/zh/develop/aicore_develop_guide.md"
+          ],
+          "title": "Tiling 机制入门：核切分与 UB 切分",
+          "topic": "以 AddExampleTilingFunc 为主线讲解 tiling 的职责：获取平台信息（UB 大小、AI Core 数）、做核切分与 UB 切分、计算 workspace 并设置 BlockDim。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-tiling-data-key.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解 tiling data 结构体在 host 与 device 间的传递方式",
+            "掌握 tiling key 与 kernel 分支的对应关系",
+            "了解 tiling 模板注册机制的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "examples/add_example/op_kernel",
+            "common/inc/op_host"
+          ],
+          "order": 2,
+          "practice_task": "为 AddExample 新增一种 tiling 场景（如 totalNum 小于单核处理量时走 MODE_2 分支），定义新 tiling key 并在 kernel 侧按 key 区分处理逻辑。",
+          "source_files": [
+            "examples/add_example/op_kernel/add_example_tiling_data.h",
+            "examples/add_example/op_kernel/add_example_tiling_key.h",
+            "common/inc/op_host/tiling_templates_registry.h"
+          ],
+          "title": "TilingData 与 TilingKey：host/device 数据契约与模板注册",
+          "topic": "讲解 tiling data 结构定义、tiling key 的编码方式，以及 tiling_templates_registry 中模板化 tiling 的注册与复用机制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l3-tiling-common-utils.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "掌握 CeilDiv/FloorAlign 等常用工具函数",
+            "理解 tiling 缓存对重复执行性能的意义",
+            "能识别真实算子中对公共 tiling 设施的复用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "common/inc/op_host",
+            "matmul/quant_batch_matmul_v4/op_host"
+          ],
+          "order": 3,
+          "practice_task": "在 AddExample 的 tiling 中接入 tiling 缓存：相同 shape 重复调用时直接命中缓存，并用 UT 或日志验证命中路径。",
+          "source_files": [
+            "common/inc/op_host/tiling_util.h",
+            "common/inc/op_host/tiling_cache.h",
+            "common/inc/op_host/tiling_base.h"
+          ],
+          "title": "公共 Tiling 设施：tiling_util、tiling_cache 与复用",
+          "topic": "介绍 common/inc/op_host 提供的公共 tiling 工具：tiling_util 的数学对齐工具、tiling 缓存机制以及真实算子如何复用这些设施。"
+        }
+      ],
+      "order": 4,
+      "title": "Tiling：把大任务切给 AI Core"
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u5-l1-ascendc-programming-model.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "理解 AI Core 上 GM/UB 两级存储与数据流",
+            "掌握 TQue 双缓冲队列的使用范式",
+            "能读懂 CopyIn-Compute-CopyOut 三段式 kernel 结构"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "examples/add_example/op_kernel"
+          ],
+          "order": 1,
+          "practice_task": "将 AddExample 的 BUFFER_NUM 从 2 改为 1 和 3，分别编译运行并对比样例执行结果与（可选）性能差异，理解双缓冲的意义。",
+          "source_files": [
+            "examples/add_example/op_kernel/add_example.h",
+            "docs/zh/develop/aicore_develop_guide.md"
+          ],
+          "title": "Ascend C 编程模型：矢量算子 Kernel 的结构与流水",
+          "topic": "解读 add_example.h 的 Kernel 类设计：TPipe/TQue 队列、GlobalTensor/LocalTensor、CopyIn-Compute-CopyOut 流水线与双缓冲。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-kernel-entry-and-datamove.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "理解 extern \"C\" 入口函数与 tiling data 的 device 侧获取方式",
+            "掌握 DataCopyPad 参数与对齐要求",
+            "能处理尾块不对齐场景的数据搬运"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "examples/add_example/op_kernel"
+          ],
+          "order": 2,
+          "practice_task": "修改 CopyIn/CopyOut 使用不同的 DataCopy 参数组合，构造非 32 字节对齐的尾块长度，验证 DataCopyPad 的正确性。",
+          "source_files": [
+            "examples/add_example/op_kernel/add_example.cpp",
+            "examples/add_example/op_kernel/add_example.h",
+            "common/inc/op_kernel/kernel_utils.h"
+          ],
+          "title": "Kernel 入口与数据搬运：extern C 入口、DataCopy 与对齐",
+          "topic": "讲解 add_example.cpp 的 kernel 入口函数如何接收 GM 地址与 tiling data 并分发到 Kernel 类，以及 DataCopy/DataCopyPad 的参数与地址对齐细节。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l3-real-kernel-case-gelu.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "对比教学样例与生产算子在工程结构上的差异",
+            "理解 arch35 等多架构适配目录的组织方式",
+            "了解生产算子 kernel 中分支与模板的使用方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "activation/gelu/op_kernel",
+            "activation/gelu/op_host"
+          ],
+          "order": 3,
+          "practice_task": "阅读 gelu_apt.cpp，梳理其主循环结构与 add_example.h 的对应关系，绘制两者的数据流对照图并标注差异点。",
+          "source_files": [
+            "activation/gelu/op_kernel/gelu_apt.cpp",
+            "activation/gelu/README.md",
+            "activation/gelu/CMakeLists.txt"
+          ],
+          "title": "从教学样例到生产算子：gelu 内核源码阅读",
+          "topic": "对比 add_example 与真实生产算子 activation/gelu 的 kernel 实现差异：多架构目录（arch35）、性能写法与工程组织。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "filename": "u5-l4-fast-kernel-launch.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "理解 kernel launch 路径对端到端耗时的影响",
+            "掌握 fast_kernel_launch 示例解决的问题",
+            "了解 cube 类算子与 ops-tensor 分层结构的关系"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "examples/fast_kernel_launch_example",
+            "matmul"
+          ],
+          "order": 4,
+          "practice_task": "运行 fast_kernel_launch 示例，对比其与普通 aclnn 路径的算子调用耗时，写一份简短的观察记录。",
+          "source_files": [
+            "examples/fast_kernel_launch_example/README.md",
+            "examples/fast_kernel_launch_example/CMakeLists.txt",
+            "README.md"
+          ],
+          "title": "高性能与快速下发：fast_kernel_launch 示例与 Cube 类算子",
+          "topic": "介绍 examples/fast_kernel_launch_example 展示的 kernel 快速下发技术，以及 Cube 类算子（matmul）引入 ops-tensor 分层优化的背景。"
+        }
+      ],
+      "order": 5,
+      "title": "Kernel 实现：Ascend C 编程"
+    },
+    {
+      "id": "u6",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1"
+          ],
+          "filename": "u6-l1-aclnn-adapter.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "掌握 aclnn 适配层的标准代码结构",
+            "理解 l1 级 API 到 l2 级 aclnn API 的封装关系",
+            "能使用公共 op_api 工具减少适配代码"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "activation/gelu/op_api",
+            "common/inc/op_api"
+          ],
+          "order": 1,
+          "practice_task": "阅读 aclnnGelu 的两层接口，画出从 aclnnGelu 到算子下发的调用时序图；再为一个只有 Host 函数的算子补全 GetWorkspaceSize 的返回码处理。",
+          "source_files": [
+            "activation/gelu/op_api/aclnn_gelu.cpp",
+            "activation/gelu/op_api/gelu.cpp",
+            "common/inc/op_api/aclnn_util.h",
+            "docs/zh/context/two_phase_api.md"
+          ],
+          "title": "aclnn 适配层深入：op_api 的分层封装",
+          "topic": "深入 gelu 的 op_api 目录，讲解 gelu.cpp/gelu.h 与 aclnn_gelu.cpp/.h 的分层关系，以及公共 aclnn 工具（runtime2_util、op_util 等）的作用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-quant-fused-matmul.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "理解 pertensor/perchannel/pertoken/pergroup/perblock 等量化模式",
+            "看懂融合量化 matmul 算子的目录与分支组织",
+            "理解 tiling key 在多量化组合场景下的编码方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "matmul/quant_batch_matmul_v4",
+            "docs"
+          ],
+          "order": 2,
+          "practice_task": "阅读 quant_batch_matmul_v4 的 README 与 pergroup/perblock 两个 kernel 头文件，总结其支持的量化组合矩阵与对应 kernel 分支。",
+          "source_files": [
+            "matmul/quant_batch_matmul_v4/README.md",
+            "matmul/quant_batch_matmul_v4/op_kernel/quant_batch_matmul_v4_pergroup.h",
+            "matmul/quant_batch_matmul_v4/op_kernel/quant_batch_matmul_v4_tiling_key.h",
+            "docs/zh/context/quant_mode_introduction.md"
+          ],
+          "title": "量化融合算子剖析：quant_batch_matmul_v4",
+          "topic": "以全量化融合算子 quant_batch_matmul_v4 为例，讲解 fp8/mxfp8 等低 bit 数据类型、多种量化模式及其在 kernel 分支中的组织方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l3-op-categories-tour.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "建立整个仓库算子版图的心智地图",
+            "能根据需求定位候选参考算子",
+            "识别不同大类算子在 tiling/kernel 上的典型差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "norm",
+            "pooling",
+            "loss",
+            "vfusion",
+            "index"
+          ],
+          "order": 3,
+          "practice_task": "从 norm、loss、index、vfusion 四类中各选一个算子，阅读其 op_host/op_kernel 结构，写一份横向对比笔记，指出与 elementwise 算子的关键差异。",
+          "source_files": [
+            "docs/zh/op_list.md",
+            "norm/CMakeLists.txt",
+            "loss/CMakeLists.txt",
+            "index/CMakeLists.txt",
+            "vfusion/CMakeLists.txt"
+          ],
+          "title": "算子大类巡礼：norm、pooling、loss、index、vfusion 等",
+          "topic": "横向浏览仓库其余算子大类（norm、pooling、loss、optim、rnn、index、control、foreach、hash、quant 等），建立按需查找参考算子的能力。"
+        }
+      ],
+      "order": 6,
+      "title": "算子适配与典型算子族"
+    },
+    {
+      "id": "u7",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2",
+            "u4-l2"
+          ],
+          "filename": "u7-l1-ut-framework.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "掌握 -u 系列编译执行 UT 的命令组合",
+            "理解 add_example 中三类 UT 用例的编写套路",
+            "能本地跑通一个算子的全部 UT"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "examples/add_example/tests",
+            "tests/ut",
+            "build.sh"
+          ],
+          "order": 1,
+          "practice_task": "执行 bash build.sh -u --ops=add_example（或文档给出的等价命令）跑通 add_example 全部 UT，并人为制造一个断言失败观察报告输出。",
+          "source_files": [
+            "docs/zh/develop/aicore_develop_guide.md",
+            "docs/zh/install/compile.md",
+            "examples/add_example/tests/ut/op_host/test_add_example_tiling.cpp"
+          ],
+          "title": "单元测试体系：UT 框架与 infershape/tiling UT",
+          "topic": "讲解 tests/ut 的组织方式与 build.sh 的 -u 用法，以及 infershape、tiling 两类 host 侧 UT 的编写与运行。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l2-kernel-ut-and-st.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "掌握 kernel UT 的数据构造与执行器用法",
+            "理解 st 测试与 ut 测试的分工",
+            "能为新算子规划最小测试集"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "examples/add_example/tests",
+            "activation/gelu/tests"
+          ],
+          "order": 2,
+          "practice_task": "参照 test_add_example.cpp 为修改后的 Mul 版内核补一个 kernel UT 用例，并运行通过。",
+          "source_files": [
+            "examples/add_example/tests/ut/op_kernel/test_add_example.cpp",
+            "activation/gelu/tests/CMakeLists.txt",
+            "tests/requirements.txt"
+          ],
+          "title": "Kernel UT 与 ST 验证：仿真执行与精度对账",
+          "topic": "讲解 kernel UT（仿真执行）与 st 系统测试的组织方式，理解 kernel_ut_data_helper 等公共设施和精度验证方法。"
+        }
+      ],
+      "order": 7,
+      "title": "测试与验证体系"
+    },
+    {
+      "id": "u8",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u8-l1-debug-printf-dumptensor.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "掌握 Host 侧日志开关与等级设置",
+            "会在 kernel 中用 printf 输出标量调试信息",
+            "会用 DumpTensor 检查中间 Tensor 数据"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "examples/add_example/op_kernel",
+            "docs"
+          ],
+          "order": 1,
+          "practice_task": "在 AddExample 中分别加入 PRINTF 打印 tiling 字段、DumpTensor 打印 zLocal，重新编译运行并收集打印输出。",
+          "source_files": [
+            "docs/zh/debug/op_debug_prof.md",
+            "docs/QUICKSTART.md",
+            "examples/add_example/op_kernel/add_example.h"
+          ],
+          "title": "算子调试定位：printf、DumpTensor 与 Host 日志",
+          "topic": "讲解 AI Core 算子的调试手段：Host 侧日志获取、kernel 内 AscendC::PRINTF 与 DumpTensor 的使用时机和方法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "filename": "u8-l2-msprof-performance.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "掌握 msprof op 采集算子级性能数据的命令",
+            "理解 Task Duration、Block Dim 等关键指标",
+            "能根据瓶颈提示定位 kernel 优化方向"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "docs",
+            "build.sh"
+          ],
+          "order": 2,
+          "practice_task": "用 msprof op 对 AddExample 与改为 Mul 后的版本各采集一次性能数据，对比 Task Duration 与 Block Dim 并分析差异原因。",
+          "source_files": [
+            "docs/zh/debug/op_debug_prof.md",
+            "docs/QUICKSTART.md"
+          ],
+          "title": "性能采集与调优：msprof op 与流水分析",
+          "topic": "讲解 msprof op 的使用方法、OPPROF 输出的解读，以及基于流水占比、带宽利用率的常见调优方向。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "filename": "u8-l3-npu-simulator.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "理解 NPU Simulator 的适用场景与限制",
+            "掌握无真实硬件时的算子仿真调试流程",
+            "能解读仿真流水图定位性能瓶颈"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "build.sh",
+            "docs"
+          ],
+          "order": 3,
+          "practice_task": "在无卡环境（或按文档说明）使用 --simulator 方式编译并运行 add_example 样例，记录仿真方式与上板执行的输出差异。",
+          "source_files": [
+            "docs/zh/debug/npu_sim.md",
+            "build.sh"
+          ],
+          "title": "无卡调试：NPU Simulator 仿真开发调试",
+          "topic": "介绍通过 NPU Simulator 仿真工具在无真实硬件环境下开发调试算子的方法，以及 build.sh 的 --simulator 相关用法。"
+        }
+      ],
+      "order": 8,
+      "title": "调试与性能调优"
+    },
+    {
+      "id": "u9",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1",
+            "u4-l2"
+          ],
+          "filename": "u9-l1-new-op-scaffold.md",
+          "id": "u9-l1",
+          "learning_goals": [
+            "掌握 --genop 生成算子工程骨架的流程",
+            "理解生成的五层交付件模板内容",
+            "能独立起一个新算子工程并编译通过"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "build.sh",
+            "examples/add_example"
+          ],
+          "order": 1,
+          "practice_task": "用 bash build.sh --genop=examples/<你的算子名> 生成一个新算子工程，替换为最简 elementwise 实现，完成编译并通过 run_example 验证。",
+          "source_files": [
+            "docs/zh/develop/aicore_develop_guide.md",
+            "build.sh",
+            "examples/add_example/CMakeLists.txt"
+          ],
+          "title": "新建算子工程：--genop 脚手架与开发全流程",
+          "topic": "讲解如何用 build.sh --genop 创建新算子目录，以及一个新算子从定义、tiling、kernel、aclnn 适配到编译部署的最小交付集。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "filename": "u9-l2-aicpu-op-development.md",
+          "id": "u9-l2",
+          "learning_goals": [
+            "区分 AI Core 与 AI CPU 算子的适用场景",
+            "理解 op_kernel_aicpu 目录的组织方式",
+            "能运行 AI CPU 版 add_example 样例"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "examples/add_example_aicpu"
+          ],
+          "order": 2,
+          "practice_task": "编译并运行 add_example_aicpu 样例，对比其与 AI Core 版在目录结构、构建参数和运行输出上的差异。",
+          "source_files": [
+            "docs/zh/develop/aicpu_develop_guide.md",
+            "examples/add_example_aicpu/README.md",
+            "examples/add_example_aicpu/CMakeLists.txt"
+          ],
+          "title": "AI CPU 算子开发：add_example_aicpu 对照实现",
+          "topic": "以 examples/add_example_aicpu 为例讲解 AI CPU 算子的工程结构、开发与编译方式，理解何时选择 AI CPU 而非 AI Core。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "filename": "u9-l3-contribute-and-experimental.md",
+          "id": "u9-l3",
+          "learning_goals": [
+            "掌握 experimental 目录的定位与使用方式",
+            "理解贡献前需要准备的验证材料（UT/ST/精度）",
+            "能按贡献指南准备一个算子贡献"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "experimental",
+            "CONTRIBUTING.md"
+          ],
+          "order": 3,
+          "practice_task": "在 experimental 下按脚手架创建一个自定义算子目录并调试通过，再按 CONTRIBUTING.md 清单自查贡献所需材料。",
+          "source_files": [
+            "CONTRIBUTING.md",
+            "docs/CONTRIBUTING_DOCS.md",
+            "experimental/matmul/CMakeLists.txt",
+            "README.md"
+          ],
+          "title": "贡献流程与 experimental 目录：调试并贡献自定义算子",
+          "topic": "讲解贡献指南要求的提交流程、代码规范与验收标准，以及 experimental 目录如何支持开发者先调试自定义算子再贡献。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "filename": "u9-l4-cross-platform-migration.md",
+          "id": "u9-l4",
+          "learning_goals": [
+            "理解 SOC_TO_ARCH 等构建层的多芯片适配机制",
+            "掌握 arch35 等架构目录与 binary json 配置的用途",
+            "能完成一次样例或算子的跨芯片迁移"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "build.sh",
+            "activation/gelu/op_kernel",
+            "examples/add_example/op_host/config"
+          ],
+          "order": 4,
+          "practice_task": "参照迁移指南为 add_example 增加一个新的 soc 配置（复用现有 aicoreConfig 或新增 config json），编译验证迁移结果。",
+          "source_files": [
+            "docs/zh/develop/cross_platform_migration_guide.md",
+            "build.sh",
+            "activation/gelu/op_host/arch35",
+            "examples/add_example/op_host/config/ascend910b/add_example_binary.json"
+          ],
+          "title": "算子跨平台迁移：多芯片适配与样例迁移指南",
+          "topic": "讲解算子如何适配多代芯片（910b/910_93/950 等）：build.sh 的 soc 到 arch 映射、config 下的 binary json 以及跨平台迁移指南。"
+        }
+      ],
+      "order": 9,
+      "title": "扩展开发与二次贡献"
+    }
+  ]
+}

@@ -8,7 +8,8 @@
 2. 掌握最常用的参数组合：`--pkg`、`--soc`、`--ops`、`-u`（UT 编译）、`-j`、`--vendor_name`，以及哪些参数互斥。
 3. 理解 shell 参数是如何一步步变成 CMake 变量（如 `ASCEND_OP_NAME`、`ASCEND_COMPUTE_UNIT`）的。
 4. 看懂根 `CMakeLists.txt` 与 `cmake/` 目录（`variables.cmake`、`opbuild.cmake`、`gen_ops_info.cmake` 等）如何分工：谁定义开关、谁定义路径、谁生成算子信息。
-5. 能独立完成一次单算子编译（以 `add_example` 为例），并知道编译产物去哪了、怎么安装。
+5. 了解本次版本新增的 **HOSTCPU 常量折叠编译开关**：`cmake/func.cmake` 中 `add_all_modules_sources` 新增的 `HOSTCPU` 参数如何把 AiCPU 算子源码额外编译为 x86 host 目标，以及 `AICPU_INCLUDE` 的新路径调整。
+6. 能独立完成一次单算子编译（以 `add_example` 为例），并知道编译产物去哪了、怎么安装。
 
 ## 2. 前置知识
 
@@ -16,6 +17,7 @@
 - **CMake**：C++ 项目常用的构建系统生成器。`CMakeLists.txt` 描述"编什么、怎么编"，CMake 据此生成 Makefile 再编译。`option(X "描述" ON/OFF)` 定义开关，`-DX=TRUE` 从命令行传值，`add_subdirectory(dir)` 把子目录加入编译。
 - **SoC / 昇腾芯片型号**：`--soc` 指定目标芯片，例如 `ascend910b`（Atlas A2 系列）、`ascend910_93`（Atlas A3 系列）、`ascend950`。同一份源码要为不同芯片生成不同的算子二进制，所以每次编译只能指定一个型号。
 - **run 包**：编译最终产物是一个自解压安装包（`.run` 文件），安装后挂载到 CANN 环境中，上层才能调用里面的算子。上一讲（u1-l2）已经建立"算子工程交付件"的概念，本讲讲的是"这些交付件如何被批量编译并打包"。
+- **AiCPU 与常量折叠（本讲新概念）**：CANN 中算子可以跑在 AI Core（矩阵/向量专用单元）或 AI CPU（通用核）上。**常量折叠**指：当一个算子的输入在构图期就全是常量时，图引擎可以直接在 host 侧（x86 CPU）把它算掉，省去 NPU 上的调度开销。要做到这一点，AiCPU 算子的源码必须能被**再编译一份 x86 版本**并链接进 `libopconstant_folding_cv.so`——本次版本新增的 HOSTCPU 编译开关就是这条链路的地基（详见 4.6）。
 
 上一讲我们知道了仓库由几十个结构一致的单算子工程组成；本讲回答的问题是：**这么多工程，是如何被一套统一的编译体系管理起来的？**
 
@@ -23,17 +25,19 @@
 
 | 文件 | 作用 |
 |---|---|
-| [build.sh](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/build.sh) | 编译总入口：加载子脚本、按序调度各构建阶段 |
-| [scripts/build_conf.sh](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/scripts/build_conf.sh) | 全局配置：支持的 SoC 列表、build/build_out 路径、仓库名 |
-| [scripts/build_options.sh](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/scripts/build_options.sh) | 参数解析、互斥校验、帮助信息（本讲重点之一） |
-| [scripts/build_cmake.sh](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/scripts/build_cmake.sh) | 把 shell 变量装配成 CMake 参数并执行 `cmake` 命令 |
-| [CMakeLists.txt](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/CMakeLists.txt) | CMake 主入口：定义全局开关、include cmake 模块、收集算子目录 |
-| [cmake/variables.cmake](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/cmake/variables.cmake) | 全局变量：库名、安装路径、待编译算子集合、工具路径 |
-| [cmake/opbuild.cmake](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/cmake/opbuild.cmake) | 调用 opbuild 工具，从 `*_def.cpp` 生成 aclnn 接口代码与算子信息 |
-| [cmake/gen_ops_info.cmake](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/cmake/gen_ops_info.cmake) | 拷贝 kernel 源码、生成 `aic-xxx-ops-info.json`、触发二进制编译 |
-| [cmake/func.cmake](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/cmake/func.cmake) | 公共函数库，含 `check_compiled_ops`（校验 --ops 算子名） |
-| [docs/zh/install/compile.md](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/docs/zh/install/compile.md) | 官方源码构建文档（命令与安装步骤） |
-| [docs/zh/install/build.md](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/docs/zh/install/build.md) | 官方 build.sh 参数说明表 |
+| [build.sh](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/build.sh) | 编译总入口：加载子脚本、按序调度各构建阶段 |
+| [scripts/build_conf.sh](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_conf.sh) | 全局配置：支持的 SoC 列表、build/build_out 路径、仓库名 |
+| [scripts/build_options.sh](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_options.sh) | 参数解析、互斥校验、帮助信息（本讲重点之一） |
+| [scripts/build_cmake.sh](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_cmake.sh) | 把 shell 变量装配成 CMake 参数并执行 `cmake` 命令 |
+| [CMakeLists.txt](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/CMakeLists.txt) | CMake 主入口：定义全局开关、include cmake 模块、收集算子目录 |
+| [cmake/variables.cmake](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/variables.cmake) | 全局变量：库名、安装路径、待编译算子集合、工具路径、AICPU 头文件搜索路径 |
+| [cmake/opbuild.cmake](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/opbuild.cmake) | 调用 opbuild 工具，从 `*_def.cpp` 生成 aclnn 接口代码与算子信息 |
+| [cmake/gen_ops_info.cmake](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/gen_ops_info.cmake) | 拷贝 kernel 源码、生成 `aic-xxx-ops-info.json`、触发二进制编译 |
+| [cmake/func.cmake](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/func.cmake) | 公共函数库：`check_compiled_ops`（校验 --ops 算子名）、`add_all_modules_sources`（算子源码统一装配宏，本轮新增 HOSTCPU 参数）、`add_aicpu_host_kernel_modules`（host 侧常量折叠目标） |
+| [cmake/symbol.cmake](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/symbol.cmake) | 符号表生成；其 `gen_aicpu_const_symbol` 负责把 host OBJECT 链接为 `libopconstant_folding_cv.so`（4.6 提及，细节留给 u8-l4） |
+| [common/inc/aicpu/cv_aicpu_register.h](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/common/inc/aicpu/cv_aicpu_register.h) | `OPS_CV_REGISTER_CPU_KERNELV2` 注册宏，host/device 双路径（4.6 提及，细节留给 u8-l4） |
+| [docs/zh/install/compile.md](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/docs/zh/install/compile.md) | 官方源码构建文档（命令与安装步骤） |
+| [docs/zh/install/build.md](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/docs/zh/install/build.md) | 官方 build.sh 参数说明表 |
 
 ## 4. 核心概念与源码讲解
 
@@ -69,33 +73,33 @@ bash build.sh --pkg --soc=ascend910b --ops=add_example -j16
 
 主入口先 source 全部子脚本，把它们的函数加载进当前 shell：
 
-- [build.sh:L17-L24](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/build.sh#L17-L24) —— 加载 8 个子脚本：`build_conf`（全局配置）、`build_clean`（清理）、`build_options`（参数解析）、`build_cmake`（CMake 装配）、`build_lib`（库编译）、`build_ut`（UT）、`build_example`（样例）、`build_genop`（算子脚手架）。
+- [build.sh:L17-L24](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/build.sh#L17-L24) —— 加载 8 个子脚本：`build_conf`（全局配置）、`build_clean`（清理）、`build_options`（参数解析）、`build_cmake`（CMake 装配）、`build_lib`（库编译）、`build_ut`（UT）、`build_example`（样例）、`build_genop`（算子脚手架）。
 
 `main()` 是一张"构建阶段清单"，每个阶段由一个布尔变量控制是否执行：
 
-- [build.sh:L26-L60](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/build.sh#L26-L60) —— 依次执行：参数检查 → 装配 CMake 参数 → 清理 → `cmake_init`；随后按 `ENABLE_CREATE_LIB`、`ENABLE_BINARY/ENABLE_CUSTOM`、`ENABLE_STATIC`、`ENABLE_PACKAGE`、`ENABLE_TEST`、`ENABLE_RUN_EXAMPLE`、`ENABLE_GENOP` 等开关决定执行哪些构建函数。你传的每个命令行参数，最终就是在点亮这串开关中的某几个。
+- [build.sh:L26-L60](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/build.sh#L26-L60) —— 依次执行：参数检查 → 装配 CMake 参数 → 清理 → `cmake_init`；随后按 `ENABLE_CREATE_LIB`、`ENABLE_BINARY/ENABLE_CUSTOM`、`ENABLE_STATIC`、`ENABLE_PACKAGE`、`ENABLE_TEST`、`ENABLE_RUN_EXAMPLE`、`ENABLE_GENOP` 等开关决定执行哪些构建函数。你传的每个命令行参数，最终就是在点亮这串开关中的某几个。
 
 两个容易忽略的细节：
 
-- [build.sh:L62-L64](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/build.sh#L62-L64) —— 不带任何参数直接运行 `bash build.sh` 会打印帮助并退出，这是初学者最安全的入门命令。
-- [build.sh:L65-L66](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/build.sh#L65-L66) —— `main` 的全部输出通过 `while read` 逐行加上时间戳再打印，方便从日志判断每个阶段的耗时。
+- [build.sh:L62-L64](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/build.sh#L62-L64) —— 不带任何参数直接运行 `bash build.sh` 会打印帮助并退出，这是初学者最安全的入门命令。
+- [build.sh:L65-L66](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/build.sh#L65-L66) —— `main` 的全部输出通过 `while read` 逐行加上时间戳再打印，方便从日志判断每个阶段的耗时。
 
 编译目录在 `build_conf.sh` 中定义：
 
-- [scripts/build_conf.sh:L32-L34](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/scripts/build_conf.sh#L32-L34) —— `BUILD_PATH=仓库/build`（CMake 构建目录）、`BUILD_OUT_PATH=仓库/build_out`（最终 run 包输出目录）、`REPOSITORY_NAME=cv`（这就是库名里 `ophost_cv.so` 中 `cv` 的来源）。
+- [scripts/build_conf.sh:L32-L34](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_conf.sh#L32-L34) —— `BUILD_PATH=仓库/build`（CMake 构建目录）、`BUILD_OUT_PATH=仓库/build_out`（最终 run 包输出目录）、`REPOSITORY_NAME=cv`（这就是库名里 `ophost_cv.so` 中 `cv` 的来源）。
 
 #### 4.1.4 代码实践
 
 1. **实践目标**：不看任何文档，仅凭 `--help` 了解 build.sh 的能力分层。
 2. **操作步骤**：在仓库根目录执行 `bash build.sh --help`、`bash build.sh --pkg --help`、`bash build.sh -u --help`。
 3. **需要观察的现象**：三种命令打印的帮助内容不同——第一种是总览，第二种是打包（package）场景的参数与示例，第三种是测试（test）场景的参数与示例。
-4. **预期结果**：能找到每种场景下的"Examples"段落。`bash build.sh --pkg --soc=ascend910b --ops=grid_sample,crop_and_resize --build-type=Debug` 这条示例就来自 [scripts/build_options.sh:L51](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/scripts/build_options.sh#L51)。
+4. **预期结果**：能找到每种场景下的"Examples"段落。`bash build.sh --pkg --soc=ascend910b --ops=grid_sample,crop_and_resize --build-type=Debug` 这条示例就来自 [scripts/build_options.sh:L51](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_options.sh#L51)。
 5. 本节实践只读不写，无环境依赖，可直接在任意克隆仓库执行（待本地验证：帮助文本以你机器上的输出为准）。
 
 #### 4.1.5 小练习与答案
 
 **练习 1**：`build.sh` 自己只有几十行，参数解析逻辑在哪里？
-答：在 [scripts/build_options.sh](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/scripts/build_options.sh) 的 `checkopts` 函数中，`build.sh` 通过 `source` 加载后调用。
+答：在 [scripts/build_options.sh](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_options.sh) 的 `checkopts` 函数中，`build.sh` 通过 `source` 加载后调用。
 
 **练习 2**：`main()` 里为什么 `build_binary` 的条件是 `(ENABLE_BINARY 或 ENABLE_CUSTOM) 且非 JIT`？
 答：`--pkg`/`--static` 会打开 `ENABLE_BINARY`；`--ops=xx`/`--vendor_name`/`--experimental` 会打开 `ENABLE_CUSTOM`（自定义算子场景同样需要编二进制）；而 `--jit` 表示图运行态在线编译、不需要预编二进制，所以要排除。
@@ -118,6 +122,7 @@ checkopts "$@"
   │      --pkg         → ENABLE_BINARY=TRUE, ENABLE_PACKAGE=TRUE
   │      -u            → ENABLE_TEST=TRUE
   │      --vendor_name → VENDOR_NAME=xxx，ENABLE_CUSTOM=TRUE
+  │      --noaicpu     → DISABLE_AICPU=TRUE（见 4.6，会关掉 AiCPU 相关目标）
   │      ...（每个选项点亮若干开关）
   ├─ 4) check_param()       组合互斥校验，非法组合直接 exit 1
   ├─ 5) set_create_libs()   推导要编译哪些库（ophost/opapi/opgraph/插件）
@@ -128,18 +133,19 @@ checkopts "$@"
 
 参数到 shell 变量的映射核心在 `checkopts` 的 getopts 循环：
 
-- [scripts/build_options.sh:L785-L788](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/scripts/build_options.sh#L785-L788) —— `--ops=grid_sample,iou_v2` 被拆出值赋给 `COMPILED_OPS`（多个算子逗号分隔），同时置 `ENABLE_CUSTOM=TRUE`：指定算子子集就意味着走"自定义算子包"路线。
-- [scripts/build_options.sh:L826-L830](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/scripts/build_options.sh#L826-L830) —— `--pkg` 同时点亮 `ENABLE_BINARY` 和 `ENABLE_PACKAGE` 两个开关；对照 4.1 的 `main()` 可见它们分别触发"编二进制"和"打 run 包"两个阶段。
-- [scripts/build_options.sh:L795-L797](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/scripts/build_options.sh#L795-L797) —— `--soc=ascend910b` 只是把值存进 `COMPUTE_UNIT`，真正校验"是否为支持的芯片"发生在 4.3 节的 `assemble_cmake_args` 中。
+- [scripts/build_options.sh:L785-L788](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_options.sh#L785-L788) —— `--ops=grid_sample,iou_v2` 被拆出值赋给 `COMPILED_OPS`（多个算子逗号分隔），同时置 `ENABLE_CUSTOM=TRUE`：指定算子子集就意味着走"自定义算子包"路线。
+- [scripts/build_options.sh:L826-L830](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_options.sh#L826-L830) —— `--pkg` 同时点亮 `ENABLE_BINARY` 和 `ENABLE_PACKAGE` 两个开关；对照 4.1 的 `main()` 可见它们分别触发"编二进制"和"打 run 包"两个阶段。
+- [scripts/build_options.sh:L795-L797](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_options.sh#L795-L797) —— `--soc=ascend910b` 只是把值存进 `COMPUTE_UNIT`，真正校验"是否为支持的芯片"发生在 4.3 节的 `assemble_cmake_args` 中。
+- [scripts/build_options.sh:L822](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_options.sh#L822) —— `--noaicpu` 把 `DISABLE_AICPU` 置真，随后 [scripts/build_cmake.sh:L49](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_cmake.sh#L49) 会把它翻译给 CMake——这是 4.6 节 host 常量折叠目标的开关之一。
 
 互斥规则集中在 `check_param`：
 
-- [scripts/build_options.sh:L399-L403](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/scripts/build_options.sh#L399-L403) —— `--ops` 不能与 `--ophost`/`--opapi`/`--opgraph` 同用（前者是"编算子包"，后者是"编单个库"，语义冲突），除非处于 UT 模式。
-- [scripts/build_options.sh:L406-L425](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/scripts/build_options.sh#L406-L425) —— `--pkg` 不能与 UT 模式、`--ophost`/`--opapi`/`--opgraph`、`--genop` 同时使用。
+- [scripts/build_options.sh:L399-L403](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_options.sh#L399-L403) —— `--ops` 不能与 `--ophost`/`--opapi`/`--opgraph` 同用（前者是"编算子包"，后者是"编单个库"，语义冲突），除非处于 UT 模式。
+- [scripts/build_options.sh:L406-L425](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_options.sh#L406-L425) —— `--pkg` 不能与 UT 模式、`--ophost`/`--opapi`/`--opgraph`、`--genop` 同时使用。
 
 UT 模式的推导在 `set_ut_mode`：
 
-- [scripts/build_options.sh:L545-L590](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/scripts/build_options.sh#L545-L590) —— `-u` 默认全部 UT（`UT_TEST_ALL=TRUE`）；叠加 `--ophost`/`--opapi`/`--opkernel`/`--opkernel_aicpu` 则只跑对应侧的 UT，并把目标名（如 `cv_op_host_ut`）追加进 `UT_TARGETS`。这解释了官方文档 [docs/zh/install/compile.md:L243](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/docs/zh/install/compile.md#L243) 中 `bash build.sh -u --ophost --ops=grid_sample` 这类写法。
+- [scripts/build_options.sh:L545-L590](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_options.sh#L545-L590) —— `-u` 默认全部 UT（`UT_TEST_ALL=TRUE`）；叠加 `--ophost`/`--opapi`/`--opkernel`/`--opkernel_aicpu` 则只跑对应侧的 UT，并把目标名（如 `cv_op_host_ut`）追加进 `UT_TARGETS`。这解释了官方文档 [docs/zh/install/compile.md:L243](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/docs/zh/install/compile.md#L243) 中 `bash build.sh -u --ophost --ops=grid_sample` 这类写法。
 
 #### 4.2.4 代码实践
 
@@ -157,10 +163,10 @@ UT 模式的推导在 `set_ut_mode`：
 答：`--pkg` → `ENABLE_BINARY=TRUE, ENABLE_PACKAGE=TRUE`；`--soc=ascend910b` → `COMPUTE_UNIT=ascend910b`；`--ops=grid_sample` → `COMPILED_OPS=grid_sample, ENABLE_CUSTOM=TRUE`。
 
 **练习 2**：为什么 `--ops` 会隐式打开"自定义包"模式？
-答：`--ops` 表示只编译仓库中部分算子，产物以挂载（vendors）方式作用于 CANN 包，这正是"自定义算子包"的定义（见 [docs/zh/install/compile.md:L25-L31](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/docs/zh/install/compile.md#L25-L31)）；而整包（ops-cv 包）编译全部算子，无需 `--ops`。
+答：`--ops` 表示只编译仓库中部分算子，产物以挂载（vendors）方式作用于 CANN 包，这正是"自定义算子包"的定义（见 [docs/zh/install/compile.md:L25-L31](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/docs/zh/install/compile.md#L25-L31)）；而整包（ops-cv 包）编译全部算子，无需 `--ops`。
 
 **练习 3**：`-u` 与 `--ophost_test` 是什么关系？
-答：等价。`--ophost_test` 在解析时会把 `ENABLE_TEST` 置真并截掉 `_test` 后缀归一到 `ophost`（[scripts/build_options.sh:L873-L878](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/scripts/build_options.sh#L873-L878)），随后 `set_ut_mode` 只勾选 ophost 侧 UT 目标。
+答：等价。`--ophost_test` 在解析时会把 `ENABLE_TEST` 置真并截掉 `_test` 后缀归一到 `ophost`（[scripts/build_options.sh:L873-L878](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_options.sh#L873-L878)），随后 `set_ut_mode` 只勾选 ophost 侧 UT 目标。
 
 ### 4.3 从 shell 到 CMake：参数装配与 cmake 初始化
 
@@ -186,26 +192,26 @@ cmake_init()
 
 #### 4.3.3 源码精读
 
-- [scripts/build_cmake.sh:L14-L22](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/scripts/build_cmake.sh#L14-L22) —— `custom_cmake_args` 做了一个关键转换：`--ops=grid_sample,iou_v2` 中的英文逗号被替换成分号，变成 CMake 列表 `-DASCEND_OP_NAME=grid_sample;iou_v2`。CMake 中分号是列表分隔符，根 CMakeLists 的 `"add_example" IN_LIST ASCEND_OP_NAME` 判断就依赖这个格式。
-- [scripts/build_cmake.sh:L71-L77](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/scripts/build_cmake.sh#L71-L77) —— `ENABLE_BINARY` 与 `ENABLE_CUSTOM` 传给 CMake；注意 `ENABLE_CUSTOM=TRUE` 时会强制附带 `-DENABLE_BINARY=TRUE`。
-- [scripts/build_cmake.sh:L108-L124](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/scripts/build_cmake.sh#L108-L124) —— `--soc` 在这里做白名单校验：`normalize_compute_unit` 归一化后必须命中 `SUPPORT_COMPUTE_UNIT_SHORT` 列表（定义在 [scripts/build_conf.sh:L16](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/scripts/build_conf.sh#L16)，含 ascend910b、ascend910_93、ascend950 等），否则报 `soc only support : ...` 退出；合法则追加 `-DASCEND_COMPUTE_UNIT=xxx`。
-- [scripts/build_cmake.sh:L133-L147](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/scripts/build_cmake.sh#L133-L147) —— `cmake_init` 在 `build/` 目录执行 `cmake ${CMAKE_ARGS} ..`，每次都会先删除 `CMakeCache.txt`，避免上一次不同参数的缓存污染本次配置。`build.sh` 第 29 行的 `echo "CMAKE_ARGS: ..."` 会把这串参数完整打印出来——这是排查"我传的参数到底生效没有"的第一入口。
+- [scripts/build_cmake.sh:L14-L22](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_cmake.sh#L14-L22) —— `custom_cmake_args` 做了一个关键转换：`--ops=grid_sample,iou_v2` 中的英文逗号被替换成分号，变成 CMake 列表 `-DASCEND_OP_NAME=grid_sample;iou_v2`。CMake 中分号是列表分隔符，根 CMakeLists 的 `"add_example" IN_LIST ASCEND_OP_NAME` 判断就依赖这个格式。
+- [scripts/build_cmake.sh:L71-L77](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_cmake.sh#L71-L77) —— `ENABLE_BINARY` 与 `ENABLE_CUSTOM` 传给 CMake；注意 `ENABLE_CUSTOM=TRUE` 时会强制附带 `-DENABLE_BINARY=TRUE`。
+- [scripts/build_cmake.sh:L108-L124](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_cmake.sh#L108-L124) —— `--soc` 在这里做白名单校验：`normalize_compute_unit` 归一化后必须命中 `SUPPORT_COMPUTE_UNIT_SHORT` 列表（定义在 [scripts/build_conf.sh:L16](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_conf.sh#L16)，含 ascend910b、ascend910_93、ascend950 等），否则报 `soc only support : ...` 退出；合法则追加 `-DASCEND_COMPUTE_UNIT=xxx`。
+- [scripts/build_cmake.sh:L133-L147](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_cmake.sh#L133-L147) —— `cmake_init` 在 `build/` 目录执行 `cmake ${CMAKE_ARGS} ..`，每次都会先删除 `CMakeCache.txt`，避免上一次不同参数的缓存污染本次配置。`build.sh` 第 29 行的 `echo "CMAKE_ARGS: ..."` 会把这串参数完整打印出来——这是排查"我传的参数到底生效没有"的第一入口。
 
 #### 4.3.4 代码实践
 
 1. **实践目标**：学会用 CMAKE_ARGS 日志核对参数翻译。
 2. **操作步骤**：执行 `bash build.sh --pkg --soc=ascend910b --ops=grid_sample -j16`，观察脚本开头的 `CMAKE_ARGS: ...` 一行。
 3. **需要观察的现象**：该行应包含 `-DASCEND_OP_NAME=grid_sample`、`-DASCEND_COMPUTE_UNIT=ascend910b`、`-DENABLE_PACKAGE=TRUE`、`-DENABLE_CUSTOM=TRUE` 等片段。
-4. **预期结果**：能把命令行参数与 CMAKE_ARGS 中的 `-D` 项一一对应；再对照 [CMakeLists.txt:L40-L76](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/CMakeLists.txt#L40-L76) 的 `option` 声明确认变量名。
+4. **预期结果**：能把命令行参数与 CMAKE_ARGS 中的 `-D` 项一一对应；再对照 [CMakeLists.txt:L40-L76](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/CMakeLists.txt#L40-L76) 的 `option` 声明确认变量名。
 5. 依赖 CANN toolkit 编译环境，待本地验证。
 
 #### 4.3.5 小练习与答案
 
 **练习 1**：为什么每次编译都要删除 `CMakeCache.txt`？
-答：CMake 会缓存首次配置的变量值；由于本项目每次编译的 `ASCEND_OP_NAME`、`ASCEND_COMPUTE_UNIT` 等可能不同，残留缓存会导致"传了参数但没生效"，所以 [scripts/build_cmake.sh:L144](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/scripts/build_cmake.sh#L144) 强制删除。
+答：CMake 会缓存首次配置的变量值；由于本项目每次编译的 `ASCEND_OP_NAME`、`ASCEND_COMPUTE_UNIT` 等可能不同，残留缓存会导致"传了参数但没生效"，所以 [scripts/build_cmake.sh:L144](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_cmake.sh#L144) 强制删除。
 
 **练习 2**：`--ops=a,b,c` 中的逗号为什么必须转成分号再传给 CMake？
-答：CMake 的列表以分号分隔；根 CMakeLists 用 `IN_LIST` 判断算子是否在编译清单中（如 [CMakeLists.txt:L161](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/CMakeLists.txt#L161)），转分号后 CMake 才能把它识别为列表。
+答：CMake 的列表以分号分隔；根 CMakeLists 用 `IN_LIST` 判断算子是否在编译清单中（如 [CMakeLists.txt:L161](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/CMakeLists.txt#L161)），转分号后 CMake 才能把它识别为列表。
 
 ### 4.4 根 CMakeLists.txt：全局开关与源码目录组织
 
@@ -229,12 +235,12 @@ CMakeLists.txt
 
 #### 4.4.3 源码精读
 
-- [CMakeLists.txt:L40-L59](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/CMakeLists.txt#L40-L59) —— 一整排 `option` 开关：`ENABLE_TEST`（UT）、`ENABLE_BINARY`（二进制）、`ENABLE_CUSTOM`（自定义包）、`ENABLE_PACKAGE`（打包）、`ENABLE_EXPERIMENTAL`（贡献目录）等，全部默认 OFF，由 build.sh 传入的 `-D` 点亮。UT 侧还有 `OP_HOST_UT`/`OP_API_UT`/`OP_KERNEL_UT` 等细分开关。
-- [CMakeLists.txt:L70-L71](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/CMakeLists.txt#L70-L71) —— `ASCEND_COMPUTE_UNIT` 默认 `ascend910b`；`ASCEND_ALL_COMPUTE_UNIT` 列出全部支持的芯片型号，后面 `gen_ops_info_and_python` 会为其中每个型号生成算子信息文件。
-- [CMakeLists.txt:L111-L130](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/CMakeLists.txt#L111-L130) —— 依次 include `opbase.cmake`（须在 dependencies 前）、`dependencies.cmake`、`variables.cmake`、`opbuild.cmake`、`func.cmake`、`ut.cmake` 等——这就是 `cmake/` 目录各模块的挂载点。
-- [CMakeLists.txt:L137-L150](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/CMakeLists.txt#L137-L150) —— 目录收集的核心：`add_subdirectory(common)` 无条件执行；`ENABLE_EXPERIMENTAL` 打开时编译 `experimental/image`、`experimental/objdetect`（贡献算子区），否则编译正式的 `image`、`objdetect` 和 `common/src/framework`。image/objdetect 内部再递归收集各算子目录（即上一讲的"目录存在即参与编译"）。
-- [CMakeLists.txt:L161-L163](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/CMakeLists.txt#L161-L163) —— 一个很有意思的特判：只有当 `add_example` 或 `add_example_aicpu` 出现在 `--ops` 清单里时，`examples/` 目录才参与编译。这就是本讲实践中编译 `add_example` 的机制依据。
-- [CMakeLists.txt:L167-L191](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/CMakeLists.txt#L167-L191) —— 收尾阶段：`gen_ops_info_and_python()` 生成算子信息（→ 4.5），`symbol.cmake` 生成符号表，`ENABLE_PACKAGE` 时由 `package.cmake` 决定走 `pack_custom()`（自定义包）还是 `pack_built_in()`（整包）。
+- [CMakeLists.txt:L40-L59](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/CMakeLists.txt#L40-L59) —— 一整排 `option` 开关：`ENABLE_TEST`（UT）、`ENABLE_BINARY`（二进制）、`ENABLE_CUSTOM`（自定义包）、`ENABLE_PACKAGE`（打包）、`ENABLE_EXPERIMENTAL`（贡献目录）等，全部默认 OFF，由 build.sh 传入的 `-D` 点亮。UT 侧还有 `OP_HOST_UT`/`OP_API_UT`/`OP_KERNEL_UT` 等细分开关。
+- [CMakeLists.txt:L70-L71](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/CMakeLists.txt#L70-L71) —— `ASCEND_COMPUTE_UNIT` 默认 `ascend910b`；`ASCEND_ALL_COMPUTE_UNIT` 列出全部支持的芯片型号，后面 `gen_ops_info_and_python` 会为其中每个型号生成算子信息文件。
+- [CMakeLists.txt:L111-L130](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/CMakeLists.txt#L111-L130) —— 依次 include `opbase.cmake`（须在 dependencies 前）、`dependencies.cmake`、`variables.cmake`、`opbuild.cmake`、`func.cmake`、`ut.cmake` 等——这就是 `cmake/` 目录各模块的挂载点。
+- [CMakeLists.txt:L137-L150](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/CMakeLists.txt#L137-L150) —— 目录收集的核心：`add_subdirectory(common)` 无条件执行；`ENABLE_EXPERIMENTAL` 打开时编译 `experimental/image`、`experimental/objdetect`（贡献算子区），否则编译正式的 `image`、`objdetect` 和 `common/src/framework`。image/objdetect 内部再递归收集各算子目录（即上一讲的"目录存在即参与编译"）。
+- [CMakeLists.txt:L161-L163](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/CMakeLists.txt#L161-L163) —— 一个很有意思的特判：只有当 `add_example` 或 `add_example_aicpu` 出现在 `--ops` 清单里时，`examples/` 目录才参与编译。这就是本讲实践中编译 `add_example` 的机制依据。
+- [CMakeLists.txt:L167-L191](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/CMakeLists.txt#L167-L191) —— 收尾阶段：`gen_ops_info_and_python()` 生成算子信息（→ 4.5），`symbol.cmake` 生成符号表，`ENABLE_PACKAGE` 时由 `package.cmake` 决定走 `pack_custom()`（自定义包）还是 `pack_built_in()`（整包）。
 
 #### 4.4.4 代码实践
 
@@ -243,16 +249,16 @@ CMakeLists.txt
    1. 执行 `bash build.sh --pkg --soc=ascend910b --ops=grid_sample`，在 CMake 配置日志中搜索 `examples`。
    2. 再执行 `bash build.sh --pkg --soc=ascend910b --ops=add_example`，同样搜索。
 3. **需要观察的现象**：第一次日志中不应出现 `examples` 子目录的配置信息；第二次应出现 `compile project with src` 后跟 examples 目录的处理。
-4. **预期结果**：确认 [CMakeLists.txt:L161-L163](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/CMakeLists.txt#L161-L163) 的条件生效——示例算子目录平时不参与编译，只有显式 `--ops=add_example` 才进入构建。
+4. **预期结果**：确认 [CMakeLists.txt:L161-L163](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/CMakeLists.txt#L161-L163) 的条件生效——示例算子目录平时不参与编译，只有显式 `--ops=add_example` 才进入构建。
 5. 依赖编译环境，待本地验证。
 
 #### 4.4.5 小练习与答案
 
 **练习 1**：`option(ENABLE_PACKAGE ...)` 默认 OFF，那怎么打开？
-答：build.sh 的 `--pkg` 在 `assemble_cmake_args` 中追加 `-DENABLE_PACKAGE=TRUE`（[scripts/build_cmake.sh:L78-L80](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/scripts/build_cmake.sh#L78-L80)），命令行 `-D` 会覆盖 option 默认值。
+答：build.sh 的 `--pkg` 在 `assemble_cmake_args` 中追加 `-DENABLE_PACKAGE=TRUE`（[scripts/build_cmake.sh:L78-L80](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/scripts/build_cmake.sh#L78-L80)），命令行 `-D` 会覆盖 option 默认值。
 
 **练习 2**：`--experimental` 为什么会改变 `add_subdirectory` 的目标？
-答：该参数点亮 `ENABLE_EXPERIMENTAL`（[CMakeLists.txt:L138-L150](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/CMakeLists.txt#L138-L150)），使编译目标从正式目录 `image`/`objdetect` 切换到 `experimental/image`/`experimental/objdetect`，即社区贡献的算子区。
+答：该参数点亮 `ENABLE_EXPERIMENTAL`（[CMakeLists.txt:L138-L150](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/CMakeLists.txt#L138-L150)），使编译目标从正式目录 `image`/`objdetect` 切换到 `experimental/image`/`experimental/objdetect`，即社区贡献的算子区。
 
 ### 4.5 cmake 目录：variables / opbuild / gen_ops_info 的分工
 
@@ -260,16 +266,16 @@ CMakeLists.txt
 
 `cmake/` 目录是编译体系的"CMake 功能库"。本讲聚焦三个文件：
 
-- `variables.cmake`：定义全局变量——库名、安装路径、**待编译算子集合**（`NEED_COMPILE_OPS`/`COMPILED_OPS`）、opbuild 工具路径。
+- `variables.cmake`：定义全局变量——库名、安装路径、**待编译算子集合**（`NEED_COMPILE_OPS`/`COMPILED_OPS`）、opbuild 工具路径、AiCPU 编译的头文件搜索路径 `AICPU_INCLUDE`。
 - `opbuild.cmake`：调用 CANN 的 `op_build` 工具，从算子的 `*_def.cpp` 自动生成 aclnn 接口代码（`.cpp/.h`）与算子描述信息。
 - `gen_ops_info.cmake`：拷贝 kernel 源码到构建区、为每个芯片型号生成 `aic-<soc>-ops-info.json`、触发二进制编译。
 
-`func.cmake` 中的 `check_compiled_ops` 负责"算子名写错就报错"的兜底校验。
+`func.cmake` 中的 `check_compiled_ops` 负责"算子名写错就报错"的兜底校验；`add_all_modules_sources` 是每个算子 CMakeLists 都会调用的"源码装配宏"（4.6 展开）。
 
 #### 4.5.2 核心流程
 
 ```text
-variables.cmake  ──提供──▶  NEED_COMPILE_OPS / COMPILED_OPS / 各安装路径 / OP_BUILD_TOOL
+variables.cmake  ──提供──▶  NEED_COMPILE_OPS / COMPILED_OPS / 各安装路径 / OP_BUILD_TOOL / AICPU_INCLUDE
                                 │
 gen_ops_info_and_python()  (gen_ops_info.cmake)
   ├─ gen_aclnn_with_opdef()   (opbuild.cmake)
@@ -284,16 +290,16 @@ check_compiled_ops()  (func.cmake)
 
 #### 4.5.3 源码精读
 
-- [cmake/variables.cmake:L34-L40](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/cmake/variables.cmake#L34-L40) —— 定义编译范围的两个核心变量：`NEED_COMPILE_OPS` 来自 `--ops`（用户想要的），`COMPILED_OPS` 记录实际被各算子目录注册进来的算子（实际拥有的）。二者在配置结束时由 `check_compiled_ops` 对账。
-- [cmake/variables.cmake:L57-L77](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/cmake/variables.cmake#L57-L77) —— 自定义包（`ENABLE_CUSTOM`）的安装路径以 `packages/vendors/<vendor>_cv/` 开头（op_api 头文件、库、算子信息、kernel 二进制各有子路径）——这就是"挂载式"自定义包在磁盘上的形态；对应 `--vendor_name` 默认值 `custom`，所以装完后在 `${ASCEND_HOME_PATH}/opp/vendors/custom_cv` 下能找到产物。
-- [cmake/variables.cmake:L124-L126](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/cmake/variables.cmake#L124-L126) —— 定位 CANN 自带的编译工具：`OP_BUILD_TOOL=${ASCEND_DIR}/tools/opbuild/op_build`，即 opbuild.cmake 调用的外部命令。
-- [cmake/variables.cmake:L149](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/cmake/variables.cmake#L149) —— `CMAKE_INSTALL_PREFIX` 固定为源码根的 `build_out`，这就是官方文档说"run 包存放于 build_out 目录"的实现依据。
-- [cmake/opbuild.cmake:L42-L56](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/cmake/opbuild.cmake#L42-L56) —— `gen_opbuild_target` 的关键 `add_custom_command`：先编译出一个临时的 `gen_op_host_<prefix>.so`（由各算子的 `*_def.cpp` 链接而成），再以 `OPS_PROTO_SEPARATE=1 OPS_ACLNN_GEN=...` 等环境变量启动 `${OP_BUILD_TOOL}` 加载该 so，生成 aclnn 接口源码和头文件到 `build/autogen/` 下。**上一讲说 add_example 的 op_api 是"自动生成"的，生成机制就是这里。**
-- [cmake/opbuild.cmake:L58-L75](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/cmake/opbuild.cmake#L58-L75) —— `gen_aclnn_classify` 把 def 文件按前缀分成三类：`aclnn`（对外接口，生成接口代码）、`aclnnInner`（内部接口，输出到 `inner/` 子目录）、`aclnnExc`（只导出头文件、不生成实现）。
-- [cmake/gen_ops_info.cmake:L15-L41](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/cmake/gen_ops_info.cmake#L15-L41) —— `kernel_src_copy`：为每个已编译算子创建 `<op>_src_copy` 目标，把其 `op_kernel` 目录整体拷贝到 `build/tbe/ascendc/<op_name>/`（若算子没有 op_kernel 目录则跳过），供后续统一编译二进制。
-- [cmake/gen_ops_info.cmake:L558-L589](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/cmake/gen_ops_info.cmake#L558-L589) —— `gen_ops_info_and_python` 主流程：先 `gen_aclnn_with_opdef` 生成 aclnn 代码，再拷贝 kernel 源码，然后**遍历 `ASCEND_ALL_COMPUTE_UNIT` 全部芯片型号**生成各自的 `aic-<soc>-ops-info.json` 并合并 ini 配置——算子信息是全型号生成的，真正的二进制编译只针对 `ASCEND_COMPUTE_UNIT`（`--soc`）指定的型号。
-- [cmake/gen_ops_info.cmake:L541-L555](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/cmake/gen_ops_info.cmake#L541-L555) —— `check_op_supported`：用 grep 检查算子 `*_def.cpp` 里是否有 `.AddConfig("<compute_unit>"` 声明，判断该算子是否支持目标芯片。这就是"某算子还没适配你的芯片型号"时被跳过的判定点。
-- [cmake/func.cmake:L746-L779](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/cmake/func.cmake#L746-L779) —— `check_compiled_ops`：若 `--ops` 里有算子名没出现在 `COMPILED_OPS`（即仓库里没这个目录/没被注册），直接 `FATAL_ERROR`，错误信息提示检查 `--ops` 参数。这就是 4.2.4 实践中第二条命令预期的报错来源。
+- [cmake/variables.cmake:L34-L40](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/variables.cmake#L34-L40) —— 定义编译范围的两个核心变量：`NEED_COMPILE_OPS` 来自 `--ops`（用户想要的），`COMPILED_OPS` 记录实际被各算子目录注册进来的算子（实际拥有的）。二者在配置结束时由 `check_compiled_ops` 对账。
+- [cmake/variables.cmake:L57-L77](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/variables.cmake#L57-L77) —— 自定义包（`ENABLE_CUSTOM`）的安装路径以 `packages/vendors/<vendor>_cv/` 开头（op_api 头文件、库、算子信息、kernel 二进制各有子路径）——这就是"挂载式"自定义包在磁盘上的形态；对应 `--vendor_name` 默认值 `custom`，所以装完后在 `${ASCEND_HOME_PATH}/opp/vendors/custom_cv` 下能找到产物。
+- [cmake/variables.cmake:L124-L126](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/variables.cmake#L124-L126) —— 定位 CANN 自带的编译工具：`OP_BUILD_TOOL=${ASCEND_DIR}/tools/opbuild/op_build`，即 opbuild.cmake 调用的外部命令。
+- [cmake/variables.cmake:L149](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/variables.cmake#L149) —— `CMAKE_INSTALL_PREFIX` 固定为源码根的 `build_out`，这就是官方文档说"run 包存放于 build_out 目录"的实现依据。
+- [cmake/opbuild.cmake:L42-L56](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/opbuild.cmake#L42-L56) —— `gen_opbuild_target` 的关键 `add_custom_command`：先编译出一个临时的 `gen_op_host_<prefix>.so`（由各算子的 `*_def.cpp` 链接而成），再以 `OPS_PROTO_SEPARATE=1 OPS_ACLNN_GEN=...` 等环境变量启动 `${OP_BUILD_TOOL}` 加载该 so，生成 aclnn 接口源码和头文件到 `build/autogen/` 下。**上一讲说 add_example 的 op_api 是"自动生成"的，生成机制就是这里。**
+- [cmake/opbuild.cmake:L58-L75](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/opbuild.cmake#L58-L75) —— `gen_aclnn_classify` 把 def 文件按前缀分成三类：`aclnn`（对外接口，生成接口代码）、`aclnnInner`（内部接口，输出到 `inner/` 子目录）、`aclnnExc`（只导出头文件、不生成实现）。
+- [cmake/gen_ops_info.cmake:L15-L41](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/gen_ops_info.cmake#L15-L41) —— `kernel_src_copy`：为每个已编译算子创建 `<op>_src_copy` 目标，把其 `op_kernel` 目录整体拷贝到 `build/tbe/ascendc/<op_name>/`（若算子没有 op_kernel 目录则跳过），供后续统一编译二进制。
+- [cmake/gen_ops_info.cmake:L558-L589](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/gen_ops_info.cmake#L558-L589) —— `gen_ops_info_and_python` 主流程：先 `gen_aclnn_with_opdef` 生成 aclnn 代码，再拷贝 kernel 源码，然后**遍历 `ASCEND_ALL_COMPUTE_UNIT` 全部芯片型号**生成各自的 `aic-<soc>-ops-info.json` 并合并 ini 配置——算子信息是全型号生成的，真正的二进制编译只针对 `ASCEND_COMPUTE_UNIT`（`--soc`）指定的型号。
+- [cmake/gen_ops_info.cmake:L541-L555](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/gen_ops_info.cmake#L541-L555) —— `check_op_supported`：用 grep 检查算子 `*_def.cpp` 里是否有 `.AddConfig("<compute_unit>"` 声明，判断该算子是否支持目标芯片。这就是"某算子还没适配你的芯片型号"时被跳过的判定点。
+- [cmake/func.cmake:L759-L792](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/func.cmake#L759-L792) —— `check_compiled_ops`：若 `--ops` 里有算子名没出现在 `COMPILED_OPS`（即仓库里没这个目录/没被注册），直接 `FATAL_ERROR`，错误信息提示检查 `--ops` 参数。这就是 4.2.4 实践中第二条命令预期的报错来源。
 
 #### 4.5.4 代码实践
 
@@ -312,11 +318,81 @@ check_compiled_ops()  (func.cmake)
 答：算子信息 json/ini 描述的是"算子支持哪些芯片、输入输出约束"等元数据，体积小、与运行芯片无关，全量生成便于同一个包描述完整能力；kernel 二进制与芯片微架构强相关、编译耗时，按需只为目标型号编译（`ASCEND_COMPUTE_UNIT`），可大幅缩短编译时间。
 
 **练习 3**：自定义算子包安装后，文件落在哪个目录下？
-答：`${ASCEND_HOME_PATH}/opp/vendors/<vendor_name>_cv/`（默认 vendor 为 custom，即 `custom_cv`），路径定义见 [cmake/variables.cmake:L57-L77](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/cmake/variables.cmake#L57-L77)，安装说明见 [docs/zh/install/compile.md:L71-L87](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/docs/zh/install/compile.md#L71-L87)。
+答：`${ASCEND_HOME_PATH}/opp/vendors/<vendor_name>_cv/`（默认 vendor 为 custom，即 `custom_cv`），路径定义见 [cmake/variables.cmake:L57-L77](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/variables.cmake#L57-L77)，安装说明见 [docs/zh/install/compile.md:L71-L87](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/docs/zh/install/compile.md#L71-L87)。
+
+### 4.6 新增基础设施：HOSTCPU 常量折叠编译开关
+
+> 本节对应提交 `193fa7cd`（为 ops-cv 仓实现 HOSTCPU 常量折叠框架基础设施）。本讲只讲**编译链路**——同一份 AiCPU 算子源码如何额外产出一份 x86 host 目标；注册宏 `OPS_CV_REGISTER_CPU_KERNELV2` 的双路径行为留到 u8-l4 详解。
+
+#### 4.6.1 概念说明
+
+有些 CV 算子（如 NMS 类控制流密集的算子）跑在 AI CPU 上。如果这类算子的输入在构图期全是常量，图引擎最好的做法是**在 host 侧直接把它算掉**（常量折叠），而不是调度到设备上执行。为此需要：
+
+1. 把算子 `op_kernel_aicpu/` 下的源码**再用 x86 编译器编一份**，产出 OBJECT 目标（设备侧那份是 aicpu 交叉编译产物，两者互不影响）；
+2. 把所有算子的 host OBJECT 统一链接成 `libopconstant_folding_cv.so`，供图引擎在 host 侧加载执行；
+3. 源码里的算子注册宏要能区分"这次是 host 编译还是 device 编译"，走不同的注册入口——这就靠新增的编译宏 `OPS_CV_AICPU_HOST_KERNEL`。
+
+本次提交加的就是这三件事的**编译体系部分**：`add_all_modules_sources` 新增 `HOSTCPU` 参数、新函数 `add_aicpu_host_kernel_modules`、`AICPU_INCLUDE` 补充 `common/inc` 路径（让源码能找到新头文件 `common/inc/aicpu/cv_aicpu_register.h`）。
+
+#### 4.6.2 核心流程
+
+```text
+算子 CMakeLists 调用 add_all_modules_sources(... HOSTCPU TRUE)
+  │
+  ├─ cmake_parse_arguments 解析出 MODULE_HOSTCPU=TRUE
+  │
+  ├─ 与 device 侧 aicpu 目标互斥的分支（对照）：
+  │    NOT BUILD_WITH_INSTALLED_DEPENDENCY_CANN_PKG 时 → add_aicpu_kernel_modules()
+  │    （device 版 aicpu OBJECT，进 opp 包）
+  │
+  └─ host 常量折叠分支（新增）：
+       if (MODULE_HOSTCPU                                    ① 算子显式开启
+           AND BUILD_WITH_INSTALLED_DEPENDENCY_CANN_PKG      ② built-in 整包构建
+           AND NOT ENABLE_CUSTOM)                            ③ 非自定义（vendors）包
+         file(GLOB op_kernel_aicpu/*_aicpu.cpp)
+         if (有源文件 AND NOT DISABLE_AICPU)                 ④ 有 AiCPU 源且未 --noaicpu
+           建 <op_name>_host_const_obj OBJECT 库
+             （add_aicpu_host_kernel_modules：x86 编译 + 定义 OPS_CV_AICPU_HOST_KERNEL
+               + 登记进 AICPU_HOST_OBJ_TARGETS 缓存）
+  │
+  └─（收尾在别处）cmake/symbol.cmake 的 gen_aicpu_const_symbol()
+       把 AICPU_HOST_OBJ_TARGETS 里所有 OBJECT 链接为 libopconstant_folding_cv.so
+```
+
+#### 4.6.3 源码精读
+
+- [cmake/func.cmake:L534-L543](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/func.cmake#L534-L543) —— `add_all_modules_sources` 宏的参数说明与解析：本轮在 `oneValueArgs` 中新增了 `HOSTCPU`（[L541](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/func.cmake#L541) 注释注明"设置是否编译 host 侧常量折叠 OBJECT，仅在 built-in 包生效"），经 `cmake_parse_arguments` 解析为 `MODULE_HOSTCPU`。每个算子的 op_host/CMakeLists 都通过这个宏装配源码，所以新增参数对存量算子完全向后兼容（不传即不开启）。
+- [cmake/func.cmake:L623-L632](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/func.cmake#L623-L632) —— 常量折叠目标生成块（本次新增的核心逻辑）：四个条件全满足时（① `MODULE_HOSTCPU` ② built-in 整包构建 ③ 非 `ENABLE_CUSTOM` ④ 存在 `op_kernel_aicpu/*_aicpu.cpp` 且未 `DISABLE_AICPU`），创建 `<算子名>_host_const_obj` OBJECT 目标并把源码挂进去。注意它上方 L615-L621 的 device 侧分支条件恰好是 `NOT BUILD_WITH_INSTALLED_DEPENDENCY_CANN_PKG`——**同一份 aicpu 源码，device 版与 host 版走的是互斥的两条路**。
+- [cmake/func.cmake:L255-L289](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/func.cmake#L255-L289) —— 新函数 `add_aicpu_host_kernel_modules`：为目标设置 `AICPU_INCLUDE` 头文件路径与 Eigen 依赖；[L270](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/func.cmake#L270) 定义编译宏 `OPS_CV_AICPU_HOST_KERNEL`——源码里的 `OPS_CV_REGISTER_CPU_KERNELV2` 宏凭它区分本次是 host 编译还是 device 编译；最后把目标名登记进 `AICPU_HOST_OBJ_TARGETS` 缓存（注释说明：链接进 `libopconstant_folding_cv.so` 的动作由 `symbol.cmake` 的 `gen_aicpu_const_symbol()` 完成，见 [cmake/symbol.cmake:L428-L436](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/symbol.cmake#L428-L436)）。
+- [cmake/variables.cmake:L212-L220](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/variables.cmake#L212-L220) —— `AICPU_INCLUDE` 列表本轮新增了 `${OPS_CV_DIR}/common/inc`（[L217](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/variables.cmake#L217)）：host 侧编译 `op_kernel_aicpu` 源码时需要 include 新头文件 `common/inc/aicpu/cv_aicpu_register.h`（原列表里只有 `common/inc/op_api`，找不到它）。
+
+一个诚实的现状说明：**截至当前 HEAD，仓库中还没有任何算子在自己的 CMakeLists 里传 `HOSTCPU TRUE`**（可用 `grep -rn "HOSTCPU TRUE" --include=CMakeLists.txt .` 验证，无命中）。也就是说这是一套"地基先行"的框架基础设施，等待后续算子逐个接入。
+
+#### 4.6.4 代码实践
+
+1. **实践目标**：不依赖编译环境，通过源码阅读厘清 `_host_const_obj` 目标的生成条件（对应本讲规格中的实践任务后半段）。
+2. **操作步骤**：
+   1. 在仓库根目录执行 `grep -rn "HOSTCPU" --include=CMakeLists.txt image/ objdetect/ experimental/ examples/`，确认目前没有算子传该参数。
+   2. 打开 [cmake/func.cmake:L623-L632](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/func.cmake#L623-L632)，把 if 条件抄下来，逐个标注每个变量来自哪里：`MODULE_HOSTCPU`（算子 CMakeLists 传参）、`BUILD_WITH_INSTALLED_DEPENDENCY_CANN_PKG`（整包构建模式）、`ENABLE_CUSTOM`（`--ops`/`--vendor_name` 点亮）、`DISABLE_AICPU`（`--noaicpu` 点亮，见 4.2.3）。
+   3. 选一个带 `op_kernel_aicpu` 目录的算子（如 `examples/add_example_aicpu` 或 `image/non_max_suppression_v3`），假设给它加上 `HOSTCPU TRUE`，推演哪些构建命令会生成 `_host_const_obj`、哪些不会。
+3. **需要观察的现象**：grep 无 `HOSTCPU TRUE` 命中；条件清单里能明确指出"用 `--ops=xxx` 编译时即使传了 HOSTCPU TRUE 也不会生成 host 目标"（因为 `ENABLE_CUSTOM` 为真）。
+4. **预期结果**：能写出类似"HOSTCPU 仅在 built-in 包（不带 --ops 的整包构建）、算子显式开启、有 aicpu 源码、未 --noaicpu 时生效"的一句话结论。
+5. 若想进一步实测：在整包构建（`bash build.sh --pkg --soc=ascend910b`，不带 `--ops`）日志中搜索 `add aicpu host kernel modules`（来自 [cmake/func.cmake:L259](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/func.cmake#L259) 的 message）——当前无算子接入时应无此输出，待本地验证。
+
+#### 4.6.5 小练习与答案
+
+**练习 1**：为什么 host 常量折叠目标的条件里要求 `NOT ENABLE_CUSTOM`？
+答：`ENABLE_CUSTOM` 对应"自定义算子包"（vendors 挂载）场景，此时产物只服务用户自己的少量算子；常量折叠库 `libopconstant_folding_cv.so` 是随 CANN 整包（built-in）交付、供图引擎统一加载的公共设施，自定义包场景没有意义，所以直接排除（宏注释也写明"仅在 built-in 包生效"）。
+
+**练习 2**：device 侧 aicpu OBJECT 与 host 侧常量折叠 OBJECT 的编译条件有什么对称性？
+答：二者处理同一份 `op_kernel_aicpu` 源码但条件互补：device 侧在 `NOT BUILD_WITH_INSTALLED_DEPENDENCY_CANN_PKG` 时生成（[cmake/func.cmake:L615-L621](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/func.cmake#L615-L621)，glob 模式 `*_aicpu*.cpp`），host 侧在 `BUILD_WITH_INSTALLED_DEPENDENCY_CANN_PKG` 时生成（L623-L632，glob 模式 `*_aicpu.cpp`）。一次构建只会走其中一条路。
+
+**练习 3**：`OPS_CV_AICPU_HOST_KERNEL` 这个编译宏最终影响什么？
+答：它控制 `common/inc/aicpu/cv_aicpu_register.h` 中 `OPS_CV_REGISTER_CPU_KERNELV2` 宏的展开方向：定义了它（host 编译）时经 weak 符号 `RegistCpuKernelV2` 注册进常量折叠库；未定义（device 编译）时回退到标准的 `REGISTER_CPU_KERNEL`。详细展开见 [common/inc/aicpu/cv_aicpu_register.h:L23-L34](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/common/inc/aicpu/cv_aicpu_register.h#L23-L34)（本讲了解即可，u8-l4 详解）。
 
 ## 5. 综合实践
 
-**任务：完成一次单算子编译 → 记录产物 → 多算子编译对比**（对应本讲规格中的实践任务）。
+**任务：完成一次单算子编译 → 记录产物 → 多算子编译对比 → 解读 HOSTCPU 开关**（对应本讲规格中的实践任务）。
 
 前置：按 u1-l1 的方式准备好 CANN toolkit 编译环境（source `set_env.sh`），仓库须在配套 tag 分支上。
 
@@ -327,7 +403,7 @@ check_compiled_ops()  (func.cmake)
    ```
 
    编译成功的标志是日志末尾出现
-   `Self-extractable archive "cann-ops-cv-custom_linux-<arch>.run" successfully created.`（见 [docs/zh/install/compile.md:L63-L69](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/docs/zh/install/compile.md#L63-L69)）。
+   `Self-extractable archive "cann-ops-cv-custom_linux-<arch>.run" successfully created.`（见 [docs/zh/install/compile.md:L63-L69](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/docs/zh/install/compile.md#L63-L69)）。
 
 2. **记录三类产物路径**（对照 4.5 的机制说明）：
    - `build/autogen/` —— opbuild 工具生成的 aclnn 接口代码；
@@ -351,19 +427,22 @@ check_compiled_ops()  (func.cmake)
 
    对比两次编译的 `CMAKE_ARGS` 日志（`-DASCEND_OP_NAME=add_example` vs `add_example;grid_sample`），并确认第二次的 run 包中同时包含两个算子。
 
-5. **记录与思考**：把命令、CMAKE_ARGS 关键片段、三个产物路径、安装路径整理成一页笔记；回答——如果把 `--soc` 换成 `ascend910_93` 重编，哪些产物会变化？（提示：kernel 二进制与 `tbe/op_info_cfg/ai_core/ascend910_93/` 下的信息文件。）
+5. **解读 HOSTCPU 开关**（源码阅读部分，无环境依赖，可立即完成）：按 4.6.4 的步骤阅读 [cmake/func.cmake:L623-L632](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/func.cmake#L623-L632)，用自己的话写清 `HOSTCPU TRUE` 生成 `_host_const_obj` 需要满足的全部条件。
 
-以上步骤依赖真实 CANN 编译环境，本讲义未实际执行，均属**待本地验证**内容。
+6. **记录与思考**：把命令、CMAKE_ARGS 关键片段、三个产物路径、安装路径、HOSTCPU 条件清单整理成一页笔记；回答——如果把 `--soc` 换成 `ascend910_93` 重编，哪些产物会变化？（提示：kernel 二进制与 `tbe/op_info_cfg/ai_core/ascend910_93/` 下的信息文件。）
+
+以上编译/安装步骤依赖真实 CANN 编译环境，本讲义未实际执行，均属**待本地验证**内容；第 5 步为纯源码阅读，可直接完成。
 
 ## 6. 本讲小结
 
 - `build.sh` 是薄入口：`main()` 按开关调度 8 个子脚本（conf/options/cmake/lib/ut/example/genop 等）完成"参数解析 → CMake 配置 → 编库 → 编二进制 → 打包/测试"。
-- 参数解析集中在 `build_options.sh` 的 `checkopts`：`--ops` → `COMPILED_OPS`+`ENABLE_CUSTOM`，`--pkg` → `ENABLE_BINARY`+`ENABLE_PACKAGE`，`--soc` → `COMPUTE_UNIT`；大量互斥规则在 `check_param` 中前置拦截。
+- 参数解析集中在 `build_options.sh` 的 `checkopts`：`--ops` → `COMPILED_OPS`+`ENABLE_CUSTOM`，`--pkg` → `ENABLE_BINARY`+`ENABLE_PACKAGE`，`--soc` → `COMPUTE_UNIT`，`--noaicpu` → `DISABLE_AICPU`；大量互斥规则在 `check_param` 中前置拦截。
 - `build_cmake.sh` 负责翻译：shell 变量装配成 `-DASCEND_OP_NAME=a;b`、`-DASCEND_COMPUTE_UNIT=xxx` 等 CMake 变量，`--soc` 在此处做白名单校验，每次配置前清掉 `CMakeCache.txt`。
 - 根 `CMakeLists.txt` 用一排 `option` 接收开关，`ENABLE_EXPERIMENTAL` 决定编译正式目录还是贡献目录，`examples/` 仅在 `--ops` 包含 add_example 时参与编译。
-- `cmake/variables.cmake` 定义编译范围（`NEED_COMPILE_OPS` vs `COMPILED_OPS`）与安装路径（自定义包 → `vendors/<vendor>_cv`，产物 → `build_out`）；`opbuild.cmake` 借助 CANN `op_build` 工具从 `*_def.cpp` 自动生成 aclnn 接口代码；`gen_ops_info.cmake` 拷贝 kernel 源码并为全部芯片生成算子信息、为目标芯片编译二进制。
+- `cmake/variables.cmake` 定义编译范围（`NEED_COMPILE_OPS` vs `COMPILED_OPS`）、安装路径（自定义包 → `vendors/<vendor>_cv`，产物 → `build_out`）与 `AICPU_INCLUDE`（本轮新增 `common/inc`）；`opbuild.cmake` 借助 CANN `op_build` 工具从 `*_def.cpp` 自动生成 aclnn 接口代码；`gen_ops_info.cmake` 拷贝 kernel 源码并为全部芯片生成算子信息、为目标芯片编译二进制。
 - `check_compiled_ops`（func.cmake）保证 `--ops` 里拼错的算子名会直接报错而不是被静默忽略。
+- **本轮新增**：`add_all_modules_sources` 的 `HOSTCPU` 参数 + `add_aicpu_host_kernel_modules` 函数构成 host 侧常量折叠编译链路——在 built-in 整包、算子显式开启且有 `op_kernel_aicpu` 源码时，把 AiCPU 源码额外编译为带 `OPS_CV_AICPU_HOST_KERNEL` 宏的 x86 OBJECT，最终由 symbol.cmake 链接成 `libopconstant_folding_cv.so`；目前尚无算子接入，属框架地基。
 
 ## 7. 下一步学习建议
 
-下一讲（u1-l4「第一次运行算子：AddExample 全流程实操」）会把本讲的编译产物真正跑起来：安装 run 包后执行 `test_aclnn_add_example` 样例，打通"编译 → 安装 → 运行"闭环。建议预习时先浏览 [docs/QUICKSTART.md](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/docs/QUICKSTART.md) 和 [examples/add_example/README.md](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/examples/add_example/README.md)。想深入了解打包细节的读者，可以继续阅读 [cmake/package.cmake](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/cmake/package.cmake) 与 [cmake/symbol.cmake](https://github.com/gitcode.com/cann/ops-cv/blob/2bd9cb7c292a1b753781ba301fcde08656554b5f/cmake/symbol.cmake)。
+下一讲（u1-l4「第一次运行算子：AddExample 全流程实操」）会把本讲的编译产物真正跑起来：安装 run 包后执行 `test_aclnn_add_example` 样例，打通"编译 → 安装 → 运行"闭环。建议预习时先浏览 [docs/QUICKSTART.md](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/docs/QUICKSTART.md) 和 [examples/add_example/README.md](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/examples/add_example/README.md)。想深入了解打包细节的读者，可以继续阅读 [cmake/package.cmake](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/package.cmake) 与 [cmake/symbol.cmake](https://github.com/gitcode.com/cann/ops-cv/blob/394ba763c277cbe076d44b35d80bef8f901af18e/cmake/symbol.cmake)。对 4.6 常量折叠机制意犹未尽的读者，请在学完 AiCPU 算子开发（u8-l1）后阅读 u8-l4「HOSTCPU 常量折叠框架」，那里会展开 `cv_aicpu_register.h` 注册宏的双路径行为与 `libopconstant_folding_cv.so` 的完整链接过程。

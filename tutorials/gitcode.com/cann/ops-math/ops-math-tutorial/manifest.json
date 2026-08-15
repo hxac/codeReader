@@ -1,14 +1,13 @@
 {
-  "head": "4332f74d81d2d3ce1d7ea89375e911bce1b3a516",
+  "head": "6f9460138514f3a9e8555b8e83a3a4daef666b93",
   "project": "ops-math",
-  "rationale": "ops-math 是 CANN 数值计算基础算子库，涵盖 conversion/math/random 三大类共数百个算子，每个算子都遵循 op_def 注册、infershape、tiling、kernel、aclnn 适配的固定分层结构，且基于 atvoss 框架（BroadcastSch/OpDag）与 AscendC 编程模型。因此学习路线设计为：第一单元让读者从零认识项目定位、目录结构、编译方式并跑通第一个算子样例；第二单元以最典型的 add 算子为主线，逐层解剖一个算子从注册、形状推导、tiling、kernel 到 aclnn 接口与调用方式的完整链路；第三单元深入 broadcast、数据类型、tiling 框架、atvoss 调度、图模式与多架构适配等横切核心机制；第四单元按算子类别（elementwise、reduction、conversion、random、aicpu）横向对比典型算子的实现差异；第五单元进入工程实践层，覆盖新算子脚手架生成、UT/ST 测试、调试与性能采集、性能调优以及实验目录与贡献流程。依赖关系上后续单元均建立在 u1、u2 之上，符合由浅入深、结合真实源码并配套实践任务的原则。",
+  "rationale": "ops-math 是 CANN 数值计算基础算子库，涵盖 conversion/math/random 三大类共数百个算子，每个算子都遵循 op_def 注册、infershape、tiling、kernel、aclnn 适配的固定分层结构，且基于 atvoss 框架（BroadcastSch/OpDag）与 AscendC 编程模型。因此学习路线设计为：第一单元让读者从零认识项目定位、目录结构、编译方式并跑通第一个算子样例；第二单元以最典型的 add 算子为主线，逐层解剖一个算子从注册、形状推导、tiling、kernel 到 aclnn 接口与调用方式的完整链路；第三单元深入 broadcast、数据类型、tiling 框架、atvoss 调度、图模式与多架构适配等横切核心机制；第四单元按算子类别（elementwise、reduction、conversion、random、aicpu）横向对比典型算子的实现差异；第五单元进入工程实践层，覆盖新算子脚手架生成、UT/ST 测试、调试与性能采集、性能调优以及实验目录与贡献流程。本次增量分析（4332f74..6f94601）显示变化集中在三处：多个算子 examples 样例改写为 C++ RAII 资源管理风格、cast 算子的 tiling/kernel 性能重构（tiling 数据简化为 host/device 共享的普通结构体 CastTilingData，kernel 侧 cast_impl.h 大幅重写）、以及 amp_update_scale/div 的局部改动和 CI 脚本优化。所有既有讲义引用的源码文件（add 主线、文档、公共框架、add_example 脚手架等）均未被本次 diff 触及，故全部标记为 keep；同时 cast 作为 conversion 类最典型的算子，其本次重构后的模板化 tiling 策略与精简 tiling 数据结构具有很强的教学价值，因此在单元四新增一篇 cast 算子讲义，依赖 conversion 类算子与 tiling 框架两篇先行内容。",
   "units": [
     {
       "id": "u1",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -34,7 +33,7 @@
           "topic": "介绍 ops-math 作为 CANN 数值计算基础算子库的定位、在 CANN 架构中的位置、conversion/math/random 三大类算子的划分，以及版本配套关系。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -62,7 +61,7 @@
           "topic": "讲解仓库根目录布局、单个算子目录（op_host/op_kernel/op_api/op_graph/framework/tests）的标准结构，以及 classify_rule.yaml 的算子分类规则。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -92,7 +91,7 @@
           "topic": "介绍 NPU 驱动与 CANN 包安装、build.sh 入口脚本与 scripts 下各构建子脚本的分工、CMake 构建体系以及编译产物组织。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -121,15 +120,15 @@
           "topic": "跟随 QUICKSTART 完成编译、安装算子包、配置环境变量并运行 AddExample 样例，建立对算子端到端运行流程的直观认识。"
         }
       ],
+      "level": "beginner",
       "order": 1,
       "title": "单元一：初识 ops-math"
     },
     {
       "id": "u2",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l4"
           ],
@@ -157,7 +156,7 @@
           "topic": "讲解单个算子 README 的结构：产品支持情况、计算公式、参数说明（输入/输出/属性、数据类型、格式）以及规格约束的含义。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -184,7 +183,7 @@
           "topic": "剖析 add_def.cpp 中 OpDef 的链式声明：Input/Output/ParamType/DataType/Format/UnknownShapeFormat 以及 InferShape 等注册回调，理解算子规格如何被注册到 CANN。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -212,7 +211,7 @@
           "topic": "讲解 add_infershape.cpp 如何基于 broadcast 规则推导输出 shape，以及 ge::GraphOpErrCodeStatus 的返回约定和公共推导工具的使用。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -240,7 +239,7 @@
           "topic": "介绍 tiling 的概念（多核切分、UB 内存规划），并以 AddTiling 为例讲解 TilingBaseClass 框架下 tiling 类的写法、编译信息（coreNum/ubSize）的获取与 tiling 数据序列化。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -268,7 +267,7 @@
           "topic": "剖析 add kernel 的 __global__ __aicore__ 入口、按数据类型编译期分支（bool/混合精度/cast），以及 OpDag 与 BroadcastSch 调度封装的配合方式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -298,7 +297,7 @@
           "topic": "讲解 op_api 目录下 add.cpp 与 aclnn_add.cpp 的关系、L0 到 L2 接口的封装层次（level2_base.h）、两段式接口（GetWorkspaceSize + 调用）与返回码约定。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l6"
           ],
@@ -327,15 +326,15 @@
           "topic": "对比三种调用路径：aclnn 单算子调用、GE 图模式（geir）调用，以及 kernel 侧 <<<>>> 异构调用示例，理解样例代码的编译运行方式。"
         }
       ],
+      "level": "intermediate",
       "order": 2,
       "title": "单元二：解剖一个算子——add 的完整链路"
     },
     {
       "id": "u3",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -363,7 +362,7 @@
           "topic": "系统讲解 broadcast 的 shape 对齐规则，以及该规则在 infershape（host 推导）与 kernel（BroadcastSch/元素级访存）两侧分别如何落地。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l5"
           ],
@@ -392,7 +391,7 @@
           "topic": "讲解 CANN 数据类型（BOOL/INT8/FLOAT16/BFLOAT16/FLOAT32/FLOAT8/FLOAT4 等）及算子侧的类型支持声明，重点分析 add kernel 中混合精度与 cast 分支的实现策略。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -420,7 +419,7 @@
           "topic": "讲解 math_tiling_templates_registry.h 提供的 tiling 模板复用机制、tiling key 的区分方式，以及多个算子共享 tiling 实现的工程组织。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l5"
           ],
@@ -448,7 +447,7 @@
           "topic": "深入 add_dag.h 中计算图（OpDag）的定义方式与 BroadcastSch 按 schMode 的调度执行流程，理解算子计算逻辑如何被声明式地组织并被调度器执行。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l7"
           ],
@@ -478,7 +477,7 @@
           "topic": "讲解算子在图编译模式下的适配层：proto 定义、graph_infer 推导、以及框架插件（tf plugin）的接入方式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -506,15 +505,15 @@
           "topic": "讲解 arch35 架构目录与 config/ascend950 下 soc 配置文件的作用，以及算子在不同芯片架构间迁移时的目录组织与差异管理。"
         }
       ],
+      "level": "intermediate",
       "order": 3,
       "title": "单元三：核心机制与公共框架"
     },
     {
       "id": "u4",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l4"
           ],
@@ -542,7 +541,7 @@
           "topic": "以 abs 等一元算子对照 add 二元算子，归纳 elementwise 算子在 tiling、DAG 定义和 kernel 上的共性与差异。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l4"
           ],
@@ -571,7 +570,7 @@
           "topic": "以 reduce_sum 和 cumsum 为例讲解带 axes 属性的归约算子：shape 推导（keepdim）、tiling 切分以及 kernel 侧归约/扫描实现。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -601,6 +600,38 @@
         {
           "action": "new",
           "depends_on": [
+            "u4-l3",
+            "u3-l3"
+          ],
+          "filename": "u4-l6-cast-ops.md",
+          "id": "u4-l6",
+          "learning_goals": [
+            "理解 cast 算子按模板（deinter/interleave、寄存器搬运模式）区分实现版本的策略",
+            "掌握重构后 host/device 共享的 CastTilingData 精简结构及其传递方式",
+            "理解 2025 年 cast 性能重构中 tiling 数据从十余个字段精简为 shapeSize/coreNum/ubFormer 三个字段的设计取舍"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "cast tiling 类",
+            "共享 tiling 数据结构体",
+            "cast kernel 模板实现"
+          ],
+          "order": 4,
+          "practice_task": "对比重构前后 cast tiling 字段的变化（可通过 git log/git show 查看 math/cast 的历史提交），回答：重构后 kernel 侧如何自行计算分块循环而不再依赖 tiling 传入的 blockFormer/ubLoop 等字段；再列出 cast_impl.h 中至少两种 CAST_TEMPLATE 模板常量并说明其适用场景。",
+          "source_files": [
+            "math/cast/README.md",
+            "math/cast/op_host/arch35/cast_tiling.cpp",
+            "math/cast/op_host/arch35/cast_tiling.h",
+            "math/cast/op_kernel/arch35/cast_tiling_data.h",
+            "math/cast/op_kernel/arch35/cast_impl.h",
+            "math/cast/op_kernel/cast_apt.cpp"
+          ],
+          "title": "类型转换算子 cast：模板化 tiling 与性能重构",
+          "topic": "以 math/cast 为例讲解类型转换算子的实现：按输入输出类型组合选择 CAST_TEMPLATE 模板（含 deinter/打包等寄存器搬运模式）的策略，以及近期性能重构后 tiling 数据简化为 host/device 共享的普通结构体 CastTilingData、分块循环下沉到 kernel 侧计算的新组织方式。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
             "u3-l2"
           ],
           "filename": "u4-l4-random-ops.md",
@@ -616,7 +647,7 @@
             "stateless 随机数",
             "随机数生成机制"
           ],
-          "order": 4,
+          "order": 5,
           "practice_task": "对照 drop_out_v3 与 drop_out_v3_grad 的 README，列出正反向算子的输入输出对应关系；再阅读 stateless_normal 的算子定义，说明 seed 与 offset 属性的作用。",
           "source_files": [
             "random/drop_out_v3/README.md",
@@ -628,7 +659,7 @@
           "topic": "讲解 random 类算子的特殊性：随机数发生器（Philox 等）、seed/offset 状态管理、mask 类算子输出，以及 dropout 前反向的配套组织。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l5"
           ],
@@ -645,7 +676,7 @@
             "算子定义",
             "AICPU 开发指南"
           ],
-          "order": 5,
+          "order": 6,
           "practice_task": "对比 math/add/op_kernel 与 op_kernel_aicpu 两个目录，列出 AICPU 版本 kernel 在文件组成、入口签名上与 AICore 版本的差异，并总结 AICPU 路径适用的场景。",
           "source_files": [
             "math/add/op_kernel_aicpu/add_aicpu.cpp",
@@ -657,15 +688,15 @@
           "topic": "讲解 AICPU kernel 的实现路径：与 AICore kernel 的关系、独立目录 op_kernel_aicpu 的组织、以及哪些算子（如复杂控制流或不支持的数据类型）走 AICPU。"
         }
       ],
+      "level": "intermediate",
       "order": 4,
       "title": "单元四：典型算子类别实现剖析"
     },
     {
       "id": "u5",
-      "level": "advanced",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l5",
             "u2-l6"
@@ -697,7 +728,7 @@
           "topic": "以 examples/add_example 完整工程为模板，讲解如何用 build.sh --genop 生成新算子目录，并逐层实现 def、infershape、tiling、kernel 与 aclnn 适配。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -726,7 +757,7 @@
           "topic": "讲解算子 UT 的组织方式：tests/ut 目录下 op_api/op_host 等分类、典型用例的写法（构造输入、调用、校验）以及 UT 的构建与运行。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l2"
           ],
@@ -755,7 +786,7 @@
           "topic": "讲解算子 ST 的组织：st 目录按接口/架构分类、测试数据文件（输入与 golden 输出）的格式，以及如何按 QUICKSTART 中的方式修改输入并验证。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -783,7 +814,7 @@
           "topic": "讲解算子开发中的调试手段：kernel 内 printf 日志、NPU 上的性能数据采集，以及无硬件环境下基于 CANN Simulator 的仿真调试。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l4"
           ],
@@ -811,7 +842,7 @@
           "topic": "基于 tiling 切分、内存搬运与计算密度三个维度，讲解 elementwise 算子性能调优的常见手段，并结合性能采集数据分析瓶颈。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -840,6 +871,7 @@
           "topic": "介绍 experimental 目录的作用（开发者试验自定义算子）以及向本仓正式贡献算子的流程：目录规范、README/测试要求、OAT 合规检查与 PR 流程。"
         }
       ],
+      "level": "advanced",
       "order": 5,
       "title": "单元五：测试、调试与工程实践"
     }

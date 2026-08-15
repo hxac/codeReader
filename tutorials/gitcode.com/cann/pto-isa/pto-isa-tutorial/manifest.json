@@ -1,0 +1,1213 @@
+{
+  "head": "8aacb8e0a0c636d291f2e4219d231b52e8003a8a",
+  "project": "pto-isa",
+  "rationale": "PTO Tile Library 是一个大型跨架构（A2/A3/A5/A6/CPU 仿真）的 Tile 级虚拟 ISA 实现，包含 90+ 标准指令、通信扩展指令集、Auto/Manual 双模式工作流、CPU 仿真器与 CostModel 性能模拟。学习路线按\"先跑起来→理解编程模型→逐类吃透指令→上手完整算子→掌握通信与性能优化→深入仿真器与扩展开发\"设计：单元一至单元三让读者零基础跑通 CPU 仿真并理解 GlobalTensor/Tile/Event 三大核心抽象与数据搬运链路；单元四到单元五按指令家族（逐元素、规约、重排、量化、Cube 矩阵乘、卷积、MX 混合精度）逐类精读 CPU 与 NPU 双实现；单元六到单元八进入流水线、多核、性能调优、通信指令集与 Flash Attention/MoE 等复杂算子实战；单元九到单元十一面向二次开发，覆盖 Auto Mode、自定义算子接入、构建打包、测试体系、CPU 仿真器与 CostModel 内幕，以及新增指令和 A5/A6 新架构适配。依赖关系严格单向，每篇讲义绑定真实源码文件与一个可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 PTO ISA 是什么、解决什么跨代迁移问题",
+            "说出仓库的四大平台支持（A2/A3/A5/CPU）与主要目录职责",
+            "了解 PyPTO、TileLang Ascend 等上下游生态"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "项目定位",
+            "平台矩阵",
+            "生态集成"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README 与 docs/README.md，列出 PTO 与传统 Ascend C 编程模型的三点差异，并写出 90+ 指令在你心中的分类草图。",
+          "source_files": [
+            "README.md",
+            "docs/README.md",
+            "include/README.md"
+          ],
+          "title": "PTO Tile Library 项目总览：是什么、为什么、为谁服务",
+          "topic": "介绍 PTO（Parallel Tile Operation）虚拟 ISA 的定位、核心特性、目标用户与生态（PyPTO、TileLang Ascend），以及本仓库的整体结构。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-directory-structure.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "画出仓库顶层目录地图",
+            "理解 include/pto 下 common/cpu/npu/comm/costmodel 的分工",
+            "理解 pto-inst.hpp 作为统一入口的作用"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "目录地图",
+            "头文件组织",
+            "统一入口"
+          ],
+          "order": 2,
+          "practice_task": "在本地浏览 include/pto/npu/a2a3 目录，统计指令头文件数量，并挑出 3 个你感兴趣的指令名记下来，后续单元会逐个精读。",
+          "source_files": [
+            "README.md",
+            "include/pto/pto-inst.hpp",
+            "CMakeLists.txt"
+          ],
+          "title": "源码目录结构导览：从仓库布局看懂项目分层",
+          "topic": "逐一讲解 include、kernels、demos、tests、docs、scripts、cmake 各目录的职责，以及 include/pto 内部 common/cpu/npu/comm/costmodel 的分层。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-environment-and-cpu-sim.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "搭建 CPU 仿真开发环境",
+            "使用 tests/run_cpu.py 和 build.sh 构建运行",
+            "跑通 gemm 与 flash_attn 演示"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "环境准备",
+            "构建脚本",
+            "演示运行"
+          ],
+          "order": 3,
+          "practice_task": "在本地执行 python3 tests/run_cpu.py --demo gemm --verbose 和 --demo flash_attn --verbose，记录输出并截图留档。",
+          "source_files": [
+            "docs/getting-started.md",
+            "tests/run_cpu.py",
+            "build.sh"
+          ],
+          "title": "环境搭建与 CPU 仿真快速上手",
+          "topic": "讲解 CPU 路径与 NPU 路径的环境要求，使用 tests/run_cpu.py、build.sh 一键构建与运行演示。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-first-add-demo.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "读懂一个最小 PTO kernel 的完整结构",
+            "区分 __gm__、AICORE、GlobalTensor、Tile 等关键概念",
+            "理解 host 侧调用与 kernel 侧计算的配合"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "kernel 侧代码",
+            "host 侧代码",
+            "构建脚本"
+          ],
+          "order": 4,
+          "practice_task": "仿照 add_custom.cpp，把 Add 改成 Sub（TSUB），在 CPU 仿真下跑通并验证结果正确。",
+          "source_files": [
+            "demos/baseline/add/csrc/kernel/add_custom.cpp",
+            "demos/baseline/add/csrc/host/my_add.cpp",
+            "demos/baseline/add/README.md"
+          ],
+          "title": "第一个算子：Add 示例逐行精读",
+          "topic": "以 demos/baseline/add 为例，从 kernel 侧 add_custom.cpp 到 host 侧 my_add.cpp，完整拆解一个最小 PTO 算子的写法。"
+        }
+      ],
+      "order": 1,
+      "title": "初识 PTO：项目定位与跑通第一个例子"
+    },
+    {
+      "id": "u2",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l1-globaltensor.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "掌握 GlobalTensor 的构造与 shape/stride 语义",
+            "理解 5 维 Shape 模板与 DYNAMIC 的含义",
+            "能用 GlobalTensor 描述 GM 上的数据"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "GlobalTensor 视图",
+            "Shape 模板",
+            "维度与步长"
+          ],
+          "order": 1,
+          "practice_task": "写一段代码用 GlobalTensor 描述一个 [128, 256] 的 float16 矩阵，并按 [2, 64, 256] 的视角重新切分后打印 shape。",
+          "source_files": [
+            "docs/coding/GlobalTensor.md",
+            "include/pto/common/pto_tile.hpp"
+          ],
+          "title": "GlobalTensor：全局内存上的张量视图",
+          "topic": "讲解 GlobalTensor 如何以 shape/stride 元数据描述 GM 数据，以及 Shape<...> 模板中 DYNAMIC 维度的静态/动态设计。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-tile-model.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "理解 Tile 是片上 2-D 缓冲抽象",
+            "掌握静态 tile 形状与动态 tile 掩码的配合",
+            "理解 TileType::Vec 等 tile 类型"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Tile 抽象",
+            "tile 形状与掩码",
+            "tile 存储"
+          ],
+          "order": 2,
+          "practice_task": "参考 pto_tile.hpp 中 Tile 的定义，手写一个 64x64 的 float16 Tile 声明，并说明掩码在某行无效时如何保护越界写入。",
+          "source_files": [
+            "docs/coding/Tile.md",
+            "include/pto/common/pto_tile.hpp"
+          ],
+          "title": "Tile 编程模型：静态形状、动态掩码与数据组织",
+          "topic": "讲解 Tile 作为片上 tile 缓冲的核心抽象，静态 tile 形状、动态 tile mask、以及数据在 tile 存储中的组织方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-event-sync.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "掌握 set/wait 事件原语的使用",
+            "理解指令间依赖与流水线同步",
+            "能读懂 kernel 中 TSYNC 之类的同步写法"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "事件记录与等待",
+            "flag 语义",
+            "流水线同步"
+          ],
+          "order": 3,
+          "practice_task": "在 Add 示例中为 TLOAD 和计算指令之间手工插入一对 set/wait 事件，观察 CPU 仿真下行为不变，并解释原因。",
+          "source_files": [
+            "docs/coding/Event.md",
+            "include/pto/common/event.hpp"
+          ],
+          "title": "事件与同步：set/wait flag 与流水线依赖",
+          "topic": "讲解事件记录（set）与等待（wait）机制，以及 PTO 如何用事件表达 MTE/Vector/Cube 等流水线间的依赖顺序。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-pto-inst-entry.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "理解 __CPU_SIM、__CCE_AICORE__、__COSTMODEL 三条编译路径",
+            "理解 common/cpu/npu 三层头文件的引用关系",
+            "掌握 arch_macro/arch_capability 的作用"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "编译期后端选择",
+            "架构宏",
+            "指令接口层"
+          ],
+          "order": 4,
+          "practice_task": "用 grep 分别统计 __CPU_SIM 与 __CCE_AICORE__ 在 include/pto/common 与 include/pto/cpu 中的出现次数，说明两套实现的隔离方式。",
+          "source_files": [
+            "include/pto/pto-inst.hpp",
+            "include/pto/common/arch_macro.hpp",
+            "include/pto/common/cpu_stub.hpp"
+          ],
+          "title": "统一入口 pto-inst.hpp 与多后端架构切换",
+          "topic": "讲解 pto-inst.hpp 如何通过 __CPU_SIM、__CCE_AICORE__、__COSTMODEL 宏把同一份 kernel 代码路由到 CPU 仿真、NPU 或 CostModel 后端。"
+        }
+      ],
+      "order": 2,
+      "title": "编程模型核心：GlobalTensor、Tile 与事件"
+    },
+    {
+      "id": "u3",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u3-l1-tload-tstore.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "掌握 TLOAD/TSTORE 的参数与约束",
+            "理解 GM 与 tile 存储之间的数据通路",
+            "能独立完成一次搬运+计算+写回"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "TLOAD 语义",
+            "TSTORE 语义",
+            "CPU/NPU 双实现对比"
+          ],
+          "order": 1,
+          "practice_task": "用 TLOAD 加载一个 [128,128] 矩阵，乘以 2 后用 TSTORE 写回，分别在 CPU 仿真和文档对照下确认语义。",
+          "source_files": [
+            "docs/isa/TLOAD.md",
+            "include/pto/cpu/TLoad.hpp",
+            "include/pto/npu/a2a3/TLoad.hpp"
+          ],
+          "title": "TLOAD/TSTORE：数据进出 tile 的门户",
+          "topic": "精读数据搬运主链路指令 TLOAD/TSTORE 的 ISA 文档、CPU 仿真实现与 NPU 实现，理解 GM 与 tile 存储之间的搬运。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-tassign-talloc.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 Manual 模式下显式缓冲绑定的意义",
+            "掌握 TASSIGN/TAlloc/TFree 的 API",
+            "区分 Auto 模式隐式绑定与 Manual 模式显式绑定"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "TASSIGN 绑定",
+            "缓冲分配/释放",
+            "Auto 与 Manual 差异"
+          ],
+          "order": 2,
+          "practice_task": "把上一讲的加载-计算-写回改造为 Manual 风格：显式 TAlloc 缓冲、TASSIGN 绑定、TFree 释放，并保持结果一致。",
+          "source_files": [
+            "docs/isa/TASSIGN.md",
+            "docs/isa/TALLOC.md",
+            "include/pto/npu/a2a3/TAssign.hpp"
+          ],
+          "title": "TASSIGN 与缓冲管理：Tile 显式绑定、TAlloc/TFree",
+          "topic": "讲解 Manual 模式下如何用 TASSIGN 显式把 Tile 绑定到片上缓冲，以及 TAlloc/TFree 的生命周期管理。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-tmovement-ops.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "掌握 TMov、TTrans、TReshape 的语义差异",
+            "理解片上数据重排的代价",
+            "能为算子选择合适的搬运类指令"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "TMov",
+            "TTrans",
+            "TReshape"
+          ],
+          "order": 3,
+          "practice_task": "对一个 [64,64] tile 执行 TTrans，再执行 TReshape 成 [128,32]，用 CPU 仿真打印中间结果验证。",
+          "source_files": [
+            "docs/isa/TMOV.md",
+            "docs/isa/TTRANS.md",
+            "docs/isa/TRESHAPE.md"
+          ],
+          "title": "片上搬移类指令：TMov、TTrans、TReshape",
+          "topic": "讲解片上 tile 之间的复制、转置与形状重组指令，以及它们在算子流水中的位置。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l4-cpu-sim-internals-tadd.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "理解 CPU 仿真如何用普通 C++ 实现 tile 指令",
+            "掌握 ElementTileOp 等通用仿真骨架",
+            "能读懂任意一个 include/pto/cpu 下的指令实现"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "TAdd 仿真实现",
+            "通用 Element 仿真骨架",
+            "仿真与 NPU 实现对照"
+          ],
+          "order": 4,
+          "practice_task": "对照 include/pto/cpu/TSub.hpp（若存在，否则选 TMul.hpp）与 TAdd.hpp，画出 CPU 仿真实现的调用关系图。",
+          "source_files": [
+            "include/pto/cpu/TAdd.hpp",
+            "include/pto/cpu/ElementTileOp.h"
+          ],
+          "title": "CPU 仿真实现剖析：以 TAdd 为例读透一条指令",
+          "topic": "以 TAdd 为例，剖析 include/pto/cpu 下指令的仿真实现套路，理解 ElementTileOp 等公共骨架的复用方式。"
+        }
+      ],
+      "order": 3,
+      "title": "数据搬运与 CPU 仿真实现"
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u4-l1-binary-scalar-ops.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "掌握 TBinOp/TBinSOp 类模板的抽象方式",
+            "理解一条模板如何派生 TAdd/TMul/TSub 等一族指令",
+            "能通过 NPU 实现看到底层 intrinsic 的映射"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "二元运算模板",
+            "标量运算变体",
+            "NPU intrinsic 映射"
+          ],
+          "order": 1,
+          "practice_task": "基于 TBinOp 模板思路，说明新增一个 TFMod 需要改动哪些文件，并对照 docs/isa/TFMOD.md 验证你的判断。",
+          "source_files": [
+            "include/pto/npu/a2a3/TBinOp.hpp",
+            "include/pto/npu/a2a3/TBinSOp.hpp",
+            "docs/isa/TADD.md"
+          ],
+          "title": "逐元素与标量运算族：TBinOp/TBinSOp 抽象",
+          "topic": "讲解二元/标量运算指令族的模板化实现，理解 NPU 侧如何通过统一模板派生出 TAdd/TMul 等几十条指令。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-reduction-ops.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "掌握行/列规约指令的语义与 mask 行为",
+            "理解 TPart 规约在多核切分中的作用",
+            "能实现 row-softmax 风格的规约+归一化"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "行/列规约",
+            "部分规约",
+            "Softmax 实战"
+          ],
+          "order": 2,
+          "practice_task": "用 TRowSum + broadcast 风格运算实现 row-softmax 的前半部分（求和），并与 docs/coding/tutorials/row-softmax.md 的参考实现对齐。",
+          "source_files": [
+            "include/pto/npu/a2a3/TColSum.hpp",
+            "docs/isa/TCOLSUM.md",
+            "docs/coding/tutorials/row-softmax.md"
+          ],
+          "title": "规约指令：TRowSum/TColSum 与 TPart 部分-规约",
+          "topic": "讲解行/列规约与部分规约（TPartMax/TPartArgMax 等）指令族，以及它们在多核规约协议中的角色。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-gather-scatter-rearrange.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "掌握 tile 级与矩阵级 Gather/Scatter 的适用场景",
+            "理解 TExtract/TInsert 与 TConcat/TFillPad 的重排语义",
+            "能按索引重组数据"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TGather/TScatter",
+            "MGather/MScatter",
+            "TExtract/TInsert"
+          ],
+          "order": 3,
+          "practice_task": "用 TGather 按 index 数组重排一个 [64,64] tile 的行，并用 TScatter 还原，验证数据一致。",
+          "source_files": [
+            "include/pto/npu/a2a3/TGather.hpp",
+            "include/pto/npu/a2a3/MGather.hpp",
+            "docs/isa/TGATHER.md"
+          ],
+          "title": "数据重排指令：TGather/TScatter、TExtract/TInsert 与 MGather/MScatter",
+          "topic": "讲解按索引重排 tile 数据的指令族，包括 tile 级 Gather/Scatter 与矩阵级 MGather/MScatter。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u4-l4-cvt-and-quant.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "掌握 TCvt 的类型转换约束",
+            "理解量化参数（scale/offset）的设置与使用流程",
+            "能写一个 fake-quantize 计算"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TCvt",
+            "SetQuant 系列",
+            "TQuant/TDequant"
+          ],
+          "order": 4,
+          "practice_task": "把一个 fp16 tile 用 SetQuantScalar + TQuant 量化到 int8，再用 TDequant 反量化，计算最大绝对误差。",
+          "source_files": [
+            "include/pto/npu/a2a3/TCvt.hpp",
+            "include/pto/npu/a2a3/SetQuantVector.hpp",
+            "include/pto/npu/a2a3/TDequant.hpp"
+          ],
+          "title": "类型转换与量化指令：TCvt、SetQuant、TQuant/TDequant",
+          "topic": "讲解精度转换与量化/反量化指令，以及 SetQuantScalar/SetQuantVector 量化参数的配置机制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "filename": "u4-l5-sort-topk.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "掌握 TMrgSort 归并排序指令的语义",
+            "理解 ArgMax/ArgMin 与排序的关联",
+            "读懂完整 TopK 算子的多核切分策略"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TMrgSort",
+            "Arg 规约指令",
+            "TopK 算子实现"
+          ],
+          "order": 5,
+          "practice_task": "运行 kernels/manual/a2a3/topk 的 run.sh（或 CPU 仿真等价路径），修改 K 值并核对输出的 top-k 索引正确性。",
+          "source_files": [
+            "include/pto/npu/a2a3/TMrgSort.hpp",
+            "docs/isa/TMRGSORT.md",
+            "kernels/manual/a2a3/topk/README.md"
+          ],
+          "title": "排序与 TopK：TMrgSort 与 TopK 算子实战",
+          "topic": "讲解 TMrgSort/TSort32 等排序指令，并结合 kernels/manual/a2a3/topk 完整算子理解排序类指令的工程用法。"
+        }
+      ],
+      "order": 4,
+      "title": "计算指令族精读"
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u5-l1-tmatmul-cube.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "掌握 TMatmul 及 _ACC/_BIAS 变体的参数",
+            "理解 tile 形状与 Cube 单元的约束关系",
+            "理解 L0 缓冲与 matmul 数据通路"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TMatmul 基本形式",
+            "累加与偏置变体",
+            "Cube 约束"
+          ],
+          "order": 1,
+          "practice_task": "用 TMatmul 计算两个 [128,128]x[128,128] 的 fp16 矩阵乘，再用 TMatmul_ACC 在循环中累加 4 次，对比一次大 K 的结果。",
+          "source_files": [
+            "docs/isa/TMATMUL.md",
+            "include/pto/npu/a2a3/TMatmul.hpp"
+          ],
+          "title": "TMatmul 与 Cube 单元：矩阵乘指令族",
+          "topic": "精读 TMatmul/TMatmul_ACC/TMatmul_BIAS 指令，理解 Cube 单元、M/N/K tile 约束与累加机制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-gemm-baseline.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "掌握朴素分块 GEMM 的写法",
+            "理解 M/N/K 三重循环的分块顺序",
+            "定位基线实现的性能瓶颈"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "分块循环",
+            "tile 复用",
+            "基线瓶颈分析"
+          ],
+          "order": 2,
+          "practice_task": "阅读 demos/baseline/gemm_basic 的 kernel 源码，修改分块大小（如 128→64），在 CPU 仿真下验证正确性并记录改动点。",
+          "source_files": [
+            "demos/baseline/gemm_basic/README.md",
+            "docs/coding/tutorials/gemm.md"
+          ],
+          "title": "GEMM 基线：从零写一个分块矩阵乘",
+          "topic": "基于 demos/baseline/gemm_basic 与 gemm 教程，理解最朴素的 tile 分块 GEMM 如何组织循环与搬运。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-gemm-performance.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "理解 double buffer 与流水重叠的实现",
+            "掌握多核切分与 L2 利用策略",
+            "学会对照性能数据评估优化收益"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "流水线设计",
+            "多核切分",
+            "性能数据解读"
+          ],
+          "order": 3,
+          "practice_task": "对照 README 的优化说明，找出 kernel 中事件 set/wait 与 double buffer 对应的代码段，画出一个主循环迭代的流水线时序图。",
+          "source_files": [
+            "kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp",
+            "kernels/manual/a2a3/gemm_performance/README.md"
+          ],
+          "title": "高性能 GEMM：gemm_performance 优化全解",
+          "topic": "精读 kernels/manual/a2a3/gemm_performance，理解 double buffer、多核切分、搬运与计算重叠等 tile 级优化手段。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l4-img2col-conv.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "掌握 Img2col 展开指令的用法",
+            "理解 SetFmatrix/SetImg2col 系列配置指令",
+            "读懂一个完整 Conv2d 前向算子"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TImg2col",
+            "SetImg2col/SetFmatrix",
+            "Conv2d 算子"
+          ],
+          "order": 4,
+          "practice_task": "运行或通读 conv2d_forward 的 kernel，修改 padding 参数并手算一层输出尺寸，与程序输出对比。",
+          "source_files": [
+            "include/pto/npu/a2a3/TImg2col.hpp",
+            "include/pto/npu/a2a3/SetImg2colRpt.hpp",
+            "kernels/manual/a2a3/conv2d_forward/README.md"
+          ],
+          "title": "卷积通路：Img2col、SetFmatrix 与 Conv2d Forward",
+          "topic": "讲解卷积扩展指令：TImg2col、SetImg2colRpt/SetImg2colPadding、SetFmatrix，并结合 conv2d_forward 算子理解完整卷积链路。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "filename": "u5-l5-mx-mixed-precision.md",
+          "id": "u5-l5",
+          "learning_goals": [
+            "理解 MX 指令的缩放因子数据布局",
+            "掌握 TMATMUL_MX 与普通 TMATmul 的差异",
+            "能运行并理解 mxfp4/mxfp8 性能 kernel"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "MX 指令语义",
+            "缩放因子布局",
+            "A5 性能实现"
+          ],
+          "order": 5,
+          "practice_task": "对照 docs/isa/TMATMUL_MX.md 与 kernels/manual/a5/matmul_mxfp4_performance，画出 MX matmul 输入（数据+scale）的内存布局图。",
+          "source_files": [
+            "docs/isa/TMATMUL_MX.md",
+            "kernels/manual/a5/matmul_mxfp4_performance",
+            "include/pto/npu/a5/README.md"
+          ],
+          "title": "MX 混合精度矩阵乘：TMATMUL_MX 与 A5 性能实现",
+          "topic": "讲解 MX（microscaling）混合精度指令族 TMATMUL_MX/TGEMV_MX/TQUANT_HIF4，以及 A5 上的 mxfp4/mxfp8 性能算子。"
+        }
+      ],
+      "order": 5,
+      "title": "Cube 矩阵乘与卷积指令"
+    },
+    {
+      "id": "u6",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u6-l1-multicore-syncall.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "理解 AICORE 多核模型与核间同步原语",
+            "掌握 SyncAll 的使用约束",
+            "能设计多核数据切分方案"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "多核模型",
+            "SyncAll",
+            "数据切分"
+          ],
+          "order": 1,
+          "practice_task": "把 Add 示例改造成按行切分到多核的版本（CPU 仿真下单线程模拟多核语义即可），并用 SyncAll 做一次核间同步。",
+          "source_files": [
+            "docs/coding/multi-core-programming.md",
+            "include/pto/npu/a2a3/SyncAll.hpp"
+          ],
+          "title": "多核编程与核间同步：SyncAll",
+          "topic": "讲解多核编程模型、SyncAll 栅栏同步，以及多核间数据切分与规约协议。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-pipeline-parallel.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "理解 MTE/Vector/Cube 各流水线的角色",
+            "掌握用事件构造 double buffer 的模式",
+            "识别流水线气泡"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "流水线模型",
+            "double buffer 模式",
+            "事件驱动调度"
+          ],
+          "order": 2,
+          "practice_task": "在 gemm 基线上手工实现两级流水（load 与 compute 重叠一轮），对比 CPU 仿真下的指令序列变化。",
+          "source_files": [
+            "docs/coding/pipeline-parallel.md",
+            "kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp"
+          ],
+          "title": "流水线并行：事件驱动的 double buffer",
+          "topic": "讲解流水线并行文档与 gemm_performance 中的实际事件编排，理解搬运/计算/写回三段流水的重叠。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l3-performance-optimization.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "掌握 CUBE/MTE/Vector Bound 的判定方法",
+            "掌握 tile 大小/形状/指令排序三个调优维度",
+            "了解内存优化最佳实践"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "瓶颈分类",
+            "调优维度",
+            "内存优化"
+          ],
+          "order": 3,
+          "practice_task": "对 u6-l2 的流水线 gemm 做 tile 形状扫描（至少 3 组），记录结果并判断该 kernel 是 CUBE Bound 还是 MTE Bound。",
+          "source_files": [
+            "docs/coding/opt.md",
+            "docs/coding/performance-best-practices.md",
+            "docs/coding/memory-optimization.md"
+          ],
+          "title": "性能分析与优化方法论",
+          "topic": "总结性能优化路径：瓶颈识别（CUBE/MTE/Vector Bound）、tile 参数调优、内存与搬运优化最佳实践。"
+        }
+      ],
+      "order": 6,
+      "title": "多核、流水线与性能优化"
+    },
+    {
+      "id": "u7",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u7-l1-comm-isa-overview.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "理解通信指令集的三大类能力",
+            "掌握 comm_types 中的核心类型定义",
+            "理解通信指令与计算指令同级的 tile 抽象设计"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "通信分类",
+            "通信类型定义",
+            "驱动多引擎设计"
+          ],
+          "order": 1,
+          "practice_task": "浏览 include/pto/comm/a2a3 目录，把 9 个通信指令头文件按点对点/集合/信号同步分类填表。",
+          "source_files": [
+            "docs/isa/comm/README.md",
+            "include/pto/comm/comm_types.hpp",
+            "include/pto/comm/pto_comm_inst.hpp"
+          ],
+          "title": "通信 ISA 总览：点对点、信号同步与集合通信",
+          "topic": "介绍 PTO 通信扩展指令集的全景：指令分类、tile 级抽象、多数据搬运引擎的驱动方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l2-tget-tput.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "掌握 TGet/TPut 的远端地址与 tile 参数",
+            "理解信号同步原语的握手协议",
+            "能实现一次跨 NPU 的数据搬运+同步"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TGet/TPut",
+            "TTest/TWait",
+            "TNotify"
+          ],
+          "order": 2,
+          "practice_task": "参考 tget_bandwidth 示例，写一段 TGet 读取远端 tile 并用 TWait 等待完成的伪代码，标出每一步依赖的指令。",
+          "source_files": [
+            "include/pto/comm/a2a3/TGet.hpp",
+            "include/pto/comm/a2a3/TPut.hpp",
+            "include/pto/comm/a2a3/TWait.hpp",
+            "include/pto/comm/a2a3/TNotify.hpp"
+          ],
+          "title": "点对点通信与信号同步：TGet/TPut、TNotify/TWait/TTest",
+          "topic": "精读点对点读写指令 TGet/TPut 与信号同步指令 TNotify/TWait/TTest 的语义与实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "filename": "u7-l3-collective-comm.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "掌握集合通信指令的参与方与数据切分语义",
+            "理解 TBroadCast/TReduce 的实现路径",
+            "能选择合适的集合通信原语"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TReduce",
+            "TBroadCast",
+            "TGather/TScatter"
+          ],
+          "order": 3,
+          "practice_task": "设计一个 8 卡 AllReduce 方案：说明你会用 TReduce 还是 TGet+TPut 组合，写出指令序列并说明同步点。",
+          "source_files": [
+            "include/pto/comm/a2a3/TReduce.hpp",
+            "include/pto/comm/a2a3/TBroadCast.hpp",
+            "include/pto/comm/a2a3/TGather.hpp"
+          ],
+          "title": "集合通信：TReduce、TBroadCast、TGather/TScatter",
+          "topic": "讲解集合通信指令族的语义、参与 rank 约束与 A2A3 上的实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "filename": "u7-l4-async-comm.md",
+          "id": "u7-l4",
+          "learning_goals": [
+            "掌握 TGetAsync/TPutAsync 的异步语义",
+            "理解 ccu/sdma/urma 三种异步引擎分工",
+            "会用带宽示例测量与对比同步/异步指令"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "异步指令",
+            "通信引擎",
+            "带宽测量"
+          ],
+          "order": 4,
+          "practice_task": "阅读 tget_bandwidth 的 README 与源码，说明同步 TGET 与 TGET_ASYNC 的数据通路差异，并预测哪种在大块传输下更快。",
+          "source_files": [
+            "include/pto/comm/a2a3/async/TGetAsync.hpp",
+            "include/pto/comm/a2a3/async/TPutAsync.hpp",
+            "kernels/manual/a2a3/tget_bandwidth/README.md"
+          ],
+          "title": "异步通信与通信引擎：TGetAsync/TPutAsync 与 tget_bandwidth",
+          "topic": "讲解异步通信指令与底层 ccu/sdma/urma 引擎抽象，并通过 tget_bandwidth 示例对比同步与异步远读带宽。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l4"
+          ],
+          "filename": "u7-l5-gemm-ar-fusion.md",
+          "id": "u7-l5",
+          "learning_goals": [
+            "理解计算通信重叠的流水线设计",
+            "掌握 gemm_ar 中的通信-计算编排",
+            "能设计一个简单的融合算子"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "融合流水线",
+            "通信-计算重叠",
+            "gemm_ar 源码"
+          ],
+          "order": 5,
+          "practice_task": "画出 gemm_ar 一个主循环迭代中 GEMM 计算与 AllReduce 通信的时间线，标出两者重叠的区域。",
+          "source_files": [
+            "kernels/manual/a2a3/gemm_ar/README.md",
+            "kernels/manual/a2a3/gemm_ar",
+            "include/pto/comm/comm_types.hpp"
+          ],
+          "title": "计算通信融合实战：GEMM + AllReduce 融合算子",
+          "topic": "精读 gemm_ar 融合算子，理解如何在一条算子流水线内重叠 GEMM 计算与 AllReduce 通信。"
+        }
+      ],
+      "order": 7,
+      "title": "通信指令集与计算通信融合"
+    },
+    {
+      "id": "u8",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l3",
+            "u4-l2"
+          ],
+          "filename": "u8-l1-flash-attention.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "掌握 online softmax 的 tile 化实现",
+            "理解 Flash Attention 的分块 K/V 流水",
+            "对照 A2A3 与 A5 两版实现差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "online softmax",
+            "Q/K/V 分块流水",
+            "A5 差异"
+          ],
+          "order": 1,
+          "practice_task": "对照 README 的性能表，解释序列长度从 1024 增长到 32768 时加速比从 2.79x 降到 1.12x 的原因（提示：从 tile 复用率角度分析）。",
+          "source_files": [
+            "kernels/manual/common/flash_atten/README.md",
+            "kernels/manual/a5/flash_atten/README.md"
+          ],
+          "title": "Flash Attention：复杂算子的 tile 级实现",
+          "topic": "以 Flash Attention 为例，把前面学到的 TMatmul、规约、指数运算、流水线组合成一个完整的注意力算子。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1",
+            "u7-l3"
+          ],
+          "filename": "u8-l2-moe-dispatch-combine.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "理解 MoE dispatch/combine 的通信与 token 重排流程",
+            "掌握 dispatch_mega_combine 的融合设计",
+            "理解 pending-credit 一类跨 dispatch 状态同步问题"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "MoE 流程",
+            "token 重排",
+            "融合与同步加固"
+          ],
+          "order": 2,
+          "practice_task": "阅读 moe_dispatch 与 moe_combine 的 README，画出 token 从输入到专家再回来的完整数据流图，标出每一步用到的 PTO 指令类别。",
+          "source_files": [
+            "kernels/manual/a2a3/moe_dispatch/README.md",
+            "kernels/manual/a2a3/moe_combine/README.md",
+            "kernels/manual/a2a3/dispatch_mega_combine/README.md"
+          ],
+          "title": "MoE 通信算子：dispatch/combine 与 mega 融合",
+          "topic": "精读 MoE dispatch/combine 及 dispatch_mega_combine 融合算子，理解 token 重排、跨卡通信与相关同步加固。"
+        }
+      ],
+      "order": 8,
+      "title": "复杂算子实战"
+    },
+    {
+      "id": "u9",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u9-l1-auto-mode.md",
+          "id": "u9-l1",
+          "learning_goals": [
+            "理解 Auto 模式的隐式缓冲分配与同步插入",
+            "掌握 kernel 开发者在 Auto 模式下的规则与限制",
+            "能运行 auto_mode 的 add 示例"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Auto 模式总览",
+            "开发者规则",
+            "auto add 示例"
+          ],
+          "order": 1,
+          "practice_task": "对比 demos/baseline/add 与 demos/auto_mode/baseline/add 的 kernel 源码 diff，列出 Auto 模式替你省掉的三类样板代码。",
+          "source_files": [
+            "docs/auto_mode/Auto_Mode_Overview.md",
+            "docs/auto_mode/Kernel_Developer_Rules_And_Limitations.md",
+            "demos/auto_mode/baseline/add/README.md"
+          ],
+          "title": "Auto Mode 双模式工作流",
+          "topic": "讲解 Auto/Manual 双模式的设计动机，Auto 模式下编译器自动插入 tile 缓冲分配与同步的规则与限制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "filename": "u9-l2-custom-op-integration.md",
+          "id": "u9-l2",
+          "learning_goals": [
+            "掌握自定义算子的目录结构与 host 侧封装",
+            "理解 op_extension 扩展机制",
+            "能把一个 PTO kernel 注册为可调用算子"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "kernel 侧融合",
+            "host 侧封装",
+            "框架集成"
+          ],
+          "order": 2,
+          "practice_task": "仿照 fused_add_relu_mul，实现一个 fused_mul_add kernel（先乘后加），补齐 host 侧封装并在 CPU 仿真下验证。",
+          "source_files": [
+            "kernels/custom/fused_add_relu_mul/fused_add_relu_mul_kernel.cpp",
+            "kernels/custom/fused_add_relu_mul/main.cpp",
+            "docs/coding/framework-integration.md"
+          ],
+          "title": "自定义算子封装与框架集成",
+          "topic": "以 fused_add_relu_mul 为例讲解算子融合写法，以及如何通过 op_extension 把 PTO kernel 接入上层框架。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u9-l3-build-system.md",
+          "id": "u9-l3",
+          "learning_goals": [
+            "理解顶层 CMakeLists 的组织与条件编译",
+            "掌握 build.sh 的 --run_all/--a3/--sim 用法",
+            "会打 wheel 包"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "CMake 结构",
+            "build.sh",
+            "wheel 打包"
+          ],
+          "order": 3,
+          "practice_task": "执行 python3 -m build --wheel 生成安装包，解包检查头文件是否被正确打入 pkg_inc/include 路径。",
+          "source_files": [
+            "CMakeLists.txt",
+            "build.sh",
+            "setup.py",
+            "cmake/README.md"
+          ],
+          "title": "构建体系与打包：CMake、build.sh 与 wheel",
+          "topic": "讲解 CMake 工程、build.sh 一键构建入口以及 Python wheel 打包流程，理解多平台条件编译的组织方式。"
+        }
+      ],
+      "order": 9,
+      "title": "Auto Mode、自定义算子与构建体系"
+    },
+    {
+      "id": "u10",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3",
+            "u3-l4"
+          ],
+          "filename": "u10-l1-test-system.md",
+          "id": "u10-l1",
+          "learning_goals": [
+            "掌握 ST 用例的四件套结构（kernel/main/gen_data/CMakeLists）",
+            "会使用 run_st.py 定向运行单个用例",
+            "理解用例命名与覆盖校验脚本的作用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "用例结构",
+            "run_st.py",
+            "覆盖校验"
+          ],
+          "order": 1,
+          "practice_task": "参照 tadd 用例为 TMul 新建一个 ST 用例目录，包含 kernel、main、gen_data 与 CMakeLists，并用 run_st.py 跑通。",
+          "source_files": [
+            "tests/README.md",
+            "tests/cpu/st/testcase/tadd",
+            "tests/script/run_st.py",
+            "tests/validate_op_coverage.py"
+          ],
+          "title": "测试体系：ST 用例结构与运行脚本",
+          "topic": "讲解 CPU ST 测试的组织方式：testcase 目录约定、gen_data 造数、run_st.py 的过滤与运行机制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "filename": "u10-l2-cpu-simulator.md",
+          "id": "u10-l2",
+          "learning_goals": [
+            "理解 CPU 仿真如何模拟多核与片上存储层级",
+            "掌握 cpu_stub 的桩函数机制",
+            "能用 cpu_sim 调试方法定位问题"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "内存模型",
+            "桩机制",
+            "仿真调试"
+          ],
+          "order": 2,
+          "practice_task": "在 NPUMemoryModel 中找到 GM/UB/L1 各级存储的定义，画出租户隔离前后的地址空间示意图，并用 debug 打印验证一次 TLOAD 的地址翻译。",
+          "source_files": [
+            "include/pto/cpu/NPUMemoryModel.hpp",
+            "include/pto/common/cpu_stub.hpp",
+            "docs/coding/cpu_sim.md"
+          ],
+          "title": "CPU 仿真器内幕：内存模型与桩机制",
+          "topic": "深入 include/pto/cpu，理解 NPUMemoryModel 如何模拟 NPU 存储层级、多核执行与指令桩。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u10-l2"
+          ],
+          "filename": "u10-l3-costmodel.md",
+          "id": "u10-l3",
+          "learning_goals": [
+            "理解 CostModel 与功能仿真的区别",
+            "掌握 perf_sim 流水线建模的组成（pipe_model/latency/recorder）",
+            "会用 run_costmodel.py 估算 kernel 周期"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "轻量 CostModel",
+            "流水线建模",
+            "A5 VF 优化"
+          ],
+          "order": 3,
+          "practice_task": "用 tests/run_costmodel.py 对 gemm 基线跑一次性能模拟，解读报告中各流水段的周期占比，并指出瓶颈段。",
+          "source_files": [
+            "include/pto/costmodel/lightweight_costmodel.hpp",
+            "include/pto/costmodel/perf_sim/pipe_model.hpp",
+            "tests/run_costmodel.py"
+          ],
+          "title": "CostModel 性能模拟：从功能正确到性能可预估",
+          "topic": "讲解 costmodel 目录的轻量性能模型、A5 VF/CCE 造价模型与 perf_sim 流水线仿真，理解如何在无硬件环境下评估性能。"
+        }
+      ],
+      "order": 10,
+      "title": "测试体系与仿真器内幕"
+    },
+    {
+      "id": "u11",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4",
+            "u10-l1"
+          ],
+          "filename": "u11-l1-add-new-instruction.md",
+          "id": "u11-l1",
+          "learning_goals": [
+            "掌握新增指令需要触达的全部文件清单",
+            "理解 CPU/NPU/文档/测试四位一体的开发闭环",
+            "能按贡献规范提交一条新指令"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "实现清单",
+            "文档规范",
+            "测试闭环"
+          ],
+          "order": 1,
+          "practice_task": "以 TAdd 为模板，规划新增一条 THypot（勾股）指令的完整改动清单（cpu 头文件、npu 头文件、ISA 文档、ST 用例），并实现 CPU 仿真部分。",
+          "source_files": [
+            "include/pto/cpu/TAdd.hpp",
+            "include/pto/npu/a2a3/TAdd.hpp",
+            "docs/isa/TADD.md",
+            "CONTRIBUTING.md"
+          ],
+          "title": "二次开发：为 PTO 新增一条指令",
+          "topic": "综合前面的知识，走一遍新增指令的完整流程：CPU 实现、NPU 实现、ISA 文档、ST 用例与清单登记。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u11-l1",
+            "u5-l5"
+          ],
+          "filename": "u11-l2-a5-a6-arch-porting.md",
+          "id": "u11-l2",
+          "learning_goals": [
+            "理解 a2a3/a5/a6 指令目录的组织差异",
+            "掌握 A5 SIMT（engram_simt）等新编程形态",
+            "理解架构取舍（性能 vs 抽象统一）"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "A5/A6 目录组织",
+            "跨代迁移",
+            "架构取舍"
+          ],
+          "order": 2,
+          "practice_task": "对比同一指令（如 TMatmul）在 include/pto/npu/a2a3 与 include/pto/npu/a5（或 a6）下的实现差异，写一份迁移要点清单。",
+          "source_files": [
+            "include/pto/npu/a5/README.md",
+            "include/pto/npu/a6/TMatmul.hpp",
+            "kernels/manual/a5/engram_simt/README.md",
+            "include/pto/npu/a2a3/TMatmul.hpp"
+          ],
+          "title": "架构适配：A5/A6 后端与跨代迁移",
+          "topic": "讲解 npu/a5、npu/a6 后端的组织方式、A5 新特性（SIMT 编程、Int64 扩展、MX 指令）以及跨代迁移时的取舍。"
+        }
+      ],
+      "order": 11,
+      "title": "扩展开发与架构演进"
+    }
+  ]
+}
