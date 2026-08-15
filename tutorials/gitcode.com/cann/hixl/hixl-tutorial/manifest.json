@@ -1,0 +1,1235 @@
+{
+  "head": "8898b0c5ab8fef325d4a978940fc9f97d1e70c47",
+  "project": "hixl",
+  "rationale": "HIXL 是面向昇腾芯片的单边通信库，由底层传输引擎 HIXL Engine（src/hixl，含 engine/cs/fabric_mem/proxy 子模块）、上层 KV Cache 传输接口 LLM-DataDist（src/llm_datadist）以及 pybind11 Python 绑定（src/python）组成。学习路线按\"先跑通、再读懂 API、再深入引擎内部、最后上手高级主题\"设计：单元1 让读者从零构建并运行 quickstart 样例并建立目录地图；单元2 逐一精读 include/hixl 公开 API（生命周期、内存注册、建链、传输）；单元3-5 下沉到 Engine 抽象、client handler 路径、endpoint 生成匹配、proxy 层、CS 通信服务和 FabricMem 模式等核心机制；单元6 沿\"初始化建链→Cache 管理→Push/Pull 传输→data_transfer job→FSM→传输后端\"主线拆解 LLM-DataDist；单元7 覆盖 Python 绑定与 PD 分离端到端样例；单元8 面向专家层讲性能基准、测试体系、profiling、ADXL 旧接口与错误处理。本次增量分析显示 a5dd1de..8898b0c 之间唯一的两次提交（fc0d82d 切换 CCE 集群与 8898b0c 将其完全 revert）净代码变化为空，整个源码树与上次规划时逐字节一致，因此全部讲义保持 keep，无需任何重写或更新。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 HIXL 的定位与典型业务场景（PD 分离、KV Cache 传输）",
+            "区分 HIXL Engine、LLM-DataDist、Python 绑定三个组件职责",
+            "理解单边零拷贝通信与 HCCS/RDMA 多链路概念"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "HIXL Engine",
+            "LLM-DataDist"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README 与 docs/README.md，绘制一张 HIXL 分层架构草图（应用→LLM-DataDist→HIXL Engine→HCCS/RDMA），并用自己的话概括每个核心组件的职责。",
+          "source_files": [
+            "README.md",
+            "AGENTS.md",
+            "docs/README.md",
+            "docs/zh/guide/introduction.md"
+          ],
+          "title": "HIXL 是什么：项目定位、架构与核心概念",
+          "topic": "介绍 HIXL 的项目定位、单边零拷贝通信的核心价值、HIXL Engine 与 LLM-DataDist 两大组件的分工以及典型应用场景。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-build-and-test.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "掌握 build.sh 常用编译参数（--build-type、--asan、--examples）",
+            "了解 CMake 工程组织与输出目录",
+            "会用 tests/run_test.sh 执行 C++ 与 Python 测试"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "build.sh",
+            "tests/run_test.sh"
+          ],
+          "order": 2,
+          "practice_task": "在已加载 CANN 环境的机器上执行 bash build.sh --examples 完成构建，然后运行 bash tests/run_test.sh -s hixl 记录结果；若无昇腾硬件则记录阻塞原因并梳理 build.sh 的完整参数列表。",
+          "source_files": [
+            "build.sh",
+            "CMakeLists.txt",
+            "docs/zh/build.md",
+            "tests/run_test.sh"
+          ],
+          "title": "构建与测试：从源码到可执行样例",
+          "topic": "讲解 CANN 环境准备、build.sh 编译流程、CMake 工程组织方式，以及如何用 tests/run_test.sh 执行 C++ 与 Python 测试。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-quickstart-example.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "理解 server/client 双进程模型与 local_engine/remote_engine 标识格式",
+            "读懂初始化、内存注册、建链、READ 传输、数据校验的完整调用序列",
+            "掌握样例启动方式与常见失败排查"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "HIXL C++ API 调用序列",
+            "server/client 模型"
+          ],
+          "order": 3,
+          "practice_task": "按 docs/zh/quick_start.md 在两张互通 device 上分别启动 server 与 client 跑通 hixl_example_quickstart，再把样例改为传输 4KB 数据并打印校验结果。",
+          "source_files": [
+            "examples/cpp/hixl_example_quickstart.cpp",
+            "docs/zh/quick_start.md",
+            "examples/run_example.sh",
+            "examples/README.md"
+          ],
+          "title": "第一个 HIXL 程序：quickstart 样例精读",
+          "topic": "以 hixl_example_quickstart 为例走通 server/client 双进程启动、READ 传输与数据校验流程，理解 HIXL C++ API 的典型调用序列。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l4-repo-layout-and-api-map.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "记住 include/hixl、include/cs、include/adxl、include/llm_datadist 四组公开头文件边界",
+            "在源码树中快速定位 Engine、CS、FabricMem、LLM-DataDist、Python 绑定实现目录",
+            "了解 HIXL、HIXL_CS、LLM-DataDist、ADXL 四套接口间关系"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "include 目录",
+            "src 目录结构"
+          ],
+          "order": 4,
+          "practice_task": "对照 include/ 与 src/ 目录制作一张接口到实现的映射表（头文件→实现文件→所属组件），并用 docs/zh/api/cpp/brief.md 校对。",
+          "source_files": [
+            "include/hixl/hixl.h",
+            "include/cs/hixl_cs.h",
+            "include/adxl/adxl_engine.h",
+            "include/llm_datadist/llm_datadist.h",
+            "docs/zh/api/cpp/brief.md"
+          ],
+          "title": "目录结构与公开 API 地图",
+          "topic": "梳理仓库目录结构、公开头文件边界（hixl/cs/adxl/llm_datadist）以及接口与实现目录的对应关系。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l5-d2d-d2h-h2d-examples.md",
+          "id": "u1-l5",
+          "learning_goals": [
+            "理解 D2D、D2H、H2D、D2rH 等内存传输路径的含义与适用场景",
+            "对比 quickstart 与 d2rd/d2rh 样例在初始化参数与角色上的差异",
+            "掌握多进程样例的组织方式"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "传输样例",
+            "传输路径"
+          ],
+          "order": 5,
+          "practice_task": "运行 hixl_example_d2rh 与 hixl_example_d2rd_multiproc，对比并记录两者在角色设置、内存注册类型与传输方向上的差异，写出样例调用序列对比表。",
+          "source_files": [
+            "examples/cpp/hixl_example_d2rd.cpp",
+            "examples/cpp/hixl_example_d2rh.cpp",
+            "examples/cpp/hixl_example_d2rd_multiproc.cpp",
+            "examples/README.md"
+          ],
+          "title": "多场景传输样例：D2D/D2H/H2D/D2rH",
+          "topic": "通过 d2rd、d2rh、multiproc 等样例理解不同内存类型与传输方向的用法差异。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "初识 HIXL：定位、构建与运行"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l1-hixl-class-and-lifecycle.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "理解 Hixl 类接口清单与调用前置条件",
+            "掌握 Pimpl 惯用法在 hixl.h 与 hixl_impl.cc 中的使用",
+            "理解 local_engine 标识（ipv4/ipv6、是否带端口决定 server 角色）的语义"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Hixl 类",
+            "HixlImpl"
+          ],
+          "order": 1,
+          "practice_task": "通读 include/hixl/hixl.h 列出全部公开接口并按生命周期、内存、链路、传输、通知五类分组，画出接口调用状态图。",
+          "source_files": [
+            "include/hixl/hixl.h",
+            "src/hixl/engine/hixl_impl.cc",
+            "src/hixl/engine/hixl_options.cc",
+            "src/hixl/engine/hixl_options.h"
+          ],
+          "title": "Hixl 类与初始化流程：Pimpl 背后的实现",
+          "topic": "精读 Hixl 公开类与 HixlImpl 实现，理解 Initialize/Finalize 生命周期、选项解析与 Pimpl 设计。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-hixl-types-and-status.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "掌握 MemType、TransferOp、TransferOpDesc、MemDesc 等关键数据结构的字段含义",
+            "理解 Status 与错误码的判断方式",
+            "理解 AscendString 等基础类型的使用"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "hixl_types.h",
+            "错误码体系"
+          ],
+          "order": 2,
+          "practice_task": "编写一个只依赖头文件的小程序，构造各种 TransferOpDesc 并调用 GetCapability 查询若干 FeatureType，观察返回值。",
+          "source_files": [
+            "include/hixl/hixl_types.h",
+            "docs/zh/api/cpp/HIXL-data-structure.md",
+            "docs/zh/api/cpp/HIXL-error-code.md"
+          ],
+          "title": "核心数据结构与错误码",
+          "topic": "逐个解释 hixl_types.h 中的内存描述、传输描述、状态枚举等数据结构，并对照官方 API 文档理解错误码体系。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-memory-registration.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "理解注册内存对零拷贝传输的意义",
+            "掌握 MemDesc/MemType/MemHandle 的使用方式",
+            "理解 segment 抽象与引擎侧内存登记逻辑"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "内存注册",
+            "segment",
+            "HixlMemStore"
+          ],
+          "order": 3,
+          "practice_task": "基于 quickstart 样例扩展：注册两块不同 MemType 的内存，分别执行传输并对比行为，最后正确执行 DeregisterMem 释放。",
+          "source_files": [
+            "src/hixl/engine/hixl_impl.cc",
+            "src/hixl/common/segment.h",
+            "src/hixl/common/segment.cc",
+            "src/hixl/cs/hixl_mem_store.cc",
+            "examples/cpp/hixl_example_quickstart.cpp"
+          ],
+          "title": "内存注册与解注册：零拷贝的前提",
+          "topic": "讲解 RegisterMem/DeregisterMem 的语义、MemHandle 机制以及引擎内部 segment 与 HixlMemStore 的登记流程。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-connect-and-async.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "掌握同步与异步建链断链接口的使用差异",
+            "理解 AsyncConnectStatus 状态查询机制",
+            "理解 ClientManager 对多条远端链路的管理方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "HixlClient",
+            "ClientManager"
+          ],
+          "order": 4,
+          "practice_task": "改写 quickstart 样例，把同步 Connect 换成 ConnectAsync + GetAsyncConnectStatus 轮询，观察异步建链状态迁移。",
+          "source_files": [
+            "src/hixl/engine/hixl_client.cc",
+            "src/hixl/engine/hixl_client.h",
+            "src/hixl/engine/client_manager.cc",
+            "src/hixl/engine/client_manager.h"
+          ],
+          "title": "建链与断链：Connect/Disconnect 及异步版本",
+          "topic": "分析 Connect/Disconnect/ConnectAsync 等链路管理接口，以及 HixlClient、ClientManager 的实现。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u2-l5-transfer-and-notify.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "掌握 TransferSync 与 TransferAsync/GetTransferStatus 的正确用法",
+            "理解批量 op_descs 的组织方式",
+            "掌握 SendNotify/GetNotifies 通知机制"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "传输接口",
+            "通知机制"
+          ],
+          "order": 5,
+          "practice_task": "编写一个批量异步传输练习：一次 TransferAsync 下发多个 TransferOpDesc，用 GetTransferStatus 轮询直到完成，再校验数据。",
+          "source_files": [
+            "src/hixl/engine/hixl_impl.cc",
+            "src/hixl/engine/hixl_engine.cc",
+            "src/hixl/engine/hixl_client.cc",
+            "examples/cpp/hixl_example_d2rd.cpp"
+          ],
+          "title": "数据传输与通知：TransferSync/Async 与 Notify",
+          "topic": "精读传输主接口与通知接口的实现链路，理解同步/异步传输状态查询机制。"
+        }
+      ],
+      "level": "beginner",
+      "order": 2,
+      "title": "HIXL Engine 公开 API 精读"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u3-l1-engine-abstraction.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "理解 Engine 抽象基类与 CommEngine 的职责划分",
+            "掌握工厂模式在引擎创建中的作用",
+            "理解 HixlEngine/HixlServer 角色划分"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Engine",
+            "CommEngine",
+            "EngineFactory",
+            "HixlEngine",
+            "HixlServer"
+          ],
+          "order": 1,
+          "practice_task": "绘制从 Hixl::Initialize 到具体 Engine 对象创建的调用时序图，标注 factory 选择分支。",
+          "source_files": [
+            "src/hixl/engine/engine.h",
+            "src/hixl/engine/comm_engine.cc",
+            "src/hixl/engine/comm_engine.h",
+            "src/hixl/engine/engine_factory.cc",
+            "src/hixl/engine/hixl_server.cc"
+          ],
+          "title": "Engine 抽象体系与工厂",
+          "topic": "分析 Engine/CommEngine 抽象基类、EngineFactory 工厂以及 HixlEngine 与 HixlServer 的关系。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-client-handler.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 ClientHandler 接口在不同链路类型上的实现差异",
+            "掌握 direct 与 UB 两类 handler 的选路逻辑",
+            "理解 ClientHandlerFactory 与配置 helper 的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ClientHandler",
+            "DirectClientHandler",
+            "UBClientHandler",
+            "ClientHandlerFactory"
+          ],
+          "order": 2,
+          "practice_task": "梳理一次 TransferAsync 调用从 HixlClient 到具体 ClientHandler 的分派路径并画出类图；尝试总结 handler 选择的判断条件。",
+          "source_files": [
+            "src/hixl/engine/client_handler.h",
+            "src/hixl/engine/client_handler_factory.cc",
+            "src/hixl/engine/direct_client_handler.cc",
+            "src/hixl/engine/ub_client_handler.cc"
+          ],
+          "title": "ClientHandler：不同链路的传输处理策略",
+          "topic": "讲解 client_handler 接口体系，对比 DirectClientHandler 与 UBClientHandler 两种实现及其选择机制。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l3-endpoint-generator-matcher.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解 endpoint 标识的生成规则（local_comm_res、rootinfo builder、route conf）",
+            "掌握 EndpointMatcher 的匹配逻辑",
+            "理解通信资源在异构集群中的适配方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "EndpointGenerator",
+            "EndpointMatcher"
+          ],
+          "order": 3,
+          "practice_task": "在源码中找到 endpoint 匹配失败会返回哪个错误码，写一段笔记解释从远端 engine 字符串到可用 endpoint 的完整转换过程。",
+          "source_files": [
+            "src/hixl/engine/endpoint_generator/endpoint_generator.cc",
+            "src/hixl/engine/endpoint_generator/local_comm_res_generator_v1.cc",
+            "src/hixl/engine/endpoint_generator/rootinfo_builder_generator_v1.cc",
+            "src/hixl/engine/endpoint_matcher.cc",
+            "src/hixl/engine/endpoint_matcher.h"
+          ],
+          "title": "Endpoint 生成与匹配",
+          "topic": "分析 endpoint_generator 子模块与 EndpointMatcher，理解通信资源标识如何生成、路由配置如何下发以及端点如何匹配。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l4-connect-pool-executor.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "理解 ConnectPoolExecutor 的任务模型",
+            "掌握线程池与周期任务等公共组件的使用方式",
+            "理解异步建链的并发控制策略"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ConnectPoolExecutor",
+            "ThreadPool",
+            "PeriodicTask"
+          ],
+          "order": 4,
+          "practice_task": "阅读 tests/cpp/hixl 下与 engine 相关的单测，挑选一个并发建链用例分析其断言意图，并写出异步建链的时序说明。",
+          "source_files": [
+            "src/hixl/engine/connect_pool_executor.cc",
+            "src/hixl/engine/connect_pool_executor.h",
+            "src/hixl/common/thread_pool.cc",
+            "src/hixl/common/periodic_task.cc"
+          ],
+          "title": "连接池执行器与线程模型",
+          "topic": "讲解 ConnectPoolExecutor、ThreadPool、PeriodicTask 等并发基础设施如何支撑高并发建链。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l5-proxy-layer.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "理解 proxy 层对底层昇腾系统接口的封装方式",
+            "掌握 dlopen 动态加载与符号解析的容错写法",
+            "理解 proxy 层在跨芯片代际适配中的作用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "AscendHalProxy",
+            "DcmiProxy",
+            "HcommProxy"
+          ],
+          "order": 5,
+          "practice_task": "以 dcmi_proxy 为例写一篇笔记，说明它封装了哪些底层查询能力、在何处被调用，并追踪一个调用点验证。",
+          "source_files": [
+            "src/hixl/proxy/ascend_hal_proxy.cc",
+            "src/hixl/proxy/dcmi_proxy.cc",
+            "src/hixl/proxy/dsmi_proxy.cc",
+            "src/hixl/proxy/hcomm_proxy.cc"
+          ],
+          "title": "Proxy 层：屏蔽昇腾硬件差异",
+          "topic": "分析 ascend_hal/dcmi/dsmi/hccp/hcomm 等 proxy 封装，理解引擎如何屏蔽底层硬件与驱动接口差异。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "Engine 内部机制"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u4-l1-cs-architecture.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "理解 CS 模块的职责边界与 server/client 分工",
+            "掌握 HixlCs 对外接口（include/cs/hixl_cs.h）的能力范围",
+            "理解引擎与 CS 之间的调用关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "HixlCs",
+            "HixlCsServer",
+            "HixlCsClient"
+          ],
+          "order": 1,
+          "practice_task": "画出 CS server 与 CS client 的交互示意图，标注建链与内存注册消息的流向。",
+          "source_files": [
+            "include/cs/hixl_cs.h",
+            "src/hixl/cs/hixl_cs.cc",
+            "src/hixl/cs/hixl_cs_server.cc",
+            "src/hixl/cs/hixl_cs_client.cc"
+          ],
+          "title": "CS 通信服务总体架构",
+          "topic": "讲解 CS（Communication Server/Service）模块的 server/client 架构与在引擎中的位置。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-msg-handler-and-receiver.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解 MsgHandler 的消息分发机制",
+            "掌握连接消息与内存消息的处理流程",
+            "理解 MsgReceiver 的事件循环模型"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "MsgHandler",
+            "ConnMsgHandler",
+            "MemMsgHandler",
+            "MsgReceiver"
+          ],
+          "order": 2,
+          "practice_task": "追踪一次 RegisterMem 触发的 MemMsgHandler 处理流程，写出请求与应答消息的字段流转表。",
+          "source_files": [
+            "src/hixl/cs/msg_handler.cc",
+            "src/hixl/cs/conn_msg_handler.cc",
+            "src/hixl/cs/mem_msg_handler.cc",
+            "src/hixl/cs/msg_receiver.cc",
+            "src/hixl/common/ctrl_msg.h"
+          ],
+          "title": "消息处理器与接收器",
+          "topic": "分析 msg_handler/conn_msg_handler/mem_msg_handler/msg_receiver 的消息分发与处理机制。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-channel-and-transfer-pool.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "理解 Channel 抽象与多链路管理方式",
+            "掌握 TransferPool 对传输任务的调度模型",
+            "理解 Endpoint 与 EndpointStore 的存储结构"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Channel",
+            "TransferPool",
+            "EndpointStore"
+          ],
+          "order": 3,
+          "practice_task": "梳理一条传输请求进入 TransferPool 后的生命周期（入队、执行、完成、回收），画出状态流转图。",
+          "source_files": [
+            "src/hixl/cs/channel.cc",
+            "src/hixl/cs/transfer_pool.cc",
+            "src/hixl/cs/endpoint.cc",
+            "src/hixl/cs/endpoint_store.cc"
+          ],
+          "title": "Channel、TransferPool 与 Endpoint 存储",
+          "topic": "讲解 CS 内部的数据通道、传输任务池与端点存储的组织方式。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l4-cs-config-and-notify.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "理解 GlobalConfig 的配置项与默认值",
+            "理解 Notify 地址解析流程",
+            "理解 host register 与 kernel 加载的作用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "GlobalConfig",
+            "NotifyAddrResolver",
+            "HostRegisterProxy"
+          ],
+          "order": 4,
+          "practice_task": "枚举 global_config.h 中的关键配置项及其默认值，写一份配置调优速查表。",
+          "source_files": [
+            "src/hixl/cs/global_config.cc",
+            "src/hixl/cs/notify_addr_resolver.cc",
+            "src/hixl/cs/host_register_proxy.cc",
+            "src/hixl/cs/load_kernel.cc"
+          ],
+          "title": "CS 全局配置、Notify 解析与内核加载",
+          "topic": "分析 GlobalConfig 配置体系、NotifyAddrResolver 通知地址解析以及 load_kernel 内核加载机制。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "CS 通信服务模块"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u5-l1-fabricmem-overview.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "理解 FabricMem 模式的设计动机与适用场景",
+            "掌握 FabricMemEngine 与基础引擎的关系",
+            "理解 fabric_mem 模块的文件组织"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "FabricMemEngine",
+            "fabric_mem 模块"
+          ],
+          "order": 1,
+          "practice_task": "阅读设计文档并画出 FabricMem 模式下一次 D2D 传输的组件交互图，与普通 HCCS 路径做对比。",
+          "source_files": [
+            "docs/zh/design/FabricMem模式设计.md",
+            "docs/zh/FabricMem.md",
+            "src/hixl/engine/fabric_mem_engine.cc",
+            "src/hixl/fabric_mem/fabric_mem_types.h"
+          ],
+          "title": "FabricMem 模式：概念与设计",
+          "topic": "结合设计文档与 FabricMemEngine 入口，理解超节点内 FabricMem 传输模式的设计思想。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-fabricmem-memory.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "理解 FabricMemAllocator 的内存分配策略",
+            "掌握 SlotPool 传输槽位管理机制",
+            "理解虚拟内存管理器的地址映射方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "FabricMemAllocator",
+            "FabricMemSlotPool",
+            "VirtualMemoryManager"
+          ],
+          "order": 2,
+          "practice_task": "追踪一次 FabricMem 内存注册从 allocator 到 slot pool 的过程，写出关键函数调用链。",
+          "source_files": [
+            "src/hixl/fabric_mem/fabric_mem_allocator.cc",
+            "src/hixl/fabric_mem/fabric_mem_slot_pool.cc",
+            "src/hixl/fabric_mem/virtual_memory_manager.cc",
+            "src/hixl/fabric_mem/fabric_mem_memory.cc"
+          ],
+          "title": "FabricMem 内存体系：分配、槽位与虚拟内存",
+          "topic": "分析 FabricMem 的内存分配器、槽位池与虚拟内存管理三大组件。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-fabricmem-transfer.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "理解 host 与 aicpu 两条传输服务路径的分工",
+            "掌握 channel manager 的通道管理方式",
+            "理解 aicpu dispatcher 的下发机制"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "FabricMemTransferService",
+            "HostTransferService",
+            "AicpuTransferService",
+            "ChannelManager"
+          ],
+          "order": 3,
+          "practice_task": "对比 host 与 aicpu 两条传输路径的触发条件，写一份路径选择决策说明。",
+          "source_files": [
+            "src/hixl/fabric_mem/fabric_mem_transfer_service.cc",
+            "src/hixl/fabric_mem/fabric_mem_host_transfer_service.cc",
+            "src/hixl/fabric_mem/fabric_mem_aicpu_transfer_service.cc",
+            "src/hixl/fabric_mem/fabric_mem_channel_manager.cc",
+            "src/hixl/fabric_mem/fabric_mem_aicpu_dispatcher.cc"
+          ],
+          "title": "FabricMem 传输服务：host 与 aicpu 路径",
+          "topic": "分析 FabricMem 传输服务抽象及 host/aicpu 两种实现。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "filename": "u5-l4-fabricmem-example.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "掌握 FabricMem 模式的使能方式与运行步骤",
+            "理解样例中内存注册与传输的写法差异",
+            "了解 FabricMem 统计信息的查看方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "fabric_mem_d2d 样例",
+            "FabricMemStatistic"
+          ],
+          "order": 4,
+          "practice_task": "运行 examples/cpp/fabric_mem_d2d.cpp，开启统计并记录一次传输的带宽数据；对比相同数据量下普通路径的表现。",
+          "source_files": [
+            "examples/cpp/fabric_mem_d2d.cpp",
+            "src/hixl/fabric_mem/fabric_mem_statistic.cc",
+            "src/hixl/fabric_mem/fabric_mem_config.h",
+            "docs/zh/FabricMem.md"
+          ],
+          "title": "FabricMem 实战：d2d 样例端到端",
+          "topic": "通过 fabric_mem_d2d 样例把 FabricMem 的配置、注册、传输、统计串成完整闭环。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 5,
+      "title": "FabricMem 模式"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u6-l1-llm-datadist-overview.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "理解 LlmDataDist 类的接口全景与 LLM-DataDist 在推理引擎中的作用",
+            "掌握 Prompt/Decoder/Mix 角色模型",
+            "理解 LLM-DataDist 与 HIXL Engine 的分层关系"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "LlmDataDist",
+            "llm_engine_types.h"
+          ],
+          "order": 1,
+          "practice_task": "对照头文件与 API 文档，把 LlmDataDist 的接口按初始化、建链、Cache、传输四组分类并写出每个接口的一句话说明。",
+          "source_files": [
+            "include/llm_datadist/llm_datadist.h",
+            "include/llm_datadist/llm_engine_types.h",
+            "include/llm_datadist/llm_error_codes.h",
+            "docs/zh/api/cpp/LLM-DataDist-interface.md"
+          ],
+          "title": "LLM-DataDist 概述与角色模型",
+          "topic": "介绍 LLM-DataDist 的 KV Cache 传输定位、LlmDataDist 类接口全景以及 Prompt/Decoder 角色模型。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-init-and-link.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "理解 Initialize 选项解析与 V2 实现的组织方式",
+            "掌握 LinkLlmClusters 的建链流程与 rank table 生成机制",
+            "理解 CommEntityManager/CommLinkManager 的管理职责"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "LlmDataDistImpl",
+            "LlmLinkManager",
+            "RankTableGenerator"
+          ],
+          "order": 2,
+          "practice_task": "追踪 SetRole + LinkLlmClusters 的内部调用链，画出 Prompt 与 Decoder 两端的建链时序图。",
+          "source_files": [
+            "src/llm_datadist/api/llm_datadist_impl.cc",
+            "src/llm_datadist/llm_datadist_v2.cc",
+            "src/llm_datadist/link_mgr/comm_link_manager.cc",
+            "src/llm_datadist/common/rank_table_generator.cc",
+            "src/llm_datadist/link_mgr/link_msg_handler.cc"
+          ],
+          "title": "初始化与集群建链",
+          "topic": "分析 llm_datadist_impl.cc 的初始化实现与 link_mgr 模块的集群建链管理。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l3-cache-management.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "理解 CacheDesc/Cache/CacheIndex 等数据结构与 CachePlacement 语义",
+            "掌握 AllocateCache/DeallocateCache/RegisterKvCache 的区别与适用场景",
+            "理解 DataCacheEngine 的查表与生命周期管理"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "CacheManager",
+            "DataCacheEngine",
+            "CommMemManager"
+          ],
+          "order": 3,
+          "practice_task": "编写练习：用 AllocateCache 分配一个 Cache 后通过 RegisterKvCache 注册外部内存，对比两种方式的接口行为并记录差异。",
+          "source_files": [
+            "src/llm_datadist/cache_mgr/cache_manager.cc",
+            "src/llm_datadist/cache_mgr/data_cache_engine.cc",
+            "src/llm_datadist/cache_mgr/comm_mem_manager.cc",
+            "include/llm_datadist/llm_engine_types.h"
+          ],
+          "title": "Cache 管理：分配、注册与查找",
+          "topic": "分析 cache_mgr 模块的 CacheManager、DataCacheEngine 与通信内存管理。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "filename": "u6-l4-push-pull-kv-cache.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "掌握 PushKvCache/PullKvCache 与 Blocks 版本接口的用法差异",
+            "理解 CacheIndex 寻址远端 Cache 的机制",
+            "理解批量 Blocks 传输的地址组织方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Push/Pull 接口",
+            "CacheIndex"
+          ],
+          "order": 4,
+          "practice_task": "阅读 prompt_push_cache_and_blocks 与 decoder_pull_cache_and_blocks 两个样例，写出 Push 与 Pull 两侧的接口调用对照表。",
+          "source_files": [
+            "src/llm_datadist/api/llm_datadist_impl.cc",
+            "include/llm_datadist/llm_datadist.h",
+            "examples/cpp/prompt_push_cache_and_blocks.cpp",
+            "examples/cpp/decoder_pull_cache_and_blocks.cpp"
+          ],
+          "title": "KV Cache 传输：Push/Pull 接口",
+          "topic": "精读 Push/Pull 系列 KV Cache 传输接口的实现与语义。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "filename": "u6-l5-data-transfer-jobs.md",
+          "id": "u6-l5",
+          "learning_goals": [
+            "理解 DataTransferJob 的任务抽象与 D2D/D2H/H2D 三类 job 的差异",
+            "掌握 layer_wise 分层传输的实现思路",
+            "理解 DataTransferClient 的任务编排方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DataTransferJob",
+            "D2DDataTransferJob",
+            "LayerWiseTransferJob",
+            "DataTransferClient"
+          ],
+          "order": 5,
+          "practice_task": "以一次 PullKvCache 为入口，画出其拆分为 DataTransferJob 并执行的调用序列图。",
+          "source_files": [
+            "src/llm_datadist/data_transfer/data_transfer_client.cc",
+            "src/llm_datadist/data_transfer/d2d_data_transfer_job.cc",
+            "src/llm_datadist/data_transfer/d2h_data_transfer_job.cc",
+            "src/llm_datadist/data_transfer/layer_wise_transfer_job.cc",
+            "src/llm_datadist/data_transfer/data_transfer_job.h"
+          ],
+          "title": "DataTransfer Job 体系",
+          "topic": "分析 data_transfer 模块中 D2D/D2H/H2D 与 layer_wise 各类传输任务的实现。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l5"
+          ],
+          "filename": "u6-l6-fsm.md",
+          "id": "u6-l6",
+          "learning_goals": [
+            "理解 StateManager 驱动的状态迁移机制",
+            "掌握 idle/send/receive 三态的进入条件与职责",
+            "理解状态机在角色切换（switch roles）中的作用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "StateManager",
+            "IdleState",
+            "SendState",
+            "ReceiveState"
+          ],
+          "order": 6,
+          "practice_task": "结合 decoder_switch_roles/prompt_switch_roles 样例，画出角色切换时两个实例状态机的迁移图。",
+          "source_files": [
+            "src/llm_datadist/fsm/state_manager.cc",
+            "src/llm_datadist/fsm/idle_state.cc",
+            "src/llm_datadist/fsm/send_state.cc",
+            "src/llm_datadist/fsm/receive_state.cc",
+            "examples/cpp/decoder_switch_roles.cpp"
+          ],
+          "title": "FSM：发送/接收状态机",
+          "topic": "分析 llm_datadist 的 fsm 模块如何用状态机管理传输会话。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "filename": "u6-l7-transfer-engine-backend.md",
+          "id": "u6-l7",
+          "learning_goals": [
+            "理解 TransferEngine 抽象与 HIXL 传输后端的适配方式",
+            "掌握 CommAdapter 的桥接职责",
+            "理解 adxl_inner_engine 的历史角色与 buffer_transfer_service 的关系"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "TransferEngine",
+            "HixlTransferEngine",
+            "CommAdapter",
+            "AdxlInnerEngine"
+          ],
+          "order": 7,
+          "practice_task": "画图说明 LlmDataDist→TransferEngine→HIXL Engine 的适配层次，并结合设计文档说明接入 HIXL 后端的原因。",
+          "source_files": [
+            "src/llm_datadist/transfer_engine/transfer_engine.h",
+            "src/llm_datadist/transfer_engine/hixl_transfer_engine.cc",
+            "src/llm_datadist/comm_adapter/comm_adapter.cc",
+            "src/llm_datadist/adxl/adxl_inner_engine.cc",
+            "docs/zh/design/llm-datadist_supporting_the_hixl_transfer_backend.md"
+          ],
+          "title": "传输后端：TransferEngine 与 HIXL 适配",
+          "topic": "分析 transfer_engine 后端抽象、comm_adapter 桥接以及 HIXL 后端的实现。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "filename": "u6-l8-memory-subsystem.md",
+          "id": "u6-l8",
+          "learning_goals": [
+            "理解 LLM-DataDist 自研内存子系统的分层（allocator/span/type）",
+            "掌握 scalable allocator 与 span 伙伴链接的管理方式",
+            "理解内存池在 Cache 分配中的应用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ScalableAllocator",
+            "SpanLayer",
+            "memory 子系统"
+          ],
+          "order": 8,
+          "practice_task": "梳理一次 Cache 内存分配从 scalable_allocator 到 span_layer 的调用链，并解释 page span 的复用机制。",
+          "source_files": [
+            "src/llm_datadist/memory/allocator/scalable_allocator.cc",
+            "src/llm_datadist/memory/allocator/memory_pool.h",
+            "src/llm_datadist/memory/span/span_layer.cc",
+            "src/llm_datadist/memory/span/page_span.cc",
+            "src/llm_datadist/common/llm_mem_pool.cc"
+          ],
+          "title": "LLM-DataDist 内存子系统",
+          "topic": "分析 memory 子系统的分层分配器与 span 管理。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 6,
+      "title": "LLM-DataDist：KV Cache 传输"
+    },
+    {
+      "id": "u7",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u7-l1-python-binding-hixl.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "理解 pybind11 绑定代码的组织方式",
+            "掌握 Python 侧 HIXL 接口与 C++ 接口的映射关系",
+            "掌握 hixl Python 包的构建与安装方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "hixl_py 绑定",
+            "whl 打包"
+          ],
+          "order": 1,
+          "practice_task": "阅读 hixl_py.cc 后列出 Python 侧可用的类与方法，运行 examples/python/hixl_d2rd_multiproc_sample.py 验证绑定可用。",
+          "source_files": [
+            "src/python/hixl_py/hixl_py.cc",
+            "src/python/hixl_py/hixl_py.h",
+            "src/python/CMakeLists.txt",
+            "examples/python/hixl_d2rd_multiproc_sample.py"
+          ],
+          "title": "HIXL Python 绑定",
+          "topic": "分析 src/python/hixl_py 的 pybind11 绑定实现与 whl 打包方式。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u7-l2-python-llm-datadist.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "掌握 LLMDataDist、CacheManager 等 Python 类的用法",
+            "理解 Python 异步传输样例的组织方式",
+            "会查阅 Python API 文档定位接口语义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "llm_datadist Python 包",
+            "Python API 文档"
+          ],
+          "order": 2,
+          "practice_task": "运行 pull_cache_sample.py 与 transfer_cache_async_sample.py，对比同步 Pull 与异步传输的接口差异并记录输出。",
+          "source_files": [
+            "src/python/llm_datadist/__init__.py",
+            "src/python/llm_datadist/llm_datadist",
+            "examples/python/pull_cache_sample.py",
+            "examples/python/transfer_cache_async_sample.py",
+            "docs/zh/api/python/LLMDataDist.md"
+          ],
+          "title": "LLM-DataDist Python 接口",
+          "topic": "讲解 LLM-DataDist 的 Python 包结构与主要类，配合样例与 API 文档学习。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "filename": "u7-l3-pd-disjoint-example.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "理解 PD 分离架构中 Prompt 与 Decoder 的协作流程",
+            "掌握角色设置、建链、Push/Pull、角色切换的端到端时序",
+            "理解 transfer backend 样例的接入方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "PD 分离",
+            "prompt/decoder 样例"
+          ],
+          "order": 3,
+          "practice_task": "跑通 prompt_push_cache_and_blocks + decoder_pull_cache_and_blocks 双进程样例，并把传输改为 blocks 粒度重跑，记录耗时差异。",
+          "source_files": [
+            "examples/cpp/prompt_push_cache_and_blocks.cpp",
+            "examples/cpp/decoder_pull_cache_and_blocks.cpp",
+            "examples/cpp/prompt_switch_roles.cpp",
+            "examples/python/hixl_transfer_backend_sample.py",
+            "examples/README.md"
+          ],
+          "title": "PD 分离端到端：Prompt/Decoder 双进程样例",
+          "topic": "以 Prompt/Decoder 成对样例串起 PD 分离场景下 KV Cache 的完整传输流程。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 7,
+      "title": "Python 绑定与端到端样例"
+    },
+    {
+      "id": "u8",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u8-l1-benchmarks.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "掌握 run_all_bench.sh 与 run_all_benchmarks.py 的使用方式",
+            "理解 comm_benchmark 与 kv_benchmark 两类基准的区别",
+            "学会解读带宽/时延指标并定位性能瓶颈"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "comm_benchmark",
+            "kv_benchmark",
+            "性能文档"
+          ],
+          "order": 1,
+          "practice_task": "在测试环境运行一次 comm benchmark，记录不同消息 size 下的带宽，并与 benchmarks/performance.md 中数据对比分析。",
+          "source_files": [
+            "benchmarks/run_all_bench.sh",
+            "benchmarks/run_all_benchmarks.py",
+            "benchmarks/comm_benchmark/hixl_comm_bench.cpp",
+            "benchmarks/kv_benchmark/CMakeLists.txt",
+            "benchmarks/performance.md"
+          ],
+          "title": "性能基准测试",
+          "topic": "讲解 benchmarks 目录的通信基准与 KV 基准的构建、运行与结果解读。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u8-l2-test-system.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "理解 tests 目录的 suite 划分（adxl/llm_datadist/hixl/ops 等）",
+            "掌握 gtest 单测的组织与公共测试工具",
+            "学会为新功能补充单测"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "gtest 单测",
+            "run_test.sh"
+          ],
+          "order": 2,
+          "practice_task": "挑选 tests/cpp/llm_datadist/llm_datadist_v2_api_unittest.cc 中一个用例，分析其Arrange-Act-Assert结构，并模仿写出一个针对新场景的用例骨架。",
+          "source_files": [
+            "tests/run_test.sh",
+            "tests/cpp/CMakeLists.txt",
+            "tests/cpp/llm_datadist/llm_datadist_v2_api_unittest.cc",
+            "tests/cpp/adxl/adxl_engine_unittest.cc",
+            "tests/cpp/hixl/CMakeLists.txt"
+          ],
+          "title": "测试体系与单测编写",
+          "topic": "分析 C++/Python 测试工程的组织方式，学会阅读和编写单元测试。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u8-l3-profiling-and-statistics.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "理解 prof_api_reg 的性能数据上报机制",
+            "掌握引擎侧与 LLM-DataDist 侧统计组件的使用",
+            "学会在传输链路上埋点定位耗时"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "prof_api_reg",
+            "统计管理器"
+          ],
+          "order": 3,
+          "practice_task": "在一条传输路径上添加（或仅定位）统计埋点，运行样例后收集统计输出，写一份传输耗时分解报告。",
+          "source_files": [
+            "src/hixl/profiling/prof_api_reg.cc",
+            "src/hixl/common/statistic_utils.h",
+            "src/llm_datadist/comm_statistic_manager.cc",
+            "src/llm_datadist/adxl/statistic_manager.cc"
+          ],
+          "title": "Profiling 与统计",
+          "topic": "分析 profiling 注册与两级统计管理器，掌握性能数据的采集方法。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l7"
+          ],
+          "filename": "u8-l4-adxl-deprecated.md",
+          "id": "u8-l4",
+          "learning_goals": [
+            "了解 ADXL 接口的历史定位与废弃原因",
+            "掌握 buffer_transfer_service/channel_manager 等 ADXL 内部机制",
+            "能把旧 ADXL 调用映射到新的 HIXL/LLM-DataDist 接口"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "AdxlEngine",
+            "BufferTransferService",
+            "ChannelManager",
+            "TransferSlotPool"
+          ],
+          "order": 4,
+          "practice_task": "对照 deprecated_ADXL-interface.md 与 include/hixl/hixl.h，把 ADXL 的注册、建链、传输接口逐一映射到 HIXL 新接口并写出迁移清单。",
+          "source_files": [
+            "include/adxl/adxl_engine.h",
+            "src/llm_datadist/adxl/buffer_transfer_service.cc",
+            "src/llm_datadist/adxl/channel_manager.cc",
+            "src/llm_datadist/adxl/transfer_slot_pool.cc",
+            "docs/zh/api/cpp/deprecated_ADXL-interface.md"
+          ],
+          "title": "ADXL 接口体系与新旧迁移",
+          "topic": "梳理已废弃的 ADXL 接口与其内部机制，帮助读者完成向 HIXL 新接口的迁移。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u8-l5-error-handling-and-conventions.md",
+          "id": "u8-l5",
+          "learning_goals": [
+            "掌握 HIXL 与 LLM-DataDist 两级错误码的分层规则",
+            "理解 hixl_checker/llm_checker 宏的统一检查风格",
+            "理解日志组件与初始化竞态防护等健壮性设计"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "错误码体系",
+            "checker 宏",
+            "日志组件"
+          ],
+          "order": 5,
+          "practice_task": "从源码中找出三个不同类型的错误返回路径，追踪错误码如何从底层传递到用户接口，写一篇错误处理机制笔记。",
+          "source_files": [
+            "include/llm_datadist/llm_error_codes.h",
+            "src/llm_datadist/llm_error_codes.cc",
+            "src/hixl/common/hixl_checker.h",
+            "src/llm_datadist/common/llm_checker.h",
+            "src/hixl/common/hixl_log.h"
+          ],
+          "title": "错误处理、Checker 宏与代码规范",
+          "topic": "总结错误码体系、检查宏、日志组件与仓库代码规范，帮助读者安全地二次开发。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u8-l5"
+          ],
+          "filename": "u8-l6-contribution-workflow.md",
+          "id": "u8-l6",
+          "learning_goals": [
+            "理解提交前必须通过的检查（pre-commit、编译、测试）",
+            "掌握贡献文档与 classify_rule 的约束",
+            "能规划一次完整的源码修改到提交流程"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "贡献流程",
+            "pre-commit",
+            "文档导读"
+          ],
+          "order": 6,
+          "practice_task": "完成一次模拟贡献：修改一处注释后运行 pre-commit run --files 与相关编译测试，记录整个提交流程 checklist。",
+          "source_files": [
+            "CONTRIBUTING.md",
+            "AGENTS.md",
+            "requirements.txt",
+            "docs/zh/guide/README.md"
+          ],
+          "title": "二次开发与贡献流程",
+          "topic": "讲解仓库贡献规范、pre-commit 检查与从修改到提交的完整流程。"
+        }
+      ],
+      "level": "advanced",
+      "order": 8,
+      "title": "高级主题：性能、测试与二次开发"
+    }
+  ]
+}
