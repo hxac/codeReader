@@ -39459,7 +39459,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/gitcode.com/cann/pto-isa/pto-isa-tutorial",
       "last_head": "8aacb8e0a0c636d291f2e4219d231b52e8003a8a",
-      "last_run_at": "2026-08-15T23:02:56Z",
+      "last_run_at": "2026-08-16T15:51:24Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "gitcode.com/cann/pyasc": {
@@ -39706,13 +39706,13 @@
       "mode": "full",
       "tutorial_path": "tutorials/gitcode.com/cann/pyasc/pyasc-tutorial",
       "last_head": "739ef7e242c12c6a58e0ec7ec429e610b7ee988f",
-      "last_run_at": "2026-08-15T23:02:56Z",
+      "last_run_at": "2026-08-16T15:51:24Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "gitcode.com/cann/pypto": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.2[1m]\",\"query_source\":\"generate_session_title\"}\nBudget limit reached ($3.02 of $3); stopping background agents.\n\n{\"is_error\":true,\"duration_api_ms\":320387,\"num_turns\":1,\"stop_reason\":null,\"session_id\":\"0de00675-9435-4303-988b-f832df",
-      "last_run_at": "2026-08-15T23:02:56Z"
+      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.2[1m]\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"4f2dd6b7-2f5c-4887-9b84-c9dd3ae4aecb\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"th",
+      "last_run_at": "2026-08-16T15:51:24Z"
     },
     "gitcode.com/cann/runtime": {},
     "gitcode.com/cann/shmem": {},
@@ -51503,7 +51503,7 @@
     "ai-dynamo/dynamo": {},
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-15T23:02:56Z"
+      "last_run_at": "2026-08-16T15:51:24Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
