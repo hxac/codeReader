@@ -39160,21 +39160,22 @@
           "error": null
         },
         "u7-l4": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.2[1m]\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session"
+          "cost": 1.09548,
+          "error": null
         }
       },
       "manifest_head": "b2adacfe384b910c6965ca19236e42152674a87c",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/gitcode.com/cann/ops-transformer/ops-transformer-tutorial",
       "last_head": "b2adacfe384b910c6965ca19236e42152674a87c",
-      "last_run_at": "2026-08-15T18:02:46Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-08-15T23:02:56Z",
+      "last_error": null,
+      "abandoned": []
     },
     "gitcode.com/cann/pto-isa": {
       "prompt_hash": "b21aef51792b02df",
@@ -39369,51 +39370,67 @@
           "error": null
         },
         "u7-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.2084620000000004,
+          "error": null
+        },
+        "u7-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.91867,
+          "error": null
+        },
+        "u7-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.4758020000000003,
+          "error": null
+        },
+        "u8-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.6902340000000002,
+          "error": null
+        },
+        "u8-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.801968,
+          "error": null
+        },
+        "u9-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.542356,
+          "error": null
+        },
+        "u9-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.43911,
+          "error": null
+        },
+        "u9-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.562809,
+          "error": null
+        },
+        "u10-l1": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
           "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.2[1m]\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session"
-        },
-        "u7-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u10-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
         },
         "u10-l2": {
           "status": "pending",
@@ -39442,7 +39459,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/gitcode.com/cann/pto-isa/pto-isa-tutorial",
       "last_head": "8aacb8e0a0c636d291f2e4219d231b52e8003a8a",
-      "last_run_at": "2026-08-15T18:02:46Z",
+      "last_run_at": "2026-08-15T23:02:56Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "gitcode.com/cann/pyasc": {
@@ -39463,56 +39480,74 @@
           "error": null
         },
         "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.540723,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.281838,
+          "error": null
+        },
+        "u1-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.805811,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.4282609999999998,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.8067429999999998,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.326859,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.855344,
+          "error": null
+        },
+        "u2-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.813313,
+          "error": null
+        },
+        "u2-l6": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.6131189999999997,
+          "error": null
+        },
+        "u3-l1": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
           "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.2[1m]\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session"
-        },
-        "u1-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u1-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u2-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u2-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u2-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u2-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u2-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u2-l6": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
         },
         "u3-l2": {
           "status": "pending",
@@ -39671,10 +39706,14 @@
       "mode": "full",
       "tutorial_path": "tutorials/gitcode.com/cann/pyasc/pyasc-tutorial",
       "last_head": "739ef7e242c12c6a58e0ec7ec429e610b7ee988f",
-      "last_run_at": "2026-08-15T18:02:46Z",
+      "last_run_at": "2026-08-15T23:02:56Z",
       "last_error": "quota exhausted; will resume next window"
     },
-    "gitcode.com/cann/pypto": {},
+    "gitcode.com/cann/pypto": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.2[1m]\",\"query_source\":\"generate_session_title\"}\nBudget limit reached ($3.02 of $3); stopping background agents.\n\n{\"is_error\":true,\"duration_api_ms\":320387,\"num_turns\":1,\"stop_reason\":null,\"session_id\":\"0de00675-9435-4303-988b-f832df",
+      "last_run_at": "2026-08-15T23:02:56Z"
+    },
     "gitcode.com/cann/runtime": {},
     "gitcode.com/cann/shmem": {},
     "gitcode.com/cann/sip": {},
@@ -51464,7 +51503,7 @@
     "ai-dynamo/dynamo": {},
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-15T18:02:46Z"
+      "last_run_at": "2026-08-15T23:02:56Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
