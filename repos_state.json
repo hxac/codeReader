@@ -39426,41 +39426,50 @@
           "error": null
         },
         "u10-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.2[1m]\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session"
+          "cost": 2.398495,
+          "error": null
         },
         "u10-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 2.4422770000000003,
+          "error": null
         },
         "u10-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 3.176101,
+          "error": null
         },
         "u11-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 2.425877,
+          "error": null
         },
         "u11-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 2.8576079999999995,
+          "error": null
         }
       },
       "manifest_head": "8aacb8e0a0c636d291f2e4219d231b52e8003a8a",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/gitcode.com/cann/pto-isa/pto-isa-tutorial",
       "last_head": "8aacb8e0a0c636d291f2e4219d231b52e8003a8a",
-      "last_run_at": "2026-08-16T15:51:24Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-08-16T18:02:57Z",
+      "last_error": null,
+      "abandoned": []
     },
     "gitcode.com/cann/pyasc": {
       "prompt_hash": "b21aef51792b02df",
@@ -39543,71 +39552,95 @@
           "error": null
         },
         "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.296038,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.265622,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.713584,
+          "error": null
+        },
+        "u3-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.5840520000000002,
+          "error": null
+        },
+        "u3-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.4545800000000002,
+          "error": null
+        },
+        "u3-l6": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.58127,
+          "error": null
+        },
+        "u3-l7": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.0156970000000003,
+          "error": null
+        },
+        "u3-l8": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.2844750000000003,
+          "error": null
+        },
+        "u4-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.294187,
+          "error": null
+        },
+        "u4-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.4473310000000001,
+          "error": null
+        },
+        "u4-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.4492130000000008,
+          "error": null
+        },
+        "u4-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.9016359999999999,
+          "error": null
+        },
+        "u4-l5": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
           "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.2[1m]\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session"
-        },
-        "u3-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l6": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l7": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l8": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
         },
         "u5-l1": {
           "status": "pending",
@@ -39706,15 +39739,19 @@
       "mode": "full",
       "tutorial_path": "tutorials/gitcode.com/cann/pyasc/pyasc-tutorial",
       "last_head": "739ef7e242c12c6a58e0ec7ec429e610b7ee988f",
-      "last_run_at": "2026-08-16T15:51:24Z",
+      "last_run_at": "2026-08-16T18:02:57Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "gitcode.com/cann/pypto": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.2[1m]\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"4f2dd6b7-2f5c-4887-9b84-c9dd3ae4aecb\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"th",
-      "last_run_at": "2026-08-16T15:51:24Z"
+      "last_error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.2[1m]\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":389376,\"num_turns\":18,\"stop_reason\":\"tool_use\",\"session_id\":\"eed98aa8-c554-44de-9ecd-dc014af2bc44\",\"total_cost_usd\":3.045991999999999,\"usage\":{\"inpu",
+      "last_run_at": "2026-08-16T18:02:57Z"
     },
-    "gitcode.com/cann/runtime": {},
+    "gitcode.com/cann/runtime": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\nIgnoring 35 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects[\"/home/runner/work/codeReader/codeReader/work/gitcode.com-cann-runtime\"].hasTrustDialogAccept",
+      "last_run_at": "2026-08-16T18:02:57Z"
+    },
     "gitcode.com/cann/shmem": {},
     "gitcode.com/cann/sip": {},
     "sgl-project/mini-sglang": {
@@ -51503,7 +51540,7 @@
     "ai-dynamo/dynamo": {},
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-16T15:51:24Z"
+      "last_run_at": "2026-08-16T18:02:57Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
