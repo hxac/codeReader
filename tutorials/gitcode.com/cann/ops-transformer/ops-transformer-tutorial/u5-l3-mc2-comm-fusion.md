@@ -1,0 +1,440 @@
+# mc2 模块：通信计算融合算子
+
+## 1. 本讲目标
+
+学完本讲，你应该能够：
+
+1. 说清楚「通信-计算融合算子」解决什么问题：为什么不先做一个 MatMul 算子、再做一个 AllReduce 算子，而要把两者揉进同一个 kernel。
+2. 掌握 `matmul_all_reduce` 算子的版本组织方式：base / V2 / V3 / quant 系列 / weight_quant 系列共 10 个 aclnn 入口如何共享一个 inner 实现与一套 util 校验。
+3. 理解 HCCL 集合通信在算子中的接入方式：`group` 通信域字符串从哪来、`commMode`（ai_cpu / ccu）如何按芯片代际分流。
+4. 了解 `mc2/common` 公共库的分层，以及 mc2 示例与普通 aclnn 示例在构建链接上的区别（`-lhccl`）。
+
+本讲承接 u3-l2（common 库与 fallback 机制——mc2 算子正是 fallback 机制的最大受益者）和 u5-l1（MoE 路由链路——本讲之后将在 u5-l4 进入分布式 MoE 的 dispatch/combine）。
+
+## 2. 前置知识
+
+**集合通信（Collective Communication）**：多卡训练时，各张 NPU 之间需要交换数据。最常用的原语有：
+
+- **AllGather**：每张卡各自持有一份数据的一部分，通信结束后每张卡都拿到所有人的数据拼接结果。
+- **AllReduce**：每张卡各持有一个同形状张量，通信结束后每张卡都拿到所有卡数据的按元素求和（或其他规约）。
+
+例如张量并行（Tensor Parallelism）下，一层线性层的输出在各卡上是局部的，必须做一次 AllReduce 求和才能得到完整输出。
+
+**HCCL**：华为集合通信库（Huawei Collective Communication Library），是昇腾上对应 NCCL 的角色。它提供 `HcclCommInitAll`（建通信域）、`HcclGetCommName`（取通信域名字符串）、`HcclCommDestroy`（销毁）等 C 接口。注意一个关键设计：**本仓库算子接收的不是 HcclComm 句柄，而是通信域的名字符串 `group`**，框架在执行期凭名字找到对应通信域。
+
+**通信-计算融合（通算融合，mc2）**：不融合时，「MatMul 写回全局内存 → AllReduce 读出、求和、写回 → 下一步读出」至少要往返全局内存三次，且通信引擎（或 AICPU 通信服务）在与计算核交接数据时必须等对方整段完成。融合算子把矩阵乘按块切分，**算完一块就交给通信流水线发一块**，计算与通信像工厂两条并行流水线一样重叠执行，既省访存又隐藏通信延迟。mc2 目录名即来源于此（通信 + 计算二合一），仓库文档中称这类算子为「通算融合 MC2 算子」。
+
+**通信服务器类型（HcclServerType）与 commMode**：AllReduce 的通信服务可以跑在不同引擎上。本讲源码中出现两种 `commMode`：`ai_cpu`（由 AICPU 核充当通信服务器）和 `ccu`（A5/Ascend 950 上新增的专用通信控制单元）。老芯片只支持前者。
+
+如果你对「aclnn 两段式 API」「aclTensor」「tiling」这些词已经陌生，请先回看 u3-l1 与 u2-l2。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+| --- | --- |
+| `mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce.cpp` | 基础版 aclnn 入口（两段式），本讲主线 |
+| `mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce_v2.cpp` | V2 入口：新增 x3 残差输入 |
+| `mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce_v3.cpp` | V3 入口：新增 commMode 参数，支持 ccu |
+| `mc2/matmul_all_reduce/op_api/aclnn_quant_matmul_all_reduce.cpp` 等 | 全量化系列入口（V1~V5） |
+| `mc2/matmul_all_reduce/op_api/aclnn_weight_quant_matmul_all_reduce.cpp` 等 | 权重量化（伪量化）系列入口（V1/V2） |
+| `mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.cpp/.h` | 全家族共享的参数校验与工具函数 |
+| `mc2/matmul_all_reduce/op_host/matmul_all_reduce_def.cpp` | 算子原型注册，含 MC2 通信域绑定 |
+| `mc2/all_gather_matmul/README.md` | 姊妹算子 AllGatherMatmul 的接口文档 |
+| `mc2/common/` | mc2 域公共库（op_api/op_host/op_kernel/utils 四层） |
+| `examples/mc2/all_gather_add/examples/test_aclnn_all_gather_add.cpp` | 双卡 mc2 算子示例，演示 HCCL 通信域建立 |
+| `build.sh` | `--run_example` 对 mc2 示例追加 `-lhccl` 链接 |
+
+一个先说在前面的事实：入口文件里 `#include "aclnnInner_matmul_all_reduce.h"` 声明的 `aclnnInnerMatmulAllReduceGetWorkspaceSize` / `aclnnInnerMatmulAllReduce` **不在本仓库中**——它由安装的 CANN 包中的 nnopbase 组件提供（`libnnopbase.so`，build.sh 示例链接行里的 `-lnnopbase` 就是它）。也就是说，本仓库交付的是「前台 + 校验 + 参数翻译」，真正把 MatMul 块和通信流编进同一个 kernel 的 executor 构造在 CANN 底座库里。这一点读代码时必须知道，否则会找不到函数体。
+
+## 4. 核心概念与源码讲解
+
+### 4.1 通信融合算子：mc2 域的收益模型与算子地图
+
+#### 4.1.1 概念说明
+
+mc2 目录下有约 40 个算子，全部围绕「把一次集合通信和一段矩阵计算（或 elementwise 计算）放进同一次 kernel 下发」展开。以 `matmul_all_reduce` 为例，它一次完成：
+
+\[ output = AllReduce(x_1 \cdot x_2 + bias + x_3) \]
+
+收益来自三处：
+
+1. **访存**：中间结果 \( x_1 x_2 \) 不落全局内存，算完一块直接送通信。
+2. **重叠**：通信切片（属性 `commTurn`，即总数据量 / 单次通信量）让通信与后续块的矩阵乘并行。
+3. **启动开销**：两次 kernel 下发合并为一次。
+
+姊妹算子 `all_gather_matmul` 则把方向反过来：先 AllGather 再矩阵乘，其 README 给出的公式是 \( y = AllGather(x_1) \cdot x_2 + bias \)，输出 shape 变为 `(m * rank_size, n)`——这正是张量并行里「列切分权重、前向聚合激活」的经典形态。
+
+#### 4.1.2 核心流程
+
+mc2 域算子按「通信原语 × 计算形态」二维展开：
+
+```text
+通信原语:  AllReduce / AllGather / ReduceScatter / AllToAll(v) / dispatch-combine(MoE 专用)
+计算形态:  MatMul / GroupedMatMul(MoE 多专家) / Add / Add+RMSNorm / quant-dequant
+           ↓ 组合出 ↓
+matmul_all_reduce          matmul_reduce_scatter      all_gather_matmul(_v2)
+grouped_mat_mul_all_reduce quant_all_reduce           matmul_all_reduce_add_rms_norm
+moe_distribute_dispatch/combine (+setup/teardown)     distribute_barrier ...
+```
+
+这些算子大多有一条共同的约束（见 `all_gather_matmul/README.md` 约束节）：链路只支持 HCCS（卡间高速互联），例如 A2 仅支持 all mesh 组网 2/4/8 卡，A3 支持 double ring 组网 2~32 卡——通算融合依赖极低时延的卡间直连，这也是它不跑在普通以太网组网上的原因。
+
+#### 4.1.3 源码精读
+
+先看 AllGatherMatmul 的功能定义与 group 参数说明：
+
+- [mc2/all_gather_matmul/README.md:13-22](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/all_gather_matmul/README.md#L13-L22)：算子功能「完成 AllGather 通信与 MatMul 计算融合」，公式 \( y=AllGather(x1)@x2+bias \)，并额外输出 `gatherOut`（聚合结果本身也是有用输出）。
+- [mc2/all_gather_matmul/README.md:78-83](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/all_gather_matmul/README.md#L78-L83)：`group` 属性的官方解释——Host 侧标识通信域的字符串，须通过 HCCL 接口 `HcclGetCommName(HcclComm comm, char* commName)` 获取，commName 即 group。这是「算子只收字符串、不收句柄」设计的文档证据。
+- [mc2/all_gather_matmul/README.md:106-146](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/all_gather_matmul/README.md#L106-L146)：约束说明——k 轴范围 [256, 65535)、输出为 `(m*rank_size, n)`、`commTurn` 为通信数据切分数、A2 仅 HCCS all mesh 2/4/8 卡、A3 double ring 组网。
+
+再看 `matmul_all_reduce` 的 README 公式（节选）：
+
+```cpp
+// 情形2（非量化）：
+output = AllReduce(x1 @ x2 + bias + x3)
+// 情形3（全量化）：
+output = AllReduce(dequantScale * (x1_int8 @ x2_int8 + bias_int32) + x3)
+```
+
+（出处：[mc2/matmul_all_reduce/README.md:13-46](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/README.md#L13-L46)）
+
+可以看到同一个算子名字下，「量化前后、加不加残差 x3」都是公式变体——这预告了 4.2 节的版本家族。
+
+#### 4.1.4 代码实践
+
+**实践目标**：建立 mc2 域的算子地图，体会「通信原语 × 计算形态」的组合规律。
+
+**操作步骤**：
+
+1. 列出 mc2 目录：`ls mc2/`。
+2. 把算子名抄进表格，按通信原语（AllReduce / AllGather / ReduceScatter / AllToAll / dispatch-combine）分列。
+3. 挑选 `matmul_reduce_scatter` 与 `inplace_matmul_all_reduce_add_rms_norm` 两个目录，各读其 README 的「功能说明」小节。
+
+**需要观察的现象**：算子名本身就是「计算 + 通信」的连接词式命名（如 `matmul_all_reduce` = MatMul + AllReduce）；融合的后段计算越来越长（从单纯 MatMul 到 MatMul+Add+RMSNorm 一条龙）。
+
+**预期结果**：能说出每个算子名对应的通信原语与融合的计算段。运行不需要 NPU，纯目录阅读。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：`all_gather_matmul` 和 `matmul_all_reduce` 分别对应张量并行的哪种场景？
+
+**答案**：`all_gather_matmul` 对应「权重列切分」——各卡 x1 是局部的，先聚合激活再乘完整（或另一侧切分的）权重，输出 `(m*rank_size, n)`；`matmul_all_reduce` 对应「权重行切分」——各卡算出部分和，再 AllReduce 求和得到完整输出。
+
+**练习 2**：为什么 `all_gather_matmul` 要额外输出 `gatherOut`？
+
+**答案**：AllGather 的聚合结果对下游（如反向传播重算、并行残差分支）可能有用；既然融合算子内部已经生成了这份聚合数据，直接作为第二个输出吐出，可避免下游再单独做一次 AllGather。
+
+### 4.2 matmul_all_reduce 的 aclnn 版本家族：多入口、一个 inner
+
+#### 4.2.1 概念说明
+
+u1-l2 讲过「多版本接口共存」：同一算子随业务演进长出 V1~VN。`matmul_all_reduce` 是仓库里版本家族最庞大的算子之一，`op_api` 目录下共 10 对入口文件：
+
+| 家族 | 入口 | 相对 base 的新增能力 |
+| --- | --- | --- |
+| base | `aclnnMatmulAllReduce` | fp16/bf16 非量化主场景 |
+| V2 | `aclnnMatmulAllReduceV2` | 新增 `x3` 残差输入（公式情形 2 的 `+x3`） |
+| V3 | `aclnnMatmulAllReduceV3` | 新增 `commMode` 参数（`ai_cpu`/`ccu`），面向 A5 |
+| quant V1~V5 | `aclnnQuantMatmulAllReduce{,V2..V5}` | x1/x2 走 INT8 全量化，带 dequantScale/pertokenScale |
+| weight_quant V1/V2 | `aclnnWeightQuantMatmulAllReduce{,V2}` | 仅权重量化（x2 为 INT8/INT4，x1 仍为 fp16/bf16） |
+
+与 u4-l2 的 FA 家族「13 组 L2 入口共用唯一 base」同构，这里所有版本最终都汇聚到同一个 inner 两段式接口 `aclnnInnerMatmulAllReduceGetWorkspaceSize` / `aclnnInnerMatmulAllReduce`。新版本入口只做一件事：**把自己的参数集翻译并补空成 inner 的超集参数表**。inner 的参数表覆盖了 def 里注册的全部 10 个输入（x1、x2、bias、x3、antiquant_scale、antiquant_offset、dequant_scale、pertoken_scale、comm_quant_scale_1/2），非本版本的输入传 `nullptr`。
+
+#### 4.2.2 核心流程
+
+base 入口第一段的执行流程：
+
+```text
+aclnnMatmulAllReduceGetWorkspaceSize(x1, x2, bias, group, reduceOp, commTurn, streamMode, output, ...)
+  ├─ MatmulAllReduceCheckParams(...)          # 共享校验漏斗（见 4.3）
+  ├─ 维度检查: x1 必须 1~3 维
+  ├─ transposeX1 = false（不支持 A 转置）
+  ├─ transposeX2 = IsTransposeLastTwoDims(x2) # 按 stride 探测 B 是否转置
+  ├─ 未用的量化输入全部置 nullptr
+  ├─ commModePtr = "ai_cpu"                   # base 版只走 AICPU 通信服务
+  ├─ aclnnInnerMatmulAllReduceGetWorkspaceSize(... 超集参数 ...)   # 进 CANN 底座
+  └─ NnopbaseDisableOptionalInput(executor, 3..9)  # 显式声明可选输入未用
+第二段 aclnnMatmulAllReduce:
+  ├─ 若芯片为 DAV_3510(A5): NnopbaseSetHcclServerType(executor, AICPU)
+  └─ aclnnInnerMatmulAllReduce(workspace, size, executor, stream)  # 异步下发
+```
+
+V3 与 base 的差异集中在 commMode 的传递：第一段把字符串译成枚举并用 `NnopbaseSetUserHandle` 塞进 executor「捎带」，第二段用 `NnopbaseGetUserHandle` 取回，据此决定 HCCL 服务器类型用 CCU 还是 AICPU——因为第二段固定四参数，没有位置再传 commMode 了，executor 成为两段之间传递额外语义的行李箱。
+
+#### 4.2.3 源码精读
+
+base 入口的参数翻译与 inner 调用：
+
+- [mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce.cpp:33-63](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce.cpp#L33-L63)：先调 `MatmulAllReduceCheckParams` 做共享校验，再把 pertokenScale、dequantScale 等量化输入全部置 `nullptr`、`commModePtr = "ai_cpu"`，拼成 inner 的超集参数后调 `aclnnInnerMatmulAllReduceGetWorkspaceSize`。注意 `transposeX2 = IsTransposeLastTwoDims(x2)`——转置不是显式参数，而是从 stride 推断的。
+- [mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce.cpp:70-79](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce.cpp#L70-L79)：成功后用弱符号 `NnopbaseDisableOptionalInput` 逐个声明 irIndex 3~9 的可选输入未使用（弱符号意味着老版本底座没有该函数时静默跳过，这是跨版本兼容的惯用法）。
+- [mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce.cpp:87-105](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce.cpp#L87-L105)：第二段。`DAV_3510`（A5/Ascend 950）上设置 HCCL 服务器类型为 AICPU，再统一进 `aclnnInnerMatmulAllReduce`。
+
+V2 的增量——x3 残差：
+
+- [mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce_v2.cpp:76-92](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce_v2.cpp#L76-L92)：`aclnnMatmulAllReduceV2GetWorkspaceSize` 签名里多了 `x3`，校验同样复用 `MatmulAllReduceCheckParams`（其 x3 形参在 base 入口处传 `nullptr`，在 V2 传真实指针）。
+- [mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce_v2.cpp:35-56](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce_v2.cpp#L35-L56)：`InnerMatmulAllReduceV2GetWorkspaceSize` 与 base 的 inner 填空几乎逐行相同，只差 x3 透传——印证「新版本 = 入口填空」的组织方式。
+
+V3 的增量——commMode 与 CCU：
+
+- [mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce_v3.cpp:88-99](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce_v3.cpp#L88-L99)：V3 入口新增 `const char *commMode` 参数，先过共享校验，再过 `IsCommModeValid(commMode)`。
+- [mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce_v3.cpp:57-71](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce_v3.cpp#L57-L71)：把 `"ai_cpu"`/`"ccu"` 译成 `Mc2Comm::COMM_MODE_AICPU/COMM_MODE_CCU` 枚举，经 `NnopbaseSetUserHandle` 存入 executor——第一段向第二段「捎带」commMode。
+- [mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce_v3.cpp:117-133](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce_v3.cpp#L117-L133)：第二段取回 `NnopbaseGetUserHandle`，A5 上按 commMode 选 `NNOPBASE_HCCL_SERVER_TYPE_CCU` 或 `..._AICPU`；非 A5 芯片一律 AICPU。
+
+quant 与 weight_quant 家族的差异主要体现在校验侧（见 4.3），入口骨架相同：
+
+- [mc2/matmul_all_reduce/op_api/aclnn_weight_quant_matmul_all_reduce.cpp:33-40](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/aclnn_weight_quant_matmul_all_reduce.cpp#L33-L40)：weight_quant 家族的 dtype 白名单——x1 输出仍是 fp16/bf16，但 x2 支持 `DT_INT8, DT_INT4`（注释说明 op::DataType 枚举不含 INT4 所以单独列）。这是「伪量化：只压权重」的代码印记。
+
+#### 4.2.4 代码实践
+
+**实践目标**：验证「所有版本共用一个 inner」这一论断，并量化各版本的参数差异。
+
+**操作步骤**：
+
+1. 在仓库根目录执行 `grep -n "aclnnInnerMatmulAllReduceGetWorkspaceSize" mc2/matmul_all_reduce/op_api/*.cpp`，统计有哪些入口调用了它。
+2. 打开 `mc2/matmul_all_reduce/op_api/` 目录，对照 `aclnn_matmul_all_reduce.h`、`aclnn_matmul_all_reduce_v2.h`、`aclnn_matmul_all_reduce_v3.h`、`aclnn_quant_matmul_all_reduce_v5.h` 四个头文件的 `GetWorkspaceSize` 声明，把参数逐个列表对比。
+
+**需要观察的现象**：每个新增版本都只是在旧签名上「尾部追加」参数（V2 加 x3，V3 加 commMode，quant 系加 dequantScale/pertokenScale/commQuantScale 等），且每个文件的 inner 调用行都是同一条超集签名。
+
+**预期结果**：得到一张 10 行的版本 × 参数对照表，并确认 10 个入口全部收敛到唯一的 inner。纯静态阅读即可完成，无需编译。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么 V3 要用 `NnopbaseSetUserHandle`/`NnopbaseGetUserHandle` 这对接口传 commMode，而不是给第二段加参数？
+
+**答案**：aclnn 第二段接口签名是全仓库统一的四参数 `(workspace, workspaceSize, executor, stream)`（u3-l1），不能为一个算子破坏；executor 是两段之间唯一随行的载体，所以额外语义只能「捎带」在 executor 里。
+
+**练习 2**：`#ifdef MC2_UT ret = 0; #endif`（base 入口 inner 调用之后）是干什么的？
+
+**答案**：编译 UT 目标（`-DMC2_UT`）时把 inner 的返回值强制改为 0。因为 UT 环境没有真实的 CANN 底座 executor，inner 调用必然失败；置 0 让后续 `NnopbaseDisableOptionalInput` 等逻辑在 UT 中也能走到，用例可以专注测校验函数本身。
+
+**练习 3**：quant V1~V5 五个版本并存而不是改造 V1，可能的原因是什么？
+
+**答案**：aclnn 是已发布的 C 接口，改老签名会破坏存量调用方；每次语义扩充（新的 scale 布局、新的通信量化模式等）只能加新版本。这与 u4-l4 FIA 的 V1~V5、u5-l1 的 MoeInitRouting V2/V3 是同一条演进规律。
+
+### 4.3 util 校验漏斗与通信域处理
+
+#### 4.3.1 概念说明
+
+10 个入口共享一套校验与工具，全部放在 `matmul_all_reduce_util.cpp/.h`。它承担三件事：
+
+1. **校验漏斗**：空指针 → dtype → attr → format → shape → 连续性，便宜检查在前（与 u4-l2 FA 的五层漏斗同构）。
+2. **输入画像**：从 aclTensor 的 (shape, strides, format) 三要素推断「B 是否转置」「权重是否 NZ 格式」「是否 aclnn 预转置」——这些画像决定 inner 侧选择哪条 kernel 路径。
+3. **通信域合法性**：`IsCommModeValid` 按芯片代际检查 commMode 字符串。
+
+`group` 通信域字符串本身不在 util 里校验——它的合法性由 HCCL 运行期保证（拿名字找不到通信域时报错），op_api 层只透传。
+
+#### 4.3.2 核心流程
+
+非量化场景的校验漏斗（`MatmulAllReduceCheckParams`）：
+
+```text
+1. MatmulAllReduceCheckNotNull(x1, x2, output)        # 空指针
+2. MatmulAllReduceCheckDtypeValid(...)                # dtype 白名单 + 各输入 dtype 一致
+3. MatmulAllReduceCheckAttr(reduceOp, streamMode)     # reduceOp 必须 "sum"; streamMode 必须 1
+4. 非310P: MatmulAllReduceCheckFormat(x2)             # 非量化不支持 NZ 权重格式
+5. MatmulAllReduceCheckShape(...)                     # x1 2~3维, x2 2维(NZ 4维), k 对齐, bias [n]
+6. A2: 空tensor放行, 否则检查 x2 连续性(仅转置场景允许非连续)
+```
+
+全量化场景 `QuantMatmulAllReduceCheckParams` 是同一漏斗的量化版：x1/x2 收紧为 INT8，新增 dequantScale（per-tensor `[1]` / per-channel `[n]`/`[1,n]`）与 pertokenScale（`[m]`，fp32）的 shape 检查。
+
+#### 4.3.3 源码精读
+
+dtype 白名单与漏斗主体：
+
+- [mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.cpp:31-47](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.cpp#L31-L47)：五组 dtype 白名单——主列表 fp16/bf16（310P 仅 fp16）、bias INT32、量化输入 INT8、dequantScale uint64/int64/bf16/fp、pertokenScale fp32。u3-l1 讲过「dtype 白名单是硬约束」，这里再次印证：**每个可选输入都有自己的白名单**。
+- [mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.cpp:93-127](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.cpp#L93-L127)：`MatmulAllReduceCheckParams` 漏斗主体，按注释编号 1~6 依次检查；注意第 6 步用 `GetSocVersion() == SocVersion::ASCEND910B` 做了 A2 专属的连续性检查——同一文件内按 SoC 分支是 mc2 校验的常见写法。
+- [mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.cpp:169-181](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.cpp#L169-L181)：`MatmulAllReduceCheckAttr`——`reduceOp` 只支持 `"sum"`，`streamMode` 只支持 1（`NUM_ACL_STOP_ON_FAILURE`，出错即停）。集合通信算子的规约算子在当前版本没有开放 max/min。
+
+通信与计算衔接的关键画像函数：
+
+- [mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.h:61-85](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.h#L61-L85)：`IsTransposeLastTwoDims`——不看任何显式标志，纯靠 stride 判断「这块内存是不是一个转置视图」（最后一维 stride 为 1、倒数第二维 stride 等于倒数第二维长度，且 batch 维连续）。这就是 4.2 中 `transposeX2` 的来源：**转置语义是从 aclTensor 的内存排布反推出来的**。
+- [mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.cpp:309-326](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.cpp#L309-L326)：`MatmulAllReduceIsWeightNZFormat`——`ACL_FORMAT_FRACTAL_NZ` 且 storage shape 为 4 维即 NZ 权重。NZ 是昇腾 Cube 单元的原生分块格式，权重提前转成 NZ 可以让融合 kernel 省掉格式转换（README 约束中提到配合 `aclnnTransMatmulWeight` 使用）。
+- [mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.cpp:344-352](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.cpp#L344-L352)：`QuantMatmulAllReduceIsAclnnPreTransposed`——310P 上「view 是 ND 但 storage 是 NZ」说明调用方已通过 aclnn 预转置接口处理过权重，shape 校验要按转置后的逻辑维来（[matmul_all_reduce_util.cpp:423-428](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.cpp#L423-L428) 据此交换 x2Dim0/x2Dim1）。这是「同一份数据，view/storage 两层格式各自表达语义」的典型处理。
+
+通信模式合法性（通信域处理中 host 侧可见的部分）：
+
+- [mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.cpp:596-618](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.cpp#L596-L618)：`IsCommModeValid`——A5（`DAV_3510`）上 commMode 必填且只允许 `"ccu"` 或 `"ai_cpu"`；其他芯片允许 `nullptr` 或 `"ai_cpu"`，传 `"ccu"` 会报参数错。**新通信硬件能力通过新版本接口 + 新参数开放，老芯片上该参数受限**。
+- [mc2/common/utils/mc2_comm_utils.h:17-37](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/common/utils/mc2_comm_utils.h#L17-L37)：`Mc2Comm` 命名空间定义 `COMM_MODE_CCU=0`、`COMM_MODE_AICPU=1` 枚举及引擎常量，`GetCommModeFromEnv` 读环境变量 `ENV_MC2_COMM_MODE_AICPU` 强制走 AICPU——提供不改代码的降级开关。这是 mc2/common 提供给全域算子的公共能力之一。
+
+量化校验的增量（quant 家族复用漏斗的证据）：
+
+- [mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.cpp:236-263](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.cpp#L236-L263)：`QuantMatmulAllReduceCheckParams` 与非量化版结构逐条对应（NotNull → Dtype → Attr → Shape → A2 连续性），dtype 收紧为 INT8、dequantScale 必填。
+- [mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.cpp:388-405](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.cpp#L388-L405)：`QuantMatmulAllReduceCheckDequantScale`——per-tensor 为 `[1]`、per-channel 为 `[n]` 或 `[1,n]`（n 为输出最后一维）。u4-l5 讲过 CANN 的量化粒度体系（pertensor/perchannel/pertoken/pergroup/perblock），此处正是 per-tensor 与 per-channel 的 shape 判据。
+
+#### 4.3.4 代码实践
+
+**实践目标**：定位「通信与矩阵乘衔接」在 host 侧的可观察控制点，并总结版本差异。
+
+**操作步骤**：
+
+1. 在 `matmul_all_reduce_util.cpp` 中搜索以下关键词并记录行号：`commTurn`（通信切分）、`group`（通信域）、`commMode`/`IsCommModeValid`（通信服务模式）、`transposeX2`（B 矩阵画像）、`IsWeightNZFormat`（权重格式画像）。
+2. 对比 `MatmulAllReduceCheckParams`（非量化）与 `QuantMatmulAllReduceCheckParams`（全量化）两个函数体，逐条列出差异。
+3. 打开 `aclnn_weight_quant_matmul_all_reduce.cpp` 的 `CheckDtypeValid`（[mc2/matmul_all_reduce/op_api/aclnn_weight_quant_matmul_all_reduce.cpp:54-97](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/aclnn_weight_quant_matmul_all_reduce.cpp#L54-L97)），注意 A5 上 x2 白名单扩展到 `INT8/INT4/FLOAT8_E4M3FN/HIFLOAT8`。
+
+**需要观察的现象**：host 侧没有一行代码真的「做通信」——`commTurn`、`group`、`commMode` 都只是被校验后透传给 inner；通信与矩阵乘的真正衔接（分块、流水、通信域解析）在 CANN 底座的 executor 里。host 侧能做的是把「通信愿望」打包成合法参数。
+
+**预期结果**：得到一张 V2/V3/quant/weight_quant 四家族差异表（参数集、dtype 白名单、特有校验），并写出结论：版本间的差异全部集中在「入口签名 + 校验画像」，执行路径唯一。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：调用方传入 `reduceOp = "max"` 会发生什么？在哪一行被拦截？
+
+**答案**：在 [matmul_all_reduce_util.cpp:169-175](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.cpp#L169-L175) 的 `MatmulAllReduceCheckAttr` 中 `strcmp(reduceOp, "sum") != 0` 成立，打 `OP_LOGE_FOR_INVALID_VALUE` 日志并返回 false，入口随即返回 `ACLNN_ERR_PARAM_INVALID`，第一段即失败，不会到第二段。
+
+**练习 2**：为什么 `IsTransposeLastTwoDims` 要求「BMM 场景下 Batch 维度 stride 等于 N×D 乘积」？
+
+**答案**：只看最后两维的 stride 不足以判定整块内存是转置视图——如果 batch 维之间有空洞（非连续），转置推断就会错位。函数用循环验证每个更高维的 stride 恰等于低维大小乘积（[matmul_all_reduce_util.h:72-78](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.h#L72-L78)），保证「逻辑转置 + 物理连续」这一 kernel 可直接消费的前提成立。
+
+### 4.4 def 文件：MC2 通信域注册与多 SoC 配置
+
+#### 4.4.1 概念说明
+
+u2-l2 讲过 def 文件是算子的「静态户口」。mc2 算子的 def 有一个专属动作：`this->MC2().HcclGroup("group")`——把名为 `group` 的字符串属性注册为 HCCL 通信域标识。这是图模式下框架识别「这个算子需要通信资源、属于哪个通信域」的依据（对应 u3-l2 fallback 机制里图框架 `host_api_ctx` 能接管通信类算子的基础）。
+
+另外，本 def 用「场景组合」方式注册 dtype：每个输入的 DataType 列表长度相同（60 项），框架按**下标**取各输入同一列的组合形成一种合法场景——这是 u5-l2 FFN 讲过的同款机制，60 列覆盖 fp16/bf16/int8/int4/fp8 系/fp4 的各种量化组合。
+
+#### 4.4.2 核心流程
+
+```text
+OpDef("MatmulAllReduce")
+  ├─ 10 个 Input 注册（x1/x2 必选，其余可选，多数带 IgnoreContiguous）
+  ├─ Output("y")
+  ├─ Attr: group(必选 String) / reduce_op / is_trans_a / is_trans_b /
+  │        comm_turn / antiquant_group_size / group_size / y_dtype /
+  │        comm_quant_mode / comm_mode
+  ├─ 三份 OpAICoreConfig 按 SoC 分别 AddConfig:
+  │     ascend950  （含 FP8/FP4 等低精度组合, opFile.value=matmul_all_reduce_apt）
+  │     ascend910b （AutoContiguous + x2 支持 FRACTAL_NZ）
+  │     ascend310p （仅 fp16 + NZ 权重为主）
+  └─ 每个 AddConfig 之后紧跟 this->MC2().HcclGroup("group")
+```
+
+#### 4.4.3 源码精读
+
+- [mc2/matmul_all_reduce/op_host/matmul_all_reduce_def.cpp:453-462](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_host/matmul_all_reduce_def.cpp#L453-L462)：全部属性注册。`group` 是唯一 REQUIRED 属性；`comm_turn`（通信切分）、`comm_mode` 等都有默认值。u1-l2 说过的结论在此兑现：**通信域以字符串属性进入算子合同**。
+- [mc2/matmul_all_reduce/op_host/matmul_all_reduce_def.cpp:464-476](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_host/matmul_all_reduce_def.cpp#L464-L476)：ascend950 的 `OpAICoreConfig`，`ExtendCfgInfo("opFile.value", "matmul_all_reduce_apt")` 连接 host 定义与 kernel 入口（u2-l1 讲过该机制），末尾 `AddConfig("ascend950", ...)` 与 `this->MC2().HcclGroup("group")`。
+- [mc2/matmul_all_reduce/op_host/matmul_all_reduce_def.cpp:632-633](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_host/matmul_all_reduce_def.cpp#L632-L633) 与 [mc2/matmul_all_reduce/op_host/matmul_all_reduce_def.cpp:715-716](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_host/matmul_all_reduce_def.cpp#L715-L716)：ascend910b、ascend310p 两份配置及各自的 `HcclGroup("group")`——**每代 SoC 都要单独声明一次 MC2 绑定**。
+- [mc2/matmul_all_reduce/op_host/matmul_all_reduce_def.cpp:22-40](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_host/matmul_all_reduce_def.cpp#L22-L40)：x1 的 60 项场景组合 dtype 表（节选），可见 fp16/bf16/int8 与 HIFLOAT8/FLOAT8_E5M2/E4M3FN/FLOAT4_E2M1 等低精度类型混列——为 u4-l5 的量化家族提供注册底座。
+- [mc2/matmul_all_reduce/op_host/matmul_all_reduce_def.cpp:478-491](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_host/matmul_all_reduce_def.cpp#L478-L491)：910b 配置里 x1 带 `AutoContiguous()`，而 x2 带 `IgnoreContiguous()`——与 4.3 中「x2 非连续仅在转置场景放行」的运行期校验一一呼应：框架层自动整理 x1，x2 则交给算子自己按转置画像处理。
+
+#### 4.4.4 代码实践
+
+**实践目标**：弄清「新增一代 SoC 需要在 def 里交付什么」。
+
+**操作步骤**：
+
+1. 阅读 def 文件中三份 `OpAICoreConfig` 各自的 x1/x2 dtype 列表长度与类型集合。
+2. 对比 `mc2/all_gather_matmul/op_host/` 下 def 文件（若存在同名配置段）的 `HcclGroup` 注册方式是否一致。
+
+**需要观察的现象**：三份配置的输入集合相同、dtype 组合数不同（950 有 60 列覆盖 FP8/FP4，910b 16 列，310p 6 列）；`HcclGroup("group")` 出现三次，每次紧跟一个 `AddConfig`。
+
+**预期结果**：写出 checklist：新增 SoC = 新增一份 `OpAICoreConfig`（含该芯片支持的 dtype/格式组合与 AutoContiguous 策略）+ `AddConfig` + 重复 `MC2().HcclGroup("group")` 注册。待本地验证（如需确认 `all_gather_matmul` 的 def 细节）。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：为什么 `group` 是属性（Attr）而不是输入（Input）？
+
+**答案**：输入是 device 侧的张量数据，而 `group` 是 host 侧的通信域名字符串，只在构图/执行计划阶段被框架消费，不参与 kernel 的张量计算。def 里用 `Attr("group").AttrType(REQUIRED).String()` 表达这一语义。
+
+**练习 2**：图模式下框架怎么知道 `MatmulAllReduce` 节点属于哪个通信域、需要什么通信资源？
+
+**答案**：靠 `this->MC2().HcclGroup("group")` 注册的绑定——框架查 def 得知该算子是 MC2 类算子、其通信域取自名为 `group` 的属性，据此做通信资源规划与调度（这也是 u3-l2 中图模式 fallback 能在 host 侧代跑 eager 实现的前提之一）。
+
+### 4.5 mc2/common 公共库与示例构建
+
+#### 4.5.1 概念说明
+
+u3-l2 介绍了顶层 `common/` 公共库；mc2 域还有自己的域级公共库 `mc2/common/`，按消费者分层：
+
+| 子目录 | 内容 | 服务对象 |
+| --- | --- | --- |
+| `op_api/` | `mc2_context`、`mc2_aclnn_util` | mc2 算子的 aclnn 层 |
+| `op_host/` | `mc2_common_infershape`、公共 `op_tiling` | host 侧推导与切分 |
+| `op_kernel/` | matmul 分块（`mc2_matmul_block*`）、tiling 结构、量化 batch matmul 模板、`mc2_templates`、`apace` | device 侧融合 kernel 的共享积木 |
+| `utils/` | `hccl_util`、`mc2_comm_utils`、`mc2_platform_info`、`mc2_hcom_topo_info`、`context_transfer` | 通信域/拓扑/平台信息的统一获取 |
+
+`mc2_hcom_topo_info`（拓扑信息）的存在侧面印证 4.1 的约束：融合通信强依赖卡间组网形态，host 侧需要统一的拓扑查询。
+
+示例构建方面：mc2 示例与普通 aclnn 示例的**源码骨架相同（两段式调用），差异在编译链接**——mc2 示例需要链接 HCCL 库来建立通信域。u1-l4 讲过 `--run_example` 会现场 `g++` 编译示例；build.sh 对 mc2 路径做了特判。
+
+#### 4.5.2 核心流程
+
+mc2 示例从编译到运行的完整链路：
+
+```text
+bash build.sh --run_example <op> eager
+  └─ build.sh 找到示例 .cpp
+     └─ 若文件路径在 mc2/ 、examples/mc2/ 或 experimental/mc2/ 下:
+          链接行追加 -lpthread -Wl,--no-as-needed -lhccl -lhccl_fwk
+  └─ 运行时可执行文件:
+       aclInit → HcclCommInitAll(卡数, devices, comms)   # 每进程建通信域
+       → HcclGetCommName(comm, hcomName)                 # 取通信域名字符串
+       → 每个 rank 一个线程: 构造各自的 aclTensor
+       → aclnnXxxGetWorkspaceSize(..., hcomName, ...)    # group 参数在这里传入
+       → aclnnXxx(workspace, size, executor, stream)
+       → aclrtSynchronizeStreamWithTimeout → 比对 → HcclCommDestroy
+```
+
+#### 4.5.3 源码精读
+
+- [build.sh:631-654](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/build.sh#L631-L654)：`--run_example` 的 mc2 特判——计算三个绝对路径前缀（`mc2/`、`examples/mc2/`、`experimental/mc2/`），示例文件命中任一前缀即设 `MC2_APPEND_INCLUDE_AND_LIBRARY="-lpthread -Wl,--no-as-needed -lhccl -lhccl_fwk"`，随后拼进 g++ 链接行（普通算子示例没有这一段）。`--no-as-needed` 是因为示例代码只调用少量 HCCL 符号，默认 `--as-needed` 会把依赖裁掉。
+- [examples/mc2/all_gather_add/examples/test_aclnn_all_gather_add.cpp:26](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/examples/mc2/all_gather_add/examples/test_aclnn_all_gather_add.cpp#L26)：`#include "hccl/hccl.h"`——mc2 示例区别于普通示例的第一行证据。
+- [examples/mc2/all_gather_add/examples/test_aclnn_all_gather_add.cpp:111-118](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/examples/mc2/all_gather_add/examples/test_aclnn_all_gather_add.cpp#L111-L118)：`Args{rankId, hcclComm, stream}` 与 `HcclGetCommName(args.hcclComm, hcomName)`——把 HCCL 句柄翻译成算子要的 group 字符串的关键三行。
+- [examples/mc2/all_gather_add/examples/test_aclnn_all_gather_add.cpp:160-180](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/examples/mc2/all_gather_add/examples/test_aclnn_all_gather_add.cpp#L160-L180)：两段式调用本体——`aclnnAllGatherAddGetWorkspaceSize(a, b, hcomName, RANK_DIM, out, gatherOut, ...)` 第一段就把 `hcomName` 作为通信域传入；申请 workspace 后第二段 `aclnnAllGatherAdd(...)` 下发，再 `aclrtSynchronizeStreamWithTimeout`（带 10 秒超时，多卡示例防止某 rank 卡死时无限等待）。
+- [examples/mc2/all_gather_add/examples/test_aclnn_all_gather_add.cpp:333-335](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/examples/mc2/all_gather_add/examples/test_aclnn_all_gather_add.cpp#L333-L335)：`HcclCommInitAll(RANK_DIM, devices, comms)`——单进程多 device（每卡一线程）方式为两卡各建一个通信域，这是无 MPI 环境下跑通双卡示例的最简做法。
+
+mc2/common 的公共能力（本讲用到的两个）：
+
+- [mc2/common/utils/mc2_comm_utils.h:17-35](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/common/utils/mc2_comm_utils.h#L17-L35)：commMode 枚举与环境变量降级开关（4.3 已精读）。
+- `mc2/common/op_kernel/` 下的 [mc2_matmul_block.h](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/common/op_kernel/mc2_matmul_block.h)、[mc2_tiling_struct.h](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/common/op_kernel/mc2_tiling_struct.h) 等：融合 kernel 的分块/tiling 共享积木——`matmul_all_reduce`、`matmul_reduce_scatter`、`grouped_mat_mul_allto_allv` 等算子的 device 侧都基于这套积木组装，这是「同域算子家族」复用的第三种手段（前两种是版本演进与架构隔离，见 u7-l4）。
+
+#### 4.5.4 代码实践
+
+**实践目标**：走读一个 mc2 示例的编译依赖，说清它与普通 aclnn 示例的构建差异。
+
+**操作步骤**：
+
+1. 读 [build.sh:631-654](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/build.sh#L631-L654)，确认三个路径前缀与追加的链接项。
+2. 读 `examples/mc2/all_gather_add/examples/test_aclnn_all_gather_add.cpp` 的 `main` 函数（文件尾部约 320~350 行区域），梳理 `aclInit → HcclCommInitAll → 每 rank 线程 → HcclCommDestroy` 的骨架。
+3. 对照 `examples/add_example/examples/test_aclnn_add_example.cpp`（u2-l4 已读），列差异清单：头文件、通信域初始化、同步接口、线程模型。
+4. 有双卡 NPU 环境时可尝试 `bash build.sh --run_example all_gather_add eager`（示例编译依赖已安装的 run 包）；无 NPU 环境则完成静态走读即可，标注「待本地验证」。
+
+**需要观察的现象**：普通示例是「单进程单卡、`aclrtSynchronizeStream`」；mc2 示例是「单进程多卡多线程、`HcclCommInitAll` 建域、`aclrtSynchronizeStreamWithTimeout` 带超时同步」，且链接行多出 `-lhccl -lhccl_fwk -lpthread`。
+
+**预期结果**：能写出一段「把普通 aclnn 示例改造成 mc2 示例需要补什么」的清单：加 `hccl/hccl.h` 包含、建通信域并取名、group 参数传名、多 rank 线程模型、链接 HCCL 库。
+
+#### 4.5.5 小练习与答案
+
+**练习 1**：为什么 build.sh 用 `--no-as-needed` 链接 hccl？
+
+**答案**：链接器默认的 `--as-needed` 只保留被直接引用符号的库。示例的可执行文件通过运行时加载的 opapi 库间接使用 HCCL，自身直接引用的 HCCL 符号很少，不加 `--no-as-needed` 可能导致 `libhccl.so` 不进 DT_NEEDED，运行时算子在解析 HCCL 接口时找不到库。
+
+**练习 2**：示例为什么每个 rank 起一个线程而不是顺序执行两个 rank 的调用？
+
+**答案**：集合通信是同步语义——两卡都要把数据投递到通信域后 AllGather/AllReduce 才能前进。若顺序执行，rank0 的第二段调用会阻塞等待 rank1，而 rank1 永远得不到执行机会，形成死锁。多线程（或多进程+MPI）让各 rank 并发到达通信点。
+
+## 5. 综合实践
+
+**任务：产出一份《matmul_all_reduce 版本家族与通信衔接分析报告》。**
+
+结合本讲四个模块，完成以下三部分：
+
+1. **版本对照表**：按 4.2.4 的方法，用 grep 与头文件对比，整理 base/V2/V3/quant(V1~V5)/weight_quant(V1/V2) 各入口的参数签名差异、dtype 白名单差异（提示：非量化与量化白名单分别在 [matmul_all_reduce_util.cpp:31-47](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/matmul_all_reduce_util.cpp#L31-L47) 与 [aclnn_weight_quant_matmul_all_reduce.cpp:33-40](https://github.com/gitcode.com/cann/ops-transformer/blob/b2adacfe384b910c6965ca19236e42152674a87c/mc2/matmul_all_reduce/op_api/aclnn_weight_quant_matmul_all_reduce.cpp#L33-L40)），并标注每个版本「相对 inner 超集补了哪些 nullptr」。
+2. **通信衔接点清单**：按 4.3.4 的方法，列出 host 侧所有与通信相关的参数（`group`、`reduceOp`、`commTurn`、`commMode`、`streamMode`），逐一说明：谁校验它、合法值是什么、最终流向哪里（inner / def 属性 / HCCL 服务器类型选择）。
+3. **示例构建差异**：按 4.5.4 的方法走读 `all_gather_add` 示例与 `add_example` 示例，写出 mc2 示例额外的构建与运行要件，并画出「HcclCommInitAll → HcclGetCommName → aclnn 两段式（group=hcomName）→ 带超时同步 → HcclCommDestroy」的时序图。
+
+验收标准：报告中的每个论断都带一个永久链接行号；对无法在本地运行验证的部分明确标注「待本地验证」。
+
+## 6. 本讲小结
+
+- mc2 是通信-计算融合（通算融合）算子域：把 MatMul 等计算与 AllReduce/AllGather 等集合通信编进同一次 kernel 下发，收益是省中间访存、让计算与通信流水重叠、减少 kernel 启动；强依赖 HCCS 卡间直连组网。
+- `matmul_all_reduce` 有 10 个 aclnn 入口（base/V2/V3/quant×5/weight_quant×2），全部把参数翻译补空成超集后汇聚到唯一的 `aclnnInnerMatmulAllReduce*`（由 CANN 包的 nnopbase 库提供）；新版本 = 入口填空，V2 加残差 x3，V3 加 commMode 并用 executor 的 UserHandle 在两段间捎带。
+- 全家族共享 `matmul_all_reduce_util` 的校验漏斗（空指针→dtype→attr→format→shape→连续性）；转置、NZ 权重等计算画像从 aclTensor 的 stride/format 反推；`reduceOp` 仅支持 `"sum"`，`commMode` 按芯片代际受限（A5 才有 ccu）。
+- def 文件用 60 列「场景组合」注册多量化 dtype，为三代 SoC 各配一份 `OpAICoreConfig`，且每次 `AddConfig` 后都要 `this->MC2().HcclGroup("group")` 把 group 属性绑定为 HCCL 通信域。
+- 通信域以字符串流转：示例用 `HcclCommInitAll` 建域、`HcclGetCommName` 取名、把名字作为 group 传入第一段；mc2 示例与普通 aclnn 示例骨架相同，但链接行追加 `-lhccl -lhccl_fwk`（build.sh 按 mc2 路径前缀特判），并采用多 rank 线程 + 带超时同步。
+- `mc2/common` 按 op_api/op_host/op_kernel/utils 四层提供域级公共积木（通信模式枚举、平台/拓扑信息、matmul 分块模板），是「同域算子家族」复用的核心手段。
+
+## 7. 下一步学习建议
+
+下一讲 u5-l4《mc2 分布式 MoE：dispatch/combine 与同步原语》将把本讲的通信域、多 rank 协作知识扩展到完整的多卡 MoE 前向：`moe_distribute_dispatch/combine` 及其 setup/teardown 生命周期、`distribute_barrier` 同步原语，以及 v2/v3 版本并存的工程原因。建议提前浏览 `mc2/moe_distribute_dispatch/README.md` 与 `mc2/distribute_barrier/README.md`，并回顾 u5-l1 的 MoE 路由链路（dispatch 消费的正是路由结果的专家 ID）。若想深入 device 侧融合实现，可继续阅读 `mc2/common/op_kernel/mc2_matmul_block.h` 与 `mc2_tiling_struct.h`，观察分块与通信切片如何在 tiling 结构中统一表达。
