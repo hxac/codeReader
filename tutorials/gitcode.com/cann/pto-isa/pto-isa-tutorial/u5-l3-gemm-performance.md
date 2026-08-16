@@ -1,0 +1,319 @@
+# 高性能 GEMM：gemm_performance 优化全解
+
+## 1. 本讲目标
+
+上一讲（u5-l2）我们读完了 `gemm_basic` 基线，并定位了它的三大瓶颈：跨核 A/B 重复搬运、乒乓深度只有 1、`baseK` 偏小导致 MTE1 开销摊薄不足。本讲精读 `kernels/manual/a2a3/gemm_performance`，看它如何逐条消解这些瓶颈。
+
+学完本讲，你应该能够：
+
+1. 说出 gemm_performance 的四级流水（TLOAD → TEXTRACT → TMATMUL → TSTORE）与基线相比多出的一级（TEXTRACT），以及为什么多出这一级反而更快。
+2. 读懂 kernel 中两级 double buffer（L1 层与 L0 层）的事件编排，能独立回答"谁等谁、为什么"。
+3. 理解多核切分（4×6 网格）与 stepK 批量搬运（L1 缓存复用）的设计动机。
+4. 学会对照 README 的利用率表（TMATMUL/TEXTRACT/TLOAD/TSTORE Ratio）判断 kernel 是 compute-bound 还是 memory-feed-bound，并决定下一步优化什么。
+
+## 2. 前置知识
+
+本讲假设你已完成 u5-l1（TMatmul 与 Cube 单元）和 u5-l2（GEMM 基线）。在此之上补充三个概念：
+
+- **四级数据通路**。A2/A3 上一次 GEMM 的数据要走完：GM（全局内存）→ L1（片上共享缓存，`TileType::Mat` 所在）→ L0A/L0B（Cube 专属输入缓冲，`TileLeft`/`TileRight` 所在）→ L0C（累加器，`TileAcc` 所在）→ GM。基线里 L1→L0 用的是 TMOV；本讲改用 **TEXTRACT**——从 L1 的大 panel 里"切片"出当前 `baseK` 的小块搬进 L0。
+- **stepK 批量搬运（L1 caching）**。与其每次 TLOAD 只搬 `[baseM, baseK]` 一个小块，不如一次搬 `[baseM, baseK × stepKa]` 的大 panel 进 L1，再用 TEXTRACT 逐片切给 L0。DMA 启动次数减少、burst 更长，这就是 README 说的 "L1 caching"。
+- **利用率（Ratio）**。profile 工具会报告每条流水线"忙碌时间占总时间"的比例。TMATMUL Ratio 是 Cube 利用率；TLOAD Ratio 接近 100% 说明喂数据的通路已经打满——此时瓶颈在搬运而不是计算。这是本讲解读性能数据的核心标尺。
+
+事件同步的基础（`set_flag`/`wait_flag`、`(srcPipe, dstPipe, eventId)` 三元组）在 u2-l3 已讲透，本讲直接使用。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+| --- | --- |
+| [kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp) | kernel 本体：多核切分、缓冲摆放、K 迭代主循环、事件编排全部在此 |
+| [kernels/manual/a2a3/gemm_performance/README.md](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/README.md) | 优化说明、tiling 参数表、A3 实测利用率数据与调优指南 |
+| kernels/manual/a2a3/gemm_performance/main.cpp | host 侧入口，以 `m=k=n=6144` 为默认参考配置启动 kernel |
+| kernels/manual/a2a3/gemm_performance/scripts/gen_data.py | 生成输入与 golden 输出 |
+
+## 4. 核心概念与源码讲解
+
+### 4.1 多核切分与全局参数
+
+#### 4.1.1 概念说明
+
+gemm_performance 与基线一样采用 SPMD 多核模型：24 个 AICORE 各自认领一块互不重叠的输出区域，核间零同步。区别在于切分参数经过了刻意设计：
+
+- 6144 的 M、N 切成 **4 × 6 = 24** 份，每核负责 `[singleCoreM=1536, singleCoreN=1024]` 的 C 块；
+- K 维**不切**（`singleCoreK = 6144 = k`），即不做 split-K，避免引入核间规约；
+- base block 从基线的 `[128, 128, 128]` 改为 **`[baseM=128, baseN=256, baseK=64]`**——N 加倍提高了算术强度（每次搬运喂给 Cube 更多 FLOP），K 减半是为配合 stepK 批量搬运。
+
+为什么 `baseN` 敢用 256、`baseK` 只用 64？下一小节的缓冲预算会给出答案。
+
+#### 4.1.2 核心流程
+
+参数由 host 侧模板实参一路传入 kernel：
+
+```
+LaunchGEMME2E (blockDim=24, m=k=n=6144, singleCoreM=1536, singleCoreK=6144,
+               singleCoreN=1024, baseM=128, baseK=64, baseN=256,
+               stepKa=4, stepKb=4)
+    └─> GemmPerformance <<<24, stream>>>
+            └─> RunGemmE2E
+                    ├─> InitGMOffsets   // 按 block_idx 算出本核的 GM 起始地址
+                    ├─> TASSIGN × 9     // 摆放 L1/L0 缓冲
+                    └─> i/j/kIter 三重循环
+```
+
+#### 4.1.3 源码精读
+
+kernel 入口的全部调优参数集中在 `LaunchGEMME2E`，这是本例"调参只改一处"的锚点：
+
+- [gemm_performance_kernel.cpp:254-267](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp#L254-L267)：host 侧启动配置。`blockDim=24` 对应 A3 的 24 核；`m=k=n=6144`；`singleCoreM=1536, singleCoreN=1024` 实现 4×6 切分；`baseM=128, baseK=64, baseN=256`；`stepKa=stepKb=4`。
+- [gemm_performance_kernel.cpp:268-270](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp#L268-L270)：以 `<<<blockDim, nullptr, stream>>>` 语法启动 24 个核。
+
+每个核根据自己的 `block_idx` 推导 GM 偏移，把全局矩阵"投影"成自己独享的 A panel、B panel 与 C 区：
+
+- [gemm_performance_kernel.cpp:58-66](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp#L58-L66)：`mIterIdx = get_block_idx() % mIter`、`nIterIdx = get_block_idx() / mIter`，把线性核号映射成 2D 网格坐标；三个 `gmOffset` 分别按行偏移（A）、列偏移（B）和行列联合偏移（C）计算本核的读写起点。每个核拥有连续的 A panel 与 B panel，写入互不重叠，因此全程无需 SyncAll。
+
+参数间还有一个隐含约束：`m % singleCoreM == 0` 且 `n % singleCoreN == 0`（6144/1536=4、6144/1024=6），README 的 checklist 明确要求检查这一点。
+
+#### 4.1.4 代码实践
+
+1. **实践目标**：验证多核切分的无重叠性。
+2. **操作步骤**：在纸上（或一段示例 Python 中）模拟 `block_idx` 从 0 到 23，逐个套用 [gemm_performance_kernel.cpp:59-63](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp#L59-L63) 的公式，列出每个核的 `(mIterIdx, nIterIdx)` 及其 C 区左上角全局坐标。
+3. **需要观察的现象**：24 个核恰好铺满 4×6 网格，任意两核的 C 区矩形不相交。
+4. **预期结果**：`block_idx=0` 是 (0,0)，`block_idx=5` 是 (0,5)，`block_idx=6` 是 (1,0)，`block_idx=23` 是 (3,5)。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：如果把 `singleCoreN` 改成 768（6144/768=8），需要怎样的核网格？blockDim 是多少？
+
+答案：M 方向仍是 6144/1536=4，N 方向 8，共 4×8=32 核，`blockDim=32`。此时 `mIter=4` 的取模/除法映射关系不变，但 A3 只有 24 个 AICORE，超出的核会无法一次性调度——所以切分方案必须与硬件核数匹配。
+
+**练习 2**：为什么本例坚持"square 问题不切 K"？
+
+答案：切 K（split-K）会让多个核各算 C 的一部分和，最后必须跨核累加，引入同步与额外写回；而 m、n 方向切分天然无依赖。只有当 m、n 都很小、K 很大（矩阵细长）导致核数铺不满时，split-K 才值得考虑。
+
+### 4.2 缓冲布局：两级 double buffer 的物理摆放
+
+#### 4.2.1 概念说明
+
+Manual 模式下缓冲不会自动分配，`TASSIGN` 负责把片上偏移绑给 Tile（回顾 u3-l2：排布不重叠、不越界是开发者的第一责任）。本例需要摆放的缓冲有三组：
+
+1. **L1 暂存**：`aMatTile[2]`（每个 `[128, 64×4]` 的 fp16 panel）与 `bMatTile[2]`（`[64×4, 256]`），各两份构成第一级 double buffer；
+2. **L0A/L0B 计算缓冲**：`aTile[2]`（`[128, 64]`）与 `bTile[2]`（`[64, 256]`），各两份构成第二级 ping-pong；
+3. **L0C 累加器**：`cTile` 一份即可——它跨整个 K 循环持续累加，不参与乒乓。
+
+L0 的乒乓受硬件约束：A2/A3 的 L0A/L0B 每半区各 32 KiB，所以**每个 tile 的 footprint 不得超过 32 KiB**。这就回答了 4.1 的问题：
+
+- `aTile` = 128×64×2B = 16 KiB ✓
+- `bTile` = 64×256×2B = 32 KiB ✓（恰好打满预算）
+
+#### 4.2.2 核心流程
+
+缓冲容量核算（fp16，2 字节/元素）：
+
+\[ \text{L1 A panel} = baseM \times baseK \times stepKa \times 2 = 128 \times 256 \times 2 = 64\,\text{KiB} \]
+\[ \text{L1 B panel} = baseK \times stepKb \times baseN \times 2 = 256 \times 256 \times 2 = 128\,\text{KiB} \]
+
+两份 A panel + 两份 B panel 共 384 KiB，在 A2/A3 的 L1 容量（512 KiB 量级）之内。摆放地址依次排开：
+
+```
+L1:  [aMat0 64K][aMat1 64K][bMat0 128K][bMat1 128K]
+L0A: [aTile0 16K @ 0x0][aTile1 16K @ 0x8000(32K)]
+L0B: [bTile0 32K @ 0x0][bTile1 32K @ 0x8000(32K)]   // 各半区 ping/pang
+L0C: [cTile @ 0x0]
+```
+
+#### 4.2.3 源码精读
+
+- [gemm_performance_kernel.cpp:15-16](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp#L15-L16)：`BUFFER_NUM = 2` 与 `L0_PINGPONG_BYTES = 32 * 1024`，后者是 L0A/L0B 乒乓切分的硬约束常量。
+- [gemm_performance_kernel.cpp:182-196](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp#L182-L196)：Tile 类型定义。`TileMatA`/`TileMatB` 是 L1 上的 Mat tile，容量形状含 stepK 因子（`baseK * stepKa`）；`LeftTile`/`RightTile`/`ResTile` 即 u5-l1 讲过的 Cube 三件套别名，各声明 `[BUFFER_NUM]` 份，唯独 `cTile` 单份。
+- [gemm_performance_kernel.cpp:199-210](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp#L199-L210)：九条 `TASSIGN` 完成 L1 与 L0 的显式摆放。注意 L1 的地址全部用 `sizeof(U)` 参与计算的字节偏移显式排布，四个 L1 buffer 首尾相接不重叠；L0A/L0B 各以 `0x0 + L0_PINGPONG_BYTES`（即 +32 KiB）放 pang 副本。
+
+这段代码同时是基线三大瓶颈中"乒乓深度"和"baseK 摊薄"的解法：L1 双缓冲让 TLOAD 与后续各级解耦，stepK=4 让每次 DMA 搬 4 个 K 切片。
+
+#### 4.2.4 代码实践
+
+1. **实践目标**：验证缓冲摆放不重叠且不超预算。
+2. **操作步骤**：对照 [gemm_performance_kernel.cpp:199-210](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp#L199-L210)，手算每个 TASSIGN 的地址区间（以字节为单位），画一张 L1/L0A/L0B/L0C 的地址条形图。
+3. **需要观察的现象**：L1 四段区间 `[0, 64K) [64K, 128K) [128K, 256K) [256K, 384K)` 首尾相接；L0A 的 aTile1 起点恰为 32 KiB，aTile 的 16 KiB 装得下；L0B 的 bTile 为 32 KiB 恰好占满一个乒乓槽。
+4. **预期结果**：无任何两个缓冲区间相交；每个 L0 缓冲 ≤ 32 KiB。若把 `baseN` 改成 320，`bTile` = 64×320×2 = 40 KiB > 32 KiB，摆放即越界——这说明 baseN=256 不是随手选的。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：若想进一步把 `stepKa` 提到 8，L1 需要多少容量？可能带来什么风险？
+
+答案：A panel 变为 128×512×2 = 128 KiB/份，两份 256 KiB；B panel 128 KiB/份×2；合计 512 KiB，逼近或超出 L1 总量。风险是缓冲放不下（TASSIGN 越界静默踩数据），同时 stepK 过大意味着"凑齐 8 片才发一次 DMA"，K 剩余部分不足 stepK 时还会引入尾块特判。收益递减、风险陡增，这正是 README "increase stepK until L1 capacity or overlap breaks down" 的含义。
+
+**练习 2**：为什么 `cTile` 不需要 double buffer？
+
+答案：cTile 在整个 K 循环里被 `TMATMUL_ACC` 持续累加，是唯一写者也是唯一读者（同一条 Cube 流水线），写后读由 Cube 流水线内部顺序保证；乒乓的价值在于解耦"生产者搬运"与"消费者计算"，而 cTile 没有跨流水线的生产-消费对。
+
+### 4.3 流水线设计：ProcessKIteration 的事件编排
+
+#### 4.3.1 概念说明
+
+这是整个 kernel 的性能心脏。四级流水在一个 K 迭代里各做一件事：
+
+| 级 | 指令 | 流水线 | 缓冲对 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | TLOAD | MTE2 | `aMatTile[p]/bMatTile[p]`（L1） | GM→L1，每 stepK 片发一次 |
+| 2 | TEXTRACT | MTE1 | `aTile[q]/bTile[q]`（L0A/L0B） | 从 L1 panel 切出第 kModstepK 片 |
+| 3 | TMATMUL(_ACC) | M | `cTile` | Cube 乘累加 |
+| 4 | TSTORE | FIX | — | L0C→GM，内层 K 循环结束后才执行 |
+
+两级 double buffer 由两个状态变量驱动：`mte2DBFlag` 标记 L1 下一次写入哪个槽，`mte1DBFlag` 标记 L0 下一次写入哪个槽。事件协议要点（u2-l3 的"泄漏即断言"纪律在此充分体现）：
+
+- **MTE1→MTE2 事件（id 0/1，即 L1 槽号）**：TEXTRACT 用完某个 L1 槽后放行，允许 TLOAD 重写该槽；
+- **M→MTE1 事件（id 0/1，即 L0 槽号）**：TMATMUL 用完某个 L0 槽后放行，允许 TEXTRACT 重写该槽；
+- **MTE1→M 事件**：TEXTRACT 完成后通知 Cube 可以开算。
+
+由于事件编号每对流水线只有 8 个且须像 SSA 一样"set 一次、wait 一次"，而循环里事件是循环使用的，代码在循环前后补了初始化与排空：循环开始前把四个事件各 set 一次（让首轮 wait 不阻塞），循环结束后把四个事件各 wait 一次（把循环内最后一次 set 消化掉）。
+
+#### 4.3.2 核心流程
+
+一次 `kIter` 的指令序列（稳态，`kModstepKa = kIter % stepKa`）：
+
+```
+若 kModstepKa == 0（每 4 轮一次）:
+    wait  MTE1→MTE2 (mte2DBFlag)     # 上一轮 TEXTRACT 已用完该 L1 槽
+    TLOAD aMatTile[p], bMatTile[p]   # GM→L1，搬 4 片的量
+    set   MTE2→MTE1 (0), (1)         # 通知 MTE1：A/B panel 就绪
+    p 翻转
+
+wait  M→MTE1 (mte1DBFlag)            # Cube 已用完该 L0 槽
+若 kModstepKa == 0: wait MTE2→MTE1(0)   # 等 A panel 就绪
+TEXTRACT aTile[q] ← aMatTile[curr], 列偏移 kModstepKa*baseK
+若 kModstepKa == 0: wait MTE2→MTE1(1)   # 等 B panel 就绪
+TEXTRACT bTile[q] ← bMatTile[curr], 行偏移 (kIter%stepKb)*baseK
+若 (kIter+1)%stepKa == 0: set MTE1→MTE2 (currMte2Idx)  # 4 片切完，释放 L1 槽
+
+set   MTE1→M (q); wait MTE1→M (q)   # L0 数据就绪（同流水线内屏障语义）
+kIter==0 ? TMATMUL : TMATMUL_ACC     # 首轮初始化，后续累加
+set   M→MTE1 (q)                     # 释放 L0 槽
+q 翻转
+```
+
+稳态时间线上，第 n 轮的 TMATMUL 与第 n+1 轮的 TEXTRACT、第 n+4 轮才发生的 TLOAD 并行推进——这就是"搬运与计算重叠"的落点。
+
+值得注意的细节：`set MTE1→M` 后紧跟 `wait MTE1→M`，看似自我抵消，实际是把"TEXTRACT 完成"挂牌给 M 流水线，再由程序序上的 Cube 指令确认依赖——这是该 kernel 沿用底层 `PIPE_MTE*` 事件的写法（见 [gemm_performance_kernel.cpp:24-25](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp#L24-L25) 的注释说明）。
+
+#### 4.3.3 源码精读
+
+- [gemm_performance_kernel.cpp:37-46](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp#L37-L46)：`SetFlag`/`WaitFlag` 两个模板小工具，把 `set_flag`/`wait_flag` 的 `(srcPipe, dstPipe, id)` 三元组变成可读的类型参数调用，是全文件事件代码的统一入口。
+- [gemm_performance_kernel.cpp:28-35](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp#L28-L35)：`MatmulAcc`——`k==0` 用 `TMATMUL`（清零初始化），否则用 `TMATMUL_ACC`（在现有 cTile 上累加），正是 u5-l1 讲过的 split-K 累加惯用法，这里用于核内 K 方向的 96 轮（6144/64）迭代。
+- [gemm_performance_kernel.cpp:79-104](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp#L79-L104)：TLOAD 段。`NDValidShapeA = TileShape2D<U, baseM, baseK*stepKa>` 说明一次搬运的视野是 4 片 K 的宽度；`WaitFlag<PIPE_MTE1, PIPE_MTE2>(mte2DBFlag)` 先确认 TEXTRACT 已释放目标 L1 槽，两条 TLOAD 之后各 set `MTE2→MTE1` 的 0 号与 1 号事件（A、B 分开挂牌），最后翻转 `mte2DBFlag`。
+- [gemm_performance_kernel.cpp:106-122](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp#L106-L122)：TEXTRACT 段。先 `WaitFlag<PIPE_M, PIPE_MTE1>(mte1DBFlag)` 等 Cube 释放 L0 槽；`currMte2Idx` 是 `mte2DBFlag` 的反转（刚翻转过，指向"当前装好数据"的槽）；两条 TEXTRACT 的第三个/第四个参数是切片偏移（`kModstepKa * baseK` 列偏移、`(kIter % stepKb) * baseK` 行偏移）；只有把 4 片全切完（`(kIter+1)%stepKa==0`）才 `SetFlag<PIPE_MTE1, PIPE_MTE2>(currMte2Idx)` 释放 L1 槽——L1 槽的持有期横跨 4 轮 kIter。
+- [gemm_performance_kernel.cpp:124-130](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp#L124-L130)：TMATMUL 段。set/wait `MTE1→M` 后调 `MatmulAcc`，再 `SetFlag<PIPE_M, PIPE_MTE1>` 释放 L0 槽，翻转 `mte1DBFlag`。
+- [gemm_performance_kernel.cpp:154-168](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp#L154-L168)：`InitSyncFlags`/`WaitSyncFlags`——首尾补同步。若没有开头的四次 set，首轮 `WaitFlag<PIPE_M,PIPE_MTE1>` 会永远阻塞；若没有结尾的四次 wait，循环内最后一次 set 泄漏，CPU/CostModel 后端的事件断言会报错（u2-l3 的纪律）。
+- [gemm_performance_kernel.cpp:136-152](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp#L136-L152)：`StoreResult`——内层 K 循环跑完后，把 `[baseM, baseN]` 的 cTile 经 `PIPE_FIX` 写回 GM，set/wait `M→FIX` 与 `FIX→M` 两对事件把写回也纳入依赖管理（cTile 下一个 (i,j) 块要重用，必须等 FIX 读完）。
+- [gemm_performance_kernel.cpp:220-234](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp#L220-L234)：三重循环骨架。`mLoop=1536/128=12`、`nLoop=1024/256=4`、`kLoop=6144/64=96`；`InitSyncFlags()` 在循环前、`WaitSyncFlags()` 在循环后。
+
+#### 4.3.4 代码实践（本讲核心实践）
+
+1. **实践目标**：把抽象的"流水重叠"落到具体指令序列上。
+2. **操作步骤**：
+   - 通读 [gemm_performance_kernel.cpp:73-131](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp#L73-L131)，为每条指令标注它所属的流水线（MTE2/MTE1/M/FIX）。
+   - 手工展开 kIter=0..5 六轮（覆盖一次完整的 stepK=4 周期 + 下一次 TLOAD），以时间为横轴、四条流水线为纵轴，画出每条指令的位置，用箭头连接每对 set/wait。
+   - 标出"第 n 轮 TMATMUL 与第 n+1 轮 TEXTRACT 并行"的时间段。
+3. **需要观察的现象**：TLOAD 只出现在 kIter=0 和 kIter=4 两列（每 4 轮一次）；每个事件 id 恰好 set 一次、wait 一次；kIter=0 的 `WaitFlag<PIPE_M,PIPE_MTE1>` 依赖的是 `InitSyncFlags` 预先 set 的事件而非上轮循环。
+4. **预期结果**：得到一张四泳道时序图，稳态区任一时刻 MTE1、M 两条流水线都有指令在飞。若你的图出现某泳道长期空白，说明你漏画了重叠（或者理解正确地发现了气泡——kIter=0 的首轮 warmup 确实是串行的，README 称之为 "first-iteration warmup"）。**待本地验证**：图中时序为人工推演，可在真机或 CostModel 后端用 profile 数据核对。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么释放 L1 槽的条件是 `(kIter + 1) % stepKa == 0` 而不是每轮释放？
+
+答案：一个 L1 panel 装着 4 片 K 切片，要被 TEXTRACT 读 4 轮。若每轮都 set `MTE1→MTE2`，事件会 set 4 次、而 TLOAD 侧只 wait 1 次，违反"set/wait 配对"纪律，且第 2 轮就放行重写会把尚未切片的数据冲掉。
+
+**练习 2**：两条 TEXTRACT 分别等待 `MTE2→MTE1` 的 0 号和 1 号事件，为什么 A、B 要分开挂牌而不是共用一个事件？
+
+答案：两条 TLOAD（A panel、B panel）是 MTE2 流水线上先后两条指令，完成时刻不同。分开挂牌让 TEXTRACT(A) 在 A 到位后即可起飞、TEXTRACT(B) 在 B 到位后起飞，两条搬运的延迟互相不拖累；若共用一个事件（挂在 B 之后），A 已就绪也得等 B 搬完。
+
+**练习 3**：删掉 `WaitSyncFlags()` 程序还能在真机上跑对吗？
+
+答案：功能上大概率仍正确（最后一次 set 无人等待不影响数据），但在 CPU 仿真/CostModel 后端会触发事件泄漏断言直接报错；更重要的是它表明作者没有理解事件循环使用的收尾协议。README 明确提醒重构时"keep them if you refactor"。
+
+### 4.4 性能数据解读：从利用率表到优化决策
+
+#### 4.4.1 概念说明
+
+调优不能靠感觉。README 给出的 A3（24 核）实测表是决策依据，核心读法只有一个问题：**哪条流水线卡住了端到端**。
+
+| m=k=n | TMATMUL (Cube) | TEXTRACT | TLOAD | TSTORE | 耗时 (ms) |
+| --- | --- | --- | --- | --- | --- |
+| 1536 | 54.5% | 42.2% | 72.2% | 7.7% | 0.0388 |
+| 3072 | 79.0% | 62.0% | 90.9% | 5.8% | 0.2067 |
+| 6144 | 86.7% | 68.1% | 95.2% | 3.1% | 1.5060 |
+| 7680 | 80.6% | 63.0% | 98.4% | 2.4% | 3.1680 |
+
+（数据引自 [README.md:81-86](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/README.md#L81-L86)）
+
+三条规律：
+
+1. **TSTORE 恒小且持续缩小**：GEMM 写一次读多次，输出占比随规模增大而摊薄，写回永远不是瓶颈。
+2. **TMATMUL 先升后降**（54.5%→86.7%→80.6%）：小规模时 warmup/排空占比高；中等规模流水稳定；最大规模时被喂数据的通路拖住——注意 7680³ 时 TLOAD 已达 98.4%，Cube 是"没活干"而不是"干不完"。
+3. **TEXTRACT 占比可观**（42%→68%）：L1→L0 的切片/布局开销不小，是与 TLOAD 竞争的第二个搬运侧开销。
+
+README 的经验法则：**TLOAD Ratio 接近 100% 即为 memory-feed limited**，此时再优化 TMATMUL 无益，应减少每 FLOP 的搬运字节数（提高复用、增大 stepK、加大 baseN/baseM）或改善重叠。
+
+#### 4.4.2 核心流程
+
+诊断决策树：
+
+```
+读表 → TLOAD ≈ 100%？
+ ├─ 是 → memory-feed bound：加大 stepK / 加大 baseN / 减少重复搬运
+ └─ 否 → TMATMUL 高？
+      ├─ 是 → 接近 balanced：需要端到端重构才有增量收益
+      └─ 否 → 检查 TEXTRACT 是否偏高（L1→L0 布局开销）
+              或 kLoop 过小导致 warmup/drain 占比高
+```
+
+对照基线结论（u5-l2 指出基线跨核 A/B 重复搬运约 4.5 倍、乒乓深度 1）：本例中 stepK=4 的 L1 批量搬运与两级双缓冲分别回应了后两条；跨核重复搬运则由 L2 缓存在真机上部分吸收（相邻核的 A/B panel 有共享）。
+
+#### 4.4.3 源码精读
+
+- [README.md:88-98](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/README.md#L88-L98)："What the numbers suggest" 一节，逐条解释上表四条规律，并给出"TLOAD 接近 100% 即 memory-feed limited"的经验法则。
+- [README.md:160-177](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/README.md#L160-L177)：对症下药的调优建议——"high TLOAD but low TMATMUL → Cube 在挨饿；high TEXTRACT but low TMATMUL → 切片是限制器"，以及保留首尾补同步的提醒。
+- [README.md:100-107](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/README.md#L100-L107)：把 kernel 明确描述为四级流水（TLOAD/TEXTRACT/TMATMUL/TSTORE）及各自缓冲，与本讲 4.3 的表格一致。
+
+#### 4.4.4 代码实践
+
+1. **实践目标**：练习用利用率数据做优化决策。
+2. **操作步骤**：假设你把本 kernel 移植到 `m=7680, k=7680, n=7680` 且实测 TMATMUL=81%、TLOAD=98%、TEXTRACT=63%。写下你的优化清单（按预期收益排序），再到 [README.md:145-158](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/README.md#L145-L158) 的指南逐条对照。
+3. **需要观察的现象**：你的第一优先级是否落在"减少 GM 流量"（stepK、复用、重叠）而不是"优化 TMATMUL 本身"。
+4. **预期结果**：与 README 第 6 节（[README.md:189-194](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/README.md#L189-L194)）的结论一致：7680³ 应聚焦减少搬运与改善重叠。**待本地验证**：若本地无 A3 硬件，无法复测数据，可退而用 `tests/run_costmodel.py` 做性能模拟（见 u10-l3）。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：3072³ 与 6144³ 相比，TMATMUL 与 TLOAD 同时走高（79%/90.9% 与 86.7%/95.2%），这说明什么？下一步优化难度如何？
+
+答案：说明流水线接近 balanced——计算与喂 data 两边都接近打满，硬件资源利用充分。此时的增量收益需要端到端的结构性改动（如更激进的分块、L2 友好的核编排），单点微调收益有限。README 对此的原话是 "improvements require careful end-to-end changes"。
+
+**练习 2**：耗时从 1536³ 的 0.0388ms 到 7680³ 的 3.168ms，规模×5 而耗时×81，这符合什么复杂度？
+
+答案：GEMM 是 O(n³) 计算 + O(n²) 数据。5³=125 倍计算量只换来 81 倍耗时，说明大规模下硬件并行度与流水效率发挥了作用（小规模被 warmup/launch 开销拖累）；同时 TLOAD 利用率随规模上升，说明数据侧也在逼近饱和。
+
+## 5. 综合实践
+
+**任务：画出 gemm_performance 一个 stepK 周期的完整流水线时序图，并诊断一处可改进点。**
+
+1. 精读 [gemm_performance_kernel.cpp:73-131](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp#L73-L131) 与 [gemm_performance_kernel.cpp:154-168](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/gemm_performance_kernel.cpp#L154-L168)。
+2. 手工展开 kIter=0..4（覆盖 warmup 首轮、两轮 TEXTRACT+TMATMUL、下一次 TLOAD 触发），画四泳道（MTE2/MTE1/M/FIX）时序图，用带编号的箭头连接每一对 set/wait，标出缓冲槽号（L1 的 0/1、L0 的 ping/pang）。
+3. 在图上回答三个问题：
+   - 哪个时间窗内 TMATMUL 与 TEXTRACT 并行？哪个窗内 TLOAD 与 TMATMUL 并行？
+   - kIter=0 的 warmup 阶段为什么是串行的？`InitSyncFlags` 的四次 set 各自放行了哪条 wait？
+   - 若把 `stepKa` 改为 1，图中哪些箭头会消失？TLOAD 的频率变为多少？结合 README 的 TLOAD Ratio 数据预测整体性能变化方向。
+4. 有条件的话在真机 `bash run.sh -r npu -v Ascend910B1`（或 CostModel 后端）跑一次，用 profile 的流水线占比核对你在第 3 问中的预测；无条件则标注"待本地验证"。
+
+**验收标准**：图中每个事件 id 的 set/wait 严格配对；能指出至少一处气泡（如 warmup 串行段）并说明其成因。
+
+## 6. 本讲小结
+
+- gemm_performance 用 **4×6 多核切分**（`singleCoreM=1536, singleCoreN=1024`，K 不切）实现 24 核零同步并行，核坐标由 `get_block_idx()` 取模/除法映射。
+- 缓冲摆放是显式的：L1 上 4 个 stepK 加宽的 Mat panel（共 384 KiB）+ L0A/L0B 各 32 KiB 乒乓槽，**每 tile ≤ 32 KiB** 是 baseK/baseN 选择的硬约束。
+- 性能心脏是 **两级 double buffer + 事件编排**：L1 槽持有期横跨 stepKa=4 轮，L0 槽每轮翻转；`InitSyncFlags`/`WaitSyncFlags` 兜住事件循环使用的首尾配对。
+- 流水线四级化（TLOAD→TEXTRACT→TMATMUL→TSTORE）配合 stepK=4 批量搬运，同时消解了基线的"乒乓深度 1"与"baseK 摊薄不足"两个瓶颈。
+- 性能决策靠利用率表：**TLOAD ≈ 100% 即 memory-feed limited**，应减少搬运字节而非微调 TMATMUL；TEXTRACT 占比 42%~68% 提示 L1→L0 开销不可忽视。
+
+## 7. 下一步学习建议
+
+- 下一讲 u5-l4 转入卷积通路：TImg2col、SetFmatrix 与 conv2d_forward——你将再次看到"TLOAD → 片上重排 → TMATMUL → TSTORE"的骨架，只是重排级换成了 Img2col 展开。
+- 若想先深入流水线理论，可跳读 u6-l2（事件驱动的 double buffer 方法论）与 u6-l3（CUBE/MTE/Vector Bound 判定），本讲的利用率表正是那里的实战素材。
+- 建议顺手阅读 [kernels/manual/a2a3/gemm_performance/main.cpp](https://github.com/gitcode.com/cann/pto-isa/blob/8aacb8e0a0c636d291f2e4219d231b52e8003a8a/kernels/manual/a2a3/gemm_performance/main.cpp) 与 `scripts/gen_data.py`，补全 host 侧视角；再用 `tests/run_costmodel.py` 对本 kernel 做一次无硬件的性能模拟，为 u10-l3 预热。
