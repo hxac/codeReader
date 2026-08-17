@@ -1,0 +1,1166 @@
+{
+  "head": "7ed686e5da60eb6008639916adba0f835cdbf4a6",
+  "project": "shmem",
+  "rationale": "SHMEM 是面向昇腾 NPU 的对称内存分布式通信库，代码分为 Host 侧（初始化、bootstrap、HYBM 对称堆、team、同步、传输层）与 Device 侧（gm2gm/ub2gm 数据面接口与 MTE/RDMA/SDMA/UDMA 引擎直驱），外加 Python 绑定与丰富示例。学习路线按\"先跑起来、再读懂主链路、后深入传输与引擎、最终多实例/DFX/二次开发\"设计：第 1 单元让读者从零完成定位认知、编译安装与首个 init 示例；第 2 单元沿 aclshmemx_init_attr 主链路走读初始化、bootstrap 控制面与对称内存堆；第 3、4 单元分别覆盖 Host 侧与 Device 侧数据面 API（RMA/AMO/信号/同步/集合通信），Device 侧结合 AscendC kernel 示例实践；第 5 单元下沉到传输层（TransportManager、RDMA QP、SDMA/UDMA、topo）与 AICore 直驱引擎；第 6 单元讲通信域 Team；第 7 单元讲 Python 包与 PyTorch 集成；第 8 单元为专家层，覆盖多实例、stream 异步、user buffer heap、under_api 动态加载、日志/profiling DFX、测试体系与通算融合综合实战。依赖关系保证每篇讲义只建立在前序讲义之上，示例与源码一一对应，便于边读边练。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 SHMEM 的定位、核心价值与典型使用场景",
+            "理解 Host 侧与 Device 侧接口的分工",
+            "掌握 PE、对称内存、通信引擎等核心术语"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README",
+            "include/shmem.h",
+            "docs/quickstart.md",
+            "docs/glossary.md"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README 与 include/shmem.h，手工绘制一张 Host/Device 接口分层图，标注自己最感兴趣的 5 个 API 并用一句话说明用途。",
+          "source_files": [
+            "README.md",
+            "docs/quickstart.md",
+            "docs/glossary.md",
+            "include/shmem.h"
+          ],
+          "title": "项目总览：什么是对称内存通信库",
+          "topic": "介绍 SHMEM 在昇腾生态中的定位：基于对称内存的多机多卡通信加速库。梳理 Host 侧与 Device 侧双侧接口体系、MTE/xDMA 通信引擎和典型应用场景。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-build-and-install.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "理解 build.sh 与 CMake 构建流程和主要编译选项",
+            "掌握 pip、二进制包、源码编译三种安装方式",
+            "能排查 CANN 环境、编译器、第三方依赖等常见问题"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "scripts/build.sh",
+            "CMakeLists.txt",
+            "setup.py",
+            "docs/quickstart.md"
+          ],
+          "order": 2,
+          "practice_task": "在有 CANN 环境的机器上执行 bash scripts/build.sh 完成编译并 source install/set_env.sh；无 NPU 环境时至少完成编译验证，并记录遇到的依赖问题与解决方式。",
+          "source_files": [
+            "scripts/build.sh",
+            "scripts/set_env.sh",
+            "CMakeLists.txt",
+            "setup.py",
+            "docs/quickstart.md"
+          ],
+          "title": "环境准备与源码编译",
+          "topic": "讲解 CANN 工具链依赖、bisheng 编译器、三种安装方式（pip / run 包 / 源码编译）以及 build.sh 的编译参数。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-code-organization.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "记住 include/、src/、examples/、tests/ 的职责边界",
+            "理解 gm2gm、ub2gm、engine、hybm、transport 等目录命名的含义",
+            "能快速定位某个 API 对应的头文件与实现文件"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "include",
+            "src",
+            "examples",
+            "tests"
+          ],
+          "order": 3,
+          "practice_task": "对照 docs/code_organization.md，在仓库中找到 aclshmem_malloc 的声明文件与实现文件、aclshmem_device RMA 接口的头文件位置，整理成一张 API 到文件的速查表。",
+          "source_files": [
+            "docs/code_organization.md",
+            "README.md",
+            "include/shmem.h",
+            "include/host/shmem_host_def.h"
+          ],
+          "title": "目录结构与代码组织",
+          "topic": "解读 include/device、include/host、src/host、src/device 等目录的分层规则，建立从 API 头文件到实现源码的映射能力。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "filename": "u1-l4-first-example-init.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "掌握 aclshmemx_init_attr / aclshmemx_finalize 的最小调用骨架",
+            "理解 run.sh 中 mode、pesize 等运行参数的含义",
+            "能独立编译并运行 examples/init 示例"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "examples/init/main.cpp",
+            "include/host/init/shmem_host_init.h",
+            "examples/init/run.sh"
+          ],
+          "order": 4,
+          "practice_task": "使用 scripts/run_examples.sh 或 examples/init/run.sh 以不同 pesize 运行 init 示例，观察每个 PE 的输出；然后修改 main.cpp 打印 aclshmem_my_pe() 与 aclshmem_n_pes() 的返回值。",
+          "source_files": [
+            "examples/init/main.cpp",
+            "examples/init/run.sh",
+            "include/host/init/shmem_host_init.h",
+            "scripts/run_examples.sh"
+          ],
+          "title": "运行第一个示例：init 示例解析",
+          "topic": "逐行解析 examples/init/main.cpp，理解 aclInit、aclshmemx_init_attr、shmem_finalize 的完整生命周期以及 run.sh 脚本的多进程拉起方式。"
+        }
+      ],
+      "order": 1,
+      "title": "走进 SHMEM：定位、环境与首个程序"
+    },
+    {
+      "id": "u2",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l1-init-api-and-modes.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "掌握 aclshmemx_init_attr_t 各字段含义",
+            "区分 Default、MPI、UniqueID 三种模式的适用场景",
+            "理解 uniqueid 的生成与广播用法"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "include/host/init/shmem_host_init.h",
+            "include/host/shmem_host_def.h"
+          ],
+          "order": 1,
+          "practice_task": "参照 examples/init/main.cpp 中的 RUN_WITH_MPI 分支，编写一个使用 MPI 模式初始化 4 个 PE 的最小程序，并验证各 PE 打印的 my_pe 不同。",
+          "source_files": [
+            "include/host/init/shmem_host_init.h",
+            "include/host/shmem_host_def.h",
+            "examples/init/main.cpp"
+          ],
+          "title": "初始化 API 与三种 Bootstrap 模式",
+          "topic": "讲解 aclshmemx_init_attr_t 结构、ACLSHMEMX_INIT_WITH_DEFAULT / MPI / UNIQUEID 三种 bootstrap 模式以及 uniqueid 的获取与广播流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-init-flow-source.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "描述 init 三阶段（bootstrap、建堆、子模块就绪）的顺序",
+            "理解 finalize 的逆序释放与控制面 barrier",
+            "能在源码中定位各初始化阶段的函数入口"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/host/init/shmem_init.cpp",
+            "src/host/init/shmemi_init.h"
+          ],
+          "order": 2,
+          "practice_task": "在 src/host/init/shmem_init.cpp 中标注出 bootstrap、reserve_heap/setup_heap、子模块初始化三个阶段的调用位置，画出初始化流程图并注明关键函数名。",
+          "source_files": [
+            "src/host/init/shmem_init.cpp",
+            "src/host/init/shmemi_init.h",
+            "docs/principles/init_finalize.md"
+          ],
+          "title": "初始化全流程源码走读",
+          "topic": "跟随 aclshmemx_init_attr 的调用链走读 shmem_init.cpp：bootstrap 建链、HYBM 建堆、子模块就绪，以及 finalize 的逆序释放过程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-bootstrap-config-store.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "理解 Default/UID 模式下 PE 0 为中心的星型拓扑",
+            "掌握 bootstrap 插件的 dlopen 加载机制",
+            "理解 barrier/allgather 在控制面同步中的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/host/bootstrap/shmemi_bootstrap.cpp",
+            "src/host/bootstrap/shmemi_bootstrap_config_store.cpp"
+          ],
+          "order": 3,
+          "practice_task": "结合 docs/principles/config_store_bootstrap.md 的调用链，画出 Config Store 模式下 4 个 PE 建链的时序图，标注 TcpConfigStore 与 AccStoreServer 各自所在的进程。",
+          "source_files": [
+            "src/host/bootstrap/shmemi_bootstrap.cpp",
+            "src/host/bootstrap/shmemi_bootstrap_config_store.cpp",
+            "docs/principles/config_store_bootstrap.md"
+          ],
+          "title": "Bootstrap 控制面：Config Store 与 TCP 星型拓扑",
+          "topic": "深入 Default/UniqueID 模式的 CPU 侧控制面：PE 0 监听的 KV 服务、各 PE 的 TCP 客户端建链、以及基于 KV 表的 barrier/allgather 集合通信。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l4-symmetric-heap-api.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "理解对称堆与普通 device 内存的关键差异",
+            "掌握同序同大小 malloc 保证堆内偏移一致的规则",
+            "能使用 heap API 编写对称分配程序"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "include/host/mem/shmem_host_heap.h",
+            "src/host/mem/shmem_mgr.cpp",
+            "src/host/mem/shmem_mm.cpp"
+          ],
+          "order": 4,
+          "practice_task": "编写程序在两个 PE 上以相同顺序 aclshmem_malloc 相同大小的缓冲区，用 aclshmemx_get_heap_base 与指针偏移验证两 PE 的对称性。",
+          "source_files": [
+            "include/host/mem/shmem_host_heap.h",
+            "src/host/mem/shmem_mgr.cpp",
+            "src/host/mem/shmem_mm.cpp"
+          ],
+          "title": "对称内存堆 API：malloc / calloc / align / free",
+          "topic": "讲解 aclshmem_malloc 系列接口与对称堆语义：为什么各 rank 必须同序同大小分配，以及 mem_type 参数与 heap base 的关系。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u2-l5-hybm-heap-internals.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "理解 HYBM 堆的预留、分配、交换、mmap 四个阶段",
+            "掌握 mem_entity 与 slice 的关系",
+            "理解对称地址是如何在多 rank 间对齐的"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/host/mem/heap/hybm_mem_segment.cpp",
+            "src/host/mem/heap/hybm_mem_slice.cpp",
+            "src/host/entity/mem_entity_entry.cpp"
+          ],
+          "order": 5,
+          "practice_task": "阅读 reserve_heap 与 setup_heap 的调用关系，用文字+示意图说明一个 rank 的内存 slice 如何被交换并 mmap 到其他 rank，指出 exchange_slice 发生在哪一步。",
+          "source_files": [
+            "src/host/mem/heap/hybm_def.h",
+            "src/host/mem/heap/hybm_mem_segment.cpp",
+            "src/host/mem/heap/hybm_mem_slice.cpp",
+            "src/host/entity/mem_entity_entry.cpp",
+            "src/host/entity/mem_entity_factory.cpp"
+          ],
+          "title": "HYBM 混合内存与 slice 交换机制",
+          "topic": "剖析 src/host/mem/heap 下 HYBM（Hybrid Memory）实现：GVA 预留、内存分段、slice 实体化与跨 rank 交换，以及 mem_entity 工厂模式。"
+        }
+      ],
+      "order": 2,
+      "title": "核心概念：初始化与对称内存"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u3-l1-host-rma.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "掌握 put/get 系列接口的参数与语义",
+            "理解阻塞与非阻塞（nbi）变体的差异",
+            "理解远端地址 = 对称堆基址 + pe 映射的计算方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "include/host/data_plane/shmem_host_rma.h",
+            "src/host/data_plane/shmem_host_rma.cpp",
+            "src/host/mem/shmem_rma.cpp"
+          ],
+          "order": 1,
+          "practice_task": "编写 Host 侧程序：PE0 用 putmem 向 PE1 的对称缓冲写入数据，PE1 用 getmem 读回并校验；再对比 putmem 与 putmem_nbi 的行为差异。",
+          "source_files": [
+            "include/host/data_plane/shmem_host_rma.h",
+            "src/host/data_plane/shmem_host_rma.cpp",
+            "src/host/mem/shmem_rma.cpp"
+          ],
+          "title": "Host 侧 RMA：put / get 与内存拷贝",
+          "topic": "讲解 Host 侧远程内存访问接口 aclshmem_putmem / getmem 及其 nbi 变体的语义、底层调用链以及与对称堆的关系。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-signal-ops.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解数据+信号联合语义的生产者消费者用法",
+            "掌握 ACLSHMEM_SIGNAL_SET 与 SIGNAL_ADD 的区别",
+            "能用 put_signal 实现无锁通知"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "include/host/data_plane/shmem_host_so.h",
+            "宏生成接口模式"
+          ],
+          "order": 2,
+          "practice_task": "基于宏生成模式梳理 put_signal 家族（按类型、按位宽）共有多少变体，并用 put_signal + wait_until 实现一个两 PE 间的乒乓数据传递小程序。",
+          "source_files": [
+            "include/host/data_plane/shmem_host_so.h"
+          ],
+          "title": "信号操作与 put_signal",
+          "topic": "讲解 aclshmem_*_put_signal 系列接口：一次调用同时完成数据搬运与远端信号通知，及其在同步通信中的用法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l3-host-sync.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "掌握 barrier、wait_until、quiet 的使用时机",
+            "理解 p2p 同步原语的比较运算语义",
+            "能判断何时必须显式调用 quiet 保证落盘"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/host/sync/shmemi_sync.cpp",
+            "include/host/data_plane/shmem_host_p2p_sync.h"
+          ],
+          "order": 3,
+          "practice_task": "运行 examples/rdma_sync_barrier_demo，然后修改示例把 barrier 换成 signal_wait_until 实现同样的同步效果，对比两种方式输出。",
+          "source_files": [
+            "src/host/sync/shmemi_sync.cpp",
+            "src/host/sync/shmemi_sync.h",
+            "include/host/data_plane/shmem_host_p2p_sync.h"
+          ],
+          "title": "Host 侧同步：barrier、p2p 同步与保序",
+          "topic": "讲解 Host 侧同步原语：全局 barrier、p2p wait_until/wait、以及 quiet/order 等内存可见性保证机制在 src/host/sync 中的实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l4-host-collective-allgather.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "理解 allgather 示例中 Host 与 kernel 的分工",
+            "掌握 RMA 接口实现集合通信的环形/直接算法思路",
+            "能基于示例改造出 broadcast 风格的通信"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "examples/allgather/main.cpp",
+            "examples/allgather/allgather_kernel.cpp",
+            "include/host/data_plane/shmem_host_cc.h"
+          ],
+          "order": 4,
+          "practice_task": "编译运行 examples/allgather，阅读 kernel 中每个 PE 搬运哪一段数据；将 allgather 逻辑改为仅 PE0 广播自身数据到所有 PE 的变体并验证正确性。",
+          "source_files": [
+            "include/host/data_plane/shmem_host_cc.h",
+            "src/host/data_plane/shmem_host_cc.cpp",
+            "examples/allgather/main.cpp",
+            "examples/allgather/allgather_kernel.cpp",
+            "examples/allgather/README.md"
+          ],
+          "title": "Host 侧集合通信与 allgather 实战",
+          "topic": "结合 examples/allgather 讲解 Host 侧集合通信接口与 RMA 组合实现集合语义的思路。"
+        }
+      ],
+      "order": 3,
+      "title": "Host 侧数据面编程"
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u4-l1-device-programming-model.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "理解 Host 侧信息如何序列化并下发到 device 全局内存",
+            "掌握 __gm__ 指针与 ACLSHMEM_DEVICE 修饰符",
+            "理解 device 侧接口为何能直接以 pe 为参数寻址远端"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/device/shmemi_device_meta.h",
+            "src/device/shmemi_device_common.h",
+            "include/device/shmem_def.h"
+          ],
+          "order": 1,
+          "practice_task": "追踪初始化阶段 device state（mype、npes、堆信息）由哪个 Host 函数写入 device 内存，画出 Host 到 Device 的状态下发路径图。",
+          "source_files": [
+            "src/device/shmemi_device_meta.h",
+            "src/device/shmemi_device_common.h",
+            "include/device/shmem_def.h",
+            "src/host_device/shmemi_host_device_constant.h"
+          ],
+          "title": "Device 编程模型与全局状态下发",
+          "topic": "讲解 AICore kernel 中如何使用 SHMEM：host device 共享的 meta/state 结构、__gm__ 地址空间以及 kernel 侧拿到全局状态的机制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-gm2gm-rma-kernel.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "掌握 device 侧 put/get 接口在 AscendC kernel 中的调用方式",
+            "理解 gm2gm（global memory 到 global memory）数据通路",
+            "能独立编写并运行一个两 PE 数据搬运 kernel"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "include/device/gm2gm/shmem_device_rma.h",
+            "src/device/gm2gm/shmem_device_rma.cpp",
+            "examples/rdma_demo/rdma_demo_kernel.cpp"
+          ],
+          "order": 2,
+          "practice_task": "编译运行 examples/rdma_demo，理解 kernel 中搬运方向；仿照它编写一个反向 kernel：PE1 向 PE0 的对称缓冲写入数据并在 Host 侧校验。",
+          "source_files": [
+            "include/device/gm2gm/shmem_device_rma.h",
+            "src/device/gm2gm/shmem_device_rma.cpp",
+            "src/device/gm2gm/shmemi_device_rma.cpp",
+            "examples/rdma_demo/main.cpp",
+            "examples/rdma_demo/rdma_demo_kernel.cpp"
+          ],
+          "title": "gm2gm 高阶 RMA 接口与 kernel 编写",
+          "topic": "讲解 device 侧 gm2gm 高阶 RMA 接口（put/get 家族）的宏生成模式，并结合 rdma_demo 示例演示在 AscendC kernel 中直接发起跨 PE 数据搬运。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-amo.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "掌握 atomic_add/fetch_add/cas 等原子接口语义",
+            "理解不同引擎下原子操作完成保证的差异",
+            "能用 AMO 实现跨 PE 计数器"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "include/device/gm2gm/shmem_device_amo.h",
+            "src/device/gm2gm/shmem_device_amo.hpp"
+          ],
+          "order": 3,
+          "practice_task": "阅读 tests/unittest/device/mem/atomic 下的用例，编写 kernel 让 4 个 PE 各自对远端同一计数器 atomic_add 100 次，验证最终值为 400。",
+          "source_files": [
+            "include/device/gm2gm/shmem_device_amo.h",
+            "src/device/gm2gm/shmem_device_amo.hpp",
+            "tests/unittest/device/mem/atomic",
+            "docs/api/atomic_api_sync_async_comparison.md"
+          ],
+          "title": "原子内存操作 AMO",
+          "topic": "讲解 aclshmem_*_atomic_add / fetch_add / inc / cas 等原子操作宏生成体系，支持的数据类型以及不同引擎（RDMA/UDMA/MTE）下的可见性差异。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l4-device-signal-p2p-sync.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "掌握 signal_op 与六种比较运算的含义",
+            "理解 kernel 内自旋等待的实现与退出条件",
+            "能用 notify+wait 模式实现 kernel 间同步"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "include/device/gm2gm/shmem_device_p2p_sync.h",
+            "src/device/gm2gm/shmemi_device_p2p_sync_kernel.cpp",
+            "examples/notifywait/main.cpp"
+          ],
+          "order": 4,
+          "practice_task": "运行 examples/notifywait，然后修改 kernel 用 signal_op + signal_wait_until 实现两 PE kernel 间的握手：PE0 写数据并 signal，PE1 等到信号后读取并校验。",
+          "source_files": [
+            "include/device/gm2gm/shmem_device_p2p_sync.h",
+            "src/device/gm2gm/shmemi_device_p2p_sync_kernel.cpp",
+            "src/device/gm2gm/shmemi_device_p2p_sync.h",
+            "examples/notifywait/main.cpp"
+          ],
+          "title": "信号与 P2P 同步（device 侧）",
+          "topic": "讲解 kernel 内的信号操作 aclshmemx_signal_op、signal_wait_until、wait_until 家族与 notify/wait 配对，结合 notifywait 示例理解 kernel 间同步。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3",
+            "u4-l4"
+          ],
+          "filename": "u4-l5-memory-order-quiet.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "理解 AMO/RMA 操作的异步完成模型",
+            "掌握 mte_quiet/roce_quiet/udma_quiet 的适用引擎",
+            "能识别并修复缺少 quiet 导致的读到旧值问题"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "include/device/gm2gm/shmem_device_mo.h",
+            "include/device/gm2gm/shmem_device_so.h",
+            "docs/api/atomic_api_sync_async_comparison.md"
+          ],
+          "order": 5,
+          "practice_task": "在 u4-l3 的计数器实践中故意去掉 quiet 观察读回值的变化，再用对应引擎的 quiet 修复，记录两种情况的输出差异。",
+          "source_files": [
+            "include/device/gm2gm/shmem_device_mo.h",
+            "include/device/gm2gm/shmem_device_so.h",
+            "docs/api/atomic_api_sync_async_comparison.md"
+          ],
+          "title": "内存保序与 quiet 机制",
+          "topic": "讲解 device 侧内存保序（MO）接口与各引擎 quiet：为什么异步原子操作后需要 quiet 才能保证读回结果，以及不同引擎对应的 quiet 接口。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l6-ub2gm-mte.md",
+          "id": "u4-l6",
+          "learning_goals": [
+            "理解 ub2gm 与 gm2gm 两种数据面的适用场景",
+            "掌握 MTE 配置参数 aclshmemx_set_mte_config 的作用",
+            "能用 ub2gm 接口完成一次 UB 到远端 GM 的搬运"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "include/device/ub2gm/shmem_device_rma.h",
+            "include/device/ub2gm/engine/shmem_device_mte.h",
+            "src/device/ub2gm/shmem_device_rma.hpp"
+          ],
+          "order": 6,
+          "practice_task": "对比同一数据搬运任务分别用 gm2gm RMA 与 ub2gm MTE 接口实现，记录两者在接口调用与数据路径上的差异。",
+          "source_files": [
+            "include/device/ub2gm/shmem_device_rma.h",
+            "include/device/ub2gm/engine/shmem_device_mte.h",
+            "src/device/ub2gm/shmem_device_rma.hpp",
+            "examples/sdma"
+          ],
+          "title": "ub2gm 接口与 MTE 通路",
+          "topic": "讲解 AICore 驱动的 ub2gm 数据面接口：数据从 Unified Buffer 直达远端 Global Memory 的 MTE 通路及其配置。"
+        }
+      ],
+      "order": 4,
+      "title": "Device 侧编程模型与数据面接口"
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u5-l1-transport-arch.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "理解 TransportManager 抽象与工厂创建方式",
+            "掌握 dataOpType 与传输引擎的映射关系",
+            "能在源码中定位一种引擎的初始化入口"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/host/transport/transport_manager.h",
+            "src/host/transport/transport_manager.cpp",
+            "src/host/transport/transport_def.h"
+          ],
+          "order": 1,
+          "practice_task": "梳理 TransportManager 的虚函数接口列表，说明 OpenDevice/CloseDevice 等方法在各引擎实现中的职责，画出一层类图。",
+          "source_files": [
+            "src/host/transport/transport_manager.h",
+            "src/host/transport/transport_manager.cpp",
+            "src/host/transport/transport_def.h"
+          ],
+          "title": "传输层架构：TransportManager 抽象",
+          "topic": "讲解 src/host/transport 的整体设计：TransportManager 基类、按 TransportType / DataOpType 创建传输器的工厂，以及传输层与堆初始化的关系。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-composite-transport.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "理解组合模式如何按优先级委托多个引擎",
+            "掌握组合掩码与创建请求引擎集合的行为",
+            "能读懂 composite 单元测试的验证思路"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/host/transport/composite_transport_manager.h",
+            "src/host/transport/composite_transport_manager.cpp",
+            "tests/unittest/host/transport/composite_transport_manager_test.cpp"
+          ],
+          "order": 2,
+          "practice_task": "阅读 composite_transport_manager_test.cpp，写一段文字说明组合管理器在子管理器全部创建失败时的回退行为，并对照源码验证结论。",
+          "source_files": [
+            "src/host/transport/composite_transport_manager.h",
+            "src/host/transport/composite_transport_manager.cpp",
+            "tests/unittest/host/transport/composite_transport_manager_test.cpp"
+          ],
+          "title": "组合传输管理器与多引擎协同",
+          "topic": "讲解 CompositeTransportManager 如何按优先级顺序组合多个传输引擎（MTE/RDMA/SDMA/UDMA）并支持组合掩码创建。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l3-rdma-qp.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "理解 QP 的创建、缓存与复用策略",
+            "掌握固定 rank 与动态 rank 两种 QP 管理差异",
+            "理解建链端口自动分配规则"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "src/host/transport/device_rdma/device_rdma_transport_manager.cpp",
+            "src/host/transport/device_rdma/device_qp_manager.cpp",
+            "src/host/transport/device_rdma/fixed_ranks_qp_manager.cpp"
+          ],
+          "order": 3,
+          "practice_task": "画出 RDMA 模式下两个节点各 8 个 PE 建链时 QP 与连接数量的示意图，并说明 fixed_ranks 与 dynamic_ranks 两种管理器分别适用的通信模式。",
+          "source_files": [
+            "src/host/transport/device_rdma/device_rdma_transport_manager.cpp",
+            "src/host/transport/device_rdma/device_rdma_transport_manager_v2.cpp",
+            "src/host/transport/device_rdma/device_qp_manager.cpp",
+            "src/host/transport/device_rdma/fixed_ranks_qp_manager.cpp",
+            "src/host/transport/device_rdma/dynamic_ranks_qp_manager.cpp"
+          ],
+          "title": "RDMA 传输与 QP 管理",
+          "topic": "深入 device_rdma 子系统：QP（Queue Pair）管理器、固定/动态 rank QP、RoCE 网卡信息交换与建链流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "filename": "u5-l4-sdma-udma.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "理解 SDMA（仅 A3）与 UDMA（Ascend950）的平台约束",
+            "掌握 UDMA 对 HCOMM 资源接口的依赖方式",
+            "能运行 udma_demo 并解释其使用的引擎"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "src/host/transport/device_sdma/device_sdma_transport_manager.cpp",
+            "src/host/transport/device_udma/device_udma_transport_manager.cpp"
+          ],
+          "order": 4,
+          "practice_task": "对比 RDMA/SDMA/UDMA 三个 transport manager 的初始化依赖差异，整理成一张平台-引擎-依赖条件对照表；有条件时运行 examples/udma_demo 验证。",
+          "source_files": [
+            "src/host/transport/device_sdma/device_sdma_transport_manager.cpp",
+            "src/host/transport/device_udma/device_udma_transport_manager.cpp",
+            "src/host/transport/device_udma/device_udma_def.h",
+            "examples/udma_demo/main.cpp"
+          ],
+          "title": "SDMA 与 UDMA 传输管理器",
+          "topic": "讲解 SDMA 与 UDMA 两种传输管理器的实现差异、平台适配条件以及 UDMA 依赖的 HCOMM 通道资源。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l5-topo-rootinfo.md",
+          "id": "u5-l5",
+          "learning_goals": [
+            "理解 XML 拓扑解析与 NPU/NIC 亲和匹配流程",
+            "掌握 rootinfo 工具的用途与生成方式",
+            "理解拓扑信息如何影响传输路径选择"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "src/host/transport/topo/topo_reader.cpp",
+            "tests/unittest/host/topo/rootinfo_test.cpp",
+            "tests/unittest/host/topo/xml_parser_test.cpp"
+          ],
+          "order": 5,
+          "practice_task": "阅读 tests/unittest/host/topo 下的测试，说明 pcie_nic_matcher 如何为 NPU 匹配 NIC；再按 docs/tools/root_info_generate_user_guide.md 生成一份 rootinfo 并解释其内容。",
+          "source_files": [
+            "src/host/transport/topo/topo_reader.cpp",
+            "src/host/transport/topo/topo_reader.h",
+            "tests/unittest/host/topo/rootinfo_test.cpp",
+            "tests/unittest/host/topo/xml_parser_test.cpp",
+            "docs/tools/root_info_generate_user_guide.md"
+          ],
+          "title": "拓扑发现与 rootinfo",
+          "topic": "讲解 src/host/transport/topo：如何解析系统 XML 拓扑、生成 rootinfo、做 NPU-NIC 亲和匹配以指导多机路由。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2",
+            "u5-l1"
+          ],
+          "filename": "u5-l6-engine-direct-drive.md",
+          "id": "u5-l6",
+          "learning_goals": [
+            "区分高阶数据面接口与 engine 低阶直驱接口",
+            "理解 SDMA/UDMA 直驱的 prefetch、quiet 等低阶能力",
+            "能在 kernel 中选择合适的引擎接口层级"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "include/device/gm2gm/engine/shmem_device_mte.h",
+            "include/device/gm2gm/engine/shmem_device_udma.h",
+            "src/device/gm2gm/engine"
+          ],
+          "order": 6,
+          "practice_task": "为四种引擎（MTE/RDMA/SDMA/UDMA）各挑一个代表性低阶接口，说明其完成高阶 RMA 中哪一步，并整理成接口分层对照表。",
+          "source_files": [
+            "include/device/gm2gm/engine/shmem_device_mte.h",
+            "include/device/gm2gm/engine/shmem_device_rdma.h",
+            "include/device/gm2gm/engine/shmem_device_sdma.h",
+            "include/device/gm2gm/engine/shmem_device_udma.h",
+            "src/device/gm2gm/engine"
+          ],
+          "title": "AICore 直驱引擎低阶接口",
+          "topic": "讲解 include/device/gm2gm/engine 下 MTE/RDMA/SDMA/UDMA 直驱低阶接口与高阶 RMA/AMO 的关系，如何绕过高阶封装直接驱动引擎。"
+        }
+      ],
+      "order": 5,
+      "title": "传输层与通信引擎"
+    },
+    {
+      "id": "u6",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u6-l1-team-host.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "理解 ACLSHMEM_TEAM_WORLD 与 team_pools 的存储结构",
+            "掌握 team 内 mype/size 与全局 mype/npes 的区别",
+            "能用 split_strided 完成子通信域切分"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "include/host/team/shmem_host_team.h",
+            "src/host/team/shmem_team.cpp"
+          ],
+          "order": 1,
+          "practice_task": "编写程序把 8 个 PE 按 pe_start=1、pe_stride=2、pe_size=3 切分子 team，打印各 PE 的全局 my_pe 与 team 内 my_pe，验证与 docs/principles/team.md 的示例一致。",
+          "source_files": [
+            "include/host/team/shmem_host_team.h",
+            "src/host/team/shmem_team.cpp",
+            "docs/principles/team.md"
+          ],
+          "title": "Team 通信域概念与 Host 侧切分",
+          "topic": "讲解通信域 Team 的概念模型：team_pools、team 内 mype 与全局 mype 的区别，以及 team_split_strided / split_2d 切分接口。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1",
+            "u6-l1"
+          ],
+          "filename": "u6-l2-team-device-barrier.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "掌握 kernel 内 team 查询接口的用法",
+            "理解 device 侧 team barrier 的实现位置",
+            "能用 team 化 kernel 实现分组同步"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "include/device/team/shmem_device_team.h",
+            "src/device/team/shmem_device_team.hpp",
+            "tests/unittest/device/sync/barrier"
+          ],
+          "order": 2,
+          "practice_task": "阅读 tests/unittest/device/sync/barrier 用例，把 u6-l1 的子 team 传入 kernel，让每个子 team 内部各自 barrier 并打印分组结果。",
+          "source_files": [
+            "include/device/team/shmem_device_team.h",
+            "src/device/team/shmem_device_team.hpp",
+            "tests/unittest/device/sync/barrier"
+          ],
+          "title": "Device 侧 Team 与 barrier 同步",
+          "topic": "讲解 kernel 内的 team 接口与 team 级 barrier，理解通信域信息如何被 device 侧读取使用。"
+        }
+      ],
+      "order": 6,
+      "title": "Team 通信域"
+    },
+    {
+      "id": "u7",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u7-l1-python-package.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "理解 import shmem 时的后端探测与 so 加载顺序",
+            "掌握 shmem-config 的诊断用法",
+            "能排查 Python 侧找不到动态库的常见问题"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/python/shmem/__init__.py",
+            "src/python/shmem/_soc.py",
+            "src/python/shmem/shmem_config.py"
+          ],
+          "order": 1,
+          "practice_task": "在安装了 wheel 的环境执行 shmem-config --diagnose，再阅读 _soc.py 解释其如何区分不同 SoC 后端，记录诊断输出的每一项含义。",
+          "source_files": [
+            "src/python/shmem/__init__.py",
+            "src/python/shmem/_soc.py",
+            "src/python/shmem/shmem_config.py",
+            "docs/tools/shmem_config_guide.md"
+          ],
+          "title": "Python 包结构与后端自动选择",
+          "topic": "讲解 src/python/shmem 包的模块划分、SoC 类型探测、后端库自动选择与动态加载逻辑。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1",
+            "u2-l1"
+          ],
+          "filename": "u7-l2-pybind-wrapper.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "掌握 pybind11 绑定结构体与方法的标准写法",
+            "理解 GIL 释放对长耗时通信调用的意义",
+            "能追踪一个 Python API 到 C++ 实现的完整链路"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/host/python_wrapper/pyshmem.cpp",
+            "src/python/shmem/core/init_final.py",
+            "src/python/shmem/core/memory.py"
+          ],
+          "order": 2,
+          "practice_task": "追踪 shmem.core 中 init 到 pyshmem.cpp 中 aclshmem_init 绑定的调用链，为 aclshmem_malloc 补充一个 Python 侧的等价调用示例并验证返回的指针信息。",
+          "source_files": [
+            "src/host/python_wrapper/pyshmem.cpp",
+            "src/python/shmem/core/__init__.py",
+            "src/python/shmem/core/init_final.py",
+            "src/python/shmem/core/memory.py"
+          ],
+          "title": "pybind11 封装：_pyshmem 模块",
+          "topic": "讲解 pyshmem.cpp 如何用 pybind11 暴露 init/finalize/team/heap 等接口，以及 GIL 释放策略与 Python 侧 core 模块的分层。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "filename": "u7-l3-torch-integration.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "掌握 torch_npu 张量与 SHMEM 对称内存的衔接方式",
+            "理解 Python 侧初始化与多进程拉起模式",
+            "能用 Python 完成一次跨进程数据搬运"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "src/python/shmem/construct_tensor.py",
+            "examples/python_extension",
+            "examples/torch_binding"
+          ],
+          "order": 3,
+          "practice_task": "运行 examples/python_extension/test 下的用例，再编写一个双进程脚本：一边用 Python 接口写对称缓冲，另一边读回校验，体会 torch_npu 张量与对称地址的关系。",
+          "source_files": [
+            "src/python/shmem/construct_tensor.py",
+            "examples/python_extension",
+            "examples/torch_binding",
+            "docs/api/pythonAPI.md"
+          ],
+          "title": "与 PyTorch 集成实战",
+          "topic": "结合 python_extension 与 torch_binding 示例讲解如何把 SHMEM 接入 torch_npu 训练/推理流程，替代 MPI 通信。"
+        }
+      ],
+      "order": 7,
+      "title": "Python 接口与生态集成"
+    },
+    {
+      "id": "u8",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u8-l1-multi-instance.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "理解 instance_id 与实例上下文切换机制",
+            "掌握 init_manager 引用计数共享的释放时机",
+            "能编写双实例并存的最小程序"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "examples/multi_instance/main.cpp",
+            "src/host/init/shmem_init.cpp",
+            "docs/principles/multi_instance.md"
+          ],
+          "order": 1,
+          "practice_task": "运行 examples/multi_instance，梳理两个实例各自的堆与 team 隔离证据；再修改示例让两个实例使用不同的 local_mem_size 并观察行为。",
+          "source_files": [
+            "docs/principles/multi_instance.md",
+            "examples/multi_instance/main.cpp",
+            "examples/multi_instance/multi_instance_kernel.cpp",
+            "src/host/init/shmem_init.cpp"
+          ],
+          "title": "多实例机制",
+          "topic": "讲解单进程多 SHMEM 实例：instance_id 生命周期、aclshmemx_instance_ctx_set、以及 init_manager/HYBM/ConfigStore 的引用计数共享。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u4-l2"
+          ],
+          "filename": "u8-l2-stream-api.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "理解 stream 语义下通信与计算的重叠",
+            "掌握 get_stream/put_stream 类接口的同步边界",
+            "能对照 UT 验证 stream 接口的行为"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "docs/api/stream_api_usage.md",
+            "tests/unittest/host/mem/shmem_host_put_stream_test.cpp"
+          ],
+          "order": 2,
+          "practice_task": "阅读 put/get stream 测试用例，编写一个使用 stream 接口的程序，让搬运与一个本地计算 kernel 在同一 stream 上顺序执行，验证数据依赖正确。",
+          "source_files": [
+            "docs/api/stream_api_usage.md",
+            "tests/unittest/host/mem/shmem_host_put_stream_test.cpp",
+            "tests/unittest/host/mem/shmem_host_get_stream_test.cpp"
+          ],
+          "title": "Stream API 与异步通信",
+          "topic": "讲解绑定 aclrtStream 的异步通信接口：put_stream/get_stream 的用法、完成语义以及与同步版本的差异。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u8-l3-user-buffer-heap.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "理解用户 buffer 注册为对称堆的流程",
+            "掌握 aclshmemx_init_attr_with_buffers 的用法",
+            "能读懂 user_buffer_heap 单元测试"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "src/host/init/shmemi_user_buffer_heap.h",
+            "src/host/mem/heap/hybm_user_buffer_heap.h",
+            "tests/unittest/host/init/user_buffer_heap_test.cpp"
+          ],
+          "order": 3,
+          "practice_task": "阅读 user_buffer_heap_test.cpp，写一段说明用户 buffer 模式与默认 HYBM 堆在初始化参数与内存来源上的三点差异。",
+          "source_files": [
+            "include/host/init/shmem_host_init.h",
+            "src/host/init/shmemi_user_buffer_heap.h",
+            "src/host/mem/heap/hybm_user_buffer_heap.h",
+            "tests/unittest/host/init/user_buffer_heap_test.cpp"
+          ],
+          "title": "用户缓冲区堆 user buffer heap",
+          "topic": "讲解 aclshmemx_init_attr_with_buffers 路径：用户自带 device buffer 构建对称堆，buffer_desc 与 optional_attr 的语义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u8-l4-under-api-dl.md",
+          "id": "u8-l4",
+          "learning_goals": [
+            "理解动态加载如何降低对 CANN 版本的强耦合",
+            "掌握新增一个 dl 封装的固定套路",
+            "理解 UDMA 依赖 hcomm 接口的适配方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "src/host/utils/under_api/dl_api.cpp",
+            "src/host/utils/under_api/dl_hcomm_api.cpp"
+          ],
+          "order": 4,
+          "practice_task": "以 dl_hcomm_api 为模板，梳理一个 dl 封装从符号声明、dlsym 加载到上层调用的完整步骤，写出新增一个 HAL 接口封装需要改动的文件清单。",
+          "source_files": [
+            "src/host/utils/under_api/dl_api.cpp",
+            "src/host/utils/under_api/dl_acl_api.cpp",
+            "src/host/utils/under_api/dl_hcomm_api.cpp",
+            "src/host/utils/under_api/dl_rt_api.cpp"
+          ],
+          "title": "under_api 动态加载适配层",
+          "topic": "讲解 src/host/utils/under_api 下对 ACL/DCMI/HAL/HCCP/HCOMM/RT 等 CANN 接口的 dlopen 动态加载封装与版本兼容策略。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u8-l5-dfx-log-profiling.md",
+          "id": "u8-l5",
+          "learning_goals": [
+            "掌握日志等级与环境变量开关的配置方式",
+            "理解异常上报与 udma dump 的定位用途",
+            "能用 profiling 工具采集通信耗时"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "src/host/utils/log/shmemi_logger.cpp",
+            "src/host/utils/exception/shmem_exception_report.cpp",
+            "docs/debug/profiling.md"
+          ],
+          "order": 5,
+          "practice_task": "按 docs/debug/log_debug.md 打开调试日志重跑一个示例并解读关键日志行；再按 profiling 文档采集一次通信 profile，定位耗时最长的阶段。",
+          "source_files": [
+            "src/host/utils/log/shmemi_logger.cpp",
+            "src/host/utils/log/shmemi_log_defs.h",
+            "src/host/utils/exception/shmem_exception_report.cpp",
+            "docs/debug/log_debug.md",
+            "docs/debug/profiling.md"
+          ],
+          "title": "日志、异常与 Profiling DFX",
+          "topic": "讲解 SHMEM 的可观测性能力：日志等级控制、异常上报与 dump、profiling 采集以及常见问题排查入口。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u8-l6-testing.md",
+          "id": "u8-l6",
+          "learning_goals": [
+            "掌握 UT 的编译开关与运行方式",
+            "理解 host/device 测试目录与被测模块的对应关系",
+            "能为新接口补一个最小 UT"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "tests/unittest/host/init/init_host_test.cpp",
+            "tests/unittest/host/main_test.cpp",
+            "tests/unittest/CMakeLists.txt"
+          ],
+          "order": 6,
+          "practice_task": "参照 init_host_test.cpp 为某个尚未覆盖的 heap 或 sync 接口编写一个 googletest 用例并编译通过（无 NPU 时至少通过编译）。",
+          "source_files": [
+            "tests/unittest/CMakeLists.txt",
+            "tests/unittest/host/main_test.cpp",
+            "tests/unittest/host/init/init_host_test.cpp",
+            "scripts/run.sh"
+          ],
+          "title": "测试体系与单元测试编写",
+          "topic": "讲解 tests/unittest 的组织（host/device、mem/sync/team/topo/transport）、googletest 接入方式与 scripts/run.sh 的执行入口。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4",
+            "u4-l2",
+            "u6-l2"
+          ],
+          "filename": "u8-l7-mega-moe-e2e.md",
+          "id": "u8-l7",
+          "learning_goals": [
+            "理解通信与计算在 kernel 内融合的设计思路",
+            "掌握多示例工程组合解决实际业务问题的方法",
+            "能梳理 mega_moe 的端到端数据流"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "examples/shmem_mega_moe/main.cpp",
+            "examples/shmem_mega_moe/kernel",
+            "examples/combine"
+          ],
+          "order": 7,
+          "practice_task": "通读 shmem_mega_moe 的 main 与 kernel，画出各 PE 间的数据流与同步点示意图；再挑选 combine/dispatch 之一运行并说明它解决的通信问题。",
+          "source_files": [
+            "examples/shmem_mega_moe/main.cpp",
+            "examples/shmem_mega_moe/kernel",
+            "examples/combine",
+            "examples/dispatch"
+          ],
+          "title": "端到端综合实战：通算融合样例",
+          "topic": "以 shmem_mega_moe（MoE 场景）为主线，串联 put/get、AMO、同步与 team 能力，理解通算融合算子的完整实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l5",
+            "u8-l5"
+          ],
+          "filename": "u8-l8-perftest.md",
+          "id": "u8-l8",
+          "learning_goals": [
+            "掌握带宽/时延的测量方法与消息步长设计",
+            "理解不同引擎与通路在不同消息规模下的优劣",
+            "能产出一份简单的性能对比报告"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "examples/shmem_perftest",
+            "examples/rdma_perftest_demo",
+            "docs/debug/profiling.md"
+          ],
+          "order": 8,
+          "practice_task": "运行 shmem_perftest 或 rdma_perftest_demo，采集多个消息档位的带宽与时延，绘制曲线并分析小消息与大消息下的瓶颈差异。",
+          "source_files": [
+            "examples/shmem_perftest",
+            "examples/rdma_perftest_demo",
+            "examples/mte_perftest_demo",
+            "docs/debug/profiling.md"
+          ],
+          "title": "性能测试与调优",
+          "topic": "结合 shmem_perftest、rdma_perftest_demo 等性能样例讲解如何测量与优化 SHMEM 通信性能。"
+        }
+      ],
+      "order": 8,
+      "title": "高级机制、DFX 与二次开发"
+    }
+  ]
+}

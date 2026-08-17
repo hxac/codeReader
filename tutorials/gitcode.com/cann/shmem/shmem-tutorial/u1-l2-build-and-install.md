@@ -1,0 +1,626 @@
+# 环境准备与源码编译
+
+## 1. 本讲目标
+
+上一讲（u1-l1）我们建立了 SHMEM 的整体认知地图：它是一个 Host/Device 双侧接口的对称内存通信库。本讲解决「怎么把它造出来」的问题。读完本讲你应该能够：
+
+1. 说清 SHMEM 编译为什么依赖 CANN 工具链和 `bisheng` 编译器，而不是普通的 gcc。
+2. 看懂 [docs/quickstart.md](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/docs/quickstart.md) 中的硬件矩阵、CANN 版本矩阵和依赖汇总表，能对照自己的机器判断「哪些能力可用」。
+3. 掌握 `bash scripts/build.sh` 的完整流程：环境变量加载 → 参数解析 → 参数依赖校验 → 委托 CMake 构建 → 生成产物，并能熟练使用 `-soc_type`、`-examples`、`-uttests`、`-enable_rdma` 等常用参数。
+4. 读懂 [CMakeLists.txt](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt) 中的关键机制：强制检查 `ASCEND_HOME_PATH`、按 `SOC_TYPE` 选择 NPU 架构、按 bisheng 版本切换编译模式、用 `try_compile` 探测 CANN 能力。
+5. 区分三种安装方式（源码编译 / 二进制 run 包 / pip wheel）各自面向的用户和产物位置，并理解 [setup.py](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/setup.py) 如何构建「一个 wheel 同时包含 910 与 950 后端」。
+6. 独立完成本讲代码实践：在有 CANN 环境的机器上执行 `bash scripts/build.sh` 完成编译并 `source install/set_env.sh`；没有 NPU 的环境至少完成编译验证，并记录依赖问题与解决方式。
+
+## 2. 前置知识
+
+本讲是「构建系统」专题，会接触到一些构建相关的通用概念，先逐个用大白话解释：
+
+- **工具链（Toolchain）**：把源代码变成可执行文件/动态库的一整套工具，包括编译器、链接器、头文件、库文件。C/C++ 项目常见工具链是 gcc/g++。
+- **交叉编译与异构编译**：普通程序「在 x86 上编译、在 x86 上运行」。但昇腾程序不一样：同一份 SHMEM 源码里，`src/host` 下的代码编译成在 CPU 上跑的目标文件，`src/device` 下的 AscendC 代码要编译成在 AICore 上跑的 kernel 目标文件。这两种目标文件格式、指令集完全不同，所以需要能「一专多能」的编译器——这就是 CANN toolkit 自带的 `bisheng`。
+- **CMake**：C/C++ 项目的「构建脚本生成器」。它本身不编译代码，而是根据 `CMakeLists.txt` 里的描述生成 `Makefile`，再由 `make` 真正去编译。项目里的构建流程是：`build.sh` → `cmake` → `make install`。
+- **`source` 脚本与环境变量**：Linux 下 `source xxx.sh`（或 `. xxx.sh`）会在**当前 shell** 里执行脚本，因此脚本里 `export` 的环境变量会保留下来，供后续命令使用。CANN 和 SHMEM 都靠这种方式下发路径信息。
+- **动态库与 `LD_LIBRARY_PATH`**：程序运行时按 `LD_LIBRARY_PATH` 列出的目录查找 `libshmem.so` 这类动态库。找不到就会报 `cannot open shared object file`。所以「安装」一个 C/C++ 库，一半的工作是设置这个变量。
+- **CXX11 ABI**：C++ 标准库的一种二进制兼容性约定（`_GLIBCXX_USE_CXX11_ABI=0/1`）。如果你的程序和依赖库用了不同的 ABI 约定，链接或运行时会出符号找不到的问题。SHMEM 提供 `-use_cxx11_abi1/0` 开关就是为了和其他库（如 PyTorch）对齐。
+- **wheel**：Python 的二进制包格式（`.whl`），`pip install` 的直接对象。SHMEM 的 Python 接口就是先把 C++ 核心库编译好，再打进 wheel。
+- **`npu-smi info`**：昇腾的设备管理命令，类似 nvidia-smi，用来查看 NPU 型号和数量。判断自己的芯片是不是 Ascend950（决定是否加 `-soc_type Ascend950`）就靠它。
+
+承接 u1-l1 的结论：SHMEM 代码分 Host 侧与 Device 侧两套接口体系。这个分层在构建系统上有直接体现——**一份源码、两种编译模式、链接成同一个 `libshmem.so`**。理解了这一点，本讲所有内容都会顺理成章。
+
+## 3. 本讲源码地图
+
+本讲涉及的关键文件如下，请先在仓库里找到它们：
+
+| 文件 | 作用 |
+| --- | --- |
+| [docs/quickstart.md](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/docs/quickstart.md) | 官方快速开始文档：硬件/工具链依赖、CANN 版本矩阵、三种安装方式、样例运行 |
+| [scripts/build.sh](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh) | 唯一编译入口：加载 CANN 环境、解析参数、拉取第三方依赖、调用 CMake、产出 run 包与 wheel |
+| [CMakeLists.txt](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt) | 顶层 CMake 配置：编译器选择、CANN 环境检查、SOC 架构选择、能力探测、子目录组织 |
+| [src/CMakeLists.txt](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/src/CMakeLists.txt) | src 内部构建规则：device/host 两个 OBJECT 库、bootstrap 插件库、安装规则 |
+| [setup.py](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/setup.py) | Python wheel 构建脚本：把 C++ 产物与 Python 包源码组装成 `.whl` |
+| [scripts/set_env.sh](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/set_env.sh) | 安装后的环境变量设置脚本（`SHMEM_HOME_PATH`、`LD_LIBRARY_PATH`、`PATH`） |
+| [VERSION](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/VERSION) | 版本号唯一来源，当前为 `1.7.0`，build.sh 与 setup.py 都读它 |
+| [docs/compilation_build_guide.md](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/docs/compilation_build_guide.md) | 编译与构建专项文档：参数详解、RDMA 参数依赖规则、run.sh 使用 |
+
+另外 `scripts/` 目录下还有一组配套脚本，本讲会顺带认识：`install.sh` / `uninstall.sh`（run 包安装卸载）、`preinstall_check.sh`（环境自检）、`run.sh`（跑 UT）、`run_examples.sh`（跑样例）。
+
+## 4. 核心概念与源码讲解
+
+本讲拆成 4 个最小模块：环境依赖全景 → build.sh 编译入口 → CMake 构建内核 → 安装方式与产物。
+
+### 4.1 环境依赖全景：CANN 工具链与硬件矩阵
+
+#### 4.1.1 概念说明
+
+在动手编译之前必须先明白：**SHMEM 不是自包含的库**。它依赖三层外部环境：
+
+1. **硬件层**：Atlas 800I A2/A3、800T A2/A3 或 Ascend 950 系列 NPU。芯片型号决定了构建参数（`-soc_type`）和可用的通信引擎。
+2. **驱动 + CANN 层**：昇腾 HDK 驱动固件和 CANN toolkit。CANN 提供编译器（bisheng）、运行时库（`libruntime`、`libascendcl`）、头文件。CANN 版本还决定了 MTE/RDMA/SDMA/UDMA 各引擎是否可用。
+3. **宿主机工具链层**：gcc/g++ ≥ 7.3.0、cmake ≥ 3.19、GLIBC ≥ 2.28、Python ≥ 3.9.0。
+
+为什么 CANN 版本这么关键？回顾 u1-l1 的结论：SHMEM 的通信引擎分 MTE 和 xDMA（RDMA/SDMA/UDMA）两族，而这些引擎直接依赖 CANN 暴露的底层接口。例如 **UDMA 只有 Ascend950 支持，且依赖 CANN 9.1.0 提供的 HCOMM 资源接口**；SDMA 只在 A3 上支持且需要额外安装 ops 包。也就是说「编出来的库能干什么」在编译期就被 CANN 版本和芯片型号锁定了。
+
+#### 4.1.2 核心流程
+
+拿到一台新机器后的标准环境检查流程：
+
+```text
+1. npu-smi info                 → 确认 NPU 可见、看清芯片型号（是否 Ascend950）
+2. 检查宿主机工具链             → gcc/g++、cmake、python3 版本是否达标
+3. 安装 CANN toolkit .run 包    → 需要时再装对应 SoC 的 ops 包
+4. source CANN 的 set_env.sh    → 导出 ASCEND_HOME_PATH，bisheng 进入 PATH
+5. which bisheng               → 确认 bisheng 可用
+6. 进入 shmem 仓库，执行 build.sh
+```
+
+其中第 3、4 步的详细命令在 quickstart 的「CANN 包安装」小节，第 6 步是 4.2 节的内容。
+
+#### 4.1.3 源码精读
+
+先看工具链依赖清单，注意 `bisheng` 的说明——它随 CANN toolkit 安装，不是独立下载的：
+
+- [docs/quickstart.md:L36-L48](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/docs/quickstart.md#L36-L48)：列出 gcc/g++ ≥ 7.3.0、cmake ≥ 3.19、GLIBC ≥ 2.28、Python ≥ 3.9.0 的硬性要求，并说明项目默认用 CANN toolkit 提供的 `bisheng` 作为 C/C++ 编译器，编译前需 `source /usr/local/Ascend/ascend-toolkit/set_env.sh`（自定义安装路径则 source 对应路径）。
+
+硬件要求在稍上方：
+
+- [docs/quickstart.md:L30-L34](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/docs/quickstart.md#L30-L34)：支持 Atlas 800I/800T A2/A3、Ascend 950 系列，架构兼容 aarch64 与 x86。
+
+CANN 版本矩阵是整份文档里信息密度最高的表：
+
+- [docs/quickstart.md:L58-L65](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/docs/quickstart.md#L58-L65)：按「驱动固件 × CANN 版本」列出 D2D、D2H/H2D、D2rH/rH2D 各数据通路支持的引擎。例如 CANN 9.1.0 + HDK 26.0.RC1 时 D2D 通路可用 MTE/RDMA/SDMA(A3)/UDMA(950)，而 CANN 8.3.RC1 只有 MTE/RDMA。
+
+ops 包是新手最容易漏装的东西：
+
+- [docs/quickstart.md:L67-L83](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/docs/quickstart.md#L67-L83)：说明 CANN 8.5.0 起 `hccl` 等算子迁移到了 ops 包，没装对应 SoC 的 ops 包运行时会报缺少 `libhccl.so`；并给出 910b/A3/950 各 SoC 的 ops 包文件名示例。
+
+「构建与运行依赖汇总表」把所有依赖一网打尽，建议打印贴墙：
+
+- [docs/quickstart.md:L117-L126](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/docs/quickstart.md#L117-L126)：CANN toolkit、CANN ops 包、bisheng、Python 依赖、googletest v1.14.x、nlohmann/json v3.11.3 各自的使用场景与获取方式，最后一列专门写了**离线环境**怎么提前准备。
+
+其中两个第三方源码依赖由 build.sh 自动拉取：
+
+- [docs/quickstart.md:L169-L182](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/docs/quickstart.md#L169-L182)：`googletest`（`-uttests` 时拉取到 `3rdparty/googletest`）和 `nlohmann/json`（`-soc_type Ascend950` 时拉取到 `3rdparty/json`）；无法访问 GitCode 的离线环境可提前拷贝这两个目录。
+
+如果没有实体 NPU 机器，官方推荐用容器：
+
+- [docs/quickstart.md:L189-L193](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/docs/quickstart.md#L189-L193)：从昇腾镜像仓库拉取已配好 CANN 的容器；本仓不维护独立 Dockerfile，容器内跑 UT/examples 仍需宿主机提供 NPU、驱动与设备挂载。
+
+#### 4.1.4 代码实践
+
+**实践目标**：给你的机器做一次「环境体检」，产出一张依赖检查表。
+
+**操作步骤**：
+
+```bash
+# 1. 芯片与设备可见性（有 NPU 的机器）
+npu-smi info
+
+# 2. 宿主机工具链版本
+gcc --version && g++ --version
+cmake --version
+python3 --version
+ldd --version          # 查看 GLIBC 版本
+
+# 3. 加载 CANN 环境并确认 bisheng
+source /usr/local/Ascend/ascend-toolkit/set_env.sh   # 路径按实际安装位置调整
+which bisheng
+bisheng -v
+
+# 4. 确认关键环境变量
+echo $ASCEND_HOME_PATH
+```
+
+**需要观察的现象**：
+
+- `npu-smi info` 能列出设备，记下芯片型号（判断是否需要 `-soc_type Ascend950`）。
+- `bisheng -v` 的输出里有一个**日期型版本号**（形如 `2025-xx-xx`），这个日期在 4.3 节会看到它的妙用——CMake 会解析它来切换编译模式。
+- `echo $ASCEND_HOME_PATH` 非空，通常为 `/usr/local/Ascend/ascend-toolkit/latest`。
+
+**预期结果**：整理出如下格式的检查表（示例）：
+
+| 检查项 | 要求 | 本机结果 | 是否通过 |
+| --- | --- | --- | --- |
+| NPU 型号 | A2/A3 或 950 | 待填写 | 待填写 |
+| gcc/g++ | ≥ 7.3.0，且两者版本一致 | 待填写 | 待填写 |
+| cmake | ≥ 3.19 | 待填写 | 待填写 |
+| bisheng | 随 CANN toolkit 可用 | 待填写 | 待填写 |
+| ASCEND_HOME_PATH | 非空 | 待填写 | 待填写 |
+
+没有 CANN 环境时，第 1、3、4 步无法完成，如实记录「无 NPU/CANN 环境，仅做编译验证」即可——这是本讲实践任务明确允许的路径。**待本地验证**：各命令输出因机器而异，无法提前给出。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 SHMEM 不直接用 gcc 编译，而要用 bisheng？
+
+**参考答案**：因为 SHMEM 源码包含 Device 侧的 AscendC kernel 代码（`src/device`），这些代码要编译成在 AICore 上执行的目标文件，需要 CCE 编译模式（后文会看到 `-xasc`/`-xcce` 选项）；而 Host 侧 C++ 代码又要按普通 x86/aarch64 方式编译。bisheng 是 CANN toolkit 提供的、能同时处理这两种模式的编译器，`CMakeLists.txt` 也默认把 C/C++ 编译器设为 bisheng。
+
+**练习 2**：SDMA 和 UDMA 分别需要什么前置条件？
+
+**参考答案**：SDMA 只在 A3 上支持，且需要安装与 toolkit 版本和设备类型匹配的 ops 包；UDMA 只在 Ascend950 上支持，需要安装 Ascend950 对应的 toolkit 包和 ops 包，并依赖 CANN 9.1.0 提供的 HCOMM 资源接口（见 [docs/quickstart.md:L60-L62](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/docs/quickstart.md#L60-L62)）。
+
+**练习 3**：构建机房无法访问 GitCode，怎么保证 `-uttests` 和 `-soc_type Ascend950` 构建不因第三方依赖失败？
+
+**参考答案**：在联网环境提前准备好 `3rdparty/googletest`（v1.14.x）和 `3rdparty/json`（v3.11.3）两个目录，整体拷贝到仓库根目录的 `3rdparty/` 下。build.sh 的拉取函数会先检查目录是否已存在，存在则直接复用（见 4.2.3 节对 `fn_build_googletest` 的分析）。
+
+### 4.2 scripts/build.sh：唯一编译入口与参数体系
+
+#### 4.2.1 概念说明
+
+`scripts/build.sh` 是官方推荐（实际上也是唯一需要掌握）的编译入口。它存在的意义是：**把「配环境、选参数、拉依赖、调 CMake、打安装包」这一长串易错操作收敛成一条命令**。你不需要记住任何 CMake 参数，只需要记住 build.sh 的选项。
+
+它内部完成六件事：
+
+1. 加载 CANN 环境（自动定位并 source CANN 的 `set_env.sh`）。
+2. 读取版本号（来自仓库根目录 [VERSION](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/VERSION)，当前 `1.7.0`）。
+3. 解析命令行参数，把每个开关翻译成 CMake 的 `-DXXX=ON` 追加到 `COMPILE_OPTIONS` 字符串。
+4. 校验参数之间的依赖关系（比如 `-rdma_backend` 必须搭配 `-enable_rdma`），错误组合直接报错退出。
+5. 按需拉取第三方依赖（googletest、nlohmann/json）。
+6. 调用 `cmake` + `make install` 构建核心库，最后默认再打一个 `.run` 安装包。
+
+#### 4.2.2 核心流程
+
+build.sh 的整体执行流程（自上而下）：
+
+```text
+脚本启动
+  ├─ 1. 处理 _ASCEND_INSTALL_PATH / ASCEND_HOME_PATH
+  │     └─ 自动 source CANN 的 set_env.sh（优先新路径，兼容旧路径）
+  ├─ 2. 定位项目根目录，读 VERSION 文件 → export VERSION
+  ├─ 3. 清空并重建 install/ 目录
+  ├─ 4. 初始化默认值：BUILD_TYPE=RELEASE、SOC_TYPE=""、PACKAGE=OFF ...
+  ├─ 5. set -euo pipefail（任何一步失败立即退出）
+  ├─ 6. while 循环解析参数 → 累积 COMPILE_OPTIONS
+  ├─ 7. 参数依赖校验（relay / rdma_backend）
+  │     └─ SOC_TYPE=Ascend950 时按需拉取 nlohmann/json
+  ├─ 8. 清空 build/ 目录
+  └─ 9. 分派构建
+        ├─ -full：wheel + examples + uttests + package 全套
+        └─ 默认：  (可选 wheel) → fn_build() → fn_make_run_package()
+                    └─ -package 时再 make_package()
+```
+
+其中 `fn_build()` 是核心构建函数，只有两步：`cmake ... ..` 生成 Makefile，`make install -j$(nproc)` 并行编译并安装（`$(nproc)` 表示用满所有 CPU 核）。
+
+#### 4.2.3 源码精读
+
+**第一步：环境加载。** 脚本开头就从 `ASCEND_HOME_PATH` 推导 CANN 安装路径：
+
+- [scripts/build.sh:L11-L16](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L11-L16)：若已设置 `ASCEND_HOME_PATH`，则把它作为 CANN 安装路径，并回写 `ASCEND_TOOLKIT_HOME` 和 `ASCEND_HOME_PATH` 两个变量。这就是为什么 quickstart 要求先 source CANN 的 set_env.sh 再跑 build.sh。
+
+- [scripts/build.sh:L18-L42](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L18-L42)：自动探测 CANN 的 `set_env.sh`——优先 `ascend-toolkit/set_env.sh` 新路径，兼容旧的顶层 `set_env.sh`；两个都存在时打印警告并优先用新的；都找不到时给出明确的检查路径提示。
+
+**第二步：版本与目录。**
+
+- [scripts/build.sh:L44-L62](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L44-L62)：定位脚本所在目录得到项目根路径；读取 `VERSION` 文件为空则直接报错退出；随后 `rm -rf install` 并重建，同时准备 `3rdparty/`、`ci/release/` 等目录。注意 [VERSION:L1](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/VERSION#L1) 当前内容就是 `1.7.0`。
+
+**第三步：默认值与参数表。**
+
+- [scripts/build.sh:L64-L80](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L64-L80)：初始化所有构建变量默认值——`BUILD_TYPE=RELEASE`、`USE_CXX11_ABI=ON`、`ENABLE_EXAMPLES=OFF`、`SOC_TYPE=""`（空即 A2/A3 默认路径）、`PACKAGE=OFF`。
+
+- [scripts/build.sh:L84-L108](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L84-L108)：`print_usage` 打印全部选项，这是最权威的参数说明。常用参数整理如下：
+
+| 参数 | 作用 | 备注 |
+| --- | --- | --- |
+| （无参数） | 默认构建核心库 + run 包 | 不含 xDMA、示例、测试、Python |
+| `-soc_type Ascend950` | 指定 950 平台 | 通过 `npu-smi info` 判断是否需要 |
+| `-examples` | 构建 examples 目录所有样例 | 会自动克隆 catlass 到 3rdparty |
+| `-uttests` | 构建单元测试（Debug 模式） | 自动拉取 googletest v1.14.x |
+| `-debug` | Debug 构建类型 | 默认 RELEASE |
+| `-enable_rdma` | 启用 RDMA 能力 | 950 平台必须再配 `-rdma_backend` |
+| `-rdma_backend XSCALE\|HNS_1825` | 指定 950 的 RDMA 网卡后端 | 必须与 `-enable_rdma` 同用 |
+| `-enable_simt` | 启用 SIMT 编程模式接口 | |
+| `-python_extension` | 构建 910+950 双后端 wheel | 产物在 `dist/` |
+| `-package` | 构建 run 包 + wheel 交付包 | 产物在 `package/{arch}/` |
+| `-full` | package + python_extension + uttests + examples | 一条命令全家桶 |
+| `-use_cxx11_abi1` / `-use_cxx11_abi0` | 切换 CXX11 ABI | 默认 ABI=1 |
+| `-mssanitizer` | 启用内存检测 | 需配套 msSanitizer 工具拉起任务 |
+| `-cann` | 用 CANN 8.5+ 开放接口编译 | 透传 `ENABLE_CANN_BUILD` |
+| `-enable_ascendc_dump` | 启用 AscendC dump 调测 | |
+| `-gendoc` / `-onlygendoc` | 生成文档 | 依赖 doxygen/sphinx |
+
+**第四步：核心构建函数。**
+
+- [scripts/build.sh:L110-L126](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L110-L126)：`fn_build()` 进入 `build/` 目录，执行 `cmake $COMPILE_OPTIONS -DCMAKE_INSTALL_PREFIX=../install -DCMAKE_BUILD_TYPE=$BUILD_TYPE ...` 再 `make install -j$(nproc)`。注意所有 build.sh 参数最终都变成了 cmake 的 `-D` 选项；非 950 平台还会自动剔除 relay 标志避免 CMake 报错。
+
+**第五步：参数解析与依赖校验。**
+
+- [scripts/build.sh:L543-L655](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L543-L655)：`set -euo pipefail` 开启严格模式（未定义变量报错、管道失败即退出），随后 `while + case` 逐个消费参数。例如 `-uttests` 分支（[L546-L552](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L546-L552)）先调 `fn_build_googletest`、切 Debug 模式、追加 `-DUSE_UNIT_TEST=ON`；`-enable_rdma` 分支（[L568-L571](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L568-L571)）只做一件事：追加 `-DACLSHMEM_RDMA_SUPPORT=ON`。
+
+- [scripts/build.sh:L657-L688](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L657-L688)：两级参数依赖校验。`-enable_relay` 要求 UDMA（仅 950），不满足时打印清晰错误并退出；`-rdma_backend` 只能在 950（或 `-package` 多后端）场景使用，且必须同时 `-enable_rdma`。这是「在脚本层提前失败，好过在 CMake 深处报错」的典型工程实践。
+
+- [scripts/build.sh:L690-L707](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L690-L707)：950 平台启用 RDMA 时若未指定后端会直接报错（wheel 构建除外，wheel 会自动构建双后端）；并且 950 构建前调用 `fn_build_nlohmann_json` 准备 json 依赖。
+
+**第六步：主流程分派。**
+
+- [scripts/build.sh:L709-L752](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L709-L752)：清空 `build/` 后分派——`-full` 走 wheel + examples + uttests + package 四连；默认路径先（可选）构建 wheel，再剔除 950 专属的 `RDMA_BACKEND` 标志后调用 `fn_build()`，**然后无条件调用 `fn_make_run_package()` 生成 run 包**，`-package` 时额外 `make_package()`。
+
+**run 包的生成**值得单独一看：
+
+- [scripts/build.sh:L401-L438](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L401-L438)：`fn_make_run_package()` 写入 `version.info`、拷贝 `install.sh`/`set_env.sh`/`uninstall.sh`/`preinstall_check.sh`，然后用 **CANN toolkit 自带的 makeself 工具**把 `install/` 目录打包成自解压的 `SHMEM_{version}_linux-{arch}.run`。注意它依赖 `${ASCEND_HOME_PATH}/toolkit/tools/op_project_templates/...` 下的 makeself——这也是「必须有 CANN 环境」的另一个原因。
+
+**第三方依赖拉取函数**：
+
+- [scripts/build.sh:L440-L463](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L440-L463)：`fn_build_googletest()` 开头先检查 `3rdparty/googletest/lib` 是否已存在，存在直接返回（离线预置的依据）；否则克隆 v1.14.x 并按 ABI 设置编译安装。
+- [scripts/build.sh:L465-L475](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L465-L475)：`fn_build_nlohmann_json()` 同理，检测到头文件已存在就跳过，否则克隆 v3.11.3。
+
+#### 4.2.4 代码实践
+
+**实践目标**：完整跑通一次默认构建，并故意触发一次参数校验错误，理解 build.sh 的防呆设计。
+
+**操作步骤**：
+
+```bash
+cd shmem   # 仓库根目录
+
+# 1.（推荐）先加载 CANN 环境，再执行构建
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+bash scripts/build.sh
+# Ascend950 机器则改为：
+# bash scripts/build.sh -soc_type Ascend950
+
+# 2. 构建完成后配置环境变量并验证核心库
+source install/set_env.sh
+test -f install/shmem/lib/libshmem.so && echo "libshmem.so OK"
+
+# 3.（不需要 NPU）故意触发参数校验错误，观察防呆输出
+bash scripts/build.sh -soc_type Ascend950 -rdma_backend XSCALE
+# 缺少 -enable_rdma，应报错：
+# Error: -rdma_backend requires -enable_rdma to be specified.
+
+bash scripts/build.sh -enable_relay
+# 非 950 平台用 relay，应报错：
+# Error: -enable_relay requires UDMA support, which is only enabled for Ascend950.
+```
+
+**需要观察的现象**：
+
+- 步骤 1 会先打印 CANN 环境加载信息，随后进入 cmake 阶段，输出大量 `-- XXX` 状态行（下一节会逐一解读其中几行关键信息），最后 `make install` 显示 `[ xx%]` 编译进度。
+- 步骤 2 中 `echo $SHMEM_HOME_PATH` 应指向 `install` 目录（4.4 节详解）。
+- 步骤 3 的两条错误命令都会**在进入 cmake 之前**就退出，说明校验发生在参数解析之后、构建之前。
+
+**预期结果**：`install/shmem/lib/` 下生成 `libshmem.so`、`libshmem_utils.so`、`aclshmem_bootstrap_uid.so`、`aclshmem_bootstrap_config_store.so` 等动态库，以及 `install/{arch}/SHMEM_1.7.0_linux-{arch}.run` 安装包。**待本地验证**：具体 `.so` 清单和编译耗时因平台而异；无 NPU 环境下若 CANN 未安装，构建会在 cmake 阶段因缺少 `ASCEND_HOME_PATH` 失败，请如实记录报错信息——它正是下一节要讲的第一个 CMake 检查点。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：不带任何参数执行 `bash scripts/build.sh`，产物里包含示例和单元测试吗？包含 RDMA 能力吗？
+
+**参考答案**：都不包含。默认构建只编译核心库并生成 run 包：`ENABLE_EXAMPLES=OFF`、`USE_UNIT_TEST` 不会被追加、`COMPILE_OPTIONS` 里没有 `-DACLSHMEM_RDMA_SUPPORT=ON`（见 [scripts/build.sh:L64-L80](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L64-L80) 的默认值，quickstart [L216-L217](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/docs/quickstart.md#L216-L217) 也明确说明）。要示例加 `-examples`，要测试加 `-uttests`，要 RDMA 加 `-enable_rdma`。
+
+**练习 2**：`-rdma_backend`、`-enable_rdma`、`-soc_type` 三个参数的依赖规则是什么？
+
+**参考答案**：`-rdma_backend` 只在 `-soc_type Ascend950`（或 `-package` 多后端构建）时有效，且必须与 `-enable_rdma` 同时出现；指定了 `-rdma_backend` 却没开 `-enable_rdma` 会直接报错退出（[scripts/build.sh:L674-L688](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L674-L688)）。三个参数顺序不限，但依赖参数必须最终都被指定。可选后端值只有 `XSCALE`（云脉网卡）和 `HNS_1825`（1825 网卡）。
+
+**练习 3**：quickstart 的「性能调优建议」里写过「编译时加 `-DSHMEM_RDMA=ON`」，这个写法对吗？
+
+**参考答案**：不对，那是文档的一处笔误。顶层 CMake 定义的选项名是 `ACLSHMEM_RDMA_SUPPORT`（[CMakeLists.txt:L207](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L207)），build.sh 对应的开关是 `-enable_rdma`。用户不应手动传 `-D` 给 cmake，而应通过 build.sh 的开关触发，这也正是 build.sh 作为唯一入口的价值。这个小练习想训练的习惯是：**参数以 `build.sh` 的 `print_usage` 和 `docs/compilation_build_guide.md` 为准，遇到文档冲突回到源码验证**。
+
+### 4.3 CMakeLists.txt：环境探测、能力检测与编译选项
+
+#### 4.3.1 概念说明
+
+build.sh 只是「外壳」，真正定义「怎么编译」的是 [CMakeLists.txt](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt)（顶层）和 [src/CMakeLists.txt](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/src/CMakeLists.txt)（src 内部）。顶层 CMakeLists 做四类事：
+
+1. **定编译器**：默认把 C/C++ 编译器设为 bisheng。
+2. **查环境**：强制要求 `ASCEND_HOME_PATH`，否则直接失败；解析 bisheng 版本日期来决定用新还是旧的 AscendC 编译模式。
+3. **选架构**：按 `SOC_TYPE` 决定 NPU 架构（950 用 `dav-3510`，其他用 `dav-2201`）和后端名。
+4. **探能力**：用 `try_compile` 现场编一个小程序，探测当前 CANN 的 `libascendcl` 是否提供某些新接口，探测结果变成条件编译宏。
+
+src/CMakeLists.txt 则回答一个非常关键的问题：**一份源码怎么同时产出 CPU 目标文件和 AICore 目标文件？** 答案是拆成两个 OBJECT 库分别用不同编译选项编译，最后链接进同一个 `libshmem.so`。
+
+#### 4.3.2 核心流程
+
+顶层 CMakeLists 的配置期（configure）流程：
+
+```text
+1. cmake_minimum_required(3.16)；编译器默认 bisheng
+2. 检查 ASCEND_HOME_PATH → 缺失则 FATAL_ERROR
+3. 执行 bisheng -v → 正则提取日期 → 与 20260327 比较
+4.     ├─ 日期 ≥ 20260327（新版）：-xasc 模式 + --npu-arch=dav-2201/3510
+5.     └─ 日期 < 20260327（旧版）：-xcce 模式 + --cce-aicore-arch=dav-c220/c310
+6. SOC_TYPE 判断 → SHMEM_BACKEND_NAME = 910 或 950
+7. 解析 ACLSHMEM_RDMA_BACKEND → 生成 ACLSHMEMI_RDMA_K_BACKEND_* 宏
+8. 追加全局编译选项（-O2 -std=c++17 -Werror ...）
+9. 配置 CANN 头文件/库目录，链接 runtime/ascendcl 等
+10. try_compile 探测 ACL 能力符号 → 决定 -DHAS_ACLRT_MEM_FABRIC_HANDLE 等宏
+11. add_subdirectory(src / tools / [tests] / [examples])
+```
+
+src/CMakeLists.txt 的构建期结构：
+
+```text
+src/device/*.cpp ──CCE 选项──▶ aclshmem_device (OBJECT 库) ─┐
+                                                            ├─▶ libshmem.so (+ shmem_utils)
+src/host/*.cpp  ──C++ 选项──▶ aclshmem_host  (OBJECT 库) ─┘
+src/host/utils/*.cpp ──────▶ shmem_utils (SHARED)
+bootstrap 插件 ────────────▶ aclshmem_bootstrap_uid.so / aclshmem_bootstrap_config_store.so
+```
+
+#### 4.3.3 源码精读
+
+**编译器与语言标准：**
+
+- [CMakeLists.txt:L12-L20](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L12-L20)：要求 cmake ≥ 3.16（注意 quickstart 文档写的是 ≥ 3.19，按文档准备更稳妥），若用户未指定编译器，则 C/C++ 编译器默认都用 `bisheng`。
+- [CMakeLists.txt:L26-L41](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L26-L41)：开启 `compile_commands.json` 导出（供 clang-tidy 等工具用），并自动探测 ccache 加速重编译。
+- [CMakeLists.txt:L44-L48](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L44-L48)：C++ 标准定为 **C++17** 且强制要求，全库生成位置无关代码（PIC，动态库的前提）。
+
+**第一个硬检查点：**
+
+- [CMakeLists.txt:L59-L64](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L59-L64)：环境变量 `ASCEND_HOME_PATH` 不存在时 `message(FATAL_ERROR "Cannot find ASCEND_HOME_PATH, please run set_env.sh.")`。这是新手最常撞到的第一个报错——解法就是先 source CANN 的 set_env.sh。安装前缀同时设为源码树的 `install/shmem`（[L57](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L57)），build.sh 会用 `-DCMAKE_INSTALL_PREFIX=../install` 覆盖它。
+
+**bisheng 版本探测（很有意思的机制）：**
+
+- [CMakeLists.txt:L79-L120](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L79-L120)：执行 `bisheng -v`，用正则从输出里提取 `YYYY-MM-DD` 日期并转成时间戳，与分界值 **20260327** 比较，得出 `IS_NEW_VERSION`。探测失败时按旧版处理。这样同一份 CMake 能同时兼容新旧两代 bisheng 的 AscendC 编译模式。
+
+- [CMakeLists.txt:L161-L199](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L161-L199)：两种模式的差异——新版用 `-xasc --npu-arch=dav-2201`（950 则 `dav-3510`），旧版用 `-xcce --cce-aicore-arch=dav-c220`（950 则 `dav-c310`）加一串 `-mllvm` 细粒度选项。这些选项只作用于 Device 侧代码。
+
+**SOC 与后端名：**
+
+- [CMakeLists.txt:L152-L159](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L152-L159)：`SOC_TYPE=Ascend950` → `SHMEM_BACKEND_NAME=950`，否则 `910`。这个后端名后面会用于 wheel 的 `backends/<name>/` 目录布局。
+
+**RDMA 后端宏生成：**
+
+- [CMakeLists.txt:L207-L233](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L207-L233)：`ACLSHMEM_RDMA_BACKEND` 只允许在 950 上设置；`XSCALE` 生成宏 `ACLSHMEMI_RDMA_K_BACKEND_XSCALE=1`，`HNS_1825` 生成 `ACLSHMEMI_RDMA_K_BACKEND_HNS_1825=1`。注意编译指南特别提醒：这些是系统自动生成的内部宏，**不要手动 `-D` 定义**，否则会编译冲突。
+
+**全局编译/链接选项与 CANN 依赖：**
+
+- [CMakeLists.txt:L270-L299](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L270-L299)：全局追加 `-O2 -std=c++17 -Werror`（警告即错误，保证代码洁净度）以及 `-fstack-protector-strong` 等加固选项；链接选项含 `-s`（去符号）和 relro/now 加固。
+- [CMakeLists.txt:L307-L338](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L307-L338)：把 CANN 的 `tikcpp`、`include`、平台专属 include 等目录加入头文件搜索路径，`lib64` 加入库搜索路径，并链接 `runtime stdc++ ascendcl ... pthread` 等一串基础库——这就是「离开 CANN 编不了」的直接原因。
+
+**能力探测（configure 期的小型试编译）：**
+
+- [CMakeLists.txt:L344-L383](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L344-L383)：现场写一个调用了 `aclrtMemExportToShareableHandleV2` 等接口的小 cpp，用 `try_compile` 链接 `ascendcl` 试编。成功则定义 `-DHAS_ACLRT_MEM_FABRIC_HANDLE`，启用 user-buffer V2 句柄能力；失败则静默降级。这种「先探测再决定宏」的写法让同一份代码能跨多个 CANN 版本编译，u8 单元讲的 under_api 动态加载是它在运行期的对应思想。
+
+**子目录组织：**
+
+- [CMakeLists.txt:L430-L440](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L430-L440)：总是构建 `src` 和 `tools`；`USE_UNIT_TEST` 时加入 `tests/unittest`；`USE_EXAMPLES` 或 `PYEXPAND_EXAMPLE` 时加入 `examples`。这解释了 build.sh 的 `-uttests`/`-examples` 为什么能生效。
+
+**src 内部：双 OBJECT 库合体。**
+
+- [src/CMakeLists.txt:L27-L43](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/src/CMakeLists.txt#L27-L43)：`src/device`（和 `device_simt`）下所有 cpp 收进 `aclshmem_device` OBJECT 库，**PRIVATE** 附加 `${CMAKE_CCE_COMPILE_OPTIONS}`（即 4.3.2 流程里的 `-xasc`/`-xcce` 那组）——只有 device 代码用 AscendC 模式编译。
+- [src/CMakeLists.txt:L50-L76](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/src/CMakeLists.txt#L50-L76)：`src/host` 下所有 cpp（排除 python_wrapper、bootstrap、utils 等单独成库的部分）收进 `aclshmem_host` OBJECT 库，用 `-xc++` 普通 C++ 模式编译。特别注意 [L57-L62](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/src/CMakeLists.txt#L57-L62)：**SOC_TYPE 不是 950 时，UDMA 传输管理和 topo 目录会被整体排除**——这就是「UDMA 仅 950」在构建系统里的落点。
+- [src/CMakeLists.txt:L129-L135](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/src/CMakeLists.txt#L129-L135)：`add_library(shmem SHARED $<TARGET_OBJECTS:aclshmem_device> $<TARGET_OBJECTS:aclshmem_host>)`——两个 OBJECT 库链接成最终的 `libshmem.so`，950 额外链接 `hcomm`。**一份 so 同时承载 Host 实现与 Device kernel 入口**，运行时由驱动各自取用。
+- [src/CMakeLists.txt:L170-L212](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/src/CMakeLists.txt#L170-L212)：另外构建两个 bootstrap 插件 `aclshmem_bootstrap_uid.so` 和 `aclshmem_bootstrap_config_store.so`——u2-l3 讲 bootstrap 时会再见到它们，这里只需记住「初始化控制面是可插拔的独立 so」。
+
+**安装规则：**
+
+- [src/CMakeLists.txt:L214-L235](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/src/CMakeLists.txt#L214-L235)：把 `libshmem.so` 装到 `install/shmem/lib`，全部 `include/**/*.h` 装到 `install/shmem/include`，还把 `src/device`、`src/device_simt`、`src/host_device` 源码目录一并装到 `install/shmem/src`——因为用户自己写 AscendC kernel 时要 `#include` 这些设备侧头文件。
+
+#### 4.3.4 代码实践
+
+**实践目标**：不经过 build.sh，手动执行一次 cmake configure，读懂 cmake 打印的每一行关键状态，并对比两种 SOC 的差异。
+
+**操作步骤**：
+
+```bash
+cd shmem
+source /usr/local/Ascend/ascend-toolkit/set_env.sh   # 前提
+
+# 1. 手动 configure（与 fn_build 等价的简化版）
+mkdir -p build && cd build
+cmake -DCMAKE_BUILD_TYPE=RELEASE -DCMAKE_INSTALL_PREFIX=../install ..
+
+# 2. 抓取关键状态行
+cmake -L .. 2>/dev/null | grep -E "SOC_TYPE|CMAKE_C_(CXX_)?COMPILER" || true
+grep -E "^(SOC_TYPE|USE_CXX11_ABI|CMAKE_BUILD_TYPE)" CMakeCache.txt
+
+# 3. 查看生成物
+ls compile_commands.json Makefile
+
+# 4.（可选，950 机器）换 SOC 重新 configure 并对比
+rm -rf * && cmake -DSOC_TYPE=Ascend950 -DCMAKE_BUILD_TYPE=RELEASE ..
+grep "^SOC_TYPE" CMakeCache.txt
+```
+
+**需要观察的现象**：
+
+- 步骤 1 的输出里应能看到 `-- SOC_TYPE:`、`-- SHMEM_BACKEND_NAME:910`、`-- CMAKE_CCE_COMPILE_OPTIONS: ...`、ccache 探测信息等状态行——它们分别来自上文引用的 [CMakeLists.txt:L152-L200](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L152-L200)。
+- 步骤 2 中 `CMAKE_CXX_COMPILER` 应指向 bisheng。
+- 步骤 4 换成 950 后，状态行 `SHMEM_BACKEND_NAME` 变为 `950`，CCE 选项里的 NPU 架构从 `dav-2201`（或 `dav-c220`）变为 `dav-3510`（或 `dav-c310`）。
+- 反向实验（无 CANN 环境也可做）：**不 source CANN 直接执行步骤 1**，cmake 会立刻 `FATAL_ERROR: Cannot find ASCEND_HOME_PATH`——亲身体验第一个检查点。
+
+**预期结果**：`build/` 下生成 `CMakeCache.txt`（所有配置的缓存）与 `compile_commands.json`（每個文件的完整编译命令，可用来核对 device 文件确实带了 `-xasc`/`-xcce` 而 host 文件带 `-xc++`）。**待本地验证**：cmake 状态行具体内容取决于本机 CANN 与 bisheng 版本。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么没 source CANN 环境时 cmake 会直接失败，而不是编译到一半才报头文件找不到？
+
+**参考答案**：因为顶层 CMakeLists 在 [L60-L64](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L60-L64) 显式检查 `ENV{ASCEND_HOME_PATH}`，缺失即 `FATAL_ERROR`。后续所有头文件/库目录（tikcpp、lib64 等）都从这个变量推导（[L307-L338](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L307-L338)），与其等编译期混乱报错，不如 configure 期一条清晰消息失败——与 build.sh 的参数校验是同一设计哲学。
+
+**练习 2**：`IS_NEW_VERSION` 是怎么算出来的？它影响什么？
+
+**参考答案**：CMake 执行 `bisheng -v`，从输出中用正则提取形如 `YYYY-MM-DD` 的日期并转为时间戳，与分界值 20260327 比较（[CMakeLists.txt:L87-L120](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L87-L120)）。它决定 Device 侧 AscendC 编译模式：新版用 `-xasc + --npu-arch`，旧版用 `-xcce + --cce-aicore-arch`（[L161-L199](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L161-L199)）。这让仓库同时兼容新旧两代 CANN toolkit。
+
+**练习 3**：`aclshmem_device` 和 `aclshmem_host` 为什么必须拆成两个 OBJECT 库，而不是把所有 cpp 编进一个目标？
+
+**参考答案**：因为两类代码需要**互斥的编译选项**：device 侧（AscendC kernel）要用 `-xasc`/`-xcce` 加 NPU 架构选项编译成 AICore 目标文件；host 侧要用 `-xc++` 按宿主机方式编译。CMake 的编译选项是按目标（target）设置的，拆成两个 OBJECT 库才能各用各的选项，最后在 [src/CMakeLists.txt:L129](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/src/CMakeLists.txt#L129) 把两者链接成同一个 `libshmem.so`。
+
+**练习 4**：`HAS_ACLRT_MEM_FABRIC_HANDLE` 这个宏是怎么来的、有什么用？
+
+**参考答案**：configure 期 CMake 现场生成一个调用 `aclrtMemExportToShareableHandleV2` 等接口的小测试程序，用 `try_compile` 尝试链接 `ascendcl`（[CMakeLists.txt:L352-L371](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L352-L371)）；成功则定义该宏启用 user-buffer V2 能力，失败则禁用（[L378-L383](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/CMakeLists.txt#L378-L383)）。用途是让同一份源码在「有/没有这个新接口」的不同 CANN 版本上都能编译通过。
+
+### 4.4 三种安装方式与 set_env.sh：从产物到可用环境
+
+#### 4.4.1 概念说明
+
+「编译成功」和「能被使用」之间还差一步安装。SHMEM 提供三种安装方式，分别面向三类用户：
+
+| 使用场景 | 安装方式 | 产物或安装位置 |
+| --- | --- | --- |
+| 从源码开发 C/C++ 算子 | 源码编译 | 仓库的 `install/` 目录 |
+| 部署 C/C++ 动态库 | 二进制 run 包 | `/usr/local/Ascend/shmem`、`$HOME/Ascend/shmem` 或自定义路径 |
+| 使用 Python 接口 | pip / 本地 wheel | 当前 Python 环境的 `site-packages` |
+
+（表格来自 [docs/quickstart.md:L195-L207](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/docs/quickstart.md#L195-L207)。）
+
+源码编译已在 4.2 演示。run 包是自解压脚本（makeself 格式），把整个 `install/` 连同安装脚本打进一个 `.run` 文件，适合在生产机部署。wheel 最特别：**一个 wheel 同时包含 910（A2/A3）和 950 两套后端的 `.so`，运行时自动选择**——这让同一个 Python 环境无需重装就能跑在两种芯片的机器上。
+
+#### 4.4.2 核心流程
+
+**run 包路径**：
+
+```text
+bash scripts/build.sh [-soc_type Ascend950] -package
+  → package/{arch}/SHMEM_{version}_linux-{arch}.run
+    chmod +x 后执行：.run --check（仅检查）/ --install / --install-path=/opt/xxx
+  → 安装到 {INSTALL_PATH}/shmem/latest/{shmem/{include,lib}, scripts}
+  → source .../shmem/latest/set_env.sh
+```
+
+**wheel 路径**（`-python_extension` 或 `-package` 触发 `fn_whl_build`）：
+
+```text
+fn_whl_build（build.sh 内）
+  ├─ 轮 1：SOC_TYPE=Ascend910B + BUILD_PYTHON=ON → 编译 _pyshmem.so + 910 后端库
+  ├─ （启用 RDMA 时）轮 2：SOC_TYPE=Ascend950 + XSCALE   → 950 后端库
+  ├─ （启用 RDMA 时）轮 3：SOC_TYPE=Ascend950 + HNS_1825 → 950 备用网卡后端库
+  ├─ 每轮把 install/shmem/lib/*.so 拷到 install/shmem/backends/<name>/
+  └─ export _SHMEM_PREBUILT=1 → python3 setup.py bdist_wheel（只打包、不再编译）
+安装：pip install dist/cann_shmem-*.whl → shmem-config --diagnose 验证
+```
+
+**环境变量生效路径**（源码编译方式）：`source install/set_env.sh` 设置 `SHMEM_HOME_PATH`、`LD_LIBRARY_PATH`、`PATH`，进程结束后失效。
+
+#### 4.4.3 源码精读
+
+**方式一（源码编译）的官方步骤：**
+
+- [docs/quickstart.md:L209-L229](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/docs/quickstart.md#L209-L229)：clone → `bash scripts/build.sh`（950 加 `-soc_type Ascend950`）→ `source install/set_env.sh` → `test -f install/shmem/lib/libshmem.so` 验证。并注明默认构建不含 xDMA 能力。
+
+**方式二（run 包）：**
+
+- [docs/quickstart.md:L231-L275](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/docs/quickstart.md#L231-L275)：`-package` 构建出 `SHMEM_{version}_linux-{arch}.run` 与 `cann_shmem-*.whl`；安装支持 `--check`（仅环境检查）、`--install`、`--install-path=/opt/xxx` 三种模式；安装后按 root/非 root/自定义路径 source 对应的 `set_env.sh`，并用 `test -f "${SHMEM_HOME_PATH}/shmem/lib/libshmem.so"` 确认。`--check` 会输出芯片数量、HDK/CANN 版本、MTE/SDMA/UDMA/RDMA 支持情况。
+
+run 包的组装逻辑在 build.sh 里（4.2.3 已引用 [L401-L438](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L401-L438)），安装目录结构见 [docs/compilation_build_guide.md:L168-L181](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/docs/compilation_build_guide.md#L168-L181)：`{INSTALL_PATH}/shmem/{latest,{version}/shmem/{include,lib},scripts}`。
+
+**方式三（pip / wheel）：**
+
+- [docs/quickstart.md:L277-L311](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/docs/quickstart.md#L277-L311)：可从昇腾 PyPI 源 `pip install cann-shmem`，也可本地 `bash scripts/build.sh -python_extension` 后 `pip install --force-reinstall dist/cann_shmem-*.whl`；安装后用 `shmem-config --version / --backend / --diagnose` 验证，通过标准是 `native_load.ok=true`、`degraded=false`、A2/A3 的 `--backend` 输出 `910`。
+
+**wheel 的多后端构建**（build.sh 侧）：
+
+- [scripts/build.sh:L198-L206](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L198-L206)：`fn_whl_build()` 开头把 `SOC_TYPE` 和 `COMPILE_OPTIONS` 导出到环境——因为 setup.py 会从环境变量读取并转发给 CMake，不导出的话 wheel 构建会**悄悄丢掉所有 `-D` 编译选项**（源码注释原话）。
+- [scripts/build.sh:L242-L263](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L242-L263)：第一轮以 `SOC_TYPE=Ascend910B`、`BUILD_PYTHON=ON` 构建 910 后端，`_pyshmem.so`（pybind11 封装）只在这一轮编译；产物拷入 `install/shmem/backends/910/`。
+- [scripts/build.sh:L282-L341](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L282-L341)：随后以 `SOC_TYPE=Ascend950` 分别构建 XSCALE 与 HNS_1825 两个 RDMA 后端（`BUILD_PYTHON=OFF`，复用第一轮的 `_pyshmem.so`），拷入 `backends/950/`、`backends/950_xscale/`、`backends/950_hns1825/`。中间 [L285-L289](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L285-L289) 的注释解释了为什么可行：`_pyshmem.so` 是 SOC 无关的薄封装，运行时由 `__init__.py` 预加载对应后端的 `libshmem.so`（u7-l1 会深入）。
+- [scripts/build.sh:L372-L377](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L372-L377)：设置 `_SHMEM_PREBUILT=1` 再调 `setup.py bdist_wheel`——这个环境变量是 setup.py 跳过自身编译、直接打包预构建产物的开关。
+
+**setup.py 侧的配合：**
+
+- [setup.py:L27-L43](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/setup.py#L27-L43)：`_resolve_package_version()` 优先读环境变量 `VERSION`，否则读仓库根 `VERSION` 文件——与 build.sh 的版本来源保持一致（单一事实来源）。
+- [setup.py:L57-L68](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/setup.py#L57-L68)：自定义 `build_py` 命令 `BuildCppLibs`，`run()` 先编 C++（`_build_cpp`）再拷贝库（`_copy_libraries_to_package`）；`_SHMEM_PREBUILT=1` 时 `_build_cpp` 直接返回，即「多后端模式跳过 cmake」。
+- [setup.py:L76-L105](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/setup.py#L76-L105)：独立使用时（不经 build.sh），从 `PYEXPAND_TYPE`/`BUILD_TYPE`/`COMPILE_OPTIONS` 等环境变量拼出 cmake 命令并 `make install -j17`。
+- [setup.py:L133-L192](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/setup.py#L133-L192)：`_copy_libraries_to_package()` 把 `install/shmem/backends/` 的全部 `.so`、`bin/root_info_generate` 工具、`include/` 头文件、`src/device` 设备侧头文件、`version.info` 一起拷进 Python 包，使 wheel 成为「自带全部 C++ 资产」的离线包。
+- [setup.py:L195-L226](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/setup.py#L195-L226)：`setup()` 元信息——包名 `cann-shmem`、依赖 `torch-npu`、Python ≥ 3.7，并通过 entry_points 暴露 **`shmem-config`** 命令行工具；`distclass=BinaryDistribution` + `cmdclass` 声明这是带二进制扩展的包。
+
+**set_env.sh（安装后的临门一脚）：**
+
+- [scripts/set_env.sh:L11-L18](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/set_env.sh#L11-L18)：从脚本自身位置推出安装根目录并 `export SHMEM_HOME_PATH`；把 `shmem/lib` 和**驱动库目录** `/usr/local/Ascend/driver/lib64/driver/` 加进 `LD_LIBRARY_PATH`（运行期要找到驱动层的库）；把 `bin` 加进 `PATH`（里面有 `root_info_generate` 等工具）。
+- [scripts/set_env.sh:L20-L23](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/set_env.sh#L20-L23)：若检测到 `shmem/torch_binding` 目录（Python 扩展形态），额外把其 kernels 目录加入 `LD_LIBRARY_PATH`。
+
+#### 4.4.4 代码实践
+
+**实践目标**：验证安装产物完整性，体验三种方式的「最后一公里」。
+
+**操作步骤**：
+
+```bash
+# A. 源码编译方式（接 4.2 的产物）
+source install/set_env.sh
+echo $SHMEM_HOME_PATH          # 应指向 .../install
+ls install/shmem/lib/          # 核心动态库清单
+ls install/shmem/include/      # 安装出来的头文件
+cat install/version.info       # 构建信息（版本/分支/commit/SOC/CANN 版本等）
+
+# B. run 包方式
+ls install/$(uname -m)/SHMEM_*.run
+chmod +x install/$(uname -m)/SHMEM_*.run
+install/$(uname -m)/SHMEM_*.run --check     # 只检查不安装
+
+# C. wheel 方式（可选，耗时较长）
+bash scripts/build.sh -python_extension
+ls dist/cann_shmem-*.whl
+python3 -m pip install --force-reinstall dist/cann_shmem-*.whl
+shmem-config --version && shmem-config --backend && shmem-config --diagnose
+```
+
+**需要观察的现象**：
+
+- A 中 `version.info` 的字段与 [scripts/build.sh:L183-L195](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L183-L195) 写入的一一对应：SHMEM Version、Platform、branch、commit id、Build Timestamp、SOC Type、CANN Version、RDMA Backend、UDMA Support 等——它是「这个 so 是在什么环境下编出来的」的档案。
+- B 中 `--check` 会打印芯片/设备数量、HDK/CANN 版本、MTE/SDMA/UDMA/RDMA 能力；注意文档提醒：命令退出成功不代表所有可选通信能力都满足，要看 `WARN` 汇总（[docs/quickstart.md:L257-L259](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/docs/quickstart.md#L257-L259)）。
+- C 中 `--backend` 在 A2/A3 机器应输出 `910`，950 机器输出 `950`；`--diagnose` 输出的 JSON 里 `native_load.ok=true`、`degraded=false` 才算通过。
+
+**预期结果**：A、B 两步不需要额外安装即可完成；C 步需要 pip 环境且 wheel 构建耗时较长（要编多轮后端）。**待本地验证**：`--check`/`--diagnose` 的具体输出依赖本机硬件与 CANN 版本；无 NPU 环境下 B 的 `--check` 会在设备检查处给出告警，C 的 `--diagnose` 可能显示 degraded，均属预期现象，请如实记录。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：三种安装方式分别面向什么用户？各自「装到哪」？
+
+**参考答案**：源码编译面向从源码开发 C/C++ 算子的开发者，产物在仓库 `install/` 目录；run 包面向在生产环境部署 C/C++ 动态库的用户，默认装到 `/usr/local/Ascend/shmem`（root）或 `$HOME/Ascend/shmem`（非 root），可用 `--install-path` 自定义；pip/wheel 面向 Python 接口用户，装进当前 Python 环境的 `site-packages`（[docs/quickstart.md:L203-L207](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/docs/quickstart.md#L203-L207)）。
+
+**练习 2**：为什么一个 wheel 能同时支持 910 和 950？`_pyshmem.so` 为什么只需编译一次？
+
+**参考答案**：`fn_whl_build` 会分别以 `SOC_TYPE=Ascend910B` 和 `Ascend950`（XSCALE/HNS_1825 两轮）各编译一套后端库，放进 `backends/910/`、`backends/950/` 等目录，运行时 Python 包根据 SoC 探测结果预加载对应目录的 `libshmem.so`。`_pyshmem.so` 是对统一 `aclshmem_*` C API 的薄 pybind11 封装，与具体 SOC 无关，因此只在 910 那轮（`BUILD_PYTHON=ON`）编译一次并复用（[scripts/build.sh:L285-L289](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/build.sh#L285-L289) 注释）。
+
+**练习 3**：`set_env.sh` 把驱动库目录 `/usr/local/Ascend/driver/lib64/driver/` 也加进 `LD_LIBRARY_PATH`，为什么？
+
+**参考答案**：SHMEM 的传输层要直接调用驱动层接口（如 RDMA 网卡相关库），这些库在驱动安装目录而非 SHMEM 安装目录；不把驱动 lib 路径加进来，`import shmem` 或运行样例时会报找不到共享库（[scripts/set_env.sh:L15-L17](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/scripts/set_env.sh#L15-L17)）。
+
+## 5. 综合实践
+
+**任务：从零把 SHMEM「编译→安装→自检」完整走一遍，并产出一份属于你的《构建排障记录》。**
+
+按以下清单执行（每步都记录实际输出）：
+
+1. **环境体检**：完成 4.1.4 的依赖检查表，用 `npu-smi info` 确定芯片型号，决定是否需要 `-soc_type Ascend950`。
+2. **默认构建**：`source` CANN 环境 → `bash scripts/build.sh`。记录：总耗时、cmake 阶段打印的 `SHMEM_BACKEND_NAME`、是否使用了 ccache。
+3. **产物盘点**：画出 `install/` 目录树（`shmem/lib`、`shmem/include`、`shmem/src`、`version.info`、`{arch}/SHMEM_*.run`），并回答：`install/shmem/src` 里为什么会有设备侧源码头文件？（提示：[src/CMakeLists.txt:L225-L235](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/src/CMakeLists.txt#L225-L235)）
+4. **环境生效**：`source install/set_env.sh`，依次 `echo $SHMEM_HOME_PATH`、`echo $LD_LIBRARY_PATH | tr ':' '\n' | head`，确认 `shmem/lib` 与驱动目录都在。
+5. **能力构建**：按需选做其一——`-examples`（为下一讲准备）或 `-soc_type Ascend950 -enable_rdma -rdma_backend XSCALE`（950 机器），对比第 2 步输出差异。
+6. **排障记录**：把过程中遇到的每个问题按「现象 → 根因 → 解决方式」三栏记录。常见候选（提前给出排查方向）：
+
+| 现象（候选） | 根因方向 | 解决方式 |
+| --- | --- | --- |
+| cmake 报 `Cannot find ASCEND_HOME_PATH` | 没 source CANN 环境 | 先 `source /usr/local/Ascend/ascend-toolkit/set_env.sh` |
+| `bisheng: command not found` | bisheng 不在 PATH | 确认 CANN toolkit 装好并 source 其 set_env.sh |
+| 运行时报缺 `libhccl.so` | 未装对应 SoC 的 ops 包 | 按 quickstart L77-L83 装 `Ascend-cann-{soc}-ops_*.run` |
+| `-soc_type Ascend950` 构建卡在拉 json | 离线无法访问 GitCode | 预置 `3rdparty/json`（v3.11.3）再构建 |
+| `-uttests` 构建卡在拉 googletest | 同上 | 预置 `3rdparty/googletest`（v1.14.x） |
+| run 包打包阶段失败 | 找不到 makeself 工具 | 确认 CANN toolkit 完整（makeself 位于 `${ASCEND_HOME_PATH}/toolkit/tools/op_project_templates/...`） |
+| 与 PyTorch 混用链接报 CXX11 ABI 错误 | ABI 不一致 | 用 `-use_cxx11_abi0/1` 对齐后重建 |
+
+无 NPU/CANN 的环境：完成第 1 步能做的部分 + 第 6 步（至少记录 `ASCEND_HOME_PATH` 缺失的完整报错），并明确标注「仅完成编译验证，运行时行为待 NPU 环境验证」。
+
+## 6. 本讲小结
+
+- SHMEM 编译强依赖 CANN 工具链：bisheng 编译器、`ASCEND_HOME_PATH` 环境变量、CANN 头文件与 `runtime/ascendcl` 库缺一不可；CANN 版本和芯片型号共同决定 MTE/RDMA/SDMA/UDMA 哪些引擎可用。
+- `scripts/build.sh` 是唯一编译入口：加载 CANN 环境 → 读 VERSION → 解析参数为 CMake `-D` 选项 → 校验参数依赖（如 `-rdma_backend` 必须配 `-enable_rdma` 且仅 950）→ 委托 `cmake + make install`，默认还会用 makeself 生成 run 包。
+- 顶层 `CMakeLists.txt` 的三个关键机制：configure 期强制检查 `ASCEND_HOME_PATH`；解析 `bisheng -v` 的日期切换 `-xasc`/`-xcce` 编译模式并按 `SOC_TYPE` 选 NPU 架构；用 `try_compile` 探测 CANN 能力符号生成条件宏。
+- `src/CMakeLists.txt` 把 `src/device`（AscendC 模式）与 `src/host`（普通 C++ 模式）编成两个 OBJECT 库，链接成同一个 `libshmem.so`；非 950 平台会在构建系统层面排除 UDMA 与 topo 目录。
+- 三种安装方式：源码编译面向开发者（产物在 `install/`）；run 包面向部署（makeself 自解压，支持 `--check`）；wheel 面向 Python 用户（一个包含 910/950 多后端，运行时自选，`shmem-config --diagnose` 验证）。
+- 安装后必须 `source set_env.sh`：它设置 `SHMEM_HOME_PATH`，并把 `shmem/lib` 与驱动库目录加入 `LD_LIBRARY_PATH`。
+
+## 7. 下一步学习建议
+
+环境就绪后，下一讲（**u1-l3 目录结构与代码组织**）会带你建立「从 API 名字到源码文件」的定位能力，搞清 `include/host`、`include/device`、`src/host`、`src/device` 等目录的分层规则——那是在阅读任何 SHMEM 代码前的必备地图技能。
+
+再往下一讲（**u1-l4 运行第一个示例**）将用本讲构建出的环境编译运行 `examples/init`，第一次看到多个 PE 进程被拉起并互相发现。
+
+如果你本讲是用 `-uttests` 构建的，可以提前翻看 [tests/unittest/CMakeLists.txt](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/tests/unittest/CMakeLists.txt) 和 `scripts/run.sh`，为 u8-l6 的测试体系专题积累直觉；想深入了解构建参数全集，可通读 [docs/compilation_build_guide.md](https://github.com/gitcode.com/cann/shmem/blob/7ed686e5da60eb6008639916adba0f835cdbf4a6/docs/compilation_build_guide.md)。
