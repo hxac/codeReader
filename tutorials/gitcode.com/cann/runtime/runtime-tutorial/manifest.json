@@ -1,0 +1,78 @@
+{
+  "head": "44a689408e8c06e4740320b265678f8d9c3c093d",
+  "project": "runtime",
+  "rationale": "本仓是华为 CANN（昇腾）运行时，规模大、层次多（acl 对外 API 层 → runtime 核心层 → driver 驱动适配层，外加 adump/msprof/log/error_manager 维测组件），因此采用\"先跑通、再读层、后深入\"的九单元递进结构。u1 让读者从零完成环境搭建、跑通 Hello CANN 并建立目录与头文件地图；u2 剖析 acl 层初始化、宏导出与 aclrtXxx→rtXxx 分层调用，是理解后续模块的钥匙；u3~u5 按编程模型三大基础资源（Device/Context、Stream/Event/同步、内存）沿\"样例→acl 层→runtime 核心\"读源码；u6 进入 Kernel 执行与任务下发深水区（task_info/launch/SQ-CQ）；u7 下沉到驱动与芯片平台适配；u8 横向覆盖四大维测组件；u9 收敛到 ACL Graph、可靠性、TDT、IPC 等高级特性及 UT 与贡献流程，为二次开发做准备。依赖关系保证 worker 可按拓扑顺序生成讲义。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "初识 CANN Runtime",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与总体架构",
+          "order": 1,
+          "filename": "u1-l1-project-positioning-and-architecture.md",
+          "level": "beginner",
+          "topic": "介绍 CANN Runtime 在昇腾软件栈中的定位、Runtime 组件与维测组件的划分，以及 acl 层、runtime 核心层、driver 层的分层架构。",
+          "learning_goals": [
+            "说出 Runtime 与 msprof/adump/log 组件各自职责",
+            "画出 acl→runtime→driver 的层次关系",
+            "理解 Host-Device 异构编程模型"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/zh/quick_start/Runtime_overview.md",
+            "docs/zh/quick_start/Runtime_programming_model.md",
+            "docs/zh/design/architecture.md"
+          ],
+          "minimal_modules": [
+            "README",
+            "架构文档",
+            "src 顶层目录"
+          ],
+          "practice_task": "阅读架构文档后自绘一张分层框图，标注 aclrtSetDevice 从应用到达驱动要经过的层次及每层对应源码目录。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "环境搭建与源码编译",
+          "order": 2,
+          "filename": "u1-l2-environment-and-build.md",
+          "level": "beginner",
+          "topic": "讲解依赖安装、build.sh 编译流程、第三方库下载与 run 包安装，让读者得到可编译可验证的源码环境。",
+          "learning_goals": [
+            "安装 CANN 包并配置 set_env.sh 环境变量",
+            "用 build.sh 完成源码编译得到 run 包",
+            "了解 build_out 产物的含义"
+          ],
+          "source_files": [
+            "README.md",
+            "build.sh",
+            "install_deps.sh",
+            "CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "build.sh",
+            "CMakeLists.txt"
+          ],
+          "practice_task": "执行 bash build.sh 完成编译（离线环境先用 download_3rd_party.py），记录 build_out 下产物名称并安装验证。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库目录结构与代码地图",
+          "order": 3,
+          "filename": "u1-l3-repository-code-map.md",
+          "level": "beginner",
+          "topic": "逐目录讲解 src/acl、src/runtime、src/dfx、example、tests、docs 的职责，建立"
+        }
+      ]
+    }
+  ]
+}
