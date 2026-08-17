@@ -1,13 +1,13 @@
 {
-  "head": "0fc1037031e6f5b3fb0e9f68d49b4fdfd542c32e",
+  "head": "e71ccb398205a0170c847b4b8f5d8e5862aedcc5",
   "project": "pypto",
-  "rationale": "PyPTO 是面向 AI 加速器的编译型编程框架，核心链路为「Python 前端(@pypto.jit / Tensor API) → AST 解析为 PIL → 转换为 IR(Tensor Graph) → C++ 多层图 Pass(Tensor/Tile/Block Graph) → CodeGen 生成 PTO 虚拟指令 → MPMD 设备执行」，同时提供 pypto_pro 低层语言和仿真/解释器能力。学习路线按此真实编译链路组织：第 1 单元从零认识项目定位、安装运行与目录结构；第 2 单元掌握 Tensor/算子/控制流/动态 Shape 的前端编程基础（依托 examples 与官方 tutorials）；第 3 单元进入 Python 前端编译器源码（AST→PIL→IR）；第 4 单元进入 C++ 框架的多层图与 Pass 体系；第 5 单元讲代码生成、运行时与仿真解释器；第 6 单元讲 pypto_pro 低层编程；第 7 单元覆盖性能、精度、调试、整网集成与大模型实战等专家主题。依赖关系沿编译链路递进，每篇配一个可操作的代码实践，源码文件均为仓库中真实存在的文件。",
+  "rationale": "本次为增量更新，diff 范围 0fc103703..e71ccb398 仅含两个提交：2bb883295 修复 python/pypto/pil/ops.py 中 _dyn_for 动态循环展开的边界计算（unroll_step 重命名为 nstep 并改用 nstart 对齐），同时 framework/src/machine/runtime/runner/kernel_binary.cpp 将设备参数初始化改为 LiteNPU 条件跳过；e71ccb398 重构 python/tests/ut/kirin 测试以运行 camodel（compare_cos 从恒返回 1.0 改为真实余弦相似度、新增 check_nan、conftest 设置 simulation.accuracy_level、cmp 测试改为表驱动参数化）。据此判定：u3-l5 直接引用 ops.py 需小更新；u5-l2 引用的 runner/ 目录内 kernel_binary.cpp 有局部逻辑变化需小更新；u7-l7 讲测试体系且 golden 对比方式（cos 相似度+NaN 校验）实质变化需更新并补充 kirin 测试基础设施源文件；其余 31 篇讲义所依赖的 README、examples、docs、前端解析器、多层图 Pass、codegen、pypto_pro 等均无变化，保持 keep。另修正上版 manifest 中 u7-l4 的 id 笔误（u4-l4-debug-placeholder → u7-l4），整体学习路线与依赖结构不变。",
   "units": [
     {
       "id": "u1",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview-and-pto-paradigm.md",
           "id": "u1-l1",
@@ -33,7 +33,7 @@
           "topic": "介绍 PyPTO 项目的定位、PTO（Parallel Tensor/Tile Operation）编程范式、基于 Tile 的编程模型以及 Tensor→Tile→Block→Execution 的多层次编译流程。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -63,7 +63,7 @@
           "topic": "讲解如何准备环境、编译安装 PyPTO 软件包，并通过 hello_world 示例跑通第一个 add 算子。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -94,7 +94,7 @@
           "topic": "梳理仓库整体目录结构：Python 包（python/pypto、python/pypto_pro）、C++ 框架（framework）、示例（examples、models）与文档（docs）的职责与相互关系。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2",
             "u1-l3"
@@ -134,7 +134,7 @@
       "id": "u2",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -164,7 +164,7 @@
           "topic": "解析 python/pypto/tensor.py 中 Tensor 类的核心属性与方法，以及 op/creation.py 中的张量创建 API 和 from_torch 转换。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -197,7 +197,7 @@
           "topic": "讲解 python/pypto/op 下的算子库分类（math、reduction、matmul、comparison 等）与常用算子的使用方式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u2-l2"
@@ -228,7 +228,7 @@
           "topic": "深入 hello_world 中的 @pypto.jit 装饰器，理解 Python 函数如何被捕获、编译成算子并在设备上执行。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -256,7 +256,7 @@
           "topic": "介绍 Tile（硬件感知数据块）概念、set_vec_tile_shapes 等 tiling API 以及 tile shape 对性能的影响。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -286,7 +286,7 @@
           "topic": "讲解 PyPTO 算子内的循环与条件控制流写法，以及它们在编译期的处理方式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l5"
           ],
@@ -323,7 +323,7 @@
       "id": "u3",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3",
             "u2-l3"
@@ -354,7 +354,7 @@
           "topic": "剖析 python/pypto/frontend 的整体架构：jit 装饰器入口、entry.py 的捕获流程、context 与诊断机制。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -382,7 +382,7 @@
           "topic": "精读 frontend/parser/parser.py（约 1700 行），理解 Python AST 如何被解析成框架内部表示，以及支持/不支持的语法子集。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -412,7 +412,7 @@
           "topic": "讲解 PIL（PyPTO Intermediate Language）的数据结构定义、builder 构建方式与可读文本格式，理解 Python 代码被翻译成 PIL 后的样子。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l3"
           ],
@@ -440,7 +440,7 @@
           "topic": "剖析 pil/pil2ir.py 与 pir.py，理解 PIL 如何被转换（lowering）为框架 IR，以及 dispatcher 的算子分发机制。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u3-l4"
           ],
@@ -449,7 +449,8 @@
           "learning_goals": [
             "描述 compile_pipeline.py 中各阶段（解析、转换、编译）的顺序",
             "理解 op_registry 的注册与查找机制",
-            "掌握 liveness 分析在输出写回中的作用"
+            "掌握 liveness 分析在输出写回中的作用",
+            "理解 ops.py 中 _dyn_for 动态循环展开的边界对齐计算（含最新的 nstart/nstep 修正）"
           ],
           "level": "intermediate",
           "minimal_modules": [
@@ -459,15 +460,16 @@
             "python/pypto/frontend/parser/liveness.py"
           ],
           "order": 5,
-          "practice_task": "在 op_registry 中注册一个自定义的简单算子（如 x*y+1 的融合版本），编写 jit 函数调用它并验证编译与执行结果。",
+          "practice_task": "在 op_registry 中注册一个自定义的简单算子（如 x*y+1 的融合版本），编写 jit 函数调用它并验证编译与执行结果；再阅读 ops.py 中 _dyn_for 的循环展开边界计算（nstop = nstart + (loop.stop - nstart) // nstep * nstep），解释修复后为什么动态循环的各 unroll 段边界不再依赖 loop.start。",
           "source_files": [
             "python/pypto/pil/compile_pipeline.py",
             "python/pypto/pil/op_registry.py",
             "python/pypto/pil/ops.py",
-            "python/pypto/frontend/parser/liveness.py"
+            "python/pypto/frontend/parser/liveness.py",
+            "python/tests/ut/ir/test_pil.py"
           ],
           "title": "编译流水线与算子注册机制",
-          "topic": "讲解 pil/compile_pipeline.py 的编译流水线组织、ops.py 的算子定义方式与 op_registry 注册机制。"
+          "topic": "讲解 pil/compile_pipeline.py 的编译流水线组织、ops.py 的算子定义方式（含 pypto.loop 动态循环展开 _dyn_for 的边界对齐修复）与 op_registry 注册机制。"
         }
       ],
       "level": "intermediate",
@@ -478,7 +480,7 @@
       "id": "u4",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l4",
             "u1-l3"
@@ -510,7 +512,7 @@
           "topic": "介绍 framework 目录的 C++ 源码组织，以及 include/ir 与 interface/ir 中的核心 IR 对象（Program、Function、Op、MemRef、Type、Stmt）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -540,7 +542,7 @@
           "topic": "讲解 pass_mgr 的 Pass 管理框架、python 侧 pass_config.py 的 pass 开关配置，以及 pass_check/pass_log 等基础设施。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l2"
           ],
@@ -571,7 +573,7 @@
           "topic": "精读 tensor_graph_pass 目录：tile shape 推导、启发式 tile 设置、auto_cast 类型提升、循环展开、冗余 reshape 消除等 pass。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l3"
           ],
@@ -601,7 +603,7 @@
           "topic": "剖析 tile_graph_pass 目录：graph_optimization、graph_partition、graph_constraint、data_path 与子图到函数的转换。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l4"
           ],
@@ -640,7 +642,7 @@
       "id": "u5",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l5"
           ],
@@ -671,7 +673,7 @@
           "topic": "剖析 framework/src/codegen：codegen 工厂、codegen_cce 后端如何将执行图生成 PTO 虚拟指令代码。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u5-l1"
           ],
@@ -680,6 +682,7 @@
           "learning_goals": [
             "理解 machine/host 中 backend/ir_backend/main_block 的职责",
             "理解 machine/runtime 中 bundle/launcher/runner 的加载执行链路",
+            "理解 kernel_binary.cpp 中 KernelBinary 构造时按芯片架构（LiteNPU 跳过设备参数初始化）的条件分支",
             "描述一次 kernel 调用从 host 发起到设备完成的流程"
           ],
           "level": "advanced",
@@ -690,20 +693,20 @@
             "framework/src/machine/runtime/runner/"
           ],
           "order": 2,
-          "practice_task": "梳理并绘制「host 发起 → 编译产物加载 → 设备执行 → 结果回读」的时序图，标注每步对应的源码目录，并对照 PYPTO_LAUNCH_SCHED_SAME_CLUSTER 文档理解调度环境变量。",
+          "practice_task": "梳理并绘制「host 发起 → 编译产物加载 → 设备执行 → 结果回读」的时序图，标注每步对应的源码目录；重点阅读 runner/kernel_binary.cpp 的 KernelBinary 构造函数，解释最新修改中为什么 LiteNPU 架构不需要 InitCachedArgs/InitLaunchArgs/InitDeviceArgs，并对照 PYPTO_LAUNCH_SCHED_SAME_CLUSTER 文档理解调度环境变量。",
           "source_files": [
             "framework/src/machine/host/backend.cpp",
             "framework/src/machine/host/main_block.cpp",
             "framework/src/machine/host/ir_backend.cpp",
             "framework/src/machine/runtime/launcher/",
-            "framework/src/machine/runtime/runner/",
+            "framework/src/machine/runtime/runner/kernel_binary.cpp",
             "docs/zh/tutorials/appendix/env_vars/PYPTO_LAUNCH_SCHED_SAME_CLUSTER.md"
           ],
           "title": "机器层：host/device/runtime 三端架构",
-          "topic": "介绍 framework/src/machine 的 host、device、runtime 子模块，理解编译产物如何被加载、启动和执行。"
+          "topic": "介绍 framework/src/machine 的 host、device、runtime 子模块，理解编译产物如何被加载、启动和执行（含 runner/kernel_binary.cpp 中 LiteNPU 跳过设备参数初始化的最新调整）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l2"
           ],
@@ -733,7 +736,7 @@
           "topic": "讲解 MPMD（Multiple Program Multiple Data）多核调度模型、多算子协同执行，以及 op/distributed.py 中的分布式通信算子。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l2"
           ],
@@ -772,7 +775,7 @@
       "id": "u6",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4",
             "u1-l3"
@@ -803,7 +806,7 @@
           "topic": "介绍 python/pypto_pro 包的定位（Tile/Block 低层编程），以及 language 层暴露的核心 API。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l1"
           ],
@@ -834,7 +837,7 @@
           "topic": "剖析 pypto_pro/ir 的 builder、op_conversion、printer，理解低层 IR 如何被构建与转换。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l2"
           ],
@@ -874,7 +877,7 @@
       "id": "u7",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l5"
           ],
@@ -902,7 +905,7 @@
           "topic": "讲解 python/pypto/functions.py 的 Function 抽象与多 jit 函数组合模式，实现算子级复用。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4",
             "u7-l1"
@@ -933,7 +936,7 @@
           "topic": "讲解 python/pypto/cost_model.py 与 framework/src/cost_model 的代价估计机制，结合性能调优文档实践性能优化。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -963,12 +966,12 @@
           "topic": "讲解 op/quantization.py 量化算子、C++ operator/quantize 实现，以及精度验证与调优方法。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l4"
           ],
           "filename": "u7-l4-debugging-and-troubleshooting.md",
-          "id": "u4-l4-debug-placeholder",
+          "id": "u7-l4",
           "learning_goals": [
             "掌握通过环境变量控制 dump 与调试输出",
             "掌握常见报错（tile 对齐、shape 不匹配、AI Core 异常）的定位流程",
@@ -994,7 +997,7 @@
           "topic": "汇总 docs/zh/tutorials/debug 与 appendix 的调试手段：dump 编译中间产物、环境变量控制、常见 FAQ 与 AI Core 异常定位。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -1024,7 +1027,7 @@
           "topic": "讲解 converter.from_torch 的互操作机制、PyTorch 网络集成文档与 aclgraph 示例，把 PyPTO 算子嵌入已有训练/推理网络。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l1",
             "u7-l3"
@@ -1055,7 +1058,7 @@
           "topic": "以 models 目录的 GLM attention、experts selector 与 DeepSeek 稀疏量化 attention 为例，学习大模型融合算子的真实实现。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u1-l3"
           ],
@@ -1063,6 +1066,7 @@
           "id": "u7-l7",
           "learning_goals": [
             "了解 UT/ST/解释器测试的分类与运行方式",
+            "理解 kirin UT 的组织方式：common 公共库（compare_cos 余弦相似度、check_nan 校验）、conftest 全局仿真精度配置与 camodel 运行模式",
             "掌握贡献文档规定的开发与提交流程",
             "能为新算子补充一个单元测试"
           ],
@@ -1074,16 +1078,19 @@
             "CONTRIBUTION.md"
           ],
           "order": 7,
-          "practice_task": "按照现有测试的组织方式，为你在 u7-l1 写的可复用 Function 补充一个 pytest 单元测试（含 golden 对比），并按 CONTRIBUTION.md 的清单自查代码风格。",
+          "practice_task": "按照现有测试的组织方式（参考 kirin/common.py 的 compare_cos 与 check_nan、common_cmp.py 的表驱动参数化写法），为你在 u7-l1 写的可复用 Function 补充一个 pytest 单元测试（含 cos 相似度与 NaN 的 golden 对比），并按 CONTRIBUTION.md 的清单自查代码风格。",
           "source_files": [
             "python/tests/ut/interpreter/test_apply_adam_w_v2.py",
             "conftest.py",
             "pytest.ini",
             "CONTRIBUTION.md",
-            "examples/validate_examples.py"
+            "examples/validate_examples.py",
+            "python/tests/ut/kirin/common.py",
+            "python/tests/ut/kirin/conftest.py",
+            "python/tests/ut/kirin/common_cmp.py"
           ],
           "title": "测试体系与贡献流程",
-          "topic": "介绍 python/tests 的 ut/st 组织、validate_examples 示例校验、CI 配置与 CONTRIBUTION 贡献流程。"
+          "topic": "介绍 python/tests 的 ut/st 组织（含最新 kirin UT 的 camodel 运行方式、compare_cos 真实余弦相似度校验、check_nan 与 simulation.accuracy_level 全局配置）、validate_examples 示例校验、CI 配置与 CONTRIBUTION 贡献流程。"
         }
       ],
       "level": "advanced",

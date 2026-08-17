@@ -1,0 +1,1458 @@
+{
+  "head": "da40fcab61b835839d9e89a479f6586152c219c0",
+  "project": "sip",
+  "rationale": "SiP（AscendSiPBoost）是面向昇腾 NPU 的信号处理加速库，核心复杂度集中在三条主线：Host 侧执行框架（Handle/Plan/RunAsdOps/MKI）、Device 侧算子实现（operation 注册 + tiling + AscendC kernel）以及六大算子域（Base/BLAS/FFT/Filter/Interpolation/Domain）。因此学习路线设计为：先让读者从零跑通编译与第一个 example 并建立 Handle-Plan-Exec 编程模型直觉（u1-u2）；再沿一次真实调用的纵深方向拆开 Host 框架（u3）与 Device 算子开发（u4），并补齐构建系统（u5）这三块理解一切算子的公共地基；随后按模块由简到繁走读 Base（u6）、BLAS（u7，从 Level1 向量到 Level3 矩阵与 batched）、FFT（u8，API 到 Plan 分解、缓存、fftcore 算法与 ISTFT/多维）和融合领域算子（u9）；最后进入专家层：PyTorch 适配 sip_pta（u10）、UT 测试体系（u11）与从零开发新算子并贡献回社区的完整实战（u12）。依赖关系保证每篇讲义只建立在此前讲过的概念之上，例如 Cgemm 讲义依赖 Plan 机制与 tiling 两讲，二次开发实战依赖注册、kernel 与 op_list 三个机制点。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 SiP 库的定位、目标硬件与六大功能模块",
+            "区分 Host 侧框架与 Device 侧算子的职责",
+            "找到官方 API 文档、issue 与编译文档入口"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README 导读",
+            "六大模块地图",
+            "文档导航"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README 与 overview 文档后，绘制一张 SiP 模块划分图（框架/FFT/BLAS/Base/融合算子/PyTorch 适配），并为每个模块列出 2 个代表性算子名，写入自己的学习笔记。",
+          "source_files": [
+            "README.md",
+            "docs/zh/Installation_Operation_Guide/overview.md",
+            "docs/header_files_library_files.md"
+          ],
+          "title": "项目定位与能力全景：AscendSiPBoost 是什么",
+          "topic": "介绍 SiP（AscendSiPBoost）信号处理加速库的定位、面向昇腾 NPU 的应用场景，以及框架、FFT、BLAS、复数基础计算、融合算子、Solver 六大组成部分。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-repo-structure-map.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "说出 core 与 ops 两个顶层目录的分工",
+            "根据算子名推断其源码与 kernel 所在目录",
+            "理解 include 目录下公开 API 的组织方式"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "顶层目录速查",
+            "core vs ops",
+            "公开头文件"
+          ],
+          "order": 2,
+          "practice_task": "以 Conj 算子为例，在仓库中找到它的 API 声明、Host 实现、operation 注册、tiling、kernel 五个文件并记录完整路径，形成一张「算子文件地图」。",
+          "source_files": [
+            "CMakeLists.txt",
+            "include/asdsip.h",
+            "ops/include/ops.h",
+            "README.md"
+          ],
+          "title": "仓库目录结构与源码地图",
+          "topic": "讲解仓库顶层目录（core、ops、include、example、sip_pta、tests、configs、scripts、docs）的职责划分，建立从算子名定位源码的能力。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-environment-and-build.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "使用 install_deps.sh 与 requirements.txt 装齐依赖",
+            "读懂并修改 configs/build_config.json 的芯片架构开关",
+            "独立完成 bash build.sh 全量编译"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "依赖安装",
+            "芯片架构配置",
+            "build.sh 主流程"
+          ],
+          "order": 3,
+          "practice_task": "在本机（或 CI 容器）执行 install_deps.sh 与 pip3 install -r requirements.txt，随后把 build_config.json 中本机不支持的架构置 false 并运行 bash build.sh，记录编译输出目录中生成的库文件名。",
+          "source_files": [
+            "build.sh",
+            "install_deps.sh",
+            "requirements.txt",
+            "configs/build_config.json",
+            "docs/compilation_build.md"
+          ],
+          "title": "环境搭建与编译构建",
+          "topic": "说明 CANN toolkit/ops 包安装、依赖脚本、build_config.json 芯片架构配置以及 build.sh 的编译主流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-install-and-env-setup.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "说出一键编译与 run 包安装两种交付方式的差异",
+            "使用 install.sh/uninstall.sh 完成 run 包安装与卸载",
+            "配置 ASDSIP 相关环境变量使应用能链接到 asdsip"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "run 包结构",
+            "安装脚本",
+            "环境变量"
+          ],
+          "order": 4,
+          "practice_task": "执行生成的 run 包将其安装到自定义目录，source 安装目录下的 set_env.sh，然后用 gcc 编译一个仅 #include \"asdsip.h\" 的空程序并链接 libasdsip.so，验证环境变量生效。",
+          "source_files": [
+            "build.sh",
+            "scripts/install.sh",
+            "scripts/set_env.sh",
+            "docs/header_files_library_files.md"
+          ],
+          "title": "安装产物、run 包与环境变量",
+          "topic": "讲解编译产物 libasdsip 的组织、makeself 打包出的 run 包如何安装，以及 set_env.sh 背后的环境变量与日志路径配置。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3",
+            "u1-l4"
+          ],
+          "filename": "u1-l5-first-example.md",
+          "id": "u1-l5",
+          "learning_goals": [
+            "独立编译并运行 example 目录下的算子 Demo",
+            "说出 aclTensor 创建、handle 创建、workspace 分配、执行、同步、销毁的固定套路",
+            "对照 example/A2 子目录找到每个算子的专属样例"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "ACL 初始化",
+            "Demo 主流程",
+            "编译运行"
+          ],
+          "order": 5,
+          "practice_task": "进入 example 目录执行 bash build.sh 跑通 asdBlasSdot Demo；再把输入向量改成 8 个元素并手算期望点积，与程序输出对比验证。",
+          "source_files": [
+            "example/example.cpp",
+            "example/build.sh",
+            "example/README.md",
+            "include/blas_api.h"
+          ],
+          "title": "第一个算子调用：跑通 example",
+          "topic": "逐段走读 example/example.cpp，掌握 ACL 初始化、aclTensor 创建、handle/plan/workspace/stream 的固定调用顺序与资源释放。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "初识 SiP：定位、构建与首次运行"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "filename": "u2-l1-api-header-landscape.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "记住六大接口前缀与所属模块的对应关系",
+            "按需 include 正确的头文件而不是总入口",
+            "根据库名称判断链接目标"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "总入口头文件",
+            "六大模块头文件",
+            "库文件对应关系"
+          ],
+          "order": 1,
+          "practice_task": "写一个小程序分别只 include fft_api.h 调用 asdFftCreate、只 include filter_api.h 声明卷积模式枚举，验证各头文件可独立编译，并整理成前缀-头文件-库文件对照表。",
+          "source_files": [
+            "include/asdsip.h",
+            "include/base_api.h",
+            "include/blas_api.h",
+            "include/fft_api.h",
+            "include/filter_api.h",
+            "include/interp_api.h"
+          ],
+          "title": "公开 API 全景：asdsip.h 与六大模块头文件",
+          "topic": "梳理 asdsip.h 聚合的 base/blas/fft/filter/interp/domain 六个头文件、接口前缀命名规律（asdFft*、asdBlas*、asdConvolve* 等）与对应库文件。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l5",
+            "u2-l1"
+          ],
+          "filename": "u2-l2-handle-plan-exec-model.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "解释为什么 SiP 采用 Handle-Plan-Exec 而非直接函数调用",
+            "按正确顺序组织 Create/MakePlan/GetWorkspaceSize/SetWorkspace/SetStream/Exec/Synchronize/Destroy",
+            "理解 plan 一次性初始化与多次执行的复用价值"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Handle 生命周期",
+            "Plan 与 Workspace",
+            "Stream 与同步"
+          ],
+          "order": 2,
+          "practice_task": "参照 example.cpp 的 BLAS 套路，写出 asdFft 的等价调用骨架（Create→MakePlan1D→GetWorkspaceSize→SetWorkspace→SetStream→ExecC2C→Synchronize→Destroy），标注每一步对应的头文件声明位置。",
+          "source_files": [
+            "example/example.cpp",
+            "include/blas_api.h",
+            "include/fft_api.h",
+            "README.md"
+          ],
+          "title": "Handle-Plan-Exec 编程模型",
+          "topic": "提炼 SiP 所有算子统一的编程范式：创建句柄、MakePlan、申请并绑定 workspace、绑定 stream、执行、同步、销毁，并解释其设计动机。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l3-status-and-error-codes.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "使用 AspbStatus 与 ErrorType 判定调用结果",
+            "使用 ASDSIP_CHECK/ASDSIP_ECHECK 宏写出带提前返回的校验代码",
+            "根据返回码值定位文档中的故障说明"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "AspbStatus 定义",
+            "错误码枚举",
+            "校验宏"
+          ],
+          "order": 3,
+          "practice_task": "故意向 asdFftMakePlan1D 传入非法 fftSize 触发参数错误，捕获返回值并在返回码文档中查出含义；再在自己的工具函数中用 ASDSIP_CHECK 实现同样的失败即返回逻辑。",
+          "source_files": [
+            "core/utils/include/utils/aspb_status.h",
+            "core/utils/include/utils/assert.h",
+            "docs/zh/context/SiP返回码.md"
+          ],
+          "title": "AspbStatus 返回码与错误处理",
+          "topic": "讲解 AspbStatus 类型、ErrorType 错误码枚举、ASDSIP_CHECK/ASDSIP_ECHECK 校验宏，以及官方返回码对照表的用法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l4-tensor-and-memory.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "说出 Tensor desc/dims/dataSize/data 字段的含义",
+            "区分 Host 侧 Tensor 与 aclTensor 的关系",
+            "使用 TheTensor 构造测试数据并计算 stride"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Tensor 描述",
+            "TheTensor 模板",
+            "内存基座"
+          ],
+          "order": 4,
+          "practice_task": "用 wten::TheTensor<float> 构造一个 2x4 的张量，手动填充数据并实现打印函数；再对照 mem_base.h 写一段设备内存申请/释放的伪代码，说明与 aclrtMalloc 的对应关系。",
+          "source_files": [
+            "core/utils/include/utils/the_tensor.h",
+            "core/utils/the_tensor.cpp",
+            "core/utils/include/utils/the_view.h",
+            "core/utils/include/utils/mem_base.h"
+          ],
+          "title": "Tensor 与内存基础设施",
+          "topic": "走读框架内部的 Tensor 封装、TheTensor/TheView 工具类与 mem_base 内存基座，理解 aclTensor 之下框架如何描述与搬运数据。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l5-logging-system.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "使用 ASDSIP_LOG 各级别输出调试信息",
+            "说明日志 sink 分离（stdout/文件）的设计",
+            "通过环境变量调整日志级别与落盘路径"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "日志门面宏",
+            "sink 分离",
+            "环境变量控制"
+          ],
+          "order": 5,
+          "practice_task": "把 example.cpp 中加入一条 ASDSIP_LOG(DEBUG) 输出，重新编译后分别用默认配置和提升日志级别的环境变量运行，观察 stdout 与日志文件中的差异，并记录生效的环境变量名。",
+          "source_files": [
+            "core/utils/include/log/log.h",
+            "core/utils/log_core.cpp",
+            "core/utils/log_sink_file.cpp",
+            "core/utils/include/utils/env.h",
+            "docs/zh/Installation_Operation_Guide/environment_variable.md"
+          ],
+          "title": "日志系统与运行环境变量",
+          "topic": "讲解 ASDSIP_LOG 宏、log_core/log_entity 与 stdout/文件两类 sink 的实现，以及通过环境变量控制日志行为的机制。"
+        }
+      ],
+      "level": "beginner",
+      "order": 2,
+      "title": "公共接口与基础机制"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u2-l4"
+          ],
+          "filename": "u3-l1-runasdops-pipeline.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "描述 RunAsdOps 从 OpDesc 到 kernel 启动的完整步骤",
+            "解释输出 Tensor 何时由框架代为分配",
+            "追踪一个算子 API 进入框架后的第一跳代码"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "OpDesc 组装",
+            "输出内存分配",
+            "workspace 与启动"
+          ],
+          "order": 1,
+          "practice_task": "以 Conj 为例画出 RunAsdOps 调用序列图（含 MallocOutTensor、InferShape、workspace 分配），并在源码上用注释标出每一步的行号位置。",
+          "source_files": [
+            "core/utils/ops_base.cpp",
+            "core/utils/include/utils/ops_base.h",
+            "core/base/conj.cpp"
+          ],
+          "title": "RunAsdOps：一次算子调用的 Host 主链路",
+          "topic": "深入 core/utils/ops_base.cpp，走读 RunAsdOps 如何完成输出 Tensor 分配、InferShape、workspace 申请与 kernel 下发。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-opdesc-and-opparam.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "定义一个新的 OpParam 结构体并实现 == 与 ToString",
+            "说清 opName 与 specificParam 如何一起路由到具体 Operation",
+            "用 Any 类型安全地取出具体参数"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "OpDesc 结构",
+            "OpParam 定义规范",
+            "参数匹配"
+          ],
+          "order": 2,
+          "practice_task": "仿照 ops/include/params/conj.h 为假想的 Scale2 算子编写 OpParam::Scale2 结构体（含 alpha 与 n 字段），实现 operator== 与 ToString，并写一段单测验证相等比较逻辑。",
+          "source_files": [
+            "core/utils/include/utils/op_desc.h",
+            "ops/include/params/conj.h",
+            "ops/include/params/mul.h"
+          ],
+          "title": "OpDesc 与 OpParam：算子参数如何传递",
+          "topic": "讲解 OpDesc 的 opName + specificParam 组合，以及 ops/include/params 下各算子参数结构体的定义规范（==、ToString、typeId 匹配）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-operation-registration.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "编写继承 OperationBase 的 Operation 类并注册",
+            "实现 GetBestKernel 的 kernel 选择逻辑",
+            "实现 InferShapeImpl 完成输出 shape/dtype 推导"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "OperationBase 继承",
+            "GetBestKernel",
+            "InferShapeImpl 与 REG_OPERATION"
+          ],
+          "order": 3,
+          "practice_task": "对照 ConjOperation 与 MulOperation 两份实现，总结 GetBestKernel 与 InferShapeImpl 的模板化写法；然后为假想的 Scale2Operation 写出完整类骨架（不要求编译通过 kernel 部分）。",
+          "source_files": [
+            "ops/base/conj/conj_operation.cpp",
+            "ops/base/mul/mul_operation.cpp",
+            "ops/include/ops.h"
+          ],
+          "title": "Operation 注册与 InferShape",
+          "topic": "走读 conj_operation.cpp / mul_operation.cpp，理解 OperationBase 子类如何通过 GetBestKernel 选择 kernel、InferShapeImpl 推导输出，并用 REG_OPERATION 完成自注册。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l4-ops-singleton-and-mki.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "解释 Ops 单例如何建立 opName 到 Operation 的映射",
+            "定位 MKI 接口的调用点并说明其承上启下作用",
+            "使用 PlatformInfo 查询可用核数"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Ops 单例",
+            "MKI 调用点",
+            "平台信息查询"
+          ],
+          "order": 4,
+          "practice_task": "在代码库中统计 RunAsdOps 与 tiling 里分别用到的 Mki 前缀接口（如 MkiRtMemMallocDevice、PlatformInfo），按「内存/平台/kernel 信息」分类整理成表格，并注明调用文件。",
+          "source_files": [
+            "ops/include/ops.h",
+            "core/utils/ops_base.cpp",
+            "ops/base/conj/conj/tiling/conj_tiling.cpp"
+          ],
+          "title": "Ops 单例、kernel 选择与 MKI 平台层",
+          "topic": "讲解 Ops 单例如何持有全部已注册 Operation、按名称取 kernel 实例，以及外部依赖 MKI（ascend-boost-comm）在 SiP 中的角色与 PlatformInfo 的用法。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "Host 侧执行框架"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u4-l1-operator-directory-layout.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "默写一个算子目录的标准文件清单",
+            "说清 *_operation.cpp、tiling/、op_kernel/ 三层职责",
+            "为新算子搭出符合规范的目录骨架"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "目录规范",
+            "三层职责",
+            "CMake 接入点"
+          ],
+          "order": 1,
+          "practice_task": "在草稿目录中为假想算子 scale2 创建完整目录骨架（含空文件与 CMakeLists.txt），并对照 conj 的 CMakeLists.txt 检查自己漏掉了哪些目标或源文件。",
+          "source_files": [
+            "ops/base/conj/CMakeLists.txt",
+            "ops/base/conj/conj_operation.cpp",
+            "ops/base/conj/conj/conj_kernel.cpp",
+            "docs/developing_a_simple_operator.md"
+          ],
+          "title": "算子目录结构剖析：operation / tiling / op_kernel",
+          "topic": "以 ops/base/conj 为标准样本，拆解一个 Device 算子目录的固定布局（operation 注册、tiling 切分、op_kernel 核函数、CMakeLists）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-tiling-development.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "解释 TilingData、BlockDim、len/tail 切分字段的计算方式",
+            "使用 PlatformInfo 获取向量核数并做数据均分",
+            "写出符合框架签名的 Tiling 函数"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TilingData 结构",
+            "核数切分算法",
+            "KernelInfo 填充"
+          ],
+          "order": 2,
+          "practice_task": "阅读 conj_tiling.cpp 后回答：输入 1000 个复数、maxCore=40 时 len/tail/needCoreNum 各是多少？再手动模拟一遍 mul_tiling.cpp 的切分并与答案互相验证。",
+          "source_files": [
+            "ops/base/conj/conj/tiling/conj_tiling.cpp",
+            "ops/base/conj/conj/tiling/tiling_data.h",
+            "ops/base/mul/mul/tiling/mul_tiling.cpp",
+            "ops/base/mul/mul/tiling/mul_tiling_data.h"
+          ],
+          "title": "tiling 开发详解：数据切分与 BlockDim",
+          "topic": "讲解 TilingData 结构设计、按向量核数切分数据、SetBlockDim 与 scratch size 的设置，对比 conj 与 mul 两种 tiling 实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-ascendc-kernel.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "理解 tiling 数据从 GM 搬入并解析的过程",
+            "识别 AscendC kernel 的 CopyIn/Compute/CopyOut 三段结构",
+            "说清 __aicore__ 核函数与 kernel 启动封装的关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "tiling 加载",
+            "三段式 kernel",
+            "kernel 注册封装"
+          ],
+          "order": 3,
+          "practice_task": "给 conj 的核函数逐行加注释，标出 tiling 加载、循环切分、计算与搬运四段；然后把 mul_c64.cpp 的主循环边界条件与 conj 对比，写出两者在数据布局假设上的差异。",
+          "source_files": [
+            "ops/base/conj/conj/op_kernel/conj.cpp",
+            "ops/base/conj/conj/op_kernel/conj.h",
+            "ops/base/conj/conj/conj_kernel.cpp",
+            "ops/base/mul/mul/op_kernel/mul_c64.cpp"
+          ],
+          "title": "AscendC kernel 开发：从 tiling 数据到 CopyIn/Compute/CopyOut",
+          "topic": "走读 conj 与 mul 的 op_kernel 实现，理解 InitTilingData 的 GM→UB 搬运、逐核循环计算以及 conj_kernel.cpp 对核函数的启动封装。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u4-l4-multi-arch-adaptation.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "说清 arch35 目录与默认实现的共存方式",
+            "理解 build_config.json 开关如何决定编译哪些架构",
+            "为已有算子补充新架构 tiling 的改造点"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "架构差异层",
+            "编译开关",
+            "kernel 选择联动"
+          ],
+          "order": 4,
+          "practice_task": "对比 mul_tiling.cpp 与 mul_tiling_arch35.cpp 的差异并列表（切分粒度、数据类型、核数假设）；再说明 op_list.yaml 中同一 Operation 下不同 Kernel 按架构置 true 的含义。",
+          "source_files": [
+            "ops/base/mul/mul/tiling/arch35/mul_tiling_arch35.cpp",
+            "ops/base/mul/mul/op_kernel/arch35/mul_arch35.cpp",
+            "configs/build_config.json",
+            "configs/op_list.yaml"
+          ],
+          "title": "多芯片架构适配：ascend910b 与 arch35",
+          "topic": "以 mul 算子的 arch35 分支为例，讲解同一算子如何为不同代际芯片提供独立的 tiling 与 kernel 实现，并在构建配置中按架构启用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u4-l5-kernel-common-library.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "复用公共内存搬运与迭代器工具而不是手写循环",
+            "理解 layout 抽象对多数据类型的支撑",
+            "定位可复用的 block/tile 模板"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "simd 指令封装",
+            "mem/layout 工具",
+            "模板复用"
+          ],
+          "order": 5,
+          "practice_task": "在 ops/include 下找出至少 3 处被多个算子 kernel 引用的公共工具（如 simd、mem），记录各自的典型用法；然后用 tile_complex_mul.hpp 的思路为共轭运算写一个可复用的 tile 处理伪代码。",
+          "source_files": [
+            "ops/include/common/simd.h",
+            "ops/include/common/mem.h",
+            "ops/include/common/layout.h",
+            "ops/include/common/iterator.h",
+            "ops/utils/common.cpp"
+          ],
+          "title": "kernel 公共库：simd、mem、layout 与模板",
+          "topic": "介绍 ops/include/common 与 ops/include/template 提供给所有 kernel 的公共能力：向量指令封装、内存搬运、布局抽象、迭代器与 block/tile 模板。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "Device 侧算子开发"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3",
+            "u4-l1"
+          ],
+          "filename": "u5-l1-op-list-yaml.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "读懂 Operation→Kernel→架构 三级映射结构",
+            "手动把新算子登记进 op_list.yaml",
+            "理解登记缺失会导致算子不被编译的后果"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "yaml 结构",
+            "编译清单联动",
+            "新增算子登记"
+          ],
+          "order": 1,
+          "practice_task": "在本地分支为假想的 Scale2Operation 添加 yaml 条目（Scale2C64Kernel，ascend910b: true），追踪 compile_ascendc.py/build_util.py 中解析该文件的函数，记录从 yaml 到编译目标的传递路径。",
+          "source_files": [
+            "configs/op_list.yaml",
+            "scripts/compile_ascendc.py",
+            "scripts/build_util.py",
+            "docs/developing_a_simple_operator.md"
+          ],
+          "title": "op_list.yaml：算子编译清单与 Operation-Kernel 映射",
+          "topic": "解析 configs/op_list.yaml 的 Operation→Kernel→芯片架构 三级结构，以及 scripts 如何据此驱动 AscendC kernel 编译。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-cmake-organization.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "说清 host_config 与 kernel_config 各自负责的编译产物",
+            "为新增算子目录接入 add_subdirectory",
+            "理解输出目录 lib/host/device 的组装规则"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "顶层 CMake",
+            "host/device 配置",
+            "算子 CMake 模板"
+          ],
+          "order": 2,
+          "practice_task": "画出根 CMakeLists.txt 到单个算子 so 的依赖树；然后仿照 ops/base/conj/CMakeLists.txt 写出 scale2 目录的 CMake 文件并在本地 cmake 配置阶段验证能被找到。",
+          "source_files": [
+            "CMakeLists.txt",
+            "cmake/host_config.cmake",
+            "cmake/kernel_config.cmake",
+            "ops/base/conj/CMakeLists.txt"
+          ],
+          "title": "CMake 组织：Host 与 Device 编译分离",
+          "topic": "走读根 CMakeLists 与 cmake/host_config.cmake、kernel_config.cmake，理解 Host 库与 Device kernel 二进制的分离编译、安装与链接关系。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-run-package.md",
+          "id": "u5-l3",
+          "learning_tasks": null,
+          "learning_goals": [
+            "说出一键编译与 run 包安装两种交付方式的差异",
+            "使用 install.sh/uninstall.sh 完成 run 包安装与卸载",
+            "配置 ASDSIP 相关环境变量使应用能链接到 asdsip"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "run 包结构",
+            "安装脚本",
+            "卸载与版本信息"
+          ],
+          "order": 3,
+          "practice_task": "在构建机上走完 release.sh/build.sh 打包→run 包安装→set_env.sh→卸载的完整闭环，并检查 version.info 中的版本、分支、commit 字段是否与当前仓库一致。",
+          "source_files": [
+            "build.sh",
+            "scripts/install.sh",
+            "scripts/release.sh",
+            "scripts/uninstall.sh",
+            "version.info"
+          ],
+          "title": "run 包打包、安装与发布流程",
+          "topic": "分析 build.sh 的 fn_make_run_package 与 scripts/install.sh、release.sh，理解 makeself 自解压包如何把 host/device 产物与 set_env 交付给用户。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 5,
+      "title": "构建系统深度"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u4-l3"
+          ],
+          "filename": "u6-l1-asdmul-walkthrough.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "独立追踪一个基础算子从 API 到 kernel 的五跳调用",
+            "说出 asdMul 对输入 shape/dtype 的一致性要求",
+            "理解 mul 支持多 dtype kernel 的选择方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "API 层",
+            "operation 层",
+            "tiling/kernel 层"
+          ],
+          "order": 1,
+          "practice_task": "为 asdMul 编写一份调用链追踪笔记：从 base_api.h 声明到 mul.cpp、mul_operation.cpp、mul_tiling.cpp、mul_c64.cpp 各写一行职责说明，并注明关键行号。",
+          "source_files": [
+            "include/base_api.h",
+            "core/base/mul.cpp",
+            "ops/base/mul/mul_operation.cpp",
+            "ops/base/mul/mul/op_kernel/mul_c64.cpp"
+          ],
+          "title": "asdMul 全链路走读：最完整的基础算子样本",
+          "topic": "以 asdMul 为样本，把 API 声明、Host 实现、operation 注册、tiling、kernel 五层串成一条完整链路，作为读懂一切算子的模板。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-base-ops-family.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "列举 base 模块提供的算子能力",
+            "识别基础算子共同的无 plan 直调风格",
+            "判断一个新需求应落在 base 还是其他模块"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "conj/复数乘",
+            "轴交换",
+            "直调风格"
+          ],
+          "order": 2,
+          "practice_task": "阅读 core/base 目录清单后，按「逐元素/形状变换/拼接切片」给现有文件分类；然后用 conj.cpp 的套路手写 swaplast2axes 的 API 层伪代码（含 OpDesc 组装）。",
+          "source_files": [
+            "core/base/conj.cpp",
+            "core/base/swaplast2axes.cpp",
+            "core/base/complex_mul.cpp",
+            "include/base_api.h"
+          ],
+          "title": "复数基础计算家族：conj、swapLast2Axes 等",
+          "topic": "浏览 core/base 下 conj、swaplast2axes、complex_mul 等基础算子，总结它们共用的直调式 API（无需 MakePlan）写法。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 6,
+      "title": "Base 复数基础计算库"
+    },
+    {
+      "id": "u7",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u7-l1-blas-api-and-handle.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "按 Level1/2/3 归类 asdBlas 接口",
+            "说清 MakeXxxPlan 携带静态参数而 Exec 携带张量的分工",
+            "避免 handle 重复初始化等常见误用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "接口分类",
+            "MakePlan 系列",
+            "handle 管理"
+          ],
+          "order": 1,
+          "practice_task": "从 blas_api.h 中整理 Level1/2/3 各 3 个接口形成清单（含参数签名摘要），并标注哪些参数在 MakePlan 阶段固化、哪些在 Exec 阶段传入。",
+          "source_files": [
+            "include/blas_api.h",
+            "core/blas/blas_api.cpp",
+            "example/A2/BLAS/asum/example_sasum.cpp",
+            "docs/zh/API_Reference/BLAS/BLAS公共接口.md"
+          ],
+          "title": "BLAS API 全景与 Handle 生命周期",
+          "topic": "梳理 asdBlasCreate/SetStream/MakeXxxPlan/Exec/GetWorkspaceSize/SetWorkspace/Synchronize/Destroy 的完整生命周期与 Level1-3 接口分布。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l2-blasplan-and-cache.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "解释 BlasPlan 三态状态机的意义",
+            "描述 handle→plan 的缓存与销毁流程",
+            "说清 workspace 大小由谁计算、由谁分配"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Plan 基类",
+            "PlanCache 命名空间",
+            "workspace 契约"
+          ],
+          "order": 2,
+          "practice_task": "跟踪 asdBlasMakeDotPlan 的执行路径，画出 handle→BlasPlanCache::MakePlan→BlasDotPlan 的序列图；再用两个 handle 验证缓存是按 handle 隔离的。",
+          "source_files": [
+            "core/blas/blasplan/include/blasplan/BlasPlan.h",
+            "core/blas/blasplan/BlasPlan.cpp",
+            "core/blas/blasplan/BlasPlanCache.cpp"
+          ],
+          "title": "BlasPlan 与 PlanCache 机制",
+          "topic": "讲解 BlasPlan 基类的状态机（UNINITIALIZED/INITIALIZED/FAILED）、workspace 管理与 BlasPlanCache 基于 handle 的 plan 生命周期。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l2",
+            "u4-l2"
+          ],
+          "filename": "u7-l3-blas-level1-dot.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "描述 dot 算子的 plan 构建与执行两阶段",
+            "理解点积归约在 kernel 侧的切分思路",
+            "对照 example 复现 sdot 结果"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "API 入口",
+            "Plan 子类",
+            "文档对照"
+          ],
+          "order": 3,
+          "practice_task": "把 example 中的 Sdot 输入改为递减序列并手算期望值；再阅读 BlasDotPlan 的 workspace/tensor 创建逻辑，说明增大 n 后 workspace 是否需要重新申请。",
+          "source_files": [
+            "core/blas/dot.cpp",
+            "core/blas/blasplan/BlasDotPlan.cpp",
+            "docs/zh/API_Reference/BLAS/Dot.md",
+            "include/blas_api.h"
+          ],
+          "title": "Level1 向量算子：Sdot/Cdot 从 API 到 Plan",
+          "topic": "走读 dot 的 API 实现与 BlasDotPlan，理解 Level1 向量归约算子的 plan 构建与 kernel 组织。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l2",
+            "u4-l2"
+          ],
+          "filename": "u7-l4-blas-level3-cgemm.md",
+          "id": "u7-l4",
+          "learning_goals": [
+            "说清 Cgemm MakePlan 中 m/n/k/lda/ldb/ldc 的语义",
+            "理解复数 GEMM 的 tiling 与主频优化手段",
+            "对照文档核对转置组合的支持范围"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "GEMM 参数",
+            "矩阵 tiling",
+            "operation 选择"
+          ],
+          "order": 4,
+          "practice_task": "给定 A(64x32) B(32x48) 两个复数矩阵，写出调用 Cgemm 所需的全部参数（含 lda/ldb/ldc 与转置枚举），并用小规模数据跑通 example 后与 numpy 结果对比误差。",
+          "source_files": [
+            "core/blas/cgemm.cpp",
+            "core/blas/blasplan/BlasCgemmPlan.cpp",
+            "ops/blas/cgemm/cgemm_operation.cpp",
+            "ops/blas/cgemm/cgemm/tiling/cgemm_tiling.cpp",
+            "docs/zh/API_Reference/BLAS/Cgemm.md"
+          ],
+          "title": "Level3 矩阵算子：Cgemm 深度走读",
+          "topic": "分析复数矩阵乘 Cgemm 的 MakePlan 参数固化、tiling 切分与 kernel 实现，是理解 SiP 性能设计的最佳样本。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l4"
+          ],
+          "filename": "u7-l5-blas-batched-and-solver.md",
+          "id": "u7-l5",
+          "learning_goals": [
+            "解释 batched 接口在 plan 阶段如何固化批次维度",
+            "理解基于 BLAS 组合出的矩阵求逆实现思路",
+            "判断业务场景该选单算子还是 batched 接口"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "batched plan",
+            "矩阵求逆 plan",
+            "组合式实现"
+          ],
+          "order": 5,
+          "practice_task": "设计一个实验：对 128 个 8x8 复数矩阵分别用循环单次求逆与 CmatinvBatched 一次求逆，测量两种方式的耗时差异并解释 plan 复用带来的收益。",
+          "source_files": [
+            "core/blas/cgemv_batched.cpp",
+            "core/blas/cmatinv_batched.cpp",
+            "core/blas/blasplan/BlasCmatinvBatchedPlan.cpp",
+            "core/blas/blasplan/BlasGemmBatchedPlan.cpp",
+            "docs/zh/API_Reference/BLAS/CmatinvBatched.md"
+          ],
+          "title": "batched 算子与矩阵求逆：走向 Solver",
+          "topic": "讲解 cgemv_batched/cmatinv_batched 等 batched 接口与矩阵求逆 Plan，理解 Solver 类复杂数线性代数如何基于 BLAS 组合实现。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 7,
+      "title": "BLAS 线性代数库"
+    },
+    {
+      "id": "u8",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u8-l1-fft-api-and-handle.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "区分 asdFftType 各取值对应的变换类型",
+            "按 1D/2D/3D 选择正确的 MakePlan 接口",
+            "独立完成一次 C2C 正逆变换并验证还原"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "类型/方向枚举",
+            "MakePlan 家族",
+            "Exec 家族"
+          ],
+          "order": 1,
+          "practice_task": "编译运行 example/A2/FFT/1d 的 c2c 样例，对长度 8 的简单序列做正变换再逆变换，验证与原始输入一致（误差范围内），并记录归一化行为。",
+          "source_files": [
+            "include/fft_api.h",
+            "core/fft/fft_api.cpp",
+            "example/A2/FFT/1d/example_acl_fft_c2c_1d.cpp",
+            "docs/zh/API_Reference/FFT/FFT公共接口.md"
+          ],
+          "title": "FFT API 与 Handle：类型、方向与执行接口",
+          "topic": "梳理 asdFftCreate/MakePlan1D/2D/3D/ExecC2C/C2R/R2C/Separated/Istft 及枚举类型（asdFftType、asdFftDirection、asdFft1dDimType）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1",
+            "u7-l2"
+          ],
+          "filename": "u8-l2-fftplan-decomposition.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "解释一个大点数 FFT 如何拆成 PlanStep 序列",
+            "说清 fftType/direction/batchSize/strides 在 plan 中的存储",
+            "理解 FFTPlan 与 BlasPlan 状态机设计的异同"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "PlanStep 组合",
+            "plan 状态",
+            "尺寸/步长"
+          ],
+          "order": 2,
+          "practice_task": "跟踪 asdFftMakePlan1D(1024, C2C, FORWARD, batch=4) 的执行路径，画出生成的 PlanStep 序列示意图，并标注每一步会调用哪个 FftOperation。",
+          "source_files": [
+            "core/fft/fftplan/include/fftplan/fft_plan.h",
+            "core/fft/fftplan/fft_plan.cpp",
+            "core/fft/fft_api.cpp"
+          ],
+          "title": "FFTPlan：多步分解的执行计划",
+          "topic": "走读 FFTPlan 的 steps（PlanStep/FftOperation）组织方式，理解 FFT 如何按尺寸/类型分解为多个子操作依序执行。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "filename": "u8-l3-fft-cache-and-utils.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "解释 plan/tensor 两级缓存各自缓存的对象",
+            "说清 fft_mode 模式判定的作用",
+            "分析 workspace 复用对批量 FFT 场景的收益"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "plan cache",
+            "tensor cache",
+            "mode/workspace 工具"
+          ],
+          "order": 3,
+          "practice_task": "设计实验：同一 handle 连续执行 100 次 ExecC2C 与每次重新 MakePlan 再执行各测耗时，用数据说明 plan 缓存与 tensor 缓存的收益来源。",
+          "source_files": [
+            "core/fft/fftplan/fft_plan_cache.cpp",
+            "core/fft/utils/fft_mode.cpp",
+            "core/fft/utils/fftensor_cache.cpp",
+            "core/fft/utils/workspace.cpp"
+          ],
+          "title": "FFT 缓存与工具：plan cache、tensor cache、rotate",
+          "topic": "讲解 fftplan 的 plan 缓存、fftensor_cache 中间张量复用、fft_mode 模式判定与 workspace/rotate 工具如何支撑高频 FFT 调用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l2",
+            "u4-l3"
+          ],
+          "filename": "u8-l4-fftcore-algorithms.md",
+          "id": "u8-l4",
+          "learning_goals": [
+            "按点数特征选择合适 kernel 路径的规则",
+            "说清混合基与分离式（sep）实现的适用场景",
+            "定位一个具体点数最终落到哪个 fftcore 文件"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "按点数分派",
+            "混合基/分离式",
+            "公共函数"
+          ],
+          "order": 4,
+          "practice_task": "为 720 点 C2C 变换手动推演分派路径（记录判断条件与命中的 core 文件），再用实际运行日志验证推断是否正确。",
+          "source_files": [
+            "core/fft/fftcore/fft_core_n.cpp",
+            "core/fft/fftcore/fft_core_b.cpp",
+            "core/fft/fftcore/dft_core.cpp",
+            "core/fft/fftcore/fft_core_mix.cpp",
+            "core/fft/fftcore/fft_core_common_func.cpp"
+          ],
+          "title": "fftcore：按点数分派的算法内核族",
+          "topic": "分析 fftcore 下 fft_core_n/fft_core_b/dft_core/fft_core_mix 等实现，理解不同 FFT 点数如何被分派到不同算法内核。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l4"
+          ],
+          "filename": "u8-l5-fft-c2r-and-arch35.md",
+          "id": "u8-l5",
+          "learning_goals": [
+            "解释实数变换节省一半频谱存储的原理",
+            "说清 arch35 内核与通用内核的分工",
+            "处理 C2R/R2C 输出 shape 的对称性约束"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "实数变换内核",
+            "arch35 专用路径",
+            "shape 约束"
+          ],
+          "order": 5,
+          "practice_task": "对同一实信号分别用 R2C 和 C2C 变换，验证 R2C 结果与 C2C 前半频谱一致；再统计两种方式的耗时与内存占用差异并写成结论。",
+          "source_files": [
+            "core/fft/fftcore/fft_c2r_core.cpp",
+            "core/fft/fftcore/dft_r2c_core.cpp",
+            "core/fft/fftcore/fft_c2c_arch35.cpp",
+            "core/fft/fftcore/fft_c2r_arch35.cpp"
+          ],
+          "title": "实数变换与新架构内核：c2r/r2c 与 arch35",
+          "topic": "走读实数输入输出变换（C2R/R2C）的 core 实现与面向新一代芯片的 arch35 内核族。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l4"
+          ],
+          "filename": "u8-l6-istft-and-multidim.md",
+          "id": "u8-l6",
+          "learning_goals": [
+            "说清 nFft/hopLength/winLength/center 等参数如何进入 plan",
+            "理解 ISTFT 由 FFT + 重叠相加等多步组合的实现方式",
+            "为 2D/3D 数据选择正确的 MakePlan 与维度顺序"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "IstftDesc",
+            "多步融合",
+            "多维 plan"
+          ],
+          "order": 6,
+          "practice_task": "用 STFT 思路构造频谱输入调用 asdFftExecIstft 还原时域信号，调整 hopLength 观察输出长度变化，并对照 IstftDesc 字段解释每个变化来自哪个字段。",
+          "source_files": [
+            "core/fft/fftcore/fft_core_istft_any.cpp",
+            "core/fft/fftplan/include/fftplan/fft_plan.h",
+            "docs/zh/API_Reference/FFT/Istft.md",
+            "docs/zh/API_Reference/FFT/FFT_2D.md",
+            "docs/zh/API_Reference/FFT/FFT_3D.md"
+          ],
+          "title": "ISTFT 融合变换与 2D/3D FFT",
+          "topic": "讲解 asdFftIstftMakePlan/ExecIstft 背后的 IstftDesc 参数与多步融合实现，以及 2D/3D FFT 的尺寸组织。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 8,
+      "title": "FFT 快速傅里叶变换库"
+    },
+    {
+      "id": "u9",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u4-l3"
+          ],
+          "filename": "u9-l1-convolve.md",
+          "id": "u9-l1",
+          "learning_goals": [
+            "说清 full/same/valid 三种模式的输出长度规则",
+            "理解卷积算子 workspace 的查询-申请-绑定流程",
+            "对照 numpy.convolve 验证结果"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "模式枚举",
+            "API 实现",
+            "operation 层"
+          ],
+          "order": 1,
+          "practice_task": "编写程序对同一组信号分别以 full/same/valid 三种模式调用 asdConvolve，输出长度与预期公式对比，再用 numpy.convolve 校验数值一致性。",
+          "source_files": [
+            "include/filter_api.h",
+            "core/filter/convolve.cpp",
+            "ops/filter/convolve/convolve_operation.cpp",
+            "docs/zh/API_Reference/Filter/asdConvolve.md"
+          ],
+          "title": "asdConvolve：一维卷积滤波算子",
+          "topic": "走读滤波模块的一维卷积接口，理解 full/same/valid 三种卷积模式与 workspace 查询机制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "filename": "u9-l2-interp-with-coeff.md",
+          "id": "u9-l2",
+          "learning_goals": [
+            "理解「系数驱动」插值与常规逐点插值的区别",
+            "说清系数张量与输入张量的 shape 约束",
+            "正确申请并复用插值 workspace"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "插值 API",
+            "Host 实现",
+            "operation 层"
+          ],
+          "order": 2,
+          "practice_task": "构造一个线性插值系数场景调用 asdInterpWithCoeff，与 torch 的手动线性插值结果对比；随后固定 plan 改变输入长度，观察哪些参数不能变并记录原因。",
+          "source_files": [
+            "include/interp_api.h",
+            "core/interpolation/asdInterpWithCoeff.cpp",
+            "ops/blas/interpolation/interpolation_operation.cpp",
+            "docs/zh/API_Reference/Interpolation/asdInterpWithCoeff.md"
+          ],
+          "title": "asdInterpWithCoeff：基于系数的插值",
+          "topic": "讲解基于预计算系数的插值算子，理解其面向信号重采样的设计动机与 workspace 契约。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l2"
+          ],
+          "filename": "u9-l3-domain-rs.md",
+          "id": "u9-l3",
+          "learning_goals": [
+            "解释 Domain 层接口与 Base 层接口的组织差异",
+            "说清 Sinc 插值参数与信号处理场景的对应关系",
+            "评估领域算子相对通用插值的精度收益"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "领域 API",
+            "复用实现",
+            "场景对照"
+          ],
+          "order": 3,
+          "practice_task": "用正弦信号对比 rsInterpolationBySinc 与 asdInterpWithCoeff 的重采样精度（最大误差、RMSE），并分析 Domain 接口在参数封装上比通用接口多做 了什么。",
+          "source_files": [
+            "include/domain/rs_api.h",
+            "core/blas/interpolation.cpp",
+            "docs/zh/API_Reference/Domain/rsInterpolationBySinc.md"
+          ],
+          "title": "Domain 领域算子：rsInterpolationBySinc 雷达场景",
+          "topic": "介绍面向雷达信号处理的领域专用接口 rsInterpolationBySinc，看领域算子如何复用底层插值实现。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 9,
+      "title": "融合与领域算子库"
+    },
+    {
+      "id": "u10",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4",
+            "u2-l1"
+          ],
+          "filename": "u10-l1-torch-sip-architecture.md",
+          "id": "u10-l1",
+          "learning_goals": [
+            "说清 csrc/torch_sip/test 三层目录的职责",
+            "理解 TORCH_LIBRARY 注册与 Python 侧调用的关系",
+            "配置 ASDSIP_HOME_PATH 等构建环境并产出 wheel"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "目录结构",
+            "注册入口",
+            "构建配置"
+          ],
+          "order": 1,
+          "practice_task": "按 README 步骤构建 torch_sip wheel 并安装，在 python 中 import torch_sip 后打印可用的自定义算子列表，记录注册名与 csrc 文件的对应关系。",
+          "source_files": [
+            "sip_pta/README.md",
+            "sip_pta/setup.py",
+            "sip_pta/csrc/registration.cpp",
+            "sip_pta/torch_sip/__init__.py"
+          ],
+          "title": "torch_sip 架构与 TORCH_LIBRARY 注册",
+          "topic": "讲解 sip_pta 如何通过 PyTorch TORCH_LIBRARY 扩展把 asdsip 能力暴露给 python，以及 setup.py 的构建配置项。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u10-l1",
+            "u7-l2",
+            "u8-l2"
+          ],
+          "filename": "u10-l2-bindings-and-cache.md",
+          "id": "u10-l2",
+          "learning_goals": [
+            "说清 torch tensor 与 aclTensor 的转换路径",
+            "理解 MixCache 在 python 反复调用场景下缓存的 plan 对象",
+            "为一个新算子编写 pytorch 绑定骨架"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "绑定模板",
+            "NPU helper",
+            "MixCache"
+          ],
+          "order": 2,
+          "practice_task": "参照 asd_mul.cpp 为 swapLast2Axes（已有 csrc 实现）补全或检查 python 侧调用路径，写一个 torch 脚本完成轴交换并与 torch 原生 transpose 对比。",
+          "source_files": [
+            "sip_pta/csrc/base/asd_mul.cpp",
+            "sip_pta/csrc/pytorch_npu_helper.hpp",
+            "sip_pta/csrc/BlasMixCache.cpp",
+            "sip_pta/csrc/FFTMixCache.cpp"
+          ],
+          "title": "算子绑定实现与 MixCache 句柄缓存",
+          "topic": "走读具体算子的 pytorch 绑定写法与 BlasMixCache/FFTMixCache 对 handle/plan 的缓存策略。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u10-l2"
+          ],
+          "filename": "u10-l3-python-tests.md",
+          "id": "u10-l3",
+          "learning_goals": [
+            "使用 test_all.sh 组织并运行 python 测试",
+            "编写 npu 上的精度对比测试",
+            "定位绑定层常见报错（设备不一致、shape 不匹配）"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "测试脚本",
+            "对照实现",
+            "批量执行"
+          ],
+          "order": 3,
+          "practice_task": "运行 sip_pta/test 下的现有用例，然后仿照 asd_mul.py 为任一 BLAS 绑定算子新增一个测试脚本并纳入 test_all.sh，确保 CPU 参考值与 NPU 结果误差在阈值内。",
+          "source_files": [
+            "sip_pta/test/test_all.sh",
+            "sip_pta/test/base/asd_mul.py",
+            "sip_pta/README.md"
+          ],
+          "title": "python 侧测试与批量验证",
+          "topic": "讲解 sip_pta/test 的用例组织与 test_all.sh 批量执行方式，学习用 numpy/torch CPU 结果校验 NPU 输出。"
+        }
+      ],
+      "level": "advanced",
+      "order": 10,
+      "title": "PyTorch 适配层 sip_pta"
+    },
+    {
+      "id": "u11",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3",
+            "u5-l2"
+          ],
+          "filename": "u11-l1-ut-framework.md",
+          "id": "u11-l1",
+          "learning_goals": [
+            "说清 UT/FT/ST 三种测试类型对应的编译开关",
+            "理解 custom_main 与 test_common 提供的公共能力",
+            "使用 build_test.sh 编译并运行单元测试"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "测试 CMake",
+            "公共工具",
+            "执行脚本"
+          ],
+          "order": 1,
+          "practice_task": "在测试开关下编译并运行 blas 目录的全部 UT，记录通过/失败用例清单；再关闭一个架构开关重新编译，观察用例集合的变化。",
+          "source_files": [
+            "tests/ut/CMakeLists.txt",
+            "tests/ut/framework/test_util/util.cpp",
+            "tests/ut/unittest/custom_main.cpp",
+            "tests/ut/unittest/test_common.cpp",
+            "scripts/build_test.sh"
+          ],
+          "title": "UT 测试框架与公共测试工具",
+          "topic": "讲解 tests/ut 的 CMake 组织、TEST_TYPE 环境开关、custom_main 入口与 test_util 浮点比较工具。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u11-l1",
+            "u7-l3"
+          ],
+          "filename": "u11-l2-write-a-ut.md",
+          "id": "u11-l2",
+          "learning_goals": [
+            "按模板编写一个算子的完整 UT",
+            "使用 python 脚本生成并比对测试数据",
+            "为测试添加设备型号前置检查"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "用例结构",
+            "数据生成/比对",
+            "设备检查"
+          ],
+          "order": 2,
+          "practice_task": "参照 test_sdot.cpp 为 Sasum 编写 test_sasum.cpp（含数据生成与比对脚本），接入 CMake 后编译运行并通过；同时用 device_version_check 加上型号前置跳过逻辑。",
+          "source_files": [
+            "tests/ut/unittest/blas/sdot/test_sdot.cpp",
+            "tests/ut/unittest/blas/sdot/sdot_data/gen_data.py",
+            "tests/ut/unittest/blas/sdot/sdot_data/compare_data.py",
+            "tests/ut/unittest/device_version_check.cpp"
+          ],
+          "title": "编写一个算子单测：以 sdot 为模板",
+          "topic": "以 sdot 单测为模板，讲解 TEST 宏组织、gen_data.py/compare_data.py 数据流水线与设备型号检查。"
+        }
+      ],
+      "level": "advanced",
+      "order": 11,
+      "title": "测试体系与质量保障"
+    },
+    {
+      "id": "u12",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3",
+            "u4-l3",
+            "u5-l1"
+          ],
+          "filename": "u12-l1-develop-conj-operator.md",
+          "id": "u12-l1",
+          "learning_goals": [
+            "独立完成官方文档中 Conj 算子的全部步骤",
+            "说清每一步新增/修改文件的必要性",
+            "在真机或仿真环境验证新算子输出"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "文档步骤还原",
+            "五层文件联动",
+            "验证方法"
+          ],
+          "order": 1,
+          "practice_task": "严格按 developing_a_simple_operator.md 在本地分支新增 Conj 算子（或还原文档步骤），完成编译后写一个最小调用程序验证共轭结果正确，并记录每一步改动的文件清单。",
+          "source_files": [
+            "docs/developing_a_simple_operator.md",
+            "core/base/conj.cpp",
+            "ops/base/conj/conj_operation.cpp",
+            "ops/base/conj/conj/tiling/conj_tiling.cpp",
+            "ops/base/conj/conj/op_kernel/conj.cpp"
+          ],
+          "title": "实战一：按官方教程开发 Conj 算子",
+          "topic": "以官方文档为主线，把从零新增 Conj 算子的每一步（core 实现、ops 目录、params、op_list、CMake、API 声明）落到真实源码上对照学习。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u12-l1"
+          ],
+          "filename": "u12-l2-develop-new-operator.md",
+          "id": "u12-l2",
+          "learning_goals": [
+            "独立完成一个自定义算子的端到端开发",
+            "自行设计 TilingData 切分策略",
+            "为新算子补齐 UT 与调用样例"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "需求到参数设计",
+            "tiling/kernel 实现",
+            "登记与验证闭环"
+          ],
+          "order": 2,
+          "practice_task": "设计并实现 Scale2 算子（y = alpha * x，支持复数）：定义 OpParam、实现 operation/tiling/kernel、登记 op_list.yaml 与 CMake、在 base_api.h 声明，最后仿照 sdot 补一个 UT 证明数值正确。",
+          "source_files": [
+            "docs/developing_a_simple_operator.md",
+            "configs/op_list.yaml",
+            "ops/include/params/conj.h",
+            "ops/base/conj/CMakeLists.txt",
+            "include/base_api.h"
+          ],
+          "title": "实战二：从零开发一个全新算子",
+          "topic": "综合运用前述全部知识，脱离教程模板独立完成一个带标量参数的 Scale2 算子并接入 UT。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u12-l2"
+          ],
+          "filename": "u12-l3-contribution-workflow.md",
+          "id": "u12-l3",
+          "learning_goals": [
+            "按贡献指南完成 fork-修改-PR 流程",
+            "通过 pre-commit 的格式与静态检查",
+            "理解 OAT 开源合规检查的作用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "贡献流程",
+            "代码规范工具链",
+            "合规检查"
+          ],
+          "order": 3,
+          "practice_task": "为你的 Scale2 算子分支跑通 pre-commit run --all-files 与 oat 检查脚本，修复全部告警后按贡献指南模板写一份 PR 描述（含算子说明、测试结果）。",
+          "source_files": [
+            "docs/contributing_guide.md",
+            ".pre-commit-config.yaml",
+            ".clang-format",
+            "OAT.xml",
+            "scripts/oat_check.sh"
+          ],
+          "title": "贡献流程与代码规范",
+          "topic": "讲解 fork/PR 流程、pre-commit 钩子、clang-format 风格约束与 OAT 开源合规检查，把个人算子变成可合入的提交。"
+        }
+      ],
+      "level": "advanced",
+      "order": 12,
+      "title": "二次开发实战与社区贡献"
+    }
+  ]
+}

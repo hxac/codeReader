@@ -1,7 +1,7 @@
 {
-  "head": "c4f9363aff65dcde56b565cf4d9937483d872e55",
+  "head": "9afc3913406c7645448feca8cd65bd06bb9e61ce",
   "project": "shmem",
-  "rationale": "本次为增量更新。自上次 HEAD（7ed686e）以来的变化集中在三处：(1) 8d1d777 为 Ascend950 RDMA 使能多 QP——aclshmemx_set_qp_num 从仅支持 UDMA 扩展到支持 ROCE，新增 TransportOptions::RdmaQpConfig 传递链路，device_rdma_transport_manager_v2 按 qpNum 建链并做 QP 数一致性校验，同时在 include/device/gm2gm/engine/shmem_device_rdma.h 新增 aclshmemx_roce_qp_put_nbi/get_nbi/quiet 等 QP-specific 低阶接口与配套 UT；(2) 492f036 新增 examples/tp_allreduce_udma（TP=2 AIV-UDMA AllReduce baseline 与 Tailcut 绕路两种模式）并重写 rdma_perftest（多 QP 并行模式与延迟指标）；(3) c4f9363 仅改 README 语言切换链接。据此：u2-l1/u2-l2 涉及 init 头文件与 shmem_init.cpp 的 QP 配置变化标记 update；u5-l1（transport_def.h 新增 rdmaQpConfig）、u5-l3（v2 管理器多 QP）、u5-l6（engine 新增 QP 接口）标记 update；u8-l6（init UT 新增 RDMA QP 用例）、u8-l8（rdma_perftest 重写）标记 update；其余未受影响的讲义全部 keep。新增两篇讲义：u5-l7 专门讲 RDMA 多 QP 机制（串联配置、传输管理器与 kernel 直驱，属新增重要机制），u8-l9 以 tp_allreduce_udma 为端到端实战（team_split_2d 分组、AIV 多核 Local Reduce、relay 绕路通信）。整体学习路线维持\"先跑起来、再读懂主链路、后深入传输与引擎、最终多实例/DFX/二次开发\"的设计不变。",
+  "rationale": "本次为增量更新。自上次 HEAD（c4f9363）以来仅两个提交：(1) 1e7fffb fix(udma): route local RMA through MTE——src/device/gm2gm/shmem_device_rma.hpp 的 ACLSHMEM_UDMA_TRANSPORT_ENABLED 宏新增 (PE) != mype 守卫，使高阶 RMA 对本 PE 的 put/get 不再选中 UDMA 分支而回落 MTE；Host 侧 mem_entity_default.cpp 的 CanReachDataOperators 同步不再对本 rank 通告 HYBM_DOP_TYPE_DEVICE_UDMA（本 rank 仅经 MTE 可达）；并新增 UT TestShmemUDMAHighLevelLocalRma（aclrtGetSocName 检测 Ascend950 + GTEST_SKIP 门控，kernel 内强制置位本 PE 的 UDMA topo 位验证高阶接口仍选 MTE 并用 aclshmemx_mte_quiet 收尾）。(2) 9afc391 仅统一 4 个 UDMA 示例 README 的平台描述措辞（删去 __NPU_ARCH__ == 3510 括注），纯文档变化。据此标记 update：u4-l2（高阶 RMA 新增『本 PE 走 MTE』语义）、u5-l1（entity 层按 rank 通告引擎可达性，UDMA 不对本 rank 通告）、u5-l4（UDMA 平台约束补充『不支持自发送』）、u5-l6（已生成讲义直接讲解 shmem_device_rma.hpp 四分支分派，需补自 PE 守卫）、u8-l6（测试体系新增平台门控用例范例）；其余讲义不受影响，全部 keep。本轮为缺陷修复与约束澄清，未新增模块或重要机制，故不新增讲义、无 rebuild，整体学习路线维持不变。",
   "units": [
     {
       "id": "u1",
@@ -134,7 +134,7 @@
       "id": "u2",
       "lectures": [
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u1-l4"
           ],
@@ -160,10 +160,10 @@
             "examples/init/main.cpp"
           ],
           "title": "初始化 API 与三种 Bootstrap 模式",
-          "topic": "讲解 aclshmemx_init_attr_t 结构、ACLSHMEMX_INIT_WITH_DEFAULT / MPI / UNIQUEID 三种 bootstrap 模式、uniqueid 的获取与广播流程，以及 aclshmemx_set_qp_num 的引擎约束（本轮已扩展支持 ROCE 与 UDMA）。"
+          "topic": "讲解 aclshmemx_init_attr_t 结构、ACLSHMEMX_INIT_WITH_DEFAULT / MPI / UNIQUEID 三种 bootstrap 模式、uniqueid 的获取与广播流程，以及 aclshmemx_set_qp_num 的引擎约束（已扩展支持 ROCE 与 UDMA）。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -432,7 +432,7 @@
           "topic": "讲解 AICore kernel 中如何使用 SHMEM：host device 共享的 meta/state 结构、__gm__ 地址空间以及 kernel 侧拿到全局状态的机制。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u4-l1"
           ],
@@ -441,6 +441,7 @@
           "learning_goals": [
             "掌握 device 侧 put/get 接口在 AscendC kernel 中的调用方式",
             "理解 gm2gm（global memory 到 global memory）数据通路",
+            "理解高阶接口按 topo_list[pe] 自动选引擎的规则，以及 pe == my_pe 时被强制走 MTE 的守卫逻辑（UDMA 不支持自发送）",
             "能独立编写并运行一个两 PE 数据搬运 kernel"
           ],
           "level": "intermediate",
@@ -450,16 +451,17 @@
             "examples/rdma_demo/rdma_demo_kernel.cpp"
           ],
           "order": 2,
-          "practice_task": "编译运行 examples/rdma_demo，理解 kernel 中搬运方向；仿照它编写一个反向 kernel：PE1 向 PE0 的对称缓冲写入数据并在 Host 侧校验。",
+          "practice_task": "编译运行 examples/rdma_demo，理解 kernel 中搬运方向；仿照它编写一个反向 kernel：PE1 向 PE0 的对称缓冲写入数据并在 Host 侧校验；再阅读 src/device/gm2gm/shmem_device_rma.hpp 中 ACLSHMEM_UDMA_TRANSPORT_ENABLED 的 (PE) != mype 守卫，说明为什么对本 PE 的 aclshmem_putmem 不会选中 UDMA。",
           "source_files": [
             "include/device/gm2gm/shmem_device_rma.h",
             "src/device/gm2gm/shmem_device_rma.cpp",
+            "src/device/gm2gm/shmem_device_rma.hpp",
             "src/device/gm2gm/shmemi_device_rma.cpp",
             "examples/rdma_demo/main.cpp",
             "examples/rdma_demo/rdma_demo_kernel.cpp"
           ],
           "title": "gm2gm 高阶 RMA 接口与 kernel 编写",
-          "topic": "讲解 device 侧 gm2gm 高阶 RMA 接口（put/get 家族）的宏生成模式，并结合 rdma_demo 示例演示在 AscendC kernel 中直接发起跨 PE 数据搬运。"
+          "topic": "讲解 device 侧 gm2gm 高阶 RMA 接口（put/get 家族）的宏生成模式与按 topo_list 自动选引擎的规则，并结合 rdma_demo 示例演示在 AscendC kernel 中直接发起跨 PE 数据搬运；重点说明本轮新增的本 PE 保护：ACLSHMEM_UDMA_TRANSPORT_ENABLED 宏排除 pe == mype，对本 PE 的 put/get 一律走 MTE 分支而非 UDMA。"
         },
         {
           "action": "keep",
@@ -595,6 +597,7 @@
             "理解 TransportManager 抽象与工厂创建方式",
             "掌握 dataOpType 与传输引擎的映射关系",
             "理解 TransportOptions 中 udmaQpConfig/rdmaQpConfig 等引擎相关配置的传递",
+            "理解 MemEntityDefault::CanReachDataOperators 如何按 rank 计算可达引擎集合，以及 UDMA 不对本 rank 通告（自发送走 MTE）的新规则",
             "能在源码中定位一种引擎的初始化入口"
           ],
           "level": "intermediate",
@@ -604,14 +607,15 @@
             "src/host/transport/transport_def.h"
           ],
           "order": 1,
-          "practice_task": "梳理 TransportManager 的虚函数接口列表，说明 OpenDevice/CloseDevice 等方法在各引擎实现中的职责，画出一层类图；并指出 TransportOptions 新增的 rdmaQpConfig 从哪里被赋值、传给谁。",
+          "practice_task": "梳理 TransportManager 的虚函数接口列表，说明 OpenDevice/CloseDevice 等方法在各引擎实现中的职责，画出一层类图；并指出 TransportOptions 的 rdmaQpConfig 从哪里被赋值、传给谁；再对照 mem_entity_default.cpp 的 CanReachDataOperators 说明 remoteRank 等于本 rank 时返回的引擎集合与远端 rank 有何不同。",
           "source_files": [
             "src/host/transport/transport_manager.h",
             "src/host/transport/transport_manager.cpp",
-            "src/host/transport/transport_def.h"
+            "src/host/transport/transport_def.h",
+            "src/host/entity/mem_entity_default.cpp"
           ],
           "title": "传输层架构：TransportManager 抽象",
-          "topic": "讲解 src/host/transport 的整体设计：TransportManager 基类、按 TransportType / DataOpType 创建传输器的工厂、TransportOptions 携带的引擎配置（含新增的 rdmaQpConfig），以及传输层与堆初始化的关系。"
+          "topic": "讲解 src/host/transport 的整体设计：TransportManager 基类、按 TransportType / DataOpType 创建传输器的工厂、TransportOptions 携带的引擎配置（含 rdmaQpConfig），以及内存实体层如何按 rank 通告可用引擎（CanReachDataOperators 本轮起不再对本 rank 通告 UDMA，本 rank 仅经 MTE 可达）。"
         },
         {
           "action": "keep",
@@ -642,7 +646,7 @@
           "topic": "讲解 CompositeTransportManager 如何按优先级顺序组合多个传输引擎（MTE/RDMA/SDMA/UDMA）并支持组合掩码创建。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -671,10 +675,10 @@
             "src/host/transport/device_rdma/dynamic_ranks_qp_manager.cpp"
           ],
           "title": "RDMA 传输与 QP 管理",
-          "topic": "深入 device_rdma 子系统：QP（Queue Pair）管理器、固定/动态 rank QP、RoCE 网卡信息交换与建链流程，以及 v2 管理器新增的多 QP 创建（按 rdmaQpConfig.qpNum 为每个 peer 建多条 QP）与 QP 数一致性校验。"
+          "topic": "深入 device_rdma 子系统：QP（Queue Pair）管理器、固定/动态 rank QP、RoCE 网卡信息交换与建链流程，以及 v2 管理器的多 QP 创建（按 rdmaQpConfig.qpNum 为每个 peer 建多条 QP）与 QP 数一致性校验。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u5-l3"
           ],
@@ -682,6 +686,7 @@
           "id": "u5-l4",
           "learning_goals": [
             "理解 SDMA（仅 A3）与 UDMA（Ascend950）的平台约束",
+            "理解 UDMA 不支持自发送的约束及其影响：本 rank 的高阶 put/get 走 MTE，entity 层也不对本 rank 通告 UDMA",
             "掌握 UDMA 对 HCOMM 资源接口的依赖方式",
             "能运行 udma_demo 并解释其使用的引擎"
           ],
@@ -691,15 +696,16 @@
             "src/host/transport/device_udma/device_udma_transport_manager.cpp"
           ],
           "order": 4,
-          "practice_task": "对比 RDMA/SDMA/UDMA 三个 transport manager 的初始化依赖差异，整理成一张平台-引擎-依赖条件对照表；有条件时运行 examples/udma_demo 验证。",
+          "practice_task": "对比 RDMA/SDMA/UDMA 三个 transport manager 的初始化依赖差异，整理成一张平台-引擎-依赖条件对照表（含 UDMA『不支持自发送、本 rank 走 MTE』一行）；有条件时运行 examples/udma_demo 验证。",
           "source_files": [
             "src/host/transport/device_sdma/device_sdma_transport_manager.cpp",
             "src/host/transport/device_udma/device_udma_transport_manager.cpp",
             "src/host/transport/device_udma/device_udma_def.h",
+            "src/host/entity/mem_entity_default.cpp",
             "examples/udma_demo/main.cpp"
           ],
           "title": "SDMA 与 UDMA 传输管理器",
-          "topic": "讲解 SDMA 与 UDMA 两种传输管理器的实现差异、平台适配条件以及 UDMA 依赖的 HCOMM 通道资源。"
+          "topic": "讲解 SDMA 与 UDMA 两种传输管理器的实现差异、平台适配条件以及 UDMA 依赖的 HCOMM 通道资源；补充本轮明确的 UDMA 能力约束：不支持自发送（self-send），对本 rank 的高阶 RMA 由 MTE 承接。"
         },
         {
           "action": "keep",
@@ -742,7 +748,8 @@
           "learning_goals": [
             "区分高阶数据面接口与 engine 低阶直驱接口",
             "理解 SDMA/UDMA 直驱的 prefetch、quiet 等低阶能力",
-            "掌握新增的 QP-specific ROCE 接口 aclshmemx_roce_qp_put_nbi/get_nbi/quiet 及 qp_idx 语义",
+            "掌握 QP-specific ROCE 接口 aclshmemx_roce_qp_put_nbi/get_nbi/quiet 及 qp_idx 语义",
+            "理解高阶分派宏 ACLSHMEM_*_TRANSPORT_ENABLED 的判断条件，特别是 UDMA 分支排除 pe == mype 的自发送守卫",
             "能在 kernel 中选择合适的引擎接口层级"
           ],
           "level": "advanced",
@@ -752,19 +759,20 @@
             "src/device/gm2gm/engine"
           ],
           "order": 6,
-          "practice_task": "为四种引擎（MTE/RDMA/SDMA/UDMA）各挑一个代表性低阶接口，说明其完成高阶 RMA 中哪一步，并整理成接口分层对照表；单独标出 roce_qp_* 接口与普通 roce 接口在参数上的差异。",
+          "practice_task": "为四种引擎（MTE/RDMA/SDMA/UDMA）各挑一个代表性低阶接口，说明其完成高阶 RMA 中哪一步，并整理成接口分层对照表；单独标出 roce_qp_* 接口与普通 roce 接口在参数上的差异；结合 shmem_device_rma.hpp 顶部的 ACLSHMEM_UDMA_TRANSPORT_ENABLED 宏说明为什么把本 PE 的 topo_list 强行置上 UDMA 位后高阶 put/get 仍走 MTE（对照 UT TestShmemUDMAHighLevelLocalRma）。",
           "source_files": [
             "include/device/gm2gm/engine/shmem_device_mte.h",
             "include/device/gm2gm/engine/shmem_device_rdma.h",
             "include/device/gm2gm/engine/shmem_device_sdma.h",
             "include/device/gm2gm/engine/shmem_device_udma.h",
+            "src/device/gm2gm/shmem_device_rma.hpp",
             "src/device/gm2gm/engine/shmem_device_rdma.hpp"
           ],
           "title": "AICore 直驱引擎低阶接口",
-          "topic": "讲解 include/device/gm2gm/engine 下 MTE/RDMA/SDMA/UDMA 直驱低阶接口与高阶 RMA/AMO 的关系，如何绕过高阶封装直接驱动引擎；重点覆盖本轮新增的 QP-specific ROCE 接口（aclshmemx_roce_qp_put_nbi / qp_get_nbi / qp_quiet）。"
+          "topic": "讲解 include/device/gm2gm/engine 下 MTE/RDMA/SDMA/UDMA 直驱低阶接口与高阶 RMA/AMO 的关系，如何绕过高阶封装直接驱动引擎；覆盖 QP-specific ROCE 接口（aclshmemx_roce_qp_put_nbi / qp_get_nbi / qp_quiet），并补充本轮在 shmem_device_rma.hpp 引擎分派中加入的本 PE 守卫：ACLSHMEM_UDMA_TRANSPORT_ENABLED 要求 (PE) != mype，即 UDMA 分支永不服务自发送，本 PE 拷贝回落 MTE。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u5-l3",
@@ -797,7 +805,7 @@
             "tests/unittest/device/mem/rdma_mem/qp_specific_apis_kernel.cpp"
           ],
           "title": "Ascend950 RDMA 多 QP 机制",
-          "topic": "讲解本轮新增的 RDMA 多 QP 能力全链路：aclshmemx_set_qp_num 配置 ROCE 引擎 QP 数、TransportOptions::RdmaQpConfig 的传递、device_rdma_transport_manager_v2 按 qpNum 为每个 peer 创建多条 QP 并校验各 PE QP 数一致，以及 kernel 侧 aclshmemx_roce_qp_put_nbi / qp_get_nbi / qp_quiet 按 qp_idx 直驱指定 QP。"
+          "topic": "讲解 RDMA 多 QP 能力全链路：aclshmemx_set_qp_num 配置 ROCE 引擎 QP 数、TransportOptions::RdmaQpConfig 的传递、device_rdma_transport_manager_v2 按 qpNum 为每个 peer 创建多条 QP 并校验各 PE QP 数一致，以及 kernel 侧 aclshmemx_roce_qp_put_nbi / qp_get_nbi / qp_quiet 按 qp_idx 直驱指定 QP。"
         }
       ],
       "level": "intermediate",
@@ -1121,7 +1129,8 @@
           "learning_goals": [
             "掌握 UT 的编译开关与运行方式",
             "理解 host/device 测试目录与被测模块的对应关系",
-            "理解新增的 qp_specific_apis 测试如何验证 QP-specific 接口",
+            "理解 qp_specific_apis 测试如何验证 QP-specific 接口",
+            "理解平台门控测试的写法：TestShmemUDMAHighLevelLocalRma 如何在非 Ascend950 上跳过、在 kernel 内强制置位本 PE 的 UDMA topo 位验证高阶接口仍选 MTE",
             "能为新接口补一个最小 UT"
           ],
           "level": "advanced",
@@ -1131,16 +1140,18 @@
             "tests/unittest/CMakeLists.txt"
           ],
           "order": 6,
-          "practice_task": "参照 init_host_test.cpp 中 TestSetRdmaQpNumBeforeInit 的写法（含 ACLSHMEMI_RDMA_K_BACKEND_XSCALE 条件编译），为某个尚未覆盖的 heap 或 sync 接口编写一个 googletest 用例并编译通过（无 NPU 时至少通过编译）。",
+          "practice_task": "参照 init_host_test.cpp 中 TestSetRdmaQpNumBeforeInit 的写法（含 ACLSHMEMI_RDMA_K_BACKEND_XSCALE 条件编译）与 udma_mem_host_test.cpp 中 TestShmemUDMAHighLevelLocalRma 的平台门控写法（aclrtGetSocName + GTEST_SKIP），为某个尚未覆盖的 heap 或 sync 接口编写一个 googletest 用例并编译通过（无 NPU 时至少通过编译）。",
           "source_files": [
             "tests/unittest/CMakeLists.txt",
             "tests/unittest/host/main_test.cpp",
             "tests/unittest/host/init/init_host_test.cpp",
             "tests/unittest/host/mem/rdma_mem/qp_specific_apis_host_test.cpp",
+            "tests/unittest/host/mem/udma_mem/udma_mem_host_test.cpp",
+            "tests/unittest/device/mem/udma_mem/udma_mem_kernel.cpp",
             "scripts/run.sh"
           ],
           "title": "测试体系与单元测试编写",
-          "topic": "讲解 tests/unittest 的组织（host/device、mem/sync/team/topo/transport）、googletest 接入方式与 scripts/run.sh 的执行入口，并结合本轮新增的 qp_specific_apis 用例说明如何测试引擎相关接口。"
+          "topic": "讲解 tests/unittest 的组织（host/device、mem/sync/team/topo/transport）、googletest 接入方式与 scripts/run.sh 的执行入口；结合 qp_specific_apis 用例与本轮新增的 TestShmemUDMAHighLevelLocalRma 用例说明如何测试引擎相关接口——后者展示了平台门控（aclrtGetSocName 检测 Ascend950 + GTEST_SKIP）与 kernel 内篡改 topo 位再验证引擎选择守卫的测试手法。"
         },
         {
           "action": "keep",
@@ -1174,7 +1185,7 @@
           "topic": "以 shmem_mega_moe（MoE 场景）为主线，串联 put/get、AMO、同步与 team 能力，理解通算融合算子的完整实现。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u4-l5",
             "u8-l5"
@@ -1184,7 +1195,7 @@
           "learning_goals": [
             "掌握带宽/时延的测量方法与消息步长设计",
             "理解不同引擎与通路在不同消息规模下的优劣",
-            "理解 rdma_perftest 新增的多 QP 并行模式与延迟（lat）指标",
+            "理解 rdma_perftest 的多 QP 并行模式与延迟（lat）指标",
             "能产出一份简单的性能对比报告"
           ],
           "level": "advanced",
@@ -1203,10 +1214,10 @@
             "docs/debug/profiling.md"
           ],
           "title": "性能测试与调优",
-          "topic": "结合 shmem_perftest、rdma_perftest 等性能样例讲解如何测量与优化 SHMEM 通信性能；rdma_perftest 本轮已重写，支持带宽/延迟两种指标与多 QP 并行模式。"
+          "topic": "结合 shmem_perftest、rdma_perftest 等性能样例讲解如何测量与优化 SHMEM 通信性能；rdma_perftest 支持带宽/延迟两种指标与多 QP 并行模式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l5",
             "u5-l6",
@@ -1239,7 +1250,7 @@
             "include/device/gm2gm/engine/shmem_device_udma.h"
           ],
           "title": "端到端实战：TP=2 AIV-UDMA AllReduce 与 Tailcut",
-          "topic": "以新增的 examples/tp_allreduce_udma 为例讲解 TP=2 分组 AllReduce 的完整实现：team_split_2d 划分 TP 组、AIV 多核 Local Reduce、baseline（aclshmemx_udma_put_nbi 直发 + udma_quiet）与 tailcut（aclshmemx_udma_relay_put_nbi 绕路分流）两种通信模式及性能对比方法。"
+          "topic": "以 examples/tp_allreduce_udma 为例讲解 TP=2 分组 AllReduce 的完整实现：team_split_2d 划分 TP 组、AIV 多核 Local Reduce、baseline（aclshmemx_udma_put_nbi 直发 + udma_quiet）与 tailcut（aclshmemx_udma_relay_put_nbi 绕路分流）两种通信模式及性能对比方法。"
         }
       ],
       "level": "advanced",

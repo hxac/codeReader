@@ -2,456 +2,446 @@
 
 ## 1. 本讲目标
 
-学完本讲，你应该能够：
+上一讲（u6-l5）我们走完了「ASC-IR → Ascend C 源码」的发射主线：`Translation.cpp` 的 `emitOperation` 白名单分发、`CodeEmitter` 的命名栈与作用域。但那份白名单里除了 `ascendc::*` 一大批算子，还有几组「外来户」：
 
-1. 回答一个架构问题：**为什么 pyasc 不直接从 Asc 方言打印 C 代码，而要引入一个 EmitAsc 中间方言**，以及 EmitAsc 与 MLIR 官方 `emitc` 方言的分工。
-2. 说出 EmitAsc 全部 12 个 Operation 各自对应的 C++ 语法（指针偏移、成员访问、`reinterpret_cast`、可变变量、结构体声明与拷贝、原生函数调用、原样文本）。
-3. 掌握 `External/` 目录下 Arith、Math、Scf、Func、MemRef、Emitc 六个文件如何把通用 MLIR 方言操作翻译成 C 表达式，并能在源码中定位 `arith.constant`、`scf.for`、`func.call` 的发射函数。
-4. 独立跟踪一条完整链路：Python `for i in range(...)` → `scf.for` IR → ascendc.cpp 中的 `for (;;)` 语句，并写出「Python 行 / IR 操作 / C 代码行」三列对照表。
+- `emitasc::*` —— pyasc 自己定义的第二个方言；
+- `func::*`、`scf::*`、`arith::*`、`math::*`、`memref::*`、`emitc::*` —— MLIR 上游通用方言。
 
-本讲是第 6 单元（Pass 优化与 Ascend C 代码生成）的收尾讲，承接 u6-l5 已经建立的 Translation 分发、CodeEmitter 变量命名等结论，不再重复。
+本讲回答三个问题：
+
+1. 为什么 pyasc 需要一个 EmitAsc 中间方言，而不是把所有东西都塞进 Asc 方言、或直接在 Python 里拼 C 代码字符串？
+2. `lib/Target/AscendC/External/` 下六个文件（Arith/Math/Scf/Func/MemRef/Emitc）如何把通用 MLIR 方言操作翻译成 C 表达式？
+3. 一个 Python `for` 循环，如何走完「FunctionVisitor → `scf.for` → C `for` 语句」的全链路？
+
+学完本讲，你应该能独立读懂 dump 出的 `ascir.mlir` 里任何一条非 `ascendc.` 前缀的操作，并说出它最终在 `ascendc.cpp` 里生成的 C 代码形态。
 
 ## 2. 前置知识
 
-### 2.1 一份 IR 里其实混着好几种方言
-
-回顾 u5-l1 的结论：ASC-IR 是一个 MLIR 模块，其中**镜像 Ascend C API 的部分**用自研 `ascendc` 方言（dump 时前缀为 `ascendc.`），而**通用语义**直接复用 MLIR 上游方言：
-
-| 上游方言 | 表达的语义 | 典型操作 |
-|---|---|---|
-| `func` | 函数、调用、返回 | `func.func`、`func.call`、`func.return` |
-| `scf` | 结构化控制流 | `scf.for`、`scf.if`、`scf.while`、`scf.yield` |
-| `arith` | 标量整数/浮点算术 | `arith.constant`、`arith.addi`、`arith.cmpi` |
-| `math` | 数学函数 | `math.fma`、`math.copysign` |
-| `memref` | 内存引用 | `memref.alloca`、`memref.load`、`memref.store` |
-| `emitc` | MLIR 官方的「C 语法桥梁」 | `emitc.include`、`emitc.verbatim` |
-
-这意味着发射层（Translation）要面对**三类客户**：ascendc Op（u6-l5 已讲，约数百个）、上游方言 Op、以及本讲的主角——自研 `emitasc` Op。
-
-### 2.2 SSA 值与 C 变量的鸿沟
-
-MLIR 是 SSA（静态单赋值）形式：每个值只定义一次。而 C 是可变变量语言。两者翻译的通用手法是「**先声明、后赋值**」：
-
-- 每个有结果的 Op 发射为 `类型 变量 = 表达式;`（`emitAssignPrefix` 负责左半边，见 [lib/Target/AscendC/CodeEmitter.cpp:L347-L363](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/CodeEmitter.cpp#L347-L363)，u6-l5 已精读）。
-- 循环携带依赖在 MLIR 里靠 `iter_args`/`scf.yield` 接线；翻成 C 时变成「循环前声明变量、循环体内赋值、必要时循环后再拷贝一次」——这是 4.4 节的核心戏码。
-
-### 2.3 术语预备
-
-- **发射（emit）**：把 IR 操作翻译成 C/C++ 源文本的动作，入口是 `printOperation` 重载族。
-- **`LogicalResult`**：MLIR 的成败返回值，`success()`/`failure()`；发射失败会沿调用链上传并在 Python 侧抛异常（u6-l5）。
-- **`FAIL_OR`**：pyasc 定义的一个宏，展开后执行表达式并在失败时提前 `return failure()`，让发射代码保持线性书写。
-- **`getOrCreateName(Value)`**：CodeEmitter 的变量命名服务，首次见到某个 IR 值时通过 EmitNameStack 生成 `v3` 这样的唯一可读名字并缓存（[lib/Target/AscendC/CodeEmitter.cpp:L238-L247](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/CodeEmitter.cpp#L238-L247)）；常量则命名为 `c45_i32` 这类「c 值 _ 类型」形式（依据见 4.3 节测试输出）。
+- **SSA 与可变变量的对立**：MLIR 中每个值只赋值一次（Static Single Assignment），循环携带变量靠「块参数 + yield」表达；而 C 是命令式语言，变量可以反复赋值。本讲最重要的算法——`scf.for` 发射——本质上就是「SSA → 可变变量」的机械翻译。
+- **memref 充当指针**：发射层用 `memref<?xT>` 表示 C 指针 `T*`，用 `memref<1xT>` 表示「单个可变变量」。这个约定来自上游 emitc 方言，EmitAsc 沿用。
+- **上游 emitc 方言**：MLIR 官方有一个 `emitc` 方言，专门承载「贴近 C 但还没落到具体 API」的操作（如 `emitc.include`、`emitc.verbatim`）。pyasc 同时使用上游 `emitc` 与自研 `emitasc`，两者分工见 4.1。
+- **LogicalResult / FAIL_OR**：发射函数返回 `LogicalResult`，`FAIL_OR(expr)` 宏在失败时立刻 `return failure()`（[include/ascir/Target/Asc/Common.h:44-46](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Target/Asc/Common.h#L44-L46)），失败沿调用链逐层上传，最终在 Python 侧变成异常（u6-l5 已讲）。
+- **块参数（BlockArgument）**：区域的入口值。`scf.for` 的归纳变量与迭代参数就是 body 块的块参数。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
-|---|---|
-| [include/ascir/Dialect/EmitAsc/IR/Ops.td](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L22-L170) | EmitAsc 方言 12 个 Operation 的 TableGen 定义 |
-| [include/ascir/Dialect/EmitAsc/IR/Dialect.td](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Dialect.td#L16-L30) | 方言声明（名字 `emitasc`，命名空间 `mlir::emitasc`） |
-| [include/ascir/Dialect/EmitAsc/IR/Types.td](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Types.td#L22-L25) | `PyStruct` 类型定义（Python 结构体的 IR 表示） |
-| [include/ascir/Dialect/EmitAsc/IR/Attributes.td](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Attributes.td#L25-L41) | `kernel_arg` 枚举属性（供 Launcher 区分显式/隐藏参数） |
-| [lib/Target/AscendC/EmitAsc.cpp](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/EmitAsc.cpp#L23-L228) | EmitAsc 12 个 Op 的 C++ 发射实现 |
-| [lib/Target/AscendC/Translation.cpp](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/Translation.cpp#L72-L96) | `PrintableOpTypes` 白名单元组（本讲关注其前段：Builtin/EmitC/Func/SCF/MemRef/Arith/Math/EmitAsc） |
-| [lib/Target/AscendC/External/Arith.cpp](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Arith.cpp#L20-L163) 与 [include/ascir/Target/Asc/External/Arith.h](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Target/Asc/External/Arith.h#L18-L101) | arith 操作到 C 表达式的映射（模板 + 特化两段） |
-| [lib/Target/AscendC/External/Scf.cpp](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Scf.cpp#L15-L208) | scf 控制流到 C for/if/switch/while 的映射 |
-| [lib/Target/AscendC/External/Func.cpp](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Func.cpp#L15-L114) | func 函数/调用/返回的发射（含 Kernel 样板前缀） |
-| [lib/Target/AscendC/External/Math.cpp](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Math.cpp#L15-L36)、[MemRef.cpp](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/MemRef.cpp#L15-L59)、[Emitc.cpp](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Emitc.cpp#L15-L67) | math/memref/emitc 的发射（较薄，浏览即可） |
-| [lib/Target/AscendC/Common.cpp](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/Common.cpp#L19-L42) | `printConstantOp`：三种常量 Op 的公共发射 |
-| [python/asc/codegen/function_visitor.py](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/asc/codegen/function_visitor.py#L479-L516) | 前端 `visit_For`：`range` → `scf.for` |
-| [python/asc/language/core/ir_value.py](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/asc/language/core/ir_value.py#L255-L264) | `apply_binary_op`：运算符 → `create_arith_*Op` |
-| [python/asc/language/core/ops.py](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/asc/language/core/ops.py#L17-L29) | `asc.inline`：EmitAsc 的用户逃生舱 |
-| [test/Target/AscendC/emitasc.mlir](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/emitasc.mlir#L9-L101)、[arith.mlir](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/arith.mlir#L9-L38)、[scf.mlir](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/scf.mlir#L16-L37) | 官方 IR→C 对照样本（FileCheck 断言的就是期望 C 输出） |
+| --- | --- |
+| [include/ascir/Dialect/EmitAsc/IR/Dialect.td](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Dialect.td) | 声明 `emitasc` 方言（名字、命名空间） |
+| [include/ascir/Dialect/EmitAsc/IR/Ops.td](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td) | 12 个 EmitAsc 操作的 TableGen 定义 |
+| [include/ascir/Dialect/EmitAsc/IR/Types.td](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Types.td) | `PyStruct` 类型定义 |
+| [include/ascir/Dialect/EmitAsc/IR/Attributes.td](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Attributes.td) | `KernelArgument` 枚举属性（`emitasc.kernel_arg`） |
+| [lib/Dialect/EmitAsc/IR/Dialect.cpp](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Dialect/EmitAsc/IR/Dialect.cpp) | 方言初始化与宽松内联接口注册 |
+| [lib/Target/AscendC/EmitAsc.cpp](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/EmitAsc.cpp) | 12 个 EmitAsc 操作的发射实现 |
+| [lib/Target/AscendC/Translation.cpp](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/Translation.cpp) | 白名单 `PrintableOpTypes` 与 `emitOperation` 分发 |
+| [lib/Target/AscendC/External/Func.cpp](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Func.cpp) | `func.func/call/return` → C 函数骨架 |
+| [include/ascir/Target/Asc/External/Arith.h](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Target/Asc/External/Arith.h) + [lib/Target/AscendC/External/Arith.cpp](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Arith.cpp) | `arith.*` → C 算术表达式 |
+| [lib/Target/AscendC/External/Scf.cpp](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Scf.cpp) | `scf.for/if/while/...` → C 控制流（本讲主角） |
+| [lib/Target/AscendC/External/Emitc.cpp](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Emitc.cpp) | 上游 `emitc.*` → `#include`、逐字代码 |
+| [lib/Target/AscendC/External/MemRef.cpp](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/MemRef.cpp) | `memref.*` → 数组声明与下标访问 |
+| [lib/Target/AscendC/External/Math.cpp](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Math.cpp) + [include/ascir/Target/Asc/External/Math.h](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Target/Asc/External/Math.h) | `math.*` → 数学函数调用 |
+| [test/Target/AscendC/emitasc.mlir](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/emitasc.mlir)、[arith.mlir](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/arith.mlir)、[scf.mlir](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/scf.mlir) | lit + FileCheck 黄金用例（实践素材） |
+| [python/asc/language/core/ir_value.py](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/asc/language/core/ir_value.py)、[ops.py](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/asc/language/core/ops.py)、[struct.py](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/asc/language/core/struct.py) | 前端创建 EmitAsc 操作的三个入口 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 EmitAsc 方言：为什么需要它
+### 4.1 EmitAsc 方言：为「C 形状」概念专设的桥下方言
 
 #### 4.1.1 概念说明
 
-先看问题。Asc 方言的设计哲学是「一条 Op 镜像一条 Ascend C API 调用」（u5-l3），比如 `ascendc.AddL2Op` 对应 `AscendC::Add(...)`。但最终生成的 ascendc.cpp 是一份完整 C++ 源文件，里面除了 API 调用，还有大量**C++ 语言本身的语法**：
+回顾 u5-l1 的结论：Asc 方言的设计原则是「一条 Op 镜像一条 Ascend C API」。但前端实现过程中会遇到一批**没有 Ascend C API 对应物**的需求：
 
-- 指针加偏移：`x_gm_ptr + offset`（01_add 第 35 行的 `x + offset`）；
-- 取结构体成员：`config.tile_length`、`config->field`；
-- 类型双关：`reinterpret_cast<...>`；
-- 可变局部变量：SSA 世界没有「变量」，但 C 循环需要；
-- 声明结构体：`#pragma pack(push, 8) struct Xxx {...};`
-- 调用任意 C++ 函数：既非 ascendc API 又非 func.call 的情况；
-- 原样嵌入文本：`#include` 之外的杂项样板。
+- `x + offset`（`GlobalAddress` 加整数）——这是 C 的指针算术 `ptr + n`，不是任何 Ascend C 接口；
+- 访问 Struct 的字段 `s.field`、给字段赋值——C 的成员访问 `.`/`->`；
+- 声明一个 Struct 的 C 结构体（`#pragma pack` 那段）；
+- 按名字调用任意 C++ 函数（比如 `AscendC::Add` 之外的辅助函数）；
+- 把一段现成 C 代码逐字塞进生成结果（逃生舱）。
 
-这些语法没有对应的 Ascend C API，硬造几百个 Asc Op 既污染方言又违背「Asc 只镜像 API」的边界。pyasc 的解法是三管齐下：
+这些操作有两个共同点：**语义上是 C 语法**，且**必须参与 IR 数据流**（它们的输入输出是 SSA 值，要被后续操作引用、被 Pass 分析）。如果把它们做成 Python 里直接拼字符串，就绕过了 IR——无法校验、无法被 Pass 改写、无法参与支配分析。如果塞进 Asc 方言，又会污染「Asc 方言 = Ascend C API 镜像」这条干净的分层原则。
 
-1. **通用语义**（算术、控制流、函数）→ 直接复用上游 `arith`/`scf`/`func` 方言，发射层在 `External/` 目录统一翻译（4.3、4.4 节）；
-2. **官方已有桥梁** → 复用 `emitc` 方言（`emitc.include` 等）；
-3. **emitc 没有的、pyasc 特有的 C++ 语法** → 自研 **EmitAsc 方言**补齐。
-
-一句话定位：**EmitAsc 是「贴近 C 语法的低层桥梁」，补齐 emitc 覆盖不到、而 Asc 方言又不该管的那些 C++ 语法节点。**
-
-一个容易误解的点：EmitAsc **不是**由某个 Pass 从 Asc 方言「降级」出来的。它的 Op 有三个来源：
-
-- **前端直接创建**：`GlobalAddress.__add__` 创建 `emitasc.ptr_offset`，Struct 成员读写创建 `emitasc.member`/`set_member`，`asc.inline()` 创建 `emitasc.verbatim`；
-- **Pass 种入**：`DeclarePyStructPass` 在模块里插入 `emitasc.declare_py_struct`（u6-l4），`LegalizeKernelArgs` 使用 `emitasc.kernel_arg` 属性；
-- **手写 IR 测试**：`test/Target/AscendC/emitasc.mlir` 直接手写 emitasc IR 验证发射。
+pyasc 的解法是定义第二个小方言 **EmitAsc**（"C++ emission support dialect"），专门承载这些「贴近 C 语法、但不属于任何 Ascend C API」的操作。它与上游 `emitc` 方言分工：`emitc` 提供通用的 `include`/`verbatim`（由 External/Emitc.cpp 发射），`emitasc` 提供 pyasc 特有的 `PyStruct`、指针算术、kernel 参数属性等。
 
 #### 4.1.2 核心流程
 
-EmitAsc 一条 Op 从创建到变成 C 代码的路径：
+EmitAsc 操作有三个生产者、一个消费者：
 
 ```text
-Python 前端 / Pass
-    │  builder.create_emitasc_XxxOp(...)        (pybind 绑定，python/src/OpBuilder.cpp)
-    ▼
-ASC-IR 中的 emitasc.xxx 操作                    (与 scf/arith/ascendc 混居同一模块)
-    │  Compiler.run 跑完 Pass 后调用 ir_to_ascendc
-    ▼
-Translation.emitOperation 的 TypeSwitch 命中     (PrintableOpTypes 白名单，Translation.cpp:93-96)
-    │  mlir::emitasc::printOperation(emitter, op) 重载
-    ▼
-CodeEmitter 提供的类型/命名/缩进服务 → C++ 文本
+生产者 1: Python 前端（JIT 编译期）
+  GlobalAddress.__add__   → emitasc.ptr_offset
+  asc.inline(...)         → emitasc.verbatim
+  Struct 字段读写/本地副本 → emitasc.member / set_member / copy_struct
+                                    │
+生产者 2: Transforms Pass                       │
+  DeclarePyStructPass     → emitasc.declare_py_struct
+  LegalizeKernelArgs      → emitasc.kernel_arg 属性（打在 func 参数上）
+                                    │
+                                    ▼
+            ir.ModuleOp（与 ascendc.* 操作混居同一模块）
+                                    │
+消费者: lib/Target/AscendC/EmitAsc.cpp 的 12 个 printOperation
+        （经 Translation.cpp 白名单分发）
 ```
+
+注意：EmitAsc **没有独立的降级 Pass**。它不是「Asc → EmitAsc → C」两跳，而是「各类操作（ascendc/emitasc/scf/arith/...）并列 → 统一发射」一跳。EmitAsc 的价值在于把 C 形状的概念**沉淀为可复用、可校验的 IR 节点**，而不是引入一层中间转换。
 
 #### 4.1.3 源码精读
 
-**（1）方言声明**。EmitAsc 方言名字是 `emitasc`，C++ 命名空间 `mlir::emitasc`，见 [include/ascir/Dialect/EmitAsc/IR/Dialect.td:L16-L30](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Dialect.td#L16-L30)（这段声明了方言并开放默认的类型/属性打印解析器）。它没有 `Asc_Dialect` 那样的 Op 注册宏全家桶，注册逻辑在 `lib/Dialect/EmitAsc/IR/Types.cpp` 等手写文件中完成。
+**方言声明**。[Dialect.td:16-30](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Dialect.td#L16-L30) 定义了名为 `emitasc` 的方言，`cppNamespace` 为 `::mlir::emitasc`，并通过 `extraClassDeclaration` 预告了 `registerAttributes/registerTypes/registerOps` 三个注册函数——它们在 [lib/Dialect/EmitAsc/IR/Dialect.cpp:25-30](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Dialect/EmitAsc/IR/Dialect.cpp#L25-L30) 的 `initialize()` 中依次调用（内容全部由 TableGen 生成）。
 
-**（2）12 个 Operation 一览**。基类模板 `EmitAsc_Op` 见 [include/ascir/Dialect/EmitAsc/IR/Ops.td:L22-L25](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L22-L25)，每个 Op 的定义、参数与 C++ 对应关系整理如下（行号均为 Ops.td 中的定义位置）：
+同一个文件还注册了**宽松内联接口**：[Dialect.cpp:36-40](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Dialect/EmitAsc/IR/Dialect.cpp#L36-L40) 调用 `registerExternalModels`，为方言挂上 `PermissiveInlinerInterface`——三个 `isLegalToInline` 重载全部返回 `true`（[include/ascir/Dialect/Utils/Inlining.h:26-38](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/Utils/Inlining.h#L26-L38)）。这对应 u4-l4 讲过的「Device 子函数内联」：子函数体里含 `emitasc.*` 操作时，内联合法性检查直接放行。
 
-| Op（IR 名） | 定义行 | 对应 C++ 语法 | 典型来源 |
-|---|---|---|---|
-| `emitasc.call_opaque` | [L27-L39](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L27-L39) | `callee(args...)` 按名字调用任意 C++ 函数 | 发射层辅助 |
-| `emitasc.copy_struct` | [L41-L46](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L41-L46) | 局部结构体定义 + 逐字节 memcpy | Struct `create_local()` |
-| `emitasc.declare_py_struct` | [L48-L52](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L48-L52) | `#pragma pack(push,8) struct {...};` | DeclarePyStructPass |
-| `emitasc.dereference` | [L54-L59](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L54-L59) | `T& r = *p;` | 发射层辅助 |
-| `emitasc.member` | [L61-L67](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L61-L67) | `obj.field` / `obj->field` | Struct `__getattrjit__` |
-| `emitasc.member_ptr` | [L69-L84](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L69-L84) | `(T*)&base->member;` | 发射层辅助 |
-| `emitasc.member_ref` | [L86-L101](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L86-L101) | `T& r = base->member;` | 发射层辅助 |
-| `emitasc.set_member` | [L103-L108](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L103-L108) | `obj.field = value;` | Struct `__setattrjit__` |
-| `emitasc.ptr_offset` | [L110-L122](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L110-L122) | `base + offset`（静态或动态偏移） | `GlobalAddress.__add__` |
-| `emitasc.reinterpret_cast` | [L124-L131](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L124-L131) | `reinterpret_cast<T>(src)` | 张量类型双关 |
-| `emitasc.variable` | [L133-L165](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L133-L165) | `T v[N]{init};`（可变变量的 SSA 化） | 需要可变语义处 |
-| `emitasc.verbatim` | [L167-L170](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L167-L170) | 原样输出文本，支持 `$0 $1` 占位替换 | `asc.inline()` |
+**12 个操作一览**。[Ops.td:22-25](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L22-L25) 先定义基类 `EmitAsc_Op`，随后逐个声明：
 
-三个值得停留的细节：
+| Op（IR 名） | 定义位置 | 对应 C 语义 |
+| --- | --- | --- |
+| `emitasc.call_opaque` | [Ops.td:27-39](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L27-L39) | 按名字调用任意 C++ 函数 `callee(args)` |
+| `emitasc.copy_struct` | [Ops.td:41-46](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L41-L46) | 在设备侧新建结构体并逐字节拷贝 |
+| `emitasc.declare_py_struct` | [Ops.td:48-52](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L48-L52) | 声明 `#pragma pack(8)` 结构体 |
+| `emitasc.dereference` | [Ops.td:54-59](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L54-L59) | 一元 `*ptr` |
+| `emitasc.member` | [Ops.td:61-67](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L61-L67) | `base.field`（读成员） |
+| `emitasc.member_ptr` | [Ops.td:69-84](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L69-L84) | `&base->member`（取成员地址） |
+| `emitasc.member_ref` | [Ops.td:86-101](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L86-L101) | `base->member`（取成员引用） |
+| `emitasc.set_member` | [Ops.td:103-108](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L103-L108) | `base.field = value` |
+| `emitasc.ptr_offset` | [Ops.td:110-122](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L110-L122) | `ptr + n`（实现 ViewLike 接口、可折叠） |
+| `emitasc.reinterpret_cast` | [Ops.td:124-131](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L124-L131) | `reinterpret_cast<T>(x)` |
+| `emitasc.variable` | [Ops.td:133-165](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L133-L165) | 定义可变变量 `T v[1]{init}` |
+| `emitasc.verbatim` | [Ops.td:167-170](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L167-L170) | 逐字输出代码串（支持 `$0` 占位替换） |
 
-- **`ptr_offset` 的双形态**：偏移既可以是编译期 `IndexAttr`（`staticOffset`）也可以是运行时 `Optional<Index>` 操作数（`dynamicOffset`），还挂了 `ViewLikeOpInterface` 并 `hasFolder`（允许在 Fold 阶段做简化）——这是整个 Ops.td 里接口最丰富的一个 Op，因为它承载了 01_add 中 `x + offset` 这种最高频的指针运算。
-- **`variable` 的「memref 包装」 trick**：注意它的结果类型约束是 `AnyNon0RankedMemRef`，builder 里把初始化值包成 `MemRefType::get(1, type)`（[L145-L160](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L145-L160)）。SSA 世界表达「一个可变槽位」的标准做法就是给它一个地址（一维数组），发射时再还原成 `T v[1]{init};`。
-- **`PyStruct` 类型与 `kernel_arg` 属性**：[include/ascir/Dialect/EmitAsc/IR/Types.td:L22-L25](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Types.td#L22-L25) 定义了 `!emitasc.py_struct<"名字", [成员类型], [成员名]>` 类型，参数化的成员表让一个类型表达任意 Python Struct；[include/ascir/Dialect/EmitAsc/IR/Attributes.td:L25-L41](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Attributes.td#L25-L41) 定义了 `explicit`/`ffts_addr` 两值枚举属性，即 u6-l4 讲过的 kernel 参数 ABI 标记——可以看到 EmitAsc 方言同时还承载了「标注发射层元信息」的职责。
+两个值得注意的细节：
 
-**（3）前端创建点之一：指针偏移**。01_add 第 35 行 `x + offset` 中 `x` 是 `GlobalAddress`，其 `__add__` 实现：
+- `ptr_offset` 带 `DeclareOpInterfaceMethods<ViewLikeOpInterface>` 且 `hasFolder = 1`——它是一个规范的 View 操作，能被 MLIR 的通用折叠机制处理；
+- `variable` 的 builder 接受 `OpFoldResult`（[Ops.td:145-160](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Ops.td#L145-L160)），把「编译期常量初始化」与「运行时值初始化」两种来源统一成静态属性或动态操作数——这是「一个 Op 两种姿态」的典型 TableGen 手法。
+
+**类型与属性**。[Types.td:22-25](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Types.td#L22-L25) 定义唯一的类型 `PyStruct`：三个参数（结构体名、字段类型数组、字段名数组）全部编进类型，打印为 `!emitasc.py_struct<...>`。这正是 u3-l3 讲过的「Struct 三面体」中 IR 侧那一面。
+
+[Attributes.td:25-41](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/IR/Attributes.td#L25-L41) 定义 `KernelArgument` 枚举（`Explicit=0` / `FftsAddr=1`）与 `KernelArgumentAttr`。回忆 u6-l4：`LegalizeKernelArgs` 给 kernel 形参打 `emitasc.kernel_arg` 属性——[lib/Dialect/Asc/Transforms/LegalizeKernelArgs.cpp:35-56](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Dialect/Asc/Transforms/LegalizeKernelArgs.cpp#L35-L56) 就是生产端；Python 侧的 [python/src/IR.cpp:65-83](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/src/IR.cpp#L65-L83)（`getKernelArgAttrs`）是消费端，Launcher 据此决定参数 ABI 中谁是显式参数、谁是隐藏的 `ffts_addr`。**一个枚举属性把后端标记传到运行时，EmitAsc 方言在这里充当了「属性命名空间」**。属性名字符串常量定义在 [include/ascir/Dialect/EmitAsc/Utils/Attributes.h:19](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Dialect/EmitAsc/Utils/Attributes.h#L19)。
+
+**前端如何创建这些操作**（三个入口，全部在 JIT 编译期）：
+
+1. 指针加法：[ir_value.py:46-51](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/asc/language/core/ir_value.py#L46-L51) 中 `GlobalAddress.__add__` 先把偏移量经 `arith.index_cast` 转成 `index` 类型，再创建 `emitasc.ptr_offset`。你在 01_add 里写的 `x + offset`，落进 IR 就是这一条。
 
 ```python
-@require_jit
-def __add__(self, offset: "RuntimeInt") -> GlobalAddress:
-    offset = materialize_ir_value(offset, KT.int_)
-    builder = global_builder.get_ir_builder()
-    offset_index = builder.create_arith_IndexCastOp(offset.to_ir(), builder.get_index_type())
-    handle = builder.create_emitasc_PtrOffsetOp(self.to_ir(), offset_index)
-    return GlobalAddress(handle, self.dtype)
+offset_index = builder.create_arith_IndexCastOp(offset.to_ir(), builder.get_index_type())
+handle = builder.create_emitasc_PtrOffsetOp(self.to_ir(), offset_index)
 ```
 
-见 [python/asc/language/core/ir_value.py:L45-L51](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/asc/language/core/ir_value.py#L45-L51)。注意它**混用两个方言**：先用 `arith.index_cast` 把偏移转成 `index` 类型，再交给 `emitasc.ptr_offset` 做指针加法——这正是「一个表达式、多方言协作」的缩影（u2-l3 讲过 GlobalAddress 加法是指针偏移而非算术加法，此处即其 IR 落点）。
+2. 逐字代码逃生舱：[ops.py:17-29](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/asc/language/core/ops.py#L17-L29) 的 `asc.inline(code, args)` 把一段 C 代码包成 `emitasc.verbatim`，可选地把若干 IR 值绑到 `$0`、`$1` 占位符上；`before_function=True` 时还会把插入点临时挪到函数头部再还原。
 
-**（4）前端创建点之二：Struct 成员访问**。[python/asc/language/core/struct.py:L194-L211](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/asc/language/core/struct.py#L194-L211) 中 `__getattrjit__` 生成 `emitasc.member`、`__setattrjit__` 生成 `emitasc.set_member`；[L223-L233](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/asc/language/core/struct.py#L223-L233) 用 `get_emitasc_PyStructType` 构造 IR 类型，[L242-L246](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/asc/language/core/struct.py#L242-L246) 的 `create_local` 生成 `emitasc.copy_struct`（u3-l3 讲过的 Struct「设备侧本地副本」）。
+3. Struct 三件套：[struct.py:194-198](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/asc/language/core/struct.py#L194-L198)（`__getattrjit__` 读字段 → `emitasc.member`）、[struct.py:200-209](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/asc/language/core/struct.py#L200-L209)（`__setattrjit__` 写字段 → `emitasc.set_member`）、[struct.py:242-245](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/asc/language/core/struct.py#L242-L245)（`create_local` → `emitasc.copy_struct`）、[struct.py:222-229](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/asc/language/core/struct.py#L222-L229)（`get_ir_type` → `emitasc.py_struct` 类型）。
 
-**（5）pybind 绑定**。`create_emitasc_*` 方法是 OpBuilder.cpp 中**手写**的绑定（它们不属于 `-gen-pybind-defs` 生成的 ascendc 族），见 [python/src/OpBuilder.cpp:L819-L834](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/src/OpBuilder.cpp#L819-L834)，依次绑定 `PtrOffsetOp`、`SetMemberOp`、`VerbatimOp`——呼应 u5-l5 的结论：需要枚举翻译或多结果打包的方法手写，规整 ascendc Op 走生成。
+这些 `create_emitasc_*` 方法不在 TableGen 自动生成之列，而是手写在 [python/src/OpBuilder.cpp:810-832](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/src/OpBuilder.cpp#L810-L832)（`create_emitasc_CopyStructOp/MemberOp/PtrOffsetOp/SetMemberOp/VerbatimOp`）与 [OpBuilder.cpp:386-393](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/src/OpBuilder.cpp#L386-L393)（`get_emitasc_PyStructType`）——因为 EmitAsc 的 Op 太少，手写比走 `-gen-pybind-defs` 管线更省事。
 
-**（6）注册进发射白名单**。[lib/Target/AscendC/Translation.cpp:L93-L96](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/Translation.cpp#L93-L96) 把 12 个 emitasc Op 全部列进 `PrintableOpTypes` 元组，与 emitc/func/scf/memref/arith/math 平起平坐地排在 ascendc 之前；未登记的 Op 会落入 `emitOperation` 的 Default 分支并报 "unable to find printer for op"（[Translation.cpp:L271-L293](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/Translation.cpp#L271-L293)，u6-l5 已精读）。另外 [bin/ascir-translate.cpp:L35-L48](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/bin/ascir-translate.cpp#L35-L48) 注册翻译工具时把 `emitasc::EmitAscDialect` 与 arith/scf/func/memref/math/emitc 一并插入方言注册表——这份清单就是「发射层接受哪些方言」的权威答案。
+**Pass 侧的生产者**。[DeclarePyStructPass.cpp:65-90](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Dialect/Asc/Transforms/DeclarePyStructPass.cpp#L65-L90)：收集全模块出现过的 `PyStructType`，去重后用 `ImplicitLocOpBuilder` 在模块体开头逐个 `builder.create<emitasc::DeclarePyStructOp>(pyStruct)`。于是「声明结构体」这个动作就以 IR 节点形式固化在模块头部，发射层只管照打。
 
 #### 4.1.4 代码实践
 
-**实践 A：用 `asc.inline` 亲眼看 EmitAsc 生效。**
+**实践目标**：亲手制造一条 `emitasc.verbatim`，观察它从 Python 到 C 的完整旅程。
 
-1. 实践目标：验证 `emitasc.verbatim` 把文本原样送进 ascendc.cpp。
-2. 操作步骤：
-   - 参考 [examples/01_add/add.py](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/examples/01_add/add.py#L28-L69) 复制一份最小 kernel（Model 模式即可，无需 NPU）；
-   - 在 kernel 体内加一行 `asc.inline("// hello from emitasc")`（`inline` 的定义见 [python/asc/language/core/ops.py:L17-L29](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/asc/language/core/ops.py#L17-L29)，经 `asc.language.__init__` 导出为 `asc.inline`）；
-   - 设置 `PYASC_DUMP_PATH=.` 后运行，打开导出的 `codegen.mlir` 与 `ascendc.cpp`。
-3. 需要观察的现象：`codegen.mlir` 中出现 `emitasc.verbatim "// hello from emitasc"` 操作；`ascendc.cpp` 中该字符串原样出现。
-4. 预期结果：文本逐字出现在两处。**待本地验证**（本讲写作环境未运行编译器）。
-5. 进阶：把调用改成 `asc.inline("// value = $0", args=(tile_length,))`，观察 `$0` 是否被替换为该 IR 值的 C 变量名（替换逻辑见 4.2 节 `VerbatimOp`）。注意 `inline` 是逃生舱，注入的 C 代码 correctness 由你自己负责。
+**操作步骤**：
+
+1. 复制 `examples/01_add/add.py` 为 `add_inline.py`（放在任意可运行目录）。
+2. 在 kernel 函数体第一行插入一句（**示例代码**）：
+
+```python
+asc.inline("// === hello from python frontend ===")
+```
+
+3. 设置 `PYASC_DUMP_PATH=/tmp/pyasc_dump`，在 Model 模式下运行。
+4. 打开导出的 `codegen.mlir` 与 `ascendc.cpp`。
+
+**需要观察的现象**：
+
+- `codegen.mlir` 中 kernel 入口附近出现 `emitasc.verbatim "// === hello from python frontend ==="` 一条 IR；
+- `ascendc.cpp` 中对应函数体内出现一行一模一样的注释。
+
+**预期结果**：两处内容一致，证明 verbatim 是「先入 IR、再被发射」而非直接字符串拼接；若传 `args=(某个张量句柄,)` 并在 code 里写 `$0`，dump 中可见操作数被绑定。**待本地验证**（本讲义写作环境未运行 NPU/仿真器）。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么不把 `ptr_offset`、`member` 这些做进 Asc 方言？
+**练习 1**：为什么 `emitasc.ptr_offset` 要实现 `ViewLikeOpInterface`，而 `emitasc.verbatim` 不需要？
 
-**参考答案**：Asc 方言的边界是「镜像 Ascend C API」（u5-l1/u5-l3 的命名规则 `ascendc.类名.成员函数` 都围绕 API 展开）。`+`、`->`、`reinterpret_cast` 是 C++ 语言语法而非 Ascend C 库接口，塞进 Asc 会破坏「一条 Op 一条 API」的可读性与 TableGen 生成机制（Asc Op 都带 `getAPIName` 供发射层拼接 API 名）。独立成 EmitAsc 让两个方言各自保持单一职责。
+**答案**：`ptr_offset` 语义上是「在既有指针上做视图偏移」，产生的新 memref 是原 memref 的视图，MLIR 的 View 体系（及配套的折叠 `hasFolder`）能对它做规范化，比如偏移为 0 时折叠回原值；`verbatim` 是逐字文本，没有值语义，不参与任何规范化。
 
-**练习 2**：`emitasc.variable` 为什么把结果类型定为 `memref<1xT>` 而不是直接的 `T`？
+**练习 2**：`emitasc.kernel_arg` 属性挂在什么操作上？谁读它？
 
-**参考答案**：MLIR 是 SSA，单值只能赋值一次；「可变变量」需要一个稳定的地址语义。包装成 `memref<1xT>` 后，对变量的每次写都变成对同一地址的 store，类型系统层面就表达了可变性；发射层再把这层包装剥掉，还原成 C 的 `T v[1]{init};`（数组形式 + 初始化列表）。
+**答案**：挂在 kernel `func.func` 的形参上（`LegalizeKernelArgs` 打标，含末尾追加的 `ffts_addr` 隐藏参数）；由 Python 侧 `getKernelArgAttrs`（python/src/IR.cpp:65-83）读出，交给 Launcher 决定参数打包顺序。
 
-**练习 3**：`emitasc` 与 `emitc` 都有 `verbatim`，为什么两个都要留？
+**练习 3**：EmitAsc 方言为什么注册 `PermissiveInlinerInterface`？
 
-**参考答案**：`emitc` 是 MLIR 官方方言，`emitc.verbatim` 只做纯文本输出；`emitasc.verbatim` 在此基础上增加了 `$0/$1/...` 占位符与 IR 值绑定（`args` 变长操作数），能把 IR 值的 C 变量名嵌进文本。两者能力不同、来源不同（`emitc.include` 由 Pass 插入，`emitasc.verbatim` 主要服务 `asc.inline`），因此并存。
+**答案**：Device 子函数会被内联进 kernel（u4-l4）。内联合法性按方言接口检查，若 EmitAsc 未声明允许内联，含 `emitasc.*` 的子函数体就无法被搬进 kernel 函数，整条内联链路会断。
 
-### 4.2 EmitAsc 的发射实现
+### 4.2 EmitAsc.cpp：十二个操作的发射实现
 
 #### 4.2.1 概念说明
 
-`lib/Target/AscendC/EmitAsc.cpp` 为 12 个 Op 各写一个 `mlir::emitasc::printOperation` 重载（声明集中在 [include/ascir/Target/Asc/EmitAsc.h:L24-L46](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Target/Asc/EmitAsc.h#L24-L46)）。与 ascendc Op 的发射相比，这里的手写代码更多、生成代码更少——因为 EmitAsc Op 数量有限且形态各异，TableGen 化收益不大。本模块挑五个最有代表性的精读。
+`lib/Target/AscendC/EmitAsc.cpp` 是 EmitAsc 方言的消费者，为 12 个操作各写一个 `printOperation` 重载。它与 u6-l5 讲过的 Asc 发射完全同构：同一个 `CodeEmitter`、同一套 `emitAssignPrefix`/`getOrCreateName` 原语，只是服务对象换成了 C 形状操作。
 
 #### 4.2.2 核心流程
 
-每个重载的套路一致：
+每个发射函数的套路固定：
 
-1. 若有结果：`FAIL_OR(emitter.emitAssignPrefix(...))` 或 `emitType` 先打印左值；
-2. 用 `emitter.getOrCreateName(...)` 取操作数的 C 变量名；
-3. 把 C++ 语法文本拼进 `os`；
-4. 返回 `success()`，分号由外层 `emitOperation` 统一补（多行语句的 Op 自带换行，分号位置见各实现）。
+1. 若操作有结果 → `emitAssignPrefix` 先打印 `T vN = `（[CodeEmitter.cpp:347-363](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/CodeEmitter.cpp#L347-L363)，内部委托 `emitVariableDeclaration` [CodeEmitter.cpp:334-345](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/CodeEmitter.cpp#L334-L345)）；
+2. 打印操作符或函数形态，操作数一律经 `getOrCreateName` 取唯一变量名；
+3. 分号由外层 `emitOperation` 统一补（[Translation.cpp:291](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/Translation.cpp#L291)）。
 
 #### 4.2.3 源码精读
 
-**（1）`CallOpaqueOp`——按名字调用**（[lib/Target/AscendC/EmitAsc.cpp:L23-L33](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/EmitAsc.cpp#L23-L33)）：
+**接线**：12 个 `emitasc::*` 操作登记在白名单元组的 EmitAsc 段——[Translation.cpp:93-96](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/Translation.cpp#L93-L96)，紧挨着上游 `emitc`（L76）、`func`（L78）、`scf`（L80）、`memref`（L82）、`arith`（L84-89）、`math`（L91-92）各段。`emitOperation`（[Translation.cpp:271-293](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/Translation.cpp#L271-L293)）用 `TypeSwitch` 把操作分派到对应重载。**这印证了本讲的核心图景：ascendc、emitasc 与六个通用方言在发射层完全平权。**
 
-```cpp
-FAIL_OR(emitter.emitAssignPrefix(*op.getOperation()));
-os << op.getCallee() << '(';
-llvm::interleaveComma(op.getOperands(), os, [&](Value operand) { os << emitter.getOrCreateName(operand); });
-os << ')';
-```
+**四个代表性实现**：
 
-`callee` 是字符串属性，允许带命名空间甚至模板参数（td 注释要求「demangled，构造函数用父类名表示」），操作数逐个打印成逗号列表。对照测试 [test/Target/AscendC/emitasc.mlir:L16-L20](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/emitasc.mlir#L16-L20)：`emitasc.call_opaque "add" (%arg0, %arg1)` 发射为 `int32_t v3 = add(v1, v2);`。
+1. **成员访问的 `.` 与 `->` 二选一**（[EmitAsc.cpp:64-75](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/EmitAsc.cpp#L64-L75)）：`member` 操作根据 `base` 是不是 `MemRefType`（即指针）决定打印 `->` 还是 `.`。C 里两套语法的选择被编码成一次类型判断。
 
-**（2）`PtrOffsetOp`——指针加偏移**（[lib/Target/AscendC/EmitAsc.cpp:L130-L141](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/EmitAsc.cpp#L130-L141)）：打印 `base + N`，`N` 取动态操作数或静态属性二选一。测试 [emitasc.mlir:L36-L40](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/emitasc.mlir#L36-L40) 中静态 `512` 与动态 `%arg1` 两种写法分别得到 `int32_t* v3 = v1 + 512;` 与 `int32_t* v4 = v1 + v2;`。
+2. **结构体声明**（[EmitAsc.cpp:95-110](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/EmitAsc.cpp#L95-L110)）：`declare_py_struct` 打印 `#pragma pack(push, 8)`、逐字段 `类型 名字;`、`#pragma pack(pop)`。与前端 ctypes 侧的 `_pack_ = 8`（u3-l3、u6-l4）成对，保证 Host 打包与设备侧布局逐字节对齐。
 
-**（3）`VariableOp`——可变变量落地**（[lib/Target/AscendC/EmitAsc.cpp:L164-L187](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/EmitAsc.cpp#L164-L187)）：先 `emitType` 打印元素类型，再打印变量名和形状维度（`[1]`），最后 `{init}` 打印初始化列表——静态初始化走 `emitAttribute`（直接印常量），动态初始化印初始化表达式的变量名。测试 [emitasc.mlir:L56-L60](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/emitasc.mlir#L56-L60) 的期望输出正是 `int32_t v2[1]{512};`、`int32_t v3[1]{v1};`。
+3. **可变变量**（[EmitAsc.cpp:164-187](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/EmitAsc.cpp#L164-L187)）：`variable` 打印 `T v[shape]{init};`——静态初始化直接打属性值，动态初始化打操作数变量名。注意 IR 里它是 `memref<1xT>`，发射成「长度为 1 的数组」，绕开 C 标量与 SSA 单赋值的冲突。
 
-**（4）`DeclarePyStructOp`——结构体声明**（[lib/Target/AscendC/EmitAsc.cpp:L95-L110](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/EmitAsc.cpp#L95-L110)）：从 `PyStructType` 属性里取名字、成员类型表、成员名表，逐成员 `emitType` + 名字，整体包在 `#pragma pack(push, 8) ... #pragma pack(pop)` 里——与前端 ctypes 打包结构体的 `_pack_ = 8` 成对（u6-l4 已讲过这对约定），两端不一致会导致 Host/Device 布局错位。期望输出见 [emitasc.mlir:L62-L78](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/emitasc.mlir#L62-L78)。
+4. **verbatim 的占位符替换**（[EmitAsc.cpp:189-228](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/EmitAsc.cpp#L189-L228)）：带 `args` 时，用 `std::from_chars` 手工扫描代码串里的 `$数字` 并替换成对应操作数的变量名（`$0` → 第一个实参的 `v3` 之类）。没有 args 则原样输出。
 
-**（5）`VerbatimOp`——带占位符的原样输出**（[lib/Target/AscendC/EmitAsc.cpp:L189-L228](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/EmitAsc.cpp#L189-L228)）：无 `args` 时直接输出整段文本；有 `args` 时手工扫描字符串，把 `$<数字>` 替换成对应 IR 值的 C 变量名（用 `std::from_chars` 解析下标，越界或解析失败则原样保留 `$`）。这就是 4.1.4 实践 A 进阶步骤的依据。
-
-**（6）`CopyStructOp`——最「重」的一个**（[lib/Target/AscendC/EmitAsc.cpp:L35-L54](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/EmitAsc.cpp#L35-L54)）：它不发一行调用，而是**生成一小段 C 代码**——先声明局部结构体，再写一个按字节循环的拷贝，源端还会根据 memref 的 memory space 打出 `__gm__` 之类的地址空间修饰（经 `symbolizeAddressSpace` 反查枚举）。期望输出见 [emitasc.mlir:L79-L91](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/emitasc.mlir#L79-L91)。这解释了 u3-l3 的一处现象：Struct 参数从 GM 拷到本地走的不是 `data_copy`，而是这段编译期展开的逐字节循环。
-
-其余 `Member/MemberPtr/MemberRef/SetMember/Dereference/ReinterpretCast` 的实现模式与上述同构（成员访问依据 base 是否 memref 决定 `->` 还是 `.`，见 [EmitAsc.cpp:L64-L75](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/EmitAsc.cpp#L64-L75)），建议按上表自行通读。
+另一个有意思的实现是 `copy_struct`（[EmitAsc.cpp:35-54](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/EmitAsc.cpp#L35-L54)）：它不生成 `memcpy`，而是生成一个逐字节的 `for` 循环，并根据源 memref 的 memory space 打印 `__gm__` 等地址空间修饰——因为结构体可能跨 GM 与 UB，通用 `memcpy` 不可用。
 
 #### 4.2.4 代码实践
 
-**实践 B：把官方测试当「对照字典」用。**
+**实践目标**：用现成 lit 用例验证你对 EmitAsc 发射的理解，不需要跑任何硬件。
 
-1. 实践目标：不运行编译器也能掌握 emitasc Op 的输入输出形态。
-2. 操作步骤：打开 [test/Target/AscendC/emitasc.mlir](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/emitasc.mlir#L9-L101)，该文件每个函数上方 `// CHECK:` 注释就是 FileCheck 断言的期望 C 输出；对照 4.1.3 的表格，把每个 CHECK 块与 Ops.td 定义、EmitAsc.cpp 实现三方对齐。
-3. 需要观察的现象：CHECK 行里的变量名规律——普通值是 `v1、v2...`，常量是 `c45_i32`（值_类型）；`__gm__` 修饰出现在 memory space 为 GM 的参数上。
-4. 预期结果：整理出 12 行的「Op → 期望 C 输出」表。若本地已按 u7-l5 的方式构建 devtools，可执行 `ascir-translate -mlir-to-ascendc test/Target/AscendC/emitasc.mlir` 直接得到输出（**待本地验证**）。
+**操作步骤**：
+
+1. 打开 [test/Target/AscendC/emitasc.mlir](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/emitasc.mlir)。首行 RUN 命令是 `ascir-translate -mlir-to-ascendc %s | FileCheck %s`。
+2. 逐个对照「IR 输入 → CHECK 期望输出」。例如第 16-20 行的输入：
+
+```text
+func.func @call_opaque_test(%arg0: i32, %arg1: i32) -> i32 {
+    %0 = emitasc.call_opaque "add" (%arg0, %arg1) : (i32, i32) -> i32
+    emitasc.call_opaque "empty" () : () -> ()
+    return %0 : i32
+}
+```
+
+   期望输出（CHECK 第 11-15 行）是：
+
+```cpp
+int32_t call_opaque_test(int32_t v1, int32_t v2) {
+  int32_t v3 = add(v1, v2);
+  empty();
+  return v3;
+}
+```
+
+3. 若本地已用 `PYASC_SETUP_DEVTOOLS=1` 构建（u1-l2、u7-l5），可直接运行 `ascir-translate -mlir-to-ascendc test/Target/AscendC/emitasc.mlir` 肉眼查看完整输出；没有构建则纯阅读即可。
+
+**需要观察的现象**：`emitasc.ptr_offset` 的两条输入（[emitasc.mlir:36-39](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/emitasc.mlir#L36-L39)）分别用静态偏移 `512` 和动态偏移 `%arg1`，输出分别是 `v1 + 512` 与 `v1 + v2`——对应发射代码里 `dynamicOffset` 与 `staticOffsetAttr` 两个分支（EmitAsc.cpp:135-139）。
+
+**预期结果**：你能不看 CHECK 行，先自己写出期望 C 代码再对答案；`variable` 用例应产出 `int32_t v2[1]{512};`。**待本地验证**（未运行 ascir-translate 的输出以本地为准）。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：`DeclarePyStructOp` 发射的 `#pragma pack(push, 8)` 若改成 4，哪一层会先出错？
+**练习 1**：`emitasc.variable` 的 IR 结果类型为什么是 `memref<1xT>` 而不是 `T`？
 
-**参考答案**：不会是编译错误，而是**运行期数据错位**。Host 侧 ctypes 结构体按 `_pack_ = 8` 打包参数 blob（u3-l3、u6-l4），Device 侧按 8 字节对齐解析；两端 pack 不一致时成员偏移错开，数值悄悄读错。这属于「约定型耦合」，无任何编译期校验。
+**答案**：C 可变变量要被多次赋值、多次读取，与 SSA 单赋值冲突。用 `memref<1xT>`（长度 1 的数组）承载，每次改值都是一次对数组的 store，读取是 load，语义上绕开了 SSA 限制；发射时打印成 `T v[1]{init}`。
 
-**练习 2**：`CopyStructOp` 为什么不直接生成 `memcpy` 或结构体赋值 `auto local = *gm_ptr;`？
+**练习 2**：`copy_struct` 为什么生成逐字节循环而不用 `memcpy`？
 
-**参考答案**：源结构体位于 `__gm__`（全局内存）地址空间，目标是本地变量，两类地址空间在昇腾编译器里不能直接解引用赋值；逐字节 `reinterpret_cast<uint8_t*>` 循环是绕开地址空间类型限制的保守写法。同时逐字节方式让源端可以打地址空间修饰（`reinterpret_cast<__gm__ uint8_t*>`），保持两端各自合法。
+**答案**：结构体可能位于不同地址空间（GM/UB），发射代码会按 memref 的 memory space 打印 `__gm__` 等修饰，逐字节 `reinterpret_cast<uint8_t*>` 拷贝跨空间安全；`memcpy` 在设备侧跨地址空间不可用。
 
-### 4.3 External 发射：scf/arith/math/memref/emitc 到 C 的映射
+### 4.3 External 六文件：通用 MLIR 方言的 C 发射
 
 #### 4.3.1 概念说明
 
-`lib/Target/AscendC/External/` 下六个文件专门翻译**上游方言**，目录名「External」即「Asc 之外的外部方言」。它们的定位与 Asc/EmitAsc 发射不同：
-
-- Asc Op：一条 Op ≈ 一条 API 调用，大量由 TableGen 生成（u6-l5）；
-- External Op：一条 Op ≈ **一个 C 表达式或语句**，例如 `arith.addi` → `a + b`。
-
-其中 arith 是最厚的一块，采用「**头文件模板 + cpp 特化**」两段式组织；scf/func 负责控制流与函数骨架（放到 4.4 一起讲）；math/memref/emitc 很薄。
+前端生成的 IR 中，除了 `ascendc.*`（算子 API）和 `emitasc.*`（C 形状辅助），还有大量**上游通用方言**操作：`func.func` 承载函数、`scf.for/if/while` 承载控制流、`arith.addi/cmpi/...` 承载标量运算、`math.sqrt/exp` 承载数学函数、`memref.load/store` 承载内存读写、`emitc.include` 承载头文件。`lib/Target/AscendC/External/` 下六个文件按方言一一对应地实现它们的发射。称其「External」是因为这些方言定义在 pyasc 之外（MLIR 上游）。
 
 #### 4.3.2 核心流程
 
-以 `z = a + b`（int）为例的完整链条：
+六个文件的分工与映射关系：
 
-```text
-Python: buf_id = i % BUFFER_NUM
-  └─ PlainValue.__mod__ → apply_binary_op(self, other, "RemSI", None)      (ir_value.py:96)
-       └─ create_arith_RemSIOp(lhs_ir, rhs_ir)                              (ir_value.py:263)
-            ▼  (Pass 流水线不改写算术，原样到达发射)
-Translation.emitOperation → TypeSwitch 命中 arith::RemSIOp
-  └─ printOperation 模板 (Arith.h) → emitAssignPrefix → "lhs % rhs"
-       ▼
-C 代码: int32_t v9 = v3 % c2;
-```
+| 文件 | 处理的操作 | 典型 C 输出 |
+| --- | --- | --- |
+| Func.cpp | `func.func / call / return / constant` | 函数签名、`f(args)`、`return x` |
+| Scf.cpp | `scf.for / if / while / condition / yield / index_switch` | `for(;;){}`、`if(){}else{}`、`while(true)` |
+| Arith.h/.cpp | 约 40 个 `arith.*` 标量运算 | `a + b`、`a % b`、`(a+b-1)/b`、三目 |
+| Math.h/.cpp | 约 17 个 `math.*` 函数 | `sqrt(x)`、`AscendC::Exp(x)`、`a*b+c` |
+| MemRef.cpp | `memref.alloca / load / store / cast` | `T v[N]`、`m[i]`、`m[i]=v` |
+| Emitc.cpp | `emitc.include / verbatim / cast / constant / variable` | `#include <...>`、逐字文本 |
 
-常量则多一跳：Python 立即数 `2` 经 `materialize_ir_value` → `convert_value` → `builder.get_i32(2)`（[python/asc/language/core/ir_value.py:L366-L396](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/asc/language/core/ir_value.py#L366-L396)），后者在 C++ 侧 `create<arith::ConstantOp>`（[python/src/OpBuilder.cpp:L523-L527](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/src/OpBuilder.cpp#L523-L527)）。
+两处架构手法值得学习：
+
+- **模板 + `LogicalResultForT` 白名单**：Arith/Math 的几十个二元/一元操作共用一个函数模板，返回类型用 `LogicalResultForT<OpType, 允许列表...>` 约束（[Arith.h:18-24](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Target/Asc/External/Arith.h#L18-L24)），编译期限定重载范围，再用 `if constexpr` 按具体 Op 选操作符。
+- **特例内联在模板里**：`ceildivsi` 没有对应 C 运算符，直接打印公式 `(a + b - 1) / b`（[Arith.h:29-33](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Target/Asc/External/Arith.h#L29-L33)）；`min/max` 家族打印成三目表达式（[Arith.h:34-47](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Target/Asc/External/Arith.h#L34-L47)）；`math.fma` 打印 `a * b + c`（[Math.cpp:15-25](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Math.cpp#L15-L25)）。
 
 #### 4.3.3 源码精读
 
-**（1）二元运算的「一个模板管 24 个 Op」**。[include/ascir/Target/Asc/External/Arith.h:L18-L74](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Target/Asc/External/Arith.h#L18-L74) 用函数模板 + 返回类型 `LogicalResultForT<BinaryOpType, ...24 个 Op 类型...>` 的 SFINAE 手法，让**一个函数体**服务 `AddI/SubI/MulI/DivSI/RemSI/AndI/OrI/XOrI/ShLI/ShRSI/ShRUI/...` 全体规则二元运算：先 `isScalarOperation` 校验、`emitAssignPrefix` 打左值，再用 `if constexpr` 链按 Op 类型挑选 `+ - * / % & | ^ << >>` 符号。两个特例值得注意：
+**Func.cpp——函数骨架与 u6-l4 的衔接**。[Func.cpp:53-114](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Func.cpp#L53-L114) 是 `func.func` 的发射。核心判断在 L63-67：
 
-- `CeilDivSIOp`（向上取整除）没有对应 C 运算符，展开为 `(lhs + rhs - 1) / rhs`（[Arith.h:L29-L33](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Target/Asc/External/Arith.h#L29-L33)）；
-- `MaximumF/MinimumF/MaxSI/MinSI` 等最大最小族展开为三目表达式 `((a > b) ? (a) : (b))`（[Arith.h:L34-L47](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Target/Asc/External/Arith.h#L34-L47)）。
+```cpp
+bool isMainFunction = functionOp->hasAttr(ascendc::attr::global);
+os << (isMainFunction ? "extern \"C\"  __global__ " : "__inline__ __attribute__((always_inline)) ");
+os << "__aicore__ ";
+```
 
-**（2）Arith.cpp 里的特化**。[lib/Target/AscendC/External/Arith.cpp:L53-L86](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Arith.cpp#L53-L86) 的 `CmpIOp` 把 10 种谓词（`eq/ne/sle/ult/...`）switch 成 6 个 C 符号（有符号/无符号折叠为同一符号）；`SelectOp`（[L140-L149](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Arith.cpp#L140-L149)）发射三目 `cond ? t : f`；`IndexCastOp`（[L151-L163](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Arith.cpp#L151-L163)）发射 `static_cast<T>(v)`；`MulUIExtendedOp`（[L28-L51](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Arith.cpp#L28-L51)）是唯一双结果 Op，发射两条语句：低位 `a * b`、高位用 64 位中间量右移得到。
+带 `ascendc.global` 属性的函数打印成 Kernel 入口（`extern "C" __global__ __aicore__`），否则打印成 `__inline__ always_inline __aicore__` 的内联函数——这正是 u6-l5 结尾「Pass 只种属性、发射层才落纸」的落点，也是 u4-l4「真内联交给毕昇编译器」的物理形式。函数体要求单块（L56-58，多块需要顶部声明变量，当前报错），随后逐形参打印类型与名字（L70-77）、逐操作发射（L99-109）。`func.call`（[Func.cpp:23-36](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Func.cpp#L23-L36)）直接打印 `callee(v1, v2)`。
 
-**（3）常量的公共出口**。`arith::ConstantOp`、`func::ConstantOp`、`emitc::ConstantOp`、`emitc::VariableOp` 四者共用 [lib/Target/AscendC/Common.cpp:L19-L42](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/Common.cpp#L19-L42) 的 `printConstantOp`：先打 `constexpr` 前缀——**但 float16 例外**（半精度常量不能 `constexpr`，见开头的位宽判断），再走 `emitAssignPrefix` + `emitAttribute` 打印字面值。浮点字面值的打印细节在 [CodeEmitter.cpp:L288-L312](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/CodeEmitter.cpp#L288-L312)：有限值按语义加 `(float)`/`(double)` 前缀且不截断尾零，NaN/无穷用 `0.f/0.f`、`__builtin_inff()` 合成——这些写法都是为了在目标编译器上精确复现位级相同的常量。
+**Arith——谓词与三目**。比较操作 `arith.cmpi` 的谓词映射在 [Arith.cpp:53-86](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Arith.cpp#L53-L86)：`eq→==`、`ne→!=`、`sle/ule→<=`、`slt/ult→<`……注意有符号与无符号谓词（`sle` 与 `ule`）打印成**同一个 C 运算符**——C 的比较运算符行为由操作数类型决定，而操作数类型已由 `emitType` 按符号语义映射（`CodeEmitter::shouldMapToUnsigned`，[CodeEmitter.cpp:257](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/CodeEmitter.cpp#L257) 附近），所以谓词本身无需区分。`cmpf` 同理（[Arith.cpp:88-128](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Arith.cpp#L88-L128)），但 `ORD/UNO/AlwaysTrue` 等无 C 对应的谓词直接 `llvm_unreachable`。`select` 打印三目 `cond ? t : f`（[Arith.cpp:140-149](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Arith.cpp#L140-L149)）；`index_cast` 与扩展/截断族打印 `static_cast<T>(x)`（[Arith.cpp:151-163](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Arith.cpp#L151-L163)、[Arith.h:76-87](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Target/Asc/External/Arith.h#L76-L87)）；`bitcast` 打印 `*reinterpret_cast<T*>(&x)`（[Arith.cpp:130-138](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Arith.cpp#L130-L138)）。
 
-**（4）arith.mlir：现成的映射表**。[test/Target/AscendC/arith.mlir:L9-L38](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/arith.mlir#L9-L38) 一口气断言了 13 个二元运算的期望输出（`addi→+`、`subi→-`、`muli→*`、`divsi→/`、`remsi→%`、`ceildivsi→(a+b-1)/b`、`shli→<<`、`shrsi/shrui→>>`、`andi→&`、`ori→|`、`xori→^`、`divui→/`），[L40-L68](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/arith.mlir#L40-L68) 是 10 个比较谓词。这张表就是「IR 操作 → C 代码」的权威字典。
-
-**（5）math/memref/emitc 速览**。math 与 arith 同构，也是「头文件模板 + cpp 特化」两段：[include/ascir/Target/Asc/External/Math.h:L18-L77](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Target/Asc/External/Math.h#L18-L77) 的 unary 模板管 13 个一元数学 Op、`Atan2Op` 单独成模板，绝大多数映射为 `AscendC::Xxx(...)` 命名空间调用（昇腾上标量数学复用向量 API 基建），三个例外值得记：`sqrt` 映射为普通 `sqrt(...)`、`exp2` 展开为 `Exp(x * Log(2))`、`absf` 展开为三目表达式；Math.cpp 只放非模板的 `FmaOp`（→ `a * b + c`）与 `CopySignOp`（→ 三目表达式）（[lib/Target/AscendC/External/Math.cpp:L15-L36](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Math.cpp#L15-L36)）。MemRef.cpp 四条：`alloca` 打数组声明、`load/store` 打 `mem[i]`、`cast` 打 `reinterpret_cast`（[lib/Target/AscendC/External/MemRef.cpp:L15-L59](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12a6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/MemRef.cpp#L15-L59)）。Emitc.cpp 四条：常量、C 风格括号强转、verbatim、`#include`（标准头打 `<>`、其余打 `""`，[lib/Target/AscendC/External/Emitc.cpp:L55-L67](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Emitc.cpp#L55-L67)）——u6-l4 讲过的「include 由 Pass 种入 emitc.include、发射层落纸」即此。
-
-**（6）类型到 C 类型**。所有 `emitType` 的总入口在 [lib/Target/AscendC/CodeEmitter.cpp:L835-L854](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/CodeEmitter.cpp#L835-L854)：先查 `emitTypeMapper`（TypeID → 专属发射器，PyStruct、各 Tensor 类型等），未命中再按 Integer/Float/MemRef 兜底。整数最终在 [L798-L800](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/CodeEmitter.cpp#L798-L800) 拼成 `int32_t`/`uint32_t`（按符号性），`index` 类型固定为 `uint32_t`（[L405-L408](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/CodeEmitter.cpp#L405-L408)）。
+**MemRef 与 Emitc**。`memref.load/store` 打印下标表达式 `m[i]` / `m[i] = v`（[MemRef.cpp:27-49](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/MemRef.cpp#L27-L49)）；`memref.alloca` 打印数组声明（L15-25）。`emitc.include` 按 `isStandardInclude` 打印 `#include <...>` 或 `#include "..."`（[Emitc.cpp:55-67](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Emitc.cpp#L55-L67)）——这就是 u6-l4 里 GenerateBoilerplate「按特征 Op 插入 `emitc.include`」的消费端：**include 列表完全由 IR 决定**。
 
 #### 4.3.4 代码实践
 
-**实践 C：整理你的算术映射表。**
+**实践目标**：不运行任何东西，用 FileCheck 用例反向测验「IR → C」映射能力。
 
-1. 实践目标：把 arith → C 的映射内化成可查表。
-2. 操作步骤：
-   - 通读 [Arith.h:L18-L87](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Target/Asc/External/Arith.h#L18-L87) 与 [arith.mlir](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/arith.mlir#L9-L68)；
-   - 自制两列对照表：左列 Python 表达式（`a + b`、`a // b`、`a % b`、`ceildiv(a,b)`、`a << b`、`a > b`），中间列写出你预测的 IR 操作名（提示：u4-l2 的四张运算符翻译表 + 本讲 4.3.2），右列写出预测的 C 表达式；
-   - 与 Arith.h 的 `if constexpr` 链逐条核对。
-3. 需要观察的现象：`ceildiv`（u2-l5 提及的 `asc.ceildiv`，NameScope builtins 白名单成员）与普通 `//` 在 C 输出上的差别；`a > b` 的结果是 `bool`（i1）而非 int。
-4. 预期结果：约 10 行的对照表，全部能在 Arith.h/Arith.cpp 中指出依据行。
+**操作步骤**：
+
+1. 打开 [test/Target/AscendC/arith.mlir](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/arith.mlir)。
+2. 遮住 CHECK 注释，只看 L27-42 的输入（`arith.addi/subi/muli/divsi/remsi/ceildivsi/shli/shrsi/shrui/andi/ori/xori/divui`），自己在纸上写出 13 行期望输出。
+3. 对照 L11-25 的 CHECK：`+`、`-`、`*`、`/`、`%`、`(v1 + v2 - 1) / v2`、`<<`、`>>`（两遍）、`&`、`|`、`^`、`/`。
+4. 再看 L57-68 的 `cmpi` 十谓词用例，核对 L44-55 的输出（注意 `sge/uge` 都打印 `>=`）。
+
+**需要观察的现象**：`ceildivsi` 是唯一没有单一 C 运算符的操作；位移 `shrsi`（有符号）与 `shrui`（无符号）输出相同 `>>`，正确性依赖操作数类型的符号映射。
+
+**预期结果**：全部命中即通过；这是仓库自带的黄金用例，`ascir-translate` 行为与 CHECK 严格一致（由 CI lit 保证）。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么二元运算模板要放在头文件（Arith.h）而不是 Arith.cpp？
+**练习 1**：`math.absf` 发射成什么？为什么不用 `fabs`？
 
-**参考答案**：函数模板必须对每个实例化点可见。24 个 Op 类型在 `Translation.cpp` 的 TypeSwitch 里被实例化，模板定义必须随头文件到达那里；而 Arith.cpp 只放非模板的普通函数（CmpI/Select 等），声明在头、定义在 cpp 即可。
+**答案**：三目表达式 `(x > 0) ? x : -x`（[Math.h:27-31](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Target/Asc/External/Math.h#L27-L31)）。设备侧 C++ 环境不保证标准库 `fabs` 可用，自拼三目最稳。而 `math.exp/cos/sin/log` 等打印成 `AscendC::Exp(...)` 等**昇腾私有实现**（Math.h:34-55）——通用方言的发射也会落到昇腾命名空间。
 
-**练习 2**：`arith.cmpi ult`（无符号小于）和 `slt`（有符号小于）的 C 输出都是 `<`，语义靠什么保证？
+**练习 2**：`emitc.include` 与 `emitasc.verbatim` 都能输出「任意文本」，为什么不合并成一个？
 
-**参考答案**：靠**操作数类型**。发射层把 `uint32_t a < b` 与 `int32_t a < b` 打成同样的 `<` 符号，无符号/有符号语义由 C 类型系统承载；而 IR 里整数类型的符号性（`ui32` vs `i32`）在 `emitType` 时已经分流成 `uint32_t`/`int32_t`（CodeEmitter.cpp:798-800）。即「谓词差异下沉为类型差异」。
+**答案**：`emitc.include` 是结构化操作（有 `is_standard_include` 布尔属性，决定 `<>` 与 `""`），Pass 能识别并去重；`verbatim` 是无结构逃生舱，只该在确无对应 Op 时使用。语义分层让优化 Pass 有抓手。
 
-**练习 3**：`math.sqrt` 与 `math.exp` 走哪条路发射？两者输出有何区别？
-
-**参考答案**：都走 [External/Math.h:L18-L60](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Target/Asc/External/Math.h#L18-L60) 的 unary 模板（不在 Math.cpp——那里只有非模板的 Fma/CopySign）。`math.sqrt` 是该模板里的少数例外，发射为普通 C 函数 `sqrt(x)`；而 `math.exp` 发射为 `AscendC::Exp(x)` 命名空间调用。区别的原因：昇腾侧大多标量数学要复用向量 API 基建（带命名空间），个别（如 sqrt）直接用平台 C 库函数即可。
-
-### 4.4 scf/func 到 C 的映射：跟踪一个 for 循环的完整降级
+### 4.4 从 Python for 到 C for：scf.for 的完整降级路径
 
 #### 4.4.1 概念说明
 
-本模块回答学习目标里的第三条：**Python `for` 循环如何一步步变成 C `for` 语句**。这条链横跨前端（u4 单元讲过其 AST 侧）与发射层（本讲），第一次把它们首尾接起来。同时覆盖 `func.call`/`func.return`/`func.func` 三个函数级操作的发射——其中 FuncOp 正是 ascendc.cpp 里 `extern "C" __global__ __aicore__` 样板的落纸点（u6-l4 讲过属性是谁种的，这里看谁打印）。
+这是本讲的收官模块，把前面所有环节串成一条链。`scf.for` 的 IR 形态：
+
+```text
+%result = scf.for %iv = %lb to %ub step %step iter_args(%arg = %init) -> (T) {
+  ... 使用 %iv、%arg，可能重定义 %arg 的"新值" ...
+  scf.yield %new : T
+}
+```
+
+SSA 世界里「循环变量每圈取新值」由块参数表达：每圈开始时 `%arg` 绑定上一圈 `yield` 的值。C 世界里没有块参数，只有可反复赋值的变量。**发射算法就是把 φ 语义翻译成「声明在前、循环尾赋值」**：
+
+\[ \text{SSA：} v_{k+1} = \text{body}(v_k) \quad\Longrightarrow\quad \text{C：} \underbrace{T\ v = init}_{\text{预声明}};\ \underbrace{\text{for}\{...\ v = body(v);\}}_{\text{循环尾回写}} \]
 
 #### 4.4.2 核心流程
 
-**前端侧（发生 JIT 编译期）**：`visit_For`（[python/asc/codegen/function_visitor.py:L479-L516](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/python/asc/codegen/function_visitor.py#L479-L516)）：
+[Scf.cpp:26-93](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Scf.cpp#L26-L93) 的 `printOperation(scf::ForOp)` 分七步：
 
-1. 只接受 `range` / `asc.static_range`，`for-else` 直接拒绝；
-2. `static_range` 走 `handle_static_range` 编译期完全展开（不产生循环 IR，u4-l3）；
-3. `range` 的 start/stop/step 经 `materialize_ir_value` 落成 `int32` 常量（或运行时值）；
-4. `compute_inout` 分析循环体改写了哪些外层变量，作为块进块出值（iter_args）；
-5. `create_scf_ForOp` 建循环，循环变量存进 NameScope，循环末尾补 `create_scf_YieldOp` 回传块出值。
+1. 为每个**循环结果**预声明变量：`T v;`（L34-38）；
+2. 为每个 **iter_arg** 打印初始化：`T vN = vInit;`（L40-47）；
+3. 打印 C for 头：`for (T iv = lb; iv < ub; iv += step) {`（L49-56）；
+4. 发射循环体（**跳过最后一个操作**，即 yield，L66-71）；
+5. 把 yield 的操作数**回写**给 iter_args：`vArg = vYield;`（L73-77）；
+6. 关闭花括号（L79）；
+7. 循环结束后把 iter_args **拷给结果变量**：`vResult = vArg;`（L84-91）。
 
-**发射侧（translate 阶段）**：`printOperation(CodeEmitter&, scf::ForOp)`（[lib/Target/AscendC/External/Scf.cpp:L26-L93](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Scf.cpp#L26-L93)）按固定五步发射：
+配套细节：
 
-```text
-① 为每个循环结果变量预声明：      int32_t v5;
-② 为每个 iterArg 打初始化行：     int32_t v6 = v1;
-③ 打 C for 头（+=step）：         for (int32_t v3 = c0; v3 < c16; v3 += c1) {
-④  循环体（跳过末尾 yield）…
-⑤  循环体末尾回拷 yield→iterArg：  v6 = v9;
-                                  }
-⑥ 循环后回拷 iterArg→result：     v5 = v6;
-```
-
-这个「**预声明 + 三次拷贝**」结构就是 SSA→C 的翻译核心：MLIR 里 `iter_args`/`yield` 表达的循环携带依赖，在 C 里变成了「变量先声明、循环内改、循环后取」。
+- `emitBlock`（[Scf.cpp:15-24](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Scf.cpp#L15-L24)）跳过零操作数的 `scf.yield`（无意义的尾巴）；
+- `needsSemicolon`（[Common.h:60-68](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/include/ascir/Target/Asc/Common.h#L60-L68)）规定 `scf.if/for/index_switch/yield` 后不补分号——语句块自带花括号；
+- `scf.while` 的翻译更激进：打印成 `while (true) { ... }`，把 `scf.condition` 翻成 `if (!cond) { 结果回填; break; }`（[Scf.cpp:159-174](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Scf.cpp#L159-L174)、[Scf.cpp:176-208](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Scf.cpp#L176-L208)）——「先执行再判断退出」。
 
 #### 4.4.3 源码精读
 
-**（1）`scf::ForOp` 发射**。[Scf.cpp:L26-L93](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Scf.cpp#L26-L93)。几个细节：
-
-- 循环头三段式打印在 [L49-L56](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Scf.cpp#L49-L56)：`for (T i = lb; i < ub; i += step) {`——注意步进固定打成 `+=`，且边界比较固定为 `<`（所以 `range(a, b, -1)` 这类负步进会生成语义错误的 C 循环，属于当前实现的约束，**待确认**是否前端已拦截）；
-- 循环体跳过末尾 yield（[L62-L71](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Scf.cpp#L62-L71) 的注释解释了原因：yield 的职责被⑤⑥两次显式赋值取代）；
-- 结果为空时（如 01_add 的循环，`i`/`buf_id` 都只在体内用）①⑥自动退化为空，只剩一个纯 `for` 头。
-
-**（2）无携带依赖时的实际形态（推导示例）**。01_add 第 49-50 行：
+以 01_add 为例走全链。Python 侧关键行（[examples/01_add/add.py:49-50](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/examples/01_add/add.py#L49-L50)）：
 
 ```python
-for i in range(TILE_NUM * BUFFER_NUM):   # TILE_NUM=8, BUFFER_NUM=2 → range(16)
+for i in range(TILE_NUM * BUFFER_NUM):
     buf_id = i % BUFFER_NUM
 ```
 
-前端先算 `TILE_NUM * BUFFER_NUM`（编译期 Python 值相乘得 16，u2-l3 讲过纯 Python 常量间运算不产生 IR），故 `range(16)` 的三个边界都是常量。预期 IR 与 C 输出（依据上述源码推导，**示意，待本地验证**）：
+逐环节对应：
 
-```text
-IR:                                     C（示意）:
-%c0 = arith.constant 0 : i32            constexpr int32_t c0_i32 = 0;
-%c16 = arith.constant 16 : i32          constexpr int32_t c16_i32 = 16;
-%c1 = arith.constant 1 : i32            constexpr int32_t c1_i32 = 1;
-%v3 = arith.remisi %v_i, %c2            （循环体内）
-scf.for %i = %c0 to %c16 step %c1 {     for (int32_t v_i = c0_i32; v_i < c16_i32;
-  ...                                       v_i += c1_i32) {
-}                                         }
+1. **FunctionVisitor**（u4-l3）：识别 `range(...)`，边界物化为 int32 常量，生成 `scf.for`；`i` 成为归纳变量（body 块参数），无 iter_args（`buf_id` 每圈重新定义，不跨圈携带——若跨圈改写外层变量才会产生 iter_args，见 u4-l2 的 BlockInOut 记账）。
+2. **Pass 流水线**（u6-l1/u6-l2）：EraseSync/HoistQueBind/InsertSync 等改写 `ascendc.*` 部分，`scf.for` 结构原样保留到 `ascir.mlir`。
+3. **发射层**：`arith.constant`（边界 0 与 16）经 [Arith.cpp:20-26](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Arith.cpp#L20-L26) → `printConstantOp`（[Common.cpp:19-42](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/Common.cpp#L19-L42)）打印 `constexpr int32_t vN = 16;`（非 fp16 一律加 `constexpr`）；`scf.for` 走上述七步算法；`i % BUFFER_NUM` 是 `arith.remsi` → `vA % vB`。
+
+最终 C 形态（示意，变量名以实际 dump 为准）：
+
+```cpp
+constexpr int32_t v1 = 16;
+for (int32_t v2 = 0; v2 < v1; v2 += 1) {
+  int32_t v3 = v2 % 2;
+  // ...ascendc.DataCopy / ascendc.Add 等算子调用...
+}
 ```
 
-**（3）`scf::YieldOp` 与 `emitBlock`**。[Scf.cpp:L143-L157](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Scf.cpp#L143-L157)：零操作数的 yield（纯终结符）在 `emitBlock`（[L15-L24](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Scf.cpp#L15-L24)）里被静默跳过；带操作数的 yield 打印成一组 `result = operand;` 赋值，并检查操作数确实在作用域内。
+对照黄金用例：[test/Target/AscendC/scf.mlir:16-27](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/scf.mlir#L16-L27) 展示了 `scf.while` 无结果版本的期望输出——`while (true) { ... if (!v3) { break; } ... }`，正是「condition → if-break」策略的直观样例。
 
-**（4）其余控制流**。`IfOp`（[L95-L121](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Scf.cpp#L95-L121)）：同样先预声明结果变量，再打 `if (...) { } else { }`——u4-l3 讲过的「运行期 if 结果按名字并集合并」在这里落地成 C 的先声明后赋值。`WhileOp`（[L176-L208](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Scf.cpp#L176-L208)）+ `ConditionOp`（[L159-L174](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Scf.cpp#L159-L174)）：MLIR 的 before/do 双区域被翻译成 `while (true) { if (!cond) { ...; break; } ... }`——条件反转 + break，测试样例见 [scf.mlir:L16-L37](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/scf.mlir#L16-L37)。`IndexSwitchOp`（[L123-L141](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Scf.cpp#L123-L141)）直译 `switch/case/default`，样例见 [scf.mlir:L100-L129](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/scf.mlir#L100-L129)。
-
-**（5）func 三件套**。[Func.cpp:L53-L114](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Func.cpp#L53-L114) 的 `FuncOp` 发射函数骨架：开 `CodeEmitter::Scope`（变量作用域压栈），依据 `ascendc.global` 属性二选一前缀——Kernel 打 `extern "C"  __global__ __aicore__`，Device 子函数打 `__inline__ __attribute__((always_inline)) __aicore__`（u4-l4 讲过的内联策略在此落纸）；随后依次发射返回类型、函数名、参数表、（多块时的）块标签与块参数声明、逐操作体。`CallOp`（[L23-L36](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Func.cpp#L23-L36)）发射 `callee(args)`，有结果时先 `emitAssignPrefix`；`ReturnOp`（[L38-L51](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Func.cpp#L38-L51)）发射 `return`/`return v`，多返回值未实现（直接 `llvm_unreachable`）。
-
-**（6）限制：单块函数**。`FuncOp` 开头即检查 `getBlocks().size() > 1` 则报错 "needs variables declared at top"（[L55-L58](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/External/Func.cpp#L55-L58)）——pyasc 前端只生成结构化控制流（scf），不做 CFG 级分支，因此函数体天然单块，这条防线确保意外混入多块 IR 时快速失败。
+再补一环闭环：`while` 的 IR 由前端什么生成？u2-l6/u5-l6 提过 Matmul 的 `Iterate` 用 `scf.while` 手工搭循环（MatmulIterator 自建 `scf.while` 并 save/restore 插入点）——通用控制流 IR 不只来自 Python `for`，也来自高阶 API 内部构造。
 
 #### 4.4.4 代码实践
 
-**实践 D：亲手跑通三列对照（本讲核心实践）。**
+**实践目标**：验证「`range` 生成循环、`static_range` 完全展开」的分岔，以及 `scf.for` 的 C 形态。
 
-1. 实践目标：对 01_add 完成学习目标 4 的三列对照表。
-2. 操作步骤：
-   - 环境就绪后（u1-l2/u1-l4），执行：
-     ```bash
-     cd examples/01_add
-     PYASC_DUMP_PATH=/tmp/pyasc_dump python3 add.py -r Model
-     ```
-   - 打开 `/tmp/pyasc_dump` 下的 `codegen.mlir`（Pass 前）与 `ascendc.cpp`；
-   - 针对 kernel 里这五行逐行追踪（[examples/01_add/add.py:L31-L50](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/examples/01_add/add.py#L31-L50)）：
-     1. 第 31 行 `offset = asc.get_block_idx() * block_length`；
-     2. 第 35 行 `x_gm.set_global_buffer(x + offset, block_length)` 中的 `x + offset`；
-     3. 第 39 行 `tile_length = block_length // TILE_NUM // BUFFER_NUM`；
-     4. 第 49 行 `for i in range(TILE_NUM * BUFFER_NUM)`；
-     5. 第 50 行 `buf_id = i % BUFFER_NUM`。
-3. 需要观察的现象：每条 Python 语句在 `codegen.mlir` 中对应哪些操作（预期：①`ascendc.GetBlockIdxOp` + `arith.muli`/`index_cast`；②`arith.index_cast` + `emitasc.ptr_offset` + `ascendc.SetGlobalBufferOp`；③两条 `arith.divsi`；④三个 `arith.constant` + `scf.for`；⑤`arith.remsi`），以及这些操作在 `ascendc.cpp` 中生成的行（预期：①乘法赋值行；②指针加法行；③两条除法赋值行；④`constexpr` 常量行 + `for (;;)` 头；⑤取模赋值行）。
-4. 预期结果：形如下式的表格（C 列为依据本讲源码推导的示意，具体变量名/行号**待本地验证**）：
+**操作步骤**：
 
-   | Python 行 | IR 操作 | C 代码（示意） |
-   |---|---|---|
-   | `offset = asc.get_block_idx() * block_length` | `ascendc.get_block_idx` + `arith.muli` | `uint32_t v2 = v1 * v_arg;` |
-   | `x + offset` | `arith.index_cast` + `emitasc.ptr_offset` | `__gm__ float* v3 = v_ptr + v2;` |
-   | `block_length // 8 // 2` | `arith.divsi` ×2 | `int32_t v4 = v_arg / c8;` 等 |
-   | `for i in range(16)` | `arith.constant` ×3 + `scf.for` | `for (int32_t v6 = c0; v6 < c16; v6 += c1) {` |
-   | `buf_id = i % 2` | `arith.remsi` | `int32_t v7 = v6 % c2;` |
+1. 设置 `PYASC_DUMP_PATH`，Model 模式运行原版 01_add，保存 `ascir.mlir` 与 `ascendc.cpp`。
+2. 把 [add.py:49](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/examples/01_add/add.py#L49) 的 `range` 改为 `asc.static_range`（记得 `import asc` 已有），再运行一次并另存 dump。
+3. 对比两份 `ascir.mlir`：一个含 `scf.for`，一个循环消失、循环体按 16 次顺序展开。
+4. 对比两份 `ascendc.cpp`：一个是一条 C `for`，一个是 16 段重复语句；对比文件行数。
 
-5. 附加验证：把 `TILE_NUM` 改成 4 重跑，确认 `scf.for` 上界常量与 C 头部的 `c8/c16` 相应变化；再换成 `asc.static_range` 版本（u4-l3 实践做过），确认 `ascendc.cpp` 中循环消失、语句按份展开。
+**需要观察的现象**：展开版 IR 与 C 代码显著膨胀（约 16 倍于循环体的体量）；`static_range` 版没有任何 `for` 关键字。
+
+**预期结果**：与 u4-l3 的结论一致——`range` 的循环在设备上真正执行（运行时迭代），`static_range` 在编译期摊平。16 次展开会拉长编译时间与代码体积，但省去循环控制开销；这是「编译时间/体积 vs 运行时分支开销」的经典取舍。**待本地验证**（展开倍数以实际 TILE_NUM×BUFFER_NUM 为准）。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：`scf.for` 的结果变量为什么必须在循环前声明、循环后赋值，而不能像 C 一样「在循环体内最后一次赋值自然生效」？
+**练习 1**：为什么 `scf.for` 的结果变量必须**在循环前**声明，而不能在循环后？
 
-**参考答案**：MLIR 的 ForOp 是表达式，其 result 在循环结束后作为 SSA 值被后续操作使用；C 里没有对应物，只能拆成「提前声明变量（供后续引用）+ 循环体内更新 + 循环后从 iterArg 拷贝」三步。若只在循环体内赋值，当循环零次执行时 C 变量未初始化，而 SSA 语义要求 result 恒有定义（iterArg 初值），所以循环后的拷贝不可省。
+**答案**：C 要求先声明后使用；循环体内可能引用循环结果吗？不会——但结果变量在循环**结束后**被赋值（第 7 步 `vResult = vArg;`），而其类型在进入作用域时就必须可见；更重要的是 SSA 语义要求结果在 `for` 之后可用，若声明在循环体内就成了局部变量。预声明 + 后赋值是 SSA 多出口值到 C 的标准翻译。
 
-**练习 2**：`func.return` 带多个操作数会怎样？这和前端哪条规则呼应？
+**练习 2**：`scf.for` 发射为什么跳过循环体的最后一个操作？
 
-**参考答案**：发射层 `llvm_unreachable` 直接崩溃级失败（Func.cpp:49）。前端侧呼应 u4-l3/u4-l4 的规则：return 只能在函数顶层、Kernel 不能返回对象、返回值至多一个——前端约束保证了发射层不会遇到多返回值。
+**答案**：最后一个操作必是 `scf.yield`。它不产生 C 语句，其语义（「本圈结束时的迭代变量值」）已由第 5 步的回写赋值 `vArg = vYield;` 显式表达；若照常发射会打出冗余内容。
 
-**练习 3**：Kernel 函数与 Device 子函数的 C 前缀差异是什么？分别由哪个属性驱动？
+**练习 3**：`scf.condition` 为什么翻译成 `if (!cond) { ...; break; }` 而不是 `while (cond)`？
 
-**参考答案**：Kernel 是 `extern "C"  __global__ __aicore__`（外部可见、可被 Launcher 按 ABI 调起），Device 子函数是 `__inline__ __attribute__((always_inline)) __aicore__`（私有、强制内联）。驱动属性是 `ascendc.global`——由前端 `make_global()` 在 `visit_FunctionDef` 打上（function_visitor.py:536-537），FuncOp 发射函数读取它选择前缀（Func.cpp:63-67）。这正是 u6-l4「Pass/前端种属性、发射层落纸」模式的又一实例。
+**答案**：`scf.while` 的 before/after 两区域中，条件判断之后还有算子要执行；直接 `while (cond)` 会把 before 区域剩余操作排除在循环外。「`while (true)` + 尾部 if-break」保证 before/after 区域所有操作的相对顺序与 IR 一致，是保守而正确的翻译。
 
 ## 5. 综合实践
 
-**任务：为 01_add 产出一份《Python → IR → C 全链路追踪报告》。**
+**任务：制作「Python 行 / IR 操作 / C 代码行」三列对照表。**
 
-把 4.4.4 实践 D 扩充成完整报告，要求覆盖本讲全部三个模块：
+1. **准备**：设置 `PYASC_DUMP_PATH`，Model 模式运行 `examples/01_add/add.py`，得到 `codegen.mlir`、`ascir.mlir`、`ascendc.cpp` 三份产物。
+2. **选材**：在 kernel 里挑出以下 6 个 Python 语句/表达式（都在 [examples/01_add/add.py:29-69](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/examples/01_add/add.py#L29-L69)）：
+   - L31 `offset = asc.get_block_idx() * block_length`
+   - L35 `x_gm.set_global_buffer(x + offset, block_length)`
+   - L39 `tile_length = block_length // TILE_NUM // BUFFER_NUM`
+   - L49 `for i in range(TILE_NUM * BUFFER_NUM):`
+   - L50 `buf_id = i % BUFFER_NUM`
+   - L53 `asc.data_copy(x_local[buf_id * tile_length:], ...)`
+3. **填表**：为每一行在 `ascir.mlir` 中找到对应 IR 操作（提示：`ascendc.` 前缀查 u5-l1 的「四名合一」反查法；`x + offset` 是 `emitasc.ptr_offset`；`//` 整除是 `arith.divsi`；循环是 `scf.for`；`%` 是 `arith.remsi`；切片是 `ascendc.LocalTensorSubIndexOp` 一族），再在 `ascendc.cpp` 中找到生成的 C 语句，抄录变量名。
+4. **扩展（可选，示例代码，待本地验证）**：写一个只含整数累加的新 kernel（如 `acc = 0; for i in range(8): acc = acc + i * 2`，最后把 `acc` 写入 GM），它会产生**带 iter_args 的 `scf.for`**，正好覆盖第 2、5、7 步的回写赋值路径——这是 01_add 覆盖不到的分支：
 
-1. **准备**：`PYASC_DUMP_PATH=/tmp/pyasc_dump python3 examples/01_add/add.py -r Model`，收集 `codegen.mlir`、`ascir.mlir`、`ascendc.cpp` 三份产物。
-2. **External 部分**：从 `ascendc.cpp` 中挑出 5 条由 arith 发射的行（至少含一条除法、一条取模、一条比较或常量），在 `codegen.mlir` 中找到对应 `arith.*` 操作，在 Arith.h/Arith.cpp 中指出依据行号，写进三列对照表。
-3. **scf/func 部分**：定位 `scf.for` 及其生成的 C `for` 头，记录归纳变量、上下界、步进在 IR 与 C 两侧的名字；定位 kernel 函数的 `extern "C" __global__` 前缀与 `func.return` 生成的 `return`。
-4. **EmitAsc 部分**：在 `codegen.mlir` 中搜索 `emitasc.` 前缀，预期至少能找到 `set_global_buffer(x + offset, ...)` 附近的 `emitasc.ptr_offset`（来自 `GlobalAddress.__add__`）；把该操作的 IR 文本、Ops.td 定义行、EmitAsc.cpp 发射行、最终 C 行写成一行四列记录。
-5. **扩展实验**：向 kernel 添加 `asc.inline("// traced by u6-l6")` 与一个 `asc.ConstExpr[int]` 形参（参考 u2-l1），重跑并记录：verbatim 文本出现在哪一级产物、ConstExpr 值变化后哪些 C 行随之改变、缓存是否失效（对照 u3-l8）。
-6. **交付**：报告以三列对照表为主体，每个条目标注源码永久链接；无法本地运行的部分明确标注「待本地验证」。
+```text
+int32_t v_acc;                 // 步骤1：结果预声明（示意）
+int32_t v1 = 0;                // 步骤2：iter_arg 初始化
+for (int32_t v2 = 0; ...) {
+    int32_t v3 = v2 * 2;
+    int32_t v4 = v1 + v3;
+    v1 = v4;                   // 步骤5：yield 回写
+}
+v_acc = v1;                    // 步骤7：iter_args 拷给结果
+```
 
-若本地没有可运行环境，可将 2、3 两步降级为「纸面版」：以 [test/Target/AscendC/arith.mlir](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/arith.mlir#L9-L38)、[scf.mlir](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/scf.mlir#L16-L37)、[emitasc.mlir](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Target/AscendC/emitasc.mlir#L9-L101) 的 CHECK 注释为「已验证输出」，同样能完成对照表。
+**验收标准**：三列对照表每行都能闭环；对 `acc` 版 kernel，能指出 C 输出中哪一行来自第 1 步、哪两行分别来自第 5 步与第 7 步。
 
 ## 6. 本讲小结
 
-- **EmitAsc 是自研的「贴近 C 语法的低层桥梁」**：12 个 Op 补齐 emitc 覆盖不到、Asc 方言又不该管的 C++ 语法（指针偏移、成员访问、reinterpret_cast、可变变量、PyStruct 声明与拷贝、原生调用、原样文本），它不是 Pass 降级的产物，而是前端直接创建、Pass 种入、测试手写三个来源共用。
-- **发射层面对三类客户、一套机制**：ascendc Op（TableGen 生成为主）、上游方言（External/ 六文件手写翻译）、emitasc Op（12 个手写重载），全部经 `PrintableOpTypes` 白名单 + TypeSwitch 分发，未登记即 "unable to find printer for op"。
-- **External 的组织模式**：arith 用「头文件模板管 24 个规则二元运算 + cpp 特化不规则者」，比较/选择/ casts 各自特化，常量四类 Op 共用 `printConstantOp`（`constexpr` 前缀、float16 例外、NaN/Inf 特造字面量）。
-- **SSA→C 的通用手法是「先声明、后赋值」**：`emitAssignPrefix` 服务单结果 Op；`scf.for` 的 iter_args/yield 被翻译成「结果预声明 + iterArg 初始化 + 循环尾回拷 + 循环后回拷」四次动作；`while` 用 `while(true)+if(!cond)break` 表达；`index_switch` 直译 switch。
-- **`func.func` 是样板的落纸点**：`ascendc.global` 属性决定 Kernel（`extern "C" __global__ __aicore__`）与 Device 子函数（always_inline）两种前缀；多块函数被显式拒绝，因为前端只产结构化控制流。
-- **调 C 输出的检索口诀**：先查 test/Target/AscendC/*.mlir 的 CHECK 注释（现成对照），再查 External/*.cpp（上游方言）→ EmitAsc.cpp（emitasc）→ Ops.td（定义），三步内必中。
+- **EmitAsc 是「C 形状」概念的专用方言**：12 个操作承载指针算术、成员访问、结构体声明、按名调用、逐字文本等没有 Ascend C API 对应物的语义；它与上游 `emitc` 分工并存，且没有独立降级 Pass——与 ascendc/通用方言并列进入统一发射。
+- **EmitAsc 操作有三个生产者**：Python 前端（`GlobalAddress.__add__`、`asc.inline`、Struct 三件套）、Transforms Pass（`DeclarePyStructPass`、`LegalizeKernelArgs`）、以及手写在 OpBuilder.cpp 的 pybind 绑定；`emitasc.kernel_arg` 属性是后端向 Launcher 回传参数 ABI 的通道。
+- **External 六文件按方言拆分**：Func（函数骨架，`ascendc.global` 属性决定 `extern "C" __global__` 与 `always_inline` 两种命运）、Scf（控制流）、Arith/Math（标量运算与数学函数，模板 + `LogicalResultForT` 白名单量产）、MemRef（数组与下标）、Emitc（include/逐字）。
+- **`scf.for` → C for 的七步算法**是 SSA 到命令式的机械翻译：结果预声明、iter_args 初始化、for 头、体（跳过 yield）、yield 回写、关括号、iter_args 拷给结果；`scf.while` 翻成 `while (true)` + `if (!cond) break`。
+- **黄金用例就在仓库里**：`test/Target/AscendC/{emitasc,arith,scf,func,memref,math,emitc}.mlir` 用 FileCheck 锁定了每个映射，是无需硬件的最佳练习素材。
+- 一个常见误区澄清：min/max/absf/ceildivsi 等「没有 C 运算符」的操作并不失败，而是**内联展开成三目或公式**；真正失败的是白名单外的操作（`unable to find printer for op`）。
 
 ## 7. 下一步学习建议
 
-本讲完成后，第 6 单元（Pass 优化与 Ascend C 代码生成）全部结束，你已经打通「Python 源码 → AST → ASC-IR → Pass → Ascend C → C 代码行」的全链路。接下来进入第 7 单元：
+本讲讲完，第 6 单元（Pass 优化与 Ascend C 代码生成）就完整了：你已经具备从 Python 源码到 C 语句的全链路追踪能力。接下来：
 
-1. **u7-l5（开发者工具）**：动手构建 `ascir-opt`/`ascir-translate`，用 `ascir-translate -mlir-to-ascendc` 手工翻译一份 .mlir，把本讲的「纸面版」实践升级为可执行验证——这是巩固本讲最直接的后续。
-2. **u7-l1（Matmul 高阶 API）**：观察 `ascendc.matmul` 一族 Op 如何依赖本讲的 emitasc.ptr_offset/member 完成对象式 API 的发射，检验你对「语句级 API 调用 + C 语法胶水」混合发射的理解。
-3. **u7-l6（测试与贡献）**：若想为 pyasc 新增发射能力，本讲的 test/Target/AscendC 目录就是贡献格式范本——新 Op 必须同时补 td 定义、printOperation 与 CHECK 测试，三件缺一不可。
+- **u7-l5（开发者工具）**：学习用 `ascir-opt` 单独跑 Pass、用 `ascir-translate` 手工翻译 `.mlir`，把本讲的 lit 用例变成可交互的实验场。
+- **u7-l6（测试体系与贡献流程）**：`test/Target/AscendC/` 下这些 FileCheck 用例正是贡献新接口时必须补的回归；了解新增一个 Ascend C 接口要在 language、td、TableGen、发射、测试五层落文件。
+- **源码延伸阅读**：对照读 [lib/Target/AscendC/CodeEmitter.cpp](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/lib/Target/AscendC/CodeEmitter.cpp) 的类型映射表（`emitTypeMapper`，L164 附近把 `emitasc::PyStructType` 映射为结构体名打印），理解类型系统如何接入发射层；再读 [test/Dialect/AscendC/Transforms/insert-sync.mlir](https://github.com/gitcode.com/cann/pyasc/blob/739ef7e242c12c6a58e0ec7ec429e610b7ee988f/test/Dialect/AscendC/Transforms/insert-sync.mlir) 观察含 `scf.for` 的 IR 在同步重建后的形态。
