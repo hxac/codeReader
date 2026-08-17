@@ -1,13 +1,13 @@
 {
-  "head": "da40fcab61b835839d9e89a479f6586152c219c0",
+  "head": "8ab9fcefc8637dc8f216996073fdb0d73f9db6e3",
   "project": "sip",
-  "rationale": "SiP（AscendSiPBoost）是面向昇腾 NPU 的信号处理加速库，核心复杂度集中在三条主线：Host 侧执行框架（Handle/Plan/RunAsdOps/MKI）、Device 侧算子实现（operation 注册 + tiling + AscendC kernel）以及六大算子域（Base/BLAS/FFT/Filter/Interpolation/Domain）。因此学习路线设计为：先让读者从零跑通编译与第一个 example 并建立 Handle-Plan-Exec 编程模型直觉（u1-u2）；再沿一次真实调用的纵深方向拆开 Host 框架（u3）与 Device 算子开发（u4），并补齐构建系统（u5）这三块理解一切算子的公共地基；随后按模块由简到繁走读 Base（u6）、BLAS（u7，从 Level1 向量到 Level3 矩阵与 batched）、FFT（u8，API 到 Plan 分解、缓存、fftcore 算法与 ISTFT/多维）和融合领域算子（u9）；最后进入专家层：PyTorch 适配 sip_pta（u10）、UT 测试体系（u11）与从零开发新算子并贡献回社区的完整实战（u12）。依赖关系保证每篇讲义只建立在此前讲过的概念之上，例如 Cgemm 讲义依赖 Plan 机制与 tiling 两讲，二次开发实战依赖注册、kernel 与 op_list 三个机制点。",
+  "rationale": "SiP（AscendSiPBoost）是面向昇腾 NPU 的信号处理加速库，核心复杂度集中在三条主线：Host 侧执行框架（Handle/Plan/RunAsdOps/MKI）、Device 侧算子实现（operation 注册 + tiling + AscendC kernel）以及六大算子域（Base/BLAS/FFT/Filter/Interpolation/Domain）。因此学习路线设计为：先让读者从零跑通编译与第一个 example 并建立 Handle-Plan-Exec 编程模型直觉（u1-u2）；再沿一次真实调用的纵深方向拆开 Host 框架（u3）与 Device 算子开发（u4），并补齐构建系统（u5）这三块理解一切算子的公共地基；随后按模块由简到繁走读 Base（u6）、BLAS（u7，从 Level1 向量到 Level3 矩阵与 batched）、FFT（u8，API 到 Plan 分解、缓存、fftcore 算法与 ISTFT/多维）和融合领域算子（u9）；最后进入专家层：PyTorch 适配 sip_pta（u10）、UT 测试体系（u11）与从零开发新算子并贡献回社区的完整实战（u12）。依赖关系保证每篇讲义只建立在此前讲过的概念之上，例如 Cgemm 讲义依赖 Plan 机制与 tiling 两讲，二次开发实战依赖注册、kernel 与 op_list 三个机制点。本次增量（da40fca→8ab9fce）仅包含一个提交：修复 scripts/ 下 ruff 告警及 install_deps.sh dos2unix 问题，改动只涉及 install_deps.sh 与三个构建脚本（build_util.py、compile_ascendc.py、update_tbe_tactic_json.py）的格式化、sys.exit 替换 exit 与 dos2unix 安装失败改为可忽略告警，函数名与整体逻辑结构均未变化，也没有新增功能或模块；因此只有直接引用 install_deps.sh 的 u1-l3 和直接引用 compile_ascendc.py/build_util.py（行号与代码引用随格式化整体漂移）的 u5-l1 需要小幅 update，其余讲义全部 keep，无需新增或重建。",
   "units": [
     {
       "id": "u1",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -33,7 +33,7 @@
           "topic": "介绍 SiP（AscendSiPBoost）信号处理加速库的定位、面向昇腾 NPU 的应用场景，以及框架、FFT、BLAS、复数基础计算、融合算子、Solver 六大组成部分。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -62,7 +62,7 @@
           "topic": "讲解仓库顶层目录（core、ops、include、example、sip_pta、tests、configs、scripts、docs）的职责划分，建立从算子名定位源码的能力。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u1-l1"
           ],
@@ -89,10 +89,10 @@
             "docs/compilation_build.md"
           ],
           "title": "环境搭建与编译构建",
-          "topic": "说明 CANN toolkit/ops 包安装、依赖脚本、build_config.json 芯片架构配置以及 build.sh 的编译主流程。"
+          "topic": "说明 CANN toolkit/ops 包安装、依赖脚本、build_config.json 芯片架构配置以及 build.sh 的编译主流程。本次增量中 install_deps.sh 的 dos2unix 安装失败由 exit 1 改为打印可忽略告警，需在依赖安装小节同步该行为变化。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -121,7 +121,7 @@
           "topic": "讲解编译产物 libasdsip 的组织、makeself 打包出的 run 包如何安装，以及 set_env.sh 背后的环境变量与日志路径配置。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3",
             "u1-l4"
@@ -159,7 +159,7 @@
       "id": "u2",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1",
             "u1-l2"
@@ -191,7 +191,7 @@
           "topic": "梳理 asdsip.h 聚合的 base/blas/fft/filter/interp/domain 六个头文件、接口前缀命名规律（asdFft*、asdBlas*、asdConvolve* 等）与对应库文件。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l5",
             "u2-l1"
@@ -221,7 +221,7 @@
           "topic": "提炼 SiP 所有算子统一的编程范式：创建句柄、MakePlan、申请并绑定 workspace、绑定 stream、执行、同步、销毁，并解释其设计动机。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -249,7 +249,7 @@
           "topic": "讲解 AspbStatus 类型、ErrorType 错误码枚举、ASDSIP_CHECK/ASDSIP_ECHECK 校验宏，以及官方返回码对照表的用法。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -278,7 +278,7 @@
           "topic": "走读框架内部的 Tensor 封装、TheTensor/TheView 工具类与 mem_base 内存基座，理解 aclTensor 之下框架如何描述与搬运数据。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -316,7 +316,7 @@
       "id": "u3",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u2-l4"
@@ -345,7 +345,7 @@
           "topic": "深入 core/utils/ops_base.cpp，走读 RunAsdOps 如何完成输出 Tensor 分配、InferShape、workspace 申请与 kernel 下发。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -363,7 +363,7 @@
             "参数匹配"
           ],
           "order": 2,
-          "practice_task": "仿照 ops/include/params/conj.h 为假想的 Scale2 算子编写 OpParam::Scale2 结构体（含 alpha 与 n 字段），实现 operator== 与 ToString，并写一段单测验证相等比较逻辑。",
+          "practice_task": "仿照 ops/include/params/conj.h 为假想的 Scale2 算子编写 OpParam::Scale2 结构体（含 alpha 与 n 字段），实现 operator== 和 ToString，并写一段单测验证相等比较逻辑。",
           "source_files": [
             "core/utils/include/utils/op_desc.h",
             "ops/include/params/conj.h",
@@ -373,7 +373,7 @@
           "topic": "讲解 OpDesc 的 opName + specificParam 组合，以及 ops/include/params 下各算子参数结构体的定义规范（==、ToString、typeId 匹配）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -401,7 +401,7 @@
           "topic": "走读 conj_operation.cpp / mul_operation.cpp，理解 OperationBase 子类如何通过 GetBestKernel 选择 kernel、InferShapeImpl 推导输出，并用 REG_OPERATION 完成自注册。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l3"
           ],
@@ -437,7 +437,7 @@
       "id": "u4",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l3"
           ],
@@ -466,7 +466,7 @@
           "topic": "以 ops/base/conj 为标准样本，拆解一个 Device 算子目录的固定布局（operation 注册、tiling 切分、op_kernel 核函数、CMakeLists）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -495,7 +495,7 @@
           "topic": "讲解 TilingData 结构设计、按向量核数切分数据、SetBlockDim 与 scratch size 的设置，对比 conj 与 mul 两种 tiling 实现。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l2"
           ],
@@ -524,7 +524,7 @@
           "topic": "走读 conj 与 mul 的 op_kernel 实现，理解 InitTilingData 的 GM→UB 搬运、逐核循环计算以及 conj_kernel.cpp 对核函数的启动封装。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l3"
           ],
@@ -553,7 +553,7 @@
           "topic": "以 mul 算子的 arch35 分支为例，讲解同一算子如何为不同代际芯片提供独立的 tiling 与 kernel 实现，并在构建配置中按架构启用。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l3"
           ],
@@ -591,7 +591,7 @@
       "id": "u5",
       "lectures": [
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u1-l3",
             "u4-l1"
@@ -618,10 +618,10 @@
             "docs/developing_a_simple_operator.md"
           ],
           "title": "op_list.yaml：算子编译清单与 Operation-Kernel 映射",
-          "topic": "解析 configs/op_list.yaml 的 Operation→Kernel→芯片架构 三级结构，以及 scripts 如何据此驱动 AscendC kernel 编译。"
+          "topic": "解析 configs/op_list.yaml 的 Operation→Kernel→芯片架构 三级结构，以及 scripts 如何据此驱动 AscendC kernel 编译。本次增量对 compile_ascendc.py 与 build_util.py 做了 ruff 格式化（引号风格、sys.exit 替换 exit、行号整体漂移），函数名与解析逻辑未变，讲义中的源码引用需按新行号刷新。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -650,13 +650,12 @@
           "topic": "走读根 CMakeLists 与 cmake/host_config.cmake、kernel_config.cmake，理解 Host 库与 Device kernel 二进制的分离编译、安装与链接关系。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l2"
           ],
           "filename": "u5-l3-run-package.md",
           "id": "u5-l3",
-          "learning_tasks": null,
           "learning_goals": [
             "说出一键编译与 run 包安装两种交付方式的差异",
             "使用 install.sh/uninstall.sh 完成 run 包安装与卸载",
@@ -689,7 +688,7 @@
       "id": "u6",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1",
             "u4-l3"
@@ -719,7 +718,7 @@
           "topic": "以 asdMul 为样本，把 API 声明、Host 实现、operation 注册、tiling、kernel 五层串成一条完整链路，作为读懂一切算子的模板。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l1"
           ],
@@ -756,7 +755,7 @@
       "id": "u7",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -785,7 +784,7 @@
           "topic": "梳理 asdBlasCreate/SetStream/MakeXxxPlan/Exec/GetWorkspaceSize/SetWorkspace/Synchronize/Destroy 的完整生命周期与 Level1-3 接口分布。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l1"
           ],
@@ -813,7 +812,7 @@
           "topic": "讲解 BlasPlan 基类的状态机（UNINITIALIZED/INITIALIZED/FAILED）、workspace 管理与 BlasPlanCache 基于 handle 的 plan 生命周期。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l2",
             "u4-l2"
@@ -843,7 +842,7 @@
           "topic": "走读 dot 的 API 实现与 BlasDotPlan，理解 Level1 向量归约算子的 plan 构建与 kernel 组织。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l2",
             "u4-l2"
@@ -874,7 +873,7 @@
           "topic": "分析复数矩阵乘 Cgemm 的 MakePlan 参数固化、tiling 切分与 kernel 实现，是理解 SiP 性能设计的最佳样本。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l4"
           ],
@@ -912,7 +911,7 @@
       "id": "u8",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -941,7 +940,7 @@
           "topic": "梳理 asdFftCreate/MakePlan1D/2D/3D/ExecC2C/C2R/R2C/Separated/Istft 及枚举类型（asdFftType、asdFftDirection、asdFft1dDimType）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u8-l1",
             "u7-l2"
@@ -970,7 +969,7 @@
           "topic": "走读 FFTPlan 的 steps（PlanStep/FftOperation）组织方式，理解 FFT 如何按尺寸/类型分解为多个子操作依序执行。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u8-l2"
           ],
@@ -999,7 +998,7 @@
           "topic": "讲解 fftplan 的 plan 缓存、fftensor_cache 中间张量复用、fft_mode 模式判定与 workspace/rotate 工具如何支撑高频 FFT 调用。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u8-l2",
             "u4-l3"
@@ -1030,7 +1029,7 @@
           "topic": "分析 fftcore 下 fft_core_n/fft_core_b/dft_core/fft_core_mix 等实现，理解不同 FFT 点数如何被分派到不同算法内核。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u8-l4"
           ],
@@ -1059,7 +1058,7 @@
           "topic": "走读实数输入输出变换（C2R/R2C）的 core 实现与面向新一代芯片的 arch35 内核族。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u8-l4"
           ],
@@ -1097,7 +1096,7 @@
       "id": "u9",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1",
             "u4-l3"
@@ -1127,7 +1126,7 @@
           "topic": "走读滤波模块的一维卷积接口，理解 full/same/valid 三种卷积模式与 workspace 查询机制。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u9-l1"
           ],
@@ -1156,7 +1155,7 @@
           "topic": "讲解基于预计算系数的插值算子，理解其面向信号重采样的设计动机与 workspace 契约。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u9-l2"
           ],
@@ -1192,7 +1191,7 @@
       "id": "u10",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l4",
             "u2-l1"
@@ -1222,7 +1221,7 @@
           "topic": "讲解 sip_pta 如何通过 PyTorch TORCH_LIBRARY 扩展把 asdsip 能力暴露给 python，以及 setup.py 的构建配置项。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u10-l1",
             "u7-l2",
@@ -1253,7 +1252,7 @@
           "topic": "走读具体算子的 pytorch 绑定写法与 BlasMixCache/FFTMixCache 对 handle/plan 的缓存策略。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u10-l2"
           ],
@@ -1289,7 +1288,7 @@
       "id": "u11",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3",
             "u5-l2"
@@ -1320,7 +1319,7 @@
           "topic": "讲解 tests/ut 的 CMake 组织、TEST_TYPE 环境开关、custom_main 入口与 test_util 浮点比较工具。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u11-l1",
             "u7-l3"
@@ -1358,7 +1357,7 @@
       "id": "u12",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l3",
             "u4-l3",
@@ -1390,7 +1389,7 @@
           "topic": "以官方文档为主线，把从零新增 Conj 算子的每一步（core 实现、ops 目录、params、op_list、CMake、API 声明）落到真实源码上对照学习。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u12-l1"
           ],
@@ -1420,7 +1419,7 @@
           "topic": "综合运用前述全部知识，脱离教程模板独立完成一个带标量参数的 Scale2 算子并接入 UT。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u12-l2"
           ],

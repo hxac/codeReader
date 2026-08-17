@@ -4,7 +4,7 @@
 
 学完本讲，你应该能够：
 
-1. 使用 `install_deps.sh` 与 `requirements.txt` 把编译 SiP 所需的基础工具与 Python 依赖装齐。
+1. 使用 `install_deps.sh` 与 `requirements.txt` 把编译 SiP 所需的基础工具与 Python 依赖装齐，并说清哪些依赖「失败即中断」、哪些「失败可忽略」。
 2. 读懂 `configs/build_config.json` 的芯片架构开关，并理解 `scripts/build_util.py` 是如何消费这份配置的。
 3. 独立完成 `bash build.sh` 全量编译，并能说清楚脚本从参数解析、三方依赖拉取、CMake 构建到 run 包打包的完整主流程。
 
@@ -25,14 +25,14 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| [install_deps.sh](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/install_deps.sh) | 一键检测/安装操作系统级依赖（python、gcc、cmake、pigz、dos2unix、git、googletest） |
-| [requirements.txt](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/requirements.txt) | Python 三方库依赖清单（numpy、setuptools、wheel） |
-| [README.md](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/README.md) | 「环境构建」章节：依赖版本要求、CANN toolkit/ops 包安装命令 |
-| [configs/build_config.json](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/configs/build_config.json) | 编译目标芯片架构开关 |
-| [scripts/build_util.py](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/scripts/build_util.py) | 编译辅助脚本，`get_build_target_list()` 负责读取 build_config.json |
-| [build.sh](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/build.sh) | 编译总入口脚本：参数解析、三方依赖拉取、CMake 构建、run 包打包 |
-| [CMakeLists.txt](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/CMakeLists.txt) | 顶层 CMake：引入 host_config、ops、core 子目录，安装 libmki |
-| [docs/compilation_build.md](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/docs/compilation_build.md) | 官方编译文档：芯片架构对照表、关键产物说明 |
+| [install_deps.sh](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/install_deps.sh) | 一键检测/安装操作系统级依赖（python、gcc、cmake、pigz、dos2unix、git、googletest） |
+| [requirements.txt](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/requirements.txt) | Python 三方库依赖清单（numpy、setuptools、wheel） |
+| [README.md](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/README.md) | 「环境构建」章节：依赖版本要求、CANN toolkit/ops 包安装命令 |
+| [configs/build_config.json](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/configs/build_config.json) | 编译目标芯片架构开关 |
+| [scripts/build_util.py](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/scripts/build_util.py) | 编译辅助脚本，`get_build_target_list()` 负责读取 build_config.json |
+| [build.sh](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/build.sh) | 编译总入口脚本：参数解析、三方依赖拉取、CMake 构建、run 包打包 |
+| [CMakeLists.txt](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/CMakeLists.txt) | 顶层 CMake：引入 host_config、ops、core 子目录，安装 libmki |
+| [docs/compilation_build.md](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/docs/compilation_build.md) | 官方编译文档：芯片架构对照表、关键产物说明 |
 
 ## 4. 核心概念与源码讲解
 
@@ -50,6 +50,8 @@
 
 为什么把 CANN 单独拎出来？因为 CANN 包体积大、版本与芯片型号强相关（ops 包甚至按 `soc_name` 命名），不适合塞进一个通用脚本。
 
+操作系统层的依赖还分两档：**必需依赖**（python、gcc、cmake、git）安装失败会 `exit 1` 中断脚本；**可选依赖**（pigz、dos2unix、googletest）失败只打告警继续往下走。哪個依赖属于哪一档，完全由它在编译链路中的角色决定，4.1.3 会用源码逐一对照。
+
 #### 4.1.2 核心流程
 
 `install_deps.sh` 的执行流程：
@@ -61,7 +63,7 @@ main()
  ├── install_gcc()        检查 gcc >= 7.3.0
  ├── install_cmake()      检查 cmake >= 3.16.0
  ├── install_pigz()       检查 pigz >= 2.4（可选，失败可忽略）
- ├── install_dos2unix()   检查 dos2unix
+ ├── install_dos2unix()   检查 dos2unix（可选，失败可忽略）
  ├── install_git()        检查 git
  └── install_googletest() 下载并编译 googletest v1.14.0 到 /usr/local（仅 UT 需要）
 ```
@@ -82,36 +84,42 @@ CANN 软件层的手工步骤（摘自 README）：
 
 **① 操作系统探测**——脚本先弄清自己在什么系统上，才能决定用 `apt`、`dnf` 还是 `brew`：
 
-- [install_deps.sh:L45-L76](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/install_deps.sh#L45-L76)：`detect_os()` 通过 `/etc/debian_version`、`/etc/redhat-release`、`/etc/os-release` 判断发行版。注意 openEuler/EulerOS 被单独识别为 `euler` 并使用 `dnf`；不支持的系统直接 `exit 1`。
+- [install_deps.sh:L45-L76](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/install_deps.sh#L45-L76)：`detect_os()` 通过 `/etc/debian_version`、`/etc/redhat-release`、`/etc/os-release` 判断发行版。注意 openEuler/EulerOS 被单独识别为 `euler` 并使用 `dnf`；不支持的系统直接 `exit 1`。
 
 **② 版本比较函数**——所有检测都靠它：
 
-- [install_deps.sh:L28-L43](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/install_deps.sh#L28-L43)：`version_ge()` 把 `xx.xx.xx` 格式的版本号按 `.` 切成数组逐段比较，返回「当前版本是否 >= 要求版本」。
+- [install_deps.sh:L28-L43](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/install_deps.sh#L28-L43)：`version_ge()` 把 `xx.xx.xx` 格式的版本号按 `.` 切成数组逐段比较，返回「当前版本是否 >= 要求版本」。
 
 **③ 典型的检测-安装-复查模式**（以 cmake 为例）：
 
-- [install_deps.sh:L205-L262](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/install_deps.sh#L205-L262)：`install_cmake()` 要求版本 >= 3.16.0（要求值定义在 L208）。已装且达标则直接 `return`（L214-L217）；否则按发行版走不同分支，例如 Ubuntu 18.04 要额外挂 kitware 软件源（L223-L227）才能拿到新 cmake；安装结束后在 L250-L253 复查版本，仍不达标则报错退出。
+- [install_deps.sh:L205-L262](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/install_deps.sh#L205-L262)：`install_cmake()` 要求版本 >= 3.16.0（要求值定义在 L208）。已装且达标则直接 `return`（L214-L217）；否则按发行版走不同分支，例如 Ubuntu 18.04 要额外挂 kitware 软件源（L223-L227）才能拿到新 cmake；安装结束后在 L250-L253 复查版本，仍不达标则报错退出（L256、L260 两处 `exit 1`）。
 
 **④ googletest 的特殊处理**——唯一一个「下载源码现场编译」的依赖：
 
-- [install_deps.sh:L396-L444](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/install_deps.sh#L396-L444)：`install_googletest()` 先用 `pkg-config --exists gtest` 或查找 `/usr/local/lib/libgtest.a` 判断是否已装（L401-L409）；未装则从 GitHub 下载 v1.14.0（L416），在临时目录 `cmake .. && make && sudo make install` 装到 `/usr/local`（L430-L433）。下载失败只是告警跳过（L417-L422），因为它只在跑 UT 时才必需。
+- [install_deps.sh:L395-L443](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/install_deps.sh#L395-L443)：`install_googletest()` 先用 `pkg-config --exists gtest` 或查找 `/usr/local/lib/libgtest.a` 判断是否已装（L400-L408）；未装则从 GitHub 下载 v1.14.0（L415），在临时目录 `cmake .. && make && sudo make install` 装到 `/usr/local`（L429-L432）。下载失败只是告警跳过（L416-L421），因为它只在跑 UT 时才必需。
 
-**⑤ 依赖总入口**：
+**⑤ dos2unix 的失败策略——本讲义本次更新的重点变化**：
 
-- [install_deps.sh:L446-L464](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/install_deps.sh#L446-L464)：`main()` 依次调用上述所有安装函数。注意 L456 有一行注释 `# patch removed: no patch files in the repository build flow`——patch 工具的安装已被移除，说明这份脚本与仓库当前构建流程是同步演进的。
+- [install_deps.sh:L344-L367](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/install_deps.sh#L344-L367)：`install_dos2unix()` 安装后复查，失败分支（L364-L366）现在只打印 `dos2unix installation failed, can be ignored` 然后**正常返回**。
+- 行为变化：在 8ab9fce 提交之前，这个分支是 `echo "dos2unix installation failed"` 加 `exit 1`——装不上 dos2unix 会直接终止整个依赖安装脚本；本次提交删掉了 `exit 1`，把 dos2unix 正式归入 pigz 所在的「可选依赖」一档。
+- 为什么可以这样降级？dos2unix 用于把 Windows 风格换行符（CRLF）的文本转成 Unix 风格（LF）。在当前仓库的 `build.sh` 与 `scripts/` 里检索不到对它的直接调用，它属于防御性依赖（例如个别环境下需要手工规整脚本换行符时才会用到），缺了它不影响 `bash build.sh` 的主编译链路。相应的代价是：如果某个环境真的因换行符问题出错，你需要自己 `sudo apt install dos2unix` 并手动处理。
 
-**⑥ Python 依赖清单**：
+**⑥ 依赖总入口**：
 
-- [requirements.txt:L1-L3](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/requirements.txt#L1-L3)：只有三项——`numpy`、`setuptools`、`wheel`。注意 README 的依赖清单里还提到 `pyyaml`（编译脚本解析 `op_list.yaml` 时需要），但它不在 requirements.txt 中，通常由 CANN 安装环境或系统 python 自带；若编译时报 `ModuleNotFoundError: No module named 'yaml'`，需要手动 `pip3 install pyyaml`。这一点**待本地验证**（取决于你的 CANN 安装方式）。
+- [install_deps.sh:L445-L463](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/install_deps.sh#L445-L463)：`main()` 依次调用上述所有安装函数。注意 L455 有一行注释 `# patch removed: no patch files in the repository build flow`——patch 工具的安装已被移出主流程（`install_patch` 函数还留在文件里，见 L301-L342，但 `main()` 不再调用它），说明这份脚本与仓库当前构建流程是同步演进的。
 
-**⑦ README 中的依赖版本要求与 CANN 安装命令**：
+**⑦ Python 依赖清单**：
 
-- [README.md:L40-L64](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/README.md#L40-L64)：官方依赖清单（python >= 3.7.0、gcc >= 7.3.0、cmake >= 3.16.0、pigz >= 2.4、dos2unix、numpy、pyyaml、googletest）与 `install_deps.sh` / `pip3 install -r requirements.txt` 两条命令。
-- [README.md:L66-L102](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/README.md#L66-L102)：CANN toolkit 包（L70-L75）与 ops 包（L86-L90）的安装命令，以及 L98-L101 的 `source .../set_env.sh` 环境变量配置。**ops 包必须与 toolkit 安装在同一路径**（L93 有明确说明）。
+- [requirements.txt:L1-L3](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/requirements.txt#L1-L3)：只有三项——`numpy`、`setuptools`、`wheel`。注意 README 的依赖清单里还提到 `pyyaml`（编译脚本解析 `op_list.yaml` 时需要），但它不在 requirements.txt 中，通常由 CANN 安装环境或系统 python 自带；若编译时报 `ModuleNotFoundError: No module named 'yaml'`，需要手动 `pip3 install pyyaml`。这一点**待本地验证**（取决于你的 CANN 安装方式）。
+
+**⑧ README 中的依赖版本要求与 CANN 安装命令**：
+
+- [README.md:L40-L64](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/README.md#L40-L64)：官方依赖清单（python >= 3.7.0、gcc >= 7.3.0、cmake >= 3.16.0、pigz >= 2.4、dos2unix、numpy、pyyaml、googletest）与 `install_deps.sh` / `pip3 install -r requirements.txt` 两条命令。README 把 dos2unix 列为依赖但没有区分必需/可选——脚本源码（上一条 ⑤）才是失败策略的准确依据。
+- [README.md:L66-L102](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/README.md#L66-L102)：CANN toolkit 包（L70-L75）与 ops 包（L86-L90）的安装命令，以及 L98-L101 的 `source .../set_env.sh` 环境变量配置。**ops 包必须与 toolkit 安装在同一路径**（L93 有明确说明）。
 
 #### 4.1.4 代码实践
 
-**实践目标**：把编译环境装齐，并亲眼确认每项依赖的检测逻辑生效。
+**实践目标**：把编译环境装齐，并亲眼确认每项依赖的检测逻辑与失败策略。
 
 **操作步骤**：
 
@@ -119,27 +127,29 @@ CANN 软件层的手工步骤（摘自 README）：
 2. 观察输出中的 `==== Checking Python ====`、`==== Checking GCC ====` 等分段信息。
 3. 执行 `pip3 install -r requirements.txt`。
 4. 再次执行 `bash install_deps.sh`（重复执行一次）。
+5. （可选，验证 dos2unix 降级行为）在一个无 root 权限、且未装 dos2unix 的容器里执行 `bash install_deps.sh`，观察它走到 dos2unix 检查时的表现。
 
 **需要观察的现象**：
 
 - 第一遍执行时，已达标的依赖会打印 `xxx version meets requirements` 后直接继续；未达标的才会触发安装命令。
 - 第二遍执行时，所有依赖都应命中「已安装/达标」分支，脚本很快跑完——验证幂等性。
+- 步骤 5 中若 dos2unix 安装失败，脚本只会打印 `dos2unix installation failed, can be ignored` 并**继续执行后续的 install_git、install_googletest**，最终仍打印成功提示——这正是 8ab9fce 提交改出来的新行为（旧版会在这里直接退出）。
 
 **预期结果**：脚本最后打印 `All dependencies installed successfully!`。CANN 包的安装（toolkit + ops + set_env.sh）需要按 README 3.1.2~3.1.4 手工完成，本实践不含这一步；若你尚未安装 CANN，后续 4.3 的编译会失败。**完整编译结果待本地验证**。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：`install_deps.sh` 中 `run_command()`（[L14-L26](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/install_deps.sh#L14-L26)）和直接写 `sudo apt install` 相比有什么好处？
+**练习 1**：`install_deps.sh` 中 `run_command()`（[L14-L26](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/install_deps.sh#L14-L26)）和直接写 `sudo apt install` 相比有什么好处？
 
 **答案**：`run_command()` 会先回显要执行的命令，再捕获其 stdout/stderr 与退出码；失败时打印「失败的命令 + 完整错误输出 + 退出码」并以相同退出码终止脚本。这让排错时能直接看到是哪条命令、因为什么失败，而不是只看到一串裸报错。
 
-**练习 2**：为什么 `install_pigz()` 失败时只告警不退出（[L289-L298](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/install_deps.sh#L289-L298)），而 `install_cmake()` 失败会 `exit 1`？
+**练习 2**：`install_pigz()`（[L289-L298](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/install_deps.sh#L289-L298)）和 `install_dos2unix()`（[L344-L367](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/install_deps.sh#L344-L367)）失败时都只告警不退出，而 `install_cmake()` 失败会 `exit 1`。请从「该依赖在编译链路中的角色」解释这种差异，并指出 dos2unix 是什么时候加入「可忽略」阵营的。
 
-**答案**：pigz 只是并行 gzip 压缩工具，用来加速 run 包打包（makeself 的 `--pigz` 选项），缺了它编译仍能完成、只是打包慢；cmake 是构建系统的核心，缺了它整个编译无从谈起。依赖的「必需/可选」属性决定了失败策略。
+**答案**：pigz 只是并行 gzip 压缩工具，用来加速 run 包打包（makeself 的 `--pigz` 选项），缺了它编译仍能完成、只是打包慢；dos2unix 只做 CRLF→LF 换行符转换，当前构建脚本没有直接调用它，属于防御性工具；cmake 则是构建系统的核心，缺了它整个编译无从谈起。依赖的「必需/可选」属性决定了失败策略。dos2unix 是在 8ab9fce 提交（修复 scripts/ 下 ruff 告警及 install_deps.sh dos2unix 问题）中由 `exit 1` 改为可忽略告警的，此前它会中断整个脚本——这可以看作社区对「实际没人依赖它」的迟到修正。
 
 **练习 3**：README 说 googletest 建议 1.11.0 版本，而 `install_deps.sh` 实际装的是什么版本？以哪个为准？
 
-**答案**：脚本在 [L397](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/install_deps.sh#L397) 写死 `gtest_ver="v1.14.0"`。以脚本（代码）为准——这印证了 u1-l1 的结论：文档可能滞后，冲突时看源码。另外 `build.sh` 的 `fn_build_googletest()`（[L131-L143](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/build.sh#L131-L143)）在跑 UT 时也会往 `3rdparty/googletest` 再下一份 v1.14.0。
+**答案**：脚本在 [L396](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/install_deps.sh#L396) 写死 `gtest_ver="v1.14.0"`。以脚本（代码）为准——这印证了 u1-l1 的结论：文档可能滞后，冲突时看源码。另外 `build.sh` 的 `fn_build_googletest()`（[L131-L143](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/build.sh#L131-L143)）在跑 UT 时也会往 `3rdparty/googletest` 再下一份 v1.14.0。
 
 ### 4.2 模块二：芯片架构配置（build_config.json）
 
@@ -167,9 +177,9 @@ build_util.py :: get_build_target_list()
 
 **① 配置文件本体**——全文件只有 8 行：
 
-- [configs/build_config.json:L1-L8](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/configs/build_config.json#L1-L8)：`targets` 下挂四个架构开关。当前默认值：`ascend310b: false`、`ascend310p: false`、`ascend910b: true`、`ascend950: true`——即默认同时编译 910b 和 950 两个目标。
+- [configs/build_config.json:L1-L8](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/configs/build_config.json#L1-L8)：`targets` 下挂四个架构开关。当前默认值：`ascend310b: false`、`ascend310p: false`、`ascend910b: true`、`ascend950: true`——即默认同时编译 910b 和 950 两个目标。
 
-各架构对应的产品系列（来自官方文档 [docs/compilation_build.md:L58-L65](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/docs/compilation_build.md#L58-L65)）：
+各架构对应的产品系列（来自官方文档 [docs/compilation_build.md:L58-L65](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/docs/compilation_build.md#L58-L65)）：
 
 | 芯片架构 | 对应产品系列 |
 | --- | --- |
@@ -180,15 +190,16 @@ build_util.py :: get_build_target_list()
 
 **② 消费配置的函数**：
 
-- [scripts/build_util.py:L20-L51](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/scripts/build_util.py#L20-L51)：`get_build_target_list()`。L21-L27 决定读哪个文件：环境变量 `BUILD_CONFIG_FILE` 非空则读它，否则读脚本同目录下 `../configs/build_config.json`（即仓库默认配置）。L30-L35 打开 JSON、取 `targets` 字段、把值为 `True` 的架构名收进 `device_list`。L36-L44 用三个 except 分别处理「文件不存在 / JSON 非法 / 缺 targets 键」。L46-L49 兜底：列表为空时报 `no target device is set` 并退出。
+- [scripts/build_util.py:L20-L52](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/scripts/build_util.py#L20-L52)：`get_build_target_list()`。L21-L28 决定读哪个文件：环境变量 `BUILD_CONFIG_FILE` 非空则读它，否则读脚本同目录下 `../configs/build_config.json`（即仓库默认配置）。L30-L36 打开 JSON、取 `targets` 字段、把值为 `True` 的架构名收进 `device_list`。L37-L45 用三个 except 分别处理「文件不存在 / JSON 非法 / 缺 targets 键」，每条分支都以 `sys.exit(1)` 终止。L47-L49 兜底：列表为空时报 `no target device is set` 并退出。L51 对列表去重后返回。
+- 一个阅读提示：在 8ab9fce 提交之前，这几个退出调用写作 `exit(1)`；该提交做 ruff 规范清理时统一替换为 `sys.exit(1)`（`exit()` 是给交互式解释器用的站点内建函数，脚本中规范写法是 `sys.exit()`），同时调整了 import 顺序与引号风格。**构建行为完全没变**，但你对照旧版本代码或旧资料时会看到写法差异。
 
 **③ 不支持架构必须关掉的原因**：
 
-- [docs/compilation_build.md:L67-L69](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/docs/compilation_build.md#L67-L69)：官方明确警告——默认同时启用 `ascend910b` 和 `ascend950`，若运行环境只支持其中一种，必须把不支持的置 `false`，否则编译会因硬件特性不匹配而失败，典型报错是 `simd_vf function 'RegCompute' must be a free function or static member function`。这个报错的根源是：本机安装的 CANN 工具链只认识某一架构的 SIMD 内建指令，编另一架构的 kernel 源码时语法检查过不去。
+- [docs/compilation_build.md:L67-L69](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/docs/compilation_build.md#L67-L69)：官方明确警告——默认同时启用 `ascend910b` 和 `ascend950`，若运行环境只支持其中一种，必须把不支持的置 `false`，否则编译会因硬件特性不匹配而失败，典型报错是 `simd_vf function 'RegCompute' must be a free function or static member function`。这个报错的根源是：本机安装的 CANN 工具链只认识某一架构的 SIMD 内建指令，编另一架构的 kernel 源码时语法检查过不去。
 
 **④ 自定义配置文件方式**：
 
-- [docs/compilation_build.md:L71-L80](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/docs/compilation_build.md#L71-L80)：不想改仓库内文件时，可以 `export BUILD_CONFIG_FILE=/path/to/your/build_config.json`。文档还特别提醒：`3rdparty/mki/` 下也有一份 `build_config.json`，但 SiP 编译以项目自身配置为准，不要改 mki 里的那份。
+- [docs/compilation_build.md:L71-L80](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/docs/compilation_build.md#L71-L80)：不想改仓库内文件时，可以 `export BUILD_CONFIG_FILE=/path/to/your/build_config.json`。文档还特别提醒：`3rdparty/mki/` 下也有一份 `build_config.json`，但 SiP 编译以项目自身配置为准，不要改 mki 里的那份。
 
 #### 4.2.4 代码实践
 
@@ -215,11 +226,11 @@ build_util.py :: get_build_target_list()
 - 步骤 3 应触发 `ERROR:root:no target device is set` 并退出码非 0。
 - 步骤 4 应触发 `ERROR:root:file ... is not json file!`。
 
-**预期结果**：三步现象分别对应 `get_build_target_list()` 的正常路径、空列表兜底（L46-L49）和 JSON 解析异常（L39-L41）。此实践只依赖 python3，可在任何机器完成；**具体输出待本地验证**。
+**预期结果**：三步现象分别对应 `get_build_target_list()` 的正常路径、空列表兜底（L47-L49）和 JSON 解析异常（L40-L42）。此实践只依赖 python3，可在任何机器完成；**具体输出待本地验证**。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么 `get_build_target_list()` 在返回前要做一次 `list(set(device_list))`（[L50](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/scripts/build_util.py#L50)）？
+**练习 1**：为什么 `get_build_target_list()` 在返回前要做一次 `list(set(device_list))`（[L51](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/scripts/build_util.py#L51)）？
 
 **答案**：对列表去重。JSON 的 `targets` 对象理论上可以有重复 key（部分解析器容许），去重保证下游不会为同一架构编译两次。同时也让返回顺序不保证稳定——所以下游不应依赖列表顺序。
 
@@ -235,7 +246,7 @@ build_util.py :: get_build_target_list()
 
 #### 4.3.1 概念说明
 
-`build.sh` 是整个仓库的编译总入口，但它**不直接编译任何代码**——它做的是四件事：解析命令行参数、准备三方依赖、调用 CMake、把产物打成 run 包。真正的编译发生在 CMake 生成的 Makefile 里（顶层 [CMakeLists.txt](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/CMakeLists.txt)）。
+`build.sh` 是整个仓库的编译总入口，但它**不直接编译任何代码**——它做的是四件事：解析命令行参数、准备三方依赖、调用 CMake、把产物打成 run 包。真正的编译发生在 CMake 生成的 Makefile 里（顶层 [CMakeLists.txt](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/CMakeLists.txt)）。
 
 SiP 编译有一个特殊之处：它依赖外部仓 **ascend-boost-comm（MKI）** 和 **catlass**。MKI 是 SiP 与底层运行时之间的平台抽象层（u3-l4 会展开讲），`build.sh` 会在首次编译时自动 `git clone` 这两个仓到 `3rdparty/` 并现场编译 MKI——这就是官方文档说「编译涉及①拉取并编译 ascend-boost-comm ②编译 SiP 两个过程」的原因。
 
@@ -271,39 +282,39 @@ CMake 侧（顶层 CMakeLists.txt）接着做的事：安装前缀设为 `output
 
 **① 脚本级环境变量与默认值**：
 
-- [build.sh:L356-L380](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/build.sh#L356-L380)：先 `cd $(dirname $0)` 保证工作目录是脚本所在处（即仓库根），然后定义所有路径常量：`CACHE_DIR=$CODE_ROOT/build`、`OUTPUT_DIR=$CODE_ROOT/output`、`THIRD_PARTY_DIR=$CODE_ROOT/3rdparty`、`MKI_ROOT=$THIRD_PARTY_DIR/ascend-boost-comm`，版本号 `VERSION="9.1.0"`，以及合法参数列表 `BUILD_OPTION_LIST`（L377）。这些变量是理解后续所有函数的钥匙。
+- [build.sh:L356-L380](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/build.sh#L356-L380)：先 `cd $(dirname $0)` 保证工作目录是脚本所在处（即仓库根），然后定义所有路径常量：`CACHE_DIR=$CODE_ROOT/build`、`OUTPUT_DIR=$CODE_ROOT/output`、`THIRD_PARTY_DIR=$CODE_ROOT/3rdparty`、`MKI_ROOT=$THIRD_PARTY_DIR/ascend-boost-comm`，版本号 `VERSION="9.1.0"`，以及合法参数列表 `BUILD_OPTION_LIST`（L377）。这些变量是理解后续所有函数的钥匙。
 
 **② 参数解析**：
 
-- [build.sh:L260-L322](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/build.sh#L260-L322)：`fn_main()` 先判断第一个参数是否在 `BUILD_OPTION_LIST` 里，空则默认 `--dev`（L262-L268）；再用 `until/case` 循环消化后续选项——`--output=<dir>` 会创建目录并重定向 `OUTPUT_DIR`（L289-L300），`--use_cxx11_abi=1/0` 切换 ABI（L301-L306）。L320-L321 把 ABI 与 `CMAKE_BUILD_TYPE=Release` 追加进 `COMPILE_OPTIONS`。
+- [build.sh:L260-L322](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/build.sh#L260-L322)：`fn_main()` 先判断第一个参数是否在 `BUILD_OPTION_LIST` 里，空则默认 `--dev`（L262-L268）；再用 `until/case` 循环消化后续选项——`--output=<dir>` 会创建目录并重定向 `OUTPUT_DIR`（L289-L300），`--use_cxx11_abi=1/0` 切换 ABI（L301-L306）。L320-L321 把 ABI 与 `CMAKE_BUILD_TYPE=Release` 追加进 `COMPILE_OPTIONS`。
 
 **③ 编译类型分发**：
 
-- [build.sh:L322-L353](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/build.sh#L322-L353)：`case` 分支——`--dev` 走 `fn_build`；`ut/--ut` 额外做 UT 准备（`fn_ut_test_needed`）与覆盖率统计（`fn_build_coverage`）；`smoke_pr/smoke_all` 编译后跑冒烟测试；`--clean` 删除 `output`、`build`、`3rdparty` 三个目录彻底清理。
+- [build.sh:L322-L353](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/build.sh#L322-L353)：`case` 分支——`--dev` 走 `fn_build`；`ut/--ut` 额外做 UT 准备（`fn_ut_test_needed`）与覆盖率统计（`fn_build_coverage`）；`smoke_pr/smoke_all` 编译后跑冒烟测试；`--clean` 删除 `output`、`build`、`3rdparty` 三个目录彻底清理。
 
 **④ 三方依赖自动拉取与 MKI 现场编译**（fn_build 前半）：
 
-- [build.sh:L198-L225](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/build.sh#L198-L225)：`fn_build()` 先检查 `3rdparty/mki` 与 `3rdparty/compiler` 是否存在，不存在则 `git clone https://gitcode.com/cann/ascend-boost-comm.git`（L208），调用 `fn_build_mki()` 编译，再把产出的 `mki/` 与 `compiler/` 拷回 `3rdparty/`（L214-L215）。接着检查 `catlass`（矩阵模板库），不存在同样 clone（L223）。**首次编译因此需要联网且耗时明显更长**。
-- [build.sh:L34-L44](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/build.sh#L34-L44)：`fn_build_mki()` 清掉 MKI 的 build/output 目录后，用 `bash scripts/build.sh --use_cxx11_abi=0` 在 ascend-boost-comm 仓内完成编译，并回显其 commit id 方便追溯。
+- [build.sh:L198-L225](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/build.sh#L198-L225)：`fn_build()` 先检查 `3rdparty/mki` 与 `3rdparty/compiler` 是否存在，不存在则 `git clone https://gitcode.com/cann/ascend-boost-comm.git`（L208），调用 `fn_build_mki()` 编译，再把产出的 `mki/` 与 `compiler/` 拷回 `3rdparty/`（L214-L215）。接着检查 `catlass`（矩阵模板库），不存在同样 clone（L223）。**首次编译因此需要联网且耗时明显更长**。
+- [build.sh:L34-L44](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/build.sh#L34-L44)：`fn_build_mki()` 清掉 MKI 的 build/output 目录后，用 `bash scripts/build.sh --use_cxx11_abi=0` 在 ascend-boost-comm 仓内完成编译，并回显其 commit id 方便追溯。
 
 **⑤ CMake 配置 + 编译 + 安装 + 打包**：
 
-- [build.sh:L227-L239](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/build.sh#L227-L239)：先 `cmake -B build -S .` 做一次配置探测，随后**删掉 `build` 和 `output` 重新来**（L232，保证干净构建），进入 `build/` 目录后调 `fn_compile_and_pack "$CODE_ROOT" "$COMPILE_OPTIONS"`。
-- [build.sh:L103-L113](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/build.sh#L103-L113)：`fn_compile_and_pack()` 依次执行 `cmake $1 $2`（配置）、`make -j64`（并行编译，`--verbose` 时改为 `VERBOSE=1 make -j`）、`make install`（安装到 output），最后 `fn_make_run_package` 打包。
+- [build.sh:L227-L239](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/build.sh#L227-L239)：先 `cmake -B build -S .` 做一次配置探测，随后**删掉 `build` 和 `output` 重新来**（L232，保证干净构建），进入 `build/` 目录后调 `fn_compile_and_pack "$CODE_ROOT" "$COMPILE_OPTIONS"`。
+- [build.sh:L103-L113](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/build.sh#L103-L113)：`fn_compile_and_pack()` 依次执行 `cmake $1 $2`（配置）、`make -j64`（并行编译，`--verbose` 时改为 `VERBOSE=1 make -j`）、`make install`（安装到 output），最后 `fn_make_run_package` 打包。
 
 **⑥ run 包打包**：
 
-- [build.sh:L46-L101](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/build.sh#L46-L101)：`fn_make_run_package()` 先探测 CPU 架构（x86_64/aarch64，L48-L57），把版本、分支、commit id 写进 `output/version.info`（L58-L67）；再把 `install.sh`、`set_env.sh`、`uninstall.sh`、`filelist.csv` 拷进输出目录并用 `sed` 替换其中的架构/版本/日志路径占位符（L82-L93）；最后用 CANN toolkit 自带的 makeself 工具把整个 `output` 目录打成 `Ascend-cann-SIP_${VERSION}_linux-${ARCH}.run`（L95-L98）。makeself 脚本本身来自 `$ASCEND_HOME_PATH/toolkit/...`——**这也是为什么编译前必须装好 CANN toolkit 并 source set_env.sh**。
+- [build.sh:L46-L101](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/build.sh#L46-L101)：`fn_make_run_package()` 先探测 CPU 架构（x86_64/aarch64，L48-L57），把版本、分支、commit id 写进 `output/version.info`（L58-L67）；再把 `install.sh`、`set_env.sh`、`uninstall.sh`、`filelist.csv` 拷进输出目录并用 `sed` 替换其中的架构/版本/日志路径占位符（L82-L93）；最后用 CANN toolkit 自带的 makeself 工具把整个 `output` 目录打成 `Ascend-cann-SIP_${VERSION}_linux-${ARCH}.run`（L95-L98）。makeself 脚本本身来自 `$ASCEND_HOME_PATH/toolkit/...`——**这也是为什么编译前必须装好 CANN toolkit 并 source set_env.sh**。
 
 **⑦ 顶层 CMakeLists 的关键决策**：
 
-- [CMakeLists.txt:L27-L29](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/CMakeLists.txt#L27-L29)：安装前缀默认改为 `${PROJECT_SOURCE_DIR}/output`，解释了为什么 `make install` 后产物落在 `output/` 而不是系统目录。
-- [CMakeLists.txt:L53-L62](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/CMakeLists.txt#L53-L62)：头文件与库搜索路径挂到 `$ENV{ASCEND_HOME_PATH}` 的 `include`/`lib64`——CMake 通过环境变量找到 CANN，这是「source set_env.sh 之后才能编译」的根因。
-- [CMakeLists.txt:L84-L89](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/CMakeLists.txt#L84-L89)：`add_subdirectory` 依次引入 `imported_libs`（导入外部预编译库）、`ops`（Device 侧算子）、`core`（Host 侧框架），最后把 MKI 的 `libmki_static.a` 与 `libmki.so` 一并安装到 `output/lib`——所以最终交付物里 SiP 库和 MKI 库是绑在一起的。
+- [CMakeLists.txt:L27-L29](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/CMakeLists.txt#L27-L29)：安装前缀默认改为 `${PROJECT_SOURCE_DIR}/output`，解释了为什么 `make install` 后产物落在 `output/` 而不是系统目录。
+- [CMakeLists.txt:L53-L62](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/CMakeLists.txt#L53-L62)：头文件与库搜索路径挂到 `$ENV{ASCEND_HOME_PATH}` 的 `include`/`lib64`——CMake 通过环境变量找到 CANN，这是「source set_env.sh 之后才能编译」的根因。
+- [CMakeLists.txt:L84-L89](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/CMakeLists.txt#L84-L89)：`add_subdirectory` 依次引入 `imported_libs`（导入外部预编译库）、`ops`（Device 侧算子）、`core`（Host 侧框架），最后把 MKI 的 `libmki_static.a` 与 `libmki.so` 一并安装到 `output/lib`——所以最终交付物里 SiP 库和 MKI 库是绑在一起的。
 
 **⑧ 期望产物清单**（来自官方文档）：
 
-- [docs/compilation_build.md:L82-L101](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/docs/compilation_build.md#L82-L101)：编译完成后 `output/version.info` 记录版本信息；`output/lib/` 下有 **`libasdsip.so`**（SiP 加速库动态库）与 **`libmki.so`**（MKI 库动态库）；`output/` 顶层还有可执行的 `.run` 安装包。
+- [docs/compilation_build.md:L82-L101](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/docs/compilation_build.md#L82-L101)：编译完成后 `output/version.info` 记录版本信息；`output/lib/` 下有 **`libasdsip.so`**（SiP 加速库动态库）与 **`libmki.so`**（MKI 库动态库）；`output/` 顶层还有可执行的 `.run` 安装包。
 
 #### 4.3.4 代码实践
 
@@ -313,7 +324,7 @@ CMake 侧（顶层 CMakeLists.txt）接着做的事：安装前缀设为 `output
 
 1. 确认已装好 CANN toolkit + ops 包并 `source .../cann/set_env.sh`（README 3.1.4）。
 2. 按本机支持的芯片修改配置：若只支持 910b，把 `configs/build_config.json` 中 `ascend950` 改为 `false`（或用 `BUILD_CONFIG_FILE` 指向自定义副本，避免改动仓库文件）。
-3. 执行 `bash build.sh --help`，对照 [build.sh:L242-L258](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/build.sh#L242-L258) 的 `help_info()` 核对可用参数。
+3. 执行 `bash build.sh --help`，对照 [build.sh:L242-L258](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/build.sh#L242-L258) 的 `help_info()` 核对可用参数。
 4. 执行 `bash build.sh`（等价于 `bash build.sh --dev`）。首次运行会先看到 clone ascend-boost-comm 与 catlass 的输出。
 5. 编译结束后检查产物：
    ```bash
@@ -324,8 +335,8 @@ CMake 侧（顶层 CMakeLists.txt）接着做的事：安装前缀设为 `output
 
 **需要观察的现象**：
 
-- 编译日志中出现 `current commid id of ascend-boost-comm: ...`（来自 [L40](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/build.sh#L40)）与 `current commid id of ascendSipBoost: ...`（来自 [L230](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/build.sh#L230)）两行，分别对应 MKI 与 SiP 自身。
-- 末尾打印 `Ascend-cann-SIP_9.1.0_linux-${ARCH}.run is successfully generated in ...`（[L100](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/build.sh#L100)）。
+- 编译日志中出现 `current commid id of ascend-boost-comm: ...`（来自 [L40](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/build.sh#L40)）与 `current commid id of ascendSipBoost: ...`（来自 [L230](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/build.sh#L230)）两行，分别对应 MKI 与 SiP 自身。
+- 末尾打印 `Ascend-cann-SIP_9.1.0_linux-${ARCH}.run is successfully generated in ...`（[L100](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/build.sh#L100)）。
 
 **预期结果**：
 
@@ -339,15 +350,15 @@ CMake 侧（顶层 CMakeLists.txt）接着做的事：安装前缀设为 `output
 
 **练习 1**：`bash build.sh`、`bash build.sh --dev`、`bash build.sh ut` 三者分别做什么？
 
-**答案**：不带参数时 `fn_main` 发现第一个参数为空，默认 `arg1="--dev"`（[L262-L268](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/build.sh#L262-L268)），所以前两者完全等价，都走 `fn_build`（编译 + 打 run 包）。`ut` 会先 `fn_ut_test_needed`（导出 `NEED_COMPILE_RT=TRUE`、`TEST_TYPE=UT`，安装 lcov 与 googletest）再 `fn_build`，最后 `fn_build_coverage` 跑单测并收集覆盖率——顶层 CMakeLists 正是通过 `TEST_TYPE=UT` 环境变量加入 `tests` 子目录与覆盖率编译选项的（[CMakeLists.txt:L44-L79](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/CMakeLists.txt#L44-L79)）。
+**答案**：不带参数时 `fn_main` 发现第一个参数为空，默认 `arg1="--dev"`（[L262-L268](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/build.sh#L262-L268)），所以前两者完全等价，都走 `fn_build`（编译 + 打 run 包）。`ut` 会先 `fn_ut_test_needed`（导出 `NEED_COMPILE_RT=TRUE`、`TEST_TYPE=UT`，安装 lcov 与 googletest）再 `fn_build`，最后 `fn_build_coverage` 跑单测并收集覆盖率——顶层 CMakeLists 正是通过 `TEST_TYPE=UT` 环境变量加入 `tests` 子目录与覆盖率编译选项的（[CMakeLists.txt:L44-L79](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/CMakeLists.txt#L44-L79)）。
 
-**练习 2**：`build.sh` 里 [L227](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/build.sh#L227) 已经 `cmake -B build -S .` 配置过一次，[L232](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/build.sh#L232) 又 `rm -rf build output`，再在 `fn_compile_and_pack` 里重新 `cmake`。第一次配置为什么留着？
+**练习 2**：`build.sh` 里 [L227](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/build.sh#L227) 已经 `cmake -B build -S .` 配置过一次，[L232](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/build.sh#L232) 又 `rm -rf build output`，再在 `fn_compile_and_pack` 里重新 `cmake`。第一次配置为什么留着？
 
 **答案**：第一次 `cmake -B build -S .` 主要起**环境探测/早期失败**作用——如果 CANN 没装、工具链缺失，会在这一步就报出清晰的 CMake 错误，而不是在拉完两个三方仓之后才失败。随后删掉重来是因为正式配置需要携带 `COMPILE_OPTIONS`（ABI、Release 类型、NO_WERROR 等），且干净目录能避免陈旧缓存干扰。代价是每次都是全量干净构建，增量编译需要开发者自己进入 `build/` 目录手敲 `make`。
 
 **练习 3**：为什么说「没有 source CANN 的 set_env.sh 就无法编译」？给出源码证据。
 
-**答案**：两处硬证据。其一，顶层 CMake 的头文件与库路径直接取自环境变量：`include_directories($ENV{ASCEND_HOME_PATH}/include ...)` 与 `link_directories($ENV{ASCEND_HOME_PATH}/lib64)`（[CMakeLists.txt:L53-L62](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/CMakeLists.txt#L53-L62)）——`ASCEND_HOME_PATH` 未设置时 CMake 找不到 ACL 头文件和库。其二，run 包打包用的 makeself 工具路径也是 `$ASCEND_HOME_PATH/toolkit/tools/...`（[build.sh:L95](https://github.com/gitcode.com/cann/sip/blob/da40fcab61b835839d9e89a479f6586152c219c0/build.sh#L95)）。`set_env.sh` 正是设置 `ASCEND_HOME_PATH` 等变量的脚本。
+**答案**：两处硬证据。其一，顶层 CMake 的头文件与库路径直接取自环境变量：`include_directories($ENV{ASCEND_HOME_PATH}/include ...)` 与 `link_directories($ENV{ASCEND_HOME_PATH}/lib64)`（[CMakeLists.txt:L53-L62](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/CMakeLists.txt#L53-L62)）——`ASCEND_HOME_PATH` 未设置时 CMake 找不到 ACL 头文件和库。其二，run 包打包用的 makeself 工具路径也是 `$ASCEND_HOME_PATH/toolkit/tools/...`（[build.sh:L95](https://github.com/gitcode.com/cann/sip/blob/8ab9fcefc8637dc8f216996073fdb0d73f9db6e3/build.sh#L95)）。`set_env.sh` 正是设置 `ASCEND_HOME_PATH` 等变量的脚本。
 
 ## 5. 综合实践
 
@@ -366,7 +377,8 @@ CMake 侧（顶层 CMakeLists.txt）接着做的事：安装前缀设为 `output
 ## 6. 本讲小结
 
 - 依赖分三层安装：系统工具层由 `install_deps.sh` 幂等地「检测-安装-复查」；Python 层用 `pip3 install -r requirements.txt`；CANN toolkit/ops 层需手工下载 `.run` 包安装并 `source set_env.sh`。
-- `configs/build_config.json` 的 `targets` 开关决定编译哪些芯片架构，由 `scripts/build_util.py::get_build_target_list()` 消费；只支持一种芯片时必须关掉其余架构，否则编译报 simd_vf 类错误。
+- 系统依赖分「必需/可选」两档：python/gcc/cmake/git 失败即 `exit 1`；pigz、dos2unix、googletest 失败只告警——其中 dos2unix 是 8ab9fce 提交刚从「失败中断」降级为「可忽略告警」的，因为构建脚本并不直接依赖它。
+- `configs/build_config.json` 的 `targets` 开关决定编译哪些芯片架构，由 `scripts/build_util.py::get_build_target_list()` 消费（该函数在 8ab9fce 中做了 ruff 清理：`exit(1)` 统一为 `sys.exit(1)`，行为不变）；只支持一种芯片时必须关掉其余架构，否则编译报 simd_vf 类错误。
 - `bash build.sh`（默认 `--dev`）的主流程是：解析参数 → 自动 clone 并编译 ascend-boost-comm(MKI) 与 catlass 到 `3rdparty/` → 干净目录里 `cmake + make -j64 + make install` → makeself 打出 `.run` 包。
 - CMake 通过 `$ENV{ASCEND_HOME_PATH}` 找到 CANN 的头文件与库，这就是编译前必须 source set_env.sh 的根因。
 - 核心产物：`output/lib/libasdsip.so` 与 `libmki.so`、`output/version.info`、`output/Ascend-cann-SIP_9.1.0_linux-${ARCH}.run`。
