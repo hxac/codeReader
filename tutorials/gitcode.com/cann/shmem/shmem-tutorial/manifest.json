@@ -1,14 +1,13 @@
 {
-  "head": "7ed686e5da60eb6008639916adba0f835cdbf4a6",
+  "head": "c4f9363aff65dcde56b565cf4d9937483d872e55",
   "project": "shmem",
-  "rationale": "SHMEM 是面向昇腾 NPU 的对称内存分布式通信库，代码分为 Host 侧（初始化、bootstrap、HYBM 对称堆、team、同步、传输层）与 Device 侧（gm2gm/ub2gm 数据面接口与 MTE/RDMA/SDMA/UDMA 引擎直驱），外加 Python 绑定与丰富示例。学习路线按\"先跑起来、再读懂主链路、后深入传输与引擎、最终多实例/DFX/二次开发\"设计：第 1 单元让读者从零完成定位认知、编译安装与首个 init 示例；第 2 单元沿 aclshmemx_init_attr 主链路走读初始化、bootstrap 控制面与对称内存堆；第 3、4 单元分别覆盖 Host 侧与 Device 侧数据面 API（RMA/AMO/信号/同步/集合通信），Device 侧结合 AscendC kernel 示例实践；第 5 单元下沉到传输层（TransportManager、RDMA QP、SDMA/UDMA、topo）与 AICore 直驱引擎；第 6 单元讲通信域 Team；第 7 单元讲 Python 包与 PyTorch 集成；第 8 单元为专家层，覆盖多实例、stream 异步、user buffer heap、under_api 动态加载、日志/profiling DFX、测试体系与通算融合综合实战。依赖关系保证每篇讲义只建立在前序讲义之上，示例与源码一一对应，便于边读边练。",
+  "rationale": "本次为增量更新。自上次 HEAD（7ed686e）以来的变化集中在三处：(1) 8d1d777 为 Ascend950 RDMA 使能多 QP——aclshmemx_set_qp_num 从仅支持 UDMA 扩展到支持 ROCE，新增 TransportOptions::RdmaQpConfig 传递链路，device_rdma_transport_manager_v2 按 qpNum 建链并做 QP 数一致性校验，同时在 include/device/gm2gm/engine/shmem_device_rdma.h 新增 aclshmemx_roce_qp_put_nbi/get_nbi/quiet 等 QP-specific 低阶接口与配套 UT；(2) 492f036 新增 examples/tp_allreduce_udma（TP=2 AIV-UDMA AllReduce baseline 与 Tailcut 绕路两种模式）并重写 rdma_perftest（多 QP 并行模式与延迟指标）；(3) c4f9363 仅改 README 语言切换链接。据此：u2-l1/u2-l2 涉及 init 头文件与 shmem_init.cpp 的 QP 配置变化标记 update；u5-l1（transport_def.h 新增 rdmaQpConfig）、u5-l3（v2 管理器多 QP）、u5-l6（engine 新增 QP 接口）标记 update；u8-l6（init UT 新增 RDMA QP 用例）、u8-l8（rdma_perftest 重写）标记 update；其余未受影响的讲义全部 keep。新增两篇讲义：u5-l7 专门讲 RDMA 多 QP 机制（串联配置、传输管理器与 kernel 直驱，属新增重要机制），u8-l9 以 tp_allreduce_udma 为端到端实战（team_split_2d 分组、AIV 多核 Local Reduce、relay 绕路通信）。整体学习路线维持\"先跑起来、再读懂主链路、后深入传输与引擎、最终多实例/DFX/二次开发\"的设计不变。",
   "units": [
     {
       "id": "u1",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -36,7 +35,7 @@
           "topic": "介绍 SHMEM 在昇腾生态中的定位：基于对称内存的多机多卡通信加速库。梳理 Host 侧与 Device 侧双侧接口体系、MTE/xDMA 通信引擎和典型应用场景。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -67,7 +66,7 @@
           "topic": "讲解 CANN 工具链依赖、bisheng 编译器、三种安装方式（pip / run 包 / 源码编译）以及 build.sh 的编译参数。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -97,7 +96,7 @@
           "topic": "解读 include/device、include/host、src/host、src/device 等目录的分层规则，建立从 API 头文件到实现源码的映射能力。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2",
             "u1-l3"
@@ -127,15 +126,15 @@
           "topic": "逐行解析 examples/init/main.cpp，理解 aclInit、aclshmemx_init_attr、shmem_finalize 的完整生命周期以及 run.sh 脚本的多进程拉起方式。"
         }
       ],
+      "level": "beginner",
       "order": 1,
       "title": "走进 SHMEM：定位、环境与首个程序"
     },
     {
       "id": "u2",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u1-l4"
           ],
@@ -144,7 +143,8 @@
           "learning_goals": [
             "掌握 aclshmemx_init_attr_t 各字段含义",
             "区分 Default、MPI、UniqueID 三种模式的适用场景",
-            "理解 uniqueid 的生成与广播用法"
+            "理解 uniqueid 的生成与广播用法",
+            "了解 aclshmemx_set_qp_num 对 ROCE/UDMA 引擎的 QP 数配置规则"
           ],
           "level": "beginner",
           "minimal_modules": [
@@ -152,17 +152,18 @@
             "include/host/shmem_host_def.h"
           ],
           "order": 1,
-          "practice_task": "参照 examples/init/main.cpp 中的 RUN_WITH_MPI 分支，编写一个使用 MPI 模式初始化 4 个 PE 的最小程序，并验证各 PE 打印的 my_pe 不同。",
+          "practice_task": "参照 examples/init/main.cpp 中的 RUN_WITH_MPI 分支，编写一个使用 MPI 模式初始化 4 个 PE 的最小程序，并验证各 PE 打印的 my_pe 不同；再在初始化前调用 aclshmemx_set_qp_num 分别配置 ROCE 与 UDMA 的 QP 数并观察返回值。",
           "source_files": [
             "include/host/init/shmem_host_init.h",
             "include/host/shmem_host_def.h",
+            "src/host/init/shmem_init.cpp",
             "examples/init/main.cpp"
           ],
           "title": "初始化 API 与三种 Bootstrap 模式",
-          "topic": "讲解 aclshmemx_init_attr_t 结构、ACLSHMEMX_INIT_WITH_DEFAULT / MPI / UNIQUEID 三种 bootstrap 模式以及 uniqueid 的获取与广播流程。"
+          "topic": "讲解 aclshmemx_init_attr_t 结构、ACLSHMEMX_INIT_WITH_DEFAULT / MPI / UNIQUEID 三种 bootstrap 模式、uniqueid 的获取与广播流程，以及 aclshmemx_set_qp_num 的引擎约束（本轮已扩展支持 ROCE 与 UDMA）。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u2-l1"
           ],
@@ -171,6 +172,7 @@
           "learning_goals": [
             "描述 init 三阶段（bootstrap、建堆、子模块就绪）的顺序",
             "理解 finalize 的逆序释放与控制面 barrier",
+            "理解 QP 配置在实例存活期间冻结、最后一个实例 finalize 后复位的生命周期",
             "能在源码中定位各初始化阶段的函数入口"
           ],
           "level": "intermediate",
@@ -179,17 +181,18 @@
             "src/host/init/shmemi_init.h"
           ],
           "order": 2,
-          "practice_task": "在 src/host/init/shmem_init.cpp 中标注出 bootstrap、reserve_heap/setup_heap、子模块初始化三个阶段的调用位置，画出初始化流程图并注明关键函数名。",
+          "practice_task": "在 src/host/init/shmem_init.cpp 中标注出 bootstrap、reserve_heap/setup_heap、子模块初始化三个阶段的调用位置，画出初始化流程图并注明关键函数名；同时标出 g_rdma_qp_config/g_udma_qp_config 何时传入 bind_aclshmem_entity、何时被复位。",
           "source_files": [
             "src/host/init/shmem_init.cpp",
             "src/host/init/shmemi_init.h",
+            "src/host/init/backends/shmem_init_backend.cpp",
             "docs/principles/init_finalize.md"
           ],
           "title": "初始化全流程源码走读",
-          "topic": "跟随 aclshmemx_init_attr 的调用链走读 shmem_init.cpp：bootstrap 建链、HYBM 建堆、子模块就绪，以及 finalize 的逆序释放过程。"
+          "topic": "跟随 aclshmemx_init_attr 的调用链走读 shmem_init.cpp：bootstrap 建链、HYBM 建堆、子模块就绪，QP 配置（ROCE/UDMA）的冻结与复位，以及 finalize 的逆序释放过程。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -216,7 +219,7 @@
           "topic": "深入 Default/UniqueID 模式的 CPU 侧控制面：PE 0 监听的 KV 服务、各 PE 的 TCP 客户端建链、以及基于 KV 表的 barrier/allgather 集合通信。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -244,7 +247,7 @@
           "topic": "讲解 aclshmem_malloc 系列接口与对称堆语义：为什么各 rank 必须同序同大小分配，以及 mem_type 参数与 heap base 的关系。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -274,15 +277,15 @@
           "topic": "剖析 src/host/mem/heap 下 HYBM（Hybrid Memory）实现：GVA 预留、内存分段、slice 实体化与跨 rank 交换，以及 mem_entity 工厂模式。"
         }
       ],
+      "level": "beginner",
       "order": 2,
       "title": "核心概念：初始化与对称内存"
     },
     {
       "id": "u3",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -310,7 +313,7 @@
           "topic": "讲解 Host 侧远程内存访问接口 aclshmem_putmem / getmem 及其 nbi 变体的语义、底层调用链以及与对称堆的关系。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -335,7 +338,7 @@
           "topic": "讲解 aclshmem_*_put_signal 系列接口：一次调用同时完成数据搬运与远端信号通知，及其在同步通信中的用法。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -362,7 +365,7 @@
           "topic": "讲解 Host 侧同步原语：全局 barrier、p2p wait_until/wait、以及 quiet/order 等内存可见性保证机制在 src/host/sync 中的实现。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l3"
           ],
@@ -392,15 +395,15 @@
           "topic": "结合 examples/allgather 讲解 Host 侧集合通信接口与 RMA 组合实现集合语义的思路。"
         }
       ],
+      "level": "intermediate",
       "order": 3,
       "title": "Host 侧数据面编程"
     },
     {
       "id": "u4",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -429,7 +432,7 @@
           "topic": "讲解 AICore kernel 中如何使用 SHMEM：host device 共享的 meta/state 结构、__gm__ 地址空间以及 kernel 侧拿到全局状态的机制。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -459,7 +462,7 @@
           "topic": "讲解 device 侧 gm2gm 高阶 RMA 接口（put/get 家族）的宏生成模式，并结合 rdma_demo 示例演示在 AscendC kernel 中直接发起跨 PE 数据搬运。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l2"
           ],
@@ -487,7 +490,7 @@
           "topic": "讲解 aclshmem_*_atomic_add / fetch_add / inc / cas 等原子操作宏生成体系，支持的数据类型以及不同引擎（RDMA/UDMA/MTE）下的可见性差异。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l2"
           ],
@@ -516,7 +519,7 @@
           "topic": "讲解 kernel 内的信号操作 aclshmemx_signal_op、signal_wait_until、wait_until 家族与 notify/wait 配对，结合 notifywait 示例理解 kernel 间同步。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l3",
             "u4-l4"
@@ -545,7 +548,7 @@
           "topic": "讲解 device 侧内存保序（MO）接口与各引擎 quiet：为什么异步原子操作后需要 quiet 才能保证读回结果，以及不同引擎对应的 quiet 接口。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l2"
           ],
@@ -574,15 +577,15 @@
           "topic": "讲解 AICore 驱动的 ub2gm 数据面接口：数据从 Unified Buffer 直达远端 Global Memory 的 MTE 通路及其配置。"
         }
       ],
+      "level": "intermediate",
       "order": 4,
       "title": "Device 侧编程模型与数据面接口"
     },
     {
       "id": "u5",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u2-l2"
           ],
@@ -591,6 +594,7 @@
           "learning_goals": [
             "理解 TransportManager 抽象与工厂创建方式",
             "掌握 dataOpType 与传输引擎的映射关系",
+            "理解 TransportOptions 中 udmaQpConfig/rdmaQpConfig 等引擎相关配置的传递",
             "能在源码中定位一种引擎的初始化入口"
           ],
           "level": "intermediate",
@@ -600,17 +604,17 @@
             "src/host/transport/transport_def.h"
           ],
           "order": 1,
-          "practice_task": "梳理 TransportManager 的虚函数接口列表，说明 OpenDevice/CloseDevice 等方法在各引擎实现中的职责，画出一层类图。",
+          "practice_task": "梳理 TransportManager 的虚函数接口列表，说明 OpenDevice/CloseDevice 等方法在各引擎实现中的职责，画出一层类图；并指出 TransportOptions 新增的 rdmaQpConfig 从哪里被赋值、传给谁。",
           "source_files": [
             "src/host/transport/transport_manager.h",
             "src/host/transport/transport_manager.cpp",
             "src/host/transport/transport_def.h"
           ],
           "title": "传输层架构：TransportManager 抽象",
-          "topic": "讲解 src/host/transport 的整体设计：TransportManager 基类、按 TransportType / DataOpType 创建传输器的工厂，以及传输层与堆初始化的关系。"
+          "topic": "讲解 src/host/transport 的整体设计：TransportManager 基类、按 TransportType / DataOpType 创建传输器的工厂、TransportOptions 携带的引擎配置（含新增的 rdmaQpConfig），以及传输层与堆初始化的关系。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -638,7 +642,7 @@
           "topic": "讲解 CompositeTransportManager 如何按优先级顺序组合多个传输引擎（MTE/RDMA/SDMA/UDMA）并支持组合掩码创建。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u5-l1"
           ],
@@ -647,7 +651,8 @@
           "learning_goals": [
             "理解 QP 的创建、缓存与复用策略",
             "掌握固定 rank 与动态 rank 两种 QP 管理差异",
-            "理解建链端口自动分配规则"
+            "理解建链端口自动分配规则",
+            "理解 Ascend950 上按 qpNum 创建多条 QP 的流程与 QP 数一致性校验"
           ],
           "level": "advanced",
           "minimal_modules": [
@@ -656,19 +661,20 @@
             "src/host/transport/device_rdma/fixed_ranks_qp_manager.cpp"
           ],
           "order": 3,
-          "practice_task": "画出 RDMA 模式下两个节点各 8 个 PE 建链时 QP 与连接数量的示意图，并说明 fixed_ranks 与 dynamic_ranks 两种管理器分别适用的通信模式。",
+          "practice_task": "画出 RDMA 模式下两个节点各 8 个 PE 建链时 QP 与连接数量的示意图（含每个 peer 配置多条 QP 的情形），并说明 fixed_ranks 与 dynamic_ranks 两种管理器分别适用的通信模式；对照 device_rdma_transport_manager_v2 中 CheckQpNumConsistency 说明各 PE QP 数不一致时的行为。",
           "source_files": [
             "src/host/transport/device_rdma/device_rdma_transport_manager.cpp",
             "src/host/transport/device_rdma/device_rdma_transport_manager_v2.cpp",
+            "src/host/transport/device_rdma/device_rdma_transport_manager_v2.h",
             "src/host/transport/device_rdma/device_qp_manager.cpp",
             "src/host/transport/device_rdma/fixed_ranks_qp_manager.cpp",
             "src/host/transport/device_rdma/dynamic_ranks_qp_manager.cpp"
           ],
           "title": "RDMA 传输与 QP 管理",
-          "topic": "深入 device_rdma 子系统：QP（Queue Pair）管理器、固定/动态 rank QP、RoCE 网卡信息交换与建链流程。"
+          "topic": "深入 device_rdma 子系统：QP（Queue Pair）管理器、固定/动态 rank QP、RoCE 网卡信息交换与建链流程，以及 v2 管理器新增的多 QP 创建（按 rdmaQpConfig.qpNum 为每个 peer 建多条 QP）与 QP 数一致性校验。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l3"
           ],
@@ -696,7 +702,7 @@
           "topic": "讲解 SDMA 与 UDMA 两种传输管理器的实现差异、平台适配条件以及 UDMA 依赖的 HCOMM 通道资源。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -726,7 +732,7 @@
           "topic": "讲解 src/host/transport/topo：如何解析系统 XML 拓扑、生成 rootinfo、做 NPU-NIC 亲和匹配以指导多机路由。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u4-l2",
             "u5-l1"
@@ -736,6 +742,7 @@
           "learning_goals": [
             "区分高阶数据面接口与 engine 低阶直驱接口",
             "理解 SDMA/UDMA 直驱的 prefetch、quiet 等低阶能力",
+            "掌握新增的 QP-specific ROCE 接口 aclshmemx_roce_qp_put_nbi/get_nbi/quiet 及 qp_idx 语义",
             "能在 kernel 中选择合适的引擎接口层级"
           ],
           "level": "advanced",
@@ -745,27 +752,63 @@
             "src/device/gm2gm/engine"
           ],
           "order": 6,
-          "practice_task": "为四种引擎（MTE/RDMA/SDMA/UDMA）各挑一个代表性低阶接口，说明其完成高阶 RMA 中哪一步，并整理成接口分层对照表。",
+          "practice_task": "为四种引擎（MTE/RDMA/SDMA/UDMA）各挑一个代表性低阶接口，说明其完成高阶 RMA 中哪一步，并整理成接口分层对照表；单独标出 roce_qp_* 接口与普通 roce 接口在参数上的差异。",
           "source_files": [
             "include/device/gm2gm/engine/shmem_device_mte.h",
             "include/device/gm2gm/engine/shmem_device_rdma.h",
             "include/device/gm2gm/engine/shmem_device_sdma.h",
             "include/device/gm2gm/engine/shmem_device_udma.h",
-            "src/device/gm2gm/engine"
+            "src/device/gm2gm/engine/shmem_device_rdma.hpp"
           ],
           "title": "AICore 直驱引擎低阶接口",
-          "topic": "讲解 include/device/gm2gm/engine 下 MTE/RDMA/SDMA/UDMA 直驱低阶接口与高阶 RMA/AMO 的关系，如何绕过高阶封装直接驱动引擎。"
+          "topic": "讲解 include/device/gm2gm/engine 下 MTE/RDMA/SDMA/UDMA 直驱低阶接口与高阶 RMA/AMO 的关系，如何绕过高阶封装直接驱动引擎；重点覆盖本轮新增的 QP-specific ROCE 接口（aclshmemx_roce_qp_put_nbi / qp_get_nbi / qp_quiet）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u5-l3",
+            "u5-l6"
+          ],
+          "filename": "u5-l7-rdma-multi-qp.md",
+          "id": "u5-l7",
+          "learning_goals": [
+            "掌握 aclshmemx_set_qp_num 对 ROCE/UDMA 的配置规则（取值范围、冻结时机、finalize 后复位）",
+            "理解 rdmaQpConfig 从全局配置经 bind_aclshmem_entity 传递到 transport manager 的链路",
+            "理解 device_rdma_transport_manager_v2 按 qpNum 建链与 QP 数一致性校验",
+            "能用 QP-specific ROCE 接口在 kernel 中按 qp_idx 发起并行传输并用 qp_quiet 等待完成"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "aclshmemx_set_qp_num",
+            "TransportOptions::RdmaQpConfig",
+            "device_rdma_transport_manager_v2",
+            "aclshmemx_roce_qp_* 接口"
+          ],
+          "order": 7,
+          "practice_task": "阅读 tests/unittest/host/mem/rdma_mem/qp_specific_apis_host_test.cpp 与 tests/unittest/device/mem/rdma_mem/qp_specific_apis_kernel.cpp，说明测试中 qp_idx 如何映射到具体 QP；再运行 examples/shmem_perftest/rdma_perftest 的多 QP 并行模式，对比单 QP 与多 QP 下的带宽差异（无 NPU 环境时整理两种模式的接口调用差异即可）。",
+          "source_files": [
+            "include/host/init/shmem_host_init.h",
+            "src/host/init/shmem_init.cpp",
+            "src/host/transport/transport_def.h",
+            "src/host/transport/device_rdma/device_rdma_transport_manager_v2.cpp",
+            "include/device/gm2gm/engine/shmem_device_rdma.h",
+            "tests/unittest/host/mem/rdma_mem/qp_specific_apis_host_test.cpp",
+            "tests/unittest/device/mem/rdma_mem/qp_specific_apis_kernel.cpp"
+          ],
+          "title": "Ascend950 RDMA 多 QP 机制",
+          "topic": "讲解本轮新增的 RDMA 多 QP 能力全链路：aclshmemx_set_qp_num 配置 ROCE 引擎 QP 数、TransportOptions::RdmaQpConfig 的传递、device_rdma_transport_manager_v2 按 qpNum 为每个 peer 创建多条 QP 并校验各 PE QP 数一致，以及 kernel 侧 aclshmemx_roce_qp_put_nbi / qp_get_nbi / qp_quiet 按 qp_idx 直驱指定 QP。"
         }
       ],
+      "level": "intermediate",
       "order": 5,
       "title": "传输层与通信引擎"
     },
     {
       "id": "u6",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -792,7 +835,7 @@
           "topic": "讲解通信域 Team 的概念模型：team_pools、team 内 mype 与全局 mype 的区别，以及 team_split_strided / split_2d 切分接口。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1",
             "u6-l1"
@@ -821,15 +864,15 @@
           "topic": "讲解 kernel 内的 team 接口与 team 级 barrier，理解通信域信息如何被 device 侧读取使用。"
         }
       ],
+      "level": "intermediate",
       "order": 6,
       "title": "Team 通信域"
     },
     {
       "id": "u7",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -858,7 +901,7 @@
           "topic": "讲解 src/python/shmem 包的模块划分、SoC 类型探测、后端库自动选择与动态加载逻辑。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l1",
             "u2-l1"
@@ -888,7 +931,7 @@
           "topic": "讲解 pyshmem.cpp 如何用 pybind11 暴露 init/finalize/team/heap 等接口，以及 GIL 释放策略与 Python 侧 core 模块的分层。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l2"
           ],
@@ -917,15 +960,15 @@
           "topic": "结合 python_extension 与 torch_binding 示例讲解如何把 SHMEM 接入 torch_npu 训练/推理流程，替代 MPI 通信。"
         }
       ],
+      "level": "intermediate",
       "order": 7,
       "title": "Python 接口与生态集成"
     },
     {
       "id": "u8",
-      "level": "advanced",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -954,7 +997,7 @@
           "topic": "讲解单进程多 SHMEM 实例：instance_id 生命周期、aclshmemx_instance_ctx_set、以及 init_manager/HYBM/ConfigStore 的引用计数共享。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1",
             "u4-l2"
@@ -982,7 +1025,7 @@
           "topic": "讲解绑定 aclrtStream 的异步通信接口：put_stream/get_stream 的用法、完成语义以及与同步版本的差异。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l5"
           ],
@@ -1011,7 +1054,7 @@
           "topic": "讲解 aclshmemx_init_attr_with_buffers 路径：用户自带 device buffer 构建对称堆，buffer_desc 与 optional_attr 的语义。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -1039,7 +1082,7 @@
           "topic": "讲解 src/host/utils/under_api 下对 ACL/DCMI/HAL/HCCP/HCOMM/RT 等 CANN 接口的 dlopen 动态加载封装与版本兼容策略。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -1069,7 +1112,7 @@
           "topic": "讲解 SHMEM 的可观测性能力：日志等级控制、异常上报与 dump、profiling 采集以及常见问题排查入口。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u2-l2"
           ],
@@ -1078,6 +1121,7 @@
           "learning_goals": [
             "掌握 UT 的编译开关与运行方式",
             "理解 host/device 测试目录与被测模块的对应关系",
+            "理解新增的 qp_specific_apis 测试如何验证 QP-specific 接口",
             "能为新接口补一个最小 UT"
           ],
           "level": "advanced",
@@ -1087,18 +1131,19 @@
             "tests/unittest/CMakeLists.txt"
           ],
           "order": 6,
-          "practice_task": "参照 init_host_test.cpp 为某个尚未覆盖的 heap 或 sync 接口编写一个 googletest 用例并编译通过（无 NPU 时至少通过编译）。",
+          "practice_task": "参照 init_host_test.cpp 中 TestSetRdmaQpNumBeforeInit 的写法（含 ACLSHMEMI_RDMA_K_BACKEND_XSCALE 条件编译），为某个尚未覆盖的 heap 或 sync 接口编写一个 googletest 用例并编译通过（无 NPU 时至少通过编译）。",
           "source_files": [
             "tests/unittest/CMakeLists.txt",
             "tests/unittest/host/main_test.cpp",
             "tests/unittest/host/init/init_host_test.cpp",
+            "tests/unittest/host/mem/rdma_mem/qp_specific_apis_host_test.cpp",
             "scripts/run.sh"
           ],
           "title": "测试体系与单元测试编写",
-          "topic": "讲解 tests/unittest 的组织（host/device、mem/sync/team/topo/transport）、googletest 接入方式与 scripts/run.sh 的执行入口。"
+          "topic": "讲解 tests/unittest 的组织（host/device、mem/sync/team/topo/transport）、googletest 接入方式与 scripts/run.sh 的执行入口，并结合本轮新增的 qp_specific_apis 用例说明如何测试引擎相关接口。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l4",
             "u4-l2",
@@ -1129,7 +1174,7 @@
           "topic": "以 shmem_mega_moe（MoE 场景）为主线，串联 put/get、AMO、同步与 team 能力，理解通算融合算子的完整实现。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u4-l5",
             "u8-l5"
@@ -1139,6 +1184,7 @@
           "learning_goals": [
             "掌握带宽/时延的测量方法与消息步长设计",
             "理解不同引擎与通路在不同消息规模下的优劣",
+            "理解 rdma_perftest 新增的多 QP 并行模式与延迟（lat）指标",
             "能产出一份简单的性能对比报告"
           ],
           "level": "advanced",
@@ -1148,17 +1194,55 @@
             "docs/debug/profiling.md"
           ],
           "order": 8,
-          "practice_task": "运行 shmem_perftest 或 rdma_perftest_demo，采集多个消息档位的带宽与时延，绘制曲线并分析小消息与大消息下的瓶颈差异。",
+          "practice_task": "运行 shmem_perftest 或 rdma_perftest_demo，采集多个消息档位的带宽与时延（含 rdma_perftest 的多 QP 并行模式与单 QP 对比），绘制曲线并分析小消息与大消息下的瓶颈差异。",
           "source_files": [
             "examples/shmem_perftest",
+            "examples/shmem_perftest/rdma_perftest/rdma_perftest_kernel.cpp",
             "examples/rdma_perftest_demo",
             "examples/mte_perftest_demo",
             "docs/debug/profiling.md"
           ],
           "title": "性能测试与调优",
-          "topic": "结合 shmem_perftest、rdma_perftest_demo 等性能样例讲解如何测量与优化 SHMEM 通信性能。"
+          "topic": "结合 shmem_perftest、rdma_perftest 等性能样例讲解如何测量与优化 SHMEM 通信性能；rdma_perftest 本轮已重写，支持带宽/延迟两种指标与多 QP 并行模式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l5",
+            "u5-l6",
+            "u6-l1"
+          ],
+          "filename": "u8-l9-tp-allreduce-udma.md",
+          "id": "u8-l9",
+          "learning_goals": [
+            "理解用 team_split_2d 划分 TP=2 通信组与 reduce-scatter + local reduce + all-gather 的 AllReduce 分解",
+            "掌握 baseline（udma_put_nbi + quiet）与 tailcut（udma_relay_put_nbi 绕路）两种通信模式的路径差异",
+            "理解 AIV 多核切分 Local Reduce 与 2:1:1 流量权重的 box 划分",
+            "能使用示例脚本完成功能校验与性能对比"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "examples/tp_allreduce_udma/main.cpp",
+            "examples/tp_allreduce_udma/tp_allreduce_udma_kernel.cpp",
+            "examples/utils/tp_allreduce_perf_host.h",
+            "aclshmemx_udma_put_nbi/relay_put_nbi"
+          ],
+          "order": 9,
+          "practice_task": "先运行 examples/tp_allreduce_udma/scripts/run.sh 完成 baseline 与 tailcut 的 FP16 功能测试并通过 scripts/check_result.py 校验；再以相同 relay 编译配置（-enable_relay）对比两种模式在不同 elements/aiv 参数下的耗时，解释绕路路径为什么能提升带宽利用。",
+          "source_files": [
+            "examples/tp_allreduce_udma/main.cpp",
+            "examples/tp_allreduce_udma/tp_allreduce_udma_kernel.cpp",
+            "examples/tp_allreduce_udma/tp_allreduce_udma_kernel.h",
+            "examples/tp_allreduce_udma/README.md",
+            "examples/tp_allreduce_udma/scripts/run.sh",
+            "examples/utils/tp_allreduce_perf_host.h",
+            "include/device/gm2gm/engine/shmem_device_udma.h"
+          ],
+          "title": "端到端实战：TP=2 AIV-UDMA AllReduce 与 Tailcut",
+          "topic": "以新增的 examples/tp_allreduce_udma 为例讲解 TP=2 分组 AllReduce 的完整实现：team_split_2d 划分 TP 组、AIV 多核 Local Reduce、baseline（aclshmemx_udma_put_nbi 直发 + udma_quiet）与 tailcut（aclshmemx_udma_relay_put_nbi 绕路分流）两种通信模式及性能对比方法。"
         }
       ],
+      "level": "advanced",
       "order": 8,
       "title": "高级机制、DFX 与二次开发"
     }
