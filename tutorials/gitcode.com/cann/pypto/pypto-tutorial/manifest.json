@@ -1,0 +1,1101 @@
+{
+  "head": "e71ccb398205a0170c847b4b8f5d8e5862aedcc5",
+  "project": "pypto",
+  "rationale": "本次为增量更新，diff 范围 0fc103703..e71ccb398 仅含两个提交：2bb883295 修复 python/pypto/pil/ops.py 中 _dyn_for 动态循环展开的边界计算（unroll_step 重命名为 nstep 并改用 nstart 对齐），同时 framework/src/machine/runtime/runner/kernel_binary.cpp 将设备参数初始化改为 LiteNPU 条件跳过；e71ccb398 重构 python/tests/ut/kirin 测试以运行 camodel（compare_cos 从恒返回 1.0 改为真实余弦相似度、新增 check_nan、conftest 设置 simulation.accuracy_level、cmp 测试改为表驱动参数化）。据此判定：u3-l5 直接引用 ops.py 需小更新；u5-l2 引用的 runner/ 目录内 kernel_binary.cpp 有局部逻辑变化需小更新；u7-l7 讲测试体系且 golden 对比方式（cos 相似度+NaN 校验）实质变化需更新并补充 kirin 测试基础设施源文件；其余 31 篇讲义所依赖的 README、examples、docs、前端解析器、多层图 Pass、codegen、pypto_pro 等均无变化，保持 keep。另修正上版 manifest 中 u7-l4 的 id 笔误（u4-l4-debug-placeholder → u7-l4），整体学习路线与依赖结构不变。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview-and-pto-paradigm.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 PyPTO 的定位、目标用户和核心特性",
+            "解释 PTO（Parallel Tensor/Tile Operation）编程范式与基于 Tile 的编程模型",
+            "描述 Tensor Graph → Tile Graph → Block Graph → Execution Graph 的多层次 IR 编译流程"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README.md",
+            "docs/zh/tutorials/introduction/introduction.md",
+            "docs/zh/tutorials/introduction/program_paradigms.md"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README 与编程范式文档后，用自己的话画出 PyPTO 从用户 Python 代码到设备执行的完整流程框图，并标注每一步对应的中间表示名称。",
+          "source_files": [
+            "README.md",
+            "docs/zh/tutorials/introduction/introduction.md",
+            "docs/zh/tutorials/introduction/program_paradigms.md"
+          ],
+          "title": "PyPTO 是什么：项目定位与 PTO 编程范式",
+          "topic": "介绍 PyPTO 项目的定位、PTO（Parallel Tensor/Tile Operation）编程范式、基于 Tile 的编程模型以及 Tensor→Tile→Block→Execution 的多层次编译流程。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-environment-and-hello-world.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "完成 PyPTO 基础环境准备与软件包安装",
+            "理解 @pypto.jit 装饰器、Tensor[...] 类型标注与 out[:] 写回语法",
+            "区分 RunMode.NPU 与 RunMode.SIM 两种运行模式并成功运行示例"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "examples/00_hello_world/hello_world.py",
+            "docs/zh/install/prepare_environment.md",
+            "docs/zh/install/build_and_install.md",
+            "docs/zh/invocation/examples_invocation.md"
+          ],
+          "order": 2,
+          "practice_task": "搭建环境后运行 examples/00_hello_world/hello_world.py（无条件真机时使用 SIM 模式），把向量加法改成 x + 2 * y 并验证输出结果正确。",
+          "source_files": [
+            "examples/00_hello_world/hello_world.py",
+            "docs/zh/install/prepare_environment.md",
+            "docs/zh/install/build_and_install.md",
+            "docs/zh/invocation/examples_invocation.md"
+          ],
+          "title": "环境搭建、编译安装与运行第一个算子",
+          "topic": "讲解如何准备环境、编译安装 PyPTO 软件包，并通过 hello_world 示例跑通第一个 add 算子。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-repo-structure-and-code-map.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "说出 python/、framework/、examples/、models/、docs/ 各目录的职责",
+            "定位 Python 前端、PIL、C++ Pass、CodeGen、运行时各自所在的源码位置",
+            "了解 CMakeLists.txt 与 build_ci.py 在构建中的角色"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README.md",
+            "python/pypto/__init__.py",
+            "framework/src/passes/tensor_graph_pass/auto_cast.cpp",
+            "framework/src/codegen/codegen.cpp",
+            "CMakeLists.txt"
+          ],
+          "order": 3,
+          "practice_task": "对照源码地图，在仓库中分别找到：jit 装饰器定义、PIL 构件文件、tensor graph 某个 pass、codegen 入口，记录它们的路径并绘制一张模块归属表。",
+          "source_files": [
+            "README.md",
+            "python/pypto/__init__.py",
+            "CMakeLists.txt",
+            "build_ci.py"
+          ],
+          "title": "仓库目录结构与源码地图",
+          "topic": "梳理仓库整体目录结构：Python 包（python/pypto、python/pypto_pro）、C++ 框架（framework）、示例（examples、models）与文档（docs）的职责与相互关系。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "filename": "u1-l4-examples-system-and-learning-path.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "了解 examples 目录的分层学习路径与运行方式",
+            "能独立运行 basic_ops、elementwise_ops 等初级示例",
+            "掌握借助 examples 与官方 tutorials 自主探索 API 的方法"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "examples/README.md",
+            "examples/01_beginner/basic/basic_ops.py",
+            "examples/01_beginner/compute/elementwise_ops.py",
+            "examples/01_beginner/compute/reduce_ops.py"
+          ],
+          "order": 4,
+          "practice_task": "运行 examples/01_beginner/basic/basic_ops.py 与 compute 目录下任意两个示例，挑选其中一个算子（如 reduce）修改输入 shape 与 tile 设置，观察并记录结果变化。",
+          "source_files": [
+            "examples/README.md",
+            "examples/01_beginner/basic/basic_ops.py",
+            "examples/01_beginner/compute/elementwise_ops.py",
+            "examples/01_beginner/compute/matmul_ops.py",
+            "examples/01_beginner/compute/reduce_ops.py"
+          ],
+          "title": "examples 示例体系与官方文档学习路径",
+          "topic": "介绍 examples 的 beginner/intermediate/advanced 三级示例体系和 docs/zh/tutorials 官方教程的组织方式，建立自主学习路径。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "初识 PyPTO：定位、安装与源码地图"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l1-tensor-object-and-creation.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "掌握 pypto.Tensor 的构造方式与 shape/dtype/platform 属性",
+            "理解 Tensor[...] 注解在 jit 函数签名中的自动推断作用",
+            "了解 from_torch 转换与数据在 host/device 间的流动"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "python/pypto/tensor.py",
+            "python/pypto/converter.py",
+            "python/pypto/op/creation.py",
+            "docs/zh/tutorials/development/tensor_creation.md"
+          ],
+          "order": 1,
+          "practice_task": "编写一个 jit 算子：用 pypto 的创建类 API 生成常量 Tensor 并写入输出，再编写一段脚本用 pypto.converter.from_torch 把 torch.Tensor 转成 pypto Tensor 后传入算子执行。",
+          "source_files": [
+            "python/pypto/tensor.py",
+            "python/pypto/converter.py",
+            "python/pypto/op/creation.py",
+            "docs/zh/tutorials/development/tensor_creation.md"
+          ],
+          "title": "Tensor 对象与张量创建",
+          "topic": "解析 python/pypto/tensor.py 中 Tensor 类的核心属性与方法，以及 op/creation.py 中的张量创建 API 和 from_torch 转换。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-tensor-operations-and-op-api.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "掌握 math/reduction/matmul 等常用算子的调用方式",
+            "理解 pypto/op 目录按类别组织算子库的结构",
+            "能组合多个算子实现 elementwise、归约、matmul 计算"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "python/pypto/op/math.py",
+            "python/pypto/op/reduction.py",
+            "python/pypto/op/matmul.py",
+            "examples/01_beginner/compute/elementwise_ops.py",
+            "examples/01_beginner/compute/reduce_ops.py"
+          ],
+          "order": 2,
+          "practice_task": "参照 elementwise_ops.py，编写一个融合算子：对两个输入先做逐元素乘法再做按行求和，并与 torch 的等价实现对比结果。",
+          "source_files": [
+            "python/pypto/op/math.py",
+            "python/pypto/op/reduction.py",
+            "python/pypto/op/matmul.py",
+            "docs/zh/tutorials/development/tensor_operation.md",
+            "examples/01_beginner/compute/elementwise_ops.py",
+            "examples/01_beginner/compute/reduce_ops.py"
+          ],
+          "title": "Tensor 操作与算子 API 体系",
+          "topic": "讲解 python/pypto/op 下的算子库分类（math、reduction、matmul、comparison 等）与常用算子的使用方式。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "filename": "u2-l3-jit-and-first-kernel.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "理解 jit 装饰器的捕获-编译-执行三阶段过程",
+            "掌握 runtime_options（如 run_mode）的配置方法",
+            "理解算子无返回值、通过 out[:] 或 assemble 写回的设计"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "examples/00_hello_world/hello_world.py",
+            "python/pypto/frontend/__init__.py",
+            "python/pypto/runtime.py",
+            "docs/zh/tutorials/development/compile.md"
+          ],
+          "order": 3,
+          "practice_task": "把 hello_world 改造成带命令行参数的通用算子：新增一个 scale 参数实现 out[:] = (x + y) * scale，分别在 SIM 与 NPU 模式下运行并对比输出。",
+          "source_files": [
+            "examples/00_hello_world/hello_world.py",
+            "python/pypto/frontend/__init__.py",
+            "python/pypto/runtime.py",
+            "docs/zh/tutorials/introduction/quick_start.md"
+          ],
+          "title": "@pypto.jit 装饰器：从 Python 函数到可执行算子",
+          "topic": "深入 hello_world 中的 @pypto.jit 装饰器，理解 Python 函数如何被捕获、编译成算子并在设备上执行。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-tiling-and-tile-programming.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "理解 Tile 是硬件感知的数据块及其与内存层次的关系",
+            "掌握 set_vec_tile_shapes 等 tile 设置 API 的用法与约束",
+            "能对 elementwise/reduce 算子调整 tile shape 并验证正确性"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "examples/01_beginner/tiling/",
+            "python/pypto/functions.py",
+            "docs/zh/tutorials/development/tiling.md"
+          ],
+          "order": 4,
+          "practice_task": "编写一个向量算子，分别用 32x32、64x32、128x64 三组 tile shape 运行，记录结果一致性，并阅读 tiling.md 解释 tile shape 需要满足的对齐约束。",
+          "source_files": [
+            "examples/01_beginner/tiling/",
+            "docs/zh/tutorials/development/tiling.md",
+            "examples/00_hello_world/hello_world.py"
+          ],
+          "title": "Tile 编程入门：理解与设置 tile shape",
+          "topic": "介绍 Tile（硬件感知数据块）概念、set_vec_tile_shapes 等 tiling API 以及 tile shape 对性能的影响。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l5-control-flow-loops-and-conditions.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "掌握 pypto 中 for 循环的写法与循环变量的限制",
+            "掌握条件分支在 jit 算子中的表达方式",
+            "理解 Python 语法糖与可支持语法子集的边界"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "examples/02_intermediate/controlflow/loop/loop.py",
+            "examples/02_intermediate/controlflow/condition/condition.py",
+            "docs/zh/tutorials/development/loops.md",
+            "docs/zh/tutorials/development/conditions.md"
+          ],
+          "order": 5,
+          "practice_task": "参考 loop.py 与 condition.py，实现一个带边界的累乘算子：循环 N 次每步根据条件选择乘 x 或乘 y，运行并与 torch 等价实现对比。",
+          "source_files": [
+            "examples/02_intermediate/controlflow/loop/loop.py",
+            "examples/02_intermediate/controlflow/condition/condition.py",
+            "docs/zh/tutorials/development/loops.md",
+            "docs/zh/tutorials/development/conditions.md"
+          ],
+          "title": "控制流编程：循环与条件",
+          "topic": "讲解 PyPTO 算子内的循环与条件控制流写法，以及它们在编译期的处理方式。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u2-l6-dynamic-shape-and-symbolic-scalar.md",
+          "id": "u2-l6",
+          "learning_goals": [
+            "理解符号化标量与动态 shape 的语义和 SatStatus 含义",
+            "掌握动态 shape 算子的编写方法",
+            "理解动态 shape 对 tiling 与编译的影响"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "python/pypto/symbolic_scalar.py",
+            "examples/02_intermediate/controlflow/others/dynamic.py",
+            "docs/zh/tutorials/appendix/faq/symbolic-scalar-no-increment.md"
+          ],
+          "order": 6,
+          "practice_task": "参考 dynamic.py 编写一个支持动态 M 维度的向量加法算子，用两个不同的 shape 调用同一编译产物，验证结果正确并观察是否触发重新编译。",
+          "source_files": [
+            "python/pypto/symbolic_scalar.py",
+            "examples/02_intermediate/controlflow/others/dynamic.py",
+            "examples/02_intermediate/controlflow/others/kernel_input.py",
+            "docs/zh/tutorials/appendix/faq/symbolic-scalar-no-increment.md"
+          ],
+          "title": "动态 Shape 与 SymbolicScalar 符号化编程",
+          "topic": "讲解 SymbolicScalar 符号标量机制与动态 shape 编程，理解符号化编程在编译期与运行期的处理。"
+        }
+      ],
+      "level": "beginner",
+      "order": 2,
+      "title": "Python 前端编程基础"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l3",
+            "u2-l3"
+          ],
+          "filename": "u3-l1-frontend-entry-and-jit-internals.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "理解 frontend/parser/entry.py 的入口职责与调用链",
+            "描述 Python 函数从被 jit 捕获到生成 PIL 的完整路径",
+            "了解 diagnostics 诊断机制的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "python/pypto/frontend/__init__.py",
+            "python/pypto/frontend/parser/entry.py",
+            "python/pypto/frontend/parser/context.py",
+            "python/pypto/frontend/parser/diagnostics.py"
+          ],
+          "order": 1,
+          "practice_task": "在本地给 entry.py 的关键入口函数加日志（或用断点），运行一个 jit 算子并记录捕获、解析、编译各阶段被调用的函数名与顺序，画出调用时序。",
+          "source_files": [
+            "python/pypto/frontend/__init__.py",
+            "python/pypto/frontend/parser/entry.py",
+            "python/pypto/frontend/parser/context.py",
+            "python/pypto/frontend/parser/diagnostics.py"
+          ],
+          "title": "前端架构与 jit 入口源码剖析",
+          "topic": "剖析 python/pypto/frontend 的整体架构：jit 装饰器入口、entry.py 的捕获流程、context 与诊断机制。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-ast-parser-internals.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 parser.py 如何遍历 AST 并生成中间表示",
+            "掌握 PyPTO 支持的 Python 语法子集及其映射规则",
+            "能根据报错定位到对应的语法限制"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "python/pypto/frontend/parser/parser.py",
+            "python/pypto/frontend/parser/evaluator.py",
+            "python/pypto/frontend/developer_doc.md"
+          ],
+          "order": 2,
+          "practice_task": "写三个分别含列表推导式、闭包、增量循环的 jit 函数，预测哪些能编译通过并实测验证，再在 parser.py 中找到抛出相应诊断的位置。",
+          "source_files": [
+            "python/pypto/frontend/parser/parser.py",
+            "python/pypto/frontend/parser/evaluator.py",
+            "python/pypto/frontend/developer_doc.md"
+          ],
+          "title": "Python AST 解析器：parser.py 源码精读",
+          "topic": "精读 frontend/parser/parser.py（约 1700 行），理解 Python AST 如何被解析成框架内部表示，以及支持/不支持的语法子集。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-pil-intermediate-representation.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "列举 PIL 的核心节点类型（函数、语句、表达式）",
+            "理解 pil_builder.py 构造 PIL 的 API 设计",
+            "能读懂一份 PIL 文本并对应回 Python 源码"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "python/pypto/frontend/parser/pil.py",
+            "python/pypto/frontend/parser/pil_builder.py",
+            "python/pypto/frontend/parser/pil_io_text.py",
+            "python/pypto/frontend/parser/pil_parser.py"
+          ],
+          "order": 3,
+          "practice_task": "把 hello_world 的 add 算子 dump 成 PIL 文本（参考 pil_io_text.py），逐行标注每个节点与 Python 源语句的对应关系。",
+          "source_files": [
+            "python/pypto/frontend/parser/pil.py",
+            "python/pypto/frontend/parser/pil_builder.py",
+            "python/pypto/frontend/parser/pil_io_text.py",
+            "python/pypto/frontend/parser/pil_parser.py"
+          ],
+          "title": "PIL 中间表示：结构、构建与文本格式",
+          "topic": "讲解 PIL（PyPTO Intermediate Language）的数据结构定义、builder 构建方式与可读文本格式，理解 Python 代码被翻译成 PIL 后的样子。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l4-pil-to-ir-conversion.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "理解 pir.py 中 PIL 到 IR 的映射规则",
+            "掌握 pil2ir.py 的转换流程与 dispatcher 的分发逻辑",
+            "认识 IR 层算子与前端算子的对应关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "python/pypto/pil/pil2ir.py",
+            "python/pypto/pil/pir.py",
+            "python/pypto/pil/dispatcher.py"
+          ],
+          "order": 4,
+          "practice_task": "追踪 pypto.add 从 op/math.py 到 dispatcher 分发再到 IR 节点生成的完整路径，绘制一条调用链图并标注每层的函数名。",
+          "source_files": [
+            "python/pypto/pil/pil2ir.py",
+            "python/pypto/pil/pir.py",
+            "python/pypto/pil/dispatcher.py"
+          ],
+          "title": "从 PIL 到 IR：pil2ir 转换与派发器",
+          "topic": "剖析 pil/pil2ir.py 与 pir.py，理解 PIL 如何被转换（lowering）为框架 IR，以及 dispatcher 的算子分发机制。"
+        },
+        {
+          "action": "update",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u3-l5-compile-pipeline-and-op-registry.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "描述 compile_pipeline.py 中各阶段（解析、转换、编译）的顺序",
+            "理解 op_registry 的注册与查找机制",
+            "掌握 liveness 分析在输出写回中的作用",
+            "理解 ops.py 中 _dyn_for 动态循环展开的边界对齐计算（含最新的 nstart/nstep 修正）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "python/pypto/pil/compile_pipeline.py",
+            "python/pypto/pil/op_registry.py",
+            "python/pypto/pil/ops.py",
+            "python/pypto/frontend/parser/liveness.py"
+          ],
+          "order": 5,
+          "practice_task": "在 op_registry 中注册一个自定义的简单算子（如 x*y+1 的融合版本），编写 jit 函数调用它并验证编译与执行结果；再阅读 ops.py 中 _dyn_for 的循环展开边界计算（nstop = nstart + (loop.stop - nstart) // nstep * nstep），解释修复后为什么动态循环的各 unroll 段边界不再依赖 loop.start。",
+          "source_files": [
+            "python/pypto/pil/compile_pipeline.py",
+            "python/pypto/pil/op_registry.py",
+            "python/pypto/pil/ops.py",
+            "python/pypto/frontend/parser/liveness.py",
+            "python/tests/ut/ir/test_pil.py"
+          ],
+          "title": "编译流水线与算子注册机制",
+          "topic": "讲解 pil/compile_pipeline.py 的编译流水线组织、ops.py 的算子定义方式（含 pypto.loop 动态循环展开 _dyn_for 的边界对齐修复）与 op_registry 注册机制。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "前端编译器源码：从 Python 到 PIL 到 IR"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l4",
+            "u1-l3"
+          ],
+          "filename": "u4-l1-framework-ir-core-objects.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "认识 IR 层核心对象：Program、Function、Op、MemRef、Type、Stmt",
+            "理解 builder.cpp 的图构建方式与 verifier 的校验作用",
+            "建立 Python IR 与 C++ IR 的概念对应"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "framework/include/ir/core.h",
+            "framework/include/ir/program.h",
+            "framework/src/interface/ir/builder.cpp",
+            "framework/src/interface/ir/core.cpp"
+          ],
+          "order": 1,
+          "practice_task": "对照 include/ir 下的头文件，绘制 IR 核心类关系图（Program-Function-Op-Stmt-MemRef），并给每个类标注一句话职责。",
+          "source_files": [
+            "framework/include/ir/core.h",
+            "framework/include/ir/program.h",
+            "framework/include/ir/memref.h",
+            "framework/src/interface/ir/builder.cpp",
+            "framework/src/interface/ir/core.cpp"
+          ],
+          "title": "C++ 框架与 IR 核心对象",
+          "topic": "介绍 framework 目录的 C++ 源码组织，以及 include/ir 与 interface/ir 中的核心 IR 对象（Program、Function、Op、MemRef、Type、Stmt）。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-pass-manager-and-config.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解 PassManager 驱动 pass 序列执行的方式",
+            "掌握 pass_config.py 中启用/禁用 pass 的配置方法",
+            "理解 pass_check 与 pass_log 的调试支撑作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "framework/src/passes/pass_mgr/",
+            "python/pypto/pass_config.py",
+            "framework/src/passes/pass_check/",
+            "framework/src/passes/pass_log/"
+          ],
+          "order": 2,
+          "practice_task": "用 pass_config.py 提供的配置接口禁用 tensor graph 的 remove_redundant_reshape pass，运行一个含 reshape 的算子，对比编译中间产物差异（无真机时用 SIM 模式）。",
+          "source_files": [
+            "framework/src/passes/pass_mgr/",
+            "python/pypto/pass_config.py",
+            "framework/src/passes/pass_check/",
+            "framework/src/passes/pass_log/"
+          ],
+          "title": "Pass 管理器与编译配置",
+          "topic": "讲解 pass_mgr 的 Pass 管理框架、python 侧 pass_config.py 的 pass 开关配置，以及 pass_check/pass_log 等基础设施。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-tensor-graph-passes.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "列举 tensor graph 阶段的主要 pass 及其职责",
+            "理解 derivation_tile_shape/set_heuristic_tile_shapes 如何决定 tile shape",
+            "理解 auto_cast 类型提升与 infer_memory_conflict 内存冲突检测的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "framework/src/passes/tensor_graph_pass/derivation_tile_shape.cpp",
+            "framework/src/passes/tensor_graph_pass/set_heuristic_tile_shapes.cpp",
+            "framework/src/passes/tensor_graph_pass/auto_cast.cpp",
+            "framework/src/passes/tensor_graph_pass/loop_unroll.cpp"
+          ],
+          "order": 3,
+          "practice_task": "阅读 derivation_tile_shape.cpp 与 set_heuristic_tile_shapes.cpp，用一个 matmul 算子 dump 编译中间产物，找到 tile shape 被推导或改写的证据并解释规则。",
+          "source_files": [
+            "framework/src/passes/tensor_graph_pass/derivation_tile_shape.cpp",
+            "framework/src/passes/tensor_graph_pass/set_heuristic_tile_shapes.cpp",
+            "framework/src/passes/tensor_graph_pass/auto_cast.cpp",
+            "framework/src/passes/tensor_graph_pass/loop_unroll.cpp",
+            "framework/src/passes/tensor_graph_pass/remove_redundant_reshape.cpp"
+          ],
+          "title": "Tensor Graph Pass：从张量图到 Tile 图的铺垫",
+          "topic": "精读 tensor_graph_pass 目录：tile shape 推导、启发式 tile 设置、auto_cast 类型提升、循环展开、冗余 reshape 消除等 pass。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u4-l4-tile-graph-passes.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "理解 tile graph 阶段图优化与图划分的目标",
+            "理解 static_subgraph_processor 与 subgraph_to_function 如何把子图变成函数",
+            "认识 graph_constraint/graph_partition/data_path 子模块的分工"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "framework/src/passes/tile_graph_pass/static_subgraph_processor.cpp",
+            "framework/src/passes/tile_graph_pass/subgraph_to_function.cpp",
+            "framework/src/passes/tile_graph_pass/graph_partition/",
+            "framework/src/passes/tile_graph_pass/graph_optimization/"
+          ],
+          "order": 4,
+          "practice_task": "在 tile graph 的某个优化 pass 中加入一条日志输出被处理的节点信息，运行一个 elementwise 算子并收集日志，说明该 pass 改变了什么。",
+          "source_files": [
+            "framework/src/passes/tile_graph_pass/static_subgraph_processor.cpp",
+            "framework/src/passes/tile_graph_pass/subgraph_to_function.cpp",
+            "framework/src/passes/tile_graph_pass/graph_partition/",
+            "framework/src/passes/tile_graph_pass/graph_optimization/"
+          ],
+          "title": "Tile Graph Pass：图优化、约束与子图处理",
+          "topic": "剖析 tile_graph_pass 目录：graph_optimization、graph_partition、graph_constraint、data_path 与子图到函数的转换。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "filename": "u4-l5-block-graph-passes-and-scheduling.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "理解 block graph 阶段面向调度与代码生成的 pass 设计",
+            "理解 insert_sync/tune_sync_for_vf 等同步插入 pass 的作用",
+            "理解 prior_scheduling 与 schedule_ooo 的调度策略差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "framework/src/passes/block_graph_pass/insert_sync.cpp",
+            "framework/src/passes/block_graph_pass/prior_scheduling.cpp",
+            "framework/src/passes/block_graph_pass/schedule_ooo/",
+            "framework/src/passes/block_graph_pass/memory_reuse/"
+          ],
+          "order": 5,
+          "practice_task": "对比插入同步 pass 前后同一算子的编译产物（参考 docs/zh/tutorials/appendix/env_vars/PYPTO_DATADUMP_ENABLE.md 打开 dump），解释 insert_sync 为什么在这些位置插入同步。",
+          "source_files": [
+            "framework/src/passes/block_graph_pass/insert_sync.cpp",
+            "framework/src/passes/block_graph_pass/prior_scheduling.cpp",
+            "framework/src/passes/block_graph_pass/schedule_ooo/",
+            "framework/src/passes/block_graph_pass/memory_reuse/",
+            "framework/src/passes/block_graph_pass/codegen_preproc.cpp"
+          ],
+          "title": "Block Graph Pass：调度、同步与内存复用",
+          "topic": "剖析 block_graph_pass 目录：prior_scheduling 优先级调度、schedule_ooo 乱序调度、insert_sync 同步插入、memory_reuse 内存复用与 mix_subgraph_split 混合子图切分。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "C++ 编译框架：多层图与 Pass 体系"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l5"
+          ],
+          "filename": "u5-l1-codegen-and-virtual-instructions.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "理解 codegen_factory 的多后端代码生成架构",
+            "理解 codegen_cce 如何把 IR 节点翻译为 PTO 虚拟指令",
+            "能读懂 dump 出来的虚拟指令片段"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "framework/src/codegen/codegen.cpp",
+            "framework/src/codegen/codegen_cce.cpp",
+            "framework/src/codegen/codegen_op.cpp",
+            "framework/src/codegen/codegen_factory.h"
+          ],
+          "order": 1,
+          "practice_task": "dump 一个简单 elementwise 算子的虚拟指令产物，逐条注释指令含义（加载、计算、写回），统计指令条数并说明与 tile shape 的关系。",
+          "source_files": [
+            "framework/src/codegen/codegen.cpp",
+            "framework/src/codegen/codegen_cce.cpp",
+            "framework/src/codegen/codegen_op.cpp",
+            "framework/src/codegen/codegen_factory.h",
+            "docs/zh/tutorials/appendix/env_vars/PTO_TILE_LIB_CODE_PATH.md"
+          ],
+          "title": "CodeGen：从 Block Graph 到 PTO 虚拟指令",
+          "topic": "剖析 framework/src/codegen：codegen 工厂、codegen_cce 后端如何将执行图生成 PTO 虚拟指令代码。"
+        },
+        {
+          "action": "update",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-machine-layer-host-device-runtime.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "理解 machine/host 中 backend/ir_backend/main_block 的职责",
+            "理解 machine/runtime 中 bundle/launcher/runner 的加载执行链路",
+            "理解 kernel_binary.cpp 中 KernelBinary 构造时按芯片架构（LiteNPU 跳过设备参数初始化）的条件分支",
+            "描述一次 kernel 调用从 host 发起到设备完成的流程"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "framework/src/machine/host/backend.cpp",
+            "framework/src/machine/host/main_block.cpp",
+            "framework/src/machine/runtime/launcher/",
+            "framework/src/machine/runtime/runner/"
+          ],
+          "order": 2,
+          "practice_task": "梳理并绘制「host 发起 → 编译产物加载 → 设备执行 → 结果回读」的时序图，标注每步对应的源码目录；重点阅读 runner/kernel_binary.cpp 的 KernelBinary 构造函数，解释最新修改中为什么 LiteNPU 架构不需要 InitCachedArgs/InitLaunchArgs/InitDeviceArgs，并对照 PYPTO_LAUNCH_SCHED_SAME_CLUSTER 文档理解调度环境变量。",
+          "source_files": [
+            "framework/src/machine/host/backend.cpp",
+            "framework/src/machine/host/main_block.cpp",
+            "framework/src/machine/host/ir_backend.cpp",
+            "framework/src/machine/runtime/launcher/",
+            "framework/src/machine/runtime/runner/kernel_binary.cpp",
+            "docs/zh/tutorials/appendix/env_vars/PYPTO_LAUNCH_SCHED_SAME_CLUSTER.md"
+          ],
+          "title": "机器层：host/device/runtime 三端架构",
+          "topic": "介绍 framework/src/machine 的 host、device、runtime 子模块，理解编译产物如何被加载、启动和执行（含 runner/kernel_binary.cpp 中 LiteNPU 跳过设备参数初始化的最新调整）。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-mpmd-execution-and-distributed.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "理解 MPMD 与 SPMD 的区别及 PyPTO 的选择理由",
+            "理解跨核同步（barrier、cross-core wait）API 的语义",
+            "了解 distributed 通信算子的使用场景"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "python/pypto/op/distributed.py",
+            "framework/src/machine/runtime/distributed/",
+            "docs/zh/pypto_pro/api/SIMD-API/operation/synchronization/barrier.md"
+          ],
+          "order": 3,
+          "practice_task": "编写（或改造示例为）一个按核切分数据的算子，使用跨核同步 API 保证各核写回顺序，运行验证正确性并解释去掉同步会发生什么。",
+          "source_files": [
+            "python/pypto/op/distributed.py",
+            "framework/src/machine/runtime/distributed/",
+            "framework/src/interface/interpreter/communication.cpp",
+            "docs/zh/pypto_pro/api/SIMD-API/operation/synchronization/barrier.md",
+            "docs/zh/pypto_pro/api/SIMD-API/operation/synchronization/sync_all.md"
+          ],
+          "title": "MPMD 执行模型与分布式通信",
+          "topic": "讲解 MPMD（Multiple Program Multiple Data）多核调度模型、多算子协同执行，以及 op/distributed.py 中的分布式通信算子。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l4-simulation-and-interpreter.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "掌握 RunMode.SIM 仿真模式的原理与用法",
+            "理解 interpreter 各 calc 模块如何逐条解释执行算子",
+            "能利用解释器定位算子数值错误"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "framework/src/machine/simulation/aicore_hardware.cpp",
+            "framework/src/interface/interpreter/calc.cpp",
+            "framework/src/interface/interpreter/calc_vector.cpp",
+            "python/tests/ut/interpreter/test_apply_adam_w_v2.py"
+          ],
+          "order": 4,
+          "practice_task": "在 SIM 模式下运行 python/tests/ut/interpreter 中的一个测试（如 test_apply_adam_w_v2.py），打开解释器日志观察单条指令的解释过程，记录至少 5 条指令的执行轨迹。",
+          "source_files": [
+            "framework/src/machine/simulation/aicore_hardware.cpp",
+            "framework/src/interface/interpreter/calc.cpp",
+            "framework/src/interface/interpreter/calc_vector.cpp",
+            "framework/src/interface/interpreter/calc_cube.cpp",
+            "python/tests/ut/interpreter/test_apply_adam_w_v2.py"
+          ],
+          "title": "仿真模式与解释器：不依赖真机的执行路径",
+          "topic": "剖析 machine/simulation 的 AI Core 仿真与 interface/interpreter 的指令解释执行（calc_vector/calc_cube 等），理解 SIM 模式与数值 verify 机制。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 5,
+      "title": "代码生成与运行时执行"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l4",
+            "u1-l3"
+          ],
+          "filename": "u6-l1-pypto-pro-overview-and-language-api.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "理解 pypto_pro 与 pypto 的分层关系与适用人群",
+            "掌握 language 层核心 API（数据搬运、SIMD 计算、同步）",
+            "能读懂一个 pypto_pro 编写的 kernel"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "python/pypto_pro/__init__.py",
+            "python/pypto_pro/language/_api.py",
+            "python/pypto_pro/language/_vf_api.py",
+            "docs/zh/pypto_pro/api/index.md"
+          ],
+          "order": 1,
+          "practice_task": "阅读 language/_api.py 中的数据搬运与计算 API，写一个最小 pypto_pro kernel：把输入 tile 搬入本地内存、做逐元素计算后搬出，运行验证结果。",
+          "source_files": [
+            "python/pypto_pro/__init__.py",
+            "python/pypto_pro/language/_api.py",
+            "python/pypto_pro/language/_vf_api.py",
+            "docs/zh/pypto_pro/api/index.md"
+          ],
+          "title": "pypto_pro 低层编程概览与语言层 API",
+          "topic": "介绍 python/pypto_pro 包的定位（Tile/Block 低层编程），以及 language 层暴露的核心 API。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-pypto-pro-ir-builder.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "理解 builder.py 构建 pypto_pro IR 的方式",
+            "理解 op_conversion.py 中算子到低层操作的转换",
+            "能对比 pypto 前端 IR 与 pypto_pro IR 的抽象层级差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "python/pypto_pro/ir/builder.py",
+            "python/pypto_pro/ir/op_conversion.py",
+            "python/pypto_pro/ir/type.py",
+            "python/pypto_pro/ir/printer.py"
+          ],
+          "order": 2,
+          "practice_task": "用 ir/builder.py 的接口手工构建一个两节点小 IR（如 load→add），用 printer 打印出来，再对照 op_conversion.py 里一个自动转换案例说明差异。",
+          "source_files": [
+            "python/pypto_pro/ir/builder.py",
+            "python/pypto_pro/ir/op_conversion.py",
+            "python/pypto_pro/ir/type.py",
+            "python/pypto_pro/ir/printer.py",
+            "python/pypto_pro/ir/_operators.py"
+          ],
+          "title": "pypto_pro IR 构建器与算子转换",
+          "topic": "剖析 pypto_pro/ir 的 builder、op_conversion、printer，理解低层 IR 如何被构建与转换。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l3-pypto-pro-runtime-jit-and-kernel.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "理解 pypto_pro/runtime/jit.py 的编译入口与 kernel 生命周期",
+            "理解 tilingkey 机制如何支撑多 shape 复用",
+            "掌握 compile_config/shape_policy 的调优入口"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "python/pypto_pro/runtime/jit.py",
+            "python/pypto_pro/runtime/kernel.py",
+            "python/pypto_pro/runtime/tilingkey.py",
+            "python/pypto_pro/runtime/shape_policy.py",
+            "python/pypto_pro/runtime/compile_config.py"
+          ],
+          "order": 3,
+          "practice_task": "定义两个不同 shape 的输入调用同一 pypto_pro jit 函数，观察 tilingkey 的变化与编译缓存行为，并用日志记录第二次调用是否复用编译产物。",
+          "source_files": [
+            "python/pypto_pro/runtime/jit.py",
+            "python/pypto_pro/runtime/kernel.py",
+            "python/pypto_pro/runtime/tilingkey.py",
+            "python/pypto_pro/runtime/shape_policy.py",
+            "python/pypto_pro/runtime/compile_config.py"
+          ],
+          "title": "pypto_pro 运行时：jit、kernel 与 tilingkey",
+          "topic": "剖析 pypto_pro/runtime 的 jit 装饰、kernel 管理、tilingkey 多形态复用与 shape 策略。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 6,
+      "title": "pypto_pro：面向性能专家的低层编程"
+    },
+    {
+      "id": "u7",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u7-l1-function-composition-and-reuse.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "掌握 Function 定义与在多个 jit 算子中的复用方法",
+            "理解 multi_jit 多算子组合的运行方式",
+            "理解算子库分层复用的组织思路"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "python/pypto/functions.py",
+            "examples/03_advanced/patterns/function/function.py",
+            "examples/03_advanced/patterns/function/multi_jit.py"
+          ],
+          "order": 1,
+          "practice_task": "参考 examples/03_advanced/patterns/function，把一个融合算子拆成两个可复用的 Function（如 norm 与 activation），再在两个不同 jit 入口中组合它们并分别验证结果。",
+          "source_files": [
+            "python/pypto/functions.py",
+            "examples/03_advanced/patterns/function/function.py",
+            "examples/03_advanced/patterns/function/multi_jit.py"
+          ],
+          "title": "Function 机制：多函数组合与算子复用",
+          "topic": "讲解 python/pypto/functions.py 的 Function 抽象与多 jit 函数组合模式，实现算子级复用。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l4",
+            "u7-l1"
+          ],
+          "filename": "u7-l2-cost-model-and-performance.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "理解 cost_model 估算算子开销的思路",
+            "掌握使用 cost model 辅助选择 tile shape 的方法",
+            "掌握基础的性能数据采集与分析方法"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "python/pypto/cost_model.py",
+            "framework/src/cost_model/",
+            "examples/03_advanced/cost_model/cost_model.py",
+            "docs/zh/tutorials/debug/performance.md"
+          ],
+          "order": 2,
+          "practice_task": "运行 examples/03_advanced/cost_model/cost_model.py，对同一个 matmul 用 cost model 比较至少 3 组 tile 方案，选出最优方案并用实测（或 SIM）验证预估是否准确。",
+          "source_files": [
+            "python/pypto/cost_model.py",
+            "framework/src/cost_model/",
+            "examples/03_advanced/cost_model/cost_model.py",
+            "docs/zh/tutorials/debug/performance.md"
+          ],
+          "title": "代价模型与性能优化方法",
+          "topic": "讲解 python/pypto/cost_model.py 与 framework/src/cost_model 的代价估计机制，结合性能调优文档实践性能优化。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u7-l3-precision-and-quantization.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "掌握 quantization 算子的使用与量化反量化流程",
+            "理解 verify 机制与精度对比方法",
+            "了解精度问题的常见定位手段"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "python/pypto/op/quantization.py",
+            "python/pypto/op/verify.py",
+            "framework/src/operator/quantize/",
+            "docs/zh/tutorials/debug/precision.md"
+          ],
+          "order": 3,
+          "practice_task": "编写一个量化 matmul 算子（量化输入→matmul→反量化输出），用 op/verify.py 的 verify 机制与 fp32 基线对比相对误差，并记录误差随 scale 的变化。",
+          "source_files": [
+            "python/pypto/op/quantization.py",
+            "python/pypto/op/verify.py",
+            "framework/src/operator/quantize/",
+            "docs/zh/tutorials/debug/precision.md"
+          ],
+          "title": "精度处理与量化算子",
+          "topic": "讲解 op/quantization.py 量化算子、C++ operator/quantize 实现，以及精度验证与调优方法。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "filename": "u7-l4-debugging-and-troubleshooting.md",
+          "id": "u7-l4",
+          "learning_goals": [
+            "掌握通过环境变量控制 dump 与调试输出",
+            "掌握常见报错（tile 对齐、shape 不匹配、AI Core 异常）的定位流程",
+            "了解工具链可视化分析编译产物的方法"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "docs/zh/tutorials/debug/debug.md",
+            "docs/zh/tutorials/appendix/trouble_shooting/index.md",
+            "docs/zh/tutorials/appendix/faq/aicore-exception.md",
+            "docs/zh/tutorials/appendix/faq/tileshape-32byte-alignment.md"
+          ],
+          "order": 4,
+          "practice_task": "故意写一个 tile shape 不满足 32 字节对齐的算子复现 FAQ 中的报错，按照 trouble_shooting 文档定位并修复，再打开 PYPTO_DATADUMP_ENABLE dump 编译产物完成一次完整排障演练。",
+          "source_files": [
+            "docs/zh/tutorials/debug/debug.md",
+            "docs/zh/tutorials/appendix/trouble_shooting/index.md",
+            "docs/zh/tutorials/appendix/faq/aicore-exception.md",
+            "docs/zh/tutorials/appendix/faq/tileshape-32byte-alignment.md",
+            "docs/zh/tutorials/appendix/env_vars/PYPTO_DATADUMP_ENABLE.md"
+          ],
+          "title": "调试体系：环境变量、FAQ 与问题定位",
+          "topic": "汇总 docs/zh/tutorials/debug 与 appendix 的调试手段：dump 编译中间产物、环境变量控制、常见 FAQ 与 AI Core 异常定位。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u7-l5-pytorch-integration.md",
+          "id": "u7-l5",
+          "learning_goals": [
+            "掌握 from_torch 的数据转换与零拷贝行为",
+            "掌握 PyPTO 自定义算子接入 torch Module 的方式",
+            "理解 aclgraph 等图集成模式的适用场景"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "python/pypto/converter.py",
+            "docs/zh/tutorials/network_integration/pytorch_integration.md",
+            "examples/03_advanced/aclgraph/aclgraph.py",
+            "examples/02_intermediate/basic_nn/ffn/ffn_module.py"
+          ],
+          "order": 5,
+          "practice_task": "把 examples/02_intermediate/basic_nn/ffn 中的 FFN 模块替换成自己的 PyPTO 融合算子版本，在 torch 中跑通前向并对比原实现的输出与耗时。",
+          "source_files": [
+            "python/pypto/converter.py",
+            "docs/zh/tutorials/network_integration/pytorch_integration.md",
+            "examples/03_advanced/aclgraph/aclgraph.py",
+            "examples/02_intermediate/basic_nn/ffn/ffn_module.py"
+          ],
+          "title": "与 PyTorch 集成：整网接入",
+          "topic": "讲解 converter.from_torch 的互操作机制、PyTorch 网络集成文档与 aclgraph 示例，把 PyPTO 算子嵌入已有训练/推理网络。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u7-l1",
+            "u7-l3"
+          ],
+          "filename": "u7-l6-real-model-attention-and-moe.md",
+          "id": "u7-l6",
+          "learning_goals": [
+            "读懂 GLM attention 实现的 tile 划分与循环结构",
+            "理解 experts selector/MoE 类算子的实现要点",
+            "掌握从模型示例到自研融合算子的迁移方法"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "models/glm_v4_5/glm_attention.py",
+            "models/glm_v4_5/glm_select_experts.py",
+            "models/deepseek_v32_exp/deepseekv32_sparse_flash_attention_quant.py",
+            "python/tests/ut/interpreter/test_flash_attention_mha.py"
+          ],
+          "order": 6,
+          "practice_task": "选取 models/glm_v4_5/glm_attention.py 中的一个核心循环，画出其 tile 数据流图（load/compute/store 与同步位置），然后仿照它实现一个简化的单头 attention 并用 SIM 模式验证正确性。",
+          "source_files": [
+            "models/glm_v4_5/glm_attention.py",
+            "models/glm_v4_5/glm_select_experts.py",
+            "models/deepseek_v32_exp/deepseekv32_sparse_flash_attention_quant.py",
+            "examples/03_advanced/advanced_nn/attention/attention.py"
+          ],
+          "title": "大模型实战：Attention 与 MoE 算子",
+          "topic": "以 models 目录的 GLM attention、experts selector 与 DeepSeek 稀疏量化 attention 为例，学习大模型融合算子的真实实现。"
+        },
+        {
+          "action": "update",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u7-l7-testing-and-contribution.md",
+          "id": "u7-l7",
+          "learning_goals": [
+            "了解 UT/ST/解释器测试的分类与运行方式",
+            "理解 kirin UT 的组织方式：common 公共库（compare_cos 余弦相似度、check_nan 校验）、conftest 全局仿真精度配置与 camodel 运行模式",
+            "掌握贡献文档规定的开发与提交流程",
+            "能为新算子补充一个单元测试"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "python/tests/ut/interpreter/test_apply_adam_w_v2.py",
+            "conftest.py",
+            "pytest.ini",
+            "CONTRIBUTION.md"
+          ],
+          "order": 7,
+          "practice_task": "按照现有测试的组织方式（参考 kirin/common.py 的 compare_cos 与 check_nan、common_cmp.py 的表驱动参数化写法），为你在 u7-l1 写的可复用 Function 补充一个 pytest 单元测试（含 cos 相似度与 NaN 的 golden 对比），并按 CONTRIBUTION.md 的清单自查代码风格。",
+          "source_files": [
+            "python/tests/ut/interpreter/test_apply_adam_w_v2.py",
+            "conftest.py",
+            "pytest.ini",
+            "CONTRIBUTION.md",
+            "examples/validate_examples.py",
+            "python/tests/ut/kirin/common.py",
+            "python/tests/ut/kirin/conftest.py",
+            "python/tests/ut/kirin/common_cmp.py"
+          ],
+          "title": "测试体系与贡献流程",
+          "topic": "介绍 python/tests 的 ut/st 组织（含最新 kirin UT 的 camodel 运行方式、compare_cos 真实余弦相似度校验、check_nan 与 simulation.accuracy_level 全局配置）、validate_examples 示例校验、CI 配置与 CONTRIBUTION 贡献流程。"
+        }
+      ],
+      "level": "advanced",
+      "order": 7,
+      "title": "高级主题：性能、精度与二次开发实战"
+    }
+  ]
+}
