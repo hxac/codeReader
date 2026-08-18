@@ -1,0 +1,459 @@
+{
+  "head": "665c840782baf7faae8a8b244ea313f3cfcc346f",
+  "project": "DeepSeek-Math-V2",
+  "rationale": "本仓库是 DeepSeekMath-V2 模型的官方发布仓库，代码量很小但逻辑高度浓缩：核心只有 inference/ 目录下的四个 Python 文件（main.py 多轮编排、generate.py 异步 API 生成引擎、math_templates.py 提示词模板、utils.py 输出解析）加上 run.sh 入口，配合 inputs/ 的竞赛题数据和 outputs/ 的模型预测结果。因此学习路线设计为：先从 README 与论文 PDF 建立对\"生成—验证—元验证—精炼\"自我验证闭环的宏观认识，并弄清输入输出数据格式与运行方式（入门单元 u1）；然后自底向上拆解两块基础设施——generate.py 的异步并发与断点续跑机制（u2）、四个提示词模板与输出解析工具（u3）；再进入 main.py 主循环，按数据流向依次讲解证明验证准备、元验证准备（u4），以及最复杂的证明池持久化、多证明聚合与精炼输入构造（u5，进阶难点）；最后从测试时计算扩展的视角理解各超参数如何控制验证算力规模，并做二次开发实践（u6）。依赖关系严格按照\"先数据格式与运行、再底层引擎与解析、再主循环阶段、最后聚合与调参扩展\"的顺序排列，每篇讲义都绑定真实源码文件与一个可动手的代码任务。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 DeepSeekMath-V2 的核心主张：用验证器作为奖励模型训练生成器，实现自验证的数学推理",
+            "列举仓库顶层目录（figures、inputs、outputs、inference、DeepSeekMath_V2.pdf）各自的用途",
+            "解释生成-验证差距（generation-verification gap）与测试时算力扩展的关系"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README.md 的 Introduction 与 Evaluation Results 小节",
+            "论文 PDF 的标题与摘要",
+            "仓库顶层目录结构"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README.md 的 Introduction，并打开 DeepSeekMath_V2.pdf 阅读标题与摘要；然后用 200 字以内写出『生成器—验证器—元验证器』三者在这个项目中各自扮演的角色，并对照 figures/IMO-ProofBench.png 与 figures/Competitions.png 记录模型在 IMO 2025、CMO 2024、Putnam 2024 上的大致成绩。",
+          "source_files": [
+            "README.md",
+            "DeepSeekMath_V2.pdf",
+            "figures/IMO-ProofBench.png",
+            "figures/Competitions.png"
+          ],
+          "title": "项目定位与总体架构：DeepSeekMath-V2 是什么",
+          "topic": "介绍 DeepSeekMath-V2 的研究动机（自验证的数学推理、定理证明）与仓库整体结构。说明本仓库是模型发布仓库而非训练代码库，核心可读代码集中在 inference/ 目录。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-data-formats.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "描述 inputs/*.json 中每道题的字段：id、question、answer、contest、problem_idx",
+            "描述 outputs/*.jsonl 中 model_prediction 等字段与输入字段的对应关系",
+            "区分 .json（整份数组）与 .jsonl（每行一条记录）两种读写方式"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "inputs/IMO2025.json",
+            "inputs/CMO2024.json",
+            "outputs/IMO2025.jsonl",
+            "outputs/README.md"
+          ],
+          "order": 2,
+          "practice_task": "写一个 inspect_data.py 脚本：加载 inputs/IMO2025.json 与 inputs/CMO2024.json，打印每份文件的题目数量和全部字段名；再逐行读取 outputs/IMO2025.jsonl，统计共几条记录，并打印第一条记录中除 question 外的所有顶层键及其类型。",
+          "source_files": [
+            "inputs/IMO2025.json",
+            "inputs/CMO2024.json",
+            "inputs/CMO2025.json",
+            "inputs/Putnam2024.json",
+            "outputs/IMO2025.jsonl",
+            "outputs/README.md"
+          ],
+          "title": "输入与输出数据格式：竞赛题与模型预测",
+          "topic": "讲解 inputs/ 目录下竞赛题目 JSON 的字段结构（id、question、answer、contest、problem_idx）与 outputs/ 目录下模型预测 jsonl 的结构，为后续阅读流水线代码建立数据直觉。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "filename": "u1-l3-run-the-pipeline.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "说明 run.sh 中各参数（input_paths、output_dirname、proof_pool_dirname、n_best_proofs_to_sample 等）的含义",
+            "在 generate.py 中定位 api_key 与 base_url 的填写位置",
+            "指出直接运行 main.py 会因 proof_gen_url、proof_rate_url、infer_script 未在 argparse 中注册而报错这一发布代码的待确认问题"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "inference/run.sh",
+            "inference/main.py 的 argparse 段（第 19-65 行）",
+            "inference/generate.py 的 APIModel.__init__",
+            "inference/README.md"
+          ],
+          "order": 3,
+          "practice_task": "把 inference/ 复制为 inference_mini/，制作一个只含 1 道题的 mytest.json 输入文件；在 generate.py 中填入可用的 api_key 与 base_url；为 main.py 的 argparse 补上缺失的 --proof_gen_url、--proof_rate_url、--infer_script 参数（设 infer_script 为 generate），然后以 --max_rounds 1 --n_parallel_proof_gen 2 --n_verification_per_proof 2 跑通第一轮，观察输出目录下生成的 input.jsonl 与 output.jsonl。",
+          "source_files": [
+            "inference/run.sh",
+            "inference/README.md",
+            "inference/main.py",
+            "inference/generate.py"
+          ],
+          "title": "运行方式与参数总览：从 run.sh 到 main.py",
+          "topic": "讲解如何配置 API Key 并通过 run.sh 启动证明评估流水线，梳理 main.py 中几十个命令行参数的分组（证明生成、证明验证、元验证、轮次控制）。同时指出代码中 args.proof_gen_url、args.proof_rate_url、args.infer_script 未在 argparse 注册、需自行补上的问题（待确认）。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "入门：认识项目与跑通评估"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l1-async-api-model.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "解释 generate_one 如何把 reasoning_content 与 content 拼接成带 </think> 标记的输出字符串",
+            "说明 generate_all 用 asyncio.gather 并发所有请求、generate 用 asyncio.run 驱动事件循环的分层结构",
+            "理解 generate 对输入 item 的 messages/prompt 两种兼容处理及输出 dict 的合并方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "inference/generate.py 的 APIModel 类（第 15-75 行）"
+          ],
+          "order": 1,
+          "practice_task": "仿照 APIModel 写一个 mini_api.py：定义一个 MockAPIModel，把 client.chat.completions.create 替换为返回固定 reasoning_content 与 content 的假异步函数；让 generate 方法并发处理 10 条带 messages 的输入，验证输出字符串的 </think> 拼接逻辑与 finish_reason 透传是否符合预期。",
+          "source_files": [
+            "inference/generate.py"
+          ],
+          "title": "APIModel 与异步生成：generate.py 的核心抽象",
+          "topic": "精读 generate.py 中的 APIModel 类，理解它如何用 AsyncOpenAI 调用兼容 OpenAI 接口的推理服务，如何把 reasoning_content 与 content 拼回 <think>...</think> 格式，以及 asyncio.gather 如何并发处理一批请求。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-multiprocessing-resume.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "解释 mp_generate_loop 为何每个进程 sleep(5) 后各自实例化一个 APIModel 与事件循环",
+            "描述 .meta pickle 文件中 complete_batches 集合如何实现按批断点续跑与去重",
+            "分析 n 参数把每条输入复制 n 份实现多次采样的机制"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "inference/generate.py 的 mp_generate / mp_generate_loop",
+            "inference/generate.py 的 __main__ 批处理与收尾循环（第 83-181 行）"
+          ],
+          "order": 2,
+          "practice_task": "写一个 reproduce_resume.py：用 multiprocessing.Queue 与两个子进程模拟 input_queue/output_queue 的批处理协议（含 (None, None) 哨兵）；先跑到一半用 KeyboardInterrupt 终止，检查 .meta 文件中的 complete_batches；再次运行并验证已完成的批次被跳过、总输出条数最终等于 n 乘以输入条数。",
+          "source_files": [
+            "inference/generate.py"
+          ],
+          "title": "多进程队列与断点续跑：generate.py 的工程骨架",
+          "topic": "分析 generate.py 主流程：主进程读取 jsonl、按 batch_size 切批并复制 n 份，通过 multiprocessing Queue 分发给多个 worker 进程，用 .meta pickle 记录 complete_batches 实现幂等续跑。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 2,
+      "title": "生成引擎：generate.py 的并发与断点续跑"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u3-l1-prompt-templates.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "复述 proof_verification 的 0/0.5/1 三档评分标准与对『引用论文结论必须自行证明』的约束",
+            "解释 proof_generation 模板要求模型输出 Solution 与 Self Evaluation 两个小节并自打分的原因",
+            "说明 proof_refinement 模板如何把 instruction 与候选证明及其评价拼装成精炼提示"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "inference/math_templates.py 的 proof_generation 与 proof_verification",
+            "inference/math_templates.py 的 meta_verification 与 proof_refinement"
+          ],
+          "order": 1,
+          "practice_task": "写一个 render_templates.py：从 inputs/CMO2024.json 取第一题，用 str.format 分别渲染 proof_generation（填 question）与 proof_verification（填 statement 和一段你手写的证明），把最终提示词完整打印出来；再手动构造 proof_refinement 的 proofs_to_refine（含一段证明和一条评价）并渲染，检查三份提示词的衔接关系。",
+          "source_files": [
+            "inference/math_templates.py",
+            "inputs/CMO2024.json"
+          ],
+          "title": "四大提示词模板：math_templates.py 逐段精读",
+          "topic": "逐段阅读 math_templates.py 中的 proof_generation、proof_verification、meta_verification、proof_refinement 四个模板，理解 0/0.5/1 三档评分标准、自我评价小节的格式约定，以及元验证对『评价合理性』而非『解答正确性』的判定规则。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-output-parsing.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "手推 extract_boxed_answers 对嵌套大括号的括号配对算法",
+            "解释 _normalize_prover_output 如何把各种星号写法的标题统一成 ## Solution / ## Self Evaluation",
+            "说明 hash_problem_idx 用 SHA256 为没有 problem_idx 的题目生成稳定主键的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "inference/utils.py 的 extract_boxed_answers",
+            "inference/utils.py 的 _normalize_prover_output / extract_solution / extract_self_eval",
+            "inference/utils.py 的 hash_problem_idx 与 read_data"
+          ],
+          "order": 2,
+          "practice_task": "为 utils.py 写一个 test_utils.py 单元测试（不修改源文件）：覆盖 extract_boxed_answers 的嵌套括号（如 \\boxed{\\frac{1}{2}} 与 \\boxed{x^{2}}）、百分号结尾分支、extract_solution 与 extract_self_eval 对 '* Solution *' 星号标题的归一化，以及 hash_problem_idx 对同一题多次哈希结果一致；全部通过后再测一个缺少 ## Self Evaluation 小节时应抛出的异常行为。",
+          "source_files": [
+            "inference/utils.py"
+          ],
+          "title": "输出解析工具：utils.py 的 boxed 提取与章节切分",
+          "topic": "精读 utils.py：extract_boxed_answers 如何用括号计数处理嵌套的 \\boxed{...}，extract_solution 与 extract_self_eval 如何靠 ## Solution / ## Self Evaluation 标题切分模型输出，以及 hash_problem_idx 如何为题目生成稳定 ID。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "提示词与解析：模板体系与输出处理"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3",
+            "u3-l1"
+          ],
+          "filename": "u4-l1-main-loop-overview.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "画出 R 轮循环中 proof_gen/proof_verification/meta_verification 三个子目录的 input/output.jsonl 依赖图",
+            "解释第 1 轮读取原始 json/jsonl 并注入 source_name 与 messages 的初始化逻辑",
+            "说明用 os.path.exists 判断中间文件是否已存在、从而支持从任意轮次续跑的设计"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "inference/main.py 的 __main__ 轮次循环（第 397-523 行）",
+            "inference/main.py 的 argparse 参数"
+          ],
+          "order": 1,
+          "practice_task": "写一个 flow_diagram.py：把 main.py 第 397-523 行的轮次循环抽象成函数依赖图（可用 print 输出 ASCII 图），标注每条边的输入输出文件路径模板（如 {output_dirname}/proof_gen_R{R}/input.jsonl）；再为 max_rounds=2 手动推演出完整的文件产生顺序清单。",
+          "source_files": [
+            "inference/main.py"
+          ],
+          "title": "主循环全貌：main.py 的轮次编排",
+          "topic": "自顶向下走读 main.py 的 __main__ 流程：R1 从原始输入构建 proof_gen 输入，之后每轮执行证明生成、证明验证、元验证三个阶段，下一轮的精炼输入由上一轮验证结果生成，直到 max_rounds。理解以文件存在性为条件的断点续跑设计。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1",
+            "u3-l2"
+          ],
+          "filename": "u4-l2-prepare-proof-verification.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "解释 finish_reason 为 stop 且含 </think> 才进入验证的过滤条件",
+            "复述 self_eval 分数从 Self Evaluation 小节最后一个 \\boxed 值解析的链路",
+            "说明模板渲染后 messages 如何替换原始 input/output 字段"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "inference/main.py 的 prepare_proof_verification（第 66-116 行）",
+            "inference/utils.py 的 extract_self_eval / extract_solution / extract_boxed_answers"
+          ],
+          "order": 2,
+          "practice_task": "写一个 build_verification_input.py：手工构造一个假想的 proof_gen_R1/output.jsonl（3 条记录：一条正常含 Solution/Self Evaluation、一条被截断 finish_reason=length、一条 Self Evaluation 缺 \\boxed），调用 utils.py 的解析函数仿照 prepare_proof_verification 产出验证输入 jsonl，验证只有第 1 条进入输出、self_eval_score 被正确解析。",
+          "source_files": [
+            "inference/main.py",
+            "inference/utils.py"
+          ],
+          "title": "证明验证准备：prepare_proof_verification 解析",
+          "topic": "精读 prepare_proof_verification 函数：如何从证明生成输出中过滤未完成的样本、切出 proof 与 self_eval、计算 self_eval_score，并用 proof_verification 模板渲染出验证请求。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-prepare-meta-verification.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "解释 score > 0.75 的过滤阈值等价于只保留 0 与 0.5 档评价进入元验证",
+            "说明元验证输入由 statement、proof、rating 三段拼装而成",
+            "对比 prepare_meta_verification 与 prepare_proof_verification 在字段处理上的差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "inference/main.py 的 prepare_meta_verification（第 118-154 行）",
+            "inference/math_templates.py 的 meta_verification"
+          ],
+          "order": 3,
+          "practice_task": "在 build_verification_input.py 的基础上扩展：为上一讲的证明构造三条假想的验证输出（评分分别为 1、0.5、0），实现 prepare_meta_verification 的过滤逻辑，验证评分为 1 的记录被跳过、其余记录的 rating 被完整保留并渲染进 meta_verification 模板。",
+          "source_files": [
+            "inference/main.py",
+            "inference/math_templates.py"
+          ],
+          "title": "元验证准备：prepare_meta_verification 与低分评价复核",
+          "topic": "精读 prepare_meta_verification 函数：如何从证明验证输出中提取评分，只把评分不高于 0.75 的低分评价送入元验证复核，并用 meta_verification 模板渲染输入。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "主循环三阶段：验证与元验证的数据准备"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u5-l1-proof-pool.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "描述证明池文件 {proof_pool_dirname}/{source_name}/{problem_idx}.jsonl 的组织方式与字段",
+            "解释 meanscore 如何由多次验证评分取均值得到、score2ratings 如何按分数桶聚合同分评价",
+            "说明 proof_id 递增编号与 dep_proof_ids 谱系追踪如何记录精炼来源"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "inference/main.py 的 _prepare_proof_agg_tasks 证明池读写段（第 165-220 行）",
+            "inference/utils.py 的 hash_problem_idx"
+          ],
+          "order": 1,
+          "practice_task": "写一个 proof_pool.py 模块：实现 load_pool（读取某题的 jsonl 并做 proof 与 proof_id 双重去重校验）、append_proofs（为新证明分配递增 proof_id、计算 meanscore、记录 round_idx 与 dep_proof_ids）；用手造的 2 轮共 5 条证明数据验证断言逻辑与 nxt_proof_id 的递增。",
+          "source_files": [
+            "inference/main.py",
+            "inference/utils.py"
+          ],
+          "title": "证明池机制：持久化、去重与谱系追踪",
+          "topic": "深入 _prepare_proof_agg_tasks 的证明池部分：每个问题的所有历史证明以 jsonl 追加写入 proof_pool 目录，记录 meanscore、score2ratings、self_eval、proof_id 与 dep_proof_ids 形成证明谱系，并通过双重去重集合避免重复入库。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1",
+            "u4-l2"
+          ],
+          "filename": "u5-l2-aggregation-strategy.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "解释按 (meanscore, self_eval_score) 双键降序排序后截取前 n_best_proofs_to_sample 的筛选策略",
+            "复述 itertools.combinations 生成候选组合、每组合内部再按包含证明数递减去重的枚举流程",
+            "说明单分数桶最多取 8 条、多分数桶每桶最多 max_rating_per_score 条的评价采样上限"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "inference/main.py 的 _prepare_proof_agg_tasks 组合生成与摘要拼装段（第 222-284 行）",
+            "inference/main.py 的 _split_jobs"
+          ],
+          "order": 2,
+          "practice_task": "写一个 toy_aggregation.py：构造 10 个带不同 meanscore 与 self_eval_score 的假证明，复刻排序、shuffle、combinations 与去重逻辑，打印最终选出的组合列表；然后分别把 n_best_proofs_to_sample 从 6 改到 32、n_proofs_to_refine 从 4 改到 1，观察组合数量与摘要长度的变化并记录结论。",
+          "source_files": [
+            "inference/main.py"
+          ],
+          "title": "聚合与组合策略：多证明精炼的采样算法",
+          "topic": "剖析 _prepare_proof_agg_tasks 后半段：已有满分证明则跳过该题；否则按均值分与自评分排序取前 n_best_proofs_to_sample 个证明，用 itertools.combinations 枚举至多 num_trials 个不重复组合，每个组合按分数桶采样至多 8 条评价拼成摘要，最终渲染 proof_refinement 模板。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2",
+            "u4-l3"
+          ],
+          "filename": "u5-l3-prepare-proof-refinement.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "解释 rating2quality 字典以评价全文为主键关联元验证质量分的 join 逻辑",
+            "描述 problem2proof2ratings 等四个嵌套字典如何从扁平输出还原成问题→证明→评价的层级索引",
+            "说明 multiprocessing.Pool 配合 _split_jobs 将题目按 50 一组并行处理的结构"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "inference/main.py 的 prepare_proof_refinement（第 286-395 行）",
+            "inference/main.py 的 _prepare_proof_agg_tasks",
+            "inference/main.py 的 __main__ 中对 prepare_proof_refinement 的调用（第 430-446 行）"
+          ],
+          "order": 3,
+          "practice_task": "写一个 build_refinement_input.py：手造一份 proof_verification_R1/output.jsonl（2 题、每题 2 个证明、每证明 2 条评价）和一份 meta_verification_R1/output.jsonl（其中一条评价被元验证判为 0.5），调用前面两讲实现的 proof_pool 与聚合函数，产出完整的 proof_gen_R2/input.jsonl，并检查 dep_proof_ids 与证明池记录一致。",
+          "source_files": [
+            "inference/main.py"
+          ],
+          "title": "精炼输入构建：prepare_proof_refinement 的数据汇合",
+          "topic": "走读 prepare_proof_refinement 全流程：先从元验证输出建立 rating2quality 映射，再从验证输出按问题/证明两级聚合评分，最后用 multiprocessing.Pool 并行调用 _prepare_proof_agg_tasks 生成下一轮精炼请求，use_old_proofs_for_refinement 时还会并入历史证明池。"
+        }
+      ],
+      "level": "advanced",
+      "order": 5,
+      "title": "证明池与精炼聚合：核心难点"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "filename": "u6-l1-test-time-compute.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "推导 n_parallel_proof_gen、n_agg_trials、n_verification_per_proof 与 API 调用次数之间的数量关系",
+            "对比 run.sh 的竞赛配置与 main.py 默认值在验证强度上的差异",
+            "解释轮次循环中『出现满分证明即停止该题』的早停条件与生成-验证差距维护的的关系"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "inference/main.py 的 __main__ 轮次循环",
+            "inference/run.sh 的参数配置",
+            "inference/main.py 的 _prepare_proof_agg_tasks 早停判断"
+          ],
+          "order": 1,
+          "practice_task": "写一个 estimate_cost.py：输入 n_parallel_proof_gen、n_agg_trials、n_verification_per_proof、n_problems、max_rounds、平均 token 单价，估算整轮流水线的 API 请求总量与大致开销；分别计算 run.sh 竞赛配置和一组小型调试配置（如 8/4/4）的数值并对比，据此为本机实验推荐一套小于 100 次请求的参数组合。",
+          "source_files": [
+            "inference/main.py",
+            "inference/run.sh"
+          ],
+          "title": "测试时算力扩展：参数如何控制验证规模",
+          "topic": "从测试时计算扩展的视角审视全部超参数：n_parallel_proof_gen、n_agg_trials、n_verification_per_proof、max_rounds 共同决定每题消耗的生成与验证算力；对照 README 中 IMO/Putnam 成绩说明扩展验证算力带来的收益。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-extend-and-harden.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "为 main.py 的 argparse 补齐 proof_gen_url、proof_rate_url、infer_script 等缺失参数",
+            "新增数据源时正确处理 source_name 注入与 problem_idx 唯一性约束",
+            "设计 dry_run 与请求上限等保护机制，避免全量跑飞产生高额费用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "inference/main.py 的 argparse 与 os.system 调用点",
+            "inference/generate.py 的 APIModel.__init__",
+            "inference/main.py 的 __main__ 输入加载段"
+          ],
+          "order": 2,
+          "practice_task": "在 inference_mini/ 副本上完成三项改造并验证：（1）注册缺失的 --proof_gen_url、--proof_rate_url、--infer_script 参数；（2）新增 --dry_run 开关，把 os.system 替换为打印命令以检查将执行的完整命令序列；（3）新增 --max_requests 上限，超限时让 generate.py 在提交批次前主动退出并保留 .meta 断点；最后用自建的 2 题数据集走通 dry_run 全流程。",
+          "source_files": [
+            "inference/main.py",
+            "inference/generate.py",
+            "inference/run.sh"
+          ],
+          "title": "二次开发实践：适配新基准与工程加固",
+          "topic": "总结将流水线适配到自定义数据集或新 API 服务需要改动的位置，并修补发布代码中的已知毛刺（未注册的 argparse 属性、硬编码的 API 配置、os.system 拼接命令的脆弱性），讨论元验证开关与成本控制策略。"
+        }
+      ],
+      "level": "advanced",
+      "order": 6,
+      "title": "扩展与实践：算力调度与二次开发"
+    }
+  ]
+}
