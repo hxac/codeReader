@@ -1,51 +1,55 @@
 {
-  "head": "05473ed83d2bada157e89f181e15c205a3b22163",
+  "head": "a7d74150ac7a663fdaa01ec5177e303baaf6c331",
   "project": "zed",
-  "rationale": "Zed 是一个包含 243 个 crate 的超大型 Rust 工作区,本大纲按照\"从零开始、由浅入深\"的原则分八个单元设计学习路径:第一单元让读者建立全局认知并能从源码构建运行;第二单元深入 GPUI——它是理解一切 UI 代码的前置基础,因此放在所有业务模块之前,并以官方 examples 收尾强化动手能力;第三单元自底向上讲解 Rope、sum_tree、Buffer 与 tree-sitter 语法,这是编辑器的数据结构地基;第四单元沿\"文件系统→项目→窗口\"逐层讲 Worktree、Project、Workspace 与 Item,让读者理解一个文件如何变成屏幕上的标签页;第五单元进入编辑器本体,重点剖析 MultiBuffer 与 DisplayMap 这两个最精巧的机制;第六单元打通语言智能链路(LSP、补全、诊断);第七单元覆盖设置、键位、扩展与主题这套用户可定制生态;第八单元以协作 RPC、AI Agent、终端/Vim、Git、测试与二次开发实战收尾,面向想贡献代码的进阶读者。依赖关系上严格保证每篇讲义只依赖其前序讲义覆盖的知识,大型项目拆分为 38 篇讲义,逻辑优先、不硬凑数量。",
+  "rationale": "Zed 是一个包含 243 个 crate 的超大型 Rust 工作区,本大纲按照\"从零开始、由浅入深\"的原则分八个单元设计学习路径:第一单元让读者建立全局认知并能从源码构建运行;第二单元深入 GPUI——它是理解一切 UI 代码的前置基础,因此放在所有业务模块之前,并以官方 examples 收尾强化动手能力;第三单元自底向上讲解 Rope、sum_tree、Buffer 与 tree-sitter 语法,这是编辑器的数据结构地基;第四单元沿\"文件系统→项目→窗口\"逐层讲 Worktree、Project、Workspace 与 Item,让读者理解一个文件如何变成屏幕上的标签页;第五单元进入编辑器本体,重点剖析 MultiBuffer 与 DisplayMap 这两个最精巧的机制;第六单元打通语言智能链路(LSP、补全、诊断);第七单元覆盖设置、键位、扩展与主题这套用户可定制生态;第八单元以协作 RPC、AI Agent、终端/Vim、Git、测试与二次开发实战收尾,面向想贡献代码的进阶读者。依赖关系上严格保证每篇讲义只依赖其前序讲义覆盖的知识,大型项目拆分为 38 篇讲义,逻辑优先、不硬凑数量。本次增量更新:两次新提交分别为 tabular_data_preview crate 的内部命名收尾(不影响任何讲义)与 git_gutter_width 设置重构(Option<f32> 改为 Default/Custom 枚举,新增 settings_content 中的枚举定义、settings crate 的 IntoGpui 像素转换以及 migrator 中的一条设置迁移),因此仅 u5-l1(editor_settings 中 Gutter 字段类型变化)、u5-l4(element.rs 中 gutter 宽度匹配逻辑变化)、u7-l1(default.json 变化,且设置值转换与版本迁移现在值得纳入讲授)标记为 update,其余讲义均保持 keep。",
   "units": [
     {
       "id": "u1",
-      "order": 1,
-      "title": "入门:认识 Zed 与源码环境搭建",
-      "level": "beginner",
       "lectures": [
         {
-          "id": "u1-l1",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [],
           "filename": "u1-l1-project-overview.md",
-          "title": "项目总览:Zed 是什么",
-          "level": "beginner",
-          "topic": "介绍 Zed 的定位(高性能、多人协作的代码编辑器)、技术栈(Rust + 自研 GPUI 框架)、由 Atom 和 Tree-sitter 作者打造的背景,以及仓库顶层文件和文档布局。",
+          "id": "u1-l1",
           "learning_goals": [
             "说出 Zed 的产品定位与技术亮点",
             "理解 Zed 与 Atom、Tree-sitter 的历史渊源",
             "找到官方文档、贡献指南等入口资源"
           ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README 阅读与信息提取",
+            "仓库顶层文件巡览"
+          ],
+          "order": 1,
+          "practice_task": "克隆仓库后通读 README.md 与 CONTRIBUTING.md,用三句话总结 Zed 的定位,并列出仓库根目录下 5 个你认识的文件类型(如 Cargo.lock、flake.nix、livekit.yaml)各自的作用。",
           "source_files": [
             "README.md",
             "CONTRIBUTING.md",
             "docs/src/development/glossary.md"
           ],
-          "minimal_modules": [
-            "README 阅读与信息提取",
-            "仓库顶层文件巡览"
-          ],
-          "practice_task": "克隆仓库后通读 README.md 与 CONTRIBUTING.md,用三句话总结 Zed 的定位,并列出仓库根目录下 5 个你认识的文件类型(如 Cargo.lock、flake.nix、livekit.yaml)各自的作用。",
-          "depends_on": [],
-          "action": "new"
+          "title": "项目总览:Zed 是什么",
+          "topic": "介绍 Zed 的定位(高性能、多人协作的代码编辑器)、技术栈(Rust + 自研 GPUI 框架)、由 Atom 和 Tree-sitter 作者打造的背景,以及仓库顶层文件和文档布局。"
         },
         {
-          "id": "u1-l2",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
           "filename": "u1-l2-build-and-run.md",
-          "title": "构建与运行:从源码跑起 Zed",
-          "level": "beginner",
-          "topic": "讲解 Zed 的构建体系:Cargo workspace、Rust 工具链固定、各平台依赖安装,以及 script 目录下的辅助脚本。",
+          "id": "u1-l2",
           "learning_goals": [
             "安装 Zed 构建所需的全部系统依赖",
             "用 cargo 成功编译并运行 debug 版 Zed",
             "知道去哪里排查构建失败问题"
           ],
+          "level": "beginner",
+          "minimal_modules": [
+            "workspace 清单解读",
+            "平台构建文档使用"
+          ],
+          "order": 2,
+          "practice_task": "在你自己的机器上完成依赖安装并执行 cargo run 运行 Zed,记录编译耗时;再尝试运行一次 cargo check --workspace,对比两者耗时差异。",
           "source_files": [
             "Cargo.toml",
             "rust-toolchain.toml",
@@ -53,626 +57,629 @@
             "docs/src/development/macos.md",
             "docs/src/development/windows.md"
           ],
-          "minimal_modules": [
-            "workspace 清单解读",
-            "平台构建文档使用"
-          ],
-          "practice_task": "在你自己的机器上完成依赖安装并执行 cargo run 运行 Zed,记录编译耗时;再尝试运行一次 cargo check --workspace,对比两者耗时差异。",
+          "title": "构建与运行:从源码跑起 Zed",
+          "topic": "讲解 Zed 的构建体系:Cargo workspace、Rust 工具链固定、各平台依赖安装,以及 script 目录下的辅助脚本。"
+        },
+        {
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u1-l3",
-          "order": 3,
           "filename": "u1-l3-workspace-layout.md",
-          "title": "仓库与 Crate 组织:243 个盒子如何协作",
-          "level": "beginner",
-          "topic": "带读者俯瞰整个 workspace:crates 目录下按领域分组的 crate、tooling 与 extensions 目录,以及 default-members 只构建 crates/zed 的事实。",
+          "id": "u1-l3",
           "learning_goals": [
             "看懂根 Cargo.toml 的 members 与 default-members",
             "按功能给 crate 分类(UI、编辑器、语言、AI、协作等)",
             "通过依赖关系判断某个 crate 所处的层次"
           ],
+          "level": "beginner",
+          "minimal_modules": [
+            "workspace 成员浏览",
+            "crate 分类"
+          ],
+          "order": 3,
+          "practice_task": "浏览 crates/ 目录,把 gpui、editor、language、project、worktree、rope、agent、collab、vim、terminal 这 10 个 crate 按底层/中间/顶层分层画一张依赖草图。",
           "source_files": [
             "Cargo.toml",
             "crates/zed/Cargo.toml",
             "docs/src/development/glossary.md"
           ],
-          "minimal_modules": [
-            "workspace 成员浏览",
-            "crate 分类"
-          ],
-          "practice_task": "浏览 crates/ 目录,把 gpui、editor、language、project、worktree、rope、agent、collab、vim、terminal 这 10 个 crate 按底层/中间/顶层分层画一张依赖草图。",
-          "depends_on": [
-            "u1-l1"
-          ],
-          "action": "new"
+          "title": "仓库与 Crate 组织:243 个盒子如何协作",
+          "topic": "带读者俯瞰整个 workspace:crates 目录下按领域分组的 crate、tooling 与 extensions 目录,以及 default-members 只构建 crates/zed 的事实。"
         },
         {
-          "id": "u1-l4",
-          "order": 4,
+          "action": "keep",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
           "filename": "u1-l4-app-startup.md",
-          "title": "应用启动流程:从 main 到窗口出现",
-          "level": "beginner",
-          "topic": "逐段阅读 main.rs 与 zed.rs 的核心启动代码:平台检测、Application 创建、命令行参数解析、初始化(主题、设置、扩展、会话)以及工作区窗口的打开。",
+          "id": "u1-l4",
           "learning_goals": [
             "描述 Zed 从 main() 到窗口出现的完整启动序列",
             "理解平台选择、崩溃处理与全局分配器的初始化",
             "定位 CLI 参数处理与工作区打开逻辑"
           ],
-          "source_files": [
-            "crates/zed/src/main.rs",
-            "crates/zed/src/zed.rs"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "入口流程跟踪",
             "初始化要点提炼"
           ],
+          "order": 4,
           "practice_task": "在 zed.rs 的启动流程中找到设置加载、主题注册、工作区创建三处关键调用,加一条 eprintln! 日志验证你理解的执行顺序是否正确,重新编译观察输出。",
-          "depends_on": [
-            "u1-l2",
-            "u1-l3"
+          "source_files": [
+            "crates/zed/src/main.rs",
+            "crates/zed/src/zed.rs"
           ],
-          "action": "new"
+          "title": "应用启动流程:从 main 到窗口出现",
+          "topic": "逐段阅读 main.rs 与 zed.rs 的核心启动代码:平台检测、Application 创建、命令行参数解析、初始化(主题、设置、扩展、会话)以及工作区窗口的打开。"
         }
-      ]
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "入门:认识 Zed 与源码环境搭建"
     },
     {
       "id": "u2",
-      "order": 2,
-      "title": "GPUI:Zed 的 UI 与应用框架",
-      "level": "beginner",
       "lectures": [
         {
-          "id": "u2-l1",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u1-l3"
+          ],
           "filename": "u2-l1-gpui-overview.md",
-          "title": "GPUI 总览:Zed 的 UI 与状态框架",
-          "level": "beginner",
-          "topic": "介绍 gpui crate 的模块划分(app、elements、platform、keymap、text_system 等)与 gpui_macos/gpui_linux/gpui_windows 等平台 crate 的关系,建立框架地图。",
+          "id": "u2-l1",
           "learning_goals": [
             "列出 GPUI 的核心模块及其职责",
             "区分 GPUI 框架本体与各平台后端 crate",
             "理解 GPUI 既是 UI 框架又是并发运行时的双重身份"
           ],
+          "level": "beginner",
+          "minimal_modules": [
+            "gpui crate 结构浏览",
+            "框架/平台分层理解"
+          ],
+          "order": 1,
+          "practice_task": "阅读 gpui crate 的模块列表,写一段 200 字的笔记回答:为什么 Zed 不直接用 egui 或 iced,GPUI 同时提供了哪些 UI 之外的能力。",
           "source_files": [
             "crates/gpui/src/gpui.rs",
             "crates/gpui/src/element.rs",
             "crates/gpui/Cargo.toml"
           ],
-          "minimal_modules": [
-            "gpui crate 结构浏览",
-            "框架/平台分层理解"
-          ],
-          "practice_task": "阅读 gpui crate 的模块列表,写一段 200 字的笔记回答:为什么 Zed 不直接用 egui 或 iced,GPUI 同时提供了哪些 UI 之外的能力。",
-          "depends_on": [
-            "u1-l3"
-          ],
-          "action": "new"
+          "title": "GPUI 总览:Zed 的 UI 与状态框架",
+          "topic": "介绍 gpui crate 的模块划分(app、elements、platform、keymap、text_system 等)与 gpui_macos/gpui_linux/gpui_windows 等平台 crate 的关系,建立框架地图。"
         },
         {
-          "id": "u2-l2",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
           "filename": "u2-l2-entity-and-app.md",
-          "title": "Entity 模型与 App 上下文",
-          "level": "intermediate",
-          "topic": "深入 GPUI 的核心状态管理:Entity<T> 句柄、entity_map、App/Context/AsyncApp 上下文、WeakEntity、cx.notify() 与 cx.subscribe() 事件机制。",
+          "id": "u2-l2",
           "learning_goals": [
             "使用 Entity<T> 的 read/update/observe API",
             "区分 App、Context<T>、AsyncApp 三种上下文",
             "运用 WeakEntity 与 Subscription 避免循环引用"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Entity 生命周期",
+            "上下文类型体系",
+            "订阅与观察"
+          ],
+          "order": 2,
+          "practice_task": "写一个最小的 GPUI 程序:定义一个 Counter 实体,通过 cx.observe 在另一个实体中监听它的变化并打印日志,验证 notify 触发链路。",
           "source_files": [
             "crates/gpui/src/app.rs",
             "crates/gpui/src/app/entity_map.rs",
             "crates/gpui/src/app/context.rs",
             "crates/gpui/src/subscription.rs"
           ],
-          "minimal_modules": [
-            "Entity 生命周期",
-            "上下文类型体系",
-            "订阅与观察"
-          ],
-          "practice_task": "写一个最小的 GPUI 程序:定义一个 Counter 实体,通过 cx.observe 在另一个实体中监听它的变化并打印日志,验证 notify 触发链路。",
-          "depends_on": [
-            "u2-l1"
-          ],
-          "action": "new"
+          "title": "Entity 模型与 App 上下文",
+          "topic": "深入 GPUI 的核心状态管理:Entity<T> 句柄、entity_map、App/Context/AsyncApp 上下文、WeakEntity、cx.notify() 与 cx.subscribe() 事件机制。"
         },
         {
-          "id": "u2-l3",
-          "order": 3,
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
           "filename": "u2-l3-render-and-element.md",
-          "title": "Element 与 Render:声明式 UI 渲染",
-          "level": "intermediate",
-          "topic": "讲解 Render trait 如何把状态变成元素树、RenderOnce 与 derive(IntoElement) 的组件化方式、div() 容器与 child 组合,以及 cx.notify 触发的重绘循环。",
+          "id": "u2-l3",
           "learning_goals": [
             "实现 Render trait 渲染自定义视图",
             "区分 Render 与 RenderOnce 的适用场景",
             "理解元素树的构建与请求重绘的机制"
           ],
-          "source_files": [
-            "crates/gpui/src/elements/div.rs",
-            "crates/gpui/src/view.rs",
-            "crates/gpui/examples/hello_world.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "Render/RenderOnce 对比",
             "元素树组装",
             "重绘触发"
           ],
+          "order": 3,
           "practice_task": "仿照 hello_world.rs,实现一个 RenderOnce 组件 Card,内部包含标题与正文两段文本,并在窗口中渲染出三个不同内容的 Card。",
-          "depends_on": [
-            "u2-l2"
+          "source_files": [
+            "crates/gpui/src/elements/div.rs",
+            "crates/gpui/src/view.rs",
+            "crates/gpui/examples/hello_world.rs"
           ],
-          "action": "new"
+          "title": "Element 与 Render:声明式 UI 渲染",
+          "topic": "讲解 Render trait 如何把状态变成元素树、RenderOnce 与 derive(IntoElement) 的组件化方式、div() 容器与 child 组合,以及 cx.notify 触发的重绘循环。"
         },
         {
-          "id": "u2-l4",
-          "order": 4,
+          "action": "keep",
+          "depends_on": [
+            "u2-l3"
+          ],
           "filename": "u2-l4-layout-and-style.md",
-          "title": "布局与样式:Tailwind 风格的 API",
-          "level": "intermediate",
-          "topic": "讲解 GPUI 借鉴 Tailwind 的样式方法、基于 taffy 的 flexbox 布局引擎、Style 结构,以及 .when()/.when_some() 条件样式组合子。",
+          "id": "u2-l4",
           "learning_goals": [
             "使用 Tailwind 风格方法链定义样式",
             "理解 flexbox 布局在 GPUI 中的映射",
             "使用 when/when_some 组织条件样式"
           ],
-          "source_files": [
-            "crates/gpui/src/styled.rs",
-            "crates/gpui/src/style.rs",
-            "crates/gpui/src/taffy.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "Styled 方法链",
             "flexbox 布局",
             "条件样式组合"
           ],
+          "order": 4,
           "practice_task": "用 GPUI 复刻一个简单的三栏布局:左侧 200px 固定宽侧栏、中间自适应内容区、右侧 100px 工具栏,并给三栏加上不同背景色与内边距。",
+          "source_files": [
+            "crates/gpui/src/styled.rs",
+            "crates/gpui/src/style.rs",
+            "crates/gpui/src/taffy.rs"
+          ],
+          "title": "布局与样式:Tailwind 风格的 API",
+          "topic": "讲解 GPUI 借鉴 Tailwind 的样式方法、基于 taffy 的 flexbox 布局引擎、Style 结构,以及 .when()/.when_some() 条件样式组合子。"
+        },
+        {
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u2-l5",
-          "order": 5,
           "filename": "u2-l5-events-actions-keymap.md",
-          "title": "事件、Action 与键位分发",
-          "level": "intermediate",
-          "topic": "讲解鼠标/键盘事件处理、actions! 宏定义动作、keymap 的匹配上下文与按键分发链,以及 cx.listener 的监听器写法。",
+          "id": "u2-l5",
           "learning_goals": [
             "用 actions! 宏定义并注册 Action",
             "理解按键从窗口到焦点元素的匹配与冒泡",
             "用 cx.listener 把事件写回所属实体"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Action 定义与分发",
+            "按键匹配与上下文",
+            "监听器模式"
+          ],
+          "order": 5,
+          "practice_task": "定义一个自定义 Action(ToggleSidebar),在 JSON keymap 里为它绑定快捷键,运行程序按下快捷键验证 on_action 回调被触发。",
           "source_files": [
             "crates/gpui/src/action.rs",
             "crates/gpui/src/keymap.rs",
             "crates/gpui/src/key_dispatch.rs",
             "crates/gpui/src/input.rs"
           ],
-          "minimal_modules": [
-            "Action 定义与分发",
-            "按键匹配与上下文",
-            "监听器模式"
-          ],
-          "practice_task": "定义一个自定义 Action(ToggleSidebar),在 JSON keymap 里为它绑定快捷键,运行程序按下快捷键验证 on_action 回调被触发。",
-          "depends_on": [
-            "u2-l3"
-          ],
-          "action": "new"
+          "title": "事件、Action 与键位分发",
+          "topic": "讲解鼠标/键盘事件处理、actions! 宏定义动作、keymap 的匹配上下文与按键分发链,以及 cx.listener 的监听器写法。"
         },
         {
-          "id": "u2-l6",
-          "order": 6,
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
           "filename": "u2-l6-executor-and-tasks.md",
-          "title": "并发模型:Executor 与 Task",
-          "level": "intermediate",
-          "topic": "讲解 GPUI 的单前台线程模型、background_spawn、Task 的 detach/存储/取消语义,以及 AsyncApp 跨 await 点的使用规则。",
+          "id": "u2-l6",
           "learning_goals": [
             "区分 spawn 与 background_spawn 的执行线程",
             "理解 Task 的取消语义与 detach 的适用时机",
             "用后台任务加前台更新的模式封装耗时操作"
           ],
-          "source_files": [
-            "crates/gpui/src/executor.rs",
-            "crates/gpui/src/app/async_context.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "前台/后台执行器",
             "Task 取消语义",
             "异步上下文规则"
           ],
+          "order": 6,
           "practice_task": "编写一个异步任务:在 background_spawn 中计算斐波那契数列第 40 项,计算完成后回到前台把结果写进一个实体并触发重绘,验证 UI 未被阻塞。",
-          "depends_on": [
-            "u2-l2"
+          "source_files": [
+            "crates/gpui/src/executor.rs",
+            "crates/gpui/src/app/async_context.rs"
           ],
-          "action": "new"
+          "title": "并发模型:Executor 与 Task",
+          "topic": "讲解 GPUI 的单前台线程模型、background_spawn、Task 的 detach/存储/取消语义,以及 AsyncApp 跨 await 点的使用规则。"
         },
         {
-          "id": "u2-l7",
-          "order": 7,
+          "action": "keep",
+          "depends_on": [
+            "u2-l3",
+            "u2-l4",
+            "u2-l5"
+          ],
           "filename": "u2-l7-gpui-hands-on.md",
-          "title": "GPUI 实战:从示例到自己的小组件",
-          "level": "intermediate",
-          "topic": "以官方 examples 为教材,综合运用前六讲的知识写一个包含状态、事件、布局和样式的完整小应用。",
+          "id": "u2-l7",
           "learning_goals": [
             "独立创建并运行一个 GPUI 示例程序",
             "综合运用 Entity、Render、样式与事件",
             "掌握 examples 目录作为学习素材的方法"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "示例程序搭建",
+            "交互状态联动"
+          ],
+          "order": 7,
+          "practice_task": "在本地创建一个独立的小项目(或修改 examples),综合运用本单元知识实现一个可交互的待办列表:支持点击添加条目、点击条目删除,数据存放在 Entity 中。",
           "source_files": [
             "crates/gpui/examples/hello_world.rs",
             "crates/gpui/examples/input.rs",
             "crates/gpui/examples/animation.rs",
             "crates/gpui/examples/README.md"
           ],
-          "minimal_modules": [
-            "示例程序搭建",
-            "交互状态联动"
-          ],
-          "practice_task": "在本地创建一个独立的小项目(或修改 examples),综合运用本单元知识实现一个可交互的待办列表:支持点击添加条目、点击条目删除,数据存放在 Entity 中。",
-          "depends_on": [
-            "u2-l3",
-            "u2-l4",
-            "u2-l5"
-          ],
-          "action": "new"
+          "title": "GPUI 实战:从示例到自己的小组件",
+          "topic": "以官方 examples 为教材,综合运用前六讲的知识写一个包含状态、事件、布局和样式的完整小应用。"
         }
-      ]
+      ],
+      "level": "beginner",
+      "order": 2,
+      "title": "GPUI:Zed 的 UI 与应用框架"
     },
     {
       "id": "u3",
-      "order": 3,
-      "title": "文本核心:Rope、sum_tree 与 Buffer",
-      "level": "intermediate",
       "lectures": [
         {
-          "id": "u3-l1",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u1-l3"
+          ],
           "filename": "u3-l1-rope.md",
-          "title": "Rope:文本的树形存储",
-          "level": "intermediate",
-          "topic": "讲解 Zed 自研 Rope 的 B 树结构、以 chunk 为单位的切片存储、Point 与 Offset 双坐标系统,以及高效插入删除的实现。",
+          "id": "u3-l1",
           "learning_goals": [
             "解释 Rope 相比 String 的性能优势",
             "理解 Point/Offset 两套坐标的换算",
             "使用 Rope 的 cursor 做前向/后向遍历"
           ],
-          "source_files": [
-            "crates/rope/src/rope.rs",
-            "crates/rope/src/chunk.rs",
-            "crates/rope/src/point.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "Rope 结构与不变量",
             "坐标系统",
             "游标遍历"
           ],
+          "order": 1,
           "practice_task": "写一小段 Rust 代码:构造一个 Rope,执行若干次随机插入/删除后,用 cursor 从头到尾扫描并验证总字符数与换行数和直接遍历字符串的结果一致。",
-          "depends_on": [
-            "u1-l3"
+          "source_files": [
+            "crates/rope/src/rope.rs",
+            "crates/rope/src/chunk.rs",
+            "crates/rope/src/point.rs"
           ],
-          "action": "new"
+          "title": "Rope:文本的树形存储",
+          "topic": "讲解 Zed 自研 Rope 的 B 树结构、以 chunk 为单位的切片存储、Point 与 Offset 双坐标系统,以及高效插入删除的实现。"
         },
         {
-          "id": "u3-l2",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
           "filename": "u3-l2-sum-tree.md",
-          "title": "sum_tree:可聚合的通用树结构",
-          "level": "intermediate",
-          "topic": "讲解 Zed 复用度极高的 sum_tree 抽象:以 summary 缓存实现 O(log n) 区间查询,Cursor 定位,以及 Rope、Buffer、DisplayMap 等模块如何复用它。",
+          "id": "u3-l2",
           "learning_goals": [
             "理解求和树用缓存摘要加速区间查询的原理",
             "使用 Cursor 的 summary 方法定位目标区间",
             "识别 Zed 中哪些模块复用了 sum_tree"
           ],
-          "source_files": [
-            "crates/sum_tree/src/sum_tree.rs",
-            "crates/sum_tree/src/cursor.rs",
-            "crates/sum_tree/src/tree_map.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "Item/Summary trait",
             "游标查询",
             "树编辑"
           ],
+          "order": 2,
           "practice_task": "用 sum_tree 实现一个整数序列,支持单点修改与任意区间的和查询,写测试验证多次修改后查询仍然正确。",
+          "source_files": [
+            "crates/sum_tree/src/sum_tree.rs",
+            "crates/sum_tree/src/cursor.rs",
+            "crates/sum_tree/src/tree_map.rs"
+          ],
+          "title": "sum_tree:可聚合的通用树结构",
+          "topic": "讲解 Zed 复用度极高的 sum_tree 抽象:以 summary 缓存实现 O(log n) 区间查询,Cursor 定位,以及 Rope、Buffer、DisplayMap 等模块如何复用它。"
+        },
+        {
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u3-l3",
-          "order": 3,
           "filename": "u3-l3-buffer-and-edits.md",
-          "title": "Buffer:文本缓冲区与编辑事务",
-          "level": "intermediate",
-          "topic": "讲解 language crate 的 Buffer:封装 Rope 并叠加编辑历史(Transaction)、撤销重做、行级快照与轮询式异步编辑,以及如何驱动 syntax 重算。",
+          "id": "u3-l3",
           "learning_goals": [
             "解释 Buffer 与 Rope 的分工",
             "理解 Transaction 编辑分组与撤销栈",
             "使用 edited_since 过滤增量重算"
           ],
-          "source_files": [
-            "crates/language/src/buffer.rs",
-            "crates/language/src/buffer/row_chunk.rs",
-            "crates/language/src/file_content.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "Buffer 快照",
             "编辑与事务",
             "异步轮询"
           ],
+          "order": 3,
           "practice_task": "写一个使用 Buffer 的测试:插入三段文本后用一次 undo 全部撤销,再用 edited_since 验证只有受影响的行被标记为已编辑。",
-          "depends_on": [
-            "u3-l1"
+          "source_files": [
+            "crates/language/src/buffer.rs",
+            "crates/language/src/buffer/row_chunk.rs",
+            "crates/language/src/file_content.rs"
           ],
-          "action": "new"
+          "title": "Buffer:文本缓冲区与编辑事务",
+          "topic": "讲解 language crate 的 Buffer:封装 Rope 并叠加编辑历史(Transaction)、撤销重做、行级快照与轮询式异步编辑,以及如何驱动 syntax 重算。"
         },
         {
-          "id": "u3-l4",
-          "order": 4,
+          "action": "keep",
+          "depends_on": [
+            "u3-l3"
+          ],
           "filename": "u3-l4-tree-sitter-syntax.md",
-          "title": "语法高亮:tree-sitter 集成",
-          "level": "intermediate",
-          "topic": "讲解 language crate 如何用 tree-sitter 做增量解析:syntax_map 维护语法树缓存、重算范围圈定、高亮迭代查询,以及多语言注入的处理。",
+          "id": "u3-l4",
           "learning_goals": [
             "解释增量解析如何避免全文件重解析",
             "理解 SyntaxMap 的范围圈定机制",
             "描述一次按键到高亮刷新的完整链路"
           ],
-          "source_files": [
-            "crates/language/src/language.rs",
-            "crates/language/src/syntax_map.rs",
-            "crates/language/src/outline.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "LanguageRegistry",
             "增量解析",
             "高亮查询"
           ],
+          "order": 4,
           "practice_task": "在 debug 模式运行 Zed,打开一个大文件连续敲键,借助日志或断点观察一次编辑触发的语法重算范围,验证它远小于整个文件。",
-          "depends_on": [
-            "u3-l3"
+          "source_files": [
+            "crates/language/src/language.rs",
+            "crates/language/src/syntax_map.rs",
+            "crates/language/src/outline.rs"
           ],
-          "action": "new"
+          "title": "语法高亮:tree-sitter 集成",
+          "topic": "讲解 language crate 如何用 tree-sitter 做增量解析:syntax_map 维护语法树缓存、重算范围圈定、高亮迭代查询,以及多语言注入的处理。"
         }
-      ]
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "文本核心:Rope、sum_tree 与 Buffer"
     },
     {
       "id": "u4",
-      "order": 4,
-      "title": "项目与工作区:从文件系统到窗口",
-      "level": "intermediate",
       "lectures": [
         {
-          "id": "u4-l1",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u2-l6",
+            "u3-l3"
+          ],
           "filename": "u4-l1-worktree.md",
-          "title": "Worktree:文件系统的抽象层",
-          "level": "intermediate",
-          "topic": "讲解 worktree crate:本地/远程两种工作树、文件快照的不可变结构、gitignore 过滤、后台扫描与刷新,以及快照查询 API。",
+          "id": "u4-l1",
           "learning_goals": [
             "解释 Worktree 对本地目录的封装方式",
             "理解快照查询为何不阻塞前台",
             "描述文件新增/修改事件如何传播到 UI"
           ],
-          "source_files": [
-            "crates/worktree/src/worktree.rs",
-            "crates/worktree/src/ignore.rs",
-            "crates/worktree/src/worktree_settings.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "Worktree 快照",
             "后台扫描与刷新",
             "事件流"
           ],
+          "order": 1,
           "practice_task": "写一个测试(参考 worktree 已有测试的组织方式):创建临时目录后构造 Worktree,新增一个被 .gitignore 匹配的文件,验证快照查询能按设置决定是否包含它。",
-          "depends_on": [
-            "u2-l6",
-            "u3-l3"
+          "source_files": [
+            "crates/worktree/src/worktree.rs",
+            "crates/worktree/src/ignore.rs",
+            "crates/worktree/src/worktree_settings.rs"
           ],
-          "action": "new"
+          "title": "Worktree:文件系统的抽象层",
+          "topic": "讲解 worktree crate:本地/远程两种工作树、文件快照的不可变结构、gitignore 过滤、后台扫描与刷新,以及快照查询 API。"
         },
         {
-          "id": "u4-l2",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u4-l1"
+          ],
           "filename": "u4-l2-project.md",
-          "title": "Project:项目的中心枢纽",
-          "level": "intermediate",
-          "topic": "讲解 project crate 的核心角色:聚合 worktree、buffer、LSP、git、终端、任务等子存储,作为 UI 与底层能力之间的中介。",
+          "id": "u4-l2",
           "learning_goals": [
             "说出 Project 聚合了哪些子存储及各自职责",
             "追踪从 worktree 文件到打开一个 Buffer 的调用链",
             "理解 Project 的事件如何驱动界面刷新"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Project 顶层结构",
+            "buffer_store/worktree_store 协作",
+            "打开文件链路"
+          ],
+          "order": 2,
+          "practice_task": "从 workspace 打开文件的 action 入口出发,用 IDE 的跳转功能跟踪到 buffer_store 创建 Buffer 的位置,画出这条调用链的时序草图。",
           "source_files": [
             "crates/project/src/project.rs",
             "crates/project/src/buffer_store.rs",
             "crates/project/src/worktree_store.rs",
             "crates/project/src/project_settings.rs"
           ],
-          "minimal_modules": [
-            "Project 顶层结构",
-            "buffer_store/worktree_store 协作",
-            "打开文件链路"
-          ],
-          "practice_task": "从 workspace 打开文件的 action 入口出发,用 IDE 的跳转功能跟踪到 buffer_store 创建 Buffer 的位置,画出这条调用链的时序草图。",
-          "depends_on": [
-            "u4-l1"
-          ],
-          "action": "new"
+          "title": "Project:项目的中心枢纽",
+          "topic": "讲解 project crate 的核心角色:聚合 worktree、buffer、LSP、git、终端、任务等子存储,作为 UI 与底层能力之间的中介。"
         },
         {
-          "id": "u4-l3",
-          "order": 3,
+          "action": "keep",
+          "depends_on": [
+            "u2-l2",
+            "u4-l2"
+          ],
           "filename": "u4-l3-workspace-and-pane.md",
-          "title": "Workspace 与 Pane:窗口的组织者",
-          "level": "intermediate",
-          "topic": "讲解 workspace crate:Workspace 实体的结构、Pane 与 PaneGroup 的标签页/分屏布局、状态栏与面板(dock)挂载,以及激活项管理。",
+          "id": "u4-l3",
           "learning_goals": [
             "描述 Workspace、Pane、Item 三层结构的关系",
             "理解 PaneGroup 的二叉树分屏模型",
             "知道 dock 面板如何注册进 workspace"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Workspace 实体",
+            "Pane 与 PaneGroup",
+            "dock 面板体系"
+          ],
+          "order": 3,
+          "practice_task": "阅读 PaneGroup 的实现后回答:为什么分屏布局用二叉树而不是平铺列表;并手工画出左右分屏、左半再上下分屏时对应的树形结构。",
           "source_files": [
             "crates/workspace/src/workspace.rs",
             "crates/workspace/src/pane.rs",
             "crates/workspace/src/pane_group.rs",
             "crates/workspace/src/dock.rs"
           ],
-          "minimal_modules": [
-            "Workspace 实体",
-            "Pane 与 PaneGroup",
-            "dock 面板体系"
-          ],
-          "practice_task": "阅读 PaneGroup 的实现后回答:为什么分屏布局用二叉树而不是平铺列表;并手工画出左右分屏、左半再上下分屏时对应的树形结构。",
-          "depends_on": [
-            "u2-l2",
-            "u4-l2"
-          ],
-          "action": "new"
+          "title": "Workspace 与 Pane:窗口的组织者",
+          "topic": "讲解 workspace crate:Workspace 实体的结构、Pane 与 PaneGroup 的标签页/分屏布局、状态栏与面板(dock)挂载,以及激活项管理。"
         },
         {
-          "id": "u4-l4",
-          "order": 4,
+          "action": "keep",
+          "depends_on": [
+            "u4-l3"
+          ],
           "filename": "u4-l4-item-system.md",
-          "title": "Item 系统:编辑器如何挂进窗格",
-          "level": "intermediate",
-          "topic": "讲解 workspace 的 Item trait:任何能占用一个标签页的视图(编辑器、终端、搜索等)都实现它,涵盖标题、tab 生命周期、序列化导航与搜索能力。",
+          "id": "u4-l4",
           "learning_goals": [
             "说出 Item trait 的核心方法及职责",
             "理解 tab 的激活/关闭/预览流程",
             "为自定义视图实现 Item trait"
           ],
-          "source_files": [
-            "crates/workspace/src/item.rs",
-            "crates/editor/src/items.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "Item trait",
             "tab 事件",
             "项目内搜索接口"
           ],
+          "order": 4,
           "practice_task": "给一个简单的 GPUI 视图实现 Item trait,把它作为标签页打开在 workspace 里,验证标题显示、tab 关闭和 tab 切换行为正确。",
-          "depends_on": [
-            "u4-l3"
+          "source_files": [
+            "crates/workspace/src/item.rs",
+            "crates/editor/src/items.rs"
           ],
-          "action": "new"
+          "title": "Item 系统:编辑器如何挂进窗格",
+          "topic": "讲解 workspace 的 Item trait:任何能占用一个标签页的视图(编辑器、终端、搜索等)都实现它,涵盖标题、tab 生命周期、序列化导航与搜索能力。"
         },
         {
-          "id": "u4-l5",
-          "order": 5,
+          "action": "keep",
+          "depends_on": [
+            "u4-l4"
+          ],
           "filename": "u4-l5-workspace-persistence.md",
-          "title": "状态持久化:会话如何被记住",
-          "level": "intermediate",
-          "topic": "讲解 workspace 的持久化:序列化窗格布局与打开项、DB 键值存储(db::kvp)、workspace 状态恢复函数,以及 windows 恢复流程。",
+          "id": "u4-l5",
           "learning_goals": [
             "解释 workspace 序列化快照包含哪些信息",
             "理解 GlobalKeyValueStore 的存取方式",
             "追踪应用重启后恢复窗口的完整流程"
           ],
-          "source_files": [
-            "crates/workspace/src/persistence.rs",
-            "crates/workspace/src/persistence/model.rs",
-            "crates/db/src/kvp.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "序列化模型",
             "kvp 存储",
             "恢复入口"
           ],
+          "order": 5,
           "practice_task": "给某个自定义 Item 增加 serialize/deserialize 支持,重启 Zed 后验证该标签页(或至少其占位信息)能被恢复。",
-          "depends_on": [
-            "u4-l4"
+          "source_files": [
+            "crates/workspace/src/persistence.rs",
+            "crates/workspace/src/persistence/model.rs",
+            "crates/db/src/kvp.rs"
           ],
-          "action": "new"
+          "title": "状态持久化:会话如何被记住",
+          "topic": "讲解 workspace 的持久化:序列化窗格布局与打开项、DB 键值存储(db::kvp)、workspace 状态恢复函数,以及 windows 恢复流程。"
         }
-      ]
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "项目与工作区:从文件系统到窗口"
     },
     {
       "id": "u5",
-      "order": 5,
-      "title": "编辑器:从文本到像素",
-      "level": "advanced",
       "lectures": [
         {
-          "id": "u5-l1",
-          "order": 1,
+          "action": "update",
+          "depends_on": [
+            "u4-l4",
+            "u3-l3"
+          ],
           "filename": "u5-l1-editor-overview.md",
-          "title": "Editor 总览:状态与职责",
-          "level": "intermediate",
-          "topic": "概览 editor crate:Editor 实体持有 MultiBuffer 快照、光标与选区集合、显示配置,处理键盘输入、鼠标交互与各类语言功能入口。",
+          "id": "u5-l1",
           "learning_goals": [
             "列出 Editor 的主要状态字段分组",
             "理解 Editor 与 Buffer、DisplayMap 的分工",
-            "定位处理按键输入的代码路径"
+            "定位处理按键输入的代码路径",
+            "说出 Gutter 设置的结构与 git_gutter_width 枚举(Default/Custom)的取值方式"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Editor 状态结构",
+            "光标与选区",
+            "移动逻辑"
+          ],
+          "order": 1,
+          "practice_task": "在 editor.rs 中找到处理光标移动的代码,梳理 move_right 在有选区和无选区时的行为差异,写成简短笔记。",
           "source_files": [
             "crates/editor/src/editor.rs",
             "crates/editor/src/config.rs",
             "crates/editor/src/editor_settings.rs",
             "crates/editor/src/movement.rs"
           ],
-          "minimal_modules": [
-            "Editor 状态结构",
-            "光标与选区",
-            "移动逻辑"
-          ],
-          "practice_task": "在 editor.rs 中找到处理光标移动的代码,梳理 move_right 在有选区和无选区时的行为差异,写成简短笔记。",
-          "depends_on": [
-            "u4-l4",
-            "u3-l3"
-          ],
-          "action": "new"
+          "title": "Editor 总览:状态与职责",
+          "topic": "概览 editor crate:Editor 实体持有 MultiBuffer 快照、光标与选区集合、显示配置,处理键盘输入、鼠标交互与各类语言功能入口。注意 Gutter 设置中的 git_gutter_width 已从 Option<f32> 重构为 settings::GitGutterWidth 枚举(Default 随字号缩放 / Custom 固定像素)。"
         },
         {
-          "id": "u5-l2",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u5-l1",
+            "u3-l3"
+          ],
           "filename": "u5-l2-multi-buffer.md",
-          "title": "MultiBuffer:多缓冲区拼接的艺术",
-          "level": "advanced",
-          "topic": "讲解 multi_buffer crate:把多个 Buffer 的区间拼成一个逻辑文档(项目搜索、git diff 的基础),Anchor 定位体系,以及跨 buffer 编辑的事务处理。",
+          "id": "u5-l2",
           "learning_goals": [
             "解释 Anchor 如何在动态文本中稳定定位",
             "理解 MultiBuffer 的区间拼接模型",
             "说出项目搜索结果页为何用 MultiBuffer 实现"
           ],
-          "source_files": [
-            "crates/multi_buffer/src/multi_buffer.rs",
-            "crates/multi_buffer/src/anchor.rs",
-            "crates/multi_buffer/src/transaction.rs"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "Anchor 体系",
             "区间拼接",
             "编辑事务"
           ],
+          "order": 2,
           "practice_task": "构造一个包含两个 Buffer 各取若干行的 MultiBuffer,在拼接视图中间插入一行文本,验证原 Buffer 中对应位置同步更新。",
-          "depends_on": [
-            "u5-l1",
-            "u3-l3"
+          "source_files": [
+            "crates/multi_buffer/src/multi_buffer.rs",
+            "crates/multi_buffer/src/anchor.rs",
+            "crates/multi_buffer/src/transaction.rs"
           ],
-          "action": "new"
+          "title": "MultiBuffer:多缓冲区拼接的艺术",
+          "topic": "讲解 multi_buffer crate:把多个 Buffer 的区间拼成一个逻辑文档(项目搜索、git diff 的基础),Anchor 定位体系,以及跨 buffer 编辑的事务处理。"
         },
         {
-          "id": "u5-l3",
-          "order": 3,
+          "action": "keep",
+          "depends_on": [
+            "u5-l2",
+            "u3-l2"
+          ],
           "filename": "u5-l3-display-map.md",
-          "title": "DisplayMap:从文本坐标到屏幕坐标",
-          "level": "advanced",
-          "topic": "讲解 editor 的 display_map 体系:折叠、换行、制表符、inlay 提示、块状元素(诊断块)如何逐层叠加,把 Buffer 坐标变换为屏幕坐标。",
+          "id": "u5-l3",
           "learning_goals": [
             "说出各子 map(fold/wrap/tab/inlay/block)的职责与叠加顺序",
             "理解坐标从 Buffer 到屏幕的变换方向",
             "实现一个自定义的行内变换效果"
           ],
+          "level": "advanced",
+          "minimal_modules": [
+            "变换叠加架构",
+            "fold/wrap 实现",
+            "块与 inlay"
+          ],
+          "order": 3,
+          "practice_task": "跟踪一次代码折叠操作:从触发折叠的 action 到 fold_map 更新再到屏幕行数变化,写出这条链路的各层调用说明。",
           "source_files": [
             "crates/editor/src/display_map.rs",
             "crates/editor/src/display_map/fold_map.rs",
@@ -680,277 +687,280 @@
             "crates/editor/src/display_map/block_map.rs",
             "crates/editor/src/display_map/inlay_map.rs"
           ],
-          "minimal_modules": [
-            "变换叠加架构",
-            "fold/wrap 实现",
-            "块与 inlay"
-          ],
-          "practice_task": "跟踪一次代码折叠操作:从触发折叠的 action 到 fold_map 更新再到屏幕行数变化,写出这条链路的各层调用说明。",
-          "depends_on": [
-            "u5-l2",
-            "u3-l2"
-          ],
-          "action": "new"
+          "title": "DisplayMap:从文本坐标到屏幕坐标",
+          "topic": "讲解 editor 的 display_map 体系:折叠、换行、制表符、inlay 提示、块状元素(诊断块)如何逐层叠加,把 Buffer 坐标变换为屏幕坐标。"
         },
         {
-          "id": "u5-l4",
-          "order": 4,
+          "action": "update",
+          "depends_on": [
+            "u5-l3",
+            "u2-l3"
+          ],
           "filename": "u5-l4-editor-element-rendering.md",
-          "title": "编辑器渲染:Element 与绘制管线",
-          "level": "advanced",
-          "topic": "讲解 editor 的 element.rs:布局计算行高与最大宽度、用 paint_for_layout/paint 两次遍历绘制文本、高亮样式合成、滚动视口裁剪与鼠标命中测试。",
+          "id": "u5-l4",
           "learning_goals": [
             "解释编辑器布局与绘制两阶段的工作方式",
             "理解可见行范围圈定与视口裁剪",
             "定位自定义绘制(如行高亮)应修改的位置"
           ],
-          "source_files": [
-            "crates/editor/src/element.rs",
-            "crates/editor/src/element/mouse.rs",
-            "crates/editor/src/display_map/invisibles.rs"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "两阶段渲染",
             "视口裁剪",
             "鼠标命中"
           ],
+          "order": 4,
           "practice_task": "给编辑器加一个自定义装饰效果(例如高亮当前光标所在屏幕行),从 element 渲染处入手实现并验证不影响滚动性能。",
-          "depends_on": [
-            "u5-l3",
-            "u2-l3"
+          "source_files": [
+            "crates/editor/src/element.rs",
+            "crates/editor/src/element/mouse.rs",
+            "crates/editor/src/display_map/invisibles.rs"
           ],
-          "action": "new"
+          "title": "编辑器渲染:Element 与绘制管线",
+          "topic": "讲解 editor 的 element.rs:布局计算行高与最大宽度、用 paint_for_layout/paint 两次遍历绘制文本、高亮样式合成、滚动视口裁剪与鼠标命中测试。注意 gutter_strip_width 与 blame 高亮宽度现在按 GitGutterWidth::Default/Custom 枚举匹配,而非 Option<f32>。"
         }
-      ]
+      ],
+      "level": "advanced",
+      "order": 5,
+      "title": "编辑器:从文本到像素"
     },
     {
       "id": "u6",
-      "order": 6,
-      "title": "语言智能:LSP 与代码理解",
-      "level": "advanced",
       "lectures": [
         {
-          "id": "u6-l1",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u3-l4"
+          ],
           "filename": "u6-l1-language-registry.md",
-          "title": "语言注册表与语言定义",
-          "level": "intermediate",
-          "topic": "讲解 LanguageRegistry 如何管理语言:内置语言定义 Rust/Python/JS 等的 grammar、查询文件、语言服务器配置,以及扩展贡献语言的注册流程。",
+          "id": "u6-l1",
           "learning_goals": [
             "说出一个语言定义包含哪些组成部分",
             "理解 LanguageRegistry 的懒加载策略",
             "描述新语言从扩展安装到生效的链路"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "语言定义",
+            "注册表",
+            "内置语言"
+          ],
+          "order": 1,
+          "practice_task": "对照 rust.rs 写出一个新语言的最小定义(只需名字、后缀和注释 token 规则),注册进 registry 后验证 .mylang 文件能被识别并正确高亮注释。",
           "source_files": [
             "crates/language/src/language_registry.rs",
             "crates/language/src/available_languages.rs",
             "crates/languages/src/lib.rs",
             "crates/languages/src/rust.rs"
           ],
-          "minimal_modules": [
-            "语言定义",
-            "注册表",
-            "内置语言"
-          ],
-          "practice_task": "对照 rust.rs 写出一个新语言的最小定义(只需名字、后缀和注释 token 规则),注册进 registry 后验证 .mylang 文件能被识别并正确高亮注释。",
-          "depends_on": [
-            "u3-l4"
-          ],
-          "action": "new"
+          "title": "语言注册表与语言定义",
+          "topic": "讲解 LanguageRegistry 如何管理语言:内置语言定义 Rust/Python/JS 等的 grammar、查询文件、语言服务器配置,以及扩展贡献语言的注册流程。"
         },
         {
-          "id": "u6-l2",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u4-l2"
+          ],
           "filename": "u6-l2-lsp-crate.md",
-          "title": "LSP 客户端:协议层的封装",
-          "level": "intermediate",
-          "topic": "讲解 lsp crate 对 Language Server Protocol 的建模:请求/通知信封类型、JSON-RPC 传输层、多路复用与并发请求的处理方式。",
+          "id": "u6-l2",
           "learning_goals": [
             "理解 LSP 消息的类型建模",
             "解释并发请求如何被多路复用",
             "手动构造一次 simulate 的服务器交互"
           ],
-          "source_files": [
-            "crates/lsp/src/lsp.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "消息类型",
             "传输层",
             "并发模型"
           ],
+          "order": 2,
           "practice_task": "用 lsp crate 写一个小程序:启动任意系统的语言服务器,发送 initialize 与 textDocument/didOpen 请求,把响应打印到终端。",
-          "depends_on": [
-            "u4-l2"
+          "source_files": [
+            "crates/lsp/src/lsp.rs"
           ],
-          "action": "new"
+          "title": "LSP 客户端:协议层的封装",
+          "topic": "讲解 lsp crate 对 Language Server Protocol 的建模:请求/通知信封类型、JSON-RPC 传输层、多路复用与并发请求的处理方式。"
         },
         {
-          "id": "u6-l3",
-          "order": 3,
+          "action": "keep",
+          "depends_on": [
+            "u6-l1",
+            "u6-l2"
+          ],
           "filename": "u6-l3-lsp-store.md",
-          "title": "LspStore:服务器会话的生命周期",
-          "level": "advanced",
-          "topic": "讲解 project 的 lsp_store:语言服务器的启动/重启/关闭、buffer 与 server 的关联管理、诊断流分发、以及多服务器方言(如 ESLint)的协同。",
+          "id": "u6-l3",
           "learning_goals": [
             "描述语言服务器从启动到就绪的完整状态机",
             "理解 buffer 与 server 实例的多对多关联",
             "追踪诊断从服务器到编辑器的传播路径"
           ],
-          "source_files": [
-            "crates/project/src/lsp_store.rs",
-            "crates/project/src/lsp_command.rs"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "服务器生命周期",
             "buffer 关联",
             "诊断分发"
           ],
+          "order": 3,
           "practice_task": "给日志加断点或阅读代码回答:同一个 Rust 文件被两个 worktree 各自打开时,Zed 会启动几个 rust-analyzer?把判断依据写成笔记。",
-          "depends_on": [
-            "u6-l1",
-            "u6-l2"
+          "source_files": [
+            "crates/project/src/lsp_store.rs",
+            "crates/project/src/lsp_command.rs"
           ],
-          "action": "new"
+          "title": "LspStore:服务器会话的生命周期",
+          "topic": "讲解 project 的 lsp_store:语言服务器的启动/重启/关闭、buffer 与 server 的关联管理、诊断流分发、以及多服务器方言(如 ESLint)的协同。"
         },
         {
-          "id": "u6-l4",
-          "order": 4,
+          "action": "keep",
+          "depends_on": [
+            "u6-l3",
+            "u5-l1"
+          ],
           "filename": "u6-l4-completions-diagnostics.md",
-          "title": "补全、诊断与代码操作",
-          "level": "advanced",
-          "topic": "讲解编辑器如何消费语言能力:completions 的触发与排序渲染、diagnostics 的展示与跳转、code_actions 的执行,以及 LSP 扩展命令。",
+          "id": "u6-l4",
           "learning_goals": [
             "描述补全从触发到渲染的处理流程",
             "理解诊断如何映射到屏幕行与块",
             "用代码操作 API 实现一次自动修复"
           ],
+          "level": "advanced",
+          "minimal_modules": [
+            "补全管线",
+            "诊断展示",
+            "代码操作"
+          ],
+          "order": 4,
+          "practice_task": "在 completions 的处理链路上加日志,统计一次真实补全从请求到渲染涉及的排序与过滤步骤,记录各步耗时感受性能设计。",
           "source_files": [
             "crates/editor/src/completions.rs",
             "crates/editor/src/diagnostics.rs",
             "crates/editor/src/code_actions.rs",
             "crates/editor/src/lsp_ext.rs"
           ],
-          "minimal_modules": [
-            "补全管线",
-            "诊断展示",
-            "代码操作"
-          ],
-          "practice_task": "在 completions 的处理链路上加日志,统计一次真实补全从请求到渲染涉及的排序与过滤步骤,记录各步耗时感受性能设计。",
-          "depends_on": [
-            "u6-l3",
-            "u5-l1"
-          ],
-          "action": "new"
+          "title": "补全、诊断与代码操作",
+          "topic": "讲解编辑器如何消费语言能力:completions 的触发与排序渲染、diagnostics 的展示与跳转、code_actions 的执行,以及 LSP 扩展命令。"
         }
-      ]
+      ],
+      "level": "advanced",
+      "order": 6,
+      "title": "语言智能:LSP 与代码理解"
     },
     {
       "id": "u7",
-      "order": 7,
-      "title": "设置与生态:键位、扩展、主题",
-      "level": "intermediate",
       "lectures": [
         {
-          "id": "u7-l1",
-          "order": 1,
+          "action": "update",
+          "depends_on": [
+            "u2-l2"
+          ],
           "filename": "u7-l1-settings-system.md",
-          "title": "Settings:分层配置系统",
-          "level": "intermediate",
-          "topic": "讲解 settings crate:settings! 宏生成的设置项、SettingsStore 的注册与读取、用户/项目/默认值合并、文件监听热更新,以及 editorconfig 兼容。",
+          "id": "u7-l1",
           "learning_goals": [
             "用 settings! 宏定义一个新设置项",
             "理解设置值的分层覆盖与合并规则",
-            "描述设置文件改动后的热更新流程"
+            "描述设置文件改动后的热更新流程",
+            "解释设置格式演进时 migrator 中的迁移如何改写旧用户配置"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "settings! 宏",
+            "SettingsStore 合并",
+            "文件监听",
+            "设置迁移"
+          ],
+          "order": 1,
+          "practice_task": "定义一个带默认值的新设置项(例如 show_line_count),在编辑器状态栏根据它显示/隐藏行数统计,验证修改 settings.json 后无需重启即生效;再阅读 m_2026_08_17 的 git_gutter_width 迁移,写出一个将旧数值迁移为 {\"custom\": n} 的迁移函数思路。",
           "source_files": [
             "crates/settings/src/settings.rs",
             "crates/settings/src/settings_store.rs",
             "crates/settings/src/settings_file.rs",
+            "crates/settings/src/content_into_gpui.rs",
+            "crates/migrator/src/migrations/m_2026_08_17/settings.rs",
             "assets/settings/default.json"
           ],
-          "minimal_modules": [
-            "settings! 宏",
-            "SettingsStore 合并",
-            "文件监听"
-          ],
-          "practice_task": "定义一个带默认值的新设置项(例如 show_line_count),在编辑器状态栏根据它显示/隐藏行数统计,验证修改 settings.json 后无需重启即生效。",
-          "depends_on": [
-            "u2-l2"
-          ],
-          "action": "new"
+          "title": "Settings:分层配置系统",
+          "topic": "讲解 settings crate:settings! 宏生成的设置项、SettingsStore 的注册与读取、用户/项目/默认值合并、文件监听热更新,以及 editorconfig 兼容;并结合 git_gutter_width 从 Option<f32> 演进为 GitGutterWidth 枚举的实例,讲清 settings_content 中的内容定义、IntoGpui 像素转换以及 migrator 的设置版本迁移机制。"
         },
         {
-          "id": "u7-l2",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u2-l5",
+            "u7-l1"
+          ],
           "filename": "u7-l2-keymap-and-command-palette.md",
-          "title": "Keymap 与命令面板:交互入口",
-          "level": "intermediate",
-          "topic": "讲解 JSON keymap 的结构与 action 绑定、匹配上下文谓词、命令面板如何枚举 action 并支持模糊搜索执行。",
+          "id": "u7-l2",
           "learning_goals": [
             "读懂 keymap JSON 的结构与谓词语法",
             "理解 action 到 keymap 条目的对应关系",
             "描述命令面板枚举与过滤 action 的机制"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "binding 解析",
+            "上下文谓词",
+            "命令面板枚举"
+          ],
+          "order": 2,
+          "practice_task": "为命令面板贡献一个新条目:注册一个自定义 action,让它出现在命令面板里并可通过模糊搜索执行。",
           "source_files": [
             "crates/gpui/src/keymap/binding.rs",
             "crates/gpui/src/keymap/context.rs",
             "assets/keymaps/default-macos.json",
             "crates/command_palette/src/command_palette.rs"
           ],
-          "minimal_modules": [
-            "binding 解析",
-            "上下文谓词",
-            "命令面板枚举"
-          ],
-          "practice_task": "为命令面板贡献一个新条目:注册一个自定义 action,让它出现在命令面板里并可通过模糊搜索执行。",
-          "depends_on": [
-            "u2-l5",
-            "u7-l1"
-          ],
-          "action": "new"
+          "title": "Keymap 与命令面板:交互入口",
+          "topic": "讲解 JSON keymap 的结构与 action 绑定、匹配上下文谓词、命令面板如何枚举 action 并支持模糊搜索执行。"
         },
         {
-          "id": "u7-l3",
-          "order": 3,
+          "action": "keep",
+          "depends_on": [
+            "u4-l2",
+            "u7-l1"
+          ],
           "filename": "u7-l3-extension-system.md",
-          "title": "扩展系统:WASM 插件架构",
-          "level": "intermediate",
-          "topic": "讲解 extension 系列crate:扩展清单与市场元数据、extension_host 的安装/更新/启停流程、WASM 沙箱如何加载扩展逻辑、extension_api 提供的能力面。",
+          "id": "u7-l3",
           "learning_goals": [
             "说出扩展清单定义哪些能力(语言/主题/服务器/命令)",
             "描述扩展从下载到 WASM 实例运行的流程",
             "理解扩展与宿主通信的 API 边界"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "扩展清单",
+            "宿主生命周期",
+            "WASM 沙箱"
+          ],
+          "order": 3,
+          "practice_task": "阅读一个真实扩展的 manifest.toml,梳理它声明了哪些能力;再写一个最小扩展(注册一条命令)并在本地 Zed 中安装运行。",
           "source_files": [
             "crates/extension/src/extension_manifest.rs",
             "crates/extension_host/src/extension_host.rs",
             "crates/extension_host/src/wasm_host.rs",
             "crates/extension_api/src/extension_api.rs"
           ],
-          "minimal_modules": [
-            "扩展清单",
-            "宿主生命周期",
-            "WASM 沙箱"
-          ],
-          "practice_task": "阅读一个真实扩展的 manifest.toml,梳理它声明了哪些能力;再写一个最小扩展(注册一条命令)并在本地 Zed 中安装运行。",
-          "depends_on": [
-            "u4-l2",
-            "u7-l1"
-          ],
-          "action": "new"
+          "title": "扩展系统:WASM 插件架构",
+          "topic": "讲解 extension 系列crate:扩展清单与市场元数据、extension_host 的安装/更新/启停流程、WASM 沙箱如何加载扩展逻辑、extension_api 提供的能力面。"
         },
         {
-          "id": "u7-l4",
-          "order": 4,
+          "action": "keep",
+          "depends_on": [
+            "u2-l4"
+          ],
           "filename": "u7-l4-theme-and-ui-kit.md",
-          "title": "主题与 UI 组件库",
-          "level": "intermediate",
-          "topic": "讲解 theme crate(主题注册、颜色体系、语法配色规则)与 ui/component crate 的关系,以及如何组合出 Zed 一致的视觉语言。",
+          "id": "u7-l4",
           "learning_goals": [
             "理解主题如何同时覆盖界面色与语法高亮色",
             "列出 ui crate 常用组件清单",
             "用 ui 组件组合一个自定义面板"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "主题结构",
+            "组件库",
+            "ActiveTheme 用法"
+          ],
+          "order": 4,
+          "practice_task": "用 ui crate 的现成组件实现一个简单的自定义侧边面板(含图标按钮与列表),并验证它自动适配明暗主题。",
           "source_files": [
             "crates/theme/src/theme.rs",
             "crates/theme/src/registry.rs",
@@ -958,37 +968,38 @@
             "crates/ui/src/ui.rs",
             "crates/ui/src/components.rs"
           ],
-          "minimal_modules": [
-            "主题结构",
-            "组件库",
-            "ActiveTheme 用法"
-          ],
-          "practice_task": "用 ui crate 的现成组件实现一个简单的自定义侧边面板(含图标按钮与列表),并验证它自动适配明暗主题。",
-          "depends_on": [
-            "u2-l4"
-          ],
-          "action": "new"
+          "title": "主题与 UI 组件库",
+          "topic": "讲解 theme crate(主题注册、颜色体系、语法配色规则)与 ui/component crate 的关系,以及如何组合出 Zed 一致的视觉语言。"
         }
-      ]
+      ],
+      "level": "intermediate",
+      "order": 7,
+      "title": "设置与生态:键位、扩展、主题"
     },
     {
       "id": "u8",
-      "order": 8,
-      "title": "高级专题:协作、AI、终端与二次开发",
-      "level": "advanced",
       "lectures": [
         {
-          "id": "u8-l1",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u4-l3"
+          ],
           "filename": "u8-l1-collab-and-rpc.md",
-          "title": "协作与 RPC:多人编辑的底座",
-          "level": "advanced",
-          "topic": "讲解 rpc/proto/client/collab 四个 crate 的分工:proto 消息定义、rpc 连接层与对等连接、client 登录与连接管理、collab 服务端的实体存储,以及 buffer 操作如何同步。",
+          "id": "u8-l1",
           "learning_goals": [
             "说出四个网络相关 crate 的职责边界",
             "理解一条协作消息从发送到落库的路径",
             "了解操作同步与版本向量策略"
           ],
+          "level": "advanced",
+          "minimal_modules": [
+            "proto 定义",
+            "rpc 连接层",
+            "client 会话",
+            "collab 服务端"
+          ],
+          "order": 1,
+          "practice_task": "在本地用 Docker 或源码启动 collab 服务端,把两个客户端连接到同一房间,观察共享 buffer 的编辑同步,并对照源码写出消息流转说明。",
           "source_files": [
             "crates/rpc/src/rpc.rs",
             "crates/rpc/src/proto_client.rs",
@@ -996,30 +1007,29 @@
             "crates/client/src/client.rs",
             "crates/collab/src/main.rs"
           ],
-          "minimal_modules": [
-            "proto 定义",
-            "rpc 连接层",
-            "client 会话",
-            "collab 服务端"
-          ],
-          "practice_task": "在本地用 Docker 或源码启动 collab 服务端,把两个客户端连接到同一房间,观察共享 buffer 的编辑同步,并对照源码写出消息流转说明。",
-          "depends_on": [
-            "u4-l3"
-          ],
-          "action": "new"
+          "title": "协作与 RPC:多人编辑的底座",
+          "topic": "讲解 rpc/proto/client/collab 四个 crate 的分工:proto 消息定义、rpc 连接层与对等连接、client 登录与连接管理、collab 服务端的实体存储,以及 buffer 操作如何同步。"
         },
         {
-          "id": "u8-l2",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u4-l2"
+          ],
           "filename": "u8-l2-agent-and-ai.md",
-          "title": "AI 与 Agent:编辑器里的智能体",
-          "level": "advanced",
-          "topic": "讲解 agent 系列与 language_models crate:多 LLM 提供商接入层、对话 Thread 与工具调用循环、agent_ui 的面板交互,以及权限沙箱控制。",
+          "id": "u8-l2",
           "learning_goals": [
             "说出语言模型提供商的抽象接口设计",
             "描述一次 Agent 任务从用户输入到工具执行的循环",
             "理解工具权限与沙箱机制"
           ],
+          "level": "advanced",
+          "minimal_modules": [
+            "模型提供商抽象",
+            "Thread 与工具循环",
+            "AgentPanel UI"
+          ],
+          "order": 2,
+          "practice_task": "梳理 agent 工具调用的循环代码,画出一次工具调用从模型请求、权限检查到执行回填的流程图,并标注每步所在的文件。",
           "source_files": [
             "crates/agent/src/agent.rs",
             "crates/agent/src/thread.rs",
@@ -1028,29 +1038,31 @@
             "crates/language_models/src/language_models.rs",
             "crates/agent_ui/src/agent_panel.rs"
           ],
-          "minimal_modules": [
-            "模型提供商抽象",
-            "Thread 与工具循环",
-            "AgentPanel UI"
-          ],
-          "practice_task": "梳理 agent 工具调用的循环代码,画出一次工具调用从模型请求、权限检查到执行回填的流程图,并标注每步所在的文件。",
-          "depends_on": [
-            "u4-l2"
-          ],
-          "action": "new"
+          "title": "AI 与 Agent:编辑器里的智能体",
+          "topic": "讲解 agent 系列与 language_models crate:多 LLM 提供商接入层、对话 Thread 与工具调用循环、agent_ui 的面板交互,以及权限沙箱控制。"
         },
         {
-          "id": "u8-l3",
-          "order": 3,
+          "action": "keep",
+          "depends_on": [
+            "u4-l4",
+            "u2-l5"
+          ],
           "filename": "u8-l3-terminal-and-vim.md",
-          "title": "终端与 Vim 模式:两种高频交互界面",
-          "level": "advanced",
-          "topic": "讲解 terminal crate(基于 alacritty 终端模拟、PTY 管理、事件映射)与 vim crate(模式状态机、motion 对象、与编辑器动作的桥接)。",
+          "id": "u8-l3",
           "learning_goals": [
             "说出终端模拟层的职责与事件流转",
             "理解 Vim 模式状态机如何拦截并改写按键行为",
             "对比普通编辑与 Vim 模式下的输入路径差异"
           ],
+          "level": "advanced",
+          "minimal_modules": [
+            "终端模拟与 PTY",
+            "terminal_view 渲染",
+            "Vim 模式状态机",
+            "motion 系统"
+          ],
+          "order": 3,
+          "practice_task": "开启 vim 模式后,在 vim crate 中新增一个自定义 operator-motion 组合(如 d 与某个新 motion 绑定),或在 terminal 中新增一条按键到转义序列的映射,验证生效。",
           "source_files": [
             "crates/terminal/src/terminal.rs",
             "crates/terminal_view/src/terminal_view.rs",
@@ -1058,31 +1070,30 @@
             "crates/vim/src/state.rs",
             "crates/vim/src/motion.rs"
           ],
-          "minimal_modules": [
-            "终端模拟与 PTY",
-            "terminal_view 渲染",
-            "Vim 模式状态机",
-            "motion 系统"
-          ],
-          "practice_task": "开启 vim 模式后,在 vim crate 中新增一个自定义 operator-motion 组合(如 d 与某个新 motion 绑定),或在 terminal 中新增一条按键到转义序列的映射,验证生效。",
-          "depends_on": [
-            "u4-l4",
-            "u2-l5"
-          ],
-          "action": "new"
+          "title": "终端与 Vim 模式:两种高频交互界面",
+          "topic": "讲解 terminal crate(基于 alacritty 终端模拟、PTY 管理、事件映射)与 vim crate(模式状态机、motion 对象、与编辑器动作的桥接)。"
         },
         {
-          "id": "u8-l4",
-          "order": 4,
+          "action": "keep",
+          "depends_on": [
+            "u5-l2",
+            "u4-l2"
+          ],
           "filename": "u8-l4-git-integration.md",
-          "title": "Git 集成:状态、diff 与 blame",
-          "level": "advanced",
-          "topic": "讲解 git/git_ui/project 三者的协作:git crate 封装的仓库操作(blame/commit/status/stash)、project 的 git_store 缓存、以及 git_ui 的面板与 diff 多缓冲区视图。",
+          "id": "u8-l4",
           "learning_goals": [
             "说出 git crate 封装了哪些仓库操作",
             "理解 git_store 如何在 project 中管理仓库句柄",
             "解释 git diff 视图为何复用 MultiBuffer"
           ],
+          "level": "advanced",
+          "minimal_modules": [
+            "git 仓库抽象",
+            "git_store 缓存",
+            "面板与 diff UI"
+          ],
+          "order": 4,
+          "practice_task": "跟踪一次打开 git diff 面板的流程,说明变更 hunks 如何被构造成 MultiBuffer 区间,并把这条链路写成时序说明。",
           "source_files": [
             "crates/git/src/repository.rs",
             "crates/git/src/blame.rs",
@@ -1090,60 +1101,62 @@
             "crates/git_ui/src/git_panel.rs",
             "crates/git_ui/src/diff_multibuffer.rs"
           ],
-          "minimal_modules": [
-            "git 仓库抽象",
-            "git_store 缓存",
-            "面板与 diff UI"
-          ],
-          "practice_task": "跟踪一次打开 git diff 面板的流程,说明变更 hunks 如何被构造成 MultiBuffer 区间,并把这条链路写成时序说明。",
-          "depends_on": [
-            "u5-l2",
-            "u4-l2"
-          ],
-          "action": "new"
+          "title": "Git 集成:状态、diff 与 blame",
+          "topic": "讲解 git/git_ui/project 三者的协作:git crate 封装的仓库操作(blame/commit/status/stash)、project 的 git_store 缓存、以及 git_ui 的面板与 diff 多缓冲区视图。"
         },
         {
-          "id": "u8-l5",
-          "order": 5,
+          "action": "keep",
+          "depends_on": [
+            "u2-l6",
+            "u5-l1"
+          ],
           "filename": "u8-l5-testing-and-performance.md",
-          "title": "测试体系与性能调优",
-          "level": "advanced",
-          "topic": "讲解 Zed 的测试基础设施:gpui 的 test harness(TestAppContext/run_until_parked)、编辑器与项目的测试组织、benchmark crate,以及性能分析工具与文档。",
+          "id": "u8-l5",
           "learning_goals": [
             "用 TestAppContext 写一个异步交互测试",
             "理解 run_until_parked 驱动异步任务的方式",
             "知道去哪里找性能分析入口与基准结果"
           ],
+          "level": "advanced",
+          "minimal_modules": [
+            "测试上下文",
+            "异步驱动",
+            "基准组织"
+          ],
+          "order": 5,
+          "practice_task": "为一个你此前实现的小功能补一个 GPUI 测试:构造 TestAppContext、驱动异步任务完成、断言最终状态;运行 cargo test 验证通过。",
           "source_files": [
             "crates/gpui/src/test.rs",
             "crates/gpui/src/app/test_context.rs",
             "crates/editor/src/editor_tests.rs",
             "docs/src/development/glossary.md"
           ],
-          "minimal_modules": [
-            "测试上下文",
-            "异步驱动",
-            "基准组织"
-          ],
-          "practice_task": "为一个你此前实现的小功能补一个 GPUI 测试:构造 TestAppContext、驱动异步任务完成、断言最终状态;运行 cargo test 验证通过。",
-          "depends_on": [
-            "u2-l6",
-            "u5-l1"
-          ],
-          "action": "new"
+          "title": "测试体系与性能调优",
+          "topic": "讲解 Zed 的测试基础设施:gpui 的 test harness(TestAppContext/run_until_parked)、编辑器与项目的测试组织、benchmark crate,以及性能分析工具与文档。"
         },
         {
-          "id": "u8-l6",
-          "order": 6,
+          "action": "keep",
+          "depends_on": [
+            "u7-l2",
+            "u5-l1",
+            "u8-l5"
+          ],
           "filename": "u8-l6-contribute-a-feature.md",
-          "title": "二次开发实战:给 Zed 加一个完整功能",
-          "level": "advanced",
-          "topic": "综合全手册知识,走完一个真实功能的完整闭环:定义 action、实现处理逻辑、绑定键位、注册进命令面板、补测试、按贡献规范提交 PR。",
+          "id": "u8-l6",
           "learning_goals": [
             "独立完成从需求到 PR 的完整开发闭环",
             "运用 action/settings/keymap/test 的组合套路",
             "掌握 Zed 的代码规范与 PR 检查清单"
           ],
+          "level": "advanced",
+          "minimal_modules": [
+            "功能规划",
+            "action 与键位",
+            "测试与验证",
+            "PR 规范"
+          ],
+          "order": 6,
+          "practice_task": "实现一个真实小功能(例如\"复制当前文件路径到剪贴板\"这类尚未存在的 action):定义 action、在 workspace 注册处理、绑定快捷键、补一个测试,并按仓库规范整理成可提交的 commit。",
           "source_files": [
             "CONTRIBUTING.md",
             "CLAUDE.md",
@@ -1151,21 +1164,13 @@
             "crates/workspace/src/workspace.rs",
             "assets/keymaps/default-macos.json"
           ],
-          "minimal_modules": [
-            "功能规划",
-            "action 与键位",
-            "测试与验证",
-            "PR 规范"
-          ],
-          "practice_task": "实现一个真实小功能(例如\"复制当前文件路径到剪贴板\"这类尚未存在的 action):定义 action、在 workspace 注册处理、绑定快捷键、补一个测试,并按仓库规范整理成可提交的 commit。",
-          "depends_on": [
-            "u7-l2",
-            "u5-l1",
-            "u8-l5"
-          ],
-          "action": "new"
+          "title": "二次开发实战:给 Zed 加一个完整功能",
+          "topic": "综合全手册知识,走完一个真实功能的完整闭环:定义 action、实现处理逻辑、绑定键位、注册进命令面板、补测试、按贡献规范提交 PR。"
         }
-      ]
+      ],
+      "level": "advanced",
+      "order": 8,
+      "title": "高级专题:协作、AI、终端与二次开发"
     }
   ]
 }

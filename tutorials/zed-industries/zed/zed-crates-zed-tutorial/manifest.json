@@ -1,0 +1,859 @@
+{
+  "head": "a7d74150ac7a663fdaa01ec5177e303baaf6c331",
+  "project": "zed-crates-zed",
+  "rationale": "crates/zed 是 Zed 编辑器的主程序二进制 crate，代码形态高度集中：src/main.rs 负责进程级启动（多模式入口、目录/日志初始化、全局 init 序列、会话恢复），src/zed.rs 负责窗口与工作区装配（窗口选项、状态栏、面板、Pane 工具栏、action 注册、配置热加载），src/zed/open_listener.rs 负责打开协议（zed:// 与 ssh:// URL 解析、CLI IPC、打开行为、单实例），src/reliability 负责稳定性（卡顿检测、内存监控、崩溃上报）。因此学习路线按『真实执行顺序』设计：先让读者从零认识 crate 定位、构建方式与入口（单元 1），再沿 main() 的启动主链路深入 init 序列、AppState 与会话恢复（单元 2），接着攻克打开请求这一核心协议层（单元 3），然后进入 zed.rs 的窗口/工作区/面板/工具栏/action 装配（单元 4）与配置、键位、主题热加载（单元 5），最后在专家层覆盖可靠性机制、典型扩展范例（edit prediction、telemetry log）、测试体系与可视化测试，并以一条端到端新增 zed:// 链路的综合实战收尾（单元 6）。每篇讲义只讲一个主题、引用 1-6 个真实源码文件，并配一个可操作的代码实践，依赖关系沿调用链由浅入深。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "理解 zed crate 在整个 workspace 中的位置与职责",
+            "能读懂 Cargo.toml 中的 features 与四个 bundle 配置差异",
+            "知道 RELEASE_CHANNEL 与 release_channel crate 的关系"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "crate 定位与依赖全景",
+            "feature 开关（test-support/visual-tests/tracy）",
+            "release channel 与 bundle 元数据"
+          ],
+          "order": 1,
+          "practice_task": "通读 Cargo.toml，列出 zed 的两个二进制目标及其 required-features；再挑选 3 个依赖 crate（如 workspace、gpui、project），写下你猜测的职责，并在后续章节中逐一验证。",
+          "source_files": [
+            "Cargo.toml",
+            "RELEASE_CHANNEL"
+          ],
+          "title": "项目定位与 crate 全景",
+          "topic": "介绍 crates/zed 在 zed 仓库中的定位：它是 Zed 编辑器的主程序二进制 crate，负责把几乎所有功能 crate 组装成可运行的应用。解读 Cargo.toml 中的依赖、features 与 bundle 元数据。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-build-and-run.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "了解 build.rs 在构建期完成的工作",
+            "能在本地编译并运行 Zed 主程序",
+            "认识各平台特定的依赖与构建差异"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "build.rs 构建脚本",
+            "平台条件依赖",
+            "本地运行方式"
+          ],
+          "order": 2,
+          "practice_task": "在本地执行一次 cargo check -p zed（或 cargo run），结合 build.rs 源码说明构建期产物如何进入 OUT_DIR（提示：zed.rs 中的 APP_ICON 会 include_bytes 该目录下的 app_icon.png）；整理 Linux/macOS/Windows 各自的平台特定构建依赖。",
+          "source_files": [
+            "build.rs",
+            "Cargo.toml",
+            "resources/zed.desktop.in"
+          ],
+          "title": "构建与运行方式",
+          "topic": "讲解 build.rs 在构建期做了什么（如 Linux 应用图标的解码校验）、如何在本地编译运行 zed，以及 resources 目录中各平台资源（桌面文件、图标、entitlements）的作用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-crate-layout.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "掌握 crate 的模块树与条件编译模块",
+            "知道 zed.rs 与 open_listener.rs 两大文件的内部分区",
+            "能快速定位某个功能所在的源码文件"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "模块树与条件编译",
+            "大文件的函数分区",
+            "文件职责速查"
+          ],
+          "order": 3,
+          "practice_task": "画出完整模块树（标注 macOS/Windows 专属模块），并为 zed.rs 和 open_listener.rs 两个大文件建立『函数名 → 行号区间 → 职责』的分区清单，作为后续阅读的地图。",
+          "source_files": [
+            "src/main.rs",
+            "src/zed.rs"
+          ],
+          "title": "目录结构与模块树",
+          "topic": "梳理 src/main.rs、src/zed.rs、src/zed/ 子模块与 src/reliability 的模块树，说明每个文件的大致职责与代码量分布，帮助读者建立源码地图。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-main-entrypoint-modes.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "理解 zed 二进制的多种运行模式",
+            "掌握启动目录与日志的初始化兜底逻辑",
+            "理解单实例检查在 main 中的位置与平台差异"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "CLI 参数与特殊模式",
+            "init_paths 与目录创建",
+            "zlog 日志初始化"
+          ],
+          "order": 4,
+          "practice_task": "阅读 main() 前半部分并运行（或推演）--printenv、--system-specs、--dump-all-actions 的输出；解释 init_paths 会创建哪些目录、失败时 files_not_created_on_launch 如何兜底。",
+          "source_files": [
+            "src/main.rs"
+          ],
+          "title": "main() 入口：多模式与启动前置",
+          "topic": "逐段阅读 main() 前半部分：沙箱启动器、root 防护、clap 参数解析、askpass/crash-handler/printenv 等特殊模式、init_paths 目录创建、zlog 日志初始化与单实例检查。"
+        }
+      ],
+      "order": 1,
+      "title": "从零开始：认识 crates/zed"
+    },
+    {
+      "id": "u2",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l1-app-run-init.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "掌握 init 序列的分层结构",
+            "理解为什么 init 顺序不能随意调换",
+            "学会从一个 init 调用追进对应 crate 的入口"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "init 序列分层",
+            "全局状态注册（set_global）",
+            "配置观察者注册"
+          ],
+          "order": 1,
+          "practice_task": "把 app.run 内的 init 调用整理成一张分层时序图（基础设施 → 服务 → UI 框架 → 面板），并挑选 settings::init 与 workspace::init 追进对应 crate 阅读其入口函数。",
+          "source_files": [
+            "src/main.rs"
+          ],
+          "title": "app.run：全局 init 序列",
+          "topic": "深入 app.run 闭包中数十个 init 调用的先后顺序与依赖关系：settings、HTTP client、Fs、Client、LanguageRegistry、NodeRuntime、extension、theme、workspace 等。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-app-state-and-ids.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "理解 AppState 承载哪些全局句柄",
+            "掌握 system_id/installation_id 的读取与迁移逻辑",
+            "理解首启遥测事件的判定分支"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "AppState 构成",
+            "身份标识与 KVP 存储",
+            "telemetry 启动流程"
+          ],
+          "order": 2,
+          "practice_task": "阅读 system_id 与 installation_id 两个函数，写出『已存在/新建/legacy 迁移』的条件分支表；解释 authenticate 在 stdout_is_a__pty 两种情况下行为的差异。",
+          "source_files": [
+            "src/main.rs"
+          ],
+          "title": "AppState、身份标识与遥测",
+          "topic": "解析 AppState 全局状态的构成、system_id/installation_id（含 legacy device_id 迁移）、AppSession 与 Session 的关系，以及 telemetry 启动和 App First Opened 系列事件的判定。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-session-restore.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "掌握 RestoreOnStartupBehavior 的三分支逻辑",
+            "理解序列化工作区的读取与恢复流程",
+            "理解恢复失败时的降级与兜底策略"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "恢复行为枚举",
+            "序列化工作区读取",
+            "失败兜底与空窗口"
+          ],
+          "order": 3,
+          "practice_task": "结合 workspace crate 的 SerializedMultiWorkspace 画出恢复流程图；解释 last_session_window_stack 存在时为什么要对 locations 做 reverse。",
+          "source_files": [
+            "src/main.rs"
+          ],
+          "title": "会话恢复与首启引导",
+          "topic": "分析 restore_or_create_workspace 与 restorable_workspace_locations 如何根据 RestoreOnStartupBehavior 决定恢复 LastWorkspace/LastSession，FIRST_OPEN 时展示 onboarding，以及恢复全部失败时的 toast/空窗口兜底。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l4-startup-open-loop.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "理解 OpenListener 的生产者/消费者设计",
+            "掌握启动期首窗与恢复完成的竞态处理",
+            "能追踪一次打开请求的完整分发路径"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "OpenListener 通道",
+            "首窗竞态等待",
+            "handle_open_request 分发"
+          ],
+          "order": 4,
+          "practice_task": "跟踪『zed 已在运行时再次执行 zed file.txt』的完整路径（单实例转发 → RawOpenRequest → open_rx 循环 → handle_open_request），整理成调用链笔记。",
+          "source_files": [
+            "src/main.rs",
+            "src/zed/open_listener.rs"
+          ],
+          "title": "启动期打开请求循环",
+          "topic": "讲解 OpenListener 双端通道、首窗 first_window_rx 与 restore_finished 的竞态等待（macOS 冷启动场景的注释），以及 open_rx 循环如何把请求交给 handle_open_request 分发。"
+        }
+      ],
+      "order": 2,
+      "title": "应用初始化主链路"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u3-l1-open-request-parsing.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "掌握 OpenRequest::parse 的分发结构",
+            "理解 zed:// 各子协议的语义与参数",
+            "能为新的 URL 形式编写解析测试"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "URL scheme 分发",
+            "OpenRequestKind 枚举",
+            "查询参数解析"
+          ],
+          "order": 1,
+          "practice_task": "参考 test_parse_git_clone_url、test_parse_focus_app_url 等测试，为一种尚未覆盖的 URL 形式（如 zed://settings/ 带尾斜杠）编写解析测试并运行 cargo test -p zed。",
+          "source_files": [
+            "src/zed/open_listener.rs"
+          ],
+          "title": "OpenRequest 与 zed:// URL 解析",
+          "topic": "精读 OpenRequest::parse 对 zed://file、zed://agent、zed://settings、zed://git/clone、zed://git/commit、zed://schemas、zed://skill、zed-cli:// 等 scheme 的分发，以及 file:// 与 wsl 参数的处理。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-ssh-url-parsing.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 SCP 风格地址的规范化算法",
+            "掌握 RemoteConnectionOptions 的构造过程",
+            "理解 RemoteSettings 对连接参数的补全"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ssh URL 规范化",
+            "远程连接选项",
+            "远程打开入口"
+          ],
+          "order": 2,
+          "practice_task": "整理 test_parse_ssh_urls 与 test_reject_ssh_urls 的用例表，解释为什么 ssh://me@localhost:code/vibes/mine-bot 这类地址会被拒绝。",
+          "source_files": [
+            "src/zed/open_listener.rs"
+          ],
+          "title": "ssh:// 与远程打开",
+          "topic": "分析 parse_ssh_url 对标准与 SCP/git 风格 ssh 地址的规范化、parse_ssh_file_path 如何构造 RemoteConnectionOptions，以及 RemoteSettings 如何补全连接选项。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l3-cli-connection.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解 CLI 与主进程之间的 IPC 通道设计",
+            "掌握 CliRequest/CliResponse 的协议形态",
+            "理解首次使用时的交互式打开行为提示"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "IPC 握手",
+            "CliRequest 处理",
+            "resolve_open_behavior 交互"
+          ],
+          "order": 3,
+          "practice_task": "阅读测试工具 run_cli_with_zed_handler，画出 CLI 进程与 Zed 主进程之间的消息时序图（PromptOpenBehavior → SetOpenBehavior → 写入 settings → Exit）。",
+          "source_files": [
+            "src/zed/open_listener.rs"
+          ],
+          "title": "CLI IPC 连接与打开行为",
+          "topic": "讲解 zed-cli:// 握手（connect_to_cli 的 IpcHandshake 与跨线程转发）、handle_cli_connection 对 CliRequest::Open 的处理，以及 resolve_open_behavior 的交互式提示与设置持久化。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l4-open-behaviors.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "掌握 OpenBehavior 到 OpenOptions 的映射规则",
+            "理解 --wait 的 release future 与 Ping 保活机制",
+            "理解本地/远程工作区打开的分支差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "WorkspaceMatching 映射",
+            "--wait 等待机制",
+            "本地与远程分支"
+          ],
+          "order": 4,
+          "practice_task": "制作 CLI 标志（-n/-e/--add/--reuse）到 OpenOptions 字段（workspace_matching、add_dirs_to_sidebar、requesting_window）的对照表，并运行 test_add_flag_prefers_focused_window、test_wait_with_directory_waits_for_window_close 验证理解。",
+          "source_files": [
+            "src/zed/open_listener.rs"
+          ],
+          "title": "打开行为与工作区打开选项",
+          "topic": "解析 open_options_for_behavior/open_options_for_request 中 OpenBehavior → WorkspaceMatching/add_dirs_to_sidebar 的映射，open_workspaces/open_local_workspace 的本地与远程分支，以及 --wait 的 release future 与 Ping 保活、--diff 与 dev_container 的处理。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u3-l5-single-instance.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "理解三大平台单实例的不同实现手段",
+            "理解第二实例如何把请求转发给主实例",
+            "理解 app.on_open_urls 与 OpenListener 的统一入口"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Linux unix socket 转发",
+            "macOS/Windows 单实例检查",
+            "URL 事件统一入口"
+          ],
+          "order": 5,
+          "practice_task": "在 Linux 上启动 zed 后找到数据目录下的 zed-<channel>.sock，写一个小脚本（或用 socat）向该 socket 发送一个 file:// URL，观察主实例的反应并记录。",
+          "source_files": [
+            "src/zed/open_listener.rs",
+            "src/zed/mac_only_instance.rs",
+            "src/zed/windows_only_instance.rs"
+          ],
+          "title": "单实例与平台 IPC",
+          "topic": "讲解 Linux 的 unix datagram socket（listen_for_cli_connections）、macOS 的 ensure_only_instance、Windows 的 handle_single_instance，以及 app.on_open_urls 回调如何统一汇入 OpenListener。"
+        }
+      ],
+      "order": 3,
+      "title": "打开请求：URL 协议与 CLI 集成"
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u4-l1-window-options.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "掌握 WindowOptions 各字段的来源与默认值",
+            "理解环境变量与设置对窗口装饰的优先级",
+            "理解 Linux 图标从 OUT_DIR 嵌入的方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "WindowOptions 组装",
+            "窗口装饰优先级",
+            "平台特定字段"
+          ],
+          "order": 1,
+          "practice_task": "把 window_min_size 改成一个新值并在本地运行验证效果；梳理 ZED_WINDOW_DECORATIONS 环境变量、WorkspaceSettings 与默认值三层优先级关系。",
+          "source_files": [
+            "src/zed.rs"
+          ],
+          "title": "build_window_options：窗口选项工厂",
+          "topic": "解读 build_window_options 如何组装 WindowOptions：透明标题栏、app_owns_titlebar_drag、Linux 的 APP_ICON 嵌入、window_decorations 设置映射、最小尺寸与 tabbing identifier。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u4-l2-workspace-observation.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "掌握 observe_new 的装配模式",
+            "理解 MultiWorkspace/Workspace 的层次关系",
+            "理解窗口关闭确认的异步处理"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "observe_new 装配",
+            "窗口关闭回调",
+            "Sidebar 延迟创建"
+          ],
+          "order": 2,
+          "practice_task": "画图说明 MultiWorkspace/Workspace/Pane/Project 的层次关系；解释 Sidebar 为什么用 cx.defer 延迟创建，以及 ActiveWorkspaceChanged 事件如何驱动 Agent 面板迁移。",
+          "source_files": [
+            "src/zed.rs"
+          ],
+          "title": "initialize_workspace：观察 MultiWorkspace/Workspace",
+          "topic": "分析 initialize_workspace 中两段 cx.observe_new 装配：窗口关闭确认（on_window_should_close）、输入延迟遥测循环、Sidebar 的 defer 创建、ActiveWorkspaceChanged 订阅。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-status-bar-and-panels.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "掌握状态栏 item 的注册方式",
+            "理解面板的并发加载模式",
+            "理解 disable_ai 设置对面板装卸的驱动"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "状态栏 item 注册",
+            "面板并行加载",
+            "AI 面板动态装卸"
+          ],
+          "order": 3,
+          "practice_task": "按源码列出状态栏左右两侧全部 item 及其来源 crate；追踪 disable_ai 设置变化时 AgentPanel 的装卸路径（setup_or_teardown_ai_panel）。",
+          "source_files": [
+            "src/zed.rs"
+          ],
+          "title": "状态栏与面板初始化",
+          "topic": "讲解状态栏左右 item 的注册顺序、initialize_panels 用 futures::join! 并行加载六大面板、add_panel_when_ready 的容错，以及 ensure_agent_panel_for_workspace 依据 disable_ai 动态装卸。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l4-pane-toolbar.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "掌握 PaneAdded 事件驱动的工具栏装配",
+            "理解 ToolbarItemView 的接入方式",
+            "理解 QuickActionBar 随活动 item 切换的机制"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "工具栏注册清单",
+            "PaneAdded 事件",
+            "QuickActionBar 分支"
+          ],
+          "order": 4,
+          "practice_task": "梳理 QuickActionBar 在编辑器、REPL、图片预览等不同活动 item 下的渲染分支（含 preview.rs 与 repl_menu.rs），写成一份分支清单。",
+          "source_files": [
+            "src/zed.rs",
+            "src/zed/quick_action_bar.rs",
+            "src/zed/quick_action_bar/preview.rs",
+            "src/zed/quick_action_bar/repl_menu.rs"
+          ],
+          "title": "Pane 工具栏与 QuickActionBar",
+          "topic": "解析 initialize_pane 中二十余个 toolbar item 的注册流程，并重点阅读 QuickActionBar（含 preview 与 repl_menu 子模块）如何依据活动 item 类型切换按钮。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l5-workspace-actions.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "掌握 actions! 宏与 action 分发机制",
+            "理解 persist 与运行时两条字体缩放路径",
+            "掌握 with_active_or_new_workspace 的使用模式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "action 定义与注册",
+            "设置回写模式",
+            "模态与 URL 打开"
+          ],
+          "order": 5,
+          "practice_task": "新增一个自定义 action（用 actions! 宏定义并在 register_actions 中注册处理函数），通过命令面板触发验证效果，完成后撤销改动并总结注册链路。",
+          "source_files": [
+            "src/zed.rs",
+            "src/zed/open_url_modal.rs"
+          ],
+          "title": "workspace 级 action 注册",
+          "topic": "精读 register_actions：actions! 宏与 Action 分发、字体大小增减的 persist/运行时两条路径、OpenZedUrl/OpenUrlPrompt/OpenBrowser、NewWindow/NewFile 与面板 toggle_focus。"
+        }
+      ],
+      "order": 4,
+      "title": "窗口与工作区装配"
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u5-l1-settings-watch.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "掌握配置文件监听与重载链路",
+            "理解设置解析错误的分级通知",
+            "理解 GPUI 能力与设置之间的桥接方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "配置文件监听",
+            "错误通知机制",
+            "设置到 GPUI 的桥接"
+          ],
+          "order": 1,
+          "practice_task": "故意在 settings.json 写入一个非法字段，跟踪错误如何经 notify_settings_errors 变成界面通知；总结 SettingsStore 全局观察在 main.rs 与 zed.rs 中的两类用途。",
+          "source_files": [
+            "src/zed.rs",
+            "src/main.rs"
+          ],
+          "title": "settings 文件监听与错误通知",
+          "topic": "分析 watch_settings_files 的监听链路、notify_settings_errors/init_global_config_error_notifications 的错误呈现，以及 init_cursor_hide_mode/init_app_appearance/init_reduce_motion 三个设置到 GPUI 能力的桥接。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-keymap-loading.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "掌握 keymap 文件的监听→解析→重载流程",
+            "理解默认 keymap 的合成顺序",
+            "理解迁移提示条的出现条件"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "keymap 监听与重载",
+            "多 keymap 合成",
+            "迁移横幅"
+          ],
+          "order": 2,
+          "practice_task": "跟踪 open_settings_file 打开 keymap 文件的路径，说明 keymap JSON 解析错误时 show_keymap_file_json_error 的提示形态；梳理 migrate.rs 中 MigrationType 的迁移场景与 MigrationBanner 的渲染时机。",
+          "source_files": [
+            "src/zed.rs",
+            "src/zed/migrate.rs"
+          ],
+          "title": "keymap 加载、AI 绑定过滤与迁移提示",
+          "topic": "讲解 handle_keymap_file_changes 的监听→解析→reload_keymaps 流程、load_default_keymap 的多 keymap 合成、is_ai_keybinding/filter_disabled_ai_bindings 的过滤，以及 MigrationBanner 的迁移通知。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l3-themes-and-fonts.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "掌握内嵌字体的并行加载方式",
+            "理解主题目录的热加载与重载触发",
+            "理解语言查询文件在开发模式下的重载"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "内嵌字体加载",
+            "主题热加载",
+            "语言文件重载"
+          ],
+          "order": 3,
+          "practice_task": "向 themes 目录放入一个最小主题 JSON，观察 Zed 不重启识别新主题的全链路；解释 watch 调用中 100ms 防抖参数的作用。",
+          "source_files": [
+            "src/main.rs",
+            "src/zed.rs"
+          ],
+          "title": "主题、字体与语言热重载",
+          "topic": "分析 load_embedded_fonts 的并行加载、load_user_themes_in_background 与 watch_themes 的主题热加载、watch_languages（debug 构建下 .scm 重载）以及 eager_load_active_theme_and_icon_theme。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l5"
+          ],
+          "filename": "u5-l4-app-menus.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "掌握菜单与 action 的绑定方式",
+            "理解菜单项的启用/禁用条件",
+            "理解 dock 菜单动作与 URL 的联动"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "菜单结构",
+            "action 绑定",
+            "dock 菜单联动"
+          ],
+          "order": 4,
+          "practice_task": "在 app_menus 中新增一个菜单项并绑定到已存在的 action，本地运行验证（或说明无法运行时的验证思路），然后撤销改动。",
+          "source_files": [
+            "src/zed/app_menus.rs",
+            "src/zed/open_listener.rs"
+          ],
+          "title": "应用菜单构建",
+          "topic": "解读 app_menus(cx) 如何构造菜单栏并把菜单项绑定到 action 与键位提示，以及 Windows dock 菜单动作与 zed-dock-action:// URL 的联动。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1",
+            "u4-l5"
+          ],
+          "filename": "u5-l5-settings-files-opening.md",
+          "id": "u5-l5",
+          "learning_goals": [
+            "掌握三类打开函数的适用场景",
+            "理解项目级配置文件的查找规则",
+            "能追踪一个设置类 action 的完整执行链"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "三种打开函数对比",
+            "项目级配置定位",
+            "action 到 buffer 的链路"
+          ],
+          "order": 5,
+          "practice_task": "追踪 zed_actions::OpenProjectSettingsFile 从 action 触发到 buffer 打开的完整调用链，画成流程图，并对比 open_bundled_file 打开默认设置的差异。",
+          "source_files": [
+            "src/zed.rs"
+          ],
+          "title": "设置/任务文件打开链路",
+          "topic": "分析 open_settings_file/open_bundled_file/open_local_file 三个打开函数的差异，以及项目级 .zed/settings.json、tasks.json、debug 任务文件的定位逻辑（paths crate 的相对路径常量）。"
+        }
+      ],
+      "order": 5,
+      "title": "配置、键位与外观热加载"
+    },
+    {
+      "id": "u6",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u6-l1-reliability-overview.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "掌握 reliability::init 启动的四类机制",
+            "理解内存日志的节流策略",
+            "理解 minidump 上传的触发条件"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "init 四类机制",
+            "内存监控节流",
+            "minidump 上传"
+          ],
+          "order": 1,
+          "practice_task": "整理内存日志相关三个常量（轮询间隔、心跳间隔、最小记录增量）的含义；说明 diagnostics_enabled 与 staff 标志分别控制哪些上传行为。",
+          "source_files": [
+            "src/reliability.rs"
+          ],
+          "title": "reliability 总览：卡顿检测、内存监控与崩溃上报",
+          "topic": "解读 reliability::init：hang_detection 的启动、30 秒内存轮询与心跳日志、staff 标志下的构建耗时上传、minidump 上传与远程项目中崩溃文件的收集。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-hang-detection-internals.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "掌握卡顿检测的触发与采样机制",
+            "理解任务栈落盘与上报的数据形态",
+            "识别与 GPUI executor 的交互点"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "检测主循环",
+            "任务栈采样",
+            "落盘与上报"
+          ],
+          "order": 2,
+          "practice_task": "描述一次『卡顿』从检测、采样、写入 hang_traces_dir 到上报的完整生命周期，并指出实现中与 GPUI 执行器/定时器交互的位置。",
+          "source_files": [
+            "src/reliability/hang_detection.rs",
+            "src/reliability/hang_detection/task_traces.rs",
+            "src/reliability/hang_detection/logging.rs",
+            "src/reliability/hang_detection/telemetry.rs"
+          ],
+          "title": "hang_detection 内部实现",
+          "topic": "深入 hang_detection 的四个文件：主检测循环、task_traces 的任务栈采样、logging 的落盘格式、telemetry 的事件上报。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u6-l3-edit-prediction-registry.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "掌握 provider 配置的推断逻辑",
+            "理解设置变化到 provider 重分配的链路",
+            "理解 ClearHistory 等辅助 action"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "provider 配置推断",
+            "provider 分配",
+            "辅助 action"
+          ],
+          "order": 3,
+          "practice_task": "画出『设置 → EditPredictionProviderConfig → provider 实例』的决策图，并总结 Copilot 相关设置项如何影响最终选择。",
+          "source_files": [
+            "src/zed/edit_prediction_registry.rs"
+          ],
+          "title": "edit_prediction_registry：补全提供方注册",
+          "topic": "分析 edit prediction 提供方如何依据设置推断配置（EditPredictionProviderConfig、infer_prompt_format）并 assign 到对应语言，以及 ClearHistory action 的处理。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "filename": "u6-l4-telemetry-log-view.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "掌握 workspace Item 的实现要素",
+            "理解 ToolbarItemView 的接入方式",
+            "理解事件驱动的视图更新模式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Item 与 Focusable",
+            "ToolbarItemView",
+            "markdown 渲染"
+          ],
+          "order": 4,
+          "practice_task": "仿照 TelemetryLogView 写一个只读的『最近事件』视图骨架（实现 Item、Focusable、Render，用 markdown 渲染条目），在本地编译通过即可，不必合入。",
+          "source_files": [
+            "src/zed/telemetry_log.rs"
+          ],
+          "title": "telemetry_log：标准 Item 视图范例",
+          "topic": "以 TelemetryLogView 为范例讲解 workspace 的 Item trait、Focusable、ToolbarItemView 与 Render 的配合，以及事件驱动的日志追加和折叠/展开参数渲染。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u6-l5-testing-infra.md",
+          "id": "u6-l5",
+          "learning_goals": [
+            "掌握 TestAppContext 下的应用重建方式",
+            "掌握 FakeFs 与可视化测试上下文的使用",
+            "能仿照现有测试新增用例并运行"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "init_test 装配",
+            "FakeFs 与窗口测试",
+            "e2e CLI 测试手法"
+          ],
+          "order": 5,
+          "practice_task": "运行 cargo test -p zed 中的一个 gpui::test（如 test_open_workspace_with_directory），再仿照现有用例为 derive_paths_with_position 或 OpenRequest::parse 增加一个新测试并跑通。",
+          "source_files": [
+            "src/zed.rs",
+            "src/zed/open_listener.rs"
+          ],
+          "title": "测试体系：init_test 与 gpui::test",
+          "topic": "解析 zed.rs 测试模块中的 init_test/init_test_with_state 如何在 TestAppContext 中重建迷你应用（设置、主题、workspace、编辑器、面板），以及 FakeFs、窗口测试与端到端 CLI 测试的手法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l5"
+          ],
+          "filename": "u6-l6-visual-tests.md",
+          "id": "u6-l6",
+          "learning_goals": [
+            "理解 visual-tests feature 与第二个二进制的组织方式",
+            "理解 macOS 专属 visual_tests 模块的条件编译",
+            "了解截图对比测试的组织思路"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "visual-test-runner 二进制",
+            "条件编译模块",
+            "截图用例组织"
+          ],
+          "order": 6,
+          "practice_task": "阅读 visual_test_runner.rs 的入口与用例组织方式，总结运行可视化测试的前提条件（feature、平台）与命令形态；若当前平台不支持，写明限制与替代验证方式。",
+          "source_files": [
+            "src/visual_test_runner.rs",
+            "src/zed/visual_tests.rs"
+          ],
+          "title": "可视化测试与 visual_test_runner",
+          "topic": "介绍 visual-tests feature、zed_visual_test_runner 二进制与 macOS 专属的 zed::visual_tests 模块之间的关系，以及可视化（截图）测试的组织方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u4-l5",
+            "u5-l4"
+          ],
+          "filename": "u6-l7-capstone-new-url-scheme.md",
+          "id": "u6-l7",
+          "learning_goals": [
+            "综合运用 URL 解析、请求分发与 action 注册",
+            "掌握内置 buffer 的打开方式",
+            "能为新功能配套单元测试"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "端到端链路设计",
+            "解析与分发实现",
+            "测试与验证"
+          ],
+          "order": 7,
+          "practice_task": "动手实现 zed://release-notes：新增 OpenRequestKind 变体与解析分支，在 handle_open_request 中打开一个内置 markdown buffer，配套解析单元测试，并在本地运行验证后总结改动清单。",
+          "source_files": [
+            "src/zed/open_listener.rs",
+            "src/main.rs",
+            "src/zed.rs",
+            "src/zed/app_menus.rs"
+          ],
+          "title": "综合实战：端到端新增一条 zed:// 链路",
+          "topic": "综合前文知识：从 OpenRequest 解析、handle_open_request 分发、action 注册到菜单绑定，完整设计并实现一个新的 zed:// 功能（例如 zed://release-notes）。"
+        }
+      ],
+      "order": 6,
+      "title": "可靠性、扩展点与测试"
+    }
+  ]
+}
