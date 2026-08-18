@@ -1,0 +1,397 @@
+{
+  "head": "912443365be503d6898c3543955882e7516e4294",
+  "project": "dev",
+  "rationale": "本仓库是 CodeMirror 的中央开发仓库：编辑器本体分散在三十多个独立的 @codemirror/* 包仓库中，本仓库只提供装配脚本（bin/cm.js）、包注册表（bin/packages.js）、文档生成（bin/build-readme.js）和 demo/dev server，属于小型工具型项目，故规划 3 个单元共 13 篇讲义。学习顺序遵循『先定位再动手、先主链路再外围』：入门单元先厘清仓库与 npm 各包的关系，完成 cm install 多仓库装配，读懂 CLI 命令分发骨架，并跑起 demo 与 8090 端口开发服务器；进阶单元沿真实调用链『包注册表 → 构建流水线 → dev server 内部 → 双轨测试 → 多仓库工作流命令』递进讲解；专家单元进入发布工程（git log 变更挖掘、语义化版本与 CHANGELOG 自动生成、README/API 文档流水线），最后以注册新包、扩展 cm 命令的二次开发实战收尾，并讨论多仓库相对单体 monorepo 的架构取舍。由于各包源码需经 cm install 克隆后才会出现在仓库根目录，所有讲义的 source_files 均只引用本仓库内真实存在的文件，涉及包内部实现时聚焦于本仓库脚本如何驱动它们。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出本仓库与 npm 上各个 @codemirror/* 包的关系",
+            "列出仓库根目录各文件与目录的职责",
+            "知道从哪里获取使用文档与参与贡献的途径"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README 中 install/build/dev 三条命令说明",
+            "package.json 的 scripts 与 workspaces 配置",
+            "CONTRIBUTING.md 的贡献流程"
+          ],
+          "order": 1,
+          "practice_task": "通读 README.md 与 CONTRIBUTING.md，手工画出仓库目录树并标注每个条目的用途；再列出 package.json 中 test、test-node、prepare、dev 四个脚本分别对应的 cm 子命令。",
+          "source_files": [
+            "README.md",
+            "CONTRIBUTING.md",
+            "package.json"
+          ],
+          "title": "这个仓库是什么：CodeMirror 中央开发仓库总览",
+          "topic": "介绍本仓库在 CodeMirror 生态中的定位：它是开发脚本、bug 跟踪和演示页面的聚集地，编辑器本体分散在各个独立包仓库中。了解 README、CONTRIBUTING 与整体目录结构。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-install-and-setup.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "追踪 install() 对每个包的克隆、更新、清理三分支逻辑",
+            "理解文件顶部『不要提前 require node_modules』注释的原因",
+            "会用 node bin/cm.js install [--ssh] 完成环境搭建"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "start() 中的 assertInstalled 守卫",
+            "install()",
+            "run() 子进程封装"
+          ],
+          "order": 2,
+          "practice_task": "在一个全新克隆上执行 node bin/cm.js install，记录输出中出现的三类动作（exists updating、Checking out、Running npm install）；随后执行 node bin/cm.js packages，把输出与 packages.js 中的清单对照。",
+          "source_files": [
+            "bin/cm.js",
+            "bin/packages.js",
+            "README.md",
+            "package.json"
+          ],
+          "title": "从零跑起来：cm install 与多仓库装配",
+          "topic": "逐行阅读 bin/cm.js 中的 install()、assertInstalled() 与 run() 辅助函数，理解它如何把三十多个包仓库克隆到本地、用 npm workspaces 装配依赖并触发首次构建。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-cli-dispatch.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "看懂 cmdFn 映射表与利用 cmdFn.length 的参数个数校验技巧",
+            "理解 new Promise 包裹 + catch(error) 的统一错误出口",
+            "能对照 help() 文本找到每个子命令对应的实现函数"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "start()",
+            "help()",
+            "error() 与 run()"
+          ],
+          "order": 3,
+          "practice_task": "在 cm.js 的映射表里新增一个 echo 命令：接收任意参数并原样打印，同时更新 help() 文本；用 node bin/cm.js echo hello 验证效果。",
+          "source_files": [
+            "bin/cm.js"
+          ],
+          "title": "命令行骨架：cm.js 的命令分发与帮助系统",
+          "topic": "解析 cm.js 顶层的 start()：如何用一张命令到函数的映射表实现子命令分发、参数个数校验，以及 help()/error() 提供的统一出口。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l4-demo-and-devserver.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "读懂 demo.ts 中 EditorView 的 doc、extensions、parent 配置项",
+            "理解 index.html 与构建输出模块 _m/demo.js 的对应关系",
+            "会用 npm run dev 启动 8090 端口并访问 demo 和 /test/ 页面"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "demo.ts 的 EditorView 初始化",
+            "cm.js 的 devserver()",
+            "startServer() 中的静态文件服务"
+          ],
+          "order": 4,
+          "practice_task": "启动 npm run dev 后打开 http://localhost:8090，把 demo.ts 的 doc 文本换成一段自己写的代码并保存，观察自动重建后在浏览器里的效果；再访问 /test/ 页面确认浏览器测试入口存在。",
+          "source_files": [
+            "demo/demo.ts",
+            "demo/index.html",
+            "package.json",
+            "bin/cm.js"
+          ],
+          "title": "看见编辑器：demo 应用与 dev 服务器初体验",
+          "topic": "阅读 demo/demo.ts 如何用 codemirror 包的 EditorView 加 basicSetup 与 javascript() 语言扩展搭建编辑器，以及 demo/index.html 如何加载构建产物模块。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "入门：认识仓库并把开发环境跑起来"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l1-package-registry.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "区分 12 个核心包与二十多个外围语言包/主题包",
+            "理解 main 文件探测的三条优先级规则（唯一 ts 文件 > index.ts > 与包同名的文件）",
+            "掌握 packages、packageNames、buildPackages 三个导出的差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "core 与 nonCore 常量",
+            "Pkg 构造函数",
+            "loadPackages()"
+          ],
+          "order": 1,
+          "practice_task": "写一个临时脚本 require('./bin/packages') 并调用 loadPackages()，打印每个包的 name、dir、main 三元组；再对照 tsconfig.json 的 paths，验证 main 探测结果与 paths 映射是否一致。",
+          "source_files": [
+            "bin/packages.js",
+            "bin/cm.js",
+            "tsconfig.json"
+          ],
+          "title": "包注册表：packages.js 与 Pkg 模型",
+          "topic": "剖析 bin/packages.js：core 与 nonCore 两组包清单、Pkg 类如何确定每个包的目录与入口文件（main 探测规则），以及 loadPackages() 导出的三个集合。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u2-l1"
+          ],
+          "filename": "u2-l2-build-pipeline.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "梳理从 cm build 到包内 dist 产物的调用链",
+            "理解 tsconfig.json 中 paths 把 @codemirror/* 指向兄弟仓库源码的作用",
+            "知道 clean() 删除哪些构建产物以及它与 cm install 清理动作的分工"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "build()",
+            "clean()",
+            "Pkg.main 探测与 buildPackages 过滤"
+          ],
+          "order": 2,
+          "practice_task": "执行 node bin/cm.js build 记录耗时与输出，再执行 node bin/cm.js clean 观察各包 dist 目录的变化；最后在 tsconfig.json 里任选两个包的 paths 条目，追到对应的源码入口文件。",
+          "source_files": [
+            "bin/cm.js",
+            "bin/packages.js",
+            "tsconfig.json",
+            "package.json"
+          ],
+          "title": "构建流水线：cm build 背后的工具链",
+          "topic": "分析 build() 如何把 buildPackages 的 main 列表交给 @marijn/buildtool，并结合 @codemirror/buildhelper 的 options 完成打包；理解 npm workspaces 与 tsconfig paths 如何让各包源码互相引用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-devserver-internals.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "看懂 moduleserver.handleRequest 与 serveStatic 的回退关系",
+            "理解 /test/ 路由调用 gatherTests 动态拼接测试页 HTML 的过程",
+            "掌握监听地址与 8090 端口的配置位置以及 --source-map 选项的去向"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "startServer()",
+            "devserver() 的 watch 调用",
+            "/test/ 请求分支"
+          ],
+          "order": 3,
+          "practice_task": "把监听端口从 8090 改成 8091 并重启 dev server 验证生效；再为服务器增加一条 /hello 路由返回固定文本，用 curl 验证响应。",
+          "source_files": [
+            "bin/cm.js",
+            "demo/index.html",
+            "demo/test/mocha.js",
+            "demo/test/mocha.css"
+          ],
+          "title": "dev server 内部：esmoduleserve 与测试路由",
+          "topic": "深入 startServer()：用 esmoduleserve 提供 ES 模块按需编译服务、用 serve-static 托管 demo 目录，以及 /test/ 路径如何运行时生成 mocha 测试页面。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-test-runner.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "理解 browserTests 与 node tests 两条测试轨道各自的收集方式",
+            "会使用 npm run test、npm run test-node 以及 --grep 过滤",
+            "知道浏览器测试页面是运行时生成而非静态文件"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "test()",
+            "startServer() 中的 gatherTests 调用",
+            "package.json 的 test 与 test-node 脚本"
+          ],
+          "order": 4,
+          "practice_task": "先运行 npm run test-node 观察输出结构，再给命令加上 --grep 只跑部分用例；对照 test() 源码找出每个参数是在哪几行被消费的。",
+          "source_files": [
+            "bin/cm.js",
+            "package.json",
+            "demo/test/mocha.js",
+            "demo/test/mocha.css"
+          ],
+          "title": "测试体系：cm test 与浏览器/Node 双轨测试",
+          "topic": "解读 test() 命令：gatherTests 收集各包测试、--firefox/--chrome/--no-browser/--grep 参数的解析方式，以及浏览器测试页面对 demo/test 下 mocha 资产的依赖。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l5-multirepo-commands.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "理解以 packages 数组为中心的循环式命令实现模式",
+            "掌握用 git status -sb 输出字符串判断『有变更/有新提交』的技巧",
+            "会用 cm grep 在全部包源码中定位符号并用 cm run 逐包执行命令"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "status()",
+            "commit() 与 push()",
+            "grep() 与 runCmd()"
+          ],
+          "order": 5,
+          "practice_task": "依次执行 cm status、cm run pwd、cm grep EditorView，记录三者输出范围；然后为 grep 增加一个 --test-only 选项，使其只搜索各包的 test 目录。",
+          "source_files": [
+            "bin/cm.js",
+            "bin/packages.js"
+          ],
+          "title": "多仓库日常：status/commit/push/run/grep 协同",
+          "topic": "研究 cm.js 中遍历所有包仓库的一组工作流命令：status 的『有变化才输出』过滤、commit/push 的变更检测、run 的逐包执行，以及 grep 对 legacy-modes 等特殊目录的处理。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 2,
+      "title": "进阶：核心模块与主调用链"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u3-l1-changelog-mining.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "读懂 git log --format=%B%n --reverse 输出的处理方式",
+            "理解分段正则中前瞻断言划定的惰性匹配边界",
+            "掌握 fix、feature、breaking 三类变更结果的数据结构"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "changelog()",
+            "run() 的 git 封装",
+            "releaseNotes() 对分类结果的消费"
+          ],
+          "order": 1,
+          "practice_task": "在一个练习用的 git 仓库里构造包含 FIX:、FEATURE:、BREAKING: 段落的提交，编写小脚本复用 changelog() 的正则，验证三类信息被正确分组且顺序保持时间正序。",
+          "source_files": [
+            "bin/cm.js"
+          ],
+          "title": "变更日志挖掘：用正则从 git log 提取分类变更",
+          "topic": "剖析 changelog()：按时间正序读取两个版本之间的提交信息，用识别 BREAKING/FIX/FEATURE 标记的分段正则把提交归入三类，为发布做准备。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-release-flow.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 0.x 版本号与正式版本号两套不同的升级策略",
+            "追踪从 changes 到 notes 再到 git commit 与 tag 的完整链路",
+            "知道 setModuleVersion 与 updateDependencyVersion 的联动方式以及依赖联动被暂时停用的原因"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "bumpVersion()",
+            "release() 与 doRelease()",
+            "releaseNotes() 与 editReleaseNotes()",
+            "unreleased()"
+          ],
+          "order": 2,
+          "practice_task": "在沙盒包仓库演练一次发布：构造若干分类提交后用 bumpVersion 的规则推演新版本号，再按 doRelease 的步骤生成 CHANGELOG.md 与 git tag，最后用 git tag -n 验证 tag 注释内容。",
+          "source_files": [
+            "bin/cm.js"
+          ],
+          "title": "发布流程：语义化版本与 CHANGELOG 自动生成",
+          "topic": "贯通 release 命令全链路：bumpVersion 按 0.x 与 x.y.z 两套规则升级版本、doRelease 写 CHANGELOG 并打 tag、editReleaseNotes 调用外部编辑器人工修订、unreleased 预览未发布变更。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u3-l3-readme-generation.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解包内 src/README.md 模板中 @...@ 文档占位符与 $$$ 替换点的工作方式",
+            "看懂把 href 与 id 改写为 codemirror.net 文档锚点的后处理正则",
+            "区分普通包与 legacy-modes 在文档生成上的两条代码路径"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "imports 解析器数组",
+            "普通包分支的 placeholders 提取与 gather 调用",
+            "HTML 后处理与模板替换"
+          ],
+          "order": 3,
+          "practice_task": "任选一个 nonCore 包执行 node bin/cm.js build-readme <pkg>，用该包仓库内的 git diff 观察 README.md 的变化并标出新增 HTML 的锚点规律；再阅读该包 src/README.md 找到被替换的占位符原文。",
+          "source_files": [
+            "bin/build-readme.js",
+            "bin/packages.js",
+            "bin/cm.js"
+          ],
+          "title": "文档流水线：build-readme 如何生成带 API 文档的 README",
+          "topic": "解析 bin/build-readme.js：用 getdocs-ts 收集类型注释、builddocs 渲染 HTML、三级 import 解析器生成跨包文档链接，以及 legacy-modes 多入口的特殊分支。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u3-l2",
+            "u3-l3"
+          ],
+          "filename": "u3-l4-extend-the-toolchain.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "能独立完成『新增包』与『新增命令』两类扩展并让它们接入现有守卫与循环",
+            "评估多仓库方案在依赖联动、测试与发布上的代价和收益",
+            "识别 cm.js 中依赖 rm、grep 等 UNIX 工具带来的跨平台问题"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "packages.js 的清单与 Pkg 构造",
+            "cm.js 的命令映射表与 assertInstalled",
+            "tsconfig paths 与 npm workspaces 的联动"
+          ],
+          "order": 4,
+          "practice_task": "设计并实现一个实验包：把它加入 packages.js（并验证入口探测规则）、在 tsconfig.json 补上 paths 映射、为 cm.js 新增 cm doctor 命令检查该包是否已克隆且完成构建，最后按 CONTRIBUTING.md 的代码风格整理改动。",
+          "source_files": [
+            "bin/packages.js",
+            "bin/cm.js",
+            "tsconfig.json",
+            "package.json",
+            "CONTRIBUTING.md"
+          ],
+          "title": "二次开发实战：扩展工具链与架构取舍",
+          "topic": "综合前面所有知识：如何向 packages.js 注册一个新包、如何新增 cm 子命令并接入 assertInstalled 守卫，以及『多仓库 + 中央脚本』相对单体 monorepo 的取舍与可移植性问题。"
+        }
+      ],
+      "level": "advanced",
+      "order": 3,
+      "title": "专家：发布工程、文档生成与二次开发"
+    }
+  ]
+}

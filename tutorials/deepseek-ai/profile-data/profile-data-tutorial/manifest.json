@@ -1,0 +1,434 @@
+{
+  "head": "449602428a1b023acb8a505d4f34fef536535db6",
+  "project": "profile-data",
+  "rationale": "本仓库不是传统代码项目，而是 DeepSeek 公开的训练/推理 profiling 数据集：三份 PyTorch Profiler 导出的 Chrome Trace JSON（train.json EP64、prefill.json EP32、decode.json EP128）加 README 与截图。因此学习路线从\"看懂并打开轨迹数据\"入手：第一单元让读者建立仓库定位、可视化方法（chrome://tracing / Perfetto）与 Trace Event 格式的事件字段认知；第二单元按\"CPU-GPU 关联机制 → train(DualPipe 1F1B 注解与 DeepEP 内核) → prefill(双微批与 FP8/MLA/MoE 内核图谱) → decode(低延迟 dispatch_ll/combine_ll 与 split-KV 注意力)\"的顺序逐份精读，先讲关联机制再读具体轨迹，避免读者在 GPU 时间线里迷路；第三单元上升到定量分析与二次实践：写通用分析脚本、量化通信-计算重叠率与气泡、横向对比三种配置，最后用 torch.profiler 自制轨迹并连接 DualPipe/DeepEP/DeepGEMM 生态。全程每篇讲义都配一个可直接对数据执行的 Python 实践任务，形成\"格式认知 → 精读 → 定量 → 复现\"的递进闭环。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "order": 1,
+      "title": "认识数据集与轨迹可视化",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 profile-data 仓库的用途：公开训练与推理框架的 profiling 数据",
+            "列举三份轨迹各自的阶段与并行配置（train=EP64、prefill=EP32+16K tokens/GPU、decode=EP128+128 requests/GPU）",
+            "对应 README 中三张截图与三份 JSON 的关系",
+            "理解“模拟绝对均衡 MoE 路由”这一采集前提"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "项目背景与定位",
+            "三份轨迹的并行配置",
+            "仓库文件布局"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README.md，制作一张表格记录三份轨迹的阶段（训练/预填充/解码）、world_size、序列长度、批量设置，并为 assets/ 下三张截图各写一句说明：它对应哪份轨迹、展示了什么现象。",
+          "source_files": [
+            "README.md",
+            "assets/train.jpg",
+            "assets/prefill.jpg",
+            "assets/decode.jpg"
+          ],
+          "title": "项目概览：profile-data 是什么",
+          "topic": "介绍 DeepSeek profile-data 仓库的定位：公开训练与推理的通信-计算重叠 profiling 数据；梳理 README 中三种场景（训练 EP64、预填充 EP32、解码 EP128）的配置差异与仓库文件布局。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-visualize-trace.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "掌握 chrome://tracing（或 edge://tracing）加载本地大 JSON 轨迹的步骤",
+            "掌握用 Perfetto UI（ui.perfetto.dev）打开 Chrome Trace JSON 的替代方案",
+            "学会使用 W/S 缩放、轨迹折叠、事件点选查看 args 等基本操作",
+            "在截图中辨认 CPU 进程、GPU 0~7 进程与 stream 线"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "chrome://tracing 与 Perfetto 两种查看方式",
+            "大文件加载与缩放技巧",
+            "时间线中进程/线程的视觉对应"
+          ],
+          "order": 2,
+          "practice_task": "下载仓库并用 chrome://tracing（或 ui.perfetto.dev）打开 train.json，缩放到 CPU 线上的 “1F1B” 注解区间，观察下方 GPU 0~7 时间线；记录轨迹中出现的 GPU 进程数量，并点选一个 GPU 内核事件查看它的 name、ts、dur 与 args 字段。",
+          "source_files": [
+            "README.md",
+            "train.json",
+            "assets/train.jpg"
+          ],
+          "title": "把轨迹文件看起来的两种方式",
+          "topic": "讲解如何用 Chrome 的 chrome://tracing（或 Edge 的 edge://tracing）以及 Perfetto UI 打开并浏览仓库中的大型轨迹 JSON，学会缩放、查看进程/线程轨道和事件详情。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-trace-file-structure.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "说出 PyTorch Profiler Chrome Trace 导出的四个顶层字段及含义",
+            "从 deviceProperties 读出采集机器为 NVIDIA H800、132 SM、80GB 显存等关键参数",
+            "用 distributedInfo 区分三份轨迹：world_size 64/32/128、backend nccl、rank 0",
+            "用 Python 加载 JSON 并统计 traceEvents 数量"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "顶层字段 schemaVersion/deviceProperties/distributedInfo/traceEvents",
+            "deviceProperties 中的 GPU 硬件参数",
+            "三份文件的 distributedInfo 差异"
+          ],
+          "order": 3,
+          "practice_task": "编写 Python 脚本依次加载 train.json、prefill.json、decode.json，打印每份文件的 schemaVersion、distributedInfo、deviceProperties 中 GPU 数量与 GPU 型号，以及 traceEvents 的长度，并以表格形式汇报。",
+          "source_files": [
+            "train.json",
+            "prefill.json",
+            "decode.json"
+          ],
+          "title": "轨迹文件整体结构：PyTorch Profiler 的导出格式",
+          "topic": "解析轨迹 JSON 的顶层结构：schemaVersion、deviceProperties（NVIDIA H800 硬件信息）、distributedInfo（backend/rank/world_size）与 traceEvents 事件数组；对比三份文件的 world_size（64/32/128）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-event-fields-metadata.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "解释 ph=X/M/s/f 各自代表的事件类型",
+            "解释 cat 的含义并列举 cpu_op、cuda_runtime、kernel、user_annotation、ac2g、gpu_memcpy 等类别",
+            "用 process_name/process_labels/thread_name 元数据事件把 pid/tid 映射为 “GPU 0”、“stream 7” 等可读名称",
+            "用 ts 与 dur（微秒）计算事件区间"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "事件字段 ph/cat/name/pid/tid/ts/dur/args",
+            "元数据事件 process_name/process_labels/thread_name",
+            "事件类别速查表"
+          ],
+          "order": 4,
+          "practice_task": "写脚本统计 train.json 中每个 cat 的事件数量并降序输出；再解析 ph=\"M\" 的元数据事件，输出 pid=1166 与 pid=0 的进程标签（CPU / GPU 0）以及各 tid 对应的 stream 名称。",
+          "source_files": [
+            "train.json"
+          ],
+          "title": "读懂单条事件：ph/cat/pid/tid/ts/dur 与元数据事件",
+          "topic": "逐字段讲解 traceEvents 中的事件：ph（X 完成事件、M 元数据、s/f 流事件）、cat（cpu_op/kernel/cuda_runtime/user_annotation/ac2g/gpu_memcpy 等）、pid/tid、ts/dur 与 args；说明 process_labels/thread_name 如何标记 CPU、GPU 0~7 与 stream。"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "level": "intermediate",
+      "order": 2,
+      "title": "逐份精读三份轨迹",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l1-cpu-gpu-correlation.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "描述 CPU 侧 cuda_runtime 事件（如 cudaLaunchKernel）与 GPU 侧 kernel 事件的对应关系",
+            "使用 args 中的 correlation 与 External id 把 GPU 内核反查回 CPU 算子",
+            "说明 ac2g 流事件（ph=s/f）在可视化中画出的箭头",
+            "理解 cpu_op 事件（aten::to、aten::copy_ 等）是算子调用的层级嵌套"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "cuda_runtime 事件与 correlation 字段",
+            "External id 与 Ev Idx 的链接作用",
+            "ac2g 流事件"
+          ],
+          "order": 1,
+          "practice_task": "在 train.json 中任选一个 GPU kernel 事件，读取其 args 中的 correlation/External id，编写脚本在 CPU 侧找到同 correlation 的 cuda_runtime 事件及其外层 cpu_op 算子，打印这条“GPU 内核 ← CUDA API ← CPU 算子”链路。",
+          "source_files": [
+            "train.json",
+            "prefill.json"
+          ],
+          "title": "CPU 与 GPU 的关联：cuda_runtime、External id 与 ac2g",
+          "topic": "讲解 PyTorch 轨迹中 CPU 事件与 GPU 事件的关联机制：cuda_runtime 事件通过 correlation 与 GPU kernel 关联，cpu_op 通过 External id 关联，ac2g 流事件（ph=s/f）在时间线上画出 CPU 到 GPU 的箭头。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l2-train-dualpipe-annotations.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "解释 ProfilerStep#1 与 1F1B 注解的含义",
+            "列出 attn/mlp/dispatch/combine × F/B/W 共 11 类注解并说明 F/B/W 分别对应前向/反向/权重梯度",
+            "从 user_annotation 的时间区间还原一个 chunk 内“先反后前”的调度顺序",
+            "理解 README 所述每个 chunk 含 4 个 MoE 层、PP 通信未计入轨迹"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "DualPipe 与 1F1B 调度",
+            "attn/mlp/dispatch/combine × F/B/W 注解体系",
+            "8 个 GPU 进程时间线的阅读"
+          ],
+          "order": 2,
+          "practice_task": "提取 train.json 中全部 user_annotation 事件，按 ts 排序输出“名称/开始时间/时长”表格，数出 dispatch(F) 与 combine(B) 的出现次数，验证一个 1F1B 区间内包含 4 个 MoE 层的调度重复模式。",
+          "source_files": [
+            "train.json",
+            "README.md",
+            "assets/train.jpg"
+          ],
+          "title": "train.json 与 DualPipe：1F1B 调度注解",
+          "topic": "精读 train.json 的 user_annotation：ProfilerStep#1 之下有 1F1B 总注解，以及 attn(F/B/W)、mlp(F/B/W)、dispatch(F/B)、combine(F/B) 等 DualPipe 前反向分块调度注解；结合 EP64 与 4 层 MoE chunk 理解通信-计算重叠。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-deepep-comm-kernels.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "识别 dpsk::ep::internode::dispatch/combine/notify_dispatch 与 dpsk::ep::cuda::get_dispatch_layout 四类内核的签名特征",
+            "说明 dispatch/combine 分别承担 token 发往专家与结果聚合的反方向通信",
+            "统计通信类内核的次数与总时长占比",
+            "在时间线上观察 dispatch/combine 与 attn/mlp 计算内核的交错重叠"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "internode dispatch/combine/notify_dispatch 内核",
+            "get_dispatch_layout 布局内核",
+            "通信与计算内核的交替模式"
+          ],
+          "order": 3,
+          "practice_task": "编写脚本统计 train.json 中名称含 dpsk::ep:: 的 kernel 事件，按内核名聚合计数与总时长，计算其占全部 GPU kernel 时间的比例；再取一个 combine(B) 注解区间，列出其中穿插的计算内核。",
+          "source_files": [
+            "train.json",
+            "README.md"
+          ],
+          "title": "训练/预填充轨迹中的 DeepEP 通信内核",
+          "topic": "认识 train.json 与 prefill.json 中的 DeepEP 内节点内核：dpsk::ep::internode::dispatch/combine、notify_dispatch/cached_notify 以及 get_dispatch_layout，理解 dispatch/combine 即 MoE 的 all-to-all 两个方向。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l4-prefill-kernel-map.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "按 stream 维度区分通信流（internode dispatch/combine 所在流）与计算流",
+            "识别 DeepGEMM 的 dpsk::gemm::fp8_gemm_kernel 与 grouped GEMM（cutlass/dpsk::grouped_gemm）内核",
+            "梳理 MoE 路由内核链：clean_and_count_expert → get_fused_mapping → expand_to_fused → reduce_fused 与 top2_sum_gate",
+            "识别 MLA 预填充注意力 flash::compute_attn_ws、vllm rotary、FP8 量化 per_token_cast_to_fp8 等算子"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "EP32 双微批重叠策略",
+            "DeepGEMM fp8_gemm_kernel 与 grouped GEMM",
+            "MoE 路由与融合内核链",
+            "MLA 预填充注意力内核"
+          ],
+          "order": 4,
+          "practice_task": "对 prefill.json 的 kernel 事件按 args.stream 分组，统计每个流的内核数量与代表内核名，标出 DeepEP 通信所在的流；再统计 top2_sum_gate、clean_and_count_expert 等路由相关内核的调用次数。",
+          "source_files": [
+            "prefill.json",
+            "README.md",
+            "assets/prefill.jpg"
+          ],
+          "title": "prefill.json 解析：双微批重叠与计算内核图谱",
+          "topic": "系统梳理 prefill.json（EP32、4K prompt、16K tokens/GPU、双微批）的 GPU 内核图谱：DeepEP internode 通信内核、DeepGEMM FP8 GEMM、grouped GEMM、MoE 路由内核链（clean_and_count_expert/get_fused_mapping/expand_to_fused/reduce_fused/top2_sum_gate）与 MLA 预填充注意力 compute_attn_ws。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l5-decode-low-latency-comm.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "识别低延迟版 dispatch_ll/combine_ll 内核签名",
+            "用 stream 字段验证通信内核与计算内核位于不同流",
+            "解释 RDMA 消息发出后 GPU SM 被释放、等待在计算结束后完成的调度方式",
+            "对比 normal（dispatch/combine）与 low-latency（dispatch_ll/combine_ll）两代内核在轨迹中的形态差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "dispatch_ll/combine_ll 低延迟内核",
+            "通信流与计算流的分离",
+            "RDMA 发出后释放 SM 的调度语义"
+          ],
+          "order": 5,
+          "practice_task": "在 decode.json 中找出名称含 dispatch_ll 与 combine_ll 的 kernel 事件，输出它们所在 stream 与时长分布；再取计算流任一密集区间，验证通信流在该区间只有少量短内核甚至空闲，写出你的结论。",
+          "source_files": [
+            "decode.json",
+            "README.md",
+            "assets/decode.jpg"
+          ],
+          "title": "decode.json 解析：低延迟 dispatch_ll/combine_ll",
+          "topic": "精读 decode.json（EP128、128 requests/GPU）中的 DeepEP 低延迟内核 dispatch_ll/combine_ll：它们运行在独立通信流上，RDMA 消息发出后不占用 GPU SM，等待与计算重叠，对应 DeepEP 的 low-latency 实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u2-l6-decode-attention-microbatch.md",
+          "id": "u2-l6",
+          "learning_goals": [
+            "识别 flash_fwd_splitkv_mla_kernel 与 flash_fwd_splitkv_mla_combine_kernel 的分工",
+            "按 ts 排序验证解码阶段同样使用两个微批重叠计算与 all-to-all",
+            "统计注意力内核在解码步总时长中的占比",
+            "列举解码侧其余计算内核：fp8_gemm、swiglu、rotary、per_token_cast_to_fp8"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "flash_fwd_splitkv_mla 两段式内核",
+            "解码阶段的双微批交替",
+            "解码计算内核清单"
+          ],
+          "order": 6,
+          "practice_task": "统计 decode.json 中 flash_fwd_splitkv_mla_kernel 与 flash_fwd_splitkv_mla_combine_kernel 的次数与总时长，并按时间排序输出前 20 个事件，观察两微批是否交替出现；计算注意力内核占全部 kernel 时长的比例。",
+          "source_files": [
+            "decode.json",
+            "README.md"
+          ],
+          "title": "decode 的 split-KV MLA 注意力与双微批结构",
+          "topic": "解析 decode.json 的注意力与微批结构：flash::flash_fwd_splitkv_mla_kernel + combine 内核构成的 split-KV MLA 解码注意力，结合 README 说明解码同样用两个微批重叠计算与 all-to-all 通信。"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "level": "advanced",
+      "order": 3,
+      "title": "定量分析与二次实践",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u3-l1-quantitative-analysis.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "编写按 cat、name、pid/stream 聚合的通用统计函数",
+            "输出 Top-N 耗时内核与各类别时间占比",
+            "处理 decode.json 这类单行压缩大 JSON 的内存友好加载",
+            "将 ts/dur 微秒换算为毫秒并做区间端点计算"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "JSON 加载与大文件处理",
+            "按类别/内核名/流的聚合统计",
+            "Top-N 与占比计算"
+          ],
+          "order": 1,
+          "practice_task": "编写脚本 analyze_trace.py：输入任意一份轨迹 JSON，输出事件总数、各类 cat 的数量与总时长、Top-20 耗时内核（按名称聚合）及所在流；对三份轨迹各运行一次并保存结果。",
+          "source_files": [
+            "train.json",
+            "prefill.json",
+            "decode.json"
+          ],
+          "title": "用 Python 做轨迹定量分析",
+          "topic": "把前面的零散查询沉淀为一个可复用的分析脚本：加载轨迹、按 cat 与内核名聚合、输出 Top-N 耗时内核、按 pid/stream 汇总，形成对任意 PyTorch Chrome Trace 都可用的分析工具。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-overlap-bubble-metrics.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "把事件列表转换为 (start, end) 时间区间并按流分组",
+            "实现两集合区间的交集总长度计算，得到重叠率",
+            "定义并计算通信流的“等待气泡”与计算流的空闲比例",
+            "解释 decode 通信不占 SM 时重叠率的含义变化"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "流时间轴区间运算",
+            "重叠率定义与计算",
+            "气泡/空闲指标定义"
+          ],
+          "order": 2,
+          "practice_task": "对 decode.json 实现区间求交：计算通信流（含 dispatch_ll/combine_ll 的流）与计算流的事件区间重叠比例，以及通信流总时长中与计算重叠的部分；再对 train.json 重复同样计算，比较两个场景的重叠率。",
+          "source_files": [
+            "decode.json",
+            "train.json"
+          ],
+          "title": "通信-计算重叠率与气泡量化",
+          "topic": "进阶定量：将同一 GPU 上通信流与计算流的事件转为时间区间集合，计算交集得到重叠率、差集得到暴露的通信时间与计算气泡，用数字验证 README 描述的重叠策略。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u2-l3",
+            "u2-l4",
+            "u2-l5"
+          ],
+          "filename": "u3-l3-three-config-comparison.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "整理三种场景的并行配置与采集口径差异",
+            "对比 normal 与 low-latency 两类 DeepEP 内核在轨迹中的占比形态",
+            "对比预填充 compute_attn_ws 与解码 splitkv_mla 两代注意力内核",
+            "用统一指标（通信占比、重叠率、Top 内核）产出对比结论"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "EP64/EP32/EP128 配置对比",
+            "通信内核族与注意力内核族差异",
+            "统一指标的横向汇总"
+          ],
+          "order": 3,
+          "practice_task": "综合前面各讲脚本，生成一张三轨迹对比表：world_size、GPU 进程数、内核总数、DeepEP 通信内核族及占比、注意力内核族及占比、通信-计算重叠率；并用三到五句结论解释训练、预填充、解码在通信策略上的不同取舍。",
+          "source_files": [
+            "train.json",
+            "prefill.json",
+            "decode.json",
+            "README.md"
+          ],
+          "title": "三种配置横向对比：train / prefill / decode",
+          "topic": "横向对比三份轨迹：EP64 训练（DualPipe 前反向分块）、EP32 预填充（双微批 + internode 通信）、EP128 解码（低延迟 RDMA 通信），从 world_size、内核族构成、通信占比与重叠率角度量化差异。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l4-profile-your-own-model.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "使用 torch.profiler.profile 的 activities 与 record_shapes 参数采集 CPU+CUDA 活动",
+            "用 export_chrome_trace 导出与仓库同格式的 JSON 并用 chrome://tracing 查看",
+            "用 u3-l1 的脚本分析自制轨迹并与仓库轨迹结构对照",
+            "建立 profile-data 与 DualPipe、DeepEP、DeepGEMM 开源仓库的知识连接"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "torch.profiler 基本用法",
+            "export_chrome_trace 导出",
+            "DualPipe/DeepEP/DeepGEMM 生态连接"
+          ],
+          "order": 4,
+          "practice_task": "在本机或 Colab 上用 torch.profiler.profile（activities 含 CPU 与 CUDA）录制一个小模型的 forward+backward，profiler.export_chrome_trace(\"my_trace.json\") 导出；检查其 schemaVersion/distributedInfo/traceEvents 结构与仓库轨迹的异同，并用 analyze_trace.py 输出 Top-10 内核。若无 GPU，可只采 CPU 侧事件并说明差异。",
+          "source_files": [
+            "README.md",
+            "train.json"
+          ],
+          "title": "自建 profiling 与生态项目连接",
+          "topic": "收尾与实践延伸：用 torch.profiler.profile + export_chrome_trace 录制自己的模型得到同格式轨迹，用前几讲的脚本分析；并把仓库结论连接到 DualPipe、DeepEP、DeepGEMM 等开源实现，理解这些轨迹背后的工程决策。"
+        }
+      ]
+    }
+  ]
+}
