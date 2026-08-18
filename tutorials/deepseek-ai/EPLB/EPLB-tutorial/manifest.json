@@ -1,0 +1,405 @@
+{
+  "head": "d52c72d5b2f2fb4c41afbf8eb21366820239913d",
+  "project": "EPLB",
+  "rationale": "EPLB 是一个小而精的算法仓库：核心实现只有 eplb.py 一个文件（约 165 行、四个函数），但背后是 MoE 专家并行、冗余专家、组受限路由等较重的领域知识，且代码大量使用 gather/scatter/置换复合等张量技巧。因此学习路线设计为：第一单元先脱离代码建立问题域认知（MoE 负载不均、冗余专家策略、hierarchical 与 global 两种策略的适用场景），完成环境搭建、跑通 README 示例并建立四函数代码地图；第二单元按\"由纯算法到张量技巧再到主流程\"的顺序精读源码——先讲 balanced_packing（LPT 式贪心装箱）与 replicate_experts（weight/logcnt 贪心复制）两个独立算法，再补齐 unflatten/gather/scatter/逆置换等前置张量工具，然后分三讲拆解 rebalance_experts_hierarchical（组打包到节点+节点内复制、GPU 打包与映射链合成），最后讲入口 rebalance_experts 的策略分派与 log2phy 逆映射构造；第三单元面向二次开发，依次是正确性测试、负载均衡质量评估、性能与设备一致性（结合 d52c72d 与 e1100fe 两个真实修复/演进 commit）、工程集成（负载统计到权重重排的上下游流水线）以及变体实战。依赖关系保证读者任意时刻只需已学知识即可推进，实践任务从手算模拟逐步升级到写测试、写评测、写变体实现。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出专家并行下 GPU 负载不均衡的成因与危害",
+            "描述冗余专家 + 启发式打包的整体解决思路",
+            "区分 hierarchical 与 global 两种策略的适用场景"
+          ],
+          "level": "beginner",
+          "minimal_modules": [],
+          "order": 1,
+          "practice_task": "阅读 README 并观察 example.png 中的放置方案，标出哪些逻辑专家被复制了、它们的副本分别落在哪些节点和 GPU 上，用自己的话写一段问题陈述。",
+          "source_files": [
+            "README.md"
+          ],
+          "title": "项目概览：EPLB 是什么、解决什么问题",
+          "topic": "介绍 EPLB 的定位：专家并行（EP）下不同专家负载差异导致 GPU 负载不均，DeepSeek-V3 采用冗余专家策略复制重载专家，再启发式打包到 GPU；本讲通读 README，建立对两种负载均衡策略的第一印象。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-moe-and-expert-parallelism.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "解释逻辑专家与物理专家（副本）的区别",
+            "说明专家组约束对节点放置的影响",
+            "理解 prefill 用较小 EP（hierarchical）、decode 用较大 EP（global）的原因"
+          ],
+          "level": "beginner",
+          "minimal_modules": [],
+          "order": 2,
+          "practice_task": "用纸笔设计一个 12 专家、4 组、2 节点 8 GPU 的小型 MoE 部署草图：先手动复制若干重载专家再放置到 GPU，记录你遇到的组约束与负载不均衡问题，为后续对照算法结果做准备。",
+          "source_files": [
+            "README.md",
+            "eplb.py"
+          ],
+          "title": "领域背景：MoE、专家并行与 DeepSeek-V3 路由",
+          "topic": "讲解理解 EPLB 所需的背景概念：MoE 层与逻辑/物理专家、专家并行、DeepSeek-V3 的 group-limited expert routing，以及 prefill/decode 阶段 EP 规模差异如何决定为什么同组专家要尽量放在同一节点。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-setup-and-first-run.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "搭建能运行 eplb.py 的环境并跑通示例",
+            "解释 phy2log、log2phy、logcnt 三个返回值的形状与语义",
+            "观察参数变化对输出形状与内容的影响"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "rebalance_experts"
+          ],
+          "order": 3,
+          "practice_task": "安装 PyTorch 后运行 README 示例，打印三个输出张量；修改 num_replicas、num_gpus 等参数重跑，统计 phy2log 中每个逻辑专家 id 的出现次数并验证与 logcnt 一致。",
+          "source_files": [
+            "README.md",
+            "eplb.py"
+          ],
+          "title": "环境搭建与首次运行：读懂接口的三个输出",
+          "topic": "本仓库没有打包文件，eplb.py 以纯 Python 模块直接 import 使用；本讲搭建环境、运行 README 的两层 12 专家示例，并逐一解释 rebalance_experts 返回的 phy2log、log2phy、logcnt 三个张量的形状与含义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-code-map-and-dataflow.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "画出四个函数的调用关系图",
+            "列出每个函数的输入输出张量形状",
+            "描述 hierarchical 策略“组打包到节点→节点内复制→物理专家打包到 GPU”的三步流程"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "balanced_packing",
+            "replicate_experts",
+            "rebalance_experts_hierarchical",
+            "rebalance_experts"
+          ],
+          "order": 4,
+          "practice_task": "编写一个脚本，为每个函数固定一组随机输入并断言全部输出形状，整理成你自己的“函数与形状速查表”，作为后续精读的参照。",
+          "source_files": [
+            "eplb.py"
+          ],
+          "title": "代码地图：四个函数的分工与数据流",
+          "topic": "纵览 eplb.py 的整体结构：balanced_packing、replicate_experts、rebalance_experts_hierarchical、rebalance_experts 四个函数的职责、调用关系，以及 hierarchical 策略三步流程中各张量形状的演变。"
+        }
+      ],
+      "title": "认识 EPLB：问题、背景与上手",
+      "order": 1
+    },
+    {
+      "id": "u2",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l1-balanced-packing.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "解释为什么按权重降序排序能改善贪心装箱质量",
+            "读懂 pack_items 容量约束与 pack_weights 最轻包选择的配合",
+            "说明 groups_per_pack==1 的平凡分支与 min(..., key=...) 惯用法"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "balanced_packing"
+          ],
+          "order": 1,
+          "practice_task": "构造 8 个物品、2 个包的小例子，手工模拟算法每一步写出 pack_index 和 rank_in_pack，再用代码运行验证你的手算结果一致。",
+          "source_files": [
+            "eplb.py"
+          ],
+          "title": "balanced_packing：带容量约束的贪心装箱",
+          "topic": "逐行精读 balanced_packing：按权重降序排序后，把每个物品放入“仍有容量且当前最轻”的包，这是 LPT（最长处理时间优先）式贪心的变体；同时讲解 Python 的 min(range, key=...) 选择惯用法与 groups_per_pack==1 的提前返回分支。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l2-replicate-experts.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "解释 weight/logcnt 为何近似每个副本的期望负载",
+            "推导循环从 num_log 到 num_phy 恰好复制 num_phy-num_log 个冗余专家",
+            "理解 phy2log、rank、logcnt 三个输出分别在放置方案中扮演的角色"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "replicate_experts"
+          ],
+          "order": 2,
+          "practice_task": "实现一个“每轮直接复制当前最重专家”的朴素对照版本，在同一组负载上比较两个版本的最大单副本负载，验证 weight/logcnt 贪心的优势并记录反例（若有）。",
+          "source_files": [
+            "eplb.py"
+          ],
+          "title": "replicate_experts：冗余副本的贪心分配",
+          "topic": "精读 replicate_experts：每一轮复制 weight/logcnt 最大的逻辑专家，等价于尽量拉平所有副本的期望负载；同时理解 phy2log、rank（该专家的第几个副本）、logcnt 三个输出如何随循环逐步构造。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l3-tensor-techniques.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "用 scatter_ 手写一个置换的逆并验证正确性",
+            "解释 gather 按 index 重排与 scatter_ 按 index 写回的对应关系",
+            "看懂 (pack_index * groups_per_node + rank_in_pack) * group_size + arange(group_size) 这类复合索引编码"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [],
+          "order": 3,
+          "practice_task": "在 Python 交互环境中对随机置换做 gather/scatter 实验：实现 inverse(perm)，并断言 perm.gather(-1, inverse(perm)) 与 inverse(perm).gather(-1, perm) 都恢复为有序序列。",
+          "source_files": [
+            "eplb.py"
+          ],
+          "title": "源码中的 PyTorch 张量技巧：gather、scatter 与逆置换",
+          "topic": "集中讲解 eplb.py 用到的张量操作：sort().indices、unflatten/flatten、gather、scatter_ 构造逆置换的 inverse 函数、expand/repeat、带步长的 arange 生成偏移，这些是读懂 hierarchical 主流程的前置工具箱。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2",
+            "u2-l3"
+          ],
+          "filename": "u2-l4-hierarchical-steps-groups-and-replication.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "解释 tokens_per_group 的 unflatten+sum 计算链路",
+            "推导 log2mlog 公式中乘法与 arange 偏移如何把“节点号+节点内组序号”编码为新逻辑编号",
+            "说明 view 成 [num_layers*num_nodes, ...] 如何让所有节点的复制在一次调用中并行完成"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "rebalance_experts_hierarchical",
+            "balanced_packing",
+            "replicate_experts"
+          ],
+          "order": 4,
+          "practice_task": "复制 rebalance_experts_hierarchical 为实验版本，在 Step 1、Step 2 之后打印 tokens_per_group、log2mlog、mlog2log、mlogcnt 等中间张量，验证组划分后每个节点的总负载是否平衡。",
+          "source_files": [
+            "eplb.py"
+          ],
+          "title": "层级策略前两步：组打包到节点与节点内复制",
+          "topic": "精读 rebalance_experts_hierarchical 的 Step 1 与 Step 2：unflatten+sum 求每组 token 数、balanced_packing 把组打包到节点、log2mlog 与 mlog2log 互逆置换的构造，随后 gather 重排并 view 成 [num_layers*num_nodes, ...] 调用 replicate_experts 在节点内复制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u2-l5-hierarchical-step-gpu-packing-and-mapping.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "追踪一个物理专家从 mlog 编号到最终原始 log 编号的完整映射链",
+            "解释 phy2pphy = pack_index * phy_experts_per_gpu + rank_in_pack 的槽位编码",
+            "说明末尾按 num_logical_experts//num_nodes 步长的 arange 偏移如何把节点内编号还原为全局编号"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "rebalance_experts_hierarchical",
+            "balanced_packing"
+          ],
+          "order": 5,
+          "practice_task": "选取一个被复制（logcnt>1）的逻辑专家，编写代码逐步打印它在 phy2mlog、pphy2phy、pphy2mlog、pphy2log 各映射后的编号，直到落在某个 GPU 的具体槽位，并画出完整映射链路图。",
+          "source_files": [
+            "eplb.py"
+          ],
+          "title": "层级策略第三步：GPU 打包与多层映射链合成",
+          "topic": "精读 Step 3：tokens_per_phy = tokens_per_mlog/mlogcnt 再 gather 得到每个副本的负载，balanced_packing 打包到 GPU，最后通过 phy2pphy→pphy2phy→pphy2mlog→pphy2log 的映射复合把所有中间编号翻译回原始逻辑专家编号，并把 logcnt 映射回原顺序。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u2-l6-entry-point-and-global-policy.md",
+          "id": "u2-l6",
+          "learning_goals": [
+            "说明两种策略的分派条件与各自适合的 prefill/decode 阶段",
+            "解释 log2phy 中 phy2log * maxlogcnt + phyrank 的扁平化 scatter 技巧与 -1 padding",
+            "理解全局策略如何通过退化参数复用 hierarchical 实现"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "rebalance_experts"
+          ],
+          "order": 6,
+          "practice_task": "用 num_groups=4、num_nodes=3（不整除）触发全局策略，对比其输出与 hierarchical 策略的差异；并验证 log2phy 中 -1 恰好出现在复制数未达最大值的专家槽位。",
+          "source_files": [
+            "eplb.py",
+            "README.md"
+          ],
+          "title": "入口函数与全局策略：分派、退化复用与逆映射构造",
+          "topic": "精读 rebalance_experts：按 num_groups % num_nodes 是否为 0 分派策略；全局策略通过调用 hierarchical(weight, num_replicas, 1, 1, num_gpus) 退化为“全局复制 + GPU 级打包”；最后用 scatter_ 与 maxlogcnt 扁平化技巧构造 log2phy 逆映射（含 -1 padding），以及 weight.float().cpu() 的作用。"
+        }
+      ],
+      "title": "核心算法与源码精读",
+      "order": 2
+    },
+    {
+      "id": "u3",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l5",
+            "u2-l6"
+          ],
+          "filename": "u3-l1-correctness-testing.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "列出放置方案必须满足的不变量清单",
+            "用 torch 断言把每个不变量写成可执行测试",
+            "构造覆盖 hierarchical 与 global 两条分支及各平凡分支的参数组合"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "rebalance_experts",
+            "rebalance_experts_hierarchical"
+          ],
+          "order": 1,
+          "practice_task": "编写 test_eplb.py，实现至少 6 条不变量断言（形状、每 GPU 数量、至少一副本、互逆一致、组-节点对齐、边界参数），并在多组随机负载上全部跑通。",
+          "source_files": [
+            "eplb.py",
+            "README.md"
+          ],
+          "title": "为 EPLB 编写正确性测试",
+          "topic": "从零设计测试套件：输出形状断言、每个 GPU 恰好 num_replicas/num_gpus 个专家、每个逻辑专家至少一个副本、phy2log 与 log2phy/logcnt 互逆一致、层级策略下同节点组约束满足，以及 groups_per_pack=1、num_nodes=1 等边界分支。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-balance-quality-evaluation.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "利用 weight 与 logcnt 实现每 GPU 负载计算函数",
+            "解释长尾分布下冗余专家带来的均衡收益",
+            "分析层级策略“组打包到节点”约束付出的均衡代价"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "rebalance_experts"
+          ],
+          "order": 2,
+          "practice_task": "编写评测脚本，在均匀、长尾、真实感三种负载分布 × hierarchical/global 两种策略 × 多个冗余数量下输出均衡度对比表格，并总结哪种场景收益最大、哪里的均衡代价最明显。",
+          "source_files": [
+            "eplb.py",
+            "README.md"
+          ],
+          "title": "负载均衡质量评估：指标、下界与实验",
+          "topic": "定义均衡度指标（每 GPU 负载的 max/min、max/mean、标准差），推导理论下界（总负载 / num_gpus），在均匀、长尾、模拟真实统计的负载分布上实验，对比 hierarchical 与 global 策略以及关闭冗余（num_replicas=num_log）的基线。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "filename": "u3-l3-performance-and-devices.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "评估算法在数百专家、数十层规模下的耗时瓶颈",
+            "解释 .cpu() 与各张量 device 参数如何维持设备一致性",
+            "从 git 历史理解全局策略补上 GPU 级均衡与设备修复的动机"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "balanced_packing",
+            "replicate_experts",
+            "rebalance_experts_hierarchical"
+          ],
+          "order": 3,
+          "practice_task": "用 timeit 在大规模负载（如 60 层 × 256 专家）上测量耗时；尝试将 replicate_experts 的循环改为批量 argmax 或向量化实现，用 u3-l1 的测试验证等价性并比较速度。",
+          "source_files": [
+            "eplb.py"
+          ],
+          "title": "性能、数值与设备一致性：结合两次真实修复演进",
+          "topic": "分析 balanced_packing、replicate_experts 中 Python 循环的复杂度与向量化机会、weight.float() 的数值稳定性考虑、CPU/GPU 设备一致性；结合 commit d52c72d（修复 pphy2mlog 设备缺失）与 e1100fe（全局策略从仅调用 replicate_experts 改为复用 hierarchical 以获得 GPU 级均衡）两个真实案例理解工程演化。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "filename": "u3-l4-integration-pipeline.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "设计“统计→rebalance_experts→应用映射”的最小集成流水线",
+            "说明 log2phy 的 -1 padding 在权重重排侧的处理方式",
+            "讨论重排频率与参数迁移开销之间的权衡"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "rebalance_experts"
+          ],
+          "order": 4,
+          "practice_task": "编写模拟集成脚本：生成随时间漂移的专家负载统计（滑动平均），每轮调用 rebalance_experts 并按映射“重排”模拟的专家权重张量，打印每次重排前后每 GPU 负载的变化曲线。",
+          "source_files": [
+            "README.md",
+            "eplb.py"
+          ],
+          "title": "工程集成：从负载统计到专家权重重排",
+          "topic": "讲清 EPLB 的上下游：如何用历史统计的滑动平均估计专家负载（README 指出具体预测方法不在本仓库范围）、训练/推理框架如何按 phy2log/log2phy 重排专家权重与路由表、以及重排触发节奏与迁移开销的权衡。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2",
+            "u3-l3"
+          ],
+          "filename": "u3-l5-extensions-and-evolution.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "在不破坏原有接口的前提下实现并接入一个变体复制策略",
+            "用 u3-l2 的均衡度指标量化变体相对原版的收益与代价",
+            "说明“用退化参数复用 hierarchical 实现全局策略”这一设计模式的优缺点"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "replicate_experts",
+            "balanced_packing",
+            "rebalance_experts_hierarchical"
+          ],
+          "order": 5,
+          "practice_task": "实现一个“最大副本数受限”的 replicate_experts 变体并接入 rebalance_experts 的实验分支，用评测脚本对比原版与变体在长尾负载下的均衡度、副本分布与耗时差异。",
+          "source_files": [
+            "eplb.py",
+            "README.md"
+          ],
+          "title": "二次开发实战：策略变体与“退化参数复用”设计模式",
+          "topic": "以变体实验收尾：实现最大副本数受限、放置约束（如按节点带宽加权）等变体策略，并参考 e1100fe 将全局策略从独立实现重构为 hierarchical(1,1,num_gpus) 的做法，体会用退化参数复用同一实现的设计模式及其维护优势。"
+        }
+      ],
+      "title": "验证、评估与二次开发",
+      "order": 3
+    }
+  ]
+}
