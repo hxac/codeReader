@@ -1,0 +1,852 @@
+{
+  "head": "00c0e96e769062e373203c62830f510fa121db76",
+  "project": "zed-crates-text",
+  "rationale": "text crate 是 Zed 编辑器的协同文本缓冲区核心（约 6600 行），它把 rope（文本存储）、clock（Lamport 时钟与版本向量）、sum_tree（有序聚合树）三块基础设施组合成一个支持多副本并发编辑、锚点、撤销重做的 CRDT 式缓冲区，因此学习顺序必须先立地基再上高楼：单元 1 让读者从零跑起来，理解 Buffer 与 BufferSnapshot 的可变/不可变分工；单元 2 建立坐标系统（offset、Point、PointUtf16、TextDimension），这是后续一切 API 的通用语言；单元 3 补齐协同编辑的理论地基（Lamport 时间戳、版本向量、Fragment 墓碑模型、Locator 可插入标识），不理解这一层就无法读懂任何编辑代码；单元 4 沿主链路精读本地编辑与远程编辑的合并算法，以及乱序操作的延迟应用机制；单元 5 讲\"变更如何被观察\"——edits_since 差分迭代器、Patch 代数、订阅推送与历史版本时间旅行，这是编辑器增量渲染的基础；单元 6 专讲 Anchor 锚点系统，它是位置在并发编辑下保持稳定的抽象；单元 7 进入专家层，剖析事务分组、undo/redo 与 UndoMap 的奇偶计数技巧；单元 8 收尾于性能设计（SumTree 共享与内存布局）、随机化测试（Network 模拟丢包乱序）、snapshot_with_edits 预览提交模式，并以一个基于公开 API 的综合实践收束。依赖关系按此递进设置，全部讲义均锚定在真实源码文件上。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 text crate 在 Zed 中的定位：它如何被 language、editor、project 等上层 crate 依赖",
+            "列出 text crate 的核心依赖 rope、clock、sum_tree、collections 各自承担的职责",
+            "知道库根是 src/text.rs 而非 lib.rs，并理解 Cargo.toml 中 [lib] path 配置与 test-support feature 的作用"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Cargo.toml",
+            "src/text.rs 的 mod 声明区",
+            "Buffer（总体印象）"
+          ],
+          "order": 1,
+          "practice_task": "在仓库根目录运行 cargo test -p text --no-run 确认 crate 可构建，再运行 cargo test -p text test_edit 观察一个现有测试通过；然后在 src/tests.rs 末尾模仿 test_edit 新增一个空测试 fn test_my_first_buffer() 并运行它。",
+          "source_files": [
+            "Cargo.toml",
+            "src/text.rs",
+            "../language/Cargo.toml",
+            "../editor/Cargo.toml"
+          ],
+          "title": "项目定位：text crate 是什么、在 Zed 中处于什么位置",
+          "topic": "介绍 text crate 是 Zed 编辑器的协同文本缓冲区实现，说明它依赖 rope、clock、sum_tree 等基础 crate，并被 language、editor、project 等上层 crate 消费。建立对项目规模（约 6600 行、10 个源文件）和技术栈的整体认知。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-first-buffer.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "使用 Buffer::new 创建缓冲区并用 Buffer::edit 执行插入、替换、删除",
+            "区分 usize offset、FullOffset 与 Range<usize> 三种编辑入参形态",
+            "理解 Buffer::edit 返回的 Operation 是可发送给其他副本的编辑操作"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Buffer::new",
+            "Buffer::edit",
+            "BufferSnapshot::text",
+            "Buffer::version"
+          ],
+          "order": 2,
+          "practice_task": "在 src/tests.rs 中编写测试：创建包含 \"hello world\" 的 Buffer，先用一次 edit 把 \"world\" 替换为 \"zed\"，再用一次传入多个 (Range<usize>, &str) 的 edit 同时插入前缀和删除后缀，每次编辑后断言 buffer.text() 的内容，并打印 buffer.version() 观察 clock::Global 的变化。",
+          "source_files": [
+            "src/text.rs",
+            "src/tests.rs"
+          ],
+          "title": "第一个 Buffer：创建、编辑与读取文本",
+          "topic": "动手创建一个 Buffer，执行本地编辑并读取文本，观察版本号变化。讲解 Buffer::new、Buffer::edit、Buffer::text、Buffer::version 这条最小使用链路。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-module-map.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "说出 10 个源文件各自的职责一句话摘要",
+            "识别哪些模块是 pub（locator、operation_queue、subscription）、哪些是私有（anchor、patch、selection、undo_map）以及 network 仅在 test/test-support 下编译",
+            "根据引用关系画出模块间依赖方向"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "src/text.rs 模块声明",
+            "anchor/patch/selection/undo_map/locator/network/operation_queue/subscription/tests"
+          ],
+          "order": 3,
+          "practice_task": "阅读 src/text.rs 开头的模块声明与各文件头部，手工绘制模块依赖图；然后用 grep 在 src/text.rs 中统计每个模块被引用的位置，把你的图与实际引用关系对照，标注出 pub use anchor::*、pub use patch::Patch 等再导出路径。",
+          "source_files": [
+            "src/text.rs",
+            "src/anchor.rs",
+            "src/locator.rs",
+            "src/network.rs",
+            "src/operation_queue.rs",
+            "src/patch.rs",
+            "src/selection.rs",
+            "src/subscription.rs",
+            "src/undo_map.rs"
+          ],
+          "title": "目录结构与模块地图：十个源文件各自负责什么",
+          "topic": "逐一梳理 src 下十个文件的角色：text.rs 主逻辑、anchor/locator 位置标识、patch 编辑补丁、selection 选区、subscription 订阅、undo_map 撤销映射、operation_queue 操作队列、network 测试网络、tests 测试。理解 pub 与私有模块的边界。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l4-buffer-and-snapshot.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "说出 Buffer 与 BufferSnapshot 各自持有的字段：Buffer 多出 history、deferred_ops、lamport_clock、subscriptions 等可变状态",
+            "使用 BufferId::new 构造合法 id 并解释 NonZeroU64 的设计",
+            "使用 branch() 创建共享快照但拥有独立历史与时钟的分支副本"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Buffer",
+            "BufferSnapshot",
+            "BufferId",
+            "Deref for Buffer",
+            "Buffer::branch"
+          ],
+          "order": 4,
+          "practice_task": "编写测试：创建 Buffer 后调用 branch() 得到分支，在原 buffer 和分支上分别做不同的编辑，断言两者文本不同但 BufferId 相同；再写一段代码分别通过 buffer.text()（Deref）和 buffer.into_snapshot().text() 访问文本，体会 Deref 的便利。",
+          "source_files": [
+            "src/text.rs"
+          ],
+          "title": "Buffer 与 BufferSnapshot：可变拥有者与不可变快照",
+          "topic": "剖析 Buffer 与 BufferSnapshot 两个核心类型的字段与分工：Buffer 持有历史、订阅与延迟操作队列，BufferSnapshot 是纯数据快照可廉价 clone；同时讲解 BufferId 与 branch 的用途。"
+        }
+      ],
+      "order": 1,
+      "title": "起步：认识并跑通 text crate"
+    },
+    {
+      "id": "u2",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l1-rope-and-text-storage.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "解释 visible_text 与 deleted_text 两根 Rope 的作用：可见文本与墓碑文本",
+            "使用 text_for_range、chars_for_range、bytes_in_range 以 chunk 方式读取文本",
+            "理解 LineEnding::detect/normalize 如何在入口处统一换行、text_with_line_endings 如何按需还原"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "BufferSnapshot 的 visible_text/deleted_text",
+            "as_rope/text_for_range/bytes_in_range",
+            "LineEnding"
+          ],
+          "order": 1,
+          "practice_task": "编写测试：创建含 CRLF 换行的 Buffer，断言 text() 已被规范化为 \\n 且 line_ending() 仍记录原始风格；再实现一个函数 count_chunks_via_api，用 text_for_range(0..buffer.len()) 返回的 Chunks 迭代器统计 chunk 数量，与 buffer.as_rope() 的直接遍历结果对比。",
+          "source_files": [
+            "src/text.rs"
+          ],
+          "title": "双 Rope 存储：可见文本与已删除文本",
+          "topic": "讲解 BufferSnapshot 内部用两根 Rope 分别保存可见文本与被删除（墓碑）文本，理解 text crate 通过 pub use rope::* 复用 rope 的 Rope、Point、TextSummary 等类型，以及 LineEnding 的规范化处理。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-coordinate-conversion-traits.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "写出 ToOffset、ToPoint、ToPointUtf16、ToOffsetUtf16、FromAnchor 各 trait 的方法签名与适用场景",
+            "解释 Point 与 PointUtf16 的差异（UTF-8 列 vs UTF-16 列）以及 LSP 等外部系统为何需要 UTF-16",
+            "使用 clip_offset/clip_point/clip_point_utf16 把任意位置吸附到合法字符边界"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "ToOffset",
+            "ToPoint/ToPointUtf16/ToOffsetUtf16",
+            "FullOffset",
+            "clip_* 家族"
+          ],
+          "order": 2,
+          "practice_task": "编写一个泛型函数 fn line_of<T: ToOffset>(pos: T, snapshot: &BufferSnapshot) -> u32，内部先转 usize 再 offset_to_point 取行号；分别用 usize、Point、PointUtf16 三种参数调用它；再对含中文的 buffer 调用 clip_offset_utf16 传入落在多字节字符中间的 OffsetUtf16，验证吸附行为。",
+          "source_files": [
+            "src/text.rs",
+            "src/anchor.rs"
+          ],
+          "title": "坐标转换 trait 家族：ToOffset、ToPoint、ToPointUtf16",
+          "topic": "精读 text.rs 底部定义的坐标转换 trait 家族，理解 usize、Point、PointUtf16、OffsetUtf16、Unclipped<PointUtf16>、Anchor 之间如何统一互转，以及 FullOffset（含已删除文本的偏移）与普通 offset 的区别。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-text-dimensions-and-summaries.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "理解 TextDimension 抽象让同一查询 API 可返回 usize、Point、PointUtf16 等多种维度",
+            "使用 text_summary_for_range 以 TextSummary 为维度计算区间的行列摘要",
+            "说出 max_point/row_count/len 与 TextSummary 的关系"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "TextDimension（rope 提供）",
+            "text_summary_for_range",
+            "TextSummary/max_point"
+          ],
+          "order": 3,
+          "practice_task": "编写测试：对一个多行 buffer 调用 text_summary_for_range 分别以 usize 和 TextSummary 为维度查询同一区间，打印结果；再实现函数 fn range_lines(...) 基于 TextSummary 返回区间覆盖的行数，与逐字符统计结果比对。",
+          "source_files": [
+            "src/text.rs"
+          ],
+          "title": "TextDimension 与 TextSummary：泛型化的区间度量",
+          "topic": "讲解 crate 中大量出现的 D: TextDimension 泛型约束：edits_since、summary_for_anchor 等查询都让调用方选择返回维度（字节数、行列、UTF-16 等），配合 rope 的 TextSummary 理解 max_point、text_summary_for_range 的用法。"
+        }
+      ],
+      "order": 2,
+      "title": "文本坐标系：offset、Point 与维度查询"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u3-l1-clock-lamport-and-global.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "解释 ReplicaId 的预定义常量 LOCAL/REMOTE_SERVER/AGENT/LOCAL_BRANCH/FIRST_COLLAB_ID 各代表什么",
+            "说明 Lamport{value, replica_id} 如何保证因果有序、clock.tick 与 clock.observe 的区别",
+            "使用 Global::observe/join/observed/observed_all 判断某个操作是否已被当前版本包含"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ReplicaId",
+            "Lamport",
+            "clock::Global",
+            "Buffer::lamport_clock 与 BufferSnapshot::version"
+          ],
+          "order": 1,
+          "practice_task": "编写测试：创建两个 Buffer（不同 ReplicaId），各自编辑若干次后互相 apply_ops 对方的 Operation；每一步打印双方的 lamport_clock 与 version()，验证 tick 使本地 value 递增、observe 吸收远方 value、apply 后两副本 version 收敛一致。",
+          "source_files": [
+            "../clock/src/clock.rs",
+            "src/text.rs"
+          ],
+          "title": "时钟基础课：ReplicaId、Lamport 时间戳与 Global 版本向量",
+          "topic": "先到邻近的 clock crate 补课：Lamport 时间戳（replica_id + 序号）如何为每个编辑赋予全局顺序，版本向量 Global 如何记录各副本的已知进度，text crate 中 version、observed、observed_all 如何支撑并发判断。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u2-l1"
+          ],
+          "filename": "u3-l2-fragment-tombstone-model.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "说出 Fragment 的每个字段含义：id(Locator)、timestamp、insertion_offset、len、visible、deletions、max_undos",
+            "解释 visible_text/deleted_text 与 fragments SumTree 的对应关系：fragments 决定每段文本属于哪根 rope",
+            "理解 MAX_INSERTION_LEN 为何把大插入切成多个 fragment、Buffer::new 如何为初始文本生成 fragment"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Fragment",
+            "FragmentSummary",
+            "Buffer::new_normalized",
+            "MAX_INSERTION_LEN"
+          ],
+          "order": 2,
+          "practice_task": "阅读 Buffer::new 与 Buffer::new_normalized 中构建初始 fragments 的循环，画出一行文本 \"abcd\" 的 fragment 序列；然后编写测试：对 buffer 做删除后调用 deleted_text() 断言被删文本仍在墓碑绳中，再 undo 后断言该文本重新可见。",
+          "source_files": [
+            "src/text.rs"
+          ],
+          "title": "Fragment 与墓碑模型：协同编辑的数据结构核心",
+          "topic": "深入 BufferSnapshot 的 fragments/insertions/insertion_slices 三棵 SumTree 与 Fragment 结构：每个 fragment 是一次插入产生的文本段，删除不擦除数据而是打上 deletions 时间戳并把文本移入 deleted_text，这是实现协同合并与撤销的基础。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-locator.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "解释 Locator(SmallVec<[u64;2]>) 如何像分数一样在两个已有标识之间生成新标识而无需重编号",
+            "理解 between 中 mid = lhs + ((rhs-lhs) >> 48) 的移位技巧为何能保证顺序追加保持深度 1",
+            "说出 Locator 作为 Fragment id 与 SumTree key 的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Locator::between",
+            "Locator::min/max",
+            "sum_tree::Item for Locator"
+          ],
+          "order": 3,
+          "practice_task": "在 locator.rs 的测试模块中新增一个实验：从 Locator::min() 出发连续调用 between 向后追加 1000 个标识，断言每个长度仍为 1（复现 test_sequential_forward_append_stays_at_depth_1 的思路）；再在两个标识之间反复二分插入 1000 次，记录 SmallVec 深度增长情况并解释。",
+          "source_files": [
+            "src/locator.rs"
+          ],
+          "title": "Locator：可在任意位置插入的有序标识",
+          "topic": "精读 locator.rs：Fragment 的 id 使用 Locator 而非整数下标，Locator::between 能在前驱与后继之间生成新的有序标识，使并发插入不需要移动既有元素，这是 fragment 树保持稳定排序的关键。"
+        }
+      ],
+      "order": 3,
+      "title": "协同地基：时钟、Fragment 与 Locator"
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u4-l1-local-edit-pipeline.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "追踪 Buffer::edit 的五步：start_transaction → tick → apply_local_edit → history.push/push_undo → end_transaction",
+            "理解 apply_edit_internal 中游标逐段消费旧 fragment、切出前缀/交集/后缀的三段式处理",
+            "说明 EditOperation 的 version 字段记录的是编辑前版本、ranges 使用 FullOffset 的原因"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Buffer::edit",
+            "BufferSnapshot::apply_edit_internal",
+            "EditOperation",
+            "push_fragments_for_insertion"
+          ],
+          "order": 1,
+          "practice_task": "启用 test-support feature 后，在测试中使用 edit_via_marked_text(\"«hello» w«orld»\") 风格的标记文本完成一次编辑；然后手工构造等价的多区间 edit 调用得到相同结果，并用 edits_for_marked_text 打印将被生成的 (Range<usize>, String) 列表加深理解。",
+          "source_files": [
+            "src/text.rs",
+            "src/tests.rs"
+          ],
+          "title": "本地编辑主链路：Buffer::edit 到 apply_edit_internal",
+          "topic": "逐段精读本地编辑的完整代码路径：edit 如何开启事务、生成 Lamport 时间戳，apply_edit_internal 如何用旧 fragments 游标切分区间、生成新 fragment、标记删除、重建 rope，并产出 EditOperation 与用于通知的 Patch。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-fragment-and-rope-builders.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "解释 FragmentChunk::Tree 与 Loose 两种累积形态各自的服务对象：保留共享子树 vs 批量构建",
+            "理解 to_sum_tree 中超过 1024 个松散 fragment 时走 from_par_iter 的并行构建策略",
+            "说明 RopeBuilder 如何用旧 rope 的 cursor 切片拼装新的 visible/deleted 两根 rope"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "FragmentBuilder/FragmentChunk",
+            "RopeBuilder",
+            "SumTree::from_par_iter"
+          ],
+          "order": 2,
+          "practice_task": "编写测试：构造一个长文本 buffer（如 10 万字符），克隆其 snapshot，再对原 buffer 做一处小编辑，然后用 check_invariants() 验证编辑后不变量成立；对照代码解释为什么未被编辑区域对应的 SumTree 节点和 rope 节点仍与旧快照共享。",
+          "source_files": [
+            "src/text.rs"
+          ],
+          "title": "FragmentBuilder 与 RopeBuilder：不可变结构共享的重建艺术",
+          "topic": "讲解编辑路径中的两个辅助构建器：FragmentBuilder 把切下来的子树与新建 fragment 分桶累积以最大化 SumTree 节点共享，RopeBuilder 借助旧 rope 的 cursor 切片重建可见/删除两根 rope。理解持久化数据结构如何让编辑成本与编辑长度成正比。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1",
+            "u3-l1"
+          ],
+          "filename": "u4-l3-remote-edit-merge.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "追踪 apply_ops → apply_op → apply_remote_edit 的调用链与 version 去重逻辑",
+            "解释并发插入的平局判定：跳过 timestamp 更大的并发 fragment 使两副本收敛到相同顺序",
+            "说明 version.observed(fragment.timestamp) 检查如何避免重复删除同一插入"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Buffer::apply_ops/apply_op",
+            "apply_remote_edit",
+            "VersionedFullOffset",
+            "InsertionSlice"
+          ],
+          "order": 3,
+          "practice_task": "编写测试模拟协同：replica 1 在行首插入 \"A\"，replica 2 在同一位置并发插入 \"B\"，互相 apply_ops 后断言两个副本 text() 完全一致（顺序由 Lamport 决定）；再测试非并发场景下远程删除与本地插入交叠时的合并结果。",
+          "source_files": [
+            "src/text.rs",
+            "src/tests.rs"
+          ],
+          "title": "远程编辑合并：apply_ops 与 apply_remote_edit",
+          "topic": "精读远程操作如何被接收与合并：EditOperation 携带编辑者视角的版本与 FullOffset 区间，apply_remote_edit 在 versioned 坐标系中重放编辑，跳过更高 Lamport 的并发插入以解决平局，被删除 fragment 打上对方时间戳进入墓碑。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u4-l4-deferred-operations.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "解释 can_apply_op 如何通过 Operation 自带 version 判断其依赖是否已满足",
+            "说明 deferred_ops(OperationQueue<Operation>) 与 deferred_replicas 的记录与冲刷机制",
+            "理解 OperationQueue 以 Lamport 为 key 的 SumTree 实现带来的排序去重与高效插入"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Buffer::apply_ops/can_apply_op/flush_deferred_ops",
+            "OperationQueue",
+            "Operation::lamport_timestamp"
+          ],
+          "order": 4,
+          "practice_task": "编写测试：让副本 A 先收到依赖版本尚不可知的远程操作（构造方式：先 apply_ops 一个后发出的 EditOperation，再 apply_ops 它依赖的前一个），用 deferred_ops_len() 断言操作先进入延迟队列，补齐依赖后断言队列清空且两副本文本一致。",
+          "source_files": [
+            "src/text.rs",
+            "src/operation_queue.rs"
+          ],
+          "title": "乱序到达的操作：OperationQueue 与 deferred ops",
+          "topic": "讲解网络传输导致的乱序问题：Buffer::apply_ops 对暂时无法应用的操作（依赖版本未观察到）放入 OperationQueue 延迟队列，待缺失操作到达后 flush_deferred_ops 自动重放，并用 deferred_replicas 跟踪被阻塞的副本。"
+        }
+      ],
+      "order": 4,
+      "title": "编辑主链路：本地与远程操作的应用"
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1",
+            "u2-l3"
+          ],
+          "filename": "u5-l1-edits-since.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "理解 fragments.filter(!since.observed_all(&summary.max_version)) 如何把扫描范围压缩到变更子树",
+            "读懂 Edits::next 中 old_end/new_end 双坐标累计与 pending_edit 合并相邻变更的逻辑",
+            "区分 edits_since、edits_since_in_range、anchored_edits_since* 与 has_edits_since 的适用场景"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "edits_since/anchored_edits_since_in_range",
+            "Edits 迭代器",
+            "FragmentSummary::max_version",
+            "Edit<D>"
+          ],
+          "order": 1,
+          "practice_task": "编写测试：记录 version，执行插入、删除、替换三类编辑，然后用 edits_since::<usize>(&old_version) 收集 Edit 并还原新文本（对旧文本按顺序应用这些 Edit），断言结果与 buffer.text() 一致；再对比 anchored_edits_since 返回的 Anchor 区间。",
+          "source_files": [
+            "src/text.rs"
+          ],
+          "title": "edits_since 家族：两个版本之间的差分编辑流",
+          "topic": "讲解如何向快照询问\"自某版本以来发生了什么\"：edits_since 返回 Edit<D>（old/new 双区间映射），内部用带过滤的 SumTree 游标只遍历 max_version 超过 since 的 fragment，并用 UndoMap 判断历史可见性。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-patch-algebra.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "读懂 compose 主循环如何用游标对齐旧编辑与新编辑并输出统一坐标的复合编辑",
+            "使用 old_to_new/edit_for_old_position 做旧坐标到新坐标的映射",
+            "理解 invert 反转 old/new 语义的用途（如反向应用补丁）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Patch::compose",
+            "Patch::old_to_new",
+            "Patch::invert",
+            "Edit<D>"
+          ],
+          "order": 2,
+          "practice_task": "编写测试：构造 Patch<u32> 表示第一批编辑（如删除 0..2、在 5 处插入），再构造第二批，调用 compose 得到复合补丁；参考 patch.rs 现有测试 assert_patch_composition 的断言方式验证三者的 old_to_new 映射一致，并测试 invert 后可把文本还原。",
+          "source_files": [
+            "src/patch.rs"
+          ],
+          "title": "Patch 代数：compose、old_to_new 与 invert",
+          "topic": "精读 patch.rs：Patch 是一组不相交 Edit 的集合，compose 把先后两批编辑合成为单个等价补丁，old_to_new 把旧坐标映射到新坐标，invert 反转方向。这是订阅推送与增量渲染的数学基础。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-subscriptions.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "解释 Topic 持有 Vec<Weak<Mutex<Patch<T>>>>、publish 时 upgrade 失败即清理的防泄漏设计",
+            "使用 Buffer::subscribe().consume() 获取自上次消费以来累积的 Patch<usize>",
+            "说出 wait_for_edits/wait_for_anchors/wait_for_version/give_up_waiting 各自等待什么条件"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Topic::publish/publish_mut",
+            "Subscription::consume",
+            "Buffer::subscribe",
+            "wait_for_version"
+          ],
+          "order": 3,
+          "practice_task": "编写测试：对 buffer 调用 subscribe() 拿到 Subscription，执行两轮编辑，中间 consume() 一次，断言每次拿到的 Patch 的编辑数量与坐标符合预期（旧坐标基于消费时刻的快照）；再测试 drop 订阅后继续编辑不崩溃，解释 Weak 的作用。",
+          "source_files": [
+            "src/subscription.rs",
+            "src/text.rs"
+          ],
+          "title": "订阅机制：Topic、Subscription 与异步等待",
+          "topic": "讲解 Buffer 的变更通知：内部 Topic<usize> 维护弱引用订阅者列表，每次编辑 publish 一个 Patch，订阅方通过 consume 取走并组合累积的补丁；以及基于 oneshot 的 wait_for_edits/wait_for_anchors/wait_for_version 异步等待 API。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1",
+            "u3-l1"
+          ],
+          "filename": "u5-l4-version-time-travel.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "追踪 rope_for_version 中 filter 游标与 was_visible 判定如何从墓碑绳取回历史文本",
+            "使用 offsets_to_version 把当前坐标映射回历史版本坐标",
+            "理解 is_visible（当前可见）与 was_visible（指定版本可见）由 UndoMap 奇偶性决定的差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "rope_for_version",
+            "offsets_to_version/range_to_version",
+            "Fragment::was_visible",
+            "UndoMap::was_undone"
+          ],
+          "order": 4,
+          "practice_task": "编写测试：对 buffer 做多轮编辑（含删除与撤销），保存若干历史 version；用 rope_for_version 重建每个历史版本文本并与编辑当时记录的 text() 快照逐一比对；再用 offsets_to_version 把当前 offset 映射回最初版本并验证指向相同字符。",
+          "source_files": [
+            "src/text.rs"
+          ],
+          "title": "版本时间旅行：rope_for_version 与 offsets_to_version",
+          "topic": "讲解 BufferSnapshot 如何重建任意历史版本的文本：rope_for_version 按 fragment 的 was_visible(version, undo_map) 决定取可见绳还是墓碑绳的片段，offsets_to_version/range_to_version 则把当前位置坐标换算为历史版本坐标。"
+        }
+      ],
+      "order": 5,
+      "title": "变更的观察：差分、补丁与订阅"
+    },
+    {
+      "id": "u6",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2",
+            "u2-l2"
+          ],
+          "filename": "u6-l1-anchor-basics.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "说出 Anchor 四要素：插入操作时间戳、操作内偏移、bias、buffer_id",
+            "使用 anchor_before/anchor_after/anchor_at 创建锚点并用 offset_for_anchor 解析",
+            "理解 Anchor::cmp 需要借助 BufferSnapshot 才能比较顺序的原因"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Anchor",
+            "anchor_before/anchor_after",
+            "offset_for_anchor",
+            "Anchor::cmp"
+          ],
+          "order": 1,
+          "practice_task": "编写测试：在文本中间创建 anchor，随后在该位置前后反复插入删除，每次编辑后断言 anchor 解析出的 offset 始终紧贴原来的字符；再实验 bias：同一位置取 Bias::Left 与 Bias::Right 两个锚点，在中间插入文本后观察两者解析结果分居插入文本两侧。",
+          "source_files": [
+            "src/anchor.rs",
+            "src/text.rs"
+          ],
+          "title": "Anchor 锚点：在并发编辑下稳定的位置句柄",
+          "topic": "讲解 Anchor 的设计动机与结构：offset 会因编辑失效，而 Anchor 记录\"某次插入操作中的第 N 个字节\"，天然免疫后续编辑；包括 min/max 哨兵锚点与跨 buffer 的 buffer_id 校验。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-anchor-resolution.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "理解锚点解析路径：Lamport 定位插入操作 → insertions 树查 fragment_id → fragments 树累加 summary 得到维度",
+            "使用 summaries_for_anchors_with_payload 一次解析大批锚点并按 buffer 顺序重排",
+            "区分 can_resolve（目标 buffer 是否见过该插入）与 is_valid（锚点是否落在当前可见 fragment 内）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "summaries_for_anchors/summaries_for_anchors_with_payload",
+            "fragment_id_for_anchor",
+            "can_resolve/is_valid",
+            "Anchor::bias_left/bias_right"
+          ],
+          "order": 2,
+          "practice_task": "编写测试：生成 1000 个随机位置的锚点，用 summaries_for_anchors 批量解析为 offset，与逐个调用 offset_for_anchor 的结果比对一致；再构造协同场景：副本 2 收到副本 1 的锚点但尚未收到对应编辑，验证 can_resolve 为假，apply_ops 后变真。",
+          "source_files": [
+            "src/text.rs",
+            "src/anchor.rs"
+          ],
+          "title": "锚点解析与批量查询：summaries_for_anchor 全家桶",
+          "topic": "深入锚点如何被解析为坐标：锚点通过 timestamp 在 insertions 树中找到 fragment，再在 fragments 树中累加 summary 得到任意维度；批量接口 summaries_for_anchors 借助 SumTree 游标一次 seek 多个锚点，且结果可携带任意 payload。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l3-selection.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "理解 Selection 用 start/end 恒有序 + reversed 标志表示方向的表示法",
+            "使用 set_head/set_tail/collapse_to 正确维护方向翻转逻辑",
+            "使用 Selection::<Anchor>::resolve 把锚点选区解析为任意维度的坐标选区"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Selection",
+            "SelectionGoal",
+            "set_head/set_tail/swap_head_tail",
+            "Selection::resolve"
+          ],
+          "order": 3,
+          "practice_task": "编写测试：创建 Selection<Anchor>，模拟用户从右向左拖选（连续 set_head 传入递减位置），断言 reversed 在跨过 tail 时正确翻转且 start<=end 恒成立；编辑 buffer 后 resolve::<Point>() 验证选区随文本稳定移动。",
+          "source_files": [
+            "src/selection.rs"
+          ],
+          "title": "Selection 与 SelectionGoal：基于锚点的选区",
+          "topic": "讲解 selection.rs 中的选区类型：Selection<T> 用 start/end 加 reversed 表示方向，head/tail 区分活动端与固定端，SelectionGoal 记录垂直移动时的水平目标，泛型 T 可以是 Anchor 以获得编辑稳定性。"
+        }
+      ],
+      "order": 6,
+      "title": "Anchor 锚点系统"
+    },
+    {
+      "id": "u7",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u7-l1-transactions-and-grouping.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "说出 History 的字段：base_text、operations 映射、undo_stack、redo_stack、transaction_depth、group_interval",
+            "解释 start/end_transaction 的深度计数与空事务自动弹出行为",
+            "理解 group/group_until 基于 300ms 时间间隔把连续快速编辑合并为一次撤销单元"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "History",
+            "start_transaction/end_transaction",
+            "History::group/group_trailing",
+            "Transaction/HistoryEntry"
+          ],
+          "order": 1,
+          "practice_task": "编写测试：设置 set_group_interval 为较短时长，用 start_transaction_at/end_transaction_at 传入受控时间戳，构造\"间隔小于阈值的多笔事务\"与\"大于阈值\"两种序列，分别调用 undo()，断言前者一次撤销回滚全部、后者只回滚最后一笔。",
+          "source_files": [
+            "src/text.rs",
+            "src/tests.rs"
+          ],
+          "title": "事务与撤销分组：History 的 undo 栈管理",
+          "topic": "剖析 History 与事务机制：start/end_transaction 用深度计数支持嵌套，Transaction 记录一次逻辑编辑的多个 edit_id，group 依据 group_interval（默认 300ms）自动合并时间上相邻的事务，finalize_last_transaction 可阻止分组。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l2-undo-redo-undo-map.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "追踪 undo 的路径：弹出 undo 栈条目 → 由 edit_ids 统计各编辑的撤销次数 → 生成 UndoOperation 并应用",
+            "解释 UndoMap 的 (edit_id, undo_id) → undo_count 映射与 undo_count % 2 == 1 的奇偶判定",
+            "理解 undo 作为普通 Operation 广播后，各副本用 was_undone(edit_id, version) 得到一致的历史可见性"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Buffer::undo/redo/undo_operations",
+            "UndoOperation",
+            "UndoMap::is_undone/was_undone",
+            "Fragment::is_visible"
+          ],
+          "order": 2,
+          "practice_task": "编写测试：两个协同副本，副本 1 的编辑广播给副本 2 后，副本 1 执行 undo 并广播 UndoOperation；断言两副本文本收敛一致；再做 redo，验证 undo_count 奇偶翻转后片段可见性恢复，用 deleted_text() 观察文本在墓碑绳中的往返。",
+          "source_files": [
+            "src/text.rs",
+            "src/undo_map.rs"
+          ],
+          "title": "undo / redo 的实现与 UndoMap 的奇偶计数",
+          "topic": "剖析撤销的协同化实现：undo 不是简单回滚状态，而是生成 UndoOperation 记录每个 edit_id 的撤销计数并像普通操作一样广播；UndoMap 存入 SumTree 后用 undo_count 的奇偶性判断某片段在当前或历史版本是否可见。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "filename": "u7-l3-transaction-manipulation.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "使用 merge_transactions 把细粒度事务合并为一次撤销单元，理解 forget_transaction 从两栈中摘除事务",
+            "理解 push_empty_transaction 创建父事务用于后续合并的用意及其对 redo 栈的约定",
+            "使用 edited_ranges_for_transaction_id 查询一个事务修改过的区域并映射到当前坐标"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "merge_transactions",
+            "forget_transaction",
+            "push_empty_transaction",
+            "edited_ranges_for_transaction_id/edited_ranges_for_edit_ids",
+            "InsertionSlice/fragment_ids_for_edits"
+          ],
+          "order": 3,
+          "practice_task": "编写测试：用 push_empty_transaction 创建父事务，在其中完成两次独立编辑并 merge_transactions 合并进父事务，undo 一次断言两笔编辑同时回滚；再用 edited_ranges_for_transaction_id 获取这些编辑对应的当前 buffer 区间，与手工记录的区间比对。",
+          "source_files": [
+            "src/text.rs"
+          ],
+          "title": "事务操作进阶：合并、遗忘与编辑范围查询",
+          "topic": "讲解 History 暴露的高级事务操作：merge_transactions 将多个事务合并为一个撤销单元、forget_transaction 把事务从历史中移除（用于协作场景清理）、push_empty_transaction 构造空父事务，以及如何通过 InsertionSlice 反查一个事务触碰过的 fragments 与当前坐标范围。"
+        }
+      ],
+      "order": 7,
+      "title": "历史、事务与撤销重做"
+    },
+    {
+      "id": "u8",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1",
+            "u5-l1"
+          ],
+          "filename": "u8-l1-snapshot-with-edits.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "解释 snapshot_with_edits 返回的 EditedBufferSnapshot 三字段：base_version、snapshot、did_edit",
+            "理解这个\"影子快照\"如何让调用方在不提交的前提下用编辑后状态做计算",
+            "说明 fast_forward 的前提是 base_version 仍是当前版本（期间无其他编辑）"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Buffer::snapshot_with_edits",
+            "EditedBufferSnapshot",
+            "Buffer::fast_forward"
+          ],
+          "order": 1,
+          "practice_task": "编写测试：用 snapshot_with_edits 在不动原 buffer 的前提下预览\"把某段整体删除\"后的文本并计算行数变化，断言原 buffer 未变；随后调用 fast_forward 提交，断言原 buffer 文本等于预览文本；再测试中间插入其他编辑后 fast_flush 的行为边界（对照源码确认拒绝条件）。",
+          "source_files": [
+            "src/text.rs"
+          ],
+          "title": "snapshot_with_edits：先试后定的预览提交模式",
+          "topic": "讲解 Buffer::snapshot_with_edits 与 EditedBufferSnapshot：构造一个\"假设应用了这些编辑\"的临时快照供预览计算，若采纳则 fast_forward 一步把影子快照转正，避免重放编辑。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2",
+            "u3-l3"
+          ],
+          "filename": "u8-l2-sumtree-and-memory-layout.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "说出 fragments/insertions/insertion_slices 三棵树各自的 key、summary 与查询维度",
+            "理解 Anchor 与 InsertionSlice 中把 Lamport 拆成 replica_id+value 内联存储以填补对齐空隙的字节级技巧",
+            "理解 FragmentSummary 的 max_id/max_version/min_insertion_version 等冗余聚合如何支撑对数级过滤查询"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "impl sum_tree::Item for Fragment",
+            "impl sum_tree::Summary for FragmentSummary",
+            "Dimension 实现（usize/FullOffset/FragmentTextSummary）",
+            "InsertionSlice/Anchor 内存布局"
+          ],
+          "order": 2,
+          "practice_task": "阅读 FragmentSummary 的 add_summary 实现，用 std::mem::size_of 分别测量 Anchor、InsertionSlice、Fragment 的大小并对照源码注释解释字段排列；然后仿照 impl Dimension for usize 为一个自定义元组结构（如 VisibleLen(u64)）实现 Dimension<'_, FragmentSummary>，在测试中用它对 fragments 树做一次查询。",
+          "source_files": [
+            "src/text.rs",
+            "src/anchor.rs"
+          ],
+          "title": "性能剖析：SumTree 使用模式与内存布局优化",
+          "topic": "总结 text crate 对 sum_tree 的运用范式：Item/Summary/Dimension/KeyedItem 四件套、FilterCursor 按 max_version 剪枝、TreeMap/TreeSet 辅助索引；并剖析源码中的内存布局技巧（Anchor 内联 Lamport 省 8 字节、InsertionSlice 同类优化、FragmentBuilder 节点共享与并行构建）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u8-l3-randomized-testing-network.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "使用 Network 的 broadcast/receive/disconnect_peer/reconnect_peer 模拟丢包、乱序、重复与断线重连",
+            "理解 randomly_edit/randomly_undo_redo/get_random_edits 等属性测试工具与 gpui::test(iterations = N) 的随机重跑机制",
+            "掌握 check_invariants 的断言内容：fragment 有序、与 insertions 树对应、rope 与 fragment 汇总一致"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Network（broadcast/receive/disconnect/reconnect）",
+            "Buffer::randomly_edit/randomly_undo_redo",
+            "Buffer::check_invariants",
+            "tests.rs 中的随机测试"
+          ],
+          "order": 3,
+          "practice_task": "仿照 test_random_concurrent_edits 编写自己的随机测试：3 个副本经 Network 随机交换操作并随机断线重连，循环数百轮后断言所有副本 text() 收敛一致且 check_invariants() 通过；再故意把断言改错一次验证测试的有效性。",
+          "source_files": [
+            "src/tests.rs",
+            "src/network.rs"
+          ],
+          "title": "测试策略：随机化测试与 Network 网络模拟",
+          "topic": "讲解 crate 如何验证协同正确性：network.rs 提供会随机复制、乱序、部分投递的模拟网络，tests.rs 用随机编辑与随机 undo/redo 驱动多副本收敛断言，配合 check_invariants 检查内部结构一致性。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2",
+            "u7-l2",
+            "u5-l3",
+            "u8-l3"
+          ],
+          "filename": "u8-l4-capstone-extensions.md",
+          "id": "u8-l4",
+          "learning_goals": [
+            "综合运用 Buffer、Anchor、edits_since、Patch 与订阅实现一个非平凡的上层功能",
+            "说出 LineIndent/line_indents_in_row_range、point_from_external_input、chunks_with_line_ending、BufferSnapshot::debug 等边缘工具的用途",
+            "识别 crate 的扩展边界：哪些需求应在新 crate 中组合 text 而非修改它"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "LineIndent/line_indents_in_row_range",
+            "point_from_external_input",
+            "BufferSnapshot::debug（debug_assertions）",
+            "综合运用：edits_since + Patch + Anchor + subscribe"
+          ],
+          "order": 4,
+          "practice_task": "毕业实践：实现一个\"协作行号监视器\"——用 subscribe 订阅 Patch 增量维护一个行起始偏移数组，暴露 line_for_offset/offset_for_line 接口，并用 Anchor 记住若干书签位置保证编辑后仍指向原字符；为它写一个基于 Network 的双副本随机测试验证一致性。",
+          "source_files": [
+            "src/text.rs"
+          ],
+          "title": "综合实践与二次开发：把 text crate 当作积木",
+          "topic": "收束全课程：梳理 text crate 暴露的其余实用面（行缩进查询、外部输入坐标换算、调试标注工具），总结上层 crate 如何组合 Buffer/Anchor/Patch 构建编辑器功能，并讨论二次开发时的切入点与边界。"
+        }
+      ],
+      "order": 8,
+      "title": "高级主题：性能、测试与综合实践"
+    }
+  ]
+}

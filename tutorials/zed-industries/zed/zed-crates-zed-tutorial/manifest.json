@@ -1,14 +1,13 @@
 {
-  "head": "a7d74150ac7a663fdaa01ec5177e303baaf6c331",
+  "head": "00c0e96e769062e373203c62830f510fa121db76",
   "project": "zed-crates-zed",
-  "rationale": "crates/zed 是 Zed 编辑器的主程序二进制 crate，代码形态高度集中：src/main.rs 负责进程级启动（多模式入口、目录/日志初始化、全局 init 序列、会话恢复），src/zed.rs 负责窗口与工作区装配（窗口选项、状态栏、面板、Pane 工具栏、action 注册、配置热加载），src/zed/open_listener.rs 负责打开协议（zed:// 与 ssh:// URL 解析、CLI IPC、打开行为、单实例），src/reliability 负责稳定性（卡顿检测、内存监控、崩溃上报）。因此学习路线按『真实执行顺序』设计：先让读者从零认识 crate 定位、构建方式与入口（单元 1），再沿 main() 的启动主链路深入 init 序列、AppState 与会话恢复（单元 2），接着攻克打开请求这一核心协议层（单元 3），然后进入 zed.rs 的窗口/工作区/面板/工具栏/action 装配（单元 4）与配置、键位、主题热加载（单元 5），最后在专家层覆盖可靠性机制、典型扩展范例（edit prediction、telemetry log）、测试体系与可视化测试，并以一条端到端新增 zed:// 链路的综合实战收尾（单元 6）。每篇讲义只讲一个主题、引用 1-6 个真实源码文件，并配一个可操作的代码实践，依赖关系沿调用链由浅入深。",
+  "rationale": "增量分析结论：git diff a7d74150..00c0e96e 显示两次提交之间 crates/zed 目录下没有任何文件变化（改动全部集中在依赖 crate 如 gpui、language、project、markdown、scheduler、vim、worktree 及工作区根 Cargo.toml 的依赖源切换，例如 async-tar fork 与 tree-sitter git rev）。现有 30 篇讲义引用的全部源码文件（main.rs、zed.rs、open_listener.rs、reliability/、quick_action_bar/ 等）经核实均原样存在，因此整套大纲结构、讲义顺序与依赖关系全部保留，所有讲义 action 置为 keep，仅更新 head。原有学习路线设计不变：按『真实执行顺序』从 crate 认知（单元 1）→ main() 启动主链路（单元 2）→ 打开请求协议层（单元 3）→ 窗口/工作区/面板装配（单元 4）→ 配置键位外观热加载（单元 5）→ 可靠性、扩展点、测试与端到端实战（单元 6）逐层递进，每篇讲义只讲一个主题、引用真实源码并配一个可操作实践。",
   "units": [
     {
       "id": "u1",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -33,7 +32,7 @@
           "topic": "介绍 crates/zed 在 zed 仓库中的定位：它是 Zed 编辑器的主程序二进制 crate，负责把几乎所有功能 crate 组装成可运行的应用。解读 Cargo.toml 中的依赖、features 与 bundle 元数据。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -61,7 +60,7 @@
           "topic": "讲解 build.rs 在构建期做了什么（如 Linux 应用图标的解码校验）、如何在本地编译运行 zed，以及 resources 目录中各平台资源（桌面文件、图标、entitlements）的作用。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -88,7 +87,7 @@
           "topic": "梳理 src/main.rs、src/zed.rs、src/zed/ 子模块与 src/reliability 的模块树，说明每个文件的大致职责与代码量分布，帮助读者建立源码地图。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -114,15 +113,15 @@
           "topic": "逐段阅读 main() 前半部分：沙箱启动器、root 防护、clap 参数解析、askpass/crash-handler/printenv 等特殊模式、init_paths 目录创建、zlog 日志初始化与单实例检查。"
         }
       ],
+      "level": "beginner",
       "order": 1,
       "title": "从零开始：认识 crates/zed"
     },
     {
       "id": "u2",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l4"
           ],
@@ -148,7 +147,7 @@
           "topic": "深入 app.run 闭包中数十个 init 调用的先后顺序与依赖关系：settings、HTTP client、Fs、Client、LanguageRegistry、NodeRuntime、extension、theme、workspace 等。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -174,7 +173,7 @@
           "topic": "解析 AppState 全局状态的构成、system_id/installation_id（含 legacy device_id 迁移）、AppSession 与 Session 的关系，以及 telemetry 启动和 App First Opened 系列事件的判定。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -200,7 +199,7 @@
           "topic": "分析 restore_or_create_workspace 与 restorable_workspace_locations 如何根据 RestoreOnStartupBehavior 决定恢复 LastWorkspace/LastSession，FIRST_OPEN 时展示 onboarding，以及恢复全部失败时的 toast/空窗口兜底。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -227,15 +226,15 @@
           "topic": "讲解 OpenListener 双端通道、首窗 first_window_rx 与 restore_finished 的竞态等待（macOS 冷启动场景的注释），以及 open_rx 循环如何把请求交给 handle_open_request 分发。"
         }
       ],
+      "level": "intermediate",
       "order": 2,
       "title": "应用初始化主链路"
     },
     {
       "id": "u3",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -261,7 +260,7 @@
           "topic": "精读 OpenRequest::parse 对 zed://file、zed://agent、zed://settings、zed://git/clone、zed://git/commit、zed://schemas、zed://skill、zed-cli:// 等 scheme 的分发，以及 file:// 与 wsl 参数的处理。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -270,7 +269,7 @@
           "learning_goals": [
             "理解 SCP 风格地址的规范化算法",
             "掌握 RemoteConnectionOptions 的构造过程",
-            "理解 RemoteSettings 对连接参数的补全"
+            "理解 Remote Settings 对连接参数的补全"
           ],
           "level": "intermediate",
           "minimal_modules": [
@@ -287,7 +286,7 @@
           "topic": "分析 parse_ssh_url 对标准与 SCP/git 风格 ssh 地址的规范化、parse_ssh_file_path 如何构造 RemoteConnectionOptions，以及 RemoteSettings 如何补全连接选项。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -313,7 +312,7 @@
           "topic": "讲解 zed-cli:// 握手（connect_to_cli 的 IpcHandshake 与跨线程转发）、handle_cli_connection 对 CliRequest::Open 的处理，以及 resolve_open_behavior 的交互式提示与设置持久化。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l3"
           ],
@@ -339,7 +338,7 @@
           "topic": "解析 open_options_for_behavior/open_options_for_request 中 OpenBehavior → WorkspaceMatching/add_dirs_to_sidebar 的映射，open_workspaces/open_local_workspace 的本地与远程分支，以及 --wait 的 release future 与 Ping 保活、--diff 与 dev_container 的处理。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -367,15 +366,15 @@
           "topic": "讲解 Linux 的 unix datagram socket（listen_for_cli_connections）、macOS 的 ensure_only_instance、Windows 的 handle_single_instance，以及 app.on_open_urls 回调如何统一汇入 OpenListener。"
         }
       ],
+      "level": "intermediate",
       "order": 3,
       "title": "打开请求：URL 协议与 CLI 集成"
     },
     {
       "id": "u4",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -401,7 +400,7 @@
           "topic": "解读 build_window_options 如何组装 WindowOptions：透明标题栏、app_owns_titlebar_drag、Linux 的 APP_ICON 嵌入、window_decorations 设置映射、最小尺寸与 tabbing identifier。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -427,7 +426,7 @@
           "topic": "分析 initialize_workspace 中两段 cx.observe_new 装配：窗口关闭确认（on_window_should_close）、输入延迟遥测循环、Sidebar 的 defer 创建、ActiveWorkspaceChanged 订阅。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l2"
           ],
@@ -453,7 +452,7 @@
           "topic": "讲解状态栏左右 item 的注册顺序、initialize_panels 用 futures::join! 并行加载六大面板、add_panel_when_ready 的容错，以及 ensure_agent_panel_for_workspace 依据 disable_ai 动态装卸。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l2"
           ],
@@ -482,7 +481,7 @@
           "topic": "解析 initialize_pane 中二十余个 toolbar item 的注册流程，并重点阅读 QuickActionBar（含 preview 与 repl_menu 子模块）如何依据活动 item 类型切换按钮。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l2"
           ],
@@ -509,15 +508,15 @@
           "topic": "精读 register_actions：actions! 宏与 Action 分发、字体大小增减的 persist/运行时两条路径、OpenZedUrl/OpenUrlPrompt/OpenBrowser、NewWindow/NewFile 与面板 toggle_focus。"
         }
       ],
+      "level": "intermediate",
       "order": 4,
       "title": "窗口与工作区装配"
     },
     {
       "id": "u5",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -544,7 +543,7 @@
           "topic": "分析 watch_settings_files 的监听链路、notify_settings_errors/init_global_config_error_notifications 的错误呈现，以及 init_cursor_hide_mode/init_app_appearance/init_reduce_motion 三个设置到 GPUI 能力的桥接。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -571,7 +570,7 @@
           "topic": "讲解 handle_keymap_file_changes 的监听→解析→reload_keymaps 流程、load_default_keymap 的多 keymap 合成、is_ai_keybinding/filter_disabled_ai_bindings 的过滤，以及 MigrationBanner 的迁移通知。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -598,7 +597,7 @@
           "topic": "分析 load_embedded_fonts 的并行加载、load_user_themes_in_background 与 watch_themes 的主题热加载、watch_languages（debug 构建下 .scm 重载）以及 eager_load_active_theme_and_icon_theme。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l5"
           ],
@@ -625,7 +624,7 @@
           "topic": "解读 app_menus(cx) 如何构造菜单栏并把菜单项绑定到 action 与键位提示，以及 Windows dock 菜单动作与 zed-dock-action:// URL 的联动。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1",
             "u4-l5"
@@ -652,15 +651,15 @@
           "topic": "分析 open_settings_file/open_bundled_file/open_local_file 三个打开函数的差异，以及项目级 .zed/settings.json、tasks.json、debug 任务文件的定位逻辑（paths crate 的相对路径常量）。"
         }
       ],
+      "level": "intermediate",
       "order": 5,
       "title": "配置、键位与外观热加载"
     },
     {
       "id": "u6",
-      "level": "advanced",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -686,7 +685,7 @@
           "topic": "解读 reliability::init：hang_detection 的启动、30 秒内存轮询与心跳日志、staff 标志下的构建耗时上传、minidump 上传与远程项目中崩溃文件的收集。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l1"
           ],
@@ -715,7 +714,7 @@
           "topic": "深入 hang_detection 的四个文件：主检测循环、task_traces 的任务栈采样、logging 的落盘格式、telemetry 的事件上报。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -741,7 +740,7 @@
           "topic": "分析 edit prediction 提供方如何依据设置推断配置（EditPredictionProviderConfig、infer_prompt_format）并 assign 到对应语言，以及 ClearHistory action 的处理。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l4"
           ],
@@ -767,7 +766,7 @@
           "topic": "以 TelemetryLogView 为范例讲解 workspace 的 Item trait、Focusable、ToolbarItemView 与 Render 的配合，以及事件驱动的日志追加和折叠/展开参数渲染。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -794,7 +793,7 @@
           "topic": "解析 zed.rs 测试模块中的 init_test/init_test_with_state 如何在 TestAppContext 中重建迷你应用（设置、主题、workspace、编辑器、面板），以及 FakeFs、窗口测试与端到端 CLI 测试的手法。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l5"
           ],
@@ -821,7 +820,7 @@
           "topic": "介绍 visual-tests feature、zed_visual_test_runner 二进制与 macOS 专属的 zed::visual_tests 模块之间的关系，以及可视化（截图）测试的组织方式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1",
             "u4-l5",
@@ -852,6 +851,7 @@
           "topic": "综合前文知识：从 OpenRequest 解析、handle_open_request 分发、action 注册到菜单绑定，完整设计并实现一个新的 zed:// 功能（例如 zed://release-notes）。"
         }
       ],
+      "level": "advanced",
       "order": 6,
       "title": "可靠性、扩展点与测试"
     }

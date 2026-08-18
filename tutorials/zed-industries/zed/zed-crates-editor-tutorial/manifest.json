@@ -1,13 +1,13 @@
 {
-  "head": "a7d74150ac7a663fdaa01ec5177e303baaf6c331",
+  "head": "00c0e96e769062e373203c62830f510fa121db76",
   "project": "zed-crates-editor",
-  "rationale": "editor 是 Zed 中所有文本输入与代码编辑的核心 crate（约 13.7 万行），其复杂度来自三大机制：多层坐标变换（DisplayMap 分层管线）、不可变快照（EditorSnapshot）与 GPUI 实体渲染。因此学习路线先打地基（第 1 单元解决“是什么、怎么构建、怎么跑测试、模块怎么分类”），第 2 单元解剖 Editor 实体的状态与生命周期，第 3 单元攻克制坐标系与 DisplayMap——这是理解一切编辑、渲染、LSP 功能的前提；随后沿两条主线展开：第 4 单元选区/动作/输入（数据侧）与第 5 单元渲染/交互（UI 侧），二者都依赖前三个单元；第 6 单元在坐标与渲染基础上讲 LSP 智能功能（补全、code action、hover、诊断、inlay 等），第 7 单元进入 git 集成、diff 视图与多缓冲摘录这类复合形态，第 8 单元收尾于 workspace 集成、持久化、行内预测（Zeta）、协作、性能与测试基建、二次开发扩展点。每一讲都锚定真实源码文件并配一个可在 test-support feature 下运行的代码实践，难度从 beginner 逐级过渡到 advanced。",
+  "rationale": "增量分析：两次 HEAD 之间共 6 个提交，其中只有一个提交（3624a5bfda \"project: Anchor diagnostic related information that points into the buffer\"）触及 crates/editor，且改动极小：hover_popover.rs 的 show_hotver 生产代码改为用 DiagnosticEntry::new 构造带锚定区间的诊断条目，display_map.rs 与 semantic_tokens.rs 仅各自测试模块同步换了构造函数写法（行数零偏移）；诊断数据模型的相关变化（related_information 挂到 DiagnosticEntry、新增构造器与 map_coordinates）发生在依赖的 language crate，本 crate 的架构、模块结构与主流程完全未动。因此整体结构维持原八单元路线不变：第 1 单元打地基，第 2 单元解剖 Editor 实体，第 3 单元攻克制坐标系与 DisplayMap，第 4/5 单元沿数据侧与 UI 侧双线展开，第 6 单元讲 LSP 智能功能，第 7 单元讲 git 与多缓冲形态，第 8 单元收尾于集成与二次开发。仅两讲标记 update：u6-l4（hover 的 show_hover 代码片段变化）与 u6-l5（讲义实践任务中注入诊断的代码需改用 DiagnosticEntry::new 并说明 related_information 已随条目锚定），其余讲义内容与所引源码均不受影响，全部 keep；无新增模块，故不新增讲义，也无需 rebuild。",
   "units": [
     {
       "id": "u1",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-crate-overview.md",
           "id": "u1-l1",
@@ -31,7 +31,7 @@
           "topic": "介绍 editor crate 在 Zed 中的定位：它是所有文本输入元素和完整代码编辑器的实现，被 vim、search、terminal_view 等 30 多个 crate 复用。通过 Cargo.toml 和 src/editor.rs 顶部的模块声明建立全局认知。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -59,7 +59,7 @@
           "topic": "讲解如何构建和测试这个 crate：test-support feature 引入了哪些依赖，src/test.rs 提供了哪些公共测试工具，以及 src/editor_tests.rs 这个四万余行的测试文件如何组织。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -95,7 +95,7 @@
       "id": "u2",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1",
             "u1-l3"
@@ -122,7 +122,7 @@
           "topic": "逐组解读 Editor 结构体的字段：buffer（MultiBuffer）、display_map、selections、scroll_manager 是四大件，其余上百个字段按选区历史、诊断、补全、git blame、任务句柄等分组理解。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -149,7 +149,7 @@
           "topic": "讲解 Editor 的构造路径：Editor::new 与 new_internal、for_buffer、for_multibuffer、clone（深拷贝 display map 与选区状态），以及 _subscriptions 中注册的订阅和 EditorEvent 的对外广播。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -176,7 +176,7 @@
           "topic": "讲解快照模式：EditorSnapshot 把缓冲区快照、display map 快照、选区和滚动状态冻结成一致的只读视图，是所有读路径（渲染、移动、命中测试）的基础。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -212,7 +212,7 @@
       "id": "u3",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u2-l3"
@@ -241,7 +241,7 @@
           "topic": "介绍 crate 里并存的坐标系：MultiBufferOffset/Point/Utf16、Anchor（可随编辑自动更新的锚点）以及显示坐标 DisplayPoint/DisplayRow，并说明为什么需要这么多层。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -266,10 +266,10 @@
             "src/display_map/wrap_map.rs"
           ],
           "title": "DisplayMap 分层管线：Inlay→Fold→Tab→Wrap→Block",
-          "topic": "总览 display_map 的分层架构：InlayMap、FoldMap、TabMap、WrapMap、BlockMap 逐层叠加，每层都有 Transform、TransformSummary、Snapshot 与 sync 增量更新约定，底层用 sum_tree 实现。"
+          "topic": "总览 display_map 的分层架构：InlayMap、FoldMap、TabMap、WrapMap、BlockMap 逐层叠加，每层都有 Transform、TransformSummary、Snapshot 与 sync 增量更新约定，底层用 sum_tree 实现。（注：display_map.rs 本次仅在测试模块把诊断条目改为 DiagnosticEntry::new 构造，不影响本讲内容。）"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -297,7 +297,7 @@
           "topic": "以文档最完整的 inlay_map 为样本，深入一层的实现：Transform 枚举、基于 sum_tree 的快照、sync 如何把下层编辑增量转换为本层编辑，以及各类点坐标互换 API。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -325,7 +325,7 @@
           "topic": "讲解块插入机制：BlockMap 允许在文本流中插入自定义块（诊断详情、协作光标、折叠预览），BlockProperties 提供位置、样式与渲染回调；crease_map 则管理带占位渲染器的可折叠区域。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2",
             "u3-l4"
@@ -363,7 +363,7 @@
       "id": "u4",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3",
             "u3-l1"
@@ -392,7 +392,7 @@
           "topic": "讲解选区数据结构：disjoint 非重叠选区集合 + 拖拽期间的 pending 选区、SelectMode（字符/词/行/全选）、selection_history 如何让撤销重做恢复光标位置。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -420,7 +420,7 @@
           "topic": "讲解 Zed 的 Action 机制：actions.rs 用宏定义全部编辑器动作（带 serde 字段与文档注释），按键经 keymap 匹配后派发到 Editor 的处理方法，用户可在 keymap 中重新绑定。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1",
             "u4-l2"
@@ -450,7 +450,7 @@
           "topic": "讲解文本输入链路：input.rs 处理按键输入、IME 组合事务、自动闭合括号与自动包围、snippet 栈与占位跳转，以及 JSX 标签自动关闭和 linked editing ranges 等语言感知输入增强。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -477,7 +477,7 @@
           "topic": "讲解 movement.rs：把“左移一个词/行首/匹配括号”等意图换算成坐标的纯函数集合，依赖 CharClassifier 字符分类和 TextLayoutDetails 排版信息，是 vim crate 复用的公共移动底座。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1",
             "u4-l3"
@@ -515,7 +515,7 @@
       "id": "u5",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4",
             "u4-l2"
@@ -544,7 +544,7 @@
           "topic": "讲解渲染主入口：Editor 实现 GPUI 的 Render，构造 EditorElement 完成布局与绘制，样式来自 EditorStyle；光标布局 CursorLayout 与 BlinkManager 控制闪烁节奏。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1",
             "u3-l2"
@@ -574,7 +574,7 @@
           "topic": "讲解单行排版：display map 产出的 HighlightedChunk 经 layout_line 用窗口文本系统整形为 ShapedLine， invisibles 模块决定不可见字符的替换显示，括号着色与匹配高亮在行级叠加。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1",
             "u4-l1"
@@ -604,7 +604,7 @@
           "topic": "讲解鼠标链路：element/mouse.rs 处理按下/拖拽/释放，PointForPosition 把像素坐标映射回缓冲区位置，单击/双击/三击分别选字符/词/行，拖拽可进入列选择，右键弹出 mouse_context_menu。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -633,7 +633,7 @@
           "topic": "讲解编辑器四周的装饰：GutterDimensions 管理行号/折叠/git/runnables/断点/书签等侧栏列的宽度，element/header.rs 渲染多缓冲头部与粘性头部，minimap 复用一个 Minimap 模式的子 Editor。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3",
             "u3-l2"
@@ -671,7 +671,7 @@
       "id": "u6",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u1-l3"
@@ -700,7 +700,7 @@
           "topic": "讲解 Editor 如何拿到语言智能：project 字段连接 Project 与 LSP，SemanticsProvider、CompletionProvider、CodeActionProvider 等可注入接口决定数据来源，编辑后由一系列 Task 字段触发后台刷新。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l1",
             "u5-l1"
@@ -729,7 +729,7 @@
           "topic": "讲解补全链路：completions.rs 负责触发时机（输入、单词补全）与 LSP/词内候选合并，code_context_menus.rs 中的 CompletionsMenu 用 fuzzy 匹配排序并渲染菜单，确认时处理 snippet 与光标位置。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l1"
           ],
@@ -759,7 +759,7 @@
           "topic": "讲解 code_actions.rs 如何拉取与应用 LSP code action、CodeActionsMenu 的渲染与快捷应用、行内重命名（pending_rename），以及 code_lens.rs 在行内渲染可点击的 lens。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u6-l1",
             "u5-l1"
@@ -774,6 +774,7 @@
           "level": "intermediate",
           "minimal_modules": [
             "hover_popover.rs 的 HoverState 与 hide_hover",
+            "hover_popover.rs 中 show_hover 的 DiagnosticEntry::new 构造（本次变化点）",
             "hover_links.rs 的 find_url / find_file",
             "signature_help.rs 的 SignatureHelpState"
           ],
@@ -786,10 +787,10 @@
             "src/signature_help.rs"
           ],
           "title": "悬浮层：hover popover、链接识别与签名帮助",
-          "topic": "讲解悬浮体系：hover_popover.rs 用 markdown 渲染类型/文档信息，hover_links.rs 识别 URL、文件路径与定义跳转链接（配合 document_links.rs 的 LSP 链接），signature_help.rs 在输入参数时展示函数签名。"
+          "topic": "讲解悬浮体系：hover_popover.rs 用 markdown 渲染类型/文档信息，hover_links.rs 识别 URL、文件路径与定义跳转链接（配合 document_links.rs 的 LSP 链接），signature_help.rs 在输入参数时展示函数签名。更新点：show_hover 中本地诊断条目改为用 DiagnosticEntry::new 构造，其区间由 PointUtf16 换成锚定区间（anchor_before..anchor_after），以便诊断相关信息随编辑自动跟随，讲义引用该函数片段时需同步。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u6-l1",
             "u3-l4"
@@ -808,17 +809,17 @@
             "element.rs 中诊断下划线与块渲染部分（待确认具体行号）"
           ],
           "order": 5,
-          "practice_task": "写一个测试：向缓冲区注入一条错误诊断，运行直到任务完成后断言行内诊断列表包含该条内容，并验证块状（详情）形态能被展开与关闭。",
+          "practice_task": "写一个测试：向缓冲区注入一条错误诊断（注意：上游 language crate 的 DiagnosticEntry 新增了 related_information 字段，构造时须使用 DiagnosticEntry::new(range, diagnostic) 而非结构体字面量，可对照 display_map.rs 测试模块中的最新写法），运行直到任务完成后断言行内诊断列表包含该条内容，并验证块状（详情）形态能被展开与关闭。",
           "source_files": [
             "src/diagnostics.rs",
             "src/editor.rs",
             "src/editor_tests.rs"
           ],
           "title": "诊断展示：行内诊断、块状诊断与跳转",
-          "topic": "讲解诊断呈现：diagnostics.rs 维护 ActiveDiagnostic 与行内诊断集合，严重诊断可作为 BlockMap 中的块展开详情，诊断跳转动作支持按严重度过滤，编辑时后台任务刷新行内列表。"
+          "topic": "讲解诊断呈现：diagnostics.rs 维护 ActiveDiagnostic 与行内诊断集合，严重诊断可作为 BlockMap 中的块展开详情，诊断跳转动作支持按严重度过滤，编辑时后台任务刷新行内列表。更新点：依赖的 language crate 将 related_information 移入 DiagnosticEntry 并提供 DiagnosticEntry::new 构造器（区间统一锚定、新增 map_coordinates 与 entries_in_range），本讲实践任务中注入诊断的示例代码需改用新构造器。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l1",
             "u3-l3"
@@ -846,7 +847,7 @@
             "src/document_symbols.rs"
           ],
           "title": "其他 LSP 渲染面：inlay hints、语义高亮与大纲",
-          "topic": "汇总其余语言数据渲染：inlay hints 的按需刷新（InlayHintRefreshReason）、semantic_tokens 的语义高亮刷新、document_colors 的取色器，以及 document_symbols 大纲如何供面包屑、粘性头部和大纲面板使用。"
+          "topic": "汇总其余语言数据渲染：inlay hints 的按需刷新（InlayHintRefreshReason）、semantic_tokens 的语义高亮刷新、document_colors 的取色器，以及 document_symbols 大纲如何供面包屑、粘性头部和大纲面板使用。（注：semantic_tokens.rs 本次仅测试模块换了 DiagnosticEntry::new 写法，不影响本讲内容。）"
         }
       ],
       "level": "intermediate",
@@ -857,7 +858,7 @@
       "id": "u7",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2",
             "u6-l1"
@@ -887,7 +888,7 @@
           "topic": "讲解 git.rs 与 git/blame.rs：git gutter 中按 hunk 展示增删改、GitBlame 实体懒加载 blame 数据并渲染行内 blame 与弹出卡片、hunk 级操作（撤销/暂存）通过 DiffHunkDelegate 委托。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l1"
           ],
@@ -915,7 +916,7 @@
           "topic": "讲解 split.rs：SplittableEditor 用“同一个 MultiBuffer + diff base”实现与 HEAD/暂存区对比的 diff 视图，buffer_diff 计算的 hunk 以特殊样式呈现并支持逐块接受/还原，split_editor_view.rs 负责并排或内联渲染。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l4",
             "u2-l2"
@@ -953,7 +954,7 @@
       "id": "u8",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u7-l3"
@@ -981,7 +982,7 @@
           "topic": "讲解 items.rs：Editor 实现 workspace 的 Item（标签页标题、图标、激活/关闭）、SearchableItem（配合搜索面板高亮与跳转）、FollowableItem（协作跟随的状态同步与反序列化）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u8-l1"
           ],
@@ -1009,7 +1010,7 @@
           "topic": "讲解 persistence.rs：基于 db crate 的 SQLite 存储保存每个编辑器的选区与折叠，Editor::clone/恢复视图时读回；配合 SERIALIZATION_THROTTLE_TIME 节流写入。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l2",
             "u5-l2"
@@ -1037,7 +1038,7 @@
           "topic": "讲解 edit_prediction.rs（Zeta 行内补全）：EditPredictionDelegate 接口对接预测服务，预测结果以行内幽灵文本、diff 弹出或菜单候选三种形态呈现，输入变化会触发失效与刷新。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u8-l1"
           ],
@@ -1065,7 +1066,7 @@
           "topic": "讲解协作相关机制：show_local_selections 控制是否渲染本地选区以显示远端参与者、协作光标的悬浮名称、leader_id/remote_id 标识视图归属，selection.rs 的 sync_selections 可在编辑器间镜像选区。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1",
             "u1-l2"
@@ -1095,7 +1096,7 @@
           "topic": "汇总测试与性能设施：EditorTestContext 提供带标记文本的声明式断言，EditorLspTestContext 搭建假 LSP 服务器，property_test.rs 用 proptest 做随机编辑性质测试；性能上依赖 chunk 化渲染、后台任务与防抖。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u6-l1",
