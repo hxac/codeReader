@@ -1,0 +1,939 @@
+{
+  "head": "5829ef116d36c871ce2b9e54a6153dd3856a1561",
+  "project": "DreamCraft3D",
+  "rationale": "DreamCraft3D 是基于 threestudio 框架的分阶段 3D 生成系统（coarse-nerf → coarse-neus → geometry → texture 四条 yaml 配置串成流水线），核心创新在 stable_diffusion_bsd_guidance 的自举得分蒸馏（BSD）与视图条件 Zero123 先验。因此学习路线设计为：先入门（单元 1-2）让读者理解项目定位、装好环境、读懂 launch.py 入口与配置系统并跑通四阶段流水线；再进阶（单元 3-6）沿「注册机制 → BaseSystem/BaseLift3DSystem 抽象 → 随机相机与单图数据 → 隐式体积/SDF/DMTet 三种几何与对应渲染器 → dreamcraft3d-system 的交替训练与损失体系」这条与代码调用链一致的顺序深入；最后专家层（单元 7-8）攻破最核心的扩散引导族（DeepFloyd SDS、Stable Zero123、BSD 双 LoRA 交替优化、ControlNet 正则）以及 DreamBooth 个性化、网格导出、Gradio 界面与二次开发扩展点。依赖关系严格按「先跑通、再读架构、再读算法、最后做扩展」递进，每篇讲义聚焦单一主题并配可操作实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 DreamCraft3D 的输入输出与两阶段（几何雕刻、纹理提升）划分",
+            "理解视图相关扩散先验与 BSD 自举交替优化的动机",
+            "建立代码模块与论文概念之间的对应关系"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README.md"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README 与论文摘要，手绘一张两阶段流程图，标出 NeRF/NeuS、Zero123、DMTet、DreamBooth/BSD 各自作用的位置，并对照 configs/ 目录下四个 yaml 写出每个阶段对应哪个配置文件。",
+          "source_files": [
+            "README.md"
+          ],
+          "title": "项目概览：从一张参考图到三维资产",
+          "topic": "介绍 DreamCraft3D 是什么、要解决的多面一致性与纹理保真问题，以及「几何雕刻 + 纹理提升」分层生成和自举扩散先验（Bootstrapped Score Distillation）的核心思想。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-environment-setup.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "完成 Python/CUDA/依赖安装",
+            "下载并摆放 stable-zero123 与 omnidata 预训练权重",
+            "了解 load/ 目录的组织方式"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "docs/installation.md",
+            "requirements.txt",
+            "docker/Dockerfile"
+          ],
+          "order": 2,
+          "practice_task": "按 README 与 docs/installation.md 完成环境安装，下载 stable_zero123.ckpt 与 omnidata 深度/法向权重到 load/ 对应目录，然后写一个 20 行的检查脚本列出 load/ 下各权重文件是否存在及大小。",
+          "source_files": [
+            "README.md",
+            "docs/installation.md",
+            "requirements.txt",
+            "docker/Dockerfile",
+            "docker/compose.yaml"
+          ],
+          "title": "环境搭建与预训练权重下载",
+          "topic": "讲解如何安装 threestudio 依赖、准备 NVIDIA GPU 环境并下载 Zero123 与 Omnidata 预训练模型，以及 Docker 安装方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-repo-structure-map.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "说出根目录每个文件夹的职责",
+            "定位 systems/models/data/utils/scripts 五大子包",
+            "统计项目中注册组件的分布"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "threestudio/__init__.py"
+          ],
+          "order": 3,
+          "practice_task": "手绘仓库目录树并标注各目录职责；用 grep 统计 @threestudio.register 出现在哪些目录、各有多少个注册组件，整理成一张「注册名 → 文件」对照表。",
+          "source_files": [
+            "README.md",
+            "threestudio/__init__.py",
+            "configs/dreamcraft3d-coarse-nerf.yaml"
+          ],
+          "title": "仓库目录结构与代码地图",
+          "topic": "带读者通读仓库顶层结构（launch.py、gradio_app.py、preprocess_image.py、configs、threestudio、extern、load），建立代码地图。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-launch-entry.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "解释 GPU 选择、日志着色、断点自动续训等工程细节",
+            "梳理 train/validate/test/export 四种运行模式",
+            "理解 callbacks 与 loggers 的挂载方式"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "launch.py",
+            "threestudio/utils/callbacks.py"
+          ],
+          "order": 4,
+          "practice_task": "为 launch.py 的 main() 逐步添加中文注释（配置加载 → find datamodule → find system → Trainer 构建 → fit/test/predict）；再写一个只调用 load_config 的小脚本解析 coarse-nerf 配置，打印 data_type 与 system_type 验证理解。",
+          "source_files": [
+            "launch.py",
+            "threestudio/utils/config.py",
+            "threestudio/utils/callbacks.py"
+          ],
+          "title": "入口 launch.py：从命令行到 PyTorch Lightning Trainer",
+          "topic": "逐段解读 launch.py 的 main()：CUDA 设备选择、配置加载、custom_import、datamodule/system 构建、callbacks 与 Trainer 的组装，以及 --train/--validate/--test/--export/--gradio 五种模式。"
+        }
+      ],
+      "order": 1,
+      "title": "单元一：走进 DreamCraft3D"
+    },
+    {
+      "id": "u2",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l1-preprocess-image.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "理解 carvekit 去背景、BLIP2 打标语、Omnidata 估计深度法向的流水线",
+            "得到后续训练所需的 rgba/depth/normal 三件套",
+            "了解 --recenter 参数的作用"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "preprocess_image.py"
+          ],
+          "order": 1,
+          "practice_task": "对一张自有图片运行 python preprocess_image.py /path/to/image.png --recenter，检查输出目录中的 rgba 图、深度图与法向图，并把结果与 load/images/hamburger_rgba.png 的效果对比。",
+          "source_files": [
+            "preprocess_image.py",
+            "README.md",
+            "threestudio/utils/dpt.py"
+          ],
+          "title": "输入图像预处理 preprocess_image.py",
+          "topic": "解读背景去除（carvekit HiInterface）、BLIP2 自动生成提示词、Omnidata 深度/法向预测这三大预处理步骤，产出训练所需的 RGBA 参考图。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l2-config-system.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "掌握 load_config/OmegaConf.merge/parse_structured 的执行顺序",
+            "理解 rmspace、cmaxgt0 等自定义 resolver 的用途",
+            "学会用点号语法在命令行覆盖任意配置"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "threestudio/utils/config.py"
+          ],
+          "order": 2,
+          "practice_task": "写一个最小脚本加载 configs/dreamcraft3d-coarse-nerf.yaml 并从命令行覆盖 data.image_path 与 system.prompt_processor.prompt；再手动调用 rmspace 和 cmaxgt0 两个 resolver 打印结果，验证对 tag 与 requires_normal 的理解。",
+          "source_files": [
+            "threestudio/utils/config.py",
+            "configs/dreamcraft3d-coarse-nerf.yaml",
+            "launch.py"
+          ],
+          "title": "配置系统：OmegaConf、resolvers 与命令行覆盖",
+          "topic": "讲解 ExperimentConfig 数据类、load_config 的 yaml+CLI 合并流程、自定义 OmegaConf resolver（rmspace/cmaxgt0 等）以及 trial_dir 的生成规则。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u2-l1"
+          ],
+          "filename": "u2-l3-stage-configs.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "说出每个阶段的 geometry_type/renderer_type/guidance_type",
+            "理解分辨率从 128 到 1024 的粗到细策略",
+            "理解 ckpt 通过 system.weights 与 geometry_convert_from 传递"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "configs/dreamcraft3d-coarse-nerf.yaml",
+            "configs/dreamcraft3d-texture.yaml"
+          ],
+          "order": 3,
+          "practice_task": "制作一张四阶段对比表（geometry/renderer/guidance/prompt_processor/分辨率/主要损失），并解释为什么 texture 阶段 fix_geometry=true、optimzer 里出现 guidance.train_unet 与 guidance.train_unet_lora 两组学习率。",
+          "source_files": [
+            "configs/dreamcraft3d-coarse-nerf.yaml",
+            "configs/dreamcraft3d-coarse-neus.yaml",
+            "configs/dreamcraft3d-geometry.yaml",
+            "configs/dreamcraft3d-texture.yaml",
+            "README.md"
+          ],
+          "title": "四阶段配置对比：从 coarse 到 texture",
+          "topic": "并排对比四份 yaml：几何表示（implicit-volume → implicit-sdf → tetrahedra-sdf-grid）、渲染器（nerf/neus 体渲染 → nvdiff 光栅化）、引导模型（DeepFloyd+Zero123 → BSD SD）与损失权重的演变。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-outputs-and-export.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "解释 CodeSnapshot/ConfigSnapshot/ModelCheckpoint 回调的作用",
+            "掌握用 parsed.yaml + resume 导出 obj 网格的命令",
+            "理解 nvdiff-rasterizer-context 在导出中的角色"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "launch.py",
+            "threestudio/utils/callbacks.py"
+          ],
+          "order": 4,
+          "practice_task": "若有可用 ckpt 则运行 README 中的 export 命令导出 obj+mtl 并用 meshlab 查看；否则通读代码后在 outputs/ 目录结构图上标出 ckpts/save/code/configs/tb_logs/csv_logs 各自由哪个回调产生。",
+          "source_files": [
+            "README.md",
+            "launch.py",
+            "threestudio/utils/callbacks.py",
+            "threestudio/models/exporters/mesh_exporter.py",
+            "threestudio/models/exporters/base.py"
+          ],
+          "title": "训练产物：trial 目录、检查点与网格导出",
+          "topic": "介绍 outputs/<name>/<tag>/ 试验目录结构（ckpts、save、code、configs、tb_logs、csv_logs），以及用 --export + mesh-exporter 导出带纹理 obj 网格的流程。"
+        }
+      ],
+      "order": 2,
+      "title": "单元二：跑通四阶段流水线"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u3-l1-registry-mechanism.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "理解 __modules__ 字典的注册与查找过程",
+            "掌握用 custom_import 注入外部扩展",
+            "能独立新增一个可被配置引用的组件"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "threestudio/__init__.py"
+          ],
+          "order": 1,
+          "practice_task": "在独立目录实现一个 solid-color-background 的变体（如垂直渐变背景），用 @threestudio.register 注册，再通过 cfg.custom_import + background_type=新注册名 在 coarse-nerf 配置上验证能否被 find 到并实例化。",
+          "source_files": [
+            "threestudio/__init__.py",
+            "threestudio/models/background/solid_color_background.py",
+            "launch.py"
+          ],
+          "title": "注册机制：@register 装饰器与 find 查找",
+          "topic": "剖析 threestudio/__init__.py 中 register/find 的实现、包导入如何触发注册，以及 launch.py 里 custom_import 支持外部扩展的方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-base-module-lifecycle.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 Configurable 的 parse_structured 配置注入",
+            "掌握 update_step/update_step_end 的触发时机",
+            "理解渐进式训练（分辨率、编码层级）如何借助该机制实现"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "threestudio/utils/base.py",
+            "threestudio/utils/misc.py"
+          ],
+          "order": 2,
+          "practice_task": "给上一讲的自定义 background 加上 update_step 实现，按 global_step 从 2000 步起渐变背景颜色；在 on_train_batch_start/update_if_possible 调用链上打断点或加日志，记录每步收到的 epoch 与 global_step。",
+          "source_files": [
+            "threestudio/utils/base.py",
+            "threestudio/systems/base.py",
+            "threestudio/utils/misc.py"
+          ],
+          "title": "BaseModule、Configurable 与 Updateable 生命周期",
+          "topic": "讲解 Configurable/Updateable 基类、update_step 钩子在训练批次前后被调用的时机，以及 BaseModule 如何管理 submodules 与 configure 流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-system-abstraction.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "解释 BaseSystem 如何桥接注册组件与 Lightning 训练循环",
+            "掌握 geometry_convert_from 的阶段衔接逻辑",
+            "理解 parse_optimizer 按模块名设置学习率的方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "threestudio/systems/base.py",
+            "threestudio/systems/utils.py"
+          ],
+          "order": 3,
+          "practice_task": "画出 BaseLift3DSystem.configure 的组装流程图（含 create_from 分支）；再对照 texture 配置的 optimizer.params 解释 geometry.encoding、guidance.train_unet 等键是如何被 parse_optimizer 匹配到参数组的。",
+          "source_files": [
+            "threestudio/systems/base.py",
+            "threestudio/systems/utils.py",
+            "configs/dreamcraft3d-texture.yaml"
+          ],
+          "title": "BaseSystem 与 BaseLift3DSystem：三维系统的组装",
+          "topic": "解读 BaseSystem（pl.LightningModule 封装、权重加载、true_global_step、update_step 分发）与 BaseLift3DSystem 如何把 geometry/material/background/renderer 四类组件拼成可训练三维系统，以及 geometry_convert_from 的跨阶段衔接。"
+        }
+      ],
+      "order": 3,
+      "title": "单元三：插件化架构与核心抽象"
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u4-l1-random-camera.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "掌握方位角/仰角/距离/fovy 采样范围配置",
+            "理解 get_rays、get_mvp_matrix 等投影工具函数",
+            "理解 progressive_until 渐进视角与 batch_uniform_azimuth 的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "threestudio/data/uncond.py",
+            "threestudio/utils/ops.py"
+          ],
+          "order": 1,
+          "practice_task": "单独实例化 RandomCameraIterableDataset，取 8 个 batch，用 matplotlib 画出对应相机位置（c2w 平移分量）在球面上的分布；再改 elevation_range 与 progressive_until 对比采样变化。",
+          "source_files": [
+            "threestudio/data/uncond.py",
+            "threestudio/utils/ops.py"
+          ],
+          "title": "随机相机：RandomCameraIterableDataset 与射线几何",
+          "topic": "解读随机相机采样：elevation/azimuth/distance/fovy 范围、射线方向生成、mvp 矩阵构造、渐进视角范围与 perturb 参数。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-single-image-data.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解参考视角相机参数如何写入 batch",
+            "理解 mvp_mtx_ref/c2w_ref 在 mask/深度监督中的用途",
+            "掌握 resolution_milestones 分辨率爬坡机制"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "threestudio/data/image.py"
+          ],
+          "order": 2,
+          "practice_task": "写脚本实例化 SingleImageDataModule 并取一个训练 batch，打印所有 key 及张量形状；在图中并排展示 rgb、mask、ref_depth、ref_normal，标注它们分别来自原图还是 Omnidata 预测。",
+          "source_files": [
+            "threestudio/data/image.py",
+            "threestudio/data/uncond.py",
+            "threestudio/utils/misc.py"
+          ],
+          "title": "单图数据管线：参考图监督与随机相机混合",
+          "topic": "解读 single-image-datamodule：如何加载 RGBA 参考图、生成参考视角深度/法向、把 random_camera 子数据集嵌入 batch，以及分辨率里程碑与多相机混合配置。"
+        }
+      ],
+      "order": 4,
+      "title": "单元四：数据与相机系统"
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u5-l1-implicit-volume-geometry.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "理解 density_bias 两种 blob 初始化的差异",
+            "理解 ProgressiveBandHashGrid 由粗到细策略",
+            "掌握 forward 返回的 density/特征如何被渲染器消费"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "threestudio/models/geometry/implicit_volume.py",
+            "threestudio/models/networks.py"
+          ],
+          "order": 1,
+          "practice_task": "把配置切换为 density_bias= blob_dreamfusion 与 blob_magic3d 各渲染一张密度切片对比；再调整 pos_encoding_config.start_level 观察 ProgressiveBandHashGrid 层级解锁对初始密度场的影响。",
+          "source_files": [
+            "threestudio/models/geometry/implicit_volume.py",
+            "threestudio/models/geometry/base.py",
+            "threestudio/models/networks.py",
+            "configs/dreamcraft3d-coarse-nerf.yaml"
+          ],
+          "title": "隐式体积几何 implicit-volume 与哈希编码",
+          "topic": "解读 implicit-volume：密度 MLP、ProgressiveBandHashGrid 位置编码、Magic3D 密度初始化（blob_magic3d）、密度激活与粗阶段几何先验。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-nerf-volume-renderer.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "理解 ray_indices/compact 渲染与逐像素全射线渲染的区别",
+            "解释 proposal network 的 proposal_requires_grad_fn 机制",
+            "理解 update_step 中占用网格（occupancy grid）的更新"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "threestudio/models/renderers/nerf_volume_renderer.py"
+          ],
+          "order": 2,
+          "practice_task": "通读 forward 中两套渲染分支，注释每一步张量形状；将 num_samples_per_rank 从 512 降到 128 并记录显存与渲染噪声变化，解释 trade-off。",
+          "source_files": [
+            "threestudio/models/renderers/nerf_volume_renderer.py",
+            "threestudio/models/renderers/base.py",
+            "threestudio/models/networks.py"
+          ],
+          "title": "NeRF 体渲染器：nerfacc ray marching 与 proposal network",
+          "topic": "解读 nerf-volume-renderer 的 render_nerf/render_nerf_grad 路径、nerfacc 的 ray marching、proposal 网络（PropMLP）与占用网格加速、法向扰动输出。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-neus-renderer.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "理解 VolSDF 与 NeuS 两种密度转换的差异",
+            "掌握 LearnedVariance 的作用与 coarse-neus 配置对应参数",
+            "理解从 NeRF 权重 warm start SDF 的策略"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "threestudio/models/renderers/neus_volume_renderer.py",
+            "threestudio/models/geometry/implicit_sdf.py"
+          ],
+          "order": 3,
+          "practice_task": "对照 coarse-nerf 与 coarse-neus 两份配置列出 geometry/renderer 差异清单；用 numpy 重实现 volsdf_density 并画一条 sdf→density 转换曲线，观察 inv_std 变化带来的锐度差异。",
+          "source_files": [
+            "threestudio/models/renderers/neus_volume_renderer.py",
+            "threestudio/models/geometry/implicit_sdf.py",
+            "configs/dreamcraft3d-coarse-neus.yaml"
+          ],
+          "title": "SDF 几何与 NeuS 体渲染",
+          "topic": "解读 implicit-sdf 的 initialize_shape、二次根号 SDF 参数化与 neus-volume-renderer 的 get_alpha、LearnedVariance 以及 volsdf 密度转换。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "filename": "u5-l4-dmtet-rasterization.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "理解 DMTet 顶点位移（deformable grid）的梯度来源",
+            "掌握 create_from 从 NeuS 网格初始化的采样流程",
+            "理解 nvdiffrast 光栅化前向如何保持可微"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "threestudio/models/geometry/tetrahedra_sdf_grid.py",
+            "threestudio/models/renderers/nvdiff_rasterizer.py"
+          ],
+          "order": 4,
+          "practice_task": "追踪 geometry 阶段配置中 geometry_convert_from 的完整数据流（上一阶段 ckpt → load_module_weights → create_from 采样 SDF 初始化网格）；解释 isosurface_deformable_grid=true 时网格顶点如何参与训练。",
+          "source_files": [
+            "threestudio/models/geometry/tetrahedra_sdf_grid.py",
+            "threestudio/models/renderers/nvdiff_rasterizer.py",
+            "threestudio/models/isosurface.py",
+            "threestudio/models/mesh.py",
+            "configs/dreamcraft3d-geometry.yaml"
+          ],
+          "title": "DMTet：tetrahedra-sdf-grid 与 nvdiffrast 光栅化",
+          "topic": "解读 tetrahedra-sdf-grid 的四面体网格、 marching tetrahedra 提取等值面、create_from 从 NeuS 结果初始化，以及 nvdiff-rasterizer 的可微光栅化渲染。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "filename": "u5-l5-materials-background.md",
+          "id": "u5-l5",
+          "learning_goals": [
+            "理解 no-material 直接输出 RGB 的设计动机",
+            "理解 texture 阶段高分辨率渲染与 patch 渲染的关系",
+            "掌握背景与材质在 loss 中的分工"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "threestudio/models/materials/no_material.py",
+            "threestudio/models/renderers/patch_renderer.py"
+          ],
+          "order": 5,
+          "practice_task": "对比 no-material 与 diffuse-with-point-light-material 的前向输出，说明为什么 texture 阶段选 no-material（提示：与 BSD 蒸馏目标保持一致）；再把背景换成 textured-background 观察参考图 loss 的 mask 合成逻辑是否仍成立。",
+          "source_files": [
+            "threestudio/models/materials/no_material.py",
+            "threestudio/models/materials/diffuse_with_point_light_material.py",
+            "threestudio/models/background/solid_color_background.py",
+            "threestudio/models/background/textured_background.py",
+            "threestudio/models/renderers/patch_renderer.py"
+          ],
+          "title": "材质、背景与 PatchRenderer",
+          "topic": "解读 no-material（直接由几何特征产出颜色）在 DreamCraft3D 各阶段的选择、solid-color/textured 背景的差异，以及 patch-renderer 的高分辨率分块渲染思路。"
+        }
+      ],
+      "order": 5,
+      "title": "单元五：3D 表示与可微渲染"
+    },
+    {
+      "id": "u6",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3",
+            "u5-l5"
+          ],
+          "filename": "u6-l1-system-configure.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "理解 guidance 与 guidance_3d 双通道设计",
+            "理解 control_guidance 的可选正则角色",
+            "理解 stage 字段驱动的行为分支"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "threestudio/systems/dreamcraft3d.py"
+          ],
+          "order": 1,
+          "practice_task": "画出 dreamcraft3d-system 的模块依赖图（system 及其 guidance/guidance_3d/prompt_processor/perceptual_loss/control_guidance），并在 coarse-nerf 与 texture 两份配置下分别标出哪些分支被激活。",
+          "source_files": [
+            "threestudio/systems/dreamcraft3d.py",
+            "configs/dreamcraft3d-coarse-nerf.yaml",
+            "configs/dreamcraft3d-texture.yaml"
+          ],
+          "title": "dreamcraft3d-system 的 configure 与双引导组装",
+          "topic": "解读 ImageConditionDreamFusion 的 Config（stage/freq/guidance_3d/control_guidance）与 configure 中 guidance、guidance_3d、prompt_processor、perceptual_loss 的组装。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-alternating-training.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "解释 freq.n_ref/ref_only_steps/no_diff_steps 的控制逻辑",
+            "理解 only_pretrain_step 与 BSD 预训练的联动",
+            "理解 geometry 阶段 rgb 与 normal 交替渲染"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "threestudio/systems/dreamcraft3d.py"
+          ],
+          "order": 2,
+          "practice_task": "写一个小模拟脚本按 alternate 逻辑跑 100 个 step，统计 do_ref/do_guidance 的执行比例；再修改 freq.n_ref=4 与 only_pretrain_step 观察分布变化，解释这种调度对「参考图保真 vs 扩散先验」平衡的意义。",
+          "source_files": [
+            "threestudio/systems/dreamcraft3d.py",
+            "configs/dreamcraft3d-coarse-nerf.yaml",
+            "configs/dreamcraft3d-texture.yaml"
+          ],
+          "title": "training_step：参考监督与扩散引导的交替调度",
+          "topic": "解读 training_step 中 ref_or_guidance 的 accumulate/alternate 策略、n_ref 控制的参考步频率、only_pretrain_step 与 BSD 预训练步的联动，以及 geometry 阶段 rgb/normal 双渲染类型切换。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l3-reference-losses.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "理解最小二乘尺度对齐深度的实现",
+            "理解 texture 阶段 grow_mask 的边缘容差设计",
+            "掌握法向 loss 的坐标约定（x 轴翻转）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "threestudio/systems/dreamcraft3d.py"
+          ],
+          "order": 3,
+          "practice_task": "推导 depth loss 中 torch.linalg.lstsq 最小二乘对齐的数学意义并注释代码；把 depth_rel 从 PearsonCorrCoef 换成手写相关系数实现，数值对拍验证一致；解释 texture 阶段改用 L1+grow_mask 的动机。",
+          "source_files": [
+            "threestudio/systems/dreamcraft3d.py",
+            "configs/dreamcraft3d-coarse-nerf.yaml"
+          ],
+          "title": "training_substep（一）：参考图监督损失",
+          "topic": "逐项解读 ref 子步损失：RGB（MSE/L1+grow_mask）、mask、深度（尺度对齐最小二乘）、相对深度（Pearson 相关）、法向余弦相似度。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "filename": "u6-l4-regularization-losses.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "将每项正则与其解决的视觉缺陷（飞点、雾状、空洞）对应",
+            "理解 geometry 阶段网格正则与 texture 阶段感知正则的分工",
+            "理解 C() 四元组调度与损失权重的联动"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "threestudio/systems/dreamcraft3d.py"
+          ],
+          "order": 4,
+          "practice_task": "整理一张「损失项 → 作用阶段 → 代码位置 → 解决的问题」表格；任选 coarse 阶段两项正则（如 lambda_sparsity、lambda_orient）在低步数训练中置零对比渲染结果，记录差异。",
+          "source_files": [
+            "threestudio/systems/dreamcraft3d.py",
+            "configs/dreamcraft3d-coarse-nerf.yaml",
+            "configs/dreamcraft3d-geometry.yaml",
+            "configs/dreamcraft3d-texture.yaml"
+          ],
+          "title": "training_substep（二）：正则化与阶段专属损失",
+          "topic": "解读 coarse 阶段的 orient/sparsity/opaque/eikonal/z_variance 正则、geometry 阶段的 normal_consistency/laplacian_smoothness 网格正则，以及 texture 阶段基于 ControlNet 编辑的感知 reg 损失。"
+        }
+      ],
+      "order": 6,
+      "title": "单元六：训练系统与损失函数"
+    },
+    {
+      "id": "u7",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u7-l1-prompt-processors.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "理解方位角前/后视角文本替换规则",
+            "理解 negative/peri-negative 三段式嵌入",
+            "理解不同 guidance 需要匹配不同 prompt processor 的原因"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "threestudio/models/prompt_processors/base.py"
+          ],
+          "order": 1,
+          "practice_task": "写脚本调用 StableDiffusionPromptProcessor，打印从 -180° 到 180° 每隔 45° 的 view-dependent 文本与负向文本；再解释 coarse 阶段为何用 deep-floyd-prompt-processor（与 guidance 模型词表对齐）。",
+          "source_files": [
+            "threestudio/models/prompt_processors/base.py",
+            "threestudio/models/prompt_processors/deepfloyd_prompt_processor.py",
+            "threestudio/models/prompt_processors/stable_diffusion_prompt_processor.py"
+          ],
+          "title": "Prompt Processor：文本嵌入与视角相关提示",
+          "topic": "解读 prompt processor 基类的缓存与 view-dependent prompting（front/side/back 提示切换）、perp-negative 负向嵌入，以及 deep-floyd 与 stable-diffusion 两种实现的差异。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l2-deepfloyd-sds.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "推导 SDS 梯度 = w(t)(ε_cond-ε_uncond) 的加权差分形式",
+            "理解 min/max_step_percent 时间步区间的作用",
+            "理解 perp-neg 与 guidance_scale 对梯度的影响"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "threestudio/models/guidance/deep_floyd_guidance.py"
+          ],
+          "order": 2,
+          "practice_task": "在 get_noise_pred 与 __call__ 的 SDS 分支逐行注释张量形状与梯度回传路径；把 guidance_scale 从 20 调到 5/50 各跑数百步，对比粗阶段几何演化差异并记录现象。",
+          "source_files": [
+            "threestudio/models/guidance/deep_floyd_guidance.py",
+            "threestudio/utils/ops.py",
+            "configs/dreamcraft3d-coarse-nerf.yaml"
+          ],
+          "title": "DeepFloyd guidance 与 SDS 得分蒸馏",
+          "topic": "解读 deep-floyd-guidance 的 forward_unet、get_noise_pred、CFG 加权得分蒸馏梯度、时间步采样区间调度与 perp-neg 处理，这是粗阶段文本先验的来源。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "filename": "u7-l3-stable-zero123.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "理解视图条件扩散如何缓解 Janus 问题",
+            "掌握外部 LDM 代码的加载与封装方式",
+            "理解 cond_elevation/azimuth 与随机相机参数的对应"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "threestudio/models/guidance/stable_zero123_guidance.py",
+            "extern/zero123.py",
+            "extern/ldm_zero123/guidance.py"
+          ],
+          "order": 3,
+          "practice_task": "追踪 stable_zero123.ckpt + sd-objaverse-finetune-c_concat-256.yaml 的加载链路（load_model_from_config）；画出参考图嵌入（CLIP+CCIP）与目标相机条件在 UNet 中的拼接位置示意图。",
+          "source_files": [
+            "threestudio/models/guidance/stable_zero123_guidance.py",
+            "extern/zero123.py",
+            "extern/ldm_zero128/guidance.py",
+            "extern/ldm_zero123/guidance.py",
+            "load/zero123/download.sh",
+            "configs/dreamcraft3d-coarse-nerf.yaml"
+          ],
+          "title": "Stable Zero123：视图条件 3D 先验",
+          "topic": "解读 stable-zero123-guidance：prepare_embeddings/get_img_embeds 的 CLIP 与 CCIP 嵌入、相对相机姿态条件拼接、extern/ldm_zero123 的 LDM 加载，以及它在粗阶段提供的多视角一致性。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l4-bsd-structure.md",
+          "id": "u7-l4",
+          "learning_goals": [
+            "分清冻结管线、可训练 UNet 与 LoRA 管线的职责",
+            "理解 set_up_lora_layers/LoRAAttnProcessor 注入方式",
+            "理解相机条件 embedding 与视角相关提示的配合"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "threestudio/models/guidance/stable_diffusion_bsd_guidance.py"
+          ],
+          "order": 4,
+          "practice_task": "画出 BSD 模块结构图（pipe/pipe_lora/pipe_fix、train_unet/train_unet_lora、camera_embedding、lora_layers），标注每个子模块的 requires_grad 状态；统计 set_up_lora_layers 注入的 LoRA 层数量。",
+          "source_files": [
+            "threestudio/models/guidance/stable_diffusion_bsd_guidance.py",
+            "configs/dreamcraft3d-texture.yaml"
+          ],
+          "title": "BSD 引导（上）：三管线结构与 LoRA 装配",
+          "topic": "解读 stable-diffusion-bsd-guidance 的 configure：pipe/pipe_lora/pipe_fix 三条 StableDiffusionPipeline、train_unet/train_unet_lora 两个可训练 UNet、set_up_lora_layers 的 LoRA 注入与相机条件嵌入。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l4",
+            "u6-l2"
+          ],
+          "filename": "u7-l5-bsd-optimization.md",
+          "id": "u7-l5",
+          "learning_goals": [
+            "推导 VSD/BSD 梯度与 LoRA 参数的交替更新关系",
+            "理解 train_pretrain 用冻结模型采样回灌防止灾难性遗忘",
+            "打通 system.training_step 与 guidance.update_step 的调度闭环"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "threestudio/models/guidance/stable_diffusion_bsd_guidance.py"
+          ],
+          "order": 5,
+          "practice_task": "为 compute_grad_vsd、train_lora、train_pretrain 三个方法各写一段数据流注释（输入渲染图→加噪→UNet→loss→梯度去向）；解释 cfg 中 only_pretrain_step=1000、per_update_pretrain_step=25 与 training_step 中 only_pretrain 分支如何共同决定前 1000 步以预训练为主。",
+          "source_files": [
+            "threestudio/models/guidance/stable_diffusion_bsd_guidance.py",
+            "threestudio/systems/dreamcraft3d.py",
+            "configs/dreamcraft3d-texture.yaml"
+          ],
+          "title": "BSD 引导（下）：VSD 梯度与双 LoRA 交替优化",
+          "topic": "解读 compute_grad_vsd 的变分得分蒸馏梯度、train_lora 在当前渲染上的 DreamBooth 式训练、train_pretrain 的冻结模型采样回灌预训练，以及 update_step 中预训练阶段的切换逻辑。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l5"
+          ],
+          "filename": "u7-l6-controlnet-guidance.md",
+          "id": "u7-l6",
+          "learning_goals": [
+            "理解 img2img 编辑图作为软监督的思路",
+            "理解感知损失在纹理保真中的作用",
+            "掌握通过 yaml 开关实验性功能的方法"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "threestudio/models/guidance/controlnet_reg_guidance.py",
+            "threestudio/utils/perceptual/perceptual.py"
+          ],
+          "order": 6,
+          "practice_task": "把 texture 配置中被注释的 control_guidance/control_prompt_processor 段取消注释（或写等价覆盖脚本），跑数百步观察 .threestudio_cache/control_debug.jpg 的编辑结果；再置零 lambda_reg 对比纹理是否漂移。",
+          "source_files": [
+            "threestudio/models/guidance/controlnet_guidance.py",
+            "threestudio/models/guidance/controlnet_reg_guidance.py",
+            "threestudio/utils/perceptual/perceptual.py",
+            "threestudio/systems/dreamcraft3d.py",
+            "configs/dreamcraft3d-texture.yaml"
+          ],
+          "title": "ControlNet 编辑正则与感知损失",
+          "topic": "解读 controlnet-guidance 的 img2img 编辑与 controlnet-reg-guidance 在 texture 阶段的可选正则：编辑图生成、VGG 感知损失 lambda_reg 如何约束渲染不偏离参考外观。"
+        }
+      ],
+      "order": 7,
+      "title": "单元七：扩散引导家族——从 SDS 到 BSD"
+    },
+    {
+      "id": "u8",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "filename": "u8-l1-schedule-c-function.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "理解四元组在不同长度下的解析规则",
+            "理解损失权重随步数线性/多段调度",
+            "能自己新增一个 resolver"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "threestudio/utils/misc.py",
+            "threestudio/utils/config.py"
+          ],
+          "order": 1,
+          "practice_task": "写脚本对若干四元组（如 [2000, 5., 1., 2001] 与 [0, 0.7, 0.2, 200]）采样步数 0..3000，绘制 C() 值曲线；再仿照 cmaxgt0 注册一个自定义 resolver 并在 yaml 中使用验证。",
+          "source_files": [
+            "threestudio/utils/misc.py",
+            "threestudio/utils/config.py",
+            "threestudio/systems/base.py"
+          ],
+          "title": "训练调度核心：C() 函数与步数感知参数",
+          "topic": "解读 misc.py 中的 C() 实现：[start_step, start_value, end_value, end_step] 四元组线性插值、列表多段调度，以及它如何驱动损失权重、时间步区间与渐进参数随训练变化。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "filename": "u8-l2-dreambooth-personalization.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "理解 Janus 问题的成因与个性化先验的解法",
+            "掌握 Zero123++ 多视图生成与 DreamBooth LoRA 训练流程",
+            "能把训练出的 LoRA 权重接回主训练"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "threestudio/scripts/img_to_mv.py",
+            "threestudio/scripts/train_dreambooth_lora.py"
+          ],
+          "order": 2,
+          "practice_task": "用 img_to_mv.py 为一张自有图片生成 2x3 多视图网格并检查合理性；随后按 README 命令以小步数（如 max_train_steps=100）试跑 train_dreambooth_lora.py，最后把 lora_weights_path 指向产物验证 coarse 阶段能否加载。",
+          "source_files": [
+            "threestudio/scripts/img_to_mv.py",
+            "threestudio/scripts/train_dreambooth_lora.py",
+            "threestudio/scripts/dreamcraft3d_dreambooth.py",
+            "README.md"
+          ],
+          "title": "DreamBooth 个性化与多视图数据生成",
+          "topic": "解读 img_to_mv.py 用 Zero123++ 从单图生成多视图、train_dreambooth_lora.py 训练 DeepFloyd LoRA，以及 lora_weights_path 如何替换粗阶段文生图先验以缓解 Janus 问题。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l4",
+            "u2-l4"
+          ],
+          "filename": "u8-l3-mesh-export-optimization.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "理解 xatlas UV 展开与纹理烘焙流程",
+            "掌握通过降低分辨率省显存的官方技巧",
+            "理解 precision 16-mixed 与 32 在不同阶段的取舍"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "threestudio/models/exporters/mesh_exporter.py"
+          ],
+          "order": 3,
+          "practice_task": "对 ckpt 执行 --export 导出 obj+mtl 并检查贴图；再按 README Tips 用 data.height=128 data.width=128（含 random_camera）跑粗阶段，记录显存峰值与默认配置的差异，写一段分析。",
+          "source_files": [
+            "threestudio/models/exporters/mesh_exporter.py",
+            "threestudio/models/exporters/base.py",
+            "threestudio/models/geometry/tetrahedra_sdf_grid.py",
+            "README.md"
+          ],
+          "title": "网格导出与显存优化实战",
+          "topic": "解读 mesh-exporter 的 xatlas UV 展开、顶点颜色/纹理烘焙、obj+mtl 输出，以及 xformers、梯度检查点、混合精度、分辨率调低等显存优化手段在代码中的落点。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l2",
+            "u8-l3"
+          ],
+          "filename": "u8-l4-gradio-and-extensions.md",
+          "id": "u8-l4",
+          "learning_goals": [
+            "理解 Gradio 前端与 launch.py 子进程的通信设计",
+            "理解 CodeSnapshot/ConfigSnapshot 保障的可复现性",
+            "能规划并落地一个自定义扩展组件"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "gradio_app.py",
+            "launch.py"
+          ],
+          "order": 4,
+          "practice_task": "本地启动 python gradio_app.py 完成一次（可缩短步数的）粗阶段训练并观察 progress 目录；随后任选一个扩展点（新 guidance 或新 exporter）实现注册骨架并在配置中切换成功。",
+          "source_files": [
+            "gradio_app.py",
+            "launch.py",
+            "threestudio/__init__.py",
+            "threestudio/utils/callbacks.py"
+          ],
+          "title": "Gradio 界面与二次开发实践",
+          "topic": "解读 gradio_app.py 的模型配置加载、run 子进程调用、进度文件监听与超时控制，总结全项目的扩展点（新 geometry/renderer/guidance/exporter/system），完成一个自定义扩展的收尾实战。"
+        }
+      ],
+      "order": 8,
+      "title": "单元八：工具链、导出与二次开发"
+    }
+  ]
+}

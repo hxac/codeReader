@@ -1,0 +1,458 @@
+# u8-l2 DreamBooth 个性化与多视图数据生成
+
+## 1. 本讲目标
+
+学完本讲，你应该能够：
+
+1. 说清 Janus（多面）问题的成因，以及「把文生图先验换成本物体的个性化先验」为什么能缓解它。
+2. 读懂 `threestudio/scripts/img_to_mv.py`：如何用 Zero123++ 从一张参考图生成 2×3 多视图网格并裁剪成 6 张训练图。
+3. 读懂 `threestudio/scripts/train_dreambooth_lora.py`：如何在 DeepFloyd IF 上做 DreamBooth LoRA 微调——数据集组织、视角相关提示、LoRA 注入、训练循环与权重保存。
+4. 把训练出的 LoRA 权重通过 `system.guidance.lora_weights_path` 接回 coarse 阶段主训练，替换默认的 DeepFloyd 文生图先验。
+5. 识别这套脚本里三个真实的「坑」：`CACHE_DIR` 未定义、`cuda:1` 硬编码、视角相关提示的文件名解析约定——它们都直接来自源码，不是猜测。
+
+## 2. 前置知识
+
+### 2.1 Janus 问题回顾
+
+在 u7-l2 我们已经知道，coarse 阶段的几何由 SDS 得分蒸馏驱动：渲染一个随机视角，交给扩散模型「打分」，把分数差反传回三维场景。问题在于**文生图模型是视角盲的**——你给它提示词 "a mushroom"，它无论从哪个视角看都倾向生成「蘑菇最典型、最像正面」的样子。于是优化器把每个视角都拉向「正面观感」，最终长出一张多脸怪物（正面、侧面各一张脸），这就是 Janus 问题。
+
+DreamCraft3D 在 coarse 阶段的对策是双引导（见 u6-l1、u7-l3）：`guidance_3d`（Stable Zero123）提供视图条件先验。而本讲介绍的是**可选的第三条路**：干脆把文本先验本身「个性化」——用参考图的多视图扩展去微调 DeepFloyd IF，让打分模型本身认识这个物体。README 把它放在折叠面板里，定位是「Stage 1 出现 Janus 问题时的可选手段」。
+
+### 2.2 DreamBooth 与 LoRA
+
+**DreamBooth** 是一种个性化微调技术：拿一个罕见词（如 `sks`）当占位符，用少量目标物体图片微调文生图模型，使 `a sks mushroom` 这个提示精确指向**这只**蘑菇。为防止模型把「蘑菇」这个类别的通用知识忘掉（灾难性遗忘），经典做法是加**先验保持损失**：用原模型生成一批普通蘑菇图（class images），微调时同时约束模型在这批图上仍然表现如初。
+
+\[ \mathcal{L} = \underbrace{\mathbb{E}_{x\sim p_{\text{inst}},\,t,\epsilon}\big\|\epsilon_\theta(x_t,t,c_{\text{inst}})-\epsilon\big\|^2}_{\text{实例损失：拟合目标物体}} \;+\; w\cdot\underbrace{\mathbb{E}_{x\sim p_{\text{class}},\,t,\epsilon}\big\|\epsilon_\theta(x_t,t,c_{\text{class}})-\epsilon\big\|^2}_{\text{先验保持损失：不忘类别先验}} \]
+
+**LoRA**（Low-Rank Adaptation）则回答「微调哪些参数」：不动原权重 \(W\)，而是在旁边挂一对低秩矩阵，前向变为
+
+\[ W' = W + BA,\qquad B\in\mathbb{R}^{d\times r},\; A\in\mathbb{R}^{r\times k},\; r \ll \min(d,k) \]
+
+秩 \(r\)（本脚本的 `--rank`，默认 4）把可训练参数量压缩几个数量级，产物是一个几 MB 的 `pytorch_lora_weights.safetensors`，可以随时挂载/卸载。回忆 u7-l4/u7-l5：BSD 引导内部也用 LoRA 更新扩散模型——本讲是同一技术在「训练前离线」场景的应用。
+
+### 2.3 Zero123++ 与 DeepFloyd IF 的两个事实
+
+- **Zero123++**（`sudo-ai/zero123plus-v1.1`）是 Zero123 的升级版多视图生成器：输入一张图，输出**一张拼好的大图**，里面按 3 行 × 2 列排布 6 个新视角。所以脚本里必须做裁剪。
+- **DeepFloyd IF 是像素空间扩散模型**（u7-l2 已详述）：没有 VAE 潜空间，UNet 直接在 64×64 像素上跑，输出 6 通道（3 通道噪声均值 + 3 通道学习方差），文本编码器是 T5。这两点决定了训练脚本里有一批 IF 专属分支。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+| --- | --- |
+| [threestudio/scripts/img_to_mv.py](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/img_to_mv.py) | 用 Zero123++ 从单图生成 6 视图网格并裁剪保存（含可选 4× 超分） |
+| [threestudio/scripts/train_dreambooth_lora.py](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py) | 改编自 HuggingFace diffusers 官方示例的 DreamBooth LoRA 训练脚本，针对 DeepFloyd IF 做了适配 |
+| [threestudio/models/guidance/deep_floyd_guidance.py](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/models/guidance/deep_floyd_guidance.py) | 消费端：粗阶段文本先验，`configure` 里按 `lora_weights_path` 挂载 LoRA |
+| [threestudio/scripts/test_dreambooth_lora.py](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/test_dreambooth_lora.py) | 25 行的最小推理验证脚本：挂 LoRA 生成一张图 |
+| [threestudio/scripts/dreamcraft3d_dreambooth.py](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/dreamcraft3d_dreambooth.py) | 另一条自动化路线：gen_data（渲染图→多视图数据）+ 全量 DreamBooth 的一条龙封装 |
+| [README.md](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/README.md) | L128–L166 折叠面板给出完整命令链 |
+| [configs/dreamcraft3d-coarse-nerf.yaml](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/configs/dreamcraft3d-coarse-nerf.yaml) | coarse 阶段配置，`system.guidance` 段是 LoRA 路径的覆盖目标 |
+
+三条命令串成的流水线（摘自 README）：
+
+```sh
+# ① 单图 → 6 视图
+python threestudio/scripts/img_to_mv.py --image_path 'load/mushroom.png' \
+    --save_path '.cache/temp' --prompt 'a photo of mushroom' --superres
+# ② 6 视图 → 个性化 DeepFloyd LoRA
+accelerate launch threestudio/scripts/train_dreambooth_lora.py \
+    --pretrained_model_name_or_path="DeepFloyd/IF-I-XL-v1.0" \
+    --instance_data_dir=".cache/temp" --output_dir=".cache/if_dreambooth_mushroom" ...
+# ③ LoRA 接回主训练
+python launch.py --config configs/dreamcraft3d-coarse-nerf.yaml --train \
+    system.guidance.lora_weights_path=".cache/if_dreambooth_mushroom" ...
+```
+
+## 4. 核心概念与源码讲解
+
+### 4.1 总体思路：换先验而不是加约束
+
+#### 4.1.1 概念说明
+
+u6-l4 讲过，正则化损失只能施加「结构先验」（平滑、稀疏、不透明），不能提供「内容信息」——它不知道这只蘑菇长什么样。Janus 问题恰恰是内容层面的：打分模型在每个视角都要求「最典型的正面观感」。
+
+解决思路分两代：
+
+| 方案 | 位置 | 思路 | 代价 |
+| --- | --- | --- | --- |
+| 视图条件先验 Zero123 | coarse 阶段默认（u7-l3） | 给打分模型看参考图 + 相对相机姿态 | 每步推理要拼条件嵌入 |
+| 个性化先验（本讲） | coarse 阶段可选 | 直接微调打分模型，让它「认识」这个物体 | 需要离线训练一次 LoRA |
+| BSD 自举（u7-l4/5） | texture 阶段 | 训练中在线微调扩散模型再蒸馏回去 | 训练开销大、需交替优化 |
+
+三者一脉相承：**让扩散先验与参考物体对齐**。本讲的离线 DreamBooth 是最「朴素」的一种——数据从哪来？单张参考图不够 DreamBooth 用（会过拟合成一个视角），于是先用 Zero123++ 把它扩展成 6 个视角，这正是 `img_to_mv.py` 存在的意义。
+
+#### 4.1.2 核心流程
+
+```text
+参考图 (rgba)
+   │ ① img_to_mv.py
+   ▼
+Zero123++ ──► 2列×3行大图 ──裁剪──► cropped_0..5.jpg（6 张，可超分）＋ 原图拷贝
+   │ ② train_dreambooth_lora.py
+   ▼
+DreamBooth LoRA（.cache/if_dreambooth_mushroom/pytorch_lora_weights.safetensors）
+   │ ③ launch.py + system.guidance.lora_weights_path=...
+   ▼
+deep-floyd-guidance 的 IFPipeline 挂载 LoRA ──► coarse 阶段 SDS 打分（u7-l2 骨架不变）
+```
+
+注意第 ③ 步只是**换打分模型**，SDS 梯度形式、`C()` 驱动的时间步区间调度（`min_step_percent: [0, 0.7, 0.2, 200]` 等四元组）全部原样保留——个性化改变的是 \(\epsilon_\theta\) 这个人，不是蒸馏公式本身。
+
+#### 4.1.3 源码精读
+
+README 把整条链路放在「Janus 问题出现时的可选方案」折叠面板里：
+
+- [README.md:L128-L135](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/README.md#L128-L135)：折叠面板标题点明用途（Stage 1 出现 Janus problem 时），第一步用 Zero123++ 从参考图生成多视图，并提醒「请检查生成的多视图是否合理」。
+- [README.md:L138-L158](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/README.md#L138-L158)：DreamBooth LoRA 训练命令。关键参数：`--instance_prompt="a sks mushroom"`（罕见词 `sks` 作占位符）、`--resolution=64`（IF 是 64×64 像素空间模型）、`--learning_rate=5e-6 --scale_lr`、`--max_train_steps=1200`、`--pre_compute_text_embeddings`（预计算文本嵌入，训练时不再驻留 T5 编码器省显存）。
+- [README.md:L160-L165](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/README.md#L160-L165)：产物在 `.cache/if_dreambooth_mushroom`，用 `system.guidance.lora_weights_path` 一键替换 coarse 阶段先验。
+- [configs/dreamcraft3d-coarse-nerf.yaml:L95-L99](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/configs/dreamcraft3d-coarse-nerf.yaml#L95-L99)：yaml 里的 `system.guidance` 段——`pretrained_model_name_or_path` 指向 DeepFloyd/IF-I-XL-v1.0，`min/max_step_percent` 是 u8-l1 讲过的 C() 四元组；`lora_weights_path` 不在 yaml 里出现，靠命令行点号语法注入（u2-l2）。
+
+#### 4.1.4 代码实践
+
+**实践目标**：不跑任何模型，先把「数据 → LoRA → 消费」三段的文件与配置对应关系打通。
+
+**操作步骤**：
+
+1. 打开 [README.md:L128-L166](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/README.md#L128-L166)，把三条命令抄成本地备忘。
+2. 用 u2-l2 学过的 `load_config` 写 10 行脚本（示例代码，放你自己的目录）：
+
+```python
+# check_lora_cfg.py（示例代码）
+import sys
+sys.path.insert(0, ".")
+from threestudio.utils.config import load_config
+
+cfg = load_config("configs/dreamcraft3d-coarse-nerf.yaml",
+                  cli_args=["system.guidance.lora_weights_path=.cache/if_dreambooth_mushroom"],
+                  n_gpus=1)
+print(cfg.system.guidance.pretrained_model_name_or_path)  # DeepFloyd/IF-I-XL-v1.0
+print(cfg.system.guidance.lora_weights_path)              # .cache/if_dreambooth_mushroom
+print(cfg.system.guidance_type)                           # deep-floyd-guidance
+```
+
+**需要观察的现象**：命令行 extras 合并后 `lora_weights_path` 出现在结构化配置里，且 `guidance_type` 仍是 `deep-floyd-guidance`——个性化**不换组件，只换组件内部的权重**。
+
+**预期结果**：三行输出如注释所示。若报 `???` 缺失说明 prompt 等必填项未给（见 u2-l2），可临时补 `system.prompt_processor.prompt=...`。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 DreamCraft3D 不直接用单张参考图做 DreamBooth，而要先扩展成 6 个视角？
+
+**答案**：单图 DreamBooth 会让模型把「该物体」与「该视角」绑定，泛化到其他视角时仍可能 Janus 化（甚至更严重，因为过拟合到一个观感）；多视图数据天然携带视角多样性，让占位符 `sks mushroom` 学到的是三维一致的物体概念。README 也特意提醒先检查多视图的合理性——数据错了先验就错了。
+
+**练习 2**：`lora_weights_path` 与 u2-l3 讲过的 `system.weights`、`geometry_convert_from` 有什么本质区别？
+
+**答案**：后两者加载的是**场景侧**（三维系统）的检查点，用于阶段间接力；`lora_weights_path` 加载的是**引导侧**（扩散打分模型）的 LoRA 增量，只影响 SDS 梯度的来源，场景参数初始化完全不受它影响。
+
+### 4.2 img_to_mv.py：Zero123++ 多视图生成
+
+#### 4.2.1 概念说明
+
+`img_to_mv.py` 只做一件事：参考图进，6 张视角不同的图出。它解决的是 DreamBooth 的「数据荒」——但用的不是渲染，而是另一个扩散模型 Zero123++ 的多视图生成能力。与 u7-l3 的 Stable Zero123 不同：Zero123（旧版/稳定版）一次生成**一个**指定视角，条件是相对相机姿态；Zero123++ 一次生成**一张 6 视图拼图**，无需逐视角指定姿态，视角组合由模型自身的训练设定决定。
+
+#### 4.2.2 核心流程
+
+```text
+main(args)
+ ├─ os.makedirs(save_path)；os.system("cp 原图 → save_path")     # 原图也进训练目录！
+ ├─ load_model(superres)
+ │   ├─ Zero123++：sudo-ai/zero123plus-v1.1（fp16、本地缓存、local_files_only）
+ │   ├─ 调度器换成 EulerAncestralDiscreteScheduler(timestep_spacing='trailing')
+ │   └─ 可选：stabilityai/stable-diffusion-x4-upscaler（4 倍超分）
+ ├─ img_to_mv：大图 = mv_model(参考图, num_inference_steps=75)
+ └─ crop_save_image_to_2x3_grid：按 3 行 × 2 列等分裁成 6 块
+      └─ 每块可选 superres_4x（缩到 256 再放大 4 倍）
+      └─ 保存 cropped_0.jpg ... cropped_5.jpg（行优先编号）
+```
+
+#### 4.2.3 源码精读
+
+- [threestudio/scripts/img_to_mv.py:L8-L15](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/img_to_mv.py#L8-L15)：`DiffusionPipeline.from_pretrained("sudo-ai/zero123plus-v1.1", custom_pipeline="sudo-ai/zero123plus-pipeline", torch_dtype=float16, cache_dir="load/checkpoints/huggingface/hub", local_files_only=True)`——注意 `local_files_only=True`：模型**必须提前下载**到 `load/checkpoints/huggingface/hub`，脚本不会自动拉取；调度器换成 `timestep_spacing='trailing'` 的 EulerAncestral，这是 Zero123++ 官方推荐配置，直接影响采样质量。
+- [threestudio/scripts/img_to_mv.py:L17-L25](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/img_to_mv.py#L17-L25)：`--superres` 开启时额外加载 SD x4 上采样器；两者都从同一本地缓存目录读。
+- [threestudio/scripts/img_to_mv.py:L28-L39](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/img_to_mv.py#L28-L39)：**第一个坑**——`model.to('cuda:1')` 在 `img_to_mv` 和 `superres_4x` 里各硬编码了一次。单卡机器上会直接报错，需在你的本地副本里改成 `cuda:0`（或 `cuda`）。推理 75 步出一张拼图。
+- [threestudio/scripts/img_to_mv.py:L42-L62](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/img_to_mv.py#L42-L62)：`grid_width = width // 2`、`grid_height = height // 3`——2 列 × 3 行共 6 块；双重循环 `for i in range(3): for j in range(2)` 按**行优先**裁剪，`cropped_0` 是左上、`cropped_1` 右上、`cropped_2` 左中……超分在裁剪后逐块进行（先 `resize((256,256))` 再 x4）。
+- [threestudio/scripts/img_to_mv.py:L65-L80](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/img_to_mv.py#L65-L80)：`main` 里 `os.system(f"cp '{args.image_path}' '{args.save_path}'")` 把原始参考图也拷进输出目录——下一节的 `DreamBoothDataset` 会遍历目录里**所有**图片文件，所以实例集实际是 6 张裁剪 + 1 张原图 = 7 张。
+
+#### 4.2.4 代码实践
+
+**实践目标**：为自己的图片生成 2×3 多视图网格，并做合理性检查（README 明确要求这一步）。
+
+**操作步骤**：
+
+1. 准备一张去背景的 RGBA 图（u2-l1 的 `preprocess_image.py --recenter` 产物最合适，尺度居中贴布对 Zero123++ 友好）。
+2. 复制 `img_to_mv.py` 到你自己的工作目录，把两处 `cuda:1` 改为 `cuda:0`（不改源码仓库，改自己的副本）。
+3. 运行（权重已按 u1-l2 预下载到 `load/checkpoints/huggingface/hub` 的前提下）：
+
+```sh
+python my_img_to_mv.py --image_path my_hamburger_rgba.png \
+    --save_path .cache/temp --prompt 'a photo of hamburger' --superres
+```
+
+4. 用看图工具把 7 张图排成一行检查。
+
+**需要观察的现象**：
+
+- `cropped_0..5` 六个视角的**物体身份是否一致**（同一只汉堡，而不是六个不同的汉堡）；
+- 视角是否**真的有变化**（行与行之间仰角不同、列与列之间方位角不同）；
+- 背景是否干净、剪影是否完整。
+
+**预期结果**：6 张视角合理、身份一致的图。若出现身份漂移（某些视角长出了别的物体），**不要进入下一步**——README 的提醒正是为此，脏数据会把错误先验烧进 LoRA。本实践依赖 Zero123++ 权重与 GPU，**待本地验证**。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`local_files_only=True` 加 `cache_dir="load/checkpoints/huggingface/hub"` 意味着什么？与 deep-floyd-guidance 的默认行为有何不同？
+
+**答案**：意味着脚本只从本地缓存读、缺失即抛错，必须提前把 `sudo-ai/zero123plus-v1.1` 下载到 `load/checkpoints/huggingface/hub`。而 deep-floyd-guidance 的 `cache_dir`/`local_files_only` 配置默认是 `None`/`False`（[deep_floyd_guidance.py:L22-L23](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/models/guidance/deep_floyd_guidance.py#L22-L23)），首次运行会从 HuggingFace Hub 自动拉取 DeepFloyd IF（见 u1-l2）。
+
+**练习 2**：为什么裁剪循环是 `range(3)` 在外、`range(2)` 在内，而不是反过来？
+
+**答案**：Zero123++ 的拼图是 3 行 × 2 列：`grid_height = height // 3` 说明纵向切 3 刀得 3 行，`grid_width = width // 2` 横向切 1 刀得 2 列。外层遍历行、内层遍历列，`cropped_{idx}` 的 idx 就是行优先序号（0=左上，1=右上，2=左中……）。若弄反了会把图切成 2 行 × 3 列的错块。
+
+### 4.3 train_dreambooth_lora.py（一）：数据集与视角相关提示
+
+#### 4.3.1 概念说明
+
+`train_dreambooth_lora.py` 改编自 HuggingFace diffusers 的官方 `train_dreambooth_lora.py` 示例（文件头保留 Apache 2.0 版权声明），DreamCraft3D 对它做了三类改造：所有模型加载强制走本地缓存、文本编码器支持 T5（DeepFloyd 用）、新增 `--use_view_dependent_prompt` 视角相关提示开关。
+
+数据侧的核心是 `DreamBoothDataset`：一个目录的实例图 + 一个实例提示词，每个 `__getitem__` 返回「图 + tokenize 后的提示」。视角相关提示是本脚本最有意思的自定义：**从文件名里解析出方位角**，把 `a sks mushroom` 自动扩展成 `a sks mushroom, front view` / `side view` / `back view`——这与 u7-l1 prompt processor 的 view-dependent prompting 是同一个思想（用文本显式告知视角，缓解视角盲），只不过发生在**训练数据构造**阶段而非推理阶段。
+
+#### 4.3.2 核心流程
+
+```text
+DreamBoothDataset.__getitem__(index)
+ ├─ 读实例图 → exif_transpose → 转 RGB → Resize/CenterCrop(64) → ToTensor → Normalize([0.5],[0.5])
+ ├─ 若 use_view_dependent_prompt:
+ │     angle = float(文件名[4:-4])            # 期望「4 字符前缀 + 角度」命名
+ │     angle < 45 或 ≥ 315      → "front view"
+ │     45 ≤ angle < 135 或 225 ≤ angle < 315 → "side view"
+ │     其余（135 ≤ angle < 225）→ "back view"
+ │     instance_prompt += f", {view}"
+ ├─ 若预计算嵌入: 直接取 encoder_hidden_states（跳过上面整个视角分支！）
+ └─ 否则 tokenize(提示词) → input_ids + attention_mask
+```
+
+#### 4.3.3 源码精读
+
+- [threestudio/scripts/train_dreambooth_lora.py:L456-L460](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L456-L460)：`--use_view_dependent_prompt` 开关定义。
+- [threestudio/scripts/train_dreambooth_lora.py:L565-L572](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L565-L572)：角度解析与分桶。`os.path.basename(...)[4:-4]` 切掉前 4 个字符与后 4 个字符（`.jpg`），意味着文件名必须是「恰好 4 字符前缀 + 角度数字」的格式——例如 `view30.0.jpg` 解析出 `30.0`。
+- [threestudio/scripts/train_dreambooth_lora.py:L574-L590](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L574-L590)：`example["instance_images"]` 与提示词构造。注意 `if self.encoder_hidden_states is not None` 分支**优先于**视角相关提示——预计算嵌入时所有图共用同一段嵌入，`--pre_compute_text_embeddings` 与 `--use_view_dependent_prompt` 实际上互斥（前者胜出）。
+- [threestudio/scripts/train_dreambooth_lora.py:L544-L551](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L544-L551)：图像变换链 `Resize → (Center|Random)Crop → ToTensor → Normalize([0.5],[0.5])`，把任意输入（含超分后的大图）归一到 \([-1,1]\)、边长 `--resolution`（README 传 64）。
+- [threestudio/scripts/train_dreambooth_lora.py:L518-L529](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L518-L529)：数据发现逻辑——`iterdir` 后按扩展名过滤图片。**这就是 `cropped_N.jpg` 命名与视角解析约定冲突的地方**：`"cropped_30.0.jpg"[4:-4]` 得到 `"ped_30.0"`，`float()` 会抛 `ValueError`；而 `img_to_mv.py` 的产物本来就是整数序号（`cropped_0.jpg` → `"ped_0"`）。所以**当前两个脚本不能直接配合 `--use_view_dependent_prompt` 使用**：README 的示例命令也没有传这个开关，走的是「所有图共用 `a sks mushroom`」的默认路径。若想启用，需先把 6 张裁剪按其真实方位角重命名为「4 字符前缀 + 角度」格式。
+- [threestudio/scripts/train_dreambooth_lora.py:L592-L609](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L592-L609)：可选的 class 图（先验保持）分支，与实例图同样变换、同样 tokenize。
+
+#### 4.3.4 代码实践
+
+**实践目标**：用纯 Python 验证视角分桶逻辑与文件名解析约定，不依赖任何模型。
+
+**操作步骤**：
+
+1. 把分桶逻辑抄成独立函数（示例代码）：
+
+```python
+# view_bucket.py（示例代码，依据 train_dreambooth_lora.py L565-L572 改写）
+def view_of(angle: float) -> str:
+    if angle < 45 or angle >= 315:
+        return "front view"
+    elif 45 <= angle < 135 or 225 <= angle < 315:
+        return "side view"
+    else:
+        return "back view"
+
+for a in [0, 30, 90, 180, 270, 350, -30]:
+    print(f"{a:>5} -> {view_of(a)}")
+
+# 文件名切片约定
+print("view30.0.jpg"[4:-4])    # 30.0   ✓ 可解析
+print("cropped_30.0.jpg"[4:-4])  # ped_30.0 ✗ float() 抛 ValueError
+```
+
+2. 运行 `python view_bucket.py`。
+
+**需要观察的现象**：角度到视角的映射是否符合直觉；两种文件名切片的结果差异。
+
+**预期结果**：`0/30/350/-30 → front`（都不满足 `45 ≤ a`，负角因 `angle < 45` 同样落 front），`90/270 → side`，`180 → back`；`view30.0.jpg` 切出 `30.0`，`cropped_30.0.jpg` 切出 `ped_30.0`。边界由不等式的开闭决定：`45` 本身属于 side（`45 <= angle`），`315` 属于 front（`angle >= 315`）。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：`--pre_compute_text_embeddings` 为什么与视角相关提示互斥？从数据流角度解释。
+
+**答案**：预计算路径在训练开始前就把**单一** `instance_prompt` 编码成 `encoder_hidden_states` 并传入数据集；`__getitem__` 里 `if self.encoder_hidden_states is not None` 分支直接返回这段固定嵌入，构造视角相关文本的 else 分支永远不会执行。README 命令恰好传了 `--pre_compute_text_embeddings`，因此即便补上文件名重命名，视角提示也不会生效。
+
+**练习 2**：normalize 用 `Normalize([0.5],[0.5])` 把像素域变成什么范围？为什么扩散模型训练需要这个范围？
+
+**答案**：`ToTensor` 后像素在 \([0,1]\)，减 0.5 除 0.5 后到 \([-1,1]\)——扩散模型（含 DeepFloyd IF）的噪声/数据约定都在 \([-1,1]\)，加噪公式 \(x_t=\sqrt{\bar\alpha_t}x_0+\sqrt{1-\bar\alpha_t}\epsilon\) 中 \(x_0,\epsilon\) 同域才能保证信噪比有意义。
+
+### 4.4 train_dreambooth_lora.py（二）：LoRA 注入与训练循环
+
+#### 4.4.1 概念说明
+
+这一节是脚本的「引擎舱」：如何把 LoRA 挂到 UNet 的注意力层、如何在 DeepFloyd IF（无 VAE、6 通道输出）上跑标准扩散训练目标、如何只保存 LoRA 增量。它与 u7-l4 BSD 引导里的 `set_up_lora_layers` 是同一件事的两种写法（离线全量注入 vs 在线选择性注入），对照阅读能看出 LoRA API 的两种用法。
+
+#### 4.4.2 核心流程
+
+```text
+main(args)
+ ├─ Accelerator 初始化；可选：先用原模型采样 num_class_images 张 class 图（先验保持）
+ ├─ 加载 tokenizer / T5 text_encoder / DDPMScheduler / unet；IF 无 VAE → try/except → vae=None
+ ├─ vae/text_encoder/unet 全部 requires_grad_(False)          # 冻结基座
+ ├─ 遍历 unet.attn_processors：
+ │     对每层注意力的 to_q/to_k/to_v/to_out[0] 执行
+ │     set_lora_layer(LoRALinearLayer(in, out, rank))          # 注入低秩旁路
+ │     收集全部 LoRA 参数 → unet_lora_parameters
+ ├─ optimizer 只装 LoRA 参数（AdamW，lr=5e-6，scale_lr 按 batch 放大）
+ ├─ 训练循环（每个 step）：
+ │     pixel_values ──vae? 否→直接──► model_input（IF：像素即输入）
+ │     noise、t 随机采样；noisy = add_noise(model_input, noise, t)
+ │     IF 特化：in_channels == 2*C → noisy 与自身按通道拼接
+ │     model_pred = unet(noisy, t, text_embed).sample
+ │     IF 特化：输出 6 通道 → chunk 成两半，丢弃方差半
+ │     target = noise（epsilon 预测）或 velocity（v 预测）
+ │     loss = MSE(model_pred, target) [+ prior_loss_weight × class 部分 MSE]
+ │     backward → 只更新 LoRA
+ └─ 训练结束：save_lora_weights → output_dir/pytorch_lora_weights.safetensors
+```
+
+#### 4.4.3 源码精读
+
+- [threestudio/scripts/train_dreambooth_lora.py:L741-L785](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L741-L785)：先验保持的 class 图自动生成——不足 `--num_class_images` 张时先用原模型按 `--class_prompt` 采样补齐（文件名带图像 sha1 防重）。
+- [threestudio/scripts/train_dreambooth_lora.py:L797-L829](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L797-L829)：模型加载。**第二个坑**：这些调用里的 `cache_dir=CACHE_DIR` 引用了一个**本文件从未定义的全局变量**（全文检索只有使用、没有赋值），原样运行会在加载 tokenizer 时抛 `NameError`。使用前需在你自己的副本里补一行定义，例如 `CACHE_DIR = "load/checkpoints/huggingface/hub"`（与 img_to_mv.py 的缓存目录一致）。另外 [L818-L825](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L818-L825) 的 `try/except OSError: vae = None` 是 IF 适配——DeepFloyd 仓库没有 `vae` 子目录，加载失败被静默吞掉。
+- [threestudio/scripts/train_dreambooth_lora.py:L116-L138](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L116-L138)：`import_model_class_from_model_name_or_path` 读 text_encoder 配置的 `architectures[0]` 反推类，支持 `T5EncoderModel`（IF）与 `CLIPTextModel`（SD）——这是相对官方示例新增的 IF 支持。
+- [threestudio/scripts/train_dreambooth_lora.py:L831-L835](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L831-L835)：基座三件套 `requires_grad_(False)`——**只有 LoRA 旁路可训练**。
+- [threestudio/scripts/train_dreambooth_lora.py:L869-L936](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L869-L936)：LoRA 注入主体。遍历 `unet.attn_processors`，先按名字逐级 `getattr` 拿到注意力模块，再对 `to_q/to_k/to_v/to_out[0]` 调 `set_lora_layer(LoRALinearLayer(in_features, out_features, rank=args.rank))`，并把旁路参数收进 `unet_lora_parameters`。L876-L880 的注释给出 Stable Diffusion 的账本：down 12 + mid 2 + up 18 = **32 个注意力层**，每层 4 个投影 → 128 个 LoRA 旁路。L920-L936 处理 AddedKV 型注意力的 `add_k_proj/add_v_proj`（SD 之外的结构才用到）。
+- [threestudio/scripts/train_dreambooth_lora.py:L944-L990](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L944-L990)：accelerate 的 save/load 钩子——`accelerator.save_state` 时只序列化 LoRA 层（`unet_lora_state_dict`），断点续训轻若无物；这是 LoRA「只存增量」哲学在工程上的落点。
+- [threestudio/scripts/train_dreambooth_lora.py:L1016-L1027](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L1016-L1027)：优化器只装 `unet_lora_parameters`（未开 `--train_text_encoder` 时）。
+- [threestudio/scripts/train_dreambooth_lora.py:L1184-L1236](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L1184-L1236)：训练步核心，三个 IF 特化分支密集出现——[L1188-L1193](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L1188-L1193) `vae is None` 时 `model_input = pixel_values`（像素空间，不经潜空间编码与 `scaling_factor`）；[L1219-L1220](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L1219-L1220) `in_channels == channels*2` 时把 `noisy_model_input` 与自身按通道拼接（IF UNet 期望 6 通道输入，此处用复制填充条件半）；[L1235-L1236](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L1235-L1236) `model_pred.shape[1] == 6` 时 chunk 丢掉方差半，只训简化目标（与 u7-l2 DeepFloyd guidance 里的处理完全一致）。
+- [threestudio/scripts/train_dreambooth_lora.py:L1246-L1260](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L1246-L1260)：先验保持损失——batch 里实例图与 class 图沿 batch 维拼在一起一次前向，再 chunk 成两半分别算 MSE，按 `prior_loss_weight` 加权求和（对照 2.2 节公式）。
+- [threestudio/scripts/train_dreambooth_lora.py:L1390-L1408](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L1390-L1408)：训练结束，UNet 转 float32 后 `LoraLoaderMixin.save_lora_weights(save_directory=args.output_dir, ...)`——产物即 `.cache/if_dreambooth_mushroom/pytorch_lora_weights.safetensors`。
+- [threestudio/scripts/train_dreambooth_lora.py:L1412-L1433](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L1412-L1433)：收尾自检——重新加载原模型、`pipeline.load_lora_weights(args.output_dir, weight_name="pytorch_lora_weights.safetensors")`、用 validation prompt 生成样图写进 tracker。
+
+#### 4.4.4 代码实践
+
+**实践目标**：以 `max_train_steps=100` 的烟测配置把训练链路跑通（重点是绕过两个坑），观察产物结构。
+
+**操作步骤**：
+
+1. 复制脚本到你的工作目录，在文件顶部 import 区之后补一行 `CACHE_DIR = "load/checkpoints/huggingface/hub"`（`NameError` 的修复，只改自己的副本）。
+2. 确认 DeepFloyd IF 权重已在本地缓存（u1-l2：gated 模型，需同意许可并登录后由 Hub 下载）。
+3. 用 README 命令降步数运行：
+
+```sh
+export MODEL_NAME="DeepFloyd/IF-I-XL-v1.0"
+export INSTANCE_DIR=".cache/temp"
+export OUTPUT_DIR=".cache/if_dreambooth_mushroom_smoke"
+
+accelerate launch my_train_dreambooth_lora.py \
+  --pretrained_model_name_or_path=$MODEL_NAME \
+  --instance_data_dir=$INSTANCE_DIR \
+  --output_dir=$OUTPUT_DIR \
+  --instance_prompt="a sks mushroom" \
+  --resolution=64 --train_batch_size=4 --gradient_accumulation_steps=1 \
+  --learning_rate=5e-6 --scale_lr \
+  --max_train_steps=100 --checkpointing_steps=100 \
+  --pre_compute_text_embeddings \
+  --tokenizer_max_length=77 --text_encoder_use_attention_mask
+```
+
+4. 训练结束后查看 `ls -la $OUTPUT_DIR` 与 `ls $OUTPUT_DIR/checkpoint-100/`。
+
+**需要观察的现象**：进度条上 `loss` 从 ~1 量级缓慢下降；无 `NameError`、无 OOM（64×64 像素空间训练显存需求远小于 SD 的潜空间训练）。
+
+**预期结果**：`$OUTPUT_DIR/pytorch_lora_weights.safetensors`（几 MB 量级）与 `checkpoint-100/pytorch_lora_weights.safetensors` 断点并存。100 步只是链路验证，`sks` 概念远未训成，**不要**用于第 ③ 步的质量评估。本实践需要 GPU 与 IF 权重，**待本地验证**。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：既然 `unet` 整体 `requires_grad_(False)`，为什么训练循环里梯度还能流进 UNet？
+
+**答案**：`requires_grad_(False)` 只作用于**基座权重**；随后注入的 `LoRALinearLayer` 旁路参数是新建的 `nn.Parameter`（默认 `requires_grad=True`），挂在 `to_q.lora_layer` 等属性上。前向时旁路输出与冻结主干的输出相加，反向时梯度沿旁路流到 LoRA 参数，主干权重没有 grad。这正是「冻结主干、只训旁路」的 LoRA 训练范式（u7-l5 的 BSD 也是同构做法）。
+
+**练习 2**：IF 分支里 `model_pred.shape[1] == 6` 时为什么可以把后 3 通道直接丢掉？丢弃会带来什么副作用、脚本在消费端如何补救？
+
+**答案**：IF UNet 输出 = 噪声均值 3 通道 + 学习方差 3 通道；简化训练目标只优化均值部分（MSE 对着 target noise），方差半不参与损失。副作用是训完的模型方差预测不可靠，推理时若沿用 `learned/learned_range` 方差类型采样会出问题——所以消费端把 scheduler 的 `variance_type` 强制改成 `fixed_small`（见 4.5 节 [deep_floyd_guidance.py:L72-L75](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/models/guidance/deep_floyd_guidance.py#L72-L75)），训练端收尾推理也做了同样处理（[L1331-L1340](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L1331-L1340)）。训练与消费两端必须成对出现这个约定，漏掉任何一边都会出隐蔽 bug。
+
+**练习 3**：`--scale_lr` 打开后有效学习率是多少？
+
+**答案**：`lr × gradient_accumulation_steps × train_batch_size × num_processes`（[L997-L1000](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L997-L1000)）。README 命令下 = 5e-6 × 1 × 4 × 1 = **2e-5**。
+
+### 4.5 lora_weights_path：把 LoRA 接回主训练
+
+#### 4.5.1 概念说明
+
+最后一段是消费端。deep-floyd-guidance 的 `configure` 在构建 IFPipeline 之后检查 `lora_weights_path`：非空则挂载 LoRA 并同步修 scheduler 方差类型。改动只有配置一行，u7-l2 讲过的整个 SDS 骨架（`get_noise_pred`、CFG 加权、`C()` 时间步调度、perp-neg）一行不动——**换先验的成本被 LoRA 的「可插拔」性质压到了最低**。本节还顺带看两个配套脚本：`test_dreambooth_lora.py`（最小验证）与 `dreamcraft3d_dreambooth.py`（另一条自动化路线）。
+
+#### 4.5.2 核心流程
+
+```text
+deep-floyd-guidance.configure（u7-l2 已讲骨架，此处只看增量）
+ ├─ IFPipeline.from_pretrained("DeepFloyd/IF-I-XL-v1.0", text_encoder=None, ...)
+ ├─ if lora_weights_path is not None:
+ │     pipe.load_lora_weights(lora_weights_path)                      # 挂 LoRA
+ │     pipe.scheduler = ...from_config(..., variance_type="fixed_small")  # 配套修方差
+ ├─ self.unet = pipe.unet.eval(); 全参数 requires_grad_(False)
+ └─ 之后 SDS 打分用的 ε̂ 来自「基座 + LoRA」的 UNet
+```
+
+#### 4.5.3 源码精读
+
+- [threestudio/models/guidance/deep_floyd_guidance.py:L47](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/models/guidance/deep_floyd_guidance.py#L47)：Config 数据类里的 `lora_weights_path: Optional[str] = None`——默认关闭，个性化完全是可选项。
+- [threestudio/models/guidance/deep_floyd_guidance.py:L59-L70](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/models/guidance/deep_floyd_guidance.py#L59-L70)：基座 IFPipeline 加载（`text_encoder=None`：文本嵌入由 u7-l1 的 deep-floyd-prompt-processor 预计算）。
+- [threestudio/models/guidance/deep_floyd_guidance.py:L72-L75](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/models/guidance/deep_floyd_guidance.py#L72-L75)：本讲的核心三行——`load_lora_weights` 挂载增量，scheduler 方差类型改 `fixed_small`（与 4.4 节「丢方差训练」成对，练习 2 的另一半答案）。
+- [threestudio/models/guidance/deep_floyd_guidance.py:L101-L104](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/models/guidance/deep_floyd_guidance.py#L101-L104)：挂完 LoRA 后 UNet 依旧整体冻结——个性化先验在主训练里是**只读的打分器**，这与 texture 阶段 BSD（u7-l5，扩散模型参与优化）形成对照。
+- [threestudio/scripts/test_dreambooth_lora.py:L19-L25](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/test_dreambooth_lora.py#L19-L25)：25 行最小验证——加载 IF、`load_lora_weights("if_dreambooth_mushroom")`、方差 `fixed_small`、用 `"A photo of a sks mushroom, front view"` 生成一张图。注意硬编码 `cuda:7` 与模型路径，用前需改自己的副本；它验证的是「LoRA 能挂上、`sks` 概念生效」这层，比跑完整 coarse 训练便宜得多。
+- [threestudio/scripts/dreamcraft3d_dreambooth.py:L18-L48](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/dreamcraft3d_dreambooth.py#L18-L48)：一条更自动化的姊妹路线：`--action gen_data|dreambooth|both`。gen_data 调 [generate_mv_datasets.py](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/generate_mv_datasets.py)（从**已训练粗模型的渲染图**出发、借 zero123 guidance 生成多视图数据，文件名按 `ref_{azimuth}.png` 等含角度的格式落盘）；dreambooth 用 `os.system` 拼命令启动 `train_dreambooth.py`（**全量** DreamBooth 而非 LoRA），超参（`learning_rate=1e-6`、`max_train_steps=1000`）硬编码在字符串里，配置键走 `cfg.custom_import.dreambooth.*`。它与 README 手册路线（img_to_mv + LoRA）是并存的两套方案，后者更省显存、更常被使用。
+
+#### 4.5.4 代码实践
+
+**实践目标**：验证 LoRA 产物能被 coarse 阶段正确加载（不要求训出质量）。
+
+**操作步骤**：
+
+1. 便宜路径（推荐先做）：复制 `test_dreambooth_lora.py` 到你的目录，改 `cuda:7 → cuda:0`、`"if_dreambooth_mushroom" → ".cache/if_dreambooth_mushroom"`（或你的烟测输出目录），运行后查看生成的 `mushroom_dreambooth_lora.png`。
+2. 完整路径：用 u1-l4 的命令在 coarse-nerf 上加载（步数可先用 `trainer.max_steps` 压短）：
+
+```sh
+python launch.py --config configs/dreamcraft3d-coarse-nerf.yaml --train \
+    system.prompt_processor.prompt="a brightly colored mushroom growing on a log" \
+    data.image_path="load/images/mushroom_log_rgba.png" \
+    system.guidance.lora_weights_path=".cache/if_dreambooth_mushroom" \
+    trainer.max_steps=50
+```
+
+3. 观察启动日志。
+
+**需要观察的现象**：日志先出现 `Loading Deep Floyd ...`（[deep_floyd_guidance.py:L52](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/models/guidance/deep_floyd_guidance.py#L52)），随后无 `load_lora_weights` 相关报错、无 safetensors 键不匹配警告；训练正常出 step。
+
+**预期结果**：两种路径都能干净加载。若日志出现键名不匹配，通常是 diffusers 版本差异导致 LoRA state dict 命名变化（脚本基于 `check_min_version("0.23.0.dev0")` 时代的 API，[L71](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L71)），需对齐版本。本实践依赖 GPU 与已训权重，**待本地验证**。
+
+#### 4.5.5 小练习与答案
+
+**练习 1**：为什么挂载 LoRA 后还要改 scheduler 的 `variance_type`？这个改动的依据藏在训练脚本的哪一行？
+
+**答案**：训练时 `model_pred.shape[1] == 6` 分支把方差预测半扔了（简化目标），模型方差输出不可信；推理若用 `learned/learned_range` 会引用这段坏输出，故强制 `fixed_small`。依据即 [train_dreambooth_lora.py:L1232-L1236](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth_lora.py#L1232-L1236) 的 chunk 逻辑及其注释（"if model predicts variance, throw away the prediction"）。
+
+**练习 2**：`dreamcraft3d_dreambooth.py` 路线与 README 手册路线，各以什么为多视图数据的「源头」？分别训练什么？
+
+**答案**：前者以**已训练粗模型自己的渲染图**为源头（`generate_mv_dataset` 从 render_image_path 采样，再用 zero123 guidance 扩展），训练全量 DreamBooth（`train_dreambooth.py`，改基座权重本身）；后者以**原始参考图**为源头（Zero123++ 一次性出 6 视图），只训 LoRA 增量。前者更「自举」（数据随模型迭代），后者更独立、更省资源。
+
+## 5. 综合实践
+
+把三段链路完整走一遍（即本讲规格指定的实践任务）：
+
+1. **数据生成**：为自己的图片跑（修好 `cuda:1` 的）`img_to_mv.py`，得到 6 张 `cropped_*.jpg` + 1 张原图；逐张检查视角合理性与身份一致性，不合格则换图/换 seed 重来。**门槛检查**：README L136 明确要求 "Please check if the generated mv images above are reasonable"，这一步不过关不许进入下一步。
+2. **烟测训练**：复制 `train_dreambooth_lora.py` 到自己的目录，补上 `CACHE_DIR` 定义，按 4.4.4 的命令以 `max_train_steps=100` 试跑；确认产物 `pytorch_lora_weights.safetensors` 生成、断点目录结构正确。正式使用时再按 README 的 1200 步重训。
+3. **接回主训练**：先用 4.5.4 的便宜路径验证 LoRA 可挂载；再按 README 命令给 coarse-nerf 加 `system.guidance.lora_weights_path=...` 跑一次短训练（如 `trainer.max_steps=500`），与不加 LoRA 的同 seed 短训练对比 `save/` 下渲染图的差异方向（是否更贴近参考物体、Janus 迹象是否减轻）。
+4. **复盘**：写一份 200 字的实验记录，包含三个坑（`CACHE_DIR`、`cuda:1`、文件名角度约定）各自的修复方式，以及「渲染图差异是否支持『个性化先验缓解 Janus』」的判断。全流程依赖 GPU 与预训练权重，**待本地验证**。
+
+## 6. 本讲小结
+
+- Janus 问题源于文生图先验的「视角盲」；本讲的解法是**换先验**——用参考图的 Zero123++ 多视图扩展对 DeepFloyd IF 做 DreamBooth LoRA 微调，让打分模型本身认识目标物体，而 SDS 蒸馏骨架与 `C()` 调度一行不改。
+- `img_to_mv.py`：Zero123++（本地缓存 + `timestep_spacing='trailing'`）从单图产出 2 列 × 3 行拼图，按行优先裁成 `cropped_0..5.jpg`，原图也被拷进实例目录；两处硬编码 `cuda:1` 是单卡用户的第一个坑。
+- `train_dreambooth_lora.py` 改编自 diffusers 官方示例，三处 IF 特化：无 VAE（像素即 `model_input`）、6 通道输入复制拼接、6 通道输出砍方差半；LoRA 经 `attn_processors` 遍历注入 `to_q/to_k/to_v/to_out[0]`（SD 共 32 层注意力），基座全冻结，产物仅几 MB 的 `pytorch_lora_weights.safetensors`；文件内 `CACHE_DIR` 未定义是第二个坑，`[4:-4]` 文件名角度解析与 `cropped_N.jpg` 命名不匹配是第三个坑。
+- 消费端只需 `system.guidance.lora_weights_path` 一行配置：`configure` 里 `load_lora_weights` + scheduler `variance_type="fixed_small"`（与训练端丢方差成对出现），UNet 依旧冻结——与 texture 阶段 BSD「扩散模型参与优化」形成鲜明对照。
+- `--pre_compute_text_embeddings`（README 命令在用）会让 `--use_view_dependent_prompt` 静默失效：预计算嵌入走固定分支，视角相关文本永远不被构造。
+- 仓库里还并存 `dreamcraft3d_dreambooth.py` 自动化路线（渲染图→多视图→全量 DreamBooth）与 `test_dreambooth_lora.py` 最小验证脚本，前者数据更自举、后者是接入主训练前的廉价体检。
+
+## 7. 下一步学习建议
+
+- **u8-l3 网格导出与显存优化实战**：若你已用（或没用）个性化先验跑完四阶段，下一步是把最终 ckpt 导出为 obj+mtl 并掌握 `data.height/width` 降分辨率等显存技巧，与本讲的烟测方法论互补。
+- **回读 u7-l4/u7-l5（BSD 引导）**：把本讲的「离线 DreamBooth + 冻结消费」与 BSD 的「在线 DreamBooth 式交替优化」并排重读，体会同一 LoRA 技术在两种训练制度下的角色差异。
+- **源码延伸**：对照 [threestudio/scripts/generate_mv_datasets.py](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/generate_mv_datasets.py) 与 [threestudio/scripts/train_dreambooth.py](https://github.com/deepseek-ai/DreamCraft3D/blob/5829ef116d36c871ce2b9e54a6153dd3856a1561/threestudio/scripts/train_dreambooth.py)，理清全量 DreamBooth 与 LoRA 版在参数量、显存、产物形态上的全部差异。
+- **论文对照**：阅读 DreamCraft3D 论文中关于粗阶段先验选择的消融实验，验证本讲「多视图数据质量是个性化先验上限」的论断。
