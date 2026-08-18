@@ -42810,8 +42810,8 @@
     },
     "deepseek-ai/profile-data": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-08-18T13:37:13Z",
+      "last_error": null,
+      "last_run_at": "2026-08-18T18:03:04Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -42891,29 +42891,34 @@
           "error": null
         },
         "u3-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
+          "cost": 1.94123,
+          "error": null
         },
         "u3-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.6918330000000001,
+          "error": null
         },
         "u3-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.994671,
+          "error": null
         }
       },
       "manifest_head": "449602428a1b023acb8a505d4f34fef536535db6",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/deepseek-ai/profile-data/profile-data-tutorial",
-      "last_head": "449602428a1b023acb8a505d4f34fef536535db6"
+      "last_head": "449602428a1b023acb8a505d4f34fef536535db6",
+      "abandoned": []
     },
     "scipy/scipy@scipy/cluster": {
       "prompt_hash": "b21aef51792b02df",
@@ -53365,200 +53370,499 @@
       "abandoned": []
     },
     "zed-industries/zed@crates/zed": {
-      "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-08-18T13:37:13Z",
+      "last_error": null,
+      "last_run_at": "2026-08-18T18:03:04Z",
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
         "u1-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.181686,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.154576,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.3909230000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.189913,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.9550639999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 2.40678,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l3": {
-          "status": "failed",
-          "action": "new",
-          "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u3-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u3-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u3-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u3-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u3-l5": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u4-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u4-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u4-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u4-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u4-l5": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u5-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u5-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u5-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u5-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u5-l5": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l5": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l6": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l7": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         }
       },
-      "manifest_head": "a7d74150ac7a663fdaa01ec5177e303baaf6c331",
-      "prev_head": null,
-      "phase": "workers",
-      "mode": "full",
+      "manifest_head": "00c0e96e769062e373203c62830f510fa121db76",
+      "prev_head": "a7d74150ac7a663fdaa01ec5177e303baaf6c331",
+      "phase": "done",
+      "mode": "incremental",
       "tutorial_path": "tutorials/zed-industries/zed/zed-crates-zed-tutorial",
-      "last_head": "a7d74150ac7a663fdaa01ec5177e303baaf6c331"
+      "last_head": "00c0e96e769062e373203c62830f510fa121db76",
+      "abandoned": []
     },
     "zed-industries/zed@crates/editor": {
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
         "u1-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l5": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l5": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l5": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l4": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 2.6214379999999995,
+          "error": null
+        },
+        "u6-l5": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 2.170156,
+          "error": null
+        },
+        "u6-l6": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u7-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u7-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u8-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u8-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u8-l5": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u8-l6": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        }
+      },
+      "manifest_head": "00c0e96e769062e373203c62830f510fa121db76",
+      "prev_head": "a7d74150ac7a663fdaa01ec5177e303baaf6c331",
+      "phase": "done",
+      "mode": "incremental",
+      "tutorial_path": "tutorials/zed-industries/zed/zed-crates-editor-tutorial",
+      "last_head": "00c0e96e769062e373203c62830f510fa121db76",
+      "last_run_at": "2026-08-18T18:03:04Z",
+      "last_error": null,
+      "abandoned": []
+    },
+    "zed-industries/zed@crates/rope": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.1798910000000002,
+          "cost": 0.869343,
           "error": null
         },
         "u1-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.346386,
+          "cost": 1.703965,
           "error": null
         },
         "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.6614580000000003,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.878188,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3745880000000001,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.6963950000000003,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
+        },
+        "u2-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l7": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l8": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "00c0e96e769062e373203c62830f510fa121db76",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/zed-industries/zed/zed-crates-rope-tutorial",
+      "last_head": "00c0e96e769062e373203c62830f510fa121db76",
+      "last_run_at": "2026-08-18T18:03:04Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
+    "zed-industries/zed@crates/multi_buffer": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.111943,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.757276,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.6792949999999998,
+          "error": null
+        },
+        "u1-l4": {
           "status": "failed",
           "action": "new",
           "retries": 0,
@@ -53581,6 +53885,41 @@
           "retries": 0
         },
         "u2-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l7": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l8": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l9": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l10": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l11": {
           "status": "pending",
           "action": "new",
           "retries": 0
@@ -53610,6 +53949,102 @@
           "action": "new",
           "retries": 0
         },
+        "u3-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l7": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l8": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l9": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l10": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "00c0e96e769062e373203c62830f510fa121db76",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/zed-industries/zed/zed-crates-multi_buffer-tutorial",
+      "last_head": "00c0e96e769062e373203c62830f510fa121db76",
+      "last_run_at": "2026-08-18T18:03:04Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
+    "zed-industries/zed@crates/text": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.227874,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.372552,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.514326,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
+        },
+        "u2-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
         "u4-l1": {
           "status": "pending",
           "action": "new",
@@ -53626,11 +54061,6 @@
           "retries": 0
         },
         "u4-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l5": {
           "status": "pending",
           "action": "new",
           "retries": 0
@@ -53655,11 +54085,6 @@
           "action": "new",
           "retries": 0
         },
-        "u5-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
         "u6-l1": {
           "status": "pending",
           "action": "new",
@@ -53671,21 +54096,6 @@
           "retries": 0
         },
         "u6-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l6": {
           "status": "pending",
           "action": "new",
           "retries": 0
@@ -53724,30 +54134,17 @@
           "status": "pending",
           "action": "new",
           "retries": 0
-        },
-        "u8-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l6": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
         }
       },
-      "manifest_head": "a7d74150ac7a663fdaa01ec5177e303baaf6c331",
+      "manifest_head": "00c0e96e769062e373203c62830f510fa121db76",
       "prev_head": null,
       "phase": "workers",
       "mode": "full",
-      "tutorial_path": "tutorials/zed-industries/zed/zed-crates-editor-tutorial",
-      "last_head": "a7d74150ac7a663fdaa01ec5177e303baaf6c331",
-      "last_run_at": "2026-08-18T13:37:13Z",
+      "tutorial_path": "tutorials/zed-industries/zed/zed-crates-text-tutorial",
+      "last_head": "00c0e96e769062e373203c62830f510fa121db76",
+      "last_run_at": "2026-08-18T18:03:04Z",
       "last_error": "quota exhausted; will resume next window"
     },
-    "zed-industries/zed@crates/rope": {},
-    "zed-industries/zed@crates/multi_buffer": {},
-    "zed-industries/zed@crates/text": {},
     "zed-industries/zed@crates/buffer_diff": {},
     "zed-industries/zed@crates/streaming_diff": {},
     "zed-industries/zed@crates/sum_tree": {},
@@ -53779,7 +54176,7 @@
     "ai-dynamo/dynamo": {},
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-18T13:37:13Z"
+      "last_run_at": "2026-08-18T18:03:04Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
