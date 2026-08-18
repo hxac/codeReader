@@ -1,482 +1,347 @@
-# 测试时算力扩展：参数如何控制验证规模
+# 测试时算力扩展:参数如何控制验证规模
 
 ## 1. 本讲目标
 
-学完本讲，你应该能够：
+学完本讲,你应该能够:
 
-1. 推导 `n_parallel_proof_gen`、`n_agg_trials`、`n_verification_per_proof`、`max_rounds` 这四个超参数与整条流水线 API 请求总量之间的数量关系，能手算任意一轮的请求数。
-2. 对比 `run.sh` 的竞赛配置与 `main.py` 的 argparse 默认值，说清楚「验证强度 ×16」最终落在总开销的哪个部分。
-3. 解释 `_prepare_proof_agg_tasks` 中 `meanscore > 0.99999` 的早停条件为什么等价于「所有验证评分都是 1 分」，以及它与 README 中「扩展验证算力以维护生成-验证差距」这句话的对应关系。
-4. 写出一个 `estimate_cost.py` 成本估算器，为本地小规模实验选出一套总请求量小于 100 的参数组合。
+1. 推导 `n_parallel_proof_gen`、`n_agg_trials`、`n_verification_per_proof`、`max_rounds` 与整条流水线 API 请求总量之间的数量关系,并能对任意参数组合算出请求量上界。
+2. 对比 `run.sh` 的竞赛配置与 `main.py` argparse 默认值在验证强度上的差异,理解「竞赛成绩是在大规模测试时算力下取得的」这句话在代码里的具体落点。
+3. 解释 `_prepare_proof_agg_tasks` 中「出现满分证明即停止该题」的早停条件,以及它与「生成-验证差距」维护之间的张力:验证强度越高,早停越可靠。
 
-本讲是手册的倒数第二讲。前面五个单元已经把流水线的每个零件拆开讲过，这一讲换一个视角：**不再问「这段代码怎么工作」，而问「这套系统一共要花多少钱」**。
+本讲是高级单元的第一篇。前面五个单元已经把流水线的每个部件拆开讲过,本讲退后一步,把所有超参数放到「测试时算力扩展」(test-time compute scaling)这把尺子下统一度量:这套代码的每一个可调参数,本质上都在回答同一个问题——你愿意为一道题花多少次生成、多少次验证。
 
 ## 2. 前置知识
 
-### 2.1 测试时算力扩展（test-time compute scaling）
+### 2.1 测试时算力扩展
 
-「测试时算力扩展」指模型训练完成后，在推理（测试）阶段投入更多计算来换取更好的输出质量。最常见的形式是「多次采样 + 择优」：让模型对同一道题生成 N 个答案，再用某种机制挑出最好的一个。本项目的机制是**生成—验证—精炼**多轮闭环：采样多个证明 → 验证器给每个证明打分 → 低分证明进入下一轮精炼。投入的算力就消耗在这三个阶段的 API 调用上。
+训练时算力花在更新模型权重上;测试时算力花在推理阶段:让模型多采样几个答案、多检查几遍、把好答案挑出来。对数学推理而言,经典做法是「best-of-n」——采样 n 个解答再挑一个。本项目的闭环(生成 → 验证 → 元验证 → 精炼,循环 R 轮)是 best-of-n 的强化版:不仅采样多个证明,还用验证器逐个打分,把高分证明连同批语喂回给生成器精炼。
 
-### 2.2 请求计数的基本事实（承接 u2-l2）
+### 2.2 「请求」的精确定义
 
-u2-l2 已经建立了计数公式：**generate.py 的输出条数＝请求数＝输入行数 × n**。原因是引擎在数据层把每行输入复制 `n` 份，而不是使用 API 原生的采样参数。本讲的全部推导都建立在这个公式上。
+本讲所有计数中的「一次请求」指对 `client.chat.completions.create` 的一次调用,即 [inference/generate.py:L23-L28](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/generate.py#L23-L28) 里的一个异步任务。第 2 单元已建立关键事实:多次采样不是用 API 原生 `n` 参数,而是在数据层把每行输入复制 n 份,所以 **请求数 = 输出条数 = 输入行数 × n**。
 
-### 2.3 生成-验证差距（承接 u1-l1）
+### 2.3 生成-验证差距(回顾)
 
-生成-验证差距（generation-verification gap）指验证能力领先于生成能力：模型能看出的错误比它能主动避免的错误多。这个差距是自验证可靠性的前提——一旦生成器追上验证器，「自我检查」就形同虚设。README 的核心主张之一是：随着生成器变强，必须同步扩展验证算力来维持这个差距。本讲会看到这句话在本仓库推理代码中的具体落点。
+第 1 讲建立的术语:生成器越强,验证器越难发现它的错误,这个差距叫生成-验证差距。README 明确主张:为维持这个差距,要扩展**验证**算力去自动标注「难验证的证明」:
 
-### 2.4 本讲记号
+> To maintain the generation-verification gap as the generator becomes stronger, we propose to scale verification compute to automatically label new hard-to-verify proofs, creating training data to further improve the verifier.([README.md:L43-L43](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/README.md#L43-L43))
 
-| 记号 | 含义 | 对应参数 |
-|---|---|---|
-| \( N \) | 题目总数 | 输入文件题数之和 |
-| \( G \) | 每题并行生成采样数 | `--n_parallel_proof_gen` |
-| \( T \) | 每题每轮精炼试验（组合）数 | `--n_agg_trials` |
-| \( V \) | 每个证明的验证次数 | `--n_verification_per_proof` |
-| \( R_{\max} \) | 生成轮数上限 | `--max_rounds` |
-| \( U_R \) | 第 \( R \) 轮仍未「退役」（未早停）的题数 | 派生量 |
-| \( P_R \) | 第 \( R \) 轮实际进入验证的证明条数 | 派生量 |
+本讲会看到,这个主张在推理代码里同样成立:整套配置中真正「贵」的不是生成,而是验证。
+
+### 2.4 早停
+
+早停(early stopping)指某道题一旦满足特定条件,就不再为它投入后续轮次的算力。本流水线的条件是「证明池中出现均值分超过 0.99999 的证明」,细节见 4.3 节。
 
 ## 3. 本讲源码地图
 
-| 文件 | 本讲关注点 |
-|---|---|
-| [inference/main.py](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py) | argparse 参数默认值（L24-L53）；`__main__` 轮次循环中三处命令拼装（L448-L523）；`_prepare_proof_agg_tasks` 的早停判断（L219-L227） |
-| [inference/run.sh](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/run.sh) | 竞赛配置的全部参数取值（L9-L20） |
-| [inference/generate.py](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/generate.py) | 「每行复制 n 份」的计数机制（L139-L142），只引用这一小段 |
-| [README.md](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/README.md) | 「扩展验证算力维护生成-验证差距」的原始表述与 IMO/Putnam 成绩（L40-L44） |
+| 文件 | 本讲关注的片段 | 作用 |
+| --- | --- | --- |
+| `inference/main.py` | argparse 参数段(L19-L55) | 全部超参数的默认值定义 |
+| `inference/main.py` | `__main__` 轮次循环(L397-L523) | 参数如何流经生成/验证/元验证三阶段,决定每轮请求量 |
+| `inference/main.py` | `_prepare_proof_agg_tasks` 早停判断(L222-L223) | 满分早停条件,控制算力何时停止投入 |
+| `inference/run.sh` | 参数配置(L9-L20) | 官方竞赛配置,与默认值对照的基准 |
+| `inference/generate.py` | 数据层 n 倍复制(L139-L150) | 「请求数 = 行数 × n」的实现依据 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 请求计数代数：一轮到底花多少次调用
+### 4.1 请求量核算:从四个参数到 API 调用总数
 
 #### 4.1.1 概念说明
 
-`main.py` 自己不发任何 HTTP 请求，它只拼出三条 shell 命令交给 `generate.py` 执行（u1-l3、u4-l1）。因此「每轮花多少次 API 调用」完全由三条命令的 `--n` 参数和各自 `input.jsonl` 的行数决定。四个超参数各管一段：
+读者至此已经知道每个阶段做什么,但还没有把「参数 → 请求量」的账算清楚。这个账之所以重要,是因为:
 
-- \( G \)（`n_parallel_proof_gen`）：第 1 轮每题采多少个证明，也间接决定后续每轮的总采样预算；
-- \( T \)（`n_agg_trials`）：第 2 轮起每题构造多少个「精炼试验」（证明组合），u5-l2 已讲过它和采样数的守恒关系；
-- \( V \)（`n_verification_per_proof`）：每个证明被验证多少次，`meanscore` 就是这 \( V \) 次评分的均值；
-- \( R_{\max} \)（`max_rounds`）：整个闭环最多转多少轮。
+- 这套流水线没有任何内置的费用上限,`os.system` 发出的命令一经启动就会按参数全量执行;
+- 跑一次竞赛配置的请求量以百万计(见 4.1.2),参数随手一改就是十倍的开销差;
+- 反过来,想在本机做小规模实验,也必须先会算这个账,才知道该把参数压到多小。
+
+参与计数的参数有四个:`n_parallel_proof_gen`(每题每轮的生成采样预算,记 \( n_{\parallel} \))、`n_agg_trials`(每题每轮的精炼组合数上限,记 \( t_{\max} \))、`n_verification_per_proof`(每条证明的验证次数,记 \( n_{\mathrm{ver}} \))、`max_rounds`(轮数上限,记 \( R_{\max} \))。另有题目总数 \( P \)。
 
 #### 4.1.2 核心流程
 
-一轮（第 \( R \) 轮）的请求数按三个阶段累加：
+先看每轮每题的生成请求数 \( g_R \)。第 1 轮没有历史证明可组合,输入就是题目本身,采样预算全额下发;第 2 轮起输入变成「组合后的精炼请求」,每条请求复制取整后的份数:
 
-```text
-生成请求   Gen_R  = U_R × s_R
-             其中 s_1 = G                      （第 1 轮：每题 1 行输入 × n=G）
-             s_R  = c_R × (G // T)   (R ≥ 2)   （每题 c_R 行输入 × n=G//T）
-             c_R = min(T, 该题可用的证明组合数)
+\[ g_R = \begin{cases} n_{\parallel} & R = 1 \\ t_R \cdot \left\lfloor n_{\parallel} / t_{\max} \right\rfloor \le n_{\parallel} & R \ge 2 \end{cases} \]
 
-验证请求   Ver_R  = P_R × V
-             P_R ≤ Gen_R（截断、格式违约的样本被丢弃，重复文本被去重）
+其中 \( t_R = \min(t_{\max}, \binom{m}{k}) \) 是该题该轮实际生成的组合数(u5-l2 已推导),\( m \) 为可用证明数、\( k = n_{\text{proofs\_to\_refine}} \)。当整除且组合凑满时 \( g_R = n_{\parallel} \),这正是 u5-l2 提过的「算力守恒式」\( t_{\max} \times \lfloor n_{\parallel}/t_{\max} \rfloor \approx n_{\parallel} \)。
 
-元验证请求 Meta_R ≤ f_low × P_R × V × 1
-             只统计评分 ≤ 0.75 的批语，f_low 为低分比例；
-             run.sh 传了 --skip_meta_verification，此项为 0
-```
+再看验证。验证阶段的输入是本轮生成输出中通过完整性闸门的记录,每条复制 \( n_{\mathrm{ver}} \) 份,所以每轮每题的验证请求数上界为:
 
-两个关键观察：
+\[ v = g_R \cdot n_{\mathrm{ver}} \]
 
-**第一，算力守恒。** 当 \( G \) 能被 \( T \) 整除且 \( c_R = T \) 时，\( s_R = T \times (G/T) = G \)，即第 2 轮起每题每轮的生成请求数和第 1 轮完全一样。竞赛配置 \( 32 \times 4 = 128 \) 正是 u5-l2 推导过的守恒式。反例：若 \( G//T = 0 \)（如 \( G=4, T=32 \)），第 2 轮起生成阶段零请求，流水线空转到 `max_rounds`。
+忽略截断丢弃(闸门只会让实际值更小)。若元验证未跳过,还有一项低分评价的复核,最坏再叠加一个同阶量级(见 4.2.3)。
 
-**第二，验证主导总开销。** 最坏情形下（无早停、全部样本存活、跳过元验证、\( G \bmod T = 0 \)）总量有一个极简的闭式：
+全程总请求量上界(不考虑早停,早停只会让实际值更小):
 
-\[
-\mathrm{Total} = R_{\max} \cdot N \cdot G \cdot (1 + V)
-\]
+\[ C_{\text{total}} \le P \cdot R_{\max} \cdot n_{\parallel} \cdot (1 + n_{\mathrm{ver}}) \]
 
-验证请求占比为 \( \frac{V}{1+V} \)。默认配置 \( V=4 \) 时占 80%；竞赛配置 \( V=64 \) 时占 **98.5%**。也就是说，这套流水线的钱几乎全部花在「反复检查证明」上，而不是「写证明」上——这正是标题里「扩展验证规模」的字面含义。
+代入 run.sh 竞赛配置(\( P = 18 \)(IMO2025、CMO2024、CMO2025 各 6 题)、\( n_{\parallel} = 128 \)、\( n_{\mathrm{ver}} = 64 \)、\( R_{\max} = 16 \)):
 
-若考虑早停，设每轮题目存活率为 \( \rho \)（\( U_{R+1} \approx \rho \, U_R \)），生成请求总量变成几何级数：
+- 每轮每题:生成 \( 128 \) + 验证 \( 128 \times 64 = 8192 \),合计 \( 8320 \);
+- 全程上界:\( 18 \times 16 \times 8320 = 2{,}396{,}160 \) 次,约 **240 万次请求**;
+- 其中验证占 \( 8192 / 8320 \approx 98.5\% \)。
 
-\[
-\sum_{R=1}^{R_{\max}} \mathrm{Gen}_R = N \cdot G \cdot \frac{1-\rho^{R_{\max}}}{1-\rho}
-\]
-
-例如 \( \rho = 0.7 \)、\( R_{\max}=16 \) 时级数为 \( (1-0.7^{16})/0.3 \approx 3.32 \)，总开销约为最坏值的五分之一。
+这就是「扩展验证算力」的字面含义:在这套实现里,测试时算力几乎全部花在验证上,生成只占零头。
 
 #### 4.1.3 源码精读
 
-**（1）采样数在第 1 轮和后续轮之间的切换** —— [inference/main.py:448](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L448)
+**参数定义。** 四个核心参数的默认值在 argparse 段一次看全:
 
-```python
-n_sample = args.n_parallel_proof_gen if R == 1 else args.n_parallel_proof_gen // args.n_agg_trials
-```
+- [inference/main.py:L31-L34](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L31-L34) 依次定义 `n_best_proofs_to_sample=32`、`n_proofs_to_refine=1`、`n_agg_trials=32`、`n_parallel_proof_gen=128`——后者就是每题每轮的生成采样预算 \( n_{\parallel} \)。
+- [inference/main.py:L41-L41](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L41-L41) 定义 `n_verification_per_proof=4`,即每条证明被验证的次数 \( n_{\mathrm{ver}} \)。
+- [inference/main.py:L52-L53](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L52-L53) 定义 `start_round=1`、`max_rounds=20`。
 
-这一行是 \( s_R \) 公式的直接对应物：第 1 轮每行输入复制 \( G \) 份；第 2 轮起每题的输入行数变成约 \( T \) 个组合，每行只复制 \( \lfloor G/T \rfloor \) 份，乘积守恒回 \( G \)。注意这里是整除，\( G < T \) 时结果为 0。
+**采样预算的轮次切换。** 整个计数模型最关键的一行:
 
-**（2）生成命令把 n_sample 填进 `--n`** —— [inference/main.py:449-L462](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L449-L462)
+- [inference/main.py:L448-L448](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L448-L448) `n_sample = args.n_parallel_proof_gen if R == 1 else args.n_parallel_proof_gen // args.n_agg_trials`——R1 全额、R≥2 按 `n_agg_trials` 整除。注意整除用的是**参数** `n_agg_trials` 而非该题实际组合数 \( t_R \),所以「实际组合数不足」只会让请求更少,不会破坏上界。
 
-```python
-proof_gen_cmd = f"""
-python {args.infer_script}.py \
---input_data_path {proof_gen_input_path} \
-...
---n {n_sample}
-""".strip()
-os.system(proof_gen_cmd)
-```
+**预算下发给引擎。** 生成命令把 `n_sample` 作为 `--n` 传给 generate.py:
 
-拼好的命令交给 shell 执行，`--n` 就是上面的 \( s_R \)。`batch_size` 只影响分批方式（u2-l2：批次数 \( =\lceil nL/b \rceil \)），不影响请求总数。
+- [inference/main.py:L449-L462](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L449-L462) 拼出 `python {args.infer_script}.py ... --n {n_sample}` 并 `os.system` 执行(发布代码中 `infer_script` 未注册的毛刺见 u1-l3,不赘述)。
 
-**（3）验证命令的 `--n` 是 `n_verification_per_proof`** —— [inference/main.py:480-L492](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L480-L492)
+**验证的乘法。** 验证命令把每条证明复制 \( n_{\mathrm{ver}} \) 份:
 
-```python
-proof_verification_cmd = f"""
-python generate.py \
---input_data_path {proof_verification_input_path} \
-...
---n {args.n_verification_per_proof}
-""".strip()
-```
+- [inference/main.py:L480-L492](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L480-L492) 生成验证命令,第 489 行 `--n {args.n_verification_per_proof}`——这是总账里那个 64 倍乘数的直接来源。
 
-验证输入的每一行（一条通过筛选的证明）都被复制 \( V \) 份——同一个证明发给验证器 \( V \) 次，取均值算 `meanscore`。
+**数据层复制。** 「请求数 = 行数 × n」的实现:
 
-**（4）元验证命令受开关保护** —— [inference/main.py:502-L523](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L502-L523)
+- [inference/generate.py:L139-L150](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/generate.py#L139-L150) 读入每一行后 `for i in range(n): submit_batch.append(item)`,每行精确复制 n 份,一个批次凑满 `batch_size` 才入队。
+- [inference/generate.py:L104-L114](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/generate.py#L104-L114) 断点档案 `.meta` 记录 `n` 与 `batch_size`,续跑时若改动会被 assert 拦截——注意改参数做实验前必须清掉旧的输出与 `.meta`。
 
-`if not args.skip_meta_verification:` 包住了元验证的整段准备与执行；`--n` 取 `n_meta_verification_per_rating`（默认 1）。run.sh 开了跳过开关，所以竞赛跑法里这一段完全不产生请求（呼应 u4-l3、u5-l3 的「元验证休眠」结论）。
+**并发度不影响总账。** `--num_processes`(生成默认 40、验证默认 320)与 `--batch_size`(默认 160)只改变请求的并发调度与墙钟时间,**不改变请求总数**。另注意收尾轮:循环头部 `range(args.start_round, args.max_rounds + 2)` 多出的那一轮([inference/main.py:L398-L398](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L398-L398))只调用 `prepare_proof_refinement` 刷新证明池,随后在 [inference/main.py:L445-L446](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L445-L446) `break`,不发任何请求,故不计入 \( C_{\text{total}} \)。
 
-**（5）计数的物理基础：每行复制 n 份** —— [inference/generate.py:139-L142](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/generate.py#L139-L142)
+#### 4.1.4 代码实践:手算两套配置的请求账
 
-```python
-for line in tqdm(fr, desc="Waiting Input"):
-    item = json.loads(line)
-    for i in range(n):
-        submit_batch.append(item)
-```
-
-这四行就是「请求数 = 行数 × n」的全部实现：多次采样靠数据层复制，而非 API 参数。
-
-**（6）收尾轮不花钱** —— [inference/main.py:445-L446](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L445-L446)
-
-循环范围是 `range(start_round, max_rounds + 2)`，多出来的那一轮只调用 `prepare_proof_refinement` 刷新证明池然后 `break`，不拼任何生成命令。所以实际产生请求的轮数就是 \( R_{\max} \)，闭式里的 \( R_{\max} \) 不用加一。
-
-#### 4.1.4 代码实践：手算 run.sh 的第一轮
-
-1. **实践目标**：不写代码，纯手推竞赛配置第 1 轮的两个请求数，验证自己真的掌握了计数公式。
-2. **操作步骤**：
-   - 从 [run.sh:3](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/run.sh#L3) 确认输入为 IMO2025 + CMO2024 + CMO2025 三份文件；用 `grep -c '"problem_idx"' inputs/IMO2025.json` 等命令数出每份题数（应为 6 + 6 + 6 = 18）。
-   - 从 [run.sh:16-L17](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/run.sh#L16-L17) 读出 \( G=128 \)、\( V=64 \)。
-   - 套公式：第 1 轮生成请求 \( = N \times G \)；验证请求上界 \( = N \times G \times V \)。
-3. **需要观察的现象**：验证请求数是生成请求数的整整 64 倍。
-4. **预期结果**（手工推算）：生成 \( 18 \times 128 = 2304 \) 次；验证上界 \( 2304 \times 64 = 147\,456 \) 次。仅第 1 轮就超过 14 万次验证请求。
-5. 本实践为纯推算，无需运行流水线即可完成。
+1. **实践目标**:不写代码,先用 4.1.2 的公式手算两套配置,建立数量级直觉,为综合实践的脚本打底。
+2. **操作步骤**:
+   - 对竞赛配置代入 \( P=18, n_{\parallel}=128, n_{\mathrm{ver}}=64, R_{\max}=16 \);
+   - 对一组小调试配置代入 \( P=2, n_{\parallel}=8, n_{\mathrm{ver}}=2, R_{\max}=2 \);
+   - 分别算出:每轮每题请求量、全程总请求上界、验证占比。
+3. **需要观察的现象**:竞赛配置的总账是否落在百万量级;调试配置是否压进了三位数。
+4. **预期结果**(手算):
+   - 竞赛配置:每轮每题 \( 128 \times (1+64) = 8320 \);全程 \( 18 \times 16 \times 8320 = 2{,}396{,}160 \);验证占 98.5%。
+   - 调试配置:每轮每题 \( 8 \times (1+2) = 24 \);全程 \( 2 \times 2 \times 24 = 96 \) 请求(R2 的组合上界 \( \min(8, m) \times (8 \div 8) \le 8 \),不破上界),满足「小于 100 次请求」。
+5. 本实践为纸笔推导,数值已手算给出;综合实践的脚本应复现这些数字。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：若把 `--n_parallel_proof_gen` 设为 4、`--n_agg_trials` 设为 32（其余默认），第 2 轮会发生什么？
+**练习 1**:取 `n_parallel_proof_gen=100`、`n_agg_trials=32`。R≥2 的 `n_sample` 是多少?每题每轮生成请求最多多少?整除损耗有多大?
 
-**答案**：`n_sample = 4 // 32 = 0`（[main.py:448](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L448)），第 2 轮起生成阶段每次复制 0 份、不发出任何请求，但轮次循环仍会继续准备输入、拼命令、跑验证（输入为空），流水线空转到 `max_rounds`。配置时必须保证 \( G \ge T \)（最好整除）。
+答案:`100 // 32 = 3`;每题每轮生成请求 \( \le \min(32, \binom{m}{k}) \times 3 \le 96 \)。理想守恒值是 100,实际 96,损耗 4%——非整除配置会永久损失这部分采样预算,选参数时应让 \( n_{\parallel} \) 是 \( t_{\max} \) 的整数倍(run.sh 的 128 = 4 × 32 即如此)。
 
-**练习 2**：第 2 轮某题生成了 30 个组合（\( c_R = 30 < T = 32 \)），该题这一轮的生成请求数是多少（\( G=128 \)）？
+**练习 2**:为什么 R=1 不做整除切换,而 R≥2 要除?
 
-**答案**：\( 30 \times \lfloor 128/32 \rfloor = 30 \times 4 = 120 \)。守恒式 \( T \times (G/T) = G \) 只在组合数凑满 \( T \) 时成立；候选证明太少时组合数不足，实际请求数按比例缩小。
+答案:R1 的输入是题目本身,不存在组合,`n_parallel_proof_gen` 条采样就是后续组合的原料,必须全额下发;R≥2 的输入已经是「证明组合」,每条组合复制 \( \lfloor n_{\parallel}/t_{\max} \rfloor \) 份,组合数 × 每组合份数 ≈ 总预算,把同一笔预算按「组合广度 × 组合内深度」重新分配。
 
-**练习 3**：为什么说 `batch_size` 不影响本讲的任何数字？
+**练习 3**:收尾轮(R = `max_rounds + 1`)会发出多少次 API 请求?
 
-**答案**：`batch_size` 只决定 generate.py 主进程把复制后的请求切成多大的批次投递给队列（u2-l2），请求总量在复制那一步（generate.py L141-142）就已经定死为「行数 × n」，与分批粒度无关。
+答案:0 次。该轮只执行 `prepare_proof_refinement`(把最后一轮验证结果写入证明池)后立即 `break`([inference/main.py:L445-L446](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L445-L446)),不进入任何 `os.system` 生成调用。
 
-### 4.2 竞赛配置 vs 默认配置：算力花在哪里
+### 4.2 run.sh 竞赛配置 vs argparse 默认值:验证强度的对撞
 
 #### 4.2.1 概念说明
 
-同一份 `main.py`，命令行参数不同，成本可以差出一个数量级以上。u1-l3 已经指出过「run.sh 的验证强度是默认值的 16 倍（64 对 4）」这个事实；本讲把它放进 4.1 的闭式里，看它对总账的放大效果，并补齐其余参数的差异。这也回答一个初学者常见疑问：**为什么 README 敢说这些成绩是 "with scaled test-time compute"——scale 到底 scale 在哪？** 答案：主要 scale 在 \( V \) 上。
+同一份 `main.py`,默认值与官方竞赛配置跑出的请求量差一个数量级。逐参数对照这份差异,能看出官方在「算力换质量」上的取舍:钱花在验证上,而不是生成上;省在轮数和元验证上,而不是验证次数上。
 
 #### 4.2.2 核心流程
 
-逐项对照两套配置（默认值取自 argparse，竞赛值取自 run.sh）：
+逐参数对照(argparse 默认值 → run.sh 竞赛配置):
 
-| 参数 | 默认值（main.py） | 竞赛值（run.sh） | 倍数 | 作用 |
-|---|---|---|---|---|
-| `n_parallel_proof_gen`（\( G \)） | 128 | 128 | ×1 | 每题每轮生成预算 |
-| `n_agg_trials`（\( T \)） | 32 | 32 | ×1 | 每题精炼组合数 |
-| `n_verification_per_proof`（\( V \)） | 4 | **64** | **×16** | 每证明验证次数 |
-| `max_rounds`（\( R_{\max} \)） | 20 | 16 | ×0.8 | 轮数上限 |
-| `skip_meta_verification` | 关（元验证开启） | **开** | — | 竞赛跑法跳过元验证 |
-| `n_best_proofs_to_sample` | 32 | 32 | ×1 | 候选池截取数 |
-| `n_proofs_to_refine` | 1 | 1 | ×1 | 每个组合内证明数 |
+| 参数 | 默认值 | run.sh | 对请求账的影响 |
+| --- | --- | --- | --- |
+| `n_parallel_proof_gen` | 128 | 128 | 不变,生成预算恒定 |
+| `n_agg_trials` | 32 | 32 | 不变,R≥2 每组合 4 次采样 |
+| `n_proofs_to_refine` | 4 | **1** | 精炼请求内含 1 份证明(而非 4 份),提示变短 |
+| `n_best_proofs_to_sample` | 32 | 32 | 不变 |
+| `n_verification_per_proof` | 4 | **64** | **验证强度 ×16,总账的主导项** |
+| `skip_meta_verification` | 关 | **开** | 元验证请求归零 |
+| `max_rounds` | 20 | **16** | 轮数 −20% |
 
-代入闭式 \( R_{\max} \cdot N \cdot G \cdot (1 + V) \)，取 \( N = 18 \)：
+对总账的影响(均取 \( P = 18 \) 题跑满、无早停的上界):
 
-| 配置 | 生成请求 | 验证请求（上界） | 合计 |
-|---|---|---|---|
-| 竞赛配置（V=64, R=16） | \( 16 \times 2304 = 36\,864 \) | \( 36\,864 \times 64 = 2\,359\,296 \) | **≈ 239.6 万** |
-| 默认配置（V=4, R=20，忽略元验证） | \( 20 \times 2304 = 46\,080 \) | \( 46\,080 \times 4 = 184\,320 \) | ≈ 23.0 万 |
-
-两个结论：
-
-1. \( V \) 从 4 提到 64，总请求量放大 \( \frac{65}{5} \times \frac{16}{20} = 10.4 \) 倍——**验证次数是整条流水线最陡的成本旋钮**。
-2. 竞赛跑法的最坏情形约 240 万次请求；就算早停让每轮题目数按 \( \rho=0.7 \) 衰减，总量仍在几十万量级（几何级数因子约 3.32，约 50 万次）。这是 18 道题的成本。README 中 IMO 2025 金牌、Putnam 2024 的 118/120 正是花这个量级的验证算力换来的（[README.md:44](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/README.md#L44)）。
+- 默认值:每轮每题 \( 128 \times (1+4) = 640 \),全程 \( 18 \times 20 \times 640 = 230{,}400 \) 请求;
+- 竞赛配置:每轮每题 \( 128 \times (1+64) = 8320 \),全程 \( 18 \times 16 \times 8320 = 2{,}396{,}160 \) 请求;
+- 比值:\( 8320/640 = 13 \) 倍于每轮每题;\( 2{,}396{,}160 / 230{,}400 \approx 10.4 \) 倍于全程(轮数缩短抵消了一部分)。
 
 #### 4.2.3 源码精读
 
-**（1）四个核心参数的默认值** —— [inference/main.py:31-L34](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L31-L34)
+- [inference/run.sh:L9-L20](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/run.sh#L9-L20) 竞赛配置全貌:`--n_best_proofs_to_sample 32 --n_proofs_to_refine 1 --n_agg_trials 32 --n_parallel_proof_gen 128 --n_verification_per_proof 64 --skip_meta_verification --start_round 1 --max_rounds 16`。
+- [inference/run.sh:L3-L3](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/run.sh#L3-L3) 输入为三份文件拼接:`../IMO2025.json,../CMO2024.json,../CMO2025.json`,每份 6 题,共 \( P = 18 \)。
+- [inference/main.py:L41-L41](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L41-L41) 默认 `n_verification_per_proof=4` 对照 run.sh 的 64——这就是 u1-l3 指出的「验证强度 ×16」的原始出处。
+- [inference/main.py:L44-L44](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L44-L44) `--skip_meta_verification` 为 `store_true` 开关;主循环中 [inference/main.py:L504-L509](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L504-L509) 仅在未跳过时准备元验证输入。若不跳过,元验证请求量最坏为 \( P \cdot R_{\max} \cdot n_{\parallel} \cdot n_{\mathrm{ver}} \cdot \rho \)(\( \rho \) 为低分评价占比,≤ 1),即再叠加一个与验证同阶的量——官方配置选择直接砍掉这一环。
+- [inference/main.py:L389-L389](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L389-L389) `Avg trials per statement` 日志:跑完后可从这里读到每题实际组合数 \( t_R \) 的实测均值,用来校准 4.1.2 公式中「组合凑不满」造成的偏差。
 
-```python
-parser.add_argument("--n_best_proofs_to_sample", type=int, default=32, ...)
-parser.add_argument("--n_proofs_to_refine", type=int, default=1, ...)
-parser.add_argument("--n_agg_trials", type=int, default=32, ...)
-parser.add_argument("--n_parallel_proof_gen", type=int, default=128)
-```
+**成绩与算力的绑定。** README 的表述是:模型「achieving gold-level scores on IMO 2025 and CMO 2024 and a near-perfect 118/120 on Putnam 2024 **with scaled test-time compute**」([README.md:L44-L44](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/README.md#L44-L44))。换言之,u1-l1 记录的那份成绩单对应的正是 run.sh 这套每轮每题 8320 次请求、全程百万量级的验证配置;把参数压到默认值的 1/13,成绩不保证可复现。
 
-`n_best_proofs_to_sample` 和 `n_proofs_to_refine` 不直接出现在请求计数公式里，它们决定组合的「形状」（从多少候选里挑、每个组合装几条证明），再经由 \( c_R \le T \) 间接影响行数。
+#### 4.2.4 代码实践:填一张属于你自己的对照表
 
-**（2）验证强度与元验证开关的默认值** —— [inference/main.py:41-L49](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L41-L49)
-
-```python
-parser.add_argument("--n_verification_per_proof", type=int, default=4)
-parser.add_argument("--skip_meta_verification", action='store_true')
-...
-parser.add_argument("--n_meta_verification_per_rating", type=int, default=1)
-```
-
-注意 `action='store_true'`：默认关闭（即默认**会**跑元验证）；run.sh 显式传了 `--skip_meta_verification` 才跳过。轮数默认值见 [inference/main.py:52-L53](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L52-L53)（`start_round=1`、`max_rounds=20`）。
-
-**（3）竞赛配置全文** —— [inference/run.sh:9-L20](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/run.sh#L9-L20)
-
-```bash
-python main.py \
-    --input_paths ${input_path} \
-    --output_dirname ${output_dirname} \
-    --proof_pool_dirname ${proof_pool_dirname} \
-    --n_best_proofs_to_sample 32 \
-    --n_proofs_to_refine 1 \
-    --n_agg_trials 32 \
-    --n_parallel_proof_gen 128 \
-    --n_verification_per_proof 64 \
-    --skip_meta_verification \
-    --start_round 1 \
-    --max_rounds 16
-```
-
-与默认值真正不同的只有三处：\( V=64 \)、跳过元验证、\( R_{\max}=16 \)。生成侧（\( G \)、\( T \)）原封不动——**官方把 scaling 预算全部押在验证侧**，这是 README 第 43 行「scale verification compute」在配置层面的直接体现。
-
-**（4）原始表述** —— [README.md:40-L44](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/README.md#L40-L44)
-
-> To maintain the generation-verification gap as the generator becomes stronger, we propose to scale verification compute... achieving gold-level scores on IMO 2025 and CMO 2024 and a near-perfect 118/120 on Putnam 2024 with scaled test-time compute.
-
-「训练时扩展验证算力造数据」与「测试时扩展验证算力做评估」是同一原则的两个应用面；本仓库能直接看到的是后者。
-
-#### 4.2.4 代码实践：核对默认值
-
-1. **实践目标**：不读源码、只用命令行确认 argparse 默认值，并验证 u1-l3 说过的「`--help` 能用」。
-2. **操作步骤**：
-   - `cd inference && python main.py --help`
-   - 对照输出，抄下 `n_parallel_proof_gen`、`n_agg_trials`、`n_verification_per_proof`、`max_rounds`、`skip_meta_verification` 五项的默认值。
-3. **需要观察的现象**：帮助信息正常打印、进程退出码为 0；输出中**没有** `proof_gen_url`、`proof_rate_url`、`infer_script` 三个参数（它们从未被注册）。
-4. **预期结果**：五个默认值依次为 128、32、4、20、False（`store_true` 型缺省）。之所以不报 `AttributeError`，是因为 `--help` 在 [main.py:55](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L55) 的 `parse_known_args` 内就打印并退出，早于 [main.py:61](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L61) 对 `args.proof_gen_url` 的访问。若环境缺少 `numpy`/`orjson`/`tqdm` 等依赖，脚本在 import 阶段就会失败，此现象待本地验证。
+1. **实践目标**:把「参数差异 → 请求账差异」的推理走一遍,产出一张可复算的表格。
+2. **操作步骤**:
+   - 打开 [inference/main.py:L24-L53](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L24-L53),把与请求量有关的全部默认参数抄下;
+   - 打开 run.sh,逐项标注「相同 / 放大 / 缩小」;
+   - 用 4.1.2 公式算出两套配置在 \( P = 18 \) 下的全程上界与验证占比;
+   - 追加一行「本机调试配置」:自选四个参数,使 \( P = 2 \) 时全程 < 100 请求。
+3. **需要观察的现象**:哪一个参数单独翻了总账?哪一个参数几乎不影响总账?
+4. **预期结果**:`n_verification_per_proof` 4→64 单独造成 13 倍(每轮每题);`n_proofs_to_refine`、`n_best_proofs_to_sample` 对请求**条数**几乎无影响(只改变单条请求的 token 长度);调试配置一例:\( 8/8/2 \)、2 题 2 轮 → 96 请求。待本地用综合实践的脚本复核。
+5. 本实践不改源码,仅阅读与计算。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：保持其他参数不变，把 \( V \) 从 64 降回 4，总请求量变为原来的几分之几？
+**练习 1**:竞赛配置把 `n_proofs_to_refine` 从默认 4 降为 1,对请求条数和 token 成本分别有什么影响?
 
-**答案**：单轮总量从 \( NG(1+64) = 65NG \) 变为 \( 5NG \)，即约 \( 5/65 \approx 7.7\% \)。\( V \) 同时出现在分子和占比公式里，是唯一能让总量变化超过一个数量级的单参数。
+答案:请求条数几乎不变(组合数上限仍由 `n_agg_trials=32` 决定,且 \( \binom{32}{1} = 32 \) 恰好凑满);token 成本下降——每条精炼请求只内嵌 1 份证明及其批语摘要,而非 4 份,提示词长度大约降到原来的四分之一量级(分析推断,源码未明示动机)。
 
-**练习 2**：默认配置会跑元验证而 run.sh 跳过。粗估默认配置下元验证的请求量级。
+**练习 2**:`max_tokens` 如何进入成本估算?
 
-**答案**：元验证输入是评分 \( \le 0.75 \) 的批语，每条最多 1 次请求（\( n_{\text{meta}}=1 \)）。批语总数上界是 \( P_R \times V \)（每条验证输出一条批语），所以元验证请求 \( \le P_R \times V \)——量级与验证请求相同，最多再翻一倍。跳过它本身就是一项显著的成本决策。
+答案:main.py 把 `proof_gen_max_len`(默认 128K)与 `proof_verification_max_len`(默认 64K)分别下发给两个阶段([inference/main.py:L449-L492](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L449-L492));generate.py 又把同一值同时作为 `max_tokens` 与 `max_total_tokens` 传入([inference/generate.py:L116-L121](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/generate.py#L116-L121))。它们不改变请求条数,只决定单条请求的 token 上限,是成本公式中的「单价 × 用量」里的用量系数。
 
-**练习 3**：run.sh 把 `max_rounds` 从默认 20 降到 16，这是为了省钱吗？从早停的角度还能怎么解释？
+**练习 3**:为什么不跳过元验证时,说元验证「最坏再叠加一个与验证同阶的量」?
 
-**答案**：省钱是一部分（线性减少最坏总量），但更自然的解释是：\( V=64 \) 时早停门槛极严（见 4.3），绝大多数能在早期拿到全 1 分的题早已退役，剩下的是真正难的题，多转几轮边际收益很低；16 轮是「预算—收益」的经验折中。仅凭仓库内容无法确证作者动机，此解释待确认。
+答案:元验证输入来自验证输出中评分 ≤ 0.75 的低分批语(u4-l3 的漏斗),每条复制 `n_meta_verification_per_rating`(默认 1)份。低分占比 \( \rho \) 事先未知,最坏 \( \rho \to 1 \),此时元验证请求数趋近验证请求数本身,总账从 \( n_{\parallel}(1 + n_{\mathrm{ver}}) \) 变成 \( n_{\parallel}(1 + 2 n_{\mathrm{ver}}) \) 量级。
 
-### 4.3 早停条件与生成-验证差距的维护
+### 4.3 满分早停:0.99999 阈值与生成-验证差距的维护
 
 #### 4.3.1 概念说明
 
-轮次循环不会真的把每题都跑满 \( R_{\max} \) 轮。`_prepare_proof_agg_tasks` 里有一个两行的早停判断：某题的证明池里只要出现过一条「近满分」证明（\( \mathrm{meanscore} > 0.99999 \)），该题就永远不再产生精炼请求——**退役**。这个判断是整条流水线唯一的「我们相信这个证明」决策点，而它完全委托给了验证器：验证器对所有 \( V \) 次评分一致给 1 分，系统才放行。理解这个门槛的数学结构，就理解了「扩展验证算力」如何转化为「更可信的停机」。
+如果每道题都跑满 \( R_{\max} \) 轮,大部分算力会浪费在已经被解决的题上。流水线的止损机制是:在为下一轮准备精炼输入时,若某题的候选证明中出现「均值分超过 0.99999」的证明,就不再为该题生成任何精炼请求——该题退出循环。
+
+这个条件与生成-验证差距的关系是本讲最值得琢磨的一点:**早停完全信任验证器**。「一致满分」是验证器给出的信号,验证器越弱,这个信号越可能失真——一个会给错误证明打满分的验证器,会让生成器在错误证明上提前收工。而压制这种「假早停」的手段,恰恰是提高 `n_verification_per_proof`:验证强度越高,「碰巧全对」的概率被指数级压低。早停的可靠性与验证算力是同一个旋钮的两面。
 
 #### 4.3.2 核心流程
 
-**第一步：0.99999 不是「平均很高」，而是「全票通过」。** 评分契约是 0/0.5/1 三档（u3-l1）。设某证明得到 \( k \) 个评分，其中至少一个低于 1，则均值上界为（其余全是 1、最低那个是 0.5）：
+早停判断发生在 `_prepare_proof_agg_tasks`(为 R+1 轮准备输入)内部,时序如下:
 
-\[
-\mathrm{meanscore} \le \frac{k-1+0.5}{k} = 1 - \frac{0.5}{k}
-\]
+1. 读取证明池旧记录;本轮新证明入库(写池发生在早停判断**之前**,所以最后一轮的证明不丢);
+2. `use_old_proofs_for_refinement=True` 时把旧池证明并入候选集;
+3. 若候选集中**任一**证明的 meanscore > 0.99999,`continue` 跳过该题——不生成精炼请求;
+4. 否则进入 u5-l2 讲过的排序、组合、采样流程。
 
-- \( V = 4 \)：上界 \( 1 - 0.125 = 0.875 \)
-- \( V = 64 \)：上界 \( 1 - 0.0078125 \approx 0.99219 \)
+阈值取 0.99999 而非 1.0 是浮点防御。由于评分只有 0/0.5/1 三档,meanscore 的次高可能值是 \( (n_{\mathrm{ver}} - 0.5) / n_{\mathrm{ver}} \)(仅一条 0.5 分、其余满分):
 
-两者都远低于 0.99999。反过来，只要有一个非 1 评分就不可能过线，所以：
+\[ \frac{n_{\mathrm{ver}} - 0.5}{n_{\mathrm{ver}}} = 1 - \frac{0.5}{n_{\mathrm{ver}}} \le 1 - \frac{0.5}{64} \approx 0.99219 < 0.99999 \]
 
-\[
-\mathrm{meanscore} > 0.99999 \iff \text{所有（成功解析的）评分都等于 } 1
-\]
+所以 `> 0.99999` 严格等价于「\( n_{\mathrm{ver}} \) 次验证全部给 1 分」。
 
-（「成功解析」的限定来自 u4-l2/u5-l3：解析失败的验证输出被丢弃，不参与均值。）
+「假早停」的概率刻画:设单次验证给满分的事件独立、概率为 \( p \)(可理解为验证器对该证明的置信),则一致满分概率为:
 
-**第二步：\( V \) 指数级收紧门槛。** 设验证器对某条**有缺陷**的证明单次误判为 1 分的概率为 \( p \)，则该证明被误退役的概率是：
+\[ P(\text{early stop}) = p^{\, n_{\mathrm{ver}}} \]
 
-\[
-P(\text{误退役}) = p^{V}
-\]
+代入几组数值感受验证强度的指数效应:
 
-| 单次误判概率 \( p \) | \( V=4 \)：\( p^4 \) | \( V=64 \)：\( p^{64} \) |
-|---|---|---|
-| 0.90 | 65.6% | 0.118% |
-| 0.95 | 81.5% | 3.76% |
-| 0.99 | 96.1% | 52.6% |
+| \( p \) | \( n_{\mathrm{ver}} = 4 \) | \( n_{\mathrm{ver}} = 64 \) |
+| --- | --- | --- |
+| 0.90 | 0.656 | \( 1.2 \times 10^{-3} \) |
+| 0.95 | 0.815 | 0.038 |
+| 0.99 | 0.961 | 0.526 |
 
-\( V \) 从 4 提到 64，把「验证器看走眼」的容忍度压缩了几个数量级——这就是测试时的「维护生成-验证差距」：**生成器越强，越需要验证器的一致性背书才肯停机**。代价是真实好证明（\( p \approx 1 \) 表示验证器每次都认可）也要凑齐全票才停，\( p = 0.99 \) 时 64 票全对的概率只有 52.6%，于是系统继续烧轮次去精炼——严格的门槛与更多的轮次是一体两面。
-
-**第三步：退役是永久的、跨轮累积的。** 早停检查发生在合并旧证明池**之后**，所以只要历史任何一轮出现过全票证明，该题从此每轮都直接跳过：
-
-```text
-for 每道未处理完的题:
-    读旧证明池 → 合并本轮新证明
-    if 池中任意证明 meanscore > 0.99999:
-        continue                      # 该题退役：本轮不产生任何精炼输入行
-    构造 T 个组合 → 写入下一轮 proof_gen input
-```
-
-于是 4.1 中的 \( U_R \) 单调不增，总请求量从「\( R_{\max} \) 倍」收敛到几何级数 \( \frac{1-\rho^{R_{\max}}}{1-\rho} \) 倍。
+读法:若验证器对一个「其实有瑕疵」的证明每次有 10% 概率误打满分,`n_verification_per_proof=4` 时该错误证明有约 65% 的概率触发早停;升到 64 后降到约 0.1%。验证算力以线性代价换取假早停概率的指数下降——这就是「扩展验证算力以维持生成-验证差距」在推理阶段的具体形态。此外,meanscore 作为均值,其标准差随 \( 1/\sqrt{n_{\mathrm{ver}}} \) 收缩,排序选优(u5-l2 的双键排序)与早停判断同时受益。
 
 #### 4.3.3 源码精读
 
-**（1）合并旧池，再查早停** —— [inference/main.py:219-L223](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L219-L223)
+- [inference/main.py:L222-L223](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L222-L223) 早停判断本体:`if any(record[1] > 0.99999 for record in proof_meanscore_ratings_tuples): continue`——`record[1]` 即 meanscore,`any` 意味着候选集中一条满分即止。
+- [inference/main.py:L219-L220](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L219-L220) `use_old_proofs_for_refinement` 时 `proof_meanscore_ratings_tuples += old_proof_pool`——旧池证明参与早停判断,因此一旦某题历史任何一轮出现过满分证明,之后每一轮都会早停,该题永久退出。
+- [inference/main.py:L211-L218](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L211-L218) 新证明写池在早停判断之前——早停的题也会把本轮证明完整入库,只是不再产生下游请求。
+- [inference/main.py:L199-L199](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L199-L199) `meanscore = float(np.mean([rating['score'] for rating in ratings]))`——均值分子上的正是 \( n_{\mathrm{ver}} \) 次验证的得分(同一证明的多条验证记录在此聚合,u5-l1 已详述)。
+- [inference/main.py:L437-L438](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L437-L438) 主循环调用处传 `use_old_proofs_for_refinement=True`——确认生产路径上旧池始终参与早停。
+
+把三讲串起来:早停是「每轮每题 8320 请求」这笔账的**唯一系统性折扣**。实际总请求量会随轮次递减——被解决的题逐轮退出,`Avg trials per statement`([inference/main.py:L389-L389](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L389-L389))也随之走低。公式给的是天花板,早停决定你离天花板多远。
+
+#### 4.3.4 代码实践:观察 \( p^{n} \) 的指数压制
+
+1. **实践目标**:用十行脚本把 4.3.2 的表格扩展成曲线,直观建立「验证次数指数级压低假早停」的手感。
+2. **操作步骤**:在教程目录外任意临时位置新建 `early_stop_curve.py`(示例代码,不改动仓库):
 
 ```python
-if use_old_proofs_for_refinement:
-    proof_meanscore_ratings_tuples += old_proof_pool
-
-if any(record[1] > 0.99999 for record in proof_meanscore_ratings_tuples):
-    continue
+# 示例代码:早停概率随验证次数的指数衰减
+for p in (0.90, 0.95, 0.99):
+    row = [f"p={p:.2f}"] + [f"{p**n:.2e}" for n in (1, 2, 4, 8, 16, 32, 64)]
+    print("\t".join(row))
 ```
 
-`record[1]` 是 `meanscore`。`use_old_proofs_for_refinement=True` 由主循环传入（[main.py:438](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L438)），因此检查范围是「本轮新证明 + 全部历史证明」，一旦过线即永久退役。注意 `continue` 发生在证明池追加写入（L211-L218）**之后**——退役题的当轮新证明仍然入账，只是不再派生新任务。
-
-**（2）没退役的题才进入排序与组合枚举** —— [inference/main.py:225-L227](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L225-L227)
-
-```python
-for _ in range(10):
-    np.random.shuffle(proof_meanscore_ratings_tuples)
-proof_meanscore_ratings_tuples = sorted(proof_meanscore_ratings_tuples,
-    key=lambda x: (x[1], x[3]['self_eval_score']), reverse=True)[:n_best_proofs_to_sample]
-```
-
-排序细节（洗牌打破并列、双键降序）属于 u5-l2 的内容；本讲只需要知道：早停 `continue` 之后的代码才决定 \( c_R \)（组合数），从而决定下一轮该题的生成请求数。
-
-**（3）退役信息如何反馈回请求量** —— [inference/main.py:430-L444](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L430-L444)
-
-第 \( R+1 \) 轮的 `proof_gen_R{R+1}/input.jsonl` 完全由 `prepare_proof_refinement` 产出；退役题不产生行，所以下一轮 `U` 自然缩小。`main.py` 没有任何显式的「题目状态表」——**早停状态就存在证明池文件里**，这也是断点续跑天然兼容早停的原因（u5-l1 的「一次成账」性质）。
-
-#### 4.3.4 代码实践：算出门槛的数学
-
-1. **实践目标**：用五行 Python 验证 4.3.2 的两张表，把「0.99999 = 全票」变成亲手算过的事实。
-2. **操作步骤**：
-
-   ```python
-   # 示例代码：独立小脚本，与仓库无关
-   for k in (4, 64):                     # 验证次数
-       print(k, 1 - 0.5 / k)             # 有一个 0.5 分时的均值上界
-   for p in (0.90, 0.95, 0.99):
-       print(p, round(p ** 4, 4), round(p ** 64, 6))
-   ```
-
-3. **需要观察的现象**：均值上界都小于 0.99999；\( p^{64} \) 相对 \( p^4 \) 的坍缩速度。
-4. **预期结果**（手工推算）：`4 0.875`、`64 0.9921875`；`0.9 0.6561 0.001180`、`0.95 0.8145 0.037553`、`0.99 0.9606 0.525638`。
-5. 结果只依赖 Python 内建运算，任何环境均可复现；如在你的机器上数字不一致，请检查是否用了整除（`0.5 / k` 不能写成 `//`）。
+3. **需要观察的现象**:每行数值随 n 的衰减速度;`p=0.99` 在 n=64 处是否仍停留在 0.5 附近(强验证器难以被压制,这是符合预期的——它本来就「该」早停)。
+4. **预期结果**:`p=0.90` 行从 0.90 一路降到 \( 1.2 \times 10^{-3} \)(n=64);`p=0.99` 行 n=64 时约 0.53。运行结果待本地验证。
+5. 思考延伸:阈值 0.99999 固定不动,若把三档评分换成连续分数,次高可能值 \( 1 - 0.5/n \) 的论证需要如何修改?
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：某证明 64 次验证中有 1 次给 0.5、63 次给 1，`meanscore` 是多少？会触发早停吗？
+**练习 1**:`n_verification_per_proof=6` 时,meanscore > 0.99999 要求几次 1 分、几次 0.5 分?
 
-**答案**：\( (63 \times 1 + 0.5)/64 = 63.5/64 = 0.9921875 < 0.99999 \)，不触发。早停是「一票否决」而非「平均分高」。
+答案:6 次全 1 分。次高可能值 \( 5.5/6 \approx 0.9167 < 0.99999 \),中间不存在任何能达到阈值的得分组合。
 
-**练习 2**：`> 0.99999` 里的 0.99999 为什么不直接写 `>= 1.0`？
+**练习 2**:一道题在第 3 轮触发了早停,第 4 轮它的证明池还会更新吗?第 4 轮还会为它生成精炼请求吗?
 
-**答案**：`meanscore` 是浮点均值，\( 63.5/64 \) 这类值与 1.0 之间没有整数分档，写 `>= 1.0` 在浮点语义下与 `> 0.99999` 等价（都要求全票），但作者用 0.99999 作缓冲，规避了「全票均值是否精确等于 1.0」的浮点表示问题——\( k \times 1.0 / k \) 在 IEEE 754 下应精确为 1.0，但用一个略小的阈值更稳健，属于防御式写法。
+答案:会更新,不会生成。早停判断(`continue`)发生在写池([inference/main.py:L211-L218](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L211-L218))之后,本轮新证明先入库再判断;`continue` 直接跳过组合生成,且由于旧池证明并入候选([inference/main.py:L219-L220](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L219-L220)),满分证明每轮都在候选集中,该题从第 4 轮起永久早停。
 
-**练习 3**：早停检查为什么放在「合并旧池之后」而不是只看本轮新证明？换成只看本轮会有什么后果？
+**练习 3**:为什么说「早停的可靠性与验证算力是同一个旋钮的两面」?
 
-**答案**：若只看本轮，某题第 3 轮拿到全票证明、第 4 轮恰无新全票证明时，该题会被错误地重新拉回精炼，多花 \( G \times (1+V) \) 量级的请求。放在合并后，池文件本身就是跨轮的退役标记，检查一次、永久生效。
+答案:早停条件是「\( n_{\mathrm{ver}} \) 次验证一致满分」,其假阳性概率为 \( p^{n_{\mathrm{ver}}} \)。调高 `n_verification_per_proof` 同时做了两件事:让总账里的验证请求线性变多(4.1.2 的乘子),让错误的早停概率指数变低(4.3.2 的公式)。反之,压低验证次数省下的钱,直接以「更容易在坏证明上提前收工」的形式还回去——这与 README 主张的「扩展验证算力以维持生成-验证差距」([README.md:L43-L43](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/README.md#L43-L43))是同一件事的成本面与收益面。
 
-## 5. 综合实践：写一个 estimate_cost.py 成本估算器
+## 5. 综合实践:写一个 estimate_cost.py 估算器
 
-这是本讲的收尾任务，把 4.1 的计数代数、4.2 的配置对比、4.3 的早停衰减全部装进一个脚本。
+**任务**:实现一个请求量与费用估算器,输入六个量——`n_parallel_proof_gen`、`n_agg_trials`、`n_verification_per_proof`、`n_problems`、`max_rounds`、平均 token 单价(元/百万 token)——输出整条流水线的 API 请求总量上界与大致开销;对比 run.sh 竞赛配置与小型调试配置(如 8/4/4),并据此推荐一套总请求 < 100 的本机实验参数。
 
-**任务**：实现 `estimate(n_problems, n_parallel_proof_gen, n_agg_trials, n_verification_per_proof, max_rounds, ...)`，输出三阶段请求量、总量、token 量与开销；分别计算 run.sh 竞赛配置与一组小型调试配置（8/4/4）并对比；最后给出一套总请求小于 100 的本地实验参数。
+**操作步骤**:
 
-**参考实现（示例代码，仓库中不存在此文件）**：
+1. 在教程目录外新建 `estimate_cost.py`(示例代码,不改动仓库),核心如下:
 
 ```python
-# estimate_cost.py —— 示例代码
+# 示例代码:DeepSeekMath-V2 推理流水线请求量/费用估算器(上界模型)
 import argparse
 
-def estimate(n_problems, G, T, V, max_rounds, survival=1.0,
-             skip_meta=True, avg_gen_tokens=16384, avg_ver_tokens=4096,
-             price_per_ktoken=0.0):
-    n_sample = G // T
-    assert n_sample >= 1, "G // T == 0：第 2 轮起将不再生成任何样本"
+parser = argparse.ArgumentParser()
+parser.add_argument("--n_parallel_proof_gen", type=int, required=True)
+parser.add_argument("--n_agg_trials", type=int, required=True)
+parser.add_argument("--n_verification_per_proof", type=int, required=True)
+parser.add_argument("--n_problems", type=int, required=True)
+parser.add_argument("--max_rounds", type=int, required=True)
+parser.add_argument("--gen_avg_tokens", type=int, default=32_000)   # 单次生成请求平均 token(输入+输出)
+parser.add_argument("--ver_avg_tokens", type=int, default=16_000)   # 单次验证请求平均 token
+parser.add_argument("--price_per_million", type=float, required=True)
+args = parser.parse_args()
 
-    gen = ver = meta = 0
-    U = n_problems                      # 未退役题数
-    for R in range(1, max_rounds + 1):
-        s = G if R == 1 else T * n_sample   # 竞争守恒：第 2 轮起每题仍约 G 次
-        g = int(U * s)
-        gen += g
-        ver += g * V                    # 上界：假设全部样本通过筛选
-        if not skip_meta:
-            meta += g * V               # 上界：假设全部评分 ≤ 0.75
-        U = int(U * survival)           # 早停：每轮存活率
-    tokens = gen * avg_gen_tokens + (ver + meta) * avg_ver_tokens
-    return {
-        "gen_requests": gen, "ver_requests": ver, "meta_requests": meta,
-        "total_requests": gen + ver + meta,
-        "total_tokens": tokens,
-        "cost": tokens / 1000 * price_per_ktoken,
-    }
+n_par, n_ver = args.n_parallel_proof_gen, args.n_verification_per_proof
+n_sample = n_par // args.n_agg_trials          # R>=2 每组合采样数;R1 全额 n_par
+print(f"R>=2 每组合采样数 = {n_sample}"
+      f"{' (警告: 不整除, 每题每轮损耗 ' + str(n_par - n_sample * args.n_agg_trials) + ' 次采样)' if n_par % args.n_agg_trials else ''}")
 
-if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    p.add_argument("--n_problems", type=int, required=True)
-    p.add_argument("--G", type=int, default=128)
-    p.add_argument("--T", type=int, default=32)
-    p.add_argument("--V", type=int, default=64)
-    p.add_argument("--max_rounds", type=int, default=16)
-    p.add_argument("--survival", type=float, default=1.0)
-    args = p.parse_args()
-    print(estimate(args.n_problems, args.G, args.T, args.V, args.max_rounds, args.survival))
+# 上界模型:每轮每题生成 <= n_par;验证 <= n_par * n_ver;早停与丢弃只会更低
+gen_req = args.n_problems * args.max_rounds * n_par
+ver_req = args.n_problems * args.max_rounds * n_par * n_ver
+tokens = gen_req * args.gen_avg_tokens + ver_req * args.ver_avg_tokens
+cost = tokens / 1e6 * args.price_per_million
+print(f"生成请求 <= {gen_req:,}; 验证请求 <= {ver_req:,}; 合计 <= {gen_req + ver_req:,}")
+print(f"验证占比 <= {ver_req / (gen_req + ver_req):.1%}")
+print(f"token <= {tokens:,}; 费用 <= {cost:,.2f}(单价 {args.price_per_million}/百万 token)")
 ```
 
-**操作步骤**：
+2. 跑三组配置对比(费用单价自定):
+   - 竞赛配置:`--n_parallel_proof_gen 128 --n_agg_trials 32 --n_verification_per_proof 64 --n_problems 18 --max_rounds 16`
+   - 默认值:`--n_parallel_proof_gen 128 --n_agg_trials 32 --n_verification_per_proof 4 --n_problems 18 --max_rounds 20`
+   - 调试配置:`--n_parallel_proof_gen 8 --n_agg_trials 8 --n_verification_per_proof 2 --n_problems 2 --max_rounds 2`
+3. 检查调试配置的合计请求数是否 < 100,并记录三组的验证占比。
 
-1. 把上面的参考实现存为 `estimate_cost.py`（放在 `DeepSeek-Math-V2-tutorial/` 或任何不影响源码的目录）。
-2. 计算竞赛配置：`python estimate_cost.py --n_problems 18 --G 128 --T 32 --V 64 --max_rounds 16`。
-3. 计算调试配置（单份 6 题文件）：`python estimate_cost.py --n_problems 6 --G 8 --T 4 --V 4 --max_rounds 2`。
-4. 给调试配置加上早停衰减：`--survival 0.5`，观察总量变化。
-5. 反复调小参数，找到一套 `total_requests < 100` 的组合。
+**需要观察的现象**:竞赛配置与默认配置的合计请求数比值;不整除配置的损耗警告是否触发;调试配置离 100 的余量。
 
-**预期结果（手工推算，待本地验证）**：
+**预期结果**(手算上界,脚本应复现):
 
-| 配置 | 生成 | 验证 | 合计请求 |
-|---|---|---|---|
-| 竞赛（18 题, 128/32/64, R=16, survival=1） | 36 864 | 2 359 296 | **2 396 160** |
-| 调试（6 题, 8/4/4, R=2, survival=1） | 96 | 384 | **480** |
-| 推荐（3 题, 4/2/2, R=2, survival=1） | 24 | 48 | **72** |
+| 配置 | 生成请求 | 验证请求 | 合计 | 验证占比 |
+| --- | --- | --- | --- | --- |
+| 竞赛(18 题/16 轮/128/64) | 36,864 | 2,359,296 | **2,396,160** | 98.5% |
+| 默认(18 题/20 轮/128/4) | 46,080 | 184,320 | **230,400** | 80.0% |
+| 调试(2 题/2 轮/8/2) | 32 | 64 | **96** | 66.7% |
 
-**需要观察的现象与结论**：
+**本机推荐参数**(总请求 96 < 100):`--n_problems 2 --max_rounds 2 --n_parallel_proof_gen 8 --n_agg_trials 8 --n_verification_per_proof 2 --n_proofs_to_refine 1`。要点:`n_parallel` 取 `n_agg_trials` 的整数倍(8/8=1,无损耗);`n_proofs_to_refine=1` 使 \( \binom{m}{1} = m \),只要 R1 产出 8 个不同证明即可凑满组合数,凑不满则请求更少、上界仍成立;验证次数压到 2 意味着早停条件实际几乎不可触发(两次全满分即可达标),调试时如需观察早停行为,可临时升到 4 并相应上调请求预算。若还需更省,可退到 4/4/2 × 2 题 2 轮 = 48 请求。
 
-1. 即便是「小型」的 8/4/4 配置，6 题两轮也要 480 次请求——验证开销的放大效应（\( \times V \)）在小配置下同样成立，本地实验必须把 \( V \) 一并调小。
-2. 推荐配置 4/2/2 满足约束：\( G//T = 2 \ge 1 \)（第 2 轮仍有采样）、总请求 72 < 100；第 1 轮每题 4 个证明虽少，但足以观察 `proof_pool`、`meanscore`、组合生成的完整链路。`n_best_proofs_to_sample` 保持默认 32 也没关系——代码里用 `min(..., len(...))` 截断（[main.py:227](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L227)）。
-3. token 开销 = 生成请求 × 平均生成 token + 验证请求 × 平均验证 token。若按参考默认（生成 16K、验证 4K），竞赛配置约 \( 3.7 \times 10^8 + 9.7 \times 10^9 \approx 10^{10} \) token——百亿量级，验证侧占 94%。代入你所用服务的千 token 单价即可得到金额。
+脚本运行输出待本地验证;以上数值为按 4.1.2 公式的手算结果。
 
 ## 6. 本讲小结
 
-- **请求计数闭式**：跳过元验证、无早停时，总请求 \( \approx R_{\max} \cdot N \cdot G \cdot (1+V) \)；三个 `--n` 参数分别来自 [main.py:448](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L448)（生成侧 \( G \) 或 \( \lfloor G/T \rfloor \)）与 [main.py:489](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L489)（验证侧 \( V \)）。
-- **算力守恒**：第 2 轮起每题每轮生成请求 \( T \times \lfloor G/T \rfloor \approx G \)，前提是 \( G \ge T \)；组合数不足时按比例缩小。
-- **竞赛配置的钱花在验证上**：run.sh 相对默认值只改了三处（\( V \): 4→64、跳过元验证、\( R_{\max} \): 20→16），总请求约 240 万（18 题、最坏情形），验证占 98.5%。
-- **早停 = 全票通过**：`meanscore > 0.99999` 在 0/0.5/1 三档契约下等价于「所有验证评分都是 1」；\( V \) 越大，误退役概率 \( p^V \) 指数级下降。
-- **退役是永久的**：早停检查发生在合并旧证明池之后（[main.py:219-L223](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L219-L223)），池文件本身就是跨轮的退役标记，也是断点续跑兼容早停的原因。
-- **维护生成-验证差距的测试时落点**：README 的「scale verification compute」在本仓库体现为把 \( V \) 调大 16 倍、并让停机决策完全依赖验证器的一致性背书。
+- 请求总账公式:\( C_{\text{total}} \le P \cdot R_{\max} \cdot n_{\parallel} \cdot (1 + n_{\mathrm{ver}}) \);R=1 每题生成 \( n_{\parallel} \) 次,R≥2 每题 \( \le t_R \cdot \lfloor n_{\parallel} / t_{\max} \rfloor \) 次,算力守恒的前提是整除。
+- run.sh 竞赛配置(18 题、16 轮、128 采样、64 验证)全程上界约 240 万次请求,其中验证占 98.5%——「扩展测试时算力」在这套代码里几乎等于「扩展验证算力」;README 报告的 IMO/CMO/Putnam 成绩与这套高强度配置绑定。
+- 竞赛配置相对默认值的实质差异是验证强度 ×16 与砍掉元验证;`n_proofs_to_refine` 4→1 影响的是 token 而非请求条数;进程数与批大小只改墙钟不改总账。
+- 早停条件「候选证明中任一 meanscore > 0.99999」在三档评分下严格等价于「\( n_{\mathrm{ver}} \) 次验证全部满分」;写池先于判断,早停的题仍会入库最后一轮证明,且因旧池并入候选而永久退出。
+- 假早停概率为 \( p^{n_{\mathrm{ver}}} \):验证算力以线性代价换取早停可靠性的指数提升——这是生成-验证差距在推理侧的具体维护机制。
+- 断点续跑的 `.meta` 断言要求 `n` 与 `batch_size` 与上次一致,改参数做实验前必须清理旧输出与 `.meta` 文件。
 
 ## 7. 下一步学习建议
 
-本讲是 u6 单元的第一讲。下一讲 **u6-l2 二次开发实践：适配新基准与工程加固** 将把本讲的成本意识落到工程上：补齐 `proof_gen_url`、`proof_rate_url`、`infer_script` 三个缺失的 argparse 参数、新增 `--dry_run` 与请求上限保护，避免本讲算出的「百万级请求」在误配置下真的跑飞。
-
-继续阅读源码的建议：
-
-1. 拿一套小配置（如推荐的 4/2/2）完整跑两轮，对照本讲的计数表逐项核对 `output.jsonl` 的实际行数与估算的偏差来源（截断丢弃、文本去重、组合数不足）。
-2. 重读 [main.py:222](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L222) 一行，思考若把阈值改成 `> 0.9`，早停行为与总成本会如何变化——这是理解「验证算力 ↔ 停机可信度」互换关系最直接的思想实验。
+下一讲(u6-l2)把视角从「算参数」转向「改代码」:为 `main.py` 补齐未注册的 `proof_gen_url`、`proof_rate_url`、`infer_script` 三个参数,新增 `--dry_run` 与请求上限保护,把本讲的估算器变成流水线的硬约束。建议在进入下一讲前,先通读 [inference/main.py:L397-L523](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/inference/main.py#L397-L523) 的三处 `os.system` 调用点,思考每处命令的参数分别来自哪个 args 属性、哪些属性目前是悬空的;有余力的读者可以对照 `outputs/` 目录里官方发布的预测结果,结合 [outputs/README.md](https://github.com/deepseek-ai/DeepSeek-Math-V2/blob/665c840782baf7faae8a8b244ea313f3cfcc346f/outputs/README.md) 思考 `average_automatic_rating` 的分布与本讲的验证强度参数有何关联(待确认,发布物不含运行配置)。
