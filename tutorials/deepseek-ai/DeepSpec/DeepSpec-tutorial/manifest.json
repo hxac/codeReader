@@ -1,0 +1,979 @@
+{
+  "head": "005e03b81cec38b7da6399833d609ee89a2587f2",
+  "project": "DeepSpec",
+  "rationale": "DeepSpec 是一个面向投机解码草稿模型的全栈训练/评估代码库（数据准备→训练→评估三阶段，含 DSpark、DFlash、Eagle3 三种算法，支持 Qwen3 与 Gemma4 目标模型）。大纲按\"先跑通、再读懂主链路、后深挖算法与扩展\"设计：第 1 单元从项目定位、目录结构、入口自举和配置系统入手让读者零基础起步；第 2 单元沿数据流水线（下载切分→模板解析→答案重生成→目标缓存格式/生成/读取）展开，因为目标缓存是理解整个训练范式的关键；第 3 单元剖析 BaseTrainer 训练框架（初始化、主循环、分布式、优化器、断点续训、日志）；第 4、5 单元进入核心算法建模（DSpark 锚点块式草稿、Markov 头、损失函数、Gemma4 变体，以及 Eagle3 与 DFlash 的对比），按\"共享 BaseTrainer、只换模型与损失\"的真实代码组织方式讲解；第 6 单元深入评估系统（投机解码主循环、拒绝采样验证、DSpark/Eagle3 评估器、置信度校准）；第 7 单元以扩展实践（接入新目标模型、性能工程、端到端小规模实战）收尾。讲义间用 depends_on 显式串联，每篇配一个可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "用自己的话解释投机解码加速 LLM 推理的基本原理",
+            "说出 DeepSpec 三阶段工作流与三种草稿模型算法的定位",
+            "知道 Released Checkpoints 与 config/ 目录的对应关系"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "投机解码 propose/verify 基本概念",
+            "草稿模型（draft model）与目标模型（target model）",
+            "DeepSpec 三阶段工作流"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README.md 与论文摘要，写一段 200 字的笔记回答：为什么训练草稿模型需要目标模型的中间层隐藏状态？然后在 Hugging Face 上找到 dspark_qwen3_4b_block7 对应的本仓库配置文件路径。",
+          "source_files": [
+            "README.md",
+            "NOTICE"
+          ],
+          "title": "DeepSpec 是什么：投机解码与草稿模型训练全栈",
+          "topic": "介绍投机解码的基本概念（草稿模型提议、目标模型验证），以及 DeepSpec 作为数据准备、草稿模型训练、评估三位一体代码库的定位，梳理 DSpark、DFlash、Eagle3 三种算法的关系。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-repo-structure-and-workflow.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "画出 DeepSpec 的目录树并标注每个目录的职责",
+            "说出数据准备、训练、评估三个阶段的输入输出文件",
+            "独立完成 pip install -r requirements.txt 并浏览各 shell 脚本"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "仓库目录结构",
+            "三阶段流水线",
+            "shell 启动脚本"
+          ],
+          "order": 2,
+          "practice_task": "安装依赖（python -m pip install -r requirements.txt），然后手工绘制一张目录结构图，标注 deepspec/ 下 data、modeling、trainer、eval、utils 各自包含哪些子模块，并把 scripts/ 下三个阶段的脚本连成一张流程图。",
+          "source_files": [
+            "README.md",
+            "scripts/data/README.md",
+            "scripts/train/train.sh",
+            "scripts/eval/eval.sh",
+            "requirements.txt"
+          ],
+          "title": "代码结构与三阶段工作流总览",
+          "topic": "逐层浏览仓库目录（config/、scripts/、deepspec/、eval_datasets/），理解数据准备→训练→评估三阶段各自消费与产出的文件。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-entry-points.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "解释 torch.multiprocessing.spawn 的 per-GPU worker 模型与 torchrun 的区别",
+            "追踪 train.py 从 parse_args 到 trainer.train() 的调用链",
+            "解释 eval.py 如何通过 architectures 字段分发到具体 Evaluator"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "train.py 启动链路",
+            "eval.py 的 EVALUATORS 分发",
+            "spawn 多进程入口"
+          ],
+          "order": 3,
+          "practice_task": "在 eval.py 的 EVALUATORS 字典旁写一份注释表，说明每个 key 来自哪种 draft config 的 architectures 字段；再在 train.py 中标注 local_rank 如何变成全局 rank（对照 deepspec/utils/distributed.py 的 init_dist）。",
+          "source_files": [
+            "train.py",
+            "eval.py",
+            "deepspec/utils/distributed.py"
+          ],
+          "title": "入口文件解析：train.py 与 eval.py 如何自举多 GPU",
+          "topic": "精读两个入口脚本：train.py 如何加载配置、spawn 每个 GPU 一个进程并实例化 trainer_cls；eval.py 如何根据 draft checkpoint 的 architectures 字段选择 Evaluator。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-config-system.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "解释 ConfigNode 如何让 dict 支持属性访问",
+            "用 --opts 覆盖任意嵌套配置字段",
+            "理解 finalize_cfg 在保存 checkpoint 时的作用"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "ConfigNode 属性访问",
+            "load_config 动态导入",
+            "--opts 点路径覆盖"
+          ],
+          "order": 4,
+          "practice_task": "写一个独立小脚本，用 load_config 加载 config/dspark/dspark_qwen3_4b.py，用 parse_opts_to_config 覆盖 train.lr=3e-4 和 data.max_length=2048，打印结果验证；再故意写一个不存在的键观察报错信息。",
+          "source_files": [
+            "deepspec/utils/config.py",
+            "config/dspark/dspark_qwen3_4b.py",
+            "deepspec/utils/constant/public.py"
+          ],
+          "title": "配置系统：Python 配置文件与 --opts 覆盖机制",
+          "topic": "讲解 ConfigNode、load_config 的动态模块加载、finalize_cfg 钩子，以及 train.sh 中 --opts \"train.lr=3e-4\" 这类点路径覆盖是如何实现的。"
+        }
+      ],
+      "order": 1,
+      "title": "认识 DeepSpec：定位、结构与运行方式"
+    },
+    {
+      "id": "u2",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l1-download-and-split.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "运行 download_and_split.py 产出训练 JSONL 与评测 JSONL",
+            "理解 --skip-existing 与 --test-size 参数行为",
+            "确认输出文件里 conversations 字段的格式约定"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "数据集下载与切分",
+            "train/test 划分",
+            "JSONL 输出格式"
+          ],
+          "order": 1,
+          "practice_task": "用一个小数据集（或把 test-size 调大减少数据量）跑通 download_and_split.py，检查输出的 eval_datasets/*.jsonl 中每行是否含 turns 字段，并统计训练集条数。",
+          "source_files": [
+            "scripts/data/download_and_split.py",
+            "scripts/data/README.md"
+          ],
+          "title": "数据下载与训练/评测切分",
+          "topic": "讲解第一步数据脚本：如何从 mlabonne/open-perfectblend 下载数据、切分出训练 JSONL 与留出的评测 user turns。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l2-chat-template-parsing.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "解释 TEMPLATE_REGISTRY 的注册机制与新增模板的步骤",
+            "追踪从 assistant 正则匹配到 token 级 loss_mask 的映射过程",
+            "理解 Gemma4 assistant_loss_prefix 跳过 thought 段的用意"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ChatTemplate/TemplateRegistry",
+            "GeneralParser.parse",
+            "loss_mask 构建"
+          ],
+          "order": 2,
+          "practice_task": "用 Qwen3 的 tokenizer（AutoTokenizer.from_pretrained(\"Qwen/Qwen3-4B\")）构造两轮对话，调用 preprocess_record 得到 input_ids/attention_mask/loss_mask，打印着色文本验证只有 assistant 回复部分 loss_mask 为 1。",
+          "source_files": [
+            "deepspec/data/parser.py"
+          ],
+          "title": "对话模板与 loss_mask：parser.py 的字符到 token 映射",
+          "topic": "剖析 ChatTemplate 注册表（qwen 与 gemma4 两种模板）、GeneralParser 如何渲染对话文本，以及如何用正则匹配 assistant 片段再把字符区间换算成 token 区间生成 loss_mask。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l3-regenerate-answers.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "启动本地 OpenAI 兼容推理服务并用脚本重生成答案",
+            "解释并发、断点续跑（--resume）与错误样本收集逻辑",
+            "理解为什么训练数据必须由目标模型自己重新生成"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "OpenAI 兼容 API 客户端",
+            "并发与限速控制",
+            "失败重试与 resume"
+          ],
+          "order": 3,
+          "practice_task": "任选一个可本地启动的小模型，用 launch_sglang_server.sh（或 vLLM 等价命令）起一个 OpenAI 兼容服务，然后用 generate_train_data.py 对 20 条样本重生成答案，检查输出 JSONL 与 error JSONL 的内容。",
+          "source_files": [
+            "scripts/data/generate_train_data.py",
+            "scripts/data/launch_sglang_server.sh"
+          ],
+          "title": "用推理引擎重生成目标答案",
+          "topic": "讲解如何通过 OpenAI 兼容接口（示例为 SGLang）让目标模型重写 assistant 回复，包括多服务器负载均衡、并发控制、采样参数与断点续跑。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l4-target-cache-format.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "说出 manifest.json、samples.idx、分片文件各自的职责",
+            "手工解码一条 INDEX_RECORD_STRUCT 索引记录",
+            "根据 expected_target_cache_tensor_nbytes 估算缓存体积"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "manifest.json 结构",
+            "samples.idx 定长索引",
+            "分片文件布局"
+          ],
+          "order": 4,
+          "practice_task": "写一段 Python，用 INDEX_RECORD_STRUCT.unpack_from 解码一个真实（或自造的）samples.idx 的前 3 条记录；再按 README 的 38TB 警告，自己计算 seq_len=4096、hidden_size=2560、5 层 target、100 万样本时的缓存字节数。",
+          "source_files": [
+            "deepspec/data/target_cache_dataset.py",
+            "scripts/data/README.md"
+          ],
+          "title": "目标缓存的存储协议：manifest、索引与分片",
+          "topic": "讲解 target cache 的二进制协议：manifest.json 的字段校验、struct 定长索引记录（sample_id/shard_id/seq_len/各 tensor 偏移）、bfloat16 隐藏态与 int32 token 的存储约定。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4",
+            "u2-l3"
+          ],
+          "filename": "u2-l5-prepare-target-cache.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "解释 forward hook 如何截取指定 decoder 层的原始输出",
+            "说明 -1 层（embedding 输出）与普通层的区别",
+            "描述分片写入、临时目录与断点续跑的工程处理"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "register_forward_hook 捕获中间层",
+            "分片写入与 manifest 生成",
+            "断点续跑"
+          ],
+          "order": 5,
+          "practice_task": "加载一个任意小型 CausalLM，仿照 run_target_forward_with_hooks 注册 forward hook，抓取第 0 层和 embed_tokens 的输出并打印形状；再解释为什么不用 output_hidden_states（提示：见 base_evaluator.assert_no_final_target_layer 的注释）。",
+          "source_files": [
+            "scripts/data/prepare_target_cache.py",
+            "deepspec/data/target_cache_dataset.py"
+          ],
+          "title": "prepare_target_cache：用 forward hook 抓取目标中间层",
+          "topic": "精读缓存生成脚本：如何对 Gemma4/Qwen3 取 backbone、用 register_forward_hook 捕获 target_layer_ids 各层输出、按 rank 分片写入并在结束时 finalize 索引与 manifest。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u2-l6-cache-dataset-loading.md",
+          "id": "u2-l6",
+          "learning_goals": [
+            "解释 mmap + 偏移量随机读取单条样本的流程",
+            "说明 CacheCollator 如何把变长样本组 batch",
+            "理解 CUDAPrefetcher 用后台线程和独立 CUDA stream 做 prefetch 的原理"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "CacheDataset mmap 读取",
+            "CacheCollator 组 batch",
+            "CUDAPrefetcher 双缓冲"
+          ],
+          "order": 6,
+          "practice_task": "阅读 CacheDataset.__getitem__ 与 CacheCollator，画出一份数据从磁盘字节到 GPU tensor 的完整旅程图（含 dtype 转换，见 move_batch_to_device 里 int64 的转换注释）；再统计一次 collate 后 batch 中各字段的形状。",
+          "source_files": [
+            "deepspec/data/target_cache_dataset.py",
+            "deepspec/data/jsonl_dataset.py",
+            "deepspec/data/cuda_prefetcher.py"
+          ],
+          "title": "训练侧读取：CacheDataset、CacheCollator 与 CUDA 预取",
+          "topic": "讲解训练时如何用 mmap 按索引随机读取缓存样本、collator 如何拼 batch，以及 CUDAPrefetcher 如何用后台线程加独立 CUDA 流重叠 H2D 拷贝与计算。"
+        }
+      ],
+      "order": 2,
+      "title": "数据流水线：从原始语料到目标缓存"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4",
+            "u2-l6"
+          ],
+          "filename": "u3-l1-basetrainer-init.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "描述 __init__ 中模型构建、FSDP 包装、数据集校验、优化器创建的顺序",
+            "解释为什么草稿模型的 embedding 和 lm_head 直接冻结复用目标模型权重",
+            "推导 gradient_accumulation_steps 与 steps_per_epoch 的计算公式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "BaseTrainer.__init__ 流程",
+            "build_models 冻结 embed/lm_head",
+            "_compute_training_schedule"
+          ],
+          "order": 1,
+          "practice_task": "对照 _compute_training_schedule 手工计算：world_size=8、local_batch_size=1、global_batch_size=512、dataset_size=100000、epochs=10 时的梯度累积步数、每 epoch 样本数与总步数；再用 Python 复算验证。",
+          "source_files": [
+            "deepspec/trainer/base_trainer.py",
+            "deepspec/trainer/dspark_trainer.py"
+          ],
+          "title": "BaseTrainer 初始化：模型构建、冻结权重与 FSDP 包装",
+          "topic": "拆解 BaseTrainer.__init__ 的完整顺序：init_dist、断点发现、build_models（从目标模型拷贝并冻结 embedding/lm_head）、torch.compile、FSDP 包装、数据集校验、训练日程计算与优化器构建。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-training-loop.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "解释 no_sync 上下文在梯度累积中的作用",
+            "说明 next_micro_step 为何是训练进度的唯一真相源",
+            "描述 FSDP.clip_grad_norm_ 与 optimizer.step 的配合"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "train() 主循环",
+            "梯度累积与 no_sync",
+            "SuspendController 挂起保存"
+          ],
+          "order": 2,
+          "practice_task": "在 train() 中标注每个变量随一次迭代如何变化（next_micro_step、global_step、should_sync）；然后写伪代码把 SuspendController.requested() 触发时的保存-挂起-退出路径单独梳理出来。",
+          "source_files": [
+            "deepspec/trainer/base_trainer.py",
+            "deepspec/utils/hfai_suspend.py"
+          ],
+          "title": "训练主循环：梯度累积、no_sync 与挂起保存",
+          "topic": "精读 train() 方法：CUDAPrefetcher 迭代、should_sync 判定、no_sync 上下文、loss.backward、梯度裁剪、优化器步进、按 checkpointing_steps 存盘，以及 SuspendController 的挂起-保存流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l3-distributed-and-sampler.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "解释本仓库不依赖 torchrun 的 rank 计算方式",
+            "说明 StatelessResumableDistributedSampler 如何从任意全局样本偏移恢复",
+            "区分 global main process 与 local main process 的打印/落盘职责"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "init_dist rank 推导",
+            "StatelessResumableDistributedSampler",
+            "main process 工具函数"
+          ],
+          "order": 3,
+          "practice_task": "模拟 world_size=4、samples_per_epoch=100、local_batch_size=1，分别计算从 start_offset_samples=0 和 =37 恢复时每个 rank 会读到的样本索引序列，验证任何样本不重不漏。",
+          "source_files": [
+            "deepspec/utils/distributed.py",
+            "deepspec/trainer/base_trainer.py"
+          ],
+          "title": "分布式启动与无状态可恢复采样器",
+          "topic": "讲解 init_dist 如何在无 torchrun 环境变量时默认单机多卡，rank/world_size 如何由 node_rank 与 GPU 数推导，以及 StatelessResumableDistributedSampler 如何支持从任意样本偏移断点续训。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l4-optimizer-and-scheduler.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "解释 WarmupScheduler 两阶段切换的触发条件",
+            "说明 BF16Optimizer 如何管理主权重与梯度",
+            "根据 warmup_ratio 推算任意 step 的学习率"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TwoStageScheduler",
+            "WarmupScheduler",
+            "BF16Optimizer"
+          ],
+          "order": 4,
+          "practice_task": "实例化一个玩具参数量和 WarmupScheduler（total=1000, warmup_ratio=0.04），画出/打印前 100 步的学习率曲线，标出 warmup 结束后进入 cosine 衰减的转折点。",
+          "source_files": [
+            "deepspec/utils/optim.py"
+          ],
+          "title": "BF16Optimizer 与两段式学习率调度",
+          "topic": "剖析 TwoStageScheduler/WarmupScheduler 的状态保存与恢复细节，以及 BF16Optimizer 如何包装训练（含 lr、warmup_ratio、weight_decay、total_steps 的传入方式，见 BaseTrainer 中的调用）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l5-checkpoint-and-resume.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "解释 FSDP state dict 的 gathered 与 sharded 两种形态及何时用哪种",
+            "说明 step_latest 符号链接的原子更新流程",
+            "描述从 checkpoint 恢复模型权重与训练状态的完整调用链"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "save_checkpoint/load_checkpoint",
+            "step_latest 符号链接",
+            "train_config.py 回写"
+          ],
+          "order": 5,
+          "practice_task": "追踪一次 save_checkpoint 调用：列出最终 checkpoint 目录中的全部文件及生成者；再对照 discover_latest_checkpoint 与 load_training_state，写出从 step_latest 恢复时 next_micro_step 之外还恢复了哪些状态。",
+          "source_files": [
+            "deepspec/trainer/ckpt_manager.py",
+            "deepspec/utils/io.py",
+            "deepspec/trainer/base_trainer.py"
+          ],
+          "title": "检查点管理：保存、step_latest 原子符号链接与断点续训",
+          "topic": "讲解 ckpt_manager：step_latest 符号链接的发现与原子替换（safe_symlink）、训练配置随 checkpoint 回写为 train_config.py（含 --opts 追加）、FSDP state dict 的合并保存与恢复。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l6-logging-and-metrics.md",
+          "id": "u3-l6",
+          "learning_goals": [
+            "解释 add_metric 的 num/den 归一化设计",
+            "说明训练进度、ETA 与学习率是如何被记录的",
+            "用 TensorBoard 打开一次训练日志并找到关键曲线"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "add_metric 聚合",
+            "training_logger 会话",
+            "TensorBoard 写入"
+          ],
+          "order": 6,
+          "practice_task": "写一个 20 行的演示脚本：循环调用 add_metric 记录两个假指标，再调用 flush 并把结果写成 TensorBoard 事件文件，用 tensorboard --logdir 验证曲线出现。",
+          "source_files": [
+            "deepspec/utils/metrics.py",
+            "deepspec/utils/training_logger.py"
+          ],
+          "title": "指标聚合与训练日志：metrics 与 training_logger",
+          "topic": "讲解 add_metric 的分子/分母累积模式、跨 rank 聚合与 flush 时机，以及 training_logger 如何把 loss、grad_norm、lr、进度和 ETA 写入 TensorBoard。"
+        }
+      ],
+      "order": 3,
+      "title": "训练框架：BaseTrainer 的骨架工程"
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u4-l1-dspark-anchors-and-blocks.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "解释 build_anchor_candidate_mask 对锚点与首个监督目标的双约束",
+            "描述 create_noise_embed 如何在 mask token 流中放回锚点 token",
+            "读懂 dspark_mask_mod 中上下文注意力与块内注意力的或逻辑"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "sample_anchor_positions",
+            "create_noise_embed/create_position_ids",
+            "create_dspark_attention_mask"
+          ],
+          "order": 1,
+          "practice_task": "构造一个 seq_len=16、loss_mask 只在 6..12 为 1 的玩具样本，调用 sample_anchor_positions(num_anchors=4) 打印锚点与 keep_mask；再手算 create_dspark_attention_mask 在 block_size=3 时某个 query 能看到哪些 key。",
+          "source_files": [
+            "deepspec/modeling/dspark/common.py"
+          ],
+          "title": "DSpark 核心机制：锚点采样、噪声块与非因果掩码",
+          "topic": "讲解 DSpark 的训练构图方式：从 loss_mask 采样锚点位置、生成以锚点开头的 mask token 噪声块、用 flex_attention 的 block mask 实现“上下文 + 本块内可见”的非因果注意力。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-qwen3-dspark-model.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "解释 K/V 由 target_hidden_states 与噪声 embedding 拼接的动机",
+            "说明草稿 config 如何从目标 config 派生（层数、target_layer_ids、block_size）",
+            "追踪一次训练 forward 的输入输出张量形状"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Qwen3DSparkAttention 双源 K/V",
+            "build_draft_config",
+            "_forward_backbone 与 forward"
+          ],
+          "order": 2,
+          "practice_task": "对照 build_draft_config 列出草稿模型 config 与 Qwen3-4B 目标 config 的字段差异表；然后在纸上标出一次 forward 中 input_ids、target_hidden_states、draft_logits 的形状（对照 DSparkForwardOutput 的注释）。",
+          "source_files": [
+            "deepspec/modeling/dspark/qwen3/modeling.py",
+            "deepspec/modeling/dspark/qwen3/config.py",
+            "deepspec/modeling/dspark/common.py"
+          ],
+          "title": "Qwen3DSparkModel：复用 HF 组件的草稿模型结构",
+          "topic": "精读草稿模型实现：注意力层如何对上下文隐状态与噪声 token 分别做 k/v 投影再拼接、如何复用 transformers 的 Qwen3RMSNorm/RoPE 等组件，以及 config 如何由目标模型 config 加 model_args 派生。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-markov-head.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "解释 markov_w1/markov_w2 构成的低秩双线性偏置",
+            "描述 sample_block_tokens 逐 token 采样时 logits 的修正方式",
+            "对比开启与关闭 markov head（markov_rank=0）的行为差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "VanillaMarkov 双线性偏置",
+            "apply_step_logits/apply_block_logits",
+            "sample_block_tokens 逐 token 采样"
+          ],
+          "order": 3,
+          "practice_task": "实例化一个 vocab_size=100、markov_rank=16 的 VanillaMarkov，喂随机 base_logits 与 first_prev_token_ids，验证 apply_block_logits 与逐条 apply_step_logits 相加结果一致；再手推一次 sample_block_tokens 的循环状态。",
+          "source_files": [
+            "deepspec/modeling/dspark/markov_head.py",
+            "deepspec/utils/sampling.py"
+          ],
+          "title": "Markov 头：基于前一 token 的逐步 logits 修正",
+          "topic": "讲解 markov head 的设计：用前一 token 的 embedding 经低秩映射生成 logits 偏置，训练时作用到整块 logits，推理采样时逐 token 迭代修正。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l4-dspark-loss.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "写出总损失的各 alpha 加权组合",
+            "解释位置衰减权重 exp(-t/gamma) 的作用",
+            "说明跨 rank all_reduce 损失分母的原因"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "CE 损失与位置衰减",
+            "L1 概率距离蒸馏",
+            "accept rate 与置信度损失"
+          ],
+          "order": 4,
+          "practice_task": "构造形状为 (1, 2, 4, V) 的玩具 draft_logits/aligned_target_logits/eval_mask，分别单独置 ce_loss_alpha=1 其余为 0、再单独置 l1_loss_alpha=1，调用 compute_dspark_loss 验证各分量的量级与 mask 生效。",
+          "source_files": [
+            "deepspec/modeling/dspark/loss.py",
+            "deepspec/modeling/dspark/common.py"
+          ],
+          "title": "DSpark 训练损失：CE、L1 蒸馏与置信度监督的组合",
+          "topic": "剖析 compute_dspark_loss：带位置指数衰减的交叉熵、与目标分布的 L1 距离（1-accept rate）、置信度头损失，以及各分项分母的跨 rank all_reduce 归一化。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l5-gemma4-variant.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "列出 Gemma4 与 Qwen3 草稿实现的差异点",
+            "解释 config 中 chat_template 与 mask_token_id 等字段随模型族的变化",
+            "说明新增一个模型族时 modeling/config 需要改动的面"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Gemma4DSparkModel 差异",
+            "gemma4 build_draft_config",
+            "dspark_gemma4_12b 配置"
+          ],
+          "order": 5,
+          "practice_task": "diff 对比 qwen3 与 gemma4 两个目录下的 config.py 与 modeling.py，写一份差异清单（至少列出注意力结构、norm、config 派生三方面）；再对比 config/dspark 下两族 yaml 式配置的 model 字段差异。",
+          "source_files": [
+            "deepspec/modeling/dspark/gemma4/modeling.py",
+            "deepspec/modeling/dspark/gemma4/config.py",
+            "config/dspark/dspark_gemma4_12b.py",
+            "deepspec/modeling/dspark/qwen3/modeling.py"
+          ],
+          "title": "接入第二个模型族：Gemma4 变体与模型无关层",
+          "topic": "对比 gemma4 与 qwen3 两套 DSpark 实现，理解哪些逻辑放在共享的 common.py/loss.py，哪些必须按模型族重写，以及 Gemma4 目标在 config 上的特殊处理。"
+        }
+      ],
+      "order": 4,
+      "title": "DSpark 建模：块式半自回归草稿模型"
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u5-l1-eagle3-model.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "解释 5 层隐状态拼接输入的构造（extract_eagle3_context_feature）",
+            "说明 ttt_length 与 draft_num_hidden_layers=1 的设计约束",
+            "描述 compile_friendly_flex_attention 的编译缓存技巧"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Eagle3 上下文特征拼接",
+            "单层草稿 + ttt_length",
+            "flex_attention 编译包装"
+          ],
+          "order": 1,
+          "practice_task": "对比 eagle3 与 dspark 的 qwen3 config.py：列出各自从目标 config 派生的字段差异；再解释为什么 Eagle3 校验 target_layer_ids 必须恰好 5 层而 DSpark 不必。",
+          "source_files": [
+            "deepspec/modeling/eagle3/qwen3/modeling.py",
+            "deepspec/modeling/eagle3/common.py",
+            "config/eagle3/eagle3_qwen3_4b.py"
+          ],
+          "title": "Eagle3 草稿模型：TTT 训练与单层草稿头",
+          "topic": "讲解 Eagle3 的建模思路：拼接多层目标隐状态作为输入特征、train-time test（ttt_length）逐步展开、单隐藏层草稿，以及 flex_attention 的编译友好封装。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1",
+            "u3-l1"
+          ],
+          "filename": "u5-l2-eagle3-loss-and-trainer.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "解释 Eagle3 训练时“隐状态 i 对 token i+1、RoPE 位置保持 i”的约定",
+            "描述 step_loss_decay 对逐步损失的衰减",
+            "对比 Qwen3Eagle3Trainer.run_batch 与 DSpark 版本的输入差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "compute_eagle3_loss",
+            "位置错位约定",
+            "eagle3_trainer"
+          ],
+          "order": 2,
+          "practice_task": "画出 compute_eagle3_loss 的张量流图（batch 字段→hidden→逐步 logits→加权 loss）；再写一段伪代码验证 ttt_length=7 时会产生 7 个带衰减权重的 CE 项。",
+          "source_files": [
+            "deepspec/modeling/eagle3/loss.py",
+            "deepspec/trainer/eagle3_trainer.py"
+          ],
+          "title": "Eagle3 损失与训练器：逐步 CE 与位置错位约定",
+          "topic": "剖析 compute_eagle3_loss 的逐步交叉熵与 step_loss_decay 衰减，以及 Qwen3Eagle3Trainer 如何复用 BaseTrainer 但重写 build_models 与 run_batch。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l4",
+            "u5-l2"
+          ],
+          "filename": "u5-l3-dflash-and-algorithm-comparison.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "指出 DFlash 是 DSpark 实现的简化配置而非独立模型代码",
+            "用表格对比三种算法在头结构与损失上的差异",
+            "根据需求选择合适的 config 并说明理由"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "DFlash=关掉 markov/置信度/L1 的 DSpark",
+            "三算法损失对比",
+            "config 选择"
+          ],
+          "order": 3,
+          "practice_task": "写一份对比表：以 dspark_qwen3_4b、dflash_qwen3_4b、eagle3_qwen3_4b 三份 config 为准，逐字段列出 model 与 train 的差异，并推断每种设置对显存、训练稳定性与解码接受率的影响。",
+          "source_files": [
+            "config/dflash/dflash_qwen3_4b.py",
+            "config/dspark/dspark_qwen3_4b.py",
+            "config/eagle3/eagle3_qwen3_4b.py",
+            "README.md"
+          ],
+          "title": "DFlash 配置化实现与三种算法对比",
+          "topic": "展示 DFlash 如何通过同一套 DSpark 代码仅改配置（markov_rank=0、confidence_head_alpha=0、纯 CE 损失）实现，并横向对比 DSpark/DFlash/Eagle3 的结构、损失与适用场景。"
+        }
+      ],
+      "order": 5,
+      "title": "Eagle3 建模与三种算法横向对比"
+    },
+    {
+      "id": "u6",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u6-l1-eval-entry-and-framework.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "解释 EVALUATORS 按架构名分发与 TASKS 数据集配额的设计",
+            "说明 eval_datasets/*.jsonl 的 turns 格式约束",
+            "理解多卡评测时样本如何分片与指标如何 allreduce"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "eval.py 分发",
+            "load_and_process_dataset",
+            "run_dataset 与指标汇总"
+          ],
+          "order": 1,
+          "practice_task": "查看 eval_datasets/gsm8k.jsonl 的前两行确认 turns 字段；然后在 TASKS 里临时只保留 (\"gsm8k\", 8)，跑通一次对已发布 checkpoint（如 deepseek-ai/dspark_qwen3_4b_block7）的小规模评测并解读输出表格各列。",
+          "source_files": [
+            "eval.py",
+            "deepspec/eval/base_evaluator.py",
+            "eval_datasets/gsm8k.jsonl"
+          ],
+          "title": "评估框架：eval.py 入口与 BaseEvaluator 骨架",
+          "topic": "讲解评估侧的整体结构：EVALUATORS 分发表、TASKS 数据集与样本数、数据集 JSONL 的 turns 约定、多卡分片与结果表格（accept_len、verify_rate、accept_rate@k）的生成。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-speculative-decoding-loop.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "解释 prefill 后首 token 直接采样的原因",
+            "描述 propose→verify→update 每轮提交的 token 数与位置推进规则",
+            "说明 DynamicCache.crop 在回退未被接受 token 时的作用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "prefill 与首 token",
+            "propose/verify/update 钩子",
+            "KV cache 裁剪与循环推进"
+          ],
+          "order": 2,
+          "practice_task": "写一份时序图：一个 max_proposal_tokens=7、两轮验证分别接受 3 个和 0 个草稿 token 的例子中，output_ids、past_key_values_target、start 的逐轮变化；验证每轮恰好提交 accepted+1 个 token。",
+          "source_files": [
+            "deepspec/eval/base_evaluator.py"
+          ],
+          "title": "投机解码主循环：generate_decoding_sample 的钩子设计",
+          "topic": "逐行精读通用解码循环：目标模型 prefill、init_context/propose/update/post_verify 四个算法钩子、acceptance_lengths 等统计量的收集，以及 past_key_values_target 的 crop 维护。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l3-verification-and-rejection-sampling.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "推导 accept_prob = min(1, p_target/p_draft) 保持目标分布不变的原因",
+            "解释 accept_prefix_mask 用 cumprod 得到前缀接受的技巧",
+            "说明 residual 采样如何在首个拒绝位修正分布"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "logits_to_probs/temperature",
+            "接受概率与 cumprod 前缀",
+            "sample_residual 修正采样"
+          ],
+          "order": 3,
+          "practice_task": "实现一个玩具验证器：自造 target/draft 概率分布，按 verify_draft_tokens 的公式采样 10000 次被接受 token 数，统计平均接受长度，并与理论值 sum(cumprod(accept_prob)) 比较；再验证采样结果的 token 分布与目标分布一致。",
+          "source_files": [
+            "deepspec/eval/base_evaluator.py",
+            "deepspec/utils/sampling.py"
+          ],
+          "title": "验证与拒绝采样：verify_draft_tokens 的数学与实现",
+          "topic": "深挖拒绝采样验证：接受概率 p_target(x)/p_draft(x) 的截断、随机数比较与前缀 cumprod、被拒位置的 residual 采样，以及停止 token 截断与 committed_tokens 的拼装。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2",
+            "u4-l2"
+          ],
+          "filename": "u6-l4-dspark-evaluator-and-draft-ops.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "解释草稿 KV cache 前缀与目标 KV cache 的对应维护方式",
+            "描述 _update 如何从验证输出提取被接受前缀的目标隐状态",
+            "追踪一次 DSpark 提议从 mask token 块到 draft_probs 的完整路径"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "forward_dspark_draft_block",
+            "build_dspark_proposal 与置信度早停",
+            "_init_context/_update 状态维护"
+          ],
+          "order": 4,
+          "practice_task": "对照 _propose 写出一次块提议的伪代码（含 draft_input_ids 构造、position 切片、cache crop）；再解释 forward_dspark_draft_block 里 past_key_values_draft.crop(start) 为什么必须发生在取回 block_hidden 之后。",
+          "source_files": [
+            "deepspec/eval/dspark/evaluator.py",
+            "deepspec/eval/dspark/draft_ops.py"
+          ],
+          "title": "DSpark 评估器：块提议、草稿缓存与上下文更新",
+          "topic": "讲解 DSpark 如何实现四个钩子：用 mask token 块做一次 forward 提议整块、forward_dspark_draft_block 维护草稿 KV cache、_update 只保留被接受前缀的目标隐状态。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l4",
+            "u4-l4"
+          ],
+          "filename": "u6-l5-confidence-calibration.md",
+          "id": "u6-l5",
+          "learning_goals": [
+            "解释置信度阈值如何提前截断低置信提议",
+            "手算 ECE 与 Brier 分解",
+            "说明 confidence_threshold 非 0 时为何关闭校准记录"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ConfidenceHeadRecorder",
+            "PerPositionConfidenceMetrics（ECE/AUROC/Brier）",
+            "可靠性图与阈值早停"
+          ],
+          "order": 5,
+          "practice_task": "自造 500 个 (预测概率, 实际0/1标签) 对，实现 10 桶 ECE 和 Brier score 并与逐位置加权结果对比；再跑一次 --confidence-threshold 0.6 的评测，对比接受长度与 verify_rate 相对 0.0 的变化。",
+          "source_files": [
+            "deepspec/eval/dspark/confidence_head.py",
+            "deepspec/eval/dspark/evaluator.py"
+          ],
+          "title": "置信度头评估：ECE、AUROC、Brier 与可靠性图",
+          "topic": "剖析 ConfidenceHeadRecorder：逐位置把 cumprod 置信预测与真实接受前缀对比，计算 ECE/AUROC/Brier、输出 reliability_diagram，并支持按阈值提前停止提议。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2",
+            "u5-l1"
+          ],
+          "filename": "u6-l6-eagle3-evaluator.md",
+          "id": "u6-l6",
+          "learning_goals": [
+            "解释 Eagle3 草稿 cache 预填充时的 token 错位对齐",
+            "说明单层草稿约束与多 token cache 扩展的安全性关系",
+            "对比 Eagle3 与 DSpark 评估器的状态结构差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "extend_draft_cache 预填充",
+            "逐 token 提议循环",
+            "draft_num_hidden_layers==1 约束"
+          ],
+          "order": 6,
+          "practice_task": "画图对比 DSpark（块提议）与 Eagle3（链式逐 token 提议）一轮验证的状态更新；解释 evaluator 中 assert draft_num_hidden_layers == 1 注释描述的缓存安全隐患。",
+          "source_files": [
+            "deepspec/eval/eagle3/evaluator.py",
+            "deepspec/modeling/eagle3/qwen3/modeling.py"
+          ],
+          "title": "Eagle3 评估器：链式提议与草稿缓存扩展",
+          "topic": "讲解 Eagle3 评估钩子：prefill 时用错位 token 填充草稿 cache、逐 token 链式提议 ttt_length 个 draft token、提交多 token 时的 extend_draft_cache 约定。"
+        }
+      ],
+      "order": 6,
+      "title": "评估系统：投机解码的提议、验证与度量"
+    },
+    {
+      "id": "u7",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l5",
+            "u6-l4"
+          ],
+          "filename": "u7-l1-add-new-target-model.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "列出新增目标模型族需要创建/修改的全部文件清单",
+            "解释 draft config 派生与 initialize_embeddings_and_head 的接入点",
+            "说明 evaluator 注册与 trainer 子类化的最小实现"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "modeling/<family> 新目录",
+            "trainer 子类与 config 文件",
+            "EVALUATORS 注册"
+          ],
+          "order": 1,
+          "practice_task": "以 Llama 或其他 HF 模型族为目标，写一份不落地的接入设计文档：给出需要新建的文件路径（modeling/dspark/<family>/、config/dspark/<family>.py、eval 侧 evaluator）、每个文件要实现的关键方法签名，以及预计要处理的差异点。",
+          "source_files": [
+            "deepspec/modeling/dspark/qwen3/config.py",
+            "deepspec/modeling/dspark/gemma4/config.py",
+            "deepspec/trainer/dspark_trainer.py",
+            "eval.py"
+          ],
+          "title": "扩展实践：为一个新目标模型族接入 DeepSpec",
+          "topic": "以现有 Qwen3/Gemma4 双实现为模板，总结接入一个新目标模型族需要动的地方：modeling/<family>/、config 文件、trainer 子类、evaluator 注册与 chat_template。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2",
+            "u4-l1"
+          ],
+          "filename": "u7-l2-performance-engineering.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "解释 torch.compile(dynamic=True) 与 recompile_limit 的取舍",
+            "说明 flex_attention block mask 相对普通 attention 掩码的收益",
+            "量化 CUDAPrefetcher 与 no_sync 对吞吐的贡献"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "torch.compile 与动态形状",
+            "flex_attention block mask",
+            "CUDA stream 预取与 no_sync"
+          ],
+          "order": 2,
+          "practice_task": "设计一个消融实验表：在固定小数据集上分别关闭 torch_compile、把 flex_attention 换成 eager、去掉 CUDAPrefetcher，各跑 20 步记录 step 耗时与显存峰值（可用 torch.cuda.max_memory_allocated），并分析结果。",
+          "source_files": [
+            "deepspec/trainer/base_trainer.py",
+            "deepspec/modeling/eagle3/common.py",
+            "deepspec/data/cuda_prefetcher.py",
+            "deepspec/modeling/dspark/common.py"
+          ],
+          "title": "性能工程：torch.compile、flex_attention 与数据预取",
+          "topic": "汇总代码库里的性能手段：dynamic torch.compile、编译版 flex_attention/create_block_mask、CUDA stream 预取、FSDP sharding_strategy 选择与 no_sync 梯度累积。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l5",
+            "u6-l4",
+            "u2-l5"
+          ],
+          "filename": "u7-l3-end-to-end-capstone.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "独立完成小规模端到端训练与评估全流程",
+            "解释中途 kill 进程后从 step_latest 恢复的过程",
+            "根据 accept_len 与 verify_rate 判断草稿模型质量"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "小规模数据准备",
+            "--opts 缩小训练规模",
+            "断点续训与评测解读"
+          ],
+          "order": 3,
+          "practice_task": "端到端实战：用几百条自造（或小子集）数据生成一个小目标缓存（注意缩小 target_layer_ids 与 max_length 控制磁盘），以 --opts 覆盖 num_train_epochs=1、global_batch_size、checkpointing_steps 跑通训练；中途手动 kill 一次验证断点续训；最后用 eval.py 在 gsm8k 前 30 条上评测，报告 accept_len 与 verify_rate。",
+          "source_files": [
+            "scripts/data/prepare_data.sh",
+            "scripts/data/README.md",
+            "scripts/train/train.sh",
+            "scripts/eval/eval.sh"
+          ],
+          "title": "毕业实战：从数据到评测的端到端小规模全流程",
+          "topic": "综合全部知识，把三阶段串成一次可控成本的真实运行：缩小数据集与缓存规模、用 --opts 调小 batch 与步数、验证断点续训，最后评测并解读指标。"
+        }
+      ],
+      "order": 7,
+      "title": "扩展与二次开发实战"
+    }
+  ]
+}
