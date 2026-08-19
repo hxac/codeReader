@@ -1,14 +1,13 @@
 {
-  "head": "28c0f4aef89d298a08176977d9839671827f5528",
+  "head": "fa00dccc42311f8dc71c533105488b0dbd518138",
   "project": "zed-crates-lsp",
-  "rationale": "zed 的 lsp crate 体量很小（仅 src/lsp.rs 与 src/input_handler.rs 两个文件、约 2700 行），但信息密度极高：它实现了一个完整的、基于 stdio 的 JSON-RPC/LSP 客户端运行时。大纲因此按「协议消息 → 进程生命周期 → RPC 核心机制 → 深水区专题」四层递进：第一单元先建立 JSON-RPC 消息模型与 Content-Length 分帧的直觉，这是读懂后续一切机制的语言基础；第二单元沿「启动子进程 → IO 任务管线 → initialize 握手 → shutdown 善后」的生命周期主线走一遍真实服务器交互；第三单元深入本 crate 最核心的 request/notify 双向机制，覆盖超时、取消、入站分发与 workspace/文档同步 API；第四单元留给背压设计、Subscription 内存语义、FakeLanguageServer 测试体系与可观测性/脱敏这些需要前置知识的进阶主题。每篇讲义都锚定到实际确认存在的源码文件（crate 内两个源文件，加上 util crate 的 ConnectionResult/command/redact 交叉引用），practice_task 均以 crate 内已有测试（如 test_fake、test_backpressure_when_messages_are_not_consumed、test_subscription_leaks_handlers_after_server_drop）为样板，读者可在 Zed workspace 内直接用 cargo test -p lsp 验证成果。",
+  "rationale": "zed 的 lsp crate 体量很小（仅 src/lsp.rs 与 src/input_handler.rs 两个文件、约 2700 行），但信息密度极高：它实现了一个完整的、基于 stdio 的 JSON-RPC/LSP 客户端运行时。大纲因此按「协议消息 → 进程生命周期 → RPC 核心机制 → 深水区专题」四层递进：第一单元先建立 JSON-RPC 消息模型与 Content-Length 分帧的直觉，这是读懂后续一切机制的语言基础；第二单元沿「启动子进程 → IO 任务管线 → initialize 握手 → shutdown 善后」的生命周期主线走一遍真实服务器交互；第三单元深入本 crate 最核心的 request/notify 双向机制，覆盖超时、取消、入站分发与 workspace/文档同步 API；第四单元留给背压设计、Subscription 内存语义、FakeLanguageServer 测试体系与可观测性/脱敏这些需要前置知识的进阶主题。每篇讲义都锚定到实际确认存在的源码文件（crate 内两个源文件，加上 util crate 的 command/redact/util 交叉引用），practice_task 均以 crate 内已有测试（如 test_fake、test_backpressure_when_messages_are_not_consumed、test_subscription_leaks_handlers_after_server_drop）为样板，读者可在 Zed workspace 内直接用 cargo test -p lsp 验证成果。本次增量核对（28c0f4ae → fa00dccc）：git diff 确认 crates/lsp 全部源码、被引用的 crates/util 三个文件及 workspace 根 Cargo.toml 在两个 HEAD 之间零变化，因此全部 16 篇讲义维持原大纲不变，action 均为 keep。",
   "units": [
     {
       "id": "u1",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -35,7 +34,7 @@
           "topic": "lsp crate 在 Zed workspace 中的位置、它对官方 lsp-types crate 的整体再导出（pub use lsp_types::*）、以及 src/lsp.rs 与 src/input_handler.rs 两个源码文件的职责划分。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -63,7 +62,7 @@
           "topic": "RequestId、Request、Notification、AnyResponse、Response/LspResult、NotificationOrRequest 等消息结构体，以及 serde(untagged)、skip_serializing_if、RawValue 借用式反序列化等技巧。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -91,15 +90,15 @@
           "topic": "src/input_handler.rs 中 LspStdoutHandler 如何按 Content-Length 头切分字节流、read_headers 的增量读取逻辑，以及解析后如何区分通知与响应。"
         }
       ],
+      "level": "beginner",
       "order": 1,
       "title": "走近 lsp crate：协议与消息"
     },
     {
       "id": "u2",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -127,7 +126,7 @@
           "topic": "LanguageServerBinary 与 LanguageServerBinaryOptions 的含义，以及 LanguageServer::new 如何 spawn 子进程、把 stdin/stdout/stderr 全部 piped、设置 kill_on_drop 并推导工作目录与 root_uri。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u1-l3"
@@ -157,7 +156,7 @@
           "topic": "new_internal 如何对 Stdin/Stdout/Stderr 做泛型抽象，建立 outbound 通道、通知序列化通道与各类 handler 表，并 spawn handle_incoming_messages、handle_stderr、handle_outgoing_messages 三个任务。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -184,7 +183,7 @@
           "topic": "default_initialize_params 构造的完整 ClientCapabilities、SEMANTIC_TOKEN_TYPES/MODIFIERS 常量，以及 initialize() 如何发送 Initialize、保存 ServerCapabilities 并补发 Initialized 通知。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u2-l3"
@@ -212,15 +211,15 @@
           "topic": "shutdown() 如何在 SERVER_SHUTDOWN_TIMEOUT 内用 select! 让 Shutdown 请求与定时器竞争、随后发送 Exit 通知、等待 barrier、kill 子进程，以及 Drop for LanguageServer 的自动关闭。"
         }
       ],
+      "level": "intermediate",
       "order": 2,
       "title": "服务器进程：启动、握手与关闭"
     },
     {
       "id": "u3",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -246,7 +245,7 @@
           "topic": "notify/notify_internal 与 NotificationSerializer：为什么发送的是「序列化闭包」而非序列化好的字符串，notification 通道又如何维护消息顺序与级联关闭。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u1-l3"
@@ -275,7 +274,7 @@
           "topic": "request<T> 的完整链路——AtomicI32 分配请求 id、向 response_handlers 注册回调、oneshot 通道回传结果，以及 LspRequest 如何包装 future 并对外暴露请求 id。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -303,7 +302,7 @@
           "topic": "request_timeout_future 对零与 Duration::MAX 的特殊处理、select! 在响应与定时器之间的竞争、cancel_on_drop 借助 $/cancelRequest 取消请求，以及 ConnectionResult 的三种终态。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u3-l2"
@@ -331,7 +330,7 @@
           "topic": "handle_incoming_messages 主循环：$/cancelRequest 特判、按 method 查表调用 handler、未处理请求回 MethodNotFound、yield_now 防饿死；以及 on_custom_request 如何把 server→client 请求变成响应任务。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3",
             "u3-l1"
@@ -359,15 +358,15 @@
           "topic": "add/remove/set_workspace_folders 如何依据服务器能力决定是否发送变更通知、workspace_folder_for_uri 的命名推导，以及 register_buffer/unregister_buffer 对 didOpen/didClose 的封装。"
         }
       ],
+      "level": "intermediate",
       "order": 3,
       "title": "RPC 核心：通知、请求、分发"
     },
     {
       "id": "u4",
-      "level": "advanced",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3",
             "u3-l4"
@@ -394,7 +393,7 @@
           "topic": "INCOMING_MESSAGE_QUEUE_CAPACITY = 128 的取舍：前台卡住时读取任务停摆、让 OS 管道对服务器施加反向压力，以及 test_backpressure_when_messages_are_not_consumed 的验证手法。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l4"
           ],
@@ -421,7 +420,7 @@
           "topic": "Subscription 的 Notification/Io 两个变体、Drop 时通过 Weak 升级摘除 handler、detach 的语义，以及 test_subscription_leaks_handlers_after_server_drop 揭示的 handler 表共享陷阱。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3",
             "u3-l4"
@@ -451,7 +450,7 @@
           "topic": "test-support feature 下用 async_pipe 双向管道构造的 FakeLanguageServer：两半连接的组装、set_request_handler/handle_notification 的信号通道、进度模拟，以及本 crate 测试的组织方式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u3-l4"
@@ -481,6 +480,7 @@
           "topic": "on_io/IoKind 对 stdin/stdout/stderr 三向流的观测、stderr_capture 在启动失败诊断中的角色、trace 日志、Debug for LanguageServerBinary 的 env 脱敏，以及 readable_version 对 gopls 版本串的特判。"
         }
       ],
+      "level": "advanced",
       "order": 4,
       "title": "深水区：背压、生命周期、测试与可观测性"
     }

@@ -1,14 +1,13 @@
 {
-  "head": "28c0f4aef89d298a08176977d9839671827f5528",
+  "head": "fa00dccc42311f8dc71c533105488b0dbd518138",
   "project": "zed-crates-gpui",
-  "rationale": "GPUI 是 Zed 编辑器自研的 GPU 加速、混合保留/立即模式 UI 框架（本 crate 约 6.7 万行），核心复杂度集中在四条主线：以 App/Entity/Context 为中心的所有权与响应式状态模型、以 Render/Element/div 为中心的声明式 UI 与三阶段（request_layout/prepaint/paint）绘制管线、以 Action/Keymap/焦点为中心的键盘优先交互链路、以及 Platform 抽象与文本/图片等平台服务。因此学习路线设计为七个单元：先让读者跑起 hello_world 并建立目录地图（u1），再建立『App 拥有一切实体、Context 是唯一入口』的心智模型（u2，配合 _ownership_and_data_flow 与 docs/contexts.md 两份官方文档），然后用 div/Style/内置元素上手声明式 UI（u3）；有了这三层基础，才进入 Element 生命周期、Taffy 布局、Window::draw 与 Scene 原语等绘制内部机制（u4），继而学习输入事件、Action 派发、焦点与拖放等交互机制（u5），再到虚拟化列表、悬浮层、动画、文本系统、图片缓存与无障碍等高级 UI 模式（u6），最后覆盖平台抽象、多窗口、测试（#[gpui::test]/TestAppContext）、性能剖析，并以一个综合小应用收官（u7）。每篇讲义只讲一个主题、引用 1-6 个真实源码文件并配一个可运行的实践任务，依赖关系按『先状态模型、再 UI、再内部机制、再扩展』排序，确保初学者也能由浅入深读到源码级理解。",
+  "rationale": "增量分析：两次 HEAD 之间仅有一个提交（d70c45e5bb）改动 gpui crate，且集中在 src/app.rs、src/input.rs、src/platform.rs 三个文件，内容为纯增量 API 扩展——新增 App::read_from_clipboard_async、Platform::read_from_clipboard_async（默认包装同步读取，web 等异步权限平台可覆写）、InputHandler/EntityInputHandler 的 paste 钩子（平台发起粘贴可携带图片等完整 ClipboardItem）以及 ClipboardReadError 错误类型；模块结构、绘制管线、交互主链路均未变化。因此原有七单元、由浅入深的学习路线整体保持不变：已生成的 u1 全部讲义与 u2-l1~l4 不涉及剪贴板与输入处理抽象，标记 keep；尚未生成的讲义（u2-l5 起全部）保持 new；仅微调 u5-l1（输入事件模型）与 u7-l1（Platform 抽象）的主题和学习目标，把新的 paste 输入钩子与异步剪贴板读取纳入讲解范围，确保后续生成的讲义覆盖最新 API。该变化幅度不足以支撑独立新讲义，并入上述两篇更符合『每篇只讲一个主题』的拆分原则。",
   "units": [
     {
       "id": "u1",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -34,7 +33,7 @@
           "topic": "介绍 GPUI 作为 Zed 的 GPU 加速、混合立即/保留模式 UI 框架的定位，梳理它提供的三层编程界面（实体状态、声明式视图、命令式元素），并解读 Cargo.toml 中的 feature 与平台依赖。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -62,7 +61,7 @@
           "topic": "从零构建并运行 GPUI 应用：以 hello_world 为例，逐行讲解 Application、run 回调、open_window、WindowOptions 与根视图的创建流程。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -91,7 +90,7 @@
           "topic": "带读者走一遍 src/ 目录：gpui.rs 如何通过 mod 与 pub use 组织 60 多个模块，app、elements、platform、text_system、window 各自承担什么职责。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -120,15 +119,15 @@
           "topic": "examples/ 目录有 40 多个可运行示例，本讲按布局样式、交互、图片绘制动画、窗口行为四类导览，并说明哪些是新手最佳起点。"
         }
       ],
+      "level": "beginner",
       "order": 1,
       "title": "初识 GPUI：定位、运行与第一个应用"
     },
     {
       "id": "u2",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -156,7 +155,7 @@
           "topic": "剖析 Application 的启动流程：with_platform、with_assets、run 如何把控制权交给 Platform 事件循环，以及 AppCell/RefCell 带来的单前台线程借用约束。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -184,7 +183,7 @@
           "topic": "基于官方 ownership 文档和 entity_map.rs，讲解 GPUI 独特的实体模型：App 是唯一所有者，Entity<T> 只是带类型的引用计数句柄，读写必须通过 update/read 租约完成。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -214,7 +213,7 @@
           "topic": "系统梳理 GPUI 的上下文体系：App、Context<T>、AsyncApp/AsyncWindowContext 各自的能力，以及 notify/observe、emit/subscribe、listener、spawn 等核心方法。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -271,12 +270,12 @@
           "topic": "分析前台/后台双执行器架构：ForegroundExecutor 与 BackgroundExecutor 如何协作，Task 的 detach/取消语义，以及平台调度器如何驱动 futures。"
         }
       ],
+      "level": "beginner",
       "order": 2,
       "title": "状态与上下文：App、Entity、Context"
     },
     {
       "id": "u3",
-      "level": "beginner",
       "lectures": [
         {
           "action": "new",
@@ -405,7 +404,7 @@
           "id": "u3-l5",
           "learning_goals": [
             "掌握文本、图片、SVG 三类内容元素的构造参数",
-            "理解 SharedString 与SharedUri 的引入动机",
+            "理解 SharedString 与 SharedUri 的引入动机",
             "能根据需求选择内置元素而非立刻自定义 Element"
           ],
           "level": "beginner",
@@ -456,12 +455,12 @@
           "topic": "讲解 RenderOnce trait 与 #[derive(IntoElement)] 宏：如何把元素组合封装成接收所有权、按值构造的可复用组件，区别于持有状态的视图。"
         }
       ],
+      "level": "beginner",
       "order": 3,
       "title": "声明式 UI：视图、元素与样式"
     },
     {
       "id": "u4",
-      "level": "intermediate",
       "lectures": [
         {
           "action": "new",
@@ -611,12 +610,12 @@
           "topic": "以 canvas 元素和 painting 示例为模板，完整实现一个自定义绘制元素：申请布局、计算 bounds、用 Path/Quad 绘制内容，并处理内容遮罩。"
         }
       ],
+      "level": "intermediate",
       "order": 4,
       "title": "元素机制与绘制管线"
     },
     {
       "id": "u5",
-      "level": "intermediate",
       "lectures": [
         {
           "action": "new",
@@ -628,14 +627,16 @@
           "learning_goals": [
             "列举鼠标与键盘事件结构中的关键字段",
             "理解 PlatformInput 如何统一各平台输入",
-            "会用坐标换算处理 hitbox 内的点击位置"
+            "会用坐标换算处理 hitbox 内的点击位置",
+            "了解 InputHandler/EntityInputHandler 的 paste 钩子如何接收平台发起的粘贴（含 web 端携带图片的 ClipboardItem）"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "MouseDownEvent/MoveEvent",
             "KeyDownEvent",
             "PlatformInput",
-            "ScrollDelta"
+            "ScrollDelta",
+            "InputHandler::paste"
           ],
           "order": 1,
           "practice_task": "在示例中同时监听 on_mouse_down、on_mouse_move、on_scroll_wheel，把事件关键字段（按钮、位置、滚轮 delta 类型）实时显示在界面上。",
@@ -645,7 +646,7 @@
             "examples/mouse_pressure.rs"
           ],
           "title": "输入事件模型：鼠标、键盘与触摸",
-          "topic": "梳理 interactive.rs 中的事件类型体系：MouseDown/Up/Move/ScrollWheel/KeyDown、ClickEvent 合成、触摸与压力事件，以及 input.rs 中的文本输入处理抽象。"
+          "topic": "梳理 interactive.rs 中的事件类型体系：MouseDown/Up/Move/ScrollWheel/KeyDown、ClickEvent 合成、触摸与压力事件，以及 input.rs 中的文本输入处理抽象（InputHandler/EntityInputHandler trait 与平台发起粘贴的 paste 钩子）。"
         },
         {
           "action": "new",
@@ -798,12 +799,12 @@
           "topic": "讲解 drag & drop 体系：元素间拖拽（on_drag/on_drop 与 drag payload）、来自操作系统的文件拖放（FileDropEvent），以及 gestures.rs 中的手势识别。"
         }
       ],
+      "level": "intermediate",
       "order": 5,
       "title": "交互机制：事件、动作与焦点"
     },
     {
       "id": "u6",
-      "level": "intermediate",
       "lectures": [
         {
           "action": "new",
@@ -1038,12 +1039,12 @@
           "topic": "基于官方 _accessibility 指南与 window/a11y.rs，讲解 GPUI 如何在绘制时同步构建 AccessKit 无障碍树，以及 role、aria 属性、合成子节点。"
         }
       ],
+      "level": "intermediate",
       "order": 6,
       "title": "高级 UI 模式"
     },
     {
       "id": "u7",
-      "level": "advanced",
       "lectures": [
         {
           "action": "new",
@@ -1055,14 +1056,16 @@
           "learning_goals": [
             "列举 Platform trait 承担的全部职责",
             "理解 test platform 如何在无窗口环境驱动帧",
-            "了解新增平台支持需要实现哪些 trait"
+            "了解新增平台支持需要实现哪些 trait",
+            "理解 read_from_clipboard 与 read_from_clipboard_async 的关系及异步权限模型（如 web 平台的 ClipboardReadError）"
           ],
           "level": "advanced",
           "minimal_modules": [
             "Platform trait",
             "PlatformWindow",
             "PlatformDispatcher",
-            "test platform"
+            "test platform",
+            "剪贴板同步/异步读取"
           ],
           "order": 1,
           "practice_task": "用 Application::with_platform 接入 platform/test.rs 提供的测试平台，在无真实窗口的环境创建实体并手动驱动若干帧，观察绘制调用。",
@@ -1072,7 +1075,7 @@
             "src/platform/test.rs"
           ],
           "title": "Platform 抽象与跨平台架构",
-          "topic": "解读 platform.rs 中约 3000 行的平台抽象：Platform、PlatformWindow、PlatformDispatcher、PlatformTextSystem、PlatformAtlas 等 trait 如何隔离 macOS/Linux/Windows 差异。"
+          "topic": "解读 platform.rs 中约 3000 行的平台抽象：Platform、PlatformWindow、PlatformDispatcher、PlatformTextSystem、PlatformAtlas 等 trait 如何隔离 macOS/Linux/Windows 差异，以及带默认实现的扩展点（如剪贴板的同步/异步两种读取形态）。"
         },
         {
           "action": "new",
@@ -1082,7 +1085,6 @@
           ],
           "filename": "u7-l2-window-management.md",
           "id": "u7-l2",
-          "learning_tasks": null,
           "learning_goals": [
             "会配置 WindowKind、window_bounds、标题栏等选项",
             "掌握 WindowHandle/AnyWindowHandle 的跨窗口更新模式",
@@ -1135,8 +1137,8 @@
             "examples/system_notifications.rs",
             "examples/set_menus.rs"
           ],
-          "topic": "覆盖三块系统集成：window.prompt 的原生对话框流程（prompts.rs）、应用菜单（app_menu.rs 与 init_app_menus）、系统通知的发送与响应。",
-          "title": "对话框、菜单与系统通知"
+          "title": "对话框、菜单与系统通知",
+          "topic": "覆盖三块系统集成：window.prompt 的原生对话框流程（prompts.rs）、应用菜单（app_menu.rs 与 init_app_menus）、系统通知的发送与响应。"
         },
         {
           "action": "new",
@@ -1236,6 +1238,7 @@
           "topic": "以一个迷你文件管理器为毕业项目，串联全部知识点：实体状态建模、组件化视图、键盘动作、虚拟化列表、悬浮菜单、测试与调试，最后回顾框架整体架构。"
         }
       ],
+      "level": "advanced",
       "order": 7,
       "title": "平台层、工程化与综合实战"
     }

@@ -1,13 +1,13 @@
 {
-  "head": "28c0f4aef89d298a08176977d9839671827f5528",
+  "head": "fa00dccc42311f8dc71c533105488b0dbd518138",
   "project": "zed-crates-component",
-  "rationale": "component crate 本身只有两个源文件（约 530 行），但它是 Zed 组件预览体系的中枢，学习价值横跨 component、ui_macros、ui、component_preview、workspace 五个 crate，因此路线设计成“先看到现象、再解剖机制、最后动手扩展”：第 1 单元让读者先把组件预览跑起来并摸清 crate 布局与符号导出路径，建立直观感受；第 2 单元自底向上解剖注册管线——Component trait 的七个方法、ComponentRegistry/ComponentMetadata 数据结构、inventory 链接期分布式注册、RegisterComponent 派生宏展开，以及 scope/status 设计系统治理语义；第 3 单元回到“写组件的人”的视角，先读懂 ComponentExample/ComponentExampleGroup 布局元素与四个辅助函数，再以 Divider 与跨 crate 的 NumberField 为范本完成一次真实接入实践；第 4 单元进入专家层，精读 ComponentPreview 这个 workspace 条目应用的渲染、过滤分组、SQLite 持久化，最后引导读者思考如何在自有项目中复用与裁剪这套链接期注册机制。依赖链保证每篇讲义只建立在前文已建立的概念之上，全部 15 篇对应小型核心 crate 加中等生态圈的中等偏上规模。",
+  "rationale": "增量分析：上次 HEAD 28c0f4ae 到当前 HEAD fa00dccc 之间共 5 个提交，全部集中在 gpui/gpui_web/gpui_linux、path、project、language_models、opencode、title_bar、open_path_prompt、util 等 crate，与本手册核心范围（component、component_preview、ui_macros、ui、settings_ui）零交集；范围内唯一的 workspace.rs 改动只是 apply_restored_multiworkspace_state 中一行 repo_identity_path 增加 PathStyle::local() 参数（约第 9714 行，净行数变化为 0），不影响 u1-l2 所讲的 component::init()（仍位于第 785 行）与 OpenComponentPreview 动作。因此整体学习路线无需调整，全部 15 篇讲义保持原有结构并标记为 keep：单元一先跑起预览并摸清布局，单元二自底向上解剖注册管线，单元三回到组件作者视角完成真实接入，单元四精读预览应用与复用取舍，依赖链与讲义划分继续有效。",
   "units": [
     {
       "id": "u1",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -33,7 +33,7 @@
           "topic": "介绍 crates/component 的定位：为 Zed 设计系统提供 Component trait、组件注册表与预览布局，用于可视化调试、UI 模式文档与变体展示；并梳理它与 ui、ui_macros、component_preview、workspace 的协作关系。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -61,7 +61,7 @@
           "topic": "讲解两种打开组件预览的方式：cargo run -p component_preview --example component_preview 独立运行，以及在 Zed 中触发 workspace 的 OpenComponentPreview 动作；顺带定位 component::init() 在 workspace::init 中的调用位置和执行时机。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -99,7 +99,7 @@
       "id": "u2",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -125,7 +125,7 @@
           "topic": "逐个讲解 Component trait 的七个方法：id、scope、status、name、sort_name、description、preview，覆盖各自的默认实现、doc 注释中的使用建议，以及哪个方法该在什么场景覆写。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -151,7 +151,7 @@
           "topic": "分析 register_component 如何把 trait 的静态信息固化成 ComponentMetadata（含 fn 指针字段），COMPONENT_DATA 这个 LazyLock<RwLock<ComponentRegistry>> 全局注册表如何工作，以及 sorted_components、component_map、get、scopeless_name 等 API 的用途。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -178,7 +178,7 @@
           "topic": "讲解 inventory crate 的 collect!/submit! 机制如何让分散在各 crate 的组件在链接期自动登记注册函数、component::init() 如何统一触发执行，以及 __private 模块为何要把 inventory 重导出给宏展开使用。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -206,7 +206,7 @@
           "topic": "精读 derive_register_component.rs 的三段生成物：编译期断言类型实现 Component、生成 __component_registry_internal_register_* 注册函数、用 inventory::submit! 提交 ComponentFn；并以 ToggleButtonGroup 为例说明泛型组件为何不能走派生而要手动注册。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -241,7 +241,7 @@
       "id": "u3",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -267,7 +267,7 @@
           "topic": "精读 component_layout.rs 的两个 RenderOnce 元素：单个示例卡片（变体名、可选描述、带 pattern_slash 斜纹背景与圆角边框的展示区）和分组容器（大写标题 + 通栏分隔线），以及 width、grow、vertical 等构建器选项。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -294,7 +294,7 @@
           "topic": "介绍 single_example、empty_example、example_group、example_group_with_title 四个辅助函数，结合 Divider 真实的 preview 学习如何组织“变体分组 + 真实用法示例”的预览结构，以及 empty_example 表达“应渲染为空”场景的语义。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2",
             "u2-l4"
@@ -331,7 +331,7 @@
       "id": "u4",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u1-l2"
@@ -359,7 +359,7 @@
           "topic": "分析 ComponentPreview 的字段设计与构造流程、Render 实现的三栏结构（uniform_list 侧栏导航 + 过滤输入 + 内容区）、PreviewPage 的 AllComponents/Component 两态切换，以及 Item、Focusable、EventEmitter 如何把它作为面板条目嵌入 workspace。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -385,7 +385,7 @@
           "topic": "精读 filtered_components 与 scope_ordered_entries：大小写不敏感匹配组件名/作用域/描述、按 scope 分组并按 sort_name 排序、未分类组件置入 Uncategized 尾部分组，以及过滤命中时用 HighlightedLabel 做字符级高亮的 char_boundary 处理。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -412,7 +412,7 @@
           "topic": "分析 serialize/should_serialize/deserialize 的协作：ItemEvent::UpdateTab 触发保存 active_page_id，ComponentPreviewDb 用 SQLite（STRICT 表 + ON CONFLICT 更新）持久化，workspace 恢复时反序列化回上次查看的组件页，以及 delete_unloaded_items 的清理机制。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4",
             "u4-l1"

@@ -54404,85 +54404,79 @@
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
         "u1-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.7479369999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.836117,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.2952850000000002,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 3.337067999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 2.1010570000000004,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.27683,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l5": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.8488049999999998,
+          "cost": 1.504528,
           "error": null
         },
-        "u2-l4": {
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.4244839999999996,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.579351,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.9648339999999997,
+          "error": null
+        },
+        "u3-l4": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
           "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
-        },
-        "u2-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
         },
         "u3-l5": {
           "status": "pending",
@@ -54620,94 +54614,276 @@
           "retries": 0
         }
       },
-      "manifest_head": "28c0f4aef89d298a08176977d9839671827f5528",
-      "prev_head": null,
+      "manifest_head": "fa00dccc42311f8dc71c533105488b0dbd518138",
+      "prev_head": "28c0f4aef89d298a08176977d9839671827f5528",
       "phase": "workers",
-      "mode": "full",
+      "mode": "incremental",
       "tutorial_path": "tutorials/zed-industries/zed/zed-crates-gpui-tutorial",
-      "last_head": "28c0f4aef89d298a08176977d9839671827f5528",
-      "last_run_at": "2026-08-19T11:03:09Z",
+      "last_head": "fa00dccc42311f8dc71c533105488b0dbd518138",
+      "last_run_at": "2026-08-19T13:03:06Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "zed-industries/zed@crates/component": {
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
         "u1-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l5": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        }
+      },
+      "manifest_head": "fa00dccc42311f8dc71c533105488b0dbd518138",
+      "prev_head": "28c0f4aef89d298a08176977d9839671827f5528",
+      "phase": "done",
+      "mode": "incremental",
+      "tutorial_path": "tutorials/zed-industries/zed/zed-crates-component-tutorial",
+      "last_head": "fa00dccc42311f8dc71c533105488b0dbd518138",
+      "last_run_at": "2026-08-19T13:03:06Z",
+      "last_error": null,
+      "abandoned": []
+    },
+    "zed-industries/zed@crates/lsp": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l5": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        }
+      },
+      "manifest_head": "fa00dccc42311f8dc71c533105488b0dbd518138",
+      "prev_head": "28c0f4aef89d298a08176977d9839671827f5528",
+      "phase": "done",
+      "mode": "incremental",
+      "tutorial_path": "tutorials/zed-industries/zed/zed-crates-lsp-tutorial",
+      "last_head": "fa00dccc42311f8dc71c533105488b0dbd518138",
+      "last_run_at": "2026-08-19T13:03:06Z",
+      "last_error": null,
+      "abandoned": []
+    },
+    "zed-industries/zed@crates/ui": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.8987400000000001,
+          "cost": 1.1990979999999998,
           "error": null
         },
         "u1-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.9382999999999999,
+          "cost": 1.565917,
           "error": null
         },
         "u1-l3": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.746259,
+          "cost": 1.6537800000000002,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3616700000000002,
           "error": null
         },
         "u2-l1": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.033936,
+          "cost": 0.764877,
           "error": null
         },
         "u2-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.8566040000000006,
+          "cost": 1.193021,
           "error": null
         },
         "u2-l3": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.258249,
+          "cost": 1.6054220000000001,
           "error": null
         },
         "u2-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.030718,
-          "error": null
-        },
-        "u2-l5": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.957773,
-          "error": null
-        },
-        "u3-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.091789,
-          "error": null
-        },
-        "u3-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.095634,
-          "error": null
-        },
-        "u3-l3": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
           "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
+        },
+        "u3-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
         },
         "u4-l1": {
           "status": "pending",
@@ -54724,86 +54900,157 @@
           "action": "new",
           "retries": 0
         },
-        "u4-l4": {
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l6": {
           "status": "pending",
           "action": "new",
           "retries": 0
         }
       },
-      "manifest_head": "28c0f4aef89d298a08176977d9839671827f5528",
+      "manifest_head": "fa00dccc42311f8dc71c533105488b0dbd518138",
       "prev_head": null,
       "phase": "workers",
       "mode": "full",
-      "tutorial_path": "tutorials/zed-industries/zed/zed-crates-component-tutorial",
-      "last_head": "28c0f4aef89d298a08176977d9839671827f5528",
-      "last_run_at": "2026-08-19T11:03:09Z",
+      "tutorial_path": "tutorials/zed-industries/zed/zed-crates-ui-tutorial",
+      "last_head": "fa00dccc42311f8dc71c533105488b0dbd518138",
+      "last_run_at": "2026-08-19T13:03:06Z",
       "last_error": "quota exhausted; will resume next window"
     },
-    "zed-industries/zed@crates/lsp": {
+    "zed-industries/zed@crates/gpui_wgpu": {
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
         "u1-l1": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.9860879999999999,
+          "cost": 1.072703,
           "error": null
         },
         "u1-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.286434,
+          "cost": 1.2858420000000002,
           "error": null
         },
         "u1-l3": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.966624,
+          "cost": 1.655045,
           "error": null
         },
         "u2-l1": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.3118509999999999,
+          "cost": 1.093178,
           "error": null
         },
         "u2-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.9893910000000001,
+          "cost": 0.901077,
           "error": null
         },
         "u2-l3": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.1977750000000003,
+          "cost": 1.4140339999999998,
           "error": null
         },
         "u2-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.422331,
-          "error": null
-        },
-        "u3-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.564816,
-          "error": null
-        },
-        "u3-l2": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
           "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
+        },
+        "u3-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
         },
         "u3-l3": {
           "status": "pending",
@@ -54820,6 +55067,16 @@
           "action": "new",
           "retries": 0
         },
+        "u3-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l7": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
         "u4-l1": {
           "status": "pending",
           "action": "new",
@@ -54839,19 +55096,62 @@
           "status": "pending",
           "action": "new",
           "retries": 0
+        },
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
         }
       },
-      "manifest_head": "28c0f4aef89d298a08176977d9839671827f5528",
+      "manifest_head": "fa00dccc42311f8dc71c533105488b0dbd518138",
       "prev_head": null,
       "phase": "workers",
       "mode": "full",
-      "tutorial_path": "tutorials/zed-industries/zed/zed-crates-lsp-tutorial",
-      "last_head": "28c0f4aef89d298a08176977d9839671827f5528",
-      "last_run_at": "2026-08-19T11:03:09Z",
+      "tutorial_path": "tutorials/zed-industries/zed/zed-crates-gpui_wgpu-tutorial",
+      "last_head": "fa00dccc42311f8dc71c533105488b0dbd518138",
+      "last_run_at": "2026-08-19T13:03:06Z",
       "last_error": "quota exhausted; will resume next window"
     },
-    "zed-industries/zed@crates/ui": {},
-    "zed-industries/zed@crates/gpui_wgpu": {},
     "zed-industries/zed@crates/gpui_platform": {},
     "zed-industries/zed@crates/gpui_web": {},
     "zed-industries/zed@crates/gpui_shared_string": {},
@@ -54875,7 +55175,7 @@
     "ai-dynamo/dynamo": {},
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-19T11:03:09Z"
+      "last_run_at": "2026-08-19T13:03:06Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
