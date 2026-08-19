@@ -1,0 +1,1243 @@
+{
+  "head": "28c0f4aef89d298a08176977d9839671827f5528",
+  "project": "zed-crates-gpui",
+  "rationale": "GPUI 是 Zed 编辑器自研的 GPU 加速、混合保留/立即模式 UI 框架（本 crate 约 6.7 万行），核心复杂度集中在四条主线：以 App/Entity/Context 为中心的所有权与响应式状态模型、以 Render/Element/div 为中心的声明式 UI 与三阶段（request_layout/prepaint/paint）绘制管线、以 Action/Keymap/焦点为中心的键盘优先交互链路、以及 Platform 抽象与文本/图片等平台服务。因此学习路线设计为七个单元：先让读者跑起 hello_world 并建立目录地图（u1），再建立『App 拥有一切实体、Context 是唯一入口』的心智模型（u2，配合 _ownership_and_data_flow 与 docs/contexts.md 两份官方文档），然后用 div/Style/内置元素上手声明式 UI（u3）；有了这三层基础，才进入 Element 生命周期、Taffy 布局、Window::draw 与 Scene 原语等绘制内部机制（u4），继而学习输入事件、Action 派发、焦点与拖放等交互机制（u5），再到虚拟化列表、悬浮层、动画、文本系统、图片缓存与无障碍等高级 UI 模式（u6），最后覆盖平台抽象、多窗口、测试（#[gpui::test]/TestAppContext）、性能剖析，并以一个综合小应用收官（u7）。每篇讲义只讲一个主题、引用 1-6 个真实源码文件并配一个可运行的实践任务，依赖关系按『先状态模型、再 UI、再内部机制、再扩展』排序，确保初学者也能由浅入深读到源码级理解。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 GPUI 的三种编程层级（实体状态管理、视图声明式 UI、元素命令式 UI）",
+            "理解 gpui 与 gpui_platform 两个 crate 的分工和各平台 feature 的含义",
+            "了解 GPUI 的依赖体系（taffy、accesskit、lyon、refineable 等）"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README",
+            "Cargo.toml features",
+            "crate 注册表"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README 与 Cargo.toml，用一段话总结 GPUI 的定位与三层 API；列出 default features 中每个 feature 在 Linux 上分别启用了什么，并写在笔记里。",
+          "source_files": [
+            "README.md",
+            "Cargo.toml",
+            "src/gpui.rs"
+          ],
+          "title": "GPUI 是什么：项目定位与整体架构",
+          "topic": "介绍 GPUI 作为 Zed 的 GPU 加速、混合立即/保留模式 UI 框架的定位，梳理它提供的三层编程界面（实体状态、声明式视图、命令式元素），并解读 Cargo.toml 中的 feature 与平台依赖。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-run-first-app.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "会用 cargo run -p gpui --example <name> 运行任意示例",
+            "读懂 application().run / cx.open_window / cx.new / Render 四个步骤",
+            "能修改 div 的样式链式调用并观察效果"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Application::run",
+            "App::open_window",
+            "Render"
+          ],
+          "order": 2,
+          "practice_task": "运行 hello_world 示例，然后复制它到 examples/ 下新建一个自己的示例（或改源码），把窗口标题色块改成两行布局，并让文字来自一个可修改的字段。",
+          "source_files": [
+            "examples/hello_world.rs",
+            "examples/README.md",
+            "src/app.rs"
+          ],
+          "title": "运行第一个 GPUI 应用：hello_world 逐行解读",
+          "topic": "从零构建并运行 GPUI 应用：以 hello_world 为例，逐行讲解 Application、run 回调、open_window、WindowOptions 与根视图的创建流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-crate-structure-map.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "说出 app/elements/platform/text_system/window 五大目录的职责",
+            "根据 gpui.rs 的 pub use 找到任意公开类型的定义文件",
+            "区分核心机制文件与平台/测试条件编译文件"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "模块树",
+            "pub use 重导出",
+            "条件编译"
+          ],
+          "order": 3,
+          "practice_task": "对照 src/ 目录手绘一张模块依赖草图，把 element.rs、elements/div.rs、window.rs、platform.rs、app.rs 之间的引用方向标出来；再用 grep 验证三处猜测。",
+          "source_files": [
+            "src/gpui.rs",
+            "src/element.rs",
+            "src/elements/mod.rs",
+            "docs/contexts.md"
+          ],
+          "title": "gpui crate 目录结构导览",
+          "topic": "带读者走一遍 src/ 目录：gpui.rs 如何通过 mod 与 pub use 组织 60 多个模块，app、elements、platform、text_system、window 各自承担什么职责。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l4-examples-tour.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "知道哪几个示例适合作为后续学习参照",
+            "能把示例按布局、交互、图片动画、窗口行为四类归类",
+            "养成『改一点跑一次』的源码学习习惯"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "examples/README",
+            "示例分类"
+          ],
+          "order": 4,
+          "practice_task": "从布局、交互、图片动画、窗口行为四类中各挑一个示例运行，记录每个示例展示的核心 API，形成后续学习时的查阅清单。",
+          "source_files": [
+            "examples/README.md",
+            "examples/input.rs",
+            "examples/uniform_list.rs",
+            "examples/testing.rs",
+            "examples/window.rs"
+          ],
+          "title": "示例全景：把 examples 当学习地图",
+          "topic": "examples/ 目录有 40 多个可运行示例，本讲按布局样式、交互、图片绘制动画、窗口行为四类导览，并说明哪些是新手最佳起点。"
+        }
+      ],
+      "order": 1,
+      "title": "初识 GPUI：定位、运行与第一个应用"
+    },
+    {
+      "id": "u2",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l1-app-lifecycle.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "理清 Application、AppCell、App 三者关系与 RefCell 借用模型",
+            "会用 with_assets、with_http_client、on_app_quit 等配置钩子",
+            "理解 run_embedded 与 run 的区别及 wasm 场景"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Application",
+            "AppCell/RefCell",
+            "平台事件循环"
+          ],
+          "order": 1,
+          "practice_task": "在 hello_world 基础上给 Application 挂上 on_app_quit 回调打印日志，并在 run 回调里尝试嵌套借用 App（如再 borrow_mut 一次）观察 panic，从而体会单线程借用规则。",
+          "source_files": [
+            "src/app.rs",
+            "docs/contexts.md",
+            "examples/on_window_close_quit.rs"
+          ],
+          "title": "App 与 Application：应用生命周期",
+          "topic": "剖析 Application 的启动流程：with_platform、with_assets、run 如何把控制权交给 Platform 事件循环，以及 AppCell/RefCell 带来的单前台线程借用约束。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-entity-ownership.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "解释 Entity<T> 为何类似 Rc 却必须借助 App 才能访问",
+            "掌握 read/update/clone/downgrade 的使用场景与循环引用风险",
+            "理解 EntityMap 的 slot 预留机制与实体回收时机"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "EntityMap",
+            "Entity<T>",
+            "WeakEntity<T>"
+          ],
+          "order": 2,
+          "practice_task": "创建一个 Counter 实体，用 handle.update 递增计数并打印；再故意让两个实体互持强句柄，对比换成 WeakEntity 后 Drop 行为的差异。",
+          "source_files": [
+            "src/app/entity_map.rs",
+            "src/_ownership_and_data_flow.rs",
+            "src/gpui.rs"
+          ],
+          "title": "Entity 与所有权模型：App 拥有一切",
+          "topic": "基于官方 ownership 文档和 entity_map.rs，讲解 GPUI 独特的实体模型：App 是唯一所有者，Entity<T> 只是带类型的引用计数句柄，读写必须通过 update/read 租约完成。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-context-family.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "区分五种上下文的能力边界与 Deref 关系",
+            "会用 cx.listener 把元素事件回调绑定到实体方法",
+            "掌握 notify/observe/subscribe/emit 构成的响应式循环"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Context<T>",
+            "AsyncApp",
+            "cx.listener",
+            "EventEmitter"
+          ],
+          "order": 3,
+          "practice_task": "实现两个实体 A、B：A 在被 update 时 cx.notify()，B 通过 cx.observe(A) 打印日志；再用 cx.subscribe 接收 A emit 的自定义事件，观察两条通知路径的触发时机。",
+          "source_files": [
+            "src/app/context.rs",
+            "src/app/async_context.rs",
+            "docs/contexts.md",
+            "src/gpui.rs"
+          ],
+          "title": "Context 家族：App、Context<T> 与 AsyncApp",
+          "topic": "系统梳理 GPUI 的上下文体系：App、Context<T>、AsyncApp/AsyncWindowContext 各自的能力，以及 notify/observe、emit/subscribe、listener、spawn 等核心方法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-global-state.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "会定义并读取 Global 单例",
+            "理解全局租约（lease_global）如何避免可变借用冲突",
+            "知道何时该用 Global、何时该用独立 Entity"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Global trait",
+            "ReadGlobal/UpdateGlobal",
+            "cx.observe_global"
+          ],
+          "order": 4,
+          "practice_task": "定义一个 Global 的 ThemeConfig（含主题色），在视图中用 Global::global(cx) 读取颜色渲染背景，并通过 update_global 切换主题验证 UI 自动刷新。",
+          "source_files": [
+            "src/global.rs",
+            "src/gpui.rs",
+            "src/app.rs"
+          ],
+          "title": "Global 全局状态",
+          "topic": "讲解 Global trait 与 set_global/update_global/read_global 机制，以及 GPUI 内部如何用 TypeIdHashMap 存储全局单例（如 FocusMap、GlobalColors）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l5-async-executor.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "区分 spawn 与 background_spawn 并理解 Send 约束来源",
+            "掌握 Task 的取消语义与 detach 的使用时机",
+            "理解 foreground executor 如何与平台事件循环集成"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "ForegroundExecutor",
+            "BackgroundExecutor",
+            "Task",
+            "PlatformDispatcher"
+          ],
+          "order": 5,
+          "practice_task": "写一个示例：用 background_spawn 计算斐波那契数列第 40 项，期间用 timer 模拟耗时，再回到前台更新实体状态刷新 UI；实验提前 Drop 任务时计算是否被取消。",
+          "source_files": [
+            "src/executor.rs",
+            "src/platform_scheduler.rs",
+            "src/platform.rs"
+          ],
+          "title": "GPUI 并发模型：executor 与 Task",
+          "topic": "分析前台/后台双执行器架构：ForegroundExecutor 与 BackgroundExecutor 如何协作，Task 的 detach/取消语义，以及平台调度器如何驱动 futures。"
+        }
+      ],
+      "order": 2,
+      "title": "状态与上下文：App、Entity、Context"
+    },
+    {
+      "id": "u3",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u3-l1-render-and-views.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "理解视图只是实现了 Render 的实体这一统一设计",
+            "知道 ViewElement 如何用 entity id 跨帧缓存渲染结果",
+            "能解释 cx.notify() 与下一帧重绘之间的关系"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Render",
+            "ViewElement",
+            "AnyView",
+            "渲染缓存"
+          ],
+          "order": 1,
+          "practice_task": "把 u2 的 Counter 改造成视图：根视图里再嵌入一个子视图，分别在两个实体上调用 cx.notify()，观察哪个区域被重绘。",
+          "source_files": [
+            "src/element.rs",
+            "src/view.rs",
+            "examples/hello_world.rs"
+          ],
+          "title": "Render 与视图：从状态到元素树",
+          "topic": "讲解 Render trait 如何把实体变成视图、ViewElement 如何作为实体与元素世界之间的桥梁、AnyView 的类型擦除，以及渲染缓存何时复用何时丢弃。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-div-and-styling.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "熟练使用 flexbox 相关链式方法组织布局",
+            "理解 .when/.when_some 条件样式与 FluentBuilder 模式",
+            "能对照 Tailwind CSS 心智迁移到 GPUI 方法名"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "div()",
+            "Styled trait",
+            "ParentElement",
+            "FluentBuilder"
+          ],
+          "order": 2,
+          "practice_task": "仅用 div 复刻一张卡片列表：外层纵向滚动列、每张卡片横向排列头像与文字，要求全部样式通过 Styled 方法完成，不用硬编码像素之外的结构代码。",
+          "source_files": [
+            "src/elements/div.rs",
+            "src/styled.rs",
+            "examples/hello_world.rs",
+            "examples/opacity.rs"
+          ],
+          "title": "div 与 Tailwind 风格样式 API",
+          "topic": "div 是 GPUI 的万能元素：讲解其构建方式、flexbox 布局方法族、child/children 组合，以及与 Tailwind CSS 相似的样式方法命名规律。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-style-refinement.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "解释 StyleRefinement 的层级合并如何实现样式继承与覆盖",
+            "掌握文本样式（字体、行高、对齐、空白处理）的传递规则",
+            "会用 refinement 实现主题级别的默认样式"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Style",
+            "StyleRefinement",
+            "TextStyle",
+            "Refineable"
+          ],
+          "order": 3,
+          "practice_task": "给根 div 设置文字样式，验证子元素自动继承；再在某个子元素上局部覆盖颜色和字号，并用调试输出确认最终合成的 Style 值。",
+          "source_files": [
+            "src/style.rs",
+            "src/styled.rs",
+            "examples/text_layout.rs"
+          ],
+          "title": "Style 与 StyleRefinement：样式如何合成",
+          "topic": "深入 style.rs：Style 结构、StyleRefinement 的可选字段叠加机制（refineable）、文本样式继承，以及 Display/FlexDirection/Position 等布局枚举的含义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l4-geometry-and-color.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "区分逻辑像素与物理像素并在两者间换算",
+            "会用 Bounds/Point/Size 完成基础几何运算与居中布局",
+            "掌握 Rgba/Hsla 的构造、透明度与颜色混合"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Pixels/DevicePixels",
+            "Bounds",
+            "Rgba/Hsla",
+            "颜色空间"
+          ],
+          "order": 4,
+          "practice_task": "编写一个小工具函数，接收窗口逻辑尺寸和缩放系数，返回居中 300x200 弹窗的 DevicePixels 边界；再用 Hsla 生成一组按色相均匀分布的色块渲染出来。",
+          "source_files": [
+            "src/geometry.rs",
+            "src/color.rs",
+            "src/colors.rs",
+            "examples/gradient.rs"
+          ],
+          "title": "几何与颜色基础类型",
+          "topic": "讲解 geometry.rs 中的 Pixels、DevicePixels、Point、Size、Bounds 与 px() 宏，以及 color.rs 中的 Rgba/Hsla、颜色空间和预定义颜色，这些类型贯穿所有后续源码。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l5-builtin-elements.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "掌握文本、图片、SVG 三类内容元素的构造参数",
+            "理解 SharedString 与SharedUri 的引入动机",
+            "能根据需求选择内置元素而非立刻自定义 Element"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "StyledText",
+            "Img",
+            "Svg",
+            "Canvas"
+          ],
+          "order": 5,
+          "practice_task": "做一个图文混排卡片：一张本地图（img()）、一个 SVG 图标、一段带多种样式的 StyledText，全部在一个 div 中对齐排列。",
+          "source_files": [
+            "src/elements/text.rs",
+            "src/elements/img.rs",
+            "src/elements/svg.rs",
+            "src/elements/canvas.rs",
+            "examples/text.rs"
+          ],
+          "title": "内置元素一览：text、img、svg、canvas",
+          "topic": "快速过一遍常用内置元素：styled text、图片、SVG 与 canvas 各自的构造参数、能力边界和典型用法，为后续深入缓存与加载机制打基础。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l6-render-once-components.md",
+          "id": "u3-l6",
+          "learning_goals": [
+            "区分 Render（有状态实体视图）与 RenderOnce（无状态组件）",
+            "会用 #[derive(IntoElement)] 编写可复用组件",
+            "理解组件在每帧重建与视图缓存的性能差异"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "RenderOnce",
+            "IntoElement derive",
+            "组件模式"
+          ],
+          "order": 6,
+          "practice_task": "把 u3-l2 的卡片抽象成 #[derive(IntoElement)] 的 Card 组件（接收标题、内容、颜色参数），在父视图里用 .children() 渲染五张不同参数的卡片。",
+          "source_files": [
+            "src/element.rs",
+            "examples/view_example/view_example_main.rs",
+            "examples/data_table.rs"
+          ],
+          "title": "RenderOnce 与组件化复用",
+          "topic": "讲解 RenderOnce trait 与 #[derive(IntoElement)] 宏：如何把元素组合封装成接收所有权、按值构造的可复用组件，区别于持有状态的视图。"
+        }
+      ],
+      "order": 3,
+      "title": "声明式 UI：视图、元素与样式"
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u3-l3"
+          ],
+          "filename": "u4-l1-element-lifecycle.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "说出三阶段各自的职责与状态传递方式",
+            "理解 ElementId/GlobalElementId 的跨帧状态定位作用",
+            "能实现一个带 prepaint 状态的最小自定义元素"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Element trait",
+            "request_layout/prepaint/paint",
+            "GlobalElementId",
+            "元素 arena"
+          ],
+          "order": 1,
+          "practice_task": "实现一个 FixedBox 自定义元素：request_layout 向 Taffy 申报固定尺寸，prepaint 计算居中 bounds，paint 用 window.paint_quad 画一个纯色矩形，并在窗口中使用它。",
+          "source_files": [
+            "src/element.rs",
+            "src/elements/canvas.rs",
+            "src/arena.rs"
+          ],
+          "title": "Element trait 三阶段生命周期",
+          "topic": "逐方法解读 Element trait：request_layout、prepaint、paint 三阶段的职责、RequestLayoutState/PrepaintState 的作用，以及元素每帧重建但状态可存续的设计。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-taffy-layout.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解 GPUI 如何把 Style 翻译成 Taffy 节点并驱动布局",
+            "会阅读 grid_layout 示例掌握网格布局用法",
+            "能排查常见布局不生效问题（display、overflow、available space）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TaffyLayoutEngine",
+            "Style 映射",
+            "AvailableSpace"
+          ],
+          "order": 2,
+          "practice_task": "用 grid 布局方法实现一个 3x3 九宫格，其中一格跨两列；再故意把某元素 display 设为 none，观察 Taffy 布局结果的变化。",
+          "source_files": [
+            "src/taffy.rs",
+            "src/style.rs",
+            "examples/grid_layout.rs"
+          ],
+          "title": "Taffy 布局引擎集成",
+          "topic": "分析 GPUI 如何封装 taffy 这个 Rust 版 flexbox/grid 引擎：Style 如何映射为 taffy 样式、LayoutId 的申请与计算流程、AvailableSpace 的传递。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l3-window-draw-pipeline.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "描述从 cx.notify() 到屏幕更新的完整链路",
+            "理解元素 arena 与每帧分配回收的取舍",
+            "会区分 refresh（忽略缓存）与常规重绘"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Window",
+            "Window::draw",
+            "元素 arena",
+            "重绘调度"
+          ],
+          "order": 3,
+          "practice_task": "在示例中分别调用 window.refresh() 与仅 cx.notify()，用日志统计两种方式下根视图 render 被调用的次数，验证缓存复用行为。",
+          "source_files": [
+            "src/window.rs",
+            "src/arena.rs",
+            "src/bounds_tree.rs",
+            "src/app.rs"
+          ],
+          "title": "窗口绘制管线：从 refresh 到 draw",
+          "topic": "进入 window.rs（7400 行）的核心：Window 结构、draw 如何驱动整棵元素树走完三阶段、cx.notify 引发的重绘调度，以及元素 arena 与 bounds_tree 的配合。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u4-l4-scene-primitives.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "识别 Scene 中四类 Primitive 的用途与数据字段",
+            "理解 sprite 与 path 批处理对 GPU 渲染的意义",
+            "会用 window.paint_* 系列接口向场景添加图元"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Scene",
+            "Primitive",
+            "Quad/Shadow",
+            "Path"
+          ],
+          "order": 4,
+          "practice_task": "用 PathBuilder 画一个三角形和一个圆角矩形边框，理解 lyon 曲线细分；把它们和 Quad 一起绘制，对比三类图元的渲染效果。",
+          "source_files": [
+            "src/scene.rs",
+            "src/path_builder.rs",
+            "examples/painting.rs"
+          ],
+          "title": "Scene 与绘制原语",
+          "topic": "讲解渲染场景层：Scene 如何收集 Primitive（Quad、Mono/PolychromeSprite、Path、Shadow、PaintSurface）并分批，这是 GPUI 与 GPU 渲染器之间的接口。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "filename": "u4-l5-custom-element-painting.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "掌握自定义元素从布局到绘制完整实现套路",
+            "理解内容裁剪（ContentMask）与越界绘制的规则",
+            "能编写不依赖 div 的纯命令式 UI 组件"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Canvas",
+            "Element 实现",
+            "ContentMask",
+            "with_content_mask"
+          ],
+          "order": 5,
+          "practice_task": "用纯自定义 Element（不经 div）实现一个模拟时钟：request_layout 申报正方形，paint 中用 Path 画表盘指针，配合 on_next_frame 每秒重绘一次。",
+          "source_files": [
+            "src/elements/canvas.rs",
+            "examples/painting.rs",
+            "examples/paths_bench.rs",
+            "src/element.rs"
+          ],
+          "title": "自定义 Element 实战：命令式绘制",
+          "topic": "以 canvas 元素和 painting 示例为模板，完整实现一个自定义绘制元素：申请布局、计算 bounds、用 Path/Quad 绘制内容，并处理内容遮罩。"
+        }
+      ],
+      "order": 4,
+      "title": "元素机制与绘制管线"
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u5-l1-input-events.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "列举鼠标与键盘事件结构中的关键字段",
+            "理解 PlatformInput 如何统一各平台输入",
+            "会用坐标换算处理 hitbox 内的点击位置"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "MouseDownEvent/MoveEvent",
+            "KeyDownEvent",
+            "PlatformInput",
+            "ScrollDelta"
+          ],
+          "order": 1,
+          "practice_task": "在示例中同时监听 on_mouse_down、on_mouse_move、on_scroll_wheel，把事件关键字段（按钮、位置、滚轮 delta 类型）实时显示在界面上。",
+          "source_files": [
+            "src/interactive.rs",
+            "src/input.rs",
+            "examples/mouse_pressure.rs"
+          ],
+          "title": "输入事件模型：鼠标、键盘与触摸",
+          "topic": "梳理 interactive.rs 中的事件类型体系：MouseDown/Up/Move/ScrollWheel/KeyDown、ClickEvent 合成、触摸与压力事件，以及 input.rs 中的文本输入处理抽象。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-interactive-div.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "理解为什么交互监听是 paint 阶段注册而非持久存在",
+            "掌握 hitbox 与 hover/active 状态样式机制",
+            "会用 id() 与 ElementId 做状态化元素"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "InteractiveElement",
+            "Stateful<E>",
+            "hitbox",
+            "paint_mouse_listeners"
+          ],
+          "order": 2,
+          "practice_task": "实现一组可 hover 高亮、按下变色、点击计数递增的按钮网格；再对比不加 .id() 时 hover 状态的行为差异。",
+          "source_files": [
+            "src/elements/div.rs",
+            "examples/scrollable.rs",
+            "examples/opacity.rs"
+          ],
+          "title": "InteractiveElement 与状态化元素",
+          "topic": "剖析 div.rs 中的 InteractiveElement/StatefulInteractiveElement 两个 trait：on_click 等监听如何在 paint 阶段注册、Stateful 包装、hover/active 状态样式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-actions.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "会用 actions! 宏与 #[derive(Action)] 定义动作",
+            "理解 ActionRegistry 与 inventory 自动注册机制",
+            "掌握 on_action + cx.listener 的标准写法"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "actions! 宏",
+            "ActionRegistry",
+            "on_action"
+          ],
+          "order": 3,
+          "practice_task": "为一个绘图面板定义 IncreaseBrush/DecreaseBrush 动作并绑定到 +、- 键与菜单，让状态栏显示当前笔刷大小，验证键盘与代码派发两条路径。",
+          "source_files": [
+            "src/action.rs",
+            "src/app.rs",
+            "examples/set_menus.rs",
+            "docs/key_dispatch.md"
+          ],
+          "title": "Action 体系：把按键变成逻辑操作",
+          "topic": "讲解 Action trait、actions! 宏、带数据动作的 derive 宏，以及 ActionRegistry 如何在 App 启动时通过 inventory 收集注册。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "filename": "u5-l4-key-dispatch.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "解释 KeyContext 栈如何参与绑定匹配优先级",
+            "理解 DispatchTree 的构建与复用优化",
+            "能排查『按键没反应』类问题的排查路径"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Keymap",
+            "KeyBinding",
+            "KeyContext",
+            "DispatchTree"
+          ],
+          "order": 4,
+          "practice_task": "构建嵌套 key_context 的界面（外层 Editor、内层 Search），给同名动作在不同上下文绑定不同按键，验证焦点移动时按键行为切换。",
+          "source_files": [
+            "src/key_dispatch.rs",
+            "src/keymap.rs",
+            "src/keymap/binding.rs",
+            "src/keymap/context.rs",
+            "src/platform/keystroke.rs",
+            "docs/key_dispatch.md"
+          ],
+          "title": "键位派发链路：Keymap、KeyContext 与 DispatchTree",
+          "topic": "追踪一次按键的完整旅程：平台 keystroke → Keymap 匹配 KeyBinding → DispatchTree 沿元素树与 KeyContext 栈寻找 on_action 处理器，含 docs/key_dispatch.md 官方说明。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l5-focus-system.md",
+          "id": "u5-l5",
+          "learning_goals": [
+            "理解 FocusHandle 与 FocusMap 的存储结构",
+            "会实现 Focusable 并管理容器焦点 containment",
+            "掌握 tab 导航与 focus_visible 样式实现原理"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "FocusHandle",
+            "Focusable",
+            "tab_stop",
+            "focus containment"
+          ],
+          "order": 5,
+          "practice_task": "做一个含三个输入卡的表单：实现 Focusable、支持 Tab/Shift-Tab 循环切换、被聚焦的卡片显示 focus ring（用 focus_visible 样式区分鼠标与键盘聚焦）。",
+          "source_files": [
+            "src/window.rs",
+            "src/tab_stop.rs",
+            "examples/focus_visible.rs",
+            "examples/tab_stop.rs",
+            "examples/input.rs"
+          ],
+          "title": "焦点系统：FocusHandle 与键盘导航",
+          "topic": "聚焦 window.rs 中的焦点机制：FocusHandle/FocusMap、focus/blur/is_focused、tab_stop 元素的键盘导航实现，以及 focus_visible 与容器焦点。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l6-drag-drop-gestures.md",
+          "id": "u5-l6",
+          "learning_goals": [
+            "会用 on_drag/on_drop 组合可拖放界面",
+            "理解外部文件拖入的事件负载结构",
+            "了解 gestures 模块对高级指针手势的抽象"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "on_drag/on_drop",
+            "ExternalDragPayload",
+            "FileDropEvent",
+            "gestures"
+          ],
+          "order": 6,
+          "practice_task": "实现一个两栏看板：左栏条目可拖动，右栏作为 drop 目标接收并显示；再支持从系统文件管理器拖文件进窗口显示路径。",
+          "source_files": [
+            "src/interactive.rs",
+            "src/gestures.rs",
+            "examples/drag_drop.rs"
+          ],
+          "title": "拖放与手势",
+          "topic": "讲解 drag & drop 体系：元素间拖拽（on_drag/on_drop 与 drag payload）、来自操作系统的文件拖放（FileDropEvent），以及 gestures.rs 中的手势识别。"
+        }
+      ],
+      "order": 5,
+      "title": "交互机制：事件、动作与焦点"
+    },
+    {
+      "id": "u6",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1",
+            "u5-l5"
+          ],
+          "filename": "u6-l1-uniform-list.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "理解定高列表的窗口化裁剪与滚动状态管理",
+            "会用 UniformListScrollHandle 程序化控制滚动",
+            "掌握 UniformListIter 回调按需渲染子项的机制"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "UniformList",
+            "UniformListScrollHandle",
+            "视口裁剪"
+          ],
+          "order": 1,
+          "practice_task": "用 uniform_list 渲染十万行数据，实现一个跳转到指定行的按钮（通过 scroll_handle 滚动到位），验证内存中不会实例化全部行。",
+          "source_files": [
+            "src/elements/uniform_list.rs",
+            "examples/uniform_list.rs",
+            "examples/data_table.rs"
+          ],
+          "title": "虚拟化列表入门：uniform_list",
+          "topic": "以 uniform_list 为例讲解等高虚拟化：只渲染可视区条目、UniformListScrollHandle 管理滚动偏移、item_count 与回调按需构建。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-virtualized-list.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "理解变高列表的测量-缓存-复用循环",
+            "会处理 overscroll、sticky 与滚动事件",
+            "能选型 uniform_list 与 list 并说明理由"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "List/ListState",
+            "测量缓存",
+            "ListScrollEvent"
+          ],
+          "order": 2,
+          "practice_task": "用 list 实现一个聊天记录列表：每条消息高度随内容变化，新消息到达时自动滚动到底部（处理未渲染区域的尺寸估计）。",
+          "source_files": [
+            "src/elements/list.rs",
+            "examples/list_example.rs",
+            "examples/data_table.rs"
+          ],
+          "title": "变高度虚拟列表：list 元素",
+          "topic": "深入 3000 行的 list.rs：ListState 如何缓存已测量条目高度、处理向上滚动时的尺寸估算、ListScrollEvent 与滚动句柄，这是 Zed 编辑器列表的基础。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u6-l3-deferred-anchored.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "理解 deferred 如何把绘制移到当前层最上方",
+            "掌握 anchored 的定位算法与候选位置优先级",
+            "能实现带遮挡检测的 popover/下拉菜单"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Deferred",
+            "Anchored",
+            "层叠绘制",
+            "popover 模式"
+          ],
+          "order": 3,
+          "practice_task": "实现一个自定义下拉菜单：点击按钮弹出 anchored 列表，窗口边缘时自动翻转方向，点击外部或 Esc 关闭（结合 on_blur 与动作）。",
+          "source_files": [
+            "src/elements/deferred.rs",
+            "src/elements/anchored.rs",
+            "examples/popover.rs"
+          ],
+          "title": "悬浮层与锚定定位：deferred 与 anchored",
+          "topic": "讲解 GPUI 的悬浮层方案：Deferred 延迟到图层末尾绘制、Anchored 把浮层锚到目标元素并自动调整方向，popover 示例是最佳参照。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u6-l4-animation-spring.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "会用 .with_animation 为任意元素添加过渡动画",
+            "理解 SpringState 的物理积分与静止判定",
+            "掌握 AnimationPhase 驱动重复动画的写法"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "AnimationExt",
+            "Animation/SpringAnimationElement",
+            "SpringConfig/SpringState",
+            "AnimationPhase"
+          ],
+          "order": 4,
+          "practice_task": "给一个卡片实现点击时弹性放大回弹（spring 动画），再实现一个无限循环的呼吸灯效果（AnimationPhase::repeat），对比两种驱动的帧行为。",
+          "source_files": [
+            "src/elements/animation.rs",
+            "src/spring.rs",
+            "examples/animation.rs"
+          ],
+          "title": "动画系统：Animation 与弹簧物理",
+          "topic": "讲解 GPUI 动画：AnimationExt 的 with_animation、插值 trait、spring.rs 中的阻尼弹簧模拟，以及 AnimationPhase 的循环动画支持。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "filename": "u6-l5-text-system.md",
+          "id": "u6-l5",
+          "learning_goals": [
+            "理解 FontId/Font/FontMetrics 与平台字体后端的分层",
+            "掌握 WindowTextSystem 与帧内缓存的设计意图",
+            "会用 StyledText 渲染带高亮样式的多段落文本"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TextSystem/WindowTextSystem",
+            "Line/TextRun",
+            "字形光栅化缓存"
+          ],
+          "order": 5,
+          "practice_task": "渲染一段带语法高亮效果的代码片段：用 TextRun 划分关键字、字符串、注释三种样式，并测量整行宽度实现右对齐。",
+          "source_files": [
+            "src/text_system.rs",
+            "src/text_system/line.rs",
+            "src/text_system/line_layout.rs",
+            "examples/text_layout.rs"
+          ],
+          "title": "文本系统：字体、字形与行布局",
+          "topic": "分析 TextSystem 与 WindowTextSystem 的双层结构、字体加载与 fallback、Line/TextRun 的行布局模型，以及字形如何进入图集渲染。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l5"
+          ],
+          "filename": "u6-l6-text-wrap-measure.md",
+          "id": "u6-l6",
+          "learning_goals": [
+            "理解 LineWrapperHandle 的跨帧缓存复用机制",
+            "会实现按宽度断行并测量多行文本总高度",
+            "了解白名单字符与换行边界的处理规则"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "LineWrapper",
+            "wrap_line",
+            "行高测量"
+          ],
+          "order": 6,
+          "practice_task": "实现一个自动换行的文本块，鼠标拖动改变窗口宽度时重新换行；用 line wrap 结果计算内容高度并让外层 div 出现滚动条。",
+          "source_files": [
+            "src/text_system/line_wrapper.rs",
+            "examples/text_wrapper.rs",
+            "examples/text.rs"
+          ],
+          "title": "文本换行与测量：line_wrapper",
+          "topic": "line_wrapper.rs 有 1500+ 行，专门解决按宽度断行：讲解 wrap 算法、缓存句柄 LineWrapperHandle、与像素宽度测量的配合。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "filename": "u6-l7-images-svg-assets.md",
+          "id": "u6-l7",
+          "learning_goals": [
+            "理解 AssetSource 如何定位应用资源",
+            "掌握图片异步加载、缩放与对象适配模式",
+            "会排查 SVG/图片不显示的常见原因"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "AssetSource",
+            "ImageCache",
+            "SvgRenderer",
+            "Img 元素"
+          ],
+          "order": 7,
+          "practice_task": "为示例配置 AssetSource，渲染一个目录下的本地图 + 远程 URL 图（观察加载中状态）+ 多个尺寸的同一 SVG，并验证二次渲染命中缓存。",
+          "source_files": [
+            "src/assets.rs",
+            "src/asset_cache.rs",
+            "src/elements/image_cache.rs",
+            "src/elements/img.rs",
+            "src/svg_renderer.rs",
+            "examples/image_loading.rs"
+          ],
+          "title": "图片、SVG 与资源缓存",
+          "topic": "串讲资源体系：AssetSource 资产源、image_cache 的加载去重与缓存、Img 元素的尺寸策略、SvgRenderer 与 resvg 集成。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u6-l8-accessibility.md",
+          "id": "u6-l8",
+          "learning_goals": [
+            "会用 role/aria_* 方法为元素标注无障碍语义",
+            "理解 window/a11y.rs 如何在绘制阶段构建树",
+            "掌握合成子节点在自定义文本元素中的用法"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "AccessKit 集成",
+            "role 标注",
+            "A11ySubtreeBuilder"
+          ],
+          "order": 8,
+          "practice_task": "给之前的表单示例补全无障碍：输入框标注 label、按钮提供可操作角色、用屏幕阅读器（或 AccessKit 调试工具）遍历验证树结构完整。",
+          "source_files": [
+            "src/_accessibility.rs",
+            "src/window/a11y.rs",
+            "examples/a11y.rs"
+          ],
+          "title": "无障碍访问：AccessKit 集成",
+          "topic": "基于官方 _accessibility 指南与 window/a11y.rs，讲解 GPUI 如何在绘制时同步构建 AccessKit 无障碍树，以及 role、aria 属性、合成子节点。"
+        }
+      ],
+      "order": 6,
+      "title": "高级 UI 模式"
+    },
+    {
+      "id": "u7",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u7-l1-platform-layer.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "列举 Platform trait 承担的全部职责",
+            "理解 test platform 如何在无窗口环境驱动帧",
+            "了解新增平台支持需要实现哪些 trait"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Platform trait",
+            "PlatformWindow",
+            "PlatformDispatcher",
+            "test platform"
+          ],
+          "order": 1,
+          "practice_task": "用 Application::with_platform 接入 platform/test.rs 提供的测试平台，在无真实窗口的环境创建实体并手动驱动若干帧，观察绘制调用。",
+          "source_files": [
+            "src/platform.rs",
+            "src/platform/test/platform.rs",
+            "src/platform/test.rs"
+          ],
+          "title": "Platform 抽象与跨平台架构",
+          "topic": "解读 platform.rs 中约 3000 行的平台抽象：Platform、PlatformWindow、PlatformDispatcher、PlatformTextSystem、PlatformAtlas 等 trait 如何隔离 macOS/Linux/Windows 差异。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u7-l1"
+          ],
+          "filename": "u7-l2-window-management.md",
+          "id": "u7-l2",
+          "learning_tasks": null,
+          "learning_goals": [
+            "会配置 WindowKind、window_bounds、标题栏等选项",
+            "掌握 WindowHandle/AnyWindowHandle 的跨窗口更新模式",
+            "理解实体不属于窗口、可在窗口间迁移的设计"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "WindowOptions",
+            "WindowKind",
+            "WindowHandle",
+            "cx.open_window"
+          ],
+          "order": 2,
+          "practice_task": "实现主窗口 + 两个子窗口：子窗口展示同一份数据的不同视图，在一个窗口修改数据后另一个窗口实时刷新；实现把某个视图实体迁移到新窗口。",
+          "source_files": [
+            "src/window.rs",
+            "src/app.rs",
+            "examples/window.rs",
+            "examples/move_entity_between_windows.rs",
+            "examples/window_positioning.rs"
+          ],
+          "title": "窗口管理：多窗口与 WindowOptions",
+          "topic": "讲解多窗口编程：WindowOptions（kind、bounds、装饰、焦点）、WindowHandle 的更新与读取、实体在窗口间共享与迁移、窗口生命周期事件。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "filename": "u7-l3-prompts-menus-notifications.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "会用 window.prompt 构建确认/输入对话框",
+            "理解 PromptLevel/PromptButton 的事件流",
+            "掌握应用菜单项与动作的绑定方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "window.prompt",
+            "PromptBuilder",
+            "Menu/MenuItem",
+            "SystemNotification"
+          ],
+          "order": 3,
+          "practice_task": "实现退出前确认：关闭窗口时弹出三按钮 prompt（保存/放弃/取消），选保存后发送系统通知；同时为应用配置带快捷键的文件菜单。",
+          "source_files": [
+            "src/window/prompts.rs",
+            "src/window.rs",
+            "src/platform/app_menu.rs",
+            "examples/system_notifications.rs",
+            "examples/set_menus.rs"
+          ],
+          "topic": "覆盖三块系统集成：window.prompt 的原生对话框流程（prompts.rs）、应用菜单（app_menu.rs 与 init_app_menus）、系统通知的发送与响应。",
+          "title": "对话框、菜单与系统通知"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3",
+            "u5-l3"
+          ],
+          "filename": "u7-l4-testing-gpui-apps.md",
+          "id": "u7-l4",
+          "learning_goals": [
+            "会写 #[gpui::test] 并用 cx.executor() 推进虚拟时间",
+            "掌握 simulate_keystrokes/dispatch_action 等输入模拟",
+            "能搭建 headless 视觉测试与泄漏检测"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "#[gpui::test]",
+            "TestAppContext",
+            "VisualTestContext",
+            "cx.executor"
+          ],
+          "order": 4,
+          "practice_task": "为之前的计数器按钮写三个测试：模拟点击后计数递增、模拟按键派发 action、用条件编译加视觉快照；跑通 cargo test -p gpui 及自己的测试。",
+          "source_files": [
+            "src/app/test_context.rs",
+            "src/app/test_app.rs",
+            "src/test.rs",
+            "examples/testing.rs",
+            "tests/action_macros.rs"
+          ],
+          "title": "测试 GPUI 应用：#[gpui::test] 与 TestAppContext",
+          "topic": "讲解测试基础设施：#[gpui::test] 宏、TestAppContext 的虚拟时钟与输入模拟、VisualTestContext、headless_app_context，以及实体泄漏检测。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u7-l5-profiling-debugging.md",
+          "id": "u7-l5",
+          "learning_goals": [
+            "会用 profiler 记录任务耗时与帧性能",
+            "掌握 gpui::bench 宏与 BenchAppContext 的用法",
+            "会用 debug_below 与 inspector 定位元素树问题"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "profiler",
+            "#[gpui::bench]",
+            "DebugBelow",
+            "Inspector"
+          ],
+          "order": 5,
+          "practice_task": "给一个含大量 div 的界面开启 debug_below 样式输出元素边界；再写一个 benchmark 测量渲染一万个子元素的帧耗时，对比虚拟化前后的差异。",
+          "source_files": [
+            "src/profiler.rs",
+            "src/app/bench_context.rs",
+            "src/debug_overlay.rs",
+            "src/inspector.rs",
+            "src/style.rs"
+          ],
+          "title": "性能剖析与调试工具",
+          "topic": "介绍性能工具链：profiler.rs 的任务/帧/线程采样统计、#[gpui::bench] 基准宏、debug_overlay、DebugBelow 样式与 inspector 元素检查器。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l6",
+            "u5-l4",
+            "u6-l1",
+            "u6-l3",
+            "u7-l4"
+          ],
+          "filename": "u7-l6-capstone-project.md",
+          "id": "u7-l6",
+          "learning_goals": [
+            "独立完成从状态建模到交互绘制的完整 GPUI 应用",
+            "综合运用实体、动作、键位、虚拟化列表与测试",
+            "形成可对照源码继续深入 renderer/platform 的路线图"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "综合应用",
+            "架构选型",
+            "代码组织"
+          ],
+          "order": 6,
+          "practice_task": "实现一个迷你文件浏览器：树形目录（虚拟化列表）、可搜索过滤（输入框+焦点管理）、快捷键导航（j/k 展开收起，自定义 action 与 keymap）、双击打开系统对话框预览文件（prompt），并为其补充至少两个 gpui::test。",
+          "source_files": [
+            "examples/tree.rs",
+            "examples/data_table.rs",
+            "examples/input.rs",
+            "examples/popover.rs",
+            "src/app.rs"
+          ],
+          "title": "综合实战：构建一个完整小应用",
+          "topic": "以一个迷你文件管理器为毕业项目，串联全部知识点：实体状态建模、组件化视图、键盘动作、虚拟化列表、悬浮菜单、测试与调试，最后回顾框架整体架构。"
+        }
+      ],
+      "order": 7,
+      "title": "平台层、工程化与综合实战"
+    }
+  ]
+}

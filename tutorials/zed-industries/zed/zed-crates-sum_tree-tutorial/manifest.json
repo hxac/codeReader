@@ -1,14 +1,13 @@
 {
-  "head": "4c7244790a075e862eeb4e5ccc12d6c8f5da6f7e",
+  "head": "28c0f4aef89d298a08176977d9839671827f5528",
   "project": "zed-crates-sum_tree",
-  "rationale": "sum_tree 是 Zed 中被 rope、multi_buffer、buffer_diff 等核心 crate 依赖的基础数据结构（并发友好的 B+ 树），代码量不大但抽象密度高。学习顺序设计为：第一单元先让读者“跑起来、看得见结构”——认识 crate 定位、Node 的 Internal/Leaf 布局与 Arc 结构共享、本地构建与随机化测试的运行方式；第二单元攻克贯穿一切 API 的三个 trait（Item/Summary/Dimension 与 SeekTarget），它们是理解所有查询与构建接口的钥匙；第三单元进入读路径核心 Cursor（栈式导航、Bias 边界语义、slice/summary 聚合、FilterCursor 剪枝），这是后续编辑操作的基础；第四单元精读写路径的内部机制（append 的节点分裂、append_large/merge_into_right 的欠溢处理、KeyedItem 的批量 edit），这是全 crate 最难的部分，因此放在具备游标与构建知识之后；第五单元以 TreeMap/TreeSet 这个“summary 即最大键”的最佳实践范本收束抽象体系，再连接到 rope 中 SumTree<Chunk> 的真实多维度用法，并以模型测试与 proptest 属性测试结尾。讲义间依赖关系严格反映调用与概念的前置关系，写路径讲座依赖构建与游标知识，生态讲座依赖持久化与 append 的理解。",
+  "rationale": "增量分析结论：上次 HEAD 4c7244790a 到当前 HEAD 28c0f4aef8 之间共有 4 个提交，均不涉及 crates/sum_tree（也不涉及讲义引用的 crates/rope），本 crate 的四个源码文件与 Cargo.toml 完全未变，因此所有讲义 action 均为 keep，大纲结构与学习路线维持原设计不变。原设计理由仍然成立：sum_tree 是 Zed 中被 rope、multi_buffer、buffer_diff 等核心 crate 依赖的并发友好 B+ 树，代码量不大但抽象密度高。第一单元先让读者跑起来、看得见结构（crate 定位、Node 布局与 Arc 结构共享、构建与随机化测试）；第二单元攻克贯穿一切 API 的三个 trait（Item/Summary/Dimension 与 SeekTarget）；第三单元进入读路径核心 Cursor（栈式导航、Bias 边界语义、slice/summary 聚合、FilterCursor 剪枝）；第四单元精读写路径内部机制（append 节点分裂、append_large/merge_into_right 欠溢处理、KeyedItem 批量编辑）；第五单元以 TreeMap/TreeSet 收束抽象体系并连接 rope 的真实多维度用法，以模型对拍与 proptest 属性测试结尾。讲义依赖关系严格反映调用与概念前置关系。",
   "units": [
     {
       "id": "u1",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -32,7 +31,7 @@
           "topic": "介绍 sum_tree crate 的定位（Cargo.toml 描述为 concurrency-friendly B-tree）、它作为 rope/multi_buffer/buffer_diff 等核心 crate 共同依赖的地位，以及 crate 的文件组织与依赖构成。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -59,7 +58,7 @@
           "topic": "解析 Node 枚举的 Internal/Leaf 两个变体、TREE_BASE 决定的节点容量上限（2*TREE_BASE）、heapless::Vec（ArrayVec）的定容存储，以及 Arc<Node> 带来的廉价克隆与结构共享。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -87,15 +86,15 @@
           "topic": "讲解如何在本地构建与测试 sum_tree，包括测试下 TREE_BASE=2 的编译期切换、test_random 支持的 SEED/ITERATIONS/OPERATIONS 环境变量，以及 test-support feature 与 proptest 的关系。"
         }
       ],
+      "level": "beginner",
       "order": 1,
       "title": "初识 sum_tree"
     },
     {
       "id": "u2",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -123,7 +122,7 @@
           "topic": "讲解 Item trait（summary 方法）、Summary trait（zero/add_summary）以及 ContextLessSummary 与带 Context<'a> 的 Summary 的区别，以测试中的 IntegersSummary（count/sum/contains_even/max）为完整示例。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -150,7 +149,7 @@
           "topic": "讲解 Dimension trait 如何从 Summary 投影出可加度量（测试中的 Count、Sum 与 u8 的 max 维度）、Dimensions<D1,D2,D3> 组合维度，以及 SeekTarget 如何定义目标与游标位置的比较规则。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -178,15 +177,15 @@
           "topic": "逐个讲解 SumTree 的构建入口：new/from_summary/from_item/from_iter（自底向上逐层组装）、from_par_iter（rayon 并行构建）、push/extend/par_extend，并说明它们最终都汇聚到 append。"
         }
       ],
+      "level": "intermediate",
       "order": 2,
       "title": "核心 trait 体系：Item、Summary 与 Dimension"
     },
     {
       "id": "u3",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u2-l3"
@@ -216,7 +215,7 @@
           "topic": "讲解 Cursor 的内部表示（StackEntry 数组模拟的根到叶子路径栈，容量 16）与核心 API：seek/seek_forward/next/prev/item/item_summary/start/end，以及使用前必须先 seek 的断言。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -244,7 +243,7 @@
           "topic": "以源码文档中 AˇBCD 光标的例子讲解 Bias::Left/Bias::Right 在 seek/slice/find 中如何决定落在边界上的目标归属左侧还是右侧元素，以及 invert 的用途。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -272,7 +271,7 @@
           "topic": "讲解 Cursor::slice 如何在 seek 过程中顺带把经过的子树与元素聚合成新 SumTree（SliceSeekAggregate）、suffix 如何用 End 目标取到结尾、summary 如何用 SummarySeekAggregate 只累加维度而不建树。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -301,15 +300,15 @@
           "topic": "讲解 FilterCursor 如何把 FnMut(&T::Summary) -> bool 谓词传入 search_forward/search_backward，在内层节点级别整棵跳过不匹配的子树，从而实现高效过滤遍历。"
         }
       ],
+      "level": "intermediate",
       "order": 3,
       "title": "Cursor 游标导航"
     },
     {
       "id": "u4",
-      "level": "advanced",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -336,7 +335,7 @@
           "topic": "精读 append 的顶层按高度分派与 push_tree_recursive：等高时展开合并、高度差为 1 时直接挂子树、否则递归下推；子节点数超过 2*TREE_BASE 时从中点分裂并经 from_child_trees 升高一层。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -363,7 +362,7 @@
           "topic": "精读小树 append 到大树时的 append_large（向最左子树递归下钻、必要时前插分裂节点）与 merge_into_right（同高节点合并、超出容量时对半分），这两个函数补全了 B+ 树的平衡语义。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u3-l3"
@@ -392,15 +391,15 @@
           "topic": "讲解 KeyedItem（带 Ord 键的元素）、免游标的 find_exact/find/find_with_prev 查找、insert_or_replace 与 remove 基于 slice+push+append 的重建模式，以及 edit() 对一批 Edit 排序后单趟线性合并的批量编辑算法。"
         }
       ],
+      "level": "advanced",
       "order": 4,
       "title": "append 内部机制与键控编辑"
     },
     {
       "id": "u5",
-      "level": "advanced",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l3"
           ],
@@ -428,7 +427,7 @@
           "topic": "讲解 TreeMap 如何以 MapEntry 为 Item、以 MapKey（区间最后一个键）为 Summary 实现有序映射，MapKeyRef 借用键避免克隆的 Dimension 设计，以及 MapSeekTarget 如何支撑 remove_range 这类非精确边界（如按路径前缀删除）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u4-l1"
@@ -457,7 +456,7 @@
           "topic": "从并发与持久化角度总结 sum_tree 的设计（Arc 结构共享、O(log n) 汇总、slice 的子树复用），并以 rope crate 的 SumTree<Chunk> 为例展示真实用法：ChunkSummary 携带多维度信息，支撑按 offset/Point/UTF-16 多种坐标查找。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3",
             "u2-l2"
@@ -487,6 +486,7 @@
           "topic": "讲解 test_random 如何以 Vec 为参考模型对树做随机 splice/seek/slice/filter 的对拍验证，property_test.rs 如何为 SumTree 实现 proptest 的 Arbitrary 与 sum_tree 生成策略，以及 test-support feature 如何把这些工具暴露给下游 crate。"
         }
       ],
+      "level": "advanced",
       "order": 5,
       "title": "TreeMap、生态与测试实践"
     }

@@ -1,14 +1,13 @@
 {
-  "head": "4c7244790a075e862eeb4e5ccc12d6c8f5da6f7e",
+  "head": "28c0f4aef89d298a08176977d9839671827f5528",
   "project": "zed-crates-streaming_diff",
-  "rationale": "streaming_diff 是一个小而精的 crate（单个源文件 streaming_diff.rs + 一个 criterion 基准），解决的问题是：当新文本以流式分块到达（例如 LLM 生成编辑）时，边推送边计算字符级差异，并把字符级差异折叠成行级差异。学习路线按\"是什么 → 数据模型 → 打分基础 → 核心算法流程 → 行级转换与工程实践\"递进：第一单元让读者跑通测试、理解 CharOperation/LineOperation 两种差异语言；第二单元先攻私有的列主序 Matrix 和打分常量这两个算法地基；第三单元顺着 StreamingDiff 的生命周期（new 初始化 → push_new 增量主循环 → backtrack 回溯 → finish 收尾）拆解滚动矩阵、锚点推进等流式技巧；第四单元进入 LineDiff 的状态机（flush/trim/行集合）与 line_operations 重建，最后覆盖随机化测试、基准与真实调用方（agent/edit_session、agent_ui/buffer_codegen）。整体从 beginner 到 advanced，每篇只讲一个主题且都带可动手的实践任务。",
+  "rationale": "streaming_diff 是一个小而精的 crate（单个源文件 streaming_diff.rs + 一个 criterion 基准），解决的问题是：当新文本以流式分块到达（例如 LLM 生成编辑）时，边推送边计算字符级差异，并把字符级差异折叠成行级差异。学习路线按\"是什么 → 数据模型 → 打分基础 → 核心算法流程 → 行级转换与工程实践\"递进：第一单元让读者跑通测试、理解 CharOperation/LineOperation 两种差异语言；第二单元先攻私有的列主序 Matrix 和打分常量这两个算法地基；第三单元顺着 StreamingDiff 的生命周期（new 初始化 → push_new 增量主循环 → backtrack 回溯 → finish 收尾）拆解滚动矩阵、锚点推进等流式技巧；第四单元进入 LineDiff 的状态机（flush/trim/行集合）与 line_operations 重建，最后覆盖随机化测试、基准与真实调用方（agent/edit_session、agent_ui/buffer_codegen）。整体从 beginner 到 advanced，每篇只讲一个主题且都带可动手的实践任务。本次增量检查：上次 HEAD（4c7244790a）到当前 HEAD（28c0f4aef8）之间 crates/streaming_diff 及其被引用的调用方文件（agent/edit_session.rs、agent_ui/buffer_codegen.rs）均无任何提交和差异，crate 结构、所有公开接口与内部符号（Matrix、StreamingDiff、LineDiff、打分常量、测试与基准）完全未变，因此全部讲义维持 keep，无需重写。",
   "units": [
     {
       "id": "u1",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-streaming-diff-overview.md",
           "id": "u1-l1",
@@ -33,7 +32,7 @@
           "topic": "介绍 streaming_diff crate 的定位：在旧文本固定、新文本分块流式到达时计算字符级差异，服务于 Zed 中 agent 编辑与代码生成的增量渲染；了解 Cargo.toml、库根文件 src/streaming_diff.rs 的组织，以及如何运行测试。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -60,15 +59,15 @@
           "topic": "讲解两种差异表示：字符级的 CharOperation::Insert/Delete/Keep（Delete/Keep 以字节数计量、Insert 携带文本）与行级的 LineOperation；并用测试中的 apply_char_operations/apply_line_operations 验证差异可重建新文本。"
         }
       ],
+      "level": "beginner",
       "order": 1,
       "title": "单元一：认识 streaming_diff"
     },
     {
       "id": "u2",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -95,7 +94,7 @@
           "topic": "拆解私有的 Matrix 结构：列主序 Vec<f64> 存储、resize 复用容量、swap_columns 的 unsafe 指针交换、以及 adjacent_columns_mut 如何用 split_at_mut 同时借用相邻两列。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -123,15 +122,15 @@
           "topic": "解读 INSERTION_SCORE=-1、DELETION_SCORE=-20、EQUALITY_BASE=1.8 与 MAX_EQUALITY_EXPONENT=16 这组常量：插入便宜、删除昂贵、长相等游程按指数奖励，从而使 diff 偏向“保留旧文本 + 插入新内容”，匹配 LLM 流式输出的场景。"
         }
       ],
+      "level": "beginner",
       "order": 2,
       "title": "单元二：打分矩阵与计分模型"
     },
     {
       "id": "u3",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -157,7 +156,7 @@
           "topic": "以 Needleman-Wunsch 风格的序列对齐为背景，理解 StreamingDiff::new 如何把 old 转为 Vec<char>、把矩阵初始化为 (old_len+1) x 1，并把第 0 列填为 i * DELETION_SCORE（即“删除前 i 个旧字符”的代价）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1",
             "u2-l1"
@@ -185,7 +184,7 @@
           "topic": "逐行精读 push_new：swap_columns(0, cols-1) 复用上一次的边界列、resize 扩出新的列区间、用 adjacent_columns_mut 拿到相邻两列逐行填入 max(插入, 删除, 相等) 分数，并用双缓冲的 equal_runs 数组跟踪连续相等长度。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -212,7 +211,7 @@
           "topic": "讲解 push_new 末段如何在已结算区间内寻找分数最大的 (old 行, 新列) 终点并推进 old_text_ix/new_text_ix 锚点，以及 backtrack 如何从终点反向走 DP 决策、用 pending_insert 与“合并到最后一个 hunk”的技巧生成紧凑的 CharOperation 序列。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l3"
           ],
@@ -238,15 +237,15 @@
           "topic": "对比 finish()（锚定到 old 末尾做最终回溯）与 push_new 的增量回溯，总结流式使用的核心不变量：任意分块方式下，把所有返回的 CharOperation 依次应用都能重建 new 文本；同时讨论内存与计算量随 old 长度的增长边界。"
         }
       ],
+      "level": "intermediate",
       "order": 3,
       "title": "单元三：StreamingDiff 核心流程"
     },
     {
       "id": "u4",
-      "level": "advanced",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2",
             "u3-l4"
@@ -270,11 +269,11 @@
           "source_files": [
             "crates/streaming_diff/src/streaming_diff.rs"
           ],
-          "topic": "介绍 LineDiff 的状态字段：old_end/new_end 两个 rope::Point 游标、deleted_rows/inserted_rows 两个 BTreeSet、buffered_insert/buffered_delete 缓冲，以及 inserted_newline_at_end 标志；理解 is_line_start/is_line_end 判定与 rope 的 Point 换算。",
-          "title": "LineDiff 的状态模型：游标、行集合与缓冲区"
+          "title": "LineDiff 的状态模型：游标、行集合与缓冲区",
+          "topic": "介绍 LineDiff 的状态字段：old_end/new_end 两个 rope::Point 游标、deleted_rows/inserted_rows 两个 BTreeSet、buffered_insert/buffered_delete 缓冲，以及 inserted_newline_at_end 标志；理解 is_line_start/is_line_end 判定与 rope 的 Point 换算。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -298,11 +297,11 @@
           "source_files": [
             "crates/streaming_diff/src/streaming_diff.rs"
           ],
-          "topic": "精读 push_char_operation 的三个分支与 flush_insert/flush_delete/keep 的协作：插入按行首/行尾分情况累计 inserted_rows，删除在行边界内外给出不同的行归属，trim_buffered_end 会先削掉新旧文本的公共后缀再结算，从而把无意义的插入+删除折叠成 Keep。",
-          "title": "字符操作到行边界：flush 与 trim 的状态机"
+          "title": "字符操作到行边界：flush 与 trim 的状态机",
+          "topic": "精读 push_char_operation 的三个分支与 flush_insert/flush_delete/keep 的协作：插入按行首/行尾分情况累计 inserted_rows，删除在行边界内外给出不同的行归属，trim_buffered_end 会先削掉新旧文本的公共后缀再结算，从而把无意义的插入+删除折叠成 Keep。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l2"
           ],
@@ -324,11 +323,11 @@
           "source_files": [
             "crates/streaming_diff/src/streaming_diff.rs"
           ],
-          "topic": "讲解 line_operations 如何用两个 peekable 迭代器归并 deleted_rows 与 inserted_rows，生成合并后的 LineOperation 序列，包括 cmp::max(1, min(...)) 的保底 Keep 与结尾对齐旧文本行数的处理。",
-          "title": "从行集合重建行操作：line_operations 归并算法"
+          "title": "从行集合重建行操作：line_operations 归并算法",
+          "topic": "讲解 line_operations 如何用两个 peekable 迭代器归并 deleted_rows 与 inserted_rows，生成合并后的 LineOperation 序列，包括 cmp::max(1, min(...)) 的保底 Keep 与结尾对齐旧文本行数的处理。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l4",
             "u4-l3"
@@ -353,11 +352,11 @@
             "crates/streaming_diff/src/streaming_diff.rs",
             "crates/streaming_diff/benches/streaming_diff.rs"
           ],
-          "topic": "梳理 crate 的测试与基准设施：test_random_diffs 的随机化测试（SEED/ITERATIONS/OLD_TEXT_LEN 环境变量）、round-trip 不变量验证，以及 criterion 基准中按 512 字节分块推送的四种编辑形态 fixture 与 unsafe swap 的安全性论证。",
-          "title": "随机化测试与基准：如何验证和度量 diff 质量"
+          "title": "随机化测试与基准：如何验证和度量 diff 质量",
+          "topic": "梳理 crate 的测试与基准设施：test_random_diffs 的随机化测试（SEED/ITERATIONS/OLD_TEXT_LEN 环境变量）、round-trip 不变量验证，以及 criterion 基准中按 512 字节分块推送的四种编辑形态 fixture 与 unsafe swap 的安全性论证。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l4",
             "u4-l3"
@@ -382,10 +381,11 @@
             "crates/agent/src/tools/edit_session.rs",
             "crates/agent_ui/src/buffer_codegen.rs"
           ],
-          "topic": "回到真实调用方：agent 的 edit_session 如何在工具调用流式输出时用 StreamingDiff 增量生成 CharOperation 并写回缓冲区，agent_ui 的 buffer_codegen 如何同时用 StreamingDiff 与 LineDiff 维护行级差异以便重放；由此总结二次开发时的接入模式与注意点。",
-          "title": "在 Zed 中落地：agent 编辑会话与代码生成的真实用法"
+          "title": "在 Zed 中落地：agent 编辑会话与代码生成的真实用法",
+          "topic": "回到真实调用方：agent 的 edit_session 如何在工具调用流式输出时用 StreamingDiff 增量生成 CharOperation 并写回缓冲区，agent_ui 的 buffer_codegen 如何同时用 StreamingDiff 与 LineDiff 维护行级差异以便重放；由此总结二次开发时的接入模式与注意点。"
         }
       ],
+      "level": "advanced",
       "order": 4,
       "title": "单元四：LineDiff 与工程实践"
     }
