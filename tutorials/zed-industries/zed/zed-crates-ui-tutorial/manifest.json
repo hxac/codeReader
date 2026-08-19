@@ -1,0 +1,944 @@
+{
+  "head": "2936989f1b7a15aaf7131b0a3c17961d706fdbf5",
+  "project": "zed-crates-ui",
+  "rationale": "本次为增量更新：对比 fa00dccc..2936989f 的完整 diff，crates/ui 目录零文件变更（改动集中在 gpui、markdown、editor、picker 等其他 crate，均不影响本手册引用的 ui 源码与讲解内容），且 ui crate 关键源码文件在当前 HEAD 全部仍然存在，因此全部 26 篇讲义 action 均为 keep，仅更新 head 与理由字段。学习主线维持不变：入门层讲清 crate 定位、prelude 约定、RenderOnce 模型与布局原语，再集中讲设计令牌（颜色/排版/间距/层级）；进阶层按组件族分单元（Button 家族、图标与展示、弹出层与菜单、表单与导航、容器与复合组件），每族从最常用组件切入再进入抽象基座；专家层剖析无障碍、动画、rem 缩放、工具函数、组件预览注册与测试等横切机制。依赖关系保持组件类讲义依赖 u1 的 RenderOnce 模型与 u2 令牌系统、弹出层单元内部从严递进，读者可按图索骥、跳跃阅读。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [],
+          "filename": "u1-l1-crate-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 ui crate 在 Zed 工程中的角色与依赖的兄弟 crate",
+            "看懂 src/ui.rs 与 src/components.rs 的模块组织与 re-export 方式",
+            "能够从任何一个组件名定位到它的源码文件"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "src/ui.rs",
+            "src/components.rs",
+            "Cargo.toml 依赖清单"
+          ],
+          "order": 1,
+          "practice_task": "阅读 Cargo.toml 与 src/ui.rs、src/components.rs，画出 ui 对 gpui/theme/icons/component/ui_macros 的依赖关系图，并书面追踪 Button 从 src/components/button/button.rs 到 crate 根 `pub use` 的完整导出路径。",
+          "source_files": [
+            "src/ui.rs",
+            "src/components.rs",
+            "Cargo.toml"
+          ],
+          "title": "ui crate 的定位与整体结构",
+          "topic": "介绍 ui crate 在 Zed 中的角色：基于 GPUI 的组件与样式库。讲解它与 gpui、theme、icons、component、ui_macros 等兄弟 crate 的关系，以及 src/ui.rs 作为 lib 根、src/components.rs 统一声明并 re-export 全部组件的组织方式。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-prelude-and-exports.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "记住 prelude 提供的核心类型与函数",
+            "区分 prelude 与 component_prelude 的用途",
+            "理解扁平化 re-export 对下游使用体验的影响"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "src/prelude.rs",
+            "src/component_prelude.rs",
+            "gpui prelude 转发"
+          ],
+          "order": 2,
+          "practice_task": "仅通过 `use ui::prelude::*` 编写一个返回 `impl IntoElement` 的函数，组合 div、h_flex、Label 与 Button，并以 doc test 或临时示例的形式通过 `cargo check -p ui` 验证。",
+          "source_files": [
+            "src/prelude.rs",
+            "src/component_prelude.rs",
+            "src/ui.rs"
+          ],
+          "title": "prelude：导入约定与公共 API 地图",
+          "topic": "解读 src/prelude.rs 导出了哪些 gpui 原语、组件与样式工具，以及 src/component_prelude.rs 为组件预览体系单独准备的导出；说明下游 crate 为什么几乎总是 `use ui::prelude::*`。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-render-once-model.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "掌握 derive(IntoElement) + impl RenderOnce 的标准写法",
+            "理解 builder 模式方法按值消费 self 的原因",
+            "区分 RenderOnce 组件与基于 Entity 的有状态视图"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Icon 的 RenderOnce 实现",
+            "Popover 的 ParentElement 实现",
+            "builder 模式方法"
+          ],
+          "order": 3,
+          "practice_task": "仿照 Icon 实现一个自定义 RenderOnce 组件（例如可调直径与颜色的 StatusDot），提供 new/color/diameter 等 builder 方法，并为其编写 doc 示例。",
+          "source_files": [
+            "src/components/icon.rs",
+            "src/components/popover.rs"
+          ],
+          "title": "RenderOnce：无状态组件的渲染模型",
+          "topic": "讲解 ui crate 组件的标准形态：derive(IntoElement) + RenderOnce::render(self, window, cx)，以 Icon 和 Popover 两个最简组件为例，说明按值消费 self 的 builder 模式，以及它与 GPUI Entity/Render 有状态视图的区别。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l4-layout-primitives.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "掌握 h_flex/v_flex 的等价链式调用",
+            "会用 h_group_*/v_group_* 组织成组控件",
+            "理解 ui crate 对 GPUI flexbox 的封装习惯"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "stack.rs 的 h_flex/v_flex",
+            "group.rs 的分组函数",
+            "StyledExt::h_flex/v_flex"
+          ],
+          "order": 4,
+          "practice_task": "用 h_flex、v_flex 与 h_group_* 组合一个工具栏骨架：左侧图标按钮组、中间分隔线、右侧弹性留白加主按钮，不借助任何具体业务组件。",
+          "source_files": [
+            "src/components/stack.rs",
+            "src/components/group.rs",
+            "src/traits/styled_ext.rs"
+          ],
+          "title": "布局原语：h_flex、v_flex 与 Group",
+          "topic": "讲解 h_flex()/v_flex() 快捷函数、StyledExt 上的同名方法以及 h_group_sm/lg/xl 系列分组容器，说明 ui crate 如何在 GPUI flexbox 之上约定统一的布局习惯。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "初识 ui crate"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l1-semantic-color.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "理解语义色与主题解耦的设计动机",
+            "能根据场景选择 Default/Muted/Error/Warning 等变体",
+            "知道 Color::Custom 与 Color::Player 的特殊地位"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Color 枚举",
+            "Color::color(cx) 解析",
+            "theme::ActiveTheme"
+          ],
+          "order": 1,
+          "practice_task": "编写一个 doc 示例展示典型语义变体（Default、Muted、Error、Warning、Success、Disabled）的适用场景，并写一段文字说明为什么源码强烈不建议使用 Color::Custom。",
+          "source_files": [
+            "src/styles/color.rs"
+          ],
+          "title": "语义颜色系统",
+          "topic": "解读 styles/color.rs 中的 Color 枚举：每个变体代表跨主题一致的语义（如 Error、Modified、Ignored、Player 等），并通过 Color::color(cx) 查询当前 theme 得到实际 Hsla；说明为什么不直接写死颜色值。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1",
+            "u1-l3"
+          ],
+          "filename": "u2-l2-label-and-typography.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "掌握 Label 的常用 builder 方法（size/weight/color/截断）",
+            "理解 LabelCommon 与 LabelLike 的委托结构",
+            "会用 TextSize 与 text_ui* 系列方法适配 ui_scale"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Label",
+            "LabelCommon trait",
+            "TextSize 与 StyledTypography"
+          ],
+          "order": 2,
+          "practice_task": "构造一组标签：不同 LabelSize、不同 FontWeight、不同 Color，并分别演示 truncate、truncate_middle、line_clamp 的差异；再用 StyledTypography 的 text_ui/text_ui_sm 对比 rem 随 ui_scale 的变化。",
+          "source_files": [
+            "src/components/label/label.rs",
+            "src/components/label/label_like.rs",
+            "src/styles/typography.rs"
+          ],
+          "title": "Label 家族与排版系统",
+          "topic": "讲解 Label/LabelLike 与共享 API 的 LabelCommon trait（size、weight、color、strikethrough、truncate 等），以及 styles/typography.rs 中 TextSize 档位和 StyledTypography 扩展方法（text_ui、text_ui_sm、font_buffer 等）如何随用户 ui_scale 设置缩放。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l3-dynamic-spacing.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "理解 BaseXX 命名与像素值、rem 的换算关系",
+            "掌握三档 UI 密度下间距如何变化",
+            "避免用硬编码 px 做间距"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "derive_dynamic_spacing 宏输入",
+            "DynamicSpacing::BaseXX",
+            "ui_density()"
+          ],
+          "order": 3,
+          "practice_task": "把一段用 px() 硬编码 gap/padding 的布局改写为 DynamicSpacing::BaseXX.rems(cx)（或 .px(cx)），并在 Compact/Default/Comfortable 三档密度下对比说明尺寸差异。",
+          "source_files": [
+            "src/styles/spacing.rs"
+          ],
+          "title": "DynamicSpacing 与 UI 密度",
+          "topic": "解读 styles/spacing.rs：derive_dynamic_spacing! 宏如何为三档 UI 密度（Compact/Default/Comfortable）生成 DynamicSpacing 枚举，BaseXX 命名与默认 rem 尺寸的换算，以及 ui_density() 的正确使用边界（只用于展示，不用于算间距）。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l4-elevation-and-appearance.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "掌握三级 elevation 的语义与典型使用场景",
+            "会读 ElevationIndex 对应的背景/边框/阴影",
+            "会判断明暗主题与透明背景并做适配"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "ElevationIndex",
+            "elevation_1/2/3",
+            "is_light 与 theme_is_transparent"
+          ],
+          "order": 4,
+          "practice_task": "为同一个卡片分别应用 elevation_1/elevation_2/elevation_3 渲染三份，并在明暗两种主题下用 is_light(cx) 调整边框颜色，观察背景、圆角与阴影差异。",
+          "source_files": [
+            "src/styles/elevation.rs",
+            "src/traits/styled_ext.rs",
+            "src/styles/appearance.rs",
+            "src/utils.rs"
+          ],
+          "title": "Elevation 表面层级与外观判断",
+          "topic": "讲解 ElevationIndex（Surface/ElevatedSurface/ModalSurface）三级表面层级、StyledExt::elevation_1/2/3 的样式封装，以及 utils 里的 is_light() 与 appearance 中的 theme_is_transparent() 如何帮助组件适配明暗与透明主题。"
+        }
+      ],
+      "level": "beginner",
+      "order": 2,
+      "title": "设计令牌：颜色、排版、间距与层级"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l3",
+            "u2-l2"
+          ],
+          "filename": "u3-l1-button.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "掌握 Button 的完整 builder API",
+            "理解 selected_label/toggle_state/loading 等状态切换逻辑",
+            "能读懂 Button::render 如何组装内部元素树"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Button 结构体",
+            "Toggleable/Disableable 实现",
+            "render 组装逻辑"
+          ],
+          "order": 1,
+          "practice_task": "实现一个「删除项目」按钮：start_icon 为删除图标、key_binding 绑定删除动作、disabled 由状态控制、loading 在操作进行中替换图标为旋转 spinner，并补充 doc 示例。",
+          "source_files": [
+            "src/components/button/button.rs"
+          ],
+          "title": "Button：组件全解",
+          "topic": "逐段精读 Button：构造函数、label/图标/快捷键/加载态等 builder 方法、Toggleable 与 Disableable 的状态表现，以及 render() 如何用 h_flex 组织图标、Label 和 KeyBinding 并把工作委托给内部的 ButtonLike。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-button-like-and-styles.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "掌握 ButtonStyle/TintColor/ButtonSize 的取值与效果",
+            "理解 ButtonCommon 作为共享 API 的设计意图",
+            "知道何时应该直接使用 ButtonLike"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ButtonCommon trait",
+            "ButtonStyle 与 TintColor",
+            "ButtonLike"
+          ],
+          "order": 2,
+          "practice_task": "直接用 ButtonLike::new_rounded_left / new_rounded_right 组装一个自定义按钮（例如「主操作 + 下拉箭头」拼接按钮），说明它与 SplitButton 的差异与取舍。",
+          "source_files": [
+            "src/components/button/button_like.rs",
+            "src/components/button/button.rs"
+          ],
+          "title": "ButtonLike 与按钮样式系统",
+          "topic": "讲解 ButtonCommon/SelectableButton 这两个 trait 如何统一各按钮的公共 API，ButtonStyle（含 Tinted 色调）、ButtonSize 档位与 KeybindingPosition，以及 ButtonLike 作为底层按钮元素承载样式、aria、tooltip、点击处理的完整能力。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l3-button-variants.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "为不同场景选择正确的按钮变体",
+            "掌握 IconButtonShape 与 ToggleButtonGroup 的用法",
+            "理解 ButtonBuilder 风格 API 的设计"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "IconButton",
+            "ToggleButtonGroup",
+            "SplitButton 与 CopyButton"
+          ],
+          "order": 3,
+          "practice_task": "用 ToggleButtonGroup 构造一个两到三档的 segmented control（如视图切换），处理选中项回调；再用 IconButton 与 CopyButton 组合一个复制交互。",
+          "source_files": [
+            "src/components/button/icon_button.rs",
+            "src/components/button/toggle_button.rs",
+            "src/components/button/split_button.rs",
+            "src/components/button/copy_button.rs",
+            "src/components/button/button_link.rs"
+          ],
+          "title": "衍生按钮：IconButton、ToggleButton、SplitButton 等",
+          "topic": "浏览 button 目录下的其余组件：IconButton（含 IconButtonShape）、ToggleButton/ToggleButtonGroup、SplitButton、CopyButton 和 ButtonLink，说明各自的使用场景与共同点。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1",
+            "u1-l3"
+          ],
+          "filename": "u3-l4-capability-traits.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "掌握各能力 trait 的方法签名与实现要求",
+            "理解用 trait 统一交互能力的泛型编程模式",
+            "能为自己组件补齐一致的交互 API"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Clickable",
+            "Disableable/Toggleable",
+            "FixedWidth"
+          ],
+          "order": 4,
+          "practice_task": "为 u1-l3 实现的自定义组件补上 Clickable（on_click/cursor_style）与 Disableable 实现，并编写一个泛型函数 `fn wire_up<T: Clickable + Disableable>(el: T) -> T` 验证 trait 约束可用。",
+          "source_files": [
+            "src/traits/clickable.rs",
+            "src/traits/disableable.rs",
+            "src/traits/toggleable.rs",
+            "src/traits/fixed.rs"
+          ],
+          "title": "能力 trait：Clickable、Disableable、Toggleable、FixedWidth",
+          "topic": "讲解 traits 目录下的能力 trait：Clickable、Disableable、Toggleable、FixedWidth，它们如何让 Button、IconButton 等不同组件暴露一致的交互方法，以及组件通过委托内部 ButtonLike 实现这些 trait 的写法。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "Button 家族"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l3",
+            "u2-l1"
+          ],
+          "filename": "u4-l1-icon-system.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "掌握 Icon 的三种来源与渲染差异",
+            "理解 IconSize 档位与 rem 尺寸",
+            "会给图标叠加指示器与装饰"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Icon 与 IconSource",
+            "IconSize",
+            "IconWithIndicator/IconDecoration"
+          ],
+          "order": 1,
+          "practice_task": "渲染一个图标网格：同一 IconName 在 XSmall/Small/Medium/XLarge 下的表现，并用 IconWithIndicator 给用户图标叠加在线状态小圆点。",
+          "source_files": [
+            "src/components/icon.rs",
+            "src/components/icon/decorated_icon.rs",
+            "src/components/icon/icon_decoration.rs"
+          ],
+          "title": "Icon 体系",
+          "topic": "讲解 Icon 组件：IconName 来自 icons crate、三种 IconSource（内嵌 SVG / 外部图片 / 外部 SVG）对应的渲染方式、IconSize 档位与 square() 计算以及 IconWithIndicator 的角标叠加。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-identity-components.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "掌握 Avatar 的音频/协作状态指示",
+            "会用 Facepile 聚合多个头像",
+            "了解 collab 子模块的成品组件"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Avatar 与 AvatarAudioStatusIndicator",
+            "Facepile",
+            "collab 更新按钮"
+          ],
+          "order": 2,
+          "practice_task": "用 Avatar + Facepile + Color::Player 组合一个「协作者栏」：若干头像叠加展示，最后一个位置显示 CountBadge 数字，鼠标悬停头像显示 Tooltip。",
+          "source_files": [
+            "src/components/avatar.rs",
+            "src/components/facepile.rs",
+            "src/components/collab/update_button.rs",
+            "src/components/collab/collab_notification.rs",
+            "src/components/count_badge.rs"
+          ],
+          "title": "身份与协作组件",
+          "topic": "讲解身份展示类组件：Avatar（含音频状态、协作者可用性指示）、Facepile 头像堆叠、CountBadge 计数徽标，以及 collab 目录下的 UpdateButton 与 CollabNotification 等成品组件。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1",
+            "u4-l1"
+          ],
+          "filename": "u4-l3-feedback-components.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "按语义级别选择正确的反馈组件",
+            "掌握进度组件的用法",
+            "会用 Disclosure 做可折叠区域"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Callout 与 Severity",
+            "ProgressBar/CircularProgress",
+            "Disclosure 与 Divider"
+          ],
+          "order": 3,
+          "practice_task": "组装一个「同步进行中」卡片：CircularProgress + 说明 Label，内部用 Disclosure 折叠详细日志，底部 ProgressBar 展示总进度，顶部用 Callout 标注警告状态。",
+          "source_files": [
+            "src/components/callout.rs",
+            "src/components/banner.rs",
+            "src/components/progress/progress_bar.rs",
+            "src/components/progress/circular_progress.rs",
+            "src/components/indicator.rs",
+            "src/components/divider.rs",
+            "src/components/disclosure.rs"
+          ],
+          "title": "反馈与状态组件",
+          "topic": "讲解状态反馈类组件：Callout 与 Banner 的强调方式、ProgressBar/CircularProgress、Indicator 状态点、Divider 分隔线以及 Disclosure 折叠指示器，并联系 Severity 语义级别。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "图标与信息展示组件"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u5-l1-tooltip-and-popover.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "掌握 Tooltip 的几种构造器",
+            "理解 Tooltip 返回 AnyView 工厂的原因",
+            "会用 Popover 组织弹出面板内容"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Tooltip 构造器",
+            "Title 枚举",
+            "Popover"
+          ],
+          "order": 1,
+          "practice_task": "用 Tooltip::for_action_title 给按钮加「带快捷键」的提示，并用 Popover 的 children + aside 组织一个左右两栏的弹出面板。",
+          "source_files": [
+            "src/components/tooltip.rs",
+            "src/components/popover.rs"
+          ],
+          "title": "Tooltip 与 Popover",
+          "topic": "讲解最轻量的两个弹出组件：Tooltip（simple/text/for_action_title 等构造器，返回 AnyView 工厂）与 Popover（内容 + 可选 aside 的静态定位面板，内置 elevation_2）。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-context-menu.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "掌握 ContextMenuEntry 的全部配置项",
+            "理解 ContextMenu 是 Entity 而非普通元素",
+            "会用 build/rebuild 更新菜单"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ContextMenu::build",
+            "ContextMenuEntry",
+            "ContextMenuItem 与分隔线"
+          ],
+          "order": 2,
+          "practice_task": "构造一个文件右键菜单：含图标项「重命名」、绑定 action 的「删除」、toggle 项「在侧栏显示」、一条分隔线和禁用项「恢复」，并在窗口焦点/上下文变化时调用 rebuild 更新可用性。",
+          "source_files": [
+            "src/components/context_menu.rs"
+          ],
+          "title": "ContextMenu：菜单实体",
+          "topic": "精读最大的单个组件文件（约 2500 行）：ContextMenu 作为 GPUI Entity 的构建方式、ContextMenuEntry 的图标/动作/handler/toggleable/disabled 配置、菜单的 build/rebuild 生命周期以及 documentation_aside 侧栏文档。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-popover-menu.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "理解 PopoverTrigger 的 trait 约束设计",
+            "掌握 PopoverMenuHandle 的开合控制",
+            "理解 ManagedView 在弹出体系中的角色"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "PopoverMenu",
+            "PopoverMenuHandle",
+            "PopoverTrigger trait"
+          ],
+          "order": 3,
+          "practice_task": "用 PopoverMenu 包裹 u5-l2 构建的 ContextMenu：触发按钮显示选中项，通过 PopoverMenuHandle 在代码中打开/关闭菜单，并在选中某项后自动收起（具体方法名以源码为准）。",
+          "source_files": [
+            "src/components/popover_menu.rs",
+            "src/components/context_menu.rs"
+          ],
+          "title": "PopoverMenu：通用弹出菜单机制",
+          "topic": "讲解通用弹出机制：PopoverTrigger trait（IntoElement + Clickable + Toggleable）约束哪些元素能当触发器、PopoverMenuHandle 如何在代码中控制开合，以及 ManagedView 抽象如何让 ContextMenu 等任意视图成为弹出内容。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "filename": "u5-l4-dropdown-and-right-click.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "掌握 DropdownMenu 的触发器配置与四种样式",
+            "会用 RightClickMenu 挂载二级菜单",
+            "理解这三个组件与 PopoverMenu 的分层关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "DropdownMenu",
+            "DropdownStyle",
+            "right_click_menu 函数"
+          ],
+          "order": 4,
+          "practice_task": "实现一个「主题选择」下拉：DropdownMenu 展示主题列表，选中后触发器文案更新为所选主题；再给一个列表项挂上 right_click_menu，右键打开 u5-l2 的菜单。",
+          "source_files": [
+            "src/components/dropdown_menu.rs",
+            "src/components/right_click_menu.rs",
+            "src/components/popover_menu.rs"
+          ],
+          "title": "DropdownMenu 与 RightClickMenu",
+          "topic": "讲解上层封装：DropdownMenu（四种 DropdownStyle 触发器 + Entity<ContextMenu> + 锚点/偏移控制）和 RightClickMenu（把菜单挂到任意元素的二级点击上），说明它们与 PopoverMenu 的分工。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 5,
+      "title": "弹出层与菜单体系"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u6-l1-switch-and-checkbox.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "掌握 checkbox()/switch() 工厂函数与 ToggleState",
+            "理解 SwitchLabelPosition 等布局选项",
+            "会用 SwitchField 组织设置项"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Switch 与 SwitchColor",
+            "Checkbox",
+            "ToggleState 三态"
+          ],
+          "order": 1,
+          "practice_task": "构造一个设置页片段：三行设置项（Label + Switch），点击 Switch 切换布尔状态；其中一个使用 Checkbox 呈现父级三态（子项部分开启时为 ToggleState::Indeterminate）。",
+          "source_files": [
+            "src/components/toggle.rs"
+          ],
+          "title": "Switch 与 Checkbox",
+          "topic": "精读 toggle.rs（约 1100 行）：checkbox()/switch() 工厂函数、ToggleState 三态语义、Switch 的颜色/标签位置/尺寸配置以及 SwitchField 表单封装。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u6-l2-keybinding-display.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "掌握 KeyBinding 的几种来源构造",
+            "理解快捷键文本的平台差异处理",
+            "会在按钮与菜单中统一展示快捷键"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "KeyBinding",
+            "PlatformStyle",
+            "KeybindingHint"
+          ],
+          "order": 2,
+          "practice_task": "分别在 Button（key_binding 方法）和 ContextMenuEntry（action 绑定）上显示同一 action 的快捷键，并对照 PlatformStyle 说明 macOS 与 Windows/Linux 下修饰键图标的差异。",
+          "source_files": [
+            "src/components/keybinding.rs",
+            "src/components/keybinding_hint.rs",
+            "src/styles/platform.rs"
+          ],
+          "title": "KeyBinding 展示与平台风格",
+          "topic": "讲解 KeyBinding 组件：从 action（含 focus 上下文）或原始 keystrokes 解析快捷键、PlatformStyle 决定显示 ⌘ 还是 Ctrl 等平台符号、vim_mode 全局状态的影响，以及 KeybindingHint 组合展示。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u6-l3-tab-and-tab-bar.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "掌握 Tab 的位置感知与关闭按钮配置",
+            "会用 TabBar 组织一组 Tab",
+            "理解 Navigable 在键盘导航中的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Tab 与 TabPosition",
+            "TabBar",
+            "Navigable"
+          ],
+          "order": 3,
+          "practice_task": "组装一个标签栏：三个 Tab（带图标与关闭按钮，当前项高亮），边缘项使用正确的 TabPosition 让圆角只朝内侧；尝试接入 Navigable 实现键盘左右切换（Navigable 的具体 API 以源码为准）。",
+          "source_files": [
+            "src/components/tab.rs",
+            "src/components/tab_bar.rs",
+            "src/components/navigable.rs"
+          ],
+          "title": "Tab 与 TabBar",
+          "topic": "讲解 tab.rs 与 tab_bar.rs：TabPosition 边缘位置感知（决定圆角与边框朝向）、关闭按钮侧边配置、TabBar 容器，以及 navigable.rs 中 Navigable/NavigableEntry 提供的键盘导航结构。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 6,
+      "title": "表单与导航控件"
+    },
+    {
+      "id": "u7",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u7-l1-list-family.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "掌握 List/ListItem 的组装方式",
+            "理解各子组件的分工",
+            "知道何时需要 StickyItems 机制"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "List 与 EmptyMessage",
+            "ListItem",
+            "StickyItems"
+          ],
+          "order": 1,
+          "practice_task": "用 ListSubHeader + ListItem 组一个分组的设置列表（至少两组），为每项接入 Switch，并在空态时展示 EmptyMessage；尝试用 sticky_items 让滚动时组头吸顶（API 细节以源码为准）。",
+          "source_files": [
+            "src/components/list/list.rs",
+            "src/components/list/list_item.rs",
+            "src/components/list/list_header.rs",
+            "src/components/list/list_sub_header.rs",
+            "src/components/sticky_items.rs"
+          ],
+          "title": "List 家族与 Sticky Items",
+          "topic": "讲解 list 目录下的列表族组件：List 容器与空态消息、ListItem（含间距与停靠侧配置）、ListHeader/ListSubHeader 分组头，以及 sticky_items.rs 提供的滚动吸顶机制。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l2-data-table.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "掌握 TableRow 与 IntoTableRow 的建模方式",
+            "理解列宽再分配算法的目标",
+            "会渲染可调宽/可隐藏列的表格"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "DataTable 渲染",
+            "TableRow/IntoTableRow",
+            "RedistributableColumnsState"
+          ],
+          "order": 2,
+          "practice_task": "定义一个三列数据的 TableRow 实现（名称/大小/修改时间），渲染成表格，并接入 resize handle 与列隐藏，观察剩余列宽如何被重新分配。",
+          "source_files": [
+            "src/components/data_table.rs",
+            "src/components/data_table/table_row.rs",
+            "src/components/redistributable_columns.rs"
+          ],
+          "title": "DataTable 与列宽分配",
+          "topic": "讲解 DataTable 组件与 TableRow/IntoTableRow 数据建模，以及 redistributable_columns.rs 中的列宽再分配算法：拖动或隐藏某列时宽度如何按比例分给其他列（TableResizeBehavior、HeaderResizeInfo 等）。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l4",
+            "u5-l1"
+          ],
+          "filename": "u7-l3-modal.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "掌握 Modal 的区块化组装方式",
+            "理解 Section 的内容组织作用",
+            "会处理弹窗滚动与页脚操作"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Modal/ModalHeader/ModalFooter",
+            "Section/SectionHeader",
+            "AlertModal"
+          ],
+          "order": 3,
+          "practice_task": "用 ModalHeader + 两个 Section + ModalFooter 组装一个「确认导入」弹窗：正文可滚动（传入 ScrollHandle），页脚放取消与确认按钮，并与 AlertModal 的简化用法对比。",
+          "source_files": [
+            "src/components/modal.rs",
+            "src/components/notification/alert_modal.rs"
+          ],
+          "title": "Modal 体系",
+          "topic": "讲解 modal.rs 的区块化弹窗：Modal 容器（含滚动句柄）、ModalHeader（返回/关闭按钮）、Section/SectionHeader 分节内容与 ModalFooter 操作区，以及 notification/alert_modal.rs 的 AlertModal 简化封装。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 7,
+      "title": "容器与复合组件"
+    },
+    {
+      "id": "u8",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u8-l1-accessibility.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "掌握 aria_* 系列方法的语义与时机",
+            "理解 combobox 场景的 aria_value 默认值逻辑",
+            "能响应 AccessKit 动作"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "aria_* builder 方法",
+            "Role 与 aria_expanded",
+            "on_a11y_action"
+          ],
+          "order": 1,
+          "practice_task": "为 u1-l3 的自定义组件补齐无障碍：设置 aria_label、正确的 Role、受控状态的 aria_expanded，并通过 on_a11y_action 注册一个 AccessKit 动作处理函数。",
+          "source_files": [
+            "src/components/button/button.rs",
+            "src/components/button/button_like.rs"
+          ],
+          "title": "无障碍：aria 与 AccessKit",
+          "topic": "以 Button 为例讲解 ui crate 的无障碍支持：aria_label/aria_description/aria_value/aria_role/aria_expanded 与 on_a11y_action，以及 Button::render 中为快捷键（aria-keyshortcuts）和 combobox 角色自动补默认值的技巧。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u8-l2-animation.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "掌握常见动画的复用方式",
+            "理解 keyed 动画对状态保持的意义",
+            "会为图标与状态切换加动画"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DefaultAnimations",
+            "AnimationExt",
+            "Transformable"
+          ],
+          "order": 2,
+          "practice_task": "复刻 Button loading 态：给一个 LoadCircle 图标加 with_keyed_rotate_animation 让其在 loading 时持续旋转；再为 Disclosure 的开合选择一个合适的默认过渡动画。",
+          "source_files": [
+            "src/styles/animation.rs",
+            "src/traits/animation_ext.rs",
+            "src/traits/transformable.rs",
+            "src/components/button/button.rs"
+          ],
+          "title": "动画系统",
+          "topic": "讲解 styles/animation.rs（AnimationDuration/AnimationDirection/DefaultAnimations）、traits/animation_ext.rs 的 CommonAnimationExt 以及 Transformable 变换 trait；以 Button loading 图标的 keyed 旋转动画为例。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u8-l3-rem-scaling.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "理解 ui_scale 通过 rem 生效的机制",
+            "掌握 WithRemSize 的实现方式（手动实现 Element）",
+            "知道 IconSize/ButtonSize 统一走 rems 的原因"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "WithRemSize 的 Element 实现",
+            "rems_from_px",
+            "rem 与 Pixels 换算"
+          ],
+          "order": 3,
+          "practice_task": "用 WithRemSize 在固定像素区域内整体缩放一组子元素（例如把内容按 12px rem 基准渲染），并解释为什么组件内部尺寸要统一使用 rems 而不是 px。",
+          "source_files": [
+            "src/utils/with_rem_size.rs",
+            "src/styles/units.rs",
+            "src/styles/typography.rs"
+          ],
+          "title": "rem 缩放：ui_scale 与 WithRemSize",
+          "topic": "讲解 ui crate 的尺寸缩放底层：一切尺寸基于 rem，用户 ui_scale 改变窗口 rem size 后组件如何随之缩放；WithRemSize 直接实现 Element trait 为子树覆写 rem 基准的原理与用途。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u8-l4-utils.md",
+          "id": "u8-l4",
+          "learning_goals": [
+            "会复用 utils 中的通用函数",
+            "理解 APCA 对比度的用途",
+            "掌握 corner_solver 的适用场景"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "format_distance",
+            "apca_contrast/color_contrast",
+            "corner_solver"
+          ],
+          "order": 4,
+          "practice_task": "运行 `cargo test -p ui` 观察 utils 相关测试；用 format_distance 格式化几个时间间隔，用 APCA 函数校验一组前景/背景色组合的可读性，并用 inner_corner_radius 解决一个嵌套圆角问题。",
+          "source_files": [
+            "src/utils.rs",
+            "src/utils/format_distance.rs",
+            "src/utils/apca_contrast.rs",
+            "src/utils/color_contrast.rs",
+            "src/utils/corner_solver.rs"
+          ],
+          "title": "工具函数库：格式化、对比度与圆角求解",
+          "topic": "讲解 utils 目录：capitalize/reveal_in_file_manager_label 等杂项、format_distance 的相对时间格式化、apca_contrast/color_contrast 颜色对比度计算，以及 corner_solver 的嵌套圆角求解。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l3",
+            "u3-l1"
+          ],
+          "filename": "u8-l5-component-registry.md",
+          "id": "u8-l5",
+          "learning_goals": [
+            "掌握 Component trait 的实现要求",
+            "会用 example_group/single_example 组织预览",
+            "了解 RegisterComponent 派生宏的作用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Component trait",
+            "RegisterComponent 派生",
+            "example_group/single_example"
+          ],
+          "order": 5,
+          "practice_task": "为 u1-l3 的自定义组件实现 Component trait：选择合适的 ComponentScope、编写 description 与 preview，用 example_group_with_title + single_example 展示至少三个变体。",
+          "source_files": [
+            "src/component_prelude.rs",
+            "src/components/button/button.rs",
+            "src/components/icon.rs"
+          ],
+          "title": "组件注册与预览体系",
+          "topic": "讲解 ui 组件如何接入组件文档/预览体系：来自 component crate 的 Component trait（scope/sort_name/description/preview）、ui_macros 的 RegisterComponent 派生宏，以及 example_group/single_example 组合预览的方式；顺带说明 components/stories.rs 旧 stories 机制已不在模块树中。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u8-l6-testing.md",
+          "id": "u8-l6",
+          "learning_goals": [
+            "了解 ui crate 中三类测试的分布",
+            "掌握为纯逻辑写单测的方法",
+            "知道 gpui::test 与 test-support feature 的用法"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "data_table/tests.rs",
+            "label 纯逻辑单测",
+            "gpui::test 集成测试"
+          ],
+          "order": 6,
+          "practice_task": "运行 `cargo test -p ui` 并统计各模块测试数量；为 u1-l3 自定义组件中可纯逻辑化的部分（如颜色/尺寸计算）补充一个单元测试并使其通过。",
+          "source_files": [
+            "src/components/data_table/tests.rs",
+            "src/components/label/label.rs",
+            "src/components/keybinding.rs",
+            "src/components/collab/update_button.rs"
+          ],
+          "title": "测试策略",
+          "topic": "总结 ui crate 的测试方式：data_table/tests.rs 的表格算法测试、label.rs 与 keybinding.rs 中的纯逻辑单元测试、utils 中的函数测试，以及 collab/update_button.rs 使用 gpui::test（依赖 gpui test-support feature）的视图级测试。"
+        }
+      ],
+      "level": "advanced",
+      "order": 8,
+      "title": "高级机制"
+    }
+  ]
+}
