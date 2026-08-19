@@ -1,14 +1,13 @@
 {
-  "head": "00c0e96e769062e373203c62830f510fa121db76",
+  "head": "3f660a0a60a5c1ae6200eef4dcb50120f5a4e84f",
   "project": "zed-crates-text",
-  "rationale": "text crate 是 Zed 编辑器的协同文本缓冲区核心（约 6600 行），它把 rope（文本存储）、clock（Lamport 时钟与版本向量）、sum_tree（有序聚合树）三块基础设施组合成一个支持多副本并发编辑、锚点、撤销重做的 CRDT 式缓冲区，因此学习顺序必须先立地基再上高楼：单元 1 让读者从零跑起来，理解 Buffer 与 BufferSnapshot 的可变/不可变分工；单元 2 建立坐标系统（offset、Point、PointUtf16、TextDimension），这是后续一切 API 的通用语言；单元 3 补齐协同编辑的理论地基（Lamport 时间戳、版本向量、Fragment 墓碑模型、Locator 可插入标识），不理解这一层就无法读懂任何编辑代码；单元 4 沿主链路精读本地编辑与远程编辑的合并算法，以及乱序操作的延迟应用机制；单元 5 讲\"变更如何被观察\"——edits_since 差分迭代器、Patch 代数、订阅推送与历史版本时间旅行，这是编辑器增量渲染的基础；单元 6 专讲 Anchor 锚点系统，它是位置在并发编辑下保持稳定的抽象；单元 7 进入专家层，剖析事务分组、undo/redo 与 UndoMap 的奇偶计数技巧；单元 8 收尾于性能设计（SumTree 共享与内存布局）、随机化测试（Network 模拟丢包乱序）、snapshot_with_edits 预览提交模式，并以一个基于公开 API 的综合实践收束。依赖关系按此递进设置，全部讲义均锚定在真实源码文件上。",
+  "rationale": "本次为增量更新：git diff 00c0e96e76..3f660a0a60 显示两提交之间仅有 2 个提交（workspace 标签恢复、gpui uniform_list 清理），改动全部位于 workspace、git_ui、debugger_ui、gpui、project 等 crate，crates/text 及其讲义引用的 clock 等相邻 crate 源码零变化（仍为 10 个源文件、约 6600 行），因此全部 26 篇讲义 action 均为 keep，结构与依赖关系维持原样。原设计逻辑不变：text crate 是 Zed 编辑器的协同文本缓冲区核心，它把 rope（文本存储）、clock（Lamport 时钟与版本向量）、sum_tree（有序聚合树）三块基础设施组合成一个支持多副本并发编辑、锚点、撤销重做的 CRDT 式缓冲区，因此学习顺序必须先立地基再上高楼：单元 1 让读者从零跑起来，理解 Buffer 与 BufferSnapshot 的可变/不可变分工；单元 2 建立坐标系统（offset、Point、PointUtf16、TextDimension），这是后续一切 API 的通用语言；单元 3 补齐协同编辑的理论地基（Lamport 时间戳、版本向量、Fragment 墓碑模型、Locator 可插入标识），不理解这一层就无法读懂任何编辑代码；单元 4 沿主链路精读本地编辑与远程编辑的合并算法，以及乱序操作的延迟应用机制；单元 5 讲\"变更如何被观察\"——edits_since 差分迭代器、Patch 代数、订阅推送与历史版本时间旅行，这是编辑器增量渲染的基础；单元 6 专讲 Anchor 锚点系统，它是位置在并发编辑下保持稳定的抽象；单元 7 进入专家层，剖析事务分组、undo/redo 与 UndoMap 的奇偶计数技巧；单元 8 收尾于性能设计（SumTree 共享与内存布局）、随机化测试（Network 模拟丢包乱序）、snapshot_with_edits 预览提交模式，并以一个基于公开 API 的综合实践收束。依赖关系按此递进设置，全部讲义均锚定在真实源码文件上。",
   "units": [
     {
       "id": "u1",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -35,7 +34,7 @@
           "topic": "介绍 text crate 是 Zed 编辑器的协同文本缓冲区实现，说明它依赖 rope、clock、sum_tree 等基础 crate，并被 language、editor、project 等上层 crate 消费。建立对项目规模（约 6600 行、10 个源文件）和技术栈的整体认知。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -63,7 +62,7 @@
           "topic": "动手创建一个 Buffer，执行本地编辑并读取文本，观察版本号变化。讲解 Buffer::new、Buffer::edit、Buffer::text、Buffer::version 这条最小使用链路。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -96,7 +95,7 @@
           "topic": "逐一梳理 src 下十个文件的角色：text.rs 主逻辑、anchor/locator 位置标识、patch 编辑补丁、selection 选区、subscription 订阅、undo_map 撤销映射、operation_queue 操作队列、network 测试网络、tests 测试。理解 pub 与私有模块的边界。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -124,15 +123,15 @@
           "topic": "剖析 Buffer 与 BufferSnapshot 两个核心类型的字段与分工：Buffer 持有历史、订阅与延迟操作队列，BufferSnapshot 是纯数据快照可廉价 clone；同时讲解 BufferId 与 branch 的用途。"
         }
       ],
+      "level": "beginner",
       "order": 1,
       "title": "起步：认识并跑通 text crate"
     },
     {
       "id": "u2",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -158,7 +157,7 @@
           "topic": "讲解 BufferSnapshot 内部用两根 Rope 分别保存可见文本与被删除（墓碑）文本，理解 text crate 通过 pub use rope::* 复用 rope 的 Rope、Point、TextSummary 等类型，以及 LineEnding 的规范化处理。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -186,7 +185,7 @@
           "topic": "精读 text.rs 底部定义的坐标转换 trait 家族，理解 usize、Point、PointUtf16、OffsetUtf16、Unclipped<PointUtf16>、Anchor 之间如何统一互转，以及 FullOffset（含已删除文本的偏移）与普通 offset 的区别。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -212,15 +211,15 @@
           "topic": "讲解 crate 中大量出现的 D: TextDimension 泛型约束：edits_since、summary_for_anchor 等查询都让调用方选择返回维度（字节数、行列、UTF-16 等），配合 rope 的 TextSummary 理解 max_point、text_summary_for_range 的用法。"
         }
       ],
+      "level": "beginner",
       "order": 2,
       "title": "文本坐标系：offset、Point 与维度查询"
     },
     {
       "id": "u3",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -248,7 +247,7 @@
           "topic": "先到邻近的 clock crate 补课：Lamport 时间戳（replica_id + 序号）如何为每个编辑赋予全局顺序，版本向量 Global 如何记录各副本的已知进度，text crate 中 version、observed、observed_all 如何支撑并发判断。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1",
             "u2-l1"
@@ -276,7 +275,7 @@
           "topic": "深入 BufferSnapshot 的 fragments/insertions/insertion_slices 三棵 SumTree 与 Fragment 结构：每个 fragment 是一次插入产生的文本段，删除不擦除数据而是打上 deletions 时间戳并把文本移入 deleted_text，这是实现协同合并与撤销的基础。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -302,15 +301,15 @@
           "topic": "精读 locator.rs：Fragment 的 id 使用 Locator 而非整数下标，Locator::between 能在前驱与后继之间生成新的有序标识，使并发插入不需要移动既有元素，这是 fragment 树保持稳定排序的关键。"
         }
       ],
+      "level": "intermediate",
       "order": 3,
       "title": "协同地基：时钟、Fragment 与 Locator"
     },
     {
       "id": "u4",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -338,7 +337,7 @@
           "topic": "逐段精读本地编辑的完整代码路径：edit 如何开启事务、生成 Lamport 时间戳，apply_edit_internal 如何用旧 fragments 游标切分区间、生成新 fragment、标记删除、重建 rope，并产出 EditOperation 与用于通知的 Patch。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -364,7 +363,7 @@
           "topic": "讲解编辑路径中的两个辅助构建器：FragmentBuilder 把切下来的子树与新建 fragment 分桶累积以最大化 SumTree 节点共享，RopeBuilder 借助旧 rope 的 cursor 切片重建可见/删除两根 rope。理解持久化数据结构如何让编辑成本与编辑长度成正比。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1",
             "u3-l1"
@@ -393,7 +392,7 @@
           "topic": "精读远程操作如何被接收与合并：EditOperation 携带编辑者视角的版本与 FullOffset 区间，apply_remote_edit 在 versioned 坐标系中重放编辑，跳过更高 Lamport 的并发插入以解决平局，被删除 fragment 打上对方时间戳进入墓碑。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l3"
           ],
@@ -420,15 +419,15 @@
           "topic": "讲解网络传输导致的乱序问题：Buffer::apply_ops 对暂时无法应用的操作（依赖版本未观察到）放入 OperationQueue 延迟队列，待缺失操作到达后 flush_deferred_ops 自动重放，并用 deferred_replicas 跟踪被阻塞的副本。"
         }
       ],
+      "level": "intermediate",
       "order": 4,
       "title": "编辑主链路：本地与远程操作的应用"
     },
     {
       "id": "u5",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1",
             "u2-l3"
@@ -456,7 +455,7 @@
           "topic": "讲解如何向快照询问\"自某版本以来发生了什么\"：edits_since 返回 Edit<D>（old/new 双区间映射），内部用带过滤的 SumTree 游标只遍历 max_version 超过 since 的 fragment，并用 UndoMap 判断历史可见性。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -483,7 +482,7 @@
           "topic": "精读 patch.rs：Patch 是一组不相交 Edit 的集合，compose 把先后两批编辑合成为单个等价补丁，old_to_new 把旧坐标映射到新坐标，invert 反转方向。这是订阅推送与增量渲染的数学基础。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l2"
           ],
@@ -511,7 +510,7 @@
           "topic": "讲解 Buffer 的变更通知：内部 Topic<usize> 维护弱引用订阅者列表，每次编辑 publish 一个 Patch，订阅方通过 consume 取走并组合累积的补丁；以及基于 oneshot 的 wait_for_edits/wait_for_anchors/wait_for_version 异步等待 API。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1",
             "u3-l1"
@@ -539,15 +538,15 @@
           "topic": "讲解 BufferSnapshot 如何重建任意历史版本的文本：rope_for_version 按 fragment 的 was_visible(version, undo_map) 决定取可见绳还是墓碑绳的片段，offsets_to_version/range_to_version 则把当前位置坐标换算为历史版本坐标。"
         }
       ],
+      "level": "intermediate",
       "order": 5,
       "title": "变更的观察：差分、补丁与订阅"
     },
     {
       "id": "u6",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2",
             "u2-l2"
@@ -576,7 +575,7 @@
           "topic": "讲解 Anchor 的设计动机与结构：offset 会因编辑失效，而 Anchor 记录\"某次插入操作中的第 N 个字节\"，天然免疫后续编辑；包括 min/max 哨兵锚点与跨 buffer 的 buffer_id 校验。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l1"
           ],
@@ -604,7 +603,7 @@
           "topic": "深入锚点如何被解析为坐标：锚点通过 timestamp 在 insertions 树中找到 fragment，再在 fragments 树中累加 summary 得到任意维度；批量接口 summaries_for_anchors 借助 SumTree 游标一次 seek 多个锚点，且结果可携带任意 payload。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l1"
           ],
@@ -631,15 +630,15 @@
           "topic": "讲解 selection.rs 中的选区类型：Selection<T> 用 start/end 加 reversed 表示方向，head/tail 区分活动端与固定端，SelectionGoal 记录垂直移动时的水平目标，泛型 T 可以是 Anchor 以获得编辑稳定性。"
         }
       ],
+      "level": "intermediate",
       "order": 6,
       "title": "Anchor 锚点系统"
     },
     {
       "id": "u7",
-      "level": "advanced",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -667,7 +666,7 @@
           "topic": "剖析 History 与事务机制：start/end_transaction 用深度计数支持嵌套，Transaction 记录一次逻辑编辑的多个 edit_id，group 依据 group_interval（默认 300ms）自动合并时间上相邻的事务，finalize_last_transaction 可阻止分组。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l1"
           ],
@@ -695,7 +694,7 @@
           "topic": "剖析撤销的协同化实现：undo 不是简单回滚状态，而是生成 UndoOperation 记录每个 edit_id 的撤销计数并像普通操作一样广播；UndoMap 存入 SumTree 后用 undo_count 的奇偶性判断某片段在当前或历史版本是否可见。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l2"
           ],
@@ -723,15 +722,15 @@
           "topic": "讲解 History 暴露的高级事务操作：merge_transactions 将多个事务合并为一个撤销单元、forget_transaction 把事务从历史中移除（用于协作场景清理）、push_empty_transaction 构造空父事务，以及如何通过 InsertionSlice 反查一个事务触碰过的 fragments 与当前坐标范围。"
         }
       ],
+      "level": "advanced",
       "order": 7,
       "title": "历史、事务与撤销重做"
     },
     {
       "id": "u8",
-      "level": "advanced",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1",
             "u5-l1"
@@ -758,7 +757,7 @@
           "topic": "讲解 Buffer::snapshot_with_edits 与 EditedBufferSnapshot：构造一个\"假设应用了这些编辑\"的临时快照供预览计算，若采纳则 fast_forward 一步把影子快照转正，避免重放编辑。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l2",
             "u3-l3"
@@ -787,7 +786,7 @@
           "topic": "总结 text crate 对 sum_tree 的运用范式：Item/Summary/Dimension/KeyedItem 四件套、FilterCursor 按 max_version 剪枝、TreeMap/TreeSet 辅助索引；并剖析源码中的内存布局技巧（Anchor 内联 Lamport 省 8 字节、InsertionSlice 同类优化、FragmentBuilder 节点共享与并行构建）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l3"
           ],
@@ -815,7 +814,7 @@
           "topic": "讲解 crate 如何验证协同正确性：network.rs 提供会随机复制、乱序、部分投递的模拟网络，tests.rs 用随机编辑与随机 undo/redo 驱动多副本收敛断言，配合 check_invariants 检查内部结构一致性。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l2",
             "u7-l2",
@@ -845,6 +844,7 @@
           "topic": "收束全课程：梳理 text crate 暴露的其余实用面（行缩进查询、外部输入坐标换算、调试标注工具），总结上层 crate 如何组合 Buffer/Anchor/Patch 构建编辑器功能，并讨论二次开发时的切入点与边界。"
         }
       ],
+      "level": "advanced",
       "order": 8,
       "title": "高级主题：性能、测试与综合实践"
     }

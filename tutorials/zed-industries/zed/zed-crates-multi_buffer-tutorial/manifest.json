@@ -1,14 +1,13 @@
 {
-  "head": "00c0e96e769062e373203c62830f510fa121db76",
+  "head": "3f660a0a60a5c1ae6200eef4dcb50120f5a4e84f",
   "project": "zed-crates-multi_buffer",
-  "rationale": "multi_buffer 是 Zed 编辑器的核心文档模型：它把一个或多个 language::Buffer 的若干片段（Excerpt）拼接成一条可编辑的逻辑文本，被 editor、search、git_ui、vim 等下游 crate 依赖。学习难点在于『拼接之后』的位置换算（多套坐标系）、基于 sum_tree 的增量维护、跨 buffer 的编辑分发与事务，以及 diff 虚拟文本（DeletedHunk）带来的第二层变换。因此大纲按四段推进：先建立全局认知（crate 定位、核心概念、实验环境、快照模型），再系统学习位置体系与 SumTree/游标这两块地基，随后沿『读取 → 编辑 → 同步 → 事务』的真实数据流走通主链路，最后进入专家层：diff 集成与 DiffTransform、面向 UI 的行元数据、语言特性桥接、双向范围映射、标题/状态推导、随机化测试体系与架构取舍。每篇讲义只讲一个主题并配一个可在 multi_buffer_tests.rs 中落地的可运行实践任务，充分利用 crate 自带的 test-support 构造器（build_simple/build_multi/build_random）和大量现成测试作为参照。",
+  "rationale": "增量检查结论：自上次大纲 HEAD（00c0e96e）到当前 HEAD（3f660a0a）之间仅有两个提交——3f660a0a（移除 uniform_list.rs 中废弃的 std::usize 导入，附带 git_ui/project/debugger_ui 的同类小清理）与 aad75630f9（workspace 恢复时保持固定标签页正确），二者均未触碰 crates/multi_buffer 的任何源码、测试或 Cargo.toml，crate 的公共接口、数据结构与行为完全未变，因此全部 25 篇讲义标记为 keep，单元划分与依赖关系维持原样，仅更新 head 与讲义目录中已生成进度对应的后续生成计划。原有设计依然成立：multi_buffer 是 Zed 编辑器的核心文档模型，它把一个或多个 language::Buffer 的若干片段（Excerpt）拼接成一条可编辑的逻辑文本，被 editor、search、git_ui、vim 等下游 crate 依赖。学习难点在于『拼接之后』的位置换算（多套坐标系）、基于 sum_tree 的增量维护、跨 buffer 的编辑分发与事务，以及 diff 虚拟文本（DeletedHunk）带来的第二层变换。因此大纲按四段推进：先建立全局认知（crate 定位、核心概念、实验环境、快照模型），再系统学习位置体系与 SumTree/游标这两块地基，随后沿『读取 → 编辑 → 同步 → 事务』的真实数据流走通主链路，最后进入专家层：diff 集成与 DiffTransform、面向 UI 的行元数据、语言特性桥接、双向范围映射、标题/状态推导、随机化测试体系与架构取舍。每篇讲义只讲一个主题并配一个可在 multi_buffer_tests.rs 中落地的可运行实践任务，充分利用 crate 自带的 test-support 构造器（build_simple/build_multi/build_random）和大量现成测试作为参照。",
   "units": [
     {
       "id": "u1",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-crate-overview-and-layout.md",
           "id": "u1-l1",
@@ -36,7 +35,7 @@
           "topic": "介绍 multi_buffer crate 在 Zed 中的定位：把一个或多个 Buffer 组成单一可编辑视图（项目搜索、git diff 视图的基础），梳理 src 下 multi_buffer.rs、anchor.rs、path_key.rs、transaction.rs、multi_buffer_tests.rs 五个文件的分工与依赖（gpui、language、sum_tree、buffer_diff 等），并指出 editor、search、git_ui、vim 等下游消费者。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -63,7 +62,7 @@
           "topic": "讲解 MultiBuffer 结构体的字段（snapshot、buffers、diffs、subscriptions、singleton、history、title、capability），ExcerptRange 的 context/primary 双范围含义（搜索结果高亮），以及 singleton（单 buffer 单 excerpt）这一贯穿全库的特殊形态。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -90,7 +89,7 @@
           "topic": "说明 crate 的 test-support feature、#[gpui::test] 测试形态，以及 test-only 构造器：build_simple、build_multi、build_from_buffer、build_random、randomly_edit、randomly_edit_excerpts、randomly_mutate，让读者能快速创建可实验的 MultiBuffer 实例。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -117,14 +116,15 @@
           "topic": "剖析 MultiBufferSnapshot 的字段：excerpts（SumTree<Excerpt>）、buffers（TreeMap<BufferId, BufferStateSnapshot>）、path_keys（IndexSet<PathKey>）、diffs 与 diff_transforms 两棵树，以及 singleton、edit_count 等标志位；解释 snapshot(cx)/read(cx) 与惰性 sync 的关系。"
         }
       ],
+      "level": "beginner",
+      "order": 1,
       "title": "入门：认识 multi_buffer"
     },
     {
       "id": "u2",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l4"
           ],
@@ -151,7 +151,7 @@
           "topic": "讲解 multibuffer 侧的 MultiBufferOffset、MultiBufferOffsetUtf16、MultiBufferRow 与 buffer 侧的 BufferOffset/BufferOffsetUtf16 的区别，ToOffset/ToPoint/ToOffsetUtf16 trait 如何让一套 API 接受多种坐标，以及 clip_offset/clip_point 等裁剪操作。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -177,7 +177,7 @@
           "topic": "解析 MBTextSummary（len、chars、len_utf16、lines、first/last_line_chars、longest_row 等）及其 AddAssign 合并算法，MultiBufferDimension trait（from_summary/add_text_dim/add_mb_text_summary）以及 DimensionPair 组合维度的实现。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -203,7 +203,7 @@
           "topic": "讲解 sum_tree::Item for Excerpt、ExcerptSummary（path_key、max_anchor、widest_line_number、text、count）、ExcerptDimension/OutputDimension 包装类型，以及 PathKey、MultiBufferOffset 如何作为 Dimension 在树上做 O(log n) 定位。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -231,7 +231,7 @@
           "topic": "精读 anchor.rs：Anchor 的 Min/Max/Excerpt 三变体、ExcerptAnchor（text_anchor + PathKeyIndex + diff_base_anchor）、cmp 与 bias_left/bias_right、summary 求值，以及 AnchorRangeExt 工具方法；说明锚点在 buffer 被编辑后如何保持指向。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -259,7 +259,7 @@
           "topic": "讲解 path_key.rs 中的 PathKey（sort_prefix + RelPath）、PathKeyIndex、snapshot.path_keys 索引表，为什么 excerpt 按 PathKey 而不是 BufferId 排序，以及 buffer 重命名/同路径替换 buffer 时锚点失效（AnchorSeekTarget::Missing）的处理。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l5"
           ],
@@ -287,7 +287,7 @@
           "topic": "走读 path_key.rs 中的 excerpt 管理入口：set_excerpts_for_buffer/set_excerpts_for_path、update_excerpts_for_path、set_anchored_excerpts_for_path、update_path_excerpts、expand_excerpts（上/下扩展）、remove_excerpts_for_buffer/remove_excerpts，以及 build_excerpt_ranges 如何按上下文行数扩展范围。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -313,7 +313,7 @@
           "topic": "解析 MultiBufferCursor<MBD, BD> 的 seek/seek_forward/next/prev、build_region 与 MultiBufferRegion（range、buffer_range、buffer 快照、is_main_buffer），说明它如何同时维护 multibuffer 输出维度与底层 buffer 维度，是读取与坐标换算的公共引擎。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l7"
           ],
@@ -340,7 +340,7 @@
           "topic": "梳理 MultiBufferSnapshot 的读取 API：text、text_for_range、chars_at、bytes_in_range、reversed 系列，重点精读 chunks(range, LanguageAwareStyling) 与 MultiBufferChunks/ExcerptChunks 如何在 excerpt 与 diff 基文本之间拼接 chunk。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u2-l7"
@@ -368,7 +368,7 @@
           "topic": "精读 edit/edit_before/edit_non_coalesce → edit_internal → convert_edits_to_buffer_edits 的完整链路：如何用游标把 multibuffer 范围翻译成各 buffer 的 BufferEdit、插入与删除如何拆分、相邻编辑如何合并，以及 autoindent_ranges 的自动缩进处理。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l9"
           ],
@@ -395,7 +395,7 @@
           "topic": "讲解 on_buffer_event 对底层 buffer 事件的监听、buffer_changed_since_sync 标志、sync/sync_mut 的惰性同步、sync_from_buffer_changes 如何用版本比较重建 excerpts 树并产出 Edit<MultiBufferOffset>，以及 Event 枚举与 subscribe() 订阅模型。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l10"
           ],
@@ -423,14 +423,15 @@
           "topic": "精读 transaction.rs：History 的 undo/redo 栈、Transaction 记录各 buffer 的子事务 id、事务深度与 300ms 默认分组间隔（group/group_until/group_trailing）、start/end_transaction 与 undo/redo/undo_transaction/forget_transaction，以及 singleton 模式下直接委托给 Buffer 的分叉逻辑。"
         }
       ],
+      "level": "intermediate",
+      "order": 2,
       "title": "进阶：核心数据结构与主链路"
     },
     {
       "id": "u3",
-      "level": "advanced",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l10"
           ],
@@ -457,7 +458,7 @@
           "topic": "讲解 DiffState/DiffStateSnapshot、diffs SumTree、add_diff 与 add_inverted_diff（反向 diff：把 base 文本当主文本展示）、DiffState 如何订阅 BufferDiff 事件（buffer_diff_changed/inverted_buffer_diff_changed）并在 sync 时刷新。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -484,7 +485,7 @@
           "topic": "深入 diff_transforms SumTree：DiffTransform::BufferContent/DeletedHunk、DiffTransformSummary 的 input/output 双摘要、ExcerptOffset 表示未含删除文本的输入坐标，以及 sync_diff_transforms/recompute_diff_transforms_for_edit 如何在编辑与 diff 变化时增量维护这棵树。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -511,7 +512,7 @@
           "topic": "讲解 expand_diff_hunks/collapse_diff_hunks/set_all_diff_hunks_expanded/toggle_single_diff_hunk/expand_or_collapse_diff_hunks_inner 的状态机，MultiBufferDiffHunk 的字段（row_range、buffer_range、diff_base_byte_range、status、word_diffs）以及 diff_hunks_in_range 的查询实现。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l8"
           ],
@@ -538,7 +539,7 @@
           "topic": "讲解编辑器渲染所需的行级元数据：RowInfo（buffer_id、buffer_row、multibuffer_row、diff_status、expand_info、wrapped_buffer_row）、MultiBufferRows 迭代器、ExcerptBoundary/ExcerptBoundaryInfo、ExpandInfo 与 ExpandExcerptDirection、show_headers、widest_line_number，以及 set_active_selections/selections_in_range 的协作方选区。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l8"
           ],
@@ -565,7 +566,7 @@
           "topic": "梳理 MultiBufferSnapshot 对 language 能力的桥接：language_scope_at/char_classifier_at、syntax_ancestor、outline/symbols_containing、text_object_ranges、bracket_ranges/innermost_enclosing_bracket_ranges、redacted_ranges、runnable_ranges、diagnostic_group/diagnostics_in_range，说明它们如何借助 lift_buffer_metadata 把查询下推到各 buffer。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l4"
           ],
@@ -592,7 +593,7 @@
           "topic": "讲解缩进相关 API：line_indent_for_row/indent_size_for_line、line_indents 与 reversed_line_indents 的实现、suggested_indents_callback 的多 buffer 缩进建议算法、indent_guides_in_range 与 IndentGuide（含 indent_level）、autoindent_ranges 与编辑链路的配合。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -619,7 +620,7 @@
           "topic": "系统讲解坐标/范围在两层之间的转换：range_to_buffer_ranges(_with_deleted_hunks)、anchor_to_buffer_anchor、anchor_range_to_buffer_anchor_range、buffer_range_to_excerpt_ranges、anchor_in_buffer/anchor_in_excerpt、point_to_buffer_point/point_to_buffer_offset、map_excerpt_ranges，以及通用下推机制 lift_buffer_metadata。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l4"
           ],
@@ -646,7 +647,7 @@
           "topic": "讲解 title 的推导链路（显式 set_title/with_title → 文件路径 → 首行内容截断与空白合并）、is_dirty/has_deleted_file/has_conflict 等状态如何在 sync 时从各 buffer 聚合，以及 without_headers/show_headers 对展示的影响。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3",
             "u2-l8"
@@ -674,7 +675,7 @@
           "topic": "分析 multi_buffer_tests.rs 的测试策略：check_multibuffer/check_multibuffer_edits 的不变量断言（chunk、行号、位置换算、行缩进一致性）、随机化测试（test_random_multibuffer、test_random_set_ranges、test_random_chunk_bitmaps_with_diffs）与 mutate_excerpt_ranges 变异器、format_diff/assert_new_snapshot 等辅助。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l10",
             "u3-l2"
@@ -704,6 +705,8 @@
           "topic": "收束全书的架构讨论：为什么选择不可变快照 + 惰性同步、为什么用 sum_tree 而非平面数组、为什么编辑先转换成 buffer 编辑而不是复制文本（以及 edit_internal 中避免 LLVM IR 膨胀的非泛型拆分）、DiffTransform 双坐标栈的复杂度代价，以及 check_invariants 在测试中的守护作用。"
         }
       ],
+      "level": "advanced",
+      "order": 3,
       "title": "专家：diff、语言桥接、测试与架构"
     }
   ]

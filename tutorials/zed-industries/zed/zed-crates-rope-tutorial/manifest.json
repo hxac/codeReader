@@ -1,14 +1,13 @@
 {
-  "head": "00c0e96e769062e373203c62830f510fa121db76",
+  "head": "3f660a0a60a5c1ae6200eef4dcb50120f5a4e84f",
   "project": "zed-crates-rope",
-  "rationale": "rope 是 Zed 编辑器的文本存储核心，代码量不大（6 个源文件约 4100 行）但概念密度高，因此按「先整体、再数据结构、后底层机制」设计三层路线。入门层先讲清 crate 定位、目录与基本 API，让读者能构建并使用 Rope；进阶层按依赖顺序讲解坐标系统（Point/OffsetUtf16/PointUtf16/Unclipped）→ TextSummary 摘要 → sum_tree 集成 → Chunk 位图结构 → 构建与遍历链路 → 坐标换算与 clip，这是因为 Rope 的所有查询都建立在「chunk 摘要 + 前缀和树」之上，必须先懂摘要再懂查询；专家层覆盖 UTF-8/UTF-16 边界防御、随机化测试策略、criterion 基准与在 Zed 生态中的二次开发实践。全部讲义引用真实源码并配套可运行的代码实践。",
+  "rationale": "rope 是 Zed 编辑器的文本存储核心，代码量不大（6 个源文件约 4100 行）但概念密度高，因此按「先整体、再数据结构、后底层机制」设计三层路线。入门层先讲清 crate 定位、目录与基本 API，让读者能构建并使用 Rope；进阶层按依赖顺序讲解坐标系统（Point/OffsetUtf16/PointUtf16/Unclipped）→ TextSummary 摘要 → sum_tree 集成 → Chunk 位图结构 → 构建与遍历链路 → 坐标换算与 clip，这是因为 Rope 的所有查询都建立在「chunk 摘要 + 前缀和树」之上，必须先懂摘要再懂查询；专家层覆盖 UTF-8/UTF-16 边界防御、随机化测试策略、criterion 基准与在 Zed 生态中的二次开发实践。全部讲义引用真实源码并配套可运行的代码实践。增量说明：上次 HEAD 00c0e96e76 至当前 HEAD 3f660a0a60 之间的两个提交（workspace 持久化修复、移除废弃的 std::usize 导入）只涉及 crates/workspace、crates/gpui、crates/project、crates/git_ui、crates/debugger_ui，crates/rope 目录（含 src 六个文件、benches、Cargo.toml）零改动，所有讲义内容仍然准确，故全部标记为 keep。",
   "units": [
     {
       "id": "u1",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-what-is-rope-and-why.md",
           "id": "u1-l1",
@@ -32,7 +31,7 @@
           "topic": "介绍 rope crate 在 Zed 中的定位：编辑器中文本缓冲区的底层数据结构；解释为什么编辑器需要 rope 而不是 String，以及本 crate 的依赖（sum_tree、heapless、rayon、unicode-segmentation）和构建方式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -63,7 +62,7 @@
           "topic": "逐个介绍 rope.rs（Rope/游标/迭代器/摘要）、chunk.rs（定长块与位图）、point.rs、point_utf16.rs、offset_utf16.rs、unclipped.rs 的职责边界和 pub use 导出关系。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -88,15 +87,15 @@
           "topic": "学习 Rope 的日常 API：new/push/push_front/append、From<&str>、slice/replace/slice_rows、len/summary/max_point、chars/chunks/bytes_in_range，以及 Display/Debug 实现。"
         }
       ],
+      "level": "beginner",
       "order": 1,
       "title": "单元一：认识 rope 与跑起来"
     },
     {
       "id": "u2",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -126,7 +125,7 @@
           "topic": "讲解 rope 中四类坐标类型：字节偏移（usize）、Point（UTF-8 行:列）、OffsetUtf16/PointUtf16（LSP 等外部协议用的 UTF-16 坐标）以及 Unclipped<T> 包装器，重点分析它们 Add/Sub/Ord 的实现语义。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -153,7 +152,7 @@
           "topic": "解析 TextSummary 的九个字段（len/chars/len_utf16/lines/first_line_chars/last_line_chars/last_line_len_utf16/longest_row/longest_row_chars），以及 From<&str> 的逐字符构造和 AddAssign 的合并代数。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -180,7 +179,7 @@
           "topic": "讲解 Rope 如何把 Chunk 挂在 SumTree 上：impl sum_tree::Item for Chunk、ChunkSummary、TextDimension/Dimension trait 的各种实现，以及 find/cursor 借助摘要做快速定位的原理。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -207,7 +206,7 @@
           "topic": "深入 Chunk 结构：chars/chars_utf16/newlines/tabs 四张 u128 位图、heapless ArrayString<MAX_BASE> 定长文本、Chunk::new 的按 8 字节分块构造过程，以及 MIN_BASE/MAX_BASE 常量与测试下的 Bitmap=u16 配置。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -234,7 +233,7 @@
           "topic": "讲解 ChunkSlice<'a> 如何借用 Chunk 的一部分文本并同步平移位图：split_at/slice 的掩码移位、text_summary/lines/longest_row 等统计方法，以及块内的各种坐标换算。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -261,7 +260,7 @@
           "topic": "分析 Rope 的写入路径：push 的填充-切分循环、push_large 的容量预估与 rayon par_extend、push_front、append/push_chunk 的首尾块合并，以及 check_invariants 维护的不变量。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l5"
           ],
@@ -288,7 +287,7 @@
           "topic": "讲解 Rope 的四类读取抽象：Cursor（可前进的定位/切片/摘要）、Chunks（正/反向块迭代、peek_with_bitmaps、next_line/prev_line、equals_str）、Bytes（实现 io::Read）和 Lines 迭代器。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u2-l5"
@@ -313,19 +312,19 @@
             "src/chunk.rs",
             "src/unclipped.rs"
           ],
-          "topic": "汇总 Rope 提供的全部坐标换算 API（offset/offset_utf16/point/point_utf16 两两互转）与 clip 家族，重点讲 Bias 语义和 Chunk 内基于 GraphemeCursor 的字素边界裁剪。",
-          "title": "坐标换算与 clip：把外部坐标安全落回文本"
+          "title": "坐标换算与 clip：把外部坐标安全落回文本",
+          "topic": "汇总 Rope 提供的全部坐标换算 API（offset/offset_utf16/point/point_utf16 两两互转）与 clip 家族，重点讲 Bias 语义和 Chunk 内基于 GraphemeCursor 的字素边界裁剪。"
         }
       ],
+      "level": "intermediate",
       "order": 2,
       "title": "单元二：核心数据结构与调用链"
     },
     {
       "id": "u3",
-      "level": "advanced",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -352,7 +351,7 @@
           "topic": "分析 rope 对非法字节偏移的防御体系：is_char_boundary、assert_char_boundary::<PANIC>（panic 或 log 两种模式）、floor/ceil_char_boundary，以及 chunk.rs 中 panic_char_boundary/log_err_char_boundary 的分工。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3",
             "u2-l6"
@@ -380,7 +379,7 @@
           "topic": "研读 rope.rs 尾部的 mod tests：以 StdRng 为参数的可复现随机测试（test_random_rope、test_push_front_random 等）、test_clip/test_lines 等行为测试，以及 cfg(all(test, not(rust_analyzer))) 下 Bitmap=u16、NUM_CHUNKS=16 的测试专用配置。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -407,7 +406,7 @@
           "topic": "讲解 benches/rope_benchmark.rs：generate_random_text/generate_random_rope/generate_random_rope_ranges 等数据生成器、按 size 扫描的 criterion 分组、Throughput 与 BatchSize 的用法，以及各基准分别覆盖哪些操作。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l7",
             "u2-l8"
@@ -438,6 +437,7 @@
           "topic": "总结 rope 被编辑器上层（editor、text、multi_buffer、git、streaming_diff 等 crate 依赖）使用的方式，并示范如何基于 Rope 的公开 API 做二次开发，以及如果要扩展 rope 本身（例如新增一个 TextDimension）需要触碰哪些 trait 实现。"
         }
       ],
+      "level": "advanced",
       "order": 3,
       "title": "单元三：深入机制与工程实践"
     }

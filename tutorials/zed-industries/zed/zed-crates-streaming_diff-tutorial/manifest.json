@@ -1,0 +1,393 @@
+{
+  "head": "4c7244790a075e862eeb4e5ccc12d6c8f5da6f7e",
+  "project": "zed-crates-streaming_diff",
+  "rationale": "streaming_diff 是一个小而精的 crate（单个源文件 streaming_diff.rs + 一个 criterion 基准），解决的问题是：当新文本以流式分块到达（例如 LLM 生成编辑）时，边推送边计算字符级差异，并把字符级差异折叠成行级差异。学习路线按\"是什么 → 数据模型 → 打分基础 → 核心算法流程 → 行级转换与工程实践\"递进：第一单元让读者跑通测试、理解 CharOperation/LineOperation 两种差异语言；第二单元先攻私有的列主序 Matrix 和打分常量这两个算法地基；第三单元顺着 StreamingDiff 的生命周期（new 初始化 → push_new 增量主循环 → backtrack 回溯 → finish 收尾）拆解滚动矩阵、锚点推进等流式技巧；第四单元进入 LineDiff 的状态机（flush/trim/行集合）与 line_operations 重建，最后覆盖随机化测试、基准与真实调用方（agent/edit_session、agent_ui/buffer_codegen）。整体从 beginner 到 advanced，每篇只讲一个主题且都带可动手的实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-streaming-diff-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 streaming_diff 在 Zed 工作区中的位置、依赖（rope、ordered-float）与被 agent/agent_ui 使用的场景",
+            "独立运行 cargo test -p streaming_diff 与基准编译",
+            "对照源码说出库根文件与模块组织方式"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Cargo.toml",
+            "crate 目录结构"
+          ],
+          "order": 1,
+          "practice_task": "在仓库根目录运行 cargo test -p streaming_diff 并记录测试数量与结果；再运行 cargo bench -p streaming_diff --no-run 确认基准可编译；用 cargo tree -p streaming_diff 观察它的依赖。",
+          "source_files": [
+            "crates/streaming_diff/Cargo.toml",
+            "crates/streaming_diff/src/streaming_diff.rs",
+            "README.md"
+          ],
+          "title": "streaming_diff 是什么：流式差异计算的定位与运行方式",
+          "topic": "介绍 streaming_diff crate 的定位：在旧文本固定、新文本分块流式到达时计算字符级差异，服务于 Zed 中 agent 编辑与代码生成的增量渲染；了解 Cargo.toml、库根文件 src/streaming_diff.rs 的组织，以及如何运行测试。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-char-and-line-operations.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "解释 CharOperation 与 LineOperation 各变体的语义与单位差异",
+            "理解 Insert 携带 String 而 Delete/Keep 只带字节数的设计",
+            "能手工把一串 CharOperation 应用到旧文本得到新文本"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "CharOperation",
+            "LineOperation",
+            "tests::apply_char_operations",
+            "tests::apply_line_operations"
+          ],
+          "order": 2,
+          "practice_task": "参考 tests 模块中的 apply_char_operations，在本地练习文件里实现一个 count_old_bytes(ops: &[CharOperation]) -> usize 统计操作序列覆盖的旧文本字节数，并用 test_apply_char_operations 中的 \"Hello, world!\" 例子（预期 13 字节）写一个断言测试。",
+          "source_files": [
+            "crates/streaming_diff/src/streaming_diff.rs"
+          ],
+          "title": "差异的语言：CharOperation 与 LineOperation 数据模型",
+          "topic": "讲解两种差异表示：字符级的 CharOperation::Insert/Delete/Keep（Delete/Keep 以字节数计量、Insert 携带文本）与行级的 LineOperation；并用测试中的 apply_char_operations/apply_line_operations 验证差异可重建新文本。"
+        }
+      ],
+      "order": 1,
+      "title": "单元一：认识 streaming_diff"
+    },
+    {
+      "id": "u2",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l1-column-major-matrix.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "解释 cells[col * rows + row] 的列主序布局与 get/set 的下标换算",
+            "说明 resize 扩容保留旧值的语义和越界 panic 的防护",
+            "读懂 swap_columns 用 as_mut_ptr + swap_nonoverlapping 交换内存区间的原因"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Matrix",
+            "Matrix::resize",
+            "Matrix::swap_columns",
+            "Matrix::adjacent_columns_mut"
+          ],
+          "order": 1,
+          "practice_task": "把 Matrix 结构体复制到本地练习文件（或测试模块）中，为它补一个单元测试：先 resize(2, 3) 并 set 若干值，再 resize(2, 5) 扩容，断言旧值仍在、新列初始化为 0，并验证 get 的行列下标换算符合预期。",
+          "source_files": [
+            "crates/streaming_diff/src/streaming_diff.rs"
+          ],
+          "title": "列主序打分矩阵：Matrix 的存储与操作",
+          "topic": "拆解私有的 Matrix 结构：列主序 Vec<f64> 存储、resize 复用容量、swap_columns 的 unsafe 指针交换、以及 adjacent_columns_mut 如何用 split_at_mut 同时借用相邻两列。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-scoring-model.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "说出四个打分常量的数值与各自代表的编辑代价/奖励",
+            "解释连续相等游标如何通过 EQUALITY_BASE.powi(min(run/4, 16)) 奖励长匹配",
+            "分析这种打分如何让 diff 倾向于保留旧文本、把新内容表达为插入"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "StreamingDiff::INSERTION_SCORE",
+            "StreamingDiff::DELETION_SCORE",
+            "StreamingDiff::EQUALITY_BASE",
+            "StreamingDiff::MAX_EQUALITY_EXPONENT",
+            "equal_run 计算"
+          ],
+          "order": 2,
+          "practice_task": "把 StreamingDiff 复制到本地练习文件，将 DELETION_SCORE 从 -20 改为 -2、再将 MAX_EQUALITY_EXPONENT 从 16 改为 2，对固定的一对 old/new 文本（如 \"aaaa\\nbbbb\" → \"aaaa\\nBBBB\"）分别运行 diff，记录 Keep/Insert/Delete 序列的变化并写成两个断言测试。",
+          "source_files": [
+            "crates/streaming_diff/src/streaming_diff.rs"
+          ],
+          "title": "打分模型：为什么删除比插入贵 20 倍",
+          "topic": "解读 INSERTION_SCORE=-1、DELETION_SCORE=-20、EQUALITY_BASE=1.8 与 MAX_EQUALITY_EXPONENT=16 这组常量：插入便宜、删除昂贵、长相等游程按指数奖励，从而使 diff 偏向“保留旧文本 + 插入新内容”，匹配 LLM 流式输出的场景。"
+        }
+      ],
+      "order": 2,
+      "title": "单元二：打分矩阵与计分模型"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u3-l1-constructor-and-dp-init.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "说出动态规划中 (i, j) 状态与三种子问题的含义",
+            "解释 new() 中第 0 列按 i * DELETION_SCORE 初始化的边界条件",
+            "对比该实现与教科书 Needleman-Wunsch 的异同（局部锚定、浮点分数）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "StreamingDiff::new",
+            "Matrix::resize",
+            "Matrix::set"
+          ],
+          "order": 1,
+          "practice_task": "手算 old=\"ab\"、首个新块为 \"b\" 时的 3x2 分数矩阵（含第 0 列删除初始化与第 0 行插入初始化），再把 Matrix 的 Debug 实现接到本地复制代码中打印，核对手算结果。",
+          "source_files": [
+            "crates/streaming_diff/src/streaming_diff.rs"
+          ],
+          "title": "构造函数与 DP 初始化：从全局对齐算法说起",
+          "topic": "以 Needleman-Wunsch 风格的序列对齐为背景，理解 StreamingDiff::new 如何把 old 转为 Vec<char>、把矩阵初始化为 (old_len+1) x 1，并把第 0 列填为 i * DELETION_SCORE（即“删除前 i 个旧字符”的代价）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u2-l1"
+          ],
+          "filename": "u3-l2-push-new-main-loop.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "解释 swap_columns 如何把上一轮边界列变成新一轮的初始化列",
+            "跟踪 previous_equal_runs/current_equal_runs 的交换与清零时机",
+            "说明 adjacent_columns_mut 返回的 (前一列只读, 当前列可写) 如何支撑原地填表"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "StreamingDiff::push_new",
+            "Matrix::swap_columns",
+            "Matrix::adjacent_columns_mut",
+            "previous_equal_runs/current_equal_runs"
+          ],
+          "order": 2,
+          "practice_task": "在复制的 push_new 中加入 eprintln! 打印每个新字符对应列的分数向量，对 old=\"hello\" 分两次 push \"he\" 与 \"llo world\"，观察第二次调用时矩阵如何被复用以及 new_text_ix 锚点如何推进，记录一份 trace。",
+          "source_files": [
+            "crates/streaming_diff/src/streaming_diff.rs"
+          ],
+          "title": "push_new 主循环：矩阵滚动与增量填表",
+          "topic": "逐行精读 push_new：swap_columns(0, cols-1) 复用上一次的边界列、resize 扩出新的列区间、用 adjacent_columns_mut 拿到相邻两列逐行填入 max(插入, 删除, 相等) 分数，并用双缓冲的 equal_runs 数组跟踪连续相等长度。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-backtrack-and-anchors.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "解释为什么每轮选取分数最大的旧行终点作为新锚点",
+            "跟踪回溯循环中 pending_insert 与 Delete/Keep 合并的逻辑",
+            "理解 OrderedFloat 在 max_by_key 比较浮点分数中的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "StreamingDiff::push_new 的终点搜索",
+            "StreamingDiff::backtrack",
+            "old_text_ix/new_text_ix",
+            "OrderedFloat"
+          ],
+          "order": 3,
+          "practice_task": "为 backtrack 写一个测试：构造 old=\"aaaa\\nbbbb\"、new=\"aaaa\\nBBBB\"，断言回溯得到的 CharOperation 恰好把 old 补丁成 new（复用 tests 里的 apply_char_operations 验证），并断言相邻 Delete/Keep 操作已被合并。",
+          "source_files": [
+            "crates/streaming_diff/src/streaming_diff.rs"
+          ],
+          "title": "回溯与锚点：从最优终点还原编辑脚本",
+          "topic": "讲解 push_new 末段如何在已结算区间内寻找分数最大的 (old 行, 新列) 终点并推进 old_text_ix/new_text_ix 锚点，以及 backtrack 如何从终点反向走 DP 决策、用 pending_insert 与“合并到最后一个 hunk”的技巧生成紧凑的 CharOperation 序列。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l4-finish-and-streaming-guarantees.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "说出 finish 与 push_new 返回值在锚点选择上的差别",
+            "陈述“分块方式不影响最终重建结果”这一不变量",
+            "分析内存与时间复杂度随旧文本长度和块大小的增长"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "StreamingDiff::finish",
+            "backtrack(self.old.len(), self.new.len())",
+            "tests::random_streaming_diff"
+          ],
+          "order": 4,
+          "practice_task": "仿照 tests 里的 random_streaming_diff 写一个分块一致性测试：对同一 new 文本分别以 1、2、4、8 字符为块大小推送，断言每次拼接 push_new + finish 的 CharOperation 后 apply_char_operations 的结果都等于 new 文本。",
+          "source_files": [
+            "crates/streaming_diff/src/streaming_diff.rs"
+          ],
+          "title": "finish 与流式语义：增量差异的正确性保证",
+          "topic": "对比 finish()（锚定到 old 末尾做最终回溯）与 push_new 的增量回溯，总结流式使用的核心不变量：任意分块方式下，把所有返回的 CharOperation 依次应用都能重建 new 文本；同时讨论内存与计算量随 old 长度的增长边界。"
+        }
+      ],
+      "order": 3,
+      "title": "单元三：StreamingDiff 核心流程"
+    },
+    {
+      "id": "u4",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u3-l4"
+          ],
+          "filename": "u4-l1-linediff-state-model.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "说出每个字段的类型、单位与在行折叠中的作用",
+            "用 point_to_offset/offset_to_point 完成 Point 与字节偏移的换算",
+            "解释 BTreeSet 天然有序对后续重建的意义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "LineDiff",
+            "old_end/new_end",
+            "deleted_rows/inserted_rows",
+            "is_line_start/is_line_end"
+          ],
+          "order": 1,
+          "practice_task": "手工模拟 LineDiff 处理 Keep{5}, Delete{5}, Keep{4}（old=\"aaaa\\nbbbb\\ncccc\"）时 old_end/new_end 与 deleted_rows/inserted_rows 的逐步变化并写下表格，再在本地复制代码中为这些字段加临时 Debug 打印验证你的推演。",
+          "source_files": [
+            "crates/streaming_diff/src/streaming_diff.rs"
+          ],
+          "topic": "介绍 LineDiff 的状态字段：old_end/new_end 两个 rope::Point 游标、deleted_rows/inserted_rows 两个 BTreeSet、buffered_insert/buffered_delete 缓冲，以及 inserted_newline_at_end 标志；理解 is_line_start/is_line_end 判定与 rope 的 Point 换算。",
+          "title": "LineDiff 的状态模型：游标、行集合与缓冲区"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-flush-insert-delete-keep.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "画出 push_char_operation 对三种操作的分支处理流程",
+            "解释 flush_insert 按“旧行首/旧行尾/行中”三分的行归属规则",
+            "说明 trim_buffered_end 如何把“先插后删”折叠为 Keep 并避免幽灵行"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "LineDiff::push_char_operation",
+            "flush_insert",
+            "flush_delete",
+            "keep",
+            "trim_buffered_end"
+          ],
+          "order": 2,
+          "practice_task": "仿照 test_replace_line，为“替换最后一行”补一个新测试：手写 char_ops（Keep + Delete + Insert + 可选 Keep），断言得到的 line_ops 符合预期，且 apply_line_operations(old, new, &line_ops) == new 的 round-trip 成立。",
+          "source_files": [
+            "crates/streaming_diff/src/streaming_diff.rs"
+          ],
+          "topic": "精读 push_char_operation 的三个分支与 flush_insert/flush_delete/keep 的协作：插入按行首/行尾分情况累计 inserted_rows，删除在行边界内外给出不同的行归属，trim_buffered_end 会先削掉新旧文本的公共后缀再结算，从而把无意义的插入+删除折叠成 Keep。",
+          "title": "字符操作到行边界：flush 与 trim 的状态机"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-line-operations-reconstruction.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "解释双指针合并 BTreeSet 行号并输出 Keep/Insert/Delete 的算法",
+            "说明 kept_lines 取 max(1, min(...)) 的用意与尾部补 Keep 的原因",
+            "理解 line_operations 只读不改状态、可在流式过程中随时调用的设计"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "LineDiff::line_operations",
+            "deleted_rows/inserted_rows 迭代合并",
+            "LineOperation"
+          ],
+          "order": 3,
+          "practice_task": "写一个批量性质测试：复用 tests 里的 random_text 与 randomly_edit 生成多组随机 old/new，对每组跑 StreamingDiff 得到 char_ops，再经 LineDiff 得到 line_ops，断言 apply_line_operations(old, new, &line_ops) == new 全部成立。",
+          "source_files": [
+            "crates/streaming_diff/src/streaming_diff.rs"
+          ],
+          "topic": "讲解 line_operations 如何用两个 peekable 迭代器归并 deleted_rows 与 inserted_rows，生成合并后的 LineOperation 序列，包括 cmp::max(1, min(...)) 的保底 Keep 与结尾对齐旧文本行数的处理。",
+          "title": "从行集合重建行操作：line_operations 归并算法"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4",
+            "u4-l3"
+          ],
+          "filename": "u4-l4-tests-and-benchmarks.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "会用 SEED/ITERATIONS/OLD_TEXT_LEN 环境变量复现随机测试失败",
+            "说明 char_ops→line_ops→round-trip 这条验证链覆盖的正确性面",
+            "读懂 criterion 基准的 fixture 设计并解释 fixture 保持较小体积的原因"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "tests::random_test",
+            "tests::random_streaming_diff",
+            "benches/streaming_diff.rs",
+            "Matrix::swap_columns 的 unsafe 块"
+          ],
+          "order": 4,
+          "practice_task": "运行 ITERATIONS=1000 SEED=7 cargo test -p streaming_diff test_random_diffs 并记录耗时；再运行 cargo bench -p streaming_diff 比较四个 fixture 的吞吐；写一段文字论证 swap_columns 中 unsafe 代码在现有调用方式下为何不会越界或重叠。",
+          "source_files": [
+            "crates/streaming_diff/src/streaming_diff.rs",
+            "crates/streaming_diff/benches/streaming_diff.rs"
+          ],
+          "topic": "梳理 crate 的测试与基准设施：test_random_diffs 的随机化测试（SEED/ITERATIONS/OLD_TEXT_LEN 环境变量）、round-trip 不变量验证，以及 criterion 基准中按 512 字节分块推送的四种编辑形态 fixture 与 unsafe swap 的安全性论证。",
+          "title": "随机化测试与基准：如何验证和度量 diff 质量"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4",
+            "u4-l3"
+          ],
+          "filename": "u4-l5-integration-in-zed.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "说出 StreamingDiff 与 LineDiff 在调用方是如何配合使用的",
+            "解释流式编辑为什么既需要字符级操作又需要行级操作",
+            "能独立写出一个消费该 crate 公共 API 的最小流式示例"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "StreamingDiff::new/push_new/finish",
+            "LineDiff::push_char_operations/line_operations",
+            "调用方的流式循环结构"
+          ],
+          "order": 5,
+          "practice_task": "在本地练习文件中写一个约 50 行的最小示例：用 StreamingDiff::new 固定旧文本，按块 push_new 模拟 LLM 流式输出，把每次返回的 CharOperation 应用到一个 String 缓冲上，最后调用 finish() 并断言结果等于目标文本；再接上 LineDiff 打印行级 LineOperation 序列。",
+          "source_files": [
+            "crates/streaming_diff/src/streaming_diff.rs",
+            "crates/agent/src/tools/edit_session.rs",
+            "crates/agent_ui/src/buffer_codegen.rs"
+          ],
+          "topic": "回到真实调用方：agent 的 edit_session 如何在工具调用流式输出时用 StreamingDiff 增量生成 CharOperation 并写回缓冲区，agent_ui 的 buffer_codegen 如何同时用 StreamingDiff 与 LineDiff 维护行级差异以便重放；由此总结二次开发时的接入模式与注意点。",
+          "title": "在 Zed 中落地：agent 编辑会话与代码生成的真实用法"
+        }
+      ],
+      "order": 4,
+      "title": "单元四：LineDiff 与工程实践"
+    }
+  ]
+}

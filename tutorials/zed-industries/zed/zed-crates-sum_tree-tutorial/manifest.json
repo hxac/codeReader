@@ -1,0 +1,494 @@
+{
+  "head": "4c7244790a075e862eeb4e5ccc12d6c8f5da6f7e",
+  "project": "zed-crates-sum_tree",
+  "rationale": "sum_tree 是 Zed 中被 rope、multi_buffer、buffer_diff 等核心 crate 依赖的基础数据结构（并发友好的 B+ 树），代码量不大但抽象密度高。学习顺序设计为：第一单元先让读者“跑起来、看得见结构”——认识 crate 定位、Node 的 Internal/Leaf 布局与 Arc 结构共享、本地构建与随机化测试的运行方式；第二单元攻克贯穿一切 API 的三个 trait（Item/Summary/Dimension 与 SeekTarget），它们是理解所有查询与构建接口的钥匙；第三单元进入读路径核心 Cursor（栈式导航、Bias 边界语义、slice/summary 聚合、FilterCursor 剪枝），这是后续编辑操作的基础；第四单元精读写路径的内部机制（append 的节点分裂、append_large/merge_into_right 的欠溢处理、KeyedItem 的批量 edit），这是全 crate 最难的部分，因此放在具备游标与构建知识之后；第五单元以 TreeMap/TreeSet 这个“summary 即最大键”的最佳实践范本收束抽象体系，再连接到 rope 中 SumTree<Chunk> 的真实多维度用法，并以模型测试与 proptest 属性测试结尾。讲义间依赖关系严格反映调用与概念的前置关系，写路径讲座依赖构建与游标知识，生态讲座依赖持久化与 append 的理解。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "理解 sum_tree 解决的问题：O(log n) 的前缀汇总查询与可结构共享的持久化有序序列",
+            "知道 crate 四个源码文件（sum_tree.rs/cursor.rs/tree_map.rs/property_test.rs）各自职责",
+            "了解 heapless、rayon、proptest 等依赖在 crate 中的用途"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "crate 根模块（mod 与 pub use 声明）",
+            "Cargo.toml 的 [lib] 与 features 配置"
+          ],
+          "order": 1,
+          "practice_task": "在 zed 工作区执行 cargo build -p sum_tree 与 cargo test -p sum_tree 确认编译测试通过；然后在 crate 的测试模块中仿照 test_extend_and_push_tree 写一个最小测试，用 SumTree::default() + extend(0..10, ()) 构建树并断言 items(()) 的输出。",
+          "source_files": [
+            "crates/sum_tree/Cargo.toml",
+            "crates/sum_tree/src/sum_tree.rs"
+          ],
+          "title": "sum_tree 是什么：Zed 的并发友好 B+ 树",
+          "topic": "介绍 sum_tree crate 的定位（Cargo.toml 描述为 concurrency-friendly B-tree）、它作为 rope/multi_buffer/buffer_diff 等核心 crate 共同依赖的地位，以及 crate 的文件组织与依赖构成。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-node-layout-and-arc.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "说出 Internal 节点（height/summary/child_summaries/child_trees）与 Leaf 节点（summary/items/item_summaries）各字段含义",
+            "理解测试构建 TREE_BASE=2、正式构建 TREE_BASE=6 的编译期切换",
+            "理解 Arc::make_mut 写时克隆在“不可变树”修改中的作用"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Node",
+            "TREE_BASE",
+            "CapacityResultExt (unwrap_oob)",
+            "SumTree 的 Arc<Node> 包装"
+          ],
+          "order": 2,
+          "practice_task": "写一个测试构建包含 25 个元素的 SumTree<u8>，用 Debug 打印整棵树，数出叶子数量与每个叶子的 item 数，验证均不超过 2*TREE_BASE（测试下为 4），并解释根节点 height 的取值。",
+          "source_files": [
+            "crates/sum_tree/src/sum_tree.rs"
+          ],
+          "title": "树的骨架：Node、TREE_BASE 与 Arc 结构共享",
+          "topic": "解析 Node 枚举的 Internal/Leaf 两个变体、TREE_BASE 决定的节点容量上限（2*TREE_BASE）、heapless::Vec（ArrayVec）的定容存储，以及 Arc<Node> 带来的廉价克隆与结构共享。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-build-and-run-tests.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "会用 cargo test -p sum_tree 运行本 crate 的单元测试",
+            "会用 SEED/ITERATIONS/OPERATIONS 环境变量复现指定随机序列下的测试",
+            "理解 #[cfg(test)] 与 feature = \"test-support\" 的条件编译与可见性差异"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "tests::test_random",
+            "tests::init_logger (zlog)",
+            "test-support feature"
+          ],
+          "order": 3,
+          "practice_task": "用 SEED=42 ITERATIONS=5 OPERATIONS=10 cargo test -p sum_tree test_random 复现一次固定随机运行；再把 test_extend_and_push_tree 的断言故意改错一次观察失败输出，最后还原。",
+          "source_files": [
+            "crates/sum_tree/src/sum_tree.rs",
+            "crates/sum_tree/src/property_test.rs",
+            "crates/sum_tree/Cargo.toml"
+          ],
+          "title": "构建、运行与随机化测试",
+          "topic": "讲解如何在本地构建与测试 sum_tree，包括测试下 TREE_BASE=2 的编译期切换、test_random 支持的 SEED/ITERATIONS/OPERATIONS 环境变量，以及 test-support feature 与 proptest 的关系。"
+        }
+      ],
+      "order": 1,
+      "title": "初识 sum_tree"
+    },
+    {
+      "id": "u2",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l1-item-and-summary.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "能为自定义类型实现 Item 与 ContextLessSummary",
+            "理解 Summary 的 add_summary 单调叠加语义",
+            "知道 NoSummary 占位类型与 Context<'a> 存在的理由"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Item",
+            "Summary",
+            "ContextLessSummary",
+            "NoSummary",
+            "tests::IntegersSummary"
+          ],
+          "order": 1,
+          "practice_task": "在测试模块中定义 struct Word { text: String, is_keyword: bool }，为其实现 Item 与 ContextLessSummary（汇总元素个数与最长单词长度），构建树后验证 summary() 的聚合值与手算一致。",
+          "source_files": [
+            "crates/sum_tree/src/sum_tree.rs"
+          ],
+          "title": "Item 与 Summary：为元素定义汇总",
+          "topic": "讲解 Item trait（summary 方法）、Summary trait（zero/add_summary）以及 ContextLessSummary 与带 Context<'a> 的 Summary 的区别，以测试中的 IntegersSummary（count/sum/contains_even/max）为完整示例。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-dimension-and-seek-target.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "理解同一个 Summary 可以派生出多个 Dimension 且都能用于 seek 与 extent",
+            "会为已有 Summary 实现自定义 Dimension",
+            "理解 SeekTarget::cmp 返回 Ordering 的语义以及 () 可作零维度"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Dimension",
+            "Dimensions<D1, D2, D3>",
+            "SeekTarget",
+            "tests 中的 Count/Sum 与 u8 的 max 维度"
+          ],
+          "order": 2,
+          "practice_task": "仿照 Count/Sum，在测试中为 IntegersSummary 再实现一个新维度（例如统计 contains_even 命中次数的 EvenCount），写测试验证 extent::<EvenCount>() 与手工统计一致。",
+          "source_files": [
+            "crates/sum_tree/src/sum_tree.rs"
+          ],
+          "title": "Dimension 与 SeekTarget：多维度定位",
+          "topic": "讲解 Dimension trait 如何从 Summary 投影出可加度量（测试中的 Count、Sum 与 u8 的 max 维度）、Dimensions<D1,D2,D3> 组合维度，以及 SeekTarget 如何定义目标与游标位置的比较规则。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l3-building-trees.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "理解 from_iter 每次取 2*TREE_BASE 个元素装成叶子再逐层向上组装的流程",
+            "知道 from_par_iter 需要 T: Send + Sync 等约束的原因",
+            "掌握 push/extend/par_extend 的适用场景与它们最终落到 append 的关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "SumTree::from_iter",
+            "SumTree::from_par_iter",
+            "SumTree::push",
+            "SumTree::extend",
+            "SumTree::par_extend"
+          ],
+          "order": 3,
+          "practice_task": "写一个测试：分别用 from_iter、循环 push、par_extend 三种方式构建同一批 10_000 个元素，断言三者 items(()) 相等，并用 std::time::Instant 粗略比较三种方式的耗时差异。",
+          "source_files": [
+            "crates/sum_tree/src/sum_tree.rs"
+          ],
+          "title": "从迭代器到树：构建 API 全景",
+          "topic": "逐个讲解 SumTree 的构建入口：new/from_summary/from_item/from_iter（自底向上逐层组装）、from_par_iter（rayon 并行构建）、push/extend/par_extend，并说明它们最终都汇聚到 append。"
+        }
+      ],
+      "order": 2,
+      "title": "核心 trait 体系：Item、Summary 与 Dimension"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "filename": "u3-l1-cursor-basics.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "理解 stack 中每个 StackEntry（tree/index/position）的含义",
+            "会用 cursor 完成遍历与按维度定位",
+            "理解 did_seek 与 at_end 两个状态位以及 assert_did_seek 断言"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Cursor",
+            "StackEntry",
+            "Cursor::{seek, seek_forward}",
+            "Cursor::{next, prev}",
+            "Cursor::{item, item_summary, start, end}"
+          ],
+          "order": 1,
+          "practice_task": "实现函数 nth_item(tree: &SumTree<u8>, n: usize) -> Option<u8>：用 cursor::<Count>(()) seek 到 Count(n) 后返回 item 的克隆，写测试覆盖首、中、尾与越界四种情况。",
+          "source_files": [
+            "crates/sum_tree/src/cursor.rs",
+            "crates/sum_tree/src/sum_tree.rs"
+          ],
+          "title": "Cursor 基础：栈式导航与 seek",
+          "topic": "讲解 Cursor 的内部表示（StackEntry 数组模拟的根到叶子路径栈，容量 16）与核心 API：seek/seek_forward/next/prev/item/item_summary/start/end，以及使用前必须先 seek 的断言。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-bias-semantics.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "能预测 seek(&Count(n), Bias::Left) 与 Bias::Right 得到的 item 差异",
+            "理解 comparison == Ordering::Equal 时 bias 分支的判定逻辑",
+            "掌握 slice 场景下 bias 对切片端点开闭的影响"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Bias",
+            "Bias::invert",
+            "find_iterate 中的 bias 分支",
+            "seek_internal 中的 bias 分支"
+          ],
+          "order": 2,
+          "practice_task": "写一个测试：对包含 [1,2,3,4,5,6] 的树，系统化 seek Count(0..=6) 分别配 Bias::Left/Bias::Right，把 item() 结果整理成表格断言，并与 test_cursor 中现有断言对照。",
+          "source_files": [
+            "crates/sum_tree/src/sum_tree.rs",
+            "crates/sum_tree/src/cursor.rs"
+          ],
+          "title": "Bias：边界归属的语义",
+          "topic": "以源码文档中 AˇBCD 光标的例子讲解 Bias::Left/Bias::Right 在 seek/slice/find 中如何决定落在边界上的目标归属左侧还是右侧元素，以及 invert 的用途。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l3-slice-and-seek-aggregate.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解 SeekAggregate 的四个回调与 () 空实现各自的用途",
+            "理解 slice 的结构共享：整棵中间子树以 Arc clone 直接进结果",
+            "会用 cursor.summary::<_, D>() 做区间聚合查询"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Cursor::{slice, suffix, summary}",
+            "SeekAggregate",
+            "SliceSeekAggregate",
+            "SummarySeekAggregate",
+            "End"
+          ],
+          "order": 3,
+          "practice_task": "仿照 test_random 中的 splice 模式实现 fn splice(tree: SumTree<u8>, range: std::ops::Range<usize>, new_items: Vec<u8>) -> SumTree<u8>，写测试验证结果与对 Vec 调用 splice 后的序列一致。",
+          "source_files": [
+            "crates/sum_tree/src/cursor.rs"
+          ],
+          "title": "slice、suffix、summary 与 SeekAggregate",
+          "topic": "讲解 Cursor::slice 如何在 seek 过程中顺带把经过的子树与元素聚合成新 SumTree（SliceSeekAggregate）、suffix 如何用 End 目标取到结尾、summary 如何用 SummarySeekAggregate 只累加维度而不建树。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l4-filter-cursor.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "理解 filter_node 谓词作用于节点 summary 而非单个 item",
+            "理解 search_forward 跳过子树时同步累加 position 的逻辑",
+            "能对比 FilterCursor 与 iter().filter() 的复杂度差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "FilterCursor",
+            "Cursor::search_forward",
+            "Cursor::search_backward",
+            "SumTree::filter",
+            "tests::IntegersSummary::contains_even"
+          ],
+          "order": 4,
+          "practice_task": "用 tree.filter::<_, Count>((), |s| s.contains_even) 创建过滤游标，配合 next()/start() 统计所有偶数元素个数与总和，并与 iter().filter 的结果对拍断言相等。",
+          "source_files": [
+            "crates/sum_tree/src/cursor.rs",
+            "crates/sum_tree/src/sum_tree.rs"
+          ],
+          "title": "FilterCursor：按 summary 剪枝遍历",
+          "topic": "讲解 FilterCursor 如何把 FnMut(&T::Summary) -> bool 谓词传入 search_forward/search_backward，在内层节点级别整棵跳过不匹配的子树，从而实现高效过滤遍历。"
+        }
+      ],
+      "order": 3,
+      "title": "Cursor 游标导航"
+    },
+    {
+      "id": "u4",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u4-l1-append-and-node-split.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "能跟踪两棵树 append 时每一层发生的变化",
+            "理解 midpoint 对半分裂策略与 child_count > 2*TREE_BASE 的触发条件",
+            "理解 Arc::make_mut 在递归修改路径上的写时复制行为"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "SumTree::append",
+            "SumTree::push_tree_recursive",
+            "SumTree::from_child_trees",
+            "Node::is_underflowing"
+          ],
+          "order": 1,
+          "practice_task": "写测试分别 append 两棵高度为 0、0 与 1、0 与 2 的树，用 Debug 打印结果验证高度与元素有序性，并解释为什么一次 append 后树高最多增加 1。",
+          "source_files": [
+            "crates/sum_tree/src/sum_tree.rs"
+          ],
+          "title": "append 与节点分裂：push_tree_recursive 精读",
+          "topic": "精读 append 的顶层按高度分派与 push_tree_recursive：等高时展开合并、高度差为 1 时直接挂子树、否则递归下推；子节点数超过 2*TREE_BASE 时从中点分裂并经 from_child_trees 升高一层。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-append-large-and-merge.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解 is_underflowing（子节点数 < TREE_BASE）何时触发合并路径",
+            "理解 merge_into_right 返回 Some(tree) 承载左半部分的约定",
+            "能分析这两个函数如何避免在树中留下欠溢节点"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "SumTree::append_large",
+            "SumTree::merge_into_right",
+            "Node::is_underflowing",
+            "Node::{leftmost_leaf, rightmost_leaf}"
+          ],
+          "order": 2,
+          "practice_task": "先构建一棵 100 元素的树，再 append 一棵只有 1 个元素的树；写遍历检查（可用 Debug 输出辅助）验证结果树中所有内部节点的子节点数都 >= TREE_BASE（测试构建下为 2）。",
+          "source_files": [
+            "crates/sum_tree/src/sum_tree.rs"
+          ],
+          "title": "append_large 与 merge_into_right：欠溢处理",
+          "topic": "精读小树 append 到大树时的 append_large（向最左子树递归下钻、必要时前插分裂节点）与 merge_into_right（同高节点合并、超出容量时对半分），这两个函数补全了 B+ 树的平衡语义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u3-l3"
+          ],
+          "filename": "u4-l3-keyed-item-and-edit.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "会为元素实现 KeyedItem 并使用 get/insert_or_replace/remove",
+            "理解 edit 中 buffered_items 延迟 extend 的动机",
+            "理解 edit 返回的 removed 列表与 find_exact 精确匹配的判定"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "KeyedItem",
+            "Edit",
+            "SumTree::edit",
+            "SumTree::{insert_or_replace, remove, get}",
+            "SumTree::{find_exact, find, find_with_prev}"
+          ],
+          "order": 3,
+          "practice_task": "自定义类型 Student { id: u32, score: u32 } 并实现 KeyedItem（以 id 为键），写测试批量 edit 混合 Insert/Remove 操作，验证树内容与返回的 removed 列表均符合预期。",
+          "source_files": [
+            "crates/sum_tree/src/sum_tree.rs"
+          ],
+          "title": "KeyedItem、Edit 与批量编辑",
+          "topic": "讲解 KeyedItem（带 Ord 键的元素）、免游标的 find_exact/find/find_with_prev 查找、insert_or_replace 与 remove 基于 slice+push+append 的重建模式，以及 edit() 对一批 Edit 排序后单趟线性合并的批量编辑算法。"
+        }
+      ],
+      "order": 4,
+      "title": "append 内部机制与键控编辑"
+    },
+    {
+      "id": "u5",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u5-l1-tree-map-and-tree-set.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "理解“summary = 最大键”这一把 B+ 树变成有序映射的关键技巧",
+            "会使用 get/insert/extend/closest/iter_from/retain/insert_tree 等 API",
+            "会实现自定义 MapSeekTarget 做非精确边界的范围删除"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TreeMap",
+            "TreeSet",
+            "MapEntry",
+            "MapKey 与 MapKeyRef",
+            "MapSeekTarget"
+          ],
+          "order": 1,
+          "practice_task": "仿照 test_remove_between_and_path_successor，为 TreeMap<String, i32> 实现并测试一个 MapSeekTarget，用于一次 remove_range 删除所有以给定前缀开头的键。",
+          "source_files": [
+            "crates/sum_tree/src/tree_map.rs"
+          ],
+          "title": "TreeMap/TreeSet：基于 SumTree 的有序映射",
+          "topic": "讲解 TreeMap 如何以 MapEntry 为 Item、以 MapKey（区间最后一个键）为 Summary 实现有序映射，MapKeyRef 借用键避免克隆的 Dimension 设计，以及 MapSeekTarget 如何支撑 remove_range 这类非精确边界（如按路径前缀删除）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u4-l1"
+          ],
+          "filename": "u5-l2-sum-tree-in-zed-ecosystem.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "能解释“concurrency-friendly”的具体含义：克隆共享未变子树、slice 零拷贝",
+            "理解 rope 中 usize/OffsetUtf16/Point 都是 ChunkSummary 的 Dimension",
+            "了解 multi_buffer、buffer_diff、language 等下游 crate 依赖 sum_tree 的事实"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "SumTree 的 Arc<Node> 持久化设计",
+            "rope 中的 Chunk",
+            "rope 中的 ChunkSummary",
+            "rope 中 usize/OffsetUtf16/Point 的 Dimension 实现"
+          ],
+          "order": 2,
+          "practice_task": "阅读 rope.rs 中 impl Dimension for usize 与 for Point 的实现后，在测试里为自己在第 u2-l1 讲定义的 Summary 增加第二个维度（如行数），并演示一次跨维度定位：先按行号维度 seek，再读出对应的字符偏移维度。",
+          "source_files": [
+            "crates/sum_tree/src/sum_tree.rs",
+            "crates/rope/src/rope.rs"
+          ],
+          "title": "sum_tree 在 Zed 生态中的角色",
+          "topic": "从并发与持久化角度总结 sum_tree 的设计（Arc 结构共享、O(log n) 汇总、slice 的子树复用），并以 rope crate 的 SumTree<Chunk> 为例展示真实用法：ChunkSummary 携带多维度信息，支撑按 offset/Point/UTF-16 多种坐标查找。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3",
+            "u2-l2"
+          ],
+          "filename": "u5-l3-model-and-property-testing.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "会编写以 Vec 为参考模型的对拍测试",
+            "会使用 property_test::sum_tree 策略生成随机树",
+            "理解 #[cfg(any(test, feature = \"test-support\"))] 的可见性控制"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "tests::test_random",
+            "property_test 中为 SumTree 实现的 Arbitrary",
+            "property_test::sum_tree 策略",
+            "test-support feature"
+          ],
+          "order": 3,
+          "practice_task": "写一个 proptest：用 property_test::sum_tree(any::<u8>(), 0..100) 生成随机树，验证两条性质：(a) iter().count() 等于 extent::<Count>()；(b) 从头 slice 到任意位置再 append 剩余 suffix 得到与原树相等的树。",
+          "source_files": [
+            "crates/sum_tree/src/sum_tree.rs",
+            "crates/sum_tree/src/property_test.rs",
+            "crates/sum_tree/Cargo.toml"
+          ],
+          "title": "测试策略：模型对拍与属性测试",
+          "topic": "讲解 test_random 如何以 Vec 为参考模型对树做随机 splice/seek/slice/filter 的对拍验证，property_test.rs 如何为 SumTree 实现 proptest 的 Arbitrary 与 sum_tree 生成策略，以及 test-support feature 如何把这些工具暴露给下游 crate。"
+        }
+      ],
+      "order": 5,
+      "title": "TreeMap、生态与测试实践"
+    }
+  ]
+}
