@@ -1,13 +1,11 @@
 {
-  "head": "fa00dccc42311f8dc71c533105488b0dbd518138",
-  "project": "zed-crates-gpui_wgpu",
-  "rationale": "gpui_wgpu 是 Zed 中基于 wgpu 的跨平台 GPUI 渲染器与文本系统实现（被 gpui_linux、gpui_web、headless 场景消费），约 4800 行 Rust 加 1300 余行 WGSL。学习路线按『认知 → GPU 上下文 → 渲染主链路 → 着色器 → 图集与文本 → 健壮性与工程实践』组织：第一单元先让读者从零建立项目定位、模块结构与可运行验证手段；第二单元讲 WgpuContext 的 instance/adapter/device 创建、适配器排序选择、Web 后端初始化与设备丢失检测，这是所有渲染的前提；第三单元沿 draw() → record_frame() 的一帧流水线拆成 7 讲（表面配置、管线与绑定组、全局 uniform、帧循环、批次调度、实例数据双通道、路径两阶段渲染），因为这是本 crate 的核心调用链；第四单元从 WGSL 侧与 Rust 侧对照讲解共享着色器、各图元着色器、storage/WebGL 两种实例传输变体与亚像素双源混合；第五单元讲 WgpuAtlas（PlatformAtlas + etagere）与 CosmicTextSystem（字体加载、排版、字形光栅化）两个平台 trait 实现；最后第六单元覆盖设备恢复与多窗口协调、resize/透明度切换、真实平台集成与测试基准工程，面向二次开发与架构取舍。依赖关系上着色器单元依赖渲染器单元，图集与文本单元相对独立可并行学习。",
   "units": [
     {
+      "filename": "u1-l1-project-overview.md",
       "id": "u1",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -33,7 +31,7 @@
           "topic": "介绍 gpui_wgpu crate 在 Zed 仓库中的角色：基于 wgpu 实现的 GPUI 渲染器、精灵图集与 cosmic-text 文本系统，服务于 Linux、Web 等非 macOS 平台。梳理它与 gpui、gpui_linux、gpui_web 的关系以及关键依赖。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -62,7 +60,7 @@
           "topic": "精读只有 10 行的 lib 根 gpui_wgpu.rs，理解 cosmic_text_system、wgpu_atlas、wgpu_context、wgpu_renderer 四个模块的划分与再导出策略；结合 Cargo.toml 理解 font-kit 可选特性、wasm 条件依赖与 [lib] path 配置。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -96,10 +94,11 @@
       "title": "初识 gpui_wgpu"
     },
     {
+      "filename": "u1-l1-project-overview.md",
       "id": "u2",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -126,7 +125,7 @@
           "topic": "解析 WgpuContext 结构体持有的 instance/adapter/device/queue 及派生能力（dual_source_blending、color_texture_format）。重点读 create_device 如何决定 required_features、downlevel limits 与色彩纹理格式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -153,7 +152,7 @@
           "topic": "讲解 select_adapter_and_device：枚举适配器后按用户覆盖（ZED_DEVICE_ID）、合成器 GPU 提示、设备类型、后端优先级排序，并用 try_adapter_with_surface 实际配置表面来验证兼容性，避免 NVIDIA+Intel 混合系统的假阳性。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -182,7 +181,7 @@
           "topic": "解读 wasm 专用的 new_web 路径：WebBackendPreference 三种偏好、new_instance_with_webgpu_detection 探测、WebDisplaySource 提供 web display handle 的原因，以及 WebGL2 后端使用 downlevel_webgl2_defaults 限制。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -214,10 +213,11 @@
       "title": "GPU 上下文与初始化"
     },
     {
+      "filename": "u1-l1-project-overview.md",
       "id": "u3",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -245,7 +245,7 @@
           "topic": "认识 WgpuRenderer 的字段与三段式构造（new / new_from_canvas / new_internal），以及 WgpuSurfaceConfig 与 GpuContext（Rc<RefCell<Option<WgpuContext>>>）的共享语义。覆盖 surface 能力查询、格式与 alpha 模式选择、尺寸钳制。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -274,7 +274,7 @@
           "topic": "精读 create_pipelines 与 create_bind_group_layouts：globals/instances/texture/surfaces 四种布局、三种着色器拼接变体（storage/WebGL/subpixel）的选择逻辑、PreMultiplied 与普通混合状态差异，以及 subpixel_sprites 为何是 Option。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -302,7 +302,7 @@
           "topic": "讲解 GlobalParams/GammaParams/SurfaceParams 等 Pod 结构、单个 globals_buffer 里三段 uniform 的偏移对齐计算，以及 RenderingParameters::new 如何从 ZED_FONTS_GAMMA 等环境变量和适配器能力推导 path_sample_count 与 gamma 参数。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2",
             "u2-l4"
@@ -330,7 +330,7 @@
           "topic": "逐分支解析 draw()：device_lost 早退、未配置表面早退（Android 场景）、连续 GPU 错误的计数与降级（超过 5 次清图集重试、超过 10 次 panic）、get_current_texture 六种结果的处理、atlas.before_frame()、globals 写入与 present。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l4"
           ],
@@ -357,7 +357,7 @@
           "topic": "解析 record_frame 中 scene.batches() 循环如何把 PrimitiveBatch 分派到对应管线：Quads/Shadows/Underlines 走 draw_instances，三种 Sprite 批次额外绑定图集纹理走 draw_sprites，Paths 批次需要中断并重启渲染 pass，Surfaces 在本渲染器中不实现。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l5"
           ],
@@ -385,7 +385,7 @@
           "topic": "深入本 crate 最精巧的部分：每帧把 Quad/Shadow/Sprite 等实例按 POD 字节流写入 InstanceData。原生路径用 storage buffer 加 binding offset，WebGL2 路径因无 storage buffer 而写入 Rgba32Uint 纹理并按绝对 texel 索引，导致 first_instance 语义不同；容量不足时 grow_instance_data 翻倍重建。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l5"
           ],
@@ -419,10 +419,11 @@
       "title": "渲染器与一帧的绘制"
     },
     {
+      "filename": "u1-l1-project-overview.md",
       "id": "u4",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -450,7 +451,7 @@
           "topic": "精读 shaders.wgsl 的公共部分：GlobalParams/GammaParams/Bounds/Corners/Edges 等结构、@group(0)/(2) 绑定，以及改编自 Microsoft Terminal 的 gamma 与对比度校正函数族（color_brightness、enhance_contrast、apply_alpha_correction）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -478,7 +479,7 @@
           "topic": "逐个阅读 vs/fs_quad（圆角矩形 SDF）、vs/fs_shadow（盒阴影模糊）、vs/fs_underline（下划线样式）、vs/fs_mono_sprite 与 vs/fs_poly_sprite（图集采样与色彩校正）、vs/fs_surface（占位实现）的入口函数与 varying 结构。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1",
             "u3-l6"
@@ -508,7 +509,7 @@
           "topic": "对照 shaders_storage.wgsl（var<storage> 数组 + load_* 函数）与 shaders_webgl.wgsl（Rgba32Uint 纹理 + InstanceCursor 逐 word 读取与 bitcast），理解同一份记录数据在两种后端上的解码方式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l2"
           ],
@@ -541,10 +542,11 @@
       "title": "WGSL 着色器剖析"
     },
     {
+      "filename": "u1-l1-project-overview.md",
       "id": "u5",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -572,7 +574,7 @@
           "topic": "讲解 WgpuAtlas 如何实现 gpui 的 PlatformAtlas trait：get_or_insert_with 的缓存命中/未命中路径、etagere 的 BucketedAtlasAllocator 如何在 1024 起步的纹理内分配 tile、三种 AtlasTextureKind 决定 R8Unorm 或色彩格式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -600,7 +602,7 @@
           "topic": "分析 PendingUpload 的延迟批量上传（before_frame 时 flush）、remove 时的 etagere deallocate、引用计数与 free_list 纹理槽复用，以及 swizzle_upload_data 在 Rgba8Unorm 下的 BGRA→RGBA 通道交换。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -629,7 +631,7 @@
           "topic": "讲解 CosmicTextSystem 对 PlatformTextSystem 的实现之一：基于 cosmic-text 的 FontSystem/fontdb 加载字体、load_family 构建 LoadedFont 列表、font_ids_by_family_cache 缓存家族解析、find_best_match 按属性挑选字面。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l3"
           ],
@@ -659,7 +661,7 @@
           "topic": "解析 layout_line 的双路径：无段落分隔符走 layout_line_no_separators 快路径，含 U+001C 等双向段落分隔符走 layout_line_with_separators 分段整形；以及 compute_run_spans/pick_covering_slot 如何按用户 fallback 链把字符分配到不同字体槽。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l3"
           ],
@@ -691,10 +693,11 @@
       "title": "精灵图集与文本系统"
     },
     {
+      "filename": "u1-l1-project-overview.md",
       "id": "u6",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4",
             "u3-l4"
@@ -724,7 +727,7 @@
           "topic": "精读 recover()：通过共享 GpuContext 判断是否需要重建 context、丢弃 WgpuResources、atlas.handle_device_lost、再走 new_internal 重建；以及 unconfigure_surface/replace_surface 的 Android 表面替换路径与 needs_redraw 标志。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -751,7 +754,7 @@
           "topic": "对比 update_drawable_size（poll 等待在途 GPU 工作、销毁旧中间纹理、重新 configure surface、中间纹理懒重建）与 update_transparency（切换 alpha mode 并整套重建管线）两条状态更新路径。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1",
             "u2-l3"
@@ -783,7 +786,7 @@
           "topic": "跳出 crate 本身，看 gpui_linux 的 Wayland/X11 窗口与 gpui_web 如何创建 WgpuRenderer：共享 GpuContext、CompositorGpuHint 的 dev_t 来源、canvas surface 与 new_from_canvas 路径、以及 CosmicTextSystem 在 gpui_linux 与 gpui_web 中的复用。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3",
             "u4-l4",
@@ -820,5 +823,8 @@
       "order": 6,
       "title": "健壮性、平台集成与工程实践"
     }
-  ]
+  ],
+  "head": "2936989f1b7a15aaf7131b0a3c17961d706fdbf5",
+  "project": "zed-crates-gpui_wgpu",
+  "rationale": "gpui_wgpu 是 Zed 中基于 wgpu 的跨平台 GPUI 渲染器与文本系统实现（被 gpui_linux、gpui_web、headless 场景消费），约 4800 行 Rust 加 1300 余行 WGSL。学习路线按『认知 → GPU 上下文 → 渲染主链路 → 着色器 → 图集与文本 → 健壮性与工程实践』组织：第一单元先让读者从零建立项目定位、模块结构与可运行验证手段；第二单元讲 WgpuContext 的 instance/adapter/device 创建、适配器排序选择、Web 后端初始化与设备丢失检测，这是所有渲染的前提；第三单元沿 draw() → record_frame() 的一帧流水线拆成 7 讲（表面配置、管线与绑定组、全局 uniform、帧循环、批次调度、实例数据双通道、路径两阶段渲染），因为这是本 crate 的核心调用链；第四单元从 WGSL 侧与 Rust 侧对照讲解共享着色器、各图元着色器、storage/WebGL 两种实例传输变体与亚像素双源混合；第五单元讲 WgpuAtlas（PlatformAtlas + etagere）与 CosmicTextSystem（字体加载、排版、字形光栅化）两个平台 trait 实现；最后第六单元覆盖设备恢复与多窗口协调、resize/透明度切换、真实平台集成与测试基准工程，面向二次开发与架构取舍。依赖关系上着色器单元依赖渲染器单元，图集与文本单元相对独立可并行学习。增量核对结论：git diff fa00dccc..2936989f1b 显示 crates/gpui_wgpu 自身零改动，相关 crate 中仅 gpui/gpui_linux/gpui_web 的 Platform::restart 增加 arguments 参数、gpui 的 LineLayout 新增 split/paint API，均不涉及本大纲引用的渲染器、着色器、图集、文本系统与平台集成内容（u2-l3/u6-l3 引用的 gpui_web platform.rs 中 WebBackendPreference 相关代码未变），故全部讲义维持 keep。"
 }

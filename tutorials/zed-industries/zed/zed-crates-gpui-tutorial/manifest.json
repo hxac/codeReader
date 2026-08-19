@@ -1,7 +1,4 @@
 {
-  "head": "fa00dccc42311f8dc71c533105488b0dbd518138",
-  "project": "zed-crates-gpui",
-  "rationale": "增量分析：两次 HEAD 之间仅有一个提交（d70c45e5bb）改动 gpui crate，且集中在 src/app.rs、src/input.rs、src/platform.rs 三个文件，内容为纯增量 API 扩展——新增 App::read_from_clipboard_async、Platform::read_from_clipboard_async（默认包装同步读取，web 等异步权限平台可覆写）、InputHandler/EntityInputHandler 的 paste 钩子（平台发起粘贴可携带图片等完整 ClipboardItem）以及 ClipboardReadError 错误类型；模块结构、绘制管线、交互主链路均未变化。因此原有七单元、由浅入深的学习路线整体保持不变：已生成的 u1 全部讲义与 u2-l1~l4 不涉及剪贴板与输入处理抽象，标记 keep；尚未生成的讲义（u2-l5 起全部）保持 new；仅微调 u5-l1（输入事件模型）与 u7-l1（Platform 抽象）的主题和学习目标，把新的 paste 输入钩子与异步剪贴板读取纳入讲解范围，确保后续生成的讲义覆盖最新 API。该变化幅度不足以支撑独立新讲义，并入上述两篇更符合『每篇只讲一个主题』的拆分原则。",
   "units": [
     {
       "id": "u1",
@@ -127,7 +124,7 @@
       "id": "u2",
       "lectures": [
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u1-l2"
           ],
@@ -135,24 +132,26 @@
           "id": "u2-l1",
           "learning_goals": [
             "理清 Application、AppCell、App 三者关系与 RefCell 借用模型",
-            "会用 with_assets、with_http_client、on_app_quit 等配置钩子",
-            "理解 run_embedded 与 run 的区别及 wasm 场景"
+            "会用 with_assets、with_http_client、on_app_quit、with_restart_arguments 等配置钩子",
+            "理解 run_embedded 与 run 的区别及 wasm 场景",
+            "理解退出/重启链路：cx.restart 会把 restart_path 与 restart_arguments 一并交给 Platform::restart"
           ],
           "level": "beginner",
           "minimal_modules": [
             "Application",
             "AppCell/RefCell",
-            "平台事件循环"
+            "平台事件循环",
+            "restart 参数转发"
           ],
           "order": 1,
-          "practice_task": "在 hello_world 基础上给 Application 挂上 on_app_quit 回调打印日志，并在 run 回调里尝试嵌套借用 App（如再 borrow_mut 一次）观察 panic，从而体会单线程借用规则。",
+          "practice_task": "在 hello_world 基础上给 Application 挂上 on_app_quit 回调打印日志，并用 with_restart_arguments 配置重启参数、观察 cx.restart 后平台收到的 (path, arguments)；再在 run 回调里尝试嵌套借用 App（如再 borrow_mut 一次）观察 panic，从而体会单线程借用规则。",
           "source_files": [
             "src/app.rs",
             "docs/contexts.md",
             "examples/on_window_close_quit.rs"
           ],
           "title": "App 与 Application：应用生命周期",
-          "topic": "剖析 Application 的启动流程：with_platform、with_assets、run 如何把控制权交给 Platform 事件循环，以及 AppCell/RefCell 带来的单前台线程借用约束。"
+          "topic": "剖析 Application 的启动流程：with_platform、with_assets、run 如何把控制权交给 Platform 事件循环，AppCell/RefCell 带来的单前台线程借用约束，以及退出/重启链路——新版 App::restart 会把 restart_path 与新增的 restart_arguments（如 --user-data-dir）一并传给 Platform::restart。"
         },
         {
           "action": "keep",
@@ -241,7 +240,7 @@
           "topic": "讲解 Global trait 与 set_global/update_global/read_global 机制，以及 GPUI 内部如何用 TypeIdHashMap 存储全局单例（如 FocusMap、GlobalColors）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -250,7 +249,7 @@
           "learning_goals": [
             "区分 spawn 与 background_spawn 并理解 Send 约束来源",
             "掌握 Task 的取消语义与 detach 的使用时机",
-            "理解 foreground executor 如何与平台事件循环集成"
+            "理解前台 executor 如何与平台事件循环集成"
           ],
           "level": "beginner",
           "minimal_modules": [
@@ -278,7 +277,7 @@
       "id": "u3",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -307,7 +306,7 @@
           "topic": "讲解 Render trait 如何把实体变成视图、ViewElement 如何作为实体与元素世界之间的桥梁、AnyView 的类型擦除，以及渲染缓存何时复用何时丢弃。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -337,7 +336,7 @@
           "topic": "div 是 GPUI 的万能元素：讲解其构建方式、flexbox 布局方法族、child/children 组合，以及与 Tailwind CSS 相似的样式方法命名规律。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -366,7 +365,7 @@
           "topic": "深入 style.rs：Style 结构、StyleRefinement 的可选字段叠加机制（refineable）、文本样式继承，以及 Display/FlexDirection/Position 等布局枚举的含义。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -502,7 +501,7 @@
           "learning_goals": [
             "理解 GPUI 如何把 Style 翻译成 Taffy 节点并驱动布局",
             "会阅读 grid_layout 示例掌握网格布局用法",
-            "能排查常见布局不生效问题（display、overflow、available space）"
+            "能排查常见布局不生效问题（display、overflow、availablespace）"
           ],
           "level": "intermediate",
           "minimal_modules": [
@@ -931,16 +930,18 @@
           "learning_goals": [
             "理解 FontId/Font/FontMetrics 与平台字体后端的分层",
             "掌握 WindowTextSystem 与帧内缓存的设计意图",
-            "会用 StyledText 渲染带高亮样式的多段落文本"
+            "会用 StyledText 渲染带语法高亮样式的多段落文本",
+            "理解 ShapedLine 与 LineLayout 的职责分层：ShapedLine 因内联 DecorationRun SmallVec 体积近 3KB，新版把切分与绘制下沉为 LineLayout::split_at/paint/paint_background，调用方可持有裸 Arc<LineLayout> 并自管装饰"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "TextSystem/WindowTextSystem",
             "Line/TextRun",
-            "字形光栅化缓存"
+            "字形光栅化缓存",
+            "LineLayout::split_at/paint"
           ],
           "order": 5,
-          "practice_task": "渲染一段带语法高亮效果的代码片段：用 TextRun 划分关键字、字符串、注释三种样式，并测量整行宽度实现右对齐。",
+          "practice_task": "渲染一段带语法高亮效果的代码片段：用 TextRun 划分关键字、字符串、注释三种样式，并测量整行宽度实现右对齐；再用 layout_line 取得 LineLayout，用 split_at 在指定字节处切成前后两半分别 paint，验证前半宽度等于切点 x 进度、后半字形位置已重定位到 x=0。",
           "source_files": [
             "src/text_system.rs",
             "src/text_system/line.rs",
@@ -948,7 +949,7 @@
             "examples/text_layout.rs"
           ],
           "title": "文本系统：字体、字形与行布局",
-          "topic": "分析 TextSystem 与 WindowTextSystem 的双层结构、字体加载与 fallback、Line/TextRun 的行布局模型，以及字形如何进入图集渲染。"
+          "topic": "分析 TextSystem 与 WindowTextSystem 的双层结构、字体加载与 fallback、Line/TextRun 的行布局模型，以及字形如何进入图集渲染；并讲解 ShapedLine 与 LineLayout 的分层——ShapedLine::split_at 现在委托给新增的 LineLayout::split_at，配合 LineLayout::paint/paint_background（显式传入 DecorationRun），调用方可以只持有轻量的 Arc<LineLayout> 自己管理装饰，避免近 3KB 的 ShapedLine 在碎片化拼行时反复搬运与重分配。"
         },
         {
           "action": "new",
@@ -1057,7 +1058,8 @@
             "列举 Platform trait 承担的全部职责",
             "理解 test platform 如何在无窗口环境驱动帧",
             "了解新增平台支持需要实现哪些 trait",
-            "理解 read_from_clipboard 与 read_from_clipboard_async 的关系及异步权限模型（如 web 平台的 ClipboardReadError）"
+            "理解 read_from_clipboard 与 read_from_clipboard_async 的关系及异步权限模型（如 web 平台的 ClipboardReadError）",
+            "理解 Platform::restart(binary_path, arguments) 签名与 Application::with_restart_arguments 的参数转发链路"
           ],
           "level": "advanced",
           "minimal_modules": [
@@ -1065,17 +1067,18 @@
             "PlatformWindow",
             "PlatformDispatcher",
             "test platform",
-            "剪贴板同步/异步读取"
+            "剪贴板同步/异步读取",
+            "restart 参数转发"
           ],
           "order": 1,
-          "practice_task": "用 Application::with_platform 接入 platform/test.rs 提供的测试平台，在无真实窗口的环境创建实体并手动驱动若干帧，观察绘制调用。",
+          "practice_task": "用 Application::with_platform 接入 platform/test.rs 提供的测试平台，在无真实窗口的环境创建实体并手动驱动若干帧，观察绘制调用；再用 expect_restart 验证 cx.restart 时 (路径, 参数) 被原样传给平台。",
           "source_files": [
             "src/platform.rs",
             "src/platform/test/platform.rs",
             "src/platform/test.rs"
           ],
           "title": "Platform 抽象与跨平台架构",
-          "topic": "解读 platform.rs 中约 3000 行的平台抽象：Platform、PlatformWindow、PlatformDispatcher、PlatformTextSystem、PlatformAtlas 等 trait 如何隔离 macOS/Linux/Windows 差异，以及带默认实现的扩展点（如剪贴板的同步/异步两种读取形态）。"
+          "topic": "解读 platform.rs 中约 3000 行的平台抽象：Platform、PlatformWindow、PlatformDispatcher、PlatformTextSystem、PlatformAtlas 等 trait 如何隔离 macOS/Linux/Windows 差异，以及带默认实现或近期演化的扩展点（如剪贴板的同步/异步两种读取形态、携带 restart_arguments 的应用重启）。"
         },
         {
           "action": "new",
@@ -1242,5 +1245,8 @@
       "order": 7,
       "title": "平台层、工程化与综合实战"
     }
-  ]
+  ],
+  "head": "2936989f1b7a15aaf7131b0a3c17961d706fdbf5",
+  "project": "zed-crates-gpui",
+  "rationale": "增量分析：两次 HEAD 之间仅有两个提交改动 gpui crate。7150765979（保留 --user-data-dir 的重启）在 src/app.rs 新增 Application::with_restart_arguments 与 App::restart_arguments 字段，App::restart 现在把 (restart_path, restart_arguments) 一并交给平台，src/platform.rs 的 Platform::restart 签名相应增加 Vec<OsString> 参数（test/visual_test 平台同步调整）；2936989f1b（当前 HEAD）把 ShapedLine::split_at 的字形切分逻辑下沉为 src/text_system/line_layout.rs 新增的 LineLayout::split_at，并在 src/text_system/line.rs 为 LineLayout 新增 paint/paint_background（显式传入 DecorationRun），使调用方可持有轻量 Arc<LineLayout> 自管装饰。模块结构、绘制管线、交互主链路均未变化，七单元学习路线整体保持。已生成讲义中，u1 全部、u2-l2~l4、u2-l5 与 u3-l1~l4 不涉及重启参数与文本行布局细节，标记 keep（本轮新生成的 u2-l5、u3-l1~l4 由 new 转为 keep）；u2-l1 讲解 Application 配置钩子族与退出/重启链路，需要把 with_restart_arguments 与 restart 参数转发纳入，标记 update；尚未生成的 u6-l5（文本系统）扩展主题与实践任务以覆盖 LineLayout 的切分/绘制新 API，u7-l1（Platform 抽象）把 restart 新签名纳入讲解范围，两者仍为 new；其余未生成讲义保持 new。两处变化均为纯增量 API 扩展，不足以支撑独立新讲义，并入既有主题更符合『每篇只讲一个主题』的拆分原则。"
 }
