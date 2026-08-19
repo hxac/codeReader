@@ -1,0 +1,560 @@
+{
+  "head": "28c0f4aef89d298a08176977d9839671827f5528",
+  "project": "zed-crates-buffer_diff",
+  "rationale": "buffer_diff 是 Zed 中负责「把编辑器 buffer 与其 diff 基准文本（如 git HEAD、index）做行级差异，并以 hunk 形式提供给编辑器 gutter、git 面板、agent 等模块」的核心 crate，全部实现集中在约 4400 行的单一文件 src/buffer_diff.rs 中，底层依赖 imara-diff 算法与 sum_tree 区间树。学习路线设计为：单元一先建立三个核心名词（diff base、hunk、snapshot）并让读者跑通测试；单元二自底向上拆解数据结构（DiffHunk、SumTree 存储）、查询 API 与坐标映射；单元三进入 diff 计算主链路（imara-diff、HunkSink、word diff）与实体生命周期、增量变更通知；单元四攻克本 crate 最难的部分——为支持 git stage/unstage 而设计的 DiffBaseKind、secondary diff 三方模型与乐观 pending hunk 机制；单元五以测试体系、随机化对照测试和综合驱动实践收尾。每篇讲义只依赖前置讲义已讲过的概念，源码引用集中在 buffer_diff.rs 的对应区段。本轮增量检查：git diff 4c7244790a..28c0f4aef8 对 crates/buffer_diff 为空（无提交触及该 crate），editor/git_ui 等下游 Cargo.toml 亦无变化、无新增消费者，src/buffer_diff.rs 行数与全部关键符号（compute_hunks、set_pending_hunks、compute_uncommitted_index_edits、compare_hunks、assert_hunks 等）均与上版一致，故全部讲义保持 keep，既有结构与依赖关系无需调整。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [],
+          "filename": "u1-l1-crate-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 buffer_diff 在 Zed 中的职责边界",
+            "列出 imara-diff、sum_tree、gpui、language、rope、text 各依赖的作用",
+            "知道 editor、git_ui、project 等下游 crate 依赖它"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Cargo 依赖清单",
+            "文件头部 use 导入",
+            "下游消费者（editor/git_ui/project 等）"
+          ],
+          "order": 1,
+          "practice_task": "阅读 crates/buffer_diff/Cargo.toml 与 buffer_diff.rs 的头部导入，运行 cargo build -p buffer_diff 验证可构建；再用 grep 在 zed 仓库中找出所有依赖 buffer_diff 的 crate，整理一份不超过 10 行的观察笔记，说明每个消费者大致用它做什么。",
+          "source_files": [
+            "crates/buffer_diff/Cargo.toml",
+            "crates/buffer_diff/src/buffer_diff.rs",
+            "crates/git_ui/Cargo.toml",
+            "crates/editor/Cargo.toml"
+          ],
+          "title": "buffer_diff 是什么：Zed 里的行级差异引擎",
+          "topic": "介绍 crate 在 Zed 仓库中的位置与职责：为一个 buffer 与其 diff 基准文本计算行级差异，并把 hunk 提供给编辑器、git 面板等消费者。梳理依赖（imara-diff、sum_tree、gpui、language、rope、text）与下游使用方。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-core-concepts.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "区分 BufferDiff 实体与 BufferDiffSnapshot 快照",
+            "解释 DiffHunk 各字段（buffer_range、diff_base_byte_range、word diffs）的含义",
+            "说出四种 DiffBaseKind 的语义"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "BufferDiff 实体",
+            "BufferDiffSnapshot",
+            "DiffHunk",
+            "DiffBaseKind"
+          ],
+          "order": 2,
+          "practice_task": "在 crate 的测试模块中仿照 test_buffer_diff_simple，用 BufferDiff::new_with_base_text 构造一个 diff，遍历所有 hunk 并打印 buffer_range、diff_base_byte_range 与 status()，手工核对这些字段与你的预期文本一致。",
+          "source_files": [
+            "crates/buffer_diff/src/buffer_diff.rs"
+          ],
+          "title": "三个核心名词：DiffBaseKind、DiffHunk 与 BufferDiffSnapshot",
+          "topic": "讲解 crate 的核心数据模型：BufferDiff 是 gpui 实体，BufferDiffSnapshot 是不可变快照，DiffHunk 用锚点描述一块差异。同时介绍 DiffBaseKind 的四种基准来源（Head/Index/Oid/Custom）。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-run-first-test.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "掌握 cargo test -p buffer_diff 运行单个测试的方法",
+            "理解 #[gpui::test] 与 TestAppContext 的作用",
+            "会读会写 assert_hunks 的四元组断言"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "mod tests 组织",
+            "BufferDiffSnapshot::new_sync 辅助函数",
+            "assert_hunks 断言工具"
+          ],
+          "order": 3,
+          "practice_task": "运行 cargo test -p buffer_diff test_buffer_diff_simple 使其通过；然后仿照它新增一个测试：base 与 buffer 各改一处形成两个 hunk，用 assert_hunks 断言删除文本、新增文本与状态，运行通过后再故意改错一处观察 pretty_assertions 的失败输出。",
+          "source_files": [
+            "crates/buffer_diff/src/buffer_diff.rs"
+          ],
+          "title": "把项目跑起来：cargo test 与第一个测试",
+          "topic": "介绍测试模块的组织方式：#[gpui::test] 异步测试、TestAppContext、new_sync 快捷构造、assert_hunks 断言工具的四元组格式，以及如何运行单个测试。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "单元一：初识 buffer_diff——定位、概念与运行"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l1-diff-hunk-and-status.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "解释 status() 如何根据两个区间的空与非空判定三种 kind",
+            "理解 buffer_range 用 Anchor 而非 Point 的原因",
+            "识别整文件新增（is_created_file）的判定条件"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "DiffHunk",
+            "DiffHunkStatus / DiffHunkStatusKind",
+            "DiffHunk::status 与 is_created_file"
+          ],
+          "order": 1,
+          "practice_task": "写一个测试构造三种场景：纯新增行、纯删除行、修改行，用 assert_hunks 分别断言 DiffHunkStatus::added_none/deleted_none/modified_none，并额外断言一个「空 base」场景下 hunk 的 is_created_file() 为 true。",
+          "source_files": [
+            "crates/buffer_diff/src/buffer_diff.rs"
+          ],
+          "title": "DiffHunk 与 DiffHunkStatus：一块差异的完整描述",
+          "topic": "逐字段讲解 DiffHunk（buffer_range 锚点、diff_base_byte_range、base/buffer word diffs），以及 status() 如何根据区间是否为空推导出 Added/Modified/Deleted 三种类型。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-sumtree-hunk-storage.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "解释 SumTree 的 Item/Summary/SeekTarget 三件套",
+            "说明 added_rows/removed_rows 是如何被聚合的",
+            "会用 changed_row_counts 统计变更行数"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "InternalDiffHunk",
+            "DiffHunkSummary",
+            "sum_tree::Item/Summary 实现",
+            "Anchor 与 usize 的 SeekTarget 实现"
+          ],
+          "order": 2,
+          "practice_task": "构造一个包含多个 hunk 的 diff，调用 snapshot.changed_row_counts() 断言新增/删除行数之和；再在测试里直接对 SumTree 使用 cursor/filter 遍历 hunk，观察 DiffHunkSummary 的聚合区间随游标推进的变化。",
+          "source_files": [
+            "crates/buffer_diff/src/buffer_diff.rs"
+          ],
+          "title": "用 SumTree 存 hunk：Item、Summary 与 SeekTarget",
+          "topic": "讲解 InternalDiffHunk 与 DiffHunkSummary：sum_tree 的 Item/Summary/SeekTarget trait 实现，锚点与字节偏移两种定位方式，以及 changed_row_counts 如何借助摘要聚合得到新增/删除行数。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-hunk-query-apis.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "为不同场景选择正确的查询 API",
+            "理解 hunk 结束点向下一行行首扩展的规则",
+            "掌握 summaries_for_anchors_with_payload 的批量锚点解析"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "hunks_intersecting_range 系列 API",
+            "hunks_intersecting_range_impl",
+            "range_to_hunk_range",
+            "raw_hunks_intersecting_range"
+          ],
+          "order": 3,
+          "practice_task": "在同一 buffer 上分别用 hunks_intersecting_range（传 buffer 锚点范围）与 hunks_intersecting_base_text_range（传 base 字节范围）查询同一处修改，断言两者返回相同的 hunk；再用 range_to_hunk_range 把一个跨越两个 hunk 的范围扩展成完整 hunk 范围并断言。",
+          "source_files": [
+            "crates/buffer_diff/src/buffer_diff.rs"
+          ],
+          "title": "hunk 查询 API 家族与过滤机制",
+          "topic": "系统梳理 hunks、hunks_intersecting_range（正向/反向）、hunks_intersecting_base_text_range、hunks_in_row_range、range_to_hunk_range 等查询接口，以及 hunks_intersecting_range_impl 中 filter + summaries_for_anchors_with_payload 的实现机制和行尾扩展规则。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-coordinate-mapping-patch.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "理解 Patch 的 old/new 区间与 invert/compose 语义",
+            "解释 patch_for_buffer_range 的 prefix_edit 与游标拼接",
+            "会用四个 point 映射函数做坐标换算"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "patch_for_buffer_range",
+            "patch_for_base_text_range",
+            "buffer_point/base_text_point 映射函数",
+            "naive 对照实现"
+          ],
+          "order": 4,
+          "practice_task": "写一个测试：对若干手工选定的 buffer 位置调用 buffer_point_to_base_text_point 和 base_text_point_to_buffer_point，断言与手工期望一致；再随机选 10 个点与 patch_for_buffer_range_naive 的结果逐一比对（参考 test_patch_for_range_random 的思路）。",
+          "source_files": [
+            "crates/buffer_diff/src/buffer_diff.rs"
+          ],
+          "title": "坐标映射：patch_for_buffer_range 与 Patch 组合",
+          "topic": "讲解如何把 buffer 坐标与 base text 坐标互相映射：edits_since 取反后与 hunk 编辑 compose 的推导过程，patch_for_buffer_range 与 patch_for_base_text_range 的对称性，以及 naive 实现如何作为测试对照。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 2,
+      "title": "单元二：数据结构与 hunk 查询"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u3-l1-compute-hunks-imara-diff.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "掌握 imara-diff 的 InternedInput/Diff::compute/hunks() 用法",
+            "理解 postprocess_lines 对多基准 diff 相关性的意义",
+            "说出空 buffer 与缺失 base 两个特例的输出形态"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "compute_hunks",
+            "imara-diff（InternedInput/Diff/Algorithm::Histogram）",
+            "postprocess_lines 启发式",
+            "空 buffer 与无 base 特例"
+          ],
+          "order": 1,
+          "practice_task": "写实验测试：对同一 buffer 分别用两个「相同内容但改动锚定位置不同（如缩进滑动）」的 base 文本计算 diff，记录 hunk 的 buffer_range；在练习分支上临时注释掉 postprocess_lines 调用对比 hunk 位置差异，并用源码注释里的 HEAD/index 场景解释为什么必须规范化。",
+          "source_files": [
+            "crates/buffer_diff/src/buffer_diff.rs"
+          ],
+          "title": "compute_hunks：imara-diff 的使用方式",
+          "topic": "讲解 diff 计算入口：InternedInput 按行装载文本、Algorithm::Histogram、postprocess_lines（git 的 slider/indent 启发式）对 hunk 位置规范化的必要性，以及空 buffer（\"\\n\"）和 base 缺失两个特例。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-hunk-sink-line-offsets.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 imara-diff hunk 的 before/after 行区间语义",
+            "掌握行号到字节区间、再到锚点的换算链路",
+            "解释 diff_base_point_range 的用途"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "HunkSink::new",
+            "compute_line_offsets",
+            "process_change"
+          ],
+          "order": 2,
+          "practice_task": "为一个手工写定的 5 行 base 文本计算 old_line_offsets（逐行累加行长度），预测某次修改产生的 diff_base_byte_range 与 buffer 行范围；再运行实际 diff 并打印 hunk 字段，核对手算与程序输出一致。",
+          "source_files": [
+            "crates/buffer_diff/src/buffer_diff.rs"
+          ],
+          "title": "HunkSink：从行号到字节区间与锚点",
+          "topic": "讲解 HunkSink 如何把 imara-diff 输出的行号区间换算成 diff_base_byte_range（借助 compute_line_offsets 的行偏移表）、buffer 锚点区间和 diff_base_point_range。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-word-diffs.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "掌握 word diff 的触发条件（行数相等且不超过上限）",
+            "理解 base_word_diffs 与 buffer_word_diffs 两种表示的差异",
+            "知道设置如何通过 build_diff_options 进入计算流程"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "build_diff_options",
+            "HunkSink 中的 word diff 分支",
+            "word_diff_ranges（language crate）"
+          ],
+          "order": 3,
+          "practice_task": "构造一个 3 行等行数修改的 diff，断言 hunk 的 buffer_word_diffs 非空且能对上改动的单词位置；再构造一个超过 5 行的修改，断言 word diffs 为空；最后阅读 build_diff_options，说明 word_diff_enabled 设置关闭时整个 word diff 如何被跳过。",
+          "source_files": [
+            "crates/buffer_diff/src/buffer_diff.rs"
+          ],
+          "title": "词级差异：word_diff_ranges 与设置开关",
+          "topic": "讲解 hunk 内的词级差异：build_diff_options 读取 LanguageSettings 的 word_diff_enabled，MAX_WORD_DIFF_LINE_COUNT=5 与「行数相等」的触发条件，base_word_diffs 存偏移、buffer_word_diffs 存锚点的设计。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l3",
+            "u3-l1"
+          ],
+          "filename": "u3-l4-bufferdiff-lifecycle.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "说出 update_diff 的后台计算与 unchanged_hunks 快路径",
+            "梳理 set_base_text 四步流程中的版本检查",
+            "理解 BaseTextChanged 与 DiffChanged 两个事件的触发时机"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "BufferDiff 构造函数（new/new_unchanged/new_with_base_text_buffer）",
+            "update_diff",
+            "set_snapshot / set_snapshot_with_secondary",
+            "set_base_text",
+            "snapshot()"
+          ],
+          "order": 4,
+          "practice_task": "画出 set_base_text 的时序图（标注每一步的版本比较与丢弃分支）；然后写一个测试：创建 BufferDiff 后调用 recalculate_diff_sync 得到 hunk，编辑 buffer 后再次 recalculate，断言 hunk 更新且 diff base 保持不变。",
+          "source_files": [
+            "crates/buffer_diff/src/buffer_diff.rs"
+          ],
+          "title": "BufferDiff 实体生命周期与异步更新",
+          "topic": "讲解 BufferDiff 实体：三种构造函数、base_text_buffer 作为只读 language::Buffer 的设计、update_diff 在后台线程计算并带 unchanged_hunks 快路径、set_base_text 的四步异步流程与并发丢弃保护、事件发射。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l4",
+            "u2-l2"
+          ],
+          "filename": "u3-l5-compare-hunks-diff-changed.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "读懂 compare_hunks 三分支游标推进逻辑",
+            "区分 changed_range 与 extended_range 的用途",
+            "理解 set_snapshot_with_secondary 对多个变更来源的范围合并"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "compare_hunks",
+            "DiffChanged",
+            "set_snapshot_with_secondary 的范围合并",
+            "BufferDiffEvent"
+          ],
+          "order": 5,
+          "practice_task": "复现 test_buffer_diff_compare 与 test_extended_range 的场景（新旧两次 diff 之间只改一小块），打印每次 set_snapshot 返回的 DiffChanged 三个范围，解释 extended_range 为什么比 changed_range 大，以及这对渲染层重绘意味着什么。",
+          "source_files": [
+            "crates/buffer_diff/src/buffer_diff.rs"
+          ],
+          "title": "compare_hunks 与 DiffChanged：增量通知的精确范围",
+          "topic": "讲解新旧 hunk 树的双游标归并比较：如何得到 changed_range、base_text_changed_range，以及 extended_range 为何要把变更区之外的最近未变 hunk 与其间的 buffer 编辑也纳入；以及 set_snapshot_with_secondary 如何合并 pending 与 secondary 的变更范围。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "单元三：diff 计算核心链路"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u4-l1-diff-base-kind-stageable.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "解释为什么只有 HEAD 基准的 diff 可 staging",
+            "掌握 new_with_base_text_buffer 接入外部基准缓冲的用法",
+            "理解 base_kind 在下游判流中的作用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DiffBaseKind",
+            "is_stageable",
+            "new_with_base_text_buffer"
+          ],
+          "order": 1,
+          "practice_task": "写测试用四种 DiffBaseKind 分别构造 BufferDiff，断言只有 Head 使 is_stageable() 为 true；在测试注释中用自己的话解释源码注释里「对非 HEAD 基准做 stage 会改写已提交内容」的含义，并举例说明 Oid（如 merge base）场景。",
+          "source_files": [
+            "crates/buffer_diff/src/buffer_diff.rs"
+          ],
+          "title": "DiffBaseKind 与可 staging 判定",
+          "topic": "讲解 DiffBaseKind 四种变体（Head/Index/Oid/Custom）的语义，以及为什么源码规定只有 HEAD 基准的 diff 支持 stage/restore hunk（否则会改写已提交工作），引出 is_stageable 与 new_with_base_text_buffer。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l1",
+            "u2-l3"
+          ],
+          "filename": "u4-l2-secondary-diff-model.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "搭建 uncommitted diff + secondary diff 的三方结构",
+            "说出五种 DiffHunkSecondaryStatus 的判定规则",
+            "理解范围完全相等才判 HasSecondaryHunk 的设计"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "secondary_diff 字段与访问器",
+            "DiffHunkSecondaryStatus",
+            "hunks_intersecting_range_impl 中的 secondary 游标合并",
+            "set_secondary_diff"
+          ],
+          "order": 2,
+          "practice_task": "复现 test_buffer_diff_with_secondary 的三方文本（head/index/buffer 各有差异），构造 uncommitted diff 并挂上 secondary diff，遍历所有 hunk 打印 secondary_status，标注哪些行已 staged、哪些未 staged、哪些部分 staged（OverlapsWithSecondaryHunk）。",
+          "source_files": [
+            "crates/buffer_diff/src/buffer_diff.rs"
+          ],
+          "title": "secondary diff：三方差异模型与 DiffHunkSecondaryStatus",
+          "topic": "讲解 git 三方模型在 crate 中的表达：uncommitted diff（HEAD vs buffer）通过 set_secondary_diff 挂载 staged 侧 diff，hunks_intersecting_range_impl 用 secondary 游标为每个 hunk 合成五种 secondary 状态。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-pending-hunks-optimistic.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "区分 PendingSense 两种意图的使用场景",
+            "理解 set_pending_hunks 的合并与范围扩展算法",
+            "解释 buffer_version 与 has_edits_since_in_range 的失效判断"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "PendingHunk / PendingSense",
+            "set_pending_hunks 合并算法",
+            "mark_all_hunks_pending / suppress_all_hunks_pending / clear_pending_hunks",
+            "pending 生效条件（版本未过期）"
+          ],
+          "order": 3,
+          "practice_task": "写测试：对一个未 staged 的 hunk 调用 set_pending_hunks（SetSecondaryStatus{stage:true}），立即查询断言其 secondary_status 变为 SecondaryHunkRemovalPending；随后编辑该 hunk 覆盖的行使其 buffer_version 过期，再次查询观察 pending 失效、状态回落，并对照 test_set_pending_hunks_change_covers_replaced_hunks 验证替换语义。",
+          "source_files": [
+            "crates/buffer_diff/src/buffer_diff.rs"
+          ],
+          "title": "PendingHunk 乐观更新：stage 反馈先行的 UI",
+          "topic": "讲解乐观更新机制：PendingHunk 携带 buffer 版本与 PendingSense（SetSecondaryStatus 或 Suppress），set_pending_hunks 如何与既有 pending 合并（新胜旧、变更范围扩展），以及 buffer 再编辑后 pending 如何失效。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u4-l4-uncommitted-index-edits.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "掌握 buffer 坐标到 index 坐标的 overshoot 换算",
+            "理解重叠 hunk 合并与 edits 严格不相交不变量",
+            "说出 stale buffer 情况下 clamp 防越界的原理"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "compute_uncommitted_index_edits",
+            "unstage_staged_hunks",
+            "stage_or_unstage_hunks",
+            "整文件新增/删除分支"
+          ],
+          "order": 4,
+          "practice_task": "精读 test_stage_hunk：对每个被 stage 的 hunk 手工推演 buffer 偏移与 index 偏移的换算（overshoot），预测 compute_uncommitted_index_edits 返回的编辑区间与替换文本；再用 stage_or_unstage_hunks 返回的 Rope 与手算的 index 文本比对；最后跑 test_stage_all_with_stale_buffer，解释 clamp 到 index_text.len() 的那两行 min 解决了什么问题。",
+          "source_files": [
+            "crates/buffer_diff/src/buffer_diff.rs"
+          ],
+          "title": "compute_uncommitted_index_edits：把 stage 操作翻译成索引文本编辑",
+          "topic": "讲解最复杂的函数：利用「unstaged hunk 之间的文本在 buffer 与 index 中相同」的假设做 overshoot 坐标映射，合并重叠的 unstaged hunk 与相邻 hunk，对 stale buffer 做钳制，维护编辑序列严格递增不变量，以及整文件创建/删除的短路分支。"
+        }
+      ],
+      "level": "advanced",
+      "order": 4,
+      "title": "单元四：git 集成——staging、secondary diff 与乐观更新"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u5-l1-test-suite-assert-hunks.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "能独立阅读并运行 crate 中任意一个测试",
+            "掌握 assert_hunks 四元组断言格式",
+            "理解 CRLF 归一化对 diff 的影响"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "mod tests 用例集",
+            "assert_hunks",
+            "测试辅助（unindent/marked_text_ranges 等）"
+          ],
+          "order": 1,
+          "practice_task": "为「一次删除两行 + 紧随其后新增三行」的相邻修改场景写一个新测试，用 assert_hunks 断言 hunk 的行区间、删除文本、新增文本与 modified 状态，运行通过后总结：相邻的删除和新增为什么被合并为一个 hunk 而不是两个。",
+          "source_files": [
+            "crates/buffer_diff/src/buffer_diff.rs"
+          ],
+          "title": "测试体系与 assert_hunks 断言工具",
+          "topic": "导读测试模块的整体组织与代表性用例：test_buffer_diff_simple/range、test_changed_ranges、test_set_base_text_with_crlf（行尾归一化），以及 assert_hunks 的（行区间、删除文本、新增文本、状态）四元组断言格式。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l1",
+            "u3-l5",
+            "u2-l4"
+          ],
+          "filename": "u5-l2-randomized-tests.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "掌握用 StdRng 种子驱动随机测试的方法",
+            "理解朴素实现作为正确性 oracle 的价值",
+            "能定位并分析随机测试暴露的边界情况"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "test_staging_and_unstaging_hunks（gen_line/gen_working_copy）",
+            "test_patch_for_range_random",
+            "naive oracle 实现（patch_*_naive）"
+          ],
+          "order": 2,
+          "practice_task": "把 test_patch_for_range_random 的迭代次数临时调大（如 100 次）并固定几个种子运行；找出一种容易使断言失败的文本形状（例如大量重复行或单字符行），分析失败源于算法边界还是断言过严，写成简短分析笔记后把迭代次数还原。",
+          "source_files": [
+            "crates/buffer_diff/src/buffer_diff.rs"
+          ],
+          "title": "随机化测试：用生成器与朴素实现做正确性对照",
+          "topic": "讲解两处随机化测试：test_staging_and_unstaging_hunks 用随机生成的工作副本验证 staging 循环，test_patch_for_range_random 用随机点位把增量 patch 与 naive 全量实现互为 oracle，并介绍 StdRng 种子的可复现性。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l4",
+            "u4-l4"
+          ],
+          "filename": "u5-l3-capstone-drive-buffer-diff.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "完整掌握从创建实体到订阅事件的公开 API 面",
+            "能组合 snapshot 查询、pending 更新与 patch 映射解决实际问题",
+            "理解下游 crate（editor/git_ui 等）与 buffer_diff 的契约边界"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "公开 API 总览（构造/更新/查询/映射/事件）",
+            "BufferDiffEvent 事件流（EventEmitter/subscribe）",
+            "下游依赖关系（Cargo.toml 层面）"
+          ],
+          "order": 3,
+          "practice_task": "写一个综合测试实现「迷你 git 面板后端」：创建 text::Buffer → BufferDiff::new(Head) → set_base_text 写入 HEAD 文本 → 编辑 buffer → recalculate_diff_sync → 用 cx.subscribe 订阅 BufferDiffEvent 并记录 DiffChanged 范围 → stage 一个 hunk（set_pending_hunks）验证 secondary_status → 用 patch_for_buffer_range 把一行 buffer 文本映射回 base 做还原演示；最后对照 Cargo.toml 列出的真实消费者，说明这个迷你流程对应 editor/git_ui 中的哪类调用。",
+          "source_files": [
+            "crates/buffer_diff/src/buffer_diff.rs",
+            "crates/buffer_diff/Cargo.toml"
+          ],
+          "title": "综合实践：以库的方式驱动 buffer_diff 完整流程",
+          "topic": "汇总 crate 的公开 API 面（实体构造、set_base_text、snapshot 查询、pending 更新、patch 映射、事件订阅），并从 Cargo.toml 出发说明 editor、git_ui、multi_buffer、agent_ui 等下游如何依赖本 crate，指导读者完成一个端到端驱动练习。"
+        }
+      ],
+      "level": "advanced",
+      "order": 5,
+      "title": "单元五：测试、正确性验证与二次开发"
+    }
+  ]
+}
