@@ -1,0 +1,278 @@
+{
+  "head": "6e0a0835755ea57c1db4e0057f1a30ddba554706",
+  "project": "zed-crates-gpui_shared_string",
+  "rationale": "gpui_shared_string 是一个只有 212 行、单文件的最小 crate，但它是整个 GPUI 文本渲染与 Zed 各模块传递字符串的基础类型：概念上是 Arc<str> 与 &'static str 的统一抽象，底层由 SmolStr 支撑，clone 是 O(1)。学习顺序设计为：先用两篇入门讲义建立\"它是什么、怎么用\"的直觉（项目定位与快速上手）；再进入进阶层，按\"封装原理 → Deref/AsRef/Borrow 透明代理 → From 转换矩阵 → 相等与哈希语义\"的顺序逐块精读源码，这四块正好覆盖本 crate 除序列化外的全部源码，也是 Rust trait 系统的经典教材；最后专家层讲三件事：serde/schemars 手写实现的模式、SharedString 在 gpui 中实现 Element/IntoElement 直接作为 UI 文本元素的机制、以及它作为独立 crate 从 gpui 拆出的依赖治理意义（language_core、env_var 等非 UI crate 因此不必依赖庞大的 gpui）。由于项目极小，控制在 9 篇，逻辑优先、不硬拆。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 SharedString 解决的核心问题：在 GPUI 任务间廉价克隆不可变字符串",
+            "读懂 Cargo.toml 中 [lib] path、workspace lints 与三个依赖的作用",
+            "知道 gpui 通过 pub use gpui_shared_string::* 对外再导出，以及非 UI crate（env_var、language_core）直接依赖它"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "SharedString 的文档注释与设计意图（Arc<str> 与 &'static str 的抽象）",
+            "Cargo.toml 解读：smol_str/serde/schemars 三个依赖与 workspace 约定",
+            "在 zed 仓库中的位置：gpui.rs 的 re-export 与全仓库使用范围"
+          ],
+          "order": 1,
+          "practice_task": "在 zed 仓库根目录运行 cargo tree -p gpui_shared_string 查看它的依赖树有多小；再用 grep -rl SharedString crates/gpui/src 统计引用文件数，对比 crates/env_var 与 crates/language_core 的 Cargo.toml，写下三行结论：谁依赖它、为什么不直接依赖 gpui。",
+          "source_files": [
+            "crates/gpui_shared_string/Cargo.toml",
+            "crates/gpui_shared_string/gpui_shared_string.rs",
+            "crates/gpui/src/gpui.rs",
+            "Cargo.toml"
+          ],
+          "title": "项目概览：一个 212 行的基础字符串 crate",
+          "topic": "介绍 gpui_shared_string crate 的定位：为 GPUI 提供可廉价克隆的不可变字符串类型 SharedString，并说明它为什么从 gpui 中拆分为独立的最小依赖 crate。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-shared-string-basics.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "区分 new_static（const fn，适合常量）与 new/From（运行时构造）的使用场景",
+            "掌握 as_str() 与自动解引用读取内容",
+            "识别 zed 真实代码中 .into() 构造 SharedString 的惯用法"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "构造 API：new_static / new / From 三条路径",
+            "读取 API：as_str() 与 Deref 自动解引用",
+            "真实用法：hello_world 示例中的 text 字段与 .into() 惯用法"
+          ],
+          "order": 2,
+          "practice_task": "新建一个独立 cargo 项目，以 path 依赖方式引入 zed 仓库的 gpui_shared_string，写一个 main：用 SharedString::new_static 定义一个常量、用 new(&runtime_string) 和 \"lit\".into() 各构造一个值，打印三者 as_str() 与克隆后的值，体会克隆不报错也不深拷贝。",
+          "source_files": [
+            "crates/gpui_shared_string/gpui_shared_string.rs",
+            "crates/gpui/examples/hello_world.rs"
+          ],
+          "title": "SharedString 快速上手：构造、读取与克隆",
+          "topic": "讲解 SharedString 的构造方式（new_static 常量构造、new、From 转换）与读取方式（as_str、Deref 自动解引用），并结合 gpui 的 hello_world 示例看真实用法。"
+        }
+      ],
+      "order": 1,
+      "title": "入门：认识 SharedString"
+    },
+    {
+      "id": "u2",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l1-newtype-and-smol-str.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "解释 newtype 封装如何让未来更换底层表示（如换掉 SmolStr）不破坏公共 API",
+            "描述 SmolStr 短字符串内联、长字符串 Arc 堆分配的存储策略",
+            "列出 derive(Eq, PartialEq, PartialOrd, Ord, Hash, Clone) 各自带来的能力"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "结构体定义与六个 derive 的逐个含义",
+            "SmolStr 的双模式存储：内联缓冲 vs Arc<str> 堆分配",
+            "String 深拷贝克隆与 SharedString O(1) 克隆的成本对比"
+          ],
+          "order": 1,
+          "practice_task": "写一个带 #[test] 的程序：构造短字符串（10 字节）和长字符串（100 字节）的 SharedString 与 String，各自 clone 一百万次并用 std::time::Instant 计时，断言 SharedString 明显更快，并在注释里解释为什么两种长度的 SharedString 克隆都便宜。",
+          "source_files": [
+            "crates/gpui_shared_string/gpui_shared_string.rs",
+            "crates/gpui_shared_string/Cargo.toml"
+          ],
+          "title": "newtype 封装与 SmolStr 内部机制",
+          "topic": "解读 pub struct SharedString(SmolStr) 这一 newtype 封装：为什么不直接暴露 SmolStr 或 Arc<str>，以及 SmolStr 的内联存储如何让克隆变得廉价。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-deref-asref-borrow.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "理解 Deref 让 SharedString 免写 .as_str() 即可调用 str 的全部方法",
+            "理解 AsRef<str> 使其能传入任意接受 impl AsRef<str> 的泛型 API",
+            "理解 Borrow<str> 与 Hash/Eq 语义一致性是 HashMap 跨类型查键的前提"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Deref<Target = str> 与自动解引用",
+            "AsRef<str> 与泛型字符串 API 的互操作",
+            "Borrow<str> 与 HashMap<SharedString, V> 用 &str 查键实验"
+          ],
+          "order": 2,
+          "practice_task": "写测试：建一个 HashMap<SharedString, i32>，插入 SharedString::new(\"rust\") 键值对，然后分别用 &str \"rust\" 和 SharedString::new(\"rust\") 调用 get，验证两者都能命中；再演示直接在 SharedString 值上调用 len() 和 split_whitespace()（不写 .as_str()）证明 Deref 生效。",
+          "source_files": [
+            "crates/gpui_shared_string/gpui_shared_string.rs"
+          ],
+          "title": "Deref、AsRef、Borrow：像 str 一样使用",
+          "topic": "逐行解读 Deref、AsRef、Borrow 三个 trait 的实现，理解 SharedString 为什么能直接调用 str 的方法、能传入泛型字符串 API、能用 &str 在 HashMap 中查键。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-from-conversions.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "记住转入方向（&str/String/Box<str>/Arc<str>/Cow/char）与转出方向（Arc<str>/String）",
+            "判断哪些转换零拷贝（如 Arc<str> 转入）、哪些可能分配（如长字符串构造）",
+            "理解 From<&SharedString> 通过 clone 实现的写法与 inline 标注"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "转入实现：&str、String、Box<str>、Cow、char 与 Arc 系",
+            "转出实现：From<SharedString> for Arc<str> / String",
+            "API 设计视角：styled.rs 的 font_family(impl Into<SharedString>) 与 const ELLIPSIS"
+          ],
+          "order": 3,
+          "practice_task": "为本 crate 的每一个 From 实现各写一个单元测试（共 13 个方向），在每条断言旁用注释标注：该转换是否发生堆分配、是否转移所有权；再模仿 styled.rs 写一个接受 impl Into<SharedString> 的函数，分别传入 &str 和 String 调用它。",
+          "source_files": [
+            "crates/gpui_shared_string/gpui_shared_string.rs",
+            "crates/gpui/src/styled.rs"
+          ],
+          "title": "From 转换矩阵：与 Rust 字符串生态互转",
+          "topic": "系统梳理 SharedString 的全部 From/Into 实现：从 &str、String、Box<str>、Arc<str>、Cow、char 转入，以及转出为 Arc<str> 和 String，理解每个转换背后的所有权与内存语义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-eq-ord-hash.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "掌握为自定义类型实现跨类型 PartialEq 的标准写法",
+            "解释为什么相等性只比较字符串内容而与构造路径（静态/内联/堆）无关",
+            "理解 Eq/Ord/Hash 与 Borrow<str> 共同保证 HashMap 行为正确"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "derive 的 Eq/PartialEq/Ord/PartialOrd/Hash 如何按内容生效",
+            "四个手写跨类型 PartialEq 实现逐行解读",
+            "内容语义 vs 存储方式：new_static 与 new 构造的同一文本相等"
+          ],
+          "order": 4,
+          "practice_task": "写测试验证：SharedString::new_static(\"a\") == SharedString::new(&\"a\".to_string()) == \"a\" == String::from(\"a\")；再用 std::collections::hash_map::DefaultHasher 分别对 SharedString 和 &str 的同一文本计算哈希，断言一致，并在注释中解释这与 Borrow 的关系。",
+          "source_files": [
+            "crates/gpui_shared_string/gpui_shared_string.rs"
+          ],
+          "title": "相等、排序与哈希：跨类型比较",
+          "topic": "解读 PartialEq<String>、PartialEq<str>、PartialEq<&str> 的多方向比较实现与 derive 出的 Eq/Ord/Hash，理解为什么比较只看内容而与存储方式无关。"
+        }
+      ],
+      "order": 2,
+      "title": "进阶：精读 SharedString 的 trait 实现"
+    },
+    {
+      "id": "u3",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u3-l1-serde-and-schemars.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "掌握手写 Serialize（serialize_str 透传）与 Deserialize（先 String 再 new）的模式",
+            "理解 JsonSchema 三个方法为何全部委托 String：让 schema 呈现为普通字符串",
+            "了解 schemars 在 Zed 设置/配置系统里为类型生成 JSON Schema 的用途"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Serialize 实现：serializer.serialize_str(self.as_ref())",
+            "Deserialize 实现：String::deserialize 后 SharedString::new",
+            "JsonSchema 实现：inline_schema/schema_name/json_schema 委托 String"
+          ],
+          "order": 1,
+          "practice_task": "在测试中定义 struct Config { name: SharedString }，用 serde_json 完成序列化→反序列化往返并断言相等；再调用 schemars::schema_for!(Config) 打印生成的 schema，确认 name 字段就是普通 string 类型。",
+          "source_files": [
+            "crates/gpui_shared_string/gpui_shared_string.rs",
+            "crates/gpui_shared_string/Cargo.toml"
+          ],
+          "title": "serde 与 schemars：让字符串类型透明序列化",
+          "topic": "解读 Serialize/Deserialize 的手工实现（在 JSON 中表现为普通字符串）与 JsonSchema 实现（完全委托 String 的 schema），理解 SharedString 与 Zed 设置系统的关系。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u2-l3"
+          ],
+          "filename": "u3-l2-gpui-element.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 Element trait 的 request_layout/prepaint/paint 生命周期与各阶段状态类型",
+            "理解 IntoElement for SharedString 让字符串直接作为 div().child(...) 的子元素",
+            "辨认 gpui 代码中 SharedString 作为文本载荷的典型位置（StyledText、ELLIPSIS 常量、hello_world）"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "impl Element for SharedString：request_layout 里 self.clone() 的底气",
+            "IntoElement/IntoElements 转换链：&str/Cow 与 SharedString",
+            "典型使用场景：hello_world 的 text 字段、styled.rs 的 ELLIPSIS 与 font_family"
+          ],
+          "order": 2,
+          "practice_task": "在本地克隆的 zed 仓库运行 cargo run -p gpui --example hello_world 看到窗口后，把 HelloWorld.text 改成由 format! 生成的动态字符串再 .into() 成 SharedString，重跑确认渲染更新；再在 text.rs 中找到 request_layout 中 self.clone() 那一行，注释说明为什么这次克隆的开销可以接受。",
+          "source_files": [
+            "crates/gpui/src/elements/text.rs",
+            "crates/gpui/examples/hello_world.rs",
+            "crates/gpui/src/styled.rs"
+          ],
+          "title": "在 GPUI 中渲染：SharedString 作为 UI 元素",
+          "topic": "解读 gpui 中 impl Element for SharedString 与 impl IntoElement 的实现，理解一个字符串类型如何直接成为 UI 文本元素，以及 .child(\"文本\") 背后的转换链。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
+          "filename": "u3-l3-architecture-and-reuse.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "解释拆分动机：env_var/language_core 只需字符串类型，不应拖入整个 gpui",
+            "读懂 [lib] path、publish.workspace、lints.workspace 等 workspace 约定写法",
+            "能独立复刻「最小 newtype crate + 多层复用」的组织模式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "依赖方向分析：谁依赖 gpui_shared_string，谁 re-export 它",
+            "Cargo.toml 的 workspace 约定与 crate 命名规范",
+            "动手复刻：为自己的项目抽一个共享基础类型 crate"
+          ],
+          "order": 3,
+          "practice_task": "创建一个练习 workspace，仿照 gpui_shared_string 新建最小 crate（如 shared_id）：Cargo.toml 使用 [lib] path 与 workspace lints，类型实现构造方法、Deref、至少 4 个 From、跨类型 PartialEq 与 serde；再建两个下游 crate（一个 UI 层、一个非 UI 层）同时依赖它并编译通过。",
+          "source_files": [
+            "crates/gpui_shared_string/Cargo.toml",
+            "crates/gpui/src/gpui.rs",
+            "crates/language_core/Cargo.toml",
+            "crates/env_var/Cargo.toml",
+            "Cargo.toml"
+          ],
+          "title": "架构取舍与二次开发：最小 crate 的拆分之道",
+          "topic": "分析 gpui_shared_string 作为独立 crate 的架构意义：让 language_core、env_var 等非 UI crate 无需依赖庞大的 gpui 即可使用同一字符串类型，并动手复刻这种「最小依赖基础类型 crate」模式。"
+        }
+      ],
+      "order": 3,
+      "title": "专家：生态集成、渲染与架构"
+    }
+  ]
+}

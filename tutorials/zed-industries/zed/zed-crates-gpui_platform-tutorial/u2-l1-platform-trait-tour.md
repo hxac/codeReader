@@ -29,15 +29,15 @@
 
 | 文件 | 角色 |
 | --- | --- |
-| [gpui/src/platform.rs:L125-L341](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L125-L341) | `Platform` trait 的定义，本讲主战场（约 220 行，纯契约，几乎没有逻辑） |
-| [gpui_platform/src/gpui_platform.rs:L1-L4](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/src/gpui_platform.rs#L1-L4) | 门面 crate 对 trait 的再导出：`pub use gpui::Platform;` |
-| [gpui_platform/src/gpui_platform.rs:L57-L81](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/src/gpui_platform.rs#L57-L81) | `current_platform`：构造 `Rc<dyn Platform>` 的地方 |
-| [gpui/src/app.rs:L777-L801](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L777-L801) | `App::new_app`：契约的「消费者」，启动时从平台对象抽取执行器、文本系统、键盘 |
-| [gpui_macos/src/platform.rs:L478](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L478) | `impl Platform for MacPlatform` 起点 |
-| [gpui_windows/src/platform.rs:L408](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/src/platform.rs#L408) | `impl Platform for WindowsPlatform` 起点 |
-| [gpui_linux/src/linux/platform.rs:L233](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L233) | `impl<P: LinuxClient> Platform for LinuxPlatform<P>` 起点（注意它是泛型的） |
-| [gpui_web/src/platform.rs:L267](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_web/src/platform.rs#L267) | `impl Platform for WebPlatform` 起点 |
-| [gpui/src/platform/test/platform.rs:L309](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform/test/platform.rs#L309) | `impl Platform for TestPlatform`：gpui 自带的测试替身（u8-l4 的主角） |
+| [gpui/src/platform.rs:L125-L341](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L125-L341) | `Platform` trait 的定义，本讲主战场（约 220 行，纯契约，几乎没有逻辑） |
+| [gpui_platform/src/gpui_platform.rs:L1-L4](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_platform/src/gpui_platform.rs#L1-L4) | 门面 crate 对 trait 的再导出：`pub use gpui::Platform;` |
+| [gpui_platform/src/gpui_platform.rs:L57-L81](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_platform/src/gpui_platform.rs#L57-L81) | `current_platform`：构造 `Rc<dyn Platform>` 的地方 |
+| [gpui/src/app.rs:L779-L803](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L779-L803) | `App::new_app`：契约的「消费者」，启动时从平台对象抽取执行器、文本系统、键盘 |
+| [gpui_macos/src/platform.rs:L478](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L478) | `impl Platform for MacPlatform` 起点 |
+| [gpui_windows/src/platform.rs:L408](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_windows/src/platform.rs#L408) | `impl Platform for WindowsPlatform` 起点 |
+| [gpui_linux/src/linux/platform.rs:L233](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L233) | `impl<P: LinuxClient> Platform for LinuxPlatform<P>` 起点（注意它是泛型的） |
+| [gpui_web/src/platform.rs:L267](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_web/src/platform.rs#L267) | `impl Platform for WebPlatform` 起点 |
+| [gpui/src/platform/test/platform.rs:L309](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform/test/platform.rs#L309) | `impl Platform for TestPlatform`：gpui 自带的测试替身（u8-l4 的主角） |
 
 > 提示：本讲涉及大量兄弟 crate 的源码，正文里所有链接都指向仓库内真实文件；在自己机器上阅读时，从 `crates/gpui_platform` 出发，用 `../gpui/src/platform.rs` 这样的相对路径即可找到它们。
 
@@ -51,7 +51,7 @@ u1-l1 说过 `gpui_platform` 是门面 crate，但当时没有回答一个问题
 
 答案藏在门面 crate 的第一行代码里：`pub use gpui::Platform;`。这行再导出没有复制任何代码，只是给 `gpui` crate 里定义的那个 trait 起了一个「免 cfg」的别名。于是：
 
-- 定义处：gpui 主 crate 的 [gpui/src/platform.rs:L126](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L126)，`pub trait Platform: 'static`。
+- 定义处：gpui 主 crate 的 [gpui/src/platform.rs:L126](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L126)，`pub trait Platform: 'static`。
 - 使用处：任何依赖 `gpui_platform` 的 crate 直接写 `use gpui_platform::Platform;`，不需要知道背后是哪个平台 crate。
 - 实现处：四个平台 crate 各自 `impl Platform for XxxPlatform`，再加上 gpui 内的测试替身。
 
@@ -67,7 +67,7 @@ u1-l1 说过 `gpui_platform` 是门面 crate，但当时没有回答一个问题
 gpui_platform::application()
   └─ current_platform(false)                    # 按 cfg 挑实现，返回 Rc<dyn Platform>
        └─ gpui::Application::with_platform(...)
-            └─ App::new_app(platform, ...)      # app.rs:777，消费契约的起点
+            └─ App::new_app(platform, ...)      # app.rs:779，消费契约的起点
                  ├─ platform.background_executor()   # 立刻抽取
                  ├─ platform.foreground_executor()   # 立刻抽取
                  ├─ assert!(background_executor.is_main_thread())
@@ -84,7 +84,7 @@ gpui_platform::application()
 
 #### 4.1.3 源码精读
 
-先看门面的再导出（[gpui_platform/src/gpui_platform.rs:L1-L4](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/src/gpui_platform.rs#L1-L4)）：
+先看门面的再导出（[gpui_platform/src/gpui_platform.rs:L1-L4](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_platform/src/gpui_platform.rs#L1-L4)）：
 
 ```rust
 //! Convenience crate that re-exports GPUI's platform traits and the
@@ -95,7 +95,7 @@ pub use gpui::Platform;
 
 这段代码说明：trait 的「权威定义」永远在 gpui 主 crate，门面只负责传播名字。
 
-再看构造侧（[gpui_platform/src/gpui_platform.rs:L57-L60](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/src/gpui_platform.rs#L57-L60)）：
+再看构造侧（[gpui_platform/src/gpui_platform.rs:L57-L60](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_platform/src/gpui_platform.rs#L57-L60)）：
 
 ```rust
 /// Returns the default [`Platform`] for the current OS.
@@ -108,7 +108,7 @@ pub fn current_platform(headless: bool) -> Rc<dyn Platform> {
 
 返回类型 `Rc<dyn Platform>` 就是「契约指针」：编译期不锁定具体类型，运行期动态分发。u1-l4 已逐分支分析过这四段 cfg，这里不再重复。
 
-然后是消费侧（[gpui/src/app.rs:L777-L801](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L777-L801)）：
+然后是消费侧（[gpui/src/app.rs:L779-L803](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L779-L803)）：
 
 ```rust
 pub(crate) fn new_app(
@@ -130,11 +130,13 @@ pub(crate) fn new_app(
 
 这段代码验证了流程图里的抽取顺序：执行器 → 主线程断言 → 文本系统 → 键盘。trait 定义里没有「文档」告诉你哪些方法在启动期就会被调用，源码的消费侧才是真相。
 
-最后看一次典型的运行期转发。`App` 上的公开方法（[gpui/src/app.rs:L1008](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L1008) 的 `quit`、[L1298](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L1298) 的 `displays`）内部都只有一行，形如：
+> **版本演进提示**：从提交 `6e0a0835` 起，`new_app` 在主线程断言之后多了一段编译期门控的插桩——[gpui/src/app.rs:L790-L791](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L790-L791) 的 `#[cfg(feature = "profiler")] let foreground_journal = crate::profiler::journal::install_foreground_journal();`（对应 `App` 结构体里 L816-L817 的同门控字段）。它不影响上面讨论的抽取顺序，只在启用 gpui 的 `profiler` feature 时为前台工作日志安装采集器，完整机制在 u4-l6 展开——你在阅读 `app.rs` 时遇到的所有 `cfg(feature = "profiler")` 代码块都源于这个 feature。本讲义锚定的正是这个 HEAD，因此本段的行号说明与链接均已对齐。
+
+最后看一次典型的运行期转发。`App` 上的公开方法（[gpui/src/app.rs:L1014](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L1014) 的 `quit`、[L1304](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L1304) 的 `displays`）内部都只有一行，形如：
 
 ```rust
-self.platform.quit();        // app.rs:1009，位于 pub fn quit(&self) 内
-self.platform.displays()     // app.rs:1299，位于 pub fn displays(&self) 内
+self.platform.quit();        // app.rs:1015，位于 pub fn quit(&self) 内
+self.platform.displays()     // app.rs:1305，位于 pub fn displays(&self) 内
 ```
 
 所以当你想找「剪贴板在 Linux 上到底怎么实现」时，正确的检索路径是：先在 `gpui/src/app.rs` 找到转发方法确认 trait 方法名，再沿 `impl Platform for` 找平台实现，而不是一头扎进平台 crate 猜函数名。
@@ -143,11 +145,11 @@ self.platform.displays()     // app.rs:1299，位于 pub fn displays(&self) 内
 
 1. **实践目标**：亲手确认「应用层方法 → App 转发 → trait 契约 → 平台实现」四层结构，记住每层的落点。
 2. **操作步骤**：
-   1. 打开 [gpui/src/app.rs:L1417](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L1417)，阅读 `pub fn write_to_clipboard(&self, item: ClipboardItem)` 的函数体。
-   2. 记下它调用的 trait 方法及所在文件行号（对照 [gpui/src/platform.rs:L311](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L311) 的契约声明）。
-   3. 再打开你当前操作系统对应的 `impl Platform for ...`（见第 3 节地图），找到同名方法，记下文件与行号。如果你在 Linux 上，可以从 [gpui_linux/src/linux/platform.rs:L747](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L747) 的 `read_from_clipboard` 附近找起，同一片区域通常还有 `write_to_clipboard`。
+   1. 打开 [gpui/src/app.rs:L1423](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L1423)，阅读 `pub fn write_to_clipboard(&self, item: ClipboardItem)` 的函数体。
+   2. 记下它调用的 trait 方法及所在文件行号（对照 [gpui/src/platform.rs:L311](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L311) 的契约声明）。
+   3. 再打开你当前操作系统对应的 `impl Platform for ...`（见第 3 节地图），找到同名方法，记下文件与行号。如果你在 Linux 上，可以从 [gpui_linux/src/linux/platform.rs:L747](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L747) 的 `read_from_clipboard` 附近找起，同一片区域通常还有 `write_to_clipboard`。
 3. **需要观察的现象**：`App` 的转发方法体极短（一两行）；trait 声明无方法体（必需方法）或只有几行默认体；平台实现里出现的都是各操作系统的原生 API（NSPasteboard、IDataObject、wl_data_offer 之类）。
-4. **预期结果**：得到一条形如「app.rs:L1417 → platform.rs 契约 → 平台 crate 实现行号」的三段式记录。转发语句的具体行号待本地确认（不同平台实现的行号不同），但三层结构必然存在。
+4. **预期结果**：得到一条形如「app.rs:L1423 → platform.rs 契约 → 平台 crate 实现行号」的三段式记录。转发语句的具体行号待本地确认（不同平台实现的行号不同），但三层结构必然存在。
 5. 如果无法运行或打开项目，本实践纯靠 GitHub 链接即可完成，无需「待本地验证」的运行步骤。
 
 #### 4.1.5 小练习与答案
@@ -168,7 +170,7 @@ self.platform.displays()     // app.rs:1299，位于 pub fn displays(&self) 内
 
 #### 4.2.1 概念说明
 
-[gpui/src/platform.rs:L125-L341](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L125-L341) 的 `Platform` trait 在当前 HEAD 下共有 **69 个方法**，其中 **18 个带默认实现**，另有 **4 个方法按平台 cfg 门控**（只在特定编译目标上存在）。直接从头读到尾容易迷路，本讲把它们组织成八个功能组：
+[gpui/src/platform.rs:L125-L341](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L125-L341) 的 `Platform` trait 在当前 HEAD 下共有 **69 个方法**，其中 **18 个带默认实现**，另有 **4 个方法按平台 cfg 门控**（只在特定编译目标上存在）。直接从头读到尾容易迷路，本讲把它们组织成八个功能组：
 
 1. **执行器与文本系统**（3 个）——GPUI 的运行基础。
 2. **生命周期**（12 个）——启动、退出、重启、各种系统事件回调。
@@ -179,7 +181,7 @@ self.platform.displays()     // app.rs:1299，位于 pub fn displays(&self) 内
 7. **键盘**（3 个）——键盘布局与按键映射。
 8. **杂项**（8 个）——合成器名、可执行文件路径、光标样式、滚动手势服务等。
 
-有个结构性的细节值得先说：trait 声明处标着 `#[expect(missing_docs)]`（[gpui/src/platform.rs:L125](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L125)），意味着大部分方法**没有**文档注释，语义要靠实现与调用处反推；只有少数方法（如 `set_window_appearance`、通知三件套）带 doc。读这份契约时，带 doc 的方法往往是行为最微妙的地方。
+有个结构性的细节值得先说：trait 声明处标着 `#[expect(missing_docs)]`（[gpui/src/platform.rs:L125](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L125)），意味着大部分方法**没有**文档注释，语义要靠实现与调用处反推；只有少数方法（如 `set_window_appearance`、通知三件套）带 doc。读这份契约时，带 doc 的方法往往是行为最微妙的地方。
 
 #### 4.2.2 核心流程
 
@@ -189,7 +191,7 @@ self.platform.displays()     // app.rs:1299，位于 pub fn displays(&self) 内
 - **必需**：无默认实现，每个（可见该方法的）平台必须实现；**默认**：带默认体，可覆盖可不覆盖。
 - **cfg**：标注该方法只在部分编译目标上存在。
 
-**第 1 组 · 执行器与文本系统**（[L127-L129](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L127-L129)）
+**第 1 组 · 执行器与文本系统**（[L127-L129](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L127-L129)）
 
 | 方法 | 行号 | 必需/默认 | 说明 |
 | --- | --- | --- | --- |
@@ -197,7 +199,7 @@ self.platform.displays()     // app.rs:1299，位于 pub fn displays(&self) 内
 | `foreground_executor` | L128 | 必需 | 前台（主线程）执行器 |
 | `text_system` | L129 | 必需 | 平台文本系统（u8-l1 主题） |
 
-**第 2 组 · 生命周期**（[L131-L137](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L131-L137)、[L203-L205](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L203-L205)、[L211-L222](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L211-L222)）
+**第 2 组 · 生命周期**（[L131-L137](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L131-L137)、[L203-L205](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L203-L205)、[L211-L222](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L211-L222)）
 
 | 方法 | 行号 | 必需/默认 | 说明 |
 | --- | --- | --- | --- |
@@ -210,7 +212,7 @@ self.platform.displays()     // app.rs:1299，位于 pub fn displays(&self) 内
 | `on_app_lifecycle` | L216 | 默认（空） | 移动端生命周期阶段回调；doc 明言「Desktop platforms never invoke this」 |
 | `on_memory_warning` | L222 | 默认（空） | 移动端内存压力回调；桌面平台同样永不调用 |
 
-**第 3 组 · 窗口与显示器**（[L139-L166](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L139-L166)）
+**第 3 组 · 窗口与显示器**（[L139-L166](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L139-L166)）
 
 | 方法 | 行号 | 必需/默认 | 说明 |
 | --- | --- | --- | --- |
@@ -222,7 +224,7 @@ self.platform.displays()     // app.rs:1299，位于 pub fn displays(&self) 内
 | `screen_capture_sources` | L150-L160 | 默认（返回带错误的通道） | 未启用 screen-capture feature 时的兜底 |
 | `open_window` | L162-L166 | 必需 | 创建平台窗口，返回 `Box<dyn PlatformWindow>`（u3 主题） |
 
-**第 4 组 · 外观**（[L168-L184](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L168-L184)）
+**第 4 组 · 外观**（[L168-L184](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L168-L184)）
 
 | 方法 | 行号 | 必需/默认 | 说明 |
 | --- | --- | --- | --- |
@@ -230,7 +232,7 @@ self.platform.displays()     // app.rs:1299，位于 pub fn displays(&self) 内
 | `set_window_appearance` | L171-L179 | 默认（no-op） | 覆盖系统级外观；doc 明言目前仅 macOS 实现了真实行为 |
 | `button_layout` | L182-L184 | 默认 `None` | 窗口关闭/最小化/最大化按钮的布局 |
 
-**第 5 组 · 系统集成：URL / 文件 / 剪贴板 / 凭据**（[L186-L201](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L186-L201)、[L310-L336](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L310-L336)）
+**第 5 组 · 系统集成：URL / 文件 / 剪贴板 / 凭据**（[L186-L201](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L186-L201)、[L310-L336](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L310-L336)）
 
 | 方法 | 行号 | 必需/默认 | 说明 |
 | --- | --- | --- | --- |
@@ -244,7 +246,7 @@ self.platform.displays()     // app.rs:1299，位于 pub fn displays(&self) 内
 | `read_from_find_pasteboard` / `write_to_find_pasteboard` | L329-L332 | 必需，**cfg macos** | macOS 查找粘贴板（⌘F/E 共享的那块） |
 | `write_credentials` / `read_credentials` / `delete_credentials` | L334-L336 | 必需 | 凭据三件套，落到各平台钥匙串/凭据管理器 |
 
-**第 6 组 · 菜单与通知**（[L231-L291](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L231-L291)）
+**第 6 组 · 菜单与通知**（[L231-L291](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L231-L291)）
 
 | 方法 | 行号 | 必需/默认 | 说明 |
 | --- | --- | --- | --- |
@@ -261,7 +263,7 @@ self.platform.displays()     // app.rs:1299，位于 pub fn displays(&self) 内
 | `dismiss_system_notification` | L273-L279 | 默认（no-op） | 撤回通知，best-effort |
 | `on_system_notification_response` | L281-L291 | 默认（no-op） | 用户点通知/通知按钮时的回调 |
 
-**第 7 组 · 键盘**（[L338-L340](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L338-L340)）
+**第 7 组 · 键盘**（[L338-L340](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L338-L340)）
 
 | 方法 | 行号 | 必需/默认 | 说明 |
 | --- | --- | --- | --- |
@@ -269,7 +271,7 @@ self.platform.displays()     // app.rs:1299，位于 pub fn displays(&self) 内
 | `keyboard_mapper` | L339 | 必需 | 原始按键 → `Keystroke` 的映射器 |
 | `on_keyboard_layout_change` | L340 | 必需 | 布局变化回调 |
 
-**第 8 组 · 杂项**（[L224-L229](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L224-L229)、[L293-L308](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L293-L308)）
+**第 8 组 · 杂项**（[L224-L229](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L224-L229)、[L293-L308](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L293-L308)）
 
 | 方法 | 行号 | 必需/默认 | 说明 |
 | --- | --- | --- | --- |
@@ -292,7 +294,7 @@ self.platform.displays()     // app.rs:1299，位于 pub fn displays(&self) 内
 
 #### 4.2.3 源码精读
 
-把八个分组放回源码里，能看到作者其实就是按这些主题分段书写的。以第 5 组剪贴板段落为例（[gpui/src/platform.rs:L310-L336](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L310-L336)）：
+把八个分组放回源码里，能看到作者其实就是按这些主题分段书写的。以第 5 组剪贴板段落为例（[gpui/src/platform.rs:L310-L336](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L310-L336)）：
 
 ```rust
 fn read_from_clipboard(&self) -> Option<ClipboardItem>;
@@ -323,7 +325,7 @@ fn read_from_find_pasteboard(&self) -> Option<ClipboardItem>;
 3. `#[cfg]` 紧贴在方法声明上，与 u1-l4 见过的「函数体内 cfg 块」是两种不同粒度的条件编译。
 4. 主选区与查找粘贴板是**必需**而非默认——在这两个平台上，实现者无处可躲，必须给出真实行为。
 
-再看菜单组中默认设计最讲究的 `update_jump_list`（[gpui/src/platform.rs:L239-L245](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L239-L245)）：
+再看菜单组中默认设计最讲究的 `update_jump_list`（[gpui/src/platform.rs:L239-L245](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L239-L245)）：
 
 ```rust
 fn update_jump_list(
@@ -424,7 +426,7 @@ fn update_jump_list(
 
 #### 4.3.3 源码精读
 
-**案例一：`set_window_appearance` —— 只有 macOS 说真话。** 契约（[gpui/src/platform.rs:L171-L179](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L171-L179)）的 doc 写得很直白：覆盖外观是为了让原生窗口边框跟随应用主题，且「A no-op on other platforms」。唯一的实现者在 [gpui_macos/src/platform.rs:L688-L703](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L688-L703)：
+**案例一：`set_window_appearance` —— 只有 macOS 说真话。** 契约（[gpui/src/platform.rs:L171-L179](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L171-L179)）的 doc 写得很直白：覆盖外观是为了让原生窗口边框跟随应用主题，且「A no-op on other platforms」。唯一的实现者在 [gpui_macos/src/platform.rs:L688-L703](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L688-L703)：
 
 ```rust
 fn set_window_appearance(&self, appearance: Option<WindowAppearance>) {
@@ -438,7 +440,7 @@ fn set_window_appearance(&self, appearance: Option<WindowAppearance>) {
 
 它直接设置 `NSApplication` 的 appearance，把 Light/Dark/Vibrant 四种枚举映射到 NSAppearance 常量。其他三个平台的实现文件里搜不到这个方法——继承 no-op。
 
-**案例二：`set_app_identity` —— Windows 与 Linux 各取所需。** Windows 侧（[gpui_windows/src/platform.rs:L693-L709](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/src/platform.rs#L693-L709)）调用 Win32 的 `SetCurrentProcessExplicitAppUserModelID`：
+**案例二：`set_app_identity` —— Windows 与 Linux 各取所需。** Windows 侧（[gpui_windows/src/platform.rs:L693-L709](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_windows/src/platform.rs#L693-L709)）调用 Win32 的 `SetCurrentProcessExplicitAppUserModelID`：
 
 ```rust
 fn set_app_identity(&self, identifier: &str, name: &str) {
@@ -450,11 +452,11 @@ fn set_app_identity(&self, identifier: &str, name: &str) {
     SetCurrentProcessExplicitAppUserModelID(...)
 ```
 
-注意它还处理了「有包身份则系统自动分配 AUMID」的分支——覆盖不是照抄契约，而是带平台知识的实现。Linux 侧（[gpui_linux/src/linux/platform.rs:L569](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L569)）则只是把应用名存进 `LinuxCommon`，供发系统通知时使用；macOS 与 Web 用默认 no-op。
+注意它还处理了「有包身份则系统自动分配 AUMID」的分支——覆盖不是照抄契约，而是带平台知识的实现。Linux 侧（[gpui_linux/src/linux/platform.rs:L569](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L569)）则只是把应用名存进 `LinuxCommon`，供发系统通知时使用；macOS 与 Web 用默认 no-op。
 
-**案例三：`compositor_name` —— 探测型默认与两层分发。** 契约默认返回空串（[gpui/src/platform.rs:L293-L295](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L293-L295)）。Linux 的覆盖（[gpui_linux/src/linux/platform.rs:L284](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L284)）并不是终点，它转发给内部后端：这是 u1-l4 讲过的两层分发——`LinuxPlatform` 外壳实现了 `Platform`，而 `compositor_name` 的真实答案（"Wayland"/"X11"/"headless"）来自实现 `LinuxClient` 契约（[gpui_linux/src/linux/platform.rs:L51-L52](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L51-L52)）的三个客户端，如 Wayland 侧（[gpui_linux/src/linux/wayland/client.rs:L1223](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/wayland/client.rs#L1223)）。所以 grep 一个方法名时，Linux 上常会命中三层：外壳转发、`LinuxClient` 声明、具体后端实现。
+**案例三：`compositor_name` —— 探测型默认与两层分发。** 契约默认返回空串（[gpui/src/platform.rs:L293-L295](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L293-L295)）。Linux 的覆盖（[gpui_linux/src/linux/platform.rs:L284](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L284)）并不是终点，它转发给内部后端：这是 u1-l4 讲过的两层分发——`LinuxPlatform` 外壳实现了 `Platform`，而 `compositor_name` 的真实答案（"Wayland"/"X11"/"headless"）来自实现 `LinuxClient` 契约（[gpui_linux/src/linux/platform.rs:L51-L52](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L51-L52)）的三个客户端，如 Wayland 侧（[gpui_linux/src/linux/wayland/client.rs:L1223](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/wayland/client.rs#L1223)）。所以 grep 一个方法名时，Linux 上常会命中三层：外壳转发、`LinuxClient` 声明、具体后端实现。
 
-**案例四：`read_from_clipboard_async` —— 回退型默认的唯一覆盖者。** 默认体把同步版包成 `Task::ready`（[gpui/src/platform.rs:L320-L322](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L320-L322)）。浏览器因为剪贴板读取受权限与异步 API 限制，是唯一覆盖者（[gpui_web/src/platform.rs:L559](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_web/src/platform.rs#L559)）。这解释了契约 doc 里那句「callers that can await should prefer this method」：能等待的调用方永远走异步版，平台自己决定要不要快路径。
+**案例四：`read_from_clipboard_async` —— 回退型默认的唯一覆盖者。** 默认体把同步版包成 `Task::ready`（[gpui/src/platform.rs:L320-L322](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L320-L322)）。浏览器因为剪贴板读取受权限与异步 API 限制，是唯一覆盖者（[gpui_web/src/platform.rs:L559](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_web/src/platform.rs#L559)）。这解释了契约 doc 里那句「callers that can await should prefer this method」：能等待的调用方永远走异步版，平台自己决定要不要快路径。
 
 #### 4.3.4 代码实践：验证「单平台覆盖」现象（grep 型）
 
@@ -475,8 +477,8 @@ fn set_app_identity(&self, identifier: &str, name: &str) {
         crates/gpui_linux/src crates/gpui_web/src
    ```
 
-3. **需要观察的现象**：第一条只命中 `gpui_macos/src/platform.rs:688`；第二条命中 `gpui_windows/src/platform.rs:947` 与 `gpui_windows/src/destination_list.rs:64`（后者是实现细节 helper，u6-l3 会讲到）；第三条只命中 `gpui_web/src/platform.rs:559`。
-4. **预期结果**：与上述行号一致（本讲写作时已在当前 HEAD 验证过这三处命中；若你 checkout 了新提交，行号可能漂移，命中文件不应变）。其余三个平台对这三个方法零命中——它们继承契约默认体。
+3. **需要观察的现象**：第一条只命中 `gpui_macos/src/platform.rs:688`；第二条在 Windows 命中**三处**——`gpui_windows/src/platform.rs:947`（trait 覆盖）、`gpui_windows/src/platform.rs:273`（固有 `impl WindowsPlatform` 块里的私有辅助方法，与 trait 方法恰好同名）、`gpui_windows/src/destination_list.rs:64`（封装 Win32 ICustomDestinationList 的 helper，u6-l3 会讲到）；第三条只命中 `gpui_web/src/platform.rs:559`。
+4. **预期结果**：与上述行号一致（本讲写作时已在当前 HEAD 验证过这些命中；若你 checkout 了新提交，行号可能漂移，命中文件不应变）。其余平台对这三个方法零命中——它们继承契约默认体。`update_jump_list` 在 Windows 上构成一条三层链：trait 覆盖（[L947-L953](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_windows/src/platform.rs#L947-L953)）只有一行，转发给固有辅助 `self.update_jump_list(menus, entries)`（[L273](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_windows/src/platform.rs#L273)），后者再异步调用 destination_list 的 Win32 封装——这是「grep 命中 ≠ trait 实现」的最佳教材：判断命中属于谁，永远要看它落在哪个 `impl` 块里。
 5. 若你在自己的 fork 里改过这些文件，以你的仓库为准，**待本地验证**。
 
 #### 4.3.5 小练习与答案
@@ -491,7 +493,7 @@ fn set_app_identity(&self, identifier: &str, name: &str) {
 
 **练习 3**：如果 Linux 想让 `window_stack` 返回真实数据，它实际改的是哪个文件？
 
-答案：不是直接改 `impl Platform for LinuxPlatform`（外壳的转发逻辑已有），而是改实现 `LinuxClient` 的某个后端客户端。外壳在 [gpui_linux/src/linux/platform.rs:L380](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L380) 覆盖 `Platform::window_stack` 后转发给 `self.inner`（LinuxClient），目前 Wayland（client.rs:L1219）、X11（client.rs:L1817）、headless（client.rs:L96）三个后端各自给出实现。这是 u5-l1 的伏笔。
+答案：不是直接改 `impl Platform for LinuxPlatform`（外壳的转发逻辑已有），而是改实现 `LinuxClient` 的某个后端客户端。外壳在 [gpui_linux/src/linux/platform.rs:L380](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L380) 覆盖 `Platform::window_stack` 后转发给 `self.inner`（LinuxClient），目前 Wayland（client.rs:L1219）、X11（client.rs:L1817）、headless（client.rs:L96）三个后端各自给出实现。这是 u5-l1 的伏笔。
 
 ### 4.4 主实践：方法分组表 + 四平台实现定位
 
@@ -537,12 +539,12 @@ grep -rn "fn window_appearance" crates/gpui_{macos,windows,linux,web}/src
 
 | 实现者 | 位置 | 备注 |
 | --- | --- | --- |
-| `MacPlatform` | [gpui_macos/src/platform.rs:L478](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L478) | AppKit 实现，约 660 行 |
-| `WindowsPlatform` | [gpui_windows/src/platform.rs:L408](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/src/platform.rs#L408) | Win32 实现 |
-| `LinuxPlatform<P>` | [gpui_linux/src/linux/platform.rs:L233](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L233) | 泛型外壳，`P: LinuxClient` 是 Wayland/X11/headless 之一 |
-| `WebPlatform` | [gpui_web/src/platform.rs:L267](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_web/src/platform.rs#L267) | 浏览器实现 |
-| `TestPlatform` | [gpui/src/platform/test/platform.rs:L309](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform/test/platform.rs#L309) | 测试替身（u8-l4） |
-| `VisualTestPlatform` | [gpui/src/platform/visual_test.rs:L67](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform/visual_test.rs#L67) | 可视化测试替身，仅 macOS cfg |
+| `MacPlatform` | [gpui_macos/src/platform.rs:L478](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L478) | AppKit 实现，约 660 行 |
+| `WindowsPlatform` | [gpui_windows/src/platform.rs:L408](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_windows/src/platform.rs#L408) | Win32 实现 |
+| `LinuxPlatform<P>` | [gpui_linux/src/linux/platform.rs:L233](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L233) | 泛型外壳，`P: LinuxClient` 是 Wayland/X11/headless 之一 |
+| `WebPlatform` | [gpui_web/src/platform.rs:L267](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_web/src/platform.rs#L267) | 浏览器实现 |
+| `TestPlatform` | [gpui/src/platform/test/platform.rs:L309](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform/test/platform.rs#L309) | 测试替身（u8-l4） |
+| `VisualTestPlatform` | [gpui/src/platform/visual_test.rs:L67](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform/visual_test.rs#L67) | 可视化测试替身，仅 macOS cfg |
 
 注意 grep 模式里 `impl.*Platform for` 是为 `impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P>` 这种带泛型参数的写法准备的——精确的 `impl Platform for` 匹配不到它，这也是很多人第一次 grep 时「漏掉 Linux」的原因。
 
@@ -550,18 +552,18 @@ grep -rn "fn window_appearance" crates/gpui_{macos,windows,linux,web}/src
 
 | 方法（分组） | macOS | Windows | Linux | Web |
 | --- | --- | --- | --- | --- |
-| `run`（生命周期） | [platform.rs:L491](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L491) | 在 `impl` 块内，待定位 | [platform.rs:L267](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L267) | 在 `impl` 块内，待定位 |
-| `text_system`（执行器） | [platform.rs:L487](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L487) | 在 `impl` 块内，待定位 | [platform.rs:L244](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L244) | 在 `impl` 块内，待定位 |
-| `read_from_clipboard`（系统集成） | 在 `pasteboard.rs` 附近，待定位 | 在 `clipboard.rs`，待定位 | [platform.rs:L747](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L747) | 在 `impl` 块内，待定位 |
-| `open_window`（窗口） | 在 `impl` 块内，待定位 | 在 `impl` 块内，待定位 | [platform.rs:L384](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L384) | 在 `impl` 块内，待定位 |
-| `set_app_identity`（菜单与通知） | 用默认 | [platform.rs:L693](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/src/platform.rs#L693) | [platform.rs:L569](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L569) | 用默认 |
-| `keyboard_layout`（键盘） | [platform.rs:L1025](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L1025) | 在 `impl` 块内，待定位 | [platform.rs:L248](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L248) | 在 `impl` 块内，待定位 |
-| `update_jump_list`（菜单与通知） | 用默认 | [platform.rs:L947](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/src/platform.rs#L947) | 用默认 | 用默认 |
-| `set_window_appearance`（外观） | [platform.rs:L688](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L688) | 用默认 | 用默认 | 用默认 |
-| `read_from_clipboard_async`（系统集成） | 用默认 | 用默认 | 用默认 | [platform.rs:L559](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_web/src/platform.rs#L559) |
-| `window_stack`（窗口） | [platform.rs:L645](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L645) | 用默认 | [platform.rs:L380](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L380) | 用默认 |
-| `compositor_name`（杂项） | 用默认 | 用默认 | [platform.rs:L284](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L284) | [platform.rs:L495](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_web/src/platform.rs#L495) |
-| `is_screen_capture_supported`（窗口） | [platform.rs:L627](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L627) | [platform.rs:L553](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/src/platform.rs#L553) | [platform.rs:L365](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L365) | 用默认 |
+| `run`（生命周期） | [platform.rs:L491](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L491) | 在 `impl` 块内，待定位 | [platform.rs:L267](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L267) | 在 `impl` 块内，待定位 |
+| `text_system`（执行器） | [platform.rs:L487](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L487) | 在 `impl` 块内，待定位 | [platform.rs:L244](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L244) | 在 `impl` 块内，待定位 |
+| `read_from_clipboard`（系统集成） | 在 `pasteboard.rs` 附近，待定位 | 在 `clipboard.rs`，待定位 | [platform.rs:L747](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L747) | 在 `impl` 块内，待定位 |
+| `open_window`（窗口） | 在 `impl` 块内，待定位 | 在 `impl` 块内，待定位 | [platform.rs:L384](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L384) | 在 `impl` 块内，待定位 |
+| `set_app_identity`（菜单与通知） | 用默认 | [platform.rs:L693](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_windows/src/platform.rs#L693) | [platform.rs:L569](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L569) | 用默认 |
+| `keyboard_layout`（键盘） | [platform.rs:L1025](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L1025) | 在 `impl` 块内，待定位 | [platform.rs:L248](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L248) | 在 `impl` 块内，待定位 |
+| `update_jump_list`（菜单与通知） | 用默认 | [platform.rs:L947](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_windows/src/platform.rs#L947) | 用默认 | 用默认 |
+| `set_window_appearance`（外观） | [platform.rs:L688](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L688) | 用默认 | 用默认 | 用默认 |
+| `read_from_clipboard_async`（系统集成） | 用默认 | 用默认 | 用默认 | [platform.rs:L559](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_web/src/platform.rs#L559) |
+| `window_stack`（窗口） | [platform.rs:L645](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L645) | 用默认 | [platform.rs:L380](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L380) | 用默认 |
+| `compositor_name`（杂项） | 用默认 | 用默认 | [platform.rs:L284](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L284) | [platform.rs:L495](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_web/src/platform.rs#L495) |
+| `is_screen_capture_supported`（窗口） | [platform.rs:L627](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L627) | [platform.rs:L553](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_windows/src/platform.rs#L553) | [platform.rs:L365](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L365) | 用默认 |
 
 「待定位」「用默认」也是合法填格：前者留给读者完成（这正是实践任务），后者是 4.3 讲过的「搜不到即默认」。
 
@@ -593,7 +595,7 @@ grep -rn "fn window_appearance" crates/gpui_{macos,windows,linux,web}/src
 
 **练习 3**：`TestPlatform` 和 `VisualTestPlatform` 也实现了 `Platform`，它们覆盖默认方法的策略和真实平台有何不同？
 
-答案：真实平台只覆盖「本平台有能力」的方法，其余继承默认；测试替身的策略是**把不确定性与异步都替换成确定性行为**——例如用 TestDispatcher 代替真实事件循环（u8-l4），让 `run_until_parked`、`advance_clock` 可以驱动时间。它们大量覆盖方法的目的不是提供能力，而是提供可预测性。这也是 gpui_platform.rs 测试模块里三个 macOS 测试存在的意义（[gpui_platform/src/gpui_platform.rs:L113-L206](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/src/gpui_platform.rs#L113-L206)）。
+答案：真实平台只覆盖「本平台有能力」的方法，其余继承默认；测试替身的策略是**把不确定性与异步都替换成确定性行为**——例如用 TestDispatcher 代替真实事件循环（u8-l4），让 `run_until_parked`、`advance_clock` 可以驱动时间。它们大量覆盖方法的目的不是提供能力，而是提供可预测性。这也是 gpui_platform.rs 测试模块里三个 macOS 测试存在的意义（[gpui_platform/src/gpui_platform.rs:L113-L206](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_platform/src/gpui_platform.rs#L113-L206)）。
 
 ## 5. 综合实践
 
@@ -604,11 +606,11 @@ grep -rn "fn window_appearance" crates/gpui_{macos,windows,linux,web}/src
    - 每个平台覆盖了多少个默认方法（覆盖数 = 该平台「额外能力」的粗略度量）；
    - 每个默认方法被几个平台覆盖（覆盖数 = 0 的方法是「事实上没人需要」，覆盖数 = 3~4 的方法值得怀疑「为什么不让它变成必需」）。
 3. 写 200 字左右的评论，回答：如果让你为一个新的操作系统（假设是某自研 RTOS）实现 `Platform`，你打算覆盖哪几个默认方法？哪些必需方法你会觉得最难实现（提示：`text_system` 与 `keyboard_mapper` 是公认硬骨头，u8-l1/u3-l3 会解释原因）？
-4. 把矩阵存进你的学习笔记仓库，并在 HEAD 变化时用 `git log -p -- crates/gpui/src/platform.rs` 检查契约是否新增/删除了方法，更新矩阵——这份讲义的所有行号都锚定在 `2936989f1b`，随仓库演进它们会漂移，而你的矩阵应该活着。
+4. 把矩阵存进你的学习笔记仓库，并在 HEAD 变化时用 `git log -p -- crates/gpui/src/platform.rs` 检查契约是否新增/删除了方法，更新矩阵——这份讲义的所有行号都锚定在 `6e0a083575`，随仓库演进它们会漂移，而你的矩阵应该活着。
 
 ## 6. 本讲小结
 
-- `Platform` 是 gpui 与操作系统之间的契约，定义于 [gpui/src/platform.rs:L125-L341](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L125-L341)，当前共 69 个方法，可归为八大功能组：执行器与文本系统、生命周期、窗口与显示器、外观、系统集成、菜单与通知、键盘、杂项。
+- `Platform` 是 gpui 与操作系统之间的契约，定义于 [gpui/src/platform.rs:L125-L341](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L125-L341)，当前共 69 个方法，可归为八大功能组：执行器与文本系统、生命周期、窗口与显示器、外观、系统集成、菜单与通知、键盘、杂项。
 - 其中 18 个方法带默认实现、4 个方法按平台 cfg 门控；因此「最小实现」在 Linux/macOS 上是 49 个方法，在 Windows/Web 上是 47 个。
 - 默认实现分三种姿态：能力探测型（返回 `None`/`false`/`""`，调用方降级）、优雅降级 no-op 型（平台不支持即忽略）、通用回退型（默认体给出能用的结果）。覆盖情况高度不对称：`set_window_appearance` 只有 macOS 实现，`update_jump_list` 只有 Windows 实现，`read_from_clipboard_async` 只有 Web 覆盖。
 - 契约的消费链路是：`current_platform` 构造 `Rc<dyn Platform>` → `Application::with_platform` → `App::new_app` 启动期抽取执行器/文本系统/键盘并断言主线程 → 运行期 `App` 逐方法转发。找实现时沿这条链路走，不要在平台 crate 里盲猜函数名。
@@ -620,10 +622,10 @@ grep -rn "fn window_appearance" crates/gpui_{macos,windows,linux,web}/src
 本讲建立了全景地图，接下来三讲逐组下钻，建议按序：
 
 1. **u2-l2（生命周期与运行循环）**：精读 `run`/`quit`/`restart` 与 `on_quit`/`on_reopen`/`on_system_wake` 的桌面实现，理解各平台事件循环入口的对应关系（NSApplication run vs calloop vs Win32 消息循环）。
-2. **u2-l3（显示器管理）**：下钻 `displays`/`primary_display` 与 `PlatformDisplay` 契约（[gpui/src/platform.rs:L344-L372](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L344-L372)，紧接在 `Platform` 之后），看多屏几何如何上报。
+2. **u2-l3（显示器管理）**：下钻 `displays`/`primary_display` 与 `PlatformDisplay` 契约（[gpui/src/platform.rs:L344-L372](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L344-L372)，紧接在 `Platform` 之后），看多屏几何如何上报。
 3. **u2-l4（系统集成服务）**：下钻本讲第 5 组，覆盖剪贴板、URL、文件对话框与凭据的完整异步链路。
 
 延伸阅读（本讲已埋的伏笔）：
 
-- [gpui/src/platform/test/platform.rs:L309](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform/test/platform.rs#L309) 的 `TestPlatform`：一份「如何用最少的代码满足 47+ 个必需方法」的活样本，是 u8-l5 毕业实践的最佳起点。
-- [gpui_linux/src/linux/platform.rs:L51-L104](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L51-L104) 的 `LinuxClient` trait：观察一个真实平台内部如何再做一层「迷你契约」拆分后端，u5-l1 的主角。
+- [gpui/src/platform/test/platform.rs:L309](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform/test/platform.rs#L309) 的 `TestPlatform`：一份「如何用最少的代码满足 47+ 个必需方法」的活样本，是 u8-l5 毕业实践的最佳起点。
+- [gpui_linux/src/linux/platform.rs:L51-L104](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L51-L104) 的 `LinuxClient` trait：观察一个真实平台内部如何再做一层「迷你契约」拆分后端，u5-l1 的主角。

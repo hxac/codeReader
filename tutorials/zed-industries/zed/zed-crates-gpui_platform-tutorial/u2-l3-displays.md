@@ -97,20 +97,20 @@ return Bounds { origin, size: window_size }
 
 先看契约本体。`PlatformDisplay` 定义在 gpui 主 crate 的 platform.rs 中：
 
-- [crates/gpui/src/platform.rs:L343-L372](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L343-L372) —— `PlatformDisplay` trait 全文。注意 `visible_bounds()`（L358-L360）与 `default_bounds()`（L363-L371）带默认实现，前三个方法（`id`/`uuid`/`bounds`）必须由平台实现。doc 注释明确写了 uuid 的用途：「Returns a stable identifier for this display that can be persisted and used across system restarts」。
-- [crates/gpui/src/platform.rs:L460-L487](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L460-L487) —— `DisplayId` 的定义：`pub struct DisplayId(pub(crate) u64)`，字段是私有的，外界只能通过 `new`/`From<u64>` 构造、`From<DisplayId> for u64` 取回，`Debug` 输出形如 `DisplayId(3)`。「不透明」是刻意设计：调用方不该对数值含义做任何假设。
+- [crates/gpui/src/platform.rs:L343-L372](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L343-L372) —— `PlatformDisplay` trait 全文。注意 `visible_bounds()`（L358-L360）与 `default_bounds()`（L363-L371）带默认实现，前三个方法（`id`/`uuid`/`bounds`）必须由平台实现。doc 注释明确写了 uuid 的用途：「Returns a stable identifier for this display that can be persisted and used across system restarts」。
+- [crates/gpui/src/platform.rs:L460-L487](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L460-L487) —— `DisplayId` 的定义：`pub struct DisplayId(pub(crate) u64)`，字段是私有的，外界只能通过 `new`/`From<u64>` 构造、`From<DisplayId> for u64` 取回，`Debug` 输出形如 `DisplayId(3)`。「不透明」是刻意设计：调用方不该对数值含义做任何假设。
 
 再看一个真实消费者，体会 uuid 的价值：
 
-- [crates/zed/src/zed.rs:L361-L366](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/zed/src/zed.rs#L361-L366) —— Zed 编辑器的 `build_window_options`：拿持久化保存的 `display_uuid`，遍历 `cx.displays()` 用 `display.uuid().ok() == Some(uuid)` 找回上次那台显示器。这就是「DisplayId 不能落盘、uuid 可以」的活例子。
+- [crates/zed/src/zed.rs:L361-L366](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/zed/src/zed.rs#L361-L366) —— Zed 编辑器的 `build_window_options`：拿持久化保存的 `display_uuid`，遍历 `cx.displays()` 用 `display.uuid().ok() == Some(uuid)` 找回上次那台显示器。这就是「DisplayId 不能落盘、uuid 可以」的活例子。
 
 #### 4.1.4 代码实践（源码阅读型）
 
 1. **实践目标**：确认 `DisplayId` 的数值语义随平台不同，从而理解为什么不能拿它做持久化键。
 2. **操作步骤**：
-   - 打开 [crates/gpui_linux/src/linux/wayland/display.rs:L26-L29](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/wayland/display.rs#L26-L29)，看 Wayland 的 `id()` 用 `self.id.protocol_id()`——这是 Wayland 连接里 `wl_output` 协议对象的编号，同一次连接内唯一，重连后会重新分配。
-   - 打开 [crates/gpui_linux/src/linux/x11/display.rs:L39-L42](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/x11/display.rs#L39-L42)，看 X11 的 `id()` 只是屏幕在列表里的**下标**。
-   - 打开 [crates/gpui_windows/src/display.rs:L77-L79](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/src/display.rs#L77-L79)，看 Windows 的 `DisplayId` 直接装的是 `HMONITOR` 句柄的指针值。
+   - 打开 [crates/gpui_linux/src/linux/wayland/display.rs:L26-L29](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/wayland/display.rs#L26-L29)，看 Wayland 的 `id()` 用 `self.id.protocol_id()`——这是 Wayland 连接里 `wl_output` 协议对象的编号，同一次连接内唯一，重连后会重新分配。
+   - 打开 [crates/gpui_linux/src/linux/x11/display.rs:L39-L42](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/x11/display.rs#L39-L42)，看 X11 的 `id()` 只是屏幕在列表里的**下标**。
+   - 打开 [crates/gpui_windows/src/display.rs:L77-L79](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_windows/src/display.rs#L77-L79)，看 Windows 的 `DisplayId` 直接装的是 `HMONITOR` 句柄的指针值。
 3. **需要观察的现象**：三个平台的 `u64` 来源完全不同——对象编号 / 数组下标 / 系统句柄。
 4. **预期结果**：你会得出结论：`DisplayId` 只在「当前这次平台会话」内有意义；任何要写进配置文件的场景都必须走 `uuid()`。
 
@@ -118,11 +118,11 @@ return Bounds { origin, size: window_size }
 
 **练习 1**：`uuid()` 为什么返回 `Result<Uuid>` 而不是 `Uuid`？哪些平台真的会失败？
 
-**答案**：因为部分平台拿不到稳定身份。macOS 的 `CGDisplayCreateUUIDFromDisplayID` 可能返回空指针（实现里用 `anyhow::ensure!` 报错，见 [crates/gpui_macos/src/display.rs:L79-L84](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/display.rs#L79-L84)）；Wayland 的显示器可能没上报 `name`，此时用 `context(...)` 报错（[crates/gpui_linux/src/linux/wayland/display.rs:L31-L37](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/wayland/display.rs#L31-L37)）。Windows、X11、headless、Web 的实现则直接 `Ok(...)`，不会失败——契约按「最谨慎的实现」对齐。
+**答案**：因为部分平台拿不到稳定身份。macOS 的 `CGDisplayCreateUUIDFromDisplayID` 可能返回空指针（实现里用 `anyhow::ensure!` 报错，见 [crates/gpui_macos/src/display.rs:L79-L84](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/display.rs#L79-L84)）；Wayland 的显示器可能没上报 `name`，此时用 `context(...)` 报错（[crates/gpui_linux/src/linux/wayland/display.rs:L31-L37](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/wayland/display.rs#L31-L37)）。Windows、X11、headless、Web 的实现则直接 `Ok(...)`，不会失败——契约按「最谨慎的实现」对齐。
 
 **练习 2**：`default_bounds()` 为什么要把窗口尺寸和屏幕尺寸做 `min`？
 
-**答案**：见 [crates/gpui/src/platform.rs:L363-L371](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L363-L371) 中的 `DEFAULT_WINDOW_SIZE.min(&bounds.size)`。如果窗口默认尺寸比屏幕还大（小窗口的弹出层开在超小屏幕上），不减一下窗口会超出屏幕；先取小再按它居中，保证窗口完整落在屏幕内。
+**答案**：见 [crates/gpui/src/platform.rs:L363-L371](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L363-L371) 中的 `DEFAULT_WINDOW_SIZE.min(&bounds.size)`。如果窗口默认尺寸比屏幕还大（小窗口的弹出层开在超小屏幕上），不减一下窗口会超出屏幕；先取小再按它居中，保证窗口完整落在屏幕内。
 
 ### 4.2 枚举入口：Platform::displays / primary_display 与应用层封装
 
@@ -161,11 +161,11 @@ cx.displays()                     # App (gpui/src/app.rs)
 
 #### 4.2.3 源码精读
 
-- [crates/gpui/src/platform.rs:L139-L140](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L139-L140) —— `Platform` trait 中两个显示器方法的声明，位于 trait 顶部「窗口与显示器」分组，紧跟生命周期方法之后，且都无默认实现。
-- [crates/gpui/src/app.rs:L1297-L1305](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L1297-L1305) —— `App::displays()` 与 `App::primary_display()`：单纯转发给 `self.platform`。这就是 u2-l1 说过的「运行期逐方法转发」在显示器分组的具体形态。
-- [crates/gpui/src/app.rs:L1319-L1325](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L1319-L1325) —— `App::find_display(id)`：每次调用都重新枚举一遍 `displays()` 再按 `display.id() == id` 线性查找。注意这里没有缓存。
-- [crates/gpui/src/geometry.rs:L738-L765](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/geometry.rs#L738-L765) —— `Bounds::centered` 与 `Bounds::maximized`：完整的回退链实现。`centered` 找不到任何显示器时退到 `(0,0)`；`maximized` 退到 1024×768 的兜底矩形。
-- [crates/gpui/examples/window_positioning.rs:L73-L95](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/examples/window_positioning.rs#L73-L95) —— 官方示例的入口：`application().run` 回调里 `for screen in cx.displays()`，对每台显示器用 `screen.id()` 和 `screen.bounds()` 的各个角点/中点定位窗口；`build_window_options`（L53-L71）把 `display_id: Some(display_id)` 塞进 `WindowOptions`，保证窗口真的开在那台屏幕上。这是本讲实践任务的骨架。
+- [crates/gpui/src/platform.rs:L139-L140](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L139-L140) —— `Platform` trait 中两个显示器方法的声明，位于 trait 顶部「窗口与显示器」分组，紧跟生命周期方法之后，且都无默认实现。
+- [crates/gpui/src/app.rs:L1303-L1311](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L1303-L1311) —— `App::displays()` 与 `App::primary_display()`：单纯转发给 `self.platform`。这就是 u2-l1 说过的「运行期逐方法转发」在显示器分组的具体形态。
+- [crates/gpui/src/app.rs:L1325-L1331](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L1325-L1331) —— `App::find_display(id)`：每次调用都重新枚举一遍 `displays()` 再按 `display.id() == id` 线性查找。注意这里没有缓存。
+- [crates/gpui/src/geometry.rs:L740-L765](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/geometry.rs#L740-L765) —— `Bounds::centered` 与 `Bounds::maximized`：完整的回退链实现。`centered` 找不到任何显示器时退到 `(0,0)`；`maximized` 退到 1024×768 的兜底矩形。
+- [crates/gpui/examples/window_positioning.rs:L73-L95](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/examples/window_positioning.rs#L73-L95) —— 官方示例的入口：`application().run` 回调里 `for screen in cx.displays()`，对每台显示器用 `screen.id()` 和 `screen.bounds()` 的各个角点/中点定位窗口；`build_window_options`（L53-L71）把 `display_id: Some(display_id)` 塞进 `WindowOptions`，保证窗口真的开在那台屏幕上。这是本讲实践任务的骨架。
 
 #### 4.2.4 代码实践（运行官方示例）
 
@@ -178,7 +178,7 @@ cx.displays()                     # App (gpui/src/app.rs)
       ```
 
    2. 观察每台显示器上出现的九个彩色小窗口（四角 + 四边中点 + 正中）。
-   3. 回到源码，把 L84 的 `origin: point(margin_offset, margin_offset)` 与 L97-L100 的 `screen.bounds().top_right() - ...` 对照窗口实际出现的位置。
+   3. 回到源码，把 L84 的 `origin: point(margin_offset, margin_offset)` 与 L97-L101 的 `screen.bounds().top_right() - ...` 对照窗口实际出现的位置。
 3. **需要观察的现象**：每个小窗口都落在对应显示器的对应方位上；窗口里的文字显示 `Top Left DisplayId(N)` 之类的字样，`N` 就是那台显示器的 `DisplayId` 数值。
 4. **预期结果**：单屏机器上九个窗口都在同一块屏；双屏机器上两组窗口分别落在两块屏。若在无显示环境（如 SSH 会话）运行，Linux 会走 headless 后端（u1-l4 讲过的探测规则），窗口逻辑存在但不上屏——具体是否报错**待本地验证**。
 
@@ -235,37 +235,37 @@ macOS 侧 `visible_bounds()` 的坐标翻转：AppKit 的 `visibleFrame` 以**�
 
 **macOS**
 
-- [crates/gpui_macos/src/display.rs:L48-L66](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/display.rs#L48-L66) —— `MacDisplay::all()`：调用 `CGGetActiveDisplayList`，注释里假设系统不超过 32 台显示器；返回非 0 直接 `panic!`。
-- [crates/gpui_macos/src/display.rs:L28-L45](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/display.rs#L28-L45) —— `MacDisplay::primary()`：**不走** `all()`，而是取 `NSScreen::screens` 的第 0 个再读出它的 `NSScreenNumber`。注释解释了原因：机器睡眠等状态下 `CGGetActiveDisplayList` 不保证返回完整列表，并附了 Chromium 同样处理的源码链接。「主显示器 = 有菜单栏的那块 = AppKit screen 列表第 0 个」。
-- [crates/gpui_macos/src/display.rs:L108-L119](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/display.rs#L108-L119) —— `bounds()`：调 `CGDisplayBounds` 拿全局坐标，但**把 origin 丢弃、置为默认值 (0,0)**，只保留尺寸。也就是说 macOS 的 `bounds()` 表达的是「这台屏自己的局部几何」，多屏定位必须配合 `WindowOptions::display_id`（正如 window_positioning 示例的做法）。这是阅读 macOS 代码时最容易误判的一个细节。
-- [crates/gpui_macos/src/display.rs:L121-L148](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/display.rs#L121-L148) —— `visible_bounds()`：找到对应的 `NSScreen`，取 `frame` 与 `visibleFrame` 之差（菜单栏 + Dock），并做上一节说的 y 轴翻转；找不到 `NSScreen` 时优雅退回 `bounds()`。
-- [crates/gpui_macos/src/display.rs:L79-L106](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/display.rs#L79-L106) —— `uuid()`：`CGDisplayCreateUUIDFromDisplayID` → `CFUUIDGetUUIDBytes` → 手工逐字节拼成 `Uuid`，最后 `CFRelease` 释放 CoreFoundation 对象。这是四套实现里唯一由操作系统原生提供的稳定身份。
-- [crates/gpui_macos/src/platform.rs:L616-L624](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L616-L624) —— `MacPlatform` 对两个 trait 方法的实现：一行包一个 `Rc<MacDisplay>`。
+- [crates/gpui_macos/src/display.rs:L48-L66](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/display.rs#L48-L66) —— `MacDisplay::all()`：调用 `CGGetActiveDisplayList`，注释里假设系统不超过 32 台显示器；返回非 0 直接 `panic!`。
+- [crates/gpui_macos/src/display.rs:L28-L45](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/display.rs#L28-L45) —— `MacDisplay::primary()`：**不走** `all()`，而是取 `NSScreen::screens` 的第 0 个再读出它的 `NSScreenNumber`。注释解释了原因：机器睡眠等状态下 `CGGetActiveDisplayList` 不保证返回完整列表，并附了 Chromium 同样处理的源码链接。「主显示器 = 有菜单栏的那块 = AppKit screen 列表第 0 个」。
+- [crates/gpui_macos/src/display.rs:L108-L119](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/display.rs#L108-L119) —— `bounds()`：调 `CGDisplayBounds` 拿全局坐标，但**把 origin 丢弃、置为默认值 (0,0)**，只保留尺寸。也就是说 macOS 的 `bounds()` 表达的是「这台屏自己的局部几何」，多屏定位必须配合 `WindowOptions::display_id`（正如 window_positioning 示例的做法）。这是阅读 macOS 代码时最容易误判的一个细节。
+- [crates/gpui_macos/src/display.rs:L121-L148](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/display.rs#L121-L148) —— `visible_bounds()`：找到对应的 `NSScreen`，取 `frame` 与 `visibleFrame` 之差（菜单栏 + Dock），并做上一节说的 y 轴翻转；找不到 `NSScreen` 时优雅退回 `bounds()`。
+- [crates/gpui_macos/src/display.rs:L79-L106](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/display.rs#L79-L106) —— `uuid()`：`CGDisplayCreateUUIDFromDisplayID` → `CFUUIDGetUUIDBytes` → 手工逐字节拼成 `Uuid`，最后 `CFRelease` 释放 CoreFoundation 对象。这是四套实现里唯一由操作系统原生提供的稳定身份。
+- [crates/gpui_macos/src/platform.rs:L616-L624](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L616-L624) —— `MacPlatform` 对两个 trait 方法的实现：一行包一个 `Rc<MacDisplay>`。
 
 **Wayland**
 
-- [crates/gpui_linux/src/linux/wayland/client.rs:L1435-L1476](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/wayland/client.rs#L1435-L1476) —— `wl_output` 事件分发：`Name`/`Scale`/`Geometry`/`Mode` 逐项填进 `InProgressOutput`，`Done` 事件触发 `complete()` 判定。这就是 4.3.2 状态机的落地代码。
-- [crates/gpui_linux/src/linux/wayland/client.rs:L272-L303](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/wayland/client.rs#L272-L303) —— `InProgressOutput::complete()`（position 与 size 必须都到齐，scale 缺省为 1）与最终形态 `Output`（几何以 `Bounds<DevicePixels>` 存储）。
-- [crates/gpui_linux/src/linux/wayland/client.rs:L929-L942](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/wayland/client.rs#L929-L942) —— `displays()`：把 `state.outputs` 逐条换成 `WaylandDisplay`，关键一行 `output.bounds.to_pixels(output.scale as f32)` 完成「物理像素 → 逻辑像素」的除法。
-- [crates/gpui_linux/src/linux/wayland/client.rs:L960-L962](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/wayland/client.rs#L960-L962) —— `primary_display()` 恒返回 `None`：Wayland 协议没有主显示器概念，契约的 `Option` 为它留了后门。
-- [crates/gpui_linux/src/linux/wayland/display.rs:L26-L42](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/wayland/display.rs#L26-L42) —— `PlatformDisplay for WaylandDisplay`：`id()` 用协议对象编号；`uuid()` 用 `Uuid::new_v5(NAMESPACE_DNS, name)` 从 output 名字**确定性派生**（同一台屏重启后名字不变则 uuid 不变），没有名字就报错；`bounds()` 返回缓存值。注意它没有覆盖 `visible_bounds`——Wayland 客户端不知道面板占多大地，只能退回默认实现（等于 `bounds()`）。
+- [crates/gpui_linux/src/linux/wayland/client.rs:L1435-L1476](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/wayland/client.rs#L1435-L1476) —— `wl_output` 事件分发：`Name`/`Scale`/`Geometry`/`Mode` 逐项填进 `InProgressOutput`，`Done` 事件触发 `complete()` 判定。这就是 4.3.2 状态机的落地代码。
+- [crates/gpui_linux/src/linux/wayland/client.rs:L272-L303](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/wayland/client.rs#L272-L303) —— `InProgressOutput::complete()`（position 与 size 必须都到齐，scale 缺省为 1）与最终形态 `Output`（几何以 `Bounds<DevicePixels>` 存储）。
+- [crates/gpui_linux/src/linux/wayland/client.rs:L929-L942](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/wayland/client.rs#L929-L942) —— `displays()`：把 `state.outputs` 逐条换成 `WaylandDisplay`，关键一行 `output.bounds.to_pixels(output.scale as f32)` 完成「物理像素 → 逻辑像素」的除法。
+- [crates/gpui_linux/src/linux/wayland/client.rs:L960-L962](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/wayland/client.rs#L960-L962) —— `primary_display()` 恒返回 `None`：Wayland 协议没有主显示器概念，契约的 `Option` 为它留了后门。
+- [crates/gpui_linux/src/linux/wayland/display.rs:L26-L42](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/wayland/display.rs#L26-L42) —— `PlatformDisplay for WaylandDisplay`：`id()` 用协议对象编号；`uuid()` 用 `Uuid::new_v5(NAMESPACE_DNS, name)` 从 output 名字**确定性派生**（同一台屏重启后名字不变则 uuid 不变），没有名字就报错；`bounds()` 返回缓存值。注意它没有覆盖 `visible_bounds`——Wayland 客户端不知道面板占多大地，只能退回默认实现（等于 `bounds()`）。
 
 **X11**
 
-- [crates/gpui_linux/src/linux/x11/display.rs:L14-L36](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/x11/display.rs#L14-L36) —— `X11Display::new`：从 XCB 连接的 `setup().roots[x_screen_index]` 读 `width_in_pixels`/`height_in_pixels`，除以 scale 得逻辑尺寸；origin 固定为默认 (0,0)。`uuid` 则是 `Uuid::from_bytes([0; 16])` —— **全零占位符**，所有 X11 显示器的 uuid 都相同，持久化身份在这套实现里等于不可用（这也解释了为什么契约把 `uuid()` 设计成尽力而为的 `Result`）。
-- [crates/gpui_linux/src/linux/x11/client.rs:L1546-L1569](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/x11/client.rs#L1546-L1569) —— `displays()` 遍历 `setup().roots` 每个 screen 构造一个 `X11Display`；`primary_display()` 用 `state.x_root_index`（当前所在 screen）构造。X11 的「显示器」粒度是 X screen，而不是物理显示器——多数现代 X 会话只有一个 screen 横跨所有物理屏。
+- [crates/gpui_linux/src/linux/x11/display.rs:L14-L36](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/x11/display.rs#L14-L36) —— `X11Display::new`：从 XCB 连接的 `setup().roots[x_screen_index]` 读 `width_in_pixels`/`height_in_pixels`，除以 scale 得逻辑尺寸；origin 固定为默认 (0,0)。`uuid` 则是 `Uuid::from_bytes([0; 16])` —— **全零占位符**，所有 X11 显示器的 uuid 都相同，持久化身份在这套实现里等于不可用（这也解释了为什么契约把 `uuid()` 设计成尽力而为的 `Result`）。
+- [crates/gpui_linux/src/linux/x11/client.rs:L1546-L1570](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/x11/client.rs#L1546-L1570) —— `displays()` 遍历 `setup().roots` 每个 screen 构造一个 `X11Display`；`primary_display()` 用 `state.x_root_index`（当前所在 screen）构造。X11 的「显示器」粒度是 X screen，而不是物理显示器——多数现代 X 会话只有一个 screen 横跨所有物理屏。
 
 **Windows**
 
-- [crates/gpui_windows/src/display.rs:L148-L172](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/src/display.rs#L148-L172) —— `available_monitors()`：`EnumDisplayMonitors` 系统调用 + `monitor_enum_proc` 回调把 `HMONITOR` 收进 `SmallVec<[HMONITOR; 4]>`（栈上内联 4 个，覆盖绝大多数机器）。
-- [crates/gpui_windows/src/display.rs:L36-L75](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/src/display.rs#L36-L75) —— `WindowsDisplay::new`：与 macOS「每次调用实时查询」相反，Windows 实现在构造时一次性算好**所有字段并缓存**——`GetMonitorInfoW` 的 `rcMonitor`（整屏）与 `rcWork`（工作区，扣除任务栏）分别变成 `bounds` 与 `visible_bounds`；`GetDpiForMonitor(MDT_EFFECTIVE_DPI)` 除以 96 得 scale，物理矩形除以 scale 得逻辑矩形；uuid 由 `szDevice` 设备名（如 `\\.\DISPLAY1`）派生 v5。
-- [crates/gpui_windows/src/display.rs:L81-L93](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/src/display.rs#L81-L93) —— `primary_monitor()`：`MonitorFromPoint((0,0), MONITOR_DEFAULTTOPRIMARY)`——「覆盖 (0,0) 点的显示器就是主显示器」，注释链到 Raymond Chen 的经典解释。
-- [crates/gpui_windows/src/display.rs:L113-L146](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/src/display.rs#L113-L146) —— `displays()`（枚举 + 构造）与 `PlatformDisplay` 实现（四个字段全是读缓存）。
+- [crates/gpui_windows/src/display.rs:L148-L172](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_windows/src/display.rs#L148-L172) —— `available_monitors()`：`EnumDisplayMonitors` 系统调用 + `monitor_enum_proc` 回调把 `HMONITOR` 收进 `SmallVec<[HMONITOR; 4]>`（栈上内联 4 个，覆盖绝大多数机器）。
+- [crates/gpui_windows/src/display.rs:L36-L75](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_windows/src/display.rs#L36-L75) —— `WindowsDisplay::new`：与 macOS「每次调用实时查询」相反，Windows 实现在构造时一次性算好**所有字段并缓存**——`GetMonitorInfoW` 的 `rcMonitor`（整屏）与 `rcWork`（工作区，扣除任务栏）分别变成 `bounds` 与 `visible_bounds`；`GetDpiForMonitor(MDT_EFFECTIVE_DPI)` 除以 96 得 scale，物理矩形除以 scale 得逻辑矩形；uuid 由 `szDevice` 设备名（如 `\\.\DISPLAY1`）派生 v5。
+- [crates/gpui_windows/src/display.rs:L81-L93](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_windows/src/display.rs#L81-L93) —— `primary_monitor()`：`MonitorFromPoint((0,0), MONITOR_DEFAULTTOPRIMARY)`——「覆盖 (0,0) 点的显示器就是主显示器」，注释链到 Raymond Chen 的经典解释。
+- [crates/gpui_windows/src/display.rs:L113-L146](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_windows/src/display.rs#L113-L146) —— `displays()`（枚举 + 构造）与 `PlatformDisplay` 实现（四个字段全是读缓存）。
 
 **两个补注（headless 与 Web）**
 
-- [crates/gpui_linux/src/linux/headless/window.rs:L25-L51](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/headless/window.rs#L25-L51) —— `HeadlessDisplay`：写死的 1920×1080、`DisplayId::new(0)`、`Uuid::nil()`，注释直言「恰好只有一台 headless 显示器，nil 即稳定身份」。配合 [crates/gpui_linux/src/linux/headless/client.rs:L66-L72](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/headless/client.rs#L66-L72)（`displays` 返回 `[它]`、`primary_display` 返回 `Some(它)`），无头环境里所有窗口几何都有据可查。
-- [crates/gpui_web/src/display.rs:L18-L100](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_web/src/display.rs#L18-L100) —— `WebDisplay`：浏览器里「显示器」退化为「当前浏览器窗口所在的 screen」。`bounds()` 用 `window.screen().width/height`；`visible_bounds()` 用 `innerWidth/innerHeight`（视口，天然排除浏览器地址栏等 UI——网页版的「任务栏」就是浏览器 chrome）；`id` 固定为 1；uuid 是构造时随机生成的 `new_v4()`——**每次构造都不同**，跨刷新不稳定。它还覆盖了 `default_bounds()`（可见区的 75% 居中），是少数重写该方法的地方。
+- [crates/gpui_linux/src/linux/headless/window.rs:L25-L51](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/headless/window.rs#L25-L51) —— `HeadlessDisplay`：写死的 1920×1080、`DisplayId::new(0)`、`Uuid::nil()`，注释直言「恰好只有一台 headless 显示器，nil 即稳定身份」。配合 [crates/gpui_linux/src/linux/headless/client.rs:L66-L72](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/headless/client.rs#L66-L72)（`displays` 返回 `[它]`、`primary_display` 返回 `Some(它)`），无头环境里所有窗口几何都有据可查。
+- [crates/gpui_web/src/display.rs:L18-L101](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_web/src/display.rs#L18-L101) —— `WebDisplay`：浏览器里「显示器」退化为「当前浏览器窗口所在的 screen」。`bounds()` 用 `window.screen().width/height`；`visible_bounds()` 用 `innerWidth/innerHeight`（视口，天然排除浏览器地址栏等 UI——网页版的「任务栏」就是浏览器 chrome）；`id` 固定为 1；uuid 是构造时随机生成的 `new_v4()`——**每次构造都不同**，跨刷新不稳定。它还覆盖了 `default_bounds()`（可见区的 75% 居中），是少数重写该方法的地方。
 
 #### 4.3.4 代码实践（对照表 + 双屏/缩放验证）
 
@@ -285,15 +285,15 @@ macOS 侧 `visible_bounds()` 的坐标翻转：AppKit 的 `visibleFrame` 以**�
 
 **练习 1**：macOS 的 `primary()` 为什么舍近求远，不用 `all()` 返回的第一个？
 
-**答案**：[crates/gpui_macos/src/display.rs:L29-L35](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/display.rs#L29-L35) 的注释：机器刚唤醒等状态下 `CGGetActiveDisplayList` 不保证返回活动显示器列表，而 AppKit 的 `NSScreen::screens` 始终可用且第 0 个就是带菜单栏的主屏；Chromium 也采用同一策略。
+**答案**：[crates/gpui_macos/src/display.rs:L29-L35](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/display.rs#L29-L35) 的注释：机器刚唤醒等状态下 `CGGetActiveDisplayList` 不保证返回活动显示器列表，而 AppKit 的 `NSScreen::screens` 始终可用且第 0 个就是带菜单栏的主屏；Chromium 也采用同一策略。
 
 **练习 2**：在 X11 实现上，把窗口「记住上次所在显示器」的功能（存 uuid）会出什么问题？
 
-**答案**：X11 的 `uuid()` 返回全零占位（[crates/gpui_linux/src/linux/x11/display.rs:L44-L46](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/x11/display.rs#L44-L46)），所有显示器 uuid 相同，存档后永远匹配到列表里第一台。功能降级但不报错——契约把 uuid 定义为 `Result` 且消费方（如 zed.rs 的 `find`）找不到就自然回退，正是为这种「尽力而为」的实现留的余地。
+**答案**：X11 的 `uuid()` 返回全零占位（[crates/gpui_linux/src/linux/x11/display.rs:L44-L46](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/x11/display.rs#L44-L46)），所有显示器 uuid 相同，存档后永远匹配到列表里第一台。功能降级但不报错——契约把 uuid 定义为 `Result` 且消费方（如 zed.rs 的 `find`）找不到就自然回退，正是为这种「尽力而为」的实现留的余地。
 
 **练习 3**：Wayland 实现为什么不像 Windows 那样在构造时缓存 `visible_bounds`？
 
-**答案**：不是风格差异，是**信息不存在**：Wayland 协议不向客户端暴露面板（任务栏）的位置和大小，客户端无从计算工作区，所以 `WaylandDisplay` 干脆不覆盖 `visible_bounds()`，走 trait 默认实现返回 `bounds()`（[crates/gpui/src/platform.rs:L358-L360](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L358-L360)）。Windows 能做是因为 `GetMonitorInfoW` 直接给出 `rcWork`。
+**答案**：不是风格差异，是**信息不存在**：Wayland 协议不向客户端暴露面板（任务栏）的位置和大小，客户端无从计算工作区，所以 `WaylandDisplay` 干脆不覆盖 `visible_bounds()`，走 trait 默认实现返回 `bounds()`（[crates/gpui/src/platform.rs:L358-L360](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L358-L360)）。Windows 能做是因为 `GetMonitorInfoW` 直接给出 `rcWork`。
 
 ## 5. 综合实践
 
@@ -382,6 +382,6 @@ cargo run -p gpui --example display_probe
 
 继续阅读建议：
 
-- [crates/gpui/examples/window_positioning.rs](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/examples/window_positioning.rs) —— 把它改造成「在每台显示器的 visible_bounds 内开窗口」，观察与 bounds 定位的差别。
-- [crates/zed/src/zed.rs:L361](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/zed/src/zed.rs#L361) 起的 `build_window_options` —— 生产代码如何组合 uuid 恢复、窗口装饰等选项。
+- [crates/gpui/examples/window_positioning.rs](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/examples/window_positioning.rs) —— 把它改造成「在每台显示器的 visible_bounds 内开窗口」，观察与 bounds 定位的差别。
+- [crates/zed/src/zed.rs:L361](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/zed/src/zed.rs#L361) 起的 `build_window_options` —— 生产代码如何组合 uuid 恢复、窗口装饰等选项。
 - u8-l2（PlatformAtlas 与渲染后端）会用到显示器的 scale 信息解释 HiDPI 渲染，可提前留个印象。

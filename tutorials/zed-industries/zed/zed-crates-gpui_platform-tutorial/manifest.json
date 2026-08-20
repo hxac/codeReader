@@ -1,80 +1,85 @@
 {
-  "head": "2936989f1b7a15aaf7131b0a3c17961d706fdbf5",
+  "head": "6e0a0835755ea57c1db4e0057f1a30ddba554706",
   "project": "zed-crates-gpui_platform",
-  "rationale": "gpui_platform 本身是一个只有约 200 行的\"门面\"crate，它真正的学习价值在于它串起的整条 GPUI 平台抽象链路：gpui 中的 Platform/PlatformWindow/PlatformDispatcher/PlatformTextSystem/PlatformAtlas 等契约 trait，以及 gpui_macos、gpui_windows、gpui_linux、gpui_web 四个按 cfg 条件编译的操作系统实现。因此大纲采用\"先门面、再契约、再实现\"的三段式：第一单元让读者从零跑起一个跨平台窗口应用并吃透 current_platform 的条件编译分发；第二到第四单元按\"Platform trait 契约 → 窗口与输入 → 调度与并发\"逐层拆解平台无关接口，这是所有平台实现共同遵守的骨架；第五到第七单元分别深入 Linux（含 headless/X11/Wayland/portal）、macOS 与 Windows、Web 三套真实实现，让读者对照契约看落地差异；第八单元收尾于文本系统、图集与渲染后端、无头渲染、test-support 测试设施，并以\"实现一个自定义 Platform\"作为毕业实践。source_files 中的路径一律相对于永久链接基目录 crates/gpui_platform/，兄弟 crate 使用 ../ 前缀，保证生成的 GitHub 链接可直接访问。全链路共 33 篇，依赖关系从 u1 的零基础入口逐层展开，最终汇聚到 u8-l5 的综合实践。",
+  "rationale": "gpui_platform 本身是一个只有约 200 行的门面 crate，它真正的学习价值在于它串起的整条 GPUI 平台抽象链路：gpui 中的 Platform/PlatformWindow/PlatformDispatcher/PlatformTextSystem/PlatformAtlas 等契约 trait，以及 gpui_macos、gpui_windows、gpui_linux、gpui_web 四个按 cfg 条件编译的操作系统实现。因此大纲采用「先门面、再契约、再实现」的三段式：第一单元让读者从零跑起一个跨平台窗口应用并吃透 current_platform 的条件编译分发；第二到第四单元按「Platform trait 契约 → 窗口与输入 → 调度与并发」逐层拆解平台无关接口，这是所有平台实现共同遵守的骨架；第五到第七单元分别深入 Linux（含 headless/X11/Wayland/portal）、macOS 与 Windows、Web 三套真实实现，让读者对照契约看落地差异；第八单元收尾于文本系统、图集与渲染后端、无头渲染、test-support 测试设施，并以「实现一个自定义 Platform」作为毕业实践。source_files 中的路径一律相对于永久链接基目录 crates/gpui_platform/，兄弟 crate 使用 ../ 前缀，保证生成的 GitHub 链接可直接访问。本次增量（2936989f → 6e0a0835）的 diff 分析结论：gpui_platform crate 与 gpui_linux/gpui_macos/gpui_windows/gpui_web 四个平台 crate 完全零变化，变化全部集中在 gpui 主 crate 的 profiler feature——新增 profiler/journal.rs（ForegroundJournal 前台工作日志，约 2759 行）与 profiler/hang.rs（HangDetector 事后 hang 检测，约 1268 行），并在 app.rs（App::foreground_journal）、executor.rs（ForegroundRunnableCounter）、platform_scheduler.rs（schedule_local 排队计数）、window.rs（每帧 dirty→present 记录）与 interactive.rs（PlatformInput::kind_name）上插入 #[cfg(feature = \\\"profiler\\\")] 门控的钩子。据此调整：u1-l1、u1-l3、u1-l4 引用的源文件（gpui_platform.rs、各 Cargo.toml、platform.rs、gpui_linux）均未变化，保持 keep；u1-l2、u2-l1、u2-l2、u2-l3 因正文引用了 app.rs 与 window.rs 的行号级永久链接而全部偏移（app.rs 在 L689 后累计 +2/+4/+6/+13，window.rs 在 WindowInvalidator 区域后约 +16），内容概念不变只需刷新链接，标记 update；其余 26 篇尚未生成、引用的文件也未变化，维持 new；另在 u4 单元末尾新增 u4-l6，专门讲解挂在调度链路（PlatformScheduler→PlatformDispatcher→前台执行器）上的前台工作日志与 hang 检测机制，解释读者阅读 executor.rs 时会遇到的所有 cfg(profiler) 代码块。全链路共 34 篇，依赖关系从 u1 的零基础入口逐层展开，最终汇聚到 u8-l5 的综合实践。",
   "units": [
     {
       "id": "u1",
-      "title": "平台层入门：跑起来与看懂架构",
-      "level": "beginner",
-      "order": 1,
       "lectures": [
         {
-          "id": "u1-l1",
-          "title": "gpui_platform 是什么：一个门面 crate 的定位与平台层架构总览",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [],
           "filename": "u1-l1-platform-layer-overview.md",
-          "level": "beginner",
-          "topic": "介绍 gpui_platform 在 Zed 代码库中的定位：它只是对 gpui 平台 trait 与 current_platform 构造器的便捷再导出，目的是让使用者免写 #[cfg] 条件编译。画出 gpui → gpui_platform → gpui_macos/gpui_windows/gpui_linux/gpui_web 的 crate 依赖图。",
+          "id": "u1-l1",
           "learning_goals": [
             "说出门面（facade）crate 在这里解决的具体痛点：跨平台 #[cfg] 门控",
             "画出五个平台相关 crate 之间的依赖方向",
             "理解 platform/ 目录在 gpui 主 crate 中承担的角色"
           ],
+          "level": "beginner",
+          "minimal_modules": [
+            "gpui_platform（模块注释与 pub use）",
+            "Platform trait 声明（仅看签名不深入）"
+          ],
+          "order": 1,
+          "practice_task": "使用 cargo tree 或阅读各 Cargo.toml，手工画出 gpui_platform 与四个平台 crate 的依赖图，并标注每个平台 crate 在哪个 target 上被链接，把图和结论写成学习笔记。",
           "source_files": [
             "src/gpui_platform.rs",
             "Cargo.toml",
             "../gpui/src/platform.rs"
           ],
-          "minimal_modules": [
-            "gpui_platform（模块注释与 pub use）",
-            "Platform trait 声明（仅看签名不深入）"
-          ],
-          "practice_task": "使用 cargo tree 或阅读各 Cargo.toml，手工画出 gpui_platform 与四个平台 crate 的依赖图，并标注每个平台 crate 在哪个 target 上被链接，把图和结论写成学习笔记。",
-          "depends_on": [],
-          "action": "new"
+          "title": "gpui_platform 是什么：一个门面 crate 的定位与平台层架构总览",
+          "topic": "介绍 gpui_platform 在 Zed 代码库中的定位：它只是对 gpui 平台 trait 与 current_platform 构造器的便捷再导出，目的是让使用者免写 #[cfg] 条件编译。画出 gpui → gpui_platform → gpui_macos/gpui_windows/gpui_linux/gpui_web 的 crate 依赖图。"
         },
         {
-          "id": "u1-l2",
-          "title": "从零跑起第一个应用：application() 与一个跨平台窗口",
-          "order": 2,
+          "action": "update",
+          "depends_on": [
+            "u1-l1"
+          ],
           "filename": "u1-l2-first-application.md",
-          "level": "beginner",
-          "topic": "对照 gpui 官方 window 示例，讲解如何用 gpui_platform::application() 创建应用、打开窗口并在不同操作系统上得到一致行为，同时区分 application() 与 headless() 两个入口。",
+          "id": "u1-l2",
           "learning_goals": [
             "用 gpui_platform::application() 写出最小可运行的窗口程序",
             "理解 Application::with_platform 如何把 Platform 实例注入应用",
             "说明 headless 参数为 true 时应用的行为差异"
           ],
-          "source_files": [
-            "src/gpui_platform.rs",
-            "../gpui/examples/window.rs",
-            "../gpui/src/app.rs"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "application()",
             "headless()",
             "Application::with_platform",
             "App::open_window"
           ],
+          "order": 2,
           "practice_task": "新建一个独立小 crate，依赖 gpui 与 gpui_platform，用 gpui_platform::application() 打开一个显示 \"Hello Platform\" 的窗口，再改为 headless() 观察差异并记录两种模式下 run 回调的执行情况。",
+          "source_files": [
+            "src/gpui_platform.rs",
+            "../gpui/examples/window.rs",
+            "../gpui/src/app.rs",
+            "../gpui/src/window.rs"
+          ],
+          "title": "从零跑起第一个应用：application() 与一个跨平台窗口",
+          "topic": "对照 gpui 官方 window 示例，讲解如何用 gpui_platform::application() 创建应用、打开窗口并在不同操作系统上得到一致行为，同时区分 application() 与 headless() 两个入口。"
+        },
+        {
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u1-l3",
-          "title": "crate 依赖、feature 开关与平台 crate 目录地图",
-          "order": 3,
           "filename": "u1-l3-crate-features-and-layout.md",
-          "level": "beginner",
-          "topic": "逐段阅读 gpui_platform/Cargo.toml：按目标操作系统划分的依赖表、wayland/x11/font-kit/screen-capture/test-support 等 feature 如何向下透传到各平台 crate，并浏览四个平台 crate 的源码目录结构。",
+          "id": "u1-l3",
           "learning_goals": [
             "看懂按 target.'cfg(...)' 分组的依赖声明",
             "列出 gpui_platform 暴露的全部 feature 及其作用",
             "说出每个平台 crate 内主要源码文件的职责划分"
           ],
+          "level": "beginner",
+          "minimal_modules": [
+            "[features] 段",
+            "[target] 依赖段"
+          ],
+          "order": 3,
+          "practice_task": "写出一条 cargo build 命令为 Linux 同时启用 wayland 与 x11，再写一条只启用 x11 的命令；分别构建并对比编译出的平台组合，记录 feature 透传路径。",
           "source_files": [
             "Cargo.toml",
             "../gpui_linux/Cargo.toml",
@@ -82,150 +87,155 @@
             "../gpui_windows/Cargo.toml",
             "../gpui_macos/Cargo.toml"
           ],
-          "minimal_modules": [
-            "[features] 段",
-            "[target] 依赖段"
-          ],
-          "practice_task": "写出一条 cargo build 命令为 Linux 同时启用 wayland 与 x11，再写一条只启用 x11 的命令；分别构建并对比编译出的平台组合，记录 feature 透传路径。",
-          "depends_on": [
-            "u1-l1"
-          ],
-          "action": "new"
+          "title": "crate 依赖、feature 开关与平台 crate 目录地图",
+          "topic": "逐段阅读 gpui_platform/Cargo.toml：按目标操作系统划分的依赖表、wayland/x11/font-kit/screen-capture/test-support 等 feature 如何向下透传到各平台 crate，并浏览四个平台 crate 的源码目录结构。"
         },
         {
-          "id": "u1-l4",
-          "title": "current_platform 与条件编译：一次编写、按平台分发",
-          "order": 4,
+          "action": "keep",
+          "depends_on": [
+            "u1-l1",
+            "u1-l3"
+          ],
           "filename": "u1-l4-current-platform-and-cfg.md",
-          "level": "beginner",
-          "topic": "精读 current_platform(headless) 函数体中四组 #[cfg] 分支如何分别构造 MacPlatform、WindowsPlatform、gpui_linux::current_platform 与 WebPlatform，并引出 Linux 侧 guess_compositor 的环境变量探测逻辑。",
+          "id": "u1-l4",
           "learning_goals": [
             "理解 #[cfg(target_os)] 与 #[cfg(target_family)] 在同一函数内互斥展开的写法",
             "说明 Windows 分支为何使用 expect 而 macOS 不用",
             "解释 WAYLAND_DISPLAY / DISPLAY / ZED_HEADLESS 如何决定 Linux 后端选择"
           ],
-          "source_files": [
-            "src/gpui_platform.rs",
-            "../gpui_linux/src/linux.rs",
-            "../gpui/src/platform.rs"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "current_platform",
             "gpui_linux::current_platform",
             "guess_compositor"
           ],
+          "order": 4,
           "practice_task": "在你当前操作系统上写一个程序直接调用 gpui_platform::current_platform(false) 并打印其 compositor_name()，再设置 ZED_HEADLESS 环境变量（Linux）重跑一次，对比输出并解释原因。",
-          "depends_on": [
-            "u1-l1",
-            "u1-l3"
+          "source_files": [
+            "src/gpui_platform.rs",
+            "../gpui_linux/src/linux.rs",
+            "../gpui/src/platform.rs"
           ],
-          "action": "new"
+          "title": "current_platform 与条件编译：一次编写、按平台分发",
+          "topic": "精读 current_platform(headless) 函数体中四组 #[cfg] 分支如何分别构造 MacPlatform、WindowsPlatform、gpui_linux::current_platform 与 WebPlatform，并引出 Linux 侧 guess_compositor 的环境变量探测逻辑。"
         }
-      ]
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "平台层入门：跑起来与看懂架构"
     },
     {
       "id": "u2",
-      "title": "Platform trait 契约：平台无关接口逐组拆解",
-      "level": "intermediate",
-      "order": 2,
       "lectures": [
         {
-          "id": "u2-l1",
-          "title": "Platform trait 全景导览：从执行器到凭据的八大方法分组",
-          "order": 1,
+          "action": "update",
+          "depends_on": [
+            "u1-l1",
+            "u1-l4"
+          ],
           "filename": "u2-l1-platform-trait-tour.md",
-          "level": "intermediate",
-          "topic": "系统性地走读 gpui/src/platform.rs 中 Platform trait 的全部方法，把它们归纳为执行器、生命周期、窗口与显示器、外观、系统集成（URL/文件/剪贴板/凭据）、菜单与通知、键盘、杂项八组，并区分哪些有默认实现。",
+          "id": "u2-l1",
           "learning_goals": [
             "按功能组复述 Platform trait 的方法清单",
             "识别带默认实现的方法与必须实现的方法的差异及其对实现者的意义",
             "掌握用 rust-analyzer 跳转查看 trait 实现列表的方法"
           ],
-          "source_files": [
-            "../gpui/src/platform.rs",
-            "src/gpui_platform.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "Platform trait 完整签名",
             "pub use gpui::Platform"
           ],
+          "order": 1,
           "practice_task": "制作一张 Platform trait 方法分组表，标注每个方法是必需还是有默认实现，并用 grep 在四个平台 crate 中各找出三个方法的实现位置填入表中。",
-          "depends_on": [
-            "u1-l1",
-            "u1-l4"
+          "source_files": [
+            "../gpui/src/platform.rs",
+            "src/gpui_platform.rs",
+            "../gpui/src/app.rs"
           ],
-          "action": "new"
+          "title": "Platform trait 全景导览：从执行器到凭据的八大方法分组",
+          "topic": "系统性地走读 gpui/src/platform.rs 中 Platform trait 的全部方法，把它们归纳为执行器、生命周期、窗口与显示器、外观、系统集成（URL/文件/剪贴板/凭据）、菜单与通知、键盘、杂项八组，并区分哪些有默认实现。"
         },
         {
-          "id": "u2-l2",
-          "title": "应用生命周期与运行循环：run、quit、restart 与回调注册",
-          "order": 2,
+          "action": "update",
+          "depends_on": [
+            "u2-l1"
+          ],
           "filename": "u2-l2-lifecycle-and-run-loop.md",
-          "level": "intermediate",
-          "topic": "聚焦 Platform 的 run/quit/restart/activate/hide 家族与 on_quit、on_reopen、on_system_wake、on_app_lifecycle、on_memory_warning 等回调注册方法，说明桌面与移动平台在生命周期语义上的不对称。",
+          "id": "u2-l2",
           "learning_goals": [
             "描述 run(on_finish_launching) 在各平台上对应的事件循环入口",
             "解释 AppLifecyclePhase 与桌面平台回调的映射关系",
             "理解为何移动端生命周期方法在桌面平台上永远不会被调用"
           ],
-          "source_files": [
-            "../gpui/src/platform.rs",
-            "../gpui_linux/src/linux/platform.rs",
-            "../gpui_macos/src/platform.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "Platform::run",
             "Platform::quit",
             "Platform::on_app_lifecycle",
             "PlatformHandlers"
           ],
+          "order": 2,
           "practice_task": "写一个程序注册 on_quit 与 on_system_wake 回调，在回调里打印日志，然后通过窗口关闭与 kill 信号分别触发退出，观察两个回调的触发时机并记录差异。",
+          "source_files": [
+            "../gpui/src/platform.rs",
+            "../gpui_linux/src/linux/platform.rs",
+            "../gpui_macos/src/platform.rs",
+            "../gpui/src/app.rs"
+          ],
+          "title": "应用生命周期与运行循环：run、quit、restart 与回调注册",
+          "topic": "聚焦 Platform 的 run/quit/restart/activate/hide 家族与 on_quit、on_reopen、on_system_wake、on_app_lifecycle、on_memory_warning 等回调注册方法，说明桌面与移动平台在生命周期语义上的不对称。"
+        },
+        {
+          "action": "update",
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u2-l3",
-          "title": "显示器管理：PlatformDisplay 与多屏几何",
-          "order": 3,
           "filename": "u2-l3-displays.md",
-          "level": "intermediate",
-          "topic": "讲解 displays/primary_display 接口与 PlatformDisplay trait 的 id、uuid、bounds、visible_bounds 等方法，并对照 macOS 与 Linux 的 display 实现看不同窗口系统如何上报显示器几何。",
+          "id": "u2-l3",
           "learning_goals": [
             "理解 DisplayId 与可持久化的 uuid 的用途区别",
             "说明 visible_bounds 为何要排除任务栏与 Dock 区域",
             "对比 macOS、X11、Wayland 三种显示器枚举实现的数据来源"
           ],
-          "source_files": [
-            "../gpui/src/platform.rs",
-            "../gpui_macos/src/display.rs",
-            "../gpui_linux/src/linux/wayland/display.rs",
-            "../gpui_windows/src/display.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "PlatformDisplay",
             "Platform::displays",
             "Platform::primary_display"
           ],
+          "order": 3,
           "practice_task": "写一个小程序枚举当前所有显示器，打印每台的 id、bounds 与 visible_bounds，并在双屏或缩放场景下验证坐标换算是否符合预期。",
+          "source_files": [
+            "../gpui/src/platform.rs",
+            "../gpui_macos/src/display.rs",
+            "../gpui_linux/src/linux/wayland/display.rs",
+            "../gpui_windows/src/display.rs",
+            "../gpui/src/app.rs"
+          ],
+          "title": "显示器管理：PlatformDisplay 与多屏几何",
+          "topic": "讲解 displays/primary_display 接口与 PlatformDisplay trait 的 id、uuid、bounds、visible_bounds 等方法，并对照 macOS 与 Linux 的 display 实现看不同窗口系统如何上报显示器几何。"
+        },
+        {
+          "action": "new",
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u2-l4",
-          "title": "系统集成服务：剪贴板、URL、文件对话框与凭据存储",
-          "order": 4,
           "filename": "u2-l4-system-services.md",
-          "level": "intermediate",
-          "topic": "拆解剪贴板读写（含 Linux 主选区与 macOS 查找板、浏览器异步剪贴板）、open_url 与 URL scheme 注册、prompt_for_paths 文件对话框、reveal_path、以及 write_credentials/read_credentials 凭据三件套。",
+          "id": "u2-l4",
           "learning_goals": [
             "说明 read_from_clipboard 与 read_from_clipboard_async 的适用场景差异",
             "理解 Linux 主选区（primary selection）与普通剪贴板的区别",
             "描述凭据存储在各平台分别落到哪个系统服务"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Platform::read_from_clipboard",
+            "Platform::prompt_for_paths",
+            "Platform::write_credentials",
+            "LinuxClient::read_from_primary"
+          ],
+          "order": 4,
+          "practice_task": "实现一个跨平台小工具：把一段文本写入剪贴板再读回校验，在 Linux 上额外验证主选区读写，并把每一步在各平台的真实调用路径写成笔记。",
           "source_files": [
             "../gpui/src/platform.rs",
             "../gpui_macos/src/pasteboard.rs",
@@ -233,402 +243,436 @@
             "../gpui_windows/src/clipboard.rs",
             "../gpui_web/src/platform.rs"
           ],
-          "minimal_modules": [
-            "Platform::read_from_clipboard",
-            "Platform::prompt_for_paths",
-            "Platform::write_credentials",
-            "LinuxClient::read_from_primary"
-          ],
-          "practice_task": "实现一个跨平台小工具：把一段文本写入剪贴板再读回校验，在 Linux 上额外验证主选区读写，并把每一步在各平台的真实调用路径写成笔记。",
-          "depends_on": [
-            "u2-l1"
-          ],
-          "action": "new"
+          "title": "系统集成服务：剪贴板、URL、文件对话框与凭据存储",
+          "topic": "拆解剪贴板读写（含 Linux 主选区与 macOS 查找板、浏览器异步剪贴板）、open_url 与 URL scheme 注册、prompt_for_paths 文件对话框、reveal_path、以及 write_credentials/read_credentials 凭据三件套。"
         }
-      ]
+      ],
+      "level": "intermediate",
+      "order": 2,
+      "title": "Platform trait 契约：平台无关接口逐组拆解"
     },
     {
       "id": "u3",
-      "title": "窗口与输入：从 WindowOptions 到具体窗口句柄",
-      "level": "intermediate",
-      "order": 3,
       "lectures": [
         {
-          "id": "u3-l1",
-          "title": "窗口创建主链路：WindowOptions、WindowParams 与 Platform::open_window",
-          "order": 1,
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u2-l1"
+          ],
           "filename": "u3-l1-open-window-chain.md",
-          "level": "intermediate",
-          "topic": "追踪从应用层 cx.open_window 传下的 WindowOptions 如何化为 WindowParams，最终进入 Platform::open_window 返回 Box<dyn PlatformWindow>，并说明 AnyWindowHandle 在其中的桥接作用。",
+          "id": "u3-l1",
           "learning_goals": [
             "画出从 App::open_window 到 Platform::open_window 的调用链",
             "理解 WindowParams 中窗口边界、标题栏、装饰等关键字段",
             "说明 AnyWindowHandle 如何让平台层与 GPUI 视图层解耦"
           ],
-          "source_files": [
-            "../gpui/src/platform.rs",
-            "../gpui_linux/src/linux/platform.rs",
-            "../gpui_macos/src/platform.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "Platform::open_window",
             "WindowParams",
             "AnyWindowHandle"
           ],
+          "order": 1,
           "practice_task": "用调试器或加日志的方式跟踪一次窗口创建调用链，记录每层函数名与参数，并把 WindowOptions 中你改动的三个字段（如 window_bounds、titlebar、window_kind）在链路上的传播路径标注出来。",
-          "depends_on": [
-            "u1-l2",
-            "u2-l1"
+          "source_files": [
+            "../gpui/src/platform.rs",
+            "../gpui_linux/src/linux/platform.rs",
+            "../gpui_macos/src/platform.rs"
           ],
-          "action": "new"
+          "title": "窗口创建主链路：WindowOptions、WindowParams 与 Platform::open_window",
+          "topic": "追踪从应用层 cx.open_window 传下的 WindowOptions 如何化为 WindowParams，最终进入 Platform::open_window 返回 Box<dyn PlatformWindow>，并说明 AnyWindowHandle 在其中的桥接作用。"
         },
         {
-          "id": "u3-l2",
-          "title": "PlatformWindow trait 详解：绘制、尺寸、焦点与窗口控制",
-          "order": 2,
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
           "filename": "u3-l2-platform-window.md",
-          "level": "intermediate",
-          "topic": "走读 PlatformWindow trait（含 raw-window-handle 的 HasWindowHandle/HasDisplayHandle 约束），覆盖标题、大小、位置、缩放、焦点、全屏与窗口控制区等方法，并以 Linux 侧实现为例。",
+          "id": "u3-l2",
           "learning_goals": [
             "列出 PlatformWindow 的核心方法分组",
             "理解为什么 PlatformWindow 必须实现 raw-window-handle 两个 trait",
             "说明 window_stack 与激活窗口状态由谁维护"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "PlatformWindow",
+            "HasWindowHandle",
+            "WindowControlArea"
+          ],
+          "order": 2,
+          "practice_task": "写一个示例程序在运行时动态调用窗口的 set_title、set_size 与 minimize/maximize 方法，观察并记录各平台行为差异（至少在你的操作系统上完整验证）。",
           "source_files": [
             "../gpui/src/platform.rs",
             "../gpui_linux/src/linux/wayland/window.rs",
             "../gpui_linux/src/linux/x11/window.rs",
             "../gpui_windows/src/window.rs"
           ],
-          "minimal_modules": [
-            "PlatformWindow",
-            "HasWindowHandle",
-            "WindowControlArea"
-          ],
-          "practice_task": "写一个示例程序在运行时动态调用窗口的 set_title、set_size 与 minimize/maximize 方法，观察并记录各平台行为差异（至少在你的操作系统上完整验证）。",
-          "depends_on": [
-            "u3-l1"
-          ],
-          "action": "new"
+          "title": "PlatformWindow trait 详解：绘制、尺寸、焦点与窗口控制",
+          "topic": "走读 PlatformWindow trait（含 raw-window-handle 的 HasWindowHandle/HasDisplayHandle 约束），覆盖标题、大小、位置、缩放、焦点、全屏与窗口控制区等方法，并以 Linux 侧实现为例。"
         },
         {
-          "id": "u3-l3",
-          "title": "键盘输入的跨平台抽象：布局、映射与 Keystroke",
-          "order": 3,
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
           "filename": "u3-l3-keyboard-mapping.md",
-          "level": "intermediate",
-          "topic": "讲解 PlatformKeyboardLayout 与 PlatformKeyboardMapper 两个 trait 以及 keystroke 模型，再对照 macOS（Carbon/HIToolbox）、Linux（xkbcommon）、Web（浏览器 KeyboardEvent）三套映射实现看同一契约的不同落地。",
+          "id": "u3-l3",
           "learning_goals": [
             "解释键盘布局与按键映射为何必须由平台层提供",
             "描述 Keystroke 从原始按键事件到 GPUI 动作的转换过程",
             "对比 xkbcommon 与 macOS 键盘 API 的数据处理差异"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "PlatformKeyboardLayout",
+            "PlatformKeyboardMapper",
+            "xkb State/Keycode/Keysym"
+          ],
+          "order": 3,
+          "practice_task": "写一个键盘事件打印工具，输出每次按键的 Keystroke 关键字段，切换系统输入法或布局后对比输出变化，并定位是哪个平台函数产生了差异。",
           "source_files": [
             "../gpui/src/platform/keyboard.rs",
             "../gpui_linux/src/linux/keyboard.rs",
             "../gpui_macos/src/keyboard.rs",
             "../gpui_web/src/keyboard.rs"
           ],
-          "minimal_modules": [
-            "PlatformKeyboardLayout",
-            "PlatformKeyboardMapper",
-            "xkb State/Keycode/Keysym"
-          ],
-          "practice_task": "写一个键盘事件打印工具，输出每次按键的 Keystroke 关键字段，切换系统输入法或布局后对比输出变化，并定位是哪个平台函数产生了差异。",
-          "depends_on": [
-            "u2-l1"
-          ],
-          "action": "new"
+          "title": "键盘输入的跨平台抽象：布局、映射与 Keystroke",
+          "topic": "讲解 PlatformKeyboardLayout 与 PlatformKeyboardMapper 两个 trait 以及 keystroke 模型，再对照 macOS（Carbon/HIToolbox）、Linux（xkbcommon）、Web（浏览器 KeyboardEvent）三套映射实现看同一契约的不同落地。"
         },
         {
-          "id": "u3-l4",
-          "title": "光标、外观与拖放：set_cursor_style、window_appearance 与外部拖拽",
-          "order": 4,
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
           "filename": "u3-l4-cursor-appearance-drag.md",
-          "level": "intermediate",
-          "topic": "覆盖 set_cursor_style、hide_cursor_until_mouse_moves、is_cursor_visible、window_appearance/set_window_appearance（含 macOS 专属覆盖逻辑）、should_auto_hide_scrollbars 以及 ExternalDragPayload 外部拖放支持。",
+          "id": "u3-l4",
           "learning_goals": [
             "理解外观覆盖为何只在 macOS 上真正生效",
             "掌握光标样式的设置与查询接口",
             "说明外部拖放负载如何在不同窗口系统间传递"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Platform::set_cursor_style",
+            "Platform::set_window_appearance",
+            "ExternalDragPayload"
+          ],
+          "order": 4,
+          "practice_task": "写一个示例：鼠标悬停不同区域时切换光标样式，点击按钮后调用 set_window_appearance 强制暗色外观，记录非 macOS 平台上的行为（是否如文档所述为 no-op）。",
           "source_files": [
             "../gpui/src/platform.rs",
             "../gpui_macos/src/window_appearance.rs",
             "../gpui_linux/src/linux/wayland/cursor.rs",
             "../gpui_linux/src/linux/x11/window.rs"
           ],
-          "minimal_modules": [
-            "Platform::set_cursor_style",
-            "Platform::set_window_appearance",
-            "ExternalDragPayload"
-          ],
-          "practice_task": "写一个示例：鼠标悬停不同区域时切换光标样式，点击按钮后调用 set_window_appearance 强制暗色外观，记录非 macOS 平台上的行为（是否如文档所述为 no-op）。",
-          "depends_on": [
-            "u3-l2"
-          ],
-          "action": "new"
+          "title": "光标、外观与拖放：set_cursor_style、window_appearance 与外部拖拽",
+          "topic": "覆盖 set_cursor_style、hide_cursor_until_mouse_moves、is_cursor_visible、window_appearance/set_window_appearance（含 macOS 专属覆盖逻辑）、should_auto_hide_scrollbars 以及 ExternalDragPayload 外部拖放支持。"
         }
-      ]
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "窗口与输入：从 WindowOptions 到具体窗口句柄"
     },
     {
       "id": "u4",
-      "title": "调度与并发：平台事件循环与执行器",
-      "level": "intermediate",
-      "order": 4,
       "lectures": [
         {
-          "id": "u4-l1",
-          "title": "前台/后台执行器：GPUI 的单前台线程模型",
-          "order": 1,
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
           "filename": "u4-l1-executors.md",
-          "level": "intermediate",
-          "topic": "从 Platform 的 background_executor/foreground_executor 两个方法切入，讲解 GPUI 所有实体更新与 UI 绘制都发生在单一前台线程的模型，以及 background_spawn 与 spawn 的分工。",
+          "id": "u4-l1",
           "learning_goals": [
             "解释为什么 GPUI 把 UI 状态更新限制在单线程",
             "区分 Task 的 detach、存储与 await 三种生命周期管理方式",
             "说明平台层在执行器创建中扮演的角色"
           ],
-          "source_files": [
-            "../gpui/src/platform.rs",
-            "src/gpui_platform.rs",
-            "../gpui_web/examples/hello_web/main.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "Platform::background_executor",
             "Platform::foreground_executor",
             "background_executor()（gpui_platform）",
             "cx.spawn/background_spawn"
           ],
+          "order": 1,
           "practice_task": "参照 hello_web 示例的素数计数结构，写一个把 CPU 密集任务切分到 background_spawn、再回前台更新进度的桌面小程序，验证 UI 在计算期间不卡顿。",
-          "depends_on": [
-            "u2-l2"
+          "source_files": [
+            "../gpui/src/platform.rs",
+            "src/gpui_platform.rs",
+            "../gpui_web/examples/hello_web/main.rs"
           ],
-          "action": "new"
+          "title": "前台/后台执行器：GPUI 的单前台线程模型",
+          "topic": "从 Platform 的 background_executor/foreground_executor 两个方法切入，讲解 GPUI 所有实体更新与 UI 绘制都发生在单一前台线程的模型，以及 background_spawn 与 spawn 的分工。"
         },
         {
-          "id": "u4-l2",
-          "title": "PlatformDispatcher 契约：跨线程投递 runnable 的统一接口",
-          "order": 2,
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
           "filename": "u4-l2-dispatcher-trait.md",
-          "level": "intermediate",
-          "topic": "精读 PlatformDispatcher trait（Send + Sync）的各个方法，理解它是执行器底层把异步任务安全投递到平台事件循环的桥，并说明 RunnableMeta、优先级队列与 tick 概念。",
+          "id": "u4-l2",
           "learning_goals": [
             "列出 PlatformDispatcher 需要实现的核心方法",
             "解释为什么该 trait 要求 Send + Sync 而 Platform 本身不是",
             "描述 runnable 从后台线程到主线程的完整旅程"
           ],
-          "source_files": [
-            "../gpui/src/platform.rs",
-            "../gpui/src/platform/threaded_dispatcher.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "PlatformDispatcher",
             "RunnableVariant",
             "ThreadedDispatcher"
           ],
+          "order": 2,
           "practice_task": "阅读 ThreadedDispatcher 通用实现并写一段测试代码：从普通 std::thread 向主循环投递任务，验证任务在前台线程执行（可用线程 id 打印证明）。",
-          "depends_on": [
-            "u4-l1"
+          "source_files": [
+            "../gpui/src/platform.rs",
+            "../gpui/src/platform/threaded_dispatcher.rs"
           ],
-          "action": "new"
+          "title": "PlatformDispatcher 契约：跨线程投递 runnable 的统一接口",
+          "topic": "精读 PlatformDispatcher trait（Send + Sync）的各个方法，理解它是执行器底层把异步任务安全投递到平台事件循环的桥，并说明 RunnableMeta、优先级队列与 tick 概念。"
         },
         {
-          "id": "u4-l3",
-          "title": "LinuxDispatcher 与 calloop：用事件循环库实现调度器",
-          "order": 3,
+          "action": "new",
+          "depends_on": [
+            "u4-l2",
+            "u1-l4"
+          ],
           "filename": "u4-l3-linux-dispatcher.md",
-          "level": "intermediate",
-          "topic": "深入 gpui_linux 的 LinuxDispatcher：它基于 calloop 事件循环，配合 PriorityQueueCalloopSender/Receiver 实现带优先级的任务通道，并处理计时器与外部线程唤醒。",
+          "id": "u4-l3",
           "learning_goals": [
             "理解 calloop 的 LoopSignal 与 channel 机制如何被复用",
             "说明带优先级队列为何对输入事件与普通任务区分处理",
             "跟踪一个 dispatch 调用在 Linux 上的完整路径"
           ],
-          "source_files": [
-            "../gpui_linux/src/linux/dispatcher.rs",
-            "../gpui_linux/src/linux/platform.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "LinuxDispatcher",
             "PriorityQueueCalloopSender",
             "PriorityQueueCalloopReceiver",
             "TimerAfter"
           ],
+          "order": 3,
           "practice_task": "写一个基于 calloop 的最小示例程序（独立 crate），实现从其他线程向主循环投递任务并带两个优先级，仿照 LinuxDispatcher 的结构组织代码。",
-          "depends_on": [
-            "u4-l2",
-            "u1-l4"
+          "source_files": [
+            "../gpui_linux/src/linux/dispatcher.rs",
+            "../gpui_linux/src/linux/platform.rs"
           ],
-          "action": "new"
+          "title": "LinuxDispatcher 与 calloop：用事件循环库实现调度器",
+          "topic": "深入 gpui_linux 的 LinuxDispatcher：它基于 calloop 事件循环，配合 PriorityQueueCalloopSender/Receiver 实现带优先级的任务通道，并处理计时器与外部线程唤醒。"
         },
         {
-          "id": "u4-l4",
-          "title": "macOS 与 Windows 的调度器：MacDispatcher 与 Windows_dispatcher",
-          "order": 4,
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
           "filename": "u4-l4-macos-windows-dispatchers.md",
-          "level": "intermediate",
-          "topic": "对比 macOS 上基于 NSRunLoop/main queue 的 MacDispatcher 与 Windows 上基于窗口消息循环的调度器实现，看两种原生消息机制如何映射到同一 PlatformDispatcher 契约。",
+          "id": "u4-l4",
           "learning_goals": [
             "说明 macOS 主线程 run loop 与 dispatch 的关系及主线程约束",
             "说明 Windows 消息循环如何被用作任务唤醒机制",
             "总结四个平台调度器在唤醒机制上的共性"
           ],
-          "source_files": [
-            "../gpui_macos/src/dispatcher.rs",
-            "../gpui_windows/src/dispatcher.rs",
-            "../gpui_windows/src/platform.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "MacDispatcher",
             "Windows 平台 dispatcher 实现",
             "PlatformDispatcher"
           ],
+          "order": 4,
           "practice_task": "写一份对比表，从唤醒机制、线程安全、优先级支持、计时器实现四个维度比较 macOS、Windows、Linux 三个调度器，每格附源码行号引用。",
+          "source_files": [
+            "../gpui_macos/src/dispatcher.rs",
+            "../gpui_windows/src/dispatcher.rs",
+            "../gpui_windows/src/platform.rs"
+          ],
+          "title": "macOS 与 Windows 的调度器：MacDispatcher 与 Windows_dispatcher",
+          "topic": "对比 macOS 上基于 NSRunLoop/main queue 的 MacDispatcher 与 Windows 上基于窗口消息循环的调度器实现，看两种原生消息机制如何映射到同一 PlatformDispatcher 契约。"
+        },
+        {
+          "action": "new",
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u4-l5",
-          "title": "WebDispatcher：浏览器主线程邮箱与 wasm 单线程世界",
-          "order": 5,
           "filename": "u4-l5-web-dispatcher.md",
-          "level": "intermediate",
-          "topic": "分析 gpui_web 的 MainThreadMailbox 与 MainThreadItem 设计：在 wasm 没有原生线程的前提下，如何用浏览器任务调度原语模拟前台调度器，以及 single_threaded_web 与多线程 web 后端的差别。",
+          "id": "u4-l5",
           "learning_goals": [
             "理解 wasm 环境下线程与任务调度的限制",
             "说明 MainThreadMailbox 如何把任务排到浏览器事件循环",
             "区分 application、application_with_web_backend 与 single_threaded_web 三个入口"
           ],
-          "source_files": [
-            "../gpui_web/src/dispatcher.rs",
-            "../gpui_web/src/gpui_web.rs",
-            "src/gpui_platform.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "WebDispatcher",
             "MainThreadMailbox",
             "MainThreadItem",
             "single_threaded_web"
           ],
+          "order": 5,
           "practice_task": "阅读 MainThreadMailbox 实现后，写一段 wasm 侧伪代码或流程图描述一个任务从 spawn 到被执行经过的每一站，并标注对应的浏览器 API。",
+          "source_files": [
+            "../gpui_web/src/dispatcher.rs",
+            "../gpui_web/src/gpui_web.rs",
+            "src/gpui_platform.rs"
+          ],
+          "title": "WebDispatcher：浏览器主线程邮箱与 wasm 单线程世界",
+          "topic": "分析 gpui_web 的 MainThreadMailbox 与 MainThreadItem 设计：在 wasm 没有原生线程的前提下，如何用浏览器任务调度原语模拟前台调度器，以及 single_threaded_web 与多线程 web 后端的差别。"
+        },
+        {
+          "action": "new",
           "depends_on": [
+            "u4-l1",
             "u4-l2"
           ],
-          "action": "new"
+          "filename": "u4-l6-foreground-journal-and-hangs.md",
+          "id": "u4-l6",
+          "learning_goals": [
+            "理解 profiler feature 的编译期门控与 trace_enabled 运行期开关的分工",
+            "跟踪一个前台 runnable 与一帧绘制在 ForegroundJournal 中各自留下的记录",
+            "掌握 HangDetector 判定 hang 的两条标准：单事件超阈值与区间总耗时超帧预算"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "profiler::journal（ForegroundJournal、ForegroundJournalEntry、FrameSnapshot）",
+            "profiler::hang（HangDetector、HangIncident）",
+            "ForegroundRunnableCounter",
+            "App::foreground_journal"
+          ],
+          "order": 6,
+          "practice_task": "以 gpui 的 profiler feature 构建一个小窗口程序，在按钮回调里通过 cx.foreground_journal() 拿到 journal 与 collector，collect_unseen 后打印最近几条 ForegroundJournalEntry；再人为插入一段忙循环，用极小的 threshold 与 frame_budget 构造 HangDetector，验证 poll 能产出 HangIncident，并记录触发的是哪条判定标准。",
+          "source_files": [
+            "../gpui/src/profiler.rs",
+            "../gpui/src/profiler/journal.rs",
+            "../gpui/src/profiler/hang.rs",
+            "../gpui/src/executor.rs",
+            "../gpui/src/platform_scheduler.rs",
+            "../gpui/src/app.rs"
+          ],
+          "title": "前台工作日志与 hang 检测：profiler 对调度链路的插桩",
+          "topic": "讲解 gpui 的 profiler feature（依赖 hdrhistogram）新增的前台工作日志机制：ForegroundExecutor 与 PlatformScheduler 如何通过 ForegroundRunnableCounter 记录排队任务、window.rs 如何记录每帧从 dirty 到 present 的轨迹、journal.rs 的事件流与 FrameSnapshot 模型，以及 hang.rs 的 HangDetector 如何从日志流中事后检测主线程卡顿并产出 HangIncident。"
         }
-      ]
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "调度与并发：平台事件循环与执行器"
     },
     {
       "id": "u5",
-      "title": "Linux 平台深入：三客户端架构与桌面协议",
-      "level": "intermediate",
-      "order": 5,
       "lectures": [
         {
-          "id": "u5-l1",
-          "title": "LinuxPlatform 与 LinuxClient：一个外壳、三种后端",
-          "order": 1,
+          "action": "new",
+          "depends_on": [
+            "u1-l4",
+            "u2-l1"
+          ],
           "filename": "u5-l1-linux-platform-inner.md",
-          "level": "intermediate",
-          "topic": "讲解 LinuxPlatform 如何通过内部 LinuxClient trait 把公共逻辑收敛到 LinuxCommon 与 PlatformHandlers，而把 Wayland、X11、headless 三种后端作为可替换实现，形成二次分发结构。",
+          "id": "u5-l1",
           "learning_goals": [
             "解释 gpui_platform::current_platform 与 gpui_linux::current_platform 的两层分发关系",
             "说明 LinuxCommon 与 PlatformHandlers 各自聚合了什么状态",
             "列出 LinuxClient trait 要求后端实现的方法"
           ],
-          "source_files": [
-            "../gpui_linux/src/linux/platform.rs",
-            "../gpui_linux/src/linux.rs",
-            "../gpui_linux/src/gpui_linux.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "LinuxPlatform",
             "LinuxClient",
             "LinuxCommon",
             "PlatformHandlers"
           ],
+          "order": 1,
           "practice_task": "画一张 LinuxPlatform 调用 LinuxClient 方法的类图/序列图，任选三个 Platform trait 方法（如 read_from_clipboard、displays、open_window）标注它们如何穿透到具体后端。",
-          "depends_on": [
-            "u1-l4",
-            "u2-l1"
+          "source_files": [
+            "../gpui_linux/src/linux/platform.rs",
+            "../gpui_linux/src/linux.rs",
+            "../gpui_linux/src/gpui_linux.rs"
           ],
-          "action": "new"
+          "title": "LinuxPlatform 与 LinuxClient：一个外壳、三种后端",
+          "topic": "讲解 LinuxPlatform 如何通过内部 LinuxClient trait 把公共逻辑收敛到 LinuxCommon 与 PlatformHandlers，而把 Wayland、X11、headless 三种后端作为可替换实现，形成二次分发结构。"
         },
         {
-          "id": "u5-l2",
-          "title": "headless 客户端：无显示环境下的平台实现",
-          "order": 2,
+          "action": "new",
+          "depends_on": [
+            "u5-l1",
+            "u4-l3"
+          ],
           "filename": "u5-l2-headless-client.md",
-          "level": "intermediate",
-          "topic": "分析 HeadlessClient 与 headless window 的实现策略：哪些接口返回空值或假数据、事件循环如何驱动，以及它如何支撑 CI、远程服务器与 ZED_HEADLESS 场景。",
+          "id": "u5-l2",
           "learning_goals": [
             "理解 headless 后端存在的工程意义（测试、CI、远程开发）",
             "识别 HeadlessClient 中被刻意留空的方法及其原因",
             "掌握 gpui_platform::headless() 入口对应的完整路径"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "HeadlessClient",
+            "headless::window",
+            "gpui_platform::headless"
+          ],
+          "order": 2,
+          "practice_task": "在无显示环境（或设置 ZED_HEADLESS=1）下运行一个使用 headless() 的程序，打开一个逻辑窗口并驱动几帧渲染，记录哪些平台调用被静默处理。",
           "source_files": [
             "../gpui_linux/src/linux/headless/client.rs",
             "../gpui_linux/src/linux/headless/window.rs",
             "../gpui_linux/src/linux/headless.rs",
             "src/gpui_platform.rs"
           ],
-          "minimal_modules": [
-            "HeadlessClient",
-            "headless::window",
-            "gpui_platform::headless"
-          ],
-          "practice_task": "在无显示环境（或设置 ZED_HEADLESS=1）下运行一个使用 headless() 的程序，打开一个逻辑窗口并驱动几帧渲染，记录哪些平台调用被静默处理。",
-          "depends_on": [
-            "u5-l1",
-            "u4-l3"
-          ],
-          "action": "new"
+          "title": "headless 客户端：无显示环境下的平台实现",
+          "topic": "分析 HeadlessClient 与 headless window 的实现策略：哪些接口返回空值或假数据、事件循环如何驱动，以及它如何支撑 CI、远程服务器与 ZED_HEADLESS 场景。"
         },
         {
-          "id": "u5-l3",
-          "title": "X11 客户端：XCB 连接、事件翻译与 XIM 输入法",
-          "order": 3,
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
           "filename": "u5-l3-x11-client.md",
-          "level": "intermediate",
-          "topic": "走读 X11Client 的连接建立、事件循环与事件翻译层（x11/event.rs）、XIM 输入法处理器、X11 剪贴板以及窗口与显示器的 X 封装。",
+          "id": "u5-l3",
           "learning_goals": [
             "描述 X11Client 如何用 XCB 处理连接与事件",
             "理解 XIM 集成为何需要独立 handler 模块",
             "说明 X11 剪贴板与主选区的实现要点"
           ],
-          "source_files": [
-            "../gpui_linux/src/linux/x11/client.rs",
-            "../gpui_linux/src/linux/x11/event.rs",
-            "../gpui_linux/src/linux/x11/xim_handler.rs",
-            "../gpui_linux/src/linux/x11/clipboard.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "X11Client",
             "x11::event 事件翻译",
             "XimHandler",
             "x11::clipboard"
           ],
+          "order": 3,
           "practice_task": "在 X11 会话下运行一个 GPUI 窗口程序，用 xev 或日志观察一次按键与一次窗口 resize 事件在 event.rs 中被翻译成什么 GPUI 事件，写成对照表。",
+          "source_files": [
+            "../gpui_linux/src/linux/x11/client.rs",
+            "../gpui_linux/src/linux/x11/event.rs",
+            "../gpui_linux/src/linux/x11/xim_handler.rs",
+            "../gpui_linux/src/linux/x11/clipboard.rs"
+          ],
+          "title": "X11 客户端：XCB 连接、事件翻译与 XIM 输入法",
+          "topic": "走读 X11Client 的连接建立、事件循环与事件翻译层（x11/event.rs）、XIM 输入法处理器、X11 剪贴板以及窗口与显示器的 X 封装。"
+        },
+        {
+          "action": "new",
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u5-l4",
-          "title": "Wayland 客户端：协议对象、layer_shell 与弹出层",
-          "order": 4,
           "filename": "u5-l4-wayland-client.md",
-          "level": "intermediate",
-          "topic": "分析 WaylandClient 与周边模块：display、window、cursor、clipboard、serial 管理、popup 父子锚定，以及 layer_shell 带来的自定义标题栏能力。",
+          "id": "u5-l4",
           "learning_goals": [
             "理解 Wayland 无全局坐标模型对窗口定位接口的影响",
             "说明 serial 模块为何要专门跟踪最后一次输入序列号",
             "描述 layer_shell 如何用于实现 Z 风格的自绘标题栏与面板"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "WaylandClient",
+            "wayland::window",
+            "wayland::serial",
+            "wayland::layer_shell",
+            "wayland::popup"
+          ],
+          "order": 4,
+          "practice_task": "在 Wayland 会话下运行示例并对照源码记录：窗口创建、光标切换、剪贴板写入三个操作各自经过的 Wayland 协议对象，输出一份调用路径笔记。",
           "source_files": [
             "../gpui_linux/src/linux/wayland/client.rs",
             "../gpui_linux/src/linux/wayland/display.rs",
@@ -637,66 +681,66 @@
             "../gpui_linux/src/linux/wayland/layer_shell.rs",
             "../gpui_linux/src/linux/wayland/popup.rs"
           ],
-          "minimal_modules": [
-            "WaylandClient",
-            "wayland::window",
-            "wayland::serial",
-            "wayland::layer_shell",
-            "wayland::popup"
-          ],
-          "practice_task": "在 Wayland 会话下运行示例并对照源码记录：窗口创建、光标切换、剪贴板写入三个操作各自经过的 Wayland 协议对象，输出一份调用路径笔记。",
+          "title": "Wayland 客户端：协议对象、layer_shell 与弹出层",
+          "topic": "分析 WaylandClient 与周边模块：display、window、cursor、clipboard、serial 管理、popup 父子锚定，以及 layer_shell 带来的自定义标题栏能力。"
+        },
+        {
+          "action": "new",
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u5-l5",
-          "title": "xdg-desktop-portal 集成：文件选择器与系统级对话框",
-          "order": 5,
           "filename": "u5-l5-xdg-portal.md",
-          "level": "intermediate",
-          "topic": "讲解为什么 Linux 上文件选择器走 xdg-desktop-portal（通过 ashpd）而非原生工具包，窗口标识符如何传递，以及 portal 缺失时的错误提示策略。",
+          "id": "u5-l5",
           "learning_goals": [
             "解释 portal 机制对沙箱化桌面应用的必要性",
             "描述 prompt_for_paths 在 Linux 上的完整异步链路",
             "理解 FILE_PICKER_PORTAL_MISSING 错误的触发条件"
           ],
-          "source_files": [
-            "../gpui_linux/src/linux/xdg_desktop_portal.rs",
-            "../gpui_linux/src/linux/platform.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "xdg_desktop_portal",
             "LinuxClient::window_identifier",
             "PathPromptOptions"
           ],
+          "order": 5,
           "practice_task": "写一个调用 prompt_for_paths 的示例，分别在有和无 xdg-desktop-portal 实现的会话中运行（可用环境变量或卸载模拟），记录成功与失败两条路径的行为。",
-          "depends_on": [
-            "u5-l1"
+          "source_files": [
+            "../gpui_linux/src/linux/xdg_desktop_portal.rs",
+            "../gpui_linux/src/linux/platform.rs"
           ],
-          "action": "new"
+          "title": "xdg-desktop-portal 集成：文件选择器与系统级对话框",
+          "topic": "讲解为什么 Linux 上文件选择器走 xdg-desktop-portal（通过 ashpd）而非原生工具包，窗口标识符如何传递，以及 portal 缺失时的错误提示策略。"
         }
-      ]
+      ],
+      "level": "intermediate",
+      "order": 5,
+      "title": "Linux 平台深入：三客户端架构与桌面协议"
     },
     {
       "id": "u6",
-      "title": "macOS 与 Windows 平台实现",
-      "level": "intermediate",
-      "order": 6,
       "lectures": [
         {
-          "id": "u6-l1",
-          "title": "MacPlatform 与 AppKit：Cocoa 事件循环、外观与粘贴板",
-          "order": 1,
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
           "filename": "u6-l1-mac-platform.md",
-          "level": "intermediate",
-          "topic": "分析 MacPlatform 如何包装 NSApplication 与 macOS 主线程约束，覆盖 events.rs 的事件桥接、pasteboard、display_link 垂直同步回调与 window_appearance 映射。",
+          "id": "u6-l1",
           "learning_goals": [
             "理解 macOS 主线程约束对测试与初始化顺序的影响",
             "描述 AppKit 事件如何被翻译成 GPUI 输入事件",
             "说明 NSPasteboard 与 GPUI ClipboardItem 的转换"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "MacPlatform",
+            "macos::events",
+            "macos::pasteboard",
+            "macos::display_link"
+          ],
+          "order": 1,
+          "practice_task": "整理一份 macOS 专属能力清单（外观覆盖、查找粘贴板、Dock 菜单、display link 等），每项标注对应源码位置，并说明这些能力在 Platform trait 上的 cfg 门控方式。",
           "source_files": [
             "../gpui_macos/src/platform.rs",
             "../gpui_macos/src/events.rs",
@@ -704,31 +748,31 @@
             "../gpui_macos/src/display_link.rs",
             "../gpui_macos/src/window_appearance.rs"
           ],
-          "minimal_modules": [
-            "MacPlatform",
-            "macos::events",
-            "macos::pasteboard",
-            "macos::display_link"
-          ],
-          "practice_task": "整理一份 macOS 专属能力清单（外观覆盖、查找粘贴板、Dock 菜单、display link 等），每项标注对应源码位置，并说明这些能力在 Platform trait 上的 cfg 门控方式。",
-          "depends_on": [
-            "u2-l1",
-            "u2-l2"
-          ],
-          "action": "new"
+          "title": "MacPlatform 与 AppKit：Cocoa 事件循环、外观与粘贴板",
+          "topic": "分析 MacPlatform 如何包装 NSApplication 与 macOS 主线程约束，覆盖 events.rs 的事件桥接、pasteboard、display_link 垂直同步回调与 window_appearance 映射。"
         },
         {
-          "id": "u6-l2",
-          "title": "WindowsPlatform 与 DirectX 渲染栈",
-          "order": 2,
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
           "filename": "u6-l2-windows-directx.md",
-          "level": "intermediate",
-          "topic": "讲解 Windows 平台的组成：platform.rs 与 wrapper.rs 的职责、directx_devices/directx_renderer/directx_atlas 三层渲染结构、direct_write 文本系统、vsync 以及 direct_manipulation 触控板手势。",
+          "id": "u6-l2",
           "learning_goals": [
             "描述 DirectX 设备、渲染器与图集三层的分工",
             "理解 DirectWrite 在 Windows 文本系统中的位置",
             "说明 direct_manipulation 如何提供精密触控板事件"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "WindowsPlatform",
+            "directx_renderer",
+            "directx_atlas",
+            "directx_devices",
+            "direct_manipulation"
+          ],
+          "order": 2,
+          "practice_task": "画一张 Windows 渲染栈分层图（设备创建 → 渲染器 → 图集 → 窗口呈现），为每层注明关键类型与初始化时机，并与 gpui 的 PlatformAtlas/PlatformWindow 契约方法对应起来。",
           "source_files": [
             "../gpui_windows/src/platform.rs",
             "../gpui_windows/src/directx_renderer.rs",
@@ -737,38 +781,22 @@
             "../gpui_windows/src/vsync.rs",
             "../gpui_windows/src/direct_manipulation.rs"
           ],
-          "minimal_modules": [
-            "WindowsPlatform",
-            "directx_renderer",
-            "directx_atlas",
-            "directx_devices",
-            "direct_manipulation"
-          ],
-          "practice_task": "画一张 Windows 渲染栈分层图（设备创建 → 渲染器 → 图集 → 窗口呈现），为每层注明关键类型与初始化时机，并与 gpui 的 PlatformAtlas/PlatformWindow 契约方法对应起来。",
+          "title": "WindowsPlatform 与 DirectX 渲染栈",
+          "topic": "讲解 Windows 平台的组成：platform.rs 与 wrapper.rs 的职责、directx_devices/directx_renderer/directx_atlas 三层渲染结构、direct_write 文本系统、vsync 以及 direct_manipulation 触控板手势。"
+        },
+        {
+          "action": "new",
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u6-l3",
-          "title": "菜单、系统通知与跳转列表：app_menu 契约的三方实现",
-          "order": 3,
           "filename": "u6-l3-menus-notifications.md",
-          "level": "intermediate",
-          "topic": "覆盖 gpui 的 app_menu/keystroke 模型与 set_menus/get_menus 契约，以及各平台的系统通知实现（macOS 通知中心、Windows 通知、Linux portal/DBus），Windows 专属的 destination_list 跳转列表与 AppUserModelID 身份设置。",
+          "id": "u6-l3",
           "learning_goals": [
             "理解 Menu/MenuItem/OwnedMenu 数据模型与 Keymap 的绑定方式",
             "对比三个平台 show_system_notification 与通知响应回调的实现",
             "说明 set_app_identity 与 Windows 跳转列表的关系"
           ],
-          "source_files": [
-            "../gpui/src/platform/app_menu.rs",
-            "../gpui_macos/src/system_notifications.rs",
-            "../gpui_windows/src/system_notifications.rs",
-            "../gpui_windows/src/destination_list.rs",
-            "../gpui_linux/src/linux/system_notifications.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "app_menu",
             "Platform::set_menus",
@@ -776,39 +804,40 @@
             "Platform::set_app_identity",
             "destination_list"
           ],
+          "order": 3,
           "practice_task": "写一个示例程序注册一组应用菜单（含快捷键）并发送一条带 tag 的系统通知，验证重复 tag 通知的替换行为，并记录在你平台上各功能是否可用及对应实现函数。",
-          "depends_on": [
-            "u2-l1"
+          "source_files": [
+            "../gpui/src/platform/app_menu.rs",
+            "../gpui_macos/src/system_notifications.rs",
+            "../gpui_windows/src/system_notifications.rs",
+            "../gpui_windows/src/destination_list.rs",
+            "../gpui_linux/src/linux/system_notifications.rs"
           ],
-          "action": "new"
+          "title": "菜单、系统通知与跳转列表：app_menu 契约的三方实现",
+          "topic": "覆盖 gpui 的 app_menu/keystroke 模型与 set_menus/get_menus 契约，以及各平台的系统通知实现（macOS 通知中心、Windows 通知、Linux portal/DBus），Windows 专属的 destination_list 跳转列表与 AppUserModelID 身份设置。"
         }
-      ]
+      ],
+      "level": "intermediate",
+      "order": 6,
+      "title": "macOS 与 Windows 平台实现"
     },
     {
       "id": "u7",
-      "title": "Web 平台：把 GPUI 带进浏览器",
-      "level": "advanced",
-      "order": 7,
       "lectures": [
         {
-          "id": "u7-l1",
-          "title": "WebPlatform 与 wasm 入口：web_init、后端偏好与 http client",
-          "order": 1,
+          "action": "new",
+          "depends_on": [
+            "u1-l4",
+            "u2-l1"
+          ],
           "filename": "u7-l1-web-platform-entry.md",
-          "level": "intermediate",
-          "topic": "讲解 gpui_platform 在 wasm 上的专属入口（web_init、application_with_web_backend、single_threaded_web）、WebBackendPreference 的 Auto/WebGpu/WebGl 选择，以及 WebPlatform 自带 FetchHttpClient 的注入方式。",
+          "id": "u7-l1",
           "learning_goals": [
             "掌握 wasm 入口的初始化顺序（panic hook、日志、平台、http client）",
             "理解为何 web 平台要额外提供 http client 而其他平台不需要",
             "说明三种后端偏好的回退逻辑"
           ],
-          "source_files": [
-            "src/gpui_platform.rs",
-            "../gpui_web/src/platform.rs",
-            "../gpui_web/src/logging.rs",
-            "../gpui_web/src/http_client.rs",
-            "../gpui_web/src/gpui_web.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "web_init",
             "application_with_web_backend",
@@ -816,91 +845,105 @@
             "WebPlatform",
             "FetchHttpClient"
           ],
+          "order": 1,
           "practice_task": "阅读 requested_backend 函数后，为 hello_web 增加一个新的查询参数（如 backend=auto 显式指定），并追踪该参数如何影响 WebPlatform 的初始化分支。",
-          "depends_on": [
-            "u1-l4",
-            "u2-l1"
+          "source_files": [
+            "src/gpui_platform.rs",
+            "../gpui_web/src/platform.rs",
+            "../gpui_web/src/logging.rs",
+            "../gpui_web/src/http_client.rs",
+            "../gpui_web/src/gpui_web.rs"
           ],
-          "action": "new"
+          "title": "WebPlatform 与 wasm 入口：web_init、后端偏好与 http client",
+          "topic": "讲解 gpui_platform 在 wasm 上的专属入口（web_init、application_with_web_backend、single_threaded_web）、WebBackendPreference 的 Auto/WebGpu/WebGl 选择，以及 WebPlatform 自带 FetchHttpClient 的注入方式。"
         },
         {
-          "id": "u7-l2",
-          "title": "WebWindow 与浏览器事件桥接",
-          "order": 2,
+          "action": "new",
+          "depends_on": [
+            "u7-l1",
+            "u3-l2"
+          ],
           "filename": "u7-l2-web-window-events.md",
-          "level": "intermediate",
-          "topic": "分析 WebWindow 如何在 canvas 与 DOM 之上模拟窗口语义（尺寸、设备像素比、焦点），以及 WebEventListeners 如何把键盘、鼠标、指针等浏览器事件翻译成 GPUI 的 PlatformInput。",
+          "id": "u7-l2",
           "learning_goals": [
             "理解浏览器设备像素比与 GPUI Pixels 的换算",
             "描述 WebEventListeners 的注册与事件分发流程",
             "对比 WebWindow 与桌面 PlatformWindow 在能力上的取舍"
           ],
-          "source_files": [
-            "../gpui_web/src/window.rs",
-            "../gpui_web/src/events.rs",
-            "../gpui_web/src/display.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "WebWindow",
             "WebEventListeners",
             "WebDisplay"
           ],
+          "order": 2,
           "practice_task": "列一张浏览器事件到 GPUI PlatformInput 的映射表（至少覆盖 keydown、mousedown、wheel、pointermove、blur），每行注明 events.rs 中的处理位置，并指出一处浏览器特有而桌面没有的行为。",
-          "depends_on": [
-            "u7-l1",
-            "u3-l2"
+          "source_files": [
+            "../gpui_web/src/window.rs",
+            "../gpui_web/src/events.rs",
+            "../gpui_web/src/display.rs"
           ],
-          "action": "new"
+          "title": "WebWindow 与浏览器事件桥接",
+          "topic": "分析 WebWindow 如何在 canvas 与 DOM 之上模拟窗口语义（尺寸、设备像素比、焦点），以及 WebEventListeners 如何把键盘、鼠标、指针等浏览器事件翻译成 GPUI 的 PlatformInput。"
         },
         {
-          "id": "u7-l3",
-          "title": "hello_web 实战：trunk 打包与前后台协作",
-          "order": 3,
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
           "filename": "u7-l3-hello-web-example.md",
-          "level": "advanced",
-          "topic": "完整走读 hello_web 示例：trunk.toml 与 .cargo/config.toml 的构建配置、wasm-bindgen 入口写法、多 chunk 后台计算与前台进度更新的协作模式。",
+          "id": "u7-l3",
           "learning_goals": [
             "掌握用 trunk 构建 GPUI wasm 应用的完整流程",
             "理解 hello_web 中 NUM_CHUNKS 任务切分与 Task 存储的生命周期管理",
             "能独立把一个 GPUI 桌面示例移植到 web 平台"
           ],
+          "level": "advanced",
+          "minimal_modules": [
+            "hello_web::main",
+            "requested_backend",
+            "HelloWeb::start_search"
+          ],
+          "order": 3,
+          "practice_task": "本地跑通 hello_web（或完成移植方案文档），然后改造它：把素数计数换成你自己的 CPU 密集任务，保持多 chunk 后台并行与前台进度条更新结构不变。",
           "source_files": [
             "../gpui_web/examples/hello_web/main.rs",
             "../gpui_web/examples/hello_web/trunk.toml",
             "../gpui_web/examples/hello_web/Cargo.toml",
             "../gpui_web/examples/hello_web/.cargo/config.toml"
           ],
-          "minimal_modules": [
-            "hello_web::main",
-            "requested_backend",
-            "HelloWeb::start_search"
-          ],
-          "practice_task": "本地跑通 hello_web（或完成移植方案文档），然后改造它：把素数计数换成你自己的 CPU 密集任务，保持多 chunk 后台并行与前台进度条更新结构不变。",
-          "depends_on": [
-            "u7-l1"
-          ],
-          "action": "new"
+          "title": "hello_web 实战：trunk 打包与前后台协作",
+          "topic": "完整走读 hello_web 示例：trunk.toml 与 .cargo/config.toml 的构建配置、wasm-bindgen 入口写法、多 chunk 后台计算与前台进度更新的协作模式。"
         }
-      ]
+      ],
+      "level": "advanced",
+      "order": 7,
+      "title": "Web 平台：把 GPUI 带进浏览器"
     },
     {
       "id": "u8",
-      "title": "高级主题：文本、渲染、无头与二次开发",
-      "level": "advanced",
-      "order": 8,
       "lectures": [
         {
-          "id": "u8-l1",
-          "title": "PlatformTextSystem：字体加载、整形与四套字体栈",
-          "order": 1,
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
           "filename": "u8-l1-text-system.md",
-          "level": "advanced",
-          "topic": "讲解 PlatformTextSystem trait（platform.rs:1072 起）涵盖的字体枚举、字形id、 shaping 与布局查询，并对比四套实现：macOS CoreText+open_type、Linux font-kit、Windows DirectWrite、Web 实现。",
+          "id": "u8-l1",
           "learning_goals": [
             "列出 PlatformTextSystem 的核心方法与返回数据结构",
             "解释 FontId、GlyphId、ShapedRun 等类型在渲染管线中的位置",
             "对比四个平台字体引擎的能力差异与取舍"
           ],
+          "level": "advanced",
+          "minimal_modules": [
+            "PlatformTextSystem",
+            "macos::text_system",
+            "linux::text_system",
+            "direct_write"
+          ],
+          "order": 1,
+          "practice_task": "写一个程序枚举系统全部字体并打印三个字体族的度量（ascender、descender、line_height），在两个不同操作系统上运行并对比结果差异。",
           "source_files": [
             "../gpui/src/platform.rs",
             "../gpui_macos/src/text_system.rs",
@@ -908,95 +951,81 @@
             "../gpui_windows/src/direct_write.rs",
             "../gpui_macos/src/open_type.rs"
           ],
-          "minimal_modules": [
-            "PlatformTextSystem",
-            "macos::text_system",
-            "linux::text_system",
-            "direct_write"
-          ],
-          "practice_task": "写一个程序枚举系统全部字体并打印三个字体族的度量（ascender、descender、line_height），在两个不同操作系统上运行并对比结果差异。",
-          "depends_on": [
-            "u2-l1"
-          ],
-          "action": "new"
+          "title": "PlatformTextSystem：字体加载、整形与四套字体栈",
+          "topic": "讲解 PlatformTextSystem trait（platform.rs:1072 起）涵盖的字体枚举、字形id、 shaping 与布局查询，并对比四套实现：macOS CoreText+open_type、Linux font-kit、Windows DirectWrite、Web 实现。"
         },
         {
-          "id": "u8-l2",
-          "title": "PlatformAtlas 与渲染后端：字形与图集管理",
-          "order": 2,
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
           "filename": "u8-l2-atlas-and-renderers.md",
-          "level": "advanced",
-          "topic": "讲解 PlatformAtlas trait（platform.rs:1324 起）如何为渲染后端管理字形/纹理图集，并结合 Windows 的 directx_atlas 与 macOS 的 metal_renderer 看图集与具体 GPU API 的配合。",
+          "id": "u8-l2",
           "learning_goals": [
             "理解图集在 GPU UI 渲染中减少状态切换的作用",
             "描述 RenderGlyphParams/RenderImageParams 等绘制参数如何进入图集",
             "说明 Windows 图集与渲染器、设备三者的所有权关系"
           ],
-          "source_files": [
-            "../gpui/src/platform.rs",
-            "../gpui_windows/src/directx_atlas.rs",
-            "../gpui_windows/src/directx_renderer.rs"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "PlatformAtlas",
             "directx_atlas",
             "directx_renderer"
           ],
-          "practice_task": "画一张\"一次文本绘制请求\"的数据流图：从 layout 结果到字形进入图集再到 GPU 绘制，标注每一步对应的 trait 方法与实现文件。",
-          "depends_on": [
-            "u3-l2"
+          "order": 2,
+          "practice_task": "画一张「一次文本绘制请求」的数据流图：从 layout 结果到字形进入图集再到 GPU 绘制，标注每一步对应的 trait 方法与实现文件。",
+          "source_files": [
+            "../gpui/src/platform.rs",
+            "../gpui_windows/src/directx_atlas.rs",
+            "../gpui_windows/src/directx_renderer.rs"
           ],
-          "action": "new"
+          "title": "PlatformAtlas 与渲染后端：字形与图集管理",
+          "topic": "讲解 PlatformAtlas trait（platform.rs:1324 起）如何为渲染后端管理字形/纹理图集，并结合 Windows 的 directx_atlas 与 macOS 的 metal_renderer 看图集与具体 GPU API 的配合。"
         },
         {
-          "id": "u8-l3",
-          "title": "无头渲染：PlatformHeadlessRenderer 与离屏截图",
-          "order": 3,
+          "action": "new",
+          "depends_on": [
+            "u5-l2",
+            "u8-l2"
+          ],
           "filename": "u8-l3-headless-renderer.md",
-          "level": "advanced",
-          "topic": "讲解 PlatformHeadlessRenderer 契约、gpui_platform::current_headless_renderer 的平台限制（目前仅 macOS 返回 Metal 实现）、以及 HeadlessAppContext 如何组合平台与无头渲染器做离屏渲染。",
+          "id": "u8-l3",
           "learning_goals": [
             "理解无头渲染与无头平台两个概念的组合关系",
             "说明为什么该能力当前只落在 macOS 上",
             "掌握 HeadlessAppContext 的典型用法（视觉快照、自动化截图）"
           ],
+          "level": "advanced",
+          "minimal_modules": [
+            "PlatformHeadlessRenderer",
+            "current_headless_renderer",
+            "HeadlessAppContext"
+          ],
+          "order": 3,
+          "practice_task": "编写一个使用 HeadlessAppContext 的示例（非 macOS 上允许写成编译通过的条件编译骨架），把一个 GPUI 视图离屏渲染成图像并保存，记录平台差异。",
           "source_files": [
             "../gpui/src/platform.rs",
             "src/gpui_platform.rs",
             "../gpui/src/app/headless_app_context.rs",
             "../gpui_macos/src/platform.rs"
           ],
-          "minimal_modules": [
-            "PlatformHeadlessRenderer",
-            "current_headless_renderer",
-            "HeadlessAppContext"
-          ],
-          "practice_task": "编写一个使用 HeadlessAppContext 的示例（非 macOS 上允许写成编译通过的条件编译骨架），把一个 GPUI 视图离屏渲染成图像并保存，记录平台差异。",
-          "depends_on": [
-            "u5-l2",
-            "u8-l2"
-          ],
-          "action": "new"
+          "title": "无头渲染：PlatformHeadlessRenderer 与离屏截图",
+          "topic": "讲解 PlatformHeadlessRenderer 契约、gpui_platform::current_headless_renderer 的平台限制（目前仅 macOS 返回 Metal 实现）、以及 HeadlessAppContext 如何组合平台与无头渲染器做离屏渲染。"
         },
         {
-          "id": "u8-l4",
-          "title": "test-support 与可视化测试：TestPlatform、run_until_parked 与时钟推进",
-          "order": 4,
+          "action": "new",
+          "depends_on": [
+            "u4-l2",
+            "u5-l2"
+          ],
           "filename": "u8-l4-test-support.md",
-          "level": "advanced",
-          "topic": "讲解 gpui 内建的测试平台设施（platform/test 目录）与 ThreadedDispatcher，以及 gpui_platform 测试模块中那三个被 ignore 的 macOS 主线程测试背后的原因、VisualTestAppContext 的 run_until_parked 与 advance_clock 用法。",
+          "id": "u8-l4",
           "learning_goals": [
             "理解为何 macOS 测试必须 --ignored --test-threads=1 运行",
             "掌握用 GPUI 计时器替代 smol::Timer 的测试写法",
             "能编写不依赖真实窗口系统的确定性 UI 测试"
           ],
-          "source_files": [
-            "src/gpui_platform.rs",
-            "../gpui/src/platform/test.rs",
-            "../gpui/src/platform/test/dispatcher.rs",
-            "../gpui/src/platform/visual_test.rs",
-            "../gpui/examples/testing.rs"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "TestDispatcher",
             "VisualTestAppContext",
@@ -1004,39 +1033,20 @@
             "advance_clock",
             "gpui_platform::tests"
           ],
+          "order": 4,
           "practice_task": "参照 gpui_platform.rs 中的测试，写一个使用 TestDispatcher 的测试：断言一个延时任务在时钟推进前未执行、推进后已执行（在非 macOS 平台可去掉主线程限制直接运行）。",
-          "depends_on": [
-            "u4-l2",
-            "u5-l2"
+          "source_files": [
+            "src/gpui_platform.rs",
+            "../gpui/src/platform/test.rs",
+            "../gpui/src/platform/test/dispatcher.rs",
+            "../gpui/src/platform/visual_test.rs",
+            "../gpui/examples/testing.rs"
           ],
-          "action": "new"
+          "title": "test-support 与可视化测试：TestPlatform、run_until_parked 与时钟推进",
+          "topic": "讲解 gpui 内建的测试平台设施（platform/test 目录）与 ThreadedDispatcher，以及 gpui_platform 测试模块中那三个被 ignore 的 macOS 主线程测试背后的原因、VisualTestAppContext 的 run_until_parked 与 advance_clock 用法。"
         },
         {
-          "id": "u8-l5",
-          "title": "毕业实践：实现一个自定义 Platform",
-          "order": 5,
-          "filename": "u8-l5-custom-platform.md",
-          "level": "advanced",
-          "topic": "综合前面所有知识，动手实现一个最小的自定义 Platform（例如把所有系统调用记录到日志的 FakePlatform，或复用 ThreadedDispatcher 的嵌入式外壳），体会契约的完整边界与默认实现的减负作用。",
-          "learning_goals": [
-            "独立判断 Platform trait 中哪些方法必须实现、哪些可用默认值",
-            "复用 gpui 已提供的 ThreadedDispatcher、TestPlatform 等通用构件",
-            "理解向新操作系统或新窗口系统移植 GPUI 的真实工作量分布"
-          ],
-          "source_files": [
-            "../gpui/src/platform.rs",
-            "../gpui/src/platform/threaded_dispatcher.rs",
-            "../gpui/src/platform/test/platform.rs",
-            "src/gpui_platform.rs",
-            "../gpui/src/app.rs"
-          ],
-          "minimal_modules": [
-            "Platform",
-            "ThreadedDispatcher",
-            "test::platform（作为最小实现参考）",
-            "Application::with_platform"
-          ],
-          "practice_task": "实现 FakePlatform：至少正确提供执行器、text_system（可复用现有实现）与 run 循环，其余方法用日志记录并给出合理默认值；用它通过 Application::with_platform 启动一个窗口程序并在日志中验证至少五个平台方法被调用。",
+          "action": "new",
           "depends_on": [
             "u2-l1",
             "u2-l2",
@@ -1044,9 +1054,36 @@
             "u4-l2",
             "u8-l1"
           ],
-          "action": "new"
+          "filename": "u8-l5-custom-platform.md",
+          "id": "u8-l5",
+          "learning_goals": [
+            "独立判断 Platform trait 中哪些方法必须实现、哪些可用默认值",
+            "复用 gpui 已提供的 ThreadedDispatcher、TestPlatform 等通用构件",
+            "理解向新操作系统或新窗口系统移植 GPUI 的真实工作量分布"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Platform",
+            "ThreadedDispatcher",
+            "test::platform（作为最小实现参考）",
+            "Application::with_platform"
+          ],
+          "order": 5,
+          "practice_task": "实现 FakePlatform：至少正确提供执行器、text_system（可复用现有实现）与 run 循环，其余方法用日志记录并给出合理默认值；用它通过 Application::with_platform 启动一个窗口程序并在日志中验证至少五个平台方法被调用。",
+          "source_files": [
+            "../gpui/src/platform.rs",
+            "../gpui/src/platform/threaded_dispatcher.rs",
+            "../gpui/src/platform/test/platform.rs",
+            "src/gpui_platform.rs",
+            "../gpui/src/app.rs"
+          ],
+          "title": "毕业实践：实现一个自定义 Platform",
+          "topic": "综合前面所有知识，动手实现一个最小的自定义 Platform（例如把所有系统调用记录到日志的 FakePlatform，或复用 ThreadedDispatcher 的嵌入式外壳），体会契约的完整边界与默认实现的减负作用。"
         }
-      ]
+      ],
+      "level": "advanced",
+      "order": 8,
+      "title": "高级主题：文本、渲染、无头与二次开发"
     }
   ]
 }

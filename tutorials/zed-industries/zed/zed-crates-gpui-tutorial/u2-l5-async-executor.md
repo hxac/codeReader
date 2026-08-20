@@ -8,6 +8,7 @@
 2. 区分 `cx.spawn` / `cx.background_spawn` 两条派发路径，并解释为什么后者的 future 必须满足 `Send + 'static` 而前者不需要。
 3. 掌握 `Task` 的三种归宿：被 `await`、被 `detach`、被 Drop（取消），以及「取消发生在轮询边界」这一关键语义。
 4. 理解 `PlatformDispatcher` 如何把 GPUI 的调度请求翻译成操作系统原语（主线程派发、后台线程池、定时器），从而让同一套 executor 代码跑在 macOS / Linux / Windows / Web 上。
+5. 知道 `profiler` feature 在调度路径上埋了哪些计数点（`ForegroundRunnableCounter`），并明白它们只做观测、不改变任何调度语义——这是 u7-l6 前台工作日志的入口。
 
 本讲承接 u2-l3 建立的上下文体系：那一讲我们知道了 `Context::spawn` 会把 `WeakEntity<T>` 递进异步闭包，本讲回答「这些异步闭包到底被谁、在哪个线程、按什么规则执行」。
 
@@ -37,9 +38,10 @@ GPUI 的全部实体状态与 UI 渲染都发生在**单一前台线程**（通�
 
 | 文件 | 行数规模 | 作用 |
 |---|---|---|
-| `src/executor.rs` | 约 550 行 | `ForegroundExecutor` / `BackgroundExecutor` 两个公开执行器，`TaskExt` 扩展 trait，以及测试 |
-| `src/platform_scheduler.rs` | 约 450 行 | `PlatformScheduler`：把 scheduler crate 的调度需求翻译成 `PlatformDispatcher` 调用；`PlatformClock`；一组验证线程语义的测试 |
+| `src/executor.rs` | 约 570 行 | `ForegroundExecutor` / `BackgroundExecutor` 两个公开执行器，`TaskExt` 扩展 trait，以及测试 |
+| `src/platform_scheduler.rs` | 约 465 行 | `PlatformScheduler`：把 scheduler crate 的调度需求翻译成 `PlatformDispatcher` 调用；`PlatformClock`；一组验证线程语义的测试 |
 | `src/platform.rs` | 约 3000 行（本讲只看其中一段） | `Platform` trait 与 `PlatformDispatcher` trait——平台差异的隔离层 |
+| `src/profiler/journal.rs` | 约 2760 行（本讲只看一小段） | `profiler` feature 下的前台工作日志；本讲只精读其中 `ForegroundRunnableCounter` 计数器，完整机制留给 u7-l6 |
 | `src/app.rs` | 节选 | `App` 如何持有两个执行器、`App::spawn` 的定义 |
 | `src/app/context.rs` / `src/app/async_context.rs` | 节选 | `Context<T>::spawn`、`background_spawn` 在各上下文上的入口 |
 | `examples/move_entity_between_windows.rs` | 155 行 | 最佳学习样本：timer + 前台任务 + `WeakEntity` 回写的完整闭环 |
@@ -70,27 +72,29 @@ cx.spawn(f)                          (App / Context<T> / AsyncApp)
 
 注意「装箱」这一步的差异：前台用 `boxed_local()`，后台用 `boxed()`——前者不需要 vtable 的线程安全版本，是「不要求 Send」在实现上的直接体现。
 
+另外，`schedule_local` 这一步在启用 `profiler` feature 时还会顺手递增一个「已入队未轮询」计数（见 4.4.3 的埋点讲解）——它只被观测链路读取，对上面的派发流程没有任何影响。
+
 #### 4.1.3 源码精读
 
-先看结构体定义，注意第三个字段：
+先看结构体定义，注意两个细节——`PhantomData` 与 `cfg(profiler)` 下的新字段：
 
-[src/executor.rs:24-L28](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/executor.rs#L24-L28) 定义 `ForegroundExecutor`：内部持有一个 `scheduler::LocalExecutor` 和 `Arc<dyn PlatformDispatcher>`，并用 `not_send: PhantomData<Rc<()>>` 把自己标记为 `!Send`——编译期保证它不会逃逸出主线程。
+[src/executor.rs:23-L30](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L23-L30) 定义 `ForegroundExecutor`：内部持有一个 `scheduler::LocalExecutor` 和 `Arc<dyn PlatformDispatcher>`，用 `not_send: PhantomData<Rc<()>>` 把自己标记为 `!Send`——编译期保证它不会逃逸出主线程。第三个字段 `foreground_runnables` 是提交 1861e58f98 新增的：仅在编译开启 `profiler` feature 时存在，类型是 `Option<journal::ForegroundRunnableCounter>`，用于向前台工作日志报告「有多少个 runnable 已入队」（详见 4.4.3）。
 
 再看 spawn 方法：
 
-[src/executor.rs:335-L342](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/executor.rs#L335-L342) 是 `ForegroundExecutor::spawn`：签名只要求 `Future<Output = R> + 'static`，**没有 `Send` 约束**；实现上用 `boxed_local()` 装箱后交给内部 `LocalExecutor`。
+[src/executor.rs:347-L354](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L347-L354) 是 `ForegroundExecutor::spawn`：签名只要求 `Future<Output = R> + 'static`，**没有 `Send` 约束**；实现上用 `boxed_local()` 装箱后交给内部 `LocalExecutor`。
 
-[src/executor.rs:344-L356](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/executor.rs#L344-L356) 是 `spawn_with_priority`：注释明说前台任务**忽略优先级**，按提交顺序在主线程依次执行——主线程只有一条执行流，天然是 FIFO。
+[src/executor.rs:356-L368](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L356-L368) 是 `spawn_with_priority`：注释明说前台任务**忽略优先级**，按提交顺序在主线程依次执行——主线程只有一条执行流，天然是 FIFO。
 
 用户侧的入口在 `App` 上：
 
-[src/app.rs:1911-L1927](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/app.rs#L1911-L1927) 定义 `App::spawn`：接受 `AsyncFnOnce(&mut AsyncApp) -> R`，先把 `self.to_async()` 克隆出一份 `AsyncApp`，再把「调用该异步闭包」这件事作为一个 future 交给前台执行器。这就是你在闭包里能拿到 `cx: &mut AsyncApp` 的原因。
+[src/app.rs:1936-L1952](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L1936-L1952) 定义 `App::spawn`：接受 `AsyncFnOnce(&mut AsyncApp) -> R`，先把 `self.to_async()` 克隆出一份 `AsyncApp`，再把「调用该异步闭包」这件事情作为一个 future 交给前台执行器。这就是你在闭包里能拿到 `cx: &mut AsyncApp` 的原因。
 
-[src/app/context.rs:237-L245](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/app/context.rs#L237-L245) 定义 `Context<T>::spawn`：与 `App::spawn` 的唯一差别是闭包多收一个参数 `WeakEntity<T>`（`this`）。u2-l3 讲过，这是异步回写实体状态的标准入口，弱引用避免任务把实体寿命无限延长。
+[src/app/context.rs:237-L245](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app/context.rs#L237-L245) 定义 `Context<T>::spawn`：与 `App::spawn` 的唯一差别是闭包多收一个参数 `WeakEntity<T>`（`this`）。u2-l3 讲过，这是异步回写实体状态的标准入口，弱引用避免任务把实体寿命无限延长。
 
 还有一个值得注意的细节——应用退出后的保护：
 
-[src/app.rs:1903-L1909](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/app.rs#L1903-L1909) 中 `App::foreground_executor()` 在 `quitting` 为真时直接 panic（`App::spawn` 里则是 `debug_panic!`）。对照 u2-l1 讲过的「`on_app_quit` 之后前台调度被关闸」，这里就是闸门本身：退出流程开始后不允许再排新的前台工作。
+[src/app.rs:1921-L1927](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L1921-L1927) 中 `App::foreground_executor()` 在 `quitting` 为真时直接 panic（`App::spawn` 里则是 `debug_panic!`）。对照 u2-l1 讲过的「`on_app_quit` 之后前台调度被关闸」，这里就是闸门本身：退出流程开始后不允许再排新的前台工作。
 
 #### 4.1.4 代码实践：用编译器体会 Send 约束差异
 
@@ -121,7 +125,7 @@ cx.spawn(f)                          (App / Context<T> / AsyncApp)
 
 **练习 3**：前台任务调用 `spawn_with_priority(Priority::High, ...)` 会发生什么？
 
-**答案**：优先级被忽略，任务仍按提交顺序在主线程执行。见 [src/executor.rs:354-L355](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/executor.rs#L354-L355) 的注释「Priority is ignored for foreground tasks」。
+**答案**：优先级被忽略，任务仍按提交顺序在主线程执行。见 [src/executor.rs:366](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L366) 的注释「Priority is ignored for foreground tasks」。
 
 ### 4.2 BackgroundExecutor：平台线程池里的后台执行器
 
@@ -160,37 +164,37 @@ cx.background_executor().timer(d)
 
 #### 4.2.3 源码精读
 
-[src/executor.rs:15-L19](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/executor.rs#L15-L19) 定义 `BackgroundExecutor`：同样持有 `Arc<dyn PlatformDispatcher>`，但没有 `PhantomData`——它是 `Clone` 且线程安全的，可以随意复制到任何地方使用。
+[src/executor.rs:15-L19](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L15-L19) 定义 `BackgroundExecutor`：同样持有 `Arc<dyn PlatformDispatcher>`，但没有 `PhantomData`——它是 `Clone` 且线程安全的，可以随意复制到任何地方使用。
 
-[src/executor.rs:110-L117](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/executor.rs#L110-L117) 是 `BackgroundExecutor::spawn`：签名 `future: impl Future<Output = R> + Send + 'static` 且 `R: Send + 'static`——**这就是 Send 约束的源头**。实现上先 `boxed()` 再按默认优先级派发。
+[src/executor.rs:112-L119](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L112-L119) 是 `BackgroundExecutor::spawn`：签名 `future: impl Future<Output = R> + Send + 'static` 且 `R: Send + 'static`——**这就是 Send 约束的源头**。实现上先 `boxed()` 再按默认优先级派发。
 
-[src/executor.rs:124-L137](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/executor.rs#L124-L137) 是 `spawn_with_priority`：注意特例——`Priority::RealtimeAudio` 会走 `spawn_realtime`，在带实时调度优先级的专属线程上运行（音频处理需要确定性延迟）。
+[src/executor.rs:121-L139](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L121-L139) 是 `spawn_with_priority`：注意特例——`Priority::RealtimeAudio` 会走 `spawn_realtime`，在带实时调度优先级的专属线程上运行（音频处理需要确定性延迟）。
 
-[src/executor.rs:181-L190](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/executor.rs#L181-L190) 是 `timer`：时长为零时直接返回 `Task::ready(())`（不产生任何调度）；否则把调度器提供的 `Timer` future 再 spawn 成后台任务。文档提醒：受其他任务影响，实际经过的时间**可能**比请求的长。
+[src/executor.rs:183-L192](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L183-L192) 是 `timer`：时长为零时直接返回 `Task::ready(())`（不产生任何调度）；否则把调度器提供的 `Timer` future 再 spawn 成后台任务。文档提醒：受其他任务影响，实际经过的时间**可能**比请求的长。
 
-[src/executor.rs:89-L108](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/executor.rs#L89-L108) 是 `spawn_dedicated`：为闭包开一根新的专属 OS 线程（持有独立的 `LocalExecutor`）。文档注释解释了动机——共享后台线程的栈可能很小（macOS GCD 工作线程固定 512 KiB），深递归或大栈 future 应该用满 2 MiB 标准栈的专属线程。注意约束的巧妙之处：future 本身可以 `!Send`（独占线程内可以用 `Rc`），但**返回值**必须 `Send + Sync`（要送回发起线程）。
+[src/executor.rs:91-L110](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L91-L110) 是 `spawn_dedicated`：为闭包开一根新的专属 OS 线程（持有独立的 `LocalExecutor`）。文档注释解释了动机——共享后台线程的栈可能很小（macOS GCD 工作线程固定 512 KiB），深递归或大栈 future 应该用满 2 MiB 标准栈的专属线程。注意约束的巧妙之处：future 本身可以 `!Send`（独占线程内可以用 `Rc`），但**返回值**必须 `Send + Sync`（要送回发起线程）。
 
 用户侧入口（与 4.1.3 的 `spawn` 对照）：
 
-[src/app/context.rs:856-L862](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/app/context.rs#L856-L862) 与 [src/app/async_context.rs:126-L132](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/app/async_context.rs#L126-L132) 分别在 `Context<T>` 与 `AsyncApp` 上定义 `background_spawn`：实现都只有一行——`self.app.background_executor.spawn(future)`（后者经由 `self.background_executor`）。**`background_spawn` 不给你 `AsyncApp`**，因为后台线程根本不允许碰实体状态。
+[src/app/context.rs:856-L863](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app/context.rs#L856-L863) 与 [src/app/async_context.rs:125-L131](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app/async_context.rs#L125-L131) 分别在 `Context<T>` 与 `AsyncApp` 上定义 `background_spawn`：实现都只有一行——`self.app.background_executor.spawn(future)`（后者经由 `self.background_executor`）。**`background_spawn` 不给你 `AsyncApp`**，因为后台线程根本不允许碰实体状态。
 
 装配发生在 `App` 创建时：
 
-[src/app.rs:769-L780](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/app.rs#L769-L780) 中 `App::new_app` 从 `Rc<dyn Platform>` 取出两个执行器存入 `App`，并断言 `background_executor.is_main_thread()`——App 必须在主线程构造（呼应 u2-l1）。
+[src/app.rs:779-L792](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L779-L792) 中 `App::new_app` 从 `Rc<dyn Platform>` 取出两个执行器存入 `App`，并断言 `background_executor.is_main_thread()`——App 必须在主线程构造（呼应 u2-l1）。同一段里还能看到 `#[cfg(feature = "profiler")]` 下调用 `install_foreground_journal()` 安装前台日志（见 4.4.3）。
 
 一个真实用例（timer 的最小闭环）：
 
-[src/examples/window.rs:251-L265](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/examples/window.rs#L251-L265) 「Hide Application」按钮：先 `cx.hide()` 隐藏应用，然后 `window.spawn` 起一个前台任务，`await` 一个 3 秒 timer，再 `cx.activate(false)` 恢复应用，最后 `detach()` 让它自生自灭。这个 8 行片段浓缩了本讲全部概念：前台任务、后台 timer、await 串联、detach。
+[src/examples/window.rs:251-L265](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/examples/window.rs#L251-L265) 「Hide Application」按钮：先 `cx.hide()` 隐藏应用，然后 `window.spawn` 起一个前台任务，`await` 一个 3 秒 timer，再 `cx.activate(false)` 恢复应用，最后 `detach()` 让它自生自灭。这个 8 行片段浓缩了本讲全部概念：前台任务、后台 timer、await 串联、detach。
 
 #### 4.2.4 代码实践：阅读 timer 驱动的真实闭环
 
 1. **实践目标**：读懂一个「定时器 → 前台回写」的完整生产级循环。
 2. **操作步骤**：
-   - 打开 [examples/move_entity_between_windows.rs:35-L51](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/examples/move_entity_between_windows.rs#L35-L51)。
+   - 打开 [examples/move_entity_between_windows.rs:35-L51](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/examples/move_entity_between_windows.rs#L35-L51)。
    - 运行：`cargo run -p gpui --example move_entity_between_windows`。
    - 对照下面的调用链标注每一行：`cx.spawn_in` 把谁递给了闭包？`cx.background_executor().timer(...)` 在哪个线程计时？`this.update_in` 如何回到实体所在的窗口？
 3. **需要观察的现象**：终端每秒打印一行 `tick #N fired in entity's current window ...`；点击按钮把实体搬进新窗口后，tick 打印的窗口编号随之改变。
-4. **预期结果**：任务引用被存进 `_tasks: Vec<Task<()>>` 字段（[examples/move_entity_between_windows.rs:25](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/examples/move_entity_between_windows.rs#L25)），实体存活期间循环不会被取消——这就是「存字段以延长任务寿命」的官方推荐写法（CLAUDE.md 中的约定）。
+4. **预期结果**：任务引用被存进 `_tasks: Vec<Task<()>>` 字段（[examples/move_entity_between_windows.rs:25](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/examples/move_entity_between_windows.rs#L25)），实体存活期间循环不会被取消——这就是「存字段以延长任务寿命」的官方推荐写法（CLAUDE.md 中的约定）。
 
 #### 4.2.5 小练习与答案
 
@@ -200,11 +204,11 @@ cx.background_executor().timer(d)
 
 **练习 2**：为什么 `BackgroundExecutor::timer(0)` 不派发任何任务？
 
-**答案**：见 [src/executor.rs:186-L188](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/executor.rs#L186-L188)：零时长定时器语义上立即就绪，直接返回 `Task::ready(())`，避免一次无意义的「派发到平台 → 平台立刻唤醒」往返。
+**答案**：见 [src/executor.rs:188-L190](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L188-L190)：零时长定时器语义上立即就绪，直接返回 `Task::ready(())`，避免一次无意义的「派发到平台 → 平台立刻唤醒」往返。
 
 **练习 3**：你要在后台跑一个需要 8 MiB 栈的深递归解析器，该用 `spawn` 还是 `spawn_dedicated`？
 
-**答案**：`spawn_dedicated`。`spawn` 的 future 由平台线程池轮询，栈大小不受你控制（macOS GCD 工作线程仅 512 KiB）；`spawn_dedicated` 为该会话开专属 OS 线程，享有标准库默认 2 MiB 栈，且独占线程内还允许 future 使用 `Rc` 等 `!Send` 类型（返回值仍需 `Send + Sync`）。见 [src/executor.rs:89-L108](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/executor.rs#L89-L108) 的文档注释。
+**答案**：`spawn_dedicated`。`spawn` 的 future 由平台线程池轮询，栈大小不受你控制（macOS GCD 工作线程仅 512 KiB）；`spawn_dedicated` 为该会话开专属 OS 线程，享有标准库默认 2 MiB 栈，且独占线程内还允许 future 使用 `Rc` 等 `!Send` 类型（返回值仍需 `Send + Sync`）。见 [src/executor.rs:91-L110](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L91-L110) 的文档注释。
 
 ### 4.3 Task：可等待、可分离、可取消的 future 句柄
 
@@ -242,27 +246,27 @@ Task<R> 的生命周期：
 
 `Task` 类型本身来自 `scheduler` crate，gpui 重新导出：
 
-[src/executor.rs:9-L11](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/executor.rs#L9-L11) 把 `Task`、`FallibleTask`、`Priority`、`DedicatedExecutor` 等从 `scheduler` crate 引入 gpui 命名空间——`Task` 的定义不在 gpui 源码内，但它的行为由 gpui 自己的测试约束。
+[src/executor.rs:9-L11](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L9-L11) 把 `Task`、`FallibleTask`、`Priority`、`DedicatedExecutor` 等从 `scheduler` crate 引入 gpui 命名空间——`Task` 的定义不在 gpui 源码内，但它的行为由 gpui 自己的测试约束。
 
 取消语义有测试为证：
 
-[src/platform_scheduler.rs:289-L337](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/platform_scheduler.rs#L289-L337) 测试 `spawn_dedicated_dropping_task_cancels_future`：future 先发信号宣布自己已启动，然后 `futures::future::pending::<()>().await` 永久挂起；测试随后 `drop(task)`，断言 await 点之后的代码**从未执行**（两个通道都收不到信号）。这就是「Drop 即取消、取消在 await 边界生效」的可执行证明。
+[src/platform_scheduler.rs:302-L350](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform_scheduler.rs#L302-L350) 测试 `spawn_dedicated_dropping_task_cancels_future`：future 先发信号宣布自己已启动，然后 `futures::future::pending::<()>().await` 永久挂起；测试随后 `drop(task)`，断言 await 点之后的代码**从未执行**（两个通道都收不到信号）。这就是「Drop 即取消、取消在 await 边界生效」的可执行证明。
 
 `detach` 的真实用法：
 
-[src/executor.rs:46-L52](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/executor.rs#L46-L52) 是 `TaskExt::detach_and_log_err` 的实现：把「记录错误」这一步包装成新的 future，再 `spawn` 到**前台**执行器并 `detach()`。注意 `#[track_caller]`——它捕获调用位置，让日志能指向任务诞生的源码行。
+[src/executor.rs:48-L54](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L48-L54) 是 `TaskExt::detach_and_log_err` 的实现：把「记录错误」这一步包装成新的 future，再 `spawn` 到**前台**执行器并 `detach()`。注意 `#[track_caller]`——它捕获调用位置，让日志能指向任务诞生的源码行。
 
-[src/examples/testing.rs:449-L455](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/examples/testing.rs#L449-L455) 展示最朴素的后台发射模式：`cx.background_spawn({ let client = self.client.clone(); async move { client.send(delta); } }).detach();`——先克隆需要的数据，后台发送，凭证立即 detach。这里必须先 `clone`：`self.client` 是借来的，`async move` 块要 `'static`。
+[src/examples/testing.rs:449-L455](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/examples/testing.rs#L449-L455) 展示最朴素的后台发射模式：`cx.background_spawn({ let client = self.client.clone(); async move { client.send(delta); } }).detach();`——先克隆需要的数据，后台发送，凭证立即 detach。这里必须先 `clone`：`self.client` 是借来的，`async move` 块要 `'static`。
 
 gpui 自己的单测里还能看到任务最基本的运行验证：
 
-[src/executor.rs:530-L554](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/executor.rs#L530-L554) 测试 `sanity_test_tasks_run`：前台 spawn 一个改写 `Rc<RefCell<bool>>` 的任务并 detach，`run_until_parked` 推进调度后断言任务确实执行了。注意任务体里用的正是 `Rc`——前台任务 `!Send` 也无妨的活证据。
+[src/executor.rs:548-L571](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L548-L571) 测试 `sanity_test_tasks_run`：前台 spawn 一个改写 `Rc<RefCell<bool>>` 的任务并 detach，`run_until_parked` 推进调度后断言任务确实执行了。注意任务体里用的正是 `Rc`——前台任务 `!Send` 也无妨的活证据。
 
 #### 4.3.4 代码实践：见证 Drop 取消
 
 1. **实践目标**：亲手验证「丢弃 Task 会取消 future，且取消发生在 await 点」。
 2. **操作步骤**：
-   - 阅读 [src/platform_scheduler.rs:289-L337](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/platform_scheduler.rs#L289-L337) 的测试，画出时间线：`started` 信号 → `pending().await` 挂起 → `drop(task)` → 断言 `after_park` 信号永不出现。
+   - 阅读 [src/platform_scheduler.rs:302-L350](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform_scheduler.rs#L302-L350) 的测试，画出时间线：`started` 信号 → `pending().await` 挂起 → `drop(task)` → 断言 `after_park` 信号永不出现。
    - 运行：`cargo test -p gpui --lib -- platform_scheduler`（测试名过滤方式「待本地验证」）。
 3. **需要观察的现象**：该测试通过——说明 Drop 之后 future 在 `await` 点被取消、后续代码没有执行。做对比实验时要注意：单纯注释掉 `drop(task)` 并不能让断言失败（future 挂在 `pending()` 上，`after_park_rx.recv_timeout(...)` 依旧超时返回 `Err`），更有效的改法是把 `pending().await` 换成带超时的等待（例如 `futures::future::select` + `timer`），让「任务存活」与「任务被取消」产生可区分的信号；改造后的具体现象「待本地验证」。
 4. **预期结果**：建立肌肉记忆——`Task` 不是「线程句柄」而是「取消凭证」；想要任务活着，要么 await、要么 detach、要么存起来。
@@ -279,7 +283,7 @@ gpui 自己的单测里还能看到任务最基本的运行验证：
 
 **练习 3**：为什么 `detach_and_log_err` 要把错误处理任务 spawn 到**前台**执行器而不是后台？
 
-**答案**：见 [src/executor.rs:49-L51](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/executor.rs#L49-L51)：日志写入通常涉及共享的日志器状态，且 `log_tracked_err` 链路与前台基础设施协作；前台执行器保证按序执行且无需 `Send`。同时它借 `#[track_caller]` 把调用点位置带进日志，便于排查。
+**答案**：见 [src/executor.rs:51-L53](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L51-L53)：日志写入通常涉及共享的日志器状态，且 `log_tracked_err` 链路与前台基础设施协作；前台执行器保证按序执行且无需 `Send`。同时它借 `#[track_caller]` 把调用点位置带进日志，便于排查。
 
 ### 4.4 PlatformDispatcher 与 PlatformScheduler：平台调度器如何驱动 futures
 
@@ -301,7 +305,7 @@ gpui 自己的单测里还能看到任务最基本的运行验证：
 scheduler crate 执行器          PlatformScheduler(适配器)           平台实现 crate
 ─────────────────────          ──────────────────────           ─────────────────
 LocalExecutor ──schedule_local──▶ dispatch_on_main_thread ───────▶ GCD main queue /
-                                                                  事件循环唤醒
+                                 （profiler 下先递增入队计数）       事件循环唤醒
 BackgroundExecutor
  ──schedule_background_with_...─▶ dispatch(runnable, priority) ─▶ GCD work queue /
                                                                   线程池
@@ -315,7 +319,7 @@ block(同步阻塞) ───────────────▶ Parker + wa
 平台实现提供 Arc<dyn PlatformDispatcher>
   → BackgroundExecutor::new / ForegroundExecutor::new 包装它（内部各建一个 PlatformScheduler）
     → Platform::background_executor() / foreground_executor() 暴露给框架
-      → App::new_app 取出并存入字段（app.rs:774-775）
+      → App::new_app 取出并存入字段（app.rs:784-785；profiler 下还安装前台日志）
         → 各上下文经 background_spawn / spawn 触达用户代码
 ```
 
@@ -323,49 +327,66 @@ block(同步阻塞) ───────────────▶ Parker + wa
 
 先看平台契约：
 
-[src/platform.rs:1025-L1032](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/platform.rs#L1025-L1032) 定义 `PlatformDispatcher` trait 的四个核心方法：`is_main_thread`、`dispatch`、`dispatch_on_main_thread`、`dispatch_after`。注释明确说它「public 是为了测试宏，但不应视为公开 API」——这是内部契约。
+[src/platform.rs:1029-L1033](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L1029-L1033) 定义 `PlatformDispatcher` trait 的四个核心方法：`is_main_thread`、`dispatch`、`dispatch_on_main_thread`、`dispatch_after`。注释明确说它「public 是为了测试宏，但不应视为公开 API」——这是内部契约。
 
-[src/platform.rs:1034-L1055](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/platform.rs#L1034-L1055) 是几个带默认实现的方法：`dispatch_on_main_thread_when_idle` 默认退化为「低优先级主线程派发」（支持空闲调度的平台可覆写，对应 `ForegroundExecutor::spawn_when_idle`）；`now()` 默认 `Instant::now()`；`increase_timer_resolution` 返回空 guard（Windows 平台可覆写，见下文 `block` 里的用法）。
+[src/platform.rs:1035-L1056](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L1035-L1056) 是几个带默认实现的方法：`dispatch_on_main_thread_when_idle` 默认退化为「低优先级主线程派发」（支持空闲调度的平台可覆写，对应 `ForegroundExecutor::spawn_when_idle`）；`now()` 默认 `Instant::now()`；`increase_timer_resolution` 返回空 guard（Windows 平台可覆写，见下文 `block` 里的用法）。
 
 而 `Platform` trait 对外只暴露两个工厂：
 
-[src/platform.rs:124-L127](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/platform.rs#L124-L127) `Platform::background_executor` / `foreground_executor`——平台实现负责构造绑定自己调度原语的执行器。
+[src/platform.rs:127-L128](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L127-L128) `Platform::background_executor` / `foreground_executor`——平台实现负责构造绑定自己调度原语的执行器。
 
 再看适配器：
 
-[src/platform_scheduler.rs:23-L55](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/platform_scheduler.rs#L23-L55) 定义 `PlatformScheduler` 与其 `foreground_executor` 工厂：为每个前台执行器分配一个 `SessionId`，并注入「需要调度时回调 `schedule_local`」的闭包（持有 `Weak` 引用避免环）。
+[src/platform_scheduler.rs:27-L33](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform_scheduler.rs#L27-L33) 定义 `PlatformScheduler`：除了 `dispatcher`、`clock`、`next_session_id` 三个老字段，还多了一个 `#[cfg(feature = "profiler")]` 的 `foreground_runnables: ForegroundRunnableCounter`（L31-L32）——就是前文反复出现的那个计数器，宿主在这里。
 
-[src/platform_scheduler.rs:107-L118](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/platform_scheduler.rs#L107-L118) 是两个翻译函数本体：`schedule_local` → `dispatch_on_main_thread`；`schedule_background_with_priority` → `dispatch`。整个适配器的核心就这两行透传。
+[src/platform_scheduler.rs:46-L54](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform_scheduler.rs#L46-L54) 是 `foreground_executor` 工厂：为每个前台执行器分配一个 `SessionId`，并注入「需要调度时回调 `schedule_local`」的闭包（持有 `Weak` 引用避免环）。
 
-[src/platform_scheduler.rs:124-L147](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/platform_scheduler.rs#L124-L147) 实现 `timer`：用 `async_task::Builder` 造一个 runnable，其 schedule 回调把 runnable 交给 `dispatch_after(duration, ...)`；runnable 执行时往 oneshot channel 发 `()`，`Timer` future 因收到该信号而就绪。计时由此完全委托给平台定时器。
+[src/platform_scheduler.rs:118-L131](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform_scheduler.rs#L118-L131) 是两个翻译函数本体：`schedule_local` → `dispatch_on_main_thread`；`schedule_background_with_priority` → `dispatch`。注意 `schedule_local` 开头多出的两行 `#[cfg(feature = "profiler")] self.foreground_runnables.queued();`——每次把 runnable 排向主线程时先递增计数（见下文「可观测性埋点」）。
 
-[src/platform_scheduler.rs:57-L105](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/platform_scheduler.rs#L57-L105) 实现 `block`（同步阻塞等 future）：用 `waker_fn` 把「唤醒」接到 `parking` crate 的 unparker 上，循环「poll → park 直到被唤醒或超时」。注意 L86-L90 的细节：在 Windows 上等超时时先调 `increase_timer_resolution()`——因为 Windows 默认定时器精度约 15.6 毫秒，不提高精度短超时会严重失真。这是平台差异渗入调度层的绝佳例子。
+[src/platform_scheduler.rs:137-L160](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform_scheduler.rs#L137-L160) 实现 `timer`：用 `async_task::Builder` 造一个 runnable，其 schedule 回调把 runnable 交给 `dispatch_after(duration, ...)`；runnable 执行时往 oneshot channel 发 `()`，`Timer` future 因收到该信号而就绪。计时由此完全委托给平台定时器。
 
-[src/platform_scheduler.rs:174-L186](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/platform_scheduler.rs#L174-L186) 是 `PlatformClock`：`now()` 委托给 `dispatcher.now()` 而不是直接 `Instant::now()`——这让测试平台可以注入假时钟（对应 `BackgroundExecutor::now()` 的文档「允许测试使用假计时器」）。
+[src/platform_scheduler.rs:69-L116](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform_scheduler.rs#L69-L116) 实现 `block`（同步阻塞等 future）：用 `waker_fn` 把「唤醒」接到 `parking` crate 的 unparker 上，循环「poll → park 直到被唤醒或超时」。注意 L96-L101 的细节：在 Windows 上等超时时先调 `increase_timer_resolution()`——因为 Windows 默认定时器精度约 15.6 毫秒，不提高精度短超时会严重失真。这是平台差异渗入调度层的绝佳例子。
+
+[src/platform_scheduler.rs:186-L199](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform_scheduler.rs#L186-L199) 是 `PlatformClock`：`now()` 委托给 `dispatcher.now()` 而不是直接 `Instant::now()`——这让测试平台可以注入假时钟（对应 `BackgroundExecutor::now()` 的文档「允许测试使用假计时器」）。
+
+**可观测性埋点：ForegroundRunnableCounter（profiler feature）**
+
+提交 1861e58f98（gpui: Journal foreground work between frames and report hang incidents）在这条调度链上插入了一组纯观测性的计数点。它们全部包在 `#[cfg(feature = "profiler")]` 里，默认构建（不开该 feature）连字段都不存在，调度语义分毫未动：
+
+- [src/profiler/journal.rs:357-L378](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/profiler/journal.rs#L357-L378) 定义 `ForegroundRunnableCounter`：本质就是一个 `Arc<AtomicUsize>`。`queued()` 原子加一；`finished()` 原子减一（用 `fetch_update` + `checked_sub`，减到 0 不会下溢）；`has_runnables()` 询问队列里是否还有未完成的工作。
+- 入队侧有两处调用 `queued()`：一是 [src/platform_scheduler.rs:118-L123](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform_scheduler.rs#L118-L123) 的 `schedule_local`（覆盖普通前台任务）；二是 [src/executor.rs:379-L399](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L379-L399) 的 `spawn_when_idle`——它绕过 `schedule_local`、直接走 `dispatch_on_main_thread_when_idle`，所以要自己在派发闭包里补一次计数（L389-L396）。
+- 计数器的所有权链：`PlatformScheduler` 构造时从线程局部存储取一份（[src/platform_scheduler.rs:36-L44](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform_scheduler.rs#L36-L44)），`ForegroundExecutor::new` 再经访问器 [src/platform_scheduler.rs:60-L65](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform_scheduler.rs#L60-L65) 克隆出 `Option<ForegroundRunnableCounter>` 存进执行器（[src/executor.rs:296-L345](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L296-L345)）。注意 L333-L336 的注释：测试构建下计数器是 `None`——确定性测试调度器不会触发 GPUI 的任务 profiler 钩子，若照常递增就会出现「只加不减」的脏计数。
+- 消费侧在 `App`：[src/app.rs:690-L693](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L690-L693) 给 `App` 增加了 `foreground_journal` 字段，[src/app.rs:790-L791](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L790-L791) 在 `new_app` 里安装，[src/app.rs:1929-L1934](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L1929-L1934) 暴露 `App::foreground_journal()` 访问器（同一前台线程上的多个 App 共享一条日志流）。
+
+这组计数回答的问题是：「主线程此刻是真的空闲，还是只是暂时没有 runnable 排队？」前台日志（ForegroundJournal）据此把连续的事件流切分成一段段「活动区间」，并把低于 100µs（`TASK_POLL_FLOOR`）的零星任务轮询折叠成聚合计数而不是逐条记录——这正是本讲开头那个 `schedule_local` 里两行 `cfg` 代码的存在意义。日志如何被 HangDetector 消费、如何产出卡顿报告，是 u7-l6 的主题，本讲只需记住：**调度链上多了一双「只看不动手」的眼睛**。
 
 #### 4.4.4 代码实践：画一条完整的派发链
 
 1. **实践目标**：把本讲四条链路（前台派发、后台派发、定时器、阻塞等待）各自整理成「方法 → 方法 → 平台原语」的清单。
 2. **操作步骤**：
-   - 从 [src/app/context.rs:856-L862](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/app/context.rs#L856-L862) 的 `background_spawn` 出发，手动展开到 `PlatformDispatcher::dispatch`，把途经的每个函数与行号记下来。
-   - 再从 `App::spawn`（[src/app.rs:1911-L1927](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/app.rs#L1911-L1927)）展开到 `dispatch_on_main_thread`。
+   - 从 [src/app/context.rs:856-L863](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app/context.rs#L856-L863) 的 `background_spawn` 出发，手动展开到 `PlatformDispatcher::dispatch`，把途经的每个函数与行号记下来。
+   - 再从 `App::spawn`（[src/app.rs:1936-L1952](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L1936-L1952)）展开到 `dispatch_on_main_thread`。
    - 用 `grep -n "dispatch_on_main_thread" src/platform.rs` 之类验证清单（源码阅读型实践，无需运行）。
-3. **需要观察的现象**：两条链在中途分叉（`schedule_local` vs `schedule_background_with_priority`），最终汇合于同一个 `Arc<dyn PlatformDispatcher>`。
+3. **需要观察的现象**：两条链在中途分叉（`schedule_local` vs `schedule_background_with_priority`），最终汇合于同一个 `Arc<dyn PlatformDispatcher>`；前台那条链路上还能标出 `queued()` 计数点。
 4. **预期结果**：得到一张可对照源码的派发链图；后续阅读任何 `cx.spawn` 代码都能立刻说出「这段代码将在哪个线程、被谁轮询」。
 
 #### 4.4.5 小练习与答案
 
 **练习 1**：`PlatformScheduler` 为什么持有 `Arc<dyn PlatformDispatcher>`，而 `foreground_executor` 工厂里却只给闭包一个 `Weak`？
 
-**答案**：见 [src/platform_scheduler.rs:42-L50](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/platform_scheduler.rs#L42-L50)：`PlatformScheduler` 自身生命周期与平台一致，强引用没问题；但注入给 `LocalExecutor` 的调度闭包可能活得比 scheduler 更久（执行器被移动、scheduler 已析构），用 `Weak` + `upgrade()` 失败时静默丢弃，避免闭包反向吊住 scheduler 的寿命（u2-l2 讲过的强引用成环问题）。
+**答案**：见 [src/platform_scheduler.rs:48-L53](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform_scheduler.rs#L48-L53)：`PlatformScheduler` 自身生命周期与平台一致，强引用没问题；但注入给 `LocalExecutor` 的调度闭包可能活得比 scheduler 更久（执行器被移动、scheduler 已析构），用 `Weak` + `upgrade()` 失败时静默丢弃，避免闭包反向吊住 scheduler 的寿命（u2-l2 讲过的强引用成环问题）。
 
 **练习 2**：如果一个新的操作系统平台要接入 GPUI，最少要实现 `PlatformDispatcher` 的哪些方法？
 
-**答案**：必须实现无默认体的四个：`is_main_thread`、`dispatch`、`dispatch_on_main_thread`、`dispatch_after`（[src/platform.rs:1028-L1032](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/platform.rs#L1028-L1032)），外加 `spawn_realtime`（L1047，无默认体）。其余（`now`、`increase_timer_resolution`、`dispatch_on_main_thread_when_idle`、`idle_time_remaining`）都有可用的默认实现。这个短清单正说明该 trait 是精心收敛过的「平台最小调度契约」。
+**答案**：必须实现无默认体的四个：`is_main_thread`、`dispatch`、`dispatch_on_main_thread`、`dispatch_after`（[src/platform.rs:1030-L1033](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L1030-L1033)），外加 `spawn_realtime`（[src/platform.rs:1048](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L1048)，无默认体）。其余（`now`、`increase_timer_resolution`、`dispatch_on_main_thread_when_idle`、`idle_time_remaining`）都有可用的默认实现。这个短清单正说明该 trait 是精心收敛过的「平台最小调度契约」。
 
 **练习 3**：测试平台上 `cx.background_executor().timer(...)` 会真的等一秒吗？
 
-**答案**：不会。测试分发器携带假时钟：`BackgroundExecutor::advance_clock(duration)` 直接把时间拨 forward 使 timer 就绪（[src/executor.rs:198-L202](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/executor.rs#L198-L202)），`run_until_parked` 在无任务可跑时也会自动推进到下一个 timer。这就是 u1-l4 提过的 `run_until_parked` 测试范式的底层支撑，也是 `PlatformClock` 把 `now()` 委托给 dispatcher 的原因。
+**答案**：不会。测试分发器携带假时钟：`BackgroundExecutor::advance_clock(duration)` 直接把时间拨 forward 使 timer 就绪（[src/executor.rs:200-L204](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L200-L204)），`run_until_parked` 在无任务可跑时也会自动推进到下一个 timer。这就是 u1-l4 提过的 `run_until_parked` 测试范式的底层支撑，也是 `PlatformClock` 把 `now()` 委托给 dispatcher 的原因。
+
+**练习 4**：为什么 `ForegroundRunnableCounter` 在测试构建下被置为 `None`，而不是照样计数？
+
+**答案**：见 [src/executor.rs:333-L336](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L333-L336) 的注释：计数器的增减必须成对——入队时 `queued()` 加一，轮询结束由 profiler 钩子 `finished()` 减一。确定性测试调度器不调用这些钩子，若照常递增，计数会只涨不降，`has_runnables()` 永远为真，前台日志会把「空闲」误判成「忙碌」。置 `None` 是让观测链路在无法自洽的环境里干脆闭嘴。
 
 ## 5. 综合实践
 
@@ -519,7 +540,7 @@ pub fn start() {
 }
 ```
 
-再在 `crates/gpui/Cargo.toml` 追加声明（参照现有条目格式，见 [Cargo.toml:181-L184](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/Cargo.toml#L181-L184) 的 `move_entity_between_windows`）：
+再在 `crates/gpui/Cargo.toml` 追加声明（参照现有条目格式，见 [Cargo.toml:181-L184](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/Cargo.toml#L181-L184) 的 `move_entity_between_windows`）：
 
 ```toml
 [[example]]
@@ -554,11 +575,12 @@ path = "examples/async_fib.rs"
 
 ## 6. 本讲小结
 
-- GPUI 的并发是**双执行器**架构：`ForegroundExecutor` 只在主线程轮询、不要求 `Send`、忽略优先级；`BackgroundExecutor` 把 `Send + 'static` 的 future 送进平台线程池，`Send` 约束直接写在 [spawn 签名](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/executor.rs#L110-L117)里。
+- GPUI 的并发是**双执行器**架构：`ForegroundExecutor` 只在主线程轮询、不要求 `Send`、忽略优先级；`BackgroundExecutor` 把 `Send + 'static` 的 future 送进平台线程池，`Send` 约束直接写在 [spawn 签名](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L112-L119)里。
 - `cx.spawn` 与 `cx.background_spawn` 是用户侧两条派发路径：前者给闭包 `&mut AsyncApp`（`Context<T>::spawn` 还额外给 `WeakEntity<T>`），后者什么都不给——后台线程不允许触碰实体状态。
 - `Task` 是可 await 的**取消凭证**：Drop 即取消，且取消发生在轮询边界、不能抢占正在执行的同步计算；想让任务活下去，就 `await`、`detach()`（错误用 `detach_and_log_err`）或存进字段绑定实体寿命。
 - `timer` 不占线程，完全委托平台定时器（`dispatch_after`），零时长直接 `Task::ready`；测试平台上由假时钟驱动。
 - `PlatformDispatcher` 是约六个方法的平台最小调度契约，`PlatformScheduler` 把 scheduler crate 的调用翻译过去；`block` 里 Windows 定时器精度补偿（`increase_timer_resolution`）展示了平台差异被隔离在这一层的价值。
+- 提交 1861e58f98 在这条调度链上插入了 `profiler` feature 下的 `ForegroundRunnableCounter` 埋点（`schedule_local` 与 `spawn_when_idle` 入队时 `queued()`，轮询结束 `finished()`）：它向前台工作日志回答「主线程是否真的空闲」，不改变任何调度语义；测试构建下置 `None` 以免计数只增不减。
 - 执行器在 `App::new_app` 时从 `Platform` 取出并存入 `App`；应用进入 quitting 后 `App::foreground_executor()` 会 panic，前台调度被关闸（呼应 u2-l1 的退出链）。
 
 ## 7. 下一步学习建议
@@ -567,6 +589,7 @@ path = "examples/async_fib.rs"
 
 继续深挖并发可阅读：
 
-- [src/app.rs:2625](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/app.rs#L2625) 附近的 `load_asset` / `spawn` 用法——`.shared()` 让多个等待者共享同一个后台任务。
-- [src/executor.rs:141-L171](https://github.com/zed-industries/zed/blob/fa00dccc42311f8dc71c533105488b0dbd518138/crates/gpui/src/executor.rs#L141-L171) 的 `scoped` / `scoped_priority`——用通道 + `Drop` 实现的「等待一组后台任务全部完成」作用域原语。
+- [src/app.rs:2635-L2656](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L2635-L2656) 的 `fetch_asset`——`.shared()` 让多个等待者共享同一个后台任务（旧名 `load_asset`，现已更名为 `fetch_asset` 并返回 `(Shared<Task>, bool)`）。
+- [src/executor.rs:141-L173](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/executor.rs#L141-L173) 的 `scoped` / `scoped_priority`——用通道 + `Drop` 实现的「等待一组后台任务全部完成」作用域原语。
+- 本讲 4.4.3 提到的 `ForegroundRunnableCounter` 只是前台工作日志的计数入口：想在运行时读到任务轮询、窗口绘制、帧呈现的完整事件流并理解卡顿（hang）如何被判定，请直接进入 **u7-l6（前台工作日志与卡顿检测）**——`ForegroundJournal` 的环形缓冲、`TASK_POLL_FLOOR` 折叠与 `HangDetector` 都在那里展开。
 - u2-l4 讲过的 `Effect` 队列与本讲 `Task` 的关系：任务里 `this.update` 产生的 `Notify` 效果同样在更新收尾的 `flush_effects` 中派发。

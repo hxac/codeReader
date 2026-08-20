@@ -1,14 +1,13 @@
 {
-  "head": "2936989f1b7a15aaf7131b0a3c17961d706fdbf5",
+  "head": "6e0a0835755ea57c1db4e0057f1a30ddba554706",
   "project": "zed-crates-gpui_web",
-  "rationale": "gpui_web 是 Zed 仓库中一个约 3300 行的中型 crate，作用是把 GPUI 的 Platform / PlatformWindow / PlatformDispatcher 平台抽象落到浏览器（WebAssembly）上，源码仅 8 个模块加一个可运行的 trunk 示例。学习顺序按照\"先跑起来、再读抽象契约、然后逐模块走核心链路、最后看能力边界与工程实践\"设计：第一单元让读者用 hello_web 示例把项目跑起来并理解 GPUI 平台抽象的契约（为什么这个 crate 存在）；第二单元按数据流顺序拆核心模块——平台初始化与图形后端选择（platform.rs）、窗口创建与 canvas/隐藏输入框（window.rs 前半）、rAF 帧循环与渲染（window.rs 中段）、ResizeObserver 与 DPR 缩放（window.rs 后半）、DOM 事件到 PlatformInput 的转换（events.rs 指针部分）、键盘/IME/粘贴（events.rs 后半）、调度器与 wasm 线程（dispatcher.rs）、Fetch HTTP 客户端（http_client.rs）；第三单元覆盖剪贴板/光标/显示器等平台能力、Closure 与 Rc 循环等资源生命周期陷阱、Safari 与 SharedArrayBuffer 等浏览器兼容矩阵，最终以\"从零构建自己的 GPUI Web 应用\"收尾，把所有知识串成可交付的实践。每讲只解决一个问题并配一个动手任务，依赖关系沿调用链递进。",
+  "rationale": "gpui_web 是 Zed 仓库中一个约 3300 行的中型 crate，作用是把 GPUI 的 Platform / PlatformWindow / PlatformDispatcher 平台抽象落到浏览器（WebAssembly）上，源码仅 8 个模块加一个可运行的 trunk 示例。学习顺序按照\"先跑起来、再读抽象契约、然后逐模块走核心链路、最后看能力边界与工程实践\"设计：第一单元让读者用 hello_web 示例把项目跑起来并理解 GPUI 平台抽象的契约（为什么这个 crate 存在）；第二单元按数据流顺序拆核心模块——平台初始化与图形后端选择（platform.rs）、窗口创建与 canvas/隐藏输入框（window.rs 前半）、rAF 帧循环与渲染（window.rs 中段）、ResizeObserver 与 DPR 缩放（window.rs 后半）、DOM 事件到 PlatformInput 的转换（events.rs 指针部分）、键盘/IME/粘贴（events.rs 后半）、调度器与 wasm 线程（dispatcher.rs）、Fetch HTTP 客户端（http_client.rs）；第三单元覆盖剪贴板/光标/显示器等平台能力、Closure 与 Rc 循环等资源生命周期陷阱、Safari 与 SharedArrayBuffer 等浏览器兼容矩阵，最终以\"从零构建自己的 GPUI Web 应用\"收尾，把所有知识串成可交付的实践。每讲只解决一个问题并配一个动手任务，依赖关系沿调用链递进。本次增量核对（2936989..6e0a0835）确认：crates/gpui_web 与 crates/gpui_platform 零改动，讲义引用的 gpui/src/platform.rs 也无变化，gpui 相邻改动均为 profiler feature 内部埋点（window.rs/executor.rs/platform_scheduler.rs 及新增 profiler/journal.rs），不影响任何讲义所讲的契约与行为，故全部讲义保持 keep。",
   "units": [
     {
       "id": "u1",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -33,7 +32,7 @@
           "topic": "介绍 gpui_web crate 在 Zed 仓库中的定位：它是 GPUI UI 框架的浏览器（WebAssembly）平台后端，把 GPUI 的 Platform 抽象映射到 DOM/Canvas/WebGPU 上。通读库入口 gpui_web.rs 的模块声明与再导出，建立整个 crate 的心智地图。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -63,7 +62,7 @@
           "topic": "学习 examples/hello_web 示例工程：trunk 打包配置、index.html 中的 canvas 样式、.cargo/config.toml 的 wasm 链接参数（atomics、shared-memory、TLS 导出），以及示例 main.rs 的完整流程（web_init、按 URL 参数选择图形后端、后台线程数素数）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -90,15 +89,15 @@
           "topic": "理解 gpui crate 定义的 Platform/PlatformWindow/PlatformDispatcher trait 契约，以及 gpui_platform 这个门面 crate 如何在 wasm 目标下把 WebPlatform 装配进 Application（application_with_web_backend、single_threaded_web、web_init），弄清 gpui_web 与兄弟 crate（gpui_wgpu、gpui_platform）的分工。"
         }
       ],
+      "level": "beginner",
       "order": 1,
       "title": "入门：认识 gpui_web 并把它跑起来"
     },
     {
       "id": "u2",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -124,7 +123,7 @@
           "topic": "精读 platform.rs 的 WebPlatform 构造与启动流程：内嵌字体的 include_bytes、CosmicTextSystem 文本系统、Platform::run 中异步 initialize_graphics 的 WebGPU 优先/WebGL2 兜底策略，以及 WebWindowLifecycle 状态机（Available/Open/Closed/Unavailable）和 WebWindowError 各变体的含义。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -150,7 +149,7 @@
           "topic": "精读 window.rs 的窗口创建链路：prepare_canvas 如何动态创建铺满视口的 canvas，WebWindow::new 如何创建 1px 隐藏 input 元素来承接焦点和键盘输入，WebWindowInner 的内部可变状态组织，以及 raw_window_handle 的 Web canvas 句柄实现。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -174,7 +173,7 @@
           "topic": "理解浏览器上的帧驱动模型：create_raf_closure 创建的 requestAnimationFrame 闭包、wake_frame_loop 的防重入调度、frame_waker 返回弱引用唤醒器的原因、on_request_frame 回调如何触发 GPUI 绘制，以及 draw() 中 pending_physical_size 的延迟应用和 WgpuRenderer 的调用。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -198,7 +197,7 @@
           "topic": "精读 window.rs 的 resize 处理：ResizeObserver 闭包中 devicePixelContentBoxSize（物理像素）与 Safari 回退 contentRect（CSS 像素）的分支、watch_dpr_changes 用 resolution 媒体查询监听缩放变化、max_texture_dimension 钳制后重算逻辑尺寸，以及零尺寸画布的处理。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -224,7 +223,7 @@
           "topic": "进入 events.rs：EventListenerHandle 的 RAII 设计（Drop 时注销监听避免 \"closure invoked after being dropped\"）、pointerdown/up/move/leave 到 GPUI MouseDown/MouseUp/MouseMove/MouseExited 的字段映射、ClickState 的双击检测算法、wheel 事件的 non-passive 注册与 deltaMode 处理、修饰键状态更新。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l5"
           ],
@@ -250,7 +249,7 @@
           "topic": "精读 events.rs 键盘链路：dom_key_to_gpui_key 的 DOM key 到 GPUI key 映射、modifiers/capslock 提取与 ModifiersChanged 仅在变化时派发、keystroke_inserts_text 与 compute_key_char 对 macOS Option 和 AltGr 的特判、composition 事件实现的 IME 输入、paste 事件中同步文本与异步图片 blob 的处理。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -277,7 +276,7 @@
           "topic": "精读 dispatcher.rs：MainThreadMailbox 基于 PriorityQueue 和 Atomics（SharedArrayBuffer 上的 Int32 信号量）的主线程邮箱、run_waker_loop 用 Atomics.wait_async 异步等待唤醒、单线程模式下 queue_microtask/setTimeout/requestIdleCallback 的映射、多线程模式下 wasm_thread 后台 worker 池（hardware_concurrency、MIN_BACKGROUND_THREADS）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l7"
           ],
@@ -303,15 +302,15 @@
           "topic": "精读 http_client.rs：HttpClient trait 的实现如何把通用 http 请求翻译成 web_sys Request（FetchCredentials 三档、RedirectPolicy 到 RequestInit 的映射）、为什么请求体要整体缓冲（read_body_to_bytes 的注释）、ReadableStreamBody 用 mpsc 通道泵响应流以及 oneshot 取消信号驱动 reader.cancel 的机制。"
         }
       ],
+      "level": "intermediate",
       "order": 2,
       "title": "进阶：核心模块源码精读"
     },
     {
       "id": "u3",
-      "level": "advanced",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -339,7 +338,7 @@
           "topic": "系统梳理 platform.rs/display.rs/keyboard.rs 中剩余的平台能力：异步剪贴板读取（navigator.clipboard 探测、mime type 过滤、NotAllowedError 到 ClipboardReadError 的映射）、同步写入 write_text、CursorStyle 到 CSS cursor 的映射表与 hide_cursor_until_mouse_moves 的恢复监听、WebDisplay 的 screen 与 viewport 尺寸、prefers-color-scheme 外观、WebKeyboardLayout 的占位实现。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3",
             "u2-l5"
@@ -366,7 +365,7 @@
           "topic": "专题分析窗口销毁与内存安全：Drop for WebWindow 中先 cancel_animation_frame、清空 raf_function、断开 ResizeObserver、解除 mql_handle 引用循环再移除 DOM 元素的顺序及其原因；with_callback 的 take/call/restore 重入保护；with_input_handler 的同型模式；frame_waker 用 Rc::downgrade 打破回调循环。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4",
             "u2-l7"
@@ -396,7 +395,7 @@
           "topic": "汇总 crate 中所有能力探测与降级路径：Safari 无 requestIdleCallback 时退化为普通宏任务、无 devicePixelContentBoxSize 时用 contentRect、无 SharedArrayBuffer/waitAsync 时退化为单线程调度、WebGPU 初始化失败时自动换 canvas 试 WebGL2、非安全上下文无 navigator.clipboard、多窗口/重开窗口不支持等，并说明 COOP/COEP 头是开启这些能力的部署前提。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3",
             "u2-l8"
@@ -427,6 +426,7 @@
           "topic": "收官实战：以 hello_web 为脚手架，从零创建一个新的 trunk 工程，综合运用本手册全部知识——入口装配、图形后端选择、窗口与事件、后台线程、FetchHttpClient、剪贴板与光标——完成一个完整的小应用，并理解部署时所需的 COOP/COEP 头与 wasm 构建配置。"
         }
       ],
+      "level": "advanced",
       "order": 3,
       "title": "专家：能力边界、兼容性与二次开发"
     }

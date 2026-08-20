@@ -73,24 +73,24 @@ gpui_platform::application()
 
 先看门面本身。`application()` 总共只有 8 行：
 
-- [crates/gpui_platform/src/gpui_platform.rs:13-21](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/src/gpui_platform.rs#L13-L21)：`application()` 的完整实现。wasm 目标走 `application_with_web_backend`（自动选择 WebGPU/WebGL 后端）；非 wasm 目标调用 `gpui::Application::with_platform(current_platform(false))`——注意传入的 `headless` 参数是 `false`，即"我要一个有真实窗口的应用"。
+- [crates/gpui_platform/src/gpui_platform.rs:13-21](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_platform/src/gpui_platform.rs#L13-L21)：`application()` 的完整实现。wasm 目标走 `application_with_web_backend`（自动选择 WebGPU/WebGL 后端）；非 wasm 目标调用 `gpui::Application::with_platform(current_platform(false))`——注意传入的 `headless` 参数是 `false`，即"我要一个有真实窗口的应用"。
 
 再看 `current_platform` 的开头两个分支（完整四分支的精读留给 u1-l4）：
 
-- [crates/gpui_platform/src/gpui_platform.rs:57-69](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/src/gpui_platform.rs#L57-L69)：`current_platform(headless)` 签名返回 `Rc<dyn Platform>`。macOS 分支直接 `Rc::new(MacPlatform::new(headless))`；Windows 分支多了 `.expect("failed to initialize Windows platform")`——因为 Windows 平台初始化可能失败（返回 `Result`），而门面层选择直接 panic。
+- [crates/gpui_platform/src/gpui_platform.rs:57-69](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_platform/src/gpui_platform.rs#L57-L69)：`current_platform(headless)` 签名返回 `Rc<dyn Platform>`。macOS 分支直接 `Rc::new(MacPlatform::new(headless))`；Windows 分支多了 `.expect("failed to initialize Windows platform")`——因为 Windows 平台初始化可能失败（返回 `Result`），而门面层选择直接 panic。
 
 依赖侧的"另一半条件编译"：
 
-- [crates/gpui_platform/Cargo.toml:23-37](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/Cargo.toml#L23-L37)：基础依赖只有 `gpui`；随后按 `[target.'cfg(target_os = "macos")']`、`windows`、`linux/freebsd`、`wasm` 四组分别引入对应平台 crate。在 Linux 上编译时，`gpui_macos`、`gpui_windows` 甚至不会出现在依赖树里。
+- [crates/gpui_platform/Cargo.toml:23-37](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_platform/Cargo.toml#L23-L37)：基础依赖只有 `gpui`；随后按 `[target.'cfg(target_os = "macos")']`、`windows`、`linux/freebsd`、`wasm` 四组分别引入对应平台 crate。在 Linux 上编译时，`gpui_macos`、`gpui_windows` 甚至不会出现在依赖树里。
 
 官方最小示例长什么样：
 
-- [crates/gpui/examples/hello_world.rs:92-109](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/examples/hello_world.rs#L92-L109)：`run_example()`——`application().run(|cx| { ... cx.open_window(WindowOptions {...}, |_, cx| cx.new(|_| HelloWorld { .. })) ... cx.activate(true); })`。这就是"跨平台 GUI 程序"的全部骨架：拿应用 → 启动回调里开一个窗口 → 激活。
-- [crates/gpui/examples/hello_world.rs:111-121](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/examples/hello_world.rs#L111-L121)：文件末尾的双入口写法——桌面目标用 `fn main()`；wasm 目标用 `#[wasm_bindgen(start)] pub fn start()` 并先调用 `gpui_platform::web_init()` 初始化 panic 钩子与日志。配合文件第一行的 `#![cfg_attr(target_family = "wasm", no_main)]`，同一份示例既能在桌面跑也能在浏览器跑。这就是 `application()` 想带给使用者的体验。
+- [crates/gpui/examples/hello_world.rs:92-109](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/examples/hello_world.rs#L92-L109)：`run_example()`——`application().run(|cx| { ... cx.open_window(WindowOptions {...}, |_, cx| cx.new(|_| HelloWorld { .. })) ... cx.activate(true); })`。这就是"跨平台 GUI 程序"的全部骨架：拿应用 → 启动回调里开一个窗口 → 激活。
+- [crates/gpui/examples/hello_world.rs:111-121](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/examples/hello_world.rs#L111-L121)：文件末尾的双入口写法——桌面目标用 `fn main()`；wasm 目标用 `#[wasm_bindgen(start)] pub fn start()` 并先调用 `gpui_platform::web_init()` 初始化 panic 钩子与日志。配合文件第一行的 `#![cfg_attr(target_family = "wasm", no_main)]`，同一份示例既能在桌面跑也能在浏览器跑。这就是 `application()` 想带给使用者的体验。
 
 为什么 gpui 的示例能直接 `use gpui_platform::application`：
 
-- [crates/gpui/Cargo.toml:147-151](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/Cargo.toml#L147-L151)：`gpui` 的 `[dev-dependencies]` 里声明了 `gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }`。示例（examples）属于 dev 依赖范畴，所以每个官方示例都能直接使用门面入口。
+- [crates/gpui/Cargo.toml:147-151](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/Cargo.toml#L147-L151)：`gpui` 的 `[dev-dependencies]` 里声明了 `gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }`。示例（examples）属于 dev 依赖范畴，所以每个官方示例都能直接使用门面入口。
 
 #### 4.1.4 代码实践：跑通官方示例
 
@@ -142,10 +142,10 @@ Application::with_platform(platform: Rc<dyn Platform>)
 
 #### 4.2.3 源码精读
 
-- [crates/gpui/src/app.rs:144-146](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L144-L146)：`Application` 的定义——`pub struct Application(Rc<AppCell>)`。文档注释说明它"通常在 main 函数里构造，除初始配置外很少交互"。
-- [crates/gpui/src/app.rs:176-183](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L176-L183)：`with_platform` 全文。调用 `App::new_app(platform, Arc::new(()), Arc::new(NullHttpClient))`——第三个参数就是默认的空 HTTP 客户端；第二个参数是空资源源（可用 `with_assets` 覆盖）。
-- [crates/gpui/src/app.rs:777-793](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L777-L793)：`App::new_app` 的前半段，能清楚看到"应用的一切系统能力都从 platform 抽取"：`platform.background_executor()`、`platform.foreground_executor()`、`platform.text_system()`、`platform.keyboard_layout()`、`platform.keyboard_mapper()`；同时断言必须在主线程构造（macOS 上 AppKit 有严格的主线程约束）。
-- [crates/zed/src/main.rs:86-93](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/zed/src/main.rs#L86-L93)：Zed 编辑器自己的用法——`build_application()` 先调 `gpui_platform::current_platform(false)` 拿平台，再按环境变量决定用 `Application::with_platform(platform)` 还是 `Application::new_inaccessible(platform)`（强制关闭无障碍集成）。注意 Zed 没有直接用 `application()`，因为它需要在注入前对平台做额外选择——这说明 `with_platform` 是更底层的通用入口，`application()` 是给不需要定制的多数人的便捷入口。
+- [crates/gpui/src/app.rs:144-146](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L144-L146)：`Application` 的定义——`pub struct Application(Rc<AppCell>)`。文档注释说明它"通常在 main 函数里构造，除初始配置外很少交互"。
+- [crates/gpui/src/app.rs:176-183](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L176-L183)：`with_platform` 全文。调用 `App::new_app(platform, Arc::new(()), Arc::new(NullHttpClient))`——第三个参数就是默认的空 HTTP 客户端；第二个参数是空资源源（可用 `with_assets` 覆盖）。
+- [crates/gpui/src/app.rs:779-797](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L779-L797)：`App::new_app` 的前半段，能清楚看到"应用的一切系统能力都从 platform 抽取"：`platform.background_executor()`、`platform.foreground_executor()`、`platform.text_system()`、`platform.keyboard_layout()`、`platform.keyboard_mapper()`；同时断言必须在主线程构造（macOS 上 AppKit 有严格的主线程约束）。另外 L790-791 有一段 `#[cfg(feature = "profiler")]` 门控的代码（安装前台工作日志 ForegroundJournal），默认 feature 下不参与编译、可忽略，第 4 单元的 u4-l6 会专门讲解。
+- [crates/zed/src/main.rs:86-93](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/zed/src/main.rs#L86-L93)：Zed 编辑器自己的用法——`build_application()` 先调 `gpui_platform::current_platform(false)` 拿平台，再按环境变量决定用 `Application::with_platform(platform)` 还是 `Application::new_inaccessible(platform)`（强制关闭无障碍集成）。注意 Zed 没有直接用 `application()`，因为它需要在注入前对平台做额外选择——这说明 `with_platform` 是更底层的通用入口，`application()` 是给不需要定制的多数人的便捷入口。
 
 #### 4.2.4 代码实践：找出所有"注入点"的使用者
 
@@ -204,10 +204,10 @@ application().run(|cx| ...)
 
 #### 4.3.3 源码精读
 
-- [crates/gpui/src/app.rs:233-243](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L233-L243)：`Application::run` 全文。它把 `on_finish_launching` 闭包装进 `Box`，交给 `platform.run(...)`；注释说明回调会在"应用完全启动后"被调用一次。注意 `run` 拿走 `self`——应用只能启动一次。
-- [crates/gpui/examples/window.rs:311-337](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/examples/window.rs#L311-L337)：官方 window 示例的入口 `run_example()`：`application().run(|cx| ...)` 里先 `Bounds::centered(...)` 计算居中边界，`cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() }, |window, cx| ...)` 开主窗口，最后 `cx.activate(true)` 把应用带到前台，并注册 `Quit` 动作与 `cmd-q` 快捷键。
-- [crates/gpui/src/app.rs:1242-1275](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L1242-L1275)：`App::open_window` 全文。签名要求根视图类型 `V: 'static + Render`；流程为注册窗口 id → `Window::new` → 压栈调用 `build_root_view` → 存入 `window.root` → `window.draw(cx)`（L1258-1263 的注释解释了"至少绘制一帧"的 Windows 背景）→ 存回窗口表并返回 `WindowHandle<V>`。失败时（L1269-1272）会撤销刚注册的窗口 id，保持状态一致。
-- [crates/gpui/src/window.rs:1334-1388](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/window.rs#L1334-L1388)：`Window::new` 中段——把 `WindowOptions` 逐字段解构（L1339-1362），在 L1368 计算默认边界，随后在 L1369 调用 `cx.platform.open_window(handle, WindowParams { ... })`，这就是**应用层与平台层的交界点**：从这里往下就进入各操作系统的实现了（第 5-7 单元）。
+- [crates/gpui/src/app.rs:233-243](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L233-L243)：`Application::run` 全文。它把 `on_finish_launching` 闭包装进 `Box`，交给 `platform.run(...)`；注释说明回调会在"应用完全启动后"被调用一次。注意 `run` 拿走 `self`——应用只能启动一次。
+- [crates/gpui/examples/window.rs:311-337](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/examples/window.rs#L311-L337)：官方 window 示例的入口 `run_example()`：`application().run(|cx| ...)` 里先 `Bounds::centered(...)` 计算居中边界，`cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() }, |window, cx| ...)` 开主窗口，最后 `cx.activate(true)` 把应用带到前台，并注册 `Quit` 动作与 `cmd-q` 快捷键。
+- [crates/gpui/src/app.rs:1248-1281](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L1248-L1281)：`App::open_window` 全文。签名要求根视图类型 `V: 'static + Render`；流程为注册窗口 id → `Window::new` → 压栈调用 `build_root_view` → 存入 `window.root` → `window.draw(cx)`（L1264-1267 的注释解释了"至少绘制一帧"的 Windows 背景）→ 存回窗口表并返回 `WindowHandle<V>`。失败时（L1275-1278）会撤销刚注册的窗口 id，保持状态一致。
+- [crates/gpui/src/window.rs:1350-1404](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/window.rs#L1350-L1404)：`Window::new` 中段——把 `WindowOptions` 逐字段解构（L1355-1378），在 L1384 计算默认边界，随后在 L1385 调用 `cx.platform.open_window(handle, WindowParams { ... })`，这就是**应用层与平台层的交界点**：从这里往下就进入各操作系统的实现了（第 5-7 单元）。
 
 #### 4.3.4 代码实践：改造 WindowOptions 观察行为
 
@@ -216,7 +216,7 @@ application().run(|cx| ...)
    1. 打开 `crates/gpui/examples/hello_world.rs`，把 `Bounds::centered(None, size(px(500.), px(500.0)), cx)` 改成 `size(px(300.), px(150.0))`。
    2. 运行 `cargo run -p gpui --example hello_world`，观察窗口尺寸变化。
    3. 再把 `WindowOptions` 增加一个字段 `kind: WindowKind::PopUp`（可参照 window.rs 示例中 Popup 按钮的写法），重新运行观察窗口装饰与置顶行为的差异。
-   4. （源码阅读部分）对照 [crates/gpui/src/window.rs:1371-1387](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/window.rs#L1371-L1387)，确认你改动的每个字段都出现在 `WindowParams` 的构造里。
+   4. （源码阅读部分）对照 [crates/gpui/src/window.rs:1387-1403](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/window.rs#L1387-L1403)，确认你改动的每个字段都出现在 `WindowParams` 的构造里。
 3. **需要观察的现象**：窗口尺寸随第一步改变；改为 `PopUp` 后窗口呈现弹出样式（无常规装饰/不进任务栏，具体表现依平台而异）。
 4. **预期结果**：字段改动直接反映到窗口形态；并能在源码里指出每个字段流入 `WindowParams` 的哪一项。**待本地验证**（窗口形态的平台差异需在你的操作系统上实际确认）。
 
@@ -264,12 +264,12 @@ gpui_platform::headless()
 
 #### 4.4.3 源码精读
 
-- [crates/gpui_platform/src/gpui_platform.rs:23-25](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/src/gpui_platform.rs#L23-L25)：`headless()` 全文——就是 `with_platform(current_platform(true))`，与 `application()` 唯一的区别是那个布尔值。
-- [crates/gpui_linux/src/linux.rs:30-60](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux.rs#L30-L60)：Linux 侧 `current_platform`。L34-38 是 headless 短路分支——`if headless { return ... HeadlessClient::new() }`，连 compositor 探测都不做；L40 起才按 `gpui::guess_compositor()` 的结果在 Wayland/X11/Headless 三者间选择。
-- [crates/gpui/src/platform.rs:98-123](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L98-L123)：`guess_compositor()`——先看 `ZED_HEADLESS` 环境变量（设置即强制无头），再看 `WAYLAND_DISPLAY` / `DISPLAY` 是否存在且非空，据此返回 `"Wayland"` / `"X11"` / `"Headless"`。
-- [crates/gpui_linux/src/linux/headless/client.rs:100-113](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/headless/client.rs#L100-L113)：`HeadlessClient` 的 `open_window`——直接 `Ok(Box::new(HeadlessWindow::new(...)))` 成功返回一个逻辑窗口；`compositor_name()` 返回 `"headless"`（4.1 实践里打印这个名字就能确认当前后端）。紧随其后的 `set_cursor_style`、`open_uri`、`reveal_path` 都是空实现——这就是"系统能力静默降级"的实例。
-- [crates/gpui_linux/src/linux/headless/client.rs:133-142](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/headless/client.rs#L133-L142)：`HeadlessClient::run`——取走事件循环（第二次调用会 panic："App is already running"），然后 `event_loop.run(None, ...)` 进入 **calloop** 事件循环。也就是说无头模式并不是"空转返回"，而是有一个真实（但没有窗口系统）的事件循环在驱动任务与计时器。
-- 真实使用者佐证：[crates/remote_server/src/server.rs:570](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/remote_server/src/server.rs#L570) 与 [crates/editor_benchmarks/src/main.rs:113](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/editor_benchmarks/src/main.rs#L113)——远程服务器与基准测试都通过 `gpui_platform::headless().run(...)` 驱动 gpui。
+- [crates/gpui_platform/src/gpui_platform.rs:23-25](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_platform/src/gpui_platform.rs#L23-L25)：`headless()` 全文——就是 `with_platform(current_platform(true))`，与 `application()` 唯一的区别是那个布尔值。
+- [crates/gpui_linux/src/linux.rs:30-60](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux.rs#L30-L60)：Linux 侧 `current_platform`。L34-38 是 headless 短路分支——`if headless { return ... HeadlessClient::new() }`，连 compositor 探测都不做；L40 起才按 `gpui::guess_compositor()` 的结果在 Wayland/X11/Headless 三者间选择。
+- [crates/gpui/src/platform.rs:98-123](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L98-L123)：`guess_compositor()`——先看 `ZED_HEADLESS` 环境变量（设置即强制无头），再看 `WAYLAND_DISPLAY` / `DISPLAY` 是否存在且非空，据此返回 `"Wayland"` / `"X11"` / `"Headless"`。
+- [crates/gpui_linux/src/linux/headless/client.rs:100-113](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/headless/client.rs#L100-L113)：`HeadlessClient` 的 `open_window`——直接 `Ok(Box::new(HeadlessWindow::new(...)))` 成功返回一个逻辑窗口；`compositor_name()` 返回 `"headless"`（4.1 实践里打印这个名字就能确认当前后端）。紧随其后的 `set_cursor_style`、`open_uri`、`reveal_path` 都是空实现——这就是"系统能力静默降级"的实例。
+- [crates/gpui_linux/src/linux/headless/client.rs:133-142](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/headless/client.rs#L133-L142)：`HeadlessClient::run`——取走事件循环（第二次调用会 panic："App is already running"），然后 `event_loop.run(None, ...)` 进入 **calloop** 事件循环。也就是说无头模式并不是"空转返回"，而是有一个真实（但没有窗口系统）的事件循环在驱动任务与计时器。
+- 真实使用者佐证：[crates/remote_server/src/server.rs:570](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/remote_server/src/server.rs#L570) 与 [crates/editor_benchmarks/src/main.rs:113](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/editor_benchmarks/src/main.rs#L113)——远程服务器与基准测试都通过 `gpui_platform::headless().run(...)` 驱动 gpui。
 
 #### 4.4.4 代码实践：观察 headless 与普通模式的差异
 
@@ -382,5 +382,5 @@ gpui_platform::headless()
 ## 7. 下一步学习建议
 
 - 下一讲（u1-l3）转到构建视角：逐段阅读 `gpui_platform/Cargo.toml` 的 feature 表与按 target 分组的依赖，理解 `wayland` / `x11` / `test-support` 等 feature 如何透传，并动手用不同的 feature 组合构建。
-- 若想先巩固本讲的调用链，建议用 rust-analyzer 在 `App::open_window`（`crates/gpui/src/app.rs:1242`）上执行 Find All References / Go to Implementation，把 `cx.platform.open_window` 在四个平台 crate 中的实现各看一眼——这是第 5-7 单元的预习。
+- 若想先巩固本讲的调用链，建议用 rust-analyzer 在 `App::open_window`（`crates/gpui/src/app.rs:1248`）上执行 Find All References / Go to Implementation，把 `cx.platform.open_window` 在四个平台 crate 中的实现各看一眼——这是第 5-7 单元的预习。
 - 推荐顺带阅读 `crates/gpui/examples/on_window_close_quit.rs`，看"最后一个窗口关闭时如何退出应用"，加深对 `run` 阻塞语义的理解。

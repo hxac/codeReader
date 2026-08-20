@@ -25,16 +25,16 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| [../gpui/src/platform.rs](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs) | 契约层：`Platform` trait 的生命周期方法声明（L131-L137、L203-L222）与 `AppLifecyclePhase` 枚举（L746-L769） |
-| [../gpui/src/app.rs](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs) | 应用层：`Application::run`、`App::quit/restart/shutdown`、`QuitMode`，以及启动期把 App 观察者桥接到平台回调的胶水代码 |
-| [../gpui_linux/src/linux/platform.rs](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs) | Linux 外壳：`LinuxPlatform` 对 run/quit/restart/回调注册的实现，`PlatformHandlers` 与 `LinuxCommon` 两个聚合结构，以及监听系统唤醒的 DBus 代码 |
-| [../gpui_linux/src/linux/headless/client.rs](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/headless/client.rs) | Linux headless 后端：最简洁的 calloop 事件循环样本，可当作理解 Linux `run` 的最短路径 |
-| [../gpui_linux/src/linux/x11/client.rs](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/x11/client.rs) | Linux X11 后端：与 headless 同构的 `run` 实现 |
-| [../gpui_linux/src/linux/wayland/client.rs](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/wayland/client.rs) | Linux Wayland 后端：calloop 事件源的注册现场 |
-| [../gpui_macos/src/platform.rs](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs) | macOS 实现：NSApplication 包装、Objective-C 委托方法（`did_finish_launching`/`will_terminate`/`should_handle_reopen`/`on_system_wake`） |
-| [../gpui_windows/src/platform.rs](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/src/platform.rs) | Windows 实现：GetMessageW 消息循环、`PostQuitMessage` 退出、电源通知注册 |
-| [../gpui_web/src/platform.rs](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_web/src/platform.rs) | Web 实现：不拥有事件循环，「退出」只是打日志 |
-| [../gpui/examples/window.rs](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/examples/window.rs) | 官方示例：`cx.quit()`、`cx.hide()`、`cx.activate()` 的真实用法，本讲实践任务的模板 |
+| [../gpui/src/platform.rs](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs) | 契约层：`Platform` trait 的生命周期方法声明（L131-L137、L203-L222）与 `AppLifecyclePhase` 枚举（L746-L769） |
+| [../gpui/src/app.rs](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs) | 应用层：`Application::run`、`App::quit/restart/shutdown`、`QuitMode`，以及启动期把 App 观察者桥接到平台回调的胶水代码 |
+| [../gpui_linux/src/linux/platform.rs](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs) | Linux 外壳：`LinuxPlatform` 对 run/quit/restart/回调注册的实现，`PlatformHandlers` 与 `LinuxCommon` 两个聚合结构，以及监听系统唤醒的 DBus 代码 |
+| [../gpui_linux/src/linux/headless/client.rs](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/headless/client.rs) | Linux headless 后端：最简洁的 calloop 事件循环样本，可当作理解 Linux `run` 的最短路径 |
+| [../gpui_linux/src/linux/x11/client.rs](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/x11/client.rs) | Linux X11 后端：与 headless 同构的 `run` 实现 |
+| [../gpui_linux/src/linux/wayland/client.rs](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/wayland/client.rs) | Linux Wayland 后端：calloop 事件源的注册现场 |
+| [../gpui_macos/src/platform.rs](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs) | macOS 实现：NSApplication 包装、Objective-C 委托方法（`did_finish_launching`/`will_terminate`/`should_handle_reopen`/`on_system_wake`） |
+| [../gpui_windows/src/platform.rs](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_windows/src/platform.rs) | Windows 实现：GetMessageW 消息循环、`PostQuitMessage` 退出、电源通知注册 |
+| [../gpui_web/src/platform.rs](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_web/src/platform.rs) | Web 实现：不拥有事件循环，「退出」只是打日志 |
+| [../gpui/examples/window.rs](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/examples/window.rs) | 官方示例：`cx.quit()`、`cx.hide()`、`cx.activate()` 的真实用法，本讲实践任务的模板 |
 
 ## 4. 核心概念与源码讲解
 
@@ -83,40 +83,40 @@ gpui_platform::application()                      # u1-l2 讲过：构造 Rc<dyn
 
 **契约签名**——五个必需方法，没有任何默认实现，每个平台都必须给出自己的版本：
 
-[../gpui/src/platform.rs:L131-L137](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L131-L137)
+[../gpui/src/platform.rs:L131-L137](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L131-L137)
 这段声明了 `run`（带启动回调）、`quit`、`restart`（带可选二进制路径与参数列表）、`activate`、`hide`、`hide_other_apps`、`unhide_other_apps`。注意 `run` 的回调类型是 `FnOnce`——启动只发生一次。
 
 **应用层如何包装 `run`**——`Application::run` 把带 `&mut App` 参数的用户闭包适配成平台需要的无参闭包：
 
-[../gpui/src/app.rs:L233-L243](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L233-L243)
-`this` 是 `Rc<AppCell>` 的克隆，被移动进闭包；平台调用闭包时先 `borrow_mut` 拿到 `&mut App`，再执行用户回调。这就是「平台层不认识 App」的桥接手法。紧随其后的 [run_embedded（L245-L265）](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L245-L265) 面向「事件循环属于别人」的嵌入场景（如 wasm guest）：它调用同样的 `platform.run`，但返回一个 `ApplicationHandle` 让宿主后续可以重新进入应用——它假设平台的 `run` 只执行回调、立即返回，Web 平台正是这么实现的。
+[../gpui/src/app.rs:L233-L243](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L233-L243)
+`this` 是 `Rc<AppCell>` 的克隆，被移动进闭包；平台调用闭包时先 `borrow_mut` 拿到 `&mut App`，再执行用户回调。这就是「平台层不认识 App」的桥接手法。紧随其后的 [run_embedded（L245-L265）](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L245-L265) 面向「事件循环属于别人」的嵌入场景（如 wasm guest）：它调用同样的 `platform.run`，但返回一个 `ApplicationHandle` 让宿主后续可以重新进入应用——它假设平台的 `run` 只执行回调、立即返回，Web 平台正是这么实现的。
 
 **Linux 外壳的 `run`**——三行结构：回调 → 循环 → 退出钩子：
 
-[../gpui_linux/src/linux/platform.rs:L267-L278](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L267-L278)
-先同步执行 `on_finish_launching`，然后调用 `LinuxClient::run`（trait 方法，声明于 [platform.rs:L96](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L96)，阻塞在 calloop 上），循环返回后把 `PlatformHandlers` 里的 quit 回调取出来执行。**quit 回调在 `run` 的尾声触发**——这是 Linux 退出的关键设计，4.2 会展开。
+[../gpui_linux/src/linux/platform.rs:L267-L278](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L267-L278)
+先同步执行 `on_finish_launching`，然后调用 `LinuxClient::run`（trait 方法，声明于 [platform.rs:L96](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L96)，阻塞在 calloop 上），循环返回后把 `PlatformHandlers` 里的 quit 回调取出来执行。**quit 回调在 `run` 的尾声触发**——这是 Linux 退出的关键设计，4.2 会展开。
 
 **Linux 后端真正的事件循环**——headless 后端是全仓库最短的 `run` 实现：
 
-[../gpui_linux/src/linux/headless/client.rs:L133-L142](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/headless/client.rs#L133-L142)
-`event_loop.take()` 把 `Option<EventLoop>` 拿走——用 Option 的空值语义保证「run 只能被调用一次」，重复调用直接 panic（`expect("App is already running")`）。X11 后端的实现几乎逐字相同，只是用 `context` + `log_err` 优雅降级而非 panic：[../gpui_linux/src/linux/x11/client.rs:L1792-L1805](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/x11/client.rs#L1792-L1805)。
+[../gpui_linux/src/linux/headless/client.rs:L133-L142](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/headless/client.rs#L133-L142)
+`event_loop.take()` 把 `Option<EventLoop>` 拿走——用 Option 的空值语义保证「run 只能被调用一次」，重复调用直接 panic（`expect("App is already running")`）。X11 后端的实现几乎逐字相同，只是用 `context` + `log_err` 优雅降级而非 panic：[../gpui_linux/src/linux/x11/client.rs:L1792-L1805](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/x11/client.rs#L1792-L1805)。
 
 **macOS 的 `run`**——回调时机与 Linux 相反，启动回调被**推迟**到 AppKit 通知：
 
-[../gpui_macos/src/platform.rs:L491-L518](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L491-L518)
-非 headless 路径下，`on_finish_launching` 被存进 `state.finish_launching`（`Option<Box<dyn FnOnce()>>`，字段声明见 [L187](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L187)）而不立即执行；接着把平台指针塞进 NSApplication 与委托对象的实例变量，然后调用 `app.run()` 进入 AppKit 循环。headless 路径则跳过 AppKit，直接执行回调后进入裸 `CFRunLoopRun()`。真正执行回调的地方是 Objective-C 委托方法：
+[../gpui_macos/src/platform.rs:L491-L518](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L491-L518)
+非 headless 路径下，`on_finish_launching` 被存进 `state.finish_launching`（`Option<Box<dyn FnOnce()>>`，字段声明见 [L187](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L187)）而不立即执行；接着把平台指针塞进 NSApplication 与委托对象的实例变量，然后调用 `app.run()` 进入 AppKit 循环。headless 路径则跳过 AppKit，直接执行回调后进入裸 `CFRunLoopRun()`。真正执行回调的地方是 Objective-C 委托方法：
 
-[../gpui_macos/src/platform.rs:L1281-L1317](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L1281-L1317)
-`did_finish_launching` 响应 AppKit 的「启动完成」通知：设置激活策略、注册键盘布局/热状态/系统唤醒观察者，最后 `state.finish_launching.take()` 取出回调执行。这个委托方法在类构造时被挂到 selector 上：[../gpui_macos/src/platform.rs:L84-L99](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L84-L99) 把 `applicationWillFinishLaunching:`、`applicationDidFinishLaunching:`、`applicationShouldHandleReopen:hasVisibleWindows:`、`applicationWillTerminate:` 四个 selector 绑到 Rust 函数。
+[../gpui_macos/src/platform.rs:L1281-L1317](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L1281-L1317)
+`did_finish_launching` 响应 AppKit 的「启动完成」通知：设置激活策略、注册键盘布局/热状态/系统唤醒观察者，最后 `state.finish_launching.take()` 取出回调执行。这个委托方法在类构造时被挂到 selector 上：[../gpui_macos/src/platform.rs:L84-L99](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L84-L99) 把 `applicationWillFinishLaunching:`、`applicationDidFinishLaunching:`、`applicationShouldHandleReopen:hasVisibleWindows:`、`applicationWillTerminate:` 四个 selector 绑到 Rust 函数。
 
 **Windows 的 `run`**——教科书式 Win32 消息循环：
 
-[../gpui_windows/src/platform.rs:L447-L465](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/src/platform.rs#L447-L465)
+[../gpui_windows/src/platform.rs:L447-L465](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_windows/src/platform.rs#L447-L465)
 先执行回调、启动垂直同步线程，然后 `GetMessageW` 死循环（返回 0 即退出循环），最后调用 quit 回调——退出钩子的布局与 Linux 完全一致。
 
 **Web 的 `run`**——唯一不阻塞的实现：
 
-[../gpui_web/src/platform.rs:L280-L304](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_web/src/platform.rs#L280-L304)
+[../gpui_web/src/platform.rs:L280-L304](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_web/src/platform.rs#L280-L304)
 回调被推迟到**图形初始化成功之后**：`spawn_local` 启动一个浏览器异步任务，等 WebGPU/WebGL surface 准备好才执行 `on_finish_launching()`；初始化失败则显示「图形不可用」提示。`run` 函数本身立即返回，这正是 `run_embedded` 文档所说的「事件循环属于别人」的形态（u7 会展开）。
 
 #### 4.1.4 代码实践
@@ -125,7 +125,7 @@ gpui_platform::application()                      # u1-l2 讲过：构造 Rc<dyn
 
 1. **实践目标**：亲眼确认 `on_finish_launching` 在 Linux 上于事件循环启动前执行，且只执行一次。
 2. **操作步骤**：
-   1. 参照 [../gpui/examples/window.rs:L311-L337](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/examples/window.rs#L311-L337) 写一个最小程序（示例代码，非项目原文件）：
+   1. 参照 [../gpui/examples/window.rs:L311-L337](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/examples/window.rs#L311-L337) 写一个最小程序（示例代码，非项目原文件）：
 
       ```rust
       use gpui::{App, WindowOptions};
@@ -179,20 +179,20 @@ gpui_platform::application()                      # u1-l2 讲过：构造 Rc<dyn
 
 ```text
 用户按 cmd-q / 关掉最后一个窗口 / 代码调用 cx.quit()
-  └─ App::quit()                          # app.rs:1008
+  └─ App::quit()                          # app.rs:1014
        └─ Platform::quit()
             └─ common.signal.stop()        # calloop LoopSignal：请求事件循环停止
                  └─ calloop 循环退出
                       └─ LinuxPlatform::run 继续：取出 callbacks.quit 并调用   # platform.rs:272-277
-                           └─ （gpui 在 App::new_app 里注册的那个闭包）        # app.rs:912-919
-                                └─ App::shutdown()                           # app.rs:957
+                           └─ （gpui 在 App::new_app 里注册的那个闭包）        # app.rs:918-925
+                                └─ App::shutdown()                           # app.rs:963
                                      ├─ 执行所有 on_app_quit 观察者（限时 200ms）
                                      ├─ 清空 windows
                                      └─ flush_effects
                  └─ run 返回 → main 结束 → 进程退出
 ```
 
-关窗是否触发退出由 `QuitMode` 决定（[app.rs:L322-L332](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L322-L332)）：
+关窗是否触发退出由 `QuitMode` 决定（[app.rs:L322-L332](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L322-L332)）：
 
 - `Default`：macOS 用 `Explicit`（应用可以无窗口存活，点 Dock 重新开窗），其他平台用 `LastWindowClosed`；
 - `LastWindowClosed`：最后一个窗口关闭即退出；
@@ -202,48 +202,48 @@ gpui_platform::application()                      # u1-l2 讲过：构造 Rc<dyn
 
 **App 层入口**——`App::quit` 只有一行，把决定权完全交给平台：
 
-[../gpui/src/app.rs:L1008-L1010](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L1008-L1010)
+[../gpui/src/app.rs:L1014-L1016](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L1014-L1016)
 转发到 `self.platform.quit()`。「关窗→退出」的判定则在窗口移除逻辑里：
 
-[../gpui/src/app.rs:L1879-L1887](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L1879-L1887)
+[../gpui/src/app.rs:L1885-L1893](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L1885-L1893)
 最后一个窗口被移除后，按 `quit_mode` 判断是否调用 `cx.quit()`；`Default` 模式在编译期用 `cfg!(not(target_os = "macos"))` 分岔——这就是「Linux/Windows 关掉最后一个窗口应用就退出，macOS 不会」的出处。
 
 **Linux 的 quit**——一行代码，靠 calloop 的停止信号：
 
-[../gpui_linux/src/linux/platform.rs:L280-L282](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L280-L282)
+[../gpui_linux/src/linux/platform.rs:L280-L282](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L280-L282)
 `LoopSignal::stop()` 让正在 `event_loop.run()` 里转的循环在处理完当前迭代后返回；随后 4.1.3 读过的 `LinuxPlatform::run` 尾声触发 quit 回调。
 
 **macOS 的 quit**——刻意做成异步，原因写在注释里：
 
-[../gpui_macos/src/platform.rs:L520-L538](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L520-L538)
+[../gpui_macos/src/platform.rs:L520-L538](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L520-L538)
 如果同步调用 `terminate:`，AppKit 会立刻同步触发所有窗口的 `on_close` 回调；若调用方此时还持有 App 状态的借用，就会双重借用 panic。所以把 `terminate:` 派发到主队列**下一轮**执行（`exec_async_f`），保证当前调用栈展开、借用释放后再终止。这是跨语言 FFI 边界上常见的重入陷阱，值得记住。
 
 **Windows 的 quit**——Win32 标准姿势：
 
-[../gpui_windows/src/platform.rs:L467-L471](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/src/platform.rs#L467-L471)
-把 `PostQuitMessage(0)` 作为一个任务派发到前台执行器（而不是直接调用），这让退出请求和其他前台任务一样排队——同样是为了避免在任意调用栈里立即终止。`PostQuitMessage` 会使 `GetMessageW` 返回 0，消息循环结束，`run` 尾声触发 quit 回调（[L463-L464](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/src/platform.rs#L463-L464)）。
+[../gpui_windows/src/platform.rs:L467-L471](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_windows/src/platform.rs#L467-L471)
+把 `PostQuitMessage(0)` 作为一个任务派发到前台执行器（而不是直接调用），这让退出请求和其他前台任务一样排队——同样是为了避免在任意调用栈里立即终止。`PostQuitMessage` 会使 `GetMessageW` 返回 0，消息循环结束，`run` 尾声触发 quit 回调（[L463-L464](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_windows/src/platform.rs#L463-L464)）。
 
 **Web 的 quit**——直接拒绝：
 
-[../gpui_web/src/platform.rs:L306-L308](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_web/src/platform.rs#L306-L308)
+[../gpui_web/src/platform.rs:L306-L308](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_web/src/platform.rs#L306-L308)
 浏览器里页面无权终止自己所在的标签页，只能打一条 warn 日志。这是「契约统一、能力降级」的典型样本。
 
 **restart 三兄弟**——同一逻辑的三种 shell 方言。Linux 版：
 
-[../gpui_linux/src/linux/platform.rs:L288-L338](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L288-L338)
-取当前 PID 与可执行路径，spawn 一个 `bash -c` 子进程，脚本用 `kill -0` 轮询等待旧进程消失，再以相同参数重新启动它（`process_group(0)` 让接班进程与旧进程组解耦）；spawn 成功后立刻 `self.quit()`。macOS 版（[L540-L586](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L540-L586)）用 `open` 命令处理 `.app` bundle；Windows 版（[L473-L528](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/src/platform.rs#L473-L528)）用 PowerShell 脚本加 `ZED_RESTART_*` 环境变量传参，并特意把 spawn 推迟到前台执行器——注释解释了 `CreateProcessW` 会泵消息循环、可能引发 `AppCell` 双重借用。
+[../gpui_linux/src/linux/platform.rs:L288-L338](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L288-L338)
+取当前 PID 与可执行路径，spawn 一个 `bash -c` 子进程，脚本用 `kill -0` 轮询等待旧进程消失，再以相同参数重新启动它（`process_group(0)` 让接班进程与旧进程组解耦）；spawn 成功后立刻 `self.quit()`。macOS 版（[L540-L586](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L540-L586)）用 `open` 命令处理 `.app` bundle；Windows 版（[L473-L528](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_windows/src/platform.rs#L473-L528)）用 PowerShell 脚本加 `ZED_RESTART_*` 环境变量传参，并特意把 spawn 推迟到前台执行器——注释解释了 `CreateProcessW` 会泵消息循环、可能引发 `AppCell` 双重借用。
 
-App 层的 `restart` 入口在 [app.rs:L1595-L1603](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L1595-L1603)：先执行 `on_app_restart` 观察者（文档明确它们**先于** `on_app_quit` 回调，见 [L2330-L2343](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L2330-L2343)），再把 `restart_path`/`restart_arguments` 传给平台。
+App 层的 `restart` 入口在 [app.rs:L1601-L1609](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L1601-L1609)：先执行 `on_app_restart` 观察者（文档明确它们**先于** `on_app_quit` 回调，见 [L2343-L2356](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L2343-L2356)），再把 `restart_path`/`restart_arguments` 传给平台。
 
 **activate/hide 家族的降级姿态**——Linux 全部打日志了事：
 
-[../gpui_linux/src/linux/platform.rs:L340-L354](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L340-L354)
-四个方法都是 `log::info!("... is not implemented on Linux, ignoring the call")`——不 panic、不返回错误，安静降级。macOS 则有完整实现（[L588-L614](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L588-L614)）：`activateIgnoringOtherApps:`、`hide:`、`hideOtherApplications:`、`unhideAllApplications:` 一一对应 AppKit API。官方示例 [../gpui/examples/window.rs:L251-L265](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/examples/window.rs#L251-L265) 演示了 `cx.hide()` 后 3 秒再 `cx.activate(false)` 恢复的完整用法。
+[../gpui_linux/src/linux/platform.rs:L340-L354](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L340-L354)
+四个方法都是 `log::info!("... is not implemented on Linux, ignoring the call")`——不 panic、不返回错误，安静降级。macOS 则有完整实现（[L588-L614](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L588-L614)）：`activateIgnoringOtherApps:`、`hide:`、`hideOtherApplications:`、`unhideAllApplications:` 一一对应 AppKit API。官方示例 [../gpui/examples/window.rs:L251-L265](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/examples/window.rs#L251-L265) 演示了 `cx.hide()` 后 3 秒再 `cx.activate(false)` 恢复的完整用法。
 
 **退出的收尾：App::shutdown**——quit 回调的最终目的地：
 
-[../gpui/src/app.rs:L957-L979](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L957-L979)
-取出所有 `on_app_quit` 观察者生成 future，清空窗口，`block_with_timeout(SHUTDOWN_TIMEOUT, ...)` 限时等待全部完成——超时是 200 毫秒（[app.rs:L77](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L77) 定义 `SHUTDOWN_TIMEOUT`），防止某个模块卡死拖住整个退出。观察者的注册入口是 [App::on_app_quit（L2310-L2328）](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L2310-L2328)，签名是 `FnMut(&mut App) -> Fut`——允许异步清理。
+[../gpui/src/app.rs:L963-L985](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L963-L985)
+取出所有 `on_app_quit` 观察者生成 future，清空窗口，`block_with_timeout(SHUTDOWN_TIMEOUT, ...)` 限时等待全部完成——超时是 200 毫秒（[app.rs:L77](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L77) 定义 `SHUTDOWN_TIMEOUT`），防止某个模块卡死拖住整个退出。观察者的注册入口是 [App::on_app_quit（L2323-L2341）](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L2323-L2341)，签名是 `FnMut(&mut App) -> Fut`——允许异步清理。
 
 #### 4.2.4 代码实践
 
@@ -264,7 +264,7 @@ App 层的 `restart` 入口在 [app.rs:L1595-L1603](https://github.com/zed-indus
       });
       ```
 
-   2. 用快捷键触发退出：参照 [window.rs:L334-L335](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/examples/window.rs#L334-L335) 定义 `actions!(demo, [Quit]);` 并 `cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)])` + `cx.on_action(|_: &Quit, cx| cx.quit())`（Linux 上建议绑定 `ctrl-q`）。
+   2. 用快捷键触发退出：参照 [window.rs:L334-L335](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/examples/window.rs#L334-L335) 定义 `actions!(demo, [Quit]);` 并 `cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)])` + `cx.on_action(|_: &Quit, cx| cx.quit())`（Linux 上建议绑定 `ctrl-q`）。
    3. 运行后按快捷键退出，观察日志；再改用直接关闭窗口退出，对比是否走了同样的链路。
 3. **需要观察的现象**：`[on_app_quit]` 在窗口关闭/快捷键两种退出方式下都恰好打印一次，且打印发生在进程结束之前。
 4. **预期结果**：两种触发方式最终汇入同一条 `Platform::quit → 事件循环退出 → on_quit 回调 → shutdown` 链路。若把清理改成耗时超过 200ms 的操作，应能看到 `timed out waiting on app_will_quit` 错误日志。「待本地验证」。
@@ -277,7 +277,7 @@ App 层的 `restart` 入口在 [app.rs:L1595-L1603](https://github.com/zed-indus
 
 **练习 2**：`QuitMode::Default` 下，同一个 GPUI 应用在 macOS 和 Linux 上「关闭最后一个窗口」的行为有何不同？为什么契约要留这个差异？
 
-答案：macOS 上应用继续运行（`Default` 等价 `Explicit`），Linux/Windows 上应用退出（等价 `LastWindowClosed`，见 app.rs:1879-1887 的 `cfg!(not(target_os = "macos"))`）。原因是桌面习惯差异：macOS 用户预期点 Dock 图标应用能重新开窗（对应 `on_reopen` 回调），而 Linux/Windows 用户预期关掉所有窗口即结束程序。GPUI 把平台习惯编码进默认值，同时允许 `with_quit_mode` 覆盖。
+答案：macOS 上应用继续运行（`Default` 等价 `Explicit`），Linux/Windows 上应用退出（等价 `LastWindowClosed`，见 app.rs:1885-1893 的 `cfg!(not(target_os = "macos"))`）。原因是桌面习惯差异：macOS 用户预期点 Dock 图标应用能重新开窗（对应 `on_reopen` 回调），而 Linux/Windows 用户预期关掉所有窗口即结束程序。GPUI 把平台习惯编码进默认值，同时允许 `with_quit_mode` 覆盖。
 
 **练习 3**：为什么三个桌面平台的 `restart` 都要 spawn 一个外部 shell 进程来等待和重启，而不是在进程内先清理再 `exec`？
 
@@ -287,7 +287,7 @@ App 层的 `restart` 入口在 [app.rs:L1595-L1603](https://github.com/zed-indus
 
 #### 4.3.1 概念说明
 
-契约里三个桌面回调注册方法（[platform.rs:L203-L205](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L203-L205)）：
+契约里三个桌面回调注册方法（[platform.rs:L203-L205](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L203-L205)）：
 
 - `on_quit`：进程即将退出时触发（各平台时机见 4.2）；
 - `on_reopen`：用户「重新打开」应用时触发——典型场景是 macOS 上点击 Dock 图标且应用已无窗口；
@@ -302,7 +302,7 @@ App 层的 `restart` 入口在 [app.rs:L1595-L1603](https://github.com/zed-indus
 以最复杂的 `on_system_wake` 为例，Linux 上的完整链路（七步）：
 
 ```text
-1. App::new_app 启动期调用 platform.on_system_wake(closure)     # app.rs:900-910
+1. App::new_app 启动期调用 platform.on_system_wake(closure)     # app.rs:906-916
    （closure 的内容：upgrade Rc<AppCell> → 遍历 system_wake_observers）
 2. LinuxPlatform::on_system_wake：
    callbacks.system_wake = Some(callback)                        # platform.rs:562-567
@@ -315,7 +315,7 @@ App 层的 `restart` 入口在 [app.rs:L1595-L1603](https://github.com/zed-indus
    → client.with_common(|common| common.handle_system_wake())    # headless: client.rs:40-46
 7. handle_system_wake 取出 callbacks.system_wake 执行
    → 第 1 步的 closure → 遍历 App 的 system_wake_observers
-   → 用户在 cx.on_system_wake(...) 里注册的回调最终被调用      # app.rs:1349-1362
+   → 用户在 cx.on_system_wake(...) 里注册的回调最终被调用      # app.rs:1355-1368
 ```
 
 注意第 1 步和第 7 步之间隔着「平台原始事件 → DBus → calloop channel → 平台回调 → App 观察者」五层转发，这是 gpui 把「平台差异」挡在 `App` 之外的标准做法。
@@ -324,49 +324,49 @@ App 层的 `restart` 入口在 [app.rs:L1595-L1603](https://github.com/zed-indus
 
 **契约声明**——三个回调都是必需方法：
 
-[../gpui/src/platform.rs:L203-L205](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L203-L205)
+[../gpui/src/platform.rs:L203-L205](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L203-L205)
 `on_quit`、`on_reopen`、`on_system_wake` 均接收 `Box<dyn FnMut()>`。与下一节将看到的 `on_app_lifecycle`（默认空实现）形成对照：桌面回调是每个平台必须认真实现的。
 
 **Linux 的回调仓库**——`PlatformHandlers`：
 
-[../gpui_linux/src/linux/platform.rs:L106-L116](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L106-L116)
-九个 `Option<Box<dyn FnMut...>>` 字段，覆盖打开 URL、退出、重开、菜单动作、键盘布局变化、系统唤醒。`Option` 表达「回调可能还没注册」；`FnMut` 允许重复触发。它作为 `callbacks` 字段存在于 [LinuxCommon（L118-L136）](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L118-L136)——同一个结构还聚合了执行器、文本系统、`LoopSignal` 等三后端共享的全部状态。
+[../gpui_linux/src/linux/platform.rs:L106-L116](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L106-L116)
+九个 `Option<Box<dyn FnMut...>>` 字段，覆盖打开 URL、退出、重开、菜单动作、键盘布局变化、系统唤醒。`Option` 表达「回调可能还没注册」；`FnMut` 允许重复触发。它作为 `callbacks` 字段存在于 [LinuxCommon（L118-L136）](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L118-L136)——同一个结构还聚合了执行器、文本系统、`LoopSignal` 等三后端共享的全部状态。
 
 **Linux 外壳的三个注册方法**——写入 `PlatformHandlers`：
 
-[../gpui_linux/src/linux/platform.rs:L550-L567](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L550-L567)
+[../gpui_linux/src/linux/platform.rs:L550-L567](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L550-L567)
 `on_quit`/`on_reopen` 是纯赋值；`on_system_wake` 赋值之外还调用 `start_wake_listener()`——懒启动设计：没人关心系统唤醒就不建立 DBus 连接。
 
 **唤醒监听器与回调触发**——三个函数接力：
 
-[../gpui_linux/src/linux/platform.rs:L180-L202](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L180-L202)
+[../gpui_linux/src/linux/platform.rs:L180-L202](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L180-L202)
 `start_wake_listener` 用 `wake_listener_started` 标志保证只启动一次；`handle_system_wake` 用 `take()` → 调用 → `get_or_insert` 放回的手法取得 `FnMut` 的可变调用权（因为回调存在 `self.callbacks` 里，直接 `&mut` 调用会与 `with_common` 的闭包借用冲突）。
 
-[../gpui_linux/src/linux/platform.rs:L205-L227](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L205-L227)
+[../gpui_linux/src/linux/platform.rs:L205-L227](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs#L205-L227)
 `listen_for_system_wake` 通过 ashpd 的 zbus 连接系统总线，向 `org.freedesktop.login1` 的 `PrepareForSleep` 信号订阅：参数 `sleeping == false` 表示「从睡眠中醒来」，此时向 calloop channel 发一个空消息。这段代码只在 `wayland`/`x11` feature 开启时编译（`#[cfg(all(target_os = "linux", any(feature = "wayland", feature = "x11")))]`）。
 
 **事件循环侧的接收**——三后端各自把 wake 通道注册为 calloop 事件源。headless 版最短：
 
-[../gpui_linux/src/linux/headless/client.rs:L28-L46](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/headless/client.rs#L28-L46)
-`LinuxCommon::new` 返回三元组 `(common, main_receiver, wake_receiver)`——主任务通道和唤醒通道并列；两个 channel 都通过 `insert_source` 挂进 calloop，wake 事件到达即调用 `handle_system_wake`。Wayland 后端同样三步（[wayland/client.rs:L743-L772](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/wayland/client.rs#L743-L772)），X11 后端见 [x11/client.rs:L312-L341](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/x11/client.rs#L312-L341)。
+[../gpui_linux/src/linux/headless/client.rs:L28-L46](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/headless/client.rs#L28-L46)
+`LinuxCommon::new` 返回三元组 `(common, main_receiver, wake_receiver)`——主任务通道和唤醒通道并列；两个 channel 都通过 `insert_source` 挂进 calloop，wake 事件到达即调用 `handle_system_wake`。Wayland 后端同样三步（[wayland/client.rs:L743-L772](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/wayland/client.rs#L743-L772)），X11 后端见 [x11/client.rs:L312-L341](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/x11/client.rs#L312-L341)。
 
 **App 层的桥接**——`App::new_app` 在启动期把平台回调接到 App 观察者集合：
 
-[../gpui/src/app.rs:L900-L910](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L900-L910)
-注册 `on_system_wake`：闭包里用 `Rc::downgrade` 弱引用升级拿到 App（避免平台持有强引用导致 App 无法释放），然后遍历 `system_wake_observers`。紧接着的 [L912-L919](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L912-L919) 注册 `on_quit`，内容是调用 `cx.shutdown()`——把 4.2 的两个线程接起来。用户侧入口是 [App::on_system_wake（L1349-L1362）](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app.rs#L1349-L1362)，返回 `Subscription`，注册即激活（`activate()` 立即跑一次观察者）。
+[../gpui/src/app.rs:L906-L916](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L906-L916)
+注册 `on_system_wake`：闭包里用 `Rc::downgrade` 弱引用升级拿到 App（避免平台持有强引用导致 App 无法释放），然后遍历 `system_wake_observers`。紧接着的 [L918-L925](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L918-L925) 注册 `on_quit`，内容是调用 `cx.shutdown()`——把 4.2 的两个线程接起来。用户侧入口是 [App::on_system_wake（L1355-L1368）](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app.rs#L1355-L1368)，返回 `Subscription`，注册即激活（`activate()` 立即跑一次观察者）。
 
-**macOS 的同名链路**——回调存在 `MacPlatformState`（字段见 [L168-L194](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L168-L194)），触发点全部是 Objective-C 委托方法：
+**macOS 的同名链路**——回调存在 `MacPlatformState`（字段见 [L168-L194](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L168-L194)），触发点全部是 Objective-C 委托方法：
 
-[../gpui_macos/src/platform.rs:L971-L988](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L971-L988)
-`on_system_wake` 注册回调时，若尚未注册过观察者，则向 AppKit 委托对象挂载 `NSWorkspaceDidWakeNotification` 观察者（[register_system_wake_observer，L1319-L1331](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L1319-L1331)）。注意 `did_finish_launching`（[L1281-L1317](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L1281-L1317)）里也有一段相同逻辑——如果用户在启动回调里注册 `on_system_wake`，那时委托对象已存在，两处配合保证「无论注册早晚都能挂上观察者」。
+[../gpui_macos/src/platform.rs:L971-L988](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L971-L988)
+`on_system_wake` 注册回调时，若尚未注册过观察者，则向 AppKit 委托对象挂载 `NSWorkspaceDidWakeNotification` 观察者（[register_system_wake_observer，L1319-L1331](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L1319-L1331)）。注意 `did_finish_launching`（[L1281-L1317](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L1281-L1317)）里也有一段相同逻辑——如果用户在启动回调里注册 `on_system_wake`，那时委托对象已存在，两处配合保证「无论注册早晚都能挂上观察者」。
 
-[../gpui_macos/src/platform.rs:L1396-L1415](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L1396-L1415)
-`onSystemWake:` selector 的 Rust 实现：先把回调执行**推迟到主队列下一轮**（`exec_async_f`，与 quit 同样的防重入手法，注释写明是因为 NSNotificationCenter 同步派发通知），再取回调执行。对应地，`on_reopen` 的触发点是 [should_handle_reopen（L1333-L1343）](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L1333-L1343)：仅当 `has_open_windows == false`（应用没有可见窗口）时才调用 reopen 回调——这正是「点 Dock 图标重新开窗」的实现机制；`on_quit` 的触发点是 [will_terminate（L1345-L1353）](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L1345-L1353)，对应 `applicationWillTerminate:`。
+[../gpui_macos/src/platform.rs:L1396-L1415](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L1396-L1415)
+`onSystemWake:` selector 的 Rust 实现：先把回调执行**推迟到主队列下一轮**（`exec_async_f`，与 quit 同样的防重入手法，注释写明是因为 NSNotificationCenter 同步派发通知），再取回调执行。对应地，`on_reopen` 的触发点是 [should_handle_reopen（L1333-L1343）](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L1333-L1343)：仅当 `has_open_windows == false`（应用没有可见窗口）时才调用 reopen 回调——这正是「点 Dock 图标重新开窗」的实现机制；`on_quit` 的触发点是 [will_terminate（L1345-L1353）](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L1345-L1353)，对应 `applicationWillTerminate:`。
 
 **Windows 的注册**——存进平台回调状态并用 Win32 电源通知：
 
-[../gpui_windows/src/platform.rs:L670-L684](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/src/platform.rs#L670-L684)
-三个回调分别 `set` 进对应字段；`on_system_wake` 额外调用 `RegisterSuspendResumeNotification` 注册电源事件——唤醒时窗口消息循环收到 `WM_POWERBROADCAST`（注释标明 `self.handle` 是接收消息的平台窗口）。Web 平台则把 `on_system_wake` 实现为空（[gpui_web/src/platform.rs:L461-L469](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_web/src/platform.rs#L461-L469)）：浏览器不向页面暴露系统睡眠事件。
+[../gpui_windows/src/platform.rs:L670-L684](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_windows/src/platform.rs#L670-L684)
+三个回调分别 `set` 进对应字段；`on_system_wake` 额外调用 `RegisterSuspendResumeNotification` 注册电源事件——唤醒时窗口消息循环收到 `WM_POWERBROADCAST`（注释标明 `self.handle` 是接收消息的平台窗口）。Web 平台则把 `on_system_wake` 实现为空（[gpui_web/src/platform.rs:L461-L469](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_web/src/platform.rs#L461-L469)）：浏览器不向页面暴露系统睡眠事件。
 
 #### 4.3.4 代码实践
 
@@ -374,7 +374,7 @@ App 层的 `restart` 入口在 [app.rs:L1595-L1603](https://github.com/zed-indus
 
 1. **实践目标**：不写代码也能动手——亲手把 4.3.2 的七步流程图与源码行号一一对应，检验「链路追踪」能力。
 2. **操作步骤**：
-   1. 打开 [gpui_linux/src/linux/platform.rs](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs)，找到 `PlatformHandlers`、`start_wake_listener`、`handle_system_wake`、`listen_for_system_wake` 四处，确认它们的调用关系。
+   1. 打开 [gpui_linux/src/linux/platform.rs](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/platform.rs)，找到 `PlatformHandlers`、`start_wake_listener`、`handle_system_wake`、`listen_for_system_wake` 四处，确认它们的调用关系。
    2. 用 grep 确认三后端各自在哪里注册 `wake_receiver`：
 
       ```bash
@@ -389,7 +389,7 @@ App 层的 `restart` 入口在 [app.rs:L1595-L1603](https://github.com/zed-indus
 
 **练习 1**：为什么 `PlatformHandlers` 放在 `LinuxCommon` 里而不是直接放在 `LinuxPlatform` 外壳上？
 
-答案：`LinuxPlatform<P>` 是泛型外壳，真正的运行时状态（事件循环句柄、连接、窗口表）都在后端 `P`（Wayland/X11/headless 客户端）里；而后端需要**互不可见地**访问共享回调（比如 headless 的事件循环要触发 system_wake 回调）。`LinuxCommon` 通过 `with_common(f)` 闭包访问器挂进每个后端（headless 的实现见 [headless/client.rs:L58-L60](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/headless/client.rs#L58-L60)），外壳与后端都能到达同一份数据。若放在外壳上，后端触发回调就需要持有外壳的引用，形成循环依赖。
+答案：`LinuxPlatform<P>` 是泛型外壳，真正的运行时状态（事件循环句柄、连接、窗口表）都在后端 `P`（Wayland/X11/headless 客户端）里；而后端需要**互不可见地**访问共享回调（比如 headless 的事件循环要触发 system_wake 回调）。`LinuxCommon` 通过 `with_common(f)` 闭包访问器挂进每个后端（headless 的实现见 [headless/client.rs:L58-L60](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_linux/src/linux/headless/client.rs#L58-L60)），外壳与后端都能到达同一份数据。若放在外壳上，后端触发回调就需要持有外壳的引用，形成循环依赖。
 
 **练习 2**：`handle_system_wake` 里为什么用 `take()` + `get_or_insert(callback)` 而不是直接 `if let Some(cb) = &mut self.callbacks.system_wake { cb() }`？
 
@@ -397,7 +397,7 @@ App 层的 `restart` 入口在 [app.rs:L1595-L1603](https://github.com/zed-indus
 
 **练习 3**：macOS 的 `should_handle_reopen` 只在 `has_open_windows == false` 时触发回调。如果 Zed 想实现「点 Dock 图标时若有窗口则全部带到前台」，应该用 `on_reopen` 吗？
 
-答案：不该。`on_reopen` 语义就是「重开」（无窗口时的 Dock 点击）。有窗口时的前台化是 `activate` 家族的职责（`Platform::activate`，macOS 实现见 [L588-L593](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L588-L593)），由系统行为直接完成，不需要应用回调参与。把两个场景分开正是契约设计的清晰之处。
+答案：不该。`on_reopen` 语义就是「重开」（无窗口时的 Dock 点击）。有窗口时的前台化是 `activate` 家族的职责（`Platform::activate`，macOS 实现见 [L588-L593](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui_macos/src/platform.rs#L588-L593)），由系统行为直接完成，不需要应用回调参与。把两个场景分开正是契约设计的清晰之处。
 
 ### 4.4 AppLifecyclePhase 与移动端生命周期：桌面上的「永不触发」
 
@@ -408,13 +408,13 @@ u2-l1 提过 trait 里有四个带默认实现的「移动端方法」。本讲�
 - `on_app_lifecycle(callback: Box<dyn FnMut(AppLifecyclePhase)>)`——生命周期阶段变化时触发；
 - `on_memory_warning(callback: Box<dyn FnMut()>)`——系统内存吃紧时触发。
 
-它们与桌面回调的根本差异是**控制权的归属**。注释写得很直白（[platform.rs:L207-L209](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L207-L209)）：桌面应用自己决定何时退出（`quit` 是应用主动调用）；移动应用的生死由操作系统掌握——系统随时把应用切到后台、暂停、甚至直接杀死，应用只能「响应」而无法「决定」。
+它们与桌面回调的根本差异是**控制权的归属**。注释写得很直白（[platform.rs:L207-L209](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L207-L209)）：桌面应用自己决定何时退出（`quit` 是应用主动调用）；移动应用的生死由操作系统掌握——系统随时把应用切到后台、暂停、甚至直接杀死，应用只能「响应」而无法「决定」。
 
 `AppLifecyclePhase` 就是把 iOS/Android 的系统回调词汇表抽象成四个平台无关的阶段。契约 doc 注释明确写着「Desktop platforms never invoke this」——四个桌面平台实现里没有任何一个覆盖 `on_app_lifecycle`（它们全部继承默认空实现），所以在桌面上注册这个回调等于把闭包扔进黑洞。这不是缺陷而是设计：契约为未来的 iOS/Android 后端（GPUI 的移动端支持）预留了词汇，桌面平台用默认空实现表达「本平台无此概念」。
 
 #### 4.4.2 核心流程
 
-移动端语义下的生命周期状态机（对照表见契约 doc，[platform.rs:L746-L757](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L746-L757)）：
+移动端语义下的生命周期状态机（对照表见契约 doc，[platform.rs:L746-L757](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L746-L757)）：
 
 ```text
         （启动）
@@ -440,12 +440,12 @@ u2-l1 提过 trait 里有四个带默认实现的「移动端方法」。本讲�
 
 **契约中的移动端方法组**——两处默认空实现：
 
-[../gpui/src/platform.rs:L207-L222](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L207-L222)
+[../gpui/src/platform.rs:L207-L222](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L207-L222)
 注释首先声明「移动平台方法」的语境：OS 拥有应用生命周期，应用只能响应。`on_app_lifecycle` 默认体为空并带 doc「Desktop platforms never invoke this」；`on_memory_warning` 同样默认空实现，doc 指明对应 iOS `didReceiveMemoryWarning` 与 Android `onTrimMemory`。
 
 **`AppLifecyclePhase` 枚举**——四阶段与两大移动平台的映射：
 
-[../gpui/src/platform.rs:L746-L769](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L746-L769)
+[../gpui/src/platform.rs:L746-L769](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/platform.rs#L746-L769)
 doc 注释里直接内嵌了一张映射表（`Active ↔ didBecomeActive/onResume`、`Inactive ↔ willResignActive/onPause`、`Background ↔ didEnterBackground/onStop`、`Foreground ↔ willEnterForeground/onStart`），并解释 `Background` 意味着「GPU surface 可能被销毁、进程可能无预警被杀」。每个变体的字段注释再次强调语义（如 `Inactive` 是「可见但不接收输入」）。
 
 **「桌面永不调用」的证据**——契约层之外，`App` 根本没有暴露转发 API。在 gpui/src/app.rs 里搜索 `on_app_lifecycle` 零命中：`App` 有 `on_system_wake`、`on_app_quit`、`on_thermal_state_change` 等等（它们都在 4.2/4.3 读过），唯独没有 `on_app_lifecycle` 的 App 层版本。桌面调用链在 `App` 这一层就断掉了，平台默认空实现永远接不到回调。你可以自己验证：
@@ -555,5 +555,5 @@ grep -rn "fn on_app_lifecycle\|fn on_memory_warning" crates/gpui*/src
 
 1. **u2-l3（显示器管理）**：继续沿八大分组下钻 `displays`/`primary_display` 与 `PlatformDisplay` 契约。你可以先复习本讲 4.1 提到的「平台状态在构造期建立」——显示器枚举同样发生在后端客户端初始化期，理解本讲的 `LinuxCommon` 聚合方式后再读 display 实现会非常顺。
 2. **u2-l4（系统集成服务）**：本讲看到 `PlatformHandlers` 里还有 `open_urls` 回调字段，u2-l4 会展开 URL 打开、剪贴板、文件对话框、凭据存储这组高频系统集成。
-3. **u4 单元（调度与并发）**：本讲多次出现「派发到前台执行器再执行」的防重入手法（macOS quit、Windows restart）以及 calloop channel。u4-l2 的 `PlatformDispatcher` 与 u4-l3 的 `LinuxDispatcher` 会把这些机制讲透：`run` 阻塞期间任务如何被投递进事件循环，正是调度器的核心命题。
-4. **延伸阅读**：对照 [gpui/src/app/headless_app_context.rs](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/app/headless_app_context.rs)（u8-l3 主角）思考一个问题：无头场景下 `run` 的循环还在转（4.1.3 的 headless 实现），但没有真实窗口与输入，这个「空转」的价值是什么？答案是它是 u8-l4 确定性测试与离屏渲染的驱动引擎。
+3. **u4 单元（调度与并发）**：本讲多次出现「派发到前台执行器再执行」的防重入手法（macOS quit、Windows restart）以及 calloop channel。u4-l2 的 `PlatformDispatcher` 与 u4-l3 的 `LinuxDispatcher` 会把这些机制讲透：`run` 阻塞期间任务如何被投递进事件循环，正是调度器的核心命题。若你在 `App` 的字段列表或 `App::new_app` 里读到 `#[cfg(feature = "profiler")]` 的 `foreground_journal` 相关代码（当前 HEAD 新增），那是挂在同一条调度链路上的前台工作日志与 hang 检测插桩，由 u4-l6 专门讲解，不影响本讲的生命周期语义。
+4. **延伸阅读**：对照 [gpui/src/app/headless_app_context.rs](https://github.com/zed-industries/zed/blob/6e0a0835755ea57c1db4e0057f1a30ddba554706/crates/gpui/src/app/headless_app_context.rs)（u8-l3 主角）思考一个问题：无头场景下 `run` 的循环还在转（4.1.3 的 headless 实现），但没有真实窗口与输入，这个「空转」的价值是什么？答案是它是 u8-l4 确定性测试与离屏渲染的驱动引擎。
