@@ -1,13 +1,13 @@
 {
-  "head": "1b04e4caf01e376624fb514ef85b0e6d8ee5d930",
+  "head": "b0e37a6c18a6321061ba842e26ee7156729f0870",
   "project": "zed-crates-gpui_util",
-  "rationale": "gpui_util 是一个只有两个源码文件的小型基础工具库（约 740 行），为整个 GPUI 生态提供零 GPUI 依赖的公共工具，被 fuzzy、lsp、gpui_linux、gpui_windows、util 等 80 多个文件引用。学习顺序设计为：第一单元先让读者从零建立对 crate 定位、极简依赖（log、anyhow、仅 Windows 需要 which）和 lib.rs 单文件分区结构的整体认识；第二单元按\"使用频率与理解难度递增\"的顺序精读核心工具——先讲被引用最多的 ResultExt 错误处理扩展，再深入其背后的 log_error_with_caller 与 track_caller 机制，然后是 debug_panic!/maybe! 两个宏、手写 Future 适配器（TryFutureExt，涉及 unsafe Pin 投影）、defer RAII、ArcCow 智能指针与 TypeIdHasher 专用哈希器；第三单元进入专家视角，覆盖 Windows 平台代码（cfg 条件编译、pwsh 探测、LazyLock）、性能工具（measure、post_inc、select_nth_unstable_by 算法取舍）以及 crate 的架构定位与二次开发方法。每篇讲义只解决一个问题，源码引用集中在 lib.rs 与 arc_cow.rs 两个文件的不同区段，讲义之间通过 depends_on 形成清晰链路。",
+  "rationale": "gpui_util 是一个只有两个源码文件的小型基础工具库（约 740 行），为整个 GPUI 生态提供零 GPUI 依赖的公共工具，被 fuzzy、lsp、gpui_linux、gpui_windows、util 等大量下游文件引用。学习顺序设计为：第一单元先让读者从零建立对 crate 定位、极简依赖（log、anyhow、仅 Windows 需要 which）和 lib.rs 单文件分区结构的整体认识；第二单元按「使用频率与理解难度递增」的顺序精读核心工具——先讲被引用最多的 ResultExt 错误处理扩展，再深入其背后的 log_error_with_caller 与 track_caller 机制，然后是 debug_panic!/maybe! 两个宏、手写 Future 适配器（TryFutureExt，涉及 unsafe Pin 投影）、defer RAII、ArcCow 智能指针与 TypeIdHasher 专用哈希器；第三单元进入专家视角，覆盖 Windows 平台代码（cfg 条件编译、pwsh 探测、LazyLock）、性能工具（measure、post_inc、select_nth_unstable_by 算法取舍）以及 crate 的架构定位与二次开发方法。增量说明：对比上次 HEAD（1b04e4caf01e376624fb514ef85b0e6d8ee5d930）与当前 HEAD（b0e37a6c18a6321061ba842e26ee7156729f0870），crates/gpui_util 目录下没有任何提交、没有代码差异，src/lib.rs 与 src/arc_cow.rs 中的全部关键符号（ResultExt、log_error_with_caller、debug_panic!、maybe!、TryFutureExt、defer、ArcCow、TypeIdHasher、new_std_command、find_pwsh_*、measure、post_inc、truncate_to_bottom_n_sorted_by 等）均未变化，因此全部 12 篇讲义保持原结构，action 均为 keep，无需新增或重建。",
   "units": [
     {
       "id": "u1",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-crate-overview.md",
           "id": "u1-l1",
@@ -32,7 +32,7 @@
           "topic": "介绍 gpui_util 在 zed 工作区中的定位——一个为 GPUI 生态服务、自身零 GPUI 依赖的基础工具库；通过 Cargo.toml 分析它的极简依赖（log、anyhow，以及仅 Windows 目标的 which），并说明它被 fuzzy、lsp、gpui_linux 等大量下游 crate 使用。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -67,7 +67,7 @@
       "id": "u2",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -94,7 +94,7 @@
           "topic": "精读 gpui_util 中使用频率最高的 trait ResultExt<E>，理解 log_err、warn_on_err、log_with_level、log_err_with_backtrace、debug_assert_ok、anyhow 六个方法如何把『记录并降级错误』变成一行调用。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -122,7 +122,7 @@
           "topic": "深入 ResultExt 背后的内部函数 log_error_with_caller：如何用 #[track_caller] 捕获调用者位置、如何从 crates/<crate>/src/<module> 路径反推出日志 target，以及如何手工构造 log::Record 而不是用 log::error! 宏。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -149,7 +149,7 @@
           "topic": "学习 gpui_util 的三个开发期辅助工具：debug_panic! 宏在 debug 构建触发 panic、在 release 构建记录带回溯的错误日志；some_or_debug_panic 对 Option 做同样的事；maybe! 宏展开成立即调用的函数表达式，让非 Result 函数内部也能使用 ? 运算符。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u2-l2"
@@ -178,7 +178,7 @@
           "topic": "精读 TryFutureExt / TryFutureExtBacktrace 两个 trait 与 LogErrorFuture、LogErrorWithBacktraceFuture、UnwrapFuture 三个包装 future：学习如何手动实现 Future trait、如何用 unsafe Pin::new_unchecked 做内部投影，以及为什么 Location 必须在调用点捕获。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -204,7 +204,7 @@
           "topic": "学习 defer 函数与 Deferred<F> 结构体：返回值被 drop 时执行闭包（类似 Go 的 defer 或 C++ 的 RAII 守卫），abort() 可以取消执行；这是 Zed 代码里做作用域清理的基础工具。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -232,7 +232,7 @@
           "topic": "精读独立的 arc_cow 模块：ArcCow<'a, T> 是 Borrowed(&'a T) 与 Owned(Arc<T>) 的二选一类型，像 Cow 一样灵活但 clone 更便宜；学习它如何为 PartialEq、Ord、Hash、Deref、AsRef、Borrow、Debug 以及一整套 From 转换做委托实现。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -267,7 +267,7 @@
       "id": "u3",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -294,7 +294,7 @@
           "topic": "分析两段 cfg(target_os = \"windows\") 门控的代码：new_std_command 用 CREATE_NO_WINDOW 标志创建不弹窗的子进程；get_windows_system_shell 按优先级在 ProgramFiles、MSIX、scoop、PATH 中探测 pwsh，并用 LazyLock 缓存结果。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -321,7 +321,7 @@
           "topic": "学习三个小而精的性能工具：measure 用 ZED_MEASUREMENTS 环境变量门控计时并通过 OnceLock 只读一次环境；post_inc 提供 C 风格后置自增；truncate_to_bottom_n_sorted_by 用 select_nth_unstable_by 加截断加排序取出有序的最小 N 项，优于全量排序。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u2-l6",

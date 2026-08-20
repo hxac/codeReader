@@ -1,7 +1,7 @@
 {
-  "head": "1b04e4caf01e376624fb514ef85b0e6d8ee5d930",
+  "head": "b0e37a6c18a6321061ba842e26ee7156729f0870",
   "project": "zed-crates-gpui_platform",
-  "rationale": "gpui_platform 本身是一个只有约 200 行的门面 crate，它真正的学习价值在于它串起的整条 GPUI 平台抽象链路：gpui 中的 Platform/PlatformWindow/PlatformDispatcher/PlatformTextSystem/PlatformAtlas 等契约 trait，以及 gpui_macos、gpui_windows、gpui_linux、gpui_web 四个按 cfg 条件编译的操作系统实现。因此大纲采用「先门面、再契约、再实现」的三段式：第一单元让读者从零跑起一个跨平台窗口应用并吃透 current_platform 的条件编译分发；第二到第四单元按「Platform trait 契约 → 窗口与输入 → 调度与并发」逐层拆解平台无关接口，这是所有平台实现共同遵守的骨架；第五到第七单元分别深入 Linux（含 headless/X11/Wayland/portal）、macOS 与 Windows、Web 三套真实实现，让读者对照契约看落地差异；第八单元收尾于文本系统、图集与渲染后端、无头渲染、test-support 测试设施，并以「实现一个自定义 Platform」作为毕业实践。source_files 中的路径一律相对于永久链接基目录 crates/gpui_platform/，兄弟 crate 使用 ../ 前缀，保证生成的 GitHub 链接可直接访问。本次增量（6e0a0835 → 1b04e4caf，共 6 个提交）的 diff 分析结论：gpui_platform crate 本体、gpui 主 crate 的全部 src 源码（含上一轮新增的 profiler 模块）以及 gpui_macos 全程零变化，范围内仅两类改动波及本手册。其一，提交 4d1935b8 对 gpui_linux/src/linux/x11/window.rs 的 X11 紧急提示重构：新增 set_wm_hints_urgency 辅助函数（约 window.rs:395 起）统一 WM_HINTS urgency 的置位与清除，request_attention 简化为调用该辅助函数，且在窗口状态由非激活转为激活时自动清除 urgency 标志（约 window.rs:1116 起）；该文件是 u3-l2 的引用源码，但该讲义尚未生成，worker 会直接按当前 HEAD 生成，故维持 new 并在其主题中补充注意力请求的完整生命周期。其二，提交 282f47a 把 cargo-machete 迁移为 cargo-shear 带来的依赖清理：gpui/Cargo.toml 移除了平台代码抽离后遗留的 macOS 依赖（block/cocoa/core-foundation 等）与 gpui_web dev-dependency，gpui_linux/Cargo.toml 移除 image/itertools/pathfinder_geometry/pollster/profiling/swash，gpui_web 与 gpui_windows 的 Cargo.toml 各新增 cargo-shear 元数据段；u1-l3 逐段讲解的正是这些平台 crate 的 Cargo.toml 依赖表，故标记 update 以刷新依赖清单与行号锚点，而其核心内容的 gpui_platform/Cargo.toml feature 透传结构未变，实践任务不受影响。上一轮标记 update 的 u1-l2、u2-l1、u2-l2、u2-l3 已在 6e0a0835 上完成重写（正文永久链接现已指向该提交），本轮它们引用的 app.rs/window.rs/platform.rs 等文件零变化，转为 keep；u1-l1、u1-l4、u2-l4、u3-l1 引用的源码同样未变，维持 keep；其余 25 篇尚未生成的讲义维持 new。全链路仍为 34 篇，依赖关系从 u1 的零基础入口逐层展开，最终汇聚到 u8-l5 的综合实践。",
+  "rationale": "gpui_platform 本身是一个只有约 200 行的门面 crate，它真正的学习价值在于它串起的整条 GPUI 平台抽象链路：gpui 中的 Platform/PlatformWindow/PlatformDispatcher/PlatformTextSystem/PlatformAtlas 等契约 trait，以及 gpui_macos、gpui_windows、gpui_linux、gpui_web 四个按 cfg 条件编译的操作系统实现。因此大纲采用「先门面、再契约、再实现」的三段式：第一单元让读者从零跑起一个跨平台窗口应用并吃透 current_platform 的条件编译分发；第二到第四单元按「Platform trait 契约 → 窗口与输入 → 调度与并发」逐层拆解平台无关接口，这是所有平台实现共同遵守的骨架；第五到第七单元分别深入 Linux（含 headless/X11/Wayland/portal）、macOS 与 Windows、Web 三套真实实现，让读者对照契约看落地差异；第八单元收尾于文本系统、图集与渲染后端、无头渲染、test-support 测试设施，并以「实现一个自定义 Platform」作为毕业实践。source_files 中的路径一律相对于永久链接基目录 crates/gpui_platform/，兄弟 crate 使用 ../ 前缀，保证生成的 GitHub 链接可直接访问。本轮增量（1b04e4caf → b0e37a6c18，共 9 个提交）的 diff 分析结论：git diff 限定在 gpui_platform、gpui、gpui_linux、gpui_macos、gpui_windows、gpui_web 六个 crate 上的改动为零，九个提交全部落在本手册引用范围之外（editor、project、workspace、worktree、lsp_store、project_panel、agent_ui、file_finder、fs、language_tools、lsp_locations、zed 等 crate，外加 CONTRIBUTING.md 与 Cargo.lock 的锁文件漂移），因此没有任何讲义引用的源码文件需要刷新；已抽查确认上一轮的关键锚点依然在位（如 x11/window.rs:397 的 set_wm_hints_urgency、gpui/src/profiler/journal.rs 与 hang.rs、platform/test 目录）。讲义目录方面，上一轮标记 new 的 u3-l2、u3-l3 已按当时 HEAD 生成完毕，标记 update 的 u1-l3 也已完成 cargo-shear 依赖清单刷新重写，故本轮这 13 篇已生成讲义全部转为 keep；其余 21 篇（u3-l4 起）尚待生成，维持 new。全链路仍为 34 篇，依赖关系与单元结构保持不变。",
   "units": [
     {
       "id": "u1",
@@ -62,7 +62,7 @@
           "topic": "对照 gpui 官方 window 示例，讲解如何用 gpui_platform::application() 创建应用、打开窗口并在不同操作系统上得到一致行为，同时区分 application() 与 headless() 两个入口。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -88,7 +88,7 @@
             "../gpui_macos/Cargo.toml"
           ],
           "title": "crate 依赖、feature 开关与平台 crate 目录地图",
-          "topic": "逐段阅读 gpui_platform/Cargo.toml：按目标操作系统划分的依赖表、wayland/x11/font-kit/screen-capture/test-support 等 feature 如何向下透传到各平台 crate，并浏览四个平台 crate 的源码目录结构。注意本轮 cargo-shear 依赖清理后各平台 crate 的依赖清单已有变化（如 gpui_linux 移除了 image/itertools/pathfinder_geometry/pollster/profiling/swash）。"
+          "topic": "逐段阅读 gpui_platform/Cargo.toml：按目标操作系统划分的依赖表、wayland/x11/font-kit/screen-capture/test-support 等 feature 如何向下透传到各平台 crate，并浏览四个平台 crate 的源码目录结构。注意上一轮 cargo-shear 依赖清理后各平台 crate 的依赖清单已有变化（如 gpui_linux 移除了 image/itertools/pathfinder_geometry/pollster/profiling/swash），本讲义已据此完成刷新。"
         },
         {
           "action": "keep",
@@ -284,7 +284,7 @@
           "topic": "追踪从应用层 cx.open_window 传下的 WindowOptions 如何化为 WindowParams，最终进入 Platform::open_window 返回 Box<dyn PlatformWindow>，并说明 AnyWindowHandle 在其中的桥接作用。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -313,7 +313,7 @@
           "topic": "走读 PlatformWindow trait（含 raw-window-handle 的 HasWindowHandle/HasDisplayHandle 约束），覆盖标题、大小、位置、缩放、焦点、全屏、窗口控制区与注意力请求（request_attention 在 X11 上通过 set_wm_hints_urgency 设置 WM_HINTS urgency 标志、窗口转为激活时自动清除）等方法，并以 Linux 侧实现为例。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],

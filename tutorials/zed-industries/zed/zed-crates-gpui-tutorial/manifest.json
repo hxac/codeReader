@@ -1,7 +1,7 @@
 {
-  "head": "1b04e4caf01e376624fb514ef85b0e6d8ee5d930",
+  "head": "b0e37a6c18a6321061ba842e26ee7156729f0870",
   "project": "zed-crates-gpui",
-  "rationale": "增量分析：两次 HEAD 之间只有一个提交改动 gpui crate——282f47a544（Switch from cargo-machete to cargo-shear，#62643），且只碰 Cargo.toml（+10/−20 行）：macOS target 依赖段清除了平台 crate 拆分后遗留的死依赖（block、cocoa、cocoa-foundation、core-foundation(-sys)、core-graphics、core-text、foreign-types、media、objc、mach2、metal，仅保留 core-video、font-kit、log、objc2/objc2-metal），删除了 linux/freebsd/macos 段的 pathfinder_geometry、wasm dev-dependencies 里的 gpui_web 与 macOS build-dependencies 里的 cbindgen，并把 [package.metadata.cargo-machete] 换成 [package.metadata.cargo-shear]（ignored 扩为 bindgen/font-kit/getrandom/objc2/objc2-metal/tracing，新增 ignored-paths 指向 src/_ownership_and_data_flow.rs）；同一提交对兄弟 crate 只是同类清扫（gpui_linux 删掉 image/itertools/pathfinder_geometry/pollster/profiling/swash 并加 cargo-shear 元数据，gpui_web 仅加元数据，gpui_platform 未动）。关键在于 [features] 段与主 [dependencies] 段逐字节未变、23 个 [[example]] 注册原样保留（仅整体上移约 10 行），而已生成的 21 篇讲义没有任何一篇引用被删除的依赖或 cargo-machete 元数据：u1-l1 对 features、常用依赖（taffy/accesskit/lyon/refineable/slotmap 等）与示例注册的论断在 HEAD 上仍然成立，其源码链接钉在生成时 commit 均可解析。同时核实：上一轮标记 update 的 u1-l3/u2-l5/u4-l3 与其后生成的 u5-l1/u5-l2 均已在 6e0a0835 重生成并纳入 1861e58f98 的 journal/hang 相关事实（文件内已出现 ForegroundRunnableCounter、record_frame_pending、kind_name 等内容且链接钉在 6e0a0835），而本轮 src/ 目录零改动，因此全部已生成讲义标 keep（并清理了这三篇 topic 中已过时的『更新点』旁注与 u2-l1 的『本轮』旁注）；u5-l3 起共 17 篇尚未生成，维持 new。学习路线、单元划分、依赖关系与七单元结构均不变。",
+  "rationale": "增量分析：1b04e4ca..b0e37a6c 区间共 9 个提交，其中没有任何一个改动 crates/gpui——对该目录的 git diff 输出为空，src/、examples/、Cargo.toml、docs/ 全部逐字节不变，因此不存在代码漂移，所有已生成讲义的论断与源码链接（钉在内容一致的提交上）均继续成立。讲义目录方面：上一轮之后 worker 又生成了 u5-l3（Action 体系，476 行）、u5-l4（键位派发，599 行）、u5-l5（焦点系统，739 行）三篇且均带 summary 文件，至此 u1–u5 共 23 篇讲义已生成并与当前代码树一致，本轮全部标 keep；u5-l6 起 16 篇（u5-l6、u6-l1..u6-l8、u7-l1..u7-l7）尚未生成，维持 new。学习路线、七单元结构、依赖关系与讲义顺序均不变，仅清理 u4 单元标题中遗留的『待补充 u4-l4/u4-l5』过时旁注。",
   "units": [
     {
       "id": "u1",
@@ -555,7 +555,7 @@
       ],
       "level": "intermediate",
       "order": 4,
-      "title": "元素机制与绘制管线（待补充 u4-l4/u4-l5）"
+      "title": "元素机制与绘制管线"
     },
     {
       "id": "u5",
@@ -623,7 +623,7 @@
           "topic": "剖析 div.rs 中的 InteractiveElement/StatefulInteractiveElement 两个 trait：on_click 等监听如何在 paint 阶段注册、Stateful 包装、hover/active 状态样式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l2"
           ],
@@ -652,7 +652,7 @@
           "topic": "讲解 Action trait、actions! 宏、带数据动作的 derive 宏，以及 ActionRegistry 如何在 App 启动时通过 inventory 收集注册。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l3"
           ],
@@ -684,7 +684,7 @@
           "topic": "追踪一次按键的完整旅程：平台 keystroke → Keymap 匹配 KeyBinding → DispatchTree 沿元素树与 KeyContext 栈寻找 on_action 处理器，含 docs/key_dispatch.md 官方说明。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l2"
           ],
