@@ -1,14 +1,13 @@
 {
-  "head": "6e0a0835755ea57c1db4e0057f1a30ddba554706",
+  "head": "1b04e4caf01e376624fb514ef85b0e6d8ee5d930",
   "project": "zed-crates-gpui_shared_string",
-  "rationale": "gpui_shared_string 是一个只有 212 行、单文件的最小 crate，但它是整个 GPUI 文本渲染与 Zed 各模块传递字符串的基础类型：概念上是 Arc<str> 与 &'static str 的统一抽象，底层由 SmolStr 支撑，clone 是 O(1)。学习顺序设计为：先用两篇入门讲义建立\"它是什么、怎么用\"的直觉（项目定位与快速上手）；再进入进阶层，按\"封装原理 → Deref/AsRef/Borrow 透明代理 → From 转换矩阵 → 相等与哈希语义\"的顺序逐块精读源码，这四块正好覆盖本 crate 除序列化外的全部源码，也是 Rust trait 系统的经典教材；最后专家层讲三件事：serde/schemars 手写实现的模式、SharedString 在 gpui 中实现 Element/IntoElement 直接作为 UI 文本元素的机制、以及它作为独立 crate 从 gpui 拆出的依赖治理意义（language_core、env_var 等非 UI crate 因此不必依赖庞大的 gpui）。由于项目极小，控制在 9 篇，逻辑优先、不硬拆。",
+  "rationale": "gpui_shared_string 是一个只有 212 行、单文件的最小 crate，但它是整个 GPUI 文本渲染与 Zed 各模块传递字符串的基础类型：概念上是 Arc<str> 与 &'static str 的统一抽象，底层由 SmolStr 支撑，clone 是 O(1)。学习顺序设计为：先用两篇入门讲义建立\"它是什么、怎么用\"的直觉（项目定位与快速上手）；再进入进阶层，按\"封装原理 → Deref/AsRef/Borrow 透明代理 → From 转换矩阵 → 相等与哈希语义\"的顺序逐块精读源码，这四块正好覆盖本 crate 除序列化外的全部源码，也是 Rust trait 系统的经典教材；最后专家层讲三件事：serde/schemars 手写实现的模式、SharedString 在 gpui 中实现 Element/IntoElement 直接作为 UI 文本元素的机制、以及它作为独立 crate 从 gpui 拆出的依赖治理意义（language_core、env_var 等非 UI crate 因此不必依赖庞大的 gpui）。由于项目极小，控制在 9 篇，逻辑优先、不硬拆。本次增量检查：上次 HEAD 6e0a083 与当前 HEAD 1b04e4ca 之间，crates/gpui_shared_string/ 本身、gpui 的 gpui.rs/styled.rs/text.rs/hello_world.rs、language_core 与 env_var 的 Cargo.toml 以及根 Cargo.toml 的 diff 均为空，也无任何涉及 SharedString 的提交，源码与旧大纲完全一致，故全部讲义标记为 keep，仅更新 head。",
   "units": [
     {
       "id": "u1",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -35,7 +34,7 @@
           "topic": "介绍 gpui_shared_string crate 的定位：为 GPUI 提供可廉价克隆的不可变字符串类型 SharedString，并说明它为什么从 gpui 中拆分为独立的最小依赖 crate。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -62,15 +61,15 @@
           "topic": "讲解 SharedString 的构造方式（new_static 常量构造、new、From 转换）与读取方式（as_str、Deref 自动解引用），并结合 gpui 的 hello_world 示例看真实用法。"
         }
       ],
+      "level": "beginner",
       "order": 1,
       "title": "入门：认识 SharedString"
     },
     {
       "id": "u2",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -97,7 +96,7 @@
           "topic": "解读 pub struct SharedString(SmolStr) 这一 newtype 封装：为什么不直接暴露 SmolStr 或 Arc<str>，以及 SmolStr 的内联存储如何让克隆变得廉价。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -123,7 +122,7 @@
           "topic": "逐行解读 Deref、AsRef、Borrow 三个 trait 的实现，理解 SharedString 为什么能直接调用 str 的方法、能传入泛型字符串 API、能用 &str 在 HashMap 中查键。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -150,7 +149,7 @@
           "topic": "系统梳理 SharedString 的全部 From/Into 实现：从 &str、String、Box<str>、Arc<str>、Cow、char 转入，以及转出为 Arc<str> 和 String，理解每个转换背后的所有权与内存语义。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -176,15 +175,15 @@
           "topic": "解读 PartialEq<String>、PartialEq<str>、PartialEq<&str> 的多方向比较实现与 derive 出的 Eq/Ord/Hash，理解为什么比较只看内容而与存储方式无关。"
         }
       ],
+      "level": "intermediate",
       "order": 2,
       "title": "进阶：精读 SharedString 的 trait 实现"
     },
     {
       "id": "u3",
-      "level": "advanced",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -211,7 +210,7 @@
           "topic": "解读 Serialize/Deserialize 的手工实现（在 JSON 中表现为普通字符串）与 JsonSchema 实现（完全委托 String 的 schema），理解 SharedString 与 Zed 设置系统的关系。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2",
             "u2-l3"
@@ -220,7 +219,7 @@
           "id": "u3-l2",
           "learning_goals": [
             "理解 Element trait 的 request_layout/prepaint/paint 生命周期与各阶段状态类型",
-            "理解 IntoElement for SharedString 让字符串直接作为 div().child(...) 的子元素",
+            "理解 IntoElements for SharedString 让字符串直接作为 div().child(...) 的子元素",
             "辨认 gpui 代码中 SharedString 作为文本载荷的典型位置（StyledText、ELLIPSIS 常量、hello_world）"
           ],
           "level": "advanced",
@@ -240,7 +239,7 @@
           "topic": "解读 gpui 中 impl Element for SharedString 与 impl IntoElement 的实现，理解一个字符串类型如何直接成为 UI 文本元素，以及 .child(\"文本\") 背后的转换链。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1",
             "u3-l2"
@@ -271,6 +270,7 @@
           "topic": "分析 gpui_shared_string 作为独立 crate 的架构意义：让 language_core、env_var 等非 UI crate 无需依赖庞大的 gpui 即可使用同一字符串类型，并动手复刻这种「最小依赖基础类型 crate」模式。"
         }
       ],
+      "level": "advanced",
       "order": 3,
       "title": "专家：生态集成、渲染与架构"
     }

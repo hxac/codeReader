@@ -1,0 +1,359 @@
+{
+  "head": "1b04e4caf01e376624fb514ef85b0e6d8ee5d930",
+  "project": "zed-crates-gpui_util",
+  "rationale": "gpui_util 是一个只有两个源码文件的小型基础工具库（约 740 行），为整个 GPUI 生态提供零 GPUI 依赖的公共工具，被 fuzzy、lsp、gpui_linux、gpui_windows、util 等 80 多个文件引用。学习顺序设计为：第一单元先让读者从零建立对 crate 定位、极简依赖（log、anyhow、仅 Windows 需要 which）和 lib.rs 单文件分区结构的整体认识；第二单元按\"使用频率与理解难度递增\"的顺序精读核心工具——先讲被引用最多的 ResultExt 错误处理扩展，再深入其背后的 log_error_with_caller 与 track_caller 机制，然后是 debug_panic!/maybe! 两个宏、手写 Future 适配器（TryFutureExt，涉及 unsafe Pin 投影）、defer RAII、ArcCow 智能指针与 TypeIdHasher 专用哈希器；第三单元进入专家视角，覆盖 Windows 平台代码（cfg 条件编译、pwsh 探测、LazyLock）、性能工具（measure、post_inc、select_nth_unstable_by 算法取舍）以及 crate 的架构定位与二次开发方法。每篇讲义只解决一个问题，源码引用集中在 lib.rs 与 arc_cow.rs 两个文件的不同区段，讲义之间通过 depends_on 形成清晰链路。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-crate-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 gpui_util 在 zed 工作区中的角色：为 GPUI 生态各 crate 提供无 GPUI 依赖的公共工具",
+            "通过 Cargo.toml 理解其极简依赖策略：log、anyhow 为全平台依赖，which 仅在 Windows 目标引入",
+            "了解 crate 的构建方式与 workspace lints 的继承关系"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Cargo.toml 依赖声明",
+            "src/lib.rs 顶部注释与导入",
+            "src/arc_cow.rs 模块声明"
+          ],
+          "order": 1,
+          "practice_task": "在 zed 仓库中运行 cargo check -p gpui_util 与 cargo doc -p gpui_util --no-deps，列出 src/lib.rs 导出的全部公开项（函数、trait、宏、结构体），按类别制成清单，并标注哪些项仅在 Windows 目标下编译。",
+          "source_files": [
+            "Cargo.toml",
+            "src/lib.rs"
+          ],
+          "title": "gpui_util 是什么：定位、依赖与构建",
+          "topic": "介绍 gpui_util 在 zed 工作区中的定位——一个为 GPUI 生态服务、自身零 GPUI 依赖的基础工具库；通过 Cargo.toml 分析它的极简依赖（log、anyhow，以及仅 Windows 目标的 which），并说明它被 fuzzy、lsp、gpui_linux 等大量下游 crate 使用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-source-map-and-cfg.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "绘制 lib.rs 的分区地图：平台工具、宏、ResultExt、日志内部实现、Future 适配器、defer、哈希器、算法工具",
+            "理解 #[cfg(target_os)] 如何让同一 crate 服务 Windows 与 Unix 平台",
+            "掌握阅读 cfg 门控代码的方法：在非 Windows 平台上如何验证 Windows 分支"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "lib.rs 的 cfg 模块分区",
+            "arc_cow 子模块",
+            "lib.rs 内嵌测试 type_id_hasher"
+          ],
+          "order": 2,
+          "practice_task": "为 src/lib.rs 制作一份模块清单表，把每个区段标注为「平台无关 / 仅 Windows / 仅测试」三类；再用 cargo tree -p gpui_util 与 cargo tree -p gpui_util --target x86_64-pc-windows-msvc 对比两个目标下的依赖差异。",
+          "source_files": [
+            "src/lib.rs",
+            "src/arc_cow.rs"
+          ],
+          "title": "源码地图：lib.rs 单文件布局与条件编译",
+          "topic": "通读 src/lib.rs 的分区结构——Windows 平台工具、通用小函数、宏、ResultExt、日志基础设施、Future 适配器、defer、TypeId 哈希器和排序工具，并理解 #[cfg(target_os = \"windows\")] 条件编译如何让一份代码服务多平台。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "初识 gpui_util"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l1-result-ext.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "掌握 log_err、warn_on_err、log_with_level 返回 Option<T> 的语义与适用场景",
+            "理解 debug_assert_ok 如何在开发期把『不该发生的错误』升级为 panic",
+            "掌握 log_err_with_backtrace 与 anyhow() 两个进阶方法的边界",
+            "理解项目规范『禁止 let _ = 丢弃错误』与本 trait 的关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "trait ResultExt 定义",
+            "ResultExt for Result 实现",
+            "anyhow() 转换方法"
+          ],
+          "order": 1,
+          "practice_task": "写一段示例代码对 std::fs::read_to_string(\"不存在.txt\") 的 Result 分别调用 .log_err()、.warn_on_err()、.debug_assert_ok(\"读取失败\") 与 .anyhow()，在 RUST_LOG=debug 环境下运行，对比日志级别、返回类型（Option<T>、Result、anyhow::Result）各自的用途；再写一个错误示例说明为什么 `let _ = result;` 被项目规范禁止而 `.log_err()` 是推荐写法。",
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "title": "ResultExt：Result 错误处理扩展 trait",
+          "topic": "精读 gpui_util 中使用频率最高的 trait ResultExt<E>，理解 log_err、warn_on_err、log_with_level、log_err_with_backtrace、debug_assert_ok、anyhow 六个方法如何把『记录并降级错误』变成一行调用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-log-error-with-caller.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "理解 #[track_caller] 与 Location::caller() 如何在不付出运行时开销的前提下获取真实调用点",
+            "看懂从文件路径解析出 crate 名与 module path 的字符串处理逻辑",
+            "掌握手工构造 log::Record 的字段含义：target、module_path、file、line、level",
+            "理解 DebugAsDisplay 适配器为什么能让 anyhow::Error 输出回溯"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "#[track_caller] 与 Location",
+            "crates/ 路径解析逻辑",
+            "log::Record 构建",
+            "DebugAsDisplay 适配器"
+          ],
+          "order": 2,
+          "practice_task": "模仿 log_error_with_caller 自己写一个带 #[track_caller] 的函数 report_caller()，在两处不同位置调用它，验证打印的文件与行号是调用点而非定义点；再用同样的路径解析规则处理一个形如 crates/foo/src/bar/baz.rs 的字符串，手工推导出它生成的 target 与 module_path。",
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "title": "log_error_with_caller：track_caller 与日志定位",
+          "topic": "深入 ResultExt 背后的内部函数 log_error_with_caller：如何用 #[track_caller] 捕获调用者位置、如何从 crates/<crate>/src/<module> 路径反推出日志 target，以及如何手工构造 log::Record 而不是用 log::error! 宏。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-debug-panic-and-maybe.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "掌握 debug_panic! 在 debug 与 release 两种构建下的不同行为",
+            "理解 debug_assertions 与 cfg!(debug_assertions) 的判定时机",
+            "掌握 maybe! 宏三种形式（普通块、async 块、async move 块）的展开结果",
+            "学会用 maybe! 在不改变函数签名的前提下使用 ? 运算符"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "debug_panic! 宏展开",
+            "some_or_debug_panic 函数",
+            "maybe! 宏的三条匹配规则"
+          ],
+          "order": 3,
+          "practice_task": "写一个函数用 debug_panic!(\"意外状态: {}\", x) 包裹一个不该到达的分支，分别在 debug 和 cargo build --release（配合 RUST_BACKTRACE=1 与日志输出）下触发它，观察 panic 与 log::error 两种行为差异；再把一段三层嵌套 if let 的解析函数用 maybe!({ let a = ...?; ... }) 重写并保持测试通过，另写一个 async move 变体的用例。",
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "title": "debug_panic!、some_or_debug_panic 与 maybe! 宏",
+          "topic": "学习 gpui_util 的三个开发期辅助工具：debug_panic! 宏在 debug 构建触发 panic、在 release 构建记录带回溯的错误日志；some_or_debug_panic 对 Option 做同样的事；maybe! 宏展开成立即调用的函数表达式，让非 Result 函数内部也能使用 ? 运算符。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "filename": "u2-l4-try-future-ext.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "理解 LogErrorFuture 如何在 poll 返回 Ready(Err) 时记录错误并把输出变成 Option<T>",
+            "掌握 Pin<&mut Self> 下访问内部 future 的 unsafe 投影写法及其安全性前提",
+            "理解为什么 Location 必须在构造 future 时（调用点）捕获而不能在 poll 时获取",
+            "对比 TryFutureExt 与 TryFutureExtBacktrace 两套 trait 的适用边界"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TryFutureExt 与 TryFutureExtBacktrace trait",
+            "LogErrorFuture 的 Future 实现",
+            "UnwrapFuture 的 Future 实现",
+            "log_tracked_err 与调用点捕获"
+          ],
+          "order": 4,
+          "practice_task": "仿照 LogErrorFuture 实现一个 PrefixErrFuture：在内部 future 返回 Err 时以固定前缀（如 [my-task]）记录错误；用 async fn 或 smol 驱动它，分别在 Pending 和 Ready(Err) 路径上验证行为，并写测试断言记录到的错误信息包含前缀。",
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "title": "TryFutureExt：为 Future 手写错误处理适配器",
+          "topic": "精读 TryFutureExt / TryFutureExtBacktrace 两个 trait 与 LogErrorFuture、LogErrorWithBacktraceFuture、UnwrapFuture 三个包装 future：学习如何手动实现 Future trait、如何用 unsafe Pin::new_unchecked 做内部投影，以及为什么 Location 必须在调用点捕获。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l5-defer.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "掌握 Drop trait 实现确定性清理的 RAII 模式",
+            "理解 Deferred 内部 Option<F> 与 abort() 的配合：取走闭包使 drop 不再执行",
+            "理解 #[must_use] 属性如何防止 defer 返回值被立即丢弃导致闭包立刻执行"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Deferred 结构体与 abort 方法",
+            "Drop 实现",
+            "defer 构造函数"
+          ],
+          "order": 5,
+          "practice_task": "用 defer 实现一个作用域计时器：进入作用域时开始计时，drop 时 eprintln 打印耗时；再写一个测试验证调用 Deferred::abort() 后闭包不会执行；最后解释如果写了 `defer(f);`（不带 let 绑定）会发生什么，以及 #[must_use] 如何给出警告。",
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "title": "defer 与 Deferred：基于 Drop 的 RAII 延迟执行",
+          "topic": "学习 defer 函数与 Deferred<F> 结构体：返回值被 drop 时执行闭包（类似 Go 的 defer 或 C++ 的 RAII 守卫），abort() 可以取消执行；这是 Zed 代码里做作用域清理的基础工具。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l6-arc-cow.md",
+          "id": "u2-l6",
+          "learning_goals": [
+            "理解 Borrowed(&'a T) 与 Owned(Arc<T>) 两个变体的所有权含义",
+            "掌握从 &T、Arc<T>、String、Cow<str>、Vec<T> 等来源构造 ArcCow 的转换规则",
+            "理解 Deref、AsRef、Borrow 三个 trait 在这里的分工与重复实现的原因",
+            "理解为什么 Clone 是 Arc 引用计数递增而不是数据拷贝"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ArcCow 枚举定义",
+            "From 转换实现族",
+            "Deref/AsRef/Borrow 委托实现",
+            "Hash/PartialEq/Ord 值语义实现"
+          ],
+          "order": 6,
+          "practice_task": "写一个函数 fn describe(s: impl Into<ArcCow<'_, str>>)，分别用 &\"静态 str\"、String、Arc<str> 三种实参调用它；为 ArcCow<[u8]> 补一个测试：验证两个来源不同（Borrowed 与 Owned）但内容相同的值其 Hash 结果与 Ord 比较结果一致；最后对比 ArcCow 与 std::borrow::Cow 在 clone 一百万次时的耗时差异并解释原因。",
+          "source_files": [
+            "src/arc_cow.rs"
+          ],
+          "title": "ArcCow：借用的引用计数写时克隆智能指针",
+          "topic": "精读独立的 arc_cow 模块：ArcCow<'a, T> 是 Borrowed(&'a T) 与 Owned(Arc<T>) 的二选一类型，像 Cow 一样灵活但 clone 更便宜；学习它如何为 PartialEq、Ord、Hash、Deref、AsRef、Borrow、Debug 以及一整套 From 转换做委托实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l7-type-id-hasher.md",
+          "id": "u2-l7",
+          "learning_goals": [
+            "理解 std::hash::Hasher 与 BuildHasher 两个 trait 的契约",
+            "看懂 write() 只取前 8 字节并用 u64::from_ne_bytes 直接作为哈希值的原理",
+            "理解 TypeId 的内存表示为何使这种『恒等哈希』既正确又零开销",
+            "掌握 crate 内嵌 #[test] 的组织方式与断言技巧"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TypeIdHasher 的 write 与 finish",
+            "TypeIdHashBuilder 的 BuildHasher 实现",
+            "type_id_hasher 单元测试"
+          ],
+          "order": 7,
+          "practice_task": "构造一个 HashMap<TypeId, &'static str, TypeIdHashBuilder>，插入五种类型的映射并验证查询命中；然后阅读文件内的 type_id_hasher 测试，解释为什么它要挑选零尺寸类型、unsized 类型等多样性输入；最后故意用 TypeIdHasher 哈希一个超过 8 字节的普通数据，观察 debug 构建下 debug_panic! 的报错信息。",
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "title": "TypeIdHasher：为 TypeId 键定制的零成本哈希器",
+          "topic": "学习 TypeIdHashBuilder 与 TypeIdHasher：一个专为 HashMap<TypeId, _> 设计的哈希器，不真正散列数据而是直接把 TypeId 的前 8 字节当作 u64 哈希值；同时借此理解 std::hash::Hasher/BuildHasher 契约和 crate 内的单元测试写法。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 2,
+      "title": "核心工具精读"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u3-l1-windows-helpers.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "理解 CREATE_NO_WINDOW (0x0800_0000) 标志如何避免子进程弹出控制台窗口",
+            "看懂 pwsh 的多位置探测链：ProgramFiles（含 32/64 位与预览版）、MSIX 安装目录、scoop、which 回退",
+            "掌握 LazyLock 静态量只探测一次的惰性初始化模式",
+            "掌握在非 Windows 平台上阅读与验证 cfg 门控代码的方法"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "new_std_command 的双平台实现",
+            "find_pwsh_* 三个探测函数",
+            "SYSTEM_SHELL 的 LazyLock 初始化链"
+          ],
+          "order": 1,
+          "practice_task": "写一个跨平台小程序用 gpui_util::new_std_command(\"git\").arg(\"--version\").output() 运行子进程；非 Windows 环境下用 cargo check -p gpui_util --target x86_64-pc-windows-msvc（或结合代码永久链接阅读）梳理 get_windows_system_shell 中 9 个查找闭包的优先级顺序，画出探测决策树，并解释 64 位系统上为什么先查 ProgramFiles 再查 ProgramFiles(x86)。",
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "title": "Windows 平台工具：无窗口命令与系统 Shell 探测",
+          "topic": "分析两段 cfg(target_os = \"windows\") 门控的代码：new_std_command 用 CREATE_NO_WINDOW 标志创建不弹窗的子进程；get_windows_system_shell 按优先级在 ProgramFiles、MSIX、scoop、PATH 中探测 pwsh，并用 LazyLock 缓存结果。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u3-l2-perf-utils.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "掌握 OnceLock 缓存环境变量读取、避免热路径重复解析的模式",
+            "理解 post_inc 的 trait 约束（From<u8> + AddAssign + Copy）如何同时支持多种数值类型",
+            "理解 select_nth_unstable_by 的 quickselect 复杂度与『先选择再排序』策略的权衡",
+            "看懂源码中关于阈值取舍的注释为何说完整排序不一定更差"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "measure 与 OnceLock 缓存",
+            "post_inc 泛型约束",
+            "truncate_to_bottom_n_sorted_by 的三段式算法"
+          ],
+          "order": 2,
+          "practice_task": "写一个基准对比：对 10 万个随机 u32 取最小的前 100 个，分别用 truncate_to_bottom_n_sorted_by、全量 sort_by 后 truncate 两种实现计时并比较；再给 measure 包裹一段耗时函数，分别在设置与不设置 ZED_MEASUREMENTS=1 的情况下运行，验证环境变量只被读取一次（可在日志中观察）。",
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "title": "性能与算法工具：measure、post_inc 与部分排序",
+          "topic": "学习三个小而精的性能工具：measure 用 ZED_MEASUREMENTS 环境变量门控计时并通过 OnceLock 只读一次环境；post_inc 提供 C 风格后置自增；truncate_to_bottom_n_sorted_by 用 select_nth_unstable_by 加截断加排序取出有序的最小 N 项，优于全量排序。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u2-l6",
+            "u3-l2"
+          ],
+          "filename": "u3-l3-design-and-extensions.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解基础工具库保持零 GPUI 依赖对避免循环依赖的意义",
+            "通过 lib.rs 首行注释（FluentBuilder、FutureExt、Timeout 已迁出）了解 crate 的演化历史",
+            "掌握向本 crate 添加新工具的流程：签名设计、doc 注释、单元测试、clippy 验证",
+            "理解 gpui_util 与 crates/util 的分工关系（待确认：具体边界需结合 util crate 进一步阅读）"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Cargo.toml 的依赖与 lints 策略",
+            "lib.rs 顶部历史注释",
+            "crate 内既有单元测试范式"
+          ],
+          "order": 3,
+          "practice_task": "遵循 crate 既有风格新增一个小工具（例如给 ResultExt 增加 info_on_err 方法，或新增一个带单元测试的 pub fn hex_dump(data: &[u8]) -> String），补齐 doc 注释与测试，运行 cargo test -p gpui_util 与 ./script/clippy 验证通过，并写一段说明：这个新工具应该放在 gpui_util 还是 crates/util，判断依据是什么。",
+          "source_files": [
+            "Cargo.toml",
+            "src/lib.rs"
+          ],
+          "title": "设计取舍与二次开发：为什么 gpui_util 长这样",
+          "topic": "从架构视角总结：gpui_util 为什么坚持不依赖 gpui 本身（让 fuzzy、lsp、各平台 crate 都能复用而不产生循环依赖）；lib.rs 首行注释揭示了哪些功能曾被放这里又迁出（FluentBuilder、FutureExt、Timeout）；以及如何按 crate 的风格贡献新的工具函数。"
+        }
+      ],
+      "level": "advanced",
+      "order": 3,
+      "title": "平台、性能与设计取舍"
+    }
+  ]
+}

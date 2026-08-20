@@ -1,7 +1,7 @@
 {
-  "head": "6e0a0835755ea57c1db4e0057f1a30ddba554706",
+  "head": "1b04e4caf01e376624fb514ef85b0e6d8ee5d930",
   "project": "zed-crates-gpui",
-  "rationale": "增量分析：两次 HEAD 之间只有一个提交改动 gpui crate——1861e58f98（gpui: Journal foreground work between frames and report hang incidents，#62779）。它在 profiler feature 下新增 src/profiler/journal.rs（约 2760 行：ForegroundJournal 固定大小环形缓冲，主线程记录任务轮询、动作处理、输入派发、窗口绘制与帧呈现，边界条目（帧呈现/前台空闲）把流划分为活动区间，低于 100µs 的轮询折叠为计数、环形分段离主线程排空）与 src/profiler/hang.rs（约 1270 行：HangDetector 按『单事件≥卡顿阈值』或『累计前台开销≥帧预算』两类条件产出 HangIncident，序列化 startup/steady 相位、busy fraction、dirty-to-present 与最多 8 个贡献者），并在 src/app.rs（App 新增 foreground_journal 字段与 foreground_journal() 访问器）、src/executor.rs 与 src/platform_scheduler.rs（ForegroundRunnableCounter 入队计数埋点）、src/interactive.rs（新增 PlatformInput::kind_name）、src/window.rs（WindowInvalidator 携带 window_id 并在标脏时上报 record_frame_pending、present 记录提交起止时间、帧回调加 foreground_turn 守卫）、src/profiler.rs（WindowProfiler 双写 journal、PresentTiming 改为 present_start/present_end、record_present 签名变化）完成接线。示例、docs、其余模块与七单元学习路线均未变。已生成讲义的判定：u1-l3 中『profiler/ 目前只有 actions.rs』的断言已过时，标记 update；u2-l5 精读的 PlatformScheduler 结构体、schedule_local 与 ForegroundExecutor 恰是埋点插入位置（行号偏移+局部新增），标记 update；u4-l3 引用的 WindowInvalidatorInner（window.rs:119-127）新增 window_id 字段且 present/帧请求闭包插入 journal 埋点，标记 update；其余已生成讲义（u1-l1/l2/l4、u2-l1~l4、u3-l1~l6、u4-l1/l2）所讲机制不受影响，且其源码链接钉在生成时的 commit 仍可解析，标记 keep。该子系统新增逾 4000 行、主题独立（可观测性/卡顿诊断内幕），足以单独成篇，故新增 u7-l6『前台工作日志与卡顿检测』讲义（依赖 u2-l5、u4-l3、u7-l5），毕业项目顺延为 u7-l7 并保持在单元末尾（两者均未生成，无文件冲突）；u5-l1 与 u7-l5 仍为 new，仅在主题/目标中纳入 kind_name 与 journal 双写等新事实。",
+  "rationale": "增量分析：两次 HEAD 之间只有一个提交改动 gpui crate——282f47a544（Switch from cargo-machete to cargo-shear，#62643），且只碰 Cargo.toml（+10/−20 行）：macOS target 依赖段清除了平台 crate 拆分后遗留的死依赖（block、cocoa、cocoa-foundation、core-foundation(-sys)、core-graphics、core-text、foreign-types、media、objc、mach2、metal，仅保留 core-video、font-kit、log、objc2/objc2-metal），删除了 linux/freebsd/macos 段的 pathfinder_geometry、wasm dev-dependencies 里的 gpui_web 与 macOS build-dependencies 里的 cbindgen，并把 [package.metadata.cargo-machete] 换成 [package.metadata.cargo-shear]（ignored 扩为 bindgen/font-kit/getrandom/objc2/objc2-metal/tracing，新增 ignored-paths 指向 src/_ownership_and_data_flow.rs）；同一提交对兄弟 crate 只是同类清扫（gpui_linux 删掉 image/itertools/pathfinder_geometry/pollster/profiling/swash 并加 cargo-shear 元数据，gpui_web 仅加元数据，gpui_platform 未动）。关键在于 [features] 段与主 [dependencies] 段逐字节未变、23 个 [[example]] 注册原样保留（仅整体上移约 10 行），而已生成的 21 篇讲义没有任何一篇引用被删除的依赖或 cargo-machete 元数据：u1-l1 对 features、常用依赖（taffy/accesskit/lyon/refineable/slotmap 等）与示例注册的论断在 HEAD 上仍然成立，其源码链接钉在生成时 commit 均可解析。同时核实：上一轮标记 update 的 u1-l3/u2-l5/u4-l3 与其后生成的 u5-l1/u5-l2 均已在 6e0a0835 重生成并纳入 1861e58f98 的 journal/hang 相关事实（文件内已出现 ForegroundRunnableCounter、record_frame_pending、kind_name 等内容且链接钉在 6e0a0835），而本轮 src/ 目录零改动，因此全部已生成讲义标 keep（并清理了这三篇 topic 中已过时的『更新点』旁注与 u2-l1 的『本轮』旁注）；u5-l3 起共 17 篇尚未生成，维持 new。学习路线、单元划分、依赖关系与七单元结构均不变。",
   "units": [
     {
       "id": "u1",
@@ -30,7 +30,7 @@
             "src/gpui.rs"
           ],
           "title": "GPUI 是什么：项目定位与整体架构",
-          "topic": "介绍 GPUI 作为 Zed 的 GPU 加速、混合立即/保留模式 UI 框架的定位，梳理它提供的三层编程界面（实体状态、声明式视图、命令式元素），并解读 Cargo.toml 中的 feature 与平台依赖。"
+          "topic": "介绍 GPUI 作为 Zed 的 GPU 加速、混合立即/保留模式 UI 框架的定位，梳理它提供的三层编程界面（实体状态、声明式视图、命令式元素），并解读 Cargo.toml 中的 feature 与平台依赖。（注：282f47a544 的依赖清扫只删去未被讲义引用的死依赖，features 段与常用依赖未变，内容仍准确。）"
         },
         {
           "action": "keep",
@@ -61,7 +61,7 @@
           "topic": "从零构建并运行 GPUI 应用：以 hello_world 为例，逐行讲解 Application、run 回调、open_window、WindowOptions 与根视图的创建流程。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -87,7 +87,7 @@
             "docs/contexts.md"
           ],
           "title": "gpui crate 目录结构导览",
-          "topic": "带读者走一遍 src/ 目录：gpui.rs 如何通过 mod 与 pub use 组织 60 多个模块，app、elements、platform、text_system、window 各自承担什么职责。更新点：profiler/ 目录不再只有 actions.rs——1861e58f98 新增了 hang.rs 与 journal.rs 两个模块（前台日志与卡顿检测，u7-l6 详解），目录清单与相关描述需同步修正。"
+          "topic": "带读者走一遍 src/ 目录：gpui.rs 如何通过 mod 与 pub use 组织 60 多个模块，app、elements、platform、text_system、window 各自承担什么职责；profiler/ 目录现含 actions.rs 与 feature 门控的 journal.rs/hang.rs（前台日志与卡顿检测，u7-l6 详解）。"
         },
         {
           "action": "keep",
@@ -154,7 +154,7 @@
             "examples/on_window_close_quit.rs"
           ],
           "title": "App 与 Application：应用生命周期",
-          "topic": "剖析 Application 的启动流程：with_platform、with_assets、run 如何把控制权交给 Platform 事件循环，AppCell/RefCell 带来的单前台线程借用约束，以及退出/重启链路——新版 App::restart 会把 restart_path 与新增的 restart_arguments（如 --user-data-dir）一并传给 Platform::restart。（本轮 app.rs 仅在 App 结构体新增 cfg(profiler) 的 foreground_journal 字段与访问器，不影响本讲主题。）"
+          "topic": "剖析 Application 的启动流程：with_platform、with_assets、run 如何把控制权交给 Platform 事件循环，AppCell/RefCell 带来的单前台线程借用约束，以及退出/重启链路——App::restart 会把 restart_path 与 restart_arguments（如 --user-data-dir）一并传给 Platform::restart。"
         },
         {
           "action": "keep",
@@ -187,7 +187,7 @@
         {
           "action": "keep",
           "depends_on": [
-            "u2-l2"
+            "u2-l1"
           ],
           "filename": "u2-l3-context-family.md",
           "id": "u2-l3",
@@ -243,7 +243,7 @@
           "topic": "讲解 Global trait 与 set_global/update_global/read_global 机制，以及 GPUI 内部如何用 TypeIdHashMap 存储全局单例（如 FocusMap、GlobalColors）。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -269,7 +269,7 @@
             "src/platform.rs"
           ],
           "title": "GPUI 并发模型：executor 与 Task",
-          "topic": "分析前台/后台双执行器架构：ForegroundExecutor 与 BackgroundExecutor 如何协作，Task 的 detach/取消语义，以及平台调度器如何驱动 futures。更新点：1861e58f98 在 ForegroundExecutor 与 PlatformScheduler 中插入了 profiler feature 下的 ForegroundRunnableCounter 埋点（结构体新增字段、schedule_local 与 spawn_with_dispatch 在入队时调用 queued()），调度语义不变，但本讲引用的 PlatformScheduler 结构体（platform_scheduler.rs:23-55）与两个翻译函数区域（约 107-118 行）代码与行号有少量变化，需同步更新引用并顺带说明该计数器服务于 u7-l6 的前台日志。"
+          "topic": "分析前台/后台双执行器架构：ForegroundExecutor 与 BackgroundExecutor 如何协作，Task 的 detach/取消语义，以及平台调度器如何驱动 futures；并说明 profiler feature 下 ForegroundRunnableCounter 在 schedule_local/spawn_with_dispatch 入队路径上的计数埋点——它服务于 u7-l6 的前台工作日志，不改变任何调度语义。"
         }
       ],
       "level": "beginner",
@@ -523,7 +523,7 @@
           "topic": "分析 GPUI 如何封装 taffy 这个 Rust 版 flexbox/grid 引擎：Style 如何映射为 taffy 样式、LayoutId 的申请与计算流程、AvailableSpace 的传递。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -550,19 +550,18 @@
             "src/app.rs"
           ],
           "title": "窗口绘制管线：从 refresh 到 draw",
-          "topic": "进入 window.rs（约 7500 行）的核心：Window 结构、draw 如何驱动整棵元素树走完三阶段、cx.notify 引发的重绘调度，以及元素 arena 与 bounds_tree 的配合。更新点：1861e58f98 给 WindowInvalidatorInner 新增了 window_id 字段（本讲引用的 window.rs:119-127 结构体区域）、WindowInvalidator::new 现在接收 window_id、标脏时向 profiler journal 上报 record_frame_pending、on_request_frame 帧回调与 present() 插入 foreground_turn 守卫且 present 记录提交起止时间、dispatch_event 用 PlatformInput::kind_name 标注输入类别——均为 cfg(profiler) 埋点，主链路语义不变，但引用代码与行号需微调（细节留给 u7-l6）。"
+          "topic": "进入 window.rs（约 7500 行）的核心：Window 结构、draw 如何驱动整棵元素树走完三阶段、cx.notify 引发的重绘调度，以及元素 arena 与 bounds_tree 的配合；并指出 profiler 构建下的可观测性埋点——WindowInvalidator 携带 window_id、标脏时上报 record_frame_pending、present 记录提交起止时间、dispatch_event 用 PlatformInput::kind_name 标注输入类别——它们不改主链路语义，细节在 u7-l6 展开。"
         }
       ],
       "level": "intermediate",
       "order": 4,
-      "title": "元素机制与绘制管线（待补充 u4-l4/u4-l5）",
-      "lectures_extra_note": "占位"
+      "title": "元素机制与绘制管线（待补充 u4-l4/u4-l5）"
     },
     {
       "id": "u5",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -573,7 +572,7 @@
             "理解 PlatformInput 如何统一各平台输入",
             "会用坐标换算处理 hitbox 内的点击位置",
             "了解 InputHandler/EntityInputHandler 的 paste 钩子如何接收平台发起的粘贴（含 web 端携带图片的 ClipboardItem）",
-            "会用新增的 PlatformInput::kind_name 为日志与遥测提供输入类别的短静态名"
+            "会用 PlatformInput::kind_name 为日志与遥测提供输入类别的短静态名"
           ],
           "level": "intermediate",
           "minimal_modules": [
@@ -592,10 +591,10 @@
             "examples/mouse_pressure.rs"
           ],
           "title": "输入事件模型：鼠标、键盘与触摸",
-          "topic": "梳理 interactive.rs 中的事件类型体系：MouseDown/Up/Move/ScrollWheel/KeyDown、ClickEvent 合成、触摸与压力事件，以及 input.rs 中的文本输入处理抽象（InputHandler/EntityInputHandler trait 与平台发起粘贴的 paste 钩子）；并介绍 1861e58f98 新增的 PlatformInput::kind_name——为每种输入变体返回 'key_down'、'scroll_wheel' 等短静态名，供前台日志与遥测使用。"
+          "topic": "梳理 interactive.rs 中的事件类型体系：MouseDown/Up/Move/ScrollWheel/KeyDown、ClickEvent 合成、触摸与压力事件，以及 input.rs 中的文本输入处理抽象（InputHandler/EntityInputHandler trait 与平台发起粘贴的 paste 钩子）；并介绍 PlatformInput::kind_name——为每种输入变体返回 'key_down'、'scroll_wheel' 等短静态名，供前台日志与遥测使用。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -692,7 +691,7 @@
           "filename": "u5-l5-focus-system.md",
           "id": "u5-l5",
           "learning_goals": [
-            "理解 FocusHandle 与 FocusMap 的存储结构",
+            "理解 FocusHandle 与 Focus Map 的存储结构",
             "会实现 Focusable 并管理容器焦点 containment",
             "掌握 tab 导航与 focus_visible 样式实现原理"
           ],

@@ -28,7 +28,7 @@
 | --- | --- |
 | `Cargo.toml`（gpui_platform） | 本讲主角：四段目标依赖 + 7 个 feature 声明 |
 | 仓库根 `Cargo.toml` | `[workspace.dependencies]` 中 gpui 家族的统一声明，`default-features = false` 的出处 |
-| `../gpui_linux/Cargo.toml` | feature 最丰富的平台 crate：`wayland`/`x11` 各自拉起一整套窗口系统依赖 |
+| `../gpui_linux/Cargo.toml` | feature 最丰富的平台 crate：`wayland`/`x11` 各自拉起一整套窗口系统依赖（近期经历了一轮 cargo-shear 依赖清理，见 4.3.3） |
 | `../gpui_macos/Cargo.toml` | `font-kit`（git fork）、`runtime_shaders`、`screen-capture` 的落点 |
 | `../gpui_windows/Cargo.toml` | `screen-capture`（scap）、可选依赖与 build-dependencies 写法 |
 | `../gpui_web/Cargo.toml` | wasm 目标依赖段、`multithreaded` 默认 feature、庞大的 web-sys feature 列表 |
@@ -57,23 +57,23 @@
 
 先看本讲主角自己的清单头与库根声明：
 
-> [Cargo.toml:L1-L12](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/Cargo.toml#L1-L12)
+> [Cargo.toml:L1-L12](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/Cargo.toml#L1-L12)
 > `gpui_platform` 的 `[package]` 与 `[lib]` 段。`[lib] path = "src/gpui_platform.rs"` 让库根文件与 crate 同名（而不是默认的 `lib.rs`），这是 Zed 的命名规范；`[lints] workspace = true` 则继承全仓库统一的 clippy 规则。
 
 再看仓库根里 gpui 家族的统一声明：
 
-> [../../Cargo.toml:L357-L368](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/Cargo.toml#L357-L368)
-> `gpui`、`gpui_apple`、`gpui_linux`、`gpui_macos`、`gpui_platform`、`gpui_web`、`gpui_wgpu`、`gpui_windows` 的 workspace 声明。注意除 `gpui_apple`、`gpui_web` 外都写了 `default-features = false`。特别地，`gpui_linux` 自己的 `default` 是 `["wayland", "x11"]`，但这里被关掉了默认值——所以通过 workspace 引用它时，Wayland/X11 是否编译完全由引用方的 feature 决定。
+> [../../Cargo.toml:L357-L368](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/Cargo.toml#L357-L368)
+> 从 `gpui` 到 `gpui_windows` 共 12 行 gpui 家族的 workspace 声明。其中五个「带开关可关」的 crate——`gpui`、`gpui_linux`、`gpui_macos`、`gpui_platform`、`gpui_windows`——全都写了 `default-features = false`；`gpui_apple`、`gpui_macros`、`gpui_wgpu`、`gpui_web` 等辅助 crate 则没有这一句。特别地，`gpui_linux` 自己的 `default` 是 `["wayland", "x11"]`，但这里被关掉了默认值——所以通过 workspace 引用它时，Wayland/X11 是否编译完全由引用方的 feature 决定。
 
 对照 `gpui` 主 crate 的默认值，能看清「谁默认开什么」：
 
-> [../gpui/Cargo.toml:L19-L39](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/Cargo.toml#L19-L39)
-> `gpui` 的 `[features]`：`default = ["font-kit", "wayland", "x11", "windows-manifest"]`，另有 `test-support`、`screen-capture`、`windows-manifest = ["dep:embed-resource"]` 等。由于 workspace 声明关闭了默认值，这些默认项在 Zed 仓库内不会被「顺带」打开，必须显式透传。
+> [../gpui/Cargo.toml:L19-L40](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui/Cargo.toml#L19-L40)
+> `gpui` 的 `[features]`：`default = ["font-kit", "wayland", "x11", "windows-manifest"]`，另有 `test-support`、`screen-capture`、`profiler`、`windows-manifest = ["dep:embed-resource"]` 等。由于 workspace 声明关闭了默认值，这些默认项在 Zed 仓库内不会被「顺带」打开，必须显式透传。
 
 一个真实消费者的例子：
 
-> [../zed/Cargo.toml:L124-L124](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/zed/Cargo.toml#L124-L124)
-> Zed 主程序这样依赖门面：`gpui_platform = { workspace = true, features = ["screen-capture", "font-kit", "wayland", "x11"] }`。最终二进制的平台能力组合就是在这里定盘的——这正是 feature 透传链的起点。
+> [../zed/Cargo.toml:L123-L123](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/zed/Cargo.toml#L123-L123)
+> Zed 主程序这样依赖门面：`gpui_platform = { workspace = true, features = [ "screen-capture", "font-kit", "wayland", "x11" ] }`。最终二进制的平台能力组合就是在这里定盘的——这正是 feature 透传链的起点。
 
 #### 4.1.4 代码实践
 
@@ -120,23 +120,23 @@
 
 四段目标依赖全文如下：
 
-> [Cargo.toml:L23-L38](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/Cargo.toml#L23-L38)
+> [Cargo.toml:L23-L38](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/Cargo.toml#L23-L38)
 > 先是无条件的 `[dependencies]`：只有 `gpui.workspace = true`。随后四段按目标划分：macos 段挂 `gpui_macos`；windows 段挂 `gpui_windows`，并给 `gpui` **追加** `windows-manifest` feature；linux/freebsd 段挂 `gpui_linux`；wasm 段挂 `gpui_web` 与 `console_error_panic_hook`（供 `web_init()` 安装 panic 钩子用，见 u1-l1）。
 
 逐段拆开看两个细节：
 
-> [Cargo.toml:L29-L31](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/Cargo.toml#L29-L31)
-> Windows 段展示了「对已声明的 workspace 依赖按目标追加 feature」的写法：`gpui = { workspace = true, features = ["windows-manifest"] }`。`windows-manifest` 在 gpui 里的定义是 `["dep:embed-resource"]`（见 [../gpui/Cargo.toml:L39-L39](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/Cargo.toml#L39-L39)），即构建脚本里嵌入 Windows 清单资源。
+> [Cargo.toml:L29-L31](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/Cargo.toml#L29-L31)
+> Windows 段展示了「对已声明的 workspace 依赖按目标追加 feature」的写法：`gpui = { workspace = true, features = ["windows-manifest"] }`。`windows-manifest` 在 gpui 里的定义是 `["dep:embed-resource"]`（见 [../gpui/Cargo.toml:L39-L39](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui/Cargo.toml#L39-L39)），即构建脚本里嵌入 Windows 清单资源。
 
-> [Cargo.toml:L33-L34](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/Cargo.toml#L33-L34)
+> [Cargo.toml:L33-L34](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/Cargo.toml#L33-L34)
 > Linux 段的谓词是 `any(target_os = "linux", target_os = "freebsd")`——留意 FreeBSD 也被支持，后面 `gpui_linux` 的所有 cfg 都沿用这对组合。而 wasm 段用的是 `target_family = "wasm"`，覆盖所有 wasm 目标架构。
 
 四个平台 crate 也各自把自己的重依赖锁在同样的谓词后面，形成「crate 内二级门控」：
 
-> [../gpui_linux/Cargo.toml:L53-L53](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/Cargo.toml#L53-L53)
+> [../gpui_linux/Cargo.toml:L53-L53](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_linux/Cargo.toml#L53-L53)
 > `gpui_linux` 的全部依赖（含 wayland/x11 相关）都在 `[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]` 之下——在 macOS 上构建这个 crate 时它一个外部依赖都不需要。
 
-> [../gpui_macos/Cargo.toml:L24-L24](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/Cargo.toml#L24-L24)、[../gpui_windows/Cargo.toml:L22-L22](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/Cargo.toml#L22-L22)、[../gpui_web/Cargo.toml:L19-L19](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_web/Cargo.toml#L19-L19)
+> [../gpui_macos/Cargo.toml:L24-L24](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_macos/Cargo.toml#L24-L24)、[../gpui_windows/Cargo.toml:L22-L22](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_windows/Cargo.toml#L22-L22)、[../gpui_web/Cargo.toml:L19-L19](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_web/Cargo.toml#L19-L19)
 > 另外三个平台 crate 依样画瓢：AppKit/DirectX/web-sys 等系统绑定只在各自目标上成为依赖。同一份仓库可以在任一平台上 checkout 并解析，无需手改清单。
 
 #### 4.2.4 代码实践
@@ -206,45 +206,50 @@ cargo --features wayland
 
 门面的全部 feature 声明：
 
-> [Cargo.toml:L14-L21](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/Cargo.toml#L14-L21)
+> [Cargo.toml:L14-L21](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/Cargo.toml#L14-L21)
 > 七行声明就是上一节表格的原文。注意 `screen-capture` 一行列了四个 crate（`gpui` + 三个桌面平台），而 `web` 不在其中——浏览器没有屏幕捕获实现；`test-support` 只列了 `gpui` 与 `gpui_macos`。指向「当前目标上未激活的 target 依赖」的项会被 Cargo 忽略，所以这些声明可以安全地写在一份清单里。
 
 接着看 Linux 侧如何接住 `wayland`/`x11`：
 
-> [../gpui_linux/Cargo.toml:L14-L50](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/Cargo.toml#L14-L50)
+> [../gpui_linux/Cargo.toml:L14-L50](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_linux/Cargo.toml#L14-L50)
 > `gpui_linux` 的 `[features]`：`default = ["wayland", "x11"]`；`wayland = [...]` 与 `x11 = [...]` 两个列表各自点名全部窗口系统绑定；`screen-capture = ["gpui/screen-capture", "scap"]`。两个大列表里的 `"scap?/x11"` 用了 `?` 语法：只有当 `scap` 因 `screen-capture` 被激活时，才顺带打开它的 `x11` feature。
 
-> [../gpui_linux/Cargo.toml:L87-L96](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/Cargo.toml#L87-L96)
-> 注释 `# Used in both windowing options` 下的共享可选依赖：`ashpd`（portal）、`bitflags`、`filedescriptor`、`open`、`xkbcommon`、`scap`——它们被 wayland/x11 两条链复用，所以声明为 optional，由 feature 按需激活。
+> [../gpui_linux/Cargo.toml:L82-L90](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_linux/Cargo.toml#L82-L90)
+> 注释 `# Used in both windowing options` 下的共享可选依赖：`ashpd`（portal）、`bitflags`、`filedescriptor`、`open`、`xkbcommon`——它们被 wayland/x11 两条链复用，所以声明为 optional，由 feature 按需激活；`scap` 则单独挂在 `# Screen capture` 注释下，只由 `screen-capture` 一条链激活。
 
-> [../gpui_linux/Cargo.toml:L98-L135](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/Cargo.toml#L98-L135)
+> [../gpui_linux/Cargo.toml:L92-L129](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_linux/Cargo.toml#L92-L129)
 > `# Wayland` 与 `# X11` 两段可选依赖的「弹药库」。注意 `xim` 是 Zed 维护的 git fork（`zed-xim`，带发布到 crates.io 的警示注释），`x11rb` 携带 `xkb`/`randr`/`xinput`/`cursor` 等一串协议 feature。
+
+这份清单最近刚被「打扫」过，值得专门认识一下它的卫生机制：
+
+> [../gpui_linux/Cargo.toml:L131-L132](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_linux/Cargo.toml#L131-L132)
+> 文件末尾的 `[package.metadata.cargo-shear]` 段：Zed 仓库把「未使用依赖检查工具」从 cargo-machete 迁移到了 cargo-shear（提交 282f47a），迁移顺带完成了一次依赖大扫除——`gpui_linux` 删掉了不再直接使用的 `image`、`itertools`、`pathfinder_geometry`、`pollster`、`profiling`、`swash`；`gpui` 也清掉了平台代码抽离到 `gpui_macos` 后遗留的 macOS 绑定（`block`、`cocoa`、`core-foundation` 等）与 `gpui_web` dev-dependency；`gpui_web`、`gpui_windows` 的清单末尾也各有一段同款元数据。`ignored` 列出的是「看似未使用、实则必须保留」的依赖（如靠 feature 字符串激活的 `bitflags`、`scap`、`x11-clipboard`）。读旧分支或旧文章时若看到这些已删除的依赖名，记得先对一下 HEAD。
 
 再 macOS 侧，看 `font-kit` 与 `runtime_shaders` 的落点：
 
-> [../gpui_macos/Cargo.toml:L14-L19](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/Cargo.toml#L14-L19)
+> [../gpui_macos/Cargo.toml:L14-L19](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_macos/Cargo.toml#L14-L19)
 > `font-kit = ["dep:font-kit"]` 用 `dep:` 精确激活可选依赖；`runtime_shaders` 与 `test-support` 分别下穿到 `gpui_apple`；`screen-capture = ["gpui/screen-capture"]` 只透传给 gpui（macOS 用系统 API，无需第三方库）。
 
-> [../gpui_macos/Cargo.toml:L39-L40](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/Cargo.toml#L39-L40)
+> [../gpui_macos/Cargo.toml:L39-L40](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_macos/Cargo.toml#L39-L40)
 > `font-kit` 依赖指向 `zed-industries/font-kit` 的 git fork（package 名 `zed-font-kit`），并带有「改动它必须同步发布新版本」的维护警示——真实项目里 feature 背后往往是这种带工程约束的选择。
 
 最后看 Windows 与 web 的对照：
 
-> [../gpui_windows/Cargo.toml:L14-L17](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/Cargo.toml#L14-L17)
+> [../gpui_windows/Cargo.toml:L14-L17](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_windows/Cargo.toml#L14-L17)
 > Windows 的 feature 面最小：`default = ["gpui/default"]`、`test-support`、`screen-capture = ["gpui/screen-capture", "scap"]`。DirectX 栈是必选的，不做成开关。
 
-> [../gpui_web/Cargo.toml:L12-L14](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_web/Cargo.toml#L12-L14)
+> [../gpui_web/Cargo.toml:L12-L14](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_web/Cargo.toml#L12-L14)
 > web 唯一的 feature 是 `multithreaded = ["dep:wasm_thread", "scheduler/wasm-threads"]`，且在默认值里。`gpui_platform` 没有为它提供透传电线——是否多线程由 `gpui_web` 的默认值（未被 workspace 关闭）决定。
 
 运行期暗线的证据（feature 影响后端探测）：
 
-> [../gpui/src/platform.rs:L96-L123](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L96-L123)
+> [../gpui/src/platform.rs:L96-L123](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui/src/platform.rs#L96-L123)
 > `guess_compositor()` 中，读取 `WAYLAND_DISPLAY` 的那行被 `#[cfg(feature = "wayland")]` 包住，`DISPLAY` 同理。若 `gpui/wayland` 没开，`wayland_display` 恒为 `None`——**即使你坐在 Wayland 桌面前，程序也只能探测到 "Headless"**。这就是「编译期开关悄悄改写运行期行为」的活例子。
 
-> [../gpui_linux/src/linux.rs:L30-L60](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux.rs#L30-L60)
+> [../gpui_linux/src/linux.rs:L30-L60](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_linux/src/linux.rs#L30-L60)
 > `gpui_linux::current_platform` 按 `guess_compositor()` 的返回值选择 `WaylandClient`/`X11Client`/`HeadlessClient`，每个 match 臂本身又带 `#[cfg(feature = ...)]`。若探测结果落在所有已编译臂之外，会命中 `unreachable!`，错误信息明确要求「至少启用 wayland 或 x11 之一」。
 
-> [../gpui_linux/src/linux/platform.rs:L149-L152](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L149-L152)
+> [../gpui_linux/src/linux/platform.rs:L149-L152](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_linux/src/linux/platform.rs#L149-L152)
 > 连文本系统都随 feature 切换：开 wayland 或 x11 时用 `CosmicTextSystem`，两者全关时退化为 `gpui::NoopTextSystem`——证明「零 feature」组合也是被支持的合法构建。
 
 #### 4.3.4 代码实践
@@ -277,7 +282,7 @@ cargo --features wayland
 
 **练习 3**：为什么 `gpui_platform` 的 `wayland` feature 只写 `["gpui_linux/wayland"]`，而不需要同时写 `["gpui/wayland"]`？
 
-**答案**：因为 `gpui_linux` 的 `wayland` 列表里已经包含 `"gpui/wayland"`（[../gpui_linux/Cargo.toml:L17-L33](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/Cargo.toml#L17-L33)），透传是传递性的，门面不必重复。同理 `screen-capture` 列出平台 crate 后，`gpui/screen-capture` 已由各平台 crate 转发——门面额外显式列出 `gpui/screen-capture` 主要是为了在「没有任何平台 crate 被激活」的极端组合下仍然语义完整。
+**答案**：因为 `gpui_linux` 的 `wayland` 列表里已经包含 `"gpui/wayland"`（[../gpui_linux/Cargo.toml:L17-L33](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_linux/Cargo.toml#L17-L33)），透传是传递性的，门面不必重复。同理 `screen-capture` 列出平台 crate 后，`gpui/screen-capture` 已由各平台 crate 转发——门面额外显式列出 `gpui/screen-capture` 主要是为了在「没有任何平台 crate 被激活」的极端组合下仍然语义完整。
 
 ### 4.4 平台 crate 目录地图：从文件名看出职责划分
 
@@ -297,10 +302,10 @@ cargo --features wayland
 
 **gpui_linux（27 个文件，分四级）**——先看两层库根：
 
-> [../gpui_linux/src/gpui_linux.rs:L1-L4](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/gpui_linux.rs#L1-L4)
+> [../gpui_linux/src/gpui_linux.rs:L1-L4](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_linux/src/gpui_linux.rs#L1-L4)
 > 库根第一行 `#![cfg(any(target_os = "linux", target_os = "freebsd"))]` 是整 crate 的大門，与 Cargo.toml 的目标段同谓词；随后声明唯一的子模块 `linux` 并导出 `current_platform`。
 
-> [../gpui_linux/src/linux.rs:L1-L25](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux.rs#L1-L25)
+> [../gpui_linux/src/linux.rs:L1-L25](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_linux/src/linux.rs#L1-L25)
 > 二级模块根。`mod wayland` 只在 `#[cfg(feature = "wayland")]` 下存在，`mod x11` 同理；`text_system` 与 `xdg_desktop_portal` 在任一 feature 打开时可用。**这就是 4.3 的 feature 开关在源码侧的落点**：关掉 x11 后 `x11/` 目录六个文件根本不参与编译。
 
 由此得到 gpui_linux 的目录职责表（★ = 受 feature 门控）：
@@ -320,17 +325,17 @@ cargo --features wayland
 
 **gpui_macos（14 个文件，扁平结构）**：
 
-> [../gpui_macos/src/gpui_macos.rs:L1-L35](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/gpui_macos.rs#L1-L35)
+> [../gpui_macos/src/gpui_macos.rs:L1-L35](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_macos/src/gpui_macos.rs#L1-L35)
 > 库根声明全部模块：`#[cfg(feature = "screen-capture")] mod screen_capture;` 与 `#[cfg(feature = "font-kit")] mod text_system; open_type;` 是仅有的两个 feature 门控点，渲染则直接复用 `gpui_apple::metal_renderer`。其余为无条件模块：`platform`（MacPlatform）、`window`、`events`（AppKit 事件桥）、`keyboard`、`display`、`display_link`（垂直同步）、`dispatcher`、`pasteboard`（剪贴板）、`system_notifications`、`window_appearance`。文件尾部还放了一批 Objective-C 互操作的私有工具（`NSRange` 等）。
 
 **gpui_windows（19 个 .rs + 3 个 .hlsl）**：
 
-> [../gpui_windows/src/gpui_windows.rs:L1-L41](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/src/gpui_windows.rs#L1-L41)
+> [../gpui_windows/src/gpui_windows.rs:L1-L41](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_windows/src/gpui_windows.rs#L1-L41)
 > 库根一口气声明 18 个模块再以 `pub(crate) use ...::*` 展平，唯一公开导出 `WindowsPlatform`。按文件名分组：窗口与输入（`platform`/`window`/`wrapper`/`events`/`keyboard`/`display`）、DirectX 渲染三层（`directx_devices`/`directx_renderer`/`directx_atlas`，u6-l2、u8-l2）、文本（`direct_write`）、系统集成（`clipboard`/`system_notifications`/`system_settings`/`destination_list`）、调度与垂直同步（`dispatcher`/`vsync`）、触控板（`direct_manipulation`）。目录里还有三个 `.hlsl` 着色器源文件（`shaders.hlsl` 等），由 DirectX 渲染器在构建时编译——Rust 项目里混排 GPU shader 源码的典型样子。
 
 **gpui_web（9 个文件，最精简）**：
 
-> [../gpui_web/src/gpui_web.rs:L1-L24](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_web/src/gpui_web.rs#L1-L24)
+> [../gpui_web/src/gpui_web.rs:L1-L24](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_web/src/gpui_web.rs#L1-L24)
 > 库根 `#![cfg(target_family = "wasm")]` + 8 个模块全部无条件编译：`platform`（WebPlatform）、`window`、`events`（浏览器事件桥）、`display`、`keyboard`、`dispatcher`（MainThreadMailbox，u4-l5）、`http_client`（FetchHttpClient）、`logging`。web 没有任何 feature 门控模块——它的唯一 feature `multithreaded` 只影响依赖与 dispatcher 的实现选择。
 
 **gpui_platform（1 个文件）**：`src/gpui_platform.rs`，即 u1-l1 精读过的门面本体。一张表里它只占一行，这正是门面模式的直观体现。
@@ -341,7 +346,7 @@ cargo --features wayland
 
 **操作步骤**：
 
-1. 打开 [../gpui_linux/src/linux.rs:L1-L25](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux.rs#L1-L25)，对每个 `mod` 声明记录其 `#[cfg]` 条件。
+1. 打开 [../gpui_linux/src/linux.rs:L1-L25](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_linux/src/linux.rs#L1-L25)，对每个 `mod` 声明记录其 `#[cfg]` 条件。
 2. 用 Glob/编辑器列出 `src/linux/wayland/` 与 `src/linux/x11/` 下的全部文件，把它们归入对应 feature 列。
 3. 重复一遍 `gpui_macos/src/gpui_macos.rs`，找出其中两个 feature 门控模块。
 4. 把结果整理成三列表格：文件 | 所属后端 | 启用条件。
@@ -362,7 +367,7 @@ cargo --features wayland
 
 **练习 3**：不看 `gpui_platform.rs` 源码，仅凭本讲的 Cargo.toml 知识回答：在 wasm 目标上 `gpui_platform` 额外链接了哪个非 gpui 家族的 crate？用途是什么？
 
-**答案**：`console_error_panic_hook`（[Cargo.toml:L36-L38](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/Cargo.toml#L36-L38)）。它被 `web_init()` 调用（`console_error_panic_hook::set_once()`），把 Rust panic 的信息转发到浏览器的 console，便于在 wasm 里排错。
+**答案**：`console_error_panic_hook`（[Cargo.toml:L36-L38](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/Cargo.toml#L36-L38)）。它被 `web_init()` 调用（`console_error_panic_hook::set_once()`），把 Rust panic 的信息转发到浏览器的 console，便于在 wasm 里排错。
 
 ## 5. 综合实践
 
@@ -382,17 +387,18 @@ cargo --features wayland
 4. **对照组合 C（零 feature）**：执行 `cargo build -p gpui_platform` 与对应的 `cargo tree`，观察此时连 `x11rb` 也消失，且 `gpui_linux` 内部退化为 headless 骨架（无 `CosmicTextSystem`）。
 5. **比对**：`diff /tmp/tree-both.txt /tmp/tree-x11.txt`，把消失的包（预期为 `wayland-*`、`calloop-wayland-source` 等）逐一登记。
 6. **画图**：参照 4.3.2 的链式图，把组合 A 中「`gpui_platform/wayland` → `gpui_linux/wayland` → 具体包」的每一跳抄成自己的透传图，并用 `cargo tree` 输出佐证每一跳。
-7. **（选做，验证运行期暗线）**：基于组合 C 写一个调用 `gpui_platform::current_platform(false).compositor_name()` 的小程序，在图形会话中运行——预期仍输出 headless 相关名称，因为 `gpui/wayland` 未启用导致 `guess_compositor()` 探测不到 Wayland（对照 [../gpui/src/platform.rs:L103-L111](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L103-L111)）。此步结果待本地验证。
+7. **（选做，验证运行期暗线）**：基于组合 C 写一个调用 `gpui_platform::current_platform(false).compositor_name()` 的小程序，在图形会话中运行——预期仍输出 headless 相关名称，因为 `gpui/wayland` 未启用导致 `guess_compositor()` 探测不到 Wayland（对照 [../gpui/src/platform.rs:L103-L111](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui/src/platform.rs#L103-L111)）。此步结果待本地验证。
 
 完成标准：笔记里同时具备「三条构建命令的依赖树差异」与「一张手工透传图」，且图上每一跳都能在依赖树输出里指认对应行。
 
 ## 6. 本讲小结
 
 - `gpui_platform` 的 Cargo.toml 用四段 `[target.'cfg(...)'.dependencies]` 保证任何编译目标恰好链接一个平台 crate，谓词与 `current_platform()` 源码里的 `#[cfg]` 完全一致。
-- workspace 根对 gpui 家族统一声明 `default-features = false`，把 feature 决定权上收给最终消费者（如 `zed` crate 的 `features = ["screen-capture", "font-kit", "wayland", "x11"]`）。
+- workspace 根对 gpui 家族统一声明 `default-features = false`（覆盖 `gpui`、`gpui_linux`、`gpui_macos`、`gpui_platform`、`gpui_windows` 五个核心 crate），把 feature 决定权上收给最终消费者（如 `zed` crate 的 `features = ["screen-capture", "font-kit", "wayland", "x11"]`）。
 - 门面的 7 个 feature 全是「电线」：`wayland`/`x11` 经 `gpui_linux` 抵达 wayland-client / x11rb 等系统绑定；`font-kit`/`runtime_shaders` 是 macOS 专属；`screen-capture` 覆盖三个桌面平台；`test-support` 通往 gpui 测试设施。
 - feature 还会改写运行期行为：`guess_compositor()` 只在对应 feature 开启时才读取 `WAYLAND_DISPLAY`/`DISPLAY`，零 feature 构建即使有图形会话也只能得到 headless 后端。
 - 四个平台 crate 目录即能力清单：Linux 四层结构（公共/Wayland/X11/headless）且后两者目录整体受 feature 门控；macOS 扁平加两个 feature 模块；Windows 扁平加 HLSL 着色器；web 最精简（9 个文件）。
+- 依赖清单是活的：cargo-machete → cargo-shear 迁移（提交 282f47a）刚清掉 `gpui_linux` 的 `image`/`itertools`/`pathfinder_geometry`/`pollster`/`profiling`/`swash` 与 `gpui` 遗留的 macOS 绑定——读 Cargo.toml 时永远以当前 HEAD 为准。
 
 ## 7. 下一步学习建议
 

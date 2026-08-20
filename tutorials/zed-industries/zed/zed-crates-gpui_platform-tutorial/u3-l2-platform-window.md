@@ -1,0 +1,499 @@
+# PlatformWindow trait 详解：绘制、尺寸、焦点与窗口控制
+
+## 1. 本讲目标
+
+上一讲（u3-l1）我们跟踪了「`App::open_window` → `Window::new` → `Platform::open_window`」的窗口创建主链路，看到平台层最终交回一个 `Box<dyn PlatformWindow>`。本讲就钻进这个黑盒，学完后你应该能：
+
+1. 按「几何查询 / 控制动作 / 回调注册 / 绘制」给 `PlatformWindow` 的几十个方法分组，说出每组代表作。
+2. 解释为什么 `PlatformWindow` 把 `HasWindowHandle + HasDisplayHandle`（raw-window-handle 生态标准）写进 supertrait，而各平台实现分别交出什么样的原始句柄。
+3. 对照 X11、Wayland、Windows 三套实现，看同一个 `set_title` / `resize` / `minimize` / `zoom` 动作如何落成完全不同的系统调用。
+4. 说明窗口激活状态（`is_active`）与窗口栈（`window_stack`）分别由谁维护：平台窗口是事实来源，gpui 的 `Window` 只是缓存镜像；Z 序是全局信息，只能向 `Platform` 查询。
+5. 完整复述 X11 上 `request_attention` 的生命周期：设置 ICCCM `WM_HINTS` urgency 标志 → 任务栏闪烁 → 窗口转为激活时自动清除。
+
+## 2. 前置知识
+
+- **trait 对象与动态分发**：`Box<dyn PlatformWindow>` 意味着调用哪个实现由运行期决定，但候选集合在编译期就被「当前链接了哪个平台 crate」锁死（回顾 u1-l4 的条件编译分发）。
+- **supertrait（父 trait 约束）**：Rust 中 `trait A: B {}` 表示实现 `A` 必须先实现 `B`。`PlatformWindow: HasWindowHandle + HasDisplayHandle` 就是用 supertrait 强制每个平台窗口都能交出「原始窗口句柄」。
+- **raw-window-handle**：Rust 图形生态（wgpu、softbuffer、winit 等）约定的零成本抽象——只描述「窗口/显示器指针长什么样」（X11 的窗口 id、Wayland 的 `wl_surface*`、Win32 的 HWND……），不规定如何创建窗口。GPUI 的渲染器（`gpui_wgpu`）正是拿这个原始句柄去创建 GPU surface。
+- **逻辑像素与物理像素**：GPUI 对上层统一用逻辑像素（`Pixels`），物理像素 = 逻辑像素 × `scale_factor`，即 \( \text{device px} = \text{logical px} \times \text{scale\_factor} \)。高分屏上 `scale_factor` 可能为 2.0。
+- **X11 的窗口管理器协商**：X11 协议本身只管像素，最小化/最大化/激活这些「窗口状态」由 EWMH/_NETWM 约定完成——客户端通过 ClientMessage 或属性（`WM_HINTS`、`_NET_WM_STATE`）向窗口管理器（WM）发请求，WM 决定是否执行。理解这点，X11 实现里的大量 `send_event`/`change_property` 就不再神秘。
+- **回调注入模式**：平台窗口持有 `Box<dyn FnMut(...)>` 回调槽（`on_input`、`on_active_status_change`……），由 gpui 的 `Window::new` 在创建后立刻注册。事件流向是「OS → 平台窗口 → 回调 → gpui Window → 应用」。
+
+## 3. 本讲源码地图
+
+| 文件 | 角色 |
+| --- | --- |
+| [../gpui/src/platform.rs](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/platform.rs) | 契约层：`PlatformWindow` trait 定义（本讲主战场），以及 `Platform::active_window`/`window_stack` |
+| [../gpui/src/window.rs](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs) | gpui 上层 `Window`：注册平台回调、缓存激活状态、暴露应用级 API（`set_window_title`、`zoom_window` 等）与 `WindowControlArea` |
+| [../gpui_linux/src/linux/x11/window.rs](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs) | X11 实现：`X11Window`，含 `set_wm_hints_urgency` 辅助函数与本讲的注意力请求主线索 |
+| [../gpui_linux/src/linux/wayland/window.rs](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs) | Wayland 实现：`WaylandWindow`，展示「一切皆协议请求」的窗口控制方式 |
+| [../gpui_windows/src/window.rs](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_windows/src/window.rs) | Windows 实现：`WindowsWindow`，直接调用 Win32 API |
+| [../gpui_linux/src/linux/headless/window.rs](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/headless/window.rs) | headless 实现：supertrait 的「反例样本」——句柄返回 `NotSupported` |
+| [../gpui/examples/window.rs](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/examples/window.rs) | 官方窗口示例，代码实践的底稿 |
+
+## 4. 核心概念与源码讲解
+
+### 4.1 PlatformWindow trait 总览与 raw-window-handle 双 supertrait
+
+#### 4.1.1 概念说明
+
+`PlatformWindow` 是「一个已经创建出来的窗口」的平台抽象。gpui 上层代码（`Window`、渲染器、焦点系统）只认这份契约，不关心底下是 `X11Window`、`WaylandWindow` 还是 `WindowsWindow`。
+
+它最特别的一点是把 raw-window-handle 的两个 trait 写成了 supertrait：任何平台窗口都必须能回答「你的原始窗口句柄是什么」「你的原始显示器连接是什么」。这是 GPUI 与整个 Rust 图形生态互操作的关键——渲染用的 surface 创建发生在 gpui 主 crate 与 `gpui_wgpu` 里，它们只能通过这个标准化接口拿到 X11 窗口 id、Wayland surface 指针或 Win32 HWND。
+
+#### 4.1.2 核心流程
+
+trait 的方法可粗分为六组：
+
+| 分组 | 代表方法 | 说明 |
+| --- | --- | --- |
+| 几何与状态查询 | `bounds`、`content_size`、`scale_factor`、`is_maximized`、`window_bounds`、`appearance`、`display`、`mouse_position`、`is_fullscreen` | 读取当前窗口状态 |
+| 窗口控制动作 | `set_title`、`resize`、`minimize`、`zoom`、`toggle_fullscreen`、`activate`、`request_attention` | 主动改变窗口状态 |
+| 回调注册（on_* 家族） | `on_input`、`on_active_status_change`、`on_resize`、`on_moved`、`on_should_close`、`on_close`、`on_hit_test_window_control` | 平台事件向上层投递的通道 |
+| 绘制 | `draw`、`completed_frame`、`sprite_atlas`、`is_subpixel_rendering_supported` | 渲染管线入口（u8-l2 详讲） |
+| 输入法/无障碍 | `set_input_handler`、`take_input_handler`、`update_ime_position`、`a11y_*` | 文本输入与可达性 |
+| 平台专属 | macOS 窗口标签页族、Windows 的 `get_raw_handle`、Linux 的 `start_window_move`/`window_controls`、移动端的 `insets`/软键盘 | 大多带默认实现，按目标 cfg 门控 |
+
+平台专属方法里大量使用默认实现（空操作或返回占位值），这是 u2-l1 总结过的「默认实现三种姿态」在窗口层的延续：实现一个新平台时，只有无默认体的方法（如 `bounds`、`resize`、`set_title`、`draw`）是硬性作业。
+
+#### 4.1.3 源码精读
+
+trait 声明与 supertrait 约束（导入在第 54 行）：
+
+- [../gpui/src/platform.rs:L54](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/platform.rs#L54) —— 契约层从这里引入 raw-window-handle 的两个 trait。
+- [../gpui/src/platform.rs:L815-L819](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/platform.rs#L815-L819) —— `pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle`，紧跟的前几个方法就是几何查询组（`bounds`、`is_maximized`、`window_bounds`、`content_size`、`resize`）。
+- [../gpui/src/platform.rs:L838-L839](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/platform.rs#L838-L839) —— `request_attention` 的文档注释与**空默认实现**：不覆盖它的平台（如 Wayland）静默忽略注意力请求。
+- [../gpui/src/platform.rs:L852-L862](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/platform.rs#L852-L862) —— `on_*` 回调注册家族：平台窗口只存回调，真正的事件来源是各平台的事件循环。
+- [../gpui/src/platform.rs:L898-L899](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/platform.rs#L898-L899) —— `get_raw_handle` 用 `#[cfg(target_os = "windows")]` 门控：Windows 专属方法直接出现在 trait 里，但其他目标根本看不到它。
+
+三侧的 supertrait 落地（交出的原始句柄各不相同）：
+
+- [../gpui_linux/src/linux/x11/window.rs:L327-L335](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L327-L335) —— X11 窗口句柄 = `XcbWindowHandle`（一个非零 u32 窗口 id），紧随其后的 [L337-L350](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L337-L350) 用裸 `*mut xcb_connection_t` 指针构造 `XcbDisplayHandle`。
+- [../gpui_linux/src/linux/wayland/window.rs:L1403-L1427](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1403-L1427) —— Wayland 句柄 = `wl_surface` 裸指针与 `wl_display` 裸指针，分别包成 `WaylandWindowHandle`/`WaylandDisplayHandle`。
+- [../gpui_linux/src/linux/headless/window.rs:L63-L77](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/headless/window.rs#L63-L77) —— headless 窗口同样被要求实现这两个 trait，但只能返回 `HandleError::NotSupported`：supertrait 是强制的，实现质量由平台决定。
+- [../gpui/src/window.rs:L6598-L6610](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L6598-L6610) —— gpui 的 `Window` 也实现了同样两个 trait，做法是原样转发给 `platform_window`：于是 wgpu 生态代码拿到 gpui `Window` 就能直接创建 surface，无需知道平台细节。
+
+顺带一提：X11 与 Wayland 的 window.rs 里各还有一个内部 `RawWindow` 类型（[x11/window.rs:L305-L325](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L305-L325)、[wayland/window.rs:L72-L85](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L72-L85)），它们手动标了 `unsafe impl Send/Sync`，专门用于把裸指针交给 wgpu 创建 surface。
+
+#### 4.1.4 代码实践（源码阅读型）
+
+1. **实践目标**：亲手统计 `PlatformWindow` 的「硬性作业量」，验证「默认实现减负」的说法。
+2. **操作步骤**：打开 `crates/gpui/src/platform.rs`，从 L816 的 trait 声明读到 L989 结束。逐行登记每个方法：有 `{}` 或有返回值默认体的记「有默认」，以 `;` 结尾的记「必须实现」。再用 `grep -n "fn " crates/gpui_linux/src/linux/wayland/window.rs` 对照 Wayland 实现实际覆盖了哪些。
+3. **需要观察的现象**：macOS 专属块（L868-L896）、Linux 专属块（L901-L930）、移动端块（L934-L966）里默认实现的比例远高于通用块。
+4. **预期结果**：你会得到一张三类清单——「所有平台必须实现」「带默认实现可覆盖」「cfg 门控按平台可见」。这正是 u8-l5 毕业实践实现 FakePlatform 时的作业清单。
+5. 本任务为纯阅读，无需运行，预期可直接完成。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 GPUI 不自己定义一对「原始句柄」trait，而要复用 raw-window-handle？
+
+**答案**：因为 raw-window-handle 是 wgpu、winit、softbuffer 等共同遵循的生态事实标准。复用它意味着任何接受 `impl HasWindowHandle` 的第三方图形库都能直接和 GPUI 窗口对接；自己造 trait 则每次集成都要写适配层。代价只是各平台窗口要能交出裸指针——这对平台实现方几乎零成本。
+
+**练习 2**：headless 窗口实现 `HasWindowHandle` 时返回错误，为什么编译能通过、运行也不崩溃？
+
+**答案**：supertrait 约束只要求「实现该 trait」，不要求「实现必须成功」。`window_handle` 的返回类型是 `Result<WindowHandle, HandleError>`，headless 返回 `Err(HandleError::NotSupported)` 即满足了签名。调用方（如 wgpu surface 创建）拿到 `Err` 后自行决定降级或报错——类型系统把「能力缺失」编码进了返回值。
+
+**练习 3**：`get_raw_handle` 是 trait 里的 Windows 专属方法，Linux 实现需要为它写 `unimplemented!()` 吗？
+
+**答案**：不需要。该方法带 `#[cfg(target_os = "windows")]`，在 Linux 编译目标上这个方法根本不存在于 trait 中，Linux 实现自然无从谈起也无义务实现。
+
+### 4.2 窗口几何与状态查询：bounds、content_size、scale_factor 与 resize
+
+#### 4.2.1 概念说明
+
+这一组方法回答三个问题：窗口在哪多大（`bounds`、`window_bounds`）、内容区多大（`content_size`）、逻辑像素如何换算物理像素（`scale_factor`）。查询之外唯一的写入动作是 `resize`。
+
+三套实现的差异浓缩了三种窗口系统的性格：
+
+- **X11**：客户端可以直接 `ConfigureWindow` 改自己的几何，但窗口管理器可以否决/改写，真实尺寸要等 configure 事件回来再更新 `state.bounds`。
+- **Wayland**：客户端**不能**给自己定位，只能建议 surface 局部几何（`set_geometry`），最终尺寸由 compositor 在 configure 事件里裁决——所以 `resize` 里还夹着一个异步的 `state_ptr.resize` 任务。
+- **Windows**：直接 `SetWindowPos`，但要注意 `resize` 设定的是**内容区**尺寸，需要按边框偏移换算出外框矩形。
+
+#### 4.2.2 核心流程
+
+以「应用把窗口改成 400×300 逻辑像素」为例：
+
+```text
+应用: window.resize(size(px(400.), px(300.)))        # gpui/src/window.rs
+  └─ platform_window.resize(size)                     # 进入平台实现
+       X11:      逻辑px × scale_factor → 设备px → ConfigureWindow(width, height) → flush
+       Wayland:  扣除 CSD 内边距/平铺 inset → set_geometry(建议) → spawn 异步等 compositor 裁决
+       Windows:  calculate_window_rect(补边框) → SetWindowPos(保持位置不动)
+  ← 真实新尺寸经 on_resize 回调流回 gpui Window
+```
+
+注意最后一行：`resize` 是「请求」，不是「事实」。事实永远以平台事件（X11 ConfigureNotify / Wayland configure / Windows WM_SIZE）驱动的 `on_resize` 回调为准。
+
+#### 4.2.3 源码精读
+
+- [../gpui/src/window.rs:L2469-L2471](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L2469-L2471) —— 应用级 `Window::resize` 只有一行：转发给 `platform_window.resize`。
+- [../gpui_linux/src/linux/x11/window.rs:L1416-L1438](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1416-L1438) —— X11 的 `resize`：先把 `Size<Pixels>` 按 `scale_factor` 换算成设备像素（第 1418 行），再发 `ConfigureWindow` 只改宽高，最后 `xcb_flush` 立刻把请求推给服务器。
+- [../gpui_linux/src/linux/x11/window.rs:L1376-L1383](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1376-L1383) —— X11 的 `window_bounds` 查询：没有独立的「最大化」事实源，而是从 `_NET_WM_STATE` 扫描得到的 `maximized_vertical && maximized_horizontal` 标志推导（见 4.4.3 的状态刷新函数）。
+- [../gpui_linux/src/linux/wayland/window.rs:L1468-L1515](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1468-L1515) —— Wayland 的 `resize`：popup 分支走 reposition；普通窗口先扣掉客户端装饰内边距与平铺 inset 得到 window geometry，再 `set_geometry`，最后把真正的缓冲区尺寸调整 spawn 成异步任务——因为要等 configure 回来。
+- [../gpui_windows/src/window.rs:L633-L656](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_windows/src/window.rs#L633-L656) —— Windows 的 `resize`：`calculate_window_rect` 把内容区矩形扩成含边框的外框矩形，然后 `SetWindowPos` 并带 `SWP_NOMOVE`（只改尺寸不改位置），整个调用被 spawn 到执行器上异步执行。
+
+#### 4.2.4 代码实践
+
+1. **实践目标**：验证「resize 是请求、on_resize 才是事实」。
+2. **操作步骤**：在仓库根目录运行官方窗口示例 `cargo run -p gpui --example window`，反复点击示例中的 "Resize" 按钮（该按钮的实现在 [../gpui/examples/window.rs:L266-L269](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/examples/window.rs#L266-L269)，逻辑是把宽高互换）。同时观察终端——示例在开窗时通过 `cx.observe_window_bounds` 打印了每次 bounds 变化（[L322-L325](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/examples/window.rs#L322-L325)）。
+3. **需要观察的现象**：拖动窗口边缘手动改变尺寸时，终端同样打印 bounds 变化——这条路径完全不经过 `PlatformWindow::resize`，而是 WM/compositor 事件 → `on_resize` 回调。
+4. **预期结果**：按钮点击与你手动拖拽最终都汇入同一条 `observe_window_bounds` 通知链，证明「查询与回调」才是几何状态的单向事实来源。（在 X11 上部分窗口管理器会拒绝客户端的 ConfigureWindow，此时按钮甚至可能不生效——这本身就是最好的教材。待本地验证。）
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么 Wayland 的 `resize` 里要 `spawn` 一个异步任务，而 X11 不用？
+
+**答案**：X11 的 `ConfigureWindow` 是显式的跨线程请求，发出去就完事，真实结果由后续 ConfigureNotify 事件异步送达。Wayland 的窗口尺寸由 compositor 在 configure 事件中裁决，客户端提交 buffer 前必须等这个裁决，因此把「等待 configure → 按新尺寸重建缓冲区」这串依赖事件循环的工作交给 executor 上的任务继续推进。
+
+**练习 2**：`bounds()` 与 `content_size()` 有什么区别？
+
+**答案**：`bounds` 是窗口外框（含标题栏/边框，坐标是窗口在屏幕上的位置）；`content_size` 是可绘制内容区的逻辑尺寸。Windows 实现里专门注释了 GPUI 用逻辑尺寸处理鼠标命中（[gpui_windows/src/window.rs:L625-L631](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_windows/src/window.rs#L625-L631)），而 `resize` 要在这两者之间做边框换算。
+
+### 4.3 窗口控制动作：set_title、minimize、zoom 与 toggle_fullscreen
+
+#### 4.3.1 概念说明
+
+这一组是「人对窗口管理器说的话」：改标题、最小化、最大化（GPUI 历史地叫 `zoom`）、切全屏。它们共同的特点是**异步协商**——调用返回只代表「请求已发出」，窗口是否真的动起来取决于 WM/compositor/系统。同一契约在三平台的落地几乎是一套「三窗口系统文化对照教材」。
+
+应用层从不直接碰 `PlatformWindow`，而是用 gpui `Window` 上的薄封装：`set_window_title`、`minimize_window`、`zoom_window`、`toggle_fullscreen`。
+
+#### 4.3.2 核心流程
+
+```text
+应用调用                       X11 落点                        Wayland 落点              Windows 落点
+set_title      →  写 WM_NAME(STRING) + _NET_WM_NAME(UTF8)  →  xdg_toplevel.set_title  →  SetWindowTextW
+minimize       →  ClientMessage(WM_CHANGE_STATE, 3=Iconic) →  xdg_toplevel.set_minimized → ShowWindowAsync(SW_MINIMIZE)
+zoom           →  请求 toggle _NET_WM_STATE_MAXIMIZED_*,  →  set_maximized/unset_maximized → SW_MAXIMIZE
+toggle_fullscreen → 请求 toggle _NET_WM_STATE_FULLSCREEN  →  set_fullscreen/unset_fullscreen → 记 initial_placement(未显示时)
+```
+
+#### 4.3.3 源码精读
+
+**标题**——X11 要写两份属性，因为旧式工具读 `WM_NAME`（Latin-1 字符串），EWMH 时代的工具读 `_NET_WM_NAME`（UTF-8）：
+
+- [../gpui_linux/src/linux/x11/window.rs:L1551-L1576](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1551-L1576) —— 两次 `change_property8` 分别写 `WM_NAME` 与 `_NET_WM_NAME`，最后 flush。
+- [../gpui_linux/src/linux/wayland/window.rs:L1598-L1602](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1598-L1602) —— Wayland 只是给 toplevel 对象发一条 `set_title` 协议请求，标题栏由 compositor 画。
+- [../gpui_windows/src/window.rs:L874-L878](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_windows/src/window.rs#L874-L878) —— Windows 一行 `SetWindowTextW`，字符串转宽字符。
+
+**最小化与最大化**：
+
+- [../gpui_linux/src/linux/x11/window.rs:L1634-L1653](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1634-L1653) —— X11 `minimize`：向根窗口发 `WM_CHANGE_STATE` ClientMessage，数据 3 是 ICCCM 规定的 IconicState。
+- [../gpui_linux/src/linux/x11/window.rs:L1655-L1675](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1655-L1675) —— `zoom` 与 `toggle_fullscreen` 都复用 `set_wm_hints` 辅助函数，向 WM 请求 toggle 对应的 `_NET_WM_STATE` 原子（最大化要同时给 VERT 与 HORZ 两个原子，全屏给 FULLSCREEN + NONE）。
+- [../gpui_linux/src/linux/wayland/window.rs:L1632-L1658](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1632-L1658) —— Wayland 按当前状态选择 `set_minimized`/`set_maximized`/`unset_maximized`/`set_fullscreen`/`unset_fullscreen`。
+- [../gpui_windows/src/window.rs:L907-L929](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_windows/src/window.rs#L907-L929) —— Windows 用 `ShowWindowAsync(SW_MINIMIZE/SW_MAXIMIZE)`；窗口尚未显示时则改写 `initial_placement`，把「打开即最大化/全屏」记在出生参数里——这是 u3-l1 讲过的「WindowBounds 三态在开窗时压平、再由后置动作补回」的运行期版本。
+
+**应用级封装**（实践任务要用的 API）：
+
+- [../gpui/src/window.rs:L2579-L2582](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L2579-L2582) —— `set_window_title`：转发 `platform_window.set_title`，同时同步无障碍树里的标题。
+- [../gpui/src/window.rs:L2530-L2532](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L2530-L2532) —— `zoom_window`。
+- [../gpui/src/window.rs:L5719-L5726](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L5719-L5726) —— `minimize_window` 与 `toggle_fullscreen`。
+
+#### 4.3.4 代码实践（本讲主实践：运行时动态控制窗口）
+
+1. **实践目标**：写一个「窗口控制台」示例，在运行时动态调用 `set_window_title`、`resize`、`minimize_window`、`zoom_window`、`toggle_fullscreen`、`request_attention`，并记录平台差异。
+
+2. **操作步骤**：
+
+   第一步，先跑官方示例热身（仓库根目录）：
+
+   ```bash
+   cargo run -p gpui --example window
+   ```
+
+   点击 "Resize" 按钮确认环境可用。
+
+   第二步，在自己的克隆里新建 `crates/gpui/examples/window_controls.rs`（示例代码，结构完全仿照官方 window 示例的按钮工厂与开窗流程）：
+
+   ```rust
+   // 示例代码：窗口控制台。仿照 crates/gpui/examples/window.rs 编写。
+   use gpui::{App, Bounds, Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size};
+   use gpui_platform::application;
+
+   struct WindowControlsDemo;
+
+   fn button(text: &str, on_click: impl Fn(&mut Window, &mut App) + 'static) -> impl IntoElement {
+       div()
+           .id(text.to_string())
+           .flex_none()
+           .px_2()
+           .bg(rgb(0xf7f7f7))
+           .border_1()
+           .rounded_sm()
+           .cursor_pointer()
+           .child(text.to_string())
+           .on_click(move |_, window, cx| on_click(window, cx))
+   }
+
+   impl Render for WindowControlsDemo {
+       fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+           div().p_4().flex().flex_wrap().gap_2().size_full()
+               .child(button("Set Title", |window, _| {
+                   window.set_window_title("标题已被运行时修改");
+               }))
+               .child(button("Resize", |window, _| {
+                   let size = window.bounds().size;
+                   window.resize(gpui::size(size.height, size.width)); // 宽高互换
+               }))
+               .child(button("Minimize", |window, _| {
+                   window.minimize_window();
+               }))
+               .child(button("Zoom", |window, _| {
+                   window.zoom_window();
+               }))
+               .child(button("Fullscreen", |window, _| {
+                   window.toggle_fullscreen();
+               }))
+               .child(button("Request Attention", |window, cx| {
+                   // 3 秒后请求注意力；期间请点击其他应用窗口让本窗口失焦，
+                   // 否则 request_attention 会因窗口已激活而提前返回。
+                   // spawn/update 写法仿照官方示例的 "Hide Application" 按钮。
+                   window
+                       .spawn(cx, async move |cx| {
+                           cx.background_executor()
+                               .timer(std::time::Duration::from_secs(3))
+                               .await;
+                           cx.update(|window, _| {
+                               window.request_attention();
+                           });
+                       })
+                       .detach();
+               }))
+       }
+   }
+
+   fn main() {
+       application().run(|cx: &mut App| {
+           let bounds = Bounds::centered(None, size(px(560.0), px(240.0)), cx);
+           cx.open_window(
+               WindowOptions {
+                   window_bounds: Some(WindowBounds::Windowed(bounds)),
+                   ..Default::default()
+               },
+               |_, cx| cx.new(|_| WindowControlsDemo),
+           )
+           .unwrap();
+           cx.activate(true);
+       });
+   }
+   ```
+
+   第三步，运行：
+
+   ```bash
+   cargo run -p gpui --example window_controls
+   ```
+
+3. **需要观察的现象**（逐项记录）：
+
+   - 点击 "Set Title" 后标题栏/任务栏文字变化；Linux 上另开终端执行 `xprop -name "标题已被运行时修改" WM_NAME _NET_WM_NAME`（X11 会话）能看到两个属性同步更新。
+   - "Minimize" 后窗口收进任务栏；从任务栏点回后 "Zoom" 再点一次应还原（X11/Windows 是 toggle 语义，Wayland 实现里显式按 `state.maximized` 分支选择 set/unset）。
+   - "Fullscreen" 在 Wayland/X11 上窗口应铺满整屏（含任务栏区域），再点一次还原。
+   - "Request Attention"：点击后 **3 秒内切到别的窗口**。X11 上任务栏按钮闪烁或高亮；Windows 上标题栏/任务栏闪烁（`FlashWindowEx`）；Wayland 上什么都不会发生（trait 默认空实现）。
+
+4. **预期结果**：所有按钮在 macOS/X11/Windows 上产生可见效果；Wayland 上除 "Request Attention" 外均有效。若你的 WM 拒绝最大化（少数平铺式 WM），"Zoom" 可能无变化——这本身就是「请求-协商」模型的证据。现象随平台/WM 不同，**待本地验证**，请把实际结果填进下面这张表：
+
+   | 动作 | 你的平台 | 观察结果 |
+   | --- | --- | --- |
+   | set_title | | |
+   | resize | | |
+   | minimize | | |
+   | zoom | | |
+   | toggle_fullscreen | | |
+   | request_attention | | |
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：X11 的 `set_title` 为什么写两个属性？只写 `_NET_WM_NAME` 行不行？
+
+**答案**：不行。`WM_NAME` 是 ICCCM 的旧约定，类型 STRING（Latin-1 字节串），老式工具（部分任务栏、dmenu 类启动器）只读它；`_NET_WM_NAME` 是 EWMH 扩展，类型 UTF8_STRING，支持完整 Unicode。两份都写才能让新旧工具都显示正确标题，这也是几乎所有 X11 应用（如 GTK）的标准做法。
+
+**练习 2**：为什么 Windows 的 `zoom`/`toggle_fullscreen` 里都有 `IsWindowVisible` 分支和 `initial_placement` 改写？
+
+**答案**：窗口尚未显示（`show: false` 打开，见官方示例的 "Invisible" 按钮）时，`ShowWindowAsync` 无从发力，于是把「最大化/全屏」意图记进 `initial_placement`，等真正显示时一次性按该状态创建。这是「动作请求」与「出生参数」两条路径的合流点。
+
+**练习 3**：应用层 `Window::zoom_window` 与平台层 `PlatformWindow::zoom` 是什么关系？中间还可能发生什么？
+
+**答案**：前者是后者的纯转发封装（[window.rs:L2530-L2532](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L2530-L2532)）。中间隔着整个窗口系统：X11 上要等 WM 处理 `_NET_WM_STATE` 请求并回发事件，Wayland 上要等 compositor 的 configure 事件；状态真正落地后 gpui 才经由 `on_resize` 等回调感知到。
+
+### 4.4 焦点与激活：activate、is_active、on_active_status_change 与 window_stack
+
+#### 4.4.1 概念说明
+
+「激活」（active/focused）指窗口正在接收键盘输入的 OS 级状态。它牵扯三层：
+
+1. **平台窗口**：`X11Window`/`WaylandWindow`/`WindowsWindow` 各自维护激活事实。
+2. **gpui `Window`**：用 `Rc<Cell<bool>>` 缓存镜像，初值取自 `platform_window.is_active()`，之后靠 `on_active_status_change` 回调同步。
+3. **`Platform`**：跨窗口的全局问题——「当前激活的是哪个窗口」（`active_window`）与「所有窗口的前后顺序」（`window_stack`）。
+
+关键结论：**激活状态由平台窗口维护，gpui 只缓存**；**window_stack 只能由 Platform 提供**，因为 Z 序是跨窗口的全局信息，单个窗口自己看不见。`window_stack` 在 trait 里带默认实现返回 `None`（表示「本平台无法回答」），macOS 与 X11 覆盖了它，Wayland 返回 `None`——Wayland 协议根本不暴露全局窗口列表。
+
+#### 4.4.2 核心流程
+
+```text
+激活事件的两条路：
+
+① 别的窗口抢走焦点 / 本窗口获得焦点
+   OS 事件 → 平台窗口状态刷新(X11: 扫描 _NET_WM_STATE_FOCUSED)
+           → set_active(focus) → 取出 active_status_change 回调 → 调用
+           → gpui Window.active.set(bool) → 触发 activation_observers → 重绘
+
+② 应用主动请求激活
+   window.activate_window() → PlatformWindow::activate
+           X11: 发 _NET_ACTIVE_WINDOW ClientMessage + SetInputFocus
+           Wayland: 申请 xdg-activation token（大概率被拒，但 KWin/Mutter 可借此提示）
+           Windows: SetActiveWindow/SetFocus/SetForegroundWindow（还要伪造一次 Alt 键输入）
+
+全局查询：
+   cx.active_window()   → Platform::active_window（必需方法）
+   cx.window_stack()    → Platform::window_stack（默认 None；macOS/X11 覆盖）
+```
+
+#### 4.4.3 源码精读
+
+**X11 侧的事实维护**——窗口状态刷新函数是激活、全屏、最大化的唯一事实入口：
+
+- [../gpui_linux/src/linux/x11/window.rs:L1116-L1141](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1116-L1141) —— 读取根窗口维护的 `_NET_WM_STATE` 属性，先把 `state.active/fullscreen/maximized_*/hidden` 全部清零，再按出现的原子重新置位（`_NET_WM_STATE_FOCUSED` → active）。第 1139-1141 行是本讲点题之笔：窗口由非激活转为激活时自动清除 urgency 标志（详见 4.5）。
+- [../gpui_linux/src/linux/x11/window.rs:L1543-L1545](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1543-L1545) —— `is_active` 只是读出上面维护的布尔值。
+- [../gpui_linux/src/linux/x11/window.rs:L1322-L1331](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1322-L1331) —— `set_active(focus)`：取出 `active_status_change` 回调调用后**放回槽位**（`take` → 调用 → `Some(fun)` 放回，避免 `RefCell` 重入借用冲突），并同步无障碍焦点。
+
+**gpui 侧的缓存与接线**：
+
+- [../gpui/src/window.rs:L1422](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L1422) —— `Window::new` 用 `Rc::new(Cell::new(platform_window.is_active()))` 初始化激活缓存。
+- [../gpui/src/window.rs:L1710-L1730](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L1710-L1730) —— 注册 `on_active_status_change`：回调里更新缓存、刷新修饰键与大写锁定状态、触发 `activation_observers`、标记 bounds 变化并重绘。注意它通过 `AsyncApp` 的 `handle.update` 跳回主线程实体更新——平台事件线程不直接摸 gpui 状态。
+- [../gpui/src/window.rs:L2510-L2512](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L2510-L2512) —— 应用层查询 `is_window_active` 读的就是这个缓存。
+
+**另外两个平台的 is_active**：
+
+- [../gpui_windows/src/window.rs:L858-L860](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_windows/src/window.rs#L858-L860) —— Windows 不维护缓存，每次现问系统：`self.0.hwnd == GetActiveWindow()`。
+- [../gpui_linux/src/linux/wayland/window.rs:L1590-L1592](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1590-L1592) —— Wayland 读 keyboard focus 进入 surface 时记下的 `state.active`。
+
+**全局窗口栈**：
+
+- [../gpui/src/platform.rs:L141-L144](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/platform.rs#L141-L144) —— `active_window` 是必需方法；`window_stack` 默认 `None`。
+- [../gpui_macos/src/platform.rs:L639-L647](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_macos/src/platform.rs#L639-L647) —— macOS 由 `MacWindow::ordered_windows()` 给出，注释明确「最前即激活」。
+- [../gpui_linux/src/linux/x11/client.rs:L1817-L1839](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/client.rs#L1817-L1839) —— X11 读根窗口的 `_NET_CLIENT_LIST_STACKING` 属性（WM 维护的全局窗口栈快照）。
+- [../gpui_linux/src/linux/wayland/client.rs:L1219-L1221](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1219-L1221) —— Wayland 返回 `None`：协议不提供全局 Z 序，调用方必须自己降级。
+
+#### 4.4.4 代码实践（源码阅读型）
+
+1. **实践目标**：把「激活状态由谁维护」在三平台逐一落实。
+2. **操作步骤**：依次打开三处 `is_active` 实现（上文 X11 L1543、Windows L858、Wayland L1590），再向上各追一层，找到写入/比较的数据源头。
+3. **需要观察的现象**：三个平台的答案分别是「X11：从 `_NET_WM_STATE` 扫描出的 `state.active` 布尔」「Windows：与 `GetActiveWindow()` 实时比对」「Wayland：keyboard_enter 事件写入的 `state.active`」。
+4. **预期结果**：得到结论——激活的**事实来源永远是窗口系统**，gpui `Window` 的 `Rc<Cell<bool>>` 只是回放缓存的镜像；而 `window_stack` 连镜像都没有，因为它属于 `Platform` 级全局查询。纯阅读任务，可直接完成。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：为什么 X11 的 `set_active` 要先把回调 `take` 出来调用，再放回去？
+
+**答案**：回调存在 `Rc<RefCell<Callbacks>>` 里，而回调内部很可能再次触发对同一 `RefCell` 的访问（例如经 gpui 转一圈又调用平台窗口方法）。若调用时仍持有借用，就会触发 `RefCell` 重入 panic。`take` 置空 → 释放借用 → 调用 → 放回，是这类「存储回调的内部可变结构」的标准防重入手法。
+
+**练习 2**：Zed 想实现「关闭窗口时按打开顺序恢复」，`window_stack` 在 macOS 与 Wayland 上表现不同会带来什么工程后果？
+
+**答案**：macOS 能拿到真实前后序（`ordered_windows`），可按 Z 序恢复；Wayland 上 `window_stack` 返回 `None`，功能必须降级（例如退回应用自己维护的打开顺序）。这正是 trait 默认实现「能力探测型」姿态的意义：调用方拿到 `None` 就知道要走降级路径，而不是平台假装给出错误答案。
+
+**练习 3**：`activate` 在 Windows 实现里为什么要用 `SendInput` 伪造一次 Alt 键按下与抬起？
+
+**答案**：Windows 的前台锁定策略要求窗口必须「近期收到过用户输入」才允许 `SetForegroundWindow` 把自己提到前台，否则只有任务栏闪烁。伪造一次 Alt 输入是为了骗过该策略，源码注释（[gpui_windows/src/window.rs:L800-L805](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_windows/src/window.rs#L800-L805)）自嘲这是 "premium ragebait by windows"。
+
+### 4.5 注意力请求与窗口控制区：request_attention 的 urgency 生命周期与 WindowControlArea
+
+#### 4.5.1 概念说明
+
+`request_attention` 解决的场景是：后台窗口发生了需要用户立刻知道的事（比如构建失败、收到消息），但窗口不能也不该强行抢焦点——于是请 OS「温和提示」：任务栏闪烁（Windows）、dock 图标跳动（macOS）、urgency 标志（X11）。
+
+trait 层它带空默认实现，各平台按能力覆盖。X11 的实现是本讲最完整的一条小生命周期，也正好覆盖了规格里的三个最小模块之一 `WindowControlArea` 的邻居——`on_hit_test_window_control` 回调：当 Linux 上应用自绘标题栏（client-side decorations）时，平台需要反过来问 gpui「鼠标现在悬停在你自绘的关闭/最大化按钮上吗」，答案类型就是 `WindowControlArea`。
+
+#### 4.5.2 核心流程
+
+X11 上 urgency 的完整生命周期：
+
+```text
+应用: window.request_attention()
+  └─ is_active()? ── 是 ──→ 直接返回（已激活的窗口无需提示）
+        │否
+        ▼
+  set_wm_hints_urgency(xcb, x_window, urgent=true)
+     读旧 WM_HINTS → 保留其他 hints → 置 urgent 位 → 写回属性 → flush
+        │
+        ▼
+  WM 读到 urgency → 任务栏高亮/闪烁（各 WM 表现不同）
+        │
+        ▼
+  用户点击该窗口 → WM 更新 _NET_WM_STATE（FOCUSED 置位）
+        │
+        ▼
+  X11Client 收到事件 → 调 state 刷新函数 → was_active=false → active=true
+        │
+        ▼
+  set_wm_hints_urgency(urgent=false)   ← 源码注释：urgency 没有自己的撤销信号，
+                                          ICCCM 把清零职责留给客户端，焦点是惯例手段
+```
+
+#### 4.5.3 源码精读
+
+- [../gpui/src/platform.rs:L838-L839](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/platform.rs#L838-L839) —— 契约：`request_attention` 默认空实现。
+- [../gpui_linux/src/linux/x11/window.rs:L1535-L1541](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1535-L1541) —— X11 入口：已激活则提前返回，否则调用辅助函数置 urgency。
+- [../gpui_linux/src/linux/x11/window.rs:L392-L423](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L392-L423) —— `set_wm_hints_urgency` 辅助函数（本轮提交 4d1935b8 重构的产物）：先读现有 `WM_HINTS` 避免清掉别的 hint；**清除时如果 urgency 本来就没置位则直接跳过**——注释解释了原因：写回会在从未请求过注意力的窗口上凭空创建 `WM_HINTS` 属性，还会给每次窗口状态变化增加一次 X 往返。
+- [../gpui_linux/src/linux/x11/window.rs:L1137-L1141](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1137-L1141) —— 生命周期的收尾：状态刷新发现 `active && !was_active` 时自动清除 urgency，注释点明 ICCCM 没有定义 urgency 的撤销信号，焦点是惯例清零手段。
+- [../gpui_windows/src/window.rs:L837-L856](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_windows/src/window.rs#L837-L856) —— Windows 版本：同样先 `is_active` 短路，然后 `FlashWindowEx(FLASHW_ALL, uCount=1)` 让标题栏与任务栏项闪一次。
+- [../gpui_linux/src/linux/wayland/window.rs:L1588](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1588) —— Wayland 版本是空体：直接吃 trait 默认值的等价实现。注意力提示在 Wayland 上走的是 `activate` 里的 xdg-activation token 路径（[L1571-L1586](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1571-L1586)，注释说明 KWin/Mutter 可借 app_id 做视觉提示）。
+
+**窗口控制区 `WindowControlArea`**：
+
+- [../gpui/src/window.rs:L737-L748](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L737-L748) —— 四个变体：`Drag`（可拖拽区）、`Close`、`Max`、`Min`。它描述的是**应用自绘**的窗口控制区域，只在客户端装饰（CSD）场景有意义。
+- [../gpui/src/platform.rs:L859](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/platform.rs#L859) —— 契约：`on_hit_test_window_control` 注册「平台询问当前鼠标命中的控制区」的回调。
+- [../gpui/src/window.rs:L1751-L1766](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L1751-L1766) —— gpui 的回答逻辑：遍历本帧渲染时登记的 `window_control_hitboxes`，与鼠标命中测试的 hitbox 集合求交集，命中即上报对应 `WindowControlArea`。也就是「自绘按钮的命中测试由 gpui 元素树完成，平台只拿结论」。
+- [../gpui/src/window.rs:L2574-L2576](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L2574-L2576) —— 配套查询 `window_controls()`：应用据此决定要不要自己画关闭/最大化/最小化按钮（trait 默认 `WindowControls::default()`，见 [platform.rs:L926-L928](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/platform.rs#L926-L928)，Linux 专属块）。
+
+#### 4.5.4 代码实践（X11 会话下的 urgency 观测）
+
+1. **实践目标**：用系统工具亲眼看到 urgency 标志的置位与自动清除。
+2. **操作步骤**：
+   1. 在 X11 会话中运行 4.3.4 的 `window_controls` 示例。
+   2. 先用 `xdotool search --name "窗口控制台"` 或 `xprop | click 窗口` 拿到窗口 id（记为 `$WID`）。
+   3. 点击 "Request Attention" 按钮，**3 秒内点击另一个应用窗口**使其失焦。
+   4. 到期后执行 `xprop -id $WID WM_HINTS`。
+   5. 再点击示例窗口使其重新激活，重复第 4 步。
+3. **需要观察的现象**：第 4 步输出应含 `Urgent hint indicated`（ urgency 置位）；第 5 步之后同样的命令不再含 urgency 标志（甚至整个 `WM_HINTS` 的 flags 位变化）。同时留意任务栏对该窗口的高亮/闪烁表现。
+4. **预期结果**：完整复现 4.5.2 的生命周期。在非 X11 平台（Wayland/macOS/Windows）本观测不适用，请改测：Windows 上看标题栏闪烁，Wayland 上确认无任何现象。**待本地验证**。
+
+#### 4.5.5 小练习与答案
+
+**练习 1**：`set_wm_hints_urgency(x, w, false)` 为什么在 urgency 未置位时提前返回，而不是无脑写回属性？
+
+**答案**：两个原因（源码注释 L394-L396 原文）：其一，给从未请求过注意力的窗口写回 `WM_HINTS` 会凭空创建一个原本不存在的属性；其二，该函数会在**每次**窗口状态变化时被调用到（清除路径），无脑写回等于给每次状态变化都加一次 X 服务往返。跳过未置位的清除把这两个成本都消掉了。
+
+**练习 2**：为什么「窗口转为激活时清除 urgency」的代码放在状态刷新函数里，而不是放在 `activate()` 或某个焦点事件处理器里？
+
+**答案**：因为 `state.active` 的事实来源是 `_NET_WM_STATE` 属性扫描（L1116-L1135），任何焦点变化最终都会流经这一个刷新函数。把清除挂在「`was_active=false` 且 `active=true`」的翻转瞬间，无论焦点变化由哪条事件路径触发（用户点击、WM 切换、`activate()` 请求），都能恰好清一次；放在单个事件处理器里则容易漏路径或重复清除。
+
+**练习 3**：`WindowControlArea` 为什么是 gpui 定义的类型，而不是平台 crate 各自定义？
+
+**答案**：它属于**契约**而不是**实现**：gpui 上层（元素树、hitbox 系统）负责产生「鼠标在自绘关闭按钮上」这一结论，平台窗口只负责消费结论（例如据此决定是否响应 WM 的移动/缩放请求）。类型放在契约层（经 `pub use` 进 gpui）保证两侧说的是同一种语言；Windows/macOS 用服务器端装饰，不参与这套协议，自然不实现相关 Linux 专属方法。
+
+## 5. 综合实践
+
+把 4.3 的示例升级为「窗口体检面板」：
+
+1. 视图顶部用 `window.bounds()`、`window.viewport_size()`、`window.scale_factor()`、`window.is_window_active()`、`window.window_decorations()`、`window.window_controls()` 实时渲染一张状态表（状态变化时通过 `cx.notify()` 触发重绘；可搭配 `cx.observe_window_bounds` 验证回调链）。
+2. 中部放 4.3.4 的六个控制按钮，外加一个「随机标题」按钮（每次点击把当前时间戳写进 `set_window_title`）。
+3. 底部做一个「复刻窗口控制区」：用三个可点击 div 模拟关闭/最大化/最小化按钮，分别调用 `window.remove_window()`、`zoom_window()`、`minimize_window()`，体会 `WindowControlArea` 所服务的 CSD 场景。
+4. 在你的操作系统上跑完整流程，把每个按钮的效果、每个查询的返回值记成一张平台档案表；若有第二台不同系统的机器，再跑一遍对比。
+
+这个任务串起本讲全部模块：几何查询（4.2）、控制动作（4.3）、激活状态（4.4）、注意力与控制区（4.5），全部通过 gpui `Window` 的应用级 API 触达 `PlatformWindow` 契约。
+
+## 6. 本讲小结
+
+- `PlatformWindow` 是「单个窗口」的平台契约，按几何查询、控制动作、回调注册、绘制、输入法/无障碍、平台专属六组组织；大量方法带默认实现或 cfg 门控，最小实现集合因平台而异。
+- `HasWindowHandle + HasDisplayHandle` 是写进 supertrait 的生态义务：X11 交出窗口 id 与 `xcb_connection_t*`，Wayland 交出 `wl_surface*`/`wl_display*`，headless 只能返回 `NotSupported`；gpui `Window` 原样转发，使 wgpu 生态可直接对接。
+- 同一动作三种落法：`set_title` 是 X11 双属性（`WM_NAME`+`_NET_WM_NAME`）/ Wayland 协议请求 / Win32 `SetWindowTextW`；`minimize`/`zoom`/`fullscreen` 分别走 ClientMessage、`xdg_toplevel` 请求族与 `ShowWindowAsync`——本质都是「向窗口系统发请求，等事件回流确认」。
+- 激活状态的事实来源在平台窗口（X11 扫描 `_NET_WM_STATE_FOCUSED`、Windows 实时比对 `GetActiveWindow`），gpui `Window` 只维护 `Rc<Cell<bool>>` 镜像并经 `on_active_status_change` 同步；`window_stack` 是 Platform 级全局查询，macOS/X11 可答、Wayland 返回 `None`。
+- `request_attention` 在 X11 上是一条完整生命周期：置 `WM_HINTS` urgency → WM 提示 → 窗口转激活时自动清除；清除路径跳过未置位的情况以避免创建多余属性和 X 往返；Windows 用 `FlashWindowEx`，Wayland 不实现（走 xdg-activation 提示）。
+- `WindowControlArea`（Drag/Close/Max/Min）服务于 Linux 客户端装饰：gpui 在 `on_hit_test_window_control` 回调里用本帧 hitbox 命中测试得出结论，平台窗口只消费结论。
+
+## 7. 下一步学习建议
+
+- 下一讲 u3-l3《键盘输入的跨平台抽象》把视角从窗口转向输入：`PlatformKeyboardLayout`/`PlatformKeyboardMapper` 与 `Keystroke`，继续沿「契约 → 各平台落地」的方法读 `platform/keyboard.rs` 与三套键盘实现。
+- 想先补齐窗口输入事件的读者，可以精读本讲反复出现的 `on_input` 回调在 X11 的填充方：`crates/gpui_linux/src/linux/x11/event.rs`（u5-l3 会展开）。
+- 对绘制组方法（`draw`、`sprite_atlas`、`completed_frame`）意犹未尽的读者，直接预习 u8-l2《PlatformAtlas 与渲染后端》，看本讲 4.1 表格里「绘制」组的三个方法如何撑起整条 GPU 渲染链。
+- 动手型读者可以尝试给 4.3 的示例补一个 macOS 分支（如 `titlebar_double_click`、`set_edited`），体会 trait 里 macOS 专属块的存在感。
