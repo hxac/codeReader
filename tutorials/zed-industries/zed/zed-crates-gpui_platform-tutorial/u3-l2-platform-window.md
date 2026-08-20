@@ -23,13 +23,13 @@
 
 | 文件 | 角色 |
 | --- | --- |
-| [../gpui/src/platform.rs](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/platform.rs) | 契约层：`PlatformWindow` trait 定义（本讲主战场），以及 `Platform::active_window`/`window_stack` |
-| [../gpui/src/window.rs](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs) | gpui 上层 `Window`：注册平台回调、缓存激活状态、暴露应用级 API（`set_window_title`、`zoom_window` 等）与 `WindowControlArea` |
-| [../gpui_linux/src/linux/x11/window.rs](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs) | X11 实现：`X11Window`，含 `set_wm_hints_urgency` 辅助函数与本讲的注意力请求主线索 |
-| [../gpui_linux/src/linux/wayland/window.rs](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs) | Wayland 实现：`WaylandWindow`，展示「一切皆协议请求」的窗口控制方式 |
-| [../gpui_windows/src/window.rs](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_windows/src/window.rs) | Windows 实现：`WindowsWindow`，直接调用 Win32 API |
-| [../gpui_linux/src/linux/headless/window.rs](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/headless/window.rs) | headless 实现：supertrait 的「反例样本」——句柄返回 `NotSupported` |
-| [../gpui/examples/window.rs](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/examples/window.rs) | 官方窗口示例，代码实践的底稿 |
+| [../gpui/src/platform.rs](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/platform.rs) | 契约层：`PlatformWindow` trait 定义（本讲主战场），以及 `Platform::active_window`/`window_stack` |
+| [../gpui/src/window.rs](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/window.rs) | gpui 上层 `Window`：注册平台回调、缓存激活状态、暴露应用级 API（`set_window_title`、`zoom_window` 等）与 `WindowControlArea` |
+| [../gpui_linux/src/linux/x11/window.rs](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs) | X11 实现：`X11Window`，含 `set_wm_hints_urgency` 辅助函数与本讲的注意力请求主线索 |
+| [../gpui_linux/src/linux/wayland/window.rs](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs) | Wayland 实现：`WaylandWindow`，展示「一切皆协议请求」的窗口控制方式 |
+| [../gpui_windows/src/window.rs](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_windows/src/window.rs) | Windows 实现：`WindowsWindow`，直接调用 Win32 API |
+| [../gpui_linux/src/linux/headless/window.rs](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/headless/window.rs) | headless 实现：supertrait 的「反例样本」——句柄返回 `NotSupported` |
+| [../gpui/examples/window.rs](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/examples/window.rs) | 官方窗口示例，代码实践的底稿 |
 
 ## 4. 核心概念与源码讲解
 
@@ -60,20 +60,20 @@ trait 的方法可粗分为六组：
 
 trait 声明与 supertrait 约束（导入在第 54 行）：
 
-- [../gpui/src/platform.rs:L54](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/platform.rs#L54) —— 契约层从这里引入 raw-window-handle 的两个 trait。
-- [../gpui/src/platform.rs:L815-L819](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/platform.rs#L815-L819) —— `pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle`，紧跟的前几个方法就是几何查询组（`bounds`、`is_maximized`、`window_bounds`、`content_size`、`resize`）。
-- [../gpui/src/platform.rs:L838-L839](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/platform.rs#L838-L839) —— `request_attention` 的文档注释与**空默认实现**：不覆盖它的平台（如 Wayland）静默忽略注意力请求。
-- [../gpui/src/platform.rs:L852-L862](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/platform.rs#L852-L862) —— `on_*` 回调注册家族：平台窗口只存回调，真正的事件来源是各平台的事件循环。
-- [../gpui/src/platform.rs:L898-L899](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/platform.rs#L898-L899) —— `get_raw_handle` 用 `#[cfg(target_os = "windows")]` 门控：Windows 专属方法直接出现在 trait 里，但其他目标根本看不到它。
+- [../gpui/src/platform.rs:L54](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/platform.rs#L54) —— 契约层从这里引入 raw-window-handle 的两个 trait。
+- [../gpui/src/platform.rs:L816-L821](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/platform.rs#L816-L821) —— `pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle`，紧跟的前几个方法就是几何查询组（`bounds`、`is_maximized`、`window_bounds`、`content_size`、`resize`）。
+- [../gpui/src/platform.rs:L838-L839](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/platform.rs#L838-L839) —— `request_attention` 的文档注释与**空默认实现**：不覆盖它的平台（如 Wayland）静默忽略注意力请求。
+- [../gpui/src/platform.rs:L852-L862](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/platform.rs#L852-L862) —— `on_*` 回调注册家族：平台窗口只存回调，真正的事件来源是各平台的事件循环。
+- [../gpui/src/platform.rs:L898-L899](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/platform.rs#L898-L899) —— `get_raw_handle` 用 `#[cfg(target_os = "windows")]` 门控：Windows 专属方法直接出现在 trait 里，但其他目标根本看不到它。
 
 三侧的 supertrait 落地（交出的原始句柄各不相同）：
 
-- [../gpui_linux/src/linux/x11/window.rs:L327-L335](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L327-L335) —— X11 窗口句柄 = `XcbWindowHandle`（一个非零 u32 窗口 id），紧随其后的 [L337-L350](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L337-L350) 用裸 `*mut xcb_connection_t` 指针构造 `XcbDisplayHandle`。
-- [../gpui_linux/src/linux/wayland/window.rs:L1403-L1427](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1403-L1427) —— Wayland 句柄 = `wl_surface` 裸指针与 `wl_display` 裸指针，分别包成 `WaylandWindowHandle`/`WaylandDisplayHandle`。
-- [../gpui_linux/src/linux/headless/window.rs:L63-L77](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/headless/window.rs#L63-L77) —— headless 窗口同样被要求实现这两个 trait，但只能返回 `HandleError::NotSupported`：supertrait 是强制的，实现质量由平台决定。
-- [../gpui/src/window.rs:L6598-L6610](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L6598-L6610) —— gpui 的 `Window` 也实现了同样两个 trait，做法是原样转发给 `platform_window`：于是 wgpu 生态代码拿到 gpui `Window` 就能直接创建 surface，无需知道平台细节。
+- [../gpui_linux/src/linux/x11/window.rs:L327-L335](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L327-L335) —— X11 窗口句柄 = `XcbWindowHandle`（一个非零 u32 窗口 id），紧随其后的 [L337-L351](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L337-L351) 用裸 `*mut xcb_connection_t` 指针构造 `XcbDisplayHandle`。
+- [../gpui_linux/src/linux/wayland/window.rs:L1403-L1427](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1403-L1427) —— Wayland 句柄 = `wl_surface` 裸指针与 `wl_display` 裸指针，分别包成 `WaylandWindowHandle`/`WaylandDisplayHandle`。
+- [../gpui_linux/src/linux/headless/window.rs:L63-L77](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/headless/window.rs#L63-L77) —— headless 窗口同样被要求实现这两个 trait，但只能返回 `HandleError::NotSupported`：supertrait 是强制的，实现质量由平台决定。
+- [../gpui/src/window.rs:L6598-L6610](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/window.rs#L6598-L6610) —— gpui 的 `Window` 也实现了同样两个 trait，做法是原样转发给 `platform_window`：于是 wgpu 生态代码拿到 gpui `Window` 就能直接创建 surface，无需知道平台细节。
 
-顺带一提：X11 与 Wayland 的 window.rs 里各还有一个内部 `RawWindow` 类型（[x11/window.rs:L305-L325](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L305-L325)、[wayland/window.rs:L72-L85](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L72-L85)），它们手动标了 `unsafe impl Send/Sync`，专门用于把裸指针交给 wgpu 创建 surface。
+顺带一提：X11 与 Wayland 的 window.rs 里各还有一个内部 `RawWindow` 类型（[x11/window.rs:L305-L325](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L305-L325)、[wayland/window.rs:L72-L85](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L72-L85)），它们手动标了 `unsafe impl Send/Sync`，专门用于把裸指针交给 wgpu 创建 surface。
 
 #### 4.1.4 代码实践（源码阅读型）
 
@@ -126,16 +126,16 @@ trait 声明与 supertrait 约束（导入在第 54 行）：
 
 #### 4.2.3 源码精读
 
-- [../gpui/src/window.rs:L2469-L2471](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L2469-L2471) —— 应用级 `Window::resize` 只有一行：转发给 `platform_window.resize`。
-- [../gpui_linux/src/linux/x11/window.rs:L1416-L1438](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1416-L1438) —— X11 的 `resize`：先把 `Size<Pixels>` 按 `scale_factor` 换算成设备像素（第 1418 行），再发 `ConfigureWindow` 只改宽高，最后 `xcb_flush` 立刻把请求推给服务器。
-- [../gpui_linux/src/linux/x11/window.rs:L1376-L1383](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1376-L1383) —— X11 的 `window_bounds` 查询：没有独立的「最大化」事实源，而是从 `_NET_WM_STATE` 扫描得到的 `maximized_vertical && maximized_horizontal` 标志推导（见 4.4.3 的状态刷新函数）。
-- [../gpui_linux/src/linux/wayland/window.rs:L1468-L1515](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1468-L1515) —— Wayland 的 `resize`：popup 分支走 reposition；普通窗口先扣掉客户端装饰内边距与平铺 inset 得到 window geometry，再 `set_geometry`，最后把真正的缓冲区尺寸调整 spawn 成异步任务——因为要等 configure 回来。
-- [../gpui_windows/src/window.rs:L633-L656](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_windows/src/window.rs#L633-L656) —— Windows 的 `resize`：`calculate_window_rect` 把内容区矩形扩成含边框的外框矩形，然后 `SetWindowPos` 并带 `SWP_NOMOVE`（只改尺寸不改位置），整个调用被 spawn 到执行器上异步执行。
+- [../gpui/src/window.rs:L2469-L2471](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/window.rs#L2469-L2471) —— 应用级 `Window::resize` 只有一行：转发给 `platform_window.resize`。
+- [../gpui_linux/src/linux/x11/window.rs:L1416-L1438](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1416-L1438) —— X11 的 `resize`：先把 `Size<Pixels>` 按 `scale_factor` 换算成设备像素（第 1418 行），再发 `ConfigureWindow` 只改宽高，最后 `xcb_flush` 立刻把请求推给服务器。
+- [../gpui_linux/src/linux/x11/window.rs:L1376-L1383](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1376-L1383) —— X11 的 `window_bounds` 查询：没有独立的「最大化」事实源，而是从 `_NET_WM_STATE` 扫描得到的 `maximized_vertical && maximized_horizontal` 标志推导（见 4.4.3 的状态刷新函数）。
+- [../gpui_linux/src/linux/wayland/window.rs:L1468-L1515](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1468-L1515) —— Wayland 的 `resize`：popup 分支走 reposition；普通窗口先扣掉客户端装饰内边距与平铺 inset 得到 window geometry，再 `set_geometry`，最后把真正的缓冲区尺寸调整 spawn 成异步任务——因为要等 configure 回来。
+- [../gpui_windows/src/window.rs:L633-L656](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_windows/src/window.rs#L633-L656) —— Windows 的 `resize`：`calculate_window_rect` 把内容区矩形扩成含边框的外框矩形，然后 `SetWindowPos` 并带 `SWP_NOMOVE`（只改尺寸不改位置），整个调用被 spawn 到执行器上异步执行。
 
 #### 4.2.4 代码实践
 
 1. **实践目标**：验证「resize 是请求、on_resize 才是事实」。
-2. **操作步骤**：在仓库根目录运行官方窗口示例 `cargo run -p gpui --example window`，反复点击示例中的 "Resize" 按钮（该按钮的实现在 [../gpui/examples/window.rs:L266-L269](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/examples/window.rs#L266-L269)，逻辑是把宽高互换）。同时观察终端——示例在开窗时通过 `cx.observe_window_bounds` 打印了每次 bounds 变化（[L322-L325](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/examples/window.rs#L322-L325)）。
+2. **操作步骤**：在仓库根目录运行官方窗口示例 `cargo run -p gpui --example window`，反复点击示例中的 "Resize" 按钮（该按钮的实现在 [../gpui/examples/window.rs:L266-L269](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/examples/window.rs#L266-L269)，逻辑是把宽高互换）。同时观察终端——示例在开窗时通过 `cx.observe_window_bounds` 打印了每次 bounds 变化（[L322-L325](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/examples/window.rs#L322-L325)）。
 3. **需要观察的现象**：拖动窗口边缘手动改变尺寸时，终端同样打印 bounds 变化——这条路径完全不经过 `PlatformWindow::resize`，而是 WM/compositor 事件 → `on_resize` 回调。
 4. **预期结果**：按钮点击与你手动拖拽最终都汇入同一条 `observe_window_bounds` 通知链，证明「查询与回调」才是几何状态的单向事实来源。（在 X11 上部分窗口管理器会拒绝客户端的 ConfigureWindow，此时按钮甚至可能不生效——这本身就是最好的教材。待本地验证。）
 
@@ -147,7 +147,7 @@ trait 声明与 supertrait 约束（导入在第 54 行）：
 
 **练习 2**：`bounds()` 与 `content_size()` 有什么区别？
 
-**答案**：`bounds` 是窗口外框（含标题栏/边框，坐标是窗口在屏幕上的位置）；`content_size` 是可绘制内容区的逻辑尺寸。Windows 实现里专门注释了 GPUI 用逻辑尺寸处理鼠标命中（[gpui_windows/src/window.rs:L625-L631](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_windows/src/window.rs#L625-L631)），而 `resize` 要在这两者之间做边框换算。
+**答案**：`bounds` 是窗口外框（含标题栏/边框，坐标是窗口在屏幕上的位置）；`content_size` 是可绘制内容区的逻辑尺寸。Windows 实现里专门注释了 GPUI 用逻辑尺寸处理鼠标命中（[gpui_windows/src/window.rs:L625-L631](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_windows/src/window.rs#L625-L631)），而 `resize` 要在这两者之间做边框换算。
 
 ### 4.3 窗口控制动作：set_title、minimize、zoom 与 toggle_fullscreen
 
@@ -171,22 +171,22 @@ toggle_fullscreen → 请求 toggle _NET_WM_STATE_FULLSCREEN  →  set_fullscree
 
 **标题**——X11 要写两份属性，因为旧式工具读 `WM_NAME`（Latin-1 字符串），EWMH 时代的工具读 `_NET_WM_NAME`（UTF-8）：
 
-- [../gpui_linux/src/linux/x11/window.rs:L1551-L1576](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1551-L1576) —— 两次 `change_property8` 分别写 `WM_NAME` 与 `_NET_WM_NAME`，最后 flush。
-- [../gpui_linux/src/linux/wayland/window.rs:L1598-L1602](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1598-L1602) —— Wayland 只是给 toplevel 对象发一条 `set_title` 协议请求，标题栏由 compositor 画。
-- [../gpui_windows/src/window.rs:L874-L878](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_windows/src/window.rs#L874-L878) —— Windows 一行 `SetWindowTextW`，字符串转宽字符。
+- [../gpui_linux/src/linux/x11/window.rs:L1543-L1568](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1543-L1568) —— 两次 `change_property8` 分别写 `WM_NAME` 与 `_NET_WM_NAME`，最后 flush。
+- [../gpui_linux/src/linux/wayland/window.rs:L1598-L1602](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1598-L1602) —— Wayland 只是给 toplevel 对象发一条 `set_title` 协议请求，标题栏由 compositor 画。
+- [../gpui_windows/src/window.rs:L874-L878](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_windows/src/window.rs#L874-L878) —— Windows 一行 `SetWindowTextW`，字符串转宽字符。
 
 **最小化与最大化**：
 
-- [../gpui_linux/src/linux/x11/window.rs:L1634-L1653](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1634-L1653) —— X11 `minimize`：向根窗口发 `WM_CHANGE_STATE` ClientMessage，数据 3 是 ICCCM 规定的 IconicState。
-- [../gpui_linux/src/linux/x11/window.rs:L1655-L1675](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1655-L1675) —— `zoom` 与 `toggle_fullscreen` 都复用 `set_wm_hints` 辅助函数，向 WM 请求 toggle 对应的 `_NET_WM_STATE` 原子（最大化要同时给 VERT 与 HORZ 两个原子，全屏给 FULLSCREEN + NONE）。
-- [../gpui_linux/src/linux/wayland/window.rs:L1632-L1658](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1632-L1658) —— Wayland 按当前状态选择 `set_minimized`/`set_maximized`/`unset_maximized`/`set_fullscreen`/`unset_fullscreen`。
-- [../gpui_windows/src/window.rs:L907-L929](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_windows/src/window.rs#L907-L929) —— Windows 用 `ShowWindowAsync(SW_MINIMIZE/SW_MAXIMIZE)`；窗口尚未显示时则改写 `initial_placement`，把「打开即最大化/全屏」记在出生参数里——这是 u3-l1 讲过的「WindowBounds 三态在开窗时压平、再由后置动作补回」的运行期版本。
+- [../gpui_linux/src/linux/x11/window.rs:L1626-L1645](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1626-L1645) —— X11 `minimize`：向根窗口发 `WM_CHANGE_STATE` ClientMessage，数据 3 是 ICCCM 规定的 IconicState。
+- [../gpui_linux/src/linux/x11/window.rs:L1647-L1667](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1647-L1667) —— `zoom` 与 `toggle_fullscreen` 都复用 `set_wm_hints` 辅助函数，向 WM 请求 toggle 对应的 `_NET_WM_STATE` 原子（最大化要同时给 VERT 与 HORZ 两个原子，全屏给 FULLSCREEN + NONE）。
+- [../gpui_linux/src/linux/wayland/window.rs:L1632-L1658](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1632-L1658) —— Wayland 按当前状态选择 `set_minimized`/`set_maximized`/`unset_maximized`/`set_fullscreen`/`unset_fullscreen`。
+- [../gpui_windows/src/window.rs:L907-L929](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_windows/src/window.rs#L907-L929) —— Windows 用 `ShowWindowAsync(SW_MINIMIZE/SW_MAXIMIZE)`；窗口尚未显示时则改写 `initial_placement`，把「打开即最大化/全屏」记在出生参数里——这是 u3-l1 讲过的「WindowBounds 三态在开窗时压平、再由后置动作补回」的运行期版本。
 
 **应用级封装**（实践任务要用的 API）：
 
-- [../gpui/src/window.rs:L2579-L2582](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L2579-L2582) —— `set_window_title`：转发 `platform_window.set_title`，同时同步无障碍树里的标题。
-- [../gpui/src/window.rs:L2530-L2532](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L2530-L2532) —— `zoom_window`。
-- [../gpui/src/window.rs:L5719-L5726](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L5719-L5726) —— `minimize_window` 与 `toggle_fullscreen`。
+- [../gpui/src/window.rs:L2579-L2582](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/window.rs#L2579-L2582) —— `set_window_title`：转发 `platform_window.set_title`，同时同步无障碍树里的标题。
+- [../gpui/src/window.rs:L2530-L2532](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/window.rs#L2530-L2532) —— `zoom_window`。
+- [../gpui/src/window.rs:L5719-L5726](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/window.rs#L5719-L5726) —— `minimize_window` 与 `toggle_fullscreen`。
 
 #### 4.3.4 代码实践（本讲主实践：运行时动态控制窗口）
 
@@ -313,7 +313,7 @@ toggle_fullscreen → 请求 toggle _NET_WM_STATE_FULLSCREEN  →  set_fullscree
 
 **练习 3**：应用层 `Window::zoom_window` 与平台层 `PlatformWindow::zoom` 是什么关系？中间还可能发生什么？
 
-**答案**：前者是后者的纯转发封装（[window.rs:L2530-L2532](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L2530-L2532)）。中间隔着整个窗口系统：X11 上要等 WM 处理 `_NET_WM_STATE` 请求并回发事件，Wayland 上要等 compositor 的 configure 事件；状态真正落地后 gpui 才经由 `on_resize` 等回调感知到。
+**答案**：前者是后者的纯转发封装（[window.rs:L2530-L2532](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/window.rs#L2530-L2532)）。中间隔着整个窗口系统：X11 上要等 WM 处理 `_NET_WM_STATE` 请求并回发事件，Wayland 上要等 compositor 的 configure 事件；状态真正落地后 gpui 才经由 `on_resize` 等回调感知到。
 
 ### 4.4 焦点与激活：activate、is_active、on_active_status_change 与 window_stack
 
@@ -339,7 +339,8 @@ toggle_fullscreen → 请求 toggle _NET_WM_STATE_FULLSCREEN  →  set_fullscree
 
 ② 应用主动请求激活
    window.activate_window() → PlatformWindow::activate
-           X11: 发 _NET_ACTIVE_WINDOW ClientMessage + SetInputFocus
+           X11: 只发 _NET_ACTIVE_WINDOW ClientMessage，焦点裁决完全交给 WM
+                （提交 f4178619ac 之前这里还会附加一次 SetInputFocus 强制抢焦点，现已删除）
            Wayland: 申请 xdg-activation token（大概率被拒，但 KWin/Mutter 可借此提示）
            Windows: SetActiveWindow/SetFocus/SetForegroundWindow（还要伪造一次 Alt 键输入）
 
@@ -352,32 +353,36 @@ toggle_fullscreen → 请求 toggle _NET_WM_STATE_FULLSCREEN  →  set_fullscree
 
 **X11 侧的事实维护**——窗口状态刷新函数是激活、全屏、最大化的唯一事实入口：
 
-- [../gpui_linux/src/linux/x11/window.rs:L1116-L1141](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1116-L1141) —— 读取根窗口维护的 `_NET_WM_STATE` 属性，先把 `state.active/fullscreen/maximized_*/hidden` 全部清零，再按出现的原子重新置位（`_NET_WM_STATE_FOCUSED` → active）。第 1139-1141 行是本讲点题之笔：窗口由非激活转为激活时自动清除 urgency 标志（详见 4.5）。
-- [../gpui_linux/src/linux/x11/window.rs:L1543-L1545](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1543-L1545) —— `is_active` 只是读出上面维护的布尔值。
-- [../gpui_linux/src/linux/x11/window.rs:L1322-L1331](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1322-L1331) —— `set_active(focus)`：取出 `active_status_change` 回调调用后**放回槽位**（`take` → 调用 → `Some(fun)` 放回，避免 `RefCell` 重入借用冲突），并同步无障碍焦点。
+- [../gpui_linux/src/linux/x11/window.rs:L1116-L1141](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1116-L1141) —— 读取根窗口维护的 `_NET_WM_STATE` 属性，先把 `state.active/fullscreen/maximized_*/hidden` 全部清零，再按出现的原子重新置位（`_NET_WM_STATE_FOCUSED` → active）。第 1139-1141 行是本讲点题之笔：窗口由非激活转为激活时自动清除 urgency 标志（详见 4.5）。
+- [../gpui_linux/src/linux/x11/window.rs:L1535-L1537](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1535-L1537) —— `is_active` 只是读出上面维护的布尔值。
+- [../gpui_linux/src/linux/x11/window.rs:L1322-L1331](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1322-L1331) —— `set_active(focus)`：取出 `active_status_change` 回调调用后**放回槽位**（`take` → 调用 → `Some(fun)` 放回，避免 `RefCell` 重入借用冲突），并同步无障碍焦点。
+
+**应用主动激活——X11 侧的最新形态（提交 f4178619ac 之后）**：
+
+- [../gpui_linux/src/linux/x11/window.rs:L1507-L1525](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1507-L1525) —— X11 的 `activate()` 现在只做一件事：向根窗口发一条 `_NET_ACTIVE_WINDOW` ClientMessage（EWMH 规定的标准激活请求），然后 `xcb_flush`。**不再**附带 `SetInputFocus`。历史上这里曾有一段无条件的 `set_input_focus(POINTER_ROOT, ...)`（#13071 引入）：它当时是「X11 上首次打开的窗口停在空白帧」bug 的 workaround——靠额外制造一轮 X11 流量间接触发事件处理，但同时也越过了窗口管理器的焦点策略（即使 WM 决定不把焦点给这个窗口，客户端也强行抢了）。f4178619ac 找到并修复了真正的病因：前台 runnable 执行完后主动排空 x11rb 内部缓冲的事件队列（见 [../gpui_linux/src/linux/x11/client.rs:L316-L339](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/client.rs#L316-L339) 中 `insert_idle` 回调末尾的 `process_x11_events` 调用），首帧渲染不再依赖「碰巧发生的 X11 活动」，这个抢焦点的补丁随之删除。事件排空机制属于调度链路，u4-l3 会专门展开。
 
 **gpui 侧的缓存与接线**：
 
-- [../gpui/src/window.rs:L1422](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L1422) —— `Window::new` 用 `Rc::new(Cell::new(platform_window.is_active()))` 初始化激活缓存。
-- [../gpui/src/window.rs:L1710-L1730](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L1710-L1730) —— 注册 `on_active_status_change`：回调里更新缓存、刷新修饰键与大写锁定状态、触发 `activation_observers`、标记 bounds 变化并重绘。注意它通过 `AsyncApp` 的 `handle.update` 跳回主线程实体更新——平台事件线程不直接摸 gpui 状态。
-- [../gpui/src/window.rs:L2510-L2512](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L2510-L2512) —— 应用层查询 `is_window_active` 读的就是这个缓存。
+- [../gpui/src/window.rs:L1422](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/window.rs#L1422) —— `Window::new` 用 `Rc::new(Cell::new(platform_window.is_active()))` 初始化激活缓存。
+- [../gpui/src/window.rs:L1710-L1730](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/window.rs#L1710-L1730) —— 注册 `on_active_status_change`：回调里更新缓存、刷新修饰键与大写锁定状态、触发 `activation_observers`、标记 bounds 变化并重绘。注意它通过 `AsyncApp` 的 `handle.update` 跳回主线程实体更新——平台事件线程不直接摸 gpui 状态。
+- [../gpui/src/window.rs:L2510-L2512](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/window.rs#L2510-L2512) —— 应用层查询 `is_window_active` 读的就是这个缓存。
 
 **另外两个平台的 is_active**：
 
-- [../gpui_windows/src/window.rs:L858-L860](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_windows/src/window.rs#L858-L860) —— Windows 不维护缓存，每次现问系统：`self.0.hwnd == GetActiveWindow()`。
-- [../gpui_linux/src/linux/wayland/window.rs:L1590-L1592](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1590-L1592) —— Wayland 读 keyboard focus 进入 surface 时记下的 `state.active`。
+- [../gpui_windows/src/window.rs:L858-L860](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_windows/src/window.rs#L858-L860) —— Windows 不维护缓存，每次现问系统：`self.0.hwnd == GetActiveWindow()`。
+- [../gpui_linux/src/linux/wayland/window.rs:L1590-L1592](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1590-L1592) —— Wayland 读 keyboard focus 进入 surface 时记下的 `state.active`。
 
 **全局窗口栈**：
 
-- [../gpui/src/platform.rs:L141-L144](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/platform.rs#L141-L144) —— `active_window` 是必需方法；`window_stack` 默认 `None`。
-- [../gpui_macos/src/platform.rs:L639-L647](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_macos/src/platform.rs#L639-L647) —— macOS 由 `MacWindow::ordered_windows()` 给出，注释明确「最前即激活」。
-- [../gpui_linux/src/linux/x11/client.rs:L1817-L1839](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/client.rs#L1817-L1839) —— X11 读根窗口的 `_NET_CLIENT_LIST_STACKING` 属性（WM 维护的全局窗口栈快照）。
-- [../gpui_linux/src/linux/wayland/client.rs:L1219-L1221](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1219-L1221) —— Wayland 返回 `None`：协议不提供全局 Z 序，调用方必须自己降级。
+- [../gpui/src/platform.rs:L141-L144](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/platform.rs#L141-L144) —— `active_window` 是必需方法；`window_stack` 默认 `None`。
+- [../gpui_macos/src/platform.rs:L643-L647](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_macos/src/platform.rs#L643-L647) —— macOS 由 `MacWindow::ordered_windows()` 给出，注释明确「最前即激活」。
+- [../gpui_linux/src/linux/x11/client.rs:L1820-L1860](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/client.rs#L1820-L1860) —— X11 读根窗口的 `_NET_CLIENT_LIST_STACKING` 属性（WM 维护的全局窗口栈快照）。
+- [../gpui_linux/src/linux/wayland/client.rs:L1219-L1221](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1219-L1221) —— Wayland 返回 `None`：协议不提供全局 Z 序，调用方必须自己降级。
 
 #### 4.4.4 代码实践（源码阅读型）
 
 1. **实践目标**：把「激活状态由谁维护」在三平台逐一落实。
-2. **操作步骤**：依次打开三处 `is_active` 实现（上文 X11 L1543、Windows L858、Wayland L1590），再向上各追一层，找到写入/比较的数据源头。
+2. **操作步骤**：依次打开三处 `is_active` 实现（上文 X11 L1535、Windows L858、Wayland L1590），再向上各追一层，找到写入/比较的数据源头。
 3. **需要观察的现象**：三个平台的答案分别是「X11：从 `_NET_WM_STATE` 扫描出的 `state.active` 布尔」「Windows：与 `GetActiveWindow()` 实时比对」「Wayland：keyboard_enter 事件写入的 `state.active`」。
 4. **预期结果**：得到结论——激活的**事实来源永远是窗口系统**，gpui `Window` 的 `Rc<Cell<bool>>` 只是回放缓存的镜像；而 `window_stack` 连镜像都没有，因为它属于 `Platform` 级全局查询。纯阅读任务，可直接完成。
 
@@ -393,7 +398,7 @@ toggle_fullscreen → 请求 toggle _NET_WM_STATE_FULLSCREEN  →  set_fullscree
 
 **练习 3**：`activate` 在 Windows 实现里为什么要用 `SendInput` 伪造一次 Alt 键按下与抬起？
 
-**答案**：Windows 的前台锁定策略要求窗口必须「近期收到过用户输入」才允许 `SetForegroundWindow` 把自己提到前台，否则只有任务栏闪烁。伪造一次 Alt 输入是为了骗过该策略，源码注释（[gpui_windows/src/window.rs:L800-L805](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_windows/src/window.rs#L800-L805)）自嘲这是 "premium ragebait by windows"。
+**答案**：Windows 的前台锁定策略要求窗口必须「近期收到过用户输入」才允许 `SetForegroundWindow` 把自己提到前台，否则只有任务栏闪烁。伪造一次 Alt 输入是为了骗过该策略，源码注释（[gpui_windows/src/window.rs:L800-L805](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_windows/src/window.rs#L800-L805)）自嘲这是 "premium ragebait by windows"。
 
 ### 4.5 注意力请求与窗口控制区：request_attention 的 urgency 生命周期与 WindowControlArea
 
@@ -431,19 +436,19 @@ X11 上 urgency 的完整生命周期：
 
 #### 4.5.3 源码精读
 
-- [../gpui/src/platform.rs:L838-L839](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/platform.rs#L838-L839) —— 契约：`request_attention` 默认空实现。
-- [../gpui_linux/src/linux/x11/window.rs:L1535-L1541](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1535-L1541) —— X11 入口：已激活则提前返回，否则调用辅助函数置 urgency。
-- [../gpui_linux/src/linux/x11/window.rs:L392-L423](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L392-L423) —— `set_wm_hints_urgency` 辅助函数（本轮提交 4d1935b8 重构的产物）：先读现有 `WM_HINTS` 避免清掉别的 hint；**清除时如果 urgency 本来就没置位则直接跳过**——注释解释了原因：写回会在从未请求过注意力的窗口上凭空创建 `WM_HINTS` 属性，还会给每次窗口状态变化增加一次 X 往返。
-- [../gpui_linux/src/linux/x11/window.rs:L1137-L1141](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1137-L1141) —— 生命周期的收尾：状态刷新发现 `active && !was_active` 时自动清除 urgency，注释点明 ICCCM 没有定义 urgency 的撤销信号，焦点是惯例清零手段。
-- [../gpui_windows/src/window.rs:L837-L856](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_windows/src/window.rs#L837-L856) —— Windows 版本：同样先 `is_active` 短路，然后 `FlashWindowEx(FLASHW_ALL, uCount=1)` 让标题栏与任务栏项闪一次。
-- [../gpui_linux/src/linux/wayland/window.rs:L1588](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1588) —— Wayland 版本是空体：直接吃 trait 默认值的等价实现。注意力提示在 Wayland 上走的是 `activate` 里的 xdg-activation token 路径（[L1571-L1586](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1571-L1586)，注释说明 KWin/Mutter 可借 app_id 做视觉提示）。
+- [../gpui/src/platform.rs:L838-L839](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/platform.rs#L838-L839) —— 契约：`request_attention` 默认空实现。
+- [../gpui_linux/src/linux/x11/window.rs:L1527-L1533](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1527-L1533) —— X11 入口：已激活则提前返回，否则调用辅助函数置 urgency。
+- [../gpui_linux/src/linux/x11/window.rs:L392-L423](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L392-L423) —— `set_wm_hints_urgency` 辅助函数（当前形态由较早的提交 4d1935b8 重构奠定）：先读现有 `WM_HINTS` 避免清掉别的 hint；**清除时如果 urgency 本来就没置位则直接跳过**——注释解释了原因：写回会在从未请求过注意力的窗口上凭空创建 `WM_HINTS` 属性，还会给每次窗口状态变化增加一次 X 往返。
+- [../gpui_linux/src/linux/x11/window.rs:L1137-L1141](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/window.rs#L1137-L1141) —— 生命周期的收尾：状态刷新发现 `active && !was_active` 时自动清除 urgency，注释点明 ICCCM 没有定义 urgency 的撤销信号，焦点是惯例清零手段。
+- [../gpui_windows/src/window.rs:L837-L856](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_windows/src/window.rs#L837-L856) —— Windows 版本：同样先 `is_active` 短路，然后 `FlashWindowEx(FLASHW_ALL, uCount=1)` 让标题栏与任务栏项闪一次。
+- [../gpui_linux/src/linux/wayland/window.rs:L1588](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1588) —— Wayland 版本是空体：直接吃 trait 默认值的等价实现。注意力提示在 Wayland 上走的是 `activate` 里的 xdg-activation token 路径（[L1571-L1586](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1571-L1586)，注释说明 KWin/Mutter 可借 app_id 做视觉提示）。
 
 **窗口控制区 `WindowControlArea`**：
 
-- [../gpui/src/window.rs:L737-L748](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L737-L748) —— 四个变体：`Drag`（可拖拽区）、`Close`、`Max`、`Min`。它描述的是**应用自绘**的窗口控制区域，只在客户端装饰（CSD）场景有意义。
-- [../gpui/src/platform.rs:L859](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/platform.rs#L859) —— 契约：`on_hit_test_window_control` 注册「平台询问当前鼠标命中的控制区」的回调。
-- [../gpui/src/window.rs:L1751-L1766](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L1751-L1766) —— gpui 的回答逻辑：遍历本帧渲染时登记的 `window_control_hitboxes`，与鼠标命中测试的 hitbox 集合求交集，命中即上报对应 `WindowControlArea`。也就是「自绘按钮的命中测试由 gpui 元素树完成，平台只拿结论」。
-- [../gpui/src/window.rs:L2574-L2576](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/window.rs#L2574-L2576) —— 配套查询 `window_controls()`：应用据此决定要不要自己画关闭/最大化/最小化按钮（trait 默认 `WindowControls::default()`，见 [platform.rs:L926-L928](https://github.com/zed-industries/zed/blob/1b04e4caf01e376624fb514ef85b0e6d8ee5d930/crates/gpui_platform/../gpui/src/platform.rs#L926-L928)，Linux 专属块）。
+- [../gpui/src/window.rs:L737-L748](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/window.rs#L737-L748) —— 四个变体：`Drag`（可拖拽区）、`Close`、`Max`、`Min`。它描述的是**应用自绘**的窗口控制区域，只在客户端装饰（CSD）场景有意义。
+- [../gpui/src/platform.rs:L859](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/platform.rs#L859) —— 契约：`on_hit_test_window_control` 注册「平台询问当前鼠标命中的控制区」的回调。
+- [../gpui/src/window.rs:L1751-L1766](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/window.rs#L1751-L1766) —— gpui 的回答逻辑：遍历本帧渲染时登记的 `window_control_hitboxes`，与鼠标命中测试的 hitbox 集合求交集，命中即上报对应 `WindowControlArea`。也就是「自绘按钮的命中测试由 gpui 元素树完成，平台只拿结论」。
+- [../gpui/src/window.rs:L2574-L2576](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/window.rs#L2574-L2576) —— 配套查询 `window_controls()`：应用据此决定要不要自己画关闭/最大化/最小化按钮（trait 默认 `WindowControls::default()`，见 [platform.rs:L926-L928](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/platform.rs#L926-L928)，Linux 专属块）。
 
 #### 4.5.4 代码实践（X11 会话下的 urgency 观测）
 
@@ -487,7 +492,7 @@ X11 上 urgency 的完整生命周期：
 - `PlatformWindow` 是「单个窗口」的平台契约，按几何查询、控制动作、回调注册、绘制、输入法/无障碍、平台专属六组组织；大量方法带默认实现或 cfg 门控，最小实现集合因平台而异。
 - `HasWindowHandle + HasDisplayHandle` 是写进 supertrait 的生态义务：X11 交出窗口 id 与 `xcb_connection_t*`，Wayland 交出 `wl_surface*`/`wl_display*`，headless 只能返回 `NotSupported`；gpui `Window` 原样转发，使 wgpu 生态可直接对接。
 - 同一动作三种落法：`set_title` 是 X11 双属性（`WM_NAME`+`_NET_WM_NAME`）/ Wayland 协议请求 / Win32 `SetWindowTextW`；`minimize`/`zoom`/`fullscreen` 分别走 ClientMessage、`xdg_toplevel` 请求族与 `ShowWindowAsync`——本质都是「向窗口系统发请求，等事件回流确认」。
-- 激活状态的事实来源在平台窗口（X11 扫描 `_NET_WM_STATE_FOCUSED`、Windows 实时比对 `GetActiveWindow`），gpui `Window` 只维护 `Rc<Cell<bool>>` 镜像并经 `on_active_status_change` 同步；`window_stack` 是 Platform 级全局查询，macOS/X11 可答、Wayland 返回 `None`。
+- 激活状态的事实来源在平台窗口（X11 扫描 `_NET_WM_STATE_FOCUSED`、Windows 实时比对 `GetActiveWindow`），gpui `Window` 只维护 `Rc<Cell<bool>>` 镜像并经 `on_active_status_change` 同步；`window_stack` 是 Platform 级全局查询，macOS/X11 可答、Wayland 返回 `None`。X11 的 `activate` 自 f4178619ac 起只发 `_NET_ACTIVE_WINDOW` 请求——焦点裁决完全交给窗口管理器，强制 `SetInputFocus` 的 workaround 已随真正的修复（前排任务后排空 x11rb 缓冲事件）一并删除。
 - `request_attention` 在 X11 上是一条完整生命周期：置 `WM_HINTS` urgency → WM 提示 → 窗口转激活时自动清除；清除路径跳过未置位的情况以避免创建多余属性和 X 往返；Windows 用 `FlashWindowEx`，Wayland 不实现（走 xdg-activation 提示）。
 - `WindowControlArea`（Drag/Close/Max/Min）服务于 Linux 客户端装饰：gpui 在 `on_hit_test_window_control` 回调里用本帧 hitbox 命中测试得出结论，平台窗口只消费结论。
 

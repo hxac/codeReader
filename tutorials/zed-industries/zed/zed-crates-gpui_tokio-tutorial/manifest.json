@@ -1,11 +1,13 @@
 {
+  "head": "fe9556a11e9cc9dbc78686041aa524d6932879db",
+  "project": "zed-crates-gpui_tokio",
+  "rationale": "增量检查结论：对比 b0e37a6c..fe9556a11e 共 6 个提交，变更集中在 cloud_llm_client、edit_prediction、gpui_linux 的 X11 事件处理、ztracing、cli 与设置文档，完全没有触及 crates/gpui_tokio、crates/gpui_util、crates/gpui 的 executor.rs/global.rs/app.rs，也未触及讲义引用的任何下游用例文件（client、cloud_api_client/websocket、extension_host、livekit_client、zed/src/main.rs、agent/eval_cli 测试），因此全部 13 篇讲义标记为 keep，结构与依赖关系维持原样。整体路线设计不变：第一单元补齐双运行时背景认知（项目定位、构建配置、GPUI 执行器模型、Tokio 运行时基础），第二单元按「初始化 → 全局状态与生命周期 → spawn 桥接 → 取消语义 → 错误处理」的源码主线精读，cancellation 机制（defer + abort_handle）单独成篇，第三单元进入专家层覆盖 Tokio::handle 与 enter、四个真实用例、测试初始化模式与迷你实现综合实践；该 crate 属小型项目，13 篇符合 8 到 15 篇的规则，不硬拆、逻辑优先。",
   "units": [
     {
       "id": "u1",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -31,7 +33,7 @@
           "topic": "介绍 gpui_tokio 的定位：Zed 主体运行在 GPUI 自带的执行器上，而大量生态库（reqwest、tokio-tungstenite、livekit 等）依赖 Tokio 运行时，这个约 100 行的 crate 负责把两者桥接起来。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -57,7 +59,7 @@
           "topic": "逐行阅读 Cargo.toml：[lib] path 指向 src/gpui_tokio.rs 的命名约定、workspace 依赖继承、tokio 只启用 rt 和 rt-multi-thread 两个 feature 的含义。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -85,7 +87,7 @@
           "topic": "讲解 GPUI 侧的并发原语：前台单线程执行器、cx.spawn 与 cx.background_spawn 的区别、Task 的生命周期与 drop 即取消的语义，这些是理解桥接代码的基础。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -111,15 +113,15 @@
           "topic": "讲解 Tokio 侧的基础：multi_thread 运行时的构建、Handle 可以脱离 Runtime 所有权独立 spawn、JoinHandle 与 abort_handle 的取消机制。"
         }
       ],
+      "level": "beginner",
       "order": 1,
       "title": "初识 gpui_tokio：定位、结构与双运行时背景"
     },
     {
       "id": "u2",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2",
             "u1-l3",
@@ -148,7 +150,7 @@
           "topic": "精读两个初始化函数：init 用 Builder 创建 2 线程的 multi_thread 运行时并连同 Handle 一起存入全局；init_from_handle 只保存外部 Handle、不持有 runtime。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -176,7 +178,7 @@
           "topic": "剖析 GlobalTokio 如何借助 GPUI 的 Global 机制成为应用级单例：Global trait、set_global、ReadGlobal::global 取值，以及 Drop 时用 shutdown_background 异步关停 runtime 的原因。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u1-l3",
@@ -205,7 +207,7 @@
           "topic": "逐行精读 Tokio::spawn：通过 read_global 拿到 Tokio Handle，把 future spawn 到 Tokio 线程池，取 abort_handle 建立 cancel 守卫，再用 cx.background_spawn await JoinHandle 并把结果包装回 GPUI Task。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -232,7 +234,7 @@
           "topic": "理解 GPUI Task 被 drop 时如何联动取消 Tokio 任务：gpui_util::defer 返回的 Deferred 在 Drop 时执行 abort，任务正常完成后 drop(cancel) 主动解除守卫，这是一套 RAII 式取消协议。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -259,15 +261,15 @@
           "topic": "对比 spawn 与 spawn_result：前者返回 Task<Result<R, JoinError>>，后者要求 future 本身输出 anyhow::Result 并用 ? 把 JoinError 也折叠成 anyhow 错误，分析两层错误的语义差别。"
         }
       ],
+      "level": "intermediate",
       "order": 2,
       "title": "核心源码精读：初始化、全局状态、桥接与取消"
     },
     {
       "id": "u3",
-      "level": "advanced",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -294,7 +296,7 @@
           "topic": "讲解 Tokio::handle(cx) 如何暴露原始 Tokio Handle，以及 zed 主程序在创建 ReqwestClient 时用 Handle::enter() 进入运行时上下文的实战做法。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3",
             "u2-l5"
@@ -324,7 +326,7 @@
           "topic": "横向对比 gpui_tokio 在 Zed 中的典型用法：client crate 用 spawn_result 建立代理 TCP 连接、cloud_api_client 用它连 websocket、extension_host 用 spawn 驱动 WASM 扩展、livekit_client 用它跑屏幕采集循环。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u2-l2"
@@ -354,7 +356,7 @@
           "topic": "观察 agent、extension_host、eval_cli、collab 等 crate 的测试如何在构造 App 后显式调用 gpui_tokio::init，理解 GPUI 每个测试/每个 App 实例拥有独立全局状态的含义。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u2-l3",
@@ -384,11 +386,9 @@
           "topic": "以重建代替阅读：不看源码，仅凭已学概念实现一个 mini_gpui_tokio（Global 持有 runtime、spawn 桥接、defer 取消联动、Drop 关停），再与官方实现对照查漏。"
         }
       ],
+      "level": "advanced",
       "order": 3,
       "title": "实战与扩展：真实用例、测试模式与综合实现"
     }
-  ],
-  "head": "b0e37a6c18a6321061ba842e26ee7156729f0870",
-  "project": "zed-crates-gpui_tokio",
-  "rationale": "gpui_tokio 是一个仅约 100 行、单文件的桥接 crate，但它的每一行都横跨 GPUI 与 Tokio 两个异步生态，因此学习路线设计为：第一单元先补齐「双运行时」的背景认知（项目定位、构建配置、GPUI 执行器模型、Tokio 运行时基础），让初学者具备读懂这 100 行的前置知识；第二单元按源码主线「初始化 → 全局状态与生命周期 → spawn 桥接 → 取消语义 → 错误处理」逐段精读， cancellation 机制（defer + abort_handle）单独成篇，因为它是本 crate 最精巧也最容易被误解的部分；第三单元进入专家层，覆盖 Tokio::handle 与运行时上下文 enter、Zed 代码库中 client/cloud_api_client/extension_host/livekit_client 四个真实用例、测试中 gpui_tokio::init 的普遍模式，最后以「从零实现迷你 gpui_tokio」作为综合实践收尾。该 crate 属小型项目，按 8 到 15 篇的规则取 13 篇，不硬拆、逻辑优先。"
+  ]
 }

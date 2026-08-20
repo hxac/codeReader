@@ -7,7 +7,7 @@
 1. 说明 `LinuxDispatcher` 的独特架构决策——它**不拥有主事件循环**，主循环归 Wayland/X11/headless 客户端所有，调度器只持有一个能「唤醒」主循环的发送端。
 2. 理解 calloop 的 `ping`（eventfd 唤醒）、`channel`、`timer`、`insert_idle` 与 `LoopSignal` 五个原语，以及 `PriorityQueueCalloopSender`/`PriorityQueueCalloopReceiver` 如何把一个纯同步的优先级队列「适配」成合法的 calloop 事件源。
 3. 跟踪三条投递路径的完整旅程：后台 `dispatch` 落到 Worker 线程池、`dispatch_on_main_thread` 经 ping 唤醒主循环、`dispatch_after` 经专用 Timer 线程延迟执行。
-4. 解释为什么 X11/Wayland 把 runnable 塞进 `insert_idle` 而 headless 直接执行——输入事件优先于普通任务的关键机制。
+4. 解释为什么 X11/Wayland 把 runnable 塞进 `insert_idle` 而 headless 直接执行——输入事件优先于普通任务的关键机制；并说明本轮更新（提交 f4178619ac，PR #62081）之后，X11 的 idle 回调为什么还要在执行完每个 runnable 后追加一次 `process_x11_events` 排空。
 5. 独立写出一个仿照 `LinuxDispatcher` 结构的、带两个优先级的最小 calloop 调度器。
 
 ## 2. 前置知识
@@ -26,8 +26,10 @@ GUI 程序的主线程典型工作方式是「事件循环」（event loop）：
 
 另外两个概念：
 
-- **`insert_idle`**：往循环里插入一个「空闲回调」。calloop 的一次 `dispatch` 迭代先把就绪的事件源回调全部跑完，之后、睡觉之前，会执行空闲队列里的回调。X11/Wayland 用它让 runnable 排在输入事件之后。
+- **`insert_idle`**：往循环里插入一个「空闲回调」。calloop 的一次 `dispatch` 迭代先把就绪的事件源回调全部跑完，之后、睡觉之前，会执行空闲队列里的回调。X11/Wayland 用它让 runnable 排在输入事件之后。空闲回调的签名是 `FnMut(&mut D, ...)`——能拿到循环数据 `D`，这一点在本讲的 X11 排空机制里会用到。
 - **`LoopSignal`**：`event_loop.get_signal()` 得到的停止信号，任意线程调 `signal.stop()`，循环在当前迭代结束后退出。它正是 Linux `Platform::quit` 的实现（承接 u2-l2）。
+
+还有一个本讲必须建立的直觉：**calloop 只能感知文件描述符**。epoll 的世界里「有事件」等价于「某个 fd 就绪」；凡是发生在用户态内存里的状态变化（队列、缓冲区），calloop 一概看不见，必须人为造一个 fd（eventfd/ping）当「门铃」。4.2 的 ping 适配器和 4.4 的 X11 排空，本质上都是在弥补这条鸿沟。
 
 ### 2.2 从上一讲带来的结论（不重复展开）
 
@@ -39,14 +41,14 @@ GUI 程序的主线程典型工作方式是「事件循环」（event loop）：
 
 | 文件 | 作用 |
 |---|---|
-| [../gpui_linux/src/linux/dispatcher.rs](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs) | 本讲主角：`LinuxDispatcher`、`TimerAfter`、`PriorityQueueCalloopSender/Receiver` 及其单元测试 |
-| [../gpui_linux/src/linux/platform.rs](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/platform.rs) | `LinuxCommon::new`：调度器、执行器、主循环接收端的装配车间；`run`/`quit` |
-| [../gpui_linux/src/linux/headless/client.rs](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/headless/client.rs) | headless 后端：创建事件循环并直跑 runnable（对照组之一） |
-| [../gpui_linux/src/linux/x11/client.rs](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/x11/client.rs) | X11 后端：`insert_idle` 包一层再执行（对照组之二） |
-| [../gpui_linux/src/linux/wayland/client.rs](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs) | Wayland 后端：与 X11 同型的 `insert_idle` 处理 |
-| [../gpui/src/queue.rs](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui/src/queue.rs) | 平台无关的三队列优先级通道（Mutex + Condvar + 抽签） |
-| [../scheduler/src/scheduler.rs](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../scheduler/src/scheduler.rs) | `Priority` 枚举与权重定义 |
-| [../gpui/src/platform_scheduler.rs](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui/src/platform_scheduler.rs) | 执行器侧调用点：`dispatch`/`dispatch_on_main_thread`/`dispatch_after` 的上游 |
+| [../gpui_linux/src/linux/dispatcher.rs](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs) | 本讲主角：`LinuxDispatcher`、`TimerAfter`、`PriorityQueueCalloopSender/Receiver` 及其单元测试 |
+| [../gpui_linux/src/linux/platform.rs](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/platform.rs) | `LinuxCommon::new`：调度器、执行器、主循环接收端的装配车间；`run`/`quit` |
+| [../gpui_linux/src/linux/headless/client.rs](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/headless/client.rs) | headless 后端：创建事件循环并直跑 runnable（对照组之一） |
+| [../gpui_linux/src/linux/x11/client.rs](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/client.rs) | X11 后端：`insert_idle` 包一层执行，且每个 runnable 执行后追加 `process_x11_events` 排空 x11rb 内部缓冲（对照组之二，本轮更新点） |
+| [../gpui_linux/src/linux/wayland/client.rs](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs) | Wayland 后端：同骨架的 `insert_idle` 三段式，但没有 X11 的排空步骤 |
+| [../gpui/src/queue.rs](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/queue.rs) | 平台无关的三队列优先级通道（Mutex + Condvar + 抽签） |
+| [../scheduler/src/scheduler.rs](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../scheduler/src/scheduler.rs) | `Priority` 枚举与权重定义 |
+| [../gpui/src/platform_scheduler.rs](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/platform_scheduler.rs) | 执行器侧调用点：`dispatch`/`dispatch_on_main_thread`/`dispatch_after` 的上游 |
 
 ## 4. 核心概念与源码讲解
 
@@ -81,21 +83,21 @@ LinuxCommon::new(signal)
 
 先看结构体——四个字段对应四条通路：
 
-- [../gpui_linux/src/linux/dispatcher.rs:L20-L26](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L20-L26) — `LinuxDispatcher`：`main_sender` 唤醒主循环执行前台任务；`timer_sender` 发延迟任务给 Timer 线程；`background_sender` 投后台任务给 Worker 池；`main_thread_id` 记录构造时的线程用于 `is_main_thread`。注意没有任何字段持有主事件循环——它真的不属于调度器。
+- [../gpui_linux/src/linux/dispatcher.rs:L20-L26](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L20-L26) — `LinuxDispatcher`：`main_sender` 唤醒主循环执行前台任务；`timer_sender` 发延迟任务给 Timer 线程；`background_sender` 投后台任务给 Worker 池；`main_thread_id` 记录构造时的线程用于 `is_main_thread`。注意没有任何字段持有主事件循环——它真的不属于调度器。
 
-- [../gpui_linux/src/linux/dispatcher.rs:L33-L34](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L33-L34) — 线程数取 `available_parallelism()` 且不低于 `MIN_THREADS = 2`（[L28](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L28)）。
+- [../gpui_linux/src/linux/dispatcher.rs:L33-L34](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L33-L34) — 线程数取 `available_parallelism()` 且不低于 `MIN_THREADS = 2`（[L28](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L28)）。
 
-- [../gpui_linux/src/linux/dispatcher.rs:L36-L52](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L36-L52) — Worker 线程池：每个线程命名 `Worker-{i}`，克隆一份后台通道接收端，进入**阻塞迭代** `for runnable in receiver.iter()`——队列空时线程在 Condvar 上睡眠，有任务时被唤醒，按抽签顺序取出执行。
+- [../gpui_linux/src/linux/dispatcher.rs:L36-L52](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L36-L52) — Worker 线程池：每个线程命名 `Worker-{i}`，克隆一份后台通道接收端，进入**阻塞迭代** `for runnable in receiver.iter()`——队列空时线程在 Condvar 上睡眠，有任务时被唤醒，按抽签顺序取出执行。
 
-- [../gpui_linux/src/linux/dispatcher.rs:L42-L48](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L42-L48) — Worker 执行体的固定三段式：先 `profiler::update_running_task` 登记、再 `runnable.run()`、最后 `profiler::save_task_timing()`。这套插桩贯穿 Linux 调度器的每条执行路径（细节留待 u4-l6）。
+- [../gpui_linux/src/linux/dispatcher.rs:L42-L48](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L42-L48) — Worker 执行体的固定三段式：先 `profiler::update_running_task` 登记、再 `runnable.run()`、最后 `profiler::save_task_timing()`。这套插桩贯穿 Linux 调度器的每条执行路径（细节留待 u4-l6）。
 
-- [../gpui_linux/src/linux/dispatcher.rs:L92-L98](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L92-L98) — 构造收尾：`main_thread_id` 用 `thread::current().id()` 捕获。由于 `LinuxDispatcher::new` 只会被 `LinuxCommon::new` 在主线程调用，这个 id 就是主线程 id。
+- [../gpui_linux/src/linux/dispatcher.rs:L92-L98](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L92-L98) — 构造收尾：`main_thread_id` 用 `thread::current().id()` 捕获。由于 `LinuxDispatcher::new` 只会被 `LinuxCommon::new` 在主线程调用，这个 id 就是主线程 id。
 
 装配车间在平台侧：
 
-- [../gpui_linux/src/linux/platform.rs:L139-L178](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/platform.rs#L139-L178) — `LinuxCommon::new` 全景：L146 创建主通道配对；L156 构造 `LinuxDispatcher`（吃进 `main_sender`）；L158-L162 用**同一个** `Arc<LinuxDispatcher>` 分别构造后台、前台执行器——这正是 u4-l1 说过的「一个调度器实例喂两个执行器」。
+- [../gpui_linux/src/linux/platform.rs:L139-L178](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/platform.rs#L139-L178) — `LinuxCommon::new` 全景：L146 创建主通道配对；L156 构造 `LinuxDispatcher`（吃进 `main_sender`）；L158-L162 用**同一个** `Arc<LinuxDispatcher>` 分别构造后台、前台执行器——这正是 u4-l1 说过的「一个调度器实例喂两个执行器」。
 
-- [../gpui_linux/src/linux/platform.rs:L126](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/platform.rs#L126) — `LinuxCommon` 还存着 `signal: LoopSignal`。谁传进来的？客户端构造事件循环后用 `event_loop.get_signal()` 传入（见 4.4.3），于是 `Platform::quit` 只需 `signal.stop()`（[L280-L282](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/platform.rs#L280-L282)）。
+- [../gpui_linux/src/linux/platform.rs:L126](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/platform.rs#L126) — `LinuxCommon` 还存着 `signal: LoopSignal`。谁传进来的？客户端构造事件循环后用 `event_loop.get_signal()` 传入（见 4.4.3），于是 `Platform::quit` 只需 `signal.stop()`（[L280-L282](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/platform.rs#L280-L282)）。
 
 #### 4.1.4 代码实践：亲眼看到这些线程
 
@@ -110,7 +112,7 @@ LinuxCommon::new(signal)
      ps -T -p "$(pgrep -f 'example.*window' | head -1)" -o spid,comm
      ```
 3. **需要观察的现象**：线程列表中应出现 `Worker-0`、`Worker-1`……（数量 = max(CPU 核数, 2)）和一个名为 `Timer` 的线程；此外还有主线程与 wgpu/渲染相关线程。
-4. **预期结果**：线程名与 [dispatcher.rs:L40](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L40)（`Worker-{i}`）和 [L56](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L56)（`Timer`）一一对应。具体线程数取决于机器核数，待本地验证。
+4. **预期结果**：线程名与 [dispatcher.rs:L40](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L40)（`Worker-{i}`）和 [L56](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L56)（`Timer`）一一对应。具体线程数取决于机器核数，待本地验证。
 
 #### 4.1.5 小练习与答案
 
@@ -118,7 +120,7 @@ LinuxCommon::new(signal)
 **答案**：Linux 上主线程的事件循环由窗口系统客户端（Wayland/X11/headless）创建并拥有，协议事件与调度任务共用一个循环更高效也更简单；调度器只通过 `main_sender`（队列 + ping）唤醒该循环，因此它自建的线程只剩后台 Worker 池与 Timer 线程。
 
 **练习 2**：`is_main_thread` 是如何实现的？为什么不需要平台 API？
-**答案**：构造时在主线程捕获 `thread::current().id()` 存入 `main_thread_id`，查询时比较当前线程 id（[dispatcher.rs:L103-L105](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L103-L105)）。因为构造必然发生在主线程（`LinuxCommon::new` 由客户端构造函数调用），纯 Rust 的线程 id 比较即可，无需 `gettid` 之类的系统调用。
+**答案**：构造时在主线程捕获 `thread::current().id()` 存入 `main_thread_id`，查询时比较当前线程 id（[dispatcher.rs:L103-L105](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L103-L105)）。因为构造必然发生在主线程（`LinuxCommon::new` 由客户端构造函数调用），纯 Rust 的线程 id 比较即可，无需 `gettid` 之类的系统调用。
 
 ### 4.2 PriorityQueueCalloopSender / Receiver：给优先级队列装上 calloop 唤醒
 
@@ -154,24 +156,24 @@ dispatch_on_main_thread(r, p)
 
 #### 4.2.3 源码精读
 
-- [../gpui_linux/src/linux/dispatcher.rs:L161-L178](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L161-L178) — 发送端：`send` 先走底层队列，成功后 `ping()`；注释外的关键点是 ping 只在 `res.is_ok()` 时发——入队失败（对端已死）就不必唤醒。
+- [../gpui_linux/src/linux/dispatcher.rs:L161-L178](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L161-L178) — 发送端：`send` 先走底层队列，成功后 `ping()`；注释外的关键点是 ping 只在 `res.is_ok()` 时发——入队失败（对端已死）就不必唤醒。
 
-- [../gpui_linux/src/linux/dispatcher.rs:L180-L184](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L180-L184) — 发送端 `Drop` 时也 ping 一次：让循环醒来发现「所有发送端已消失」，从而触发 `Event::Closed` 并移除事件源（与 calloop channel 的关闭语义对齐）。
+- [../gpui_linux/src/linux/dispatcher.rs:L180-L184](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L180-L184) — 发送端 `Drop` 时也 ping 一次：让循环醒来发现「所有发送端已消失」，从而触发 `Event::Closed` 并移除事件源（与 calloop channel 的关闭语义对齐）。
 
-- [../gpui_linux/src/linux/dispatcher.rs:L193-L206](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L193-L206) — 配对构造：`make_ping()` 拿到 `(Ping, PingSource)`，再建底层优先级通道；Ping 克隆给发送端，PingSource 留在接收端。
+- [../gpui_linux/src/linux/dispatcher.rs:L193-L206](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L193-L206) — 配对构造：`make_ping()` 拿到 `(Ping, PingSource)`，再建底层优先级通道；Ping 克隆给发送端，PingSource 留在接收端。
 
-- [../gpui_linux/src/linux/dispatcher.rs:L228-L243](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L228-L243) — `EventSource` 实现的关联类型：`Event = calloop::channel::Event<T>`、`Error = ChannelError`（[L211-L226](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L211-L226) 是对 `PingError` 的薄包装）。
+- [../gpui_linux/src/linux/dispatcher.rs:L228-L243](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L228-L243) — `EventSource` 实现的关联类型：`Event = calloop::channel::Event<T>`、`Error = ChannelError`（[L211-L226](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L211-L226) 是对 `PingError` 的薄包装）。
 
-- [../gpui_linux/src/linux/dispatcher.rs:L246-L272](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L246-L272) — 核心回调：借 `PingSource::process_events` 拿到唤醒时机，在闭包里克隆接收端并 `try_iter()` 排空。`Ok(r)` 逐个上抛 `Event::Msg`；`Err(_)` 说明所有发送端已掉线，标记 `disconnected` 并在末尾补发一次 `Event::Closed`。
+- [../gpui_linux/src/linux/dispatcher.rs:L246-L272](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L246-L272) — 核心回调：借 `PingSource::process_events` 拿到唤醒时机，在闭包里克隆接收端并 `try_iter()` 排空。`Ok(r)` 逐个上抛 `Event::Msg`；`Err(_)` 说明所有发送端已掉线，标记 `disconnected` 并在末尾补发一次 `Event::Closed`。
 
-- [../gpui_linux/src/linux/dispatcher.rs:L274-L282](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L274-L282) — 三个出口的决策树：`disconnected` → `PostAction::Remove`（把自己从循环移除）；本轮一个任务都没取到（`clear_readiness`）→ 沿用 ping 源的动作；本轮取到过任务 → **手动再 ping 一次**并 `PostAction::Continue`。最后这个再唤醒是防御性的：eventfd 的计数会把多次 ping 合并成一次就绪，「只要本轮有产出就再约一轮」确保排空期间新入队的任务不会被唤醒合并吞掉。
+- [../gpui_linux/src/linux/dispatcher.rs:L274-L282](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L274-L282) — 三个出口的决策树：`disconnected` → `PostAction::Remove`（把自己从循环移除）；本轮一个任务都没取到（`clear_readiness`）→ 沿用 ping 源的动作；本轮取到过任务 → **手动再 ping 一次**并 `PostAction::Continue`。最后这个再唤醒是防御性的：eventfd 的计数会把多次 ping 合并成一次就绪，「只要本轮有产出就再约一轮」确保排空期间新入队的任务不会被唤醒合并吞掉。
 
-- [../gpui_linux/src/linux/dispatcher.rs:L285-L303](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L285-L303) — `register/reregister/unregister` 原样委托给内部的 `PingSource`：注册进 epoll 的始终是那一个 eventfd，队列本身对 poll 不可见。
+- [../gpui_linux/src/linux/dispatcher.rs:L285-L303](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L285-L303) — `register/reregister/unregister` 原样委托给内部的 `PingSource`：注册进 epoll 的始终是那一个 eventfd，队列本身对 poll 不可见。
 
 顺带看两眼底层队列，理解「优先级」在这里的真实含义：
 
-- [../gpui/src/queue.rs:L69-L78](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui/src/queue.rs#L69-L78) — 入队：按 `Priority` 挑三条 `VecDeque` 之一；`RealtimeAudio` 直接 `unreachable!`——呼应契约「实时任务永不入队」。
-- [../gpui/src/queue.rs:L328-L351](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui/src/queue.rs#L328-L351) — 出队抽签：权重来自 [../scheduler/src/scheduler.rs:L47-L55](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../scheduler/src/scheduler.rs#L47-L55)（High=60、Medium=30、Low=10）。也就是说**主线程通道里消息的处理顺序同样是抽签的**，High 只是概率更高，不保证绝对先于 Low。
+- [../gpui/src/queue.rs:L69-L78](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/queue.rs#L69-L78) — 入队：按 `Priority` 挑三条 `VecDeque` 之一；`RealtimeAudio` 直接 `unreachable!`——呼应契约「实时任务永不入队」。
+- [../gpui/src/queue.rs:L328-L351](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/queue.rs#L328-L351) — 出队抽签：权重来自 [../scheduler/src/scheduler.rs:L47-L55](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../scheduler/src/scheduler.rs#L47-L55)（High=60、Medium=30、Low=10）。也就是说**主线程通道里消息的处理顺序同样是抽签的**，High 只是概率更高，不保证绝对先于 Low。
 
 #### 4.2.4 代码实践：跑通并魔改 calloop_works 测试
 
@@ -221,10 +223,10 @@ dispatcher.rs 自带一个不依赖任何窗口系统的单元测试，是理解
 **答案**：calloop 的事件源必须对应一个可 poll 的对象（Linux 上是 epoll 感知的 fd）。优先级队列只是 `Mutex` + `Condvar` 的内存结构，没有 fd，epoll 感知不到它的变化；所以用 ping 的 eventfd 作「门外铃」：入队后按铃，铃声（而不是队列本身）唤醒循环，醒来后再排空队列。
 
 **练习 2**：接收端为什么在「本轮取到过任务」时要再 ping 一次自己？
-**答案**：eventfd 唤醒会被合并——两次 `ping()` 若都发生在循环睡眠期间，poll 只就绪一次。排空过程中或紧接着的新入队虽然自己也会 ping，但为不依赖对底层唤醒合并语义的假设，「本轮有产出就再约一轮核查」以少量冗余唤醒换取不丢任务（[dispatcher.rs:L279-L282](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L279-L282)）。
+**答案**：eventfd 唤醒会被合并——两次 `ping()` 若都发生在循环睡眠期间，poll 只就绪一次。排空过程中或紧接着的新入队虽然自己也会 ping，但为不依赖对底层唤醒合并语义的假设，「本轮有产出就再约一轮核查」以少量冗余唤醒换取不丢任务（[dispatcher.rs:L279-L282](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L279-L282)）。
 
 **练习 3**：`Event::Closed` 什么时候触发？
-**答案**：当所有 `PriorityQueueCalloopSender` 被 drop（其 `Drop` 会 ping 最后一次），接收端排空时从底层通道收到 `Err`，标记 disconnected、上抛一次 `Event::Closed`，并以 `PostAction::Remove` 把自己从循环移除（[dispatcher.rs:L180-L184](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L180-L184)、[L258-L260](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L258-L260)、[L274-L275](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L274-L275)）。
+**答案**：当所有 `PriorityQueueCalloopSender` 被 drop（其 `Drop` 会 ping 最后一次），接收端排空时从底层通道收到 `Err`，标记 disconnected、上抛一次 `Event::Closed`，并以 `PostAction::Remove` 把自己从循环移除（[dispatcher.rs:L180-L184](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L180-L184)、[L258-L260](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L258-L260)、[L274-L275](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L274-L275)）。
 
 ### 4.3 TimerAfter：专用计时器线程与一次性定时器
 
@@ -251,23 +253,24 @@ dispatcher.rs 自带一个不依赖任何窗口系统的单元测试，是理解
 
 #### 4.3.3 源码精读
 
-- [../gpui_linux/src/linux/dispatcher.rs:L15-L18](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L15-L18) — `TimerAfter` 信封定义。
+- [../gpui_linux/src/linux/dispatcher.rs:L15-L18](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L15-L18) — `TimerAfter` 信封定义。
 
-- [../gpui_linux/src/linux/dispatcher.rs:L54-L88](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L54-L88) — Timer 线程全貌：L58-L59 建私有循环；L63-L84 把 `timer_channel` 注册进该循环，每收到一个 `TimerAfter` 就插入一个新的一次性 timer 源；L86 `event_loop.run(None, ...)` 无限阻塞驱动。注意 L62-L67 拿了两个相同的 handle（`handle` 收消息、`timer_handle` 插定时器），纯为闭包捕获方便。
+- [../gpui_linux/src/linux/dispatcher.rs:L54-L88](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L54-L88) — Timer 线程全貌：L58-L59 建私有循环；L63-L84 把 `timer_channel` 注册进该循环，每收到一个 `TimerAfter` 就插入一个新的一次性 timer 源；L86 `event_loop.run(None, ...)` 无限阻塞驱动。注意 L62-L67 拿了两个相同的 handle（`handle` 收消息、`timer_handle` 插定时器），纯为闭包捕获方便。
 
-- [../gpui_linux/src/linux/dispatcher.rs:L66-L79](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L66-L79) — 到期回调：runnable 被包在 `Option` 里，回调内 `take()` 保证**至多执行一次**；执行前后照例做 profiler 登记；返回 `TimeoutAction::Drop` 让源执行后自移除。
+- [../gpui_linux/src/linux/dispatcher.rs:L66-L79](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L66-L79) — 到期回调：runnable 被包在 `Option` 里，回调内 `take()` 保证**至多执行一次**；执行前后照例做 profiler 登记；返回 `TimeoutAction::Drop` 让源执行后自移除。
 
-- [../gpui_linux/src/linux/dispatcher.rs:L129-L136](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L129-L136) — `dispatch_after` 的错误处理：发送失败说明 Timer 线程已关停（应用退出中），此时对返回的 `TimerAfter` 调 `std::mem::forget`。注释讲明了理由——drop 一个已调度的 runnable 等于取消其任务，会让任何等待者的下一次 poll 直接 panic；泄漏则让任务永远挂起，在关机阶段可接受。
+- [../gpui_linux/src/linux/dispatcher.rs:L129-L136](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L129-L136) — `dispatch_after` 的错误处理：发送失败说明 Timer 线程已关停（应用退出中），此时对返回的 `TimerAfter` 调 `std::mem::forget`。注释讲明了理由——drop 一个已调度的 runnable 等于取消其任务，会让任何等待者的下一次 poll 直接 panic；泄漏则让任务永远挂起，在关机阶段可接受。
 
 上游是谁？执行器的 `timer` 一路接到这里：
 
-- [../gpui/src/executor.rs:L187-L192](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui/src/executor.rs#L187-L192) — `BackgroundExecutor::timer(duration)` 就是 `spawn(scheduler().timer(duration))`：把「等闹钟」包装成一个后台任务。
-- [../gpui/src/platform_scheduler.rs:L138-L156](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui/src/platform_scheduler.rs#L138-L156) — `timer` 的真身：用 `async_task` 造一个 runnable，其 future 只做 `tx.send(())`（点亮 oneshot），而它的 **schedule 函数**是 `dispatcher.dispatch_after(duration, runnable)`。于是到期的瞬间，Timer 线程执行 runnable → oneshot 被点亮 → 等待这个 oneshot 的 future（通常在前台执行器上）被 waker 重新调度回主线程。延迟与唤醒的职责就这样切开。
+- [../gpui/src/executor.rs:L187-L192](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/executor.rs#L187-L192) — `BackgroundExecutor::timer(duration)` 就是 `spawn(scheduler().timer(duration))`：把「等闹钟」包装成一个后台任务。
+
+- [../gpui/src/platform_scheduler.rs:L138-L156](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/platform_scheduler.rs#L138-L156) — `timer` 的真身：用 `async_task` 造一个 runnable，其 future 只做 `tx.send(())`（点亮 oneshot），而它的 **schedule 函数**是 `dispatcher.dispatch_after(duration, runnable)`。于是到期的瞬间，Timer 线程执行 runnable → oneshot 被点亮 → 等待这个 oneshot 的 future（通常在前台执行器上）被 waker 重新调度回主线程。延迟与唤醒的职责就这样切开。
 
 #### 4.3.4 代码实践：跟踪一条 timer 调用链（源码阅读型）
 
 1. **实践目标**：把 `timer()` 到 `TimerAfter` 的静态调用链走一遍，填出路径表。
-2. **操作步骤**：从 [executor.rs:L187](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui/src/executor.rs#L187) 出发，依次打开 [platform_scheduler.rs:L138-L156](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui/src/platform_scheduler.rs#L138-L156) 与 [dispatcher.rs:L129-L136](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L129-L136)，记录每一步的函数与线程。
+2. **操作步骤**：从 [executor.rs:L187](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/executor.rs#L187) 出发，依次打开 [platform_scheduler.rs:L138-L156](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/platform_scheduler.rs#L138-L156) 与 [dispatcher.rs:L129-L136](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L129-L136)，记录每一步的函数与线程。
 3. **需要观察的现象**（可选实验，示例代码）：
    ```rust
    // 在任意 GPUI 示例的 run 回调里：
@@ -285,15 +288,17 @@ dispatcher.rs 自带一个不依赖任何窗口系统的单元测试，是理解
 **答案**：这是一种用吞吐换简单的取舍——calloop 的 timer 源自带到期管理，每次插入/自毁的成本可接受，换来的是零维护的 correctness（`TimeoutAction::Drop` 即一次性语义）；对编辑器场景的延迟任务量而言足够。统一时间轮（如 `ThreadedDispatcher` 的做法，见 u4-l2）是另一种工程选择。
 
 **练习 2**：`TimerAfter` 到期时 runnable 在哪个线程执行？这带来什么约束？
-**答案**：Timer 线程（[dispatcher.rs:L70-L78](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L70-L78)）。因此 runnable 必须是 `Send`（契约本身就要求），且不应在回调里做任何主线程限定的工作——真实链路中它只点亮 oneshot，由 waker 把后续工作带回正确的执行器。
+**答案**：Timer 线程（[dispatcher.rs:L70-L78](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L70-L78)）。因此 runnable 必须是 `Send`（契约本身就要求），且不应在回调里做任何主线程限定的工作——真实链路中它只点亮 oneshot，由 waker 把后续工作带回正确的执行器。
 
-### 4.4 一次投递的完整路径：三条通路与输入优先级
+### 4.4 一次投递的完整路径：三条通路、输入优先级与 X11 事件排空
 
 #### 4.4.1 概念说明
 
-现在把三个契约方法接上各自的终点，并回答本讲的最后一个问题：**为什么主循环里输入事件比普通任务「优先」？**
+现在把三个契约方法接上各自的终点，并回答本讲最后两个问题：**为什么主循环里输入事件比普通任务「优先」？以及 X11 为什么还要在 idle 回调末尾多做一步「排空」？**
 
-Wayland/X11 客户端把协议事件源和 `main_receiver` 注册在**同一个**循环里。若 runnable 在事件源回调里立即执行，一轮 dispatch 中 runnable 会与输入事件按注册/就绪顺序竞争；而 `insert_idle` 把 runnable 挪到「本轮所有事件回调跑完之后、睡觉之前」的空闲时段——用户输入（按键、鼠标）永远先于任务被处理，剩余时间才用来消化任务队列。headless 没有用户输入，也就不需要这层缓冲，直接执行。
+第一个问题——顺序。Wayland/X11 客户端把协议事件源和 `main_receiver` 注册在**同一个**循环里。若 runnable 在事件源回调里立即执行，一轮 dispatch 中 runnable 会与输入事件按注册/就绪顺序竞争；而 `insert_idle` 把 runnable 挪到「本轮所有事件回调跑完之后、睡觉之前」的空闲时段——用户输入（按键、鼠标）永远先于任务被处理，剩余时间才用来消化任务队列。headless 没有用户输入，也就不需要这层缓冲，直接执行。
+
+第二个问题——可见性，这是本轮更新（提交 f4178619ac，PR #62081）引入的关键变化。calloop 对 X11 事件的常规感知渠道是挂在 XCB socket fd 上的 `Generic` 事件源——**socket 可读**才回调。但客户端用的是 x11rb 的 `xcb_ffi::XCBConnection`，它会把已从 socket 读入的事件缓存在自己**内部**的队列里：一旦事件已经读进库内缓冲、而 socket 上暂时没有新数据到达，calloop 就完全不知道还有事件待处理，主循环会「带着未处理的事件」入睡。前台 runnable 的执行恰好会制造这种局面——比如首帧绘制时会发出一串 X11 请求，引发的回复与事件落进 x11rb 内部缓冲，socket 却随之静默。修复前这曾表现为 X11 上第一个打开的窗口停在空白帧。修法很直接：idle 回调执行完每个 runnable 之后，主动调用一次 `process_x11_events`（内部循环 `poll_for_event`）把 x11rb 内部缓冲排空。Wayland 侧没有这条缝隙——协议事件不经过「攒在库内缓冲、对 poll 不可见」的路径——idle 回调维持三段式原样。**因此 X11 与 Wayland 的 `insert_idle` 处理不再是逐行同型**：骨架一致（insert_idle + profiler 三段式），X11 多出收尾的排空一步。
 
 #### 4.4.2 核心流程
 
@@ -308,8 +313,10 @@ Wayland/X11 客户端把协议事件源和 `main_receiver` 注册在**同一个*
      └→ main_sender.send（入队 + ping）
      └→ 主循环 poll 就绪 → PriorityQueueCalloopReceiver::process_events
      └→ Event::Msg(runnable)
-          ├─ Wayland/X11: handle.insert_idle(run + profiler)   ← 让输入先行
-          └─ headless:  直接 runnable.run()
+          ├─ Wayland: insert_idle(profiler 三段式)              ← 让输入先行
+          ├─ X11:     insert_idle(profiler 三段式
+          │             + process_x11_events 排空 x11rb 内部缓冲) ← 本轮更新新增收尾
+          └─ headless: 直接 runnable.run()
 
 ③ 延迟：dispatch_after(duration, runnable)  → 见 4.3
 
@@ -318,47 +325,53 @@ Wayland/X11 客户端把协议事件源和 `main_receiver` 注册在**同一个*
 
 #### 4.4.3 源码精读
 
-- [../gpui_linux/src/linux/dispatcher.rs:L107-L111](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L107-L111) — 通路①：后台投递直接进优先级通道；失败即 panic（fail-fast：Worker 池在正常运行期不可能先于发送端消失，出现即初始化顺序 bug）。
+- [../gpui_linux/src/linux/dispatcher.rs:L107-L111](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L107-L111) — 通路①：后台投递直接进优先级通道；失败即 panic（fail-fast：Worker 池在正常运行期不可能先于发送端消失，出现即初始化顺序 bug）。
 
-- [../gpui_linux/src/linux/dispatcher.rs:L113-L127](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L113-L127) — 通路②：投主线程。失败分支的注释是全文件最值得咀嚼的一段——runnable 可能包着 `!Send` 的 future（u4-l1 讲过：前台任务允许非 Send），平时只会在主线程 poll/drop；若发送失败说明主循环接收端已死且当前在后台线程，**在错误线程 drop 一个 `!Send` 值是未定义行为**，所以必须 `mem::forget`（泄漏它），反正进程即将退出。这正呼应 u4-l2 说的「!Send future 仅在主线程执行与销毁」。
+- [../gpui_linux/src/linux/dispatcher.rs:L113-L127](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L113-L127) — 通路②：投主线程。失败分支的注释是全文件最值得咀嚼的一段——runnable 可能包着 `!Send` 的 future（u4-l1 讲过：前台任务允许非 Send），平时只会在主线程 poll/drop；若发送失败说明主循环接收端已死且当前在后台线程，**在错误线程 drop 一个 `!Send` 值是未定义行为**，所以必须 `mem::forget`（泄漏它），反正进程即将退出。这正呼应 u4-l2 说的「!Send future 仅在主线程执行与销毁」。
 
-- [../gpui_linux/src/linux/dispatcher.rs:L138-L158](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L138-L158) — 通路④：实时任务不复用线程池，直接 `std::thread::spawn` 并用 `pthread_setschedparam` 设 `SCHED_FIFO`、优先级 65；失败仅告警降级为普通线程。这就是契约里「RealtimeAudio 永不入队」在 Linux 侧的兑现。
+- [../gpui_linux/src/linux/dispatcher.rs:L138-L158](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L138-L158) — 通路④：实时任务不复用线程池，直接 `std::thread::spawn` 并用 `pthread_setschedparam` 设 `SCHED_FIFO`、优先级 65；失败仅告警降级为普通线程。这就是契约里「RealtimeAudio 永不入队」在 Linux 侧的兑现。
 
-接收端注册（同一模式的三个变体）：
+接收端注册（同一模式的三个变体，其中 X11 在本轮更新后多了排空步骤）：
 
-- [../gpui_linux/src/linux/headless/client.rs:L26-L38](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/headless/client.rs#L26-L38) — headless：先建 `EventLoop`，把 `get_signal()` 交给 `LinuxCommon::new`，再把 `main_receiver` 注册进**自己的**循环；回调里 `runnable.run()` 直跑，无 idle 缓冲。
+- [../gpui_linux/src/linux/headless/client.rs:L26-L38](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/headless/client.rs#L26-L38) — headless：先建 `EventLoop`，把 `get_signal()` 交给 `LinuxCommon::new`，再把 `main_receiver` 注册进**自己的**循环；回调里 `runnable.run()` 直跑，无 idle 缓冲。
 
-- [../gpui_linux/src/linux/x11/client.rs:L316-L333](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/x11/client.rs#L316-L333) — X11：同样的注册，但回调里是 `handle.insert_idle(...)`。[L321-L323](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/x11/client.rs#L321-L323) 的注释就是本节论点的原始出处：把 runnable 排成 idle 回调，确保用户输入与 X11 事件更高优先、任务在事件回调之后处理。
+- [../gpui_linux/src/linux/x11/client.rs:L316-L339](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/client.rs#L316-L339) — X11：同样的注册，但回调里是 `handle.insert_idle(...)`。[L321-L323](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/client.rs#L321-L323) 的注释是「输入优先」论点的原始出处：把 runnable 排成 idle 回调，确保用户输入与 X11 事件更高优先、任务在事件回调之后处理。idle 闭包的参数是 `|client|`——它拿到了循环数据 `&mut X11Client`，这正是为了收尾的排空。
 
-- [../gpui_linux/src/linux/wayland/client.rs:L746-L761](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L746-L761) — Wayland：与 X11 逐行同型（insert_idle + profiler 登记），佐证这是 Linux 有头后端的统一模式。
+- [../gpui_linux/src/linux/x11/client.rs:L324-L333](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/client.rs#L324-L333) — X11 idle 回调体，本轮更新的核心：前半段（L325-L329）仍是 profiler 三段式 + `runnable.run()`；后半段（[L331-L332](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/client.rs#L331-L332)）是新增的收尾——克隆一份 `xcb_connection`，然后 `client.process_x11_events(&xcb_connection).log_err()` 主动排空 x11rb 内部缓冲的事件队列。
 
-- [../gpui_linux/src/linux/headless/client.rs:L133-L142](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/headless/client.rs#L133-L142) — 主循环本体在客户端的 `run` 里：`event_loop.run(None, ...)` 永久阻塞。配合 [platform.rs:L267-L278](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/platform.rs#L267-L278)（`Platform::run` 先同步执行启动回调再进循环）与 [L280-L282](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/platform.rs#L280-L282)（`quit` = `signal.stop()`），u2-l2 讲过的生命周期在这里全部落到 calloop 的 `LoopSignal` 上。
+- [../gpui_linux/src/linux/x11/client.rs:L471-L486](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/client.rs#L471-L486) — 对照组：X11 事件的「常规」入口。客户端把 XCB socket 包成 `FdWrapper` 注册为 `Generic` fd 源（`Interest::READ` + `Level` 模式），socket 可读时回调 [L481](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/client.rs#L481) 的 `process_x11_events`。问题在于：这条路径的触发条件是「socket 再次可读」，而事件若已躺在 x11rb 内部队列里、socket 暂无新数据，这条路永远不会醒——这正是 idle 回调里补排空的必要性所在。
 
-顺带留意 [platform.rs:L147](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/platform.rs#L147)：`LinuxCommon::new` 还创建了第二条 calloop channel（`wake_receiver`），专供 login1 的 PrepareForSleep 系统唤醒信号（u2-l2 讲过）接入同一个主循环。「多个事件源共享一个循环」是贯穿 gpui_linux 的组织原则。
+- [../gpui_linux/src/linux/x11/client.rs:L568-L583](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/client.rs#L568-L583) — `process_x11_events` 定义：外层 `loop` 内用 `xcb_connection.poll_for_event()` 反复取事件——`poll_for_event` 先消费 x11rb **内部缓冲**、必要时才碰 socket，所以它能看到 calloop 看不见的那部分事件。顺带一提，每帧刷新定时器的回调在渲染之后也会调用同一函数排空（[L2004](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/client.rs#L2004)），「不依赖单一唤醒渠道」是 X11 侧的反复出现的防御姿态。
+
+- [../gpui_linux/src/linux/wayland/client.rs:L746-L761](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L746-L761) — Wayland：骨架与 X11 相同（`insert_idle` + profiler 三段式，闭包参数是 `|_|`，不需要循环数据），但**没有** X11 那步收尾排空——如 4.4.1 所析，Wayland 协议栈不存在「事件已读入库内缓冲、对 poll 不可见」的缝隙。更新前两边逐行同型，更新后 X11 比 Wayland 多出 `process_x11_events` 一步。
+
+- [../gpui_linux/src/linux/headless/client.rs:L133-L142](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/headless/client.rs#L133-L142) — 主循环本体在客户端的 `run` 里：`event_loop.run(None, ...)` 永久阻塞。配合 [platform.rs:L267-L278](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/platform.rs#L267-L278)（`Platform::run` 先同步执行启动回调再进循环）与 [L280-L282](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/platform.rs#L280-L282)（`quit` = `signal.stop()`），u2-l2 讲过的生命周期在这里全部落到 calloop 的 `LoopSignal` 上。
+
+顺带留意 [platform.rs:L147](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/platform.rs#L147)：`LinuxCommon::new` 还创建了第二条 calloop channel（`wake_receiver`），专供 login1 的 PrepareForSleep 系统唤醒信号（u2-l2 讲过）接入同一个主循环。「多个事件源共享一个循环」是贯穿 gpui_linux 的组织原则。
 
 #### 4.4.4 代码实践：三个后端对照阅读（源码阅读型）
 
-1. **实践目标**：说清同一份 `main_receiver` 在三个后端的注册差异及原因。
-2. **操作步骤**：并排打开 4.4.3 列出的三处 `insert_source`，逐行比较回调体。
-3. **需要观察的现象**：headless 是两行直跑；X11/Wayland 多了 `handle.insert_idle` 与 profiler 三段式。
-4. **预期结果**：能回答「为什么 headless 不需要 insert_idle」——它没有窗口系统事件源，循环里除了 wake channel 外没有需要优先保障的输入，idle 缓冲没有意义；而 X11/Wayland 的循环里同时挂着协议事件，必须让位。
+1. **实践目标**：说清同一份 `main_receiver` 在三个后端的注册差异及原因，并解释 X11 多出的排空步骤。
+2. **操作步骤**：并排打开 4.4.3 列出的三处 `insert_source`，逐行比较回调体；再打开 [x11/client.rs:L471-L486](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/client.rs#L471-L486) 的 socket 事件源，思考「socket 可读」与「x11rb 内部有事件」什么时候会脱节。
+3. **需要观察的现象**：headless 是两行直跑；Wayland 是 `insert_idle` + profiler 三段式；X11 在三段式之外，闭包参数还变成了 `|client|`，并在末尾多出 `process_x11_events` 排空。
+4. **预期结果**：能回答三连问——为什么 headless 不需要 insert_idle（没有窗口系统事件源，无输入可让位）；为什么 Wayland 不需要排空（协议事件不经过对 poll 不可见的库内缓冲）；为什么 X11 两样都要（既要给输入让位，又要弥补 calloop 只监听 socket、看不到 x11rb 内部队列的盲区）。
 
 #### 4.4.5 小练习与答案
 
 **练习 1**：`dispatch` 失败时 panic，`dispatch_on_main_thread` 失败时 forget，两种策略为何不同？
-**答案**：后台通道的失败只可能源于 Worker 接收端先死，属于初始化顺序 bug，fail-fast 暴露问题更合理；主线程通道的失败发生在关机期，且 runnable 可能含 `!Send` future，在后台线程 drop 有 UB 风险，forget（泄漏）是唯一安全选择——进程将退，泄漏无妨（[dispatcher.rs:L107-L127](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L107-L127)）。
+**答案**：后台通道的失败只可能源于 Worker 接收端先死，属于初始化顺序 bug，fail-fast 暴露问题更合理；主线程通道的失败发生在关机期，且 runnable 可能含 `!Send` future，在后台线程 drop 有 UB 风险，forget（泄漏）是唯一安全选择——进程将退，泄漏无妨（[dispatcher.rs:L107-L127](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/dispatcher.rs#L107-L127)）。
 
-**练习 2**：X11 后端把 runnable 包进 `insert_idle`，这对「一轮 dispatch」内的执行顺序意味着什么？
-**答案**：calloop 每轮先执行所有就绪事件源的回调（X11 输入、ping 排空等），再执行空闲回调。包进 idle 后，即使任务与按键事件在同一轮就绪，按键的处理也先于任务，任务只在当轮剩余时间里消化——用吞吐换取输入响应的确定性。
+**练习 2**：X11 后端把 runnable 包进 `insert_idle`，且执行完 runnable 还要调用 `process_x11_events`——这两步各自解决什么问题？去掉分别会发生什么？
+**答案**：`insert_idle` 解决**顺序**问题：calloop 每轮先执行所有就绪事件源的回调（X11 输入、ping 排空等），再执行空闲回调，包进 idle 后即使任务与按键事件同轮就绪，按键也先于任务。`process_x11_events` 解决**可见性**问题：calloop 只监听 XCB socket 的 fd（[x11/client.rs:L471-L486](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/x11/client.rs#L471-L486)），而 x11rb 已读入内部队列的事件不会再让 socket 可读；去掉排空，主循环可能带着未处理的 X11 事件入睡——这正是 f4178619ac 之前 X11 首开窗口停在空白帧的成因。
 
 **练习 3**：`Platform::quit` 如何让阻塞在 `event_loop.run` 的主线程返回？
-**答案**：客户端构造循环时把 `event_loop.get_signal()` 传入 `LinuxCommon`，`quit` 调 `signal.stop()`（[platform.rs:L280-L282](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/platform.rs#L280-L282)），calloop 在当前迭代结束后退出 `run`，随后 `Platform::run` 触发 on_quit 回调（[L267-L278](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui_linux/src/linux/platform.rs#L267-L278)）。
+**答案**：客户端构造循环时把 `event_loop.get_signal()` 传入 `LinuxCommon`，`quit` 调 `signal.stop()`（[platform.rs:L280-L282](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/platform.rs#L280-L282)），calloop 在当前迭代结束后退出 `run`，随后 `Platform::run` 触发 on_quit 回调（[L267-L278](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui_linux/src/linux/platform.rs#L267-L278)）。
 
 ## 5. 综合实践
 
 **任务：写一个仿照 LinuxDispatcher 结构的最小 calloop 调度器（独立 crate）**。要求复刻本讲的四个骨架件：ping 适配的优先级通道、Worker 线程池、`insert_idle` 执行、延迟投递，让你在没有 gpui 的情况下体会这套结构。
 
-在仓库外新建 `mini-dispatcher`（workspace 里 calloop 是 git fork 依赖，见 [Cargo.toml:L971](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/Cargo.toml#L971)，独立 crate 直接用 crates.io 版本即可；本讲用到的 API 两边一致，具体版本兼容性待本地验证）：
+在仓库外新建 `mini-dispatcher`（workspace 里 calloop 是 git fork 依赖，见 [Cargo.toml:L971](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/Cargo.toml#L971)，独立 crate 直接用 crates.io 版本即可；本讲用到的 API 两边一致，具体版本兼容性待本地验证）：
 
 ```toml
 # Cargo.toml
@@ -566,8 +579,8 @@ fn main() -> anyhow::Result<()> {
 1. 所有 `high-*`/`low-*` 都以 `[main ...]` 打印且线程 id 相同（证明它们都回到主循环执行）。
 2. 由于队列是严格优先级，每轮排空时 high 组先于 low 组（与 gpui 的抽签不同，见练习）。
 3. `delayed-job` 在最后约 100ms 后由 `[timer-fired]` 打印，且只出现一次（`TimeoutAction::Drop`）。
-4. 把 `insert_idle` 换成直接执行，观察输出顺序不变但语义上失去了「输入优先」的保障——在本例没有其他事件源，差异不可见；这正是 headless 直跑的理由。
-5. 进阶：把严格优先改成 60/10 加权抽签（参照 [queue.rs:L328-L351](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui/src/queue.rs#L328-L351)），验证 Low 任务不再被无限挤压。
+4. 把 `insert_idle` 换成直接执行，观察输出顺序不变但语义上失去了「输入优先」的保障——在本例没有其他事件源，差异不可见；这正是 headless 直跑的理由。而真实 X11 代码里 idle 回调还要在执行完任务后做一次事件排空（见 4.4.3），本例没有 x11rb 那样的库内缓冲，无需模拟这一步。
+5. 进阶：把严格优先改成 60/10 加权抽签（参照 [queue.rs:L328-L351](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/queue.rs#L328-L351)），验证 Low 任务不再被无限挤压。
 
 运行结果与 calloop crates.io 版本的 API 细节差异待本地验证。
 
@@ -578,11 +591,12 @@ fn main() -> anyhow::Result<()> {
 - `dispatch_after` 走 `TimerAfter` 信封进 Timer 线程的私有 calloop 循环，每次插入一个 `TimeoutAction::Drop` 的一次性 timer 源；到期在 Timer 线程执行 runnable，真实链路中它只点亮 oneshot，由 waker 把等待的 future 带回原执行器。
 - 失败处理三种姿态：后台 `dispatch` 失败 panic（fail-fast）；主线程投递失败 `mem::forget`（`!Send` future 不能在错误线程 drop，宁泄漏不 UB）；延迟投递失败同样 forget（drop 会取消任务并令等待者 panic）。
 - X11/Wayland 把 runnable 包进 `insert_idle`，让用户输入与协议事件在同轮 dispatch 中永远先于普通任务；headless 无输入事件源，直跑即可。`quit` 的实现就是客户端循环的 `LoopSignal.stop()`。
+- 本轮更新（f4178619ac）后，X11 的 idle 回调在执行完每个 runnable 后还会调用 `process_x11_events` 排空 x11rb 内部事件队列——因为 calloop 只监听 XCB socket 的 fd，看不到已读入库内缓冲的事件，此前 X11 首开的窗口会因此停在空白帧；Wayland 无此缝隙，两边不再逐行同型。
 - 即便在主线程通道里，「优先级」也只是 60/30/10 的抽签概率，不是严格顺序——防饿死是全链路的一致选择。
 
 ## 7. 下一步学习建议
 
 1. **u4-l4（macOS 与 Windows 的调度器）**：对比 `MacDispatcher`（NSRunLoop/dispatch）与 Windows 消息循环版调度器如何映射同一契约，重点看它们与 Linux 版在「谁拥有主循环」「如何唤醒」上的差异。
 2. **u4-l6（前台工作日志与 hang 检测）**：本讲反复出现的 `profiler::update_running_task`/`save_task_timing` 三段式就是那里的插桩点，可顺势深读。
-3. **u5-l1（LinuxPlatform 与 LinuxClient）**：本讲的 `LinuxCommon::new` 只是装配的一角，下一单元完整展开「一个外壳、三种后端」的二次分发结构。
-4. 延伸阅读：calloop 文档中 `EventSource` 的 register/reregister 协议（理解为什么 4.2 的三个方法必须委托给 PingSource），以及 [../gpui/src/queue.rs](https://github.com/zed-industries/zed/blob/b0e37a6c18a6321061ba842e26ee7156729f0870/crates/gpui_platform/../gpui/src/queue.rs) 末尾的通道行为测试（`tx.send` 高中低混合后接收顺序的断言方式）。
+3. **u5-l1（LinuxPlatform 与 LinuxClient）**：本讲的 `LinuxCommon::new` 只是装配的一角，下一单元完整展开「一个外壳、三种后端」的二次分发结构；u5-l3 还会从 X11 客户端整体视角再次遇到 `process_x11_events` 的其余调用点。
+4. 延伸阅读：calloop 文档中 `EventSource` 的 register/reregister 协议（理解为什么 4.2 的三个方法必须委托给 PingSource），以及 [../gpui/src/queue.rs](https://github.com/zed-industries/zed/blob/fe9556a11e9cc9dbc78686041aa524d6932879db/crates/gpui_platform/../gpui/src/queue.rs) 末尾的通道行为测试（`tx.send` 高中低混合后接收顺序的断言方式）。

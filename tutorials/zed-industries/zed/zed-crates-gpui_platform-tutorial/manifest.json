@@ -1,7 +1,7 @@
 {
-  "head": "b0e37a6c18a6321061ba842e26ee7156729f0870",
+  "head": "fe9556a11e9cc9dbc78686041aa524d6932879db",
   "project": "zed-crates-gpui_platform",
-  "rationale": "gpui_platform 本身是一个只有约 200 行的门面 crate，它真正的学习价值在于它串起的整条 GPUI 平台抽象链路：gpui 中的 Platform/PlatformWindow/PlatformDispatcher/PlatformTextSystem/PlatformAtlas 等契约 trait，以及 gpui_macos、gpui_windows、gpui_linux、gpui_web 四个按 cfg 条件编译的操作系统实现。因此大纲采用「先门面、再契约、再实现」的三段式：第一单元让读者从零跑起一个跨平台窗口应用并吃透 current_platform 的条件编译分发；第二到第四单元按「Platform trait 契约 → 窗口与输入 → 调度与并发」逐层拆解平台无关接口，这是所有平台实现共同遵守的骨架；第五到第七单元分别深入 Linux（含 headless/X11/Wayland/portal）、macOS 与 Windows、Web 三套真实实现，让读者对照契约看落地差异；第八单元收尾于文本系统、图集与渲染后端、无头渲染、test-support 测试设施，并以「实现一个自定义 Platform」作为毕业实践。source_files 中的路径一律相对于永久链接基目录 crates/gpui_platform/，兄弟 crate 使用 ../ 前缀，保证生成的 GitHub 链接可直接访问。本轮增量（1b04e4caf → b0e37a6c18，共 9 个提交）的 diff 分析结论：git diff 限定在 gpui_platform、gpui、gpui_linux、gpui_macos、gpui_windows、gpui_web 六个 crate 上的改动为零，九个提交全部落在本手册引用范围之外（editor、project、workspace、worktree、lsp_store、project_panel、agent_ui、file_finder、fs、language_tools、lsp_locations、zed 等 crate，外加 CONTRIBUTING.md 与 Cargo.lock 的锁文件漂移），因此没有任何讲义引用的源码文件需要刷新；已抽查确认上一轮的关键锚点依然在位（如 x11/window.rs:397 的 set_wm_hints_urgency、gpui/src/profiler/journal.rs 与 hang.rs、platform/test 目录）。讲义目录方面，上一轮标记 new 的 u3-l2、u3-l3 已按当时 HEAD 生成完毕，标记 update 的 u1-l3 也已完成 cargo-shear 依赖清单刷新重写，故本轮这 13 篇已生成讲义全部转为 keep；其余 21 篇（u3-l4 起）尚待生成，维持 new。全链路仍为 34 篇，依赖关系与单元结构保持不变。",
+  "rationale": "gpui_platform 本身是一个只有约 200 行的门面 crate，它真正的学习价值在于它串起的整条 GPUI 平台抽象链路：gpui 中的 Platform/PlatformWindow/PlatformDispatcher/PlatformTextSystem/PlatformAtlas 等契约 trait，以及 gpui_macos、gpui_windows、gpui_linux、gpui_web 四个按 cfg 条件编译的操作系统实现。因此大纲采用「先门面、再契约、再实现」的三段式：第一单元让读者从零跑起一个跨平台窗口应用并吃透 current_platform 的条件编译分发；第二到第四单元按「Platform trait 契约 → 窗口与输入 → 调度与并发」逐层拆解平台无关接口，这是所有平台实现共同遵守的骨架；第五到第七单元分别深入 Linux（含 headless/X11/Wayland/portal）、macOS 与 Windows、Web 三套真实实现，让读者对照契约看落地差异；第八单元收尾于文本系统、图集与渲染后端、无头渲染、test-support 测试设施，并以「实现一个自定义 Platform」作为毕业实践。source_files 中的路径一律相对于永久链接基目录 crates/gpui_platform/，兄弟 crate 使用 ../ 前缀，保证生成的 GitHub 链接可直接访问。本轮增量（b0e37a6c18 → fe9556a11e，共 6 个提交）中，落在手册引用的六个 crate（gpui_platform、gpui、gpui_linux、gpui_macos、gpui_windows、gpui_web）上的提交只有一个：f4178619ac「gpui_linux: Drain buffered X11 events after foreground work (#62081)」，其余五个提交（ztracing 的 web performance 映射、cloud_llm_client 的 Baseten provider、文本输入一次性自动填充开关、inline completion 防抖、cli Flatpak 启动参数）均在本手册引用范围之外。该提交改动两处：其一，x11/client.rs 的 insert_idle 回调在执行完每个 runnable 后新增 process_x11_events 调用，主动排空 x11rb 内部事件队列（calloop 只监听底层 socket，读不到 x11rb 内部队列，曾导致 X11 上首开的窗口停在空白帧）；其二，x11/window.rs 的 activate() 删除了无条件的 SetInputFocus(POINTER_ROOT)，窗口激活完全交由 _NET_ACTIVE_WINDOW 与窗口管理器的焦点策略。据此判定：已生成的 u3-l2 讲义中「X11: 发 _NET_ACTIVE_WINDOW ClientMessage + SetInputFocus」的描述已过时，标记 update；已生成的 u4-l3 讲义中「X11 与 Wayland 的 insert_idle 处理逐行同型」的论断不再成立（X11 侧多出事件排空步骤），标记 update；u3-l4 主题为光标/外观/拖放，不涉及 activate 与事件排空，不受影响。讲义目录方面，上一轮之后新近生成了 u3-l4、u4-l1、u4-l2、u4-l3 四篇，已生成讲义累计 15 篇（u1 全部 4 篇、u2 全部 4 篇、u3 全部 4 篇、u4 前 3 篇），除 u3-l2 与 u4-l3 标记 update 外全部转为 keep；u4-l4 起的 19 篇仍待生成，维持 new，其中 u5-l3 的 topic 已补充「前台任务执行后排空缓冲事件」这一新机制，确保 worker 按当前 HEAD 生成。全链路仍为 34 篇，单元结构、依赖关系与讲义顺序保持不变。",
   "units": [
     {
       "id": "u1",
@@ -284,7 +284,7 @@
           "topic": "追踪从应用层 cx.open_window 传下的 WindowOptions 如何化为 WindowParams，最终进入 Platform::open_window 返回 Box<dyn PlatformWindow>，并说明 AnyWindowHandle 在其中的桥接作用。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u3-l1"
           ],
@@ -310,7 +310,7 @@
             "../gpui_windows/src/window.rs"
           ],
           "title": "PlatformWindow trait 详解：绘制、尺寸、焦点与窗口控制",
-          "topic": "走读 PlatformWindow trait（含 raw-window-handle 的 HasWindowHandle/HasDisplayHandle 约束），覆盖标题、大小、位置、缩放、焦点、全屏、窗口控制区与注意力请求（request_attention 在 X11 上通过 set_wm_hints_urgency 设置 WM_HINTS urgency 标志、窗口转为激活时自动清除）等方法，并以 Linux 侧实现为例。"
+          "topic": "走读 PlatformWindow trait（含 raw-window-handle 的 HasWindowHandle/HasDisplayHandle 约束），覆盖标题、大小、位置、缩放、焦点、全屏、窗口控制区与注意力请求（request_attention 在 X11 上通过 set_wm_hints_urgency 设置 WM_HINTS urgency 标志、窗口转为激活时自动清除）等方法，并以 Linux 侧实现为例。注意本轮 f4178619ac 之后，X11 的 activate() 只发送 _NET_ACTIVE_WINDOW ClientMessage，不再附加 SetInputFocus(POINTER_ROOT) 强制抢焦点，讲义中相关描述需按当前源码刷新。"
         },
         {
           "action": "keep",
@@ -342,7 +342,7 @@
           "topic": "讲解 PlatformKeyboardLayout 与 PlatformKeyboardMapper 两个 trait 以及 keystroke 模型，再对照 macOS（Carbon/HIToolbox）、Linux（xkbcommon）、Web（浏览器 KeyboardEvent）三套映射实现看同一契约的不同落地。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -379,7 +379,7 @@
       "id": "u4",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -408,7 +408,7 @@
           "topic": "从 Platform 的 background_executor/foreground_executor 两个方法切入，讲解 GPUI 所有实体更新与 UI 绘制都发生在单一前台线程的模型，以及 background_spawn 与 spawn 的分工。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -435,7 +435,7 @@
           "topic": "精读 PlatformDispatcher trait（Send + Sync）的各个方法，理解它是执行器底层把异步任务安全投递到平台事件循环的桥，并说明 RunnableMeta、优先级队列与 tick 概念。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u4-l2",
             "u1-l4"
@@ -461,7 +461,7 @@
             "../gpui_linux/src/linux/platform.rs"
           ],
           "title": "LinuxDispatcher 与 calloop：用事件循环库实现调度器",
-          "topic": "深入 gpui_linux 的 LinuxDispatcher：它基于 calloop 事件循环，配合 PriorityQueueCalloopSender/Receiver 实现带优先级的任务通道，并处理计时器与外部线程唤醒。"
+          "topic": "深入 gpui_linux 的 LinuxDispatcher：它基于 calloop 事件循环，配合 PriorityQueueCalloopSender/Receiver 实现带优先级的任务通道，并处理计时器与外部线程唤醒。注意本轮 f4178619ac 之后，X11 侧的 insert_idle 回调在执行完 runnable 后还会调用 process_x11_events 排空 x11rb 内部缓冲队列（修复 X11 首开窗口空白），与 Wayland 侧不再逐行同型，讲义中的对照描述需按当前源码刷新。"
         },
         {
           "action": "new",
@@ -649,7 +649,7 @@
             "../gpui_linux/src/linux/x11/clipboard.rs"
           ],
           "title": "X11 客户端：XCB 连接、事件翻译与 XIM 输入法",
-          "topic": "走读 X11Client 的连接建立、事件循环与事件翻译层（x11/event.rs）、XIM 输入法处理器、X11 剪贴板以及窗口与显示器的 X 封装。"
+          "topic": "走读 X11Client 的连接建立、事件循环与事件翻译层（x11/event.rs）、XIM 输入法处理器、X11 剪贴板以及窗口与显示器的 X 封装。重点覆盖本轮 f4178619ac 新增的机制：前台 runnable 在 insert_idle 回调执行完毕后主动 process_x11_events 排空 x11rb 内部缓冲队列——因为 calloop 只监听底层 socket、看不到 x11rb 内部队列，曾导致 X11 首开窗口停留在空白帧。"
         },
         {
           "action": "new",
