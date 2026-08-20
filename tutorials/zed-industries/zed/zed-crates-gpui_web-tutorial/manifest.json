@@ -1,0 +1,434 @@
+{
+  "head": "6e0a0835755ea57c1db4e0057f1a30ddba554706",
+  "project": "zed-crates-gpui_web",
+  "rationale": "gpui_web 是 Zed 仓库中一个约 3300 行的中型 crate，作用是把 GPUI 的 Platform / PlatformWindow / PlatformDispatcher 平台抽象落到浏览器（WebAssembly）上，源码仅 8 个模块加一个可运行的 trunk 示例。学习顺序按照\"先跑起来、再读抽象契约、然后逐模块走核心链路、最后看能力边界与工程实践\"设计：第一单元让读者用 hello_web 示例把项目跑起来并理解 GPUI 平台抽象的契约（为什么这个 crate 存在）；第二单元按数据流顺序拆核心模块——平台初始化与图形后端选择（platform.rs）、窗口创建与 canvas/隐藏输入框（window.rs 前半）、rAF 帧循环与渲染（window.rs 中段）、ResizeObserver 与 DPR 缩放（window.rs 后半）、DOM 事件到 PlatformInput 的转换（events.rs 指针部分）、键盘/IME/粘贴（events.rs 后半）、调度器与 wasm 线程（dispatcher.rs）、Fetch HTTP 客户端（http_client.rs）；第三单元覆盖剪贴板/光标/显示器等平台能力、Closure 与 Rc 循环等资源生命周期陷阱、Safari 与 SharedArrayBuffer 等浏览器兼容矩阵，最终以\"从零构建自己的 GPUI Web 应用\"收尾，把所有知识串成可交付的实践。每讲只解决一个问题并配一个动手任务，依赖关系沿调用链递进。本次增量核对（2936989..6e0a0835）确认：crates/gpui_web 与 crates/gpui_platform 零改动，讲义引用的 gpui/src/platform.rs 也无变化，gpui 相邻改动均为 profiler feature 内部埋点（window.rs/executor.rs/platform_scheduler.rs 及新增 profiler/journal.rs），不影响任何讲义所讲的契约与行为，故全部讲义保持 keep。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 gpui_web 在 Zed/GPUI 体系中的定位：为 WebAssembly 目标实现 Platform 抽象",
+            "列出 crate 的 8 个源码模块及各自职责（platform/window/events/dispatcher/display/keyboard/logging/http_client）",
+            "理解 Cargo.toml 中 wasm 目标依赖、multithreaded feature 与 lib 路径配置"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "gpui_web.rs（库入口与导出）",
+            "Cargo.toml（wasm 目标依赖）"
+          ],
+          "order": 1,
+          "practice_task": "浏览 crates/gpui_web 目录与 src/gpui_web.rs，画一张模块职责表，标注每个 mod 对应实现的 gpui trait，并回答：为什么整个 crate 顶部有 #![cfg(target_family = \"wasm\")]。",
+          "source_files": [
+            "src/gpui_web.rs",
+            "Cargo.toml",
+            "src/platform.rs"
+          ],
+          "title": "gpui_web 是什么：项目定位与目录结构",
+          "topic": "介绍 gpui_web crate 在 Zed 仓库中的定位：它是 GPUI UI 框架的浏览器（WebAssembly）平台后端，把 GPUI 的 Platform 抽象映射到 DOM/Canvas/WebGPU 上。通读库入口 gpui_web.rs 的模块声明与再导出，建立整个 crate 的心智地图。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-run-hello-web-example.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "用 trunk serve 成功在浏览器运行 hello_web",
+            "解释 COOP/COEP 响应头与 SharedArrayBuffer/WebGPU 的关系",
+            "读懂 main.rs 的入口流程：web_init → application_with_web_backend → open_window → Render"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "examples/hello_web（trunk 工程）",
+            "src/logging.rs"
+          ],
+          "order": 2,
+          "practice_task": "安装 trunk 后在 examples/hello_web 目录运行 trunk serve，打开浏览器验证示例；然后修改 main.rs：给界面加一个按钮或改标题颜色，重新编译观察变化；再用 ?backend=webgl 查询参数强制 WebGL2 后端并对比运行结果。",
+          "source_files": [
+            "examples/hello_web/main.rs",
+            "examples/hello_web/Cargo.toml",
+            "examples/hello_web/trunk.toml",
+            "examples/hello_web/index.html",
+            "examples/hello_web/.cargo/config.toml",
+            "src/logging.rs"
+          ],
+          "title": "跑起来：hello_web 示例与 wasm 构建链路",
+          "topic": "学习 examples/hello_web 示例工程：trunk 打包配置、index.html 中的 canvas 样式、.cargo/config.toml 的 wasm 链接参数（atomics、shared-memory、TLS 导出），以及示例 main.rs 的完整流程（web_init、按 URL 参数选择图形后端、后台线程数素数）。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-gpui-platform-trait.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "列出 Platform trait 的主要能力分组（执行器、窗口、剪贴板、光标、外观、菜单等）",
+            "追踪 gpui_platform::application_with_web_backend 如何构造 WebPlatform 并注入 FetchHttpClient",
+            "对照 impl Platform for WebPlatform 识别哪些方法是真实实现、哪些是空实现或返回错误"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "gpui_platform.rs（平台装配）",
+            "platform.rs（WebPlatform 实现）"
+          ],
+          "order": 3,
+          "practice_task": "从 gpui_platform::application_with_web_backend 出发，手工追踪到 WebPlatform::new_with_backend，列出 WebPlatform 结构体每个字段的用途；再从 Platform trait 中挑 3 个方法，说明浏览器版为什么只能返回 \"not supported\" 错误。",
+          "source_files": [
+            "../gpui_platform/src/gpui_platform.rs",
+            "../gpui/src/platform.rs",
+            "src/platform.rs"
+          ],
+          "title": "平台抽象契约：Platform trait 与装配方式",
+          "topic": "理解 gpui crate 定义的 Platform/PlatformWindow/PlatformDispatcher trait 契约，以及 gpui_platform 这个门面 crate 如何在 wasm 目标下把 WebPlatform 装配进 Application（application_with_web_backend、single_threaded_web、web_init），弄清 gpui_web 与兄弟 crate（gpui_wgpu、gpui_platform）的分工。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "入门：认识 gpui_web 并把它跑起来"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l1-web-platform-init.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "解释 WebPlatform::new_with_backend 的初始化步骤：dispatcher、执行器、内嵌字体、文本系统、显示器",
+            "描述 initialize_graphics 的 Auto 策略：先 WebGPU 失败后 WebGL2，以及失败时如何降级展示错误信息",
+            "说明 WebWindowLifecycle 四个状态与 WebWindowError 五种错误分别在什么场景出现"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "platform.rs（初始化与图形后端）",
+            "gpui_web.rs（导出）"
+          ],
+          "order": 1,
+          "practice_task": "在示例中分别用 ?backend=webgpu、?backend=webgl 和 Auto 三种配置启动，通过日志确认实际选中的后端；然后阅读 open_window 的状态机，写出每个 WebWindowLifecycle 状态转换的触发条件表。",
+          "source_files": [
+            "src/platform.rs",
+            "src/gpui_web.rs"
+          ],
+          "title": "WebPlatform 初始化与图形后端选择",
+          "topic": "精读 platform.rs 的 WebPlatform 构造与启动流程：内嵌字体的 include_bytes、CosmicTextSystem 文本系统、Platform::run 中异步 initialize_graphics 的 WebGPU 优先/WebGL2 兜底策略，以及 WebWindowLifecycle 状态机（Available/Open/Closed/Unavailable）和 WebWindowError 各变体的含义。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-web-window-creation.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "解释 prepare_canvas 注入的 CSS（width/height 100%、touch-action、outline）各自解决什么问题",
+            "说明隐藏 input 元素为何是浏览器上接收键盘/IME 输入的关键设计",
+            "理解 WebWindowInner 用 RefCell/Cell 拆分可变状态的原因以及 Rc 共享所有权结构"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "window.rs（窗口构造）",
+            "platform.rs（open_window 调用方）"
+          ],
+          "order": 2,
+          "practice_task": "运行示例后打开浏览器 DevTools，对照源码画出最终 DOM 结构（canvas + input）；然后修改 prepare_canvas 里的样式列表（例如给 canvas 加边框），重新编译验证，并解释 set_tab_index(-1) 与 focus() 的配合逻辑。",
+          "source_files": [
+            "src/window.rs",
+            "src/platform.rs"
+          ],
+          "title": "WebWindow 的诞生：canvas、隐藏输入框与窗口结构",
+          "topic": "精读 window.rs 的窗口创建链路：prepare_canvas 如何动态创建铺满视口的 canvas，WebWindow::new 如何创建 1px 隐藏 input 元素来承接焦点和键盘输入，WebWindowInner 的内部可变状态组织，以及 raw_window_handle 的 Web canvas 句柄实现。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-frame-loop-rendering.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "追踪一次完整绘制链路：rAF 回调 → request_frame 回调 → GPUI draw → WgpuRenderer.draw",
+            "解释 raf_id 置空时机与防丢帧注释的设计意图",
+            "理解 pending_physical_size 为何延迟到 draw 才应用以及 sprite_atlas/gpu_specs 的暴露方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "window.rs（帧循环与绘制）"
+          ],
+          "order": 3,
+          "practice_task": "在 create_raf_closure 的回调里加一个计数器并把每秒帧数渲染到界面上（或打印到控制台），观察空闲时与交互时的帧率差异；再实验把 wake_frame_loop 提前 return 的条件改掉，观察会发生什么并解释。",
+          "source_files": [
+            "src/window.rs"
+          ],
+          "title": "渲染循环：requestAnimationFrame 帧驱动与 WgpuRenderer",
+          "topic": "理解浏览器上的帧驱动模型：create_raf_closure 创建的 requestAnimationFrame 闭包、wake_frame_loop 的防重入调度、frame_waker 返回弱引用唤醒器的原因、on_request_frame 回调如何触发 GPUI 绘制，以及 draw() 中 pending_physical_size 的延迟应用和 WgpuRenderer 的调用。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l4-resize-scale-handling.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "说明 devicePixelContentBoxSize 与 contentRect 两条尺寸测量路径的差别与适用浏览器",
+            "解释 DPR 变化如何通过 matchMedia 媒体查询触发重新 observe 并更新 scale_factor",
+            "理解 clamping 后重算逻辑尺寸、零尺寸画布（display:none）通知 GPUI 的边界处理"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "window.rs（ResizeObserver 闭包）"
+          ],
+          "order": 4,
+          "practice_task": "编写一个记录窗口逻辑尺寸与 scale_factor 的小面板（或在 resize 回调处打日志），通过拖拽窗口、移动到不同 DPR 的显示器、浏览器缩放（Ctrl+加减）验证三条路径各自触发的更新；解释 notify_scale 标志的作用。",
+          "source_files": [
+            "src/window.rs"
+          ],
+          "title": "尺寸与缩放：ResizeObserver 与 devicePixelRatio",
+          "topic": "精读 window.rs 的 resize 处理：ResizeObserver 闭包中 devicePixelContentBoxSize（物理像素）与 Safari 回退 contentRect（CSS 像素）的分支、watch_dpr_changes 用 resolution 媒体查询监听缩放变化、max_texture_dimension 钳制后重算逻辑尺寸，以及零尺寸画布的处理。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l5-dom-pointer-events.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "解释 EventListenerHandle 为什么必须同时持有 target 和 closure 才能安全移除监听",
+            "描述 pointerdown 到 MouseDownEvent 的完整转换步骤（按钮映射、坐标、修饰键、点击计数）",
+            "理解 set_pointer_capture 防止拖拽出画布后 pressed_button 卡住的原理"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "events.rs（事件监听基础设施）",
+            "window.rs（dispatch_input 与回调）"
+          ],
+          "order": 5,
+          "practice_task": "给 canvas 增加一个 dblclick 之外的实验：修改 ClickState 的判定阈值（400ms/5px），观察双击、三击行为变化；再写一个小的 hit-test 日志，在 MouseDown 时打印按钮与坐标，验证 dom_mouse_button_to_gpui 的映射。",
+          "source_files": [
+            "src/events.rs",
+            "src/window.rs"
+          ],
+          "title": "DOM 事件到 PlatformInput：指针、滚轮与点击状态",
+          "topic": "进入 events.rs：EventListenerHandle 的 RAII 设计（Drop 时注销监听避免 \"closure invoked after being dropped\"）、pointerdown/up/move/leave 到 GPUI MouseDown/MouseUp/MouseMove/MouseExited 的字段映射、ClickState 的双击检测算法、wheel 事件的 non-passive 注册与 deltaMode 处理、修饰键状态更新。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u2-l6-keyboard-ime-paste.md",
+          "id": "u2-l6",
+          "learning_goals": [
+            "追踪一次按键从 DOM keydown 到 GPUI KeyDownEvent 再到文本插入 input handler 的完整路径",
+            "解释 keystroke_inserts_text 与 compute_key_char 如何区分快捷键与文本输入",
+            "说明 composition 事件驱动 IME 以及 paste 中同步收集 File 句柄、异步读 blob 的两阶段设计"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "events.rs（键盘与输入法）",
+            "window.rs（input_handler 槽位）"
+          ],
+          "order": 6,
+          "practice_task": "切换到中文输入法在示例中输入文字，观察 compositionupdate/end 与 replace_and_mark_text_in_range 的调用（可加日志）；再给示例加一个快捷键（如 Ctrl+L）并在 keydown 处理中打印 keystroke，验证修饰键映射是否符合预期。",
+          "source_files": [
+            "src/events.rs",
+            "src/window.rs"
+          ],
+          "title": "键盘、IME 组合输入与粘贴事件",
+          "topic": "精读 events.rs 键盘链路：dom_key_to_gpui_key 的 DOM key 到 GPUI key 映射、modifiers/capslock 提取与 ModifiersChanged 仅在变化时派发、keystroke_inserts_text 与 compute_key_char 对 macOS Option 和 AltGr 的特判、composition 事件实现的 IME 输入、paste 事件中同步文本与异步图片 blob 的处理。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l7-web-dispatcher-threads.md",
+          "id": "u2-l7",
+          "learning_goals": [
+            "说明 supports_threads 的判定条件与单线程回退路径",
+            "解释 MainThreadMailbox 用 Atomics.store/notify 唤醒、wait_async 异步等待、重新武装后再 drain 的完整协议",
+            "理解 dispatch_after/dispatch_on_main_thread_when_idle 分别映射到 setTimeout 与 requestIdleCallback 的方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "dispatcher.rs（调度器）",
+            "examples/hello_web/main.rs（使用者视角）"
+          ],
+          "order": 7,
+          "practice_task": "先用原始 trunk 配置（带 COOP/COEP 头）运行示例观察多线程调度；再把 trunk.toml 中的 headers 删掉重启，对比控制台警告与素数计算的线程数变化，写一段总结两条路径的差异；最后阅读 run_waker_loop，解释为什么 store(0) 之后要再 drain 一次。",
+          "source_files": [
+            "src/dispatcher.rs",
+            "examples/hello_web/main.rs",
+            "examples/hello_web/trunk.toml"
+          ],
+          "title": "WebDispatcher：调度、微任务与 wasm 后台线程",
+          "topic": "精读 dispatcher.rs：MainThreadMailbox 基于 PriorityQueue 和 Atomics（SharedArrayBuffer 上的 Int32 信号量）的主线程邮箱、run_waker_loop 用 Atomics.wait_async 异步等待唤醒、单线程模式下 queue_microtask/setTimeout/requestIdleCallback 的映射、多线程模式下 wasm_thread 后台 worker 池（hardware_concurrency、MIN_BACKGROUND_THREADS）。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l7"
+          ],
+          "filename": "u2-l8-fetch-http-client.md",
+          "id": "u2-l8",
+          "learning_goals": [
+            "解释 FetchHttpClient::send 为什么要把 fetch 派发回主线程执行",
+            "描述 RequestInit 组装（method、credentials、redirect 策略、body 缓冲）与响应头解析过程",
+            "理解 ReadableStreamBody 的 mpsc 泵与 oneshot 取消链路如何支持背压与取消"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "http_client.rs（Fetch 客户端）",
+            "platform.rs（fetch_http_client 工厂）"
+          ],
+          "order": 8,
+          "practice_task": "参照 hello_web 的写法，在示例中新增一个按钮，点击后用 FetchHttpClient 请求一个公开 JSON 接口并把结果渲染到界面上；再实验 with_credentials(FetchCredentials::Include) 观察行为差异（可对照浏览器 Network 面板的请求头）。",
+          "source_files": [
+            "src/http_client.rs",
+            "src/platform.rs"
+          ],
+          "title": "FetchHttpClient：基于浏览器 Fetch 的 HTTP 客户端",
+          "topic": "精读 http_client.rs：HttpClient trait 的实现如何把通用 http 请求翻译成 web_sys Request（FetchCredentials 三档、RedirectPolicy 到 RequestInit 的映射）、为什么请求体要整体缓冲（read_body_to_bytes 的注释）、ReadableStreamBody 用 mpsc 通道泵响应流以及 oneshot 取消信号驱动 reader.cancel 的机制。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 2,
+      "title": "进阶：核心模块源码精读"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u3-l1-platform-capabilities.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "解释 read_from_clipboard_async 依赖用户激活（user activation）与安全上下文的原因及探测逻辑",
+            "追踪 set_cursor_style 的 CursorStyle 到 CSS cursor 映射与隐藏后自动恢复的监听链路",
+            "理解 WebDisplay 的 screen/viewport/default_bounds 计算与窗口外观、全屏、标题的浏览器实现"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "platform.rs（剪贴板与光标）",
+            "display.rs（显示器）",
+            "keyboard.rs（键盘布局）"
+          ],
+          "order": 1,
+          "practice_task": "给示例加一个 \"复制结果\" 按钮，用 GPUI 的剪贴板 API 写入一段文本，再到别的应用粘贴验证；再实现一个只读剪贴板按钮（点击后读取并显示），观察必须在用户手势内调用的限制，最后给一个 div 加 cursor_pointer 样式验证 set_cursor_style 的 CSS 映射。",
+          "source_files": [
+            "src/platform.rs",
+            "src/display.rs",
+            "src/keyboard.rs"
+          ],
+          "title": "平台能力地图：剪贴板、光标、显示器与外观",
+          "topic": "系统梳理 platform.rs/display.rs/keyboard.rs 中剩余的平台能力：异步剪贴板读取（navigator.clipboard 探测、mime type 过滤、NotAllowedError 到 ClipboardReadError 的映射）、同步写入 write_text、CursorStyle 到 CSS cursor 的映射表与 hide_cursor_until_mouse_moves 的恢复监听、WebDisplay 的 screen 与 viewport 尺寸、prefers-color-scheme 外观、WebKeyboardLayout 的占位实现。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l3",
+            "u2-l5"
+          ],
+          "filename": "u3-l2-resource-lifecycle.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "说明 wasm_bindgen Closure 被 JS 持有后 Drop 时机错位导致 \"closure invoked after being dropped\" 的机理与三类防御",
+            "解释 mql_handle 自引用循环与 frame_waker 用 WeakEntity 式弱引用避免泄漏的设计",
+            "理解 with_callback 的 take/call/restore 模式如何避免 RefCell 重入 BorrowMutError"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "window.rs（Drop 与回调机制）",
+            "events.rs（EventListenerHandle）"
+          ],
+          "order": 2,
+          "practice_task": "通读 WebWindow 的 Drop 实现并给每个清理步骤标注对应的泄漏/崩溃风险；然后写一份 \"新增事件监听检查清单\"（closure 存在哪、谁来 Drop、是否成环），并用它审查 register_appearance_change 与 watch_dpr_changes 两处代码。",
+          "source_files": [
+            "src/window.rs",
+            "src/events.rs"
+          ],
+          "title": "资源生命周期：Closure、Rc 循环与重入安全",
+          "topic": "专题分析窗口销毁与内存安全：Drop for WebWindow 中先 cancel_animation_frame、清空 raf_function、断开 ResizeObserver、解除 mql_handle 引用循环再移除 DOM 元素的顺序及其原因；with_callback 的 take/call/restore 重入保护；with_input_handler 的同型模式；frame_waker 用 Rc::downgrade 打破回调循环。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l4",
+            "u2-l7"
+          ],
+          "filename": "u3-l3-browser-compatibility.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "整理一份能力探测清单：requestIdleCallback、devicePixelContentBoxSize、SharedArrayBuffer、Atomics.waitAsync、WebGPU、安全上下文剪贴板",
+            "解释 COOP/COEP（crossOriginIsolated）与共享内存 wasm 线程的依赖关系",
+            "描述图形后端与调度器两条降级链路各自的回退策略与用户可见表现"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "dispatcher.rs（能力探测）",
+            "window.rs（Safari 回退）",
+            "platform.rs（图形降级）"
+          ],
+          "order": 3,
+          "practice_task": "整理一张浏览器兼容矩阵表（Chrome/Firefox/Safari 各探测项的支持情况与代码回退路径）；在 Chrome 上通过删除 COOP/COEP 头制造单线程环境、用 chrome://flags 关闭 WebGPU 制造 WebGL2 回退，分别记录控制台日志证据，对照源码注释验证每条回退分支。",
+          "source_files": [
+            "src/dispatcher.rs",
+            "src/window.rs",
+            "src/platform.rs",
+            "examples/hello_web/trunk.toml"
+          ],
+          "title": "浏览器兼容矩阵与优雅降级",
+          "topic": "汇总 crate 中所有能力探测与降级路径：Safari 无 requestIdleCallback 时退化为普通宏任务、无 devicePixelContentBoxSize 时用 contentRect、无 SharedArrayBuffer/waitAsync 时退化为单线程调度、WebGPU 初始化失败时自动换 canvas 试 WebGL2、非安全上下文无 navigator.clipboard、多窗口/重开窗口不支持等，并说明 COOP/COEP 头是开启这些能力的部署前提。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l3",
+            "u2-l8"
+          ],
+          "filename": "u3-l4-build-your-own-app.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "独立搭建一个基于 gpui/gpui_platform/gpui_web 的 trunk 工程",
+            "组合运用后台任务（background_spawn）、网络请求（FetchHttpClient）与事件处理构建完整应用",
+            "总结浏览器平台与桌面平台的能力差异，形成技术选型判断"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "examples/hello_web（脚手架参考）",
+            "gpui_web.rs（API 面）"
+          ],
+          "order": 4,
+          "practice_task": "从零创建一个新的 trunk 工程（可复制 hello_web 的 Cargo.toml/trunk.toml/index.html/.cargo 配置作为起点），实现一个带输入框、按钮、后台任务和网络请求的小应用——例如：输入关键词，点按钮后后台线程做计算/清洗，同时用 FetchHttpClient 拉取公开 API，结果渲染成列表；部署时确认响应头满足 crossOriginIsolated 要求。",
+          "source_files": [
+            "examples/hello_web/main.rs",
+            "examples/hello_web/Cargo.toml",
+            "examples/hello_web/trunk.toml",
+            "examples/hello_web/index.html",
+            "examples/hello_web/.cargo/config.toml",
+            "src/gpui_web.rs"
+          ],
+          "title": "综合实践：构建你自己的 GPUI Web 应用",
+          "topic": "收官实战：以 hello_web 为脚手架，从零创建一个新的 trunk 工程，综合运用本手册全部知识——入口装配、图形后端选择、窗口与事件、后台线程、FetchHttpClient、剪贴板与光标——完成一个完整的小应用，并理解部署时所需的 COOP/COEP 头与 wasm 构建配置。"
+        }
+      ],
+      "level": "advanced",
+      "order": 3,
+      "title": "专家：能力边界、兼容性与二次开发"
+    }
+  ]
+}
