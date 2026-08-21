@@ -1,7 +1,7 @@
 {
-  "head": "fe9556a11e9cc9dbc78686041aa524d6932879db",
+  "head": "91bf967e279fba3b326c096aeb66053cb2373547",
   "project": "zed-crates-gpui",
-  "rationale": "增量分析：b0e37a6c..fe9556a11e 区间共 6 个提交，其中没有任何一个改动 crates/gpui——对该目录的 git diff 输出为空（0 个文件、0 字节），src/、examples/、docs/、Cargo.toml 全部逐字节不变，因此不存在代码漂移，所有已生成讲义的论断与源码链接（钉在内容一致的提交上）均继续成立。区间内两个标题带 gpui 字样的提交都不在本 crate 范围：fe9556a11e 只改 crates/ztracing（web 端 performance API 映射）与 Cargo.lock，f4178619ac 只改 crates/gpui_linux（X11 事件排空），均为兄弟 crate，讲义未引用其源码。讲义目录方面：上一轮之后 worker 又生成了 u5-l6（拖放与手势）、u6-l1（uniform_list）、u6-l2（变高 list）、u6-l3（deferred/anchored）、u6-l4（动画与弹簧）五篇且均带 summary 文件，至此 u1–u6 前四讲共 28 篇讲义已生成并与当前代码树一致，本轮全部标 keep；剩余 11 篇（u6-l5..u6-l8、u7-l1..u7-l7）尚未生成，维持 new，其引用的源码路径（含 profiler/journal.rs、profiler/hang.rs、text_system/line_layout.rs 等）已逐一确认仍存在。学习路线、七单元结构、依赖关系与讲义顺序均不变。",
+  "rationale": "增量分析：fe9556a11e..91bf967e27 区间共 2 个提交（91bf967e27 inspector flag、f5e87e5343 settings_ui Clear 按钮），改动仅涉及 crates/inspector_ui、crates/ui、crates/zed、crates/settings_ui 四个兄弟 crate，对 crates/gpui 的 git diff 为空（0 文件、0 字节），src/、examples/、tests/、docs/、Cargo.toml 逐字节不变，不存在代码漂移，所有已生成讲义的论断与源码链接均继续成立。其中 91bf967e27 标题里的 inspector 指 zed 主程序的 inspector_ui 开关，与 gpui 自身的 src/inspector.rs（u7-l5 引用）无关，该文件未受影响。讲义目录方面：上一轮之后 worker 又生成了 u6-l5（文本系统）、u6-l6（line_wrapper）、u6-l7（图片与资源缓存）、u6-l8（AccessKit）与 u7-l1（Platform 抽象）五篇且均带 summary 文件，至此 u1–u6 全部 27 篇加 u7-l1 共 33 篇讲义已生成并与当前代码树一致，本轮全部标 keep；剩余 6 篇（u7-l2..u7-l7）尚未生成，维持 new，其引用的源码路径（含 window/prompts.rs、platform/app_menu.rs、app/test_context.rs、app/bench_context.rs、debug_overlay.rs、inspector.rs、profiler/journal.rs、profiler/hang.rs、examples/tree.rs 等）已逐一确认仍存在。学习路线、七单元结构、依赖关系与讲义顺序均不变。",
   "units": [
     {
       "id": "u1",
@@ -867,7 +867,7 @@
           "topic": "讲解 GPUI 动画：AnimationExt 的 with_animation、插值 trait、spring.rs 中的阻尼弹簧模拟，以及 AnimationPhase 的循环动画支持。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l5"
           ],
@@ -898,7 +898,7 @@
           "topic": "分析 TextSystem 与 WindowTextSystem 的双层结构、字体加载与 fallback、Line/TextRun 的行布局模型，以及字形如何进入图集渲染；并讲解 ShapedLine 与 LineLayout 的分层——ShapedLine::split_at 现在委托给新增的 LineLayout::split_at，配合 LineLayout::paint/paint_background（显式传入 DecorationRun），调用方可以只持有轻量的 Arc<LineLayout> 自己管理装饰，避免近 3KB 的 ShapedLine 在碎片化拼行时反复搬运与重分配。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l5"
           ],
@@ -926,7 +926,7 @@
           "topic": "line_wrapper.rs 有 1500+ 行，专门解决按宽度断行：讲解 wrap 算法、缓存句柄 LineWrapperHandle、与像素宽度测量的配合。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l5"
           ],
@@ -958,7 +958,7 @@
           "topic": "串讲资源体系：AssetSource 资产源、image_cache 的加载去重与缓存、Img 元素的尺寸策略、SvgRenderer 与 resvg 集成。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l2"
           ],
@@ -994,7 +994,7 @@
       "id": "u7",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l3"
           ],

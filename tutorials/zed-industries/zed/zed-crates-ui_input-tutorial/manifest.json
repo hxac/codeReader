@@ -1,0 +1,372 @@
+{
+  "head": "91bf967e279fba3b326c096aeb66053cb2373547",
+  "project": "zed-crates-ui_input",
+  "rationale": "ui_input 是一个小而精的 GPUI 表单组件 crate（仅 ui_input.rs 与 input_field.rs 两个源文件），但它的核心价值不在代码量，而在两件事：一是可复用的 InputField 表单组件本身，二是通过 ErasedEditor trait + ERASED_EDITOR_FACTORY 全局工厂实现的依赖反转（让 ui 体系不必依赖庞大的 editor crate）。因此学习路线先让读者从零认识 crate 的定位、目录与运行预览方式（第一单元），再逐层拆解 InputField 的数据模型、渲染布局与交互状态（第二单元），然后深入 ErasedEditor 类型擦除抽象、工厂注入机制与 Zed 仓库中的三类真实消费场景（第三单元），最后进入注册体系、自定义表单组件开发与架构取舍等二次开发主题（第四单元）。每一讲都锚定真实源码（crate 内两个文件加上 editor、component、workspace、language_models、settings_ui、picker 等上下游关键文件），并配一个可直接动手的实践任务，形成从『会用』到『读懂』再到『能写』的渐进路径。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 ui_input crate 的用途和它在 Zed crate 依赖图中的位置",
+            "解释 crate 根模块文档注释中『不能放进 ui crate』的原因",
+            "列出 ErasedEditor trait 暴露的主要能力（文本读写、焦点、订阅、渲染、类型擦除）",
+            "对照 Cargo.toml 说出三个依赖（component、gpui、ui）各自承担的角色"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "crate 根模块与模块文档",
+            "Cargo.toml 依赖声明",
+            "ErasedEditor trait 方法清单",
+            "input_field 子模块"
+          ],
+          "order": 1,
+          "practice_task": "阅读 src/ui_input.rs 和 Cargo.toml，手工画出 ui_input、ui、component、editor 之间的依赖与『依赖反转』关系图（editor 在运行期通过工厂注入），并列出 ErasedEditor trait 的全部方法并按『文本操作 / 焦点 / 事件订阅 / 渲染』分组。",
+          "source_files": [
+            "src/ui_input.rs",
+            "src/input_field.rs",
+            "Cargo.toml"
+          ],
+          "title": "项目概览：ui_input 是什么、为什么存在",
+          "topic": "介绍 ui_input crate 的定位：为表单场景（搜索框、表单字段等）提供 UI 组件；解释它为什么不能放进 ui crate（因为它依赖 editor）；梳理两个源文件和三个依赖（component、gpui、ui）构成的最小 crate 结构。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-component-preview.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "使用 workspace: open component preview 命令查看 InputField 的实际渲染效果",
+            "说明 Component trait 的 preview 方法与 ComponentScope::Input 的作用",
+            "理解 example_group / single_example 布局助手如何组织预览内容",
+            "了解 component::init 与 inventory 分布式注册的基本流程"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Component trait 与 preview 方法",
+            "ComponentRegistry 与注册流程",
+            "example_group / single_example 布局助手",
+            "component_preview 入口"
+          ],
+          "order": 2,
+          "practice_task": "克隆并构建 Zed，运行后执行 `workspace: open component preview`，在 Forms & Input 分区中找到 InputField，截图或记录 Small Label 与 Regular Label 两个示例；再对照 src/input_field.rs 中 preview 的代码，标出屏幕上每个示例对应 single_example 的哪一次调用。",
+          "source_files": [
+            "src/input_field.rs",
+            "../component/src/component.rs",
+            "../component/src/component_layout.rs",
+            "../component_preview/src/component_preview.rs"
+          ],
+          "title": "运行与预览：通过组件预览系统看到 InputField",
+          "topic": "讲解如何在 Zed 中实际看到 InputField 组件：Component trait 的 preview 实现、ComponentScope::Input 分类、example_group/single_example 预览布局，以及 component_preview 面板的注册机制。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "初识 ui_input：定位、结构与预览"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u2-l1-builder-api.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "逐一说出 InputField 结构体字段（label、placeholder、editor、start_icon、min_width、tab_index、tab_stop、masked、error）的含义",
+            "解释 InputField::new 如何通过 ERASED_EDITOR_FACTORY 创建底层编辑器并设置占位文本",
+            "掌握 builder 风格链式 API 的惯用法",
+            "理解 Focusable 实现如何把焦点委托给内部 editor"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "InputField 结构体定义",
+            "InputField::new 与工厂调用",
+            "builder 链式方法",
+            "Focusable 委托实现"
+          ],
+          "order": 1,
+          "practice_task": "在 Zed 仓库中找一个使用 InputField 的消费者（如 workspace 的 security_modal 或 language_models 的 provider 配置页），仿照它的写法编写一段代码：创建一个带 label、start_icon、masked 的 InputField，并分别用 text()/set_text()/is_empty() 完成一次读取和一次回填。",
+          "source_files": [
+            "src/input_field.rs",
+            "src/ui_input.rs",
+            "../workspace/src/security_modal.rs"
+          ],
+          "title": "InputField 的数据模型与 Builder API",
+          "topic": "逐字段拆解 InputField 结构体，讲解 builder 风格的链式配置方法（label、label_size、label_min_width、start_icon、tab_index、tab_stop、masked），以及 new 中通过工厂创建 editor、Focusable 委托和 text/set_text/clear 等委托方法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-render-layout.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "读懂 render 中 v_flex + h_flex 的两层布局结构与 gap/padding/rounded 等样式方法",
+            "说明 InputFieldStyle 三个颜色如何来自 cx.theme().colors() 以及焦点时如何切换 border_focused",
+            "掌握 .when / .when_some 条件渲染的用法",
+            "理解 start_icon 如何作为第一个 child 插入、editor.render 如何作为 AnyElement 嵌入"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Render 实现",
+            "InputFieldStyle 与主题色",
+            "when / when_some 条件渲染",
+            "start_icon 与 editor.render 的嵌入"
+          ],
+          "order": 2,
+          "practice_task": "在本仓库做一个练习性修改（不必提交）：给 InputField 增加一个 end_icon: Option<IconName> 字段与对应 builder 方法，在 render 中把它渲染到编辑器之后，构建后通过 component preview 或 settings 页面验证图标出现在输入框末尾。",
+          "source_files": [
+            "src/input_field.rs"
+          ],
+          "title": "render 方法拆解：布局、主题与条件样式",
+          "topic": "逐段阅读 InputField 的 Render 实现：v_flex/h_flex 布局层级、InputFieldStyle 如何从主题取色、焦点态边框切换、start_icon 的条件渲染，以及 when/when_some 组合子与 Tailwind 风格样式方法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-focus-error-masked.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "解释 track_focus 与 Focusable::focus_handle 委托如何让外层容器响应键盘事件",
+            "说明 tab_index 与 tab_stop 两个配置如何组合出三种焦点行为",
+            "掌握 set_error 的错误边框 + 红色提示文案的渲染逻辑",
+            "读懂 masked 眼睛按钮中 cx.listener 闭包如何翻转状态并调用 editor.set_masked"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "track_focus 与 tab 配置逻辑",
+            "set_error 与错误样式",
+            "masked 切换按钮与 cx.listener",
+            "cx.notify 状态刷新"
+          ],
+          "order": 3,
+          "practice_task": "构建一个包含两个 InputField 的简单视图：第一个通过 tab_index(0) 与 tab_stop(true) 排在 Tab 顺序最前，第二个通过 tab_stop(false) 不可 Tab 聚焦；再为第一个字段调用 set_error(Some(\"必填项\")) 并运行验证红色边框与提示文案，随后用 set_error(None) 清除。",
+          "source_files": [
+            "src/input_field.rs",
+            "src/ui_input.rs"
+          ],
+          "title": "交互状态：焦点、Tab 顺序、错误提示与 masked 切换",
+          "topic": "聚焦 InputField 的交互细节：track_focus 与 tab_index/tab_stop 的组合逻辑、set_error 驱动的红色边框与错误子文案、masked 输入的眼睛切换按钮（IconButton + Tooltip + cx.listener）以及 cx.notify 触发重渲染。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 2,
+      "title": "InputField 组件本体：模型、渲染与交互"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u3-l1-erased-editor-trait.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "解释为什么 InputField 不能直接持有 Entity<Editor> 而要用 Arc<dyn ErasedEditor>",
+            "把 trait 方法按文本操作、焦点、事件订阅、渲染、类型擦除分类",
+            "说明 ErasedEditorEvent 只保留 BufferEdited 和 Blurred 两个事件的取舍",
+            "理解 ErasedEditorImpl 通过 Entity<Editor> 委托实现 trait 的方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ErasedEditor trait 定义",
+            "ErasedEditorEvent 事件枚举",
+            "editor crate 中的 ErasedEditorImpl",
+            "subscribe 的回调转发"
+          ],
+          "order": 1,
+          "practice_task": "对照 src/ui_input.rs 的 trait 定义与 editor.rs 中 ErasedEditorImpl 的实现，整理一张『trait 方法 → Editor 等价方法』的对照表；再写一段示例代码，用 as_any 加 Any::downcast_ref 把 Arc<dyn ErasedEditor> 还原为 &Entity<Editor>，验证类型擦除是可逆的。",
+          "source_files": [
+            "src/ui_input.rs",
+            "../editor/src/editor.rs"
+          ],
+          "title": "ErasedEditor trait 与事件模型：类型擦除的艺术",
+          "topic": "深入 crate 根模块定义的 ErasedEditor trait：为什么需要把 Editor 类型擦除成 trait 对象、方法如何分类（文本读写、占位、掩码、只读、多行、焦点、订阅、渲染、as_any），以及 ErasedEditorEvent 的 BufferEdited/Blurred 两个事件。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-editor-factory.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "解释 OnceLock 全局静态工厂的类型签名与只能设置一次的特性",
+            "找到 editor crate 初始化工厂的确切代码位置与初始化时机",
+            "复述『ui 不能依赖 editor』导致的循环依赖问题及本方案的解法",
+            "说明 InputField::new 在工厂未初始化时 expect 直接 panic 的前提假设"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ERASED_EDITOR_FACTORY 静态定义",
+            "editor::init 中的工厂注册",
+            "InputField::new 的工厂调用",
+            "循环依赖与依赖反转"
+          ],
+          "order": 2,
+          "practice_task": "用 grep 在 Zed 仓库中找出所有读取 ERASED_EDITOR_FACTORY 的调用点（至少包括 InputField::new 与 picker 的 Head::editor），再画出『应用启动 → editor::init 设置工厂 → UI 组件消费工厂』的时序图，并回答：如果某个测试环境没有调用 editor::init，创建 InputField 会发生什么。",
+          "source_files": [
+            "src/ui_input.rs",
+            "../editor/src/editor.rs",
+            "src/input_field.rs",
+            "../picker/src/head.rs"
+          ],
+          "title": "ERASED_EDITOR_FACTORY：用全局工厂打破循环依赖",
+          "topic": "讲解 crate 级静态 ERASED_EDITOR_FACTORY（OnceLock<fn>）如何由 editor crate 在 init 时注入 SingleLine Editor，从而让 ui_input 不必编译期依赖 editor；分析这种服务定位器模式的初始化时机与失败模式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1"
+          ],
+          "filename": "u3-l3-real-world-usage.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "掌握三种典型消费模式：简单表单、预填配置、事件订阅驱动校验",
+            "理解弱引用 + Result 错误处理如何避免实体悬垂与 unwrap panic",
+            "掌握 ErasedEditorEvent::BufferEdited 驱动重算校验的完整链路",
+            "学会用 set_error 反馈校验结果、用 set_text 在失焦外的时机回填文本"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "subscribe + Box 闭包订阅模式",
+            "weak_entity 弱引用更新",
+            "set_text 预填与 set_error 校验",
+            "多输入字段组织"
+          ],
+          "order": 3,
+          "practice_task": "模仿 skill_creator 的订阅模式编写一个完整示例：创建一个带 label 的 Entity<InputField>，通过 editor().subscribe 监听 BufferEdited，在回调里判断 text() 是否为空，为空时调用 set_error(Some(\"不能为空\"))，非空时清除错误，并确保 Subscription 被存放在字段中不被提前 drop。",
+          "source_files": [
+            "../workspace/src/security_modal.rs",
+            "../language_models/src/provider/llama_cpp.rs",
+            "../settings_ui/src/pages/skill_creator.rs",
+            "src/input_field.rs",
+            "src/ui_input.rs"
+          ],
+          "title": "消费方实战：Zed 仓库中的三种真实用法",
+          "topic": "通过三个真实消费者学习 InputField 的惯用法：workspace security_modal 的最简表单、language_models llama_cpp ConfigurationView 的 set_text 预填多个字段，以及 settings_ui skill_creator 中 editor().subscribe(Box::new(...)) + cx.weak_entity 的事件订阅模式。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "ErasedEditor 抽象与工厂注入"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u4-l1-component-registry.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "掌握 Component trait 各默认方法（id、scope、status、name、sort_name、description、preview）的职责",
+            "解释 RegisterComponent derive 借助 inventory 的分布式注册如何在 component::init 时生效",
+            "说明 ComponentScope 与 ComponentStatus 如何影响预览的分组与展示",
+            "学会用 example_group / single_example 组织多个预览变体"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Component trait 完整定义",
+            "RegisterComponent derive 与 inventory",
+            "ComponentScope / ComponentStatus",
+            "ComponentRegistry 与组件元数据"
+          ],
+          "order": 1,
+          "practice_task": "在 InputField::preview 中新增第三个 single_example：一个 .masked(true).label(\"API Key\") 的示例，重新构建并打开 component preview，验证新变体出现在 Forms & Input 分区中；再尝试给某个组件设置 ComponentStatus::WorkInProgress 并观察面板上的状态标注。",
+          "source_files": [
+            "../component/src/component.rs",
+            "../component/src/component_layout.rs",
+            "src/input_field.rs"
+          ],
+          "title": "Component 注册体系深入：从 derive 到预览面板",
+          "topic": "系统讲解 component crate 的注册体系：Component trait 的全部方法、#[derive(RegisterComponent)] 与 inventory 分布式切片注册、ComponentScope/ComponentStatus 的分组与状态语义，以及 ComponentRegistry 元数据如何被 component_preview 面板消费。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3",
+            "u3-l1"
+          ],
+          "filename": "u4-l2-custom-form-component.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "以 InputField 为模板独立实现一个表单组件（结构体 + builder + Render + Focusable）",
+            "正确复用 ErasedEditor 作为底层文本编辑能力",
+            "为新组件实现 Component trait 并通过 derive 注册进预览面板",
+            "理解 set_read_only、set_multiline 等 trait 扩展能力如何映射到组件配置"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "新组件结构体设计",
+            "Render + Focusable 实现",
+            "Component 实现",
+            "Cargo.toml 模块声明"
+          ],
+          "order": 2,
+          "practice_task": "在本地仓库的 ui_input crate 中新增 number_field.rs：实现 NumberField 组件，内部持有 Arc<dyn ErasedEditor>，左右各一个 IconButton 做数值步进（解析 text() 为 f64 后 set_text 回写），实现 Render、Focusable 与 Component（注册到 ComponentScope::Input），并在 ui_input.rs 中声明模块、通过 component preview 验证效果。",
+          "source_files": [
+            "src/input_field.rs",
+            "src/ui_input.rs",
+            "Cargo.toml"
+          ],
+          "title": "构建你自己的表单组件：二次开发实战",
+          "topic": "以 InputField 为模板，学习如何在 ui_input crate 中新增一个自定义表单组件（如带步进按钮的 NumberField）：复用 ERASED_EDITOR_FACTORY 创建的 ErasedEditor、实现 builder API 与 Render、并通过 RegisterComponent 注册预览。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2",
+            "u4-l2"
+          ],
+          "filename": "u4-l3-architecture-tradeoffs.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "列举类型擦除带来的成本与补偿手段（as_any、Box 回调、String 拷贝）",
+            "评估全局 OnceLock 工厂相对 trait 注入 / 泛型参数等替代方案的优劣",
+            "说明 picker 等基础设施如何复用同一 ErasedEditor 抽象",
+            "为 ui_input 这类无测试 crate 设计消费者层测试策略"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "类型擦除的成本分析",
+            "工厂注入的备选方案对比",
+            "picker 对 ErasedEditor 的复用",
+            "测试策略"
+          ],
+          "order": 3,
+          "practice_task": "撰写一份简短的设计分析（可作为学习笔记）：对比『全局 OnceLock 工厂 + trait 对象』与『泛型参数 InputField<E: Editor>』两种设计方案在编译时间、API 复杂度、可测试性上的差异；并使用 gpui 的测试设施（TestAppContext/VisualTestContext）为消费者写一个针对 InputField is_empty 与 set_error 行为的测试，或在笔记中说明该 crate 缺少测试时如何在消费层覆盖这些行为。",
+          "source_files": [
+            "src/ui_input.rs",
+            "src/input_field.rs",
+            "../picker/src/head.rs",
+            "../editor/src/editor.rs"
+          ],
+          "title": "架构取舍与边界：擦除成本、复用与测试策略",
+          "topic": "总结 ui_input 的架构取舍：类型擦除的运行期成本（String 拷贝、Box<dyn FnMut> 回调、as_any 向下转型）、全局工厂与依赖反转的利弊、picker Head 等基础设施对 ErasedEditor 的复用，以及 crate 本身缺少单元测试时的测试策略。"
+        }
+      ],
+      "level": "advanced",
+      "order": 4,
+      "title": "高级主题：注册体系、二次开发与架构取舍"
+    }
+  ]
+}

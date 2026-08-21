@@ -1,14 +1,13 @@
 {
-  "head": "fe9556a11e9cc9dbc78686041aa524d6932879db",
+  "head": "91bf967e279fba3b326c096aeb66053cb2373547",
   "project": "zed-crates-gpui_macros",
-  "rationale": "gpui_macros 是 GPUI 框架的\"宏引擎\"，本身是一个纯 proc-macro crate（仅 syn/quote/proc-macro2/heck 四个依赖），但每个宏都在 gpui 运行时中有明确的对应物。因此学习顺序设计为：先用第一单元建立\"proc-macro 是什么、这个 crate 提供哪些宏、它们被 gpui 用在哪里\"的全局地图；第二单元进入最复杂、最具代表性的 Action 派生宏（属性解析与代码生成分开两讲，再讲 inventory 自动注册机制），并顺带覆盖最简单的 IntoElement/Render 派生作为对比；第三单元讲两个\"字段委托\"型派生宏 AppContext/VisualContext（它们展示了如何用属性定位字段并生成大量委托方法），以及体量最大的 styles.rs 样式方法批量生成系统（Tailwind 风格前缀×后缀组合）；第四单元进入专家层，拆解 #[gpui::test] 的参数解析与生成的测试骨架、#[gpui::bench] 基准宏、#[gpui::property_test] 属性测试宏，最后以条件编译的 #[derive_inspector_reflection] 收尾（它需要先理解样式宏，因为它会在 trait 内展开这些宏）。依赖关系按\"先机制后应用\"排列，每篇讲义都锚定真实源码文件并给出可在本地编译验证的实践任务。",
+  "rationale": "gpui_macros 是 GPUI 框架的\"宏引擎\"，本身是一个纯 proc-macro crate（仅 syn/quote/proc-macro2/heck 四个依赖），但每个宏都在 gpui 运行时中有明确的对应物。因此学习顺序设计为：先用第一单元建立\"proc-macro 是什么、这个 crate 提供哪些宏、它们被 gpui 用在哪里\"的全局地图；第二单元进入最复杂、最具代表性的 Action 派生宏（属性解析与代码生成分开两讲，再讲 inventory 自动注册机制），并顺带覆盖最简单的 IntoElement/Render 派生作为对比；第三单元讲两个\"字段委托\"型派生宏 AppContext/VisualContext（它们展示了如何用属性定位字段并生成大量委托方法），以及体量最大的 styles.rs 样式方法批量生成系统（Tailwind 风格前缀×后缀组合）；第四单元进入专家层，拆解 #[gpui::test] 的参数解析与生成的测试骨架、#[gpui::bench] 基准宏、#[gpui::property_test] 属性测试宏，最后以条件编译的 #[derive_inspector_reflection] 收尾（它需要先理解样式宏，因为它会在 trait 内展开这些宏）。依赖关系按\"先机制后应用\"排列，每篇讲义都锚定真实源码文件并给出可在本地编译验证的实践任务。增量说明：对比上次 HEAD（fe9556a11e）与当前 HEAD（91bf967e27），crates/gpui_macros 与其引用的 crates/gpui 源码（styled.rs、action.rs、test.rs、inspector.rs、gpui.rs、elements/div.rs）完全零改动；本次新增的 inspector flag（zed/inspector_ui/ui 中的 feature 接线与 StyledExt 属性门控变化）只发生在下游使用侧 crate，不影响任何讲义所锚定的宏实现源码与结论，因此全部讲义标记为 keep，仅更新 head。",
   "units": [
     {
       "id": "u1",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -33,7 +32,7 @@
           "topic": "介绍 gpui_macros crate 的定位：它是 gpui 框架专属的 proc-macro 库，为 GPUI 提供 Action 派生、样式方法生成、测试与基准宏等能力。讲解 Cargo.toml 中的 proc-macro = true、[lib] path、inspector feature，以及 gpui_macros.rs 作为唯一库入口的模块组织。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -61,7 +60,7 @@
           "topic": "讲解 Rust 过程宏的三种形式（派生宏、属性宏、函数式宏），以及 gpui_macros 如何用 #[proc_macro_derive]、#[proc_macro_attribute]、#[proc_macro] 声明入口并转发到内部模块。同时介绍 syn 解析、quote 生成、proc_macro2 TokenStream 的基本工作流。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -89,15 +88,15 @@
           "topic": "通读 gpui_macros 导出的全部宏（Action、register_action、IntoElement、Render、AppContext、VisualContext、8 个样式宏、test、bench、property_test、derive_inspector_reflection），并对照 gpui crate 中的真实调用点（如 Styled trait、actions! 宏）建立全景索引。"
         }
       ],
+      "level": "beginner",
       "order": 1,
       "title": "单元一：认识 gpui_macros"
     },
     {
       "id": "u2",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2",
             "u1-l3"
@@ -125,7 +124,7 @@
           "topic": "深入 derive_action.rs 的属性解析阶段：如何用 parse_nested_meta 识别 name、namespace、no_json、no_register、deprecated_aliases、deprecated 参数，如何提取 doc 注释，以及名称拼接与 `::` 禁止规则。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -152,7 +151,7 @@
           "topic": "逐行拆解 derive_action.rs 生成的 impl gpui::Action 代码：partial_eq 的向下转型、boxed_clone、build 的 serde_json 反序列化、action_json_schema 的 schemars 分支，以及 deprecated_aliases/deprecation_message/documentation 元数据方法。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -180,7 +179,7 @@
           "topic": "讲解 register_action.rs 中的 generate_register_action：生成隐藏的构建函数、通过 inventory::submit! 提交 MacroActionBuilder，以及 gpui 侧如何用 inventory 收集全部 action；同时分析 gpui 的 actions! 声明宏如何在其上封装。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -209,15 +208,15 @@
           "topic": "分析 crate 中代码量最少的两个派生宏：IntoElement 如何为 RenderOnce 类型生成 ViewElement 包装实现，Render 派生为何生成返回 gpui::Empty 的默认实现；并讲解 split_for_impl 对泛型的正确处理。"
         }
       ],
+      "level": "intermediate",
       "order": 2,
       "title": "单元二：Action 与元素派生宏"
     },
     {
       "id": "u3",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -246,7 +245,7 @@
           "topic": "讲解 derive_app_context.rs：如何通过 #[app] 属性在结构体中定位持有 &mut App 的字段，并为 gpui::AppContext trait 的所有方法生成委托实现；以及缺失属性时用 compile_error! 报错的模式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -275,7 +274,7 @@
           "topic": "讲解 derive_visual_context.rs：同时要求 #[app] 与 #[window] 两个属性字段，生成的实现如何在 AppContext 之上组合 Window 能力，特别是 update_window_entity/new_window_entity 中对闭包参数的重组技巧。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2",
             "u1-l3"
@@ -303,15 +302,15 @@
           "topic": "解析体量最大的 styles.rs：StyleableMacroInput 的可选 visibility 输入、generate_predefined_setter 与 generate_custom_value_setter 两种代码生成器、负值 _neg 变体，以及 margin/padding/position/size/corner/border 前缀表与尺寸后缀表如何组合出 Tailwind 风格的方法族。"
         }
       ],
+      "level": "intermediate",
       "order": 3,
       "title": "单元三：上下文派生与样式方法生成"
     },
     {
       "id": "u4",
-      "level": "advanced",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -338,7 +337,7 @@
           "topic": "拆解 test.rs 的参数解析与函数改写：Args 的 Parse 实现如何处理 seed/seeds/iterations/retries/on_failure，被标注函数如何被重命名为 __ 前缀的内层函数，以及原有属性如何转移到生成的外层 #[test] 函数上。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -365,7 +364,7 @@
           "topic": "拆解 test.rs 生成的完整测试骨架：根据函数签名按类型注入 TestAppContext/App/StdRng/BackgroundExecutor，gpui::run_test 的调度与种子机制，teardown 阶段的 run_until_parked、forbid_parking、quit 与 drain_tasks，以及同步与异步两条生成路径的差异。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2",
             "u1-l3"
@@ -393,7 +392,7 @@
           "topic": "讲解 bench.rs：如何把标注函数改写成接收 &mut criterion::Criterion 的标准基准函数，fps/inputs/input_name/group/sample_size 参数的解析与依赖校验，以及生成的 BenchAppContext、headless renderer 接线和帧预算报告。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1",
             "u4-l2"
@@ -422,7 +421,7 @@
           "topic": "拆解 property_test.rs：宏如何拦截 config 与 proptest_path 参数、注入种子 strategy、把 TestAppContext/BackgroundExecutor 参数抽出后将其余参数转发给 proptest 的宏，以及为什么 StdRng 参数被显式禁止。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2",
             "u3-l3"
@@ -449,9 +448,10 @@
             "crates/gpui/src/styled.rs"
           ],
           "title": "#[derive_inspector_reflection]：trait 方法运行时反射",
-          "topic": "讲解条件编译的 derive_inspector_reflection.rs：如何筛选 fn(self) -> Self 形状的 trait 方法、生成类型擦除的 wrapper 函数与 FunctionReflection 表、为什么需要 MacroExpander 先展开 trait 内的样式宏，以及 CARGO_PKG_NAME 启发式区分 gpui 内部与外部调用。"
+          "topic": "讲解条件编译的 derive_inspector_reflection.rs：如何筛选 fn(self) -> Self 形状的 trait 方法、生成类型擦除的 wrapper 函数与 FunctionReflection 表、为什么需要 MacroExpander 先展开 trait 内的样式宏，以及 CARGO_PKG_NAME 启发式区分 gpui 内部与外部调用。可补充说明：本次提交在下游 crate（zed 的 inspector feature）中新增了 ui/derive_inspector_reflection 接线，使该宏在非 debug 构建下也能被应用，但宏实现本身未变。"
         }
       ],
+      "level": "advanced",
       "order": 4,
       "title": "单元四：测试、基准、属性测试与反射宏"
     }
