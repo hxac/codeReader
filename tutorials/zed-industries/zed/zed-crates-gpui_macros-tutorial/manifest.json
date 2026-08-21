@@ -1,0 +1,459 @@
+{
+  "head": "91bf967e279fba3b326c096aeb66053cb2373547",
+  "project": "zed-crates-gpui_macros",
+  "rationale": "gpui_macros 是 GPUI 框架的\"宏引擎\"，本身是一个纯 proc-macro crate（仅 syn/quote/proc-macro2/heck 四个依赖），但每个宏都在 gpui 运行时中有明确的对应物。因此学习顺序设计为：先用第一单元建立\"proc-macro 是什么、这个 crate 提供哪些宏、它们被 gpui 用在哪里\"的全局地图；第二单元进入最复杂、最具代表性的 Action 派生宏（属性解析与代码生成分开两讲，再讲 inventory 自动注册机制），并顺带覆盖最简单的 IntoElement/Render 派生作为对比；第三单元讲两个\"字段委托\"型派生宏 AppContext/VisualContext（它们展示了如何用属性定位字段并生成大量委托方法），以及体量最大的 styles.rs 样式方法批量生成系统（Tailwind 风格前缀×后缀组合）；第四单元进入专家层，拆解 #[gpui::test] 的参数解析与生成的测试骨架、#[gpui::bench] 基准宏、#[gpui::property_test] 属性测试宏，最后以条件编译的 #[derive_inspector_reflection] 收尾（它需要先理解样式宏，因为它会在 trait 内展开这些宏）。依赖关系按\"先机制后应用\"排列，每篇讲义都锚定真实源码文件并给出可在本地编译验证的实践任务。增量说明：对比上次 HEAD（fe9556a11e）与当前 HEAD（91bf967e27），crates/gpui_macros 与其引用的 crates/gpui 源码（styled.rs、action.rs、test.rs、inspector.rs、gpui.rs、elements/div.rs）完全零改动；本次新增的 inspector flag（zed/inspector_ui/ui 中的 feature 接线与 StyledExt 属性门控变化）只发生在下游使用侧 crate，不影响任何讲义所锚定的宏实现源码与结论，因此全部讲义标记为 keep，仅更新 head。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 gpui_macros 在 Zed/GPUI 架构中的角色和依赖边界",
+            "理解 proc-macro = true 与 [lib] path 的含义",
+            "掌握本 crate 的构建与测试方式"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "crate 定位与 Cargo.toml 结构",
+            "库入口 gpui_macros.rs 的模块组织",
+            "构建与测试命令"
+          ],
+          "order": 1,
+          "practice_task": "在 zed 仓库根目录执行 cargo build -p gpui_macros 和 cargo test -p gpui_macros，记录测试列表；再对照 src/gpui_macros.rs 中的 mod 声明画出\"宏入口 -> 实现文件\"的对应关系图。",
+          "source_files": [
+            "crates/gpui_macros/Cargo.toml",
+            "crates/gpui_macros/src/gpui_macros.rs"
+          ],
+          "title": "gpui_macros 是什么：GPUI 背后的宏引擎",
+          "topic": "介绍 gpui_macros crate 的定位：它是 gpui 框架专属的 proc-macro 库，为 GPUI 提供 Action 派生、样式方法生成、测试与基准宏等能力。讲解 Cargo.toml 中的 proc-macro = true、[lib] path、inspector feature，以及 gpui_macros.rs 作为唯一库入口的模块组织。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-proc-macro-fundamentals.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "区分 derive、attribute、function-like 三类过程宏及其在 gpui_macros.rs 中的标注方式",
+            "理解 proc-macro2/syn/quote 三件套的分工",
+            "学会用 cargo expand 观察宏展开结果"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "三类过程宏的声明语法",
+            "syn 解析与 quote 生成的基本套路",
+            "cargo expand 工具"
+          ],
+          "order": 2,
+          "practice_task": "安装 cargo-expand 后执行 cargo expand -p gpui_macros --test render_test，把 #[derive(Render)] 展开后的 impl 代码抄写下来，与 src/derive_render.rs 中 quote! 的内容逐行对照，标注每一行来自 quote 模板的哪个片段。",
+          "source_files": [
+            "crates/gpui_macros/src/gpui_macros.rs",
+            "crates/gpui_macros/src/derive_render.rs",
+            "crates/gpui_macros/tests/render_test.rs"
+          ],
+          "title": "过程宏基础：syn、quote 与三类宏入口",
+          "topic": "讲解 Rust 过程宏的三种形式（派生宏、属性宏、函数式宏），以及 gpui_macros 如何用 #[proc_macro_derive]、#[proc_macro_attribute]、#[proc_macro] 声明入口并转发到内部模块。同时介绍 syn 解析、quote 生成、proc_macro2 TokenStream 的基本工作流。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-macro-inventory-map.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "列出 gpui_macros 导出的全部宏及各自类别",
+            "在 gpui crate 中定位每个宏的真实调用点",
+            "建立\"宏名 -> 入口函数 -> 实现模块 -> gpui 使用处\"的索引"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "宏清单与分类",
+            "gpui 侧使用点（styled.rs、action.rs 等）",
+            "grep 检索宏用法的方法"
+          ],
+          "order": 3,
+          "practice_task": "用 grep 在 crates/gpui/src 下检索 style_helpers!、actions!、gpui::test、derive_inspector_reflection 的使用位置，制作一张\"宏 -> 调用文件:行号\"对照表，并说明 Styled trait 中连续调用 8 个样式宏的原因。",
+          "source_files": [
+            "crates/gpui_macros/src/gpui_macros.rs",
+            "crates/gpui/src/styled.rs",
+            "crates/gpui/src/action.rs"
+          ],
+          "title": "宏清单速览：宏与它们在 gpui 中的用武之地",
+          "topic": "通读 gpui_macros 导出的全部宏（Action、register_action、IntoElement、Render、AppContext、VisualContext、8 个样式宏、test、bench、property_test、derive_inspector_reflection），并对照 gpui crate 中的真实调用点（如 Styled trait、actions! 宏）建立全景索引。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "单元一：认识 gpui_macros"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "filename": "u2-l1-action-derive-attribute-parsing.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "理解 attr.parse_nested_meta 解析 #[action(...)] 的流程",
+            "掌握 name/namespace/no_json/no_register/deprecated_aliases/deprecated 各参数的语义与校验规则",
+            "理解 doc 注释如何被提取为 action 文档"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "syn 属性解析 API",
+            "#[action] 六个参数",
+            "名称拼接与 :: 校验"
+          ],
+          "order": 1,
+          "practice_task": "写一个临时测试 crate（依赖 gpui），分别定义带 #[action(namespace = editor, name = \"CustomName\")] 的单元结构体 action 和带字段的 action，用 gpui::test 断言 Action::name_for_type() 的返回值；再故意传入未定义的参数，观察编译错误信息出自 derive_action.rs 的哪一行。",
+          "source_files": [
+            "crates/gpui_macros/src/derive_action.rs",
+            "crates/gpui/src/action.rs"
+          ],
+          "title": "#[derive(Action)]（上）：#[action(...)] 属性解析",
+          "topic": "深入 derive_action.rs 的属性解析阶段：如何用 parse_nested_meta 识别 name、namespace、no_json、no_register、deprecated_aliases、deprecated 参数，如何提取 doc 注释，以及名称拼接与 `::` 禁止规则。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-action-derive-codegen.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "读懂为 Action trait 生成的全部方法",
+            "理解单元结构体、带字段结构体、no_json 三种分支的差异",
+            "理解 gpui 如何用这些方法从 JSON 反序列化 action"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Action trait 方法清单",
+            "serde_json::from_value 分支与 schemars 分支",
+            "gpui::private 重导出路径"
+          ],
+          "order": 2,
+          "practice_task": "用 cargo expand 展开 actions!(test, [SampleAction]) 生成的一个 action，对照 derive_action.rs 标注 build、action_json_schema、partial_eq、boxed_clone 各方法的生成分支；再写一个 gpui::test，调用 gpui 的 build_action 相关 API（见 crates/gpui/src/action.rs）从 JSON 构造出带字段的 action 并断言字段值。",
+          "source_files": [
+            "crates/gpui_macros/src/derive_action.rs",
+            "crates/gpui/src/action.rs"
+          ],
+          "title": "#[derive(Action)]（下）：生成的 trait 实现逐行拆解",
+          "topic": "逐行拆解 derive_action.rs 生成的 impl gpui::Action 代码：partial_eq 的向下转型、boxed_clone、build 的 serde_json 反序列化、action_json_schema 的 schemars 分支，以及 deprecated_aliases/deprecation_message/documentation 元数据方法。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-register-action-and-inventory.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "理解 generate_register_action 生成的隐藏函数与 MacroActionData 结构",
+            "理解 inventory::submit! 如何在程序启动前收集所有 action",
+            "理解 gpui 的 actions! 声明宏如何复用 #[derive(Action)]"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "inventory 链接期收集机制",
+            "MacroActionBuilder/MacroActionData",
+            "actions! 宏的两种形式"
+          ],
+          "order": 3,
+          "practice_task": "阅读 crates/gpui/src/action.rs 中 build_action_type 与 generate_list_of_all_registered_actions 的实现，然后写一个 gpui::test：注册两个自定义 action 后，遍历 generate_list_of_all_registered_actions() 的输出，断言你的两个 action 名称都出现且 build 能成功执行。",
+          "source_files": [
+            "crates/gpui_macros/src/register_action.rs",
+            "crates/gpui_macros/src/derive_action.rs",
+            "crates/gpui/src/action.rs"
+          ],
+          "title": "register_action 与 inventory：action 如何自动注册",
+          "topic": "讲解 register_action.rs 中的 generate_register_action：生成隐藏的构建函数、通过 inventory::submit! 提交 MacroActionBuilder，以及 gpui 侧如何用 inventory 收集全部 action；同时分析 gpui 的 actions! 声明宏如何在其上封装。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l4-into-element-and-render-derives.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "理解 IntoElement 派生如何把 RenderOnce 类型包装为 ViewElement",
+            "理解 ast.generics.split_for_impl 处理泛型的原因",
+            "了解 #[derive(Render)] 生成空渲染的用途与 #[doc(hidden)] 的原因"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "IntoElement/RenderOnce/ViewElement 关系",
+            "split_for_impl 惯用法",
+            "最小派生宏模板"
+          ],
+          "order": 4,
+          "practice_task": "参考 tests/render_test.rs 与 crates/gpui/src/elements/div.rs，在一个 gpui::test 中定义实现 RenderOnce 的结构体并加 #[derive(IntoElement)]，用 cargo expand 查看生成代码，然后把它作为 child 放进一个 div 渲染树中验证编译与运行都通过。",
+          "source_files": [
+            "crates/gpui_macros/src/derive_into_element.rs",
+            "crates/gpui_macros/src/derive_render.rs",
+            "crates/gpui_macros/tests/render_test.rs",
+            "crates/gpui/src/elements/div.rs"
+          ],
+          "title": "最小的两个派生宏：IntoElement 与 Render",
+          "topic": "分析 crate 中代码量最少的两个派生宏：IntoElement 如何为 RenderOnce 类型生成 ViewElement 包装实现，Render 派生为何生成返回 gpui::Empty 的默认实现；并讲解 split_for_impl 对泛型的正确处理。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 2,
+      "title": "单元二：Action 与元素派生宏"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u3-l1-app-context-derive.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "理解 get_simple_attribute_field 如何用 #[app] 属性定位字段",
+            "理解派生宏如何为十余个 AppContext 方法生成委托代码",
+            "掌握缺失属性时输出 compile_error! 的错误处理模式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "属性字段探测",
+            "AppContext trait 的方法族",
+            "compile_error! 反馈机制"
+          ],
+          "order": 1,
+          "practice_task": "仿照 tests/derive_context.rs，在自己的测试文件里定义一个含 #[app] app: &mut App 与一个额外自定义字段（如 label: String）的结构体并派生 AppContext；先故意去掉 #[app] 属性确认编译错误信息，再补回属性并在 gpui::test（同步形式，参数为 &mut App）中用它创建一个 Entity 并断言读取成功。",
+          "source_files": [
+            "crates/gpui_macros/src/derive_app_context.rs",
+            "crates/gpui_macros/src/gpui_macros.rs",
+            "crates/gpui_macros/tests/derive_context.rs",
+            "crates/gpui/src/gpui.rs"
+          ],
+          "title": "#[derive(AppContext)]：用 #[app] 字段委托生成上下文",
+          "topic": "讲解 derive_app_context.rs：如何通过 #[app] 属性在结构体中定位持有 &mut App 的字段，并为 gpui::AppContext trait 的所有方法生成委托实现；以及缺失属性时用 compile_error! 报错的模式。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-visual-context-derive.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 #[window] 与 #[app] 双属性约束",
+            "读懂 update_window_entity/new_window_entity 中闭包重组的技巧",
+            "理解 VisualContext 与 AppContext 的分层关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "双属性字段探测",
+            "AppContext 复用与 Window 注入",
+            "focus 与 replace_root_view 的委托"
+          ],
+          "order": 2,
+          "practice_task": "扩展 u3-l1 的结构体，加上 #[window] window: &mut Window 并派生 VisualContext（参考 tests/derive_context.rs 的组合写法）；在 gpui::test 的异步形式中通过 TestAppContext 更新一个实现了 Render 的视图，用自定义上下文调用 VisualContext 提供的方法，验证焦点与视图操作正常工作。",
+          "source_files": [
+            "crates/gpui_macros/src/derive_visual_context.rs",
+            "crates/gpui_macros/src/derive_app_context.rs",
+            "crates/gpui_macros/tests/derive_context.rs",
+            "crates/gpui/src/gpui.rs"
+          ],
+          "title": "#[derive(VisualContext)]：组合 App 与 Window 的上下文",
+          "topic": "讲解 derive_visual_context.rs：同时要求 #[app] 与 #[window] 两个属性字段，生成的实现如何在 AppContext 之上组合 Window 能力，特别是 update_window_entity/new_window_entity 中对闭包参数的重组技巧。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "filename": "u3-l3-style-macros-generation.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解 StyleableMacroInput 如何解析可选的 { visibility: pub } 语法",
+            "理解 generate_predefined_setter/generate_custom_value_setter 的差异与 _neg 负值变体",
+            "理解前缀×后缀组合如何生成数百个 Tailwind 风格方法并被 Styled trait 复用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "样式宏输入解析（visibility）",
+            "两种 setter 生成器与负值限定符",
+            "前缀/后缀表驱动生成"
+          ],
+          "order": 3,
+          "practice_task": "执行 cargo expand -p gpui styled，统计 margin_style_methods! 为 Styled trait 生成了多少个方法；然后在 gpui::test 中对一个 div() 依次调用 .w_1_2().mt_2().py_4().rounded_md().shadow_sm()，用 cargo expand 与 gpui 的样式读取 API 验证相对宽度 relative(0.5) 与 rems(0.5) margin 被写入 style。",
+          "source_files": [
+            "crates/gpui_macros/src/styles.rs",
+            "crates/gpui/src/styled.rs"
+          ],
+          "title": "样式宏系统：用前缀×后缀批量生成 Tailwind 风格方法",
+          "topic": "解析体量最大的 styles.rs：StyleableMacroInput 的可选 visibility 输入、generate_predefined_setter 与 generate_custom_value_setter 两种代码生成器、负值 _neg 变体，以及 margin/padding/position/size/corner/border 前缀表与尺寸后缀表如何组合出 Tailwind 风格的方法族。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "单元三：上下文派生与样式方法生成"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u4-l1-gpui-test-args-parsing.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "理解 Args 的 Parse 实现如何处理 seed/seeds/iterations/retries/on_failure",
+            "理解内外层函数重命名（__ 前缀）与属性转移的技巧",
+            "掌握 syn::Error 到 compile_error token 的错误输出方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "属性宏参数解析",
+            "ItemFn 重写与属性保留",
+            "编译错误生成"
+          ],
+          "order": 1,
+          "practice_task": "写三个使用 #[gpui::test] 的测试：分别带 seed = 7、seeds(1, 2, 3) 与 iterations = 5，用 cargo expand 观察生成的外层 #[test] 函数中种子数组的差异；再故意写 on_failure = 123（非字符串）确认报错位置，并说明错误如何从 error_to_stream 返回。",
+          "source_files": [
+            "crates/gpui_macros/src/test.rs",
+            "crates/gpui_macros/src/gpui_macros.rs"
+          ],
+          "title": "#[gpui::test]（上）：参数解析与函数改写",
+          "topic": "拆解 test.rs 的参数解析与函数改写：Args 的 Parse 实现如何处理 seed/seeds/iterations/retries/on_failure，被标注函数如何被重命名为 __ 前缀的内层函数，以及原有属性如何转移到生成的外层 #[test] 函数上。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-gpui-test-harness.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解按参数类型（TestAppContext/App/StdRng/BackgroundExecutor）注入变量的机制",
+            "理解 run_test/run_until_parked/forbid_parking/quit/drain_tasks 组成的测试生命周期",
+            "区分同步与异步两条代码生成路径"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "签名驱动的参数注入",
+            "gpui::run_test 与 dispatcher",
+            "teardown 与任务泄漏检测"
+          ],
+          "order": 2,
+          "practice_task": "写两个 gpui::test：同步版接收 &mut App，异步版接收 &mut TestAppContext 与 StdRng；在异步版里分别启动一个被丢弃（未 detach、未保存）的任务和一个 detach_and_log_err 的任务，对比 run_until_parked 之后两者的执行情况，并结合 test.rs 中关于 drain_tasks 的注释解释差异。",
+          "source_files": [
+            "crates/gpui_macros/src/test.rs",
+            "crates/gpui/src/test.rs"
+          ],
+          "title": "#[gpui::test]（下）：生成的测试骨架与 TestAppContext 生命周期",
+          "topic": "拆解 test.rs 生成的完整测试骨架：根据函数签名按类型注入 TestAppContext/App/StdRng/BackgroundExecutor，gpui::run_test 的调度与种子机制，teardown 阶段的 run_until_parked、forbid_parking、quit 与 drain_tasks，以及同步与异步两条生成路径的差异。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "filename": "u4-l3-gpui-bench.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "理解 bench 宏如何把标注函数改写为 criterion 的 bench_function/bench_with_input",
+            "掌握 fps/inputs/input_name/group/sample_size 五个参数及依赖校验",
+            "理解 BenchAppContext 与 headless renderer 的接线方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "criterion 集成模式",
+            "BenchAppContext 与 bench_platform",
+            "参数校验与 async 限制"
+          ],
+          "order": 3,
+          "practice_task": "按 gpui_macros.rs 中 bench 的文档注释要求，在一个临时 crate 的 dev-dependencies 里加入 criterion、gpui_platform（test-support feature）并启用 gpui 的 bench feature，写一个 #[gpui::bench] 的无输入基准和一个 #[gpui::bench(inputs = [1usize, 10, 100], input_name = \"items\")] 的分组基准，运行 cargo bench 验证生成的 benchmark group 名称。",
+          "source_files": [
+            "crates/gpui_macros/src/bench.rs",
+            "crates/gpui_macros/src/gpui_macros.rs"
+          ],
+          "title": "#[gpui::bench]：包装 Criterion 的 GPUI 基准宏",
+          "topic": "讲解 bench.rs：如何把标注函数改写成接收 &mut criterion::Criterion 的标准基准函数，fps/inputs/input_name/group/sample_size 参数的解析与依赖校验，以及生成的 BenchAppContext、headless renderer 接线和帧预算报告。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l1",
+            "u4-l2"
+          ],
+          "filename": "u4-l4-gpui-property-test.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "理解宏如何拦截 config/proptest_path 并改写为 apply_seed_to_proptest_config",
+            "理解参数分流：TestAppContext/BackgroundExecutor 注入、StdRng 禁止、其余转发 proptest",
+            "理解闭包化的内层函数与 run_test_once 的种子策略"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "宏到宏的转发（生成 proptest 调用）",
+            "参数分流与 retain_mut",
+            "seed_strategy 与失败持久化"
+          ],
+          "order": 4,
+          "practice_task": "写一个 #[gpui::property_test] 函数：参数包括 #[strategy = 1..100] x: i32、s: String 以及 &mut TestAppContext，断言业务逻辑；再写一个接收 StdRng 的版本，确认编译器给出 property_test.rs 中那条指向 proptest 文档的 compile_error!，解释为什么 StdRng 会破坏 shrinking。",
+          "source_files": [
+            "crates/gpui_macros/src/property_test.rs",
+            "crates/gpui/src/test.rs",
+            "crates/gpui_macros/src/gpui_macros.rs"
+          ],
+          "title": "#[gpui::property_test]：基于 proptest 的属性测试宏",
+          "topic": "拆解 property_test.rs：宏如何拦截 config 与 proptest_path 参数、注入种子 strategy、把 TestAppContext/BackgroundExecutor 参数抽出后将其余参数转发给 proptest 的宏，以及为什么 StdRng 参数被显式禁止。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2",
+            "u3-l3"
+          ],
+          "filename": "u4-l5-derive-inspector-reflection.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "理解为什么该宏先用 MacroExpander 展开 trait 内的样式宏再做反射",
+            "理解 __wrapper_* 函数如何用 Box<dyn Any> 实现类型擦除的按名调用",
+            "理解 inspector feature 与 debug_assertions 双条件编译及 CARGO_PKG_NAME 判定 gpui 内部调用的启发式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "宏展开器 VisitMut",
+            "Fn(self)->Self 方法筛选与 wrapper 生成",
+            "条件编译与 crate 判定启发式"
+          ],
+          "order": 5,
+          "practice_task": "运行 cargo test -p gpui_macros --test derive_inspector_reflection；然后仿照该测试，为一个新的 trait（含一个 fn half(mut self) -> Self 和一个应被过滤的 &self 方法）编写测试，断言 methods() 只包含符合形状的方法、find_method 能按名调用并返回文档字符串。",
+          "source_files": [
+            "crates/gpui_macros/src/derive_inspector_reflection.rs",
+            "crates/gpui_macros/tests/derive_inspector_reflection.rs",
+            "crates/gpui/src/inspector.rs",
+            "crates/gpui/src/styled.rs"
+          ],
+          "title": "#[derive_inspector_reflection]：trait 方法运行时反射",
+          "topic": "讲解条件编译的 derive_inspector_reflection.rs：如何筛选 fn(self) -> Self 形状的 trait 方法、生成类型擦除的 wrapper 函数与 FunctionReflection 表、为什么需要 MacroExpander 先展开 trait 内的样式宏，以及 CARGO_PKG_NAME 启发式区分 gpui 内部与外部调用。可补充说明：本次提交在下游 crate（zed 的 inspector feature）中新增了 ui/derive_inspector_reflection 接线，使该宏在非 debug 构建下也能被应用，但宏实现本身未变。"
+        }
+      ],
+      "level": "advanced",
+      "order": 4,
+      "title": "单元四：测试、基准、属性测试与反射宏"
+    }
+  ]
+}
