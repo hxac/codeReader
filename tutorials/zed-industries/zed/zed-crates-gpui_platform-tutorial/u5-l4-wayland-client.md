@@ -1,839 +1,539 @@
-# Wayland 客户端：协议对象、layer_shell 与弹出层
+# Wayland 客户端：协议对象、layer_shell 与按需驱动渲染循环
 
 ## 1. 本讲目标
 
-本讲是「Linux 平台深入」单元的第四讲，深入 `gpui_linux` 三大后端中的 Wayland 后端。学完本讲，你应该能够：
+本讲是 Linux 三后端之旅的最后一站。读完本讲，你应该能够：
 
-1. 描述 `WaylandClient` 的初始化流水线：连接合成器、从 `wl_registry` 绑定协议对象、把 Wayland socket 与调度通道挂进 calloop 主循环。
-2. 理解 Wayland「无全局坐标」安全模型对窗口定位接口的系统性影响：为什么 `primary_display` 返回 `None`、为什么弹出层要靠 positioner「描述」而非「指定」位置、为什么拖动窗口要走 `xdg_toplevel._move` 协商。
-3. 说明 `serial.rs` 为什么要按五种 `SerialKind` 分别跟踪最后一次输入序列号，以及 `selection_serial` 的特殊地位。
-4. 读懂 `wayland/window.rs` 的「一个 `wl_surface`、三种角色」设计：`Xdg`、`LayerShell`、`Popup` 三态如何由 `WindowKind` 决定，configure/ack 协商如何驱动首帧。
-5. 掌握 `layer_shell` 与 `popup` 两组协议映射：锚定位掩码、独占区、键盘交互性，以及锚定弹出层的 anchor/gravity/constraint 三元组。
+1. 说出 `WaylandClient` 的整体结构：它如何管理协议对象（`Globals`）、如何把 calloop 事件循环复用为主循环、以及 `LinuxClient` 契约在它身上如何落地。
+2. 理解 Wayland「无全局坐标」模型对窗口定位接口的影响：为什么 popup 要用 positioner 锚定父表面、为什么 layer_shell 要锚定屏幕边缘。
+3. 说明 `serial` 模块为何要专门跟踪「最后一次输入序列号」，以及剪贴板所有权、popup grab、光标切换分别消费哪一类 serial。
+4. 描述 layer_shell 如何支撑 Z 风格的自绘标题栏与面板。
+5. **重点**：解释 eb354c8d50 重写后的按需驱动渲染循环——`FrameLoop` 八态状态机如何取代旧的「持续心跳」模型，窗口空闲时如何停泊（Parked）在零 CPU 状态，`schedule_frame` 又如何通过 calloop `frame_ping` 唤醒它。
 
 ## 2. 前置知识
 
-### 2.1 Wayland 协议基础：对象、请求、事件
+### 2.1 Wayland 一页纸
 
-X11（上一讲）把窗口系统做成一台服务器；Wayland 反过来，把**合成器（compositor）**做成唯一有权决定屏幕内容与窗口位置的进程。你的应用是一个客户端，通过 Unix socket 与合成器通信。三个核心概念：
+- **显示服务器模型**：Wayland 客户端不直接向屏幕绘制，而是把自己的像素放进 `wl_buffer`，挂到 `wl_surface` 上，用 `commit` 请求提交；合成器（compositor，如 mutter、KWin、sway）决定这块表面何时、何地、以多大比例上屏。
+- **协议对象与 request/event**：Wayland 是一套对象协议。客户端创建对象（如 `xdg_surface`）、向对象发 request（如 `ack_configure`）；合成器向对象发 event（如 `configure`）。Rust 侧由 `wayland-client` crate 的生成代码表示这些对象。
+- **serial**：几乎每个输入事件都携带一个单调递增的 u32 序列号。凡是「证明发生过用户交互」的请求（抓取 popup、声明剪贴板所有权、移动窗口）都要回传一个 serial，合成器会校验它确实对应某个真实事件，防止程序凭空抢焦点。
+- **frame callback**：客户端对 `wl_surface` 调用 `frame` 请求后，合成器会在该表面下一次提交真正上屏时回调它。这是 Wayland 的垂直同步节拍器，也是本讲渲染循环的核心。
+- **xdg_shell**：普通窗口的标准协议（`xdg_surface` + `xdg_toplevel` + `xdg_popup`），负责窗口装饰协商、最大化和弹出层定位。
+- **zwlr_layer_shell_v1**：wlroots 系扩展协议，允许表面挂到背景/底部/顶部/覆盖四个层级并锚定屏幕边缘——面板、Dock、通知区都靠它。
 
-- **协议对象（protocol object）**：Wayland 的一切能力都定义成带接口名的对象，由 `wl_registry` 广播的 **global** 列出。客户端用 `bind` 请求把需要的 global 变成自己的对象（如 `wl_compositor`、`wl_seat`、`xdg_wm_base`）。对象有整数 id，`ObjectId` 就是 Rust 侧对它的封装。
-- **请求（request）与事件（event）**：请求是客户端→合成器的调用，事件是合成器→客户端的推送。`wayland-client` crate 用 `Dispatch` trait 把事件分发到你的状态类型上。
-- **`wl_surface` 与角色（role）**：`wl_compositor.create_surface` 造出来的 surface 只是一块画布，必须再赋予一个角色才能成为「窗口」：`xdg_toplevel`（普通窗口）、`xdg_popup`（弹出层）、`zwlr_layer_surface_v1`（钉在屏幕边缘的面板）。surface 的状态是**双缓冲**的——修改后要 `commit` 才生效。
+### 2.2 承接前几讲的认知
 
-### 2.2 无全局坐标：Wayland 最重要的安全决定
-
-X11 客户端可以查询并设置任何窗口的绝对屏幕坐标；Wayland 刻意拿掉了这个能力——**客户端根本不知道自己的窗口在屏幕上的哪里**，也不知道别的窗口在哪里。好处是屏幕信息不会泄漏给恶意应用。代价是一连串接口变形，本讲会逐一遇到：
-
-| 想做的事 | X11 的做法 | Wayland 的做法 |
-| --- | --- | --- |
-| 把窗口移到 (x, y) | 直接设置坐标 | 不可能；只能拖动时请求 `xdg_toplevel._move(seat, serial)` 让合成器代劳 |
-| 在鼠标旁弹菜单 | 算出全局坐标后 CreateWindow | 用 `xdg_positioner` 描述「锚在父窗口某矩形旁边」，合成器决定最终位置 |
-| 查询哪个是主显示器 | 读 RandR 输出列表 | 协议没有主显示器概念，`primary_display` 只能返回 `None` |
-| 做一个 dock/面板 | override-redirect 窗口 + 定位 | `layer_shell` 协议：声明层、锚边、独占区，由合成器放置 |
-
-### 2.3 serial：输入事件的「防伪凭证」
-
-Wayland 合成器给每个输入事件附带一个单调递增的 32 位序号 **serial**。凡是「可能抢焦点/抢所有权」的请求——设置光标、声明剪贴板所有权、弹出层抓取（grab）、激活窗口——都必须**引用一个来自真实用户交互的 serial**，否则合成器直接忽略。这是防止后台应用伪造用户意图的机制，也是本讲 `serial.rs` 存在的全部理由。注意 serial 会在 `u32` 上界回绕（rollover），所以「最新」要按事件到达顺序判断而不是数值大小判断。
-
-### 2.4 承接前几讲的认知
-
-- **u5-l1**：`LinuxPlatform<P>` 外壳、`LinuxClient` 契约（定义在 [../gpui_linux/src/linux/platform.rs:L51](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/platform.rs#L51) 起）、`LinuxCommon` 公共状态。本讲的 `WaylandClient` 就是该契约的 Wayland 实现。
-- **u4-l3**：`LinuxDispatcher` 不拥有主循环；主循环归各客户端所有。本讲会看到 `WaylandClient::new` 里 `LinuxCommon::new(event_loop.get_signal())` 的接线处。
-- **u3-l2**：`PlatformWindow` 契约（含 raw-window-handle 双 supertrait）；本讲的 `RawWindow` 用 `wl_surface` 指针兑现它。
-- **u2-l3 / u2-l4**：显示器契约与剪贴板契约；本讲看它们在 Wayland 上的形态。
-- **u5-l3**：X11 后端的对照。本讲多处会以「X11 这样、Wayland 那样」加深理解。
+- u5-l1 讲过 `LinuxPlatform` 是外壳、`LinuxClient` 是契约、Wayland/X11/headless 是三个可替换后端；本讲进入 Wayland 后端内部。
+- u4-l3 讲过 calloop 的 `ping`、`Timer`、`insert_idle` 原语；本讲的 `frame_ping` 与帧重试定时器就是它们的直接应用。
+- u3-l2 讲过 `PlatformWindow::schedule_frame` 契约（原 `completed_frame`，eb354c8d50 更名并改语义）；本讲看它唯一的真实平台实现。
 
 ## 3. 本讲源码地图
 
-本讲涉及的关键文件（路径相对于 `crates/gpui_platform/`，兄弟 crate 用 `../` 前缀）：
-
-| 文件 | 作用 |
-| --- | --- |
-| [../gpui_linux/src/linux/wayland/client.rs](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs) | Wayland 后端主体：`Globals` 协议对象集合、`WaylandClientState` 状态全集、`WaylandClient::new()` 初始化流水线、`LinuxClient` 契约实现、约 30 个 `Dispatch` 事件处理实现。约 2900 行，是 Wayland 后端的心脏 |
-| [../gpui_linux/src/linux/wayland/window.rs](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs) | 窗口实现：`WaylandWindowState` 与三态 `WaylandSurfaceState`、configure 协商、帧回调、CSD 装饰、`PlatformWindow` 契约实现 |
-| [../gpui_linux/src/linux/wayland/serial.rs](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/serial.rs) | 输入序号跟踪器：`SerialKind`、`SerialTracker`、`selection_serial` 规则，附 5 个单元测试 |
-| [../gpui_linux/src/linux/wayland/display.rs](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/display.rs) | `WaylandDisplay`：`PlatformDisplay` 契约的最小实现，uuid 由显示器名推导 |
-| [../gpui_linux/src/linux/wayland/popup.rs](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/popup.rs) | popup 枚举值到 `xdg_positioner` 协议值的纯映射函数 |
-| [../gpui_linux/src/linux/wayland/layer_shell.rs](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/layer_shell.rs) | layer_shell 枚举值到 `zwlr_layer_shell_v1` 协议值的纯映射函数 |
-| [../gpui_linux/src/linux/wayland/cursor.rs](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/cursor.rs) | XCursor 主题加载与「无 cursor-shape-v1 时的曲面临时光标」后备路径 |
-| [../gpui_linux/src/linux/wayland/clipboard.rs](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/clipboard.rs) | Wayland 剪贴板：选区所有权模型下的本地暂存 + data offer 读取 |
-| [../gpui_linux/src/linux/wayland.rs](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland.rs) | 模块聚合文件：声明 7 个子模块，并定义 `to_shape`（`CursorStyle` → cursor-shape-v1 `Shape`） |
-| [../gpui/src/platform/layer_shell.rs](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui/src/platform/layer_shell.rs) | 平台无关的 layer_shell 数据模型：`Layer`、`Anchor`、`KeyboardInteractivity`、`LayerShellOptions` |
-| [../gpui/src/platform/popup.rs](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui/src/platform/popup.rs) | 平台无关的 popup 数据模型：`PopupOptions`、`PopupAnchor`、`PopupGravity`、`PopupConstraintAdjustment` |
-| [../gpui/examples/layer_shell.rs](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui/examples/layer_shell.rs) | 官方 layer_shell 示例：屏幕底部一块半透明的时钟面板 |
-| [../gpui/examples/window.rs](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui/examples/window.rs) 与 [../gpui/examples/input.rs](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui/examples/input.rs) | 综合实践的运行载体：开窗/光标切换用前者，剪贴板读写用后者 |
+| 文件 | 行数规模 | 作用 |
+| --- | --- | --- |
+| `../gpui_linux/src/linux/wayland/client.rs` | 最大 | `WaylandClientState`、`Globals` 协议对象集合、事件循环组装、`LinuxClient` 实现、各协议对象的 `Dispatch` 实现 |
+| `../gpui_linux/src/linux/wayland/window.rs` | 大 | `WaylandWindowState`、三种表面状态、`FrameLoop`/`PresentationState` 状态机、`PlatformWindow` 实现 |
+| `../gpui_linux/src/linux/wayland/serial.rs` | 小 | `SerialKind`/`Serial`/`SerialTracker` 序列号跟踪 |
+| `../gpui_linux/src/linux/wayland/layer_shell.rs` | 极小 | 平台无关 layer_shell 枚举到 wlr 协议枚举的映射 |
+| `../gpui_linux/src/linux/wayland/popup.rs` | 极小 | popup 的 anchor/gravity/constraint 位标志到 xdg_positioner 的映射 |
+| `../gpui_linux/src/linux/wayland/display.rs` | 小 | `WaylandDisplay`：显示器上报 |
+| `../gpui/src/platform/layer_shell.rs`（gpui 主 crate） | 小 | 平台无关的 `Layer`/`Anchor`/`LayerShellOptions` 模型 |
+| `../gpui/src/platform.rs`（gpui 主 crate） | 契约 | `PlatformWindow::schedule_frame` 默认空实现 |
+| `../gpui/src/window.rs`（gpui 主 crate） | 帧调度 | GPUI 侧调用 `schedule_frame` 的四个位置与三个新测试 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 WaylandClient：连接、globals 绑定与 calloop 主循环
+### 4.1 WaylandClient 与 Globals：连接、协议对象与事件循环
 
 #### 4.1.1 概念说明
 
-`WaylandClient` 是 `LinuxClient` 契约在 Wayland 上的实现，外形与 X11 后端同构——一个包装了共享可变状态的元组结构体：
+`WaylandClient` 是 `LinuxClient` 契约（见 u5-l1）的 Wayland 实现。它的全部可变状态收在 `Rc<RefCell<WaylandClientState>>` 里，而 `WaylandClientStatePtr`（内部是 `Weak`）是传给 `wayland-client` 派发系统的句柄——源码注释说明了原因：孤儿规则（orphan rules）要求 `Dispatch` 实现里的状态类型是本地类型，但又必须能把窗口交还给 GPUI。
 
-```rust
-#[derive(Clone)]
-pub struct WaylandClient(Rc<RefCell<WaylandClientState>);
-```
-
-定义于 [../gpui_linux/src/linux/wayland/client.rs:L648-L649](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L648-L649)（原文即如此，右括号在源码中为 `>)`）。它的独特之处是一个**双指针结构**：`WaylandClient` 持有 `Rc`，而事件分发用的 `WaylandClientStatePtr` 持有 `Weak`：
-
-```rust
-/// This struct is required to conform to Rust's orphan rules, so we can dispatch on the state but hand the
-/// window to GPUI.
-#[derive(Clone)]
-pub struct WaylandClientStatePtr(Weak<RefCell<WaylandClientState>>);
-```
-
-见 [../gpui_linux/src/linux/wayland/client.rs:L428-L431](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L428-L431)。注释点破了设计动机：`wayland-client` 的 `Dispatch<State>` 要求 State 作为分发上下文，而孤儿规则不允许为外部类型 `Rc<RefCell<WaylandClientState>>` 实现外部 trait，所以包一层本地新类型；用 `Weak` 则让事件循环不强制延续客户端生命。窗口（交给 GPUI 的 `Box<dyn PlatformWindow>`）经 `WaylandClientStatePtr` 反向持有客户端，形成可断开的环。
-
-`WaylandClientState`（[L305-L361](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L305-L361)）聚合了后端全部状态，可按职责分组：
-
-| 分组 | 代表字段 | 用途 |
-| --- | --- | --- |
-| 序号 | `serial_tracker` | 4.2 的主角 |
-| 协议对象 | `globals`、`wl_seat`、`wl_pointer`、`wl_keyboard`、`data_device`、`primary_selection`、`text_input` | 与合成器的会话资源 |
-| 窗口表 | `windows: HashMap<ObjectId, WaylandWindowStatePtr>`、`mouse_focused_window`、`keyboard_focused_window` | surface id → 窗口；焦点镜像 |
-| 显示器 | `outputs`、`in_progress_outputs`、`wl_outputs` | 4.1.3(4) 的被动累积 |
-| 输入状态 | `modifiers`、`capslock`、`click`、`repeat`、`keymap_state`、`compose_state` | 修饰键、双击计数、按键重复、xkb |
-| 光标 | `cursor_style`、`cursor_hidden_window`、`cursor`、`cursor_shape_device` | 样式缓存 + 两条设置路径 |
-| 剪贴板 | `clipboard`、`data_offers`、`primary_data_offer` | 所有权与接收 |
-| 公共 | `common: LinuxCommon`、`loop_handle`、`event_loop` | u5-l1 讲过的外壳借出物 |
+`Globals` 结构体集中持有一次连接里绑定到的全部协议管理器对象。它体现了一个重要工程决策：**哪些协议是必需的、哪些尽力而为**——`compositor`、`shm`、`seat`、`wm_base` 用 `unwrap()`（缺了直接 panic，这些是 Wayland 桌面的底线）；layer_shell、cursor_shape、viewporter、decoration、blur 等全部用 `.ok()` 绑定成 `Option`，运行期逐项降级。
 
 #### 4.1.2 核心流程
 
-`WaylandClient::new()`（[L702-L921](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L702-L921)）的初始化流水线：
+初始化流程（`WaylandClientState::new` 内）：
 
 ```text
-1. 取走环境变量 XDG_ACTIVATION_TOKEN（启动激活令牌，用后即删防止传给子进程）
-2. Connection::connect_to_env()              ← 连接 $WAYLAND_DISPLAY 指定的合成器
-3. registry_queue_init()                     ← 拿到 wl_registry 快照(GlobalList) + 事件队列
-4. 遍历 global 列表：
-     wl_seat   → 手工 bind（版本钳制 5..=9，低于 5 直接 panic，因为依赖 wl_pointer.frame）
-     wl_output → 手工 bind（版本钳制 2..=4），插入 in_progress_outputs / wl_outputs
-5. EventLoop::try_new() + LinuxCommon::new(signal)   ← u4-l3/u5-l1 的调度接线
-6. 注册 main_receiver：前台 runnable 经 insert_idle 执行（保证输入事件优先）
-7. 注册 wake_receiver：系统唤醒回调
-8. detect_compositor_gpu()                   ← 用一条临时连接探测 zwp_linux_dmabuf_v1
-9. data_device / primary_selection / Cursor::new / XDPEventSource
-10. 组装 WaylandClientState
-11. WaylandSource::insert(handle)            ← 把 Wayland socket 注册为 calloop 事件源
+连接 wl_display → 收集 registry 全局对象
+→ 绑定 wl_seat / wl_output
+→ 创建 calloop EventLoop（主循环）
+→ LinuxCommon::new(LoopSignal)          ← 承接 u5-l1 的公共状态
+→ 注册 main_receiver（前台 runnable → insert_idle）
+→ 注册 wake_receiver（系统唤醒）
+→ 创建 frame_ping（calloop::ping::make_ping）并注册
+→ Globals::new(...)                      ← 绑定全部协议管理器
+→ data_device / primary_selection / cursor 初始化
+→ 注册 XDPEventSource（外观/按钮布局变化）
 ```
 
-运行期事件循环 `run()`（[L1135-L1150](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1135-L1150)）只是 `event_loop.run(None, &mut WaylandClientStatePtr(..), |_| {})`——阻塞在 calloop 上，直到 `LinuxCommon` 的 quit 路径拉动 `LoopSignal`（u5-l1）。循环上挂着的事件源：Wayland socket（协议事件）、main_receiver（前台任务）、wake_receiver（系统唤醒）、XDP 事件源（外观/按钮布局/光标主题变化）、剪贴板发送用的 generic fd 源、以及键盘重复等计时器。
+运行期，一个 GPUI 前台任务或一次 `frame_ping` 到达时的路径：
+
+```text
+calloop 事件循环唤醒
+  ├─ main_receiver：Msg(runnable) → insert_idle → runnable.run()（GPUI 逻辑）
+  ├─ frame_ping   → client.dispatch_scheduled_frames() → 逐窗口 scheduled_frame_fired()
+  ├─ Timer(重试)  → window.retry_timer_fired()
+  └─ Wayland socket 可读 → 协议 event 派发到各 Dispatch 实现
+```
 
 #### 4.1.3 源码精读
 
-**(1) Globals：一次 bind 出全部协议对象**
+**`WaylandClientState` 的字段全景**（[../gpui_linux/src/linux/wayland/client.rs:L313-L369](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L313-L369)）：串口跟踪器、globals、GPU 上下文、seat/pointer/keyboard、surface 到窗口的映射表 `windows: HashMap<ObjectId, WaylandWindowStatePtr>`、输出设备表、xkb 键盘状态、拖拽/点击/按键重复状态、calloop `loop_handle`、剪贴板、光标、`LinuxCommon`。注意 `windows` 以 `ObjectId`（wl_surface 的对象 id）为键——这是 Wayland 事件路由回窗口的索引。
+
+**`Globals` 结构体**（[../gpui_linux/src/linux/wayland/client.rs:L207-L231](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L207-L231)）：除协议管理器外还有两个非协议字段——`executor: ForegroundExecutor` 与 `frame_ping: Ping`。后者是**全客户端唯一**的帧唤醒 ping，被 `clone` 进每个窗口（`Ping` 内部是 `Arc`）。
+
+**`Globals::new` 的绑定策略**（[../gpui_linux/src/linux/wayland/client.rs:L233-L278](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L233-L278)）：对照每一行可以看到 `unwrap()` 与 `.ok()` 的分界：合成器没有 layer_shell？没关系，Zed 的面板功能降级；没有 `wm_base`？整个桌面模型不成立，直接失败。
+
+**frame_ping 的创建与注册**（[../gpui_linux/src/linux/wayland/client.rs:L824-L830](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L824-L830)）：
 
 ```rust
-#[derive(Clone)]
-pub struct Globals {
-    pub qh: QueueHandle<WaylandClientStatePtr>,
-    pub activation: Option<xdg_activation_v1::XdgActivationV1>,
-    pub compositor: wl_compositor::WlCompositor,
-    ...
-    pub layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
-    ...
-}
-```
-
-`Globals`（[L202-L225](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L202-L225)）把 bind 结果分成两类：`Option` 的是**可选协议**（缺失时对应功能降级），非 `Option` 的 `compositor`/`shm`/`seat`/`wm_base` 是最小渲染与 shell 依赖、bind 失败直接 `unwrap` 崩溃。绑定逻辑在 `Globals::new`（[L227-L269](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L227-L269)），每个 `globals.bind(&qh, 版本区间, ())` 都显式声明能接受的协议版本区间，可选的一律 `.ok()`。本讲后续模块的三个主角都在这里露面：`layer_shell`、`wm_base`（popup 也要它）、`decoration_manager`。
-
-**(2) 前台任务的接法：insert_idle**
-
-```rust
+let (frame_ping, frame_ping_source) =
+    calloop::ping::make_ping().expect("Failed to create the frame ping");
 handle
-    .insert_source(main_receiver, {
-        let handle = handle.clone();
-        move |event, _, _: &mut WaylandClientStatePtr| {
-            if let calloop::channel::Event::Msg(runnable) = event {
-                handle.insert_idle(|_| {
-                    let location = runnable.metadata().location;
-                    let spawned = runnable.metadata().spawned;
-                    profiler::update_running_task(spawned, location);
-                    runnable.run();
-                    profiler::save_task_timing();
-                });
-            }
-        }
+    .insert_source(frame_ping_source, |_, _, client| {
+        client.dispatch_scheduled_frames();
     })
     .unwrap();
 ```
 
-见 [L746-L761](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L746-L761)。这与 u4-l3 讲过的结构一致：调度器投递的 runnable 不立即执行，而是排成 idle 回调，让已就绪的 Wayland 协议事件（输入）先被处理。对比 X11 侧的增强（每个 runnable 后排空 x11rb 缓冲），Wayland 侧不需要——`WaylandSource` 直接监听 socket，协议事件与 calloop 的感知范围一致。
+ping 一旦触发，就广播给所有窗口（详见 4.4）。紧接着 `Globals::new` 把这个 ping 存进 `Globals`（[../gpui_linux/src/linux/wayland/client.rs:L833-L839](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L833-L839)）。
 
-**(3) 显示器：被动累积，直到 Done 才完整**
+**`LinuxClient::open_window`**（[../gpui_linux/src/linux/wayland/client.rs:L1038-L1101](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1038-L1101)）：三个看点。第一，popup 显式按 `options.parent` 找父窗口，其余窗口的父亲是当前键盘焦点窗口。第二，popup 的 grab serial 取 `MousePress` 与 `KeyPress` 两类中的较大者——注释言明：grab 必须引用一次真实的按下事件，否则合成器会当场拒绝并立刻关闭 popup。第三，窗口构造成功后 `state.windows.insert(surface_id, window.0.clone())` 登记进路由表。
 
-Wayland 不允许客户端主动查询屏幕布局，显示器几何只能等合成器推事件。`InProgressOutput`（[L272-L295](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L272-L295)）逐字段收集 `name`/`scale`/`position`/`size`/`subpixel`，`complete()` 要求 position 与 size 都到齐才产出 `Output`。事件侧：
+**`run` 与 `compositor_name`**（[../gpui_linux/src/linux/wayland/client.rs:L1191-L1206](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1191-L1206)）：`run` 把 `event_loop` 从状态里 take 出来（`expect("App is already running")` 保证只跑一次）后交给 `event_loop.run` 阻塞。`compositor_name` 返回 `"Wayland"`（[L1279-L1281](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1279-L1281)），正是 u1-l4 提到的观测出口。
 
-```rust
-wl_output::Event::Geometry { x, y, subpixel, .. } => {
-    in_progress_output.position = Some(point(DevicePixels(x), DevicePixels(y)));
-    ...
-}
-wl_output::Event::Mode { width, height, .. } => {
-    in_progress_output.size = Some(size(DevicePixels(width), DevicePixels(height)))
-}
-wl_output::Event::Done => {
-    if let Some(complete) = in_progress_output.complete() {
-        state.outputs.insert(output.id(), complete);
-    }
-    state.in_progress_outputs.remove(&output.id());
-}
-```
-
-见 [L1451-L1472](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1451-L1472)——`wl_output.Done` 是「这批信息发完了」的边界。之后 `displays()`（[L929-L942](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L929-L942)）把每个 `Output` 包成 `WaylandDisplay`，物理像素除以 scale 换算逻辑像素（u2-l3 讲过该约定）。而 `primary_display()` 直接返回 `None`（[L960-L962](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L960-L962)），`window_stack()` 也返回 `None`（[L1219-L1221](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1219-L1221)）——这两个「拿不到」都是 2.2 节安全模型的直接后果。
-
-`WaylandDisplay` 本体在 [../gpui_linux/src/linux/wayland/display.rs:L12-L42](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/display.rs#L12-L42)：`id()` 用 `ObjectId::protocol_id`（连接期内稳定、跨连接无意义），`uuid()` 用显示器名做 v5 DNS 命名空间哈希——协议没有给稳定硬件标识，name 是能拿到的最好材料，name 为空则报错。对照 u2-l3：X11 侧干脆给全零占位 uuid，Wayland 至少能从 name 推导。
-
-**(4) 拖动窗口为什么要 serial**
-
-`PlatformWindow::start_window_move` 的实现最能体现「无全局坐标」：
-
-```rust
-fn start_window_move(&self) {
-    let state = self.borrow();
-    let serial = state.client.get_serial(SerialKind::MousePress);
-    if let Some(toplevel) = state.surface_state.toplevel() {
-        toplevel._move(&state.globals.seat, serial.as_raw());
-    }
-}
-```
-
-见 [../gpui_linux/src/linux/wayland/window.rs:L1769-L1775](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1769-L1775)。客户端不发坐标，只说「用户正在我的 surface 上按着鼠标，请代为开始交互式移动」，并附上那一次按下的 serial 作凭证；之后的位置全程由合成器掌握。`start_window_resize`（[L1786-L1795](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1786-L1795)）同理，只是多带一个 `ResizeEdge`。
+**显示器**（[../gpui_linux/src/linux/wayland/display.rs:L12-L42](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/display.rs#L12-L42)）：`WaylandDisplay` 的 `uuid` 用输出名生成 v5 UUID（承接 u2-l3 的「uuid 才是跨重启身份」）；而 `primary_display` 直接返回 `None`（[../gpui_linux/src/linux/wayland/client.rs:L1016-L1018](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1016-L1018)）——Wayland 协议根本没有「主显示器」概念。
 
 #### 4.1.4 代码实践
 
-**实践目标**：亲眼看到 `WaylandClient::new` 的绑定流水线在真实协议流里的样子。
+**实践：用 WAYLAND_DEBUG 观察 `Globals` 的绑定结果。**
 
-**操作步骤**：
-
-1. 确认处于 Wayland 会话（`echo $WAYLAND_DISPLAY` 非空）。
-2. 运行 `WAYLAND_DEBUG=1 cargo run -p gpui --example window 2> protocol.log`。`WAYLAND_DEBUG` 是 libwayland 的调试开关（`wayland-backend` 在 gpui_linux 里启用 `client_system` + `dlopen` 特性走系统库，见 [../gpui_linux/Cargo.toml:L94-L97](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/Cargo.toml#L94-L97)），会把双向协议消息打进 stderr。
-3. 在 `protocol.log` 里依次找：`wl_registry.global` 一串广播、对 `wl_seat`/`wl_output` 的 `wl_registry.bind`、`xdg_wm_base`/`wl_compositor`/`wl_shm` 的 bind。
-4. 对照 4.1.3(1) 的 `Globals` 字段清单，标记日志里出现/缺席的协议：例如你的合成器若没有 `zwlr_layer_shell_v1`，日志中就不会有它的 bind。
-
-**需要观察的现象**：绑定请求携带版本号，且 `wl_seat` 的版本落在 5..=9 区间。
-
-**预期结果**：日志中 global 列表与你桌面环境的合成器实现一致（GNOME 的 Mutter、KDE 的 KWin、wlroots 系的 sway 支持的协议各不相同），缺席的协议恰好对应 `Globals` 里的 `None` 字段。具体输出依赖本机合成器，「待本地验证」。
+1. 实践目标：把「协议对象」从抽象概念变成肉眼可见的 request/event 流。
+2. 操作步骤（在 Linux + Wayland 会话下）：
+   - 在 Zed 仓库根目录运行 `WAYLAND_DEBUG=1 cargo run -p gpui --example window 2>wayland.log`（`libwayland` 会把全部协议流量打到 stderr）；
+   - 打开 `wayland.log`，开头几百行是 `wl_registry` 的 `global` 事件——逐行找出 `zwlr_layer_shell_v1`、`wp_cursor_shape_manager_v1`、`zxdg_decoration_manager_v1` 是否出现；
+   - 对照 `Globals::new` 的绑定清单，确认你的合成器缺哪个协议。
+3. 需要观察的现象：不同合成器（GNOME 的 mutter 不支持 layer_shell；KWin/sway 支持）日志里的 global 列表不同。
+4. 预期结果：缺失的协议在代码里对应 `Globals` 的 `None` 字段，相关功能运行期降级。**待本地验证**（取决于你所用的合成器）。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 `wl_seat` 版本低于 5 时 `wl_seat_version` 直接 panic，而 `wl_output` 用 clamp？
+**练习 1**：为什么 `WaylandClientStatePtr` 包的是 `Weak` 而不是 `Rc`？
+答案：`Dispatch` 实现要求状态类型可传入 `EventLoop::run`；`Weak` 让事件循环持有状态指针却不延长 `WaylandClientState` 的生命周期，客户句柄与状态之间不形成强引用环（承接 u5-l1 的外壳-后端关系），取用时 `upgrade()` 失败即安静返回。
 
-答案：见 [L673-L700](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L673-L700) 的注释——`wl_pointer.frame` 事件自 wl_seat 版本 5 起才存在，而指针事件的处理依赖 frame 做批量结算，缺了它功能性地残废，不如启动期 fail-fast；wl_output 的老版本只是信息少一点，钳到 2 仍可用。
+**练习 2**：如果合成器不支持 `zwlr_layer_shell_v1`，用 `WindowKind::LayerShell` 开窗会发生什么？
+答案：`WaylandSurfaceState::new` 里 `globals.layer_shell.as_ref()` 为 `None`，返回 `LayerShellNotSupportedError`（见 4.6 源码），开窗失败由调用方处理。
 
-**练习 2**：`Drop for WaylandClient`（[L651-L669](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L651-L669)）里为什么先 `state.windows.clear()` 再逐个 release 输入设备？
+**练习 3**：`frame_ping` 为什么只建一个、而不是每窗口一个？
+答案：calloop 源是稀缺资源；ping 只负责「唤醒事件循环」这一个事实，具体哪些窗口需要 tick 由 `dispatch_scheduled_frames` 广播后各窗口按自身状态（`Scheduled`）自行裁决（见 4.4）。
 
-答案：先清窗口表会触发各 `WaylandWindow` 的 `Drop`（若没有其他持有者），而窗口析构会调度异步的 `drop_window` 清理；先把客户端侧的窗口引用断掉，能保证后续 `wl_pointer.release()` 等销毁请求发出时不再有窗口事件会引用这些设备对象。
-
-**练习 3**：`detect_compositor_gpu`（[L1287-L1304](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1287-L1304)）为什么要另开一条连接，而不是复用主连接？
-
-答案：它只需要一次 roundtrip 读取 `zwp_linux_dmabuf_v1` 的默认 feedback 拿到合成器所用 GPU 的设备号（用于渲染器选择同一 GPU，避免跨设备拷贝）；用独立的 `DmabufProbeState` 临时连接可以把这次探测与主连接的 `WaylandClientState` 分发状态完全隔离，探测失败也只是返回 `None` 不影响启动。
-
-### 4.2 wayland::serial：输入序号跟踪器
+### 4.2 wayland::window：WaylandWindowState 与三种表面
 
 #### 4.2.1 概念说明
 
-2.3 节说过：改光标、设剪贴板、弹菜单抓键盘，都要向合成器出示「这确实来自用户操作」的 serial。但 Wayland 协议对不同请求认的 serial 来源并不相同——`wl_pointer.set_cursor` 认指针进入/按键类事件的 serial，`wl_data_device.set_selection` 认任意**按键或指针按下**的 serial，`xdg_popup.grab` 认**按下**事件的 serial（release 的不行）。于是 gpui_linux 不存「一个最新 serial」，而是按用途分五类跟踪（[serial.rs:L3-L10](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/serial.rs#L3-L10)）：
+每个窗口的全部状态在 `WaylandWindowState`，而它的「表面身份」由 `WaylandSurfaceState` 枚举表达，对应三种协议形态：
 
-| SerialKind | 更新时机 | 典型消费者 |
-| --- | --- | --- |
-| `MouseEnter` | `wl_pointer.enter` 事件 | `set_cursor_style`、隐藏/恢复光标 |
-| `MousePress` | `wl_pointer.button` **按下**沿 | 拖动/改尺寸/弹出层抓取/激活令牌 |
-| `KeyPress` | `wl_keyboard.key` **按下**沿 | 弹出层抓取的备选 |
-| `InputMethod` | `zwp_text_input_v3` 事件 | 输入法相关提交 |
-| `DataDevice` | `wl_data_device` 事件 | 数据设备交互 |
+1. `Xdg`——普通窗口（`xdg_surface` + `xdg_toplevel`），可选装饰协商与模态对话框；
+2. `LayerShell`——wlroots 层表面，用于面板/Dock 类 UI；
+3. `Popup`——锚定父表面的弹出层（`xdg_popup`）。
 
-其中只有 `KeyPress` 与 `MousePress` 会同时写入 `selection_serial`（剪贴板/主选区所有权专用），其余类别一概不算数——这是 `wl_data_device.set_selection` 对「用户驱动事件」的要求。
+**无全局坐标模型**是贯穿本模块的背景：Wayland 客户端既查不到也设不了自己「在屏幕上的绝对位置」，窗口摆放完全归合成器管。于是：普通窗口的 `resize` 只改表面局部几何；popup 用 positioner 相对**父窗口几何**声明锚点；layer_shell 用 anchor 相对**屏幕边缘**声明锚点；`primary_display`、`window_stack` 干脆返回 `None`。
 
 #### 4.2.2 核心流程
 
+窗口的诞生与首帧：
+
 ```text
-事件到达（client.rs 各 Dispatch 实现）
-    │ serial 随事件携带
-    ▼
-SerialTracker::update(kind, serial)
-    ├── KeyPress/MousePress → 同时刷新 selection_serial（按到达顺序，不看数值大小）
-    └── 存入 serials[kind]
-    ▼
-消费者按需读取
-    ├── get(MouseEnter)  → wl_pointer.set_cursor
-    ├── get(MousePress)  → toplevel._move / resize / popup grab / activation token
-    ├── selection_serial() → data_device.set_selection / primary_selection.set_selection
-    └── get(kind) 未跟踪时返回 Serial(0)（调用方自行判断是否可用）
+open_window
+→ wl_compositor.create_surface
+→ WaylandSurfaceState::new（按 WindowKind 三分支）
+→ 申请 fractional_scale / viewport
+→ WaylandWindow::new（frame_loop = Unconfigured，保存 frame_ping）
+→ surface.commit()                 ← 把初始状态发给合成器，仅此而已
+   ... 合成器异步回应 ...
+→ xdg_surface.Configure 事件到达
+→ ack_configure + set_geometry
+→ 首次 Configure：frame()          ← 渲染循环由此启动（见 4.3）
+→ 后续 Configure：request_redraw()
 ```
 
-回绕问题的处理：`selection_serial` 只在 `update` 里被「最后一个写入者」覆盖，从不做数值比较，所以 `0xffff_fff0` 之后再来 `0x0000_0010`，后者即是最新——单元测试 [serial.rs:L97-L104](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/serial.rs#L97-L104) 专门固化了这一点。注意一个对比：4.4 将看到的弹出层抓取处用了两次 serial 的 `u32::max()` 挑较大者，那是「同一时刻取更近的一次按下」的局部近似，与 `selection_serial` 的到达序模型是两回事。
+窗口的死亡（`Drop`）按依赖逆序销毁协议对象，任何顺序错误都是协议错误。
 
 #### 4.2.3 源码精读
 
-**(1) SerialTracker 本体**
+**`WaylandWindowState` 字段**（[../gpui_linux/src/linux/wayland/window.rs:L97-L134](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L97-L134)）：留意渲染循环相关的四个字段——`redraw_requested`（脏标记）、`presentation`（呈现状态，L126）、`pending_frame_callback`（在途的 wl_callback，L127）与 `parent`/`children`（父子表面关系，`children: FxHashMap<ObjectId, bool>` 的布尔值标记「是否阻塞父窗口输入」——对话框阻塞、popup 不阻塞）。
+
+**三种表面的构造分支**（[../gpui_linux/src/linux/wayland/window.rs:L142-L293](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L142-L293)）：`WaylandSurfaceState::new` 按 `params.kind` 三分。LayerShell 分支（L151-196）在 4.6 精读；popup 分支（L198-244）在 4.6 与 4.5 精读；其余一切 `WindowKind` 都落到 `get_xdg_surface` + `get_toplevel`（L246-291），`Floating`/`Dialog` 会调用 `toplevel.set_parent` 建立父子关系。
+
+**首帧的点火处**（[../gpui_linux/src/linux/wayland/window.rs:L1059-L1131](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1059-L1131)）：`handle_xdg_surface_event` 处理 `Configure`——先 `ack_configure`、上报 `set_geometry`，然后是关键一行（L1125-1131）：
 
 ```rust
-pub(crate) struct SerialTracker {
-    serials: HashMap<SerialKind, Serial>,
-    selection_serial: Option<SelectionSerial>,
-}
-
-impl SerialTracker {
-    pub fn update(&mut self, kind: SerialKind, value: u32) {
-        let serial = Serial(value);
-
-        if matches!(&kind, SerialKind::KeyPress | SerialKind::MousePress) {
-            self.selection_serial = Some(SelectionSerial(serial));
-        }
-
-        self.serials.insert(kind, serial);
-    }
-
-    pub fn get(&self, kind: SerialKind) -> Serial {
-        self.serials.get(&kind).copied().unwrap_or(Serial(0))
-    }
-```
-
-见 [serial.rs:L30-L60](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/serial.rs#L30-L60)。`Serial`/`SelectionSerial` 是两个不含行为的新类型（[L12-L28](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/serial.rs#L12-L28)），类型隔离防止把「任意 serial」误传给只认选区 serial 的接口。`get` 对未跟踪类别返回 0，调用方以 `serial != 0` 判断可用性。
-
-**(2) 生产者：两个典型写入点**
-
-键盘按下沿写入 `KeyPress`（[client.rs:L1795-L1803](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1795-L1803)）：
-
-```rust
-wl_keyboard::Event::Key { serial, key, state: WEnum::Value(key_state), .. } => {
-    if key_state == wl_keyboard::KeyState::Pressed {
-        state.serial_tracker.update(SerialKind::KeyPress, serial);
-    }
-    ...
-```
-
-指针按下沿写入 `MousePress`，且源码注释明确说明为什么只记按下（[client.rs:L2150-L2160](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L2150-L2160)）：
-
-```rust
-wl_pointer::Event::Button { serial, button, state: WEnum::Value(button_state), .. } => {
-    // Record presses only. Requests referencing this serial (popup grabs,
-    // interactive moves) are declined when given a release serial.
-    if button_state == wl_pointer::ButtonState::Pressed {
-        state.serial_tracker.update(SerialKind::MousePress, serial);
-    }
-```
-
-**(3) 消费者一：set_cursor_style（走 MouseEnter）**
-
-```rust
-let serial = state.serial_tracker.get(SerialKind::MouseEnter);
-if let Some(cursor_shape_device) = &state.cursor_shape_device {
-    cursor_shape_device.set_shape(serial.as_raw(), to_shape(style));
-} else if let Some(focused_window) = &state.mouse_focused_window {
-    // cursor-shape-v1 isn't supported, set the cursor using a surface.
-    ...
-    state.cursor.set_icon(&wl_pointer, serial.as_raw(),
-        cursor_style_to_icon_names(style), scale);
+let initial_configure = self.frame_loop.get() == FrameLoop::Unconfigured;
+if initial_configure {
+    self.frame();
+} else {
+    self.request_redraw();
 }
 ```
 
-见 [client.rs:L1068-L1084](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1068-L1084)。两条路径：优先 `wp_cursor_shape_device_v1.set_shape`（传枚举，合成器自己渲染），后备是把 XCursor 主题里的位图 attach 到一块专用 surface 再 `wl_pointer.set_cursor`（[cursor.rs:L94-L151](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/cursor.rs#L94-L151)，含热点坐标换算与 `set_buffer_scale`）。`CursorStyle` 到协议枚举的翻译表 `to_shape` 在 [wayland.rs:L18-L42](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland.rs#L18-L42)，主题名后备链在 `set_icon` 里：指定名 → `DEFAULT_CURSOR_ICON_NAME` → 放弃并告警。
+第一次 Configure 之前客户端不许提交缓冲区（协议规定），所以首帧要等这一刻才由 `frame()` 点燃；之后的每次 Configure 只标脏请求重绘。这就是实践任务里「首帧如何由 Unconfigured 进入 FrameLoop」的答案。
 
-**(4) 消费者二：write_to_clipboard（走 selection_serial）**
+**无全局坐标的代码证据**（[../gpui_linux/src/linux/wayland/window.rs:L1679-L1681](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1679-L1681)）：`resize` 的注释直言「On Wayland, window geometry is surface-local: resizing should not attempt to translate the window; the compositor controls placement」——resize 只改表面局部几何，从不移动窗口。popup 更特殊（L1662-1664 注释）：位置是合成器的裁决，resize 会重新跑一遍 positioner。
 
-```rust
-if state.mouse_focused_window.is_some() || state.keyboard_focused_window.is_some() {
-    state.clipboard.set(item);
-    let Some(serial) = state.serial_tracker.selection_serial() else {
-        log::warn!(
-            "Skipping Wayland clipboard ownership request because no keyboard or pointer press serial has been received"
-        );
-        return;
-    };
-    let data_source = data_device_manager
-        .create_data_source(&state.globals.qh, DataSourceKind::Clipboard);
-    for mime_type in TEXT_MIME_TYPES {
-        data_source.offer(mime_type.to_string());
-    }
-    data_source.offer(state.clipboard.self_mime());
-    data_device.set_selection(Some(&data_source), serial.as_raw());
-}
-```
-
-见 [client.rs:L1177-L1200](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1177-L1200)。这段浓缩了 Wayland 剪贴板与 X11 的同与不同：同为**选区所有权模型**（数据留在拥有者进程，`write_to_clipboard` 只是把 `ClipboardItem` 存进本地 `state.clipboard.set`，见 [clipboard.rs:L161-L167](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/clipboard.rs#L161-L167)）；不同的是无需常驻服务线程与隐藏窗口——合成器直接把读取方的文件描述符经 `wl_data_source.send` 递过来，`Clipboard::send`（[clipboard.rs:L183-L197](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/clipboard.rs#L183-L197)）把本地文本写进 fd（经 calloop generic 源异步写，[L235 起](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/clipboard.rs#L235)）。还有一个省 IPC 的小技巧：offer 列表里混入 `self_mime()`（值为 `pid/<进程号>`，[clipboard.rs:L149](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/clipboard.rs#L149)）；读取时若发现对方 offer 带着自己的 pid 串，说明「拥有者还是我自己」，直接返回本地缓存（[clipboard.rs:L205-L207](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/clipboard.rs#L205-L207)）。
+**`Drop` 的销毁顺序**（[../gpui_linux/src/linux/wayland/window.rs:L752-L801](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L752-L801)）：第一行先把 `frame_loop` 置为 `Parked`（让任何在途唤醒对这个已死窗口失效），随后按 renderer → blur → decoration → surface_state（toplevel/xdg_surface）→ viewport → wl_surface 的顺序销毁，注释逐条引用协议文档说明为何这个顺序不可乱。
 
 #### 4.2.4 代码实践
 
-**实践目标**：验证 `selection_serial` 的到达序规则与类别过滤规则。
+**实践：跟踪一次窗口创建的全链路（源码阅读型）。**
 
-**操作步骤**：
-
-1. 运行仓库内现成单元测试：`cargo test -p gpui_linux serial`（过滤器会命中 serial.rs 测试模块里的全部 5 个测试）。
-2. 打开 [serial.rs:L77-L125](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/serial.rs#L77-L125)，逐个测试对照断言：哪个测试证明 `InputMethod`/`MouseEnter`/`DataDevice` 不影响 selection_serial？哪个证明回绕后按到达序取胜？哪个证明 0 也是合法的选区 serial？
-3. （选做）在 `WaylandClientState` 上人为构造场景：把 4.2.3(4) 的 `write_to_clipboard` 在应用一启动、尚未收到任何按键时调用一次（例如在示例的 `run` 回调里直接 `cx.write_to_clipboard(...)`），观察日志中的 warn。
-
-**需要观察的现象**：第 1 步测试全绿；第 3 步出现 "Skipping Wayland clipboard ownership request..." 告警。
-
-**预期结果**：测试通过是源码保证的确定行为（但测试编译需拉起 gpui_linux 全部依赖，环境缺系统库时可能失败，「待本地验证」）；第 3 步的告警在按任意键或点一次鼠标后消失，因为 `selection_serial` 从 `None` 变为 `Some`。
+1. 实践目标：验证 4.2.2 的流程图与真实代码一致。
+2. 操作步骤：
+   - 从 u3-l1 讲过的 `App::open_window` 出发，沿 `LinuxPlatform::open_window` → `WaylandClient::open_window`（L1038）→ `WaylandWindow::new`（L813）→ `WaylandSurfaceState::new`（L142）一路抄下函数名；
+   - 在 [L860](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L860) 处确认初始状态是 `FrameLoop::Unconfigured`；
+   - 继续追 `handle_xdg_surface_event`（L1059）确认首帧入口。
+3. 需要观察的现象：`open_window` 返回时**没有任何像素提交**，只做了一次 `surface.commit()`（L865）。
+4. 预期结果：你的调用链笔记应与 4.2.2 的流程图逐行对应；首帧确实发生在收到第一个 `Configure` 之后。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么 `set_cursor_style` 用 `MouseEnter` 的 serial 而不是 `MousePress`？
+**练习 1**：`children` 表为什么对话框标 `true`、popup 标 `false`？
+答案：`is_blocked()`（L914-917）用它判断父窗口是否被挡住输入。模态对话框期间父窗口不该响应；而 popup（如右键菜单）出现时父窗口仍要能收到点击以便「点旁边关闭菜单」，popup 分支注释明确写了 "Non-blocking"。
 
-答案：`wl_pointer.set_cursor`（以及 `set_shape`）语义上是「在指针位于我的 surface 期间改光标」，合成器校验的是与指针 enter 同源交互链的 serial；gpui 在 `wl_pointer.enter` 事件里记录 enter serial（[client.rs:L2044](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L2044)），改样式时直接取用；且 enter 后每次重新应用样式（如 2055-2067 行在 enter 事件里重设）都用事件自带 serial，保证凭证新鲜。`MousePress` 的 serial 理论上晚于 enter 也可用，但按类别取 enter 更贴合「指针交互」语义。
+**练习 2**：为什么 `WaylandWindow::new` 最后只做一次 `surface.commit()` 而不画第一帧？
+答案：xdg_shell 协议要求客户端在第一次 `configure` 之前不得提交带缓冲区的表面状态；`App::open_window` 的「强制首帧」在 Wayland 上实际要推迟到 `handle_xdg_surface_event` 收到初始 Configure 时的 `frame()` 调用。
 
-**练习 2**：`hide_cursor_until_mouse_moves` 与 `restore_cursor_after_hide`（[client.rs:L594-L645](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L594-L645)）是怎么把光标藏起来又还回来的？
-
-答案：藏：`wl_pointer.set_cursor(serial, None, 0, 0)`——buffer 传 `None` 即不显示任何光标图像，同时记下 `cursor_hidden_window` 防止后续 `set_cursor_style` 覆盖掉「不可见」状态。还：从 `cursor_style` 缓存读回样式（所以 `set_cursor_style` 在隐藏期间仍照常更新缓存），再走 4.2.3(3) 的两条路径之一重新 set。这呼应 u3-l4 讲过的「打字藏光标」链路。
-
-**练习 3**：如果把 `Serial` 与 `SelectionSerial` 合并成一个类型，最可能引发什么 bug？
-
-答案：类型不隔离后，任何 serial（比如 `DataDevice` 的）都能被传给 `set_selection`，编译器不再拦截；合成器会因凭证不是用户按键/按下事件而忽略请求，剪贴板「写了却读不到」且无错误返回——正是 Rust 新类型模式要消灭的那类静默错误。
-
-### 4.3 wayland::window：一个 wl_surface，三种角色，configure 协商
+### 4.3 按需驱动渲染循环（上）：FrameLoop 与 PresentationState 状态机
 
 #### 4.3.1 概念说明
 
-`WaylandWindow` 的核心设计是**三态合一**：`WaylandWindowState` 承载所有窗口公共状态（渲染器、bounds、scale、回调、焦点镜像……），而「这个窗口在社会上是什么角色」由 `surface_state` 枚举决定：
+eb354c8d50 之前，Wayland 后端用「每帧心跳」驱动渲染：窗口持续无条件地请求 frame callback，靠 `acknowledged_first_configure`/`force_render_after_recovery` 等补丁维持节拍，空闲窗口也在空转。重写后改为**按需驱动**：渲染循环是一个显式状态机，没有需求时停泊（Parked）在零唤醒状态，需求出现时由外部唤醒。
 
-```rust
-pub enum WaylandSurfaceState {
-    Xdg(WaylandXdgSurfaceState),
-    LayerShell(WaylandLayerSurfaceState),
-    Popup(WaylandPopupSurfaceState),
-}
-```
+两个正交的状态变量：
 
-见 [window.rs:L135-L139](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L135-L139)。三态分别对应 `WindowKind::Normal/Floating/Dialog`、`WindowKind::LayerShell`、`WindowKind::AnchoredPopup`（契约枚举见 [../gpui/src/platform.rs:L2043-L2070](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui/src/platform.rs#L2043-L2070)，其中 `LayerShell` 变体带 `#[cfg(all(target_os = "linux", feature = "wayland"))]` 门控）。后续 4.4、4.5 分别展开后两个角色，本模块先把公共骨架讲清：创建链路、configure/ack 协商、帧回调与装饰。
-
-另一个贯穿性概念是 **CSD（客户端装饰）**：Wayland 上窗口标题栏要么由合成器画（SSD，需 `xdg-decoration` 协议支持），要么由应用自己画（CSD）。GPUI 默认 CSD——`WaylandWindowState::new` 里 `decorations: WindowDecorations::Client`（[window.rs:L610](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L610)），窗口用 `client_inset` 向合成器申报「边缘这圈是我的 chrome」（`inset()`，[L664-L669](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L664-L669)；运行期由 `set_client_inset` 更新，[L1884](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1884)）。Zed 在 Wayland 上的自绘标题栏走的就是这条路；4.5 的 layer_shell 则是另一种「自绘 chrome」——不是装饰普通窗口，而是把整个表面做成 dock/面板。
+- **`PresentationState`**（4 态）：跟踪「这块表面的像素有没有成功上过屏」。`Unpresented` → `Presented` 是正常路径；呈现失败经 `failed()` 进入 `RetryBeforeFirstPresent` 或 `RetryAfterPresent`——区分的意义在于：从未上过屏的表面可能永远等不到合成器回调（合成器认为它无内容可显示），必须靠**本地定时器**重试；已经上过屏的表面则可以把重试托付给合成器节拍。
+- **`FrameLoop`**（8 态）：渲染循环本身的调度状态，回答「下一次 tick 从哪来」。
 
 #### 4.3.2 核心流程
 
-窗口创建到首帧的完整链路：
+`FrameLoop` 八态（[../gpui_linux/src/linux/wayland/window.rs:L732-L742](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L732-L742)）：
+
+| 状态 | 含义 | 下一次 tick 的来源 |
+| --- | --- | --- |
+| `Unconfigured` | 还没收到首个 Configure | 合成器的 configure（→ frame()） |
+| `Ticking` | 一次 frame() 正在进行 | complete_frame() 的裁决 |
+| `RescheduleRequested` | tick 期间又来了新需求 | 本地重试定时器 |
+| `PresentationFailed` | 上次呈现失败 | complete_frame() 的裁决 |
+| `AwaitingCallback` | 像素已提交，等合成器回调 | wl_callback::Done |
+| `Scheduled` | 已 ping，等待事件循环分发 | frame_ping |
+| `RetryScheduled` | 已排定重试定时器 | calloop Timer（约 16.7ms） |
+| `Parked` | 空闲停泊，无任何唤醒源 | schedule_frame() 的 ping |
+
+一次完整帧的转移：
 
 ```text
-LinuxClient::open_window (client.rs L982)
-  ├── AnchoredPopup → 查父窗口 + 组装 grab serial（4.4）
-  ├── 其他 kind     → 父 = keyboard_focused_window
-  ├── display_id    → 找目标 wl_output（layer_shell 用）
-  ▼
-WaylandWindow::new (window.rs L738)
-  ├── compositor.create_surface            ← 画布
-  ├── WaylandSurfaceState::new             ← 按 WindowKind 赋角色（三选一）
-  ├── fractional_scale_manager.get_fractional_scale（可选，分数缩放）
-  ├── viewporter.get_viewport（可选）
-  └── surface.commit                       ← 第一拍：提交角色
-  ▼
-合成器异步回应
-  xdg_toplevel.configure / layer_surface.configure / xdg_popup.configure
-  ▼
-handle_toplevel_event 等 → 暂存 in_progress_configure
-  ▼
-xdg_surface.configure(serial)
-  ▼
-handle_xdg_surface_event (window.rs L882)
-  ├── 应用尺寸/全屏/最大化/平铺状态
-  ├── ack_configure(serial)                ← 必须先应答才能提交新 buffer
-  ├── set_window_geometry（扣除 CSD inset）
-  └── 首次 configure → frame() → 请求 wl_surface.frame 回调 → 绘制
-```
+frame()                        [→ Ticking]
+  ├─ 调 GPUI 的 request_frame 回调（场景构建 + present）
+  │    └─ present → PlatformWindow::draw(scene)
+  │         ├─ 成功: presentation=Presented,  frame_loop=AwaitingCallback
+  │         └─ 失败: presentation=failed(),   frame_loop=PresentationFailed
+  └─ complete_frame()
+       ├─ 当前已是 AwaitingCallback → 直接返回（在等回调）
+       ├─ requires_presentation（被节流没画/从未上屏）
+       │    ├─ 已上过屏且失败 → 请求 frame callback + commit → AwaitingCallback
+       │    └─ 否则 → RetryScheduled + client.schedule_frame_retry()
+       ├─ RescheduleRequested 或 redraw_requested → RetryScheduled + 重试定时器
+       └─ 否则 → Parked
 
-此后每次绘制都遵循「frame 回调 → 绘制 → attach/damage/commit → 下一个 frame 回调」的节拍，`frame()` 见 [window.rs:L841-L857](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L841-L857)，回调到达处见 [client.rs:L1383-L1403](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1383-L1403)（`wl_callback.done` 再触发下一轮 `window.frame()`）。
+wl_callback::Done 到达 → frame_callback_fired()  [AwaitingCallback → frame() → …]
+```
 
 #### 4.3.3 源码精读
 
-**(1) open_window：外壳里的分发点**
+**`PresentationState`**（[../gpui_linux/src/linux/wayland/window.rs:L675-L697](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L675-L697)）：`requires_presentation()` 只对两个 Retry 态为真；`failed()` 把失败映射到「记住是否曾上屏」的 Retry 态。这两条语义有专门的单元测试（[L699-L729](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L699-L729)），断言「失败要记住是否呈现过」「只有 Retry 态需要呈现」。
 
-```rust
-let (window, surface_id) = WaylandWindow::new(
-    handle,
-    state.globals.clone(),
-    state.gpu_context.clone(),
-    compositor_gpu,
-    WaylandClientStatePtr(Rc::downgrade(&self.0)),
-    params,
-    appearance,
-    parent,
-    popup_grab,
-    target_output,
-)?;
+**`frame()`**（[../gpui_linux/src/linux/wayland/window.rs:L919-L942](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L919-L942)）：进入即置 `Ticking`；读走 `redraw_requested`（注释解释：GPUI 可能只 tick 不画，强制渲染请求要「锁存」到真正到达渲染器的那次 draw）；然后同步调用 GPUI 注册的 `request_frame` 回调，把 `force_render` 与 `require_presentation` 两个诉求装进 `RequestFrameOptions` 传过去。若回调不存在（窗口尚未接入 GPUI），直接 `Parked` 返回。
 
-if window.0.toplevel().is_some() {
-    state.consume_startup_activation_token(&window.0.surface());
-}
-state.windows.insert(surface_id, window.0.clone());
-```
+**`PlatformWindow::draw`**（[../gpui_linux/src/linux/wayland/window.rs:L1901-L1943](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1901-L1943)）：这是像素真正进 GPU 的地方。三步：① 若 GPU 设备丢失先尝试 `renderer.recover`，失败则标脏下帧再试；② 若没有在途回调则请求 `state.surface.frame(...)`（L1928-1931）——**frame callback 在呈现前请求，附在本次提交上**；③ `renderer.draw(scene)` 成功 → `Presented` + `AwaitingCallback`，失败 → `presentation.failed()` + `PresentationFailed`（L1932-1938）。注意 GPUI 侧的 `Window::present()`（[../gpui/src/window.rs:L3016-L3021](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui/src/window.rs#L3016-L3021)）最终就是调 `platform_window.draw(&self.rendered_frame.scene)`——所以 frame() 里那次回调的执行会同步走到这里。
 
-见 [client.rs:L1026-L1044](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1026-L1044)。窗口造好后以 surface 的 `ObjectId` 为键登记进客户端的 `windows` 表——此后所有协议事件都靠这个表路由到窗口（`get_window`，[L1405-L1410](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1405-L1410)）。`toplevel().is_some()` 时消费启动激活令牌（用 `XDG_ACTIVATION_TOKEN` 环境变量换一次 `activation.activate`，让「从启动器点开」的窗口获得焦点，[L417-L425](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L417-L425)）。
-
-**(2) WaylandWindow::new 与渲染器挂接**
-
-```rust
-let surface = globals.compositor.create_surface(&globals.qh, ());
-let surface_state = WaylandSurfaceState::new(&surface, &globals, &params,
-    parent.clone(), popup_grab, target_output)?;
-...
-// Kick things off
-surface.commit();
-```
-
-见 [window.rs:L750-L789](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L750-L789)。渲染器在 `WaylandWindowState::new` 里创建：把 `wl_surface` 的原生指针包进 `RawWindow`（实现 raw-window-handle 的 `HasWindowHandle`/`HasDisplayHandle`，[window.rs:L60-L85](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L60-L85)），交给 `WgpuRenderer::new` 建 GPU surface（[L555-L575](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L555-L575)，present mode 优先 Mailbox）。这兑现了 u3-l2 讲的契约：`PlatformWindow` 必须交出 raw handle 供 wgpu 生态使用。xdg 分支还会顺手 `set_title`/`set_app_id`，并用渲染器的 `max_texture_size` 反向设置窗口 `set_max_size`（[L577-L592](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L577-L592)）。
-
-**(3) configure 协商：ack 是提交新帧的前置条件**
-
-`handle_xdg_surface_event`（[window.rs:L882-L954](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L882-L954)）处理 `xdg_surface.configure`，做四件事：把暂存的 `in_progress_configure` 落到状态上（含「每 vblank 至多一次交互式 resize」的节流）；`ack_configure(serial)`；按 `inset` 扣边后 `set_window_geometry`（CSD 申报）；首次 configure 时 `acknowledged_first_configure = true` 并发起首帧。三态的 ack 与 set_geometry 有各自的实现（[L366-L378](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L366-L378)、[L418-L431](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L418-L431)），注意 layer 分支的注释：**layer surface 不能设位置**，只能 `set_size`——又一处「无全局坐标」的体现。
-
-**(4) 装饰协商与销毁顺序**
-
-`request_decorations`（[window.rs:L1860-L1878](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1860-L1878)）：若合成器支持 `xdg-decoration` 就 `set_mode` 申请 SSD，否则记一条日志并**留在 CSD**。合成器的实际裁决经 `handle_toplevel_decoration_event`（[L957-L985](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L957-L985)）回流，ClientSide 分支会触发 `appearance_changed` 回调让上层重绘透明背景。`Drop for WaylandWindow`（[L680-L727](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L680-L727)）则严格遵守协议规定的析构顺序：blur → decoration → 角色对象（toplevel/xdg_popup 先于 xdg_surface）→ viewport → `wl_surface` 最后销毁，每一步都带协议文档链接注释；收尾再经前台执行器异步 `close()` + `drop_window` 清理客户端侧登记。
+**`complete_frame()`**（[../gpui_linux/src/linux/wayland/window.rs:L944-L986](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L944-L986)）：frame() 的收尾裁决，按 4.3.2 伪代码逐分支对应。最微妙的是 L952-966 的注释：首帧之前或被节流跳过绘制时，合成器可能**永远不回** frame callback，此时若已经上过屏（`PresentationFailed` 且 `RetryAfterPresent`）就主动补一次 `frame` 请求 + `commit` 转 `AwaitingCallback`，让合成器来定重试节奏——「被遮挡的窗口不该一直轮询」；否则交给本地定时器。最后的兜底是 `Parked`。
 
 #### 4.3.4 代码实践
 
-**实践目标**：在协议流里辨认一次完整的 configure 协商。
+**实践：手工填写状态转移表（源码阅读型）。**
 
-**操作步骤**：
-
-1. `WAYLAND_DEBUG=1 cargo run -p gpui --example window 2> window.log`。
-2. 只看**主窗口**（忽略后续点击开的子窗口）的日志段，按顺序摘出：`wl_compositor.create_surface`、`xdg_wm_base.get_xdg_surface`、`xdg_surface.get_toplevel`、`xdg_toplevel.set_title`/`set_app_id`/`set_max_size`、（若有）`zxdg_decoration_manager_v1.get_toplevel_decoration`、`wl_surface.commit`、`xdg_toplevel.configure`、`xdg_surface.ack_configure`、`xdg_surface.set_window_geometry`、`wl_surface.frame`、`wl_surface.attach`/`commit`。
-3. 拖动窗口边缘触发 resize，再摘一段 configure/ack，对照 4.3.3(3) 的节流逻辑。
-4. 点击 "Custom Titlebar" 按钮开一个无标题栏子窗口，对比它与普通子窗口在 decoration 相关请求上的差异。
-
-**需要观察的现象**：每次 configure 后必有一条 ack_configure；resize 高频时 ack 依旧逐条出现但 `set_window_geometry` 的提交节奏受节流影响。
-
-**预期结果**：请求顺序与 4.3.2 流程图一致是协议规定的确定行为；具体字段值（configure 里的 states 位掩码、尺寸）取决于合成器，「待本地验证」。
+1. 实践目标：把 4.3.2 的伪代码变成自己推导出的结论。
+2. 操作步骤：
+   - 只读 `frame()`、`draw()`、`complete_frame()` 三个函数（L919-L986、L1901-L1943）；
+   - 画一张 8×4 表格：行是 `FrameLoop` 八态，列是「正常画完」「画失败」「被节流没画」「无回调」，格子里填 complete_frame 出口状态；
+   - 用 `PresentationState` 的两个 Retry 态解释表格中「被节流」列的两种不同出口。
+3. 需要观察的现象：`AwaitingCallback` 是 complete_frame 里唯一「直接 return」的入口状态。
+4. 预期结果：与 4.3.2 的转移图一致；特别能说清 `RetryBeforeFirstPresent`（本地定时器重试）与 `RetryAfterPresent`（补 frame callback 等合成器）的分野。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么首帧必须等 configure，而不能 create_surface 后立刻画？
+**练习 1**：为什么 `redraw_requested` 在 `frame()` 里被读走后仍可能为真？
+答案：`draw()` 里 `renderer.needs_redraw()`（L1940-1942）或 GPU 恢复失败会把它重新置真——同一帧内产生的新需求留给下一次 tick，配合 `RescheduleRequested` 保证不丢帧。
 
-答案：xdg-shell 的双缓冲状态模型要求：角色（toplevel 等）在首次 configure 到达并被告知初始尺寸/状态之前，客户端不应提交带 buffer 的最终状态；而且 Wayland 上窗口初始尺寸可能由合成器决定（如 maximized 或 layer surface 的锚定尺寸）。`acknowledged_first_configure` 标志（[window.rs:L948-L953](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L948-L953)）就是这条协议要求的状态化。
+**练习 2**：旧模型的 `acknowledged_first_configure` 解决的问题，新模型用什么解决？
+答案：旧模型要靠标志位记住「第一个 configure 是否已确认」来决定心跳从何时开始；新模型里 `FrameLoop::Unconfigured` 本身就是这一事实（`is_configured()`，L1009-1011），首个 Configure 直接调用 `frame()` 启动循环，之后由需求驱动，无需心跳。
 
-**练习 2**：`handle_fractional_scale_event` 里 `scale as f32 / 120.0`（[window.rs:L987-L991](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L987-L991)）的 120 是什么？
-
-答案：fractional-scale-v1 协议用 120 为分母的定点数表达分数缩放（120 = 100%，180 = 150%，240 = 200%），避免浮点协商；除以 120 还原成倍率后交给 `rescale`。它配合 viewporter 使用：buffer 保持整数倍率，用 viewport 做分数缩放变换。
-
-**练习 3**：`window_decorations()` 返回的 `Decorations::Client { tiling }` 为什么要带 tiling 信息？
-
-答案：见 [window.rs:L1850-L1858](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1850-L1858)。窗口被平铺（贴边半屏）时，合成器不会再画任何边框，相邻窗口直接相接；上层需要知道哪些边已被平铺，才能只在与自由边相邻处绘制阴影/圆角等 CSD 效果（`inset_by_tiling` 辅助函数即为此服务）。
-
-### 4.4 wayland::popup：锚定弹出层与 positioner
+### 4.4 按需驱动渲染循环（下）：四个唤醒入口、frame_ping 与重试定时器
 
 #### 4.4.1 概念说明
 
-「在鼠标旁边弹一个菜单」在无全局坐标世界里怎么做？答案是把问题反过来陈述：**不说弹在哪里，而是描述锚定关系**，让合成器解算。这就是 xdg-shell 的 popup 子协议：客户端构造一个一次性的 `xdg_positioner`，填入锚矩形（父窗口坐标系里的参考矩形）、锚点（anchor：矩形九个位置之一）、重力（gravity：弹出层朝哪个方向生长）、约束调整（constraint_adjustment：出屏时允许滑动/翻转/收缩）与偏移，然后用 `xdg_surface.get_popup(parent, positioner)` 创建弹出层。合成器综合屏幕布局后给出最终位置。
+状态机停在 `Parked` 后，必须有东西能把它叫醒。唤醒入口共有四个，对应三种唤醒源加一个协议回调：
 
-平台无关的数据模型在 gpui 主 crate 的 [../gpui/src/platform/popup.rs](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui/src/platform/popup.rs)：`PopupOptions`（[L15-L53](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui/src/platform/popup.rs#L15-L53)）的文档注释写得非常清楚——`anchor_rect` 是父窗口坐标系的矩形（下拉菜单就是那个按钮的 bounds）、`grab` 为 true 时弹层表现为菜单（接管键盘、点外部即收）。`grab` 的注释还点出关键时序：**grab 必须在触发它的按下事件还活跃时请求**，所以要从 mouse-down 处理器开窗，而不是 click 处理器。另一条重要边界写在文件末尾的 `PopupNotSupportedError`（[L127-L134](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui/src/platform/popup.rs#L127-L134)）：原生 popup 与 gpui 窗口内绘制的 popover 是两回事，平台不支持原生 popup 时调用方应回退到窗口内渲染（u3-l1 提过 macOS 正是显式报此错）。目前仓库中 `WindowKind::AnchoredPopup` 的构造点只在契约与平台实现层面，gpui 自身的菜单仍是窗口内 popover 渲染——原生 popup 是为需要系统级弹出表面的调用方预留的能力，Wayland 是实现最完整的一侧。
+1. **`scheduled_frame_fired`**——`frame_ping` 到达（GPUI 主动说「我有新需求」）；
+2. **`retry_timer_fired`**——本地重试定时器到期（被节流/首帧前的兜底节拍）；
+3. **`frame_callback_fired`**——`wl_callback::Done`（合成器说「你上一帧上屏了」，eb354c8d50 之前这里直接调 `frame()`，现在先过状态机裁决）；
+4. **`retry_timer` 的排定者 `schedule_frame_retry`** 与 GPUI 侧 `schedule_frame` 契约。
+
+设计要点是**幂等广播 + 状态过滤**：ping 是全局的、不含目标窗口信息，每个窗口收到广播后检查自己的状态是否匹配，不匹配就忽略——这让唤醒机制天然多路复用且免于竞态。
 
 #### 4.4.2 核心流程
 
 ```text
-App 层: WindowOptions { kind: WindowKind::AnchoredPopup(PopupOptions { parent, anchor_rect, anchor, gravity, constraint_adjustment, offset, grab }) }
-    ▼
-LinuxClient::open_window（client.rs L989-L1012）
-  ├── 在 windows 表里按 options.parent 找父窗口（找不到 → Err）
-  ├── grab 时取 max(MousePress, KeyPress) serial（为 0 则放弃 grab）
-  ▼
-WaylandSurfaceState::new 的 Popup 分支（window.rs L197-L243）
-  ├── build_popup_positioner：anchor_rect 从「gpui 窗口坐标」平移到
-  │   「父窗口 geometry 坐标」，并夹紧到 geometry 内至少 1px（协议禁零尺寸/越界）
-  ├── wm_base.get_xdg_surface → xdg_surface
-  ├── 父是 layer surface ? get_popup(None) + layer_surface.get_popup(xdg_popup)
-  │                    : get_popup(parent.xdg_surface, positioner)
-  ├── positioner.destroy()（一次性对象即弃）
-  ├── grab ? xdg_popup.grab(seat, serial)
-  └── parent.add_child(surface_id, /* blocks= */ false)   ← 弹层不阻塞父窗口输入
-    ▼
-合成器解算位置 → xdg_popup.configure + xdg_surface.configure
-    ▼
-handle_popup_event → 复用 xdg_surface.configure 协商（尺寸记入 in_progress_configure）
-    ▼
-运行期父/弹层尺寸变化 → reposition_popup：重建 positioner + xdg_popup.reposition(token)
+GPUI 侧产生需求（窗口变脏 / on_next_frame / 需要呈现）
+→ platform_window.schedule_frame()
+   ├─ Parked           → Scheduled + frame_ping.ping()   ← 唤醒停泊的循环
+   ├─ Ticking          → RescheduleRequested             ← 本帧结束后再来一次
+   └─ 其余状态          → 什么都不做（唤醒已武装：
+                          ping 在途 / 定时器在途 / 已提交像素必有回调）
+
+frame_ping 触发 → dispatch_scheduled_frames() 广播
+→ 每个窗口 scheduled_frame_fired(): 仅 Scheduled 态执行 frame()
+
+节流/首帧兜底 → schedule_frame_retry(surface_id)
+→ calloop Timer 16_667µs 后 → retry_timer_fired(): 仅 RetryScheduled 态执行 frame()
+
+合成器上屏 → wl_callback::Done → frame_callback_fired()
+→ 清 pending_frame_callback；仅 AwaitingCallback 态执行 frame()
 ```
 
 #### 4.4.3 源码精读
 
-**(1) grab serial 的组装**
+**`schedule_frame` 的三分支**（[../gpui_linux/src/linux/wayland/window.rs:L1013-L1026](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1013-L1026)）：
 
 ```rust
-// A popup grab must reference a press event or the compositor declines it and
-// immediately dismisses the popup, so use the most recent press serial, or no
-// grab before any press.
-let popup_grab = options.grab.then(|| {
-    let serial = state
-        .serial_tracker
-        .get(SerialKind::MousePress)
-        .as_raw()
-        .max(state.serial_tracker.get(SerialKind::KeyPress).as_raw());
-    (serial != 0).then(|| (serial, state.wl_seat.clone()))
-});
-```
-
-见 [client.rs:L998-L1009](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L998-L1009)。这是 4.2 提到的第三个消费者：抓取凭证取「最近一次鼠标按下与键盘按下中较大者」，还没收到任何按下事件（serial 为 0）就干脆不 grab。
-
-**(2) positioner 的坐标换算**
-
-```rust
-// The protocol wants the anchor rect relative to the parent's window geometry, while
-// `options.anchor_rect` is in gpui window coordinates (surface-local). A rect extending
-// outside the geometry or with a zero size is a protocol error, so translate, then clamp
-// to at least one pixel inside the geometry, pulling the origin inward at the edges.
-let anchor_rect = Bounds {
-    origin: options.anchor_rect.origin - parent_geometry.origin,
-    size: options.anchor_rect.size,
-};
-```
-
-见 `build_popup_positioner`（[window.rs:L314-L363](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L314-L363)）的开头。两个坐标系的差（gpui 的 surface 局部坐标 vs 协议的父窗口 geometry 坐标）与协议的两条禁区（零尺寸、越界）都在这一段里化解；锚点/重力/约束的枚举翻译来自 [popup.rs:L5-L38](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/popup.rs#L5-L38) 的三个纯函数（`wayland_anchor`/`wayland_gravity`/`wayland_constraint_adjustment`，后者按注释直接按位映射）。
-
-**(3) 两种父对象与再锚定**
-
-popup 的父可以是普通 xdg surface，也可以是 layer surface——后者的挂接方式不同：
-
-```rust
-// A layer-shell parent takes a null xdg parent and is attached via the layer
-// surface. Every other surface kind has an xdg_surface to parent to directly.
-let xdg_popup = if let Some(parent_layer_surface) = parent.layer_surface() {
-    let xdg_popup = xdg_surface.get_popup(None, &positioner, &globals.qh, surface.id());
-    parent_layer_surface.get_popup(&xdg_popup);
-    xdg_popup
-} else {
-    xdg_surface.get_popup(parent.xdg_surface().as_ref(), &positioner, &globals.qh, surface.id())
-};
-```
-
-见 [window.rs:L213-L226](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L213-L226)。父窗口登记子表面时用 `add_child(surface.id(), false)`（[L235](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L235)）——注释说明弹层**不阻塞**父窗口输入（对比 Dialog 的 `true`：对话框模态阻塞），这样点击父窗口自身还能用于「点外面收起菜单」。父或弹层尺寸变化后的再锚定走 `reposition_popup`（[L433-L456](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L433-L456)）：重建 positioner、携带自增 token 调 `xdg_popup.reposition`；注释强调对未映射（首次 configure 前）的弹层 reposition 是协议错误，所以 `WaylandPopupSurfaceState` 里保存 `options` 与 `next_reposition_token`（[L306-L312](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L306-L312)）正是为此。合成器回应 `xdg_popup.configure` 时，`handle_popup_event`（[L1142-L1159](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1142-L1159)）只取尺寸——注释点明「位置是合成器的」，随后借道 `xdg_surface.configure` 走 4.3 的同一套协商。
-
-#### 4.4.4 代码实践
-
-**实践目标**：把 AnchoredPopup 的完整调用链走一遍，并理解 grab 时序约束。
-
-**操作步骤**：
-
-1. 阅读型跟踪：从 [client.rs:L989-L1012](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L989-L1012) 出发，依次抄下经过的每个函数名与协议请求，画出时序图。
-2. （可选，示例代码）写一个最小验证程序：主窗口里放一个按钮，在按钮的 **mouse-down** 处理器（不是 click）里 `cx.open_window` 一个 `WindowKind::AnchoredPopup` 窗口，`PopupOptions` 里 `anchor_rect` 填按钮 bounds、`anchor: PopupAnchor::BottomLeft`、`gravity: PopupGravity::BottomRight`、`grab: true`：
-
-```rust
-// 示例代码：仅示意 AnchoredPopup 的最小用法，未在本讲环境中运行
-cx.open_window(
-    WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds {
-            origin: point(px(0.), px(0.)),
-            size: size(px(160.), px(120.)),
-        })),
-        kind: WindowKind::AnchoredPopup(PopupOptions {
-            parent: window.window_handle().downcast::<MyView>().unwrap(),
-            anchor_rect: button_bounds,
-            anchor: PopupAnchor::BottomLeft,
-            gravity: PopupGravity::BottomRight,
-            constraint_adjustment: PopupConstraintAdjustment::SLIDE_Y | PopupConstraintAdjustment::FLIP_Y,
-            offset: point(px(0.), px(0.)),
-            grab: true,
-        }),
-        ..Default::default()
-    },
-    |_, cx| cx.new(|_| PopupView),
-)
-```
-
-3. 把 `grab` 换 `false` 再跑一次，对比点弹层外部时的收起行为。
-
-**需要观察的现象**：grab 版本点窗口其他区域时父窗口仍收到点击（`blocks=false` 的效果），由你的应用负责收起弹层；点其他**应用**时合成器直接收起弹层。
-
-**预期结果**：锚定与翻转行为由合成器解算，属协议确定行为；具体交互手感依合成器而异，运行结果「待本地验证」。示例代码中 parent 句柄的获取方式（`window_handle().downcast`）依你的视图类型调整，若类型不符需改为保存好的 `AnyWindowHandle`。
-
-#### 4.5 4.4.5 小练习与答案 → 见下（纠正：本节为 4.4.5）
-
-#### 4.4.5 小练习与答案
-
-**练习 1**：为什么 anchor_rect 必须从 gpui 窗口坐标平移到「父窗口 geometry」坐标？
-
-答案：xdg_positioner 协议规定锚矩形相对父的 **window geometry**（`set_window_geometry` 申报的、含 CSD 的可见区域），而 gpui 上层给的 `anchor_rect` 在窗口内容坐标系（surface 局部）。Wayland 上开 CSD 时两者差一个 inset，不平移弹层会整体偏移标题栏高度；X11 等有全局坐标的平台则由各自的平台实现自行换算。
-
-**练习 2**：`PopupConstraintAdjustment` 的 SLIDE 与 FLIP 有什么区别？
-
-答案：见 [../gpui/src/platform/popup.rs:L106-L125](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui/src/platform/popup.rs#L106-L125) 的位定义：SLIDE 是把弹层沿该轴**平移**进屏（锚点关系不变，菜单整体挪进来）；FLIP 是把 anchor 与 gravity **翻转**到参考矩形另一侧（下拉变上拉）。典型菜单两者都开：先试翻转，翻不下再滑。RESIZE 则允许压缩弹层尺寸。
-
-**练习 3**：若把 `xdg_popup.grab` 的 serial 换成 `SerialKind::MouseEnter` 的，会发生什么？
-
-答案：enter 事件不是按下事件，合成器会拒绝 grab 并立即收起弹层——这正是 [client.rs:L998-L1000](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L998-L1000) 注释所写的拒绝条件，也是 4.2 练习 1「按类别取 serial」的反面教材。
-
-### 4.5 wayland::layer_shell：钉在屏幕边缘的表面
-
-#### 4.5.1 概念说明
-
-`zwlr_layer_shell_v1` 出自 wlroots 生态的 wlr-protocols（GNOME 需装对应扩展支持），专门服务 dock、状态栏、通知、壁纸、屏幕键盘这类「不是普通窗口」的表面。它回答的问题是：**无全局坐标世界里如何占住屏幕边缘**——客户端声明四件事，位置由合成器解算：
-
-- **层（Layer）**：`Background < Bottom < Top < Overlay`，层间严格压盖，同层内顺序不定（[../gpui/src/platform/layer_shell.rs:L8-L22](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui/src/platform/layer_shell.rs#L8-L22)，默认 Overlay）。
-- **锚（Anchor）**：位掩码 `TOP|BOTTOM|LEFT|RIGHT`，可组合——`LEFT | RIGHT | BOTTOM` 就是「贴住底边并横向拉满」，这正是 dock 的形态（[L24-L39](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui/src/platform/layer_shell.rs#L24-L39)）。
-- **独占区（exclusive zone / edge）**：告诉合成器「请别让普通窗口盖住我占的这条带」，任务栏所以能常驻；`exclusive_edge` 指明独占哪条边（[L67-L71](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui/src/platform/layer_shell.rs#L67-L71)）。
-- **键盘交互性（KeyboardInteractivity）****：`None`（收不到键盘）/`Exclusive`（独占键盘，适合输入法候选窗）/`OnDemand`（像普通窗口一样可聚焦，[L41-L55](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui/src/platform/layer_shell.rs#L41-L55)）。
-
-外加 `namespace`（合成器据它应用规则，创建后不可改）与 `margin`（CSS 顺序四边距）。这些全部装进 `LayerShellOptions`（[L57-L77](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui/src/platform/layer_shell.rs#L57-L77)）。要分清两种「自绘 chrome」：普通窗口的 Z 风格自绘标题栏是 **CSD**（4.3：xdg_toplevel + `client_inset` + `set_window_geometry`，把标题栏画进自己的 surface）；layer_shell 则是把整个表面升级为面板级表面，适合 dock/通知/overlay。两者都能让「界面完全由应用绘制」，但管辖的是不同种类的窗口。协议不存在时（`Globals.layer_shell` 为 `None`）创建即失败，错误类型 `LayerShellNotSupportedError`（[L79-L83](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui/src/platform/layer_shell.rs#L79-L83)）。
-
-#### 4.5.2 核心流程
-
-```text
-App 层: WindowKind::LayerShell(LayerShellOptions)
-    ▼
-open_window → target_output（按 display_id 选 wl_output；None = 当前输出）
-    ▼
-WaylandSurfaceState::new 的 LayerShell 分支（window.rs L150-L195）
-  ├── globals.layer_shell 为 None → Err(LayerShellNotSupportedError)
-  ├── layer_shell.get_layer_surface(surface, output, layer, namespace, qh, surface.id)
-  ├── set_size（请求尺寸；锚定拉满的维度上会被合成器的 configure 覆盖）
-  ├── set_anchor(位掩码)
-  ├── set_keyboard_interactivity
-  ├── set_margin（可选）
-  ├── set_exclusive_zone / set_exclusive_edge（可选）
-  └── surface.commit
-    ▼
-zwlr_layer_surface.configure(width, height, serial)
-    ▼
-handle_layersurface_event（window.rs L1105-L1139）
-  └── 组装 in_progress_configure 后「照 xdg_surface 的老路走」：
-      复用 handle_xdg_surface_event 完成 ack + set_size + 首帧
-```
-
-运行期还可以经 `PlatformWindow::set_exclusive_zone` / `set_exclusive_edge`（[window.rs:L1797-L1816](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1797-L1816)）动态调整并立即 commit 生效。
-
-#### 4.5.3 源码精读
-
-**(1) 枚举映射层**
-
-[wayland/layer_shell.rs](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/layer_shell.rs) 全文不足 30 行：第一行 `pub use gpui::layer_shell::*;` 把平台无关模型原样再导出，随后三个纯函数把 `Layer`、`Anchor`（按位直转）、`KeyboardInteractivity` 映射到协议枚举（[L5-L26](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/layer_shell.rs#L5-L26)）。模块声明的注释（[wayland.rs:L9-L10](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland.rs#L9-L10)）说明它是 `pub mod`——因为 `LayerShellOptions` 等类型要暴露给上层 gpui 使用，而 client/window 等子模块是私有 `mod`。
-
-**(2) 创建分支与独占边校验**
-
-```rust
-if let WindowKind::LayerShell(options) = &params.kind {
-    let Some(layer_shell) = globals.layer_shell.as_ref() else {
-        return Err(LayerShellNotSupportedError.into());
-    };
-
-    let layer_surface = layer_shell.get_layer_surface(
-        &surface,
-        target_output.as_ref(),
-        super::layer_shell::wayland_layer(options.layer),
-        options.namespace.clone(),
-        &globals.qh,
-        surface.id(),
-    );
-
-    let width = f32::from(params.bounds.size.width);
-    let height = f32::from(params.bounds.size.height);
-    layer_surface.set_size(width as u32, height as u32);
-
-    layer_surface.set_anchor(super::layer_shell::wayland_anchor(options.anchor));
-    layer_surface.set_keyboard_interactivity(
-        super::layer_shell::wayland_keyboard_interactivity(options.keyboard_interactivity),
-    );
-    ...
-```
-
-见 [window.rs:L150-L181](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L150-L181)（margin/exclusive_zone/exclusive_edge 的传递在同一分支续至 L195）。独占边有一条协议级校验：
-
-```rust
-/// An exclusive edge must be a single edge that the surface is anchored to,
-/// otherwise the compositor raises a fatal `invalid_exclusive_edge` protocol
-/// error. An invalid edge is logged and ignored. Returns whether it applied.
-fn apply_exclusive_edge(...) -> bool {
-    if edge.bits().count_ones() == 1 && anchor.contains(edge) {
-        layer_surface.set_exclusive_edge(super::layer_shell::wayland_anchor(edge));
-        true
-    } else {
-        log::warn!("ignoring exclusive edge {edge:?}: must be a single edge of the surface anchor {anchor:?}");
-        false
+pub fn schedule_frame(&self) {
+    match self.frame_loop.get() {
+        FrameLoop::Parked => {
+            self.frame_loop.set(FrameLoop::Scheduled);
+            self.frame_ping.ping();
+        }
+        FrameLoop::Ticking => {
+            self.frame_loop.set(FrameLoop::RescheduleRequested);
+        }
+        // A wake is already armed: a ping or retry timer is in flight, or a
+        // presented buffer guarantees a compositor frame callback.
+        _ => {}
     }
 }
 ```
 
-见 [window.rs:L469-L486](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L469-L486)——用「单个位 + 被锚包含」两道检查把致命协议错误拦成一条警告，这是防御式翻译的好样本。
+这是 `PlatformWindow::schedule_frame` 契约在 Wayland 上的全部实现（trait 实现在 [L1945-L1947](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1945-L1947) 直接转发到这里）。契约本身在 gpui 主 crate 是个**默认空实现**（[../gpui/src/platform.rs:L864](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui/src/platform.rs#L864)，`fn schedule_frame(&self) {}`）——含义是「平台自己有帧驱动就忽略我」；macOS/Windows/X11/Web 都不覆写，只有 Wayland（与测试替身 TestWindow，[../gpui/src/platform/test/window.rs:L353](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui/src/platform/test/window.rs#L353)）覆写。
 
-**(3) configure 复用与事件路由**
+**广播器 `dispatch_scheduled_frames`**（[../gpui_linux/src/linux/wayland/client.rs:L448-L463](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L448-L463)）：先克隆出全部窗口句柄再逐个 `scheduled_frame_fired()`——注释点明必须先释放 client 的借用，因为 tick 会重入 GPUI（如 IME 更新）再借 client。
+
+**三个 fired 入口**（[../gpui_linux/src/linux/wayland/window.rs:L988-L1007](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L988-L1007)）：三个函数体结构相同——先查状态匹配再 `frame()`。`frame_callback_fired` 多一步清空 `pending_frame_callback`，其注释解释了一个微妙竞态：「另一次 wl_surface commit 可能捎带了同一个 callback，而唤醒权当时在重试定时器手里」——回调可能在非 AwaitingCallback 状态到达，此时忽略即可，去重靠清 pending 完成。
+
+**`wl_callback::Done` 的派发实现**（[../gpui_linux/src/linux/wayland/client.rs:L1439-L1459](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1439-L1459)）：`Dispatch<WlCallback, ObjectId>` 的 user data 是 surface 的 `ObjectId`，经 `get_window`（[L1461-L1466](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1461-L1466)）路由回窗口，`Event::Done` 触发 `frame_callback_fired()`——这正是规格里强调的「Done 改触 frame_callback_fired 而非直接 frame()」。
+
+**重试定时器**（[../gpui_linux/src/linux/wayland/client.rs:L191-L193](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L191-L193) 与 [L465-L485](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L465-L485)）：
 
 ```rust
-zwlr_layer_surface_v1::Event::Configure { width, height, serial } => {
-    ...
-    state.in_progress_configure = Some(InProgressConfigure { size, fullscreen: false, maximized: false, resizing: false, tiling: Tiling::default() });
-    drop(state);
-
-    // just do the same thing we'd do as an xdg_surface
-    self.handle_xdg_surface_event(xdg_surface::Event::Configure { serial });
-
-    false
-}
-zwlr_layer_surface_v1::Event::Closed => {
-    // unlike xdg, we don't have a choice here: the surface is closing.
-    true
-}
+const FRAME_RETRY_INTERVAL: Duration = Duration::from_micros(16_667);
 ```
 
-见 [window.rs:L1105-L1139](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1105-L1139)。layer surface 的 configure 语义比 xdg 简单（没有最大化/平铺），所以填好 `InProgressConfigure` 后直接借道 4.3 的协商管线；`Closed` 注释则点出与 xdg `close` 的差异——xdg 的关闭请求可以无视，layer surface 的 closed 是合成器的既成事实。事件从协议到窗口的路由在 [client.rs:L1522-L1545](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1522-L1545)（以 `surface.id()` 作 user_data 找回窗口，返回 true 则调 `window.close()`）。
+文档注释说明取值理由：固定 60Hz 节拍即可——重试只发生在被节流或呈现失败的帧上，匹配输出真实刷新率并不可观测。`schedule_frame_retry` 为该 surface 插一个一次性 `Timer`，到期回调里 `retry_timer_fired()`，`TimeoutAction::Drop` 用后即焚。注释也解释了为何不立即重试：那会顶着把 draw 推迟掉的那道帧率节流空转。
 
-**(4) 官方示例**
+**GPUI 侧的四个调用点**（谁会调 `schedule_frame`）：
 
-[../gpui/examples/layer_shell.rs:L76-L100](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui/examples/layer_shell.rs#L76-L100)：一块 500×200 的透明面板，`Anchor::LEFT | Anchor::RIGHT | BOTTOM` 横向拉满贴底、底边距 40px、`KeyboardInteractivity::None`、每 500ms 重绘的时钟。这是 layer_shell 用法最紧凑的范本。
+- `on_next_frame` 注册回调后立即调（[../gpui/src/window.rs:L2354-L2361](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui/src/window.rs#L2354-L2361)，注释：next-frame 回调制造了帧需求却不弄脏窗口，必须显式唤醒平台帧源）；
+- 帧被节流推迟时调（[../gpui/src/window.rs:L1591-L1609](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui/src/window.rs#L1591-L1609)，「Deferred by throttling: ask demand-driven platforms to retry」）；
+- 一帧结束后窗口仍脏或仍有 next-frame 回调时调（[../gpui/src/window.rs:L1652-L1660](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui/src/window.rs#L1652-L1660)）；
+- `App` 运行循环把待处理效应清空后，对每个脏/待呈现/有 next-frame 回调的窗口调（[../gpui/src/app.rs:L1708-L1716](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui/src/app.rs#L1708-L1716)）——这是「停泊窗口被新工作唤醒」的总入口。
+
+**确定性测试佐证**（[../gpui/src/window.rs:L7092-L7164](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui/src/window.rs#L7092-L7164)）：三个新测试用 TestWindow 的 `simulate_scheduled_frame`/`frame_scheduled` 模拟设施把同一状态机在测试里跑通：`queued_frame_callback_wakes_a_parked_render_loop`（停泊窗口收到 on_next_frame 必须 `frame_scheduled()`）、`pending_presentation_wakes_a_parked_render_loop`（画完待呈现的场面必须唤醒）、`callback_queued_during_a_frame_requests_a_follow_up`（帧内排队的新回调必须在停泊前排定后续帧）。u8-l4 会展开测试平台设施。
+
+#### 4.4.4 代码实践
+
+**实践：跑通状态机的确定性测试。**
+
+1. 实践目标：亲眼看到「停泊—唤醒—再停泊」循环在测试里复现。
+2. 操作步骤（任意平台，无需 Wayland 会话）：
+   - `cargo test -p gpui --lib queued_frame_callback_wakes_a_parked_render_loop`；
+   - 再跑 `cargo test -p gpui --lib pending_presentation_wakes_a_parked_render_loop callback_queued_during_a_frame_requests_a_follow_up`；
+   - 打开 [L7092-L7164](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui/src/window.rs#L7092-L7164)，把每个 `assert!` 映射回 4.4.2 流程图的某一步。
+3. 需要观察的现象：三个测试全部通过；第一个测试里两次 `simulate_scheduled_frame` 后 `frame_scheduled()` 变 false（停泊），`on_next_frame` 后立刻变 true（唤醒）。
+4. 预期结果：如上。**待本地验证**（gpui 编译较重，首次构建需要几分钟）。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：窗口处于 `AwaitingCallback` 时 GPUI 又调了 `schedule_frame`，会发生什么？
+答案：落入 `_ => {}` 分支，什么都不做——已提交的像素保证合成器终将送来 `wl_callback::Done`，唤醒已武装，再 ping 是浪费。
+
+**练习 2**：为什么 `retry_timer_fired` 里状态不是 `RetryScheduled` 就直接忽略，而不是报错？
+答案：定时器在途期间窗口可能已被 ping 唤醒并完成了一帧（状态漂移到 `AwaitingCallback` 甚至又回到 `Parked`）。忽略过期唤醒是状态机「幂等广播 + 状态过滤」设计的必然结果；唤醒多扣一次只是空转一个 tick，漏掉才是 bug。
+
+**练习 3**：`FRAME_RETRY_INTERVAL` 为什么不必匹配显示器的实际刷新率？
+答案：源码注释（client.rs L191-192）：重试只发生在被节流或失败的帧上，「匹配输出真实刷新率」在效果上不可观测；固定 60Hz（16_667µs）已是最坏情况的合适节拍。
+
+### 4.5 wayland::serial：SerialTracker 与输入序列号
+
+#### 4.5.1 概念说明
+
+Wayland 的安全模型之一是「序列号证明交互」：`set_selection`（剪贴板）、`grab`（popup 抓取）、`set_shape`（光标）这类敏感请求都要带一个 serial，合成器验证它对应真实发生过的输入事件。客户端因此必须**记住自己见过的各类事件序列号**，在发请求时挑对的那个用——这就是 `serial.rs` 存在的全部理由。
+
+关键设计：**选区序列号（selection_serial）只认按键按下与鼠标按下**。声明剪贴板/主选区所有权是「用户复制了东西」的动作，协议要求它引用一次 press 事件；悬浮进入（MouseEnter）、输入法、数据设备这类与「用户按下」无关的 serial 一律不认。
+
+#### 4.5.2 核心流程
+
+```text
+合成器 event（带 serial）→ client.rs 的 Dispatch 实现
+  → serial_tracker.update(kind, serial)
+       ├─ kind ∈ {KeyPress, MousePress} → 同时记录 selection_serial
+       └─ 存入 serials[kind]
+
+发请求时按用途取：
+  popup grab        → max(MousePress, KeyPress)     （open_window）
+  set_cursor_shape  → MouseEnter                    （指针在表面上才有效）
+  show_window_menu / start_window_move → MousePress （必须是按住时刻）
+  set_selection     → selection_serial              （无则放弃并告警）
+```
+
+#### 4.5.3 源码精读
+
+**类型与跟踪器**（[../gpui_linux/src/linux/wayland/serial.rs:L3-L65](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/serial.rs#L3-L65)）：`SerialKind` 五类（DataDevice/InputMethod/MouseEnter/MousePress/KeyPress）；`Serial(u32)` 与 `SelectionSerial(Serial)` 是两个新类型，后者把「可用于选区请求」的序列号在类型层面与其他序列号隔开——不经过 `selection_serial()` 就拿不到它。`update()`（L45-53）只在 KeyPress/MousePress 时更新选区 serial；`get()` 对未跟踪的种类返回 0（popup grab 逻辑据此判断「尚无按下事件时不发 grab」，见 client.rs L1057-1064）。
+
+**五处喂入点**（client.rs）：KeyPress（[L1858](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1858)）、InputMethod（[L2031](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L2031)）、MouseEnter（[L2100](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L2100)，指针 Enter 事件处理内）、MousePress（[L2215](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L2215)）、DataDevice（[L2593](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L2593)）。
+
+**消费点一：光标切换**（[../gpui_linux/src/linux/wayland/client.rs:L1103-L1141](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1103-L1141)）：`set_cursor_style` 取 `SerialKind::MouseEnter` 的 serial，优先走 `cursor_shape_device.set_shape(serial, ...)`（cursor-shape-v1 协议）；不支持时回退到加载 XCursor 主题、把光标图像挂到独立 wl_surface 上再 `wl_pointer.set_cursor(serial, ...)`（[../gpui_linux/src/linux/wayland/cursor.rs:L94-L146](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/cursor.rs#L94-L146)）。指针 Enter 事件里也用同一 serial 重设光标（[client.rs:L2092-L2123](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L2092-L2123)）。
+
+**消费点二：剪贴板所有权**（[../gpui_linux/src/linux/wayland/client.rs:L1233-L1257](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1233-L1257)）：`write_to_clipboard` 先把数据存进本地 `Clipboard`，创建 `wl_data_source`、offer 出文本 MIME 类型与「自描述」MIME，最后 `data_device.set_selection(Some(&data_source), serial.as_raw())`。serial 取 `selection_serial()`；**一个都没有时打警告并放弃所有权请求**——这解释了 u2-l4 讲过的现象：Wayland 下程序刚启动、用户还没按过任何键时，复制可能「无效」。`write_to_primary`（[L1208-L1231](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1208-L1231)）走 zwp_primary_selection 设备，同样的 serial 逻辑。
+
+**回绕测试**（[../gpui_linux/src/linux/wayland/serial.rs:L98-L104](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/serial.rs#L98-L104)）：`test_uses_event_arrival_order_across_rollover` 故意让 KeyPress serial 为 `0xffff_fff0`、MousePress 为 `0x10`，断言选区 serial 是后者——证明跟踪器按**到达顺序**而非**数值大小**取舍，u32 回绕（约 42.9 亿次事件后）不会破坏语义。
 
 #### 4.5.4 代码实践
 
-**实践目标**：跑通一个 layer_shell 表面，观察合成器如何解算锚定。
+**实践：运行 serial 单元测试。**
 
-**操作步骤**：
-
-1. 在 Wayland 会话运行 `WAYLAND_DEBUG=1 cargo run -p gpui --example layer_shell 2> layer.log`。
-2. 观察屏幕底部出现的时钟面板：横向是否拉满？底边是否悬空 40px（margin 的效果）？普通窗口最大化时是否避开它（没设 exclusive_zone，理论上会被盖住）。
-3. 在 `layer.log` 中找 `zwlr_layer_shell_v1.get_layer_surface`、`set_anchor`、`set_margin`、`set_keyboard_interactivity`、`zwlr_layer_surface_v1.configure`、`ack_configure`。
-4. 修改实验：把示例中 `anchor` 改为 `Anchor::TOP`、`margin` 去掉、`Layer` 保持默认（Overlay），重新运行观察位置变化；再给 `LayerShellOptions` 加 `exclusive_zone: Some(px(40.))`，观察最大化窗口是否让出这条带。
-
-**需要观察的现象**：锚定与拉满由合成器执行；configure 回报的 width 可能不等于请求的 500（因为左右锚定拉满时宽度由合成器决定）。
-
-**预期结果**：支持 wlr-layer-shell 的合成器（sway、KDE 等）上面板如期出现；GNOME 无扩展支持时 `Globals.layer_shell` 为 `None`，`open_window` 返回 `LayerShellNotSupportedError`，示例 `unwrap` 直接报错退出——这本身就是 4.5.1 所述失败路径的验证。具体表现「待本地验证」。
+1. 实践目标：验证「到达顺序优先」与「只认 press」两条规则。
+2. 操作步骤：`cargo test -p gpui_linux serial`（gpui_linux 默认 feature 即含 wayland/x11，无需额外开关）。
+3. 需要观察的现象：5 个测试全绿，其中 `test_selection_serial_ignores_unrelated_serial_kinds` 断言后到的 InputMethod/MouseEnter/DataDevice serial 不会覆盖已记录的选区 serial。
+4. 预期结果：全部通过；这是纯逻辑模块，不依赖图形环境。
 
 #### 4.5.5 小练习与答案
 
-**练习 1**：为什么示例把 `keyboard_interactivity` 设为 `None` 而不是 `OnDemand`？
+**练习 1**：为什么 popup grab 取 `max(MousePress, KeyPress)` 而不是其中一个？
+答案：菜单可能由鼠标右键也可能由键盘快捷键打开，grab 必须引用「打开它的那次交互」；两类 serial 都是 u32 且单调递增，取较大者即最近一次按下（回绕窗口极小，此处按数值取大是务实选择）。
 
-答案：时钟面板不接收输入，`None` 让合成器把键盘留给真正聚焦的窗口；`Exclusive` 会从当前窗口抢走键盘（适合输入法面板），`OnDemand` 则允许点击聚焦。对一个纯展示型 overlay，`None` 是唯一不打扰用户的选择。
+**练习 2**：把 `SelectionSerial` 做成独立新类型（而不是直接用 `Serial`）防止了什么？
+答案：防止调用方拿 MouseEnter 之类的 serial 去发 `set_selection` 请求被合成器拒绝——只有经 `SerialTracker::selection_serial()` 这一个受控出口才能得到该类型，「哪些 serial 合法」的规则被编码进了类型系统。
 
-**练习 2**：`set_exclusive_zone(-1)` 与 `0` 与正数各是什么语义？
+### 4.6 layer_shell 与 popup：Z 风格面板与父子锚定
 
-答案：按 layer-shell 协议：正数 = 独占相应像素宽的带；`0` = 不独占但把自己锚定的边让出给其他 layer surface（跟随默认）；`-1` = 完全不改动独占区。gpui 侧 `set_exclusive_zone(zone: Pixels)` 传像素值（[window.rs:L1797-L1807](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1797-L1807)），`LayerShellOptions::exclusive_zone` 未设时创建分支不会发这个请求，由合成器按默认规则处理。
+#### 4.6.1 概念说明
 
-**练习 3**：layer_shell 弹出的 popup（4.4 的 layer 父分支）与普通 popup 有什么不同？
+**layer_shell**（`zwlr_layer_shell_v1`）解决「普通窗口语义装不下的表面」：任务栏、启动器、通知、输入法候选框需要钉在某个屏幕层级、贴着屏幕边缘、还能预留独占区（exclusive zone，让别的窗口避开自己）。Zed 用它实现面板/Dock 类 UI；同时它配合**客户端装饰（CSD）**构成 Z 风格界面——`WaylandWindowState` 初始 `decorations: WindowDecorations::Client`（window.rs L612），标题栏由 GPUI 自绘，layer_shell 提供把这种表面钉在 Overlay 层的能力。
 
-答案：父是 layer surface 时没有可用的 xdg 父对象，`get_popup` 的 xdg_parent 参数传 `None`，改用 `layer_surface.get_popup(&xdg_popup)` 挂接（[window.rs:L213-L226](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L213-L226)）。这是输入法面板（layer surface）上弹候选窗的典型结构。
+**popup**（`xdg_popup`）解决「相对定位」：菜单、下拉框必须贴着触发它的元素。由于无全局坐标，客户端不能说「放在屏幕 (x, y)」，只能说「以父表面几何内的这个矩形为锚、按这个 gravity 伸展、越界时按这个策略调整」——合成器算出最终位置并回执。
+
+两套模型先在 gpui 主 crate 定义为**平台无关类型**（`Layer`、`Anchor` 位标志、`KeyboardInteractivity`、`LayerShellOptions`，[../gpui/src/platform/layer_shell.rs:L9-L83](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui/src/platform/layer_shell.rs#L9-L83)），Wayland 侧的两个小文件只做枚举到位标志的机械映射（[../gpui_linux/src/linux/wayland/layer_shell.rs:L5-L26](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/layer_shell.rs#L5-L26)、[../gpui_linux/src/linux/wayland/popup.rs:L5-L38](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/popup.rs#L5-L38)）。
+
+#### 4.6.2 核心流程
+
+layer_shell 表面的构造（`WaylandSurfaceState::new` 的第一分支）：
+
+```text
+globals.layer_shell 为 None？ → 返回 LayerShellNotSupportedError
+get_layer_surface(surface, target_output, layer, namespace)
+set_size / set_anchor / set_keyboard_interactivity
+set_margin（CSS 顺序：上右下左）/ set_exclusive_zone / set_exclusive_edge
+→ 返回 WaylandSurfaceState::LayerShell
+```
+
+popup 的构造与重锚定：
+
+```text
+必须先有父窗口 → build_popup_positioner：
+  set_size（钳到 ≥1，0 或负数是协议错误）
+  锚矩形从 gpui 表面局部坐标换算到「父窗口几何」坐标并钳到几何内
+  set_anchor / set_gravity / set_constraint_adjustment / set_offset
+→ get_xdg_surface + get_popup(父 xdg_surface 或经 layer_surface 挂靠)
+→ 有 grab 则 xdg_popup.grab(seat, serial)
+→ parent.add_child(surface.id(), blocking=false)
+
+父窗口 resize 后 → reposition_popup：重跑 positioner + xdg_popup.reposition
+```
+
+#### 4.6.3 源码精读
+
+**LayerShell 分支**（[../gpui_linux/src/linux/wayland/window.rs:L151-L196](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L151-L196)）：`WindowKind::LayerShell(options)` 时先检查协议存在（L153-155，返回 `LayerShellNotSupportedError`）；随后把 `LayerShellOptions` 的每个字段翻译成 `zwlr_layer_surface_v1` 的 request。对照平台无关模型（[../gpui/src/platform/layer_shell.rs:L59-L77](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui/src/platform/layer_shell.rs#L59-L77)）读：`namespace` 给合成器下规则用、创建后不可改；`Anchor` 是位标志，`LEFT | RIGHT` 同时置位即可横向铺满整屏。
+
+**popup 分支与 positioner**（[../gpui_linux/src/linux/wayland/window.rs:L198-L244](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L198-L244) 与 [L315-L364](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L315-L364)）：两个细节值得抄进笔记。其一，锚矩形坐标系换算（L328-346）：协议要的是「相对父窗口几何」的坐标，而 GPUI 的 `anchor_rect` 是表面局部坐标，先平移再整体钳进父几何内至少一像素——伸出几何外或零尺寸都是协议错误，这是客户端防御性编程的典型样本。其二，父子挂靠的两种形态（L216-227）：父是普通窗口走 `xdg_surface.get_popup(Some(parent_xdg_surface), ...)`；父是 layer_shell 表面则传 `None` 再由 `parent_layer_surface.get_popup(&xdg_popup)` 挂靠——layer 表面没有 xdg 身份，协议为此提供了专门入口。grab 逻辑（L230-232）承接 4.5：serial 必须引用一次 press。
+
+**重锚定状态**（[../gpui_linux/src/linux/wayland/window.rs:L307-L313](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L307-L313)）：`WaylandPopupSurfaceState` 特意保留 `options: PopupOptions` 与 `next_reposition_token`——注释说明保留 options 就是为了父窗口尺寸变化后能用 `xdg_popup.reposition` 重新锚定；token 用来把合成器的 `repositioned` 回执与请求配对。调用处即 `resize` 里的 popup 分支（[L1662-L1677](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L1662-L1677)）：首个 Configure 之前 popup 未映射、不能 reposition，初始尺寸由第一次 positioner 携带。
+
+#### 4.6.4 代码实践
+
+**实践：写一个最小 layer-shell 骨架（示例代码，待本地验证）。**
+
+1. 实践目标：体会 `LayerShellOptions` 各字段如何落到协议请求。
+2. 操作步骤：参照 u1-l2 的最小窗口程序，把 `WindowOptions` 的 `window_kind` 换成 layer-shell（以下为示例代码，非项目原有代码）：
+
+```rust
+use gpui::{layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions}, WindowKind, px};
+
+let options = WindowOptions {
+    window_kind: WindowKind::LayerShell(LayerShellOptions {
+        namespace: "my-panel".into(),
+        layer: Layer::Top,
+        anchor: Anchor::TOP | Anchor::LEFT | Anchor::RIGHT, // 横向铺满顶部
+        exclusive_zone: Some(px(32.)),                       // 其他窗口避开这条带
+        keyboard_interactivity: KeyboardInteractivity::OnDemand,
+        ..Default::default()
+    }),
+    ..Default::default()
+};
+```
+
+3. 需要观察的现象：在不支持 layer_shell 的合成器（如 GNOME）上开窗失败（`LayerShellNotSupportedError`）；在 sway/KWin 上出现贴顶横条，且普通窗口不会与它重叠。
+4. 预期结果：如上。**待本地验证**（需要 wlroots 系合成器会话）。
+
+#### 4.6.5 小练习与答案
+
+**练习 1**：`Anchor::LEFT | Anchor::RIGHT` 与只设一个方向的 anchor 有何行为差异？
+答案：位标志可组合。双向锚定时合成器把表面拉伸到贴满左右两缘（宽度由合成器定）；单侧锚定时表面保持请求的 `set_size` 尺寸、仅贴住那一侧——这是用 anchor 表达「铺满 vs 靠边」的手段。
+
+**练习 2**：popup 的 `add_child(..., false)` 与对话框的 `add_child(..., true)` 在输入分发上分别意味着什么？
+答案：popup 非阻塞，父窗口继续接收输入，用于「点击别处关闭菜单」；对话框阻塞，`is_blocked()` 为真期间父窗口的输入被拦截，实现模态。
 
 ## 5. 综合实践
 
-**任务**：在 Wayland 会话下运行 GPUI 示例，对照源码回答「窗口创建、光标切换、剪贴板写入三个操作各自经过哪些 Wayland 协议对象」，输出一份调用路径笔记。
+在 Wayland 会话下完成一份「调用路径笔记」，把本讲四个模块串起来（Linux 环境可用 `echo $XDG_SESSION_TYPE` 确认是 wayland）：
 
-**步骤**：
-
-1. **准备**：确认 `echo $WAYLAND_DISPLAY` 非空；准备两个终端日志文件。
-2. **窗口创建与光标切换**：`WAYLAND_DEBUG=1 cargo run -p gpui --example window 2> window.log`。
-   - 操作 A（创建）：点击 "Normal" 按钮开一个子窗口。
-   - 操作 B（光标）：把鼠标悬停到任意按钮上（按钮有 `.cursor_pointer()`，会触发 u3-l4 讲过的帧末 `set_cursor_style`）。
-3. **剪贴板写入**：`WAYLAND_DEBUG=1 cargo run -p gpui --example input 2> input.log`，在输入框里打几个字、选中一段、按 Ctrl+C（[input.rs:L145-L160](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui/examples/input.rs#L145-L160) 是剪贴板动作的入口）。
-4. **整理笔记**：对三个操作各写一行「协议对象序列 → 源码位置」，参考答案骨架（以源码为准核对日志）：
-
-| 操作 | 协议对象序列（预期骨架） | 关键源码位置 |
-| --- | --- | --- |
-| 创建窗口 | `wl_compositor.create_surface` → `xdg_wm_base.get_xdg_surface` → `get_toplevel`（+ `set_title`/`set_app_id`/`set_max_size`，dialog 再加 `xdg_wm_dialog_v1`）→ （可选 `zxdg_decoration_manager_v1.get_toplevel_decoration`）→ `commit` → `configure` → `ack_configure` → `set_window_geometry` → `frame`/`attach`/`commit` | client.rs `open_window` [L982-L1045](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L982-L1045)；window.rs `WaylandSurfaceState::new` [L245-L291](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs#L245-L291) |
-| 切换光标 | `wp_cursor_shape_manager_v1.get_cursor_shape_device`（一次性）→ 每次 `wp_cursor_shape_device_v1.set_shape(serial)`；无该协议时后备为 `wl_pointer.set_cursor(serial, surface, hot_x, hot_y)` + 光标 surface 的 `attach`/`commit` | client.rs `set_cursor_style` [L1047-L1085](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1047-L1085)；cursor.rs `set_icon` [L94-L151](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/cursor.rs#L94-L151) |
-| 写剪贴板 | `wl_data_device_manager.create_data_source` → 多条 `offer`（各文本 MIME + `pid/<n>`）→ `wl_data_device.set_selection(serial)`；之后若他进程来取：`wl_data_source.send`（fd） | client.rs `write_to_clipboard` [L1177-L1201](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1177-L1201)；clipboard.rs `send` [L183-L197](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/clipboard.rs#L183-L197) |
-
-5. **核对**：逐条在日志里找到对应请求；找不到的（如 cursor_shape_device）判断是合成器缺协议走了后备路径，还是时序未触发。
-
-**预期结果**：三行骨架是源码推导的确定路径；日志中的具体协议集合、serial 数值、MIME 列表依赖本机合成器与剪贴板管理器，「待本地验证」。把笔记存档，它就是你这台机器上 GPUI Wayland 后端的「协议对象速查表」。
+1. **准备**：`WAYLAND_DEBUG=1 cargo run -p gpui --example window 2>frames.log`；另外开一个终端准备 `tail -f frames.log`。
+2. **窗口创建路径**：从日志开头的 `wl_compositor.create_surface`、`xdg_wm_base.get_xdg_surface`、`xdg_surface.get_toplevel`、首次 `xdg_surface.configure` + `ack_configure`，对照 4.2 首帧流程，确认「像素提交发生在首次 configure 之后」。
+3. **光标切换路径**：把鼠标移进移出窗口，在日志里找 `wl_pointer.enter/leave`（serial 出现在请求参数里）与 `wp_cursor_shape_device_v1.set_shape`（或回退路径的 `wl_pointer.set_cursor`），对照 4.5 的 serial 消费点，记下用的是哪一类 serial。
+4. **剪贴板写入路径**：选中文本按 Ctrl+C，在日志里找 `wl_data_device_manager.create_data_source`、`data_source.offer`（逐个 MIME）、`wl_data_device.set_selection(serial=...)`，对照 4.5 消费点二，抄下那个 serial 并回日志里找它对应的是哪次按键事件。
+5. **空闲停泊验证**：停止一切交互 30 秒，`grep -c "wl_surface.frame" frames.log` 每隔 10 秒采样一次——数字应不再增长（无新的 frame callback 请求、无空帧提交），这正是 `FrameLoop::Parked` 的可观测投影；再动一下鼠标触发一帧，数字恢复增长。
+6. **产出**：一份 Markdown 笔记，含三张「操作 → 协议对象序列」对照表和 Parked 验证结论；若第 5 步数字仍在增长，回到 4.4 检查你的合成器是否走在「被节流重试」路径上并记录原因。
 
 ## 6. 本讲小结
 
-- **WaylandClient** 以 `Rc<RefCell<WaylandClientState>>` 为体、`WaylandClientStatePtr(Weak)` 为分发代理；初始化流水线依次完成连接、`wl_registry` global 绑定（`Globals` 区分必需/可选协议）、`LinuxCommon` 调度接线（前台任务经 `insert_idle` 让位输入事件）、DMABUF GPU 探测与 `WaylandSource` 注册，`run()` 阻塞在自有的 calloop 主循环上。
-- **无全局坐标**是理解一切接口变形的钥匙：显示器几何只能被动累积（`InProgressOutput` 到 `Done` 才完整）、`primary_display`/`window_stack` 返回 `None`、窗口不能设位置只能协商（`_move(seat, serial)`）、layer surface 连 `set_window_geometry` 都不可用。
-- **serial.rs** 用五种 `SerialKind` 分别跟踪最后一次输入序号：改光标用 `MouseEnter`、拖动/抓取用 `MousePress`、剪贴板所有权用只认按下事件的 `selection_serial`（按到达序处理回绕，测试固化）。
-- **wayland/window.rs** 是「一个 `wl_surface`、三种角色」：`WindowKind` 决定 `Xdg`/`LayerShell`/`Popup` 三态；configure/ack 协商是提交新 buffer 的前置条件，首帧等在 `acknowledged_first_configure` 上；CSD 默认开启，`client_inset` + `set_window_geometry` 申报自绘 chrome，析构严格按协议顺序。
-- **popup** 用 positioner「描述而非指定」位置（anchor/gravity/constraint 三元组 + grab serial），坐标要平移进父窗口 geometry 并防零尺寸/越界协议错误；父为 layer surface 时改走 `layer_surface.get_popup` 挂接。
-- **layer_shell** 把表面钉在屏幕边缘：层、锚位掩码、独占区、键盘交互性四件套由合成器解算位置，协议缺失时报 `LayerShellNotSupportedError`；它服务 dock/面板/overlay，与普通窗口的 CSD 标题栏是两种不同层面的「自绘 chrome」。
+- `WaylandClient` 的骨架是 `Rc<RefCell<WaylandClientState>>` + calloop 主循环：`Globals` 集中绑定协议对象并区分「必需（unwrap）」与「尽力而为（Option）」，唯一的 `frame_ping` 存在 `Globals` 里共享给每个窗口。
+- Wayland 无全局坐标：`primary_display`/`window_stack` 返回 None，resize 只改表面局部几何，popup 靠 positioner 相对父窗口几何锚定并支持 `reposition` 重锚定，layer_shell 靠 anchor 相对屏幕边缘定位——三种定位策略各对应一种表面形态。
+- 渲染循环是**按需驱动**的显式状态机：`FrameLoop` 八态回答「下一次 tick 从哪来」，`PresentationState` 四态记住「像素是否上过屏」；`Parked` 是零唤醒的稳态，首帧由 `Unconfigured` 收到首次 Configure 时的 `frame()` 点燃。
+- 四个唤醒入口各司其职：`schedule_frame`（Parked→Scheduled+ping）、`frame_callback_fired`（合成器回调）、`scheduled_frame_fired`（ping 广播）、`retry_timer_fired`（16_667µs 定时器，兜底被节流与首帧前场景）；所有入口都先过滤状态再 tick，多唤醒与过期唤醒都被幂等吸收。
+- `SerialTracker` 按「事件到达顺序」跟踪五类序列号，选区序列号只认 press 事件；popup grab、光标、窗口菜单/移动、剪贴板所有权各取所需，类型层面的 `SelectionSerial` 把合法性规则编码进签名。
+- layer_shell 与 popup 的平台无关模型定义在 gpui 主 crate，Wayland 侧只做枚举映射与防御性钳制（锚矩形至少一像素、尺寸至少为 1），配合 CSD 默认值支撑 Z 风格自绘界面。
 
 ## 7. 下一步学习建议
 
-- **下一讲 u5-l5** 讲 xdg-desktop-portal：本讲 4.1 里 `XDPEventSource` 处理的外观、按钮布局、光标主题/尺寸事件，以及 `window_identifier()`（[client.rs:L1227-L1239](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/client.rs#L1227-L1239)，从 `wl_surface` 生成 portal 窗口标识符）都将在那里闭环。
-- **横向对照**：带着本讲的三个问题重读 u5-l3 的 X11 侧——X11 怎么定位窗口（全局坐标）、怎么设光标（XCursor，无需 serial）、剪贴板为何要常驻服务线程（没有合成器递 fd）；再预习 u6-l1/u6-l2 看 macOS/Windows 如何用系统服务消解同样的问题。
-- **纵向深入渲染**：`WaylandWindow` 里 `WgpuRenderer`、`wp_viewport` 与 fractional-scale 的配合（4.3 练习 2）是 u8-l2「PlatformAtlas 与渲染后端」的入口，可提前阅读 [../gpui_linux/src/linux/wayland/window.rs](https://github.com/zed-industries/zed/blob/91bf967e279fba3b326c096aeb66053cb2373547/crates/gpui_platform/../gpui_linux/src/linux/wayland/window.rs) 中 `rescale` 与 `handle_surface_event` 对 `preferred_buffer_scale`/`preferred_buffer_transform` 的处理。
-- **动手验证**：完成第 5 节综合实践后，可尝试给 layer_shell 示例加上 `exclusive_zone` 并观察普通窗口的避让，或把 4.4 的 popup 示例接到 layer 面板上（练习 3 的结构），检验自己对三种角色组合关系的理解。
+- **u5-l5（xdg-desktop-portal）**：Linux 单元收官，看文件选择器等系统对话框如何在 Wayland 之上再借一层 portal 协议完成。
+- **回读 GPUI 帧调度**：带着本讲的状态机视角重读 `../gpui/src/window.rs` 的帧节流与 `invalidator.wake_platform()`，以及 `../gpui/src/app.rs:L1693-L1721` 的效应排空循环，理解「契约两侧」如何配合。
+- **u8-l4（test-support）**：深入 TestWindow 的 `schedule_frame`/`simulate_scheduled_frame`/`frame_scheduled` 模拟设施，学会在没有 Wayland 会话的机器上确定性地测试按需渲染循环。
+- **延伸阅读**：wayland.app 上的 [xdg-shell](https://wayland.app/protocols/xdg-shell-unstable-v1)、[wlr-layer-shell](https://wayland.app/protocols/wlr-layer-shell-unstable-v1) 与 [frame callback](https://wayland.app/protocols/wayland#wl_surface:request:frame) 协议文本，逐条对照本讲引用的请求与事件。

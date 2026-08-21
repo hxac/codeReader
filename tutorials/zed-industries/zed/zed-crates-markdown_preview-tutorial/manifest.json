@@ -1,0 +1,451 @@
+{
+  "head": "10b2925e7c44439b99aeb39d5402133e0ad49192",
+  "project": "zed-crates-markdown_preview",
+  "rationale": "markdown_preview 是 Zed 编辑器中实现 Markdown 预览面板的 workspace 型 crate，核心代码集中在 markdown_preview_view.rs（约 3700 行，其中近半是 gpui 集成测试），另有两个小文件负责入口注册和设置。学习路线按“先跑起来、再懂主链路、最后吃透平台集成”设计：入门层先讲清 crate 在 Zed 全仓中的定位、init 注册的动作体系与设置机制，让读者能编译运行并触发预览；进阶层沿着数据流讲核心机制——从视图结构、打开链路、编辑器绑定与 Follow 模式、防抖重解析、双向滚动同步，到渲染装配、交互回写、链接导航和图片解析，每个机制独立成篇且按依赖排序；专家层讲它与 workspace 平台的三大集成点（Item 生命周期、SearchableItem 搜索、SerializableItem+SQLite 持久化）以及测试体系与二次开发方向。该 crate 代码量属中小型但横跨 gpui/editor/workspace/markdown/db 多个子系统，故拆为 16 篇，逻辑优先、每篇一个主题。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-markdown-preview-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 markdown_preview crate 的职责边界与三个源码文件各自的作用",
+            "看懂 Cargo.toml 中的依赖如何划分为 UI 框架层、编辑器层与平台层",
+            "独立编译该 crate 并在 Zed 中打开一个 Markdown 文件触发预览"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "markdown_preview::markdown_preview_view",
+            "markdown_preview::markdown_preview_settings",
+            "Cargo.toml 依赖清单"
+          ],
+          "order": 1,
+          "practice_task": "在仓库根目录执行 `cargo build -p markdown_preview` 确认可独立编译；然后通读 Cargo.toml 的 [dependencies]，把每个依赖按 gpui/editor/workspace/markdown/其他 分组画出依赖草图，并用 grep 找到 crates/zed/src/main.rs 中调用 markdown_preview::init 的位置。",
+          "source_files": [
+            "crates/markdown_preview/Cargo.toml",
+            "crates/markdown_preview/src/markdown_preview.rs",
+            "crates/zed/src/main.rs"
+          ],
+          "title": "markdown_preview 是什么：crate 定位、目录结构与构建",
+          "topic": "介绍 markdown_preview crate 在 Zed 中的定位（编辑器内置的 Markdown 预览面板）、三个源码文件的分工、lib 根 markdown_preview.rs 的声明方式，以及它依赖 gpui/editor/markdown/workspace 等兄弟 crate 的方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-init-and-actions.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "解释 init(cx) 如何通过 register_serializable_item 和 observe_new 把视图接入 Workspace",
+            "梳理 actions! 宏定义的滚动/开关预览动作与 zed_actions 重导出的关系",
+            "在默认键位表中找到并验证 markdown::OpenPreview 等绑定"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "markdown_preview::markdown_preview_view",
+            "gpui actions 宏",
+            "workspace 动作注册"
+          ],
+          "order": 2,
+          "practice_task": "在 assets/keymaps/default-macos.json 中找到 markdown::OpenPreview 与 markdown::OpenPreviewToTheSide 的绑定并亲手触发；再给自己的编辑器配置追加一条 markdown::ScrollUpByItem 的键位绑定，验证动作能在预览获得焦点时生效。",
+          "source_files": [
+            "crates/markdown_preview/src/markdown_preview.rs",
+            "assets/keymaps/default-macos.json"
+          ],
+          "title": "入口与动作注册：init、actions! 宏与快捷键",
+          "topic": "讲解 markdown_preview.rs 中的 init(cx) 入口：注册可序列化项、通过 cx.observe_new 监听新 Workspace 并注册动作；梳理 actions! 宏定义的滚动与开关动作，以及从 zed_actions 重导出的 OpenPreview/OpenPreviewToTheSide。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-preview-settings.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "理解 Settings trait 的 from_settings 如何把 settings.json 内容转换为强类型设置",
+            "追踪 max_width 设置从 JSON 到渲染容器的完整路径",
+            "掌握预览字体大小的读取与持久化修改方式"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "markdown_preview::markdown_preview_settings",
+            "settings crate 的 Settings/RegisterSetting",
+            "theme_settings 中的 markdown_preview 字体设置"
+          ],
+          "order": 3,
+          "practice_task": "在 settings.json 中关闭 markdown_preview.limit_content_width 并调整 max_width，观察预览内容宽度变化；再使用编辑器的 IncreaseBufferFontSize 动作（预览聚焦时）观察 markdown_preview_font_size 如何被写入设置文件。",
+          "source_files": [
+            "crates/markdown_preview/src/markdown_preview_settings.rs",
+            "crates/markdown_preview/src/markdown_preview_view.rs"
+          ],
+          "title": "预览设置：MarkdownPreviewSettings 与字体设置",
+          "topic": "讲解 markdown_preview_settings.rs 中 MarkdownPreviewSettings 的定义、limit_content_width 与 max_width 如何经 Settings trait 从全局设置解析，以及预览字体大小（markdown_preview_font_size）经 ThemeSettings 和 update_settings_file 的调节与持久化路径。"
+        }
+      ],
+      "order": 1,
+      "title": "单元一：起步——认识并跑起来 markdown_preview"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "filename": "u2-l1-view-structure.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "说出 MarkdownPreviewView 每个字段的用途（markdown 实体、scroll_handle、active_editor 等）",
+            "区分 Default 与 Follow 两种模式的行为差异与序列化表示",
+            "理解 MarkdownPreviewEvent 与 EditorState、PreviewLinkTarget 的角色"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "MarkdownPreviewView 结构体",
+            "MarkdownPreviewMode",
+            "markdown crate 的 Markdown 实体"
+          ],
+          "order": 1,
+          "practice_task": "阅读 MarkdownPreviewView::new，为每个字段写一句注释说明其生命周期与谁负责更新它；再画出 Default/Follow 两模式在 new 中走的不同订阅分支（observe_in 与 subscribe_in）对照图。",
+          "source_files": [
+            "crates/markdown_preview/src/markdown_preview_view.rs"
+          ],
+          "title": "视图核心结构：MarkdownPreviewView 与两种预览模式",
+          "topic": "逐字段拆解 MarkdownPreviewView 结构体，讲解 MarkdownPreviewMode（Default 固定绑定 vs Follow 跟随活动编辑器）、EditorState、MarkdownPreviewEvent、PreviewLinkTarget 等关键类型的设计意图。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-open-preview-flow.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "跟踪 OpenPreview/OpenPreviewToTheSide/OpenFollowingPreview 三个动作的不同行为",
+            "解释 find_existing_independent_preview_item_idx 如何按 buffer 复用已有预览",
+            "理解 is_markdown_path/is_markdown_file 的判定依据"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "workspace::Pane 与 add_item",
+            "activate_or_add_preview 复用逻辑",
+            "LanguageRegistry 语言判定"
+          ],
+          "order": 2,
+          "practice_task": "写一份调用链笔记：从键入 cmd-shift-v 开始，列出 register_action 回调到 pane.add_item 的每一帧函数；然后连续对同一文件触发两次 OpenPreview，用日志或断点验证第二次走了复用分支而不是新建。",
+          "source_files": [
+            "crates/markdown_preview/src/markdown_preview_view.rs",
+            "crates/markdown_preview/src/markdown_preview.rs"
+          ],
+          "title": "打开预览的完整链路：动作到 Pane 条目",
+          "topic": "跟踪从 workspace 动作到 pane.add_item 的完整链路：register 注册的三个打开动作、open_preview_in_pane / open_preview_to_the_side_of_pane、activate_or_add_preview 的复用判定（按 buffer 而非 editor 匹配），以及 open_for_project_path 与 is_markdown_path 判定。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-editor-binding-and-follow.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "解释 set_editor 如何通过 subscribe_in 订阅 EditorEvent 并分类响应",
+            "描述 Follow 模式经 observe_in 与 workspace_updated 切换源编辑器的流程",
+            "理解 Default 模式下 find_canonical_editor 在工作区恢复后重新绑定的意义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "set_editor 与 EditorEvent 订阅",
+            "Follow 模式的 workspace 观察",
+            "find_canonical_editor 重绑定"
+          ],
+          "order": 3,
+          "practice_task": "在 Zed 中分别创建 Default 与 Follow 预览，切换到另一个 Markdown 文件观察两者表现差异；对照源码解释为什么 Follow 用 observe_in 而 Default 用 subscribe_in（提示：注释中关于光标热路径的说明）。",
+          "source_files": [
+            "crates/markdown_preview/src/markdown_preview_view.rs"
+          ],
+          "title": "编辑器绑定与 Follow 模式：set_editor 与事件订阅",
+          "topic": "讲解 set_editor 如何订阅 EditorEvent（Edited/BufferEdited/DirtyChanged/FileHandleChanged/SelectionsChanged）并驱动预览更新，Follow 模式如何通过 workspace_updated 跟随活动编辑器，以及 Default 模式经 on_workspace_event/find_canonical_editor 在工作区恢复与拆分后重绑规范编辑器。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-debounced-reparse.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "解释 REPARSE_DEBOUNCE 与 wait_for_debounce 参数如何避免频繁重解析",
+            "描述 pending_update_task 的去重策略与任务取消语义",
+            "理解 markdown_parse_pending 如何配合 SearchEvent::MatchesInvalidated"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "update_markdown_from_active_editor",
+            "cx.spawn_in 异步任务",
+            "markdown crate 的 reset/is_parsing"
+          ],
+          "order": 4,
+          "practice_task": "把 REPARSE_DEBOUNCE 从 200ms 临时改成 2000ms，编译运行后在编辑器里连续输入，观察预览刷新明显滞后；改回前记录你对“已有防抖任务时直接 return”这一短路分支的理解。",
+          "source_files": [
+            "crates/markdown_preview/src/markdown_preview_view.rs"
+          ],
+          "title": "防抖更新链路：从编辑事件到 markdown.reset",
+          "topic": "拆解 update_markdown_from_active_editor → schedule_markdown_update 的异步防抖链路：REPARSE_DEBOUNCE 定时器、pending_update_task 的去重、从编辑器读取 buffer 全文、markdown.reset 触发后台解析，以及 markdown_parse_pending 对搜索结果失效的标记。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u2-l5-scroll-sync.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "解释 selected_source_index 如何从编辑器选区换算到 buffer 偏移",
+            "描述 sync_preview_to_source_index 与 set_active_root_for_source_index 的分工",
+            "理解 ScrollHandle 驱动的页滚动/行滚动/按元素滚动的实现差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "selected_source_index 偏移换算",
+            "markdown crate 的 autoscroll API",
+            "gpui ScrollHandle"
+          ],
+          "order": 5,
+          "practice_task": "在编辑器中移动光标，观察预览如何高亮并滚动到对应区块；然后修改 line_scroll_amount 或 scroll_up 中 max_height 的系数（rem_size * 2），重新编译体会滚动粒度变化。",
+          "source_files": [
+            "crates/markdown_preview/src/markdown_preview_view.rs"
+          ],
+          "title": "双向滚动同步与滚动动作族",
+          "topic": "讲解源码到预览的滚动同步：selected_source_index 从多 buffer 选区换算 buffer 偏移、sync_preview_to_source_index 调用 markdown 的 autoscroll 与 set_active_root_for_source_index，以及反向的 change_selection_to_source_index；再梳理 8 个滚动动作如何用 ScrollHandle 实现页/行/元素粒度滚动。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u1-l3"
+          ],
+          "filename": "u2-l6-render-pipeline.md",
+          "id": "u2-l6",
+          "learning_goals": [
+            "描述 render 的元素树层级与各层职责（滚动容器、rem 缩放、右键菜单包装）",
+            "解释 MarkdownElement 的构建参数：代码块渲染器、图片解析器、URL 回调",
+            "理解 resolve_preview_theme 与 MarkdownPreviewSettings.max_width 在渲染中的应用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "gpui Render 与 IntoElement",
+            "markdown crate 的 MarkdownElement/MarkdownStyle",
+            "ui crate 的 Scrollbars/WithRemSize"
+          ],
+          "order": 6,
+          "practice_task": "修改 render 中滚动容器的 p_4 为 p_8（或去掉 max_width 的 mx_auto 居中），重新编译 Zed 观察预览版式变化；再在 settings.json 配一个 markdown_preview_theme，验证 resolve_preview_theme 分支生效。",
+          "source_files": [
+            "crates/markdown_preview/src/markdown_preview_view.rs",
+            "crates/markdown/src/markdown.rs"
+          ],
+          "title": "渲染管线：render 与 MarkdownElement 装配",
+          "topic": "讲解 Render 实现的元素树结构（外层 div、WithRemSize 字体缩放、overflow_y_scroll 滚动容器、max_width 约束、custom_scrollbars、hovered_url 的 LinkPreview 气泡），以及 render_markdown_element 如何装配 MarkdownElement：主题选择、CodeBlockRenderer、image_resolver、on_url_click/on_url_hover 等回调。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "filename": "u2-l7-interaction-writeback.md",
+          "id": "u2-l7",
+          "learning_goals": [
+            "跟踪 on_checkbox_toggle 回调如何把勾选状态写回源 buffer",
+            "解释 refresh_preview 为何只在预览聚焦时刷新",
+            "描述右键菜单如何从 markdown 实体读取选区/链接上下文并动态构建"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "MarkdownElement 交互回调",
+            "editor::Editor 的 edit API",
+            "ui crate 的 right_click_menu/ContextMenu"
+          ],
+          "order": 7,
+          "practice_task": "打开一个含任务列表（- [ ] / - [x]）的 Markdown 文件，在预览中点击复选框，验证编辑器源文本同步变化；再参考 Copy Link 条目，尝试给右键菜单追加一个“复制纯文本标题”类的新条目并验证。",
+          "source_files": [
+            "crates/markdown_preview/src/markdown_preview_view.rs"
+          ],
+          "title": "交互回调与编辑器回写：复选框、右键菜单",
+          "topic": "讲解预览到编辑器的写回路径：on_source_click 单击定位源码、on_checkbox_toggle → apply_checkbox_toggle_to_editor 用 editor.edit 替换 [ ]/[x] 标记、refresh_preview 的聚焦守卫，以及基于 markdown 实体上下文（选中文字/Markdown/链接）动态构建的右键菜单。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "filename": "u2-l8-link-navigation.md",
+          "id": "u2-l8",
+          "learning_goals": [
+            "描述 handle_url_click 如何区分纯 fragment 锚点与带路径链接",
+            "解释 open_preview_url 中本地 markdown、带行列号路径、外部 URL 三条分支",
+            "理解 open_markdown_link_in_preview 的复用/新建预览决策与 navigate_to_link_target"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "handle_url_click/open_preview_url",
+            "resolve_open_target 与 worktree 解析",
+            "navigate_to_link_target 的两类目标"
+          ],
+          "order": 8,
+          "practice_task": "构造一个含 `[标题](other.md#anchor)`、`[行号](src/main.rs:12)` 和 `[外链](https://zed.dev)` 三种链接的 Markdown 文件，逐一点击并对照源码写出每条链接命中的分支；再验证 Alt+点击本地链接时绕过预览内打开的行为。",
+          "source_files": [
+            "crates/markdown_preview/src/markdown_preview_view.rs"
+          ],
+          "title": "链接点击与导航：从 URL 到预览或编辑器",
+          "topic": "拆解链接处理链路：handle_url_click 分离 fragment、open_preview_url 的三分支（本地 markdown 用预览打开、带行列号路径打开编辑器、其余交给 open_url_or_file）、open_markdown_link_in_preview 的 worktree/buffer 解析与已有预览复用，以及 PreviewLinkTarget 的 Heading/Position 两类导航。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "filename": "u2-l9-image-resolution.md",
+          "id": "u2-l9",
+          "learning_goals": [
+            "描述 image_resolver 回调对 data:/http(s):/相对路径/工作区根路径的分流",
+            "解释 resolve_project_path_for_preview_image 如何在源文件所在 worktree 内解析相对路径",
+            "理解远程项目中经 image_store::project_image_source 的取图方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "resolve_preview_image",
+            "Project/Worktree 路径解析",
+            "gpui ImageSource 与 project image_store"
+          ],
+          "order": 9,
+          "practice_task": "在一个临时目录建 workspace，放一张相对路径引用的图片和一张 `/绝对工作区路径` 引用的图片，验证两者都能渲染；再把指向缺失文件的图片改为断链，观察 resolve_preview_image 中 path.exists() 分支的行为。",
+          "source_files": [
+            "crates/markdown_preview/src/markdown_preview_view.rs"
+          ],
+          "title": "图片解析：本地路径、工作区路径与远程项目",
+          "topic": "讲解 resolve_preview_image 的完整分流策略：data: 前缀跳过、http(s) 走网络资源、相对路径基于 base_directory 拼接、以 / 开头按工作区根解析、远程项目经 resolve_project_path_for_preview_image 与 image_store 取图，以及 path_style 在客户端与服务端不一致时的处理。"
+        }
+      ],
+      "order": 2,
+      "title": "单元二：核心机制——视图生命周期、同步与渲染"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u3-l1-workspace-item.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "解释 act_as_type 如何让预览在必要时“扮演”其源编辑器",
+            "理解 save/save_as/can_save 全部委托给源编辑器而 reload 返回 Ok 的设计",
+            "描述 to_item_events 如何把预览事件映射为标签/面包屑更新"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "workspace::item::Item",
+            "Focusable 与 EventEmitter",
+            "SaveIntent 保存委托"
+          ],
+          "order": 1,
+          "practice_task": "在预览激活为当前条目时按 cmd-s，用源码解释这次保存为何最终落到源编辑器上；再对照 tab_content_text 写下“Preview <文件名>” 标签的生成规则，并解释 buffer_kind 为 Singleton 的含义。",
+          "source_files": [
+            "crates/markdown_preview/src/markdown_preview_view.rs"
+          ],
+          "title": "作为工作区 Item：生命周期、标签与保存委托",
+          "topic": "讲解 MarkdownPreviewView 对 workspace::item::Item trait 的实现：act_as_type 让预览可被当作 Editor 使用、tab_icon/tab_content_text 的标签呈现、save/save_as 委托源编辑器、reload 的空实现语义、to_item_events 映射事件驱动标签刷新，以及 Focusable 与 EventEmitter 声明。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u3-l2-searchable-item.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "描述 find_matches 如何在后台线程对 markdown 源文本执行搜索",
+            "解释 filter_non_rendered_matches 用二分查找剔除不可见命中的算法",
+            "理解 active_match_index 依据当前源偏移选择上/下一个命中的规则"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "workspace::searchable::SearchableItem",
+            "markdown crate 的搜索高亮 API",
+            "project::search::SearchQuery"
+          ],
+          "order": 2,
+          "practice_task": "构造一篇含 HTML 注释与未渲染内容的 Markdown，在预览中执行查找，验证命中的都是可见渲染文本；对照 filter_non_rendered_matches 的 partition_point 逻辑，给它补一个说明性单元测试（参考既有 tests 模块中的同名测试）。",
+          "source_files": [
+            "crates/markdown_preview/src/markdown_preview_view.rs"
+          ],
+          "title": "预览内搜索：SearchableItem 实现",
+          "topic": "讲解 SearchableItem 实现：supported_options 声明支持大小写/全词/正则但不支持替换，find_matches 在 cx.background_spawn 中对 markdown 源文本搜索并经 filter_non_rendered_matches 过滤掉未渲染区域的命中，update_matches/activate_match 驱动高亮与滚动，以及 markdown_parse_pending 在解析落地后使匹配失效。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l3-serialization-persistence.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "描述 serialize 如何把源文件绝对路径与模式写入 markdown_previews 表",
+            "解释 deserialize 重建 worktree/buffer/editor/视图的完整流程",
+            "理解 should_serialize 与 cleanup/delete_unloaded_items 的时机"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "workspace::item::SerializableItem",
+            "db crate 的 Domain/sql 宏",
+            "MarkdownPreviewMode 的数据库表示"
+          ],
+          "order": 3,
+          "practice_task": "打开预览后重启 Zed，确认预览标签被恢复；再通读 persistence 模块中的 CREATE TABLE 语句，画出 item_id/workspace_id/abs_path/mode 四列与恢复流程的对应关系，并解释 MarkdownPreviewEvent 为何触发序列化。",
+          "source_files": [
+            "crates/markdown_preview/src/markdown_preview_view.rs"
+          ],
+          "title": "序列化与持久化：SerializableItem 与 MarkdownPreviewDb",
+          "topic": "讲解 SerializableItem 实现与 persistence 模块：serialize 把 (item_id, workspace_id, abs_path, mode) 写入 SQLite 的 markdown_previews 表（含外键级联删除），deserialize 经 find_or_create_worktree 与 open_buffer 重建视图，cleanup 用 delete_unloaded_items 清理已关闭条目，以及 should_serialize 的事件过滤。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u3-l3"
+          ],
+          "filename": "u3-l4-testing-and-extending.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "掌握 gpui::test + TestAppContext + TestWindowContext 的测试骨架",
+            "学会用 TempTree 和 init_test 搭建带 Markdown 文件的测试工作区",
+            "能基于既有测试模板为新功能补测试并规划扩展点"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "gpui 测试上下文",
+            "fs crate 的 TempTree",
+            "测试辅助函数（open_markdown_file/init_test 等）"
+          ],
+          "order": 4,
+          "practice_task": "运行 `cargo test -p markdown_preview` 并通读 opens_markdown_links_in_preview 测试；然后仿照其结构，为“预览内点击本地 markdown 链接后原预览切换文件”这一行为编写一个新测试（可先写断言再补齐步骤）。",
+          "source_files": [
+            "crates/markdown_preview/src/markdown_preview_view.rs"
+          ],
+          "title": "测试体系与二次开发方向",
+          "topic": "以 tests 模块为例讲解 gpui 集成测试范式：init_test 搭建 AppState、open_markdown_file 用 TempTree 造 fixture、run_until_parked 与等待序列化的 wait_for_preview_serialization，覆盖链接打开、复选框回写、序列化恢复、Follow 模式、远程图片等场景；并总结向该 crate 添加新功能的常用切入点。"
+        }
+      ],
+      "order": 3,
+      "title": "单元三：专家层——平台集成、持久化与测试"
+    }
+  ]
+}

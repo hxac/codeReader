@@ -1,7 +1,7 @@
 {
-  "head": "91bf967e279fba3b326c096aeb66053cb2373547",
   "project": "zed-crates-gpui",
-  "rationale": "增量分析：fe9556a11e..91bf967e27 区间共 2 个提交（91bf967e27 inspector flag、f5e87e5343 settings_ui Clear 按钮），改动仅涉及 crates/inspector_ui、crates/ui、crates/zed、crates/settings_ui 四个兄弟 crate，对 crates/gpui 的 git diff 为空（0 文件、0 字节），src/、examples/、tests/、docs/、Cargo.toml 逐字节不变，不存在代码漂移，所有已生成讲义的论断与源码链接均继续成立。其中 91bf967e27 标题里的 inspector 指 zed 主程序的 inspector_ui 开关，与 gpui 自身的 src/inspector.rs（u7-l5 引用）无关，该文件未受影响。讲义目录方面：上一轮之后 worker 又生成了 u6-l5（文本系统）、u6-l6（line_wrapper）、u6-l7（图片与资源缓存）、u6-l8（AccessKit）与 u7-l1（Platform 抽象）五篇且均带 summary 文件，至此 u1–u6 全部 27 篇加 u7-l1 共 33 篇讲义已生成并与当前代码树一致，本轮全部标 keep；剩余 6 篇（u7-l2..u7-l7）尚未生成，维持 new，其引用的源码路径（含 window/prompts.rs、platform/app_menu.rs、app/test_context.rs、app/bench_context.rs、debug_overlay.rs、inspector.rs、profiler/journal.rs、profiler/hang.rs、examples/tree.rs 等）已逐一确认仍存在。学习路线、七单元结构、依赖关系与讲义顺序均不变。",
+  "head": "10b2925e7c44439b99aeb39d5402133e0ad49192",
+  "rationale": "增量分析：91bf967e27..10b2925e7c 区间共 11 个提交，其中只有 eb354c8d50（gpui: Make the Wayland render loop demand-driven #60690）触及 crates/gpui，改动集中在 5 个文件（src/app.rs、src/app/async_context.rs、src/platform.rs、src/platform/test/window.rs、src/window.rs，合计 +166/-15）；examples/、tests/、docs/、Cargo.toml、README 均无变化。该提交把渲染循环从「无条件帧节拍」改为按需驱动：PlatformWindow::completed_frame() 演化为 schedule_frame()（platform.rs:864，默认空实现，由 GPUI 在有帧需求时调用）；App::flush_effects 主循环收尾（pending_effects 清空、break 之前）新增一轮扫描，对 is_dirty、needs_present 或有 next_frame_callbacks 的窗口调用 schedule_frame 唤醒可能已停靠的平台帧源；window.rs 帧回调路径删除 complete_frame，present 之后与 on_next_frame 中改为按需 schedule_frame，next_frame_callbacks 字段改为 pub(crate)；AsyncApp::refresh 改为经 update 调 refresh_windows，让刷新效果入队以唤醒已停靠的渲染循环；TestWindow 新增 simulate_scheduled_frame/frame_scheduled，window.rs 与 app.rs 各新增数个 gpui::test。据此判定：u7-l1 在帧管线图与源码精读中明文引用 completed_frame（该名字已不存在），标 update，把 schedule_frame 的语义演变纳入讲解；u4-l3 讲的正是重绘调度与 on_request_frame 帧回调心脏（window.rs 约 1594-1660 行恰是本次改动区），标 update，补充按需帧调度模型。其余讲义论断不受影响：u2-l1 只在借用收尾的高度描述 flush_effects（「队列空了才退出」仍成立）；u2-l3 未涉及 AsyncApp::refresh 细节；u5-l5/u5-l6/u7-l2/u7-l5 引用的焦点、拖放、窗口管理、present 计时区域未被触及，且 permalink 均钉在生成时的提交上不会失效；u7-l4 的输入模拟链路未变（TestWindow 新增的帧调度模拟 API 属可补充的边角，不动摇既有内容）；u1/u3/u6 各篇引用的文件均不在改动集内——以上全部 keep。讲义目录方面：上一轮之后 worker 又生成了 u7-l2、u7-l3、u7-l4、u7-l5 四篇且均带 summary 文件，至此 39 篇中 37 篇已生成并与代码树一致；剩余 u7-l6、u7-l7 维持 new，其引用的源码路径（profiler/journal.rs、profiler/hang.rs、examples/tree.rs 等）已逐一确认仍存在。按需帧调度是对既有机制的修改而非新模块，并入 u4-l3 与 u7-l1 讲解即可，无需新增讲义；七单元结构、依赖关系与讲义顺序均不变。",
   "units": [
     {
       "id": "u1",
@@ -523,7 +523,7 @@
           "topic": "分析 GPUI 如何封装 taffy 这个 Rust 版 flexbox/grid 引擎：Style 如何映射为 taffy 样式、LayoutId 的申请与计算流程、AvailableSpace 的传递。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u4-l1"
           ],
@@ -532,14 +532,16 @@
           "learning_goals": [
             "描述从 cx.notify() 到屏幕更新的完整链路",
             "理解元素 arena 与每帧分配回收的取舍",
-            "会区分 refresh（忽略缓存）与常规重绘"
+            "会区分 refresh（忽略缓存）与常规重绘",
+            "理解 eb354c8d50 之后渲染循环的按需驱动模型：flush_effects 收尾扫描、present 之后与 on_next_frame 中的 PlatformWindow::schedule_frame 如何唤醒可能已停靠的平台帧源"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "Window",
             "Window::draw",
             "元素 arena",
-            "重绘调度"
+            "重绘调度",
+            "schedule_frame 按需排帧"
           ],
           "order": 3,
           "practice_task": "在示例中分别调用 window.refresh() 与仅 cx.notify()，用日志统计两种方式下根视图 render 被调用的次数，验证缓存复用行为。",
@@ -550,7 +552,7 @@
             "src/app.rs"
           ],
           "title": "窗口绘制管线：从 refresh 到 draw",
-          "topic": "进入 window.rs（约 7500 行）的核心：Window 结构、draw 如何驱动整棵元素树走完三阶段、cx.notify 引发的重绘调度，以及元素 arena 与 bounds_tree 的配合；并指出 profiler 构建下的可观测性埋点——WindowInvalidator 携带 window_id、标脏时上报 record_frame_pending、present 记录提交起止时间、dispatch_event 用 PlatformInput::kind_name 标注输入类别——它们不改主链路语义，细节在 u7-l6 展开。"
+          "topic": "进入 window.rs（约 7500 行）的核心：Window 结构、draw 如何驱动整棵元素树走完三阶段、cx.notify 引发的重绘调度，以及元素 arena 与 bounds_tree 的配合；并指出 profiler 构建下的可观测性埋点——WindowInvalidator 携带 window_id、标脏时上报 record_frame_pending、present 记录提交起止时间、dispatch_event 用 PlatformInput::kind_name 标注输入类别——它们不改主链路语义，细节在 u7-l6 展开。此外补充 eb354c8d50 引入的按需驱动渲染循环：App::flush_effects 收尾（队列清空、退出前）会对 is_dirty、needs_present 或有 next_frame_callbacks 的窗口调用 PlatformWindow::schedule_frame 唤醒帧源，on_next_frame 与 present 之后也按需排帧，取代旧的 completed_frame 无条件收尾（背景：Wayland 的帧回调只在提交后才到来，无条件节拍假设在空闲全屏窗口上会冻结）。"
         }
       ],
       "level": "intermediate",
@@ -994,7 +996,7 @@
       "id": "u7",
       "lectures": [
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u4-l3"
           ],
@@ -1005,7 +1007,8 @@
             "理解 test platform 如何在无窗口环境驱动帧",
             "了解新增平台支持需要实现哪些 trait",
             "理解 read_from_clipboard 与 read_from_clipboard_async 的关系及异步权限模型（如 web 平台的 ClipboardReadError）",
-            "理解 Platform::restart(binary_path, arguments) 签名与 Application::with_restart_arguments 的参数转发链路"
+            "理解 Platform::restart(binary_path, arguments) 签名与 Application::with_restart_arguments 的参数转发链路",
+            "理解 PlatformWindow::schedule_frame 的语义演变：eb354c8d50 起取代 completed_frame，成为 GPUI 向按需驱动平台（如 Wayland）请求下一帧的统一入口"
           ],
           "level": "advanced",
           "minimal_modules": [
@@ -1014,7 +1017,8 @@
             "PlatformDispatcher",
             "test platform",
             "剪贴板同步/异步读取",
-            "restart 参数转发"
+            "restart 参数转发",
+            "schedule_frame 按需帧调度"
           ],
           "order": 1,
           "practice_task": "用 Application::with_platform 接入 platform/test.rs 提供的测试平台，在无真实窗口的环境创建实体并手动驱动若干帧，观察绘制调用；再用 expect_restart 验证 cx.restart 时 (路径, 参数) 被原样传给平台。",
@@ -1024,10 +1028,10 @@
             "src/platform/test.rs"
           ],
           "title": "Platform 抽象与跨平台架构",
-          "topic": "解读 platform.rs 中约 3000 行的平台抽象：Platform、PlatformWindow、PlatformDispatcher、PlatformTextSystem、PlatformAtlas 等 trait 如何隔离 macOS/Linux/Windows 差异，以及带默认实现或近期演化的扩展点（如剪贴板的同步/异步两种读取形态、携带 restart_arguments 的应用重启）。"
+          "topic": "解读 platform.rs 中约 3000 行的平台抽象：Platform、PlatformWindow、PlatformDispatcher、PlatformTextSystem、PlatformAtlas 等 trait 如何隔离 macOS/Linux/Windows 差异，以及带默认实现或近期演化的扩展点（如剪贴板的同步/异步两种读取形态、携带 restart_arguments 的应用重启，以及 eb354c8d50 把 completed_frame 演化为 schedule_frame 后的按需帧调度——Wayland 的 wl_surface 帧回调只在提交后才到来，因此渲染循环改为需求驱动、空闲时停靠）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u7-l1"
@@ -1059,7 +1063,7 @@
           "topic": "讲解多窗口编程：WindowOptions（kind、bounds、装饰、焦点）、WindowHandle 的更新与读取、实体在窗口间共享与迁移、窗口生命周期事件。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l2"
           ],
@@ -1090,7 +1094,7 @@
           "topic": "覆盖三块系统集成：window.prompt 的原生对话框流程（prompts.rs）、应用菜单（app_menu.rs 与 init_app_menus）、系统通知的发送与响应。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3",
             "u5-l3"
@@ -1122,7 +1126,7 @@
           "topic": "讲解测试基础设施：#[gpui::test] 宏、TestAppContext 的虚拟时钟与输入模拟、VisualTestContext、headless_app_context，以及实体泄漏检测。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l3"
           ],

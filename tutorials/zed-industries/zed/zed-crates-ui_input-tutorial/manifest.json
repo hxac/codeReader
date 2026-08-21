@@ -1,13 +1,13 @@
 {
-  "head": "91bf967e279fba3b326c096aeb66053cb2373547",
+  "head": "10b2925e7c44439b99aeb39d5402133e0ad49192",
   "project": "zed-crates-ui_input",
-  "rationale": "ui_input 是一个小而精的 GPUI 表单组件 crate（仅 ui_input.rs 与 input_field.rs 两个源文件），但它的核心价值不在代码量，而在两件事：一是可复用的 InputField 表单组件本身，二是通过 ErasedEditor trait + ERASED_EDITOR_FACTORY 全局工厂实现的依赖反转（让 ui 体系不必依赖庞大的 editor crate）。因此学习路线先让读者从零认识 crate 的定位、目录与运行预览方式（第一单元），再逐层拆解 InputField 的数据模型、渲染布局与交互状态（第二单元），然后深入 ErasedEditor 类型擦除抽象、工厂注入机制与 Zed 仓库中的三类真实消费场景（第三单元），最后进入注册体系、自定义表单组件开发与架构取舍等二次开发主题（第四单元）。每一讲都锚定真实源码（crate 内两个文件加上 editor、component、workspace、language_models、settings_ui、picker 等上下游关键文件），并配一个可直接动手的实践任务，形成从『会用』到『读懂』再到『能写』的渐进路径。",
+  "rationale": "ui_input 是一个小而精的 GPUI 表单组件 crate（仅 ui_input.rs 与 input_field.rs 两个源文件），但它的核心价值不在代码量，而在两件事：一是可复用的 InputField 表单组件本身，二是通过 ErasedEditor trait + ERASED_EDITOR_FACTORY 全局工厂实现的依赖反转（让 ui 体系不必依赖庞大的 editor crate）。因此学习路线先让读者从零认识 crate 的定位、目录与运行预览方式（第一单元），再逐层拆解 InputField 的数据模型、渲染布局与交互状态（第二单元），然后深入 ErasedEditor 类型擦除抽象、工厂注入机制与 Zed 仓库中的三类真实消费场景（第三单元），最后进入注册体系、自定义表单组件开发与架构取舍等二次开发主题（第四单元）。每一讲都锚定真实源码（crate 内两个文件加上 editor、component、workspace、language_models、settings_ui、picker 等上下游关键文件），并配一个可直接动手的实践任务，形成从『会用』到『读懂』再到『能写』的渐进路径。本次增量分析：git diff 91bf967e..10b2925e 显示全部 39 个变更文件均不涉及 crates/ui_input 本体，也不涉及任何讲义引用的上下游源码文件（component、component_preview、picker、settings_ui/skill_creator、language_models/llama_cpp、workspace/security_modal、editor/src/editor.rs 均无变化；editor 仅有未被任何讲义引用的 editor_tests.rs 变更），故全部 11 篇讲义维持原大纲并标记为 keep，无需新增或移除。",
   "units": [
     {
       "id": "u1",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -35,7 +35,7 @@
           "topic": "介绍 ui_input crate 的定位：为表单场景（搜索框、表单字段等）提供 UI 组件；解释它为什么不能放进 ui crate（因为它依赖 editor）；梳理两个源文件和三个依赖（component、gpui、ui）构成的最小 crate 结构。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -74,7 +74,7 @@
       "id": "u2",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -104,7 +104,7 @@
           "topic": "逐字段拆解 InputField 结构体，讲解 builder 风格的链式配置方法（label、label_size、label_min_width、start_icon、tab_index、tab_stop、masked），以及 new 中通过工厂创建 editor、Focusable 委托和 text/set_text/clear 等委托方法。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -132,7 +132,7 @@
           "topic": "逐段阅读 InputField 的 Render 实现：v_flex/h_flex 布局层级、InputFieldStyle 如何从主题取色、焦点态边框切换、start_icon 的条件渲染，以及 when/when_some 组合子与 Tailwind 风格样式方法。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -169,7 +169,7 @@
       "id": "u3",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -198,7 +198,7 @@
           "topic": "深入 crate 根模块定义的 ErasedEditor trait：为什么需要把 Editor 类型擦除成 trait 对象、方法如何分类（文本读写、占位、掩码、只读、多行、焦点、订阅、渲染、as_any），以及 ErasedEditorEvent 的 BufferEdited/Blurred 两个事件。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -229,7 +229,7 @@
           "topic": "讲解 crate 级静态 ERASED_EDITOR_FACTORY（OnceLock<fn>）如何由 editor crate 在 init 时注入 SingleLine Editor，从而让 ui_input 不必编译期依赖 editor；分析这种服务定位器模式的初始化时机与失败模式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u3-l1"
@@ -270,7 +270,7 @@
       "id": "u4",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -300,7 +300,7 @@
           "topic": "系统讲解 component crate 的注册体系：Component trait 的全部方法、#[derive(RegisterComponent)] 与 inventory 分布式切片注册、ComponentScope/ComponentStatus 的分组与状态语义，以及 ComponentRegistry 元数据如何被 component_preview 面板消费。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u2-l3",
@@ -332,7 +332,7 @@
           "topic": "以 InputField 为模板，学习如何在 ui_input crate 中新增一个自定义表单组件（如带步进按钮的 NumberField）：复用 ERASED_EDITOR_FACTORY 创建的 ErasedEditor、实现 builder API 与 Render、并通过 RegisterComponent 注册预览。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2",
             "u4-l2"
