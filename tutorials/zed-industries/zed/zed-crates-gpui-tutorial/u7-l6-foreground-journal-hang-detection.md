@@ -1,542 +1,560 @@
-# u7-l6 前台工作日志与卡顿检测：ForegroundJournal 与 HangDetector
+# 前台工作日志与卡顿检测：ForegroundJournal 与 HangDetector
 
 ## 1. 本讲目标
 
-学完本讲，你应该能够：
+GPUI 的所有 UI 工作都发生在一条前台线程上（u2-l5 讲过双执行器模型）。这条线程一旦被某段同步计算长时间占住，整个应用就会冻结——没有掉帧日志、没有堆栈、用户只看到「卡了」。本讲讲解 `profiler` feature 下的一套可观测性子系统，学完后你应当能够：
 
-1. 说清 `ForegroundJournal` 记录了哪些前台工作（任务轮询、动作处理、输入派发、窗口绘制、帧呈现），它们如何成为 `ForegroundEvent` / `ForegroundJournalEntry`，以及「小轮询折叠」「按完成顺序记录」这两条特殊规则。
-2. 解释边界条目（`Presented` / `Idle`）如何把事件流切成一个个活动区间，`IntervalSealer` 这个纯状态机如何把区间封口成 `FrameSnapshot`，以及 `occupancy` 与 `busy_fraction` 是怎么算出来的。
-3. 理解「便宜到可以默认开启」的工程取舍：低于 100µs 的轮询折叠进 `ForegroundRunnableCounter` 旁边的 `PollSummary`、固定 4MiB 的无锁环形缓冲、写线程永不为读者等待、丢失以 `Discontinuity` 显式上报。
-4. 会用 `HangDetector::poll` 捕获 `HangIncident`，并说清两类触发条件：单个事件 ≥ 卡顿阈值（Zed release 取 100ms），或区间累计前台开销 ≥ 帧预算（Zed release 取 8ms）。
-5. 沿着 `App::foreground_journal`、`PlatformScheduler::schedule_local` 的 `queued()`、平台调度器的 `update_running_task` / `save_task_timing`、`WindowInvalidator::record_frame_pending`、`WindowProfiler` 的输入/动作/绘制/呈现括号、`PlatformInput::kind_name`，完整说出一次前台 turn 的记录链路。
-
-本讲是「专家层」的可观测性专题。前置依赖：u2-l5（前台/后台双执行器与平台调度器）、u4-l3（窗口绘制管线与按需排帧）、u7-l5（profiler 的三层采集体系）。u7-l5 讲的是「统计聚合」（直方图、top-5），本讲讲的是「逐事件日志」——同一批埋点的另一条出口。
+1. 解释 `ForegroundJournal` 如何在主线程上用固定大小的无锁环形缓冲记录五类前台工作（任务轮询、动作处理、输入派发、窗口绘制、帧呈现），以及为什么低于 `TASK_POLL_FLOOR`（100µs）的轮询要折叠成计数摘要。
+2. 说明边界条目（新帧呈现 / 前台转入空闲）如何把事件流切成一个个「活动区间」，`IntervalSealer` 如何把区间封口成 `FrameSnapshot`，`occupancy` 与 `busy_fraction` 又是怎么算出来的。
+3. 使用 `HangDetector::poll` 读取 `HangIncident`，并解释两类触发条件：单事件时长 ≥ 卡顿阈值，或区间累计前台开销 ≥ 帧预算。
+4. 沿着 `App::foreground_journal`、`PlatformScheduler` 的 `queued()` 计数、`WindowInvalidator::record_frame_pending`、`WindowProfiler` 的各对 begin/end 括号和 `PlatformInput::kind_name`，说出一次完整前台 turn 的记录链路。
 
 ## 2. 前置知识
 
-- **前台线程（foreground thread）**：GPUI 的所有实体更新、绘制、输入派发都发生在单一主线程上（u2-l1、u2-l5）。任何一段同步计算（一次 `thread::sleep`、一个死循环、一个超长的动作处理器）都会让整个界面冻结——这就是「卡顿」（hang）。检测卡顿的前提是先记账：主线程每一刻在干什么。
-- **turn（前台回合）**：一次对主线程的「进入—做完—返回空闲」过程。平台派发一个 runnable、派发一个输入事件、请求一帧，都会开启一个 turn。turn 可以嵌套（输入派发里同步触发了一帧绘制）。
-- **环形缓冲（ring buffer）**：固定大小的数组 + 游标循环复用。写快读慢时旧数据被覆盖——内存有界，但需要显式告知读者「有数据丢了」。journal 用的是单写多读、带序列号的无锁变体。
-- **`scheduler::Instant`**：scheduler crate 提供的时刻类型。测试平台里它走假时钟（u7-l4），生产平台里就是真实单调时钟。journal 里全部时间戳都是它。
-- **`profiler` feature**：本讲全部代码都在 `#[cfg(feature = "profiler")]` 之后。该 feature 只额外引入 `hdrhistogram`（[Cargo.toml:L40](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/Cargo.toml#L40)），编译产物里常驻、默认开启（对 Zed 而言），不是「调试时才打开」的开关。
-- **帧预算（frame budget）**：一帧的时间配额。120Hz 下约 8.3ms。一个区间里许多个 1ms 的小工作加起来超过了它，同样会掉帧——即使没有任何单项工作「看起来很慢」。
+阅读本讲前，你应当已经理解（对应前面各讲）：
+
+- **前台线程与 turn**：GPUI 的实体更新、绘制、事件派发全部发生在单一前台线程（u1-l2、u2-l1）。一次「turn」指一段不可分割的前台工作，例如轮询一个 future、派发一条输入。
+- **任务与调度**：`ForegroundExecutor` 在主线程轮询 future，任务经 `PlatformDispatcher::dispatch_on_main_thread` 入队（u2-l5）。`Task` 的 `Drop` 即取消。
+- **窗口绘制管线**：`cx.notify()` 标脏窗口 → 平台请求帧 → `Window::draw` 走完元素树三阶段 → `present` 把场景提交给平台（u4-l3）。本讲的 `Draw`/`Present` 事件就是在这些环节埋点得到的。
+- **profiler 三层采集**：u7-l5 讲过每线程任务计时（100µs 准入的 top-5 统计）、`WindowProfiler` 的帧直方图、`set_trace_enabled` 开关的逐帧事件缓冲。本讲的 journal 是第四层：**始终开启**、语义化、面向卡顿归因，它由 1861e58f98 引入。
+- **无锁数据结构直觉**：会读 `compare_exchange` 即可，本讲不要求写过无锁代码。
+
+两个关键术语先给出定义：
+
+- **活动区间（interval）**：从前一个边界结束到下一个边界结束之间的一段前台历史。边界只有两种：一帧新绘制的画面被提交给平台（Presented），或前台彻底空闲（Idle）。
+- **卡顿（hang）**：任何一段单独的前台工作阻塞了前台线程超过阈值；或一个区间内前台总开销达到帧预算——许多小块工作也能像一次长停顿一样丢帧。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
 | --- | --- |
-| [src/profiler/journal.rs](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs) | 本讲主角之一：`ForegroundJournal`（固定大小环形日志）、`ForegroundEvent` / `ForegroundJournalEntry`、`IntervalSealer`（区间封口状态机）、`FrameSnapshot`（区间快照与占用率计算），以及主线程侧的写入器与全部 `record_*` 入口 |
-| [src/profiler/hang.rs](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/hang.rs) | 本讲主角之二：`HangDetector`（轮询日志、产出 `HangIncident`）与 `SerializedHangIncident` / `SerializedHangContributor`（遥测形态、嵌套深度） |
-| [src/profiler.rs](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler.rs) | 采集核心：`TaskTiming` / `FrameTiming` / `PresentTiming` 计时结构、任务轮询的 turn 括号（`update_running_task` / `save_task_timing`）、`WindowProfiler` 把输入/动作/绘制/呈现逐一写入 journal |
-| [src/app.rs](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/app.rs) | `App` 构造时安装日志（`install_foreground_journal`）并提供 `App::foreground_journal()` 访问器 |
-| [src/executor.rs](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/executor.rs) | `ForegroundExecutor` 持有 runnable 计数器，`spawn_when_idle` 入队时 `queued()` |
-| [src/platform_scheduler.rs](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/platform_scheduler.rs) | `PlatformScheduler::schedule_local` 入队时 `queued()`——runnable 计数的另一个入口 |
-| [src/window.rs](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/window.rs) | 全部窗口侧接线：`WindowInvalidator` 标脏时上报 `record_frame_pending`、帧回调与 `present` 的 turn 括号、`dispatch_event` 与动作派发的 begin/end 埋点 |
-| [src/interactive.rs](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/interactive.rs) | `PlatformInput::kind_name`：给每种输入变体一个短静态名（`"key_down"` 等），供日志与遥测使用 |
-| [crates/zed/src/reliability/hang_detection.rs](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/zed/src/reliability/hang_detection.rs) | Zed 应用侧的真实消费者：在独立线程上每秒 `HangDetector::poll` 一次并上报遥测，阈值 100ms / 帧预算 8ms（release） |
-| [crates/gpui_linux/src/linux/dispatcher.rs](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_linux/src/linux/dispatcher.rs) | 平台调度器三段式范本：`update_running_task` → `runnable.run()` → `save_task_timing`（macOS 的 dispatcher 同形） |
+| `src/profiler/journal.rs` | 本讲主角一：`ForegroundEvent`/`ForegroundJournalEntry` 事件模型、`ForegroundJournalWriter`（主线程写入端）、`JournalRing`/`JournalPublisher`（固定大小环形缓冲）、`ForegroundJournalCollector`（独立游标读取端）、`IntervalSealer`/`FrameSnapshot`（区间封口与占用度计算） |
+| `src/profiler/hang.rs` | 本讲主角二：`HangDetector`（轮询日志、产出 `HangIncident`）与 `SerializedHangIncident`/`SerializedHangContributor`（telemetry 友好的序列化形态） |
+| `src/profiler.rs` | `TaskTiming`/`FrameTiming`/`PresentTiming`/`ActionTiming` 计时结构；`WindowProfiler` 的输入/动作/绘制/呈现四对括号；`update_running_task`/`save_task_timing` 两个全局钩子 |
+| `src/app.rs` | `App` 持有 `foreground_journal` 句柄；构造时安装日志；`App::foreground_journal()` 对外暴露 |
+| `src/executor.rs`、`src/platform_scheduler.rs` | `ForegroundRunnableCounter` 的 `queued()`/`finished()` 维护「还有任务排队」这个事实 |
+| `src/window.rs` | `WindowInvalidator` 在窗口变脏时上报 `record_frame_pending`；`dispatch_event`/`dispatch_action`/`draw`/`present` 上的埋点括号 |
+| `src/interactive.rs` | `PlatformInput::kind_name()`：为每种输入变体返回 `"key_down"`、`"scroll_wheel"` 等短静态名 |
+| `../zed/src/reliability/hang_detection.rs` | 生产接线示范：Zed 应用如何用几十行把 `HangDetector` 挂到独立线程（拓展阅读） |
+
+条件编译提示：以上几乎所有内容都在 `#[cfg(feature = "profiler")]` 之下，该 feature 只额外引入 `hdrhistogram` 依赖（`Cargo.toml` 中 `profiler = ["dep:hdrhistogram"]`）。不开 feature 时这些代码不存在，运行时零开销。
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 ForegroundJournal 与 ForegroundEvent：主线程在忙什么
+### 4.1 ForegroundJournal 与 ForegroundEvent：前台工作如何被记录
 
 #### 4.1.1 概念说明
 
-`ForegroundJournal` 是 profiler feature 下的**主线程工作日志**：一段按时间排列的、有界的、可被多个消费者独立读取的事件流。它回答的问题是「刚才界面卡住的那 200ms 里，主线程到底在执行什么」。
+`ForegroundJournal` 是主线程的工作日志。它要回答的问题是：**「刚才前台线程到底在忙什么，每件事花了多久？」**
 
-u7-l5 的直方图只能回答「p99 的 draw 耗时是多少」，无法回答「是哪个任务的哪一次轮询把帧拖死的」。journal 补上这块：**逐事件、带源码位置、带因果边界**。
+设计约束非常苛刻，由此产生了三个核心取舍：
 
-它的三条设计约束（都写在模块文档里）：
-
-1. **只记主线程**。写入器是 thread-local 的，别的线程调用记录函数是无操作（no-op）。
-2. **事件流必须有界**。用「小轮询折叠」把事件量约束在「慢轮询的数量级」上。
-3. **边界必须是语义事件**。区间怎么切分由显式的边界条目决定，「绝不从流逝时间或 draw 这类顺带事件里推断边界」。
+1. **记录必须极廉价**。日志默认开启（不依赖 `set_trace_enabled`），热路径上每条事件只能做几次原子写。因此它住在主线程的 thread-local 里，写入永不等待读取者。
+2. **流必须有界**。一个健康的应用每秒可能有几十万次低于 100µs 的任务轮询，逐条记录会瞬间写爆任何缓冲。解法是 `TASK_POLL_FLOOR`：短于 100µs 的轮询折叠进 `PollSummary`（只保留精确条数与总时长），流的大小由「慢轮询的数量」而非「轮询总数」决定。
+3. **语义化边界**。日志不是无结构的计时列表，而是被两种边界条目切成区间：`Presented`（一帧新画面提交完成）与 `Idle`（前台回到平台空闲循环）。后面所有分析（帧预算、dirty-to-present、busy_fraction）都建立在这套区间语义上。
 
 #### 4.1.2 核心流程
 
-一次典型的「输入→重绘→呈现」会在日志里留下这样一串条目（按记录顺序）：
+一次典型帧的事件流（按时序）：
 
 ```text
-FrameState(Pending { window_id, dirty_at })     ← 窗口第一次变脏（元数据，不是工作）
-Event(Input(InputTiming { kind: "key_down", .. }))  ← 一次键盘派发
-Event(TaskPoll(TaskTiming { location, .. }))    ← 一次 ≥100µs 的任务轮询
-Event(SmallPolls { summary: { count: 37, total: 1.2ms }, .. })  ← 37 次低于 100µs 的轮询的折叠摘要
-Event(Draw(FrameTiming { .. }))                 ← 一次窗口绘制
-Boundary(Presented(PresentedFrame { .. }))      ← 帧提交平台：区间到此封口
+窗口变脏        → FrameState::Pending { window_id, dirty_at }   （元数据，不算工作）
+输入到达        → Event::Input(InputTiming { kind: "key_down", ... })
+动作处理        → Event::Action(ActionTiming { name: "editor::Save", ... })
+开始绘制        → （begin_draw 括号，同时再报一次 frame_pending）
+绘制完成        → Event::Draw(FrameTiming { dirty_at, invalidations, draw_start, draw_end })
+提交平台完成    → Boundary::Presented(PresentedFrame { frame, presentation })
+                  ↑ 边界：此前所有工作被封口成一个区间
+前台空闲        → Boundary::Idle { ended_at }
 ```
 
-要点：
+写入端的守门逻辑（何时产生 Idle 边界）：
 
-- **按完成顺序记录**。一个跨帧边界仍在进行的事件（例如包住了 draw 的那次任务轮询）在它**结束**时才被记录，其开始时间可能早于此前已记录的事件。这让「区间归因」以结束时刻为准。
-- **折叠规则**：轮询时长 < `TASK_POLL_FLOOR`（100µs）不单独记录，而是累进一个待冲刷的 `SmallPollFlush`（保留精确次数与总时长），在下一条被保留的事件或边界之前一次性冲出去。
-- **两类非工作条目**：`FrameState` 是待决帧状态的控制面变化（纯元数据）；`Discontinuity` 显式声明「这里丢了 N 条逻辑条目」，禁止消费者跨缺口推断边界。
+```text
+end_turn(ended_at):
+    turn_depth 还有外层?           → 不封口（嵌套 turn 只在最外层结束时考虑）
+    runnable 计数 > 0?             → 不封口（还有任务马上要跑，不算空闲）
+    存在未过期(1s 内)的 pending 帧? → 不封口（帧还没呈现，区间必须等它）
+    本区间没有保留过任何事件?       → 丢弃折叠的小轮询，不封口
+    否则                           → 写入 Boundary::Idle
+```
+
+事件按**完成顺序**记录：一个横跨帧边界的轮询（例如包住了一次 draw 的任务轮询）在它结束时才入环，其时间戳可能早于之前已记录的事件——读取端不假设流内时间单调。
 
 #### 4.1.3 源码精读
 
-模块文档把整个设计一页说尽：[journal.rs:L1-L13](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L1-L13) —— 前台线程把任务轮询、动作处理器、输入派发、绘制、呈现记进有界环形日志；短于阈值的轮询折叠成摘要；呈现与转空闲是显式边界。
+五类事件与折叠摘要的定义：
 
-折叠的下限常量：[journal.rs:L29-L40](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L29-L40) 定义了 `TASK_POLL_FLOOR = 100µs`（事件量级被「慢轮询数」约束，同时保留精确计数与总时长）与 `FRAME_DEADLINE = 1s`（一帧脏了 1 秒还没呈现就不再阻止「转空闲」边界——隐藏或被遮挡的窗口收不到帧回调，不能让它永久压制边界）。
+- [src/profiler/journal.rs:L64-L79](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L64-L79) — `ForegroundEvent` 枚举：`TaskPoll`/`Action`/`Input`/`Draw`/`Present` 五类实际工作，加上 `SmallPolls`（折叠摘要）。每类携带自己的计时结构。
+- [src/profiler/journal.rs:L29-L32](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L29-L32) — `TASK_POLL_FLOOR = 100µs`：折叠门槛，让流的大小由慢轮询数量决定。
+- [src/profiler/journal.rs:L115-L127](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L115-L127) — `InputTiming`：`kind` 字段是 `&'static str`，来源就是 `PlatformInput::kind_name()`（见 4.5），另带 `caused_invalidation` 标记该输入是否弄脏了窗口。
+- [src/profiler/journal.rs:L129-L154](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L129-L154) — `PollSummary`（count + total）与 `SmallPollFlush`（摘要 + 最紧包围区间 `since`/`until`）。保留 span 是为了后续能把折叠时间按比例摊到更窄的报告窗口。
 
-五种工作事件与折叠摘要构成 `ForegroundEvent`：[journal.rs:L64-L79](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L64-L79)。其中输入事件携带的 `kind` 是 `&'static str`：[journal.rs:L115-L127](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L115-L127) 明确指向 `PlatformInput::kind_name`（4.5 节精读），并记录该输入是否引发了对某窗口的失效。
+写入端的折叠与记录：
 
-折叠摘要的结构：[journal.rs:L129-L154](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L129-L154)。`PollSummary` 只有 `count` 与 `total` 两个字段；`SmallPollFlush` 额外携带最紧的包含区间（`since`/`until`），为的是占用率计算能把折叠时间按比例分摊到更窄的报告窗口（4.2 节）。
+- [src/profiler/journal.rs:L629-L639](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L629-L639) — `record_task_poll`：先 `finished()` 递减 runnable 计数，再按 `poll_duration() >= TASK_POLL_FLOOR` 决定逐条保留还是折叠，最后 `end_turn` 尝试封口。
+- [src/profiler/journal.rs:L445-L476](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L445-L476) — `fold_small_poll` 把短轮询并入当前摘要并扩展 span；`record_entry` 保证已积累的 `SmallPolls` 摘要**紧贴在**下一条保留事件或边界之前被冲刷入环，维持流的时序语义。
+- [src/profiler/journal.rs:L407-L434](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L407-L434) — `end_turn` 的四重守门。注释解释了「为什么只有折叠轮询的唤醒不封口」：定时器、文件监视器会造成无数孤立微唤醒，若每次都封口，折叠机制挡掉的轮询又会以边界条目的形式回到环里，几秒内写爆环形缓冲。
 
-日志里实际存放的四类条目：[journal.rs:L226-L240](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L226-L240) —— `Event`（已完成的工作）、`Boundary`（语义边界）、`FrameState`（待决帧元数据）、`Discontinuity`（缺口，禁止跨缺口推断边界）。
+日志条目的完整类型与安装：
 
-写入器本体挂在线程局部变量上：[journal.rs:L524-L527](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L524-L527)。`FOREGROUND_JOURNAL` 是 `RefCell<Option<ForegroundJournalWriter>>`——未安装的线程上所有记录调用经 `with_journal`（[journal.rs:L593-L599](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L593-L599)）静默跳过。安装动作由 `App` 构造触发，且幂等：[journal.rs:L533-L554](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L533-L554)，同一线程上的多个 `App`（测试场景）共享一条日志流。
-
-任务轮询的记录入口最能体现「折叠 + turn 收尾」的耦合：[journal.rs:L629-L639](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L629-L639)。它先调用 runnable 计数器的 `finished()`（每个曾 `queued()` 的 runnable 最终都有一次配对的轮询），再按 `TASK_POLL_FLOOR` 二选一：保留为 `TaskPoll` 事件或折叠；最后以该轮询的结束时刻收掉一个 turn。
+- [src/profiler/journal.rs:L225-L240](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L225-L240) — `ForegroundJournalEntry`：`Event`/`Boundary`/`FrameState`（元数据）/`Discontinuity`（丢失标记，消费者不得跨过它推断边界）。
+- [src/profiler/journal.rs:L533-L554](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L533-L554) — `install_foreground_journal`：由 `App` 构造时调用一次；幂等，同线程多个 `App`（测试场景）共享一条日志流。
+- [src/app.rs:L790-L791](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/app.rs#L790-L791) 与 [src/app.rs:L1938-L1943](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/app.rs#L1938-L1943) — `App` 构造时安装日志；`App::foreground_journal()` 返回可克隆的句柄给应用侧（如 Zed 的 reliability 模块）。
 
 #### 4.1.4 代码实践
 
-**实践目标**：亲眼看到一条真实的日志流。
+**实践目标**：不动手运行，通过阅读一个高质量集成测试，建立「四类前台工作 → 四类事件」的映射。
 
 **操作步骤**：
 
-1. 复制 `examples/hello_world.rs` 为 `examples/journal_probe.rs`（示例代码，非项目原有文件）。
-2. 在 `run_example` 的 `application().run` 回调里、`open_window` 之前加入：
+1. 打开 [src/profiler/hang.rs:L1100-L1182](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/hang.rs#L1100-L1182)，通读测试 `detects_randomly_placed_foreground_hangs`。
+2. 该测试在一个真实 `VisualTestContext` 窗口中随机注入 1~4 次卡顿，注入点有四类：`cx.notify()` 后的 `render`（睡眠）、`simulate_mouse_down` 触发的输入派发、`dispatch_action` 触发的动作处理、`simulate_blocked_foreground_poll` 模拟的任务轮询。
+3. 对照测试末尾的 `matches_kind`（[src/profiler/hang.rs:L1209-L1221](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/hang.rs#L1209-L1221)），确认四类注入分别被断言为 `Draw`、`Input`、`Action`（按名字 `HangyAction` 匹配）、`TaskPoll`（按 spawn 位置的文件名匹配）。
 
-   ```rust
-   // 示例代码：每 500ms 冲刷一次前台日志并打印
-   let mut collector = cx.foreground_journal().collector();
-   cx.spawn(async move |cx| {
-       loop {
-           cx.background_executor().timer(Duration::from_millis(500)).await;
-           let drained = collector.collect_unseen();
-           for entry in drained.entries {
-               println!("[journal] {entry:?}");
-           }
-       }
-   })
-   .detach();
-   ```
+**需要观察的现象**：测试如何区分「同类事件的多次注入」——它按注入时长降序逐一配对观察到的贡献者，睡眠不会提前醒来，因此观察时长必须 ≥ 注入时长。
 
-3. 顶部补 `use std::time::Duration;`。
-4. 运行：
+**预期结果**：能在笔记里画出「注入手段 → 事件变体 → 匹配判据」三列对照表。
 
-   ```bash
-   cargo run -p gpui --example journal_probe --features profiler
-   ```
-
-**需要观察的现象**：窗口打开后每 500ms 打一批条目。初始阶段应能看到 `FrameState(Pending …)`、`Event(Draw …)`、`Boundary(Presented …)`；鼠标划过窗口（hover 样式重绘）会再次触发这一组；完全静止一段时间后日志安静下来（不再有 Idle 边界反复出现——空闲区间之间没有工作就不封口）。
-
-**预期结果**：条目种类与 4.1.2 的序列吻合；`Draw` 条目里的 `invalidations` 会随你在同一帧内触发的失效次数增长。实际输出内容与机器、平台相关，具体数值**待本地验证**。
+**待本地验证**：无需运行即成立（这是阅读型实践）；若想运行：`cargo test -p gpui --features profiler detects_randomly_placed`。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 `ForegroundEvent` 要按「完成顺序」而不是「开始顺序」记录？
+**练习 1**：一个任务的单次轮询耗时 60µs，它会被记录吗？
 
-**答案**：写入发生在一件事结束的时刻——这是唯一无需缓冲、无需预测的点（事件开始时不知道自己会不会跨帧、会跨多远）。代价是流内时间戳可能「倒序」：一个包住 draw 的长轮询在 draw 之后才记录，但开始时间更早。因为区间的切分与封口都发生在边界条目上（也是完成时刻），以完成顺序消费日志的 `IntervalSealer` 天然保证「区间里包含所有在边界之前结束的工作」。
+**答案**：不会逐条记录。60µs < `TASK_POLL_FLOOR`（100µs），它被折叠进 `PollSummary`：条数加一、总时长累加，随后以 `SmallPolls(SmallPollFlush)` 的形式在下一条保留事件前冲刷入环。它的精确计数与总时长没有丢失。
 
-**练习 2**：`FrameState(Pending)` 明明不是「工作」，为什么要进日志流？
+**练习 2**：为什么 `Discontinuity` 条目要求「消费者不得跨过它推断区间边界」？
 
-**答案**：它是给消费者看的**控制面元数据**：记录某窗口从何时起有一帧等待呈现。写侧用它给 Idle 边界把关（还有未呈现帧就不算真空闲，见 4.2.3），读侧（如要计算 dirty-to-present 延迟的应用层）可以直接从流里取 `dirty_at`，而不需要另一套通道。sealer 本身对它无感（[journal.rs:L1033-L1036](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L1033-L1036)）。
+**答案**：丢失的条目里可能恰好有 `Boundary`。若消费者假装丢失段是连续的，就会把两个区间错合并成一个，或把边界归错位置——帧预算类卡顿判定（依赖区间完整性）会基于错误前提。后面 4.3 会看到 `HangIncident::detect` 在日志不连续时直接抑制预算判定，只保留逐条观察到的超阈值事件。
 
-**练习 3**：折叠为什么保 `since`/`until` 而不是只存 `count`/`total`？
+**练习 3**：`FrameState::Pending` 是前台「工作」吗？
 
-**答案**：`FrameSnapshot::occupancy_within` 支持任意报告窗口（例如锚定在某帧首次失效时刻的窗口）。折叠后的轮询没有单独时间戳，只能按区间比例分摊：分摊量 \( = total \times \frac{overlap}{span} \)，其中 span 就是 `until - since`。没有这两个字段就无法做窗口对齐的占用率。
+**答案**：不是。它只是控制面元数据（哪个窗口有一帧待呈现、何时变脏），用于门控 Idle 边界（`FRAME_DEADLINE`）和计算 `dirty_to_present`。`IntervalSealer` 对它直接跳过（见 [src/profiler/journal.rs:L1033-L1036](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L1033-L1036)），它不参与 occupancy 计算。
 
-### 4.2 JournalRing 与 IntervalSealer：有界缓冲与区间封口
+### 4.2 JournalRing 与 IntervalSealer：环形缓冲与区间封口
 
 #### 4.2.1 概念说明
 
-日志流的两侧是一对完全解耦的组件：
+有了事件流，还需要两块基础设施：
 
-- **`JournalRing`（写侧基础设施）**：固定大小的槽位数组（约 4MiB），单写多读、无锁、永不阻塞写线程。写线程（主线程）宁可丢数据也不等读者。
-- **`IntervalSealer`（读侧纯状态机）**：吃进 drained 条目，把「上一个边界之后到下一个边界之前」的所有工作打包成一个不可变的 `FrameSnapshot`。它没有任何时钟依赖——不从流逝时间推断任何事。
+- **JournalRing**：固定大小（约 4MiB 预算）的无锁环形缓冲，是「主线程永不等待读取者」这一承诺的落点。多个 `ForegroundJournalCollector` 各持独立游标并发读取，读不到的条目以 `Discontinuity` 如实报告，绝不阻塞写入。
+- **IntervalSealer**：一个**纯状态机**，把 drained 出来的条目按边界分组为 `FrameSnapshot`。强调纯：它不看流逝时间、不猜测边界（不把「碰巧是一次 draw」当边界），只认显式的 `Boundary` 条目。这使它可以被任意分批喂入（生产中每秒喂一批、测试中一次喂完），结果完全一致——journal.rs 里甚至有一组 proptest 对照参考模型验证这一点。
 
-这一对组件合起来实现了本讲的核心抽象：**活动区间（activity interval）**。边界只有两种：
+`FrameSnapshot` 上最重要的两个派生量：
 
-- `Presented`：一帧新绘的画面提交给了平台（携带 `PresentedFrame` = 这次绘制的 `FrameTiming` + 这次提交的 `PresentTiming`）。
-- `Idle`：前台回到了平台空闲循环，且没有未过期（1 秒内）的待呈现帧。
+- **occupancy**：区间内前台真正在工作的时间。事件可能嵌套（输入派发内部同步画了一帧），所以取所有事件 span 裁剪到窗口后的**并集**，避免重复计数；折叠的小轮询没有个体时间戳，按 span 与窗口的重叠比例摊入（假设折叠时间在 span 上均匀分布）。
+- **busy_fraction**：\( \text{busy\_fraction} = \min\!\left(1.0,\ \dfrac{\text{occupancy}}{\text{interval\_end} - \text{interval\_start}}\right) \)。低 busy_fraction 配上高 dirty_to_present 说明是调度/限流延迟而非应用在干活。
 
 #### 4.2.2 核心流程
 
-**写入与读取的协作**（单写多读）：
+无锁槽位的协作协议（单写入者 + 多读取者）：
 
 ```text
-主线程（唯一写者）                        任意读者线程（多个，独立游标）
-record_*() ──► JournalPublisher
-                 │  try_publish(seq, entry) 到 ring 槽位
-                 │  失败（槽位正被读者钉住）─► pending 队列（≤64）下轮重试
-                 ▼
-           JournalRing[seq % capacity]
-                 │  每槽: users 原子计数 + sequence 原子序号
-                 ▼
-           collector.collect_unseen()
-                 游标从 cursor 推进到 finalized；
-                 槽位序号不匹配或被覆盖 → Discontinuity { lost }
+槽结构: users(AtomicUsize) + sequence(AtomicU64) + entry(UnsafeCell)
+写入 try_publish(seq, e):
+    users 从 0 CAS 到 SLOT_WRITER（最高位）→ 独占槽
+    写入 entry → 存 sequence → users 归零（Release）
+    若槽被读者占着 → CAS 失败 → 进入 publisher 的 pending 队列（容量 64）下轮重试
+读取 try_read(expected_seq):
+    试加一位读者（users 计数 +1，且无写者）→ 失败则返回 None（记丢失）
+    sequence 匹配 expected_seq? → Copy 出 entry（Copy 类型，读取即复制）
 ```
 
-**区间的封口条件**（写侧把关 Idle 边界）：最外层 turn 结束、且 runnable 计数为零、且没有 1 秒内变脏还未呈现的帧、且自上一边界以来至少保留过一条事件，才写入 `Idle` 边界。
+`collect_unseen` 的游标推进：
 
-**FrameSnapshot 的占用率**：区间内所有事件时间区间的**并集**（裁剪到区间内，嵌套工作不重复计数）加上折叠轮询的按比例分摊：
+```text
+end = finalized（已成功落槽的最大序列）
+cursor < end - capacity? → 落后部分合并为一条 Discontinuity { lost }
+逐槽读取 [cursor, end)，读不到的槽就地累计进 Discontinuity
+```
 
-\[ \text{busy\_fraction} = \min\!\left(1,\ \frac{\text{occupancy}}{\text{interval\_end} - \text{interval\_start}}\right) \]
+Sealer 的封口规则：
+
+```text
+Event     → 区间为空时把 interval_start 提到 max(interval_start, event.start)（剔除前置空闲）
+            SmallPolls → 存入 small_polls；其余存入 events（有 16k 上限，溢出只计数）
+Presented 边界 → 先把 present 工作本身作为 Event 压入，再封口
+任意边界  → 区间为空？推进 interval_start（不产出快照）
+            否则 seal：生成 FrameSnapshot，interval_start 重置为边界时刻
+FrameState → 跳过
+Discontinuity → 计入 dropped_events，标记 journal_discontinuous
+```
 
 #### 4.2.3 源码精读
 
-体量约束都在文件头部常量里：[journal.rs:L42-L56](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L42-L56) —— 单区间事件上限 16K（100µs 地板上「完全卡死的一秒」最多产生约 1 万次可记录轮询，达到这个上限说明系统已经病得很重）；环形缓冲按 4MiB 预算换算槽位数；pending 队列 64 条用来吸收与读者在「正被回绕的槽位」上的短暂碰撞，写线程永不为读者等待。
-
-写侧对 Idle 边界的把关是理解「区间」语义的关键：[journal.rs:L403-L443](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L403-L443)。`end_turn` 里那行注释解释了一个微妙取舍：偶发唤醒（定时器、文件监听）每次只留下一个微小轮询，若每次转空闲都封口，被折叠挡在环外的轮询会以边界的形式重新涌入、几秒内写穿环。因此**只有折叠轮询、没有任何保留事件的「空闲」会在真正空闲时把折叠摘要直接丢弃**——不相干的唤醒不能把开销累积给以后某个帧预算。`has_unexpired_pending_frame` 同时实现 `FRAME_DEADLINE`：超过 1 秒还没呈现的脏帧不再阻止 Idle 边界，但只解除阻塞，区间仍会在真正的呈现或空闲边界封口——「饿死帧的卡顿」与「被饿死的帧」留在同一个区间里。
-
-折叠的累积与冲刷：[journal.rs:L445-L476](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L445-L476)。`record_entry` 发布任何条目前先取走待冲刷的小轮询，保证顺序正确；`retained_since_boundary` 标志在边界条目后复位。
-
-呈现的记录分两态：[journal.rs:L505-L521](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L505-L521)。**有新绘帧**的提交产出 `Boundary(Presented)`（封口区间并清掉该窗口的待决记录）；**没有新帧**的提交（比如重复呈现同一画面）只是普通 `Event(Present)`，不封口。
-
-槽位与环的实现：[journal.rs:L666-L745](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L666-L745)。每个槽有 `users`（最高位是写者标志、其余是读者计数）与 `sequence`（逻辑序号，`u64::MAX` 表示空）；写者用一次 CAS 从 0 换到 `SLOT_WRITER` 独占槽位、写入后先存序号再放锁；读者先加读者计数、校验序号匹配再拷贝——序号不匹配说明该槽已被更新的条目复用。环本身只是 `sequence % capacity` 的定位器：[journal.rs:L767-L796](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L767-L796)。
-
-发布器的 pending 重试：[journal.rs:L803-L874](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L803-L874)。发布失败不丢逻辑序号——条目进 pending 队列按序重试；队列满后的丢弃累计到 `dropped_after_pending`，以 `finalized` 游标的跳跃反映为读者的 `Discontinuity`。
-
-读取端：`ForegroundJournal::collector`（[journal.rs:L898-L906](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L898-L906)）把游标初始化在当前 `offered`——**只观察创建之后的事件**；`collect_unseen`（[journal.rs:L933-L960](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L933-L960)）把游标钳制到「仍被保留的窗口」，被覆盖的部分先合成一条 `Discontinuity { lost }`，逐槽读取失败的再就地合并进相邻的间断条目。
-
-封口状态机：[journal.rs:L963-L1086](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L963-L1086)。`push_entries` 遇到 `Presented` 边界时先把呈现工作本身入列（呈现也是区间的一部分），空区间则只推进 `interval_start`（排除区间首事件之前的空闲时间，不靠时间启发式）；`seal` 取走全部累积状态产出快照。事件数触顶时的优雅降级在 `push_small_polls`：不是丢弃轮询时间，而是把最后一个 flush 的区间拉宽（代价是分摊变粗）。
-
-占用率与忙碌分数：[journal.rs:L282-L355](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L282-L355)。`occupancy_within` 先把每个事件的区间裁剪到报告窗口、排序后做区间并集（嵌套工作不双计），再对每个折叠 flush 按重叠比例分摊（折叠时间假设在 span 上均匀分布）。
+- [src/profiler/journal.rs:L666-L745](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L666-L745) — `JournalSlot`：`users` 的高位标记写者、低位计数读者，保证「写时无读者、读时无写者」；`try_read` 要求 `sequence` 精确匹配（`EMPTY_SEQUENCE = u64::MAX` 表示从未写入）。
+- [src/profiler/journal.rs:L767-L796](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L767-L796) — `JournalRing`：`sequence % capacity` 定位槽；`offered`（已发出）与 `finalized`（已落槽）两个原子游标是读取端可见性的边界。
+- [src/profiler/journal.rs:L803-L874](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L803-L874) — `JournalPublisher`：撞槽时进 `pending`（`VecDeque`，容量 64）按序重试；pending 也满则丢弃并计数 `dropped_after_pending`，让 `finalized` 追上 `offered`，把丢失如实暴露给读取端。
+- [src/profiler/journal.rs:L45-L56](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L45-L56) — 容量预算：环 4MiB / 单槽大小（最坏每秒约 1 万条事件，可容纳数秒流量等消费者排空）；pending 64 只为吸收「读者恰好压住正被回绕的槽」这类瞬时碰撞；单区间事件上限 16k 是对病态事件风暴的兜底。
+- [src/profiler/journal.rs:L876-L905](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L876-L905) — `ForegroundJournal::collector()`：每个收集器从当前 `offered` 开始观察，互相独立。
+- [src/profiler/journal.rs:L929-L961](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L929-L961) — `collect_unseen`：先按 `finalized - capacity` 钳制游标并合成丢失标记，再逐槽读取；相邻丢失合并进同一条 `Discontinuity`。
+- [src/profiler/journal.rs:L287-L354](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L287-L354) — `occupancy_within`：事件 span 裁剪到窗口、排序、合并重叠（嵌套不重复计）；小轮询按 `overlap / span` 比例摊入 `summary.total`；`busy_fraction` 即上面的公式并钳到 1.0。
+- [src/profiler/journal.rs:L963-L1086](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L963-L1086) — `IntervalSealer`：`push_entries` 返回本次批内完成的快照，未封口的工作跨调用保留；`seal` 用 `mem::take` 移交状态并把 `interval_start` 重置为边界时刻。
 
 #### 4.2.4 代码实践
 
-**实践目标**：用 journal 自己的单元测试验证区间语义，特别是「折叠轮询在真空闲时被丢弃」。
+**实践目标**：用属性测试验证「sealer 的结果与喂入批次划分无关」，直观感受纯状态机的可测性。
 
 **操作步骤**：
 
-1. 运行 journal 模块的测试：
+1. 运行：`cargo test -p gpui --features profiler profiler::journal`。
+2. 重点看两个测试：`completion_order_sealer_matches_reference_under_arbitrary_batching`（[src/profiler/journal.rs:L2469-L2505](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L2469-L2505)，同一批条目整批喂与随机分批喂必须得到相同快照）与 `ring_matches_reference_model_under_wrap_collisions_and_independent_cursors`（[src/profiler/journal.rs:L2341-L2441](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L2341-L2441)，随机「发布/收集/新建收集器/钉住槽/放开槽」操作序列下，真实环与参考模型逐步对账）。
 
-   ```bash
-   cargo test -p gpui --features profiler profiler::journal::
-   ```
+**需要观察的现象**：proptest 会生成上百组随机操作序列，任何一组不一致都会以最小化用例的形式报告。
 
-2. 阅读两个测试：
-   - `small_polls_are_flushed_immediately_before_a_retained_event`（[journal.rs:L1453-L1499](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L1453-L1499)）：小轮询必须在下一条被保留的事件**之前**冲出去（顺序保证）。
-   - `sparse_small_polls_are_discarded_when_the_foreground_returns_to_idle`（[journal.rs:L1534-L1567](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L1534-L1567)）：只有零星小轮询、无保留事件的空闲，折叠摘要被整体丢弃。
-3. 再看 `a_pending_frame_prevents_idle_until_presentation`（[journal.rs:L1267-L1299](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L1267-L1299)）与 `an_expired_frame_no_longer_blocks_idle_boundaries`（[journal.rs:L1352-L1390](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L1352-L1390)）这对测试，对照 `FRAME_DEADLINE` 的语义。
+**预期结果**：全部通过；如果本地机器慢，完整 journal 测试套件（含并发 2 万条发布的 `concurrent_collection_preserves_the_complete_logical_sequence`）应在数秒内完成。
 
-**需要观察的现象**：全部测试通过；断言里能直接看到快照的 `small_polls`、`dropped_events`、边界种类。
-
-**预期结果**：`cargo test` 绿色。若失败请先确认带了 `--features profiler`（无 feature 时该模块根本不编译）。
+**待本地验证**：具体耗时依机器而定。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：写线程为什么「宁可丢数据也不等读者」？丢的数据去哪了？
+**练习 1**：为什么读取者「钉住」一个槽不会拖慢写入者？
 
-**答案**：写线程是主线程本身——为遥测等待读者等于制造要检测的卡顿，本末倒置。丢失有两条路：槽位被回绕覆盖（读者游标落后超过容量），或 pending 队列（64 条）满后继续丢弃。两条路都汇聚成读者可见的 `Discontinuity { lost }` 条目与 `DrainedEntries::lost` 计数，`FrameSnapshot::journal_discontinuous` 据此标记「该区间不完整」——下游（4.3）对不完整区间会降级处理。
+**答案**：写入者对被占槽的 `try_publish` CAS 会失败，但失败不等待——条目进入 publisher 的 `pending` 队列（至多 64 条），在下次发布时按序重试。前台线程永远只做几次原子操作；若 pending 也满了才丢弃并让 `finalized` 追上 `offered`，把损失报告为 `Discontinuity`。代价转移给了读取端：漏看的条目再也看不到。
 
-**练习 2**：`IntervalSealer` 为什么不做任何时钟推断？
+**练习 2**：`Presented` 边界到来时，sealer 为什么要先把 `Present` 作为事件压入再封口？
 
-**答案**：凭时间切区间会把「一段安静的等待」（比如等 vsync、等平台帧回调）误判为边界或漏掉真正的边界；而语义边界（呈现完成、转空闲）本身就是「一段前台工作的因果终点」。测试 `a_slow_frame_with_little_foreground_spend_is_not_an_incident`（hang.rs）反过来验证了这一点：帧很慢但前台没花时间（被限流/调度延迟），不是卡顿。
+**答案**：平台提交（`platform_window.draw(&scene)`）本身消耗前台时间，是区间工作的一部分。若不压入，这段时间既不出现在 `events` 里也不计入 occupancy，帧预算判定会系统性低估。见 [src/profiler/journal.rs:L1018-L1031](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L1018-L1031)。
 
-**练习 3**：两个 `App` 在同一线程上（gpui 测试常见）共享一条日志流，会不会互相污染？
+**练习 3**：一个只包含折叠小轮询、没有任何保留事件的「区间」会发生什么？
 
-**答案**：不会破坏正确性：安装幂等（[journal.rs:L536-L554](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L536-L554)），两个 App 的事件进同一条流，各自创建的 collector 各有独立游标、只观察创建之后的事件，因此一个 App 的探测器天然看不到另一个 App 早先的历史。
+**答案**：不会形成区间。写入端在真正空闲时直接丢弃这批折叠摘要（`retained_since_boundary` 为假则 `small_polls = None`），sealer 端遇到「空区间 + 边界」也只推进 `interval_start` 不产出快照。两道防线共同保证：孤立微唤醒既不写环，也不会累积到后续帧预算里。
 
 ### 4.3 HangDetector 与 HangIncident：两类卡顿判定
 
 #### 4.3.1 概念说明
 
-`HangDetector` 是日志的**第一个内部消费者**：定期把新条目喂给自带的 `IntervalSealer`，每得到一个 `FrameSnapshot` 就判定一次——这个区间里发生卡顿了吗？
+`HangDetector` 是日志的消费者。它组合了一个收集器和一个 sealer，`poll()` 时排空新条目、封口完成的区间，然后对每个 `FrameSnapshot` 应用两条判定：
 
-判定有两条彼此独立的路径（[hang.rs:L1-L12](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/hang.rs#L1-L12) 的模块文档）：
+1. **单事件阈值**：区间内存在 `duration() >= threshold` 的事件——一次任务轮询、动作处理、输入派发、绘制或平台提交中的任何一个把前台堵了这么久。这是用户感知到的「冻一下」。
+2. **帧预算**：没有任何单事件越线，但区间总前台开销（occupancy，含折叠轮询摊入）≥ `frame_budget`。许多 1ms 的小工作同样能丢帧——甚至能让无窗口的无头应用挨饿。此时**区间内全部事件**都成为贡献者，因为没有哪一次单独的停顿能解释这个忙碌区间。
 
-1. **阈值路径**：区间里存在至少一个事件，时长 ≥ `threshold`。一次 120ms 的同步 sleep 就是这种。
-2. **预算路径**：没有任何单事件过阈值，但区间累计前台开销（occupancy）≥ `frame_budget`。16 个各 1ms 的小轮询加起来 16ms > 8ms 预算，同样掉帧——「许多小块工作能把一帧拖死，和一次长停顿一样彻底」。
+两条判定的不对等地位值得注意：阈值判定基于逐条观察，即使日志有缺口仍然可信；预算判定依赖区间完整，`journal_discontinuous` 时直接放弃（返回 `None`），宁可漏报不可误报。
 
-检测是**事后**的：卡顿要等到封口它的边界（呈现或转空闲）到达才被报告。一个永不让出前台线程的死循环在它让出之前观测不到。
+检测是**事后**的：一段永远不让出前台的工作，在它让出（或进程死亡）之前不会被观察到。Zed 选用 100ms（release）作为阈值，正对应人手指能感知的卡顿下限。
 
 #### 4.3.2 核心流程
 
 ```text
-HangDetector::poll()
-  ├─ collector.collect_unseen()            取新条目
-  ├─ 首个 Presented 边界 → 记住 first_present_at（供 4.4 的 phase 判定）
-  ├─ sealer.push_entries(entries)          封口出若干 FrameSnapshot
-  └─ 对每个 snapshot: HangIncident::detect(snapshot, threshold, frame_budget)
-        ├─ 收集 duration ≥ threshold 的事件 → 非空 ⇒ 命中阈值路径
-        ├─ 否则：若 journal_discontinuous ⇒ 放弃（缺口期间不可信累计结论）
-        │        若 occupancy < frame_budget ⇒ 放弃
-        │        否则 ⇒ 命中预算路径，贡献者 = 区间内全部事件
-        └─ 贡献者按时长降序排列（最长者即 stall 的最佳估计）
+poll():
+    drained = collector.collect_unseen()
+    首次观察到 Presented 边界? → 记住 first_present_at（只锁存一次，用于 startup/steady 分相）
+    snapshots = sealer.push_entries(drained.entries)
+    对每个 snapshot:
+        contributors = events 中 duration >= threshold 者
+        if contributors 为空:
+            if journal_discontinuous → 放弃（区间不完整，预算不可信）
+            if occupancy(interval) < frame_budget → 放弃
+            contributors = 全部 events（预算触发，人人有责）
+        contributors 按时长降序排序（首位即最大停顿 stall）
+        产出 HangIncident { snapshot, contributors }
 ```
 
-Zed 应用的真实取值（[hang_detection.rs:L31-L53](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/zed/src/reliability/hang_detection.rs#L31-L53)）：阈值 release 100ms（debug 构建放宽到 5s，Windows debug 30s）；帧预算 release 8ms（「一个 120Hz 刷新周期」，debug 构建放宽到 100ms 防止未优化构建天天报警）。
+`HangIncident` 上还有一个派生量 `active_window`：报告窗口从「起因」开始——封口帧的首次变脏时刻 `dirty_at`，无帧则取最早贡献者的开始——到封口为止。它把上一个帧与起因之间的空闲时间裁掉，让 `active_ms` 度量的是「这一卡到底持续多忙」，而不是把安静时间也算进去。
 
 #### 4.3.3 源码精读
 
-判定函数本体：[hang.rs:L393-L425](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/hang.rs#L393-L425)。注意三个细节：贡献者先按阈值过滤；预算路径在 `journal_discontinuous` 时直接返回 `None`（跨缺口的累计结论不可信——阈值路径留下的贡献者仍然有效，因为单个事件自带完整时间戳）；预算路径触发时贡献者是**区间内全部事件**（没有哪个单项能解释这个忙碌区间）。
-
-探测器本体：[hang.rs:L24-L48](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/hang.rs#L24-L48) 与 [hang.rs:L50-L89](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/hang.rs#L50-L89)。`new` 同时建 collector 与 sealer——**只观察创建之后的事件**；`poll` 每次顺带锁存首个呈现边界（`first_present_at`）。
-
-报告窗口不等于区间本身：[hang.rs:L370-L391](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/hang.rs#L370-L391)。`active_window` 从「原因」（封口帧的首次失效时刻，或最早贡献者的开始时刻，取更早者）到封口——剪掉上一帧与原因之间的前台空闲，让 `busy_fraction` 分母里不含无关等待。
-
-Zed 的消费方式是范本：[hang_detection.rs:L94-L135](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/zed/src/reliability/hang_detection.rs#L94-L135) 在 `App` 启动时创建探测器，随后 [hang_detection.rs:L139-L177](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/zed/src/reliability/hang_detection.rs#L139-L177) 把它移进一条独立的 `HangDetection` 线程，每秒 poll 一次——检测与上报和前台/后台的卡顿隔离（探测器里的 `spin::Mutex` 与环的 `Sync` 实现支持跨线程使用；在 gpui 示例里也可以简单地放进前台定时任务，见综合实践）。应用退出回调里再 poll 最后一次，把尾部的 incident 一并上报。
+- [src/profiler/hang.rs:L1-L11](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/hang.rs#L1-L11) — 模块文档，一段话讲清两类判定与事后性。
+- [src/profiler/hang.rs:L24-L48](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/hang.rs#L24-L48) — `HangDetector`（收集器 + sealer + 两个参数 + `first_present_at`）与 `HangIncident`（快照 + 贡献者，注意文档：预算触发时 contributors 是全部事件）。
+- [src/profiler/hang.rs:L50-L89](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/hang.rs#L50-L89) — 构造（只观察创建之后的事件）与 `poll`：注意 `first_present_at` 只在 `None` 时赋值，之后永久锁存。
+- [src/profiler/hang.rs:L393-L425](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/hang.rs#L393-L425) — `HangIncident::detect`：两条判定的完整实现，顺序就是「先逐条、后预算；不连续只信逐条」。
+- [src/profiler/hang.rs:L370-L391](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/hang.rs#L370-L391) — `active_window`：`min(dirty_at, 最早贡献者开始)` 到封口；贡献者可能在上次封口时已在运行，因此窗口允许早于快照的 `interval_start`。
+- [src/profiler/journal.rs:L156-L172](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L156-L172) — `PresentedFrame::dirty_to_present_duration`：从帧首次变脏到提交完成的端到端延迟，`Option` 是因为变脏时刻可能未被观察到。
+- 生产参数（拓展阅读）：[../zed/src/reliability/hang_detection.rs:L31-L59](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/zed/src/reliability/hang_detection.rs#L31-L59) — Zed 的接线：release 下 `hang_time = 100ms`、`frame_budget = 8ms`（一个 120Hz 刷新周期）；debug 构建（Windows 上 30s，其余 5s；预算同为 100ms）避免未优化代码天天误报。同文件还注册了 `dev: HangAction` 等三个「自卡」动作用于端到端验证。
 
 #### 4.3.4 代码实践
 
-**实践目标**：亲手制造一次阈值路径的卡顿并检出它。
+**实践目标**：通过阅读边界测试，精确掌握两条判定的触发与不触发条件。
 
 **操作步骤**：
 
-1. 在 4.1 的 `journal_probe.rs 里加一个可点击区域（给根 `div` 加 `.id()` 与 `.on_click(...)`），点击处理器里 `std::thread::sleep(Duration::from_millis(120));`（示例代码——在真实应用里这是绝对禁止的同步阻塞，此处正是为了制造待检测的病灶）。
-2. 把 collector 换成探测器（示例代码）：
+1. 阅读 [src/profiler/hang.rs:L724-L767](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/hang.rs#L724-L767) `an_interval_of_small_work_over_budget_is_an_incident`：三个 5/8/5ms 的轮询都低于 10ms 阈值，但总开销达预算 → 事件，且**全部三个**都是贡献者、`stall_ms` 取最长的 8ms。
+2. 对照 [src/profiler/hang.rs:L808-L837](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/hang.rs#L808-L837) `a_slow_frame_with_little_foreground_spend_is_not_an_incident`：dirty-to-present 长达 150ms 但前台只干了 5ms——**不是**卡顿，预算度量的是前台开销不是迟到。
+3. 再看 [src/profiler/hang.rs:L922-L966](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/hang.rs#L922-L966) `small_poll_spend_alone_can_reach_the_budget`：没有任何保留事件、只有 40 次共 12ms 的折叠轮询，照样触发预算事件——此时 `contributors` 为空、`stall_ms` 为 0，`small_poll_count/total_ms` 承担全部叙事。
 
-   ```rust
-   let startup = std::time::Instant::now();  // 注意: scheduler::Instant 未公开构造入口，
-                                             // 示例用 std Instant 仅作演示；真实消费者
-                                             // （zed）用的是 scheduler::Instant
-   let mut detector = gpui::profiler::hang::HangDetector::new(
-       cx.foreground_journal(),
-       Duration::from_millis(100),
-       Duration::from_millis(8),
-   );
-   cx.spawn(async move |cx| {
-       loop {
-           cx.background_executor().timer(Duration::from_millis(500)).await;
-           for incident in detector.poll() {
-               println!("[hang] {:#?}", incident);
-           }
-       }
-   })
-   .detach();
-   ```
+**需要观察的现象**：三种「忙碌形态」——单次长停顿、多次中停顿、海量微停顿——分别由哪条判定捕获、贡献者列表各是什么样子。
 
-3. 用 release 模式运行（debug 构建的常规帧就能吃满 8ms 预算，报告会淹没在噪声里）：
+**预期结果**：能口头复述：形态一由阈值捕获（贡献者只有越线事件）；形态二、三由预算捕获（贡献者是全部事件或空列表）。
 
-   ```bash
-   cargo run --release -p gpui --example journal_probe --features profiler
-   ```
-
-4. 点击那个阻塞区域，等最多 1 秒。
-
-**需要观察的现象**：点击后界面冻结约 120ms；下一次 poll 打出 incident，`contributors` 首元素是一个 `Input` 事件、时长约 120ms（点击发生在一次 `mouse_down`/`mouse_up` 派发里——见 4.5.3 的 begin/end_input 括号）。
-
-**预期结果**：incident 的 `snapshot.events` 里同时能看到这次输入引发的后续 `Draw`；`boundary` 是 `Presented`。具体数值**待本地验证**。
+**待本地验证**：可运行 `cargo test -p gpui --features profiler profiler::hang` 复核。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么预算路径在 `journal_discontinuous` 时放弃，阈值路径不放弃？
+**练习 1**：为什么检测是「事后」的？一段 `loop {}` 死循环会被检测到吗？
 
-**答案**：预算是**累计**结论——缺口里丢失的事件可能才是开销大头，跨缺口累计会严重低估或错归因，所以不可信。阈值路径的每个贡献者是**自包含**的（自带完整起止时间戳，单事件即结论），缺口之外的单事件结论不受影响。
+**答案**：不会。写入发生在工作**结束**的括号处（`save_task_timing`、`end_input` 等），一段永不返回的同步代码永远走不到结束括号，日志里只有它之前的历史。这正是模块文档「Work that never yields back to the foreground is not observed until it does」的含义。要抓现行死循环需要看门狗线程采样栈，那是另一类工具。
 
-**练习 2**：`an_idle_sealed_interval_over_budget_is_an_incident`（[hang.rs:L843-L871](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/hang.rs#L843-L871) 测的是什么场景？
+**练习 2**：`FRAME_DEADLINE`（1 秒）和卡顿阈值（release 100ms）是什么关系？
 
-**答案**：无头（headless）应用或长时间无呈现的窗口：区间以 Idle 边界封口而非呈现。预算路径照样适用——模块文档点明「许多小块工作能把一帧拖死，或者把一个无头应用饿死，与一次长停顿同样彻底」。这说明判定与「有没有帧」无关，只与「前台花了多少时间」有关。
+**答案**：二者无关。`FRAME_DEADLINE` 是**写入端**的门控参数：一帧变脏超过 1 秒还没呈现（隐藏/被遮挡的窗口收不到帧回调）就不再阻止 Idle 边界，防止一个永不呈现的窗口把区间无限拉长；但它只是「解锁」，区间仍会在真正的呈现或空闲处封口——一次饿死帧的卡顿和它饿死的那一帧留在同一个 incident 里（见 [src/profiler/journal.rs:L34-L40](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L34-L40) 的注释与测试 `a_hang_outliving_the_frame_deadline_keeps_its_frame_association`）。阈值则是**消费端**判定单事件是否算卡顿的参数。
 
-**练习 3**：检测为什么必须事后（post-hoc）？
+**练习 3**：`HangDetector` 必须跑在前台线程上吗？
 
-**答案**：判定输入是**封口后的区间**：阈值要等事件结束才知道时长；预算要等边界才知道累计窗口；而且写侧 Idle 边界本身要求「turn 结束、无 runnable、无待呈现帧」——都只有事后才能成立。代价是永不返回前台的工作（死循环）检测不到，这是文档明示的边界条件。
+**答案**：不必。它只持有 `ForegroundJournalCollector`（内部是 `Arc<JournalRing>`，槽是 `Sync` 的），可以在任意线程轮询。Zed 的生产实现正是把它放进独立线程、以 1 秒间隔 `poll`（[../zed/src/reliability/hang_detection.rs:L94-L130](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/zed/src/reliability/hang_detection.rs#L94-L130)），退出前在 `on_app_quit` 里做最后一次排空并上报遥测。
 
-### 4.4 SerializedHangIncident 与贡献者：遥测形态
+### 4.4 SerializedHangIncident 与贡献者：面向遥测的报告形态
 
 #### 4.4.1 概念说明
 
-`HangIncident` 里的 `FrameSnapshot` 带着 `scheduler::Instant`、`&'static Location` 这些不适合直接出门的字段。`SerializedHangIncident` 把它转成**遥测友好**的纯数据：时间戳与时长统一为「自应用启动以来的毫秒数」（微秒精度），位置转成 `SerializedLocation`，贡献者数量有上限。
+`HangIncident` 内部用的是 `Instant` 与枚举，直接序列化会得到平台相关的时钟与冗余结构。`SerializedHangIncident` 把它转成遥测友好的纯数据：
 
-两个最有信息量的字段：
+- 时间统一为「自启动以来的毫秒」（微秒精度，输出形如 `115.954`）。
+- 补充归因字段：`phase`（startup/steady，以首个新帧呈现完成为界——启动期卡顿常见且预期，稳态卡顿更值得警惕）、`sealed_by`（present/idle，标注边界而非原因）、`stall_ms`（最长单段，用户感知冻结的最佳估计）、`dirty_to_present_ms`、`busy_fraction`。
+- 贡献者列表限量（调用方传 `max_contributors`，保最长若干个，其余计入 `contributors_elided`），按**开始顺序**排列，并给每个贡献者标注**嵌套深度**。
 
-- **`phase`**：`"startup"` 或 `"steady"`。以探测器观察到的**第一个新绘帧完成平台提交**的时刻（`first_present_at`）为界——启动期的卡顿用户尚未看到画面，严重性完全不同，遥测里要分开统计。
-- **`stall_ms` 与 `active_ms` 的差**：`active_ms` 是报告窗口全长，`stall_ms` 是最长单块工作。多个停顿堆在一帧上时 `active_ms` 远大于 `stall_ms`——这正是「预算路径」的形态。
-
-贡献者的 **`depth`（嵌套深度）**：前台工作是嵌套的——一次输入派发里可能同步跑一个动作处理器，一次绘制里可能轮询一个任务。depth 表示「有多少别的事件的区间完整包含它」。跨深度把时长**相加**会重复计数，depth 让消费端能正确聚合。
+嵌套深度是这份报告最精妙的设计：前台工作是嵌套的——一次输入派发可能同步画了一帧，一次绘制内部可能轮询了任务。`depth` 表示「区间内有几个事件严格包含本事件」。depth-1 事件的时间已经躺在某个 depth-0 事件的时长里，跨深度把时长相加会重复计数；有了 depth，读报告的人能把「40ms 的 mouse_move 里套着 38ms 的 draw」正确读成一件事而不是两件。
 
 #### 4.4.2 核心流程
 
 ```text
-HangIncident（内部形态）                SerializedHangIncident（遥测形态）
-────────────────────────                ─────────────────────────────────
-snapshot.interval_*          ──►        start_ms / active_ms   (自启动起, µs 精度 ms)
-contributors[0].duration()   ─►         stall_ms
-boundary: Presented|Idle     ─►         sealed_by = "present"|"idle", dirty_to_present_ms?
-occupancy_within(active)     ─►         busy_fraction (四舍五入到 3 位小数)
-contributors（按时长降序）     ─►        contributors（按开始时刻升序, 各带 depth, ≤ max）
-区间事件数 / 折叠计数          ─►        event_count / small_poll_count / small_poll_total_ms
-缺口信息                     ─►         dropped_events / journal_discontinuous
+convert(startup, incident, max_contributors, first_present_at):
+    active = active_window()
+    busy_fraction = occupancy_within(active) / active 时长
+    phase  = active 开始于 first_present_at 之后? "steady" : "startup"
+    stall  = contributors[0].duration()   （已按最长排序）
+    保留前 max_contributors 个 → 按开始时间排序 → 逐个标注 nesting_depth
+    每个 ForegroundEvent 映射为对应 SerializedHangContributor 变体:
+        TaskPoll{location: 序列化的 spawn 位置, ...}
+        Action{name, ...}
+        Input{input_kind: "key_down" 等, caused_invalidation, ...}
+        Draw{window_id, dirty_to_draw_ms, invalidations, ...}
+        Present{window_id, ...}
 ```
 
-深度计算：对每个贡献者统计「区间内严格包含它的事件数」——相同区间互不包含，自身不计入。
+深度计算：对事件 e，统计区间内满足 `other.start <= e.start && e.end <= other.end && (other.start < e.start || e.end < other.end)` 的事件数——严格包含才计数，span 完全相同的事件互不包含，e 自己也不会把自己算进去。
 
 #### 4.4.3 源码精读
 
-序列化结构：[hang.rs:L92-L142](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/hang.rs#L92-L142)。字段文档本身就是一份判读手册：`busy_fraction` 低而 `dirty_to_present_ms` 高说明是限流或调度延迟而非应用工作；`sealed_by` 标注的是边界不是原因，「原因」是第一个贡献者。
-
-贡献者枚举：[hang.rs:L144-L216](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/hang.rs#L144-L216)。五种变体各带最相关的字段：任务轮询带 spawn 位置（`location`）、动作带名称（`name`）、输入带 `input_kind` 与 `caused_invalidation`、绘制带 `dirty_to_draw_ms` 与合并的失效次数、呈现带窗口号。serde 以 `kind` 为标签、snake_case 命名。
-
-毫秒的微秒精度化：[hang.rs:L218-L222](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/hang.rs#L218-L222) —— `as_micros() as f64 / 1000.0`，让 JSON 里是 `115.954` 而不是一长串浮点尾差或整数微秒。
-
-转换主函数：[hang.rs:L224-L296](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/hang.rs#L224-L296)。注意 `contributors` 的排序变化：内部按时长降序（最重要的在前、`stall_ms` 必居首），序列化时改按开始时刻升序（时间线顺序，方便人读与后端按时间聚合），被上限裁掉的条目数记进 `contributors_elided`。
-
-嵌套深度：[hang.rs:L298-L310](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/hang.rs#L298-L310) 的 `nesting_depth` 是 O(n²) 的朴素计数——n 被上限约束（Zed 取 8，[hang_detection.rs:L29](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/zed/src/reliability/hang_detection.rs#L29)），朴素即正确即够用。
-
-`small_poll_spend_alone_can_reach_the_budget`（[hang.rs:L923-L966](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/hang.rs#L923-L966)）是预算路径的极端用例：区间没有任何保留事件，40 次折叠轮询共 12ms 单独达到预算——incident 的 `stall_ms` 为 0、`event_count` 为 0，故事完全由 `small_poll_count`/`small_poll_total_ms` 讲述。
+- [src/profiler/hang.rs:L92-L142](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/hang.rs#L92-L142) — `SerializedHangIncident` 全字段文档：每个字段都写明了语义与边界情形（如 `busy_fraction` 低而 `dirty_to_present_ms` 高 → 限流/调度延迟而非应用工作）。
+- [src/profiler/hang.rs:L144-L216](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/hang.rs#L144-L216) — `SerializedHangContributor`：`#[serde(tag = "kind", rename_all = "snake_case")]` 让 JSON 自描述变体；`Input` 的字段名用 `input_kind` 是因为 `kind` 被 serde 标签占用。
+- [src/profiler/hang.rs:L224-L296](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/hang.rs#L224-L296) — `convert`：注意 `stall_ms` 直接取排序后的首个贡献者；`busy_fraction` 四舍五入到三位小数；贡献者截断后重排为开始序。
+- [src/profiler/hang.rs:L298-L310](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/hang.rs#L298-L310) — `nesting_depth` 的严格包含判定。
+- [src/profiler/hang.rs:L871-L917](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/hang.rs#L871-L917) — 测试 `serialized_contributors_are_chronological_with_nesting_depths`：一次 40ms 的 `mouse_move` 内套着 38ms 的 draw，序列化为 depth 0 的 Input 跟随 depth 1 的 Draw——两段墙钟时间几乎相同的事件被正确表达为包含关系。
 
 #### 4.4.4 代码实践
 
-**实践目标**：把 4.3 检出的 incident 转成序列化形态并判读字段。
+**实践目标**：手算一次 `busy_fraction`，验证你对 occupancy 并集计算的理解。
 
 **操作步骤**：
 
-1. 在 4.3 的打印处改为（示例代码）：
+1. 阅读 [src/profiler/hang.rs:L513-L596](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/hang.rs#L513-L596) `serialized_incident_reports_presented_seal_fields`。
+2. 区间 `[150, 400]`ms，帧在 100ms 首次变脏 → `start_ms = 100`、`active_ms = 300`；事件为 poll 150→300、action 300→340、input 340→345、present 380→400，另有折叠轮询 2 次共 1ms（span 105→145）。
+3. 手算 occupancy：四个事件 span 首尾相接共 \(150+40+5+20=215\)ms，加上折叠的 1ms = 216ms；\(216/300 = 0.72\)。
 
-   ```rust
-   let first_present = detector.first_present_at();
-   for incident in detector.poll() {
-       let s = gpui::profiler::hang::SerializedHangIncident::convert(
-           startup_instant, &incident, 8, first_present,
-       );
-       println!("[hang] {}", serde_json::to_string_pretty(&s).unwrap());
-   }
-   ```
+**需要观察的现象**：测试断言 `busy_fraction == 0.72`、`stall_ms == 150.0`、`dirty_to_present_ms == Some(300.0)`、`contributors_elided == 2`（上限 1，合格贡献者 3 个）。
 
-   （`startup_instant` 用你记录的启动时刻；serde_json 是 gpui 的现成依赖，示例里可直接 `use`。）
-2. 触发一次 120ms 阻塞点击，读输出。
-3. 进阶（可选）：参照 `examples/input.rs` 的 `bind_keys` + `key_context` + `on_action` 三件套，给一个按键绑一个会 `sleep(150ms)` 的动作，按键触发后再看 incident。
+**预期结果**：手算与断言一致；若不一致，回到 4.2 的 `occupancy_within` 重读 span 合并逻辑。
 
-**需要观察的现象**：点击场景的 `contributors` 里 `kind: "input"`、`input_kind: "mouse_down"`（或 `mouse_up`）、`duration_ms ≈ 120`；`sealed_by: "present"`；`phase` 取决于该 incident 是否发生在第一次呈现之前。按键场景里会出现 `input_kind: "key_down"` 的 depth 0 贡献者和 `kind: "action"`、`depth: 1` 的贡献者——动作处理器嵌套在输入派发里。
-
-**预期结果**：两次实验的 `stall_ms`（点击≈120 / 按键≈150）与 `contributors` 嵌套关系明确；`dirty_to_present_ms` 应明显大于 `stall_ms`（帧要等下一次呈现时机）。数值**待本地验证**。
+**待本地验证**：无需运行，笔算即验证。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：为什么 `busy_fraction` 要在序列化时四舍五入到 3 位小数？
+**练习 1**：`phase` 为什么以「第一个**新绘制**帧呈现完成」为界，而不是应用启动时刻？
 
-**答案**：纯体积考量：毫秒精度的时间除出来的比值带一堆浮点尾差（`0.08000000000000002`），对遥测毫无增量信息，3 位小数（千分之一）足够判读，还能提高下游列式存储的基数压缩率。`as_millis` 的微秒精度毫秒是同一个理由。
+**答案**：启动阶段（字体加载、首帧构建）卡顿是预期且通常一次性的；用户对「刚打开时顿一下」和「用着用着冻住」的耐受完全不同。`first_present_at` 锚定的是「界面真正活起来」的时刻，活动窗口始于其后的 incident 标为 steady，优先归因。见测试 `phase_is_startup_until_the_first_present`（[src/profiler/hang.rs:L624-L654](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/hang.rs#L624-L654)）。
 
-**练习 2**：`phase` 为什么用「第一个**新绘帧完成提交**」而不是「进程启动 N 秒内」划界？
+**练习 2**：贡献者上限截断保留的是「最长」还是「最早」的一批？截断后顺序如何？
 
-**答案**：启动时长因机器、窗口大小、工作区而异，固定秒数既误伤慢机也放过快机的晚期启动卡顿。第一个新绘帧提交完成是语义事件：从这一刻起用户开始看到画面、卡顿开始有用户可感知的后果。`first_present_at` 在 `poll` 里锁存（[hang.rs:L74-L81](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/hang.rs#L74-L81)），探测器创建之前的帧不算。
+**答案**：`convert` 先对已按最长排序的 `incident.contributors` 取前 `max_contributors` 个（保最长，`stall_ms` 必在其中），再把这些保留者**按开始时间排序**输出，便于按时间线阅读；被裁掉的数量记入 `contributors_elided`。
 
-**练习 3**：贡献者上限裁剪保留的是「最长的」还是「最早的」？为什么 `stall_ms` 一定还在？
+**练习 3**：`SmallPolls` 摘要可能成为贡献者吗？
 
-**答案**：保留最长的（`take(max_contributors)` 作用在按时长降序的 `contributors` 上，[hang.rs:L276-L282](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/hang.rs#L276-L282)），再按开始时刻重排输出。`stall_ms` 取自 `contributors.first()` 且降序保证首元素就是最长者，而最长者必然在前 max 名内，所以 `stall_ms` 永远有实物支撑。
+**答案**：正常不可能——sealer 把折叠摘要收进 `small_polls` 而非 `events`，贡献者只从 `events` 里选。序列化代码仍防御性地把它编成一个 `<small poll summary>` 位置的 TaskPoll 而非 panic（[src/profiler/hang.rs:L351-L365](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/hang.rs#L351-L365)）。
 
-### 4.5 埋点接入：一次完整前台 turn 的记录链路
+### 4.5 埋点接入：app / executor / window 的完整记录链路
 
 #### 4.5.1 概念说明
 
-前面四节讲了「日志长什么样、怎么消费」；本节回答「数据从哪来」。journal 没有自己的采样线程——**所有条目都由被测代码路径上的括号埋点产生**。这些括号同时服务 u7-l5 的统计聚合与本讲的日志（双写）。
+前面四节是「日志系统本身」，本节回答：**事件是从哪里、被谁写进来的？** 整条链路可以概括为一句话：**每个子系统在自己的工作括号前后各调一次 journal 的全局函数，写入端据此维护 turn 深度与 pending 帧状态，App 只负责安装与分发句柄。**
 
-埋点分四组：
+五类埋点来源：
 
-| 组 | 埋点 | 产出条目 |
+| 埋点 | 位置 | 写入的 journal 内容 |
 | --- | --- | --- |
-| 调度入队 | `schedule_local` / `spawn_when_idle` 的 `queued()` | runnable 计数（决定 Idle 边界的「无 runnable」条件） |
-| 任务轮询 | 平台调度器的 `update_running_task` / `save_task_timing` | `TaskPoll` / `SmallPolls` + turn 括号 |
-| 窗口生命周期 | `WindowInvalidator` 标脏、`WindowProfiler::new` / `Drop` | `FrameState(Pending/Closed)` |
-| 交互与绘制 | `begin_input`/`end_input`、`begin_action_handler`/`end_action_handler`、`begin_draw`/`end_draw`、`present` 的括号 | `Input` / `Action` / `Draw` / `Present` 或 `Boundary(Presented)` |
+| runnable 执行括号 | 各平台 dispatcher（如 macOS trampoline、Linux worker） | `begin_turn` + `TaskPoll`/折叠 + `end_turn` |
+| runnable 入队 | `PlatformScheduler::schedule_local`、`ForegroundExecutor::spawn_when_idle` | runnable 计数 +1（不写字节进环） |
+| 输入/动作括号 | `WindowProfiler::begin_input`/`end_input`、`begin_action_handler`/`end_action_handler` | `Input`（带 kind_name）/`Action` 事件 + turn 括号 |
+| 帧括号 | `WindowProfiler::begin_draw`/`end_draw`、`Window::present` | `FrameState::Pending`、`Draw`、`Present`/`Presented` 边界 |
+| 窗口变脏/关闭 | `WindowInvalidator`、`WindowProfiler` 的 Drop | `FrameState::Pending`（去重后）/`Closed` |
+
+`ForegroundRunnableCounter` 是其中最「看不见」的一环：它只是一个 `Arc<AtomicUsize>` 计数，但 `end_turn` 靠它判断「还有任务马上要跑」，避免在连续轮询之间错误地插入 Idle 边界。
 
 #### 4.5.2 核心流程
 
-以「用户按下一个键、界面重绘、帧提交」为例的完整记录链路：
+一次完整的用户按键 turn（从空白到再次空白）：
 
 ```text
 平台键盘事件到达
-  └─ Window::dispatch_event (window.rs:5009)
-       ├─ begin_input(event.kind_name())          → begin_foreground_turn + push 活动
-       ├─ （监听器执行；若有动作命中）
-       │    begin_action_handler / end_action_handler  → Action 事件（嵌套在输入 turn 内）
-       └─ end_input(caused_invalidation)          → Input 事件（kind、是否引发失效）+ end_turn
+  └ window.dispatch_event
+      ├ window_profiler.begin_input("key_down")   → begin_turn + 记录开始时刻
+      ├ （监听器可能派发动作）
+      │   └ dispatch_action
+      │       ├ begin_action_handler(SaveAction)  → begin_turn + 记录动作名
+      │       └ end_action_handler                → Event::Action + end_turn
+      ├ caused_invalidation = update_count 变化?
+      └ window_profiler.end_input(bool)           → Event::Input{kind:"key_down",...} + end_turn
 
-视图 cx.notify() → WindowInvalidator::invalidate_view (window.rs:165)
-  └─ 窗口首次变脏 → record_frame_pending(window_id, dirty_at)   → FrameState(Pending)
+cx.notify() 使窗口变脏
+  └ WindowInvalidator::invalidate_view
+      └ journal::record_frame_pending(window_id, dirty_at)   → FrameState::Pending
 
-平台帧回调 on_request_frame (window.rs:1533)
-  └─ foreground_turn() 括号（RAII guard，drop 时 end_turn）
+平台帧回调 → window.draw()
+  ├ window_profiler.begin_draw                    → begin_turn + 再次 frame_pending
+  └ window_profiler.end_draw(dirty_at, invalidations) → Event::Draw + end_turn
 
-Window::draw (window.rs:2854)
-  ├─ take_frame_dirty() 取走本帧累计的 dirty_at/invalidations
-  ├─ begin_draw()                                 → begin_turn + record_frame_pending
-  ├─ （元素树三阶段；期间平台调度器可能轮询任务：
-  │    update_running_task → begin_turn；save_task_timing → record_task_poll + end_turn）
-  └─ end_draw(dirty_at, invalidations)            → Draw 事件 + end_turn
+present()
+  ├ foreground_turn() 守卫                        → begin_turn
+  ├ platform_window.draw(&scene)                  （真正提交）
+  └ window_profiler.record_present(start, end, …)
+      └ journal::record_present(timing, Some(frame)) → Boundary::Presented + end_turn
 
-Window::present (window.rs:3016)
-  ├─ foreground_turn() 括号 + present_start 计时
-  ├─ platform_window.draw(&scene)                 → 提交平台
-  └─ record_present(present_start, now, …)
-       └─ journal::record_present                 → 有 pending_frame ⇒ Boundary(Presented)（封口！）
-
-（此后主线程无 runnable、无待呈现帧、最外层 turn 结束）
-  └─ end_turn 写下 Idle 边界 —— 下一个区间开始
+最后一个 turn 结束且无排队任务、无未过期 pending 帧
+  └ end_turn                                      → Boundary::Idle
 ```
+
+任务轮询这条线则是：调度器把 runnable 投递到主线程时 `queued()` +1（[src/platform_scheduler.rs:L118-L123](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/platform_scheduler.rs#L118-L123)）；执行体外部包着 `update_running_task`（→ `begin_foreground_turn`）与 `save_task_timing`（→ `record_task_poll`，内部 `finished()` −1 并决定保留或折叠）。
 
 #### 4.5.3 源码精读
 
-**安装与访问**：`App` 构造时安装（[app.rs:L790-L791](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/app.rs#L790-L791)，字段声明在 [app.rs:L693](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/app.rs#L693)），公开访问器 `App::foreground_journal`（[app.rs:L1938-L1943](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/app.rs#L1938-L1943)）返回可 `Clone` 的句柄——同线程多个 App 共享流。
+**App 侧**：
 
-**runnable 计数**：`PlatformScheduler::schedule_local` 在把 runnable 交给平台主线程派发前 `queued()`（[platform_scheduler.rs:L118-L123](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/platform_scheduler.rs#L118-L123)）；`ForegroundExecutor::spawn_when_idle` 的派发闭包里同样计数（[executor.rs:L380-L399](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/executor.rs#L380-L399)）。计数器本体是 `Arc<AtomicUsize>`（[journal.rs:L357-L380](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L357-L380)），`finished()` 用 `fetch_update` 防下溢。注意一个诚实的例外：确定性测试调度器不走这些钩子，`ForegroundExecutor::new` 在 test-support 下把计数器置为 `None`（[executor.rs:L323-L336](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/executor.rs#L323-L336)），否则增量没有配对的减量。
+- [src/app.rs:L692-L693](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/app.rs#L692-L693) 与 [src/app.rs:L790-L791](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/app.rs#L790-L791) — `App` 的 `foreground_journal` 字段与构造期安装。
+- [src/app.rs:L1938-L1943](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/app.rs#L1938-L1943) — 应用侧唯一入口 `cx.foreground_journal()`。
 
-**任务轮询括号**：`update_running_task` 开 turn（[profiler.rs:L668-L675](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler.rs#L668-L675)），`save_task_timing` 产出 `TaskTiming` 并交给 `record_task_poll`（[profiler.rs:L677-L689](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler.rs#L677-L689)）。这对括号由各平台调度器负责调用——Linux 的 worker 线程是标准三段式（[gpui_linux/src/linux/dispatcher.rs:L42-L48](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui_linux/src/linux/dispatcher.rs#L42-L48)：登记→执行→保存），macOS 的 dispatcher 同形。`TaskTiming` 的 `location` 是任务的 spawn 位置（`#[track_caller]` 捕获），这就是 4.4 里任务轮询贡献者能带源码位置的来源（[profiler.rs:L77-L83](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler.rs#L77-L83)）。
+**executor / 调度器侧（runnable 计数）**：
 
-**窗口标脏**：`WindowInvalidator::invalidate_view` 在窗口从干净变脏的那一刻上报 `record_frame_pending`（[window.rs:L165-L190](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/window.rs#L165-L190)），`set_dirty` 同理（[window.rs:L196-L216](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/window.rs#L196-L216)）。首次失效时刻与失效次数由 `FrameDirtyAccumulator` 累积（[window.rs:L131-L141](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/window.rs#L131-L141)、[window.rs:L246-L256](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/window.rs#L246-L256)），draw 时一次性取走（[window.rs:L2854-L2860](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/window.rs#L2854-L2860)）——「一帧合并了多少次失效」由此而来。
+- [src/profiler/journal.rs:L357-L380](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L357-L380) — `ForegroundRunnableCounter`：`queued`/`finished`/`has_runnables`，一次原子加、一次 CAS 减。
+- [src/platform_scheduler.rs:L118-L123](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/platform_scheduler.rs#L118-L123) — `schedule_local`：每个投往主线程的 runnable 计数 +1，紧随其后 `dispatch_on_main_thread`。
+- [src/executor.rs:L380-L399](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/executor.rs#L380-L399) — `spawn_when_idle` 的自定义派发闭包同样计数；测试调度器不经过这些钩子，所以 [src/executor.rs:L333-L336](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/executor.rs#L333-L336) 在 test-support 下把计数器置为 `None`，避免只加不减。
 
-**输入括号**：`dispatch_event` 以 `begin_input(event.kind_name())` 起手（[window.rs:L5007-L5012](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/window.rs#L5007-L5012)），用 `update_count` 的差值判断该输入是否引发失效，`end_input(caused_invalidation)` 收尾（[window.rs:L5138-L5143](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/window.rs#L5138-L5143)）。`kind_name` 的十二个短静态名在 [interactive.rs:L824-L841](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/interactive.rs#L824-L841)。窗口侧的 `WindowProfiler::begin_input`/`end_input`（[profiler.rs:L940-L980](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler.rs#L940-L980)）同时维护输入延迟直方图（u7-l5）与 journal 双写。
+**平台 dispatcher 的执行括号（任务轮询来源）**：
 
-**动作括号**：动作派发的四个阶段（全局捕获、路径捕获、路径冒泡、全局冒泡，u5-l3）每处监听器调用都以 `begin_action_handler` / `end_action_handler` 包裹（如 [window.rs:L5581-L5596](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/window.rs#L5581-L5596)，四组括号分布在 [window.rs:L5588-L5671](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/window.rs#L5588-L5671)）。窗口侧实现（[profiler.rs:L982-L1006](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler.rs#L982-L1006)）里那条注释解释了为什么 journal 条目挂在窗口上：旧的单一全局 running 槽在测试并发跑动作时会错乱。
+- [../gpui_macos/src/dispatcher.rs:L166-L175](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui_macos/src/dispatcher.rs#L166-L175) — macOS GCD trampoline：`update_running_task` → `runnable.run()` → `save_task_timing`，固定三段式。
+- [../gpui_linux/src/linux/dispatcher.rs:L42-L48](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui_linux/src/linux/dispatcher.rs#L42-L48) — Linux worker 线程同样的三段式（wayland/x11 主循环与定时器路径各有同构括号）。
+- [src/profiler.rs:L668-L689](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler.rs#L668-L689) — 这两个钩子的实现：`update_running_task` 先 `journal::begin_foreground_turn`；`save_task_timing` 产出 `TaskTiming` 后 `journal::record_task_poll`。
 
-**绘制与呈现括号**：`begin_draw` / `end_draw`（[profiler.rs:L1008-L1040](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler.rs#L1008-L1040)）产出 `FrameTiming`（结构定义 [profiler.rs:L785-L815](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler.rs#L785-L815)，`end_draw` 的调用点在 [window.rs:L2980-L2986](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/window.rs#L2980-L2986)）。`Window::present` 以 RAII turn 括号 + `present_start` 计时开始，提交后调用 `record_present`（[window.rs:L3015-L3031](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/window.rs#L3015-L3031)）；窗口侧 `record_present_at`（[profiler.rs:L1078-L1125](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler.rs#L1078-L1125)）取出 `pending_frame`（上一次 `end_draw` 存入，[profiler.rs:L1127-L1132](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler.rs#L1127-L1132)）：**有**则交给 journal 产出 `Presented` 边界（封口），**无**则只是普通 `Present` 事件。`PresentTiming` 定义在 [profiler.rs:L817-L838](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler.rs#L817-L838)。帧回调 `on_request_frame` 整体套一层 `foreground_turn`（[window.rs:L1533-L1543](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/window.rs#L1533-L1543)）。窗口销毁时 `WindowProfiler::drop` 上报 `FrameState(Closed)`（[profiler.rs:L1141-L1146](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler.rs#L1141-L1146)）——已关窗口的待决帧不再阻塞 Idle 边界。
+**window 侧（输入/动作/帧括号）**：
 
-代码里有一条诚实的欠账值得知道：[journal.rs:L601-L607](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L601-L607) 的 TODO 指出调度器与 `WindowProfiler` 里的 turn 括号目前是裸的 begin/end 对而非 RAII guard，panic 被 catch 时 `turn_depth` 会永久失衡（Zed 对 panic 直接 abort 所以是潜在问题，作为库使用时才暴露）。
+- [src/window.rs:L5007-L5011](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/window.rs#L5007-L5011) — `dispatch_event` 开头：`begin_input(event.kind_name())`；[src/window.rs:L5138-L5143](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/window.rs#L5138-L5143) — 结尾以 `update_count` 差值判定 `caused_invalidation` 后 `end_input`。
+- [src/interactive.rs:L824-L841](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/interactive.rs#L824-L841) — `PlatformInput::kind_name()`：12 个变体到短静态名的映射，正是 `InputTiming.kind` 的来源。
+- [src/profiler.rs:L983-L1006](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler.rs#L983-L1006) — 动作括号：`begin_action_handler` 经 `update_running_action` 解析出 `&'static str` 动作名（未注册的动作得到 `"un-named"`）；`end_action_handler` 同时双写旧聚合存储与 journal（注释解释了为何 journal 条目按窗口跟踪）。
+- [src/window.rs:L5588-L5592](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/window.rs#L5588-L5592) — 全局动作监听器的调用点被这对括号包住（捕获/冒泡各路径同样处理）。
+- [src/window.rs:L2855-L2860](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/window.rs#L2855-L2860) — `Window::draw` 开头取走 `FrameDirtyAccumulator` 并 `begin_draw`；[src/window.rs:L2980-L2986](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/window.rs#L2980-L2986) — 结尾 `end_draw(dirty_at, invalidations)`。
+- [src/profiler.rs:L1008-L1040](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler.rs#L1008-L1040) — 绘制括号实现：`begin_draw` 同时上报 `record_frame_pending`；`end_draw` 组装 `FrameTiming` 并写直方图 + journal 双路。
+- [src/window.rs:L3015-L3031](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/window.rs#L3015-L3031) — `present`：用 RAII 守卫 `foreground_turn()` 包住整段提交，记录 `present_start`/`present_end` 后交给 `window_profiler.record_present`。
+- [src/profiler.rs:L1078-L1125](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler.rs#L1078-L1125) — `record_present_at`：有 `pending_frame`（本窗口这次确实画过）→ `journal::record_present(timing, Some(frame))` 产生 **Presented 边界**；没有 → 只产生普通 `Present` 事件（重复提交同一帧不封口）。
+- [src/window.rs:L165-L190](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/window.rs#L165-L190) 与 [src/window.rs:L246-L251](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/window.rs#L246-L251) — `WindowInvalidator::invalidate_view`：窗口**由干净变脏的那一刻**上报 `record_frame_pending`，`FrameDirtyAccumulator` 记住首脏时刻与合并的失效次数——这正是 `FrameTiming.dirty_at`/`invalidations` 与 `dirty_to_present` 的数据源头。
+- [src/profiler/journal.rs:L482-L503](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L482-L503) — 写入端对 `record_frame_pending` 去重：同窗口已有未过期 pending 帧时，只有 `dirty_at` 前进了至少 `FRAME_DEADLINE` 才再记一条，避免每帧一条的噪音。
+- [src/profiler.rs:L910-L938](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler.rs#L910-L938) 与 [src/profiler.rs:L1141-L1146](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler.rs#L1141-L1146) — `WindowProfiler::new` 建窗即报一次 pending；`Drop` 报 `Closed`，让窗口关闭后不再阻塞 Idle 边界。
+
+已知债务（写代码时要避免踩坑）：[src/profiler/journal.rs:L601-L627](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L601-L627) 的 TODO 指出，多数括号是裸的 begin/end 调用对而非 RAII 守卫；若 panic 被 unwind 捕获，`turn_depth` 与 runnable 计数会永久失衡，静默禁用后续 Idle 边界。Zed 进程遇 panic 即 abort 所以目前是潜伏问题，`present` 已经改用守卫，新代码应效仿。
 
 #### 4.5.4 代码实践
 
-**实践目标**：不经运行、纯靠 grep 验证 4.5.2 的链路图。
+**实践目标**：亲手验证「四平台对称的任务括号」与「turn 守卫」两件事。
 
 **操作步骤**：
 
-1. 在 `crates/gpui/src` 下执行：
+1. 在仓库根目录执行只读搜索：`grep -rn "update_running_task" crates/gpui_macos crates/gpui_linux crates/gpui_windows --include=*.rs`（Windows 平台的对应实现留给读者按相同模式定位）。
+2. 对每个命中检查它是否与 `save_task_timing` 成对出现、是否包住 `runnable.run()`。
+3. 再看 [src/profiler/journal.rs:L608-L627](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/journal.rs#L608-L627)：`ForegroundTurnGuard` 只在 Drop 时调 `end_foreground_turn`；对比 `present`（守卫）与 `begin_input`/`end_input`（裸对）两种写法。
 
-   ```bash
-   grep -rn "begin_action_handler\|end_action_handler" src/window.rs | wc -l
-   grep -rn "record_frame_pending" src/ | grep -v "profiler/journal"
-   grep -rn "update_running_task\|save_task_timing" ../gpui_linux/src ../gpui_macos/src
-   ```
+**需要观察的现象**：每条执行路径上「计数 +1 → begin_turn → run → 记录事件 → end_turn（可能封口）」的完整骨架。
 
-2. 对照 4.5.2 的链路图，给每个箭头标注你找到的 `文件:行号`。
-3. 回答：为什么 `record_frame_pending` 在窗口侧有两处调用点（`invalidate_view` 与 `set_dirty`）之外，`WindowProfiler` 内部还有两处（`new` 与 `begin_draw`）？
+**预期结果**：macOS trampoline 与 Linux worker/主循环/定时器路径全部符合三段式；能说出把裸对改成守卫可以解决什么问题（unwind 安全）。
 
-**需要观察的现象**：`begin_action_handler` 恰好四组括号（对应动作派发四阶段）；`record_frame_pending` 共四处窗口侧/剖析器侧调用；Linux 与 macOS 的调度器都有 `update_running_task`/`save_task_timing` 三段式。
-
-**预期结果**：链路图上每个箭头都有真实行号支撑。`WindowProfiler::new` 的上报是因为新窗口创建即待绘首帧；`begin_draw` 的上报是因为上一帧呈现后窗口回到「干净」，开始画新帧时又变脏——这两处保证「待决帧」状态机不漏窗。
+**待本地验证**：Windows 实现（`crates/gpui_windows`）的对应行为。
 
 #### 4.5.5 小练习与答案
 
-**练习 1**：为什么 `ForegroundExecutor` 在 test-support 构建里把 runnable 计数器置为 `None`？
+**练习 1**：`cx.notify()` 之后、`draw` 之前，journal 里多了什么条目？
 
-**答案**：计数靠两条路径配对：入队路径（`schedule_local`/`spawn_when_idle`）`queued()`，执行路径（`save_task_timing` → `record_task_poll`）`finished()`。确定性测试调度器（u7-l4）不经过平台派发、不调用 GPUI 的剖析钩子，若只有增量没有减量，计数只增不减，`has_runnables()` 永真，Idle 边界永不产生——日志退化。置 `None` 是把这条不配对的路径显式关掉（[executor.rs:L333-L336](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/executor.rs#L333-L336)）。
+**答案**：一条 `FrameState::Pending { window_id, dirty_at }`（窗口由干净变脏时上报，带去重），外加 `Effect::Notify` 引发的观察者工作可能产生的 `TaskPoll`/`Action` 等事件。`Pending` 是元数据，不计入 occupancy，但会让 `end_turn` 推迟产生 Idle 边界直到该帧呈现或超过 1 秒。
 
-**练习 2**：`InputTiming::caused_invalidation` 是怎么算出来的？它对下游有什么用？
+**练习 2**：为什么 `record_present` 需要 `frame: Option<FrameTiming>` 参数？`None` 意味着什么？
 
-**答案**：`dispatch_event` 记录派发前后 `WindowInvalidator::update_count()` 的差值（[window.rs:L5012](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/window.rs#L5012) 与 [window.rs:L5138-L5143](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/window.rs#L5138-L5143)），非零即引发失效。下游可区分「贵而无害的输入」（如纯 hover 移动，不触发重绘）与「引发重绘的输入」；同时窗口侧用它维护输入延迟直方图（无效输入不进延迟样本）。
+**答案**：平台可能重复提交同一帧（如窗口尺寸变化触发重绘提交但内容未重建）。`Some(frame)` 表示这是**新绘制**帧的提交 → 产生 `Presented` 边界并移除该窗口的 pending 记录；`None` 表示重提交 → 只产生普通 `Present` 事件。区分二者保证边界语义严格等于「一帧新画面的完成」，也让 present 间隔直方图不被重提交污染。
 
-**练习 3**：同样叫 `record_present`，什么时候产边界、什么时候产普通事件？
+**练习 3**：测试平台（`TestDispatcher`）下 journal 还工作吗？
 
-**答案**：看 `WindowProfiler` 里是否有 `pending_frame`（上一次 `end_draw` 存下的 `FrameTiming`）。有新绘帧的提交 = 一个帧周期的因果终点，产 `Boundary(Presented)` 封口区间；没有新绘帧的提交（重复呈现同一画面、纯装饰性的提交）只是又一次前台工作，产 `Event(Present)`，区间继续等真正的边界（[profiler.rs:L1096-L1110](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler.rs#L1096-L1110) 与 [journal.rs:L505-L521](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/gpui/src/profiler/journal.rs#L505-L521)）。
+**答案**：部分工作。测试调度器不经过 `update_running_task`/`save_task_timing` 括号（所以 `ForegroundExecutor::new` 在 test-support 下把 runnable 计数器置 `None`），任务轮询事件因此缺失；但窗口的输入/动作/绘制/呈现括号照常生效——hang.rs 的集成测试正是靠这些括号检测注入的 render/input/action 卡顿，并手工调用公共钩子模拟被阻塞的任务轮询（[src/profiler/hang.rs:L1231-L1239](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/profiler/hang.rs#L1231-L1239)）。
 
 ## 5. 综合实践
 
-把 4.1–4.4 的碎片拼成一个完整的「卡顿实验台」示例（示例代码，建议在 `examples/journal_probe.rs` 中完成）：
+把整讲串起来：写一个能看到自己日志与卡顿报告的示例。以下为**示例代码**（非仓库原有），基于 `examples/hello_world.rs` 改造，建议直接在本地工作副本中临时修改并用 `git restore` 还原。
 
-1. **界面**：根视图放两块可点击区域——
-   - 「长停顿」：点击处理器里 `std::thread::sleep(120ms)`（制造**阈值路径**的病灶：单事件 ≥ 100ms）；
-   - 「碎片风暴」：点击后用 `cx.spawn` 派发 16 个前台小任务、每个 `sleep(1ms)` 后结束（制造**预算路径**的病灶：没有任何单事件过阈值，累计 ≥ 8ms）。
-2. **探测器**：`HangDetector::new(cx.foreground_journal(), 100ms, 8ms)`，放进每 500ms 触发一次的前台定时任务里 `poll()`，对每个 incident 用 `SerializedHangIncident::convert(startup, &incident, 8, detector.first_present_at())` 序列化打印。
-3. **对照阅读**：分别触发两种病灶，把两次 incident 的 `stall_ms`、`active_ms`、`busy_fraction`、`contributors`（长度、种类、depth）填进一张对比表。
-4. **预期结论**（待本地验证）：
-   - 长停顿：`stall_ms ≈ 120`，贡献者极少（一次 Input，可能带后续 Draw），`busy_fraction` 高；
-   - 碎片风暴：`stall_ms ≈ 1`（最长单个轮询），`contributors` 是一串 1ms 的 `TaskPoll`（各带 spawn 位置）加上引发它们的 Input，`busy_fraction` 与 `active_ms` 共同讲述「许多小块堆满一帧」；
-   - 两种形态都产出了 incident——验证两类判定条件各自生效。
-5. **延伸**：把帧预算调到 1ms 再跑「碎片风暴」，观察报告数量与 `journal_discontinuous` 的变化；把长停顿放进动作处理器（绑定按键）而不是点击，观察 `depth` 如何从 0（Input）变 1（Action）。
+**步骤 1：改造示例**。在 `crates/gpui/examples/hello_world.rs` 的 `run_example` 中加入监控线程（`ForegroundJournal` 是 `Clone` 且其收集器可跨线程——生产中 Zed 正是把检测器放在独立线程）：
+
+```rust
+// 示例代码：加入 run_example 开头（cx: &mut App 之后）
+use gpui::profiler::hang::HangDetector;
+use gpui::profiler::journal::ForegroundJournalEntry;
+use std::time::Duration;
+
+let journal = cx.foreground_journal();
+std::thread::spawn(move || {
+    let mut raw = journal.collector(); // 独立游标：只看创建后的条目
+    let mut detector =
+        HangDetector::new(journal.clone(), Duration::from_millis(50), Duration::from_millis(8));
+    loop {
+        std::thread::sleep(Duration::from_millis(200));
+        for entry in raw.collect_unseen().entries {
+            println!("[journal] {entry:?}");   // 所有条目都实现了 Debug
+        }
+        for incident in detector.poll() {
+            let report = gpui::profiler::hang::SerializedHangIncident::convert(
+                scheduler::Instant::now() - Duration::from_secs(1), // 近似启动锚点，示例从简
+                &incident, 8, detector.first_present_at(),
+            );
+            println!("[hang] {}", serde_json::to_string(&report).unwrap());
+        }
+    }
+});
+```
+
+**步骤 2：打印一帧的完整事件序列**。以 `cargo run -p gpui --example hello_world --features profiler` 启动，观察开窗后前几百毫秒的输出，应能找到类似这样的序列：`FrameState::Pending` → `Event(Draw(...))` → `Boundary::Presented(...)`，中间可能夹着输入与折叠摘要。把看到的序列与本讲 4.1.2 的流程图逐条对上。
+
+**步骤 3：制造两种掉帧形态**。给视图加两个触发途径（示例代码）：
+
+```rust
+// 形态 A：单次长停顿——输入派发期间睡 120ms（> 阈值 50ms）
+//   在 render 里给某个色块加 .on_mouse_down(MouseButton::Left, |_, _, _| {
+//       std::thread::sleep(Duration::from_millis(120)); })
+// 形态 B：大量小工作——16 个前台任务各睡 1ms（每个 > 100µs 折叠门槛，
+//   单个 < 50ms 阈值，合计 ≥ 8ms 预算）
+//   cx.spawn(async move |_| {
+//       for _ in 0..16 {
+//           std::thread::sleep(Duration::from_millis(1));
+//       }
+//   }).detach();
+```
+
+**步骤 4：对比两份报告**。预期差异（**待本地验证**，具体数值随机器浮动）：
+
+| 维度 | 形态 A（长停顿） | 形态 B（预算超支） |
+| --- | --- | --- |
+| 触发判定 | 阈值（单事件 ≥ 50ms） | 预算（occupancy ≥ 8ms，无单事件越线） |
+| `stall_ms` | ≈120（那一次停顿） | ≈1（最长的一次 1ms 睡眠） |
+| `active_ms` | 与停顿相当 | 覆盖整串小任务的时间窗 |
+| `busy_fraction` | 接近 1.0 | 取决于任务间空隙，通常明显小于 1 |
+| contributors | 1 条 `input`（`input_kind: "mouse_down"`，depth 0） | 16 条 `task_poll`（各自带 spawn 位置） |
+| `sealed_by` | present 或 idle | 多半 present（随后必有一帧） |
+
+**验收标准**：两种形态都能产出 `HangIncident`；形态 B 的报告里能看到 `contributors_elided`（16 > 上限 8）；把阈值改成 200ms 后形态 A 不再触发（逐条判定失效且 occupancy 未到预算），而形态 B 的报告不受影响——这直接验证了两条判定的独立性。
 
 ## 6. 本讲小结
 
-- `ForegroundJournal` 是 profiler feature 下常驻的主线程工作日志：任务轮询、动作、输入、绘制、呈现五类工作按**完成顺序**记入固定 4MiB 的单写多读无锁环形缓冲，写线程永不为读者等待，丢失以 `Discontinuity` 显式上报。
-- 「便宜到可以默认开启」靠两条折叠：< `TASK_POLL_FLOOR`（100µs）的轮询折叠成带精确计数与总时长的 `PollSummary`（真空闲时整体丢弃，防止偶发唤醒写穿环）；边界只由**语义事件**（`Presented` / `Idle`）产生，Idle 还需无 runnable、无 1 秒内待呈现帧。
-- `IntervalSealer` 是零时钟依赖的纯状态机，把边界之间的工作封成 `FrameSnapshot`；`occupancy` 是事件区间并集加折叠轮询按比例分摊，`busy_fraction` 以此对区间时长归一。
-- `HangDetector` 事后轮询日志，两条独立判定：单事件 ≥ 阈值（Zed release 100ms），或区间累计前台开销 ≥ 帧预算（release 8ms，即一个 120Hz 周期）；缺口期间放弃累计结论但保留单事件结论。
-- `SerializedHangIncident` 把 incident 转成遥测形态：`startup`/`steady` 相位以首个新绘帧提交为界、微秒精度的毫秒时间戳、按时长保留但按时间排序的带 `depth` 嵌套深度的贡献者列表（任务轮询带 spawn 位置、动作带名称、输入带 `kind_name`）。
-- 全部数据来自被测路径上的括号埋点：`schedule_local`/`spawn_when_idle` 的 `queued()`、平台调度器三段式（`update_running_task` → run → `save_task_timing`）、`WindowInvalidator` 标脏上报、`WindowProfiler` 的输入/动作/绘制/呈现括号与 `present` 的边界产出——同一批括号同时喂 u7-l5 的直方图与本讲的日志。
+- `ForegroundJournal` 在主线程用约 4MiB 的固定无锁环形缓冲记录五类前台工作；低于 100µs 的任务轮询折叠成「条数 + 总时长」摘要，写入者永不等待读取者，损失以 `Discontinuity` 如实上报。
+- 事件流被两种显式边界切分：`Presented`（一帧新画面提交完成）与 `Idle`（前台空闲且无未过期的 pending 帧）。`IntervalSealer` 是不依赖时间启发式的纯状态机，把区间封口为 `FrameSnapshot`；`occupancy` 取事件 span 并集、小轮询按重叠比例摊入，`busy_fraction` = occupancy / 区间时长。
+- `HangDetector::poll` 对每个封口区间应用两条判定：单事件时长 ≥ 阈值（release 下 Zed 用 100ms），或区间总前台开销 ≥ 帧预算（8ms，一个 120Hz 周期）；预算触发时全部事件都算贡献者，日志不连续时预算判定被抑制。
+- `SerializedHangIncident` 输出毫秒时间戳、startup/steady 分相、stall/active/busy_fraction/dirty_to_present 与限量、按时序排列、带嵌套深度的贡献者列表——深度让「输入里套着绘制」不会被读成两次独立的墙钟消耗。
+- 埋点全景：平台 dispatcher 的 runnable 三段式括号产生任务事件，`ForegroundRunnableCounter` 的 `queued()/finished()` 维持「还有任务排队」事实，`WindowProfiler` 的四对括号产生输入（带 `PlatformInput::kind_name`）、动作、绘制、呈现事件，`WindowInvalidator` 在窗口变脏时上报 pending 帧，`App` 负责安装并经 `cx.foreground_journal()` 分发句柄。
+- 已知债务：多数括号是裸 begin/end 对而非 RAII 守卫，unwind 被捕获时会静默破坏 turn 深度；新代码应像 `present` 一样使用 `foreground_turn()` 守卫。
 
 ## 7. 下一步学习建议
 
-- **u7-l7（综合实战）**：把本讲的探测器接到你的毕业项目里，作为「性能验收」环节——任何交互路径都不该产出 incident。
-- **对照阅读 Zed 应用侧消费者**：[crates/zed/src/reliability/hang_detection.rs](https://github.com/zed-industries/zed/blob/10b2925e7c44439b99aeb39d5402133e0ad49192/crates/zed/src/reliability/hang_detection.rs) 完整展示「独立检测线程 + 每秒 poll + 退出时最后一次 poll + 遥测上报」的生产级接法，以及 `dev::HangAction` 等自测动作。
-- **回看 u7-l5 的双写关系**：`WindowProfiler` 的直方图（统计聚合、无界时间跨度）与本讲 journal（逐事件、有界环形）共用同一批括号；理解「聚合看趋势、日志看因果」的分工。
-- **顺带精读调度 crate**：`scheduler` 的 `LocalExecutor` 如何携带 `RunnableMeta`（spawn 位置与时刻）穿过平台派发，是本讲 `TaskTiming::location` 的上游。
+- **u7-l7（综合实战）**：把本讲的检测思路带进毕业项目——为迷你文件浏览器开启 `profiler` feature，在大量树节点展开时观察 `Draw` 事件与预算触发形态，验证虚拟化列表（u6-l1/u6-l2）对帧预算的实际改善。
+- **对照阅读 u7-l5 的旧三层**：profiler.rs 的任务统计、`WindowProfiler` 直方图、`FrameTimingCollector` 与本讲 journal 的关系是「聚合 vs 明细」「开关开启 vs 默认开启」；理解双写点（`end_action_handler`、`record_draw_timing`、`record_present_at`）有助于给新埋点选址。
+- **拓展阅读生产接线**：`crates/zed/src/reliability/hang_detection.rs`（含 `logging`/`telemetry` 子模块）展示独立线程轮询、`on_app_quit` 终态排空、以及 `dev: HangForeground` 等自卡动作的端到端用法。
+- **无锁与属性测试范式**：若对 `JournalSlot` 的单写多读协议感兴趣，精读 journal.rs 测试模块中的 `ModelRing` 参考模型与 proptest 对账（`ring_matches_reference_model_under_wrap_collisions_and_independent_cursors`），这是学习「用模型检验并发结构」的极好范本。

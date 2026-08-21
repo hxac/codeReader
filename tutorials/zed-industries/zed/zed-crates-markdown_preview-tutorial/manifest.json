@@ -1,13 +1,13 @@
 {
-  "head": "10b2925e7c44439b99aeb39d5402133e0ad49192",
+  "head": "ec18126b1dbd32b089e51d7edee1e20b3bd53637",
   "project": "zed-crates-markdown_preview",
-  "rationale": "markdown_preview 是 Zed 编辑器中实现 Markdown 预览面板的 workspace 型 crate，核心代码集中在 markdown_preview_view.rs（约 3700 行，其中近半是 gpui 集成测试），另有两个小文件负责入口注册和设置。学习路线按“先跑起来、再懂主链路、最后吃透平台集成”设计：入门层先讲清 crate 在 Zed 全仓中的定位、init 注册的动作体系与设置机制，让读者能编译运行并触发预览；进阶层沿着数据流讲核心机制——从视图结构、打开链路、编辑器绑定与 Follow 模式、防抖重解析、双向滚动同步，到渲染装配、交互回写、链接导航和图片解析，每个机制独立成篇且按依赖排序；专家层讲它与 workspace 平台的三大集成点（Item 生命周期、SearchableItem 搜索、SerializableItem+SQLite 持久化）以及测试体系与二次开发方向。该 crate 代码量属中小型但横跨 gpui/editor/workspace/markdown/db 多个子系统，故拆为 16 篇，逻辑优先、每篇一个主题。",
+  "rationale": "markdown_preview 是 Zed 编辑器中实现 Markdown 预览面板的 workspace 型 crate，核心代码集中在 markdown_preview_view.rs（约 3700 行，其中近半是 gpui 集成测试），另有两个小文件负责入口注册和设置。学习路线按“先跑起来、再懂主链路、最后吃透平台集成”设计：入门层先讲清 crate 在 Zed 全仓中的定位、init 注册的动作体系与设置机制，让读者能编译运行并触发预览；进阶层沿着数据流讲核心机制——从视图结构、打开链路、编辑器绑定与 Follow 模式、防抖重解析、双向滚动同步，到渲染装配、交互回写、链接导航和图片解析，每个机制独立成篇且按依赖排序；专家层讲它与 workspace 平台的三大集成点（Item 生命周期、SearchableItem 搜索、SerializableItem+SQLite 持久化）以及测试体系与二次开发方向。该 crate 代码量属中小型但横跨 gpui/editor/workspace/markdown/db 多个子系统，故拆为 16 篇，逻辑优先、每篇一个主题。本次增量核对（10b2925e7c → ec18126b1d）确认两次 HEAD 间仅 mermaid_render、zlog 与 Cargo.lock 发生变化，markdown_preview crate、markdown crate、zed 入口与键位表均无改动，故全部讲义维持 keep，大纲结构与依赖关系不变。",
   "units": [
     {
       "id": "u1",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-markdown-preview-overview.md",
           "id": "u1-l1",
@@ -33,7 +33,7 @@
           "topic": "介绍 markdown_preview crate 在 Zed 中的定位（编辑器内置的 Markdown 预览面板）、三个源码文件的分工、lib 根 markdown_preview.rs 的声明方式，以及它依赖 gpui/editor/markdown/workspace 等兄弟 crate 的方式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -60,7 +60,7 @@
           "topic": "讲解 markdown_preview.rs 中的 init(cx) 入口：注册可序列化项、通过 cx.observe_new 监听新 Workspace 并注册动作；梳理 actions! 宏定义的滚动与开关动作，以及从 zed_actions 重导出的 OpenPreview/OpenPreviewToTheSide。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -87,6 +87,7 @@
           "topic": "讲解 markdown_preview_settings.rs 中 MarkdownPreviewSettings 的定义、limit_content_width 与 max_width 如何经 Settings trait 从全局设置解析，以及预览字体大小（markdown_preview_font_size）经 ThemeSettings 和 update_settings_file 的调节与持久化路径。"
         }
       ],
+      "level": "beginner",
       "order": 1,
       "title": "单元一：起步——认识并跑起来 markdown_preview"
     },
@@ -94,7 +95,7 @@
       "id": "u2",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1",
             "u1-l2"
@@ -121,7 +122,7 @@
           "topic": "逐字段拆解 MarkdownPreviewView 结构体，讲解 MarkdownPreviewMode（Default 固定绑定 vs Follow 跟随活动编辑器）、EditorState、MarkdownPreviewEvent、PreviewLinkTarget 等关键类型的设计意图。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -148,7 +149,7 @@
           "topic": "跟踪从 workspace 动作到 pane.add_item 的完整链路：register 注册的三个打开动作、open_preview_in_pane / open_preview_to_the_side_of_pane、activate_or_add_preview 的复用判定（按 buffer 而非 editor 匹配），以及 open_for_project_path 与 is_markdown_path 判定。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -174,7 +175,7 @@
           "topic": "讲解 set_editor 如何订阅 EditorEvent（Edited/BufferEdited/DirtyChanged/FileHandleChanged/SelectionsChanged）并驱动预览更新，Follow 模式如何通过 workspace_updated 跟随活动编辑器，以及 Default 模式经 on_workspace_event/find_canonical_editor 在工作区恢复与拆分后重绑规范编辑器。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -200,7 +201,7 @@
           "topic": "拆解 update_markdown_from_active_editor → schedule_markdown_update 的异步防抖链路：REPARSE_DEBOUNCE 定时器、pending_update_task 的去重、从编辑器读取 buffer 全文、markdown.reset 触发后台解析，以及 markdown_parse_pending 对搜索结果失效的标记。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -226,7 +227,7 @@
           "topic": "讲解源码到预览的滚动同步：selected_source_index 从多 buffer 选区换算 buffer 偏移、sync_preview_to_source_index 调用 markdown 的 autoscroll 与 set_active_root_for_source_index，以及反向的 change_selection_to_source_index；再梳理 8 个滚动动作如何用 ScrollHandle 实现页/行/元素粒度滚动。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u1-l3"
@@ -254,7 +255,7 @@
           "topic": "讲解 Render 实现的元素树结构（外层 div、WithRemSize 字体缩放、overflow_y_scroll 滚动容器、max_width 约束、custom_scrollbars、hovered_url 的 LinkPreview 气泡），以及 render_markdown_element 如何装配 MarkdownElement：主题选择、CodeBlockRenderer、image_resolver、on_url_click/on_url_hover 等回调。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l6"
           ],
@@ -280,7 +281,7 @@
           "topic": "讲解预览到编辑器的写回路径：on_source_click 单击定位源码、on_checkbox_toggle → apply_checkbox_toggle_to_editor 用 editor.edit 替换 [ ]/[x] 标记、refresh_preview 的聚焦守卫，以及基于 markdown 实体上下文（选中文字/Markdown/链接）动态构建的右键菜单。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l6"
           ],
@@ -306,7 +307,7 @@
           "topic": "拆解链接处理链路：handle_url_click 分离 fragment、open_preview_url 的三分支（本地 markdown 用预览打开、带行列号路径打开编辑器、其余交给 open_url_or_file）、open_markdown_link_in_preview 的 worktree/buffer 解析与已有预览复用，以及 PreviewLinkTarget 的 Heading/Position 两类导航。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l6"
           ],
@@ -332,6 +333,7 @@
           "topic": "讲解 resolve_preview_image 的完整分流策略：data: 前缀跳过、http(s) 走网络资源、相对路径基于 base_directory 拼接、以 / 开头按工作区根解析、远程项目经 resolve_project_path_for_preview_image 与 image_store 取图，以及 path_style 在客户端与服务端不一致时的处理。"
         }
       ],
+      "level": "intermediate",
       "order": 2,
       "title": "单元二：核心机制——视图生命周期、同步与渲染"
     },
@@ -339,7 +341,7 @@
       "id": "u3",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -365,7 +367,7 @@
           "topic": "讲解 MarkdownPreviewView 对 workspace::item::Item trait 的实现：act_as_type 让预览可被当作 Editor 使用、tab_icon/tab_content_text 的标签呈现、save/save_as 委托源编辑器、reload 的空实现语义、to_item_events 映射事件驱动标签刷新，以及 Focusable 与 EventEmitter 声明。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -391,7 +393,7 @@
           "topic": "讲解 SearchableItem 实现：supported_options 声明支持大小写/全词/正则但不支持替换，find_matches 在 cx.background_spawn 中对 markdown 源文本搜索并经 filter_non_rendered_matches 过滤掉未渲染区域的命中，update_matches/activate_match 驱动高亮与滚动，以及 markdown_parse_pending 在解析落地后使匹配失效。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -417,7 +419,7 @@
           "topic": "讲解 SerializableItem 实现与 persistence 模块：serialize 把 (item_id, workspace_id, abs_path, mode) 写入 SQLite 的 markdown_previews 表（含外键级联删除），deserialize 经 find_or_create_worktree 与 open_buffer 重建视图，cleanup 用 delete_unloaded_items 清理已关闭条目，以及 should_serialize 的事件过滤。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1",
             "u3-l3"
@@ -444,6 +446,7 @@
           "topic": "以 tests 模块为例讲解 gpui 集成测试范式：init_test 搭建 AppState、open_markdown_file 用 TempTree 造 fixture、run_until_parked 与等待序列化的 wait_for_preview_serialization，覆盖链接打开、复选框回写、序列化恢复、Follow 模式、远程图片等场景；并总结向该 crate 添加新功能的常用切入点。"
         }
       ],
+      "level": "advanced",
       "order": 3,
       "title": "单元三：专家层——平台集成、持久化与测试"
     }

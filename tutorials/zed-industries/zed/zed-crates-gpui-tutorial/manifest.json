@@ -1,7 +1,7 @@
 {
+  "head": "ec18126b1dbd32b089e51d7edee1e20b3bd53637",
   "project": "zed-crates-gpui",
-  "head": "10b2925e7c44439b99aeb39d5402133e0ad49192",
-  "rationale": "增量分析：91bf967e27..10b2925e7c 区间共 11 个提交，其中只有 eb354c8d50（gpui: Make the Wayland render loop demand-driven #60690）触及 crates/gpui，改动集中在 5 个文件（src/app.rs、src/app/async_context.rs、src/platform.rs、src/platform/test/window.rs、src/window.rs，合计 +166/-15）；examples/、tests/、docs/、Cargo.toml、README 均无变化。该提交把渲染循环从「无条件帧节拍」改为按需驱动：PlatformWindow::completed_frame() 演化为 schedule_frame()（platform.rs:864，默认空实现，由 GPUI 在有帧需求时调用）；App::flush_effects 主循环收尾（pending_effects 清空、break 之前）新增一轮扫描，对 is_dirty、needs_present 或有 next_frame_callbacks 的窗口调用 schedule_frame 唤醒可能已停靠的平台帧源；window.rs 帧回调路径删除 complete_frame，present 之后与 on_next_frame 中改为按需 schedule_frame，next_frame_callbacks 字段改为 pub(crate)；AsyncApp::refresh 改为经 update 调 refresh_windows，让刷新效果入队以唤醒已停靠的渲染循环；TestWindow 新增 simulate_scheduled_frame/frame_scheduled，window.rs 与 app.rs 各新增数个 gpui::test。据此判定：u7-l1 在帧管线图与源码精读中明文引用 completed_frame（该名字已不存在），标 update，把 schedule_frame 的语义演变纳入讲解；u4-l3 讲的正是重绘调度与 on_request_frame 帧回调心脏（window.rs 约 1594-1660 行恰是本次改动区），标 update，补充按需帧调度模型。其余讲义论断不受影响：u2-l1 只在借用收尾的高度描述 flush_effects（「队列空了才退出」仍成立）；u2-l3 未涉及 AsyncApp::refresh 细节；u5-l5/u5-l6/u7-l2/u7-l5 引用的焦点、拖放、窗口管理、present 计时区域未被触及，且 permalink 均钉在生成时的提交上不会失效；u7-l4 的输入模拟链路未变（TestWindow 新增的帧调度模拟 API 属可补充的边角，不动摇既有内容）；u1/u3/u6 各篇引用的文件均不在改动集内——以上全部 keep。讲义目录方面：上一轮之后 worker 又生成了 u7-l2、u7-l3、u7-l4、u7-l5 四篇且均带 summary 文件，至此 39 篇中 37 篇已生成并与代码树一致；剩余 u7-l6、u7-l7 维持 new，其引用的源码路径（profiler/journal.rs、profiler/hang.rs、examples/tree.rs 等）已逐一确认仍存在。按需帧调度是对既有机制的修改而非新模块，并入 u4-l3 与 u7-l1 讲解即可，无需新增讲义；七单元结构、依赖关系与讲义顺序均不变。",
+  "rationale": "增量分析：10b2925e7c..ec18126b1d 区间仅有 1 个提交 ec18126b1d（mermaid_render: Update merman to 0.8.0-alpha.5 #62931），改动文件为根 Cargo.lock、crates/mermaid_render/Cargo.toml 及其 2 个源文件、crates/zlog/src/filter.rs；`git diff --stat -- crates/gpui` 为空，gpui crate 本体零改动，工作区内该目录除讲义文件夹外也完全干净。Cargo.lock 的 churn 源自 mermaid 渲染库 merman 的版本提升，不在 gpui 依赖讲解范围内（各讲义引用的 Cargo.toml 指 crates/gpui/Cargo.toml，未被触及），因此所有讲义论断与源码引用均不受影响。上一轮因 eb354c8d50（schedule_frame 按需帧调度）标记 update 的 u4-l3 与 u7-l1 已由 worker 重写完成（生成文件中分别有 29 处与 37 处 schedule_frame 相关论述，与当前代码一致），本轮降级为 keep；上一轮标记 new 的 u7-l6 讲义正文已生成但配套 summary 文件尚缺、生成未完全收尾，维持 new 以便 worker 补全；u7-l7 仍未生成，维持 new，其引用的 examples/tree.rs、examples/data_table.rs、examples/input.rs、examples/popover.rs 与 src/app.rs 已逐一确认在当前 HEAD 存在。其余 35 篇讲义引用的源码文件均不在改动集内且 permalink 钉在各自生成时的提交上不会失效，全部 keep。七单元结构、依赖关系与讲义顺序均不变，无需新增或移除讲义。",
   "units": [
     {
       "id": "u1",
@@ -523,7 +523,7 @@
           "topic": "分析 GPUI 如何封装 taffy 这个 Rust 版 flexbox/grid 引擎：Style 如何映射为 taffy 样式、LayoutId 的申请与计算流程、AvailableSpace 的传递。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -996,7 +996,7 @@
       "id": "u7",
       "lectures": [
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u4-l3"
           ],
