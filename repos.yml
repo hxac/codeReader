@@ -368,3 +368,112 @@ repos:
   - name: ai-dynamo/dynamo
   - name: SFU-HiAccel/uBench
   - name: passlab/CUDAMicroBench
+  - name: microsoft/mimalloc
+  - name: microsoft/RustTraining
+  - name: rayon-rs/rayon
+  - name: dragostis/chili
+  - name: ttrftech/NanoVNA
+  - name: ttrftech/CentSDR
+  - name: jankae/LibreVNA
+  - name: CVCUDA/CV-CUDA
+  - name: yangzf-1023/4C4D
+  - name: openecos-projects/icsprout55-pdk
+  - name: Pixel-Talk/PEAR
+  - name: MoonshotAI/checkpoint-engine
+  - name: MoonshotAI/FlashKDA
+  - name: MoonshotAI/Attention-Residuals
+  - name: MoonshotAI/Moonlight
+  - name: MoonshotAI/MoBA
+  - name: MoonshotAI/Kimi-VL
+  - name: MoonshotAI/MoonEP
+  - name: openinfer-project/openinfer
+    folders:
+      [
+        "self",
+        "openinfer-bench",
+        "openinfer-build",
+        "openinfer-core",
+        "openinfer-cupti",
+        "openinfer-deepseek-v2-lite",
+        "openinfer-dynamo-backend",
+        "openinfer-dynamo-frontend",
+        "openinfer-engine",
+        "openinfer-glm52",
+        "openinfer-kernels",
+        "openinfer-kimi-k2",
+        "openinfer-kv-cache",
+        "openinfer-kv-offload",
+        "openinfer-qwen3",
+        "openinfer-qwen35-4b",
+        "openinfer-sample",
+        "openinfer-server",
+        "openinfer-sim",
+        "openinfer-vllm-frontend",
+        "openinfer-vllm-support"
+      ]
+  - name: AmolHarsh/ground3d-lmm
+  - name: dk-liang/UniSeg3D
+  - name: QwenLM/Qwen3-VL
+  - name: open-mmlab/mmdetection3d
+  - name: facebookresearch/Mask2Former
+  - name: aria2/aria2
+  - name: GopeedLab/gopeed
+  - name: rasbt/LLMs-from-scratch
+  - name: rasbt/reasoning-from-scratch
+  - name: rasbt/machine-learning-book
+  - name: rasbt/deeplearning-models
+  - name: deepspeedai/DeepSpeed
+  - name: triple-mu/fast-ulysses
+  - name: KellerJordan/Muon
+  - name: allenai/open-instruct
+  - name: allenai/OLMo-core
+  - name: allenai/olmocr
+  - name: allenai/OLMo
+  - name: allenai/RL4LMs
+  - name: allenai/longformer
+  - name: allenai/scispacy
+  - name: allenai/WildDet3D
+  - name: allenai/molmoact2
+  - name: allenai/OLMoASR
+  - name: allenai/scholarphi
+  - name: allenai/molmospaces
+  - name: earendil-works/pi
+  - name: earendil-works/pi-coding-agent
+  - name: earendil-works/pi-agent-core
+  - name: earendil-works/pi-ai
+  - name: earendil-works/pi-tui
+  - name: earendil-works/pi-chat
+  - name: ultraworkers/claw-code
+  - name: hxac/claude-code
+  - name: cosmiciron/vmprint
+  - name: cosmiciron/layoutmaster
+  - name: meta-pytorch/torchft
+  - name: SemiAnalysisAI/InferenceX
+  - name: unslothai/unsloth
+  - name: silverbulletmd/silverbullet
+  - name: xichan96/dinotty'
+  - name: sandboxie-plus/sandboxie
+  - name: sandboxie/sandboxie
+  - name: erweixin/RaTeX
+  - name: microsoft/markitdown
+    folders:
+      [
+        "self",
+        "packages/markitdown"
+      ]
+  - name: pulldown-cmark/pulldown-cmark
+  - name: getzola/zola
+  - name: harbor-framework/harbor
+  - name: headroomlabs-ai/headroom
+  - name: LinxISA/linx-isa
+  - name: LinxlSA/llvm-project
+  - name: LinxlSA/qemu
+  - name: LinxlSA/linux
+  - name: LinxlSA/LinxCore
+  - name: LinxlSA/pyCircuit
+  - name: LinxlSA/glibc
+  - name: LinxlSA/musl
+  - name: LinxlSA/PTO-Kernel
+  - name: lizardbyte/sunshine
+  - name: databendlabs/openraft
+  - name: kenforthewin/atomic-editor
