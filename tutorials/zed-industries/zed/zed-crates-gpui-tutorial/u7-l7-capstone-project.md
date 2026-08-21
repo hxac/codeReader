@@ -1,0 +1,779 @@
+# 综合实战：构建一个完整小应用（迷你文件浏览器）
+
+## 1. 本讲目标
+
+这是整部学习手册的毕业讲。前面六个单元我们把 GPUI 拆成了一块块积木：实体、上下文、样式、元素三阶段、动作、键位、焦点、虚拟化列表、悬浮层、测试。本讲把这些积木拼回一台完整的机器。
+
+读完本讲，你应当能够：
+
+1. 把一份产品需求（「做一个文件浏览器」）翻译成 GPUI 的三层结构：**实体存状态、组件做展示、元素做呈现**，并能写出「状态归属表」。
+2. 把一棵递归的目录树**扁平化**成等高行向量，交给 `uniform_list` 虚拟化渲染，理解为什么不能递归嵌套 div。
+3. 用 `actions!` + `bind_keys` + `key_context` + `track_focus` 组装出 `j`/`k` 键盘导航，并用 `deferred`/`anchored` 弹出悬浮菜单、用 `window.prompt` 弹出系统对话框。
+4. 为整个应用写出至少两个 `#[gpui::test]`：一个纯逻辑测试，一个走完整动作派发链路的窗口级测试。
+5. 闭合整个手册的认知环路：你写下的每一行代码，都能在 GPUI 源码里指出它最终落在了哪个模块。
+
+本讲的毕业项目是**迷你文件浏览器（MiniBrowser）**。它不是玩具：Zed 编辑器真实的侧边栏 `crates/project_panel` 用的正是同一套架构，我们在 4.2.3 会对照它的源码。
+
+## 2. 前置知识
+
+本讲是纯综合讲，几乎不引入新 API，而是把已学的 API 组装起来。开始前请确认你理解下面这些概念（括号内是出处）：
+
+| 概念 | 一句话回顾 | 出处 |
+| --- | --- | --- |
+| 实体与所有权 | `App` 拥有一切实体，`Entity<T>` 只是句柄，读写走 `update`/`read_with` | u2-l2 |
+| `Context<T>` 与 `cx.listener` | 把元素事件回调绑定到「当前实体 + `Context<T>`」的标准适配器 | u2-l3 |
+| 视图与组件 | `Render` 是有状态实体视图；`RenderOnce` + `#[derive(IntoElement)]` 是无状态组件 | u3-l1、u3-l6 |
+| Action 体系 | `actions!` 宏定义动作，`on_action(cx.listener(...))` 注册监听，派发路径由焦点决定 | u5-l3 |
+| 键位派发 | `bind_keys` 注册绑定，`key_context` 声明上下文，绑定按「匹配深度」裁决 | u5-l4 |
+| 焦点 | `FocusHandle` + `track_focus`/`Focusable`，动作沿焦点路径派发 | u5-l5 |
+| `uniform_list` | 等高虚拟化列表，只为可见区间构建元素 | u6-l1 |
+| `deferred` + `anchored` | 悬浮层标准配方：deferred 管层级、anchored 管位置 | u6-l3 |
+| `window.prompt` | 原生对话框，同步发起、异步收答案 | u7-l3 |
+| `#[gpui::test]` | 注入 `TestAppContext`/`VisualTestContext`，虚拟时钟 + 确定性调度 | u7-l4 |
+
+如果表中某一项你还觉得模糊，建议先回去翻对应讲义再继续——本讲的乐趣恰恰来自「所有零件都已经认识」。
+
+## 3. 本讲源码地图
+
+本讲引用的关键文件（均位于 `crates/gpui/` 下，除特别标注外）：
+
+| 文件 | 作用 | 本讲用它做什么 |
+| --- | --- | --- |
+| `examples/data_table.rs` | 万行股票数据虚拟表格 | **主参照**：数据 + 组件 + 实体的三层分层的完整范本 |
+| `examples/input.rs` | 文本输入框全套实现 | 抄它的 `actions!` / `key_context` / `track_focus` / `bind_keys` 写法 |
+| `examples/popover.rs` | 悬浮层示例 | 抄它的 `deferred(anchored(...))` 弹层配方 |
+| `examples/testing.rs` | 测试基础设施示例 | 抄它的两个测试模板 |
+| `examples/window.rs` | 窗口能力示例 | 抄它的 `window.prompt` 用法 |
+| `examples/tree.rs` | 深层级 div 压测示例 | **反例**：说明文件树不该递归嵌套渲染 |
+| `src/elements/uniform_list.rs` | `uniform_list` 构造函数与滚动句柄 | 精读虚拟化入口 |
+| `src/app/context.rs` | `Context::processor` | 理解列表回调如何安全地回到实体 |
+| `src/app.rs` | `App` 核心 | `open_window` / `bind_keys` / `on_action` |
+| `src/window.rs` | `Window` 核心 | `prompt` 的签名与策略分发 |
+| `src/keymap/binding.rs` | `KeyBinding` | 理解绑定的上下文参数 |
+| `crates/project_panel/src/project_panel.rs`（gpui 之外） | Zed 真实的项目侧边栏 | 验证毕业项目的架构与产品代码一致 |
+
+一个值得注意的工程细节：`crates/gpui/Cargo.toml` 显式声明了大部分示例 target（见 [Cargo.toml:167-169](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/Cargo.toml#L167-L169) 起的 `[[example]]` 段），但 `data_table`、`popover`、`testing` 等文件并未列入——Cargo 默认自动发现 `examples/` 下的文件，所以它们照样能用 `cargo run -p gpui --example data_table` 运行。你后面新增自己的示例文件时，两种方式都可行（待本地验证）。
+
+## 4. 核心概念与源码讲解
+
+### 4.1 架构选型：把需求翻译成三层结构
+
+#### 4.1.1 概念说明
+
+「做一个文件浏览器」是一份产品需求，不是一份技术方案。GPUI 给了你三种语域（u1-l1），毕业项目的第一件事是把需求里的每一项**分配**给最合适的语域：
+
+- **实体（Entity）**——拥有跨帧生命周期的状态：目录树本体、展开集合、过滤词、选中项、滚动位置。判据：*用户离开这一帧后它还存在吗？* 存在就放实体。
+- **组件（RenderOnce）**——每帧按值构造的展示配方：一行目录条目、一个工具栏按钮。判据：*它只是「数据的画法」，自身没有身份吗？* 是就做组件。
+- **元素（Element / 内置元素）**——呈现手段：`div` 排版、`uniform_list` 虚拟化、`deferred`/`anchored` 浮层。判据：*需要 GPUI 的专门机制（虚拟化、层级、命中测试）吗？* 需要就选对应元素。
+
+这个分配过程就是「架构选型」。选错的典型症状：把瞬时展示做成了实体（状态膨胀、到处 `notify`）；把持久状态塞进组件（每帧重建导致状态丢失）；该用虚拟化列表时手写递归 div（内存与布局开销爆炸）。
+
+#### 4.1.2 核心流程
+
+MiniBrowser 的需求到结构映射如下：
+
+```text
+需求                          →  结构选型
+─────────────────────────────────────────────────────────────
+目录树数据（可能上万节点）      →  实体字段：扁平化行向量 Vec<Rc<Entry>>
+展开/收起、过滤词、选中项      →  实体字段：expanded / filter / selected
+                                  （用稳定 id，不用行下标！）
+滚动位置、跳转选中项           →  UniformListScrollHandle（挂在实体上）
+每个条目的画法（缩进+图标+名） →  RenderOnce 组件 EntryRow
+长列表流畅滚动                 →  uniform_list 元素（等高虚拟化）
+j/k 键盘导航                   →  actions! + bind_keys + key_context + track_focus
+悬浮菜单（排序/刷新）           →  deferred(anchored(...))，开关是实体里的一个 bool
+双击预览文件                   →  window.prompt（原生对话框）
+确定性测试                     →  #[gpui::test] + 内存假树
+```
+
+状态归属表（在动手写代码前先填这张表，是 GPUI 项目最有用的一张草稿纸）：
+
+| 状态 | 类型 | 放哪 | 谁改它 | 改后要 `cx.notify()` 吗 |
+| --- | --- | --- | --- | --- |
+| `rows` 扁平化行 | `Vec<Rc<Entry>>` | 实体 | `flatten()` 重算 | 是 |
+| `expanded` | `HashSet<EntryId>` | 实体 | `toggle_expand` 动作 | 是 |
+| `filter` | `SharedString` | 实体 | 搜索框（订阅输入实体） | 是 |
+| `selected` | `Option<EntryId>` | 实体 | 点击 / `j`/`k` | 是 |
+| 滚动偏移 | `UniformListScrollHandle` | 实体 | `track_scroll` 接管 | 否（列表自管理） |
+| 「菜单是否打开」 | `bool` | 实体 | 工具栏按钮 / `on_mouse_down_out` | 是 |
+| 某行的高亮样式 | — | 组件入参 | 每帧从实体读出 | 不适用 |
+
+#### 4.1.3 源码精读
+
+**（1）主参照：data_table 的三层分层。** 这个示例把 10000 条随机股票（[examples/data_table.rs:16-39](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/data_table.rs#L16-L39)）渲染成 24 列虚拟表格。注意它的字段注释——数据用 `Rc` 共享而不是克隆：
+
+- 数据层 `Quote` 是纯数据结构，与 UI 无关。
+- 展示层 `TableRow` 是 `#[derive(IntoElement)]` 的无状态组件（[examples/data_table.rs:140-153](https://github.com/zed-industries-zed/crates/gpui/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/data_table.rs#L140-L153)），持有 `Rc<Quote>` 而非 `Quote`，构造几乎零成本。
+- 状态层 `DataTable` 实体只存四样东西：共享数据、可见区间、滚动句柄、拖拽状态（[examples/data_table.rs:255-262](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/data_table.rs#L255-L262)）。
+
+组件的 `render` 按值消费 `self`、只拿 `&mut App`，这正是 u3-l6 讲过的 RenderOnce 协议（[examples/data_table.rs:236-253](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/data_table.rs#L236-L253)）。
+
+**（2）反例：tree.rs 不是「文件树」。** `examples/tree.rs` 名字容易误导——它渲染的是一个 `GPUI_TREE_DEPTH` 层的**嵌套 div 深度压测**，默认 50 层（[examples/tree.rs:11-16](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/tree.rs#L11-L16)、[examples/tree.rs:18-31](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/tree.rs#L18-L31)）。它的存在恰恰说明：元素树可以深，但**不代表文件树应该用递归 div 画**。递归嵌套意味着：
+
+- 每层的缩进靠嵌套布局表达，无法把「可见行」裁剪出来——没有虚拟化；
+- 深层节点参与完整的 Taffy 布局，而 `uniform_list` 只测一个条目就能算出全部行位（u6-l1 的「以算术代替布局」）；
+- 展开状态要挂在每层元素上，而不是集中在实体里。
+
+所以 MiniBrowser 的文件树在数据结构上是树，在渲染结构上是**一行一行的扁平列表**，缩进只是每行开头的一段固定宽度。
+
+**（3）三种语域同框：input.rs。** 一个文件里同时出现三种技术（动作定义、实体视图、自定义元素），是很好的「分层是选择而非教条」的例证：`actions!` 在顶层定义意图（[examples/input.rs:16-34](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/input.rs#L16-L34)），`TextInput` 实体持有全部状态，真正画字符的是自定义 `TextElement`（实现 `Element` 三阶段，u4-l1 的主题）。MiniBrowser 我们不需要自定义元素——`div` + `uniform_list` + `deferred` 已经够用，这本身就是一个选型结论：**内置元素优先，canvas 次之，自定义 Element 最后**（u3-l5 的结论）。
+
+#### 4.1.4 代码实践
+
+**实践目标**：在写任何代码之前，产出两份设计草稿，并把它们与 data_table 的分层对照。
+
+**操作步骤**：
+
+1. 通读 [examples/data_table.rs](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/data_table.rs)（约 490 行），画出它的三层结构图：`Quote`（数据）→ `TableRow`（组件）→ `DataTable`（实体）→ `uniform_list`（元素）。
+2. 为 MiniBrowser 填写 4.1.2 的「状态归属表」（直接抄到你的笔记里，按需增删行）。
+3. 为 MiniBrowser 画目录组织草图。建议从单文件示例起步（与 examples 惯例一致），长大后再拆模块：
+
+```text
+examples/mini_browser.rs        ← 起步：单文件，约 400~600 行
+    mod entry     : Entry / EntryId / 假树生成器
+    mod browser   : MiniBrowser 实体（状态 + 动作 + flatten）
+    mod row       : EntryRow 组件（RenderOnce）
+    mod tests     : #[gpui::test] 测试
+```
+
+4. 给每个需求项标注它落在哪一层（实体 / 组件 / 元素 / 平台）。
+
+**需要观察的现象**：data_table 中 `DataTable` 实体的字段数量出人意料地少（4 个），而屏幕上同时呈现上万行数据。
+
+**预期结果**：你会得到一张「需求 → 结构」的完整对照表。如果某个状态你发现说不清「谁改它、改后要不要 notify」，说明设计还有洞——现在补比写完再补便宜得多。（设计草稿无需运行验证。）
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：过滤词 `filter` 为什么不能放在 `EntryRow` 组件里？
+
+**参考答案**：组件是每帧按值重建的无状态配方（u3-l6），放在里面的状态活不过一帧；而且过滤词会改变整个行向量（重算 `flatten`），它属于实体状态，修改后要 `cx.notify()` 触发整棵视图重绘。
+
+**练习 2**：`selected` 为什么存稳定 id 而不是当前行下标？
+
+**参考答案**：行下标是 `flatten()` 的产物——过滤词变化、目录展开/收起都会让同一批条目整体移位。存下标会导致「刚选中第 3 行，一过滤选中变成了别的文件」。稳定 id（例如用目录路径或自增 `EntityId` 式整数）在状态变化之间保持不变。
+
+**练习 3**：如果把「某行是否悬停」也搬进实体状态，会有什么代价？
+
+**参考答案**：功能上可行但完全没有必要。悬停样式是 `Stateful<Div>` 的 `hover` 状态样式（u5-l2），由 hitbox + 元素状态表按帧维护，零实体开销；搬进实体则每次鼠标划过都要 `update` + `notify` 整个视图，代价高且语义重复。
+
+---
+
+### 4.2 状态建模与代码组织：扁平化文件树 + uniform_list
+
+#### 4.2.1 概念说明
+
+文件树在内存里是递归结构，在屏幕上是等高行。MiniBrowser 的核心思路：**每帧（确切说是每次状态变化后）把树重算成一个扁平的行向量**，每行自带 `depth`（缩进深度），然后把这个向量交给 `uniform_list`。这个「树 → 向量」的函数是整个应用的心脏：
+
+- 输入：树、展开集合 `expanded`、过滤词 `filter`；
+- 输出：当前应当显示的行序列。
+
+`uniform_list`（u6-l1）拿到行数后不会为每行建元素——它只测量一个条目得到行高，再用算术算出可见区间，**只为可见区间调用你的回调**。于是内存中的实体状态是 O(可见行)，屏幕却能装下十万条目。
+
+#### 4.2.2 核心流程
+
+`flatten` 的伪代码（过滤语义：显示「自身匹配」或「有后代匹配」的目录，以及所有匹配的文件）：
+
+```text
+fn flatten(tree, expanded, filter) -> Vec<Row>:
+    out = []
+    visit(node, depth):
+        if filter 非空:
+            keep = node.name 包含 filter 或 任一后代匹配
+            if not keep: return            # 整棵子树跳过
+        out.push(Row { id: node.id, depth, ... })
+        if node.is_dir and node.id ∈ expanded:
+            for child in node.children:     # 未展开的目录：孩子不进入 out
+                visit(child, depth + 1)
+    visit(tree.root, 0)
+    return out
+```
+
+`uniform_list` 侧的可见区间直觉模型（u6-l1 精读过实现，这里是等价的心智模型）：
+
+\[ \text{first} = \left\lfloor \frac{\text{scroll\_offset}}{\text{item\_height}} \right\rfloor, \qquad \text{last} = \left\lceil \frac{\text{scroll\_offset} + \text{viewport\_height}}{\text{item\_height}} \right\rceil \]
+
+行高只测一次，总高 = 行高 × 行数，所以滚动偏移到行号的换算是一次除法，不需要布局引擎参与。
+
+一条完整的更新链路（本讲把前面所有链路串起来）：
+
+```text
+用户按 j
+  → Keymap 匹配 NextEntry（上下文 FileBrowser）          (u5-l4)
+  → 沿焦点路径的 DispatchTree 找到 on_action 监听器       (u5-l3)
+  → cx.listener 回调里 selected 前移，cx.notify()         (u2-l3)
+  → flush_effects 把窗口标脏，schedule_frame 排帧          (u4-l3)
+  → 下一帧 render()：重新 flatten()，重建 uniform_list
+  → uniform_list 在布局阶段按区间回调，构建可见 EntryRow
+  → 三阶段推进，命中测试登记，像素上屏
+```
+
+#### 4.2.3 源码精读
+
+**（1）`uniform_list` 构造函数**（[src/elements/uniform_list.rs:18-55](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/elements/uniform_list.rs#L18-L55)）：签名是 `(id, item_count, f)`，其中 `f: Fn(Range<usize>, &mut Window, &mut App) -> Vec<R>`。注意两点：它自带 `overflow.y = Scroll` 的基础样式（所以外层容器要能约束它的高度，u6-l1 讲过 `ListSizingBehavior`）；回调签名拿的是 `&mut App` 而不是 `Context<T>`——这就是必须配合 `cx.processor` 的原因。
+
+**（2）`Context::processor` 是桥**（[src/app/context.rs:264-27](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/app/context.rs#L264-L272)）：它把「实体方法」适配成「裸回调」——内部捕获实体句柄，调用时执行 `view.update(cx, |view, cx| f(view, e, window, cx))`。于是你的闭包能同时拿到 `&mut MiniBrowser` 和 `&mut Context<MiniBrowser>`。
+
+这里有一个**关键的时序事实**，初学者几乎都会在这里困惑：`render()` 里调用 `cx.processor(...)` 只是**构造**闭包，闭包真正被执行是在布局阶段（`render()` 已经返回之后）。所以：
+
+- data_table 才敢在回调里写 `this.visible_range = range.clone()`（见下）——这不是重入借用，因为 `render()` 早已结束；
+- 这种「顺带记录」**故意不调 `cx.notify()`**：如果调了，布局期写状态 → 标脏 → 再排一帧 → 再写……就是每帧自我复制的死循环。它只为下一帧的显示留信息。
+
+**（3）data_table 的标准用法**（[examples/data_table.rs:429-446](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/data_table.rs#L429-L446)）：`uniform_list("items", self.quotes.len(), cx.processor(...))` 之后接 `.track_scroll(&self.scroll_handle)` 接管滚动。回调里为区间内每个下标构造 `TableRow::new(i, quote.clone())`——`clone` 的只是 `Rc` 指针。外层 `div().relative().size_full()` 再叠一个绝对定位的自绘滚动条（[examples/data_table.rs:296-319](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/data_table.rs#L296-L319)），用 `scroll_handle.0.borrow().base_handle` 读偏移——这是「虚拟列表 + 自绘滚动条」的完整范本。
+
+**（4）滚动句柄**（[src/elements/uniform_list.rs:134-157](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/elements/uniform_list.rs#L134-L157)）：`UniformListScrollHandle` 包装了基础 `ScrollHandle` 并增加 `scroll_to_item`——它**只登记一个延迟意图**（`deferred_scroll_to_item`），下一帧 prepaint 时才换算成像素偏移。非严格模式（注释写明「已可见则不动」）正适合 `j`/`k` 导航：选中项在屏内时不打扰滚动，出屏时最小滚动量带回。
+
+**（5）真实产品验证：Zed 的项目面板。** 毕业项目的架构不是教学虚构。Zed 真实侧边栏的核心渲染代码（[crates/project_panel/src/project_panel.rs:7139-7165](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/project_panel/src/project_panel.rs#L7139-L7165)，gpui 之外）与你将写出的代码几乎逐字对应：`track_focus(&self.focus_handle(cx))` + `uniform_list("entries", item_count, cx.processor(|this, range, window, cx| ...))`，回调里同样记录 `this.rendered_entries_len = range.end - range.start`，同样按区间构建条目元素，外加 `with_decoration` 画跨行缩进线（u6-l1 讲过的 `UniformListDecoration`）。7000 行的产品代码与 500 行的毕业项目共享同一副骨架——这就是架构选型正确的样子。
+
+#### 4.2.4 代码实践
+
+**实践目标**：实现 MiniBrowser 的数据模型与列表渲染，跑出一个能滚动的扁平文件树（先不做交互）。
+
+**操作步骤**：
+
+1. 新建 `examples/mini_browser.rs`（见 4.1.4 的目录规划；先全部写在单文件里）。以下为**示例代码**（非仓库现有代码），可直接作为起点：
+
+```rust
+// 示例代码：examples/mini_browser.rs（第一步：数据 + 列表）
+#![cfg_attr(target_family = "wasm", no_main)]
+use std::collections::HashSet;
+use gpui::{
+    App, Context, Entity, FocusHandle, Focusable, Pixels, Render, ScrollStrategy,
+    SharedString, UniformListScrollHandle, Window, WindowOptions, div, prelude::*, px,
+    uniform_list,
+};
+use gpui_platform::application;
+
+/// 条目的稳定标识：过滤/展开都会打乱行下标，但 id 不变。
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct EntryId(usize);
+
+#[derive(Clone)]
+struct Entry {
+    id: EntryId,
+    name: SharedString,
+    is_dir: bool,
+    depth: usize,
+    children: Vec<Entry>,
+}
+
+impl Entry {
+    /// 内存假树：不碰磁盘，保证测试确定性（真实目录可用 background_spawn 读取，
+    /// 见 u2-l5；毕业项目先假树，扩展挑战里再换真 IO）。
+    fn fake_tree() -> Entry { /* 递归生成若干层目录与文件，略 */ }
+}
+
+#[derive(Clone)]
+struct Row {
+    id: EntryId,
+    name: SharedString,
+    is_dir: bool,
+    depth: usize,
+}
+
+struct MiniBrowser {
+    tree: Entry,                       // 完整树
+    rows: Vec<Row>,                    // flatten 的产物
+    expanded: HashSet<EntryId>,
+    selected: Option<EntryId>,
+    scroll_handle: UniformListScrollHandle,
+    focus_handle: FocusHandle,
+}
+
+impl MiniBrowser {
+    fn new(cx: &mut Context<Self>) -> Self {
+        let tree = Entry::fake_tree();
+        let mut this = Self {
+            rows: Vec::new(),
+            tree,
+            expanded: HashSet::new(),
+            selected: None,
+            scroll_handle: UniformListScrollHandle::new(),
+            focus_handle: cx.focus_handle(),
+        };
+        this.reflatten();
+        this
+    }
+
+    /// 树 → 行。展开/过滤/选中的任何变化后都要重算。
+    fn reflatten(&mut self) {
+        let mut rows = Vec::new();
+        fn visit(node: &Entry, expanded: &HashSet<EntryId>, out: &mut Vec<Row>) {
+            out.push(Row { id: node.id, name: node.name.clone(),
+                           is_dir: node.is_dir, depth: node.depth });
+            if node.is_dir && expanded.contains(&node.id) {
+                for child in &node.children {
+                    visit(child, expanded, out);
+                }
+            }
+        }
+        visit(&self.tree, &self.expanded, &mut rows);
+        self.rows = rows;
+    }
+
+    fn row_index_of(&self, id: EntryId) -> Option<usize> {
+        self.rows.iter().position(|row| row.id == id)
+    }
+}
+
+impl Focusable for MiniBrowser {
+    fn focus_handle(&self, _: &App) -> FocusHandle { self.focus_handle.clone() }
+}
+
+impl Render for MiniBrowser {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().flex().flex_col().track_focus(&self.focus_handle)
+            .child(div().px_2().py_1().text_sm()
+                .child(format!("{} entries", self.rows.len())))
+            .child(uniform_list(
+                "entries",
+                self.rows.len(),
+                cx.processor(|this, range: std::ops::Range<usize>, _, _| {
+                    // 布局阶段才执行：只为可见区间克隆 Row（Row 很小，直接 clone）。
+                    range.map(|ix| this.rows[ix].clone()).collect::<Vec<_>>()
+                }),
+            )
+            .flex_1()
+            .track_scroll(&self.scroll_handle))
+    }
+}
+
+fn run_example() {
+    application().run(|cx: &mut App| {
+        cx.open_window(WindowOptions::default(), |_, cx| {
+            cx.new(|cx| MiniBrowser::new(cx))
+        })
+        .unwrap();
+    });
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn main() { run_example(); }
+```
+
+2. 注意 `Row` 需要实现 `IntoElement` 才能作为列表项返回——下一步（4.3）我们把它升级为 `EntryRow` 组件；本步可临时让闭包返回 `div().child(row.name.clone()).pl(px(row.depth as f32 * 16.))` 之类的临时元素先跑通。
+3. `Row` 目前只做浅缩进展示；`depth` 字段先留着。
+
+**需要观察的现象**：窗口中出现可滚动的条目列；顶部计数随展开而变化（本步还没有展开交互，可以先在 `new` 里预置几个 `expanded` 条目试验）；快速拖动滚动流畅。
+
+**预期结果**：与 `cargo run -p gpui --example data_table` 同款的虚拟化行为——无论树多大，任意时刻只构建几十行。具体帧率与平台有关，待本地验证。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么 `uniform_list` 的回调签名是 `&mut App` 而不是 `Context<T>`？`cx.processor` 做了什么？
+
+**参考答案**：列表元素是通用组件，不知道也不该知道任何实体类型，它只能给出「区间 + 窗口 + 应用上下文」。`cx.processor`（[src/app/context.rs:264-272](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/app/context.rs#L264-L272)）捕获当前实体句柄，把调用翻译成 `view.update(cx, |view, cx| f(view, e, window, cx))`，从而把裸回调适配回「实体方法」。
+
+**练习 2**：如果 `rows` 有十万行而 `reflatten()` 在每次 `render()` 里都完整重算，会怎样？什么时候重算才是对的？
+
+**参考答案**：`render()` 每帧都可能执行（动画、悬停都会触发帧），完整重算十万行的树遍历是浪费。正确做法是**只在输入变化时重算**：`toggle_expand`、`set_filter` 等改状态的方法内先改 `expanded`/`filter`，紧接着调一次 `reflatten()`，再 `cx.notify()`。`render()` 只读取 `self.rows`。（进一步优化可缓存过滤结果，毕业项目不必。）
+
+**练习 3**：`scroll_to_item` 为什么是「登记意图」而不是立即改偏移？
+
+**参考答案**：调用它时（例如动作回调里）你只知道目标行号，不知道当前行高与视口几何——这些信息在布局阶段才可用。所以它写入 `deferred_scroll_to_item`（[src/elements/uniform_list.rs:150-157](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/elements/uniform_list.rs#L150-L157)），下一帧 prepaint 换算成像素偏移。这是 GPUI 里「命令 → 帧内延迟执行」的常见模式（u6-l3 的 `Deferred`、u5-l2 的 pending click 同理）。
+
+---
+
+### 4.3 交互编排：动作、keymap、焦点、悬浮菜单与 prompt
+
+#### 4.3.1 概念说明
+
+静态列表有了，现在让它「活」。本模块一次性组装五个子系统，它们各自属于前面的讲义，但组合时会产生**新的设计问题**——这正是综合讲的价值：
+
+1. **动作定义与注册**（u5-l3）：`actions!` 定义 `NextEntry`/`PrevEntry`/`ToggleExpand`/`FocusSearch`。
+2. **键位绑定**（u5-l4）：`bind_keys` 把 `j`/`k`/`enter`/`/` 绑到动作，并限定上下文。
+3. **焦点管理**（u5-l5）：列表区与搜索框各有 `FocusHandle`，动作沿焦点路径派发——`j` 只应在焦点位于列表时生效。
+4. **悬浮菜单**（u6-l3）：工具栏按钮弹出 `deferred(anchored(...))` 面板，`on_mouse_down_out` 点击外部关闭。
+5. **系统对话框**（u7-l3）：双击文件弹 `window.prompt`，异步收答案。
+
+组合的核心矛盾是：**`j` 是个普通字符，而应用里还有一个文本输入框**。焦点在搜索框里敲 `j` 应该输入字母，焦点在列表里敲 `j` 才应该下移选中。解法是 4.3.2 的重点。
+
+#### 4.3.2 核心流程
+
+一次 `j` 键的完整旅程（串联 u5-l3/u5-l4/u5-l5）：
+
+```text
+平台按键 → Keystroke { key: "j" }
+  → window 先画脏帧，再在上一帧 DispatchTree 上派发      (u4-l3/u5-l4)
+  → Keymap.bindings_for_input 拿焦点路径上的 KeyContext 栈：
+        焦点在列表  → 栈 = ["FileBrowser"]        → j 命中 NextEntry
+        焦点在搜索  → 栈 = ["SearchInput"]        → j 无绑定，落到文本输入
+  → 四阶段派发（全局捕获 → 路径捕获 → 路径冒泡 → 全局冒泡）
+  → on_action(cx.listener(Self::next_entry)) 命中
+  → selected 前移 + scroll_to_item + cx.notify()
+  → 下一帧 reflatten 后的 rows 被重新渲染
+```
+
+防误触的结构要点（**上下文隔离靠元素树结构，不靠运行时判断**）：
+
+```text
+div (根，无 key_context，处理 FocusSearch —— 全局动作)
+ ├── div .key_context("SearchInput") .track_focus(&search_focus)   ← 搜索框
+ └── div .key_context("FileBrowser") .track_focus(&list_focus)     ← 列表
+```
+
+`j` 的绑定写成 `KeyBinding::new("j", NextEntry, Some("FileBrowser"))`。由于搜索框不是列表容器的后代，焦点在搜索框时上下文栈里根本没有 `FileBrowser`，绑定自然不命中——不需要写任何「如果焦点在输入框就忽略」的命令式代码。若两块必须嵌套，则要改用绑定谓词（如 `"FileBrowser && !SearchInput"`，u5-l4 的谓词小语言），毕业项目用结构隔离更简单。
+
+#### 4.3.3 源码精读
+
+**（1）动作定义**（[examples/input.rs:16-34](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/input.rs#L16-L34)）：`actions!(text_input, [Backspace, Delete, ...])` 一行一个零数据动作，命名空间 `text_input` 会进入动作全名（`text_input::Backspace`），注册发生在链接期（u5-l3 的 inventory 机制）。
+
+**（2）元素侧的标准写法**（[examples/input.rs:585-627](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/input.rs#L585-L627)）：`.key_context("TextInput")` 声明上下文事实，`.track_focus(&self.focus_handle(cx))` 把句柄挂上派发树，然后一串 `.on_action(cx.listener(Self::backspace))`。同文件末尾的 `impl Focusable`（[examples/input.rs:623-627](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/input.rs#L623-L627)）是实体接入焦点体系的另一半。**注意次序无关性**：`key_context`、`track_focus`、`on_action` 都是链式配置，真正生效在 paint 阶段写入下一帧的 DispatchTree（u5-l3）。
+
+**（3）绑定注册与初始焦点**（[examples/input.rs:697-714](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/input.rs#L697-L714)、[examples/input.rs:757-762](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/input.rs#L757-L762)）：`cx.bind_keys([...])` 在 `run` 回调里完成；开窗后用 `window.focus(&view.text_input.focus_handle(cx), cx)` 设定初始焦点。带上下文的绑定示例见 testing 示例（[examples/testing.rs:182-185](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/testing.rs#L182-L185)）：`KeyBinding::new("up", Increment, Some("Counter"))` 与元素侧 `.key_context("Counter")`（[examples/testing.rs:84](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/testing.rs#L84)）严格配对——上下文字符串拼错不会报错，只会「按键没反应」，这是 u5-l4 六步排查的第一嫌疑。
+
+`bind_keys` 的底层（[src/app.rs:2224-2227](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/app.rs#L2224-L2227)）只是把绑定塞进 `Keymap` 并入队一个 `Effect::RefreshWindows`——改键位表会触发窗口刷新以重建派发树。`KeyBinding::new` 的第三个参数是可选上下文（[src/keymap/binding.rs:31-45](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/keymap/binding.rs#L31-L45)），字符串解析失败会 panic（文档注明）。
+
+**（4）悬浮菜单配方**（[examples/popover.rs:119-152](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/popover.rs#L119-L152)）：`.when(self.open, |this| this.child(deferred(anchored().anchor(Anchor::TopLeft).snap_to_window_with_margin(px(8.)).child(面板)).priority(1)))`。三个成分各司其职（u6-l3）：`when` 是构建期条件挂载；`deferred` 把面板挪到图层末尾绘制；`anchored` 负责位置与越界翻转。面板上的 `on_mouse_down_out`（[examples/popover.rs:136-142](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/popover.rs#L136-L142)）在 Capture 阶段拦截外部按下、关闭菜单。嵌套浮层用更高的 `priority` 抬层级（[examples/popover.rs:44-78](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/popover.rs#L44-L78)）。
+
+**（5）prompt**（[src/window.rs:5748-5787](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/window.rs#L5748-L5787)）：签名 `prompt<T>(level, message, detail, answers, cx) -> oneshot::Receiver<usize>`，返回的接收器会收到**被点击按钮的下标**。策略分发在方法内部完成：`PromptBuilder::Default` 先问平台要原生对话框，平台不支持则回落自绘（u7-l3 详述）。调用侧的标准姿势见 window 示例（[examples/window.rs:270-287](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/window.rs#L270-L287)）：同步拿到 receiver，立刻 `cx.spawn` 异步等答案。**不要**在监听器里直接 `.await`——监听器是同步闭包。
+
+#### 4.3.4 代码实践
+
+**实践目标**：给 4.2 的列表装上完整交互：`j`/`k` 导航、`enter` 展开收起、`/` 聚焦搜索、双击弹 prompt、工具栏弹悬浮菜单。
+
+**操作步骤**：
+
+1. 定义动作与行组件（**示例代码**，接 4.2）：
+
+```rust
+// 示例代码：动作与 EntryRow 组件
+use gpui::{actions, ClickEvent, ElementId};
+
+actions!(
+    mini_browser,
+    [NextEntry, PrevEntry, ToggleExpand, FocusSearch]
+);
+
+#[derive(IntoElement)]
+struct EntryRow {
+    ix: usize,
+    row: Row,                       // Row 很小，直接按值传入
+    selected: bool,
+}
+
+impl RenderOnce for EntryRow {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        div()
+            // 有 id 才有 hover/active 状态样式；用稳定 EntryId 而非名字，
+            // 同名兄弟也不会撞 id（u5-l2 的状态串扰警告）。
+            .id(ElementId::NamedInteger("entry".into(), self.row.id.0 as u64))
+            .w_full()
+            .pl(px(self.row.depth as f32 * 16.))    // 扁平缩进：宽度 = 深度 × 16px
+            .when(self.selected, |el| el.bg(gpui::blue().opacity(0.2)))
+            .child(if self.row.is_dir { "▸ " } else { "  " })
+            .child(self.row.name.clone())
+    }
+}
+```
+
+（`RenderOnce`/`IntoElement` 已由 `prelude::*` 提供；`ElementId` 的常用变体是 `Name(SharedString)`、`Integer(u64)` 与 `NamedInteger(SharedString, u64)`，见 [src/window.rs:6617-6631](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/window.rs#L6617-L6631)。同一层兄弟 id 必须唯一，否则跨帧元素状态会串扰。）
+
+2. 改造 `uniform_list` 回调，为每行挂点击监听（**示例代码**）。注意闭包在布局阶段执行、此时可安全 `cx.listener`：
+
+```rust
+// 示例代码：列表回调里的行交互
+.child(uniform_list(
+    "entries",
+    self.rows.len(),
+    cx.processor(|this, range: std::ops::Range<usize>, _window, cx| {
+        range
+            .filter_map(|ix| this.rows.get(ix).map(|row| (ix, row.clone())))
+            .map(|(ix, row)| {
+                let selected = this.selected == Some(row.id);
+                EntryRow { ix, row, selected }
+                    .on_click({
+                        let ix = ix;
+                        cx.listener(move |this, event: &ClickEvent, window, cx| {
+                            // 双击 = click_count 达到 2（平台已做时间窗口累计）
+                            if event.click_count() == 2 {
+                                this.open_entry(ix, window, cx);
+                            } else {
+                                this.selected = Some(this.rows[ix].id);
+                                cx.notify();
+                            }
+                        })
+                    })
+            })
+            .collect::<Vec<_>>()
+    }),
+))
+```
+
+3. 动作处理器与 prompt（**示例代码**，`open_entry` 的姿势照抄 window 示例）：
+
+```rust
+// 示例代码：动作处理器 + prompt
+impl MiniBrowser {
+    fn next_entry(&mut self, _: &NextEntry, _: &mut Window, cx: &mut Context<Self>) {
+        let next = self.selected
+            .and_then(|id| self.row_index_of(id))
+            .map(|ix| ix + 1)
+            .filter(|&ix| ix < self.rows.len())
+            .unwrap_or(0);
+        self.selected = Some(self.rows[next].id);
+        self.scroll_handle.scroll_to_item(next, ScrollStrategy::Center);
+        cx.notify();
+    }
+
+    fn toggle_expand(&mut self, _: &ToggleExpand, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.selected.and_then(|id| self.row_index_of(id)) else {
+            return;
+        };
+        if !self.rows[ix].is_dir {          // 文件没有可展开的孩子
+            return;
+        }
+        let id = self.rows[ix].id;
+        if !self.expanded.insert(id) {      // insert 返回 false 表示已展开 → 收起
+            self.expanded.remove(&id);
+        }
+        self.reflatten();                   // 先改数据，再 notify（练习 2 的结论）
+        cx.notify();
+    }
+
+    fn open_entry(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.rows.get(ix) else { return };
+        let answer = window.prompt(
+            gpui::PromptLevel::Info,
+            &format!("预览 {}", row.name),
+            Some(&format!("深度 {} · {}", row.depth, if row.is_dir { "目录" } else { "文件" })),
+            &["打开", "取消"],
+            cx,
+        );
+        let name = row.name.clone();
+        cx.spawn(async move |_| {
+            if answer.await.unwrap() == 0 {
+                println!("open {}", name);   // 真实应用在此接系统打开命令
+            }
+        })
+        .detach();
+    }
+}
+```
+
+4. `render()` 根节点补上 `.key_context("FileBrowser")`、`.track_focus(&self.focus_handle(cx))`、四个 `.on_action(cx.listener(...))`；搜索框单独一块 `.key_context("SearchInput")`（结构隔离见 4.3.2）。`FocusSearch` 处理器里 `self.search_focus.focus(window, cx)`。
+5. `run_example()` 里注册绑定并设初始焦点（照抄 [examples/input.rs:700-714](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/input.rs#L700-L714) 与 [examples/input.rs:757-762](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/input.rs#L757-L762) 的姿势）：
+
+```rust
+// 示例代码：绑定与初始焦点
+cx.bind_keys([
+    KeyBinding::new("j", NextEntry, Some("FileBrowser")),
+    KeyBinding::new("k", PrevEntry, Some("FileBrowser")),
+    KeyBinding::new("enter", ToggleExpand, Some("FileBrowser")),
+    KeyBinding::new("/", FocusSearch, None),      // 全局：任何焦点下都可达
+]);
+// 开窗后：
+window.update(cx, |view, window, cx| {
+    window.focus(&view.focus_handle(cx), cx);     // 初始焦点给列表
+    cx.activate(true);
+}).unwrap();
+```
+
+6. 工具栏按钮 + 悬浮菜单：给实体加 `menu_open: bool` 字段，按钮 `on_click` 翻转；菜单本体照抄 popover 配方（`.when(self.menu_open, |el| el.child(deferred(anchored().anchor(Anchor::TopLeft).snap_to_window_with_margin(px(8.)).child(菜单面板)).priority(1)))`），面板内 `on_mouse_down_out` 关闭。菜单项先放「全部展开 / 全部收起」两个按钮。
+
+**需要观察的现象**：
+
+- 焦点在列表时按 `j`/`k` 选中行移动、接近视口边缘时列表自动滚动；焦点切到搜索框（按 `/`）后再按 `j`，输入的是字母 `j` 而不是移动选中。
+- 双击文件弹出系统对话框（Linux 桌面上大概率是 GPUI 自绘回落版，u7-l3）；点「打开」后终端打印 `open xxx`。
+- 悬浮菜单浮在列表上层，点击面板外部立即关闭。
+- 快速连按 `j` 不丢帧。
+
+**预期结果**：以上四条全部成立。若 `j` 无反应，按 u5-l4 的六步排查：先查焦点在哪，再查 `key_context` 字符串与绑定的上下文是否逐字符一致。运行表现与平台相关，待本地验证。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么 `FocusSearch` 的绑定上下文是 `None`，而 `NextEntry` 是 `Some("FileBrowser")`？
+
+**参考答案**：`None` 表示无上下文谓词，任何焦点路径都能命中——「跳到搜索框」恰恰要在焦点不在搜索框时可用，所以它是全局动作。`NextEntry` 必须限定在列表上下文，否则会在搜索框里打字时抢走 `j` 键。这也解释了为什么 `FocusSearch` 的处理器放在根节点、`NextEntry` 的处理器放在列表容器上。
+
+**练习 2**：把 `toggle_expand` 里的 `reflatten()` 与 `cx.notify()` 顺序对调（先 notify 再 reflatten）会出什么问题？
+
+**参考答案**：`cx.notify()` 只是把窗口标脏、请求下一帧（u4-l3），并不会立即重绘，所以**本帧内**顺序对调看似无害。但真正的错误是遗漏 `reflatten()` 或把它放到 `render()` 里——状态（`expanded`）与派生物（`rows`）会不一致。保持「改状态 → 重算派生物 → notify」的固定顺序能让这类不一致在代码评审时一眼暴露。（更深一层：派生重算也可以在 `render()` 里做脏检查，见 4.2 练习 2。）
+
+**练习 3**：如果不用 `deferred`，直接把菜单作为列表容器的普通 child，会发生什么？
+
+**参考答案**：菜单会参与容器的 flex 布局，把列表挤窄（或被 `overflow` 裁掉），而且绘制顺序跟随元素树，无法保证盖住列表。`deferred` 的职责正是把「住在树里」（参与布局与派发）与「画在最上层」（层级抬升）解耦（u6-l3）。
+
+---
+
+### 4.4 测试与整体架构回顾
+
+#### 4.4.1 概念说明
+
+u7-l4 讲过测试基础设施，本模块解决「**给一个完整应用写测试时，测什么、在哪一层测**」。MiniBrowser 的可测试性来自 4.1 的分层决策：
+
+- `flatten`/`row_index_of` 是**纯逻辑**——不碰 GPUI 上下文即可直接断言，测试最便宜、失败定位最快；
+- 动作处理器是**实体级逻辑**——用 `TestAppContext` 建实体、调 `update`，不需要窗口；
+- 「按 `j` 选中真的下移」是**派发链路**——动作解析依赖元素树（u5-l3：监听器写在下一帧 DispatchTree 里），必须开窗口、用 `VisualTestContext` + `dispatch_action` 走完整链路。
+
+层次越低测试越多（金字塔），层次越高越少而精。**测试用内存假树**（4.2 的 `Entry::fake_tree`）是决定性测试的前提：不碰磁盘，`TestDispatcher` 的虚拟时钟就不会因等待外部 IO 而 panic（u7-l4 的 parking 机制）。
+
+#### 4.4.2 核心流程
+
+写测试前的决策流程：
+
+```text
+要验证的行为是什么？
+ ├── 纯计算（flatten 结果 / 过滤语义）      → 普通函数断言（可不依赖 gpui::test）
+ ├── 状态变更（toggle_expand 后 rows 变化） → TestAppContext + entity.update
+ ├── 动作派发（j 键 → selected 下移）        → open_window + VisualTestContext
+ │                                           + focus_handle.dispatch_action
+ └── 异步（prompt 回答后的行为）             → async gpui::test + run_until_parked
+```
+
+两个必写的测试（对应毕业任务要求的「至少两个」）：
+
+1. **`test_flatten_and_expand`**（实体级）：展开根目录后行数正确、深度递增；收起后回到一行。
+2. **`test_next_entry_dispatch`**（窗口级）：派发 `NextEntry` 动作，断言 `selected` 按 id 下移——这条链路覆盖 `key_context` 声明、`track_focus` 挂载、DispatchTree 构建、`cx.listener` 回调的**全部接线**，是最能抓住「上下文字符串拼错」「忘了 track_focus」这类集成错误的测试。
+
+#### 4.4.3 源码精读
+
+**（1）实体级测试模板**（[examples/testing.rs:224-246](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/testing.rs#L224-L246)）：`#[gpui::test]` + `cx: &mut TestAppContext`，`cx.new` 建实体、`update` 改状态、`read_with` 断言。文件头注释明确给出运行命令（[examples/testing.rs:7-8](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/testing.rs#L7-L8)）：`cargo test -p gpui --example testing --features test-support`。
+
+**（2）窗口级动作测试模板**（[examples/testing.rs:251-273](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/testing.rs#L251-L273)）：流程是 `cx.update(|cx| cx.open_window(...))` 开窗 → `VisualTestContext::from_window` 取窗口上下文 → `window.root(&mut cx)` 拿根视图实体 → 读出 `focus_handle` → `cx.update(|window, cx| focus_handle.dispatch_action(&Increment, window, cx))` 派发 → `read_with` 断言。源码里的注释点破了关键：**动作派发依赖元素树解析处理器，而测试里每次 `update*` 调用后窗口都会自动重画**，所以派发时树是新鲜的。
+
+**（3）为什么测试里窗口能自动重画**：`App::open_window` 创建窗口时会**同步先画一帧**再返回句柄（[src/app.rs:1248-1281](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/app.rs#L1248-L1281)，见 1264-1269 行的注释：Windows 平台上未渲染的窗口会在派发树断言上崩溃）。这是产品代码里的防御，也顺带保证了测试的派发树始终可用。
+
+**（4）属性测试与多实体测试**（进阶）：同一示例还演示了 `#[gpui::test(iterations = 10)]` 随机操作序列（[examples/testing.rs:326-357](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/testing.rs#L326-L357)）与双 `TestAppContext` 模拟分布式系统——毕业项目用不到，但值得知道边界在哪。
+
+**（5）全局兜底处理器**：若某些动作要「任何地方都可达」（如退出），可用 `App::on_action` 注册全局监听（[src/app.rs:2243-2257](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/app.rs#L2243-L2257)，仅在冒泡阶段、无人处理时触发），input 示例的 `Quit` 就是这么接的（[examples/input.rs:763-764](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/input.rs#L763-L764)）。
+
+#### 4.4.4 代码实践
+
+**实践目标**：为 MiniBrowser 写两个 `#[gpui::test]`，并跑通。
+
+**操作步骤**：
+
+1. 在 `examples/mini_browser.rs` 底部加测试模块（**示例代码**）：
+
+```rust
+// 示例代码：两个毕业测试
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+
+    /// 构造一棵已知的假树：根目录下 2 个子目录、各 1 个文件。
+    fn fixture() -> Entry { Entry::fake_tree() }   // 假树数据固定、可预测
+
+    #[gpui::test]
+    fn test_flatten_and_expand(cx: &mut TestAppContext) {
+        let browser = cx.new(|cx| MiniBrowser::with_tree(fixture(), cx));
+
+        browser.update(cx, |this, cx| {
+            let root = this.rows[0].id;
+            assert!(this.rows[0].is_dir);
+            this.expanded.insert(root);
+            this.reflatten();
+            assert_eq!(this.rows.len(), 5, "展开根目录后应看到全部后代");
+            assert_eq!(this.rows[1].depth, 1, "孩子深度 +1");
+            this.expanded.remove(&root);
+            this.reflatten();
+            assert_eq!(this.rows.len(), 1, "收起后只剩根");
+            cx.notify();
+        });
+    }
+
+    #[gpui::test]
+    fn test_next_entry_dispatch(cx: &mut TestAppContext) {
+        // 先展开根目录，让列表里有多行可导航。
+        let window = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |_, cx| {
+                cx.new(|cx| {
+                    let mut browser = MiniBrowser::with_tree(fixture(), cx);
+                    let root = browser.rows[0].id;
+                    browser.expanded.insert(root);
+                    browser.reflatten();
+                    browser
+                })
+            })
+            .unwrap()
+        });
+
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let browser: Entity<MiniBrowser> = window.root(&mut cx).unwrap();
+
+        // 走完整派发链路：焦点句柄 → DispatchTree → on_action 监听器。
+        let focus = browser.read_with(&cx, |this, _| this.focus_handle.clone());
+        cx.update(|window, cx| {
+            focus.dispatch_action(&NextEntry, window, cx);
+        });
+
+        let selected = browser.read_with(&cx, |this| this.selected);
+        assert_eq!(
+            selected,
+            browser.read_with(&cx, |this| Some(this.rows[1].id)),
+            "派发 NextEntry 后应选中第二行"
+        );
+    }
+}
+```
+
+（`with_tree` 是给 `new` 加的便捷构造：接收假树、完成首次 `reflatten`。）
+
+2. 运行：`cargo test -p gpui --example mini_browser --features test-support`（与 testing 示例的命令同款，见 [examples/testing.rs:8](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/examples/testing.rs#L8)）。
+3. 若第二个测试失败且 `selected` 为 `None`，依次检查：根节点是否 `track_focus`、`on_action` 是否注册在带 `key_context` 的容器上、`Focusable` 是否实现。
+
+**需要观察的现象**：两个测试通过；故意把 `key_context("FileBrowser")` 改成 `key_context("FileBrowserX")` 后，第二个测试**仍应通过**（`dispatch_action` 绕过键位匹配直达焦点路径，u7-l4），但真实按键会失效——体会「测试通过 ≠ 按键可用」的盲区。
+
+**预期结果**：测试通过耗时以毫秒计（无真实窗口、虚拟时钟）。`--features test-support` 是必需的，否则 `TestAppContext` 等设施不可用。具体输出待本地验证。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：为什么第二个测试用 `dispatch_action` 而不是 `simulate_keystrokes("j")`？
+
+**参考答案**：两者验证的层不同。`dispatch_action` 直达焦点路径上的动作处理器，验证「监听器接线正确」；`simulate_keystrokes` 还要经过 Keymap 匹配，能额外抓住「绑定上下文与 `key_context` 不一致」的错误，但前提是测试里先 `bind_keys`（u7-l4：测试不继承示例 `run_example` 里注册的绑定）。最佳实践是两个都写，一个测接线、一个测键位。
+
+**练习 2**：测试里为什么必须用内存假树，不能读真实文件系统？
+
+**参考答案**：两个原因。一是确定性：测试断言行数与顺序，真实目录内容随时变化，断言无法稳定。二是调度模型：`TestDispatcher` 在「无事可做」时会让 await panic（parking 检测，u7-l4），磁盘 IO 是 GPUI 控制之外的外部系统；要真的等它需要 `allow_parking()`，而那会牺牲确定性。真实 IO 应放在被 mock 的边界之后（例如 `with_tree` 注入数据）。
+
+**练习 3**：如何为「双击弹 prompt」写测试？
+
+**参考答案**：prompt 依赖平台对话框（或自绘回落），在 headless 测试里行为受限。合理策略是把「双击 → 打开」拆成两段：测试断言「双击后进入待确认状态」（例如实体里记一个 `pending_open: Option<EntryId>` 字段），prompt 的答案处理（收到下标 0 才真正打开）单独用纯逻辑测。UI 与副作用的接缝处正是可测试性的来源。
+
+---
+
+## 5. 综合实践
+
+毕业项目验收：完成一个**迷你文件浏览器**，建议按五个里程碑推进，每个里程碑都可独立运行、独立验收。
+
+| 里程碑 | 内容 | 验收标准 |
+| --- | --- | --- |
+| M1 数据与列表 | 4.2 的全部：`Entry`/`Row`/假树/`reflatten`/`uniform_list` | 万级假树滚动流畅；顶部计数与展开状态一致 |
+| M2 键盘导航 | `j`/`k`/`enter` + 选中高亮 + `scroll_to_item` | 焦点在列表时 `j` 下移、`enter` 展开收起并保持选中不丢 |
+| M3 搜索过滤 | `/` 聚焦搜索框、输入即过滤（自身或后代匹配） | 搜索框里打字 `j` 是字母；过滤后行下标变化但选中项跟随 |
+| M4 菜单与对话框 | 工具栏悬浮菜单 + 双击 `prompt` 预览 | 菜单浮于列表上层、点外部关闭；双击弹框、点「打开」有可观察输出 |
+| M5 测试 | 4.4 的两个 `#[gpui::test]` | `cargo test -p gpui --example mini_browser --features test-support` 全绿 |
+
+**贯穿性任务**：在项目完成后，写一份「调用链路注释」——为 `next_entry` 的每一行标注它最终触发的 GPUI 内部模块（例如 `cx.notify()` → `App::notify` → `WindowInvalidator` 标脏 → `schedule_frame` 排帧 → `Window::draw` 三阶段）。这份注释就是你**个人的整机地图**，也是检验你是否真的「闭合了认知环路」的标准：说不清任何一行，就回到对应讲义。
+
+**扩展挑战**（按性价比排序）：
+
+1. **真实目录**：用 `cx.background_spawn` + `smol` 的文件 API 读真实目录树，回到前台 `update` 实体（u2-l5 的标准前后台协作）；注意处理读取失败的错误传播（CLAUDE.md 的告诫：不要 `let _ =` 静默丢弃错误）。
+2. **变高行**：把长文件名换行显示，此时 `uniform_list` 的等高假设失效，改用 `list` 元素（u6-l2）。
+3. **右键菜单**：用 `event.is_right_click()`（[src/interactive.rs:344-352](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/gpui/src/interactive.rs#L344-L352)）弹 `anchored` 菜单，菜单项含「重命名/删除/在终端打开」（Zed 项目面板有完整实现可对照）。
+4. **无障碍**：给行补 `.role()`/`.aria_*`，用 `debug_a11y_tree_json` 验证（u6-l8）。
+5. **性能剖析**：开 `--features profiler`，用 u7-l5 的工具对比万行/十万行下的帧耗时与丢帧数。
+6. **键位冲突实验**：把搜索框移进列表容器内部（破坏 4.3.2 的结构隔离），观察 `j` 开始抢字母，再用谓词绑定 `"FileBrowser && !SearchInput"` 修复——亲手踩一次 u5-l4 的坑。
+
+## 6. 本讲小结
+
+- **架构选型是分配问题**：实体存跨帧状态、RenderOnce 组件做展示配方、专门元素（`uniform_list`/`deferred`/`anchored`）提供机制——先填「状态归属表」再写代码。
+- **树要扁平化**：文件树渲染成等高行向量交给 `uniform_list`，缩进是深度 × 固定宽度，绝不递归嵌套 div；`cx.processor` 把列表回调安全地适配回实体方法，且闭包在布局阶段才执行。
+- **组合产生新设计问题**：`j` 键与文本输入的冲突靠 `key_context` 的**结构隔离**解决（搜索框不是列表容器的后代），而不是运行时判断；`reflatten` → `cx.notify()` 的固定顺序保证状态与派生物一致。
+- **悬浮层与对话框各有协议**：菜单用 `deferred(anchored(...))` + `when` 开关 + `on_mouse_down_out` 关闭；`window.prompt` 同步发起、`cx.spawn` 异步收下标。
+- **可测试性来自分层**：纯逻辑直测、实体级用 `TestAppContext`、派发链路用 `VisualTestContext` + `dispatch_action`；内存假树是确定性测试的前提。
+- **你的架构与产品一致**：Zed 真实项目面板（`crates/project_panel`）的渲染核心与本项目的 `track_focus` + `uniform_list` + `cx.processor` 结构逐字对应——毕业项目不是练习题，是产品代码的缩微版。
+
+## 7. 下一步学习建议
+
+手册到此收官，但 GPUI 之门刚开。按「离你已掌握知识的距离」排序：
+
+1. **读 Zed 的产品代码（最推荐）**：[crates/project_panel/src/project_panel.rs](https://github.com/zed-industries/zed/blob/ec18126b1dbd32b089e51d7edee1e20b3bd53637/crates/project_panel/src/project_panel.rs)——把毕业项目与它逐段对照，看你做的每个决定在产品里如何被推广（多选、拖拽、撤销、远程目录）。`crates/file_finder` 与 `crates/ui` 也是极好的进阶读物。
+2. **平台层深潜**：选一个 `gpui_macos` / `gpui_linux` / `gpui_windows`，对照 `Platform` trait（u7-l1）读它的窗口创建、事件循环与帧调度实现，理解 `schedule_frame` 在 Wayland 与 X11 上的差异落地。
+3. **渲染器**：GPUI 的 `Scene`/图集/精灵渲染在独立的 `gpui` 内部模块与 `blade` 图形抽象中（u4-l3 只讲到 `Scene` 为止），顺着 `window.draw` 产出的 `Scene` 去追一个 quad 从提交到 GPU 上屏的路径。
+4. **给 GPUI 或 Zed 提交一个 PR**：`examples/` 是最好的切入点——为某个尚缺的能力写示例、为示例补 README 索引（u1-l4 发现 README 会漏收录示例，这本身就是一个可提交的文档修复）。
+5. **回到你的项目**：用 MiniBrowser 作骨架做一个真实的小工具（书签管理器、日志查看器、TODO 面板）。框架知识只有在「自己的需求」里反复锤炼后才会真正内化。
+
+祝你在 GPUI 上构建出属于自己的东西。
