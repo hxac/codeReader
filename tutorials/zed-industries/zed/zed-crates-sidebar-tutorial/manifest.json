@@ -1,13 +1,13 @@
 {
-  "head": "907ed09c9f4476caf250e6ce4bbffb23b4622f3b",
+  "head": "f36aec822be697df9049fed020b593147c93b4cf",
   "project": "zed-crates-sidebar",
-  "rationale": "sidebar crate 是 Zed 编辑器左侧的「多项目 Agent 线程/终端侧边栏」，核心是单个 8000 余行的 sidebar.rs，围绕「订阅外部状态 → 全量重建列表 → 增量应用 ListState → 渲染与交互」这条主线组织。因此学习路线按「先跑起来、再读数据模型、然后沿数据流自上游（订阅网络、重建管线）到下游（渲染、键盘交互）、再到跨视图行为（激活、ThreadSwitcher、归档与持久化）、最后落到测试与可观测性」设计：第一单元让读者从零认识 crate 定位、构建与 Sidebar 实体；第二单元讲清 ListEntry/工作区分组/选中与活跃三组核心模型；第三单元拆解事件订阅与 update_entries→rebuild_contents→apply_list_state_diff 重建管线（这是本 crate 最关键、注释中明确强调『每次全量重推导』的架构决策）；第四、五单元覆盖渲染骨架与键盘交互；第六单元讲线程/终端激活与草稿创建；第七单元独立讲 thread_switcher.rs 这个自包含模态；第八单元进入归档流水线与序列化恢复等高级生命周期主题；第九单元以 15000 行的 gpui 测试文件收尾，训练读者能为本 crate 写出新测试。难度按 beginner→intermediate→advanced 递进，讲义间用 depends_on 显式声明阅读顺序。",
+  "rationale": "增量分析结论：上次 HEAD 907ed09c 到当前 HEAD f36aec822 之间共有 7 个提交，其中零个提交触及 crates/sidebar，sidebar.rs、sidebar_tests.rs、thread_switcher.rs 与 Cargo.toml 完全无 diff；讲义引用的外部文件中 multi_workspace.rs、threads_archive_view.rs、agent_ui/test_support.rs 也零变化。唯一被引用且发生变化的是 crates/zed/src/zed.rs（提交 107ee1a60a，仅 6 行）：initialize_panels 中 initialize_agent_panel 改为传入 workspace_handle.clone()，并在面板初始化后显式调用 finish_dock_restoration。该改动位于 zed.rs:808 之后，使 u1-l1 中引用的 zed.rs:L912（register_actions）与 L1427（dump_workspace_info 注册）漂移为 L916/L1431，但 Sidebar::new 的装配主链路（zed.rs:538-548）与 crate 内全部源码未受影响，因此 u1-l1 只需小幅修订（更新行号并把永久链接重新钉到新 HEAD），u1-l2、u1-l3、u2-l1 三篇已生成讲义涉及的文件零变化、保持 keep；其余 18 篇讲义尚未生成，保持 new 以便 worker 按原计划继续生成，整体学习路线（先跑起来、再读数据模型、沿数据流自上游到下游、再到跨视图行为与生命周期、最后测试与可观测性）无需调整。",
   "units": [
     {
       "id": "u1",
       "lectures": [
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -33,7 +33,7 @@
           "topic": "介绍 sidebar crate 在 Zed 中的定位（多项目 Agent 线程与终端侧边栏）、三个源文件的分工、Cargo.toml 中的关键依赖，以及它在 zed crate 中被装配的位置。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -60,7 +60,7 @@
           "topic": "讲解如何构建和测试 sidebar crate，介绍 gpui 测试的基本形态，以及通过 visual_test_runner 观察 UI 的途径。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -96,7 +96,7 @@
       "id": "u2",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],

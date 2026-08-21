@@ -27,16 +27,16 @@
 
 | 文件 | 行数 | 作用 |
 | --- | --- | --- |
-| [crates/sidebar/Cargo.toml](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/Cargo.toml) | 82 | crate 清单：声明库名、依赖（含 dev-dependencies） |
-| [crates/sidebar/src/sidebar.rs](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs) | 8208 | 库根（见下方说明），包含 `Sidebar` 实体、数据模型、重建管线、渲染与全部交互逻辑 |
-| [crates/sidebar/src/sidebar_tests.rs](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar_tests.rs) | 15111 | 测试模块，仅 `#[cfg(test)]` 时编译，体量约为实现代码的两倍 |
-| [crates/sidebar/src/thread_switcher.rs](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/thread_switcher.rs) | 421 | ctrl-tab 风格的「线程切换器」模态组件，自包含 |
-| [crates/zed/src/zed.rs](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/zed/src/zed.rs) | — | 应用外壳：`Sidebar` 在这里被创建并注册（还有 `dump_workspace_info` 调试动作的注册点） |
-| [crates/workspace/src/multi_workspace.rs](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/workspace/src/multi_workspace.rs) | — | 多工作区容器：定义 `Sidebar` 契约 trait 与 `register_sidebar` |
+| [crates/sidebar/Cargo.toml](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/Cargo.toml) | 82 | crate 清单：声明库名、依赖（含 dev-dependencies） |
+| [crates/sidebar/src/sidebar.rs](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs) | 8208 | 库根（见下方说明），包含 `Sidebar` 实体、数据模型、重建管线、渲染与全部交互逻辑 |
+| [crates/sidebar/src/sidebar_tests.rs](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar_tests.rs) | 15111 | 测试模块，仅 `#[cfg(test)]` 时编译，体量约为实现代码的两倍 |
+| [crates/sidebar/src/thread_switcher.rs](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/thread_switcher.rs) | 421 | ctrl-tab 风格的「线程切换器」模态组件，自包含 |
+| [crates/zed/src/zed.rs](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/zed/src/zed.rs) | — | 应用外壳：`Sidebar` 在这里被创建并注册（还有 `dump_workspace_info` 调试动作的注册点） |
+| [crates/workspace/src/multi_workspace.rs](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/workspace/src/multi_workspace.rs) | — | 多工作区容器：定义 `Sidebar` 契约 trait 与 `register_sidebar` |
 
 一个值得注意的细节：本 crate **没有** `src/lib.rs`，库根直接由 Cargo.toml 指定为 `src/sidebar.rs`：
 
-> [Cargo.toml:L11-L12](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/Cargo.toml#L11-L12) —— `[lib] path = "src/sidebar.rs"`，这是 Zed 仓库的命名惯例（用描述性文件名代替 `lib.rs`）。`sidebar.rs` 第一行 `mod thread_switcher;` 声明子模块，`#[cfg(test)] mod sidebar_tests;` 在测试构建时挂载测试文件（见 [sidebar.rs:L1](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L1) 与 [sidebar.rs:L83-L84](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L83-L84)）。
+> [Cargo.toml:L11-L12](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/Cargo.toml#L11-L12) —— `[lib] path = "src/sidebar.rs"`，这是 Zed 仓库的命名惯例（用描述性文件名代替 `lib.rs`）。`sidebar.rs` 第一行 `mod thread_switcher;` 声明子模块，`#[cfg(test)] mod sidebar_tests;` 在测试构建时挂载测试文件（见 [sidebar.rs:L1](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L1) 与 [sidebar.rs:L83-L84](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L83-L84)）。
 
 ## 4. 核心概念与源码讲解
 
@@ -72,7 +72,7 @@ render()（flexbox 元素树 → gpui list 虚拟列表）
 
 `sidebar.rs` 顶部的 struct 文档注释明确写出了这条架构约束：
 
-> [sidebar.rs:L730-L733](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L730-L733) —— 「侧边栏在每次变化时通过 `update_entries` → `rebuild_contents` 从零重推导整个条目列表。不要添加增量或跨事件协调状态——凡是能从当前世界状态算出来的，都在 rebuild 里算。」这段注释是理解整个 crate 的钥匙，后续第三单元会专门展开。
+> [sidebar.rs:L730-L733](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L730-L733) —— 「侧边栏在每次变化时通过 `update_entries` → `rebuild_contents` 从零重推导整个条目列表。不要添加增量或跨事件协调状态——凡是能从当前世界状态算出来的，都在 rebuild 里算。」这段注释是理解整个 crate 的钥匙，后续第三单元会专门展开。
 
 三个源文件的分工：
 
@@ -84,16 +84,16 @@ render()（flexbox 元素树 → gpui list 虚拟列表）
 
 #### 4.1.3 源码精读
 
-**库根与动作声明。** [sidebar.rs:L1](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L1) 声明 `mod thread_switcher;`；[sidebar.rs:L83-L84](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L83-L84) 在且仅在测试构建中挂载 `sidebar_tests` 模块。
+**库根与动作声明。** [sidebar.rs:L1](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L1) 声明 `mod thread_switcher;`；[sidebar.rs:L83-L84](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L83-L84) 在且仅在测试构建中挂载 `sidebar_tests` 模块。
 
 **本 crate 自定义的动作（action）。** GPUI 中「动作」是键盘/菜单事件的目标，用 `gpui::actions!` 宏声明：
 
-- [sidebar.rs:L86-L94](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L86-L94) —— 在 `agents_sidebar` 命名空间下声明 `NewThreadInGroup`（在当前分组新建线程）与 `ToggleThreadHistory`（在线程列表与历史归档之间切换）。
-- [sidebar.rs:L96-L102](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L96-L102) —— 在 `dev` 命名空间下声明 `DumpWorkspaceInfo`（把多工作区状态倾倒进一个缓冲区，用于调试）。
+- [sidebar.rs:L86-L94](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L86-L94) —— 在 `agents_sidebar` 命名空间下声明 `NewThreadInGroup`（在当前分组新建线程）与 `ToggleThreadHistory`（在线程列表与历史归档之间切换）。
+- [sidebar.rs:L96-L102](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L96-L102) —— 在 `dev` 命名空间下声明 `DumpWorkspaceInfo`（把多工作区状态倾倒进一个缓冲区，用于调试）。
 
-**宽度常量。** [sidebar.rs:L104-L106](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L104-L106) 定义默认宽 300px、最小 200px、最大 800px——序列化恢复时宽度会被钳制在这个区间（见 4.4.3）。
+**宽度常量。** [sidebar.rs:L104-L106](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L104-L106) 定义默认宽 300px、最小 200px、最大 800px——序列化恢复时宽度会被钳制在这个区间（见 4.4.3）。
 
-**切换器子模块。** [sidebar.rs:L78-L81](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L78-L81) 从 `crate::thread_switcher` 引入 `ThreadSwitcher` 及其条目/事件类型；`thread_switcher.rs` 内部又反向引用父模块的 `ThreadEntryWorkspace`（[thread_switcher.rs:L15](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/thread_switcher.rs#L15)），两个文件形成双向协作，但切换器的 UI 逻辑完全自包含。
+**切换器子模块。** [sidebar.rs:L78-L81](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L78-L81) 从 `crate::thread_switcher` 引入 `ThreadSwitcher` 及其条目/事件类型；`thread_switcher.rs` 内部又反向引用父模块的 `ThreadEntryWorkspace`（[thread_switcher.rs:L15](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/thread_switcher.rs#L15)），两个文件形成双向协作，但切换器的 UI 逻辑完全自包含。
 
 #### 4.1.4 代码实践
 
@@ -113,11 +113,11 @@ render()（flexbox 元素树 → gpui list 虚拟列表）
 
 **练习 1**：为什么 `sidebar_tests.rs` 不出现在 `Cargo.toml` 的任何 target 里，却能被编译？
 
-答案：它通过库根 [sidebar.rs:L83-L84](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L83-L84) 的 `#[cfg(test)] mod sidebar_tests;` 挂进模块树，只在 `cargo test` 时编译；Cargo 会自动把 `<模块名>.rs` 作为同名模块的文件来源。
+答案：它通过库根 [sidebar.rs:L83-L84](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L83-L84) 的 `#[cfg(test)] mod sidebar_tests;` 挂进模块树，只在 `cargo test` 时编译；Cargo 会自动把 `<模块名>.rs` 作为同名模块的文件来源。
 
 **练习 2**：`DumpWorkspaceInfo` 动作属于哪个命名空间？它面向什么用户？
 
-答案：`dev` 命名空间（[sidebar.rs:L96-L102](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L96-L102)），面向开发者调试多工作区状态，普通用户日常不会触发。
+答案：`dev` 命名空间（[sidebar.rs:L96-L102](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L96-L102)），面向开发者调试多工作区状态，普通用户日常不会触发。
 
 ### 4.2 Cargo.toml 依赖与 crate 边界
 
@@ -141,29 +141,29 @@ git / git_ui_core(分支信息) ──────────┤
 gpui / ui / theme(绘制原语) ─────────┘
 ```
 
-注意依赖是**单向**的：sidebar 依赖 `agent_ui`、`workspace`，反之 `zed` 依赖 sidebar（[crates/zed/Cargo.toml:L201](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/zed/Cargo.toml#L201) 的 `sidebar.workspace = true`）。这保证了库 crate 之间不循环引用。
+注意依赖是**单向**的：sidebar 依赖 `agent_ui`、`workspace`，反之 `zed` 依赖 sidebar（[crates/zed/Cargo.toml:L201](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/zed/Cargo.toml#L201) 的 `sidebar.workspace = true`）。这保证了库 crate 之间不循环引用。
 
 #### 4.2.3 源码精读
 
-**依赖声明区**：[Cargo.toml:L17-L53](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/Cargo.toml#L17-L53) 列出全部正式依赖；[Cargo.toml:L55-L82](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/Cargo.toml#L55-L82) 是带 `test-support` 特性的 dev-dependencies（测试专用，比如 `clock`、`db`、`pretty_assertions`）。
+**依赖声明区**：[Cargo.toml:L17-L53](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/Cargo.toml#L17-L53) 列出全部正式依赖；[Cargo.toml:L55-L82](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/Cargo.toml#L55-L82) 是带 `test-support` 特性的 dev-dependencies（测试专用，比如 `clock`、`db`、`pretty_assertions`）。
 
-结合 `sidebar.rs` 顶部的 use 区段（[sidebar.rs:L3-L81](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L3-L81)），关键依赖的用途如下：
+结合 `sidebar.rs` 顶部的 use 区段（[sidebar.rs:L3-L81](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L3-L81)），关键依赖的用途如下：
 
 | 依赖（组） | Cargo.toml 行 | 在 sidebar.rs 中的真实使用点（示例） | 边界含义 |
 | --- | --- | --- | --- |
-| `agent_ui` | L24 | `AgentPanel`、`ThreadId`、`ThreadMetadataStore`、`ThreadsArchiveView`（[sidebar.rs:L8-L23](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L8-L23)） | Agent 面板 UI、线程元数据存储与归档视图都由 agent_ui 提供，sidebar 只做列表编排 |
-| `agent` / `acp_thread` / `agent-client-protocol` / `agent_settings` | L21-L22, L18, L22 | `ThreadStore`、`ThreadStatus`、`acp::SessionId`（[sidebar.rs:L3-L6](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L3-L6)） | 会话数据模型与 ACP 协议类型；sidebar 不实现协议，只消费类型 |
-| `workspace` | L51 | `MultiWorkspace`、`ProjectGroupKey`、`Sidebar` 契约 trait、`Open`（[sidebar.rs:L65-L70](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L65-L70)） | 窗口级容器与侧边栏契约（见 4.4）；workspace 不知道 sidebar 的存在 |
-| `project` | L38 | `ProjectEvent`、`WorktreeId`、`AgentId`（[sidebar.rs:L42](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L42)） | 工作树增删与路径变化事件是列表重建的触发源之一 |
-| `gpui` / `ui` / `theme` / `theme_settings` / `platform_title_bar` | L31, L48, L46-L47, L37 | `Entity`、`ListState`、`ThreadItem`、`ActiveTheme`、`CLIENT_SIDE_DECORATION_ROUNDING`（[sidebar.rs:L30-L35](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L30-L35)、[sidebar.rs:L56-L61](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L56-L61)） | 绘制与交互原语；`ThreadItem` 行组件直接来自 ui crate |
-| `git` / `git_ui_core` | L30, L52 | `RemoteBranchName`、`worktree_create_targets`（[sidebar.rs:L72](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L72)） | 分组菜单里「新建 worktree」走 git_ui_core 的服务，sidebar 不直接做 git I/O |
-| `menu` / `zed_actions` | L35, L53 | `Confirm`、`SelectNext` 等通用列表动作；`CreateWorktree`、`ToggleThreadSwitcher`（[sidebar.rs:L38-L40](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L38-L40)、[sidebar.rs:L72-L76](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L72-L76)） | 键盘动作复用全局动作定义，避免各写一份 |
-| `editor` | L27 | 行内搜索过滤器与重命名输入框都是 `Editor` 实体（[sidebar.rs:L26](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L26)） | 文本输入复用编辑器组件 |
-| `feature_flags` | L28 | `AgentThreadWorktreeLabelFlag`（[sidebar.rs:L27-L29](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L27-L29)） | 行上是否显示 worktree/branch 标签由远程特性开关控制 |
+| `agent_ui` | L24 | `AgentPanel`、`ThreadId`、`ThreadMetadataStore`、`ThreadsArchiveView`（[sidebar.rs:L8-L23](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L8-L23)） | Agent 面板 UI、线程元数据存储与归档视图都由 agent_ui 提供，sidebar 只做列表编排 |
+| `agent` / `acp_thread` / `agent-client-protocol` / `agent_settings` | L21-L22, L18, L22 | `ThreadStore`、`ThreadStatus`、`acp::SessionId`（[sidebar.rs:L3-L6](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L3-L6)） | 会话数据模型与 ACP 协议类型；sidebar 不实现协议，只消费类型 |
+| `workspace` | L51 | `MultiWorkspace`、`ProjectGroupKey`、`Sidebar` 契约 trait、`Open`（[sidebar.rs:L65-L70](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L65-L70)） | 窗口级容器与侧边栏契约（见 4.4）；workspace 不知道 sidebar 的存在 |
+| `project` | L38 | `ProjectEvent`、`WorktreeId`、`AgentId`（[sidebar.rs:L42](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L42)） | 工作树增删与路径变化事件是列表重建的触发源之一 |
+| `gpui` / `ui` / `theme` / `theme_settings` / `platform_title_bar` | L31, L48, L46-L47, L37 | `Entity`、`ListState`、`ThreadItem`、`ActiveTheme`、`CLIENT_SIDE_DECORATION_ROUNDING`（[sidebar.rs:L30-L35](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L30-L35)、[sidebar.rs:L56-L61](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L56-L61)） | 绘制与交互原语；`ThreadItem` 行组件直接来自 ui crate |
+| `git` / `git_ui_core` | L30, L52 | `RemoteBranchName`、`worktree_create_targets`（[sidebar.rs:L72](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L72)） | 分组菜单里「新建 worktree」走 git_ui_core 的服务，sidebar 不直接做 git I/O |
+| `menu` / `zed_actions` | L35, L53 | `Confirm`、`SelectNext` 等通用列表动作；`CreateWorktree`、`ToggleThreadSwitcher`（[sidebar.rs:L38-L40](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L38-L40)、[sidebar.rs:L72-L76](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L72-L76)） | 键盘动作复用全局动作定义，避免各写一份 |
+| `editor` | L27 | 行内搜索过滤器与重命名输入框都是 `Editor` 实体（[sidebar.rs:L26](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L26)） | 文本输入复用编辑器组件 |
+| `feature_flags` | L28 | `AgentThreadWorktreeLabelFlag`（[sidebar.rs:L27-L29](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L27-L29)） | 行上是否显示 worktree/branch 标签由远程特性开关控制 |
 
 （其余如 `anyhow`、`chrono`、`serde`、`itertools`、`unicode-segmentation`、`util` 等为通用工具依赖。）
 
-**一个特性开关细节**：[Cargo.toml:L24](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/Cargo.toml#L24) 写的是 `agent_ui = { workspace = true, features = ["audio"] }`——正式依赖里给 agent_ui 追加开了 `audio` 特性（线程完成提示音），而 dev-dependencies（L58）则开 `test-support`。这说明 crate 边界不止「谁依赖谁」，还包括「以什么特性依赖」。
+**一个特性开关细节**：[Cargo.toml:L24](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/Cargo.toml#L24) 写的是 `agent_ui = { workspace = true, features = ["audio"] }`——正式依赖里给 agent_ui 追加开了 `audio` 特性（线程完成提示音），而 dev-dependencies（L58）则开 `test-support`。这说明 crate 边界不止「谁依赖谁」，还包括「以什么特性依赖」。
 
 #### 4.2.4 代码实践
 
@@ -173,8 +173,8 @@ gpui / ui / theme(绘制原语) ─────────┘
 
 1. 本机克隆 Zed 仓库并进入仓库根目录。
 2. 执行 `cargo tree -p sidebar --depth 1`，把输出的直接依赖列表抄下来。
-3. 与 [Cargo.toml:L17-L53](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/Cargo.toml#L17-L53) 逐项对照，确认一一对应。
-4. 任选其中 3 个 zed 内部 crate（建议 `agent_ui`、`workspace`、`git_ui_core`），在 [sidebar.rs:L3-L81](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L3-L81) 的 use 区段为每个依赖找到至少一处真实使用点（形如上表第三列），写一份「依赖 → use 行 → 用途」对照表。
+3. 与 [Cargo.toml:L17-L53](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/Cargo.toml#L17-L53) 逐项对照，确认一一对应。
+4. 任选其中 3 个 zed 内部 crate（建议 `agent_ui`、`workspace`、`git_ui_core`），在 [sidebar.rs:L3-L81](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L3-L81) 的 use 区段为每个依赖找到至少一处真实使用点（形如上表第三列），写一份「依赖 → use 行 → 用途」对照表。
 
 **需要观察的现象**：`cargo tree` 输出的第一层依赖应恰好是 Cargo.toml 中 `[dependencies]` 列出的那些（外部 crate 与内部 crate 混排，按字母序）。
 
@@ -184,11 +184,11 @@ gpui / ui / theme(绘制原语) ─────────┘
 
 **练习 1**：为什么 sidebar 的依赖里有 `editor`，却没有 `language`（编辑器的语法高亮依赖）？
 
-答案：sidebar 只把 `Editor` 当单行输入框用（过滤搜索、行内重命名，见 [sidebar.rs:L806-L811](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L806-L811)），不需要语法能力；`language` 只出现在 dev-dependencies 且带 `test-support`（[Cargo.toml:L61](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/Cargo.toml#L61)），供测试环境使用。依赖最小化是 Zed workspace 的普遍风格。
+答案：sidebar 只把 `Editor` 当单行输入框用（过滤搜索、行内重命名，见 [sidebar.rs:L806-L811](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L806-L811)），不需要语法能力；`language` 只出现在 dev-dependencies 且带 `test-support`（[Cargo.toml:L61](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/Cargo.toml#L61)），供测试环境使用。依赖最小化是 Zed workspace 的普遍风格。
 
 **练习 2**：如果要在侧边栏里直接读写数据库里的线程记录，应该依赖哪个 crate？现在的代码是怎么避免这层依赖的？
 
-答案：直接依赖应是数据库层（如 `db`）；当前代码避免了这个依赖——线程/终端的持久化元数据通过 `agent_ui` 的 `ThreadMetadataStore` 与 `TerminalThreadMetadataStore` 全局存储访问（[sidebar.rs:L8-L13](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L8-L13)），sidebar 只 observe 它们的变化（见 4.3.3），把数据访问留在 agent_ui 一侧。
+答案：直接依赖应是数据库层（如 `db`）；当前代码避免了这个依赖——线程/终端的持久化元数据通过 `agent_ui` 的 `ThreadMetadataStore` 与 `TerminalThreadMetadataStore` 全局存储访问（[sidebar.rs:L8-L13](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L8-L13)），sidebar 只 observe 它们的变化（见 4.3.3），把数据访问留在 agent_ui 一侧。
 
 ### 4.3 Sidebar 实体的诞生：Sidebar::new
 
@@ -196,7 +196,7 @@ gpui / ui / theme(绘制原语) ─────────┘
 
 `Sidebar` 是一个 GPUI 实体（`Entity<Sidebar>`）：结构体保存状态，`Sidebar::new` 在创建实体的同时注册全部「事件 → 反应」 wiring。读懂构造函数，等于拿到这个 crate 的「接线图」。
 
-`Sidebar::new` 的签名值得先看一眼（[sidebar.rs:L795-L799](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L795-L799)）：
+`Sidebar::new` 的签名值得先看一眼（[sidebar.rs:L795-L799](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L795-L799)）：
 
 ```rust
 pub fn new(
@@ -230,29 +230,29 @@ pub fn new(
    └── schedule_update_entries(false)    # 第一次全量重建
 ```
 
-之后返回 `Self { ... }`，把约 30 个字段填默认值（[sidebar.rs:L889-L923](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L889-L923)）。
+之后返回 `Self { ... }`，把约 30 个字段填默认值（[sidebar.rs:L889-L923](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L889-L923)）。
 
 #### 4.3.3 源码精读
 
-**状态字段全景（选读）。** [sidebar.rs:L734-L792](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L734-L792) 定义了 `Sidebar` 的全部状态，几个代表性字段：
+**状态字段全景（选读）。** [sidebar.rs:L734-L792](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L734-L792) 定义了 `Sidebar` 的全部状态，几个代表性字段：
 
-- `multi_workspace: WeakEntity<MultiWorkspace>`（[L735](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L735)）——持有**弱**引用，避免容器与面板互相强持有导致实体永不释放；
-- `list_state: ListState`（[L740](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L740)）——gpui 虚拟列表的滚动/测量状态；
-- `selection: Option<usize>`（[L742-L745](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L742-L745)）——键盘焦点下标，注释特别强调「不等于 active 条目」；
-- `thread_last_accessed`（[L757-L761](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L757-L761)）——只由显式用户动作更新，用于切换器的 MRU 排序；
-- `update_task: Option<Task<()>>`（[L782](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L782)）——挂起的刷新任务，用于合并重复刷新。
+- `multi_workspace: WeakEntity<MultiWorkspace>`（[L735](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L735)）——持有**弱**引用，避免容器与面板互相强持有导致实体永不释放；
+- `list_state: ListState`（[L740](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L740)）——gpui 虚拟列表的滚动/测量状态；
+- `selection: Option<usize>`（[L742-L745](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L742-L745)）——键盘焦点下标，注释特别强调「不等于 active 条目」；
+- `thread_last_accessed`（[L757-L761](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L757-L761)）——只由显式用户动作更新，用于切换器的 MRU 排序；
+- `update_task: Option<Task<()>>`（[L782](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L782)）——挂起的刷新任务，用于合并重复刷新。
 
-**焦点接线。** [sidebar.rs:L800-L802](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L800-L802) 创建焦点句柄并注册 `on_focus_in` 回调到 `Self::focus_in`（`.detach()` 让订阅独立于返回值存活）。
+**焦点接线。** [sidebar.rs:L800-L802](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L800-L802) 创建焦点句柄并注册 `on_focus_in` 回调到 `Self::focus_in`（`.detach()` 让订阅独立于返回值存活）。
 
-**搜索框与重命名框。** [sidebar.rs:L806-L811](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L806-L811) 创建两个单行 `Editor` 实体，搜索框带占位文案 `Search threads…`。
+**搜索框与重命名框。** [sidebar.rs:L806-L811](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L806-L811) 创建两个单行 `Editor` 实体，搜索框带占位文案 `Search threads…`。
 
-**宿主事件订阅。** [sidebar.rs:L813-L832](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L813-L832) 订阅 `MultiWorkspaceEvent`：活跃工作区变化时同步 active 条目并刷新；新增工作区时调用 `subscribe_to_workspace` 为它补订事件；工作区移除或分组变化时刷新。这就是「侧边栏跟随窗口内所有项目」的实现起点。
+**宿主事件订阅。** [sidebar.rs:L813-L832](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L813-L832) 订阅 `MultiWorkspaceEvent`：活跃工作区变化时同步 active 条目并刷新；新增工作区时调用 `subscribe_to_workspace` 为它补订事件；工作区移除或分组变化时刷新。这就是「侧边栏跟随窗口内所有项目」的实现起点。
 
-**搜索框事件。** [sidebar.rs:L834-L843](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L834-L843) 监听 `BufferEdited`：非空查询会先 `take()` 掉键盘选中态，再以 `select_first_after_update = true` 调度刷新。
+**搜索框事件。** [sidebar.rs:L834-L843](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L834-L843) 监听 `BufferEdited`：非空查询会先 `take()` 掉键盘选中态，再以 `select_first_after_update = true` 调度刷新。
 
-**两个元数据存储的观察。** [sidebar.rs:L854-L865](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L854-L865) `cx.observe` 全局 `ThreadMetadataStore` 与 `TerminalThreadMetadataStore`——数据库里的线程标题、路径等任何变化都会触发一次列表刷新。这是 sidebar 与持久层的唯一耦合点。
+**两个元数据存储的观察。** [sidebar.rs:L854-L865](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L854-L865) `cx.observe` 全局 `ThreadMetadataStore` 与 `TerminalThreadMetadataStore`——数据库里的线程标题、路径等任何变化都会触发一次列表刷新。这是 sidebar 与持久层的唯一耦合点。
 
-**延迟初始化。** [sidebar.rs:L878-L887](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L878-L887) 先把宿主降级为 `WeakEntity`，再 `cx.defer_in(window, ...)`：等本轮更新结束、实体完全就绪后，遍历宿主**当前已有**的每个 workspace 逐个订阅，并做第一次 `schedule_update_entries(false)`。之所以延迟，是因为构造函数里 `Self` 尚未返回，此时去读自身实体容易造成重入借用；之所以用弱引用，是防止闭包意外延长宿主生命周期。
+**延迟初始化。** [sidebar.rs:L878-L887](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L878-L887) 先把宿主降级为 `WeakEntity`，再 `cx.defer_in(window, ...)`：等本轮更新结束、实体完全就绪后，遍历宿主**当前已有**的每个 workspace 逐个订阅，并做第一次 `schedule_update_entries(false)`。之所以延迟，是因为构造函数里 `Self` 尚未返回，此时去读自身实体容易造成重入借用；之所以用弱引用，是防止闭包意外延长宿主生命周期。
 
 #### 4.3.4 代码实践
 
@@ -260,7 +260,7 @@ pub fn new(
 
 **操作步骤**：
 
-1. 通读 [sidebar.rs:L795-L924](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L795-L924)。
+1. 通读 [sidebar.rs:L795-L924](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L795-L924)。
 2. 建一张三列表格：事件源（实体）| API（subscribe/observe/defer_in）| 副作用（调用了哪些方法）。
 3. 单独标出哪些订阅在构造时注册、哪些推迟到 `defer_in` 中（提示：`subscribe_to_workspace` 在两处被调用——`WorkspaceAdded` 事件与 defer 块）。
 4. （可选，本地练习）在 `defer_in` 闭包末尾临时加一行 `log::info!("sidebar deferred init");`，运行任一测试观察日志输出，确认延迟块被执行，然后**还原改动**。
@@ -273,11 +273,11 @@ pub fn new(
 
 **练习 1**：`Sidebar` 为什么持有 `WeakEntity<MultiWorkspace>` 而不是 `Entity<MultiWorkspace>`？
 
-答案：`MultiWorkspace`（宿主）通过 `register_sidebar` 强持有侧边栏实体（见 4.4.3 的 `sidebar: Option<Box<dyn SidebarHandle>>` 字段）；若 sidebar 再强持有宿主，两者互相强引用，实体引用计数永不归零，窗口关闭后内存泄漏。弱引用 + 用时 `upgrade()`（如 [sidebar.rs:L930-L939](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L930-L939) 的 `is_group_collapsed`）是 GPUI 的标准做法。
+答案：`MultiWorkspace`（宿主）通过 `register_sidebar` 强持有侧边栏实体（见 4.4.3 的 `sidebar: Option<Box<dyn SidebarHandle>>` 字段）；若 sidebar 再强持有宿主，两者互相强引用，实体引用计数永不归零，窗口关闭后内存泄漏。弱引用 + 用时 `upgrade()`（如 [sidebar.rs:L930-L939](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L930-L939) 的 `is_group_collapsed`）是 GPUI 的标准做法。
 
 **练习 2**：搜索框为什么在查询非空时要先 `this.selection.take()`？
 
-答案：输入过滤后可见行集合立刻收窄，原先的键盘选中下标可能指向已被过滤掉的行甚至越界；先清空选中，再靠 `select_first_after_update = true` 在刷新完成后自动选中第一个匹配行（[sidebar.rs:L834-L843](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L834-L843)）。
+答案：输入过滤后可见行集合立刻收窄，原先的键盘选中下标可能指向已被过滤掉的行甚至越界；先清空选中，再靠 `select_first_after_update = true` 在刷新完成后自动选中第一个匹配行（[sidebar.rs:L834-L843](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L834-L843)）。
 
 **练习 3**：`Sidebar::new` 里创建的两个 `Editor` 实体，分别在什么交互场景下被用户看到？
 
@@ -289,7 +289,7 @@ pub fn new(
 
 到目前为止我们只知道 sidebar 是个库 crate；它变成屏幕上一条侧边栏，靠的是 `zed` crate（应用外壳）在合适的时机 `cx.new(|cx| Sidebar::new(...))`，再交给 `MultiWorkspace::register_sidebar` 挂载。
 
-这里有一条重要的**契约边界**：`workspace` crate 定义了一个泛型 trait `Sidebar`（在 sidebar.rs 中以别名 `WorkspaceSidebar` 引入，[sidebar.rs:L68](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L68)），要求实现 `Focusable + Render + EventEmitter<SidebarEvent>`。也就是说：**workspace 不知道具体实现是谁**，zed 负责把实现「注射」进去。这样一来 workspace ↔ sidebar 互不依赖，装配只发生在最上层的 zed crate。
+这里有一条重要的**契约边界**：`workspace` crate 定义了一个泛型 trait `Sidebar`（在 sidebar.rs 中以别名 `WorkspaceSidebar` 引入，[sidebar.rs:L68](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L68)），要求实现 `Focusable + Render + EventEmitter<SidebarEvent>`。也就是说：**workspace 不知道具体实现是谁**，zed 负责把实现「注射」进去。这样一来 workspace ↔ sidebar 互不依赖，装配只发生在最上层的 zed crate。
 
 #### 4.4.2 核心流程
 
@@ -312,13 +312,13 @@ zed::initialize_workspace(app_state, cx)                    # zed.rs:430
 
 #### 4.4.3 源码精读
 
-**观察每个新 MultiWorkspace。** [zed.rs:L444-L447](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/zed/src/zed.rs#L444-L447) 位于 `initialize_workspace`（[zed.rs:L430](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/zed/src/zed.rs#L430)）内：每当有新的 `MultiWorkspace` 实体创建（即新窗口），就执行装配；没有 window 的（headless 测试）直接返回。
+**观察每个新 MultiWorkspace。** [zed.rs:L444-L447](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/zed/src/zed.rs#L444-L447) 位于 `initialize_workspace`（[zed.rs:L430](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/zed/src/zed.rs#L430)）内：每当有新的 `MultiWorkspace` 实体创建（即新窗口），就执行装配；没有 window 的（headless 测试）直接返回。
 
-**创建并注册。** [zed.rs:L538-L548](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/zed/src/zed.rs#L538-L548) 是本讲的落点：先 `cx.new` 创建 `Sidebar` 实体，再 `multi_workspace_handle.update` 调用 `register_sidebar`。注意整体包在 `cx.defer` 里——等 MultiWorkspace 自身的构造与订阅完成后再挂侧边栏。此外 [zed.rs:L79](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/zed/src/zed.rs#L79) 的 `use sidebar::Sidebar;` 正是 zed crate 依赖 sidebar 的体现（声明见 [crates/zed/Cargo.toml:L201](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/zed/Cargo.toml#L201)）。
+**创建并注册。** [zed.rs:L538-L548](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/zed/src/zed.rs#L538-L548) 是本讲的落点：先 `cx.new` 创建 `Sidebar` 实体，再 `multi_workspace_handle.update` 调用 `register_sidebar`。注意整体包在 `cx.defer` 里——等 MultiWorkspace 自身的构造与订阅完成后再挂侧边栏。此外 [zed.rs:L79](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/zed/src/zed.rs#L79) 的 `use sidebar::Sidebar;` 正是 zed crate 依赖 sidebar 的体现（声明见 [crates/zed/Cargo.toml:L201](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/zed/Cargo.toml#L201)）。
 
-**宿主侧的容器字段。** [multi_workspace.rs:L306-L324](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/workspace/src/multi_workspace.rs#L306-L324) 定义 `MultiWorkspace`，其中 [L317](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/workspace/src/multi_workspace.rs#L317) 的 `sidebar: Option<Box<dyn SidebarHandle>>` 是侧边栏的存放处——类型擦除的 trait 对象，workspace 侧只认接口。
+**宿主侧的容器字段。** [multi_workspace.rs:L306-L324](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/workspace/src/multi_workspace.rs#L306-L324) 定义 `MultiWorkspace`，其中 [L317](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/workspace/src/multi_workspace.rs#L317) 的 `sidebar: Option<Box<dyn SidebarHandle>>` 是侧边栏的存放处——类型擦除的 trait 对象，workspace 侧只认接口。
 
-**register_sidebar 本体。** [multi_workspace.rs:L393-L405](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/workspace/src/multi_workspace.rs#L393-L405)：
+**register_sidebar 本体。** [multi_workspace.rs:L393-L405](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/workspace/src/multi_workspace.rs#L393-L405)：
 
 ```rust
 pub fn register_sidebar<T: Sidebar>(&mut self, sidebar: Entity<T>, cx: &mut Context<Self>) {
@@ -332,11 +332,11 @@ pub fn register_sidebar<T: Sidebar>(&mut self, sidebar: Entity<T>, cx: &mut Cont
 
 三行分别是：侧边栏任何变化 → 宿主重渲染；侧边栏发出 `SerializeNeeded` → 宿主把窗口状态写盘；装箱存储。订阅被 push 进 `_subscriptions`，随宿主存活。
 
-**契约 trait。** [multi_workspace.rs:L122-L161](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/workspace/src/multi_workspace.rs#L122-L161) 定义 trait `Sidebar`：必备 `width`/`set_width`/`has_notifications`/`side`，可选 `prepare_for_focus`、`toggle_thread_switcher`、`cycle_project`、`cycle_thread`、`serialized_state`/`restore_serialized_state` 等（均带默认实现）。
+**契约 trait。** [multi_workspace.rs:L122-L161](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/workspace/src/multi_workspace.rs#L122-L161) 定义 trait `Sidebar`：必备 `width`/`set_width`/`has_notifications`/`side`，可选 `prepare_for_focus`、`toggle_thread_switcher`、`cycle_project`、`cycle_thread`、`serialized_state`/`restore_serialized_state` 等（均带默认实现）。
 
-**sidebar crate 侧的实现。** [sidebar.rs:L7677-L7750](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L7677-L7750) 是 `impl WorkspaceSidebar for Sidebar`：例如 `set_width` 会把宽度钳制在 `[MIN_WIDTH, MAX_WIDTH]`（[L7682-L7685](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L7682-L7685)），`serialized_state` 把宽度与当前视图打包成 JSON（[L7721-L7730](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L7721-L7730)）。紧随其后的 [L7752](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L7752) 声明 `EventEmitter<workspace::SidebarEvent>`、[L7754-L7758](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L7754-L7758) 实现 `Focusable`、[L7760](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L7760) 起 `Render`——三者共同满足契约 trait 的超 trait 要求。
+**sidebar crate 侧的实现。** [sidebar.rs:L7677-L7750](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L7677-L7750) 是 `impl WorkspaceSidebar for Sidebar`：例如 `set_width` 会把宽度钳制在 `[MIN_WIDTH, MAX_WIDTH]`（[L7682-L7685](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L7682-L7685)），`serialized_state` 把宽度与当前视图打包成 JSON（[L7721-L7730](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L7721-L7730)）。紧随其后的 [L7752](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L7752) 声明 `EventEmitter<workspace::SidebarEvent>`、[L7754-L7758](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L7754-L7758) 实现 `Focusable`、[L7760](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L7760) 起 `Render`——三者共同满足契约 trait 的超 trait 要求。
 
-**另一个装配点：调试动作。** [zed.rs:L1427](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/zed/src/zed.rs#L1427) 在 `register_actions`（[zed.rs:L912](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/zed/src/zed.rs#L912)）里把 `sidebar::dump_workspace_info` 注册为 workspace 动作——这是「函数式动作」注册的例子，也说明 zed crate 除了创建实体外还负责动作接线。
+**另一个装配点：调试动作。** [zed.rs:L1431](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/zed/src/zed.rs#L1431) 在 `register_actions`（[zed.rs:L916](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/zed/src/zed.rs#L916)）里把 `sidebar::dump_workspace_info` 注册为 workspace 动作——这是「函数式动作」注册的例子，也说明 zed crate 除了创建实体外还负责动作接线。
 
 #### 4.4.4 代码实践
 
@@ -344,9 +344,9 @@ pub fn register_sidebar<T: Sidebar>(&mut self, sidebar: Entity<T>, cx: &mut Cont
 
 **操作步骤**：
 
-1. 打开 [zed.rs:L538-L548](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/zed/src/zed.rs#L538-L548)，从内向外跳转：`Sidebar::new` → `register_sidebar` → 外层的 `observe_new` → `initialize_workspace`。
+1. 打开 [zed.rs:L538-L548](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/zed/src/zed.rs#L538-L548)，从内向外跳转：`Sidebar::new` → `register_sidebar` → 外层的 `observe_new` → `initialize_workspace`。
 2. 在仓库根目录执行 `git grep -n "sidebar::" crates/zed/src/zed.rs`，列出 zed crate 对 sidebar 的全部引用（应能看到 `use sidebar::Sidebar`、`cx.new(...)`、`register_action(sidebar::dump_workspace_info)` 等）。
-3. 打开 [multi_workspace.rs:L393-L405](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/workspace/src/multi_workspace.rs#L393-L405)，确认 `register_sidebar` 存进 `self.sidebar` 的值类型是 `Box<dyn SidebarHandle>`。
+3. 打开 [multi_workspace.rs:L393-L405](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/workspace/src/multi_workspace.rs#L393-L405)，确认 `register_sidebar` 存进 `self.sidebar` 的值类型是 `Box<dyn SidebarHandle>`。
 4. 回答检验问题（见「预期结果」）。
 
 **需要观察的现象**：zed.rs 中 sidebar 相关引用集中在少数几处；`register_sidebar` 的两笔订阅都进 `_subscriptions`。
@@ -357,11 +357,11 @@ pub fn register_sidebar<T: Sidebar>(&mut self, sidebar: Entity<T>, cx: &mut Cont
 
 **练习 1**：为什么 `register_sidebar` 的参数是泛型 `Entity<T: Sidebar>`，而 `MultiWorkspace` 的字段却是 `Box<dyn SidebarHandle>`？
 
-答案：注册时编译期类型已知，用泛型零开销；存储时宿主只关心统一接口（宽度、焦点、序列化等），用 trait 对象擦除类型后放进一个 `Option` 字段即可，无需为每种侧边栏实现写专门字段。配套的 `impl<T: Sidebar> SidebarHandle for Entity<T>`（[multi_workspace.rs:L192](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/workspace/src/multi_workspace.rs#L192)）完成了从泛型到 trait 对象的桥接。
+答案：注册时编译期类型已知，用泛型零开销；存储时宿主只关心统一接口（宽度、焦点、序列化等），用 trait 对象擦除类型后放进一个 `Option` 字段即可，无需为每种侧边栏实现写专门字段。配套的 `impl<T: Sidebar> SidebarHandle for Entity<T>`（[multi_workspace.rs:L192](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/workspace/src/multi_workspace.rs#L192)）完成了从泛型到 trait 对象的桥接。
 
 **练习 2**：`SidebarEvent::SerializeNeeded` 是谁发出、谁消费、干什么用？
 
-答案：sidebar 在状态需要持久化时经 `cx.emit` 发出（`serialize` 方法，[sidebar.rs:L926-L928](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L926-L928)）；`register_sidebar` 注册的订阅消费它并调用 `MultiWorkspace::serialize` 写盘（[multi_workspace.rs:L398-L403](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/workspace/src/multi_workspace.rs#L398-L403)）。这让 sidebar 不必知道持久化细节。
+答案：sidebar 在状态需要持久化时经 `cx.emit` 发出（`serialize` 方法，[sidebar.rs:L926-L928](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L926-L928)）；`register_sidebar` 注册的订阅消费它并调用 `MultiWorkspace::serialize` 写盘（[multi_workspace.rs:L398-L403](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/workspace/src/multi_workspace.rs#L398-L403)）。这让 sidebar 不必知道持久化细节。
 
 **练习 3**：如果把 `Sidebar::new` 的调用从 `cx.defer` 中移出来直接执行，可能会遇到什么问题？
 
@@ -377,9 +377,9 @@ pub fn register_sidebar<T: Sidebar>(&mut self, sidebar: Entity<T>, cx: &mut Cont
    cargo tree -p sidebar --depth 1
    ```
 
-   抄下输出的全部直接依赖，与 [Cargo.toml:L17-L53](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/Cargo.toml#L17-L53) 逐项核对。（输出**待本地验证**。）
+   抄下输出的全部直接依赖，与 [Cargo.toml:L17-L53](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/Cargo.toml#L17-L53) 逐项核对。（输出**待本地验证**。）
 
-2. **使用点定位（源码阅读）**：对下列每个 zed 内部依赖——`agent_ui`、`agent`、`acp_thread`、`workspace`、`project`、`git`、`git_ui_core`、`ui`、`menu`、`zed_actions`、`editor`、`feature_flags`、`recent_projects`、`remote`、`action_log`——在 [sidebar.rs:L3-L81](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L3-L81) 的 use 区段找到对应 import，并顺着符号在文件后文找到至少一处真实调用，填入下表（示例已填两行）：
+2. **使用点定位（源码阅读）**：对下列每个 zed 内部依赖——`agent_ui`、`agent`、`acp_thread`、`workspace`、`project`、`git`、`git_ui_core`、`ui`、`menu`、`zed_actions`、`editor`、`feature_flags`、`recent_projects`、`remote`、`action_log`——在 [sidebar.rs:L3-L81](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L3-L81) 的 use 区段找到对应 import，并顺着符号在文件后文找到至少一处真实调用，填入下表（示例已填两行）：
 
    | 依赖 | use 位置 | 真实使用点（函数/行为） | 一句话用途 |
    | --- | --- | --- | --- |
@@ -395,7 +395,7 @@ pub fn register_sidebar<T: Sidebar>(&mut self, sidebar: Entity<T>, cx: &mut Cont
 
 - `sidebar` crate 是 Zed 的**多项目 Agent 线程/终端侧边栏**：列表范围覆盖窗口内所有项目分组，因此挂在 `MultiWorkspace` 而非单个 `Workspace` 上。
 - 三个源文件分工明确：`sidebar.rs`（8208 行，库根+主实现）、`sidebar_tests.rs`（15111 行，仅测试编译）、`thread_switcher.rs`（421 行，自包含模态）。
-- 架构核心约束写在 [sidebar.rs:L730-L733](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L730-L733)：每次变化都从当前世界状态**全量重推导**列表，禁止增量协调状态。
+- 架构核心约束写在 [sidebar.rs:L730-L733](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L730-L733)：每次变化都从当前世界状态**全量重推导**列表，禁止增量协调状态。
 - 依赖方向 = 分层方向：sidebar 组合 `agent_ui`（面板与元数据存储）、`workspace`（容器与契约）、`project`/`git*`（事件与 git 服务）、`gpui`/`ui`（绘制），自身不做数据持久化与 git I/O。
 - 装配发生在 zed crate：新窗口的 `MultiWorkspace` 触发 `observe_new` 回调，`defer` 后 `cx.new(Sidebar::new)` 并 `register_sidebar` 装箱为 `Box<dyn SidebarHandle>` 存进宿主。
 - `Sidebar::new` 是全 crate 的接线图：构造期注册 5 组订阅/观察，`defer_in` 中补订已有工作区并做首次全量刷新。
@@ -404,5 +404,5 @@ pub fn register_sidebar<T: Sidebar>(&mut self, sidebar: Entity<T>, cx: &mut Cont
 
 - **下一讲（u1-l2）**：学习如何构建、运行与测试这个 crate（`cargo test -p sidebar`、`#[gpui::test]` 的形态），让代码真正跑起来。
 - **随后（u1-l3）**：逐字段精读 `Sidebar` 结构体与 `Sidebar::new` 的全部订阅，把本讲 4.3 的接线表补全。
-- **源码预读建议**：带着「全量重推导」这条约束去读 [sidebar.rs:L1974-L1993](https://github.com/zed-industries/zed/blob/907ed09c9f4476caf250e6ce4bbffb23b4622f3b/crates/sidebar/src/sidebar.rs#L1974-L1993) 附近的 `schedule_update_entries` 与 `update_entries`，为第三单元的重建管线做铺垫。
+- **源码预读建议**：带着「全量重推导」这条约束去读 [sidebar.rs:L1974-L1993](https://github.com/zed-industries/zed/blob/f36aec822be697df9049fed020b593147c93b4cf/crates/sidebar/src/sidebar.rs#L1974-L1993) 附近的 `schedule_update_entries` 与 `update_entries`，为第三单元的重建管线做铺垫。
 - 如果对 GPUI 基础不熟，可先浏览仓库内 `crates/gpui` 的文档注释与 Zed 官方文档中关于 Entity/Context/Render 的章节。

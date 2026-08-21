@@ -1,14 +1,13 @@
 {
-  "head": "ec18126b1dbd32b089e51d7edee1e20b3bd53637",
+  "head": "f36aec822be697df9049fed020b593147c93b4cf",
   "project": "zed-crates-ui_macros",
-  "rationale": "ui_macros 是一个仅有三个源码文件的小型过程宏 crate，但它处在 Zed UI 体系的关键连接点：对内它用 syn/quote 做解析与代码生成，对外它的两个宏分别被 ui crate 的间距系统（derive_dynamic_spacing! 生成 DynamicSpacing 枚举）和 component crate 的组件注册体系（RegisterComponent 派生宏配合 inventory）消费。因此学习路线设计为：单元一从零开始，先弄清 crate 定位、过程宏基础与两个宏的全景；单元二沿「解析输入（syn）→ 生成代码（quote）」这条主线精读 dynamic_spacing 源码；单元三把宏放回 UI 密度系统（theme 的 UiDensity、rems/px 换算）的真实语境中理解它解决什么问题；单元四精读第二个宏 RegisterComponent，深入 inventory 分布式注册与组件预览体系；单元五讨论健壮性（unwrap 与编译期错误）、测试（doctest 与 dev-dependencies）以及动手写一个新宏的扩展实践。两条宏各自独立成线、先易后难，通过 depends_on 串成一条既能读懂源码又能逐步上手的路径。",
+  "rationale": "ui_macros 是一个仅有三个源码文件的小型过程宏 crate，但它处在 Zed UI 体系的关键连接点：对内它用 syn/quote 做解析与代码生成，对外它的两个宏分别被 ui crate 的间距系统（derive_dynamic_spacing! 生成 DynamicSpacing 枚举）和 component crate 的组件注册体系（RegisterComponent 派生宏配合 inventory）消费。因此学习路线设计为：单元一从零开始，先弄清 crate 定位、过程宏基础与两个宏的全景；单元二沿「解析输入（syn）→ 生成代码（quote）」这条主线精读 dynamic_spacing 源码；单元三把宏放回 UI 密度系统（theme 的 UiDensity、rems/px 换算）的真实语境中理解它解决什么问题；单元四精读第二个宏 RegisterComponent，深入 inventory 分布式注册与组件预览体系；单元五讨论健壮性（unwrap 与编译期错误）、测试（doctest 与 dev-dependencies）以及动手写一个新宏的扩展实践。两条宏各自独立成线、先易后难，通过 depends_on 串成一条既能读懂源码又能逐步上手的路径。本次增量核查（ec18126b..f36aec82）确认 ui_macros 及其消费者 crate（ui、component、theme、component_preview）与工作区 Cargo 配置均无任何差异，全部讲义保持原状。",
   "units": [
     {
       "id": "u1",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -33,7 +32,7 @@
           "topic": "介绍 ui_macros crate 的定位：它是 Zed 仓库中一个 proc-macro 类型的库，只对外暴露两个宏（derive_dynamic_spacing! 和 RegisterComponent），分别服务于 UI 间距系统和组件注册体系。通过 Cargo.toml 认识它的构建配置与依赖。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -60,7 +59,7 @@
           "topic": "讲解 Rust 过程宏的三种形式，以及 ui_macros 如何在 src/ui_macros.rs 中用 #[proc_macro] 声明函数式宏、用 #[proc_macro_derive] 声明派生宏，并转发到内部模块实现。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -89,15 +88,15 @@
           "topic": "从全局视角梳理两个宏的输入、输出与上下游：derive_dynamic_spacing! 在 ui crate 的 spacing.rs 中被调用并展开为 DynamicSpacing 枚举；RegisterComponent 在多个 UI 组件上派生，把组件登记进 ComponentRegistry。"
         }
       ],
+      "level": "beginner",
       "order": 1,
       "title": "初识 ui_macros：项目定位与过程宏基础"
     },
     {
       "id": "u2",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2",
             "u1-l3"
@@ -124,7 +123,7 @@
           "topic": "精读 dynamic_spacing.rs 的前半部分：如何用 syn 的 Parse trait、Punctuated、peek 和 parenthesized! 把 derive_dynamic_spacing![24, (1, 2, 4)] 这样的输入解析成结构化数据 Single(LitInt) 与 Tuple(LitInt, LitInt, LitInt)。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -150,15 +149,15 @@
           "topic": "精读 dynamic_spacing.rs 的后半部分：如何用 quote! 和 format_ident! 拼出枚举定义、带 #[doc = ...] 的变体文档，以及 spacing_ratio 的 match 分支，并用 #(#spacing_ratios,)* 这样的重复语法批量展开。"
         }
       ],
+      "level": "intermediate",
       "order": 2,
       "title": "源码精读（一）：syn 解析与 quote 代码生成"
     },
     {
       "id": "u3",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -185,7 +184,7 @@
           "topic": "聚焦宏的命名规则：Single 输入按 (n-4, n, n+4) 公式推导三档值，Tuple 输入直接使用三个值；变体名统一取 Default 档的像素值并补零成 BaseXX，同时生成对应的 `px|px|px (@16px/rem)` 文档注释。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -214,15 +213,15 @@
           "topic": "理解生成代码的运行时行为：spacing_ratio 根据 ::theme::theme_settings(cx).ui_density(cx) 在 Compact/Default/Comfortable 三档间选择像素值，再除以 BASE_REM_SIZE_IN_PX 得到 rem 比例；px() 则结合 UI 字号把 rem 换算回像素。"
         }
       ],
+      "level": "intermediate",
       "order": 3,
       "title": "源码精读（二）：DynamicSpacing 与 UI 密度系统"
     },
     {
       "id": "u4",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3",
             "u2-l2"
@@ -250,7 +249,7 @@
           "topic": "逐行拆解 derive_register_component.rs：用 DeriveInput 取出类型名，生成一个 const 匿名块通过 PhantomData 在编译期断言该类型实现了 component::Component，再生成 __component_registry_internal_register_{Name} 注册函数。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -279,7 +278,7 @@
           "topic": "打通注册链路：宏生成 inventory::submit! 提交 ComponentFn，component crate 用 inventory::collect! 收集，component::init() 遍历 inventory::iter 逐个调用注册函数，最终把 ComponentMetadata 写入全局 COMPONENT_DATA（LazyLock<RwLock<ComponentRegistry>>）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l2"
           ],
@@ -307,15 +306,15 @@
           "topic": "站在使用者的角度看 RegisterComponent 的价值：Component trait 定义了 id、scope、status、name、sort_name、description 和 preview 等方法，derive 后组件即可被 component_preview 可视化预览；以 Tooltip 为例阅读真实实现。"
         }
       ],
+      "level": "intermediate",
       "order": 4,
       "title": "源码精读（三）：RegisterComponent 与组件注册体系"
     },
     {
       "id": "u5",
-      "level": "advanced",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u4-l1"
@@ -343,7 +342,7 @@
           "topic": "审视两个宏的错误处理：dynamic_spacing 大量使用 base10_parse::<f32>().unwrap()，一旦输入不是合法数字就会让编译器直接 panic；对比 derive 宏中 parse_macro_input! 自带的错误返回机制，讨论如何用 syn::Error 改进。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -370,7 +369,7 @@
           "topic": "ui_macros 没有独立的 tests 目录，唯一的自动化验证是 src/ui_macros.rs 里 RegisterComponent 的 doctest；Cargo.toml 的 dev-dependencies（component、ui）正是为这个示例服务的。讨论 proc-macro crate 的测试策略。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1",
             "u5-l2"
@@ -400,6 +399,7 @@
           "topic": "作为整套手册的收尾，把前四单元的技能串起来：参照 dynamic_spacing 的解析与生成模式，从零设计并实现一个新的函数式过程宏，并接入调用方验证。"
         }
       ],
+      "level": "advanced",
       "order": 5,
       "title": "进阶主题：健壮性、测试与二次开发"
     }

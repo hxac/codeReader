@@ -1,4 +1,7 @@
 {
+  "head": "f36aec822be697df9049fed020b593147c93b4cf",
+  "project": "zed-crates-gpui_platform",
+  "rationale": "本轮增量区间（ec18126b1d → f36aec822b）共 8 个提交，改动全部落在 anthropic/open_ai 等 AI provider、editor、git_ui、markdown、terminal_view、workspace、extension_cli 等应用层 crate 以及根 Cargo.lock 与默认设置，经 git diff --name-only 核对，手册引用的六个 crate（gpui_platform、gpui、gpui_linux、gpui_macos、gpui_windows、gpui_web）在本区间内零文件变动，因此没有任何讲义的知识内容受到影响。核对讲义目录确认：上一轮标记 new 的 u6 三篇（MacPlatform、Windows DirectX、菜单通知）与 u7 三篇（web 入口、WebWindow 事件桥接、hello_web 实战）已由 worker 按当前源码生成完毕且内容完整，连同此前已就绪的 u1 至 u5 共 23 篇，全手册 34 篇中前 29 篇均已生成并与当前源码一致，统一标记 keep；仅剩 u8 五篇（PlatformTextSystem、PlatformAtlas 与渲染、无头渲染、test-support 测试设施、自定义 Platform 毕业实践）尚未生成，维持 new，其 topic 中引用的源码文件与 eb354c8d50 之后的 schedule_frame/FrameLoop/TestWindow 模拟设施等描述经核对仍与当前源码一致，worker 可直接按规划撰写。八单元、34 篇的结构、依赖关系与讲义顺序保持不变。",
   "units": [
     {
       "id": "u1",
@@ -721,7 +724,7 @@
       "id": "u6",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u2-l2"
@@ -753,7 +756,7 @@
           "topic": "分析 MacPlatform 如何包装 NSApplication 与 macOS 主线程约束，覆盖 events.rs 的事件桥接、pasteboard、display_link 垂直同步回调与 window_appearance 映射。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -786,7 +789,7 @@
           "topic": "讲解 Windows 平台的组成：platform.rs 与 wrapper.rs 的职责、directx_devices/directx_renderer/directx_atlas 三层渲染结构、direct_write 文本系统、vsync 以及 direct_manipulation 触控板手势。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -826,7 +829,7 @@
       "id": "u7",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l4",
             "u2-l1"
@@ -859,7 +862,7 @@
           "topic": "讲解 gpui_platform 在 wasm 上的专属入口（web_init、application_with_web_backend、single_threaded_web）、WebBackendPreference 的 Auto/WebGpu/WebGl 选择，以及 WebPlatform 自带 FetchHttpClient 的注入方式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l1",
             "u3-l2"
@@ -888,7 +891,7 @@
           "topic": "分析 WebWindow 如何在 canvas 与 DOM 之上模拟窗口语义（尺寸、设备像素比、焦点），以及 WebEventListeners 如何把键盘、鼠标、指针等浏览器事件翻译成 GPUI 的 PlatformInput。按 eb354c8d50 之后的源码：WebWindow 不再覆写帧调度方法，PlatformWindow::schedule_frame 走默认空实现，呈现完全交给 wgpu surface 的自动 present，与 Wayland 的按需唤醒形成对照。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l1"
           ],
@@ -1089,8 +1092,5 @@
       "order": 8,
       "title": "高级主题：文本、渲染、无头与二次开发"
     }
-  ],
-  "head": "ec18126b1dbd32b089e51d7edee1e20b3bd53637",
-  "project": "zed-crates-gpui_platform",
-  "rationale": "本轮增量区间（10b2925e7c → ec18126b1d）内仅有一个提交 ec18126b1d「mermaid_render: Update merman to 0.8.0-alpha.5 (#62931)」，改动全部落在仓库根 Cargo.lock、crates/mermaid_render 与 crates/zlog，未触及手册引用的六个 crate（gpui_platform、gpui、gpui_linux、gpui_macos、gpui_windows、gpui_web）中的任何源码或 Cargo.toml，因此没有任何讲义的知识内容受到影响。核对讲义目录确认：上一轮标记 update 的 u3-l2 与标记 rebuild 的 u5-l4 已由 worker 按 eb354c8d50 之后的 schedule_frame/FrameLoop 按需渲染语义完成修订与重建（讲义文本已覆盖八态状态机、frame_ping 唤醒与 Parked 停泊等新机制），连同其后新生成的 u5-l5，u1 至 u5 全部 23 篇均已就绪且与当前源码一致，统一转为 keep；仅将 u3-l2、u5-l4 topic 中已执行完毕的「需按该版源码修订/勿再按旧源码撰写」指令性表述改为陈述性描述，避免未来误判为待办。尚未生成的 u6 三篇、u7 三篇、u8 五篇共 11 篇维持 new，其中 u7-l2、u8-l4 topic 中关于 eb354c8d50 新增设施（WebWindow 不覆写帧调度、TestWindow 的 simulate_scheduled_frame 等）的描述经核对仍与当前源码一致，worker 可直接按规划撰写。八单元、34 篇的结构、依赖关系与讲义顺序保持不变。"
+  ]
 }
