@@ -56027,41 +56027,53 @@
           "error": null
         },
         "u5-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.5569219999999997,
+          "error": null
+        },
+        "u5-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.58909,
+          "error": null
+        },
+        "u5-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.488529,
+          "error": null
+        },
+        "u6-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.7665019999999998,
+          "error": null
+        },
+        "u6-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.554859,
+          "error": null
+        },
+        "u6-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.414846,
+          "error": null
+        },
+        "u7-l1": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
           "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
-        },
-        "u5-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
         },
         "u7-l2": {
           "status": "pending",
@@ -56105,7 +56117,7 @@
       "mode": "incremental",
       "tutorial_path": "tutorials/zed-industries/zed/zed-crates-sidebar-tutorial",
       "last_head": "7eec89207ccfbef7ba366da22fc885079a5c0296",
-      "last_run_at": "2026-08-22T13:02:22Z",
+      "last_run_at": "2026-08-22T18:02:22Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "zed-industries/zed@crates/picker": {
@@ -56337,31 +56349,39 @@
           "error": null
         },
         "u4-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 3.5482319999999996,
+          "error": null
+        },
+        "u4-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.2461290000000003,
+          "error": null
+        },
+        "u4-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.436924,
+          "error": null
+        },
+        "u4-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.027643,
+          "error": null
+        },
+        "u4-l5": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
           "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
-        },
-        "u4-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
         },
         "u4-l6": {
           "status": "pending",
@@ -56425,7 +56445,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/gitcode.com/ascend-tribe/openPangu-2.0-Op/openPangu-2.0-Op-inference-tutorial",
       "last_head": "c1d24e36d7fb94a98607a02b0edc88c47b64d850",
-      "last_run_at": "2026-08-22T13:02:22Z",
+      "last_run_at": "2026-08-22T18:02:22Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "gitcode.com/ascend-tribe/openPangu-2.0-Op@training": {
@@ -56495,21 +56515,25 @@
           "error": null
         },
         "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 4.698285999999999,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 6.062099999999999,
+          "error": null
+        },
+        "u3-l3": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
           "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
-        },
-        "u3-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
         },
         "u3-l4": {
           "status": "pending",
@@ -56663,7 +56687,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/gitcode.com/ascend-tribe/openPangu-2.0-Op/openPangu-2.0-Op-training-tutorial",
       "last_head": "c1d24e36d7fb94a98607a02b0edc88c47b64d850",
-      "last_run_at": "2026-08-22T13:02:22Z",
+      "last_run_at": "2026-08-22T18:02:22Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "gitcode.com/ascend-tribe/openPangu-2.0-Infer": {},
@@ -56676,7 +56700,7 @@
     "ai-dynamo/dynamo": {},
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-22T13:02:22Z"
+      "last_run_at": "2026-08-22T18:02:22Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
