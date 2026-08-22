@@ -1,0 +1,406 @@
+# current_platform 与条件编译：一次编写、按平台分发
+
+## 1. 本讲目标
+
+前几讲我们知道了 `gpui_platform` 是门面（u1-l1）、feature 如何透传（u1-l3）、`application()`/`headless()` 如何把平台注入应用（u1-l2）。本讲钻进门面最核心的那 24 行代码——`current_platform` 函数体，读完你应该能够：
+
+1. 解释 `#[cfg(target_os = ...)]` 与 `#[cfg(target_family = ...)]` 写在**函数体内部**时的展开机制：为什么一个函数可以有"四个身体"，而每次编译恰好只剩一个。
+2. 说明四个分支各自的形态差异从何而来——尤其是 **Windows 分支为什么必须 `.expect(...)` 而 macOS 分支不用**。
+3. 讲清 Linux 上的**两层分发**：`gpui_platform::current_platform` 选操作系统，`gpui_linux::current_platform` 再选窗口系统（Wayland / X11 / headless）。
+4. 解释 `WAYLAND_DISPLAY`、`DISPLAY`、`ZED_HEADLESS` 三个环境变量如何决定 Linux 后端选择，以及 feature 开关如何"悄悄改写"这个探测结果。
+5. 亲手运行一个探针程序，打印当前平台的 `compositor_name()`，再用 `ZED_HEADLESS` 改变它的输出。
+
+## 2. 前置知识
+
+### 2.1 编译目标与条件编译
+
+Rust 编译器在编译每个 crate 时都有一个确定的**编译目标**（target triple，例如 `x86_64-unknown-linux-gnu`、`aarch64-apple-darwin`、`wasm32-unknown-unknown`）。基于这个目标，rustc 会预先设定一组 **cfg 键值**，最常用的两个：
+
+- `target_os`：目标操作系统，取值如 `"macos"`、`"windows"`、`"linux"`、`"freebsd"`。
+- `target_family`：目标"家族"，如 `"unix"`、`"windows"`、`"wasm"`。wasm 不是某个操作系统（`wasm32-unknown-unknown` 的 `target_os` 是 `"unknown"`），所以判断"是否在浏览器/wasm 环境"要用 family 而不是 os。
+
+`#[cfg(谓词)]` 是**编译期**开关：谓词为真的项被保留，为假的项在语法展开阶段就被整段删除——不是运行期的 if。它可以贴在模块、函数、`impl`、语句甚至单个 `use` 上。**删除发生在类型检查和名字解析之前**，所以被删掉的代码里引用了"本目标上根本不存在的依赖"也不会报错。
+
+### 2.2 块语句上的 cfg：函数体内的"平行宇宙"
+
+```rust
+fn f() -> T {
+    #[cfg(target_os = "macos")]
+    { /* 身体 A */ }
+
+    #[cfg(target_os = "windows")]
+    { /* 身体 B */ }
+}
+```
+
+每个 `#[cfg] { ... }` 是函数体里的一个**块语句**。展开后只有谓词成立的块幸存；幸存的那个块恰好在函数末尾、后面没有分号，于是成为函数的**尾表达式**（返回值）。如果所有谓词都不成立，函数体变成空的，与声明的返回类型不匹配——直接编译失败。换句话说，这套写法**靠返回类型兜底**：不支持的平台上这个 crate 根本编译不过，而不是运行期报错。
+
+### 2.3 承接前两讲
+
+- u1-l1 已确立：`gpui_platform` 只做再导出与平台挑选，依赖方向是"平台 crate → gpui"（gpui 定义 `Platform` 契约，四个平台 crate 是实现方）。`Rc<dyn Platform>` 是贯穿全链路的平台句柄类型。
+- u1-l3 已确立：workspace 根对 gpui 家族统一 `default-features = false`，`wayland`/`x11` 等 feature 是从最终消费者一路透传下来的"电线"；并且 `guess_compositor()` 只有在对应 feature 开启时才会去读 `WAYLAND_DISPLAY`/`DISPLAY`。本讲把这个结论展开成完整的决策表。
+
+### 2.4 Result 与 expect
+
+Rust 用 `Result<T, E>` 表达可失败的操作。`MacPlatform::new(headless)` 直接返回 `Self`（不可能失败），而 `WindowsPlatform::new(headless)` 返回 `Result<Self>`（初始化可能失败）。`current_platform` 的返回类型是 `Rc<dyn Platform>` 而非 `Result`，所以 Windows 分支用 `.expect("...")` 把失败转化为带信息的 panic。这背后的差异是**平台初始化的本质区别**，4.1.3 详述。
+
+### 2.5 "探测"与"连接"的区别
+
+`guess_compositor()` 只读环境变量、**不尝试连接**任何显示服务器（源码注释原话）。这是纯字符串层面的猜测：环境变量说有 Wayland，它就返回 `"Wayland"`，哪怕那个 socket 根本不存在。真正的连接发生在后续 `WaylandClient::new()` / `X11Client::new()` 里。
+
+## 3. 本讲源码地图
+
+| 文件 | 本讲关注点 |
+| --- | --- |
+| `src/gpui_platform.rs` | 主角：`current_platform`（L57-81）的四段 `#[cfg]` 分支；L4 的 `pub use gpui::Platform` 再导出 |
+| `Cargo.toml` | L26-38 的四段 `[target.'cfg(...)'.dependencies]`，与代码里的四个 cfg 谓词一一对应 |
+| `../gpui_linux/src/linux.rs` | 第二层分发：`gpui_linux::current_platform`（L30-60），含 headless 短路与 `unreachable!` |
+| `../gpui/src/platform.rs` | `guess_compositor()`（L93-123）、`Platform` trait 声明（L125 起）与 `compositor_name` 默认实现（L293-295） |
+| `../gpui_linux/src/linux/platform.rs` | `LinuxPlatform` 如何把 `compositor_name` 委托给内部 client（L284-286）；`LinuxClient` 契约（L51-53） |
+| `../gpui_linux/src/linux/{wayland,x11,headless}/client.rs` | 三个 client 各自的 `compositor_name` 返回值（实践任务的观测出口） |
+| `../gpui_macos/src/platform.rs` / `../gpui_windows/src/platform.rs` | 两个构造器签名差异：`new -> Self` vs `new -> Result<Self>` |
+| `../client/src/telemetry.rs` | 同款"函数内多段 cfg"模式的第二个真实用例，且消费 `guess_compositor()` |
+
+## 4. 核心概念与源码讲解
+
+### 4.1 `current_platform`：一个函数里的四段编译期分发
+
+#### 4.1.1 概念说明
+
+`current_platform(headless: bool) -> Rc<dyn Platform>` 是整个门面 crate 的心脏：给定"是否无头"，返回当前编译目标对应的平台实现。它解决的问题叫**平台分发**——"同一段调用代码，在 macOS 上用 AppKit、在 Windows 上用 Win32/DirectX、在 Linux 上用 Wayland/X11、在 wasm 上用浏览器 API"。
+
+关键认知：这个分发**全部发生在编译期**。函数体里有四个互斥的 `#[cfg]` 块，每次编译只有一个存活；运行期没有任何操作系统判断。这也是 u1-l2 练习中"`application()` 为什么不需要调用者告诉它操作系统"的完整答案。
+
+#### 4.1.2 核心流程
+
+先把原文"翻译"成决策树：
+
+```text
+gpui_platform::current_platform(headless)          ← 编译期就开始裁决
+│
+├─ target_os = "macos"                  → Rc::new(MacPlatform::new(headless))
+│                                          构造器不返回 Result，直接用
+│
+├─ target_os = "windows"                → Rc::new(WindowsPlatform::new(headless)
+│                                              .expect("failed to initialize ..."))
+│                                          构造器返回 Result，失败即 panic
+│
+├─ target_os ∈ {"linux","freebsd"}      → gpui_linux::current_platform(headless)
+│                                          注意：不再 Rc::new，第二层已返回 Rc<dyn Platform>
+│
+└─ target_family = "wasm"               → let _ = headless;   // 参数被显式丢弃
+                                           Rc::new(WebPlatform::new(true))
+```
+
+四段 cfg 的展开与互斥：
+
+1. rustc 依据编译目标设定 cfg（如 `target_os="linux"` 为真，其余为假）。
+2. 展开阶段：谓词为假的块**整段删除**。在 Linux 上，`gpui_macos`、`gpui_windows`、`gpui_web` 三个名字从这函数里彻底消失。
+3. 幸存的唯一块成为尾表达式，其类型恰为 `Rc<dyn Platform>`，类型检查通过。
+4. 四个谓词（macos / windows / {linux,freebsd} / wasm）两两互斥——这不是 rustc 强制的，而是作者保证的；如果某个目标的四个谓词全为假，函数体为空，返回类型不匹配，**编译失败**。所以"支持哪些平台"由这段代码的编译能否通过来划定边界。
+
+#### 4.1.3 源码精读
+
+先看主角本体：
+
+[crates/gpui_platform/src/gpui_platform.rs:57-81](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/src/gpui_platform.rs#L57-L81)：`current_platform` 全函数。四个块依次对应 macOS（L58-61）、Windows（L63-69）、Linux/FreeBSD（L71-74）、wasm（L76-80）。注意 crate 顶部的模块注释（[L1-2](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/src/gpui_platform.rs#L1-L2)）直接说明了这个函数存在的意义："re-exports GPUI's platform traits and the `current_platform` constructor so consumers don't need `#[cfg]` gating"——把条件编译的噪音关进门面，下游拿到的永远是同一个无条件的函数签名。
+
+逐段看差异：
+
+**macOS 分支**（L58-61）只有一行。构造器签名见 [crates/gpui_macos/src/platform.rs:197-201](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_macos/src/platform.rs#L197-L201)：`pub fn new(headless: bool) -> Self`——直接返回 `Self`，不可失败。原因：macOS 上创建 `MacDispatcher`、文本系统（font-kit 门控，L200-207）等都不涉及"可能连不上的外部资源"。
+
+**Windows 分支**（L63-69）多出一个 `.expect("failed to initialize Windows platform")`。看构造器就明白：[crates/gpui_windows/src/platform.rs:110-119](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_windows/src/platform.rs#L110-L119)：`pub fn new(headless: bool) -> Result<Self>`，第一步 `OleInitialize` 可能失败（L111-113 带 `context("unable to initialize Windows OLE")`）；非无头时还要创建 DirectX 设备与 DirectWrite 文本系统（L114-119），都是可能失败的外部资源。**为什么这里敢用 expect/panic 而不是传播错误？** 因为 `current_platform` 的签名是启动期一次性调用的"构造当前平台"，调用点（`application()`/`headless()`）也不返回 Result；平台初始化失败时应用无法继续，与其让错误在类型上层层传染，不如当场 panic 并带上清晰信息——这是启动期 fail-fast 的常见取舍。
+
+**Linux/FreeBSD 分支**（L71-74）没有 `Rc::new`，直接 `gpui_linux::current_platform(headless)`——因为第二层函数自己就返回 `Rc<dyn gpui::Platform>`（见 4.2.3）。用 `any(target_os = "linux", target_os = "freebsd")` 是因为 gpui_linux 同时支持这两个系统。这就是"两层分发"的外层。
+
+**wasm 分支**（L76-80）有两个细节：用 `target_family = "wasm"` 而非 `target_os`（见 2.1）；以及 `let _ = headless;`——参数被显式丢弃（避免未使用警告），`WebPlatform::new(true)` 硬编码传入 `true`。也就是说在 web 目标上，`current_platform(true)` 与 `current_platform(false)` 没有区别，headless 语义由 web 侧自行决定。
+
+代码里的 cfg 还必须与 **Cargo.toml 的目标依赖**严格对齐——cargo 不会因为你代码里写了 `#[cfg(target_os = "macos")]` 就自动链接 gpui_macos：
+
+[crates/gpui_platform/Cargo.toml:26-38](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/Cargo.toml#L26-L38)：四段 `[target.'cfg(...)'.dependencies]` 分别声明 `gpui_macos`、`gpui_windows`、`gpui_linux`、`gpui_web`，谓词与函数内四段完全一致。由此得到一个重要事实：**在 Linux 上编译时，gpui_macos/gpui_windows/gpui_web 三个 crate 根本不会被编译和链接**——条件编译省掉的不只是分支代码，还有三个平台 crate 及其全部系统依赖（Cocoa、DirectX、wasm-bindgen……）。这正是"门面把 cfg 收敛到一处"的工程价值：32 个下游 crate（zed、markdown 等）不用各自维护这套 cfg + 目标依赖。
+
+最后看一个同款模式的"复读"——证明这不是孤例写法：
+
+[crates/client/src/telemetry.rs:109-127](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/client/src/telemetry.rs#L109-L127)：遥测的 `os_name()` 用完全相同的"函数内多段 cfg 块"结构，并且 Linux/FreeBSD 块里嵌着 `format!("Linux {}", gpui::guess_compositor())`——`guess_compositor()` 的返回值会被拼进上报的系统名里（例如 "Linux Wayland"）。这同时说明：这个探测函数不只是平台选择在用，它还是**运行期查询"当前会话类型"的公开 API**（其他消费者见 4.3.3）。
+
+#### 4.1.4 代码实践：纸上展开 + 依赖对照（源码阅读型）
+
+1. **实践目标**：亲手验证"一个函数四个身体，每个目标只剩一个"，并确认代码 cfg 与 Cargo.toml 目标依赖的一一对应。
+2. **操作步骤**：
+   - 对照 [gpui_platform.rs:57-81](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/src/gpui_platform.rs#L57-L81)，在纸上分别写出 **macOS** 与 **Linux** 目标上展开后的 `current_platform` 完整函数（把其余三段划掉）。
+   - 执行 `grep -n "target" crates/gpui_platform/Cargo.toml`，把命中的四段与函数里的四个 cfg 谓词逐一对表。
+3. **需要观察的现象**：macOS 展开后函数体只剩 `Rc::new(gpui_macos::MacPlatform::new(headless))`；Linux 展开后只剩 `gpui_linux::current_platform(headless)`；Cargo.toml 四段 target 依赖与四个 cfg 谓词完全同构。
+4. **预期结果**：两张"展开后的函数" + 一张 cfg↔target 依赖对照表。据此能回答：在 Linux 目标上，`gpui_macos` 这个名字为什么不会引发"未解析的 crate"错误（答：引用它的块在名字解析之前就已被删除，且该依赖在 Linux 目标上根本不会被链接）。
+5. 本实践为纯阅读型，无需运行（结论可直接从源码与 Cargo.toml 推出）。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：如果有人把某个新操作系统（比如 `target_os = "ios"`）的目标交给 rustc 编译 `gpui_platform`，会发生什么？
+
+**参考答案**：四个 cfg 谓词全为假，函数体展开后为空，返回 `()` 与声明的 `Rc<dyn Platform>` 不匹配——**编译失败**（类型错误）。支持范围由"能否编译"划定，而不是运行期报错；同时 Cargo.toml 里也没有任何 target 段会在 ios 上拉入平台依赖。
+
+**练习 2**：为什么 wasm 分支写 `#[cfg(target_family = "wasm")]` 而不是 `#[cfg(target_os = "...")]`？
+
+**参考答案**：wasm 是编译目标"家族"而非操作系统；`wasm32-unknown-unknown` 的 `target_os` 值并不是 `"wasm"`。用 `target_family = "wasm"` 能同时覆盖各家 wasm 目标，是判断"是否处于 wasm 环境"的标准谓词。
+
+**练习 3**：`current_platform` 的 Windows 分支用 `.expect()` 直接 panic，违反了"避免 panic"的一般守则吗？
+
+**参考答案**：这是一种被接受的启动期 fail-fast：函数在应用生命周期最开始被调用一次，失败意味着平台无法初始化、程序无法继续；让签名变成 `Result` 会把错误传染给 `application()`/`headless()` 等所有入口。expect 的消息（"failed to initialize Windows platform"）配合构造器内部的 `context(...)` 能定位失败原因。对比之下，CLAUDE.md 禁止的是在**常规逻辑路径**上用 `unwrap()` 吞掉可恢复错误。
+
+### 4.2 `gpui_linux::current_platform`：Linux 内部的第二层分发
+
+#### 4.2.1 概念说明
+
+macOS/Windows 上"选操作系统"之后就没有悬念了（一家一个窗口系统），Linux 却有三种可能：Wayland、X11、无显示。所以 Linux 分支没有在门面里写死，而是**再委托一层**：`gpui_linux::current_platform`。
+
+这一层引入一个漂亮的内聚结构（u5-l1 会展开）：`LinuxPlatform` 是个统一外壳，内部持有一个实现 `LinuxClient` 契约的后端（`WaylandClient` / `X11Client` / `HeadlessClient`）。本讲只关注"怎么选中其中一个"。
+
+#### 4.2.2 核心流程
+
+```text
+gpui_linux::current_platform(headless)
+│
+├─ headless == true ？ → 短路返回 LinuxPlatform { inner: HeadlessClient::new() }
+│                        （连 compositor 探测都不做——调用方已经明说了要无头）
+│
+└─ 否则 s = gpui::guess_compositor()      ← 运行期读环境变量
+   ├─ s == "Wayland"   且 feature wayland 开 → WaylandClient::new()
+   ├─ s == "X11"       且 feature x11   开 → X11Client::new().context(..).unwrap()
+   ├─ s == "Headless"（恒存活臂）          → HeadlessClient::new()
+   └─ 其他                                  → unreachable!(要求至少启用 wayland/x11 之一)
+```
+
+注意这里出现了**两类开关的叠加**：外层 `if headless` 是运行期参数短路；`match guess_compositor()` 是运行期环境探测；而每个 match 臂上又各贴着一个**编译期** `#[cfg(feature = ...)]`。编译期先把一部分臂删掉，剩下的臂在运行期按探测结果命中。
+
+#### 4.2.3 源码精读
+
+[crates/gpui_linux/src/linux.rs:30-60](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux.rs#L30-L60)：`gpui_linux::current_platform` 全函数。返回类型 `Rc<dyn gpui::Platform>`——这就是外层分支不需要再 `Rc::new` 的原因。
+
+- **L34-38 headless 短路**：`if headless { return Rc::new(LinuxPlatform { inner: HeadlessClient::new() }) }`。参数为真时连 `guess_compositor()` 都不调用。这解释了 u1-l2 练习里 `headless()` 与 `ZED_HEADLESS=1 cargo run` 的路径差异：前者走参数短路，后者要等探测函数读环境变量。
+- **L40**：`match gpui::guess_compositor()`，把 4.3 节的探测结果映射到后端。
+- **L41-44 Wayland 臂**：臂本身贴 `#[cfg(feature = "wayland")]`；`WaylandClient::new()` 不返回 Result（连接失败的处理在 client 内部，u5-l4 展开）。
+- **L46-51 X11 臂**：贴 `#[cfg(feature = "x11")]`；`X11Client::new()` 返回 Result——连接 X server 可能失败，所以 [L48-50](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux.rs#L48-L50) 用 `.context("Failed to initialize X11 client.").unwrap()`。与 Windows 分支的 expect 同理：启动期 fail-fast。函数顶部 [L31-32](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux.rs#L31-L32) 的 `use anyhow::Context` 也整体贴着 `#[cfg(feature = "x11")]`——只有这个臂需要它。
+- **L53-55 Headless 臂**：**没有任何 cfg**，永远编译。探测说"无图形环境"就落到它。
+- **L56-58 兜底臂**：`_ => unreachable!(r#"At least one of the "wayland" or "x11" features must be enabled on gpui_linux or gpui_platform."#)`。
+
+`unreachable!` 值得停下来想一想，因为它实际上**在当前代码里是不可达的**。不变量来自两处的刻意对称：
+
+| feature 组合（gpui_platform 或 gpui_linux 层面） | `guess_compositor()` 可能返回 | 编译后存活的 match 臂 | 覆盖情况 |
+| --- | --- | --- | --- |
+| 两个都不开 | 仅 `"Headless"`（两个环境变量都不读） | 仅 Headless 臂 | 完全覆盖 |
+| 仅 `wayland` | `"Wayland"` / `"Headless"` | Wayland + Headless | 完全覆盖 |
+| 仅 `x11` | `"X11"` / `"Headless"` | X11 + Headless | 完全覆盖 |
+| 两个都开 | 三种都可能 | 三臂全在 | 完全覆盖 |
+
+对称性的根源在 4.3 节：探测函数读取 `WAYLAND_DISPLAY` 的那两行本身贴着 `#[cfg(feature = "wayland")]`。所以探测**永远不可能返回一个"对应臂已被编译掉"的后端名**。那为什么还要 `unreachable!`？这是防御式断言：万一未来有人改动了"读环境变量"与"match 臂"两处的门控使对称性破裂，程序会在启动期以明确信息炸掉，而不是静默落错分支。错误信息面向的是"改坏了对称性"的未来维护者，也正是它点名两个 crate 名（`gpui_linux or gpui_platform`）的原因——feature 从哪一层透传进来都算数。
+
+顺带一提模块层面的门控：[linux.rs:6-11](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux.rs#L6-L11) 里 `mod wayland;`、`mod x11;` 分别贴着 `#[cfg(feature = ...)]`——零 feature 构建时整个 wayland/x11 目录（连同 wayland-client、x11 等系统库依赖）都不参与编译，`WaylandClient`/`X11Client` 这两个名字在 match 臂里自然也就不存在了。
+
+#### 4.2.4 代码实践：可达性推演（源码阅读型）
+
+1. **实践目标**：验证 4.2.3 的覆盖表，体会"编译期删臂 + 运行期探测"叠加后的行为。
+2. **操作步骤**：
+   - 情形 A：假设构建命令是 `cargo build -p gpui_platform`（不启用任何 feature，default 为空，见 [Cargo.toml:14-15](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/Cargo.toml#L14-L15)）。写下：`guess_compositor()` 能返回什么？哪些臂存活？`current_platform(false)` 最终返回什么？
+   - 情形 B：假设 `features = ["x11"]` 且进程环境里 `WAYLAND_DISPLAY=wayland-0`（真实 Wayland 会话）。再回答同样三个问题。
+3. **需要观察的现象**：情形 A 中即使桌面会话齐全，结果也是 `LinuxPlatform { inner: HeadlessClient }`；情形 B 中设置了 `WAYLAND_DISPLAY` 却仍选 X11/或 Headless——环境变量**没有被读**。
+4. **预期结果**：情形 A——wayland/x11 都未开，两处 env 读取均被 cfg 删除，探测只能得 `"Headless"`，命中恒存活臂。情形 B——`wayland` feature 未开，`WAYLAND_DISPLAY` 读取行不存在，探测结果取决于 `DISPLAY` 是否非空与 `x11` 臂是否存活：`DISPLAY` 非空则得 `"X11"` 命中 X11 臂；否则 `"Headless"`。两种情形 `unreachable!` 都不会触发。
+5. 纯推演型实践；如需实证，可在 4.3.4 的探针工程里用不同 feature 组合各构建一次对比输出（**待本地验证**）。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`gpui_platform::current_platform` 与 `gpui_linux::current_platform` 是什么关系？为什么 Linux 需要两层而 macOS 不需要？
+
+**参考答案**：外层在编译期按操作系统挑选，Linux/FreeBSD 分支委托给内层；内层在运行期按环境变量（外加编译期 feature 删臂）在 Wayland/X11/headless 三个后端中挑选，返回同一类型 `Rc<dyn Platform>`。macOS 只有一个窗口系统家族，第一层结束后就没有选择余地，无需第二层。
+
+**练习 2**：为什么 headless 参数在第二层是"短路 return"，而不是也做成一个 match 臂？
+
+**参考答案**：`headless=true` 是调用方的**显式指令**（例如 `headless()` 入口、远程服务器、CI），语义上优先于一切环境探测——用户明说了无头，就不该再被 `WAYLAND_DISPLAY` 之类的残留环境变量劫持。短路在探测之前，保证了这个优先级，也省掉一次无意义的环境读取。
+
+**练习 3**：X11 臂里的 `.unwrap()` 与 Windows 分支的 `.expect()` 表达了同一种取舍，这个取舍是什么？
+
+**参考答案**：都是"启动期 fail-fast"：平台/后端初始化失败时应用无法工作，与其把 `Result` 沿 `current_platform → application() → main` 一路传染，不如当场终止并留下原因（X11 臂用 `.context("Failed to initialize X11 client.")` 补充了上下文再 unwrap）。
+
+### 4.3 `guess_compositor` 与 `compositor_name`：环境变量探测与可观测出口
+
+#### 4.3.1 概念说明
+
+第二层分发的裁判是 `gpui::guess_compositor()`——一个只活在 Linux/FreeBSD 上的约 25 行小函数，通过读三个环境变量猜出"该用哪个窗口系统后端"。
+
+而要**观察**这套分发选了谁，最方便的窗口是 `Platform::compositor_name()`：`Platform` trait 给了默认实现（空字符串），Linux 的 `LinuxPlatform` 把它委托给内部 client，三个 client 各自返回一个可区分的名字。它是我们实践任务的"探针读数"。
+
+#### 4.3.2 核心流程
+
+`guess_compositor()` 的完整决策表（注意每个读取都受 feature 门控）：
+
+| 顺序 | 条件 | 结果 |
+| --- | --- | --- |
+| 1 | `ZED_HEADLESS` 存在（**任何值，空串也算**） | `"Headless"` |
+| 2 | `WAYLAND_DISPLAY` 存在且**非空**（仅 feature `wayland` 开时才读） | `"Wayland"` |
+| 3 | `DISPLAY` 存在且**非空**（仅 feature `x11` 开时才读） | `"X11"` |
+| 4 | 以上皆否 | `"Headless"` |
+
+优先级：强制无头 > Wayland > X11 > 兜底无头。伪代码：
+
+```text
+fn guess_compositor() -> &'static str:
+    if env("ZED_HEADLESS") 存在:          return "Headless"
+    wayland = feature.wayland ? env("WAYLAND_DISPLAY") : None   # 编译期决定读不读
+    x11     = feature.x11     ? env("DISPLAY")         : None
+    if wayland 非空: return "Wayland"
+    if x11     非空: return "X11"
+    return "Headless"
+```
+
+读数端 `compositor_name()` 的链条：
+
+```text
+platform.compositor_name()                       # trait 方法
+  └─ LinuxPlatform::compositor_name()            # 委托 inner
+       └─ inner.compositor_name()                # LinuxClient 契约方法
+            ├─ WaylandClient  → "Wayland"
+            ├─ X11Client      → "X11"
+            └─ HeadlessClient → "headless"       # 注意：小写！
+（macOS / Windows 未覆盖 → trait 默认 "" ）
+```
+
+#### 4.3.3 源码精读
+
+**探测端**：
+
+[crates/gpui/src/platform.rs:93-123](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L93-L123)：`guess_compositor` 全函数，逐段看：
+
+- [L93-95](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L93-L95)：文档注释挑明两个事实——它只是"猜测"，且 **"Does not attempt to connect to the given compositor"**（不尝试连接）。上面还有一条 `TODO(jk): return an enum instead of a string`：返回字符串是公认的瑕疵，比较时全靠约定字符串字面量（消费者都在 `== "Wayland"` 这样比）。这是阅读大型代码库时很典型的信号——注释里的 TODO 直接告诉你这个 API 的演化方向。
+- [L96](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L96)：`#[cfg(any(target_os = "linux", target_os = "freebsd"))]`——这个函数只在这两个目标上存在。macOS/Windows 上调用它会直接编译错误，所以消费者（如遥测）必须把它包在自己的 `#[cfg]` 块里（见 4.1.3 的 telemetry 例子）。
+- [L99-101](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L99-L101)：`std::env::var_os("ZED_HEADLESS").is_some()`——只判断**存在性**，不检查值。`ZED_HEADLESS=1`、`ZED_HEADLESS=true` 甚至 `ZED_HEADLESS=`（空字符串）都会强制无头。
+- [L103-111](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L103-L111)：两对镜像的 cfg——feature 开时真的读环境变量，feature 关时直接绑定为 `None`。这就是 u1-l3 说的"编译期开关悄悄改写运行期行为"的具体落点：**feature 关闭时，环境变量即使设置也形同虚设**。
+- [L113-114](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L113-L114)：`is_some_and(|display| !display.is_empty())`——存在且**非空**才算数。与 `ZED_HEADLESS` 的"存在即可"形成刻意对比：设置 `WAYLAND_DISPLAY=`（空）不会选中 Wayland。
+- [L116-122](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L116-L122)：三级优先级链，Wayland 优先于 X11（现代发行版同时导出两个变量时选 Wayland）。
+
+**读数端**：
+
+- [crates/gpui/src/platform.rs:293-295](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L293-L295)：`Platform` trait 的默认实现返回 `""`。前面 L125 起是 trait 本体（L127-128 的两个 executor 方法是 u4 的主题）。
+- [crates/gpui_linux/src/linux/platform.rs:51-53](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L51-L53)：`LinuxClient` 契约要求每个后端实现 `compositor_name`；[L284-286](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/platform.rs#L284-L286)：`LinuxPlatform` 的实现只是 `self.inner.compositor_name()`——外壳无条件转发给被选中的后端。
+- 三个后端的返回值：[wayland/client.rs:1223-1225](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/wayland/client.rs#L1223-L1225) 返回 `"Wayland"`；[x11/client.rs:1533-1535](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/x11/client.rs#L1533-L1535) 返回 `"X11"`；[headless/client.rs:111-113](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux/headless/client.rs#L111-L113) 返回 **`"headless"`（小写！）**。注意这个大小写不对称：`guess_compositor()` 的 match 用的是首字母大写的 `"Headless"`（[linux.rs:53](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux.rs#L53)），而探针打印出来的是小写 `headless`——两个字符串来自两个不同的地方，比较时别混用。macOS 与 Windows 的 crate 里没有任何 `compositor_name` 覆盖（可用 grep 验证），因此走 trait 默认值 `""`。
+
+**其他运行期消费者**（证明这个探测的用途超出平台选择）：
+
+- [crates/workspace/src/status_bar.rs:175](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/workspace/src/status_bar.rs#L175)：`gpui::guess_compositor() == "Wayland" && window.scale_factor() != 1.0`——状态栏对 Wayland 分数缩放做特殊处理。
+- [crates/title_bar/src/collab.rs:617](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/title_bar/src/collab.rs#L617)：同样以 `== "Wayland"` 区分窗口系统行为。
+- [crates/client/src/telemetry.rs:116](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/client/src/telemetry.rs#L116)：拼进上报的 OS 名称（"Linux Wayland"）。
+
+#### 4.3.4 代码实践：探针程序与 ZED_HEADLESS 对比（本讲主实践）
+
+1. **实践目标**：在你的操作系统上真实调用 `gpui_platform::current_platform(false)`，打印它选中的后端；再用 `ZED_HEADLESS` 环境变量改变选择，验证 4.3.2 的决策表。
+
+2. **操作步骤**：
+
+   在 zed 仓库**之外**新建一个独立 crate（例如 `/tmp/platform-probe`，避免卷入 zed 的 workspace 成员校验）：
+
+   ```toml
+   # /tmp/platform-probe/Cargo.toml
+   [package]
+   name = "platform-probe"
+   version = "0.1.0"
+   edition = "2021"   # 本例代码极简，任何近期 edition 均可
+
+   [dependencies]
+   # path 指向你检出的 zed 仓库
+   gpui_platform = { path = "/path/to/zed/crates/gpui_platform" }
+
+   # Linux/FreeBSD 读者加这一段：显式启用两个图形后端 feature（default 为空！）
+   # [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+   # gpui_platform = { path = "/path/to/zed/crates/gpui_platform", features = ["wayland", "x11"] }
+   ```
+
+   ```rust
+   // /tmp/platform-probe/src/main.rs
+   // 示例代码（教程演示用，非仓库原有文件）
+   use gpui_platform::Platform; // 门面在 L4 再导出了 trait，无需直接依赖 gpui
+
+   fn main() {
+       let platform = gpui_platform::current_platform(false);
+       println!("compositor_name = {:?}", platform.compositor_name());
+   }
+   ```
+
+   依次运行：
+
+   ```bash
+   cd /tmp/platform-probe
+   cargo run --quiet                        # 第一次：正常环境
+   ZED_HEADLESS=1 cargo run --quiet         # 第二次：强制无头
+   ```
+
+3. **需要观察的现象**：两次输出的 `compositor_name` 不同。在 Linux 图形会话中第一次应打印真实后端，第二次变为 `"headless"`。同时留意：若忘了启用上面注释掉的 feature 段，即使你坐在桌面会话里，第一次也会打印 `"headless"`——因为探测函数读取 `WAYLAND_DISPLAY`/`DISPLAY` 的代码根本没被编译进去（4.2.4 情形 A）。
+
+4. **预期结果**（按平台）：
+
+   | 环境 | 第一次输出 | 第二次（ZED_HEADLESS=1） |
+   | --- | --- | --- |
+   | Linux + Wayland 会话（wayland feature 开） | `"Wayland"` | `"headless"` |
+   | Linux + X11 会话（x11 feature 开） | `"X11"` | `"headless"` |
+   | Linux 无显示（SSH/容器，feature 开） | `"headless"` | `"headless"` |
+   | Linux 任意环境，feature 未开 | `"headless"` | `"headless"` |
+   | macOS / Windows | `""`（trait 默认实现，两平台未覆盖） | `""`（ZED_HEADLESS 只在 Linux/FreeBSD 被读） |
+
+   差异的成因链条：`ZED_HEADLESS` 存在 → `guess_compositor()` 在第一优先级返回 `"Headless"` → `gpui_linux::current_platform` 命中恒存活的 Headless 臂 → `LinuxPlatform { inner: HeadlessClient }` → 其 `compositor_name()` 返回小写 `"headless"`。注意这条链**不经过** 4.2 的参数短路（我们传的一直是 `false`），是环境变量在运行期改写了探测结果。
+
+5. 本讲义写作环境无图形会话，未实际运行以上命令，**待本地验证**。（推演依据即上述源码行号，若有出入请以源码为准。）
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：`ZED_HEADLESS=`（设为空字符串）和 `WAYLAND_DISPLAY=`（空字符串）分别会产生什么效果？为什么规则不一样？
+
+**参考答案**：`ZED_HEADLESS=` 仍会强制无头——判断用的是 `var_os().is_some()`，只看存在性（platform.rs:99-101）；`WAYLAND_DISPLAY=` 不会选中 Wayland——判断是 `is_some_and(|d| !d.is_empty())`，要求非空（platform.rs:113）。规则差异符合直觉：前者是布尔开关（"设了就开"），后者是指向 socket 的路径（空路径没有意义）。
+
+**练习 2**：为什么 `guess_compositor()` 上要贴 `#[cfg(any(target_os = "linux", target_os = "freebsd")))]`？去掉会怎样？
+
+**参考答案**：读取 `WAYLAND_DISPLAY`/`DISPLAY` 只对 Linux/FreeBSD 有意义；macOS/Windows 上这两个环境变量通常不存在，函数会永远返回 `"Headless"`，误导调用者。贴上 cfg 后，其他平台上它根本不存在，任何误用（如遥测代码）会在编译期被逼着用自己的 `#[cfg]` 块包起来——把"平台专属 API"变成编译期可见的事实。
+
+**练习 3**：既然 `guess_compositor()` "不尝试连接"，那么在 X11 会话里伪造 `WAYLAND_DISPLAY=/nonexistent` 再启动真实应用，理论上会发生什么？
+
+**参考答案**：探测只看字符串非空，会返回 `"Wayland"`，于是选择 `WaylandClient::new()`——而真正的连接发生在这一次。后果（连接失败后是 panic、报错还是回退）取决于 `WaylandClient::new` 的内部实现（u5-l4 精读），本讲不臆断。这个思想实验说明"猜测"与"连接"是两个阶段：猜错不会在 guess 里暴露，而是在构造 client 时才付出代价。**待本地验证**。
+
+## 5. 综合实践：环境变量矩阵实验 + 全仓消费者考察
+
+把本讲三个模块串成一个完整实验。仍然使用 4.3.4 的探针 crate（Linux 读者启用 wayland+x11 两个 feature）。
+
+**第一步：矩阵实验。** 依次用不同环境运行探针并填表：
+
+| 实验 | 命令（前缀） | 预期 `compositor_name` | 对应源码依据 |
+| --- | --- | --- | --- |
+| 1 基线 | `cargo run` | 真实后端（`"Wayland"`/`"X11"`）或 `"headless"` | platform.rs:116-122 |
+| 2 强制无头 | `ZED_HEADLESS=1 cargo run` | `"headless"` | platform.rs:99-101 |
+| 3 空值开关 | `ZED_HEADLESS= cargo run` | `"headless"`（存在即生效） | platform.rs:99-101 |
+| 4 假 Wayland | `WAYLAND_DISPLAY=/nonexistent cargo run` | `"Wayland"`（不校验连通性） | platform.rs:94-95, 113 |
+| 5 空 Wayland | `WAYLAND_DISPLAY= cargo run` | 回落到 `"X11"` 或 `"headless"` | platform.rs:113-119 |
+| 6 双变量 | `WAYLAND_DISPLAY=wayland-0 DISPLAY=:0 cargo run` | `"Wayland"`（优先级高） | platform.rs:116-117 |
+
+（实验 4 涉及真实连接，行为待本地验证；其余实验仅涉及字符串判断。）
+
+**第二步：代码对照。** 每行实验后，回到 [linux.rs:40-59](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_linux/src/linux.rs#L40-L59) 手工走一遍 match，确认你填的预期值与臂的选择一致；有出入时用 `RUST_BACKTRACE=1` 或在探针里加一行 `println!("{}", gpui::guess_compositor());`（需 `use gpui;`——探针需补一个对 gpui 的 path 依赖）直接打印探测结果定位分歧在"探测"还是"选臂"环节。
+
+**第三步：消费者考察。** 执行：
+
+```bash
+grep -rn "guess_compositor()" crates --include="*.rs" | grep -v tutorial
+```
+
+对 [workspace/src/status_bar.rs:175](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/workspace/src/status_bar.rs#L175) 与 [title_bar/src/collab.rs:617](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/title_bar/src/collab.rs#L617) 各读上下文 20 行，回答：这两处 UI 代码为什么需要在意"当前是不是 Wayland"？（提示：与分数缩放 `scale_factor() != 1.0` 相关的渲染差异。）最终交付：一张填完的实验表 + 一段"feature/环境变量/最终后端"三级决定链的文字总结。
+
+## 6. 本讲小结
+
+- `current_platform` 用**函数体内四段互斥 `#[cfg]` 块**完成编译期平台分发；每次编译只有一个块幸存并成为尾表达式，不支持的编译目标会因函数体为空而编译失败——支持边界由类型系统划定。
+- 四段分支形态各异：macOS 构造器不可失败（直接 `Rc::new`）；Windows 的 `new` 返回 `Result`（OLE + DirectX 可能失败），故用 `.expect()` 做启动期 fail-fast；Linux/FreeBSD 委托第二层；wasm 忽略 `headless` 参数硬编码 `true`，并用 `target_family` 而非 `target_os` 判断。
+- 代码 cfg 必须与 Cargo.toml 的 `[target.'cfg(...)'.dependencies]` 手工保持同步（[Cargo.toml:26-38](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui_platform/Cargo.toml#L26-L38)）；非目标平台的 crate 连编译都不参与。
+- Linux 是**两层分发**：外层选操作系统，内层 `gpui_linux::current_platform` 先按 `headless` 参数短路，再按 `guess_compositor()` 选 Wayland/X11/headless，且每个 match 臂还叠加 feature 门控；`unreachable!` 依赖"读环境变量的门控"与"臂的门控"对称这一不变量，是防御式断言。
+- `guess_compositor()` 是纯环境变量探测（不连接）：`ZED_HEADLESS` 存在即强制无头（空串也算），`WAYLAND_DISPLAY`/`DISPLAY` 需非空且受 feature 门控，优先级 Wayland > X11 > 兜底无头。
+- 观测出口 `compositor_name()`：Linux 三后端分别返回 `"Wayland"`/`"X11"`/`"headless"`（注意小写），macOS/Windows 走 trait 默认 `""`。
+
+## 7. 下一步学习建议
+
+本讲结束时，你已经完全看清"一次编写、按平台分发"的机制，但只把 `Platform` trait 当作一个名字用了。下一讲 **u2-l1《Platform trait 全景导览》**将系统走读 [platform.rs:125](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L125) 起的完整契约——执行器、生命周期、窗口、外观、系统集成等八组方法，并区分哪些有默认实现。继续阅读的建议路径：
+
+1. [crates/gpui/src/platform.rs:125-190](https://github.com/zed-industries/zed/blob/2936989f1b7a15aaf7131b0a3c17961d706fdbf5/crates/gpui/src/platform.rs#L125-L190)：通读 `Platform` trait 前几十行，体会"必需方法（无默认体）vs 可选方法（带默认体）"对实现者的减负差异——本讲见过的 `compositor_name` 默认 `""` 就是后者。
+2. 想追 Linux 三个后端的内部结构，直接跳到 u5 单元（u5-l1 的 `LinuxPlatform`/`LinuxClient` 外壳-后端结构是本讲 4.2 的展开）。
+3. 想理解 `headless` 后端为什么值得存在，读 u5-l2 与仓库中真实消费者：`grep -rn "gpui_platform::headless()" crates --include="*.rs"`（remote_server、各类 benchmark 都在列）。
