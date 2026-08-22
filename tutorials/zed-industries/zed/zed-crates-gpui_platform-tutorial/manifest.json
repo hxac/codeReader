@@ -1,7 +1,7 @@
 {
-  "head": "f36aec822be697df9049fed020b593147c93b4cf",
+  "head": "fd82517a115d97a07835b52f0512b22b38e38ccf",
   "project": "zed-crates-gpui_platform",
-  "rationale": "本轮增量区间（ec18126b1d → f36aec822b）共 8 个提交，改动全部落在 anthropic/open_ai 等 AI provider、editor、git_ui、markdown、terminal_view、workspace、extension_cli 等应用层 crate 以及根 Cargo.lock 与默认设置，经 git diff --name-only 核对，手册引用的六个 crate（gpui_platform、gpui、gpui_linux、gpui_macos、gpui_windows、gpui_web）在本区间内零文件变动，因此没有任何讲义的知识内容受到影响。核对讲义目录确认：上一轮标记 new 的 u6 三篇（MacPlatform、Windows DirectX、菜单通知）与 u7 三篇（web 入口、WebWindow 事件桥接、hello_web 实战）已由 worker 按当前源码生成完毕且内容完整，连同此前已就绪的 u1 至 u5 共 23 篇，全手册 34 篇中前 29 篇均已生成并与当前源码一致，统一标记 keep；仅剩 u8 五篇（PlatformTextSystem、PlatformAtlas 与渲染、无头渲染、test-support 测试设施、自定义 Platform 毕业实践）尚未生成，维持 new，其 topic 中引用的源码文件与 eb354c8d50 之后的 schedule_frame/FrameLoop/TestWindow 模拟设施等描述经核对仍与当前源码一致，worker 可直接按规划撰写。八单元、34 篇的结构、依赖关系与讲义顺序保持不变。",
+  "rationale": "本轮增量区间（f36aec822b → fd82517a11）仅 2 个提交：fd82517a11（Tangled git 托管支持）只改动 crates/git、git_hosting_providers、settings_content 与 docs，与本手册无关；7316cf7745（gpui: Report foreground executor work in bench reports）是唯一触及手册覆盖范围的提交，经 git diff --name-only 核对，六个相关 crate 中只有两个文件变化：crates/gpui/src/app/bench_context.rs（+323 行，TraceScope 现在同时持有 ForegroundJournalCollector、finish 返回 TracedEvents、BenchReport 新增 foreground_work 直方图与 ForegroundWorkSummary/DurationHistogram、报告打印新增前台工作段）与 crates/gpui/src/profiler/journal.rs（11 行，install_test_foreground_journal 与 TestForegroundJournalGuard 从 pub(super) 放宽为 pub(crate) 并补文档，均为 cfg(test) 代码）。全手册 34 篇中唯一引用 journal.rs 的是 u4-l6（前台工作日志与 hang 检测），该讲义大量按行号引用 journal.rs（如 876-906、533-535 等，本次改动使 556 行之后整体下移约 5 行），且其主题本就是「前台日志的消费者」，因此标为 update：刷新行号并把 bench 接入作为新的消费者补入（bench_iter/bench_task/bench_renderer 三个入口都会把无窗口的任务轮询、动作与输入分发汇入 BenchReport::foreground_work），同时在 source_files 中新增 ../gpui/src/app/bench_context.rs、在学习目标与实践任务中加入对应条目；hang 检测、IntervalSealer、ForegroundRunnableCounter 等核心内容未变，无需重建。核对讲义目录确认：上一轮标记 new 的 u8-l1、u8-l2、u8-l3（文本系统、图集渲染、无头渲染）已由 worker 按当前源码生成完毕，连同此前已就绪的 u1 至 u7 共 29 篇，本区间内其引用源码零变化，统一标 keep；仅剩 u8-l4（test-support）与 u8-l5（自定义 Platform 毕业实践）尚未生成，维持 new，其引用的 platform/test 系列文件与 schedule_frame/TestWindow 模拟设施在本区间未变，worker 可直接按规划撰写。八单元、34 篇的结构、依赖关系与讲义顺序保持不变。",
   "units": [
     {
       "id": "u1",
@@ -521,7 +521,7 @@
           "topic": "分析 gpui_web 的 MainThreadMailbox 与 MainThreadItem 设计：在 wasm 没有原生线程的前提下，如何用浏览器任务调度原语模拟前台调度器，以及 single_threaded_web 与多线程 web 后端的差别。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u4-l1",
             "u4-l2"
@@ -531,27 +531,30 @@
           "learning_goals": [
             "理解 profiler feature 的编译期门控与 trace_enabled 运行期开关的分工",
             "跟踪一个前台 runnable 与一帧绘制在 ForegroundJournal 中各自留下的记录",
-            "掌握 HangDetector 判定 hang 的两条标准：单事件超阈值与区间总耗时超帧预算"
+            "掌握 HangDetector 判定 hang 的两条标准：单事件超阈值与区间总耗时超帧预算",
+            "说明 7316cf7745 之后 gpui::bench 如何通过 ForegroundJournalCollector 把无窗口的前台工作汇入 BenchReport::foreground_work"
           ],
           "level": "advanced",
           "minimal_modules": [
             "profiler::journal（ForegroundJournal、ForegroundJournalEntry、FrameSnapshot）",
             "profiler::hang（HangDetector、HangIncident）",
             "ForegroundRunnableCounter",
-            "App::foreground_journal"
+            "App::foreground_journal",
+            "BenchReport::foreground_work 与 TraceScope 的 journal_collector（app/bench_context.rs）"
           ],
           "order": 6,
-          "practice_task": "以 gpui 的 profiler feature 构建一个小窗口程序，在按钮回调里通过 cx.foreground_journal() 拿到 journal 与 collector，collect_unseen 后打印最近几条 ForegroundJournalEntry；再人为插入一段忙循环，用极小的 threshold 与 frame_budget 构造 HangDetector，验证 poll 能产出 HangIncident，并记录触发的是哪条判定标准。",
+          "practice_task": "以 gpui 的 profiler feature 构建一个小窗口程序，在按钮回调里通过 cx.foreground_journal() 拿到 journal 与 collector，collect_unseen 后打印最近几条 ForegroundJournalEntry；再人为插入一段忙循环，用极小的 threshold 与 frame_budget 构造 HangDetector，验证 poll 能产出 HangIncident，并记录触发的是哪条判定标准。可选延伸：改用 --features bench 写一个 #[gpui::bench] 的 bench_task，在无窗口的工作负载下读取 BenchReport::foreground_work()（或报告打印中的 foreground executor work 段），验证不产生任何绘制的前台任务也会被计时上报。",
           "source_files": [
             "../gpui/src/profiler.rs",
             "../gpui/src/profiler/journal.rs",
             "../gpui/src/profiler/hang.rs",
             "../gpui/src/executor.rs",
             "../gpui/src/platform_scheduler.rs",
-            "../gpui/src/app.rs"
+            "../gpui/src/app.rs",
+            "../gpui/src/app/bench_context.rs"
           ],
           "title": "前台工作日志与 hang 检测：profiler 对调度链路的插桩",
-          "topic": "讲解 gpui 的 profiler feature（依赖 hdrhistogram）新增的前台工作日志机制：ForegroundExecutor 与 PlatformScheduler 如何通过 ForegroundRunnableCounter 记录排队任务、window.rs 如何记录每帧从 dirty 到 present 的轨迹、journal.rs 的事件流与 FrameSnapshot 模型，以及 hang.rs 的 HangDetector 如何从日志流中事后检测主线程卡顿并产出 HangIncident。"
+          "topic": "讲解 gpui 的 profiler feature（依赖 hdrhistogram）的前台工作日志机制：ForegroundExecutor 与 PlatformScheduler 如何通过 ForegroundRunnableCounter 记录排队任务、window.rs 如何记录每帧从 dirty 到 present 的轨迹、journal.rs 的事件流与 FrameSnapshot 模型，以及 hang.rs 的 HangDetector 如何从日志流中事后检测主线程卡顿并产出 HangIncident。本次更新补入 7316cf7745（Report foreground executor work in bench reports）：TraceScope 现在在测量起点同时创建 ForegroundJournalCollector（collector 只观测创建之后的条目，因此每轮迭代的 setup 天然被排除在测量外）、finish 返回 TracedEvents（frame_events 与 journal_entries），BenchAppContext 的 bench_iter/bench_task/bench_renderer 都会把采集到的前台事件经 record_foreground_events 写入 BenchReport 新增的 foreground_work 直方图（DurationHistogram 以精确 total_nanos 配合桶化直方图；Draw/Present 事件跳过、SmallPolls 取 flush.summary.total），经 BenchReport::foreground_work() 输出 ForegroundWorkSummary（count/total/max/p50/p90/p95/p99 与按报告 FPS 的帧预算超支计数），报告打印时单独成段且无需窗口参与；bench_renderer 中帧计时仍按 window_id 过滤而前台工作不按窗口过滤。journal.rs 侧仅有的变化是 cfg(test) 助手 install_test_foreground_journal 与 TestForegroundJournalGuard 由 pub(super) 放宽为 pub(crate) 并补了文档（供 bench_context 测试安装隔离的每线程 journal），数据模型与 hang 检测未变；讲义中引用的 journal.rs 行号需按当前源码刷新（556 行之后整体下移约 5 行）。"
         }
       ],
       "level": "intermediate",
@@ -928,7 +931,7 @@
       "id": "u8",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -959,7 +962,7 @@
           "topic": "讲解 PlatformTextSystem trait（platform.rs:1072 起）涵盖的字体枚举、字形id、 shaping 与布局查询，并对比四套实现：macOS CoreText+open_type、Linux font-kit、Windows DirectWrite、Web 实现。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -987,7 +990,7 @@
           "topic": "讲解 PlatformAtlas trait（platform.rs:1324 起）如何为渲染后端管理字形/纹理图集，并结合 Windows 的 directx_atlas 与 macOS 的 metal_renderer 看图集与具体 GPU API 的配合。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l2",
             "u8-l2"

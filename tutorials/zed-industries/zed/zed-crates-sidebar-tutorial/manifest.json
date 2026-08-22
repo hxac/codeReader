@@ -1,13 +1,13 @@
 {
-  "head": "f36aec822be697df9049fed020b593147c93b4cf",
+  "head": "fd82517a115d97a07835b52f0512b22b38e38ccf",
   "project": "zed-crates-sidebar",
-  "rationale": "增量分析结论：上次 HEAD 907ed09c 到当前 HEAD f36aec822 之间共有 7 个提交，其中零个提交触及 crates/sidebar，sidebar.rs、sidebar_tests.rs、thread_switcher.rs 与 Cargo.toml 完全无 diff；讲义引用的外部文件中 multi_workspace.rs、threads_archive_view.rs、agent_ui/test_support.rs 也零变化。唯一被引用且发生变化的是 crates/zed/src/zed.rs（提交 107ee1a60a，仅 6 行）：initialize_panels 中 initialize_agent_panel 改为传入 workspace_handle.clone()，并在面板初始化后显式调用 finish_dock_restoration。该改动位于 zed.rs:808 之后，使 u1-l1 中引用的 zed.rs:L912（register_actions）与 L1427（dump_workspace_info 注册）漂移为 L916/L1431，但 Sidebar::new 的装配主链路（zed.rs:538-548）与 crate 内全部源码未受影响，因此 u1-l1 只需小幅修订（更新行号并把永久链接重新钉到新 HEAD），u1-l2、u1-l3、u2-l1 三篇已生成讲义涉及的文件零变化、保持 keep；其余 18 篇讲义尚未生成，保持 new 以便 worker 按原计划继续生成，整体学习路线（先跑起来、再读数据模型、沿数据流自上游到下游、再到跨视图行为与生命周期、最后测试与可观测性）无需调整。",
+  "rationale": "增量分析结论：上次 HEAD f36aec822 到当前 HEAD fd82517a11 之间仅有 2 个提交（7316cf7745 gpui 基准报告前台执行器工作、fd82517a11 git_hosting_providers 新增 Tangled 支持），改动全部落在 crates/gpui/src/app/bench_context.rs、crates/gpui/src/profiler/journal.rs、crates/git、crates/git_hosting_providers、crates/settings_content 与 docs/src/git.md，与 crates/sidebar 及讲义引用的全部外部文件（zed.rs、multi_workspace.rs、threads_archive_view.rs、test_support.rs）零交集——git diff 对这些路径返回空。因此已生成的 9 篇讲义（u1-l1 至 u3-l3）全部保持 keep：u1-l1 上一轮因 zed.rs 行号漂移标记的 update 已落盘（永久链接钉在 f36aec822，该提交与当前 HEAD 在全部被引用文件上内容完全一致，链接渲染结果不变），其余 8 篇涉及的源码零变化；另有 20 篇讲义尚未生成，维持 new 以便 worker 按原计划继续生成，整体学习路线（先跑起来、再读数据模型、沿数据流自上游到下游、再到跨视图行为与生命周期、最后测试与可观测性）无需调整。",
   "units": [
     {
       "id": "u1",
       "lectures": [
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -123,7 +123,7 @@
           "topic": "讲解侧边栏列表的三种行（项目分组头、线程、终端）以及承载它们的 SidebarContents 结构，这是理解后续重建与渲染的基础。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -151,7 +151,7 @@
           "topic": "讲解 ThreadEntryWorkspace 的 Open/Closed 两种形态、ProjectGroupKey 分组键、PathList 路径匹配，以及 linked worktree 与远程连接的判定。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -186,7 +186,7 @@
       "id": "u3",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3",
             "u2-l1"
@@ -214,7 +214,7 @@
           "topic": "系统梳理 subscribe_to_workspace（ProjectEvent、GitStoreEvent、PanelAdded）、subscribe_to_agent_panel（AgentPanelEvent）以及对两个元数据 Store 的 observe，说明每类事件触发的行为。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -241,7 +241,7 @@
           "topic": "讲解刷新的合并与调度机制：update_task 如何去抖、select_first_after_update 的语义，以及 update_entries 依次执行的重建、草稿刷新、差异应用与预取步骤。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2",
             "u2-l1"

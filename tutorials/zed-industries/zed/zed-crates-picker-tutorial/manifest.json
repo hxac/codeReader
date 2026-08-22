@@ -1,13 +1,13 @@
 {
-  "head": "f36aec822be697df9049fed020b593147c93b4cf",
+  "head": "fd82517a115d97a07835b52f0512b22b38e38ccf",
   "project": "zed-crates-picker",
-  "rationale": "picker 是 Zed 中所有\"搜索选择器\"界面的通用框架，核心是 Picker<D> 泛型视图 + PickerDelegate 委托协议，外围绕渲染、预览、几何形状与持久化四大子系统。学习路线按\"先定位运行、再核心抽象、后按数据流深入、最后攻几何与生态\"设计：单元 1-2 帮初学者从零认识 crate 并掌握 trait 与构造函数这两个最重要的扩展点；单元 3-4 沿用户交互的真实数据流（键入→更新匹配→选择→确认）讲解状态管理；单元 5-6 讲 Preview 机制与渲染管线，渲染依赖预览布局概念，故 Preview 在前；单元 7-8 是专家层，深入 shape/SizeBounds 的相对尺寸数学、拖拽调整、KVP 持久化、Modal/Popover/Embedded 三种展示形态，最后以测试模式与自定义 delegate 实战收尾。每篇讲义只覆盖单一主题，依赖沿此递进，源码引用均限定在实际确认存在的文件内。",
+  "rationale": "picker 是 Zed 中所有\"搜索选择器\"界面的通用框架，核心是 Picker<D> 泛型视图 + PickerDelegate 委托协议，外围绕渲染、预览、几何形状与持久化四大子系统。学习路线按\"先定位运行、再核心抽象、后按数据流深入、最后攻几何与生态\"设计：单元 1-2 帮初学者从零认识 crate 并掌握 trait 与构造函数这两个最重要的扩展点；单元 3-4 沿用户交互的真实数据流（键入→更新匹配→选择→确认）讲解状态管理；单元 5-6 讲 Preview 机制与渲染管线，渲染依赖预览布局概念，故 Preview 在前；单元 7-8 是专家层，深入 shape/SizeBounds 的相对尺寸数学、拖拽调整、KVP 持久化、Modal/Popover/Embedded 三种展示形态，最后以测试模式与自定义 delegate 实战收尾。每篇讲义只覆盖单一主题，依赖沿此递进，源码引用均限定在实际确认存在的文件内。本轮增量更新：git diff f36aec8..fd82517 仅包含 gpui 基准测试报告与 git_hosting_providers 新增 Tangled 支持两个提交，crates/picker 及讲义引用的 command_palette、outline、project_symbols、ui_input 均无任何变化（diff --stat 为空），所有源码文件经 git cat-file 验证仍然存在，故全部 24 篇讲义 action 均为 keep，结构、依赖与实战任务保持不变。",
   "units": [
     {
       "id": "u1",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -32,7 +32,7 @@
           "topic": "介绍 picker crate 的定位：Zed 中命令面板、文件查找器、大纲、主题选择器等几十个界面的统一框架，基于 GPUI 构建泛型组件 Picker<D>，以及它与 ui、ui_input、workspace 等 crate 的依赖关系。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -59,7 +59,7 @@
           "topic": "逐个讲解源码文件：picker.rs 是库根（Cargo.toml 的 [lib] path 指向它），其下分为 head、footer、preview、render、render/window_controls、shape、persistence、popover_menu、parts、highlighted_match_with_paths，说明各自职责与引用关系。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -87,6 +87,7 @@
           "topic": "讲解如何构建与测试该 crate：cargo 命令、test-support feature、内嵌在 picker.rs 末尾的 tests 模块、highlighted_match_with_paths.rs 里的普通单元测试，并说明该 crate 需在 zed 应用或测试上下文中观察。"
         }
       ],
+      "level": "beginner",
       "order": 1,
       "title": "单元一：初识 picker crate"
     },
@@ -94,7 +95,7 @@
       "id": "u2",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -120,7 +121,7 @@
           "topic": "系统讲解 PickerDelegate：必须实现的方法（name、match_count、selected_index、set_selected_index、placeholder_text、update_matches、confirm、dismissed、render_match）与大量可选方法，以 crate 内 TestDelegate 为参照。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -146,7 +147,7 @@
           "topic": "讲解 uniform_list / list / nonsearchable_uniform_list / nonsearchable_list / uniform_list_with_preview / list_with_preview / list_with_preview_and_query_editor 的取舍，以及 ListState 与 UniformListScrollHandle 两种容器的区别。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -174,6 +175,7 @@
           "topic": "讲解 head.rs 的 Head 枚举：Editor(Arc<dyn ErasedEditor>) 提供查询输入框，Empty 是不可见但可持焦的元素；以及 ui_input 的 ERASED_EDITOR_FACTORY 全局工厂如何延迟决定真正的编辑器实现。"
         }
       ],
+      "level": "beginner",
       "order": 2,
       "title": "单元二：核心抽象——Picker 与 PickerDelegate"
     },
@@ -181,7 +183,7 @@
       "id": "u3",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u2-l3"
@@ -208,7 +210,7 @@
           "topic": "讲解用户输入后的事件流：on_input_editor_event → Picker::update_matches → update_matches_with_options → delegate.update_matches → matches_updated，重点剖析 PendingUpdateMatches 为什么同时持有 delegate 任务与 picker 自身任务。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -235,7 +237,7 @@
           "topic": "讲解 delegate 可选的 finalize_update_matches：在打开（4ms）与确认（16ms）时阻塞等待后台结果，避免命令面板闪现空列表；以及 confirm_on_update 如何把确认推迟到匹配更新完成。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u3-l1"
@@ -262,6 +264,7 @@
           "topic": "讲解 ScrollBehavior::RevealSelected / PreserveOffset 在 ListState 与 UniformListScrollHandle 上的不同实现，matches_updated 里 reset 与 scroll 的次序，以及 scroll_to_item_index、is_scrolled_to_end 等辅助 API。"
         }
       ],
+      "level": "intermediate",
       "order": 3,
       "title": "单元三：查询与匹配更新流水线"
     },
@@ -269,7 +272,7 @@
       "id": "u4",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -295,7 +298,7 @@
           "topic": "讲解 set_selected_index 的 fallback_direction 环形扫描、select_next/previous/first/last/cycle_selection、can_select、select_history、selected_index_changed 与 set_hovered_index 的协作。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u3-l2"
@@ -322,7 +325,7 @@
           "topic": "讲解 menu::Confirm / SecondaryConfirm 的处理、do_confirm 的分支顺序、confirm_update_query（回车改为细化查询）、ConfirmInput action、confirm_completion 以及 select_child/select_parent（shift+方向键的层级进出）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1",
             "u4-l2"
@@ -349,6 +352,7 @@
           "topic": "讲解 picker 拥有 UX、delegate 拥有选择状态的多选设计：select_instead_of_open、ToggleMultiSelect/MultiSelectNext 动作、handle_click 的点击路由、render_multi_select_indicator 与 render_match_with_checkbox。"
         }
       ],
+      "level": "intermediate",
       "order": 4,
       "title": "单元四：选择、确认与多选"
     },
@@ -356,7 +360,7 @@
       "id": "u5",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u3-l1"
@@ -384,7 +388,7 @@
           "topic": "讲解 preview.rs 中 PreviewBackend trait（update/render/adjust_to_new_size/clear）、Preview 包装结构，以及 PreviewSource（Path/Buffer/Symbol/Message）、MatchLocation、Update 及其四个构造器。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -412,6 +416,7 @@
           "topic": "讲解 Layout 枚举、SetPreviewRight/Below/Hidden 与 TogglePreview 动作、set_preview_layout 如何持久化并恢复对应布局的尺寸，以及窗口过窄时 preview_layout_rendered 自动从 Right 降级为 Below。"
         }
       ],
+      "level": "intermediate",
       "order": 5,
       "title": "单元五：Preview 机制"
     },
@@ -419,7 +424,7 @@
       "id": "u6",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u5-l2"
@@ -447,7 +452,7 @@
           "topic": "讲解 render.rs 中 Render 的实现：按 Preview 布局分发到 render_with_preview_below / render_with_preview_right / render_results，外层容器如何加边框背景，以及可拖拽时挂载五条 resize 手柄。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l1"
           ],
@@ -474,7 +479,7 @@
           "topic": "讲解结果面板的结构：key_context(\"Picker\"/\"with_preview\")、大量 on_action 注册、编辑器在头或尾（PickerEditorPosition）、render_header、空态、footer 挂点、show_scrollbar 与 documentation aside 的绝对定位。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l2",
             "u4-l1"
@@ -502,7 +507,7 @@
           "topic": "讲解一行匹配如何组装：on_click/on_mouse_up(macOS ctrl 兼容)/on_hover、canvas 记录每行 bounds、多选时的 checkbox 与 tooltip、分隔线绘制，以及 select_on_hover 关闭时的 mouse_down 拦截。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l2",
             "u5-l2"
@@ -530,6 +535,7 @@
           "topic": "讲解 footer.rs：delegate 可整体覆盖 render_footer，否则默认 footer 由预览控件（Preview/Below/Right 按钮）与 Actions 菜单组成；PickerAction 的 Header/Separator/Entry/toggled 如何变成 ContextMenu 条目。"
         }
       ],
+      "level": "intermediate",
       "order": 6,
       "title": "单元六：渲染管线"
     },
@@ -537,7 +543,7 @@
       "id": "u7",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l2"
           ],
@@ -563,7 +569,7 @@
           "topic": "讲解 shape.rs 的宏生成类型 RelativeWidth/RelativeHeight（视口比例 + rems 双分量）、ViewportFraction、Centered 默认值、Shape 枚举（Resizing/HorizontallyCentered）及 picker_position_and_size 的居中公式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l1"
           ],
@@ -589,7 +595,7 @@
           "topic": "讲解 SizeBounds 的默认边界、按布局组合的最小宽高、clamp_width/height、三条边 clamp_*_edge、clamp_divider（保证结果与预览两个窗格都不过最小值）以及 clamp_position_and_size 的幂等性。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l2",
             "u6-l1"
@@ -617,6 +623,7 @@
           "topic": "讲解 window_controls.rs：每条边/角/中缝一个 Side 实现（cursor/position/current_position_and_shape/clamp/revert_to_default_size）、ResizeDrag 的增量模型、双击复位、以及 render.rs 的 finish_any_completed_resize 如何在拖拽结束时落地尺寸。"
         }
       ],
+      "level": "advanced",
       "order": 7,
       "title": "单元七：尺寸、形状与拖拽（专家层）"
     },
@@ -624,7 +631,7 @@
       "id": "u8",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l2",
             "u5-l2"
@@ -652,7 +659,7 @@
           "topic": "讲解 persistence.rs：基于 db KeyValueStore 的 pickers_v2 命名空间、按 delegate 名 + 预览布局组合的 shape key、LAST_PREVIEW_LAYOUT 键，以及 PickerConfig 用视口分数序列化的原因。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l2",
             "u2-l2"
@@ -680,7 +687,7 @@
           "topic": "讲解 Presentation 三形态（可调整的 Modal、Popover、Embedded）与 embedded()/popover()/resizable() builder、popover_menu.rs 的 PickerPopoverMenu（把整个 Picker 装进 PopoverMenu 并转发 DismissEvent）、失焦取消逻辑与 reopenable 注册。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u4-l3",
@@ -712,6 +719,7 @@
           "topic": "以 crate 内嵌 tests 为教材讲解 TestDelegate 模式、gpui::test 与 TestAppContext、init_test 的全局初始化；再串联 highlighted_match_with_paths.rs 与 parts.rs 两个共享组件，并参照 outline、project_symbols 等真实 delegate 做综合实战。"
         }
       ],
+      "level": "advanced",
       "order": 8,
       "title": "单元八：持久化、展示形态与二次开发（专家层）"
     }
