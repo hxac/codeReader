@@ -1,0 +1,727 @@
+{
+  "head": "fd82517a115d97a07835b52f0512b22b38e38ccf",
+  "project": "zed-crates-picker",
+  "rationale": "picker 是 Zed 中所有\"搜索选择器\"界面的通用框架，核心是 Picker<D> 泛型视图 + PickerDelegate 委托协议，外围绕渲染、预览、几何形状与持久化四大子系统。学习路线按\"先定位运行、再核心抽象、后按数据流深入、最后攻几何与生态\"设计：单元 1-2 帮初学者从零认识 crate 并掌握 trait 与构造函数这两个最重要的扩展点；单元 3-4 沿用户交互的真实数据流（键入→更新匹配→选择→确认）讲解状态管理；单元 5-6 讲 Preview 机制与渲染管线，渲染依赖预览布局概念，故 Preview 在前；单元 7-8 是专家层，深入 shape/SizeBounds 的相对尺寸数学、拖拽调整、KVP 持久化、Modal/Popover/Embedded 三种展示形态，最后以测试模式与自定义 delegate 实战收尾。每篇讲义只覆盖单一主题，依赖沿此递进，源码引用均限定在实际确认存在的文件内。本轮增量更新：git diff f36aec8..fd82517 仅包含 gpui 基准测试报告与 git_hosting_providers 新增 Tangled 支持两个提交，crates/picker 及讲义引用的 command_palette、outline、project_symbols、ui_input 均无任何变化（diff --stat 为空），所有源码文件经 git cat-file 验证仍然存在，故全部 24 篇讲义 action 均为 keep，结构、依赖与实战任务保持不变。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 picker crate 在 Zed 架构中的位置和典型复用方",
+            "理解 Picker<D> 与 PickerDelegate 的分工：框架管交互与外观，委托管数据",
+            "了解 DEFAULT_MODAL_WIDTH / DEFAULT_MODAL_MAX_HEIGHT 常量"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Picker 泛型结构",
+            "PickerDelegate 委托协议",
+            "crate 依赖（gpui/ui/ui_input/workspace）"
+          ],
+          "order": 1,
+          "practice_task": "在 zed 仓库根目录执行 grep -rl \"impl PickerDelegate for\" crates/，挑 3 个 delegate，记录各自 name() 的返回值，并写一段说明：为什么持久化键要用人写的名字而不是类型名（读 name() 的文档注释）。",
+          "source_files": [
+            "crates/picker/Cargo.toml",
+            "crates/picker/src/picker.rs"
+          ],
+          "title": "项目概览：picker 是什么、在 Zed 中处于什么位置",
+          "topic": "介绍 picker crate 的定位：Zed 中命令面板、文件查找器、大纲、主题选择器等几十个界面的统一框架，基于 GPUI 构建泛型组件 Picker<D>，以及它与 ui、ui_input、workspace 等 crate 的依赖关系。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-codebase-structure.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "记住 [lib] path = \"src/picker.rs\" 的库根配置与 test-support feature",
+            "说出每个子模块的职责与 pub/pub(crate) 可见性设计",
+            "理解模块引用方向，如 render.rs 依赖 shape.rs 与 preview.rs"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "lib 根 picker.rs",
+            "渲染子系统（render.rs + render/window_controls.rs）",
+            "preview/shape/persistence/footer/head 模块划分"
+          ],
+          "order": 2,
+          "practice_task": "通读 src/picker.rs 顶部的 mod 声明与 pub use 导出，手工画出模块依赖图（谁 use 谁），并标出哪些类型经 pub use 对外再导出（如 PreviewLayout、PickerAction、ErasedEditor）。",
+          "source_files": [
+            "crates/picker/src/picker.rs",
+            "crates/picker/Cargo.toml"
+          ],
+          "title": "目录结构与模块地图：从 lib 根到每个子模块",
+          "topic": "逐个讲解源码文件：picker.rs 是库根（Cargo.toml 的 [lib] path 指向它），其下分为 head、footer、preview、render、render/window_controls、shape、persistence、popover_menu、parts、highlighted_match_with_paths，说明各自职责与引用关系。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-build-and-test.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "掌握只针对 picker crate 的构建与测试命令",
+            "理解 test-support feature 与 #[cfg(any(test, feature = \"test-support\"))] 门控",
+            "会用 cargo doc 浏览公开 API"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "cargo 命令（-p picker 与 feature）",
+            "内嵌 tests 模块",
+            "dev-dependencies（editor/settings）"
+          ],
+          "order": 3,
+          "practice_task": "运行 cargo build -p picker 与 cargo test -p picker，记录测试数量；再对比 cargo test -p picker --features test-support 的差异，并用 cargo doc -p picker --no-deps 浏览 PickerDelegate 文档注释。",
+          "source_files": [
+            "crates/picker/Cargo.toml",
+            "crates/picker/src/picker.rs",
+            "crates/picker/src/highlighted_match_with_paths.rs"
+          ],
+          "title": "构建、测试与运行：让 picker 在本地跑起来",
+          "topic": "讲解如何构建与测试该 crate：cargo 命令、test-support feature、内嵌在 picker.rs 末尾的 tests 模块、highlighted_match_with_paths.rs 里的普通单元测试，并说明该 crate 需在 zed 应用或测试上下文中观察。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "单元一：初识 picker crate"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l1-picker-delegate-trait.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "区分必须实现的方法与带默认实现的可选方法",
+            "理解方法接收 &mut Context<Picker<Self>> 的意义：委托可直接驱动 Picker",
+            "掌握 ListItem 关联类型与 render_match 的契约"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "必须实现的 9 个方法",
+            "可选覆盖方法（can_select、no_matches_text 等）",
+            "关联类型 ListItem"
+          ],
+          "order": 1,
+          "practice_task": "对照 picker.rs 末尾 tests 的 TestDelegate，实现一个最小 FavoriteColorDelegate：保存若干颜色名，完成 name/match_count/selected_index/set_selected_index/placeholder_text/update_matches(返回 Task::ready(()))/confirm/dismissed/render_match，保证 cargo check -p picker 通过。",
+          "source_files": [
+            "crates/picker/src/picker.rs"
+          ],
+          "title": "PickerDelegate trait 逐方法精读：实现一个选择器需要什么",
+          "topic": "系统讲解 PickerDelegate：必须实现的方法（name、match_count、selected_index、set_selected_index、placeholder_text、update_matches、confirm、dismissed、render_match）与大量可选方法，以 crate 内 TestDelegate 为参照。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-constructors-and-containers.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "根据行高是否一致、是否可搜索、是否带预览选择构造函数",
+            "理解 ContainerKind 到 gpui::list / uniform_list 的映射",
+            "阅读 Picker::new 的初始化流程"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "七个公开构造函数",
+            "ContainerKind 与 ElementContainer",
+            "Picker::new 初始化"
+          ],
+          "order": 2,
+          "practice_task": "把同一 delegate 分别用 Picker::uniform_list 与 Picker::list 构造（参照测试里 cx.add_window_view 写法），说明两者在 ElementContainer 上的差异；再梳理 Picker::new 中从 persistence 加载 shape、注册 reopenable 到首次 finalize_update_matches(4ms) 的顺序。",
+          "source_files": [
+            "crates/picker/src/picker.rs"
+          ],
+          "title": "构造函数家族：uniform_list、list 与预览变体",
+          "topic": "讲解 uniform_list / list / nonsearchable_uniform_list / nonsearchable_list / uniform_list_with_preview / list_with_preview / list_with_preview_and_query_editor 的取舍，以及 ListState 与 UniformListScrollHandle 两种容器的区别。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-head-and-erased-editor.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "理解 ErasedEditor 如何解耦具体编辑器实现",
+            "掌握 Head::Editor 与 Head::Empty 的差异及对 Focusable 的影响",
+            "了解 editor.subscribe 与 cx.on_blur 的用法"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Head 枚举",
+            "ErasedEditor 与 ERASED_EDITOR_FACTORY",
+            "失焦取消路径"
+          ],
+          "order": 3,
+          "practice_task": "追踪 Head::editor 中 subscribe 回调如何经 weak_entity 把 BufferEdited 转发到 Picker::on_input_editor_event；写笔记说明 EmptyHead 为何只渲染 track_focus 的 div，以及 nonsearchable 构造失焦即取消的完整调用链。",
+          "source_files": [
+            "crates/picker/src/head.rs",
+            "crates/picker/src/picker.rs",
+            "crates/ui_input/src/ui_input.rs"
+          ],
+          "title": "Head 与 ErasedEditor：可搜索与不可搜索两种头部",
+          "topic": "讲解 head.rs 的 Head 枚举：Editor(Arc<dyn ErasedEditor>) 提供查询输入框，Empty 是不可见但可持焦的元素；以及 ui_input 的 ERASED_EDITOR_FACTORY 全局工厂如何延迟决定真正的编辑器实现。"
+        }
+      ],
+      "level": "beginner",
+      "order": 2,
+      "title": "单元二：核心抽象——Picker 与 PickerDelegate"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "filename": "u3-l1-update-matches-pipeline.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "走通从 BufferEdited 到 matches_updated 的完整调用链",
+            "理解 PendingUpdateMatches 双任务结构与同步取消语义",
+            "掌握 matches_updated 中列表 reset、预览刷新与 cx.notify 的顺序"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "on_input_editor_event",
+            "update_matches_with_options 与 PendingUpdateMatches",
+            "matches_updated"
+          ],
+          "order": 1,
+          "practice_task": "给 delegate 的 update_matches 返回一个带 background_spawn 延迟（约 100ms timer）的 Task，在延迟前后打印 match_count，观察快速连续输入时旧任务被取消的现象，并用自己的话解释 PendingUpdateMatches 注释中的取消设计。",
+          "source_files": [
+            "crates/picker/src/picker.rs"
+          ],
+          "title": "查询更新流水线：从键入到 matches_updated",
+          "topic": "讲解用户输入后的事件流：on_input_editor_event → Picker::update_matches → update_matches_with_options → delegate.update_matches → matches_updated，重点剖析 PendingUpdateMatches 为什么同时持有 delegate 任务与 picker 自身任务。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-finalize-update-matches.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 finalize_update_matches 阻塞等待 duration 毫秒的设计动机",
+            "掌握 confirm/secondary_confirm 中 confirm_on_update 的延迟确认路径",
+            "了解构造时 4ms 与确认时 16ms 两种等待的差别"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "finalize_update_matches 委托方法",
+            "confirm/secondary_confirm 的等待分支",
+            "confirm_on_update 延迟确认"
+          ],
+          "order": 2,
+          "practice_task": "在自己的 delegate 中实现 finalize_update_matches：有后台任务时同步等待最多 16ms 并返回 true，否则返回 false；用测试或日志验证按回车时要么立即 confirm、要么等 matches_updated 之后再 confirm。",
+          "source_files": [
+            "crates/picker/src/picker.rs",
+            "crates/command_palette/src/command_palette.rs"
+          ],
+          "title": "finalize_update_matches 与待定确认：命令面板为何不空闪",
+          "topic": "讲解 delegate 可选的 finalize_update_matches：在打开（4ms）与确认（16ms）时阻塞等待后台结果，避免命令面板闪现空列表；以及 confirm_on_update 如何把确认推迟到匹配更新完成。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2",
+            "u3-l1"
+          ],
+          "filename": "u3-l3-scroll-behavior.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解 RevealSelected 与 PreserveOffset 两种滚动策略的适用场景",
+            "区分 ListState 与 UniformListScrollHandle 的 API（reset/scroll_to 对比 scroll_to_item）",
+            "掌握 is_scrolled_to_end 与 test-support 下的 logical_scroll_top_index"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ScrollBehavior 枚举",
+            "ElementContainer 两分支的滚动处理",
+            "scroll_to_item_index 与 is_scrolled_to_end"
+          ],
+          "order": 3,
+          "practice_task": "在 delegate 的某个刷新路径上改用 update_matches_with_options(query, ScrollBehavior::PreserveOffset, ...)（可在自己的 fork 中试验），观察列表滚动位置是否保持；再写笔记对比两种容器在该枚举下的处理差异。",
+          "source_files": [
+            "crates/picker/src/picker.rs"
+          ],
+          "title": "滚动行为：ScrollBehavior 与两种列表容器",
+          "topic": "讲解 ScrollBehavior::RevealSelected / PreserveOffset 在 ListState 与 UniformListScrollHandle 上的不同实现，matches_updated 里 reset 与 scroll 的次序，以及 scroll_to_item_index、is_scrolled_to_end 等辅助 API。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "单元三：查询与匹配更新流水线"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u4-l1-selection-navigation.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "理解 set_selected_index 的 fallback_direction 循环跳过算法",
+            "掌握 select_history 钩子如何劫持上下键实现查询历史",
+            "区分 set_hovered_index 与 set_selected_index 以及 select_on_hover"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "set_selected_index 与 can_select",
+            "select_next/previous/first/last/cycle_selection",
+            "selected_index_changed 与 select_history"
+          ],
+          "order": 1,
+          "practice_task": "给 delegate 实现 can_select 让偶数下标不可选，仿照 test_keyboard_navigation_skips_non_selectable_items 写一个 gpui::test，验证从最后一项按 SelectNext 会循环回到第一项并跳过不可选项。",
+          "source_files": [
+            "crates/picker/src/picker.rs"
+          ],
+          "title": "选中索引与键盘导航：跳过不可选项的循环算法",
+          "topic": "讲解 set_selected_index 的 fallback_direction 环形扫描、select_next/previous/first/last/cycle_selection、can_select、select_history、selected_index_changed 与 set_hovered_index 的协作。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1",
+            "u3-l2"
+          ],
+          "filename": "u4-l2-confirm-family.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "梳理 do_confirm 的三级优先级：confirm_multi → confirm_update_query → confirm",
+            "理解 ConfirmInput action 与 delegate confirm_input 的用途",
+            "掌握 select_child/select_parent 如何用查询字符串表达层级导航"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "confirm/secondary_confirm/do_confirm",
+            "confirm_update_query 与 ConfirmInput",
+            "confirm_completion 与 select_child/select_parent"
+          ],
+          "order": 2,
+          "practice_task": "实现 confirm_update_query：当查询以空格结尾时回车不清空选择而是返回细化后的新查询；再实现 select_child/select_parent 让 shift+右/左键在目录式条目上进退一级，验证 set_query 会自动刷新匹配。",
+          "source_files": [
+            "crates/picker/src/picker.rs"
+          ],
+          "title": "确认语义家族：confirm、ConfirmInput 与层级导航",
+          "topic": "讲解 menu::Confirm / SecondaryConfirm 的处理、do_confirm 的分支顺序、confirm_update_query（回车改为细化查询）、ConfirmInput action、confirm_completion 以及 select_child/select_parent（shift+方向键的层级进出）。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l1",
+            "u4-l2"
+          ],
+          "filename": "u4-l3-multi-select.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "掌握多选的 5 个委托方法与各自职责",
+            "理解 ToggleMultiSelect 与 MultiSelectNext 的交互路由和 cx.propagate 的兜底",
+            "了解 render_match_with_checkbox 与 fallback 指示器两条渲染路径"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "select_instead_of_open 状态",
+            "多选委托方法组",
+            "toggle_multi_select / multi_select_next / handle_click 路由"
+          ],
+          "order": 3,
+          "practice_task": "仿照 TestDelegate::with_multi_select，为自己的 delegate 实现 supports_multi_select/is_item_selected/toggle_item_selected/selected_item_count/clear_selection/confirm_multi，并参照 test_multi_select_mode_routes_clicks 写测试验证 cmd+点击进入多选、confirm 后退出。",
+          "source_files": [
+            "crates/picker/src/picker.rs"
+          ],
+          "title": "多选模式：select_instead_of_open 与 ToggleMultiSelect",
+          "topic": "讲解 picker 拥有 UX、delegate 拥有选择状态的多选设计：select_instead_of_open、ToggleMultiSelect/MultiSelectNext 动作、handle_click 的点击路由、render_multi_select_indicator 与 render_match_with_checkbox。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "单元四：选择、确认与多选"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2",
+            "u3-l1"
+          ],
+          "filename": "u5-l1-preview-backend.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "掌握 PreviewBackend 四个方法的契约",
+            "区分 PreviewSource 四种来源及各自适用的 picker 类型",
+            "理解 Update 的四个构造器与 MatchLocation 的两个字段"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "PreviewBackend trait",
+            "PreviewSource/Update/MatchLocation",
+            "Preview 包装与 try_get_preview_data_for_match 时机"
+          ],
+          "order": 1,
+          "practice_task": "写一个最小 PreviewBackend：update 记录收到的 Update，render 返回一个占位 div，clear 置空状态；用 uniform_list_with_preview 构造带它的 Picker，验证选择变化时 update 被调用。",
+          "source_files": [
+            "crates/picker/src/preview.rs",
+            "crates/picker/src/picker.rs"
+          ],
+          "title": "PreviewBackend：预览窗口的抽象接口",
+          "topic": "讲解 preview.rs 中 PreviewBackend trait（update/render/adjust_to_new_size/clear）、Preview 包装结构，以及 PreviewSource（Path/Buffer/Symbol/Message）、MatchLocation、Update 及其四个构造器。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-preview-layout.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "理解 Layout 三种取值与 toggle_preview_visible 的切换规则",
+            "掌握 is_auto_vertical / preview_layout_rendered 的自动降级逻辑",
+            "了解布局变化时 shape 恢复与 preview_layout_changed 通知"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Layout 枚举与 set_preview_layout",
+            "is_auto_vertical 与 preview_layout_rendered",
+            "default_shape_for_layout"
+          ],
+          "order": 2,
+          "practice_task": "在 delegate 中实现 preview_layout_changed 记录 layout_is_horizontal；再写笔记回答：当窗口太窄时 Layout::Right 为什么实际渲染成 Below，涉及 shape.rs 的哪两个函数。",
+          "source_files": [
+            "crates/picker/src/picker.rs",
+            "crates/picker/src/preview.rs",
+            "crates/picker/src/shape.rs"
+          ],
+          "title": "预览布局切换：Hidden/Below/Right 与自动竖排",
+          "topic": "讲解 Layout 枚举、SetPreviewRight/Below/Hidden 与 TogglePreview 动作、set_preview_layout 如何持久化并恢复对应布局的尺寸，以及窗口过窄时 preview_layout_rendered 自动从 Right 降级为 Below。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 5,
+      "title": "单元五：Preview 机制"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2",
+            "u5-l2"
+          ],
+          "filename": "u6-l1-render-overview.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "读懂 render() 的布局分发表",
+            "理解 draws_own_container / elevation_3 / overflow_hidden 的条件应用",
+            "掌握 resize 手柄的挂载条件 is_resizable"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Render::render 分发",
+            "render_with_preview_below / right",
+            "draws_own_container 与 is_resizable"
+          ],
+          "order": 1,
+          "practice_task": "在 fork 中给 render() 外层再包一个 v_flex().border_1() 做实验，观察 elevation 与圆角裁剪变化；然后画出让 Layout::Right 自动降级渲染时走的分支流程图。",
+          "source_files": [
+            "crates/picker/src/render.rs",
+            "crates/picker/src/picker.rs"
+          ],
+          "title": "Render 总览：一个 Picker 帧如何分发布局",
+          "topic": "讲解 render.rs 中 Render 的实现：按 Preview 布局分发到 render_with_preview_below / render_with_preview_right / render_results，外层容器如何加边框背景，以及可拖拽时挂载五条 resize 手柄。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-render-results.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "理解 PickerEditorPosition 两种编辑器位置的组装差异",
+            "掌握空态 no_matches_text 与 show_scrollbar 自定义滚动条",
+            "了解 documentation_aside 的宽窄窗口两种摆法与 item_bounds 定位"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "render_results 主体",
+            "render_editor 与 editor_position",
+            "documentation aside 与空态/滚动条"
+          ],
+          "order": 2,
+          "practice_task": "覆盖 delegate 的 render_header、no_matches_text、editor_position(End) 三个方法各做一组实验，截图或记录 UI 变化；再实现 documentation_aside 返回一个简单面板并验证宽窗口下 aside 相对条目定位。",
+          "source_files": [
+            "crates/picker/src/render.rs",
+            "crates/picker/src/picker.rs"
+          ],
+          "title": "render_results：结果面板的组装与编辑器位置",
+          "topic": "讲解结果面板的结构：key_context(\"Picker\"/\"with_preview\")、大量 on_action 注册、编辑器在头或尾（PickerEditorPosition）、render_header、空态、footer 挂点、show_scrollbar 与 documentation aside 的绝对定位。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l2",
+            "u4-l1"
+          ],
+          "filename": "u6-l3-render-element.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "理解 canvas 记录 item_bounds 以支撑 aside 定位的手法",
+            "掌握多选时 checkbox 行的三条渲染路径",
+            "了解 macOS ctrl+点击映射为右键的兼容处理与 separators_after_indices"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "render_element 组装",
+            "render_multi_select_indicator 与 render_match_with_checkbox",
+            "hover/click/canvas/separators"
+          ],
+          "order": 3,
+          "practice_task": "实现 render_match_with_checkbox 把传入的 checkbox 元素渲染在条目右侧；再让 separators_after_indices 返回某个下标，观察分隔线，并解释 py(px(-1.0)) 的用途。",
+          "source_files": [
+            "crates/picker/src/picker.rs",
+            "crates/picker/src/render.rs"
+          ],
+          "title": "render_element：单行条目的渲染与鼠标交互",
+          "topic": "讲解一行匹配如何组装：on_click/on_mouse_up(macOS ctrl 兼容)/on_hover、canvas 记录每行 bounds、多选时的 checkbox 与 tooltip、分隔线绘制，以及 select_on_hover 关闭时的 mouse_down 拦截。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l2",
+            "u5-l2"
+          ],
+          "filename": "u6-l4-footer-and-actions-menu.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "掌握默认 footer 的出现条件（有预览或有 actions）",
+            "会用 PickerAction 组装菜单并理解 toggled 状态",
+            "理解 actions_menu_handle 防止打开菜单导致 picker 关闭的机制"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "render_footer / render_default_footer",
+            "render_preview_controls",
+            "PickerAction 与 PopoverMenu"
+          ],
+          "order": 4,
+          "practice_task": "给 delegate 实现 actions_menu，返回 header + 两个 entry（其中一个用 .toggled(true)）+ 一个 separator，运行后验证菜单出现且 ToggleActionsMenu 快捷键可用；再对照 on_input_editor_event 的 Blurred 分支解释菜单打开时 picker 为何不关闭。",
+          "source_files": [
+            "crates/picker/src/footer.rs",
+            "crates/picker/src/picker.rs"
+          ],
+          "title": "footer 与 Actions 菜单：PickerAction 体系",
+          "topic": "讲解 footer.rs：delegate 可整体覆盖 render_footer，否则默认 footer 由预览控件（Preview/Below/Right 按钮）与 Actions 菜单组成；PickerAction 的 Header/Separator/Entry/toggled 如何变成 ContextMenu 条目。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 6,
+      "title": "单元六：渲染管线"
+    },
+    {
+      "id": "u7",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u7-l1-shape-types.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "理解 viewport_fraction + rems 双分量表示及其加减乘除运算",
+            "掌握 Shape::Resizing 与 HorizontallyCentered 两态的语义",
+            "读懂 picker_position_and_size 的居中几何计算"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "relative_size! 宏与 RelativeWidth/Height",
+            "ViewportFraction 与 Centered",
+            "Shape 枚举与位置计算"
+          ],
+          "order": 1,
+          "practice_task": "写一个小测试验证 RelativeWidth::rems(34.0).as_pixels 在给定 viewport/rem 下的值，并实现一个从像素反推 viewport fraction 再反算回去的往返断言；用注释图解释 picker_position_and_size 里 left/right 的推导。",
+          "source_files": [
+            "crates/picker/src/shape.rs"
+          ],
+          "title": "相对尺寸类型系统：RelativeWidth、ViewportFraction 与 Shape",
+          "topic": "讲解 shape.rs 的宏生成类型 RelativeWidth/RelativeHeight（视口比例 + rems 双分量）、ViewportFraction、Centered 默认值、Shape 枚举（Resizing/HorizontallyCentered）及 picker_position_and_size 的居中公式。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l2-size-bounds-clamping.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "理解 min_width/min_height 随布局（Right 相加、Below 取 max）的组合规则",
+            "掌握 clamp_position_and_size 的幂等性设计及其意义",
+            "理解 would_clamp_width_if_horizontal 如何驱动自动竖排"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "SizeBounds 默认值",
+            "min/max 与三条 clamp_*_edge",
+            "clamp_divider 与 would_clamp_width_if_horizontal"
+          ],
+          "order": 2,
+          "practice_task": "写一个纯函数测试：构造越界的 PositionAndShape，调用 clamp_position_and_size 两次断言结果不变（幂等）；再调整 min_results/min_preview 默认值，说明 Layout::Right 与 Below 的最小尺寸计算差异。",
+          "source_files": [
+            "crates/picker/src/shape.rs"
+          ],
+          "title": "SizeBounds 与 clamp 体系：尺寸约束的数学",
+          "topic": "讲解 SizeBounds 的默认边界、按布局组合的最小宽高、clamp_width/height、三条边 clamp_*_edge、clamp_divider（保证结果与预览两个窗格都不过最小值）以及 clamp_position_and_size 的幂等性。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u7-l2",
+            "u6-l1"
+          ],
+          "filename": "u7-l3-resize-drag.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "理解 Side trait 的五个实现如何各自改变 shape",
+            "掌握 ResizeDrag 记录 shape_before + mouse_pos_before 的增量拖拽模型",
+            "了解拖拽结束如何序列化形状并回调 adjust_to_new_size"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Side trait 与六个方向类型",
+            "render_resize 的 on_drag/on_drag_move",
+            "双击复位与 finish_any_completed_resize"
+          ],
+          "order": 3,
+          "practice_task": "对照文件头部的 ASCII 示意图写一篇时序说明：从用户按下左键、拖动右侧手柄（含 Layout::Right 时 preview 同步修正）、clamp、松手、下一帧 finish_any_completed_resize 持久化，每一步 shape 字段如何变化。",
+          "source_files": [
+            "crates/picker/src/render/window_controls.rs",
+            "crates/picker/src/render.rs"
+          ],
+          "title": "拖拽调整：Side trait、ResizeDrag 与双击复位",
+          "topic": "讲解 window_controls.rs：每条边/角/中缝一个 Side 实现（cursor/position/current_position_and_shape/clamp/revert_to_default_size）、ResizeDrag 的增量模型、双击复位、以及 render.rs 的 finish_any_completed_resize 如何在拖拽结束时落地尺寸。"
+        }
+      ],
+      "level": "advanced",
+      "order": 7,
+      "title": "单元七：尺寸、形状与拖拽（专家层）"
+    },
+    {
+      "id": "u8",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u7-l2",
+            "u5-l2"
+          ],
+          "filename": "u8-l1-persistence.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "理解 key 的构成：delegate 名 + 布局字符串",
+            "掌握同一 delegate 最多三份 shape 记录的由来",
+            "理解为什么用视口分数而非像素持久化"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "PICKERS_NAMESPACE 与 key 生成",
+            "PickerConfig 序列化",
+            "加载路径在 Picker::new 与 set_preview_layout 中的接入"
+          ],
+          "order": 1,
+          "practice_task": "推导 \"file_finder/right\" 与 \"file_finder/LAST_PREVIEW_LAYOUT\" 两条记录的写入时机与读取位置；写笔记说明 store_shape_for_this_layout 中 shape 必须先于 LAST_PREVIEW_LAYOUT 写入的原因（读代码内注释）。",
+          "source_files": [
+            "crates/picker/src/persistence.rs",
+            "crates/picker/src/picker.rs"
+          ],
+          "title": "KVP 持久化：shape 与 LAST_PREVIEW_LAYOUT 的存取",
+          "topic": "讲解 persistence.rs：基于 db KeyValueStore 的 pickers_v2 命名空间、按 delegate 名 + 预览布局组合的 shape key、LAST_PREVIEW_LAYOUT 键，以及 PickerConfig 用视口分数序列化的原因。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l2",
+            "u2-l2"
+          ],
+          "filename": "u8-l2-presentation-and-popover.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "理解三种形态对背景、dismiss 与可调整性的不同处理",
+            "掌握 PickerPopoverMenu 用 PopoverMenu 承载 Picker 的手法",
+            "了解 reopenable 与 workspace::register_reopenable_picker 的联动"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Presentation 枚举与 builder 方法",
+            "PickerPopoverMenu 与 DismissEvent 转发",
+            "失焦 dismiss 与 reopenable"
+          ],
+          "order": 2,
+          "practice_task": "在 fork 中把一个 delegate 分别以三种形态呈现（默认 modal、.popover()、.embedded()），记录边框、失焦行为、resize 手柄的差异；再梳理 Blurred 事件里 actions_menu_handle/has_another_open_menu 的三重判断。",
+          "source_files": [
+            "crates/picker/src/picker.rs",
+            "crates/picker/src/popover_menu.rs"
+          ],
+          "title": "展示形态：Modal、Popover 与 Embedded",
+          "topic": "讲解 Presentation 三形态（可调整的 Modal、Popover、Embedded）与 embedded()/popover()/resizable() builder、popover_menu.rs 的 PickerPopoverMenu（把整个 Picker 装进 PopoverMenu 并转发 DismissEvent）、失焦取消逻辑与 reopenable 注册。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1",
+            "u4-l3",
+            "u6-l3"
+          ],
+          "filename": "u8-l3-testing-and-custom-delegate.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "掌握 gpui::test + add_window_view 的测试套路",
+            "理解 init_test 里 settings/theme/editor 初始化的必要性",
+            "了解 HighlightedMatch::join 的字节偏移陷阱与 project_scan_indicator 的复用场景"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "TestDelegate 模式与 init_test",
+            "crate 内 5 个 gpui::test 的断言技巧",
+            "共享组件（HighlightedMatchWithPaths/project_scan_indicator）与真实 delegate 参照"
+          ],
+          "order": 3,
+          "practice_task": "综合实战：实现一个完整的 EmojiPickerDelegate（含查询过滤、HighlightedMatch 高亮、confirm 后向 editor 插入文本），仿照 TestDelegate 写 gpui::test 覆盖键盘导航与确认，并运行 cargo test -p picker 验证。",
+          "source_files": [
+            "crates/picker/src/picker.rs",
+            "crates/picker/src/highlighted_match_with_paths.rs",
+            "crates/picker/src/parts.rs",
+            "crates/outline/src/outline.rs",
+            "crates/project_symbols/src/project_symbols.rs"
+          ],
+          "title": "测试模式与自定义 delegate 实战",
+          "topic": "以 crate 内嵌 tests 为教材讲解 TestDelegate 模式、gpui::test 与 TestAppContext、init_test 的全局初始化；再串联 highlighted_match_with_paths.rs 与 parts.rs 两个共享组件，并参照 outline、project_symbols 等真实 delegate 做综合实战。"
+        }
+      ],
+      "level": "advanced",
+      "order": 8,
+      "title": "单元八：持久化、展示形态与二次开发（专家层）"
+    }
+  ]
+}
