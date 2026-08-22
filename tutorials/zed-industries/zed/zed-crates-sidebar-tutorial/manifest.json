@@ -1,7 +1,7 @@
 {
-  "head": "fd82517a115d97a07835b52f0512b22b38e38ccf",
+  "head": "7eec89207ccfbef7ba366da22fc885079a5c0296",
   "project": "zed-crates-sidebar",
-  "rationale": "增量分析结论：上次 HEAD f36aec822 到当前 HEAD fd82517a11 之间仅有 2 个提交（7316cf7745 gpui 基准报告前台执行器工作、fd82517a11 git_hosting_providers 新增 Tangled 支持），改动全部落在 crates/gpui/src/app/bench_context.rs、crates/gpui/src/profiler/journal.rs、crates/git、crates/git_hosting_providers、crates/settings_content 与 docs/src/git.md，与 crates/sidebar 及讲义引用的全部外部文件（zed.rs、multi_workspace.rs、threads_archive_view.rs、test_support.rs）零交集——git diff 对这些路径返回空。因此已生成的 9 篇讲义（u1-l1 至 u3-l3）全部保持 keep：u1-l1 上一轮因 zed.rs 行号漂移标记的 update 已落盘（永久链接钉在 f36aec822，该提交与当前 HEAD 在全部被引用文件上内容完全一致，链接渲染结果不变），其余 8 篇涉及的源码零变化；另有 20 篇讲义尚未生成，维持 new 以便 worker 按原计划继续生成，整体学习路线（先跑起来、再读数据模型、沿数据流自上游到下游、再到跨视图行为与生命周期、最后测试与可观测性）无需调整。",
+  "rationale": "增量分析结论：上次 HEAD fd82517a11 到当前 HEAD 7eec89207c 之间仅有 1 个提交（7eec89207c extension_host 为使用旧版扩展 API 的扩展恢复项目级 LSP 设置），改动全部落在 crates/extension_host/src/wasm_host/wit/since_v0_0_6.rs 与 since_v0_1_0.rs 两个 WIT 版本适配器，与 crates/sidebar 及讲义引用的全部外部文件（zed.rs、multi_workspace.rs、threads_archive_view.rs、test_support.rs）零交集——git diff 对这些路径返回空，sidebar 的三个源文件与 Cargo.toml 在两个 HEAD 间内容完全一致，关键符号（rebuild_contents、apply_list_state_diff、Render for Sidebar、actions!）均原位存在。因此已生成的 9 篇讲义（u1-l1 至 u3-l3）全部保持 keep，其余 20 篇尚未生成的讲义维持 new 以便 worker 按原计划继续生成；extension_host 的变更与侧边栏领域无关，无需新增讲义，整体学习路线（先跑起来、再读数据模型、沿数据流自上游到下游、再到渲染与交互、然后跨视图行为与生命周期、最后测试与可观测性）不变。",
   "units": [
     {
       "id": "u1",

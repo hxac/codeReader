@@ -4,434 +4,388 @@
 
 学完本讲，你应该能够：
 
-1. 说出 `ThreadItem` 组件（位于 `ui` crate）暴露的常用 builder 方法，以及它在 `render` 内部如何决定「图标槽」「标题槽」「元数据行」三个区域的最终内容。
-2. 走读 `render_thread`，把它的每一个 builder 调用映射回 `ThreadEntry` 的字段或 `Sidebar` 的状态，并理解 `selected` / `focused` / `hovered` 三种行状态的含义。
+1. 说出 `ThreadItem` 组件（位于 `ui` crate）暴露的常用 builder 方法，并理解它在 `render` 内部如何决定「图标槽」「标题槽」「元数据行」三个区域的最终内容。
+2. 走读 `render_thread`，把它的每一个 builder 调用映射回 `ThreadEntry` 的字段或 `Sidebar` 的状态，并理解 `selected` / `focused` / `hovered` 三种行状态各自的视觉含义。
 3. 走读 `render_terminal`，理解它与线程行的对称差异，特别是「标题装饰前缀图标化」这条独有路径。
-4. 掌握 `split_leading_icon_char` 与 `pick_icon_glyph` 的两步拆分算法，能对任意标题手工推出图标字符、裁剪后标题与重映射后的高亮位置。
-5. 理解特性开关 `agent-thread-worktree-label` 如何在渲染期（而非重建期）裁剪 worktree/branch 标签。
+4. 掌握 `split_leading_icon_char` 与 `pick_icon_glyph` 的两步拆分算法，能对任意标题手工推出：图标字符、裁剪后的标题、重映射后的高亮位置。
+5. 理解特性开关 `agent-thread-worktree-label` 如何在**渲染期**（而非重建期）裁剪行上的 worktree/branch 标签。
 
 ## 2. 前置知识
 
-- **RenderOnce 组件与 builder 模式**：`ThreadItem` 是一个实现了 `RenderOnce` 的「一次性组件」——构造后立刻被消费成元素树，不适合 `Render` 那样持有实体状态。它的所有外观参数都通过同名 builder 方法链式设置（如 `.icon(...)`、`.timestamp(...)`），未设置的项使用 `ThreadItem::new` 里的默认值。这与 CLAUDE.md 中 GPUI 章节对 `RenderOnce` 的描述一致。
-- **三种行状态**（承接 u2-l3 与 u4-l1）：
-  - `is_active`：当前全局活跃条目（`active_entry` 匹配），对应 `ThreadItem::selected(...)`（行背景高亮）；
-  - 键盘选中：`selection == Some(ix)` 且侧边栏持有焦点，对应 `ThreadItem::focused(...)`（边框）；
-  - `hovered`：鼠标悬停，对应 `action_slot`（行尾操作按钮）出现。
-- **高亮位置是 UTF-8 字节偏移**：搜索过滤产生的高亮位置是字符串的字节下标，`HighlightedLabel` 的文档明确写着 "Characters are identified by UTF-8 byte position"（见 [crates/ui/src/components/label/highlighted_label.rs:L17-L20](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/components/label/highlighted_label.rs#L17-L20)）。本讲 4.4 的位置重映射全是字节运算。
-- **特性开关（feature flag）**：Zed 用 `feature_flags` crate 在运行期下发开关值，`cx.flag_value::<T>()` 读取当前值。开关值变化会触发一次重渲染，但不会触发侧边栏的数据重建。
+- **RenderOnce 组件与 builder 模式**：`ThreadItem` 是实现 `RenderOnce` 的一次性组件——构造后立即被消费成元素树，不持有实体状态。所有外观参数通过同名 builder 方法链式设置（`.icon(...)`、`.timestamp(...)` 等），未设置的项取 `ThreadItem::new` 里的默认值。这是 GPUI 中「纯展示组件」的标准写法（见仓库 CLAUDE.md 的 GPUI 章节）。
+- **行的三种状态**（承接 u2-l3、u4-l1）：
+  - `is_active`：当前全局活跃条目（`active_entry` 匹配），对应 `ThreadItem::selected(...)` → 行背景高亮；
+  - 键盘选中：`selection == Some(ix)` 且侧边栏持有焦点，对应 `ThreadItem::focused(...)` → 行边框；
+  - `hovered`：鼠标悬停，对应行尾 `action_slot`（操作按钮）的出现。
+- **高亮位置是 UTF-8 字节偏移**：搜索过滤产生的高亮位置是字符串的字节下标。`HighlightedLabel` 的文档明确写着 "Characters are identified by UTF-8 byte position"（[crates/ui/src/components/label/highlighted_label.rs:L16-L20](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/components/label/highlighted_label.rs#L16-L20)）。本讲 4.3 的位置重映射全部是字节运算。
+- **字素簇（grapheme cluster）**：一个「用户感知的字符」可能由多个 Unicode 码点组成，例如旗帜 emoji 🇺🇸 是两个区域指示符码点、`é` 可以是字母加重音符的组合。按字节或按码点切分都会把这类字符切碎，所以 `pick_icon_glyph` 用 `unicode_segmentation` 的 `graphemes(true)` 取「第一个字素簇」。
+- **特性开关（feature flag）**：Zed 用 `feature_flags` crate 在运行期下发开关值，`cx.flag_value::<T>()` 读取当前值；`watch` 让视图在开关变化时重渲染。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
 | --- | --- |
-| `crates/sidebar/src/sidebar.rs` | 侧边栏本体。本讲涉及 `render_list_entry` 的分发（L2164-L2233）、`render_thread`（L6103-L6463）、`render_terminal`（L6465-L6551）、`split_leading_icon_char`（L235-L263）、`pick_icon_glyph`（L265-L304）、`apply_worktree_label_mode`（L664-L686） |
-| `crates/ui/src/components/ai/thread_item.rs` | `ThreadItem` 行组件与 `ThreadItemWorktreeInfo`、`AgentThreadStatus` 的定义与渲染，文末还有一组可直接阅读的 `preview()` 示例 |
-| `crates/agent_ui/src/terminal_thread_metadata_store.rs` | `terminal_title_prefix`（装饰前缀检测）与 `compose_terminal_thread_title`（标题组装） |
-| `crates/agent_ui/src/thread_metadata_store.rs` | `worktree_info_from_thread_paths`：把线程存储的路径列表变成 `ThreadItemWorktreeInfo`（本讲的输入端） |
+| `crates/sidebar/src/sidebar.rs` | 侧边栏本体。本讲涉及 `render_list_entry` 的分发（L2164-L2221）、`render_thread`（L6103-L6463）、`render_terminal`（L6465-L6551）、`split_leading_icon_char`（L235-L263）、`pick_icon_glyph`（L265-L304）、`apply_worktree_label_mode`（L664-L686） |
+| `crates/ui/src/components/ai/thread_item.rs` | `ThreadItem` 行组件本体，连同 `ThreadItemWorktreeInfo`、`WorktreeKind`、`AgentThreadStatus` 的定义与渲染 |
+| `crates/agent_ui/src/terminal_thread_metadata_store.rs` | `terminal_title_prefix`：标题装饰前缀的检测算法（`split_leading_icon_char` 的第一步） |
+| `crates/agent_ui/src/threads_archive_view.rs` | `format_history_entry_timestamp`：把时间戳格式化成 `3m` / `2h` / `5d` 这类相对时间 |
 | `crates/feature_flags/src/flags.rs` | `AgentThreadWorktreeLabel` 枚举与 `AgentThreadWorktreeLabelFlag` 开关定义 |
-| `crates/sidebar/src/sidebar_tests.rs` | 已有 `test_split_leading_icon_char`（L14961-L15023），是本讲实践的参照模板 |
+| `crates/sidebar/src/sidebar_tests.rs` | `test_split_leading_icon_char`（L14961-L15023）：前缀拆分算法的现有防回归测试，是本讲实践的对照物 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 ThreadItem：可复用的行组件
+### 4.1 ThreadItem：一行长什么样
 
 #### 4.1.1 概念说明
 
-`ThreadItem` 不在 sidebar crate 里，而是 `ui` crate 提供的通用「agent 线程行」组件：一个圆角行，左边是图标槽，中间是标题（可高亮），右边是时间戳，下面可选一行元数据（项目名、worktree/branch 标签、diff 统计）。sidebar 的线程行、终端行，以及后面 u7 要讲的 `ThreadSwitcher` 弹层条目，用的都是它。
+`ThreadItem` 是 `ui` crate 提供的通用「AI 会话行」组件，侧边栏的线程行、终端行、线程切换器（u7-l1）和归档视图都复用它。它解决的问题是：把「一行会话数据」的所有视觉规则——图标、状态、标题、worktree 徽标、diff 统计、时间戳、悬停操作——收敛到一个地方，调用方只需按 builder 填参数，不必各自拼布局。
 
-把行组件下沉到 `ui` crate 的好处：外观规则（状态图标优先级、渐变淡出、chip 排版）只写一份，消费方只负责「投影」——把自己的数据结构翻译成 builder 参数。
+先认识两个附属类型。状态枚举只有四个值：
+
+- [`AgentThreadStatus`](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/components/ai/thread_item.rs#L10-L17)（默认 `Completed`，另有 `Running` / `WaitingForConfirmation` / `Error`）——注意它定义在 `ui` crate 而非 agent 业务 crate，因为它是**展示概念**。
+- [`ThreadItemWorktreeInfo`](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/components/ai/thread_item.rs#L19-L33)：一个 worktree 徽标的数据（名称、分支名、完整路径、各自的高亮位置、`WorktreeKind::Main/Linked`）。
 
 #### 4.1.2 核心流程
 
-`ThreadItem::render` 内部按优先级填充三个区域：
+`ThreadItem::render` 把一行画成**上下两条横向布局**，外加一个可选工具提示：
 
 ```text
-图标槽（三选一，按优先级）：
-  1. status == Running        → 旋转加载图标（LoadCircle + 旋转动画）
-  2. Error / WaitingForConfirmation / notified
-                               → 红叉 / 警告 / 强调色圆点
-  3. agent_icon：
-       icon_char 有值          → 把该字符当图标渲染（Label）
-       否则 custom_icon_from_external_svg 有值 → 外部 SVG 图标
-       否则                    → Icon::new(self.icon)
-
-标题槽（四选一，按优先级）：
-  1. title_slot 有值           → 任意元素（侧边栏用它放行内重命名编辑器）
-  2. title_generating          → 呼吸动画标题
-  3. highlight_positions 为空  → 普通 Label
-  4. 否则                      → HighlightedLabel(title, positions)
-
-元数据行（任一存在才渲染第二行）：
-  project_name / project_paths / linked worktree chip / diff 统计 / 时间戳
-  注意：只有 kind == Linked 的 worktree 才渲染成 chip，Main 的不显示
+┌────────────────────────────────────────────────┐
+│ [图标槽] [标题槽………]        (悬停时: 操作槽) │   ← 主行（恒出现）
+│ [占位]   归档图标·项目·路径·worktree徽标·±diff·时间 │   ← 元数据行（仅 has_metadata 时）
+└────────────────────────────────────────────────┘
 ```
+
+两个槽位都存在**优先级**，这是本组件最重要的规则：
+
+- **图标槽**（渲染期决策，见 4.1.3）：
+  1. `status == Running` → 旋转的 `LoadCircle`（加载动画）；
+  2. `Error` → 红色 `Close`；`WaitingForConfirmation` → 黄色 `Warning`；否则 `notified == true` → 强调色圆点；
+  3. 都不命中 → 「agent 图标」，其内部再分三层：`icon_char`（字符）> `custom_icon_from_external_svg`（外部 SVG）> `icon`（`IconName` 枚举）。
+- **标题槽**：
+  1. `title_slot`（调用方塞进来的任意元素，例如重命名编辑器）；
+  2. `title_generating == true` → 呼吸灯动画的 Label；
+  3. `highlight_positions` 非空 → `HighlightedLabel`（搜索命中高亮）；
+  4. 以上皆否 → 普通 `Label`。
+- **元数据行**只在 `has_metadata`（有项目名 / 项目路径 / linked worktree 徽标 / diff 统计 / 时间戳任一项）时渲染；worktree 徽标只显示 `WorktreeKind::Linked` 的条目，且「名称或分支至少有一个」。
 
 #### 4.1.3 源码精读
 
-先看数据结构与状态枚举：
+先看字段全景——[ThreadItem 结构体](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/components/ai/thread_item.rs#L35-L67)一共 28 个字段，几乎每个都对应一个同名 builder；[ThreadItem::new](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/components/ai/thread_item.rs#L69-L103) 给出全部默认值（默认图标 `IconName::ZedAgent`、`is_truncated: true`、`status: Completed`）。
 
-- [crates/ui/src/components/ai/thread_item.rs:L10-L17](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/components/ai/thread_item.rs#L10-L17)：`AgentThreadStatus` 四态枚举（Completed / Running / WaitingForConfirmation / Error），这是行状态徽标的全部来源。
-- [crates/ui/src/components/ai/thread_item.rs:L26-L33](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/components/ai/thread_item.rs#L26-L33)：`ThreadItemWorktreeInfo`，含 `worktree_name`、`branch_name`、`full_path`、`highlight_positions`、`kind`（Main/Linked）。sidebar 在重建时生成它（见 4.2.3 的输入端说明）。
-- [crates/ui/src/components/ai/thread_item.rs:L35-L67](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/components/ai/thread_item.rs#L35-L67)：`ThreadItem` 结构体字段全景——图标三态（`icon` / `icon_char` / `custom_icon_from_external_svg`）、标题四态（`title` / `title_slot` / `title_generating` / `highlight_positions`）、diff 统计（`added` / `removed`）、交互回调（`on_click` / `on_hover` / `action_slot`）。
+图标槽的三层 agent 图标——`icon_char` 优先于一切常规图标：
 
-图标槽的优先级实现：
+- [thread_item.rs:L301-L316](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/components/ai/thread_item.rs#L301-L316)：依次尝试 `icon_char`（直接当 Label 渲染字符）→ 外部 SVG → `IconName`。builder 文档也写明 `icon_char` "Takes precedence over `Self::icon` and `Self::custom_icon_from_external_svg`"（[L115-L120](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/components/ai/thread_item.rs#L115-L120)）。
 
-- [crates/ui/src/components/ai/thread_item.rs:L300-L316](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/components/ai/thread_item.rs#L300-L316)：`agent_icon` 的三级选择——`icon_char` 优先，其次外部 SVG，最后才是 `IconName`。`icon_char` 的 builder 文档也写明它「Takes precedence over `Self::icon` and `Self::custom_icon_from_external_svg`」（[L115-L120](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/components/ai/thread_item.rs#L115-L120)）。
-- [crates/ui/src/components/ai/thread_item.rs:L318-L353](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/components/ai/thread_item.rs#L318-L353)：状态图标覆盖逻辑——Running 直接换成旋转加载图标；Error/Waiting/通知圆点只在没有更高优先级状态时顶替 `agent_icon`。**注意**：通知圆点也会覆盖掉终端行的 `icon_char`，这是后面 4.3 的一个关键细节。
+状态图标对图标槽的覆盖：
 
-标题槽的实现：
+- [thread_item.rs:L318-L353](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/components/ai/thread_item.rs#L318-L353)：这段先算出 `status_icon`（Error 的红叉 / Waiting 的警告 / 通知圆点），然后做最终裁决——`Running` 用旋转图标，其次 `status_icon`，都无才是 agent 图标。**也就是说：运行中的线程行上你看不到 agent 图标，图标槽被 spinner 占据。**
 
-- [crates/ui/src/components/ai/thread_item.rs:L355-L381](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/components/ai/thread_item.rs#L355-L381)：四选一的标题渲染。`title_slot` 是任意元素（侧边栏重命名时放编辑器）；`title_generating` 用 2 秒周期、透明度在 0.4~0.8 间脉动的动画；有高亮位置时用 `HighlightedLabel`。非不透明窗口下放弃渐变淡出改用截断（承接 u4-l1 讲过的窗口外观判断）。
+标题槽四分支与元数据行：
 
-元数据行的实现：
+- [thread_item.rs:L355-L381](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/components/ai/thread_item.rs#L355-L381)：`title_slot` > 生成中脉冲 > `HighlightedLabel`（有高亮位置时）> 普通 `Label`。非不透明窗口下改为截断而非渐隐（注释解释了原因）。
+- [thread_item.rs:L412-L419](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/components/ai/thread_item.rs#L412-L419)：worktree 徽标先过滤出 `Linked` 且名称/分支非空的条目。
+- [thread_item.rs:L544-L550](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/components/ai/thread_item.rs#L544-L550)：徽标图标的选择——只显示分支时用 `GitBranch`，否则用 `GitWorktree`（注释说明 worktree 图标「同时覆盖」两种语义）。
+- [thread_item.rs:L589-L606](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/components/ai/thread_item.rs#L589-L606)：diff 统计（`DiffStat` 组件）与时间戳的渲染，各片段之间用 `•` 分隔。
 
-- [crates/ui/src/components/ai/thread_item.rs:L412-L419](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/components/ai/thread_item.rs#L412-L419)：只保留 `kind == WorktreeKind::Linked` 且至少有名字或分支的 worktree——**Main worktree 的信息在行内根本不渲染**（组件 preview 里专门有一个 "Main Worktree (hidden)" 示例印证这一点，见 [L789-L807](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/components/ai/thread_item.rs#L789-L807)）。
-- [crates/ui/src/components/ai/thread_item.rs:L541-L558](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/components/ai/thread_item.rs#L541-L558)：chip 的图标选择——当 `worktree_name` 被清空只剩 `branch_name` 时用分支图标 `GitBranch`，否则用 worktree 图标 `GitWorktree`。这正是 4.2 里特性开关 `Branch` 模式产生效果的落点。
-- [crates/ui/src/components/ai/thread_item.rs:L594-L606](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/components/ai/thread_item.rs#L594-L606)：diff 统计徽标（`DiffStat`，绿增红删）与时间戳，均以 `•` 圆点分隔。
+悬停操作槽与选中/聚焦的视觉差异：
 
-悬停与选中态：
+- [thread_item.rs:L460-L484](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/components/ai/thread_item.rs#L460-L484)：`action_slot` 只在 `hovered` 时挂载，并带一层渐隐遮罩盖住底下被截断的文字；[L437-L443](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/components/ai/thread_item.rs#L437-L443) 显示 `selected` 决定背景色、`focused` 决定边框色——这正是 4.2 讲的「活跃 = 背景、键盘选中 = 边框」的落点。
 
-- [crates/ui/src/components/ai/thread_item.rs:L437-L443](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/components/ai/thread_item.rs#L437-L443)：`selected` 上背景色、`focused` 上聚焦边框、`hover` 上悬停背景——三个状态互相独立。
-- [crates/ui/src/components/ai/thread_item.rs:L460-L484](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/components/ai/thread_item.rs#L460-L484)：仅在 `hovered` 时渲染 `action_slot`，前面垫一层 `GradientFade` 让按钮从文字下「浮」出来，并对鼠标按下 `stop_propagation`，避免点按钮误触行点击。
-
-一个值得注意的观察：`is_remote` 字段只有存储与 setter（[L61](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/components/ai/thread_item.rs#L61)、[L202-L205](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/components/ai/thread_item.rs#L202-L205)），当前 `render` 并未消费它——传了 `is_remote` 今天不会有任何视觉效果。
+一个诚实的观察：`is_remote` 字段目前只有存储与 builder（[L61](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/components/ai/thread_item.rs#L61)、[L202-L205](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/components/ai/thread_item.rs#L202-L205)），当前 `render` 实现里**没有**消费它——侧边栏照常传入，但行上并没有「远程」徽标。读源码时不要假设每个 builder 都有视觉对应。
 
 #### 4.1.4 代码实践
 
-1. **实践目标**：不运行任何代码，仅通过阅读 `preview()` 示例与 `render` 实现，确认「图标槽优先级」和「Main worktree 隐藏」两条规则。
-2. **操作步骤**：
-   - 阅读 [crates/ui/src/components/ai/thread_item.rs:L647-L987](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/components/ai/thread_item.rs#L647-L987) 的 `Component::preview`，找出名为 "Waiting for Confirmation"、"Error"、"Running Agent"、"Main Worktree (hidden)" 的四个示例。
-   - 对每个示例写下你预期的图标槽内容，然后对照 L300-L353 的优先级代码验证。
-3. **需要观察的现象**：`Waiting for Confirmation` 与 `Error` 示例都没有调用 `.icon(...)` 之外的覆盖，但图标槽显示的是警告/红叉而非默认的 `ZedAgent` 图标——因为状态图标优先级更高。
-4. **预期结果**：四个示例的图标槽依次为：警告图标（Warning）、红叉（Close）、旋转加载图标（LoadCircle）、默认 agent 图标（Main worktree 的 chip 不出现，元数据行只剩 diff 统计与时间戳）。
-5. 运行效果可通过 macOS 上的 visual test_runner 观察（承接 u1-l2：`zed_visual_test_runner` 仅限 macOS）；在其他平台本实践为纯源码阅读型，无需运行。
+1. **实践目标**：建立「字段 → 消费点」的对照能力，识别未被消费的字段。
+2. **操作步骤**：打开 `crates/ui/src/components/ai/thread_item.rs`，从 L36 的结构体开始，对每个字段在 `impl RenderOnce for ThreadItem`（L251 起）里搜索 `self.<字段名>`，做一张三列表格：字段名 / builder 方法 / 渲染中的消费点（行号或「未消费」）。
+3. **需要观察的现象**：`icon_char`、`status`、`title_slot`、`highlight_positions` 各自出现在哪几个分支里；`is_remote` 与 `archived` 是否出现在 `render` 中。
+4. **预期结果**：能得出「图标槽与标题槽各有优先级链」的结论，并发现 `is_remote` 未被渲染消费。`archived` 会被消费（元数据行里的归档图标，L491-L497）。本实践为纯源码阅读，无需运行命令。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：一个线程行同时满足「状态为 Running」且「notified 为 true」，图标槽显示什么？
-**答案**：旋转加载图标。Running 检查在 L340 最先发生，直接返回 spinner，通知圆点只在非 Running、非 Error、非 Waiting 时才顶替 `agent_icon`。
+**练习 1**：一个 `status == Running` 且 `notified == true` 的线程行，图标槽最终显示什么？
 
-**练习 2**：为什么 `ThreadItem` 要提供 `title_slot` 这样一个「任意元素」槽位，而不是只提供字符串标题？
-**答案**：行内重命名需要把标题临时替换成一个真正的 `Editor` 实体（可输入、可聚焦、要捕获 Enter/Esc）。字符串 API 表达不了「这一格放一个交互组件」，所以留了 `AnyElement` 槽。
+答案：旋转的 `LoadCircle`。`Running` 判断在 [L340-L353](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/components/ai/thread_item.rs#L340-L353) 中优先于 `status_icon`（通知圆点只是 `status_icon` 的第三候选），所以通知圆点此时被 spinner 覆盖。
 
-**练习 3**：`ThreadItemWorktreeInfo` 同时携带 `worktree_name` 与 `branch_name`，谁决定它们最终显示成什么样的 chip？
-**答案**：消费方决定。`ThreadItem::render` 负责排版（名字 + `/` + 分支 + 图标选择），而「是否保留名字/分支」由 sidebar 的 `apply_worktree_label_mode` 在传入前裁剪（见 4.2.3）——组件只管画，不管策略。
+**练习 2**：为什么空草稿行通常只有一条主行、没有元数据行？
 
-### 4.2 render_thread：把 ThreadEntry 投影成 ThreadItem
+答案：元数据行受 `has_metadata` 门控（[L421-L425](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/components/ai/thread_item.rs#L421-L425)）。空草稿的时间戳被置为空字符串（见 4.2 的 `SharedString::default()`）、diff 统计为 0（不调用 `.added`/`.removed`），若无 worktree 徽标，则五个 `has_*` 全为 false，第二行不渲染。
+
+**练习 3**：`ThreadItem` 为什么用 `RenderOnce` 而不是 `Render`？
+
+答案：它是纯展示组件——构造即消费，不需要 `Entity<T>` 包装、不需要跨帧持有状态；所有交互（`on_click`/`on_hover`）以闭包注入。持有状态与订阅的是调用方（`Sidebar`），这符合 GPUI「状态实体 + 一次性元素树」的分工。
+
+### 4.2 render_thread：把 ThreadEntry 拼成一行
 
 #### 4.2.1 概念说明
 
-`render_thread` 是纯粹的「投影函数」：输入一个重建好的 `ThreadEntry`（承接 u2-l1 的行模型、u3-l4 的重建产物），输出一个装配好的 `ThreadItem`。它自己不查数据库、不做模糊匹配——所有数据都已在 `contents` 里。它额外承担三件事：
+`render_thread` 是线程行的「数据 → 组件参数」翻译层：输入是重建管线产出的 `ThreadEntry`（u2-l1 讲过：数据库元数据打底、活跃信息覆盖），输出是一个可点击、可悬停、可右键的 `ThreadItem`（必要时再包一层右键菜单）。它本身不画任何像素，所有布局都在 `ThreadItem` 里。
 
-1. 从 `self`（Sidebar 实体状态）补充行模型里没有的即时状态：悬停下标、重命名目标、标题再生成集合；
-2. 装配悬停操作按钮与右键菜单；
-3. 用特性开关裁剪 worktree 标签。
+先复习输入。[`ThreadEntry`](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L348-L362) 中与本讲直接相关的字段：`icon` / `icon_from_external_svg`（图标两态）、`status`（状态枚举）、`draft`（草稿标记）、`highlight_positions`（搜索高亮）、`worktrees`（徽标）、`diff_stats`（diff 统计）、`is_title_generating`（标题生成中）。其中活跃字段由 [`apply_active_info`](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L373-L389) 从活的会话视图整体覆盖（`ActiveThreadInfo` 的来源在 [sidebar.rs:L7927-L7958](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7927-L7958)，图标来自会话视图、diff 统计来自 `action_log`）；已关闭线程的行则在重建时用 [`resolve_agent_icon`](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L1376-L1388) 按 agent 身份推导（原生 agent → `ZedAgent`，自定义 agent → `Terminal`，外部扩展可提供 SVG 图标），diff 统计归零（[L1565-L1584](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L1565-L1584)）。
 
 #### 4.2.2 核心流程
 
 ```text
-render_list_entry(ix)                     ← u4-l1 的虚拟列表回调
-  ├─ is_focused = 侧边栏持有焦点
-  ├─ is_selected = is_focused && selection == Some(ix)   （键盘选中）
-  ├─ is_active = active_entry.matches_entry(entry)        （全局活跃）
-  └─ match entry { Thread → render_thread(ix, t, is_active, is_selected) }
+render_list_entry(ix)                       ← 虚拟列表按需回调（L2164）
+  ├─ ListEntry::Thread → render_thread(ix, thread, is_active, is_focused)   ← 本讲
+  └─ ListEntry::Terminal → render_terminal(...)                              ← 4.3
 
-render_thread：
-  1. 派生布尔：is_draft / is_empty_draft / is_running / is_renaming / has_notification
-  2. 组装数据：标题、时间戳（空草稿无）、图标（草稿固定圆圈）、worktrees（过特性开关）
-  3. 链式装配 ThreadItem（约 25 个 builder 调用）
-  4. 悬停且非重命名 → action_slot：重命名 + 上下文按钮（停止/丢弃草稿/归档）
-  5. on_click → 清空 selection，按工作区 Open/Closed 分流激活
-  6. 非草稿且有会话 → 再包一层 right_click_menu（右键菜单）
+render_thread 内部：
+  1. 提取状态：通知、悬停、草稿、运行中、重命名中（L6111-L6132）
+  2. 派生展示量：背景色、时间戳、远程标记、worktree 徽标（裁剪开关）、图标、标题生成中（L6134-L6161）
+  3. ThreadItem builder 链：图标/状态/徽标/高亮/统计/选中/聚焦/悬停（L6163-L6195）
+  4. 分支装配：重命名 → title_slot 装入编辑器；悬停 → action_slot 装入按钮组（L6196-L6310）
+  5. on_click：清空 selection，按 Open/Closed 分流激活（L6311-L6333）
+  6. 有 session_id 且非草稿 → 包一层右键菜单再返回（L6335-L6462）
 ```
 
 #### 4.2.3 源码精读
 
-**入口分发**：[crates/sidebar/src/sidebar.rs:L2173-L2183](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L2173-L2183) 计算三种行状态，[L2217-L2220](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L2217-L2220) 按 `ListEntry` 变体分发。注意实参顺序：`render_thread(ix, thread, is_active, is_selected, cx)` 中第四个参数在函数签名里叫 `is_focused`——即「键盘选中且侧边栏聚焦」传给 `ThreadItem::focused`。
+分发入口——[sidebar.rs:L2164-L2221](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L2164-L2221)：
 
-**第一步：派生布尔与数据**（[crates/sidebar/src/sidebar.rs:L6111-L6161](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L6111-L6161)）：
+- `render_list_entry` 先取条目、算 `is_focused`（侧边栏有焦点）与 `is_selected`（键盘选择器在此行）、`is_active`（`active_entry.matches_entry`，双钥匙匹配见 u2-l3），再按 `ListEntry` 三变体分发。注意调用处 `render_thread(ix, thread, is_active, is_selected, cx)` 的第四个参数在 `render_thread` 里形参名叫 `is_focused`——名字换了一次，语义没变。
 
-- 通知状态查的是 `contents.is_thread_notified(...)`（L6111），即 u2-l1 讲过的「跨重建继承的通知集合」。
-- `is_running` 把 Running 与 WaitingForConfirmation 归为一类（L6121-L6124），只影响悬停时上下文按钮显示「停止生成」。
-- 时间戳：空草稿给空字符串（L6139-L6143）——空字符串会让 `ThreadItem` 的 `has_timestamp` 为假，第二行元数据可能整行不渲染。
-- 图标三岔口（L6152-L6156）：草稿行固定 `IconName::Circle` 并在 L6166-L6168 配 20% 透明度的哑色；非草稿用 `thread.icon` / `thread.icon_from_external_svg`。这两个字段一个来自重建时的 `resolve_agent_icon`（按 agent_id 映射：原生 agent → `ZedAgent`，自定义 agent → `Terminal`，另查 agent server 商店的外部 SVG 图标，见 [L1376-L1388](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L1376-L1388)），活跃线程则被 `apply_active_info` 用面板实时信息覆盖（u3-l4）。
-- `title_generating` 是两个来源的或：行模型里的实时标志 ‖ Sidebar 自己的 `regenerating_titles` 集合（L6158-L6161，后者记录用户点了「重新生成标题」但还没回来的线程）。
+状态提取与一个命名陷阱——[sidebar.rs:L6117-L6125](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L6117-L6125)：
 
-**第二步：特性开关裁剪 worktree 标签**。[crates/sidebar/src/sidebar.rs:L6147-L6150](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L6147-L6150) 在渲染现场读取 `AgentThreadWorktreeLabelFlag` 的值并过滤 `worktrees`：
+- 这里 `let is_selected = is_active;`——`ThreadItem::selected` 接的是**活跃**（背景高亮），不是键盘选中。随后 `.selected(is_selected).focused(is_focused)`（L6185-L6186）落到 4.1 讲的「背景 vs 边框」。阅读时务必小心这两行的命名，它们与 `render_list_entry` 里的同名词指代不同。
 
-- [crates/sidebar/src/sidebar.rs:L664-L686](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L664-L686)：`apply_worktree_label_mode` 的三模式——`Both` 原样；`Worktree` 清空所有 `branch_name`；`Branch` 只在已知分支时清空 `worktree_name`（没有分支信息时保留 worktree 名兜底，注释写明「空 chip 比图标不匹配更糟」）。清空名字后，`ThreadItem` 端会自动改用 `GitBranch` 图标（4.1.3 已讲）。
-- [crates/feature_flags/src/flags.rs:L81-L100](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/feature_flags/src/flags.rs#L81-L100)：开关定义。枚举默认 `Both`，开关名 `agent-thread-worktree-label`，`enabled_for_staff` 为 false（默认谁都不开）。
-- 开关变化如何生效？[crates/sidebar/src/sidebar.rs:L804](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L804) 在构造时调用 `AgentThreadWorktreeLabelFlag::watch(cx)`，它只是 `observe_global::<FeatureFlagStore>` 后 `cx.notify()`（[crates/feature_flags/src/feature_flags.rs:L139-L142](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/feature_flags/src/feature_flags.rs#L139-L142)）。也就是说**裁剪发生在渲染期**：开关变了 → 重渲染 → `render_thread` 现场再读 `flag_value`。这符合 u3-l2 的架构约束——`ThreadEntry` 里不存「裁剪后」的标签，避免增量状态。
+ThreadItem 主体装配——[sidebar.rs:L6163-L6187](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L6163-L6187)：
 
-**第三步：链式装配**（[crates/sidebar/src/sidebar.rs:L6163-L6187](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L6163-L6187)）：
+- 图标两选一：草稿恒用 `IconName::Circle`（且 [L6166-L6168](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L6166-L6168) 把它染成 20% 不透明度的淡色），非草稿用 `thread.icon` + 可选外部 SVG（`.when_some(icon_svg, ...)`）。
+- 时间戳：空草稿给空串（第二行随之消失），否则 `format_history_entry_timestamp`（[threads_archive_view.rs:L1019-L1040](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/agent_ui/src/threads_archive_view.rs#L1019-L1040)，产出 `3m`/`2h`/`5d`/`3w`/`2mo`）。
+- 通知、diff 统计（仅在 >0 时调用 `.added`/`.removed`）、高亮位置逐一直通。
 
-```rust
-let thread_item = ThreadItem::new(id, title.clone())
-    .base_bg(sidebar_bg)
-    .icon(icon)
-    .status(thread.status)
-    .is_remote(is_remote)
-    .when_some(icon_svg, |this, svg| this.custom_icon_from_external_svg(svg))
-    .worktrees(worktrees)
-    .timestamp(timestamp)
-    .highlight_positions(thread.highlight_positions.to_vec())
-    .title_generating(title_generating)
-    .notified(has_notification)
-    .when(thread.diff_stats.lines_added > 0, |this| {
-        this.added(thread.diff_stats.lines_added as usize)
-    })
-    // ……（removed 同理）
-    .selected(is_selected)   // ← 注意：这里 is_selected = is_active
-    .focused(is_focused)
-    .hovered(is_hovered)
-```
+重命名与悬停操作槽——[sidebar.rs:L6196-L6310](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L6196-L6310)：
 
-注意 `.selected(...)` 传的是活跃状态（L6185 的 `is_selected` 是 L6118 由 `is_active` 起的别名），`.focused(...)` 才是键盘选中——名字与直觉相反，读代码时要小心。
+- 重命名时（[L6196-L6217](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L6196-L6217)）用 `.title_slot(...)` 把标题替换为 `thread_rename_editor`，容器捕获 `Newline`/`Confirm`/`Cancel` 三个动作统一走 `finish_thread_rename`（状态机细节在 u5-l4）。
+- 悬停时（[L6218-L6310](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L6218-L6310)）装配 `action_slot`：铅笔按钮恒有；上下文按钮按状态分流——运行中 → Stop Generation；有内容的草稿 → Discard Draft；普通线程 → Archive；空草稿 → 无。
 
-**第四步：悬停操作与重命名槽**：
+点击激活与右键菜单——[sidebar.rs:L6311-L6341](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L6311-L6341)：
 
-- 重命名时（[L6196-L6217](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L6196-L6217)）：`title_slot` 放入重命名编辑器，外层 div 捕获 `Newline` / `Confirm` / `Cancel` 三个动作统一走 `finish_thread_rename`（细节在 u5-l4 展开）。同时 `is_truncated(false)` 关掉标题渐变淡出。
-- 悬停且非重命名时（[L6218-L6310](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L6218-L6310)）：`action_slot` 里必有铅笔重命名按钮；上下文按钮三选一——运行中 → 红色停止按钮（`stop_thread`）；空草稿 → 无按钮；有内容草稿 → 丢弃（`remove_draft`）；普通线程 → 归档（`archive_thread`，且要求有 `session_id`）。
-- 行点击（[L6311-L6333](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L6311-L6333)）：先 `selection = None`（鼠标接管，清掉键盘选中，承接 u2-l3），再按 `ThreadEntryWorkspace::Open` / `Closed` 分流到 `activate_thread` 或 `open_workspace_and_activate_thread`（u6-l1 展开）。
-
-**第五步：右键菜单**（[crates/sidebar/src/sidebar.rs:L6335-L6462](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L6335-L6462)）：草稿或无 `session_id` 的线程直接返回裸行（L6335-L6341）；否则用 `right_click_menu` 把 `thread_item` 包成触发器，菜单项为：Rename Title（恒有）、Regenerate Thread Title（仅 Zed 原生 agent 线程）、Open Thread as Markdown（活跃或原生线程，L6353）、Archive Thread。菜单项回调通过 `cx.weak_entity()` 拿弱引用回写 Sidebar，避免实体环。
+- `on_click` 先 `self.selection = None`（点击即清键盘选中，承接 u2-l3），再按 `ThreadEntryWorkspace::Open/Closed` 分流到 `activate_thread` 或 `open_workspace_and_activate_thread`（u6-l1）。
+- [L6335-L6341](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L6335-L6341) 是提前返回：草稿或无 `session_id` 的线程直接返回裸 `thread_item`，**不包右键菜单**——后面的菜单项（重新生成标题、以 Markdown 打开、归档）全都依赖 ACP 会话 id。
 
 #### 4.2.4 代码实践
 
-1. **实践目标**：为 `render_thread` 的每个 builder 调用建立「参数 ← 数据来源」对照表，验证「投影函数」的定性。
-2. **操作步骤**：
-   - 对照 [L6163-L6187](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L6163-L6187)，把下表右列填完（左列已给出前三行示例）：
+1. **实践目标**：把 `render_thread` 的每个 builder 调用映射回数据来源，建立「一行像素 ← 哪个字段」的完整对照。
+2. **操作步骤**：阅读 [sidebar.rs:L6103-L6341](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L6103-L6341)，手工填写下表（示例已给前两行）：
 
-     | builder 调用 | 数据来源 |
-     | --- | --- |
-     | `.timestamp(timestamp)` | `thread_display_time(&thread.metadata)` 格式化；空草稿给空串（L6139-L6143） |
-     | `.notified(has_notification)` | `self.contents.is_thread_notified(&thread.metadata.thread_id)`（L6111） |
-     | `.title_generating(...)` | `thread.is_title_generating` ‖ `self.regenerating_titles` 包含该 id（L6158-L6161） |
-     | `.icon(...)` / `.custom_icon_from_external_svg(...)` | ？ |
-     | `.worktrees(worktrees)` | ？ |
-     | `.added(...)` / `.removed(...)` | ？ |
-     | `.selected(...)` / `.focused(...)` | ？ |
+   | ThreadItem 调用 | 数据来源 |
+   | --- | --- |
+   | `.icon(IconName::Circle)` | 草稿特判（L6152-L6156） |
+   | `.status(thread.status)` | `ThreadEntry.status`（活跃行由 `apply_active_info` 覆盖，L381） |
+   | `.worktrees(...)` | ？（提示：`thread.worktrees` 经过了哪个函数？） |
+   | `.timestamp(...)` | ？ |
+   | `.highlight_positions(...)` | ？ |
+   | `.notified(...)` | ？ |
+   | `.added(...)` / `.removed(...)` | ？ |
 
-   - 填完后回答：这些来源里有几个来自 `self.contents` 之外的 Sidebar 字段？（答案应是三个：`hovered_thread_index`、`renaming_thread_id`、`regenerating_titles`，外加 `focus_handle` 相关的焦点状态。）
-3. **需要观察的现象**：纯阅读即可完成；如果想验证，可在本地临时把 `.notified(has_notification)` 改为 `.notified(false)` 后运行通知相关测试（如 `test_background_thread_completion_triggers_notification`），观察是否变红。
-4. **预期结果**：对照表每一行都能在 L6103-L6187 找到唯一对应语句；改 `notified` 的本地实验预期让依赖通知徽标的断言失败（改动属本地练习，验证后请还原）。
-5. 若不在本地运行，本实践结论可完全由源码推导，无需「待本地验证」标注。
+3. **需要观察的现象**：哪些调用有条件（`.when`/`.when_some`）、哪些恒执行；`is_selected` 与 `is_focused` 分别接到哪个 builder。
+4. **预期结果**：七个调用全部对上来源，并注意到 `worktrees` 经过了 `apply_worktree_label_mode`（见 4.4）、`notified` 查询的是 `contents.is_thread_notified`（跨重建继承的通知记忆，见 u2-l1）。本实践为源码阅读型，无需运行命令。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：`ThreadSwitcher`（u7 的线程切换器）的条目同样使用 `ThreadItemWorktreeInfo`（[sidebar.rs:L5809-L5817](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L5809-L5817)），但它没有调用 `apply_worktree_label_mode`。这说明什么？
-**答案**：特性开关只裁剪侧边栏列表行的标签；切换器弹层不受开关影响，始终按 `Both` 模式展示。同一个组件、不同消费方、不同策略——这正是把策略放在消费方而非组件里的直接后果。
+**练习 1**：悬停一个「运行中的普通线程」，行尾会出现哪些按钮？
 
-**练习 2**：为什么 `resolve_agent_icon` 在重建期执行（结果烘进 `ThreadEntry`），而 `apply_worktree_label_mode` 在渲染期执行？
-**答案**：agent 图标取决于 agent 注册信息，随重建自然刷新即可，烘进行模型可减少渲染期查询；而标签模式是个可能随时变的实验开关，若烘进行模型就需要「开关变化触发重建」这条额外链路。放在渲染期只需 `watch` → `cx.notify()` → 重渲染，符合「可现算的不落字段」的约束。
+答案：铅笔（Rename Thread，恒有）+ 红色的 Stop Generation（`is_running` 为真走 [L6245-L6256](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L6245-L6256)）。Archive 按钮只在非运行、非草稿时出现。
 
-**练习 3**：悬停时正在运行的线程与普通线程的 `action_slot` 有何区别？
-**答案**：两者都有重命名铅笔；运行中线程的上下文按钮是「停止生成」（Stop 图标、错误色），普通线程是「归档」（Archive 图标），有内容草稿是「丢弃草稿」，空草稿没有上下文按钮。
+**练习 2**：为什么线程行的元素 id 用行下标（`thread-entry-{ix}`），而终端行用 `terminal-{terminal_id}`？
 
-### 4.3 render_terminal：终端行与图标化标题
+答案：线程行 [L6132](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L6132) 用 `format!("thread-entry-{}", ix)`，终端行 [L6473](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L6473) 用 `terminal.metadata.terminal_id`。终端 id 天然稳定且全局唯一，拿来做元素 id 可避免排序变化时动画/状态错位；线程行当前选择了行下标，列表重排时 id 会跟着变——两处风格不一致，这正是「源码现状 ≠ 最优设计」的一个例证。
+
+**练习 3**：`render_thread` 里 `hovered_thread_index` 同时服务线程行和终端行（终端行在 L6475 也读它）。这样共用有什么隐患？
+
+答案：字段名暗示只属于线程，但两种行按同一个行下标 `ix` 写入/清除，语义上仍然自洽（一行只有一个悬停下标）；隐患主要是**可读性**——读代码的人容易误以为终端行有独立悬停状态。这也是仓库全词命名规则（CLAUDE.md）想避免的那类缩略遗留。
+
+### 4.3 render_terminal 与标题装饰前缀图标化
 
 #### 4.3.1 概念说明
 
-`render_terminal` 与 `render_thread` 结构对称但更薄：终端没有生命周期状态（无 Running/Error 等徽标）、没有 diff 统计、没有标题生成动画、没有重命名与右键菜单。它独有的核心是**标题装饰前缀图标化**：Agent 跑命令时产生的终端往往标题形如 `✳ pnpm build`、`[!] codex waiting`——前缀是 agent 留下的装饰符号。侧边栏把这个前缀拆出来，直接当作行的图标显示，标题则只显示剩余部分。
+终端行是线程行的「薄」版本：没有草稿、没有状态机、没有 diff 统计、没有右键菜单，图标恒为 `IconName::Terminal`。它的独特之处在于**标题装饰前缀图标化**：外部 agent（如 Claude Code、Codex 这类 CLI agent）启动的终端，标题常常自带装饰前缀——`"[!] codex waiting"`、`">>> Thinking"`、`"... working"`。直接显示既难看又浪费宽度，于是侧边栏把前缀剥出来、浓缩成单个字符，放进图标槽（`icon_char`，优先级高于 Terminal 图标），标题则从干净的部分开始。
+
+这套处理分两步两个函数：`terminal_title_prefix`（在 `agent_ui` crate，检测「有没有前缀、前缀到哪」）→ `pick_icon_glyph`（在 sidebar crate，从前缀里挑一个代表性字符），外加一段高亮位置重映射，统一封装在 `split_leading_icon_char` 里。
 
 #### 4.3.2 核心流程
 
-```text
-render_terminal(ix, terminal, is_active, is_focused)
-  1. 基础数据：id 用 terminal_id（而非下标！）、时间戳用 created_at、底图标固定 Terminal
-  2. display_title → split_leading_icon_char(title, highlight_positions)
-       Some((icon_char, trimmed, adjusted))
-         → .icon_char(icon_char) + 标题用 trimmed + 高亮用 adjusted
-       None → 无 icon_char，标题与高亮原样使用
-  3. 链式装配 ThreadItem（无 status/added/removed/title_generating）
-  4. 悬停 → action_slot 只有一个关闭按钮（close_terminal）
-  5. on_click → activate_terminal_entry
-```
+第一步：[terminal_title_prefix](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/agent_ui/src/terminal_thread_metadata_store.rs#L96-L136) 判定前缀是否存在：
+
+- 从头逐字符扫描：遇到**字母或数字** → 立即返回 `None`（标题以正常文字开头，没有装饰前缀）；
+- 在见到任何前缀字符**之前**就遇到空白 → `None`（行首缩进不算前缀）；
+- 见到非字母数字非空白的字符（符号、emoji）计入前缀；随后遇到空白即终止（连同后续连续空白一并计入），标记「前缀后确实有空白分隔」；
+- 只有「前缀后跟了空白」才返回 `Some(&title[..prefix_byte_len])`——所以纯符号标题（`"✳"`）和无缝标题（`"✳Thinking"`）都不算。
+
+第二步：[pick_icon_glyph](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L273-L304) 从前缀里挑一个字符：
+
+1. `trim()` 后为空 → `None`；
+2. 剥掉**一对**包裹的 ASCII 括号：首字符是 `[`/`(`/`{`/`<` 且能同时剥掉对应尾括号才生效，剥完 trim 后非空才采纳（`"[!]"` → `"!"`）；剥完变空（如 `"[ ]"` → `" "`）则**回退用原前缀**；
+3. 若以 `".."` 开头 → 整段浓缩成省略号 `"…"`（U+2026）；
+4. 否则取**第一个字素簇**（`graphemes(true)`），保证 🇺🇸 这类多码点 emoji 不被切碎；首字素 trim 后为空 → `None`。
+
+第三步：[split_leading_icon_char](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L235-L263) 收尾：
+
+- 前两步任一返回 `None`，或剥掉前缀后标题为空 → 整体 `None`（行按原样渲染）；
+- 高亮位置重映射：设剥掉的前缀字节长度为 \( L \)，对每个位置 \( p \)：\( p \ge L \) 时保留并映射为 \( p' = p - L \)；\( p < L \)（落在前缀里）的丢弃。写成公式：
+
+  \[ p' = p - L \quad (p \ge L), \qquad p \text{ 被丢弃} \quad (p < L) \]
 
 #### 4.3.3 源码精读
 
-**前缀从哪来**：agent_ui 在组装终端标题时就会保留装饰前缀——[crates/agent_ui/src/terminal_thread_metadata_store.rs:L75-L88](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/agent_ui/src/terminal_thread_metadata_store.rs#L75-L88) 的 `compose_terminal_thread_title`：用户给终端起了自定义标题时，重新拼上原终端标题的前缀（`format!("{prefix}{custom_title}")`）。所以「标题带装饰前缀」是写入元数据时就固化的形态，侧边栏渲染时才拆。
+`render_terminal` 中唯一独有的预处理——[sidebar.rs:L6489-L6494](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L6489-L6494)：
 
-**渲染主体**：[crates/sidebar/src/sidebar.rs:L6465-L6510](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L6465-L6510)：
+- 拆分成功 → `icon_char = Some(...)`、标题用裁剪后的、高亮用重映射后的；失败 → 三者原样。随后 [L6496-L6504](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L6496-L6504) 的 builder 链里 `.icon(IconName::Terminal)` 与 `.when_some(icon_char, |this, c| this.icon_char(c))` 并存——由 4.1 的优先级规则保证 `icon_char` 出现时盖过 Terminal 图标。
 
-- L6473：行 id 用 `terminal-{terminal_id}`——而线程行用的是 `thread-entry-{ix}`（下标）。终端行以稳定 id 标识，线程行以下标标识，这是一个容易忽略的不对称。
-- L6474：时间戳恒取 `metadata.created_at`，没有线程那套「空草稿给空串」的分支。
-- L6490-L6494：调用 `split_leading_icon_char`（4.4 精读），三种返回值分别流向 `.icon_char(...)`、标题与高亮位置。
-- L6496-L6507：builder 链——注意**没有** `.status(...)`（保持默认 Completed，所以状态图标永不出现）与 `.added/.removed`；`.notified(terminal.has_notification)` 用的是重建期算好并存进 `TerminalEntry` 的字段（[L1462-L1463](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L1462-L1463)，来自活跃面板的 `has_notification`），与线程行渲染时现查 `contents` 不同。
+`split_leading_icon_char` 本体——[sidebar.rs:L239-L263](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L239-L263)：
 
-**一个重要后果**：通知圆点的优先级高于 `icon_char`（4.1.3 的图标槽规则）。也就是说，有通知的终端行会显示强调色圆点而不是装饰前缀字符——装饰图标在有通知时让位。
+- 依次调用前两步；注意 `stripped_len = prefix.len()` 是**字节**长度（`&title[stripped_len..]` 按字节切片，因为前缀边界落在字符边界上所以安全）；高亮过滤 + 平移在同一组迭代里完成。
 
-**悬停与点击**：[crates/sidebar/src/sidebar.rs:L6516-L6536](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L6516-L6536) 悬停只放一个「关闭终端」按钮（tooltip 复用了 `ArchiveSelectedThread` 动作名），点击调 `close_terminal`；[L6537-L6549](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L6537-L6549) 行点击调 `activate_terminal_entry`（u6-l2 展开）。与线程行不同：不清理 `selection`（线程行 L6314 清了），也没有右键菜单包装。
+`pick_icon_glyph` 的括号剥离与省略号浓缩——[sidebar.rs:L279-L303](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L279-L303)：
+
+- 括号剥离只剥一层、且要求首尾同时匹配（`strip_prefix` + `strip_suffix` 链式 `.and_then`）；`"...` 判断在括号之后，所以 `"[...] working"` 先剥括号得到 `"..."` 再浓缩成 `"…"`。
+
+终端行的其余部分与线程行对称——[sidebar.rs:L6505-L6549](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L6505-L6549)：
+
+- 时间戳恒取 `created_at`（无草稿概念）；`notified` 直通 `terminal.has_notification`（每行现算，见 u2-l1）；悬停操作槽只有一个 Close 按钮（L6516-L6536，点击走 `close_terminal`，链路见 u6-l2）；`on_click` 走 `activate_terminal_entry`；没有 `.status(...)`、没有右键菜单包装。
+
+现有防回归测试（本讲实践的对照物）——[sidebar_tests.rs:L14961-L15023](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar_tests.rs#L14961-L15023)：
+
+- `test_split_leading_icon_char` 覆盖了：`"✳ Implement separate config"` → `("✳", "Implement separate config")`；`">>> Thinking"` → `">"`；`"[!] codex waiting"` → `"!"`；`"... working"`、`"[...] working"`、`"[…] working"` 全部 → `"…"`；`"🇺🇸 flag"` → 国旗 emoji 完整保留；`"# abc"` + 位置 `[0, 2, 3]` → 位置 `[0, 1]`（前缀里的 0 被丢弃）；以及一批应返回 `None` 的反例。
 
 #### 4.3.4 代码实践
 
-1. **实践目标**：对一组终端标题手工推演渲染结果，验证你理解了「前缀拆分 → 图标化 → 高亮重映射」全链路。
-2. **操作步骤**：对下表每个标题写出：检测到的前缀（`terminal_title_prefix` 的返回值）、`ThreadItem` 收到的标题、`icon_char`。先自己推，再对照 4.4 的算法核对：
+1. **实践目标**：为 `pick_icon_glyph` 建立一组输入输出样例并推理结果，然后写一个表格驱动的单元测试验证推理。
+2. **操作步骤**：
+   - 第一步（推理，先不看测试）：填写下表。前三行已给答案，其余自行推出：
 
-   | display_title | 前缀 | 显示标题 | icon_char |
-   | --- | --- | --- | --- |
-   | `✳ pnpm build` | ？ | ？ | ？ |
-   | `v1 pnpm build` | ？ | ？ | ？ |
-   | `pnpm build` | ？ | ？ | ？ |
-   | `... waiting` | ？ | ？ | ？ |
-   | `✳Thinking` | ？ | ？ | ？ |
+     | 输入（前缀） | 预期输出 | 推理要点 |
+     | --- | --- | --- |
+     | `"[!]"` | `Some("!")` | 剥方括号 → `"!"` |
+     | `">>>"` | `Some(">")` | 非括号开头，不浓缩；取首字素 |
+     | `"..."` | `Some("…")` | 以 `".."` 开头浓缩为省略号 |
+     | `"🇺🇸"` | ？ | 字素簇切分 |
+     | `"(WIP)"` | ？ | 圆括号剥离 |
+     | `"[ ]"` | ？ | 剥括号后变空 → 回退原前缀 |
+     | `"  "` / `""` | ？ | trim 后为空 |
+     | `"✳"` | ？ | 普通符号原样 |
 
-3. **需要观察的现象**：`v1 ...` 与 `✳Thinking` 两行是关键——前者以字母开头、后者前缀后没有空白分隔，两者都不该拆分。
-4. **预期结果**（可与 4.4.5 答案核对）：`✳ pnpm build` → `✳ ` / `pnpm build` / `✳`；`v1 pnpm build` → 不拆；`pnpm build` → 不拆；`... waiting` → `... ` / `waiting` / `…`；`✳Thinking` → 不拆。实际 UI 效果待本地验证（可运行 Zed 并在 agent 面板里触发一条终端命令观察侧边栏行）。
-5. 推理结果可完全由源码得出；已有测试 `test_split_leading_icon_char`（[crates/sidebar/src/sidebar_tests.rs:L14961-L15023](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar_tests.rs#L14961-L15023)）覆盖了同类样例，可作对照。
+     参考答案：`Some("🇺🇸")`（两个区域指示符码点构成一个字素簇）；`Some("W")`；`Some("[")`（剥出 `" "` → trim 空 → 不采纳，回退 `"[ ]"` 取首字素 `[`）；`None` / `None`；`Some("✳")`。
+   - 第二步（本地验证）：`pick_icon_glyph` 是 sidebar.rs 的私有函数，但 `sidebar_tests.rs` 是 crate 内的 `#[cfg(test)]` 模块，可以直接调用（现有 `test_split_leading_icon_char` 即如此）。在本地把下面的**示例代码**追加到 `sidebar_tests.rs`（练习用，勿提交），然后从仓库根目录运行：
+
+     ```bash
+     cargo test -p sidebar test_pick_icon_glyph_table
+     ```
+
+     ```rust
+     // 示例代码：表格驱动测试（本地练习用，验证后请还原）
+     #[test]
+     fn test_pick_icon_glyph_table() {
+         let cases: &[(&str, Option<&str>)] = &[
+             ("[!]", Some("!")),
+             (">>>", Some(">")),
+             ("...", Some("\u{2026}")),
+             ("🇺🇸", Some("🇺🇸")),
+             ("(WIP)", Some("W")),
+             ("[ ]", Some("[")),
+             ("✳", Some("✳")),
+             ("  ", None),
+             ("", None),
+         ];
+         for (input, expected) in cases {
+             assert_eq!(
+                 pick_icon_glyph(input).as_deref(),
+                 *expected,
+                 "input: {input:?}"
+             );
+         }
+     }
+     ```
+
+     （`pick_icon_glyph` 返回 `Option<SharedString>`，`SharedString` 解引用为 `&str`，所以用 `.as_deref()` 与 `Option<&str>` 直接比较。）
+3. **需要观察的现象**：九个用例是否全绿；如果把 `("[ ]", Some("["))` 误写成 `Some(" ")` 或 `None`，哪一步推理出了偏差。
+4. **预期结果**：全部通过即证明对「括号剥离的回退语义」与「字素簇切分」的理解正确。注意 `split_leading_icon_char` 的入口是 `terminal_title_prefix`，所以**整标题** `"[!]"`（无尾部空白）走不到 `pick_icon_glyph`；表格直接测 `pick_icon_glyph` 才能覆盖这个函数本身。上述命令与断言结果为「待本地验证」——本讲义编写环境未运行 cargo。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：列出 `render_terminal` 相对 `render_thread` 缺失的 5 个特性。
-**答案**：无状态徽标（不调 `.status`）、无 diff 统计（`.added/.removed`）、无标题生成动画、无行内重命名与右键菜单、悬停只有一个关闭按钮（线程行还有重命名 + 上下文按钮）。另外线程行点击会清空 `selection`，终端行不清。
+**练习 1**：整标题 `"[x] Done"` 经过 `split_leading_icon_char` 得到什么？
 
-**练习 2**：为什么终端行的通知标志用 `terminal.has_notification`（行模型字段），线程行却用 `contents.is_thread_notified(...)`（渲染期现查）？
-**答案**：终端通知没有跨重建记忆的需求——每轮重建直接从活跃面板现算（`live_notified_terminal_ids`），算完落进行模型即可；线程通知要检测「Running→Completed 跳变」，必须依赖跨重建继承的 `notified_threads` 集合（u2-l1、u3-l4），所以渲染期向 `contents` 查询。
+答案：`terminal_title_prefix` 检测出前缀 `"[x] "`（`x` 非字母数字？——注意 `x` **是**字母数字！）。因此第一步即返回 `None`，整行按原样渲染：图标槽是 Terminal 图标、标题原样、高亮位置不变。这道题的陷阱在于 `[` 和 `]` 是符号，但**括号内的字母**让扫描提前终止。
 
-**练习 3**：若终端标题是 `🇺🇸 deploy prod`，`icon_char` 是什么？
-**答案**：`🇺🇸`（国旗 emoji 由两个 regional indicator 组成，是多码点字素簇）。`pick_icon_glyph` 用 `graphemes(true)` 取第一个字素簇，保证不会被切半个 emoji（见 4.4.3）。
+**练习 2**：标题 `"🇺🇸 flag"`、高亮位置 `[9]`（指向 `f`，国旗 8 字节 + 空格 1 字节），拆分后位置是多少？
 
-### 4.4 split_leading_icon_char 与 pick_icon_glyph：两步拆分算法
+答案：前缀 `"🇺🇸 "` 长度 \( L = 9 \) 字节，\( 9 \ge 9 \) 保留，\( p' = 9 - 9 = 0 \)，即 `[0]`——`f` 成为裁剪后标题 `"flag"` 的第 0 字节。若位置是 `[0]`（指向前缀里的国旗）则被丢弃。
+
+**练习 3**：为什么 `split_leading_icon_char` 要在剥掉前缀后检查 `trimmed_title.is_empty()`？
+
+答案：标题只有前缀（如 `"✳"`）时 `terminal_title_prefix` 本就不会返回 `Some`，但存在边界组合（前缀 + 纯空白尾部）可能使裁剪结果为空；此时返回 `None` 让行按原样渲染，避免出现「有图标没标题」的破行。[sidebar.rs:L248-L250](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L248-L250)
+
+### 4.4 特性开关裁剪 worktree/branch 标签
 
 #### 4.4.1 概念说明
 
-这是 sidebar crate 的一对自由函数，解决「agent 在标题前面贴的装饰符号」问题：
+线程行/终端行的元数据行里，每个 linked worktree 徽标默认同时显示「worktree 名 / 分支名」。`agent-thread-worktree-label` 开关允许运营侧在不下发新版本的情况下实验两种裁剪：只看 worktree、或只看分支。它的定义在 [feature_flags/src/flags.rs:L81-L100](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/feature_flags/src/flags.rs#L81-L100)：枚举 `AgentThreadWorktreeLabel { Both（默认）, Worktree, Branch }`，flag 名为 `"agent-thread-worktree-label"`，且 `enabled_for_staff() == false`。
 
-- `terminal_title_prefix`（定义在 agent_ui crate）：判断标题是否以「非字母数字前缀 + 空白分隔」开头，是则返回含尾部空白的前缀切片。设计意图：只把「明显是装饰」的头部拆出来——以字母/数字开头的标题（如版本号 `v1`）绝不误伤，没有空白分隔的（如 `✳Thinking`）也当成普通标题。
-- `pick_icon_glyph`：把检测到的前缀浓缩成**一个**可显示的字形。规则：剥掉一对 ASCII 括号（`[!]` → `!`）、连续点号缩成省略号（`...` → `…`）、最后取第一个字素簇（`>>>` → `>`，多码点 emoji 完整保留）。
-- `split_leading_icon_char`：把两者串起来，并完成第三件事——**高亮位置重映射**：高亮位置是全标题的字节偏移（4.2 已知它由搜索过滤产生于全标题上），标题被裁掉前缀后，落在前缀里的位置丢弃，其余位置整体减去前缀字节长度。
+关键设计判断：**裁剪发生在渲染期，而不是重建期**。`render_thread` / `render_terminal` 每次渲染时用 `cx.flag_value::<AgentThreadWorktreeLabelFlag>()` 读当前值（[L6147-L6150](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L6147-L6150)、[L6483-L6486](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L6483-L6486)），把完整的 `worktrees` 先拷贝再按模式清字段。数据模型（`ThreadEntry.worktrees`、`EntryShape`）完全不受影响——行集合与行高都不因开关而变。
 
 #### 4.4.2 核心流程
 
 ```text
-split_leading_icon_char(title, highlight_positions)
-  1. prefix = terminal_title_prefix(title)?        —— 无装饰前缀 → None
-  2. icon_char = pick_icon_glyph(prefix)?           —— 浓缩不出字形 → None
-  3. trimmed = title[前缀字节长度..]                —— 剩余为空 → None
-  4. positions = positions 中 ≥ 前缀长度者 − 前缀长度
-  5. 返回 (icon_char, trimmed, positions)
-
-pick_icon_glyph(prefix)
-  1. trim；空 → None
-  2. 若首字符是 [ ( { < 且有对应的 ] ) } > 收尾 → 剥掉括号再 trim；
-     剥完变空 → 回退用原前缀
-  3. 以 ".." 开头 → 返回省略号 U+2026
-  4. 返回第一个字素簇（graphemes(true)，多码点 emoji 不拆）；
-     该字素簇 trim 后为空 → None
+Sidebar::new → AgentThreadWorktreeLabelFlag::watch(cx)          ← 开关变化 → cx.notify()（仅重渲染）
+每次渲染：
+  thread.worktrees / terminal.worktrees（完整数据）
+    → apply_worktree_label_mode(worktrees, cx.flag_value::<..>())
+        ├─ Both      → 原样
+        ├─ Worktree  → 每项 branch_name = None
+        └─ Branch    → 有 branch_name 的项 worktree_name = None
+                     （无分支名的项保留 worktree 名作回退）
+    → ThreadItem::worktrees(...)
+        → 渲染时只显示 Linked 且名称/分支非空的徽标
 ```
 
 #### 4.4.3 源码精读
 
-- [crates/sidebar/src/sidebar.rs:L235-L263](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L235-L263)：`split_leading_icon_char` 主体。L246-L249 的 `stripped_len = prefix.len()` 与 `&title[stripped_len..]` 都是**字节**运算（`prefix` 是 `&str`，`.len()` 是字节数），空标题保护在 L248-L250。位置重映射的 `filter` + `map` 在 L252-L256。
-- [crates/sidebar/src/sidebar.rs:L265-L304](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L265-L304)：`pick_icon_glyph` 主体。三个要点：
-  - L280-L290：括号剥壳只认 `[ ]`、`( )`、`{ }`、`< >` 四对 ASCII 括号，且只剥一层；剥完 trim 后若为空（如前缀就是 `"[ ]"`），回退到原前缀继续处理——这个回退分支容易被忽略；
-  - L293-L295：`starts_with("..")` 判定在括号剥壳**之后**，所以 `[...] working` 先变成 `...` 再命中省略号分支；
-  - L298-L303：`graphemes(true)` 取扩展字素簇（sidebar.rs:62 引入 `unicode_segmentation::UnicodeSegmentation`），这是国旗 emoji、变体选择符不被切碎的保证。
-- [crates/agent_ui/src/terminal_thread_metadata_store.rs:L96-L136](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/agent_ui/src/terminal_thread_metadata_store.rs#L96-L136)：`terminal_title_prefix` 的扫描循环。终止条件有三：遇到字母/数字字符立刻返回 `None`（L103-L105）；空白出现在任何前缀字符之前返回 `None`（L107-L110，所以 `" leading space"` 不拆）；只有「先见过非字母数字字符、再遇到空白」才把前缀连同空白收入（L111-L125），从未遇到空白则整体返回 `None`（L131-L135，所以 `"✳Thinking"` 不拆）。
-- 高亮位置的生产端（承接 u3-l4 / u5-l3）：[crates/sidebar/src/sidebar.rs:L1847-L1855](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L1847-L1855) 在重建的过滤阶段用 `fuzzy_match_positions(&query, terminal_title)` 把位置算在**完整标题**上；render_terminal 再经本函数重映射。worktree 名字上的高亮（L1857-L1865）不经此函数，因为前缀拆分只发生在标题上。
-- 已有测试：[crates/sidebar/src/sidebar_tests.rs:L14961-L15023](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar_tests.rs#L14961-L15023) 的 `test_split_leading_icon_char` 覆盖了拆分/不拆分/括号/省略号/emoji/位置重映射六类样例——但它测的是外层 `split_leading_icon_char`，**`pick_icon_glyph` 本身没有直接的单测**（这正是本讲实践的切入点）。
+- [`apply_worktree_label_mode`](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L664-L686)：三种模式的就地清空。`Branch` 分支里的注释值得读——「无分支名时回退显示 worktree 名，一个空徽标比一个错位的图标更糟」，所以只在 `branch_name.is_some()` 时才清 `worktree_name`。
+- [`AgentThreadWorktreeLabelFlag::watch` 的效果](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/feature_flags/src/feature_flags.rs#L134-L142)：`watch` 的实现就是 `cx.observe_global::<FeatureFlagStore>(|_, cx| cx.notify()).detach()`——开关一变只触发重渲染，不触发 `schedule_update_entries`。侧边栏在构造期注册（[sidebar.rs:L804](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L804)）。
+- 与 ThreadItem 侧的衔接：`Worktree` 模式清掉 `branch_name` 后，徽标只剩 worktree 名 + `GitWorktree` 图标；`Branch` 模式清掉 `worktree_name` 后，4.1 讲的 [chip_icon 规则](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/components/ai/thread_item.rs#L544-L550)会把徽标图标换成 `GitBranch`——同一份开关语义贯穿两个 crate。
 
-#### 4.4.4 代码实践（本讲主实践）
+#### 4.4.4 代码实践
 
-**实践目标**：为 `pick_icon_glyph` 建立一组输入输出样例表并推理结果，然后补一个表格驱动的单元测试验证推理。
-
-**第一步：样例推理**。`pick_icon_glyph` 的入参是「已检测到的前缀」（真实调用中含尾部空白，函数第一步会 trim）。按下表先自己推出结果：
-
-| 输入前缀 | 推理过程 | 预期输出 |
-| --- | --- | --- |
-| `"[!] "` | trim → `[!]` → 剥括号 → `!` | `Some("!")` |
-| `">>> "` | trim → `>>>` → 首字符 `>` 不在括号列表 → 首字素簇 | `Some(">")` |
-| `"... "` | trim → `...` → 以 `..` 开头 | `Some("…")`（U+2026） |
-| `"[...] "` | trim → `[...]` → 先剥括号得 `...` → 再命中点号分支 | `Some("…")` |
-| `"🇺🇸 "` | 首字素簇为整个国旗（两个 regional indicator） | `Some("🇺🇸")` |
-| `"(?) "` | 剥圆括号 → `?` | `Some("?")` |
-| `"[ ] "` | 剥括号后 trim 为空 → **回退原前缀** `[ ]` → 首字素簇 | `Some("[")` |
-| `"   "` | trim 后为空 | `None` |
-| `"!"` | 无括号、非点号、首字素簇 | `Some("!")` |
-
-**第二步：编写测试**。`pick_icon_glyph` 是 sidebar.rs 的私有函数，而 `sidebar_tests.rs` 以 `#[cfg(test)] mod sidebar_tests;`（[sidebar.rs:L83-L84](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L83-L84)）挂入库内且开头就是 `use super::*;`，所以测试文件可以直接调用它。在本地把下面的测试追加到 `sidebar_tests.rs` 末尾（示例代码，非项目原有代码）：
-
-```rust
-// 示例代码：为 pick_icon_glyph 补的表格驱动测试
-#[test]
-fn test_pick_icon_glyph() {
-    let cases: &[(&str, Option<&str>)] = &[
-        ("[!] ", Some("!")),
-        (">>> ", Some(">")),
-        ("... ", Some("\u{2026}")),
-        ("[...] ", Some("\u{2026}")),
-        ("🇺🇸 ", Some("🇺🇸")),
-        ("(?) ", Some("?")),
-        // 剥掉括号后为空 → 回退原前缀，取其首字素簇
-        ("[ ] ", Some("[")),
-        ("   ", None),
-        ("!", Some("!")),
-    ];
-
-    for (input, expected) in cases {
-        assert_eq!(
-            pick_icon_glyph(input).as_deref(),
-            *expected,
-            "pick_icon_glyph({input:?}) 应为 {expected:?}"
-        );
-    }
-}
-```
-
-**第三步：运行**。在仓库根目录执行：
-
-```bash
-cargo test -p sidebar --lib test_pick_icon_glyph
-```
-
-**需要观察的现象**：9 个用例全部通过；若把 `("[ ] ", Some("["))` 改成 `None` 会失败——证明「剥壳后为空回退原前缀」的分支确实存在。
-
-**预期结果**：测试通过，且与第一步的推理表逐行一致。`assert_eq!` 比较的是 `Option<SharedString>` 与 `Option<&str>`（经 `as_deref` 归一），无需手写比较器。本实践的命令输出属「待本地验证」——样例表与断言本身已由源码 L265-L304 逐行核对。
+1. **实践目标**：理解「渲染期裁剪」与「重建期状态」的边界。
+2. **操作步骤**：通读 [apply_worktree_label_mode](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L664-L686)，然后回答：如果把这段裁剪搬进 `rebuild_contents`（在构造 `ThreadEntry` 时就清字段），会带来哪些问题？把答案写成两三条要点。
+3. **需要观察的现象**：对照 u3-l3 的 `EntryShape` 契约思考——裁剪会不会改变行高？会不会需要在 `EntryShape` 里加字段？
+4. **预期结果**：要点应包括：(a) 数据被污染，换回 `Both` 模式需要整表重建才能恢复，而渲染期方案只差一次 `cx.notify()`；(b) `EntryShape` 无需变化，因为裁剪不影响行高与行集合；(c) 重建管线「从世界状态全量重推导」的世界里，开关值并不属于会触发重建的事件源，放进重建反而要新增一条订阅。本实践为源码阅读型，无需运行命令。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：`split_leading_icon_char(&"✳".into(), &[])` 返回什么？为什么？
-**答案**：`None`。`terminal_title_prefix("✳")` 扫描完整个字符串也没遇到空白（`saw_whitespace_after_prefix` 为假），返回 `None`，第一行就以 `?` 短路。已有测试 L14983 明确锁定了这个行为：只有符号、没有空白分隔的标题不拆。
+**练习 1**：`Branch` 模式下，一个只知道 worktree 名、不知道分支名的徽标会显示什么？
 
-**练习 2**：标题 `"✳ fix the bug"`、查询 `"fix"` 产生了高亮位置。fuzzy 匹配返回的字节位置是多少？`split_leading_icon_char` 重映射后又是多少？
-**答案**：`"✳ fix the bug"` 中 `✳` 占 3 字节、后跟 1 字节空格，所以 `f` 在字节 4、`i` 在 5、`x` 在 6，即 `[4, 5, 6]`；前缀 `"✳ "` 长度 4，重映射后为 `[0, 1, 2]`——恰好落在裁剪后标题 `"fix the bug"` 的 `fix` 上。这正是字节偏移设计的意义：减去前缀字节长度即完成平移。
+答案：原样显示 worktree 名 + `GitWorktree` 图标。因为 [`Branch` 分支只在 `branch_name.is_some()` 时清 `worktree_name`](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L675-L683)，避免出现只有图标的空徽标。
 
-**练习 3**：如果把 `pick_icon_glyph` 里 `starts_with("..")` 的判定移到括号剥壳**之前**，哪个已有测试用例会失败？
-**答案**：`"[...] working"`（测试 L15001-L15003）。剥壳前字符串是 `[...]`，不以 `..` 开头，会走到首字素簇分支返回 `[`，与断言的 `…` 不符。这个顺序依赖是算法的隐藏契约：先剥壳、再浓缩。
+**练习 2**：开关从 `Both` 切到 `Worktree` 的瞬间，侧边栏内部发生了什么？
+
+答案：`FeatureFlagStore` 全局变化 → `watch` 注册的观察者调用 `cx.notify()` → `Sidebar` 重渲染 → `render_thread`/`render_terminal` 再次 `cx.flag_value` 读到 `Worktree` → `apply_worktree_label_mode` 清掉 `branch_name`。没有 `update_entries`、没有 `ListState::splice`、没有 `EntryShape` 变化。
 
 ## 5. 综合实践
 
-**任务：从一条终端标题出发，画出完整的「渲染决策表」并落成可运行的测试。**
+**任务：给一行线程画「完整画像」——从字段到像素。**
 
-1. 选定 6 个标题样例（建议含：`✳ pnpm build`、`[!] codex waiting`、`... working`、`🇺🇸 flag`、`v1 Running`、`✳Thinking`），并假设搜索框里输入了会命中标题的查询词。
-2. 对每个样例，沿调用链依次填写一张决策表，每列都要给出代码依据（文件 + 行号）：
+构造（或从现有测试里找一个）满足以下条件的线程行：标题为 `"✳ Implement separate config"`、`status = Running`、`diff_stats = {lines_added: 12, lines_removed: 3}`、`notified = true`、有一个 linked worktree（名称 `feature-x`，分支 `main`）、搜索过滤词命中标题里的 `config`。然后：
 
-   | 标题 | `terminal_title_prefix` | `pick_icon_glyph` | ThreadItem 标题 | 高亮位置（重映射前后） | 图标槽最终内容 |
-   | --- | --- | --- | --- | --- | --- |
+1. 手推 `render_thread` 的完整参数表：`ThreadItem` 收到的 `icon` / `icon_char` / `status` / `notified` / `added` / `removed` / `worktrees` / `highlight_positions` / `timestamp` 各是什么；
+2. 再手推 `ThreadItem::render` 的三个裁决：图标槽落到哪一层（提示：`Running` 优先）、标题槽落到哪个分支（有高亮位置）、元数据行出现哪些片段、徽标图标是 `GitWorktree` 还是 `GitBranch`；
+3. 用 4.3.4 的表格驱动测试验证你对字符处理的理解，并把 `"✳ Implement separate config"` 加进 `test_split_leading_icon_char` 风格的断言（注意：线程行走的是 `render_thread`，**不经过** `split_leading_icon_char`——这个函数只用于终端行；想验证这一点，grep 一下它的全部调用点）；
+4. 若本地能编译，任选一个现有测试运行对照（如 `cargo test -p sidebar test_split_leading_icon_char`），确认环境可跑后，再看 `visible_entries_as_strings` 类测试如何断言行的可见文本。
 
-   最后一列要分两种情况讨论：`has_notification` 为假（显示 `icon_char`）与为真（通知圆点顶替，见 4.1.3 的优先级规则）。
-3. 把表中 `pick_icon_glyph` 一列的结论沉淀为 4.4.4 的表格驱动测试并运行；再运行既有测试做对照：
-
-   ```bash
-   cargo test -p sidebar --lib pick_icon_glyph
-   cargo test -p sidebar --lib test_split_leading_icon_char
-   ```
-
-4. （可选，纯推理）对一个「linked worktree + 已知分支」的线程行，写出特性开关三种模式（`Both` / `Worktree` / `Branch`）下元数据行 chip 的形态差异，包括 chip 图标在 `GitWorktree` 与 `GitBranch` 之间的切换条件（4.1.3 与 4.2.3）。
-
-完成标准：决策表每一格都能指出源码依据；两个测试命令全绿（命令输出待本地验证）；能口头解释「通知圆点会吃掉装饰图标」与「`Branch` 模式下无分支的 worktree 保留名字兜底」这两个反直觉行为。
+预期产出：一张两列对照表 + 三条裁决结论。第 3 步会纠正一个常见误解：前缀图标化是**终端行专属**逻辑，线程行的 `✳` 会原样留在标题里（其图标槽由 agent 身份或状态决定）。命令运行结果为「待本地验证」。
 
 ## 6. 本讲小结
 
-- `ThreadItem` 是 `ui` crate 的通用行组件，消费方只做「投影」：sidebar 把 `ThreadEntry` / `TerminalEntry` 翻译成约 25 个 builder 参数，外观规则全部留在组件内。
-- 图标槽有严格优先级：Running 旋转图标 > Error/Waiting/通知圆点 > `icon_char` > 外部 SVG > `IconName`；标题槽则是：重命名编辑器 > 生成中动画 > 高亮 Label > 普通 Label。
-- `render_thread` 是纯投影函数，但仍从 `self` 补三类即时状态（悬停下标、重命名目标、标题再生成集合），并负责悬停按钮、右键菜单与点击激活的分流。
-- `render_terminal` 更薄但独占「标题前缀图标化」路径：前缀拆出来当图标、标题裁剪、高亮位置按字节平移；终端行 id 用稳定的 `terminal_id` 而非下标。
-- 特性开关 `agent-thread-worktree-label` 的裁剪发生在渲染期（`watch` 只触发 `cx.notify()`），`ThreadEntry` 不存裁剪结果；切换器不受该开关影响。
-- `pick_icon_glyph` 目前没有直接单测，外层 `split_leading_icon_char` 有——本讲实践为前者补上了表格驱动测试。
+- `ThreadItem` 是 `ui` crate 的通用会话行组件：一行 = 主行（图标槽 + 标题槽 + 悬停操作槽）+ 可选元数据行；图标槽与标题槽都有明确的优先级链，`Running` 状态会整体接管图标槽。
+- `render_thread` 是纯翻译层：把 `ThreadEntry` 字段与 `Sidebar` 状态映射成 builder 参数；注意 `is_selected = is_active` 的命名陷阱（背景高亮 = 活跃，边框 = 键盘选中）。
+- `render_terminal` 更薄，独有「标题装饰前缀图标化」：`terminal_title_prefix`（检测：符号前缀 + 空白分隔）→ `pick_icon_glyph`（剥一层括号 → `..` 浓缩为省略号 → 取首字素簇）→ 高亮位置按字节平移并丢弃落入前缀的位置。
+- 高亮位置是 UTF-8 字节偏移，前缀剥离后的重映射是纯字节运算；多码点 emoji 靠字素簇切分保持完整。
+- `agent-thread-worktree-label` 开关在渲染期经 `apply_worktree_label_mode` 裁剪徽标标签，不触碰数据模型与 `EntryShape`；开关变化只触发 `cx.notify()`。
 
 ## 7. 下一步学习建议
 
-- **u5-l1（动作注册与键位上下文）**：本讲的 `on_click` / 悬停按钮只是交互入口，下一单元系统讲解 gpui 动作如何被声明、分发与绑定键位。
-- **u5-l3（过滤搜索）**：本讲只讲了高亮位置的「消费端」（重映射与渲染），其「生产端」——`fuzzy_match_positions` 如何在重建期写进行模型——在 u5-l3 展开。
-- **u7-l1（ThreadSwitcher）**：`ThreadItem` 的第三个消费方，可对照本讲总结「同一组件、不同策略」的取舍；顺带阅读 `thread_item.rs` 的 `preview()` 之外，还可以看 `crates/zed/src/visual_test_runner.rs` 中 `ThreadItemBranchNameTestView` 等测试视图（L2876、L3129 附近），了解组件如何被单独可视化验证。
+- 下一讲（u4-l4）继续渲染层的收尾：分组头省略号菜单、`workspace_menu_worktree_labels` 的主/次标签规则与 `DefaultBranchCache` 预取——其中 `WorkspaceMenuWorktreeLabel` 与本讲的 `ThreadItemWorktreeInfo` 是平行结构，可对照阅读。
+- 之后进入单元五（u5-l1 动作注册与键位上下文）：本讲行上的 `on_click`/悬停按钮最终调用的 `activate_thread`、`archive_thread`、`finish_thread_rename` 等方法，都同时挂在动作处理器上，届时可以看到「鼠标路径」与「键盘路径」如何汇合。
+- 想加深字符处理的理解，可以延伸阅读 `crates/ui/src/components/label/highlighted_label.rs`（高亮位置如何在单行替换时随之平移）与 `unicode_segmentation` crate 的字素簇文档。

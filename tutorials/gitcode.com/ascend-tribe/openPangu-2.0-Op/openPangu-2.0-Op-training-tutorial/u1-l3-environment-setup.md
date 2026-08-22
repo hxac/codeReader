@@ -4,325 +4,257 @@
 
 学完本讲，你应该能够：
 
-1. 说清楚昇腾 NPU 开发环境的三大组成部分：宿主机驱动、容器内的 CANN 工具链、torch_npu 框架适配层，以及为什么这个项目推荐用 docker 镜像来开发。
+1. 说清楚昇腾 NPU 开发环境的三大组成部分——宿主机驱动、容器内的 CANN 工具链、torch_npu 框架适配层——以及为什么本项目推荐用 docker 镜像开发。
 2. 根据手上机器的芯片类型（A2 / A3 / A5），从 `ascendc/README.md` 中选出正确的 docker 镜像并完成 `docker pull`。
-3. 逐行读懂 README 给出的 `docker run` 参考脚本：为什么要挂载 `/dev/davinci*` 设备节点、为什么要挂载宿主机的驱动目录，并能把它从 16 卡改写成 8 卡版本。
-4. 在容器内完成 CANN 环境变量初始化（`source .../set_env.sh`），并理解 `build.sh` 是如何沿着环境变量一路找到 CANN 安装目录和 `bisheng` 编译器的。
+3. 逐行读懂 README 给出的 `docker run` 参考脚本：为什么必须挂载 `/dev/davinci*` 设备节点和宿主机驱动目录，并能把它从 16 卡改写成 8 卡版本。
+4. 在容器内完成 CANN 环境变量初始化（`source set_env.sh`），并顺着 `build.sh` 的源码看清这些环境变量是如何被消费的。
 
-本讲不涉及任何算子代码的修改，所有操作都只发生在你的开发机和容器里。
+本讲不涉及任何算子代码修改，所有操作都只发生在你的开发机、docker 容器和 shell 环境里。这是后续一切编译（u1-l4）与测试（单元 8）的地基。
 
 ## 2. 前置知识
 
-阅读本讲前，建议你先完成 u1-l1（项目全景）和 u1-l2（算子四层模型）。此外需要了解以下基础概念：
+阅读本讲前，建议先完成 u1-l1（项目全景）和 u1-l2（算子四层模型）。此外需要了解以下基础概念：
 
-- **昇腾 NPU（华为昇腾处理器）**：华为的 AI 加速芯片。本仓库的算子就是跑在这类芯片上的。开发机上插了几张 NPU 卡，操作系统里就会出现 `/dev/davinci0`、`/dev/davinci1` 这样的设备文件。
-- **CANN（Compute Architecture for Neural Networks）**：昇腾的计算架构软件栈，相当于 NPU 版的 "CUDA Toolkit"。它包含：
-  - **算子编译工具链**：把 Ascend C 源码（`op_kernel` 目录下的 `.cpp`）编译成芯片可执行的指令，其中编译器叫 `bisheng`（毕昇）。
-  - **运行时（Runtime）**：Host 侧的 aclnn 接口最终通过它把任务下发到设备。
-  - **opp 算子库目录**：编译出的算子包最终安装到 `/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/` 下（u1-l4 详述）。
-- **torch_npu**：PyTorch 的昇腾后端适配包，作用类似 GPU 上的 `torch.cuda`，让 `torch.Tensor` 能搬到 NPU 上运算。它与 CANN 版本必须严格配套。
-- **docker 基础**：会使用 `docker pull`（拉镜像）、`docker run`（创建并启动容器）、`docker ps`（列出容器）即可。`-v 宿主机路径:容器路径` 表示把宿主机目录挂载进容器；`--device=/dev/xxx` 表示把宿主机设备文件透传给容器。
-- **`source` 与环境变量**：`source xxx.sh` 是在**当前 shell** 里逐条执行脚本，因此脚本里 `export` 的环境变量在执行后仍然生效——这是 `set_env.sh` 必须用 `source` 而不能用 `bash` 执行的原因。
+- **昇腾 NPU**：华为的 AI 加速芯片。本仓库的 Ascend C 算子就跑在这类芯片上。开发机上每插一张 NPU 卡，操作系统中就会出现一个 `/dev/davinciN` 设备文件（N 从 0 开始编号）。
+- **CANN（Compute Architecture for Neural Networks）**：昇腾的软件栈，可以类比成 NPU 版的 "CUDA Toolkit"。它包含：
+  - **算子编译工具链**：把 `op_kernel` 目录下的 Ascend C 源码编译成芯片可执行指令，其中的编译器叫 `bisheng`（毕昇）；
+  - **运行时（Runtime）**：Host 侧的 aclnn 接口最终通过它把任务下发到设备；
+  - **opp 算子库目录**：编译出的自定义算子包最终安装到 `/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/` 下（u1-l4 详述安装过程）。
+- **torch_npu**：PyTorch 的昇腾后端适配包，作用类似 GPU 上的 `torch.cuda`，让 `torch.Tensor` 能搬到 NPU 上运算。它与 CANN 版本必须严格配套——这正是镜像 tag 里把两个版本号写死的原因。
+- **docker 基础**：会 `docker pull`（拉镜像）、`docker run`（创建并启动容器）、`docker ps`（列容器）即可。两个关键语法：`-v 宿主机路径:容器路径` 把宿主机目录挂载进容器；`--device=/dev/xxx` 把宿主机设备文件透传给容器。
+- **`source` 与环境变量**：`source xxx.sh` 在**当前 shell** 里逐条执行脚本，因此脚本里 `export` 的变量在执行后仍然生效；而 `bash xxx.sh` 会开一个子 shell，变量随子 shell 一起消失。这就是 `set_env.sh` 必须 `source` 而不能 `bash` 执行的原因。
 
-一个容易混淆的点先澄清：**驱动装在宿主机，工具链装在容器里**。NPU 驱动必须直接接触硬件内核，所以它属于宿主机；而 CANN、torch_npu 这些用户态软件放在镜像里，随时可以换版本，互不污染。docker run 脚本里大量挂载卷的存在，就是为了让容器能"够得着"宿主机的驱动。
+一个最容易混淆的点先澄清：**驱动装在宿主机，工具链装在容器里**。NPU 驱动必须直接接触硬件内核，所以属于宿主机；CANN、torch_npu 这些用户态软件放在镜像里，换版本只需换镜像，互不污染。`docker run` 脚本里大量挂载卷的存在，就是为了让容器"够得着"宿主机的驱动与管理设施。
 
 ## 3. 本讲源码地图
 
-本讲涉及的文件很少，但每一处都要精读：
+本讲涉及的源码文件很少，但每一处都要精读：
 
 | 文件 | 作用 |
 | --- | --- |
-| `ascendc/README.md` | 项目官方说明书。第 162~217 行的「环境准备」章节是本讲的主线：下载源码、拉镜像、起容器、设环境变量 |
-| `ascendc/build.sh` | 编译入口脚本。虽然编译流程在 u1-l4 才展开，但它**如何在环境里寻找 CANN**（`ASCEND_CANN_PACKAGE_PATH` 五级解析、`set_env()` 函数检查 `bisheng`）属于本讲"环境变量"主题 |
-| `ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/op_host/ai_infra_aggregate_hidden_def.cpp` | 只看一眼第 83~84 行的 `AddConfig("ascend910b"/"ascend910_93")`，用来印证"芯片代号"从哪来 |
+| `ascendc/README.md` | 项目官方说明书。第 162~217 行的「环境准备」章节是本讲主线：下载源码 → 拉镜像 → 起容器 → 设环境变量 |
+| `ascendc/build.sh` | 编译入口脚本。编译全流程属于 u1-l4，但它**如何在环境里寻找 CANN**（`ASCEND_CANN_PACKAGE_PATH` 的五级解析、`set_env()` 检查 `bisheng`）属于本讲"环境变量"主题 |
+| `ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/op_host/ai_infra_aggregate_hidden_def.cpp` | 只看第 83~84 行的 `AddConfig("ascend910b"/"ascend910_93")`，用来印证 `-c` 参数里的芯片代号从哪来 |
+| `ascendc/cmake/scripts/prepare.sh` | CMake 阶段的准备脚本，第 98~106 行的 `set_env()` 展示变量如何继续传给 cmake（本讲只作旁证） |
 
-注意：`set_env.sh`、`set_env.bash` 本身**不在仓库里**——它们由 CANN 安装包生成，位于容器内的 `/usr/local/Ascend/ascend-toolkit/` 下。本讲引用的是 README 中对它们的调用方式。
+注意：`set_env.sh` 与 `set_env.bash` 本身**不在仓库里**——它们由 CANN 安装包生成，位于容器内 `/usr/local/Ascend/ascend-toolkit/` 与算子包安装目录下。本讲引用的是 README 中对它们的调用方式，以及 `build.sh` 中消费环境变量的真实代码。
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 镜像选择：A2 / A3 / A5 与芯片代际
+### 4.1 环境准备总览与镜像选择：A2 / A3 / A5
 
 #### 4.1.1 概念说明
 
-昇腾训练芯片有多个代际，本仓库 README 把开发环境分成 **A2、A3、A5** 三类，并分别为它们提供了开源镜像。选错镜像的后果很实际：CANN 版本与芯片不配套时，算子要么编译不过，要么运行时报 `socVersion` 不匹配。
+README 把「环境准备」分成四步：下载源码、获取 docker 镜像、拉起容器、设置环境变量。其中最关键的选择是**镜像**——昇腾训练芯片有多个代际，README 按芯片分成 A2、A3、A5 三类，各自提供一份开源镜像。
 
-镜像名本身是一份"配料表"，以 A3 为例：
+选错镜像的后果非常实际：CANN 版本与芯片不配套时，算子要么编译不过，要么运行时 `socVersion` 校验失败。
+
+镜像名本身就是一份"配料表"，以 A3 为例：
 
 ```
 swr.cn-east-4.myhuaweicloud.com/omni/sub_base-arm-openeuler-py311-a3:cann8.5.0-torch_npu2.9.0-20260130
-└────────────── 镜像仓库地址 ──────────────┘└────── 镜像名 ──────┘└────────── tag：CANN 与 torch_npu 版本 ─────────┘
+└────────── 镜像仓库地址 └──── 镜像名 ────┘└──── tag：CANN 与 torch_npu 版本 ────┘
 ```
 
-- `arm`：CPU 架构是 ARM（鲲鹏/飞腾服务器），在 x86 机器上拉了也跑不了；
+- `arm`：CPU 架构是 ARM（鲲鹏/飞腾服务器）。在 x86 机器上拉了也跑不起来；
 - `openeuler-py311`：操作系统 openEuler，内置 Python 3.11；
-- `a3`：芯片代际标识；
-- tag `cann8.5.0-torch_npu2.9.0`：CANN 8.5.0 配 torch_npu 2.9.0，这是一对**严格配套**的版本组合。
+- `a2` / `a3` / `a5`：芯片代际标识；
+- tag `cann8.5.0-torch_npu2.9.0`：CANN 8.5.0 配 torch_npu 2.9.0，这是一对**严格配套**的版本组合（A5 镜像是 `cann9.0.0` 配 `torch_npu2.9.0.post2`）。
+
+芯片代际与 `build.sh -c` 参数里 `soc_version` 的对应关系：README 在拉起容器（用 A3 镜像）之后紧接着说"下面以 A3 环境举例"并给出 `bash build.sh -c ascend910_93`，可以确认 **A3 ↔ ascend910_93**。按同样规律，A2 对应 `ascend910b`、A5 对应 `ascend950`（README 第 223 行列出这三个合法值；A2/A5 的直接对应关系为推断，**待确认**）。
 
 #### 4.1.2 核心流程
 
-选择镜像的决策链：
+环境搭建总流程：
 
-```text
-查看手上机器的 NPU 型号（宿主机执行 npu-smi info）
-        │
-        ▼
-确认芯片代际：A2 / A3 / A5
-        │
-        ▼
-按 README「获取 docker 镜像」章节选镜像
-  A2 → sub_base-arm-openeuler-py311-a2 : cann8.5.0-torch_npu2.9.0
-  A3 → sub_base-arm-openeuler-py311-a3 : cann8.5.0-torch_npu2.9.0
-  A5 → base-arm-openeuler-py311-a5     : cann9.0.0-torch_npu2.9.0.post2
-        │
-        ▼
-docker pull <镜像>   →   后续编译时 build.sh -c <soc_version> 要与之匹配
-```
-
-镜像代际与编译参数 `-c`（soc_version）的对应关系：
-
-| 机器芯片 | 镜像 | CANN 版本 | 编译用 soc_version |
-| --- | --- | --- | --- |
-| A3 | `sub_base-...-a3` | cann8.5.0 | `ascend910_93`（README 明确「以A3环境举例」后使用的就是它） |
-| A2 | `sub_base-...-a2` | cann8.5.0 | `ascend910b`（依据算子注册值推断，待本地验证） |
-| A5 | `base-...-a5` | cann9.0.0 | `ascend950`（依据 README 编译示例推断，待本地验证） |
-
-其中 `ascend910b`、`ascend910_93` 两个值可以在算子源码里直接看到——每个算子的 `_def.cpp` 就是按这些字符串注册芯片支持的。
+1. **下载源码**：`git clone` 仓库并进入 `training/ascendc` 目录；
+2. **拉镜像**：按机器芯片类型 `docker pull` 对应的 A2/A3/A5 镜像；
+3. **起容器**：用 README 的 `docker run` 脚本创建容器（4.2 节精读）；
+4. **进容器**：`docker attach omni_ops_training`；
+5. **设环境变量**：`source /usr/local/Ascend/ascend-toolkit/set_env.sh`（4.3 节精读）。
 
 #### 4.1.3 源码精读
 
-**① README「获取 docker 镜像」——三类镜像的原始出处**（[ascendc/README.md:L172-L178](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/README.md#L172-L178)）：
+「环境准备」章节的入口在 [ascendc/README.md:L162-L170](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/README.md#L162-L170)：README 先给出下载源码的命令。注意一个细节——README 里的 clone 地址是 `gitcode.com:cann/omni-ops.git`，而你现在读的仓库是 `gitcode.com/ascend-tribe/openPangu-2.0-Op`；两者的 `training/ascendc` 目录结构一致，本文所有路径均以当前仓库为准，执行 README 命令时把仓库地址换成当前仓库即可。
 
-这一节给出了三条 `docker pull` 命令，分别对应 A2/A3/A5。注意 A5 镜像名没有 `sub_` 前缀且使用更新的 cann9.0.0 与 `torch_npu2.9.0.post2`——代际越新，配套的 CANN 也越新。
+三条镜像拉取命令在 [ascendc/README.md:L172-L178](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/README.md#L172-L178)：README 明确说明"镜像是开源的，可以直接通过 docker pull 拉取对应 soc 的镜像"，并列出 A2（`cann8.5.0-torch_npu2.9.0`）、A3（`cann8.5.0-torch_npu2.9.0`）、A5（`cann9.0.0-torch_npu2.9.0.post2`）三行命令。三者的差异只有两处：镜像名里的 `a2/a3/a5` 与 tag 里的 CANN/torch_npu 版本。
 
-**② README「编译执行」——soc_version 的合法取值**（[ascendc/README.md:L222-L240](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/README.md#L222-L240)）：
+`-c` 参数的合法取值在 [ascendc/build.sh:L55-L56](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/build.sh#L55-L56) 的 usage 说明里也得到印证：`-c|--compute-unit` 指定芯片类型，**默认值就是 `ascend910_93`**，示例给出 `ascend910_93` 与 `ascend910b` 两种。这也解释了为什么后文所有 `bash build.sh` 示例都要显式带 `-c`——避免在错误代际的芯片上编译。
 
-README 写明 `soc_version` 的取值为 `ascend910b`、`ascend910_93`、`ascend950`，并给出 A3 环境的编译示例 `bash build.sh -c ascend910_93`。这就是上表"A3 → ascend910_93"的直接依据。
-
-**③ 算子侧的芯片注册——`AddConfig`**（[ai_infra_aggregate_hidden_def.cpp:L83-L84](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/op_host/ai_infra_aggregate_hidden_def.cpp#L83-L84)）：
-
-```cpp
-this->AICore().AddConfig("ascend910b", aicore_config);
-this->AICore().AddConfig("ascend910_93", aicore_config);
-```
-
-这两行说明：同一个算子可以为多个芯片各注册一份编译配置。这也解释了为什么 `build.sh -c` 是"按芯片选择编译目标"的开关——它决定了这次编译要为哪些 soc 生成产物。细节在 u1-l4 展开，这里只需建立"镜像代际 ↔ soc_version 字符串"的对应直觉。
+芯片代际在算子源码里的落点是 `AddConfig`，见 [ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/op_host/ai_infra_aggregate_hidden_def.cpp:L83-L84](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/op_host/ai_infra_aggregate_hidden_def.cpp#L83-L84)：算子原型同时为 `ascend910b` 与 `ascend910_93` 注册 AICore 配置。也就是说，你选的镜像决定了 `-c` 能填什么，而 `-c` 填的值必须与算子 `AddConfig` 注册过的芯片名对得上，否则该算子不可编译（详见 u9-l1 的多芯适配主题）。
 
 #### 4.1.4 代码实践
 
-**实践目标**：拉取与你机器匹配的镜像，并学会从镜像 tag 里读出配套版本。
+**实践目标**：确认自己该用哪份镜像，并理解镜像 tag 里的版本配套关系。
 
-**操作步骤**（以下为示例命令，需在配有 NPU 的宿主机上执行）：
+**操作步骤**：
 
-1. 在宿主机执行 `npu-smi info`，记录芯片型号与卡数；
-2. 按 4.1.2 的表选择镜像，执行拉取，例如 A3 环境：
+1. 在宿主机执行 `npu-smi info`（若宿主机装了 NPU 管理工具），确认芯片型号与卡数；若无法确认，向集群管理员询问机器是 A2、A3 还是 A5；
+2. 按下表选择镜像并拉取（以 A3 为例）：
 
-```bash
-docker pull swr.cn-east-4.myhuaweicloud.com/omni/sub_base-arm-openeuler-py311-a3:cann8.5.0-torch_npu2.9.0-20260130
-```
+   ```bash
+   docker pull swr.cn-east-4.myhuaweicloud.com/omni/sub_base-arm-openeuler-py311-a3:cann8.5.0-torch_npu2.9.0-20260130
+   ```
 
-3. 拉取完成后查看本地镜像：`docker images | grep omni`。
+3. 拉取完成后用 `docker images | grep omni` 确认镜像已在本地。
 
-**需要观察的现象**：
+**需要观察的现象**：`docker pull` 会分层输出下载进度，最后给出镜像摘要（DIGEST）；`docker images` 能看到完整镜像名与 tag。
 
-- `docker pull` 会分层输出下载进度（基础 OS 层、CANN 层、torch 层），镜像体积较大（通常十几 GB），需要耐心；
-- `docker images` 中能看到完整的 `REPOSITORY` 与 `TAG`。
-
-**预期结果**：本地镜像列表中出现所选镜像。无 NPU 机器时本实践无法执行，可改为纸面练习：把三个镜像 tag 拆成"CANN 版本 / torch_npu 版本 / 架构 / Python 版本"四列的对照表（答案见 4.1.5 第 1 题）。镜像实际体积**待本地验证**。
+**预期结果**：本地镜像列表中出现所选的 `sub_base-arm-openeuler-py311-aX` 镜像。若宿主机是 x86 架构，pull 可以成功但 run 时会报 `exec format error`——这说明确实需要 ARM 服务器。本实践需要真实环境，**待本地验证**。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：三个镜像 tag 分别包含哪些信息？请填表。
+**练习 1**：A5 镜像的 tag 是 `cann9.0.0-torch_npu2.9.0.post2-20260506153635`，其中 `post2` 和末尾长数字分别可能是什么信息？
 
-答案：
+**答案**：`post2` 是 torch_npu 2.9.0 的第二次后缀修订版（post-release），说明它对 2.9.0 打了补丁但仍算 2.9.0 系列；末尾的 `20260506153635` 形如时间戳（2026-05-06 15:36:35），是镜像构建日期，用来区分同版本的多次构建。依据：tag 命名惯例与另外两个镜像 tag 末尾的 `20260130`（短日期）格式一致；具体语义官方未在 README 中说明，属于合理推断。
 
-| 镜像 | CANN | torch_npu | 架构/系统/Python |
-| --- | --- | --- | --- |
-| A2 | 8.5.0 | 2.9.0 | arm / openEuler / py311 |
-| A3 | 8.5.0 | 2.9.0 | arm / openEuler / py311 |
-| A5 | 9.0.0 | 2.9.0.post2 | arm / openEuler / py311 |
+**练习 2**：为什么 A3 镜像不能用 `--disable-check-compatible` 之外的方式在 A2 机器上编译算子？
 
-**练习 2**：为什么 A2 与 A3 的 CANN 版本相同也要用两个不同镜像？
+**答案**：编译期兼容性校验会核对 CANN 包版本与目标芯片是否配套，A2 与 A3 对应的 `soc_version` 不同（`ascend910b` 与 `ascend910_93`），算子 `AddConfig` 注册的芯片集合也按代际区分；强行跳过校验（README 第 277 行 FAQ 提到 `--disable-check-compatible`）只是绕过提示，编出的产物在错误芯片上仍无法运行。FAQ 原文位置：[ascendc/README.md:L275-L277](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/README.md#L275-L277)。
 
-答案：芯片代际不同，镜像内的 CANN 细分包/驱动配套、算子编译目标（soc：`ascend910b` vs `ascend910_93`）不同。CANN 大版本号相同不代表针对的芯片相同；README 为每个代际单独提供镜像，就是为了保证"镜像—芯片—编译参数"三者严格配套。
-
-**练习 3**：在一台 x86 服务器上 `docker pull` 了 A3 镜像并 `docker run`，会发生什么？
-
-答案：镜像基于 ARM 架构，在 x86 主机上无法原生运行（除非借助 qemu 模拟，性能极差且无法访问昇腾驱动），容器起不来或立即退出。必须使用 ARM 架构的昇腾训练服务器。
-
-### 4.2 拉起 NPU 容器：docker run 参考脚本逐行拆解
+### 4.2 docker run 参考脚本逐行精读：设备透传与挂载卷
 
 #### 4.2.1 概念说明
 
-docker 的默认隔离模型里，容器**看不到宿主机的任何硬件**。要让容器内的 CANN 操作 NPU，必须把两类东西"递"进容器：
+README 给出的 `docker run` 脚本长约 24 行，初看吓人，其实只有四类参数：
 
-1. **设备节点**：`/dev/davinci0` ~ `/dev/davinci15` 是 16 张 NPU 卡的设备文件；`davinci_manager`、`devmm_svm`、`hisi_hdc` 是管理、内存与通信相关的辅助设备节点；
-2. **宿主机驱动目录与配置**：`/usr/local/Ascend/driver` 等。前文说过"驱动在宿主机"，容器要使用它就必须挂载进来。
+1. **运行方式**：`-u root -itd`（root 用户、交互式、后台运行）；
+2. **设备透传**：`--device=/dev/davinci0` ~ `davinci15` 共 16 张卡，外加 3 个管理设备；
+3. **目录挂载**：约 15 个 `-v` 卷，把宿主机的驱动、管理工具、配置、日志、数据盘接进容器；
+4. **系统选项**：`--net=host`、`--shm-size=128g`、`--privileged`、`--ipc=host` 等。
 
-README 的参考脚本还包含为**多卡集合通信**准备的网络与共享内存设置（`--net=host`、`--ipc=host`、`--shm-size=128g`），这是训练场景（HCCL 多卡 AllReduce 等）的常见需求。
-
-> 说明：README 原文只给出了脚本本身，未逐条注释各挂载卷的用途。下面表格中的用途解释属于昇腾容器部署的通用约定，供理解参考；以你机器上的实际部署文档为准。
+README 本身没有逐条注释这些挂载，下面按路径语义与昇腾通用实践解读（这是教学解读，不是 README 原文）。
 
 #### 4.2.2 核心流程
 
-一条完整的"起容器"流水线：
+一个 NPU 容器要"活起来"，必须打通四条通道：
 
 ```text
-docker run -u root -itd --name omni_ops_training
-    ├── 透传设备：--device=/dev/davinci0..15          （16 张 NPU 卡）
-    │            --device=/dev/davinci_manager        （芯片管理节点）
-    │            --device=/dev/devmm_svm              （设备内存管理）
-    │            --device=/dev/hisi_hdc               （Host-Device 通信）
-    ├── 挂载驱动：-v /usr/local/Ascend/driver:...     （宿主机 NPU 驱动）
-    │            -v /etc/ascend_install.info:...      （驱动安装信息）
-    ├── 挂载管理工具：npu-smi / dcmi / slog 等
-    ├── 挂载网络配置：/etc/hccn.conf + --net=host      （机间互联）
-    ├── 挂载代码与数据：/home、/data
-    └── 训练通信参数：--ipc=host --shm-size=128g --privileged
-            │
-            ▼
-   容器以 /bin/bash 作为主进程在后台运行（-d）
-            │
-            ▼
-   docker attach omni_ops_training 进入容器
+① 计算通道   /dev/davinci0..15        每张卡一个字符设备，算子真正读写的地方
+② 管理通道   /dev/davinci_manager      NPU 总管理设备
+             /dev/devmm_svm            设备内存管理（含共享虚拟内存 SVM）
+             /dev/hisi_hdc             Host-Device 通信通道（HDC）
+③ 驱动通道   /usr/local/Ascend/driver  宿主机 NPU 驱动本体
+             /etc/ascend_install.info  驱动安装信息（版本探测用）
+④ 运维通道   npu-smi / dcmi / slog / hccn.conf / localtime 等管理工具与配置
 ```
+
+容器启动后，镜像内的 CANN 通过 ③ 找到驱动、通过 ①② 操作硬件、通过 ④ 观测状态与网络互联。
 
 #### 4.2.3 源码精读
 
-**① README「拉起 docker 容器」参考脚本**（[ascendc/README.md:L179-L207](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/README.md#L179-L207)）。只保留骨架的关键部分：
+完整的 `docker run` 脚本在 [ascendc/README.md:L179-L207](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/README.md#L179-L207)，默认容器名 `omni_ops_training`。关键行摘录：
 
 ```bash
 docker run -u root -itd --name omni_ops_training --ulimit nproc=65535:65535 --ipc=host \
     --device=/dev/davinci0     --device=/dev/davinci1 \
-    ...（中间省略 davinci2 ~ davinci14）...
-    --device=/dev/davinci15 \
+    ...（共 davinci0~davinci15 十六张卡）...
     --device=/dev/davinci_manager --device=/dev/devmm_svm \
     --device=/dev/hisi_hdc \
     -v /home/:/home \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
     -v /etc/ascend_install.info:/etc/ascend_install.info -v /var/log/npu/:/usr/slog \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /etc/hccn.conf:/etc/hccn.conf \
-    --net=host \
-    --shm-size=128g \
-    --privileged \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi ...
+    --net=host --shm-size=128g --privileged \
     swr.cn-east-4.myhuaweicloud.com/omni/sub_base-arm-openeuler-py311-a3:cann8.5.0-torch_npu2.9.0-20260130 /bin/bash
 ```
 
-逐类拆解（完整清单见原文）：
+几个值得单独指出的参数：
 
-| 参数 | 作用 |
-| --- | --- |
-| `-u root -itd` | 以 root 运行；`-i`/`-t` 分配交互终端，`-d` 后台常驻 |
-| `--name omni_ops_training` | 容器名，README 默认此名，后续 `docker attach` 用它 |
-| `--ulimit nproc=65535:65535` | 放宽进程数上限，避免多进程编译/训练时耗尽 |
-| `--device=/dev/davinci0~15` | 透传全部 16 张卡；8 卡机器只保留 davinci0~7 即可 |
-| `--device=.../davinci_manager、devmm_svm、hisi_hdc` | 管理节点、设备内存管理与主机-设备通信（昇腾通用约定） |
-| `-v /usr/local/Ascend/driver:...` | 把宿主机 NPU 驱动挂进容器——"驱动在宿主机"的落点 |
-| `-v /etc/ascend_install.info` | 驱动安装信息文件，运行时用于识别驱动版本 |
-| `-v /var/log/npu/:/usr/slog` | NPU 日志目录，排查算子运行错误时看这里 |
-| `-v /usr/local/bin/npu-smi、/usr/local/dcmi、/usr/local/sbin` | 芯片状态查询与管理工具 |
-| `-v /etc/hccn.conf` + `--net=host` | 机间互联网络配置 + 共享宿主机网络栈 |
-| `-v /home/:/home、/data:/data` | 代码与数据盘；克隆到 `/home/code` 下的源码因此容器内直接可见 |
-| `--ipc=host --shm-size=128g` | 共享内存：多卡通信/数据加载需要大块共享内存 |
-| `--privileged` | 特权模式，便于访问设备与 cgroup |
-| 末尾镜像名 + `/bin/bash` | 用刚才拉的 A3 镜像创建容器，主进程为 bash |
+- `-v /home/:/home`（第 194 行）：把整个 `/home` 原样挂进容器。README 的源码就放在 `/home/code/` 下，这样容器内外看到同一份代码，改代码不用同步；
+- `-v /usr/local/Ascend/driver:...`（第 197 行）：**最关键的一行**。容器里装的是 CANN 工具链，而驱动必须用宿主机的——这一行让容器内的 CANN 能链接到真实驱动；
+- `-v /etc/ascend_install.info:...`（第 198 行）：CANN 启动时会读这个文件探测驱动版本，缺少它常报"驱动不匹配"；
+- `--ipc=host` 与 `--shm-size=128g`：PyTorch DataLoader 多进程靠共享内存传数据，这两项保证训练脚本不会被共享内存卡死；
+- `--privileged`：特权模式，确保容器对透传进来的设备文件有完整操作权限；
+- 末尾的镜像名决定整个环境代际——README 示例用的是 A3 镜像，与前文"以 A3 环境举例"呼应。
 
-**② 进入容器**（[ascendc/README.md:L208-L211](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/README.md#L208-L211)）：
-
-```bash
-docker attach omni_ops_training
-```
-
-README 采用 `attach`（连接到容器主进程的终端）。一个通用 docker 注意点（README 未提及）：attach 进入后**不要输入 `exit`**——那会结束主进程 `/bin/bash`，整个容器随之停止；应使用 `Ctrl-p Ctrl-q` 分离，让容器继续后台运行。
-
-**③ 源码获取路径**（[ascendc/README.md:L163-L170](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/README.md#L163-L170)）：README 的 clone 示例拉取的是 `omni-ops` 仓库并 `cd omni-ops/training/ascendc`。你现在阅读的 openPangu-2.0-Op 仓库目录布局与之相同（同样是 `training/ascendc`），因此把本仓库克隆到 `/home/code/` 下、容器内走同一路径即可——`-v /home/:/home` 这个挂载让宿主机克隆的代码在容器内原样可见，无需再拷贝。
+进入容器的命令在 [ascendc/README.md:L208-L211](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/README.md#L208-L211)：`docker attach omni_ops_training`。注意 `attach` 是直接接到容器主进程的 shell；如果你习惯 `docker exec -it omni_ops_training bash` 开第二个 shell，效果等同且更安全（attach 退出时若误按 `Ctrl-P Ctrl-Q` 以外的方式 detach/exit，可能连容器一起停掉）。
 
 #### 4.2.4 代码实践
 
-**实践目标**：把 README 的 16 卡参考脚本改写成 8 卡版本，并验证脚本语法。
+**实践目标**：把 README 的 16 卡脚本改写成可配置卡数的 8 卡版本，并理解每一处删改的影响。
 
 **操作步骤**：
 
-1. 复制 README 中完整的 `docker run` 命令；
-2. 删除 `--device=/dev/davinci8` 到 `--device=/dev/davinci15` 共 8 行；
-3. 其余参数（manager/devmm_svm/hisi_hdc、各挂载卷、网络项）**保持不变**；
-4. 保存为 `run_8card.sh` 并在第一行加上 `#!/bin/bash`；
-5. 校验语法：`bash -n run_8card.sh`（该命令只做语法解析不执行，任何环境都可运行）；
-6. 有 NPU 环境时真正执行：`bash run_8card.sh`，然后 `docker ps` 查看容器状态，再 `docker attach omni_ops_training` 进入。
+1. 复制 README 第 183~206 行脚本到本地文件 `run_8card.sh`；
+2. 删除 `--device=/dev/davinci8` 到 `--device=/dev/davinci15` 共 8 行，只保留 `davinci0` ~ `davinci7`；
+3. 其余参数（3 个管理设备、全部 `-v` 挂载、`--net=host` 等）**一个都不动**；
+4. 在有 docker 的机器上执行 `bash -n run_8card.sh` 校验续行符 `\` 没有抄错。
 
-**需要观察的现象**：
+**需要观察的现象**：`bash -n` 无输出即语法正确；实际执行后 `docker ps` 能看到 `omni_ops_training` 处于 `Up` 状态。
 
-- `bash -n` 无任何输出即语法通过；
-- `docker ps` 中 `omni_ops_training` 状态为 `Up`；
-- 容器内执行 `ls /dev/davinci*` 应只看到 0~7 号卡及 manager 等节点。
-
-**预期结果**：8 卡容器正常启动，容器内可见 8 张卡。第 5 步可独立完成；第 6 步在无 NPU 环境下**待本地验证**。
+**预期结果**：容器内 `ls /dev/davinci*` 只能看到 0~7 八个设备节点。若误删了 `--device=/dev/davinci_manager`，容器能启动但任何 NPU 操作都会失败——这正是"计算设备与管理设备缺一不可"的直接验证。本实践需要真实 NPU 宿主机，**待本地验证**（无 docker 环境时至少完成 `bash -n` 语法校验）。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：容器已经挂载了 `/usr/local/Ascend/driver`，为什么还需要 `--device=/dev/davinci*`？
+**练习 1**：`--shm-size=128g` 去掉会发生什么？为什么 README 要显式写它？
 
-答案：两者缺一不可。`--device` 把设备文件（内核设备节点）透传进容器，让容器内的进程有权限打开 NPU 硬件；`-v /usr/local/Ascend/driver` 挂载的是驱动的用户态库与配置。没有设备节点，驱动库无硬件可操作；没有驱动挂载，进程找不到与内核驱动对话的用户态入口。
+**答案**：docker 默认 `/dev/shm` 只有 64MB，PyTorch DataLoader 的 worker 进程通过共享内存回传 batch 数据，超限会报 "DataLoader worker exited unexpectedly" 一类错误。昇腾分布式训练的通信与数据搬运对共享内存需求更大，所以显式放大到 128g。这是 PyTorch/容器通用知识，与 NPU 无关，但训练脚本必备。
 
-**练习 2**：去掉 `--shm-size=128g` 与 `--ipc=host` 可能引发什么问题？
+**练习 2**：脚本里 `-v /var/log/npu/:/usr/slog` 把宿主机 NPU 日志目录挂成了容器内的 `/usr/slog`。为什么不直接挂到同路径？
 
-答案：默认共享内存通常只有 64MB 量级，多卡训练的数据加载与集合通信需要大块共享内存，不足时会报 "out of shared memory" 类错误或性能骤降；`--ipc=host` 让容器与宿主机共享 IPC 命名空间，避免跨进程共享内存访问受限。这些属于训练容器通用配置，具体阈值随模型规模变化。
+**答案**：容器内的 CANN/驱动组件按约定路径 `/usr/slog` 写日志，而宿主机上该目录是 `/var/log/npu/`。挂载源路径与目标路径可以不同，正好完成"容器内约定路径 → 宿主机实际路径"的映射，宿主机运维与容器内组件各看各的熟悉路径，互不干扰。
 
-**练习 3**：宿主机执行 `docker attach omni_ops_training` 报 "No such container"，最可能的原因？
+**练习 3**：`-itd` 三个字母各是什么意思？去掉 `d` 会怎样？
 
-答案：容器未创建或已停止：可能是 `docker run` 那一步失败（如设备节点不存在、镜像没拉到），或之前 attach 后输入 `exit` 导致主进程退出、容器停止。用 `docker ps -a` 检查容器是否存在及其状态；若已退出，可 `docker start omni_ops_training` 后再 attach。
+**答案**：`-i` 保持标准输入打开，`-t` 分配伪终端，两者合用才能得到一个可交互的 shell；`-d` 让容器在后台运行。去掉 `d`，容器会占住当前终端，一旦退出 shell（exit），`/bin/bash` 主进程结束，容器随之停止。README 用 `-itd` + `docker attach` 的组合，就是"先后台起、再连进去"。
 
-### 4.3 容器内 CANN 环境变量初始化：set_env.sh 与 build.sh 的寻路链
+### 4.3 容器内 CANN 环境变量初始化：set_env.sh 的调用与消费
 
 #### 4.3.1 概念说明
 
-进入容器后，CANN 已经安装在 `/usr/local/Ascend/ascend-toolkit/` 下，但它的可执行文件（编译器 `bisheng`、脚本 `setenv.bash` 等）还不在默认 `PATH` 里，关键的安装路径也没有导出成环境变量。README 因此要求手动执行一次：
+进了容器只是"人进去了"，CANN 还没"上线"。CANN 的二进制、库、头文件分散在 `/usr/local/Ascend/ascend-toolkit/` 的多个子目录里，靠一组环境变量串起来：
 
-```bash
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-```
+- `ASCEND_HOME_PATH`：CANN 安装根（如 `/usr/local/Ascend/ascend-toolkit/latest`）；
+- `ASCEND_OPP_PATH`：算子库 opp 目录；
+- `PATH` / `LD_LIBRARY_PATH`：让 shell 找得到 CANN 工具、让动态链接器找得到 `.so`。
 
-这一条命令会设置一批 `ASCEND_*` 环境变量（如 `ASCEND_HOME_PATH` 指向 toolkit 安装目录），并把 CANN 的 bin/lib 目录加入 `PATH`/`LD_LIBRARY_PATH`。它是后续一切编译（`build.sh`）和运行（aclnn 调用）的前置条件。
+`set_env.sh` 就是把这些变量一次性 `export` 进当前 shell 的脚本（由 CANN 安装包生成，不在本仓库中）。它必须 `source` 执行——用 `bash` 跑等于在子 shell 里 export，脚本一结束变量全没了。
 
-值得注意的是，**`build.sh` 并不盲信当前环境**：它会自己再找一遍 CANN 安装位置，找不到就报错退出。理解这条"寻路链"，是排查"为什么编译器找不到 bisheng"类问题的关键。
+环境变量不是终点，而是**被 build 脚本消费的输入**。`build.sh` 会沿着一串线索找到 CANN 包路径，然后 `source` 它的 `setenv.bash`、检查 `bisheng` 编译器是否存在。
 
 #### 4.3.2 核心流程
 
-从进容器到具备编译条件的完整链路：
+环境变量从产生到消费的完整链路：
 
 ```text
-docker attach 进入容器
-        │
-        ▼
-source /usr/local/Ascend/ascend-toolkit/set_env.sh     ← README 要求的手动步骤
-        │  （导出 ASCEND_HOME_PATH 等环境变量）
-        ▼
+容器内 shell
+  └─ source /usr/local/Ascend/ascend-toolkit/set_env.sh     # ① 产生 ASCEND_HOME_PATH 等变量
+       │
+       ▼
 bash build.sh ...
-        │
-        ├─► 解析 ASCEND_CANN_PACKAGE_PATH（五级优先链）：
-        │      ① 命令行 -p 指定的路径
-        │      ② 环境变量 ASCEND_HOME_PATH          ← set_env.sh 的贡献
-        │      ③ 环境变量 ASCEND_OPP_PATH 的上级目录
-        │      ④ /usr/local/Ascend/ascend-toolkit/latest   （root 用户默认）
-        │      ⑤ ~/Ascend/ascend-toolkit/latest            （非 root 默认）
-        │      都没有 → 报错退出，提示用 -p 指定
-        │
-        └─► set_env() 函数：
-               source $ASCEND_CANN_PACKAGE_PATH/bin/setenv.bash
-               检查 bisheng 是否在 PATH 中，找不到则报错退出
+  ├─ ② 解析 ASCEND_CANN_PACKAGE_PATH（五级 fallback，见 4.3.3）
+  ├─ ③ set_env()：source $ASCEND_CANN_PACKAGE_PATH/bin/setenv.bash
+  │       └─ 用 which bisheng 检查编译器，找不到直接报错退出
+  └─ ④ 把路径写进 cmake 参数 -DCUSTOM_ASCEND_CANN_PACKAGE_PATH=...
 ```
 
 #### 4.3.3 源码精读
 
-**① README「设置环境变量」**（[ascendc/README.md:L213-L217](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/README.md#L213-L217)）：
+README 中设置环境变量的一行命令在 [ascendc/README.md:L213-L217](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/README.md#L213-L217)：`source /usr/local/Ascend/ascend-toolkit/set_env.sh`。这是**每次新开 shell 都要做**的事——`docker attach` 重新连入、`docker exec` 新开终端，环境变量都不会自动继承。
+
+`build.sh` 消费环境变量的第一步是五级 fallback 解析，见 [ascendc/build.sh:L407-L420](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/build.sh#L407-L420)：
 
 ```bash
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
+if [ -n "${ascend_package_path}" ];then          # ① 命令行 -p|--package-path 显式指定
+    ASCEND_CANN_PACKAGE_PATH=${ascend_package_path}
+elif [ -n "${ASCEND_HOME_PATH}" ];then           # ② set_env.sh 导出的变量（最常命中）
+    ASCEND_CANN_PACKAGE_PATH=${ASCEND_HOME_PATH}
+elif [ -n "${ASCEND_OPP_PATH}" ];then            # ③ 由 OPP 路径反推上一级
+    ASCEND_CANN_PACKAGE_PATH=$(dirname ${ASCEND_OPP_PATH})
+elif [ -d "${DEFAULT_TOOLKIT_INSTALL_DIR}" ];then  # ④ 默认安装路径存在
+    ASCEND_CANN_PACKAGE_PATH=${DEFAULT_TOOLKIT_INSTALL_DIR}
+elif [ -d "${DEFAULT_INSTALL_DIR}" ];then        # ⑤ 兜底默认路径
+    ASCEND_CANN_PACKAGE_PATH=${DEFAULT_INSTALL_DIR}
+else
+    log "Error: Please set the toolkit package installation directory through parameter -p|--package-path."
+    exit 1
+fi
 ```
 
-注意是 `source` 不是 `bash`：只有 source 才能让导出的变量留在当前终端。每开一个新 shell（或重新 attach）都要重做一次。
+两个默认目录的定义在 [ascendc/build.sh:L32-L36](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/build.sh#L32-L36)：普通用户是 `~/Ascend/ascend-toolkit/latest`，root 用户是 `/usr/local/Ascend/ascend-toolkit/latest`。这也解释了一个现象：**容器里以 root 操作时，即使忘了 source，只要 CANN 装在默认路径，第 ④ 级也能救回来**——但规范做法仍然是先 `source set_env.sh`，让第 ② 级命中，避免多版本 CANN 共存时找错包。
 
-**② build.sh 的 `set_env()` 函数**（[ascendc/build.sh:L72-L82](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/build.sh#L72-L82)）：
+第二步是 `set_env()` 函数，见 [ascendc/build.sh:L72-L82](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/build.sh#L72-L82)：
 
 ```bash
 function set_env()
@@ -336,159 +268,190 @@ function set_env()
 }
 ```
 
-这段做了两件事：先 source CANN 自带的 `setenv.bash` 补全编译环境，再确认 `bisheng`（Ascend C 的编译器）能被 `which` 找到，找不到直接终止并提示检查 CANN 包与环境变量。它由主流程在清理构建目录后调用（[ascendc/build.sh:L438](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/build.sh#L438)）。
+它先 source CANN 包内的 `setenv.bash`（注意与 README 让你 source 的 `set_env.sh` 是**两个不同的脚本**：前者在具体版本包里、由 build.sh 自动调用，后者在 `ascend-toolkit/` 顶层、由人手动调用），再用 `which bisheng` 验证毕昇编译器已进入 `PATH`。找不到就直接 `exit 1`——这是"环境没配好"最常见的第一道报错。
 
-**③ `ASCEND_CANN_PACKAGE_PATH` 的五级解析**（[ascendc/build.sh:L407-L420](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/build.sh#L407-L420)）：
+第三步，解析出的路径最终传给 cmake，见 [ascendc/build.sh:L432](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/build.sh#L432)：`-DCUSTOM_ASCEND_CANN_PACKAGE_PATH=${ASCEND_CANN_PACKAGE_PATH}`，从此进入 CMake 世界（u1-l4 的内容）。旁证一例：cmake 阶段同样把这个变量继续下传，见 [ascendc/cmake/scripts/prepare.sh:L113](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/cmake/scripts/prepare.sh#L113)。
 
-```bash
-if [ -n "${ascend_package_path}" ];then          # ① 命令行 -p 优先
-    ASCEND_CANN_PACKAGE_PATH=${ascend_package_path}
-elif [ -n "${ASCEND_HOME_PATH}" ];then           # ② set_env.sh 导出的变量
-    ASCEND_CANN_PACKAGE_PATH=${ASCEND_HOME_PATH}
-elif [ -n "${ASCEND_OPP_PATH}" ];then            # ③ 由 OPP 路径反推
-    ASCEND_CANN_PACKAGE_PATH=$(dirname ${ASCEND_OPP_PATH})
-elif [ -d "${DEFAULT_TOOLKIT_INSTALL_DIR}" ];then # ④ root 默认路径存在
-    ASCEND_CANN_PACKAGE_PATH=${DEFAULT_TOOLKIT_INSTALL_DIR}
-elif [ -d "${DEFAULT_INSTALL_DIR}" ];then        # ⑤ 非 root 默认路径
-    ASCEND_CANN_PACKAGE_PATH=${DEFAULT_INSTALL_DIR}
-else
-    log "Error: Please set the toolkit package installation directory through parameter -p|--package-path."
-    exit 1
-fi
-```
-
-而 ④⑤ 中的默认路径在脚本开头按用户身份二选一（[ascendc/build.sh:L31-L37](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/build.sh#L31-L37)）：root 用 `/usr/local/Ascend/ascend-toolkit/latest`，普通用户用 `~/Ascend/ascend-toolkit/latest`。解析出的路径连同兼容性开关一起传给 CMake（[ascendc/build.sh:L432](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/build.sh#L432)：`-DCUSTOM_ASCEND_CANN_PACKAGE_PATH=... -DCHECK_COMPATIBLE=...`）。
-
-**④ 与版本校验的关系**：如果使用"非标准镜像"里不配套的 CANN 包，README 的 FAQ 建议编译时加 `--disable-check-compatible` 跳过版本校验（[ascendc/README.md:L275-L277](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/README.md#L275-L277)）。该参数在 build.sh 中的落点就是把 `CHECK_COMPATIBLE` 置为 false（[ascendc/build.sh:L303-L306](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/build.sh#L303-L306)）。优先用配套镜像，跳过校验只是应急手段。
-
-**⑤ 预告：第二个 set_env**。编译出的算子包安装后，README 还要求再 source 一次 `.../opp/vendors/omni_training_custom_transformer/bin/set_env.bash`（[ascendc/README.md:L253-L264](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/README.md#L253-L264)），让运行时能找到刚安装的自定义算子。这属于 u1-l4 的内容，本讲只需知道"环境变量初始化在装完算子包后还有一轮"。
+此外还有一个"第二份"环境脚本：自定义算子包装好之后，README 要求再 source 一次 vendors 下的 `set_env.bash`，见 [ascendc/README.md:L258-L264](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/README.md#L258-L264)（`/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/omni_training_custom_transformer/bin/set_env.bash`）。它的作用是把**新装的自定义算子包**注册进运行时查找路径——没有它，aclnn 接口找不到你刚编译的算子。这属于 u1-l4 的安装环节，这里先记住"装完包还有第二次 source"。
 
 #### 4.3.4 代码实践
 
-**实践目标**：验证环境变量链是否打通——这是能否进入 u1-l4 编译环节的体检项。
+**实践目标**：在容器内完成 CANN 环境变量初始化，亲眼看到 `set_env.sh` 导出了哪些变量。
 
-**操作步骤**（在容器内执行，示例命令）：
+**操作步骤**：
 
-1. `source /usr/local/Ascend/ascend-toolkit/set_env.sh`
-2. `echo $ASCEND_HOME_PATH` —— 应输出 toolkit 安装路径；
-3. `which bisheng` —— 应输出 bisheng 的完整路径（build.sh 检查的就是它）；
-4. `cd /home/code/<你的仓库>/training/ascendc && bash build.sh -h` —— 查看帮助，确认脚本可用且能看到 `-c` 默认值为 `ascend910_93`（[ascendc/build.sh:L46-L65](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/build.sh#L46-L65)）；
-5. 反向实验：新开一个 shell **不** source set_env.sh，直接执行 `echo $ASCEND_HOME_PATH`，观察输出为空。
+1. `docker attach omni_ops_training` 进入容器；
+2. 先看初始状态：`env | grep -i ascend`（大概率是空的或只有少量变量）；
+3. 执行 `source /usr/local/Ascend/ascend-toolkit/set_env.sh`；
+4. 再次执行 `env | grep -i ascend`，对比前后差异；
+5. 验证编译器可见：`which bisheng`。
 
-**需要观察的现象**：
+**需要观察的现象**：source 之后多出 `ASCEND_HOME_PATH`、`ASCEND_OPP_PATH` 等变量，`PATH` 与 `LD_LIBRARY_PATH` 中出现 `ascend-toolkit` 相关路径；`which bisheng` 输出一个真实路径。
 
-- 第 2/3 步有非空输出；第 4 步打印 Usage 帮助文本；
-- 第 5 步输出为空——证明这些变量只活在 source 过的 shell 里。
-
-**预期结果**：环境链打通，`build.sh -h` 正常输出。无 NPU 环境时第 1~4 步无法执行；第 5 步的现象在任何 Linux 机器上都可复现（source 的语义与是否装 CANN 无关）。容器内具体输出**待本地验证**。
+**预期结果**：与 `build.sh` 第 ② 级 fallback 呼应——`ASCEND_HOME_PATH` 非空时，`ASCEND_CANN_PACKAGE_PATH` 就取它。如果 `which bisheng` 为空，说明 source 的 CANN 与镜像不配套，这正是 build.sh L79 报错的场景。本实践需要真实容器环境，**待本地验证**；无 NPU 环境时可改做源码阅读实践——对照 build.sh L407-L420 写出五级 fallback 的命中顺序表，并标注每一级依赖的变量由谁设置（命令行参数 / set_env.sh / 系统默认）。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么 `bash /usr/local/Ascend/ascend-toolkit/set_env.sh` 不起作用，必须 `source`？
+**练习 1**：为什么 `source set_env.sh` 之后新开一个 `docker exec` 终端，环境变量又没了？
 
-答案：`bash xxx.sh` 会启动一个子 shell 执行脚本，脚本里 `export` 的变量随子 shell 退出而消失，当前终端一无所获；`source` 在当前 shell 内逐条执行，导出的变量留在当前会话。这也是为什么每开新终端都要重新 source。
+**答案**：环境变量是 shell 进程的属性。`source` 只影响当前 shell 进程及其子进程；`docker exec` 启动的是一个全新 shell，不继承之前那个 shell 的变量。解决办法：每次新终端重新 source，或把 source 命令写进容器内 `~/.bashrc`。
 
-**练习 2**：不执行任何 source，直接 `bash build.sh`，按 4.3.2 的解析链会发生什么？
+**练习 2**：`build.sh` 的 `set_env()`（L72-L82）里有一行 `source $ASCEND_CANN_PACKAGE_PATH/bin/setenv.bash || echo "0"`，为什么 source 失败只是 echo "0" 而不直接退出？
 
-答案：build.sh 并不必然失败——它会沿五级链继续找：`ASCEND_HOME_PATH` 为空、`ASCEND_OPP_PATH` 为空，则尝试默认路径；在 root 容器里 `/usr/local/Ascend/ascend-toolkit/latest` 通常存在（镜像内已装 CANN），于是 `ASCEND_CANN_PACKAGE_PATH` 落到默认路径，随后 `set_env()` source 其 `bin/setenv.bash` 仍可能把环境补起来。但如果 CANN 装在非默认位置且未 source，五级全落空，脚本报 "Please set the toolkit package installation directory through parameter -p|--package-path" 并退出。结论：README 让你先 source，是为了显式固定路径来源、不依赖默认值侥幸命中。
+**答案**：`|| echo "0"` 把失败"吞"掉继续执行，真正的安全网在后面：接下来用 `which bisheng` 判断编译器是否可用，找不到才 `exit 1`。也就是说 build.sh 关心的不是 setenv.bash 本身是否执行成功，而是它的**最终效果**（bisheng 进 PATH）。若 setenv.bash 失败但 bisheng 恰好已在 PATH 里（比如外层已手动 source 过），编译仍能继续，这是一种宽松兜底策略。
 
-**练习 3**：`which bisheng` 没有输出，build.sh 会怎样？你该按什么顺序排查？
+**练习 3**：README 让你 source 的 `set_env.sh`、算子包安装后的 `set_env.bash`、build.sh 内部 source 的 `setenv.bash`，三者分别位于哪里、各由谁调用？
 
-答案：build.sh 的 `set_env()` 检测到 `BISHENG_REAL_PATH` 为空即打印 "bisheng compilation tool not found" 并 `exit 1`，编译不会开始。排查顺序：(1) 是否 source 过 `set_env.sh`；(2) `echo $ASCEND_HOME_PATH` 是否正确指向 toolkit 目录；(3) 该目录的 `bin/` 下是否存在 bisheng（即 CANN 是否完整安装）；(4) 必要时用 `build.sh -p <路径>` 显式指定安装路径。
+**答案**：① `/usr/local/Ascend/ascend-toolkit/set_env.sh`——CANN 顶层环境脚本，人手动 source（README L216）；② `.../opp/vendors/omni_training_custom_transformer/bin/set_env.bash`——自定义算子包安装后生成，人手动 source（README L261），作用是把新算子注册进运行时；③ `$ASCEND_CANN_PACKAGE_PATH/bin/setenv.bash`——CANN 版本包内脚本，由 `build.sh` 的 `set_env()` 函数自动调用（L74）。三者名字相似、角色不同：前两个面向"运行/调用算子"，第三个面向"编译算子"。
+
+### 4.4 环境自检：确认驱动、CANN 与 torch_npu 三层就绪
+
+#### 4.4.1 概念说明
+
+环境搭好后不要急着编译，先做一次分层自检。回顾第 2 节的三层结构，每一层各有一个检查点：
+
+| 层 | 检查命令 | 验证什么 |
+| --- | --- | --- |
+| 宿主机驱动（经挂载进入容器） | `npu-smi info` | 设备透传与驱动挂载是否打通 |
+| CANN 工具链 | `which bisheng` | set_env.sh 是否生效、编译器是否在 PATH |
+| torch_npu | `python -c "import torch; import torch_npu; print(torch_npu.__version__)"` | 框架适配层是否与镜像配套 |
+
+#### 4.4.2 核心流程
+
+```text
+npu-smi info 正常？──否──> 检查 docker run 的 --device 与 /usr/local/Ascend/driver 挂载
+      │是
+which bisheng 有输出？──否──> 重新 source set_env.sh；仍失败则检查镜像 CANN 版本
+      │是
+import torch_npu 成功？──否──> 检查镜像 tag 的 torch_npu 版本与 python 版本
+      │是
+环境就绪，可以进入 u1-l4 的编译环节
+```
+
+#### 4.4.3 源码精读
+
+自检逻辑并非凭空设计，`build.sh` 自身就用代码实现了第二层检查：[ascendc/build.sh:L76-L81](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/build.sh#L76-L81) 中 `which bisheng` 为空即打印 "Error: bisheng compilation tool not found" 并 `exit 1`。我们的自检清单就是把这条内置检查扩展到驱动层与框架层。
+
+torch_npu 与 CANN 的配套关系写在镜像 tag 里（[ascendc/README.md:L172-L178](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/README.md#L172-L178)）——A3 镜像是 `cann8.5.0-torch_npu2.9.0`。如果后续安装的 torch_npu 与之不符，最典型的症状是 `import torch_npu` 时报 CCL/驱动符号找不到。README FAQ（[ascendc/README.md:L275-L277](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/README.md#L275-L277)）还提示：使用与镜像不配套的 CANN 包编译时需要 `--disable-check-compatible`——这从侧面说明"配套"是整个环境的第一约束。
+
+#### 4.4.4 代码实践
+
+**实践目标**：在容器内跑完三层自检，拿到环境的三项证据。
+
+**操作步骤**：
+
+1. `npu-smi info`：观察输出的卡数（应等于 docker run 透传的 `davinciN` 数量）与每张卡的状态；
+2. `which bisheng`：确认输出非空；
+3. `python3 -c "import torch; import torch_npu; print(torch_npu.__version__)"`；
+4. （可选进阶）`python3 -c "import torch; import torch_npu; print(torch.npu.is_available())"`。
+
+**需要观察的现象**：① 输出一张 NPU 状态表，卡数与 `--device` 数量一致；② 输出 bisheng 的绝对路径；③ 打印 torch_npu 版本号（A3 镜像应为 2.9.0 系列）；④ 输出 `True`。
+
+**预期结果**：四项全部通过即环境就绪。任何一项失败，按 4.4.2 的流程图定位到对应层排查。本实践需要真实 NPU 容器，**待本地验证**。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：`npu-smi info` 能看到 8 张卡，但 `torch.npu.is_available()` 返回 `False`，问题最可能出在哪一层？
+
+**答案**：驱动层没问题（npu-smi 走的是挂载进来的宿主机管理工具），问题在 torch_npu↔CANN 配套层：常见原因是 `set_env.sh` 没 source（运行时库不在 `LD_LIBRARY_PATH`）或 torch_npu 版本与镜像 CANN 不配套。先重新 source 再查版本对。
+
+**练习 2**：为什么 `build.sh` 只检查 `bisheng` 而不检查 npu-smi 或 torch_npu？
+
+**答案**：因为 `build.sh` 的职责只是**编译**算子包：编译期需要的是毕昇编译器与 CANN 头文件/库，不需要真实硬件（npu-smi）也不需要 PyTorch。运行与测试是另一环节（st 测试、torch_ops_extension），那时才依赖设备与 torch_npu。这体现了"编译环境"与"运行环境"的分离——也是为什么 UT（单元 8）能在无硬件环境下部分运行。
 
 ## 5. 综合实践
 
-把本讲三个模块串成一个可复用的 `setup_env.sh`（以下为**示例代码**，非仓库原有文件，请保存在教程练习目录而非源码目录）：
+把本讲三步操作（拉镜像、起容器、source 环境脚本）封装成一个可复用脚本 `setup_env.sh`。目标：换一台机器、换一代芯片时，只改脚本顶部的变量即可。
+
+以下为**示例代码**（非仓库原有文件，请保存到仓库外的个人目录，不要写进源码树）：
 
 ```bash
 #!/bin/bash
-# setup_env.sh —— openPangu 2.0 训练算子库环境一键脚本（示例代码）
-# 用法：
-#   bash setup_env.sh pull  a3                 # 拉取 A3 镜像
-#   bash setup_env.sh run   a3 8               # 创建 8 卡容器（卡数可选 8/16）
-#   bash setup_env.sh enter                    # 进入容器
-#   bash setup_env.sh env                      # 容器内执行：初始化 CANN 环境变量
-set -e
+# setup_env.sh —— openPangu 2.0 训练算子库开发环境一键搭建（示例代码）
+# 用法: bash setup_env.sh pull|run|env
+set -euo pipefail
 
-IMAGE_A2="swr.cn-east-4.myhuaweicloud.com/omni/sub_base-arm-openeuler-py311-a2:cann8.5.0-torch_npu2.9.0-20260130"
-IMAGE_A3="swr.cn-east-4.myhuaweicloud.com/omni/sub_base-arm-openeuler-py311-a3:cann8.5.0-torch_npu2.9.0-20260130"
-IMAGE_A5="swr.cn-east-4.myhuaweicloud.com/omni/base-arm-openeuler-py311-a5:cann9.0.0-torch_npu2.9.0.post2-20260506153635"
-CONTAINER_NAME="omni_ops_training"    # README 默认容器名
+##### 可按机器情况修改的参数 #####
+CHIP="a3"            # 芯片代际: a2 / a3 / a5（对应 build.sh -c 的 ascend910b / ascend910_93 / ascend950，A2/A5 对应关系待确认）
+NUM_CARDS=8          # 卡数: 8 或 16，决定 --device=/dev/davinciN 的数量
+CONTAINER="omni_ops_training"
 
-pick_image() {  # 代际 → 镜像
-    case "$1" in
-        a2) echo "$IMAGE_A2" ;;
-        a3) echo "$IMAGE_A3" ;;
-        a5) echo "$IMAGE_A5" ;;
-        *) echo "未知代际: $1（可选 a2/a3/a5）" >&2; exit 1 ;;
-    esac
+case "${CHIP}" in
+  a2) IMAGE="swr.cn-east-4.myhuaweicloud.com/omni/sub_base-arm-openeuler-py311-a2:cann8.5.0-torch_npu2.9.0-20260130" ;;
+  a3) IMAGE="swr.cn-east-4.myhuaweicloud.com/omni/sub_base-arm-openeuler-py311-a3:cann8.5.0-torch_npu2.9.0-20260130" ;;
+  a5) IMAGE="swr.cn-east-4.myhuaweicloud.com/omni/base-arm-openeuler-py311-a5:cann9.0.0-torch_npu2.9.0.post2-20260506153635" ;;
+  *) echo "不支持的芯片代际: ${CHIP}"; exit 1 ;;
+esac
+
+do_pull() { docker pull "${IMAGE}"; }
+
+do_run() {
+  DEVICES=""
+  for i in $(seq 0 $((NUM_CARDS - 1))); do
+    DEVICES="${DEVICES} --device=/dev/davinci${i}"     # 计算通道: 每张 NPU 一个字符设备
+  done
+  docker run -u root -itd --name "${CONTAINER}" \
+    --ulimit nproc=65535:65535 --ipc=host \
+    ${DEVICES} \
+    --device=/dev/davinci_manager \                    # 管理通道: NPU 总管理设备
+    --device=/dev/devmm_svm \                          # 管理通道: 设备内存管理(SVM)
+    --device=/dev/hisi_hdc \                           # 管理通道: Host-Device 通信
+    -v /home/:/home \                                  # 源码目录: 容器内外共享同一份代码
+    -v /data:/data \                                   # 数据盘
+    -v /etc/localtime:/etc/localtime \                 # 时区保持一致
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \  # 驱动通道: 宿主机 NPU 驱动本体(容器内只有工具链)
+    -v /etc/ascend_install.info:/etc/ascend_install.info \  # 驱动通道: 驱动版本探测信息
+    -v /var/log/npu/:/usr/slog \                       # 运维通道: NPU 日志映射到容器约定路径
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \ # 运维通道: NPU 状态查看工具
+    -v /sys/fs/cgroup:/sys/fs/cgroup:ro \              # 运维通道: cgroup 只读挂载
+    -v /usr/local/dcmi:/usr/local/dcmi \               # 运维通道: DCMI 管理接口
+    -v /usr/local/sbin:/usr/local/sbin \               # 运维通道: 管理侧工具
+    -v /etc/hccn.conf:/etc/hccn.conf \                 # 运维通道: 卡间互联网络配置
+    -v /root/.pip:/root/.pip -v /etc/hosts:/etc/hosts \
+    -v /usr/bin/hostname:/usr/bin/hostname \
+    --net=host --shm-size=128g --privileged \
+    "${IMAGE}" /bin/bash
+  echo "容器已启动，执行 docker attach ${CONTAINER} 进入"
 }
 
-case "$1" in
-pull)  # 模块①：镜像拉取
-    docker pull "$(pick_image "$2")"
-    ;;
-run)   # 模块②：创建容器。$2=代际 $3=卡数
-    SOC="$2"; CARDS="${3:-8}"
-    [ "$CARDS" = "8" ] || [ "$CARDS" = "16" ] || { echo "卡数仅支持 8/16" >&2; exit 1; }
+do_env() {
+  # 进入容器后执行: 初始化 CANN 环境变量（每次新开 shell 都要重做）
+  cat <<'EOF'
+请在容器内执行：
+  source /usr/local/Ascend/ascend-toolkit/set_env.sh
+  which bisheng                 # 自检: 应输出编译器路径
+  npu-smi info                  # 自检: 应看到透传的 NPU 卡
+EOF
+}
 
-    DEV_ARGS=""
-    for i in $(seq 0 $((CARDS - 1))); do          # 只透传前 N 张卡
-        DEV_ARGS="$DEV_ARGS --device=/dev/davinci$i"
-    done
-
-    docker run -u root -itd --name "$CONTAINER_NAME" \
-        --ulimit nproc=65535:65535 --ipc=host \
-        $DEV_ARGS \
-        --device=/dev/davinci_manager --device=/dev/devmm_svm \
-        --device=/dev/hisi_hdc \
-        -v /home/:/home \
-        -v /data:/data \
-        -v /etc/localtime:/etc/localtime \
-        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
-        -v /var/log/npu/:/usr/slog \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
-        -v /usr/local/dcmi:/usr/local/dcmi -v /usr/local/sbin:/usr/local/sbin \
-        -v /etc/hccn.conf:/etc/hccn.conf -v /root/.pip:/root/.pip \
-        -v /etc/hosts:/etc/hosts -v /usr/bin/hostname:/usr/bin/hostname \
-        --net=host --shm-size=128g --privileged \
-        "$(pick_image "$SOC")" /bin/bash
-    ;;
-enter)  # 进入容器（用 Ctrl-p Ctrl-q 分离，勿用 exit）
-    docker attach "$CONTAINER_NAME"
-    ;;
-env)   # 模块③：容器内初始化 CANN 环境变量并自检
-    source /usr/local/Ascend/ascend-toolkit/set_env.sh
-    echo "ASCEND_HOME_PATH = $ASCEND_HOME_PATH"
-    echo "bisheng          = $(which bisheng)"
-    ;;
-*)
-    echo "用法: bash setup_env.sh {pull a2|a3|a5 | run a2|a3|a5 [8|16] | enter | env}" >&2
-    exit 1
-    ;;
+case "${1:-}" in
+  pull) do_pull ;;
+  run)  do_run ;;
+  env)  do_env ;;
+  *)    echo "用法: bash setup_env.sh pull|run|env"; exit 1 ;;
 esac
 ```
 
-要求完成：
+**实践步骤**：
 
-1. **语法校验（任何机器可做）**：`bash -n setup_env.sh`，无输出即通过；
-2. **逐条注释核对**：对照 [ascendc/README.md:L179-L207](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/README.md#L179-L207) 检查脚本中每个挂载卷是否与 README 一致，并在脚本里为每个 `-v` 补一行注释说明其用途（参考 4.2.3 的表格）；
-3. **有 NPU 环境时**：依次执行 `pull a3` → `run a3 8` → `enter` → （容器内）`bash setup_env.sh env`，确认 `env` 子命令输出的两个变量非空；
-4. **回答思考题**：如果要在同一台机器上同时保留 A2 与 A5 两套环境，脚本需要改哪些地方？（提示：`CONTAINER_NAME` 与镜像一一对应。）
+1. 把脚本保存到仓库外的个人目录（例如 `/home/<你>/bin/setup_env.sh`）；
+2. 无 NPU 环境时，至少执行 `bash -n setup_env.sh` 做语法校验——没有任何输出即通过；
+3. 对照 [ascendc/README.md:L183-L206](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/README.md#L183-L206) 逐行核对：确认脚本没有遗漏任何 `--device` 与 `-v` 挂载（README 还挂载了 `/home`、`/data` 之外的所有卷，脚本已全部保留）；
+4. 有 NPU 环境时依次执行 `bash setup_env.sh pull` → `bash setup_env.sh run` → `docker attach omni_ops_training` → 按 `bash setup_env.sh env` 的提示在容器内 source 并自检。
 
-预期结果：`bash -n` 通过；有 NPU 时容器启动且 `env` 自检输出非空路径。无 NPU 环境时完成第 1、2、4 步即可，第 3 步**待本地验证**。
+**预期结果**：`bash -n` 静默通过；真实环境上三步走完后，4.4 节的三项自检全部通过。脚本中 `do_run` 与 README 原脚本的唯一结构性差异是用 `for i in $(seq ...)` 生成设备列表，使卡数可配置。
 
 ## 6. 本讲小结
 
-- 昇腾算子开发环境分三层：**宿主机驱动 + 容器内 CANN 工具链 + torch_npu**，驱动必须留在宿主机，工具链放进镜像，docker run 脚本里的大量挂载就是为打通两者。
-- 镜像按芯片代际三选一：A2/A3 用 cann8.5.0-torch_npu2.9.0，A5 用 cann9.0.0-torch_npu2.9.0.post2；镜像代际要与编译参数 `-c` 的 soc_version（`ascend910b` / `ascend910_93` / `ascend950`）匹配，其中 A3 → `ascend910_93` 由 README 示例直接确认。
-- docker run 的关键三类参数：`--device=/dev/davinci*` 透传 NPU 设备节点、`-v .../driver` 等挂载宿主机驱动与管理工具、`--ipc=host --shm-size=128g --net=host` 保障多卡训练通信；8 卡机器删掉多余 `--device` 行即可。
-- 进容器后必须 `source /usr/local/Ascend/ascend-toolkit/set_env.sh`，且用 `source` 而非 `bash`，每开新终端都要重来。
-- `build.sh` 对环境的依赖有明确落点：五级优先链解析 `ASCEND_CANN_PACKAGE_PATH`（`-p` > `ASCEND_HOME_PATH` > `ASCEND_OPP_PATH` > root/非 root 默认目录），再由 `set_env()` source `setenv.bash` 并强校验 `bisheng` 存在，找不到即退出。
-- 环境异常时的两个应急线索：非配套 CANN 用 `--disable-check-compatible` 跳过版本校验（README FAQ）；装完算子包后还有第二轮 `set_env.bash` 要 source（u1-l4 详述）。
+- 昇腾开发环境分三层：**宿主机驱动**（经 `--device` 与 `-v /usr/local/Ascend/driver` 进入容器）、**容器内 CANN 工具链**（镜像内置，含 bisheng 编译器）、**torch_npu**（镜像内置，与 CANN 版本严格配套，写在镜像 tag 里）。
+- 镜像按芯片代际分 A2/A3/A5 三类；README 的示例确立了 A3 ↔ `ascend910_93` 的对应（`build.sh -c` 默认值也是 `ascend910_93`），A2/A5 的对应关系为推断、待确认。
+- `docker run` 脚本 = 16 个 `davinciN` 计算设备 + 3 个管理设备（`davinci_manager`/`devmm_svm`/`hisi_hdc`）+ 约 15 个挂载卷；其中驱动目录挂载与 `ascend_install.info` 是容器内 CANN 能驱动硬件的关键。
+- 环境变量的生命周期：`source set_env.sh` 导出 `ASCEND_HOME_PATH` 等 → `build.sh` 按五级 fallback（`-p` 参数 → `ASCEND_HOME_PATH` → `ASCEND_OPP_PATH` → 两个默认目录）解析 `ASCEND_CANN_PACKAGE_PATH` → `set_env()` source 包内 `setenv.bash` 并检查 `bisheng` → 路径传给 cmake。
+- 环境自检三件套：`npu-smi info`（驱动层）、`which bisheng`（工具链层，build.sh 内置了同款检查）、`import torch_npu`（框架层）。
+- 算子包装好后还有第二次 source：`opp/vendors/.../bin/set_env.bash` 把新算子注册进运行时（u1-l4 展开）。
 
 ## 7. 下一步学习建议
 
-环境就绪后，下一讲 **u1-l4《编译与安装：build.sh、CMake 与自定义算子 run 包》**将沿着本讲打通的环境走完第一条完整链路：`build.sh -c <soc> -n <算子名>` 的参数解析与 `clean → cmake_config → build_package` 流程、`CMakeLists.txt` / `cmake/config.cmake` 的工程组织、以及把产物 run 包安装到 `opp/vendors` 并 source 第二个 `set_env.bash`。建议提前浏览 [ascendc/build.sh:L46-L65](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/build.sh#L46-L65) 的帮助文本和 [ascendc/README.md:L219-L273](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/README.md#L219-L273) 的「编译执行」章节，带着"我容器里这条命令会发生什么"的问题去读。若你对芯片适配的更多细节好奇，可以在学完 u1-l4 后回看本讲的 `AddConfig` 引用，它将在 u9-l1（多芯片适配）中展开。
+环境就绪后，进入 **u1-l4（编译与安装：build.sh、CMake 与自定义算子 run 包）**：动手执行 `bash build.sh -n 'ai_infra_aggregate_hidden;ai_infra_aggregate_hidden_grad' -c ascend910_93`，观察 `set_env()` 之后 `clean → cmake_config → build_package` 的完整流程，并把产物 run 包安装到 vendors 目录、完成第二次 `source set_env.bash`。
+
+想提前了解环境变量在编译系统里的完整去向，可以顺带浏览 [ascendc/cmake/scripts/prepare.sh:L108-L128](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/cmake/scripts/prepare.sh#L108-L128)（`CUSTOM_ASCEND_CANN_PACKAGE_PATH` 如何继续传给 cmake 与 make）；想了解多芯片适配的全貌，可预习单元 9 的 u9-l1。

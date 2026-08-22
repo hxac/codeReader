@@ -2,235 +2,159 @@
 
 ## 1. 本讲目标
 
-学完本讲，你应该能够：
+学完本讲,你应该能够:
 
-1. 拆解 `render_project_header` 产出的「一行分组头」由哪些零件组成：标签、远程图标、折叠箭头、三个状态徽标、新建按钮、省略号菜单，以及它们各自的显示条件。
-2. 解释 `is_group_collapsed` / `set_group_expanded` 这对读写方法为什么把折叠状态存放在 `MultiWorkspace` 而不是 `Sidebar` 自己身上，以及这条路径如何被序列化持久化。
+1. 拆解 `render_project_header` 产出的「一行分组头」由哪些零件组成:标签、远程图标、折叠箭头、三个状态徽标、新建按钮、省略号菜单,以及它们各自的显示条件。
+2. 解释 `is_group_collapsed` / `set_group_expanded` 这对读写方法为什么把折叠状态存放在 `MultiWorkspace` 而不是 `Sidebar` 自己身上,以及这条路径如何被序列化持久化。
 3. 说明 `project_header_indices` 这个「分组头下标表」在重建时如何生成、又被哪些消费方使用。
-4. 读懂 `render_sticky_header` 的吸附判定与「推开」式位移算法，理解它如何借助 `project_header_indices` 与 `ListState` 的滚动信息工作。
-5. 对照 `test_collapse_and_expand_group` 与 `test_collapse_changes_entry_shape` 两个测试，说明折叠操作如何同时改变可见行集合与 `EntryShape` 序列。
+4. 读懂 `render_sticky_header` 的吸附判定与「让位」式位移算法,理解它如何借助 `project_header_indices` 与 `ListState` 的滚动信息工作。
+5. 对照 `test_collapse_and_expand_group` 与 `test_collapse_changes_entry_shape` 两个测试,说明折叠操作如何同时改变可见行集合与 `EntryShape` 序列。
 
 ## 2. 前置知识
 
-本讲建立在 u4-l1（渲染主骨架）与 u2-l2（工作区与项目分组）之上，还需要回忆：
+本讲建立在 u4-l1(渲染主骨架)与 u2-l2(工作区与项目分组)之上,还需要回忆:
 
-- **`ListEntry` 三种行**（u2-l1）：侧边栏列表的每一行是 `ListEntry` 枚举的一个变体——`ProjectHeader`（项目分组头）、`Thread`（线程行）、`Terminal`（终端行）。本讲的主角是 `ProjectHeader`。
-- **`ProjectGroupKey`**（u2-l2）：项目分组的身份键＝主 worktree 路径列表＋可选的远程主机。同一窗口里 linked worktree 与主仓库共用一个键。折叠状态正是以它为键存放的。
-- **`MultiWorkspace` 与弱引用宿主**（u1-l3）：`Sidebar` 通过 `WeakEntity<MultiWorkspace>` 反向持有宿主，访问时必须 `upgrade()` 判空。宿主是「窗口内多项目世界模型」的拥有者。
-- **全量重推导教义**（u3-l2）：任何变化都汇入 `update_entries` → `rebuild_contents`，从当前世界状态**整表重算** `contents`。侧边栏自己尽量不存可推导的状态。
-- **`EntryShape` 与测量保留**（u3-l3）：行的「等高身份键」。相等形状必须渲染出相同高度；形状变了，`apply_list_state_diff` 才会让该区间测量失效。回忆那个关键约束：`bounds_for_item` 对未测量的行返回 `None`——本讲的粘性头部正好依赖已测量的高度。
-- **gpui 虚拟列表 `list` 与 `ListState`**（u4-l1）：只为视口内的行构建元素；`ListState` 缓存滚动位置与每行实测高度。粘性头部要回答的问题正是「视口顶端现在压着哪一行」。
-- **FluentBuilder 条件链**：`.when(条件, |el| ...)`、`.when_some(Option, |el, 值| ...)`、`.map(|el| ...)`，读渲染代码的三板斧。
+- **`ListEntry` 三种行**(u2-l1):侧边栏列表的每一行是 `ListEntry` 枚举的一个变体——`ProjectHeader`(项目分组头)、`Thread`(线程行)、`Terminal`(终端行)。本讲的主角是 `ProjectHeader`。
+- **`ProjectGroupKey`**(u2-l2):项目分组的身份键 = 主 worktree 路径列表 + 可选的远程主机。同一窗口里 linked worktree 与主仓库共用一个键。折叠状态正是以它为键存放的。
+- **`MultiWorkspace` 与弱引用宿主**(u1-l3):`Sidebar` 通过 `WeakEntity<MultiWorkspace>` 反向持有宿主(声明于 [sidebar.rs:735](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L735)),访问时必须 `upgrade()` 判空。宿主是「窗口内多项目世界模型」的拥有者。
+- **全量重推导教义**(u3-l2):任何变化都汇入 `update_entries` → `rebuild_contents`,从当前世界状态**整表重算** `contents`。侧边栏自己尽量不存可推导的状态。
+- **`EntryShape` 与测量保留**(u3-l3):行的「等高身份键」。相等形状必须渲染出相同高度;形状变了,`apply_list_state_diff` 才会让该区间测量失效。回忆那个关键事实:`ListState::bounds_for_item` 对未测量的行返回 `None`——本讲的粘性头部正好依赖已测量的高度。
+- **gpui 虚拟列表 `list` 与 `ListState`**(u4-l1):只为视口内的行构建元素;`ListState` 缓存滚动位置与每行实测高度。粘性头部要回答的问题正是「视口顶端现在压着哪一行」。
+- **FluentBuilder 条件链**:`.when(条件, |el| ...)`、`.when_some(Option, |el| 值| ...)`、`.map(|el| ...)`、`.children(Option)`——读渲染代码的四板斧。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
 | --- | --- |
-| `crates/sidebar/src/sidebar.rs` | 本讲主战场：`render_project_header`、`render_sticky_header`、`is_group_collapsed` / `set_group_expanded`、`toggle_collapse`、键盘折叠族（`expand_selected_entry` 等）、`cycle_project_impl`，以及 `rebuild_contents` 中生成 `project_header_indices` 的段落 |
-| `crates/workspace/src/multi_workspace.rs` | 折叠状态的真正存放处：`ProjectGroupState`、`project_groups` 字段、`group_state_by_key(_mut)`、`set_all_groups_expanded`、`restore_project_groups` 与 `serialize` |
-| `crates/sidebar/src/sidebar_tests.rs` | `test_collapse_and_expand_group`、`test_collapse_changes_entry_shape`、`test_collapse_state_survives_worktree_key_change`，以及断言辅助 `visible_entries_as_strings`、`assert_project_header_has_threads` |
+| `crates/sidebar/src/sidebar.rs` | 本讲主战场:`ListEntry` 与 `SidebarContents`/`EntryShape` 定义、`is_group_collapsed`/`set_group_expanded`/`toggle_collapse`、`rebuild_contents` 中生成 `project_header_indices` 的段落、`render_list_entry`、`render_project_header`、`render_sticky_header`、`confirm` 与 `fold_all`/`unfold_all`、`cycle_project_impl` |
+| `crates/workspace/src/multi_workspace.rs` | 折叠状态的真正存放处:`ProjectGroupState` 与 `project_groups` 字段、`group_state_by_key(_mut)`、`set_all_groups_expanded`、`ensure_project_group_state`、`restore_project_groups`、`serialize` |
+| `crates/sidebar/src/sidebar_tests.rs` | `test_collapse_and_expand_group`、`test_collapse_changes_entry_shape`、`test_collapse_state_survives_worktree_key_change`,以及断言辅助 `visible_entries_as_strings` |
+| `crates/gpui/src/elements/list.rs` | 只读两个 API 的定义:`logical_scroll_top` 返回的 `ListOffset`、`bounds_for_item`,粘性头部的数据来源 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 `render_project_header`：一行分组头由哪些零件组成
+### 4.1 `project_header_indices`:分组头下标表
 
 #### 4.1.1 概念说明
 
-项目分组头是侧边栏里「一个项目」的门牌：它汇总该分组下所有线程/终端的状态，让用户不展开也能一眼看到「这个项目有没有在跑、有没有在等我确认、有没有新通知」，同时提供折叠/展开、新建线程、分组菜单三个入口。
+`rebuild_contents` 产出的 `entries` 是一个「压平」的行数组:分组头、线程行、终端行混在同一个 `Vec<ListEntry>` 里。但很多消费方需要的是「分组头在哪」这个结构信息——粘性头部要找视口顶端的分组头,项目循环切换要按分组跳转。如果每次都现场扫描 `entries` 找 `ProjectHeader` 变体,既重复又容易和渲染期状态脱节。
 
-它的全部输入都在 `ListEntry::ProjectHeader` 变体里（重建时算好），加上两个运行时参数 `is_sticky`（是否作为粘性头部渲染）与 `is_focused`（键盘选中态）。也就是说：**渲染函数是纯投影，状态计算全部发生在 `rebuild_contents`**——这正是 u3-l2 教义在渲染层的体现。
+`SidebarContents` 因此多存了一个下标表:
 
-先看数据侧。`ProjectHeader` 变体的字段（[sidebar.rs:L392-L405](https://github.com/zed-industries-zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L392-L405)）：
+- [sidebar.rs:475-482](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L475-L482) — `SidebarContents` 结构。`project_header_indices: Vec<usize>` 记录每个 `ListEntry::ProjectHeader` 在 `entries` 里的下标;`has_open_projects` 管空态。它**不是**独立状态,而是 `entries` 的派生索引——重建时与 `entries` 同步生成,永不单独修改。
 
-| 字段 | 含义 | 由谁计算 |
-| --- | --- | --- |
-| `key: ProjectGroupKey` | 分组身份键 | 分组遍历时来自 `MultiWorkspace.project_groups` |
-| `label: SharedString` | 显示名（可含路径消歧后缀） | `group_key.display_name(&path_detail_map)` |
-| `highlight_positions` | 搜索命中字符下标 | 重建时 fuzzy 匹配得到 |
-| `has_running_threads` | 组内是否有 Running 线程 | 遍历 `live_infos`（活跃信息，进程内存态） |
-| `waiting_thread_count` | 等待确认的线程数 | 同上，按 `WaitingForConfirmation` 计数 |
-| `has_notifications` | 组内有未读通知 | 对照 `notified_threads` / `notified_terminals` 集合 |
-| `is_active` | 是否为当前活跃工作区所在分组 | 与 `active_workspace` 比对 |
-| `has_threads` | 组内是否有任何线程行 | 影响空态子行与 `EntryShape` |
+分组头行本身携带九个字段(见 [sidebar.rs:391-405](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L391-L405) 的 `ListEntry::ProjectHeader`):`key`(分组键)、`label`(分组标签)、`highlight_positions`(搜索高亮)、`has_running_threads` / `waiting_thread_count` / `has_notifications`(三个汇总徽标)、`is_active`(是否当前活跃分组)、`has_threads`(组内是否有行,决定空态子行)。这些字段在重建时由 `rebuild_contents` 从元数据存储与活跃面板信息汇总写入,渲染函数只读不写。
 
 #### 4.1.2 核心流程
 
-渲染一行分组头的组装顺序：
+`project_header_indices` 的生成时机在 `rebuild_contents` 内部,规则一句话:**先记下标,再压入头**。
 
 ```text
-render_project_header(ix, is_sticky, key, label, ...徽标参数...)
-│
-├─ 1. 计算 id / group_name：is_sticky 决定是否加 "sticky-" 前缀
-├─ 2. 查询折叠态 is_collapsed = is_group_collapsed(key)（现查 MultiWorkspace）
-├─ 3. 左侧区（h_flex）
-│     ├─ 标签 Label / HighlightedLabel（非活跃时 Muted 色；透明窗口下改截断不渐变）
-│     ├─ 远程项目图标（可选，render_remote_project_icon）
-│     ├─ [.when(is_collapsed)] 三个状态徽标：LoadCircle / Warning / Circle
-│     └─ [.when(!has_filter)] 折叠箭头 ChevronRight / ChevronDown（hover 可见）
-├─ 4. 右侧区（h_flex）：渐变遮罩 + 新建线程按钮 + 省略号菜单
-│     └─ on_mouse_down(左键) → stop_propagation（防止冒泡到整行的点击折叠）
-├─ 5. 整行事件
-│     ├─ on_mouse_down(右键) → 打开分组上下文菜单
-│     └─ on_click → 副键修饰 → 激活该组工作区；否则（且无搜索词时）→ toggle_collapse
-└─ 6. 尾部分流：!is_collapsed && !has_threads → 附加 "No threads yet" 空态子行
+对每个项目分组 group:
+    ……收集该组的线程与终端……
+    project_header_indices.push(entries.len())   # 头即将落在这个下标
+    entries.push(ListEntry::ProjectHeader { …… })
+    ……压入该组的行(展开时)……
+收尾:
+    self.contents = SidebarContents { entries, ……, project_header_indices, …… }
 ```
 
-其中第 3 步的徽标**只在折叠时显示**——展开时每条线程行有自己的状态图标，分组头没必要重复；折叠后子行不可见，状态就只能上收到门牌上。三者的优先级在代码里用 `.when` 条件串起来：运行中显示转圈 `LoadCircle`；等待确认显示 `Warning`（带 tooltip「N threads are waiting for confirmation」）；仅当既没有运行也没有等待时，通知才用 `Circle`（Accent 色）显示。
+注意两条分支都会写表:展开的组在 [sidebar.rs:1884-1894](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L1884-L1894) 压入,折叠的组(行被跳过)在 [sidebar.rs:1930-1940](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L1930-L1940) 压入——**折叠只影响组内行,分组头本身永远在列表里**。最终在 [sidebar.rs:1965-1971](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L1965-L1971) 与 `entries` 一起装入新的 `SidebarContents`。
+
+消费方有三处:
+
+1. `render_sticky_header`——找视口顶端所在分组的头(4.4 节)。
+2. `active_project_header_position` / `cycle_project_impl`——按分组循环切换项目。
+3. 键盘导航的分组边界判定(间接,经由 `entries` 上的 `ProjectHeader` 模式匹配)。
 
 #### 4.1.3 源码精读
 
-函数签名与 sticky 前缀。注意 `is_sticky` 只影响元素 id，不影响任何业务逻辑——粘性头部与列表内的行渲染**共用同一套代码**，只是元素身份不同（[sidebar.rs:L2259-L2287](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L2259-L2287)）：
+**生成点(展开分支)**:[sidebar.rs:1884-1894](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L1884-L1894)
 
 ```rust
-fn render_project_header(
-    &self,
-    ix: usize,
-    is_sticky: bool,
-    key: &ProjectGroupKey,
-    ...
-) -> AnyElement {
-    let id_prefix = if is_sticky { "sticky-" } else { "" };
-    let id = SharedString::from(format!("{id_prefix}project-header-{ix}"));
-    ...
-    let is_collapsed = self.is_group_collapsed(key, cx);
-    let disclosure_icon = if is_collapsed {
-        IconName::ChevronRight
-    } else {
-        IconName::ChevronDown
-    };
+project_header_indices.push(entries.len());
+entries.push(ListEntry::ProjectHeader {
+    key: group_key.clone(),
+    label,
+    highlight_positions: workspace_highlight_positions,
+    has_running_threads,
+    waiting_thread_count,
+    has_notifications: has_thread_notifications || has_terminal_notifications,
+    is_active,
+    has_threads,
+});
 ```
 
-折叠时上收的三个状态徽标（[sidebar.rs:L2362-L2400](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L2362-L2400)）：外层 `.when(is_collapsed, ...)` 包住三个互斥分支，通知徽标额外要求 `!has_running_threads && waiting_thread_count == 0`，避免与转圈/警告叠在一起：
+压入头**之前**先记录 `entries.len()`,保证下标指向头自己而不是头后第一行。三个徽标字段全部来自本组行集合的现算:`has_running_threads` / `waiting_thread_count` 由活跃面板的 `live_infos` 统计(见 [sidebar.rs:1708-1716](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L1708-L1716):`Running` 置真、`WaitingForConfirmation` 计数),`has_notifications` 来自 `notified_threads` / `notified_terminals` 两个通知集合的成员检查([sidebar.rs:1877-1882](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L1877-L1882))。
 
-```rust
-.when(is_collapsed, |this| {
-    this.when(has_running_threads, |this| {
-        this.child(Icon::new(IconName::LoadCircle)...with_rotate_animation(2))
-    })
-    .when(waiting_thread_count > 0, |this| {
-        ... Icon::new(IconName::Warning) ...tooltip(...)
-    })
-    .when(has_notifications && !has_running_threads && waiting_thread_count == 0, |this| {
-        this.child(Icon::new(IconName::Circle).color(Color::Accent))
-    })
-})
-```
-
-箭头与点击折叠都受 `has_filter` 约束（[sidebar.rs:L2401-L2411](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L2401-L2411) 与 [sidebar.rs:L2444-L2452](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L2444-L2452)）：搜索期间不显示折叠箭头，点击也不触发折叠，因为过滤视图的行集合是查询结果，不是分组语义的完整列表：
-
-```rust
-.when(!has_filter, |this| {
-    this.child(div()
-        .when(!is_focused, |this| this.visible_on_hover(&group_name))
-        .child(Icon::new(disclosure_icon)...))
-})
-...
-.on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-    if event.modifiers().secondary() {
-        this.activate_or_open_workspace_for_group(&key_for_focus, window, cx);
-    } else if !this.has_filter_query(cx) {
-        this.toggle_collapse(&key_for_toggle, window, cx);
-    }
-}))
-```
-
-右侧按钮簇的防误触（[sidebar.rs:L2414-L2432](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L2414-L2432)）：按钮簇包在自己的 `h_flex` 里，`on_mouse_down(左键)` 调 `cx.stop_propagation()`，否则点「+」会同时触发整行的折叠。
-
-最后是空态子行（[sidebar.rs:L2455-L2477](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L2455-L2477)）：**展开且没有线程**时，分组头下面追加一行半透明的「No threads yet」。注意这个子行是渲染层的产物，不占用 `entries` 的一个位置——但它让这一「逻辑行」的高度变了，这正是 u3-l3 中 `EntryShape::ProjectHeader` 必须携带 `has_threads` 与 `is_collapsed` 两个字段的原因（[sidebar.rs:L484-L499](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L484-L499)）：
-
-```rust
-if !is_collapsed && !has_threads {
-    v_flex().w_full()
-        .child(header)
-        .child(h_flex()...
-            .child(Label::new("No threads yet").size(LabelSize::Small)...))
-        .into_any_element()
-} else {
-    header.into_any_element()
-}
-```
-
-徽标的数据来源在 `rebuild_contents` 里：即便分组已折叠，`live_infos`（从组内所有打开工作区的 Agent 面板收集的活跃线程信息）仍被完整遍历一遍，统计 Running 与 WaitingForConfirmation（[sidebar.rs:L1704-L1716](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L1704-L1716)，折叠分支的对称实现在 [sidebar.rs:L1759-L1765](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L1759-L1765)）：
-
-```rust
-for info in live_infos {
-    if info.status == AgentThreadStatus::Running {
-        has_running_threads = true;
-    }
-    if info.status == AgentThreadStatus::WaitingForConfirmation {
-        waiting_thread_count += 1;
-    }
-    live_info_by_session.insert(info.session_id.clone(), info);
-}
-```
+**消费点(项目循环切换)**:[sidebar.rs:7011-7042](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7011-L7042) 的 `cycle_project_impl`。`header_count = project_header_indices.len()` 就是分组总数;`current_pos` 由 [active_project_header_position( sidebar.rs:6998-7009)](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L6998-L7009) 用「活跃分组键 == 头的 key」匹配得出;取模得到下一个分组的位置后,`project_header_indices[next_pos]` 直接换算回 `entries` 下标取出 `key`,并顺手 `set_group_expanded(&key, true, cx)` 展开目标组——这里已经能看到折叠状态的读写横跨 Sidebar 与 MultiWorkspace 两层,4.2 节展开。
 
 #### 4.1.4 代码实践
 
-1. **实践目标**：把分组头的「状态 → 图标 → 显示条件」整理成一张自查表，并验证你对显示条件的理解。
-2. **操作步骤**：
-   - 精读 [sidebar.rs:L2362-L2400](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L2362-L2400)，填出下表（示例已给一行）：
+**实践目标**:亲眼确认「折叠不删分组头,只删组内行」,以及下标表与 entries 的对应关系。
 
-     | 状态组合 | 图标 | 显示条件 |
-     | --- | --- | --- |
-     | 组内有 Running 线程且已折叠 | `LoadCircle`（旋转动画） | `is_collapsed && has_running_threads` |
-     | 等待确认（待填） | ？ | ？ |
-     | 仅有通知（待填） | ？ | ？ |
+**操作步骤**(源码阅读型,无需改代码):
 
-   - 再回答：展开状态下这三个徽标去哪了？
-3. **需要观察的现象**：表格填完后，你会发现三者的显示条件经由 `.when` 嵌套天然互斥——通知徽标永远不会和转圈同时出现。
-4. **预期结果**：等待确认 → `Warning` + tooltip；仅有通知 → `Circle`（Accent 色）；展开时状态显示在每条线程行自身上（u4-l3 详讲）。
-5. 若想在真实 UI 中观察，可在本机 `cargo run -p zed` 打开侧边栏折叠一个有后台线程的分组；图标外观依赖主题，**待本地验证**。
+1. 打开 [sidebar.rs:1884](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L1884) 与 [sidebar.rs:1930](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L1930),对照两处 `push`,写出「同一分组在展开/折叠两种状态下各贡献几行」。
+2. 阅读 [sidebar_tests.rs:949-1000](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar_tests.rs#L949-L1000) 的 `test_collapse_and_expand_group`,注意断言里折叠后只剩一行 `"  > [my-project]"`。
+3. 在仓库根目录运行:
+
+   ```bash
+   cargo test -p sidebar test_collapse_and_expand_group
+   ```
+
+**需要观察的现象**:测试输出中该用例通过;断言数组从两行(`"v [my-project]"` + `"  Thread 1"`)变一行(`"> [my-project]"`)再变回两行。
+
+**预期结果**:`ProjectHeader` 行在折叠前后都在 `entries[0]`,`project_header_indices == [0]` 不变,变化的是 `entries.len()` 从 2 变 1。`visible_entries_as_strings` 中 `>` / `v` 前缀正是测试辅助函数现场调用 `is_group_collapsed` 画出来的(见 [sidebar_tests.rs:563-570](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar_tests.rs#L563-L570))。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么粘性头部渲染时传 `is_sticky = true`，而这个参数的实际作用只是改 id 前缀？
+**练习 1**:如果一个分组被搜索过滤整组丢弃,`project_header_indices` 里还会有它的下标吗?
 
-**答案**：分组头的视觉与行为由 `ListEntry::ProjectHeader` 的字段决定，粘性头部渲染的是「同一个下标 `ix` 的同一份数据」，理应像素级一致；但 gpui 中元素 id 参与焦点、hover 分组（`group_name`）、`visible_on_hover` 等机制，若与列表内的行共用 id，同一帧会出现两个同 id 元素导致状态错乱，所以用 `"sticky-"` 前缀区分元素身份。
+答案:不会。过滤发生在头压入之前——[sidebar.rs:1871-1874](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L1871-L1874) 在 `matched_threads` 与 `matched_terminals` 双空且工作区不匹配时直接 `continue`,既不 `push` 下标也不 `push` 头。下标表与 `entries` 因此永远保持一致。
 
-**练习 2**：`has_threads` 字段明明可以从「entries 里该 header 之后到下一个 header 之前有没有 Thread/Terminal 行」推导出来，为什么还要作为字段存进 `ProjectHeader`？
+**练习 2**:`project_header_indices` 与 `entries` 谁是「源」?如果允许代码在重建之外单独修改 `entries`,下标表会怎样?
 
-**答案**：因为折叠时子行根本不会被 push 进 `entries`（见 4.3 节），折叠的分组头后面紧跟的就是下一个分组头；此时「组内是否有线程」无法从可见行推导，只能查元数据存储。而空态子行与 `EntryShape`（key、`has_threads`、`is_collapsed` 三元组）都依赖它，所以重建时显式算好存进变体。
+答案:`entries` 是源,下标表是重建期间同步产出的派生索引。若在重建之外单独改 `entries`(比如手动删一行),下标表会指向错误的行甚至越界——这正是本 crate 把 `contents` 整体替换([sidebar.rs:1965-1971](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L1965-L1971))而不做增量修改的原因之一。
 
-### 4.2 `is_group_collapsed` / `set_group_expanded`：折叠状态为什么住在 MultiWorkspace
+### 4.2 `is_group_collapsed` / `set_group_expanded`:折叠状态住在哪
 
 #### 4.2.1 概念说明
 
-这对读写方法是侧边栏与宿主之间围绕折叠状态的唯一通道。读侧现查、写侧直改，而**状态本体存在 `MultiWorkspace.project_groups` 里**——`Vec<ProjectGroupState>`，每个元素是 `{ key, expanded }`。
+折叠/展开是用户对「项目分组」的偏好,不是可以从世界状态推导的信息——这让它不能进 `rebuild_contents` 的重推导范畴。问题是:这个状态该存在 `Sidebar` 还是 `MultiWorkspace`?
 
-为什么放宿主而不是 `Sidebar` 自己？综合源码有四条理由：
+答案已经由前几讲的原则注定:**`MultiWorkspace`**。理由有四条:
 
-1. **分组的生命周期长于侧边栏的可见性**。分组（及其键）由 `MultiWorkspace` 在工作区加入时通过 `ensure_project_group_state` 创建、默认展开（[multi_workspace.rs:L669-L686](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/workspace/src/multi_workspace.rs#L669-L686)），侧边栏关着分组也存在；折叠偏好自然应与分组同生共死。
-2. **持久化路径已经在这里**。`MultiWorkspace::serialize` 把每个分组的 `expanded` 写进 `MultiWorkspaceState`，连同 `sidebar_open`、侧边栏自身序列化一起落库（[multi_workspace.rs:L1449-L1477](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/workspace/src/multi_workspace.rs#L1449-L1477)）；恢复时 `restore_project_groups` 合并历史状态（[multi_workspace.rs:L825-L846](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/workspace/src/multi_workspace.rs#L825-L846)）。若折叠态存在 `Sidebar`，就得两条序列化链路。
-3. **分组键会变，状态要跟着迁移**。给项目添加 worktree 时 `ProjectGroupKey` 从 `[/a]` 变成 `[/a, /b]`，`rekey_project_group` 负责把旧键的状态搬到新键（[multi_workspace.rs:L697-L708](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/workspace/src/multi_workspace.rs#L697-L708)）——这是世界模型级别的维护，侧边栏无从知晓。
-4. **全量重推导教义**。u3-l2 要求：凡是能从「当前世界状态」算出的都不该存进 `Sidebar`。折叠态虽然不是可推导的派生数据（它是用户偏好），但把它放进世界模型（宿主）后，`Sidebar` 保持纯投影——`is_group_collapsed` 每次渲染都现查，连 `EntryShape` 投影也不存副本（u3-l3 已见过：`entry_shapes` 实时调 `group_state_by_key`）。
+1. **归属对齐**:分组的所有权本来就在 `MultiWorkspace`——`project_groups: Vec<ProjectGroupState>`(见 [multi_workspace.rs:306-309](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/workspace/src/multi_workspace.rs#L306-L309)),每个元素就是 `key + expanded`([multi_workspace.rs:284-288](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/workspace/src/multi_workspace.rs#L284-L288))。`rebuild_contents` 遍历的 `MultiWorkspace::project_groups()` 快照本身就携带 `expanded` 字段,折叠与否直接决定该组要不要加载行——状态的消费者就是状态的拥有者。
+2. **生命周期**:侧边栏实体可能被重建(窗口恢复时 `Sidebar::new` 重新创建),而 `MultiWorkspace` 的分组状态要活得比任何一次视图重建更久,并随窗口状态一起持久化(见下面的 `serialize`)。
+3. **多消费方**:`cycle_project_impl` 切换分组时要展开目标组([sidebar.rs:7042](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7042)),`fold_all` / `unfold_all` 要批量设置全部组——这些入口都经 `MultiWorkspace` 的公开方法,而不是去摸 Sidebar 的私有字段。
+4. **键迁移**:工作树增删会改变 `ProjectGroupKey`,`MultiWorkspace` 内部的 `rekey_project_group`([multi_workspace.rs:697](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/workspace/src/multi_workspace.rs#L697) 起)在迁移时保留原键的 `expanded`。若状态存在 Sidebar 的 HashMap 里,换键后就成了孤儿。测试 `test_collapse_state_survives_worktree_key_change`([sidebar_tests.rs:1002](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar_tests.rs#L1002) 起)专门锁死这条行为。
+
+于是 Sidebar 只保留一对薄薄的读写门面,经弱引用宿主转发。
 
 #### 4.2.2 核心流程
 
-一次完整折叠的时序：
-
 ```text
-用户点击分组头（无搜索词）
-  └─ toggle_collapse(key)                       [sidebar.rs:L3229]
-       ├─ is_collapsed = is_group_collapsed(key)   ← 读：现查宿主
-       ├─ set_group_expanded(key, is_collapsed)    ← 写：expanded 取反（collapsed → expanded=true）
-       │    └─ mw.update:
-       │         ├─ group_state_by_key_mut(key).expanded = expanded
-       │         └─ mw.serialize(cx)               ← 异步写 KeyValueStore（持久化）
-       └─ self.update_entries(cx)                  ← 手动同步重建
-            └─ rebuild_contents:
-                 ├─ is_collapsed = is_group_collapsed(key)  ← 重新现查
-                 ├─ 折叠且无搜索词 → 不加载线程 → 只 push header
-                 └─ entry_shapes 投影 is_collapsed → apply_list_state_diff
+读:is_group_collapsed(key)
+    multi_workspace.upgrade()          # 宿主还活着吗?
+      → mw.read(cx).group_state_by_key(key)
+      → Some(state) ⇒ !state.expanded   # 有状态:expanded 取反
+      → None / 宿主已释放 ⇒ false        # 安全默认:视为展开
+
+写:set_group_expanded(key, expanded)
+    multi_workspace.upgrade()
+      → mw.update: group_state_by_key_mut(key) 改 expanded
+      → mw.serialize(cx)               # 标记窗口状态需要持久化
+
+完整交互:toggle_collapse(key)
+    is_collapsed = is_group_collapsed(key)
+    set_group_expanded(key, is_collapsed)   # 取反写入
+    update_entries(cx)                      # 立即整表重建(不走去抖)
 ```
-
-两个关键细节：
-
-- `set_group_expanded` **不发出** `ProjectGroupsChanged` 事件（那是分组结构变化的事件，由移动/删除分组等操作发出，如 [multi_workspace.rs:L898-L913](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/workspace/src/multi_workspace.rs#L898-L913) 的 `move_project_group_up`）。所以 `toggle_collapse` 必须自己补一句 `update_entries`，不能指望订阅网络刷新——注意这与 u3-l1 的「事件驱动刷新」并不矛盾：折叠是侧边栏自己发起的写，发起者自然负责收尾。
-- 侧边栏对宿主事件的订阅里，`ProjectGroupsChanged` 与 `WorkspaceRemoved` 共用一个分支，统一走 `schedule_update_entries` 去抖（[sidebar.rs:L813-L832](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L813-L832)）。
 
 #### 4.2.3 源码精读
 
-读方法：升级弱引用 → 读宿主 → 查表取反；任何一步失败都回退为「展开」（[sidebar.rs:L930-L950](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L930-L950)）：
+**读门面**:[sidebar.rs:930-939](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L930-L939)
 
 ```rust
 fn is_group_collapsed(&self, key: &ProjectGroupKey, cx: &App) -> bool {
@@ -243,7 +167,13 @@ fn is_group_collapsed(&self, key: &ProjectGroupKey, cx: &App) -> bool {
         })
         .unwrap_or(false)
 }
+```
 
+两道防线:`upgrade()` 处理宿主实体可能已被释放(WeakEntity 的标准姿势,u1-l3);`group_state_by_key` 查不到该键(比如刚恢复序列化、组还没登记)时兜底 `false`——「默认展开」让新出现的分组不至于藏起内容。
+
+**写门面**:[sidebar.rs:941-950](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L941-L950)
+
+```rust
 fn set_group_expanded(&self, key: &ProjectGroupKey, expanded: bool, cx: &mut Context<Self>) {
     if let Some(mw) = self.multi_workspace.upgrade() {
         mw.update(cx, |mw, cx| {
@@ -256,229 +186,185 @@ fn set_group_expanded(&self, key: &ProjectGroupKey, expanded: bool, cx: &mut Con
 }
 ```
 
-状态本体与访问器在宿主侧（[multi_workspace.rs:L279-L288](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/workspace/src/multi_workspace.rs#L279-L288)、[multi_workspace.rs:L879-L896](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/workspace/src/multi_workspace.rs#L879-L896)）——线性查找、按需创建、批量置位都集中在这里：
+两个细节值得注意:`group_state_by_key_mut` 查不到键时**静默不建**(只改已存在的组状态,新组由 `MultiWorkspace::ensure_project_group_state` 在登记分组时以 `expanded: true` 创建,见 [multi_workspace.rs:670-686](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/workspace/src/multi_workspace.rs#L670-L686));写完无条件调 `mw.serialize(cx)`——折叠是要记住的用户偏好,每次改动都触发宿主把整份窗口状态(含每个分组的 `expanded`)写回键值存储,见 [multi_workspace.rs:1449-1477](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/workspace/src/multi_workspace.rs#L1449-L1477),恢复则由 [restore_project_groups( multi_workspace.rs:825-846)](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/workspace/src/multi_workspace.rs#L825-L846) 读回。
 
-```rust
-pub struct ProjectGroupState {
-    pub key: ProjectGroupKey,
-    pub expanded: bool,
-}
-...
-pub fn group_state_by_key(&self, key: &ProjectGroupKey) -> Option<&ProjectGroupState> {
-    self.project_groups.iter().find(|group| group.key == *key)
-}
+**交互入口**:[sidebar.rs:3229-3238](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L3229-L3238) 的 `toggle_collapse` 把读写拼成一次取反,然后**同步**调用 `update_entries`(注意不是 `schedule_update_entries`——折叠是用户直接交互,不值得再等一拍去抖)。点击与键盘两条路都汇到这里:点击见 4.3.3,键盘 `Confirm` 在 [sidebar.rs:3528-3532](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L3528-L3532)(选中行是 `ProjectHeader` 时 `Confirm` 即折叠切换)。批量折叠 `fold_all` / `unfold_all`([sidebar.rs:4341-4365](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L4341-L4365))则直接借 `MultiWorkspace::set_all_groups_expanded`([multi_workspace.rs:892-896](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/workspace/src/multi_workspace.rs#L892-L896))批量置位。
 
-pub fn set_all_groups_expanded(&mut self, expanded: bool) {
-    for group in &mut self.project_groups {
-        group.expanded = expanded;
-    }
-}
-```
+**与 `EntryShape` 的联动**:[sidebar.rs:2053-2071](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L2053-L2071) 的 `entry_shapes` 投影形状时,**现场**查询 `multi_workspace.group_state_by_key(key)` 取 `is_collapsed`——不在 `contents` 里存副本。折叠一变,形状序列立刻不同,`apply_list_state_diff` 随之让对应区间测量失效。这正是 u3-l3 讲过的契约在分组头上的体现:`EntryShape::ProjectHeader` 之所以同时含 `has_threads` 与 `is_collapsed`([sidebar.rs:489-496](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L489-L496)),是因为这两个布尔共同决定头下面会不会多出一行「No threads yet」(见 4.3.3),直接影响该行高度。
 
-重建时对折叠的消费不止「跳过子行」：折叠且无搜索词时干脆不查询线程存储（`should_load_threads`，[sidebar.rs:L1543-L1544](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L1543-L1544)），但会另行查询线程 id 以维护通知集合（[sidebar.rs:L1908-L1923](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L1908-L1923) 的注释解释了这一点）；push header 后用 `continue` 跳过子行入列（[sidebar.rs:L1930-L1944](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L1930-L1944)）：
+#### 4.2.4 代码实践
 
-```rust
-let is_collapsed = self.is_group_collapsed(group_key, cx);
-let should_load_threads = !is_collapsed || !query.is_empty();
-...
-project_header_indices.push(entries.len());
-entries.push(ListEntry::ProjectHeader { ... });
-if is_collapsed {
-    continue;
-}
-```
+**实践目标**:亲手验证「折叠状态存在 MultiWorkspace、随 serialize 持久化、键迁移不丢」三件事,并解释设计原因。
 
-键盘折叠族（u5-l2 会从键位角度再讲，这里只看它们如何复用这对读写方法）：`SelectChild` 在分组头上是「展开或下移」（[sidebar.rs:L4250-L4272](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L4250-L4272)）；`SelectParent` 在线程行上是「收起到父级」——先回溯找到所属分组头、把 selection 移过去再折叠（[sidebar.rs:L4274-L4304](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L4274-L4304)）；`FoldAll`/`UnfoldAll` 直接走宿主的批量接口（[sidebar.rs:L4341-L4367](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L4341-L4367)）：
+**操作步骤**:
 
-```rust
-fn collapse_selected_entry(...) {
-    ...
-    Some(ListEntry::Thread(_) | ListEntry::Terminal(_)) => {
-        for i in (0..ix).rev() {
-            if let Some(ListEntry::ProjectHeader { key, .. }) = self.contents.entries.get(i) {
-                let key = key.clone();
-                self.selection = Some(i);
-                self.set_group_expanded(&key, false, cx);
-                self.update_entries(cx);
-                break;
-            }
-        }
-    }
-```
+1. 通读 [sidebar.rs:930-950](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L930-L950) 与 [multi_workspace.rs:879-896](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/workspace/src/multi_workspace.rs#L879-L896),确认读写最终都落在 `ProjectGroupState.expanded` 一个布尔上。
+2. 运行两个测试:
 
-#### 4.2.4 代码实践（本讲主实践）
+   ```bash
+   cargo test -p sidebar test_collapse_and_expand_group
+   cargo test -p sidebar test_collapse_changes_entry_shape
+   ```
 
-1. **实践目标**：用源码证据回答两个问题——「折叠状态为何持久化在 MultiWorkspace 上」与「折叠如何影响 EntryShape」。
-2. **操作步骤**：
-   - 顺着调用链通读：[sidebar.rs:L930-L950](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L930-L950)（读写方法）→ [multi_workspace.rs:L879-L890](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/workspace/src/multi_workspace.rs#L879-L890)（状态表）→ [multi_workspace.rs:L1449-L1477](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/workspace/src/multi_workspace.rs#L1449-L1477)（序列化把 `expanded` 落库）→ [multi_workspace.rs:L697-L708](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/workspace/src/multi_workspace.rs#L697-L708)（rekey 迁移状态）。为每处写一句「它证明了什么」。
-   - 运行两个测试并阅读断言：
-     ```bash
-     cargo test -p sidebar --lib test_collapse_and_expand_group
-     cargo test -p sidebar --lib test_collapse_changes_entry_shape
-     ```
-   - 对照 [sidebar_tests.rs:L950-L1000](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar_tests.rs#L950-L1000)：`visible_entries_as_strings` 对 `ProjectHeader` 行输出的图标 `v`/`>` 正是 `is_group_collapsed` 的回读（[sidebar_tests.rs:L563-L570](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar_tests.rs#L563-L570)）；折叠后只剩 `"> [my-project]"` 一行，说明子行没有进 `entries`。
-   - 对照 [sidebar_tests.rs:L721-L751](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar_tests.rs#L721-L751)：它在 `toggle_collapse` 前后各快照一次 `entry_shapes`，断言两个序列**不相等**。
-3. **需要观察的现象**：两个测试均通过；第一个测试输出展示 `v → >` 的行集合收缩，第二个测试无输出但断言成立。
-4. **预期结果**：折叠改变 `EntryShape` 序列有两条途径——`ProjectHeader` 形状里的 `is_collapsed` 字段翻转（见 [sidebar.rs:L2053-L2071](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L2053-L2071) 的投影），同时组内的 `Thread(id)` 形状整段消失。于是 `apply_list_state_diff` 判定「这一行高度可能变了」，让该区间测量失效——这正确，因为空态子行「No threads yet」的出现/消失确实改变高度。这也回答了「为何持久化在 MultiWorkspace」：`Sidebar` 是纯投影，凡非派生状态都上交宿主，由宿主统一序列化与迁移。
-5. 附加观察（可选）：[sidebar_tests.rs:L1003-L1051](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar_tests.rs#L1003-L1051) 的 `test_collapse_state_survives_worktree_key_change` 验证了分组键从 `[/project-a]` 变为 `[/project-a, /project-b]` 后折叠态仍保留——rekey 迁移的直接证据。
+3. 阅读 [multi_workspace.rs:1449-1477](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/workspace/src/multi_workspace.rs#L1449-L1477) 的 `serialize`,找到 `group.expanded` 被写进 `MultiWorkspaceState` 的那一行;再读 [sidebar_tests.rs:753-783](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar_tests.rs#L753-L783) 的 `test_serialization_round_trip`(它在序列化前特意 `toggle_collapse` 折叠了分组),确认折叠状态走的是宿主的持久化通道而非 Sidebar 自己的。
+4. 用自己的话写 3-5 句:为什么折叠状态若存在 `Sidebar` 上,`cycle_project_impl`、窗口恢复、worktree 换键三个场景会各自出什么问题。
+
+**需要观察的现象**:两条测试命令均通过;`serialize` 的闭包里能指出 `project_groups` 映射进持久化状态的确切位置。
+
+**预期结果**:你能指出——`cycle_project_impl` 将无法展开目标组(Sidebar 私有字段对其他组件不可见);窗口恢复重建 Sidebar 后折叠丢失(状态没有进宿主的序列化);换键后 `rekey_project_group` 迁移的是 MultiWorkspace 自己的表,Sidebar 侧的旧键条目变孤儿。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：`set_group_expanded` 写完后没有 `cx.emit`，也没有 `cx.notify()`（对 Sidebar 自身），刷新靠什么？
+**练习 1**:`is_group_collapsed` 的兜底值是 `false`(展开)。如果改成 `true`(折叠),哪些场景会表现异常?
 
-**答案**：靠调用方手动补 `update_entries`。`toggle_collapse`、`expand_selected_entry`、`collapse_selected_entry`、`fold_all` 等每个写点之后都紧跟一次 `self.update_entries(cx)`；`update_entries` 收尾的 `cx.notify()` 才触发重渲染。折叠不发出 `ProjectGroupsChanged`，因为该事件语义是「分组集合/结构变了」，而折叠只是既有分组上的一个布尔翻转。
+答案:凡是「分组尚未登记就渲染」的路径都会把组画成折叠:例如刚恢复序列化、`restore_project_groups` 还没跑完时的首帧;或新项目刚加入、`ensure_project_group_state` 尚未创建状态。用户会看到内容「闪没了」再展开。默认展开是更安全的中性初值。
 
-**练习 2**：如果 `ensure_project_group_state` 尚未为某个键创建状态（例如分组刚出现、状态表还没更新），`is_group_collapsed` 返回什么？这合理吗？
+**练习 2**:`toggle_collapse` 里调用的是 `update_entries(cx)` 而不是 `schedule_update_entries(...)`。结合 u3-l2 的去抖机制,说说为什么不合并。
 
-**答案**：`group_state_by_key` 返回 `None`，`unwrap_or(false)` 使其表现为「展开」。合理——新分组默认展开（`ensure_project_group_state` 里 `expanded: true`），`None` 与「默认值」语义一致，避免了调用方判空。
+答案:去抖的意义是把事件风暴(元数据批量写入、多工作区事件)合并成一次重建。折叠是单次用户点击,没有可合并的对象;且用户期望点击后**立即**看到行消失。同步 `update_entries` 省掉一拍延迟。反过来,若是 `WorktreePathsChanged` 这类可能连续触发的事件,走 `schedule_update_entries` 才划算。
 
-**练习 3**：`Sidebar::new` 的订阅里已经有 `ProjectGroupsChanged → schedule_update_entries`，为什么 `toggle_collapse` 不改成「`set_group_expanded` 内部发一个事件」来复用这条链路？
+**练习 3**:`entry_shapes` 为何现场查 `MultiWorkspace` 而不在 `SidebarContents` 里存一份 `is_collapsed`?
 
-**答案**：可以但没必要，且语义会变混。折叠需要**同步**完成重建（`toggle_collapse` 里 `update_entries` 是同步调用，测试也依赖 `run_until_parked` 前状态就绪）；事件链路是去抖合并的 `schedule_update_entries`，语义是「世界变了、稍后统一重算」。用结构变化事件驱动布尔翻转会让一个事件承担两种粒度，反而模糊了「一级订阅管世界结构」的分层。
+答案:现场查询保证形状序列与真实折叠状态**始终一致**——不存在「contents 里的副本过期」这一类 bug;也符合「能现查的不要缓存」的重推导教义。代价只是每次投影多一次 `Vec` 线性查找,而分组数通常是个位数。
 
-### 4.3 `project_header_indices`：从列表下标到分组头的反向索引
+### 4.3 `render_project_header`:一行分组头的零件清单
 
 #### 4.3.1 概念说明
 
-`SidebarContents` 里除了 `entries` 本体，还维护一个 `project_header_indices: Vec<usize>`（[sidebar.rs:L475-L482](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L475-L482)）——**按出现顺序记录每个 `ProjectHeader` 在 `entries` 里的下标**。
+`render_project_header` 是分组头的唯一渲染函数,**同时**服务两个调用方:列表内的真实行,和浮在列表上方的粘性副本(4.4 节)。它通过 `is_sticky: bool` 参数区分二者,主要影响元素 ID 前缀——同一时刻两份拷贝可能同时存在于元素树中,ID 必须不同。
 
-它解决的问题是：`entries` 是「拍平」的一维数组，分组结构（哪个范围属于哪个组）在拍平过程中丢失了；而粘性头部、项目循环切换都需要回答「下标 `i` 往前最近的分组头是谁」「全部分组头按顺序是哪些」。每次全量重建时，这个索引与 `entries` 同步重新生成，因此永远一致——不需要维护，这是「派生索引进快照」的模式。
+这行头的职责可以概括为「门牌 + 仪表盘 + 三个入口」:
+
+- **门牌**:分组标签(搜索时带高亮)、可选的远程项目图标。
+- **仪表盘**:折叠时才显示的三个状态徽标——运行中(旋转加载圈)、等待确认(警告图标 + 数量提示)、有通知(强调色圆点)。设计动机:展开时每行的状态行内可见,头不需要汇总;折叠后行都藏了,头必须替它们说话。
+- **三个入口**:点击整行切换折叠(副键点击则是激活该工作区)、右侧「+」新建线程按钮、省略号菜单(右键或点开)。
 
 #### 4.3.2 核心流程
 
-生成：`rebuild_contents` 的分组遍历循环里，push header **之前**先记录当前 `entries.len()`（这正是 header 即将落位的下标）：
-
 ```text
-for group_key in 分组序列:
-    （收集线程/终端、计算徽标……）
-    project_header_indices.push(entries.len())   ← header 将要到的下标
-    entries.push(ListEntry::ProjectHeader { ... })
-    if is_collapsed: continue                     ← 折叠组：后面没有子行
-    push 子行（线程/终端）……
+render_project_header(ix, is_sticky, key, label, highlight_positions,
+                      has_running_threads, waiting_thread_count,
+                      has_notifications, is_active, is_focused, has_threads)
+  ├─ 查 is_group_collapsed(key) ⇒ 折叠箭头方向(ChevronRight / ChevronDown)
+  ├─ id_prefix = is_sticky ? "sticky-" : ""   ⇒ 所有元素 ID / group 名加前缀防撞
+  ├─ 标签:有高亮位置用 HighlightedLabel,否则 Label;
+  │    非活跃分组淡色;透明窗口改为截断(渐变遮罩在透明背景上会显形)
+  ├─ 左半区:标签 + 远程图标 + [折叠时的三个徽标] + [悬停可见的箭头]
+  ├─ 右半区:渐变遮罩 + 新建按钮 + 省略号菜单(鼠标按下即吞掉,不触发折叠)
+  ├─ on_click:副键 ⇒ 激活该组工作区;普通点击且有搜索词 ⇒ 不动作;否则 toggle_collapse
+  └─ 收尾:!is_collapsed && !has_threads ⇒ 头下面再垫一行 "No threads yet" 空态子行
 ```
 
-展开与折叠两个分支各有一次这样的 push（[sidebar.rs:L1884](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L1884) 与 [sidebar.rs:L1930](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L1930)），最终作为 `SidebarContents` 的字段一起落进快照（[sidebar.rs:L1965-L1969](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L1965-L1969)）。
-
-举例，一个两分组（第一组展开含 2 行、第二组折叠）的列表：
-
-```text
-entries:                  [HeaderA, T1, T2, HeaderB]
-                          ↓生成
-project_header_indices:   [0, 3]
-```
-
-消费方有三处：
-
-| 消费方 | 问题 | 用法 |
-| --- | --- | --- |
-| `render_sticky_header` | 视口顶部压着哪个组的头？下一个头在哪？ | 反向 `find`（≤ 滚动行号的最后一个）；正向 `find`（> 当前头的第一个） |
-| `active_project_header_position` | 活跃工作区所在分组的头是第几个？ | `position` 遍历比对 key |
-| `cycle_project_impl` | `NextProject`/`PreviousProject` 切到哪？ | 以 `header_count` 取模循环 |
+搜索状态下(`has_filter`)交互被刻意收敛:不显示手型光标、无悬停背景、不画折叠箭头、点击不切换折叠——过滤把列表拍平成分组混合视图,折叠语义此时不适用。
 
 #### 4.3.3 源码精读
 
-「先记下标再 push」的一行代码（展开分支，[sidebar.rs:L1884-L1894](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L1884-L1894)）：
+**入口与两处调用点**。函数签名在 [sidebar.rs:2259-2273](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L2259-L2273)。列表内真实行的调用在 `render_list_entry`([sidebar.rs:2186-2216](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L2186-L2216)),`is_sticky` 传 `false`,并顺手为该行惰性登记两个菜单句柄(`project_header_menu_handles` / `project_header_new_thread_menu_handles`,字段声明见 [sidebar.rs:776-777](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L776-L777),详情留到 u4-l4)。粘性副本的调用在 [sidebar.rs:3180-3193](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L3180-L3193),`is_sticky` 传 `true`。
+
+**ID 前缀防撞**:[sidebar.rs:2278-2287](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L2278-L2287)
 
 ```rust
-project_header_indices.push(entries.len());
-entries.push(ListEntry::ProjectHeader {
-    key: group_key.clone(),
-    label,
-    ...
-});
+let id_prefix = if is_sticky { "sticky-" } else { "" };
+let id = SharedString::from(format!("{id_prefix}project-header-{ix}"));
+let group_name = SharedString::from(format!("{id_prefix}header-group-{ix}"));
+let is_collapsed = self.is_group_collapsed(key, cx);
+let disclosure_icon = if is_collapsed { IconName::ChevronRight } else { IconName::ChevronDown };
 ```
 
-项目循环切换的用法：`cycle_project_impl` 把「活跃分组头在索引表中的位置」作为游标，对 `header_count` 取模前进/后退，再经索引表映射回 entries 下标取 key（[sidebar.rs:L6998-L7042](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L6998-L7042)）：
+折叠状态是**渲染期现查**的——又一次「不存副本」。`group_name` 供悬停显隐(`visible_on_hover`)与渐变遮罩定位使用。
+
+**折叠时才出现的三个徽标**:[sidebar.rs:2362-2400](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L2362-L2400)。整段包在 `.when(is_collapsed, ...)` 里:运行中是带旋转动画的 `LoadCircle`;等待确认是 `Warning` 图标加单复数处理的 tooltip("1 thread is waiting..." / "N threads are waiting...");通知圆点只在**既没运行也没等待**时显示(`has_notifications && !has_running_threads && waiting_thread_count == 0`),避免三个徽标叠罗汉。展开时这些信息由组内每行的状态承担,头保持安静。
+
+**点击行为**:[sidebar.rs:2444-2452](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L2444-L2452)
 
 ```rust
-let header_count = self.contents.project_header_indices.len();
-...
-let next_pos = match current_pos {
-    Some(pos) => {
-        if forward { (pos + 1) % header_count }
-        else { (pos + header_count - 1) % header_count }
+.on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+    if event.modifiers().secondary() {
+        this.activate_or_open_workspace_for_group(&key_for_focus, window, cx);
+    } else if !this.has_filter_query(cx) {
+        this.toggle_collapse(&key_for_toggle, window, cx);
     }
-    None => 0,
-};
-let header_entry_ix = self.contents.project_header_indices[next_pos];
+}))
 ```
 
-而 `active_project_header_position` 展示了「先在索引表里 position，再回 entries 取 key 比对」的方向（[sidebar.rs:L6998-L7009](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L6998-L7009)）：
+三级分流:副键(如 Cmd+点击)激活/打开该组的工作区;搜索中主键点击不动作;否则才是折叠切换。右侧按钮区自己先 `on_mouse_down` 里 `cx.stop_propagation()`([sidebar.rs:2429-2431](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L2429-L2431)),防止点「+」误折叠;右键则直接弹出省略号菜单([sidebar.rs:2433-2443](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L2433-L2443))。
 
-```rust
-fn active_project_header_position(&self, cx: &App) -> Option<usize> {
-    let active_key = self.active_project_group_key(cx)?;
-    self.contents
-        .project_header_indices
-        .iter()
-        .position(|&entry_ix| {
-            matches!(
-                &self.contents.entries[entry_ix],
-                ListEntry::ProjectHeader { key, .. } if *key == active_key
-            )
-        })
-}
-```
+**空态子行**:[sidebar.rs:2455-2477](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L2455-L2477)。`!is_collapsed && !has_threads` 时,函数返回的不是头本身,而是「头 + 占位圆点 + "No threads yet" 小字」的竖排容器。这一行子行正是 `EntryShape::ProjectHeader` 必须包含 `has_threads` 与 `is_collapsed` 两个布尔的原因:它们联立决定这个条目的**总高度**。
+
+**相邻分组的分隔线**:`render_list_entry` 收尾时,第二个及以后的分组头会包一层顶边框([sidebar.rs:2223-2229](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L2223-L2229)),让分组之间有视觉界线。
 
 #### 4.3.4 代码实践
 
-1. **实践目标**：手工模拟索引生成与消费，确认你理解「下标表 ↔ entries」的对应关系。
-2. **操作步骤**：
-   - 给定一个重建结果：分组 A（展开，2 线程）、分组 B（折叠，存储里有 3 线程）、分组 C（展开，0 线程、1 终端）。写出 `entries` 的变体序列与 `project_header_indices`。
-   - 对照 `cycle_project_impl`：若当前活跃分组是 B，按 `NextProject` 两次分别落在哪个 key？（提示：`pos(B) → (pos+1)%3 → (pos+2)%3`。）
-   - 用 `assert_project_header_has_threads`（[sidebar_tests.rs:L102-L127](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar_tests.rs#L102-L127)）的思路检验你对 `has_threads` 的判断：分组 B 折叠但存储有 3 线程，它的 `has_threads` 应为多少？
-3. **需要观察的现象**：纸面推导结果与源码逻辑一致；无命令输出。
-4. **预期结果**：`entries = [HeaderA, T, T, HeaderB, HeaderC, Terminal]`，`project_header_indices = [0, 3, 4]`（分组 C 展开且无线程，但终端行是它的子行；注意「No threads yet」是渲染层子行、不占下标）；`NextProject` 两次从 B → C → A；B 的 `has_threads = true`（折叠不等于没有线程，只是子行不进列表）。
-5. 以上为纯源码阅读型推导，无需运行命令即可完成；如需机器验证，可在本地参照 `test_collapse_and_expand_group` 的脚手架写一个三分组测试打印 `visible_entries_as_strings`（**待本地验证**）。
+**实践目标**:把 11 个输入参数与产出的 UI 零件一一对应,并理解「同函数两份拷贝」。
+
+**操作步骤**:
+
+1. 在 [sidebar.rs:2259-2273](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L2259-L2273) 抄下参数表,给每个参数标注:它影响哪个零件、来自哪个数据源(例如 `waiting_thread_count` ← `rebuild_contents` 统计的 `live_infos`,`is_focused` ← 渲染期 `focus_handle.is_focused(window)`)。
+2. 本地实验(可复原的小改动):把 [sidebar.rs:2283-2287](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L2283-L2287) 的 `disclosure_icon` 两个值对调(ChevronRight ⇄ ChevronDown),运行 `cargo test -p sidebar test_collapse_and_expand_group`,观察是否仍然通过;再运行 Zed(`cargo run -p zed`)肉眼确认箭头方向反了。看完记得还原。
+
+**需要观察的现象**:测试通过——`visible_entries_as_strings` 画的 `>` / `v` 来自 `is_group_collapsed` 而非真实图标,图标换向不影响断言;但真实 UI 里折叠方向与直觉相反。
+
+**预期结果**:认识到「测试断言的是状态与行集合,不是像素」;同时确认 `render_project_header` 的图标只是状态的投影。若你没有本地运行环境,此步标注「待本地验证」。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`project_header_indices` 为什么不缓存跨重建，而是作为 `SidebarContents` 的一部分每次重算？
+**练习 1**:为什么通知圆点的条件是 `has_notifications && !has_running_threads && waiting_thread_count == 0`?
 
-**答案**：它的每个元素都指向 `entries` 的下标，而 `entries` 每次全量重建（顺序、长度都可能变）。缓存旧下标必然悬空。放进快照与 `entries` 原子地一起替换，一致性零成本——这是「派生数据不缓存」教义的直接应用。
+答案:三个徽标共享头右侧的同一小块空间。运行圈与等待警告表达「正在发生的事」,信息量更大;通知点只是「有新动静」。当运行或等待已占据位置时省略通知点,用优先级换密度,避免视觉堆叠。
 
-**练习 2**：粘性头部查找用的是「≤ 滚动行号的**最后一个**下标」，而不是「≥ 滚动行号的第一个」。为什么方向必须是反向？
+**练习 2**:透明窗口上标签改用 `.truncate()` 而非渐变遮罩([sidebar.rs:2292-2307](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L2292-L2307) 与 [sidebar.rs:2413](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L2413) 的 `children(opaque_window.then(|| gradient_overlay()))`)。为什么?
 
-**答案**：粘性头部要显示的是「视口顶部已经滚出界、但它的子行仍占据视口的那个分组」的头。视口顶端的行号 `scroll_top.item_ix` 一定处于某个分组的中部（或恰好是头部），该分组的头是**不大于**它的最后一个头下标；若找「第一个 ≥ 它的头」，得到的是下一个还没滚到的分组，显示出来就张冠李戴了。
+答案:渐变遮罩本质是「从不透明背景色渐变到透明」的色块,依赖背景是实色才看不出来。透明窗口背景是半透明的,叠上去会显出一块可见的补丁。截断不需要背景色参与,所以在非 Opaque 外观下用截断兜底。
 
-### 4.4 `render_sticky_header`：滚动联动与「推开」式吸附
+**练习 3**:粘性副本与列表内真实行同时渲染同一条目,除了 ID 前缀还需要注意什么?
+
+答案:交互一致性——两份拷贝都能折叠、都能开菜单。粘性头带着同样的 `on_click` 折叠逻辑与菜单句柄(句柄表按 `ix` 索引,两份拷贝共用同一 `ix` 的句柄,菜单弹出位置跟随实际点击的那份)。ID 前缀只解决元素树撞名,状态本身(`is_collapsed`)两份都是现查的,天然一致。
+
+### 4.4 `render_sticky_header`:吸附判定与让位位移
 
 #### 4.4.1 概念说明
 
-「粘性头部」（sticky header）是长分组列表的常见交互：当你把分组 A 的头滚出视口、但仍在浏览 A 的线程时，A 的头会吸附在列表顶部，直到分组 B 的头滚上来把它「推走」。本函数在每次渲染时计算：当前该不该显示吸附头、显示哪个、以及要不要为下一个头让位而上移。
+列表滚动后,当前分组的头会被滚出视口,用户便失去「我现在在哪个项目里」的参照。粘性头部(sticky header)解决它:把视口顶端所在分组的头**复制一份**,以绝对定位浮在列表上方,滚动到哪跟到哪——iOS 分节列表的section header是同款交互。
 
-它是 `render` 的第 7764 行最先调用的渲染辅助之一（[sidebar.rs:L7764](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7764)），返回 `Option<AnyElement>`——`None` 表示不需要吸附，挂载点在列表容器的 `.when_some(sticky_header, ...)`（[sidebar.rs:L7860-L7881](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7860-L7881)）。列表容器是 `relative` 定位，吸附头 `absolute` 叠在列表之上、`no_search_results` 覆盖层之后，所以绘制在最上层。
+实现要回答三个问题:
+
+1. **该显示哪个分组的头?** 用 `project_header_indices` + 滚动位置定位。
+2. **什么时候显示?** 真实行还看得见就不需要副本。
+3. **下一个分组的头滚上来时怎么办?** 让当前副本向上滑出,完成「交接棒」。
+
+前两个问题靠 `ListState::logical_scroll_top()`——它返回 `ListOffset { item_ix, offset_in_item }`(定义见 [list.rs:1430-1438](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/gpui/src/elements/list.rs#L1430-L1438)),即「视口顶边逻辑上压在第几行、往下偏移多少像素」。第三个问题靠 `bounds_for_item`(见 [list.rs:711](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/gpui/src/elements/list.rs#L711))拿下一分组头的实测边界做推挤计算——这正是 u3-l3 强调「必须保留测量值」的原因:若测量被重置,`bounds_for_item` 返回 `None`,让位位移直接失灵。
 
 #### 4.4.2 核心流程
 
-算法分三步：
-
 ```text
-1. 定位当前分组
-   scroll_top = list_state.logical_scroll_top()
-   header_idx = project_header_indices 中最后一个 ≤ scroll_top.item_ix 的下标
-   （若找不到 → None；item_ix 是视口内第一行的下标，offset_in_item 是该行被滚过的像素）
-
-2. 判断是否需要吸附
-   needs_sticky = header_idx < item_ix                    ← 头已完全滚出
-               || (header_idx == item_ix && offset > 0)   ← 头被滚过一部分
-   否则 → None（头本身还完整可见，画吸附头反而重复）
-
-3. 计算「推开」位移 top_offset
-   next_idx = 索引表中第一个 > header_idx 的下标
-   y = next 头的 bounds.origin.y − viewport.origin.y     ← 下一个头相对视口顶的 y
-   h = next 头的实测高度
-   若 y < h：top_offset = y − h（负值，吸附头上移让位）
-   否则：top_offset = 0
+render_sticky_header(window, cx) → Option<AnyElement>
+  1. scroll_top = list_state.logical_scroll_top()      # (item_ix, offset_in_item)
+  2. header_idx = project_header_indices 中最后一个 ≤ scroll_top.item_ix 的下标
+       (没有 ⇒ None,视口顶边还在第一个分组头之前)
+  3. needs_sticky = header_idx < scroll_top.item_ix
+                    || (相等 且 offset_in_item > 0)
+       (真实头完全可见 ⇒ false ⇒ None)
+  4. 取 entries[header_idx] 的 ProjectHeader 字段,
+     调 render_project_header(header_idx, is_sticky = true, ...)
+  5. top_offset(让位位移):
+       next_idx = project_header_indices 中第一个 > header_idx 的下标(下一分组头)
+       bounds = list_state.bounds_for_item(next_idx)     # None ⇒ 不位移
+       y = bounds.origin.y - viewport.origin.y            # 下一头在视口内的纵坐标
+       header_height = bounds.size.height
+       当 y < header_height 时: top_offset = y - header_height(负值,向上顶出)
+       否则 top_offset = 0
+  6. 返回 absolute 定位、top(top_offset) 的浮层元素
 ```
 
-第 3 步的判定条件写成数学形式：仅当 \( 0 \le y < h \)（下一个头的顶边已探入视口、但还没完整露出）时，吸附头向上位移 \( y - h \)（负数）；当 \( y \ge h \) 时下一个头还离得远，吸附头贴住顶部不动。效果是两个头以同一速度滑动交接，没有跳变。
+让位位移的几何意义:记下一分组头在视口内的纵坐标为 \( y \),其高度为 \( h \)。当 \( y \ge h \) 时它还够不着粘性区,副本稳坐 \( 0 \);一旦 \( y < h \),副本的顶部被设为
 
-另一个隐藏依赖：`bounds_for_item(next_idx)` 只对**已测量**的行返回 `Some`。这就是 u3-l3 强调「重建不得清空测量」的直接动机之一——如果重建把所有行重置为 `Unmeasured`，这里会拿不到下一个头的 bounds，`unwrap_or(px(0.))` 会让吸附头在交接瞬间错位一帧，表现为粘性头闪烁。
+\[ \text{top\_offset} = y - h < 0 \]
+
+即副本开始**向上滑出视口**,滑出的节奏与下一分组头推进的节奏完全同步;当下一分组头彻底顶上来、`scroll_top.item_ix` 越过它时,第 2 步的 `header_idx` 前移,副本换成新分组的头,完成交接。
 
 #### 4.4.3 源码精读
 
-定位与吸附判定（[sidebar.rs:L3142-L3161](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L3142-L3161)）：
+**定位与吸附判定**:[sidebar.rs:3142-3161](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L3142-L3161)
 
 ```rust
 let scroll_top = self.list_state.logical_scroll_top();
@@ -498,23 +384,9 @@ if !needs_sticky {
 }
 ```
 
-取出该行的数据后复用 `render_project_header`，注意第二个参数传 `true`（sticky id 前缀），`ix` 仍用 `header_idx`（[sidebar.rs:L3163-L3193](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L3163-L3193)）：
+`.rev().find(...)` 取「最后一个不超过滚动顶行」的头——因为 `project_header_indices` 天然升序,这就是视口顶端所在分组的头。`needs_sticky` 的两个条件分别覆盖「头已被完整滚过」与「头滚了一半」;头恰好完整可见时不显示副本,避免双影。
 
-```rust
-let ListEntry::ProjectHeader { key, label, highlight_positions,
-    has_running_threads, waiting_thread_count, has_notifications,
-    is_active, has_threads } = self.contents.entries.get(header_idx)?
-else { return None; };
-
-let header_element = self.render_project_header(
-    header_idx,
-    true,        // is_sticky
-    key, &label, &highlight_positions, ...
-    cx,
-);
-```
-
-「推开」位移（[sidebar.rs:L3195-L3207](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L3195-L3207)）：`(y_in_viewport < header_height).then_some(y_in_viewport - header_height)` 一步完成了「只在交叠时上移」与「位移量 = 交叠程度」两件事：
+**复用渲染 + 让位计算**:[sidebar.rs:3163-3207](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L3163-L3207)。解构出 `ProjectHeader` 的字段后原样喂给 `render_project_header(..., true, ...)`,副本因此与真实行像素级一致。位移段逐句对应上面流程第 5 步:
 
 ```rust
 let top_offset = self
@@ -532,73 +404,74 @@ let top_offset = self
     .unwrap_or(px(0.));
 ```
 
-最终元素：绝对定位、半透明混合背景、下边框加轻阴影（从视觉上「浮」在列表上）（[sidebar.rs:L3209-L3226](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L3209-L3226)）：
+一个实现细节:阈值 `header_height` 取的是**下一个头**的实测高度,而非粘性副本自身的高度——各分组头等高(`Tab::content_height`),用实测值可以顺带吸收空态子行等带来的高度差异;取不到边界(行未渲染或未测量)时一律不位移,宁可不让位也不跳变。
 
-```rust
-let element = v_flex()
-    .absolute()
-    .top(top_offset)
-    .left_0()
-    .w_full()
-    .bg(background)
-    .border_b_1()
-    .border_color(color.border.opacity(0.5))
-    .child(header_element)
-    .shadow_sm()
-    .into_any_element();
-```
+**浮层与挂载点**:[sidebar.rs:3214-3224](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L3214-L3224) 产出 `v_flex().absolute().top(top_offset)` 的容器,带半透明混色背景、底边框与浅阴影(阴影是「浮在上面」的视觉暗示)。它由 `render()` 在构建树的最早时刻算出([sidebar.rs:7764](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7764)),随后作为**绝对定位子元素**叠在包裹 `list` 的 `relative` 容器里([sidebar.rs:7859-7875](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7859-L7875))——叠在列表之上、无结果提示之下。
 
 #### 4.4.4 代码实践
 
-1. **实践目标**：用具体数字手推吸附算法，把三步流程变成肌肉记忆。
-2. **操作步骤**：
-   - 设 `entries = [HeaderA(0), T1(1), T2(2), HeaderB(3), T3(4)]`，`project_header_indices = [0, 3]`，每行高 28px，视口高 100px。分别对以下三个滚动位置计算 `(header_idx, needs_sticky, top_offset)`：
-     a. `item_ix = 0, offset_in_item = 0`（未滚动）；
-     b. `item_ix = 1, offset_in_item = 10`（A 的头已滚出 10px）；
-     c. `item_ix = 2, offset_in_item = 20`，且假设 HeaderB 的 `y_in_viewport = 6`（B 正在探入视口）。
-   - 每步先按 4.4.2 的伪代码计算，再回源码核对每个中间变量对应哪一行。
-3. **需要观察的现象**：纸面结果呈现「不显示 → 贴顶 → 上移让位」的三段行为，且 c 的 `top_offset = 6 − 28 = −22px`。
-4. **预期结果**：a：`header_idx=0`，`0 < 0` 不成立且 offset 为 0 → `needs_sticky = false` → `None`；b：`header_idx=0 < 1` → 吸附 A，`top_offset = 0`（B 的 `y_in_viewport ≥ 28`）；c：仍吸附 A，但 `top_offset = −22px`，A 的头被 B 推上去 22px。
-5. 视觉验证需真实滚动交互：在本机 `cargo run -p zed` 打开含多个线程的侧边栏并滚动（**待本地验证**）；纯逻辑验证可参照 4.2.4 的测试脚手架写一个直接调用 `render_sticky_header` 的测试，但需构造带滚动的 `ListState`，成本较高，建议以纸面推导为主。
+**实践目标**:用具体数字走一遍吸附判定与让位计算,确认你理解算法而非仅仅眼熟代码。
+
+**操作步骤**(纸面推演 + 测试验证):
+
+1. 设想 `entries` 为 8 行、两个分组:`project_header_indices = [0, 5]`,每行高 30px(头同样 30px,无空态子行)。分别对下列滚动位置写出 `header_idx`、`needs_sticky`、粘性头显示哪个分组:
+   - `scroll_top = (0, 0px)`
+   - `scroll_top = (1, 0px)`
+   - `scroll_top = (0, 12px)`
+   - `scroll_top = (6, 10px)`
+2. 接上题:当第二个分组头(下标 5)恰好滚到视口内纵坐标 \( y = 20\text{px} \) 时,计算 `top_offset`。
+3. 运行防回归测试确认测量保留机制在护着这条路:
+
+   ```bash
+   cargo test -p sidebar test_thread_metadata_update_preserves_sticky_header_measurements
+   ```
+
+**需要观察的现象/预期结果**:四小题答案依次为——(0, false, 无)真实头完整可见;`header_idx = 0` 但 `item_ix = 1 > 0` ⇒ (0, true, 第一组);`item_ix = 0` 且 `offset_in_item = 12 > 0` ⇒ (0, true, 第一组,头滚了一半);`.rev().find(≤6)` 命中 5 ⇒ (5, true, 第二组)。让位题:\( y = 20 < h = 30 \),`top_offset = 20 - 30 = -10\text{px} \),副本上移 10px 让位。测试通过说明重建不会丢掉这些计算依赖的测量值。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：为什么判定条件要区分「头完全滚出」与「头被滚过一部分」两种情况，而不是统一用 `header_idx <= item_ix`？
+**练习 1**:为什么定位用 `.rev().find(idx <= scroll_top.item_ix)` 而不是正序找第一个大于的再减一?
 
-**答案**：当 `header_idx == item_ix && offset_in_item == 0` 时，头正是视口第一行、完整可见，此时列表里的原位头就够了，再画吸附头等于同一行画两遍。只要 `offset_in_item > 0`，头的顶部就被裁掉了一部分，才需要吸附头补位。统一用 `<=` 会在列表顶部多出一个重复元素。
+答案:等价,但逆序直取更直接且天然处理「滚动顶行在第一个头之前」的情形——此时找不到任何满足条件的下标,`?` 直接返回 `None`,无需正序版本的边界特判。
 
-**练习 2**：吸附头的背景为什么用 `title_bar_background` 与 `panel_background` 混合（约 8:2），而不是不透明纯色？
+**练习 2**:如果 `apply_list_state_diff` 被改成「每次重建全部置为 Unmeasured」,粘性头部会出什么具体症状?
 
-**答案**：列表内容会从吸附头下方经过（`top_offset` 为负的交接阶段尤其明显），半透明混合让用户隐约看到被遮住的内容在移动，同时仍保证标签可读；这与 u4-l1 讲过的整体底色混合策略（标题栏色 : 面板色 ≈ 75:25）一脉相承，只是比例稍硬一点以突出「分层」。另外若窗口是透明外观，混合色能自然透出桌面背景，避免出现一块突兀的实心补丁。
+答案:`bounds_for_item(next_idx)` 大概率返回 `None`(未测量的行没有边界),让位位移恒为 0;滚动穿过分组边界时旧副本不再滑出、新副本瞬间替换,出现「跳变」而非「交接」;配合 u3-l3 讲过的粘性头闪跳,整体表现为分组交界处的视觉抖动。
 
-**练习 3**：`render_sticky_header` 里对 `entries.get(header_idx)` 的解构失败时返回 `None`（`else { return None; }`）。什么情况下索引表指向的行不是 `ProjectHeader`？
+**练习 3**:粘性头部在 `render()` 里只计算一次([sidebar.rs:7764](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7764))。滚动本身会触发重新计算吗?
 
-**答案**：按生成规则不可能——索引表只在 push `ProjectHeader` 前记录下标，两者在同一个循环里同步产生并一起原子替换。这个 `else` 是防御性分支（Rust 的 `let-else` 解构枚举时必须处理另一种可能），类似 `unwrap_or(false)` 的兜底风格，不代表可到达的状态。
+答案:会。gpui 的 `list` 滚动由 `ListState` 跟踪,滚动改变视口即标记所属元素脏,宿主实体随之重渲染;重渲染进入 `render()` 时用**最新**的 `logical_scroll_top()` 与 `bounds_for_item` 重算副本与位移。也就是说粘性效果不需要独立的滚动订阅,它搭了渲染循环的便车。
 
 ## 5. 综合实践
 
-把本讲四个模块串成一条链，完成一次「折叠 → 重建 → 渲染 → 吸附」的全链路追踪：
+**任务:写一份《折叠一次分组,系统里发生了什么》的完整时序说明**。
 
-1. **场景**：窗口里有分组 A（`/repo-a`，展开，线程 t1、t2）与分组 B（`/repo-b`，折叠，存储里有线程 t3）。写出此时的 `entries`、`project_header_indices`、每个 `EntryShape`。
-2. **操作**：用户点击 B 的分组头。按顺序写出发生的一切：`on_click` 分支选择（为何不是 `activate_or_open_workspace_for_group`）→ `toggle_collapse` 三步 → `MultiWorkspace` 内部变化（含 `serialize` 做了什么）→ `rebuild_contents` 中 B 分支的新行为（`should_load_threads` 的值、通知查询、`continue`）→ 新的 `entries` / `project_header_indices` / `EntryShape` 序列 → `apply_list_state_diff` 计算出的前缀/后缀长度与 splice 区间（用 u3-l3 的算法）。
-3. **验证**：把你的推导写成一张时序表，然后在本地运行：
+以「用户点击分组头」为起点,把本讲四个最小模块串成一条链,要求每一步都给出源码位置:
 
-   ```bash
-   cargo test -p sidebar --lib test_collapse_and_expand_group
-   cargo test -p sidebar --lib test_collapse_changes_entry_shape
-   ```
+1. **点击命中**:`render_project_header` 的 `on_click` 分流([sidebar.rs:2444-2452](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L2444-L2452)),普通点击且无搜索词 ⇒ `toggle_collapse`。
+2. **状态写入**:`toggle_collapse`([sidebar.rs:3229-3238](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L3229-L3238))→ `is_group_collapsed` 读 → `set_group_expanded` 写 `ProjectGroupState.expanded` 并触发 `mw.serialize`([sidebar.rs:941-950](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L941-L950)、[multi_workspace.rs:1449-1477](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/workspace/src/multi_workspace.rs#L1449-L1477))。
+3. **整表重建**:同步 `update_entries` → `rebuild_contents` 走折叠分支,组内行不再加载,但 `project_header_indices` 照常登记头([sidebar.rs:1930-1940](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L1930-L1940)),头上的三个徽标从此开始工作。
+4. **测量差异**:重推导后的 `entry_shapes` 中该头的 `is_collapsed` 翻转([sidebar.rs:2053-2071](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L2053-L2071)),`apply_list_state_diff` 据此 splice,变化的行失去测量、未变的行保留。
+5. **渲染验证**:`render_project_header` 现查 `is_group_collapsed` 换箭头方向并点亮徽标;若用户正滚在列表中间,`render_sticky_header` 的副本也随之换脸。
 
-   对照 `visible_entries_as_strings` 的断言输出（`v`/`>` 图标来自 4.2 的回读）修正表格。最后回答收尾问题：此刻用户把列表滚动到 B 的子区域（B 刚展开），粘性头部会显示哪个 key、`top_offset` 何时开始为负？
-4. **预期结果**：一条完整的因果链：点击 → 宿主布尔翻转并落库 → 同步重建（B 的子行入列）→ 形状序列变化触发最小 splice → 视口内 B 的头吸附、A 的头在交接时被推开。若中途任何一步对不上源码，回到对应小节的「源码精读」重读。
+然后运行三个测试作为证据链:
+
+```bash
+cargo test -p sidebar test_collapse_and_expand_group
+cargo test -p sidebar test_collapse_changes_entry_shape
+cargo test -p sidebar test_collapse_state_survives_worktree_key_change
+```
+
+三个测试分别锁定「可见行集合正确」「形状序列变化从而测量正确失效」「键迁移后折叠存活」三个环节。若本机暂不能运行,标注「待本地验证」并保留纸面时序。
 
 ## 6. 本讲小结
 
-- 分组头的全部状态（标签、运行/等待/通知徽标、活跃、`has_threads`）都是重建时算进 `ListEntry::ProjectHeader` 的数据，`render_project_header` 只做纯投影；三个徽标仅在折叠时显示，是「子行状态上收门牌」的设计。
-- 折叠状态存在 `MultiWorkspace.project_groups`（`{ key, expanded }` 表）而非 `Sidebar`：分组生命周期长于侧边栏可见性、序列化与 rekey 迁移都在宿主侧、侧边栏保持纯投影。读写通道是 `is_group_collapsed`（现查，缺失即展开）与 `set_group_expanded`（直改 + `serialize` 落库，不发事件，调用方自补 `update_entries`）。
-- `project_header_indices` 是「分组头在 `entries` 里的下标表」，在 push header 前一行记录、随 `SidebarContents` 快照原子重建，消费方是粘性头部定位、活跃分组定位与 `NextProject`/`PreviousProject` 循环切换。
-- `render_sticky_header` 三步走：反向找 ≤ 滚动行号的头下标、判定是否滚出（含部分滚出）、按下一个头的侵入量 \( y - h \) 计算推开位移；`bounds_for_item` 依赖测量缓存，这是 u3-l3 测量保留契约的直接受益者。
-- 折叠同时通过两条途径改变 `EntryShape` 序列（`is_collapsed` 字段翻转 + 子行形状整段消失），`test_collapse_changes_entry_shape` 把这一点锁死为契约，保证折叠时列表正确重置受影响行的高度。
+- `SidebarContents.project_header_indices` 是与 `entries` 同步生成的派生下标表:重建时「先记下标再压头」,折叠只删组内行、不删头;消费方是粘性头部与项目循环切换。
+- 折叠状态(`ProjectGroupState.expanded`)住在 `MultiWorkspace` 而非 `Sidebar`:分组所有权、序列化持久化、多消费方(`cycle_project_impl`、`fold_all`)与键迁移保留四条理由共同决定;Sidebar 只留 `is_group_collapsed` / `set_group_expanded` 一对薄门面,写入即 `serialize`。
+- `render_project_header` 一个函数服务列表内真实行与粘性副本两份拷贝,靠 `is_sticky` 前缀防 ID 撞车;折叠时点亮「运行/等待/通知」三个徽标替被藏起的行说话;`!is_collapsed && !has_threads` 时垫出 "No threads yet" 子行——这正是 `EntryShape::ProjectHeader` 必须含 `has_threads` 与 `is_collapsed` 的原因。
+- `render_sticky_header` 用 `logical_scroll_top` + 下标表定位视口顶端分组,用「头被滚过或滚了一半」判定是否显示,用下一分组头的实测边界做负向 `top_offset` 让位交接;整套机制依赖 u3-l3 的测量保留契约。
+- 折叠交互三入口汇一流:点击与键盘 `Confirm` 都进 `toggle_collapse`,批量走 `set_all_groups_expanded`;搜索态下折叠交互整体禁用。
 
 ## 7. 下一步学习建议
 
-下一讲 **u4-l3「线程行与终端行渲染」**将走进另外两种行：`render_thread` / `render_terminal` 如何拼装 `ThreadItem` 组件、状态图标与 diff 统计徽标、搜索高亮位置如何随图标前缀剥离而重新映射。本讲已铺好两块垫脚石：分组头徽标「展开时下放给子行」的约定，将在子行渲染中兑现；`highlight_positions` 从重建传到渲染的通路，也将在子行上看到更复杂的消费。若想先补上下文，可回读 u3-l3 的 `apply_list_state_diff`（本讲 4.4 的测量依赖）与 u2-l2 的 `ProjectGroupKey`（本讲全部键控状态的基座）。
+下一讲 u4-l3《线程行与终端行渲染》顺着 `render_list_entry` 的另外两个分支往下读:`render_thread` 与 `render_terminal` 如何拼装 `ThreadItem` 组件、状态图标与 diff 统计徽标,以及 `split_leading_icon_char` / `pick_icon_glyph` 的标题前缀图标化。届时你会发现本讲分组头上的三个「汇总徽标」与线程行上的「个体状态」是一对互补设计。若想先巩固本讲,建议回头精读 [multi_workspace.rs:697](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/workspace/src/multi_workspace.rs#L697) 起的 `rekey_project_group`,弄清键冲突时「活跃工作区的组获胜」规则如何保住折叠状态。

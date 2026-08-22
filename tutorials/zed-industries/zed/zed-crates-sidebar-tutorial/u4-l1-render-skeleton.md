@@ -4,372 +4,420 @@
 
 学完本讲，你应该能够：
 
-1. 把 `Sidebar::render` 产出的 UI 树按「头部 → 列表主体 → 导入横幅 → 底部栏」四层分区说清楚，并知道每层由哪个辅助函数负责。
-2. 解释 `no_open_projects` 与 `no_search_results` 这两个布尔量分别控制哪个替代视图，以及它们的数据来源。
-3. 区分 `SidebarView::ThreadList` 与 `SidebarView::Archive` 两种视图的渲染分支。
-4. 理解客户端窗口装饰（`Decorations::Client`）下侧边栏的绝对定位、圆角与「1px 外扩 + 补偿 padding」技巧，以及 `WindowBackgroundAppearance` 如何影响行标签的渲染方式。
+1. 把 `Sidebar::render` 产出的 UI 树按「头部 → 列表主体 → 导入横幅 → 底部栏」四层分区说清楚，并说出每层对应的辅助函数。
+2. 解释 `no_open_projects` 与 `no_search_results` 两个布尔量分别控制哪个替代视图，以及它们各自的数据来源。
+3. 区分 `SidebarView::ThreadList` 与 `SidebarView::Archive` 两种视图的渲染分支，知道哪些区域是两种视图共享的。
+4. 理解客户端窗口装饰（`Decorations::Client`）下侧边栏的绝对定位、圆角与「1px 外扩 + 补偿 padding」技巧，以及 `WindowBackgroundAppearance` 在本 crate 中的用武之地。
 5. 读懂 `render_sidebar_header` 与 `render_sidebar_bottom_bar` 这两个局部渲染函数的结构。
 
 ## 2. 前置知识
 
-本讲假设你已学完单元三（尤其是 u3-l2 的重建管线）。需要用到的概念：
+本讲假设你已学完单元三（尤其是 u3-l2 的重建管线与 u3-l3 的列表测量保留）。需要用到的概念：
 
 - **Render trait 与重渲染**：在 gpui 中，`Entity<Sidebar>` 之所以能显示在窗口里，是因为 `Sidebar` 实现了 `Render` trait。每当 `cx.notify()` 把实体标记为脏，gpui 就会再次调用 `render(&mut self, window, cx)`，把当前状态**投影**成一棵新的元素树。回忆 u3-l2：`update_entries` 每次收尾都会 `cx.notify()`，所以「全量重推导数据 → 全量重投影 UI」是同一哲学在数据侧和渲染侧的两面。
-- **flexbox 与 `v_flex`/`h_flex`**：gpui 的布局是 flexbox（类似 Web）。`v_flex()` 是竖向排列子元素的容器，`h_flex()` 是横向的。样式方法名借鉴 Tailwind CSS：`p_1` 是 padding、`border_r_1` 是右侧 1px 边框、`flex_1` 是「占据剩余空间」。
+- **flexbox 与 `v_flex` / `h_flex`**：gpui 的布局是 flexbox（类似 Web）。`v_flex()` 是竖向排列子元素的容器，`h_flex()` 是横向的。样式方法名借鉴 Tailwind CSS：`p_1` 是 padding、`border_r_1` 是右侧 1px 边框、`flex_1` 是「占据剩余空间」。
 - **FluentBuilder 链式写法**：渲染代码是一长串链式调用，其中三个方法负责条件分支：
   - `.when(条件, |el| ...)`：条件为真时应用闭包；
   - `.when_some(Option, |el, 值| ...)`：`Option` 有值时应用闭包；
-  - `.map(|el| ...)`：无条件变换，常用来做 `match`。
+  - `.map(|el| ...)`：无条件变换，常用来嵌一个 `match`。
 
   本讲的实践任务就是把这条长链「展开」成带缩进的树。
-- **虚拟列表 `list` 与 `ListState`**：gpui 的 [list(state, render_item)](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/gpui/src/elements/list.rs#L24-L34) 只为视口内的行调用 `render_item` 构建元素，滚动位置和每行的实测高度都缓存在 `ListState` 里。u3-l3 讲过 `apply_list_state_diff` 如何保护这些测量值，本讲只看它在渲染树里的位置。注意这里传的不是普通闭包而是 `cx.processor(Self::render_list_entry)`——[Context::processor](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/gpui/src/app/context.rs#L264-L272) 会把「按需回调」包成「先 update 实体再回调」的处理器，gpui 由此保证渲染任何一行时借到的都是 `&mut Sidebar`。
-- **窗口装饰（Decorations）**：窗口的标题栏、圆角、边框由谁画？[Decorations::Server](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/gpui/src/platform.rs#L522-L531) 表示操作系统（窗口管理器）负责，应用只画内容区；`Decorations::Client { tiling }` 表示应用自己画（Windows、Linux 上常见），此时窗口四角是圆的，贴着角的 UI 必须自己配合画圆角。`Tiling` 结构体的四个布尔进一步表示窗口某条边是否平铺贴住屏幕边缘（[crates/gpui/src/platform.rs:L697-L708](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/gpui/src/platform.rs#L697-L708)）——贴边的边是直角、无 1px 窗口边框。
-- **1px 样式方法**：`pt_px()`、`pb_px()`、`mt_px()` 这类「`_px` 后缀」方法的值恒为 `px(1.)`。它们由宏生成：前缀（`pt`/`pb`/`pl`…）在 [crates/gpui_macros/src/styles.rs:L765-L793](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/gpui_macros/src/styles.rs#L765-L793) 定义指向 padding 的哪一侧，后缀 `px` 在 [styles.rs:L1083-L1087](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/gpui_macros/src/styles.rs#L1083-L1087) 定义为 `px(1.)`（文档串就是 "1px"）。理解这点，4.2 节的「补偿 padding」就一目了然。
+- **虚拟列表 `list` 与 `ListState`**：gpui 的 [list(state, render_item)](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/gpui/src/elements/list.rs#L23-L34) 只为视口内的行调用 `render_item` 构建元素，滚动位置和每行的实测高度都缓存在 `ListState` 里。u3-l3 讲过 `apply_list_state_diff` 如何保护这些测量值，本讲只看它在渲染树里的位置。注意这里传的不是普通闭包而是 `cx.processor(Self::render_list_entry)`——[Context::processor](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/gpui/src/app/context.rs#L262-L272) 会把「按需回调」包成「先 update 实体再回调」的处理器，gpui 由此保证渲染任何一行时借到的都是 `&mut Sidebar`。
+- **窗口装饰（Decorations）**：窗口的标题栏、圆角、边框由谁画？[Decorations::Server](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/gpui/src/platform.rs#L520-L531) 表示操作系统（窗口管理器）负责，应用只画内容区；`Decorations::Client { tiling }` 表示应用自己画（Windows、部分 Linux 桌面常见），此时窗口四角是圆的，贴着角的 UI 必须自己配合画圆角。`Tiling` 结构体的四个布尔进一步表示窗口某条边是否平铺贴住屏幕边缘（[platform.rs:L697-L708](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/gpui/src/platform.rs#L697-L708)）——贴边的边是直角、没有 1px 窗口边框。
+- **`_px` 后缀样式方法**：`pt_px()`、`pb_px()`、`mt_px()` 这类方法的值恒为 `px(1.)`。它们由宏生成：`Styled` trait 体里展开的 `gpui_macros::style_helpers!()`（[styled.rs:L22-L34](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/gpui/src/styled.rs#L22-L34)）按「前缀 + 后缀」拼方法名，后缀 `px` 的定义就是 `px(1.)`（[styles.rs:L1083-L1087](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/gpui_macros/src/styles.rs#L1083-L1087)，文档串写作 "1px"）。理解这点，4.2 节的「补偿 padding」就一目了然。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
 | --- | --- |
-| `crates/sidebar/src/sidebar.rs` | 本讲主战场：`impl Render for Sidebar`（第 7760 行起）、`render_sidebar_header`、`render_sidebar_bottom_bar`、`render_sticky_header`、空态/无结果视图、导入横幅，全部在这个文件里 |
-| `crates/theme/src/theme.rs` | 定义 `CLIENT_SIDE_DECORATION_ROUNDING`（客户端装饰圆角半径 10px）与 `ClientDecorationsExt` 辅助 trait |
-| `crates/ui/src/utils/constants.rs` | `platform_title_bar_height`（平台标题栏高度）与 `TRAFFIC_LIGHT_PADDING`（macOS 红绿灯按钮左侧留白） |
-
-归档视图实体 `ThreadsArchiveView` 来自 `agent_ui` crate，本讲只看它被嵌入渲染树的位置，内部留到 u8-l1。
+| [crates/sidebar/src/sidebar.rs](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7760-L7903) | 本讲主战场：`impl Render for Sidebar`（7760 行起）以及 `render_sidebar_header`、`render_sidebar_bottom_bar`、`render_no_results`、`render_empty_state`、`render_sticky_header` 等局部渲染函数 |
+| [crates/gpui/src/platform.rs](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/gpui/src/platform.rs#L520-L531) | `Decorations` 枚举与 `Tiling` 结构体定义 |
+| [crates/gpui/src/elements/list.rs](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/gpui/src/elements/list.rs#L23-L34) | `list()` 虚拟列表元素构造函数 |
+| [crates/gpui/src/app/context.rs](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/gpui/src/app/context.rs#L262-L272) | `Context::processor`：把实体方法包装成列表回调 |
+| [crates/theme/src/theme.rs](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/theme/src/theme.rs#L52-L74) | `CLIENT_SIDE_DECORATION_ROUNDING`（10px）常量与 `ClientDecorationsExt` 圆角助手 |
+| [crates/ui/src/utils/constants.rs](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/utils/constants.rs#L12-L25) | `platform_title_bar_height`：平台标题栏高度 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 `Render::render`：一棵 UI 树的四层分区
+### 4.1 Render::render：一棵四层竖排的树
 
 #### 4.1.1 概念说明
 
-`render` 是侧边栏的「总装车间」：它自己几乎不画细节，而是把工作分派给一组 `render_*` 辅助函数，自己只决定**整体结构**——根容器的样式与定位、四种互斥/叠加的内容分支、子元素的排列顺序。理解本函数的最好方式不是逐行读链式调用，而是先把这棵树画出来。
+`render()` 是侧边栏的「总装车间」：它自己几乎不画任何具体内容，而是把四层区域组装成一棵竖向元素树——
 
-整棵树自上而下是四层：
+1. **头部**（`render_sidebar_header`）：平台标题栏 + 搜索过滤行；
+2. **列表主体**：虚拟列表、空态视图或归档视图三者择一；
+3. **导入横幅**：ACP 外部 Agent 导入与跨通道导入两条引导横幅（条件出现）；
+4. **底部栏**（`render_sidebar_bottom_bar`）：折叠按钮、历史按钮、最近项目按钮。
 
-1. **头部**（`render_sidebar_header`）：标题栏高度的搜索区，混着窗口控件。
-2. **列表主体**：三种可能——空态视图（没有任何打开的项目）、虚拟列表（正常情况，可能叠加「无结果」覆盖层与粘性分组头）、或整个换成归档视图实体。
-3. **导入横幅**（可选）：ACP 外部代理导入、跨通道导入，各自独立判定。
-4. **底部栏**（`render_sidebar_bottom_bar`）：收起按钮、历史切换按钮、最近项目按钮。
+同时它在本讲要厘清三组「开关」：
+
+- **两个视图**：`SidebarView::ThreadList`（默认）与 `SidebarView::Archive(archive_view)`（历史归档），决定主体区域渲染什么；
+- **两个布尔**：`no_open_projects` 与 `no_search_results`，决定线程列表视图下用哪个替代视图顶替列表；
+- **两种装饰**：`Decorations::Server` 与 `Decorations::Client`，决定根容器的尺寸与定位方式（4.2 节专门讲）。
 
 #### 4.1.2 核心流程
 
-把 [render()](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7761-L7902) 的链式调用展开，得到这样一棵树：
+把 [render()](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7760-L7903) 的链式调用展开，得到这样一棵树（✓ 表示该分支的触发条件）：
 
 ```text
-v_flex#workspace-sidebar                     ← 根：竖向 flex 列
-│  .key_context(dispatch_context)            ← 键位上下文（u5-l1 详讲）
-│  .track_focus(&focus_handle)               ← 可聚焦元素
-│  .on_action(...) × 25                      ← 动作注册（u5-l1 详讲）
-│  [.map 装饰分支]                            ← Server: h_full + w(width)
-│                                            ← Client: absolute + 1px 外扩 + 圆角（4.2 详讲）
-│  .bg(混合背景)  [.when 边框]                ← 左侧 → border_r_1；右侧 → border_l_1
-│
-├─ [.map 视图分支] match self.view
-│   ├─ SidebarView::ThreadList:
-│   │   ├─ render_sidebar_header(no_open_projects)          ← 第 1 层
-│   │   └─ [.map]
-│   │       ├─ if no_open_projects → render_empty_state      ← 替代视图 A
-│   │       └─ else → v_flex.relative.flex_1.overflow_hidden
-│   │           ├─ list(list_state, render_list_entry)       ← 虚拟列表
-│   │           ├─ .when(no_search_results) → render_no_results   ← 替代视图 B
-│   │           ├─ .when_some(sticky_header) → 粘性分组头
-│   │           └─ custom_scrollbars(...)
-│   └─ SidebarView::Archive(view) → view.clone()             ← 整体替换为归档视图
-│
-├─ [.map 横幅层]
-│   ├─ .when(show_acp)           → render_acp_import_onboarding(verbose)
-│   └─ .when(show_cross_channel) → render_cross_channel_import_onboarding(verbose)
-│
-└─ render_sidebar_bottom_bar                                  ← 第 4 层
+v_flex("workspace-sidebar")                        # 竖排根容器
+├─ key_context(dispatch_context)                   # 键位上下文（u5-l1 详讲）
+├─ track_focus(focus_handle)                       # 让侧边栏可聚焦
+├─ on_action × 24                                  # 动作注册（u5-l1 详讲）
+├─ font(ui_font)                                   # UI 字体
+├─ map: match window.window_decorations()          # ✓ 装饰模式
+│   ├─ Server   → h_full().w(self.width)           #   常规流式布局
+│   └─ Client   → absolute + 1px 外扩 + 圆角 + 补偿 padding
+├─ bg(title_bar_background ⊕ panel_background·25%) # 混合背景
+├─ when(在左侧) → border_r_1                        # ✓ side(cx) == Left
+│  when(在右侧) → border_l_1                        # ✓ side(cx) == Right
+├─ map: match &self.view                           # ✓ 视图分支
+│   ├─ ThreadList
+│   │   ├─ render_sidebar_header(no_open_projects)
+│   │   └─ map: if no_open_projects                #   ✓ 没有任何打开的项目
+│   │   │       └─ render_empty_state()            #     空态：打开项目/克隆仓库
+│   │   │     else
+│   │   │       └─ v_flex(relative, flex_1, overflow_hidden)
+│   │   │           ├─ list(list_state, render_list_entry)   # 虚拟列表
+│   │   │           ├─ when(no_search_results) → render_no_results()  # ✓ entries 为空
+│   │   │           ├─ when_some(sticky_header) → 粘性项目头  # ✓ 滚动越过某个分组头
+│   │   │           └─ custom_scrollbars(Vertical) # 绑定 list_state 的滚动条
+│   └─ Archive(archive_view)
+│       └─ archive_view.clone()                    #   归档子实体整体接管主体
+├─ when(show_acp)           → ACP 导入横幅          # ✓ 检测到外部 Agent 且未关闭
+├─ when(show_cross_channel) → 跨通道导入横幅        # ✓ 发现其他通道线程且未关闭
+└─ render_sidebar_bottom_bar()                     # 底部栏（两种视图都渲染）
 ```
 
-两个关键布尔量在函数开头一次性算好：
+两个布尔的分工：
 
-- `no_open_projects = !self.contents.has_open_projects`：**世界里有没有任何打开的项目**。它决定第 2 层是显示「空态引导」（打开/克隆项目）还是显示列表。数据来自 `SidebarContents.has_open_projects`（u2-l1 讲过，rebuild 阶段维护）。
-- `no_search_results = self.contents.entries.is_empty()`：**当前重建结果是否一行都没有**。它只是在列表容器**之上叠加**一个居中的「无结果/还没有线程」提示，列表本身仍然存在（只是没有行）。注意两者的层级差别：空态是**替换**列表区域，无结果是**覆盖**在列表容器上。
+| 布尔 | 定义处 | 数据来源 | 控制的替代视图 |
+| --- | --- | --- | --- |
+| `no_open_projects` | `!self.contents.has_open_projects` | u2-l1 讲过的 `SidebarContents.has_open_projects`，由 `rebuild_contents` 维护 | `render_empty_state()`：整个列表主体被 `ProjectEmptyState` 替换，提供「打开项目 / 克隆仓库」入口；同时让头部退化成纯标题栏（见 4.3） |
+| `no_search_results` | `self.contents.entries.is_empty()` | 重建后的可见行序列（含分组头） | `render_no_results()`：覆盖在列表位置上的提示，文案随是否在搜索细分两种 |
 
-还要注意：粘性头部 `sticky_header` 是在构建树**之前**单独算好的（第 7764 行），它返回 `Option<AnyElement>`——不满足滚动条件时是 `None`，`.when_some` 直接跳过。
+注意一个细节：u3-l4 讲过搜索过滤发生在分组头压入之前，整组无命中时连分组头一并丢弃——所以「过滤无命中」和「有项目但一个线程都没有」最终都表现为 `entries` 为空，靠 `render_no_results` 里是否查询非空来区分文案。
 
 #### 4.1.3 源码精读
 
-准备阶段——字体、粘性头、混合背景、两个开关：
+**（1）序幕：三个准备值与两个布尔**
 
-[crates/sidebar/src/sidebar.rs:L7761-L7772](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7761-L7772) 中：先取 UI 字体并预先计算粘性头部；随后 `bg = title_bar_background.blend(panel_background.opacity(0.25))`——这就是讲义标题里说的「标题栏混合背景」。gpui 的 `blend` 语义是逐通道线性插值（见 [crates/gpui/src/color.rs:L57-L71](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/gpui/src/color.rs#L57-L71)）：
+[sidebar.rs:L7760-L7772](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7760-L7772)：先算 UI 字体和粘性头部（粘性头部是个 `Option`，此时只是「预演」，后面用 `when_some` 决定挂不挂），再把标题栏底色与 25% 不透明度的面板底色混合，作为整个侧边栏的底色——让它和标题栏视觉上连成一体。最后派生本讲的两个关键布尔：
 
-\[ c = (1-\alpha)\cdot c_{\text{title\_bar}} + \alpha\cdot c_{\text{panel}},\qquad \alpha = 0.25 \]
+```rust
+let no_open_projects = !self.contents.has_open_projects;
+let no_search_results = self.contents.entries.is_empty();
+```
 
-即整个侧边栏底色 = 75% 标题栏色 + 25% 面板色，让侧边栏与标题栏同源又略偏面板。第 7762 行的 `_titlebar_height` 变量名以下划线开头——它在 `render` 里算了但没使用，头部函数内部会自己再算一次。
+顺带一提，第 7762 行的 `let _titlebar_height = ...` 是一个带下划线前缀的**未使用**绑定——标题栏高度在头部函数内部另算（见 4.3），这里只是遗留，也提醒我们不必把源码当圣物。
 
-根容器与动作注册（本讲只看结构，动作体系留到 u5-l1）：
+**（2）根容器：身份、焦点与动作注册**
 
-[crates/sidebar/src/sidebar.rs:L7774-L7805](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7774-L7805) 用 `v_flex().id("workspace-sidebar")` 建根，挂上键位上下文、焦点追踪，并连续注册 25 个 `.on_action` 处理器：24 个是 `cx.listener(Self::某个方法)` 形态（选择移动、确认、折叠、归档、重命名、切换器……），最后 1 个是针对 `OpenRecent` 动作的闭包，用来开关「最近项目」弹出层。注册完 `.font(ui_font)` 统一字体。
+[sidebar.rs:L7774-L7805](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7774-L7805)：`v_flex().id("workspace-sidebar")` 建立带状态的根容器，`.key_context(...)` 挂上键位上下文（`ThreadsSidebar` + `menu`，u5-l1 展开），`.track_focus(...)` 接入焦点系统，随后是 23 个 `cx.listener(...)` 加 1 个内联 `OpenRecent` 共 24 个 `on_action` 注册——键盘交互的入口全部集中在这里。这些注册与布局无关，所以本讲只数个数、不逐个展开。
 
-视图分支——`SidebarView` 是个只有两个变体的枚举（[crates/sidebar/src/sidebar.rs:L131-L135](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L131-L135)）：
+**（3）视图分支：ThreadList 与 Archive**
 
-[crates/sidebar/src/sidebar.rs:L7852-L7886](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7852-L7886) 按 `self.view` 分流。`ThreadList` 分支先挂头部，再按 `no_open_projects` 二选一：空态走 `render_empty_state`；正常走一个 `relative + flex_1 + overflow_hidden` 的容器，依次放入 `list(self.list_state.clone(), cx.processor(Self::render_list_entry))` 虚拟列表、`no_search_results` 时的覆盖层、`when_some(sticky_header)` 的粘性头、以及 `custom_scrollbars`（滚动条把手绑定到 `list_state`）。`Archive` 分支最简单：`this.child(archive_view.clone())`——归档视图是一个独立的 `Entity<ThreadsArchiveView>`，直接把自己 `render` 出的元素树挂进来（实体 clone 只是句柄复制，不复制状态）。
+[sidebar.rs:L7852-L7886](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7852-L7886) 是主体区域的 `match &self.view`。`SidebarView` 本身只有两个变体（[sidebar.rs:L130-L135](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L130-L135)）：
 
-横幅层与底栏收尾：
+```rust
+enum SidebarView {
+    #[default]
+    ThreadList,
+    Archive(Entity<ThreadsArchiveView>),
+}
+```
 
-[crates/sidebar/src/sidebar.rs:L7887-L7902](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7887-L7902) 先算两个 `should_render_*` 布尔，再依 `.when(show_acp)` / `.when(show_cross_channel)` 各挂一条横幅，最后 `.child(self.render_sidebar_bottom_bar(cx))`。注意顺序：横幅是加在列表主体**之后**、底栏**之前**的子元素，所以在竖向 flex 列里恰好夹在两者中间。
+- `ThreadList` 分支先挂头部，再按 `no_open_projects` 二选一：空态视图，或「`relative` + `flex_1` + `overflow_hidden`」的主体容器。主体容器里有四样东西：虚拟列表、无结果提示、粘性项目头、滚动条。列表回调传的是 `cx.processor(Self::render_list_entry)`，行分发逻辑（分组头/线程/终端）在 [render_list_entry（sidebar.rs:L2164-L2221）](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L2164-L2221)，具体行的画法留给 u4-l2、u4-l3。
+- `Archive` 分支只有一行：`.child(archive_view.clone())`——归档视图是 `agent_ui` 里的 `ThreadsArchiveView` 实体，整体接管主体区域（它有自己的头部和搜索，u8-l1 详讲）。注意头部、横幅、底部栏在这个 `match` 之外，所以**底部栏和横幅两种视图共享，而 `render_sidebar_header` 只在线程列表视图渲染**。
+
+粘性头部由 [render_sticky_header（sidebar.rs:L3142-L3227）](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L3142-L3227) 现算：从 `list_state.logical_scroll_top()` 找到「最后一个已滚出视口顶部的分组头」，若它确实被滚过（或正被滚出一半）就返回一个 `absolute` 定位、叠在列表顶部的分组头元素，还会根据下一个分组头滚入的位置计算 `top_offset` 让它被「推走」。u3-l3 讲过为什么必须保护 `ListState` 的测量值——`bounds_for_item` 有值，这里的推进动画才不会闪跳。
+
+**（4）两个替代视图**
+
+无结果提示在 [render_no_results（sidebar.rs:L7151-L7170）](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7151-L7170)：一个居中的 `Label`，文案由 `has_filter_query` 决定——有查询时 "No threads match your search."，否则 "No threads yet"。空态在 [render_empty_state（sidebar.rs:L7172-L7195）](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7172-L7195)：`ProjectEmptyState` 组件带「打开项目」（派发 `workspace::Open` 动作）与「克隆仓库」（派发 `git::Clone`）两个回调，还打了遥测事件。
+
+**（5）横幅与底栏收尾**
+
+[sidebar.rs:L7887-L7902](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7887-L7902)：两个 `.when` 条件挂横幅（判定函数在 [sidebar.rs:L7427-L7441](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7427-L7441) 与 [L7467-L7470](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7467-L7470)，横幅本体是自由函数 [render_import_onboarding_banner（sidebar.rs:L7612-L7675）](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7612-L7675)）。一个有意思的细节：两条横幅同时出现时会用更长的按钮文案，且这个「详细模式」经 `get_or_insert` 记进 `import_banners_use_verbose_labels` 字段后**不再回退**——避免其中一条被关闭后文案突然变短造成跳动。最后 `.child(self.render_sidebar_bottom_bar(cx))` 无条件挂底栏。
 
 #### 4.1.4 代码实践
 
-**实践目标**：把 `render()` 的链式调用彻底「去语法糖」，练成一眼能看出分支结构的能力。
+**实践目标**：把 `render()` 的链式调用亲手展开成伪代码树，并能回答两个布尔各自切换哪个替代视图。
 
-**操作步骤**：
+**操作步骤**（本地练习，不必提交）：
 
-1. 打开 [crates/sidebar/src/sidebar.rs:L7774-L7902](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7774-L7902)，准备好纸或本地文本文件。
-2. 从 `v_flex()` 开始，每遇到 `.child(...)` 就向下一层缩进，每遇到 `.when(cond, ...)` / `.when_some(opt, ...)` / `.map(...)` 就写一行 `── when <条件> →` / `── map <这个 map 在 match 什么>` 的标注。
-3. 对每个条件，追问两件事：条件的**数据来源字段**是什么（如 `self.contents.has_open_projects`）？它**何时变化**（哪个函数写入它）？
-4. 对照 4.1.2 的树检查：你的树是否漏掉了 `.when(!tiling.top, ...)` 这类藏在装饰分支内部的二级条件（4.2 会展开）。
+1. 打开 [sidebar.rs:L7760-L7903](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7760-L7903)，**先遮住 4.1.2 节的树**，从上到下逐个链式节点抄写成带缩进的树，给每个 `.when` / `.when_some` / `.map` 标注触发条件。
+2. 展开完后与 4.1.2 的树对照，找出你漏掉的分支（最常见的遗漏：`no_open_projects` 时头部仍会渲染、横幅在两种视图下都可能出现）。
+3. 追一下数据来源：`has_open_projects` 在哪被赋值（提示：`rebuild_contents` 内，u3-l4 讲过）；`entries` 何时会为空。
 
-**需要观察的现象**：展开后你会发现 `render()` 里没有任何循环和复杂计算——所有「内容」都来自 `self.contents`（u3-l4 的重建结果）与各 `render_*` 函数；`render` 只做**结构决策**。
+**需要观察的现象**：树里同一条链上 `.map` 出现了四次（装饰、视图、横幅、以及头部内的 match），每层 `map` 都是一个「结构性二选一」。
 
-**预期结果**：得到一棵类似 4.1.2 的伪代码树（你的版本应更完整，含装饰分支内部的条件）。本实践为本地练习，不必提交。
+**预期结果**：
+
+- `no_open_projects = true`（窗口里没有任何打开的项目）→ 主体变成 `ProjectEmptyState` 空态，头部的搜索行也被 `.when(!no_open_projects, ...)` 摘掉；
+- `no_search_results = true` 且有项目打开 → 列表位置出现居中提示，有查询词时说「无匹配」，无查询词时说「还没有线程」。
+
+改代码验证（可选）：本地把 [L7771](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7771) 改成 `let no_open_projects = true;` 后 `cargo run -p zed`，应看到空态视图常驻（**待本地验证**，实验后记得还原）。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：`no_open_projects` 与 `no_search_results` 能否同时为真？此时界面显示什么？
+**练习 1**：归档视图下按 `Escape`（`cancel` 动作）仍能被侧边栏处理吗？依据是什么？
 
-答案：能。关闭所有项目后 `has_open_projects` 为假，且 `entries` 必然为空。但此时只有**空态视图**生效——`render_no_results` 位于 `else` 分支的列表容器里，空态分支根本不会构建那个容器。也就是说空态优先级更高，二者是替换与覆盖的关系，不是平级选择。
+答案：能。24 个 `on_action` 注册在根容器上（[L7778-L7804](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7778-L7804)），而视图 `match` 只替换主体子树，根容器及其动作注册在任何视图下都在。
 
-**练习 2**：粘性头部为什么在构建树之前（第 7764 行）单独计算，而不是在列表容器的闭包里现算？
+**练习 2**：`render_sticky_header` 在 `render()` 开头就被调用（[L7764](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7764)），但在空态视图下它的结果去哪了？
 
-答案：因为它需要返回 `Option`——`render_sticky_header` 依据滚动位置判断「当前是否需要粘性头」，不需要时返回 `None`，`render` 里用 `.when_some(sticky_header, ...)` 处理。先算好后传入，也让树构建代码保持线性，避免在 `.when_some` 闭包里再嵌套一次「计算 + 使用」。
+答案：被丢弃。它返回 `Option<AnyElement>`，只有线程列表分支里的 `.when_some(sticky_header, ...)`（[L7875](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7875)）会消费它；空态分支不接这个变量，值直接被扔掉（而且空态下列表无内容，`render_sticky_header` 也会因找不到分组头返回 `None`）。
 
-**练习 3**：`SidebarView::Archive` 分支为什么只有一行 `this.child(archive_view.clone())`？
+**练习 3**：为什么 `no_search_results` 的判定用 `entries.is_empty()` 而不是「线程数为 0」？
 
-答案：归档视图是独立实体 `Entity<ThreadsArchiveView>`（由 `agent_ui` 提供）。实体句柄的 `clone` 是廉价的引用复制；把它作为 child 挂入时 gpui 会调用它自己的 `Render` 实现。侧边栏因此不必关心归档视图的内部结构——这是「组合优于实现」的分层：sidebar 管切换，agent_ui 管内容。
+答案：`entries` 是**可见行**序列，包含分组头。u3-l4 讲过过滤发生在压入分组头之前，整组无命中连头一起丢；所以 `entries` 为空准确表达了「没有任何可见行」——无论是因为过滤无命中，还是因为真的没有线程。若用「线程数为 0」，分组头还在时会误判。
 
-### 4.2 客户端窗口装饰：Decorations、圆角与 1px 外扩
+### 4.2 客户端窗口装饰：绝对定位、圆角与 1px 外扩
 
 #### 4.2.1 概念说明
 
-`WindowBackgroundAppearance` 与 `Decorations` 回答的是同一个问题的两面：**窗口长什么样，应用要配合做什么？**
+服务端装饰下窗口是方的，应用只管画内容；客户端装饰下（Windows、部分 Linux），**窗口的圆角和边框由应用自己画**。侧边栏贴着窗口左缘或右缘，一旦它占据了窗口的一侧，那一侧的两个窗口圆角就落在侧边栏的「辖区」里——所以侧边栏必须把自己的对应角也画成圆角，否则圆角窗口后面会露出一块方形的背景色。
 
-- `Decorations` 决定**几何**：标题栏和窗口边框由谁绘制。`Server` 时侧边栏只是一个普通的全高块；`Client` 时窗口本身有 10px 圆角和 1px 边框，贴边的侧边栏必须自己画圆角、并处理与窗口边框的接缝。
-- `WindowBackgroundAppearance` 决定**底色透明度**：Zed 允许透明/半透明窗口背景。侧边栏在非不透明窗口上要避免使用渐变淡出效果——渐变叠在透明背景上会渲染成一块可见的色斑。
+这带来两个工程问题：
 
-本模块讲三个点：`Decorations` 匹配分支的几何技巧、圆角常量的来源、以及 `WindowBackgroundAppearance` 在行渲染里的一个应用。
+1. **对齐**：客户端装饰的窗口四周有一圈 1px 的窗口边框。窗口内容区若老老实实从 0 开始画，圆角背景和窗口形状会差 1px，圆角处露出透明缝。
+2. **贴边（tiling）**：窗口被平铺到屏幕边缘时，那条边没有圆角也没有 1px 边框，处理方式必须区分。
+
+`WindowBackgroundAppearance` 则是另一个平台维度：窗口背景可以是不透明 / 半透明 / 模糊。本 crate 只在一处直接用到它——判断窗口是否不透明（见 4.2.3 末尾），影响项目分组头行内渐变标签的渲染方式。
 
 #### 4.2.2 核心流程
 
-客户端装饰下的定位算法（伪代码）：
+客户端装饰分支的规则可以总结成一张表（对上下左右每条边独立适用）：
 
-```text
-若 Decorations::Server:
-    侧边栏 = 普通块，高 = 窗口高，宽 = self.width
-若 Decorations::Client { tiling }:
-    侧边栏 = 绝对定位，铺满自己这一侧
-    对每条「未平铺」的边（top/bottom/靠窗的 left 或 right）:
-        向外扩 1px（偏移 -1px）盖住窗口边框
-        同时在该侧加 1px padding，把内容推回安全区
-    对每个「两条邻边都未平铺」的角:
-        画 10px 圆角（与窗口圆角对齐）
-```
+| 该边状态 | 根容器该边 | 效果 |
+| --- | --- | --- |
+| 贴边（`tiling.top/left/right/bottom == true`） | 定位到 `px(0.)` | 与窗口齐平，直角 |
+| 未贴边 | 定位到 `px(-1.)`（向外扩 1px）并加 1px 补偿 padding | 背景盖住 1px 窗口边框，内容又被 padding 推回原位 |
 
-为什么必须外扩 1px？窗口在客户端装饰下自带 1px 描边。如果侧边栏老老实实从窗口内容区 (0, 0) 开始，它的圆角背景与窗口圆角轮廓之间会露出一圈透明缝。把背景矩形向未平铺的边各扩 1px，让背景「压」在窗口描边之下，圆角才能严丝合缝；扩出去的 1px 用 padding 补偿，避免内容（文字、边框线）挪位。
+圆角规则：某个角要圆，当且仅当**相邻两条边都未贴边**。圆角半径恒为
+
+\[ r = \text{CLIENT\_SIDE\_DECORATION\_ROUNDING} = 10\,\text{px} \]
+
+侧边栏在左侧时管左上/左下角，在右侧时管右上/右下角。
 
 #### 4.2.3 源码精读
 
-装饰匹配的主分支：
+装饰分派在 [sidebar.rs:L7806-L7847](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7806-L7847)。`Server` 分支只有一行：`el.h_full().w(self.width)`，即常规流式布局、按用户拖的宽度占位。
 
-[crates/sidebar/src/sidebar.rs:L7806-L7847](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7806-L7847)。`Decorations::Server` 一行带过：`el.h_full().w(self.width)`（宽度即 `Sidebar` 的 `width` 字段，构造与恢复时被钳制在 200–800px 之间，[sidebar.rs:L104-L106](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L104-L106) 定义常量、[L7683](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7683) 执行钳制）。`Decorations::Client { tiling, .. }` 分支前的注释（7810-7816 行）原文解释了动机：侧边栏拥有其所在一侧的窗口圆角，要像标题栏、状态栏那样画圆角；在未平铺的边上向外拉伸 1px（带补偿 padding），使圆角背景与窗口形状精确对齐、避免圆角处出现透明缝。代码逐项执行：`.absolute()` 脱离文档流，`top`/`bottom` 在未平铺时取 `px(-1.)`（7819-7820 行），配合 `.pt_px()`/`.pb_px()`（7821-7822 行）补偿；左右方向按 `on_left` 二选一（7823-7833 行）：靠窗的那条边同样 `-1px` + `pl(px(1.))` 或 `pr(px(1.))`；最后四个 `.when` 只在「角的两条邻边都未平铺」时给对应角加圆角（7834-7845 行）。
+`Client` 分支前面有一段注释（[L7810-L7816](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7810-L7816)），翻译过来就是 4.2.1 的两个工程问题：客户端装饰下侧边栏拥有所在一侧的窗口圆角，所以要像标题栏、状态栏那样画圆角；侧边栏在未贴边的边上向外多画 1px（配合补偿 padding），让圆角背景与窗口形状精确对齐，避免圆角处出现透明缝。代码逐层做三件事：
 
-圆角常量与现成的辅助 trait：
+1. **绝对定位 + 上下边**（[L7817-L7822](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7817-L7822)）：`.absolute()` 脱离常规布局，`.top(...)`/`.bottom(...)` 按贴边与否取 `0` 或 `-1`，未贴边再加 `.pt_px()`/`.pb_px()` 把内容推回 1px。
+2. **左右边**（[L7823-L7833](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7823-L7833)）：靠窗口内侧的一端永远对齐 `0`；靠外的一端按贴边与否取 `0` 或 `-1` 加补偿 `pl/pr(px(1.))`。
+3. **四角圆角**（[L7834-L7845](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7834-L7845)）：`on_left` 时对左上/左下角、`on_right` 时对右上/右下角，条件统一是「该角的两个邻边都未贴边」。
 
-[crates/theme/src/theme.rs:L52-L77](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/theme/src/theme.rs#L52-L77) 定义 `CLIENT_SIDE_DECORATION_ROUNDING = px(10.0)`，并提供 `ClientDecorationsExt::rounded_client_corners(tiling)`——「两条邻边都未平铺才圆这个角」的通用实现。对比之下会发现 `render` **没有**复用这个 helper，而是手写四个 `.when`：因为该 helper 面向占满整窗的元素（一次处理全部四角），而侧边栏只拥有**自己一侧**的两个角，还要先知道 `on_left` 还是 `on_right`。这是「读源码时注意现成抽象为何没被复用」的好例子。
+半径常量来自 theme crate：[theme.rs:L52-L53](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/theme/src/theme.rs#L52-L53) 定义 `CLIENT_SIDE_DECORATION_ROUNDING = px(10.0)`，紧随其后的 [ClientDecorationsExt::rounded_client_corners（theme.rs:L57-L74）](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/theme/src/theme.rs#L57-L74) 把同样的「两邻边都不贴边才圆角」规则封装成任意 `Styled` 元素可用的助手。侧边栏没有直接用它，因为除了圆角它还要同时处理 1px 外扩与补偿 padding——这三件事必须配套，分开写反而容易漏。
 
-`WindowBackgroundAppearance` 的实际用武之地（预告 u4-l2）：
-
-[crates/sidebar/src/sidebar.rs:L2292-L2306](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L2292-L2306) 在 `render_project_header` 里先判定 `opaque_window = window_background_appearance() == WindowBackgroundAppearance::Opaque`（枚举定义见 [crates/gpui/src/platform.rs:L2101-L2121](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/gpui/src/platform.rs#L2101-L2121)，含 Opaque/Transparent/Blurred/MicaBackdrop 等变体）；注释说明：文字的渐变淡出效果在透明窗口上会渲染成可见色斑，所以非不透明窗口改用 `truncate()` 截断标签。窗口外观设置由此一路影响到一行文字的展示方式。
-
-顺带一提，`render_sidebar_header` 里也有一个装饰匹配（[crates/sidebar/src/sidebar.rs:L7215-L7218](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7215-L7218)）：客户端装饰时头部 `mt(px(-1.))` 向上缩 1px、服务端装饰时 `mt_px().pb_px()`——这是同一个 1px 接缝问题在头部的镜像处理（父容器顶部扩了 1px，头部要缩回去对齐标题栏）。
+`WindowBackgroundAppearance` 的用法在 [sidebar.rs:L2292-L2295](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L2292-L2295)（位于 `render_project_header` 内）：只有窗口背景**不透明**时才允许给分组标签加渐变淡出（fade gradient），半透明/模糊窗口上渐变会渲染成一块可见的色斑，所以改为直接截断文本。这是「渲染决策依赖平台外观设置」的一个典型小样本。
 
 #### 4.2.4 代码实践
 
-**实践目标**：把「1px 外扩 + 补偿 padding」的几何关系在纸面上算清楚。
+**实践目标**：给定 `tiling` 与侧边栏位置，推出哪些圆角类会被应用，验证你读懂了规则。
 
 **操作步骤**：
 
-1. 画出侧边栏贴在窗口左侧、窗口**未平铺**时的横截面示意：窗口边框 1px、侧边栏背景从 `left = -1px` 开始、内容区因 `pl(px(1.))` 从 0 开始。标出背景左边缘与窗口外边缘重合的位置。
-2. 再画窗口**左缘平铺**（`tiling.left = true`）时的示意图：此时 `left = px(0.)`、无补偿 padding、左上/左下角不画圆角。
-3. 阅读 [crates/theme/src/theme.rs:L58-L74](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/theme/src/theme.rs#L58-L74) 的 `rounded_client_corners`，与 [sidebar.rs:L7834-L7845](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7834-L7845) 的四个 `.when` 逐条对照，圈出二者处理的角集合差异。
+1. 阅读规则函数 [ClientDecorationsExt::rounded_client_corners（theme.rs:L57-L74）](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/theme/src/theme.rs#L57-L74)，它把四角的判定写得最紧凑。
+2. 对下面五个场景，先自己写出 sidebar 根容器（左侧布局）会应用哪些 `rounded_*` 与哪些 `-1px` 外扩：
+   - a. 自由窗口（四边都不贴）；
+   - b. 窗口贴住屏幕左缘（`tiling.left = true`，其余 false）；
+   - c. 窗口贴住屏幕顶缘（`tiling.top = true`，其余 false）；
+   - d. 全屏平铺（四边都 true，实际上此时窗口通常无装饰）；
+   - e. 布局切到右侧、自由窗口。
+3. 对照 [sidebar.rs:L7817-L7845](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7817-L7845) 逐条核对。
 
-**需要观察的现象**：两份示意图里，「背景覆盖的区域」与「内容可见的区域」应当恰好相差 1px——这就是补偿 padding 存在的意义。
+**需要观察的现象**：外扩（`-1px`）与圆角是两个独立维度——场景 b（贴左缘）不外扩左边但仍然不圆左上/左下角？请用代码条件 `!(tiling.top || tiling.left)` 自己验证这个推断。
 
-**预期结果**：能口头回答「为什么 `top = -1px` 时必须 `pt_px()`，而去掉任何一个都会出什么视觉问题（前者露透明缝，后者内容上移 1px）」。
+**预期结果**：
+
+- a：左上、左下都圆，四边都外扩 1px；
+- b：左边对齐 0 且 `pl(px(1.))` 不加；左上/左下角因 `tiling.left` 为真**不圆**；
+- c：顶边不外扩、不加 `pt_px()`；左上角不圆，左下角仍圆；
+- d：全部直角、全部对齐 0；
+- e：右上、右下圆（`rounded_tr`/`rounded_br`）。
+
+**待本地验证**：在 Linux/Windows 上 `cargo run -p zed`，把窗口贴到屏幕边缘再拖离，观察侧边栏圆角的出现与消失；macOS 默认服务端装饰，此分支不会走到。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：侧边栏配置在右侧（`SidebarSide::Right`），窗口顶部平铺、其余边未平铺。哪几个角会被画圆角？
+**练习 1**：为什么要「外扩 1px 再用 padding 补回来」这么绕，而不是直接让内容区从 0 开始？
 
-答案：先把四个条件全部代值再下结论。侧边栏在右，`on_left` 为假，所以 `rounded_tl` / `rounded_bl` 两个分支直接短路；再看另外两个：`rounded_tr` 要求 `!(tiling.top || tiling.right)`，`tiling.top = true` 使其整体为假，**右上角不圆**；`rounded_br` 要求 `!(tiling.bottom || tiling.right)`，两条边都未平铺，条件成立，**右下角画圆角**。最终只有右下角是圆角——平铺的边保持直角。这道题的陷阱在于直觉容易答成「右上、右下两个角」，务必代回布尔表达式。
+答案：窗口形状（含圆角）覆盖到 1px 边框外侧，而内容区起点在边框内侧。若背景只画内容区，圆角处窗口形状与背景之间会差 1px，露出透明缝隙。向外多画 1px 让背景与窗口形状重合，再用 padding 把实际内容推回原位，视觉内容不位移。
 
-**练习 2**：为什么不把圆角半径写死在 sidebar 里，而要从 theme crate 引常量？
+**练习 2**：`Decorations::Server` 分支为什么不需要任何圆角处理？
 
-答案：客户端装饰的圆角半径是**窗口级**约定：标题栏、状态栏、侧边栏都必须用同一半径，各自的圆角才能拼出完整的窗口圆角。集中定义在 [theme.rs:L53](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/theme/src/theme.rs#L53) 一处，改主题时全体同步。
+答案：服务端装饰由操作系统画窗口边框和形状，窗口对应用呈现的就是一个矩形内容区，侧边栏画什么都填不满也出不了界，直接 `h_full().w(self.width)` 即可（[L7809](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7809)）。
 
-### 4.3 `render_sidebar_header`：标题栏混合背景与搜索区
+**练习 3**：贴边（tiling）状态下窗口为什么「没有 1px 边框」？这从代码哪里能反推出来？
+
+答案：代码对贴边边取 `px(0.)` 且不加补偿 padding（[L7819-L7822](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7819-L7822)），即窗口形状与内容区在那条边上直接重合——若那里仍有 1px 边框，这种对齐就会露出缝隙，与未贴边分支的处理方式相同。圆角判定同样把贴边边视为直角（`rounded_client_corners` 的条件），三者互相印证。
+
+### 4.3 render_sidebar_header：标题栏、窗口控件与过滤行
 
 #### 4.3.1 概念说明
 
-头部是侧边栏与窗口标题栏的「共享区域」：它的高度必须等于平台标题栏高度，这样才能与旁边的窗口控件对齐；在 macOS 上红绿灯按钮（关闭/最小化/全屏）就叠在这条区域里，在 Windows/Linux 上最小化/最大化/关闭按钮画在头部内。与此同时它还承载搜索过滤框。所有平台差异（`cfg!(target_os = "macos")`、全屏状态、侧边栏在左还是在右、有无项目）都收敛在这个函数的一串布尔里。
+头部是一行高度固定为平台标题栏高度的 `h_flex`，它要同时扮演两个角色：
+
+1. **窗口标题栏的一部分**：客户端装饰/非 macOS 平台上，窗口控制按钮（关闭/最小化/最大化，Linux/Windows）或红绿灯（macOS）可能落在侧边栏区域，头部要给它们腾位置；
+2. **搜索过滤行**：放大镜图标 + 过滤输入框 + 清除按钮，仅当窗口里有打开的项目时才有意义。
+
+这两件事靠一组平台相关的布尔量协调，而 `no_open_projects` 为真时过滤行整个被摘掉，头部退化成纯标题栏。
 
 #### 4.3.2 核心流程
 
-```text
-计算 3 个布局布尔（都要求非全屏）:
-    traffic_lights        = macOS 且 在左
-    left_window_controls  = 非 macOS 且 在左
-    right_window_controls = 非 macOS 且 在右
-构建 h_flex:
-    高度 = platform_title_bar_height(window)
-    装饰补偿: Client → mt(-1px)；Server → mt(1px) + pb(1px)
-    [when left_window_controls]  → 嵌入左侧窗口控件
-    左侧内边距: traffic_lights → 71 或 78px；否则 1.5rem
-    [when !right_window_controls] → 右侧内边距 1.5rem
-    [when !no_open_projects]:
-        底边框 + （macOS 时）分隔线
-        放大镜图标 + 过滤输入框
-        [when 有选中且过滤框未聚焦] → FocusSidebarFilter 键位提示
-        [when 有查询词] → 清空按钮
-    [when right_window_controls] → 嵌入右侧窗口控件
-```
+头部开头的六个布尔（[L7203-L7211](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7203-L7211)）可以列成一张推导表：
+
+| 布尔 | 定义 | 含义 |
+| --- | --- | --- |
+| `sidebar_on_left` / `sidebar_on_right` | `self.side(cx) == ...`（设置项，[L7695-L7697](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7695-L7697)） | 侧边栏靠哪侧 |
+| `not_fullscreen` | 非全屏且非简单全屏 | 全屏时窗口控制按钮消失 |
+| `traffic_lights` | macOS ∧ 非全屏 ∧ 在左侧 | 红绿灯画在左侧侧边栏头部 |
+| `left_window_controls` | 非 macOS ∧ 非全屏 ∧ 在左侧 | Linux/Windows 窗口控制按钮画在左 |
+| `right_window_controls` | 非 macOS ∧ 非全屏 ∧ 在右侧 | 同上，画在右 |
+
+随后按「装饰模式 → 窗口控件 → 左右留白 → 过滤行 → 右侧控件」的顺序装配。
 
 #### 4.3.3 源码精读
 
-布局布尔与高度：
+**（1）高度与装饰微调**
 
-[crates/sidebar/src/sidebar.rs:L7203-L7211](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7203-L7211) 一次性算出 `traffic_lights` / `left_window_controls` / `right_window_controls` 三个互斥布尔（都要求非全屏），并取 `platform_title_bar_height(window)` 作为头部高度。该函数在 [crates/ui/src/utils/constants.rs:L12-L25](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/utils/constants.rs#L12-L25)：非 Windows 平台为 `max(1.75 × rem, 34px)`（随 UI 缩放），Windows 固定 32px。
+[sidebar.rs:L7211-L7218](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7211-L7218)：头部高度取 `platform_title_bar_height(window)`——非 Windows 平台为 `1.75 × rem` 且不低于 34px，Windows 固定 32px（[constants.rs:L12-L25](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/ui/src/utils/constants.rs#L12-L25)）。然后按装饰模式微调：
 
-容器骨架与装饰补偿：
+```rust
+.map(|header| match window.window_decorations() {
+    Decorations::Client { .. } => header.mt(px(-1.)),
+    Decorations::Server => header.mt_px().pb_px(),
+})
+```
 
-[crates/sidebar/src/sidebar.rs:L7213-L7231](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7213-L7231) 建 `h_flex().h(header_height)`，按装饰类型做 4.2 讲过的 1px 补偿；随后视情况嵌入窗口控件、设置左右内边距。macOS 红绿灯的左内边距用 `ui::utils::TRAFFIC_LIGHT_PADDING`（[constants.rs:L5-L10](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/utils/constants.rs#L5-L10)：值为 71px，若以 macOS SDK 26 或更高版本编译则为 78px；注释解释了为何用像素而非 rem——红绿灯按钮尺寸固定、不随 UI 缩放，且左侧多出的 1px 正是为窗口 1px 边框预留）。窗口控件的实际绘制委托给 `platform_title_bar` 模块的 [render_left_window_controls / render_right_window_controls](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7273-L7287)。
+这两行是 4.2 的「补偿 padding」在头部的对偶：客户端装饰下根容器加了 `pt_px()`（顶部补偿），头部用 `mt(px(-1.))` 把自己**顶回去** 1px，占据那圈 padding——因为标题栏内容本应贴着窗口顶端；服务端装饰下（macOS 的 1px 窗口边框）反而加 1px 上边距避让边框，再加 1px 下内边距保持总高度不变。
 
-搜索区只在有项目时存在：
+**（2）窗口控件与留白**
 
-[crates/sidebar/src/sidebar.rs:L7233-L7267](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7233-L7267) 的 `.when(!no_open_projects, ...)` 块是头部的「增值部分」：加底边框、macOS 时在红绿灯后补一条分隔线、放放大镜图标和 `render_filter_input` 过滤输入框；当 `self.selection.is_some()` 且过滤框未聚焦时显示 `FocusSidebarFilter` 的键位提示（帮用户发现「按哪个键跳到搜索框」）；查询非空时显示清空按钮，点击后 `reset_filter_editor_text` 并手动 `update_entries`（过滤逻辑 u5-l3 详讲）。反过来读：当 `no_open_projects` 为真，头部只剩窗口控件和内边距——没有搜索框、没有底边框，这与 4.1 的空态分支互相呼应。
+[sidebar.rs:L7219-L7231](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7219-L7231)：左侧有窗口控件时插入控件组（macOS 红绿灯则加 `TRAFFIC_LIGHT_PADDING` 左内边距，那是给 1px 窗口边框留的余量）；两侧都不是控件区时给 `pl_1p5`/`pr_1p5` 的常规留白。控件组本身委托给 [render_left/right_window_controls（L7273-L7287）](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7273-L7287)，再转交给 `platform_title_bar` crate 的同名函数——侧边栏只决定「放不放」，不关心按钮长什么样。
+
+**（3）过滤行**
+
+[sidebar.rs:L7233-L7267](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7233-L7267)：`.when(!no_open_projects, ...)` 包住整段——底边框、红绿灯右侧的分隔线、放大镜图标、过滤输入框（`render_filter_input`，内部是 `filter_editor` 实体并捕获回车动作用于确认选中，[L6553-L6563](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L6553-L6563)）、以及两个条件小部件：键盘有选中且焦点不在过滤框时显示「聚焦过滤框」的键位提示；有查询词时显示清除按钮（点击后重置文本并手动触发一次 `update_entries`）。搜索交互链的细节属于 u5-l3。
 
 #### 4.3.4 代码实践
 
-**实践目标**：理解头部高度的平台差异，以及 `no_open_projects` 对头部的「裁剪」效果。
+**实践目标**：写出头部布尔的取值矩阵，解释「同一份头部代码如何适应三种平台 × 两种侧 × 全屏与否」。
 
 **操作步骤**：
 
-1. 阅读 [constants.rs:L12-L25](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/utils/constants.rs#L12-L25)，计算默认 UI 缩放（1rem = 16px）下非 Windows 平台的头部高度（应为 `max(28, 34) = 34px`），再算 UI 放大到 125%（1rem = 20px）时的高度（`max(35, 34) = 35px`）。
-2. 在 [sidebar.rs:L7213-L7271](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7213-L7271) 中数一数：`no_open_projects = true` 时，最终元素树里还剩几个 child？（提示：`left_window_controls` 与 `right_window_controls` 互斥，且都要求非 macOS 才为真。）
-3. 不修改代码，仅推演：macOS 全屏时 `traffic_lights` 和两个 `window_controls` 全为假，此时头部还剩什么？
+1. 阅读 [sidebar.rs:L7203-L7211](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7203-L7211) 的六个布尔定义。
+2. 画一张 6 列表格，行是这些场景：macOS 左侧、macOS 右侧、Linux 左侧、Linux 右侧、Linux 左侧全屏、macOS 左侧全屏。逐格填 `traffic_lights` / `left_window_controls` / `right_window_controls` 的值。
+3. 对每行推断头部的可见内容（控件在哪边、过滤行是否存在）。
 
-**需要观察的现象**：三种平台情形（macOS 普通 / 非 macOS 在左 / 非 macOS 在右）下头部左端的内容完全不同，但高度和装饰补偿逻辑完全一致。
+**需要观察的现象**：`no_open_projects` 与平台布尔是正交的——空态视图下 macOS 左侧的头部仍然要给红绿灯腾位子。
 
-**预期结果**：第 2 步答案——`no_open_projects` 时最多只有 1 个 child（左侧或右侧窗口控件），macOS 上是 0 个；第 3 步答案——只剩内边距撑起的空头部（若同时无项目，搜索区也被裁掉）。全部为源码推演，待本地运行验证（可用 `cargo run -p zed` 切换全屏对比）。
+**预期结果**：macOS 左侧 → 红绿灯 + 无过滤行（若空态）；Linux 右侧 → 控件在右（`right_window_controls`），头部左端直接是留白/过滤行；全屏 → 三者全 false，头部只剩留白和（可选的）过滤行。可在 Zed 设置里切换 `agent_panel` 的 sidebar_side 并观察头部变化（**待本地验证**）。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`render` 根容器的背景混合用 `opacity(0.25)`，粘性头部（`render_sticky_header`）的背景混合用 `opacity(0.2)`（[sidebar.rs:L3209-L3212](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L3209-L3212)）。为什么要差这 0.05？
+**练习 1**：客户端装饰下头部为什么用 `mt(px(-1.))` 而 `Server` 下却要 `mt_px()`（方向相反）？
 
-答案：粘性头部是**悬浮在列表之上**的覆盖层（`absolute` 定位、带 `shadow_sm` 投影），混得更「实」一点（panel 占比从 25% 降到 20%）配合阴影，让它在视觉上与下层滚动内容区分开。这是一个主观视觉调参，读源码时记住「两处混合同源、比例不同」即可。
+答案：`Client` 分支根容器为了盖住 1px 窗口边框加了 `pt_px()`，头部作为第一个子元素用负 margin 顶回去，让标题内容贴住窗口顶；`Server` 分支（macOS）窗口自带 1px 边框且在内容区外侧，头部加 1px 正 margin 避让，再补 1px 底部 padding 保持行高。
 
-**练习 2**：为什么 `platform_title_bar_height` 在 Windows 上直接返回 32px 而不用 rem？
+**练习 2**：清除搜索按钮的 `on_click` 里为什么要手动调 `this.update_entries(cx)`？u3-l2 不是说变化会自动触发重建吗？
 
-答案：见 [constants.rs:L21-L25](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/ui/src/utils/constants.rs#L21-L25) 的 `todo(windows)` 注释：理想做法是向 Windows 平台 API 查询实际标题栏高度，当前先用固定值。这是「读注释识别已知技术债」的例子。
+答案：u3-l1/u3-l2 讲过，自动重建依赖事件订阅——过滤框的 `BufferEdited` 订阅在**用户键入**时触发；程序化调用 `reset_filter_editor_text` 设置文本不会产生用户的编辑事件，所以这里手动补一次 `update_entries` 让列表立刻反映清空后的状态（[L7260-L7263](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7260-L7263)）。
 
-### 4.4 `render_sidebar_bottom_bar` 与导入横幅
+**练习 3**：头部的 `.when(!no_open_projects, ...)` 里包含底边框。空态视图下头部没有底边框，视觉上如何区分头部和空态？
+
+答案：由空态组件自己负责——`ProjectEmptyState` 是垂直居中的大块内容，与头部之间自然留白；头部无过滤行时只剩留白与窗口控件，两者无需边框也能区分。这是一个「结构性区分让位于组件自带视觉」的小取舍。
+
+### 4.4 render_sidebar_bottom_bar：三个按钮与镜像布局
 
 #### 4.4.1 概念说明
 
-底部栏是侧边栏的「全局操作区」，与头部不同，它**不随 `no_open_projects` 或视图切换而变化**——列表视图和归档视图共用同一条底栏。三个控件从左到右（在右侧时从右到左）是：收起侧边栏按钮（带侧别切换菜单）、线程历史（归档视图）切换按钮、弹性空隙、最近项目按钮。导入横幅则位于底栏与列表主体之间，是两条**独立判定、可同时出现**的引导条，教用户把外部代理（ACP）或其他渠道的历史线程导入 Zed。
+底部栏是一行带顶边框的 `h_flex`，固定三个成员：折叠/展开侧边栏的开关按钮、切换线程历史（归档视图）的时钟按钮、以及被 `flex_1` 空隙推到另一端的「最近项目」按钮。它是两种视图共享的导航区，也是用户在归档视图与列表视图之间切换的入口之一。
 
 #### 4.4.2 核心流程
 
 ```text
-底栏:
-    is_archive = 当前是否归档视图
-    on_right   = 侧边栏在右侧
-    h_flex: p_1 + gap_1 + 上边框
-    [when on_right] → flex_row_reverse（控件顺序镜像）
-    child 1: 收起按钮（popover 菜单触发器，点击调 multi_workspace.close_sidebar）
-    child 2: 历史按钮（Clock 图标，toggle_state = is_archive，
-             点击 → toggle_archive 动作处理器）
-    child 3: div().flex_1()（弹性空隙）
-    child 4: 最近项目按钮
-
-横幅层（在 render 的倒数第二个 map 中）:
-    show_acp           = 有外部代理 且 ACP 引导未 dismiss
-    show_cross_channel = 有待导入渠道 且 未 dismiss
-    verbose = import_banners_use_verbose_labels.get_or_insert(show_acp && show_cross_channel)
-    [when show_acp]           → ACP 横幅（verbose ? 长/短按钮文案）
-    [when show_cross_channel] → 跨通道横幅
+h_flex (p_1, gap_1, border_t_1)
+├─ when(在右侧) → flex_row_reverse        # ✓ 镜像布局
+├─ 侧边栏开关按钮（贴边角锚定的上下文菜单触发器）
+├─ 历史按钮（toggle_state 高亮表示当前在归档视图）
+├─ div().flex_1()                          # 弹性空隙
+└─ 最近项目按钮（弹出最近项目列表）
 ```
+
+关键点是 `flex_row_reverse`：侧边栏在右侧时整行镜像，开关按钮始终贴着**窗口外侧边缘**，最近项目按钮靠内侧——与左侧布局形成对称。
 
 #### 4.4.3 源码精读
 
-底栏主体：
+[sidebar.rs:L7343-L7372](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7343-L7372)：开头取两个布尔——`is_archive`（当前是否在归档视图，决定时钟按钮的高亮态与提示文案「显示/隐藏线程历史」）和 `on_right`。容器 `.when(on_right, |this| this.flex_row_reverse())` 镜像，然后依次挂：
 
-[crates/sidebar/src/sidebar.rs:L7343-L7372](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7343-L7372)。`is_archive` 来自 `matches!(self.view, SidebarView::Archive(..))`；`on_right` 时 `flex_row_reverse()` 把整行镜像，保证「收起按钮永远靠窗边」。历史按钮用 `toggle_state(is_archive)` 呈现按下态，tooltip 文案随状态在 "Show/Hide Thread History" 间切换，点击转发给 `Self::toggle_archive`——这正是切换 `ThreadList`/`Archive` 两种视图的入口之一（完整切换逻辑 u8-l1 讲）。收起按钮的实现在 [render_sidebar_toggle_button（L7289-L7341）](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7289-L7341)：一个锚定式 popover 菜单触发器，tooltip 里同时列出 Toggle/Focus 两个动作的键位，点击本体则通过 `window.root::<MultiWorkspace>()` 找到宿主并调用 `close_sidebar`。
-
-横幅判定的「文案锁存」：
-
-[crates/sidebar/src/sidebar.rs:L7887-L7901](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7887-L7901)。两条横幅的按钮文案默认都是 "Import Threads"；当**首次同时出现**时（`show_acp && show_cross_channel`），`import_banners_use_verbose_labels.get_or_insert(...)` 把 `verbose` 锁存为 `true`，此后两条横幅分别改用更长的 "Import Threads from External Agents" / "Import Threads from Other Channels" 加以区分。`import_banners_use_verbose_labels: Option<bool>` 是 `Sidebar` 的字段（初值 `None`，见 [sidebar.rs:L783-L788](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L783-L788) 的文档注释与 [L921](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L921) 的初始化）——`get_or_insert` 只在 `None` 时写入，所以「曾经同时出现」这一事实被记住，避免用户先看到短文案、随后文案突然变长的抖动。判定函数本身在 [should_render_acp_import_onboarding（L7427-L7441）](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7427-L7441) 与 [should_render_cross_channel_import_onboarding（L7467-L7470）](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7467-L7470)，都与各自的「已 dismiss」持久化设置联动。
-
-两条横幅的内容与公共画法：
-
-[render_acp_import_onboarding（L7443-L7465）](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7443-L7465) 的导入按钮会先 `show_archive`（切到归档视图，导入的历史线程落在那里）再弹导入模态框；[render_cross_channel_import_onboarding（L7472-L7517）](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7472-L7517) 会把渠道名拼进描述文案。两者都落到公共的自由函数 [render_import_onboarding_banner（L7612-L7675）](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7612-L7675)：`v_flex` + 顶边框 + 从强调色渐隐的 `linear_gradient` 背景 + 关闭按钮 + 全宽描边导入按钮。
+- **开关按钮**：由 [render_sidebar_toggle_button（L7289-L7341）](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7289-L7341) 构造。它是一个 `sidebar_side_context_menu`（锚定在贴边角的弹出菜单）包着的 `IconButton`，图标按左/右布局选择，点击后向窗口根部的 `MultiWorkspace` 请求 `close_sidebar`；提示气泡里同时列出「切换侧边栏」和「聚焦侧边栏」两个动作的键位。
+- **历史按钮**：`IconButton` + `toggle_state(is_archive)`，点击走 `toggle_archive(&ToggleThreadHistory, ...)`——这正是 render 根上注册的动作之一，按钮点击与键位殊途同归（u8-l1 详讲切换的副作用）。
+- **空隙 + 最近项目按钮**：`div().flex_1()` 把后面的内容推到行尾；`render_recent_projects_button`（[L6565 起](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L6565)）是个 `PopoverMenu`，弹出 `SidebarRecentProjects` 列表，弹出句柄存在 `recent_projects_popover_handle` 上——render 根上那个内联的 `OpenRecent` 动作注册（[L7802-L7804](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7802-L7804)）就是从外部（比如命令面板）toggle 这个弹窗。
 
 #### 4.4.4 代码实践
 
-**实践目标**：验证 `import_banners_use_verbose_labels` 的锁存语义——这是本模块最容易被误读为「每帧重算」的逻辑。
+**实践目标**：验证「镜像布局」的实际效果，并跟踪一次按钮点击的完整去向。
 
 **操作步骤**：
 
-1. 在 [sidebar.rs:L7888-L7893](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7888-L7893) 处推演四个场景下 `verbose` 的值与字段变化：
-   - 场景 A：首帧只有 ACP 横幅（`show_acp=true, show_cross_channel=false`）；
-   - 场景 B：首帧两条同时出现；
-   - 场景 C：首帧只有一条，后来另一条也出现；
-   - 场景 D：始终各只有一条交替出现。
-2. 对每个场景写出：`get_or_insert` 的参数、字段最终值、两条横幅各自显示的按钮文案（对照 [L7456-L7460](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7456-L7460) 与 [L7508-L7512](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7508-L7512) 的三元表达式）。
-3. 推演完成后，在 `sidebar_tests.rs` 中搜索 `import` 相关测试（若有）对照你的结论；若没有覆盖测试，记为「待本地验证」。
+1. 阅读 [sidebar.rs:L7333-L7339](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7333-L7339)：开关按钮的 `on_click` 里 `window.root::<MultiWorkspace>()` 是在找谁？为什么侧边栏不自己改自己的可见性？（提示：回忆 u1-l1——侧边栏由宿主 `MultiWorkspace` 持有并注册。）
+2. 写下三个按钮各自的「点击 → 最终调用」链：开关按钮、历史按钮、最近项目按钮。
+3. 本地把 `.when(on_right, |this| this.flex_row_reverse())` 临时注释掉，`cargo check -p sidebar` 通过后 `cargo run -p zed`，把侧边栏设为右侧，观察按钮顺序（**待本地验证**，观察后还原）。
 
-**需要观察的现象**：`Option<bool>` 字段一旦从 `None` 变为 `Some(false)` 或 `Some(true)`，后续任何帧都无法再改变它——`get_or_insert` 不覆盖已有值。
+**需要观察的现象**：右侧布局下若去掉 `flex_row_reverse`，开关按钮会跑到靠窗口内侧的一端，「最近项目」贴住窗口边缘——与左侧布局不再对称。
 
-**预期结果**：场景 A 锁存 `Some(false)`，此后即使场景 C 两条同时出现，文案仍是短的；只有场景 B（首帧即同时出现）才锁存 `Some(true)` 用长文案。场景 D 始终短文案。以上为源码推演，待本地验证。
+**预期结果**：三条链分别是——开关按钮 → `multi_workspace.close_sidebar(window, cx)`（可见性归宿主管）；历史按钮 → `toggle_archive` → 切换 `SidebarView` 并序列化（u8-l1）；最近项目按钮 → 打开 `SidebarRecentProjects` 弹出菜单。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：底栏为什么用 `flex_row_reverse` 而不是把 child 顺序倒过来写？
+**练习 1**：历史按钮的 `toggle_state(is_archive)` 在视觉上表达什么？
 
-答案：代码只写一份「收起 → 历史 → 弹性空隙 → 最近项目」的语义顺序，用 `flex_row_reverse`（[sidebar.rs:L7350](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7350)）在右侧布局时整体镜像。这样「哪些控件是一组、空隙在哪」的意图保持清晰，也不会因为维护两份顺序而出现不一致。（反过来手写两份 child 顺序也能实现，属于可读性取舍。）
+答案：按钮呈「激活/按下」样式，表示当前正处于归档（线程历史）视图——底栏在两种视图下都渲染，这个高亮是用户判断「我在哪个视图」的即时线索。
 
-**练习 2**：底栏在 `no_open_projects` 时会消失吗？归档视图时会消失吗？
+**练习 2**：为什么最近项目按钮的弹出句柄要存成字段 `recent_projects_popover_handle`，而不是像其他按钮那样在渲染时临时创建？
 
-答案：都不会。对照 [render 的收尾（L7902）](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7902)：`.child(self.render_sidebar_bottom_bar(cx))` 在所有条件分支之外无条件执行。底栏是跨视图的常驻操作区——哪怕空态也要允许用户收起侧边栏、打开最近项目。
+答案：`OpenRecent` 动作（命令面板/键位可触发）需要在渲染循环之外 toggle 这个弹窗（[L7802-L7804](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7802-L7804)）；临时创建的句柄出不了渲染函数，字段让「按钮内部」和「外部动作」共享同一个弹出状态。
 
-**练习 3**：ACP 横幅的「Import」按钮为什么先 `show_archive` 再弹导入模态框？
+**练习 3**：底部栏在归档视图下会渲染吗？依据？
 
-答案：见 [sidebar.rs:L7448-L7451](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7448-L7451)：从外部代理导入的线程是**已完成的历史线程**，落在归档（线程历史）视图里。先切换视图，用户导入完成后立即能在当前视图看到结果，避免「导入成功却在列表里找不到」的困惑。
+答案：会。`.child(self.render_sidebar_bottom_bar(cx))` 在视图 `match` 之外（[L7902](https://github.com/zed-industries/zed/blob/7eec89207ccfbef7ba366da22fc885079a5c0296/crates/sidebar/src/sidebar.rs#L7902)），只被装饰/背景等根级属性包裹。
 
 ## 5. 综合实践
 
-**任务：产出一份完整的 `render()` 条件树，并在真实 Zed 中逐格验证。**
+设计一张「状态 → UI」真值表，把本讲所有分支串起来：
 
-1. **画树（纸面）**：把 [sidebar.rs:L7774-L7902](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L7774-L7902) 的整条链式调用展开成一棵带条件标注的完整伪代码树。要求覆盖**全部** `.when` / `.when_some` / `.map` 分支，包括 4.2 的装饰分支内部（`tiling` 四个方向、`on_left` 两个方向、四个圆角条件）与 4.4 的横幅分支。每个条件旁注明数据来源字段。
-2. **标注两个开关（纸面）**：在你的树上用两种颜色（或记号）分别标出 `no_open_projects` 控制的子树（空态替换 + 头部搜索区裁剪，共两处消费点）与 `no_search_results` 控制的子树（列表容器内的覆盖层，一处消费点）。写一句话回答：为什么前者出现在两个地方、后者只有一个？
-   - 参考答案：`no_open_projects` 描述「世界里没有项目」，头部搜索框对无项目毫无意义，所以头部与主体都要裁；`no_search_results` 只关心「本次重建结果为空」，是列表区域的局部状态。
-3. **运行验证（本机，可选）**：`cargo run -p zed` 启动 Zed，依次制造四个状态并对照你的树：关闭所有项目（空态 + 头部只剩窗口控件）、在空项目里搜索不存在的词（无结果覆盖层）、点击底栏时钟按钮（Archive 分支替换主体）、把窗口贴到屏幕左缘（Linux 客户端装饰下圆角消失）。每项在树上打勾。若在某平台无法触发（如 macOS 服务端装饰），在树旁注明「该分支在本平台不可达」。此步骤的具体视觉表现**待本地验证**。
+1. 列出四个输入维度：视图（ThreadList / Archive）、`no_open_projects`（true/false）、`no_search_results`（true/false）、装饰模式（Server / Client）。
+2. 对下面六个组合，逐一写出渲染树中**每个区域**（头部、主体、横幅、底栏）分别渲染什么，并给出依据的源码行号：
+   - 自由窗口 + ThreadList + 有项目 + 有线程（常态）；
+   - 自由窗口 + ThreadList + 有项目 + 过滤无命中；
+   - 自由窗口 + ThreadList + 无项目（刚打开一个空窗口）；
+   - 贴左缘平铺 + ThreadList + 常态（哪些角不圆？哪些边不外扩？）；
+   - 任意装饰 + Archive 视图（头部还是搜索行吗？底栏还在吗？）；
+   - 自由窗口 + 常态 + 同时出现两条导入横幅（按钮文案用哪个版本？之后关掉一条呢？）。
+3. 全部写完后，用 `cargo run -p zed` 实际制造其中至少三种状态（清空搜索、切到线程历史、贴边窗口）核对推断（**待本地验证**）。
+
+这张表完成后，你就拥有了一份 `render()` 的「调试速查表」——以后侧边栏显示异常时，先定位异常属于哪个区域、哪个分支，再顺着行号进源码。
 
 ## 6. 本讲小结
 
-- `render()` 是纯结构代码：四层分区（头部 → 列表主体 → 导入横幅 → 底部栏）由一组 `render_*` 辅助函数填充，内容全部来自 `self.contents`（u3-l4 的重建结果）。
-- `no_open_projects` **替换**主体为空态并**裁剪**头部搜索区（两处消费）；`no_search_results` 只在列表容器上**叠加**覆盖层（一处消费）。二者数据来源分别是 `has_open_projects` 与 `entries.is_empty()`。
-- `SidebarView::ThreadList` / `Archive(Entity<ThreadsArchiveView>)` 决定主体是自绘列表还是整体嵌入归档视图实体；底栏跨视图常驻。
-- 客户端装饰下侧边栏绝对定位、向未平铺边外扩 1px 并用 1px padding 补偿、按「两邻边未平铺」规则画 `CLIENT_SIDE_DECORATION_ROUNDING`（10px）圆角；`WindowBackgroundAppearance` 非不透明时行标签弃用渐变淡出改用截断。
-- 头部高度 = `platform_title_bar_height`（非 Windows 为 `max(1.75rem, 34px)`），三平台控件布尔互斥；混合背景 = 标题栏色 75% + 面板色 25%。
-- 导入横幅的按钮文案由 `import_banners_use_verbose_labels` 的 `get_or_insert` **首帧锁存**，防止同时出现时文案抖动。
+- `render()` 是纯投影：四层竖排结构（头部 → 主体 → 横幅 → 底栏），自身不画具体行，行渲染经 `cx.processor(Self::render_list_entry)` 交给虚拟列表按需调用。
+- 两个布尔各管一个替代视图：`no_open_projects`（来自 `contents.has_open_projects`）切换 `ProjectEmptyState` 空态并顺带摘掉头部过滤行；`no_search_results`（来自 `contents.entries.is_empty()`）挂出居中提示，文案由是否有查询词决定。
+- 视图 `match` 只替换主体：`Archive` 分支让 `ThreadsArchiveView` 子实体整体接管，而底栏和导入横幅在两种视图下共享。
+- 客户端装饰分支做三件配套的事：未贴边各边向外扩 1px 盖住窗口边框、加 1px 补偿 padding 推回内容、对「两邻边都不贴边」的角应用 `CLIENT_SIDE_DECORATION_ROUNDING`（10px）圆角；头部再用 `mt(px(-1.))` 顶回补偿 padding。
+- `WindowBackgroundAppearance` 在本 crate 仅一处直接使用：非不透明窗口上禁用分组标签的渐变淡出、改为截断。
+- 底部栏靠 `flex_row_reverse` 实现左右镜像，开关/历史/最近项目三个按钮分别通向宿主的 `close_sidebar`、`toggle_archive` 与最近项目弹出菜单。
 
 ## 7. 下一步学习建议
 
-- 下一讲 **u4-l2（项目分组头与粘性头部渲染）**：本讲只给了 `render_sticky_header` 一个「位置」（`when_some` 挂载点），下一讲深入 `render_project_header` 与粘性头部的 `top_offset` 推导（你已预习过 [sidebar.rs:L3142-L3227](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/sidebar/src/sidebar.rs#L3142-L3227) 的背景混合）。
-- 之后 **u4-l3** 讲 `render_list_entry` 分流出的线程行/终端行渲染，补全列表主体的最后一层。
-- 键位分发相关的 `dispatch_context` 与 25 个 `on_action` 留到 **u5-l1**；归档视图内部与 `toggle_archive` 的完整链路留到 **u8-l1**。
-- 延伸阅读：[crates/theme/src/theme.rs](https://github.com/zed-industries/zed/blob/fd82517a115d97a07835b52f0512b22b38e38ccf/crates/theme/src/theme.rs#L52-L77) 的 `ClientDecorationsExt`，以及 Zed 标题栏如何用同一常量画窗口圆角——多处对比能加深对「窗口级几何约定」的理解。
+本讲只拆了「骨架」——每个区域内部怎么画还没展开。建议按顺序继续：
+
+1. **u4-l2（项目分组头与粘性头部渲染）**：`render_project_header` / `render_sticky_header` 的内部——分组标签、状态徽标、计数、折叠交互，以及粘性头部的推进动画细节。
+2. **u4-l3（线程行与终端行渲染）**：`render_thread` / `render_terminal` 与 `ThreadItem` 组件的拼装、图标前缀拆分与搜索高亮。
+3. **u4-l4（菜单、工作区标签与默认分支预取）**：头部省略号菜单与 `DefaultBranchCache` 预取。
+4. 想先补渲染前置机制的，可以回看 **u3-l3**（`EntryShape` 与测量保留）——本讲的虚拟列表之所以能稳定地只重排变化区间，靠的就是那一讲讲的差异应用算法。
