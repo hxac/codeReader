@@ -1,0 +1,1203 @@
+{
+  "head": "2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15",
+  "project": "openPangu-2.0-Infer",
+  "rationale": "本仓库是\"部署仓 + 四个可独立编译的子组件\"的结构：先用最外层 README 和 ansible 脚本让读者零基础跑通 PD 分离服务（单元1），建立对 P/D/C 节点、92B/505B 规格的整体认知；随后沿\"请求如何被推理\"的主线进入核心组件 omni-npu，按 vLLM 插件入口 → 平台适配 → Worker/ModelRunner → 补丁机制的自顶向下顺序讲插件如何不改 vLLM 源码完成 NPU 适配（单元2）；再深入 openPanguV2 模型实现（MoE、稀疏注意力、mHC、MTP，单元3）与 PD 分离 KV 传输链路（单元4）；接着讲最佳实践配置、图编译、LOPT 并行 tokenizer、输出解析四个性能/功能机制（单元5）；之后按卫星组件逐个展开：omni-proxy 请求调度（单元6）、omni-cache 主机内存 KV 池（单元7）、jointfix W8A8 量化（单元8）、omni-eplb 专家负载均衡（单元9）；最后以镜像构建、测试体系与二次开发综合实战收尾（单元10）。依赖关系上，源码精读类讲义都挂在其部署/机制讲义之后，量化与 EPLB 依赖模型结构认知，综合实战依赖量化、缓存、分组调度的前置讲义，保证初学者可按序从\"会部署\"走到\"能改代码\"。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 openPangu-2.0-Flash(92B) 与 openPangu-2.0-Pro(505B) 的定位和典型部署形态",
+            "解释 Prefill/Decode/Proxy 三类节点的职责与 PD 分离的价值",
+            "列出 components/ 下四个子组件各自解决的问题"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "项目背景",
+            "PD 分离基本概念",
+            "组件职责地图"
+          ],
+          "order": 1,
+          "practice_task": "通读两份 README，手工画出一次请求从客户端到 Proxy 再到 P、D 节点的流转示意图，并标注每个环节由哪个仓库组件负责。",
+          "source_files": [
+            "README.md",
+            "README_EN.md"
+          ],
+          "title": "项目定位与全景：openPangu-2.0-Infer 是什么",
+          "topic": "介绍 openPangu-2.0-Infer 仓库的定位：在昇腾 NPU 上通过 vLLM 插件体系部署 openPangu-2.0 系列 MoE 大模型，并说明 PD 分离（Prefill/Decode 分离）与 proxy 的基本概念。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-repo-structure.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "说出仓库顶层目录与四个子模块的对应关系",
+            "理解 build/build.sh 如何按 .gitmodules 拉取并编译子模块",
+            "区分部署工具（tools/）与运行组件（components/）"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "monorepo 结构",
+            "git submodule",
+            "构建入口"
+          ],
+          "order": 2,
+          "practice_task": "阅读 build/build.sh 的 parse_args 与 check_and_build，写出只编译 omni-npu 一个模块的完整命令，并预测它会调用哪个子目录下的脚本。",
+          "source_files": [
+            "README.md",
+            "build/build.sh",
+            "components/omni-npu/README.md"
+          ],
+          "title": "仓库目录结构与四大组件划分",
+          "topic": "讲解仓库目录组织：components/ 下的 omni-npu、omni-cache、omni-eplb、omni-proxy 四个子模块，以及 tools/ 下的 ansible、docker、quant、scripts 部署工具链。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-models-and-topologies.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "区分 92B 与 505B 对应的配置目录与部署模板",
+            "解释 inventory 中 P/D/C 分组、node_rank、kv_rank、port_offset 的含义",
+            "理解 BF16 与 INT8(w8a8) 两套模板的差异来源"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "ansible inventory",
+            "端口规划",
+            "部署规格"
+          ],
+          "order": 3,
+          "practice_task": "对照 1P1D 与 3P1D 两份 inventory，画出 3P1D 的节点拓扑图，标出每个 P 节点的 kv_rank、node_port 与 api_port 计算结果。",
+          "source_files": [
+            "README.md",
+            "README_INT8.md",
+            "tools/ansible/92B/omni_infer_inventory_used_for_1P1D.yml",
+            "tools/ansible/92B/omni_infer_inventory_used_for_3P1D.yml",
+            "tools/ansible/505B/omni_infer_inventory_used_for_2P1D.yml"
+          ],
+          "title": "模型规格与部署拓扑：92B/505B 与 1P1D 等形态",
+          "topic": "讲解 92B/505B 两种模型规格与 1P1D、3P1D、2P1D、4P81D16 等部署拓扑，逐字段解读 ansible inventory 中 P、D、C 节点的定义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-first-deploy-bf16.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "完成 ssh 免密、镜像拉取与 environment 必填项修改",
+            "掌握 run_docker、run_server、run_proxy 三个 tag 的作用与执行顺序",
+            "知道 run_vllm_server_prefill_cmd 与 run_vllm_server_decode_cmd 的位置和开关方式"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "ansible-playbook",
+            "docker 容器管理",
+            "环境变量配置"
+          ],
+          "order": 4,
+          "practice_task": "在两台测试机上把 1P1D BF16 服务完整拉起：依次执行 --tags run_docker 与 --tags run_server,run_proxy，记录 LOG_PATH 下 server_0.log 的关键启动阶段。",
+          "source_files": [
+            "README.md",
+            "tools/ansible/92B/omni_infer_inventory_used_for_1P1D.yml",
+            "tools/ansible/92B/omni_infer_server_template_performance1P1D_92B_bf16_open.yml"
+          ],
+          "title": "实战：用 ansible 拉起第一个 1P1D BF16 服务",
+          "topic": "手把手走通 BF16 部署全流程：配置 ssh 免密、拉取镜像、修改 inventory 与 playbook 的 environment、依次运行 run_docker 与 run_server/run_proxy 标签。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u1-l5-request-and-troubleshoot.md",
+          "id": "u1-l5",
+          "learning_goals": [
+            "使用 curl 调用 /v1/chat/completions 并正确填写 model 字段",
+            "通过 server 日志跟踪服务拉起与推理过程",
+            "掌握 HCCL 多机通信问题的定位与修复方法"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "OpenAI 兼容 API",
+            "日志跟踪",
+            "常见故障排查"
+          ],
+          "order": 5,
+          "practice_task": "分别发送 stream=false 与 stream=true 的请求并对比响应；随后人为指定错误的网络接口复现多机通信失败，再用 HCCL_SOCKET_IFNAME 修复并在日志中确认恢复。",
+          "source_files": [
+            "README.md",
+            "tools/scripts/pd_run.sh"
+          ],
+          "title": "请求测试、日志跟踪与常见问题排查",
+          "topic": "讲解服务启动后的验证方法：向 proxy 端口发送 OpenAI 兼容请求、跟踪日志、以及 HCCL 通信失败等常见问题的修复手段。"
+        }
+      ],
+      "order": 1,
+      "title": "入门：认识项目并跑通第一个推理服务"
+    },
+    {
+      "id": "u2",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l1-vllm-plugin-entry.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "解释 vllm.platform_plugins、vllm.general_plugins 两个 entry point 组的作用",
+            "读懂 plugin() 如何探测 torch_npu 并返回平台类路径",
+            "理解 VLLM_PLUGINS 环境变量与插件加载的关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "vLLM 平台插件接口",
+            "entry points 机制",
+            "插件探测逻辑"
+          ],
+          "order": 1,
+          "practice_task": "在已部署容器内用 python -c \"from importlib.metadata import entry_points; ...\" 打印 omni-npu 注册的全部入口，并验证 import omni_npu.vllm_plugin 后 plugin() 的返回值。",
+          "source_files": [
+            "components/omni-npu/pyproject.toml",
+            "components/omni-npu/src/omni_npu/vllm_plugin.py",
+            "components/omni-npu/README.md",
+            "tools/ansible/92B/omni_infer_server_template_performance1P1D_92B_bf16_open.yml"
+          ],
+          "title": "vLLM 插件体系与 omni-npu 的三个入口",
+          "topic": "讲解 omni-npu 如何通过 pyproject.toml 中的 entry points（platform_plugins 与 general_plugins）被 vLLM 零侵入地发现和加载。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-npu-platform.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "说出 NPUPlatform 声明的设备名、dispatch key 与 HCCL 通信后端",
+            "追踪 check_and_update_config 对 vLLM 配置的全部修改项",
+            "理解 get_attn_backend_cls 的后端名解析与注册表覆盖逻辑"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Platform 接口",
+            "配置改写",
+            "注意力后端注册表"
+          ],
+          "order": 2,
+          "practice_task": "在源码中标注 NPUPlatform 每个类方法被 vLLM 调用的时机，写一份“平台适配清单”：至少列出 worker 类、block_size、communicator、图后端 4 项的返回值。",
+          "source_files": [
+            "components/omni-npu/src/omni_npu/platform.py",
+            "components/omni-npu/src/omni_npu/distributed/communicator.py",
+            "components/omni-npu/src/omni_npu/attention/backends/utils.py"
+          ],
+          "title": "NPUPlatform：设备声明、HCCL 通信与配置改写",
+          "topic": "精读 NPUPlatform 如何声明 device_type=npu、选择注意力后端、指定 worker 类与 HCCL 通信器，并在 check_and_update_config 中修正 vLLM 默认配置。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-worker-and-model-runner.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "描述 NPUWorker 从 init_device 到 KV transfer 初始化的完整时序",
+            "说明 NPUModelRunner 复用 GPUModelRunner 的方式与 NPU 特有改动",
+            "理解 NpuMemAllocator 与 NPUInputBatch 在批管理中的角色"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "WorkerBase 生命周期",
+            "ModelRunner 适配",
+            "显存池管理"
+          ],
+          "order": 3,
+          "practice_task": "画出 NPUWorker 启动时序图（init_device → load_model_extra_config → 分布式初始化 → load_model → ensure_kv_transfer_initialized），并在图中标注每个调用的源码行号。",
+          "source_files": [
+            "components/omni-npu/src/omni_npu/worker/npu_worker.py",
+            "components/omni-npu/src/omni_npu/worker/npu_model_runner.py",
+            "components/omni-npu/src/omni_npu/worker/npu_mem_pool.py",
+            "components/omni-npu/src/omni_npu/worker/npu_input_batch.py"
+          ],
+          "title": "NPUWorker 与 NPUModelRunner 生命周期",
+          "topic": "追踪一次推理引擎启动中 NPUWorker 与 NPUModelRunner 的初始化链路，理解设备初始化、模型加载、KV 传输初始化与显存池的协作。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l4-patch-manager.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "解释 PatchManager 的注册、去重与按环境变量应用流程",
+            "读懂一个具体 patch 如何替换 vLLM 的函数或类",
+            "掌握 OMNI_NPU_PATCHES_DIR 与模型专属 patch 的组织方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "monkey patch 机制",
+            "patch 注册表",
+            "模型专属补丁分组"
+          ],
+          "order": 4,
+          "practice_task": "从 patches/common 与 patches/models/pangu_v2_hybrid 中各挑一个 patch，写清楚它替换了 vLLM 哪个模块的哪个符号、为什么必须在 NPU 上这样做。",
+          "source_files": [
+            "components/omni-npu/src/omni_npu/vllm_patches/patch_manager.py",
+            "components/omni-npu/src/omni_npu/vllm_patches/__init__.py",
+            "components/omni-npu/src/omni_npu/vllm_patches/patches/common/patch_scheduler.py",
+            "components/omni-npu/src/omni_npu/vllm_patches/patches/models/pangu_v2_hybrid/patch_scheduler.py"
+          ],
+          "title": "PatchManager：不改 vLLM 源码的运行时补丁机制",
+          "topic": "讲解 omni-npu 如何用 PatchManager 在运行时替换 vLLM 行为：OMNI_NPU_VLLM_PATCHES 环境变量、ALL 展开、common 与模型专属（pangu_v2_hybrid/pangu_v2_moe）补丁目录。"
+        }
+      ],
+      "order": 2,
+      "title": "omni-npu 插件机制：vLLM 如何在昇腾上跑起来"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u3-l1-pangu-model-structure.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "说出模型文件中 MLP、MOE、DecoderLayer、Model、ForCausalLM 各层的职责",
+            "解释模型如何通过 match_hf_configs.json 被识别注册",
+            "梳理权重加载与 TP/EP 切分入口"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "MoE Transformer 结构",
+            "vLLM 模型接口",
+            "权重加载"
+          ],
+          "order": 1,
+          "practice_task": "对照一份 openPangu-2.0 权重的 config.json，在 pangu_v2_moe.py 中找到每个超参的落点，并统计 DecoderLayer 里 attention 与 MoE 子模块的实例化顺序。",
+          "source_files": [
+            "components/omni-npu/src/omni_npu/v1/models/pangu/pangu_v2_moe.py",
+            "components/omni-npu/src/omni_npu/model_config/configs/match_hf_configs.json",
+            "components/omni-npu/src/omni_npu/vllm_patches/patches/models/pangu_v2_moe/patch_model_arch_config_convertor.py"
+          ],
+          "title": "OpenPanguV2 MoE 模型结构总览",
+          "topic": "从整体上精读 2400 余行的 pangu_v2_moe.py：OpenPanguV2ForCausalLM/OpenPanguV2Model/OpenPanguV2DecoderLayer/OpenPanguV2MOE 的分层结构与前向流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-pangu-attention.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "解释 Indexer 如何为每层选出 topk 参与注意力的 token",
+            "说明 CrossLayerSharedOp 的跨层共享机制",
+            "理解注意力后端注册表如何支持插件覆盖"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "DSA 稀疏注意力",
+            "自定义算子调用",
+            "注意力后端注册"
+          ],
+          "order": 2,
+          "practice_task": "画出 NPUPanguSparseAttention 一次前向的数据流图（indexer 打分 → topk 选 token → attention 计算），并标注调用了哪些 torch_npu 自定义算子。",
+          "source_files": [
+            "components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py",
+            "components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu_custom_ops.py",
+            "components/omni-npu/src/omni_npu/attention/backends/utils.py",
+            "components/omni-npu/src/omni_npu/attention/backends/attention.py",
+            "components/omni-npu/src/omni_npu/attention/backends/dsa.py"
+          ],
+          "title": "Pangu 稀疏注意力：Indexer 与自定义算子",
+          "topic": "讲解 openPangu 特有的稀疏注意力实现：NPUPanguIndexer、NPUPanguSparseAttention、CrossLayerSharedOp，以及注意力后端的注册与选择。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l3-pangu-moe.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "解释 SharedFusedMoE 中共享专家与路由专家的融合方式",
+            "说明专家并行下权重的切分与 AllGather/All2All 通信",
+            "理解 NPU 侧 MoE 对量化与算子的适配点"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "MoE 路由与分发",
+            "专家并行",
+            "融合算子"
+          ],
+          "order": 3,
+          "practice_task": "梳理 NPUSharedFusedMoE.__init__ 与 forward 相对 vLLM 原生 SharedFusedMoE 的差异点清单，并解释 --enable-expert-parallel 打开后每个 rank 持有哪些专家权重。",
+          "source_files": [
+            "components/omni-npu/src/omni_npu/layers/fused_moe/layer.py",
+            "components/omni-npu/src/omni_npu/layers/fused_moe/fused_moe.py",
+            "components/omni-npu/src/omni_npu/layers/fused_moe/fused_moe_method_base.py",
+            "components/omni-npu/src/omni_npu/layers/fused_moe/prepare_permute_unpermute_finalize.py",
+            "components/omni-npu/src/omni_npu/v1/models/pangu/pangu_v2_moe.py"
+          ],
+          "title": "MoE 层实现与专家并行",
+          "topic": "精读 NPU 侧 MoE 实现：NPUFusedMoE、NPUSharedFusedMoE 及其与 OpenPanguV2MOE 的组合，理解共享专家融合与专家并行（EP）下的通信。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l4-custom-layers.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "解释 mHC 残差流在 block 间的传递方式",
+            "说出 NPU 版 RMSNorm、Linear、Embedding 替换默认实现的动机",
+            "掌握仿照现有层新增 NPU 自定义层的套路"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "残差流 mHC",
+            "算子替换层",
+            "logits 计算"
+          ],
+          "order": 4,
+          "practice_task": "仿照 layers/activation.py 中现有 wrapper 的写法，为一个新激活函数实现 NPU 适配版本，并说明应在哪里注册才能被模型构建时使用。",
+          "source_files": [
+            "components/omni-npu/src/omni_npu/layers/mhc/npu_mhc.py",
+            "components/omni-npu/src/omni_npu/layers/npu_rms_norm.py",
+            "components/omni-npu/src/omni_npu/layers/activation.py",
+            "components/omni-npu/src/omni_npu/v1/layers/linear.py",
+            "components/omni-npu/src/omni_npu/v1/layers/vocab_parallel_embedding.py",
+            "components/omni-npu/src/omni_npu/v1/layers/logits_processor.py"
+          ],
+          "title": "自定义层：mHC、RMSNorm、线性层与词表并行",
+          "topic": "讲解模型用到的 NPU 定制基础层：NPUmHC 多头残差、npu_rms_norm、NPU 版线性层、词表并行 Embedding 与 logits 处理器。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l5-mtp-and-samplers.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "解释 MTP draft 层的权重来源与前向流程",
+            "说明 topk/top-p 采样与拒绝采样在投机解码中的配合",
+            "理解 num_speculative_tokens 对吞吐的影响"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "MTP 投机解码",
+            "拒绝采样",
+            "采样器接口"
+          ],
+          "order": 5,
+          "practice_task": "追踪 pangu_v2_moe.py 中 get_spec_layer_idx_from_weight_name 与 MTP 模型的加载路径，说明 --num-speculative-tokens 如何控制 draft 长度，并推导拒绝采样的接受条件。",
+          "source_files": [
+            "components/omni-npu/src/omni_npu/v1/models/pangu/pangu_v2_moe_mtp.py",
+            "components/omni-npu/src/omni_npu/v1/models/pangu/pangu_v2_moe.py",
+            "components/omni-npu/src/omni_npu/sample/sampler.py",
+            "components/omni-npu/src/omni_npu/sample/ops/topk_topp_sampler.py",
+            "components/omni-npu/src/omni_npu/sample/rejection_sampler.py"
+          ],
+          "title": "MTP 投机解码与采样器",
+          "topic": "讲解 pangu_v2_moe_mtp 投机解码（MTP）实现与 NPU 采样器（topk/top-p、拒绝采样）如何协作加速 decode。"
+        }
+      ],
+      "order": 3,
+      "title": "openPangu 模型实现精读"
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u4-l1-pd-kv-transfer-config.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "解释 kv_role/kv_rank/kv_parallel_size 的取值规则",
+            "区分 producer 与 consumer 两侧的启动参数差异",
+            "理解多 P 节点下 PREFILL_SERVER_LIST 与 KV_PARALLEL_SIZE 的计算"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "PD 角色",
+            "kv-transfer-config",
+            "并行规模计算"
+          ],
+          "order": 1,
+          "practice_task": "为 3P1D 拓扑分别写出三个 P 节点与 D 节点的 kv-transfer-config JSON，并验证 KV_PARALLEL_SIZE = PREFILL_POD_NUM + 1 的推导。",
+          "source_files": [
+            "tools/ansible/92B/omni_infer_server_template_performance1P1D_92B_bf16_open.yml",
+            "tools/scripts/pd_run.sh",
+            "README.md"
+          ],
+          "title": "PD 分离与 KV 传输配置全景",
+          "topic": "系统讲解 PD 分离的配置面：ansible 模板中 run_vllm_server_prefill_cmd/decode_cmd 的 kv-transfer-config、KV_CONNECTOR、role 与 rank 的含义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1",
+            "u2-l3"
+          ],
+          "filename": "u4-l2-llmdatadist-connector.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "说出 KVConnectorBase_V1 四个协作类的职责边界",
+            "描述 decode 侧从 register_link 到 pull_blocks 的完整过程",
+            "理解心跳与 force_unlink 的容错机制"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "KVConnectorV1 接口",
+            "scheduler/worker 分工",
+            "llm_datadist 会话管理"
+          ],
+          "order": 2,
+          "practice_task": "画出一次 KV 传输的时序图：请求在 P 完成 prefill → scheduler 产生 metadata → worker 发送/拉取 KV → D 侧加载，并标注每个步骤所在的类与方法。",
+          "source_files": [
+            "components/omni-npu/src/omni_npu/connector/llmdatadist_connector_v1.py",
+            "components/omni-npu/src/omni_npu/connector/llmdatadist_manager_v1.py",
+            "components/omni-npu/src/omni_npu/connector/register.py"
+          ],
+          "title": "LLMDataDistConnector 源码精读",
+          "topic": "精读 LLMDataDistConnector：Prefill/Decode 两侧的 Scheduler 与 Worker 四个类如何配合完成 KV 块的异步传输。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-connector-ports.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "说出 ZMQ 心跳链路与 llm_datadist 数据链路各自的作用",
+            "根据部署规模推算每类端口的具体取值",
+            "掌握用网络工具验证链路建立的方法"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ZMQ PUB/SUB",
+            "RoCE 传输端口",
+            "IP 发现"
+          ],
+          "order": 3,
+          "practice_task": "在运行中的部署里用 ss -tlnp/Netstat 找到 5568、15566、15567 等端口的监听进程，与 README 端点矩阵逐行对照并写进部署文档。",
+          "source_files": [
+            "components/omni-npu/README.md",
+            "components/omni-npu/src/omni_npu/connector/utils.py",
+            "components/omni-npu/src/omni_npu/connector/llmdatadist_connector_v1.py"
+          ],
+          "title": "通信矩阵：ZMQ 心跳与 llm_datadist 传输端口",
+          "topic": "对照 omni-npu README 的端点矩阵，讲解 ZMQ 心跳（PUB/SUB、IPC）与 llm_datadist RoCE 传输的端口规划与触发时机。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l4-pd-run-script.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "按类别解释 pd_run.sh 的全部参数组",
+            "理解 rank table 文件在 llmdatadist 组网中的作用",
+            "掌握多 API server 与 DP 的关系及 server_offset 用法"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "bash 参数解析",
+            "ranktable 组网",
+            "多 API server"
+          ],
+          "order": 4,
+          "practice_task": "不看模板，手写一条最小可用的 decode 侧 pd_run.sh 调用命令（含 role、kv 参数、ranktable 路径），再与 ansible 模板生成的命令 diff 校对。",
+          "source_files": [
+            "tools/scripts/pd_run.sh",
+            "tools/scripts/start_api_servers.py",
+            "tools/scripts/bind_cpu.sh"
+          ],
+          "title": "pd_run.sh 与多机多 API Server 拉起细节",
+          "topic": "逐参数讲解 ansible 最终调用的 pd_run.sh：llmdatadist 专属参数、昇腾参数、vLLM 参数与多 API Server 参数，以及它如何拼装 vllm serve 命令。"
+        }
+      ],
+      "order": 4,
+      "title": "PD 分离与 KV 传输链路"
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u5-l1-model-extra-config.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "说出 TaskConfig/ModelParallelConfig/ModelOperatorOptConfig 的分工",
+            "解释 match_hf_configs.json 与 best_practice_configs.json 的匹配流程",
+            "掌握 CUSTOM_MODEL_CONFIG_PATH 覆盖默认配置的方法"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "配置分层",
+            "模型识别匹配",
+            "特性开关"
+          ],
+          "order": 1,
+          "practice_task": "仿照 openpangu_v2 目录下现有 json，为假想的“my-model”写一份配置：先在 match_hf_configs.json 登记，再用 CUSTOM_MODEL_CONFIG_PATH 显式指定加载并打印生效结果。",
+          "source_files": [
+            "components/omni-npu/src/omni_npu/model_config/config_loader/loader.py",
+            "components/omni-npu/src/omni_npu/model_config/config_loader/features.py",
+            "components/omni-npu/src/omni_npu/model_config/configs/low_latency/best_practice_configs.json",
+            "components/omni-npu/src/omni_npu/model_config/configs/match_hf_configs.json",
+            "components/omni-npu/src/omni_npu/model_config/README.md"
+          ],
+          "title": "模型最佳实践配置系统（ModelExtraConfig）",
+          "topic": "讲解 omni-npu 的模型配置自动加载：TaskConfig/ModelParallelConfig/ModelOperatorOptConfig 三类配置、best_practice_configs.json 匹配与 CUSTOM_MODEL_CONFIG_PATH 覆盖。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u5-l2-graph-compilation.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "解释 ACL Graph 与 cuda_graph 模式的映射关系",
+            "说出 GE 编译（use_gegraph）与 piecewise 图的差异",
+            "对比 enforce-eager 与图模式的性能特征"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "静态图捕获",
+            "GE 编译配置",
+            "图分发"
+          ],
+          "order": 2,
+          "practice_task": "在测试服务上分别用 --enforce-eager 与默认图模式启动同一模型，对比启动日志中的图捕获记录与 decode 延迟，写一份对比结论。",
+          "source_files": [
+            "components/omni-npu/src/omni_npu/compilation/acl_graph.py",
+            "components/omni-npu/src/omni_npu/compilation/npugraph_ex.py",
+            "components/omni-npu/src/omni_npu/compilation/ge_compile_config.py",
+            "components/omni-npu/src/omni_npu/worker/npu_graph_dispatcher.py",
+            "components/omni-npu/docs/compilation.md",
+            "components/omni-npu/README.md"
+          ],
+          "title": "图编译：ACL Graph 与 GE 后端",
+          "topic": "讲解昇腾图执行优化：ACLGraphWrapper 静态图捕获、NpuGraphExAdaptor 编译后端、GE 编译配置与 pass_manager。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "filename": "u5-l3-lopt-tokenizer.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "解释 LOPT 如何把 tokenize 分摊到多进程池",
+            "说出 maybe_get_lopt_tokenizer 的启用条件",
+            "理解 OMNI_SKIP_DECODE_TOKENIZE 等配套环境变量"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "并行 tokenizer",
+            "进程池管理",
+            "token 复用"
+          ],
+          "order": 3,
+          "practice_task": "阅读 lopt_wrapper.py 后回答：--lopt-pool-size 16 --lopt-chunk-size 4096 分别控制什么；设计一个对比实验度量开启 LOPT 前后的 prefill 阶段耗时差。",
+          "source_files": [
+            "components/omni-npu/src/omni_npu/lopt/lopt_wrapper.py",
+            "components/omni-npu/src/omni_npu/lopt/lopt_utils.py",
+            "tools/ansible/92B/omni_infer_server_template_performance1P1D_92B_bf16_open.yml"
+          ],
+          "title": "LOPT 并行 tokenizer",
+          "topic": "讲解 LoptParallelTokenizer：长 prompt 分块并行 tokenize 的实现、启用条件与 ansible 中的 --enable-lopt 参数。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "filename": "u5-l4-parsers-and-thinking.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "解释 reasoning parser 如何切分 think 内容",
+            "说明 tool parser 如何解析工具调用并处理 PANGU_TOOL_CALL_ENDS_THINKING",
+            "理解 thinking 预算与禁用状态对生成的影响"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "流式解析",
+            "工具调用协议",
+            "思考预算控制"
+          ],
+          "order": 4,
+          "practice_task": "构造三段模型输出样例（纯思考、思考+回答、含工具调用），编写 pytest 用例验证 parser 在流式与非流式下的切分结果。",
+          "source_files": [
+            "components/omni-npu/src/omni_npu/v1/parsers/pangu_reasoning_parser.py",
+            "components/omni-npu/src/omni_npu/v1/parsers/pangu_tool_parser.py",
+            "components/omni-npu/src/omni_npu/v1/parsers/_streaming_relay.py",
+            "components/omni-npu/src/omni_npu/v1/sample/thinking_ban_state.py",
+            "components/omni-npu/src/omni_npu/v1/config/reasoning.py"
+          ],
+          "title": "推理解析器与思考输出控制",
+          "topic": "讲解 pangu 推理输出后处理：reasoning parser（<think> 切分）、tool parser（工具调用）、流式中继与 thinking 禁用/预算状态机。"
+        }
+      ],
+      "order": 5,
+      "title": "性能与功能机制"
+    },
+    {
+      "id": "u6",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u6-l1-proxy-overview.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "解释请求 10 阶段生命周期模型",
+            "区分 sequential 与 parallel 两种 PD 调度模式",
+            "掌握 omni_proxy.sh 生成配置的参数"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Nginx 动态模块",
+            "PD 调度模式",
+            "配置生成"
+          ],
+          "order": 1,
+          "practice_task": "用 omni_proxy.sh 生成一份 2 prefill + 2 decode 上游的 nginx.conf，再手改为 parallel 模式，用 nginx -t 验证配置合法性。",
+          "source_files": [
+            "components/omni-proxy/omni_proxy/README_CN.md",
+            "components/omni-proxy/omni_proxy/README.md",
+            "components/omni-proxy/omni_proxy/omni_proxy.sh",
+            "components/omni-proxy/omni_proxy/nginx.conf"
+          ],
+          "title": "Omni Proxy 架构与快速上手",
+          "topic": "讲解基于 Nginx 的第二代请求调度引擎：请求生命周期十阶段、sequential/parallel 双调度模式、tokenizer 复用与主从调度。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-proxy-scheduler-source.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "说明请求排序权重与上游节点选择的实现位置",
+            "理解 radix tree 如何维护全局 KV 缓存视图",
+            "解释 ZMQ 如何订阅推理引擎的 KV 事件"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "C 模块结构",
+            "共享内存状态",
+            "radix tree APC"
+          ],
+          "order": 2,
+          "practice_task": "在 omni_scheduler.c 中找到请求排序与过载保护的核心代码段，绘制“新请求进入 → 分配 upstream”的流程图，并标注 radix tree 命中与否两条路径。",
+          "source_files": [
+            "components/omni-proxy/omni_proxy/modules/omni_scheduler.c",
+            "components/omni-proxy/omni_proxy/modules/omni_apc.c",
+            "components/omni-proxy/omni_proxy/modules/omni_radix_tree.c",
+            "components/omni-proxy/omni_proxy/modules/omni_tokenizer.c",
+            "components/omni-proxy/omni_proxy/modules/omni_zmq_handler.c"
+          ],
+          "title": "调度器与 APC 缓存感知源码",
+          "topic": "导读 omni_proxy 的 C 源码：omni_scheduler 的负载感知调度、omni_apc/omni_radix_tree 的前缀缓存匹配、omni_tokenizer 的内嵌分词与 ZMQ 事件订阅。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1",
+            "u1-l4"
+          ],
+          "filename": "u6-l3-proxy-deploy-groups.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "解释 run_proxy tag 生成的脚本做了什么",
+            "掌握 omni_proxy_prefill_groups/decode_groups 的分组语法与约束",
+            "理解 USE_OMNI_PROXY 与 ENABLE_APC_EVENT 的开启链路"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ansible run_proxy",
+            "分组映射",
+            "APC 开关"
+          ],
+          "order": 3,
+          "practice_task": "在 1P1D 模板的 run_proxy_cmd 基础上为 3P1D 增加分组配置（prefill 3 组各 1 台、decode 1 组），部署后通过日志确认分组映射生效。",
+          "source_files": [
+            "tools/ansible/92B/omni_infer_server_template_performance1P1D_92B_bf16_open.yml",
+            "tools/ansible/505B/omni_infer_server_template_performance4P1D_505B_int8_open_omni_cache.yml",
+            "components/omni-proxy/omni_proxy/README_CN.md",
+            "tools/scripts/pd_run.sh"
+          ],
+          "title": "在 ansible 体系里部署 proxy 与分组调度",
+          "topic": "讲解 proxy 在部署链路中的接入方式：模板 run_proxy 标签调用 omni_proxy.sh、USE_OMNI_PROXY 开关以及 prefill/decode 分组调度配置。"
+        }
+      ],
+      "order": 6,
+      "title": "omni-proxy：请求调度引擎"
+    },
+    {
+      "id": "u7",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u7-l1-omnicache-overview.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "解释主机内存池（hugetlbfs）作为中间缓存层的价值",
+            "说出 producer/consumer 两侧的环境变量差异",
+            "掌握 hugepage 的准备步骤"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "KV 卸载模型",
+            "hugetlbfs",
+            "启动参数"
+          ],
+          "order": 1,
+          "practice_task": "按用户指南在两个容器里手工拉起 producer 与 consumer（参照 examples/run_server_p.sh 与 run_server_d.sh），发送多轮对话请求并从日志确认 KV 命中。",
+          "source_files": [
+            "components/omni-cache/README.md",
+            "components/omni-cache/docs/USER_GUIDE.md",
+            "components/omni-cache/examples/run_server_p.sh",
+            "components/omni-cache/examples/run_server_d.sh"
+          ],
+          "title": "OmniCache 原理与部署",
+          "topic": "讲解 OmniCache：KV Cache 从 HBM 卸载到主机内存再传输的机制、对序列长度/并发/APC 命中率的收益，以及手工拉起 producer/consumer 的方法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1",
+            "u4-l2"
+          ],
+          "filename": "u7-l2-omnicache-connector-source.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "对比 OmniCacheConnector 与 LLMDataDistConnector 的接口差异",
+            "描述 prefill 侧卸载与 decode 侧加载的类协作",
+            "理解 gather_selection 对多 P 选择的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "connector 分层",
+            "KV loader",
+            "传输引擎"
+          ],
+          "order": 2,
+          "practice_task": "画出 KV 从 P 节点 HBM → 主机内存 → 网络 → D 节点主机内存 → HBM 的完整流转图，标注每一步涉及的类与方法名。",
+          "source_files": [
+            "components/omni-cache/omni_cache/connector/prefill/worker.py",
+            "components/omni-cache/omni_cache/connector/decode/kv_loader.py",
+            "components/omni-cache/omni_cache/connector/decode/process_manager.py",
+            "components/omni-cache/omni_cache/connector/decode/worker.py",
+            "components/omni-cache/omni_cache/connector/scheduler/prefill.py",
+            "components/omni-cache/omni_cache/connector/scheduler/decode.py"
+          ],
+          "title": "OmniCacheConnector 源码结构",
+          "topic": "导读 omni-cache 的 connector 实现：prefill 侧 worker 的卸载、decode 侧 kv_loader/process_manager 的加载，以及两侧 scheduler 的配合。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l3-omnicache-ops.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "掌握 ENABLE_OMNI_CACHE/ENABLE_HOST_MAPPING 等环境变量",
+            "理解大页内存的分配上限与释放流程",
+            "知道从 OmniCache 切回普通部署的注意事项"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "配置参考",
+            "大页运维",
+            "部署切换"
+          ],
+          "order": 3,
+          "practice_task": "演练切换流程：先按 3P1D omni_cache 模板拉起服务，再执行“重启容器 + set_hugepage_limit.sh --target-pages 262144”恢复正常部署可用内存，并记录前后 free -g 对比。",
+          "source_files": [
+            "components/omni-cache/docs/CONFIG_REFERENCE.md",
+            "components/omni-cache/tools/setup/set_hugepage_limit.sh",
+            "tools/ansible/92B/omni_infer_server_template_performance3P1D_92B_w8a8_open_omni_cache.yml",
+            "README_INT8.md"
+          ],
+          "title": "OmniCache 配置参考与大页内存运维",
+          "topic": "讲解 OmniCache 的配置项全集、大页内存脚本（set_hugepage_limit 等）与 ansible 模板中的 omni_cache 特性开关及切换注意事项。"
+        }
+      ],
+      "order": 7,
+      "title": "omni-cache：主机内存 KV 缓存池"
+    },
+    {
+      "id": "u8",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u8-l1-jointfix-overview.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "解释 W8A8：权重 per-channel 静态 + 激活 per-token 动态",
+            "说出 backend（模型轴）与 method（方法轴）的解耦设计",
+            "掌握 NPU 上 --no-deps 安装的避坑原因"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "PTQ 基础",
+            "registry 模式",
+            "CLI 子命令"
+          ],
+          "order": 1,
+          "practice_task": "在 CPU 环境安装 jointfix 并执行 jointfix quantize --help，用 registry 的 available_backends/available_methods 打印当前可选项，画出 cli→registry→backend/method 的调用关系。",
+          "source_files": [
+            "tools/quant/jointfix/README.md",
+            "tools/quant/jointfix/jointfix/cli.py",
+            "tools/quant/jointfix/jointfix/registry.py",
+            "tools/quant/jointfix/pyproject.toml"
+          ],
+          "title": "W8A8 量化与 jointfix 工具架构",
+          "topic": "介绍 jointfix 工具箱：多模型、方法可插拔的 INT8 训练后量化，core/backends/methods 三层正交架构与 CLI 入口。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "filename": "u8-l2-jointfix-core.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "描述逐层“前向收统计→量化→重前向验证”的 runner 主循环",
+            "解释校准集加载与 Hessian 通道加权的来源",
+            "理解多 device 并行与断点中间产物的组织"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "校准循环",
+            "激活统计",
+            "量化原语"
+          ],
+          "order": 2,
+          "practice_task": "阅读 core/runner.py 后写出主循环伪代码（含 layer_*.safetensors 中间产物），并回答 --n-samples/--seq-len 分别影响统计的哪个维度。",
+          "source_files": [
+            "tools/quant/jointfix/jointfix/core/runner.py",
+            "tools/quant/jointfix/jointfix/core/calib_data.py",
+            "tools/quant/jointfix/jointfix/core/stats.py",
+            "tools/quant/jointfix/jointfix/core/primitives.py",
+            "tools/quant/jointfix/jointfix/core/devices.py",
+            "tools/quant/jointfix/jointfix/core/checkpoint.py"
+          ],
+          "title": "core 模块：校准、统计与量化主循环",
+          "topic": "精读与模型/方法无关的 core 层：校准数据、激活统计、RTN/GPTQ 量化原语、多卡设备管理与逐层 runner。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "filename": "u8-l3-jointfix-method.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "解释平滑参数如何缓解离群通道导致的量化误差",
+            "描述 K=2 坐标下降在 gate/up 与 down 间的交替",
+            "理解 output-recon 目标与 GPTQ 残差方向的选择"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "smooth quantization",
+            "坐标下降",
+            "输出重建目标"
+          ],
+          "order": 3,
+          "practice_task": "运行 python examples/smoke_pangu_layer.py（或阅读其输出样例）对单层做冒烟验证，解读打印的 (a,b) 搜索过程与量化前后误差，说明 --skip-shared-experts 的理由。",
+          "source_files": [
+            "tools/quant/jointfix/jointfix/methods/jointfix.py",
+            "tools/quant/jointfix/jointfix/methods/smooth_search.py",
+            "tools/quant/jointfix/jointfix/methods/_smooth_pangu.py",
+            "tools/quant/jointfix/jointfix/methods/base.py",
+            "tools/quant/jointfix/examples/smoke_pangu_layer.py",
+            "tools/quant/jointfix/docs/quantize_openpangu_w8a8.md"
+          ],
+          "title": "JointFix 方法：联合 (a,b) 平滑参数搜索",
+          "topic": "精读 JointFix 量化方法：对每个线性层联合搜索最优平滑参数 (a,b)、Hessian 加权、K=2 坐标下降与输出侧 GPTQ + 输入侧 RTN 混合量化。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1",
+            "u1-l4"
+          ],
+          "filename": "u8-l4-jointfix-deploy.md",
+          "id": "u8-l4",
+          "learning_goals": [
+            "解释 config.json 中 quantization_config 各字段的含义",
+            "掌握 INT8 模板与 BF16 模板的差异",
+            "完成从 BF16 权重到 INT8 服务的端到端流程"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "compressed-tensors",
+            "部署组装",
+            "INT8 部署"
+          ],
+          "order": 4,
+          "practice_task": "对小模型跑完 jointfix quantize 后检查输出目录 config.json 的 quantization_config 与 ignore 列表，再用 w8a8 ansible 模板拉起服务，对比量化前后的显存占用与首 token 延迟。",
+          "source_files": [
+            "tools/quant/jointfix/jointfix/core/deploy.py",
+            "tools/quant/jointfix/jointfix/backends/pangu.py",
+            "tools/quant/jointfix/jointfix/backends/base.py",
+            "README_INT8.md",
+            "tools/ansible/92B/omni_infer_server_template_performance1P1D_92B_w8a8_open.yml"
+          ],
+          "title": "量化产物组装与 INT8 服务部署",
+          "topic": "讲解量化结果如何被组装成 vLLM 可直接加载的 compressed-tensors 模型（deploy/finalize），以及用 w8a8 ansible 模板部署 INT8 服务。"
+        }
+      ],
+      "order": 8,
+      "title": "jointfix：W8A8 量化工具箱"
+    },
+    {
+      "id": "u9",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u9-l1-eplb-overview.md",
+          "id": "u9-l1",
+          "learning_goals": [
+            "解释专家重排列与层间不均匀部署的收益",
+            "描述近实时激活采集与动态重排的配合",
+            "掌握 config.yaml 的配置项与 pattern 文件的角色"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "MoE 负载不均",
+            "冗余专家",
+            "部署配置"
+          ],
+          "order": 1,
+          "practice_task": "按 Guideline 在推理容器内完成 wheel 构建与 config.yaml 配置，说明 prefill 与 decode 节点为何需要分别配置，并指出约束条件（如与 AllGather 模式互斥）。",
+          "source_files": [
+            "components/omni-eplb/README.md",
+            "components/omni-eplb/Guideline.md",
+            "components/omni-eplb/config.yaml"
+          ],
+          "title": "OmniPlacement 专家负载均衡原理与启用",
+          "topic": "讲解 MoE 专家负载不均问题与 OmniPlacement 的解法：专家重排、层间不均匀部署、冗余专家高可用与近实时激活采集。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "filename": "u9-l2-eplb-source.md",
+          "id": "u9-l2",
+          "learning_goals": [
+            "追踪激活统计到新 mapping 生成的调用链",
+            "解释 physical→logical 专家映射的表示",
+            "理解重排如何在不中断服务的情况下生效"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "planner 调度",
+            "专家映射",
+            "分布式算子"
+          ],
+          "order": 2,
+          "practice_task": "从 omni_planner.py 入口追踪一次“采集→计算新排布→下发 mapping”的完整调用链，画出涉及模块的协作图，并说明 placement_handler 与 vLLM 侧补丁（patch_eplb_parallel）的衔接点。",
+          "source_files": [
+            "components/omni-eplb/omni_placement/omni_planner.py",
+            "components/omni-eplb/omni_placement/expert_mapping.py",
+            "components/omni-eplb/omni_placement/placement_handler.py",
+            "components/omni-eplb/omni_placement/cluster_status.py",
+            "components/omni-npu/src/omni_npu/vllm_patches/patches/common/patch_eplb_parallel.py"
+          ],
+          "title": "OmniPlanner 与专家重排实现",
+          "topic": "导读 omni_placement 核心代码：omni_planner 的规划循环、expert_mapping 的物理/逻辑映射、placement_handler 的热更新与集群状态维护。"
+        }
+      ],
+      "order": 9,
+      "title": "omni-eplb：MoE 专家负载均衡"
+    },
+    {
+      "id": "u10",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u10-l1-docker-images.md",
+          "id": "u10-l1",
+          "learning_goals": [
+            "说出 L1（CANN/torch_npu 运行时）与 L2（omniinfer 服务）的职责边界",
+            "掌握 docker_build_run.sh 的关键参数",
+            "理解自定义算子包的注入方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "镜像分层",
+            "CANN 安装",
+            "构建脚本"
+          ],
+          "order": 1,
+          "practice_task": "使用 --build-target L1 只构建开发层镜像，列出 L1 与 L2 各自安装的关键组件清单，再为 L2 追加一个自定义算子包并验证镜像内可 import。",
+          "source_files": [
+            "tools/docker/README.md",
+            "tools/docker/Dockerfile.base",
+            "tools/docker/Dockerfile.omniinfer",
+            "tools/docker/docker_build_run.sh",
+            "tools/docker/requirements/common.txt"
+          ],
+          "title": "Docker 镜像分层构建（L1/L2）",
+          "topic": "讲解推理镜像的两层构建体系：Dockerfile.base 的 CANN/torch_npu 设备层与 Dockerfile.omniinfer 的应用层，以及一键构建脚本参数。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u10-l2-testing.md",
+          "id": "u10-l2",
+          "learning_goals": [
+            "区分 unit（无需 NPU）与 integration（需真机）测试",
+            "掌握 run_tests.sh 与 pytest.ini 的用法",
+            "能仿照现有用例为新代码补测试"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "pytest 组织",
+            "conftest",
+            "测试分层"
+          ],
+          "order": 2,
+          "practice_task": "运行 ./run_tests.sh unit（或等价 pytest 命令）跑通无需 NPU 的用例，然后仿照 tests/unit 下任一用例，为你此前编写的 patch 或配置加载代码补一个最小单测并使其通过。",
+          "source_files": [
+            "components/omni-npu/tests/QUICKSTART.md",
+            "components/omni-npu/tests/README.md",
+            "components/omni-npu/tests/run_tests.sh",
+            "components/omni-npu/tests/STRUCTURE.md",
+            "components/omni-npu/pytest.ini"
+          ],
+          "title": "omni-npu 测试体系与本地跑测",
+          "topic": "讲解 omni-npu 的测试组织：unit/integration 分层、run_tests.sh、conftest 与镜像内跑测的方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4",
+            "u5-l1"
+          ],
+          "filename": "u10-l3-extend-plugin.md",
+          "id": "u10-l3",
+          "learning_goals": [
+            "独立完成一个新 patch 的注册与应用验证",
+            "掌握新增模型配置 json 的完整步骤",
+            "理解 kv connector 与模型装饰器两类扩展点"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "patch 扩展",
+            "配置扩展",
+            "connector 扩展点"
+          ],
+          "order": 3,
+          "practice_task": "写一个最小 patch 类（例如给某个 vLLM 函数加日志）注册进 PatchManager，在容器内通过 OMNI_NPU_VLLM_PATCHES 只启用它并从日志确认生效；再按 model_config/README.md 的流程为一个新模型登记配置。",
+          "source_files": [
+            "components/omni-npu/src/omni_npu/vllm_patches/patch_manager.py",
+            "components/omni-npu/src/omni_npu/model_config/README.md",
+            "components/omni-npu/src/omni_npu/connector/register.py",
+            "components/omni-npu/src/omni_npu/plugin_decorators.py",
+            "README.md"
+          ],
+          "title": "二次开发：新增补丁、模型配置与连接器",
+          "topic": "汇总 omni-npu 的三类扩展点：vLLM 运行时补丁、模型最佳实践配置、KV connector 注册（含 omni.kv_connectors entry point），以及进容器改代码的工作流。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l4",
+            "u7-l3",
+            "u6-l3"
+          ],
+          "filename": "u10-l4-production-tuning.md",
+          "id": "u10-l4",
+          "learning_goals": [
+            "为 505B 规划 4P81D16 形态的节点与端口方案",
+            "组合 INT8、OmniCache、分组调度三项特性的配置改动",
+            "形成一套可复用的上线检查清单"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "大规模拓扑规划",
+            "特性组合",
+            "上线验证"
+          ],
+          "order": 4,
+          "practice_task": "以 505B 生产上线为目标输出一份部署方案文档：inventory 草稿、模板 environment 改动清单、大页与分组调度配置、以及发压验证与回退步骤；说明每项特性对内存/吞吐的预期影响。",
+          "source_files": [
+            "README.md",
+            "README_INT8.md",
+            "tools/ansible/505B/omni_infer_inventory_used_for_4P81D16.yml",
+            "tools/ansible/505B/omni_infer_server_template_performance4P1D_505B_int8_open_omni_cache.yml",
+            "tools/ansible/505B/omni_infer_server_template_performance2P1D_505B_bf16_open.yml"
+          ],
+          "title": "生产综合实战：505B 全特性部署方案设计",
+          "topic": "以 openPangu-2.0-Pro 为例做综合演练：把 INT8 量化、OmniCache、omni-proxy 分组调度组合进 4P81D16 大规模拓扑，形成完整生产方案。"
+        }
+      ],
+      "order": 10,
+      "title": "构建、测试与二次开发实战"
+    }
+  ]
+}
