@@ -1,7 +1,7 @@
 {
-  "head": "7eec89207ccfbef7ba366da22fc885079a5c0296",
+  "head": "d9ad6aff67e47de43abb270d22de75dd950f1b48",
   "project": "zed-crates-sidebar",
-  "rationale": "增量分析结论：上次 HEAD fd82517a11 到当前 HEAD 7eec89207c 之间仅有 1 个提交（7eec89207c extension_host 为使用旧版扩展 API 的扩展恢复项目级 LSP 设置），改动全部落在 crates/extension_host/src/wasm_host/wit/since_v0_0_6.rs 与 since_v0_1_0.rs 两个 WIT 版本适配器，与 crates/sidebar 及讲义引用的全部外部文件（zed.rs、multi_workspace.rs、threads_archive_view.rs、test_support.rs）零交集——git diff 对这些路径返回空，sidebar 的三个源文件与 Cargo.toml 在两个 HEAD 间内容完全一致，关键符号（rebuild_contents、apply_list_state_diff、Render for Sidebar、actions!）均原位存在。因此已生成的 9 篇讲义（u1-l1 至 u3-l3）全部保持 keep，其余 20 篇尚未生成的讲义维持 new 以便 worker 按原计划继续生成；extension_host 的变更与侧边栏领域无关，无需新增讲义，整体学习路线（先跑起来、再读数据模型、沿数据流自上游到下游、再到渲染与交互、然后跨视图行为与生命周期、最后测试与可观测性）不变。",
+  "rationale": "增量分析结论：上次 HEAD 7eec89207c 到当前 HEAD d9ad6aff67 之间仅有 1 个提交（d9ad6aff67 gpui_linux 在 close 回调前释放 X11 client state），改动全部落在 crates/gpui_linux/src/linux/x11/client.rs（12 增 8 删），与 crates/sidebar 及讲义引用的全部外部文件（zed.rs、multi_workspace.rs、threads_archive_view.rs、test_support.rs）零交集——git diff 对这些路径返回空，sidebar 的源文件与 Cargo.toml 在两个 HEAD 间内容完全一致。该提交属于 gpui Linux 窗口后端修复，与侧边栏领域无关，无需新增、更新或重建任何讲义。教程目录检查显示 u1-l1 至 u6-l3 共 21 篇已生成，其内容所基于的源码未变，全部标 keep；u7、u8、u9 三个单元共 6 篇尚未生成，维持 new 以便 worker 按原计划继续。整体学习路线（先跑起来、再读数据模型、沿数据流自上游到下游、再到渲染与交互、然后跨视图行为与生命周期、最后测试与可观测性）不变。",
   "units": [
     {
       "id": "u1",
@@ -270,7 +270,7 @@
           "topic": "讲解列表身份键 EntryShape 的设计动机与 apply_list_state_diff 的前后缀比对算法，理解为什么只拼接变化区间能避免粘性头部闪烁。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2",
             "u2-l2"
@@ -306,7 +306,7 @@
       "id": "u4",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -333,7 +333,7 @@
           "topic": "走读 render() 的整体布局：标题栏混合背景、粘性头部、gpui list 虚拟列表、空态/无结果覆盖层、导入横幅与底部栏，以及客户端窗口装饰下的圆角与 1px 外扩技巧。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1",
             "u2-l2"
@@ -362,7 +362,7 @@
           "topic": "讲解 render_project_header 与 render_sticky_header：分组标签、运行中/等待线程计数、通知标记、折叠交互，以及粘性头部如何借助 project_header_indices 定位。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l2"
           ],
@@ -389,7 +389,7 @@
           "topic": "讲解 render_thread 与 render_terminal：ThreadItem 组件拼装、状态图标、外部 SVG 图标、diff 统计徽标、搜索高亮位置，以及标题装饰前缀拆分 split_leading_icon_char 与 pick_icon_glyph。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l2"
           ],
@@ -424,7 +424,7 @@
       "id": "u5",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -451,7 +451,7 @@
           "topic": "讲解本 crate 定义的 actions（NewThreadInGroup、ToggleThreadHistory、DumpWorkspaceInfo）、借用的 menu 动作族，以及 dispatch_context 构造的 KeyContext 如何让键位按焦点层级分发。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1",
             "u2-l3"
@@ -480,7 +480,7 @@
           "topic": "讲解 SelectNext/SelectPrevious/SelectFirst/SelectLast 的下标推进规则、Confirm 在不同行类型上的分流（折叠切换 vs 激活条目），以及 expand/collapse/fold_all 系列与 neighboring_activatable_entry。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -508,7 +508,7 @@
           "topic": "讲解过滤编辑器的 BufferEdited 订阅、查询驱动的重建、fuzzy 匹配高亮位置如何一路传到行渲染并在图标前缀剥离时被重新调整。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l2"
           ],
@@ -543,7 +543,7 @@
       "id": "u6",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l2",
             "u2-l3"
@@ -571,7 +571,7 @@
           "topic": "讲解 activate_thread 的三条路径：本窗口本地激活、其他窗口激活、（必要时）先打开工作区再激活，以及 load_agent_thread_in_workspace、open_closed_native_thread_as_markdown 与 restoring_tasks 防重入。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l1"
           ],
@@ -599,7 +599,7 @@
           "topic": "讲解终端侧的对称流程：activate_terminal_entry、load_agent_terminal_in_workspace、close_terminal/close_terminal_entry，以及 remove_workspaces_then 对空工作区的级联移除。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l4"
           ],

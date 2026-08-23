@@ -2,438 +2,467 @@
 
 ## 1. 本讲目标
 
-在 u2-l3 中，我们以 `ai_infra_aggregate_hidden` 为标本读懂了一个「单实现」的 tiling 函数：它把校验、切分、写 TilingData 全部写在一个 `TilingXxx` 函数里。但当你打开 FlashAttention 这类复杂算子的 op_host 目录，会发现 tiling 代码被拆成了七八个文件、十几个类——它们靠什么组织起来？答案就是本讲的主角：`common/include/tiling_base` 框架。
-
 学完本讲，你应该能够：
 
-1. 解释 `TilingBase` 基类的「模板方法」执行框架，以及 `GRAPH_SUCCESS / GRAPH_FAILED / GRAPH_PARAM_INVALID` 三态返回值各自的调度语义。
-2. 说明 `tiling_templates_registry` 如何用「算子名 + 芯片版本 + 优先级」三个键注册多个候选 tiling 实现，并按责任链顺序逐个尝试。
-3. 读懂 `tiling_key.h` 的十进制位组装 tilingKey 规则，理解它与 kernel 侧 `TILING_KEY_IS` 分支、以及编译产物（多份二进制）的关系。
-4. 使用 `tiling_util` 与 `data_copy_transpose_tiling` 两个公共小工具，避免重复造轮子。
-5. 对照 sinkhorn（单实现）与 FlashAttention（六模板链）两个真实落地，画出一次 tiling 请求的完整执行链。
+1. 说清 `TilingBase` 基类的「模板方法」执行框架：七个固定步骤、`GRAPH_SUCCESS / GRAPH_FAILED / GRAPH_PARAM_INVALID` 三态返回值各自的调度语义。
+2. 解释 `tiling_templates_registry.h` 中两套注册表（带 socVersion 的 `TilingRegistryNew` 与不带的 `TilingRegistry`）如何用「优先级 + 责任链」在多个候选 tiling 实现之间做运行期选择。
+3. 掌握 tilingKey 的十进制位组装编码习惯（`RecursiveSum` + `10^19` 偏移），以及它和 kernel 侧分支、编译产物之间的关系。
+4. 了解 `tiling_util`、`data_copy_transpose_tiling` 等公共工具的真实现状（有些在仓库内并无调用者）。
+5. 能对照 `sinkhorn_enhance` 的两级 tiling 文件，独立画出一帧请求的 tiling 类执行链（含 `GRAPH_PARAM_INVALID` 回退路径）。
 
 ## 2. 前置知识
 
-本讲需要以下基础，不熟悉的术语用大白话解释一遍：
+本讲是 u2-l3（Tiling 入门）的进阶篇，先回顾并补充几个概念：
 
-- **Tiling 的四项契约**（u2-l3）：tiling 是 Kernel 启动前 Host 侧的「作战规划」，产出 blockDim、tilingKey、TilingData 字节流、workspace 大小四样东西。本讲不重复切分算法本身，只讲「tiling 代码如何被组织与调度」。
-- **责任链模式（Chain of Responsibility）**：想象客服系统——一级客服答不了就转二级，二级不行转专家，任何一级能处理就结束。本讲中，每个 tiling 类就是一级客服：`IsCapable()`（我能不能处理）返回 false 就换下一家。
-- **模板方法模式（Template Method）**：基类把「做菜的流程」固定为 洗菜→切配→下锅→装盘，子类只实现每一步的具体做法。`TilingBase::DoTiling()` 就是固定流程，七个纯虚函数就是子类要填的空。
-- **注册表 + 工厂函数**：程序启动时，各翻译单元里的全局对象把「类名 → 构造函数指针」塞进一张全局表；运行期按 key 查表构造。C++ 里靠 **static 全局变量在 main 之前完成注册** 这一技巧实现。
-- **`std::map` 的有序性**：`std::map<int32_t, T>` 按 key 从小到大遍历——这正是「priority 越小越优先」的实现基础。
-- **为什么一个算子需要多个 tiling 实现**：同一个 FlashAttention 算子要支持 BSH/BSND/SBH 多种布局、变长/定长两种序列、带/不带 dropout 等众多场景。如果塞进一个函数，分支组合会爆炸；拆成多个「特化模板类」，每个只服务一种场景，互不干扰，还能按场景选择最优切分。
+- **模板方法模式（Template Method）**：父类固定「先做什么、后做什么」的流程骨架，把每一步的具体实现声明为纯虚函数，交给子类填写。`TilingBase::DoTiling()` 就是这个骨架。
+- **责任链模式（Chain of Responsibility）**：把多个处理者按优先级排成一条链，请求沿链传递；每个处理者要么处理掉请求，要么说「不是我的」并把机会让给下一个。本框架里「让位」的信号就是 `GRAPH_PARAM_INVALID`。
+- **三态返回值**：CANN 的 `ge::graphStatus` 有多个取值，本框架只关心三个：
+  - `GRAPH_SUCCESS`：本实现成功完成 tiling，链路终止；
+  - `GRAPH_FAILED`：发生不可恢复错误，整个 tiling 流程立即中止；
+  - `GRAPH_PARAM_INVALID`：本实现不支持当前输入（shape/layout/数据类型不匹配），换下一个实现再试。
+- **静态注册（static registration）**：在 `.cpp` 里用一个宏创建全局静态对象，该对象在动态库被加载时（早于任何函数调用）执行构造函数，从而把「类 → 工厂函数」写进全局单例注册表。u2-l2 讲过的 `OP_ADD` 是原型注册，本讲的 `REGISTER_TILING_TEMPLATE*` 是 tiling 实现注册，套路相同。
+- **tilingKey 回顾**（u2-l3/u2-l4）：Host 侧 tiling 写入 `SetTilingKey`，Device 侧 kernel 入口用 `TILING_KEY_IS` 读取并选择分支。同一个算子的不同「kernel 模板」共用一份 `.so`，靠 tilingKey 区分。
+- **优先级 map**：`std::map<int32_t, F>` 按 key 升序遍历，所以「优先级数值越小，越先被执行」，也就是优先级越高。
 
 ## 3. 本讲源码地图
 
-| 文件 | 作用 | 本讲视角 |
-| --- | --- | --- |
-| [ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h) | `TilingBase` 抽象基类与执行框架 | 模板方法 + 三态返回值 |
-| [ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h) | 优先级注册表与责任链调度器 | 两套注册表（带/不带 socVersion） |
-| [ascendc/src/ops-transformer/common/include/tiling_base/tiling_key.h](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_key.h) | tilingKey 十进制位组装规则 | Host 写、Device 读的分支信号编码 |
-| [ascendc/src/ops-transformer/common/src/tiling_base/tiling_util.cpp](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/src/tiling_base/tiling_util.cpp) | tiling 公共小工具（同名头文件 `tiling_util.h`） | socVersion 判断、标量 shape 保护 |
-| [ascendc/src/ops-transformer/common/include/tiling_base/data_copy_transpose_tiling.h](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/data_copy_transpose_tiling.h) | 转置搬运 tiling 参数打包 | FA 布局转换的公共件 |
-| [ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling_base.cpp](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling_base.cpp) | sinkhorn 的 tiling 入口（对接注册表） | 单实现落地样板 |
-| [ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp) | sinkhorn 的 `TilingBase` 子类实现 | 七个钩子的完整填空示范 |
-| [ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/flash_attention_score_enhance_tiling.cpp](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/flash_attention_score_enhance_tiling.cpp) | FA 的 tiling 入口 | 多模板链落地样板 |
-| [ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/arch32/flash_attention_score_enhance_tiling_general.cpp](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/arch32/flash_attention_score_enhance_tiling_general.cpp) | FA 的 tiling 基类与六个特化模板 | 责任链实战 |
-| [ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/flash_attention_score_enhance_tiling_common.h](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/flash_attention_score_enhance_tiling_common.h) | FA 的 CompileInfo 结构体 | 与框架 `CompileInfoCommon` 的对应关系 |
+| 文件 | 作用 |
+| --- | --- |
+| `ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h` | `TilingBase` 抽象基类：七步模板方法、三态契约、平台参数结构体、调试打印工具 |
+| `ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h` | 两套注册表（`TilingRegistryNew` / `TilingRegistry`）、`TilingCases` 优先级表、`RegisterNew` / `Register` 流式注册器、四个注册宏 |
+| `ascendc/src/ops-transformer/common/include/tiling_base/tiling_key.h` | tilingKey 十进制位组装：`RecursiveSum`、`GET_TILINGKEY`、`TILINGKEY` 宏 |
+| `ascendc/src/ops-transformer/common/include/tiling_base/tiling_type.h` | 位组装用到的枚举（`AxisEnum` / `DtypeEnum` / `LayoutEnum` / `SparseEnum` 等）及同套编码函数的 `optiling` 命名空间副本 |
+| `ascendc/src/ops-transformer/common/src/tiling_base/tiling_util.cpp` | 公共小工具：`IsRegbaseSocVersion`、`EnsureNotScalar`（头文件 `common/include/tiling_base/tiling_util.h`） |
+| `ascendc/src/ops-transformer/common/include/tiling_base/data_copy_transpose_tiling.h` | 转置搬运参数预计算工具 `GetDataCopyTransposeTiling`（自由函数版本） |
+| `ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling_base.cpp` | sinkhorn 接入层：框架入口函数 + `IMPL_OP_OPTILING` 注册（「两级 tiling」的第一级） |
+| `ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp` | sinkhorn 实现层：`SinkhornTilingBase` 类（继承 `TilingBase`）+ 优先级注册（第二级） |
+| `ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/flash_attention_score_enhance_tiling.cpp` | FA 前向 tiling 入口：真实的多模板责任链调度现场 |
+| `ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/arch32/flash_attention_score_enhance_tiling_general.cpp` | FA 各候选 tiling 模板实现与六个优先级注册（90/94/95/96/97/98） |
+| `ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/flash_attention_score_enhance_tiling_common.h` | FA 的 `FlashAttentionScoreEnhanceCompileInfo` 结构体（`TilingParse` 编译期信息契约） |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 TilingBase 基类：模板方法与三态返回值
+### 4.1 TilingBase 基类：七步模板方法与三态契约
 
 #### 4.1.1 概念说明
 
-`TilingBase` 是所有「框架化」tiling 实现的抽象基类。它解决两个问题：
+u2-l3 里我们读的 `ai_infra_aggregate_hidden_tiling.cpp` 是「一个函数包打天下」的写法：入口函数里顺序做取参、校验、切分、写 TilingData。当算子变复杂（比如 FlashAttention 要支持多种 layout、多种稀疏模式、多种数据类型），单个函数会膨胀成几千行 if-else。
 
-1. **固化执行流程**：任何 tiling 都要经历「取平台信息 → 取输入属性 → 判断能否处理 → 算切分 → 算高阶 API tiling → 算 workspace → 落盘 TilingData」这一套流程。基类把顺序写死，子类只填内容，不会漏步骤，也保证所有算子的 tiling 行为一致（例如统一由基类在最后调用 `SetTilingKey`）。
-2. **定义「让位」协议**：单实现时代（u2-l3 的 aggregate_hidden）tiling 函数只有 成功/失败 两种结局；多模板时代需要第三种——「我这级处理不了，请找下一级」。这就是三态返回值中的 `GRAPH_PARAM_INVALID`。
-
-注意区分三态的语义（这是本讲最重要的概念）：
-
-| 返回值 | 含义 | 框架行为 |
-| --- | --- | --- |
-| `GRAPH_SUCCESS` | 本类完成 tiling | 立即返回成功，**不再尝试后续类** |
-| `GRAPH_FAILED` | 发生真正的错误（参数非法、平台异常等） | 立即中止**整条链**，tiling 失败 |
-| `GRAPH_PARAM_INVALID` | 本类不支持当前输入场景 | 忽略本类，**继续尝试下一优先级的类** |
+`TilingBase` 解决的就是这个问题：它把一次 tiling 拆成七个固定步骤，用「基类定流程、子类填内容」的方式组织代码；再配合下一节的注册表，允许**同一个算子注册多个 tiling 类**，每个类只负责自己最擅长的那类输入。这就是标题里说的「责任链」。
 
 #### 4.1.2 核心流程
 
-`DoTiling()` 的固定流水线（伪代码）：
+`DoTiling()` 的执行顺序（以实际代码为准）：
 
 ```text
-DoTiling():
-    ret = GetShapeAttrsInfo()      # 2.先取输入/输出/属性信息（可做参数校验）
-    if ret != SUCCESS: return ret  #   失败 → 整链中止
-    ret = GetPlatformInfo()        # 1.再取平台信息（核数、UB/L1/L0 大小）
-    if ret != SUCCESS: return ret
-    if not IsCapable():            # 本类能力是否覆盖当前场景
-        return GRAPH_PARAM_INVALID #   不覆盖 → 让位给下一优先级类
-    ret = DoOpTiling()             # 3.计算数据切分（CoreSplit 等）
-    ret = DoLibApiTiling()         # 4.计算高阶 API（如 Matmul）的 tiling
-    ret = GetWorkspaceSize()       # 6.计算 workspace
-    ret = PostTiling()             # 7.SetBlockDim + 保存 TilingData
-    context_->SetTilingKey(GetTilingKey())  # 5.基类统一写 tilingKey
-    return GRAPH_SUCCESS
+DoTiling()
+ ├─ 1. GetShapeAttrsInfo()   读输入/输出 shape 与 Attr，做参数校验（失败 → 直接返回）
+ ├─ 2. GetPlatformInfo()     读平台信息：AIV/AIC 核数、UB/L1/L0 大小（失败 → 直接返回）
+ ├─ 3. IsCapable()           本类是否支持当前输入？
+ │       false → 返回 GRAPH_PARAM_INVALID（把机会让给链上的下一个类）
+ ├─ 4. DoOpTiling()          计算数据切分，填 TilingData
+ ├─ 5. DoLibApiTiling()      计算高阶 API（如 Matmul）的 tiling 参数
+ ├─ 6. GetWorkspaceSize()    计算 workspace 大小
+ ├─ 7. PostTiling()          SetBlockDim + 把 TilingData 写回 context
+ └─ 最后：context_->SetTilingKey(GetTilingKey())
 ```
 
-两个容易忽略的细节：
+注意一个容易踩坑的细节：基类保护段注释把 `GetPlatformInfo` 编号为第 1 步、`GetShapeAttrsInfo` 编号为第 2 步，但 `DoTiling()` 实际是**先取 shape/attr、后取平台信息**。阅读时以 `DoTiling()` 的调用顺序为准。
 
-- **步骤顺序是「先 shape 后平台再能力判断」**，所以 `IsCapable()` 里可以放心使用前两步填好的成员（FA 的 `IsCapable` 就在比对 inputParams 与模板约束）。
-- **`SetTilingKey` 由基类在最后统一执行**，子类的 `PostTiling` 里不需要、也不应该再调一次；这与 u2-l3 单实现风格（tiling 函数自己 `SetTilingKey`）不同，读代码时要分清风格。
+三态语义总结：
+
+| 返回值 | 谁产生 | 注册表如何反应 |
+| --- | --- | --- |
+| `GRAPH_SUCCESS` | 七步全部走完 | 链路终止，tiling 成功 |
+| `GRAPH_FAILED` | 任一步校验失败 | 立即中止整个 tiling（不再尝试后续类） |
+| `GRAPH_PARAM_INVALID` | `IsCapable()` 为 false，或某步主动返回 | 忽略本类，取下一个优先级的类继续 |
 
 #### 4.1.3 源码精读
 
-三态语义的官方注释写在 [ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h:L77-L80](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h#L77-L80)，明确说了 `GRAPH_PARAM_INVALID` 表示「本类不支持，需要继续往下执行其他 Tiling 类的实现」。
+执行骨架与三态语义的核心代码：
 
-执行框架本体在 [ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h:L81-L113](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h#L81-L113)：这段代码就是上面伪代码的原型——依次调用七个虚函数钩子，任何一步非 `GRAPH_SUCCESS` 都提前返回；唯一「合法的失败」是 `IsCapable()` 为 false 时返回 `GRAPH_PARAM_INVALID`（L91-L93）。注意 L110 的 `context_->SetTilingKey(GetTilingKey())`：`GetTilingKey()` 是七个钩子中唯一的 const 函数，只算不算写。
+[tiling_base.h:77-113](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h#L77-L113) —— `DoTiling()` 非虚函数固定七步流程；其中第 91-93 行是责任链的关键：`IsCapable()` 返回 false 就转成 `ge::GRAPH_PARAM_INVALID` 上抛；第 110 行在七步成功后才把子类算出的 `GetTilingKey()` 写进 context。
 
-七个纯虚钩子的声明在 [ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h:L121-L136](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h#L121-L136)，每行注释就是各步职责：`IsCapable` / `GetPlatformInfo` / `GetShapeAttrsInfo` / `DoOpTiling` / `DoLibApiTiling` / `GetTilingKey` / `GetWorkspaceSize` / `PostTiling`。子类必须全部实现（C++ 纯虚函数），不存在「可选钩子」。
+[tiling_base.h:121-136](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h#L121-L136) —— 七个纯虚函数声明。子类必须全部实现（不需要的步骤返回 `GRAPH_SUCCESS` 即可，例如 sinkhorn 的 `DoLibApiTiling` 是空实现）。`GetTilingKey()` 被标了 `[[nodiscard]]`，因为漏掉它 kernel 侧就选不到正确分支。
 
-基类还替子类保管公共状态，见 [ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h:L209-L215](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h#L209-L215)：`context_`（gert::TilingContext 指针）、`ascendcPlatform_`、`blockDim_`、`workspaceSize_`、`tilingKey_`、`aicoreParams_`（L35-L43 定义的结构体，装 UB 大小与核数）。配套的两个 CompileInfo 结构体 `CompileInfoCommon`（L45-L57）与 `FlashAttentionScoreGradEnhanceCompileInfo`（L58-L69）存「编译期缓存」的平台快照，后文 4.2 会看到它们在 UT 场景的妙用。
+[tiling_base.h:138-146](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h#L138-L146) —— 静态工具 `CalcTschBlockDim`：Cube（AIC）+ Vector（AIV）协同算子里，一个 AIC 通常搭配 \( r = \text{aiv}/\text{aic} \) 个 AIV，因此按 AIC 切了 `sliceNum` 份后，TSCH（任务调度）维的 blockDim 要按 \( \lceil \text{sliceNum}/r \rceil \) 对齐；当 AIC 数为 0、AIV 数为 0 或 AIC 多于 AIV 时退化为直接返回 `sliceNum`。
 
-辅助工具 `CalcTschBlockDim` 在 [ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h:L138-L146](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h#L138-L146)：当 AIC 数不超过 AIV 数时，按 `aivCoreNum / aicCoreNum` 的比值把 cube 切片数折算成混合调度（TSCH）下的 blockDim——cube/vector 混合下发时一个「调度块」要占多个 vector 核。
+[tiling_base.h:35-57](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h#L35-L57) —— `AiCoreParams`（运行期平台参数的容器）与 `CompileInfoCommon`（编译期信息结构体）。`CompileInfoCommon` 里的 `socVersion` 字段在下一节 `DoTilingImpl` 里有特殊用途：当 `context->GetPlatformInfo()` 为空（典型场景是 UT 的 faker 上下文）时，框架从这个结构体里取 soc 版本。
 
-子类怎么填空？以 sinkhorn 为例（下一节会讲它的注册），类声明在 [ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp:L79-L141](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp#L79-L141)：`SinkhornTilingBase` 继承 `Ops::Transformer::OpTiling::TilingBase`，七个 override 一一对应基类钩子，另加私有的 `CheckInputShape/CheckOutputShape/SplitCores` 等具体实现。它的 `IsCapable()` 恒返回 true（L95-L98）——因为整条链只有它一个实现，无需让位。`PostTiling()`（L546-L554）集中展示了落盘三件套：`SetBlockDim(needCoreNum)`、`GetWorkspaceSizes(1)[0] = workspaceSize_`、`tilingData_.SaveToBuffer(...) + SetDataSize(...)`，与 u2-l3 总结的四项契约完全吻合。
+[tiling_base.h:209-215](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h#L209-L215) —— 保护成员：`context_`（tiling 上下文）、`blockDim_`、`workspaceSize_`、`tilingKey_`、`aicoreParams_`。子类的七个步骤就是把数据算出来放进这些字段（或自己的成员），最后由 `PostTiling` 统一写回 context。
+
+[tiling_base.h:196-207](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h#L196-L207) —— `GetTilingDataDebugStr()`：把 RawTilingData 按 `int32_t` 逐个打印，调 tiling 问题时配合 `OP_LOGI` 很有用。
+
+[tiling_base.h:25-29](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h#L25-L29) —— `ASCENDC_OP_TEST` 编译开关：编 UT 时 `ASCENDC_EXTERN_C` 展开为 `extern "C"`，保证 tiling 入口函数符号不被 C++ 名字修饰，UT 侧才能按 C 符号链接（u8 单元会用到）。
+
+一个真实的子类对照——sinkhorn 的 `IsCapable` 与空步骤：
+
+[manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp:95-98](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp#L95-L98) —— sinkhorn 只有一个 tiling 类，`IsCapable()` 恒返回 true（所有合法性判断放在 `GetShapeAttrsInfo`/`DoOpTiling` 里，失败走 `GRAPH_FAILED`）。
+
+[manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp:534-544](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp#L534-L544) —— 该算子不用高阶 API，`DoLibApiTiling()` 直接返回成功；workspace 固定 16MB。
 
 #### 4.1.4 代码实践
 
-**实践目标**：把「基类钩子 ↔ 子类实现」的对应关系亲手对一遍，验证模板方法模式的真实落点。
+**实践目标**：把「七步模板方法」从抽象概念落到具体代码，方法是给 sinkhorn 的七步实现建一张对照表。
 
-**操作步骤**（源码阅读型，无需 NPU）：
+**操作步骤**：
 
-1. 打开 [tiling_base.h:L121-L136](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h#L121-L136)，抄下七个纯虚函数名。
-2. 打开 sinkhorn 的 [tiling.cpp](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp)，为每个钩子找到实现体的起止行号，填成一张表。
-3. 检查每个实现体内部：是否还有子步骤（如 `DoOpTiling` 调 `CheckInputShape → CheckOutputShape → CheckOptionalOutputShape → SplitCores`，见 L491-L532）。
-4. 回答附加题：如果 `GetShapeAttrsInfo()` 返回 `GRAPH_FAILED`，`IsCapable()` 还会被调用吗？
+1. 打开 [tiling_base.h:77-113](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h#L77-L113)，把七个虚函数调用抄下来作为表格左列。
+2. 在 `manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp` 中定位每个函数的实现，记录行号与一句话职责，例如：
+   - `GetShapeAttrsInfo` → L157-227：取 x 的 shape/dtype、三个属性（out_flag/eps/num_iters）、按 outFlag_ 决定是否取可选输出；
+   - `GetPlatformInfo` → L143-155：取 AIV 核数与 UB 大小放进 `aicoreParams_`；
+   - `IsCapable` → L95-98：恒 true；
+   - `DoOpTiling` → L491-532：CheckInputShape → CheckOutputShape →（可选输出校验）→ SplitCores → 预计算 reduceMask；
+   - `DoLibApiTiling` → L534-537：空；
+   - `GetWorkspaceSize` → L539-544：固定 16MB；
+   - `PostTiling` → L546-554：`SetBlockDim(needCoreNum)` + `SaveToBuffer` 写回 TilingData。
+3. 回答：`DoTiling()` 第 110 行 `SetTilingKey(GetTilingKey())` 对应 sinkhorn 的哪个函数？（L556-561，按 `out_flag` 返回 0 或 1。）
 
-**需要观察的现象**：七个钩子在子类中全部有 override；没有任何一个子类钩子直接调用 `context_->SetTilingKey`。
+**需要观察的现象**：表格填完后你会发现子类没有任何一个函数直接调用「下一步」——步骤衔接完全由基类 `DoTiling()` 驱动，这正是模板方法的特征。
 
-**预期结果**（笔者已核对，读者可复验）：`IsCapable` L95-L98、`GetPlatformInfo` L143-L155、`GetShapeAttrsInfo` L157-L227、`DoOpTiling` L491-L532、`DoLibApiTiling` L534-L537（空实现直接返回 SUCCESS）、`GetTilingKey` L556-L561、`GetWorkspaceSize` L539-L544、`PostTiling` L546-L554。附加题答案：不会——`DoTiling()` 在 L84-L86 就提前 return 了，这正是「FAILED 中止整链」的体现。
+**预期结果**：得到一张 7 行的「步骤 → sinkhorn 实现行号 → 职责」对照表；并能解释为什么 sinkhorn 把 shape 校验放在 `GetShapeAttrsInfo`/`DoOpTiling` 而不是 `IsCapable`（它只有一个实现，不存在「让位给别的类」的需求，校验失败应当直接报错终止）。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：`DoLibApiTiling` 这个钩子存在的意义是什么？为什么 sinkhorn 的实现是空的？
+**练习 1**：`DoTiling()` 中 `GetShapeAttrsInfo` 和 `GetPlatformInfo` 谁先执行？与基类注释里的编号一致吗？
 
-答案：它负责「高阶 API」（如 MatmulApiTiling 这类 CANN 库算子）的 tiling 参数计算。sinkhorn 是纯向量算子，不用 Matmul，所以返回 `GRAPH_SUCCESS` 即可（L534-L537）。FA 这类 cube 算子会在里面填 bmm1/bmm2 的 tiling。
+答案：先执行 `GetShapeAttrsInfo`（L83），后执行 `GetPlatformInfo`（L87）；与保护段注释的编号（平台信息标 1、shape 标 2）**不一致**，阅读时应以 `DoTiling()` 实际调用顺序为准。
 
-**练习 2**：基类成员 `context_` 为什么是 protected 而不是 private？这样设计的代价是什么？
+**练习 2**：子类想表达「这个输入我不处理，让别人来」，有哪两种写法？
 
-答案：protected 让子类钩子能直接访问 `TilingContext`（取 shape、写 tilingData 都离不开它），减少一层封装。代价是所有子类与基类形成白盒耦合，基类无法约束子类对 context 的写入顺序——框架靠「约定」而非「编译器」保证流程正确。
+答案：(1) `IsCapable()` 返回 false，基类会把它转换成 `GRAPH_PARAM_INVALID`；(2) 在任一步（通常是 `DoOpTiling`）直接 `return ge::GRAPH_PARAM_INVALID`，注册表同样会跳过本类继续下一个优先级（FA 的 DropMask 模板就是这么用的，见 4.2.3）。
 
-**练习 3**：子类构造函数里为什么要调一次 `Reset()`（sinkhorn L81-L85）？
+**练习 3**：`CalcTschBlockDim(16, 8, 32)` 返回多少？
 
-答案：因为注册表每次尝试都会 new 一个新实例（见 4.2），成员本应是干净的；但 `Reset()` 把成员恢复到已知初值（L563-L578），防止同一实例被复用（框架提供 `Reset(context)` 入口，L88-L92）时残留上一帧的状态。这是防御式编程，不是必需路径。
+答案：`ration = 32 / 8 = 4`，返回 `(16 + 4 - 1) / 4 = 4`。含义：8 个 AIC 切了 16 份任务、32 个 AIV 每 4 个服侍 1 个 AIC，TSCH 维只需 4 个块。
 
-### 4.2 tiling_templates_registry：优先级注册表与责任链调度
+### 4.2 tiling_templates_registry：多实现注册与责任链调度
 
 #### 4.2.1 概念说明
 
-有了 `TilingBase`，还差两个问题：一帧请求到来时**由谁创建类实例、按什么顺序尝试**；以及**注册发生在什么时候**。`tiling_templates_registry.h` 给出答案：
+有了 `TilingBase` 还不够——框架怎么知道「算子 X 有哪几个 tiling 类、按什么顺序试」？`tiling_templates_registry.h` 回答这个问题，它提供：
 
-- **工厂函数指针** `TilingClassCase`：`std::unique_ptr<TilingBase> (*)(gert::TilingContext*)`——注册的不是对象，是「造对象的函数」。
-- **`TilingCases`**：单个算子的候选表，`std::map<int32_t, TilingClassCase>`，key 是优先级，map 升序遍历即责任链顺序。
-- **两套注册表**：`TilingRegistry`（只按算子名索引）与 `TilingRegistryNew`（按「芯片版本 + 算子名」两级索引）。后者让同一算子在不同芯片上挂不同的模板集合——编译期 `AddConfig`（u2-l2）之外的另一层芯片适配。
-- **static 全局变量注册**：`REGISTER_*` 宏展开成一个全局对象，其构造函数在 `main` 之前执行注册，无需手工调用任何 init 函数。
+- **工厂函数** `TILING_CLASS<T>`：把「类模板参数」变成「返回 `unique_ptr<TilingBase>` 的函数指针」，实现「注册类」而非「注册对象」（每帧请求都要新建对象）。
+- **优先级表** `TilingCases`：`map<优先级, 工厂函数>`，`AddTiling` 会拒绝重复优先级。
+- **两套注册表**：`TilingRegistryNew`（外层再按 socVersion 分桶，`map<soc_version, map<op_type, TilingCases>>`）与 `TilingRegistry`（只有 `map<op_type, TilingCases>`）。名字带 New 的是「按芯片分实现」的版本——同一算子在 910B 和 910_93 上可以注册完全不同的 tiling 类集合。
+- **调度入口** `DoTilingImpl`：责任链的「引擎」，按优先级升序逐个实例化并调 `DoTiling()`，直到出现非 `GRAPH_PARAM_INVALID` 的结果。
+- **流式注册器与四个宏**：让 `.cpp` 里一行代码完成注册。
 
 #### 4.2.2 核心流程
 
-一帧 tiling 请求的调度过程（以带 socVersion 的 `TilingRegistryNew` 为例）：
+一帧请求的调度过程（以带 socVersion 的 `TilingRegistryNew` 为例）：
 
 ```text
-CANN 框架按 op_type 找到 IMPL_OP_OPTILING 注册的入口函数（如 TilingForSinkhorn）
-        │
-        ▼
-入口函数调用 TilingRegistryNew::GetInstance().DoTilingImpl(context)
-        │
-        ├─ 1. 确定 socVersion：
-        │     platformInfo != null → PlatformAscendC(platformInfo).GetSocVersion()   # 真实硬件/ST
-        │     platformInfo == null → CompileInfoCommon(context->GetCompileInfo())->socVersion  # UT 伪造上下文
-        │
-        ├─ 2. 查表：registry_map_[soc_version][op_type] → map<priority, 工厂函数>
-        │
-        └─ 3. 按 priority 升序遍历：
-                实例 = 工厂函数(context)          # 每次尝试都 new 一个新对象
-                status = 实例->DoTiling()
-                status == GRAPH_PARAM_INVALID → continue（试下一个）
-                否则 → return status              # SUCCESS 或 FAILED 都到此为止
-              全部让位 → OP_LOGE + return GRAPH_FAILED
+DoTilingImpl(context)
+ ├─ 解析算子名 opType = context->GetNodeType()
+ ├─ 解析 soc_version：
+ │    ├─ platformInfo 非空（真实环境）→ PlatformAscendC::GetSocVersion()
+ │    └─ platformInfo 为空（UT faker 环境）→ CompileInfoCommon::socVersion
+ ├─ GetTilingTemplates(opType, soc_version)
+ │    返回该算子在该芯片下的 map{priority → 工厂函数}（std::map 升序）
+ └─ for (priority 从小到大):
+        实例化 tiling 类 → DoTiling()
+        ├─ GRAPH_SUCCESS      → 返回成功，结束
+        ├─ GRAPH_FAILED       → 返回失败，结束（不再尝试后续类）
+        └─ GRAPH_PARAM_INVALID → 打日志，继续下一个 priority
+    全部让位 → GRAPH_FAILED（"no valid template is found"）
 ```
 
-注意第 1 步的双通道 socVersion 探测：**真实环境走 platformInfo，UT 环境走 CompileInfo**。这正是 u8 单元要讲的 UT 框架能在无硬件环境回放 tiling 的关键接缝之一。
+注册发生在**动态库加载时**：注册宏展开为一个全局静态 `RegisterNew`/`Register` 对象，其构造函数调用 `tiling<T>(priority, ...)` 把工厂函数塞进单例的 map，时机早于任何一次 tiling 请求。
 
 #### 4.2.3 源码精读
 
-工厂模板函数 `TILING_CLASS` 与函数指针类型在 [ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h:L29-L35](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h#L29-L35)：把「任意 TilingBase 子类」规约成统一签名的构造器。
+[tiling_templates_registry.h:29-35](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h#L29-L35) —— `TILING_CLASS<T>` 工厂模板与 `TilingClassCase` 函数指针类型：注册的是「如何造一个 tiling 对象」，而不是对象本身。
 
-`TilingCases::AddTiling` 在 [L42-L51](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h#L42-L51)：以 priority 为 key 插入 map；若 priority 已存在则打日志并 return——**同优先级先注册者胜，后来者被静默忽略**（只留一条 OP_LOGE，不覆盖、不报错终止）。
+[tiling_templates_registry.h:37-61](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h#L37-L61) —— `TilingCases`：优先级表本体。`AddTiling` 第 45-46 行检查同一优先级重复注册并报错，防止两个类无声地互相覆盖。
 
-责任链调度核心在 `TilingRegistryNew::DoTilingImpl(context)`，见 [L97-L131](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h#L97-L131)：L99-L116 完成 socVersion 双通道探测（platformInfo 为空时强转 `CompileInfoCommon` 读 `socVersion`，L103-L107；探测到 `RESERVED_VERSION` 视为失败，L112-L115）；L117-L128 是链遍历——`status != ge::GRAPH_PARAM_INVALID` 即返回（L122-L125），只有 PARAM_INVALID 才落日志继续（L126）；走完全链仍无果则 L129-L130 报「no valid template is found」。另有一个**显式优先级列表**重载 [L133-L166](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h#L133-L166)，允许调用方只尝试指定优先级的子集。
+[tiling_templates_registry.h:97-131](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h#L97-L131) —— `TilingRegistryNew::DoTilingImpl(context)` 责任链主循环。第 102-116 行是双通道 soc 解析（平台信息优先，编译期信息兜底）；第 118-128 行的 for 循环里，第 122 行 `if (status != ge::GRAPH_PARAM_INVALID) return status;` 一行同时表达「成功返回」与「失败中止」两种终止，只有 PARAM_INVALID 才落到下一轮。
 
-注册表本体是 [L183](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h#L183) 的 `registry_map_`：`map<soc_version, map<op_type, shared_ptr<TilingCases>>>` 两级索引。单例的取得方式有个测试钩子——[L68-L76](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h#L68-L76) 在 `ASCENDC_OP_TEST` 宏下只声明 `GetInstance()`（实现放到 UT 侧的 cpp，方便测试控制与观测），正常编译则用函数内 static 单例。不带 soc 的 `TilingRegistry` 是同样结构的降维版本，其 `DoTilingImpl` 见 [L245-L262](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h#L245-L262)，遍历逻辑与带 soc 版完全一致。
+[tiling_templates_registry.h:133-166](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h#L133-L166) —— 第二个重载 `DoTilingImpl(context, priorities)`：调用方显式给定优先级顺序（而非全表升序），供只需要试特定几个实现的场景。
 
-链式注册入口 `RegisterNew::tiling` 支持一次传多个 soc（[L202-L213](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h#L202-L213)），返回 `*this` 允许连续点号调用。
+[tiling_templates_registry.h:168-185](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h#L168-L185) —— `GetTilingTemplates`：两级 map 查找，soc 不存在或算子名不存在都返回空的 `empty_tiling_case_`（配合 OP_LOGE 报错），最终 `DoTilingImpl` 会以「no valid template is found」失败。
 
-最后看四个注册宏，[L322-L347](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h#L322-L347)：
+[tiling_templates_registry.h:187-217](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h#L187-L217) —— `RegisterNew` 流式注册器：`.tiling<T>(priority, soc_version)` 支持单个 soc 或 `std::vector<int32_t>` 一批 soc，返回 `*this` 可链式调用。
 
-| 宏 | 索引维度 | 本仓库使用者 |
-| --- | --- | --- |
-| `REGISTER_TILING_TEMPLATE` | 算子名（字符串需带引号） | MHC 的 pre / pre_grad |
-| `REGISTER_TILING_TEMPLATE_WITH_SOCVERSION` | 算子名 + 多个 soc + 优先级 | FA 前向/反向、PioneerBackward |
-| `REGISTER_TILING_TEMPLATE_NEW` | 算子名 + 单个 soc + 优先级 | （当前无使用者） |
-| `REGISTER_OPS_TILING_TEMPLATE` | 算子名（不带引号）+ 优先级 | MHC 的 sinkhorn/post 系、SparseFAGrad |
+[tiling_templates_registry.h:220-243](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h#L220-L243) —— 不带 soc 维度的 `TilingRegistry`：结构对称，只是 `registry_map_` 只有一层（第 296 行）。sinkhorn 用的就是它。
 
-宏注释（L323、L329）点明优先级规则：**priority 越小优先级越高**。
+[tiling_templates_registry.h:322-347](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h#L322-L347) —— 四个注册宏：`REGISTER_TILING_TEMPLATE_WITH_SOCVERSION`（多 soc 列表）、`REGISTER_TILING_TEMPLATE_NEW`（单 soc）、`REGISTER_TILING_TEMPLATE`（不带 soc）、`REGISTER_OPS_TILING_TEMPLATE`（不带 soc 的新版，`op_type` 参数不要加引号）。注释第 323 行明确写了优先级语义：**越小优先级越高**。
 
-两份真实落地对照：
+真实注册现场——sinkhorn 与 FA：
 
-- **sinkhorn（单实现）**：入口文件 [manifold_constrained_hyper_connection_sinkhorn_enhance_tiling_base.cpp:L23-L36](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling_base.cpp#L23-L36) 只有两件事：`TilingForSinkhorn` 把 context 递给**不带 soc** 的 `TilingRegistry`（L25），再用 `IMPL_OP_OPTILING(...).Tiling(TilingForSinkhorn).TilingParse<SinkhornCompileInfo>(...)` 挂到 CANN 框架（L34-L36）。实现文件末尾一行 [manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp:L580](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp#L580) 注册唯一候选 `SinkhornTilingBase`，优先级 2000。「入口文件薄、实现文件注册」的两级拆分让入口稳定、实现可无限拆文件。
-- **FlashAttention（六模板链）**：入口 [flash_attention_score_enhance_tiling.cpp:L287-L306](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/flash_attention_score_enhance_tiling.cpp#L287-L306) 先做 `CheckParams` 与空输入特判（`IsEmptyInput` 直接填 tilingData 并 `SetTilingKey(1)`，L300-L302，绕过责任链），然后交给**带 soc** 的 `TilingRegistryNew`（L304）。六个模板按优先级 90/94/95/96/97/98 注册在 [arch32/flash_attention_score_enhance_tiling_general.cpp:L5054-L5089](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/arch32/flash_attention_score_enhance_tiling_general.cpp#L5054-L5089)，覆盖 ASCEND910B 与 ASCEND910_93 两代芯片。
+[manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp:580](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp#L580) —— sinkhorn 用 `REGISTER_OPS_TILING_TEMPLATE(ManifoldConstrainedHyperConnectionSinkhornEnhance, SinkhornTilingBase, 2000)` 注册唯一一个实现，优先级 2000。
 
-其中最精妙的是 90 号模板 `FlashAttentionScoreEnhanceTilingDropMask`：它的 `DoOpTiling` 在 [L4993-L5029](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/arch32/flash_attention_score_enhance_tiling_general.cpp#L4993-L5029) 计算完 dropout 掩码的切分参数后**无条件返回 `GRAPH_PARAM_INVALID`**（L5028）——它是「贡献后放行」的链成员：只往共享 TilingData 里写 `dropmaskParams`，然后把主切分让给 94-98 号模板。这之所以可行，是因为 FA 基类的 `tilingData` 指针指向 **TilingContext 的原始 tiling data 缓冲**（[L584-L585](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/arch32/flash_attention_score_enhance_tiling_general.cpp#L584-L585)，`context_->GetTilingData<...>()`），链上每个实例写的都是同一块内存。
+[flash_attention_score_enhance_tiling_general.cpp:5053-5089](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/arch32/flash_attention_score_enhance_tiling_general.cpp#L5053-L5089) —— FA 前向按 90/94/95/96/97/98 六个优先级注册六个类，全部限定在 `ASCEND910B` 与 `ASCEND910_93` 两个 soc 上。90 最高优先。
 
-而「真正让位」的范例是 95 号模板的 `IsCapable()`（[L3384-L3412](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/arch32/flash_attention_score_enhance_tiling_general.cpp#L3384-L3412)）：比对 S2 上限、数据量与 UB 预算，不匹配则 `OP_LOGE` 打印双方参数后 `return false` → 基类转成 `GRAPH_PARAM_INVALID` → 链继续。
+责任链回退的真实样本——FA 的 DropMask 模板：
+
+[flash_attention_score_enhance_tiling_general.cpp:4993-5000](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/arch32/flash_attention_score_enhance_tiling_general.cpp#L4993-L5000) —— 优先级 90 的 `FlashAttentionScoreEnhanceTilingDropMask::DoOpTiling`：若 `needDropMaskOp == 0`（本帧不需要 dropout 预处理），重置参数后直接 `return ge::GRAPH_PARAM_INVALID`，把整帧让给优先级 94 的 VarLen 模板。
+
+[flash_attention_score_enhance_tiling_general.cpp:5002-5028](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/arch32/flash_attention_score_enhance_tiling_general.cpp#L5002-L5028) —— 更有意思的是：即使需要 dropmask，这个类算完 `dropmaskParams` 后**仍然返回 `GRAPH_PARAM_INVALID`**——它只负责填「dropout 掩码」这一段参数，其余通用切分交给链上后面的模板完成。
+
+[flash_attention_score_enhance_tiling_general.cpp:584-585](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/arch32/flash_attention_score_enhance_tiling_general.cpp#L584-L585) —— 上面这种「接力」能成立的前提：FA 的 `tilingData` 不是类的成员，而是指向 **context 的 TilingData 缓冲区**的指针。前一个模板写进 context 的 `dropmaskParams`，后一个模板从同一块内存里接着读——责任链共享同一块「黑板」。
+
+[flash_attention_score_enhance_tiling_general.cpp:3384-3412](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/arch32/flash_attention_score_enhance_tiling_general.cpp#L3384-L3412) —— 另一种让位方式：某特化模板的 `IsCapable()` 检查 S2 上限与单 block 数据量，不匹配时打日志并返回 false（基类转成 `GRAPH_PARAM_INVALID`，链继续）。
+
+补充：attention 家族在 [attention/common/op_host/fia_tiling_templates_registry.h:65](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/common/op_host/fia_tiling_templates_registry.h#L65) 还有一份自己的变体注册表 `FiaTilingRegistry`（配套宏 `REGISTER_TILING_TEMPLATE_FIA` 在同文件 [第 185 行](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/common/op_host/fia_tiling_templates_registry.h#L185)），思路与本节完全同构，属于家族内部的「抄一份自己维护」。
 
 #### 4.2.4 代码实践
 
-**实践目标**：盘点全仓库的责任链注册现状，建立「算子 × 模板 × 优先级 × 是否带 soc」的全景矩阵。
+**实践目标**：用 grep 摸清全仓库「谁在用哪套注册表、哪个宏」，建立注册方式的全景感。
 
 **操作步骤**：
 
-1. 在仓库 `training/` 目录执行：
+1. 在 `ascendc/src/ops-transformer` 下执行：
 
    ```bash
-   grep -rn "REGISTER_TILING_TEMPLATE\|REGISTER_OPS_TILING_TEMPLATE" \
-        ascendc/src/ops-transformer --include="*.cpp" | grep -v "define"
+   grep -rn "REGISTER_OPS_TILING_TEMPLATE\|REGISTER_TILING_TEMPLATE_WITH_SOCVERSION\|REGISTER_TILING_TEMPLATE_NEW\|REGISTER_TILING_TEMPLATE(" --include="*.cpp" | grep -v "define"
    ```
 
-2. 对每条命中，追进文件看：注册的类名、优先级数字、soc 列表（`WITH_SOCVERSION` 版本第四个参数）。
-3. 按「算子家族」分组统计注册条数，并与 4.2.3 的两个样板对照。
+2. 再统计注册表调度入口的两种用法：
 
-**需要观察的现象**：MHC 家族普遍是「单类 + 优先级 2000 + 不带 soc」；Attention 家族是「多模板 + 优先级 1~98 + 带 soc」。
+   ```bash
+   grep -rn "TilingRegistryNew::GetInstance().DoTilingImpl\|TilingRegistry::GetInstance().DoTilingImpl" --include="*.cpp"
+   ```
 
-**预期结果**（笔者在当前 HEAD 已执行，共 26 处注册、另有 4 处宏定义位于框架头文件）：FA 前向 6 处（90/94/95/96/97/98，带 soc）、FA 反向 10 处（`flash_attention_score_grad_enhance` 各 arch32 切分实现，带 soc）、`AiInfraAttentionPioneerBackward` 2 处（arch35，带 soc）、`SparseFlashAttentionGradEnhance` 1 处（优先级 1，不带 soc）、MHC 家族 7 处（sinkhorn/sinkhorn_grad/mhc_post_grad 确认优先级均为 2000；pre/pre_grad/post/post_grad 的注册调用跨多行，优先级数值待确认）。读者运行结果应与此一致；若未来代码演进，以自己的 grep 输出为准。
+3. 把结果整理成三列表格：算子名 / 注册宏 / 优先级数值，并按优先级排序。
+
+**需要观察的现象**：哪些算子只有一个实现（单宏单优先级，如 sinkhorn 的 2000）？哪些算子有 5~6 个实现排成一条链（FA 前向/反向）？带 socVersion 的注册集中出现在哪些目录（提示：`op_host/arch32`、`op_host/arch35`）？
+
+**预期结果**：你会看到 mhc 家族多用无 soc 的 `TilingRegistry` + `REGISTER_OPS_TILING_TEMPLATE`，attention 家族的 FA/pioneer 多用 `TilingRegistryNew` + `REGISTER_TILING_TEMPLATE_WITH_SOCVERSION`——因为 attention 的实现强依赖芯片代际（arch32 对应 A2 类、arch35 对应 A3 类）。完整输出依赖你的本地仓库，**待本地验证**。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：如果两个 tiling 类用**同一个优先级**注册到同一个算子，会发生什么？
+**练习 1**：`TilingRegistryNew` 和 `TilingRegistry` 的本质区别是什么？sinkhorn 用的是哪个？
 
-答案：`TilingCases::AddTiling`（L45-L47）检测到 key 已存在，打一条 `OP_LOGE("There are duplicate registrations.")` 后直接 return——先注册者生效，后来者被忽略，进程不会崩溃也不会断言。这是一个容易静默踩坑的点：新增模板前应先查该算子已占用的优先级。
+答案：`TilingRegistryNew` 的 map 多一层 socVersion 键，允许同一算子在不同芯片注册不同的 tiling 类集合；`TilingRegistry` 所有芯片共用一份。sinkhorn 用的是不带 soc 的 `TilingRegistry`（见其 `_tiling_base.cpp` 第 25 行的 `TilingRegistry::GetInstance().DoTilingImpl(context)`）。
 
-**练习 2**：`DoTilingImpl` 遍历中，某个模板 `DoOpTiling` 返回了 `GRAPH_FAILED`（例如 shape 校验失败），链会继续尝试下一个模板吗？
+**练习 2**：FA 前向注册了优先级 90 和 94 两个类，谁先执行？如果 90 返回 `GRAPH_FAILED`，94 还会执行吗？
 
-答案：不会。L122-L125 的判断是 `status != GRAPH_PARAM_INVALID` 即返回——`GRAPH_FAILED` 同样终止整链。只有 `GRAPH_PARAM_INVALID` 才表示「我不支持，请找下家」；参数校验失败属于真错误，换一个模板也救不回来。
+答案：先执行 90（`std::map` 按升序遍历，优先级数值小者优先）。若 90 返回 `GRAPH_FAILED`，94 **不会**执行：`DoTilingImpl` 只在 `GRAPH_PARAM_INVALID` 时继续，FAILED 会立即中止整条链并上抛。
 
-**练习 3**：为什么 `TilingRegistryNew::DoTilingImpl` 里 platformInfo 为 null 时敢直接 `static_cast<const CompileInfoCommon*>(context->GetCompileInfo())`？这条路径什么时候走？
+**练习 3**：注册宏为什么展开成「全局静态对象」而不是「函数内局部对象」？变量名里的 `VAR_UNUSED##op_type##class_name##priority` 起什么作用？
 
-答案：这是与 UT 框架的约定接缝：u8 将讲到的 `TilingContext faker` 伪造的 context 没有 `fe::PlatFormInfos`，但会把平台快照塞进 `TilingParse` 阶段注册的 CompileInfo 结构（`TilingPrepareForSinkhorn` / `TilingPrepareForFlashAttentionScoreEnhance` 在编译期填充）。`CompileInfoCommon` 的字段布局（socVersion 在 L55）是两边共同遵守的二进制契约，字段顺序不能随意改。真实硬件路径则走 L108-L116 的 `PlatformAscendC::GetSocVersion()`。
+答案：全局静态对象的构造函数在动态库加载时执行，早于任何 tiling 调用，保证注册表就绪；局部对象永远不会被构造。把算子名、类名、优先级拼进变量名是为了在同一编译单元/不同编译单元多次使用宏时生成不重复的变量名，避免重定义冲突。
 
-### 4.3 tiling_key.h：tilingKey 的十进制位编码
+### 4.3 tiling_key 编码：十进制位组装与编译产物的关系
 
 #### 4.3.1 概念说明
 
-u2-l3/l4 已建立概念：tilingKey 是 **Host 写、Device 读的分支信号**——kernel 入口用 `TILING_KEY_IS(key, N)` 选择实例化哪个模板。单实现算子（aggregate_hidden 用 0/1 区分 bf16/fp16，sinkhorn 用 0/1 区分推理/训练路径）手写小整数即可；但当分支维度增多（布局 × 数据类型 × 稀疏模式 × 切分轴……），手写数字会失控。`tiling_key.h` 提供**十进制按位组装**方案：每个维度占一个十进制数位，维度的枚举值就是该位上的数字。
+u2-l3 见过最朴素的 tilingKey：aggregate_hidden 用 0=BF16、1=FP16，sinkhorn 用 0=训练路径、1=推理路径——一条轴、几个值，直接定义常量即可。但当 kernel 的「变化维度」多起来（UB 切哪根轴、分核切哪根轴、数据类型、layout、稀疏模式……），简单常量不够用了。
 
-编码规则的（以 FA 家族为例的）官方注释在头文件里写得很清楚，大意是：从低位到高位依次是 Ub0、Ub1（UB 核内切分轴）、Block（分核轴）、DataType、Format/Layout、Sparse，各占一个十进制位；其余特化场景可以定义自己的位域。
+`tiling_key.h` 给出的编码习惯是**十进制位组装（decimal digit packing）**：把若干个取值小于 10 的枚举当作十进制数的各个「位」拼成一个 uint64，再加一个 \(10^{19}\) 的巨大偏移。好处：
+
+1. 一个整数同时携带多个维度的选择，可读可解码（逐位除 10 取余即可还原）；
+2. `10^19` 偏移让它和旧式小整数 key（0/1/2…）一眼区分开；
+3. 全部是 `constexpr`，编译期就能算好，kernel 侧 switch 分支的 case 值也是同一个表达式。
+
+与编译产物的关系：**一个算子编出的 kernel `.so` 里包含所有分支/模板实例，tilingKey 并不参与「选择哪份产物」，而是在运行期于 kernel 入口处选择执行哪条分支**（u2-l4 讲过的 `TILING_KEY_IS`）。Host 侧 `SetTilingKey` 写什么，Device 侧就走哪条路——两侧必须用同一套编码，这正是把编码函数放进公共头文件的原因。
 
 #### 4.3.2 核心流程
 
-`RecursiveSum` 把变参列表组装成十进制数——第一个参数落在个位：
+编码公式（`kBase = 10`）：
 
-\[ \text{RecursiveSum}(a_0, a_1, \ldots, a_{n-1}) = \sum_{i=0}^{n-1} a_i \cdot 10^{i} \]
+\[
+\text{RecursiveSum}(a_0, a_1, \ldots, a_n) = a_0 + 10 \cdot a_1 + 10^2 \cdot a_2 + \cdots + 10^n \cdot a_n
+\]
 
-`GET_TILINGKEY` 再加一个 \( 10^{19} \) 的偏移：
+\[
+\text{tilingKey} = 10^{19} + \text{RecursiveSum}(\text{ub2}, \text{ub1}, \text{block}, \text{dtype}, \text{layout}, \text{sparse})
+\]
 
-\[ \text{tilingKey} = 10^{19} + \sum_{i=0}^{n-1} a_i \cdot 10^{i} \]
-
-例如 `GET_TILINGKEY(1, 2, 3)` 展开为 \( 10^{19} + 1 + 2\times10 + 3\times100 = 10^{19} + 321 \)。
-
-三个设计要点：
-
-1. **每个参数必须 ≤ 9**：十进制位组装没有进位保护，参数 ≥ 10 会「渗」到高一位，污染相邻维度的编码。
-2. **\( 10^{19} \) 偏移是命名空间**：`uint64_t` 最大约 \( 1.8 \times 10^{19} \)，\( 10^{19} \) 起头既能放下又远离手写小 key（0、1、2……）的取值空间——运行期看到 key ≥ \( 10^{19} \) 就知道是框架编码生成的。
-3. **与编译产物的关系**：tilingKey 的每一种取值对应 kernel 的一个特化分支（`TILING_KEY_IS` 命中的一个），op_build 会为各分支生成/选择对应的二进制；Host 侧 `GetTilingKey()` 返回什么值，Device 侧就必须有同值的分支接住——两侧常量同值是跨侧契约（u2-l4 已总结）。
+即**第一个参数是最低位**。解码是逆过程：`key` 去掉偏移后逐位 `÷10 取余`，第 i 位余数对应第 i 个维度。
 
 #### 4.3.3 源码精读
 
-`RecursiveSum` 的递归实现（含终止重载）在 [ascendc/src/ops-transformer/common/include/tiling_base/tiling_key.h:L24-L33](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_key.h#L24-L33)：空参返回 0 作递归基，一般形式 `templateId + kBase * RecursiveSum(rest...)` 用 `constexpr` 完成编译期计算——整个 key 在编译期就拼好了，零运行时开销。
+[tiling_key.h:24-33](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_key.h#L24-L33) —— `RecursiveSum` 用 C++17 折叠式的可变参数模板递归实现十进制位组装：`templateId + kBase * RecursiveSum(templateIds...)`，递归终止于返回 0 的无参重载。
 
-编码规则注释（各数位含义）见 [L35-L47](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_key.h#L35-L47)，其中 L46-L47 给出了使用示例：`GET_TILINGKEY(AxisEnum::AXIS_S1, AxisEnum::AXIS_S2, AxisEnum::AXIS_N2, SupportedDtype::FLOAT32, InputLayout::BSH, SparseCapability::SUPPORT_ALL)`。
+[tiling_key.h:35-47](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_key.h#L35-L47) —— 文档注释：FlashAttentionScoreEnhance/GradEnhance 从低位到高位依次是 Ub0、Ub1、Block、DataType、Format、Sparse 六个十进制位；Ub0/Ub1 表示 UB 核内切分的轴（最多切两根，不切填 `AXIS_NONE`）。注释还给出使用示例。
 
-\( 10^{19} \) 偏移常量与入口模板在 [L49-L53](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_key.h#L49-L53)；便捷宏 `TILINGKEY(ub2, ub1, block, dtype, layout, sparse)` 在 [L58-L60](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_key.h#L58-L60)，直接接受六个枚举名。
+[tiling_key.h:49-53](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_key.h#L49-L53) —— `TILINGKEYOFFSET = 10^19` 与 `GET_TILINGKEY(...)`：在组装结果上加偏移。
 
-真实消费侧的对照：sinkhorn 走「手写小 key」路线——`GetTilingKey()` 按 `outFlag` 返回 0 或 1（[manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp:L556-L561](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp#L556-L561)），注释写明 0=训练/Transpose 路径、1=推理/DataCopyPad 路径。FA 则走「位编码」路线——各模板的 `GetTilingKey()` 返回 `GET_TPL_TILING_KEY(...)`（如 [arch32/flash_attention_score_enhance_tiling_general.cpp:L5047-L5050](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/arch32/flash_attention_score_enhance_tiling_general.cpp#L5047-L5050)，20 个参数各占一位）。注意 `GET_TPL_TILING_KEY` 本身由 CANN 侧 `fase_tiling` 组件提供（FA 入口文件 L29 `using namespace fase_tiling;`），本仓库内无其定义——它是 `GET_TILINGKEY` 同思路的扩展版。另外 FA 入口的空输入特判直接 `SetTilingKey(1)`（[flash_attention_score_enhance_tiling.cpp:L274](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/flash_attention_score_enhance_tiling.cpp#L274)），与 `FA_EMPTY_TILING_KEY` 常量（L43）对应。
+[tiling_key.h:58-60](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_key.h#L58-L60) —— `TILINGKEY(ub2, ub1, block, dtype, layout, sparse)` 宏：直接传六个枚举名即可得到 key。
+
+位组装所用的枚举定义在 [tiling_type.h:23-99](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_type.h#L23-L99)（`optiling` 命名空间）：`AxisEnum`（B/N2/G/S1/S2/D/NONE=9，供 Ub0/Ub1/Block 三位使用）、`DtypeEnum`、`LayoutEnum`（BSND/SBND/BNSD/TND/NTD_TND）、`SparseEnum`（ALL/NONE/ANY/CAUSAL/BAND/PREFIX 等 10 种）等。**每个枚举值都必须小于 10**——这是十进制位组装的硬约束，也是 `AxisEnum::NONE` 取 9 而不是 -1 的原因。
+
+[tiling_type.h:101-138](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_type.h#L101-L138) —— 同一套 `RecursiveSum`/`GET_TILINGKEY`/`TILINGKEY` 在 `optiling` 命名空间下的副本。它与 `tiling_key.h`（`Ops::Transformer::OpTiling` 命名空间）内容重复，各自服务不同的 include 习惯，阅读时注意别混用命名空间。
+
+两个对照样本：
+
+[manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp:49-50](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp#L49-L50) 与 [第 556-561 行](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp#L556-L561) —— 朴素风格：`TILING_KEY_GENERALIZED = 0`（训练/Transpose 模板）、`TILING_KEY_INFER = 1`（推理/DataCopyPad 模板），`GetTilingKey()` 按 `out_flag` 二选一。只有一条变化轴时没必要位组装。
+
+[flash_attention_score_enhance_tiling_general.cpp:5047-5050](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/arch32/flash_attention_score_enhance_tiling_general.cpp#L5047-L5050) —— FA 实际用的 `GET_TPL_TILING_KEY(0,0,...,0)`（20 个参数）来自 CANN 高阶 API 的模板选择框架，本仓库只使用、未见其定义（定义在 CANN 安装包的头文件中，**待确认**具体位置）；它与本节的 `GET_TILINGKEY` 是同一思想的更长位数版本。
 
 #### 4.3.4 代码实践
 
-**实践目标**：不依赖运行环境，手工推演编码公式的正确性，并对比两种 key 风格的适用边界。
+**实践目标**：手工算一遍十进制位组装，确认你真的理解「第一个参数是最低位」。
 
 **操作步骤**：
 
-1. 抄写 `RecursiveSum` 的两条重载（L24-L33），在纸上展开 `RecursiveSum(7, 0, 3, 1)`，逐层写出递归栈。
-2. 计算 `GET_TILINGKEY(7, 0, 3, 1)` 的完整值（含偏移）。
-3. 阅读注释 L36-L44，回答：为什么 Ub0/Ub1/Block 要用「轴枚举」而不是布尔开关？允许最多切分两根轴意味着什么？
-4. 反向练习：看到 key = \( 10^{19} + 50401 \)，写出各位数字对应的维度值序列（从个位到高位）。
+1. 查 [tiling_type.h](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_type.h#L23-L99) 中的枚举值：`AxisEnum::S2=4`、`AxisEnum::S1=3`、`AxisEnum::N2=1`、`DtypeEnum::FLOAT32=1`、`LayoutEnum::BSND=0`、`SparseEnum::ALL=0`。
+2. 手算 `TILINGKEY(S2, S1, N2, FLOAT32, BSND, ALL)`（不带偏移的部分）。
+3. 写一段最小 C++ 验证（**示例代码**，非仓库原有）：
 
-**需要观察的现象**：递归展开时第一个参数乘 \( 10^0 \)、最后一个参数乘的 10 的幂次最高；步骤 4 的答案是 (1, 0, 4, 0, 5)（个位到万位）。
+   ```cpp
+   // compile: g++ -std=c++17 -c demo.cpp
+   #include <cstdint>
+   #include <cstdio>
+   constexpr uint64_t kBase = 10;
+   constexpr uint64_t RecursiveSum() { return 0; }
+   template <typename T, typename... Args>
+   constexpr uint64_t RecursiveSum(T t, Args... rest) {
+       return static_cast<uint64_t>(t) + kBase * RecursiveSum(rest...);
+   }
+   int main() {
+       // S2=4, S1=3, N2=1, FLOAT32=1, BSND=0, ALL=0
+       printf("%llu\n", RecursiveSum(4, 3, 1, 1, 0, 0));  // 期望 1134
+       return 0;
+   }
+   ```
 
-**预期结果**：`RecursiveSum(7, 0, 3, 1) = 7 + 0×10 + 3×100 + 1×1000 = 1307`；`GET_TILINGKEY(7, 0, 3, 1) = 10^19 + 1307 = 10000000000000001307`。此为纯编译期数学，可用任意 C++ 编译器写 5 行 `static_assert` 验证（待本地验证：在容器内用 bisheng 或 g++ 编译包含该头文件的测试单元）。
+**需要观察的现象**：输出应为 `1134`，即 \(4 + 10\times3 + 100\times1 + 1000\times1\)。把参数顺序对调（如 `(0,0,BSND...)` 换成高位在前）结果会完全不同，体会「参数顺序 = 位权」。
+
+**预期结果**：加上偏移后完整 key 为 \(10^{19} + 1134 = 10000000000000001134\)。手算与程序输出一致即通过；运行结果**待本地验证**（本环境只保证公式推导）。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么选十进制位组装，而不是 C 结构体的二进制位域（bitfield）？
+**练习 1**：为什么 `GET_TILINGKEY` 要加 \(10^{19}\) 偏移？
 
-答案：十进制方案下每个维度的合法值一目了然（key 的第 i 位就是第 i 个维度），日志里打印 key 即可人工解码，排查问题快；实现只需 `constexpr` 乘加，不依赖编译器位域布局。二进制位域虽然紧凑，但可读性差、且跨 Host/Device 序列化要操心对齐。本质是用「空间换可读性」——uint64 有 19 个十进制位可用，对分支维度数量绰绰有余。
+答案：为了与旧式小整数 tilingKey（0/1/2 这类）在数值空间上彻底隔开——见到 19 位以上的 key 就知道是位组装编码；同时避免不同编码体系意外撞值。`uint64_t` 最大约 \(1.8\times10^{19}\)，\(10^{19}\) 偏移恰好仍在表示范围内但已接近上限，所以最多容纳 19 个十进制位。
 
-**练习 2**：某天有人给 `TILINGKEY` 宏的 `dtype` 位传了一个值为 12 的枚举，会发生什么？
+**练习 2**：`AxisEnum` 的枚举值为什么都小于 10？`NONE` 为什么是 9？
 
-答案：12 占两个十进制位，`12 × 10^3 = 12000` 会同时挤占 layout 位（本来 ×10^4）——编码被污染，且因为组装是合法算术，编译期不会报错，只在运行期表现为 kernel 选错分支。这类 bug 极难排查，所以每个维度枚举必须保证值域 0~9（这也是注释中各枚举都设计为个位数的原因）。
+答案：每个维度只占一个十进制位，值域必须是 0~9，否则会「进位」污染相邻位。`NONE=9` 表示「该轴不参与切分」，用位段内的最大安全值（9）做哨兵，既满足小于 10 的约束又不易与真实轴编号混淆。
 
-**练习 3**：sinkhorn 为什么不用 `GET_TILINGKEY` 而手写 0/1？
+**练习 3**：tilingKey 改变时需要重新编译算子包吗？
 
-答案：它只有两个分支（推理/训练路径），手写小 key 更直观，kernel 侧 `TILING_KEY_IS` 匹配也简单。位编码的价值在于维度组合爆炸的场景——「简单场景手写、复杂场景编码」是本仓库的惯例取舍。
+答案：不需要重新编译产物的「份数」——所有分支都编在同一个 kernel `.so` 里；tilingKey 是运行期信号，Host 写、Device 入口读。但**新增一个 key 取值**意味着 kernel 侧要新增对应分支/模板并重新编译，同时 Host 侧 `GetTilingKey()` 能产出这个新值，两侧必须同步（回顾 u2-l4 的「跨侧契约」）。
 
-### 4.4 公共小工具：tiling_util 与 data_copy_transpose_tiling
+### 4.4 tiling_util 与 data_copy_transpose_tiling：小工具的真实现状
 
 #### 4.4.1 概念说明
 
-`tiling_base` 目录里还有两个不起眼但值得读的小件：
-
-- **`tiling_util`**（头 `tiling_util.h` + 实现 `tiling_util.cpp`）：三个工具——`IsRegbaseSocVersion` 两个重载与 `EnsureNotScalar`。前者是「当前芯片是否 regbase 新架构」的判断（当前版本恒为 false，属预留开关，与 u4-l8 将讲的 arch35/regbase 算子族相关）；后者把标量 shape（维度数为 0）安全地当作 `{1}` 处理，避免 tiling 代码对空维度除零或越界。
-- **`data_copy_transpose_tiling`**：FA 家族做布局转换（如 ND 排布转置）时，kernel 侧转置搬运所需的形状参数打包器。它把「目标形状/源形状的各维及若干预乘积」一次性填进 `CopyTransposeTiling` 结构，kernel 拿到后免于现场做乘法。
+`common/src/tiling_base/tiling_util.cpp` 和 `common/include/tiling_base/data_copy_transpose_tiling.h` 是 tiling_base 目录下的两个公共小工具。本模块除了讲它们做了什么，更重要的教训是：**公共目录里的代码不等于都被使用**——学会用 grep 验证一个工具的真实调用情况，是读公共库的必备素养。
 
 #### 4.4.2 核心流程
 
-`GetDataCopyTransposeTiling` 的输入输出：
-
-```text
-输入: dstShape（转置目标形状, 四维 B/N/S/H）、srcShape（源形状）、typeSize（元素字节数）
-输出: optiling::CopyTransposeTiling（写入以下字段）
-    dstShapeB/N/S/H     目标四维
-    dstShapeHN          = dstShapeH / dstShapeN   （每个 head 的 D 维大小）
-    srcShapeB/N/S/HN    源四维
-    originalShapeNLen   = srcShapeHN * typeSize
-    shapeSHValue / shapeNsValue / shapeNsnValue / shapeBHValue  各维乘积的预计算
-```
-
-`EnsureNotScalar` 的逻辑一句话：`shape.IsScalar()` 时返回静态的 `{1}` 形状引用，否则原样返回——用「共享只读对象」避免按值拷贝 `gert::Shape`。
+- `IsRegbaseSocVersion(context)`：从 `TilingContext`/`TilingParseContext` 取平台信息 → 构造 `PlatformAscendC` → 取 `SocVersion` → 判断是否 regbase（新架构）芯片。**当前实现恒返回 false**（预留钩子）。
+- `EnsureNotScalar(shape)`：若 shape 是标量（0 维），返回固定的 `{1}` 形状，否则原样返回——避免对标量张量调 `GetDim(0)` 越界。
+- `GetDataCopyTransposeTiling(dstShape, srcShape, typeSize, tiling)`：按 BNSD 四维语义把源/目标 shape 预展开成一组乘积字段（如 `shapeSHValue = S*H`、`shapeBHValue = B*H`），供设备侧 DataCopy 转置时直接查表用，避免核内重复乘法。
 
 #### 4.4.3 源码精读
 
-`tiling_util.cpp` 全文只有 30 余行，见 [ascendc/src/ops-transformer/common/src/tiling_base/tiling_util.cpp:L22-L49](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/src/tiling_base/tiling_util.cpp#L22-L49)：
+[tiling_util.h:24-28](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_util.h#L24-L28) —— 三个工具函数的声明：两个 `IsRegbaseSocVersion` 重载 + `EnsureNotScalar`。
 
-- L22 定义函数级静态 `g_vec_1_shape = {1}`——`EnsureNotScalar`（L43-L49）返回的就是它的引用，因此**返回引用是安全的，但调用方不得修改**。
-- L24-L27 的 `IsRegbaseSocVersion(SocVersion)` 无条件 `return false`：两个 context 重载（L29-L41）分别从 `TilingParseContext` / `TilingContext` 取 platformInfo 再调它。当前版本的结论是「所有芯片都走非 regbase 路径」；等 regbase 架构全面铺开后，只需改这一个函数。
+[tiling_util.cpp:24-27](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/src/tiling_base/tiling_util.cpp#L24-L27) —— 核心判断 `IsRegbaseSocVersion(SocVersion)` 当前**固定 `return false`**：为未来的 regbase 架构（A3 类新编程范式）预留的开关，当前所有 soc 都走非 regbase 路径。
 
-`GetDataCopyTransposeTiling` 在 [ascendc/src/ops-transformer/common/include/tiling_base/data_copy_transpose_tiling.h:L25-L50](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/data_copy_transpose_tiling.h#L25-L50)：L28-L31 定义四个维度下标常量（B/N/S/H 分别是第 0/1/2/3 维），L35-L49 依次填目标形状、`dstShapeHN = H/N`（L39）、源形状与预乘积。结合 FA 的 ND 排布转换场景（输入 [B,S,N*D] 转成 [B,N,S,D]，此时四维表示里的 H=N*D，故 H/N 即 D）可以理解这些字段的几何含义——这是 FA 入口文件 include 它的原因（[flash_attention_score_enhance_tiling.cpp:L21](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/flash_attention_score_enhance_tiling.cpp#L21)）。具体的 kernel 侧消费逻辑在 u4-l3 展开，本讲只需认识「Host 侧参数打包器」这一定位。
+[tiling_util.cpp:29-41](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/src/tiling_base/tiling_util.cpp#L29-L41) —— 两个重载分别从 `TilingParseContext` 与 `TilingContext` 取平台信息再委托上面的静态函数。
+
+[tiling_util.cpp:43-49](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/src/tiling_base/tiling_util.cpp#L43-L49) —— `EnsureNotScalar`：三行实现，标量换成静态的 `{1}` shape（返回静态对象的引用避免悬空）。
+
+[data_copy_transpose_tiling.h:25-50](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/data_copy_transpose_tiling.h#L25-L50) —— 自由函数 `GetDataCopyTransposeTiling`：把 B/N/S/H 与若干预乘积写进 `optiling::CopyTransposeTiling`（结构体定义在同目录 `data_copy_transpose_tiling_def.h`）。注意它在 `optiling` 命名空间，且与本框架的 `TilingBase` 无继承关系，只是放在同一目录的独立工具。
+
+**诚实的现状核查**（用 grep 验证过）：
+
+- `EnsureNotScalar` 与这个自由函数版 `GetDataCopyTransposeTiling` 在仓库内**目前均无调用者**（只有声明/定义处命中）。
+- FA 里 [flash_attention_score_enhance_tiling_general.cpp:2367](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/arch32/flash_attention_score_enhance_tiling_general.cpp#L2367) 调用的 `transposeTilingData.GetDataCopyTransposeTiling(...)` 是**成员函数**（参数是 4 个 int64），与公共头里的自由函数只是同名，不是同一实体。
+
+结论：这两个文件当前属于「预留/历史」性质，复用前先确认调用关系，别被名字误导。
 
 #### 4.4.4 代码实践
 
-**实践目标**：确认两个工具的真实使用面，理解「公共件被谁依赖」。
+**实践目标**：亲手验证「公共工具是否被使用」，养成不轻信目录名直觉的习惯。
 
 **操作步骤**：
 
-1. 执行下面两条检索，统计引用面：
+```bash
+cd ascendc/src
+grep -rn "EnsureNotScalar" --include="*.cpp" --include="*.h" .
+grep -rn "GetDataCopyTransposeTiling" --include="*.cpp" --include="*.h" .
+grep -rn "IsRegbaseSocVersion" --include="*.cpp" --include="*.h" . | grep -v "tiling_util"
+```
 
-   ```bash
-   grep -rln "tiling_base/tiling_util.h" ascendc/src/ops-transformer --include="*.cpp" --include="*.h"
-   grep -rln "data_copy_transpose_tiling" ascendc/src/ops-transformer --include="*.cpp" --include="*.h"
-   ```
+**需要观察的现象**：第一条命令只有定义与声明两处命中；第二条命令除定义外还有 FA 的成员函数调用（同名不同物）；第三条观察 `IsRegbaseSocVersion` 是否有业务调用方。
 
-2. 打开 `IsRegbaseSocVersion` 的调用点（若有），观察调用方在 true/false 两条分支上分别做什么。
-3. 阅读第 2 步未覆盖的场景，回答：如果把 `EnsureNotScalar` 的返回类型从 `const gert::Shape&` 改成按值 `gert::Shape`，功能还正确吗？有什么代价？
-
-**需要观察的现象**：引用面远小于 `tiling_base.h` / `tiling_templates_registry.h`（后者几乎被所有框架化算子的 op_host include）——公共件也分「地基」和「边角料」两级。
-
-**预期结果**：`data_copy_transpose_tiling` 主要被 FA 前向/反向的 op_host 引用；`tiling_util` 引用面较窄。第 3 步答案：功能正确（拷贝一份 `{1}` 同样安全），代价是每次调用多一次 Shape 对象的堆分配/拷贝，而 tiling 在图编译期可能被高频调用。实际运行检索命令的具体命中清单待本地验证。
+**预期结果**：与 4.4.3 的「现状核查」一致——两个工具在仓库内无真实调用者（`IsRegbaseSocVersion` 的调用情况以你的 grep 输出为准，**待本地验证**）。如果未来某次提交开始调用它们，说明对应机制（regbase 切换、标量兜底、转置预计算）被启用了。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：`IsRegbaseSocVersion` 恒返回 false，为什么还要保留两个 context 重载？
+**练习 1**：`IsRegbaseSocVersion` 现在恒返回 false，那写它有什么意义？
 
-答案：为调用方提供类型适配（`TilingContext` 与 `TilingParseContext` 是不同生命周期阶段的上下文），并把「取 platformInfo → 构造 PlatformAscendC → 取 socVersion」的样板代码封装掉。等真要区分 regbase 时，改动被锁死在实现函数一处，所有调用方无感。
+答案：这是典型的「预留扩展点」：调用方代码可以先写成 `if (IsRegbaseSocVersion(context)) { 新路径 } else { 旧路径 }`，等 regbase 架构落地时只需改这一个函数的实现，所有调用点自动切换，避免到时候大面积改代码。
 
-**练习 2**：`GetDataCopyTransposeTiling` 里为什么把 `shapeSHValue`、`shapeBHValue` 这类乘积在 Host 侧预计算好？
+**练习 2**：`EnsureNotScalar` 为什么返回静态对象的引用而不是按值返回？
 
-答案：kernel 侧每一次乘法都发生在 AIV 上，转置搬运的地址计算是热路径；把不变的乘积前置到 Host tiling 阶段算一次，通过 TilingData 传下去，设备侧只做加法与移位。这是 tiling「能算的都在 Host 算」通用原则的具体体现（与 u2-l3 的 TilingData 三组字段同理）。
+答案：函数签名返回 `const gert::Shape&`（引用），若返回局部对象会产生悬空引用；对「标量 → `{1}`」这个固定映射使用 `static const` 对象（`tiling_util.cpp` 第 22 行的 `g_vec_1_shape`）既安全又零开销。
 
-**练习 3**：`EnsureNotScalar` 返回的静态 `{1}` 形状如果被某个调用方意外修改了，会发生什么？
+**练习 3**：公共头里的自由函数 `GetDataCopyTransposeTiling` 和 FA 里的同名调用是什么关系？
 
-答案：`g_vec_1_shape` 是所有调用方共享的函数级 static，一处修改会污染后续所有走到标量分支的 tiling 请求，且症状随机出现、极难定位。返回 `const&` 只挡住了通过该引用写入的常见路径，是「约定优先」的设计；更严格的写法是按值返回（见 4.4.4 第 3 步的取舍讨论）。
+答案：没有关系。前者是 `optiling` 命名空间下接收 `ge::Shape` 的 inline 自由函数（仓库内暂无调用者）；后者是 FA 的 `transposeTilingData` 成员函数（接收 4 个 int64），只是恰好同名。阅读时必须看签名与所属作用域，不能只看函数名。
 
 ## 5. 综合实践
 
-本讲的综合实践把两个真实算子串起来：**为 sinkhorn 画出一帧请求的 tiling 类执行链，并说明 FlashAttention 与该框架的对应关系**。全程只需读代码与画图，无需 NPU。
+**实践目标**：把本讲三个机制（两级 tiling 文件组织、责任链调度、PARAM_INVALID 回退）串成一张可复述的执行链图，并厘清 `flash_attention_score_enhance_tiling_common.h` 与框架的真实关系。
 
-**实践目标**：
+### 任务一：画出 sinkhorn 一帧请求的 tiling 类执行链
 
-1. 用一张执行链图说清「CANN 调度 → 入口函数 → 注册表 → 责任链 → 三态返回」的完整路径，特别是 `GRAPH_PARAM_INVALID` 的回退路径。
-2. 用一张对应关系表说清 FA 的 tiling_common.h / 自有基类 / 六个模板分别对应框架的哪一层。
+先读两个文件，再照下面的骨架补全（含回退路径）：
 
-**操作步骤**：
+- 接入层：[manifold_constrained_hyper_connection_sinkhorn_enhance_tiling_base.cpp:23-36](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling_base.cpp#L23-L36) —— `TilingForSinkhorn` 一行委托给 `TilingRegistry::GetInstance().DoTilingImpl(context)`，随后 `IMPL_OP_OPTILING(...).Tiling(TilingForSinkhorn).TilingParse<SinkhornCompileInfo>(...)` 把入口挂到 CANN 框架（回顾 u2-l3 的注册方式）。
+- 实现层：[manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp:79-141](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp#L79-L141) —— `SinkhornTilingBase` 类定义；[第 580 行](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp#L580) 注册优先级 2000。
 
-1. **画 sinkhorn 执行链**。按以下顺序阅读并画图（每一步都标上文件与行号）：
-   - 入口注册：[manifold_constrained_hyper_connection_sinkhorn_enhance_tiling_base.cpp:L34-L36](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling_base.cpp#L34-L36) 的 `IMPL_OP_OPTILING` 把 `TilingForSinkhorn` 挂到算子 `ManifoldConstrainedHyperConnectionSinkhornEnhance`。
-   - 入口转发：L23-L26 的 `TilingForSinkhorn` 只有一行实质代码——调 `TilingRegistry::GetInstance().DoTilingImpl(context)`（不带 soc 的注册表）。
-   - 链遍历：对照 [tiling_templates_registry.h:L245-L262](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h#L245-L262)，画出「按 priority 升序 → 工厂构造 → DoTiling() → 判三态」的循环框。
-   - 唯一候选：[manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp:L580](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp#L580) 注册的 `SinkhornTilingBase`（priority=2000）。画出其 `DoTiling()` 内部七步（基类 [tiling_base.h:L81-L113](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h#L81-L113)）。
-   - **回退路径**：在图上用虚线画出 `GRAPH_PARAM_INVALID` 分支——`IsCapable()==false`（sinkhorn 恒 true，此路不通）或钩子显式返回 PARAM_INVALID 时，遍历下一个 priority；本例没有下一个候选，于是走到 [tiling_templates_registry.h:L260-L261](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h#L260-L261) 的失败出口。结论：sinkhorn 链长为 1，PARAM_INVALID 等价于失败。
-   - 成功出口：`PostTiling()` 写 blockDim/TilingData，基类 L110 统一 `SetTilingKey(GetTilingKey())`（0 或 1）。
+执行链参考图（补全方框内容）：
 
-   参考骨架（请补全行号后誊入自己的笔记）：
+```text
+CANN 框架按算子名调用 TilingForSinkhorn(context)          [_tiling_base.cpp:23]
+  └─ TilingRegistry::GetInstance().DoTilingImpl(context)   [tiling_templates_registry.h:245]
+      ├─ opType = "ManifoldConstrainedHyperConnectionSinkhornEnhance"
+      ├─ GetTilingTemplates(opType) → map{ 2000 → SinkhornTilingBase 工厂 }
+      └─ 遍历（升序）：
+          [2000] new SinkhornTilingBase(context) → DoTiling()
+            ├─ GetShapeAttrsInfo   取 x shape/dtype + 3 个属性 + 输出 shape
+            ├─ GetPlatformInfo     AIV 核数、UB 大小 → aicoreParams_
+            ├─ IsCapable           恒 true
+            ├─ DoOpTiling          形状校验 + SplitCores + reduceMask 预计算
+            ├─ DoLibApiTiling      空实现（返回 SUCCESS）
+            ├─ GetWorkspaceSize    固定 16MB
+            ├─ PostTiling          SetBlockDim + TilingData SaveToBuffer
+            └─ SetTilingKey(out_flag==0 ? 1 : 0) → GRAPH_SUCCESS，链终止
+          ── 回退路径（本算子当前不会触发，但框架支持）──
+          若上一步返回 GRAPH_PARAM_INVALID：
+            继续尝试 map 中下一个更大的 priority 数值；
+          全部让位 → "no valid template is found" → GRAPH_FAILED
+```
 
-   ```text
-   CANN 框架（按 op_type 查到 IMPL_OP_OPTILING 注册项）
-      │
-      ▼
-   TilingForSinkhorn(ctx)                        _tiling_base.cpp:L23-L26
-      │
-      ▼
-   TilingRegistry::DoTilingImpl(ctx)             tiling_templates_registry.h:L245-L262
-      │  op_type = ctx->GetNodeType()
-      │  候选表 = registry_map_[op_type]  （std::map<priority, 工厂>，升序）
-      ▼
-   priority=2000 ──► new SinkhornTilingBase ──► DoTiling()      tiling.cpp:L79 / tiling_base.h:L81
-        │  GetShapeAttrsInfo   (L157)  ──FAILED──► 整链中止
-        │  GetPlatformInfo     (L143)
-        │  IsCapable           (L95)   ──false──► GRAPH_PARAM_INVALID ──┐
-        │  DoOpTiling          (L491)                                  │ 无下一候选
-        │  DoLibApiTiling      (L534)                                  ▼
-        │  GetWorkspaceSize    (L539)                        OP_LOGE + GRAPH_FAILED
-        │  PostTiling          (L546)                                  （L260-L261）
-        │  SetTilingKey(0|1)   (基类 L110)
-        ▼
-   GRAPH_SUCCESS
-   ```
+**观察与验证**：sinkhorn 只注册了一个类且 `IsCapable` 恒 true，所以回退路径在本算子是「潜在路径」。要观察真实回退，去看 FA：入口 [flash_attention_score_enhance_tiling.cpp:287-306](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/flash_attention_score_enhance_tiling.cpp#L287-L306) 在空输入早退后调用 `TilingRegistryNew::DoTilingImpl`（第 304 行），链首 DropMask(90) 算完 dropmask 参数后返回 `GRAPH_PARAM_INVALID`（4.2.3 已精读），接力给 VarLen(94)→SameAB(95)→S1s2Bn2gs1(96)→S1Bn2gs1(97)→B(98)。把这条真实链也画进你的图里作为对照。
 
-2. **写 FA 对应关系说明**。逐行填写下表（「框架侧」列已给出，FA 侧请自行补行号并核对）：
+**预期结果**：两张链图（sinkhorn 单实现链 + FA 多实现接力链），并能口头复述「PARAM_INVALID 是链的接力棒，SUCCESS/FAILED 是链的终止符」。
 
-   | 框架侧（common/tiling_base） | FlashAttention 侧 | 说明 |
-   | --- | --- | --- |
-   | `CompileInfoCommon`（tiling_base.h:L45-L57） | `FlashAttentionScoreEnhanceCompileInfo`（flash_attention_score_enhance_tiling_common.h:L24-L32） | 算子私有的平台快照结构体；tiling_common.h 这个文件**只放了这个结构体**，它不是「框架本体」，而是框架 CompileInfo 约定的算子侧实现 |
-   | `TilingBase` 七钩子 | `FlashAttentionScoreEnhanceTilingBase`（general.cpp:L329 起，继承 `TilingBase`） | FA 在公共基类之上又叠一层 FA 专用基类，抽走 layout/sparse 解析等公共逻辑，再派生六个特化模板 |
-   | `TilingRegistryNew::DoTilingImpl` | 入口 `TilingFlashAttentionScoreEnhance` 末尾的调用（tiling.cpp:L304） | FA 用**带 soc** 的注册表，模板按芯片（910B/910_93）区分 |
-   | priority 升序遍历 | 90 DropMask → 94 VarLen → 95 SameAB → 96 S1s2Bn2gs1 → 97 S1Bn2gs1 → 98 B（general.cpp:L5054-L5089） | 六级责任链的真实顺序 |
-   | `GRAPH_PARAM_INVALID`（IsCapable=false） | 95 号模板 `IsCapable`（general.cpp:L3384-L3412） | 模板不匹配时的标准让位路径 |
-   | `GRAPH_PARAM_INVALID`（钩子显式返回） | DropMask 的 `DoOpTiling`（general.cpp:L4993-L5029，填完 dropmaskParams 后返回） | 「贡献后放行」变体：借 PARAM_INVALID 继续链，副作用写入共享 tilingData（L584-L585） |
-   | `Reset(context)`（tiling_base.h:L116-L119） | FA 基类 L337-L341 的 override + 私有 `Reset()` | 成员状态复位约定 |
+### 任务二：说明 flash_attention_score_enhance_tiling_common.h 与框架的对应关系
 
-3. **（可选，需环境）跑一次 UT 观察链日志**。若有容器环境，按 u8 将讲的方式编译 op_host UT（`bash build.sh -u -n <算子> -c ascend910_93 --ophost`），在用例中把日志级别调到 DEBUG，观察 `Do general op tiling success priority=%d` / `Ignore general op tiling priority=%d`（registry.h:L254-L257）两条日志——它们就是责任链遍历的运行时脚印。此步待本地验证。
+打开 [flash_attention_score_enhance_tiling_common.h:24-32](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/flash_attention_score_enhance_tiling_common.h#L24-L32)，回答：它属于 tiling_base 框架吗？
 
-**预期结果**：两张图/表完成后，你应能不假思索回答三个问题——(1) sinkhorn 的链长为什么是 1，它的 `_tiling_base.cpp` 与 `_tiling.cpp` 各自为什么存在；(2) FA 的 tiling_common.h 与框架是什么关系（CompileInfo 契约的算子侧实现，而非框架本体）；(3) `GRAPH_PARAM_INVALID` 有哪两种产生方式（IsCapable 让位 / 钩子显式返回），两者在 FA 链上分别由谁示范。
+参考答案要点：
+
+1. **它不属于框架本体**。该头文件只定义了 `FlashAttentionScoreEnhanceCompileInfo` 结构体（aivNum/aicNum/ubSize/l1Size/l0cSize/l2CacheSize/socVersion），是 `TilingParse` 阶段的「编译期信息契约」，与 `tiling_base.h` 里的 `CompileInfoCommon`（[L45-57](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h#L45-L57)）角色相同但字段略异——FA 用自己的结构体。
+2. **它与框架的真正连接点有两个**：(a) [flash_attention_score_enhance_tiling.cpp:308-325](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/flash_attention_score_enhance_tiling.cpp#L308-L325) 的 `TilingPrepareForFlashAttentionScoreEnhance` 在图编译阶段把平台探测结果写进该结构体；(b) [第 304 行](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/flash_attention_score_enhance_tiling.cpp#L304) 的 `TilingRegistryNew::GetInstance().DoTilingImpl(context)` 才是责任链框架的接入调用——当真实环境下 `GetPlatformInfo()` 非空时走平台信息解析 soc；UT faker 环境下为空时，框架会改从 `CompileInfoCommon` 形态的编译信息里取 socVersion（`TilingRegistryNew::DoTilingImpl` 第 102-107 行的分支）。
+3. **结论**：文件名带 `tiling_common` 容易让人以为它是「tiling 公共框架的一部分」，实际它只是 FA 的编译期信息结构；框架本体在 `common/include/tiling_base/`。这也是本讲反复强调的方法论：以代码内容与调用关系定位职责，而不是以文件名臆断。
+
+### 可选上机验证（有 NPU/UT 环境时）
+
+运行 u8 单元将详述的 UT 流程：`bash build.sh -u -n manifold_constrained_hyper_connection_sinkhorn_enhance -c ascend910_93 --ophost`（命令形态参考 u1-l4，具体参数以 build.sh 帮助为准），在 tiling UT 的日志中寻找 `"Do general op tiling success priority=..."` 或 `"Ignore general op tiling priority=..."` 字样——它们正是 `DoTilingImpl` 循环里 [tiling_templates_registry.h:123-126](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h#L123-L126) 打出的责任链轨迹。**待本地验证**。
 
 ## 6. 本讲小结
 
-- `TilingBase::DoTiling()` 是模板方法：固定「shape 属性 → 平台 → 能力判断 → 数据切分 → 高阶 API → workspace → 落盘 → 统一 SetTilingKey」七步流程，子类填七个纯虚钩子；执行顺序保证了 `IsCapable` 可以使用前两步填好的信息。
-- 三态返回值是调度协议：`GRAPH_SUCCESS` 结束整链、`GRAPH_FAILED` 中止整链并上抛、`GRAPH_PARAM_INVALID` 让位给下一优先级——责任链的全部魔法就在这一个枚举值上。
-- `tiling_templates_registry` 用「（socVersion →）op_type → priority → 工厂函数指针」的多级 map 组织候选实现，static 全局对象在 main 之前完成注册；同优先级先到先得，后来者被静默忽略。
-- 两套注册表对应两种需求：不带 soc 的 `TilingRegistry`（MHC 系单实现）与带 soc 的 `TilingRegistryNew`（FA/Pioneer 多芯片多模板）；后者的 socVersion 探测有 platformInfo 与 CompileInfo 双通道，后者正是 UT 无硬件回放的接缝。
-- `tiling_key.h` 用十进制位组装编码 tilingKey（首个参数落个位，加 \( 10^{19} \) 偏移与手写小 key 隔离），要求每维枚举 ≤ 9；FA 的 20 参数 `GET_TPL_TILING_KEY` 是同思路的 CANN 侧扩展。
-- FA 链上的 DropMask 模板展示了 PARAM_INVALID 的高级用法——「贡献后放行」：只写共享 tilingData 的一节，然后把主切分让给后续模板；共享的载体是 `context_->GetTilingData<>()` 返回的同一块缓冲。
+- `TilingBase` 用模板方法把一次 tiling 固定为七步（GetShapeAttrsInfo → GetPlatformInfo → IsCapable → DoOpTiling → DoLibApiTiling → GetWorkspaceSize → PostTiling → SetTilingKey），子类只填内容不管流程；实际调用顺序以 `DoTiling()` 为准，与注释编号不同。
+- 三态返回值是责任链的调度语言：`GRAPH_SUCCESS` 成功终止、`GRAPH_FAILED` 立即中止、`GRAPH_PARAM_INVALID` 让位给下一个优先级实现；`IsCapable()` 返回 false 是产生第三态的标准方式，任意步骤直接返回它也合法。
+- `tiling_templates_registry.h` 提供「工厂函数 + 优先级 map + 静态注册宏」三件套，分带 socVersion（`TilingRegistryNew`）与不带（`TilingRegistry`）两套；`std::map` 升序遍历决定「优先级数值越小越先执行」；注册发生在 so 加载期的全局静态对象构造中。
+- FA 演示了责任链的高级用法：优先级 90 的 DropMask 模板只填共享 context TilingData 中的 dropmask 段就返回 `GRAPH_PARAM_INVALID`，把接力棒交给 94~98 的通用模板——多个 tiling 类合作完成一帧。
+- tilingKey 的编码习惯是十进制位组装（`RecursiveSum`，第一个参数最低位）加 \(10^{19}\) 偏移，每位对应一个枚举（轴/ dtype/layout/稀疏），枚举值必须小于 10；简单算子（sinkhorn）仍可直接用 0/1 常量。tilingKey 不决定编译产物份数，而是运行期在同一个 kernel `.so` 内选分支的信号。
+- `tiling_util.cpp` 与 `data_copy_transpose_tiling.h` 是小工具且当前在仓库内基本无调用者（`IsRegbaseSocVersion` 恒 false 属预留钩子）；读公共库要用 grep 核实真实调用关系，警惕同名不同物（FA 的成员函数 `GetDataCopyTransposeTiling`）。
 
 ## 7. 下一步学习建议
 
-- **u3-l4（stub 桩机制）**：本讲多次出现 `ASCENDC_OP_TEST` 宏与 CompileInfo 双通道——stub 讲将解释 UT 如何伪造 `TilingContext`、`fe::PlatFormInfos` 与 level0 算子符号，把本讲的「UT 接缝」补完整。
-- **u4-l2 / u4-l3（FA 前向 tiling 与 kernel）**：本讲只画了 FA 责任链的骨架；u4 将进入 95/96 号模板内部，看 B/N2/G/S1/S2 的具体切分算法与 tilingKey 位域如何映射到 kernel 的布局模板。
-- **u8-l1 / u8-l2（UT 框架与 Tiling 单测）**：动手给 tiling 写用例时，你会直接操作本讲的注册表（UT 侧 `GetInstance()` 的外部定义）与 `TilingContextPara`，届时回看 4.2 的调度流程会有豁然开朗之感。
-- **延伸阅读**：对照 [flash_attention_score_grad_enhance 的 arch32 目录](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Op/blob/c1d24e36d7fb94a98607a02b0edc88c47b64d850/training/ascendc/src/ops-transformer/attention/flash_attention_score_grad_enhance/op_host/arch32/flash_attention_score_grad_enhance_tiling_s1s2_bn2gs1s2.cpp)——它的 10 处注册是本仓库最长的一条 tiling 责任链，适合作为本讲内容的自测材料：能否不看讲义说出每个 priority 失败后的下一个候选是谁？
+- **下一讲 u3-l4（stub 桩机制）**：本讲留下了一个伏笔——`DoTilingImpl` 在 `GetPlatformInfo()` 为空时如何从 `CompileInfoCommon` 取 socVersion？这正是 UT faker 上下文的行为，下一讲讲 `common/stub` 的 op_tiling/op_api 桩时会把这条链补完整。
+- **按家族纵向深入**：想看责任链的「满配」现场，直接读 u4-l2/u4-l3（FA 前向 tiling 与 kernel），对照本讲的 90/94/95/96/97/98 六级链理解「特化模板排队、通用模板兜底」的设计；arch35 的 AttentionPioneer（u4-l8）则是带 socVersion 注册表的另一个样本。
+- **继续阅读的源码**：`attention/common/op_host/fia_tiling_templates_registry.h`（家族自制注册表变体）；`flash_attention_score_grad_enhance` 的 `op_host/arch32/` 下多个 `REGISTER_TILING_TEMPLATE_WITH_SOCVERSION` 调用点，观察反向算子如何复用同一套框架。
+- **动手建议**：在 u9-l4 综合实战里新建算子时，试着不用框架（像 aggregate_hidden 那样一个函数写完）与用框架（继承 `TilingBase` + 注册宏）各写一遍 tiling，体会在什么规模下框架开始「回本」。
