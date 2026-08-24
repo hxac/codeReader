@@ -1,0 +1,1290 @@
+{
+  "head": "c1d24e36d7fb94a98607a02b0edc88c47b64d850",
+  "project": "openPangu-2.0-Op-training",
+  "rationale": "本仓库是盘古 2.0（openPangu-2.0-Op）训练自定义算子库，主体是 ascendc（基于昇腾 Ascend C 的融合训练算子：Attention/MHC/MoME 三族），辅以 pypto（Python DSL 编写的 QAT 量化算子）和预留的 triton 目录。学习路线设计为：先在入门单元建立项目全景认知并完成环境搭建与算子包编译安装；随后以结构最简单且带完整前反向的 MoME 算子 ai_infra_aggregate_hidden 为主线，按 op_def（原型注册）→ op_host（Tiling/InferShape）→ op_kernel（设备侧 Kernel）→ op_api（aclnn 两段式接口）的顺序走通单个算子的四层结构；第三单元补齐 utils 错误日志、common 公共组件、tiling_base 框架与 stub 桩机制等基础设施；之后按算子族纵向深入——先讲体量最大、机制最全的 Attention 族（FlashAttention 前反向、稀疏 FA、LightningIndexer、A3 架构的 AttentionPioneer 及其 AICPU 元数据算子），再讲算法特色鲜明的 MHC（Sinkhorn 前反向与 pre/post 系列），接着讲 torch_ops_extension 如何把 aclnn 算子封装成 torch.ops.custom 并接入 Autograd，以及 pypto 的 QAT 量化算子；倒数第二单元集中讲 UT（framework_normal 伪造上下文框架）与 ST（MARE/MERE/RMSE 精度指标）测试体系及运行方式；最后以多芯适配（arch32/arch35、ascend910b/910_93/950）、tiling_sink、fallback 等高级机制收尾，并用“新增一个自定义算子全流程”综合实战巩固。依赖关系上每篇只依赖其真正需要的前置知识，保证读者可按序渐进或按需跳读。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出仓库三大子目录（ascendc/pypto/triton）的定位与差异",
+            "列举 Attention、MHC、MoME 三类算子的代表算子",
+            "看懂 README 中的目录结构说明"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "ascendc/README.md",
+            "ascendc/src/ops-transformer 目录树",
+            "pypto/src/ops-nn/quant/ai_infra_pypto_qat"
+          ],
+          "order": 1,
+          "practice_task": "画出 training 目录的一级/二级结构思维导图，标注每个算子目录的层级路径（attention/mhc/mome），并为 19 个算子目录各写一句功能注释（参考各算子 README 与 docs）。",
+          "source_files": [
+            "ascendc/README.md",
+            "ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/README.md",
+            "pypto/src/ops-nn/quant/ai_infra_pypto_qat/docs/qat_ops.md",
+            "triton/src/ops_transformer/attention/.gitkeep"
+          ],
+          "title": "项目全景与目录导览：openPangu 2.0 训练算子库是什么",
+          "topic": "介绍仓库定位：为盘古 2.0 大模型训练提供的昇腾融合算子库，讲解 training 下 ascendc（Ascend C 算子）、pypto（Python 算子）、triton（预留目录）三大板块和 Attention/MHC/MoME 算子家族划分。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-ascend-op-layering.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "解释 op_def/op_api/op_host/op_kernel 四层的职责边界",
+            "说明 aclnn、tiling、Ascend C kernel 各自解决什么问题",
+            "在任意算子目录中定位四层对应的文件"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "ai_infra_aggregate_hidden_def.cpp",
+            "ai_infra_aggregate_hidden_tiling.cpp",
+            "ai_infra_aggregate_hidden.cpp（kernel 入口）",
+            "aclnn_flash_attention_score_enhance.h"
+          ],
+          "order": 2,
+          "practice_task": "任选三个算子目录（如 lightning_indexer_enhance、manifold_constrained_hyper_connection_sinkhorn_enhance、ai_infra_sinkhorn_grad），填写一张“四层文件对照表”：列出每层实际文件名与缺失情况（如 aggregate_hidden 没有 op_api 目录），并说明缺少的层由谁补齐。",
+          "source_files": [
+            "ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/op_host/ai_infra_aggregate_hidden_def.cpp",
+            "ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/op_host/ai_infra_aggregate_hidden_tiling.cpp",
+            "ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/op_kernel/ai_infra_aggregate_hidden.cpp",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_api/aclnn_flash_attention_score_enhance.h",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_enhance/docs/aclnnFlashAttentionVarLenScoreEnhanceV5.md"
+          ],
+          "title": "昇腾自定义算子分层模型：op_def / op_api / op_host / op_kernel",
+          "topic": "建立阅读本仓库最重要的心智模型：一个算子由原型注册（_def.cpp）、Host 侧 Tiling/InferShape（op_host）、设备侧 Kernel（op_kernel）和对外 aclnn API（op_api）四层组成，结合目录实例展示各层落点。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-environment-setup.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "按 A2/A3/A5 选择正确的 docker 镜像",
+            "编写拉起 8 卡或 16 卡 NPU 容器的 docker run 命令",
+            "在容器内完成 CANN 环境变量初始化"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "ascendc/README.md 环境准备章节",
+            "docker run 参考脚本",
+            "set_env.sh 调用"
+          ],
+          "order": 3,
+          "practice_task": "编写一个可复用的 setup_env.sh 脚本：封装镜像拉取、容器创建（挂载 /dev/davinci* 与驱动目录）与 set_env.sh 的 source，并在脚本中加注释说明每个挂载卷的作用；无 NPU 环境时写出脚本并用 bash -n 校验语法。",
+          "source_files": [
+            "ascendc/README.md"
+          ],
+          "title": "开发环境搭建：镜像、容器与 CANN 环境变量",
+          "topic": "照 README 完成 docker 镜像拉取（A2/A3/A5 三类）、容器启动、进入容器以及 source set_env.sh 等环境准备步骤，理解昇腾 CANN 工具链与 torch_npu 的关系。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-build-and-install.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "使用 -c 指定 soc_version、-n 指定算子白名单进行编译",
+            "解释 build.sh 中 clean/cmake_config/build_package 的执行顺序",
+            "把生成的 run 包安装到 CANN opp/vendors 目录并 source set_env.bash"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "ascendc/build.sh",
+            "ascendc/CMakeLists.txt",
+            "ascendc/cmake/config.cmake"
+          ],
+          "order": 4,
+          "practice_task": "在容器中执行 bash build.sh -n 'ai_infra_aggregate_hidden;ai_infra_aggregate_hidden_grad' -c ascend910_93 完成一次指定算子的编译，记录输出 run 包的完整路径；然后按 README 步骤安装该 run 包并 source 对应 set_env.bash，最后用 ls 验证 vendors 目录生成（无 NPU 环境时可只完成到 cmake configure 阶段并贴出日志）。",
+          "source_files": [
+            "ascendc/build.sh",
+            "ascendc/CMakeLists.txt",
+            "ascendc/cmake/config.cmake"
+          ],
+          "title": "编译与安装：build.sh、CMake 与自定义算子 run 包",
+          "topic": "拆解 build.sh 的参数解析与构建流程（-c 指定芯片、-n 指定算子、--disable-check-compatible 等），理解 CMakeLists/cmake 目录组织，学会把编译产物 run 包安装到 CANN vendors 目录。"
+        }
+      ],
+      "order": 1,
+      "title": "初识项目与环境搭建"
+    },
+    {
+      "id": "u2",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l1-aggregate-hidden-docs.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "根据 README 写出算子的输入输出 shape 与数据类型约束",
+            "对照计算公式理解 mask 的作用",
+            "看懂产品支持情况表格（A2/A3 支持、950PR 不支持）"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README.md",
+            "docs/aclnnAiInfraAggregateHidden.md"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README 与 docs 后，编写一个“算子规格卡片”markdown：包含功能、公式、输入/输出表（Tensor/类型/shape/必选可选）、约束清单（B 1~8、S 1~32K、H 192*2~192*128、W=3），并用 numpy 实现 CPU 参考实现 golden(x, w, mask) 验证你理解了公式。",
+          "source_files": [
+            "ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/README.md",
+            "ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/docs/aclnnAiInfraAggregateHidden.md"
+          ],
+          "title": "从文档读懂一个算子：AggregateHidden 的功能与约束",
+          "topic": "以 MoME 的 ai_infra_aggregate_hidden（hidden 层 token 间一维分组卷积）为例，学习如何通过算子 README 与 aclnn 文档掌握功能、计算公式、参数约束与产品支持情况。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u1-l4"
+          ],
+          "filename": "u2-l2-op-def-registration.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "写出一个带必选/可选输入的 OpDef 类",
+            "解释 DynamicShapeSupportFlag、AutoContiguous、ExtendCfgInfo 的作用",
+            "说明 AICore().AddConfig 如何决定算子能在哪些芯片上运行"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "ai_infra_aggregate_hidden_def.cpp",
+            "register/op_def_registry.h 引用"
+          ],
+          "order": 2,
+          "practice_task": "仿照 _def.cpp，为一个假想的 ai_infra_mul_add 算子（两个必选输入 x/y，一个可选 bias，一个输出）编写完整的 _def.cpp：声明输入输出的类型/格式约束，并为 ascend910b 与 ascend910_93 各注册一份 AICore 配置，最后在文中说明 OP_ADD 宏在注册链路中的作用。",
+          "source_files": [
+            "ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/op_host/ai_infra_aggregate_hidden_def.cpp",
+            "ascendc/src/ops-transformer/attention/lightning_indexer_enhance/op_host/lightning_indexer_enhance_def.cpp"
+          ],
+          "title": "op_host 之原型定义：_def.cpp 与 OpDef 注册",
+          "topic": "精读 ai_infra_aggregate_hidden_def.cpp：OpDef 类如何声明 Input/Output 的类型、格式、必选/可选，OpAICoreConfig 如何按芯片（ascend910b/ascend910_93）配置编译开关，以及 OP_ADD 宏的注册作用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-tiling-basics.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "解释 Tiling 的意义：切分数据、选择 tilingKey、规划 workspace",
+            "用 OP_CHECK_IF 与 OP_LOGE 编写参数校验",
+            "说明 SetTilingKey/SetWorkSpace/SetRawTilingData 的输出契约"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ai_infra_aggregate_hidden_tiling.h",
+            "ai_infra_aggregate_hidden_tiling.cpp"
+          ],
+          "order": 3,
+          "practice_task": "在 tiling 走读基础上回答三个问题并改代码验证：(1) 若把 H_SIZE_FULL 从 4096 改成 2048，tiling 切分会如何变化？(2) 为 CheckInputValid 补充一条“B 维度超过 8 时报错”的分支；(3) 写出 tilingKey 0/1 分别对应哪种数据类型，并注明依据（TILING_KEY_IS 宏在 kernel 侧的分支）。",
+          "source_files": [
+            "ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/op_host/ai_infra_aggregate_hidden_tiling.h",
+            "ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/op_host/ai_infra_aggregate_hidden_tiling.cpp"
+          ],
+          "title": "op_host 之 Tiling 入门：TilingContext 与切分策略",
+          "topic": "讲解 tiling.h/tiling.cpp 的结构：AHInfoParser 如何从 TilingContext 取平台信息（AIV/AIC 核数、socVersion）、校验输入合法性、按 S/B/H 计算切分并写入 TilingData、设置 tilingKey 与 workspace。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-kernel-basics.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "解释 TILING_KEY_IS 与 GET_TILING_DATA_WITH_STRUCT 宏的作用",
+            "描述 Kernel 类 Init/Process 两段式结构与 TPipe 的角色",
+            "对照 tiling.cpp 找到 kernel 消费的每个 TilingData 字段"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ai_infra_aggregate_hidden.cpp（kernel 入口）",
+            "ai_infra_aggregate_hidden.h",
+            "ai_infra_aggregate_hidden_common.h"
+          ],
+          "order": 4,
+          "practice_task": "以 ai_infra_aggregate_hidden.h 中的 Kernel 类为对象，画一张 Init→Process 调用图，标出 CopyIn/Compute/CopyOut 阶段使用的 Ascend C 原语（LocalTensor、DataCopy 等）；再回答“新增一个 fp32 支持需要改哪三处（def/tiling/kernel）”并写出改动点清单。",
+          "source_files": [
+            "ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/op_kernel/ai_infra_aggregate_hidden.cpp",
+            "ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/op_kernel/ai_infra_aggregate_hidden.h",
+            "ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/op_kernel/ai_infra_aggregate_hidden_common.h"
+          ],
+          "title": "op_kernel 入门：Ascend C 设备侧 Kernel 的结构",
+          "topic": "精读 kernel 入口 extern \"C\" __global__ __aicore__ 函数：TILING_KEY_IS 按 bf16/fp16 分支、GET_TILING_DATA_WITH_STRUCT 解析 TilingData、KernelAiInfraAggregateHidden<dtype> 模板类的 Init/Process 流水线。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l5-aclnn-two-stage-api.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "解释 GetWorkspaceSize 与执行两段接口的分工",
+            "统计一个真实 aclnn 接口的输入输出与属性参数",
+            "说明 op_api 层对 tiling/kernel 的解耦作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "aclnn_flash_attention_score_enhance.h",
+            "aclnn_flash_attention_score_enhance.cpp",
+            "flash_attention_score_enhance.cpp"
+          ],
+          "order": 5,
+          "practice_task": "以 aclnnFlashAttentionVarLenScoreEnhanceV5 为例，编写一份接口签名摘要表（参数名/类型/必选可选/含义），并用 Python 的 torch_npu 风格写一个调用示例脚本（参考 README 中的单算子调用示例），标出哪些参数会透传给 tiling（如 inputLayout、sparseMode）。",
+          "source_files": [
+            "ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_api/aclnn_flash_attention_score_enhance.h",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_api/aclnn_flash_attention_score_enhance.cpp",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_api/flash_attention_score_enhance.cpp",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_enhance/docs/aclnnFlashAttentionVarLenScoreEnhanceV5.md"
+          ],
+          "title": "op_api 层：aclnn 两段式接口设计",
+          "topic": "以 flash_attention_score_enhance 的 aclnn 头文件为例，讲解 aclnnXxxGetWorkspaceSize（构造 executor、准备参数）与 aclnnXxx（下发执行）两段式调用约定，以及 op_api 目录中内部封装文件与 aclnn 文件的分工。"
+        }
+      ],
+      "order": 2,
+      "title": "单算子四层结构精读：以 AggregateHidden 为例"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u3-l1-utils-error-log.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "正确使用 OP_LOGE/OP_LOGI 与 OP_CHECK_IF 防御式校验",
+            "说明统一错误码如何从 host 侧传回框架",
+            "复用 math_util.h 的对齐计算避免重复造轮子"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "inc/error/ops_error.h",
+            "inc/log/ops_log.h",
+            "inc/log/log.h",
+            "util/math_util.h"
+          ],
+          "order": 1,
+          "practice_task": "统计 OP_CHECK_IF/OP_LOGE 在 ai_infra_aggregate_hidden_tiling.cpp 中出现的次数并归类（空指针检查、类型检查、shape 检查、soc 检查）；然后为第 2 讲练习中新增的 ai_infra_mul_add tiling 函数补全所有校验分支，统一使用 utils 里的日志与错误宏。",
+          "source_files": [
+            "ascendc/src/utils/inc/error/ops_error.h",
+            "ascendc/src/utils/inc/log/ops_log.h",
+            "ascendc/src/utils/inc/log/log.h",
+            "ascendc/src/utils/util/math_util.h"
+          ],
+          "title": "公共工具：错误码 ops_error 与日志 ops_log",
+          "topic": "走读 src/utils：ops_error.h 的错误码定义、ops_log.h/log.h 的日志宏（OP_LOGE/OP_LOGI 等）、math_util.h 的数值工具，理解算子代码中 OP_CHECK_IF 防御式编程风格。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u3-l2-common-components-overview.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "说明 pse（位置编码）与 dropmask 在 Attention 算子中的复用方式",
+            "在 common/include 中检索可复用的 kernel 工具",
+            "区分 common（可复用实现）与 stub（测试桩）两类公共代码"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "common/include/kernel/pse.h",
+            "common/include/kernel/dropmask.h",
+            "common/include/kernel/util.h",
+            "common/include/err/ops_err.h"
+          ],
+          "order": 2,
+          "practice_task": "用 grep 统计 common/include/kernel/pse.h、dropmask.h、util.h 分别被哪些算子目录引用，输出一张“公共组件使用矩阵”；再为 attention/common 目录（op_host/op_kernel/arch35/vf/memcopy）补写一段用途说明。",
+          "source_files": [
+            "ascendc/src/ops-transformer/common/include/kernel/pse.h",
+            "ascendc/src/ops-transformer/common/include/kernel/dropmask.h",
+            "ascendc/src/ops-transformer/common/include/kernel/util.h",
+            "ascendc/src/ops-transformer/common/include/err/ops_err.h"
+          ],
+          "title": "common 公共组件总览：kernel 工具与 attention 公共件",
+          "topic": "梳理 src/ops-transformer/common：include 下的 err/fallback/kernel/tiling_base/tiling_sink 五类公共头，以及 attention/common 中 Attention 算子共享的 op_host/op_kernel 组件。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u3-l3-tiling-base-framework.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "解释 TilingBase 三态返回值的调度语义",
+            "使用 tiling_templates_registry 注册多个候选 tiling 实现",
+            "描述 tilingKey 的编码习惯与编译产物的关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "tiling_base/tiling_base.h",
+            "tiling_base/tiling_key.h",
+            "tiling_base/tiling_templates_registry.h",
+            "common/src/tiling_base/tiling_util.cpp"
+          ],
+          "order": 3,
+          "practice_task": "对照 sinkhorn_enhance 的两级 tiling（_tiling_base.cpp 与 _tiling.cpp）画出一帧请求的 tiling 类执行链（含 GRAPH_PARAM_INVALID 回退到下一实现的路径）；再给出 flash_attention_score_enhance_tiling_common.h 与该框架的对应关系说明。",
+          "source_files": [
+            "ascendc/src/ops-transformer/common/include/tiling_base/tiling_base.h",
+            "ascendc/src/ops-transformer/common/include/tiling_base/tiling_key.h",
+            "ascendc/src/ops-transformer/common/include/tiling_base/tiling_templates_registry.h",
+            "ascendc/src/ops-transformer/common/src/tiling_base/tiling_util.cpp",
+            "ascendc/src/ops-transformer/common/include/tiling_base/data_copy_transpose_tiling.h"
+          ],
+          "title": "tiling_base 框架：TilingBase 责任链与模板注册",
+          "topic": "深入 common/include/tiling_base：TilingBase 基类的执行框架（SUCCESS/FAILED/PARAM_INVALID 三态）、tiling_templates_registry 多实现注册、tiling_key 编码与 tiling_util 公共工具。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l5",
+            "u3-l2"
+          ],
+          "filename": "u3-l4-stub-mechanism.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "解释 stub 在脱离真实 CANN 环境编译/测试时的作用",
+            "区分 op_tiling stub 与 op_api stub（aclnn_kernels/level0）两类",
+            "在 UT 中正确链接所需 stub 符号"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "stub/op_tiling/tbe_tiling_api.h",
+            "stub/op_tiling/op_cache_tiling.h",
+            "stub/op_api/opapi_stub.cpp",
+            "stub/op_api/level0/add.h"
+          ],
+          "order": 4,
+          "practice_task": "挑选三个 level0 桩（如 add.h、matmul_v2tov3.h、gather_v2.h），写清每个桩模拟的算子签名；再在 stub/op_tiling 中找出 tiling 数据缓存相关接口（op_cache_tiling.h、cache_tiling_data.h），说明它们如何让 UT 在无硬件环境下重复回放同一切分结果。",
+          "source_files": [
+            "ascendc/src/ops-transformer/common/stub/op_tiling/tbe_tiling_api.h",
+            "ascendc/src/ops-transformer/common/stub/op_tiling/op_cache_tiling.h",
+            "ascendc/src/ops-transformer/common/stub/op_api/opapi_stub.cpp",
+            "ascendc/src/ops-transformer/common/stub/op_api/level0/add.h"
+          ],
+          "title": "stub 桩机制：op_tiling 与 op_api 的可替换实现",
+          "topic": "讲解 common/stub：op_tiling 桩（tbe_tiling_api、op_cache_tiling、tuning 注册）与 op_api 桩（aclnn_kernels 的 transpose/pad/cast 等、level0 基础算子桩），说明它们在单元测试与宿主机编译中的替身作用。"
+        }
+      ],
+      "order": 3,
+      "title": "公共组件与基础设施"
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u4-l1-fa-enhance-overview.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "描述 varlen FA 增强算子的输入输出（query/key/value/rope、softmax 中间结果、sink）",
+            "对照公式理解 online softmax 的 max/sum 输出用途",
+            "说明该算子与反向算子的数据依赖"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "docs/aclnnFlashAttentionVarLenScoreEnhanceV5.md",
+            "op_host/flash_attention_score_enhance_def.cpp",
+            "op_host/flash_attention_score_enhance_tiling_common.h"
+          ],
+          "order": 1,
+          "practice_task": "整理一份 FA 前反向数据流图：标出前向输出（softmaxMaxOut/softmaxSumOut/softmaxOutOut/attentionOutOut）哪些会被 flash_attention_score_grad_enhance 反向消费；再用 torch 复现公式（softMax(x)+sink 处理）做一次小规模 golden 计算。",
+          "source_files": [
+            "ascendc/src/ops-transformer/attention/flash_attention_score_enhance/docs/npu_flash_attention_score_enhance.md",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_enhance/docs/aclnnFlashAttentionVarLenScoreEnhanceV5.md",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/flash_attention_score_enhance_def.cpp",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/flash_attention_score_enhance_tiling_common.h",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_api/aclnn_flash_attention_score_enhance.h"
+          ],
+          "title": "FlashAttentionScoreEnhance 前向：变长场景与算子总览",
+          "topic": "总览 FlashAttention 变长增强前向算子：docs 中的公式与接口、_def.cpp 的输入输出规模（query/queryRope/key/keyRope/value、多种 mask、sink/prefix）、tiling_common 头文件对多 layout 的抽象。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3",
+            "u4-l1"
+          ],
+          "filename": "u4-l2-fa-enhance-tiling.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "解释 InferShape 如何根据 actualSeqQLen 等属性推导输出 shape",
+            "描述 general tiling 按 B/N2/G/S1/S2 的切分策略",
+            "说明 tilingKey 如何区分 layout 与排布组合"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "op_host/flash_attention_score_enhance_tiling.cpp",
+            "op_host/arch32/flash_attention_score_enhance_tiling_general.cpp",
+            "op_host/flash_attention_score_enhance_infershape.cpp"
+          ],
+          "order": 2,
+          "practice_task": "以 BSH/BSND/SBH 三种 layout 为例，整理 infershape 对 output/softmaxOut 的 shape 推导规则表；再跟踪 tiling_general.cpp 中一个分支，写出它计算 block 切分所用的输入（核数、UB 大小、N/D 维度），注明代码行号。",
+          "source_files": [
+            "ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/flash_attention_score_enhance_tiling.cpp",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/arch32/flash_attention_score_enhance_tiling_general.cpp",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_host/flash_attention_score_enhance_infershape.cpp"
+          ],
+          "title": "FA 前向 Tiling 与 InferShape 细节",
+          "topic": "精读 flash_attention_score_enhance_tiling.cpp 入口与 arch32/tiling_general.cpp 通用切分，以及 infershape.cpp 对输出 shape 的推导，理解 layout（BSH/BSND/SBH）、N2/G/S1/S2 切分与 tilingKey 的映射。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4",
+            "u4-l2"
+          ],
+          "filename": "u4-l3-fa-enhance-kernel.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "解释 kernel 入口按 tilingKey 分发到不同 layout kernel 的机制",
+            "描述 drop_mask_adapter 对 keepProb 掩码的生成方式",
+            "说明 empty_tensor 处理空输入的早退策略"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "op_kernel/flash_attention_score_enhance.cpp",
+            "op_kernel/arch32/flash_attention_score_enhance_s1s2_bn2gs1.h",
+            "op_kernel/arch32/flash_attention_score_enhance_drop_mask_adapter.h",
+            "op_kernel/arch32/flash_attention_score_enhance_empty_tensor.h"
+          ],
+          "order": 3,
+          "practice_task": "画出 kernel 入口的 tilingKey 分发表（layout × dtype × 场景），并为 s1s2_bn2gs1.h 中的一条主循环写伪代码（CopyQK→Matmul→SoftmaxUpdate→MatmulV→CopyOut）；说明 drop_mask_adapter 与 empty_tensor 各自规避了哪些边界错误。",
+          "source_files": [
+            "ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_kernel/flash_attention_score_enhance.cpp",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_kernel/arch32/flash_attention_score_enhance_s1s2_bn2gs1.h",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_kernel/arch32/flash_attention_score_enhance_drop_mask_adapter.h",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_kernel/arch32/flash_attention_score_enhance_empty_tensor.h",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_enhance/op_kernel/arch32/flash_attention_score_enhance_tiling.h"
+          ],
+          "title": "FA 前向 Kernel：多 layout 模板与边界处理",
+          "topic": "分析 op_kernel 主入口与 arch32 目录的布局模板（s1s2_bn2gs1/bn2gs1s2_b/s1_bn2gs1、varlen_sab）、drop_mask_adapter 的 dropout 掩码适配与 empty_tensor 空间处理。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u4-l4-fa-grad-enhance.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "说明反向算子如何复用前向的 softmaxMax/Sum 中间量",
+            "解释 basic_modules 中 vec/cube 模块化拆分的复用意图",
+            "对照 det（确定性）版本说明精度/确定性取舍"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "op_host/flash_attention_score_grad_enhance_tiling.cpp",
+            "op_host/arch32/flash_attention_score_grad_enhance_tiling_common.cpp",
+            "op_kernel/arch32/basic_modules/vec_op.h",
+            "op_kernel/arch32/basic_modules/cube_op.h",
+            "op_kernel/flash_attention_score_grad_enhance.cpp"
+          ],
+          "order": 4,
+          "practice_task": "梳理反向 kernel 的 5 次 Matmul（dS=dO·Vᵀ、dV=Pᵀ·dO、dP=dS·V、dQ=dP·Kᵀ、dK=dPᵀ·Q）对应的 basic_modules 模块调用顺序；再用 torch 的 autograd 对小规模 FA 做 grad 对比，验证你理解的公式与算子实现一致。",
+          "source_files": [
+            "ascendc/src/ops-transformer/attention/flash_attention_score_grad_enhance/op_host/flash_attention_score_grad_enhance_def.cpp",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_grad_enhance/op_host/flash_attention_score_grad_enhance_tiling.cpp",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_grad_enhance/op_host/arch32/flash_attention_score_grad_enhance_tiling_common.cpp",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_grad_enhance/op_kernel/flash_attention_score_grad_enhance.cpp",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_grad_enhance/op_kernel/arch32/basic_modules/vec_op.h",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_grad_enhance/op_kernel/arch32/basic_modules/cube_op.h"
+          ],
+          "title": "FlashAttentionScoreGradEnhance 反向算子",
+          "topic": "讲解 FA 增强反向：tiling 侧的多种切分实现（s1s2_bn2gs1s2、bngs1s2_b、ngs1s2_bn 及 det 确定性版本），kernel 侧 basic_modules 的 vec/cube 模块化拆分与 sfmg（softmax 反传）组织。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "filename": "u4-l5-sparse-flash-attention.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "解释稀疏索引如何改变 softmax 的分母计算范围",
+            "描述 MLA 场景下 cube 与 vector service 的分工",
+            "对比 sparse FA 反向 bs1_basic 切分与前向的差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "sparse_flash_attention_enhance_def.cpp",
+            "sparse_flash_attention_enhance_tiling.cpp",
+            "op_kernel/sparse_flash_attention_enhance_kernel_mla.h",
+            "sparse_flash_attention_grad_enhance_tiling_common.cpp",
+            "sparse_flash_attention_grad_enhance.cpp（kernel 入口）"
+          ],
+          "order": 5,
+          "practice_task": "对比 dense FA（u4-l3）与 sparse FA 的 tilingKey 集合差异并列表；为稀疏索引输入写出索引张量的 shape 约束；在 npu_sparse_flash_attention_enhance.md 中找出稀疏模式枚举并用 python 写出每种模式的掩码生成示意。",
+          "source_files": [
+            "ascendc/src/ops-transformer/attention/sparse_flash_attention_enhance/op_host/sparse_flash_attention_enhance_def.cpp",
+            "ascendc/src/ops-transformer/attention/sparse_flash_attention_enhance/op_host/sparse_flash_attention_enhance_tiling.cpp",
+            "ascendc/src/ops-transformer/attention/sparse_flash_attention_enhance/op_kernel/sparse_flash_attention_enhance_kernel_mla.h",
+            "ascendc/src/ops-transformer/attention/sparse_flash_attention_grad_enhance/op_host/sparse_flash_attention_grad_enhance_tiling_common.cpp",
+            "ascendc/src/ops-transformer/attention/sparse_flash_attention_grad_enhance/op_kernel/sparse_flash_attention_grad_enhance.cpp"
+          ],
+          "title": "SparseFlashAttention 前向与反向：稀疏注意力",
+          "topic": "讲解稀疏 FlashAttention 增强前向（含 MLA 场景 kernel：kernel_mla/service_cube_mla/service_vector_mla）与反向（tiling_common + bs1_basic 切分）在数据布局和计算流程上与稠密 FA 的差异。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u4-l6-lightning-indexer.md",
+          "id": "u4-l6",
+          "learning_goals": [
+            "解释 lightning indexer 在稀疏注意力训练前处理中的角色",
+            "说明 proto.cpp 中 shape/属性推导的写法",
+            "描述 cube（打分/topk）与 vector（softmax/归一）的流水线协同"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "op_host/lightning_indexer_enhance_def.cpp",
+            "op_host/lightning_indexer_enhance_proto.cpp",
+            "op_kernel/lightning_indexer_enhance_service_cube.h",
+            "op_kernel/lightning_indexer_enhance_service_vector.h"
+          ],
+          "order": 6,
+          "practice_task": "写一段 python 用 torch 复现 lightning indexer 的核心数据流（q·k 打分 → topk 选索引 → softmax 权重），标注每一步对应 kernel 里的 service_cube/service_vector 哪个函数；再统计 _def.cpp 的输入输出个数并制表。",
+          "source_files": [
+            "ascendc/src/ops-transformer/attention/lightning_indexer_enhance/op_host/lightning_indexer_enhance_def.cpp",
+            "ascendc/src/ops-transformer/attention/lightning_indexer_enhance/op_host/lightning_indexer_enhance_proto.cpp",
+            "ascendc/src/ops-transformer/attention/lightning_indexer_enhance/op_kernel/lightning_indexer_enhance.cpp",
+            "ascendc/src/ops-transformer/attention/lightning_indexer_enhance/op_kernel/lightning_indexer_enhance_service_cube.h",
+            "ascendc/src/ops-transformer/attention/lightning_indexer_enhance/op_kernel/lightning_indexer_enhance_service_vector.h"
+          ],
+          "title": "LightningIndexerEnhance：索引器算子的 Cube+Vector 协同",
+          "topic": "精读 LightningIndexer 增强算子：proto.cpp 原型扩展、tiling.cpp 切分，以及 kernel 侧 service_cube/service_vector 的核间分工（cube 侧 Matmul、vector 侧 softmax/topk）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l6"
+          ],
+          "filename": "u4-l7-sparse-lightning-kl-loss.md",
+          "id": "u4-l7",
+          "learning_goals": [
+            "写出 KL 散度损失对 logits 的梯度公式并对应到 kernel 实现",
+            "说明 sparse_lightning 系列算子与前两讲算子的调用链关系",
+            "跟踪 tiling_general 中按 head/topk 的切分逻辑"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "op_host/sparse_lightning_indexer_grad_kl_loss_enhance_tiling_general.cpp",
+            "op_kernel/sparse_lightning_indexer_grad_kl_loss_enhance_service_cube.h",
+            "op_kernel/sparse_lightning_indexer_grad_kl_loss_enhance_vector.h"
+          ],
+          "order": 7,
+          "practice_task": "用 torch.autograd 数值验证 KL loss 反向公式（dL/dlogits = p*(1 - q/p) 形式按文档公式推导），再在代码中定位对应 vector 头文件的实现位置并引用行号；总结 lightning indexer 家族（lightning_indexer_enhance → sparse_lightning kl grad）在训练链路中的先后调用顺序。",
+          "source_files": [
+            "ascendc/src/ops-transformer/attention/sparse_lightning_indexer_grad_kl_loss_enhance/op_host/sparse_lightning_indexer_grad_kl_loss_enhance_def.cpp",
+            "ascendc/src/ops-transformer/attention/sparse_lightning_indexer_grad_kl_loss_enhance/op_host/sparse_lightning_indexer_grad_kl_loss_enhance_tiling_general.cpp",
+            "ascendc/src/ops-transformer/attention/sparse_lightning_indexer_grad_kl_loss_enhance/op_kernel/sparse_lightning_indexer_grad_kl_loss_enhance.cpp",
+            "ascendc/src/ops-transformer/attention/sparse_lightning_indexer_grad_kl_loss_enhance/op_kernel/sparse_lightning_indexer_grad_kl_loss_enhance_service_cube.h",
+            "ascendc/src/ops-transformer/attention/sparse_lightning_indexer_grad_kl_loss_enhance/docs/npu_sparse_lightning_indexer_grad_kl_loss_enhance.md"
+          ],
+          "title": "SparseLightningIndexerGradKlLoss：KL 散度反向算子",
+          "topic": "讲解稀疏 LightningIndexer 的 KL Loss 反向算子：docs 中的梯度公式、tiling_general 的切分，以及 vector/cube 两个 kernel 头文件的分工实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3",
+            "u3-l3"
+          ],
+          "filename": "u4-l8-attention-pioneer-arch35.md",
+          "id": "u4-l8",
+          "learning_goals": [
+            "说明 arch35 目录与 A3/910_93 芯片的对应关系",
+            "解释 tiling_register/tiling_v2 的注册与实现分离设计",
+            "描述 noquant_mla kernel 分支支持的推理（kvcache/infer/sparse）场景"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "op_host/arch35/ai_infra_attention_pioneer_tiling_v2.cpp",
+            "op_kernel/arch35/ai_infra_attention_pioneer_kernel_noquant_mla.h",
+            "op_kernel/flash_attention_interface.cpp",
+            "op_api/aclnn_ai_infra_attention_pioneer.h"
+          ],
+          "order": 8,
+          "practice_task": "整理 arch35 tiling_v2 中 TilingData 结构体的字段清单并注明用途；对比 ai_infra_attention_pioneer_backward/op_kernel/arch35/matmul_modules（copy_cube_in 等）的目录组织，写一段“前反向 kernel 模块复用”的说明；列出 docs 中支持的 layout 与稀疏模式。",
+          "source_files": [
+            "ascendc/src/ops-transformer/attention/ai_infra_attention_pioneer/op_host/ai_infra_attention_pioneer_def.cpp",
+            "ascendc/src/ops-transformer/attention/ai_infra_attention_pioneer/op_host/arch35/ai_infra_attention_pioneer_tiling_v2.cpp",
+            "ascendc/src/ops-transformer/attention/ai_infra_attention_pioneer/op_api/aclnn_ai_infra_attention_pioneer.h",
+            "ascendc/src/ops-transformer/attention/ai_infra_attention_pioneer/op_kernel/arch35/ai_infra_attention_pioneer_kernel_noquant_mla.h",
+            "ascendc/src/ops-transformer/attention/ai_infra_attention_pioneer/op_kernel/flash_attention_interface.cpp",
+            "ascendc/src/ops-transformer/attention/ai_infra_attention_pioneer/docs/npu_ai_infra_attention_pioneer.md"
+          ],
+          "title": "AttentionPioneer（A3/arch35）：新一代注意力前向与反向",
+          "topic": "讲解面向 arch35（A3 类芯片）的 AttentionPioneer 前向：tiling_register/tiling_v2 的注册机制、kernel regbase 继承体系（entry/input_params/common）、noquant_mla/infer/kvcache/sparse 多场景 kernel 与配套反向算子目录。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l8"
+          ],
+          "filename": "u4-l9-attention-pioneer-metadata-aicpu.md",
+          "id": "u4-l9",
+          "learning_goals": [
+            "解释 AICPU 算子与 AICore 算子的适用边界（串行控制逻辑 vs 密集计算）",
+            "说明 op_graph 原型头与 config.ini 的作用",
+            "描述 l0_ 前缀 op_api 与 aclnn 接口的差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "config.ini",
+            "op_kernel_aicpu/arch35/ai_infra_attention_pioneer_metadata_aicpu.cpp",
+            "op_graph/ai_infra_attention_pioneer_metadata_proto.h",
+            "op_api/l0_ai_infra_attention_pioneer_metadata.cpp"
+          ],
+          "order": 9,
+          "practice_task": "写一篇短文对比三种算子形态（AICore AscendC、AICPU、pypto Python 算子）的开发/编译/调试差异，以 metadata（AICPU）、aggregate_hidden（AICore）、ai_infra_pypto_qat（pypto）为例各列三点；并为 metadata 的输出写一个 shape 推导说明（依据 infershape 源码）。",
+          "source_files": [
+            "ascendc/src/ops-transformer/attention/ai_infra_attention_pioneer_metadata/config.ini",
+            "ascendc/src/ops-transformer/attention/ai_infra_attention_pioneer_metadata/op_kernel_aicpu/arch35/ai_infra_attention_pioneer_metadata_aicpu.cpp",
+            "ascendc/src/ops-transformer/attention/ai_infra_attention_pioneer_metadata/op_graph/ai_infra_attention_pioneer_metadata_proto.h",
+            "ascendc/src/ops-transformer/attention/ai_infra_attention_pioneer_metadata/op_api/l0_ai_infra_attention_pioneer_metadata.cpp",
+            "ascendc/src/ops-transformer/attention/ai_infra_attention_pioneer_metadata/docs/npu_ai_infra_attention_pioneer_metadata.md"
+          ],
+          "title": "AttentionPioneerMetadata：AICPU 算子与 op_graph 形态",
+          "topic": "讲解本仓库唯一的 AICPU 形态算子：op_kernel_aicpu 目录的 CPU 侧实现、op_graph 原型头、config.ini 配置和 l0_ 前缀的 op_api 封装，理解它与 AICore AscendC 算子的差异。"
+        }
+      ],
+      "order": 4,
+      "title": "Attention 算子族深入"
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u5-l1-mhc-sinkhorn-overview.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "解释 MHC（流形约束超连接）中 Sinkhorn 归一化的作用",
+            "推导 norm_out/sum_out 迭代公式并对应到 kernel 实现",
+            "说明两级 tiling（tiling_base/tiling）的复用关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "docs/npu_sinkhorn.md",
+            "op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling_base.cpp",
+            "op_kernel/manifold_constrained_hyper_connection_sinkhorn_enhance.cpp"
+          ],
+          "order": 1,
+          "practice_task": "用 numpy 实现完整 Sinkhorn 迭代（含 eps、num_iters、norm_out/sum_out 保存），验证输出为近似双随机矩阵（行和列和≈1）；对照 kernel 代码标注每次迭代对应的向量算子（exp/sum/div）实现位置。",
+          "source_files": [
+            "ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/docs/npu_sinkhorn.md",
+            "ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling_base.cpp",
+            "ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_host/manifold_constrained_hyper_connection_sinkhorn_enhance_tiling.cpp",
+            "ascendc/src/ops-transformer/mhc/manifold_constrained_hyper_connection_sinkhorn_enhance/op_kernel/manifold_constrained_hyper_connection_sinkhorn_enhance.cpp"
+          ],
+          "title": "MHC 算法背景与 SinkhornEnhance 前向",
+          "topic": "介绍 MHC（Manifold Constrained Hyper Connection）架构动机，精读 Sinkhorn 增强算子：docs 中的双随机矩阵迭代公式、tiling_base/tiling 两级实现与 generalized kernel。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-mhc-sinkhorn-grad.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "推导 Sinkhorn 反向链式法则中 norm_out/sum_out 的使用方式",
+            "组织多轮迭代的反向累加顺序",
+            "编写带 fixture 的 tiling UT 结构"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "op_host/ai_infra_sinkhorn_grad_tiling_base.cpp",
+            "op_kernel/ai_infra_sinkhorn_grad.cpp",
+            "tests/ut/op_host/test_ai_infra_sinkhorn_grad_fixture.h"
+          ],
+          "order": 2,
+          "practice_task": "用 torch.autograd 验证你对 Sinkhorn 反向的理解（前向输出对 x/scale 的梯度）；再阅读 fixture 头文件，说明它预置了哪些测试上下文，并为它补充一个 N=4、num_iters=2 的新用例参数集。",
+          "source_files": [
+            "ascendc/src/ops-transformer/mhc/ai_infra_sinkhorn_grad/op_host/ai_infra_sinkhorn_grad_tiling_base.cpp",
+            "ascendc/src/ops-transformer/mhc/ai_infra_sinkhorn_grad/op_host/ai_infra_sinkhorn_grad_tiling.cpp",
+            "ascendc/src/ops-transformer/mhc/ai_infra_sinkhorn_grad/op_kernel/ai_infra_sinkhorn_grad.cpp",
+            "ascendc/src/ops-transformer/mhc/ai_infra_sinkhorn_grad/tests/ut/op_host/test_ai_infra_sinkhorn_grad_fixture.h",
+            "ascendc/src/ops-transformer/mhc/ai_infra_sinkhorn_grad/docs/npu_sinkhorn_grad.md"
+          ],
+          "title": "SinkhornGrad 反向：保存中间量的复用设计",
+          "topic": "讲解 Sinkhorn 反向算子如何复用前向保存的 norm_out/sum_out 中间量进行链式求导，以及 tiling_base + tiling 两级结构和 UT fixture 的设计。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u5-l3-mhc-pre-ops.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "走读一个含完整 op_api 的 MHC 算子全链路",
+            "解释 split_ND kernel 头对多输入排布的处理",
+            "说明 pre 算子在整个 MHC 训练步中的位置"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "op_api/aclnn_ai_infra_manifold_constrained_hyper_connection_pre.h",
+            "op_api/ai_infra_manifold_constrained_hyper_connection_pre.cpp",
+            "op_host/ai_infra_manifold_constrained_hyper_connection_pre_def.cpp",
+            "op_kernel/ai_infra_manifold_constrained_hyper_connection_pre_split_ND.h"
+          ],
+          "order": 3,
+          "practice_task": "画出 pre 算子从 aclnn 接口到 kernel 的完整调用时序图（含 GetWorkspaceSize、executor、tiling、kernel launch）；对照 ai_infra_manifold_constrained_hyper_connection_pre_grad 目录结构，列出前反向文件的一一对应关系表。",
+          "source_files": [
+            "ascendc/src/ops-transformer/mhc/ai_infra_manifold_constrained_hyper_connection_pre/op_api/aclnn_ai_infra_manifold_constrained_hyper_connection_pre.h",
+            "ascendc/src/ops-transformer/mhc/ai_infra_manifold_constrained_hyper_connection_pre/op_api/ai_infra_manifold_constrained_hyper_connection_pre.cpp",
+            "ascendc/src/ops-transformer/mhc/ai_infra_manifold_constrained_hyper_connection_pre/op_host/ai_infra_manifold_constrained_hyper_connection_pre_def.cpp",
+            "ascendc/src/ops-transformer/mhc/ai_infra_manifold_constrained_hyper_connection_pre/op_kernel/ai_infra_manifold_constrained_hyper_connection_pre_split_ND.h",
+            "ascendc/src/ops-transformer/mhc/ai_infra_manifold_constrained_hyper_connection_pre/docs/npu_manifold_constrained_hyper_connection_pre.md"
+          ],
+          "title": "MHC 前处理算子：pre 与 pre_grad",
+          "topic": "讲解 MHC pre（前处理）与 pre_grad：完整的 op_api（aclnn 两段式 + 内部封装）、def 原型与 kernel 的 split_ND 多分支实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "filename": "u5-l4-mhc-post-ops.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "区分 post/post_grad/mhc_post_grad 三个反向算子的差异与用途",
+            "说明 mhc_post_grad 聚合多路梯度的组织方式",
+            "梳理 MHC 全家福算子在训练 step 中的协作图"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "post/op_host/ai_infra_manifold_constrained_hyper_connection_post_tiling.cpp",
+            "post/op_kernel/ai_infra_manifold_constrained_hyper_connection_post.cpp",
+            "post_grad/op_host/ai_infra_manifold_constrained_hyper_connection_post_grad_def.cpp",
+            "mhc_post_grad/op_kernel/ai_infra_mhc_post_grad.cpp"
+          ],
+          "order": 4,
+          "practice_task": "绘制 MHC 训练一步的算子协作图：pre → （超连接计算）→ post → sinkhorn → 反向（sinkhorn_grad → post_grad/mhc_post_grad → pre_grad），标注每个算子 docs 中的函数原型；并用表格对比三个 post 相关反向算子的输入差异。",
+          "source_files": [
+            "ascendc/src/ops-transformer/mhc/ai_infra_manifold_constrained_hyper_connection_post/op_host/ai_infra_manifold_constrained_hyper_connection_post_def.cpp",
+            "ascendc/src/ops-transformer/mhc/ai_infra_manifold_constrained_hyper_connection_post/op_kernel/ai_infra_manifold_constrained_hyper_connection_post.cpp",
+            "ascendc/src/ops-transformer/mhc/ai_infra_manifold_constrained_hyper_connection_post_grad/op_host/ai_infra_manifold_constrained_hyper_connection_post_grad_def.cpp",
+            "ascendc/src/ops-transformer/mhc/ai_infra_mhc_post_grad/op_kernel/ai_infra_mhc_post_grad.cpp",
+            "ascendc/src/ops-transformer/mhc/ai_infra_mhc_post_grad/docs/npu_ai_infra_mhc_post_grad.md"
+          ],
+          "title": "MHC 后处理算子：post、post_grad 与 mhc_post_grad",
+          "topic": "讲解 MHC post 系列三个算子：post 前处理（tiling_base 两级 + kernel）、post_grad 与聚合反向 ai_infra_mhc_post_grad 的差异定位。"
+        }
+      ],
+      "order": 5,
+      "title": "MHC 算子族：流形约束超连接"
+    },
+    {
+      "id": "u6",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u6-l1-torch-extension-build.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "解释 setup.py 如何用 glob 收集 csrc 源码并构建 NpuExtension",
+            "完成 wheel 包的编译安装与 import 验证",
+            "说明 csrc_base 公共层（ops_common/ops_def_registration）的职责"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "setup.py",
+            "build_and_install.sh",
+            "csrc_base/ops_def_registration.cpp",
+            "csrc_base/ops_common.h"
+          ],
+          "order": 1,
+          "practice_task": "在安装好 AscendC 算子包与 torch_npu 的环境中执行 bash build_and_install.sh 生成 wheel 并 pip install；然后 import omni_training_custom_ops 并打印 torch.ops.custom 命名空间下可用的算子名列表；无 NPU 环境时改为分析 setup.py 的 glob 规则会打包哪些 .cpp（列清单验证）。",
+          "source_files": [
+            "ascendc/torch_ops_extension/setup.py",
+            "ascendc/torch_ops_extension/build_and_install.sh",
+            "ascendc/torch_ops_extension/omni_training_custom_ops/csrc_base/ops_def_registration.cpp",
+            "ascendc/torch_ops_extension/omni_training_custom_ops/csrc_base/ops_common.h"
+          ],
+          "title": "torch_ops_extension 总览：从 aclnn 到 torch.ops.custom",
+          "topic": "讲解 PyTorch 算子扩展包的整体结构：setup.py 用 NpuExtension 收集 csrc_base 与各算子 csrc、build_and_install.sh 的编译安装流程，以及 csrc_base 公共适配层。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1",
+            "u2-l5"
+          ],
+          "filename": "u6-l2-torch-extension-csrc-autograd.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "使用 EXEC_NPU_CMD_V1 桥接 aclnn 与 torch tensor",
+            "实现 torch::autograd::Function 的 forward/backward 拼接",
+            "解释 PrivateUse1/AutogradPrivateUse1/Meta 三类注册的分层含义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ops_transformer/mome/aggregate_hidden/csrc/npu_aggregate_hidden.cpp",
+            "omni_training_custom_ops/__init__.py",
+            "csrc_base/ops_common.h"
+          ],
+          "order": 2,
+          "practice_task": "仿照 npu_aggregate_hidden.cpp，为 sinkhorn 前向算子编写 csrc 适配（可只写骨架）：包含 NPU 前向（EXEC_NPU_CMD_V1(aclnnManifoldConstrainedHyperConnectionSinkhornEnhance,...)）、Autograd Function、Meta 实现与 TORCH_LIBRARY_IMPL 注册；用 torch 自动求导机制说明 backward 里 mask 梯度返回空张量的原因。",
+          "source_files": [
+            "ascendc/torch_ops_extension/omni_training_custom_ops/ops_transformer/mome/aggregate_hidden/csrc/npu_aggregate_hidden.cpp",
+            "ascendc/torch_ops_extension/omni_training_custom_ops/__init__.py",
+            "ascendc/torch_ops_extension/omni_training_custom_ops/csrc_base/ops_common.h"
+          ],
+          "title": "csrc 适配层：Autograd Function 与算子注册",
+          "topic": "精读 npu_aggregate_hidden.cpp：NPU 前反向实现（EXEC_NPU_CMD_V1 调 aclnn）、AiInfraAggregateHiddenFunction 的 forward/backward Autograd 拼接、TORCH_LIBRARY_IMPL 对 PrivateUse1/AutogradPrivateUse1/Meta 的注册，以及 __init__.py 把 torch.ops.custom.* 挂载到 torch_npu 的机制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l3-torch-extension-converter.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "解释 converter 在 torch 场景与原生算子之间做的参数/布局转换",
+            "组织 csrc/converter/test 三件套的目录规范",
+            "复用 test 模板为新算子写适配层测试"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "converter/npu_ai_infra_manifold_constrained_hyper_connection_post.py",
+            "test/test_npu_ai_infra_manifold_constrained_hyper_connection_post.py",
+            "converter/__init__.py"
+          ],
+          "order": 3,
+          "practice_task": "为 mhc pre 算子设计 converter 蓝图（输入校验、默认值填充、调用 torch.ops.custom 接口、输出整理），写出完整 python 文件；再仿照 test 目录模板写一个最小用例（CPU 参考值 + NPU 调用 + assert），并说明 converter 与 csrc 的职责分界。",
+          "source_files": [
+            "ascendc/torch_ops_extension/omni_training_custom_ops/ops_transformer/mhc/ai_infra_manifold_constrained_hyper_connection_post/converter/npu_ai_infra_manifold_constrained_hyper_connection_post.py",
+            "ascendc/torch_ops_extension/omni_training_custom_ops/ops_transformer/mhc/ai_infra_manifold_constrained_hyper_connection_post/converter/__init__.py",
+            "ascendc/torch_ops_extension/omni_training_custom_ops/ops_transformer/mhc/ai_infra_manifold_constrained_hyper_connection_post/test/test_npu_ai_infra_manifold_constrained_hyper_connection_post.py"
+          ],
+          "title": "Python converter 与适配层测试",
+          "topic": "讲解 MHC post 算子的 python 侧 converter（参数转换/默认值处理）与 test 目录的单算子验证脚本，理解 csrc + converter + test 三件套的适配层开发范式。"
+        }
+      ],
+      "order": 6,
+      "title": "PyTorch 扩展包 torch_ops_extension"
+    },
+    {
+      "id": "u7",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u7-l1-pypto-jit-model.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "描述 pypto 的 Python 前端 → 设备代码编译链路",
+            "使用 pypto.Tensor/pypto.view/pypto.assemble 组织数据流",
+            "说明 runtime_options/pass_options 对生成代码的影响"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "op_code/ai_infra_pypto_qat.py（jit 装饰器与 asymmetric kernel）",
+            "docs/qat_ops.md"
+          ],
+          "order": 1,
+          "practice_task": "编写一个最小 pypto kernel：实现元素级 y=x*k+b（含 pypto.view/cast/assemble），仿照 ai_infra_qat_asymmetric_per_group_kernel 的签名风格写清 Tensor 形状注解与标量参数；再写一段调用函数把 torch tensor 传给它（参考 ai_infra_qat_asymmetric_per_group 的封装方式）。",
+          "source_files": [
+            "pypto/src/ops-nn/quant/ai_infra_pypto_qat/op_code/ai_infra_pypto_qat.py",
+            "pypto/src/ops-nn/quant/ai_infra_pypto_qat/docs/qat_ops.md"
+          ],
+          "title": "pypto 编程模型：Python DSL 写设备算子",
+          "topic": "介绍 pypto 框架：@pypto.frontend.jit 装饰器、pypto.Tensor 类型标注（DYNAMIC 形状）、view/cast/mul/div/round/assemble 等原语、set_vec_tile_shapes 与 loop_unroll 的编程模型。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l2-pypto-qat-symmetric.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "推导 STE 直通估计器为何 round 不可导仍能训练",
+            "对照公式走读 per_tensor 的归一化/伪量化/反量化步骤",
+            "说明 per_tensor 与 per_channel 在 scale 形状上的差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "op_code/ai_infra_pypto_qat.py（symmetric 两个 kernel）",
+            "docs/qat_ops.md（symmetric 章节）"
+          ],
+          "order": 2,
+          "practice_task": "用 torch（detach 技巧）复现 symmetric per_tensor 的 STE 前向与反向，验证梯度等于 1（直通）；再对照 docs 的约束（M∈[128,3072] 且被 128 整除）解释原因，并写一个违反约束时抛出异常的参数校验函数。",
+          "source_files": [
+            "pypto/src/ops-nn/quant/ai_infra_pypto_qat/op_code/ai_infra_pypto_qat.py",
+            "pypto/src/ops-nn/quant/ai_infra_pypto_qat/docs/qat_ops.md",
+            "pypto/src/ops-nn/quant/ai_infra_pypto_qat/tests/st/test_ai_infra_qat_symmetric_per_tensor.py"
+          ],
+          "title": "QAT 对称量化算子：per_tensor 与 per_channel",
+          "topic": "精读对称量化感知训练算子：qat_ops.md 中的 STE 公式（scale 防零保护、归一化、伪量化 round+clamp、反量化）与 per_tensor/per_channel 两种粒度的 kernel 实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "filename": "u7-l3-pypto-qat-asymmetric.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "解释 offset/shift/n_levels 在非对称量化中的几何含义",
+            "使用 pypto.loop_unroll 编写可变长循环",
+            "实现 scale/offset/weight 三路梯度的反向 kernel"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "op_code/ai_infra_pypto_qat.py（asymmetric 前向 kernel）",
+            "op_code/ai_infra_pypto_qat.py（asymmetric backward kernel）",
+            "tests/st/test_ai_infra_qat_asymmetric_per_group_backward.py"
+          ],
+          "order": 3,
+          "practice_task": "写出非对称量化的完整公式链（减 offset→归一化→clip→round→反归一化→加 offset），用 torch 实现并用 autograd 对 weight/scale/offset 求梯度作为参考；再对照 backward kernel 标注每条梯度公式的代码位置，解释 loop_unroll 的 unroll_list=[512,256] 如何影响循环展开。",
+          "source_files": [
+            "pypto/src/ops-nn/quant/ai_infra_pypto_qat/op_code/ai_infra_pypto_qat.py",
+            "pypto/src/ops-nn/quant/ai_infra_pypto_qat/tests/st/test_ai_infra_qat_asymmetric_per_group.py",
+            "pypto/src/ops-nn/quant/ai_infra_pypto_qat/tests/st/test_ai_infra_qat_asymmetric_per_group_backward.py"
+          ],
+          "title": "QAT 非对称分组量化：前向与反向 kernel",
+          "topic": "精读 ai_infra_qat_asymmetric_per_group 前向（loop_unroll 分组处理、clip/round/shift 链）与 backward kernel（grad_weight/grad_scale/grad_offset 三路输出）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "filename": "u7-l4-pypto-testing.md",
+          "id": "u7-l4",
+          "learning_goals": [
+            "复用 utils.py 的测试工具组织参数化用例",
+            "为量化算子设计合理的 atol/rtol 容差",
+            "对比 pypto 测试与 ascendc st 测试的框架差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "tests/utils.py",
+            "tests/st/test_ai_infra_qat_symmetric_per_channel.py",
+            "tests/st/test_ai_infra_qat_asymmetric_per_group.py"
+          ],
+          "order": 4,
+          "practice_task": "阅读 utils.py 后为 symmetric per_channel 补一个新用例：N=512、M=768、scale 逐通道随机，断言与 CPU 参考实现的误差在阈值内；无 NPU 时写出用例代码并注明“待确认”的阈值取值依据。",
+          "source_files": [
+            "pypto/src/ops-nn/quant/ai_infra_pypto_qat/tests/utils.py",
+            "pypto/src/ops-nn/quant/ai_infra_pypto_qat/tests/st/test_ai_infra_qat_symmetric_per_channel.py",
+            "pypto/src/ops-nn/quant/ai_infra_pypto_qat/tests/st/test_ai_infra_qat_symmetric_per_channel_backward.py",
+            "pypto/src/ops-nn/quant/ai_infra_pypto_qat/tests/st/test_ai_infra_qat_asymmetric_per_group.py"
+          ],
+          "title": "pypto 算子测试：st 用例与精度对比",
+          "topic": "讲解 pypto 算子的 st 测试组织：utils.py 公共工具、六个 test 文件覆盖前反向 × 三种量化粒度，学习 python 算子的精度验证方法。"
+        }
+      ],
+      "order": 7,
+      "title": "PyPTO 算子开发：QAT 量化"
+    },
+    {
+      "id": "u8",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3",
+            "u3-l4"
+          ],
+          "filename": "u8-l1-ut-framework-overview.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "说出 op_host/op_api/op_kernel 三类 UT 各自验证什么",
+            "解释 faker 如何替代真实 GE/驱动环境",
+            "跟踪一个 tiling UT 从入口到断言的执行路径"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ut/framework_normal/common/tiling_context_faker.h",
+            "ut/framework_normal/common/tiling_case_executor.h",
+            "ut/framework_normal/op_api/op_api_ut_common/inc/op_api_ut_common/op_api_ut.h"
+          ],
+          "order": 1,
+          "practice_task": "画出 UT 框架类图（faker/executor/main 之间的关系），并说明 test_op_host_main.cpp 如何聚合所有算子的 tiling UT；对照 CMakeLists 说明新增算子 UT 时需要挂接的构建点。",
+          "source_files": [
+            "ascendc/src/tests/ut/framework_normal/common/tiling_context_faker.h",
+            "ascendc/src/tests/ut/framework_normal/common/tiling_case_executor.h",
+            "ascendc/src/tests/ut/framework_normal/op_host/test_op_host_main.cpp",
+            "ascendc/src/tests/ut/framework_normal/op_api/op_api_ut_common/inc/op_api_ut_common/op_api_ut.h",
+            "ascendc/src/tests/ut/framework_normal/op_kernel/data_utils.h"
+          ],
+          "title": "UT 框架 framework_normal 总览：faker 与执行器",
+          "topic": "讲解 src/tests/ut/framework_normal 三层支持：op_host 的 TilingContext faker 与 case executor、op_api 的 op_api_ut 公共库与 stub 生成脚本、op_kernel 的 data_utils 与 main 入口。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1",
+            "u2-l3"
+          ],
+          "filename": "u8-l2-ut-tiling-case.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "使用 TilingContextPara 构造输入输出描述",
+            "断言 tilingKey/workspaceSize 等期望结果",
+            "为新算子建立 ut/op_host 目录骨架"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "test_ai_infra_aggregate_hidden_tiling.cpp",
+            "common/tiling_case_executor.h",
+            "tests/ut/CMakeLists.txt"
+          ],
+          "order": 2,
+          "practice_task": "为 test_ai_infra_aggregate_hidden_tiling.cpp 新增两个用例：(1) B=8、S=32K、H=4096 的 BF16 带 mask；(2) 非法 shape（H=200 不满足 192 对齐）期望 GRAPH_FAILED；写好后用 bash build.sh -u -n ai_infra_aggregate_hidden -c ascend910_93 --ophost 编译并运行（无 NPU 时至少保证编译通过）。",
+          "source_files": [
+            "ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/tests/ut/op_host/test_ai_infra_aggregate_hidden_tiling.cpp",
+            "ascendc/src/tests/ut/framework_normal/common/tiling_case_executor.h",
+            "ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/tests/ut/CMakeLists.txt"
+          ],
+          "title": "编写 Tiling 单元测试：TilingContextPara 用例法",
+          "topic": "以 test_ai_infra_aggregate_hidden_tiling.cpp 为模板，讲解如何用 TilingContextPara 描述输入输出、CompileInfo，通过 ExecuteTestCase 断言 tilingKey/tilingData/workspace。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u8-l3-st-precision-test.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "计算并解释 MARE/MERE/RMSE 三个精度指标",
+            "说明 L0/L1/L2 精度等级与小值域容差的适用场景",
+            "编写带 golden 对比的 st 用例"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "tests/st/test_ai_infra_aggregate_hidden.py",
+            "src/tests/st/conftest.py",
+            "src/tests/st/pytest.ini"
+          ],
+          "order": 3,
+          "practice_task": "为 st 用例补充一个 cpu golden 与 npu 输出的对比函数（含 MARE/MERE/RMSE 统计与 L2 等级判定），再增加一组 S=8K、B=2、H=192*8 的参数化用例；说明小值域配置中 bfloat16 threshold=2^-8、error=2^-16 的含义。",
+          "source_files": [
+            "ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/tests/st/test_ai_infra_aggregate_hidden.py",
+            "ascendc/src/tests/st/conftest.py",
+            "ascendc/src/tests/st/pytest.ini",
+            "ascendc/src/ops-transformer/attention/flash_attention_score_enhance/tests/ut/op_api/test_aclnn_flash_attention_score_enhance.cpp"
+          ],
+          "title": "ST 精度测试：MARE/MERE/RMSE 与精度分级",
+          "topic": "讲解 st 测试设计：torch_npu.testing.testcase 基类、CPU 高精度 golden（float64 升精）、MARE/MERE/RMSE 指标与 L0/L1/L2 精度等级、小值域特殊容差。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l2",
+            "u8-l3"
+          ],
+          "filename": "u8-l4-run-ut-st.md",
+          "id": "u8-l4",
+          "learning_goals": [
+            "使用 build.sh 的 UT 模式编译并运行 op_host/op_api UT",
+            "使用 pytest 在 st 目录运行精度测试并筛选用例",
+            "排查常见的编译依赖与运行环境问题"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ascendc/build.sh（UT 分支）",
+            "src/tests/requirements.txt",
+            "src/tests/st/pytest.ini"
+          ],
+          "order": 4,
+          "practice_task": "完整跑通一条测试链：(1) bash build.sh -u -n ai_infra_aggregate_hidden -c ascend910_93 --ophost 跑通 UT；(2) 安装 wheel 后在 src/tests/st 下用 pytest -k aggregate_hidden 运行 st；记录两条命令的完整输出；无 NPU 环境时写明缺什么前置条件（列出清单）。",
+          "source_files": [
+            "ascendc/build.sh",
+            "ascendc/src/tests/requirements.txt",
+            "ascendc/src/tests/st/pytest.ini",
+            "ascendc/src/tests/st/conftest.py"
+          ],
+          "title": "构建与运行 UT/ST：build.sh -u 与 pytest",
+          "topic": "串起测试运行链路：build.sh -u/--ophost/--opapi 的 UT 构建分支、transformer_op_host_ut/transformer_op_api_ut 目标、pytest.ini 与 conftest 的 st 收集执行方式。"
+        }
+      ],
+      "order": 8,
+      "title": "测试体系：UT 与 ST"
+    },
+    {
+      "id": "u9",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u4-l8"
+          ],
+          "filename": "u9-l1-multi-soc-adaptation.md",
+          "id": "u9-l1",
+          "learning_goals": [
+            "说明 socVersion 运行时校验与编译期 AddConfig 的双层适配",
+            "组织 arch32/arch35 目录隔离平台实现",
+            "为算子新增一款芯片支持"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ai_infra_aggregate_hidden_def.cpp（AddConfig）",
+            "ai_infra_aggregate_hidden_tiling.cpp（socVersion 检查）",
+            "op_host/arch35/ai_infra_attention_pioneer_tiling_v2.cpp"
+          ],
+          "order": 1,
+          "practice_task": "整理全仓库芯片支持矩阵（按算子 × ascend910b/ascend910_93/ascend950，依据 def 的 AddConfig 与 docs 产品表）；假设要给 aggregate_hidden 增加 ascend950 支持，列出 def/tiling/kernel/build.sh 各需要改动的位置清单。",
+          "source_files": [
+            "ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/op_host/ai_infra_aggregate_hidden_def.cpp",
+            "ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/op_host/ai_infra_aggregate_hidden_tiling.cpp",
+            "ascendc/src/ops-transformer/attention/ai_infra_attention_pioneer/op_host/arch35/ai_infra_attention_pioneer_tiling_v2.cpp",
+            "ascendc/README.md"
+          ],
+          "title": "多芯片与多架构适配：ascend910b / 910_93 / 950",
+          "topic": "总结仓库的多芯适配策略：def 中 AICore().AddConfig 按芯片注册、tiling 中 socVersion 运行时校验、arch32（A2 类）与 arch35（A3 类）目录隔离实现、build.sh -c 选择目标芯片。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u9-l2-tiling-sink.md",
+          "id": "u9-l2",
+          "learning_goals": [
+            "解释设备侧 tiling 相对 host 侧 tiling 的性能收益场景",
+            "跟踪 device_op_impl_registry 的实现注册与查找",
+            "描述 tiling_aicpu_task 的任务下发方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "src/tiling_sink/tiling_sink_kernel.cpp",
+            "src/tiling_sink/device_op_impl_registry.cpp",
+            "include/tiling_sink/tiling_aicpu_task.h",
+            "include/tiling_sink/device_op_impl_registry_impl.h"
+          ],
+          "order": 2,
+          "practice_task": "画出一帧使用 tiling_sink 的算子执行时序（kernel 内触发设备侧 tiling → 注册表查实现 → 回填 TilingData）；对比 host tiling 与 device tiling 在动态 shape 场景的优劣，写一段选型建议。",
+          "source_files": [
+            "ascendc/src/ops-transformer/common/src/tiling_sink/tiling_sink_kernel.cpp",
+            "ascendc/src/ops-transformer/common/src/tiling_sink/device_op_impl_registry.cpp",
+            "ascendc/src/ops-transformer/common/include/tiling_sink/tiling_aicpu_task.h",
+            "ascendc/src/ops-transformer/common/include/tiling_sink/device_op_impl_registry_impl.h"
+          ],
+          "title": "tiling_sink：设备侧 Tiling 下沉机制",
+          "topic": "讲解 common 的 tiling_sink 组件：tiling_sink_kernel 设备侧 tiling 执行器、device_op_impl_registry 注册表与 tiling_aicpu_task 任务封装，理解把 tiling 计算下沉到设备端的动机。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u9-l3-fallback-mechanism.md",
+          "id": "u9-l3",
+          "learning_goals": [
+            "解释 fallback 触发条件与两级降级策略",
+            "说明 converted_params 如何桥接不满足约束的输入",
+            "识别一个算子是否具备 fallback 能力"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "include/fallback/fallback.h",
+            "include/fallback/fallback_2stages.h",
+            "include/fallback/converted_params.h",
+            "include/fallback/fallback_comm.h"
+          ],
+          "order": 3,
+          "practice_task": "梳理 fallback 组件被哪些算子引用（grep fallback.h 的 include 关系），画出一帧“输入不支持 → 转 fallback → 拆分组合调用”的流程图；说明 converted_params 记录了哪些转换信息（cast/pad/transpose 等），并给出一个触发 fallback 的具体输入示例。",
+          "source_files": [
+            "ascendc/src/ops-transformer/common/include/fallback/fallback.h",
+            "ascendc/src/ops-transformer/common/include/fallback/fallback_2stages.h",
+            "ascendc/src/ops-transformer/common/include/fallback/converted_params.h",
+            "ascendc/src/ops-transformer/common/include/fallback/fallback_comm.h"
+          ],
+          "title": "fallback 机制：算子不支持时的两级降级",
+          "topic": "讲解 common/include/fallback：fallback.h 单级与 fallback_2stages.h 两级降级、converted_params 参数转换记录、fallback_comm 通信结构，理解 aclnn 层如何在输入不满足 kernel 约束时拆分组合算子完成任务。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l5",
+            "u6-l2",
+            "u8-l2"
+          ],
+          "filename": "u9-l4-new-operator-practice.md",
+          "id": "u9-l4",
+          "learning_goals": [
+            "独立完成从算子设计到 PyTorch 调用的全流程",
+            "按仓库规范组织 def/tiling/kernel/api/tests 六层目录",
+            "自查 CMake 与 build.sh 的挂接点"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ascendc/build.sh",
+            "ai_infra_aggregate_hidden_def.cpp",
+            "ai_infra_aggregate_hidden_tiling.cpp",
+            "ops_transformer/mome/aggregate_hidden/csrc/npu_aggregate_hidden.cpp"
+          ],
+          "order": 4,
+          "practice_task": "综合实战：在 src/ops-transformer 下新建 mome/ai_infra_scale_mul 算子（output=input*scale_vector，bf16，逐行缩放），按仓库规范完成 def（含 910b/910_93 双注册）、tiling（含校验与 tilingKey）、kernel（模板类 Init/Process）、ut（tiling 用例）与 torch_ops_extension 适配（csrc + converter），最后用 build.sh -n ai_infra_scale_mul 编译通过并在文中给出每层文件的完整清单。",
+          "source_files": [
+            "ascendc/build.sh",
+            "ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/op_host/ai_infra_aggregate_hidden_def.cpp",
+            "ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/op_host/ai_infra_aggregate_hidden_tiling.cpp",
+            "ascendc/src/ops-transformer/mome/ai_infra_aggregate_hidden/op_kernel/ai_infra_aggregate_hidden.cpp",
+            "ascendc/torch_ops_extension/omni_training_custom_ops/ops_transformer/mome/aggregate_hidden/csrc/npu_aggregate_hidden.cpp"
+          ],
+          "title": "综合实战：新增一个自定义训练算子的完整流程",
+          "topic": "以“新增 ai_infra_scale_mul 算子”为综合练习，串联全手册知识：目录骨架、_def 注册、tiling、kernel、（可选 op_api）、UT/ST、torch_ops_extension 适配、build.sh 编译验证。"
+        }
+      ],
+      "order": 9,
+      "title": "高级主题与二次开发实战"
+    }
+  ]
+}
