@@ -1,0 +1,330 @@
+# TMA：单线程描述整块 tile 与 swizzle 写入
+
+## 1. 本讲目标
+
+学完本讲，你应该能够：
+
+1. **列出 tensor map 描述符包含的信息**：元素类型、各维形状与步长、单次拷贝的 tile 形状（box）、swizzle 模式，并说明哪些信息放在描述符里、哪些信息放在指令参数里。
+2. **解释 TMA 引擎的数据路径**：为什么一个线程提交一次拷贝、硬件就能完成剩余的全部地址计算与数据搬运；发起与执行分离后，warp 里其他线程去干什么了。
+3. **说明 TMA 写共享内存时顺带应用 swizzle 的好处**：数据到达 SMEM 时就已经是后续 MMA 期望的物理排布，内核线程不必再手写 XOR 地址计算；同时理解"描述符、SMEM 布局、MMA 指令三者必须描述同一物理排布"这条一致性纪律。
+
+本讲是「TMA 异步数据搬运」单元的第一讲，只讲 2D TMA 的基本模型；多 swizzle atom 的 3D TMA（下一讲）和 load/store 的完成机制（第三讲）分别展开。
+
+## 2. 前置知识
+
+本讲建立在前两讲的概念之上，先用两段话把它们串起来。
+
+**来自 u2-l2（内存空间）**：内核优化的核心是让数据停留在离计算最近的层级。GEMM 主循环需要把 A、B tile 从 GMEM（大容量 HBM）搬进 SMEM（单 CTA 私有的低延迟暂存），Tensor Core 再从 SMEM 读数据做 MMA。此前我们用 `Tx.cta.copy` 让 128 个线程分工搬运——每个线程都要自己算 GMEM 地址和 SMEM 地址，再执行自己的 load/store。
+
+**来自 u4-l4（Swizzle）**：SMEM 划分为 32 个 bank，\( \text{bank} = (\text{addr} \div 4) \bmod 32 \)。当同一 wavefront 内多个访问落在同一 bank 的不同地址时会被串行化（bank conflict）。行主序布局利行读、伤列读；XOR swizzle 用 \( \text{mapped} = \text{col} \oplus \text{row} \) 这类双射重排地址，让行读和列读都不冲突。在 Ampere 时代（u5-l1），这个 XOR 地址计算是内核自己手写的；本讲会看到 Blackwell 把它交给了 TMA 硬件。
+
+再补充三个本讲要用的小单位：
+
+| 术语 | 含义 |
+| --- | --- |
+| **sector（扇区）** | 16 字节的最小搬运/观察单位；fp16 下一个 sector 是 8 个元素 |
+| **swizzle atom** | swizzle 的最小地址重复单元，`SWIZZLE_128B` 模式下是 8 行 × 128 字节 |
+| **box** | tensor map 中记录的"单次拷贝的 tile 形状"，TMA 一次搬一个 box |
+
+## 3. 本讲源码地图
+
+本讲的"源码"是教材正文与配套交互演示，二者互为印证：
+
+| 文件 | 作用 |
+| --- | --- |
+| [chapter_tma/index.md](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_tma/index.md) | TMA 章正文：单线程描述整块 tile、写入时 swizzle、（后续两讲的）3D TMA 与完成机制 |
+| [_extra/demo/tma_intro.html](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/tma_intro.html) | 交互演示：左边 16×128 fp16 全局矩阵，选中 8×64 tile，右边画出它落入 SMEM 的物理排布；内含一份具体的 tensor map 字段清单 |
+| [zh/chapter_tma/index.md](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/zh/chapter_tma/index.md) | 上述章节的中文镜像，内容同构 |
+| [chapter_gemm_async/index.md](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md) | GEMM Step 4 在 TIRx 中真正用上 TMA 的内核代码，本讲只借它做一次"概念落地"，深入留给单元十二 |
+
+## 4. 核心概念与源码讲解
+
+### 4.1 模块一：tensor map 描述符
+
+#### 4.1.1 概念说明
+
+先看 TMA 要解决的问题。GEMM 主循环里，Tensor Core 正在算第 \(k\) 个 tile 时，第 \(k+1\) 个 A、B tile 必须赶在当前计算结束前进 SMEM，否则流水线出现 **bubble**（计算单元空等数据的空泡）——正文开篇正是这样引入动机的：[chapter_tma/index.md:L12-L16](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_tma/index.md#L12-L16)。
+
+用线程搬运 tile，每个线程都要算一对地址再发一对访存指令。TMA 的思路是：**把"这块张量长什么样"一次性登记在一份描述符里，之后每次拷贝只需给出"这次搬哪个 tile、落到哪"**。这份描述符就是 **tensor map**。它的关键性质是：
+
+- 它描述的是**全局张量**的组织方式，与某一次具体拷贝无关；
+- 同一份描述符通常可以被很多次 tile 拷贝**复用**（整个 K 循环里 A 只有一份 tensor map）；
+- 它在驱动/运行时层面创建（PTX 里对应 `cuTensorMapEncodeTiled` 一族的宿主 API），内核里作为操作数传给 TMA 指令。
+
+#### 4.1.2 核心流程
+
+发起一次 TMA 拷贝的线程提供两类信息，二者职责分明：
+
+```text
+第一类：tensor map 描述符（静态，可复用）
+  ├─ 元素类型（如 f16）
+  ├─ 全局张量各维形状（globalDim）
+  ├─ 各维步长（globalStrides，以字节计）
+  ├─ 单次拷贝的 tile 形状（boxDim）
+  └─ 写 SMEM 时应用的 swizzle 模式
+
+第二类：本次拷贝的指令参数（动态，每次不同）
+  ├─ tile 在全局张量中的起始坐标
+  ├─ SMEM 目的地址
+  └─ （load 时）关联的 mbarrier
+```
+
+正文用一句很有用的话区分二者：**描述符回答"这张量是怎么组织的？"，指令参数回答"这次拷贝从哪里开始、落到哪里？"**——[chapter_tma/index.md:L26-L34](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_tma/index.md#L26-L34)。
+
+#### 4.1.3 源码精读
+
+**（1）正文对描述符内容的四点概括。** [chapter_tma/index.md:L30-L32](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_tma/index.md#L30-L32) 写明：tensor map 记录全局张量的元素类型、各维 shape 与 strides、一次拷贝的 tile shape、以及写 SMEM 时应用的 swizzle 模式；本次拷贝则提供 tile 起始坐标与 SMEM 目的地址。
+
+**（2）演示页面给出了一份带具体数值的 tensor map。** 打开交互演示（正文经 iframe 嵌入：[chapter_tma/index.md:L18-L23](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_tma/index.md#L18-L23)），信息框里渲染的字段是：
+
+```text
+TensorMap: dtype = f16, globalDim = [128, 16], globalStrides = [256B],
+           boxDim = [64, 8], swizzle = CU_TENSOR_MAP_SWIZZLE_128B
+Instruction: cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes
+             [smem], [tensormap, {col, row}], [mbar]
+```
+
+对应源码在 [_extra/demo/tma_intro.html:L144-L161](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/tma_intro.html#L144-L161)：这段 JavaScript 把 `rowCoord`、`colCoord` 拼进指令文本，并把 TensorMap 的五个字段渲染成公式行。注意两个容易踩坑的细节，演示源码里专门加了说明：
+
+- **维度顺序是从最内维到最外维**。图示的全局矩阵是 16 行 × 128 列 fp16，行主序下最内维是列，所以 `globalDim = [128, 16]` 表示"最内维 128 个元素、外维 16 行"；
+- **`globalStrides` 以字节计**：一行 128 个 fp16 = 256 字节，所以是 `[256B]`；`boxDim = [64, 8]` 表示一次搬"最内维 64 列 × 8 行"——64 个 fp16 恰好 128 字节，这正是 4.3 节 swizzle 约束要求的宽度。
+
+**（3）演示的场景设定。** [_extra/demo/tma_intro.html:L92-L111](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/tma_intro.html#L92-L111) 定义了左右两个面板：左边 Global Memory 是 16×128 fp16（每个格子 16B = 8 个 fp16），右边 Shared Memory 是 8×8 个 sector；常量 `GDR=16, GDC=16, BOX_R=8, BOX_C=8` 在 [_extra/demo/tma_intro.html:L129-L132](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/tma_intro.html#L129-L132)。蓝色高亮（`inBox` 判定在 [_extra/demo/tma_intro.html:L163-L184](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/tma_intro.html#L163-L184)）就是当前 box 选中的 8×64 tile；"Row offset / Col offset"按钮改的是指令参数里的 tile 起始坐标，tensor map 一字不动——这本身就是"两类信息分离"的活演示。
+
+#### 4.1.4 代码实践
+
+**实践：为一个新场景推导 tensor map 字段（纸笔推导，无需 GPU）。**
+
+1. **实践目标**：不背字段名，而是能对任意张量+tile 组合写出 tensor map，并自觉检查维度顺序与字节步长。
+2. **操作步骤**：
+   - 设全局张量为 32 行 × 512 列的 fp16 行主序矩阵，单次拷贝的 tile 是 32 行 × 64 列，swizzle 用 `CU_TENSOR_MAP_SWIZZLE_128B`；
+   - 仿照演示信息框的格式，写出 `dtype / globalDim / globalStrides / boxDim / swizzle` 五个字段；
+   - 再写出该 tile 的 TMA 指令中应填的起始坐标 `{col, row}`（假设搬第 3 个 tile 列块，行从 0 开始）。
+3. **需要观察的现象**：最内维字节数是否踩在 swizzle 约束边界上；globalStrides 的换算过程。
+4. **预期结果**：`dtype = f16`；`globalDim = [512, 32]`（内维在前）；一行 512 × 2B = 1024B，故 `globalStrides = [1024B]`；`boxDim = [64, 32]`；坐标为 `{col=192, row=0}`（第 3 个 64 列块，0 起）。最内维 64 个 fp16 = 128 字节，恰好等于 `SWIZZLE_128B` 允许的上限——这正是 4.3 节的约束。以上为推导结果，读者可对照演示页（把 Col offset 切到 64）核对字段格式。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 `globalStrides` 只有一个元素 `[256B]`，而 `globalDim` 有两个？
+
+**答案**：最内维（列方向）的元素在内存中天然连续，步长恒为元素大小，无需在描述符中登记；只有外维（行）的步长需要显式给出。2D 张量只有一个外维，所以只有一条 stride。（对应演示中 16 行 × 128 列、每行 256B 的场景。）
+
+**练习 2**：GEMM 的 K 循环要依次搬 K/64 个 B tile，需要创建多少份 tensor map？每次指令参数变化的是什么？
+
+**答案**：通常仍是一份（B 的形状、步长、box 形状、swizzle 模式在整个循环中不变，描述符可复用）。每次变化的是指令参数：tile 的起始坐标沿 K 方向步进，以及 SMEM 目的地址（多级流水线时指向不同 stage）。这正是正文"descriptor 说组织方式、instruction 说本次落点"的体现。
+
+**练习 3**：如果把全局矩阵换成 64 行 × 128 列 fp16、tile 仍是 8×64，`globalDim` 和 `globalStrides` 怎么变？
+
+**答案**：`globalDim = [128, 64]`（内维仍是列数 128），`globalStrides = [256B]` 不变（每行仍是 128 × 2B = 256B），`boxDim = [64, 8]` 不变。
+
+### 4.2 模块二：TMA 引擎数据路径——单线程发起、硬件搬运
+
+#### 4.2.1 概念说明
+
+TMA（Tensor Memory Accelerator）是 SM 里一个**专职搬运的硬件引擎**（u2-l1 介绍 SM 架构时见过它）。它的数据路径可以概括成一句话：**一个线程提交请求，引擎搬数据**。这里有三个层次值得分开理解：
+
+1. **发起是"单线程"的**：整个 warp 仍按 SIMT 模型执行这条指令，但只有被选中的那一个线程真正参与，其余线程被掩蔽——这持续到请求提交完成为止，时间极短；
+2. **搬运是异步的**：请求提交后，TMA 引擎自己去算 box 内每个元素的源地址与目的地址并传输，发起线程和 CTA 里其他 warp 可以继续干别的活；
+3. **消费是有门槛的**：消费者在读目的 tile 之前必须等传输完成（load 用 mbarrier，细节在 u6-l3）。
+
+与线程搬运对比，收益有两层：**指令数骤减**（一次提交替代上百条线程级 load/store），以及为**异步重叠**铺路（线程从搬运里解放出来，才能去干计算或协调）。
+
+#### 4.2.2 核心流程
+
+一次 GMEM→SMEM 的 TMA load 按时间顺序经过这些阶段：
+
+```text
+① 宿主/编译期：创建 tensor map（dtype、globalDim、globalStrides、boxDim、swizzle）
+② 某线程被选中（如 elect 或 tid==0 守卫），执行
+     cp.async.bulk.tensor.2d ... [smem], [tensormap, {col, row}], [mbar]
+   —— 提交后 warp 内其余线程只是被掩蔽，随即恢复
+③ TMA 引擎：按 tensor map 展开地址（含 swizzle 写入变换），异步传输整块 tile
+④ 引擎每写完一部分，向 mbarrier 报告字节数（complete_tx）
+⑤ 消费者 try_wait 屏障相位，通过后才读 SMEM tile
+```
+
+注意 ② 与 ③④ 的分界：**"发起"在瞬间结束，"搬运"在后台继续**。这就是 u2-l1 讲过的"发起与执行分离是异步的硬件根源"在 TMA 上的具体形态。
+
+#### 4.2.3 源码精读
+
+**（1）正文的对照表述。** [chapter_tma/index.md:L7-L9](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_tma/index.md#L7-L9)（章首 Overview）用三条 bullet 概括：TMA 在全局内存与共享内存之间异步搬 tile，warp 中一个线程发起、硬件完成剩余地址计算与传输；tensor map 描述全局张量，指令只给 tile 坐标与 SMEM 地址；load 与 store 用不同的完成机制。SIMT 掩蔽与"消费者必须等待"的表述在 [chapter_tma/index.md:L34](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_tma/index.md#L34)。
+
+**（2）演示页面把引擎画在了中间。** [_extra/demo/tma_intro.html:L98-L105](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/tma_intro.html#L98-L105) 在全局内存与共享内存之间画了一个 "TMA Engine / Data Mover" 方框，标注当前指令 `cp.async.bulk.tensor.2d + SWIZZLE_128B`；页面底部的三条要点（[_extra/demo/tma_intro.html:L120-L124](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/tma_intro.html#L120-L124)）分别是"单线程提交、引擎异步搬运""到达即 swizzle，降低目标访问模式的 bank conflict""双向拷贝：load 与 store"。副标题一句话点题：[_extra/demo/tma_intro.html:L75-L76](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/tma_intro.html#L75-L76)。
+
+**（3）在 TIRx 里看同一件事（GEMM Step 4）。** 教材在 GEMM 章第 4 步把线程搬运换成 TMA，改动前后对比非常清晰（[chapter_gemm_async/index.md:L30-L45](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L30-L45)）：
+
+```python
+# 之前（Step 3）：128 个线程都参与拷贝
+Tx.cta.copy(Asmem[:, :], A[m_st:m_st+BLK_M, i*BLK_K:(i+1)*BLK_K])   # all 128 threads
+...
+# 之后（Step 4）：一个线程发起 TMA load，mbarrier 追踪硬件传输完成
+tid = warp_id * 32 + lane_id
+if tid == 0:
+    Tx.copy_async(Asmem, A[...], dispatch="tma_auto")
+    Tx.copy_async(Bsmem, B[...], dispatch="tma_auto")
+    T.ptx.mbarrier.arrive.expect_tx(tma_bar, byte_count)
+T.ptx.mbarrier.try_wait(tma_bar, phase)
+```
+
+`dispatch="tma_auto"` 表示这条 GMEM→SMEM 拷贝走 TMA 引擎（TIRx 三要素中的 dispatch 换了，scope/layout 不变——正文 L21-L24 的"Step 4 execution structure"框专门强调了这一点）。完整的 `tma_load` 帮助函数在 [chapter_gemm_async/index.md:L146-L160](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L146-L160)，其中 `expect_tx` 登记的字节数是 \( (128\times64 + 128\times64)\times 2 = 32768 \) 字节（A、B 各一个 tile）。
+
+#### 4.2.4 代码实践
+
+**实践：源码阅读——把 TIRx 代码逐行归类到"描述符信息 / 指令参数"。**
+
+1. **实践目标**：验证 4.1 节的两类信息划分在真实代码里如何落地，并体会指令数的变化。
+2. **操作步骤**：
+   - 阅读 [chapter_gemm_async/index.md:L96-L98](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L96-L98)：`mma_shared_layout(a_type, SwizzleMode.SWIZZLE_128B_ATOM, (BLK_M, BLK_K))` 生成的布局随后挂在 `pool.alloc(..., layout=A_layout)` 上。想一想：tensor map 的 `boxDim` 和 `swizzle` 字段将从哪里推导出来？
+   - 再阅读 [chapter_gemm_async/index.md:L146-L160](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L146-L160) 的 `tma_load`，为 `Tx.copy_async` 的每个实参标注：它属于"描述符将编码的信息"（由 buffer 的 shape/stride/layout 推出）还是"每次变化的指令参数"（tile 起点、SMEM 目的地址、mbarrier）。
+   - 数一数指令数：Step 3 中 128 线程 × 2 个 tile 的拷贝，与 Step 4 中 1 线程发起的 2 条 `copy_async`，相差多少倍？
+3. **需要观察的现象**：`tma_config` 字典里 `dispatch / cta_group / mbar` 三个键各自控制什么；K 循环每轮 `tma_load(k_st)` 变化的只有 `k_st`。
+4. **预期结果**：`A[m_st:..., k_st:...]` 切片的形状与 Asmem 布局共同决定描述符侧信息（shape、boxDim、swizzle）；`m_st/k_st` 与 `Asmem` 基址是指令参数；指令条数从"每线程一对访存"降为"每 tile 一条提交"。此为源码阅读结论，无需 GPU；编译运行属单元十二的实践。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：warp 执行 TMA 指令时其余 31 个线程在做什么？为什么说这是"瞬间"的？
+
+**答案**：按 SIMT 模型，warp 内所有线程一起执行这条指令，但只有被选中的线程参与，其余被掩蔽。掩蔽只持续到请求提交完成——提交只是一次寄存器/描述符的递交，不含数据等待，因此瞬间结束；随后整个 warp 恢复执行后续指令，搬运在 TMA 引擎上异步继续。
+
+**练习 2**：`cta_sync()`（CTA 级栅栏）能代替 mbarrier 判断 TMA load 是否完成吗？
+
+**答案**：不能。`cta_sync()` 只同步 CTA 内的**线程**，对 TMA 引擎的异步传输一无所知（GEMM 章正文 L53 明确指出这一点）。传输是否完成必须靠 mbarrier 的字节计数追踪：引擎每写完一段就扣减待收字节数，归零后相位才放行。这正是发起与执行分离带来的新同步问题，细节留给 u6-l3。
+
+**练习 3**：既然 Step 4 发起 TMA 后立刻 `try_wait`（并没有重叠），那 Step 4 的收益是什么？
+
+**答案**：收益在"地址生成与 tile 搬运从 CTA 线程转移到 TMA 引擎"，线程执行的拷贝指令数大幅减少（GEMM 章 L49 的表述）。真正的 load/compute 重叠要到 Step 5 的双缓冲与 Step 7 的角色划分才出现——本讲只需建立"异步是重叠的前提"这一认知。
+
+### 4.3 模块三：写入时 swizzle——搬运与重排一次完成
+
+#### 4.3.1 概念说明
+
+回顾 u4-l4 的两难：同一 tile 既要被按行写（TMA 到达）、又要被按列读（MMA 取操作数），任何简单布局都无法两头讨好。Ampere 时代（u5-l1）的解法是内核手写 XOR 地址计算；Blackwell 的 TMA 给了更优雅的解法——**把 swizzle 模式登记在 tensor map 里，引擎在写入 SMEM 的同时完成地址重排**。好处有三层：
+
+1. tile 到达 SMEM 时**就已经是后续 MMA 期望的物理排布**，不需要落盘后再搬运一次；
+2. 发起线程**完全不算 swizzle 地址**，每个元素的 XOR 变换由引擎在写入路径上完成；
+3. 写入端（TMA）与读取端（MMA 的矩阵描述符/TMA store）**共用同一 swizzle 公式**——XOR 的自反性意味着读回去也走同一条公式（u4-l4）。
+
+#### 4.3.2 核心流程
+
+演示场景里 tile 是 8 行 × 8 个 sector（每 sector 16B，一行恰好 128B）。两种模式的写入规则：
+
+- **`None`（线性）**：逻辑 sector \(c\) 原样落到物理 sector \(c\)，行序不变；
+- **`128B`**：行 \(r\) 的逻辑 sector \(c\) 落到物理 sector
+
+\[
+\text{physical\_sector} = c \oplus r
+\]
+
+SMEM 内字节地址为
+
+\[
+\mathrm{addr}(r, s) = 128\,r + 16\,s \quad\text{（字节）}
+\]
+
+于是一列逻辑 sector 在 8 行里落到 8 个**互不相同**的物理 sector（\(c\oplus r\) 对 \(r=0..7\) 取遍 0..7 的一个排列），跨行访问不再挤在同一批 bank 上。代价与纪律同样明确：
+
+- **约束**：`SWIZZLE_128B` 的重排只发生在 128 字节跨度内，所以 TMA box 的**最内连续维不得超过 128 字节**（fp16 恰好 64 个元素）；更窄的数据仍要按完整 swizzle 宽度预留 SMEM（[chapter_tma/index.md:L52](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_tma/index.md#L52)、[L127](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_tma/index.md#L127)，模式在 128B/64B/32B 中按 tile 宽度与访问模式选择）；
+- **一致性纪律**：swizzle 改的是物理排布、不是逻辑内容；tensor map、SMEM tile 布局、后续 MMA 指令**必须描述同一物理排布**，否则"字节都到了，元素却认错了"。
+
+#### 4.3.3 源码精读
+
+**（1）正文的 XOR 公式与一致性警告。** [chapter_tma/index.md:L36-L48](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_tma/index.md#L36-L48)："None" 模式下逻辑 sector 保持原位；选 "128B" 后 `physical_sector = col XOR row`，同列 sector 在不同行落到不同物理位置，跨行访问不再集中到相同 bank；**引擎在写入 tile 时应用这个变换，发起线程无需自己计算每个 swizzle 地址**（L46）。L48 给出一致性警告：如果 TMA 按 128B swizzle 写、MMA 按线性布局读，字节到了 SMEM，Tensor Core 却会把它们解释成错误的矩阵元素。
+
+**（2）演示源码里的 swizzle 实现。** [_extra/demo/tma_intro.html:L201-L221](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/tma_intro.html#L201-L221) 渲染右侧 SMEM 网格，核心两行：
+
+```javascript
+var logCol = useSw ? (s ^ r) : s;              // 物理 sector s 显示的是哪个逻辑列
+d.innerHTML = ... + '@' + (r * 128 + s * 16);   // 该 sector 的 SMEM 字节偏移
+```
+
+注意方向：网格按物理位置（行 \(r\)、物理 sector \(s\)）排列，格子里显示的数值是"落在你这的是逻辑列 \(s \oplus r\)"——由于 XOR 自反，这与"逻辑列 \(c\) 落到物理 \(c\oplus r\)"是同一公式。悬停全局侧某格子时，`destSec = hovC ^ hovR` 高亮其落点，并在箭头上标注 `col XOR row = sector`（[_extra/demo/tma_intro.html:L286-L294](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/tma_intro.html#L286-L294)）。8 种 sector 颜色（`BK` 数组，L127）让"同一逻辑列散开到 8 种颜色"一眼可见。
+
+**（3）TIRx 侧的对应物。** GEMM Step 4 用 `SwizzleMode.SWIZZLE_128B_ATOM` 生成 SMEM 布局（[chapter_gemm_async/index.md:L96-L98](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L96-L98)）——tensor map 的 swizzle 字段、SMEM buffer 的 layout、后续 MMA 读取所用的布局，都从同一个 `SwizzleMode` 推导，这正是"三者必须一致"在代码结构上的保障。
+
+#### 4.3.4 代码实践
+
+**实践：手算一列 sector 的 swizzle 落点与 bank 分布，再用演示核对（纸笔 + 浏览器）。**
+
+1. **实践目标**：亲眼验证"开 swizzle 后跨行访问不冲突、不开则 8-way 冲突"，把 u4-l4 的 bank 公式用到 TMA 场景。
+2. **操作步骤**：
+   - 对 8×8 sector 的 tile，取**逻辑列 \(c=3\)**，分别算 `None` 与 `128B` 两种模式下行 \(r=0..7\) 的物理 sector、字节地址 \(\mathrm{addr}=128r+16s\) 与起始 bank \((\mathrm{addr}\div4)\bmod 32\)；
+   - 得到两列 bank 序列后，判断各自的 bank 冲突重数；
+   - 打开演示核对：构建书站（见 u1-l2）浏览 TMA 章，或直接用浏览器打开仓库中的 `_extra/demo/tma_intro.html`（其依赖的 `../viz-base.css`、`../viz-base.js` 同在 `_extra/` 下，直接打开可用）。把 Swizzle 切到 `128B`，悬停全局侧第 3 列的各格子，观察箭头标注与右侧高亮格子；再切到 `None` 对比。
+3. **需要观察的现象**：`128B` 模式下第 3 列在 8 行中的落点 sector 依次是多少；格子颜色是否 8 行互不相同。
+4. **预期结果**：
+   - `128B`：物理 sector 依次 \(3,2,1,0,7,6,5,4\)（即 \(3\oplus r\)），起始 bank 依次 \(12,8,4,0,28,24,20,16\)——8 组各占 4 个 bank，恰好覆盖 32 个 bank，无冲突；
+   - `None`：物理 sector 恒为 3，地址恒为 \(128r+48\)，起始 bank 恒为 12——8 次访问全落在 bank 12–15，按 u4-l4 的结论为 8-way 冲突（串行 8 个周期）。
+   - 浏览器中的悬停结果应与手算一致（确定性计算；若书站未构建，可先做手算部分）。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么 tensor map 里要登记 swizzle 模式，而不能等数据落到 SMEM 后再由内核重排一次？
+
+**答案**：落盘后再重排意味着额外一整轮 SMEM 读写（读出、算 XOR 地址、写回），既花时间又占带宽，还占线程。TMA 反正要走一遍"写 SMEM"的路径，把 XOR 变换合并进写入地址计算几乎是免费的，还让发起线程彻底摆脱 swizzle 数学。此外写入端登记了模式，读取端（MMA/存储）就知道按哪条公式解释物理排布。
+
+**练习 2**：一个 fp16 tile 的最内连续维是 96 个元素，能直接作为 `SWIZZLE_128B` 的 box 吗？
+
+**答案**：96 × 2B = 192B > 128B，超出 `SWIZZLE_128B` 的最内维上限，不能作为一个 box 直接搬。要么拆成两组 64/32（下一讲 3D TMA 的 group 技法），要么改选更窄的模式。反过来若数据比 swizzle 宽度更窄（如 64B 数据配 128B 模式），SMEM 分配仍要预留完整 128B 宽度（正文 L127）。
+
+**练习 3**：TMA 按 128B swizzle 写入后，一个不懂数学的消费者能否用"线性布局"正确读回 tile？
+
+**答案**：不能正确读回**按原逻辑位置**的数据——但注意 XOR 的自反性：如果消费者对物理地址再套用同一条 \(s \oplus r\) 公式，逻辑内容就能完整复原（u4-l4）。所以问题不在"数据丢了"，而在**约定必须一致**：tensor map、SMEM 布局声明与 MMA 指令三者要描述同一物理排布，否则字节虽然都在，元素身份就被解释错了（正文 L48）。
+
+## 5. 综合实践
+
+把本讲三个模块串成一个任务：**为"一个线程只给出 tile 坐标就搬完一个 8×64 fp16 tile"写出完整规格与流程**。无需 GPU，纸笔 + 浏览器即可完成。
+
+**任务 A：tensor map 字段清单。** 依据 [chapter_tma/index.md:L30-L32](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_tma/index.md#L30-L32) 的四点内容与 [_extra/demo/tma_intro.html:L153-L161](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/tma_intro.html#L153-L161) 的具体值，为演示场景（16×128 fp16 全局矩阵、8×64 tile、128B swizzle）写出完整字段表并逐项注明数值来源：
+
+| 字段 | 值 | 来源 |
+| --- | --- | --- |
+| dtype | f16 | 场景设定 |
+| globalDim | [128, 16]（内维=列在前） | 全局矩阵 16 行 × 128 列，行主序 |
+| globalStrides | [256B] | 128 元素 × 2B |
+| boxDim | [64, 8] | 一次 8 行 × 64 列，最内维 64×2B=128B |
+| swizzle | CU_TENSOR_MAP_SWIZZLE_128B | 写入时应用 XOR |
+
+**任务 B：完整流程伪代码（含 swizzle 写入）。** 下面是**示例伪代码**（非项目原有代码，指令名取自演示页展示的真实 PTX 形式）：
+
+```text
+# —— 编译期/宿主侧：一次性 ——
+tensormap = encode(dtype=f16, globalDim=[128,16],
+                   globalStrides=[256B], boxDim=[64,8],
+                   swizzle=SWIZZLE_128B)
+
+# —— 内核里：每个 tile 一次 ——
+if elect_one_thread():                       # warp 内只选一个线程
+    cp.async.bulk.tensor.2d.shared::cta.global
+        .mbarrier::complete_tx::bytes
+        [smem_tile], [tensormap, {col0, row0}], [mbar]
+    mbarrier.arrive.expect_tx(mbar, 1024)    # 8*64*2B = 1024 字节
+# 提交结束，其余线程继续其他工作；TMA 引擎在后台：
+#   for r in 0..7:            # box 的 8 行
+#     for c in 0..7:          # 每行 8 个 16B sector
+#       s = c XOR r           # ← 写入时 swizzle，引擎完成
+#       write smem[128*r + 16*s] = gmem[row0+r][col0 + 8*c .. +8]
+
+# —— 消费侧 ——
+mbarrier.try_wait(mbar, phase)               # 1024 字节到齐才放行
+MMA 读取 smem_tile（按同一 128B swizzle 解释）
+```
+
+**任务 C：核对。** 打开演示（构建书站或直接开 `_extra/demo/tma_intro.html`），切换 `None/128B`、拖动 Row/Col offset，抽 3 个格子核对你伪代码里的 `s = c XOR r` 与 `@字节偏移`；再回答：Col offset 从 0 切到 64 时，伪代码里哪一行变了、哪一行没变？（答案：指令参数 `{col0, row0}` 变，tensormap 与 expect_tx 字节数不变。）
+
+**预期结果**：字段表与演示信息框一致；伪代码覆盖"描述符（静态）→ 指令参数（动态）→ 引擎 swizzle 写入 → 字节计数 → 消费者等待"五个环节；演示悬停结果与手算一致。若本机未构建书站，任务 A、B 与手算部分仍可完整完成（确定性推导，无需验证环境）。
+
+## 6. 本讲小结
+
+- **tensor map 是"静态档案"**：dtype、globalDim、globalStrides、boxDim、swizzle 模式五项描述全局张量与单次搬运的形状，可跨大量 tile 拷贝复用；tile 起始坐标与 SMEM 目的地址才是每次变化的指令参数。
+- **维度顺序从内到外、步长以字节计**：演示中 16×128 fp16 写作 `globalDim=[128,16]`、`globalStrides=[256B]`，这是填描述符时最容易出错的两点。
+- **发起与执行分离**：warp 内单线程提交 `cp.async.bulk.tensor`（其余线程瞬间掩蔽），TMA 引擎异步完成全部地址计算与传输；`cta_sync` 管不了引擎，必须靠 mbarrier 的字节计数（细节在 u6-l3）。
+- **写入时 swizzle 是"顺带"的**：`physical_sector = col XOR row` 由引擎在写 SMEM 路径上应用，线程不算 swizzle 地址；tile 到达即符合 MMA 期望的排布，跨行访问从 8-way 冲突降为无冲突。
+- **一致性是纪律**：tensor map、SMEM 布局与后续 MMA 指令必须描述同一物理排布，否则"字节到了、元素认错"；TIRx 中三者从同一个 `SwizzleMode` 推导正是这个保障。
+- **约束要记牢**：box 最内连续维不得超过所选 swizzle 宽度（128B 模式下 fp16 恰为 64 个元素），数据更窄时 SMEM 仍按完整宽度预留——这正是下一讲 3D TMA 要解决的问题入口。
+
+## 7. 下一步学习建议
+
+- **u6-l2（3D TMA 与 128B swizzle 行布局）**：当一行超过 128 字节时，如何加一个 `group` 维把多个 swizzle atom 塞进一次 3D 拷贝，以及 128B 分组与 256B 行步长对 bank 冲突的影响（正文 L50 起的 "Using 3D TMA to Move Multiple Swizzle Atoms" 一节，本讲刻意只引用了它的约束行）。
+- **u6-l3（TMA 完成机制）**：load 的 `expect_tx/try_wait` 字节追踪与 store 的 `commit_group/wait_group`，以及为什么两个方向需要不同的机制（正文 L129-L172）。
+- **向后看**：单元十二的 GEMM Step 4（`chapter_gemm_async/index.md`）会把本讲的概念放进完整内核；届时再回头看本讲 4.2.3 的 TIRx 代码段，会有"每个参数都认识"的顺畅感。
+- **交互演示**：`_extra/demo/` 下的 `swizzle_8x8.html`、`swizzle_128B.html`（u4-l4 已用过）与本讲的 `tma_intro.html` 是同一族可视化，建议连起来看，体会"u4-l4 的 XOR 数学 → 本讲的硬件代劳"这条演进线。

@@ -4,47 +4,52 @@
 
 学完本讲，你应该能够：
 
-1. 正确安装并验证 TIRx 编译器——它不是独立的包，而是 Apache TVM wheel 中的 `tvm.tirx` 模块，且需要与 `cuda-bindings` 配套安装。
-2. 判断手头的 GPU 是否满足书中内核的 `sm_100a`（Blackwell）要求，并理解为什么别的 GPU 跑不了。
-3. 掌握贯穿全书的内核验证套路：用 PyTorch 张量直接调用编译产物，再与 PyTorch 参考结果做数值断言。
-4. 记住一条容易踩坑的规则：TIRx 通过 Python 源码检视解析内核，因此内核代码必须写在文件或 notebook 单元格里，不能塞进 `python -c`。
-5. 了解可选的 `tirx-kernels` 参考内核仓库及其固定 revision 的用意。
+1. 正确安装并验证 TIRx 编译器——它不是独立的包，而是 Apache TVM wheel 中的 `tvm.tirx` 模块，且必须与 `cuda-bindings` 配套安装。
+2. 判断手头的 GPU 是否满足书中内核的 `sm_100a`（Blackwell）要求，理解为什么其他 GPU 装得上工具链也跑不了内核。
+3. 掌握贯穿全书的内核运行套路：`tvm.compile(tir_pipeline="tirx")` 编译，用 PyTorch 张量直接调用编译产物，再与 PyTorch 参考结果做数值断言。
+4. 记住一条第一天就可能踩坑的规则：TIRx 通过 Python 源码检视（source inspection）解析内核，因此内核代码必须写在文件或 notebook 单元格里，不能塞进 `python -c "..."`。
+5. 了解可选的 `tirx-kernels` 参考内核仓库，以及官方把它的 revision 钉死的原因。
 
-本讲是「环境课」：它不教你写内核，但之后每一讲的可运行实践都建立在本讲搭好的环境之上。
+本讲是「环境课」：它不教你写内核，但之后每一讲的可运行实践都建立在本讲搭好的环境之上。没有 Blackwell GPU 的读者同样要读完本讲——本讲会给出明确的「环境限制清单」学习路径，后续讲义的实践都会提供源码推演型替代方案。
 
 ## 2. 前置知识
 
-本讲需要的背景知识都很轻量，用通俗语言过一遍：
+本讲需要的背景知识都很轻量，逐个用通俗语言过一遍：
 
-- **pip 与 Python 环境**：本书工具链通过 `pip install` 安装。建议在一个干净的虚拟环境（`venv` 或 `conda`）中操作，避免和系统里其他 PyTorch/TVM 冲突。
-- **什么是编译器 wheel**：Apache TVM 是一个编译器项目，它的 Python 包（`apache-tvm`）里同时包含 Python 前端和编译器后端的动态库。我们说的 TIRx 是这个包里的一个模块（`tvm.tirx`），不需要单独安装。
-- **NVRTC**：NVIDIA Runtime Compilation 的缩写，即在运行时把 CUDA C 源码编译成可加载的设备代码。TVM 生成 CUDA 源码后走这条路径，而 Python 侧调用 NVRTC 需要额外的绑定包——这就是 `cuda-bindings` 存在的原因。
-- **GPU 架构标记（`sm_xx`）**：NVIDIA 每代 GPU 有一个架构标记，如 Hopper 是 `sm_90`，Blackwell 数据中心 GPU 是 `sm_100a`（后缀 `a` 表示启用该架构的专属指令集）。书中内核大量使用 `tcgen05.mma`、Tensor Memory（TMEM）等 **Blackwell 专属** 硬件特性，所以老 GPU 即使能装上工具链，也无法运行这些内核。
-- **PyTorch 张量**：书中的输入数据和参考答案都用 PyTorch 张量表示。你只需要会 `torch.randn`、`torch.zeros`、矩阵乘 `@` 和 `torch.testing.assert_close` 这几个基本操作。
-- **与前一讲的衔接**：u1-l2 讲过，本地构建这本书的站点**不需要** GPU、也不需要 tvm——构书只是 Sphinx 渲染 Markdown。本讲开始要求另一套东西：**运行书中内核**的环境。两件事容易混淆，请分开对待。
+- **pip 与虚拟环境**：本书工具链全部通过 `pip install` 获取。建议在干净的虚拟环境（`venv` 或 `conda`）中操作，避免与系统里已有的 PyTorch/TVM 版本互相污染。
+- **编译器 wheel 是什么**：Apache TVM 是一个编译器项目，它的 Python 包（`apache-tvm`）里同时打包了 Python 前端和编译器后端的动态库。我们说的 TIRx 只是这个包里的一个模块（`tvm.tirx`），不需要、也没有一个单独叫 "tirx" 的包要装。
+- **NVRTC**：NVIDIA Runtime Compilation，即在运行时把 CUDA C 源码编译成可加载的设备代码。TIRx 内核编译的最后一站是 CUDA C 源码，TVM 通过 NVRTC 完成这步；而 Python 侧调用 NVRTC 需要额外的绑定库——这就是 `cuda-bindings` 存在的原因。
+- **GPU 架构标记（`sm_xx`）**：NVIDIA 每代 GPU 有一个架构标记，例如 Hopper 是 `sm_90`，Blackwell 数据中心 GPU 是 `sm_100a`（后缀 `a` 表示启用该架构的专属指令集）。书中内核大量使用 `tcgen05.mma`、Tensor Memory（TMEM）等 Blackwell 专属硬件特性，所以旧架构 GPU 即使装好了全部软件，也无法运行这些内核。
+- **PyTorch 张量的最少知识**：书中的输入数据和参考答案都用 PyTorch 张量表示。本讲只会用到 `torch.randn`（随机输入）、`torch.zeros`（清零输出）、矩阵乘 `@` 和 `torch.testing.assert_close`（数值断言）。
+- **与前一讲的衔接**：u1-l2 讲过，本地构建书站**不需要** GPU、也不需要 tvm——那只是 Sphinx 渲染 Markdown。本讲要装的是另一套东西：**运行书中内核**的环境。两件事容易混淆，请分开对待。
 
 ## 3. 本讲源码地图
 
-本讲涉及的关键文件只有两个，它们分别回答「环境怎么装」和「装好后内核怎么跑、怎么验证」：
+本讲的关键文件只有两个主文件，外加三个用于交叉印证的文件：
 
 | 文件 | 作用 |
 | --- | --- |
-| [README.md](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/README.md) | 仓库首页。其中 "Running the kernels" 一节是官方的运行环境安装说明：TIRx 编译器、PyTorch、可选的 tirx-kernels 三步，以及「示例必须写在文件里」的规则。 |
-| [chapter_intro_tirx/index.md](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md) | 第一个 TIRx 内核 `hgemm_v1` 所在章节。章首的 "Running the examples" 提示框复述了环境要求并解释了 `cuda-bindings` 的必要性；章节中段给出完整的「编译 + PyTorch 验证」代码，是本讲第 3 个模块的主要依据。 |
+| [README.md](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/README.md) | 仓库首页。其中 "Running the kernels" 一节（L51-L84）是官方的运行环境安装说明：TIRx 编译器、CUDA 版 PyTorch、可选的 tirx-kernels 三步，以及「示例必须写在文件里」的规则。 |
+| [chapter_intro_tirx/index.md](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md) | 第一个 TIRx 内核 `hgemm_v1` 所在章节。章首 "Running the examples" 提示框解释了 `cuda-bindings` 的必要性；章节中段给出完整的「编译 + PyTorch 验证」代码，是本讲第 3 个模块的主要依据。 |
+| [appendix/debugging_warp_specialized.md](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/debugging_warp_specialized.md) | 异步内核调试附录。开头的 "Before Debugging the Kernel" 给出了官方的环境自检命令（打印 `tvm.__file__`、设备名与 compute capability），是本讲排障步骤的出处。 |
+| [chapter_tensor_cores/index.md](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_tensor_cores/index.md) | Tensor Core 章节。其中对 TMEM 在 `sm_100a` 上的具体规格（128 Lane 行 × 512 Col 列）的描述，用来解释「为什么必须是 Blackwell」。 |
+| [chapter_flash_attention/index.md](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_flash_attention/index.md) | Flash Attention 4 章节。其代码节选注明来自 `tirx-kernels` 的固定 revision，说明这个参考内核仓库贯穿全书后半部分。 |
 
 ## 4. 核心概念与源码讲解
 
-本讲拆成四个最小模块：① apache-tvm 安装；② sm_100a 硬件要求；③ 编译与验证回路（PyTorch 张量直接调用）；④ tirx-kernels 参考内核。
+本讲拆成四个最小模块：① apache-tvm 安装；② sm_100a 硬件要求；③ 内核运行方式（编译与 PyTorch 验证回路）；④ tirx-kernels 参考内核。前两个模块对应规格中的「apache-tvm 安装」与「sm_100a 硬件要求」，后两个模块对应「tirx-kernels 参考内核」与学习目标中的验证套路。
 
 ### 4.1 apache-tvm 安装：TIRx 编译器从哪里来
 
 #### 4.1.1 概念说明
 
-第一个要纠正的直觉是：「TIRx 是一个独立工具」——不对。**TIRx 以 `tvm.tirx` 模块的形式随 Apache TVM 的 wheel 一起发布**。也就是说，安装 TIRx 编译器 = 安装指定版本的 `apache-tvm`。
+第一个要纠正的直觉是「TIRx 是一个独立工具」——不对。**TIRx 以 `tvm.tirx` 模块的形式随 Apache TVM 的 wheel 一起发布**。也就是说，安装 TIRx 编译器 = 安装指定版本的 `apache-tvm`，没有第二个包要装。
 
-第二个要点是**为什么还要装 `cuda-bindings`**。TIRx 内核编译的最后一站是 CUDA C 源码，TVM 通过 NVRTC 在运行时编译它；Python 侧调用 NVRTC 需要额外的绑定库，即 `cuda-bindings`。所以这两个包总是一起出现。
+第二个要点是**为什么还要装 `cuda-bindings`**。TIRx 内核编译的最后一站是 CUDA C 源码，TVM 通过 NVRTC 在运行时编译它；Python 侧调用 NVRTC 需要额外的绑定库，即 `cuda-bindings`。所以官方命令里这两个包总是一起出现，缺了后者，导入阶段不会报错，但走到 CUDA 编译时才会失败——这是很典型的「晚爆炸」依赖问题，不如一开始就装全。
 
-第三个要点是**版本必须钉死**。官方命令使用 `apache-tvm==0.26.0`，这是一个精确版本号。TIRx 是快速演进中的新模块，不同 TVM 版本之间的 API 和行为可能有差异，跟随书中指定的版本能最大程度避免「照着书敲却报错」。
+第三个要点是**版本必须钉死**。官方命令使用 `apache-tvm==0.26.0` 这个精确版本号。TIRx 是快速演进中的新模块，不同 TVM 版本之间的 API 和行为可能有差异；跟随书中指定的版本，能最大程度避免「照着书敲却报错」。
+
+第四个要点是**当心环境里有旧的 TVM**。如果机器上曾经从源码编译或克隆过 TVM，Python 可能导入的是那份旧代码而不是刚装的 wheel。调试附录给出的对策是同时打印 `tvm.__file__`（导入路径）和 `tvm.__version__`，先确认「用的确实是哪一份 TVM」，再谈其他问题。
 
 #### 4.1.2 核心流程
 
@@ -53,354 +58,349 @@
 ```text
 1. （建议）创建并激活一个干净的虚拟环境
 2. pip install apache-tvm==0.26.0 cuda-bindings
-3. python -c "import tvm, tvm.tirx; print(tvm.__version__)"
-4. 看到版本号打印且无 ImportError → TIRx 编译器就绪
-5. （第 2 个模块）安装 CUDA 版 PyTorch
+3. 安装 CUDA 版 PyTorch（官方指引见 pytorch.org）
+4. python -c "import tvm, tvm.tirx; print(tvm.__version__)"
+   → 打印出版本号且无 ImportError，说明 TIRx 模块可用
+5. （进阶自检）打印 tvm.__file__，确认导入的是 wheel 而非旧的环境残留
 ```
 
-注意第 3 步只做「导入 + 打印版本」——它验证的是**编译器可用**，还不需要 GPU。
+注意第 4 步的验证命令本身**可以**用 `python -c`，因为它只是导入模块、不定义内核——这与「内核代码不能放进 `python -c`」的规则不冲突，原因见 4.3.1。
 
 #### 4.1.3 源码精读
 
-仓库 README 的 "Running the kernels" 一节给出了权威安装步骤。第一步明确说明 TIRx 的发布形态：
+**（1）官方安装命令出自 README 的 "Running the kernels" 一节。** [README.md:L51-L60](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/README.md#L51-L60) 说明：书中内核面向 Blackwell（`sm_100a`），运行需要 Blackwell GPU、TIRx 编译器和 CUDA 版 PyTorch；第 1 步安装的「TIRx 编译器」就是 Apache TVM wheel 里的 `tvm.tirx` 模块，命令为 `pip install apache-tvm==0.26.0 cuda-bindings`。
 
-> **1. Install the TIRx compiler.** It ships as the `tvm.tirx` module of the Apache TVM wheel:
+**（2）验证命令。** [README.md:L62-L66](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/README.md#L62-L66) 给出验证方式：`python -c "import tvm, tvm.tirx; print(tvm.__version__)"`。这一行同时做了两件事：确认 `tvm` 能导入、确认其中的 `tvm.tirx` 子模块存在。任何一个失败都会抛 `ImportError`。
 
-对应源码：[README.md:L56-L66](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/README.md#L56-L66)
+**（3）`cuda-bindings` 的必要性在章节里有明确解释。** [chapter_intro_tirx/index.md:L12-L25](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L12-L25) 的 "Running the examples" 提示框复述了安装与验证命令，并特别说明：TVM 通过 NVRTC 编译 CUDA 代码时还需要 `cuda-bindings`，所以两个包一起装。这个提示框结尾还有一句很实用的话——后续各章的可运行示例都用同一套环境，环境装好后不用反复折腾。
 
-这段先说明「TIRx 编译器以 Apache TVM wheel 中的 `tvm.tirx` 模块形式发布」，随后给出安装命令 `pip install apache-tvm==0.26.0 cuda-bindings`，最后给出验证命令 `python -c "import tvm, tvm.tirx; print(tvm.__version__)"`。
-
-`cuda-bindings` 的必要性在 TIRx 入门章节的 "Running the examples" 提示框里有更明确的解释：
-
-> Compiling CUDA through NVRTC also requires `cuda-bindings`, so install both packages
-
-对应源码：[chapter_intro_tirx/index.md:L12-L28](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L12-L28)
-
-这个提示框把本章示例的三项前提（Blackwell GPU、TIRx 编译器、CUDA 版 PyTorch）和安装命令、验证命令全部列出，并特别点出「通过 NVRTC 编译 CUDA 还需要 `cuda-bindings`」。末尾一句 "The runnable examples in later chapters use the same environment" 说明：**这套环境一次装好，全书通用**。
+**（4）排障时先确认导入的是哪份 TVM。** [appendix/debugging_warp_specialized.md:L13-L17](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/debugging_warp_specialized.md#L13-L17) 给出的官方自检命令在版本号之外还打印了 `tvm.__file__`，并明确警告：如果 Python 导入的是一个旧的 TVM 检出（stale checkout），要先修环境、再改内核。本讲把它提前为安装后的例行检查。
 
 #### 4.1.4 代码实践
 
-**实践目标**：在本地装好 TIRx 编译器并确认可以导入。
+**实践目标**：把 TIRx 编译器装进一个隔离环境，并完成两层验证（能导入 / 导入的是正确的那个包）。
 
 **操作步骤**：
 
 ```bash
-# 1. 建议先进入独立虚拟环境（示例用 venv）
-python -m venv mlsys-env
-source mlsys-env/bin/activate
+# 1. 创建并激活虚拟环境（conda 示例；venv 同理）
+conda create -n tirx-book python=3.11 -y
+conda activate tirx-book
 
-# 2. 安装（与书中命令完全一致）
+# 2. 安装 TIRx 编译器与 NVRTC 绑定（版本按书中钉死）
 pip install apache-tvm==0.26.0 cuda-bindings
 
-# 3. 验证导入
+# 3. 第一层验证：能导入、能打印版本
 python -c "import tvm, tvm.tirx; print(tvm.__version__)"
+
+# 4. 第二层验证：确认导入路径来自本环境的 site-packages
+python -c "import tvm, tvm.tirx; print(tvm.__file__, tvm.__version__)"
 ```
 
 **需要观察的现象**：
 
-- 第 3 步应打印一个版本号（预期为 `0.26.0`），且没有 `ImportError` / `ModuleNotFoundError`。
-- 若 `import tvm.tirx` 报错而 `import tvm` 正常，大概率装到的 TVM 版本不对——回头检查是否精确安装了 `0.26.0`。
+- 第 3 步应打印 `0.26.0`（待本地验证）。
+- 第 4 步打印的 `tvm.__file__` 路径应位于当前虚拟环境的 `site-packages` 下；如果它指向某个源码目录（例如以前克隆的 TVM 仓库），说明环境被旧检出污染，需要先清理 `PYTHONPATH` 或调整环境变量。
 
-**预期结果**：终端输出 `0.26.0`。导入验证本身不依赖 GPU，在没有 GPU 的机器上通常也能通过（待本地验证）；但后续「编译并运行内核」需要 Blackwell GPU。
+**预期结果**：两条验证命令都成功执行；若第 3 步报 `ModuleNotFoundError: No module named 'tvm.tirx'`，最可能是装到了过旧的 `apache-tvm` 版本（TIRx 模块不存在），回到第 2 步核对版本号。本讲在撰写环境中未执行以上命令，具体输出待本地验证。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么官方命令写 `apache-tvm==0.26.0` 而不是 `apache-tvm`？
+**练习 1**：同事告诉你「我 `pip install tirx` 装上了 TIRx」，哪里不对？
 
-**参考答案**：`==0.26.0` 把版本钉死。TIRx（`tvm.tirx` 模块）仍在快速演进，书中示例都基于 0.26.0 测试；不钉版本可能装到更新或更老的版本，API 与书中代码不一致，出现「照书写却跑不通」的问题。配套的 `tirx-kernels` 仓库也注明其固定 revision 是「与 Apache TVM 0.26.0 一起测试的版本」，见 4.4 节。
+**答案**：不存在名为 `tirx` 的独立安装包。TIRx 以 `tvm.tirx` 模块的形式随 Apache TVM 的 wheel（`apache-tvm`）发布，正确命令是 `pip install apache-tvm==0.26.0 cuda-bindings`。即使某个第三方包碰巧叫这个名字，也不是本书使用的 TIRx。
 
-**练习 2**：删掉 `cuda-bindings` 只装 `apache-tvm`，会在哪个环节出问题？
+**练习 2**：为什么 `cuda-bindings` 缺失时，问题往往到很晚才暴露？
 
-**参考答案**：导入 `tvm.tirx` 大概率仍能成功，但在**编译内核**这一步会失败。TIRx 的 lowering 最后生成 CUDA 源码，由 TVM 通过 NVRTC 在运行时编译，而 Python 侧调用 NVRTC 依赖 `cuda-bindings` 提供的绑定（见 [chapter_intro_tirx/index.md:L15](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L15-L15) 的原话 "Compiling CUDA through NVRTC also requires `cuda-bindings`"）。
+**答案**：`import tvm, tvm.tirx` 不需要 NVRTC，所以安装与导入验证都会通过；只有当 `tvm.compile` 走到「把生成的 CUDA C 源码经 NVRTC 编译成设备代码」这一步时才会失败。因此官方把两个包写在同一条安装命令里，一步装全。
+
+**练习 3**：验证命令已经打印了正确的版本号，为什么调试附录还要建议打印 `tvm.__file__`？
+
+**答案**：版本号只说明「导入的那份 TVM 版本正确」，不能说明「导入的是哪一份」。如果环境中残留旧的 TVM 源码检出，Python 可能优先导入它，其版本号也可能碰巧相同或相近；`tvm.__file__` 直接暴露实际导入路径，是排查这类污染最快的方式。
 
 ### 4.2 sm_100a 硬件要求：为什么必须是 Blackwell
 
 #### 4.2.1 概念说明
 
-书中所有内核都瞄准 Blackwell 架构标记 `sm_100a`（典型 GPU 为 B200）。原因在 u1-l1 建立的全书主线上：这本书把 Blackwell 硬件本身当作主角，内核里用到的 `tcgen05.mma`（第五代 Tensor Core 指令）、Tensor Memory（TMEM）、TMA 等机制都是这一代新增或大幅强化的，旧架构 GPU 上这些指令根本不存在。
+[README.md:L51-L54](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/README.md#L51-L54) 把硬件门槛说得很直白：书中内核目标平台是 Blackwell（`sm_100a`，例如 B200），运行需要一块 Blackwell GPU。
 
-因此「能不能跑书中内核」的判据不是显存大小或 CUDA 版本，而是：**GPU 架构是否为 `sm_100a`**。
+为什么旧 GPU 不行？因为书中内核的每个环节几乎都建立在 **Blackwell 专属硬件**之上：
 
-配套要求还有一条容易被忽略：**PyTorch 必须是 CUDA 版**。PyTorch 在这里扮演两个角色——生成示例输入张量、计算参考答案做数值校验。CPU 版 PyTorch 无法把张量放到 GPU 上，验证回路就断了。
+- 计算走 `tcgen05.mma`（第五代 Tensor Core 指令族），其累加器放在 Tensor Memory（TMEM）里——`sm_100a` 上每个 CTA 的 TMEM 是一块 128 Lane 行 × 512 Col 列、每格 32 位的专用片上存储，这代之前的 GPU 没有这个部件。
+- 数据搬运依赖 TMA（Tensor Memory Accelerator）这样的异步搬运引擎。
+- 后面的章节还会用到 cluster 内的 DSMEM、mbarrier 的字节追踪等机制。
 
-需要注意「Blackwell」不等于「任意 Blackwell 代号」。书中明确以 B200 这类数据中心 GPU（`sm_100a`）为例；消费级 Blackwell 显卡使用的是另一套架构标记（如 `sm_120`），并不包含 `tcgen05`/TMEM 这套指令与存储（此为本书之外的补充知识，请以 NVIDIA 官方文档为准，待确认）。
+工具链（tvm、PyTorch）在任何 CUDA 机器上都能装，但内核一旦被编译到 `tcgen05` 这条 dispatch 路径，旧硬件上就没有对应指令可以执行。**软件装好 ≠ 内核能跑**，这是本讲最想让你带走的一条判断。
+
+另外要知道：**目标架构怎么指定**。书中示例把 target 写成 `"cuda"`，TVM 会自动检测当前设备的架构（例如 `sm_100a`）；在需要显式钉死架构的场合（如基准测试脚本），附录里出现了 `tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})` 的写法。
 
 #### 4.2.2 核心流程
 
-确认硬件资格的检查流程：
+判断「我能不能跑书中内核」的决策流程：
 
 ```text
-1. nvidia-smi 查看显卡型号（是否为 B200 等 Blackwell 数据中心卡）
-2. python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_capability())"
-   → B200 预期输出类似 True (10, 0)
-3. 同时确认 torch.cuda.is_available() 为 True（CUDA 版 PyTorch 装对了）
-4. 三项都满足 → 可以编译运行书中内核
-   任一不满足 → 后续实践改为「源码推演」模式（见 4.3.4 与第 5 节）
+1. 装好 4.1 的软件环境（任何机器都能做）
+2. 检查 GPU：
+   python -c "import torch; print(torch.cuda.get_device_name(), torch.cuda.get_device_capability())"
+3. 判断：
+   - 设备是 Blackwell 一代（README 举例 B200） → 可以编译并运行书中内核
+   - 设备是其他架构（如 Hopper sm_90）        → 工具链可用，但内核不可运行
+   - 无 GPU / 无 CUDA                         → 全部实践改为源码推演型
+4. 若不可运行：写下环境限制清单（见 4.2.4），继续无 GPU 学习路径
 ```
-
-补充一个让检查自动化的小知识：编译时目标写 `"cuda"` 即可，TVM 会自动探测当前设备的架构（如 `sm_100a`），不需要手动写架构号——这正是下一模块编译代码里 `tvm.target.Target("cuda")` 的行为。
 
 #### 4.2.3 源码精读
 
-README 的 "Running the kernels" 一节开头就划定了硬件门槛：
+**（1）硬件要求的原文。** [README.md:L51-L54](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/README.md#L51-L54)：小节标题即为 "Running the kernels (requires a Blackwell GPU)"，正文说明内核面向 Blackwell（`sm_100a`），需要 Blackwell GPU（如 B200）、TIRx 编译器和 CUDA 版 PyTorch——运行内核的三要素在这四行里凑齐了。
 
-> The kernels in this book target Blackwell (`sm_100a`), so running them needs a Blackwell GPU (such as a B200), the TIRx compiler, and a CUDA build of PyTorch.
+**（2）官方的设备检查命令。** [appendix/debugging_warp_specialized.md:L13-L15](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/debugging_warp_specialized.md#L13-L15) 用一行 `python -c "import torch; print(torch.cuda.get_device_name(), torch.cuda.get_device_capability())"` 同时拿到设备名和 compute capability；紧随其后的 [L17](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/debugging_warp_specialized.md#L17) 明确说：这些内核面向 Blackwell（`sm_100a`），如果 GPU 不是 Blackwell 一代，要先解决这个前提再谈内核。本讲把这个「先查环境再查代码」的原则提前到装机阶段。
 
-对应源码：[README.md:L51-L54](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/README.md#L51-L54)
+**（3）「Blackwell 专属」的具体证据：TMEM 规格。** [chapter_tensor_cores/index.md:L104](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_tensor_cores/index.md#L104) 描述：在 `sm_100a` 上，每个 CTA 的 TMEM 包含 128 个 Lane 行和 512 个 Col 列，每个坐标处是一个 32 位单元，`tcgen05.mma` 反复更新 TMEM 中的累加器。这段话同时给出了「书中内核依赖的硬件」和「它只存在于 Blackwell」两个事实，是硬件门槛的最佳注脚。
 
-这一句把运行内核的三项前提一次性列全：Blackwell GPU（`sm_100a`，例如 B200）、TIRx 编译器、CUDA 版 PyTorch。紧接着的第 2 步说明 PyTorch 的用途：
-
-对应源码：[README.md:L68-L69](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/README.md#L68-L69)
-
-原文说明 PyTorch 需要「与你 GPU 匹配的 CUDA 构建」，用途是「示例输入和参考校验」——正好对应我们说的两个角色。
-
-「为什么旧 GPU 不行」的直接证据在第一个内核源码里。`hgemm_v1` 的 MMA 用 `dispatch="tcgen05"` 显式选择 Blackwell 的 `tcgen05.mma` 硬件路径：
-
-对应源码：[chapter_intro_tirx/index.md:L143-L149](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L143-L149)
-
-`Tx.gemm_async(..., dispatch="tcgen05", cta_group=1)` 这一行就是「必须有 sm_100a」的根源：它要求硬件提供第五代 Tensor Core 指令；同一份代码里的 `T.ptx.tcgen05.alloc`（分配 TMEM）也属于同类 Blackwell 专属指令。最后，编译目标只需写 `"cuda"`，TVM 会自动探测当前设备架构（原文 "TVM detects the current device architecture, such as `sm_100a`"），见 [chapter_intro_tirx/index.md:L177](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L177-L177)。
+**（4）架构的自动检测与显式指定。** [chapter_intro_tirx/index.md:L177](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L177) 说明 target 写成 `"cuda"` 即可，TVM 会检测当前设备架构（如 `sm_100a`）；而基准测试附录的脚本里则出现了显式写法 [appendix/benchmarking_gpu_kernels.md:L1276](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L1276)：`tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})`，用于把测量条件钉死。
 
 #### 4.2.4 代码实践
 
-**实践目标**：判定本机能否运行书中内核，并留下书面记录。
+**实践目标**：判定自己的机器属于哪一类（可运行 / 仅可编译推演 / 纯阅读），并产出一份「环境限制清单」。
 
 **操作步骤**：
 
-```bash
-# 1. 查看显卡型号
-nvidia-smi
+1. 在装好 4.1 环境的机器上执行：
 
-# 2. 检查 CUDA 可用性与计算能力（先装好 CUDA 版 PyTorch）
-python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_capability() if torch.cuda.is_available() else 'no cuda')"
-```
+   ```bash
+   python -c "import torch; print(torch.cuda.get_device_name(), torch.cuda.get_device_capability())"
+   ```
 
-**需要观察的现象**：
+2. 记录打印的设备名与 compute capability，对照 README 的说明（Blackwell 一代、举例 B200）判断是否满足 `sm_100a`。具体的 capability 数字与架构对应表不在本书范围内，可查 NVIDIA 官方文档确认（待本地验证）。
+3. 按判定结果写一份环境限制清单，模板如下（无 GPU 机器也要写）：
 
-- 步骤 1 中显卡名称是否包含 B200/Blackwell 类型号；
-- 步骤 2 第一行是否为 `True`（CUDA 版 PyTorch 且驱动可用），第二行的计算能力元组（B200 预期为 `(10, 0)`，待本地验证）。
+   | 检查项 | 结果 | 影响 |
+   | --- | --- | --- |
+   | `import tvm, tvm.tirx` | 成功 / 失败 | 失败则一切编译实践不可做 |
+   | `torch.cuda.is_available()` | True / False | False 则不能运行内核与 GPU 验证 |
+   | 设备名 / capability | （填写） | 决定内核是否可运行 |
+   | 结论 | 可运行 / 仅推演 | 决定后续实践的形态 |
 
-**预期结果**：三项全部满足 → 环境合格；任一不满足 → 如实填写下面的限制清单，本手册后续的「运行型实践」自动降级为「源码推演型实践」：
+**需要观察的现象**：命令要么打印形如 `('NVIDIA B200', (x, y))` 的元组，要么因 `torch.cuda.is_available()` 为 False / 未装 CUDA 版 PyTorch 而报错。三种 outcome 分别对应流程图的三条分支。
 
-| 检查项 | 命令 | 结果 | 是否满足 |
-| --- | --- | --- | --- |
-| TIRx 编译器 | `python -c "import tvm, tvm.tirx; print(tvm.__version__)"` | （填写） | ☐ |
-| CUDA 版 PyTorch | `python -c "import torch; print(torch.cuda.is_available())"` | （填写） | ☐ |
-| GPU 型号/架构 | `nvidia-smi` | （填写） | ☐ |
-| 计算能力 | `torch.cuda.get_device_capability()` | （填写） | ☐ |
+**预期结果**：得到一份填好的限制清单。若结论是「仅推演」，本手册后续讲义的实践均提供源码阅读、伪代码推演、脚本复算等替代路径（例如 u2 的图表脚本、u3 的 roofline 计算），本清单就是你在各讲开头决定「走哪条路径」的依据。本讲未替你执行该命令，输出待本地验证。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：一台装了 CUDA 12 与顶级 Ampere 显卡（`sm_80`）的机器，装好了 `apache-tvm==0.26.0` + `cuda-bindings` + CUDA 版 PyTorch，能跑书中内核吗？为什么？
+**练习 1**：一台 Hopper（`sm_90`）服务器装好了 `apache-tvm==0.26.0`、`cuda-bindings` 和 CUDA 版 PyTorch，验证命令也打印了 `0.26.0`。能运行书中的 `hgemm_v1` 吗？
 
-**参考答案**：不能。工具链虽然齐全，但书中内核要求 `sm_100a`：内核里的 `dispatch="tcgen05"` 路径和 `T.ptx.tcgen05.*` 系列调用依赖 Blackwell 的第五代 Tensor Core 指令与 TMEM，`sm_80` 硬件上这些指令不存在。硬件门槛与工具链是相互独立的两回事。
+**答案**：不能。验证命令只证明软件就绪；`hgemm_v1` 的 MMA 走 `dispatch="tcgen05"` 路径，累加器放在 TMEM 里，而 `tcgen05` 指令族与 TMEM 是 Blackwell（`sm_100a`）的硬件特性，Hopper 上不存在。硬件门槛由内核使用的指令集决定，与工具链是否装好无关。
 
-**练习 2**：为什么验证回路里 PyTorch 必须是 CUDA 版，而不能用 CPU 版「先学着」？
+**练习 2**：书中示例把 target 写成 `tvm.target.Target("cuda")`，为什么不写死 `sm_100a`？
 
-**参考答案**：因为 PyTorch 张量同时承担「内核的输入/输出容器」和「参考答案计算器」两个角色。编译产物 `ex.mod(...)` 直接接受**位于 GPU 上**的 PyTorch 张量（见 4.3.3），CPU 版 PyTorch 无法创建 CUDA 张量，喂不进内核；参考校验 `A.float() @ B.float().T` 也需要与内核同一套张量交互。没有 CUDA 版 PyTorch，整条验证回路走不通。
+**答案**：TVM 会从当前设备自动检测架构（如 `sm_100a`），写成 `"cuda"` 让同一份示例代码在正确硬件上「自动选对」目标，减少硬编码。反过来说，在基准测试这种要求条件完全可复现的场合，附录脚本就用 `{"kind": "cuda", "arch": "sm_100a"}` 显式钉死架构，避免检测环节引入波动。两种写法服务不同目的。
 
-**练习 3**：书中编译代码只写了 `tvm.target.Target("cuda")`，没有出现 `sm_100a` 字样，架构是在哪里确定的？
+**练习 3**：调试附录为什么把「检查设备是不是 Blackwell」放在「读内核同步代码」之前？
 
-**参考答案**：由 TVM 在编译时自动探测当前设备架构得到（章节原文："The target can simply be `"cuda"`; TVM detects the current device architecture, such as `sm_100a`"，见 [chapter_intro_tirx/index.md:L177](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L177-L177)）。这也是「目标 GPU 资格检查」重要性的另一面：探测到的架构不是 `sm_100a` 时，后续基于 tcgen05 的 lowering 无法成立。
+**答案**：因为环境前提不满足时，任何内核侧的分析都没有意义——先运行环境自检（TVM 导入路径、版本、设备名与 capability），把环境与编译期问题排除后，再去怀疑内核本身。这是附录整篇调试方法论的第一步，也是本讲把它提前教的原因。
 
-### 4.3 编译与验证回路：用 PyTorch 张量直接调用编译产物
+### 4.3 内核运行方式：编译与 PyTorch 验证回路
 
 #### 4.3.1 概念说明
 
-环境就绪后，书中所有可运行示例都遵循同一个「编译—验证」回路。以第一个内核 `hgemm_v1`（计算 `D = A·Bᵀ` 的单 tile GEMM）为例，回路包含五步：
+环境就绪后，书中所有内核都按同一个「运行回路」使用，这个回路在 `chapter_intro_tirx` 中第一次完整出现，之后各章反复复用：
 
-1. **构造内核**：调用 `hgemm_v1(M, N, K)` 得到一个 TIRx `PrimFunc`（函数体里用 `@T.prim_func` 装饰的内层函数）。
-2. **编译**：把 `PrimFunc` 包进 `IRModule`，交给 `tvm.compile(..., tir_pipeline="tirx")`。`tir_pipeline="tirx"` 这个参数选择 TIRx 专属的 lowering 流水线，是其核心 pass `LowerTIRx` 的入口。
-3. **准备数据**：用 `torch.randn` / `torch.zeros` 在 GPU 上创建 fp16 输入与输出张量。
-4. **调用**：`ex.mod(A_tensor, B_tensor, D_tensor)`——编译产物**直接接受 PyTorch 张量**，无需手工转换成 TVM 自己的数据结构。
-5. **校验**：用 PyTorch 算出参考答案 `D_ref`，与内核写入的 `D_tensor` 做 `torch.testing.assert_close` 断言，通过则打印 `PASS`。
+1. **构造**：调用内核构建函数（如 `hgemm_v1(M, N, K)`）得到一个 TIRx `PrimFunc`。
+2. **编译**：把 `PrimFunc` 放进 `IRModule`，用 `tvm.compile(..., tir_pipeline="tirx")` 触发 TIRx lowering pipeline；其中核心 pass 是 `LowerTIRx`，它依据每个 tile 操作的 scope/layout/dispatch 选择具体实现，把 `Tx.gemm_async`、`Tx.cta.copy` 之类的高层操作降成低层 TIR，后续 pass 再展平缓冲、分离主机/设备代码并生成设备代码。
+3. **调用**：`ex.mod(...)` 直接接受 PyTorch 张量，无需手工转换格式。
+4. **验证**：用 PyTorch 按相同数学定义算出参考结果，与内核输出做数值断言（`torch.testing.assert_close`），通过则打印 `PASS`。
+5. **检视**（可选但强烈推荐）：`kernel.show()` / `kernel.script()` 打印 lowering 前的 `PrimFunc`；`ex.mod.imports[0].inspect_source()` 打印最终生成的 CUDA C 源码。对照两级代码可以看到一个 tile 操作到底变成了哪些底层指令。
 
-这个套路之所以重要，是因为它就是全书每个内核的「单元测试」：后续 GEMM 九步优化、Flash Attention 4，每一步都以「跑通同一个断言」为正确性底线。
+这个回路里有一条特殊规则：**TIRx 通过 Python 源码检视解析内核**。内核在 Python 里是一个被 `@T.prim_func` 装饰的函数（见 `hgemm_v1` 内部的 `kernel`），TIRx 需要读到这个函数**真实的源代码文本**才能把它解析成 IR；`python -c "..."` 传入的字符串无法被源码检视机制可靠获取。所以：
 
-本模块还有一个**必须记住的书写规则**：TIRx 通过 Python 源码检视（source inspection）来解析内核，因此内核代码必须写在**文件或 notebook 单元格**里，不能放进 `python -c "..."`。直观理解：解析器需要读到内核函数的**源码文本**才能把它翻译成 IR，而 `python -c` 执行的代码不存在于任何文件中，无从检视。注意区分——本讲用来「验证安装」的 `python -c "import tvm, tvm.tirx; ..."` 没问题，因为它只做导入、不定义内核；一旦要定义 `@T.prim_func`，就必须落到文件。
+- 内核定义必须写在 `.py` 文件或 notebook 单元格里；
+- 而 `python -c "import tvm, tvm.tirx; ..."` 这类**不定义内核**的验证命令是安全的。
 
 #### 4.3.2 核心流程
 
 ```text
-hgemm_v1.py（文件！）
-    │  def hgemm_v1(M,N,K): 内部 @T.prim_func 定义 kernel
-    ▼
-kernel = hgemm_v1(128, 128, 64)          # 得到 PrimFunc
-    ▼
+hgemm_v1(M,N,K)          # 构造：返回 PrimFunc（需要真实源码文本）
+        │
 tvm.compile(IRModule({"main": kernel}),
-            target="cuda", tir_pipeline="tirx")   # LowerTIRx → CUDA
-    ▼
-ex.mod(A_t, B_t, D_t)                    # 直接传 PyTorch CUDA 张量
-    ▼
-D_ref = (A.float() @ B.float().T).half() # PyTorch 参考答案
-assert_close(D_t, D_ref) → PASS          # 数值断言
+            target="cuda", tir_pipeline="tirx")   # 编译：LowerTIRx → … → CUDA
+        │
+ex.mod(A_tensor, B_tensor, D_tensor)   # 调用：直接传 PyTorch 张量
+        │
+D_ref = (A.float() @ B.float().T).half()          # 参考：PyTorch 算同一数学定义
+torch.testing.assert_close(D_tensor, D_ref, …)    # 断言：通过则 PASS
+        │
+kernel.show() / inspect_source()      # 检视：对比 lowering 前后两级代码
 ```
-
-关键认知：`ex.mod(...)` 的参数就是普通的 PyTorch CUDA 张量；内核计算结果直接写进输出张量 `D_t`，随后立刻可与 PyTorch 计算的参考值比较。
 
 #### 4.3.3 源码精读
 
-完整的编译与验证代码在 TIRx 入门章 "Compile and Verify the Result" 一节：
+**（1）为什么需要源码检视：内核是 `@T.prim_func` 装饰的函数。** [chapter_intro_tirx/index.md:L85-L100](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L85-L100) 中，`hgemm_v1(M, N, K)` 是一个普通 Python 函数，内部用 `@T.prim_func` 装饰了 `kernel(A, B, D)`。TIRx 要把 `kernel` 的函数体解析成结构化 IR，依赖读取它的源码文本——这就是「示例必须写在文件或 notebook 单元格里」的根本原因。
 
-对应源码：[chapter_intro_tirx/index.md:L181-L205](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L181-L205)
+**（2）规则的原文。** [README.md:L83-L84](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/README.md#L83-L84)：TIRx 通过 Python source inspection 解析内核源码，因此示例应放在文件或 notebook 单元格中，而不是 `python -c` 里。全书唯一的这个「格式级」硬约束，出自 README 的最后一段。
 
-逐段说明这段代码做了什么：
+**（3）编译与验证的完整代码。** [chapter_intro_tirx/index.md:L181-L205](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L181-L205) 是本模块的核心证据，逐段看：
 
-- `target = tvm.target.Target("cuda")`：目标就是 `cuda`，架构由 TVM 自动探测（`sm_100a`）。
-- `kernel = hgemm_v1(M, N, K)`：调用 4.2.3 里那个构造函数，拿到 `PrimFunc`。
-- `ex = tvm.compile(tvm.IRModule({"main": kernel}), target=target, tir_pipeline="tirx")`：`PrimFunc` 先放进 `IRModule` 再编译；`tir_pipeline="tirx"` 启用 TIRx lowering 流水线。
-- `A_tensor/B_tensor/D_tensor` 三个 `torch.*` 调用：在 `cuda` 设备上准备 fp16 输入与输出。
-- `ex.mod(A_tensor, B_tensor, D_tensor)`：**直接传 PyTorch 张量**调用编译产物，无需任何手动转换。
-- 最后四行：`(A.float() @ B.float().T).half()` 算参考答案，`assert_close(..., rtol=2e-2, atol=1e-2)` 断言，通过则打印 `PASS`。
+- [L184-L190](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L184-L190)：`target = tvm.target.Target("cuda")`；`kernel = hgemm_v1(M, N, K)` 构造内核；`ex = tvm.compile(tvm.IRModule({"main": kernel}), target=target, tir_pipeline="tirx")` 完成编译——`PrimFunc` 先放进 `IRModule`，`tir_pipeline="tirx"` 选择 TIRx 专用 lowering 管线。
+- [L192-L198](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L192-L198)：先 `empty_cache` / `synchronize` 清理状态，用 `torch.randn` 造 fp16 输入 `A_tensor`、`B_tensor`，`torch.zeros` 造输出 `D_tensor`，然后 `ex.mod(A_tensor, B_tensor, D_tensor)` 一行完成调用——正如 [L179](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L179) 所说，编译产物直接接受 PyTorch 张量，无需手工转换。
+- [L200-L204](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L200-L204)：参考结果 `D_ref = (A_tensor.float() @ B_tensor.float().T).half()`（先升 fp32 再算再降回 fp16，让参考更准），打印最大误差，`torch.testing.assert_close(D_tensor, D_ref, rtol=2e-2, atol=1e-2)` 断言，通过则打印 `PASS`。
 
-「`ex.mod` 直接接受 PyTorch 张量」这一点在正文中被明确强调：
-
-对应源码：[chapter_intro_tirx/index.md:L177-L180](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L177-L180)
-
-原文写道 "The compiled `ex.mod(...)` accepts PyTorch tensors directly, so no manual conversion is needed"，并说明 `tir_pipeline="tirx"` 选择 TIRx lowering 流水线。
-
-编译之后如果想「看看编译器做了什么」，书里给了三个检视调用：
-
-对应源码：[chapter_intro_tirx/index.md:L243-L250](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L243-L250)
-
-`kernel.show()` 与 `kernel.script()` 打印 lowering 前的 TIRx `PrimFunc`，`ex.mod.imports[0].inspect_source()` 打印最终生成的 CUDA C 源码——这是「源码推演型实践」的主力工具（无 GPU 也能用它研究 tile 操作如何变成线程级代码）。
-
-最后是那条书写规则，README 在安装步骤之后用一句话交代：
-
-> TIRx parses kernel source via Python source inspection, so examples should live in a file or notebook cell rather than inside `python -c`.
-
-对应源码：[README.md:L83-L84](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/README.md#L83-L84)
-
-这句话是所有书上示例的组织方式的注脚：内核定义永远以 `.py` 文件（或 notebook 单元格）为载体。
+**（4）两级代码检视。** [chapter_intro_tirx/index.md:L243-L250](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L243-L250)：`kernel.show()` 与 `kernel.script()` 打印 lowering 前的 TIRx `PrimFunc`，`ex.mod.imports[0].inspect_source()` 打印最终 CUDA C 源码。对照两级输出，可以看到 tile 操作生成了哪些底层指令、布局和线程 scope 如何变成具体的地址计算与控制流——这也是无 GPU 环境下最重要的学习手段之一。
 
 #### 4.3.4 代码实践
 
-**实践目标**：把书上的第一个内核变成一个可反复运行的本地文件，走通完整验证回路（有 GPU），或产出一份观察笔记（无 GPU）。
+**实践目标**：把「编译 + 验证」回路改造成一个可复用的脚本文件（而非 `python -c`），并为每行标注它在回路中的角色。
 
-**操作步骤**（以下均为示例代码，除引用的书中代码外需自行建立文件）：
+**操作步骤**：
 
-1. 新建目录与文件 `kernels/hgemm_v1.py`，把 [chapter_intro_tirx/index.md:L72-L171](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L72-L171) 中的 import 块与 `hgemm_v1` 函数**原样**抄入（注意：必须是文件，不能图省事用 `python -c`）。
-2. 新建 `run_hgemm.py`，内容为 [chapter_intro_tirx/index.md:L181-L205](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L181-L205) 的验证代码，开头加一行 `from kernels.hgemm_v1 import hgemm_v1`。
-3. 运行 `python run_hgemm.py`。
+1. 新建 `hgemm_run.py`，把 [chapter_intro_tirx/index.md:L181-L205](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L181-L205) 的代码原样抄入，并在文件开头加上内核构建函数所需的 import（见 [L72-L78](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L72-L78)）与 `hgemm_v1` 的定义（[L85-L170](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L85-L170)）。注意：正因为源码检视的要求，这一步必须落成文件，不能图省事塞进 `python -c`。
+2. 在每行后面加注释，标注它属于回路的哪一步：`# 构造` / `# 编译` / `# 调用` / `# 参考` / `# 断言`。
+3. 有 Blackwell GPU 时：`python hgemm_run.py`，期望末尾打印 `PASS`（待本地验证）。
+4. 无 GPU 时：把 `tvm.compile` 及之后的行注释掉，只保留 `kernel = hgemm_v1(128, 128, 64)` 与 `kernel.show()`，运行观察打印出的 IR。构造与打印 `PrimFunc` 是否完全不触碰 GPU 驱动，待本地验证；若导入或构造阶段即失败，说明该环境连纯 IR 构造也不可用，实践退回「纯源码阅读」。
 
 **需要观察的现象**：
 
-- 有 Blackwell GPU：终端先打印 `Max error vs torch reference: ...`（一个小量级数字），随后打印 `PASS`。
-- 无 GPU：记录失败发生在哪一步（导入？`tvm.target.Target("cuda")`？`torch.cuda` 相关调用？），这就是你的环境断点。
+- 有 GPU：终端先打印最大误差（形如 `Max error vs torch reference: 0.00xxxx`），随后 `PASS`。
+- 无 GPU：`kernel.show()` 打印出的 IR 中应能看到 `Tx.cta.copy`、`Tx.gemm_async`、`Tx.wg.copy_async` 等 tile 操作名，与正文的描述一致。
 
-**预期结果**：有 GPU 时输出 `PASS`（待本地验证——本讲义写作环境无 Blackwell GPU，未实际运行）。无 GPU 时完成下面的推演任务代替运行：
-
-- 在 `run_hgemm.py` 中把编译与调用部分替换为 `kernel.show()`、`print(kernel.script())`，观察 lowering 之前的 TIRx IR 长什么样，写 3～5 行笔记描述你看到的 `Tx.cta.copy` / `Tx.gemm_async` / `Tx.wg.copy_async` 在 IR 中的形态（能否走到这一步取决于环境，待本地验证）。
+**预期结果**：得到一份带注释的脚本 + 一张「回路角色」对照笔记。这张笔记会陪你走完整个 Part III：后续章节的内核换名字、换机制，回路本身不变。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：把 `hgemm_v1` 的定义塞进 `python -c "def hgemm_v1(...): ..."` 里执行，会发生什么？为什么？
+**练习 1**：把验证命令 `python -c "import tvm, tvm.tirx; print(tvm.__version__)"` 和把 `hgemm_v1` 塞进 `python -c`，为什么前者合法、后者非法？
 
-**参考答案**：会在 TIRx 解析内核时失败（无法得到可用的 `PrimFunc`）。因为 TIRx 依赖 Python 源码检视来解析内核——解析器需要读到函数的源码文本，而 `python -c` 执行的字符串不存在于任何文件中，无从检视。README 明确要求 "examples should live in a file or notebook cell rather than inside `python -c`"（[README.md:L83-L84](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/README.md#L83-L84)）。而 4.1 节的 `python -c "import tvm, tvm.tirx; ..."` 之所以合法，是因为它只导入模块、不定义内核。
+**答案**：前者只导入模块、不定义任何内核，不触发源码检视。后者需要 TIRx 解析 `@T.prim_func` 函数体的源代码文本，而 `python -c` 的字符串无法被源码检视机制可靠获取——README 明确要求示例放在文件或 notebook 单元格里。
 
-**练习 2**：验证代码里参考答案为什么写成 `(A_tensor.float() @ B_tensor.float().T).half()`，而不是直接 `A_tensor @ B_tensor.T`？
+**练习 2**：参考结果那一行为什么写成 `(A_tensor.float() @ B_tensor.float().T).half()`，而不是直接 `A_tensor @ B_tensor.T`？
 
-**参考答案**：这是一条「高精度参考」套路：内核的累加器是 fp32（`hgemm_v1` 里 `acc_type = "float32"`），而输入输出是 fp16。参考计算先把输入提升到 fp32 再做矩阵乘、最后降回 fp16，尽量让参考值本身不引入额外舍入误差，这样 `D_tensor` 与 `D_ref` 的差异就主要来自内核行为，配合 `rtol=2e-2, atol=1e-2` 的宽容容差做断言。
+**答案**：书中参考实现先把 fp16 输入升为 fp32、在 fp32 下做矩阵乘、再降回 fp16。fp16 直接累加的误差更大，用高精度参考能更公平地检验内核输出的正确性；最后的 `.half()` 保证与输出张量 `D_tensor` 同 dtype，才能通过 `assert_close` 比较。这是数值验证的常用手法：参考要「至少和被测对象一样准」。
 
-**练习 3**：`tvm.compile(...)` 调用中，`tir_pipeline="tirx"` 这个参数去掉会怎样？
+**练习 3**：`kernel.show()` 和 `ex.mod.imports[0].inspect_source()` 各自展示什么？为什么说这一对输出对无 GPU 读者特别重要？
 
-**参考答案**：会走默认的 TIR lowering 流水线而不是 TIRx 流水线。TIRx 流水线的核心 pass `LowerTIRx` 负责利用每个 tile 操作的 scope/layout/dispatch 信息选择具体实现，把 `Tx.gemm_async`、`Tx.cta.copy` 这类 tile 原语降成低层 TIR；不走这条流水线，这些 TIRx 专有的结构无法被正确处理（具体报错形态待本地验证）。
+**答案**：前者打印 lowering 之前的 TIRx `PrimFunc`（tile 操作还是 `Tx.*` 形态）；后者打印 lowering 之后最终生成的 CUDA C 源码（tile 操作已展开为具体指令、地址计算与控制流）。对照两级代码可以观察「scope/layout/dispatch 三要素如何落地」。对无 GPU 读者，这是不运行内核也能研究编译器行为的主要窗口——生成源码的检视不需要执行内核（能否在无 GPU 环境完成编译本身，待本地验证）。
 
-### 4.4 tirx-kernels 参考内核仓库
+### 4.4 tirx-kernels 参考内核
 
 #### 4.4.1 概念说明
 
-`tirx-kernels` 是同一组织（mlc-ai）下的**配套参考内核仓库**，在本书安装说明中定位为「可选的第 3 步」。它的价值在于：书中正文为了教学逐行展示的是简化/演进版本，而一个维护中的参考内核仓库可以当作成熟实现的对照。
+`tirx-kernels` 是同组织（mlc-ai）下的配套仓库，收录了书中内核的完整参考实现。它在本手册中是**可选**依赖，但建议有 Blackwell GPU 的读者安装，原因有三：
 
-安装它时有一个非常工程化的细节：**要 checkout 到一个固定的 commit**（`5be39749e7dfd2c4bdae9b4d396f8ec35af07126`）。README 的说法是「使用与 Apache TVM 0.26.0 一起测试的那个配套 revision」。这与 4.1 节钉死 `apache-tvm==0.26.0` 是同一个思想：**编译器与内核仓库必须版本配对**，否则 API 漂移会让你分不清报错来自自己的代码还是版本不匹配。
+1. **书里展示的是节选**。正文为了讲解只摘取内核的关键片段，完整可运行的版本（包括各种 shape、stage、phase 变量的定义）在 `tirx-kernels` 里。FA4 章开头的代码阅读约定就说明：本章代码节选自该仓库的 `flash_attention4.py`，并轻微缩略。
+2. **它是现成的正确性基准**。仓库自带测试入口（`python -m tirx_kernels.test --kernel xxx`），装好后跑一条命令就能确认「环境 + 参考内核」整体工作正常，比先手写内核再排障要快得多。
+3. **revision 被钉死**。README 指定 checkout 到 `5be39749e7dfd2c4bdae9b4d396f8ec35af07126`，并说明这是「与 Apache TVM 0.26.0 一起测试过的 companion revision」。与 4.1 钉死 `apache-tvm==0.26.0` 同理：内核 API 与编译器版本是配套演进的，两边都钉死才能复现书中的行为。
 
 #### 4.4.2 核心流程
 
 ```text
+（可选，建议有 Blackwell GPU 时执行）
 1. git clone https://github.com/mlc-ai/tirx-kernels.git
 2. cd tirx-kernels
-3. git checkout 5be39749e7dfd2c4bdae9b4d396f8ec35af07126   # 钉死 revision
-4. pip install -e .                                        # 可编辑安装
-5. python -m tirx_kernels.test --kernel fp16_bf16_gemm     # 跑一个内核的测试
+3. git checkout 5be39749e7dfd2c4bdae9b4d396f8ec35af07126   # 钉死与 TVM 0.26.0 配套的 revision
+4. pip install -e .
+5. python -m tirx_kernels.test --kernel fp16_bf16_gemm     # 跑一个参考内核的自检
 ```
-
-`pip install -e .` 的可编辑安装意味着后续如果你在该仓库里改内核源码，不需要重新安装即可生效——适合「抄着参考实现学」的用法。测试入口是 `python -m tirx_kernels.test`，用 `--kernel` 选择要测的内核（书中示例为 `fp16_bf16_gemm`）。
 
 #### 4.4.3 源码精读
 
-安装步骤的出处是 README 的第 3 步：
+**（1）官方安装说明。** [README.md:L71-L79](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/README.md#L71-L79)：可选项第 3 步——克隆 `tirx-kernels`、checkout 到指定 revision、`pip install -e .` 可编辑安装。注意措辞「Use the companion revision tested with Apache TVM 0.26.0」：revision 与编译器版本是成对给出的。
 
-对应源码：[README.md:L71-L81](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/README.md#L71-L81)
+**（2）测试入口。** [README.md:L81](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/README.md#L81)：以 `python -m tirx_kernels.test --kernel fp16_bf16_gemm` 为例运行。这个命令的作用是在你的机器上编译并运行参考 GEMM 内核、执行其正确性测试——它跑通了，说明 4.1/4.2/4.4 三层（编译器、硬件、参考内核）全部就绪。
 
-这段先说明「（可选）安装参考内核」，并强调「使用与 Apache TVM 0.26.0 配套测试的 revision」；随后给出四条命令（clone → checkout 固定 commit → `pip install -e .`），最后一句给出运行示例：`python -m tirx_kernels.test --kernel fp16_bf16_gemm`。
+**（3）这个仓库贯穿全书后半部分。** [chapter_flash_attention/index.md:L270](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_flash_attention/index.md#L270) 交代了 FA4 章的代码出处：本章代码是从 `tirx-kernels`（同一 revision 链接）的 `flash_attention4.py` 中轻度缩略而来的节选，引用了在内核其他位置定义的 shape、stage 索引与 phase 变量。也就是说，读到 Part III/IV 时，这个仓库就是你的「完整版课本」。
 
 #### 4.4.4 代码实践
 
-**实践目标**：安装参考内核仓库并跑通至少一个内核测试，确认「编译器 + 硬件 + 参考内核」三方版本配对无误。
+**实践目标**：在有 Blackwell GPU 的机器上跑通一个官方参考内核的自检；无 GPU 时完成对应的源码阅读。
 
-**操作步骤**（有 Blackwell GPU 时）：
+**操作步骤**：
 
-```bash
-git clone https://github.com/mlc-ai/tirx-kernels.git
-cd tirx-kernels
-git checkout 5be39749e7dfd2c4bdae9b4d396f8ec35af07126
-pip install -e .
-python -m tirx_kernels.test --kernel fp16_bf16_gemm
-```
+- 路线 A（有 Blackwell GPU）：
 
-**需要观察的现象**：测试命令执行后输出的通过/失败信息。
+  ```bash
+  git clone https://github.com/mlc-ai/tirx-kernels.git
+  cd tirx-kernels
+  git checkout 5be39749e7dfd2c4bdae9b4d396f8ec35af07126
+  pip install -e .
+  python -m tirx_kernels.test --kernel fp16_bf16_gemm
+  ```
 
-**预期结果**：`fp16_bf16_gemm` 内核测试通过（待本地验证）。若失败，优先排查三方版本：tvm 是否 `0.26.0`、tirx-kernels 是否在指定 commit、GPU 是否 `sm_100a`。
+  期望测试通过（具体输出形式待本地验证）。
+- 路线 B（无 GPU）：不安装，改为打开 [chapter_flash_attention/index.md:L270](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_flash_attention/index.md#L270) 中链接的该 revision 下 `tirx_kernels/attention/flash_attention4.py`，浏览其顶层结构，确认「正文节选 ↔ 完整实现」的对应关系，并在 4.2.4 的限制清单中追加一条「tirx-kernels 未安装，Part III/IV 实践采用源码阅读方式」。
 
-**无 GPU 替代实践**：在 GitHub 上打开 [tirx-kernels 仓库](https://github.com/mlc-ai/tirx-kernels)，确认该 commit 存在并浏览其目录结构，写一句话回答：「参考内核仓库与本书正文的章节（GEMM、Flash Attention）大致如何对应？」（此为源码阅读型实践；仓库内部结构以实际页面为准。）
+**需要观察的现象**：路线 A 中测试命令会经历「编译参考内核 → 运行 → 数值校验」的过程，任何一环失败都会给出报错信息；路线 B 中应能在 `flash_attention4.py` 里找到正文提及的 `q_stage`、`acc_scale` 等名字。
+
+**预期结果**：路线 A 通过则环境全链路就绪；路线 B 产出一条清单记录。两者都算完成本实践——本手册两条路径都认可。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：为什么 `tirx-kernels` 要 checkout 固定 commit，而书却不锁定读者自己写的练习代码？
+**练习 1**：为什么 README 让你 `git checkout` 到一个具体 hash，而不是直接用 `tirx-kernels` 的 main 分支？
 
-**参考答案**：因为编译器与内核之间存在 API 契约。书中指定 `apache-tvm==0.26.0`，`tirx-kernels` 主分支会随编译器演进不断变动，只有那个被注明「与 Apache TVM 0.26.0 一起测试」的 revision 才保证与读者装好的编译器配对。读者自己照书写的练习代码本来就以书中的版本为准，不存在配对问题。
+**答案**：main 分支会随上游持续演进，内核 API 与编译器版本一旦错位就可能「照书敲却跑不通」。钉死的 revision 是与 `apache-tvm==0.26.0` 成对测试过的快照，把「内核代码」和「编译器」两边的变量同时固定，才能复现书中行为。这与 4.1 钉死 TVM 版本是同一个思想：可复现性来自成对钉死。
 
-**练习 2**：`pip install -e .` 与普通 `pip install .` 的区别在本场景下有什么意义？
+**练习 2**：`python -m tirx_kernels.test --kernel fp16_bf16_gemm` 跑通意味着什么？没跑通又该如何定位？
 
-**参考答案**：`-e` 是可编辑安装，包直接指向源码目录。学习本书时你可能会对照甚至修改 tirx-kernels 里的内核源码，可编辑安装让改动即时生效、无需反复重装，把参考仓库变成「可以动手做实验的教具」。
+**答案**：跑通意味着编译器、Blackwell GPU、cuda-bindings（NVRTC 路径）、参考内核四层全部正常，之后书中示例的失败基本可以归因于示例代码本身。没跑通则按层排查：先用 4.1 的命令确认 TVM 导入与版本，再用 4.2 的命令确认设备是 Blackwell——这正是调试附录「先环境、后内核」的第一步。
+
+**练习 3**：FA4 章的代码节选与 `tirx-kernels` 里的完整实现是什么关系？
+
+**答案**：正文为了讲解只摘取关键片段并做了轻度缩略，其中引用的 shape、stage 索引、phase 变量等在完整实现的内核其他位置定义。要运行或通读 FA4，需要安装（或对照阅读）README 钉死 revision 下的 `flash_attention4.py`。
 
 ## 5. 综合实践
 
-**任务：搭建你的「内核工作台」（kernel workbench）目录，一次搭好、全书复用。**
+**任务：制作一张「一键环境报告卡」。** 把本讲四个模块的检查合并成一个脚本 `env_report.py`，它不定义任何 TIRx 内核（因此形式上不受源码检视约束），逐项检查并在末尾给出结论。以下为示例代码：
 
-不管有没有 Blackwell GPU，都请完成以下目录（均为示例代码，需自行创建；`hgemm_v1` 部分照抄书中源码）：
+```python
+# 示例代码：环境报告卡（不定义 TIRx 内核，只做检查）
+rows = []
 
-```text
-mlsys-workbench/
-├── check_env.py        # 环境自检脚本
-├── kernels/
-│   └── hgemm_v1.py     # 从书中抄下的第一个内核（必须是文件！）
-└── run_hgemm.py        # 编译 + PyTorch 验证回路
+def check(name, fn):
+    try:
+        rows.append((name, "OK", str(fn())))
+    except Exception as e:
+        rows.append((name, "FAIL", f"{type(e).__name__}: {e}"))
+
+check("tvm/tirx 导入", lambda: __import__("tvm.tirx", fromlist=["tirx"]).__name__)
+def _tvm_info():
+    import tvm
+    return f"{tvm.__version__} @ {tvm.__file__}"      # 版本 + 导入路径
+check("TVM 版本与路径", _tvm_info)
+
+def _torch_info():
+    import torch
+    if not torch.cuda.is_available():
+        return "CUDA 不可用"
+    return (f"{torch.version.cuda}, {torch.cuda.get_device_name()}, "
+            f"capability={torch.cuda.get_device_capability()}")
+check("PyTorch/CUDA", _torch_info)
+
+for name, status, detail in rows:
+    print(f"[{status:>4}] {name:16s} {detail}")
+
+# 结论规则：
+#   全 OK 且 capability 属 Blackwell 一代 → 可运行书中内核
+#   tvm OK 但 CUDA 不可用               → 仅源码推演（对照 4.2.4 清单）
 ```
 
-**第一步：写 `check_env.py`**，把 4.2.4 的检查项固化成脚本，输出四行结论（tvm 版本 / torch CUDA 可用性 / 显卡型号与计算能力 / 最终判定）。每次换机器、升级依赖后重跑一次。
+要求：
 
-**第二步：填 `kernels/hgemm_v1.py`**，原样抄录 [chapter_intro_tirx/index.md:L72-L171](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L72-L171) 的 import 与 `hgemm_v1` 定义。这一步刻意训练「内核必须落在文件里」的肌肉记忆。
-
-**第三步：写 `run_hgemm.py`**，内容基于 [chapter_intro_tirx/index.md:L181-L205](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L181-L205) 的验证代码，并做一处增强：在 `assert_close` 之前打印 `max_err`，在编译之后调用 `print(ex.mod.imports[0].inspect_source())` 把生成的 CUDA 源码存档到 `generated_cuda.txt`。
-
-**验收标准**：
-
-- 有 Blackwell GPU：`python run_hgemm.py` 打印出小的 `max_err` 与 `PASS`，且 `generated_cuda.txt` 里能看到 `tcgen05` 相关指令（待本地验证）。
-- 无 GPU：`check_env.py` 如实输出不合格项，形成 4.2.4 表格的电子版存档；同时在笔记里写下「我的环境断点在第几步」。此后全书每个「运行型实践」都改用替代形态——用 `kernel.show()` / `kernel.script()` 检视 IR、用书中表格数据做计算推演、用 `img/scripts` 下的绘图脚本复现图表（这些不需要 GPU）。
-
-这个工作台把本讲四个模块串在一起：apache-tvm 安装（4.1）决定 `check_env.py` 第一行能否通过；sm_100a 要求（4.2）决定验收走哪条分支；验证回路（4.3）就是 `run_hgemm.py` 本身；而如果你还装了 tirx-kernels（4.4），以后遇到书中简化实现看不懂的地方，就去参考仓库找成熟版本对照。
+1. 运行脚本，把输出贴进自己的学习笔记；
+2. 依据输出填写 4.2.4 的环境限制清单，明确宣告后续各讲实践走「可运行」还是「源码推演」路径；
+3. 若报告显示 `tvm.__file__` 指向 wheel 之外的路径，先修复再继续；
+4. 无 GPU 的读者额外做一步：从 4.3.4 的 `hgemm_run.py` 中摘出 `kernel.show()` 的输出（若环境允许），确认能在 IR 层面看到 `Tx.gemm_async`，作为后续「推演型实践」的起点。脚本中 capability 到架构的最终判定请对照 NVIDIA 官方文档（待本地验证）。
 
 ## 6. 本讲小结
 
-- TIRx 不是独立包：它是 Apache TVM wheel 中的 `tvm.tirx` 模块，官方安装命令为 `pip install apache-tvm==0.26.0 cuda-bindings`，版本必须钉死。
-- `cuda-bindings` 不可省略：TVM 生成的 CUDA 源码要经 NVRTC 运行时编译，Python 侧绑定由它提供。
-- 运行书中内核的三项前提：Blackwell GPU（`sm_100a`，如 B200）+ TIRx 编译器 + CUDA 版 PyTorch；旧架构 GPU 缺少 `tcgen05`/TMEM 指令，装对工具链也跑不了。
-- 全书统一的验证套路：`tvm.compile(..., tir_pipeline="tirx")` 编译，`ex.mod(...)` 直接接受 PyTorch CUDA 张量，与 `A.float() @ B.float().T` 的参考结果做 `assert_close` 断言。
-- TIRx 通过 Python 源码检视解析内核：内核代码必须写在文件或 notebook 单元格中，`python -c` 只能用于导入验证这类不定义内核的命令。
-- `tirx-kernels` 是可选的参考内核仓库，安装时 checkout 到与 TVM 0.26.0 配对测试的固定 revision，用 `python -m tirx_kernels.test --kernel fp16_bf16_gemm` 验证。
+- TIRx 不是独立包：它以 `tvm.tirx` 模块随 `apache-tvm==0.26.0` wheel 发布，且必须与 `cuda-bindings`（NVRTC 绑定）一起安装，验证命令之外还要用 `tvm.__file__` 确认导入路径无污染。
+- 硬件门槛由指令集决定：书中内核依赖 `tcgen05.mma`、TMEM（`sm_100a` 上每 CTA 128 Lane × 512 Col）等 Blackwell 专属特性，非 Blackwell GPU 装好工具链也跑不了；target 写 `"cuda"` 时 TVM 自动检测架构。
+- 内核运行回路五步走：构造 `PrimFunc` → `tvm.compile(..., tir_pipeline="tirx")` → `ex.mod` 直接收 PyTorch 张量 → `assert_close` 对比 fp32 参考断言 `PASS` → `kernel.show()` / `inspect_source()` 对照 lowering 前后两级代码。
+- 一条格式硬约束：TIRx 依赖 Python 源码检视解析内核，内核代码必须写在文件或 notebook 单元格里；`python -c` 只能用于导入验证这类不定义内核的命令。
+- `tirx-kernels` 是可选但推荐的参考内核仓库，须 checkout 到与 TVM 0.26.0 成对测试的 revision；FA4 等章节的正文代码即节选自该仓库。
+- 没有 Blackwell GPU 不影响学习：产出环境限制清单后，后续各讲实践切换为源码推演、IR 检视与脚本复算路径。
 
 ## 7. 下一步学习建议
 
-环境课到此结束。按学习路线，下一讲是 **u2-l1「线程执行层级：thread 到 cluster」**——进入 Part I，从 GPU 的六级执行层级与 SIMT 模型开始建立硬件直觉；这是理解后续一切 scope 概念的地基。
+环境课到此结束。下一讲 **u2-l1《线程执行层级：thread 到 cluster》** 进入 Part I 的硬件部分：GPU 的六级执行层级（thread、warp、warpgroup、CTA、cluster、grid）与 SIMT 执行模型，并引出「操作 scope」概念——它是理解 TIRx 三要素之一 scope 的硬件基础。
 
-如果你想先「眼见为实」地看一眼内核长什么样，可以在进入 u2 之前通读 [chapter_intro_tirx/index.md](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md) 全章（不必看懂每行），重点关注 `hgemm_v1` 的四个阶段与 scope/layout/dispatch 三要素的提法——它们会在单元九（u9）正式展开。另外，无论有无 GPU，都建议把第 5 节的工作台目录建好：有 GPU 的读者会在 u9-l2 用它跑出第一个 `PASS`，无 GPU 的读者也会用 `check_env.py` 的结论决定后续实践的形态。
+建议带着本讲的结果进入下一讲：
+
+- 有 Blackwell GPU 的读者：环境报告卡全绿，后续遇到内核示例可直接套用 4.3 的五步回路。
+- 无 GPU 的读者：报告卡与限制清单就是你的「学习模式开关」，从 u2 起所有实践走推演路径；可以提前浏览 [chapter_intro_tirx/index.md:L209-L252](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_intro_tirx/index.md#L209-L252)（Scope、Layout、Dispatch 与编译小节），把本讲的「运行回路」与「三要素」概念先挂上钩，正式精读放在 u9。

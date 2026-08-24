@@ -1,0 +1,367 @@
+# Swizzle：消除 bank conflict 的地址重排
+
+## 1. 本讲目标
+
+学完本讲后，你应该能够：
+
+1. 解释 shared memory 的 bank 划分规则、bank conflict 的成因与代价（串行化为多个周期）。
+2. 写出 XOR swizzle 的地址公式，并用它手算 8×8 模式下任意元素的物理地址。
+3. 说出 SWIZZLE_128B 模式中 sector（16 B）与 atom（8×128 B）的含义，并根据 tile 的连续维宽度在 128B/64B/32B 三种模式中做出选择。
+4. 阅读并修改仓库中的 `gen_swizzle_conflict.py` 图表脚本与两个交互演示，用它们验证自己的推导。
+
+本讲是数据布局单元（单元四）的最后一讲。前面三讲建立了「布局 = 逻辑索引到物理位置的函数」这一观念（u4-l1 的 Shape-Stride 模型、u4-l2 的命名轴、u4-l3 的复制与偏移）；本讲处理一个更特殊的问题：**当同一个 tile 既要按行读、又要按列读时，任何简单布局都只能讨好其中一方**——swizzle 通过对地址做 XOR 重排，让两方都避开 bank conflict。
+
+## 2. 前置知识
+
+本讲默认你已了解以下概念（不熟悉可先回看对应讲义）：
+
+- **共享内存（SMEM）**：每个 CTA 私有的片上高速存储，常用来暂存 tile（见 u2-l2）。本讲讨论的 bank conflict 就发生在 SMEM 中。
+- **warp 与 lane**：32 个线程组成一个 warp，以 SIMT 方式锁步执行（见 u2-l1）。一条 warp 指令的 32 个 lane 若同时访问 SMEM，硬件会按 bank 检查它们能否并行完成。
+- **布局函数 \( f_D(x) \)**：把逻辑索引映射到物理位置，`S[(shape):(strides)]` 记号下是坐标与步长的点积（见 u4-l1）。
+- **XOR（按位异或，记作 \( \oplus \)）**：两位相同得 0，不同得 1。它有一条关键性质——**自反性**：\( (c \oplus r) \oplus r = c \)。也就是说「用 r 异或一次」和「再异或一次」互为逆操作，swizzle 的读写两侧都靠这条性质还原索引。
+
+一个快速热身（后面反复用到）：
+
+| \( c \) | \( c \oplus 1 \) | \( c \oplus 2 \) | \( c \oplus 3 \) |
+|---|---|---|---|
+| 0 | 1 | 2 | 3 |
+| 1 | 0 | 3 | 2 |
+| 2 | 3 | 0 | 1 |
+| 3 | 2 | 1 | 0 |
+| 4 | 5 | 6 | 7 |
+| 5 | 4 | 7 | 6 |
+| 6 | 7 | 4 | 5 |
+| 7 | 6 | 5 | 4 |
+
+注意每一列都是 0–7 的一个**排列**——这不是巧合，而是 swizzle 保持「一元素一位置」的根本原因。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+|---|---|
+| `chapter_data_layout/index.md` | 书中「Data Layout」一章，末节 `## Swizzle Layout`（L430 起）是本讲的主要正文依据 |
+| `img/scripts/gen_swizzle_conflict.py` | matplotlib 脚本，生成书图 `img/swizzle_conflict.svg`：左=按行写（无冲突）、中=8×8 行主序 tile（颜色=bank）、右=按列读（8 重冲突） |
+| `_extra/demo/swizzle_8x8.html` | 交互演示：8×8 矩阵、1 元素=1 bank，并排对比「无 swizzle」与「XOR swizzle」两种布局的逐周期读 |
+| `_extra/demo/swizzle_128B.html` | 交互演示：SWIZZLE_128B 模式，8 行 × 32 bank，每 4 个 bank 构成一个 16 B sector |
+
+辅助材料（本讲也会引用）：
+
+- `_extra/demo/swizzle_atom_general.html`：对比 128B/64B/32B 三种 atom 形状，外加一个无 XOR 的 16 B 交错模式（正文 [chapter_data_layout/index.md:537-540](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_data_layout/index.md#L537-L540) 处以 iframe 嵌入）。
+- `img/scripts/README.md`：全部图表脚本的运行方式清单。
+- `img/async-warpgroup-smem-layout-128B-k.png`：NVIDIA PTX ISA 官方 128B swizzle 图，正文在 [chapter_data_layout/index.md:496-503](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_data_layout/index.md#L496-L503) 引用。
+
+提醒：`_extra/demo/` 下的 HTML 在构建站点时会被原样拷入（u1-l2 讲过 `html_extra_path` 机制），正文通过 iframe 引用；本地直接用浏览器打开这些 HTML 也可以交互，不需要构建整本书。
+
+## 4. 核心概念与源码讲解
+
+### 4.1 SMEM bank conflict：成因与代价
+
+#### 4.1.1 概念说明
+
+现代 NVIDIA GPU 把 shared memory 划分为 **32 个 bank**，连续的 32-bit 字轮流映射到连续的 bank。硬件在每个周期内，一个 bank 只能服务一次（宽度为一个字大小的）访问。于是：
+
+- 如果同一批访问落在**不同 bank**，它们可以并行完成——这是理想情况。
+- 如果同一批访问落进**同一个 bank 的不同地址**，硬件只能把它们**串行化**，一个周期处理一个——这就是 **bank conflict**。8 个访问撞进同一个 bank，就是 8 重（8-way）conflict，需要 8 个周期。
+- 唯一的例外是**广播**：多个 lane 读**同一个地址**时，硬件可以把这个字广播给所有 lane，不算冲突。
+
+为什么代价值得关注：SMEM 本来是低延迟的快存储，bank conflict 会把它的一次访问拉长成多个周期，直接降低内核的内存吞吐。对 Tensor Core 内核来说，SMEM 读往往在关键路径上（u2-l3 讲过三段式流水线），冲突会拖慢整个流水线。
+
+#### 4.1.2 核心流程
+
+对字节地址 `addr`，bank 号的计算规则（本章采用的 4 字节 bank 粒度）：
+
+\[ \text{bank} = \left\lfloor \text{addr} / 4 \right\rfloor \bmod 32 \]
+
+一次 warp 级 SMEM 访问的判定流程：
+
+1. warp 指令先按访问宽度切成若干**处理批**（Nsight Compute 称为 **wavefront**）：每 lane 4 字节的访问把 32 个 lane 放进一个 wavefront；8 字节按 16 lane 一组；16 字节按 8 lane 一组。
+2. 每个 wavefront 最多搬运 128 字节（32 bank × 4 字节）。
+3. **bank conflict 只在同一 wavefront 内部判定**。例如 8 字节访问时，lane 0 和 lane 16 分属不同 wavefront，即使撞进同一 bank 也不互相冲突。
+4. 同一 wavefront 内：同 bank 同地址 → 广播（1 周期）；同 bank 不同地址 → 串行（冲突次数个周期）；不同 bank → 并行（1 周期）。
+
+直观理解为什么「按行写、按列读」会出问题：8×8 行主序 tile 中，一行 8 个元素地址连续，自然散进不同 bank；而一列 8 个元素的地址都相差一整行步长——若步长恰好是 bank 映射周期的整数倍，它们会全部落进**同一个 bank**。
+
+#### 4.1.3 源码精读
+
+**（1）正文对 bank 规则与冲突的定义**。[chapter_data_layout/index.md:432-451](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_data_layout/index.md#L432-L451) 给出：32 bank 的划分、`bank = (addr // 4) % 32` 公式、冲突与广播的定义，以及 wavefront（按访问宽度切批、每批最多 128 字节、只在批内判冲突）的完整规则。这段是本模块所有推导的公理来源。
+
+**（2）行访问与列访问的取舍**。[chapter_data_layout/index.md:453-458](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_data_layout/index.md#L453-L458) 说明：张量程序常对同一 tile 做双向访问（某处读连续行、另一处抽列）；行主序对行友好、对列不友好，列主序正好相反。这段话就是 swizzle 要解决的问题陈述——**任何简单布局只能讨好一个方向**。
+
+**（3）图表脚本把冲突画了出来**。`gen_swizzle_conflict.py` 的文件头注释写明了三联图结构（中=按 bank 着色的 8×8 tile，左=合并的行写，右=按列读）：[img/scripts/gen_swizzle_conflict.py:1-5](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/scripts/gen_swizzle_conflict.py#L1-L5)。
+
+- 中间面板按「颜色 = bank 组 = 列号」给 8×8 tile 上色，即每个格子的颜色由 `COLS[c]` 决定：[img/scripts/gen_swizzle_conflict.py:27-38](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/scripts/gen_swizzle_conflict.py#L27-L38)。行号 `WR_ROW, RD_COL = 2, 5` 指定要高亮的行与列（第 29 行）。
+- 左面板「WRITE — one row」：一行的 8 个元素落进 bank 0…7，全部不同，标注 `✓ conflict-free`：[img/scripts/gen_swizzle_conflict.py:45-57](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/scripts/gen_swizzle_conflict.py#L45-L57)。
+- 右面板「READ — one column」：标注 `(ldmatrix)`——这正是 Tensor Core 内核用 `ldmatrix` 从 SMEM 抽取列 fragment 的真实场景；8 个元素全部是 `b5`，标注 `✗ 8-way conflict`：[img/scripts/gen_swizzle_conflict.py:60-74](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/scripts/gen_swizzle_conflict.py#L60-L74)。
+- 底部图注点题：行横跨 8 个 bank 组（互不相同），列只有 1 个 bank 组（×8 串行）：[img/scripts/gen_swizzle_conflict.py:76-78](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/scripts/gen_swizzle_conflict.py#L76-L78)。
+
+注意这个示意把 32 个物理 bank 简化成 8 个 bank 组（1 元素 = 1 bank），与正文 8×8 演示的简化方式一致（[chapter_data_layout/index.md:464-465](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_data_layout/index.md#L464-L465)：把 32 bank 缩减为 8 个）。
+
+#### 4.1.4 代码实践
+
+**实践目标**：运行书图脚本复现 `swizzle_conflict.svg`，并通过修改「读哪一列 / 写哪一行」验证两个结论——任意列读都是 8 重冲突、任意行写都无冲突。
+
+**操作步骤**：
+
+1. 按 [img/scripts/README.md:3-23](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/scripts/README.md#L3-L23) 的约定，在仓库根目录执行：
+
+   ```bash
+   cd img/scripts
+   python gen_swizzle_conflict.py   # -> ../swizzle_conflict.svg
+   ```
+
+   依赖 matplotlib（README 标注脚本集需要 `matplotlib`、`numpy`；本脚本源码只 import 了 matplotlib）。脚本无随机成分，输出应与已检入的 `img/swizzle_conflict.svg` 完全一致，`git diff` 应无变化；若不放心可先备份该 SVG。
+
+2. 打开生成的 SVG（或直接看仓库里的 `img/swizzle_conflict.svg`），对照 4.1.3 的三个面板读一遍。
+
+3. 修改 [img/scripts/gen_swizzle_conflict.py:29](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/scripts/gen_swizzle_conflict.py#L29) 中的 `RD_COL = 5` 为 `RD_COL = 3`，重新运行，观察右面板。
+
+4. 再把 `WR_ROW = 2` 改成 `WR_ROW = 7`，重新运行，观察左面板。
+
+**需要观察的现象**：
+
+- 第 3 步后，右面板仍是 8 重冲突（颜色换成列 3 对应的 bank 色），但面板下方文字仍写死为 `all bank 5: same`（[img/scripts/gen_swizzle_conflict.py:71](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/scripts/gen_swizzle_conflict.py#L71)）——这是一个很好的代码阅读发现：标签没有跟随 `RD_COL` 联动。改成 f-string（如 `f"all bank {RD_COL}: same"`）即可修复。
+- 第 4 步后，左面板依然是 `✓ conflict-free`，与行号无关。
+
+**预期结果**：无 swizzle 时，「按列读」的冲突程度与选哪一列无关（每列独占一个 bank 组）；「按行写」永远无冲突。这正是 4.1.1 的结论在图上的呈现。本环境未运行 matplotlib，实际图形输出**待本地验证**；上述行为是从脚本源码（高亮框与标签均由 `RD_COL`/`WR_ROW` 驱动）直接推导的。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：字节地址 `0x104`（十进制 260）落在哪个 bank？
+
+**答案**：\( \lfloor 260/4 \rfloor \bmod 32 = 65 \bmod 32 = 1 \)，bank 1。
+
+**练习 2**：一条每 lane 8 字节的 SMEM 读指令，lane 0 与 lane 16 访问同一 bank 的不同地址，lane 0 与 lane 1 也访问同一 bank 的不同地址。哪些 lane 之间构成冲突？
+
+**答案**：8 字节访问按 16 lane 一组切 wavefront：lane 0–15 一组、lane 16–31 一组。lane 0 与 lane 1 同组且同 bank 不同地址 → 冲突；lane 0 与 lane 16 分属不同 wavefront → 不冲突（依据 [chapter_data_layout/index.md:445-451](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_data_layout/index.md#L445-L451)）。
+
+**练习 3**：8 个 lane 读同一 bank 中的**同一地址**，需要几个周期？
+
+**答案**：1 个周期。同地址访问触发硬件广播，不属于 bank conflict（[chapter_data_layout/index.md:441-444](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_data_layout/index.md#L441-L444)）。
+
+### 4.2 XOR swizzle 与 8×8 模式
+
+#### 4.2.1 概念说明
+
+**Swizzle** 是一类「不改变 tile 逻辑形状、只重排物理地址」的布局变换。最常用的手法是：**把行索引的一部分按位异或进列索引**，让同一逻辑列的元素在不同行落到不同 bank。
+
+为什么这样就够了？回到 4.1 的病根：无 swizzle 时一列元素的 bank 全等于列号 `c`。做了 `mapped_col = c ⊕ r` 之后，第 r 行中逻辑列 c 的元素落在 bank `c ⊕ r`——对固定的 c，r 变化时 `c ⊕ r` 取遍 0…7（异或固定值是双射），于是 8 行的访问散进 8 个 bank，一列读从 8 周期降到 1 周期。同时行读也不受损：对固定的 r，`c ⊕ r` 随 c 也是双射，一行仍然横跨 8 个不同 bank。
+
+一句话直觉：**XOR 让「列号→bank」的映射逐行轮转，行读与列读同时无冲突**。
+
+#### 4.2.2 核心流程
+
+8×8 模式（1 元素 = 1 bank 的简化模型）下，逻辑坐标 `(r, c)` 到物理位置的映射：
+
+\[ \text{mapped\_col} = c \oplus r, \qquad \text{物理位置} = r \cdot 8 + (c \oplus r) \]
+
+逆向映射（读回时由物理位置还原逻辑列）利用 XOR 的自反性：
+
+\[ c = \text{mapped\_col} \oplus r \]
+
+逐周期读的判定流程（与交互演示的逻辑一致）：
+
+1. 收集本次访问的所有 `(r, c)`。
+2. 对每个访问计算 bank = `c ⊕ r`（无 swizzle 则为 `c`）。
+3. 按 bank 分组；**最大组的大小 = 冲突重数 = 所需周期数**。
+4. 每个周期内，每个 bank 最多出一个访问。
+
+数学上值得记下的两条性质：
+
+- **双射性**：对固定 r，\( c \mapsto c \oplus r \) 是 {0..7} 上的双射；对固定 c，\( r \mapsto c \oplus r \) 同样是双射。前者保证行读无冲突、后者保证列读无冲突，也保证每个元素仍有唯一物理位置（布局不丢元素、不重叠，呼应 u4-l2 的双射性检验）。
+- **对合性（自反）**：\( (c \oplus r) \oplus r = c \)，所以写入端与读取端用同一条 XOR 公式即可互逆，不需要额外的逆表。
+
+#### 4.2.3 源码精读
+
+**（1）正文的定义与 8×8 例子**。[chapter_data_layout/index.md:460-462](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_data_layout/index.md#L460-L462) 给出 swizzling 的定义：保持逻辑形状、重排物理地址，常见做法是把行索引的一部分 XOR 进列索引。随后 [chapter_data_layout/index.md:464-482](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_data_layout/index.md#L464-L482) 展开 8×8 演示：无 swizzle 时 `bank = logical_col`，选列 3 全部落进 bank 3（8 重冲突）；swizzle 后 `mapped_col = logical_col XOR row`、`bank = mapped_col`，读逻辑列 0 时 8 行分别落 bank 0…7，可全并行。正文最后总结：前者 8 周期、后者 1 周期（[chapter_data_layout/index.md:489-490](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_data_layout/index.md#L489-L490)）。
+
+**（2）交互演示的实现**。`swizzle_8x8.html` 页面标题下就写着核心公式 `mapped_col = logical_col XOR row`（8×8 矩阵、1 元素 = 1 bank）：[_extra/demo/swizzle_8x8.html:77-78](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/swizzle_8x8.html#L77-L78)。三个核心函数只有一行，但把读写两个方向都覆盖了：[_extra/demo/swizzle_8x8.html:118-123](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/swizzle_8x8.html#L118-L123)
+
+```js
+const bank = (r,c,sw) => sw ? (c^r) : c;        // 物理 bank
+const physCol = (r,c,sw) => sw ? (c^r) : c;      // 逻辑列的物理列位置
+const logAtPhys = (r,p,sw) => sw ? (p^r) : p;    // 物理位置上的逻辑列（逆映射）
+```
+
+注意 `logAtPhys` 与 `physCol` 用的是**同一条** `p^r` 公式——这就是 4.2.2 说的对合性在代码里的样子。页面上「Without Swizzle」与「With Swizzle (XOR)」两个并排面板（[_extra/demo/swizzle_8x8.html:92-99](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/swizzle_8x8.html#L92-L99)）分别对应 `sw=0` 与 `sw=1`。
+
+**（3）逐周期分组逻辑**。演示把一次访问按 bank 分组、以「最大组大小」为周期数，正是 4.2.2 的判定流程：[_extra/demo/swizzle_8x8.html:131-139](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/swizzle_8x8.html#L131-L139) 中 `getCycles` 先用 `bank(x.r,x.c,sw)` 建 `bank → 访问列表` 的 Map，再取各组最大长度 `mx` 作为周期数，逐周期从每组各取一个访问。页面下方的「Cycle-by-Cycle Reads」时间轴（[_extra/demo/swizzle_8x8.html:104-110](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/swizzle_8x8.html#L104-L110)）就是这份分组结果的回放，可以点 `▶` 逐周期看。
+
+**（4）图注里的同一条公式**。SVG 脚本的收尾图注直接写出 `Swizzle stores column c at c⊕r`：[img/scripts/gen_swizzle_conflict.py:76-78](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/scripts/gen_swizzle_conflict.py#L76-L78)——脚本画的是「无 swizzle 的病因」，图注预告了「swizzle 的药方」。
+
+#### 4.2.4 代码实践
+
+**实践目标**：用 XOR 公式手算 8×8 swizzle 下前三行每个元素的物理地址，并在交互演示中逐项核对。
+
+**操作步骤**：
+
+1. 手算：对 r = 0, 1, 2 与 c = 0…7，计算 `物理位置 = r·8 + (c ⊕ r)`，填出一张 3×8 的表（下面「预期结果」给出了答案，先自己算再对）。
+2. 打开交互演示：直接用浏览器打开 `_extra/demo/swizzle_8x8.html`（或在本地构建的站点里查看正文 [chapter_data_layout/index.md:484-487](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_data_layout/index.md#L484-L487) 处嵌入的 iframe）。
+3. 点选 `Read Col`、索引 0，观察「With Swizzle (XOR)」面板：读的是逻辑列 0 的 8 个格子，看它们落在哪些物理列/bank 上。
+4. 切到 `Read Row`、索引 1，确认行读在 swizzle 后依然 1 周期完成。
+5. 用第 1 步的表格抽查 3 个格子：演示网格的横轴是**物理列位置**、格中数字是**逻辑列号**（[_extra/demo/swizzle_8x8.html:173-183](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/swizzle_8x8.html#L173-L183)：每个格子先算 `logAtPhys(r,p,swz)` 再显示）。核对你的「物理位置 → 逻辑列」与显示值一致。
+
+**需要观察的现象**：
+
+- 列 0 在 swizzle 面板中，8 个格子分别位于 8 行的物理列 0,1,2,…,7（因为 `0 ⊕ r = r`），颜色（bank）各不相同，`Bank Activity` 条上 8 个 bank 全亮，周期数为 1。
+- 同样的列 0 在「Without Swizzle」面板全部落在物理列 0（同一 bank），周期数为 8。
+
+**预期结果**（手算答案，物理位置以元素为单位，行主序基址为 `r·8`）：
+
+| r \ c | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|---|---|---|
+| 0（`c⊕0`） | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+| 1（`c⊕1`） | 9 | 8 | 11 | 10 | 13 | 12 | 15 | 14 |
+| 2（`c⊕2`） | 18 | 19 | 16 | 17 | 22 | 23 | 20 | 21 |
+
+换个视角读同一张表——「物理位置 p 上放的是哪个逻辑列」（`c = p' ⊕ r`，p' 为行内偏移）：r=1 行从左到右的逻辑列标签是 `1, 0, 3, 2, 5, 4, 7, 6`。这与正文引用 NVIDIA PTX 官方 128B 图时的对照完全一致：官方图把行偏移 8 加上同一排列，得到 `9, 8, 11, 10, 13, 12, 15, 14`（[chapter_data_layout/index.md:505-511](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_data_layout/index.md#L505-L511)）——也和上表 r=1 行的数值严丝合缝。两图只是编号方式不同（演示用行内逻辑列 0–7，官方图对整个矩阵连续编号 0–63）。
+
+演示的交互结果**待本地验证**（需要在浏览器中打开）；表中数值由公式直接推出，可独立复算。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：写出 r=3 行的物理排列（行内从左到右各物理位置上的逻辑列号）。
+
+**答案**：`c = p ⊕ 3`：p=0…7 对应 c = 3, 2, 1, 0, 7, 6, 5, 4。可对照热身表第 4 列。
+
+**练习 2**：证明：swizzle 后读任意逻辑列 c（r=0…7）都不会有 bank conflict。
+
+**答案**：8 个访问的 bank 分别为 `c ⊕ 0, c ⊕ 1, …, c ⊕ 7`。固定 c 时映射 \( r \mapsto c \oplus r \) 是 {0,…,7} 上的双射（异或可逆），故 8 个 bank 两两不同，每 bank 一个访问，1 周期完成，无冲突。
+
+**练习 3**：如果把 swizzle 公式换成 `mapped_col = (c + r) % 8`（加法轮转而不是 XOR），列读还有冲突吗？行读呢？
+
+**答案**：列读同样无冲突（固定 c 时 \( r \mapsto (c+r) \bmod 8 \) 也是双射）。行读也无冲突（固定 r 时 \( c \mapsto (c+r) \bmod 8 \) 是双射）。在 8×8、按整行索引异或的简化模型里，加法轮转与 XOR 效果等价；正文选择 XOR 是因为它直接对应真实硬件的 swizzle 模式（128B/64B/32B 系列都用 XOR，见下一模块），且 XOR 电路上就是对固定的几个位做翻转。注意：真实硬件的 swizzle 只异或**行索引的高几位**（对应 sector 编号），不是整个行号——细节见 4.3。
+
+### 4.3 128B swizzle 模式：sector、atom 与模式选择
+
+#### 4.3.1 概念说明
+
+8×8 演示是教学简化（1 元素 = 1 bank）。真实硬件的 swizzle 以 **SWIZZLE_128B** 等模式出现，有两个新概念：
+
+- **sector（16 B）**：128 位为一个单元的存储块。按 4 字节 bank 粒度，一个 sector 占 **4 个相邻 bank**。
+- **atom（原子块）**：地址重排的最小重复单元。`SWIZZLE_128B` 的 atom 是 **8 行 × 每行 8 个 sector**：每行宽 8×16 B = 128 B（模式名由此而来），总大小 8 × 128 B = **1024 B**。注意「128B」指**atom 一行的宽度（沿连续维的字节数）**，不是 atom 总大小。更大的 tile 通过平铺多个 atom 构成。
+
+SWIZZLE_128B 的重排规则与 8×8 演示同构，只是作用单位从「单个元素」升级为「sector」：
+
+\[ \text{physical\_sector} = \text{logical\_sector} \oplus \text{row} \]
+
+行内 sector 的 4 个 bank 跟随 sector 整体平移（`bank = (s ⊕ r)·4 + off`，off 为 sector 内偏移 0…3）。一行 8 个 sector 恰好覆盖全部 32 个 bank。
+
+还有两个工程要点：
+
+1. **选择规则**：在 tile 的连续维（一行）能支撑的前提下，选行宽最大的 atom。行宽 N 字节的 atom 要求连续维至少 N 字节、最好被 N 整除；不足 128 B 时退而求 `SWIZZLE_64B`（atom 8×64 B）或 `SWIZZLE_32B`（8×32 B）。
+2. **保证是有条件的**：无冲突的承诺只在「元素位宽、对齐、访问模式都与硬件描述符匹配」时成立；改任何一个条件都可能把冲突请回来。并且**所有访问同一 tile 的操作必须使用同一 swizzle 模式**，由组合后的布局统一做地址变换——不同硬件单元的 swizzle 要求不同，还会随 GPU 代际变化（正文预告下一章讨论这些约束）。
+
+最后一点理论定位：XOR 置换**不是仿射映射**，所以 swizzle 不是 `S[...]` 仿射布局的一部分，而是一个**与布局组合的独立地址变换**——整体映射可看作两步：`S[...]` 先把逻辑元素映到 `@m` 线性地址，swizzle 再重排该地址。这个「组合」视角会在 u10-l3 的 `ComposeLayout` 中落地。
+
+#### 4.3.2 核心流程
+
+SWIZZLE_128B（K-major，fp16 访问为例）下一次列读的判定流程：
+
+1. 把 tile 看成 8 行 × 8 sector；每个 sector 16 B，含 4 个 bank（每 bank 4 B 一个元素）。
+2. 「列 tile」= 一列 sector 跨 8 行：8 行 × 4 元素 = 32 次读，正好是一个 warp 的 32 lane 各读一个 4 B 元素。
+3. 无 swizzle：8 行的同一逻辑 sector 映射到同一组 4 个 bank → 每个 bank 被撞 8 次 → **8 周期**（8 重冲突）。
+4. 有 swizzle：第 r 行该 sector 落在 sector 组 `s ⊕ r`，覆盖 bank `(s⊕r)·4 … (s⊕r)·4+3`；固定 s 时 `s ⊕ r` 随 r 取遍 0…7 → 32 次访问覆盖全部 32 个 bank 各一次 → **1 周期**。
+5. 「行 tile」（1 行 × 32 元素）：一行本身横跨 32 个 bank，swizzle 与否都是 1 周期（行内 sector 的 XOR 只是换序，不重叠）。
+
+atom 的平铺：tile 宽超过 8 个 sector 时，每 8 个 sector 构成一列 atom，地址置换在每个 atom 内部独立重复；行数超过 8 时同理按 atom 行堆叠。
+
+#### 4.3.3 源码精读
+
+**（1）sector 与 atom 的定义**。[chapter_data_layout/index.md:513-521](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_data_layout/index.md#L513-L521)：图中每个 128-bit 单元格称为 16 B sector；`SWIZZLE_128B` 的每行 8 个 sector 共 128 B；4 字节 bank 粒度下每 sector 占 4 个相邻 bank，一行覆盖全部 32 bank；swizzle 用行坐标对行内 8 个 sector 做 XOR 置换；atom 共 8 行、总大小 8×128 B = 1024 B，且明确「128B 是每行沿连续维的宽度，不是 atom 总大小」；atom 是地址置换的最小重复块，大 tile 由多个 atom 平铺而成。
+
+**（2）与 8×8 演示的同构性**。[chapter_data_layout/index.md:492-511](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_data_layout/index.md#L492-L511)：正文先给出 NVIDIA PTX ISA 官方的 K-major 128B swizzle 图，并指出它与 8×8 演示右面板「用同一条 XOR 规则置换每行 8 个位置」，只是标号方式不同；随后逐行对照了 r=1 的排列（见 4.2.4 的表）。
+
+**（3）128B 交互演示的实现**。页面副标题给出公式 `physical_sector = logical_sector XOR row`（8 行 × 32 bank、每 sector 4 bank）：[_extra/demo/swizzle_128B.html:97-98](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/swizzle_128B.html#L97-L98)。核心常量与映射函数：[_extra/demo/swizzle_128B.html:169-180](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/swizzle_128B.html#L169-L180)
+
+```js
+const ROWS=8, SECS=8, BPS=4, BCOLS=32;      // 8 行、8 sector、每 sector 4 bank、共 32 bank
+const swizSec = (row,sec) => sec ^ row;     // XOR 只作用在 sector 编号上
+function physBank(row,bc,sw){
+  const sec=Math.floor(bc/BPS), off=bc%BPS;
+  return (sw ? swizSec(row,sec) : sec)*BPS + off;   // bank = (s⊕r)·4 + off
+}
+```
+
+注意与 8×8 演示的差别：这里 XOR 的对象是 **sector 编号**（行内 8 个 16 B 块的序号），sector 内 4 个 bank 的偏移 `off` 原样跟随——这正是 4.3.1 说的「重排单位从元素升级为 sector」。页面底部信息区直接写出了两种访问的周期数结论：列 tile（8×4，单 sector）swizzle 后 1 周期、无 swizzle 8 周期；行 tile（1×32）恒 1 周期：[_extra/demo/swizzle_128B.html:136-142](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/swizzle_128B.html#L136-L142)。演示的配色也体现了 sector 结构：8 个基色、每色 4 个明度变体 = 8 sector × 4 bank（[_extra/demo/swizzle_128B.html:145-167](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/swizzle_128B.html#L145-L167)）。
+
+**（4）模式家族与选择规则**。[chapter_data_layout/index.md:531-556](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_data_layout/index.md#L531-L556)：`SWIZZLE_64B`/`SWIZZLE_32B` 的 atom 分别是 8×64 B 与 8×32 B（另有 16 B 交错模式，无 XOR）；实用规则是「选 tile 能支撑的最大行宽 atom，行宽 N B 要求连续维 ≥ N B 且最好被 N 整除」；行宽至少 128 B（即 64 个 float16）时通常首选 `SWIZZLE_128B`，否则依次降级；并强调无冲突保证依赖于元素位宽/对齐/访问模式与描述符匹配。
+
+**（5）理论定位与一致性要求**。[chapter_data_layout/index.md:558-566](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_data_layout/index.md#L558-L566)：实践中程序员不手算 swizzle 地址；整体映射分两步——`S[...]` 先映到 `@m` 线性地址，swizzle 再重排；因为 XOR 置换非仿射，它不属于仿射布局本身，而是与之组合的独立地址变换；访问同一 tile 的每个操作必须使用同一 swizzle 模式，由组合后的布局统一处理；不同硬件单元的要求不同且随代际变化（引出下一章）。
+
+#### 4.3.4 代码实践
+
+**实践目标**：体验「位宽/模式参数」如何影响冲突——分别通过交互演示的选择器与脚本着色修改，观察 bank 行为变化，并用正文规则为一个具体 tile 选模式。
+
+**操作步骤**：
+
+1. 打开 `_extra/demo/swizzle_128B.html`，选 `Column Tile (8×4)`，任选一个 sector 索引，对比两面板的周期数（8 vs 1）；再点 `Row Tile (1×32)` 确认恒为 1 周期。
+2. 同页反复切换 sector 索引 0…7：观察无 swizzle 面板始终 8 周期、swizzle 面板始终 1 周期——结论与选哪个 sector 无关（双射性）。
+3. 打开 `_extra/demo/swizzle_atom_general.html`（正文 [chapter_data_layout/index.md:537-540](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_data_layout/index.md#L537-L540) 嵌入），切换 swizzle 格式（128B/64B/32B/16B 交错）与数据类型，观察 atom 形状（`8 × N B`）如何随格式变化，悬停单元格查看元素在 atom 内的重排去向。
+4. 脚本级修改（把 8×8 示意图升级成 swizzle 视图）。在 [img/scripts/gen_swizzle_conflict.py:30-35](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/scripts/gen_swizzle_conflict.py#L30-L35) 的中间面板双层循环里，把格子的着色从列号改为「swizzle 后的 bank」：
+
+   ```python
+   # 示例代码：将 facecolor=COLS[c] 改为按 swizzle 后的 bank 着色
+   ax.add_patch(Rectangle((x, y), cw, ch, facecolor=COLS[(c ^ r) % 8], ...))
+   ```
+
+   同步把右面板 READ 的 bank 标签由固定 `f"b{RD_COL}"` 改为 `f"b{RD_COL ^ r}"`（[img/scripts/gen_swizzle_conflict.py:66-70](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/scripts/gen_swizzle_conflict.py#L66-L70)）。重新运行脚本，查看输出 SVG。
+
+5. 纸面推演一个「位宽变化」：tile 为 fp16（2 B）、行内有 64 个元素时选什么模式？若元素改为 fp32（4 B）、行内 32 个元素呢？
+
+**需要观察的现象**：
+
+- 第 4 步后，中间面板同一列的 8 个格子颜色互不相同（每行颜色整体轮转）；右面板 8 行的 bank 标签变成 `b{RD_COL^r}`，即 8 个不同 bank，`✗ 8-way conflict` 的结论不再成立（图注文字需要自行同步改写，否则图文不符）。
+- 第 5 步推演：fp16×64 元素 = 128 B 行宽 → `SWIZZLE_128B`；fp32×32 元素同样是 128 B 行宽 → 仍是 `SWIZZLE_128B`。行宽按**字节**而不是元素个数计算，这正是「位宽参数」影响模式选择的实质。
+
+**预期结果**：模式选择只看连续维字节宽度（≥128 B 首选 128B 模式，64/32 B 依次降级，最好整除）；元素位宽决定「一行有多少元素、一个 sector 装多少个元素」，从而决定访问模式与描述符是否匹配——不匹配时无冲突保证失效。脚本改动的图形输出**待本地验证**（本环境无法运行 matplotlib）；着色逻辑 `COLS[(c ^ r) % 8]` 的正确性可由 4.2 的手算表直接核对。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：一个 K-major 的 fp16 tile，连续维一行有 48 个元素。应选哪种 swizzle 模式？
+
+**答案**：48 × 2 B = 96 B 行宽。不足 128 B，不能选 `SWIZZLE_128B`；≥ 64 B，选 `SWIZZLE_64B`（atom 8×64 B）。规则出处：[chapter_data_layout/index.md:545-551](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_data_layout/index.md#L545-L551)。
+
+**练习 2**：`SWIZZLE_128B` atom 的一行中，第 5 行（r=5）的第 2 个 sector（s=2）落在哪些 bank？
+
+**答案**：物理 sector = `2 ⊕ 5 = 7`（二进制 010 ⊕ 101 = 111），覆盖 bank `7×4 … 7×4+3`，即 bank 28–31。
+
+**练习 3**：为什么说「swizzle 不是 `S[...]` 布局的一部分」？
+
+**答案**：`S[(shape):(strides)]` 的 \( f_D(x) \) 是坐标与步长的点积——仿射（线性）映射；而 XOR 置换 \( (s \oplus r) \) 按位混合、非线性，无法写成任何 strides 的点积。所以整体映射分两步：`S[...]` 先给出 `@m` 线性地址，swizzle 作为独立的地址变换与之组合（[chapter_data_layout/index.md:558-561](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_data_layout/index.md#L558-L561)）。这也是 TIRx 里要用 `ComposeLayout` 单独表达它的原因（见 u10-l3）。
+
+**练习 4**：同一个 SMEM tile，TMA 写入用了 `SWIZZLE_128B`，而后续某条 `ldmatrix` 按无 swizzle 的行主序地址去读，会发生什么？
+
+**答案**：读到的元素位置全错——swizzle 的写入端与读取端必须用同一条 XOR 规则互逆还原。正文明确要求「访问同一 tile 的每个操作必须使用同一 swizzle 模式」，由组合后的布局统一完成地址变换（[chapter_data_layout/index.md:563-566](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_data_layout/index.md#L563-L566)）。这不是性能问题，而是正确性问题。
+
+## 5. 综合实践
+
+**任务：把「病因图 → 药方公式 → 模式选择」整条链自己走一遍。**
+
+1. **复现病因图**：按 `img/scripts/README.md` 运行 `gen_swizzle_conflict.py`，确认 `img/swizzle_conflict.svg` 重新生成且 `git diff` 无变化。
+2. **手算药方**：写出 8×8 XOR swizzle 下 r=0,1,2 三行的完整物理地址表（4.2.4 已给答案，先独立算完再对表），并用 \( (c \oplus r) \oplus r = c \) 抽查 3 个元素还原逻辑坐标。
+3. **改图验证**：按 4.3.4 第 4 步给脚本加上 swizzle 着色（`COLS[(c ^ r) % 8]` 与 `b{RD_COL ^ r}` 标签），重新生成 SVG；对照手算表检查中间面板第 1 行的颜色顺序是否为热身表中 `c⊕1` 列的取值顺序。修改只做在本地副本或可还原的临时改动上，验证后还原脚本，不要把改动留在仓库里。
+4. **交互对照**：在 `swizzle_8x8.html` 与 `swizzle_128B.html` 中各做一次「列读」实验，记录两面板的周期数（8→1），并在 `swizzle_atom_general.html` 里把 128B/64B/32B 三种 atom 的形状截图或临摹下来。
+5. **选型收尾**：给下面三个 tile 各选一个 swizzle 模式并写一句理由：(a) K-major fp16，行内 64 元素；(b) K-major fp16，行内 24 元素；(c) K-major fp8（1 B），行内 128 元素。
+   参考答案：(a) 128 B 行宽 → `SWIZZLE_128B`；(b) 48 B 行宽 → `SWIZZLE_32B`（不足 64 B；48 可被 32 整除）；(c) 128 B 行宽 → `SWIZZLE_128B`（fp8 只是让一行装下更多元素，判据仍是字节宽度）。
+
+完成标志：你能不看书说出「bank = (addr//4) % 32」「mapped_col = c ⊕ r」「atom = 8 行 × N B，选能支撑的最大 N」这三句话，并能解释为什么 XOR 的双射性同时保住了行读与列读。
+
+## 6. 本讲小结
+
+- SMEM 分 32 个 bank，\( \text{bank} = \lfloor \text{addr}/4 \rfloor \bmod 32 \)；同一 wavefront 内同 bank 不同地址的访问被串行化（bank conflict），同地址则广播；冲突重数 = 所需周期数。
+- 行主序 tile 天生利行伤列（列元素同行距、易撞同一 bank），列主序相反——简单布局无法同时服务双向访问。
+- XOR swizzle 用 `mapped_col = logical_col ⊕ row` 重排地址：固定 c 与固定 r 时异或都是双射，因此行读与列读同时无冲突；自反性让读写两端共用一条公式。
+- 8×8 演示（1 元素 = 1 bank）与真实 `SWIZZLE_128B`（XOR 作用在 16 B sector 上，`bank = (s ⊕ r)·4 + off`）是同一条规则在两个粒度上的实例。
+- atom 是地址置换的最小重复块：128B/64B/32B 模式的 atom 分别为 8×128 B/8×64 B/8×32 B；选型规则是「tile 连续维能支撑的最大行宽」，判据按字节而非元素个数。
+- XOR 置换非仿射，不属于 `S[...]` 布局本身，而是与它组合的独立地址变换；同一 tile 的所有操作必须使用同一 swizzle 模式，否则读错数据（正确性问题，不只是性能问题）。
+
+## 7. 下一步学习建议
+
+本讲讲完了「为什么需要 swizzle、公式是什么」。接下来两讲会看到它在真实硬件路径上的落点：
+
+- **u5-l1（Ampere：寄存器 fragment 与 ldmatrix）**：本讲右面板那个 `(ldmatrix)` 列读就是 Ampere 内核从 SMEM 构造 fragment 的现场，swizzle 正是为它而生。
+- **u5-l2（Hopper：wgmma 与共享内存描述符）**：wgmma 的矩阵描述符里带有 swizzle 模式字段，SMEM 布局必须与之配套，可对照 `img/scripts/gen_smem_descriptor.py`。
+- **u6-l1/u6-l2（TMA）**：TMA 在把 tile 写入 SMEM 时可以顺带完成 swizzle，本讲的 atom/sector 概念会直接复用（3D TMA 用第三维组织多个 swizzle atom）。
+- **u10-l3（ComposeLayout 与 swizzle 变换）**：在 TIRx Layout API 中，本讲「仿射布局 + XOR 置换」的两步组合会落地为一个可调用的 `ComposeLayout` 对象。
+
+建议在进入下一讲前，先把综合实践第 5 步的三个选型题再做一遍——模式选择将贯穿后续所有 GEMM 与 FA4 内核的 SMEM pool 分配代码。

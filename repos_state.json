@@ -56690,41 +56690,53 @@
           "error": null
         },
         "u7-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.5982889999999998,
+          "error": null
+        },
+        "u8-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.562257,
+          "error": null
+        },
+        "u8-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.559258,
+          "error": null
+        },
+        "u8-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.334656,
+          "error": null
+        },
+        "u8-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.5980800000000004,
+          "error": null
+        },
+        "u9-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.9606659999999998,
+          "error": null
+        },
+        "u9-l2": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
           "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
-        },
-        "u8-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
         },
         "u9-l3": {
           "status": "pending",
@@ -56743,7 +56755,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/gitcode.com/ascend-tribe/openPangu-2.0-Op/openPangu-2.0-Op-training-tutorial",
       "last_head": "c1d24e36d7fb94a98607a02b0edc88c47b64d850",
-      "last_run_at": "2026-08-23T23:02:13Z",
+      "last_run_at": "2026-08-24T11:02:18Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "gitcode.com/ascend-tribe/openPangu-2.0-Infer": {
@@ -56883,41 +56895,53 @@
           "error": null
         },
         "u5-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.651362,
+          "error": null
+        },
+        "u5-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.830071,
+          "error": null
+        },
+        "u5-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.3661429999999997,
+          "error": null
+        },
+        "u6-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.237012,
+          "error": null
+        },
+        "u6-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.7838149999999997,
+          "error": null
+        },
+        "u6-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.8288400000000005,
+          "error": null
+        },
+        "u7-l1": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
           "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
-        },
-        "u5-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
         },
         "u7-l2": {
           "status": "pending",
@@ -56986,7 +57010,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/gitcode.com/ascend-tribe/openPangu-2.0-Infer/openPangu-2.0-Infer-tutorial",
       "last_head": "2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15",
-      "last_run_at": "2026-08-23T23:02:13Z",
+      "last_run_at": "2026-08-24T11:02:18Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "mlc-ai/modern-gpu-programming-for-mlsys": {
@@ -57007,101 +57031,137 @@
           "error": null
         },
         "u1-l3": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
+          "cost": 1.1649390000000002,
+          "error": null
         },
         "u2-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.4939099999999998,
+          "error": null
         },
         "u2-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.3494700000000002,
+          "error": null
         },
         "u2-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.786407,
+          "error": null
         },
         "u3-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.4198419999999998,
+          "error": null
         },
         "u3-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 2.05499,
+          "error": null
         },
         "u3-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.036164,
+          "error": null
         },
         "u4-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.171685,
+          "error": null
         },
         "u4-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.9310490000000002,
+          "error": null
         },
         "u4-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 4.1064229999999995,
+          "error": null
         },
         "u4-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.262205,
+          "error": null
         },
         "u5-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.4016219999999997,
+          "error": null
         },
         "u5-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.6494960000000003,
+          "error": null
         },
         "u5-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.546322,
+          "error": null
         },
         "u6-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.202872,
+          "error": null
         },
         "u6-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.7214309999999997,
+          "error": null
         },
         "u6-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.483534,
+          "error": null
         },
         "u7-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.2264719999999998,
+          "error": null
         },
         "u7-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.502719,
+          "error": null
         },
         "u7-l3": {
           "status": "pending",
@@ -57295,8 +57355,8 @@
       "mode": "full",
       "tutorial_path": "tutorials/mlc-ai/modern-gpu-programming-for-mlsys/modern-gpu-programming-for-mlsys-tutorial",
       "last_head": "0fdad075417d347e2171affadf9c1b07cd54f87f",
-      "last_run_at": "2026-08-23T23:02:13Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-08-24T11:02:18Z",
+      "last_error": "near dead zone; will resume next window"
     },
     "mlc-ai/web-llm": {},
     "OpenBitSys/BitDecoding": {},
@@ -57306,7 +57366,7 @@
     "ai-dynamo/dynamo": {},
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-23T23:02:13Z"
+      "last_run_at": "2026-08-24T11:02:18Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
