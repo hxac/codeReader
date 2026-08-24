@@ -56732,16 +56732,18 @@
           "error": null
         },
         "u9-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.475788,
+          "error": null
+        },
+        "u9-l3": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
           "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
-        },
-        "u9-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
         },
         "u9-l4": {
           "status": "pending",
@@ -56755,7 +56757,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/gitcode.com/ascend-tribe/openPangu-2.0-Op/openPangu-2.0-Op-training-tutorial",
       "last_head": "c1d24e36d7fb94a98607a02b0edc88c47b64d850",
-      "last_run_at": "2026-08-24T11:02:18Z",
+      "last_run_at": "2026-08-24T15:43:35Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "gitcode.com/ascend-tribe/openPangu-2.0-Infer": {
@@ -56937,16 +56939,18 @@
           "error": null
         },
         "u7-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.652352,
+          "error": null
+        },
+        "u7-l2": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
           "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
-        },
-        "u7-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
         },
         "u7-l3": {
           "status": "pending",
@@ -57010,7 +57014,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/gitcode.com/ascend-tribe/openPangu-2.0-Infer/openPangu-2.0-Infer-tutorial",
       "last_head": "2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15",
-      "last_run_at": "2026-08-24T11:02:18Z",
+      "last_run_at": "2026-08-24T15:43:35Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "mlc-ai/modern-gpu-programming-for-mlsys": {
@@ -57164,19 +57168,25 @@
           "error": null
         },
         "u7-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.609243,
+          "error": null
         },
         "u7-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.3255979999999998,
+          "error": null
         },
         "u8-l1": {
-          "status": "pending",
+          "status": "failed",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
         },
         "u8-l2": {
           "status": "pending",
@@ -57355,8 +57365,8 @@
       "mode": "full",
       "tutorial_path": "tutorials/mlc-ai/modern-gpu-programming-for-mlsys/modern-gpu-programming-for-mlsys-tutorial",
       "last_head": "0fdad075417d347e2171affadf9c1b07cd54f87f",
-      "last_run_at": "2026-08-24T11:02:18Z",
-      "last_error": "near dead zone; will resume next window"
+      "last_run_at": "2026-08-24T15:43:35Z",
+      "last_error": "quota exhausted; will resume next window"
     },
     "mlc-ai/web-llm": {},
     "OpenBitSys/BitDecoding": {},
@@ -57366,7 +57376,7 @@
     "ai-dynamo/dynamo": {},
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-24T11:02:18Z"
+      "last_run_at": "2026-08-24T15:43:35Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
