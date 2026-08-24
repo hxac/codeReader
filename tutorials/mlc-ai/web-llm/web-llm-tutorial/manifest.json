@@ -1,0 +1,947 @@
+{
+  "head": "90f67096b68d3b77509c938f2221e4cef03b7d76",
+  "project": "web-llm",
+  "rationale": "WebLLM 是一个约 1.2 万行 TypeScript 的浏览器端 LLM 推理引擎，核心复杂度集中在三条链路：面向用户的 OpenAI 兼容 API 层（engine.ts + openai_api_protocols）、真正的推理管线（llm_chat.ts 的 LLMChatPipeline，基于 tvmjs/WebGPU）、以及模型分发与运行环境（config.ts 的模型记录 + cache_util.ts 的缓存 + worker 架构）。因此学习路线设计为：先用 get-started 示例建立直觉并熟悉源码地图（单元一），再沿「引擎接口」由浅入深掌握 chat/completion/embedding 三类 API（单元二），随后进入最核心的 prefill/decode/采样推理管线（单元三），接着理解模型配置、缓存与完整性校验这三分发侧机制（单元四），然后攻破 Web Worker/Service Worker 的多线程与扩展架构（单元五），最后在专家层深入 OpenAI 协议细节、结构化输出、错误体系、多模型、性能观测、测试与构建发布（单元六、七）。依赖关系上严格保证每篇讲义只依赖已讲过的内容，实践任务全部对应仓库中真实存在的 examples 与测试，读者可以边读源码边在真实工程里验证。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 WebLLM 的定位、核心特性与在 MLC 生态中的位置",
+            "区分模型权重、model library（wasm）、tokenizer 等分发产物",
+            "了解 prebuiltAppConfig.model_list 支持的模型家族"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README 关键特性章节",
+            "prebuiltAppConfig 模型列表",
+            "docs 文档站点结构"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README 后，在 mlc.ai/models 或 src/config.ts 的 prebuiltAppConfig.model_list 中找出三个不同家族的模型（如 Llama、Phi、Qwen），记录它们的 model_id、量化格式与 vram_required_MB，并写一段文字说明你会为 8GB 内存的笔记本选择哪个模型以及原因。",
+          "source_files": [
+            "README.md",
+            "src/config.ts",
+            "docs/README.md"
+          ],
+          "title": "WebLLM 项目总览：定位、特性与生态",
+          "topic": "介绍 WebLLM 是什么：一个基于 WebGPU 的浏览器内 LLM 推理引擎，与 MLC LLM、WebLLM Chat 的关系，以及它支持的核心能力（OpenAI 兼容 API、流式、结构化输出、Worker 架构）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-run-get-started.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "安装依赖并在本地起一个静态服务器跑通 get-started 示例",
+            "理解 initProgressCallback 报告的模型下载与加载进度",
+            "观察浏览器 DevTools 中 WebGPU 设备与缓存的使用"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "CreateMLCEngine 调用",
+            "initProgressCallback 回调",
+            "chatCompletion 基本调用"
+          ],
+          "order": 2,
+          "practice_task": "按照 examples/get-started/README.md 的步骤在本地运行示例，修改 src/get_started.ts：把默认模型换成另一个更小的模型，并在页面上把每一轮回复的 finishReason 打印出来。截图记录首次加载与二次加载（命中缓存）的耗时差异。",
+          "source_files": [
+            "examples/get-started/README.md",
+            "examples/get-started/src/get_started.ts",
+            "examples/get-started/src/get_started.html",
+            "package.json"
+          ],
+          "title": "跑通第一个例子：get-started 实战",
+          "topic": "手把手运行 examples/get-started，理解 npm install、本地静态服务器、模型下载进度回调到第一条对话的完整链路。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-codebase-map.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "画出 src/ 下各文件的职责一览表",
+            "解释 index.ts 导出的几组 API 分别服务什么场景",
+            "理解 rollup 打包产物 lib/index.js 如何被 CDN/ESM 使用"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "src/index.ts 导出结构",
+            "engine/pipeline/worker 三层分层",
+            "rollup 构建配置"
+          ],
+          "order": 3,
+          "practice_task": "通读 src/index.ts 的所有导出，按「引擎类、Worker 类、配置类、缓存工具、OpenAI 协议、完整性校验」六类整理成一张表格，标注每个导出所在的源文件，并用 mermaid 画出一层调用关系图（页面 -> MLCEngine -> LLMChatPipeline）。",
+          "source_files": [
+            "src/index.ts",
+            "package.json",
+            "rollup.config.js",
+            "README.md"
+          ],
+          "title": "源码地图：目录结构与库入口 index.ts",
+          "topic": "梳理仓库目录结构（src、examples、tests、docs、3rdparty），精读库入口 src/index.ts 的导出分组，理解从源码到 npm 包/CDN 的构建方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-model-record-and-app-config.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "解释 ModelRecord 中 model_id、model_lib、overrides、model_type 等字段含义",
+            "理解 AppConfig 如何聚合 model_list 与缓存后端配置",
+            "掌握 ChatOptions 覆盖模型默认配置的方式"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "ModelRecord 接口",
+            "AppConfig 与 prebuiltAppConfig",
+            "ChatOptions 覆盖机制"
+          ],
+          "order": 4,
+          "practice_task": "在 src/config.ts 中定位 prebuiltAppConfig，挑选一条 ModelRecord，逐字段注释其含义；再写一个小页面，用 appConfig 只保留这一个模型并覆盖 context_window_size，验证 CreateMLCEngine 加载后 engine.getMessage() 的行为。",
+          "source_files": [
+            "src/config.ts",
+            "src/index.ts",
+            "README.md"
+          ],
+          "title": "核心概念：ModelRecord、AppConfig 与模型分发",
+          "topic": "精读 config.ts 中的 ModelRecord、AppConfig、prebuiltAppConfig、ChatOptions 等类型，理解一个模型在 WebLLM 中由哪些元数据描述、模型权重和 wasm 库分别从哪里下载。"
+        }
+      ],
+      "order": 1,
+      "title": "初识 WebLLM：从零到跑通第一个对话"
+    },
+    {
+      "id": "u2",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u1-l4"
+          ],
+          "filename": "u2-l1-engine-lifecycle.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "梳理 reload() 从选模型到创建 LLMChatPipeline 的完整步骤",
+            "对比 unload、resetChat 在生命周期中的角色",
+            "理解 MLCEngineInterface 作为统一抽象的意义"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "CreateMLCEngine 工厂函数",
+            "MLCEngine.reload 主流程",
+            "MLCEngineInterface 抽象"
+          ],
+          "order": 1,
+          "practice_task": "在 reload() 中按执行顺序列出至少 8 个关键步骤（找模型记录、构造 pipeline、加载 wasm、fetch 权重、初始化 KV cache 等）并注明对应源码行号；然后写一个页面依次调用 reload -> unload -> reload，观察内存与缓存状态变化。",
+          "source_files": [
+            "src/engine.ts",
+            "src/types.ts",
+            "examples/abort-reload/README.md"
+          ],
+          "title": "CreateMLCEngine 与引擎生命周期",
+          "topic": "精读 engine.ts 的 CreateMLCEngine、MLCEngine 构造、reload 与 unload，理解引擎从创建、加载模型到卸载的完整生命周期。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-chat-completion-non-streaming.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "掌握 ChatCompletionRequest 的 messages、temperature、max_tokens 等核心参数",
+            "追踪一次非流式请求从 engine.chatCompletion 到 pipeline 生成的调用链",
+            "读懂返回的 ChatCompletion 结构与 usage 统计"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "chatCompletion 重载分发",
+            "GenerationConfig 组装",
+            "ChatCompletion 响应结构"
+          ],
+          "order": 2,
+          "practice_task": "基于 examples/multi-round-chat 的思路写一个三轮对话页面：维护 messages 历史数组，每轮把 assistant 回复追加回去，并在每轮结束后打印 usage 中的 prefill/decode token 数，解释为什么后续轮次 prefill token 越来越多。",
+          "source_files": [
+            "src/engine.ts",
+            "src/openai_api_protocols/chat_completion.ts",
+            "examples/multi-round-chat/README.md"
+          ],
+          "title": "chatCompletion 非流式调用与多轮对话",
+          "topic": "分析 engine.chatCompletion 的非流式路径：请求字段校验、多轮 messages 的处理、采样参数合并、以及最终 ChatCompletion 响应的组装。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-streaming-chat.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "理解 AsyncIterable<ChatCompletionChunk> 流式接口的用法",
+            "分析流式路径下增量 chunk 的生成与拼接逻辑",
+            "掌握 interruptGenerate 中断生成的时机"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "流式重载入口",
+            "增量 chunk 组装",
+            "中断机制 interruptGenerate"
+          ],
+          "order": 3,
+          "practice_task": "参照 examples/streaming 写一个打字机效果页面，用 for-await 消费流式 chunk；再加一个「停止」按钮调用 engine.interruptGenerate()，记录中断后 getMessage() 返回的部分内容，并说明停止按钮为何能立即生效。",
+          "source_files": [
+            "src/engine.ts",
+            "src/openai_api_protocols/chat_completion.ts",
+            "examples/streaming/README.md"
+          ],
+          "title": "流式输出：AsyncIterable 与 ChatCompletionChunk",
+          "topic": "理解流式 chatCompletion 如何通过 AsyncIterable 逐 chunk 产出增量文本，包括 delta 拼接、finish_reason 判定与中断生成。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l4-text-completion.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "对比 completion 与 chatCompletion 的适用场景与请求差异",
+            "理解文本补全要求 KV cache 为空的约束（TextCompletionExpectsKVEmptyError）",
+            "分析 Completion 响应结构与 choices 的组装"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Completions 类",
+            "CompletionCreateParams 校验",
+            "Completion 响应组装"
+          ],
+          "order": 4,
+          "practice_task": "运行 examples/text-completion，分别用同一个基础模型对同一句 prompt 调 chatCompletion 和 completion，对比两者输出差异；再尝试在已有聊天历史时调用 completion，捕获并解释抛出的错误。",
+          "source_files": [
+            "src/engine.ts",
+            "src/openai_api_protocols/completion.ts",
+            "examples/text-completion/README.md"
+          ],
+          "title": "completion 文本补全接口",
+          "topic": "讲解 OpenAI 风格的文本补全接口 completion：与 chat 的区别、prompt 直通编码、以及它对会话状态的特殊要求。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l5-embedding-api.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "理解 EmbeddingPipeline 与 LLMChatPipeline 的分工",
+            "掌握 EmbeddingCreateParams 的 input、model、encoding_format 处理",
+            "了解 embedding 场景下的模型类型限制与错误"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Embeddings 协议类",
+            "EmbeddingPipeline",
+            "engine.embedding 分发"
+          ],
+          "order": 5,
+          "practice_task": "参照 examples/embeddings 写一个文本相似度小工具：加载一个 embedding 模型，对三段文本计算向量并输出两两余弦相似度；再故意用 chat 模型调用 embedding 接口，观察并记录抛出的 EmbeddingUnsupportedModelError。",
+          "source_files": [
+            "src/engine.ts",
+            "src/embedding.ts",
+            "src/openai_api_protocols/embedding.ts",
+            "examples/embeddings/README.md"
+          ],
+          "title": "embedding 嵌入接口与 EmbeddingPipeline",
+          "topic": "介绍 engine.embedding 与 EmbeddingPipeline：嵌入模型如何加载、输入如何分批编码、返回向量的格式。"
+        }
+      ],
+      "order": 2,
+      "title": "引擎接口层：MLCEngine 与 OpenAI 风格 API"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u3-l1-pipeline-init-and-tvm.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "解释 tvmjs 实例、DLDevice、VirtualMachine 在管线中的作用",
+            "梳理管线从 wasm model library 加载 PackedFunc 的过程",
+            "理解 GPU device 与 shader 编译（asyncLoadWebGPUPipelines）的异步性"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "LLMChatPipeline 构造流程",
+            "tvmjs runtime 绑定",
+            "WebGPU shader 异步预热"
+          ],
+          "order": 1,
+          "practice_task": "在 LLMChatPipeline 构造函数中标注出 device、vm、prefill/decoding 等 PackedFunc 分别来自哪里；写一个页面在 reload 完成后调用 engine.getMaxStorageBufferBindingSize() 和 getGPUVendor()，把当前浏览器的 GPU 信息打印出来，并讨论 maxStorageBufferBindingSize 对可运行模型规模的限制。",
+          "source_files": [
+            "src/llm_chat.ts",
+            "src/engine.ts"
+          ],
+          "title": "LLMChatPipeline 初始化与 tvmjs 运行时",
+          "topic": "深入 LLMChatPipeline 的构造流程：如何创建 tvmjs 运行时、获取 GPU 设备、加载 VirtualMachine 并取出 prefill/decode 等 PackedFunc。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-conversation-template.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 conv_template 如何由 system、roles、seps 描述一套对话格式",
+            "追踪 appendMessage 到 getPromptArray 的编码链路",
+            "理解 MessagePlaceholders 与多模态 placeholder 的替换"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Conversation 类",
+            "ConvTemplateConfig",
+            "getConversation 工厂"
+          ],
+          "order": 2,
+          "practice_task": "写一个 Node 单测风格的小脚本（可参考 tests/conversation.test.ts）：对 Llama-3 与 ChatML 两类模板分别构造多轮对话，打印 getPromptArray 的输出，肉眼验证 system prompt、角色标签与分隔符的拼接是否正确。",
+          "source_files": [
+            "src/conversation.ts",
+            "src/config.ts",
+            "tests/conversation.test.ts"
+          ],
+          "title": "Conversation 对话模板与提示词编码",
+          "topic": "精读 conversation.ts 的 Conversation 类：对话模板（conv_template）如何把多轮 messages 拼成模型输入 prompt，placeholder 如何被替换。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
+          "filename": "u3-l3-prefill-step.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解 prefill 只取最后一个 token logits 的原因",
+            "掌握 prefillChunkSize 分块预填充与进度回调机制",
+            "追踪预填充阶段的耗时与 token 统计"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "prefillStep 主循环",
+            "分块与进度上报",
+            "KV cache 写入"
+          ],
+          "order": 3,
+          "practice_task": "在 prefillStep 中找到分块循环与进度回调，画出流程图；然后把 appConfig 中模型的 prefill_chunk_size 调小（如 128），对比首 token 延迟（TTFT）变化，解释分块大小在显存与速度之间的权衡。",
+          "source_files": [
+            "src/llm_chat.ts",
+            "src/engine.ts"
+          ],
+          "title": "prefillStep：预填充与 KV cache 写入",
+          "topic": "分析 prefillStep 如何把 prompt tokens 分块送入模型、写 KV cache、产出第一个 token 的 logits，并汇报 prefill 进度。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l4-decode-step.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "理解 decodeStep 每次只前向一个 token 的循环结构",
+            "掌握停止字符串/停止 token 与 max_tokens 的判定顺序",
+            "理解 contextWindowSize 与滑动窗口对长对话的影响"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "decodeStep 主循环",
+            "终止条件判定",
+            "统计与 KV 长度维护"
+          ],
+          "order": 4,
+          "practice_task": "在 decodeStep 里列出所有会触发停止的条件并注明源码位置；写实验页面：设置一个很短的 stop 字符串和很小的 max_tokens，分别记录 finishReason，验证 stop（字符串）与 length 两种终止原因的来源。",
+          "source_files": [
+            "src/llm_chat.ts",
+            "src/config.ts"
+          ],
+          "title": "decodeStep：解码循环与终止条件",
+          "topic": "分析 decodeStep 的自回归循环：逐 token 前向、终止条件（stop 字符串、stop token、max_tokens、上下文窗口）与解码统计。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u3-l5-sampling-and-logit-processor.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "追踪 temperature、top_p 从归一化到采样的完整数据流",
+            "理解 frequency_penalty / presence_penalty 与 logit_bias 的实现位置",
+            "掌握 LogitProcessor 扩展点在每步解码中的调用时机"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "postInitAndCheckGenerationConfigValues",
+            "采样 PackedFunc 链",
+            "LogitProcessor 回调"
+          ],
+          "order": 5,
+          "practice_task": "参照 examples/logit-processor 实现一个自定义 LogitProcessor：禁止模型输出某个指定 token（把该位置 logit 置为 -Infinity），验证对话中不再出现该词；再用 examples/seed-to-reproduce 的方法固定 seed，记录同一 seed 下三次生成的输出是否一致。",
+          "source_files": [
+            "src/config.ts",
+            "src/llm_chat.ts",
+            "src/types.ts",
+            "examples/logit-processor/README.md",
+            "examples/seed-to-reproduce/README.md"
+          ],
+          "title": "采样控制：GenerationConfig、惩罚与 LogitProcessor",
+          "topic": "讲解采样链路：GenerationConfig 的校验（postInitAndCheckGenerationConfigValues）、softmaxWithTemperature、sampleWithTopP，以及用户可注入的 LogitProcessor。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l6-vision-model.md",
+          "id": "u3-l6",
+          "learning_goals": [
+            "理解 image_embed PackedFunc 与 imageDataCache 的作用",
+            "掌握多模态消息 content 数组的构造方式",
+            "识别视觉输入相关的错误类型及其触发条件"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "图像数据预处理",
+            "image_embed 前向",
+            "多模态错误族"
+          ],
+          "order": 6,
+          "practice_task": "运行 examples/vision-model，用一张本地图片发起对话；然后在源码中定位图片被转成 ImageData 并送入 image_embed 的代码路径，写一段调用链说明文字，并尝试把 prefill_chunk_size 设得比图片 token 数更小，观察并解释抛出的 PrefillChunkSizeSmallerThanImageError。",
+          "source_files": [
+            "src/llm_chat.ts",
+            "src/error.ts",
+            "src/openai_api_protocols/chat_completion.ts",
+            "examples/vision-model/README.md"
+          ],
+          "title": "视觉模型：多模态输入处理",
+          "topic": "分析视觉语言模型（VLM）路径：图片 URL 如何被下载成 ImageData、图像 embedding 如何插入 prefill、以及相关约束与错误。"
+        }
+      ],
+      "order": 3,
+      "title": "核心推理管线：LLMChatPipeline 源码精读"
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u4-l1-cache-mechanism.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "解释 getCacheOptions 中 CacheBackend 与 OPFSAccessMode 的取值含义",
+            "理解 createScopedArtifactCache 对缓存作用域的隔离",
+            "对比 CacheStorage 与 OPFS 两种后端的适用场景"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "getCacheOptions",
+            "getTensorCacheAccessOptions",
+            "createScopedArtifactCache"
+          ],
+          "order": 1,
+          "practice_task": "运行 examples/cache-usage，在 DevTools Application 面板分别观察 Cache Storage 与 OPFS 中的内容；然后切换 appConfig 的缓存后端配置再加载一次模型，记录两种后端下模型文件的存储位置与读取方式差异，写成对比笔记。",
+          "source_files": [
+            "src/cache_util.ts",
+            "src/config.ts",
+            "examples/cache-usage/README.md"
+          ],
+          "title": "模型缓存机制：CacheStorage 与 OPFS",
+          "topic": "精读 cache_util.ts 的缓存后端选择：getCacheOptions、getTensorCacheAccessOptions、createScopedArtifactCache，理解权重与 wasm 如何被浏览器持久化。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-cache-management-api.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "掌握 hasModelInCache 判断模型是否已缓存的用法",
+            "理解删除缓存时 config、wasm、权重三部分如何分别清理",
+            "了解 asyncLoadTokenizer 如何从缓存读取 tokenizer 文件"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "hasModelInCache",
+            "delete 族函数",
+            "asyncLoadTokenizer"
+          ],
+          "order": 2,
+          "practice_task": "写一个「模型管理面板」页面：列出候选模型，用 hasModelInCache 显示缓存状态，提供「删除该模型全部缓存」按钮调用 deleteModelAllInfoInCache；验证删除后重新加载会重新下载，并检查 Cache Storage 是否确实被清空。",
+          "source_files": [
+            "src/cache_util.ts",
+            "src/index.ts",
+            "tests/cache_util.test.ts"
+          ],
+          "title": "缓存管理 API：查询与删除",
+          "topic": "讲解暴露给用户的缓存管理函数：hasModelInCache、deleteModelInCache、deleteModelWasmInCache、deleteChatConfigInCache 等，以及 tokenizer 的缓存加载。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l3-integrity-verification.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "理解 SRI 字符串（sha256-...）的格式与解析",
+            "追踪 verifyIntegrity 流式读取并计算哈希的流程",
+            "掌握在 ModelRecord 中为自定义模型配置 integrity 的方法"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "parseSRI 与 isValidSRI",
+            "verifyIntegrity 流式校验",
+            "IntegrityError 集成"
+          ],
+          "order": 3,
+          "practice_task": "为本地一个 wasm 文件用 sha256 生成 SRI 字符串，配置到自定义 appConfig 的 ModelRecord.integrity 上并加载验证通过；再故意改动一位哈希字符重新加载，确认抛出 IntegrityError，说明该机制防的是什么攻击。",
+          "source_files": [
+            "src/integrity.ts",
+            "src/error.ts",
+            "tests/integrity.test.ts",
+            "examples/integrity-verification/README.md"
+          ],
+          "title": "模型完整性校验：SRI 子资源完整性",
+          "topic": "分析 integrity.ts：SRI 字符串解析（算法与 base64 哈希）、流式读取文件并校验哈希、以及校验失败时抛出 IntegrityError。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l4-custom-model.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "掌握用 mlc-llm 编译产出 WebGPU wasm model library 的命令要点",
+            "理解自定义 model_id 与 model_lib URL 的对应规则",
+            "学会用 overrides 覆盖 conv_template、context_window_size 等元数据"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "mlc_llm 编译流程",
+            "model_lib 上传与 URL 配置",
+            "AppConfig 自定义注入"
+          ],
+          "order": 4,
+          "practice_task": "按照 README 的 Custom Models 章节与 MLC LLM 文档，为一个小模型（如 TinyLlama 或 Qwen2-0.5B）编译 WebGPU 版本，把 wasm 与权重文件放到可访问的 URL，组装自定义 appConfig（含 conv_template 与 context_window_size），在页面中完成一次对话；若本地无法编译 GPU 版本，可复用现有模型权重只自定义 appConfig 字段做演练并注明「待确认」的部分。",
+          "source_files": [
+            "src/config.ts",
+            "README.md"
+          ],
+          "title": "接入自定义模型：从 MLC 编译到 appConfig",
+          "topic": "综合运用前几讲知识：如何用 mlc-llm 编译自定义模型、上传权重与 wasm、构造自定义 AppConfig 的 model_list 并交给 CreateMLCEngine。"
+        }
+      ],
+      "order": 4,
+      "title": "模型分发：配置、缓存与完整性校验"
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u5-l1-web-worker-architecture.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "理解把推理移入 worker 后主线程只做 UI 的收益",
+            "掌握 CreateWebWorkerMLCEngine 的三参数用法",
+            "读懂 message.ts 中 WorkerRequest/WorkerResponse 的序列化约定"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "CreateWebWorkerMLCEngine",
+            "WorkerRequest/WorkerResponse 协议",
+            "ChatWorker 抽象"
+          ],
+          "order": 1,
+          "practice_task": "把 u1 跑通的 get-started 页面改造成 Web Worker 版本（参照 examples/get-started-web-worker）：主线程通过 WebWorkerMLCEngine 调用同样的 chatCompletion 流式接口；对比改造前后生成过程中页面上一个 CSS 动画的流畅度，记录差异并解释原因。",
+          "source_files": [
+            "src/web_worker.ts",
+            "src/message.ts",
+            "src/types.ts",
+            "examples/get-started-web-worker/README.md"
+          ],
+          "title": "Web Worker 架构与消息协议",
+          "topic": "理解为什么要把推理放进 Worker：WebWorkerMLCEngine/WebWorkerMLCEngineHandler 的代理模式，以及 message.ts 定义的请求响应协议。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-worker-handler-internals.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "理解 onmessage 如何按 kind 分发到引擎方法",
+            "分析流式请求跨线程逐 chunk 回传的实现",
+            "掌握自定义请求 CustomRequestParams 的用法与 onrequest 回调"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "onmessage 路由",
+            "流式 chunk 回传",
+            "CustomRequestParams 扩展"
+          ],
+          "order": 2,
+          "practice_task": "在 WebWorkerMLCEngineHandler 中为所有 message kind 建立一张「请求字段 -> 引擎方法 -> 响应字段」映射表；然后利用 CustomRequestParams 和 handler 的自定义分发，实现一个跨线程的 runtimeStatsText 查询按钮，点击后在主线程显示当前 worker 内的解码速度统计。",
+          "source_files": [
+            "src/web_worker.ts",
+            "src/message.ts",
+            "tests/web_worker_handler.test.ts"
+          ],
+          "title": "WebWorkerMLCEngineHandler 源码解析",
+          "topic": "精读 Handler 的 onmessage 分发逻辑、流式请求如何跨线程回传 chunk、以及 CustomRequestParams 自定义扩展点。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l3-service-worker-and-extension.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "理解 ServiceWorkerMLCEngineHandler 继承 WebWorkerMLCEngineHandler 复用了什么",
+            "掌握 Service Worker 版引擎的注册与生命周期绑定",
+            "了解 Chrome MV3 扩展中 offscreen/extension service worker 的运行约束"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ServiceWorkerMLCEngineHandler",
+            "ServiceWorker 封装层",
+            "extension_service_worker 适配"
+          ],
+          "order": 3,
+          "practice_task": "运行 examples/service-worker，理解页面与 Service Worker 的消息流；再打开 examples/chrome-extension-webgpu-service-worker 阅读其结构，写一段说明：与普通 Web Worker 方案相比，Service Worker 方案让模型在哪些场景下可以被多个页面共享，代价是什么（提示：生命周期与内存回收）。",
+          "source_files": [
+            "src/service_worker.ts",
+            "src/extension_service_worker.ts",
+            "examples/service-worker/README.md",
+            "examples/chrome-extension/README.md"
+          ],
+          "title": "Service Worker 与 Chrome 扩展支持",
+          "topic": "分析 ServiceWorkerMLCEngine/Handler 如何把推理放进 Service Worker 实现跨页面共享，以及 extension_service_worker.ts 对 Chrome 扩展 MV3 的适配。"
+        }
+      ],
+      "order": 5,
+      "title": "Worker 架构：多线程与扩展环境"
+    },
+    {
+      "id": "u6",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u3-l2"
+          ],
+          "filename": "u6-l1-openai-protocol-design.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "理解 request 参数在 postInitAndCheckFields 中的默认值填充与非法值检查",
+            "掌握流式/非流式请求类型在类型层面的区分方式",
+            "分析未知或未支持字段如何触发 UnsupportedFieldsError"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Chat/Completions 门面类",
+            "postInitAndCheckFields",
+            "流式与非流式重载"
+          ],
+          "order": 1,
+          "practice_task": "构造五个非法请求（超范围 temperature、负数 max_tokens、非法 role、乱序 tool 消息、未知字段）分别调用 chatCompletion，捕获错误并对应到源码中的具体抛出位置；再阅读 tests/openai_chat_completion.test.ts，为其补充一个新用例：n 参数大于 1 时应抛 StreamingCountError（先在源码中确认该行为再写测试）。",
+          "source_files": [
+            "src/openai_api_protocols/chat_completion.ts",
+            "src/openai_api_protocols/index.ts",
+            "src/error.ts",
+            "tests/openai_chat_completion.test.ts"
+          ],
+          "title": "OpenAI 协议层设计与请求校验",
+          "topic": "分析 openai_api_protocols/chat_completion.ts 的协议设计：请求/响应类型体系、postInitAndCheckFields 的默认值填充与校验、不支持字段的报错机制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-function-calling.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "理解 tools/tool_choice 如何被编码进对话 prompt",
+            "追踪工具调用 JSON 的解析与 ToolCall 结构化过程",
+            "区分 OpenAI 风格与手动模板两种函数调用方式的差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "getFunctionCallUsage",
+            "工具调用输出解析",
+            "tool_choice 校验"
+          ],
+          "order": 2,
+          "practice_task": "运行 examples/function-calling 下的两个子示例（openai 风格与 manual 模板风格），用同一组工具定义让模型决定调用哪个函数；然后在 conversation.ts 中找到把工具 schema 渲染进 system prompt 的代码，说明两种方式最终生成的 prompt 有何不同。",
+          "source_files": [
+            "src/openai_api_protocols/chat_completion.ts",
+            "src/conversation.ts",
+            "tests/function_calling.test.ts",
+            "examples/function-calling/README.md"
+          ],
+          "title": "函数调用 Function Calling",
+          "topic": "讲解函数调用链路：tools 定义如何注入对话、模型输出的工具调用如何被解析成 tool_calls、以及 tool 消息如何回传结果。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1",
+            "u3-l5"
+          ],
+          "filename": "u6-l3-structured-output.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "理解 GrammarMatcher 如何在采样阶段约束候选 token",
+            "掌握 json_schema 与 json_object 两种 response_format 的差异",
+            "理解 responseFormatCacheKey 缓存 matcher 的性能优化"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ResponseFormat 类型",
+            "GrammarMatcher 约束采样",
+            "结构化输出响应组装"
+          ],
+          "order": 3,
+          "practice_task": "分别运行 examples/json-mode 与 examples/json-schema：定义一个包含嵌套对象与数组的 JSON Schema（例如地址簿），让模型严格按 schema 生成；再故意在 schema 中写一个互相矛盾的条件，观察并记录报错行为（InvalidResponseFormatGrammarError 等），说明 xgrammar 编译发生在哪个阶段。",
+          "source_files": [
+            "src/llm_chat.ts",
+            "src/openai_api_protocols/chat_completion.ts",
+            "examples/json-mode/README.md",
+            "examples/json-schema/README.md"
+          ],
+          "title": "JSON Mode 与结构化输出（xgrammar）",
+          "topic": "分析 response_format 的 json_schema/json_object 支持：xgrammar GrammarMatcher 如何在解码时逐 token 施加语法约束保证输出合法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l4-structural-tag.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "理解 structural tag 相比纯 JSON mode 的性能优势来源",
+            "掌握把工具调用包裹在自定义标签中的配置方式",
+            "了解 structural tag 与 LogitProcessor/token masking 的协作"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "structural_tag 响应格式",
+            "标签内约束应用",
+            "与 function calling 的对比"
+          ],
+          "order": 4,
+          "practice_task": "运行 examples/structural-tag-tool-use，把其中工具调用的开始/结束标签改成自定义字符串并验证仍能被正确解析；然后写对比实验：同一工具调用任务分别用 structural tag 与普通 json_schema 方式各跑三轮，记录输出 token 速度差异并解释原因。",
+          "source_files": [
+            "src/openai_api_protocols/chat_completion.ts",
+            "src/llm_chat.ts",
+            "examples/structural-tag-tool-use/README.md"
+          ],
+          "title": "Structural Tag 工具调用",
+          "topic": "讲解 structural tag 方式的工具调用：如何用自定义标签把「自由文本区」与「受约束 JSON 区」分段，降低语法约束开销。"
+        }
+      ],
+      "order": 6,
+      "title": "OpenAI 兼容协议深度：校验、函数调用与结构化输出"
+    },
+    {
+      "id": "u7",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u7-l1-error-handling.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "按环境/配置/消息/模型加载四类给错误类归类",
+            "追踪 WebGPU 不可用与 shader f16 不支持两条错误的触发路径",
+            "掌握在应用层针对可恢复错误做降级处理的策略"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ConfigValueError 家族",
+            "WebGPU 环境错误",
+            "多模态与工具调用错误族"
+          ],
+          "order": 1,
+          "practice_task": "把 src/error.ts 中所有错误类按「环境不支持 / 配置非法 / 消息不合法 / 模型未就绪 / 功能不支持」五类整理成表格（类名、触发条件、源码位置）；然后在你的示例页面里实现统一错误处理：捕获 WebGPUNotFoundError 时显示「请更换支持 WebGPU 的浏览器」提示。",
+          "source_files": [
+            "src/error.ts",
+            "src/engine.ts"
+          ],
+          "title": "错误处理体系：六十余个错误类的分层设计",
+          "topic": "系统梳理 error.ts 的错误类层次（配置校验、WebGPU 环境、消息顺序、工具调用、embedding、reload 等），理解每类错误在何处被抛出与捕获。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u4-l1"
+          ],
+          "filename": "u7-l2-multi-model-management.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "理解 reload 切换模型时旧 pipeline 资源如何释放",
+            "掌握多 pipeline 并存时的资源开销评估方法",
+            "理解 abort 后引擎状态如何恢复可用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "reload 卸载旧模型流程",
+            "多 pipeline 字典管理",
+            "中断与恢复"
+          ],
+          "order": 2,
+          "practice_task": "运行 examples/multi-models 与 examples/abort-reload：实现一个双模型切换器（一个小模型一个稍大模型），切换时先 unload 再 reload，记录每次切换后的显存占用（可通过 tvm device 的统计或性能面板估算，无法精确测量处标注「待确认」）；再测试生成中途 abort 后立即发起新请求，验证引擎状态是否正常。",
+          "source_files": [
+            "src/engine.ts",
+            "src/llm_chat.ts",
+            "examples/multi-models/README.md",
+            "examples/abort-reload/README.md"
+          ],
+          "title": "多模型管理与动态切换",
+          "topic": "分析 engine 内部多 pipeline 管理：模型切换（reload）、中断后重载、多个模型共存的内存与显存考量。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u7-l3-latency-breakdown.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "区分首 token 延迟（TTFT）与逐 token 解码延迟的构成",
+            "读懂 curRoundLatencyBreakdown 各字段含义",
+            "理解 prefill/decode 阶段 TFLOPS 与 token/s 的统计口径"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "runtimeStatsText",
+            "curRoundLatencyBreakdown 字段",
+            "prefill/decode 计时器"
+          ],
+          "order": 3,
+          "practice_task": "参照 examples/get-started-latency-breakdown 做实验：同一模型分别用 32 / 128 / 1024 token 的 prompt 各发起一轮请求，记录 TTFT 与 decode tokens/s 的变化曲线，并用 prefillTotalTokens 等字段验证统计口径，最后写一段结论解释「长 prompt 为什么拖慢首字出现」。",
+          "source_files": [
+            "src/llm_chat.ts",
+            "src/engine.ts",
+            "examples/get-started-latency-breakdown/README.md"
+          ],
+          "title": "性能观测：延迟分解与运行统计",
+          "topic": "讲解管线内的性能埋点：prefill/decode 各阶段耗时统计、curRoundLatencyBreakdown、runtimeStatsText 输出的解读。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u3-l4"
+          ],
+          "filename": "u7-l4-testing-system.md",
+          "id": "u7-l4",
+          "learning_goals": [
+            "理解单测（mock tvmjs）与集成测试（真实加载模型）的分层",
+            "掌握 jest.config.cjs 中测试环境与匹配器的配置",
+            "学会从测试用例反推 API 的预期行为"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "llm_chat_pipeline.test.ts 集成测试",
+            "mock 单测层",
+            "jest 配置"
+          ],
+          "order": 4,
+          "practice_task": "运行 npm test（如环境中无 WebGPU 则仅运行 mock 类单测并注明限制）；阅读 tests/generation_config.test.ts 后，模仿其风格为 temperature 边界值补充一个新用例（例如 temperature=0 的行为断言），跑通并提交到自己的分支。",
+          "source_files": [
+            "tests/generation_config.test.ts",
+            "tests/llm_chat_pipeline.test.ts",
+            "tests/engine_integration.test.ts",
+            "jest.config.cjs",
+            "package.json"
+          ],
+          "title": "测试体系与质量保障",
+          "topic": "梳理 tests/ 下的测试分层：管线集成测试、OpenAI 协议测试、worker handler 测试、缓存与完整性单测，理解如何在无 GPU 环境跑单测。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l4"
+          ],
+          "filename": "u7-l5-build-and-roadmap.md",
+          "id": "u7-l5",
+          "learning_goals": [
+            "理解 rollup 多入口打包与 cleanup-index-js.sh 的作用",
+            "掌握从 fork、修改、lint/test 到提 PR 的贡献流程",
+            "能独立规划一个基于 WebLLM 的小型 AI 应用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "rollup 构建链",
+            "lint/format/test 工具链",
+            "自定义功能扩展点清单"
+          ],
+          "order": 5,
+          "practice_task": "完成一次端到端二开演练：fork 仓库后，给 MLCEngineInterface 新增一个简单方法（如返回当前上下文剩余可用 token 数的 getContextTokensLeft），在 engine.ts、types.ts、web_worker.ts（消息协议与 handler）三处打通，补一个单测，跑 npm run lint 与 npm test 通过，并用 npm run build 产出 lib 包在自己的示例页面中验证。",
+          "source_files": [
+            "rollup.config.js",
+            "package.json",
+            "CONTRIBUTING.md",
+            "cleanup-index-js.sh",
+            "src/index.ts"
+          ],
+          "title": "构建、发布与二次开发路线图",
+          "topic": "收尾篇：rollup 构建产物、lint/format/test 质量门禁、贡献流程，以及基于本手册所学规划二次开发方向。"
+        }
+      ],
+      "order": 7,
+      "title": "高级主题：错误、多模型、性能、测试与二开"
+    }
+  ]
+}
