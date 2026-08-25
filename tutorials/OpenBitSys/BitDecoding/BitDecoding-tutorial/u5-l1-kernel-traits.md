@@ -1,0 +1,437 @@
+# Flash_fwd_kernel_traits：模板参数、常量推导与共享内存布局
+
+## 1. 本讲目标
+
+前几讲我们沿着「Python 接口 → pybind11 → Flash_fwd_params → dispatch」一路下潜，停在 CUDA kernel 启动之前。从本讲开始，我们真正进入 GPU 侧。本讲拆解读码 kernel 的**编译期骨架** `Flash_fwd_kernel_traits`，它是 residual、splitkv 两个 kernel 共用的"图纸"。学完后你应该能够：
+
+1. 看懂 traits 的模板参数表（`quant_mode / num_bits / group_size` 等），并**手算推导**出 `kBlockP`、`kHeadDim_pack`、`kHeadDim_v_params`、`num_params` 等全部关键常量在任意配置下的取值。
+2. 解释 `SharedStorage` / `SharedStorage_residual` 里六块共享内存的用途、同一缓冲区被多个"视图"分时复用的技巧，以及 Swizzle 布局消除 bank conflict 的动机。
+3. 计算两种已启用配置下共享内存的总字节数，核对 48 KiB 硬限制，理解为什么启动前必须调用 `cudaFuncSetAttribute`。
+4. 说清 `TiledMma`（16×128×16）与 `TiledMmaKV_i4`（16×32×16）两套 MMA 拼装各自服务哪一次矩阵乘。
+
+本讲只讲"图纸"——常量、布局、类型；kernel 内部怎么用这些图纸做在线注意力，是下一讲（u5-l2）的内容。
+
+## 2. 前置知识
+
+### 2.1 编译期常量与模板参数（承接 u3-l1/u3-l2）
+
+在 u3-l1 中我们见过：`num_bits`、`group_size`、`quant_mode` 是**编译期模板参数**，运行期靠 `decode_api.cpp` 里的 if 链把实际取值路由到对应的模板实例。这意味着 kernel 内部所有依赖这些取值的量——tile 大小、共享内存布局、循环步长——都可以写成 `constexpr`，编译器据此做循环展开、寄存器分配甚至内联 PTX 选择。**traits 结构体的职责，就是把"一整套互相耦合的编译期常量与类型"集中在一个名字下面**，供 kernel 一次性取用。
+
+### 2.2 CUDA 共享内存的三个硬件事实
+
+- **bank 与 bank conflict**：共享内存被分成 32 个 bank，每个 bank 宽 4 字节、每周期服务一个地址。若同一条访存指令里多个线程落到同一 bank 的不同地址，就会产生冲突（conflict），访存被串行化。
+- **48 KiB 静态上限与动态共享内存**：kernel 里用 `extern __shared__` 声明的**动态**共享内存，默认上限是每 block 48 KiB；超过就必须在启动前用 `cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size)` 显式抬高（A100 单 block 最高可到 163 KiB，sm_86/89 通常只有约 99 KiB）。
+- **寄存器↔共享内存↔全局内存的三级数据流**：Tensor Core 的操作数来自寄存器 fragment；共享内存是全局内存与寄存器之间的中转站，它的布局直接决定搬运效率。
+
+### 2.3 CuTe 布局三件套：Layout、tile_to_shape、Swizzle
+
+本讲的源码大量使用 CUTLASS CuTe 的布局描述工具（项目通过 `libs/cutlass` 子模块引入，见 u1-l2）：
+
+- `Layout<Shape, Stride>`：描述一个逻辑张量如何映射到线性偏移。例如 `Layout<Shape<_8, Int<64>>, Stride<Int<64>, _1>>` 表示 8 行 × 64 列、行优先（第 m 行第 n 列的偏移是 \( 64m + n \)）。
+- `tile_to_shape(atom, shape)`：把一个小的"原子布局"（atom）像铺瓷砖一样平铺成大形状。瓷砖尺寸能整除目标形状时不产生 padding，布局的 `cosize`（所需元素数）就等于形状乘积。
+- `Swizzle<B, M, S>`：一个按位 XOR 的地址置换。直观理解：把连续若干行分成一组（\( 2^B \) 行），用行号去 XOR 每行内部的块地址，让"按列读"的访问模式落到不同 bank 上（详见 4.2.1）。
+
+### 2.4 承接前两讲的两块地基
+
+- **u2-l1 的张量布局**：k-channel 模式下 `k_pack` 形状为 (b, s/pack_num, h, d)、`k_params` 为 (b, s/group_size, h, d)；V 恒为 tensor 布局，`v_pack` 为 (b, s, h, d/pack_num)。本讲所有 `kBlockP`、`kHeadDim_pack` 常量都是这些形状在"一个 tile 内"的投影。
+- **u3-l2 的 Flash_fwd_params**：运行期参数结构体承载指针与 stride；traits 则承载编译期形状。kernel 里两者配合：`params` 告诉你数据在哪，traits 告诉你每次搬多少、怎么摆。
+
+## 3. 本讲源码地图
+
+| 文件 | 角色 |
+| --- | --- |
+| `csrc/bit_decode/src/include/kernel_traits.h` | **主角**。`Flash_fwd_kernel_traits`（解码 kernel traits，L53-446）与 `Flash_qpack_traits`（打包 kernel traits，L450-574）的全部常量、MMA 类型、共享内存布局与拷贝原子 |
+| `csrc/bit_decode/src/flash_fwd_launch_template.h` | traits 的**实例化点**：`run_mha_fwd_splitkv_dispatch` 固定 kBlockM/kBlockN/kNWarps（L130-137）；`run_flash_splitkv_fwd` 做共享内存大小检查并启动两个 kernel（L76-128） |
+| `csrc/bit_decode/decode_api.cpp` | dispatch 层：把运行期的 quant_mode/group_size 字符串与整数映射为模板实参（L199-206） |
+| `csrc/bit_decode/src/flash_fwd_kernel.h` | traits 的**消费者**：kernel 函数从 traits 取常量、构造共享内存视图（本讲只看"取用"的证据，不深入计算流程） |
+| `csrc/bit_decode/src/genfile/flash_fwd_split_hdim128_fp16_sm80_4bit.cu` | 显式模板实例化清单，告诉我们哪些配置真实存在 |
+
+## 4. 核心概念与源码讲解
+
+本讲的三个最小模块：
+
+1. **Flash_fwd_kernel_traits 常量区**——模板参数如何派生出全部 kBlock*/kHeadDim*/num_params 常量；
+2. **SharedStorage**——六块共享内存、双视图复用与 Swizzle；
+3. **TiledMMA / TiledMmaKV_i4**——两套 Tensor Core 拼装及其分工。
+
+### 4.1 Flash_fwd_kernel_traits 常量区：模板参数到 tile 常量的派生链
+
+#### 4.1.1 概念说明
+
+解码 kernel 处理的是一个"形状完全由量化配置决定"的问题：一个 tile 里能装多少 token，取决于一个 uint16 能装几个量化值（\( \text{pack\_num} = 16/\text{num\_bits} \)）；一组 scale/zero 覆盖多少 token，取决于 `group_size`。如果这些量留到运行期再算，循环边界、共享内存大小、寄存器数组长度全都无法优化。因此 traits 的第一项工作就是把它们变成 `constexpr` 整数，形成一条清晰的派生链：
+
+```text
+模板参数                          派生常量
+─────────────────────────────    ─────────────────────────────────────────────
+num_bits ──► pack_num = 16/num_bits ──► kHeadDim_pack = kHeadDim / pack_num
+                                   └─► kBlockP = kBlockN / pack_num (k-channel)
+num_bits ──► residual_block_size (4bit=128, 2bit=256) = kBlockN_pack
+group_size ──► kBlockK_params = kBlockN / group_size
+           ──► kHeadDim_v_params = kHeadDim / group_size
+           ──► num_params = kBlockN_pack / group_size
+quant_mode ──► kHeadDim_k = kHeadDim (k-channel) 或 kHeadDim_pack (k-tensor)
+```
+
+两个"角色"需要先分清（承接 u2-l1）：
+
+- **K 的 k-channel 模式（quant_mode=1）**：打包沿序列方向。`k_pack` 里一行 uint16 装的是**连续 pack_num 个 token 的同一个通道**。所以一个 kBlockN=256 的 token 块，K 只占 `kBlockN/pack_num` 行、每行 kHeadDim 列。
+- **V 的 tensor 模式（恒定）**：打包沿通道方向。每个 token 自占一行、宽 `kHeadDim/pack_num` 个 uint16。
+
+这就是为什么 traits 里 K 与 V 的"打包后宽度"是两套常量（`kHeadDim_k` 与 `kHeadDim_pack`）。
+
+#### 4.1.2 核心流程
+
+1. `decode_api.cpp` 的 dispatch 读运行期字符串 `quant_mode`（`"k-channel"` 走 quant_mode=1 分支，`"k-tensor"` 的分支全部被注释）与整数 `group_size`（仅 128/32 启用，64 被注释），选定模板实例。
+2. `run_mha_fwd_splitkv_dispatch` 以**固定值** `kBlockM=16`、`kBlockN=256`、`kNWarps=4`（128 线程）实例化 `Flash_fwd_kernel_traits<Headdim, 16, 256, 4, false, false, quant_mode, num_bits, group_size, T>`。
+3. traits 在编译期展开派生链，产出全部常量；kernel 用 `constexpr int` 局部别名逐个取用（见 `flash_fwd_kernel.h` L82-107一口气取了 20 多个）。
+4. `genfile/*.cu` 里的 `template void run_mha_fwd_splitkv_dispatch<...>` 显式实例化清单决定哪些配置真的被编译进 `bit_decode_cuda`（见 u1-l2、u7-l3）。
+
+#### 4.1.3 源码精读
+
+**（1）模板签名：9 个模板参数。**
+
+[qr: kernel_traits.h L53-55]（[csrc/bit_decode/src/include/kernel_traits.h:L53-L55](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L53-L55)）定义了模板参数顺序：`kHeadDim_, kBlockM_, kBlockN_, kNWarps_, Is_Q_in_regs_, Share_Q_K_smem_, quant_mode_, num_bits_, group_size_, elem_type`。注意后三个量化参数排在布尔开关之后——这是在原版 FlashAttention traits 上追加的结果。
+
+**（2）三个量化配置与两个"总开关"常量。**
+
+[csrc/bit_decode/src/include/kernel_traits.h:L70-L75](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L70-L75) 保存模板实参并派生两个核心常量：
+
+- `pack_num = 16 / num_bits`：一个 uint16 容器装的量化值个数（4-bit 装 4 个、2-bit 装 8 个）；
+- `residual_block_size = num_bits == 4 ? 128 : 256`：残余区块大小。u2-l2 讲过它的物理来历——4-bit 时 kBlockN_pack=128、2-bit 时 256，两种位宽下"一个打包 tile"都恰好占 32 个 uint16 行，且能被 pack_num 与 group_size 整除。
+
+**（3）常量派生区（本讲最核心的 13 行）。**
+
+[csrc/bit_decode/src/include/kernel_traits.h:L81-L93](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L81-L93)：
+
+```cpp
+static constexpr int kBlockM            = kBlockM_;
+static constexpr int kBlockN            = kBlockN_;
+static constexpr int kBlockN_pack       = num_bits   == 4 ? 128 : 256;
+static constexpr int kBlockN_residual   = kBlockN_pack;
+static constexpr int kBlockP            = quant_mode == 1 ? kBlockN / pack_num : kBlockN;
+static constexpr int kBlockP_new_pack   = quant_mode == 1 ? kBlockN_pack / pack_num : kBlockN_pack;
+static constexpr int kBlockK_params     = quant_mode == 1 ? kBlockN / group_size : kBlockN;
+static constexpr int kBlockK_params_new = quant_mode == 1 ? kBlockN_pack / group_size : kBlockN_pack;
+static constexpr int kHeadDim           = kHeadDim_;
+static constexpr int kHeadDim_pack      = kHeadDim / pack_num;
+static constexpr int kHeadDim_k         = quant_mode == 1 ? kHeadDim : kHeadDim_pack;
+static constexpr int kHeadDim_k_params  = quant_mode == 1 ? kHeadDim : kHeadDim / group_size;
+static constexpr int kHeadDim_v_params  = kHeadDim / group_size;
+```
+
+逐个解读（均以 k-channel、kHeadDim=128、kBlockN=256 为背景）：
+
+| 常量 | 含义 |
+| --- | --- |
+| `kBlockN_pack` | 残余再量化一次处理的 token 数（= residual_block_size） |
+| `kBlockP` | 一个 kBlockN token 块的 K 打包后占多少**行** uint16（k-channel 沿序列打包：\( 256/\text{pack\_num} \)） |
+| `kBlockP_new_pack` | 同上，但针对"新攒满一块"（kBlockN_pack 个 token）的尺度 |
+| `kBlockK_params` / `_new` | 一个块内沿序列方向有几个量化组：\( 256/\text{group\_size} \) |
+| `kHeadDim_pack` | V（或 k-tensor 的 K）打包后每个 token 占多少个 uint16：\( 128/\text{pack\_num} \) |
+| `kHeadDim_k` | K 在 smem 中的列宽：k-channel 不沿通道打包，仍是 128；k-tensor 则是 kHeadDim_pack |
+| `kHeadDim_k_params` | K 的参数沿通道的组数：k-channel 时逐通道各有参数（128），k-tensor 时 \( 128/\text{group\_size} \) |
+| `kHeadDim_v_params` | V 的参数沿通道的组数：\( 128/\text{group\_size} \)（V 恒为 tensor 模式，与 quant_mode 无关） |
+
+紧接着的 [L95](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L95) `k_pack_div = quant_mode==1 ? pack_num : 1` 是 kernel 里换算"token 序号 ↔ 打包行号"的除数。
+
+**（4）tile_paramsk_* 与 num_params：寄存器参数张量的形状。**
+
+[csrc/bit_decode/src/include/kernel_traits.h:L103-L111](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L103-L111) 定义了一组 `tile_params*` 常量与 `num_params = kBlockN_pack / group_size`。它们本讲只需知道用途：kernel 在 L776-781 用它们声明**寄存器中的** scale/zero 张量形状（如 `TensorParamsKC = make_tensor<half_t>(Shape<4*num_params, tile_paramsk_m, tile_paramsk_k>)`），即反量化参数不驻留 smem，而是驻留寄存器。消费证据见 [csrc/bit_decode/src/flash_fwd_kernel.h:L776-L781](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L776-L781)。
+
+**（5）dispatch 与实例化点：常量的"真实取值"从这里锁定。**
+
+[csrc/bit_decode/decode_api.cpp:L199-L206](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/decode_api.cpp#L199-L206)：`quant_mode == "k-channel"` 时 quant_mode 模板实参为 1；group_size 128/32 的分支启用、64 被注释（k-tensor 分支 L208-213 全部注释）。而 [csrc/bit_decode/src/flash_fwd_launch_template.h:L130-L137](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_launch_template.h#L130-L137) 把 kBlockM=16（decoding 时 Q 只有 1 个 token，16 行是 GQA 折叠后的序列维，见 u3-l1 的 seqlenq_ngroups_swapped）、kBlockN=256、kNWarps=4 **写死**。所以当前仓库真实存在的解码 traits 实例只有 4 个：
+
+```cpp
+Flash_fwd_kernel_traits<128, 16, 256, 4, false, false, 1, 4, 128>
+Flash_fwd_kernel_traits<128, 16, 256, 4, false, false, 1, 4, 32>
+Flash_fwd_kernel_traits<128, 16, 256, 4, false, false, 1, 2, 128>
+Flash_fwd_kernel_traits<128, 16, 256, 4, false, false, 1, 2, 32>
+```
+
+对应的显式实例化清单见 [csrc/bit_decode/src/genfile/flash_fwd_split_hdim128_fp16_sm80_4bit.cu:L8-L10](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/genfile/flash_fwd_split_hdim128_fp16_sm80_4bit.cu#L8-L10)（4-bit 的 128/32 两行未注释）与 2bit 文件的 L7/L9。
+
+**（6）对照：QPack traits 是解码 traits 的"简化版"。**
+
+[csrc/bit_decode/src/include/kernel_traits.h:L450-L473](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L450-L473) 的 `Flash_qpack_traits` 复用了同一套派生公式（`kBlockP`、`kHeadDim_pack` 等逐行对应），但 Base 固定 `kBlockM=32`（L451）、无 Q/acc 共享内存、无 Swizzle（u4-l1 已详述）。读到这里可以体会：**派生公式是共享的"语法"，两个 traits 是不同的"方言"**。
+
+#### 4.1.4 代码实践：手算两组配置的常量表
+
+**实践目标**：不运行任何代码，仅凭 4.1.3 的源码，推导两组真实配置下全部关键常量，建立"看到配置就能想象 tile 形状"的手感。
+
+**操作步骤**：
+
+1. 取背景值：kHeadDim=128、kBlockM=16、kBlockN=256、kNWarps=4、quant_mode=1（k-channel）。
+2. 对配置 A（num_bits=4, group_size=128）与配置 B（num_bits=2, group_size=32），逐行代入 L70-111 的公式。
+3. 把结果填进下表（先遮住"参考答案"列）。
+
+**需要观察的现象 / 预期结果**（参考答案）：
+
+| 常量 | 公式 | A：4bit/g128 | B：2bit/g32 |
+| --- | --- | --- | --- |
+| pack_num | 16/num_bits | 4 | 8 |
+| residual_block_size | 4bit→128, 2bit→256 | 128 | 256 |
+| kBlockN_pack = kBlockN_residual | 同 residual_block_size | 128 | 256 |
+| kBlockP | kBlockN/pack_num | 64 | 32 |
+| kBlockP_new_pack | kBlockN_pack/pack_num | 32 | 32 |
+| kBlockK_params | kBlockN/group_size | 2 | 8 |
+| kBlockK_params_new | kBlockN_pack/group_size | 1 | 8 |
+| kHeadDim_pack | 128/pack_num | 32 | 16 |
+| kHeadDim_k | k-channel→128 | 128 | 128 |
+| kHeadDim_k_params | k-channel→128 | 128 | 128 |
+| kHeadDim_v_params | 128/group_size | 1 | 4 |
+| num_params | kBlockN_pack/group_size | 1 | 8 |
+| tile_paramsk_j | kBlockN/group_size | 2 | 8 |
+| tile_paramsk_m | kBlockN/kBlockN_pack | 2 | 1 |
+| tile_paramsk_k | kHeadDim/16 | 8 | 8 |
+| tile_paramsv_k | kBlockN/16 | 16 | 16 |
+| tile_paramsk_g | kBlockN/32 × kBlockN/group_size | 16 | 64 |
+| tile_paramsk_g_r | kBlockN_residual/32 × kBlockN_residual/group_size | 4 | 64 |
+| tile_paramsv_k_r | kBlockN_residual/16 | 8 | 16 |
+| kSmemSize | sizeof(SharedStorage)（见 4.2.4） | 79872 B (78 KiB) | 151552 B (148 KiB) |
+| kSmemSize_res | sizeof(SharedStorage_residual) | 78848 B (77 KiB) | 147456 B (144 KiB) |
+
+值得留意的两个"巧合"：两种位宽下 `kBlockP_new_pack` 都是 32（这正是 u2-l2 讲过的"打包 tile 恒占 32 个 uint16 行"设计）；A 配置的 `kHeadDim_v_params=1` 意味着 128 个通道共享一组 V 参数（group_size=128 ≥ head_dim）。
+
+（表中 smem 字节数的推导过程见 4.2.4；整表可在 4.3.4 的程序里机器验证。）
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：若把 num_bits=4、group_size=64 的分支解开注释（u7-l3 的实践），kBlockP、num_params、kHeadDim_v_params 分别是多少？
+
+答案：kBlockP = 256/4 = 64（与位宽有关、与 group_size 无关）；num_params = kBlockN_pack/group_size = 128/64 = 2；kHeadDim_v_params = 128/64 = 2。注意 group_size 影响的是"参数侧"常量，pack_num 影响的是"打包侧"常量——两条派生链彼此独立。
+
+**练习 2**：为什么 `kHeadDim_k` 在 k-channel 下等于 128，而 k-tensor 下等于 `kHeadDim_pack`？
+
+答案：这个常量描述 K 装进 smem 后的列宽。k-channel 沿**序列**打包，通道维原样保留，每行仍是 128 个 uint16（每个 uint16 装 4 个 token 的同一通道）；k-tensor 沿**通道**打包，128 个通道压成 128/pack_num 个 uint16，列宽变成 kHeadDim_pack。同一个常量在两种模式下描述的是"同一块 smem 的不同视图宽度"。
+
+**练习 3**：kBlockN=256 对 4-bit 意味着一次迭代处理 256 个 token，对 2-bit 也是 256 个。两者 K 打包数据在 smem 里各占多少字节（只算 SmemLayoutKPack 视图）？
+
+答案：4-bit：kBlockP×kHeadDim_k = 64×128 = 8192 个 uint16 = 16 KiB；2-bit：32×128 = 4096 个 uint16 = 8 KiB。位宽越低、打包视图越小——这正是低比特减少带宽的体现（但注意分配的缓冲区更大，见 4.2.3 的讨论）。
+
+### 4.2 SharedStorage：六块共享内存、双视图复用与 Swizzle
+
+#### 4.2.1 概念说明
+
+**为什么需要 Swizzle？** LDSM（`ldmatrix`）指令让一个 warp 一次从共享内存搬 8×16B 的矩阵片段进寄存器。如果 K tile 按朴素行优先存放，MMA 需要的"8 行 × 16 字节"片段里，各行起始地址相差整行宽度（如 128 half = 256 B）——256 B 是 bank 宽度 4 B 的整数倍，8 行会以固定模式撞进同一批 bank，产生 2 路甚至 4 路冲突。Swizzle 的办法是：以 16 字节为一个单元，把连续 \( 2^B \) 行分作一组，用**行号对组内单元地址做 XOR**：
+
+\[ \text{addr}' = \text{addr} \oplus ((\text{row} \bmod 2^B) \ll \text{unit\_bits}) \]
+
+效果是同一列方向的 16B 片段被交错散到不同 bank。本讲看到的 `Swizzle<3,3,3>`（B=3，8 行一组）是 fp16 MMA 布局的标准配方，`Swizzle<2,2,3>` 用于更窄的参数区。
+
+**为什么同一缓冲区要有多个"视图"？** 解码路径的 residual kernel 与 splitkv kernel 共用一份 traits，且在 kernel 的不同阶段，同一块 smem 要么装 FP16 的残余 K（做精确注意力），要么装打包后的 uint16（再量化输出或反量化中转）。CuTe 的做法是：缓冲区按**最大视图**分配一次，再用不同的 `SmemLayout*` 类型把它 reinterpret 成不同形状的 Tensor——一个手工的 union。
+
+#### 4.2.2 核心流程
+
+splitkv kernel 的 `SharedStorage` 有六个成员，数据流角色如下：
+
+```text
+smem_Q        ← gmem Q (16×128 fp16)，MMA 的 A 操作数来源
+smem_Kpack    ← gmem k_pack；【视图复用】splitkv: SmemLayoutKPack (打包 uint16)
+                                  residual: SmemLayoutKResidual (FP16 残余) / SmemLayoutKNewPack (打包)
+smem_Kparams  ← gmem k_params (half2 视图的 scale/zero)
+smem_Vpack    ← gmem v_pack；【视图复用】同上，V 侧
+smem_Vparams  ← gmem v_params
+smem_acc      ← P 矩阵落 smem 再作第二次 MMA 的 A 操作数；
+                【视图复用】softmax 归约时 alias 成 SmemLayoutReduce_tmp
+```
+
+两个 kernel 用**不同的结构体**：`SharedStorage`（splitkv，六块）与 `SharedStorage_residual`（residual，五块——少了 `smem_Vparams`，因为 V 的新块参数直接驻留寄存器，见 [flash_fwd_kernel.h:L779-L781](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L779-L781) 的 `TensorParamsVT_residual`）。
+
+#### 4.2.3 源码精读
+
+**（1）Q 布局：Swizzle 原子 + 平铺。**
+
+[csrc/bit_decode/src/include/kernel_traits.h:L134-L141](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L134-L141)：`SmemLayoutAtomQ` 是 8×kBlockKSmem 的 Swizzle<3,3,3> 原子（kHeadDim=128 时 kBlockKSmem=64，见 [L98-L101](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L98-L101) 的 `kSwizzle` 推导），`tile_to_shape` 平铺到 (16, 128)。注释特意提醒：原子必须用 kBlockKSmem 而不是 kHeadDim，否则 d=128 时结果出错——Swizzle 原子的行宽必须与其 XOR 粒度匹配。
+
+**（2）K 打包布局与"容量按最大视图分配"。**
+
+[csrc/bit_decode/src/include/kernel_traits.h:L153-L167](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L153-L167) 定义 `SmemLayoutAtomK_SW`（8×32 uint16 的 Swizzle 原子）与 `SmemLayoutKPack`（平铺到 (kBlockP, kHeadDim_k)）。而 [L144-L146](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L144-L146) 另有一个**不带 Swizzle 的** `SmemLayoutKSize = (kBlockN_residual, kHeadDim)`。关键在 [L289](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L289)：`smem_Kpack` 的**容量按 SmemLayoutKSize（即 FP16 残余视图）分配**。以 4-bit 为例：分配 128×128 uint16 = 32 KiB，而 splitkv kernel 实际使用的 `SmemLayoutKPack` 视图只有 64×128 = 16 KiB（练习 3）；2-bit 差距更大（分配 64 KiB、视图 8 KiB）。同一 traits 服务两个 kernel、缓冲区取最大视图，代价是 splitkv kernel 白白多占了一倍 smem——这是一个值得注意的工程取舍（也留作 4.2.5 的讨论题）。
+
+**（3）视图复用的消费证据。**
+
+[csrc/bit_decode/src/flash_fwd_kernel.h:L184-L196](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L184-L196)（residual kernel）：同一块 `smem_Kpack` 被同时声明为 `sK_residual`（reinterpret 成 Element*，FP16 视图，形状 kBlockN_residual×kHeadDim）与 `sK_new_pack`（uint16 视图，形状 kBlockP_new_pack×kHeadDim_k）；V 侧同理。splitkv kernel 的对应代码在 [L727-L741](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L727-L741)：`sK_dequant` 甚至复用了 `smem_Q` 的空间（反量化中转，分时使用）。另外 [L733-L734](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L733-L734) 里 `sAcc` 与 `sReduce_tmp` 也是同一缓冲的两个视图（[L279-L282](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L279-L282) 的 8×32 Swizzle<1,3,3> 布局服务于 softmax 跨 warp 归约）。这些都印证：**kernel 是按阶段分时复用 smem 的，读 kernel 时必须时刻问"这块缓冲现在处于哪个视图"**。
+
+**（4）K/V 参数布局：k-channel 与 k-tensor 的条件编译。**
+
+[csrc/bit_decode/src/include/kernel_traits.h:L184-L202](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L184-L202)：`SmemLayoutKParams_channel` 形状为 (tile_paramsk_j, kHeadDim)——块内每个量化组 × 每个通道各一项（half2）；`SmemLayoutKParams_group`（32×1 原子平铺）则是 k-tensor 的形状，经 `std::conditional_t` 按 quant_mode 二选一。V 参数 [L244-L249](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L244-L249) 恒为 (kBlockN, kHeadDim_v_params)。这些形状与 u2-l1 推导的 gmem 张量布局严格对应。
+
+**（5）acc 与两个 SharedStorage 的定义。**
+
+[csrc/bit_decode/src/include/kernel_traits.h:L252-L263](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L252-L263)：`SmemLayoutAcc`（16×256，带 Swizzle<3,3,3>）与 `SmemLayoutAcc_residual`（16×128，**不带** Swizzle——residual 路径的 P 矩阵搬运模式不同）。[L284-L297](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L284-L297) 与 [L299-L308](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L299-L308) 分别给出两个结构体与 `kSmemSize` / `kSmemSize_res`。注意 `array_aligned` 保证每块 16 B 对齐，各成员大小都是 1024 的倍数，因此总大小就是各成员之和（无隐藏 padding）。
+
+**（6）48 KiB 检查与启动。**
+
+[csrc/bit_decode/src/flash_fwd_launch_template.h:L80-L104](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_launch_template.h#L80-L104)：`run_flash_splitkv_fwd` 取出两个 smem 大小，先启动 residual kernel（grid 为 (m 块数, b, h)），再启动 splitkv kernel（grid 为 (m 块数, num_splits-1, b×h)，印证 u3-l3 的"+1 留给 residual"）。两者都在 `smem_size >= 48*1024` 时调用 `cudaFuncSetAttribute` 抬高动态共享内存上限，并把大小作为启动配置的第三个参数传入；kernel 内则通过 [flash_fwd_kernel.h:L75-L77](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L75-L77) 的 `extern __shared__` + reinterpret 与结构体对接。
+
+#### 4.2.4 代码实践：计算 SharedStorage 大小并核对 48 KiB 限制
+
+**实践目标**：算出两种配置下六块 smem 各自的字节数与总和，验证"必须 cudaFuncSetAttribute"的结论，并体会位宽对显存占用的冲击。
+
+**操作步骤**：
+
+1. 对配置 A（4bit/g128），逐成员计算：元素数 = 布局形状乘积（所有 tile_to_shape 目标形状都是原子的整数倍，无 padding），字节数 = 元素数 × 元素宽度（half=2 B、uint16=2 B、half2=4 B）。
+2. 求和并与 `48*1024` 比较；对配置 B（2bit/g32）重复。
+3. （可选，需 GPU）在 4.3.4 的验证程序里打印 `kSmemSize` 核对。
+
+**需要观察的现象 / 预期结果**（参考答案）：
+
+配置 A（splitkv SharedStorage）：
+
+| 成员 | 布局（元素类型 × 形状） | 字节 |
+| --- | --- | --- |
+| smem_Q | half × (16×128) | 4096 |
+| smem_Kpack | uint16 × (128×128)（SmemLayoutKSize） | 32768 |
+| smem_Kparams | half2 × (2×128) | 1024 |
+| smem_Vpack | uint16 × (128×128) | 32768 |
+| smem_Vparams | half2 × (256×1) | 1024 |
+| smem_acc | half × (16×256) | 8192 |
+| **合计** | | **79872 B = 78 KiB ≥ 48 KiB** |
+
+配置 B（2bit/g32）：4096 + 65536 + 4096 + 65536 + 4096 + 8192 = **151552 B = 148 KiB**。residual 结构体：A 为 78848 B（77 KiB）、B 为 147456 B（144 KiB）。
+
+结论：四个结构体全部超过 48 KiB，`cudaFuncSetAttribute` 分支必然触发。进一步推论：A100 单 block 上限 163 KiB，4-bit 的 78 KiB 理论上可双 block 驻留一个 SM（2×78=156 KiB），而 2-bit 的 148 KiB 只能单 block——这与 u4-l1 得出的"2-bit 打包 kernel 仅 sm_80/90 可跑"同理：sm_86/89 单 block 上限约 99 KiB，装不下 148 KiB。（硬件上限数字来自 NVIDIA 公开规格；占用率推论为估算，待本地用 `cudaOccupancyMaxActiveBlocksPerMultiprocessor` 验证。）
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`SmemLayoutKParams_channel` 在 4-bit/g128 下只有 1024 字节，为什么这么小？
+
+答案：形状是 (tile_paramsk_j, kHeadDim) = (2, 128) 个 half2 = 1024 B。一个 kBlockN=256 的块只含 2 个量化组（256/128），每组 128 个通道各一个 half2（scale/zero 的紧凑视图），所以参数区比打包区小一个数量级以上——这正是 u2-l1 讲的"参数开销 32/(g×num_bits) 比特/元素"在 smem 侧的体现。
+
+**练习 2**：如果要让 splitkv kernel 不为它用不到的残余视图买单（4-bit 下 32 KiB 的 Kpack 只用了 16 KiB），工程上可以怎么改？有什么风险？
+
+答案：可以为 splitkv 与 residual 定义各自独立的 SharedStorage（项目其实已有两个结构体，只是 smem_Kpack/smem_Vpack 的容量都按 SmemLayoutKSize 取），把 splitkv 侧的 Kpack/Vpack 容量改成 cosize_v<SmemLayoutKPack>/cosize_v<SmemLayoutVPack>。风险是：kernel 内 `sK_dequant` 等别名视图（复用 smem_Q）依赖各视图的相对大小关系，改容量必须逐一核对所有视图的峰值占用，否则出现越界写；此外收益受限于 4 KiB 粒度的占用率台阶。这属于典型的"先量化收益再动手"的优化（可对照 u7-l4 的架构评审）。
+
+**练习 3**：`SmemLayoutAcc` 用了 Swizzle<3,3,3>，`SmemLayoutAcc_residual` 却没加 Swizzle，为什么可以不加？
+
+答案：Swizzle 是为特定访问模式（LDSM 成列取 16B 片段）服务的。acc 的角色是"P 矩阵先经 R2SCopyAtomAcc 落 smem，再作为下一次 MMA 的 A 操作数被 make_tiled_copy_A 按行取"，两侧访问模式不同；residual 路径的 acc 尺寸是 16×128 且其 R2S/S2R 拷贝原子选型不同（如 [kernel_traits.h:L441](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L441) 的 `R2SCopyAtomPack` 走 DefaultCopy），朴素布局已能满足其访问模式。是否需要 Swizzle 取决于实测的 bank conflict，不是越大越全越好。（完整解释需结合 u5-l2 的数据流，此处先建立"Swizzle 服务于访问模式"的观念。）
+
+### 4.3 TiledMMA 与拷贝原子：两套 Tensor Core 拼装的分工
+
+#### 4.3.1 概念说明
+
+SM80 的 Tensor Core 原子操作 `SM80_16x8x16_F32F16F16F32_TN` 一次算一个 16(M)×8(N)×16(K) 的 FP16 矩阵乘（FP32 累加）。单个原子太小，CuTe 用 `TiledMMA<Atom, AtomLayout, Tile>` 把原子拼成大棋盘：
+
+- `Layout<Shape<Int<1>,_4,_1>>`：atom 布局——M 方向 1 个、N 方向 4 个、K 方向 1 个，共 4 个原子，恰好由 4 个 warp（kNWarps=4，128 线程）各领一个；
+- `Tile<Int<16>, Int<128>, _16>`：整体 tile 尺寸 16×128×16（M×N×K）。
+
+traits 定义了两套：`TiledMma`（N=128）与 `TiledMmaKV_i4`（N=32），后者还被 `TiledMma_residual` 别名复用。**为什么打包路径要用更窄的 N=32？** 因为 LOP3 反量化是一次处理一个 uint16 里的几个 nibble（4-bit 一批 4 个值），K/V 的打包 fragment 以 32 列（= pack_num×16/pack_num…直观上是"一个 uint16 列组"）为自然粒度重组，MMA tile 的 N 必须与这个粒度对齐，寄存器里的反量化输出才能无缝作为 MMA 的 B 操作数。
+
+#### 4.3.2 核心流程
+
+1. 基类按架构选原子：sm_80+ 用 `SM80_16x8x16_F32F16F16F32_TN`（[csrc/bit_decode/src/include/kernel_traits.h:L33-L41](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L33-L41)），旧架构退回 SM75 原子（实际编译目标恒为 sm_80/sm_90，见 u1-l2）。
+2. traits 用同一原子拼出两套 TiledMMA（[L117-L127](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L117-L127)）。
+3. kernel 里 `get_thread_slice(tidx)` 把线程映射到 MMA 棋盘上，`partition_fragment_A/B` 把 smem/寄存器张量切成该线程持有的 fragment。
+4. FP16 路径（Q 加载、残余区、acc→O）走 `tiled_mma`；打包 uint16 的 K/V tile 用 `tiled_mma_KV_i4` 切出 fragment，经寄存器内 LOP3 反量化后再进 MMA（细节在 u5-l3）。
+
+#### 4.3.3 源码精读
+
+**（1）两套 TiledMMA 定义。**
+
+[csrc/bit_decode/src/include/kernel_traits.h:L117-L127](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L117-L127)：`TiledMma` 的 `Tile<Int<16>, Int<128>, _16>` 与 `TiledMmaKV_i4` 的 `Tile<Int<16>, Int<32>, _16>` 并排摆放，唯一差异是 N 维宽度；`TiledMma_residual = TiledMmaKV_i4` 直接复用窄版。
+
+**（2）kernel 消费证据：同一个循环里两套 MMA 各管一摊。**
+
+[csrc/bit_decode/src/flash_fwd_kernel.h:L808-L817](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L808-L817)（splitkv kernel）：
+
+```cpp
+typename Kernel_traits::TiledMma      tiled_mma;
+typename Kernel_traits::TiledMmaKV_i4 tiled_mma_KV_i4;
+auto thr_mma         = tiled_mma.get_thread_slice(tidx);
+auto thr_mma_KV_i4   = tiled_mma_KV_i4.get_thread_slice(tidx);
+Tensor tSrQ          = thr_mma.partition_fragment_A(sQ);                    // FP16 的 Q
+Tensor tSrK_pack_tmp = thr_mma_KV_i4.partition_fragment_B(sK_pack_transposed); // 打包的 K
+```
+
+上面代码摘自 splitkv kernel 的 MMA 分区段。`tSrK_pack_tmp` 的 `_tmp` 后缀即暗示"这是待反量化的半成品 fragment"；而 [csrc/bit_decode/src/flash_fwd_kernel.h:L933](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L933) 的 `acc_s = partition_fragment_C(tiled_mma, Shape<kBlockM, kBlockN>)` 表明分数矩阵 C 用宽版 MMA 组织（16×256 需要 2 个 128 宽的 MMA 分区）。
+
+**（3）配套的拷贝原子：smem→寄存器与寄存器→smem。**
+
+[csrc/bit_decode/src/include/kernel_traits.h:L428-L441](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L428-L441)：`S2RCopyAtomK_i4`（uint16 版的 `SM75_U32x2_LDSM_N`）与 `S2RCopyAtomV_i4`（uint16 版的 `SM75_U16x4_LDSM_T`，转置取数）是打包数据专用的 LDSM 原子；`R2SCopyAtomPack`（DefaultCopy<uint16_t>）负责把寄存器里打包好的值写回 smem。gmem→smem 一侧，[L338-L354](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L338-L354) 为 K/V 打包数据准备了按 num_bits 二选一的 tiled copy（2-bit 的 V 用 64×2 线程映射、4-bit 用 32×4），[L361-L393](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L361-L393) 则用 `SM80_CP_ASYNC_CACHEALWAYS` 的 uint32/uint64 原子搬 half2 参数。本讲只需认识"每个方向、每种元素类型都有配套原子"这张地图，具体 partition 用法在 u5-l2 展开。
+
+#### 4.3.4 代码实践：用 constexpr 程序机器验证常量表
+
+**实践目标**：把 4.1.4 的手算表交给编译器复核，顺便把 `kSmemSize` 的真值打出来。
+
+**操作步骤**：
+
+1. 在仓库根目录新建 `traits_check.cu`（示例代码，非项目原有文件；**不要提交进仓库**）：
+
+```cpp
+// traits_check.cu —— 示例代码：打印两种配置的 traits 常量
+#include <cstdio>
+#include "kernel_traits.h"
+
+template <int NB, int GS>
+void print_cfg(const char* name) {
+    using T = Flash_fwd_kernel_traits<128, 16, 256, 4, false, false,
+                                      /*quant_mode=*/1, NB, GS, cutlass::half_t>;
+    printf("== %s ==\n", name);
+    printf("pack_num=%d residual_block_size=%d\n", T::pack_num, T::residual_block_size);
+    printf("kBlockN_pack=%d kBlockP=%d kBlockP_new_pack=%d\n",
+           T::kBlockN_pack, T::kBlockP, T::kBlockP_new_pack);
+    printf("kBlockK_params=%d kBlockK_params_new=%d\n",
+           T::kBlockK_params, T::kBlockK_params_new);
+    printf("kHeadDim_pack=%d kHeadDim_k=%d kHeadDim_k_params=%d kHeadDim_v_params=%d\n",
+           T::kHeadDim_pack, T::kHeadDim_k, T::kHeadDim_k_params, T::kHeadDim_v_params);
+    printf("num_params=%d tile_paramsk_j=%d tile_paramsk_m=%d\n",
+           T::num_params, T::tile_paramsk_j, T::tile_paramsk_m);
+    printf("kSmemSize=%d kSmemSize_res=%d (48KiB=%d)\n",
+           T::kSmemSize, T::kSmemSize_res, 48*1024);
+}
+
+int main() {
+    print_cfg<4, 128>("int4 / group_size=128");
+    print_cfg<2, 32>("int2 / group_size=32");
+    return 0;
+}
+```
+
+2. 编译运行（需要 u1-l2 装好的 CUDA 工具链与已拉取的 cutlass 子模块）：
+
+```bash
+nvcc -std=c++17 -I libs/cutlass/include -I csrc/bit_decode/src/include \
+     traits_check.cu -o traits_check && ./traits_check
+```
+
+**需要观察的现象**：程序输出应与 4.1.4 表格、4.2.4 的字节数逐项一致，尤其 `kSmemSize=79872 / 151552`。
+
+**预期结果**：两组共 15 行左右的常量输出；若编译报 `cute/tensor.hpp` 找不到，说明 `-I` 路径不对（确认 `libs/cutlass/include` 存在）；本程序无需 GPU 也可编译运行（traits 全是编译期量），编译器版本与 CUDA 11.6+ 的兼容性待本地验证。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：`TiledMma` 的 Tile 是 16×128×16，而 kBlockN=256，二者矛盾吗？
+
+答案：不矛盾。TiledMMA 描述的是**一次** `cute::gemm` 调用覆盖的棋盘；分数张量 `acc_s` 的形状是 (MMA, MMA_M, MMA_N)，kBlockN=256 时 MMA_N 维会有 2 个分区，循环里对两个 128 宽的分区分别调用 MMA（见 flash_fwd_kernel.h:933 附近 `partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{})` 的注释 `(MMA=4, MMA_M, MMA_N)`）。
+
+**练习 2**：atom 布局是 `Layout<Shape<Int<1>,_4,_1>>`（N 方向 4 个原子），与 kNWarps=4 是什么关系？
+
+答案：4 个原子各由 1 个 warp 驱动（每个 16x8x16 原子恰好消耗一个 warp 的 32 线程），N 方向 4 个原子 × 8 列 = 32 列/步，拼出 128（4 步）或 32（1 步）宽的 tile。这就是 traits 把 kNWarps 与 MMA 配置绑定设计的原因——改 warp 数必须同步改 atom 布局。
+
+**练习 3**：为什么搬 k_params/v_params 用 `SM80_CP_ASYNC_CACHEALWAYS`（uint32/uint64），而搬 Q/KV 主数据用 `SM80_CP_ASYNC_CACHEGLOBAL`（uint128）？
+
+答案（结合源码注释与 u4-l1 的对照）：Q/KV tile 每个 block 只被本 block 读一次、且量大，走 GLOBAL 提示流式语义更快；量化参数量小且会被整个 tile 生命周期反复引用（反量化每步都要乘 scale/zero），用 ALWAYS 让它留在 L1。uint32/uint64 原子对应 half2（4 B）与双 half2（8 B）的小粒度搬运。（提示语是硬件建议而非硬性语义，属性能调优惯例。）
+
+## 5. 综合实践
+
+**任务：为"新增 group_size=64 的 4-bit k-channel 配置"预估全部 tile 形状与显存代价，并用 constexpr 程序验证。**
+
+这正好是 u7-l3 扩展实践的前置热身。步骤：
+
+1. **手算**（只用本讲 4.1.3 的公式，配置：kHeadDim=128, kBlockM=16, kBlockN=256, kNWarps=4, quant_mode=1, num_bits=4, group_size=64）：推导 pack_num、kBlockP、kBlockP_new_pack、kBlockK_params、kBlockK_params_new、kHeadDim_v_params、num_params、tile_paramsk_j，以及六块 smem 的字节数与 kSmemSize 总和。
+2. **机器验证**：把 4.3.4 程序里的调用改成 `print_cfg<4, 64>("int4 / group_size=64")`，重新编译运行，逐项比对。
+3. **解读**：回答三个问题——(a) kSmemSize 变大了还是变小了，变的是哪几块？(b) 该配置在 sm_86/89（单 block 约 99 KiB 上限）上能否运行？(c) 对照 [csrc/bit_decode/decode_api.cpp:L200-L206](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/decode_api.cpp#L200-L206) 与 genfile 的注释行，说明要让这个配置真正可用还需要补哪两处代码（提示：dispatch 分支 + 显式实例化，即 u3-l1 讲过的"成对解开"）。
+
+**参考答案**（供自查）：pack_num=4、kBlockP=64、kBlockP_new_pack=32、kBlockK_params=4、kBlockK_params_new=2、kHeadDim_v_params=2、num_params=2、tile_paramsk_j=4；smem 变化仅发生在参数侧——smem_Kparams 变为 half2×(4×128)=4096 B、smem_Vparams 变为 half2×(256×2)=2048 B，总计 4096+32768+4096+32768+2048+8192=83968 B=82 KiB（比 g128 的 78 KiB 略大，因为参数更多）；82 KiB < 99 KiB，sm_86/89 理论可跑（估算，待本地验证）；代码侧需解开 decode_api.cpp L203 的注释并在 `flash_fwd_split_hdim128_fp16_sm80_4bit.cu` 补一行 `<1, 4, 64>` 的显式实例化。
+
+## 6. 本讲小结
+
+- `Flash_fwd_kernel_traits` 是解码 kernel 的编译期图纸：模板参数 `quant_mode/num_bits/group_size` 经一条清晰的派生链产出 `pack_num → kBlockP/kHeadDim_pack`（打包侧）与 `group_size → kBlockK_params/kHeadDim_v_params/num_params`（参数侧）两组常量；当前仓库仅实例化 4 个配置（k-channel × {4,2}bit × {128,32}group），kBlockM=16、kBlockN=256、kNWarps=4 在 dispatch 层写死。
+- `SharedStorage`/`SharedStorage_residual` 各含五六块 smem；同一缓冲被多个视图分时复用（FP16 残余视图 vs 打包视图、acc vs reduce_tmp、Q vs 反量化中转），且**容量按最大视图（SmemLayoutKSize/VSize）分配**——splitkv kernel 为此多占了一倍 K/V smem，是明显的工程取舍。
+- K 的 smem 布局带 `Swizzle<3,3,3>`（8 行一组 XOR 交错）以消除 LDSM 的 bank conflict；参数区用更窄的 Swizzle<2,2,3>；acc_residual 则不加 Swizzle——Swizzle 与否取决于访问模式而非惯例。
+- 两套 TiledMMA（16×128×16 与 16×32×16）共用 SM80 16x8x16 原子与 (1,4,1) 的 4-warp atom 布局：宽版服务 FP16 的 Q·K/分数组织与 P·V，窄版 `TiledMmaKV_i4` 专供打包 uint16 fragment（待 LOP3 反量化后进 MMA）。
+- 四个 smem 结构体大小为 77/78 KiB（4-bit）与 144/148 KiB（2-bit），全部超过 48 KiB，因此两个 kernel 启动前都走 `cudaFuncSetAttribute` 抬限；2-bit 的 148 KiB 只有 sm_80/90（≥163 KiB 单 block 上限）装得下。
+
+## 7. 下一步学习建议
+
+本讲只认识了"图纸"，下一讲 **u5-l2（split-KV 主循环）** 将把图纸用起来：跟踪 `compute_attn_1rowblock_splitkv` 中每个 KV 块从 gmem 加载（用本讲的 GmemTileCopyK_Pack 等原子）→ smem（本讲的 SmemLayoutKPack 视图）→ 寄存器 fragment（本讲的 TiledMmaKV_i4）→ 在线 softmax → 二次 GEMM 的完整数据流。之后 **u5-l3** 深入 LOP3 反量化如何把 uint16 fragment 变成合法 half2 操作数，**u5-l4** 看 residual kernel 如何在本讲的复用视图上完成"FP16 注意力 + 攒满再量化"。建议读者在进入下一讲前，先把 4.3.4 的验证程序跑通，对常量表形成肌肉记忆。
