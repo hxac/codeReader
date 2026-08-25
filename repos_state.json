@@ -57451,7 +57451,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/mlc-ai/modern-gpu-programming-for-mlsys/modern-gpu-programming-for-mlsys-tutorial",
       "last_head": "0fdad075417d347e2171affadf9c1b07cd54f87f",
-      "last_run_at": "2026-08-25T11:02:20Z",
+      "last_run_at": "2026-08-25T14:03:49Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "mlc-ai/web-llm": {
@@ -57677,7 +57677,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/mlc-ai/web-llm/web-llm-tutorial",
       "last_head": "90f67096b68d3b77509c938f2221e4cef03b7d76",
-      "last_run_at": "2026-08-25T11:02:20Z",
+      "last_run_at": "2026-08-25T14:03:49Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "OpenBitSys/BitDecoding": {
@@ -57839,7 +57839,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/OpenBitSys/BitDecoding/BitDecoding-tutorial",
       "last_head": "ae0d83630d6292453355ced498db2ac87f56ec62",
-      "last_run_at": "2026-08-25T11:02:20Z",
+      "last_run_at": "2026-08-25T14:03:49Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "hw-native-sys/pto-isa": {},
@@ -57848,7 +57848,7 @@
     "ai-dynamo/dynamo": {},
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-25T11:02:20Z"
+      "last_run_at": "2026-08-25T14:03:49Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
