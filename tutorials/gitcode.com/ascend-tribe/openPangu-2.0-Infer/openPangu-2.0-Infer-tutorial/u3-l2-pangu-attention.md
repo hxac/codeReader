@@ -1,0 +1,542 @@
+# Pangu 稀疏注意力：Indexer 与自定义算子
+
+## 1. 本讲目标
+
+上一讲（u3-l1）我们看完了 `pangu_v2_moe.py` 的"骨架"：DecoderLayer = 注意力 + FFN + 归一化。本讲钻进其中最特别的一块——**注意力本身**。openPangu-2.0 采用的是「混合注意力」：一部分层是滑动窗口注意力（SWA），另一部分层是**稀疏注意力（DSA，DeepSeek Sparse Attention 的同源实现）**，而 DSA 层的核心是一个 **Indexer（索引器）**：它先给每个 query token 挑出最值得关注的 top-k 个历史 token，再让"真正的注意力"只算这些 token。
+
+学完本讲，你应该能够：
+
+1. 解释 Indexer 如何为每层选出 top-k 个参与注意力的 token（打分 → topk → 稀疏注意力三步）。
+2. 说明 CrossLayerSharedOp 的跨层共享机制：为什么同一个 forward step 里几十层只算一次 tiling 元数据。
+3. 理解注意力后端注册表如何支持第三方插件覆盖（entry point 同名替换 + 环境变量逃生舱）。
+4. 分清三族算子：`torch_npu.*`、`torch.ops.custom.*`（omni_custom_ops 包）、`torch.ops.vllm.*`（omni-npu 自注册的 torch.compile 不透明包装）。
+
+## 2. 前置知识
+
+- **MLA（Multi-head Latent Attention，多头潜在注意力）**：KV 不按头存储，而是把 K/V 压缩成一个共享的"潜在向量"（latent，维度 `kv_lora_rank`，openPangu 为 512）外加一段带位置编码的 `k_pe`（维度 `qk_rope_head_dim`，64）。所有注意力头共享这一份 KV，因此 KV Cache 极小。
+- **权重吸收（weight absorption）**：MLA 中 \(q^{nope}\) 与 \(W^{UK}\) 的乘法可以挪到注意力之前（\(q' = q^{nope} W^{UK}\)），同理 \(W^{UV}\) 可挪到注意力之后。这样注意力 kernel 直接在 latent 空间计算，输出再乘 `W_UV` 升维。源码里你会反复看到 `npu_transpose_batchmatmul(q_nope, self.W_UK_T)`（吸收）和 `... × self.W_UV`（升维）这两步。
+- **PagedAttention 的 block table 与 slot mapping**：KV Cache 按"块"（block，默认 128 token）分页；`block_table` 记录每个序列用了哪些块；`slot_mapping` 是本批 token 要写入的扁平槽位。二维形式 `slot_mapping_2d = (slot // block_size, slot % block_size)` 用于按块 scatter 的算子。
+- **DSA 稀疏注意力**：标准注意力中第 \(i\) 个 query 要对全部 \(j \le i\) 的 key 计算，复杂度 \(O(T^2)\)。DSA 用一个轻量 Indexer 先打分，只保留 top-k 个 key 进入完整注意力，复杂度降为 \(O(T \cdot k)\)。
+- **torch_npu 自定义算子**：昇腾通过 `torch_npu` 包提供 `npu_*` 融合算子（如 `npu_rotary_mul`）；另有一批以 `torch.ops.custom.*` 暴露的 CANN 自定义算子（由镜像内的 `omni_custom_ops` 包提供，代码里 `try: import omni_custom_ops`）。
+- **torch.compile 不透明算子**：会用 `direct_register_custom_op` 把"会原地改 KV Cache 的函数"包装成 `torch.ops.vllm.*` 算子，对编译器隐藏副作用（u2-l3 已铺垫，本讲看实例）。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+| --- | --- |
+| `components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py` | 本讲主战场：`NPUPanguIndexer`（打分选 token）、`NPUPanguSparseAttention`（混合注意力层，3400+ 行）、`CrossLayerSharedOp` |
+| `components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu_custom_ops.py` | torch.compile 不透明算子包装层（`torch.ops.vllm.npu_pangu_*`），文件头有极好的"算子目录 + 硬约束"文档 |
+| `components/omni-npu/src/omni_npu/attention/backends/utils.py` | 注意力后端注册表（`NPU_ATTENTION_BACKEND`）、插件覆盖逻辑、SP/CP 序列并行的 `SPManager` |
+| `components/omni-npu/src/omni_npu/attention/backends/dsa.py` | `NPUDSABackend`：DSA 层的 vLLM 后端（KV Cache 形状、metadata 构建、通用稀疏前向） |
+| `components/omni-npu/src/omni_npu/attention/backends/attention.py` | `NPUAttentionBackend`：普通（非 MLA）模型的 NPU 注意力后端，注册名 `VLLM_NPU_ATTN` |
+| `components/omni-npu/src/omni_npu/layers/attention/npu_sparse_attentions.py` | `DSAAttention` / `MLASWAAttention` 两个薄封装，决定每层绑定哪个后端、声明哪种 KV Cache 规格 |
+| `components/omni-npu/src/omni_npu/platform.py` | `get_attn_backend_cls`：按 use_mla/use_sparse 选名字，再到注册表查路径 |
+| `components/omni-npu/tests/unit/layers/test_npu_pangu_helpers.py` | 无需 NPU 的单测：覆盖 `slot_mapping_2d` 的惰性构建逻辑，本讲的实践靶子 |
+
+一个容易混淆的架构点先说清楚（后续源码精读会反复印证）：
+
+- `NPUDSABackend`（backends/dsa.py）是 **vLLM 后端接口实现**，负责 KV Cache 形状（`reshape_kv_cache`）与 metadata 构建，并给非 pangu 混合模型提供一套通用前向；
+- 而 pangu 模型的**注意力计算本体**在 `NPUPanguSparseAttention`（v1/layers/attention/npu_pangu.py）里，它把自己注册进 `static_forward_context`，前向走 `npu_pangu_forward` 这个不透明算子，从 `forward_context.no_compile_layers` 里把自己捞回来执行。
+
+## 4. 核心概念与源码讲解
+
+### 4.1 DSA 稀疏注意力：Indexer 如何选出 top-k token
+
+#### 4.1.1 概念说明
+
+长序列下注意力的瓶颈不在"算得慢"而在"看得多"：decode 时每生成一个 token 都要对几千个历史 key 做点积。DSA 的思路是——绝大多数 key 对当前 query 的贡献可以忽略，那就先花小代价挑出真正重要的少数几个。
+
+挑 token 的工作交给 **Indexer**：它是一组很小的线性层（`wq_b`、`wk`、`k_norm`、`weights_proj`），对每个 query token 产出一个低维 query（`index_n_heads` 个头、每头 `index_head_dim` 维），并按头计算加权打分；打分最高的 `index_topk` 个历史 token 的**下标**（`topk_indices`）被交给稀疏注意力算子，后者只对这些下标做完整注意力。此外每个 DSA 层还有 `param_sink_number` 个可学习的 **sink token**（注意力"汇聚"向量），像虚拟的全局摘要一样拼在稀疏结果旁边，弥补 top-k 可能丢掉的全局信息。
+
+混合注意力的分工在 `__init__` 里一次判清：**SWA 层**看滑动窗口内的邻居；**DSA 层**（存在 `index_topk > 0` 配置时）用 Indexer 全局挑 token；**MTP 层**（层号 ≥ `num_hidden_layers`）按最后一个窗口处理；其余是退化为全局注意力的 MLA 层。
+
+#### 4.1.2 核心流程
+
+一次 DSA 层前向（以 prefill 为例）：
+
+```text
+npu_pangu_forward (torch.ops.vllm 不透明算子入口)
+ └─ _forward_prefill
+     ├─ _mla_prolog —— 三条"流"
+     │   ├─ Q 流:  q_a_proj → q_a_layernorm → q_b_proj → split(q_nope/q_pe)
+     │   │         → W_UK 吸收 → RoPE                     ⇒ q_nope, q_pe
+     │   ├─ Indexer 流: NPUPanguIndexer.forward
+     │   │   ├─ _indexer_prolog: wq_b/wk/k_norm/RoPE/weights_proj
+     │   │   ├─ npu_pangu_indexer_cache_update: 把 indexer 的 k 写入 kv_cache[1]
+     │   │   └─ npu_pangu_lightning_indexer: 打分 + topk   ⇒ topk_indices
+     │   └─ KV 流: kv_a_proj_with_mqa → RMSNorm+RoPE+写缓存  ⇒ kv_cache[0] 更新
+     ├─ _apply_DSA_attention —— 稀疏注意力 kernel（只算 topk_indices 指向的 key）
+     └─ _mla_epilog —— v_up（W_UV 升维）→ o_proj → TP 通信
+```
+
+Indexer 打分按算子语义可示意为（对第 \(i\) 个 query token、历史第 \(j\) 个 key）：
+
+\[ s_{i,j} = \sum_{h=1}^{H_{\text{idx}}} w_{i,h} \cdot \langle q_{i,h},\, k_j \rangle, \qquad \mathcal{I}_i = \operatorname{TopK}_{j \le i,\; s_{i,j}} \]
+
+其中 \(w_{i,h}\) 是 `weights_proj` 输出的逐头权重，\(H_{\text{idx}}\) = `index_n_heads`；随后注意力只对 \(\mathcal{I}_i\)（大小为 `index_topk`）加上 sink token 计算。topk 与完整注意力都在 CANN 融合算子里一次完成，Python 侧只拿到 `topk_indices`（形状 `[T, 1, index_topk]`，int32）。
+
+#### 4.1.3 源码精读
+
+**① 层类型判定**——`NPUPanguSparseAttention.__init__` 用一个四分支决定本层身份：
+
+[npu_pangu.py:L640-L662](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L640-L662)
+
+这段代码依次判断：层号在 `swa_layers` 里 → SWA 层（窗口取 `sliding_window_list` 对应项）；层号 ≥ `num_hidden_layers` → MTP 层；配置里有 `index_topk > 0` → **DSA 层**（`sliding_window=None`、`is_dsa_layer=True`）；否则 MLA 层，用 `max(1024*1024, …)` 的超大窗口"假装滑动"来退化为全局注意力。
+
+**② DSA 层组装**——`_init_attention_layers` 只给 DSA 层创建 Indexer，并选 `DSAAttention` 封装：
+
+[npu_pangu.py:L934-L981](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L934-L981)
+
+`is_dsa_layer` 为真时实例化 `NPUPanguIndexer`（L936-L941）并走 `DSAAttention`（L971）；否则走 `MLASWAAttention`（L981）。`DSAAttention` 只是薄封装——见 [npu_sparse_attentions.py:L134-L207](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/layers/attention/npu_sparse_attentions.py#L134-L207)：它以 `use_sparse=True`、携带 `indexer` 调父类（L168-L183），`get_attn_backend()` 返回 `NPUDSABackend`（L185-L186），`get_kv_cache_spec()` 声明 `head_size + indexer_head_dim` 的组合缓存规格（L200-L207）。
+
+**③ Indexer 的权重与前处理**：
+
+[npu_pangu.py:L156-L184](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L156-L184)
+
+四个小层：`wq_b`（把 `q_lora_rank` 投到 `index_head_dim × index_n_heads`）、`wk`（hidden → `index_head_dim`，单头共享）、`k_norm`、`weights_proj`（hidden → `index_n_heads` 的逐头打分权重）。全部 `ReplicatedLinear`，不切 TP。
+
+[npu_pangu.py:L447-L498](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L447-L498)
+
+`_indexer_prolog` 产出三元组 `(q, k, weights)`：q/k 各自做 RoPE（`use_rope_fusion_op` 开关决定用融合算子 `npu_apply_rotary_pos_emb` 还是拆分后 `npu_rotary_mul`），`weights` 直接由 `weights_proj(hidden_states)` 得到。
+
+**④ Indexer 前向 = 写缓存 + 打分**：
+
+[npu_pangu.py:L500-L529](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L500-L529)
+
+`forward` 只有两步：`torch.ops.vllm.npu_pangu_indexer_cache_update(...)` 把 indexer 的 k 写进缓存（L519-L523），再 `torch.ops.vllm.npu_pangu_lightning_indexer(...)` 打分选 topk（L525-L529）。两者都是 4.2 节讲的不透明包装算子。落到底层，写缓存调用：
+
+[npu_pangu.py:L352-L367](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L352-L367)
+
+用 `torch.ops.custom.npu_ai_infra_scatter_block_update_` 按 `slot_mapping_2d` 把 indexer k 散射进 `kv_cache[1]`（indexer 专属缓存段）。
+
+打分调用（bf16 非量化路径）：
+
+[npu_pangu.py:L209-L234](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L209-L234)
+
+核心是 `torch.ops.custom.npu_lightning_indexer_enhance`：`sparse_count=self.index_topk`（选多少个）、`sparse_block_size=1`（token 级粒度）、`sparse_mode=3`（因果对齐的稀疏模式）、`layout_query="TND"` / `layout_key="PA_BSND"`（query 按token平铺、key 从分页缓存读）。量化 KV（`int8_ds_mla` 等）会换用 `npu_quant_lightning_indexer` / `npu_ai_infra_quant_lightning_indexer`，思路相同（见 L236-L298）。
+
+**⑤ 稀疏注意力本体**：
+
+[npu_pangu.py:L2327-L2436](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L2327-L2436)
+
+`_apply_DSA_attention` 先 `torch.cat([q_nope, q_pe], dim=-1)` 拼出完整 query，然后按 `cache_dtype` 三选一挑 kernel；bf16 主路径（L2405-L2423）调 `torch.ops.custom.npu_ai_infra_sparse_flash_attention_pioneer`：
+
+- `sparse_indices=topk_indices`——**稀疏性的唯一来源**；
+- `key=kv_cache[0].unsqueeze(2)`、`value=self.dummy_value_cache`——注意 value 是个**占位零张量**！因为 MLA 权重吸收后，注意力在 latent 空间计算，kernel 输出即 latent（`[T, N, kv_lora_rank]`），真正的 V 升维挪到了后面；
+- `pre_tokens=(1 << 63) - 1`——把窗口参数放到"无限大"，即不靠窗口裁剪、完全听 `sparse_indices` 的；
+- `key_sink=self.sink_kv, value_sink=self.sink_k_nope`——把可学习 sink token 拼进注意力。
+
+prefill 路径随即做 v_up（`npu_transpose_batchmatmul(attn_output, self.W_UV)`，L2428-L2431）；decode 路径把 v_up 推迟到 `_mla_epilog`（L3269-L3300），留出与旁流任务重叠的空间。
+
+**⑥ DSA 层的 KV Cache 布局**——`NPUDSABackend.reshape_kv_cache` 决定每块缓存里装什么：
+
+[dsa.py:L74-L137](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/attention/backends/dsa.py#L74-L137)
+
+bf16 时两段：`kv_cache[0]` 尾维 576（= latent 512 + rope 64，给主注意力），`kv_cache[1]` 尾维 128（= `index_head_dim`，给 Indexer）；量化格式则是 `(656,), (128,), (1,)` 三段（多出的 `kv_cache[2]` 存 scale）。每段字节数按 `page_size_bytes` 对齐打包（`_maybe_padded_raw_tensor_to_strided_caches` 把同一块原始显存切成多个 strided 视图，见 [utils.py:L39-L129](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/attention/backends/utils.py#L39-L129)）——这就是为什么 ④ 写 `kv_cache[1]`、⑤ 读 `kv_cache[0]`，两段互不干扰（decode 双流实现正是利用了这一点，见 [npu_pangu.py:L2885-L2886](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L2885-L2886) 的注释）。
+
+#### 4.1.4 代码实践
+
+**实践目标**：把「模型配置 → 每层注意力类型 → 每类层的 kernel」这条链在源码里走一遍，产出一张自己模型的"层类型表"。
+
+**操作步骤**：
+
+1. 找到所用权重的 `config.json`（`MODEL_PATH` 指向的目录），确认这些字段：`index_topk`、`index_n_heads`、`index_head_dim`、`swa_layers` / `sliding_window_list`（或等价字段）、`param_sink_number`、`num_hidden_layers`。
+2. 对照 [npu_pangu.py:L640-L662](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L640-L662) 的四分支，逐层号判断类型，填表：
+
+   | 层号 | 分支依据 | 类型 | 窗口/ topk |
+   | --- | --- | --- | --- |
+   | 0 | `layer_idx in swa_layers`？ | SWA（或 Dense 段后首层） | ... |
+   | ... | ... | ... | ... |
+
+3. 对 DSA 层，在 [npu_pangu.py:L936-L941](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L936-L941) 与 [dsa.py:L91-L93](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/attention/backends/dsa.py#L91-L93) 之间对齐：你的 `index_head_dim` 是否落在 `kv_cache[1]` 的 128 维里（bf16 布局）。
+
+**需要观察的现象**：`index_topk > 0` 与 `swa_layers` 非空通常**同时成立**——这正是"混合注意力"的含义，两类层在同一次前向中交替出现。
+
+**预期结果**：一张覆盖全部 `num_hidden_layers`（+ MTP 层）的类型表，且 DSA 层的 `index_topk` 值能对应到 `_apply_lightning_indexer_unquant` 里 `sparse_count` 参数。
+
+**待本地验证**：具体字段名与取值以你手上的 `config.json` 为准（92B 与 505B 的 `index_topk`、SWA 层分布可能不同），本仓库内不含权重配置。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 `_apply_DSA_attention` 里 `value` 传的是 `dummy_value_cache`（全零占位张量）而不报错？
+
+**答案**：MLA 权重吸收后注意力在 latent 空间进行——kernel 的"key"实际是 latent+rope 的打包缓存 `kv_cache[0]`，输出直接就是各头的 latent 加权和（`[T, N, kv_lora_rank]`）；真正把 latent 映射回 `v_head_dim` 的 \(W_{UV}\) 乘法被推迟到 v_up 步骤（prefill 在 `_apply_DSA_attention` 尾部，decode 在 `_mla_epilog`）。所以 value 参数只是满足算子签名，数值上不参与（latent 已含在 key 段中）。
+
+**练习 2**：`_update_indexer_cache` 写 `kv_cache[1]`，`_npu_kvrmsnorm_rope_cache` 写 `kv_cache[0]`。这两段各存什么？谁在消费它们？
+
+**答案**：`kv_cache[0]`（bf16 下尾维 576 = 512 latent + 64 rope）由主注意力的 `_apply_DSA_attention` / `_apply_SWA_attention_*` 消费；`kv_cache[1]`（尾维 128 = `index_head_dim`）只由 Indexer 的 `npu_lightning_indexer_enhance` 消费。量化格式下还有 `kv_cache[2]` 存 scale。两段分区让 decode 双流实现可以并行写而不产生假依赖。
+
+**练习 3**：如果把配置里的 `index_topk` 调大会发生什么？
+
+**答案**：`sparse_count` 变大，每个 query token 参与完整注意力的历史 token 变多——精度通常更高、更接近全局注意力，但注意力的计算与访存量随 topk 线性增长，稀疏加速比下降；同时 `topk_indices` 张量（`[T, 1, index_topk]`）与相关缓冲也随之变大。这是精度-性能的直接旋钮（实际取值由模型配置决定，改动需重新评估）。
+
+### 4.2 自定义算子调用：三族算子与 torch.compile 包装层
+
+#### 4.2.1 概念说明
+
+NPU 上跑注意力不是"调用一个函数"那么简单，本仓库里能看到**三族算子**：
+
+1. **`torch_npu.*` 内置融合算子**：随 torch_npu 发布，如 `npu_rotary_mul`（RoPE）、`npu_scatter_nd_update_`（按槽位写缓存）、`npu_transpose_batchmatmul`（吸收矩阵乘）、`npu_dynamic_quant`（动态量化）、`npu_fused_infer_attention_score*`（标准 FA）。普通模型后端 `NPUAttentionBackend` 主要用这一族。
+2. **`torch.ops.custom.*`（omni_custom_ops 包）**：CANN 侧"ai_infra"定制算子，由镜像里单独安装的 `omni_custom_ops` wheel 提供，覆盖 pangu 特有需求：`npu_lightning_indexer_enhance`（Indexer 打分）、`npu_ai_infra_sparse_flash_attention_pioneer`（稀疏 FA）、`npu_ai_infra_kv_rmsnorm_rope_cache_v2`（RMSNorm+RoPE+写缓存三合一）、`npu_fused_infer_attention_sink`（带 sink 的 FA）等。文件头 `try: import omni_custom_ops`，失败仅告警——但真正调用时缺包会直接报错。
+3. **`torch.ops.vllm.*`（omni-npu 自注册）**：用 `direct_register_custom_op` 把 Python 方法包成**不透明算子**。动机：这些方法会**原地修改 KV Cache**，而 torch.compile / AOT autograd 的函数化过程（functionalization）不容忍图中可见的原地写；包成不透明算子后副作用被藏在算子边界内，周围计算仍可被追踪、融合。
+
+#### 4.2.2 核心流程
+
+一个方法要变成 `torch.ops.vllm.*` 算子需要四件套（`npu_pangu_custom_ops.py` 文件头文档总结的套路）：
+
+```text
+1. def npu_pangu_<name>(<张量参数>, layer_name: str) -> Tensor | tuple[Tensor,...] | None:
+     layer, attn_metadata = _lookup_layer_and_attn_metadata(layer_name)   # 从 forward_context 捞回对象
+     ... 真实工作（可以原地写 kv_cache）...
+     return 变更过的张量
+2. def npu_pangu_<name>_fake(<完全相同的签名>):  # 只返回同形状/ dtype 的占位张量
+3. direct_register_custom_op(op_name=..., op_func=..., mutates_args=[],
+                             fake_impl=..., dispatch_key="PrivateUse1")
+4. 调用点改写为 torch.ops.vllm.<name>(...)
+```
+
+两条"血泪约束"（源码注释原文归纳）：`mutates_args` 必须保持 `[]`（副作用藏进黑盒）；要保证两个先后执行的写缓存算子不被编译器**重排**，唯一可靠办法是让前一个算子**返回**被改的张量、后一个算子**消费**该返回值，形成显式 SSA 边。`npu_pangu_indexer_cache_update → npu_pangu_lightning_indexer` 就是这个"教科书模式"：不这样做，lightning indexer 可能读到旧缓存（精度 bug）。
+
+#### 4.2.3 源码精读
+
+**① 算子目录与硬约束**——文件头文档本身就是最好的教材：
+
+[npu_pangu_custom_ops.py:L44-L58](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu_custom_ops.py#L44-L58)
+
+算子目录：`npu_pangu_swa_decode`、`npu_pangu_indexer_cache_update`、`npu_pangu_lightning_indexer`、`npu_pangu_kv_cache_update`、以及 MoME 相关的三个。
+
+[npu_pangu_custom_ops.py:L86-L131](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu_custom_ops.py#L86-L131)
+
+硬约束 (a)～(d)：`mutates_args=[]`、返回类型只能是 Tensor/tuple/None、fake 签名必须与真实算子逐字节一致、被改参数不能是视图（slice）——要传整张叶子张量、在算子体内切片。
+
+**② 从 forward_context 捞回 layer**——不透明算子的参数里只有 `layer_name` 字符串：
+
+[npu_pangu_custom_ops.py:L145-L151](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu_custom_ops.py#L145-L151)
+
+`_lookup_layer_and_attn_metadata` 用 `layer_name` 到 `forward_context.no_compile_layers` 取回活的 layer 对象，并顺带取 `attn_metadata`。对应地，`NPUPanguSparseAttention.__init__` 末尾把自己登记进 `static_forward_context`（[npu_pangu.py:L754-L757](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L754-L757)），重复登记会直接 `ValueError`。
+
+**③ 教科书模式：写缓存 → 读缓存 的 SSA 边**：
+
+[npu_pangu_custom_ops.py:L226-L255](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu_custom_ops.py#L226-L255)
+
+`npu_pangu_indexer_cache_update` 调 `layer.indexer._update_indexer_cache`（原地写 `kv_cache[1]`），然后**返回 `(kv_cache_0, kv_cache_1)`**——尽管 `mutates_args=[]`，返回值让下游的 lightning indexer 调用形成数据依赖。注释 L208-L224 明说：缺这条边，FX/npugraph_ex 可能重排两个不透明算子，导致 lightning indexer 读到旧缓存。
+
+**④ lightning indexer 包装与 fake 实现**：
+
+[npu_pangu_custom_ops.py:L264-L301](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu_custom_ops.py#L264-L301)
+
+真实算子转发给 `layer.indexer._apply_lightning_indexer`；fake 实现（L279-L292）返回 `(q.size(0), 1, index_topk)` 的 int32 空张量——恰好就是 `topk_indices` 的真实形状（对照 [dsa.py:L414-L415](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/attention/backends/dsa.py#L414-L415) 中通用路径的 `.view(bs, 1, topk_tokens)`）。
+
+**⑤ 整层前向也是一个算子**：
+
+[npu_pangu.py:L3436-L3442](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L3436-L3442)
+
+`npu_pangu_forward` 本身被注册为不透明算子，模型的 `forward` 只是 `torch.ops.vllm.npu_pangu_forward(hidden_states, cos, sin, self.layer_name)`（[npu_pangu.py:L1182-L1188](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L1182-L1188)）。文件末尾 `from ... import npu_pangu_custom_ops  # noqa: F401`（L3451）靠导入副作用完成全部注册。
+
+**⑥ 对照：普通模型后端只用 torch_npu 一族**：
+
+[attention.py:L339-L352](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/attention/backends/attention.py#L339-L352)
+
+`NPUAttentionBackendImpl.forward` 用 `npu_scatter_pa_kv_cache` / `npu_scatter_nd_update_` 写缓存；计算则按分支调 `npu_fused_infer_attention_sink`（[attention.py:L394-L396](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/attention/backends/attention.py#L394-L396)）、`npu_fused_infer_attention_score`（L442）或 `npu_fused_infer_attention_score_v2`（[attention.py:L573-L575](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/attention/backends/attention.py#L573-L575)）。这与 pangu 路径形成清晰对照：pangu 的稀疏/latent 需求靠 `omni_custom_ops` 的定制算子满足。
+
+#### 4.2.4 代码实践
+
+**实践目标**：跑通一个无需 NPU 硬件的真实单测，并亲手产出 pangu 注意力的"算子清单"。
+
+**操作步骤**：
+
+1. 在有 torch_npu 的环境（如部署容器的 dev 镜像，见 u10-l1）里运行：
+
+   ```bash
+   cd components/omni-npu
+   python -m pytest tests/unit/layers/test_npu_pangu_helpers.py -v
+   ```
+
+   该测试覆盖 `_get_slot_mapping_2d` 的四条分支与 `NPUDSAMetadataBuilder._lazy_slot_mapping_2d` 的缓存行为（源码见 [tests/unit/layers/test_npu_pangu_helpers.py](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/tests/unit/layers/test_npu_pangu_helpers.py)），全程只用 CPU 张量。
+2. 统计算子分布（纯源码操作，不需要任何环境）：
+
+   ```bash
+   grep -n "torch_npu\.\|torch\.ops\.custom\.\|torch\.ops\.vllm\." \
+     components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py | wc -l
+   grep -o "torch_npu\.[a-z_0-9]*\|torch\.ops\.custom\.[a-z_0-9]*\|torch\.ops\.vllm\.[a-z_0-9]*" \
+     components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py | sort | uniq -c | sort -rn
+   ```
+
+**需要观察的现象**：测试全绿（4+3 个用例）；uniq 清单里 `torch.ops.custom.npu_ai_infra_*` 系列条目最多——它们是 pangu 稀疏注意力的主力。
+
+**预期结果**：一份按出现次数排序的三族算子表，能直接作为综合实践（第 5 节）数据流图的标注素材。
+
+**待本地验证**：pytest 能否在纯 CPU 环境（无 torch_npu）运行取决于导入链——`npu_pangu.py` 顶层 `import torch_npu`，故需在装有 torch_npu 的容器内执行；若容器内无 pytest，可按 u10-l2 介绍的 `run_tests.sh unit` 方式运行。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`mutates_args=[]` 但函数体明明原地改了 `kv_cache`，为什么不算"欺骗"编译器？
+
+**答案**：这不是语义声明错误，而是**刻意**的封装策略：把副作用藏进不透明算子边界，函数化过程（functionalization）看不到原地处写，就不会报错也不会插入多余的拷贝/回写。代价是编译器不再自动保证顺序——所以必须用"返回被改张量 + 下游消费"的 SSA 边手工锁序（indexer_cache_update → lightning_indexer 即此模式）。文件头 L86-L108 的注释详细解释了这一取舍。
+
+**练习 2**：`npu_pangu_kv_down_mome_inplace` 是目录里唯一声明 `mutates_args=["kv"]` 的算子，凭什么它能例外？
+
+**答案**：它满足三个苛刻条件（注释 L100-L108）：恰好只改一个 Tensor 参数；该参数是叶子张量（`kv_a_proj` 的输出，不是视图/slice，切片发生在算子体内）；返回值就是同一个张量。三者合并后 schema 坍缩为 `Tensor(a!) -> Tensor(a!)`，是 AOT 唯一接受的原地形态。推广到多参数或 Optional 参数都会失败。
+
+**练习 3**：fake 实现的返回值为什么必须"形状正确"但可以是空数据？
+
+**答案**：fake impl 服务于 torch.compile 的追踪（trace）与 shape 推导：编译器只需要知道输出的 shape/dtype/device 来规划后续算子，不执行真实计算；运行时走的是真实算子。若 fake 返回形状不对，图中下游算子的形状推理就会错，图编译直接失败。
+
+### 4.3 CrossLayerSharedOp：一步 forward 内的跨层共享
+
+#### 4.3.1 概念说明
+
+混合注意力模型里，同一层栈中所有 SWA/MLA 层在同一个 forward step 内调用同一个"FA tiling 元数据"算子（如 `npu_fused_infer_attention_sink_metadata`，Ascend950 上是 `npu_ai_infra_attention_pioneer_metadata`）：它只读 batch 形状、序列长度、头数这些**层无关**的量，产出 kernel 分块（tiling）所需的元数据。几十层各算一遍纯属浪费——但也不能只算一次存全局变量完事，因为**aclgraph（昇腾图捕获）要求张量地址跨 step 稳定**。
+
+`CrossLayerSharedOp` 就是折中方案：按调用方（caller）维护持久缓冲；step 内**第一个**层（`recompute=True` 的 producer）真正执行算子并把结果 `copy_` 进缓冲；后续层（`recompute=False`）直接读缓冲。缓冲区一旦分配地址不再变，图捕获安全；"谁是 producer"的判定放在调用方（每层的 `is_fa_metadata_producer` 标志），本类只管缓冲。
+
+#### 4.3.2 核心流程
+
+```text
+step 开始
+ ├─ 第 1 个 SWA 层:  shared_op(args, recompute=True,  caller="decode")
+ │      └─ buffer.copy_(op(**args))     # 真计算，写持久缓冲
+ ├─ 第 2..N 个 SWA 层: shared_op(args, recompute=False, caller="decode")
+ │      └─ 直接 return buffer           # 零计算
+ └─ 下一个 step: 又轮到 producer 层 recompute=True → 刷新
+```
+
+判定期在 `__init__`：每组件（主模型 / MTP）的**第一个** SWA 层是 producer：
+
+```python
+first_main_swa = self.swa_layers[0] if self.swa_layers else None
+first_mtp_layer = config.num_hidden_layers          # MTP 层从这号开始
+self.is_fa_metadata_producer = self.layer_idx in (first_main_swa, first_mtp_layer)
+```
+
+#### 4.3.3 源码精读
+
+**① 缓冲管理类**：
+
+[npu_pangu.py:L59-L100](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L59-L100)
+
+`__init__` 为每个 caller 标签各开一个 `torch.empty` 持久缓冲（外加一个兜底的 default buffer）；`__call__`（L91-L100）的逻辑浓缩为两行：`recompute=True` 或 caller 没有专属缓冲时执行真实算子并 `copy_`，否则原样返回缓冲。类 docstring（L60-L72）明确写了设计动机："Buffer addresses are stable across steps so aclgraph / cudagraph captures them safely"。
+
+**② 全局单例与延迟实例化**：
+
+[npu_pangu.py:L103-L104](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L103-L104)
+
+两个模块级全局：`npu_fused_infer_attention_sink_metadata` 与 `npu_ai_infra_attention_pioneer_metadata`（后者仅 Ascend950）。
+
+[npu_pangu.py:L1027-L1042](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L1027-L1042)
+
+`_init_cross_layer_shared_ops` 在首个注意力层构造时 `None` 检查后创建单例，caller 标签固定为 `("decode", "prefill_absorb", "prefill")`——对应三种调用场景各自的缓冲。
+
+**③ producer 判定**：
+
+[npu_pangu.py:L663-L667](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L663-L667)
+
+即 4.3.2 的两行判定。注意 MTP 组件的第一个层（`num_hidden_layers` 号）也是 producer——MTP 层栈内部同样要共享。
+
+**④ 两个真实调用点（SWA decode 路径）**：
+
+[npu_pangu.py:L1428-L1432](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L1428-L1432)
+
+Ascend950 + `use_aicpu_fa_tiling`：`npu_ai_infra_attention_pioneer_metadata(fia_meta_args, self.is_fa_metadata_producer, "decode")`——第二参就是 recompute，第三参是 caller 标签。
+
+[npu_pangu.py:L1491-L1495](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L1491-L1495)
+
+非 950 + `use_aicpu_fa_tiling`：`npu_fused_infer_attention_sink_metadata(meta_data_args, self.is_fa_metadata_producer, "decode")`。得到的 `meta_data` 随后作为 `metaData=` 参数喂给注意力算子（L1434/L1496 之后的 `kwargs.update`）。prefill 侧还有 `"prefill_absorb"`（[npu_pangu.py:L2145-L2149](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L2145-L2149)）与 `"prefill"`（[npu_pangu.py:L2312-L2316](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L2312-L2316)）两个 caller 场景。
+
+#### 4.3.4 代码实践
+
+**实践目标**：验证"同一 step 内只有一个层真正计算元数据"这一共享契约。
+
+**操作步骤**：
+
+1. 精读 [npu_pangu.py:L91-L100](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L91-L100) 的 `__call__`，写下 recompute/caller 两维的真值表（何时执行 `self._op`、何时只读缓冲）。
+2. 在部署容器内确认日志/断点（源码阅读型，不必改码）：在 `_apply_SWA_attention_decode` 的 L1428 与 L1491 两处调用上，只有 `is_fa_metadata_producer=True` 的层会触发元数据算子的真实执行；其余层跳过。
+
+**需要观察的现象**：producer 层与后续层拿到的是**同一个** `meta_data` 张量对象（同一缓冲地址）。
+
+**预期结果**：真值表为——`recompute=True` → 必算并写缓冲；`recompute=False` 且 caller 有专属缓冲 → 只读；caller 无专属缓冲（落到 default buffer）→ 即使 `recompute=False` 也会计算（L97-L99 的 `buffer is self._default_buffer or recompute` 分支）。
+
+**待本地验证**：第 2 步的运行时观察需在真实部署上确认（可用 PyTorch 断点或给 producer 判定加临时打印，属于源码阅读型实践，不修改仓库代码）。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么不干脆在 batch 开始时算一次元数据、存到 `attn_metadata` 里给所有层用？
+
+**答案**：那样也可以省计算，但会把张量生命周期交给调度器管理，且每 step 新分配的地址不同；aclgraph 捕获要求图内引用的张量地址跨 step 稳定，否则每次 step 都要重捕图。`CrossLayerSharedOp` 的缓冲在首次构造时一次性分配、永不搬家，以"固定地址 + 步内重算"同时满足共享与图捕获两个约束。
+
+**练习 2**：DSA 层的稀疏注意力（`_apply_DSA_attention`）没有用这个共享机制，为什么？
+
+**答案**：`CrossLayerSharedOp` 包的是 **FA tiling 元数据**算子，服务于 SWA/MLA 层的 `npu_fused_infer_attention_sink*` / `npu_ai_infra_attention_pioneer*` 路径（且受 `use_aicpu_fa_tiling` 配置开关控制）。DSA 路径的 `npu_ai_infra_sparse_flash_attention_pioneer` 直接由 `sparse_indices` 决定访存模式，不需要这类 aicpu tiling 元数据，因此不参与共享。共享机制是通用的（类本身与注意力类型解耦），只是当前消费者在 SWA 分支。
+
+**练习 3**：如果两个 caller（如 `"decode"` 与 `"prefill"`）在**同一个** step 内先后调用会怎样？
+
+**答案**：互不影响——`__init__` 为每个 caller 标签各配了独立缓冲，`__call__` 按 caller 取对应缓冲；`decode` 的结果不会覆盖 `prefill` 的。这正是 callers 元组存在的原因（混合批次里两种场景可能相邻出现）。
+
+### 4.4 注意力后端注册表与插件覆盖
+
+#### 4.4.1 概念说明
+
+u2-l2 讲过 `NPUPlatform.get_attn_backend_cls` 会按 `use_mla`/`use_sparse` 三分：MLA+稀疏 → `NPUDSA`，MLA → `NPUMLA`，其余 → `VLLM_NPU_ATTN`。但它返回的不是写死的 import 路径，而是到**注册表**查名——这给第三方包留了一个零侵入替换口：任何 pip 包只要在 entry point 组 `omni.attention_backends` 下提供一个 `get_name()` 与内置同名的类，就能整类替换内置后端（例如自家加速版的 NPUDSA）。环境变量 `DISABLE_PLUGIN_BACKENDS` 是逃生舱，可按名禁用替换、回到内置实现。
+
+注册表存的是"模块路径字符串"而非类对象——延迟 import，避免循环依赖（插件模块往往要 import 基类）。
+
+#### 4.4.2 核心流程
+
+```text
+【注册期】后端模块被 import 时
+  @register_attention_backend("NPUDSA")          # 装饰器
+      ├─ 检查类实现了 static reshape_kv_cache     # 硬性接口要求
+      └─ NPU_ATTENTION_BACKEND["NPUDSA"] = "模块.类名"
+
+【选择期】vLLM 启动、platform 被问询时
+  NPUPlatform.get_attn_backend_cls(selector)
+      ├─ use_mla and use_sparse → "NPUDSA"
+      ├─ use_mla                → "NPUMLA"
+      └─ else                   → "VLLM_NPU_ATTN"
+      └─ return NPU_ATTENTION_BACKEND[名字]        # 查表，插件可已覆盖
+
+【覆盖期】基础后端全部 import 完成后
+  apply_plugin_overrides()
+      ├─ 快照内置路径 base_paths
+      ├─ 扫描 entry point 组 omni.attention_backends → plugin_map[名字] = 类
+      └─ 对每个名字：插件存在、未被 DISABLE_PLUGIN_BACKENDS 列入、
+         且与内置非同类 → 注册表改指向插件路径
+```
+
+#### 4.4.3 源码精读
+
+**① 注册表本体与三件套**：
+
+[utils.py:L182-L202](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/attention/backends/utils.py#L182-L202)
+
+`register_attention_backend(backend)` 装饰器先强制被注册类实现静态方法 `reshape_kv_cache`（L185-L189，否则 `NotImplementedError`）——因为 NPU 的 KV Cache 是从原始显存池"切视图"出来的（见 4.1.3 ⑥），每个后端必须自己声明切法；然后写入全局字典 `NPU_ATTENTION_BACKEND`（L20 定义）。`get_attention_backend(name)` 就是一次字典查询。
+
+**② 两个内置注册点**：
+
+[dsa.py:L52-L56](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/attention/backends/dsa.py#L52-L56)
+
+`NPUDSA = "NPUDSA"`，`@register_attention_backend(NPUDSA)` 挂在 `NPUDSABackend` 上。
+
+[attention.py:L143-L165](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/attention/backends/attention.py#L143-L165)
+
+`VLLM_NPU_ATTN` 名字注册 `NPUAttentionBackend`，同时实现 vLLM 后端接口的四件套：`get_name` / `get_metadata_cls` / `get_builder_cls` / `get_impl_cls`。它的 `reshape_kv_cache`（[attention.py:L184-L214](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/attention/backends/attention.py#L184-L214)）把原始张量 split 成 K/V 两视图，`get_kv_cache_shape`（[attention.py:L171-L182](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/attention/backends/attention.py#L171-L182)）支持 NZ 转置排布。
+
+**③ 平台侧查表**：
+
+[platform.py:L176-L193](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/platform.py#L176-L193)
+
+三分支选名字（L183-L189），随后 `registered_path = get_attention_backend(backend_name)`——注释直言 "Query registry first (allows plugins to override)"。
+
+**④ 插件扫描与禁用名单**：
+
+[utils.py:L132-L160](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/attention/backends/utils.py#L132-L160)
+
+`_load_plugin_backends_map` 扫 entry point 组 `omni.attention_backends`（L145），以 `backend_cls.get_name()` 为键建插件表并缓存；单个插件加载失败只告警不中断。
+
+[utils.py:L163-L179](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/attention/backends/utils.py#L163-L179)
+
+`_is_plugin_disabled` 解析 `DISABLE_PLUGIN_BACKENDS`（逗号分隔名单，如 `DISABLE_PLUGIN_BACKENDS=NPUDSA,NPUMLA`）。
+
+**⑤ 覆盖主流程**：
+
+[utils.py:L230-L286](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/attention/backends/utils.py#L230-L286)
+
+`apply_plugin_overrides` 的关键顺序：**先快照** `base_paths`（L256-L257，防止加载插件模块时其装饰器先一步污染注册表），再加载插件表，逐名比较：被禁用 → 恢复内置路径（L264-L269）；插件存在且与内置不同类 → 注册表改指插件（L271-L284）。docstring 强调它必须在所有内置后端 import 完之后调用，避免循环导入。
+
+**⑥ 对照：DSA 后端的通用前向**（非 pangu 混合模型走这里）：
+
+[dsa.py:L404-L441](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/attention/backends/dsa.py#L404-L441)
+
+`NPUDSAImpl._apply_sparse_attention` 是"标准 vLLM 后端风格"的稀疏注意力：从 `self.indexer.topk_indices_buffer` 取稀疏下标，拼上 sink 下标（L417-L421 把 sink 序号 0..sink_len-1 前置、其余下标平移 `sink_len`），调 `torch.ops.custom.npu_sparse_flash_attention_enhance`。与 4.1 的 pangu 路径（`npu_ai_infra_sparse_flash_attention_pioneer` + dummy value）相比是另一套 kernel 组合——同一个注册名下，模型层是否自带 `NPUPanguSparseAttention` 决定走哪套。
+
+#### 4.4.4 代码实践
+
+**实践目标**：推演一次完整的"插件覆盖"场景，检验对注册-查表-禁用三段逻辑的掌握。
+
+**操作步骤**：
+
+1. 画出调用关系：`platform.get_attn_backend_cls` → `utils.get_attention_backend` → `NPU_ATTENTION_BACKEND`（谁写、谁读、何时写）。
+2. 假设第三方包 `acme-npu` 在其 `pyproject.toml` 写了：
+
+   ```toml
+   [project.entry-points."omni.attention_backends"]
+   acme_dsa = "acme_npu.backends:AcmeDSABackend"
+   ```
+
+   且 `AcmeDSABackend.get_name()` 返回 `"NPUDSA"`、实现了 `reshape_kv_cache`。回答三个问题（见练习）。
+3. 对照 omni-npu 自己的 `pyproject.toml`（[pyproject.toml:L33-L38](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/pyproject.toml#L33-L38)）确认：omni-npu 只注册了 vllm 的两个入口组，**没有**注册 `omni.attention_backends`——该组是留给外部插件生态的空位。
+
+**需要观察的现象**：无运行依赖，纯源码推演；关键在于分清「注册期（import 副作用）」「选择期（vLLM 启动问询）」「覆盖期（apply_plugin_overrides）」三个时点。
+
+**预期结果**：一张含三个时点的时序草图，以及练习三问的正确答案。
+
+**待本地验证**：如想实测，可在容器内 `pip install` 一个假插件包再观察启动日志中 `Plugin backend replaces NPUDSA: ... -> ...`（该日志语句在 [utils.py:L279-L283](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/attention/backends/utils.py#L279-L283)）；无插件时不会有此日志。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：装了上述 acme 插件后、且未设置任何环境变量，pangu 模型启动时 `get_attn_backend_cls` 会返回什么？
+
+**答案**：返回 acme 插件类的路径。只要 `apply_plugin_overrides` 已把 `NPU_ATTENTION_BACKEND["NPUDSA"]` 改指 `acme_npu.backends.AcmeDSABackend`，platform 的查表结果就是插件路径，vLLM 随后 import 并使用的即插件类。（前提：插件在所有内置后端注册之后被加载覆盖，且启动日志出现 replaces 记录。）
+
+**练习 2**：如何强制回到内置实现？
+
+**答案**：设置 `DISABLE_PLUGIN_BACKENDS=NPUDSA`（多个名字逗号分隔）。`apply_plugin_overrides` 对被列名的条目不仅跳过覆盖，还会把注册表**恢复**为快照的内置路径——因为加载插件模块本身会触发其装饰器先写入注册表（L264-L269 的恢复分支正是为此）。
+
+**练习 3**：为什么注册表存"路径字符串"而不是直接存类对象？
+
+**答案**：两个原因。其一，延迟 import：`get_attn_backend_cls` 返回字符串，由 vLLM 在需要的时机 import，避免平台初始化早期就拉起全部后端模块（及其 torch_npu/插件依赖）。其二，避免循环导入：插件模块通常要继承 omni_npu 的基类，若注册期就互相 import 类对象会成环；字符串+事后覆盖（先快照再加载插件）把两边解耦。
+
+## 5. 综合实践
+
+**任务：画出 `NPUPanguSparseAttention` 一次 DSA 前向的完整数据流图，并标注沿途每一个 torch_npu / 自定义算子**（本讲指定的实践任务，综合 4.1～4.4 全部内容）。
+
+**步骤**：
+
+1. **选场景**：建议画 decode 路径——它最能体现本讲的三个主题交汇：Indexer 双流并行（4.1）、不透明算子与 SSA 边（4.2）、跨层共享（4.3，画在相邻 SWA 层作对照）。
+2. **描图**：从 `torch.ops.vllm.npu_pangu_forward(hidden_states, cos, sin, layer_name)` 开始，沿 `_forward_decode → _mla_prolog`（注意 [npu_pangu.py:L2605-L2645](https://github.com/gitcode.com/ascend-tribe-openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L2605-L2645) 的分发：DSA 层走 `_mla_prolog_dsa_multistream`，主/旁两流在 [L2876-L3036](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L2876-L3036)）→ `_apply_DSA_attention` → `_mla_epilog`。下面是可照填的骨架（示例框架，需你补全算子标注）：
+
+   ```text
+   主流                                旁流(side_stream)
+   ───                                ────────────────
+   q_a_proj ── q_a_layernorm          _kv_down_mome (kv_a_proj_with_mqa)
+   q_b_nope_proj / q_b_pe_proj        [wait q_lora]
+   W_UK 吸收: <?算子>                  indexer.wq_b(q_lora)
+   q RoPE: <?算子>                     indexer rope: <?算子>
+   [wait kv]                           torch.ops.vllm.npu_pangu_indexer_cache_update
+   npu_pangu_kv_cache_update              └─ npu_ai_infra_scatter_block_update_  → kv_cache[1]
+      └─ <?融合算子> → kv_cache[0]     torch.ops.vllm.npu_pangu_lightning_indexer
+                                         └─ <?打分算子> → topk_indices
+   ────────────── 两流汇合 ──────────────
+   _apply_DSA_attention: <?稀疏FA算子>(sparse_indices=topk_indices,
+                         key=kv_cache[0], value=dummy, key_sink=sink_kv)
+   v_up: <?算子> × W_UV        （decode 路径在 _mla_epilog 内）
+   o_proj → reduce_scatter/all_reduce (TP)
+   ```
+
+3. **标注算子**：用 4.2.4 步骤 2 的 grep 清单核对，每个 `<?算子>` 处填上真实名字。你至少应标出这几个关键节点：
+   - RoPE：`npu_rotary_mul`（或融合版 `npu_apply_rotary_pos_emb`）；
+   - 吸收/升维：`npu_transpose_batchmatmul`；
+   - KV 写入：`npu_ai_infra_kv_rmsnorm_rope_cache_v2`（经 `npu_pangu_kv_cache_update` 包装）；
+   - Indexer 写缓存：`npu_ai_infra_scatter_block_update_`；
+   - Indexer 打分：`npu_lightning_indexer_enhance`；
+   - 稀疏注意力：`npu_ai_infra_sparse_flash_attention_pioneer`（bf16 路径）。
+4. **加注三处架构信息**：(a) `torch.ops.vllm.*` 包装点的 SSA 边（indexer_cache_update → lightning_indexer 的返回值传递）；(b) 主/旁流为何无假依赖（各写 `kv_cache[0]` / `kv_cache[1]`，引 [npu_pangu.py:L2885-L2886](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L2885-L2886) 注释）；(c) 相邻 SWA 层的 tiling 元数据经 `CrossLayerSharedOp` 共享（producer 层 recompute=True）。
+5. **自查**：对着 `_forward_prefill`（[L1825-L1881](https://github.com/gitcode.com/ascend-tribe/openPangu-2.0-Infer/blob/2c16b67fb408ddd1ddfd8da855e2bedd5fc23e15/components/omni-npu/src/omni_npu/v1/layers/attention/npu_pangu.py#L1825-L1881)）另画一份 prefill 版，比较差异（无旁流、v_up 位置不同）。
+
+**验收标准**：图上每个箭头都有算子名或通信原语名；能向别人讲清「hidden_states 进来 → hidden_states 出去」之间 indexer 打分和稀疏 FA 各发生一次、发生在哪条流。
+
+## 6. 本讲小结
+
+- openPangu-2.0 是**混合注意力**：`NPUPanguSparseAttention.__init__` 按层号四分支判定 SWA / MTP / DSA / MLA 层；DSA 层（`index_topk > 0`）才配 `NPUPanguIndexer` 与 `DSAAttention` 封装。
+- **Indexer 三步曲**：`_indexer_prolog` 产出低维 q/k 与逐头权重 → `npu_pangu_indexer_cache_update` 把 indexer k 写进 `kv_cache[1]` → `npu_lightning_indexer_enhance` 打分选出 `topk_indices`（`[T, 1, index_topk]`）。
+- **稀疏注意力**只对 topk 下标 + sink token 计算；value 传 dummy 是 MLA 权重吸收的结果——注意力在 latent 空间进行，`W_UV` 升维挪到 epilog。
+- 算子分三族：`torch_npu.*` 内置、`torch.ops.custom.*`（omni_custom_ops 定制）、`torch.ops.vllm.*`（自注册不透明包装，靠"返回被改张量"建立 SSA 边防止编译器重排写缓存算子）。
+- `CrossLayerSharedOp` 以"固定地址持久缓冲 + 步内 producer 重算"实现跨层共享 FA tiling 元数据，兼顾去重与 aclgraph 捕获安全。
+- 注意力后端注册表 `NPU_ATTENTION_BACKEND` 存"名字→路径字符串"，entry point 组 `omni.attention_backends` 可同名覆盖，`DISABLE_PLUGIN_BACKENDS` 可禁用；platform 的 `get_attn_backend_cls` 只查表不写死。
+
+## 7. 下一步学习建议
+
+- **下一讲（u3-l3）**：MoE 层实现与专家并行——`OpenPanguV2MOE` 如何与 `NPUSharedFusedMoE` 组合、专家权重怎么按 EP 切卡，是 DecoderLayer 里与注意力并列的另一半。
+- 建议顺读源码：`attention/backends/mla`（NPUMLABackend，SWA/MLA 层的后端细节）与 `attention/backends/utils.py` 中的 `SPManager`（本讲只带过，DSA 上下文并行 `forward_cp` 全靠它做 zigzag 切分）。
+- 若对算子本身感兴趣：在部署容器里 `python -c "import omni_custom_ops; print(omni_custom_ops.__file__)"` 找到定制算子包，对照其文档理解 `sparse_mode`、`attention_mode` 等参数的完整语义（本讲只按代码用法解释）。
+- u2-l3 提到的 `ACLGraphWrapper` 将在 u5-l2 图编译一讲展开——届时回看本讲 4.2 的不透明算子与 4.3 的地址稳定要求，会理解它们正是为图捕获铺路。
