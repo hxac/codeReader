@@ -1,0 +1,1729 @@
+{
+  "head": "0fdad075417d347e2171affadf9c1b07cd54f87f",
+  "project": "modern-gpu-programming-for-mlsys",
+  "rationale": "本仓库是一本面向 Blackwell GPU 与 TIRx DSL 的开源教材（Sphinx 站点，含中英双语、交互式演示与图表脚本），因此学习手册严格按照原书\"理解硬件→学会编程→写出 SOTA 内核\"的主线组织：先用一个入门单元让读者跑起书站、装好环境，再用三个单元建立执行层级、内存空间与 roofline 性能直觉；随后按依赖顺序深入数据布局、Tensor Core 三代演进、TMA、tcgen05/TMEM 与 mbarrier/CLC 这些后续内核反复使用的机制；第 9–10 单元进入 TIRx 编程模型（scope/layout/dispatch 三要素与 TileLayout API）；第 11–13 单元沿 GEMM 九个步骤渐进式精读源码（单 tile→K 循环→空间分块→TMA→流水线→持久内核→warp 特化→cluster→多消费者），并以端到端性能表收束；第 14 单元把全部技术综合到 Flash Attention 4；第 15 单元覆盖语言参考、编译器内部、基准测试/剖析/IKET 与异步内核调试等附录工具；第 16 单元通过演示资产与 capstone 实践引导二次开发与贡献。讲义之间用 depends_on 严格声明先后关系，每篇配一个可操作的代码实践（有 Blackwell GPU 时可运行内核，无 GPU 时可用源码推演、脚本复算与本地构书任务），既保证初学者可从零跟上，也让进阶读者能逐层深入到专家级的架构取舍。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出项目背景、目标读者与 TIRx DSL 的定位",
+            "复述 Part I–IV 与附录各自解决的问题",
+            "识别贯穿全书的两条主线内核与三个核心优化思想"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README 项目定位",
+            "四部分结构",
+            "GEMM 与 Flash Attention 主线"
+          ],
+          "order": 1,
+          "practice_task": "在线通读全书目录，写出 Part I–IV 与附录的章节清单，每章配一句摘要，并标注自己已具备与欠缺的前置知识，形成一份个人学习计划表。",
+          "source_files": [
+            "README.md",
+            "index.md"
+          ],
+          "title": "项目定位与全书学习地图",
+          "topic": "介绍这个仓库是什么：一本以 Blackwell GPU 为对象、以 TIRx Python DSL 为工具的现代 GPU 内核编程教材。梳理 Part I（理解硬件）、Part II（TIRx）、Part III（GEMM）、Part IV（Flash Attention 4）与附录的整体结构和阅读入口。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-repo-structure-and-build.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "说出仓库顶层目录的职责划分",
+            "在本地构建并预览整本书",
+            "通过 GitHub Actions 理解自动部署流程"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Sphinx/MyST 构建",
+            "zh/ 双语镜像",
+            "CI 部署"
+          ],
+          "order": 2,
+          "practice_task": "克隆仓库后执行 pip install -r requirements-docs.txt 与 sphinx-build -b html . _build/html，并用 python -m http.server -d _build/html 8000 预览；然后定位 chapter_tma/index.md 对应的中文文件路径，记录中英文文件的一一对应关系。",
+          "source_files": [
+            "README.md",
+            "conf.py",
+            "requirements-docs.txt",
+            ".github/workflows/build_deploy.yaml",
+            "zh/index.md"
+          ],
+          "title": "仓库结构与本地构建",
+          "topic": "讲解仓库的目录组织：英文正文 chapter_*/appendix/、zh/ 中文镜像、tirx_guide 语言参考、_extra/demo 交互演示、img 与 img/scripts 图片资产。演示如何用 Sphinx 在本地构建并预览站点。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-runtime-environment.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "安装并验证 tvm.tirx 与 cuda-bindings",
+            "确认目标 GPU 是否满足 sm_100a 要求",
+            "掌握用 PyTorch 张量直接调用编译产物的验证套路"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "apache-tvm 安装",
+            "sm_100a 硬件要求",
+            "tirx-kernels 参考内核"
+          ],
+          "order": 3,
+          "practice_task": "安装 apache-tvm==0.26.0 与 cuda-bindings，运行 python -c \"import tvm, tvm.tirx; print(tvm.__version__)\" 验证；有 Blackwell GPU 时可选安装 tirx-kernels 并运行 python -m tirx_kernels.test --kernel fp16_bf16_gemm；无 GPU 时记录环境限制清单，后续实践改为源码推演。",
+          "source_files": [
+            "README.md",
+            "chapter_intro_tirx/index.md"
+          ],
+          "title": "运行环境与内核运行方式",
+          "topic": "说明运行书中内核的前提：Blackwell GPU（sm_100a）、Apache TVM 中的 tvm.tirx 模块、cuda-bindings 与 CUDA 版 PyTorch，以及可选的 tirx-kernels 参考内核仓库。强调 TIRx 通过 Python 源码检视解析内核，示例必须放在文件或 notebook 单元格中。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "单元一：项目入门与环境搭建"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u2-l1-thread-hierarchy.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "记住每级线程分组的规模与协作能力",
+            "用 scope 概念描述一个操作由谁发起、谁执行",
+            "在交互演示中对照 Blackwell SM 的硬件单元"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "线程层级",
+            "SM 架构组件",
+            "操作 scope 概念"
+          ],
+          "order": 1,
+          "practice_task": "为 TMA copy、tcgen05.mma、TMEM 累加器读回、2-CTA 协作 MMA 各写一行\"操作—发起者—协作范围\"表格，并用章节原文与交互演示逐一核对。",
+          "source_files": [
+            "chapter_background/index.md",
+            "_extra/demo/thread_hierarchy.html",
+            "_extra/demo/sm_architecture.html"
+          ],
+          "title": "线程执行层级：thread 到 cluster",
+          "topic": "讲解 GPU 的六级执行层级（thread、warp、warpgroup、CTA、cluster、grid）及 SIMT 执行模型。引出\"操作 scope\"概念：不同 Blackwell 操作由不同规模的线程发起和执行。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-memory-spaces.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "比较四种存储空间的作用域与取舍",
+            "解释 TMEM 引入的动机与二维结构",
+            "说明 DSMEM 在 2-CTA 协作中的数据流向"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "GMEM/SMEM/TMEM/RF 对比",
+            "DSMEM",
+            "cluster 数据共享"
+          ],
+          "order": 2,
+          "practice_task": "整理 GMEM/SMEM/TMEM/RF 的容量-延迟-访问范围对比表，并画出 2-CTA GEMM 中各 CTA 存储 A/B 切片、经 DSMEM 读取对端 B 切片的数据流向图。",
+          "source_files": [
+            "chapter_background/index.md",
+            "_extra/demo/cta_cluster.html"
+          ],
+          "title": "内存空间：GMEM、SMEM、TMEM 与 DSMEM",
+          "topic": "介绍 GMEM、SMEM、TMEM、寄存器四种存储空间的容量/延迟/作用域权衡，Blackwell 新增的 Tensor Memory 二维结构，以及 cluster 内的分布式共享内存 DSMEM。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-gemm-data-pipeline.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "描述 GEMM tile 的加载-计算-回写三阶段",
+            "解释流水线如何让 TMA/MMA/epilogue 重叠",
+            "识别各阶段之间需要的完成信号"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "三段式 tile 流水线",
+            "TMA/MMA/epilogue 分工",
+            "重叠与空闲"
+          ],
+          "order": 3,
+          "practice_task": "用文字或 Python（matplotlib）画出三段式 GEMM 流水线在 tile k-1/k/k+1 上的重叠时序图，标出每个阶段交接处需要的同步信号。",
+          "source_files": [
+            "chapter_background/index.md",
+            "_extra/demo/pipeline_arch.html"
+          ],
+          "title": "计算引擎与 GEMM 数据流水线",
+          "topic": "区分 CUDA 核与 Tensor Core 两类计算单元的作用，然后把前面的概念串成一个三段式 GEMM tile 流水线（TMA 加载→tcgen05 MMA→epilogue 回写），说明重叠如何让多个引擎同时忙碌。"
+        }
+      ],
+      "level": "beginner",
+      "order": 2,
+      "title": "单元二：GPU 执行模型"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u3-l1-roofline-model.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "用带宽和算力两个上限推出性能屋顶",
+            "计算典型算子的算术强度并判断瓶颈",
+            "区分 compute-bound 与 memory-bound 内核"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "roofline 模型",
+            "算术强度",
+            "常见算子强度计算"
+          ],
+          "order": 1,
+          "practice_task": "运行 img/scripts/gen_roofline.py 重新生成 roofline 图；再写一个 Python 函数计算 elementwise、reduction、GEMM、attention 的算术强度，并在图上标出它们的位置与适用上限。",
+          "source_files": [
+            "chapter_performance/index.md",
+            "img/scripts/gen_roofline.py"
+          ],
+          "title": "Roofline 模型与算术强度",
+          "topic": "以 B200（约 2 PFLOP/s 稠密 fp16、8 TB/s HBM）为例讲解 roofline 性能模型：算力屋顶、带宽屋顶与算术强度如何共同决定内核的性能上限。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-memory-bound-optimization.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "量化算子融合前后的字节节省",
+            "理解 reuse 与 fusion 在带宽优化中的角色",
+            "用字节/FLOP 估算解释实测加速"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "访存削减",
+            "算子融合",
+            "数据复用"
+          ],
+          "order": 2,
+          "practice_task": "给定一个 PyTorch 组合算子（如 x@W 后接 GeLU 再 reduction），编写脚本计算融合前后的 HBM 流量与理论加速比，并与简单逐元素内核的屋顶上限对比。",
+          "source_files": [
+            "chapter_performance/index.md"
+          ],
+          "title": "内存受限内核的优化",
+          "topic": "针对低算术强度内核讲解优化重点：减少 HBM 流量、提高数据复用、算子融合，目标是逼近带宽屋顶。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-overlap-and-occupancy.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "按优化阶梯为一个内核定位并排序动作",
+            "分析 SMEM/寄存器/TMEM 对 resident CTA 数的影响",
+            "解释 overlap 如何降低计算路径空闲"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "优化阶梯",
+            "overlap",
+            "occupancy 与资源压力"
+          ],
+          "order": 3,
+          "practice_task": "选书中的一个内核（如 GEMM Step 1 或 Step 7），按优化阶梯列出它当前所处级别与下一步动作，并按其 SMEM/寄存器/TMEM 用量估算每 SM 可驻留的 CTA 数。",
+          "source_files": [
+            "chapter_performance/index.md"
+          ],
+          "title": "重叠、Occupancy 与优化阶梯",
+          "topic": "总结优化阶梯（更好的算法→更高并行→重叠→资源调优），讲解通过 overlap 减少 Tensor Core 空闲，以及 occupancy 与 SMEM/寄存器资源压力的关系。"
+        }
+      ],
+      "level": "beginner",
+      "order": 3,
+      "title": "单元三：性能模型与优化方法"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u4-l1-shape-stride-model.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "用 shape+strides 计算任意元素的线性地址",
+            "把分块表达为对索引的再切分",
+            "写出一般形式的布局函数"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "shape-stride 模型",
+            "tiling 坐标切分",
+            "一般布局函数"
+          ],
+          "order": 1,
+          "practice_task": "用 Python 实现一个 shape-stride 到线性地址的映射函数，并对行主序、列主序、(2,3) 分块布局各写测试用例验证正确性。",
+          "source_files": [
+            "chapter_data_layout/index.md"
+          ],
+          "title": "Shape-Stride 模型与 Tile Layout 函数",
+          "topic": "讲解数据布局的本质：把逻辑索引映射到物理位置。从 shape-stride 模型出发，推导分块后的布局函数及其一般形式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-named-axes.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "用命名轴表达 TMEM 与寄存器中的物理坐标",
+            "区分 TMEM Lane 地址与线程 lane ID",
+            "读懂 warp 级 fragment 的布局记号"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "命名轴",
+            "TMEM (Lane,Col) 坐标",
+            "寄存器 fragment 映射"
+          ],
+          "order": 2,
+          "practice_task": "手推章节中 (8,2,4,2) 寄存器 fragment 布局里每个逻辑元素到 (warpid, laneid, 本地槽位) 的映射，并写脚本打印一张对照表自查。",
+          "source_files": [
+            "chapter_data_layout/index.md",
+            "_extra/demo/tiled_layout.html",
+            "_extra/demo/thread_register.html"
+          ],
+          "title": "命名轴：从线性地址到物理坐标",
+          "topic": "把布局函数的输出从单一线性地址扩展为命名物理坐标：TMEM 的二维 (Lane, Column) 地址空间与 warp 寄存器 fragment 的 laneid/warpid 坐标。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-replication-and-offset.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "区分 replication（一份数据多处副本）与 offset（固定平移）",
+            "写出跨 warp 广播 scale factor 的布局",
+            "在多设备 mesh 中使用 replication+offset 记号"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "replication",
+            "offset",
+            "跨 warp 广播",
+            "GPU mesh 映射"
+          ],
+          "order": 3,
+          "practice_task": "为 2-CTA 场景下 scale factor 的跨 warp 广播写出带 replication 与 offset 的布局表达式，并计算每个副本覆盖的 lane/column 区间。",
+          "source_files": [
+            "chapter_data_layout/index.md",
+            "_extra/demo/tile_distributed.html"
+          ],
+          "title": "复制（Replication）与偏移（Offset）",
+          "topic": "讲解布局记号中的两类扩展：replication 表示同一逻辑元素出现在多个物理位置（如 scale factor 广播到各 warp），offset 表示固定平移；并展示它们在 GPU mesh 与 block-scaled MMA 中的应用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l4-swizzle-layout.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "解释 bank conflict 的成因与代价",
+            "用 XOR swizzle 公式重排 8x8/128B 模式",
+            "为给定访问模式选择合适的 swizzle 模式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "SMEM bank conflict",
+            "XOR swizzle",
+            "8x8 与 128B swizzle 模式"
+          ],
+          "order": 4,
+          "practice_task": "阅读并运行 img/scripts/gen_swizzle_conflict.py，修改 swizzle 位宽参数观察 bank 冲突变化；再用 XOR 公式手算 8x8 swizzle 下前三行元素的物理地址。",
+          "source_files": [
+            "chapter_data_layout/index.md",
+            "img/scripts/gen_swizzle_conflict.py",
+            "_extra/demo/swizzle_8x8.html",
+            "_extra/demo/swizzle_128B.html"
+          ],
+          "title": "Swizzle：消除 bank conflict 的地址重排",
+          "topic": "讲解 swizzle 如何在不改变逻辑形状的前提下重排 SMEM 地址，使同一 tile 的行访问与列访问都避开 bank conflict；覆盖 8x8 与 128B 两种经典模式。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "单元四：数据布局与记号"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u5-l1-ampere-register-fragments.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "写出 m16n8k16 下 A/B/C 的每线程元素坐标",
+            "解释 ldmatrix 从 SMEM 构造 fragment 的过程",
+            "理解 Ampere 时代 SMEM swizzle 的由来"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Ampere mma.sync",
+            "fragment 映射",
+            "ldmatrix 与 SMEM swizzle"
+          ],
+          "order": 1,
+          "practice_task": "按 m16n8k16 的 fragment 映射手推 A、B、C 中每个线程持有的元素坐标，并用一段文字说明 ldmatrix 如何把 SMEM 中 swizzle 过的行拼装成该 fragment。",
+          "source_files": [
+            "chapter_layout_generations/index.md",
+            "img/scripts/gen_ldstmatrix.py"
+          ],
+          "title": "Ampere：寄存器 fragment 与 ldmatrix",
+          "topic": "回顾 Ampere mma.sync 的数据路径：A、B、累加器都分布在 warp 内各线程的寄存器 fragment 中，内核用 ldmatrix 从 SMEM 构造 fragment，并用 swizzle 避免写回冲突。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1",
+            "u4-l4"
+          ],
+          "filename": "u5-l2-hopper-wgmma-descriptor.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "说明 wgmma 的 warp 协作方式",
+            "解析矩阵描述符的各字段含义",
+            "对比寄存器累加器与 SMEM 直接读的差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "wgmma 四 warp 协作",
+            "矩阵描述符位域",
+            "寄存器累加器"
+          ],
+          "order": 2,
+          "practice_task": "解析 wgmma 矩阵描述符的位域布局，写一个 Python 函数从（SMEM 基址、leading byte offset、stride byte offset、swizzle 模式）生成各字段值并拼出描述符。",
+          "source_files": [
+            "chapter_layout_generations/index.md",
+            "img/scripts/gen_smem_descriptor.py"
+          ],
+          "title": "Hopper：wgmma 与共享内存描述符",
+          "topic": "讲解 Hopper wgmma.mma_async：四个 warp 协作发起一条 MMA，A/B 可经矩阵描述符直接从 SMEM 读取，但累加器仍留在每线程寄存器中。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2",
+            "u4-l2"
+          ],
+          "filename": "u5-l3-blackwell-tmem-accumulator.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "说明 tcgen05.mma 的输入输出来源",
+            "推导 scale factor 在 TMEM 中的放置方式",
+            "对比三代架构的每线程数据搬运负担"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TMEM 累加器",
+            "SFA/SFB scale factor",
+            "tcgen05.cp 与 scale_vec 复制"
+          ],
+          "order": 3,
+          "practice_task": "整理三代数据路径对比表（输入位置、累加器位置、内核需维护的布局）；再推导 UE8M0 scale factor 在 TMEM 中的 sharded/replicated 布局与 scale_vec 的字级复制方式。",
+          "source_files": [
+            "chapter_layout_generations/index.md",
+            "img/scripts/gen_sf_scale_vec.py"
+          ],
+          "title": "Blackwell：累加器进入 TMEM 与 scale factor",
+          "topic": "讲解 Blackwell tcgen05 的数据路径：累加器搬到 TMEM、寄存器压力随之下降；block-scaled MMA 的 SFA/SFB 也放入 TMEM，经 tcgen05.cp 从 SMEM 搬入并按 CTA 划分方式 sharding/replication。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 5,
+      "title": "单元五：Tensor Core 布局三代演进"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u4-l4"
+          ],
+          "filename": "u6-l1-tma-basics.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "列出 tensor map 描述符包含的信息",
+            "解释单线程发起、硬件搬运动的数据路径",
+            "说明 TMA 写 SMEM 时应用 swizzle 的好处"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "tensor map 描述符",
+            "TMA 引擎数据路径",
+            "写入时 swizzle"
+          ],
+          "order": 1,
+          "practice_task": "依据章节内容写出 tensor map 的字段清单，并用伪代码描述\"一个线程只给出 tile 坐标就搬完一个 8x64 fp16 tile\"的完整流程（含 swizzle 写入）。",
+          "source_files": [
+            "chapter_tma/index.md",
+            "_extra/demo/tma_intro.html"
+          ],
+          "title": "TMA：单线程描述整块 tile 与 swizzle 写入",
+          "topic": "介绍 Tensor Memory Accelerator 的基本模型：一个线程提交 tile 拷贝，由 tensor map 描述全局张量（形状、步长、tile 形状、swizzle 模式），TMA 引擎完成剩余地址计算与传输，并可在写入 SMEM 时顺带完成 swizzle。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-3d-tma-128b-swizzle.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "用第三维组织多个 swizzle atom",
+            "推导 128B swizzle 的行布局公式",
+            "核对 tile 元素到 SMEM 地址的映射"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "3D TMA",
+            "swizzle atom",
+            "128B 行布局"
+          ],
+          "order": 2,
+          "practice_task": "用 3D TMA（第三维为 swizzle atom 编号）的坐标公式计算某 tile 第 2 个 atom 内若干元素的目标 SMEM 地址，并与 128B swizzle 行布局公式逐一核对。",
+          "source_files": [
+            "chapter_tma/index.md",
+            "_extra/demo/tma_3d.html",
+            "_extra/demo/swizzle_atom_general.html"
+          ],
+          "title": "3D TMA 与 128B swizzle 行布局",
+          "topic": "讲解用 3D TMA 搬运多个 swizzle atom 的方法，以及 128B swizzling 下的行布局细节，使 tile 到达 SMEM 时即符合后续 MMA 期望的物理排布。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l3-tma-completion.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "写出 load 的 expect_tx/try_wait 用法",
+            "写出 store 的 commit_group/wait_group 用法",
+            "解释两种机制不同的原因"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "load 完成追踪",
+            "store commit/wait group",
+            "流水线中的 TMA"
+          ],
+          "order": 3,
+          "practice_task": "分别写出 TMA load 与 store 的完成检测伪代码（expect_tx/try_wait 与 commit_group/wait_group），并用两段文字解释为什么二者需要不同机制、各自保护什么资源。",
+          "source_files": [
+            "chapter_tma/index.md"
+          ],
+          "title": "TMA 完成机制：load 的 mbarrier 与 store 的 commit group",
+          "topic": "对比 TMA load 与 store 的完成检测：load 用 mbarrier 追踪到达字节数，store 用 async commit group 与 wait group 判断源缓冲何时可复用；最后给出把 TMA 嵌入流水线的形态。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 6,
+      "title": "单元六：TMA 异步数据搬运"
+    },
+    {
+      "id": "u7",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l3",
+            "u6-l2"
+          ],
+          "filename": "u7-l1-tcgen05-mma.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "描述 tcgen05.mma 的操作数与累加器位置",
+            "解释 accum 标志与 K 步进的关系",
+            "说出 MMA 完成信号的传递方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "tcgen05.mma 执行",
+            "TMEM 累加器",
+            "commit 与完成信号"
+          ],
+          "order": 1,
+          "practice_task": "对 M=128、N=16、K=64 的 MMA 列出每次 K 步进（16 为一步）读取的 A/B 切片与更新的 TMEM 区域，标注 accum 标志的变化并说明 commit 后如何等待完成。",
+          "source_files": [
+            "chapter_tensor_cores/index.md",
+            "_extra/demo/tcgen05_intro.html"
+          ],
+          "title": "tcgen05.mma 的执行方式与 TMEM 累加器",
+          "topic": "精读 Blackwell tcgen05.mma：如何从 SMEM 读 A/B、把累加结果写入 TMEM、指令描述符的关键字段，以及 K 维逐步累加时 accum 标志的变化。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l2-cta-group-and-block-scaled.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "区分 cta_group::1 与 ::2 的 scope 和 TMEM 映射",
+            "说明 M=64/128/256 各配置的 lane 占用",
+            "描述 SFA/SFB 跨两 CTA 的放置规则"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "cta_group 两种模式",
+            "四种 M 配置映射",
+            "block-scaled scale factor"
+          ],
+          "order": 2,
+          "practice_task": "画出 cta_group::1 M=64、cta_group::1 M=128、cta_group::2 M=256、cta_group::2 M=128（dense A）四种配置的 TMEM lane/column 映射草图，并标注 block-scaled 场景下 SFA/SFB 的放置位置。",
+          "source_files": [
+            "chapter_tensor_cores/index.md",
+            "img/scripts/gen_mma_layouts.py"
+          ],
+          "title": "cta_group 与 block-scaled MMA",
+          "topic": "讲解 cta_group::1 与 cta_group::2 如何决定 MMA 的操作 scope（单 CTA 还是 CTA 对）及不同 M 尺寸下的 TMEM 累加器映射；并覆盖 block-scaled MMA 的 scale factor 放置与 tcgen05 指令间的数据交接。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u7-l3-tmem-allocation.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "掌握 TMEM 的分配/释放调用顺序",
+            "记住分配大小的对齐与列数限制",
+            "确定各 warp 可访问的 lane 窗口"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "alloc/dealloc/relinquish",
+            "分配尺寸限制",
+            "warp lane 窗口"
+          ],
+          "order": 3,
+          "practice_task": "写出 tcgen05.alloc、relinquish_alloc_permit、dealloc 的调用顺序模板与分配大小限制规则，并说明 cta_group::2 时两个 CTA 各自分配的 nCols 如何对应。",
+          "source_files": [
+            "chapter_tmem/index.md",
+            "img/scripts/gen_tmem_grid.py"
+          ],
+          "title": "TMEM 分配生命周期与 lane 访问窗口",
+          "topic": "聚焦 TMEM 的管理：tcgen05.alloc 沿列维度动态分配、dealloc 释放、relinquish_alloc_permit 放弃后续分配权；每个 warp 只能访问其 warpgroup 内对应的 32-lane 窗口。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l3",
+            "u7-l1"
+          ],
+          "filename": "u7-l4-tcgen05-ldst.md",
+          "id": "u7-l4",
+          "learning_goals": [
+            "根据 shape/num 计算每线程寄存器用量",
+            "推导 16-bit 数据的打包/解包公式",
+            "确定 wait::ld 与 wait::st 的正确位置"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ld/st 集体指令",
+            "shape 与 repeat",
+            "16-bit 打包",
+            "wait::ld/wait::st"
+          ],
+          "order": 4,
+          "practice_task": "对 16-bit 数据推导其打包进/解包出 32-bit TMEM 列的公式；然后给一段含 ld 与 st 的伪内核标注 tcgen05.wait::ld 与 wait::st 必须出现的位置及原因。",
+          "source_files": [
+            "chapter_tmem/index.md",
+            "img/scripts/gen_tmem_layout.py",
+            "img/scripts/gen_tcgen05_ldst.py"
+          ],
+          "title": "tcgen05.ld/st：数据搬运、打包与异步等待",
+          "topic": "讲解 warp 集体指令 tcgen05.ld/tcgen05.st 的 shape 与 repeat 因子、16-bit 数据在 32-bit 列中的打包/解包，以及必须配对的 wait::ld / wait::st 异步等待。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 7,
+      "title": "单元七：Blackwell Tensor Core 与 TMEM"
+    },
+    {
+      "id": "u8",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l3",
+            "u7-l1"
+          ],
+          "filename": "u8-l1-mbarrier.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "区分\"已发起\"与\"已完成\"",
+            "解释线程到达与硬件完成通知的合并计数",
+            "写出正确的 expect_tx 字节数"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "arrive/wait 分离",
+            "字节追踪",
+            "期望事务字节数"
+          ],
+          "order": 1,
+          "practice_task": "写出 producer/consumer 使用同一 mbarrier 的最小伪代码对（各一次 arrive 与 try_wait），并为一个 (128x64 + 128x64) fp16 双 tile TMA load 计算 expect_tx 应设置的字节数。",
+          "source_files": [
+            "chapter_async_barriers/index.md",
+            "_extra/demo/mbarrier_mechanism.html"
+          ],
+          "title": "mbarrier：arrive/wait 与字节追踪",
+          "topic": "讲解异步操作的完成信号问题：mbarrier 把普通线程 arrive、硬件完成通知与 TMA 在途字节计数合并在一个对象中，把生产者的 arrive 与消费者的 wait 解耦。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "filename": "u8-l2-phase-and-stage-reuse.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "解释 phase 如何区分同一 barrier 的先后使用",
+            "画出 full/empty 双屏障的 stage 复用环",
+            "手推多轮迭代的相位序列"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "phase 相位翻转",
+            "full/empty 屏障",
+            "stage 复用环"
+          ],
+          "order": 2,
+          "practice_task": "手推 depth=2 流水线连续 6 次迭代中每道 full/empty barrier 的 phase 翻转序列，验证 parity 规则；再解释漏掉一次异或翻转会出什么错。",
+          "source_files": [
+            "chapter_async_barriers/index.md",
+            "_extra/demo/phase_tracking.html",
+            "_extra/demo/mbarrier_mechanism.html"
+          ],
+          "title": "phase 相位与多级流水线的 stage 复用",
+          "topic": "讲解 barrier 通过相位（phase）复用的机制：多级流水线用 full 屏障表示 stage 就绪、empty 屏障归还缓冲，内核必须跟踪相位奇偶来区分同一屏障的先后两次使用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u8-l2"
+          ],
+          "filename": "u8-l3-cluster-launch-control.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "说明静态 persistent 调度的尾部空闲问题",
+            "描述 CLC 请求的发起与结果回传",
+            "判断何时值得引入 CLC"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "persistent 内核",
+            "CLC 取消并继承坐标",
+            "异步请求与 mbarrier 应答"
+          ],
+          "order": 3,
+          "practice_task": "写出 CLC 请求-应答的伪代码（结果经共享内存与 mbarrier 返回），并对比静态 round-robin persistent 调度在负载不均时的尾部行为差异。",
+          "source_files": [
+            "chapter_clc/index.md"
+          ],
+          "title": "Cluster Launch Control：动态认领工作",
+          "topic": "讲解 Blackwell 的 CLC：运行中的 CTA/cluster 可以取消尚未启动的 launch 并继承其网格坐标，请求异步完成、结果经 SMEM 与 mbarrier 返回，让先完工的 worker 动态认领剩余工作。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 8,
+      "title": "单元八：异步协调与高级调度"
+    },
+    {
+      "id": "u9",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3",
+            "u2-l3"
+          ],
+          "filename": "u9-l1-first-tirx-kernel.md",
+          "id": "u9-l1",
+          "learning_goals": [
+            "读通 hgemm_v1 的四个阶段",
+            "识别 Tx.cta.copy/Tx.gemm_async/Tx.wg.copy_async 的分工",
+            "区分 tile 操作与底层 PTX 辅助调用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TIRx 动机",
+            "hgemm_v1 四阶段",
+            "三个核心 tile primitive"
+          ],
+          "order": 1,
+          "practice_task": "通读 hgemm_v1 源码，按\"分配 SMEM/TMEM→拷贝 A/B→发起 MMA→读回写 GMEM\"四个阶段标注对应代码行，并列出其中所有 tile 操作与所有底层辅助调用的清单。",
+          "source_files": [
+            "chapter_intro_tirx/index.md",
+            "_extra/demo/tirx_dispatch.html"
+          ],
+          "title": "TIRx 是什么与第一个内核 hgemm_v1",
+          "topic": "介绍 TIRx（Tensor IR next）的设计动机：把分散在 CUDA/PTX 中的关键决策显式表达为结构化 IR；然后逐段精读第一个可运行的单 tile GEMM 内核 hgemm_v1。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "filename": "u9-l2-compile-and-verify.md",
+          "id": "u9-l2",
+          "learning_goals": [
+            "用 tvm.compile 与 tir_pipeline=tirx 编译内核",
+            "用 PyTorch 参考实现做数值验证",
+            "打印 IR 与生成 CUDA 源对比两个抽象层级"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "tvm.compile 流程",
+            "PyTorch 参考验证",
+            "IR 与 CUDA 源检视"
+          ],
+          "order": 2,
+          "practice_task": "在有 Blackwell GPU 的环境编译 hgemm_v1 并跑出 PASS；无 GPU 时用 kernel.show()、kernel.script() 与 ex.mod.imports[0].inspect_source() 打印两级代码，写一份\"tile 操作如何变成线程级代码\"的观察笔记。",
+          "source_files": [
+            "chapter_intro_tirx/index.md"
+          ],
+          "title": "编译与验证 TIRx 内核",
+          "topic": "讲解 TIRx 的编译与验证回路：IRModule→tvm.compile(tir_pipeline=\"tirx\")→LowerTIRx→CUDA 生成，以及如何用 PyTorch 参考结果做数值断言，并打印 PrimFunc 与最终 CUDA 源码。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l2",
+            "u4-l2",
+            "u7-l1"
+          ],
+          "filename": "u9-l3-scope-layout-dispatch.md",
+          "id": "u9-l3",
+          "learning_goals": [
+            "为任意 tile 操作标注三要素",
+            "预测修改某一要素后的行为变化",
+            "理解编译器如何由三要素推出具体实现"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "scope",
+            "layout",
+            "dispatch"
+          ],
+          "order": 3,
+          "practice_task": "为 hgemm_v1 中每个 tile 操作填写 scope/layout/dispatch 三列对照表；再回答：若把 GMEM→SMEM 拷贝从线程执行改为 TMA 派发，需要改动哪些代码位置（后续 Step 4 会验证你的答案）。",
+          "source_files": [
+            "chapter_intro_tirx/index.md",
+            "_extra/demo/tirx_dispatch.html"
+          ],
+          "title": "Scope、Layout、Dispatch 三要素",
+          "topic": "提炼 TIRx 的核心模型：每个 tile 操作都由谁执行（scope）、数据如何摆放（layout）、走哪条硬件路径（dispatch）三者共同决定，编译器据此生成线程级控制流与地址计算。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 9,
+      "title": "单元九：TIRx 编程模型入门"
+    },
+    {
+      "id": "u10",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l3",
+            "u4-l1"
+          ],
+          "filename": "u10-l1-tilelayout.md",
+          "id": "u10-l1",
+          "learning_goals": [
+            "用 S[...] 与 R[...] 构造布局",
+            "解释 shard/replica/offset 三要素的组合",
+            "把布局挂到 pool.alloc 与 T.decl_buffer 上"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TileLayout",
+            "shard",
+            "replica",
+            "offset"
+          ],
+          "order": 1,
+          "practice_task": "用 TileLayout 分别构造章节中的 TMEM 布局 S[(128,256):(1@TLane,1@TCol)] 与一个带 replication 的布局，调用 apply() 打印若干逻辑坐标的物理坐标，并用交互演示核对结果。",
+          "source_files": [
+            "chapter_tirx_layout_api/index.md",
+            "static/tirx-layout-demo/index.html"
+          ],
+          "title": "TileLayout：S、R 与 offset",
+          "topic": "讲解 tvm.tirx.layout 中 TileLayout 的构造方式：S[...] 描述分片（shard）映射，R[...] 描述复制（replica），再加固定 offset；并演示如何把布局附加到 SMEM pool 或 buffer 上。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u10-l1",
+            "u4-l2"
+          ],
+          "filename": "u10-l2-named-axes-forward-mapping.md",
+          "id": "u10-l2",
+          "learning_goals": [
+            "说明默认轴 m 的含义随 buffer scope 变化",
+            "用 forward mapping 求 TMEM 物理坐标",
+            "计算 stride 在不同位宽 buffer 下的换算"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "命名轴族",
+            "forward mapping",
+            "TMEM 布局示例",
+            "元素位宽换算"
+          ],
+          "order": 2,
+          "practice_task": "编写一个练习脚本：给定 (m,n) 逻辑坐标，分别求其在 laneid/warpid 复合布局与 TMEM TLane/TCol 布局下的物理坐标字典；再对 8-bit/16-bit buffer 计算元素 stride 到硬件 32-bit 列的换算。",
+          "source_files": [
+            "chapter_tirx_layout_api/index.md"
+          ],
+          "title": "命名轴与前向映射",
+          "topic": "讲解命名轴体系（laneid、warpid、tid_in_wg、TLane、TCol、m 等）与 TileLayout.apply() 前向映射；以 Blackwell TMEM 与 scale-factor 布局为实例推导物理坐标。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u10-l2",
+            "u4-l4"
+          ],
+          "filename": "u10-l3-composelayout-swizzle.md",
+          "id": "u10-l3",
+          "learning_goals": [
+            "解释 swizzle 为什么能消除 bank conflict",
+            "用 ComposeLayout 组合仿射映射与 XOR 置换",
+            "为给定 tile 形状与位宽选择 swizzle 参数"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "为什么 swizzle",
+            "XOR swizzle 变换",
+            "swizzle 参数选择",
+            "ComposeLayout"
+          ],
+          "order": 3,
+          "practice_task": "用 ComposeLayout 对一个 (8,64) fp16 tile 应用 128B swizzle，打印 swizzle 前后同一逻辑元素的线性地址差；再回答：若元素改为 fp32，应如何调整 swizzle 参数并说明理由。",
+          "source_files": [
+            "chapter_tirx_layout_api/index.md"
+          ],
+          "title": "ComposeLayout 与 swizzle 变换",
+          "topic": "讲解 ComposeLayout 如何把一个仿射 tile 映射与基于 XOR 的地址置换组合成 swizzle 布局，以及如何根据访问模式与位宽选择 swizzle 位宽。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 10,
+      "title": "单元十：TIRx Layout API"
+    },
+    {
+      "id": "u11",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l3"
+          ],
+          "filename": "u11-l1-gemm-dataflow-roadmap.md",
+          "id": "u11-l1",
+          "learning_goals": [
+            "写出 D=AB^T 的维度约定与 TFLOPS 公式",
+            "描述 GMEM→SMEM→TMEM→寄存器→GMEM 数据路径",
+            "列出九步优化各自改变的机制"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "GEMM 约定",
+            "Blackwell 数据路径",
+            "九步优化路线"
+          ],
+          "order": 1,
+          "practice_task": "画出 Step 1–9 的优化路线图（可用 Python/matplotlib），标注每一步改变的机制（数据搬运/流水线/调度/角色划分）与始终不变的 GEMM 数据路径。",
+          "source_files": [
+            "chapter_gemm_basics/index.md",
+            "img/scripts/gen_memory_dataflow.py"
+          ],
+          "title": "GEMM 约定、数据路径与优化路线图",
+          "topic": "建立 GEMM 章节的全局图景：维度约定（A:MxK、B:NxK、D:MxN）、Blackwell 数据路径（GMEM→SMEM→tcgen05→TMEM→寄存器→GMEM）、TFLOPS 度量，以及 Step 1–9 的完整优化路线。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u11-l1"
+          ],
+          "filename": "u11-l2-step1-single-tile.md",
+          "id": "u11-l2",
+          "learning_goals": [
+            "复述单 tile 内核的四个组成部分",
+            "解释 elect_sync 与 mbarrier 配对的 MMA 发起方式",
+            "回答 cta_sync 在拷贝与 MMA 之间的必要性"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "单 tile 数据流",
+            "SMEMPool 分配",
+            "MMA 发起与等待",
+            "TMEM 读回"
+          ],
+          "order": 2,
+          "practice_task": "复现 Step 1 内核并回答章末练习 1（为何 Tx.gemm_async 前需要 T.cuda.cta_sync()）；随后修改 BLK_K 并观察编译产物或 IR 中 MMA 指令数量的变化（无 GPU 时做推演）。",
+          "source_files": [
+            "chapter_gemm_basics/index.md"
+          ],
+          "title": "Step 1：单 tile 同步内核",
+          "topic": "精读第一个完整 GEMM 内核：单 CTA 计算一个 128x128 输出 tile，涵盖 SMEMPool 分配、barrier 初始化、CTA 协作拷贝、单线程发起 MMA、TMEM 读回与写 GMEM。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u11-l2",
+            "u8-l2"
+          ],
+          "filename": "u11-l3-step2-k-loop.md",
+          "id": "u11-l3",
+          "learning_goals": [
+            "在 K 循环中正确复用 TMEM 累加器",
+            "解释 phase_mma 翻转的必要性",
+            "诊断漏翻相位导致的提前通过"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "K 分块累加",
+            "barrier 相位翻转",
+            "TMEM 累加器复用"
+          ],
+          "order": 3,
+          "practice_task": "完成章末练习 2：推演（或在 GPU 上复现）删除 phase_mma ^= 1 后内核的行为，写清 wait 何时会过早通过、结果如何出错。",
+          "source_files": [
+            "chapter_gemm_basics/index.md"
+          ],
+          "title": "Step 2：K 循环累加",
+          "topic": "在 Step 1 上加入 K 维循环：每个 K 块搬入 SMEM 后累加进同一 TMEM 累加器，关键点是每次复用 MMA barrier 都要翻转等待相位。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u11-l3"
+          ],
+          "filename": "u11-l4-step3-spatial-tiling.md",
+          "id": "u11-l4",
+          "learning_goals": [
+            "用 cta_id 计算 M/N 方向的 tile 起点",
+            "计算给定问题规模下的 grid 形状与 CTA 数",
+            "识别相邻 CTA 重复读取的共享 tile"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "空间分块",
+            "grid 映射",
+            "tile 起点计算"
+          ],
+          "order": 4,
+          "practice_task": "完成章末练习 3：计算 M=N=4096、BLK_M=BLK_N=128 时的 grid 形状与 CTA 数；指出 CTA (bx,by) 与哪些 CTA 重复读同一 A/B tile，并说明当前内核是否（以及如何）显式共享它们。",
+          "source_files": [
+            "chapter_gemm_basics/index.md"
+          ],
+          "title": "Step 3：空间分块与多 CTA grid 映射",
+          "topic": "把输出矩阵沿 M、N 分块并映射到多个 CTA：用 cta_id 计算 tile 起点，grid 覆盖整个输出；同时指出不同 CTA 会重复读取相同 A/B tile 这一后续优化的伏笔。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 11,
+      "title": "单元十一：GEMM 基础——分块与累加"
+    },
+    {
+      "id": "u12",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u11-l4",
+            "u6-l3",
+            "u8-l1"
+          ],
+          "filename": "u12-l1-step4-tma-load.md",
+          "id": "u12-l1",
+          "learning_goals": [
+            "在 TIRx 中配置 TMA 并发起异步加载",
+            "正确设置 mbarrier 的期望字节数",
+            "定位内核中 TMA 配置代码的位置"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TMA 加载发起",
+            "load/store 同步",
+            "TMA 配置"
+          ],
+          "order": 1,
+          "practice_task": "核对 Step 4 中 expect_tx 字节数公式 (BLK_M*BLK_K + BLK_N*BLK_K)*2（章末练习 1），预测把它改小或改大后 mbarrier 分别会卡在哪一步；再在源码中找出 TMA 描述符配置所在的代码段。",
+          "source_files": [
+            "chapter_gemm_async/index.md"
+          ],
+          "title": "Step 4：TMA 异步加载",
+          "topic": "把线程驱动的 Tx.cta.copy 替换为 TMA：单线程发起、引擎搬运，load 用 mbarrier 字节计数等待，store 走 commit/wait group；问题规模升级到 M=N=K=4096。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u12-l1",
+            "u8-l2"
+          ],
+          "filename": "u12-l2-step5-software-pipeline.md",
+          "id": "u12-l2",
+          "learning_goals": [
+            "解释双缓冲如何让加载与计算重叠",
+            "推导 stage 所有权与 barrier 的对应关系",
+            "用 tile 数估算流水线 SMEM 成本"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "双缓冲 SMEM 环",
+            "prefetch 与 stage 复用",
+            "相位管理"
+          ],
+          "order": 2,
+          "practice_task": "完成章末练习 2 并手推 PIPE_DEPTH=2 时每个 SMEM stage 与其 TMA barrier 的所有权表；再把 depth 改为 3，估算 SMEM 增量并判断是否超过 B200 每 SM 228KB 上限。",
+          "source_files": [
+            "chapter_gemm_async/index.md",
+            "img/pipe_depth2.png"
+          ],
+          "title": "Step 5：双缓冲软件流水线",
+          "topic": "把 A、B 缓冲改成双缓冲 SMEM 环，引入预取、stage 复用与相位管理，建立让 TMA 加载与 MMA 计算重叠所需的缓冲结构。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u12-l2"
+          ],
+          "filename": "u12-l3-step6-persistent-kernel.md",
+          "id": "u12-l3",
+          "learning_goals": [
+            "解释 persistent 内核减少 launch 开销的机制",
+            "用 tile scheduler 计算每个 CTA 的 tile 序列",
+            "说明 tile 遍历顺序对 L2 局部性的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "persistent 调度",
+            "tile scheduler",
+            "L2 局部性"
+          ],
+          "order": 3,
+          "practice_task": "完成章末练习 3：计算 4096x4096、BLK=128 的输出 tile 总数，以及 SM_COUNT=148 时每个 persistent CTA 平均处理的 tile 数；再写出该 scheduler 生成的 tile 遍历顺序并解释它如何改善 L2 命中。",
+          "source_files": [
+            "chapter_gemm_async/index.md"
+          ],
+          "title": "Step 6：持久内核与 tile scheduler",
+          "topic": "引入固定数量的常驻 CTA 与 tile scheduler：每个 CTA 循环认领多个输出 tile，减少 launch 与重复初始化开销，并通过 tile 遍历顺序改善 L2 局部性。"
+        }
+      ],
+      "level": "advanced",
+      "order": 12,
+      "title": "单元十二：TMA 流水线与持久调度"
+    },
+    {
+      "id": "u13",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u12-l3"
+          ],
+          "filename": "u13-l1-step7-warp-specialization.md",
+          "id": "u13-l1",
+          "learning_goals": [
+            "划分 TMA producer/MMA consumer/writeback 三类角色",
+            "用四道屏障与 PipelineState 连接各角色",
+            "推演相位初始化错误导致的死锁"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "warp 角色",
+            "四道屏障",
+            "PipelineState",
+            "warpgroup_sync"
+          ],
+          "order": 1,
+          "practice_task": "完成章末练习 1：画出把 TMA 与 MMA 两个 PipelineState 的初始 phase 都设为 0 时的死锁场景图；再统计 PIPE_DEPTH=2/3/4 下流水线的 SMEM 成本并做对比表。",
+          "source_files": [
+            "chapter_gemm_advanced/index.md",
+            "img/scripts/gen_warp_specialization_timeline.py"
+          ],
+          "title": "Step 7：warp 角色划分与四道屏障",
+          "topic": "把串行的 load→MMA→writeback 拆给并发角色：TMA 生产者 warp、MMA 消费者 warp、回写 warpgroup，用四道 full/empty 屏障与 PipelineState（stage+phase）完成交接，并用 warpgroup_sync 同步回写组。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u13-l1",
+            "u7-l2",
+            "u2-l2"
+          ],
+          "filename": "u13-l2-step8-two-cta-cluster.md",
+          "id": "u13-l2",
+          "learning_goals": [
+            "画出 A/B 在两 CTA 间的切分与 DSMEM 读取路径",
+            "推导两 CTA 场景的 tile 地址计算",
+            "解释 arrive 字节数乘 CTA_GROUP 的原因"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "cta_group::2 协作 MMA",
+            "A/B 切分与 DSMEM",
+            "跨 CTA 屏障交接"
+          ],
+          "order": 2,
+          "practice_task": "完成章末练习 2：解释 arrive.expect_tx 的字节数为何乘 CTA_GROUP；再画出 A、B 在两个 CTA 间的切分图，标出哪一侧经 DSMEM 读取对端数据、哪道屏障跨 CTA 生效。",
+          "source_files": [
+            "chapter_gemm_advanced/index.md"
+          ],
+          "title": "Step 8：双 CTA cluster 协作 MMA",
+          "topic": "用 2-CTA cluster 执行 cta_group::2 协作 MMA 产出更大输出 tile：A、B 在两 CTA 间切分、经 DSMEM 互访，tile 地址计算与屏障交接都按 CTA 对组织。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u13-l2"
+          ],
+          "filename": "u13-l3-step9-multi-consumer.md",
+          "id": "u13-l3",
+          "learning_goals": [
+            "解释两个 MMA 消费者如何共享同一 B tile",
+            "重新核算多消费者下的屏障到达数与角色表",
+            "说明共享 B 而非 A 的理由"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "第二个 MMA 消费者",
+            "行范围划分",
+            "B tile 共享"
+          ],
+          "order": 3,
+          "practice_task": "完成章末练习 3（为何共享 B 而不是 A）；再修改设计让两个消费者各负责不同的行范围（如 64+64），重新核算屏障到达数、TMEM 列分配与 SMEM 占用。",
+          "source_files": [
+            "chapter_gemm_advanced/index.md"
+          ],
+          "title": "Step 9：多消费者 warp specialization",
+          "topic": "加入第二个 MMA 消费者 warp：两组 A 块共享同一批 stage 好的 B tile，各配一个回写 warpgroup，计算不同的行范围，进一步提升片上数据复用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u13-l3",
+            "u3-l3"
+          ],
+          "filename": "u13-l4-end-to-end-results.md",
+          "id": "u13-l4",
+          "learning_goals": [
+            "解读九个版本的耗时与累计加速比",
+            "把每段增益归因到具体机制",
+            "用书的基准协议规划自己的复测"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "九步性能表",
+            "加速归因",
+            "基准条件"
+          ],
+          "order": 4,
+          "practice_task": "基于书中表格用 Python（可参考 img/scripts/gen_gemm_perf.py）重绘性能曲线，计算四个比较区间的加速比，并写一段归因分析；再用 u15 的基准测试要求列出复现该实验需要控制的变量清单。",
+          "source_files": [
+            "chapter_gemm_advanced/index.md",
+            "img/scripts/gen_gemm_perf.py"
+          ],
+          "title": "端到端性能解读：从 70ms 到对齐 cuBLAS",
+          "topic": "解读 B200 上 M=N=K=4096 的九步性能表（70ms→0.094ms，最终对齐 cuBLAS），把每一段增益归因到对应机制，并说明测量条件与可比性边界。"
+        }
+      ],
+      "level": "advanced",
+      "order": 13,
+      "title": "单元十三：Warp 特化与 CTA Cluster"
+    },
+    {
+      "id": "u14",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u13-l4"
+          ],
+          "filename": "u14-l1-fa4-algorithm-structure.md",
+          "id": "u14-l1",
+          "learning_goals": [
+            "推导在线 softmax 的分块递推公式",
+            "描述 QKᵀ MMA→softmax→PV MMA 的 tile 数据流",
+            "对比 FA2/FA3/FA4 的映射差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "在线 softmax",
+            "tile 数据流",
+            "FA 版本演进"
+          ],
+          "order": 1,
+          "practice_task": "用伪代码写出 FA4 主循环：KV block 迭代、两个 MMA 与 softmax 的先后顺序、每一步读写的存储空间（GMEM/SMEM/TMEM/寄存器），并标注哪些步骤在 GEMM 内核中不存在。",
+          "source_files": [
+            "chapter_flash_attention/index.md",
+            "img/scripts/gen_flash_attention_pipeline.py"
+          ],
+          "title": "FA4 算法结构与 tile 数据流",
+          "topic": "建立 Flash Attention 的算法骨架：分块处理 K/V、在线 softmax 维护每行状态、避免完整 score 矩阵落盘；FA4 面向 Blackwell 用 TMA+tcgen05+TMEM+多角色流水线重组计算链。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u14-l1"
+          ],
+          "filename": "u14-l2-fa4-roles-and-barriers.md",
+          "id": "u14-l2",
+          "learning_goals": [
+            "列出 FA4 的角色划分与各角色寄存器预算",
+            "说明每道屏障的等待者、到达数与完成条件",
+            "整理读 FA4 代码的约定"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "warp 角色与 scope",
+            "屏障完成条件",
+            "角色间寄存器再分配"
+          ],
+          "order": 2,
+          "practice_task": "为 FA4 填写 roles/scope/barrier 三张表（谁发起、谁等待、到达数、相位），核对章末练习 4 中 p_o_rescale 为何期望 256 次到达；再按练习 5 计算四个 warpgroup 的寄存器总预算并与统一 200 的方案对比。",
+          "source_files": [
+            "chapter_flash_attention/index.md",
+            "img/scripts/gen_flash_attention_barrier_flow.py"
+          ],
+          "title": "FA4 的 warp 角色与 barrier 协议",
+          "topic": "拆解 FA4 的角色分工（TMA/MMA 发起组、两个 softmax 组、PV/校正组）与各屏障的职责和完成条件，以及角色间寄存器的再分配。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u14-l2"
+          ],
+          "filename": "u14-l3-qkt-mma-softmax.md",
+          "id": "u14-l3",
+          "learning_goals": [
+            "推导 delta/acc_scale/P 的更新公式",
+            "确定何时触发对旧 O 的 rescale",
+            "解释 exp2 与多项式近似如何分担指数计算"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "QKᵀ MMA",
+            "在线 softmax 数值递推",
+            "exp2+FMA 多项式"
+          ],
+          "order": 3,
+          "practice_task": "完成章末练习 1：用两组给定的 S 输入手算 candidate_max、delta、new_ref、acc_scale、P 及更新后的 row_sum/O，解释为何只有第二组触发对旧状态的 rescale；再完成练习 6 说明 exp2 双路径如何改变执行单元利用率。",
+          "source_files": [
+            "chapter_flash_attention/index.md"
+          ],
+          "title": "QKᵀ MMA 与夹在中间的 softmax",
+          "topic": "精读 S=QKᵀ 的计算与 softmax：指数改写为 base-2 的 exp2、用 FMA 多项式近似分担硬件指数单元压力，并在参考值变化时对 TMEM 中的旧状态做条件性 rescale。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u14-l3"
+          ],
+          "filename": "u14-l4-pv-mma-tmem-reuse.md",
+          "id": "u14-l4",
+          "learning_goals": [
+            "推导 S/P/O 在 TMEM 的物理列区间",
+            "识别重叠区域及防护屏障",
+            "解释交替使用两个 Q stage 的协议"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "PV MMA",
+            "TMEM 布局复用",
+            "fp16 列打包",
+            "屏障防护"
+          ],
+          "order": 4,
+          "practice_task": "完成章末练习 3：利用 fp16 列到 32-bit 物理列的映射推导 S0/S1/P0/P1/O0/O1 的物理列区间，标出哪些区域重叠、哪道屏障防止过早读写。",
+          "source_files": [
+            "chapter_flash_attention/index.md",
+            "img/scripts/gen_tmem_layout.py"
+          ],
+          "title": "PV MMA 与 TMEM 布局复用",
+          "topic": "精读 P·V 累加与 TMEM 中 S、P、O 的布局复用：fp16 视图列与 32-bit 物理列的对应、各区域的交替占用以及防止过早读写的等待与屏障。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u14-l4"
+          ],
+          "filename": "u14-l5-rescaling-writeback.md",
+          "id": "u14-l5",
+          "learning_goals": [
+            "写出校正循环与交替 stage 协议",
+            "解释条件 rescaling 如何减少 TMEM 往返",
+            "跟踪 O 从 TMEM 到 GMEM 的完整路径"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "条件 rescaling",
+            "校正循环",
+            "TMEM→GMEM 回写"
+          ],
+          "order": 5,
+          "practice_task": "跟踪一条 O 的 rescale+writeback 完整路径，写出校正循环与两个 Q stage 交替使用的伪代码，并统计一次 KV 迭代中 O 在 TMEM 与 GMEM 间往返的次数。",
+          "source_files": [
+            "chapter_flash_attention/index.md"
+          ],
+          "title": "条件 rescaling 与 writeback",
+          "topic": "讲解输出累加器 O 的校正与回写：softmax 参考值变化时先把旧 O 缩放到新尺度，最终经寄存器/SMEM 写回 GMEM；交替 stage 协议让校正与主循环错开。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u14-l5"
+          ],
+          "filename": "u14-l6-causal-gqa-scheduling.md",
+          "id": "u14-l6",
+          "learning_goals": [
+            "对 K/V 块做全有效/部分有效/跳过分类",
+            "把 packed 行映射到 (序列偏移, query head)",
+            "运行或推演 FA4 的编译与数值验证"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "causal 掩码块分类",
+            "GQA 行打包",
+            "tile 调度与验证"
+          ],
+          "order": 6,
+          "practice_task": "完成章末练习 7 与 8：给出 SEQ_LEN_Q=6、SEQ_LEN_KV=8、BLK_N=4 的 causal 块分类表；再计算 GQA_RATIO 与 SEQ_Q_PER_TILE 并映射 packed 行 0/5/127；有 GPU 时编译运行 FA4 并跑通 torch 参考断言。",
+          "source_files": [
+            "chapter_flash_attention/index.md"
+          ],
+          "title": "causal 掩码、GQA 与 tile 调度",
+          "topic": "覆盖 FA4 的收尾机制：右下对齐的 causal 掩码如何划分有效/部分/跳过的 K/V 块、GQA 如何把多个 query head 打包进一个 tile，以及 tile 调度与最终编译验证。"
+        }
+      ],
+      "level": "advanced",
+      "order": 14,
+      "title": "单元十四：Flash Attention 4"
+    },
+    {
+      "id": "u15",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l3"
+          ],
+          "filename": "u15-l1-language-ref-types-buffers.md",
+          "id": "u15-l1",
+          "learning_goals": [
+            "查阅 TIRx 数据类型与表达式写法",
+            "区分 buffer 的 scope 与存储层次",
+            "核对书中内核的 buffer 声明合法性"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "解析工具",
+            "数据类型",
+            "buffer 与内存作用域"
+          ],
+          "order": 1,
+          "practice_task": "用语言参考逐条核对 hgemm_v1（chapter_intro_tirx）中的 buffer 声明与作用域（SMEM pool、TMEM、local 寄存器、参数 Buffer），整理成一份速查表。",
+          "source_files": [
+            "tirx_guide/language_reference/index.rst",
+            "tirx_guide/language_reference/cuda/parser_utils.rst",
+            "tirx_guide/language_reference/cuda/data_types.rst",
+            "tirx_guide/language_reference/cuda/buffers.rst"
+          ],
+          "title": "TIRx 语言参考：解析工具、数据类型与 buffer",
+          "topic": "系统过一遍 TIRx 语言参考的前三部分：源码解析工具的约定、数据类型与表达式、buffer 与内存（scope、分配、布局附加）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u15-l1"
+          ],
+          "filename": "u15-l2-language-ref-control-sync.md",
+          "id": "u15-l2",
+          "learning_goals": [
+            "查阅线程层级内置函数",
+            "区分各类同步原语的协作范围",
+            "用参考核对内核中的守卫与同步"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "控制流",
+            "线程与同步原语"
+          ],
+          "order": 2,
+          "practice_task": "用参考中的控制流与同步原语清单，标注 hgemm_v1 与 Step 7 内核中每个 if 守卫和每条同步语句的语义与协作范围（lane/warp/warpgroup/CTA）。",
+          "source_files": [
+            "tirx_guide/language_reference/cuda/control_flow.rst",
+            "tirx_guide/language_reference/cuda/threads_sync.rst"
+          ],
+          "title": "TIRx 语言参考：控制流与线程同步",
+          "topic": "语言参考的后两部分：控制流语法与线程/同步原语（warp、warpgroup、CTA、cluster 各级同步及 elect、fence 等）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l2"
+          ],
+          "filename": "u15-l3-lowering-pipeline.md",
+          "id": "u15-l3",
+          "learning_goals": [
+            "按顺序列出 TIRx 编译各 pass 的职责",
+            "跟踪一个 tile primitive 在各 pass 前后的形态",
+            "理解主机/设备代码分离方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "LowerTIRx",
+            "缓冲展平与主机/设备分离",
+            "CUDA 代码生成"
+          ],
+          "order": 3,
+          "practice_task": "跟随 lowering pipeline 文档列出完整 pass 清单与顺序，然后跟踪 Tx.gemm_async 这一个 tile 操作从 authored IR 到生成 CUDA 的形态变化，写成一份流水账笔记。",
+          "source_files": [
+            "tirx_guide/arch/index.rst",
+            "tirx_guide/arch/lowering_pipeline.rst"
+          ],
+          "title": "编译器内部：TIRx lowering pipeline",
+          "topic": "深入编译器附录：从高层 TIRx 构造出发，经 LowerTIRx 选择具体实现、缓冲展平、主机/设备分离，最终生成 CUDA 设备代码的完整流水线。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u13-l4"
+          ],
+          "filename": "u15-l4-benchmarking-measurement.md",
+          "id": "u15-l4",
+          "learning_goals": [
+            "在计时前建立正确性基线",
+            "定义并控制计时边界与条件",
+            "用 CUDA events 与单调用计时换算吞吐"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "正确性先行",
+            "计时边界",
+            "CUDA events 计时",
+            "延迟到吞吐换算"
+          ],
+          "order": 4,
+          "practice_task": "为书中 hgemm（任一 Step）编写一个符合附录规范的计时脚本：先验证正确性，再用 CUDA events 做预热+多迭代计时，输出毫秒延迟与 TFLOPS，并注明可控条件（时钟、缓存状态等）。",
+          "source_files": [
+            "appendix/benchmarking_gpu_kernels.md"
+          ],
+          "title": "可复现基准测试：正确性、计时边界与 CUDA events",
+          "topic": "基准测试附录的上半部分：把测量与诊断分开、计时前先验证正确性、明确计时边界、用 CUDA events 测流内时间与单调用延迟，并保持基准条件一致。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u15-l4"
+          ],
+          "filename": "u15-l5-profiling-nsight.md",
+          "id": "u15-l5",
+          "learning_goals": [
+            "用 Proton 找出算子中最贵的内核",
+            "捕获并解读 nsys 时间线",
+            "用 NCU 指标分类内核瓶颈"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Proton 内核级剖析",
+            "Nsight Systems 时间线",
+            "Nsight Compute 指标与瓶颈分类"
+          ],
+          "order": 5,
+          "practice_task": "运行/改编 appendix/nsys_example.py 捕获一个目标算子的时间线，定位最贵的内核；然后整理 NCU 报告中用于判断 compute/memory/latency 受限的关键指标，给出一个瓶颈分类结论。",
+          "source_files": [
+            "appendix/benchmarking_gpu_kernels.md",
+            "appendix/nsys_example.py"
+          ],
+          "title": "性能剖析：Proton、Nsight Systems 与 Nsight Compute",
+          "topic": "基准测试附录的下半部分：用 Proton 比较算子内各内核、用 Nsight Systems 分析应用时间线、用 Nsight Compute 深入单个内核（含 B200 BF16 GEMM 实例与指标口径）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u15-l5",
+            "u13-l1"
+          ],
+          "filename": "u15-l6-iket-annotations.md",
+          "id": "u15-l6",
+          "learning_goals": [
+            "用 iket.IketProfiler 标注内核阶段",
+            "解读 IKET 输出的各阶段耗时",
+            "把阶段级数据与 nsys 时间线对照"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "IKET range 标注",
+            "warp 角色示例",
+            "阶段耗时解读"
+          ],
+          "order": 6,
+          "practice_task": "阅读并运行 appendix/iket_example.py，然后仿照它给一个两角色小内核（或书中内核的简化版）加 range_push/pop 标注，解释输出中各 range 的含义并与整体内核耗时对照。",
+          "source_files": [
+            "appendix/benchmarking_gpu_kernels.md",
+            "appendix/iket_example.py"
+          ],
+          "title": "IKET：在 DSL 内核内部标注阶段",
+          "topic": "讲解 IKET 工具：在 TIRx 源码中插入 profiler range，从而在 DSL 层面观察 warp 角色内部的阶段耗时，补充 nsys 只能看到内核边界的不足。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u13-l1",
+            "u14-l2"
+          ],
+          "filename": "u15-l7-debugging-warp-specialized.md",
+          "id": "u15-l7",
+          "learning_goals": [
+            "按 worksheet 记录角色/存储/交接/生命周期",
+            "核对生成 CUDA 中的关键指令与守卫",
+            "按症状分类（死锁/崩溃/错果/慢）选择排查路径"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "调试工作流",
+            "交接 worksheet",
+            "症状映射表",
+            "生成代码检视"
+          ],
+          "order": 7,
+          "practice_task": "选一个症状（死锁/崩溃/错误结果/正确但慢），按附录流程为 Step 7 或 FA4 写出 roles/storage/handoff/lifetime 四行 worksheet，并给出针对该症状的逐步排查清单（含 inspect_source 中应搜索的指令）。",
+          "source_files": [
+            "appendix/debugging_warp_specialized.md",
+            "chapter_gemm_advanced/index.md"
+          ],
+          "title": "调试 warp-specialized 内核",
+          "topic": "异步内核调试方法论：先排查环境与编译，再做 roles/storage/handoff/lifetime 工作表并对照生成的 CUDA 检查守卫与屏障，最后按死锁、崩溃、错误结果、正确但慢四类症状走对应分支。"
+        }
+      ],
+      "level": "advanced",
+      "order": 15,
+      "title": "单元十五：附录——语言参考、编译器与工具链"
+    },
+    {
+      "id": "u16",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u16-l1-demos-and-figure-scripts.md",
+          "id": "u16-l1",
+          "learning_goals": [
+            "运行 img/scripts 中的脚本再生成书图",
+            "修改脚本参数定制可视化",
+            "理解 _extra/demo 交互演示的组织方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "图表生成脚本",
+            "交互演示资产",
+            "viz-base 公共库"
+          ],
+          "order": 1,
+          "practice_task": "在 img/scripts 下运行两个生成脚本（如 gen_roofline.py 与 gen_swizzle_conflict.py）重出图片，修改一处参数观察输出变化；再浏览一个 _extra/demo HTML，总结它的交互逻辑与正文 iframe 引用方式。",
+          "source_files": [
+            "img/scripts/README.md",
+            "img/scripts/gen_roofline.py",
+            "img/scripts/gen_swizzle_conflict.py",
+            "_extra/demo/swizzle_8x8.html",
+            "_extra/viz-base.js"
+          ],
+          "title": "交互式演示与图表生成脚本",
+          "topic": "考察仓库的可视化基建：_extra/demo 下的自包含交互演示（靠 viz-base 公共脚本）、img/scripts 下用 matplotlib 重新生成全部书图的 Python 脚本，以及它们与正文的关联方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u14-l6",
+            "u15-l7"
+          ],
+          "filename": "u16-l2-capstone-project.md",
+          "id": "u16-l2",
+          "learning_goals": [
+            "综合运用 scope/layout/dispatch 与流水线机制设计变体",
+            "编写完整的角色/屏障/存储设计文档",
+            "规划正确性验证与性能评测方案"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "变体设计",
+            "三要素设计文档",
+            "验证与评测方案"
+          ],
+          "order": 2,
+          "practice_task": "capstone：从 GEMM Step 9 或 FA4 出发设计一个内核变体（如不同 tile 形状、block-scaled 混合精度、新的掩码或调度策略），写出 scope/layout/dispatch/屏障协议设计文档；有 Blackwell GPU 时编译并用 u15 的基准流程验证性能，无 GPU 时给出完整推演与预期风险清单。",
+          "source_files": [
+            "chapter_gemm_advanced/index.md",
+            "chapter_flash_attention/index.md",
+            "README.md"
+          ],
+          "title": "综合实战：定制你的内核变体",
+          "topic": "毕业实践：把全书技术串起来，从 GEMM Step 9 或 FA4 出发设计并实现一个自定义变体，完整走过设计（scope/layout/dispatch/同步）→实现→验证→评测→（可选）向本书贡献的流程。"
+        }
+      ],
+      "level": "advanced",
+      "order": 16,
+      "title": "单元十六：扩展实践与贡献"
+    }
+  ]
+}

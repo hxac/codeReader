@@ -1,0 +1,320 @@
+# u8-l1 mbarrier：arrive/wait 与字节追踪
+
+## 1. 本讲目标
+
+学完本讲，你应该能够：
+
+1. 严格区分一条异步指令的「已发起（issued）」与「已完成（completed）」，并解释为什么程序顺序无法证明搬运已经结束。
+2. 说出 mbarrier 对象内部维护的四个量（phase parity、pending arrival count、expected arrival count、tx-count），以及一个相位完整的充要条件。
+3. 解释 mbarrier 如何把三类参与者——普通线程的 `arrive`、硬件完成通知（`complete-tx` / `tcgen05.commit`）与 TMA 在途字节计数——合并进同一个对象，从而把生产者的 arrive 与消费者的 wait 解耦。
+4. 为给定的 tile 形状与数据类型，写出正确的 `arrive.expect_tx` 字节数，并推断登记过小或过大分别会发生什么。
+
+本讲是「异步协调」单元的第一讲，只讲单个 mbarrier 的状态机与三类更新路径；多级流水线中屏障如何通过相位（phase）复用、full/empty 双屏障协议，留给下一讲 u8-l2。
+
+## 2. 前置知识
+
+本讲建立在前两讲之上，先用通俗语言把需要的结论复述一遍：
+
+- **「已发起」不等于「已完成」（来自 u6-l3）**：TMA load 由 warp 内单个线程提交 `Tx.copy_async`，之后 TMA 引擎独立搬运数据，发起线程不必原地等待。`cta_sync()` 只能同步 CTA 内的线程，观察不到引擎的进度。
+- **MMA 也是异步的（来自 u7-l1）**：`tcgen05.mma` 由 `elect_sync` 选出的唯一线程发出，硬件完成整个矩阵乘累加；内核要用 `tcgen05.commit` 把完成事件挂到 mbarrier 上。
+- **生产者/消费者与完成信号（来自 u2-l3）**：三段式 GEMM 流水线（TMA 加载 → MMA 计算 → epilogue 回写）要重叠执行，每个交接处都需要一个「完成信号」——本讲讲的 mbarrier 就是承载这个信号的硬件对象。
+- **SMEM（来自 u2-l2）**：mbarrier 本身存放在共享内存中，是 CTA 内可见的对象。
+
+一个日常类比：你（生产者）把一批快递交给快递公司（TMA 引擎）并下单成功，这只说明「已发起」；收件人（消费者）要等到快递全部签收（「已完成」）才能使用货物。mbarrier 就是一张签收台账：你下单时在台账上登记「共 4096 字节在途」，快递公司每送到一单就核销一部分，收件人看到台账清零才能取货。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+|---|---|
+| `chapter_async_barriers/index.md` | 本讲主教材：mbarrier 的定义、初始化、三类到达路径、wait 语义与常见交接场景 |
+| `_extra/demo/mbarrier_mechanism.html` | 交互演示：mbarrier 对象的四个字段、相位完成条件、核心 API 对照表（可点击聚焦） |
+| `_extra/demo/mbarrier_tma_timeline.html` | 交互演示：生产者线程 / TMA 引擎 / mbarrier / 消费者四条生命线的时间线，逐步演算两次 2048 字节拷贝 |
+| `chapter_gemm_async/index.md` | GEMM Step 4 真实内核：`tma_bar` 的分配、初始化、`arrive.expect_tx` 与 `try_wait` 的完整用法，以及 32768 字节的实例 |
+
+## 4. 核心概念与源码讲解
+
+### 4.1 arrive/wait 分离
+
+#### 4.1.1 概念说明
+
+异步指令带来一个程序顺序解决不了的问题。考虑一次 TMA load：程序顺序可以证明 TMA 指令在 MMA 读 SMEM tile 之前发出，但这只证明搬运**先开始**，不能证明搬运**已结束**——如果 TMA 还在写 tile，MMA 可能读到不完整的数据。`tcgen05.mma` 与 epilogue 之间同样如此：Tensor Core 没写完 TMEM 累加器之前，epilogue 不能读。正文在开篇就点明了这个问题，并指出承载这个完成信号的硬件对象就是 mbarrier（[chapter_async_barriers/index.md:12-16](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_async_barriers/index.md#L12-L16)：发起只说明开始，消费者必须等完成信号；交接需要显式信号，生产者报告完成、消费者等待报告）。
+
+mbarrier（memory barrier）是存放在共享内存中的硬件同步对象，内部编码不透明，但理解其行为只需跟踪两个量：**到达计数**（当前相位还缺多少次到达）与**相位**（当前是第几轮）；对 TMA load 还要再加一个 **tx-count**（尚未传完的字节数）（[chapter_async_barriers/index.md:18-20](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_async_barriers/index.md#L18-L20)）。
+
+它的关键设计是把「报告」和「等待」做成两个独立操作：
+
+- **arrive（生产者侧）**：把「我的工作做完了」这一事件登记到屏障上，登记完立刻继续干别的活，不必等任何人。
+- **wait（消费者侧）**：只在真正需要数据或需要复用资源时才等待，等到的是屏障相位的完成。
+
+正因为二者分离，生产者可以报告进度后继续其他工作，消费者只在真正需要结果时才等待——这就是Overview 里说的「把生产者的 arrive 与消费者的 wait 解耦」（[chapter_async_barriers/index.md:7-9](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_async_barriers/index.md#L7-L9)）。
+
+#### 4.1.2 核心流程
+
+一个 mbarrier 从初始化到被等待的完整生命周期：
+
+```text
+1. init(bar, count)      由单个线程执行
+      phase = 0
+      expected_arrival_count = count   （每个相位期望多少次到达）
+      pending_arrival_count = count
+      tx_count = 0
+2. fence.mbarrier_init() + cta_sync()
+      让初始化对全 CTA 可见后，各角色才能使用屏障
+3. 参与者以三种路径之一「到达」：
+      a) 普通线程 mbarrier.arrive          → pending -= 1
+      b) 发起线程 arrive.expect_tx(N)      → pending -= 1 且 tx_count += N
+      c) tcgen05.commit                    → 所跟踪的异步操作完成后，硬件补一次 arrive
+4. try_wait(bar, phase)   消费者等待指定相位
+      相位完整条件：pending_arrival_count == 0 且 tx_count == 0
+      完成后屏障原子地进入下一相位，parity 在 0/1 间翻转
+```
+
+伪代码描述协议骨架：
+
+```text
+# 生产者
+issue_async_op()                 # 发起 TMA / MMA，只是「已发起」
+arrive(bar)                      # 报告完成条件（线程到达，或登记字节，或 commit）
+
+# 消费者
+wait(bar, phase)                 # 等屏障当前相位清零，才读数据 / 复用缓冲
+```
+
+#### 4.1.3 源码精读
+
+**初始化与参与者**。正文说明 init 时内核要指定每个相位期望多少次到达，屏障从 phase 0 开始、pending 置为期望值，随后等待相关生产者或资源使用者报告完成（[chapter_async_barriers/index.md:30-32](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_async_barriers/index.md#L30-L32)：init 指定每相位期望的到达数，起始 phase 0、pending 等于期望值）。普通线程也可以直接执行 `mbarrier.arrive`——典型场景是消费者读完共享内存缓冲后 arrive 一下，告诉生产者「缓冲可以覆写了」（[chapter_async_barriers/index.md:47](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_async_barriers/index.md#L47)：消费者读完缓冲后 arrive，告知生产者可覆写复用）。
+
+**wait 的语义**。消费者等待与当前迭代关联的相位，wait 完成后才能读数据或复用受保护的资源。裸 PTX 的 `mbarrier.try_wait.parity` 在相位完成前可能返回 false，因此必须重试；本书使用的 `T.ptx.mbarrier.try_wait` 封装了重试循环、阻塞到目标相位完成为止（[chapter_async_barriers/index.md:49](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_async_barriers/index.md#L49)：try_wait.parity 可能返回 false 需重试，T.ptx.mbarrier.try_wait 封装重试并阻塞；arrive 与 wait 分离让生产者报告后继续、消费者按需等待）。
+
+**交互演示中的对象结构**。演示页把 mbarrier 画成一个 64 位、位于共享内存中的对象，四个槽位分别是 phase parity、pending arrival count、expected arrival count、tx-count，点击任一槽位可聚焦它的职责（[_extra/demo/mbarrier_mechanism.html:116-140](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/mbarrier_mechanism.html#L116-L140)：mbarrier 对象可视化与四个字段的说明，其中 tx-count 标注为「仍在途的异步传输字节数，arrive.expect_tx 增加它、硬件随传输完成减少它」）。
+
+**API 对照表**。演示页的核心 API 表给出了每条指令对屏障状态的作用，这张表是本讲的速查卡（[_extra/demo/mbarrier_mechanism.html:158-189](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/mbarrier_mechanism.html#L158-L189)：mbarrier.init 置 phase=0、expected/pending=count、tx=0；mbarrier.arrive 使 pending 减一；arrive.expect_tx 使 pending 减一且 tx_count 加 byte_count；tcgen05.commit 在异步操作完成后由系统补一次 arrive；T.ptx.mbarrier.try_wait 不修改屏障状态、内部重试到相位完成后返回）。特别注意最后一行：**wait 不改动屏障状态**——等待是只读观察，只有到达类操作才推进状态。
+
+**真实内核中的写法**。GEMM Step 4 内核展示了完整的 TIRx 习惯用法：屏障在 SMEM pool 中以 `uint64` 分配，由 warp 0 的 lane 0 初始化为期望 1 次到达，随后 `fence.mbarrier_init()` + `cta_sync()` 把初始化发布给全 CTA（[chapter_gemm_async/index.md:113-132](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L113-L132)：tma_bar/mma_bar 以 align=8 分配在 SMEM pool；warp_id==0 且 lane_id==0 时 `T.ptx.mbarrier.init(..., 1)`；随后 fence.proxy_async、fence.mbarrier_init、cta_sync）。章首的前后对比代码则概括了使用形态（[chapter_gemm_async/index.md:37-45](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L37-L45)：`tid == 0` 的单线程发起两条 `Tx.copy_async` 后执行 `T.ptx.mbarrier.arrive.expect_tx(tma_bar, byte_count)`，全体线程再 `T.ptx.mbarrier.try_wait(tma_bar, phase)`）。
+
+#### 4.1.4 代码实践
+
+**实践目标**：写出 producer/consumer 使用同一道 mbarrier 的最小伪代码对——生产者一次 arrive、消费者一次 try_wait，并让两段代码拼起来就是 Step 4 内核的同步骨架。
+
+**操作步骤**（示例代码，仿照书中 Step 4 的习惯用法改写，比内核省略了 TMEM 与 store 部分）：
+
+```python
+# ---------- 示例代码：最小 producer/consumer mbarrier 协议 ----------
+bar = pool.alloc((1,), "uint64", align=8)      # 屏障本体放在 SMEM
+
+# 1) 初始化：期望每个相位 1 次到达（单线程执行）
+if warp_id == 0 and lane_id == 0:
+    T.ptx.mbarrier.init(bar.ptr_to([0]), 1)
+T.ptx.fence.mbarrier_init()
+T.cuda.cta_sync()
+
+# 2) 生产者：单线程发起 TMA 搬运并登记在途字节
+if tid == 0:
+    Tx.copy_async(smem_a[:, :], A[...], dispatch="tma_auto", mbar=bar.ptr_to([0]))
+    T.ptx.mbarrier.arrive.expect_tx(bar.ptr_to([0]), NBYTES)   # 唯一一次 arrive
+
+# 3) 消费者：全体线程等屏障当前相位，通过后才能读 SMEM
+T.ptx.mbarrier.try_wait(bar.ptr_to([0]), phase)
+# ... 此处读 smem_a 是安全的 ...
+```
+
+**需要观察的现象**：
+
+- `init` 的第二个参数是 1，与「只有 1 个线程会 arrive」严格对应；生产者的 `expect_tx` 同时贡献了这唯一一次到达。
+- `try_wait` 出现在 `if tid == 0` 之外——所有线程都要等，因为所有线程都会读 SMEM；而 arrive 只由单线程执行。
+- 把第 2 步的 `if tid == 0` 改成 `if warp_id == 0`（整个 warp 都执行），arrive 次数变成 32，与 init 的 1 不匹配——这正是章首提醒的陷阱（[chapter_gemm_async/index.md:47](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L47)：tid == 0 恰好选中一个线程，四个 warp 各自 elect_sync 会选出四个发起者）。
+
+**预期结果**：伪代码与 [chapter_gemm_async/index.md:145-160](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L145-L160) 中 `tma_load` 内联函数逐行对应（两条 `Tx.copy_async` + 一次 `arrive.expect_tx`）。若在 Blackwell GPU 上运行完整 Step 4 内核可得到数值 PASS；伪代码本身为纸面推演，运行结果待本地验证。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 `cta_sync()` 不能代替 mbarrier 等待 TMA load？
+
+**答案**：`cta_sync()` 只同步 CTA 内的线程，它能让「线程写的共享内存」互相可见，但观察不到 TMA 引擎的进度——引擎是独立于线程继续搬运的。判断 TMA 是否完成必须靠 mbarrier 的 tx-count 清零（[chapter_gemm_async/index.md:53](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L53)：cta_sync 只同步线程，无法判定异步搬运是否完成，MMA 读 SMEM 前必须经 mbarrier 等待 TMA load）。
+
+**练习 2**：裸 PTX 的 `mbarrier.try_wait.parity` 与本书的 `T.ptx.mbarrier.try_wait` 有何差别？
+
+**答案**：前者在相位完成前可能返回 false，调用方必须自己写重试循环；后者在内部封装了重试、阻塞直到请求的相位完成，语义上是一个真正的「等待」（[chapter_async_barriers/index.md:49](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_async_barriers/index.md#L49)）。
+
+**练习 3**：一个 mbarrier 既被生产者 `arrive`，又被消费者 `try_wait`。wait 会改变屏障状态吗？
+
+**答案**：不会。演示 API 表明确标注 try_wait「不修改屏障状态；内部重试并在完成后返回」，推进状态的只有三类到达/完成操作（[_extra/demo/mbarrier_mechanism.html:183-187](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/mbarrier_mechanism.html#L183-L187)）。
+
+### 4.2 字节追踪
+
+#### 4.2.1 概念说明
+
+arrive/wait 分离解决的是「谁来报告、谁来等待」，但还有一个计数问题：线程的到达只说明「发起者把活派出去了」，并不说明数据已经到位。mbarrier 用 **tx-count** 补上这一环：发起线程在 arrive 的同时登记「TMA 引擎预计要搬多少字节」，引擎每完成一段搬运，硬件通过 **complete-tx** 核销相应字节。于是屏障上同时跑着两本账：
+
+- **到达账**：pending arrival count，还差几次到达；
+- **字节账**：tx-count，还有多少字节在途。
+
+一本账由软件（线程）记，另一本由硬件（引擎）记，两本账都清零，当前相位才算完整。正文对 `arrive.expect_tx` 的描述是：它做两件事——先贡献一次到达使 pending 减一，再把 TMA 引擎预计传输的字节数累加到 tx-count；因此线程的到达并不意味着屏障完成，只有当硬件的 complete-tx 把 tx-count 也减到零、两个条件同时成立时相位才完成并翻转到下一相位（[chapter_async_barriers/index.md:34-43](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_async_barriers/index.md#L34-L43)：expect_tx 贡献一次到达并把预计传输字节数加进 tx-count；TMA 引擎每完成一段传输就以 complete-tx 核减；相位仅在 pending 与 tx-count 同时为零时完成，随后进入下一相位、parity 在 0/1 间翻转）。
+
+值得对照的是 Tensor Core 的路径：`tcgen05.mma` 发起本身不更新任何屏障，内核要用 `tcgen05.commit...mbarrier::arrive` 把一次屏障到达与此前发出的异步 tcgen05 操作关联起来，硬件在这些操作完成后才补上这次到达（[chapter_async_barriers/index.md:45](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_async_barriers/index.md#L45)：tcgen05.mma 不更新屏障，须用 commit 关联一次到达，硬件在操作完成后报告；缺了这次到达，等它的消费者无法前进）。也就是说：TMA 的完成用「字节」度量，MMA 的完成用「次数」度量，但两者都汇入同一个 mbarrier 的相位完成条件。
+
+#### 4.2.2 核心流程
+
+相位完整条件（正文与演示一致的表述）：
+
+\[
+\text{pending\_arrival\_count} = 0 \;\;\wedge\;\; \text{tx\_count} = 0
+\]
+
+屏障状态随事件演化的规则（每格都是原子更新）：
+
+| 事件 | 执行者 | pending | tx-count | phase |
+|---|---|---|---|---|
+| `init(count=1)` | 单线程 | 1 | 0 | 0 |
+| `arrive.expect_tx(4096)` | 发起线程 | 0 | 4096 | 0 |
+| A tile 搬完，complete-tx(2048) | TMA 引擎（硬件） | 0 | 2048 | 0 |
+| B tile 搬完，complete-tx(2048) | TMA 引擎（硬件） | 0 | 0 | 完成并翻到 1 |
+
+注意第 2 行之后 pending 已为 0，但相位并未完成——**两本账必须同时清零**。完成时屏障原子地进入下一相位，并把 pending 从 expected 重新装载（[_extra/demo/mbarrier_mechanism.html:142-153](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/mbarrier_mechanism.html#L142-L153)：相位完成条件卡片——所有期望到达发生且所有登记的异步传输字节完成；屏障随后原子推进到下一相位并从期望值恢复 pending）。上一张表正是时间线演示的剧本：生产者对 2048 字节的 A tile 与 2048 字节的 B tile 各发起一次 TMA load，然后 `arrive.expect_tx(4096)`；引擎每完成一次拷贝就向屏障报告一次 2048 字节的 complete-tx；消费者调用阻塞版 `try_wait(phase=0)`，相位完成前不得读 A/B tile（[_extra/demo/mbarrier_tma_timeline.html:216-229](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/mbarrier_tma_timeline.html#L216-L229)：三张小结卡片分别描述生产者 expect_tx(4096)、引擎两次 complete-tx、消费者阻塞 try_wait）。
+
+演示页底部还把三条更新路径并排总结成一句话：`mbarrier.arrive` 直接减 pending；`arrive.expect_tx` 到达并增加 tx-count、关联的 TMA 拷贝完成时硬件经 `complete_tx` 核减；`tcgen05.commit...arrive::one` 让系统在此前异步 tcgen05 操作完成后补报一次到达（[_extra/demo/mbarrier_mechanism.html:192-196](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/mbarrier_mechanism.html#L192-L196)：三条更新路径的注释条）。
+
+用集合语言概括三类参与者的汇入方式：
+
+\[
+\text{phase 完成} \iff \underbrace{\sum_{\text{arrive}} 1 = \text{expected}}_{\text{线程/commit 到达}} \;\wedge\; \underbrace{\sum_{\text{expect\_tx}} B = \sum_{\text{complete\_tx}} B}_{\text{TMA 字节账平}}
+\]
+
+#### 4.2.3 源码精读
+
+**正文的完成条件**。正文用代码块给出两个条件，并解释 expect_tx 不只是又一次普通到达——它还登记了屏障必须等待的传输字节数，完成要求所有期望到达与所有关联传输都结束（[chapter_async_barriers/index.md:36-43](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_async_barriers/index.md#L36-L43)：`pending arrival count == 0` 与 `tx-count == 0` 两个条件；expect_tx 不仅是普通到达，还登记必须等待的传输字节数）。
+
+**常见交接场景中的 TMA→MMA**。正文列出 Tensor Core 内核中三类数据交接：线程→异步硬件（线程写 SMEM 后被 TMA store/MMA 读，先建立同步与顺序）、TMA→MMA（生产者让屏障同时跟踪到达与传输字节，MMA 消费者等当前相位完成）、MMA→epilogue（发起线程用 `tcgen05.commit` 关联完成，epilogue 等屏障并施加 tcgen05 要求的排序 fence 后再读 TMEM）（[chapter_async_barriers/index.md:92-108](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_async_barriers/index.md#L92-L108)：三类交接；时间线演示下方注明「屏障仅在 pending 与 tx-count 同时归零后原子推进到下一相位，消费者的 wait 才得以完成」）。
+
+**真实内核中两道屏障的分工**。Step 4 内核同时用了 `tma_bar` 与 `mma_bar`：`tma_load` 内联函数发起两条 `Tx.copy_async`（tma_config 里 `"mbar": tma_bar.ptr_to([0])` 指定完成上报到 tma_bar）后调用 `arrive.expect_tx` 登记两块 tile 的总字节；`mma` 内联函数发起 `Tx.gemm_async` 后立刻 `T.ptx.tcgen05.commit(mma_bar.ptr_to([0]), cta_group=1)` 把 MMA 完成挂到 mma_bar（[chapter_gemm_async/index.md:145-168](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L145-L168)：tma_load 中两条 copy_async + arrive.expect_tx；mma 中 Tx.gemm_async + tcgen05.commit）。K 循环里先 `try_wait(tma_bar, phase_tma)` 再由单线程发起 MMA，再 `try_wait(mma_bar, phase_mma)`，两条 phase 变量各自翻转（[chapter_gemm_async/index.md:170-190](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L170-L190)：K 循环中 tid==0 发起 tma_load、全体 try_wait tma_bar、tid==0 发起 mma、全体 try_wait mma_bar、两个 phase 异或翻转）。同一个 mbarrier 抽象同时服务了「字节账」（tma_bar）与「次数账」（mma_bar）。
+
+#### 4.2.4 代码实践
+
+**实践目标**：亲手演算一次字节账，把时间线演示的每一步状态写出来。
+
+**操作步骤**：
+
+1. 打开时间线演示：本地构建书站后访问 `/demo/mbarrier_tma_timeline.html`（`_extra` 目录经 `html_extra_path` 原样拷入站点，正文 iframe 以 `../demo/...` 引用，见 [conf.py:50](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/conf.py#L50)）；或者不起 Sphinx，直接在仓库根目录运行 `python -m http.server 8000` 后浏览 `/_extra/demo/mbarrier_tma_timeline.html`，点击 ▶ 逐步播放（该演示被正文以 iframe 嵌入，见 [chapter_async_barriers/index.md:100-106](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_async_barriers/index.md#L100-L106)）。
+2. 准备一张四列表格（事件 / pending / tx-count / phase），从 `init(1)` 开始，每按一次 ▶ 就填一行。
+3. 填完后与 4.2.2 节的表格对照。
+
+**需要观察的现象**：`arrive.expect_tx(4096)` 之后 pending 立即为 0，但消费者的 wait 仍被挡住；直到第二次 complete-tx 落账、tx-count 归零的那一步，屏障才整体翻入下一相位。
+
+**预期结果**：你手填的表应与 4.2.2 节表格完全一致（两次 2048 字节核销）。若把演示中「两次拷贝」的语义误解为「两次到达」，表中 pending 会在第二步就清零导致提前完成——这正是本实践要暴露的直觉错误。演示可在浏览器中直接复现，无需 GPU；逐步演算结果待本地验证。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`arrive.expect_tx(N)` 执行完的一瞬间，屏障离完成还差什么？
+
+**答案**：还差字节账：pending 已减一（若它是唯一到达则已为 0），但 tx-count 刚加上 N，必须等硬件对每次关联传输报告 complete-tx、把 tx-count 减到 0，相位才完成（[chapter_async_barriers/index.md:34-43](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_async_barriers/index.md#L34-L43)）。
+
+**练习 2**：TMA 的完成与 tcgen05.mma 的完成分别以什么方式进入 mbarrier？
+
+**答案**：TMA 以字节进入——expect_tx 登记在途字节，引擎完成搬运后硬件 complete-tx 核减；MMA 以次数进入——`tcgen05.commit` 把一次到达与此前发出的异步 tcgen05 操作关联，硬件在这些操作完成后补一次 arrive。两者最终都汇聚到同一个相位完成条件（[chapter_async_barriers/index.md:45](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_async_barriers/index.md#L45)，[_extra/demo/mbarrier_mechanism.html:192-196](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/mbarrier_mechanism.html#L192-L196)）。
+
+**练习 3**：屏障完成并翻入下一相位后，pending arrival count 从哪里恢复？
+
+**答案**：从 expected arrival count 恢复——这是 `init` 设定的每相位到达数，屏障每轮自动重新装载（[_extra/demo/mbarrier_mechanism.html:149-152](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/_extra/demo/mbarrier_mechanism.html#L149-L152)）。
+
+### 4.3 期望事务字节数
+
+#### 4.3.1 概念说明
+
+`expect_tx` 的字节数不是可调参数，而是一个必须**精确等于**本相位内所有关联 TMA 传输将实际送达的字节数的账目数字。它等于参与该屏障的各 tile 元素总数乘以每个元素的字节数：
+
+\[
+N_{\text{bytes}} = \left( M_A \times K + N_B \times K \right) \times s, \qquad s = \text{每元素字节数}
+\]
+
+对 fp16（\(s=2\)）且 A、B tile 同为 \(128 \times 64\)：
+
+\[
+N_{\text{bytes}} = (128 \times 64 + 128 \times 64) \times 2 = 8192 \times 2 \times 2 = 32768 \text{ 字节}
+\]
+
+登记错误会在两个方向上破坏正确性：
+
+- **登记过小**：真实的 complete-tx 提前把 tx-count 扣到 0（账上等够了），相位提前完成，消费者的 `try_wait` 提前通过，MMA 读到**不完整的 tile**——结果错误，而且是静默错误，没有任何报错。
+- **登记过大**：tx-count 永远等不到足够的 complete-tx 来清零，相位永不完成，`try_wait` 永远阻塞——**内核挂死**。
+
+这正是 GEMM 章节练习 1 提出的问题（[chapter_gemm_async/index.md:681](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L681)：Step 4 的 arrive.expect_tx 使用 `(BLK_M * BLK_K + BLK_N * BLK_K) * 2` 字节，若该字节数过小或过大会发生什么）。
+
+#### 4.3.2 核心流程
+
+计算 expect_tx 字节数的检查单：
+
+```text
+1. 列出本相位经同一道屏障上报完成的全部 TMA 传输（Step 4 中是 A tile 与 B tile 两条）
+2. 对每条传输计算：元素数 = 各维长度之积；字节数 = 元素数 × sizeof(dtype)
+3. 求和得到 N_bytes = Σ (元素数_i × s_i)     # 不同 tile 允许不同 dtype
+4. 核对到达账：init 的 count 必须等于本相位实际 arrive 的次数
+   （Step 4：单线程一次 expect_tx，故 init=1）
+5. 复用屏障时（下一讲）：每个 stage 一道屏障，各自登记自己的字节，
+   不得把多个 stage 的字节记到同一相位
+```
+
+#### 4.3.3 源码精读
+
+**正文的实例数字**。GEMM 章节先用 2048+2048 的简化例子讲解时间线（发起线程执行 `arrive.expect_tx(4096)`，报告一次到达并登记 4096 字节在途；pending 归零但字节仍差 4096，屏障未完成；引擎逐步 complete-tx 核减；`try_wait(phase)` 通过后 MMA 才开始读），随后明确给出真实内核的数字：A、B 各含 \(128 \times 64\) 个 fp16 元素、各占 16384 字节，`arrive.expect_tx` 总共登记 32768 字节（[chapter_gemm_async/index.md:53-63](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L53-L63)：时间线四步说明与 2048 字节简化例；真实内核 A、B 各 128×64 fp16 占 16384 字节，expect_tx 共登记 32768 字节）。
+
+**内核中的公式**。`tma_load` 内联函数里，字节数写成 `(BLK_M * BLK_K + BLK_N * BLK_K) * F16_SIZE`，与两条 `copy_async`（A 的 `BLK_M×BLK_K` tile、B 的 `BLK_N×BLK_K` tile）严格对应（[chapter_gemm_async/index.md:145-160](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L145-L160)：两条 Tx.copy_async 之后 `T.ptx.mbarrier.arrive.expect_tx(tma_bar.ptr_to([0]), (BLK_M * BLK_K + BLK_N * BLK_K) * F16_SIZE)`）。章节的配置清单也单列了这一条：`(BLK_M * BLK_K + BLK_N * BLK_K) * 2` 就是两块 fp16 操作数 tile 装载的字节数，`arrive.expect_tx(...)` 把它交给 mbarrier（[chapter_gemm_async/index.md:228-238](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L228-L238)：五项 TMA 配置中的 Byte count 与 mbarrier 初始化两条）。注意这里的 `2` 是 fp16 每元素字节数——换 dtype 时必须同步改。
+
+**到达账与字节账的配套**。同一个配置清单说明 `init(tma_bar.ptr_to([0]), 1)` 创建 TMA load 的完成屏障，期望 1 次到达，恰与「tid == 0 的单线程执行唯一一次 expect_tx」配套；tma_config 中的 `"mbar": tma_bar.ptr_to([0])` 则指定两条 copy_async 的完成都上报到这道屏障（[chapter_gemm_async/index.md:230-234](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L230-L234)：tma_config 告诉 Tx.copy_async 用自动 TMA 派发并经 tma_bar 上报完成；init(...,1) 创建该完成屏障）。
+
+#### 4.3.4 代码实践
+
+**实践目标**：为一个 (128×64 + 128×64) fp16 双 tile TMA load 计算 `expect_tx` 应设置的字节数，并推演登记错误的行为。
+
+**操作步骤**：
+
+1. 逐 tile 计算元素数：A tile \(128 \times 64 = 8192\) 个元素；B tile 同为 8192 个。
+2. 乘以每元素字节数：fp16 为 2 字节，得 \(8192 \times 2 = 16384\) 字节/tile。
+3. 求和：\(16384 + 16384 = 32768\) 字节。
+4. 与书中数字核对：[chapter_gemm_async/index.md:63](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L63) 明确写着「A、B 各占 16384 字节，expect_tx 总共登记 32768 字节」。
+5. 推演两个错误分支并填表：
+
+| 场景 | tx-count 终态 | 相位能否完成 | 消费者行为 | 后果 |
+|---|---|---|---|---|
+| 登记 32768（正确） | 0 | 完成 | wait 通过，读到完整 tile | 正确 |
+| 登记 16384（漏加 B） | 被提前扣到 0 | 提前完成 | wait 提前通过 | 静默读错数据 |
+| 登记 65536（多算一倍） | 永远 ≥ 32768 | 永不完成 | wait 永久阻塞 | 内核挂死 |
+
+**需要观察的现象**：若在 Blackwell GPU 上运行 Step 4 内核并把 `(BLK_M * BLK_K + BLK_N * BLK_K) * F16_SIZE` 故意改小一半，`assert_close` 数值断言应失败（数据不完整）；改大一倍则程序不返回。纸面推演即可完成，GPU 上的复现结果待本地验证。
+
+**预期结果**：`expect_tx = 32768` 字节；错误分支的行为与 GEMM 章节练习 1 的设问一致（[chapter_gemm_async/index.md:681](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L681)）。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：同一内核改用 fp32 操作数（BLK_M=BLK_N=128、BLK_K=64 不变），expect_tx 应登记多少字节？
+
+**答案**：元素总数不变（8192+8192），每元素 4 字节，故 \((8192+8192)\times 4 = 65536\) 字节。公式中的 `* F16_SIZE`（或 `* 2`）必须随 dtype 同步修改。
+
+**练习 2**：如果 A、B 两条 copy_async 改为上报到**两道不同**的屏障，expect_tx 应该怎么写？
+
+**答案**：每道屏障只登记自己的那条传输：屏障 A 登记 `128×64×2 = 16384` 字节，屏障 B 同样 16384 字节；两道屏障各自等待各自的字节账清零，消费者需要对两道屏障各做一次 `try_wait`。字节账与屏障一一对应，不可跨屏障混合记账。
+
+**练习 3**：Step 5 把 A、B 缓冲改成双缓冲后，每个 stage 各有一道 tma barrier（[chapter_gemm_async/index.md:263](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L263)：tma_bar 变成每 stage 一道 mbarrier 的数组）。每道屏障的 expect_tx 应登记多少？
+
+**答案**：仍各登记本 stage 自己的 A+B 字节数（fp16、128×64×2 tile 时即 32768 字节）——缓冲翻倍改变的是「多少道屏障、如何轮流使用」，不改变「每道屏障登记其名下一次完整装载的字节数」这一规则。
+
+## 5. 综合实践
+
+把本讲三个模块串成一个「纸面协议审查」任务：
+
+1. **写协议**：以 4.1.4 的最小伪代码为骨架，扩展成完整的单迭代版本——`init(1)` → 生产者 `tid==0` 发起 A、B 两条 `Tx.copy_async`（mbar 指向同一屏障）→ `arrive.expect_tx(N)` → 消费者 `try_wait(bar, 0)`。N 用 4.3 的公式算出（fp16、128×64 双 tile 时为 32768）。
+2. **填状态表**：为这份协议写出从 init 到相位完成的五行状态表（参考 4.2.2），标注每个格子由谁更新（线程 / TMA 引擎 / 屏障硬件自动）。
+3. **对着真码检查**：逐行对照 Step 4 内核的 `tma_load` 与 K 循环（[chapter_gemm_async/index.md:145-190](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L145-L190)），列出三处你写的伪码与真实内核的差别（提示：真实内核还有 mma_bar 与两条 phase 变量的翻转——这两点分别属于 u7-l1 已讲的 commit 机制与下一讲的相位复用）。
+4. **故障注入推演**：写下把 N 改成 16384 与 65536 后表格的最终两行，说明分别观测到「结果错」还是「不返回」。
+5. （可选，需 Blackwell GPU）运行 Step 4 内核复现第 4 步的两个分支；无 GPU 时标注「待本地验证」。
+
+## 6. 本讲小结
+
+- 「已发起」≠「已完成」：程序顺序只证明 TMA/MMA 先开始，不证明已结束；线程侧的 `cta_sync` 观察不到引擎进度，交接必须依赖显式完成信号。
+- mbarrier 是共享内存中的硬件同步对象，内部跟踪 phase parity、pending/expected arrival count 与 tx-count；wait 只观察、不修改状态。
+- arrive 与 wait 分离：生产者报告后继续干活，消费者按需等待；普通线程 `arrive`、`arrive.expect_tx`、`tcgen05.commit` 是三条到达路径。
+- 相位完成条件是两本账同时清零：`pending_arrival_count == 0` 且 `tx_count == 0`；完成时屏障原子翻入下一相位并重装 pending。
+- expect_tx 字节数必须精确等于本相位全部关联传输的送达字节，对 (128×64 + 128×64) fp16 双 tile 即 32768 字节；登记过小导致静默读错数据，过大导致内核挂死。
+
+## 7. 下一步学习建议
+
+本讲只用了屏障的「第一轮」。同一道屏障在流水线里会被反复使用，如何区分「这次的完成」与「上次的完成」正是下一讲 u8-l2《phase 相位与多级流水线的 stage 复用》的主题：phase parity 的翻转规则、full/empty 双屏障如何表达「数据就绪」与「缓冲归还」两个方向（可先预习 [chapter_async_barriers/index.md:53-90](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_async_barriers/index.md#L53-L90) 的 phase 表与 [chapter_async_barriers/index.md:110-118](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_async_barriers/index.md#L110-L118) 的 stage 复用协议）。随后 u8-l3 会把这套协调机制扩展到 cluster 级的动态调度（CLC）。建议同步重读 GEMM Step 5 的 K 循环（[chapter_gemm_async/index.md:356-416](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_async/index.md#L356-L416)），把本讲的字节账放进多 stage 场景里再看一遍。

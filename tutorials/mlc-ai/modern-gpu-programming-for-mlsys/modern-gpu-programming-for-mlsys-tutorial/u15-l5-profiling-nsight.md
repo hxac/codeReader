@@ -1,0 +1,483 @@
+# u15-l5 性能剖析：Proton、Nsight Systems 与 Nsight Compute
+
+## 1. 本讲目标
+
+上一讲（u15-l4）解决的是「怎么测得准」：正确性先行、计时边界、CUDA events 与单调用延迟。本讲解决另一半问题——**时间去哪了**。学完本讲你应该能够：
+
+1. 用 Proton 对一个算子做内核级聚合剖析，按累计时间排出「最贵的内核」，并说明它只回答排序问题、不回答顺序与间隙问题。
+2. 用 Nsight Systems 捕获一次目标操作的时间线，从报告中区分 API 时间、GPU 执行时间与内核间隙，并判断一次同步调用是否真的在等 GPU。
+3. 用 Nsight Compute（`ncu`）沿「LaunchStats → Occupancy → SpeedOfLight → SchedulerStats → WarpStateStats → SourceCounters」的顺序读报告，理解各指标的**分母口径**，最终对内核给出 compute / memory / latency 受限的分类结论——而不是看到一个高百分比就贴标签。
+
+贯穿全讲的实例是书中 B200 上的一个 BF16 GEMM：它的 Compute 高达 77.74%，看起来「算力受限」，但顺着指标链往下读会发现真正的病灶是调度器绝大多数周期没有就绪 warp、warp 在等 L1TEX 数据依赖。这个反转就是本讲要训练的核心判断力。
+
+## 2. 前置知识
+
+本讲不再讲计时本身（见 u15-l4），但依赖以下已建立的认知，先用两段话把最关键的两条复习清楚。
+
+**测量与诊断是两个问题。** 基准（benchmark）回答「这个操作多快」，剖析（profile）回答「时间花在哪」。附录开篇的工具分工表是本讲的总纲：CUDA events 管流内时间、同步墙钟管单调用端到端、Proton 管「哪些内核各占多少时间」、Nsight Systems 管「主机/流/拷贝/内核在时间线上如何重叠」、NCU 管「选中内核内部哪个资源或等待该被追查」。一次 Python 调用未必对应一个内核——它可能发射多个内核、入队多次拷贝，所以剖析和计时一样需要先定义边界（这正是 u15-l4 的计时边界纪律在剖析侧的延续）。
+
+**几个会被反复引用的硬件词汇。** SM 是驻留并执行线程块的计算单元（u2-l1）；warp 是 32 线程的调度基本单位；block/warp 从被分配到 SM 起即「驻留」（resident）。occupancy 在 u3-l3 中讲过是「驻留并发度」而非性能质量度量——本讲会用 NCU 的具体字段把这句话落实成数字。roofline（u3-l1）给出的 compute/memory 上限判断是**先验**，本讲的 NCU 指标是**实测**，两者互补：roofline 说「最多多快」，NCU 说「离哪个上限近、卡在什么等待上」。
+
+另外两个新工具术语先解释清楚：
+
+- **NVTX**（NVIDIA Tools Extensions）：在代码里打标记区间（`torch.cuda.nvtx.range`），剖析器采集时会把这些区间画在时间线上，方便肉眼定位目标操作。
+- **硬件计数器与重放（replay）**：NCU 读取的是 GPU 硬件性能计数器，一次内核执行读不完所有计数器，所以 NCU 会把选中的内核**重复执行多次**（`--replay-mode kernel`），每次读一组计数器再合并。这意味着 NCU 报告里的 Duration 属于「被剖析的那次运行」，不能与未剖析基线直接混用。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 | 本讲使用方式 |
+|---|---|---|
+| [appendix/nsys_example.py](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/nsys_example.py) | 可复用的被剖析负载：BF16 GEMM + ReLU，提供 `--profile-once` / `--event-samples` / `--proton-calls` 三种模式 | 三个模块共用的实验对象，实践任务的改编底板 |
+| [appendix/benchmarking_gpu_kernels.md:392-489](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L392-L489) | 「用 Proton 找最贵内核」一节：命令、输出表、解读纪律 | 模块 4.1 的主要文本 |
+| [appendix/benchmarking_gpu_kernels.md:490-627](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L490-L627) | 「用 Nsight Systems 分析时间线」一节：捕获命令、七种 stats 报表、B200 实测数据与四步读取顺序 | 模块 4.2 的主要文本 |
+| [appendix/benchmarking_gpu_kernels.md:629-1203](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L629-L1203) | 「用 Nsight Compute 分析单个内核」一节：读报告方法论、B200 BF16 GEMM 实例、指标口径参考、假设检验 | 模块 4.3 的主要文本 |
+| [img/nsys_b200_timeline.svg](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/nsys_b200_timeline.svg) | 书中实测的 Nsight Systems 时间线插图（CPU NVTX/API 在上、GPU 流在下） | 模块 4.2 的图示对照 |
+
+相邻附录文件 [appendix/iket_example.py](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/iket_example.py) 与本讲最后一节（IKET）属下一讲 u15-l6，本讲不展开。
+
+## 4. 核心概念与源码讲解
+
+从这一讲起，基线、Proton、Nsight Systems、NCU 四类工具剖析**同一个操作**：两个 \(4096\times4096\) 的 BF16 矩阵相乘，再对结果做 ReLU。
+
+### 4.1 Proton 内核级剖析
+
+#### 4.1.1 概念说明
+
+Proton 是 Triton 自带的剖析器（`proton-viewer` 随 Triton 一起安装）。它回答的问题很窄但很关键：**这次运行的每个 GPU 内核各被调用了多少次、平均多久、累计多久**。
+
+为什么需要它？因为「一个算子慢」是笼统的。GEMM+ReLU 这个算子由两个内核组成，你先得知道 105 μs 里 GEMM 占 87 μs 还是 50 μs，才知道该优化谁。Proton 给的是**聚合排名**——它看不到内核的先后顺序、看不到内核之间的空隙、看不到主机在等什么，这些留给 4.2 的 Nsight Systems。
+
+一句话定位：Proton 负责**选靶子**，后面两个工具负责**看现场**和**验尸**。
+
+#### 4.1.2 核心流程
+
+以脚本的 `--proton-calls` 模式为例，完整链路是：
+
+```text
+构造负载（分配 a/b/c/output）
+→ 跑一次 + synchronize
+→ validate()：FP32 参考对照，失败即终止   ← 正确性前置，在剖析区间之外
+→ warmup 500 次 + synchronize
+→ proton.start(output, context="shadow", data="tree")   ← 开始记录
+→   proton.scope("target_operation") 内循环 run() 共 N 次
+→   synchronize
+→ proton.finalize(session)               ← 落盘 operator.hatchet
+→ proton-viewer 两条查询命令读表
+```
+
+两个纪律点：
+
+1. **预热在 `proton.start` 之前**。JIT 编译、惰性加载、库初始化只该发生一次，若混进记录区间会把「一次性成本」摊进内核平均时长，污染排名。
+2. **排名用累计时间（`time/ms`），不是平均时长（`avg_time/us`）**。一个平均很慢但只调用一次的内核，对总时间的贡献可能小于一个稍快但调用一万次的内核——优化目标从来是总时间。
+
+#### 4.1.3 源码精读
+
+**负载与正确性前置**。[appendix/nsys_example.py:9-26](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/nsys_example.py#L9-L26) 定义了被剖析的负载：`make_workload` 分配 BF16 的 `a`、`b`、`c` 与 `output`，返回 `run` 与 `validate` 两个闭包。`run()` 里两次 `torch.cuda.nvtx.range` 分别包住 GEMM 与 ReLU——这两个 NVTX 区间会出现在后续 Nsight Systems 时间线上；`validate()` 用 `torch.set_float32_matmul_precision("highest")` 阻止 PyTorch 在 FP32 参考里用降精计算，再以 `rtol=2e-2, atol=1e-2` 断言。
+
+[appendix/nsys_example.py:89-92](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/nsys_example.py#L89-L92) 是主流程的「门卫」：构造负载后先 `run()` 一次、同步、`validate()`。附录正文强调这次预检在基线计时区间与剖析采集区间**之外**，不通过则命令在任何测量开始前终止——这正是 u15-l4「正确性先行」在剖析工作流里的落点。
+
+**Proton 采集函数**。[appendix/nsys_example.py:59-75](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/nsys_example.py#L59-L75)：
+
+```python
+def collect_proton(run, *, warmup_calls: int, profile_calls: int, output: str):
+    import triton.profiler as proton
+    ...
+    session = proton.start(output, context="shadow", data="tree")
+    ...
+    with proton.scope("target_operation"):
+        for _ in range(profile_calls):
+            run()
+    torch.cuda.synchronize()
+    ...
+    proton.finalize(session)
+```
+
+要点：`import` 放在函数内，说明 Proton 是可选依赖；`session is None` 时显式报错而不是静默出空报告；`proton.scope("target_operation")` 给整个采集区间套了一层命名范围，报表里所有内核都挂在这棵树上；`finally` 里 `proton.finalize` 保证异常路径也能落盘。
+
+**查看报表**。附录给出三条查询命令与一张合并后的结果表（[appendix/benchmarking_gpu_kernels.md:461-478](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L461-L478)）：先 `--list` 看有哪些 metric，再用 `count,time/ms` 确认调用数与累计时间，用 `avg_time/us,time/ms` 读平均时长。书中的 B200 结果是：
+
+```text
+target_operation               calls    avg/us    total/ms
+├── GEMM kernel                  100      87.00        8.700
+└── ReLU kernel                  100      11.71        1.171
+```
+
+注意这张表是作者把两张报表**拼接**并缩短内核名后的展示；你自己跑 `proton-viewer` 会得到两张分开的表。解读顺序在 [appendix/benchmarking_gpu_kernels.md:480-488](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L480-L488)：先确认两个预期内核都在、各被调 100 次（数目不对说明剖析到了错误的东西），再比累计时间——GEMM 占绝对多数，于是它成为 NCU 的分析对象。
+
+一个容易忽略的口径差异也在这一节：手册 Proton 会话**保留正常缓存状态**，而 TVM 的 `bench(timer="proton")` 在每次被测调用前写 256 MiB 缓冲以削弱 L2 复用（u15-l4 讲过这个策略）。所以「用同一份 Proton 报告内部排序」是安全的，「拿 Proton 数字和 CUDA event 基线比绝对值」则要回到覆盖完整操作的 CUDA event 区间。
+
+#### 4.1.4 代码实践
+
+**实践目标**：亲手产出一份 Proton 排名，并验证「按累计时间选靶」这条纪律。
+
+**操作步骤**（需要带 GPU 的环境；无 GPU 见步骤 5）：
+
+1. 安装查看器依赖（Proton 本体随 Triton 提供）：
+   ```bash
+   python -m pip install pandas llnl-hatchet
+   ```
+2. 跑 100 次采集（`--warmup-calls` 与 `--proton-calls` 都是**调用次数**，与 `bench` 的毫秒预算参数不同名同义，附录特别提醒过）：
+   ```bash
+   python appendix/nsys_example.py \
+     --size 4096 \
+     --warmup-calls 500 \
+     --proton-calls 100
+   ```
+3. 依次查询：
+   ```bash
+   proton-viewer --list operator.hatchet
+   proton-viewer --metrics time/ms,count --print-sorted operator.hatchet
+   proton-viewer --metrics avg_time/us,time/ms --print-sorted operator.hatchet
+   ```
+4. **改编实验**：把 `--proton-calls` 从 100 改成 1000，重复步骤 3，观察 `count` 与 `time/ms` 同比例增长而 `avg_time/us` 基本不变——这验证了 avg 是每调用均值、total 是累计。
+5. 无 Blackwell GPU 时，本实践退化为「源码阅读型」：对照 [appendix/nsys_example.py:59-75](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/nsys_example.py#L59-L75) 画出采集状态机（idle → warmup → session → N 次 scope 内调用 → finalize），并标注「若把 warmup 挪到 `proton.start` 之后，报表会多出哪些行、avg 会怎么被污染」。
+
+**需要观察的现象**：两个内核各出现一行；`calls` 恰为 100；GEMM 的 `time/ms` 明显大于 ReLU。
+
+**预期结果**：与书中表同构——GEMM 累计约 8.7 ms、ReLU 约 1.17 ms，GEMM 是深挖对象。具体数值随 GPU/驱动/库版本变化，**待本地验证**。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：某算子含内核 X（avg 500 μs，调用 2 次）与内核 Y（avg 20 μs，调用 5000 次），该先优化谁？
+**答案**：X 累计 1 ms，Y 累计 100 ms——按 `time/ms` 排序应先优化 Y。这正是不用 `avg_time/us` 排名的原因：优化目标是总时间，不是单次慢。
+
+**练习 2**：为什么 `collect_proton` 要在 `proton.start` 之前完成全部 warmup？
+**答案**：warmup 阶段触发的 JIT 编译、内核惰性加载、库初始化若落入记录区间，会以额外内核行或更长的首次耗时应运而生，让累计时间与平均时间都不再代表稳态行为；[appendix/nsys_example.py:62-64](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/nsys_example.py#L62-L64) 中 warmup 循环与 `synchronize()` 都在 `proton.start` 之前完成。
+
+**练习 3**：Proton 报表能回答「两个内核之间 GPU 空闲了多久」吗？
+**答案**：不能。Proton 只做每内核聚合（次数/均值/累计），不含时间戳顺序信息；内核间隙、主机等待要靠 Nsight Systems 的 trace 时间戳计算（见 4.2）。
+
+### 4.2 Nsight Systems 时间线
+
+#### 4.2.1 概念说明
+
+Nsight Systems（命令 `nsys`）采集的是**应用级时间线**：主机线程上的 CUDA API 调用、NVTX 区间、各 GPU 流上的内核与拷贝，全部带时间戳排在一条时间轴上。它补上 Proton 缺的三样东西：
+
+- **顺序**——内核按提交顺序还是乱序执行？在哪个流上？
+- **间隙**——两次内核之间 GPU 空转了多久？空隙在等主机提交还是在等前序内核？
+- **重叠**——多流操作真的并发了吗？（u15-l4 末尾的多流计时正是靠 nsys 时间线来确认实际调度。）
+
+关键概念是**采集范围（capture range）**：`cudaProfilerStart()` / `cudaProfilerStop()` 只圈定「记录哪一段」，**不测量任何时间**——测量始终是 CUDA events 的事。把剖析器当计时器是初学者最常见的角色错位。
+
+另一个关键概念是 **API 时间 ≠ GPU 时间**。主机发出 `cudaLaunchKernel` 花的时间（API time）与 GPU 执行该内核的时间（GPU execution）是两个区间，可能相差数倍；时间线上它们画在不同行。忘掉这一点，后面所有数字都会读错。
+
+#### 4.2.2 核心流程
+
+`--profile-once` 模式的一次剖析：
+
+```text
+warmup 500 次（剖析器尚未开始记录）
+→ synchronize
+→ cudaProfilerStart()                ← 采集范围开始
+→   nvtx range "target operation"
+→     run()：GEMM 内核 + ReLU 内核
+→     synchronize                    ← 保证两个内核都完成后才停止采集
+→ cudaProfilerStop()                 ← 采集范围结束
+```
+
+命令行侧用 `--capture-range=cudaProfilerApi` 让 nsys 只采这段区间；随后用 `nsys stats` 导出七种报表，按固定顺序提取数字：
+
+1. `cuda_gpu_sum`：按 GPU 活动汇总累计时长 → 找最贵内核；
+2. `cuda_kern_exec_trace`：每个内核的 start/duration 及其主机 launch API → 算 `end = start + duration`，内核间隙 = 下一个内核 start − 本内核 end；
+3. `cuda_api_trace`：每条 CUDA API 的 start/duration → 判断某次同步是否真的在等 GPU；
+4. `nvtx_*` 与 `cuda_api_sum`：解释主机区间与 API 汇总。
+
+#### 4.2.3 源码精读
+
+**采集函数**。[appendix/nsys_example.py:29-39](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/nsys_example.py#L29-L39)：
+
+```python
+def run_once_for_profiler(run, *, warmup_calls: int):
+    for _ in range(warmup_calls):
+        run()
+    torch.cuda.synchronize()
+
+    cudart = torch.cuda.cudart()
+    cudart.cudaProfilerStart()
+    with torch.cuda.nvtx.range("target operation"):
+        run()
+        torch.cuda.synchronize()
+    cudart.cudaProfilerStop()
+```
+
+三个细节都值得抠：warmup 在 `cudaProfilerStart` **之前**完成，保证初始化类工作不进报告；`synchronize` 被放进 NVTX 区间**内部**，确保两个内核结束前采集不停止；`cudaProfilerStart/Stop` 来自 `torch.cuda.cudart()`，即通过 PyTorch 拿到的 CUDA runtime 句柄，不需要额外装 CUDA 扩展。附录对这段的原文说明在 [appendix/benchmarking_gpu_kernels.md:515-518](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L515-L518)。
+
+**捕获命令**。[appendix/benchmarking_gpu_kernels.md:521-535](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L521-L535)：
+
+```bash
+nsys profile \
+  --trace=cuda,nvtx \
+  --sample=none \
+  --cpuctxsw=none \
+  --capture-range=cudaProfilerApi \
+  --capture-range-end=stop \
+  --output=reports/target-timeline \
+  --force-overwrite=true \
+  python appendix/nsys_example.py --size 4096 --warmup-calls 500 --profile-once
+```
+
+参数取舍在 [appendix/benchmarking_gpu_kernels.md:537-542](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L537-L542) 有解释：`--trace=cuda,nvtx` 记 CUDA API、GPU 活动与 NVTX；CPU 采样与上下文切换追踪被关掉以保持报告聚焦——如果时间线上出现很长的 GPU 空隙，再补一份开了主机调度追踪的报告，而不是一开始就采全量。
+
+**从报表提取数字**。[appendix/benchmarking_gpu_kernels.md:561-572](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L561-L572) 的 `nsys stats` 命令一次性导出七种报表；`--force-export=true` 强制从 `.nsys-rep` 重新生成 SQLite，防止读到同名的陈旧数据。书中 B200（driver 595.58.03、CUDA 13.0、PyTorch 2.12.0+cu130、Nsight Systems 2025.6.3）采到的两张关键表：
+
+`cuda_gpu_sum`（[appendix/benchmarking_gpu_kernels.md:593-598](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L593-L598)）：
+
+| GPU activity | Count | GPU duration | Share |
+|---|---:|---:|---:|
+| BF16 GEMM | 1 | 92.608 μs | 89.4% |
+| ReLU | 1 | 10.944 μs | 10.6% |
+
+`cuda_kern_exec_trace`（[appendix/benchmarking_gpu_kernels.md:600-607](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L600-L607)）：
+
+| Kernel | API time | Positive queue time | GPU execution |
+|---|---:|---:|---:|
+| BF16 GEMM | 50.717 μs | — | 92.608 μs |
+| ReLU | 13.474 μs | 5.074 μs | 10.944 μs |
+
+**四步读取顺序**（[appendix/benchmarking_gpu_kernels.md:609-622](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L609-L622)）：
+
+1. **先选靶**：GEMM 占两内核总执行时间的 89.4% → NCU 目标；
+2. **区分 API 与 GPU**：GEMM 的 launch API 在主机上花 50.717 μs，GPU 执行 92.608 μs，是两个不同的区间；ReLU 的 positive queue time 5.074 μs 表示 launch API 返回后它还排队等了片刻（若内核在 API 返回前就已启动，该列为空）；
+3. **算间隙**：两内核时长和 103.552 μs，GEMM 起点到 ReLU 终点的 GPU 跨度 103.776 μs，间隙只有 0.224 μs——流内衔接很紧，没有可收割的空隙；
+4. **解释主机区间**：`target operation` 这个 NVTX 区间覆盖 Python/PyTorch 派发、两次 launch 和同步 API；由于 `cudaDeviceSynchronize` 在 ReLU 结束**之后**才开始，它测得的时长主要是主机侧 API 开销而非等待 GPU——判断方法就是拿 `cuda_api_trace` 里该 API 的 start 与最后一个内核的 end 比大小。
+
+时间线全貌见书中插图 [img/nsys_b200_timeline.svg](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/nsys_b200_timeline.svg)：CPU 侧 NVTX 区间与 CUDA API 在上，GPU stream 7 上依次是 GEMM 与 ReLU（`7` 只是本报告中该流的编号）；同流内核按提交顺序执行。
+
+#### 4.2.4 代码实践
+
+**实践目标**：捕获一次目标操作的时间线，用 trace 报表亲手算出「最贵内核」与「内核间隙」，并判断同步调用是否真的等待了 GPU。
+
+**操作步骤**：
+
+1. 捕获（GPU 环境）：
+   ```bash
+   mkdir -p reports
+   nsys profile \
+     --trace=cuda,nvtx --sample=none --cpuctxsw=none \
+     --capture-range=cudaProfilerApi --capture-range-end=stop \
+     --output=reports/target-timeline --force-overwrite=true \
+     python appendix/nsys_example.py --size 4096 --warmup-calls 500 --profile-once
+   ```
+2. 导出报表：
+   ```bash
+   nsys stats --force-export=true --format=column --timeunit=us \
+     --report cuda_gpu_sum --report cuda_kern_exec_trace \
+     --report cuda_api_trace --report nvtx_gpu_proj_sum \
+     --report nvtx_pushpop_trace --report cuda_api_sum \
+     reports/target-timeline.nsys-rep
+   ```
+3. 从 `cuda_kern_exec_trace` 抄下两个内核的 start 与 duration，计算：
+   \[ \text{gap} = \text{ReLU.start} - (\text{GEMM.start} + \text{GEMM.duration}) \]
+   并对 CUDA API 用同样的 `end = start + duration` 口径；
+4. 从 `cuda_api_trace` 找到 `cudaDeviceSynchronize` 的 start，与 ReLU 的 end 比较：start > end 说明 GPU 已完工、该调用没等；
+5. **改编实验**：把 [appendix/nsys_example.py:36-38](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/nsys_example.py#L36-L38) 中的 `torch.cuda.synchronize()` 从 NVTX 区间里移出去，重采一次，观察 `target operation` 区间是否变短、GPU 行为是否完全不变——体会「采集范围」与「被测边界」是两回事。
+
+**需要观察的现象**：两个内核出现在同一 GPU 流且按序执行；间隙在亚微秒量级；`cudaDeviceSynchronize` 的 API start 晚于 ReLU 结束。
+
+**预期结果**：gap ≈ 0.2 μs 量级、GEMM 占比约 89%（书中值），与你的具体数值对比并记录差异来源（GPU/驱动/PyTorch 版本）。**待本地验证**。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：书中 GEMM 的 API time 是 50.717 μs、GPU execution 是 92.608 μs。有人说「这个内核 50 μs」，错在哪？
+**答案**：混淆了两个区间。50.717 μs 是主机执行 launch API 的时间，92.608 μs 才是 GPU 执行内核的时间；两者既不相等也不互相包含，时间线上分属不同行。
+
+**练习 2**：`cudaDeviceSynchronize` 的时长主要反映什么？怎么验证？
+**答案**：在本例中主要反映主机侧 API 开销——因为它的 start 晚于最后一个内核的 end，GPU 早已完工、无 GPU 时间可等。验证方法：在 `cuda_api_trace` 中取该 API 的 start，与 `cuda_kern_exec_trace` 中最后内核的 `start + duration` 比较（附录第 4 步读取法，[appendix/benchmarking_gpu_kernels.md:589-591](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L589-L591)）。
+
+**练习 3**：`cudaProfilerStart/Stop` 与 CUDA events 各自的角色是什么？能否用前者替代后者计时？
+**答案**：前者只圈定 nsys/NCU 的**采集范围**，不产生任何时间测量；CUDA events 才在 GPU 流上记录时间戳用于计时。用前者「计时」是把范围边界误当计时器，附录原文明确写了 "they do not measure time"（[appendix/benchmarking_gpu_kernels.md:515-518](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L515-L518)）。
+
+### 4.3 Nsight Compute 指标与瓶颈分类
+
+#### 4.3.1 概念说明
+
+NCU（命令 `ncu`）深入**单个内核**，读硬件计数器，回答「这个内核内部哪条资源路径最忙、warp 在等什么」。它与前两级工具的关系是：Nsight Systems 选出目标内核，NCU 解释该内核的硬件行为。
+
+本模块要建立的核心能力是**瓶颈分类**。附录把读报告组织成一张问题表（[appendix/benchmarking_gpu_kernels.md:642-649](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L642-L649)）：
+
+| 当前问题 | 先看哪里 | 目的 |
+|---|---|---|
+| 这份报告说的是哪个内核？ | 头部的 kernel/device/grid/block 与警告 | 确认过滤与采集结果 |
+| launch 提供了足够的全设备并行吗？ | `LaunchStats` 的 `Grid Size`、`Waves Per SM` | 判断网格是否铺满 GPU |
+| 每个 SM 一次能驻留多少工作？ | `Occupancy` 的 `Block Limit` 与理论/实际 occupancy | 量化驻留度并找出绑定资源 |
+| 先查硬件哪一侧？ | `SpeedOfLight` 的 Compute / Memory / DRAM | 选 compute、memory 还是调度路径 |
+| 调度器总能找到可发射指令吗？ | `SchedulerStats` → `Warp State Statistics` | 比较驻留/就绪/发射 warp，再看等待状态 |
+
+分类判断遵循附录 [appendix/benchmarking_gpu_kernels.md:678-697](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L678-L697) 的四分支：
+
+- **Compute 更接近自身峰值** → 展开 `ComputeWorkloadAnalysis` 的 pipe utilization 与 `Issue Slots Busy`，若某条管线持续有活而发射槽大多空闲，继续查 `SchedulerStats`;
+- **Memory 更接近峰值** → 采 `MemoryWorkloadAnalysis` 系列，沿 DRAM→L2→L1/TEX 数据路径查吞吐、字节数、命中率；DRAM 也高则先查外部 HBM 流量，DRAM 低则把注意力移向 L2/L1/TEX/shared/local；
+- **两者都低** → 先怀疑 launch 没铺满设备（grid/waves 不足），铺满了则查调度器：有 active warp 但 eligible 稀少时用 `WarpStateStats` 看它们在等数据、同步还是别的依赖——这一支就是 **latency 受限**；
+- **两者都高** → 两侧各找一个具体候选，一次只改一个因素做实验。
+
+注意「compute-bound」是个**强主张**——它断言「进一步提升最终受限于计算单元吞吐」。`SpeedOfLight` 里 Compute 偏高只说明「先从计算侧查起」，不等于可以下这个结论；本节的 B200 例子正是反例。
+
+#### 4.3.2 核心流程
+
+NCU 工作流是「一份 basic 报告定方向 + 若干份定向报告收窄」，两步各自独立采集：
+
+```text
+第 1 步：--set basic
+  LaunchStats（grid/block/cluster/waves、每线程寄存器、动态 SMEM）
+  Occupancy（各 Block Limit、理论/实际 occupancy）
+  SpeedOfLight（Duration、Compute/Memory/DRAM 三吞吐）
+  → 用四分支决定下一步查哪侧
+第 2 步：--section ComputeWorkloadAnalysis / SchedulerStats / WarpStateStats
+       或 --section MemoryWorkloadAnalysis(_Chart/_Tables)
+       或 --section SourceCounters
+  → 顺序读：管线活跃 → 每调度器 warp 数 → warp 等待状态 →（定位到 SASS 指令）
+第 3 步（可选）：改代码 → 重采同组 section → 对照预测指标与未剖析基线延迟
+```
+
+关键口径提醒（附录专门用一节讲，见 4.3.3 最后一段）：
+
+- 三条吞吐百分比**各自以自己的可持续峰值为分母**，不能相加，也不表示「占执行时间的比例」；
+- `Duration` 属于被剖析的那次运行（NCU 控时钟、刷缓存、可能重放内核），跨实现比较一律回到未剖析的 CUDA event 基线。
+
+#### 4.3.3 源码精读
+
+**第一份 basic 报告**。命令在 [appendix/benchmarking_gpu_kernels.md:716-733](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L716-L733)：复用脚本的 `--profile-once` 模式，`--profile-from-start off` 让 NCU 等到脚本调用 `cudaProfilerStart()`，`--kernel-name 'regex:.*nvjet_sm100.*'` 配 `--launch-count 1` 只采区间内第一个名字匹配的内核（表达式来自上一步时间线里看到的内核名），`--set basic` 采集 launch/occupancy/高层吞吐三组 section。参数解释见 [appendix/benchmarking_gpu_kernels.md:735-753](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L735-L753)：`--replay-mode kernel` 允许 NCU 重放该 GEMM 以收全计数器，本例内核可独立重放故适用；有跨内核依赖或并发的工作负载需换能保住应用/区间状态的 replay 模式。这里「一个 GEMM」指应用提交的一次 launch，NCU 内部仍可能重放多次；500 次 warmup 在采集范围之外，避开了初始化与惰性加载。
+
+**用 basic 选方向**。书中的三行观察（[appendix/benchmarking_gpu_kernels.md:779-783](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L779-L783)）：
+
+| basic 中的观察 | 本例下一步 |
+|---|---|
+| `Grid Size = 512 blocks`；`Waves Per SM = 3.46` | 网格足以覆盖所有 SM；接着查每 SM 能驻留多少 |
+| 寄存器与 SMEM 的 `Block Limit` 都是 1；理论/实际 occupancy 12.50%/8.97% | 每 SM 理论最多 8 个驻留 warp，实测更低；用调度器指标查指令就绪度 |
+| Compute 77.74%、Memory 38.71%、DRAM 12.88% | Compute 最接近自身峰值，先展开计算侧；HBM 整体吞吐余量充足 |
+
+两个推导值得亲手复算。**Waves**：当前资源限制下每 SM 只驻留 1 个 block，B200 有 148 个 SM，全设备理论驻留 148 个 block，网格 512 个 block，故 \(512/148 = 3.46\)（[appendix/benchmarking_gpu_kernels.md:785-790](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L785-L790)）；但本 launch 用了 thread-block cluster，应以 NCU 报告的 3.46 为准，该值只说明「块数够铺满设备」，不记录实际调度顺序。**Occupancy**：B200 每 SM 最多 2048 线程即 64 warp；本配置每 block 256 线程 = 8 warp，而每 SM 只驻留 1 个 block，所以理论 occupancy \(8/64 = 12.50\%\)；实际 8.97% 是采集期间平均活跃 warp 对同一容量的比值（[appendix/benchmarking_gpu_kernels.md:792-799](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L792-L799)）。
+
+**compute-bound 的警示**就在这一段（[appendix/benchmarking_gpu_kernels.md:801-806](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L801-L806)）：Compute 最近峰值只决定「先查计算侧」；后续报告会揭示发射机会很少用、大多数调度器周期没有就绪 warp——此刻就给内核贴 compute-bound 标签会掩盖这条关键线索。
+
+**第二份定向报告**。命令在 [appendix/benchmarking_gpu_kernels.md:818-837](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L818-L837)，一次采 `ComputeWorkloadAnalysis` + `SchedulerStats` + `WarpStateStats` 三个 section。这是**独立的一次 NCU 运行**，百分比会有轻微漂移（77.74% → 78.39%），不表示性能变化；基本报告负责选路径，定向报告用同一次采集的三组数收窄结论。
+
+**按顺序读三段**（[appendix/benchmarking_gpu_kernels.md:846-882](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L846-L882)）：
+
+1. `ComputeWorkloadAnalysis` → `Pipe Utilization (% of elapsed cycles)`：`Tensor (FP)` 是浮点张量计算路径，`TMEM` 是服务张量操作的片上存储路径（区别于外部 HBM/DRAM，也区别于异步搬运引擎 TMA）——两者活跃约 78% 的时钟周期，而同 section 汇总给出 `Issue Slots Busy = 3.20%`。多周期操作可以一次发射、让管线持续活跃，所以「管线高活跃」与「低指令发射率」可以并存；
+2. `SchedulerStats` → `Warps Per Scheduler`：每调度器平均 1.44 个 active warp（驻留未完成），但只有 0.04 个 eligible（就绪）warp——0.04 是**平均 warp 个数**，不是 4%；`No Eligible = 96.11%` 表示在 SM 子分区至少有一个在飞 warp 的周期里，96.11% 的周期找不到可发射的 warp，这解释了 3.20% 的低发射率；
+3. `WarpStateStats` → `Warp State (All Cycles)`：每条已发射 warp 指令平均对应 37.00 个 warp-cycle，其中 32.11（约 87%）归 `Long Scoreboard`——scoreboard 是记录前序结果是否就绪的硬件依赖表，Long Scoreboard 意味着下一条指令还在等一个由 **L1TEX** 处理的访存操作完成（数据最终可能来自 L1、L2 或 DRAM，单看这个字段分不出来）。
+
+三段合起来就是附录给出的叙事链（[appendix/benchmarking_gpu_kernels.md:877-882](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L877-L882)）：
+
+```text
+Tensor/TMEM 路径经常活跃
+→ 调度器很少发射新指令
+→ 多数周期没有就绪 warp
+→ Long Scoreboard 是最大等待类别
+```
+
+**结论与两个改进方向**。结合 basic 里的 `DRAM Throughput = 12.88%`（聚合 HBM 带宽远未饱和，但单个请求仍可能打到 DRAM 产生长延迟）：每 SM 最多 8 个驻留 warp，意味着一个 warp 等数据时可顶上的独立 warp 很少——本内核的瓶颈不是算力吞吐而是**数据依赖延迟 + 驻留并发不足**。附录给出两个可分别验证的方向（[appendix/benchmarking_gpu_kernels.md:892-899](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L892-L899)）：提高驻留 warp（调 tile/block/资源用量），或在驻留不变的前提下让加载/预取更早发出、缩短依赖链。这正对应「两者都低→查调度器/等待状态」的 latency 分支：Compute 78% 看似高，但它度量的是**管线活跃周期**，不是指令发射率。
+
+**指标口径参考**。附录后半部分是防误读手册，本讲抽四组最常用的：
+
+- *LaunchStats/Occupancy*（[appendix/benchmarking_gpu_kernels.md:908-959](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L908-L959)）：`Registers Per Thread = 255`、`Dynamic Shared Memory Per Block = 213.28 KB`。一个 256 线程的 block 需要 \(255\times256 = 65{,}280\) 个 32-bit 寄存器，几乎吃满 B200 每 SM 的 65,536 个；两个 block 需要 130,560 个，超限。SMEM 同理：213.28 KB 已占 228 KB 上限的大头。所以两个 `Block Limit` 都是 1，**任一资源单独**都只允许每 SM 驻留一个 block；想让第二个 block 驻留，必须**两个 limit 同时**升到 ≥2，只改善一个无效。
+- *SpeedOfLight 分母*（[appendix/benchmarking_gpu_kernels.md:961-981](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L961-L981)）：NCU 采到 Duration 95.30 μs，Nsight Systems 那份是 92.608 μs——两次不同性质的采集，不可直接比较；实现间比较一律用未剖析的 CUDA event 基线。三条吞吐各自用独立峰值作分母，不能相加。
+- *两套 Pipe Utilization 分母*（[appendix/benchmarking_gpu_kernels.md:1013-1028](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L1013-L1028)）：同一个 TMEM 管线，「活跃周期视角」78.39%、「指令速率视角」0.04%——前者问「这段时间管线有活的周期占比」，后者问「指令执行速率达到峰值的比例」，分母不同，不能加减。
+
+  | Pipeline | 活跃周期视角 | 指令速率视角 |
+  |---|---:|---:|
+  | TMEM (Tensor Memory) | 78.39% | 0.04% |
+  | TC | 78.12% | 0.38% |
+  | Tensor (FP) | 78.07% | 0.61% |
+
+- *SchedulerStats 与 WarpStateStats 归一化*（[appendix/benchmarking_gpu_kernels.md:1030-1065](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L1030-L1065)）：每调度器硬件上限 16 warp，理论 2.00（= 每 SM 理论 8 warp ÷ 4 个调度器），实测 active 1.44 / eligible 0.04 / issued 0.04；warp-state 用「warp-cycle / 已发射指令」归一，37.00 中的 32.11 归 Long Scoreboard。NCU 规则旁的 `Est. Speedup` 是模型估计的潜在时间降幅，只用于排优先级，真实加速只能靠改完后重新基准。常见等待态速查（[appendix/benchmarking_gpu_kernels.md:1067-1073](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L1067-L1073)）：`Short Scoreboard` 多为等 SMEM/片上单元 → 查共享内存访问；`Barrier` 在等其他 warp 到齐 → 对比各 warp 分到的活与到达时刻；`Not Selected` 是就绪但本轮没被选中 → 看是否过多就绪 warp 抢发射机会。
+
+**SourceCounters 定位到指令**。`WarpStateStats` 只给内核级汇总，`SourceCounters` 把采样到的 stall 与执行计数落到具体 SASS 指令上（[appendix/benchmarking_gpu_kernels.md:1075-1120](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L1075-L1120)）：先看 `Warp Stall Sampling (Not-issued Samples)` 与 `Instructions Executed`，若 Long Scoreboard 的样本聚在一条 load 指令附近，它就是重点嫌疑。`nvjet` 是库实现拿不到源码，但 SASS 视图仍可用。对**自己编译的 TIRx 内核**，附录给了把 SASS 关联回生成 CUDA 源的配方（[appendix/benchmarking_gpu_kernels.md:1122-1158](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L1122-L1158)）：
+
+```bash
+export TVM_CUDA_COMPILE_MODE=nvcc
+export TVM_KERNEL_DUMP="$PWD/reports/tvm-kernels"
+```
+
+设好后**在新进程里**重跑负载让目标内核按此重编，再在 `ncu` 命令里加 `--import-source yes --source-folders "$TVM_KERNEL_DUMP"`，Source 页即可做 CUDA/SASS 关联；若 `executable` 是 TIRx 编译产物，`executable.mod.imports[0].inspect_source("cuda")` 可直接打印生成源码人工对照（这与 u9-l2 用过的是同一个检视入口）。
+
+**用代码改动检验假设**（[appendix/benchmarking_gpu_kernels.md:1160-1203](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L1160-L1203)）。本例调的是库 GEMM 改不了，但方法论对自定义内核成立：若假设是「驻留 warp 太少藏不住 L1TEX 延迟」，就调 tile/block/流水级数去降 `Registers Per Thread` 与 `Dynamic Shared Memory Per Block`，再确认**所有** block limit 都 ≥2；若假设是依赖链太长，就在驻留不变的前提下把 load/预取提前。验证按三件事走，缺一不可：
+
+1. **正确性**：同一参考、同一容差重验（脚本已有的预检直接复用）；
+2. **预测指标**：重采同组 section 看目标指标是否按预期移动（驻留实验看理论/活跃与 eligible/issued warp，依赖链实验看 `Long Scoreboard`——注意它按已发射指令归一，单独下降不构成加速证明）;
+3. **实际延迟**：关掉所有剖析器，用与最初完全相同的 shape、dtype、输入策略、warmup、CUDA event 边界与样本数重测（即 [appendix/benchmarking_gpu_kernels.md:1193-1198](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L1193-L1198) 的基线命令）。
+
+三项全过则假设成立；指标动了但延迟没变，说明要么冒出了新瓶颈、要么原假设不完整。
+
+#### 4.3.4 代码实践
+
+**实践目标**：产出一份「瓶颈分类判据表」，并对书中 B200 BF16 GEMM 给出明确的分类结论。
+
+**操作步骤**：
+
+1. （GPU 环境）采 basic 报告：
+   ```bash
+   mkdir -p reports
+   ncu \
+     --config-file off --profile-from-start off \
+     --kernel-name 'regex:.*nvjet_sm100.*' --launch-count 1 \
+     --set basic \
+     --replay-mode kernel --cache-control all \
+     --clock-control boost --pipeline-boost-state stable \
+     --export reports/bf16-gemm-basic --force-overwrite \
+     python appendix/nsys_example.py --size 4096 --warmup-calls 500 --profile-once
+   ```
+   终端查看（无 GUI 时的官方等价方式）：
+   ```bash
+   ncu --import reports/bf16-gemm-basic.ncu-rep \
+       --page details --print-details all --print-metric-name label-name
+   ```
+2. 采定向报告：把上面命令中 `--set basic` 换成三个 `--section`（`ComputeWorkloadAnalysis`、`SchedulerStats`、`WarpStateStats`），`--export` 改名 `bf16-gemm-followup`；
+3. 填写下面的判据表（「本例值」列先用书中数字代入）：
+
+   | 分类 | 关键指标 | 判据 | 本例值 | 是否命中 |
+   |---|---|---|---|---|
+   | compute 受限 | `SpeedOfLight` Compute；pipe 指令速率视角 | Compute 接近峰值**且**发射率高、eligible 充足 | 77.74%；Issue Slots 3.20% | 发射率过低，**不成立** |
+   | memory 受限 | Memory / DRAM Throughput；`MemoryWorkloadAnalysis` | Memory 或 DRAM 接近峰值 | 38.71% / 12.88% | **不成立** |
+   | latency / 并行受限 | `Waves Per SM`、eligible warps、`No Eligible`、warp-state 首要等待 | waves 不足以铺满设备，或铺满但 eligible 稀少、等待态集中 | waves 3.46（铺满）；eligible 0.04、No Eligible 96.11%、Long Scoreboard ≈87% | **成立** |
+
+4. 写出结论段：说明为什么 77.74% 的 Compute 不能推出 compute-bound（活跃周期视角 ≠ 指令速率视角），并指出两个可分别验证的改进方向；
+5. 无 GPU 时，本实践为「源码阅读型」：直接用书中表格（L781-783、L912-942、L965-970、L1022-1027、L1036-1042、L1056-1058）填第 3 步的表并完成第 4 步结论——判据表本身就是可复用资产，下次有 GPU 时换数值即可。
+
+**需要观察的现象**：basic 与定向报告的 Compute 有 1 个百分点内的漂移；三张定向表之间能复现附录的叙事链（活跃 → 不发射 → 无就绪 → 等依赖）。
+
+**预期结果**：分类结论为「**latency（数据依赖）受限、叠加驻留 warp 不足**」，改进方向为提高驻留数或缩短依赖链。具体数值**待本地验证**。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：`Achieved Occupancy = 8.97%` 能理解为「这个内核只发挥了 8.97% 的峰值性能」吗？
+**答案**：不能。它表示采集期间平均活跃 warp 数占硬件驻留容量的比例，是**驻留并发度**度量；本例它低于理论值 12.50% 只说明执行没全程维持驻留上限。附录明确写了它不是 "percent of peak kernel performance"（[appendix/benchmarking_gpu_kernels.md:956-959](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L956-L959)）。另外别忘了 u3-l3 的结论：现代 Tensor Core 内核常故意用低 occupancy 换显式重叠。
+
+**练习 2**：`Stall Long Scoreboard` 的 32.11 能与 `Issue Slots Busy` 的 3.20% 相加或相减吗？
+**答案**：不能。前者以「warp-cycles / 已发射指令」为单位、跨所有 warp 归一；后者是发射槽位占调度周期的比例，分母与量纲都不同。附录在两处分别强调各表内部口径独立（[appendix/benchmarking_gpu_kernels.md:1059-1061](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L1059-L1061)）。
+
+**练习 3**：若 `WarpStateStats` 的首要等待态是 `Short Scoreboard` 而非 `Long Scoreboard`，下一步查什么？
+**答案**：`Short Scoreboard` 通常是在等共享内存或另一片上单元产出结果，应检查 SMEM 访问与对应源码（尤其 swizzle 与 bank conflict——正好接上 u4-l4）；`Long Scoreboard` 才指向 L1TEX 处理的访存。速查表见 [appendix/benchmarking_gpu_kernels.md:1067-1073](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L1067-L1073)。
+
+## 5. 综合实践
+
+把三级工具串成一条完整的诊断流水线，对象仍是 `appendix/nsys_example.py` 的 GEMM+ReLU（有 Blackwell GPU 时实测，无 GPU 时用书中 B200 数据推演并标注）。
+
+**任务**：为该算子写一份一页纸的《剖析报告》，包含五个部分，每部分都要给出数据来源：
+
+1. **未剖析基线**：`--event-samples 20` 跑出 median/min/max（书中值 105.152/103.136/131.200 μs），作为后文一切对比的锚点；
+2. **靶子**：Proton 报表中按 `time/ms` 排出的最贵内核及依据（先核对 calls 数是否符合预期）；
+3. **现场**：nsys 时间线中的三项证据——两内核是否同流按序、内核间隙多大（用 `end = start + duration` 手算）、`cudaDeviceSynchronize` 是否真的在等 GPU；
+4. **验尸**：NCU 判据表（4.3.4 第 3 步那张）+ 一段分类结论，必须正面回答「为什么 Compute 77.74% 却不是 compute-bound」；
+5. **假设**：提出一个可检验的改动（对自定义内核：降寄存器/SMEM 用量以抬驻留，或提前 load；对库内核：换 tile 语义等价的 `--size` 或对比另一个实现），写清「预测哪些指标怎么动、预期延迟怎么动」，并注明验证需按附录三件事（正确性、预测指标、未剖析延迟）执行。
+
+**检查清单**（自评）：报告里有没有把 API 时间当 GPU 时间？有没有把 NCU 的 Duration 与 nsys 的 92.608 μs 直接比较？有没有在不同采集条件的数字之间下结论？三处都是本讲反复点名的陷阱。
+
+这个流水线可直接迁移到书中的 TIRx 内核：把 `make_workload` 里的 `run()` 换成你编译的 GEMM Step 任一版本（u11/u12 各讲），`--kernel-name` 换成该内核名，即得到 GEMM 九步优化（u13-l4）之外自测复现的工具支撑；对 warp 特化内核，再叠加下一讲的 IKET 即可看内核内部各角色的时间线。
+
+## 6. 本讲小结
+
+- **工具分工**：Proton 按内核聚合（次数/均值/累计）选靶子；Nsight Systems 给应用时间线看顺序、间隙与重叠；NCU 读硬件计数器解释单个内核。三者与 CUDA events（测量）角色不同、不可互相替代。
+- **Proton 纪律**：warmup 在 `proton.start` 之前；排名用累计时间 `time/ms` 而非平均时长；其会话保留正常缓存状态，绝对值比较要回到 CUDA event 基线。
+- **nsys 纪律**：`cudaProfilerStart/Stop` 只圈采集范围不计时；API 时间与 GPU 执行是两个区间；内核间隙用 trace 时间戳手算；同步调用是否真在等 GPU，用其 API start 与最后内核 end 比大小判断。
+- **NCU 读取顺序**：报告头 → `LaunchStats`（grid/waves）→ `Occupancy`（block limit 找绑定资源）→ `SpeedOfLight`（选侧）→ `SchedulerStats`（active/eligible/issued）→ `WarpStateStats`（等待态）→ `SourceCounters`（定位到 SASS）。
+- **指标口径**：三条吞吐各自以自身峰值为分母、不可相加；occupancy 是驻留度不是性能百分比；两套 pipe utilization 分母不同；`Duration` 只属于被剖析的那次运行。
+- **分类结论要看全链**：B200 BF16 GEMM 实例里 Compute 77.74% 只表示「管线活跃周期多」，配合 Issue Slots 3.20%、No Eligible 96.11%、Long Scoreboard ≈87% 才能得出真实结论——数据依赖延迟受限且驻留 warp 不足；`compute-bound` 是强主张，须等发射与等待证据齐了再下。
+
+## 7. 下一步学习建议
+
+- **下一讲 u15-l6（IKET）**：本讲的 nsys 只能看到内核边界，NCU 只能聚合整个 launch；IKET 在 TIRx 源码里插 range 标记，直接观察 warp 角色内部各阶段（producer/wait/consumer）的时间线，正好补上 `appendix/iket_example.py` 那一节。
+- **回接主线**：把本讲流水线套到 GEMM 各 Step（u11–u13）与 FA4（u14）上，为 u13-l4 的九步性能表做自测复现；warp 等待态分析（`Barrier`、`Short Scoreboard`）与 u13-l1 的四道屏障、u4-l4 的 bank conflict 直接呼应。
+- **调试方法**：遇到「正确但慢」时，本讲的分类流程与 u15-l7 的症状排查表（死锁/崩溃/错果/慢）会在同一处汇合——先分类瓶颈，再按症状走分支。
+- **延伸阅读**：附录原文引用的 [Nsight Systems Analysis Guide](https://docs.nvidia.com/nsight-systems/AnalysisGuide/index.html)（区间定义与 UI 细节）、[Nsight Compute CLI 文档](https://docs.nvidia.com/nsight-compute/NsightComputeCli/)（过滤与采集选项）与 [Profiling Guide 的 metrics-structure](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-structure)（吞吐指标构成）。
