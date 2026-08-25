@@ -1,66 +1,71 @@
-# u13-l4 端到端性能解读：从 70ms 到对齐 cuBLAS
+# 端到端性能解读：从 70ms 到对齐 cuBLAS
 
 ## 1. 本讲目标
 
 学完本讲，你应该能够：
 
-1. 读懂书中 B200 上 M=N=K=4096 的九步 GEMM 性能表，说出每个有测量值的 Step 的耗时与相对 Step 1 的累计加速比。
-2. 把四个比较区间的每一段增益归因到具体机制（TMA、流水线、持久调度、warp 特化、双 CTA cluster、多消费者），并与 u3-l3 的优化阶梯对应起来。
-3. 说清这张表的测量条件与可比性边界：哪些行能直接比、哪些行是虚线、为什么 70 ms 不是单 tile `hgemm_v1` 的运行结果。
-4. 参照附录的基准协议，列出复现该实验需要控制的变量清单，规划自己的复测。
+1. 读懂 `chapter_gemm_advanced` 末尾的九步性能表：知道每个数字是在什么条件下测出来的、哪些行可以直接比较、哪些行不能。
+2. 把 70 ms → 0.094 ms（约 744×）的总增益拆成书定义的四个比较区间，并对每一段增益做出有源码依据的机制归因，而不是笼统地说"用了 TMA 所以快了"。
+3. 用书中数据独立复算累计加速比与 TFLOPS，并用 Python 重绘性能曲线（可直接改编仓库自带的 `img/scripts/gen_gemm_perf.py`）。
+4. 按附录基准协议列出复现这套实验必须控制的变量清单，理解"同条件下比较版本"与"代表峰值性能"是两个不同的主张。
 
-本讲是单元十三的收尾，也是 GEMM 主线的终点：不再引入新机制，而是把 Step 1–9 的时间数据当成「实验结果」来解读——这是从「会写内核」到「会评估内核」的一步。
+本讲不引入新的内核机制——九个版本各自的原理已在 u11–u13 前三讲讲完。本讲做的是把机制翻译成数字、再把数字还原回机制的"收官动作"。
 
 ## 2. 前置知识
 
-本讲假设你已完成以下讲义（或了解对应内容）：
+本讲默认你已完成以下认知（均来自前置讲义），这里只做要点回顾：
 
-- **u3-l1 / u3-l3：roofline 与优化阶梯。** 内核可达上限由算力屋顶与带宽屋顶共同决定；优化阶梯分四级：更好的算法 → 更高并行 → 更合适的引擎 → 重叠与资源调优。本讲的归因分析会反复把性能区间映射回这个阶梯。
-- **u3-l2：算术强度。** 每 tile 字节带来的计算量（FLOP/byte）是衡量「片上复用」的标尺；Step 8/9 的增益正来自抬高这一数值。
-- **u11-l1：GEMM 约定与 TFLOPS 公式。** 全书统一 D=ABᵀ（A 为 M×K、B 为 N×K、D 为 M×N），吞吐按 \( \text{TFLOPS} = 2MNK / t \) 换算。
-- **u11-l2 至 u13-l3：九步内核本体。** Step 1–3（单 tile、K 循环、空间分块）、Step 4–6（TMA、双缓冲流水线、持久内核）、Step 7–9（warp 特化、双 CTA cluster、多消费者）。本讲只引用它们的机制名称，不再展开实现。
-
-本讲新引入的术语：
-
-| 术语 | 含义 |
-|---|---|
-| 累计加速比 | 相对基线（Step 1 的 70 ms）的总加速倍数，\( S = t_{\text{baseline}} / t \) |
-| 归因（attribution） | 把一个时间区间的增益分解到具体机制的动作 |
-| 测量条件 | 得出性能数字时所用的硬件、问题规模、时钟、迭代次数等设定 |
-| 可比性边界 | 表中哪些行在什么前提下才能直接比较的约束说明 |
+- **九步优化路线**（u11-l1、u3-l3）：Step 1–3 搭正确性骨架（单 tile、K 循环、空间分块），Step 4–6 引入 TMA、双缓冲软件流水线、持久内核，Step 7–9 做 warp 特化、双 CTA cluster、多消费者。按优化阶梯看，前四步约 142×，后五步约 5×。
+- **算术强度与 roofline**（u3-l1、u3-l2）：AI = FLOP/byte，分母绑定具体内存层级；分块复用把 tile 级 AI 抬到约 B/s。本讲会用 AI 定量解释 Step 8/9 的增益。
+- **三角色流水线**（u13-l1）：Step 7 把 TMA 生产者、MMA 消费者、回写 warpgroup 拆给并发角色，四道 full/empty 屏障交接缓冲所有权。
+- **双 CTA cluster 与多消费者**（u13-l2、u13-l3）：Step 8 用 `cta_group=2` 协作 MMA 产出 256×256 输出 tile、经 DSMEM 读对端 B 切片；Step 9 加第二个 MMA 消费者共享同一 staged B。
+- **TFLOPS 换算**（u11-l1）：吞吐 = 2MNK / t，本讲会用到附录给出的精确公式。
+- 术语提醒：**staged 操作数**指已由 TMA 装入 SMEM、等待 MMA 消费的 tile；**累计加速比**指相对 Step 1 基线的倍数，**区间加速比**指相邻两个实测版本之间的倍数。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
-|---|---|
-| `chapter_gemm_advanced/index.md` | 本章正文的 "End-to-End Results" 一节：性能表、测量条件、四个比较区间与归因叙述（L862–L902） |
-| `img/scripts/gen_gemm_perf.py` | 生成书中性能柱状图 `img/gemm_perf.png` 的 matplotlib 脚本，内含六个测量点的精确耗时 |
-| `img/scripts/README.md` | 图表脚本的运行方式说明（在 `img/scripts` 目录下执行） |
-| `appendix/benchmarking_gpu_kernels.md` | 基准测试附录：正确性先行、计时边界、CUDA events、warm-up/repeat 预算与 `tvm.tirx.bench` |
-
-阅读顺序建议：先看 `chapter_gemm_advanced/index.md` 的 L862–L902（本讲的事实来源），再对照 `gen_gemm_perf.py` 拿到精确数值，最后翻附录把「1000 次迭代、锁定时钟」这些条件落到可操作的协议上。
+|------|------|
+| `chapter_gemm_advanced/index.md` | 本讲主源码。文件末尾 "End-to-End Results" 一节给出九步性能表、测量条件、可比性边界与四个比较区间（本章前部还含 Step 7/8/9 三个完整内核，是归因的机制依据） |
+| `img/scripts/gen_gemm_perf.py` | 生成书中性能图 `img/gemm_perf.png` 的 matplotlib 脚本，内含六个实测数据点的精确耗时 |
+| `img/scripts/README.md` | 说明图表脚本的运行方式与依赖（`matplotlib`、`numpy`） |
+| `appendix/benchmarking_gpu_kernels.md` | 基准测试协议：正确性先行、计时边界、CUDA events、`tvm.tirx.bench`、条件一致性与吞吐换算，是本讲"基准条件"模块的依据 |
+| `img/gemm_perf.png` | 脚本的输出图，正文以 `../img/gemm_perf.png` 引用 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 九步性能表
+### 4.1 模块一：九步性能表
 
 #### 4.1.1 概念说明
 
-优化内核时，每一步改动都声称「更快」；端到端性能表就是把所有版本的耗时放在同一张表里，让这些声明可核对。它回答三个问题：
+九步性能表是全书 GEMM 主线的"成绩单"：它把九个版本的内核放在同一块 B200、同一个问题规模下计时，并附上 cuBLAS 作为参考实现。这张表回答两个问题——每步优化值得多少毫秒，以及教学内核离工业库还有多远。
 
-1. **现在多快？** 每个有测量值的版本一条耗时记录。
-2. **总共快了多少？** 相对基线的累计加速比。
-3. **离对手多远？** 表尾附一行 cuBLAS 参考实现，标定「工业界水平」在哪里。
+但一张性能表只有在测量条件明确时才有意义。书在给出表格前先声明了四个条件：NVIDIA B200、`M=N=K=4096`、fp16 输入、锁定时钟（locked clocks）、每个被测版本 1000 次计时迭代。这五个要素（硬件、问题规模、数据类型、时钟策略、迭代预算）共同构成表格的可比性基础——缺了任何一个，数字之间的除法就不再成立。
 
-这张表的特殊之处在于它有**虚线行**：Step 2、5、6 没有测量值。这不是数据缺失，而是可比性设计——后文 4.3 会解释为什么这三步故意不给出全矩阵数字。
+表里还有一个容易误读的细节：Step 2、5、6 三行的 Time 与 Speedup 都是"—"。这不是漏测，而是刻意的可比性设计，我们在 4.1.2 展开。
 
 #### 4.1.2 核心流程
 
-书中性能表（B200，M=N=K=4096，fp16 输入，锁定时钟，每版本 1000 次计时迭代）：
+一张行可比的性能表，生成流程是：
 
-| Step | 技术 | 耗时 | 累计加速比 |
-|------|------|------|-----------|
-| 1 | 同步加载 + MMA | 70 ms | 1× |
+1. **固定协议**：所有版本用同一 GPU、同一问题规模（`M=N=K=4096`，fp16）、同一时钟策略与迭代预算计时。
+2. **决定哪些行入表**：只给能与全矩阵结果直接比较的版本填数；机制被后续版本完整包含的中间版本（Step 5、6）和只算单 tile 的版本（Step 2）用破折号。
+3. **计算累计加速比**：以 Step 1 为 1× 基线，每行 speedup = t(Step 1) / t(该行)。
+4. **绘图**：脚本 `gen_gemm_perf.py` 只画有实测时间的六个数据点（Step 3、4、7、8、9、cuBLAS），纵轴取对数。
+
+关于第 4 步为什么用对数轴：数据从 53.6 ms 跨到 0.094 ms，相差约 570 倍（近 3 个数量级）。线性轴下后四根柱子会矮到不可见，对数轴才能让每个版本的相对差异都可见。
+
+#### 4.1.3 源码精读
+
+先看测量条件与表格本体：
+
+> [chapter_gemm_advanced/index.md:862-877](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L862-L877)
+
+这段先声明测量在 NVIDIA B200、`M=N=K=4096`、fp16 输入、锁定时钟、每版本 1000 次计时迭代下进行，并要求新的测量与复现遵循 `chap_benchmarking` 的完整协议；随后给出九行性能表：
+
+| Step | 技术 | 时间 | 加速比 |
+|------|------|------|--------|
+| 1 | 同步 load + MMA | 70 ms | 1× |
 | 2 | K 循环累加 | — | — |
 | 3 | 空间分块 | 53.6 ms | ~1.3× |
 | 4 | TMA 异步加载 | 0.49 ms | ~142× |
@@ -71,41 +76,32 @@
 | 9 | 多消费者 | 0.094 ms | ~744× |
 | — | cuBLAS（参考） | 0.094 ms | ~744× |
 
-累计加速比的计算规则：
+再看表格脚注对可比性边界的说明：
 
-\[ S_{\text{cum}}(t) = \frac{t_{\text{Step1}}}{t} = \frac{70\ \text{ms}}{t} \]
+> [chapter_gemm_advanced/index.md:879-883](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L879-L883)
 
-图表脚本中的精确测量值为（单位 ms）：
+这段交代三件事：① 每个有实测时间的行都用同一个 `M=N=K=4096` 问题，可以直接比较；② Step 1 的 70 ms 来自具有相同串行数据路径的全矩阵基线，**不是**入门章节里单 tile 内核 `hgemm_v1` 的一次运行——入门章用更小的问题讲解 Step 1–3，本表的 Step 1 与 Step 3 行测的是对应的全矩阵实现；③ Step 2 仍只计算一个输出 tile 故不可比，Step 5、6 是 TMA 内核与 warp 特化内核之间的中间版本、其机制都保留在 Step 7 中，表格只给区间端点；④ 这些数字来自一次 B200 参考运行，目的是在本教程的版本之间做同条件比较，而非代表其他问题规模或环境下的峰值性能。
 
-| 测量点 | Step 3 | Step 4 | Step 7 | Step 8 | Step 9 | cuBLAS |
-|---|---|---|---|---|---|---|
-| 精确耗时 | 53.642159 | 0.493814 | 0.226613 | 0.103529 | 0.094139 | 0.094139 |
+最后看绘图脚本中的精确数据：
 
-数值跨度从 70 ms 到 0.094 ms，约 744 倍、接近三个数量级，因此书中图表用**对数纵轴**呈现——线性轴下 Step 4 之后的柱子会矮到看不见。
+> [img/scripts/gen_gemm_perf.py:6-8](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/scripts/gen_gemm_perf.py#L6-L8)
 
-#### 4.1.3 源码精读
+`steps` 列出六个数据点（Step 3、4、7、8、9 与 cuBLAS），`times` 给出精确到微秒量级的耗时：`[53.642159, 0.493814, 0.226613, 0.103529, 0.094139, 0.094139]`。注意脚本数据从 Step 3 开始，不含 Step 1 的 70 ms。
 
-**（1）表格与测量条件的正文出处。** [chapter_gemm_advanced/index.md:862-877](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L862-L877)：这段正文声明了全部测量条件——NVIDIA B200、`M=N=K=4096`、fp16 输入、锁定时钟（locked clocks）、每个被测版本 1000 次计时迭代，并要求新的测量遵循 `chap_benchmarking`（即附录）的完整协议；随后给出上表。这些条件是整张表可比性的前提。
+> [img/scripts/gen_gemm_perf.py:14-28](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/scripts/gen_gemm_perf.py#L14-L28)
 
-**（2）图表脚本中的精确数值。** [img/scripts/gen_gemm_perf.py:6-8](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/scripts/gen_gemm_perf.py#L6-L8)：脚本把六个测量点（Step 3/4/7/8/9 与 cuBLAS）的标签、耗时和柱色写死在源码里。注意脚本里 cuBLAS 与 Step 9 使用同一个数值 0.094139，对应正文「最终内核与 cuBLAS 持平」的结论；表中 Step 1 的 70 ms 只出现在正文表格里，脚本未画（图从 Step 3 画起）。
+绘图部分：纵轴设为对数（`set_yscale('log')`）、纵轴范围 (0.06, 120) ms、每根柱子上方按耗时量级选择小数位数标注。`plt.savefig('../gemm_perf.png')` 使用相对路径，所以必须从 `img/scripts` 目录运行脚本（见 [img/scripts/README.md:3-9](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/scripts/README.md#L3-L9)，README 同时说明依赖为 `matplotlib` 与 `numpy`）。
 
-**（3）对数轴与标注。** [img/scripts/gen_gemm_perf.py:14-26](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/scripts/gen_gemm_perf.py#L14-L26)：`ax.set_yscale('log')` 与 `set_ylim(0.06, 120)` 把三个数量级的耗时压进一张图；L14 的注释说明「表承载加速比、图只关注耗时下降」这一分工。L24–L26 按耗时量级选择小数位数，在柱顶标注毫秒值。
+#### 4.1.4 代码实践
 
-**（4）脚本运行方式。** [img/scripts/README.md:3-23](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/scripts/README.md#L3-L23)：所有图表脚本需在 `img/scripts` 目录下运行，`gen_gemm_perf.py` 输出到 `../gemm_perf.png`，依赖 `matplotlib` 与 `numpy`。
+**实践目标**：用书中数据独立复算表中所有累计加速比，验证表格数字与精确数据的自洽性。此实践不需要 GPU，只需要 Python。
 
-#### 4.1.4 代码实践：用精确数值复算整张表的加速比
-
-**实践目标**：验证你不是「相信」表中的加速比，而是能从原始耗时推出它。
-
-**操作步骤**（本实践不需要 GPU，只需要 Python）：
-
-1. 新建一个脚本（示例代码）：
+**操作步骤**（示例代码，基于书中数据编写）：
 
 ```python
-# 示例代码：复算书中 GEMM 九步性能表的加速比
-# 精确耗时来自 img/scripts/gen_gemm_perf.py L7；Step 1 的 70ms 来自正文表格
-times_ms = {
-    "Step 1": 70.0,        # 正文表格（全矩阵基线，见 4.3）
+# verify_speedup.py —— 复算九步性能表的累计加速比（示例代码）
+BASE_MS = 70.0  # Step 1 全矩阵基线，书中表格数值
+rows = {
     "Step 3": 53.642159,
     "Step 4": 0.493814,
     "Step 7": 0.226613,
@@ -113,229 +109,292 @@ times_ms = {
     "Step 9": 0.094139,
     "cuBLAS": 0.094139,
 }
-base = times_ms["Step 1"]
-for name, t in times_ms.items():
-    print(f"{name:>8}: {t:10.6f} ms   累计加速比 {base / t:8.1f}x")
+for name, t in rows.items():
+    print(f"{name:>8}: {t:10.6f} ms  累计加速 {BASE_MS / t:8.1f}x")
 ```
 
-2. 运行脚本，把输出与正文表格逐行对照。
+**需要观察的现象**：输出应依次约为 1.3×、142×、309×、676×、744×、744×。
 
-**需要观察的现象**：输出应与正文表格的四舍五入一致——Step 3 约 1.3×、Step 4 约 142×、Step 7 约 309×、Step 8 约 676×、Step 9 与 cuBLAS 约 744×。
+**预期结果**（据表中数据计算，待本地验证）：
 
-**预期结果**：例如 \( 70 / 0.493814 = 141.75 \approx 142 \)，\( 70 / 0.094139 = 743.6 \approx 744 \)。若你的某个值与表格差出舍入误差之外，先检查是否把 Step 1 的 70 ms 换成了别的基线。
+| 行 | 精确耗时 ms | 复算累计加速比 | 表中标注 |
+|----|------------|--------------|---------|
+| Step 3 | 53.642159 | 70/53.642 ≈ 1.30× | ~1.3× |
+| Step 4 | 0.493814 | ≈ 141.7× | ~142× |
+| Step 7 | 0.226613 | ≈ 308.9× | ~309× |
+| Step 8 | 0.103529 | ≈ 676.1× | ~676× |
+| Step 9 | 0.094139 | ≈ 743.5× | ~744× |
+
+复算值与表中 "~" 标注全部吻合，说明表中的近似加速比就是以 Step 1 的 70 ms 为分母、用精确耗时算出的。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么图表脚本只画 Step 3/4/7/8/9 六个柱子，而不画 Step 1、2、5、6？
+**练习 1**：为什么 Step 2、5、6 三行的 Time 和 Speedup 是破折号？
 
-**答案**：脚本服务的图关注「有可比测量值的版本」。Step 2 只计算单个输出 tile，无法与全矩阵结果比较；Step 5/6 是 Step 4 与 Step 7 之间的中间版本，其机制都被 Step 7 保留，表中也只用虚线带过；Step 1 的 70 ms 是全矩阵基线，图中从 Step 3 起画已能展示三个数量级的下降。正文 L879–L881 明确交代了这些边界。
+**答案**：Step 2 的内核仍只计算一个输出 tile，与全矩阵结果没有可比性；Step 5、6 是 TMA 加载内核（Step 4）与 warp 特化内核（Step 7）之间的中间版本，其机制（软件流水线、持久调度）都完整保留在 Step 7 中，表格只给出该区间的端点。见 [chapter_gemm_advanced/index.md:881](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L881)。
 
-**练习 2**：把表中数据换算成 TFLOPS（M=N=K=4096），Step 9 达到多少？相对 u3-l1 中 B200 约 2 PFLOP/s 的稠密 fp16 屋顶，占比多少？
+**练习 2**：表中 70 ms 是不是入门章节单 tile 内核 `hgemm_v1` 的实测时间？
 
-**答案**：\( 2 \times 4096^3 = 1.374 \times 10^{11} \) FLOP；\( t = 0.094139\ \text{ms} \)，吞吐 \( \approx 1.46 \times 10^{15} \) FLOP/s ≈ 1460 TFLOPS，即约 1.46 PFLOP/s；按取整屋顶 2 PFLOP/s 估算约为七成。这是从表格数据推出的估算，书中表格本身只报耗时与加速比。
+**答案**：不是。书中明确说明 70 ms 来自具有相同串行数据路径的全矩阵基线；入门章用更小的问题讲解 Step 1–3，本表 Step 1 与 Step 3 行测的是对应的全矩阵实现（[chapter_gemm_advanced/index.md:879](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L879)）。把 70 ms 当作 `hgemm_v1` 的时间是读表时的典型错误。
 
-**练习 3**：为什么柱状图必须用对数纵轴？
+**练习 3**：`gen_gemm_perf.py` 的图里为什么没有 Step 1 的柱子？如果想加上它，要改脚本的哪两处？
 
-**答案**：最大值与最小值之比约 \( 53.6 / 0.094 \approx 570 \)（若画入 Step 1 则约 744），线性轴下 Step 4 之后的柱高不足最高柱的 1%，肉眼无法分辨 0.49→0.094 ms 这段仍在发生的 5 倍优化；对数轴把等比例变化变成等距变化，各区间都能读出来。
+**答案**：脚本 `steps`/`times` 数据列表只收录了六个数据点、未含 Step 1（[img/scripts/gen_gemm_perf.py:6-7](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/scripts/gen_gemm_perf.py#L6-L7)）。想加上它需要在两个列表头部各插入 `'Step 1\nBaseline'` 与 `70.0`，并在 `colors` 补一个颜色；由于 `70 < 120`，现有 `set_ylim(0.06, 120)` 仍能容纳（[img/scripts/gen_gemm_perf.py:8](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/scripts/gen_gemm_perf.py#L8)、[L17](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/img/scripts/gen_gemm_perf.py#L17)）。
 
-### 4.2 加速归因
+### 4.2 模块二：加速归因
 
 #### 4.2.1 概念说明
 
-知道「快了多少」之后，更有价值的问题是「为什么快」。**归因**就是把每个比较区间的时间变化映射到机制动作上。它有两个纪律：
+有了数字，下一步是回答"每一段增益是哪个机制带来的"。归因的第一纪律是：**一个比较区间的增益属于该区间新增的全部机制，不能记到单一机制头上**。书为此只定义了四个"可归因"的比较区间，每个区间都有明确的新增机制集合；区间内部的机制混在一起，区间之间才干净。
 
-1. **区间内机制常常是叠加的。** 一个区间往往同时引入多个机制，总增益不能全部记在其中一个头上（书中对 Step 1→4 的说明就是典型）。
-2. **归因要有独立依据。** 本讲的依据是三样：区间端点_KERNEL 的结构差异（u11–u13 精读过）、u3-l3 的优化阶梯层级、以及 u13-l2/l3 建立的算术强度变化（Step 7 的 64 → Step 8 的 128 FLOP/byte；Step 9 再乘 4/3）。
+书还把九个版本的优化提炼成两条反复出现的目标（[chapter_gemm_advanced/index.md:896](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L896)）：
 
-书中把九步优化的反复出现的两个目标总结成一句话：**别让 Tensor Core 等数据**（供给），以及**让每次搬上片的 tile 参与更多计算**（复用）。四个区间正好依次落在这两个轴上。
+1. **别让 Tensor Core 等数据**——Step 4–7 围绕数据供给：TMA 搬 tile、双缓冲预备下一个 K 块、持久调度让 CTA 不空转、warp 特化让加载/MMA/回写并发推进。
+2. **每片搬上芯片的数据多算几次**——Step 8–9 围绕片上复用：双 CTA cluster 产出更大输出 tile 让每个 A/B tile 参与更多乘加，第二个消费者让两个 A 块共享同一 B tile。
+
+这两条正好对应 u3-l3 优化阶梯的"重叠"与"复用"两级，也正好按 4–6 步 / 7–8 步 把表格切成两半。
 
 #### 4.2.2 核心流程
 
-正文给出四个比较区间的归因框架：
+归因的操作流程是"区间差分 + 机制核对 + 定量验证"：
 
-| 区间 | 耗时变化 | 加速比 | 引入机制（按 u3-l3 优化阶梯归类） | 目标轴 |
-|---|---|---|---|---|
-| Step 1 → 4 | 70 → 0.49 ms | ~142× | K 循环、空间分块（更高并行）+ TMA（更合适的引擎） | 供给 |
-| Step 4 → 7 | 0.49 → 0.23 ms | ~2.2× | 软件流水线、持久调度、warp 特化（重叠与资源调优） | 供给 |
-| Step 7 → 8 | 0.23 → 0.104 ms | ~2.2× | 双 CTA 协作 MMA，staged 操作数复用翻倍，算术强度 64→128 FLOP/byte | 复用 |
-| Step 8 → 9 | 0.104 → 0.094 ms | ~10% | 第二个 MMA 消费者共享 staged B，算术强度再乘 4/3 | 复用 |
+1. **列出区间**：Step 1→4、4→7、7→8、8→9（书定义的四个比较，见 4.2.3 源码引用）。
+2. **对每个区间列新增机制**：从区间的起点版本到终点版本，scope/layout/dispatch 三要素各改了什么。
+3. **把机制映射到资源通道**：数据搬运（带宽/AI）、执行重叠（空闲消除）、片上复用（AI 抬升）。
+4. **定量核对**：对复用类增益，用算术强度公式验算；对总增益，换算 TFLOPS 看它占峰值的比例。
 
-归因的推理链可以用伪代码表达：
+定量工具是两个公式。区间加速比：
 
-```text
-对每个区间 (t_from → t_to):
-    gain = t_from / t_to
-    diffs = 两端版本的结构差异（scope / layout / dispatch 三要素对照）
-    level = diffs 对应的优化阶梯层级
-    证据 = 独立计算（如算术强度变化）或中间测量点
-    结论 = "gain 归因于 diffs"，若 |diffs| > 1 则声明为混合增益
-```
+\[ S_{\text{interval}} = \frac{t_{\text{before}}}{t_{\text{after}}} \]
 
-两个值得单独指出的推理细节：
+以及 GEMM 吞吐（附录给出的形式，\(t_{\mu s}\) 为微秒延迟）：
 
-- 区间 1 是**混合增益**：K 循环、空间分块、多 CTA 并行与 TMA 同时进入，书中明确说「整个增益不能全归因于 TMA」。但由于 Step 3 也有测量值，可以额外隔离出 Step 3→4 这一子区间 \( 53.642159 / 0.493814 \approx 108.6\times \)——这一段两端只差 dispatch（线程驱动拷贝 → TMA）与 Dsmem 回写路径，是全表中最大的一笔单项增益（此子区间为从表格数据推出的观察，正文未单列）。
-- 区间 3、4 的**复用增益有算术强度背书**：输出 tile 从 128×128（Step 7）到 256×256（Step 8）再到 512×256（Step 9），每字节搬上片的数据参与的乘加越来越多，与 u3-l2「tile 级 AI ≈ B/s」的结论一致。
+\[ \text{TFLOP/s} = \frac{2 \times M \times N \times K}{t_{\mu s} \times 10^{6}} \]
+
+`M=N=K=4096` 时 \(2MNK = 2 \times 4096^3 \approx 137.44\) GFLOP，于是 Step 9 的 0.094139 ms 换算约 \(137.44 \times 10^{9} / 94.139 \approx 1459\) TFLOP/s——相对书中性能章节取整的 B200 稠密 fp16 峰值约 2 PFLOP/s，达到约 73%。cuBLAS 同为 0.094 ms，这就是"对齐 cuBLAS"的定量含义。
+
+对 Step 7/8/9 的复用增益还可以用 tile 级 AI 验算（依据书中机制的推算）：以"每 CTA（或每 cluster）每个 K 块"为记账单位，计算量除以 staged 字节数：
+
+- **Step 7**（单 CTA，128×128 输出）：每 K 块 staged \((128+128)\times 64 \times 2\text{B} = 32\text{KB}\)，计算 \(2\times 128\times 128\times 64\) FLOP，\(AI \approx 64\) FLOP/byte；
+- **Step 8**（cluster 256×256 输出，两 CTA 各出 1 片 A + 1 片 B，A 切片乘以两片 B）：staged 字节翻倍但计算量变为 4 倍，\(AI \approx 128\) FLOP/byte；
+- **Step 9**（cluster 512×256 输出，4 片 A + 2 片 B）：计算量相对 Step 8 翻倍、staged 字节只增 1.5 倍，\(AI \approx 128 \times \tfrac{4}{3} \approx 170.7\) FLOP/byte。
+
+数字走势（64 → 128 → 170.7）与实测加速走势（2.2× → 1.10×）方向一致、幅度递减，这正是归因想得到的"机制解释数字"的证据链。
 
 #### 4.2.3 源码精读
 
-**（1）四个比较区间的原文。** [chapter_gemm_advanced/index.md:885-890](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L885-L890)：L887 给出区间 1（70→0.49 ms ≈ 142×，并声明区间内还叠加了 K 循环、空间分块、多 CTA 并行，故不能全归 TMA）；L888 区间 2（软件流水线 + 持久调度 + warp 特化，0.49→0.23 ms ≈ 2.2×）；L889 区间 3（双 CTA 协作 MMA 提升 staged 操作数复用，0.23→0.104 ms ≈ 2.2×）；L890 区间 4（第二个消费者复用同一 staged B，0.104→0.094 ms ≈ 10%）。
+四个比较区间的官方定义：
 
-**（2）两个反复出现的目标。** [chapter_gemm_advanced/index.md:896-900](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L896-L900)：L896 一句话点题——别让 Tensor Core 等数据、让每个上片 tile 做更多计算；L898–L900 把九步按这两条线复述：Steps 1–3 搭骨架，Steps 4–7 改善数据供给（TMA 搬运、双缓冲预备下一 K 块、持久调度让 CTA 不停工、warp 特化让加载/MMA/回写并发），最后两步改善复用（更大输出 tile、双 A 块共享 B）。
+> [chapter_gemm_advanced/index.md:885-890](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L885-L890)
 
-**（3）收束结论。** [chapter_gemm_advanced/index.md:902](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L902)：本讲引用的最后一句原文指出，70→0.094 ms 的结果是「跨数据搬运、执行重叠与片上复用协调多个优化」的产物，而非任何单一机制的功劳——这正是归因分析的立场。
+这段列出四个区间并给出归因要点：
 
-#### 4.2.4 代码实践：生成归因对照表
+1. **Step 1 → Step 4**（70 ms → 0.49 ms，约 142×）：该区间同时加入 K 循环、空间分块、多 CTA 并行与 TMA，因此全部增益不能只归给 TMA。
+2. **Step 4 → Step 7**（0.49 → 0.23 ms，约 2.2×）：软件流水线、持久调度与 warp 特化的合计贡献。
+3. **Step 7 → Step 8**（0.23 → 0.104 ms，约 2.2×）：双 CTA 协作 MMA 提高 staged 操作数的复用。
+4. **Step 8 → Step 9**（0.104 → 0.094 ms，约 10%）：第二个 MMA 消费者复用同一批 staged B 切片。
 
-**实践目标**：把 4.2.2 的归因框架固化为一个可复算的脚本，为综合实践做铺垫。
+归因叙述的总结：
+
+> [chapter_gemm_advanced/index.md:896-902](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L896-L902)
+
+这段把九步串成因果故事：Step 1–3 从单 tile 出发加 K 循环、按 M/N 分块覆盖全矩阵；Step 4–7 改善数据供给（TMA 搬运、双缓冲预备、持久调度器维持 CTA 忙碌、warp 特化让三路并发），到 Step 7 时 Tensor Core 不必再等整条加载或回写路径结束；最后两步提高复用（更大输出 tile、两 A 块共享 B tile），让每次从 GMEM 的搬运支撑更多片上计算。结论句强调：结果是"数据搬运、执行重叠与片上复用三方面多种优化的协调"，而非任何单一机制的功劳。
+
+每个区间的机制依据都在本章前部的内核源码里，归因时可回查：
+
+- **Step 7 三角色与四道屏障**（区间 2 的机制）：角色表见 [chapter_gemm_advanced/index.md:52-56](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L52-L56)，屏障表见 [L62-67](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L62-L67)。
+- **Step 8 两 CTA 切分与 DSMEM 互读**（区间 3 的机制）：A/B/D 划分表见 [chapter_gemm_advanced/index.md:351-354](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L351-L354)；TMA 到达字节数按 `CTA_GROUP * (BLK_M*BLK_K + BLK_N*BLK_K) * F16_SIZE` 合账登记见 [L390-394](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L390-L394)。
+- **Step 9 消费者划分与共享 B**（区间 4 的机制）：两个消费者各算 256 行、共 256 列、各占 TMEM 一段列区间的表见 [chapter_gemm_advanced/index.md:612-615](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L612-L615)；"每 stage 装 2 块 A + 1 块 B"的字节数公式 `CTA_GROUP * (NUM_CONSUMER * BLK_M * BLK_K + BLK_N * BLK_K) * F16_SIZE` 见 [L645-651](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L645-L651)——这正是 4.2.2 中 AI 推算里"4 片 A + 2 片 B"的源码出处。
+
+#### 4.2.4 代码实践
+
+**实践目标**：改编仓库自带的 `gen_gemm_perf.py`，在重绘曲线的同时输出四个区间的加速比与各行 TFLOPS，把"读图"变成"算账"。此实践只需 `matplotlib`/`numpy`，无需 GPU。
 
 **操作步骤**：
 
-1. 在 4.1.4 脚本基础上追加（示例代码）：
+1. 进入 `img/scripts` 目录，**不要直接运行原脚本**——它的 `savefig('../gemm_perf.png')` 会覆盖仓库已检入的图片，而本套讲义不允许修改源码。
+2. 把脚本复制到讲义目录再改，例如 `cp img/scripts/gen_gemm_perf.py modern-gpu-programming-for-mlsys-tutorial/my_gemm_perf.py`。
+3. 在副本中做三处修改（示例代码）：
 
 ```python
-# 示例代码：四个比较区间的归因表
-intervals = [
-    ("Step 1 -> 4", 70.0, 0.493814,
-     "K 循环 + 空间分块 + 多 CTA 并行 + TMA（混合增益，不能全归 TMA）", "更高并行/更合适的引擎"),
-    ("Step 4 -> 7", 0.493814, 0.226613,
-     "软件流水线 + 持久调度 + warp 特化", "重叠"),
-    ("Step 7 -> 8", 0.226613, 0.103529,
-     "双 CTA 协作 MMA，算术强度 64 -> 128 FLOP/byte", "片上复用"),
-    ("Step 8 -> 9", 0.103529, 0.094139,
-     "第二 MMA 消费者共享 staged B，算术强度 x4/3", "片上复用"),
-]
-for name, a, b, mech, level in intervals:
-    print(f"{name:>12}: {a:9.6f} -> {b:8.6f} ms  {a/b:6.1f}x  [{level}] {mech}")
+# my_gemm_perf.py 片段 —— 在 gen_gemm_perf.py 基础上修改（示例代码）
+M = N = K = 4096
+flop = 2 * M * N * K                      # ≈ 137.44 GFLOP
+
+# 1) 在柱状标签旁追加 TFLOPS
+for x, t in enumerate(times):
+    tflops = flop / (t * 1e-3) / 1e12     # t 单位 ms
+    ax.text(x, t * 1.20, f"{tflops:.0f} TFLOP/s", ha="center",
+            va="bottom", fontsize=7, color="#666")
+
+# 2) 输出四个比较区间的加速比
+base = 70.0                                # Step 1 全矩阵基线（书中表格）
+pairs = [("Step1->Step4", base, times[1]), ("Step4->Step7", times[1], times[2]),
+         ("Step7->Step8", times[2], times[3]), ("Step8->Step9", times[3], times[4])]
+for name, a, b in pairs:
+    print(f"{name}: {a/b:.2f}x")
+
+# 3) 输出路径改到讲义目录，避免覆盖仓库图片
+plt.savefig("my_gemm_perf.png", dpi=150, bbox_inches="tight")
 ```
 
-2. 运行并核对四个区间的加速比。
+4. 运行 `python my_gemm_perf.py`。
 
-**需要观察的现象**：区间 1 约 141.7×，区间 2 约 2.18×，区间 3 约 2.19×，区间 4 约 1.10×（即约 10% 增益）。
+**需要观察的现象**：终端打印四个区间加速比；生成的 `my_gemm_perf.png` 与书中 `img/gemm_perf.png` 同构（对数纵轴、六根柱子），柱顶多出 TFLOPS 标注。
 
-**预期结果**：区间 2 与区间 3 的加速比数值上几乎相同（都约 2.2×），但归因完全不同——前者来自重叠（供给轴），后者来自复用（算术强度翻倍）。归因表的价值正在于把「同样快了 2.2 倍」区分成两种不同的物理原因。
+**预期结果**（据书中数据计算，待本地验证）：
+
+| 区间 | 计算 | 加速比 |
+|------|------|--------|
+| Step 1→4 | 70 / 0.493814 | ≈ 141.7× |
+| Step 4→7 | 0.493814 / 0.226613 | ≈ 2.18× |
+| Step 7→8 | 0.226613 / 0.103529 | ≈ 2.19× |
+| Step 8→9 | 0.103529 / 0.094139 | ≈ 1.10× |
+
+TFLOPS 标注依次约为：Step 3 ≈ 2.6、Step 4 ≈ 278、Step 7 ≈ 607、Step 8 ≈ 1327、Step 9 ≈ 1459、cuBLAS ≈ 1459。注意 Step 9 与 cuBLAS 完全相同——因为二者实测时间相同（0.094139 ms）。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：区间 1 的 142× 为什么不能全部归功于 TMA？如何用表中已有数据单独估计 TMA 那一份？
+**练习 1**：为什么书说"整个 142× 不能全部归因于 TMA"？如果想更干净地度量 TMA 本身的贡献，表中哪两个行的对比更合适？
 
-**答案**：因为 Step 1→4 之间同时加入了 K 循环、空间分块、多 CTA 并行与 TMA，端点差异不止一个机制。利用 Step 3 的中间测量点可隔离出 Step 3→4 子区间：两端版本同为 M=N=K=4096 全矩阵实现，主要差异是 GMEM→SMEM 搬运从线程驱动改为 TMA（外加 Dsmem 回写路径），\( 53.642159 / 0.493814 \approx 108.6\times \)，可视为对 TMA 一项的近似估计（从表格数据推出的观察）。
+**答案**：因为 Step 1→4 区间同时加入了 K 循环、空间分块、多 CTA 并行与 TMA 多个机制（[chapter_gemm_advanced/index.md:887](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L887)）。表中 Step 3 与 Step 4 两行都已具备全矩阵分块与多 CTA 并行，差异集中在加载路径（线程协作拷贝改 TMA 派发及配套同步），53.642159 / 0.493814 ≈ 108.6× 是更接近"TMA 净效应"的对比。（此 Step 3→4 对比为本讲义补充的观察，书只定义四个官方区间。）
 
-**练习 2**：区间 2（Step 4→7）的 2.2× 与区间 3（Step 7→8）的 2.2× 机制完全不同。请分别指出它们在优化阶梯上的层级，并说明各自的「天花板」由什么决定。
+**练习 2**：Step 8 相对 Step 7 又得到约 2.2×，机制上从哪里来？
 
-**答案**：区间 2 属于「重叠与资源调优」层级：让 TMA、Tensor Core、回写三路并发，收益的天花板是三段中最慢一段的稳态吞吐（u2-l3 的流水线结论）；区间 3 属于「片上复用」（u3-l2 的算术强度视角）：同样的字节搬运支撑更多计算，收益的天花板是 roofline 上算术强度抬升后新瓶颈（计算或带宽）的位置。
+**答案**：双 CTA cluster 用一次 `cta_group=2` 协作 MMA 产出 256×256 输出 tile：A 沿 M 对半、各 CTA 就近加载，两片 B 被双方输出共用，硬件经 DSMEM 读对端 Bsmem。staged 操作数参与的乘加翻倍，tile 级算术强度从约 64 升到约 128 FLOP/byte（每 K 块 staged 字节 ×2、计算量 ×4），GMEM 流量压力减半（u13-l2 已建立该结论，本讲 4.2.2 给出验算）。
 
-**练习 3**：区间 4 只有约 10%，是否说明多消费者不重要？
+**练习 3**：Step 9 只比 Step 8 快约 10%，远小于 Step 8 的 2.2×。既然 AI 提升比例相近（×2 与 ×4/3 只差一档），为什么实测收益差这么多？
 
-**答案**：不能只看倍数。10% 是在已经对齐 cuBLAS 的 0.104 ms 基础上再压出来的，属于「最后的 squeezing」；同时该结构（两个消费者共享 B、按消费者划分 TMEM 与回写组）是 FA4 的直接前身（u14 将看到它被扩展为更复杂的多角色协议）。在接近屋顶的区段，10% 往往正对应剩余空闲的消除。
+**答案**：三方面叠加：① AI 增幅本身递减（128→170.7 是 ×1.33，小于 64→128 的 ×2）；② 到 Step 8 时内核已接近 cuBLAS 水平（0.104 vs 0.094 ms），剩余优化空间只有约 10%，说明瓶颈已从 GMEM 供给转移到别处（Tensor Core 发射、epilogue、调度等）；③ 共享 B 只减少 B 的重复搬运，A 的加载量与回写量都随输出规模线性增长，这部分无法被该机制削减。
 
-### 4.3 基准条件与可比性边界
+### 4.3 模块三：基准条件
 
 #### 4.3.1 概念说明
 
-性能数字不是内核的属性，而是「内核 × 测量条件」的属性。同一份内核在不同条件（时钟、缓存状态、迭代次数、问题规模）下可以测出差异可观的数字，因此一张严谨的性能表必须随附条件说明与可比性边界。本模块把书中这张表的边界逐条列出，并对接附录的基准协议，使你能规划自己的复测。
+性能表脚注的最后一句话划定了数字的适用范围："这些数字来自一次 B200 参考运行，用于在本教程的版本之间做同条件比较，而非代表其他问题规模或环境下的峰值性能。"这句话把两种主张分开：
 
-书中声明的测量条件（[chapter_gemm_advanced/index.md:863-864](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L863-L864)）：
+- **版本间比较**（本书的用法）：所有版本同机、同规模、同协议测量，除内核外其余变量全部固定，除法才有意义。
+- **峰值性能主张**（不是本书的用法）：断言"这个内核能达到 X TFLOPS"，需要额外论证问题规模、时钟、缓存状态等条件，且通常要在多个规模下扫点。
 
-- 硬件：NVIDIA B200（内核中 `SM_COUNT = 148`）；
-- 问题：M=N=K=4096，fp16 输入（fp16 输出、fp32 累加）；
-- 时钟：锁定（locked clocks），排除动态调频漂移；
-- 迭代：每个被测版本 1000 次计时迭代；
-- 协议：遵循附录 `chap_benchmarking` 的完整流程。
+要让自己的复测可与书中数字对话，或者让自己的两个内核版本可比，就必须控制一组变量。附录 `chap_benchmarking` 把这套纪律总结为：测量与诊断分开、计时前先验证正确性、明确计时边界、选对计时器、保持条件一致、记录环境版本。本模块把这些要求落成一份可勾选的清单。
+
+其中两个条件值得单独解释：
+
+- **锁定时钟（locked clocks）**：GPU 默认按温度与功耗动态调频。若不锁定，先测的版本可能在冷机高频下运行、后测的在热机降频下运行，测量顺序本身引入系统偏差。
+- **1000 次计时迭代**：单次计时含启动抖动，多次迭代取统计量才能稳定。迭代次数与预热（warm-up）预算配套——预热不足时前几轮结果仍在下降，附录要求"增加 warm-up 直到早期轮次停止漂移"。
 
 #### 4.3.2 核心流程
 
-**可比性边界**（正文中三条明确声明）：
+复现这套端到端实验的协议流程：
 
-1. **Step 1 的 70 ms 不是单 tile `hgemm_v1` 的运行结果**，而是「同样串行数据路径的全矩阵实现」的基线；入门章用较小问题讲解 Steps 1–3，本表的 Step 1/3 行测的是对应的全矩阵实现（L879）。
-2. **Step 2 只计算一个输出 tile**，与全矩阵结果不可直接比较；Steps 5/6 是 TMA 版与 warp 特化版之间的中间版本，机制都被 Step 7 保留，故表中用虚线、不给出相对 Step 1 的累计加速比（L881）。
-3. **所有有测量值的行使用同一 M=N=K=4096 问题**，因此这些行可以直接比较（L879）；数字来自单次 B200 参考运行，目的是在相同条件下比较本书各版本，不代表其他问题规模或环境下的峰值性能（L883）。
-
-**附录协议的可操作要点**（复测时逐项落实）：
-
-- **正确性先行**：计时前先构造代表性输入、同步、与参考实现（fp32 计算后转目标 dtype）在声明容差下断言一致（附录 L28–L36、参考代码 L38–L52）。
-- **定义计时边界**：明确一次被测操作包含哪些 kernel/拷贝/状态复位，编译、输入构造、分配是否在界外；只有做相同工作的实现才可直接比较（L63–L69）。
-- **选择计时器**：CUDA events 量测 GPU 流内时间；同步墙钟计时器量测单次调用的端到端延迟（L77–L86）。
-- **warm-up 与重复预算**：附录示例 `warmup_calls=500`、`repeat=100`、`rounds=5` 来自 B200 上的稳定性测试——50 次预热后结果仍在下降、500 次后趋稳，`repeat=100` 比 `repeat=10` 稳定；若计时随运行时长系统性漂移，检查温度、功耗与时钟（L133–L160）。
-- **L2 状态控制**：书中使用 `tvm.tirx.bench`，它在每次被测调用前写一个 256 MiB 缓冲以削弱上一次调用残留 L2 的复用，事件区间只覆盖被测调用；参数 `warmup=25`、`repeat=100`、`rounds=5`、`cooldown_s=1.0`（L166–L198）。
+1. **固定问题与数值语义**：`M=N=K=4096`，fp16 输入/输出、fp32 累加，转置约定、对齐与容差全版本一致。
+2. **正确性先行**：每个版本先与同一参考实现（如 fp32 计算后再转 fp16 的 PyTorch GEMM）在声明容差下断言通过，才允许进入计时；参考计算与比对放在计时区间之外。
+3. **定义计时边界**：明确被测操作只含内核本身（不含输入构造、分配、编译），所有版本用同一边界。
+4. **选择计时器**：书用 `tvm.tirx.bench`（CUDA events 计时；每次测量前写 256 MiB 缓冲以减少 L2 残留复用，该写在计时区间之外）。
+5. **统一预算**：预热与重复预算（如每版本 1000 次计时迭代）、轮数、冷却时间对所有版本相同。
+6. **控制环境**：锁定时钟；多版本对比时交替测量顺序，避免某版本总是"更冷"或"更热"。
+7. **记录与报告**：记录 GPU、驱动、CUDA、框架、编译器版本与 dtype、形状、时钟、功耗设置；报告每轮结果并说明汇总用的是均值还是中位数。
 
 #### 4.3.3 源码精读
 
-**（1）条件声明与虚线行的解释。** [chapter_gemm_advanced/index.md:879-883](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L879-L883)：这三段是全表最重要的「脚注」——L879 说明 70 ms 的来历与「同问题规模可直接比较」的前提；L881 解释 Step 2/5/6 为何是虚线；L883 声明数字来自单次参考运行及其适用范围。
+表中给出的测量条件：
 
-**（2）正确性先行的检查单。** [appendix/benchmarking_gpu_kernels.md:28-58](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L28-L58)：四步验证（构造输入→运行并同步→与参考按容差比较→有状态内核先复位），参考实现用 `torch.set_float32_matmul_precision("highest")` 防 fp32 参考内部降精度，且参考计算与比较都放在计时区外。
+> [chapter_gemm_advanced/index.md:862-864](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L862-L864)
 
-**（3）计时边界的定义。** [appendix/benchmarking_gpu_kernels.md:63-90](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L63-L90)：同一算子可有三种边界（单 kernel 的流内时间 / 完整算子的流内时间 / 单次调用端到端延迟），实现之间只有边界相同才可比；CUDA events 与墙钟计时器各有适用面。
+"测量使用 NVIDIA B200、`M=N=K=4096`、fp16 输入、锁定时钟、每个被测版本 1000 次计时迭代；新的测量与复现尝试应遵循 `chap_benchmarking` 的完整协议。"——这一句同时给出五个测量条件与协议出处。
 
-**（4）warm-up/rounds 的稳定性依据与 bench 的 L2 处理。** [appendix/benchmarking_gpu_kernels.md:133-160](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L133-L160) 与 [appendix/benchmarking_gpu_kernels.md:166-198](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L166-L198)：前者给出手工 CUDA events 基准与「何时增大预算」的经验规则；后者给出 `tvm.tirx.bench` 的用法与 256 MiB 写、冷却时间的语义，并要求所有被测实现使用相同设置。
+计时前先验证正确性：
 
-#### 4.3.4 代码实践：拟定复测变量清单
+> [appendix/benchmarking_gpu_kernels.md:28-36](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L28-L36)
 
-**实践目标**：把 4.3.2 的协议要点转成一份复现本表实验前必须「钉死」的变量清单（纯阅读与写作实践，无需 GPU）。
+附录要求四步：构造有代表性的输入（含边界情形）、运行实现并同步使 GPU 工作完成、与参考实现按声明容差比对、若内核原地修改状态则在每次检查前恢复同一初始状态。对自定义 GEMM，参考可取 fp32 计算后转目标 dtype 的 PyTorch GEMM，且参考计算与结果比对保持在计时区间之外。
+
+书中使用的计时工具：
+
+> [appendix/benchmarking_gpu_kernels.md:166-198](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L166-L198)
+
+本书用 TVM 的 `tvm.tirx.bench` 处理预热、重复计时与统计：被测函数只负责发起已准备好的实现，输入、输出与工作区都留在计时区间之外；与手动暖缓存示例不同，`bench` 在每次被测调用前写一个 256 MiB 缓冲以减少上一次调用残留在 L2 中的数据被复用，然后记录独立的 CUDA event 区间。`warmup`/`repeat` 是毫秒预算（经短校准换算成调用次数），`rounds=5` 跑五轮、`cooldown_s=1.0` 在每轮前暂停；`impls` 存五轮均值，`round_samples` 存逐轮结果。对比实现时须用同一组设置。
+
+条件一致性与交替测量：
+
+> [appendix/benchmarking_gpu_kernels.md:338-369](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L338-L369)
+
+这一节要求：保留每轮结果并说明汇总是中位数还是均值；结果随轮次持续漂移时先检查预热、温度与时钟状态；对比实现时交替测量顺序，避免某实现总在更冷或更热的设备上测；全程用同一种缓存策略（手动例子重复用同一组矩阵代表暖缓存负载，TVM 的 event/Proton 计时器则每次测量前写 256 MiB 缓冲减少 L2 复用——该写在计时区间外）；同时对齐数值语义（dtype、布局、转置约定、对齐、累加精度、容差等）、被测范围（是否含分配、转换、状态复位等）与调优条件（workspace 上限、是否允许按形状自动调优及搜索预算）；最后记录 GPU、驱动、CUDA、框架、编译器版本与 dtype、形状、时钟、功耗设置，库基线还要记录库版本、所选算法与 workspace。
+
+延迟到吞吐的换算：
+
+> [appendix/benchmarking_gpu_kernels.md:371-379](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L371-L379)
+
+附录给出公式 \(\text{TFLOP/s} = 2 \times M \times N \times K / t_{\mu s} / 10^{6}\)，并强调分子计的工作量与计时边界必须描述同一件事：若计时区间覆盖"GEMM+ReLU"完整操作，除出来的只是有效吞吐，要报 GEMM 内核自身的 TFLOP/s 就必须让计时区间只含 GEMM。
+
+#### 4.3.4 代码实践
+
+**实践目标**：为"在 B200 上复现九步性能表"写出一份变量控制清单。这是纯文档型实践，无需 GPU；写清单的过程就是检验你是否理解协议的过程。
 
 **操作步骤**：
 
-1. 通读 [appendix/benchmarking_gpu_kernels.md:28-198](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L28-L198)，边读边把每个影响数字的设定抄进下表。
-2. 为每一项填写「书中的取值」与「你的复测取值/验证方式」。参考答案如下（示例表格，可直接采用）：
+1. 通读 [appendix/benchmarking_gpu_kernels.md:338-369](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L338-L369) 的"Keep Benchmark Conditions Consistent"一节。
+2. 对照下表逐项写出你的复现取值（下表"依据"列标注每项在书中的出处）：
 
-| 类别 | 变量 | 书中取值 | 复测时要做什么 |
-|---|---|---|---|
-| 硬件 | GPU 型号 / SM 数 | B200，SM_COUNT=148 | 记录 `torch.cuda.get_device_name()`，非 B200 时 SM_COUNT 需重设 |
-| 软件 | TVM / cuda-bindings / torch 版本 | apache-tvm==0.26.0（u1-l3） | 固定版本并记录 |
-| 问题 | M、N、K 与 dtype | 4096³，fp16 入 / fp16 出 / fp32 累加 | 保持一致，否则不可比 |
-| 内核 | tile 参数 | BLK_M=N=K=128/128/64、PIPE_DEPTH 等各 Step 不同 | 与书对齐，逐 Step 记录 |
-| 正确性 | 参考与容差 | fp32 参考转 fp16，先验证再计时 | 每版本计时前跑一遍断言 |
-| 时钟 | 锁频状态 | locked clocks | 确认锁定；不锁则记录漂移 |
-| 计时 | 计时器 | CUDA events（附录协议） | 界定计时边界并全程一致 |
-| 统计 | warm-up / repeat / rounds | 表声明 1000 次计时迭代；附录示例 500/100/5 并给出稳定性判据 | 先做稳定性测试再定预算 |
-| 缓存 | L2 状态 | bench 每次调用前写 256 MiB 削弱残留复用 | 用 `tvm.tirx.bench` 或等效 flush |
-| 参考 | cuBLAS 对照 | 同条件同规模测得 0.094 ms | 同一脚本内测，勿跨次比较 |
+| 变量类别 | 要固定的内容 | 依据 |
+|---------|-------------|------|
+| 硬件与环境 | GPU 型号（B200）、驱动、CUDA、TVM/PyTorch 版本，全部记录 | 表格脚注 L862-864；附录 L366-369 |
+| 问题与数值语义 | M=N=K=4096；fp16 输入输出、fp32 累加；D=ABᵀ 约定；容差 | L862-864；附录 L357-359 |
+| 正确性门槛 | 每版本先对同一 fp32 参考断言通过再计时；比对在计时区间外 | 附录 L28-36 |
+| 计时边界 | 只含内核调用；输入构造、分配、编译、参考比对全部在外 | 附录 L63-69 |
+| 计时器与预算 | `tvm.tirx.bench`（timer="event"）；预热/重复预算、轮数、冷却时间全版本一致；1000 次计时迭代 | L862-864；附录 L166-198 |
+| 时钟与热状态 | 锁定时钟；结果随轮次漂移时检查温度/功耗/预热 | L862-864；附录 L344-347 |
+| 缓存策略 | 统一采用 bench 的 256 MiB 预写（或声明暖缓存），不混用 | 附录 L349-356 |
+| 测量顺序 | 九个版本交替测量，不让某版本总在更冷/更热设备上 | 附录 L346-347 |
+| 报告口径 | 保留逐轮结果，声明均值/中位数；TFLOPS 附延迟与工作量口径 | 附录 L344-345、L381-390 |
+| 库基线 | cuBLAS 记录库版本、所选算法、workspace | 附录 L366-369 |
 
-3. 把清单保存下来，综合实践会直接引用它。
+3. 在清单末尾写一段"可比性声明"：本次复现结果仅用于同条件下版本间比较，不构成对其他问题规模或环境的峰值性能主张（呼应 [chapter_gemm_advanced/index.md:883](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L883)）。
 
-**需要观察的现象**：清单中任何一行改变（例如换问题规模、不锁时钟、去掉 L2 flush），测出的绝对耗时都会偏离表中数值——这本身就是「性能数字是条件的函数」的验证。
+**需要观察的现象**：无运行现象；成果是清单文档本身。可自查的检验标准：清单中每一项都能指向附录或正文的一个具体条目，且没有一项是"凭感觉"加的。
 
-**预期结果**：一份 10 行左右的受控变量表，其中「书中取值」一列全部能回溯到本讲引用的源码行；若某项找不到出处，应标注「待确认」而不是猜测。
+**预期结果**：清单覆盖上表十类变量；若你的清单出现附录没有依据的条目（例如"必须关闭其他进程"），要么找到书中依据，要么标注为"本讲义补充建议"。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么表中 Step 2、5、6 用虚线，而不是补测一个数字？
+**练习 1**：为什么协议要求"锁定时钟"，而且对比多个实现时要交替测量顺序？
 
-**答案**：Step 2 的内核只计算一个输出 tile（128×128），与全矩阵结果不同工作量，给了数字反而诱导错误比较；Steps 5/6 是 Step 4 与 Step 7 之间的中间形态，其机制（双缓冲、持久调度）都被 Step 7 完整保留，区间端点已足以归因。虚线是把「不可比/不必要」显式化，比填一个误导性数字更严谨。
+**答案**：GPU 会按温度与功耗动态调频，不锁定时钟时，测量顺序会系统性偏向先测的版本（冷机高频）或后测的版本；附录还要求结果随轮次持续漂移时检查预热、温度与时钟状态（[appendix/benchmarking_gpu_kernels.md:344-347](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L344-L347)）。交替顺序保证没有任何实现总在更冷或更热的设备状态下被测量。
 
-**练习 2**：有人在你面前测得 hgemm_v9 为 0.15 ms，声称「书里的 0.094 ms 不可复现」。请列出至少三个应当先核对的变量。
+**练习 2**：手动 CUDA events 示例与 `tvm.tirx.bench` 的缓存策略有何不同？为什么这属于"必须统一"的条件？
 
-**答案**（任选三个即可）：①是否锁定时钟、GPU 温度/功耗状态；②warm-up 与迭代预算是否按附录做了稳定性测试（结果仍在下降说明预热不足）；③L2 缓存状态是否用 256 MiB 写做了削弱，还是热缓存反复复用同一输入（方向相反：热缓存通常更快而非更慢，但改变了可比性）；④TVM/cuBLAS 版本与 cuBLAS 对照是否同脚本同条件；⑤问题规模与 dtype 是否为 4096³ fp16；⑥SM_COUNT 是否按实际 GPU 调整。在核对之前，「不可复现」的结论不成立。
+**答案**：手动示例反复复用同一组矩阵，代表暖缓存工作负载（实际命中率还取决于数据总量与缓存容量）；`bench` 在每次被测调用前写 256 MiB 缓冲以减少上一次调用残留在 L2 的复用，该写在计时区间之外（[appendix/benchmarking_gpu_kernels.md:349-356](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L349-L356)）。GEMM 这类大规模访存内核对 L2 残留很敏感，若两个版本用不同缓存策略测，差异可能来自缓存而非内核。
 
-**练习 3**：书中说「每个被测版本 1000 次计时迭代」，而附录示例是 `repeat=100`、`rounds=5`（共 500 次被测调用）。两者矛盾吗？
+**练习 3**：报告"Step 9 达到约 1459 TFLOP/s"时，按附录要求还应同时交代什么？
 
-**答案**：不矛盾。表格声明的是该实验实际采用的迭代规模；附录给出的是一个可运行的示例参数化，并附稳定性判据（预热加到不再漂移、变异大则加 repeat 或 rounds）。附录的角色是教会你「如何为你的负载确定预算」，而不是规定唯一数值；关键是同一张表内的所有版本用同一套设置测出。
+**答案**：附上底层延迟测量（0.094139 ms）并说明工作量如何计数：分子 \(2 \times 4096^3\) 是完整稠密 GEMM 的工作量，计时区间必须只覆盖该内核；若计时边界覆盖了更多操作（如 epilogue 之外的准备），得到的只是"有效吞吐"，须另行命名（[appendix/benchmarking_gpu_kernels.md:381-390](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/appendix/benchmarking_gpu_kernels.md#L381-L390)）。
 
 ## 5. 综合实践
 
-**任务**：把本讲三个模块串成一次完整的「读数—归因—复测规划」演练。
+**任务**：制作一份"九步 GEMM 优化性能分析报告"，把本讲三个模块串起来。全程无需 GPU。
 
-**步骤**：
+**第一步：重绘曲线并扩展标注。** 把 `img/scripts/gen_gemm_perf.py` 复制到讲义目录，改编为：① 加入 Step 1 基线（70 ms）的柱子；② 柱顶同时标注耗时与 TFLOPS；③ 输出路径指向讲义目录。运行得到 `my_gemm_perf.png`。
 
-1. **重绘性能曲线**。把 `img/scripts/gen_gemm_perf.py` 复制到临时目录（例如 `/tmp/gemm_perf_copy.py`），将 `plt.savefig('../gemm_perf.png', ...)` 一行改写为输出到你自己的路径（避免覆盖仓库已检入的 `img/gemm_perf.png`），确认 `matplotlib` 已安装后运行。预期打印 `Saved gemm_perf.png`，得到与书中间图一致的对数轴柱状图（待本地验证：本讲义写作环境未执行该命令）。可选加强：在 4.2.4 归因脚本基础上，为四个区间在图上叠加箭头或区间标注。
-2. **计算四个比较区间的加速比**。运行 4.2.4 的脚本，核对 141.7× / 2.18× / 2.19× / 1.10× 四个值，并与正文 L887–L890 的约数（142× / 2.2× / 2.2× / 10%）对照。
-3. **写一段归因分析**（200 字左右）。要求覆盖：区间 1 的混合属性与 TMA 子区间的隔离估算；区间 2 的供给轴与流水线稳态解释；区间 3、4 的复用轴与算术强度证据（64→128 FLOP/byte、×4/3）；最后用书中两个反复出现的目标（别让 Tensor Core 等数据、让每个上片 tile 做更多计算）收束。
-4. **列出复测变量清单**。把 4.3.4 的表格按你自己的环境补全「复测取值」一列；无 Blackwell GPU 的读者，为每一项标注替代方案（如改用源码推演 + 记录环境限制清单，参照 u1-l3 的做法）。
-5. **（可选，需 Blackwell GPU）** 按 4.3 的协议编译运行书中任一 Step 内核：先做正确性断言（fp32 参考 + `assert_close`），再用 CUDA events 或 `tvm.tirx.bench` 计时，与表中对应行比较并解释偏差。此步结果待本地验证。
+**第二步：算账。** 在同一脚本中打印：六个实测点的累计加速比、四个官方区间的区间加速比、每个点的 TFLOPS 及其占约 2 PFLOP/s 峰值的百分比（Step 9 ≈ 73%，待本地验证）。
 
-**交付物**：一张自绘性能图、一份四区间加速比与归因笔记、一份受控变量清单——这三样正是你日后评估自己内核时的标准装备。
+**第三步：写归因分析。** 对每个区间写 3–5 句话：该区间新增了哪些机制（引用本章内核源码的具体位置，如 4.2.3 列出的角色表、切分表、字节公式）、机制作用于哪条资源通道（数据搬运 / 执行重叠 / 片上复用）、有没有定量验证（如 Step 8 的 AI 64→128 FLOP/byte 验算）。特别要求：区间 1 必须说明"不能全归 TMA"，并补充你自己的 Step 3→4 观察（≈108.6×）。
+
+**第四步：附变量清单与可比性声明。** 把 4.3.4 的十类变量清单与"同条件版本间比较、非峰值主张"的声明附在报告末尾，说明若要在 B200 上复现，须用 `tvm.tirx.bench` 按附录协议执行。
+
+**预期成果**：一张扩展版性能图、一张四区间加速比与 TFLOPS 表、一段逐区间归因文字、一份复现变量清单。完成后你就把九个版本从"一列数字"还原成了"一组机制因果链"，这正是本讲想训练的能力。
 
 ## 6. 本讲小结
 
-- 书中九步性能表在 B200、M=N=K=4096、fp16、锁定时钟、每版本 1000 次计时迭代的条件下测得：70 ms（Step 1）→ 0.094 ms（Step 9），累计约 744×，与 cuBLAS 参考持平。
-- 四个比较区间：Step 1→4 约 142×（并行 + TMA 的混合增益）、Step 4→7 约 2.2×（重叠：流水线 + 持久调度 + warp 特化）、Step 7→8 约 2.2×（复用：算术强度 64→128 FLOP/byte）、Step 8→9 约 10%（共享 staged B）。
-- 归因纪律：区间内机制叠加时不能把增益记在单一机制头上；Step 3 的中间测量点可隔离出 TMA 子区间约 108.6×；两个 2.2× 分别属于供给轴与复用轴，物理原因不同。
-- 可比性边界：Step 1 的 70 ms 是全矩阵串行基线而非单 tile `hgemm_v1` 运行值；Step 2 只算一个 tile、Steps 5/6 是被 Step 7 保留的中间形态，故为虚线；所有有值行同问题规模、可直接比较；数字来自单次参考运行，不代表其他规模的峰值。
-- 图表脚本 `gen_gemm_perf.py` 携带六个测量点的精确耗时（Step 3=53.642159 ms … Step 9=cuBLAS=0.094139 ms），对数轴是三个数量级跨度下的必然选择。
-- 性能数字是「内核 × 测量条件」的函数：复测需钉死硬件、版本、问题规模、tile 参数、时钟、计时器、warm-up/repeat 预算、L2 状态与 cuBLAS 对照等变量，附录给出了每项的可操作协议。
+- 九步性能表来自一次 B200 参考运行：`M=N=K=4096`、fp16、锁定时钟、每版本 1000 次计时迭代；70 ms → 0.094 ms（约 744×），Step 9 与 cuBLAS 实测时间相同。
+- 表中 Step 2/5/6 用破折号是可比性设计：Step 2 只算单 tile，Step 5/6 的机制都保留在 Step 7 中；70 ms 是全矩阵串行基线，不是单 tile `hgemm_v1`。
+- 书只定义四个可归因区间：1→4 约 142×（K 循环+分块+多 CTA+TMA 的合计，不能全归 TMA）、4→7 约 2.2×（流水线+持久调度+warp 特化）、7→8 约 2.2×（cluster 复用，AI 64→128 FLOP/B）、8→9 约 10%（共享 B，AI ×4/3）。
+- 两条反复出现的优化主线：别让 Tensor Core 等数据（Step 4–7 的供给与重叠），每片搬上芯片的数据多算几次（Step 8–9 的复用）。
+- 复现或比较必须控制的条件：正确性先行、统一计时边界与计时器、锁定时钟、统一缓存策略与预算、交替测量顺序、记录环境版本；结论只构成同条件版本间比较，不构成峰值性能主张。
+- 书中数字可用纯 Python 复算与重绘：`gen_gemm_perf.py` 携带六个精确数据点，改编时须把输出路径改到仓库之外，避免覆盖检入图片。
 
 ## 7. 下一步学习建议
 
-- **u14-l1（Flash Attention 4 算法结构）**：GEMM 主线到此收官；FA4 把本讲的全部机制（TMA、tcgen05、TMEM、多角色流水线，尤其是 Step 9 的多消费者结构）迁移到 attention 这一新算子上，是检验你是否真正吃透九步的最好考场。
-- **u15-l4 / u15-l5（基准测试与剖析）**：本讲只用了附录的测量协议；这两讲将系统讲 CUDA events 计时脚本、Proton、Nsight Systems 与 Nsight Compute，让你从「读别人的表」进阶到「产出并诊断自己的表」。
-- **u16-l2（capstone）**：若想动手，从 GEMM Step 9 或 FA4 出发设计变体，用本讲的变量清单与 u15 的基准流程做完整的「设计→实现→验证→评测」闭环。
-- 源码层面，建议回头重读 [chapter_gemm_advanced/index.md:862-902](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys/blob/0fdad075417d347e2171affadf9c1b07cd54f87f/chapter_gemm_advanced/index.md#L862-L902) 一至两遍：第一遍核对数字，第二遍体会「每个区间一句话归因」的写法——这是你自己写优化报告时值得模仿的文体。
+- **进入 Part IV（Flash Attention 4）**：FA4 把本讲的全部技术（TMA、tcgen05、TMEM、多角色流水线、cluster 复用）综合到一个带在线 softmax 的真实内核中，从 u14-l1 的算法结构开始。
+- **补齐基准与剖析工具链**：本讲只用到附录的测量协议；u15-l4 至 u15-l6 将覆盖 CUDA events 计时脚本、Proton/Nsight Systems/Nsight Compute 三级剖析与 IKET 内核内标注，让你不仅会测总数，还能定位时间花在哪。
+- **源码延伸阅读**：把 `appendix/benchmarking_gpu_kernels.md` 的 "Keep Benchmark Conditions Consistent" 与 "Convert Latency to Throughput" 两节通读一遍；再回看 `chapter_gemm_basics` 与 `chapter_gemm_async`，对照本讲表格体会 Step 1–6 各自解决的是表中哪一段。
+- 若你手头有 Blackwell GPU：按第 5 节综合实践的清单规划一次真实复测，用 `tvm.tirx.bench`（timer="event"）逐版本计时，与书中数字对照并分析差异来源。
