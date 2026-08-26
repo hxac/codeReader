@@ -175,11 +175,13 @@ A5 实现的三条分流路径（位于 pkg_inc 内部头）：
 
 RDMA 底层入口（下一讲 u6-l5 的入口，这里只看接缝）：
 
-> [pkg_inc/pto/comm/async/rdma/rdma_async_intrin.hpp:147-159](https://github.com/hw-native-sys/pto-isa/blob/be5ccb765a4ce5d14ca5da8b0e2f182d7f003369/pkg_inc/pto/comm/async/rdma/rdma_async_intrin.hpp#L147-L159) — 本版本新增的 `WriteNotify` 重载：按 `ctx.backend` 分发到具体网卡后端（HNS1825），把 peer 经 `MakeExecContext(session, peer)` 注入执行上下文。
+> [pkg_inc/pto/comm/async/rdma/rdma_async_intrin.hpp:172-177](https://github.com/hw-native-sys/pto-isa/blob/be5ccb765a4ce5d14ca5da8b0e2f182d7f003369/pkg_inc/pto/comm/async/rdma/rdma_async_intrin.hpp#L172-L177) — 本版本新增的 `WriteNotify(session, ..., peer)` 重载：先经 `MakeExecContext(session, peer)`（[pkg_inc/pto/comm/async/rdma/rdma_async_intrin.hpp:100-105](https://github.com/hw-native-sys/pto-isa/blob/be5ccb765a4ce5d14ca5da8b0e2f182d7f003369/pkg_inc/pto/comm/async/rdma/rdma_async_intrin.hpp#L100-L105)，把 session 的 contextGm/rdmaBackend 与 peer 打包成 `RdmaExecContext`）注入执行上下文，再委托给 ctx 版实现。
+
+> [pkg_inc/pto/comm/async/rdma/rdma_async_intrin.hpp:147-159](https://github.com/hw-native-sys/pto-isa/blob/be5ccb765a4ce5d14ca5da8b0e2f182d7f003369/pkg_inc/pto/comm/async/rdma/rdma_async_intrin.hpp#L147-L159) — ctx 版 `WriteNotify`：按 `ctx.backend` switch 分发到具体网卡后端（当前仅 HNS1825），未编译进二进制的后端返回 `kRdmaBackendUnavailableError` 编码句柄。
 
 装配层解析方式的变化：
 
-> [include/pto/comm/pto_comm_instr_impl.hpp:23-25](https://github.com/hw-native-sys/pto-isa/blob/be5ccb765a4ce5d14ca5da8b0e2f182d7f003369/include/pto/comm/pto_comm_instr_impl.hpp#L23-L25) 与 [include/pto/comm/pto_comm_instr_impl.hpp:42-44](https://github.com/hw-native-sys/pto-isa/blob/be5ccb765a4ce5d14ca5da8b0e2f182d7f003369/include/pto/comm/pto_comm_instr_impl.hpp#L42-L44) — A2A3 与 A5 两个分支里，`TPutAsyncNotify.hpp` 都改为 `"../../../pkg_inc/pto/comm/.../TPutAsyncNotify.hpp"` 相对路径包含。原因：按 CANN 交付约定，不属于对外交付面的内部头放进 `pkg_inc/`，装配层必须用相对路径「逃出」include/ 才能找到它。这是 u1-l3「pkg_inc 存在不暴露的内部头」在通信模块的具体体现。
+> [include/pto/comm/pto_comm_instr_impl.hpp:24](https://github.com/hw-native-sys/pto-isa/blob/be5ccb765a4ce5d14ca5da8b0e2f182d7f003369/include/pto/comm/pto_comm_instr_impl.hpp#L24) 与 [include/pto/comm/pto_comm_instr_impl.hpp:43](https://github.com/hw-native-sys/pto-isa/blob/be5ccb765a4ce5d14ca5da8b0e2f182d7f003369/include/pto/comm/pto_comm_instr_impl.hpp#L43) — A2A3 与 A5 两个分支里，`TPutAsyncNotify.hpp` 都改为 `"../../../pkg_inc/pto/comm/<arch>/async/TPutAsyncNotify.hpp"` 相对路径包含（注意 a2a3 的 notify 头同样位于 pkg_inc，与本讲源码地图列出的 A5 版对应）。原因：按 CANN 交付约定，不属于对外交付面的内部头放进 `pkg_inc/`，装配层必须用相对路径「逃出」include/ 才能找到它。这是 u1-l3「pkg_inc 存在不暴露的内部头」在通信模块的具体体现。
 
 #### 4.2.4 代码实践
 
