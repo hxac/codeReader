@@ -1,0 +1,401 @@
+# 量化与打包落盘：qpack_kc_vt、quant_Ktensor 与 pack 存储
+
+## 1. 本讲目标
+
+上一讲（u4-l2）我们读完了量化打包的第一步——分组 max/min 归约原语，得到了每个线程寄存器里的 `channel_max` / `channel_min`。本讲接过这份产出，读完 QPack 的「下半场」：
+
+1. **写出 scale/zero 与反量化公式的对应关系**：从 `qpack_kc_vt::apply` 中提取完整的量化公式 \( q = \mathrm{clip}(\mathrm{round}((x - \mathrm{zero})/\mathrm{scale}),\ 0,\ \mathrm{max\_val}) \)，并数学证明它与解码端 `dequantize.h` 里 `__hfma2(src, scale, zero)` 的反量化互为逆运算，误差上界为 \( \mathrm{scale}/2 \)。
+2. **解释 qpack_kc_vt 结构体按 num_bits 特化的原因**：2-bit 与 4-bit 在量化目标区间、每个 uint16 的打包个数、位操作展开序列上都不同，模板特化让这些差异全部变成编译期常量。
+3. **描述 K 与 V 打包存储方向（行/列）的差异**：K 沿序列（行）方向打包进 `k_pack (b, s/pack, h, d)`，V 沿通道（列）方向打包进 `v_pack (b, s, h, d/pack)`，以及为什么「一个 uint16 必须落在同一个量化组内」是贯穿 pack 与 dequant 的核心不变量。
+
+## 2. 前置知识
+
+- **仿射（非对称）量化**：把一组 FP16 数映射到 \([0, 2^{b}-1]\) 的整数。需要两个参数：`scale`（步长）与 `zero`（零点偏移）。本讲的 `zero` 直接取组内最小值 `min`，所以整数 0 对应组内最小元素。
+- **half（FP16）的位结构**：1 位符号 + 5 位指数 + 10 位尾数。十六进制 `0x6400` 表示 \( 2^{10} = 1024 \)（指数位 = 20，即 \(2^{20-15}\)；尾数为 0），且此时尾数最低位的权重恰好是 \( 2^{10-10} = 1 \)。这个性质是 LOP3 反量化的魔法基础。
+- **寄存器 fragment 与 MMA 布局**（u4-l1/u4-l2 已建立）：每个线程持有的数据不是连续内存块，而是按 Tensor Core 的 thread-value（TV）布局交错的分片 `tSrK` / `tSrV`，形状为 `(MMA=4, MMA_N, MMA_K)`；`size<0>` 是 atom 内 4 个元素，`size<1>` 是 N 方向实例数，`size<2>` 是 K 方向切片数。
+- **上一讲的归约产出**：`reduce_max` / `reduce_min` 之后，每个线程拿到自己那 4 个「参数属主」方向元素在全 CTA tile 范围内的极值，摘要索引为 `s = 4g + r`（`g` = 组号，`r` = atom 内行号）。
+- **pack/params 张量布局**（u2-l1 已建立）：`pack_nums = 16/num_bits`（4-bit 时一个 uint16 装 4 个值，2-bit 装 8 个）；`group_size` 决定 `*_params` 的形状与分组粒度。
+
+## 3. 本讲源码地图
+
+| 文件 | 角色 |
+| --- | --- |
+| [csrc/bit_decode/src/include/qpack.h](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h) | 本讲主角：量化计算本体 `qpack_kc_vt`（K 逐通道 + V 逐张量共用）、k-tensor 路线 `quant_Ktensor`、三个落盘函数 `pack_Kchannel_store` / `pack_Ktensor_store` / `pack_Vtensor_store` |
+| [csrc/bit_decode/src/include/dequantize.h](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/dequantize.h) | 解码端的镜像：`lop3_dequant` 把位流还原成「数值等于 q 的 half」，`dequant_kc_vt` 用 `__hfma2(src, scale, zero)` 完成仿射反量化；`load_params_*` 与本讲的 params 写出公式互逆 |
+| [csrc/bit_decode/src/flash_fwd_kernel.h](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h) | 调用现场：prefill 打包 kernel `compute_qpack_1rowblock` 内联展开三段式落盘；residual kernel 在残余攒满时封装调用同一套函数 |
+| [csrc/bit_decode/src/include/kernel_traits.h](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h) | 编译期常量：`pack_num`、`kBlockP`、`num_params`、`ElementKVPack = uint16_t` 等，决定本讲所有循环边界 |
+| [csrc/bit_decode/decode_api.cpp](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/decode_api.cpp) | 运行时 dispatch：确认当前仅 k-channel × group_size∈{32,128} 被启用，k-tensor 路线全部被注释 |
+
+当前仓库实际启用（dispatch 与 genfile 实例化成对解开，见 [decode_api.cpp:220-227](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/decode_api.cpp#L220-L227)）的量化配置只有 4 组，本讲所有例子都取自这里：
+
+| 配置 | pack_num（16/bits） | kBlockN | kBlockP | num_params | apply 内局部 pack_num | tScales_k_c 形状 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 4-bit, g128 | 4 | 128 | 32 | 1 | 4 | (4, 8) |
+| 4-bit, g32 | 4 | 128 | 32 | 4 | 1 | (16, 8) |
+| 2-bit, g128 | 8 | 256 | 32 | 2 | 4 | (8, 8) |
+| 2-bit, g32 | 8 | 256 | 32 | 8 | 1 | (32, 8) |
+
+（常量定义见 [kernel_traits.h:73](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L73) 与 [kernel_traits.h:460-487](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L460-L487)。）
+
+## 4. 核心概念与源码讲解
+
+### 4.1 量化数学本体：qpack_kc_vt::apply 的 scale/zero 与整数映射
+
+#### 4.1.1 概念说明
+
+`qpack_kc_vt` 是一个按 `num_bits` 特化的模板结构体，封装了「从组内极值到 uint16 位流」的全部数学。它的名字泄露了一个重要事实：**它是 K 逐通道（kc = K-channel）与 V 逐张量（vt = V-tensor）两种量化模式共用的同一个量化器**——函数内部永远对 fragment 的 `size<1>` 轴分组、对 `size<0>` 轴保持独立参数。由于 K fragment 与 V fragment 经不同的 MMA 装载后，`size<1>` 分别恰好是序列轴与通道轴（见 4.3 节的对照表），一个函数就同时实现了两种布局。
+
+为什么要特化成 `<2>` 和 `<4>` 两个版本？因为位宽改变了三件编译期事实：
+
+1. **量化目标区间**：`max_val = (1 << num_bits) - 1`，4-bit 是 15，2-bit 是 3；
+2. **每个 uint16 装的元素个数**：4 个还是 8 个，直接决定内层循环步长（`jj += 4` vs `jj += 8`）、打包的移位次数（4 次 `<<4 &0xF` vs 8 次 `<<2 &0x3`）与目标列缩进（`jj/4` vs `jj/8`）；
+3. **参数 fragment 的组织**：2-bit 时 `num_params_2 = num_params/2` 的修正（见源码中的 TODO 注释），影响 scale/zero 的索引步进。
+
+这些若是运行期变量，内层就会变成带分支的循环；模板特化让编译器生成完全展开、无分支的位操作序列——这是 CUDA kernel 里典型的「用模板换吞吐」手法。
+
+#### 4.1.2 核心流程
+
+对 fragment 的每个 k 切片（`for k in size<2>(src)`，即 head_dim 的 16 个通道一档）：
+
+```
+1. 归约（上一讲）：channel_max / channel_min ← reduce_max / reduce_min(src(_, _, k))
+2. 求参数（对每个摘要条目 i）：
+      range      = max_i - min_i
+      scale_inv  = range > 0 ? max_val / range : 0        # 量化端用乘法
+      scale      = 1 / scale_inv = range / max_val         # 存给解码端，half 精度
+      zero       = min_i                                    # 存给解码端，half 精度
+3. 量化（对每个元素 x = src(i, jj, k)，其组号 g = jj / pack_num）：
+      q = clip( round( (x - zero_g) * scale_inv_g ), 0, max_val )
+4. 打包（每 pack_num 个 q 压入一个 uint16，val0 在最低位段）：
+      4-bit: packed = q0 | q1<<4 | q2<<8 | q3<<12
+      2-bit: 依次 q0..q7，每个占 2 位
+5. 写入目标 fragment：dst(i, jj/pack_num, k) = packed
+```
+
+数学上，量化与解码端的反量化构成一对仿射变换：
+
+\[ q = \mathrm{clip}\Big(\mathrm{round}\big((x - \mathrm{zero}) \cdot \frac{\mathrm{max\_val}}{\mathrm{range}}\big),\ 0,\ \mathrm{max\_val}\Big), \qquad \hat{x} = q \cdot \mathrm{scale} + \mathrm{zero} \]
+
+互逆性证明（4.1.4 实践中会完整推导并数值验证）：对组内任意 \( x \in [\min, \max] \)，令 \( \Delta = x - \mathrm{zero} \in [0, \mathrm{range}] \)，则 clip 永不触发，\( |q - \Delta/\mathrm{scale}| \le 1/2 \)（round 到最近整数），于是
+
+\[ |\hat{x} - x| = |q\cdot\mathrm{scale} - \Delta| \le \mathrm{scale}/2 = \mathrm{range}/(2\cdot\mathrm{max\_val}) \]
+
+即 4-bit 的最坏误差是组极差的 1/30，2-bit 是 1/6。两个端点精确：\( x=\min \Rightarrow q=0 \Rightarrow \hat{x}=\min \)；\( x=\max \Rightarrow q=\mathrm{max\_val} \Rightarrow \hat{x}=\max \)。退化情形 `range == 0`（组内全是同一个值）也很优雅：`scale_inv = 0` 使得 \( q=0 \)，存下的 `scale = 0` 让反量化 \( \hat{x} = 0 \cdot q + \mathrm{zero} = \min \)，**精确还原**，同时避免了对 0 做除法。
+
+#### 4.1.3 源码精读
+
+先看 4-bit 特化的参数计算。`qpack_kc_vt<4>::apply` 的开头取常量、声明 per-channel 寄存器张量：
+
+- [qpack.h:222-230](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L222-L230)：`apply` 签名与局部常量——`max_val = 15`、`pack_num = size<1>(src)/num_params`（**局部** pack_num：每线程在 size<1> 轴上每个量化组占的列数，注意与 traits 里 `pack_num = 16/num_bits` 同名不同义，u4-l2 末尾已提醒过）、`channel_stride = size<0>(src) = 4`。`channel_max` 等 5 个张量用 `make_fragment_like<float>(scales_k(_, 0))` 分配在寄存器。
+
+- [qpack.h:233-252](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L233-L252)：**scale/zero 的诞生地**。对每个摘要条目算 `range`、`scale_inv = max_val/range`（带除零保护），然后把**倒数** `1/scale_inv` 作为真正的 scale 存进 `scales_k(i, k)`，`min_i` 作为 zero 存进 `zeros_k(i, k)`。两端各用一次乘法、零次除法——GPU 上除法远贵于乘法，量化端备好 `scale_inv`、解码端备好 `scale`，是刻意的分工。
+
+再看量化与打包本体：
+
+- [qpack.h:265-275](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L265-L275)：减 zero、乘 scale_inv。注意索引表达式 `channel_zeros(i + (jj)/pack_num * channel_stride)`——这正是上一讲摘要布局 \( s = 4g + r \) 的逆映射：`i` 是 atom 内行号 \( r \)，`jj/pack_num` 是组号 \( g \)，从 `s = i + g*4` 取回该组的 zero/scale_inv。
+
+- [qpack.h:277-281](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L277-L281)：`fminf(fmaxf(roundf(val), 0.0f), max_val)`——round 后双向 clamp。由上面的证明，组内数据其实永远落在 `[0, max_val]`，clamp 只是数值兜底。
+
+- [qpack.h:283-295](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L283-L295)：**打包落位**。从 `packed = 0` 开始，先 or 最高位段的 `val3` 再逐步左移，最终 `val0` 落在最低 4 位——即「最早的元素在最低 nibble」的小端约定；结果写入 `dst(i, jj/4, k)`，每 4 个连续 `size<1>` 列压缩成 1 个 uint16 列。
+
+2-bit 特化结构完全同构，差异点值得逐一看：
+
+- [qpack.h:111-118](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L111-L118)：`max_val = 3`；局部 `pack_num = 4/(num_params/2)`（带 `// TODO: check 4`）；`num_params_2 = size<1>(src) == 4 ? num_params/2 : num_params`（带 `// TODO: change name? seems hard code?`）。对主路径（prefill qpack kernel，`size<1> = 8`）这两个公式等价于 `size<1>/num_params`；`size<1> == 4` 的分支是为残余 kernel 的 fragment 形状预留的修正（residual kernel 细节见 u5-l4）。这两行 TODO 是作者自己标注的硬编码痕迹，读源码时要带着怀疑。
+
+- [qpack.h:145-211](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L145-L211)：量化循环 `jj += 8`，8 个值依次做减零、乘 scale_inv、round/clamp，然后 [qpack.h:190-209](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L190-L209) 用 8 次 `<<2 &0x3` 打包成一个 uint16，写入 `dst(i, jj/8, k)`。
+
+对外入口是一个薄分发器：[qpack.h:302-310](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L302-L310) 的 `qpack_Kchannel_Vtensor` 把调用转发给 `qpack_kc_vt<num_bits>::apply`——kernel 代码里看到的名字是它。
+
+最后看解码端的「另一半」。反量化分两步：位流 → 数值等于 q 的 half → 仿射还原。
+
+- [dequantize.h:59-98](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/dequantize.h#L59-L98) `lop3_dequant`：LO/HI 掩码配 `EX = 0x6400`，把一个 int32（两个 uint16 pack）里的 8 个 nibble 变成 8 个合法 half。位级数学：`(q & 0xF) | 0x6400` 的 half 值是 \( 1024 + q \)（尾数最低位权重为 1），`(q & 0xF0) | 0x6400` 是 \( 1024 + 16q \)。于是 lo 路径 `__hsub2(x, 0x6400)` 直接得到 q；hi 路径 `__hfma2(x, 1/16, -64)` 得到 \( (1024+16q)/16 - 64 = q \)（常量 `MUL = 0x2c00` = 1/16，`ADD = 0xd400` = −64，见 [dequantize.h:75-77](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/dequantize.h#L75-L77)）。输出恰好是「数值等于无符号整数 q 的 half」。LOP3 本身的指令级细节留给 u5-l3，本讲只需要这个结论。
+
+- [dequantize.h:329-384](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/dequantize.h#L329-L384) `dequant_kc_vt<4>::apply`：对 LOP3 产出的每个 half2 执行 [dequantize.h:372-375](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/dequantize.h#L372-L375) 的 `target_vec(...) = __hfma2(src_val[j], scales_vec(...), zeros_vec(...))`——即 \( \hat{x} = q\cdot\mathrm{scale} + \mathrm{zero} \)，与本节量化公式严格互逆。2-bit 版本在 [dequantize.h:257-323](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/dequantize.h#L257-L323)（`__hfma2` 在 [dequantize.h:291](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/dequantize.h#L291)），配套 `lop3_dequant_2bit` 在 [dequantize.h:104-166](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/dequantize.h#L104-L166)。
+
+一个值得注意的索引细节：dequant 端取参数用 `scales_vec(i + j/pack_num * channel_stride)`（[dequantize.h:373-375](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/dequantize.h#L373-L375)）——每前进 `pack_num` 个 packed 列才换一组 scale。这隐含着本讲最重要的不变量：**一个 uint16（乃至一个 uint32 fragment）里的所有槽位必须属于同一个量化组**，否则反量化会拿错 scale。这个不变量正是由 4.3 节的打包方向设计保证的。
+
+#### 4.1.4 代码实践：numpy 复刻 pack→dequant 往返
+
+本讲的主实践：把量化公式提取成独立 numpy 脚本，验证 pack→dequant 往返误差与理论上界 `scale/2` 一致。纯 CPU 可跑，不需要 GPU。
+
+**实践目标**：证明 `qpack_kc_vt::apply` 的量化与 `__hfma2(src, scale, zero)` 的反量化互逆，并量化误差量级。
+
+**操作步骤**（以下为示例代码，非项目原有代码）：
+
+```python
+# mini_qpack_rt.py —— 复刻 qpack_kc_vt<4>::apply 的 k-channel 量化与 dequant_kc_vt<4> 的反量化
+import numpy as np
+
+rng = np.random.default_rng(42)
+num_bits, group_size, S, D = 4, 128, 256, 128   # 模拟一个 head 的 K：S 个 token × D 个通道
+max_val = (1 << num_bits) - 1
+pack_num = 16 // num_bits                       # traits 级 pack_num：一个 uint16 装 4 个
+
+X = rng.standard_normal((S, D)).astype(np.float16)
+
+# ---- 1. 分组极值与 scale/zero（对应 qpack.h:233-252）----
+n_groups = S // group_size
+Xg = X.reshape(n_groups, group_size, D)
+maxv, minv = Xg.max(axis=1), Xg.min(axis=1)                  # reduce_max / reduce_min 的产出
+range_ = (maxv - minv).astype(np.float32)
+scale_inv = np.where(range_ > 0, max_val / range_, 0).astype(np.float32)
+scale = np.where(scale_inv == 0, 0, 1.0 / scale_inv).astype(np.float16)   # 存“真 scale”
+zero = minv.astype(np.float16)
+
+# ---- 2. 量化（对应 qpack.h:265-281）：q = clip(round((x-zero)*scale_inv), 0, max_val) ----
+g = np.arange(S) // group_size
+q_raw = (X.astype(np.float32) - zero[g].astype(np.float32)) * scale_inv[g]
+q = np.clip(np.floor(q_raw + 0.5), 0, max_val).astype(np.uint16)   # floor(x+0.5)≈CUDA roundf
+
+# ---- 3. 打包（对应 qpack.h:283-294）：val0 在最低 nibble ----
+packed = np.zeros((S // pack_num, D), dtype=np.uint16)
+for j in range(pack_num):
+    packed |= q[j::pack_num] << (num_bits * j)
+
+# ---- 4. 反量化（对应 dequantize.h:372-375 的 __hfma2(src, scale, zero)）----
+q_back = np.zeros((S, D), dtype=np.uint16)
+for j in range(pack_num):
+    q_back[j::pack_num] = (packed >> (num_bits * j)) & max_val
+Xh = (q_back.astype(np.float16) * scale[g] + zero[g]).astype(np.float16)
+
+# ---- 5. 统计 ----
+err = np.abs(Xh.astype(np.float32) - X.astype(np.float32))
+bound = (scale[g].astype(np.float32) / 2).max()
+print(f"max  abs err = {err.max():.6f}   (理论上界 scale/2 = {bound:.6f})")
+print(f"mean abs err = {err.mean():.6f}")
+assert err.max() <= bound + 1e-3, "超出理论舍入上界！"
+```
+
+运行：`python mini_qpack_rt.py`。
+
+**需要观察的现象**：最大误差不超过 `scale/2`（约等于组极差除以 30）；平均误差约为 `scale/4`；把 `num_bits` 改成 2（同时 `max_val=3`、`pack_num=8`）后误差大约放大 5 倍（上界变为组极差的 1/6）。
+
+**预期结果**：对标准正态数据，组极差约 4~5，4-bit 的 `scale ≈ range/15 ≈ 0.3`，最大误差应在 0.15 左右；2-bit 的 `scale ≈ range/3 ≈ 1.5`，最大误差约 0.75。若 assert 失败，优先检查 zero 是否用了组内 min（而非全局 min）。（数值为数量级预估，待本地验证。）
+
+**书面证明**（实践的第一问，可直接抄到笔记里）：设组内 \( x \in [\min, \max] \)，\( \Delta = x - \mathrm{zero} \in [0, \mathrm{range}] \)，\( \mathrm{scale} = \mathrm{range}/\mathrm{max\_val} \)。量化端 \( q = \mathrm{round}(\Delta/\mathrm{scale}) \) 满足 \( |q - \Delta/\mathrm{scale}| \le 1/2 \)；反量化端 \( \hat{x} - x = q\cdot\mathrm{scale} - \Delta = (q - \Delta/\mathrm{scale})\cdot\mathrm{scale} \)，故 \( |\hat{x} - x| \le \mathrm{scale}/2 \)。又因 \( \Delta \in [0, \mathrm{range}] \) 保证 \( \Delta/\mathrm{scale} \in [0, \mathrm{max\_val}] \)，clip 不改变结果，两个端点精确还原。半精度存储（scale/zero 存 half、`__hfma2` 在 half 域计算）额外引入 1~2 ulp 的误差，故实测上界略高于 \( \mathrm{scale}/2 \) 属正常。∎
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：如果把系统改成对称量化（有符号 int4，区间 \([-8,7]\)，零点固定），量化端可以不动（仍存无符号 nibble），反量化端要改哪里？
+
+**答案**：改 `lop3_dequant` 的两个常量即可。lo 路径现值 \( (1024+q) - 1024 = q \)，把 `SUB` 从 `0x6400`（1024）改为 `0x6408`（1024+8）后变为 \( (1024+q)-(1024+8) = q-8 \)；hi 路径现值 \( (1024+16q)/16 - 64 = q \)，把 `ADD` 从 `0xd400`（−64）改为 `0xd480`（−72）后变为 \( (1024+16q)/16 - 72 = q-8 \)。这不是臆测：[dequantize.h:75-77](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/dequantize.h#L75-L77) 的注释里就保留着 `// 0x64086408`、`// 0xd480d480` 这两个被注释的候选值，说明作者预留了对称零点的钩子。这正是 FasterTransformer 系 int4 反量化的标准技巧（文件头注释也引用了它的链接）。
+
+**练习 2**：`range == 0` 时（组内所有元素相同），量化/反量化两端分别发生什么？最终还原是否精确？
+
+**答案**：量化端 `scale_inv = 0`（除零保护），\( q = \mathrm{clip}(\mathrm{round}(0), 0, \mathrm{max\_val}) = 0 \)；存储时 `scales_k = 0`。反量化端 \( \hat{x} = 0 \cdot 0 + \mathrm{zero} = \min \)，而组内所有值都等于 min，所以**精确还原**，没有任何精度损失，也没有除零。
+
+**练习 3**：4-bit、group_size=32 时，`apply` 内的局部 `pack_num`、摘要/参数 fragment `tScales_k_c` 的形状、gmem params 的行数 `kBlockK_params` 分别是多少？
+
+**答案**：局部 `pack_num = size<1>(num_params=4) = 4/4 = 1`（每线程每列自成一组的部分覆盖）；`tScales_k_c` 形状为 `(4*num_params, tile_paramsk_k) = (16, 8)`（声明见 [flash_fwd_kernel.h:1451-1457](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L1451-L1457)）；`kBlockK_params = kBlockN/group_size = 128/32 = 4` 行（[kernel_traits.h:471](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/kernel_traits.h#L471)）。对照 4-bit/g128：分别是 4、(4,8)、1 行。
+
+### 4.2 k-tensor 路线：quant_Ktensor 与 quad 归约族
+
+#### 4.2.1 概念说明
+
+`quant_Ktensor` 是 K 的另一种量化模式的实现：**k-tensor（逐张量）模式，量化组沿通道方向**——每个 token 的连续 `group_size` 个通道共享一组 scale/zero。它与 `qpack_kc_vt` 的关系是「同一数学、不同归约轴与不同落盘布局」：
+
+- 归约不用 4-warp 的 `allreduce_`，而是用 u4-l2 讲过的 `*_g` 家族（`thread_reduce_g` / `quad_allreduce_g` / `reduce_max_g` / `reduce_min_g`）：连续 4 个线程组成一个 quad，用 `__shfl_sync` 定向收集组内极值。
+- 落盘走 `pack_Ktensor_store`，params 布局对应全局张量 `k_params (b, d/g, h, s)`（序列在最后一维，u2-l1 已建立）。
+
+必须先说清工程现状：**这条路线当前不可达**。[decode_api.cpp:227-235](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/decode_api.cpp#L227-L235) 中 k-tensor 分支的三个 group_size 全部被注释，genfile 也没有实例化 `quant_mode=0` 的模板。所以本节是「读禁用代码」：它值得读，因为它揭示了设计上的对称性；也要带着批判读，因为其中有明显的未完成痕迹。
+
+#### 4.2.2 核心流程
+
+```
+对 fragment 的每个 size<1> 实例 k（k-tensor 模式下这一轴是序列方向）：
+1. reduce_max_g / reduce_min_g(src(_, k, _), ..., k, num_params)
+      —— quad 归约：4 线程为一组，沿 size<2>（通道切片）方向折叠部分极值后
+         __shfl_sync 交换，得到该 token 各通道组的 max/min
+2. 对每个摘要条目 i：scale_inv = max_val/range，scale = 1/scale_inv，zero = min
+      —— 数学与 qpack_kc_vt 完全一致
+3. 量化循环：对每个 (i, jj, k)，zero/scale_inv 按
+      channel_zeros(k/ki + jj + m*num_params) 取“该 token、该通道组”的参数
+      （ki = size<2>(src)/num_params：把通道切片号映射到组号）
+4. 打包：与 4-bit 版 qpack_kc_vt 相同的 q0|q1<<4|q2<<8|q3<<12
+5. 落盘：pack_Ktensor_store（见 4.3 节）
+```
+
+#### 4.2.3 源码精读
+
+- [qpack.h:380-388](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L380-L388)：函数签名与常量。第一处硬证据：`const int num_bits = 4;` **写死 4-bit**——这就是「按 num_bits 特化」的对照面：`qpack_kc_vt` 用模板特化支持 2/4-bit，`quant_Ktensor` 连模板都没有，只支持 4-bit。`ki = size<2>(src)/num_params` 把通道切片索引换算成组号。
+
+- [qpack.h:394-398](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L394-L398)：归约循环，注意它对每个 `k`（size<1> 实例）分别调用 `reduce_max_g` / `reduce_min_g`，且带 `// TODO:check 128` 注释——quad 归约的线程覆盖范围是否恰好等于一个量化组，作者自己也没有完全确认。
+
+- [qpack.h:400-413](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L400-L413)：scale/zero 计算与 `qpack_kc_vt` 逐字符几乎相同（同样的 `scale_inv == 0 ? 0 : 1/scale_inv`、同样的 `min_i` 作 zero）——**量化数学在两条路线里是同一份**，差别只在「极值沿哪根轴归约、参数写到哪里」。
+
+- [qpack.h:424-453](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L424-L453)：量化本体。与 k-channel 最大的不同在参数索引：`zero0 = channel_zeros(k/ki + jj + 0*num_params)`——组号由 `k/ki + jj`（序列实例 + 通道组）共同决定，且 4 个相邻通道分别取 `+0/+1/+2/+3 × num_params` 偏移的不同参数，对应「组沿通道、每 token 一套参数」的语义。
+
+- [qpack.h:455-466](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L455-L466)：打包段与 `qpack_kc_vt<4>` 完全一致（`<<4 &0xF` 四次，`dst(i, jj/4, k)`）。
+
+解码端的配套实现是 [dequantize.h:403-475](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/dequantize.h#L403-L475) 的 `dequantize_Ktensor`：同样硬编码 `kNumBits = 4`，在 [dequantize.h:451-459](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/dequantize.h#L451-L459) 用 `__half2half2` 把 scale/zero 广播成 half2，再在 [dequantize.h:461-464](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/dequantize.h#L461-L464) 做 `__hfma2`。pack/dequant 两侧都齐备，说明这条路线**设计上是完整的**，只是工程上被禁用。
+
+一个诚实的保留意见：`quant_Ktensor` 配套的 params 落盘算术（见 4.3 节 `pack_Ktensor_store` 的 `32*(j/num_params) + tidx/4` 行号公式）与启用路径的「前 64 行 scale、后 64 行 zero」布局并不显然对齐，按 tile 形状推算甚至可能越界。这与 dispatch 全被注释的现状互相印证——k-tensor 路线大概率是未完成的实验分支（原因假设与验证实验设计放在 u7-l4 的架构评审，此处标注**待确认**）。
+
+#### 4.2.4 代码实践：diff 式阅读两套量化器
+
+**实践目标**：用「找不同」的方式固化对两条路线的理解，而不是背代码。
+
+**操作步骤**：
+1. 并排打开 [qpack.h:220-300](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L220-L300)（`qpack_kc_vt<4>`）与 [qpack.h:378-470](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L378-L470)（`quant_Ktensor`）。
+2. 列出三类差异：(a) 归约原语（`reduce_max` vs `reduce_max_g`）；(b) 参数索引表达式（`i + jj/pack_num*channel_stride` vs `k/ki + jj + m*num_params`）；(c) 硬编码（`num_bits` 是否模板参数）。
+3. 再对照 [dequantize.h:329-384](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/dequantize.h#L329-L384) 与 [dequantize.h:403-475](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/dequantize.h#L403-L475)，确认解码端同样成对。
+
+**需要观察的现象**：两套代码的 scale/zero 计算段（约 15 行）几乎逐字符相同；所有差异都集中在「索引怎么算」和「归约怎么走」。
+
+**预期结果**：得到一张 3 列差异表。这是后续 u7-l3（新增配置）和 u7-l4（架构评审）要直接复用的分析 asset。
+
+**无法运行说明**：本实践为源码阅读型，无需 GPU，也不修改任何文件。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`quant_Ktensor` 为什么可以不接收 `num_bits` 模板参数？代价是什么？
+
+**答案**：因为函数内部直接写死 `const int num_bits = 4;`（[qpack.h:384](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L384)），打包循环按 4-bit 的 `jj += 4` 写死。代价是这条路线天然不支持 2-bit；若要支持，必须像 `qpack_kc_vt` 那样引入模板特化，或把函数拆成两个版本。
+
+**练习 2**：k-channel 与 k-tensor 各自的「参数属主」是什么？即 scale/zero 沿哪根轴每个槽位一套？
+
+**答案**：k-channel：属主是**通道**——每个通道在每个 `group_size` token 区间有一套 scale/zero，全局 `k_params (b, s/g, h, d)`；k-tensor：属主是 **token**——每个 token 在每个 `group_size` 通道区间有一套，全局 `k_params (b, d/g, h, s)`。V 恒用后者（属主是 token，组沿通道）。
+
+**练习 3**：`thread_reduce_g`（[qpack.h:341-355](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L341-L355)）里 `ii = size<1>(tensor)/num_params` 的作用是什么？
+
+**答案**：它是「每组的列数」（k-tensor 版的局部 pack_num）：把 size<1> 轴（此处是通道切片方向）切成 `num_params` 段，`summary(i)` 只在 `ni ∈ [j*ii, (j+1)*ii)` 内折叠，保证每线程的部分极值不跨组混合，剩下的跨线程合并交给 `quad_allreduce_g`。
+
+### 4.3 落盘三段式：pack_Kchannel_store / pack_Vtensor_store 与 params 的 half2 布局
+
+#### 4.3.1 概念说明
+
+量化发生在寄存器 fragment 里，但 `dst` fragment（`tSrK_pack` / `tSrV_pack`，元素类型 `ElementKVPack = uint16_t`）还不是最终位置。落盘要解决两个问题：
+
+1. **pack 数据怎么从寄存器到 gmem**：MMA fragment 的元素在线程间按 TV 布局交错，各线程直接写 gmem 会产生大量零散访问。解法是经典的「寄存器→共享内存→gmem」三段式中转：smem 里按 `SmemLayoutKPack` / `SmemLayoutVPack` 重排后，再用向量化的 tiled copy 一次性搬出去。
+2. **scale/zero 怎么写**：数据量小（每线程几十个 half），不值得走 smem，直接从寄存器交错写入 gmem 的 params 张量——但写入坐标由一套精心设计的（或者说没人完全记得为什么的）公式决定，解码端 `load_params_*` 用完全镜像的公式读回。
+
+K 与 V 的打包方向差异是本模块的核心，一张表说清（这是学习目标 3 的答案）：
+
+| | K（k-channel 模式） | V（恒为 tensor 模式） |
+| --- | --- | --- |
+| 量化组方向 | 沿**序列**：每通道连续 `group_size` 个 token 一组 | 沿**通道**：每 token 连续 `group_size` 个通道一组 |
+| fragment 分组轴 | `size<1>`（MMA_N 实例 = 序列位置） | `size<1>`（MMA_N 实例 = 通道位置） |
+| 一个 uint16 装什么 | 同一通道的 `pack_num` 个 token | 同一 token 的 `pack_num` 个通道 |
+| gmem pack 形状 | `k_pack (b, s/pack, h, d)`——沿**行（序列）**打包 | `v_pack (b, s, h, d/pack)`——沿**列（通道）**打包 |
+| kernel 侧 tile | `gK_pack (kBlockP, kHeadDim_k)` | `gV_pack (kBlockN, kHeadDim_pack)` |
+| params 形状 | `k_params (b, s/g, h, d)` | `v_params (b, d/g, h, s)` |
+| 落盘函数 | `pack_Kchannel_store` | `pack_Vtensor_store` |
+
+两个方向都不是随便选的：**它们都保证一个 uint16 的所有槽位落在同一个量化组内**（K 的 4/8 个 token 同通道同组；V 的 4/8 个通道同 token 同组，且 `pack_num ≤ group_size`）。这样解码端面对一个 packed 列只需索引一组 scale/zero（`scales_vec(i + j/pack_num*stride)` 的步进），LOP3 产出的半个 fragment 才能用一次 `__hfma2` 统一还原——打包方向与归约方向、参数布局是三位一体的设计。
+
+还有一个隐藏事实：**params 张量名义上是 fp32，kernel 实际按 `__half2` 视图写入**。以 K k-channel 为例，kernel 构造 `gK_params` 时把 `params.k_params_ptr` 重解释为 `__half2*`（[flash_fwd_kernel.h:1341-1343](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L1341-L1343)）。每 `(组块, head)` 的 128 个 fp32 槽位里：**前 64 槽（= 128 个 half）按通道序存放 128 个 scale，后 64 槽存放 128 个 zero**。算一笔账：每 (组, 通道) 恰好 `scale(16bit) + zero(16bit) = 32bit`，与 u2-l3 给出的「每元素额外 `32/group_size` 比特」完全吻合——fp32 容器不多不少正好装下 half 精度的 scale+zero，只是排列成了 `[scale 区 | zero 区]` 而不是逐通道交错。V 同理，只是按 token 组织。Python 侧的 `update_pack` 把这些张量当不透明位流 `torch.cat`，所以这套内部布局从未在 Python 层暴露。
+
+#### 4.3.2 核心流程
+
+`pack_Kchannel_store`（K）与 `pack_Vtensor_store`（V）共用同一骨架：
+
+```
+段 1  寄存器 → smem：cute::copy(smem_tiled_copy_kv_pack, src_r2s, dst_r2s)
+       —— R2SCopyAtomPack = Copy_Atom<DefaultCopy, uint16_t>，
+          按 TiledMmaK_i4 的 TV 布局把 fragment 摆回 (kBlockP, kHeadDim_k) tile
+       __syncthreads()
+
+段 2  smem → gmem：cute::copy(gmem_tiled_copy_k_pack, src_s2g, dst_s2g)
+       —— 128bit 向量化的合并访存，写 k_pack / v_pack
+       __syncthreads()
+
+段 3  params 寄存器 → gmem：双重循环直写
+       K:  params(j%num_params, 8i + 4*(j/num_params) + tidx%4)      = scale
+           params(j%num_params, 64 + 8i + 4*(j/num_params) + tidx%4) = zero
+       V:  params(128*(i/8) + 8*(i%8) + 4*(j/num_params_2) + tidx%4, j%num_params_2) = scale  (+64 行为 zero)
+       __syncthreads()
+```
+
+坐标公式里的每个因子都有含义（以 K 为例，4-bit/g128，线程 `tidx`、类 `r = tidx%4`）：
+
+- `j%num_params` → params 的**行** = 序列方向组号（g128 时恒为 0 行）；
+- `8*i` → k 切片号 × 8（`i ∈ [0,8)` 覆盖 head_dim 的 8 个 16 通道档）；
+- `4*(j/num_params)` + `tidx%4` → 通道方向的半字位置；合起来 `half 位置 c` 对应 head_dim 通道 `c`，即 **scale 区内按通道顺序线性排列**，zero 区（+64）同样；
+- `__syncthreads()` 三次出现是因为段与段之间 smem 既是读端又是写端，必须全块同步。
+
+#### 4.3.3 源码精读
+
+**三个落盘函数**（[qpack.h:474-560](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L474-L560)）：
+
+- [qpack.h:499-525](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L499-L525) `pack_Kchannel_store`：三段式骨架 + K 版 params 公式（[qpack.h:516-523](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L516-L523)）。
+- [qpack.h:527-560](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L527-L560) `pack_Vtensor_store`：多一个模板参数 `num_bits, kHeadDim`，且 [qpack.h:536-542](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L536-L542) 有一处显式特判——`kHeadDim==128 && num_bits==2` 时只有前 64 个线程执行寄存器→smem 拷贝（其余线程在 `__syncthreads` 等待；2-bit 时 V 打包 fragment 的搬运工作量恰好由 64 线程覆盖，具体推导与 `TiledMmaK_i4` 的 TV 布局有关，**待确认**）。params 公式（[qpack.h:550-558](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L550-L558)）行号变成序列位置 `128*(i/8) + 8*(i%8) + ...`，且 2-bit 时用 `num_params_2 = num_params/2` 折半参数组数（2-bit 的组覆盖 token 数翻倍）。
+- [qpack.h:474-497](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L474-L497) `pack_Ktensor_store`：k-tensor 版，params 公式（[qpack.h:491-495](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/qpack.h#L491-L495)）用 `tidx/4`（quad 内位置）编码序列属主。如 4.2 节所述，其 `[scale|zero]` 的 +64 行偏移与 tile 形状的匹配关系存疑，服务于被禁用的路线，**待确认**。
+
+**解码端的镜像**：`load_params_Kchannel`（[dequantize.h:174-194](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/dequantize.h#L174-L194)）的读取公式与 `pack_Kchannel_store` 的写入公式逐项相同——`params(m*num_params + j%num_params, 8i + 4*(j/num_params) + tidx%4)`。顺带欣赏源码里的自嘲注释（[dequantize.h:189](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/dequantize.h#L189)）：`// seems no one can know why is this offset ...`——坐标公式是「写读双方对称」保证正确，而不是有人能从第一性原理推导它。`load_params_Vtensor` 的镜像在 [dequantize.h:221-239](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/dequantize.h#L221-L239)（同样带 `num_bits==2` 的 `num_params_2` 折半）。
+
+**调用现场一：prefill 打包 kernel（内联展开版）**。`compute_qpack_1rowblock` 没有调用 `pack_*_store` 函数，而是把同样的三段式直接内联写了一遍：
+
+- [flash_fwd_kernel.h:1459-1463](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L1459-L1463)：K 量化分流——`quant_mode == 1` 走 `qpack_Kchannel_Vtensor<num_bits>(tSrK, tSrK_pack, ...)`，否则走 `quant_Ktensor`（当前不可达）。
+- [flash_fwd_kernel.h:1477](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L1477)：V 量化恒走 `qpack_Kchannel_Vtensor`（V 只有 tensor 布局，这正是「kc_vt 一个函数两种用途」的现场证据）。
+- [flash_fwd_kernel.h:1479-1487](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L1479-L1487)：V 的 params 直写 gmem，公式与 `pack_Vtensor_store` 段 3 相同；[flash_fwd_kernel.h:1489-1504](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L1489-L1504)：K 的 params 直写，k-channel/tensor 两分支对应两套公式。
+- [flash_fwd_kernel.h:1506-1515](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L1506-L1515)：寄存器→smem（含 2-bit V 的 64 线程特判）；[flash_fwd_kernel.h:1517-1521](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L1517-L1521)：smem→gmem，分别用 `gmem_tiled_copy_k_pack` / `gmem_tiled_copy_v_pack` 写出 `k_pack` / `v_pack`。
+
+**调用现场二：残余 kernel（封装版）**。`compute_attn_1rowblock_residualkv` 在残余区攒满一个块（`params.new_lens == residual_block_size`）时，就地复用同一套量化原语把这块 FP16 的 K/V 打包成 `*_new` 输出（这就是 u2-l2 说的「kernel 内顺带再量化」）：
+
+- [flash_fwd_kernel.h:401-420](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L401-L420)：K 的再量化与落盘——k-channel 分支调用 `qpack_Kchannel_Vtensor` + `pack_Kchannel_store`（[flash_fwd_kernel.h:403-409](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L403-L409)），k-tensor 分支调用 `quant_Ktensor` + `pack_Ktensor_store`（[flash_fwd_kernel.h:412-418](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L412-L418)）。
+- [flash_fwd_kernel.h:466-475](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L466-L475)：V 的再量化，`qpack_Kchannel_Vtensor` + `pack_Vtensor_store`。
+
+注意落盘目标从主缓存换成了 `tKgK_new_pack` / `gK_new_params` / `gV_new_params` 等 `*_new` 张量——它们最终由 Python 侧的 `update_pack` 拼回主缓存（u2-l2 的闭环）。同一套量化/落盘代码服务 prefill 与 decode 两个阶段，这是本讲与 u5-l4 的衔接点。
+
+另外一个有趣的考古现场：[flash_fwd_kernel.h:1524-1590](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L1524-L1590) 留着一大段被注释掉的「量化后立刻反量化回读校验」代码（把 `k_pack` 从 gmem 读回来，走 `dequant_Kchannel_Vtensor` 与原 `tSrK` 比对）。作者开发时就是在 kernel 内做 pack→dequant 往返验证的——与我们在 4.1.4 用 numpy 做的事同构。
+
+#### 4.3.4 代码实践：手推一个 params 坐标 + 对照两处调用现场
+
+**实践目标**：把 4.3.2 的坐标公式落到具体数字，并确认「内联版」与「封装版」是同一套逻辑。
+
+**操作步骤**：
+1. 设 4-bit / k-channel / group_size=128，线程 `tidx = 5`（即 `r = 1`），k 切片 `i = 2`，`num_params = 1`，scales fragment 的 half2 索引 `j = 1`。代入 `pack_Kchannel_store` 的公式：`params(j%1, 8*2 + 4*(j/1) + 5%4)`，算出该线程把 scale 写进 `gK_params` 的哪个 `(行, 列)`；再算 zero 落在哪个列（提示：+64）。
+2. 打开 [flash_fwd_kernel.h:1489-1497](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L1489-L1497)（内联版），确认你代入的公式与这里逐项一致。
+3. 打开 [dequantize.h:185-193](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/include/dequantize.h#L185-L193)（读取版），取 `m=0`，确认解码端会用同样的坐标把这份 scale 读回去。
+4. 数一数 `pack_Kchannel_store` 里的 `__syncthreads()` 个数（应为 3），并在 [flash_fwd_kernel.h:1506-1521](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_kernel.h#L1506-L1521) 的内联版里找到对应的同步点。
+
+**需要观察的现象**：step 1 得到 `(0, 21)`（行 0 = 唯一的组，列 `16 + 4 + 1 = 21`，即 scale 区第 21 个 half2 = 通道 42/43 的两个 scale），zero 落在列 `64+21 = 85`；step 2/3 的公式完全镜像。
+
+**预期结果**：写、读两端坐标一致；内联版与封装版的段序相同。若 step 1 手算与源码代入不符，回头检查 `8*i` 与 `4*(j/num_params)` 的因子顺序。
+
+**无法运行说明**：本实践为源码阅读型，无需 GPU。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么 K 沿序列打包、V 沿通道打包？换成 K 沿通道打包会破坏什么？
+
+**答案**：打包方向必须与量化组方向「正交对齐」：k-channel 的组沿序列（同通道的 group_size 个 token），沿序列打包保证一个 uint16 的 4/8 个 token 同通道且同组；V 的组沿通道（同 token 的 group_size 个通道），沿通道打包保证一个 uint16 的 4/8 个通道同 token 且同组。若 K 改沿通道打包，一个 uint16 会装 4 个不同通道的值，它们分属 4 套 scale/zero，解码端 `scales_vec(i + j/pack_num*stride)` 的「每 pack_num 列换一组参数」假设被打破，LOP3 输出的 half2 无法用一次 `__hfma2` 统一还原，轻则误差放大，重则结果错误。
+
+**练习 2**：`k_params` 在 Python 侧声明为 `torch.float32`，为什么 kernel 敢用 `__half2*` 视图写入而不越界、不浪费？
+
+**答案**：每 `(组, 通道)` 真正需要存的是 `scale(16bit) + zero(16bit) = 32bit`，恰好一个 fp32 槽。kernel 只是把排列方式定为「前半所有 scale、后半所有 zero」：128 个 fp32 槽 = 128 个 scale half + 128 个 zero half。总字节数与 fp32 声明严格相等，只是容器语义被重新解释；Python 侧 `update_pack` 只做不透明的 `torch.cat`，从不解释内容，所以两层相安无事。
+
+**练习 3**：`pack_Vtensor_store` 与 `pack_Kchannel_store` 的 params 公式里，线程项一个用 `tidx%4`、另一个（k-tensor 版 `pack_Ktensor_store`）用 `tidx/4`，为什么？
+
+**答案**：`tidx%4` 选出的是「同参数属主类」的线程：k-channel/V 的 fragment 里 atom 内 4 个元素（参数属主方向）由 `tidx%4` 区分，同类的线程写相邻坐标形成交错但无冲突的填充。k-tensor 的参数属主沿序列，而它的 fragment 里序列位置由 quad 内位置 `tidx/4`（即 B fragment 的 `gid = lane/4` 列索引）决定，所以换用 `tidx/4`。两个公式分别与各自 MMA 布局的 TV 结构对齐——这也再次解释了那句 "seems no one can know why is this offset"：坐标是布局的影子。
+
+## 5. 综合实践
+
+**任务：把 4.1.4 的单张量脚本升级为「迷你 BitDecoding 打包器」，同时产出 K（k-channel）与 V（tensor）两套 pack/params，并做配置对照。**
+
+1. **双张量打包**（示例代码，在 4.1.4 脚本基础上扩展）：
+   - K：沿用原脚本（组沿序列，`k_pack` 形状 `(S/pack_num, D)`，uint16 沿行打包）。
+   - V：生成 `V = rng.standard_normal((S, D))`，改为**组沿通道**——对每个 token，把 D 个通道按 `group_size` 分组求 max/min，量化后 uint16 沿**列**打包，得到 `v_pack (S, D/pack_num)`；params 组织成 `(S, D/group_size)`。
+   - 分别对 K/V 做 pack→dequant 往返，打印两者的最大误差。
+2. **位序自检**：在脚本里断言 `packed` 的最低 nibble 对应 `q[0]`（即 4.1.4 第 3 步与第 4 步互为逆操作），验证「val0 在最低位段」的小端约定。
+3. **配置对照**：对 4 组启用配置（4/2-bit × g128/g32）各跑一遍，填一张表：`pack_num`、`kBlockP`、`num_params`、scale 个数、实测最大误差、理论上界 `range/(2·max_val)`。预期规律：误差上界只随 `num_bits` 变化（4-bit ≈ range/30，2-bit ≈ range/6），`group_size` 只影响 scale 的个数（params 开销）——因为组越小事实验上界不变，但每组的 range 通常更小，实测误差会随 group_size 减小而略微下降（待本地验证）。
+4. **（可选，需 GPU）对照真 kernel**：把脚本的 `S=1024, D=128, group_size=32, num_bits=4` 对准 [evaluation/test.py](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/test.py) 的配置（[test.py:40-44](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/test.py#L40-L44)），运行 `python evaluation/test.py`，比较你脚本的元素级往返误差与 test.py 打印的端到端注意力 MAE 的数量级关系（端到端误差还应包含 softmax 加权、residual 路径与 half 累加的影响，应显著小于元素级上界）。
+
+**预期成果**：一张 K/V 双布局的打包对照表 + 一张 4 配置误差表，后者直接服务于 u7-l3（新增配置）与 u7-l4（精度/带宽权衡评审）。
+
+## 6. 本讲小结
+
+- **量化数学**：`qpack_kc_vt::apply` 实现 \( q = \mathrm{clip}(\mathrm{round}((x-\mathrm{zero})\cdot\mathrm{scale\_inv}), 0, \mathrm{max\_val}) \)，其中 `zero = 组内min`、`scale = range/max_val`（量化端存倒数 `scale_inv` 便于乘法）；解码端 `__hfma2(q, scale, zero)` 与之严格互逆，误差上界 \( \mathrm{scale}/2 \)，`range==0` 时精确退化。
+- **按 num_bits 特化**：`qpack_kc_vt<2>` / `<4>` 的差异是 `max_val`（3/15）、每个 uint16 的元素数（8/4）与位操作展开序列，模板特化把这些变成编译期常量，生成无分支代码；`quant_Ktensor` 则硬编码 4-bit，是反面对照。
+- **一个函数两种布局**：`qpack_kc_vt` 对 fragment 的 `size<1>` 轴分组、`size<0>` 轴独立参数；K fragment 的 `size<1>` 是序列（k-channel），V fragment 的是通道（tensor），因此 K 量化与 V 量化共用同一实现。
+- **打包方向**：K 沿序列（行）打包进 `k_pack (b, s/pack, h, d)`，V 沿通道（列）打包进 `v_pack (b, s, h, d/pack)`；两者都保证一个 uint16 内的所有槽位同属一个量化组——这是 dequant 端「每 pack_num 列换一组参数」索引的前提。
+- **落盘三段式**：寄存器→smem（按 `TiledMmaK_i4` TV 布局重排）→gmem（向量化合并访存），scale/zero 从寄存器直写 params；同一套逻辑在 prefill 打包 kernel 中内联展开、在残余 kernel 中封装为 `pack_*_store`，残余攒满时就地再量化写出 `*_new` 四件套。
+- **params 的隐藏布局**：名义 fp32 的 `*_params` 被 kernel 按 `__half2` 视图填充，每 (组, 属主) 恰好 32bit = scale+zero 两个 half，排成 `[scale 区 | zero 区]`；写读公式在 `pack_*_store` 与 `load_params_*` 间严格镜像（源码注释："seems no one can know why is this offset ..."）。
+
+## 7. 下一步学习建议
+
+本讲结束了 QPack（u4 单元）的完整链条：u4-l1 启动路径 → u4-l2 归约原语 → 本讲的量化数学与落盘。接下来两条路：
+
+1. **进入 u5-l1（Flash_fwd_kernel_traits）**：本讲反复引用的 `pack_num`、`kBlockP`、`kBlockK_params`、`SmemLayoutKPack` 等常量与 smem 布局，将在解码 kernel 的 traits 里得到系统性的推导——特别是打包 tile 如何被 LOP3 反量化后的 MMA 消费。
+2. **直达 u5-l3（LOP3 快速反量化）**：如果对 `0x6400` 位魔法意犹未尽，那一讲逐位推导 `lop3_dequant` / `lop3_dequant_2bit` 如何把本讲打包出的 uint16 位流变成 Tensor Core fragment，与本讲的 4.1 节构成完整闭环。
+3. **延伸阅读**：`dequantize.h` 文件头引用的 FasterTransformer `interleaved_numeric_conversion.h`（LOP3 技巧的出处），以及 u7-l4 将要复盘的「k-tensor 路线为何被禁用」——本讲 4.2/4.3 节标注的两处「待确认」正是那份评审报告的素材。
