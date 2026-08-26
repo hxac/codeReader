@@ -1,0 +1,1380 @@
+{
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 PyPTO 的定位：面向 AI 加速器的高性能编程框架",
+            "理解 PTO（Parallel Tensor/Tile Operation）编程范式与 Tile 编程模型",
+            "区分算法开发者（Tensor 级）、性能专家（Tile 级）、系统开发者（Block/ISA 级）三类视角"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README.md",
+            "docs/en/dev/00-ecosystem.md"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README 与 ecosystem 文档后，用自己的话写一段 200 字总结：PyPTO 把一个 Python 函数变成芯片上可执行代码要经过哪几个阶段，并画出 Tensor Graph → Tile Graph → 执行代码的分层示意图。",
+          "source_files": [
+            "README.md",
+            "README.zh-CN.md",
+            "docs/en/dev/00-ecosystem.md",
+            "docs/en/user/00-getting_started.md"
+          ],
+          "title": "项目全景：PyPTO 是什么",
+          "topic": "介绍 PyPTO 的定位、PTO 编程范式、Tile 编程模型，以及 Tensor/Tile/Block 分层抽象分别面向哪类开发者。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-build-and-install.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "理解 scikit-build-core + CMake 的构建架构与 nanobind 绑定机制",
+            "掌握开发模式安装与 CPU-only torch 依赖安装技巧",
+            "能独立完成构建并用 pytest 跑通单元测试"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "pyproject.toml",
+            "CMakeLists.txt",
+            "AGENTS.md"
+          ],
+          "order": 2,
+          "practice_task": "在本地完成 pip install -e \".[dev]\"（先装 CPU-only torch），然后运行 python -m pytest tests/ut/core -v 验证环境，记录构建过程中 CMake 做了哪些事。",
+          "source_files": [
+            "pyproject.toml",
+            "CMakeLists.txt",
+            "README.md",
+            "AGENTS.md"
+          ],
+          "title": "构建与环境搭建",
+          "topic": "讲解 pyproject.toml + scikit-build-core + CMake 的构建体系，如何以开发模式安装、如何构建 C++ 扩展并运行测试。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-repo-layout.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "记住 C++ 层（include/ src/）、绑定层（python/bindings/）、Python 层（python/pypto/）的职责划分",
+            "在源码树中快速定位 IR、Pass、代码生成、运行时四类代码",
+            "知道 docs/、examples/、tests/ 各自的作用与组织方式"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "python/pypto/__init__.py",
+            "docs/en/dev/index.md"
+          ],
+          "order": 3,
+          "practice_task": "做一张仓库地图：标注出 IR 表达式定义、某个具体 Pass 实现、PTO 代码生成入口、Python DSL 解析器、运行时 runner 各自所在的目录，并注明每处的职责。",
+          "source_files": [
+            "README.md",
+            "AGENTS.md",
+            "python/pypto/__init__.py",
+            "docs/en/dev/index.md"
+          ],
+          "title": "仓库结构与三层架构",
+          "topic": "带读者漫游仓库：include/pypto 与 src 的 C++ 核心层、python/bindings 的 nanobind 绑定层、python/pypto 的 Python API 层，以及 docs/examples/tests 的组织方式。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-hello-world-walkthrough.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "理解 @pl.jit 的「按 shape/dtype 特化 + 编译 + 缓存」行为",
+            "掌握 pl.at(level=pl.Level.CORE_GROUP) 片上计算作用域的含义",
+            "区分 Tensor（全局内存）与 Tile（片上寄存器/缓存）两类数据"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "examples/beginner/01_hello_world.py",
+            "python/pypto/language/__init__.py"
+          ],
+          "order": 4,
+          "practice_task": "把 hello world 的 Tile 尺寸从 128x128 改成 64x64 并分块循环计算 128x128 的张量加法，运行并用 torch.allclose 验证结果正确。",
+          "source_files": [
+            "examples/beginner/01_hello_world.py",
+            "python/pypto/language/__init__.py",
+            "python/pypto/runtime/runner.py"
+          ],
+          "title": "Hello World 逐行精读",
+          "topic": "逐行解读 examples/beginner/01_hello_world.py：pl.jit 装饰器、pl.at 作用域、pl.load/pl.store、pl.Out 输出参数与 Tensor/Tile 的区别。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u1-l5-write-first-kernel.md",
+          "id": "u1-l5",
+          "learning_goals": [
+            "独立编写包含 load/compute/store 三段式的算子",
+            "学会用 pl.Out 标注输出参数实现原地写回",
+            "掌握用 torch 张量对照验证算子正确性的方法"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "examples/beginner/02_elementwise.py",
+            "examples/beginner/04_activation.py",
+            "examples/beginner/06_concat.py"
+          ],
+          "order": 5,
+          "practice_task": "参照 04_activation.py 实现一个 GELU 近似算子（tanh 近似即可），输入输出均为 pl.Tensor[[1024, 1024], pl.FP32]，用 torch 的 GELU 结果对照验证误差在 1e-4 以内。",
+          "source_files": [
+            "examples/beginner/02_elementwise.py",
+            "examples/beginner/04_activation.py",
+            "examples/beginner/06_concat.py",
+            "examples/beginner/05_matmul.py"
+          ],
+          "title": "动手写第一个自定义算子",
+          "topic": "通过修改 examples/beginner 下的示例（elementwise、activation、concat），亲手写一个自定义算子并验证结果。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "初识 PyPTO：跑通第一个算子"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "filename": "u2-l1-jit-and-specialization.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "理解 JITFunction 的特化键（shape/dtype/layout）如何生成",
+            "知道编译结果如何被缓存与命中",
+            "能解释同一个 jit 函数用不同 shape 调用时的行为差异"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "python/pypto/jit/decorator.py",
+            "python/pypto/jit/cache.py"
+          ],
+          "order": 1,
+          "practice_task": "写一个 jit 算子，分别用 (128,128) 和 (256,256) 的输入各调用两次，在 cache 中确认只发生了两次编译而非四次，并打印缓存键说明原因。",
+          "source_files": [
+            "python/pypto/jit/decorator.py",
+            "python/pypto/jit/cache.py",
+            "python/pypto/jit/specializer.py"
+          ],
+          "title": "jit 装饰器与特化缓存",
+          "topic": "深入 python/pypto/jit：JITFunction 如何从 torch 张量提取 shape/dtype 元信息、如何特化、编译结果如何缓存。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-tensor-and-tile-types.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "掌握静态 shape 注解与动态 shape（dyndim）的写法",
+            "理解 Scalar/Array 等其他参数类型的注解方式",
+            "能根据算子签名选择正确的类型注解"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "python/pypto/language/__init__.py",
+            "docs/en/dev/language/00-python_syntax.md"
+          ],
+          "order": 2,
+          "practice_task": "编写一个带静态注解 pl.Tensor[[128, 128], pl.FP16] 和一个动态维度注解（如 pl.Tensor[[\"M\", 128], pl.FP32]）的算子各一个，分别运行并对比两者的特化行为。",
+          "source_files": [
+            "python/pypto/language/__init__.py",
+            "docs/en/dev/language/00-python_syntax.md",
+            "docs/en/user/language/00-types.md"
+          ],
+          "title": "Tensor 与 Tile 类型注解",
+          "topic": "讲解 DSL 的类型注解体系：pl.Tensor[[shape], dtype]、pl.Tile、pl.Out[...]、pl.Scalar 的写法与静态/动态 shape 支持。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-tensor-ops.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "掌握 tensor.* 命名空间常用算子的语义与参数",
+            "理解 Tensor 级编程如何隐式完成切分与调度",
+            "能判断一个算子适合写在 Tensor 级还是 Tile 级"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "python/pypto/language/op/tensor_ops.py",
+            "python/pypto/language/op/unified_ops.py"
+          ],
+          "order": 3,
+          "practice_task": "仅用 Tensor 级算子写一个两输入的融合算子（如 c = a * b + bias），再用 Tile 级 load/store 改写同一功能，运行两者并对比代码量与结果。",
+          "source_files": [
+            "python/pypto/language/op/tensor_ops.py",
+            "python/pypto/language/op/unified_ops.py",
+            "docs/en/api/tensor.md",
+            "examples/beginner/06_concat.py"
+          ],
+          "title": "Tensor 级算子",
+          "topic": "讲解 Tensor 级（全局内存）算子的使用：python/pypto/language/op/tensor_ops.py 中的创建、切片、组装等操作，适合算法开发者快速表达。"
+        },
+        {
+          "action": "update",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-tile-ops-load-store.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "掌握 pl.load/pl.store 的坐标与 Tile 尺寸参数",
+            "理解 Tile 级算子直接映射片上指令的性能含义",
+            "能用 Tile 三段式（load-compute-store）重写 Tensor 级算子",
+            "了解累加算子族 matmul_acc/gemv_acc/batch_matmul_acc 的 init_cond 谓词（split-K 的 k == 0 惯用法）"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "python/pypto/language/op/tile_ops.py",
+            "examples/beginner/02_elementwise.py"
+          ],
+          "order": 4,
+          "practice_task": "用 Tile 级算子实现一个 128x256 乘 256x64 的 FP16 矩阵乘（结果 FP32 累加），手动控制分块大小，与 torch.matmul 结果对照；再改写成 K 维两段循环并用 matmul_acc 的 init_cond=(k0 == 0) 消除首步剥皮，验证两版结果一致。",
+          "source_files": [
+            "python/pypto/language/op/tile_ops.py",
+            "docs/en/api/tile.md",
+            "examples/beginner/02_elementwise.py",
+            "examples/beginner/05_matmul.py"
+          ],
+          "title": "Tile 级算子：load/store 与片上计算",
+          "topic": "讲解 Tile 级算子：pl.load 把全局内存数据搬进片上 Tile，tile.* 计算算子（含带 init_cond 谓词的累加算子族），pl.store 写回，这是性能优化的核心层面。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u2-l5-scalar-and-control-flow.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "掌握 pl.range 循环与 Python if/for 在 DSL 中的限制",
+            "理解标量算子与张量算子的边界",
+            "能编写带循环累加的算子（如 softmin/累加和）"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "examples/beginner/03_scalar_ops.py",
+            "docs/en/dev/language/01-statements.md"
+          ],
+          "order": 5,
+          "practice_task": "用 pl.range 循环实现一个按行 reduce 求和的算子：输入 pl.Tensor[[256, 256], pl.FP32]，输出 pl.Tensor[[256], pl.FP32]，并与 torch.sum(dim=-1) 对照。",
+          "source_files": [
+            "examples/beginner/03_scalar_ops.py",
+            "docs/en/dev/language/01-statements.md",
+            "docs/en/user/language/02-control-flow.md",
+            "python/pypto/language/op/unified_ops.py"
+          ],
+          "title": "标量计算与控制流",
+          "topic": "讲解 DSL 中的标量表达式、pl.range 循环、条件语句等控制流写法，以及哪些 Python 语法会被追踪进 IR。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u2-l6-at-scopes-and-levels.md",
+          "id": "u2-l6",
+          "learning_goals": [
+            "理解 CORE_GROUP 等层级对应的硬件资源（AI Core 分组）",
+            "掌握作用域内 Tile 生命周期与 store 时机的关系",
+            "能解释一个作用域对应一段怎样的硬件执行单元"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "python/pypto/language/scope.py",
+            "tests/ut/language/test_at_context.py"
+          ],
+          "order": 6,
+          "practice_task": "把 05_matmul.py 中的层级从 CORE_GROUP 改成其他可用 Level，观察编译或运行结果差异，并结合 docs/en/user/language/04-scopes.md 说明原因。",
+          "source_files": [
+            "python/pypto/language/scope.py",
+            "examples/beginner/05_matmul.py",
+            "tests/ut/language/test_at_context.py",
+            "docs/en/user/language/04-scopes.md"
+          ],
+          "title": "pl.at 作用域与计算层级",
+          "topic": "讲解 pl.at(level=...) 作用域机制：Level 枚举、作用域嵌套，以及作用域如何决定代码在哪种处理器层级上执行。"
+        }
+      ],
+      "level": "beginner",
+      "order": 2,
+      "title": "Python DSL 语言基础"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "update",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "filename": "u3-l1-ast-parsing.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "理解追踪式解析与直接文本解析的分工",
+            "知道每个 Python 语法结构映射到哪个 IR 节点",
+            "能通过报错定位到 ast_parser 的对应处理分支",
+            "理解打印器输出的 pl.builtin.<ns>.<op> 形式如何被解析器读回（打印-再解析往返一致）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "python/pypto/language/parser/ast_parser.py",
+            "python/pypto/language/parser/_dsl_invoker.py"
+          ],
+          "order": 1,
+          "practice_task": "写一个包含 for 循环、if 分支和函数调用的 DSL 算子，在 ast_parser.py 中找到循环和分支各自的处理函数，注释出 Python 语法到 IR 节点的映射关系；再打印该算子 IR 并重新解析，对照 tests/ut/ir/parser/test_builtin_namespace.py 确认往返等价。",
+          "source_files": [
+            "python/pypto/language/parser/ast_parser.py",
+            "python/pypto/language/parser/decorator.py",
+            "python/pypto/language/parser/_dsl_invoker.py",
+            "tests/ut/ir/parser/test_builtin_namespace.py",
+            "docs/en/dev/language/00-python_syntax.md"
+          ],
+          "title": "DSL 解析：Python AST 如何变成 IR",
+          "topic": "深入 python/pypto/language/parser：Python 函数如何被 AST 解析、类型如何解析、DSL 调用如何被翻译成 IR 节点，以及 pl.builtin.<ns>.<op> 打印形式的回读。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-function-kinds.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "区分 FunctionType.Inline / InCore / Opaque 的语义与使用场景",
+            "理解跨函数调用时代码如何被组合",
+            "能正确选择函数类型组织多函数算子"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "python/pypto/jit/decorator.py",
+            "docs/en/dev/language/03-functions.md"
+          ],
+          "order": 2,
+          "practice_task": "编写一个三函数程序：入口函数调用一个 Inline 工具函数和一个 InCore 设备函数，运行后在编译产物中确认 Inline 函数体被内联 splice 而设备函数保留为独立 kernel。",
+          "source_files": [
+            "python/pypto/jit/decorator.py",
+            "docs/en/dev/language/03-functions.md",
+            "docs/en/dev/language/04-external-kernels.md"
+          ],
+          "title": "函数种类与调用约定",
+          "topic": "讲解 pl.function 的函数类型体系（Inline、InCore、Opaque 等）、参数方向（pl.Out、InOut）以及外部内核的引入方式。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-compile-entry.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "掌握 compile() 的完整输入输出与关键参数（backend、dump_passes 等）",
+            "理解 CompiledProgram 承载的编译产物形态",
+            "能脱离 @pl.jit 直接用底层 API 编译一个 IR 函数"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "python/pypto/ir/compile.py",
+            "python/pypto/ir/compiled_program.py"
+          ],
+          "order": 3,
+          "practice_task": "不用 @pl.jit，手动用 pl.function 定义函数并调用底层 compile 流程编译它，打印编译后的 IR（python_print），观察 Tensor 级代码已被降级成 Tile 级。",
+          "source_files": [
+            "python/pypto/ir/compile.py",
+            "python/pypto/ir/compiled_program.py",
+            "python/pypto/ir/pass_manager.py"
+          ],
+          "title": "compile() 编译入口全流程",
+          "topic": "讲解 python/pypto/ir/compile.py：从 JITFunction/Program 到运行产物的完整编译流程，包括后端选择、Pass 流水线调用与产物组织。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l4-runtime-execution.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "理解 RunConfig 控制了哪些执行行为",
+            "掌握编译产物如何被装载到设备并按 MPMD 调度",
+            "能定位一次运行中 host 侧与 device 侧各自的职责代码"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "python/pypto/runtime/runner.py",
+            "python/pypto/runtime/device_runner.py"
+          ],
+          "order": 4,
+          "practice_task": "给 hello world 加上时间统计，分别测量首次调用（编译+执行）与缓存命中后的执行耗时；然后阅读 runner.py 找到缓存命中的判断逻辑并记录代码位置。",
+          "source_files": [
+            "python/pypto/runtime/runner.py",
+            "python/pypto/runtime/device_runner.py",
+            "python/pypto/runtime/kernel_compiler.py",
+            "python/pypto/runtime/task_interface.py"
+          ],
+          "title": "运行时执行：从产物到芯片",
+          "topic": "讲解 python/pypto/runtime：RunConfig、runner 与 device_runner 如何把编译产物装载到设备、如何管理张量参数与任务调度。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l5-pass-pipeline-overview.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "记住 Default 策略各阶段 Pass 的职责分组（前端优化/作用域外提/Tile 降级/内存规划/收尾）",
+            "掌握用 dump_passes 观察每个 Pass 前后 IR 的方法",
+            "理解 Pass 的 required/produced/invalidated 属性约束"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "python/pypto/ir/pass_manager.py",
+            "docs/en/dev/passes/00-pass_manager.md"
+          ],
+          "order": 5,
+          "practice_task": "用 dump_passes 开关编译一个简单算子，从导出的逐 Pass IR 中找出 inline_functions、convert_to_ssa、convert_tensor_to_tile_ops 三个 Pass 各自改变了什么，写成对比笔记。",
+          "source_files": [
+            "python/pypto/ir/pass_manager.py",
+            "docs/en/dev/passes/00-pass_manager.md",
+            "docs/en/dev/passes/index.md"
+          ],
+          "title": "Pass 流水线总览",
+          "topic": "自顶向下俯瞰 Default 策略的 47 个 Pass：pass_manager.py 如何组装流水线、PassDumpLevel 如何逐 Pass 导出 IR、各阶段 Pass 的分组职责。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "从 DSL 到可执行：编译与运行全链路"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "filename": "u4-l1-ir-overview-hierarchy.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "掌握 Program/Function/Stmt/Expr/Type 五层节点关系",
+            "理解 ObjectKind 单枚举分发的设计动机",
+            "能画出一张 IR 节点继承关系图"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "docs/en/dev/ir/00-overview.md",
+            "include/pypto/ir/core.h"
+          ],
+          "order": 1,
+          "practice_task": "对照 docs 与 core.h 画出 Expr/Stmt/Type 的继承树（手绘或 mermaid），标出 Call/Submit、ForStmt/IfStmt、TensorType/TileType 的位置。",
+          "source_files": [
+            "docs/en/dev/ir/00-overview.md",
+            "docs/en/dev/ir/01-hierarchy.md",
+            "include/pypto/ir/core.h"
+          ],
+          "title": "IR 总览与节点层级",
+          "topic": "建立 IR 全局观：Program-Function-Stmt-Expr-Type 的层级结构、ObjectKind 运行时类型分发、span 源位置追踪。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-expression-nodes.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "掌握 Call 与 Submit 的字段差异（deps_、TASK_ID 返回 augmentation）",
+            "理解 KindTrait 与 AsVarLike 一类统一访问辅助的设计",
+            "能读懂一段 IR 打印并指出其中的表达式种类"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "include/pypto/ir/expr.h",
+            "include/pypto/ir/kind_traits.h"
+          ],
+          "order": 2,
+          "practice_task": "用 python_print 打印一个含 pl.submit 的 manual_scope 程序 IR，找出 Submit 节点并对照 expr.h 说明它与 Call 在字段上的三个差异。",
+          "source_files": [
+            "include/pypto/ir/expr.h",
+            "include/pypto/ir/kind_traits.h",
+            "src/ir/expr.cpp"
+          ],
+          "title": "表达式节点：Var、Call 与 Submit",
+          "topic": "精读 include/pypto/ir/expr.h：Var/IterArg、Call/Submit、MemRef/WindowBuffer 等表达式节点，以及 kind_traits 的精确匹配与 *Like 辅助。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-statement-nodes.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "识别 IR 打印中的每种语句节点并说出其语义",
+            "理解作用域类语句如何承载 MPMD 调度信息",
+            "掌握 SeqStmt/ForKind 等结构化控制流的用途"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "include/pypto/ir/stmt.h",
+            "docs/en/dev/language/01-statements.md"
+          ],
+          "order": 3,
+          "practice_task": "打印一个含 for 循环与 if 分支算子的 IR，逐条标注每条语句的节点类型和字段，特别指出循环变量和迭代参数如何出现在 IR 中。",
+          "source_files": [
+            "include/pypto/ir/stmt.h",
+            "src/ir/stmt.cpp",
+            "docs/en/dev/language/01-statements.md"
+          ],
+          "title": "语句节点与作用域语句",
+          "topic": "精读 include/pypto/ir/stmt.h：赋值、ForStmt（含 chunked）、IfStmt/WhileStmt、各类作用域语句（InCore/Cluster/Runtime/CommDomain 等）。"
+        },
+        {
+          "action": "update",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u4-l4-type-system.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "掌握 DataType 枚举与 TensorLayout/TileLayout 的作用",
+            "理解 Scalar[INDEX]、Scalar[TASK_ID] 等特殊标量类型",
+            "理解 TileView.compact 的含义：仅分形空间（Left/Right/Acc）有效的有效区打包表示",
+            "能根据类型推断规则预测表达式的结果类型"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "include/pypto/ir/type.h",
+            "docs/en/dev/ir/02-types.md"
+          ],
+          "order": 4,
+          "practice_task": "写算子让 tile.load(FP16 输入) 与 tile.matmul 的结果类型被推断为 FP32，打印 IR 验证推断结果，并在 type_inference 中找到对应规则的位置；再观察一个行收窄累加器 Tile 的 compact 标记如何在 IR 类型中体现。",
+          "source_files": [
+            "include/pypto/ir/type.h",
+            "src/ir/type.cpp",
+            "include/pypto/ir/type_inference.h",
+            "docs/en/dev/ir/02-types.md"
+          ],
+          "title": "类型系统",
+          "topic": "精读 include/pypto/ir/type.h：DataType、ScalarType、TensorType/TileType、MemRef 与布局（TensorLayout/TileLayout）、TileView.compact 等类型节点。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "filename": "u4-l5-function-and-program.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "掌握 params_、param_directions_、return_type 的组织方式",
+            "理解 Program 作为函数集合的查询接口",
+            "能解释 Submit 的 args_ 与被调函数 params_ 的有界覆盖关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "include/pypto/ir/function.h",
+            "include/pypto/ir/program.h"
+          ],
+          "order": 5,
+          "practice_task": "打印含两个函数的程序 IR，对照 function.h 列出每个函数的参数方向（In/Out/InOut）与返回类型，并解释 pl.Out 参数为何同时出现在返回里。",
+          "source_files": [
+            "include/pypto/ir/function.h",
+            "src/ir/function.cpp",
+            "include/pypto/ir/program.h",
+            "src/ir/program.cpp"
+          ],
+          "title": "函数与 Program",
+          "topic": "精读 include/pypto/ir/function.h 与 program.h：Function 的参数与方向、FunctionType、Program 的函数表与入口组织。"
+        },
+        {
+          "action": "update",
+          "depends_on": [
+            "u4-l5"
+          ],
+          "filename": "u4-l6-op-registry.md",
+          "id": "u4-l6",
+          "learning_goals": [
+            "理解算子按 tensor./tile./system./array. 命名空间注册的组织方式",
+            "掌握用 OpRegistry 查询算子元信息的方法",
+            "理解按名字而非指针比较算子的不变量",
+            "知道 init_cond 这类可依赖循环值的可选操作数为何注册为操作数而非 kwarg"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "include/pypto/ir/op_registry.h",
+            "src/ir/op_registry.cpp"
+          ],
+          "order": 6,
+          "practice_task": "用 _ir_core.get_op(\"tile.load\") 查询算子信息并打印其参数规格；再统计 tile. 命名空间下已注册的算子数量，列出你最常用到的 10 个；对照 docs/en/dev/ir/05-operators.md 说明 matmul_acc/gemv_acc/batch_matmul_acc 的 init_cond 操作数设计。",
+          "source_files": [
+            "include/pypto/ir/op_registry.h",
+            "src/ir/op_registry.cpp",
+            "docs/en/dev/ir/05-operators.md",
+            "python/pypto/ir/operators.py"
+          ],
+          "title": "算子注册表 OpRegistry",
+          "topic": "精读 op_registry：算子如何按命名空间（tensor./tile./system./array.）注册、IsOp 辅助函数、算子元信息（参数、方向、布局约束），以及累加算子族 init_cond 操作数的注册方式。"
+        },
+        {
+          "action": "update",
+          "depends_on": [
+            "u4-l6"
+          ],
+          "filename": "u4-l7-builder-and-printer.md",
+          "id": "u4-l7",
+          "learning_goals": [
+            "掌握用 Builder API 手工构造一个完整函数",
+            "理解 python_print 输出与 DSL 源码的对应关系（含 init_cond 在不同算子上的位置参数/关键字参数打印差异）",
+            "能完成「构造 IR → 打印 → 再解析」的往返实验"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/ir/builder.cpp",
+            "python/pypto/ir/builder.py"
+          ],
+          "order": 7,
+          "practice_task": "不用 DSL 语法，直接用 Builder API 构造一个等价于 hello world 的加法函数，打印它并与 DSL 版本的 IR 逐行对比；再构造一个带 init_cond 的 gemv_acc 调用，验证其以关键字形式打印且能重新解析回相同 IR。",
+          "source_files": [
+            "src/ir/builder.cpp",
+            "python/pypto/ir/builder.py",
+            "src/ir/transforms/python_printer.cpp",
+            "docs/en/dev/ir/06-builder.md",
+            "docs/en/dev/ir/07-parser.md"
+          ],
+          "title": "IR 构建、打印与解析",
+          "topic": "讲解如何用 Builder API 直接构造 IR（绕过 DSL）、IRPythonPrinter 如何把 IR 打印回 Python 形态（哪些算子的可选操作数按关键字打印）、以及解析器如何读回。"
+        },
+        {
+          "action": "update",
+          "depends_on": [
+            "u4-l7"
+          ],
+          "filename": "u4-l8-serialization-and-structural-eq.md",
+          "id": "u4-l8",
+          "learning_goals": [
+            "理解 .pto 产物的序列化格式与往返一致性",
+            "掌握 assert_structural_equal 在 Pass 测试中的用法",
+            "理解 AreExprsEqual/StructuralHash 的结构化比较粒度（ConstInt 按值、二元/一元/Call 按结构，其余按指针）",
+            "能写一个 IR 往返（构造→序列化→反序列化→比较）验证脚本"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/ir/serialization/serializer.cpp",
+            "src/ir/transforms/structural_equal.cpp"
+          ],
+          "order": 8,
+          "practice_task": "把一个编译后的 Program 序列化再反序列化，用 assert_structural_equal 验证往返等价；再故意改一个字段验证比较器能报出差异；最后阅读 src/ir/expr.cpp 的 AreExprsEqual 与 src/ir/type.cpp 的 HashExprForAreExprsEqual，说明两者粒度必须同步的原因。",
+          "source_files": [
+            "src/ir/serialization/serializer.cpp",
+            "src/ir/serialization/deserializer.cpp",
+            "src/ir/transforms/structural_equal.cpp",
+            "src/ir/expr.cpp",
+            "docs/en/dev/ir/04-serialization.md",
+            "docs/en/dev/ir/03-structural_comparison.md"
+          ],
+          "title": "序列化与结构化比较",
+          "topic": "讲解 IR 的 .pto 序列化/反序列化与结构化相等比较（structural_equal/structural_hash、AreExprsEqual 的比较粒度），这是测试与缓存正确性的基石。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "IR 核心解剖"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "update",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "filename": "u5-l1-pass-context-and-verifier.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "掌握 PassContext 的作用域式配置（with 语句）模型",
+            "理解 VerificationLevel 与 Instrument 的执行时机",
+            "知道 IRProperty 与 PropertyVerifier 如何守护流水线不变量（如新增的 AccCompactValid）",
+            "能读懂 pass_properties.h 中 produced/invalidated 的配合（同一属性可被后续 Pass 失效再重产）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/ir/transforms/pass_context.cpp",
+            "docs/en/dev/passes/99-verifier.md"
+          ],
+          "order": 1,
+          "practice_task": "用 PassContext + VerificationInstrument(AFTER) 跑一个编译，然后故意构造一个非法 IR（如引用未定义变量）观察验证器报错，记录报错中 span 信息的作用；再在 99-verifier.md 的表格中找出 AccCompactValid 由哪些 Pass 产出与失效。",
+          "source_files": [
+            "src/ir/transforms/pass_context.cpp",
+            "include/pypto/ir/transforms/pass_context.h",
+            "include/pypto/ir/transforms/pass_properties.h",
+            "python/pypto/ir/instruments.py",
+            "docs/en/dev/passes/99-verifier.md"
+          ],
+          "title": "PassContext 与验证器体系",
+          "topic": "讲解 Pass 的运行环境：PassContext 配置、验证等级、PropertyVerifier 注册表（含新的 AccCompactValid 验证器），以及 Pass 属性（required/produced/invalidated）。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-frontend-passes.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "理解内联为什么必须最先运行",
+            "掌握循环展开的触发条件与代价",
+            "能从 dump 的 IR 中识别这三个 Pass 的效果"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/ir/transforms/inline_functions_pass.cpp",
+            "src/ir/transforms/unroll_loops_pass.cpp"
+          ],
+          "order": 2,
+          "practice_task": "编译一个带小常数循环与 Inline 函数调用的算子，dump 前三个 Pass 的 IR，标注出函数体被 splice 和循环被展开的具体位置。",
+          "source_files": [
+            "src/ir/transforms/inline_functions_pass.cpp",
+            "src/ir/transforms/unroll_loops_pass.cpp",
+            "src/ir/transforms/ctrl_flow_transform_pass.cpp",
+            "docs/en/dev/passes/01-inline_functions.md",
+            "docs/en/dev/passes/02-unroll_loops.md",
+            "docs/en/dev/passes/03-ctrl_flow_transform.md"
+          ],
+          "title": "前端优化：inline、unroll 与控制流变换",
+          "topic": "精读流水线最前面的三个 Pass：Inline 函数内联、循环展开、控制流规范化，理解它们为后续 Pass 铺路的方式。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-ssa-and-simplify.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "理解 SSA 形式对后续数据流分析的价值",
+            "掌握公共子表达式消除与拷贝传播在 IR 层的体现",
+            "能解释 Simplify 为何在流水线中段和末尾各跑一次"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/ir/transforms/convert_to_ssa_pass.cpp",
+            "src/ir/transforms/simplify_pass.cpp"
+          ],
+          "order": 3,
+          "practice_task": "写一个含重复子表达式与无用赋值的算子，dump convert_to_ssa 前后的 IR，指出版本号变化和被消除的冗余赋值。",
+          "source_files": [
+            "src/ir/transforms/convert_to_ssa_pass.cpp",
+            "src/ir/transforms/simplify_pass.cpp",
+            "src/ir/transforms/flatten_call_expr_pass.cpp",
+            "docs/en/dev/passes/04-convert_to_ssa.md",
+            "docs/en/dev/passes/05-simplify.md"
+          ],
+          "title": "SSA 转换与化简",
+          "topic": "精读 convert_to_ssa 与 simplify：变量如何变成带版本的 SSA 形式、死代码消除与表达式化简如何发生。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "filename": "u5-l4-outline-scopes.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "理解 pl.at 作用域如何被外提成独立函数",
+            "掌握层级、簇、核内三种外提的粒度差异",
+            "能从 IR 中指出外提产生的函数边界与调用关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/ir/transforms/outline_hierarchy_scopes_pass.cpp",
+            "src/ir/transforms/outline_incore_scopes_pass.cpp"
+          ],
+          "order": 4,
+          "practice_task": "编译一个含嵌套作用域的算子（如 CORE_GROUP 内再分作用域），dump 第 7-9 个 Pass 的 IR，画出外提前后的函数调用关系图。",
+          "source_files": [
+            "src/ir/transforms/outline_hierarchy_scopes_pass.cpp",
+            "src/ir/transforms/outline_incore_scopes_pass.cpp",
+            "src/ir/transforms/outline_cluster_scopes_pass.cpp",
+            "docs/en/dev/passes/07-outline_hierarchy_scopes.md",
+            "docs/en/dev/passes/08-outline_incore_scopes.md",
+            "docs/en/dev/passes/09-outline_cluster_scopes.md"
+          ],
+          "title": "作用域外提三部曲",
+          "topic": "精读 outline_hierarchy/incore/cluster_scopes 三个 Pass：作用域语句如何被外提成独立函数，形成 MPMD 多程序结构。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "filename": "u5-l5-tensor-to-tile-lowering.md",
+          "id": "u5-l5",
+          "learning_goals": [
+            "理解隐式切分策略如何为 Tensor 算子选择 Tile 尺寸",
+            "掌握编排函数中 Tensor 中间量的优化手段",
+            "能追踪一个 tensor.* 调用在 IR 中变成 tile.* 链路的过程"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp",
+            "src/ir/transforms/optimize_orch_tensors_pass.cpp"
+          ],
+          "order": 5,
+          "practice_task": "写一个纯 Tensor 级算子（不用任何 tile.* 调用），dump 第 10 个 Pass 前后的 IR，找出编译器自动插入的 load/store 与切分逻辑。",
+          "source_files": [
+            "src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp",
+            "src/ir/transforms/optimize_orch_tensors_pass.cpp",
+            "docs/en/dev/passes/10-convert_tensor_to_tile_ops.md",
+            "docs/en/dev/passes/11-optimize_orch_tensors.md"
+          ],
+          "title": "Tensor 到 Tile 的降级",
+          "topic": "精读 convert_tensor_to_tile_ops 与 optimize_orch_tensors：Tensor 级算子如何被自动切分成 load/compute/store 的 Tile 三段式。"
+        },
+        {
+          "action": "update",
+          "depends_on": [
+            "u5-l5"
+          ],
+          "filename": "u5-l6-tile-backend-lowering.md",
+          "id": "u5-l6",
+          "learning_goals": [
+            "理解复合算子（如 matmul 融合）按目标 ISA 拆分的策略",
+            "掌握高维 Tile 摊平成 2D 的硬件约束原因",
+            "了解自动矩阵乘分块 Pass 的触发条件及其用 tile.create(compact=True) 声明累加器种子的方式",
+            "知道 batch_matmul_acc 的 init_cond 如何被 FlattenTileNdTo2D 逐行带地透传"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/ir/transforms/lower_composite_ops_pass.cpp",
+            "src/ir/transforms/auto_tile_matmul_l0_pass.cpp"
+          ],
+          "order": 6,
+          "practice_task": "编译一个 3D Tile 参与的算子，dump flatten_tile_nd_to_2d 前后的 IR，说明 3D Tile 是如何变成 2D 循环嵌套的；再编译一个带 init_cond 的 tensor.matmul_acc（batch 维乘积为 1），确认谓词被透传到每个 2D tile.matmul_acc。",
+          "source_files": [
+            "src/ir/transforms/lower_composite_ops_pass.cpp",
+            "src/ir/transforms/auto_tile_matmul_l0_pass.cpp",
+            "src/ir/transforms/canonicalize_tile_slice_pass.cpp",
+            "src/ir/transforms/infer_tile_memory_space_pass.cpp",
+            "docs/en/dev/passes/12-lower_composite_ops.md",
+            "docs/en/dev/passes/13-flatten_tile_nd_to_2d.md"
+          ],
+          "title": "Tile 后端降级链",
+          "topic": "精读 Tile 层的硬件化降级：lower_composite_ops 拆复合算子、flatten_tile_nd_to_2d 摊平高维 Tile、auto_tile_matmul_l0 自动矩阵乘分块（含 compact 累加器种子标记）、内存空间推断。"
+        },
+        {
+          "action": "update",
+          "depends_on": [
+            "u5-l6"
+          ],
+          "filename": "u5-l7-memory-planning.md",
+          "id": "u5-l7",
+          "learning_goals": [
+            "掌握 MemRef 抽象与内存空间（GM/L1/UB 等）的对应",
+            "理解基于生命周期的内存复用如何节省片上空间",
+            "理解循环携带（iter_arg/yield）写回的拷贝如何被排序、换环（swap）如何被临时缓冲打破、共享缓冲的携带如何被拒绝",
+            "能读懂内存规划后 IR 中地址分配的形态"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/ir/transforms/init_memref.cpp",
+            "src/ir/transforms/memory_reuse_pass.cpp"
+          ],
+          "order": 7,
+          "practice_task": "编译一个使用大量中间 Tile 的算子，对比开启与关闭内存复用时最终分配的片上地址范围大小，从 dump 的 IR 中找出被复用的 MemRef；再写一个移位寄存器循环（lag2 = lag1; lag1 = v），对照 tests/ut/ir/transforms/test_memory_reuse.py 说明写回拷贝的排序如何保证两个携带互不覆盖。",
+          "source_files": [
+            "src/ir/transforms/init_memref.cpp",
+            "include/pypto/ir/transforms/utils/memref_utils.h",
+            "src/ir/transforms/materialize_tensor_strides_pass.cpp",
+            "src/ir/transforms/memory_reuse_pass.cpp",
+            "src/ir/transforms/allocate_memory_addr_pass.cpp",
+            "docs/en/dev/passes/33-memory_reuse.md"
+          ],
+          "title": "内存规划三部曲",
+          "topic": "精读 init_memref、materialize_semantic_aliases、memory_reuse（含循环携带写回的排序/破环/共享缓冲拒绝）、allocate_memory_addr：MemRef 如何被创建、别名与生命周期复用、最终地址如何分配。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l7"
+          ],
+          "filename": "u5-l8-write-a-new-pass.md",
+          "id": "u5-l8",
+          "learning_goals": [
+            "掌握 CreateFunctionPass/CreateProgramPass 的 Pass 编写骨架",
+            "理解 PassProperties 声明与 Python 绑定、类型桩的三层同步",
+            "能遵守 O(N log N) 复杂度约束编写遍历"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "src/ir/transforms/passes.cpp",
+            "include/pypto/ir/transforms/passes.h",
+            "python/bindings/modules/passes.cpp"
+          ],
+          "order": 8,
+          "practice_task": "实现一个统计每个函数内 Call 节点数量并把结果写入函数属性的 Pass，完成工厂注册、Python 绑定、.pyi 桩三层修改，并按 before/after 模式补一个 pytest 测试。",
+          "source_files": [
+            "src/ir/transforms/passes.cpp",
+            "include/pypto/ir/transforms/passes.h",
+            "python/bindings/modules/passes.cpp",
+            "docs/en/dev/passes/00-pass_manager.md"
+          ],
+          "title": "动手写一个新 Pass",
+          "topic": "综合实战：按项目规范完整新增一个 IR Pass——C++ 实现、工厂注册、PassProperties 声明、nanobind 绑定、类型桩与单测。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 5,
+      "title": "编译 Pass 流水线深入"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "update",
+          "depends_on": [
+            "u5-l6"
+          ],
+          "filename": "u6-l1-pto-codegen.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "理解 CodeEmitter 如何把每个 tile.* 算子映射成 PTO 虚拟指令",
+            "掌握控制流与标量表达式的指令化方式",
+            "理解行收窄（compact）累加器跨 Cube→Vector 边界时 TPUSH/TPOP 的 pitch 规则与拒绝条件",
+            "能读懂一段 .pto 产物并与 IR 语句对应"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "src/codegen/pto/pto_codegen.cpp",
+            "src/codegen/code_emitter.cpp"
+          ],
+          "order": 1,
+          "practice_task": "用 --save-kernels 导出 hello world 的 .pto 产物，找到 pl.add 对应的指令行，再对照 code_emitter 中该算子的发射代码说明操作数如何来自 MemRef；结合 docs/en/dev/codegen/00-pto_codegen.md 说明一个 compact 累加器在 C2V 推送时为什么保持生产者写下的行 pitch。",
+          "source_files": [
+            "src/codegen/pto/pto_codegen.cpp",
+            "src/codegen/pto/pto_control_flow_codegen.cpp",
+            "src/codegen/code_emitter.cpp",
+            "src/backend/common/pto_ops_crosscore.cpp",
+            "docs/en/dev/codegen/00-pto_codegen.md"
+          ],
+          "title": "PTO 代码生成",
+          "topic": "精读 src/codegen/pto 与跨核发射：遍历降级后的 IR 生成 PTO 虚拟指令文本，控制流与标量表达式的指令化，以及行收窄累加器在 C2V 推送上的 L0C pitch 处理。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-orchestration-codegen.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "区分设备内核代码生成与主机编排代码生成的职责",
+            "理解任务依赖图如何被翻译成调度指令",
+            "掌握 Submit 产物（任务输出与 TaskId）在编排层的表达"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "src/codegen/orchestration/orchestration_codegen.cpp",
+            "src/codegen/orchestration/orchestration_analysis.cpp"
+          ],
+          "order": 2,
+          "practice_task": "编译一个含两个 submit 任务的 manual_scope 程序，阅读生成的编排代码，指出依赖边如何体现在调度顺序中，并对照 orchestration_analysis 找到分析来源。",
+          "source_files": [
+            "src/codegen/orchestration/orchestration_codegen.cpp",
+            "src/codegen/orchestration/orchestration_analysis.cpp",
+            "docs/en/dev/codegen/01-orchestration_codegen.md"
+          ],
+          "title": "编排代码生成",
+          "topic": "精读 src/codegen/orchestration：host 编排函数如何生成，任务发射、依赖等待、跨核数据流如何在编排产物中表达。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l3-backend-handler.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "理解 BackendHandler 虚接口承载哪些按后端变化的决策",
+            "掌握新增后端的三步流程（Backend 子类、Handler 子类、GetHandler 覆写）",
+            "能找出某个 hazard workaround 对应的后端开关"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "python/pypto/backend/pto_backend.py",
+            "docs/en/dev/backend/00-backend_handler.md"
+          ],
+          "order": 3,
+          "practice_task": "在后端目录中找到 910B 与 950 各自的 Handler 子类，列表对比两者至少三处不同的行为值（如 hazard 开关、布局规则），并说明 Pass 如何通过 handler 查询而不是 if 后端分支。",
+          "source_files": [
+            "python/pypto/backend/pto_backend.py",
+            "docs/en/dev/backend/00-backend_handler.md",
+            "docs/en/dev/backend/index.md"
+          ],
+          "title": "后端抽象与 BackendHandler",
+          "topic": "讲解 src/backend 下 910B/950 双后端结构、BackendHandler 如何让 Pass 与代码生成不做硬编码后端分支、compile() 如何选择后端。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "filename": "u6-l4-mixed-kernel-and-split.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "理解 AIV/AIC 混合执行模型与跨核数据流（tpop/tfree）",
+            "掌握 AUTO pl.split 的自动拆分策略",
+            "能读懂混合内核示例并预测拆分结果"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "src/ir/transforms/expand_mixed_kernel_pass.cpp",
+            "src/ir/transforms/lower_auto_vector_split_pass.cpp"
+          ],
+          "order": 4,
+          "practice_task": "运行 examples/advanced/03_mixed_kernel.py 并 dump 第 20-23 个 Pass 的 IR，找出向量部分被减半拆分、跨核搬运被插入的具体语句。",
+          "source_files": [
+            "src/ir/transforms/lower_auto_vector_split_pass.cpp",
+            "src/ir/transforms/expand_mixed_kernel_pass.cpp",
+            "src/ir/transforms/split_vector_kernel_pass.cpp",
+            "examples/advanced/03_mixed_kernel.py",
+            "docs/en/dev/passes/20-lower_auto_vector_split.md"
+          ],
+          "title": "混合内核与向量拆分",
+          "topic": "精读混合内核机制：向量/立方体混合函数如何被拆分到不同核、AUTO split 如何降级、跨核流水（tpop/tfree）如何注入。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "filename": "u6-l5-pipeline-lowering.md",
+          "id": "u6-l5",
+          "learning_goals": [
+            "理解软件流水如何用槽位轮转掩盖搬运延迟",
+            "掌握 pl.pipeline 的适用条件与两种降级路径的取舍",
+            "能对比流水化前后循环结构的差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "src/ir/transforms/lower_pipeline_loops_pass.cpp",
+            "src/ir/transforms/lower_pipeline_to_slots_pass.cpp"
+          ],
+          "order": 5,
+          "practice_task": "参照 tests/ut/language/test_pipeline_kwarg.py 写一个 pl.pipeline 循环算子，dump 降级前后的 IR，数出循环体被复制/轮转的份数并解释。",
+          "source_files": [
+            "src/ir/transforms/lower_pipeline_to_slots_pass.cpp",
+            "src/ir/transforms/lower_pipeline_loops_pass.cpp",
+            "src/ir/transforms/skew_cross_core_pipeline_pass.cpp",
+            "tests/ut/language/test_pipeline_kwarg.py",
+            "docs/en/dev/passes/27-lower_pipeline_to_slots.md"
+          ],
+          "title": "流水线软件优化",
+          "topic": "精读 pl.pipeline 的两条降级路径：槽位轮转（lower_pipeline_to_slots）与循环复制（lower_pipeline_loops），以及跨核流水错排。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l6-pto-isa-and-artifacts.md",
+          "id": "u6-l6",
+          "learning_goals": [
+            "掌握 .pto 文本产物中指令、buffer 声明、作用域的结构",
+            "理解 TPUSH/TPOP 的硬件语义与 buffer 管理规则",
+            "能使用 ptoas 工具链把产物汇编成可执行档"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "docs/en/reference/index.md",
+            "python/pypto/backend/_ptoas_preprocess.py"
+          ],
+          "order": 6,
+          "practice_task": "把 hello world 的 .pto 产物逐段注释（指令段/buffer 段/作用域段），再运行一次完整编译跟踪产物被汇编成 ELF 的过程，记录每一步的输入输出文件。",
+          "source_files": [
+            "docs/en/reference/index.md",
+            "python/pypto/backend/pto_backend.py",
+            "python/pypto/backend/_ptoas_preprocess.py",
+            "python/pypto/runtime/elf_parser.py"
+          ],
+          "title": "PTO ISA 与编译产物",
+          "topic": "面向系统开发者：PTO 虚拟指令集参考（集群架构、TPUSH/TPOP、buffer 管理）、.pto 产物的阅读方法与工具链汇编。"
+        }
+      ],
+      "level": "advanced",
+      "order": 6,
+      "title": "代码生成与后端"
+    },
+    {
+      "id": "u7",
+      "lectures": [
+        {
+          "action": "update",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u7-l1-manual-scope-task-graph.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "掌握 pl.submit 的参数、依赖与返回（任务输出 + TaskId）",
+            "理解手动依赖与自动依赖推导的边界",
+            "能编写多任务依赖的编排程序",
+            "会用 deps_viewer 的 reduced/reduced_dataflow 模式审计冗余依赖边"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "python/pypto/language/scope.py",
+            "examples/intermediate/07_task_graph.py"
+          ],
+          "order": 1,
+          "practice_task": "用 manual_scope + submit 写一个三任务流水（A→B→C 有依赖，B 与 D 并行），运行后在编排产物中确认依赖边数量，再改成 AUTO scope 比较编译器自动推导的依赖；最后导出 deps.json 并用 deps_viewer --edge-mode reduced 与 reduced_dataflow 两种模式审计你手工加的依赖中有多少条是冗余的，解释两种模式结果为何不同。",
+          "source_files": [
+            "python/pypto/language/scope.py",
+            "examples/intermediate/07_task_graph.py",
+            "docs/en/dev/language/02-manual_dependencies.md",
+            "docs/en/user/tutorials/04-task-graph.md",
+            "docs/en/user/performance/03-dependencies.md"
+          ],
+          "title": "manual_scope 与任务图编程",
+          "topic": "深入手动编排：manual_scope 中 pl.submit 的任务发射、TaskId 依赖管理、phase fence、自动依赖推导，以及依赖图冗余边（redundant edge）的审计方法。"
+        },
+        {
+          "action": "update",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l2-distributed-programming.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "掌握分布式编程模型中 rank 与 DistributedTensor 的表达",
+            "理解 WindowBuffer、远程读写、put/get 等通信原语",
+            "了解 docs/en/user/distributed 下的分布式教学阶梯（steps 01-12）如何组织",
+            "能运行并修改多 rank 协同的示例程序"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "examples/distributed/01_hello_rank.py",
+            "python/pypto/language/distributed/__init__.py"
+          ],
+          "order": 2,
+          "practice_task": "运行 examples/distributed/05_remote_load_store.py 与 06_put_get.py，然后写一个两 rank 程序：rank0 计算一半、rank1 计算另一半，用 barrier 同步后互相交换结果；再浏览 docs/en/user/distributed/05-tutorials.md 的教学阶梯目录，记录每一步教学目标。",
+          "source_files": [
+            "examples/distributed/01_hello_rank.py",
+            "examples/distributed/05_remote_load_store.py",
+            "examples/distributed/06_put_get.py",
+            "python/pypto/language/distributed/__init__.py",
+            "docs/en/user/distributed/05-tutorials.md",
+            "docs/en/dev/distributed_ops.md"
+          ],
+          "title": "分布式编程模型",
+          "topic": "讲解多 rank/多卡编程：分布式教学阶梯（05-tutorials.md）、DistributedTensor、WindowBuffer、barrier 与通信域作用域 Pass。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "filename": "u7-l3-allreduce-algorithms.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "理解 all-reduce 三种经典实现（mesh 全互读 / 两阶段 reduce-scatter+all-gather / ring 环形旋转）的通信量与轮次差异",
+            "掌握 notify/wait barrier 与邻居就绪握手在多 rank 程序中的用法",
+            "能对照 pld.tensor.allreduce 内建算子（mesh/ring 两种模式）与手写版本的降级 IR 差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "examples/distributed/08_allreduce_mesh.py",
+            "examples/distributed/10_allreduce_ring.py",
+            "docs/en/user/distributed/16-allreduce_reveal.md"
+          ],
+          "order": 3,
+          "practice_task": "在模拟器上以 P=2 与 P=4 分别运行 08/09/10/11 四个示例并与 goldens 对照（11 需分别跑 --mode mesh 与 --mode ring）；然后 dump 10_allreduce_ring 与 11（--mode ring）的降级 IR，写成对照笔记：内建 ring 每轮搬运与手写环形旋转在 IR 层的对应关系。",
+          "source_files": [
+            "examples/distributed/08_allreduce_mesh.py",
+            "examples/distributed/09_allreduce_two_phase.py",
+            "examples/distributed/10_allreduce_ring.py",
+            "examples/distributed/11_allreduce_reveal.py",
+            "docs/en/user/distributed/16-allreduce_reveal.md",
+            "docs/en/dev/passes/42-lower_host_tensor_collectives.md"
+          ],
+          "title": "All-Reduce 深入：三种手写实现与内建算子对照",
+          "topic": "精读分布式教学阶梯 steps 08-11：mesh、两阶段、ring 三种手写 all-reduce 与 pld.tensor.allreduce 内建算子，重点用 reveal 篇的 IR diff 理解集合通信的降级过程。"
+        },
+        {
+          "action": "update",
+          "depends_on": [
+            "u5-l6"
+          ],
+          "filename": "u7-l4-performance-tuning.md",
+          "id": "u7-l4",
+          "learning_goals": [
+            "掌握 Split-K 与自动 matmul 分块两类核心优化手法",
+            "理解影响性能的三个维度：分块形状、内存驻留、流水化",
+            "会解读泳道图与关键路径分析（静态 CPM vs 观测路径）及 stall 归因（data-wait/core-wait/front-gap）",
+            "能对同一算子做优化前后性能对比实验"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "examples/advanced/01_split_k.py",
+            "examples/advanced/02_auto_tile_matmul.py"
+          ],
+          "order": 4,
+          "practice_task": "以 examples/intermediate/01_fused_linear.py 为基线，分别套用 Split-K 与 auto_tile_matmul 优化，记录三种版本的耗时，并解释每步优化改变了哪个硬件行为；再对其中一次运行导出的泳道记录做关键路径分析，根据 verdict 表判断该负载是依赖受限还是资源串行受限。",
+          "source_files": [
+            "examples/advanced/01_split_k.py",
+            "examples/advanced/02_auto_tile_matmul.py",
+            "docs/en/api/optimizations.md",
+            "docs/en/user/tutorials/05-scheduling-tuning.md",
+            "docs/en/user/performance/00-swimlane.md"
+          ],
+          "title": "性能优化实践",
+          "topic": "结合高级示例讲解性能优化手法：Split-K、自动 matmul 分块、L0 驻留与调度调优，以及用泳道图/关键路径分析定位 makespan 去向并选择对应的优化方向。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u7-l4"
+          ],
+          "filename": "u7-l5-model-level-development.md",
+          "id": "u7-l5",
+          "learning_goals": [
+            "掌握多算子 DAG 的组织与 jit 多函数协作模式",
+            "理解 attention 类算子的分块与索引技巧",
+            "能以小模型为模板搭建自己的多内核网络"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "examples/models/01_ffn.py",
+            "examples/models/03_flash_attention.py"
+          ],
+          "order": 5,
+          "practice_task": "参照 01_ffn.py 与 08_llama_mini.py 的结构，实现一个两层的迷你 Transformer 块（attention + FFN），复用已有示例的算子并验证数值正确。",
+          "source_files": [
+            "examples/models/01_ffn.py",
+            "examples/models/03_flash_attention.py",
+            "examples/models/08_llama_mini.py",
+            "docs/en/user/tutorials/index.md"
+          ],
+          "title": "模型级开发",
+          "topic": "讲解如何用 PyPTO 表达完整模型：FFN、FlashAttention、PagedAttention、LLaMA mini 等示例的结构与复用模式。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "filename": "u7-l6-debugging-and-profiling.md",
+          "id": "u7-l6",
+          "learning_goals": [
+            "掌握 dump_passes 三档级别与逐 Pass diff 方法",
+            "能用 IR 降级轨迹报告定位错误发生的 Pass",
+            "掌握运行时 DFx 与模拟器 trace 的基本用法"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "python/pypto/compile_profiling.py",
+            "docs/en/dev/01-compile-profiling.md"
+          ],
+          "order": 6,
+          "practice_task": "对一个编译失败或结果错误的算子（可故意制造），用 IR trace 工具生成降级轨迹 HTML，定位第一个出现问题的 Pass 并解释判断依据。",
+          "source_files": [
+            "python/pypto/compile_profiling.py",
+            "docs/en/dev/01-compile-profiling.md",
+            "docs/en/dev/07-ir-lower-trace.md",
+            "docs/en/dev/03-runtime-dfx.md"
+          ],
+          "title": "调试与性能剖析",
+          "topic": "讲解编译期与运行期的排查工具：dump_passes 逐 Pass 导出、IR 降级轨迹、编译剖析、运行时 DFx 与模拟器 trace 清洗。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l8"
+          ],
+          "filename": "u7-l7-testing-system.md",
+          "id": "u7-l7",
+          "learning_goals": [
+            "掌握 before/after 结构化相等比较的 Pass 测试范式",
+            "理解 pytest 约定（纯 assert、pytest.main 块）与测试目录组织",
+            "能为自己的 Pass 或算子补充回归测试"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "tests/ut/conftest.py",
+            "tests/ut/ir/test_compile_pipeline.py"
+          ],
+          "order": 7,
+          "practice_task": "为你在 u5-l8 写的 Pass 补一个完整测试文件：含至少一个 before/after 结构化比较用例和一个异常路径用例，跑通并保持目录规范。",
+          "source_files": [
+            "tests/ut/conftest.py",
+            "tests/ut/ir/test_compile_pipeline.py",
+            "src/ir/transforms/structural_equal.cpp",
+            "python/pypto/ir/utils.py"
+          ],
+          "title": "测试体系与结构化断言",
+          "topic": "讲解 PyPTO 的测试组织（tests/ut 各子目录）与 before/after 断言范式，以及如何为新功能补测试。"
+        },
+        {
+          "action": "update",
+          "depends_on": [
+            "u5-l8"
+          ],
+          "filename": "u7-l8-adding-new-op.md",
+          "id": "u7-l8",
+          "learning_goals": [
+            "掌握新增算子的五层落点：注册表、类型推断、Python IR 封装、DSL 包装、代码生成",
+            "理解跨层同步（C++/绑定/桩）纪律的意义",
+            "能借 init_cond 的先例判断一个新参数应注册为操作数还是 kwarg",
+            "能独立完成一个小算子的全栈落地"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "include/pypto/ir/op_registry.h",
+            "python/pypto/language/op/tile_ops.py"
+          ],
+          "order": 8,
+          "practice_task": "按 add-op 指南新增一个 tile.sin 近似算子（可用多项式实现）：完成注册、推断、封装、DSL、codegen 与单测全链路，最终在 DSL 中调用它并验证结果；再以 gemv_acc 的 init_cond（keyword-only 操作数）为例，说明你的算子若接受循环相关参数应如何设计签名。",
+          "source_files": [
+            "include/pypto/ir/op_registry.h",
+            "python/pypto/language/op/tile_ops.py",
+            "python/pypto/ir/op/tile_ops.py",
+            "python/bindings/modules/ir.cpp",
+            ".claude/skills/add-op/SKILL.md",
+            ".claude/skills/add-op/reference.md"
+          ],
+          "title": "二次开发：新增一个算子的全栈流程",
+          "topic": "毕业实战：按项目规范跨 C++ 注册表、类型推断、Python 绑定、DSL 包装、代码生成、测试六层完整新增一个算子，并讨论操作数 vs kwarg 的签名设计（以 init_cond 家族为活例）。"
+        }
+      ],
+      "level": "advanced",
+      "order": 7,
+      "title": "高级编程与二次开发"
+    }
+  ],
+  "head": "ec5d20c1818634e35b349a014a57afb998abea67",
+  "project": "pypto",
+  "rationale": "本次为增量更新（c7ba9fb → ec5d20c），整体三层学习路线（入门跑通 → DSL 语言 → 编译运行链路 → IR 核心 → Pass 流水线 → 代码生成后端 → 高级编程与二次开发）保持不变。代码变化集中在五条线并据此设置 action：(1) 累加算子族的 init_cond 谓词扩展到 batch_matmul_acc/gemv_acc，并新增 tile.create 的 compact 标记、TileView.compact 的分形空间语义与新的 AccCompactValid 验证器，影响 Tile 算子（u2-l4）、类型系统（u4-l4）、算子注册表文档（u4-l6）、验证器体系（u5-l1）、Tile 后端降级链（u5-l6）等讲义，均为 update；(2) memory_reuse 对循环携带写回新增排序、破环与共享缓冲拒绝，内存规划讲义 u5-l7 update；(3) 解析器可回读打印器的 pl.builtin.<ns>.<op> 形式、打印器对 gemv_acc 的 init_cond 改为关键字打印，AST 解析（u3-l1）与 IR 打印（u4-l7）update；(4) AreExprsEqual/结构化哈希扩展到一元表达式，结构化比较讲义 u4-l8 update；(5) 新增分布式 all-reduce 教学阶梯（示例 08-11、四篇 walkthrough、CI P=4 腿）与关键路径/依赖冗余分析文档，为此在 u7 新增一篇 all-reduce 讲义（u7-l3，action=new），分布式基础（u7-l2）、手动任务图（u7-l1）与性能调优（u7-l4）相应 update，u7 后续讲义顺延编号。构建入门、JIT、运行时、前端 Pass、外提、SSA、编排与后端抽象等其余讲义未受代码变化影响，保持 keep。依赖关系沿单元顺序递进，u7 内新讲义紧随分布式基础之后，形成「分布式入门 → 集合通信深入 → 性能调优」的递进。"
+}
