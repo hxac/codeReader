@@ -57970,11 +57970,11 @@
           "retries": 0
         },
         "u4-l3": {
-          "status": "failed",
+          "status": "done",
           "action": "update",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
+          "cost": 1.511722,
+          "error": null
         },
         "u4-l4": {
           "status": "keep",
@@ -57992,14 +57992,18 @@
           "retries": 0
         },
         "u4-l7": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 2.8014249999999996,
+          "error": null
         },
         "u5-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": 3.2009450000000004,
+          "error": null
         },
         "u5-l2": {
           "status": "keep",
@@ -58022,14 +58026,18 @@
           "retries": 0
         },
         "u5-l6": {
-          "status": "pending",
+          "status": "done",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.9887970000000001,
+          "error": null
         },
         "u6-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.563951,
+          "error": null
         },
         "u6-l2": {
           "status": "keep",
@@ -58037,9 +58045,11 @@
           "retries": 0
         },
         "u6-l3": {
-          "status": "pending",
+          "status": "failed",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
         },
         "u6-l4": {
           "status": "keep",
@@ -58103,7 +58113,7 @@
       "mode": "incremental",
       "tutorial_path": "tutorials/hw-native-sys/pto-isa/pto-isa-tutorial",
       "last_head": "be5ccb765a4ce5d14ca5da8b0e2f182d7f003369",
-      "last_run_at": "2026-08-26T11:02:24Z",
+      "last_run_at": "2026-08-26T13:02:21Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "hw-native-sys/pypto": {
@@ -58228,21 +58238,25 @@
           "error": null
         },
         "u4-l7": {
-          "status": "failed",
+          "status": "done",
           "action": "update",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
+          "cost": 1.5868170000000004,
+          "error": null
         },
         "u4-l8": {
-          "status": "pending",
+          "status": "done",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": 2.301432,
+          "error": null
         },
         "u5-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": 3.0637879999999997,
+          "error": null
         },
         "u5-l2": {
           "status": "keep",
@@ -58265,14 +58279,18 @@
           "retries": 0
         },
         "u5-l6": {
-          "status": "pending",
+          "status": "done",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": 3.227318,
+          "error": null
         },
         "u5-l7": {
-          "status": "pending",
+          "status": "done",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": 3.8564150000000006,
+          "error": null
         },
         "u5-l8": {
           "status": "keep",
@@ -58280,9 +58298,11 @@
           "retries": 0
         },
         "u6-l1": {
-          "status": "pending",
+          "status": "failed",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
         },
         "u6-l2": {
           "status": "keep",
@@ -58356,7 +58376,7 @@
       "mode": "incremental",
       "tutorial_path": "tutorials/hw-native-sys/pypto/pypto-tutorial",
       "last_head": "ec5d20c1818634e35b349a014a57afb998abea67",
-      "last_run_at": "2026-08-26T11:02:24Z",
+      "last_run_at": "2026-08-26T13:02:21Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "oomol-lab/pdf-craft": {
@@ -58384,51 +58404,67 @@
           "error": null
         },
         "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.2299740000000001,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.992882,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.7130830000000006,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1313890000000002,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.890182,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0386499999999999,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.298457,
+          "error": null
+        },
+        "u3-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3342749999999999,
+          "error": null
+        },
+        "u3-l5": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
           "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
-        },
-        "u2-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u2-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u2-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
         },
         "u4-l1": {
           "status": "pending",
@@ -58567,13 +58603,13 @@
       "mode": "full",
       "tutorial_path": "tutorials/oomol-lab/pdf-craft/pdf-craft-tutorial",
       "last_head": "bbb2d20a93178f9bc3b7be6b23e8f5b23f551c50",
-      "last_run_at": "2026-08-26T11:02:24Z",
+      "last_run_at": "2026-08-26T13:02:21Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "ai-dynamo/dynamo": {},
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-26T11:02:24Z"
+      "last_run_at": "2026-08-26T13:02:21Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
