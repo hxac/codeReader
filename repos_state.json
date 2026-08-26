@@ -58378,21 +58378,22 @@
           "retries": 0
         },
         "u7-l8": {
-          "status": "failed",
+          "status": "done",
           "action": "update",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
+          "cost": 3.502635,
+          "error": null
         }
       },
       "manifest_head": "ec5d20c1818634e35b349a014a57afb998abea67",
       "prev_head": "c7ba9fb0cbabdcad347cf5f2c91f2c710b96981a",
-      "phase": "workers",
+      "phase": "done",
       "mode": "incremental",
       "tutorial_path": "tutorials/hw-native-sys/pypto/pypto-tutorial",
       "last_head": "ec5d20c1818634e35b349a014a57afb998abea67",
-      "last_run_at": "2026-08-26T16:08:28Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-08-26T18:04:04Z",
+      "last_error": null,
+      "abandoned": []
     },
     "oomol-lab/pdf-craft": {
       "prompt_hash": "b21aef51792b02df",
@@ -58524,76 +58525,102 @@
           "error": null
         },
         "u5-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.332418,
+          "error": null
+        },
+        "u6-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8839490000000001,
+          "error": null
+        },
+        "u6-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.6652580000000001,
+          "error": null
+        },
+        "u6-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.627033,
+          "error": null
+        },
+        "u6-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.644455,
+          "error": null
+        },
+        "u7-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.366148,
+          "error": null
+        },
+        "u7-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.5927830000000003,
+          "error": null
+        },
+        "u7-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.467938,
+          "error": null
+        },
+        "u7-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.209669,
+          "error": null
+        },
+        "u7-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.3492450000000002,
+          "error": null
+        },
+        "u8-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1125770000000001,
+          "error": null
+        },
+        "u8-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.505789,
+          "error": null
+        },
+        "u9-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.369269,
+          "error": null
+        },
+        "u9-l2": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
           "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
-        },
-        "u6-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
         },
         "u10-l1": {
           "status": "pending",
@@ -58632,17 +58659,17 @@
       "mode": "full",
       "tutorial_path": "tutorials/oomol-lab/pdf-craft/pdf-craft-tutorial",
       "last_head": "bbb2d20a93178f9bc3b7be6b23e8f5b23f551c50",
-      "last_run_at": "2026-08-26T16:08:28Z",
+      "last_run_at": "2026-08-26T18:04:04Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "ai-dynamo/dynamo": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\necc3e2911e9d452491f8f1d4\",\"tool_input\":{\"command\":\"ls -d /home/runner/work/codeReader/codeReader/work/ai-dynamo-dynamo/lib/kvbm* 2>/dev/null; echo \\\"---\\\"; for d in /home/runner/work/codeReader/codeReader/work/ai-dynamo-dynamo/lib/kvbm*/; do echo \\\"== $d\\\"; find \\\"$d\\\" -name \\\"*.r",
-      "last_run_at": "2026-08-26T16:08:28Z"
+      "last_error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\ns\":0,\"costUSD\":2.060965,\"contextWindow\":1000000,\"maxOutputTokens\":64000,\"canonicalModel\":\"claude-opus-5\",\"provider\":\"firstParty\",\"costBasis\":\"list\"}},\"permission_denials\":[{\"tool_name\":\"Bash\",\"tool_use_id\":\"call_c1c01d8365c24727893bad86\",\"tool_input\":{\"command\":\"for c in kv-router",
+      "last_run_at": "2026-08-26T18:04:04Z"
     },
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-26T16:08:28Z"
+      "last_run_at": "2026-08-26T18:04:04Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
@@ -61269,7 +61296,163 @@
       "last_error": null,
       "abandoned": []
     },
-    "SFU-HiAccel/uBench": {},
+    "SFU-HiAccel/uBench": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.204382,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.15781,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.278353,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7528759999999999,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.719132,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9576100000000001,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7632690000000001,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0843509999999998,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9894020000000001,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.885103,
+          "error": null
+        },
+        "u3-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8228820000000001,
+          "error": null
+        },
+        "u4-l1": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/SFU-HiAccel/uBench/uBench-tutorial",
+      "last_head": "57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3",
+      "last_run_at": "2026-08-26T18:04:04Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
     "passlab/CUDAMicroBench": {},
     "microsoft/mimalloc": {},
     "microsoft/RustTraining": {},

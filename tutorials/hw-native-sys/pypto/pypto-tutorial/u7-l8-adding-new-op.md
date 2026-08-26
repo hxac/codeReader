@@ -32,6 +32,7 @@
 | `src/ir/op/tile_ops/batch_matmul.cpp` | `tile.batch_matmul_acc` 注册（init_cond 家族第三个成员） |
 | `src/ir/op/tensor_ops/matmul.cpp` | `tensor.matmul_acc` 注册（家族第四个成员，Tensor 级） |
 | `src/ir/op/tile_ops/unary.cpp` | `tile.sin` 等一元算子注册（综合实践的对照样本） |
+| `src/ir/op/tile_ops/memory.cpp` | `tile.create` 注册与推断（`compact` kwarg 的活例，本版新增） |
 | `src/ir/op/type_inference.cpp` | `CheckMatmulInitCond` 等共享推断/验证助手 |
 | `python/pypto/ir/op/tile_ops.py` | Python IR 层封装：薄包装调 `_ir_core.create_op_call` |
 | `python/pypto/language/op/tile_ops.py` | DSL 层包装：unwrap Tile → IR 调用 → 重新包装（**文档即手册**） |
@@ -285,6 +286,7 @@ def matmul_acc(acc, lhs, rhs,   def matmul_acc(acc, lhs,    OpRegistry::
 #### 4.4.3 源码精读
 
 - [python/bindings/modules/ir.cpp:743-760](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/python/bindings/modules/ir.cpp#L743-L760) — 绑定层两个 `create_op_call` 重载：三参版（兼容）与四参版（带 kwargs 字典，顺序保持）。它们统一走 `CreateUserFacing`——这是所有用户可见算子构造的唯一入口。
+- [python/bindings/modules/ir.cpp:762-783](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/python/bindings/modules/ir.cpp#L762-L783) — 本版新增的 `_create_internal_op_call`：走 `CreateInternal`，能到达标记 `internal_only` 的算子（`CreateUserFacing` 按设计拒绝）。这是「什么时候才需要动绑定层」的活例——不是为了某个新算子，而是为了**新通用机制**（打印→再解析往返需要重建 Pass 42 降级出的内部派发，而没有任何 DSL 包装能拼出那个名字）。注意它带下划线前缀且注释明确声明「NOT a public API」。
 - [python/pypto/ir/op/tile_ops.py:1824-1856](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/python/pypto/ir/op/tile_ops.py#L1824-L1856) — IR 层 `matmul_acc`：第 1855 行 `args = [acc, lhs, rhs] if init_cond is None else [acc, lhs, rhs, init_cond]`，然后一行 `create_op_call`。docstring 完整解释了 split-K `k == 0` 惯用法与「保持累加器单定义、避免 phi」的动机——这些内容**必须**同步带到 DSL 层。
 - [python/pypto/ir/op/tile_ops.py:2002-2035](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/python/pypto/ir/op/tile_ops.py#L2002-L2035) — IR 层 `gemv_acc`：签名是 `(acc, lhs, rhs, span, *, acc_phase="unspecified", init_cond=None)`。注意 `acc_phase` 是 **kwarg**（进 kwargs 字典），`init_cond` 是**可选操作数**（进 args 列表）——同一个函数里两种参数机制的对照样本。
 - [python/pypto/language/op/tile_ops.py:1449-1496](https://github.com/hw-native-sys-pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/python/pypto/language/op/tile_ops.py#L1449-L1496) — DSL 层 `gemv_acc`：签名 `(acc, lhs, rhs, acc_phase="unspecified", *, init_cond=None)`。docstring 里带可运行的 split-K 代码示例，并明确写出设计理由：「`init_cond` is keyword-only because `acc_phase` already owns the fourth positional slot」（第 1476-1477 行）。这是 4.5 节讨论的原文依据。
@@ -297,7 +299,7 @@ def matmul_acc(acc, lhs, rhs,   def matmul_acc(acc, lhs,    OpRegistry::
 
 **操作步骤**：
 
-1. 写一个 InCore 函数，在 K 维两段循环里用 `pl.tile.gemv_acc(acc, a, b, init_cond=(k0 == 0))`（可参照 [tests/ut/codegen/test_matmul_init_cond.py:378-397](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/tests/ut/codegen/test_matmul_init_cond.py#L378-L397) 的写法，那里展示了 `pl.gemv_acc(acc, a, b, acc_phase="partial", init_cond=(k0 == 0))`）。
+1. 写一个 InCore 函数，在 K 维两段循环里用 `pl.tile.gemv_acc(acc, a, b, init_cond=(k0 == 0))`（可参照 [tests/ut/codegen/test_matmul_init_cond.py:378-397](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/tests/ut/codegen/test_matmul_init_cond.py#L369-L397) 的写法，那里展示了 `pl.gemv_acc(acc, a, b, acc_phase="partial", init_cond=(k0 == 0))`）。
 2. `python_print` 打印该函数的 IR。
 3. 检查打印文本里 `init_cond=` 是否以**关键字形式**出现（而非第 4 个位置参数）。
 4. 把打印文本重新 `pl.parse`，用 `ir.assert_structural_equal` 比较与原 IR 是否结构相等。
@@ -326,6 +328,11 @@ def matmul_acc(acc, lhs, rhs,   def matmul_acc(acc, lhs,    OpRegistry::
 
 深层原因是 IR 的使用-定义链（use-def）：操作数是 SSA 值，参与依赖分析、公共子表达式消除、替换与 DCE；kwarg 是编译期元数据，类型受白名单限制（`DataType`、`bool`、`MemorySpace` 等），不进任何数据流。一个引用循环变量的谓词（`k0 == 0`）**必须**让编译器看见它依赖 `k0`——只有操作数能做到。
 
+但「编译期定死」只是 kwarg 判据的一半。本版（ec5d20c）新增的 `tile.create` 的 `compact` 旗标补上了另一半：**kwarg 是「推断函数每次重推时都要重读的输入」**。Pass 在改写 IR 后常常会重新对 `Call` 跑一遍 `f_deduce_type`（`InferTileMemorySpace` 就会），如果某个影响结果类型的元数据只被塞进类型节点而不进 kwargs，重推一次就被冲掉；kwarg 则随节点永久携带、每次重推都被重新消费。也就是说两种机制真正的分野是：
+
+- **运行期有值、要进数据流** → 操作数（`init_cond`：`k0 == 0`）；
+- **编译期常量、但要被推断反复重读** → kwarg（`compact`：声明 L0C 缓冲的分形行距）。
+
 `init_cond` 家族是这条判据的活教材：两次 HEAD 之间的 PR #2528/#2529 把它带进了 `gemv_acc` 并让 `matmul_acc` 接受自己已在累加的操作数，家族现在有**四个成员**——`tile.matmul_acc`、`tile.gemv_acc`、`tile.batch_matmul_acc`、`tensor.matmul_acc`。
 
 #### 4.5.2 核心流程
@@ -337,10 +344,10 @@ def matmul_acc(acc, lhs, rhs,   def matmul_acc(acc, lhs,    OpRegistry::
   │                                     │  • f_deduce_type 里校验它
   │                                     │  • 打印时按 DSL 签名的槽位决定
   │                                     │    位置 or keyword-only
-  └─否（编译期常量，如转置旗标）──► kwarg（set_attr<T>）
-                                        • 类型须在白名单内
-                                        • ValidateKwargs 校验
-                                        • 打印恒为 key=value
+  └─否（编译期常量）──► 再问：P 影响结果类型、会被重推冲掉吗？
+      ├─ 否（纯提示/旗标）──► kwarg（set_attr<T>），打完就完
+      └─ 是（塑造 TileView 等类型细节）──► kwarg，且 f_deduce_type
+                                            每次都从 kwargs 重读它
 ```
 
 对比同一家族里的两种选择：
@@ -350,15 +357,23 @@ def matmul_acc(acc, lhs, rhs,   def matmul_acc(acc, lhs,    OpRegistry::
 | `init_cond` | 可选第 4 **操作数** | 值是 `k0 == 0` 这类循环相关表达式，须进 use-def 链 |
 | `acc_phase`（`"partial"`/`"final"`） | **kwarg**（`set_attr<std::string>`） | 编译期提示，无运行时值 |
 | `a_trans`/`b_trans`（tensor.matmul_acc） | **kwarg**（`set_attr<bool>`） | 布局旗标，编译期定死 |
+| `compact`（tile.create，本版新增） | **kwarg**（`set_attr<bool>`） | 编译期常量，但它塑造结果的 TileView；走 kwarg 才能在 Pass 重推类型时被重新读到 |
 
 #### 4.5.3 源码精读
 
 四成员的操作数注册（`add_argument("init_cond", ...)`）：
 
 - [src/ir/op/tile_ops/matmul.cpp:429-438](https://github.com/hw-native-sys-pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/ir/op/tile_ops/matmul.cpp#L429-L438) — `tile.matmul_acc`：`init_cond` 是第 4 个 `add_argument`，描述写明「谓词成立处覆写而非累加（split-K 的 `k == 0` 步）」。
-- [src/ir/op/tile_ops/matmul.cpp:482-491](https://github.com/hw-native-sys-pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/ir/op/tile_ops/matmul.cpp#L482-L491) — `tile.gemv_acc`：同样的第 4 操作数声明；同链上还有 `set_attr<std::string>("acc_phase")`——**一条注册链里同时出现两种机制**，直接对照。
+- [src/ir/op/tile_ops/matmul.cpp:482-491](https://github.com/hw-native-sys-pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/ir/op/tile_ops/matmul.cpp#L482-L494) — `tile.gemv_acc`：同样的第 4 操作数声明（第 489-491 行）；同链上还有 `set_attr<std::string>("acc_phase")`——**一条注册链里同时出现两种机制**，直接对照。
 - [src/ir/op/tile_ops/batch_matmul.cpp:303-306](https://github.com/hw-native-sys-pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/ir/op/tile_ops/batch_matmul.cpp#L303-L306) — `tile.batch_matmul_acc` 的 `init_cond` 描述更进一步：说明谓词会被 `FlattenTileNdTo2D` **逐字透传**给每个 2D unroll 出的 `tile.matmul_acc`（u5-l6 讲过的行为）。
 - [src/ir/op/tensor_ops/matmul.cpp:310-317](https://github.com/hw-native-sys-pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/ir/op/tensor_ops/matmul.cpp#L310-L317) — `tensor.matmul_acc`：Tensor 级同款第 4 操作数，同链上 `a_trans`/`b_trans` 走 kwarg——跨层保持同一设计判断。
+
+而「kwarg 因被推断重读而胜出」的反面活例，是本版给 `tile.create` 新增的 `compact` 旗标：
+
+- [src/ir/op/tile_ops/memory.cpp:591-598](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/ir/op/tile_ops/memory.cpp#L591-L598) — 推断函数内的注释逐字给出选 kwarg 的理由：「在创建时声明而不是事后盖章，正是该模式能存活的原因——Pass 盖的类型细化在任何 Pass 重新推断该调用时都会被丢弃（`InferTileMemorySpace` 就会重推），而 kwarg 会被重读」。
+- [src/ir/op/tile_ops/memory.cpp:618-624](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/ir/op/tile_ops/memory.cpp#L618-L624) — 推断里的快失败校验：`compact=true` 只允许 `target_memory=Acc`（L0C），并解释了为什么——Left/Right 空间的分形行距由填充它们的 `tile.extract` 决定，只有累加器的行距才由有效行数推出。
+- [src/ir/op/tile_ops/memory.cpp:639-641](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/ir/op/tile_ops/memory.cpp#L639-L641) 与 [src/ir/op/tile_ops/memory.cpp:1068-1077](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/ir/op/tile_ops/memory.cpp#L1068-L1077) — 推断把 kwarg 翻译成结果类型上的 `tile_view.compact = CompactMode::normal`；注册链上是 `.set_attr<bool>("compact")`。
+- [python/pypto/language/op/tile_ops.py:296-339](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/python/pypto/language/op/tile_ops.py#L296-L339) — DSL 层 `create` 的同款 keyword-only 参数，docstring 明说「Compiler-internal. Kernels do not set this」——IR 层、DSL 层、C++ 注册三处描述保持同一口径，又是一例跨层文档同步。
 
 keyword-only 的**原因**写在打印器里（这是最容易被忽视的连锁后果）：
 
@@ -367,8 +382,24 @@ keyword-only 的**原因**写在打印器里（这是最容易被忽视的连锁
 
 机制差异的最终消费端在代码生成测试里看得最清楚：
 
-- [tests/ut/codegen/test_matmul_init_cond.py:10-23](https://github.com/hw-native-sys-pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/tests/ut/codegen/test_matmul_init_cond.py#L10-L23) — 模块 docstring 点明设计：字面量 `True`/`False` 在编译期折叠成单一形态；运行期谓词降级为**双臂分支且累加器上无 phi**。若 `init_cond` 当初做成 kwarg（只能存编译期常量），运行期谓词这个能力根本无从表达——这就是操作数选择的根本回报。
-- [tests/ut/codegen/test_matmul_init_cond.py:156-196](https://github.com/hw-native-sys-pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/tests/ut/codegen/test_matmul_init_cond.py#L156-L196) — 四个基础用例：无谓词只发累加形态、字面量 True 折叠为覆写形态、字面量 False 折叠为累加形态、运行期谓词分支两形态；第 196 行起还有非 BOOL 谓词被拒的负例。
+- [tests/ut/codegen/test_matmul_init_cond.py:10-23](https://github.com/hw-native-sys-pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/tests/ut/codegen/test_matmul_init_cond.py#L11-L30) — 模块 docstring 点明设计：字面量 `True`/`False` 在编译期折叠成单一形态；运行期谓词降级为**双臂分支且累加器上无 phi**。若 `init_cond` 当初做成 kwarg（只能存编译期常量），运行期谓词这个能力根本无从表达——这就是操作数选择的根本回报。docstring 还解释了 GEMV 为何与 matmul 同文件同机制（同一个 cube MAD 上的同一谓词位）。
+- [tests/ut/codegen/test_matmul_init_cond.py:156-196](https://github.com/hw-native-sys-pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/tests/ut/codegen/test_matmul_init_cond.py#L156-L196) — matmul_acc 的四个基础用例：无谓词只发累加形态、字面量 True 折叠为覆写形态、字面量 False 折叠为累加形态、运行期谓词分支两形态；第 196 行起还有非 BOOL 谓词被拒的负例。
+- [tests/ut/codegen/test_matmul_init_cond.py:369-397](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/tests/ut/codegen/test_matmul_init_cond.py#L369-L397) 与 [tests/ut/codegen/test_matmul_init_cond.py:399-448](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/tests/ut/codegen/test_matmul_init_cond.py#L399-L448) — 本版为 `gemv_acc` 补齐的**平行测试组**：与 matmul 版一一对应的五个用例（无谓词/True/False/运行期分支/非 BOOL 拒绝）。`GemvAccSplitK` 程序顺带展示了 `[16, N]` 物理缓冲加 `set_validshape` 收窄到 `[1, N]` 的 GEMV 累加器惯例，并断言 `acc_phase` 与谓词共存。**给既有算子加参数时，把既有测试组平行复制一份**是这个仓库的测试纪律。
+- [src/backend/common/pto_ops_elementwise.cpp:966-982](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/backend/common/pto_ops_elementwise.cpp#L966-L982) — 代码生成端的共享发射器 `make_acc_codegen`：注释说明谓词只是「MAD 的 Xt 寄存器一个位」，但 PTO 层只有累加/不累加两条指令，所以运行期谓词发成分支。本版把原来的 `supports_init_cond` 模板参数**删掉了**——`gemv_acc` 获得谓词后，两个算子的参数个数检查统一为「3 或 4」（第 976-978 行）。这行 `INTERNAL_CHECK` 必须跟着注册表的推断同步改，否则新参数会在代码生成处被当成编译器 bug 拦下。第 [1108](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/backend/common/pto_ops_elementwise.cpp#L1108) 行与 [1112](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/backend/common/pto_ops_elementwise.cpp#L1112) 行的两处注册现在共用同一个发射器。
+
+**跨层同步的实物证据**：`gemv_acc` 加 `init_cond` 这一个参数（PR #2528）在仓库里留下的落点，恰好就是本讲 4.1 的六层清单：
+
+| 层 | 文件与行 | 改动 |
+| ---- | ---- | ---- |
+| ① 注册 | [matmul.cpp:489-491](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/ir/op/tile_ops/matmul.cpp#L489-L491) | 追加第 4 个 `add_argument("init_cond", ...)` |
+| ② 推断 | [matmul.cpp:348-352](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/ir/op/tile_ops/matmul.cpp#L348-L352) | `CHECK(args.size() == 3 \|\| 4)` 加 `CheckMatmulInitCond(args, 3, ...)` |
+| ④ IR 封装 | [ir/op/tile_ops.py:2002-2035](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/python/pypto/ir/op/tile_ops.py#L2002-L2035) | 加 keyword-only `init_cond`，非 None 时追加进 args 列表 |
+| ⑤ DSL 包装 | [language/op/tile_ops.py:1449-1500](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/python/pypto/language/op/tile_ops.py#L1449-L1500) | keyword-only 参数加 split-K docstring 示例 |
+| 打印器 | [python_printer.cpp:1243-1256](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/ir/transforms/python_printer.cpp#L1243-L1256) | `acc_kw_init_cond` 条件扩到 `tile.gemv_acc` |
+| ⑥ 代码生成 | [pto_ops_elementwise.cpp:974-979](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/backend/common/pto_ops_elementwise.cpp#L974-L979) | 删 `supports_init_cond`，个数检查放宽到 4 |
+| ⓪ 测试 | [test_matmul_init_cond.py:399-448](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/tests/ut/codegen/test_matmul_init_cond.py#L399-L448) | 平行复制五个用例 |
+
+一个参数、六处文件、零处可漏——「跨层同步」纪律的具体形状就是这张表。
 
 #### 4.5.4 代码实践
 
@@ -389,7 +420,7 @@ keyword-only 的**原因**写在打印器里（这是最容易被忽视的连锁
 
 **练习 1**：`tile.matmul_acc` 的 `init_cond` 按位置打印没问题，`tile.gemv_acc` 却要关键字打印。同一个参数名为何待遇不同？
 
-**答案**：打印的是 **DSL 签名**不是 IR。`gemv_acc` 的 DSL 第 4 位置槽属于 `acc_phase`，`init_cond` 是 keyword-only；IR 侧两者都存第 4 操作数。打印器必须按 DSL 签名回写，否则再解析时谓词会绑到 `acc_phase`。见 [src/ir/transforms/python_printer.cpp:1247-1252](https://github.com/hw-native-sys-pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/ir/transforms/python_printer.cpp#L1247-L1252) 的原注释。
+**答案**：打印的是 **DSL 签名**不是 IR。`gemv_acc` 的 DSL 第 4 位置槽属于 `acc_phase`，`init_cond` 是 keyword-only；IR 侧两者都存第 4 操作数。打印器必须按 DSL 签名回写，否则再解析时谓词会绑到 `acc_phase`。见 [src/ir/transforms/python_printer.cpp:1247-1252](https://github.com/hw-native-sys-pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/ir/transforms/python_printer.cpp#L1243-L1256) 的原注释（`tensor.matmul_acc` 与 `tile.gemv_acc` 两个 keyword-only 签名各占一条）。
 
 **练习 2**：如果 `init_cond` 当初注册成 `set_attr<bool>("init_cond")`，会发生什么？
 
@@ -398,6 +429,10 @@ keyword-only 的**原因**写在打印器里（这是最容易被忽视的连锁
 **练习 3**：`predicate_to_expr` 为什么把 Python `bool` 转成 `ConstInt(.., BOOL)` 而不是直接存 `std::any` 里的 bool？
 
 **答案**：因为参数机制已经选定为操作数——操作数必须是 `Expr`。把字面量包装成 `ConstInt` 后，它成为普通 SSA 值：代码生成端看到常量就在编译期折叠选边（测试 `test_literal_true_folds_to_the_non_accumulating_form`），看到符号表达式就发双臂分支。同一条管线自然处理两种情形，无需 kwarg 旁路。
+
+**练习 4**：`compact` 是编译期常量，`init_cond` 里那种「值随循环变」的理由对它不成立——那它为什么不干脆由 `AutoTileMatmulL0` 在生成累加器种子后直接改写类型节点（`tile_view.compact = ...`），而要走 `tile.create` 的 kwarg？
+
+**答案**：因为类型改写活不过下一次重推。Pass 改写 IR 后常会对 `Call` 重新跑 `f_deduce_type`（`InferTileMemorySpace` 就会），重推用注册表里可见的信息从零重建结果类型，任何「事后盖章」的字段都会在这一刻丢失；而 kwarg 随节点持久携带、每次重推都被推断重新消费（[src/ir/op/tile_ops/memory.cpp:594-598](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/ir/op/tile_ops/memory.cpp#L594-L598) 的注释原话）。所以判据的完整版是：要进数据流的放操作数；推断每次都要重读的元数据放 kwarg。
 
 ## 5. 综合实践
 
@@ -413,7 +448,7 @@ keyword-only 的**原因**写在打印器里（这是最容易被忽视的连锁
 4. **A4 单测**：在 `tests/ut/ir/operators/test_tile_ops.py` 仿照 [test_tile_sin_creates_call](https://github.com/hw-native-sys-pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/tests/ut/ir/operators/test_tile_ops.py#L550-L563)：构造 FP32 Tile 变量 → `tile.sin_poly` → 断言 `Call`、算子名、结果类型；再加一个 FP16 被拒的负例。
 5. **C2 代码生成**：`tile.sin_poly` 不对应单条 PTO 指令，走**复合算子路线**——在 `src/ir/transforms/lower_composite_ops_pass.cpp` 的规则表（[第 2209-2210 行](https://github.com/hw-native-sys-pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/ir/transforms/lower_composite_ops_pass.cpp#L2209-L2210) 已登记 `tile.sin`/`tile.cos`）旁注册你自己的菜谱：用 `tile.mul`/`tile.add`/`tile.mul` 标量变体拼 Horner 多项式（7 阶奇多项式在 |x|≤π 内误差可小于 1e-6；区间归约可先省略，注明定义域限制）。
 6. **端到端验证**：写一个 `@pl.jit` InCore 算子：`pl.load` FP32 张量 → `pl.tile.sin_poly` → `pl.store`，与 `torch.sin` 对照 `torch.allclose`（容差按你的阶数定，建议 1e-5）。运行后 dump IR 确认 `LowerCompositeOps` 之后 `tile.sin_poly` 已消失、只剩原语链。
-7. **签名设计问答**（对应本讲 4.5）：假如你的算子要支持「循环首步直接覆写、后续步累加」的变体 `sin_poly_acc(acc, tile, warm)`——`warm` 应注册成什么？写出三行理由（提示：`warm` 依赖循环变量；对照 `gemv_acc` 的 `init_cond` 是 keyword-only 操作数，而你的新算子第 3 位置槽若是空的，`warm` 可以直接占位置槽、连打印器修整都不需要）。
+7. **签名设计问答**（对应本讲 4.5）：假如你的算子要支持「循环首步直接覆写、后续步累加」的变体 `sin_poly_acc(acc, tile, warm)`——`warm` 应注册成什么？写出三行理由（提示：`warm` 依赖循环变量；对照 `gemv_acc` 的 `init_cond` 是 keyword-only 操作数，而你的新算子第 3 位置槽若是空的，`warm` 可以直接占位置槽、连打印器修整都不需要）。再问一个反面：假如你的算子有一种「输出按 N-fractal 行距打包」的编译期布局模式（对照 `tile.create` 的 `compact`，见 [src/ir/op/tile_ops/memory.cpp:591-598](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/src/ir/op/tile_ops/memory.cpp#L591-L598)），它该进操作数还是 kwarg？答案应是 kwarg——编译期常量且塑造结果类型，推断每次重推都要重读它。
 8. **文档**：在 `docs/en/dev/ir/05-operators.md` 与 `docs/zh/dev/ir/05-operators.md` 的 TileOp 表各加一行（en 为权威，zh 同步）。
 
 验收标准：`pytest tests/ut/ir/operators/test_tile_ops.py -v -k sin_poly` 通过；DSL 端到端与 torch 对照通过；`pre-commit run --all-files` 通过。若本地无编译环境，步骤 1/5/6 标注「待本地验证」，但步骤 2/3/4/7 的代码与文档必须完整写出。
@@ -424,7 +459,7 @@ keyword-only 的**原因**写在打印器里（这是最容易被忽视的连锁
 - 注册用 `REGISTER_OP` 流式链；`import pypto` 时 `ValidateTileOps` + `ValidateArgEffects` 两道自检让「半成品算子」当场失败——内存规格与副作用声明不是可选项。
 - `f_deduce_type` 同时承担 shape 推断与用户输入校验；可选尾随操作数的标准写法是「`CHECK(args.size() == N || N+1)` + 带越界保护的校验助手」，`CheckMatmulInitCond` 是跨三个文件复用的样板。
 - Python 两层封装职责分明：IR 层面向表达式，DSL 层 unwrap/wrap 面向用户；DSL docstring 是发布的产品手册，受平价 lint 约束，必须写成源码字面量。
-- 操作数 vs kwarg 的判据是「值是否随运行/循环变化」：`init_cond` 因引用 `k0 == 0` 须进 use-def 链而注册为可选第 4 操作数，家族现有四个成员；keyword-only 与否取决于 DSL 位置槽被谁占有，打印器会据此做关键字化修整保住往返一致。
+- 操作数 vs kwarg 的判据完整版是两条：值随运行/循环变化、要进 use-def 链的放操作数（`init_cond` 引用 `k0 == 0`，家族现有四个成员）；编译期定死、但要被推断每次重推时重读的元数据放 kwarg（`tile.create` 的 `compact`——事后盖章的类型改写活不过一次重推）。keyword-only 与否取决于 DSL 位置槽被谁占有，打印器会据此做关键字化修整保住往返一致。
 - 文档会滞后于代码（kSimpleOps 已搬进 `pto_ops_elementwise.cpp` 而技能文档仍写 `pto_ops_common.cpp`）——落点永远以代码为准。
 
 ## 7. 下一步学习建议

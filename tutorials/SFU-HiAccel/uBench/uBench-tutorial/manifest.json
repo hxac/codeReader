@@ -1,0 +1,768 @@
+{
+  "head": "57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3",
+  "project": "uBench",
+  "rationale": "uBench 是一个基于 Vitis HLS 的 FPGA 内存系统微基准套件（片外带宽、流带宽、片外延迟）外加 KNN/SpMV 两个案例研究，代码形态统一为「HLS 内核 + OpenCL 主机程序 + Makefile/ini 连接配置 + Python 自动生成脚本」。因此学习路线设计为：先用单元 1 让读者从零掌握项目定位、目录组织和构建运行方式（含无硬件时的 sw_emu 仿真路径）；单元 2 讲清贯穿全仓库的两条编程主线——HLS 内核（INTERFACE pragma、ap_uint、DATAFLOW/PIPELINE）与 xcl2/OpenCL 主机流程（设备发现、Buffer 与内存 bank 绑定、kernel 启动与计时），这是读懂一切后续代码的公共地基；单元 3、4 按三条微基准线逐条深入，先讲读带宽内核这个最简样板，再扩展到端口数/位宽/突发长度、DDR 与 HBM 连接（ubench.ini 的 sp/slr/nk 与主机 cl_mem_ext_ptr_t）、写带宽、内核间流（hls::stream + stream_connect）与随机访问延迟，最后覆盖 ZCU104 嵌入式差异；单元 5 解析 auto_collect 的 config.py 参数空间与四个代码生成器（注意其为 Python 2 脚本），说明自动化参数扫描流水线；单元 6 进入 advanced，用 KNN（load/compute/sort 双缓冲 + globalSort 流归并）和 SpMV（ELLPACK 分块 + UNROLL + URAM）四个设计变体的配置差异，展示如何把微基准得到的带宽/延迟洞察转化为端口宽度、突发长度、PE 数量等设计决策；单元 7 收尾于仓库公共设施、自建新微基准的扩展实践以及对测量方法学（主机端计时、xrt.ini/profile、perf_analyze）的批判与改进。依赖关系上每个单元都建立在前序单元的源码阅读能力之上，读者可在任意微基准目录停下做参数修改实验。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 uBench 的定位：量化 Xilinx Alveo U200/U280 与 ZCU104 FPGA 内存系统性能",
+            "列出影响内存带宽的五个因素：频率、并发端口数、端口位宽、最大突发长度、连续访问数据量",
+            "区分仓库中三类微基准（片外带宽、流带宽、片外延迟）与两个案例研究（KNN、SpMV）"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "微基准测试动机",
+            "五个带宽影响因素",
+            "三类微基准与两个案例"
+          ],
+          "order": 1,
+          "practice_task": "阅读根目录 README.md 与 FPGA 2021 论文引用信息，绘制一张表格，把仓库中三类微基准各自扫描的参数列出来，并标注每个参数在哪个文件中定义（如 krnl_config.h、host.cpp、config.py）。",
+          "source_files": [
+            "README.md"
+          ],
+          "title": "uBench 是什么：FPGA 内存系统微基准的动机与全景",
+          "topic": "介绍 uBench 项目背景：为什么要对现代数据中心 FPGA（Alveo U200/U280）和嵌入式 FPGA（ZCU104）的内存系统做微基准测试，以及五个影响内存带宽的关键因素。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-repo-structure-tour.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "画出 ubench/、case_study/、common/ 三大目录的树状图",
+            "说出每个微基准目录中 Makefile、utils.mk、ubench.ini、src/ 四类文件的职责",
+            "理解目录命名（read/write、DDR/HBM、2ports_512bit、32bit_per_access）即参数组合"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "顶层目录地图",
+            "微基准目录骨架",
+            "common 公共库与工具"
+          ],
+          "order": 2,
+          "practice_task": "使用 find/grep 统计 ubench/ 下所有 krnl_ubench.cpp 与 ubench.ini 的数量，写出每个目录名到五参数（频率/端口数/位宽/突发/连续数据量）的映射表，检验目录命名与参数的对应关系。",
+          "source_files": [
+            "README.md",
+            "ubench/offchip_bandwidth/datacenter/README.md",
+            "ubench/streaming_bandwidth/datacenter/README.md",
+            "ubench/offchip_latency/datacenter/README.md",
+            "case_study/SpMV/README.md",
+            "case_study/KNN/README.md"
+          ],
+          "title": "仓库目录结构导览：三大微基准与案例研究的地图",
+          "topic": "逐层讲解仓库目录：ubench/offchip_bandwidth（datacenter read/write × DDR/HBM、embedded）、ubench/streaming_bandwidth、ubench/offchip_latency、case_study（KNN/SpMV 各四个变体）以及 common/ 公共库与工具脚本的组织方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "filename": "u1-l3-environment-setup-and-build.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "说出 make all/build/check/sd_card 各目标的作用",
+            "理解 TARGET（sw_emu/hw_emu/hw）与 DEVICE 平台参数的传递链路",
+            "在无真机条件下用 sw_emu 仿真跑通一个微基准"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "环境变量检查",
+            "v++ 编译与链接目标",
+            "仿真运行路径"
+          ],
+          "order": 3,
+          "practice_task": "以 read/DDR/2ports_512bit 为目标目录，阅读其 Makefile 后写出：从源码到 ubench.xclbin 再到运行可执行文件 ubench 分别执行了哪些命令；若本机装有 Vitis，尝试 make check TARGET=sw_emu DEVICE=<平台> 跑通仿真，否则手写一份命令流程说明文档。",
+          "source_files": [
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/Makefile",
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/utils.mk",
+            "common/utils.mk",
+            "common/includes/opencl/opencl.mk",
+            "common/includes/xcl2/xcl2.mk"
+          ],
+          "title": "环境搭建与构建运行：Makefile、Vitis 与 XRT 工具链",
+          "topic": "讲解如何配置 Vitis 2020.2 + XRT 环境，解读 Makefile 的 help/build/check/sd_card 目标、utils.mk 中的平台与交叉编译检查，以及 sw_emu/hw_emu/hw 三种构建目标。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "filename": "u1-l4-microbenchmark-anatomy.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "说出一个微基准工程由哪五个文件构成及各自的生成/消费关系",
+            "理解 krnl_config.h 中的 DWIDTH、WIDTH_FACTOR、NUM_ITERATIONS 三个宏如何同时影响内核与主机",
+            "跟踪一次完整的启动流程：host 加载 xclbin → 设置参数 → enqueueTask"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "五文件流水线",
+            "配置头文件",
+            "运行数据流"
+          ],
+          "order": 4,
+          "practice_task": "以 read/DDR/2ports_512bit 工程为对象，画出从 host.cpp main() 开始到内核返回的调用时序图，并标注 krnl_config.h 中每个常量在图中被使用的位置。",
+          "source_files": [
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/src/krnl_config.h",
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/src/krnl_ubench.cpp",
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/src/host.cpp",
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/ubench.ini",
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/Makefile"
+          ],
+          "title": "解剖一个最小微基准工程：krnl_config.h + 内核 + 主机 + ini + Makefile",
+          "topic": "以 offchip_bandwidth read DDR 2ports_512bit 为样板，拆解一个微基准工程的五个组成部分及其协作关系：配置头文件、HLS 内核源码、OpenCL 主机程序、连接配置文件和构建脚本。"
+        }
+      ],
+      "title": "初识 uBench：项目定位、目录结构与第一次构建运行"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l1-hls-kernel-basics.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "解释 m_axi（bundle、offset、max_read_burst_length）与 s_axilite 两类接口的作用",
+            "说明 volatile INTERFACE_WIDTH* 类型如何由 DWIDTH 派生（ap_uint<512>）",
+            "理解 DATAFLOW 与 PIPELINE II=1 在带宽测试内核中的含义"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "INTERFACE pragma",
+            "ap_uint 宽类型",
+            "流水线与数据流"
+          ],
+          "order": 1,
+          "practice_task": "把 read/DDR 内核中的 max_read_burst_length 从 16 改为 256，把 krnl_config.h 的 DWIDTH 改为 256，列出所有必须同步修改的位置（内核签名、临时变量、主机 NUM_PORT/payload 换算），并解释位宽变化对 WIDTH_FACTOR 的影响。",
+          "source_files": [
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/src/krnl_ubench.cpp",
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/src/krnl_config.h"
+          ],
+          "title": "HLS 内核编程基础：INTERFACE pragma、ap_uint 与流水线",
+          "topic": "以最简单的读带宽内核为例，讲解 Vitis HLS 内核的接口编译指示（m_axi 内存端口、s_axilite 控制端口）、ap_uint 任意位宽类型、DATAFLOW 与 PIPELINE II=1 的语义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l2-opencl-host-programming.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "跟踪 host.cpp 中设备枚举→Program→Kernel→Buffer→setArg→enqueueTask→finish 的标准序列",
+            "解释 cl_mem_ext_ptr_t 与 XCL_MEM_TOPOLOGY/XCL_MEM_DDR_BANKx 如何把缓冲绑到指定内存 bank",
+            "说出 xcl2.hpp 提供的 get_xil_devices/read_binary_file/is_emulation/aligned_allocator 各自用途"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "设备与程序初始化",
+            "bank 绑定缓冲",
+            "内核启动"
+          ],
+          "order": 2,
+          "practice_task": "为 read/DDR 的 host.cpp 写一份带注释的逐段说明，重点标注两处分支（is_emulation 与 else）中 bank flag 的差异；再写一个小工具函数，使 NUM_PORT 为任意值时都能循环设置所有端口的 cl_mem_ext_ptr_t。",
+          "source_files": [
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/src/host.cpp",
+            "common/includes/xcl2/xcl2.hpp"
+          ],
+          "title": "主机端编程模型：xcl2 封装、OpenCL 对象与内存 bank 绑定",
+          "topic": "精读 host.cpp 的 OpenCL/XRT 编程骨架：xcl::get_xil_devices 发现设备、read_binary_file 加载 xclbin、cl::Context/CommandQueue/Program/Kernel 的创建、cl_mem_ext_ptr_t 把缓冲区指定到 DDR/HBM bank、setArg 与 enqueueTask 启动内核。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "filename": "u2-l3-bandwidth-measurement-methodology.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "解释 payload 从 256 到 262144 的倍增扫描如何对应 1KB 到 1MB 连续访问",
+            "推导带宽公式 bw = payload*4*0.00001/t*NUM_KERNEL*NUM_PORT 中每一项的单位",
+            "指出主机端计时包含内核启动开销这一局限及其对大/小 payload 的影响差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "payload 扫描",
+            "带宽换算公式",
+            "计时误差来源"
+          ],
+          "order": 3,
+          "practice_task": "把 read/DDR host.cpp 的计时方式改写为基于 cl_event（CL_QUEUE_PROFILING_ENABLE）的内核级计时，对比两种计时在同一 payload 下的差值；无硬件时可先推导公式并写伪代码。",
+          "source_files": [
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/src/host.cpp",
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/src/krnl_config.h"
+          ],
+          "title": "测量方法学：payload 扫描、计时与带宽公式",
+          "topic": "分析主机端如何完成一次带宽测量：payload 倍增循环（256→262144 个 32bit 整数，即 1KB→1MB）、std::chrono 计时窗口、NUM_ITERATIONS 放大内核执行时间，以及带宽计算公式的推导与单位换算。"
+        }
+      ],
+      "title": "公共编程模型：HLS 内核与 OpenCL 主机程序基础"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "filename": "u3-l1-read-bandwidth-kernel-deep-dive.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "逐行解释两个读循环如何各自消耗一个 gmem bundle 端口",
+            "说明 volatile 修饰和 NUM_ITERATIONS=10000 如何防止编译器优化掉读并放大时间",
+            "对比 DDR 与 HBM 版本内核源码的异同（完全相同的内核，差异在连接配置）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "双端口读循环",
+            "防优化技巧",
+            "DDR 与 HBM 版本对照"
+          ],
+          "order": 1,
+          "practice_task": "用 diff 对比 read/DDR 与 read/HBM 两个工程的 src/ 目录，验证内核代码是否一致；然后手动把内核扩展为 3 个读端口（in0/in1/in2 + gmem2），同步修改 host.cpp 的 NUM_PORT 与 ubench.ini 的 sp 行，记录所有改动点。",
+          "source_files": [
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/src/krnl_ubench.cpp",
+            "ubench/offchip_bandwidth/datacenter/read/HBM/2ports_512bit/src/krnl_ubench.cpp",
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/src/krnl_config.h"
+          ],
+          "title": "读带宽内核逐行精读：双端口读循环与防优化技巧",
+          "topic": "深入读带宽微基准内核：两个并发读端口的循环结构、volatile 临时变量防止读操作被优化掉、NUM_ITERATIONS 外层循环放大执行时间，以及 DDR 版与 HBM 版内核源码的对照。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-ports-and-width-tuning.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "按照 README 指南手动增删内核端口、临时变量与并发循环",
+            "理解 DWIDTH 改变后主机端 dataSize/WIDTH_FACTOR 换算的原因",
+            "认识 max_read_burst_length/max_write_burst_length 与 AXI 协议突发传输的关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "端口数扩展",
+            "位宽修改",
+            "突发长度调整"
+          ],
+          "order": 2,
+          "practice_task": "完成一次「手动 auto_collect」：把 2ports_512bit 复制为新目录 4ports_256bit，按 README 六节指南把端口数改为 4、位宽改为 256、burst 改为 64，并核算 host.cpp 中 payload 循环范围对应的实际连续访问字节数。",
+          "source_files": [
+            "ubench/offchip_bandwidth/datacenter/README.md",
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/src/krnl_config.h",
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/src/krnl_ubench.cpp",
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/src/host.cpp"
+          ],
+          "title": "调参数实验：端口数量、数据位宽与突发长度的手动修改",
+          "topic": "按照 datacenter README 给出的操作指南，讲解如何手动修改并发端口数（内核签名 + 主机 NUM_PORT）、端口位宽（krnl_config.h 的 DWIDTH）与最大突发长度（max_read/write_burst_length），以及每个参数改动需要联动的文件清单。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l3-ddr-hbm-connectivity.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "解释 ubench.ini 中 sp（端口到内存 bank）、slr（内核放置）、nk（内核实例数）三条指令",
+            "理解主机端 XCL_MEM_DDR_BANKx / XCL_MEM_TOPOLOGY flag 与 ini 中 sp 行必须一一对应",
+            "说出 U200 双通道 DDR 与 U280 32 bank HBM（host.cpp 中 MAX_HBM_BANKCOUNT 表）在配置上的差别"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ini 连接指令",
+            "主机 bank flag",
+            "DDR 与 HBM 差异"
+          ],
+          "order": 3,
+          "practice_task": "把 read/HBM 工程改为让两个端口分别接到 HBM[0] 和 HBM[1]（修改 ubench.ini 的 sp 行与 host.cpp 的 bank 表/flag），并写出为什么这种拆分可能改变总带宽；再对照 host.cpp 顶部的 32 个 HBM bank 常量表解释其用途。",
+          "source_files": [
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/ubench.ini",
+            "ubench/offchip_bandwidth/datacenter/read/HBM/2ports_512bit/ubench.ini",
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/src/host.cpp"
+          ],
+          "title": "DDR 与 HBM：ubench.ini 连接配置与内核布局",
+          "topic": "解读 Vitis 链接配置文件 ubench.ini 的 [connectivity] 段：slr 内核放置、sp 端口-内存 bank 映射、nk 内核实例数，以及主机端 cl_mem_ext_ptr_t flag 与之配合的方式；对比 DDR 与 HBM 两种内存的配置差异。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u3-l3"
+          ],
+          "filename": "u3-l4-write-bandwidth-variant.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "对比写内核（out0[j] = 常量）与读内核（temp = in0[j]）的结构差异",
+            "说明 max_write_burst_length 的设置位置及对写带宽的影响",
+            "指出写带宽主机计分公式的系数差异（不乘 NUM_PORT 时如何修正）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "写内核对照",
+            "写突发配置",
+            "主机公式修正"
+          ],
+          "order": 4,
+          "practice_task": "设计一个读写混合微基准：基于 write/DDR 内核新增一个读端口，使内核同时执行一次连续读和一次连续写，修改 ubench.ini 与 host.cpp 使其编译通过（可用 sw_emu 验证），并推导混合带宽的计算公式。",
+          "source_files": [
+            "ubench/offchip_bandwidth/datacenter/write/DDR/2ports_512bit/src/krnl_ubench.cpp",
+            "ubench/offchip_bandwidth/datacenter/write/DDR/2ports_512bit/src/host.cpp",
+            "ubench/offchip_bandwidth/datacenter/write/DDR/2ports_512bit/ubench.ini"
+          ],
+          "title": "写带宽变体：同一框架下的对称实现",
+          "topic": "对照 read 版本讲解 write/DDR 微基准：写内核的接口形式、max_write_burst_length、主机端缓冲区改为 CL_MEM_WRITE_ONLY 之外的差异，以及写带宽结果的解读。"
+        }
+      ],
+      "level": "intermediate",
+      "title": "片外带宽微基准：offchip_bandwidth 深度剖析"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2",
+            "u3-l3"
+          ],
+          "filename": "u4-l1-streaming-bandwidth-kernels.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "解释 ap_axiu<512,0,0,0> pkt 与 hls::stream<pkt> 如何构成 AXIS 流接口",
+            "解读 ubench.ini 中 stream_connect=krnl_streamWrite_1.kout1:krnl_streamRead_1.kin1 的配对机制",
+            "说明流带宽公式中 ×2 系数与 payload 上限放大到 ~10GB 的原因"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "AXIS 流接口",
+            "stream_connect 配对",
+            "流带宽计量"
+          ],
+          "order": 1,
+          "practice_task": "把流微基准从 2 个流端口扩展为 4 个：修改 krnl_streamWrite.cpp/krnl_streamRead.cpp 的流参数、krnl_config.h、ubench.ini 的 stream_connect 行以及 host.cpp 的参数设置，核对每条流两端端口名一致。",
+          "source_files": [
+            "ubench/streaming_bandwidth/datacenter/2ports_512bit/src/krnl_streamRead.cpp",
+            "ubench/streaming_bandwidth/datacenter/2ports_512bit/src/krnl_streamWrite.cpp",
+            "ubench/streaming_bandwidth/datacenter/2ports_512bit/src/krnl_config.h",
+            "ubench/streaming_bandwidth/datacenter/2ports_512bit/src/host.cpp",
+            "ubench/streaming_bandwidth/datacenter/2ports_512bit/ubench.ini"
+          ],
+          "title": "流带宽微基准：内核到内核的 hls::stream 数据通路",
+          "topic": "讲解流带宽微基准的成对内核结构：krnl_streamWrite 通过 hls::stream<pkt>（ap_axiu）发送数据，krnl_streamRead 接收，ubench.ini 用 stream_connect 把两个内核的流端口连起来，主机侧成对启动内核并测量流带宽。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u4-l2-offchip-latency-microbenchmark.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "解释随机下标数组 + 二次遍历如何制造地址依赖的随机访问",
+            "说明 local_in0_index[524288] 数组大小与最大可测 2MB 数组的换算关系",
+            "从总时间推导平均访问延迟：T/(NUM_ITERATIONS*size) 再折算 ns"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "随机访问模式",
+            "下标缓冲",
+            "延迟换算"
+          ],
+          "order": 2,
+          "practice_task": "阅读 latency host.cpp，写出从 payload（int 个数）到随机访问数组字节数的换算；修改 host.cpp 输出把现在的 GB/s 输出改为平均每次访问延迟（ns/access），公式为 kernel_time_in_sec/(NUM_ITERATIONS*(payload/WIDTH_FACTOR))*1e9。",
+          "source_files": [
+            "ubench/offchip_latency/datacenter/DDR/32bit_per_access/src/krnl_ubench.cpp",
+            "ubench/offchip_latency/datacenter/DDR/32bit_per_access/src/krnl_config.h",
+            "ubench/offchip_latency/datacenter/DDR/32bit_per_access/src/host.cpp",
+            "ubench/offchip_latency/datacenter/README.md"
+          ],
+          "title": "片外延迟微基准：随机访问与延迟估计",
+          "topic": "剖析 offchip_latency 微基准：主机生成随机打乱的下标数组（random_shuffle），内核先把下标读入片上数组再按随机顺序访问数据数组，通过总时间除以访问次数估计平均随机访问延迟；注意 README 与代码中 payload 起点不一致（代码从 16 即 64B 起）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3",
+            "u3-l1"
+          ],
+          "filename": "u4-l3-embedded-zcu104-port.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "说出嵌入式版本在 host.h/my_timer.h/run_app.sh/xrt.ini 上的结构与差异",
+            "理解 Makefile 的 sd_card 目标如何为 aarch64 打包 BOOT.BIN 与 init.sh",
+            "解释 ZCU104 HP/HPC 端口模型与 Alveo DDR/HBM bank 模型的配置差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "嵌入式主机框架",
+            "sd_card 打包",
+            "HP/HPC 端口模型"
+          ],
+          "order": 3,
+          "practice_task": "对比 offchip_latency 的 datacenter 与 embedded 两个版本，列出 host.cpp 在设备发现、计时、xclbin 加载上的差异清单；再阅读 run_app.sh 写出在 ZCU104 上从 SD 卡启动到运行 benchmark 的完整步骤说明。",
+          "source_files": [
+            "ubench/offchip_latency/embedded/32bit_per_access/src/host.cpp",
+            "ubench/offchip_latency/embedded/32bit_per_access/src/host.h",
+            "ubench/offchip_latency/embedded/32bit_per_access/src/my_timer.h",
+            "ubench/offchip_latency/embedded/32bit_per_access/run_app.sh",
+            "ubench/offchip_latency/embedded/32bit_per_access/xrt.ini",
+            "ubench/offchip_bandwidth/embedded/README.md"
+          ],
+          "title": "嵌入式平台移植：ZCU104 上的带宽与延迟测试",
+          "topic": "讲解嵌入式（ZCU104，aarch64）版本与数据中心版本的差异：独立 host.h 头、my_timer.h 计时、run_app.sh 板上运行脚本、xrt.ini 打开 profile/timeline_trace、Makefile 的 sd_card 打包流程，以及嵌入式 auto_collect 用 HP/HPC 端口名而非 DDR bank 名。"
+        }
+      ],
+      "level": "intermediate",
+      "title": "流带宽与片外延迟微基准"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2",
+            "u3-l3"
+          ],
+          "filename": "u5-l1-auto-collect-pipeline.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "说出 config.py 七个配置项与五因素的对应关系",
+            "跟踪 generate_microbenchmarks.py 的目录创建与 runAll.sh 生成逻辑",
+            "理解交叉积参数空间的设计与目录命名规则的对应"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "参数空间",
+            "生成主流程",
+            "runAll 批跑"
+          ],
+          "order": 1,
+          "practice_task": "把 config.py 改为 KERNEL_FREQ=[300]、NUM_CONCURRENT_PORT=[2,4]、PORT_WIDTH=[512]、MAX_BURST_LENGTH=[16,256]，先在纸上推演会生成多少个设计目录及各自的目录名，再（用 python2 或转写 python3 后）运行脚本验证目录名是否与推演一致。",
+          "source_files": [
+            "ubench/offchip_bandwidth/datacenter/auto_collect/config.py",
+            "ubench/offchip_bandwidth/datacenter/auto_collect/generate_microbenchmarks.py",
+            "ubench/offchip_bandwidth/datacenter/auto_collect/README.md"
+          ],
+          "title": "auto_collect 总体流程：config.py 参数空间与批量生成",
+          "topic": "讲解自动化生成流水线的顶层：config.py 定义七维参数（KERNEL_FREQ、NUM_CONCURRENT_PORT、PORT_WIDTH、MAX_BURST_LENGTH、CONSECUTIVE_DATA_SIZE、ACCESS_TYPE、MEMORY_TYPE），generate_microbenchmarks.py 用六层嵌套循环为每个参数组合生成一个完整微基准目录并汇总出 runAll.sh。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-code-generator-scripts.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "解释 kernelcode_gen.py 如何按端口数拼接内核签名与 pragma",
+            "说明 hostcode_gen.py 如何把连续数据大小范围写进 payload 循环、bank flag 写进缓冲分配",
+            "识别脚本中的 Python 2 语法并完成向 Python 3 的迁移"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "内核生成器",
+            "主机与连接生成器",
+            "Makefile 生成器",
+            "Python2 迁移"
+          ],
+          "order": 2,
+          "practice_task": "把四个 *_gen.py 从 Python 2 迁移到 Python 3（处理 print 语句等），并用迁移后的脚本生成一个 RD/DDR/300MHz/2port/512bit/64burst 的设计，diff 对比手工目录 read/DDR/2ports_512bit，解释 sum 端口等生成版与手写版的差异。",
+          "source_files": [
+            "ubench/offchip_bandwidth/datacenter/auto_collect/kernelcode_gen.py",
+            "ubench/offchip_bandwidth/datacenter/auto_collect/hostcode_gen.py",
+            "ubench/offchip_bandwidth/datacenter/auto_collect/connectivity_gen.py",
+            "ubench/offchip_bandwidth/datacenter/auto_collect/makefile_gen.py"
+          ],
+          "title": "四个代码生成器：内核、主机、连接与 Makefile 的模板化生成",
+          "topic": "逐个解读 kernelcode_gen.py（按端口数/访问类型生成内核源码与 pragma）、hostcode_gen.py（生成主机程序与 bank 绑定）、connectivity_gen.py（生成 ubench.ini 的 sp/slr/nk）、makefile_gen.py（生成含 kernel_frequency 的 Makefile），并注意这些脚本使用 Python 2 语法（print 语句）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1",
+            "u4-l1",
+            "u4-l3"
+          ],
+          "filename": "u5-l3-streaming-and-embedded-auto-collect.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "说出流版 auto_collect 参数集（无 ACCESS_TYPE/MAX_BURST_LENGTH，新增 NUM_KERNEL）的差异",
+            "解释嵌入式版 MEMORY_TYPE 用 PORT_NAMES（HP0/HPC0 等）替代 BANK_NAME 的原因",
+            "归纳三套 auto_collect 共享的「config + generate + 生成器」架构模式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "流版参数差异",
+            "嵌入式端口名模型",
+            "共享架构模式"
+          ],
+          "order": 3,
+          "practice_task": "对比三套 auto_collect 的 config.py，制作参数对照表；然后为流版 config.py 增加 NUM_CONCURRENT_PORT=[8] 的配置并推演生成目录数量，说明嵌入式版为何不需要 MAX_BURST_LENGTH。",
+          "source_files": [
+            "ubench/streaming_bandwidth/datacenter/auto_collect/config.py",
+            "ubench/streaming_bandwidth/datacenter/auto_collect/generate_microbenchmarks.py",
+            "ubench/offchip_bandwidth/embedded/auto_collect/config.py",
+            "ubench/streaming_bandwidth/embedded/auto_collect/config.py"
+          ],
+          "title": "流带宽与嵌入式版本的 auto_collect 变体",
+          "topic": "对比三套 auto_collect 脚本族：streaming 版参数改为 NUM_CONCURRENT_PORT/PORT_WIDTH/CONSECUTIVE_DATA_SIZE/NUM_KERNEL（以 10MB 为单位），embedded 版 MEMORY_TYPE 使用 HP/HPC 端口名列表且频率降到 150MHz；总结共用架构与差异点。"
+        }
+      ],
+      "level": "intermediate",
+      "title": "自动化生成流水线：auto_collect 脚本族"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2",
+            "u4-l1"
+          ],
+          "filename": "u6-l1-knn-baseline-architecture.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "解释 load/compute/sort 三级流水如何用 flag 与 i%2 实现双缓冲软件流水",
+            "解读奇偶交替的插入排序（odd-even sort）维护 TOP=10 近邻的方法",
+            "说明 14 个 partialKnn 内核如何经 AXIS 流汇聚到 krnl_globalSort 完成全局归并"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "三级软件流水",
+            "奇偶插入排序",
+            "流归并内核",
+            "多实例连接配置"
+          ],
+          "order": 1,
+          "practice_task": "画出 baseline_14PE 的数据流图（searchSpace DDR → 14×krnl_partialKnn → krnl_globalSort → 输出），标注每条 AXIS 流；再手算 NUM_OF_TILES=32774/14 的含义并解释 krnl_partialKnn.cpp 中 load/compute/sort 三个 flag 的相位错开设计。",
+          "source_files": [
+            "case_study/KNN/README.md",
+            "case_study/KNN/baseline_14PE/src/krnl_partialKnn.cpp",
+            "case_study/KNN/baseline_14PE/src/krnl_globalSort.cpp",
+            "case_study/KNN/baseline_14PE/src/krnl_config.h"
+          ],
+          "title": "KNN 案例研究 I：baseline 的三级流水与全局归并架构",
+          "topic": "剖析 KNN baseline_14PE：krnl_partialKnn 内 load（搬运 searchSpace tile 到 URAM）/compute（欧氏距离）/sort（维护 TOP=10 最小距离的奇偶插入排序）三级双缓冲流水，以及 14 个并行内核通过 hls::stream 把部分结果送入 krnl_globalSort 做多路归并。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-knn-design-variants.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "用一张表整理四个变体在 PE 数与端口位宽上的取舍",
+            "解释 512bit 位宽下用 FACTOR_W 展开 range() 提取 32bit 浮点的技巧",
+            "论述「加宽端口减少 PE」与「增加 PE 用窄端口」两种扩展方向的资源代价"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "变体配置矩阵",
+            "宽端口数据抽取",
+            "PE 与位宽权衡"
+          ],
+          "order": 2,
+          "practice_task": "写一个 Python 脚本自动提取四个 KNN 变体 krnl_config.h 的 NUM_KERNEL/DWIDTH 并计算理论聚合带宽（频率×位宽×PE 数，频率取 300MHz）；再用 diff 对比 suboptimal 与 optimal 的 krnl_partialKnn.cpp，定位 max_read_burst_length 的差异并解释其如何影响达到峰值带宽。",
+          "source_files": [
+            "case_study/KNN/baseline_14PE/src/krnl_config.h",
+            "case_study/KNN/suboptimal_14PE/src/krnl_config.h",
+            "case_study/KNN/optimal_14PE/src/krnl_config.h",
+            "case_study/KNN/aggressive_11PE/src/krnl_config.h",
+            "case_study/KNN/optimal_14PE/src/krnl_partialKnn.cpp"
+          ],
+          "title": "KNN 案例研究 II：四个设计变体与带宽导向的取舍",
+          "topic": "对比 KNN 四个设计：baseline_14PE（32bit 端口 ×14 PE）、suboptimal_14PE 与 optimal_14PE（64bit 端口，仅 max_read_burst_length 16→256 之差）、aggressive_11PE（512bit 宽端口、SP_LEN 扩到 2048、FACTOR_W 展开），理解端口位宽、突发长度与 PE 数量的组合如何由内存带宽洞察驱动。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1"
+          ],
+          "filename": "u6-l3-spmv-ellpack-accelerator.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "解释 ELLPACK 格式下 out[i] += nzval[j+i*L]*vec[cols[...]] 的计算顺序与循环交换",
+            "说明 buffer_load/buffer_compute 用 x/y 两组片上数组实现乒乓双缓冲的机制",
+            "解读 256bit 宽端口读取后用 range(31,0) 拆包为 float 的过程"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ELLPACK 内核",
+            "乒乓双缓冲",
+            "宽口拆包",
+            "多实例部署"
+          ],
+          "order": 3,
+          "practice_task": "推导 baseline_30PE 的 NUM_TILES 计算（N_OUT/ROWS_PER_TILE = 8400/30/8），画出 tile 级 load/compute 乒乓时序图；再对照 optimal_4PE 的 krnl_config.h（DWIDTH_256=256、UNROLL_FACTOR=4、ROWS_PER_TILE=64）说明单 PE 内部并行与总 PE 数的置换关系。",
+          "source_files": [
+            "case_study/SpMV/README.md",
+            "case_study/SpMV/baseline_30PE/src/krnl_partialspmv.cpp",
+            "case_study/SpMV/baseline_30PE/src/krnl_config.h",
+            "case_study/SpMV/baseline_30PE/spmv.ini",
+            "case_study/SpMV/optimal_4PE/src/krnl_config.h"
+          ],
+          "title": "SpMV 案例研究：ELLPACK 分块、UNROLL 与 30 PE 部署",
+          "topic": "剖析 SpMV 加速器：ELLPACK 存储下的 ellpack 计算核、load_nzval/load_cols 宽口拆包、buffer_load 与 buffer_compute 的乒乓双缓冲、UNROLL_FACTOR 片上并行，以及 baseline_30PE 用 30 个内核实例铺满 4 个 DDR bank 的 spmv.ini 部署。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2",
+            "u6-l3",
+            "u3-l2"
+          ],
+          "filename": "u6-l4-from-microbenchmark-to-design-decisions.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "把微基准的五因素映射到案例中的具体设计参数",
+            "用「带宽利用率 = 实际吞吐/微基准峰值」评估各变体效率",
+            "总结 aggressive 设计反而可能次优的反直觉结论及其成因"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "洞察到参数映射",
+            "带宽利用率评估",
+            "过优化风险"
+          ],
+          "order": 4,
+          "practice_task": "撰写一份设计决策报告：给定某平台微基准结论（如 512bit 端口在 burst=256 时达到峰值、窄端口多 PE 受限于共享 bank），为一个假想的 STREAM triad 内核选择端口数/位宽/突发长度并给出依据；再用四个 SpMV 变体的 config 推演它们的聚合带宽上限排序。",
+          "source_files": [
+            "case_study/SpMV/baseline_30PE/src/krnl_config.h",
+            "case_study/SpMV/optimal_4PE/src/krnl_config.h",
+            "case_study/SpMV/suboptimal_4PE/src/krnl_config.h",
+            "case_study/SpMV/aggressive_4PE/src/krnl_config.h",
+            "case_study/KNN/aggressive_11PE/src/krnl_config.h"
+          ],
+          "title": "从微基准洞察到加速器设计决策",
+          "topic": "综合前两个案例与微基准结论，展示设计方法论：用带宽微基准确定「最优端口位宽 × 突发长度 × 端口数」组合，再决定 PE 数量与片上缓冲大小；对比 SpMV 的 aggressive（512bit）为何可能因资源与时序反而在实测中次优于 optimal。"
+        }
+      ],
+      "level": "advanced",
+      "title": "案例研究：用内存系统洞察设计 KNN 与 SpMV 加速器"
+    },
+    {
+      "id": "u7",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u7-l1-common-infrastructure.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "说出 includes 各库的分工与 .mk 片段被主 Makefile include 的机制",
+            "理解 readme_gen/makefile_gen/md2rst 等工具如何维护示例仓库的文档一致性",
+            "识别哪些公共库是 Xilinx Vitis 示例的通用件、哪些是 uBench 特有"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "公共库清单",
+            "mk 片段机制",
+            "文档生成工具链"
+          ],
+          "order": 1,
+          "practice_task": "阅读 common/includes/xcl2/xcl2.mk，解释它如何把 xcl2.cpp 注入 HOST_SRCS 并传递 xcl2_CXXFLAGS/LDFLAGS；再运行/走读 common/utility/readme_gen/readme_gen.py，说明 description.json 到 README.md 的生成流程，最后为你的新微基准目录补一份 description.json。",
+          "source_files": [
+            "common/includes/xcl2/xcl2.hpp",
+            "common/includes/xcl2/xcl2.mk",
+            "common/utility/readme_gen/readme_gen.py",
+            "common/utility/makefile_gen/makegen.py"
+          ],
+          "title": "仓库公共设施：common/includes 与 common/utility",
+          "topic": "系统梳理 common/ 目录：includes 下的 xcl2、cmdparser、logger、oclHelper、bitmap/lodepng/simplebmp 等可复用主机库及其 .mk 片段，utility 下的 readme_gen、makefile_gen、md2rst、check_* 等仓库维护脚本的作用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4",
+            "u4-l2",
+            "u5-l2"
+          ],
+          "filename": "u7-l2-create-your-own-microbenchmark.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "复用「config 头 + 内核 + 主机 + ini + Makefile」五件套模板创建新基准",
+            "把新参数（如读写比例）贯穿内核、主机与生成脚本三处",
+            "按仓库现有目录命名规范安放新基准并补全 README"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "五件套复用",
+            "新参数贯穿",
+            "auto_collect 集成"
+          ],
+          "order": 2,
+          "practice_task": "动手创建一个新微基准 mixed_rw：内核同时含一个读端口与一个写端口（读写比例由 size 参数控制），复用 read/DDR 的 Makefile 与 ubench.ini 模板，编写 host.cpp 输出聚合带宽；进阶：仿照 kernelcode_gen.py 写一个 mixed_kernelcode_gen.py 把新基准纳入 auto_collect。",
+          "source_files": [
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/src/krnl_ubench.cpp",
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/src/host.cpp",
+            "ubench/offchip_bandwidth/datacenter/write/DDR/2ports_512bit/src/krnl_ubench.cpp",
+            "ubench/offchip_bandwidth/datacenter/auto_collect/kernelcode_gen.py"
+          ],
+          "title": "二次开发实战：设计并集成你自己的微基准",
+          "topic": "指导读者把学到的模板变成新基准：以「读写混合带宽」或「不同访问模式（strided）」为例，走完拷贝样板目录、修改内核与主机、更新 ini 与 Makefile、撰写 README、接入 auto_collect 的完整流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3",
+            "u4-l3"
+          ],
+          "filename": "u7-l3-measurement-critique-and-profiling.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "列举主机计时法的系统性误差来源（启动开销、首次访问、时钟粒度）",
+            "使用 xrt.ini 的 profile/timeline_trace 与 Makefile 里 perf_analyze 流程获取内核级数据",
+            "识别仓库的遗留问题（Python2 脚本、README 指向 2020.2 分支链接）并提出改进"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "误差源分析",
+            "XRT profiling",
+            "已知问题清单"
+          ],
+          "order": 3,
+          "practice_task": "写一份测量误差分析报告：列出主机计时包含的所有额外开销并估计量级；然后基于 Makefile 的 perf_analyze 与 xrt.ini 配置设计一套「内核级计时 + 多次取中位数」的改进方案并给出伪代码，最后汇总仓库中的待确认项（如根 README 中 off-chip_latency 链接路径与实际目录大小写不一致）。",
+          "source_files": [
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/src/host.cpp",
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/Makefile",
+            "ubench/offchip_latency/embedded/32bit_per_access/xrt.ini",
+            "ubench/offchip_bandwidth/datacenter/read/DDR/2ports_512bit/utils.mk"
+          ],
+          "title": "测量方法学批判、性能剖析与仓库已知问题",
+          "topic": "以批判视角审视测量方法：主机端 std::chrono 计时把内核启动开销计入、OCL_CHECK/O0 编译、带宽公式中 NUM_ITERATIONS 的硬编码 0.000010000 系数等隐患；介绍 xrt.ini 的 profile=true/timeline_trace=true、Makefile 的 PROFILE=yes 与 perf_analyze 流程作为替代，并盘点仓库的已知坑（Python2 脚本、部分 README 链接指向 2020.2 分支、latency README 与代码 payload 范围不一致）。"
+        }
+      ],
+      "level": "advanced",
+      "title": "扩展实践与二次开发"
+    }
+  ]
+}
