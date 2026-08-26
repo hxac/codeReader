@@ -1,0 +1,468 @@
+# LlamaBitDecoding 前向：prefill 与 decode 双路径集成
+
+## 1. 本讲目标
+
+上一讲（u6-l1）我们看清了「容器」：改造版 `DynamicCache` 用 6 个列表同时管理低比特主缓存与 FP16 残余区。本讲看清「使用者」：`evaluation/llama.py` 中的 `LlamaBitDecoding` 注意力类如何在前向传播里驱动这个容器。
+
+读完本讲，你应该能够：
+
+1. 说出 `LlamaBitDecoding` 被模型选中的完整链路（命令行参数 → config 注入 → 注意力类注册表查表）。
+2. 逐行描述 **prefill 分支**（`q_len > 1`）的 8 步序列：FP16 flash-attn → 切分残余区 → 分配打包张量 → `kvcache_pack_int` → `update_pack` → 预分配 `*_new` 缓冲。
+3. 逐行描述 **decode 分支**（`q_len == 1`）的 9 步序列：读主缓存 → 追加新 token 到残余区 → 补零对齐 → `fwd_kvcache_int` → 攒满时回写并清空。
+4. 解释残余区「补零对齐到 `residual_block_size`」的原因，以及 `cur_residual_len` 与 `v_pack.shape[1]` 的阶梯变化规律。
+5. 理解 `self.k_pack_new` 等 4 个缓冲「prefill 末尾一次分配、decode 跨步复用」的设计。
+
+## 2. 前置知识
+
+本讲假设你已读过 u6-l1（改造版 DynamicCache）与 u2-l3（两个 Python 接口）。这里补几个本讲会用到的概念：
+
+- **prefill 与 decode**：`model.generate()` 先把整条提示一次喂入模型（`q_len > 1`，称 prefill），之后每步只喂 1 个新 token（`q_len == 1`，称 decode）。`LlamaBitDecoding.forward` 用 `q_len` 一个 if 区分这两条路径——这是本讲的骨架。
+- **flash-attn 布局 `(b, s, h, d)`**：HuggingFace 内部张量是 `(batch, seq, heads, head_dim)` 的转置形式 `(b, h, s, d)`；flash-attention 库要求 `(b, s, h, d)`。`LlamaBitDecoding` 在做完投影与 RoPE 后统一 `transpose(1, 2)` 回 flash 布局，于是序列维落在 **dim 1**、头数落在 **dim 2**——后文所有 `shape[1]`/`shape[2]` 的读法都由这个约定决定。
+- **GQA（分组查询注意力）**：Llama-3.1-8B 有 32 个查询头但只有 8 个 KV 头。查询头数记 `num_heads`，KV 头数记 `nheads_k`。eager 路径用 `repeat_kv` 把 KV 复制到与 Q 同头数；BitDecoding 路径**不做** `repeat_kv`，分组映射由 CUDA kernel 内部处理（u3-l1 讲过绑定层的 `seqlenq_ngroups_swapped` 重排）。
+- **`_flash_attention_forward`**：transformers 提供的 flash-attention 封装，输入 `(b, s, h, d)` 的 Q/K/V。prefill 分支直接用它算 FP16 精确注意力。
+- **回顾三个缓存方法**（u6-l1）：`update_residual` 沿 dim=-3 追加 FP16 残余；`update_pack` 四路拼接低比特主缓存（传 `None` 时兼作读取器）；`clear_residual` 清空残余区。
+- **回顾两个 API**（u2-l3）：`kvcache_pack_int(k, k_pack, k_params, v, v_pack, v_params, ..., cu_seqlens_k, seqlen_k, quant_mode, group_size, num_bits)` 无返回值、写 out 参数；`fwd_kvcache_int` 返回 5 元组 `(out_bit, k_pack_new, k_params_new, v_pack_new, v_params_new)`。
+
+## 3. 本讲源码地图
+
+| 文件 | 角色 |
+| --- | --- |
+| `evaluation/llama.py` | **主角**。从官方 `modeling_llama.py` 复制改造而来；`LlamaBitDecoding` 类（第 573 行起）承载双路径前向 |
+| `bit_decode/bit_decode_interface.py` | 两个 API 的 Python 包装层，负责折叠 batch 维、按 `num_bits` 分流 |
+| `bit_decode/models/cache_utils.py` | 改造版 `DynamicCache`：`update_residual` / `update_pack` / `clear_residual` |
+| `evaluation/example.py` | 运行入口：参数解析、config 注入、猴子补丁、GSM8K 长提示生成 |
+| `evaluation/scripts/example.sh` | 启动命令示例（`--attn_backend bit_decoding`） |
+| `csrc/bit_decode/decode_api.cpp` | 佐证材料：`seqlen_k` 参数在 C++ 侧如何变成 batch stride 与网格大小 |
+| `csrc/bit_decode/src/flash_fwd_launch_template.h` | 佐证材料：qpack kernel 的 grid 计算 |
+| `evaluation/test.py` | 对照材料：同一个打包调用的「kernel 测试版」写法，与 llama.py 有一处关键差异 |
+
+## 4. 核心概念与源码讲解
+
+### 4.1 模块一：后端注册与配置流入——LlamaBitDecoding 是如何被选中的
+
+#### 4.1.1 概念说明
+
+BitDecoding 没有魔改 transformers 的调度逻辑，而是利用 HF 的**注意力实现插拔机制**：解码层初始化时从一张「后端名 → 注意力类」的注册表里查表实例化。BitDecoding 要做的只是：往注册表里加一个键 `bit_decoding`，并让 config 携带量化参数一路传进注意力类的 `__init__`。
+
+#### 4.1.2 核心流程
+
+```text
+example.py 命令行 (--num_bits 4 --quant_mode k-channel --group_size 128 --attn_backend bit_decoding)
+    │
+    ▼
+config 注入: config.attn_backend / num_bits / quant_mode / group_size / residual_block_size
+    │
+    ▼
+LlamaDecoderLayer.__init__ 查 LLAMA_ATTENTION_CLASSES[config.attn_backend]
+    │
+    ▼
+LlamaBitDecoding.__init__ → 父类 LlamaAttention.__init__ 把 5 个量化字段读成 self.* 属性
+    │
+    ▼
+每次前向: LlamaBitDecoding.forward(hidden_states, ..., past_key_value, ...)
+```
+
+#### 4.1.3 源码精读
+
+入口参数解析与默认值。注意 `group_size` 不传时按位宽取默认（2-bit 用 32、4-bit 用 128），`residual_block_size` 由位宽直接决定：
+
+- [evaluation/example.py:22-28](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/example.py#L22-L28)：argparse 定义 `num_bits/quant_mode/group_size/attn_backend` 四个命令行参数。
+- [evaluation/example.py:34-47](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/example.py#L34-L47)：先补 `group_size` 默认值，再把 5 个字段写进 config；`residual_block_size = 128 if num_bits == 4 else 256` 写死了位宽到块大小的映射。
+
+注册表与查表点：
+
+- [evaluation/llama.py:761-766](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L761-L766)：`LLAMA_ATTENTION_CLASSES` 注册了 4 个后端，`bit_decoding` 键指向 `LlamaBitDecoding`——这是本项目对 HF 官方文件新增的键。
+- [evaluation/llama.py:774](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L774)：`LlamaDecoderLayer.__init__` 用 `config.attn_backend` 查表实例化注意力层，每个解码层独立持有一份量化配置。
+
+config 字段落成实例属性（注意这一段在父类 `LlamaAttention.__init__` 里，因此 4 个注意力后端**都**会读这些字段，只是只有 BitDecoding 用）：
+
+- [evaluation/llama.py:286-290](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L286-L290)：读出 `num_bits`、`pack_nums = 16 / num_bits`（一个 uint16 装 4 个 int4 或 8 个 int2）、`quant_mode`、`group_size`、`residual_block_size`。
+
+启动命令（对照）：
+
+- [evaluation/scripts/example.sh:1-7](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/scripts/example.sh#L1-L7)：以 Qwen3-8B、4-bit、k-channel、group_size=128、`--attn_backend bit_decoding` 运行；注释里列出可切换的后端名。
+
+#### 4.1.4 代码实践
+
+1. **实践目标**：确认配置链路真的打通——你选的后端类和量化参数确实到达了每一层。
+2. **操作步骤**：在 `example.py` 的 `model = ...from_pretrained(...)` 之后（约第 65 行处）临时插入两行（示例代码，改完记得还原）：
+
+   ```python
+   layer0 = model.model.layers[0].self_attn
+   print(type(layer0).__name__, layer0.num_bits, layer0.quant_mode, layer0.group_size, layer0.residual_block_size)
+   ```
+
+   然后按 `example.sh` 的命令运行（把 `--attn_backend` 分别换成 `flash_attention_2` 与 `bit_decoding` 各跑一次）。
+3. **需要观察的现象**：两种后端下打印的类名分别为 `LlamaFlashAttention2` 与 `LlamaBitDecoding`；量化四元组与命令行一致（4 / k-channel / 128 / 128）。
+4. **预期结果**：类名随后端切换、量化属性在两种后端下都被赋值（因为它们定义在公共父类的 `__init__`）。
+5. 无 GPU 时可改用源码阅读：沿 4.1.3 的四个链接走一遍链路即可，本小节结论可静态得出；实际运行效果**待本地验证**。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：如果把 `--attn_backend bit_decoding` 误写成未注册的名字（如 `bit_decoding2`），会在哪一行、报什么错？
+
+**答案**：在 [evaluation/llama.py:774](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L774) 查表时抛 `KeyError: 'bit_decoding2'`——注册表里没有这个键。
+
+**练习 2**：为什么 `residual_block_size` 不做成命令行参数？
+
+**答案**：它不是自由超参，而是与 kernel 的编译期常量绑定的（u5-l1 的 `kBlockN_pack`：4-bit 为 128、2-bit 为 256）。example.py 里 `128 if num_bits == 4 else 256` 正是照抄 kernel 常量；传别的值会与编译好的 kernel 不匹配（u3-l1 提过：绑定层收下该参数但实际不消费，真正生效的是模板常量）。
+
+---
+
+### 4.2 模块二：公共前奏——投影、RoPE 与布局约定
+
+#### 4.2.1 概念说明
+
+`LlamaBitDecoding.forward` 的前半段（到 `q_len` 分岔为止）与其它 flash 类后端几乎相同：线性投影出 Q/K/V → 施加 RoPE → 转成 flash 布局。理解这段的收益是**形状约定**：分岔之后所有代码都建立在 `(b, s, h, d)` 布局之上，`nheads_k`、`d` 等局部变量也在这里提取。
+
+#### 4.2.2 核心流程
+
+```text
+hidden_states (b, q_len, hidden_size)
+    │ q_proj / k_proj / v_proj
+    ▼
+(b, q_len, num_heads·d) / (b, q_len, nheads_k·d)  ──view+transpose(1,2)──▶ (b, h, q_len, d)
+    │ apply_rotary_pos_emb
+    ▼
+(b, h, q_len, d) ──transpose(1,2)──▶ (b, q_len, h, d)   ← flash 布局，序列维在 dim 1
+    │
+    ├─ 提取 batch_size / nheads_k = shape[2] / d = shape[3]
+    │
+    ├─ q_len == 1  → decode 分支（4.4）
+    └─ q_len  > 1  → prefill 分支（4.3）
+```
+
+#### 4.2.3 源码精读
+
+- [evaluation/llama.py:610-621](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L610-L621)：取 `bsz, q_len`；三个投影后 `view(bsz, q_len, -1, head_dim).transpose(1, 2)` 得 `(b, h, q_len, d)`。注意 K/V 用 `self.num_key_value_heads`（GQA 下少于 Q 的头数），且以 `-1` 推断头数。
+- [evaluation/llama.py:623-633](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L623-L633)：位置嵌入（模型层预算好的 `position_embeddings` 优先），对 Q/K 施加 RoPE。Q 与 K 同用一份 cos/sin；**V 不加 RoPE**。
+- [evaluation/llama.py:637-646](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L637-L646)：`transpose(1, 2)` 回 flash 布局 `(b, q_len, h, d)`；随后提取 `nheads_k = key_states.shape[2]`、`d = key_states.shape[3]`。这两个局部变量贯穿两条分支。
+
+一个值得注意的对照：eager 后端在这之后会调用 `repeat_kv` 把 KV 头复制到与 Q 同数（[evaluation/llama.py:340-341](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L340-L341)），而 BitDecoding 的两条分支都**没有** `repeat_kv`——GQA 映射留给 kernel 内部处理，省下显存与带宽。
+
+#### 4.2.4 代码实践
+
+1. **实践目标**：手推公共前奏结束时的张量形状，建立后文的形状基准。
+2. **操作步骤**：纸上推导。设 Llama-3.1-8B：`num_heads=32`、`num_key_value_heads=8`、`head_dim=128`、`batch=1`，分别对 prefill（`q_len=1000`）与 decode（`q_len=1`）填表：
+
+   | 张量 | 布局 | prefill (q_len=1000) | decode (q_len=1) |
+   | --- | --- | --- | --- |
+   | query_states | (b, s, h, d) | (1, 1000, 32, 128) | (1, 1, 32, 128) |
+   | key_states | (b, s, h_k, d) | （请填写） | （请填写） |
+   | value_states | (b, s, h_k, d) | （请填写） | （请填写） |
+
+3. **需要观察的现象**：K/V 的头数维是 8 而不是 32。
+4. **预期结果**：key/value 均为 `(1, 1000, 8, 128)` 与 `(1, 1, 8, 128)`。若想程序化验证，可用一段仅含 `torch.zeros` 的独立脚本打印 shape（示例代码），无需 GPU。
+5. 本实践纯形状推导，静态可完成，无需待验证项。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么 `nheads_k` 从 `key_states` 而不是 `query_states` 提取？
+
+**答案**：GQA 下两者不同（8 vs 32）。低比特 KV cache 与打包张量都按 KV 头数分配；decode 分支把 `(b,1,32,128)` 的 Q 与 `(b,128,8,128)` 尺寸的残余 KV 一起交给 kernel，头数映射由 kernel 完成，所以 Python 侧需要的是 KV 侧头数。
+
+**练习 2**：第 637-639 行连做两次 `transpose(1,2)`（view 后一次、这里一次），最终布局是什么？为什么不直接保持第一次转置后的布局？
+
+**答案**：`view→transpose` 先得到 `(b, h, s, d)`（HF 内部约定，RoPE 的广播按这个布局写），第 637-639 行再转回 `(b, s, h, d)`（flash-attn 库的约定）。两次转置是「HF 内部布局」与「flash 布局」的桥，源码注释也承认这些转置低效（第 635-636 行 TODO）。
+
+---
+
+### 4.3 模块三：prefill 分支（q_len > 1）——先算 FP16 注意力，再量化打包
+
+#### 4.3.1 概念说明
+
+prefill 分支要同时完成两件事：
+
+1. **算出本步的注意力输出**：直接用 FP16 的完整序列跑标准 flash-attention，输出是精确的——**量化不影响 prefill 自身的输出**，只影响后续 decode 步怎么读这些 KV。
+2. **为后续 decode 准备低比特缓存**：把整条提示切成「打包区 + 残余区」，打包区交给 `kvcache_pack_int` 量化落盘，残余区原样存 FP16；最后预分配 4 个 `*_new` 缓冲供 decode 阶段复用。
+
+注意一个关键设计：prefill 分支**不调用**标准的 `past_key_value.update()`（那行被注释掉了），也就是说 FP16 的全序列 KV 从不进入 cache；cache 里只存打包区（低比特）与残余区（FP16）。
+
+#### 4.3.2 核心流程
+
+```text
+q_len > 1
+  ├─(1) attn_output = _flash_attention_forward(q, k, v)     ← FP16 精确注意力，不碰 cache
+  ├─(2) seqlen_k = 完整提示长度 L
+  ├─(3) residual_len = L % residual_block_size
+  │       seqlen_k_pack = L - residual_len                  ← 打包区长度（块对齐）
+  ├─(4) 按 quant_mode 分配 k_pack/k_params；按 tensor 布局分配 v_pack/v_params
+  ├─(5) 若 residual_len > 0：切出最后 residual_len 个 token → update_residual 存 FP16
+  │        其余前 seqlen_k_pack 个 token 作为 k_state_past / v_state_past
+  ├─(6) kvcache_pack_int(k_state_past, …, cu_seqlens_k, seqlen_k, …)   ← 量化打包写 out 参数
+  ├─(7) past_key_value.update_pack(k_pack, k_params, v_pack, v_params, layer_idx)
+  └─(8) 预分配 self.k_pack_new / k_params_new / v_pack_new / v_params_new（torch.empty）
+```
+
+#### 4.3.3 源码精读
+
+**第 (1) 步：FP16 注意力 + 被绕过的标准缓存路径。**
+
+- [evaluation/llama.py:689-703](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L689-L703)：`_flash_attention_forward` 以因果掩码算完整提示的注意力；第 690 行被注释掉的 `past_key_value.update(...)` 表明：bit_decoding 后端下，FP16 全序列 KV **不**进 cache（改由第 (5)(6) 步的分存取代）。
+
+**第 (2)(3) 步：切分打包区与残余区。**
+
+- [evaluation/llama.py:705-711](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L705-L711)：`seqlen_k = key_states.shape[1]` 是完整提示长度；`residual_len = seqlen_k % residual_block_size`，`seqlen_k_pack = seqlen_k - residual_len`。由于 `residual_block_size` 同时被 `pack_nums` 与 `group_size` 整除（u2-l2），`seqlen_k_pack` 天然可整除两者，打包张量形状都是整数。
+- [evaluation/llama.py:707](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L707)：`cu_seqlens_k = torch.arange(0, (batch_size + 1) * seqlen_k, seqlen_k, …)` 构造 `[0, L, 2L, …, bL]`。它在这里**不承担变长语义**（每个样本等长），主要用途是让 C++ 侧能从 `cu_seqlens_k.numel() - 1` 恢复出 batch 数（u3-l1/u4-l1）。
+
+**第 (4) 步：按量化模式分配四个 out 张量。**
+
+- [evaluation/llama.py:713-722](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L713-L722)：`k-channel` 时 K 沿序列打包（`k_pack=(b, L_pack/pack_nums, h, d)`，`k_params=(b, L_pack/g, h, d)`）；`else` 分支（k-tensor）K 沿通道打包。V 恒为 tensor 布局 `v_pack=(b, L_pack, h, d/pack_nums)`、`v_params=(b, d/g, h, L_pack)`。形状推导见 u2-l1，此处只强调：**分配在 Python 侧、写入在 kernel 侧**，`torch.zeros` 保证未写区域是确定的 0。
+
+**第 (5) 步：残余切片与 FP16 入缓存。**
+
+- [evaluation/llama.py:724-732](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L724-L732)：`key_states[:, -residual_len:, :, :]` 取尾部 residual_len 个 token 经 `update_residual` 存入 FP16 残余区；`[:, :-residual_len, :, :]` 作为待打包区。`residual_len == 0` 时整条序列都进打包区、不产生残余。
+
+**第 (6) 步：调用打包 API（含 batch 折叠）。**
+
+- [evaluation/llama.py:734-743](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L734-L743)：按位置传参调用 `kvcache_pack_int`：4 个 out 张量、`None`（非 paged）、`cu_seqlens_k`、`seqlen_k`（注意是**完整长度**，见下方「读码发现」）、量化三元组。
+- [bit_decode/bit_decode_interface.py:21-34](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/bit_decode/bit_decode_interface.py#L21-L34)：包装层把 `(b, L_pack, h, d)` 的 `k_state_past` reshape 成 `(b·L_pack, h, d)` 折叠 batch 维，再按 `num_bits` 分流到 `kvcache_pack_int4/2` 绑定函数。若 `residual_len > 0`，`k_state_past` 是非连续切片，这次 reshape 会触发一次隐式拷贝。
+
+**第 (7)(8) 步：入缓存 + 预分配 `*_new`。**
+
+- [evaluation/llama.py:745](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L745)：`update_pack` 首次写入时直接落列表（cache_utils.py:638-648 的「列表未满」分支），不走 `torch.cat`。
+- [evaluation/llama.py:747-750](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L747-L750)：以 `torch.empty` 预分配 4 个「新量化块」缓冲，形状严格对应一个 `residual_block_size` 的块（详见 4.5）。
+
+> **读码发现：`seqlen_k` 传参在两个调用点不一致（重要，待本地验证）**
+>
+> - [evaluation/llama.py:705](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L705) 与 [739](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L739)：llama.py 把**完整长度** `seqlen_k`（含残余部分）传给打包 API。
+> - [evaluation/test.py:74-75](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/test.py#L74-L75) 与 [97-106](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/test.py#L97-L106)：test.py 用的是**打包区长度** `seqlen_k_pack`（`cu_seqlens_k` 也按它构造）。
+>
+> 这个值在 C++ 侧的用途已核实：[csrc/bit_decode/decode_api.cpp:579-586](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/decode_api.cpp#L579-L586) 用它计算非 paged 路径的 batch stride（`seqlen_k × h × d`），[595](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/decode_api.cpp#L595) 把它写进 `params.seqlen_k`，而 [csrc/bit_decode/src/flash_fwd_launch_template.h:184](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_fwd_launch_template.h#L184) 用它算网格 `num_n_block = ceil(seqlen_k / kBlockN)`。
+>
+> 推论：当 `L % residual_block_size ≠ 0` 时，llama.py 的调用会让网格多出一个 n_block（`ceil(L/128)` 比 `L_pack/128` 多 1），batch>1 时 batch stride 也与折叠后实际内存布局（步长 `L_pack·h·d`）不符。test.py 默认配置 `seqlen_k=1024`、`residual_block_size=128` 恰好整除（`residual_len=0`），掩盖了这一差异。笔者未逐行审计 `compute_qpack_1rowblock` 内部的加载/存储谓词，**该差异是否被 kernel 内部掩码吸收、是否造成越界访问，待本地验证**（验证方法见 4.3.5 练习 3）。这也是阅读真实研究代码的好例子：模型侧与 kernel 测试侧对同一 API 的用法可能有出入。
+
+#### 4.3.4 代码实践
+
+1. **实践目标**：亲手算一遍 prefill 分支的 8 个张量形状，并识别「整除/不整除」两种情形的差异。
+2. **操作步骤**：
+   - 取 `b=1, L=1000, nheads_k=8, d=128, num_bits=4`（故 `pack_nums=4, group_size=128, residual_block_size=128`）。
+   - 计算 `residual_len`、`seqlen_k_pack`，然后填表：
+
+     | 张量 | 形状 |
+     | --- | --- |
+     | k_pack (k-channel) | (1, ?, 8, 128) |
+     | k_params | (1, ?, 8, 128) |
+     | v_pack | (1, ?, 8, ?) |
+     | v_params | (1, ?, 8, ?) |
+     | k_pack_new | (1, ?, 8, 128) |
+     | k_params_new | (1, ?, 8, 128) |
+     | v_pack_new | (1, ?, 8, ?) |
+     | v_params_new | (1, ?, 8, ?) |
+
+   - 再对 `L=1024`（整除情形）重算一遍，比较哪些形状变了。
+3. **需要观察的现象**：`L=1000` 时 `residual_len=104`、`seqlen_k_pack=896`；`L=1024` 时残余区为空、`update_residual` 不会被调用。
+4. **预期结果**：`L=1000`：`k_pack=(1,224,8,128)`、`k_params=(1,7,8,128)`、`v_pack=(1,896,8,32)`、`v_params=(1,1,8,896)`；`*_new` 依次 `(1,32,8,128)`、`(1,1,8,128)`、`(1,128,8,32)`、`(1,1,8,128)`。`L=1024` 时前四个变为 `(1,256,8,128)`、`(1,8,8,128)`、`(1,1024,8,32)`、`(1,1,8,1024)`，`*_new` 不变。
+5. 纯推导即可完成；如需程序化验证，用独立脚本仅做 `torch.zeros(...)` 打印 shape（示例代码），无需 GPU。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么 prefill 的注意力输出是「精确」的？
+
+**答案**：第 (1) 步 `_flash_attention_forward` 吃的是还没量化的 FP16 K/V（[evaluation/llama.py:691-703](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L691-L703)）；量化发生在注意力计算之后、且只写向缓存。第一个受量化影响的输出是**第一步 decode**（它从低比特缓存读 KV）。
+
+**练习 2**：`k_pack` 用 `torch.zeros` 而 `k_pack_new` 用 `torch.empty`（[evaluation/llama.py:747-750](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L747-L750)），为什么容忍这种不对称？
+
+**答案**：`k_pack` 是「kernel 可能写不满」的 out 参数，zeros 保证未写区域语义确定；`*_new` 只在残余攒满整块时被 kernel 完整写入，且 Python 侧只在 `cur_residual_len == residual_block_size` 时才消费（u2-l3/u5-l4），不攒满时读它本来就是未定义行为，初始化是白花带宽。
+
+**练习 3**（进阶，需 GPU）：为「读码发现」设计一个最小验证实验。
+
+**答案**：思路——固定 `b=1` 消除 batch stride 因素，构造 `L % 128 ≠ 0` 的短序列，直接调 `kvcache_pack_int` 后检查 `k_pack` 的 `L_pack/pack_nums` 行之后是否被写入（对比全零基线），并用 `compute-sanitizer --tool memcheck` 运行 `evaluation/test.py`（把 `seqlen_k` 改成如 1000）观察是否报越界。若 kernel 内部有谓词掩蔽则一切干净；否则可捕获 OOB。结论**待本地验证**。
+
+---
+
+### 4.4 模块四：decode 分支（q_len == 1）——读缓存、补零对齐、攒满回写
+
+#### 4.4.1 概念说明
+
+decode 每步只处理 1 个新 token，但注意力要覆盖全部历史 KV。BitDecoding 的做法是把历史分成两部分：低比特主缓存（打包区，由 splitkv kernel 处理）与 FP16 残余区＋本步新 token（由 residual kernel 处理，u5-l4）。Python 侧要做的事因此非常机械：
+
+1. 把新 token 的 K/V 追加进残余缓存；
+2. 把残余缓存**补零对齐**到 `residual_block_size`（一个固定的 tile 形状）；
+3. 调 `fwd_kvcache_int`，拿回注意力输出与「可能的新量化块」；
+4. 若残余攒满整块，把新块拼进主缓存并清空残余区。
+
+为什么补零？因为 CUDA kernel 的 tile 形状是编译期常量（`kBlockN_residual = residual_block_size`），输入必须是固定形状的张量；有效长度通过 `new_lens`（即 `cur_residual_len`）单独告诉 kernel，kernel 在掩码与加载谓词里用 `new_lens` 屏蔽补零区（u5-l2/u5-l4），补的零不参与 softmax。
+
+#### 4.4.2 核心流程
+
+```text
+q_len == 1
+  ├─(1) k_pack,… = update_pack(None,None,None,None,layer_idx)   ← 读取器模式：取主缓存 4 张量
+  ├─(2) seqlen_pack = v_pack.shape[1]                            ← 主缓存已打包 token 数
+  ├─(3) seqlens_k = full((b,), seqlen_pack)                      ← 告诉 kernel 打包区长度
+  ├─(4) k_residual / v_residual = zeros((b, residual_block_size, h_k, d))
+  ├─(5) k_rc, v_rc = update_residual(key_states, value_states, layer_idx)  ← 先追加新 token
+  ├─(6) cur_residual_len = k_rc.shape[1]                         ← 追加后的有效长度
+  ├─(7) k_residual[:, :cur_residual_len] = k_rc（v 同理）         ← 拷入固定形状缓冲，尾部补零
+  ├─(8) out, self.k_pack_new, … = fwd_kvcache_int(q, 主缓存4张量,
+  │        k_residual, v_residual, seqlens_k, self.*_new, None,
+  │        1/√d, quant_mode, group_size, residual_block_size,
+  │        cur_residual_len, num_bits)
+  └─(9) 若 cur_residual_len == residual_block_size:
+           update_pack(self.k_pack_new, …, layer_idx)             ← 拼回主缓存
+           clear_residual(layer_idx)                              ← 清空残余区
+```
+
+**阶梯规律**（设提示长 \(L\)、块大小 \(R\)、prefill 后残余 \(r = L \bmod R\)）：第 \(t\) 步 decode 在追加新 token 后
+
+\[
+\text{cur\_residual\_len}(t) = r + t \quad (t \le R - r)
+\]
+
+在第 \(t^\* = R - r \) 步恰好等于 \(R\)，触发回写：主缓存打包长度从 \(L - r\) 跳到 \(L - r + R\)，残余清零；此后每 \(R\) 步重复一次。\(r = 0\) 时首次回写在第 \(R\) 步。
+
+#### 4.4.3 源码精读
+
+**第 (1) 步：`update_pack` 的读取器模式。**
+
+- [evaluation/llama.py:649](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L649)：四个参数全传 `None`。
+- [bit_decode/models/cache_utils.py:633-662](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/bit_decode/models/cache_utils.py#L633-L662)：`if key_pack is not None` 守卫使写入逻辑整体跳过，函数退化为「返回当前层 4 个主缓存张量」。这是 u6-l1 讲过的「兼作读取器」设计在真实调用点的样子。
+
+**第 (2)(3) 步：从 `v_pack` 探测打包长度。**
+
+- [evaluation/llama.py:651-653](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L651-L653)：`seqlen_pack = v_pack.shape[1]`。为什么看 V 不看 K？V 恒为 tensor 布局 `(b, s, h, d/pack)`，dim 1 就是**已打包 token 数**；而 k-channel 的 `k_pack` dim 1 是 `s/pack_nums`（行数不是 token 数）。用 V 探测是唯一两种模式下语义一致的选择。
+- `seqlens_k`（绑定层的 `opt_seqlens_k`）按 batch 广播同一长度——generate 单提示场景各样本等长。
+
+**第 (4)-(7) 步：追加新 token、补零对齐。**
+
+- [evaluation/llama.py:656-663](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L656-L663)：先 `zeros((b, R, h_k, d))` 建固定形状缓冲；`update_residual` 把本步 `(b,1,h_k,d)` 的新 K/V 沿 dim=-3 追加进缓存（[bit_decode/models/cache_utils.py:602-603](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/bit_decode/models/cache_utils.py#L602-L603) 的 `torch.cat`）；**先追加、后读 `cur_residual_len = k_residual_cache.shape[1]`**——所以第 1 步 decode 拿到的是「prefill 残余 + 1」。最后把有效区拷进缓冲，`[cur_residual_len:R]` 区间保持为零。
+
+**第 (8) 步：调用 `fwd_kvcache_int`。**
+
+- [evaluation/llama.py:666-679](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L666-L679)：按位置对齐 [bit_decode/bit_decode_interface.py:47-61](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/bit_decode/bit_decode_interface.py#L47-L61) 的参数表：`opt_k_new/opt_v_new` ← 补零后的残余缓冲；`opt_seqlens_k` ← seqlens_k（打包区长度）；四个 `*_new` ← **上一轮存到 `self.*` 的缓冲**（跨步复用，见 4.5）；`new_lens` ← `cur_residual_len`（残余有效长度）；`sm_scale = 1/√d`。返回 5 元组，其中 4 个 `*_new` 回存到 `self.*`。
+- 两个长度参数的分工再次确认 u2-l3 的结论：`seqlens_k` 是**已打包主缓存**的 token 数，`new_lens` 是**残余区有效**长度，总 KV 长度 = 两者之和。
+
+**第 (9) 步：攒满回写。**
+
+- [evaluation/llama.py:681-683](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L681-L683)：`cur_residual_len == residual_block_size` 时，`update_pack` 把 kernel 刚写好的 `self.*_new` 四件套拼进主缓存——[bit_decode/models/cache_utils.py:657-660](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/bit_decode/models/cache_utils.py#L657-L660) 里 K 系三路沿 dim=-3、`value_cache_params` 沿 dim=-1（V 参数序列在末维，u2-l1）——随后 [clear_residual](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/bit_decode/models/cache_utils.py#L664-L666) 把残余区置空列表，下一轮 `update_residual` 从 1 重新累积。
+- [evaluation/llama.py:685-687](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L685-L687)：一段**被注释掉的调试打印**（`layer_idx == 0` 时打印 `v_pack.shape` 与 `cur_residual_len`）——本讲实践任务就是启用它。注意它位于回写 if 块**之后**，且回写分支里 `v_pack` 被重新绑定（第 682 行返回拼接后的新张量），所以打印的是**回写后**的形状。
+
+#### 4.4.4 代码实践
+
+1. **实践目标**：亲眼看到「阶梯现象」——`cur_residual_len` 锯齿爬升、`v_pack.shape[1]` 每 \(R\) 步跳一次。
+2. **操作步骤**（需 GPU，约显存 16GB+）：
+   1. 取消 [evaluation/llama.py:685-687](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L685-L687) 三行注释（这是仓库自带的调试口）。
+   2. 把 [evaluation/example.py:94](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/example.py#L94) 的 `max_new_tokens=125` 改大到 `300`（125 步可能等不到第一次回写就结束）。
+   3. 按 [evaluation/scripts/example.sh:1-7](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/scripts/example.sh#L1-L7) 运行：`python example.py --model_path Qwen/Qwen3-8B --num_bits 4 --quant_mode k-channel --group_size 128 --attn_backend bit_decoding`（Qwen3 走 qwen3.py 的同构实现，逻辑一致）。
+   4. 把每次打印的 `cur_residual_len` 与 `v_pack.shape[1]` 记成两列。
+3. **需要观察的现象**：`cur_residual_len` 从首值 \(r+1\)（\(r\) 为提示长对 128 的余数）逐 步 +1，到 128 那步打印时 `v_pack.shape[1]` 恰好 +128，随后 `cur_residual_len` 回落到 1 重新爬升；两次跳变间隔恰 128 步。
+4. **预期结果**：与 4.4.2 的公式一致。例：某次运行首行打印 `cur_residual_len: 37 / v_pack: (1, 3712, 8, 32)`，则第 91 步（37→128 需 91 步）应看到 `cur_residual_len: 128 / v_pack: (1, 3840, 8, 32)`，第 219 步再跳到 `(1, 3968, 8, 32)`。注意打印只在 `layer_idx == 0`，每步一条。
+5. 若无 GPU：完成「源码阅读版」——按 4.4.2 公式取你自拟的 \(L\) 与 \(R=128\)，手算 130 行「步数 → cur_residual_len → v_pack.shape[1]」表格，并与 4.4.3 各行源码一一对应；运行结果**待本地验证**。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：第一步 decode 的 `cur_residual_len` 是多少？
+
+**答案**：\(r + 1\)：prefill 留下 \(r = L \bmod R\) 个残余 token，decode 第 (5) 步先追加本步新 token 再读长度。若 \(r = 0\)（提示恰整除），则首值为 1。
+
+**练习 2**：残余区补的零会不会污染 softmax？
+
+**答案**：不会。有效长度经 `new_lens`（第 677 行）传入 kernel，residual kernel 用它生成掩码与加载谓词，补零区在 `Q·K^T` 打分后按 \(-\infty\) 处理（u5-l4 的 `new_lens` 掩码），对 softmax 权重贡献为零。零只是「占位填满 tile」。
+
+**练习 3**：如果把第 (7) 步的拷贝方向写反（把零缓冲 cat 进缓存），会发生什么？
+
+**答案**：形状语义崩坏——缓存将包含 \(R\) 长的补零块，下一轮 `cur_residual_len` 直接变成 \(r + R\)，永远超过 `residual_block_size`，`==` 判断永不成立，主缓存停止增长且注意力把零 token 当真值参与计算。这解释了为什么源码用「固定形状零缓冲 + 切片拷入 + 单独传 `new_lens`」而不是直接拼接。
+
+---
+
+### 4.5 模块五：past_key_value 更新序列与 `*_new` 缓冲的跨步复用
+
+#### 4.5.1 概念说明
+
+把前两个模块拼起来，从**时间线**视角看一次 `model.generate()` 里 cache 的完整生命周期。核心设计有两点：
+
+1. **每个注意力层独立持有一套 `self.*_new` 缓冲**：prefill 末尾用 `torch.empty` 分配一次，之后所有 decode 步原样传入 `fwd_kvcache_int`、原样收回，形状永远对应「一个 `residual_block_size` 的块」。这免去了每步每层的分配开销（u3-l3 讲过的中间累积缓冲则是每步分配、靠 caching allocator 摊销——两种策略并存）。
+2. **标准 `update()` 路径被完全绕过**：bit_decoding 后端下 `key_cache/value_cache` 只被 `update_residual`/`clear_residual` 触碰，FP16 全序列缓存从不构建——这正是 u6-l1 指出的 `get_seq_length` 语义漂移的来源。
+
+#### 4.5.2 核心流程
+
+一次 generate（32 层模型，块大小 \(R\)，提示长 \(L\)，\(r = L \bmod R\)）的时间线：
+
+| 阶段 | 每层发生的 cache 操作 | `*_new` 状态 |
+| --- | --- | --- |
+| prefill | `update_residual`（存 \(r\) 个尾部 token，\(r=0\) 则跳过）→ `update_pack`（首次写入 4 张量） | `torch.empty` 分配，内容无效 |
+| decode 步 1…\(R-r-1\) | 每步 `update_residual`（+1） | 原样传入/收回，kernel 不写 |
+| decode 步 \(R-r\) | `update_residual` 后长度 = \(R\) → kernel 写 `*_new` → `update_pack(*_new)` 拼接 → `clear_residual` | 被 kernel 完整覆写一次 |
+| 之后每 \(R\) 步 | 同上循环 | 同上 |
+| 结束 | 缓存随 DynamicCache 对象丢弃 | 随层对象丢弃 |
+
+#### 4.5.3 源码精读
+
+**`*_new` 的分配与形状推导（prefill 末尾，一次性）。**
+
+- [evaluation/llama.py:747-750](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L747-L750)：
+  - `k_pack_new = (b, R/pack_nums, h_k, k_pack.size(-1))`，uint16——行数恰是「一个块打包后的行数」；
+  - `k_params_new = (b, R/group_size, h_k, k_params.size(-1))`，fp32；
+  - `v_pack_new = (b, R, h_k, v_pack.size(-1))`，uint16；
+  - `v_params_new = (b, v_params.size(1), h_k, R)`，fp32。
+  
+  末维大多复制主缓存同名张量的末维（k-channel 下 `k_pack.size(-1)=d`、`k_params.size(-1)=d`、`v_pack.size(-1)=d/pack_nums`；`v_params.size(1)=d/group_size`），序列维则统一换成 \(R\)——「与主缓存同构、只装一个块」，与 u3-l2 的结论呼应。
+  
+  一个伏笔：若走 k-tensor 分支，`k_params=(b, d/g, h, L_pack)` 的 `size(-1)` 是**序列长**而非 \(d\)，套进 `k_params_new` 的末维就不再是「一个块」的形状。这从侧面印证当前实现按 k-channel 设计（与 dispatch 只启用 k-channel 一致，u2-l3/u3-l1）。
+
+**`self.*` 的跨步回存（decode）。**
+
+- [evaluation/llama.py:666-679](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L666-L679)：`self.k_pack_new` 等既作为**输入**（kernel 的写出目标缓冲）又接收返回值回存。不攒满时 kernel 不写它们，`self.*` 原样保持，下一轮继续传——「上一步的自己」就是下一步的 out 参数。
+- [evaluation/llama.py:681-683](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L681-L683)：唯一消费时机是攒满的哪一步，且消费后缓冲**不清空、不重分配**，直接进入下一轮循环。
+
+**被绕过的标准路径（对照）。**
+
+- [evaluation/llama.py:690](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L690)：注释掉的 `past_key_value.update(...)`。对照 flash_attention_2 后端的 [evaluation/llama.py:431-434](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L431-L434)：标准后端靠 `update` 沿 dim=-2 增量拼接 FP16 缓存；bit_decoding 把这份职责拆给了 `update_residual`（FP16 短区）+ `update_pack`（低比特长区）。
+
+#### 4.5.4 代码实践
+
+1. **实践目标**：把三个模块串成一张可核对的时序表。
+2. **操作步骤**：拿 4.4.4 实践（或手算）得到的日志，在表格里为每个关键事件标注源码行号：
+
+   | 事件 | 触发条件 | 源码位置 |
+   | --- | --- | --- |
+   | prefill 首次写主缓存 | prefill 完成 | （请填） |
+   | decode 读取主缓存 | 每步 | （请填） |
+   | 残余 +1 | 每步 | （请填） |
+   | 块写满、kernel 产出 `*_new` | cur_residual_len == R | （请填） |
+   | 拼回主缓存 | 同上 | （请填） |
+   | 清空残余 | 同上 | （请填） |
+3. **需要观察的现象**：除「攒满」事件外，其余事件每步都发生；且所有写操作都发生在注意力计算**之外**的 cache 方法里。
+4. **预期结果**：依次为 llama.py:745 / 649 / 658 / 666-679（kernel 内部）/ 682 / 683。
+5. 纯源码阅读即可完成，无待验证项。
+
+#### 4.5.5 小练习与答案
+
+**练习 1**：`self.k_pack_new` 挂在注意力层对象上而非 DynamicCache 上，有什么代价与好处？
+
+**答案**：好处是 decode 循环里零分配、零查找（属性直读），且每层天然独立；代价是生命周期与层绑定（`generate` 结束才释放）、prefill 重新执行时会重复分配，且 cache 对象无法独立携带「新块」语义——Python 侧的消费逻辑（第 681-683 行）必须留在注意力类里。
+
+**练习 2**：32 层模型、batch=1、4-bit、d=128、h_k=8，每个 `k_pack_new` 缓冲多大？全模型合计呢？
+
+**答案**：`k_pack_new=(1, 32, 8, 128)` uint16 = 32×8×128×2 B = 64 KiB。四个 `*_new` 中 k_pack_new 与 v_pack_new 各 64 KiB（`(1,128,8,32)` 同为 32768 元素）、k_params_new=(1,1,8,128) fp32 = 4 KiB、v_params_new 同 4 KiB，每层约 136 KiB，32 层合计约 4.25 MiB——相对 KV 主缓存本身（低比特）是个小开销，换来的是 decode 每步零分配。
+
+## 5. 综合实践
+
+**任务：用 8 步时序表 + 一次真实运行，完整复盘「残余区的一生」。**
+
+1. **准备**（需 GPU）：按 4.4.4 启用 llama.py:685-687 的调试打印，`max_new_tokens` 改为 300，分别以 `--attn_backend bit_decoding` 与 `--num_bits 2` 各跑一次 `example.py`（2-bit 时 `residual_block_size=256`、`group_size` 默认 32，可在日志中对照）。
+2. **记录**：整理两列日志（步数、`cur_residual_len`、`v_pack.shape[1]`），标出每次跳变的步号与增量。
+3. **解释**（书面回答）：
+   - 为什么 `cur_residual_len` 呈锯齿而非连续增长？——第 683 行 `clear_residual` 的存在。
+   - 为什么 `v_pack.shape[1]` 呈阶梯且每级恰为 `residual_block_size`？——第 682 行 `update_pack` 每次恰拼一个块。
+   - 4-bit 与 2-bit 的两次运行中，跳变间隔分别是多少？为什么？——128 与 256，块大小随位宽翻倍（u2-l2 的 `kBlockN_pack` 设计）。
+   - 提示长度如何影响**首次**跳变位置？——\(t^\* = R - (L \bmod R)\)，与提示长的关系只通过余数 \(r\)。
+4. **画图**：把两列日志画成双纵轴折线（`cur_residual_len` 与 `v_pack.shape[1]` 随步数变化），阶梯与锯齿的相位关系应一目了然。
+5. **无 GPU 替代**：完成 4.4.4 第 5 条的手算表 + 本任务第 3 问的全部书面解释，并标注「运行结论待本地验证」。
+
+## 6. 本讲小结
+
+- `LlamaBitDecoding` 经由 `LLAMA_ATTENTION_CLASSES` 的 `bit_decoding` 键接入 HF：config 携带 `num_bits/quant_mode/group_size/residual_block_size`，在 `LlamaAttention.__init__` 落成实例属性。
+- **prefill 分支**（`q_len>1`）先跑 FP16 flash-attn 得到精确输出（量化不影响本步），再把提示切成「打包区 + 残余区」：前者经 `kvcache_pack_int` 量化写入、`update_pack` 入缓存，后者 `update_residual` 存 FP16；末尾以 `torch.empty` 预分配 4 个 `*_new` 块缓冲。标准 `past_key_value.update()` 被整体绕过。
+- **decode 分支**（`q_len==1`）九步：`update_pack(None,…)` 读主缓存 → `v_pack.shape[1]` 探测打包长度 → 零缓冲 + `update_residual` 追加新 token → 补零对齐到 `residual_block_size` → `fwd_kvcache_int`（`new_lens` 告知有效长度）→ 攒满时 `update_pack(*_new)` 拼回 + `clear_residual`。
+- 阶梯现象：`cur_residual_len` 以 \(r+1\) 起步锯齿爬升至 \(R\) 触发回写，`v_pack.shape[1]` 每次恰 +\(R\)；首跳步号 \(t^\* = R - r\)。
+- `self.*_new` 四缓冲「prefill 分配一次、decode 跨步复用」，形状与主缓存同构、只装一个块；其末维复制自主缓存，隐含 k-channel 假设。
+- 读码发现一处真实不一致：llama.py 传给打包 API 的 `seqlen_k` 是完整长度，而 test.py 传打包区长度；该值决定 C++ 侧网格与 batch stride，`L % R ≠ 0` 时两者行为可能不同（是否被 kernel 谓词吸收，待本地验证）。
+
+## 7. 下一步学习建议
+
+- **u6-l3（Qwen3 集成与注意力后端选择）**：对照 `evaluation/qwen3.py` 与本讲的 llama.py 做 diff 式阅读——两份文件同构，正好用本讲建立的「模块清单」检验接入一个新模型要复制哪些改动。
+- **回看 u5-l4（残余 kernel）**：本讲第 (8) 步传入的 `k_residual/v_residual/new_lens` 在 kernel 侧如何被掩码、`*_new` 如何被原位写出，构成 Python↔CUDA 的完整闭环。
+- **动手方向**：把 4.3.5 练习 3 的验证实验做完（`compute-sanitizer` + 非整除序列长度），这既验证「读码发现」，也是切入 qpack kernel 存储谓词（`compute_qpack_1rowblock`，flash_fwd_kernel.h:1273）的好入口。
+- 若你关注性能：带着本讲的阶梯规律去读 `evaluation/bench_throughput.py`（u7-l2），思考回写步与非回写步的延迟差异是否可测。
