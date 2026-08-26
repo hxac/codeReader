@@ -2,482 +2,345 @@
 
 ## 1. 本讲目标
 
-学完本讲，你应该能够：
+前几讲我们已经读懂了 BitDecoding 从 Python 接口到 CUDA kernel 的完整实现，u7-l1 也搭好了正确性验证。本讲回答另一个问题：**怎么证明它快、快在哪里、快多少**。读完后你应该能够：
 
-1. 逐行读懂 `evaluation/bench_throughput.py`，说清 prefill 与 decode 两段各自的计时区间、同步点位置，以及吞吐公式如何从延迟推导出来。
-2. 解释计量卫生三件套——warmup、`torch.cuda.empty_cache()`、`torch.cuda.reset_peak_memory_stats()`——分别在消除什么干扰，以及本脚本的显存统计口径到底覆盖了哪些阶段。
-3. 独立阅读 kernel 级微基准 `bench_single_residual.cu` / `bench_single_packdecode.cu`：CUDA event 计时、长度倍增扫描、min/avg/max 三值统计，并能动手把它们从 CMake 的注释里恢复出来编译运行。
-4. 说清 `evaluation/ablation/` 下两个「外部基线」脚本真正测量的对象是什么、有什么局限，从而能自己设计一份公平的低比特注意力对比实验。
-
-本讲承接 u6-l2（LlamaBitDecoding 前向双路径）与 u7-l1（正确性测试体系）：正确性管「算得对不对」，本讲管「跑得快不快、省不省显存」，两者合起来才是完整的 kernel 评测。
+1. 逐行读懂 `bench_throughput.py`：它如何把一次生成切分成 prefill 与 decode 两段分别计时，如何换算吞吐，峰值显存在哪里采样。
+2. 说出 `warmup`、`torch.cuda.empty_cache()`、`torch.cuda.reset_peak_memory_stats()`、`torch.cuda.synchronize()` 各自解决什么计量问题，以及这份脚本里隐藏的几个「统计口径」陷阱。
+3. 读懂 kernel 级微基准 `bench_single_residual.cu` / `bench_single_packdecode.cu` 的 cudaEvent 计时骨架、min/avg/max 三值统计法，并知道它们当前的编译状态（一个可修、一个是 API 化石）。
+4. 理解 `evaluation/ablation/` 下 bitblas 与 marlin 两个脚本各自在「消融」什么，以及为什么它们只能作为打包开销基线、而不是完整注意力基线。
+5. 能独立设计一份公平的对比实验：控制哪些变量、重复多少次、报哪些统计量、如何预测并解释结果方向。
 
 ## 2. 前置知识
 
-### 2.1 延迟、吞吐与「分段计时」
+本讲不再涉及新的 kernel 细节，但用到以下测量学概念（初学者不熟悉的术语都在这里解释）：
 
-- **延迟（latency）**：完成一次操作所耗时间。本脚本区分两个粒度——prefill 一次前向的总延迟（秒），decode 单个 token 的平均延迟（秒/token）。
-- **吞吐（throughput）**：单位时间处理的 token 数。若批量大小为 \(B\)、上下文长度为 \(S_{\text{ctx}}\)、prefill 延迟为 \(t_{\text{prefill}}\)，则：
+- **prefill 与 decode**：LLM 生成分两阶段。prefill 一次性处理整段提示（`seqlen_q` 很大，并行度高），decode 每步只处理 1 个新 token（`seqlen_q=1`，访存受限）。两者性能特征完全不同，必须分开计时——混在一起的「总时间」无法定位瓶颈。
+- **wall-clock 计时 vs CUDA Event 计时**：
+  - `time.perf_counter()`（CPU 墙钟）测的是主机侧经过的时间。CUDA kernel 是异步发射的，所以计时结束前必须 `torch.cuda.synchronize()` 等 GPU 做完，否则只测到了「命令提交」的时间。
+  - `cudaEventRecord()` 把事件插进 GPU 流里，`cudaEventElapsedTime` 返回的是**两个事件之间 GPU 实际经过的时间**，天然排除主机发射开销，是 kernel 微基准的标准做法。
+- **warmup（预热）**：第一次执行某个 kernel 时，CUDA 要加载模块、分配首次显存、torch 的 caching allocator 要扩块。这些一次性成本不应算进稳态延迟，所以正式计时前先空跑几轮。
+- **caching allocator 与 `empty_cache()`**：PyTorch 释放显存时只是把块还回自己的缓存池，并不还给驱动。`torch.cuda.empty_cache()` 把缓存池清空归还驱动，让每轮迭代的显存统计从同一起点开始。
+- **`reset_peak_memory_stats()`**：PyTorch 持续跟踪「已分配显存」的峰值；不重置的话，峰值只会单调不降，第二轮以后永远读到历史最大值。每轮开头重置，峰值才反映本轮。
+- **统计口径**：一个延迟数字的含义 = 计时边界内包含了哪些开销（张量生成？kernel 发射？同步？）。口径不一致的两个数字不可比较——这是本讲反复强调的主线。
+- **有效比特数**（承接 u2-l3）：量化缓存每个元素的等效带宽成本为
 
-\[ T_{\text{prefill}} = \frac{B \cdot S_{\text{ctx}}}{t_{\text{prefill}}}, \qquad T_{\text{decode}} = \frac{B \cdot S_{\text{dec}}}{t_{\text{decode}}} \]
+  \[ \text{bits/elem} = \text{num\_bits} + \frac{32}{\text{group\_size}} \]
 
-- **为什么必须分段**：prefill 是 compute-bound（一次算几千 token 的注意力），decode 是 memory-bound（每步只算 1 个 token、却要读完整个 KV cache，见 u1-l1 的算术强度分析）。低比特 KV cache 只加速后者，把两段混在一起测，会完全掩盖收益。
-
-### 2.2 CUDA 异步执行与计时的坑
-
-PyTorch 在 CPU 上发起的 GPU 操作是**异步**的：`model(...)` 返回时 GPU 可能还没算完。所以：
-
-- 用 `time.perf_counter()`（CPU 墙钟）测 GPU 工作时，必须在计时终点前 `torch.cuda.synchronize()` 等待队列排空，否则测到的只是「launch 时间」。
-- kernel 级基准更倾向用 `cudaEvent`：事件直接插在 GPU 流上，度量的是两个事件之间的 GPU 时间，天然排除 CPU 侧干扰。
-
-### 2.3 计量卫生三件套
-
-| 手段 | 消除的干扰 |
-|---|---|
-| warmup（先跑若干次不计分） | 首次调用的一次性开销：kernel 模块加载（JIT/cubin）、caching allocator 首次分配显存、 autotune |
-| `torch.cuda.empty_cache()` | 归还上一轮迭代缓存的显存块，避免「第 0 轮分配慢、后面轮次吃免费缓存」的顺序效应 |
-| `torch.cuda.reset_peak_memory_stats()` | 把「峰值显存」计数器清零，让本轮测到的 `max_memory_allocated` 只属于本轮，而非进程历史最高 |
-
-### 2.4 你将从本讲读到的三类基准
-
-1. **模型级端到端**：`bench_throughput.py`，加载真实 LLM，测 prefill/decode 延迟、吞吐、峰值显存。
-2. **kernel 级微基准**：`bench_single_*.cu`，不加载模型，直接反复调用 `mha_fwd_kvcache`，用 CUDA event 测 kernel 组的毫秒级延迟。
-3. **消融（ablation）基线**：`ablation/test_bitblas.py`、`ablation/test_marlin.py`，拿外部位比特 GEMM 方案（BitBLAS、Marlin）的「打包开销」作参照，反衬 BitDecoding 把量化融合进 decode kernel 的设计价值。
+  FP16 是 16 bit/elem。4-bit、group_size=128 时为 \(4.25\) bit，压缩比 \(16/4.25 \approx 3.76\times\)；2-bit、group_size=32 时为 \(3\) bit，压缩比 \(\approx 5.33\times\)。这个比值是 decode 阶段注意力 kernel 加速的上界来源。
 
 ## 3. 本讲源码地图
 
 | 文件 | 角色 |
-|---|---|
-| [evaluation/bench_throughput.py](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py) | 模型级基准主脚本：参数解析、config 注入、分段计时、吞吐与显存统计 |
-| [evaluation/scripts/bench_throughput.sh](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/scripts/bench_throughput.sh) | 批量扫描脚本：在 batch×上下文长度网格上反复调 bench_throughput.py |
-| [csrc/bit_decode/src/bench_single_residual.cu](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_residual.cu) | kernel 级微基准：带 FP16 残余区的完整 decode 路径（与当前 API 同步） |
-| [csrc/bit_decode/src/bench_single_packdecode.cu](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_packdecode.cu) | kernel 级微基准：纯打包 KV 的 decode 路径（**调用旧版 9 参数签名，当前无法编译**） |
-| [csrc/bit_decode/CMakeLists.txt](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/CMakeLists.txt) | 独立 CMake 构建通道；两个 bench target 均被注释 |
-| [evaluation/ablation/test_bitblas.py](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_bitblas.py) | BitBLAS int4 权重打包耗时基线 |
-| [evaluation/ablation/test_marlin.py](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_marlin.py) | Marlin 风格 4-bit 层的 pack 耗时基线（mul 为占位实现） |
-| [evaluation/llama.py](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py) | 被基准脚本 import 的改造版 Llama；含注意力后端注册表 |
-| [csrc/bit_decode/src/flash_api.h](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_api.h) | `mha_fwd_kvcache` 当前完整签名（判断 bench .cu 是否过期的依据） |
+| --- | --- |
+| [evaluation/bench_throughput.py](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py) | 模型级基准：加载改造版 Llama，分段测 prefill/decode 延迟、吞吐与峰值显存 |
+| [evaluation/scripts/bench_throughput.sh](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/scripts/bench_throughput.sh) | 批量扫描脚本：对多组 context_len × batch_size 逐个调用 bench_throughput.py |
+| [evaluation/llama.py](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py) | 被基准脚本 import 的改造版模型，`config.attn_backend` 在此被消费（u6-l2 已精读） |
+| [csrc/bit_decode/src/bench_single_residual.cu](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_residual.cu) | kernel 级微基准：含 FP16 残余区的完整 decode 调用，cudaEvent 计时 |
+| [csrc/bit_decode/src/bench_single_packdecode.cu](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_packdecode.cu) | kernel 级微基准：纯打包缓存 decode（旧版 API，当前无法编译） |
+| [csrc/bit_decode/CMakeLists.txt](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/CMakeLists.txt) | 独立于 pip 的 C++ 构建通道，两个 bench target 均被注释 |
+| [csrc/bit_decode/src/flash_api.h](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_api.h) | `mha_fwd_kvcache` 当前签名，用来判定两个 bench 文件谁是化石 |
+| [evaluation/ablation/test_bitblas.py](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_bitblas.py) | 消融基线：bitblas int4 weight-only GEMM 的权重转换开销 |
+| [evaluation/ablation/test_marlin.py](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_marlin.py) | 消融基线：Marlin 风格层的 pack 开销（占位实现） |
+
+两层基准的分工：**模型级**（bench_throughput.py）回答「换上 bit_decoding 后端后端到端快多少、省多少显存」；**kernel 级**（bench_single_*.cu）回答「注意力算子本身快多少」——这正是 README 性能图（imgs/4090.png、imgs/a100.png）里 3-9× 加速的口径。两层缺一不可，原因见 4.2 的算术示例。
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 模块一：benchmark_throughput 主流程——prefill/decode 分段计时与吞吐计算
+### 4.1 load_model 与 config 注入：基准的「控制变量」入口
 
 #### 4.1.1 概念说明
 
-模型级基准要回答的问题是：「换上 bit_decoding 后端，一次 prefill、一步 decode 各花多久？吞圸多少？峰值显存省多少？」它不区分时间花在注意力还是 MLP，因此测的是**端到端收益**——这正好与 README 声称的 kernel 级 3-9x 加速（u1-l1）形成互补：端到端加速比必然小于 kernel 级加速比，因为 decode 每步还要读全部模型权重（这部分不随注意力后端变化）。
-
-脚本的骨架是「每一轮迭代 = 清场 → 计时 prefill → 打印显存 → 预热 decode → 计时整段 decode」，最后对所有轮次取均值并换算吞吐。
+公平对比的第一原则：**除被试变量外一切保持不变**。在 BitDecoding 里，「被试变量」是注意力后端（`flash_attention_2` / `flash_decoding` / `bit_decoding`）及其量化参数。这些参数不是传给某个函数，而是**注入模型 config**，再由 u6-l3 讲过的双层注册表消费：`LlamaDecoderLayer.__init__` 用 `config.attn_backend` 查 `LLAMA_ATTENTION_CLASSES` 决定实例化哪个注意力类。基准脚本的 `load_model` 就是这条注入链的起点。
 
 #### 4.1.2 核心流程
 
 ```text
-for iter_idx in range(iteration):          # 默认 10 轮
-    torch.cuda.empty_cache()               # 清掉上一轮缓存显存
-    torch.cuda.reset_peak_memory_stats()   # 峰值显存计数器清零
-
-    ts = perf_counter()
-    hidden = randn(b, context_len, hidden) # 注意：randn 在计时区间内
-    out = model(inputs_embeds=hidden, use_cache=True)
-    torch.cuda.synchronize()               # 等 GPU 排空
-    prefill_latency.append(perf_counter() - ts)
-
-    if iter_idx == 0: 打印当前显存/峰值显存   # 口径：本轮 reset 之后到 prefill 结束
-
-    for _ in range(5):                     # decode 预热，不计分（但会推进 KV cache 5 步）
-        model(inputs_embeds=randn(b,1,hidden), past_key_values=...)
-
-    ts = perf_counter()
-    for _ in range(decode_len):            # 默认 256 步
-        out = model(inputs_embeds=randn(b,1,hidden), past_key_values=out.past_key_values, ...)
-    torch.cuda.synchronize()               # 只在整段结束时同步一次
-    decode_latency.append(perf_counter() - ts)
-
-avg = mean(各轮延迟)
-吞吐 = B × token数 / avg延迟
+命令行参数 (--attn_backend/--num_bits/--quant_mode/--group_size)
+    │
+    ▼
+load_model(args)
+    ├── LlamaConfig.from_pretrained(model_path)     # 读原始模型配置
+    ├── config.attn_backend = ...                   # 注入 5 个字段
+    ├── config.num_bits / quant_mode / group_size
+    ├── config.residual_block_size = 128 或 256      # 由 num_bits 推导，与 kernel 常量一致
+    ▼
+LlamaForCausalLM.from_pretrained(..., config=config)  # evaluation/llama.py 的改造版
+    ▼
+每个 DecoderLayer: LLAMA_ATTENTION_CLASSES[config.attn_backend](config, layer_idx)
 ```
-
-注意两个容易忽略的口径细节（在 4.1.4 实践中你会亲自观察它们）：
-
-- **`randn` 计入计时区间**：prefill 的 `ts` 在张量生成之前打下（L73-74），decode 的 `randn` 也在循环内（L100），每步多出一个 GPU 随机数 kernel 与一次 CPU launch。
-- **decode 用「CPU 墙钟 + 终点单次同步」**：测的是整段 256 步的墙钟吞吐，而非单步 GPU 延迟；若想测纯 GPU 时间，应改用 CUDA event（见 4.3）。
 
 #### 4.1.3 源码精读
 
-**入口与参数表。** 整个脚本只有一个公开函数 `benchmark_throughput`，用 argparse 接收 10 个参数：
+[evaluation/bench_throughput.py:17-35](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L17-L35) 是 `load_model` 全文。关键点逐条：
 
-[evaluation/bench_throughput.py:37-52](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L37-L52)
+- [evaluation/bench_throughput.py:22-27](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L22-L27)：从预训练目录读出 `LlamaConfig` 后，硬塞进 5 个自定义字段。注意第 27 行 `config.residual_block_size = 128 if args.num_bits == 4 else 256`——它和 kernel_traits 的编译期常量 `kBlockN_pack`（u5-l1）必须一致，这里是 Python 侧的对齐点。即使跑 `flash_attention_2` 基线，这些字段也会被设置，只是没人消费，保证 config 结构完全相同。
+- [evaluation/bench_throughput.py:7](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L7)：`from llama import LlamaForCausalLM`——**不是** `transformers` 里的原版，而是 `evaluation/llama.py` 的改造版。这决定了脚本必须在 `evaluation/` 目录下运行（或把它加进 `PYTHONPATH`）。
+- [evaluation/bench_throughput.py:29-34](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L29-L34)：`from_pretrained(..., config=config, device_map="auto")`。`device_map="auto"` 在多卡机上会把大模型（如脚本里用的 70B）切分到多张卡，此时 wall-clock 计时覆盖的是「整个流水线」，包括卡间通信——口径上要心里有数。
 
-这段代码用 `@torch.inference_mode()` 装饰（关闭 autograd 记账，省显存省时间），默认配置为 `batch_size=1`、`context_len=2048`、`decode_len=256`、`iteration=10`、`attn_backend=flash_attention_2`、`num_bits=4`、`quant_mode=k-channel`、`group_size=128`。`--model_path` 默认 `llama3-8b-instruct`。
-
-**清场与 prefill 计时。**
-
-[evaluation/bench_throughput.py:67-81](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L67-L81)
-
-每轮开头 L69-70 就是 2.3 节讲的 `empty_cache` + `reset_peak_memory_stats`；L73 打下时间戳后，L74 生成随机输入（注意它在计时区间内），L75-78 用 `inputs_embeds` 直接喂隐藏状态（跳过 embedding 查表，但**不跳过** RoPE/MLP/注意力全栈），L79 `synchronize` 后收秒。输入是随机的而非真实文本——对计时没有影响，因为计算量只依赖形状。
-
-**显存统计的时机与口径。**
-
-[evaluation/bench_throughput.py:83-86](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L83-L86)
-
-只在第 0 轮打印，且打印点位于 prefill 之后、decode 预热之前。因此 `max_memory_allocated` 反映的是「权重 + prefill 激活 + prefill logits + 此刻的 KV cache」的峰值，**decode 阶段的峰值（如 split 缓冲 `out_accum`/`softmax_lse_accum`，见 u3-l3）不在统计口径内**。做后端显存对比时要知道自己比的是这个口径。
-
-**decode 预热与整段计时。**
-
-[evaluation/bench_throughput.py:88-108](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L88-L108)
-
-L89-95 的 5 步预热不计分，用于消化首次 decode 的 allocator 扩容与 kernel 加载；一个微妙之处是这 5 步**真实推进了 KV cache 5 个 token**（`past_key_values` 被逐层 update），随后的正式计时从「prefill 长度 + 5」开始。L98-107 对 256 步 decode 总计时，`synchronize` 只出现在整段末尾——这保证了吞吐数字包含 CPU launch 开销，与真实服务场景一致。
-
-**指标汇总与一处历史遗留。**
-
-[evaluation/bench_throughput.py:110-137](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L110-L137)
-
-L111-112 对各轮延迟取 `np.mean`；L116-117 用 2.1 节的公式算两段吞吐；L129 给出单 token decode 延迟 `avg_decode_latency / decode_len`；L135-137 额外输出一行 CSV，方便被外层 shell 脚本收集。特别看 L113 被注释掉的一行：
-
-```python
-# avg_decode_latency -= 0.0019366741180 * 32
-```
-
-这是一个**硬编码常数修正项**的遗迹（疑似想扣掉 32 层的某个固定开销）。它是测量卫生的反面教材：常数修正不可复现、不可审计。正确做法是把要排除的开销做成显式的对照实验（比如单独测「空 cache 的 model 前向」再相减），而不是在结果上减 magic number。
+注入的消费端在 [evaluation/llama.py:761-766](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L761-L766)（注册表定义）与 [evaluation/llama.py:774](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L774)（按 config 查表实例化）。`bit_decoding` 对应 u6-l2 精读的 `LlamaBitDecoding`；`flash_decoding` 是另一个 split-KV 的 FP16 对照组。
 
 #### 4.1.4 代码实践
 
-**实践目标**：拿到 `flash_attention_2` 与 `bit_decoding` 两个后端在同一配置下的五项指标，并解释差异来源。
-
-**操作步骤**（需 8B 级模型权重量级、≥A100/4090 显存；以下命令在 `evaluation/` 目录下执行，因为脚本用 `from llama import LlamaForCausalLM` 相对导入）：
-
-```bash
-cd evaluation
-
-# 基线：FP16 FlashAttention-2
-python bench_throughput.py \
-    --model_path meta-llama/Llama-3.1-8B-Instruct \
-    --batch_size 1 --context_len 16384 --decode_len 256 --iteration 3 \
-    --attn_backend flash_attention_2
-
-# 实验组：4-bit k-channel BitDecoding（只需换一个参数）
-python bench_throughput.py \
-    --model_path meta-llama/Llama-3.1-8B-Instruct \
-    --batch_size 1 --context_len 16384 --decode_len 256 --iteration 3 \
-    --attn_backend bit_decoding --num_bits 4 --quant_mode k-channel --group_size 128
-```
-
-把两组输出的 CSV 行抄进下表（数值待本地验证，此处留空）：
-
-| 指标 | flash_attention_2 | bit_decoding (4bit/k-channel/g128) |
-|---|---|---|
-| Avg Prefill Latency (s) | | |
-| Avg Decode Latency / token (s) | | |
-| Prefill Throughput (tokens/s) | | |
-| Decode Throughput (tokens/s) | | |
-| Peak GPU Memory (MB) | | |
-
-**需要观察的现象与预期结果**（待本地验证）：
-
-1. **prefill**：bit_decoding 略慢——它的 prefill 先跑一遍与基线相同的 FP16 flash-attn，再额外启动 qpack 打包 kernel（u6-l2 的 prefill 分支）。
-2. **decode**：bit_decoding 更快，且上下文越长差距越大。KV cache 每 token 有效位宽从 16 bit 降到 \(4 + 32/128 = 4.25\) bit（约 3.8× 压缩），注意力读 KV 的时间按比例下降。
-3. **端到端加速比 < kernel 级 3-9×**：decode 每步仍要读全部 8B 权重（约 16 GB，与后端无关），注意力只是总时间的一部分；16K 上下文下这一占比足够大，收益可观测，2K 下则可能被权重读取淹没。
-4. **峰值显存**：bit_decoding 低几百 MB 量级——16K 上下文的 FP16 KV cache 每层 \(2 \times 8 \times 128 \times 16384 \times 2\text{B} = 64\text{MB}\)，32 层共 2 GB，压缩后省下约 1.5 GB（注意口径：这是 prefill 时刻的统计，见 4.1.3）。
+1. **实践目标**：确认「同一份脚本、不同 `--attn_backend`，真的实例化了不同的注意力类」——这是公平对比的前提。
+2. **操作步骤**（不改源码）：在 `evaluation/` 目录下运行
+   ```bash
+   python3 -c "
+   import sys, argparse
+   sys.argv = ['x', '--model_path', 'meta-llama/Llama-3.1-8B-Instruct', '--attn_backend', 'bit_decoding']
+   from bench_throughput import load_model
+   from llama import LlamaBitDecoding
+   args = argparse.Namespace(model_path='meta-llama/Llama-3.1-8B-Instruct', dtype='float16',
+                             attn_backend='bit_decoding', num_bits=4,
+                             quant_mode='k-channel', group_size=128)
+   model = load_model(args)
+   print(type(model.model.layers[0].self_attn))
+   print(isinstance(model.model.layers[0].self_attn, LlamaBitDecoding))
+   print(model.config.num_bits, model.config.group_size, model.config.residual_block_size)
+   "
+   ```
+   把 `attn_backend` 换成 `flash_attention_2` 再跑一次。无 GPU 时改用纯阅读法：对照 [evaluation/llama.py:774](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L774) 手动推演查表结果。
+3. **需要观察的现象**：第一次输出 `LlamaBitDecoding` 与 `True`；第二次输出 `LlamaFlashAttention2` 与 `False`；`num_bits/group_size/residual_block_size` 两次都是 `4/128/128`。
+4. **预期结果**：如上。本实验只验证实例化链路，**待本地验证**（需要能加载 8B 权重的环境）。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：如果把 L79 的 `torch.cuda.synchronize()` 删掉，prefill 延迟会怎么变？为什么？
+**练习 1**：为什么量化参数走 config 注入，而不是像 `fwd_kvcache_int` 那样作为函数参数逐层传递？
+**答案**：基准要对比的基线（`flash_attention_2`）根本没有量化参数；走 config 可以让两类后端接收**结构完全相同**的初始化路径，差异被完全收敛到注册表查表那一行（[llama.py:774](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L774)）。若逐层传参，基线路径就要写一堆无意义的占位参数，破坏公平性也容易出错。
 
-**答案**：会骤降到接近纯 CPU launch 时间。因为 GPU 操作异步，`perf_counter()` 在 GPU 还没执行完时就收秒了；剩下的 `decode` 循环虽然最终会因依赖同一输出而间接触发同步，但 prefill 的计时点已经错拍。synchronize 是 CPU 墙钟计时的必要收尾。
+**练习 2**：`--attn_backend flash_decoding` 时 `config.num_bits=4` 仍会被设置。它会改变这个基线的行为吗？
+**答案**：不会。`num_bits/quant_mode/group_size/residual_block_size` 只在 `LlamaBitDecoding` 内部被读取（见 u6-l2 的 decode 分支）；`LlamaFlashDecodingAttention` 不读这些字段，注入等于无效赋值。这正是「控制变量」的设计意图：config 形状恒定，消费与否由类决定。
 
-**练习 2**：decode 预热的 5 步为什么不能省？省掉会高估还是低估 decode 延迟？
-
-**答案**：不能省。首次 decode 会触发 `out_accum`/`softmax_lse_accum` 等新缓冲的 allocator 扩容（u3-l3：每层每步分配、靠 caching allocator 摊销）、残余区 `*_new` 缓冲首次分配（u5-l4）以及 kernel 模块首次加载。省掉则把这些一次性开销摊进前几步，**高估**平均延迟（尤其 decode_len 较小时）。
-
-**练习 3**：为什么脚本用 `np.mean` 而不是报告 min？kernel 级基准 `bench_single_*.cu` 却同时报 min/avg/max？
-
-**答案**：模型级基准模拟真实服务负载，均值对应「用户平均体感」，且模型前向步骤多、单轮噪声被 256 步 decode 摊薄；kernel 级单次调用只有毫秒级，个别调用会被时钟频率漂移、其他进程抢 SM 等干扰拉高，min 是「理想无干扰」的参考、max 提示最坏情况，三者一起才能判断测量稳定性。
-
-### 4.2 模块二：load_model 的 config 注入与后端选择
+### 4.2 benchmark_throughput 主流程：prefill/decode 分段计时与吞吐计算
 
 #### 4.2.1 概念说明
 
-基准脚本的「实验变量」只有一个：`--attn_backend`。但这个字符串参数如何变成前向路径中的不同 kernel？答案在 u6-l2/u6-l3 讲过的双层机制：命令行参数 → `LlamaConfig` 附加字段 → `LLAMA_ATTENTION_CLASSES` 查表实例化注意力类。本模块从基准脚本视角把这条注入链读完整——它是设计公平对比实验的前提：**必须确认两个后端除注意力外一切条件相同**（同一份权重、同一 dtype、同一输入形状）。
+`benchmark_throughput` 是模型级基准的主体。它模拟真实服务负载：给定长度 `context_len` 的随机输入做一次 prefill，然后连续 decode `decode_len` 个 token，重复 `iteration` 轮取平均。核心设计决策有三个：**分段计时**（prefill 与 decode 分开）、**解码整段计时**（不为每个 token 单独同步，避免同步开销污染）、**吞吐换算**（token 数 / 时间）。
 
 #### 4.2.2 核心流程
 
+每一轮迭代（[bench_throughput.py:67-108](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L67-L108)）：
+
 ```text
-args.attn_backend / num_bits / quant_mode / group_size
-        │
-        ▼ 写入 config 附加字段（含 residual_block_size 推导）
-LlamaConfig.attn_backend = ...
-        │
-        ▼ LlamaForCausalLM.from_pretrained(config=..., torch_dtype=fp16)
-模型构建期：每个 DecoderLayer 查 LLAMA_ATTENTION_CLASSES[config.attn_backend]
-        │
-        ├── "flash_attention_2" → LlamaFlashAttention2（FP16 基线）
-        ├── "flash_decoding"    → LlamaFlashDecodingAttention
-        └── "bit_decoding"      → LlamaBitDecoding（量化 KV 路径）
+┌─ 清场：empty_cache() + reset_peak_memory_stats()          (L69-70, 不计时)
+├─ Prefill 段：
+│    ts = perf_counter()
+│    randn 生成 (b, context_len, hidden) 输入               ← 注意：在计时区内！
+│    model(inputs_embeds=..., use_cache=True)               ← prefill + （bit 后端时）量化打包
+│    torch.cuda.synchronize(); te = perf_counter()          (L73-81)
+│    第 0 轮额外打印 memory_allocated / max_memory_allocated (L84-86)
+├─ Decode 预热：5 次不计时单步 forward                       (L89-95, 会原地增长缓存!)
+└─ Decode 段：
+     ts = perf_counter()
+     循环 decode_len 次：randn 生成单 token 输入 + forward    ← randn 也在计时区内
+     torch.cuda.synchronize(); te = perf_counter()           (L98-108)
 ```
 
-注意注入发生在**构建期**而非运行期：换后端必须重新加载模型，不能在同一个模型实例上来回切。
+指标换算（[bench_throughput.py:110-117](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L110-L117)）：
+
+\[ \text{prefill\_throughput} = \frac{\text{batch\_size} \times \text{context\_len}}{\overline{T}_{\text{prefill}}}, \qquad \text{decode\_throughput} = \frac{\text{batch\_size} \times \text{decode\_len}}{\overline{T}_{\text{decode}}} \]
+
+单 token 延迟直接取 [bench_throughput.py:129](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L129) 的 `avg_decode_latency / decode_len`。脚本的默认参数在 [bench_throughput.py:40-50](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L40-L50)：batch 1、context 2048、decode 256、iteration 10、fp16、默认基线 `flash_attention_2`（4-bit k-channel group 128 参数对基线无效）。
 
 #### 4.2.3 源码精读
 
-**config 注入。**
+**（a）清场三件套与显存采样。** [bench_throughput.py:69-70](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L69-L70) 每轮开头清空 caching allocator 并重置峰值计数器；[bench_throughput.py:85-86](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L85-L86) 只在第 0 轮、**且只在 prefill 之后**打印当前分配量与峰值。两个口径含义：
 
-[evaluation/bench_throughput.py:17-35](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L17-L35)
+- `memory_allocated`：prefill 刚结束、KV cache（FP16 或打包+残余）刚建立时的常驻量——量化省显存的证据主要看这里；
+- `max_memory_allocated`：本轮到目前为止的峰值——但注意打印点在 decode 之前，decode 阶段新分配的 `*_new` 缓冲（u5-l4）与中间累积缓冲**不在这张快照里**。想要 decode 峰值，需要把打印挪到 decode 之后（综合实践会做）。
 
-L20 `torch.set_default_dtype(dtype)` 让后续 `from_pretrained` 中的空张量默认 FP16；L22-27 是注入本体——`attn_backend`、`num_bits`、`quant_mode`、`group_size` 四个字段直接挂在 config 上，而 `residual_block_size` 不从命令行收，而是**按 num_bits 推导**：4-bit 取 128、否则 256。这正好镜像 kernel 侧的编译期常量 `kBlockN_pack`（u2-l2：两种位宽下打包 tile 同占 32 个 uint16 行）。L29-34 用改造版 `LlamaForCausalLM`（`from llama import ...`，即 `evaluation/llama.py`，而非 transformers 官方版）加载权重，`device_map="auto"` 支持多卡切分（70B 基准就靠它）。
+**（b）计时边界。** [bench_throughput.py:73-81](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L73-L81) 与 [bench_throughput.py:98-108](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L98-L108) 的 `perf_counter → ... → synchronize → perf_counter` 结构保证 GPU 工作被计入；但 `torch.randn` 生成输入在两处都位于计时区内（L74、L100）。对 prefill（一次生成 2048×4096 的张量）这点开销可忽略；对 decode（单 token，kernel 本身可能只有几百微秒）host 侧 randn 与 Python 循环开销会**同量级地计入**单 token 延迟——两个后端都吃同样的开销，对比仍公平，但绝对值偏大，解读时要记得。
 
-**后端注册表与查表点。**
+**（c）decode 预热的副作用。** [bench_throughput.py:89-95](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L89-L95) 的 5 次预热 forward 带着 `past_key_values=out.past_key_values` 且 `use_cache=True`。cache 对象是**原地更新**的（u6-l1 的 `update_residual` 沿 dim=-3 追加），所以正式计时的 decode 段开始时，KV 长度已经是 `context_len + 5`。对 bit_decoding 还有一个细节：预热 5 步期间残余区在增长，若恰好在正式段内攒满 128，`update_pack` 的 `torch.cat` 拼接成本会被计入某一步的延迟——这是真实负载也会付的成本，属于口径内。
 
-[evaluation/llama.py:761-766](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L761-L766) 定义四个后端到类的映射；[evaluation/llama.py:774](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/llama.py#L774) 在每个 `LlamaDecoderLayer.__init__` 里查表实例化。
+**（d）一处历史痕迹。** [bench_throughput.py:113](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L113) 有一行被注释的 `# avg_decode_latency -= 0.0019366741180 * 32`——作者曾手工扣除每步约 1.94ms 的框架开销再乘 32（可能是旧实验的 decode_len）。它提醒我们：**凡是事后手工扣减的数字，都必须在报告里注明**，否则口径不可复现。当前代码已禁用该修正，报告的是原始 wall-clock。
 
-所以 `--attn_backend` 是唯一的实验开关，且 `eager`/`flash_attention_2`/`flash_decoding`/`bit_decoding` 四条路径共享同一套 QKV 投影、RoPE 与 MLP——这正是「公平对比」的结构保证。
-
-**外层扫描脚本。**
-
-[evaluation/scripts/bench_throughput.sh:4-23](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/scripts/bench_throughput.sh#L4-L23)
-
-这是一个收缩到单点的历史配置：注释里保留的 `BUDGET_POOL`（1K~32K 七档上下文）与 `BATCH_SIZE`（1~32 六档）说明作者做过网格扫描，当前只激活 16384×1 一格，模型换成 70B、`decode_len=100`、`iteration=1`（大模型跑满网格太贵）。L18 固定 `flash_attention_2`，L23 注释提醒三个可换后端。要复现论文式扫描，把注释的两个数组恢复、把 L18 换成循环即可。
+**（e）输出格式。** [bench_throughput.py:120-137](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L120-L137) 先打印人读表格，再打印一行 CSV（L136-137），方便 shell 脚本批量扫描后拼接汇总——[bench_throughput.sh](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/scripts/bench_throughput.sh#L7-L19) 正是靠嵌套循环把它当批量探针用（当前只留 `BUDGET_POOL=('16384')`、`BATCH_SIZE=('1')` 一组，模型为 Llama-3.1-70B，`--iteration 1`；被注释的第一行保留了 1024→32768 的完整扫描计划，底部 [L23](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/scripts/bench_throughput.sh#L23) 注明三个后端名）。注意 `--iteration 1` 意味着脚本当前配置下的数字是**单次冷启动样本**，含首轮 CUDA 模块加载等一次性成本，只宜作粗筛。
 
 #### 4.2.4 代码实践
 
-**实践目标**：亲手验证「注入链在构建期生效、拼写错误立刻爆炸」，这能在以后排查「为什么我设的参数没生效」时省很多时间。
-
-**操作步骤**：
-
-1. 在 `evaluation/` 下运行（`--attn_backend` 故意写错）：
-
+1. **实践目标**：亲手得到两个后端的对比数据（或产出一份可执行的实验设计）。
+2. **操作步骤**（有 GPU， ≥48GB 单卡建议用 8B 模型避免 device_map 切分干扰）：
    ```bash
-   python bench_throughput.py --model_path <任一已下载的HF模型路径> --attn_backend bit_decodingg
+   cd evaluation
+   python3 bench_throughput.py --model_path meta-llama/Llama-3.1-8B-Instruct \
+       --batch_size 1 --context_len 16384 --decode_len 256 --iteration 5 \
+       --attn_backend flash_attention_2
+   python3 bench_throughput.py --model_path meta-llama/Llama-3.1-8B-Instruct \
+       --batch_size 1 --context_len 16384 --decode_len 256 --iteration 5 \
+       --attn_backend bit_decoding --num_bits 4 --quant_mode k-channel --group_size 128
    ```
+   各记录：CSV 行、`Avg Prefill Latency`、`Avg Decode Latency (per token)`、两条 `GPU Memory` 打印。
+3. **需要观察的现象**：填入下表（左列为字段名，右列待填）：
 
-2. 观察报错出现的位置与内容。
+   | 指标 | flash_attention_2 | bit_decoding (4bit k-ch g128) |
+   | --- | --- | --- |
+   | Avg Prefill Latency (s) | 待填 | 待填（预期略高：多付一次 qpack 打包 kernel） |
+   | Avg Decode Latency / token (s) | 待填 | 待填（预期更低，见下方算术） |
+   | Prefill Throughput (tok/s) | 待填 | 待填 |
+   | Decode Throughput (tok/s) | 待填 | 待填 |
+   | GPU Memory Allocated (MB) | 待填 | 待填（预期显著更低） |
 
-**需要观察的现象**：报错不在 argparse（argparse 只校验它声明的类型，`attn_backend` 是自由字符串），而是在模型构建期抛出，形如 `KeyError: 'bit_decodingg'`，指向 `llama.py:774` 的 `LLAMA_ATTENTION_CLASSES[config.attn_backend]`。
-
-**预期结果**：确认后端选择发生在 `LlamaDecoderLayer.__init__` 查表那一刻——即权重加载过程中、任何前向之前。这也解释了为什么基准脚本必须为每个后端完整加载一次模型。
+4. **预期结果（方向性推算，具体数值待本地验证）**：以 Llama-3.1-8B、context=16384 为例做带宽算术。KV 元素数 = \( 32\_{layers} \times 2_{K,V} \times 16384 \times 8_{kv\_heads} \times 128_{dim} \approx 1.07 \times 10^9 \)。FP16 占 \( \approx 2.15\,\text{GB} \)，4-bit 打包（含 params）按 4.25 bit/elem 占 \( \approx 0.57\,\text{GB} \)。在 ~1TB/s 量级的 HBM 上，decode 每步仅 KV 读取就相差约 1.5ms——**注意力 kernel 自身**的加速潜力约 \( 16/4.25 \approx 3.8\times \)。但端到端单 token 延迟里还有每步必读的 16GB 权重（约 10ms+）与 MLP 计算，所以**模型级 decode 吞吐的提升会明显小于 kernel 级的 3-9×**；context 越长、模型权重占比越小（或多卡切分权重），端到端收益越接近 kernel 级比值。这正是仓库同时维护两级基准的原因。若实测与该方向不符，优先检查是否踩了 4.2.3 的口径陷阱。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：`--attn_backend flash_attention_2` 时传 `--num_bits 2` 会怎样？
+**练习 1**：为什么 prefill 段没有任何 warmup？这会带来什么偏差？如何缓解？
+**答案**：prefill 建立新 cache、首次触发 qpack kernel 与 CUDA 模块加载，若先预热就需要丢弃一个 cache 再重建，脚本作者选择了直接测。偏差是 `iteration` 较小时（尤其 `.sh` 里的 `--iteration 1`）prefill 均值被一次性冷启动成本抬高。缓解：用 `--iteration 5` 以上并丢弃第一轮，或自行加一轮不计时的 prefill。
 
-**答案**：什么也不会发生。`num_bits` 等量化字段仍会写进 config，但 `LlamaFlashAttention2` 类根本不读它们（只有 `LlamaBitDecoding` 读，见 u6-l2）；前向走 FP16 路径。这是「config 附加字段无人消费即静默失效」的典型例子。
+**练习 2**：decode 段为什么每步之间不 `synchronize`、只在最后同步一次？如果想要「每 token 延迟的分布」该怎么办？
+**答案**：decode 每步 kernel 只有几百微秒，逐同步会把同步等待（几十微秒级）计入并打断 CPU 发射与 GPU 执行的流水重叠，测出来的是「步进模式」而非连续生成模式，系统性偏慢。要分布的话，改用 CUDA Event 在每步前后 `record`，结束后统一 `elapsed_time`——既得分布又不打断流水（这正是 4.3 kernel 基准的做法）。
 
-**练习 2**：为什么 `residual_block_size` 不做成命令行参数，而是 `128 if num_bits == 4 else 256` 写死？
+**练习 3**：两个后端的 `Avg Decode Latency (per token)` 里都含 host 侧 randn + Python 循环开销。说一个场景，使这个共同开销导致对比结论失真。
+**答案**：当 kernel 极快（短 context + batch 1，注意力仅几十微秒）而 host 开销约百微秒时，计时区被 host 开销主导，两个后端的差异被「稀释」到接近噪声——结论会错误地得出「两者差不多」。失真条件是：共同开销 ≥ 被测差异。对策：加大 context（放大差异）、预生成输入把 randn 挪出计时区，或改用 CUDA Event 测纯 GPU 段。
 
-**答案**：因为它必须等于 kernel 编译期常量 `kBlockN_pack`（u5-l1：由模板参数派生），传别的值 kernel 也不认——u3-l1 已指出 pybind 层的 `residual_block_size` 是未被消费的哑参数。与其暴露一个假自由度，不如在 Python 侧按 `num_bits` 推导出唯一正确值。
-
-**练习 3**：想在同一张表里加 `flash_decoding` 后端做三方对比，最小改动是什么？
-
-**答案**：再跑一次脚本，把 `--attn_backend` 换成 `flash_decoding` 即可（该后端已在注册表中，u6-l3 讲过它是 FP16 的 split-KV 版本，正好把「split 带来的并行收益」与「低比特带来的带宽收益」两个变量拆开）。
-
-### 4.3 模块三：kernel 级微基准 bench_single_*.cu
+### 4.3 kernel 级微基准：bench_single_*.cu 与 cudaEvent 计时
 
 #### 4.3.1 概念说明
 
-模型级数字混入了权重读取、MLP、launch 开销；要回答「decode 注意力 kernel 本身多快」，需要**直接在 C++ 里反复调用 `mha_fwd_kvcache` 并用 CUDA event 计时**——这就是 `bench_single_residual.cu`（带 FP16 残余区的完整三 kernel 路径：residual + splitkv + combine）和 `bench_single_packdecode.cu`（无残余的纯打包路径）的用途。README 里 3-9× 的 kernel 级加速曲线（`imgs/4090.png`、`imgs/a100.png`）就是这一层测出来的。
+模型级数字混入了权重读取、MLP、Python 框架开销。要单独度量「低比特注意力算子」的性能，就要绕过整个模型，直接在 C++ 里反复调用 `mha_fwd_kvcache`，用 cudaEvent 计时。仓库提供两个微基准：
 
-两个文件当前的状态并不对等，这是本模块最有工程价值的部分：
+- `bench_single_residual.cu`：**与当前 API 同步**，测「打包主缓存 + FP16 残余区」的完整 decode 调用（对应真实 decode 路径）；
+- `bench_single_packdecode.cu`：**API 化石**，仍按旧版 9 参数签名调用，当前无法编译——它和 u7-l1 发现的 `test_single_packdecode.cu` 是同一批历史遗留。
 
-- `bench_single_residual.cu` 与**当前** API 同步（18 个位置参数），恢复 CMake target 即可用；
-- `bench_single_packdecode.cu` 调用的是**旧版 9 参数签名**，与 [csrc/bit_decode/src/flash_api.h:313-341](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_api.h#L313-L341) 的现行签名（`k_`/`v_`/`seqlens_k_` 三个 optional、四个 `*_new` 张量、`new_lens` 等）不匹配，**直接取消注释编译必然失败**——它是与 u7-l1 中 `test_single_packdecode.cu` 同期的 API 化石。
+两个 target 在 CMakeLists 里都被注释，只有 `test_single_residual` 处于启用状态（[CMakeLists.txt:35-46](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/CMakeLists.txt#L35-L46) 启用、[CMakeLists.txt:61-85](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/CMakeLists.txt#L61-L85) 注释两个 bench）。
 
 #### 4.3.2 核心流程
 
-`bench_single_residual.cu` 的测量流程（`TestDecodingKernelPerformance` 模板函数）：
+`bench_single_residual.cu` 的测量骨架：
 
 ```text
-1. 构造形状：bs=1, seqlen_q=1, 32 头, head_dim=128
-2. 残余切分：residual_len = seqlen_kv % 128（整除则保留一整块 128）
-             打包区长度 = seqlen_kv - residual_len
-3. 用 kvcache_qpack<4> 把随机 K/V 打包成 k_pack/k_params/v_pack/v_params
-4. 构造残余区：residual_block_size 大小的 FP16 缓冲，前 residual_len 个填随机值，其余补零
-             new_lens = residual_len
-5. warmup：调 mha_fwd_kvcache<4> 10 次（不计分）
-6. 计时：cudaEventRecord(start) → 调 repeat 次 → cudaEventRecord(end) → 同步
-7. 返回 平均每次毫秒 = eventElapsed / repeat
-main：对 1024~512K 倍增的每个长度，外层 3 轮 × 内层 3 次，打印 min/avg/max
+对每个 seqlen_kv ∈ {1024, 2048, ..., 524288}（L141-143 倍增）:
+    seqlen_kv += 1                                    (L149，强制产生残余!)
+    对 outer_repeat(3) 次:
+        TestDecodingKernelPerformance<32,32,128,4>(...)
+        ├── 分配 Q/K/V 与 8 个 pack/params 张量（含 *_new）   (L17-41)
+        ├── kvcache_qpack<4> 先把 K/V 量化打包（不计入计时）   (L50-58)
+        ├── 构造 FP16 残余区：补零到 residual_block_size，
+        │   有效 new_lens = (len+1) % 128（或整除时留整块）    (L63-80)
+        ├── warmup：空跑 10 次完整 mha_fwd_kvcache            (L87-99)
+        └── cudaEvent 计时：连续 repeat(3) 次求平均            (L101-126)
+    报告 min / avg / max 三值                              (L162-163)
 ```
 
-一个精巧的测试设计：main 里取 `seqlen_kv = len_list[j] + 1`（长度为 2 的幂加一）。由于 2 的幂必被 `residual_block_size=128` 整除，`+1` 恰好造出 **residual_len = 1** 的极小残余区——既保证 residual 分支被触发，又让打包区长度保持 2 的幂（block 数为整数、无尾块掩码干扰），测的是「稳态 decode + 最小残余」这一最常见形态。
+计时核心是标准 cudaEvent 三段式：`cudaEventRecord(start)` → 循环 N 次发射 kernel → `cudaEventRecord(end)` → `cudaEventSynchronize(end)` → `cudaEventElapsedTime`，再除以次数。事件记录在 GPU 流上，测得的是纯 GPU 时间，且 N 次连续发射让kernel 之间无缝衔接（注意：这也意味着测的是**背靠背稳态**，不含真实 decode 里每步一次的发射间隔）。
+
+统计上它用了 **3×3=9 个样本**并报三值：`min` 反映无干扰的理想情况，`max` 暴露时钟漂移/其他扰动，`avg` 是主指标。这比只报均值更能发现测量被污染（max 远大于 avg 时数据不可信）。
 
 #### 4.3.3 源码精读
 
-**残余切分与张量构造。**
+**（a）残余长度的刻意构造。** [bench_single_residual.cu:10-15](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_residual.cu#L10-L15)：
 
-[csrc/bit_decode/src/bench_single_residual.cu:6-41](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_residual.cu#L6-L41)
+```cpp
+const int residual_block_size = num_bits == 4 ? 128 : 256;
+int residual_len = seqlen_kv % residual_block_size == 0 ? residual_block_size : seqlen_kv % residual_block_size;
+seqlen_kv = seqlen_kv - residual_len;
+```
 
-L8-13 算残余长度并从 `seqlen_kv` 里扣除，与 `test_single_residual.cu` 一致（整除时保留一整块，刻意区别于 `test.py` 的「余 0 则残余为空」，u7-l1 讲过这一差异）；L26-36 按 `quant_mode` 分支分配打包张量——形状正是 u2-l1 推导的两套布局（k-channel：`(b, s/pack, h, d)`；k-tensor：`(b, s, h, d/pack)`），外加四个 `*_new` 输出缓冲（形状按 `residual_block_size` 一块分配）。模板参数 `<num_heads, num_heads_kv, head_dim, num_bits>` 在 main 中固定为 `<32, 32, 128, 4>`（无 GQA）。
+整除时保留**一整块**作为残余（与 u7-l1 的 `test_single_residual` 同款约定，与 `test.py` 的「余 0 残余为空」刻意不同），保证 `residual` 恒为 true。配合 [L149](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_residual.cu#L149) 的 `seqlen_kv = len_list[j] + 1`，残余路径（FP16 tile + 原位再量化，u5-l4）在**每个**测例中都被执行——因为 real decode 每一步都走这条路，缺了它基准就失真了。
 
-**打包与残余区填充。**
+**（b）计时区外完成全部准备。** [bench_single_residual.cu:44-58](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_residual.cu#L44-L58) 把 K/V 折叠成 unpadded 布局并调用 `kvcache_qpack<4>` 完成打包；[L63-80](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_residual.cu#L63-L80) 用 `torch::zeros` 建 `residual_block_size` 大小的补零缓冲、`slice(1, 0, residual_len).copy_()` 填入有效 token（对应 Python 侧 `F.pad` 对齐，u6-l2），`new_lens=residual_len` 告知 kernel 有效长度。**qpack 打包成本不计入计时**——这个基准的口径是「decode 稳态」，与 prefill 一次性打包的真实成本划分一致。
 
-[csrc/bit_decode/src/bench_single_residual.cu:44-85](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_residual.cu#L44-L85)
+**（c）与当前 API 对齐的调用。** [bench_single_residual.cu:89-99](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_residual.cu#L89-L99)（warmup）与 [L107-117](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_residual.cu#L107-L117)（计时）按位置传入 18 个实参，与 [csrc/bit_decode/src/flash_api.h:315-341](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_api.h#L315-L341) 的现行签名逐位对齐：`Q, k_pack, k_params, v_pack, v_params, k_, v_, seqlens_k_, k_pack_new, k_params_new, v_pack_new, v_params_new, block_table_, sm_scale, quant_mode, group_size, residual_block_size, new_lens`。其中 `opt_seqlens_k` 装的是每 batch 已打包主缓存长度（[L64](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_residual.cu#L64)，即 u3-l2 讲的 `cu_seqlens_k` 复用语义）。计时循环 [L101-126](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_residual.cu#L101-L126) 是 4.3.2 描述的 cudaEvent 三段式，`msec / repeat` 得单次均值。
 
-L44-47 把 K/V reshape 成 Python 侧折叠 batch 后的 `(b*s, h, d)` 并构造 `cu_seqlens_k`（u4-l1 讲过 C++ 侧为何要这么恢复 batch）；L50-58 调 `kvcache_qpack<4>` 完成一次性打包；L66-79 构造 `residual_block_size` 大小的 FP16 残余缓冲：`slice(1, 0, residual_len).copy_(...)` 只填前 `residual_len` 个真实 token，其余保持零——正是 u6-l2 讲的「补零对齐」在 C++ 里的翻版；L82-85 用 `std::make_optional` 包装三个 optional 参数。
+**（d）固定形状 = 单一变量。** [bench_single_residual.cu:129-136](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_residual.cu#L129-L136) 把 `num_heads=num_heads_kv=32, head_dim=128, k-channel, 4bit, group 128` 写死在 `main` 里，自变量只剩 `seqlen_kv`（[L138-143](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_residual.cu#L138-L143) 从 1024 倍增 10 档到 512K）——这就是 README 里「延迟 vs 上下文长度」曲线的取点方式。注意 `num_heads_kv=32` 是 **MHA 形状**（无 GQA）；Llama-3.1-8B 实际是 32Q/8KV，kernel 级数字不能直接等同于模型级注意力占比。
 
-**CUDA event 计时核心。**
-
-[csrc/bit_decode/src/bench_single_residual.cu:87-126](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_residual.cu#L87-L126)
-
-L88-99 先跑 10 次预热；L102-120 是标准 event 三段式：`cudaEventCreate` → `cudaEventRecord(start)` → 循环 `repeat` 次完整调用 `mha_fwd_kvcache<4>`（每次调用内部都会走 u3-l1 的全链路：校验、params 组装、`num_splits_heuristic`、三个 kernel 启动）→ `cudaEventRecord(end)` → `cudaEventSynchronize(end)`；L123-126 用 `cudaEventElapsedTime / repeat` 得到平均每次毫秒。事件插在流上，测的是两次 record 之间 GPU 流过的时间——CPU 侧的 `torch::empty` 分配（caching allocator 命中后是纯指针操作）不会显著污染它。
-
-**长度扫描与统计。**
-
-[csrc/bit_decode/src/bench_single_residual.cu:129-164](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_residual.cu#L129-L164)
-
-L139-143 生成 `1024 × 2^i` 共 10 档长度；L145 `outer_repeat=3, inner_repeat=3`——外层每轮重新构造张量与打包（隔离 allocator/编译缓存影响），内层在 event 区间内连发 3 次；L149 `seqlen_kv = len_list[j] + 1` 即上述「+1 技巧」；L156-163 汇总 min/avg/max。小瑕疵：L155 变量名叫 `this_sec`，装的其实是毫秒（L161-163 直接以 ms 打印），阅读时不要被误导。
-
-**化石对照：旧签名调用。**
-
-[csrc/bit_decode/src/bench_single_packdecode.cu:52-81](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_packdecode.cu#L52-L81)
-
-这里对 `mha_fwd_kvcache<4>` 只传 9 个参数：`Q, k_pack, k_params, v_pack, v_params, opt_block_table, sm_scale, quant_mode, group_size`——缺少现行签名必需的 `k_`/`v_`/`seqlens_k_` 与四个 `*_new` 张量。对照 [csrc/bit_decode/src/flash_api.h:313-341](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_api.h#L313-L341)（18 个位置参数 + 默认参数），编译器会报「参数不足 / 无匹配重载」。L49 声明了 `K_new_host` 等变量却从未使用，也是半途改造的痕迹。它的计时骨架（event + repeat）与 residual 版完全相同，读懂一个即读懂两个。
-
-**CMake 通道现状。**
-
-[csrc/bit_decode/CMakeLists.txt:61-85](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/CMakeLists.txt#L61-L85)
-
-两个 bench target（`bench_single_packdecode`、`bench_single_residual`）连同 `test_single_packdecode`、`test_batch_packdecode` 都被注释，只有 [test_single_residual（L35-46）](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/CMakeLists.txt#L35-L46) 是启用状态。每个 target 都要链上 5 个 genfile 实例化单元（u1-l2/u7-l1 讲过原因：模板显式实例化与 dispatch 成对）。另外两处恢复编译前必须处理的坑：[L10](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/CMakeLists.txt#L10) 的 include 路径硬编码成作者机器的 `/home/ddy/...`（应改回 L9 注释的 `${PROJECT_SOURCE_DIR}/../../libs/cutlass/include`），[L7](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/CMakeLists.txt#L7) 固定 `CMAKE_CUDA_ARCHITECTURES 80`。
+**（e）化石鉴定。** [bench_single_packdecode.cu:52-60](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_packdecode.cu#L52-L60) 与 [L67-75](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_packdecode.cu#L67-L75) 只传 9 个实参：`Q, k_pack, k_params, v_pack, v_params, opt_block_table, sm_scale, quant_mode, group_size`。对照现行签名，第 6 位参数是 `c10::optional<const at::Tensor> &k_`（新 token K），`opt_block_table` 会错位绑到 K 残余槽位、后续 `float→optional<Tensor>` 类型全不匹配，必然编译失败。它记录的是**加入残余机制之前**的 API 形态——纯打包缓存 decode（所以它的张量分配 [L20-30](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_packdecode.cu#L20-L30) 也没有 `*_new` 四件套、[L106](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_packdecode.cu#L106) 的 `seqlen_kv` 也不加 1）。修复方式与 u7-l1 相同：按 residual 版的 18 参调用改写。另外即使改好源码，还要过构建关：取消 [CMakeLists.txt:74-85](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/CMakeLists.txt#L74-L85) 的注释，并把 [CMakeLists.txt:10](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/CMakeLists.txt#L10) 硬编码的 `INCLUDE_DIR /home/ddy/Projects/BitDecoding/libs/cutlass` 改回本仓库路径（第 9 行留着正确写法的注释）。
 
 #### 4.3.4 代码实践
 
-**实践目标**：把 kernel 级基准跑起来，得到「decode 延迟 ~ 上下文长度」曲线的原始数据。
-
-**操作步骤**（需 Ampere 及以上 GPU + 已按 u1-l2 初始化 cutlass 子模块）：
-
-1. 编辑 `csrc/bit_decode/CMakeLists.txt`：把 L10 改为 `set(INCLUDE_DIR ${PROJECT_SOURCE_DIR}/../../libs/cutlass/include)`；把 L74-85 的 `bench_single_residual` target 整块取消注释。
-2. 构建并运行：
-
-   ```bash
-   cd csrc/bit_decode
-   cmake -B build . && cmake --build build --target bench_single_residual -j
-   ./build/bench_single_residual
-   ```
-
-3. 记录 10 档长度各自的 min/avg/max 三值。
-
-**需要观察的现象与预期结果**（待本地验证）：
-
-1. 延迟随长度近似**线性**增长（decode 是 memory-bound，时间 ∝ 读出字节数），长长度端三个值彼此接近（单次调用毫秒级、干扰被摊薄）。
-2. 可以顺手做带宽核算：4-bit k-channel、`h_kv=32`、`d=128` 时每 token KV 打包字节数为 \(2 \times 32 \times 128 \times (4 + 32/128)/8 \approx 4.3\text{KB}\)（K、V 各半，含 params），用 `延迟 × 理论HBM带宽 / 字节总数` 估算有效带宽利用率。
-3. 若你同时恢复 `bench_single_packdecode`，编译会在 `bench_single_packdecode.cu:54` 处报无匹配函数——请按 4.3.3 的签名对照补齐缺失的 9 个参数（残余张量可仿照 residual 版 L60-85 构造）后再编译。
+1. **实践目标**：不运行代码，完成一次「纸面基线设计」——为 kernel 级对比实验算出预期带宽下界，并识别编译障碍。
+2. **操作步骤**：
+   - 步骤 1：对 `seqlen_kv=16384、num_bits=4、group_size=128、h_kv=32、d=128`，分别计算 FP16 KV 与打包 KV 的字节数（打包侧用 4.25 bit/elem）；
+   - 步骤 2：除以你显卡的 HBM 带宽（如 A100-40G 约 1555 GB/s、4090 约 1008 GB/s），得到两种实现的每步注意力时间下界与比值；
+   - 步骤 3：阅读 [bench_single_packdecode.cu:53-60](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_packdecode.cu#L53-L60) 与 [flash_api.h:315-341](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/flash_api.h#L315-L341)，列出它会产生的编译错误（参数个数/类型不匹配的具体位置）；
+   - 步骤 4（可选，有 GPU 时）：仿照 u7-l1 的做法，取消 [CMakeLists.txt:74-85](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/CMakeLists.txt#L74-L85) 注释、修正 L10 路径后 `cmake --build`，跑 `bench_single_residual` 记录 10 档长度的 min/avg/max。
+3. **需要观察的现象**：步骤 2 的比值应稳定在 \( 16/4.25 \approx 3.76 \) 附近（与长度无关，因为 decode 注意力是带宽主导）；步骤 4（若执行）应看到延迟随 `seqlen_kv` 近似线性增长，且同一长度的 max 与 min 差异在 5% 以内（否则测量被扰动污染）。
+4. **预期结果**：纸面计算部分可立即完成；实际运行数值**待本地验证**。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么 warmup 10 次之后还要 `repeat=3` 次连发在同一个 event 区间里，而不是每次调用单独计时再平均？
+**练习 1**：为什么微基准里 `kvcache_qpack` 不计入计时，而模型级基准里 qpack 的成本会体现在 prefill 延迟中？两者矛盾吗？
+**答案**：不矛盾，是两种口径各自正确。kernel 级要测的是「decode 稳态注意力算子」，打包是 prefill 期一次性成本（之后每 128 步才由残余 kernel 顺带再做一次，u5-l4），把它混入会污染稳态指标；模型级测的是端到端真实成本，prefill 段天然包含 qpack，bit_decoding 的 prefill 延迟因此略高于基线——这正是 4.2.4 表格里预期 prefill「略高」的原因。
 
-**答案**：单次毫秒级调用单独计时的话，event record 本身的开销与 GPU 频率抖动占比过高；连发 3 次取平均把固定开销摊薄，且同一区间内 GPU 已升频。代价是测到的是「连发吞吐」而非「冷启动单次延迟」，对本基准（模拟 decode 稳态）恰好是对的选择。
+**练习 2**：`bench_single_residual.cu` 若删掉 [L149](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_residual.cu#L149) 的 `+ 1`，测量结果会怎样变化？
+**答案**：`len_list` 全是 2 的幂、必被 128 整除，此时 `residual_len` 走「整除留整块」分支恒为 128，残余路径仍会被执行，主缓存长度从 `2^k` 变为 `2^k - 128`。所以删除 `+1` 的实际影响很小（残余仍是整块）；`+1` 的价值在于让 `residual_len=1` 这类**极短残余**的情形也被覆盖，测例更多样。若进一步把 L12-13 改成「整除时残余为空」（test.py 约定），才会真正偏离真实 decode 路径。
 
-**练习 2**：`main` 中把 `seqlen_kv = len_list[j] + 1` 改成 `len_list[j]`，残余区会变成什么样？测的东西变了吗？
+**练习 3**：cudaEvent 计时连续发射 3 次再除以 3，为什么不每次发射前后各记一对 event？
+**答案**：逐对记录会把每对 event 之间的发射间隔与可能的流水空隙计入单个样本，且 event 本身也有记录开销；连续发射测的是背靠背稳态吞吐，样本更干净。代价是丢失单次延迟的分布信息——但 outer_repeat×inner_repeat=9 个均值样本配合 min/max 报告，已经足以监控测量质量。
 
-**答案**：`1024 % 128 == 0` 时按 L12 的规则保留**一整块 128** 作残余、打包区缩短 128，`new_lens=128` 恰好等于 `residual_block_size`——这会触发 u5-l4 的「攒满即原位再量化」路径，每步多做一次打包落盘，测的就不再是「最小残余稳态」而是「满块再量化稳态」。两种形态都值得各测一遍。
-
-**练习 3**：kernel 级测得的加速比为什么通常高于模型级？
-
-**答案**：kernel 级的分母只有注意力本身（读 KV + 少量 MMA），低比特直接按比例压缩分母；模型级分母还含每步必读的全部模型权重与 launch 开销，这些不随量化变化，按 \( \frac{1}{1 - \alpha + \alpha/r} \)（α 为注意力时间占比、r 为注意力加速比）稀释收益。
-
-### 4.4 模块四：ablation 基线——test_bitblas.py 与 test_marlin.py 到底测什么
+### 4.4 ablation 消融基线：bitblas 与 marlin 脚本在对比什么
 
 #### 4.4.1 概念说明
 
-「消融基线」回答一个设计层面的问题：如果不用 BitDecoding 的融合方案，而是拿**通用低比特 GEMM 库**（BitBLAS、Marlin 这类 weight-only int4 矩阵乘引擎）来做低比特注意力，代价是什么？BitDecoding 的核心主张（u5-l4）是把「量化打包」 piggyback 进 decode kernel——残余块攒满时在 kernel 内原位量化，零额外启动。通用库则必须有**独立的打包/重排步骤**。两个脚本分别给 BitBLAS 的 `transform_weight` 与 Marlin 风格的 `pack()` 计时，量化这一步的外部开销。
+「消融（ablation）」指为论证某个设计选择，去掉或替换该选择后重测性能。BitDecoding 的核心主张是「**在线**把量化 KV 直接喂进 Tensor Core（LOP3 反量化），不需要先解包还原成 FP16」。要支撑这个主张，就要量化「**离线/显式反量化**路线的代价」。`evaluation/ablation/` 下两个脚本分别用两个知名低比特系统作对照：
 
-必须先讲清两个脚本的**局限**，避免误读为「注意力 kernel 对比」：
+- `test_bitblas.py`：用 bitblas 的 int4 weight-only GEMM，测其**权重转换**（`transform_weight`）耗时；
+- `test_marlin.py`：用（占位复刻的）Marlin 4-bit 层，测其 **pack**（把 FP16 权重打包成 Marlin 位布局）耗时。
 
-- `test_bitblas.py` 计时的对象是权重打包（`transform_weight`），**不是** int4 GEMM 本身；
-- `test_marlin.py` 的核心 `mul` 是**占位实现**（作者注释写明 "Placeholder implementation"，内部就是 `torch.matmul` 加随机权重），`_perm` 等重排表也是随机占位（L8-10）——它测的是 `pack()` 重排逻辑的耗时，其结果只能用于「打包成本量级」比较，不能当作 Marlin kernel 性能。
+注意两者的共同点：它们都在测「**准备量化操作数**」这一步的开销，而不是完整的低比特注意力——这恰好对应 BitDecoding 里 qpack 打包与残余再量化的成本档位。
 
 #### 4.4.2 核心流程
 
-**test_bitblas.py**：
+两个脚本共享同一个测量卫生模板：
 
 ```text
-1. 用 MatmulConfig 描述一个 decode 形状的 GEMM：M=1（单 token Q），
-   N=n_heads×seq_len=128（把 KV 序列折进 N 维），K=dim=128
-   A 为 fp16，W 为 int4（无分组、无 scale/zeros）
-2. 生成 int8 权重张量 (128, 128)
-3. warmup 5 次 transform_weight
-4. perf_counter 计时 10 次 transform_weight，取均值（毫秒）
+定义算子/层 → warmup（5 次）→ torch.cuda.synchronize() →
+循环 N 次计时（每次前后 sync）→ np.mean 汇总
 ```
 
-**test_marlin.py**：构造 Marlin 风格 `Layer`（4-bit 对称分组线性层，`infeatures=128`、`outfeatures=1024`、`groupsize=128`，含真实的 Marlin 打包逻辑：缩放、平移、tile 重排、4-bit 压包），warmup 5 次后连发 100 次 `pack()`，报告平均毫秒与 packs/sec。运行入口在 [evaluation/ablation/script/test_bitblas.sh](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/script/test_bitblas.sh)（固定 `CUDA_VISIBLE_DEVICES=0`）。
+- bitblas 侧：构造 \( M{=}1, N{=}128, K{=}128 \) 的 decode 形状 int4 GEMM 配置 → warmup 5 次 `transform_weight` → 10 次计时取均值；
+- marlin 侧：构造 128→1024 的 4-bit 分组层 → warmup 5 次 `pack` → 100 次计时，报平均延迟与 packs/sec。
 
 #### 4.4.3 源码精读
 
-**BitBLAS 的 GEMM 形状映射。**
+**（a）bitblas：decode 形状的 int4 GEMM 与其打包成本。** [evaluation/ablation/test_bitblas.py:13-28](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_bitblas.py#L13-L28) 用 `MatmulConfig` 定义 \( M{=}1 \)（decode 单 token）、\( N{=}n\_heads \times seq\_len{=}128 \)、\( K{=}dim{=}128 \)、`W_dtype="int4"`、无 scale/zero 的对称量化。几何上这正是一个 decode 步骤里 \( Q \cdot K^\top \) 的形状（1×128 乘 128×128）。[L34](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_bitblas.py#L34) 生成 int8 权重，[L37-40](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_bitblas.py#L37-L40) 预热，[L48-58](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_bitblas.py#L48-L58) 每次迭代在前后 `synchronize` 之间只包住 `matmul.transform_weight(weight_tensor)`——**被计时的是 int8→int4 的权重重排，GEMM 前向本身没有测**。[L63-66](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_bitblas.py#L63-L66) 取均值。另有一个小 bug 可作练习素材：[L60-61](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_bitblas.py#L60-L61) 的进度打印条件是「每 20 次」，而 `num_runs=10`，永远不会触发。
 
-[evaluation/ablation/test_bitblas.py:13-28](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_bitblas.py#L13-L28)
+**（b）marlin：一个诚实的占位实现。** [evaluation/ablation/test_marlin.py:8-21](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_marlin.py#L8-L21) 开头即声明这是「placeholder」：`_perm/_scale_perm` 是随机排列，`mul()` 内部用的是 `torch.matmul` 加**随机权重**——即真正的 Marlin GPU kernel 并未接入，前向结果无意义。有意义的部分是 [L23-92](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_marlin.py#L23-L92) 复刻的 `Layer.pack()`：把 fake-quantized 权重做 round/clamp、按 16×16 tile 重排、逐 4-bit 槽位压进 int32（[L86-89](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_marlin.py#L86-L89) 的 `q |= res[:, i::8] << 4*i` 与 u4-l3 的 uint16 打包是同一族位操作）。[L139-158](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_marlin.py#L139-L158) 对 `pack` 做 5 次预热 + 100 次计时。注意 `pack` 主体在 **CPU/numpy** 上完成（[L87](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_marlin.py#L87) `.cpu().numpy()`），所以这个数字刻画的是「离线位打包的工程成本量级」，且依赖 CPU 性能——跨机器不可比。
 
-`M=1, N=n_heads*seq_len, K=dim` 正是 decode 注意力第一次 GEMM（\(Q \cdot K^\top\)）的形状：单 token 的 Q 乘以「序列维摊平进 N」的 KV。`W_dtype="int4"`、`layout="nt"` 说明意图是把 KV 当 int4「权重」做 W4A16 乘法——这是 BitDecoding 的替身：**同样的数学，不同的执行策略**（独立 GEMM 库 vs 融合注意力 kernel）。
-
-**计时对象是打包而非乘法。**
-
-[evaluation/ablation/test_bitblas.py:38-66](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_bitblas.py#L38-L66)
-
-warmup 与计时循环里反复调用的都是 `matmul.transform_weight(weight_tensor)`（L39、L52）——把 int8 权重转成库内部 int4 布局的前置步骤，从没调用过 `matmul(...)` 本体。结论要如实表述：此脚本度量「BitBLAS 路线每引入/更新一段 KV 就要付出的打包税」，与 BitDecoding 的对比点是打包成本的去向（独立 kernel vs 融合进 residual kernel）。
-
-**Marlin 层的骨架与占位 mul。**
-
-[evaluation/ablation/test_marlin.py:12-52](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_marlin.py#L12-L52)
-
-L12-21 的 `mul` 明写是占位（内部 `torch.matmul` + 随机矩阵）；L23 起的 `Layer` 结构则忠实复刻了 Marlin 的约束（`infeatures % 128 == 0`、`outfeatures % 256 == 0`、groupsize 只支持 -1/128）与 buffer 布局（`B` 为 `(k//16, n*16//8)` 的 int32 打包矩阵、`s` 为分组 scale、`workspace` 为 kernel 并行 workspace）。
-
-**真实的 pack 逻辑与计时。**
-
-[evaluation/ablation/test_marlin.py:54-92](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_marlin.py#L54-L92) 是仿 Marlin 的重排打包：`round(w/s)` 对称量化 → 加 `(maxq+1)//2` 平移到无符号 → clamp → 16×16 tile 置换 → 逐 4-bit 压进 int32。计时部分在 [evaluation/ablation/test_marlin.py:135-166](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_marlin.py#L135-L166)：warmup 5 次、`time.time()` 计 100 次 `pack()` 取平均（注意这里用的是 `time.time` 而非 `perf_counter`，精度略差，且 pack 大部分是 torch CPU/numpy 操作，`torch.cuda.synchronize` 仅在首尾各一次）。
+**（c）它们在消融论证中的位置。** 两个脚本合起来给出一个对照论点：另一种做法（W4A16 式 weight-only 路线）需要一次显式的操作数变换/打包步骤；而 BitDecoding 把反量化用 LOP3 内联进 Tensor Core 路径（u5-l3），decode 稳态不再有「解包/变换」步骤，代价转嫁为 prefill 一次 qpack + 每 128 步一次 piggyback 再量化（u5-l4）。要完整闭环这个论证，还缺「bitblas/marlin 前向 kernel 时间」的对照——当前脚本未测，属于读者可以补的坑（见综合实践）。
 
 #### 4.4.4 代码实践
 
-**实践目标**：源码阅读型实践——给两个 ablation 脚本写「测量对象说明书」，训练「读基准代码先问它到底在计什么」的习惯。
-
-**操作步骤**：
-
-1. 通读两个脚本，为每个脚本填出下表（答案已给，请先自己填再对照）：
-
-| 条目 | test_bitblas.py | test_marlin.py |
-|---|---|---|
-| 计时对象 | `transform_weight`（int8→int4 布局转换） | `Layer.pack`（量化+tile 重排+压包） |
-| 是否测低比特 GEMM 本体 | 否 | 否（mul 为占位） |
-| warmup / 计时次数 | 5 / 10 | 5 / 100 |
-| 计时器 | `time.perf_counter` + `cuda.synchronize` | `time.time` + 首尾 synchronize |
-| 与 BitDecoding 的对比点 | 独立打包步骤的「税」 vs 融合进 residual kernel | 同左 |
-
-2. 思考并书面回答：如果要用这两个脚本支撑「BitDecoding 的融合设计优于独立 GEMM 库路线」的结论，还缺哪块实验？（提示：需要补 `matmul(...)` 本体的延迟，加出「打包 + 乘法」总成本，再与 `mha_fwd_kvcache` 单次延迟对齐形状比较。）
-
-**需要观察的现象与预期结果**：此实践不依赖 GPU 也能完成（纯阅读 + 写说明）。预期你得到的结论是：两个脚本提供的是**打包成本侧写**，不是端到端替身；任何引用它们作「对比基线」的论述都应注明口径。
+1. **实践目标**：把两个消融脚本的「计时对象」钉死，避免日后误读数字。
+2. **操作步骤**：
+   - 通读 [test_bitblas.py:48-58](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_bitblas.py#L48-L58)，在计时区内圈出唯一的被测语句；
+   - 通读 [test_marlin.py:150-158](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_marlin.py#L150-L158)，确认被测函数是 `pack` 而非 `forward`；再对照 [test_marlin.py:12-21](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_marlin.py#L12-L21) 确认 `mul` 是占位；
+   - 在有 bitblas 环境的机器上（`pip install bitblas`，需 GPU）运行 `python3 test_bitblas.py` 记录 Mean time；marlin 脚本无外部依赖，可直接 `python3 test_marlin.py`（CPU 亦可运行，注意数字口径是 CPU 打包）。
+3. **需要观察的现象**：bitblas 输出 `Mean time: x.xx ms`（transform_weight 单次耗时）；marlin 输出平均 pack 延迟与 packs/sec。两者都不输出任何「注意力延迟」。
+4. **预期结果**：确认两个脚本的产出只是**打包/变换开销**基线；绝对数值**待本地验证**。若在报告里引用它们对比 BitDecoding 的端到端性能，属于口径错误。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：`test_bitblas.py` 里 `group_size=None, with_scaling=False, with_zeros=False`，这与 BitDecoding 的量化配置等价吗？
+**练习 1**：如果要把 bitblas 脚本改造成「真正的 decode 注意力对照基线」，最少要改哪里？
+**答案**：把计时区内的 `matmul.transform_weight(weight_tensor)` 换成 `matmul(input_tensor, weight_packed)`（先在计时区外完成一次 transform 并缓存结果），input 为 \( 1\times128 \) 的 FP16 张量。这样测的才是 int4 权重 GEMM 的前向耗时，才能与 `bench_single_*` 的 kernel 时间同口径比较。
 
-**答案**：不等价。BitDecoding 用分组仿射量化（每组一对 scale/zero，u4-l3）；这里是无分组、无 scale/zero 的裸 int4——只是形状替身，数值语义更宽松。做严格对比时至少要打开 `with_scaling`/`with_zeros` 并设 `group_size=128`。
+**练习 2**：`test_marlin.py` 明知 `mul` 是占位还保留 `Layer.forward`，为什么脚本仍有价值？
+**答案**：它的价值在于 `pack()`——位打包的 tile 重排、槽位拼接逻辑（[L81-91](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/ablation/test_marlin.py#L81-L91)）与 BitDecoding 的 pack_Kchannel/pack_Vtensor（u4-l3）解决同一个问题「如何把量化值装进整数容器」，其成本量级可作为「离线打包路线要付多少钱」的参照。`forward` 保留只是为了类的完整性，不是被测对象。
 
-**练习 2**：`test_marlin.py` 的 `pack()` 计时为什么大部分落在 CPU 而不是 GPU？
-
-**答案**：pack 的实现以 `torch.round/permute/reshape` 与 numpy 逐位压包（L86-89 的 Python 循环）为主，只有少量 `.to(device)` 搬运；所以 `torch.cuda.synchronize` 首尾各一次即可，GPU 并非瓶颈。这也说明它度量的是「宿主侧重排成本」。
-
-**练习 3**：把这三个层次的基准（模型级 / kernel 级 / ablation）各对应一个必答问题，应该怎么分配？
-
-**答案**：模型级（4.1）答「用户能感到多少加速、省多少显存」；kernel 级（4.3）答「加速来自注意力本身还是环境噪声，带宽利用率多高」；ablation（4.4）答「设计取舍是否成立——融合量化相对独立打包路线省了多少」。三层结论互相印证才构成完整证据链。
+**练习 3**：两个消融脚本的 warmup 都是 5 次，bitblas 计时 10 次、marlin 计时 100 次。哪个的样本量更成问题？为什么？
+**答案**：bitblas 的 10 次更成问题。样本均值的标准误为 \( \sigma/\sqrt{N} \)，N=10 时若数据有抖动，均值置信区间很宽；且它只报 mean 不报 min/max/方差，无法判断测量质量（对照 4.3 的三值报告法）。marlin 的 pack 是 CPU 确定性操作、方差极小，100 次足够。
 
 ## 5. 综合实践
 
-设计并（在有 GPU 的机器上）执行一份**完整的 BitDecoding 性能评审实验**，把本讲三个层次串起来：
+**任务：产出一份《flash_attention_2 vs bit_decoding 对比报告》，有 GPU 跑实测，无 GPU 交实验设计。**
 
-1. **实验矩阵**：后端 ∈ {flash_attention_2, bit_decoding(4bit/k-channel/g128)} × 上下文 ∈ {2K, 8K, 16K, 32K}，`batch_size=1`、`decode_len=256`、`iteration≥3`（每格取均值，报告 std；GPU 上建议锁频 `nvidia-smi -lgc` 后测）。
-2. **模型级**：用 `bench_throughput.py` 逐格运行，收集 CSV 行，绘制两条曲线：(a) 单 token decode 延迟 vs 上下文长度；(b) 加速比 vs 上下文长度。验证预期：加速比随上下文增长（注意力占比上升），并拟合 \( \text{加速比} \approx \frac{1}{1-\alpha + \alpha/r} \) 估计本机权重读取占比 α 与注意力加速 r。
-3. **kernel 级校准**：恢复 `bench_single_residual` target（4.3.4 步骤）跑同长度扫描，把 kernel 延迟与模型级 decode 延迟相减，估算「每步非注意力开销」，检验它是否近似常数（若非常数，说明存在随上下文增长的隐藏开销，例如 split 缓冲）。
-4. **口径声明**：在报告开头写明显存口径（prefill 时刻峰值，见 4.1.3）、decode 计时含 `randn` 与 launch 开销、迭代次数与统计方法。
-5. **无 GPU 替代**：写出上述实验设计文档（变量、重复次数、统计口径、预期曲线形状与理由），并注明每项「待本地验证」——实验设计本身就是本实践的合格交付物。
+有 GPU 路线（约 30 分钟）：
+
+1. `cd evaluation`，用 4.2.4 的两条命令分别跑 `flash_attention_2` 与 `bit_decoding`（固定 model/batch/context/decode_len/iteration，只动 `--attn_backend` 与量化参数），各跑 2 遍取第二次（消除冷启动）。
+2. 填 4.2.4 的对比表，追加两行：`GPU Memory Allocated 差值` 与「按 4.25 bit/elem 推算的理论显存节省」，核对两者是否同量级（理论 KV 节省 = \( 1.07\times10^9 \times (2 - 0.53125)\,\text{B} \approx 1.57\,\text{GB}\)，8B 权重约 16GB 不变，所以总分配量节省比例不大但 KV 部分应接近 3.8×）。
+3. 把 [bench_throughput.py:84-86](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py#L84-L86) 的打印复制一份挪到 decode 循环之后（本地临时副本，勿提交），对比「prefill 峰值」与「含 decode 的峰值」差异，验证 u5-l4 讲的 `*_new` 缓冲对峰值的影响。
+4. 用 4.3.4 的纸面带宽算式预测 decode 每步注意力节省，再与实测端到端每步节省相除，得到「注意力在端到端中的占比」估计，写成一句结论。
+
+无 GPU 路线：提交一份实验设计文档，必须包含——**自变量**：attn_backend（2 水平）+ num_bits（4/2）；**控制变量**：模型、batch=1、context_len=16384、decode_len=256、dtype=float16、设备、迭代次数=5 且丢弃首轮；**因变量与统计口径**：prefill 延迟（含 randn 与打包）、单 token decode 延迟（含 host 开销，逐字说明计时边界）、两段吞吐、prefill 后与 decode 后两次峰值显存；**报告格式**：每格填 mean±std，附 min/max；**预测**：kernel 级加速上界 \( 16/4.25\approx3.8\times \)（4bit）与 \( 16/3\approx5.3\times \)（2bit g32），端到端 decode 提升等于该值乘以注意力的时间占比、prefill 略慢、显存显著下降——并写明如何用实测数据反过来检验这些预测。所有数值标注「待本地验证」。
 
 ## 6. 本讲小结
 
-- `bench_throughput.py` 用「CPU 墙钟 + 终点 synchronize」分段测 prefill 与整段 decode，吞吐由 \( B \cdot S / t \) 换算；输入 `randn` 在计时区间内、显存峰值只覆盖 prefill 阶段，引用数字时必须声明口径。
-- 计量卫生三件套各有分工：warmup 消化首次调用的一次性开销，`empty_cache` 消除跨轮显存缓存偏置，`reset_peak_memory_stats` 把峰值统计限定到本轮；脚本里被注释的硬编码修正项是反面教材。
-- 后端切换的唯一开关是构建期的 config 注入 + `LLAMA_ATTENTION_CLASSES` 查表，`residual_block_size` 由 `num_bits` 推导以保持与 kernel 编译期常量一致；拼写错误会在模型构建期以 KeyError 暴露。
-- kernel 级微基准用 CUDA event 三段式计时（warmup 10 + 连发 3 取平均），对 2 的幂「+1」构造 residual_len=1 的稳态；`bench_single_packdecode.cu` 因旧版 9 参数签名无法编译，且两个 bench target 在 CMake 中均被注释、include 路径硬编码——恢复时三处都要处理。
-- `ablation/` 两个脚本测的是外部低比特 GEMM 库（BitBLAS/Marlin）的**打包成本**而非乘法本体，`test_marlin.py` 的 `mul` 更是占位实现；它们支撑的是「融合量化 vs 独立打包」的设计论证，不能当作端到端性能基线。
-- 三层基准各答一问：模型级看用户体感，kernel 级看加速来源与带宽利用率，ablation 看设计取舍；端到端加速比恒小于 kernel 级，差值由权重读取等不变成本解释。
+- 模型级基准 `bench_throughput.py` 的骨架是「config 注入 → prefill 整段计时 → 5 次不计时 decode 预热 → decode 整段计时 → 吞吐 = token 数/均值时间」，CSV 输出配合 `bench_throughput.sh` 的嵌套循环做批量扫描。
+- 计量卫生三件套各有分工：warmup 排除一次性成本、`empty_cache` 统一起显存状态、`reset_peak_memory_stats` 让峰值只反映本轮；但脚本存在 randn 计入计时区、预热原地增长缓存、峰值只采到 prefill 后、`--iteration 1` 冷启动等口径陷阱。
+- kernel 级微基准用 cudaEvent 三段式测纯 GPU 时间，min/avg/max 三值报告；`bench_single_residual.cu` 用 `seqlen_kv+1` 与「整除留整块」保证残余路径恒被执行，且打包准备全部放在计时区外；`bench_single_packdecode.cu` 是 9 参数旧签名的 API 化石，且两个 bench 的 CMake target 均被注释、include 路径硬编码。
+- ablation 脚本只测「量化操作数的准备成本」（bitblas 的 transform_weight、Marlin 的 CPU pack），且 marlin 的 `mul` 是占位实现——它们支撑「在线 LOP3 反量化免解包」的设计论证，但不能当作完整注意力基线引用。
+- 端到端 decode 提升被权重读取等非注意力成本稀释，理论上界是有效比特比 \( 16/(\text{num\_bits}+32/\text{group\_size}) \)——kernel 级 3-9× 与模型级个位数百分比完全可以在同一套带宽算术下自洽。
 
 ## 7. 下一步学习建议
 
-- 下一讲 u7-l3（扩展实践：新增 group_size/num_bits 配置的完整链路）会把本讲的基准方法论用起来：每打通一个新模板配置，都要用 u7-l1 的正确性测试 + 本讲的 kernel 级基准验证「算得对、跑得快」。
-- 建议继续精读 [evaluation/example.py](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/example.py) 与 [evaluation/bench_throughput.py](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/evaluation/bench_throughput.py) 的差异（前者关心生成质量、后者关心速度），体会「评测目标决定脚本结构」。
-- 若想深挖计时方法学，可对照 PyTorch 官方 `torch.cuda.Event` / `torch.profiler` 的用法，思考把 `bench_throughput.py` 的 CPU 墙钟替换为 CUDA event 需要改哪些同步点；再阅读 [csrc/bit_decode/src/bench_single_residual.cu](https://github.com/OpenBitSys/BitDecoding/blob/ae0d83630d6292453355ced498db2ac87f56ec62/csrc/bit_decode/src/bench_single_residual.cu) 的 event 用法作为参照。
-- 最后一讲 u7-l4 会站在架构层面复盘，届时把本讲测得的「端到端 vs kernel 级」差距、ablation 局限一并带入，作为评审报告的证据基础。
+下一讲 u7-l3「扩展实践：新增一个 group_size/num_bits 配置的完整链路」将把本讲的测量方法当作验收工具：打通 group_size=64 路径后，你需要自己设计对照实验验证新配置的正确性与性能。之后 u7-l4 架构评审会用到本讲的带宽模型去评估 residual_block_size、k-tensor 分支等取舍。建议顺带精读两个外部参照：FlashAttention 官方 benchmark 的计时框架（与本仓库 kernel 基准同源），以及 PyTorch 文档中 `torch.cuda.memory_allocated/max_memory_allocated` 的语义说明，把「统计口径」意识变成习惯。
