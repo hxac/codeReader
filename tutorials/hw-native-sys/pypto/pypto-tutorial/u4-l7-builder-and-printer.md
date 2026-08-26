@@ -325,9 +325,11 @@ IR 层 gemv_acc 封装：
            ) -> pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc, pl.TileView(valid_shape=[1, 64])]:
                return pl.tile.gemv_acc(acc, lhs, rhs, init_cond=k0 == 0)
    """)
-   printed = python_print(pl.parse_program(src), format=False)
+   printed = python_print(pl.parse(src), format=False)
    print(printed)
    ```
+
+   `pl.parse` 会自动识别源码里是 `@pl.function` 还是 `@pl.program`（本例是后者，返回 `ir.Program`）；项目测试里写的 `pl.parse_program(...)` 是它的旧别名，仍可用但文档已建议改用 `pl.parse`（见 4.4.3 的弃用表）。
 
 **需要观察的现象**：打印文本中出现 `pl.tile.gemv_acc(acc, lhs, rhs, init_cond=k0 == 0, acc_phase='unspecified')`——谓词带 `init_cond=` 前缀，`acc_phase` 以字符串 kwarg 跟在后面；对照 `tile.matmul_acc` 版本则是 `pl.tile.matmul_acc(acc, lhs, rhs, k0 == 0)`（裸位置）。
 
@@ -361,9 +363,9 @@ IR 层 gemv_acc 封装：
 
 ```text
 src(DSL 源码)
-  → pl.parse_program          # 解析：语法 → IR
+  → pl.parse                  # 解析：语法 → IR（自动识别 function/program）
   → python_print(format=False) # 打印：IR → 文本①
-  → pl.parse_program(文本①)    # 再解析：文本① → IR'
+  → pl.parse(文本①)            # 再解析：文本① → IR'
   → ir.assert_structural_equal(IR, IR')   # 语义没丢（忽略 span/名字）
   → python_print(IR') == 文本①            # 文本稳定
 ```
@@ -376,7 +378,7 @@ src(DSL 源码)
 
 - [python/pypto/ir/printer.py:L15-L46](https://github.com/hw-native-sys-pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/python/pypto/ir/printer.py#L15-L46)：`python_print` 统一入口。`prefix="pl"` 对应 `import pypto.language as pl`；`concise=True` 省略中间类型注解；`explicit_layout=True` 打出每个 tile 的完整布局（自描述输出）。
 
-- [docs/en/dev/ir/07-parser.md:L72-L92](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/docs/en/dev/ir/07-parser.md#L72-L92)：文本入口 `pl.parse(code)` / `pl.loads(path)`，自动识别 function/program——再解析这一步用的就是它们（`pl.parse_program` 是其按 Program 的特化，旧别名见文档说明）。
+- [docs/en/dev/ir/07-parser.md:L72-L92](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/docs/en/dev/ir/07-parser.md#L72-L92)：文本入口 `pl.parse(code)` / `pl.loads(path)`，自动识别 function/program——再解析这一步用的就是它们。文档末尾的弃用表写明 `pl.parse_program` / `pl.loads_program` 是旧别名（仍支持），新代码应写 `pl.parse`；实现见 [python/pypto/language/parser/text_parser.py:L162-L200](https://github.com/hw-native-sys/pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/python/pypto/language/parser/text_parser.py#L162-L200)（`exec` 源码并复用装饰器链，还带 `source_map` 把生成代码的 span 映回用户真实文件——`@pl.jit` 特化后再解析时就靠它找回出处）。
 
 - [docs/en/dev/ir/03-structural_comparison.md:L14](https://github.com/hw-native-sys-pypto/blob/ec5d20c1818634e35b349a014a57afb998abea67/docs/en/dev/ir/03-structural_comparison.md#L14)：结构化相等忽略 `Span`——这正是 Builder 产物与 DSL 产物可以判等的根据（两者的 span 必然不同：一个来自用户 with 行，一个来自 DSL 源码行）。
 
@@ -400,7 +402,7 @@ src = textwrap.dedent("""\
         return result
 """)
 
-f1 = pl.parse(src)                      # 或 pl.parse_program 视产物而定
+f1 = pl.parse(src)                      # 自动识别 function/program，本例返回 ir.Function
 t1 = python_print(f1, format=False)
 f2 = pl.parse(t1)
 t2 = python_print(f2, format=False)

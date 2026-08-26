@@ -169,7 +169,7 @@ Op::BinInstr(dstPtr + offset, src0Ptr + offset, src1Ptr + offset,
 
 纯源码阅读实践：给 `BinaryInstr` 同 strides 版的决策树填一张表。对一个 `Tile<Vec, half, 16, 256, RowMajor, -1, -1>`（容量 16×256，有效区域运行期给定），分别取 `(validRow, validCol) = (16, 256)` 与 `(4, 100)`，沿着 [TBinOp.hpp:L240-L260](https://github.com/hw-native-sys/pto-isa/blob/be5ccb765a4ce5d14ca5da8b0e2f182d7f003369/include/pto/npu/a2a3/TBinOp.hpp#L240-L260) 的 `if constexpr` 逐层判断，写出各自最终落到哪个函数、发出了几条 `vadd`。提示：half 的 `elementsPerRepeat = 256/2 = 128`，两个 case 的 `validCol` 分别是 2 个 repeat 整与「非 repeat 对齐」。
 
-**预期结果**（待本地验证）：`(16,256)` 走 FastPath 的 `Bin1LNormMode`（编译期 Cols==ValidCol 成立，总 repeat 数 32 ≤ 255），整段 2×16 个 repeat 一条指令发出；`(4,100)` 走 GeneralPath 非连续分支，`Cols=256` 时 `normColRepeat=2`、`Rows*normColRepeat=32` 不小于 `SMALL_RPT_BINOP=4`，且 `Rows(16) < normColRepeat+1` 不成立，落入 `Bin2LNormModeRowRpt`。
+**预期结果**：两个 case 都不会命中「小形状」与「编译期连续」两道 `if constexpr`——因为该 Tile 的 `ValidCol` 模板参数是 `-1`（DYNAMIC），`TileData::Cols(256) == TileData::ValidCol(-1)` 编译期恒为假（`ValidCol` 就是原样保存的模板参数，见 [pto_tile.hpp:L1432](https://github.com/hw-native-sys/pto-isa/blob/be5ccb765a4ce5d14ca5da8b0e2f182d7f003369/include/pto/common/pto_tile.hpp#L1432)）。于是两者都进 GeneralPath：`(16,256)` 在运行期连续分支命中 `TileData::Cols == validCol`（256==256），`nonVLAligned` 为假且总 repeat 数 32 ≤ 255，落入 `Bin1LNormMode`，整段 2×16 个 repeat 一条指令发出；`(4,100)` 走非连续分支，`normColRepeat=2`、`Rows*normColRepeat=32` 不小于 `SMALL_RPT_BINOP=4`，且 `Rows(16) < normColRepeat+1` 不成立，落入 `Bin2LNormModeRowRpt`。（路径为源码级推演；实际发出的指令数须在 sim/真机上用反汇编确认。）
 
 #### 4.2.5 小练习与答案
 
@@ -363,14 +363,16 @@ vsel 的二级寻址在 [TRem.hpp:L60-L76](https://github.com/hw-native-sys/pto-
 
 用例侧的 tmp tile 在 [tests/cpu/st/testcase/trem/trem_kernel.cpp:L23-L28](https://github.com/hw-native-sys/pto-isa/blob/be5ccb765a4ce5d14ca5da8b0e2f182d7f003369/tests/cpu/st/testcase/trem/trem_kernel.cpp#L23-L28) 声明为 `TileDataDst tmpTile(1, kTCols_)`——单行、列数与数据 tile 相同，正好容纳 TRemCheck 要求的布局。
 
+顺带一个与 4.4 节主题呼应的观察：`TRemCheck` 同样有一道 dtype 白名单 `static_assert`（[TRem.hpp:L192-L194](https://github.com/hw-native-sys/pto-isa/blob/be5ccb765a4ce5d14ca5da8b0e2f182d7f003369/include/pto/npu/a2a3/TRem.hpp#L192-L194)），只放行 `float / float32_t / int32_t`；而 CPU 侧的 TREM ST 用例偏偏有 `case_half_16x256_16x256`、`case_bf16_16x256_16x256` 等 half/bf16 用例（[trem/main.cpp:L95-L101](https://github.com/hw-native-sys/pto-isa/blob/be5ccb765a4ce5d14ca5da8b0e2f182d7f003369/tests/cpu/st/testcase/trem/main.cpp#L95-L101)，共 6 个）。CPU 后端用通用 C++ 模板实现 REM，任何浮点类型都算得出结果；同一份用例若直接切到 NPU 目标，`static_assert` 会在编译期拦下 half/bf16。这是「CPU 跑通 ≠ 全后端合法」在 TREM 上的又一实证。另外，本版本在 [constants.hpp:L42](https://github.com/hw-native-sys/pto-isa/blob/be5ccb765a4ce5d14ca5da8b0e2f182d7f003369/include/pto/common/constants.hpp#L42) 新增了 `BIT_TO_BYTE = 8`，正是 TRemCheck 用来把「位掩码字节数」换算成「地址缓冲占的 float 元素数」的度量衡。
+
 #### 4.5.4 代码实践
 
 1. **实践目标**：理解「算术指令按 count 自动展开、比较指令必须显式 repeat」的差异，并验证 TRem 用例在 CPU 模拟器上的行为。
 2. **操作步骤**：
-   - 运行 `python3 tests/run_cpu.py -t trem`（CPU 模拟器路径），观察 `case_float_64x512_64x64` 等 5 个用例是否通过。
+   - 运行 `python3 tests/run_cpu.py -t trem`（CPU 模拟器路径），观察 `case_float_64x512_64x64` 等 6 个用例是否通过。
    - 用 `git show 6285cda9 -- include/pto/npu/a2a3/TRem.hpp` 查看本次优化的完整 diff，对比新旧两版 `vcmpvs_lt` 调用行。
    - 纸面推演：validCols=512、T=float 时，旧版 `repeatTimes=1` 会写出多少位掩码？多少列的符号修正因此读到脏数据？
-3. **需要观察的现象**：CPU 模拟器上 TREM 数值正确（CPU 后端是纯 C++ `std::fmod` 风格语义，不含掩码概念）；diff 中新增的两段注释（L44-L48、L60-L64）与 `set_mask_norm/set_vector_mask(-1,-1)` 成对出现。
+3. **需要观察的现象**：CPU 模拟器上 TREM 数值正确（CPU 后端是纯 C++ `std::fmod` 风格语义，不含掩码概念，且 half/bf16 用例也能跑——但把同一份用例切到 NPU 目标会被 `TRemCheck` 的白名单拦下，见 4.5.3 的观察）；diff 中新增的两段注释（L44-L48、L60-L64）与 `set_mask_norm/set_vector_mask(-1,-1)` 成对出现。
 4. **预期结果**：512 个 fp32 元素打包位掩码共 512 位，一个 repeat 只写 64 位（64 个元素），旧版有 448 位是 UB 残留——即 64 列以后的符号修正不可靠；新版 `repeatTimes=8` 全部写满。（CPU 侧运行结果待本地验证；NPU 侧行为差异须上 sim/真机才能观测。）
 
 #### 4.5.5 小练习与答案
@@ -414,5 +416,5 @@ vsel 的二级寻址在 [TRem.hpp:L60-L76](https://github.com/hw-native-sys/pto-
 ## 7. 下一步学习建议
 
 - 下一讲（u4-l4）转向数据搬运指令族 TLOAD/TSTORE，观察 MTE2/MTE3 流水线上的指令如何与本章向量指令（PIPE_V）通过事件握手。
-- 想继续深挖 a2a3 的布局适配，可对照阅读 [include/pto/npu/a2a3/TRowProd.hpp](https://github.com/hw-native-sys/pto-isa/blob/be5ccb765a4ce5d14ca5da8b0e2f182d7f003369/include/pto/npu/a2a3/TRowProd.hpp)——它在同一提交窗口内做了类似的掩码/repeat 优化，是 4.5 节方法的第二个样本。
+- 想继续深挖 a2a3 的布局适配，可对照阅读 [include/pto/npu/a2a3/TRowProd.hpp](https://github.com/hw-native-sys/pto-isa/blob/be5ccb765a4ce5d14ca5da8b0e2f182d7f003369/include/pto/npu/a2a3/TRowProd.hpp)——它在同一提交窗口内（提交 08cc7fa6「TRowProd Performance optimization」）做了类似的掩码/repeat 优化（大量 `set_mask_norm/set_mask_count/set_vector_mask` 成对切换），是 4.5 节方法的第二个样本。
 - 想理解 A5 代际在同一指令上的差异（如 int64 用寄存器对仿真），预习 u4-l7；想亲手补齐一条指令，先读 u8-l2 的贡献清单。
