@@ -1,0 +1,1154 @@
+{
+  "head": "bbb2d20a93178f9bc3b7be6b23e8f5b23f551c50",
+  "project": "pdf-craft",
+  "rationale": "pdf-craft 是一个以 PDF 为中心的转换库，核心链路为「OCR 提取 → 目录分析 → 章节生成 → DocumentPackage 中间产物 → Markdown/EPUB 渲染」，并在中间产物之上叠加「XMLTranslator + LLM」的翻译体系与「pypdf + reportlab」的 PDF 回写体系。大纲按读者对这条链路的认知顺序设计：先在入门层建立项目定位、安装运行、目录结构与 PDFCraft 门面 API 的整体印象；再进入配置体系（六种 OCR 后端、提取选项、LLM 配置）；随后沿主链路自顶向下精读提取引擎、OCR 驱动、目录分析与章节生成四大核心流程；接着理解 DocumentPackage 中间表示与两种渲染器；最后进入专家层的 XML 翻译引擎、LLM 基础设施（修复循环）、EPUB 翻译管线与 PDF 回写管线，并以 CLI 工具、冒烟测试和自定义 Transformer 综合实战收尾。单元之间严格按数据流方向递进，每篇讲义只讲一个独立主题、引用少量真实源码文件，并配套一个可操作的代码实践，使读者既能由浅入深读懂源码，又能动手改造和扩展。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 pdf-craft 的核心能力：PDF 转 Markdown/EPUB、内容翻译、翻译回写 PDF",
+            "理解项目面向扫描书籍与技术文档的定位",
+            "熟悉 README 与 docs/en 下各指南的分工"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "项目定位",
+            "核心工作流",
+            "文档地图"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README 的 Quick Start 与 Advanced Features 小节，列出 pdf-craft 支持的五种工作流（PDF→Markdown、PDF→EPUB、PDF→翻译产物、EPUB→翻译 EPUB、PDF→翻译 PDF），并写一段 200 字总结说明每种工作流需要哪些外部依赖（OCR 服务、LLM、Poppler）。",
+          "source_files": [
+            "README.md",
+            "README_zh-CN.md",
+            "docs/en/API_REFERENCE.md"
+          ],
+          "title": "pdf-craft 是什么：项目定位与能力地图",
+          "topic": "介绍 pdf-craft 的定位：把扫描版 PDF 转换为 Markdown 或 EPUB、翻译转换结果并把译文回写 PDF，并梳理 README 与 docs 目录中的官方文档入口。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-install-and-first-run.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "完成标准安装与 Poppler 系统依赖配置",
+            "理解标准安装与 local 扩展的区别",
+            "独立跑通第一个 PDF→Markdown 转换脚本"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "依赖体系",
+            "系统依赖",
+            "首次转换"
+          ],
+          "order": 2,
+          "practice_task": "按 INSTALLATION.md 安装 pdf-craft 与 Poppler，编写脚本 convert.py：使用 DeepSeekOCRVendorConfig 指定 OCR 服务，调用 PDFCraft.convert_pdf_to_markdown 把一个小 PDF 转成 Markdown，并记录转换耗时与生成的中间目录结构。",
+          "source_files": [
+            "docs/en/INSTALLATION.md",
+            "pyproject.toml",
+            ".env.template"
+          ],
+          "title": "环境安装与第一次转换",
+          "topic": "讲解如何安装 pdf-craft（标准安装与 local 扩展）、准备 Poppler 与 OCR 凭据，并用最短脚本完成第一次 PDF 转 Markdown。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-repo-structure.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "画出 pdf_craft 包内 extractor、pdf、document、markdown、renderer、transformer、llm、pipeline 的职责边界",
+            "区分核心库 pdf_craft 与仓库本地工具 pdf_craft_tool",
+            "在源码中快速定位某个功能对应的模块"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "包结构",
+            "数据流方向",
+            "工具与测试"
+          ],
+          "order": 3,
+          "practice_task": "浏览 pdf_craft 与 pdf_craft_tool 的目录结构，绘制一张模块依赖草图：标注「PDF 输入」到「Markdown/EPUB/PDF 输出」依次经过的模块，并把 tests/ 下与各模块对应的测试文件标注在草图上。",
+          "source_files": [
+            "pdf_craft/__init__.py",
+            "pdf_craft_tool/README.md",
+            "AGENTS.md"
+          ],
+          "title": "仓库结构与模块地图",
+          "topic": "俯瞰 pdf_craft/、pdf_craft_tool/、tests/、docs/ 的目录组织，理解核心库与仓库本地 CLI 工具、测试资产的划分。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-pdfcraft-facade.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "掌握 PDFCraft 各公开方法的输入输出与适用场景",
+            "理解 extract→transform→render 三段式组合方式",
+            "理解 package_path 临时工作目录与持久化目录的区别"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "门面模式",
+            "工作流方法",
+            "临时工作区"
+          ],
+          "order": 4,
+          "practice_task": "阅读 pdf_craft/craft.py 中 convert_pdf_to_markdown 与 extract_pdf 的实现，写一个脚本分别调用两个方法：先 extract_pdf 得到 DocumentPackage，再用 render_markdown 渲染，验证结果与一步式调用一致，并用 package_path 保留中间产物观察目录内容。",
+          "source_files": [
+            "pdf_craft/craft.py",
+            "pdf_craft/__init__.py"
+          ],
+          "title": "PDFCraft 门面：公开 API 全景",
+          "topic": "精读 PDFCraft 类的 convert_pdf_to_markdown、convert_pdf_to_epub、extract_pdf、translate_pdf、translate_epub 等方法，理解门面如何组合提取、转换与渲染。"
+        }
+      ],
+      "order": 1,
+      "title": "初识 pdf-craft"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l1-ocr-backends-config.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "区分 local 与 vendor 两类配置的运行位置与依赖",
+            "掌握 DeepSeek OCR、DeepSeek OCR 2、Unlimited OCR 三族六种配置的参数",
+            "理解 ensure_ocr_config 的兜底与互斥校验逻辑"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "配置数据类",
+            "本地与远程抉择",
+            "配置校验"
+          ],
+          "order": 1,
+          "practice_task": "阅读 ocr_config.py，编写一个函数 configure(mode: OCRMode) -> OCRConfig：根据六种 OCRMode 字符串返回对应配置对象并打印关键字段；再测试 ensure_ocr_config 在同时传入 ocr 与 models_cache_path 时抛出的 ValueError。",
+          "source_files": [
+            "pdf_craft/ocr_config.py",
+            "docs/en/OCR_BACKENDS.md"
+          ],
+          "title": "六种 OCR 后端配置",
+          "topic": "解读 ocr_config.py 中三族模型（DeepSeek OCR、DeepSeek OCR 2、Unlimited OCR）的本地与远程共六种配置对象，以及 ensure_ocr_config 的兜底策略。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-extraction-options.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "掌握 ExtractionOptions 中页面范围、OCR 尺寸、DPI、封面脚注等控制项",
+            "理解 toc_assumed 与 toc_llm 对目录分析的影响",
+            "掌握 aborted、on_ocr_event 等回调的用途"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "选项数据类",
+            "中断与回调",
+            "目录假设"
+          ],
+          "order": 2,
+          "practice_task": "写脚本对一个 20 页左右的 PDF 只转换第 1 到 5 页（page_indexes=range(1,6)），注册 on_ocr_event 回调打印每页事件类型与 token 消耗，再用 aborted 回调在第 3 页后人为中止，观察异常行为。",
+          "source_files": [
+            "pdf_craft/craft.py",
+            "docs/en/PDF_TRANSLATION.md"
+          ],
+          "title": "PDFOptions 与 ExtractionOptions 详解",
+          "topic": "逐项讲解 PDFOptions 与 ExtractionOptions 两个冻结 dataclass：页面范围、ocr_size、DPI、token 上限、封面脚注、目录假设、错误忽略与中断回调。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-llm-config.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "掌握 LLM 配置对象的构造参数与默认值",
+            "理解 token_encoding 与 tiktoken 的作用",
+            "理解 cache_path 与 log_dir_path 对调试翻译问题的价值"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "LLM 配置",
+            "分词编码",
+            "缓存与日志"
+          ],
+          "order": 3,
+          "practice_task": "构造一个 LLM 配置（可用假 key），调用其 encoding 属性对一个中英混合字符串计数 token；再启用 cache_path 与 log_dir_path 运行一次 EPUB 翻译（或小规模 XML 翻译），检查缓存目录与日志目录中生成了什么。",
+          "source_files": [
+            "pdf_craft/llm/core.py",
+            "docs/en/EPUB_TRANSLATION.md"
+          ],
+          "title": "LLM 配置与 token 编码",
+          "topic": "讲解 pdf_craft.llm.LLM 声明式配置：密钥、URL、模型、token_encoding、重试、缓存与日志目录，以及 tiktoken 编码在翻译分组中的作用。"
+        }
+      ],
+      "order": 2,
+      "title": "配置体系"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u3-l1-extraction-chain.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "追踪从 PDFCraft.extract_pdf 到 DocumentPackage 的完整调用链",
+            "理解 OCR 事件循环中 token 统计与失败页收集",
+            "理解懒加载引擎对 EPUB-only 使用者的意义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "门面到引擎",
+            "OCR 事件循环",
+            "包落盘"
+          ],
+          "order": 1,
+          "practice_task": "在本地复制 transform.py 的 _extract_from_pdf 流程图：用文字或 mermaid 画出「OCR recognize → analyse_toc → generate_chapter_files → write_metadata」四步，并标注每一步读写的目录（ocr/、toc.xml、chapters/、document.json）。",
+          "source_files": [
+            "pdf_craft/craft.py",
+            "pdf_craft/extractor/pdf/extractor.py",
+            "pdf_craft/transform.py"
+          ],
+          "title": "提取主链路：从门面到引擎",
+          "topic": "追踪 PDFCraft → PDFExtractor → PDFExtractionEngine 的调用链，理解 OCR 循环、目录分析、章节生成与元数据落盘如何串成一次提取。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-pdf-handler.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 PDFHandler/PDFDocument 协议抽象了哪些能力",
+            "掌握 DefaultPDFHandler 基于 pdf2image/pypdf 的实现",
+            "理解 PageRefContext 如何逐页迭代并缓存页面渲染"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "协议抽象",
+            "默认实现",
+            "页面引用上下文"
+          ],
+          "order": 2,
+          "practice_task": "实现一个自定义 PDFHandler，包一层 DefaultPDFHandler 并在 open 时打印 PDF 路径与页数；通过 PDFOptions(pdf_handler=...) 注入后跑一次提取，观察日志。再直接调用 DefaultPDFDocument.render_page 比较不同 dpi 下的图像尺寸。",
+          "source_files": [
+            "pdf_craft/pdf/handler.py",
+            "pdf_craft/pdf/page_ref.py",
+            "docs/en/TROUBLESHOOTING.md"
+          ],
+          "title": "PDF 处理抽象：PDFHandler 与页面引用",
+          "topic": "解读 PDFHandler/PDFDocument 两个 Protocol 与 DefaultPDFHandler 默认实现，以及 PageRefContext 如何按页迭代渲染 PDF。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-ocr-driver.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解 OCREvent 六种事件类型及其含义",
+            "掌握断点续跑机制：page_N.xml 与 done 标记",
+            "掌握 token 预算控制与失败页处理策略"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "生成器事件流",
+            "断点续跑缓存",
+            "预算与失败处理"
+          ],
+          "order": 3,
+          "practice_task": "写一个脚本对同一 PDF 连续调用两次 convert_pdf_to_markdown 且复用同一 package_path：第二次运行时统计 SKIP 事件数量验证缓存生效；再人为删除其中一页的 page_N.xml 验证只有该页重新 OCR。",
+          "source_files": [
+            "pdf_craft/pdf/ocr.py",
+            "pdf_craft/metering.py"
+          ],
+          "title": "OCR 驱动器：事件流、缓存与断点续跑",
+          "topic": "精读 OCR.recognize 生成器：逐页 START/IGNORE/SKIP/COMPLETE/FAILED 事件、page_N.xml 结果缓存、done 标记与失败文件协作实现断点续跑。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l4-page-extractor-backends.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "理解六种配置到具体后端的映射逻辑",
+            "理解本地运行时缺失时如何给出可操作的安装提示",
+            "理解 OCR 结果的布局类型与正文/脚注布局划分"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "后端工厂",
+            "懒加载与错误提示",
+            "布局类型映射"
+          ],
+          "order": 4,
+          "practice_task": "阅读 _LAYOUT_KIND_TO_REF 映射表，手工打开一个提取产物 ocr/page_N.xml，统计其中布局类型并按映射表归一化；再在未安装 local 扩展的环境下构造 DeepSeekOCRLocalConfig，观察 RuntimeError 提示信息。",
+          "source_files": [
+            "pdf_craft/pdf/page_extractor.py",
+            "pdf_craft/pdf/types.py",
+            "pdf_craft/pdf/ngrams.py"
+          ],
+          "title": "页面提取后端：doc-page-extractor 适配",
+          "topic": "解读 PageExtractorNode 如何根据配置类型懒加载 doc-page-extractor 的 DeepSeek/Unlimited 后端，并把结果映射为 Page/PageLayout 结构。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u3-l5-metering-and-errors.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "掌握 ignore_pdf_errors 与 ignore_ocr_errors 两种检查器（布尔或谓词）",
+            "理解 NoUsableOCRPagesError 的触发条件与页码信息",
+            "理解 AbortedCheck 协作式中断检查"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "计量数据类",
+            "错误类型",
+            "中断检查"
+          ],
+          "order": 5,
+          "practice_task": "用 ignore_ocr_errors=lambda e: ",
+          "source_files": [
+            "pdf_craft/error.py",
+            "pdf_craft/metering.py",
+            "pdf_craft/transform.py"
+          ],
+          "title": "计量、错误与中断控制",
+          "topic": "讲解 OCRTokensMetering 计量、ignore_pdf_errors/ignore_ocr_errors 错误策略、NoUsableOCRPagesError 保护以及 AbortedCheck 协作式中断。"
+        }
+      ],
+      "order": 3,
+      "title": "PDF 提取主链路"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u4-l1-toc-pages-detection.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "理解标题匹配得分如何判定目录页",
+            "理解 Aho-Corasick 多模式匹配在标题命中中的应用",
+            "掌握 toc_assumed 开关的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "目录页评分",
+            "多模式匹配",
+            "文本归一化"
+          ],
+          "order": 1,
+          "practice_task": "对一份带目录页的 PDF 运行提取（toc_assumed=True），打开生成的 toc.xml 与 ocr/ 目录，找到被判为目录页的 page 文件；再阅读 toc_pages.py 中的阈值常量，解释它们如何避免正文页被误判为目录页。",
+          "source_files": [
+            "pdf_craft/extractor/toc/toc_pages.py",
+            "pdf_craft/extractor/toc/text.py"
+          ],
+          "title": "目录页定位：Aho-Corasick 标题匹配",
+          "topic": "解读 find_toc_pages 如何用 pyahocorasick 把正文标题与候选目录页文本做匹配打分，从而找出目录页。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-toc-level-analysis.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解统计方法推断层级的基本思路",
+            "理解 LLM 分析失败时回退统计方法的容错设计",
+            "比较「有目录页」和「无目录页」两条分析路径"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "统计层级推断",
+            "LLM 层级推断",
+            "回退策略"
+          ],
+          "order": 2,
+          "practice_task": "对同一 PDF 分别以 toc_llm=None 与 toc_llm=LLM(...) 运行提取，对比生成的 toc.xml 层级差异；再阅读 _do_analyse_toc 中 except LLMAnalysisError 分支，写 100 字说明为什么打印警告而不是抛异常。",
+          "source_files": [
+            "pdf_craft/extractor/toc/toc_levels.py",
+            "pdf_craft/extractor/toc/llm_analyser.py",
+            "pdf_craft/extractor/toc/analysing.py"
+          ],
+          "title": "层级分析：统计法与 LLM 法",
+          "topic": "对比 analyse_toc_levels 统计推断与 analyse_toc_levels_by_llm/analyse_title_levels_by_llm 两条路径，以及 LLM 失败后的回退逻辑。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-toc-data-model.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "掌握 Toc/TocInfo 数据结构与 XML 编解码",
+            "理解 _structure_toc_by_levels 的栈算法",
+            "理解 toc.xml 存在时直接复用的缓存行为"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "目录数据结构",
+            "栈式建树",
+            "结果缓存"
+          ],
+          "order": 3,
+          "practice_task": "写一个独立脚本：读取提取产物 toc.xml，用 ElementTree 解析后按缩进打印整棵目录树（id、level、page_index）；再修改其中一个条目的 level 后重新运行 convert_pdf_to_markdown，观察章节文件如何随 toc.xml 缓存而变化。",
+          "source_files": [
+            "pdf_craft/extractor/toc/types.py",
+            "pdf_craft/extractor/toc/analysing.py"
+          ],
+          "title": "Toc 数据模型与 toc.xml 缓存",
+          "topic": "讲解 Toc/TocInfo 类型、encode/decode 与 toc.xml 的缓存语义，以及 _structure_toc_by_levels 用栈把扁平层级表建成树的过程。"
+        }
+      ],
+      "order": 4,
+      "title": "目录分析"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u5-l1-chapter-data-model.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "掌握 Chapter 两种布局与 BlockLayout 的字段含义",
+            "理解 InlineExpression、Reference、HTMLTag 等内联成员",
+            "理解 chapter_N.xml 的 XML 编解码流程"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "章节布局类型",
+            "内联成员",
+            "XML 编解码"
+          ],
+          "order": 1,
+          "practice_task": "打开一个 chapters/chapter_N.xml，对照 chapter.py 的 decode 函数手工把 XML 还原成 Chapter 对象树；再用官方 decode 读入、encode 写回，验证两次文件内容等价（忽略缩进）。",
+          "source_files": [
+            "pdf_craft/extractor/chapter/chapter.py",
+            "pdf_craft/extractor/chapter/content.py"
+          ],
+          "title": "章节数据模型：Chapter 与布局体系",
+          "topic": "解读 Chapter/ParagraphLayout/BlockLayout/AssetLayout/Reference 等核心数据类及其 XML 编解码。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-jointer-merging.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "理解跨页段落合并的判定条件",
+            "理解表格/脚注/阅读序号正则的分类作用",
+            "理解 LaTeX 公式如何被解析为 InlineExpression"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "块合并器",
+            "可合并判定",
+            "正则分类"
+          ],
+          "order": 2,
+          "practice_task": "在 jointer.py 中找到处理表格标题与脚注编号的正则，构造五段示例文本（普通段、表格标题、脚注、断句续行、公式行），写单元测试验证它们分别走向哪个分支（可参考 tests/test_jointer.py 与 tests/test_punctuation.py 的写法）。",
+          "source_files": [
+            "pdf_craft/extractor/chapter/jointer.py",
+            "pdf_craft/extractor/chapter/mergeable.py",
+            "pdf_craft/extractor/chapter/reading_serials.py"
+          ],
+          "title": "Jointer：跨页文本块的合并",
+          "topic": "解读 Jointer 如何把多页 body_layouts 合并成连续文本块，涉及 mergeable 判定、阅读序号切分与表格/脚注/公式识别正则。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-chapter-generation-flow.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "理解目录条目如何触发新章节的切分",
+            "理解无目录前内容归入 chapter_head.xml 的规则",
+            "理解 analyse_chapter_internal_levels 对章内标题层级的推断"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "章节切分循环",
+            "前置章节处理",
+            "章内层级分析"
+          ],
+          "order": 3,
+          "practice_task": "写脚本统计一个提取产物中 chapter_*.xml 的数量与每个文件的 layouts 数量，找出 chapter_head.xml（如存在）包含的内容；再修改 toc.xml 删除某个二级标题条目后重新生成章节文件，观察章节边界变化。",
+          "source_files": [
+            "pdf_craft/extractor/chapter/generation.py",
+            "pdf_craft/extractor/chapter/analyse_level.py"
+          ],
+          "title": "章节生成流程：从目录到 chapter_N.xml",
+          "topic": "精读 generate_chapter_files：按目录条目切分章节、生成 chapter_head/chapter_N.xml，并在写盘前做标点归一化与章内层级分析。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "filename": "u5-l4-references-and-punctuation.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "理解脚注 Reference 与正文 Mark 的对应机制",
+            "理解标点归一化对中英文混排的处理",
+            "理解引用布局为何不写入正文而挂到 references"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "引用收集",
+            "标点归一化",
+            "标记匹配"
+          ],
+          "order": 4,
+          "practice_task": "用 tests/assets/citation.pdf 或含脚注的 PDF 做一次提取，在 chapter_N.xml 中找到一个 reference 节点并在正文里找到对应 mark；再阅读 punctuation.py，写两三个断言测试验证 normalize_punctuation_in_chapter 对中英标点的归一化行为。",
+          "source_files": [
+            "pdf_craft/extractor/chapter/reference.py",
+            "pdf_craft/extractor/chapter/mark.py",
+            "pdf_craft/extractor/chapter/punctuation.py"
+          ],
+          "title": "脚注引用与标点归一化",
+          "topic": "解读 References 生成器如何把脚注区文本关联为正文引用，以及 normalize_punctuation_in_chapter 对章节标点的统一处理。"
+        }
+      ],
+      "order": 5,
+      "title": "章节生成"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u6-l1-document-package.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "掌握 DocumentPackage 的目录约定与校验规则",
+            "理解 document.json 的 schema 与 page_pixel_sizes 用途",
+            "理解包作为提取器与渲染器之间稳定契约的意义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "包结构",
+            "元数据 schema",
+            "校验逻辑"
+          ],
+          "order": 1,
+          "practice_task": "写脚本用 DocumentPackage.from_path 加载一个提取产物并调用 validate；再手工删除 assets 目录验证报错信息；最后读取 page_pixel_sizes()，解释这些数据在后续 PDF 回写时为什么必需。",
+          "source_files": [
+            "pdf_craft/document/package.py",
+            "pdf_craft/document/__init__.py"
+          ],
+          "title": "DocumentPackage：中间产物契约",
+          "topic": "解读 DocumentPackage 的目录结构约定（chapters/、assets/、toc.xml、cover.png、document.json）、校验逻辑与页面几何元数据。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-markdown-paragraph-safety.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "理解 OCR 输出中的 HTML 片段为何需要白名单过滤",
+            "掌握 HTMLTag 泛型容器的设计意图",
+            "理解 GFM tagfilter 与属性白名单的过滤规则"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "标签解析器",
+            "白名单过滤",
+            "HTMLTag 容器"
+          ],
+          "order": 2,
+          "practice_task": "参考 tests/test_parser.py，构造含 script 标签、注释、onerror 属性、允许的 table 标签的 Markdown 字符串，调用 parse_raw_markdown 并断言：危险构造被移除或转义、table 保留为 HTMLTag 对象。",
+          "source_files": [
+            "pdf_craft/markdown/paragraph/parser.py",
+            "pdf_craft/markdown/paragraph/tags.py",
+            "pdf_craft/markdown/paragraph/types.py"
+          ],
+          "title": "Markdown 段落模型与 HTML 安全过滤",
+          "topic": "解读 parse_raw_markdown 如何按 CommonMark/GFM 规则解析 HTML 标签、按 GitHub 白名单过滤并把结果表示为字符串与 HTMLTag 混合列表。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l3-markdown-renderer.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "理解章节 XML 到 Markdown 的渲染顺序",
+            "理解表格转 Markdown 表格的处理细节",
+            "理解 assets_path 对图片链接的影响"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "渲染器封装",
+            "表格渲染",
+            "布局排版"
+          ],
+          "order": 3,
+          "practice_task": "用 MarkdownRenderer().render 直接渲染一个已提取的 DocumentPackage，指定不同的 assets_path 生成两份 Markdown，对比图片相对链接差异；再参考 tests/test_table_rendering.py 构造含表格的章节验证表格输出格式。",
+          "source_files": [
+            "pdf_craft/renderer/markdown/renderer.py",
+            "pdf_craft/markdown/render/render.py",
+            "pdf_craft/markdown/render/table.py",
+            "pdf_craft/markdown/render/layouts.py"
+          ],
+          "title": "Markdown 渲染器",
+          "topic": "解读 MarkdownRenderer 与 render_markdown_file：章节 XML 如何变成 Markdown 文件，表格、布局与资源路径如何处理。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "filename": "u6-l4-epub-renderer.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "掌握 convert_pdf_to_epub 的 book_meta、lan、table_render、latex_render 参数",
+            "理解 EPUB 渲染为何必须有 toc.xml",
+            "理解 LaTeX 公式在 EPUB 中的多种呈现方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "EPUB 生成",
+            "目录集合",
+            "公式转换"
+          ],
+          "order": 4,
+          "practice_task": "对同一 DocumentPackage 分别以 LaTeXRender.MATHML 与其他选项渲染两个 EPUB，用 unzip -l 检查包内文件差异；再用 book_meta 显式指定书名作者对比 PDF 元数据自动提取的结果。",
+          "source_files": [
+            "pdf_craft/renderer/epub/renderer.py",
+            "pdf_craft/renderer/epub/render.py",
+            "pdf_craft/renderer/epub/toc_collection.py",
+            "pdf_craft/renderer/epub/latex_to_text.py"
+          ],
+          "title": "EPUB 渲染器",
+          "topic": "解读 EpubRenderer：基于 epub-generator 生成 EPUB，涵盖书籍元数据、目录集合、语言选项、表格与 LaTeX 公式的渲染策略。"
+        }
+      ],
+      "order": 6,
+      "title": "文档包与渲染"
+    },
+    {
+      "id": "u7",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u7-l1-transformer-protocols.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "区分 ChapterTransformer 与 PackageTransformer 两种扩展点",
+            "理解 ChapterPackageTransformer 复制再改写的实现",
+            "掌握 TranslationStep 把章节转换器接入转换流程的用法"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "转换器协议",
+            "包级实现",
+            "步骤包装"
+          ],
+          "order": 1,
+          "practice_task": "实现一个 ChapterTransformer：把每章所有文本块末尾追加标记字符串（或做简单替换），包装成 TranslationStep 传给 convert_pdf_to_markdown，验证输出 Markdown 已被改写且原包未被破坏。",
+          "source_files": [
+            "pdf_craft/transformer/package.py",
+            "pdf_craft/transformer/protocol.py",
+            "pdf_craft/transformer/chapter_xml.py",
+            "pdf_craft/craft.py"
+          ],
+          "title": "转换器协议：PackageTransformer 与 ChapterTransformer",
+          "topic": "解读 PackageTransformer/ChapterTransformer 协议、ChapterPackageTransformer 的复制-改写实现，以及 TranslationStep 如何把章节级转换器接入 convert_pdf_to_* 流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l2-xml-translator-core.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "掌握 TranslationTask 与 SubmitKind 的语义",
+            "理解翻译与回填使用两个 LLM 运行时的设计",
+            "理解 jinja 提示词模板如何注入目标语言与用户提示"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "任务模型",
+            "翻译执行器",
+            "提示词模板"
+          ],
+          "order": 2,
+          "practice_task": "阅读 data/translate.jinja 与 data/fill.jinja，用 jinja2 手动渲染一份提示词（传入目标语言与示例 XML 片段）；再追踪 translate_elements 的调用点，写出 XMLTranslator 从任务输入到提交输出的五步流程说明。",
+          "source_files": [
+            "pdf_craft/transformer/xml_translator/xml_translator/translator.py",
+            "pdf_craft/transformer/xml_translator/template.py",
+            "pdf_craft/transformer/xml_translator/data/translate.jinja",
+            "pdf_craft/transformer/xml_translator/data/fill.jinja"
+          ],
+          "title": "XMLTranslator 核心：翻译任务的编排",
+          "topic": "精读 XMLTranslator：TranslationTask、translate_elements 生成器流程、双 LLM（translation_llm 与 fill_llm）运行时以及 jinja 提示词模板。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "filename": "u7-l3-segments-and-serials.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "理解文本/内联/块三类片段的划分",
+            "理解按 token 分数上限进行分组的策略",
+            "理解序列切分如何避免把标签拆散"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "片段类型",
+            "分组策略",
+            "序列切分"
+          ],
+          "order": 3,
+          "practice_task": "构造一段含 <b>、<i> 与公式的 XML 文本，调用序列切分相关函数（可参考 tests/ 中相关测试的组织方式自建用例），观察切分边界总落在标签之外；再调整 max_group_score 观察组大小变化。",
+          "source_files": [
+            "pdf_craft/transformer/xml_translator/segment/inline_segment.py",
+            "pdf_craft/transformer/xml_translator/segment/block_segment.py",
+            "pdf_craft/transformer/xml_translator/serial/splitter.py",
+            "pdf_craft/transformer/xml_translator/serial/chunk.py"
+          ],
+          "title": "文本片段与序列切分",
+          "topic": "解读 TextSegment/InlineSegment/BlockSegment 片段模型与 serial 包的切分逻辑：如何把 XML 元素按 token 预算切成可独立翻译的组。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "filename": "u7-l4-friendly-xml-and-stream-mapper.md",
+          "id": "u7-l4",
+          "learning_goals": [
+            "理解 friendly 编码如何保证 LLM 输出可解析",
+            "理解流式映射如何把翻译结果回填到原文",
+            "理解并发度对翻译吞吐的影响"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "友好编码",
+            "流式映射",
+            "并发控制"
+          ],
+          "order": 4,
+          "practice_task": "写脚本对一个含三种内联标记的 XML 元素做 encode_friendly→人工改写→decode_friendly 的往返实验，验证结构不丢失；再阅读 stream_mapper.py 与 concurrency.py，说明并发请求与结果回填的顺序保证。",
+          "source_files": [
+            "pdf_craft/transformer/xml_translator/xml/friendly/encoder.py",
+            "pdf_craft/transformer/xml_translator/xml/friendly/decoder.py",
+            "pdf_craft/transformer/xml_translator/xml_translator/stream_mapper.py",
+            "pdf_craft/transformer/xml_translator/xml_translator/concurrency.py"
+          ],
+          "title": "友好 XML 编解码与流式映射",
+          "topic": "解读 friendly XML 编码器/解码器如何把结构化 XML 变成 LLM 友好文本再还原，以及 XMLStreamMapper 如何把译文片段映射回原文元素。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l4"
+          ],
+          "filename": "u7-l5-scoring-and-repair.md",
+          "id": "u7-l5",
+          "learning_goals": [
+            "理解译文质量评分的启发式维度",
+            "理解爬山法在修复失败译文时的迭代策略",
+            "理解 FillFailedEvent 与最终 submit 阶段的保证"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "质量评分",
+            "爬山修复",
+            "提交策略"
+          ],
+          "order": 5,
+          "practice_task": "注册 on_fill_failed 回调运行一次 EPUB 翻译（小文件即可），收集 FillFailedEvent 中的错误信息分类统计；再阅读 hill_climbing.py，用 150 字解释「每轮只保留更优解」如何避免修复震荡。",
+          "source_files": [
+            "pdf_craft/transformer/xml_translator/xml_translator/score.py",
+            "pdf_craft/transformer/xml_translator/xml_translator/hill_climbing.py",
+            "pdf_craft/transformer/xml_translator/xml_translator/validation.py",
+            "pdf_craft/transformer/xml_translator/xml_translator/submitter.py"
+          ],
+          "title": "评分、爬山修复与提交策略",
+          "topic": "解读评分器、爬山修复、校验与提交器：翻译结果如何被打分、失败译文如何迭代修复、REPLACE 与 APPEND 两种提交方式如何落地。"
+        }
+      ],
+      "order": 7,
+      "title": "转换器与 XML 翻译引擎"
+    },
+    {
+      "id": "u8",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u8-l1-llm-runtime-and-retry.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "理解 LLM 声明式配置与运行时执行的分离",
+            "掌握 retry_times 与 retry_interval_seconds 的重试语义",
+            "理解协议版本号 cache_seed_content 对缓存隔离的作用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "运行时封装",
+            "重试与超时",
+            "缓存种子"
+          ],
+          "order": 1,
+          "practice_task": "构造一个指向本地 mock 服务的 LLM 配置（可用简单 http 服务器返回固定补全），设置 retry_times=3，先让服务返回 500 两次再返回成功，观察重试日志与最终成功；再参考 tests/test_llm_runtime.py 补充一个超时用例。",
+          "source_files": [
+            "pdf_craft/llm/core.py",
+            "pdf_craft/llm/runtime.py",
+            "pdf_craft/llm/error.py"
+          ],
+          "title": "LLM 运行时：请求、重试与缓存",
+          "topic": "解读 LLMRuntime 如何基于 openai 客户端执行补全请求，涵盖重试间隔、超时、缓存种子与协议版本。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "filename": "u8-l2-repair-loop-protocol.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "掌握 ResponseProtocol 四种判定结果的语义",
+            "理解带反馈历史的重试如何提升结构化输出质量",
+            "理解 guaranteed 与 increasable 两种上层封装的适用场景"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "修复循环",
+            "响应协议",
+            "保证式执行"
+          ],
+          "order": 2,
+          "practice_task": "参考 tests/test_llm_loop.py 与 tests/test_llm_guaranteed.py，实现一个 ResponseProtocol：校验 LLM 返回是否为合法 JSON（用 json-repair 思路），非法时返回 ProtocolRetry 并附带错误反馈，写单元测试验证第二次请求包含反馈消息。",
+          "source_files": [
+            "pdf_craft/llm/loop.py",
+            "pdf_craft/llm/guaranteed.py",
+            "pdf_craft/llm/increasable.py",
+            "tests/test_llm_loop.py"
+          ],
+          "title": "修复循环：协议驱动的重试",
+          "topic": "精读 run_repair_loop 与 ResponseProtocol：Success/Retry/Partial/Failure 四种结果、反馈历史机制，以及 guaranteed/increasable 的上层包装。"
+        }
+      ],
+      "order": 8,
+      "title": "LLM 基础设施"
+    },
+    {
+      "id": "u9",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "filename": "u9-l1-epub-translation-workflow.md",
+          "id": "u9-l1",
+          "learning_goals": [
+            "掌握 translate() 的参数：submit、并发、重试、进度与失败回调",
+            "理解 TOC/元数据/章节三者 5%/5%/90% 的进度权重",
+            "理解 mimetype 必须首个迁移的 ZIP 细节"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "翻译入口",
+            "进度权重",
+            "双 LLM 配置"
+          ],
+          "order": 1,
+          "practice_task": "写脚本调用 PDFCraft().translate_epub 对一份小 EPUB 做翻译（可先用占位 translator LLM 或 mock），注册 on_progress 打印进度百分比；分别用 SubmitKind.REPLACE 与 APPEND_TEXT 各跑一次，用 unzip 对比两种产物某章 HTML 的结构差异。",
+          "source_files": [
+            "pdf_craft/pipeline/epub/translation/translator.py",
+            "pdf_craft/pipeline/epub/__init__.py",
+            "docs/en/EPUB_TRANSLATION.md"
+          ],
+          "title": "EPUB 翻译工作流：translate_epub 全流程",
+          "topic": "精读 pipeline/epub/translation/translator.py 的 translate 主函数：ZIP 迁移、目录/元数据/章节三类任务生成、进度权重与逐元素写回。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "filename": "u9-l2-epub-adapter-and-text-fixes.md",
+          "id": "u9-l2",
+          "learning_goals": [
+            "理解 EPUB 容器格式：spine、ncx/nav 目录、opf 元数据",
+            "理解法语引号 unwrap 与标点修正对中文排版的意义",
+            "理解 interrupter 钩子对源文/译文片段的干预点"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "EPUB 适配层",
+            "标点修正",
+            "片段拦截器"
+          ],
+          "order": 2,
+          "practice_task": "写脚本用 adapter 的 Zip 与 search_spine_paths 列出一个 EPUB 的全部 spine 文档路径；再对 unwrap_french_quotes 写三个断言测试（含《》包裹标题、正文、嵌套三种情况），说明它为何只对目录和元数据生效。",
+          "source_files": [
+            "pdf_craft/pipeline/epub/adapter/zip.py",
+            "pdf_craft/pipeline/epub/adapter/spines.py",
+            "pdf_craft/pipeline/epub/translation/punctuation.py",
+            "pdf_craft/pipeline/epub/translation/xml_interrupter.py"
+          ],
+          "title": "EPUB 适配层：ZIP、spine 与文本修正",
+          "topic": "解读 EPUB 适配层（Zip、spine 检索、目录与元数据读写）以及法语引号解包、XMLInterrupter 片段拦截等文本修正机制。"
+        }
+      ],
+      "order": 9,
+      "title": "EPUB 翻译管线"
+    },
+    {
+      "id": "u10",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u10-l1-pdf-translation-pipeline.md",
+          "id": "u10-l1",
+          "learning_goals": [
+            "理解 translate 与 patch 两个方法各自的输入约定",
+            "理解 _to_patch_text 为何保留公式定界符与引用标记",
+            "理解页几何缺失时如何用 PDF handler 渲染兜底"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "替换收集",
+            "文本序列化",
+            "页几何兜底"
+          ],
+          "order": 1,
+          "practice_task": "写脚本：craft.extract_pdf 得到包，再用 craft.translate_pdf 传入一个把英文替换为中文的简单 translator 函数（可用硬编码字典），生成翻译 PDF；对照源码说明每个 PDFReplacement 的 bbox 与 page_pixel_size 从何而来。",
+          "source_files": [
+            "pdf_craft/pipeline/pdf/pipeline.py",
+            "pdf_craft/craft.py"
+          ],
+          "title": "PDF 翻译管线：从包到替换列表",
+          "topic": "精读 PDFTranslationPipeline：遍历章节块、调用文本转换器、生成 PDFReplacement 列表，translate 与 patch 两种入口的差异。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "filename": "u10-l2-pdf-patcher.md",
+          "id": "u10-l2",
+          "learning_goals": [
+            "理解白块覆盖 + 透明叠层的回写方案",
+            "理解预检（preflight）「先全部排版再落盘」的意义",
+            "理解按 reading_order 排序替换项的作用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "叠层绘制",
+            "预检机制",
+            "跳过记录"
+          ],
+          "order": 2,
+          "practice_task": "用 patch_pdf_with_package 对一份原 PDF 与已提取包生成回写 PDF；故意在包中加一个超长文本块（远超原区域），观察该块进入 skipped_replacements 而非强行绘制；再用 pypdf 检查输出页数与源 PDF 一致。",
+          "source_files": [
+            "pdf_craft/pipeline/pdf/patcher.py"
+          ],
+          "title": "PDFPatcher：pypdf + reportlab 叠层回写",
+          "topic": "解读 PDFPatcher：用 pypdf 保留原页面、用 reportlab 画白块与透明文字叠层，预检所有页排版后才落盘，并记录跳过的溢出替换。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u10-l2"
+          ],
+          "filename": "u10-l3-text-layout-fitting.md",
+          "id": "u10-l3",
+          "learning_goals": [
+            "理解字号在 min 与 max 之间自适应收缩的策略",
+            "理解 PatchTextOptions 各字段对排版的影响",
+            "理解阅读顺序如何影响同一页多个文本块的排布"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "盒式排版",
+            "自适应字号",
+            "字体选项"
+          ],
+          "order": 3,
+          "practice_task": "用不同 PatchTextOptions（缩小 min_font_size、换 font_name）各生成一次回写 PDF，对比同一文本块的视觉效果；参考 tests/test_pdf_patcher.py 与 tests/test_pdf_text_layout.py 为「文本恰好放不下时抛错」的分支补一个测试。",
+          "source_files": [
+            "pdf_craft/pipeline/pdf/text_layout.py",
+            "pdf_craft/pipeline/pdf/patcher.py",
+            "tests/test_pdf_text_layout.py"
+          ],
+          "title": "BoxTextLayout：字号自适应与排版",
+          "topic": "解读 BoxTextLayout 与 PatchTextOptions：如何把替换文本按 bbox 自适应缩放字号排入白块，以及中文渲染的处理。"
+        }
+      ],
+      "order": 10,
+      "title": "PDF 翻译与回写"
+    },
+    {
+      "id": "u11",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u11-l1-pdf-craft-tool-cli.md",
+          "id": "u11-l1",
+          "learning_goals": [
+            "掌握 pdf/extract、pdf/convert、pdf/translate、package、epub 等子命令",
+            "理解 runtime 如何从环境变量构造 OCR 与 LLM 配置",
+            "理解 run 目录对多次实验结果的管理"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "子命令解析",
+            "环境变量装配",
+            "运行目录"
+          ],
+          "order": 1,
+          "practice_task": "复制 .env.template 配置好凭据后，用 python -m pdf_craft_tool pdf convert 把 tests/assets 下任一 PDF 转成 Markdown 与 EPUB 各一次，检查默认输出根目录生成的 run 目录结构；再用 package render 对已提取的包重复渲染。",
+          "source_files": [
+            "pdf_craft_tool/cli.py",
+            "pdf_craft_tool/runtime.py",
+            "pdf_craft_tool/paths.py",
+            ".env.template"
+          ],
+          "title": "仓库本地 CLI：pdf_craft_tool",
+          "topic": "解读 pdf_craft_tool 的 argparse 子命令树（pdf extract/convert/translate、package render/translate/patch-pdf、epub、smoke）与基于环境变量的运行时装配。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u11-l1"
+          ],
+          "filename": "u11-l2-testing-and-boundaries.md",
+          "id": "u11-l2",
+          "learning_goals": [
+            "掌握用 JSON 矩阵驱动多后端冒烟测试的方法",
+            "理解 test_module_boundaries/test_composable_boundaries 的架构约束作用",
+            "能为新功能补充对应层级的测试"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "冒烟矩阵",
+            "单元测试",
+            "边界测试"
+          ],
+          "order": 2,
+          "practice_task": "阅读 tests/smoke/minimal.json 后复制一份自定义矩阵（改 OCR 后端与输出格式），用 pdf_craft_tool smoke 跑通；再从 tests/test_jointer.py 或 test_toc_text.py 中挑一个纯函数测试，模仿其为 jointer.py 中一个未覆盖的正则分支补写测试。",
+          "source_files": [
+            "tests/test_smoke.py",
+            "tests/smoke/minimal.json",
+            "tests/test_module_boundaries.py",
+            "tests/test_composable_boundaries.py"
+          ],
+          "title": "测试体系：单元测试与冒烟矩阵",
+          "topic": "梳理 tests/ 单元测试（jointer、punctuation、toc、llm loop、patcher 等）与 pdf_craft_tool/smoke 资产矩阵，以及模块边界与组合边界测试。"
+        }
+      ],
+      "order": 11,
+      "title": "工程化：CLI 与测试"
+    },
+    {
+      "id": "u12",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1",
+            "u7-l2",
+            "u11-l2"
+          ],
+          "filename": "u12-l1-custom-transformer-capstone.md",
+          "id": "u12-l1",
+          "learning_goals": [
+            "独立实现 PackageTransformer 并接入 convert_pdf_to_* 流程",
+            "复用 XMLTranslator 与修复循环构建自定义翻译步骤",
+            "总结 pdf-craft 分层架构的取舍与可扩展点"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "自定义转换器",
+            "步骤组合",
+            "架构复盘"
+          ],
+          "order": 1,
+          "practice_task": "综合实战：实现一个 PackageTransformer（如「为每章生成摘要并写入章节开头」或「基于 XMLTranslator 的领域术语表翻译步骤」），包装为 TranslationStep 接入 convert_pdf_to_epub 产出成品 EPUB；撰写一页笔记说明你的扩展点选在包级而非章级的原因，并对照 craft.py 的 _apply_steps 分析多步骤顺序执行的数据流。",
+          "source_files": [
+            "pdf_craft/craft.py",
+            "pdf_craft/transformer/package.py",
+            "pdf_craft/transformer/xml_translator/xml_translator/translator.py",
+            "docs/en/API_REFERENCE.md"
+          ],
+          "title": "综合实战：编写自定义转换步骤",
+          "topic": "作为收官实践：结合转换器协议、LLM 基础设施与渲染管线，实现一个自定义 PackageTransformer/TranslationStep，并复盘整体架构。"
+        }
+      ],
+      "order": 12,
+      "title": "综合实战"
+    }
+  ]
+}
