@@ -1,14 +1,14 @@
 {
-  "head": "2c4ab6cf9aae89b54286196c8d6c576c715e2f45",
+  "head": "7feb2b81be941e184314b029c7a43b8a221b5de8",
   "project": "dynamo",
-  "rationale": "Dynamo 是 Rust 核心 + Python 扩展层 + Kubernetes 部署层的三层大型仓库，学习路线按『先跑通、再读运行时、后攻高级机制』设计：U1-U2 让读者零基础跑起 hello world 并理解仓库分层；U3-U5 沿一条请求的真实路径（DistributedRuntime → lib/llm HttpService → Python frontend）讲核心调用链；U6-U8 覆盖 Dynamo 的招牌能力——KV 感知路由、P/D 分离式服务与三大引擎后端接入；U9-U12 进入专家层：KVBM 多层 KV 缓存、K8s Operator 与 DGD、Planner 自动扩缩，最后以可观测、测试与容错收尾。每篇讲义只讲一个主题、引用真实存在的源码文件，并给出可操作的代码实践（优先用 mocker 和 sample 后端，避免读者必须有 GPU）。",
+  "rationale": "增量更新：本次 diff（2c4ab6c..7feb2b8）核心变化有四类——(1) runtime/pyo3 桥接重构（RuntimeConfig 拆出 tokio_builder 并在 Python 扩展模块初始化时交给 pyo3_async_runtimes），影响已写好的 u3-l1 与 u2-l2，属局部逻辑变化标 update；(2) ext-proc 选点服务改为直接从 WorkerSelectionPolicyRegistry 构造（runner/selector/service/core 大改），尚未成文的 u6-l5、u10-l3 仍为 new 但补充了源码范围；(3) vLLM 自定义视觉编码器新增 Qwen3.5 示例与文档迁移，属新机制，在 u8 新增一篇 custom encoder 讲义；(4) 媒体加载器 SSRF 加固与 OpenAI delta 生成器状态共享，补充进 u4-l3、u4-l2 的源码范围。u1/u2 其余已写成讲义与 u3-l2 引用的源码均无变化，标 keep；其余未成文讲义保持 new，整体三层学习路线不变。",
   "units": [
     {
       "id": "u1",
       "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-positioning.md",
           "id": "u1-l1",
@@ -34,7 +34,7 @@
           "topic": "项目定位：Dynamo 是推理引擎之上的编排层，把 GPU 集群变成一个协同推理系统；介绍请求面/控制面/状态面三面架构与核心能力（分离式服务、KV 感知路由、KVBM、Planner）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -61,7 +61,7 @@
           "topic": "用容器或 PyPI 安装方式跑通最小服务：python -m dynamo.frontend 与一个 worker 进程，curl 发送 OpenAI 兼容请求；同时认识 agg 与 disagg 两种启动脚本。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -89,7 +89,7 @@
           "topic": "读懂仓库地图：lib/ 的 Rust workspace（runtime、llm、kv-router、kvbm-* 等）、components/ 的 Python 包（frontend、router、planner、各后端）、deploy/ 的 Operator 与 Helm，以及 examples/recipes/tests 的分工。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u1-l3"
           ],
@@ -104,7 +104,8 @@
           "minimal_modules": [
             "maturin",
             "hatch_build.py",
-            "container templates"
+            "container templates",
+            "container deps overrides"
           ],
           "order": 4,
           "practice_task": "从源码完成构建后，在 Python 里 import dynamo.runtime 并打印 DistributedRuntime，再用 cargo build -p dynamo-runtime 验证 Rust 侧可单独编译，记录两个构建产物分别是什么。",
@@ -113,10 +114,11 @@
             "hatch_build.py",
             "lib/bindings/python/rust/lib.rs",
             "container/Dockerfile.template",
+            "container/deps/overrides.frontend.txt",
             "container/render.py"
           ],
           "title": "从源码构建与开发环境",
-          "topic": "开发环境搭建：uv + maturin 构建 lib/bindings/python 生成 _core 扩展、hatch 打包 ai-dynamo wheel、cargo 构建整个 workspace，以及容器镜像模板体系。"
+          "topic": "开发环境搭建：uv + maturin 构建 lib/bindings/python 生成 _core 扩展、hatch 打包 ai-dynamo wheel、cargo 构建整个 workspace，以及容器镜像模板体系（含 frontend/planner 的依赖 overrides 固定机制）。"
         }
       ],
       "order": 1,
@@ -127,7 +129,7 @@
       "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -155,7 +157,7 @@
           "topic": "通过 examples/custom_backend/hello_world 掌握 Python 侧核心 API：DistributedRuntime、namespace、endpoint 注册与 Client 调用，理解一个 worker 的最小骨架。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u2-l1",
             "u1-l4"
@@ -170,10 +172,11 @@
           "level": "beginner",
           "minimal_modules": [
             "_core pymodule",
+            "pyo3 async runtime init",
             "dynamo.llm 包装层"
           ],
           "order": 2,
-          "practice_task": "在 rust/lib.rs 中找到 DistributedRuntime 与 Endpoint 的 #[pyclass] 定义位置，写一段笔记说明 make_engine/EntrypointArgs 是从哪个 Rust 模块导出给 dynamo.llm 的。",
+          "practice_task": "在 rust/lib.rs 中找到 DistributedRuntime 与 Endpoint 的 #[pyclass] 定义位置，写一段笔记说明模块初始化时如何用 RuntimeConfig::tokio_builder() 为 pyo3 桥接限定 Tokio 运行时规模，以及 make_engine/EntrypointArgs 是从哪个 Rust 模块导出给 dynamo.llm 的。",
           "source_files": [
             "lib/bindings/python/rust/lib.rs",
             "lib/bindings/python/rust/engine.rs",
@@ -181,10 +184,10 @@
             "lib/bindings/python/src/dynamo/llm/__init__.py"
           ],
           "title": "PyO3 绑定：Rust 如何暴露给 Python",
-          "topic": "拆解 _core 扩展模块：rust/lib.rs 如何注册 PyO3 类（DistributedRuntime、Endpoint、Client、Context、PyAsyncRequestStream），Python 包装层 dynamo.runtime / dynamo.llm 如何再分发这些能力。"
+          "topic": "拆解 _core 扩展模块：rust/lib.rs 如何注册 PyO3 类（DistributedRuntime、Endpoint、Client、Context、PyAsyncRequestStream）、模块初始化时如何把配置好的 Tokio builder 交给 pyo3_async_runtimes（DYN_RUNTIME_* 环境变量由此生效），Python 包装层 dynamo.runtime / dynamo.llm 如何再分发这些能力。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -220,7 +223,7 @@
       "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u1-l3"
           ],
@@ -236,22 +239,24 @@
             "Runtime",
             "DistributedRuntime",
             "DiscoveryBackend",
-            "RuntimeConfig"
+            "RuntimeConfig",
+            "tokio_builder"
           ],
           "order": 1,
-          "practice_task": "运行 lib/runtime/examples/hello_world 的 server + client，然后把 DYNAMO_* 环境变量改掉（如 namespace），观察 client 找不到服务时的报错路径。",
+          "practice_task": "运行 lib/runtime/examples/hello_world 的 server + client，然后把 DYNAMO_* 环境变量改掉（如 DYN_RUNTIME_NUM_WORKER_THREADS、namespace），观察 client 找不到服务时与线程数变化时的报错路径。",
           "source_files": [
             "lib/runtime/src/runtime.rs",
             "lib/runtime/src/distributed.rs",
             "lib/runtime/src/config.rs",
+            "lib/runtime/src/worker.rs",
             "lib/runtime/examples/hello_world/src/bin/server.rs",
             "lib/runtime/examples/hello_world/src/bin/client.rs"
           ],
           "title": "一切的起点：Runtime 与 DistributedRuntime",
-          "topic": "lib/runtime 核心入口：Runtime 包装 tokio 多线程运行时，DistributedRuntime 提供 namespace/component 层级与三种 DiscoveryBackend（Etcd/Kube/Mock）；config.rs 定义 RuntimeConfig 与环境变量配置。"
+          "topic": "lib/runtime 核心入口：Runtime 包装 tokio 多线程运行时（config.rs 现在通过 tokio_builder() 暴露 Tokio builder，pyo3 桥接与本地 create_runtime 共用它），DistributedRuntime 提供 namespace/component 层级与三种 DiscoveryBackend（Etcd/Kube/Mock）；config.rs 定义 RuntimeConfig 与环境变量配置。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -283,7 +288,7 @@
         {
           "action": "new",
           "depends_on": [
-            "u3-l2"
+            "u3-l1"
           ],
           "filename": "u3-l3-async-engine.md",
           "id": "u3-l3",
@@ -425,17 +430,19 @@
           "minimal_modules": [
             "HttpService",
             "InflightPermit",
-            "openai/generate handlers"
+            "openai/generate handlers",
+            "delta serialization"
           ],
           "order": 2,
           "practice_task": "给本地服务施加并发压力（如 200 并发 curl），观察 InflightPermit 限流行为，记录被拒绝/排队的请求数并解释源码中的判断逻辑。",
           "source_files": [
             "lib/llm/src/http/service/service_v2.rs",
             "lib/llm/src/http/service/openai.rs",
-            "lib/llm/src/http/service/generate.rs"
+            "lib/llm/src/http/service/generate.rs",
+            "lib/llm/src/protocols/openai/delta_common.rs"
           ],
           "title": "HttpService：OpenAI 兼容 HTTP 服务",
-          "topic": "service_v2.rs 的 HttpService/HttpServiceConfig/State 与 InflightPermit 并发控制，openai.rs/generate.rs 处理 OpenAI 兼容端点与流式生成。"
+          "topic": "service_v2.rs 的 HttpService/HttpServiceConfig/State 与 InflightPermit 并发控制，openai.rs/generate.rs 处理 OpenAI 兼容端点与流式生成；delta_common.rs 与 chat/completions 的 delta.rs 共享流式增量序列化器的生成器状态。"
         },
         {
           "action": "new",
@@ -446,26 +453,29 @@
           "id": "u4-l3",
           "learning_goals": [
             "追踪从文本到 token 块的转换过程",
-            "解释媒体（图片/视频）请求的 token 计数方式",
+            "解释媒体（图片/视频）请求的 token 计数方式与 URL 抓取的 SSRF 防护",
             "理解 block 化的 token 表示对 KV 路由的意义"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "OpenAIPreprocessor",
+            "media loader 与 fetch policy",
             "LocalModel",
             "token blocks",
             "block hashing"
           ],
           "order": 3,
-          "practice_task": "写一个离线脚本：加载任一分词器，把三条不同 prompt 转成 token 块并计算块哈希，验证相同前缀产生相同的前缀块序列。",
+          "practice_task": "写一个离线脚本：加载任一分词器，把三条不同 prompt 转成 token 块并计算块哈希，验证相同前缀产生相同的前缀块序列；再给一条带恶意内网图片 URL 的请求（本地 mock）观察 preprocessor 媒体加载层的拒绝路径。",
           "source_files": [
             "lib/llm/src/preprocessor.rs",
+            "lib/llm/src/preprocessor/media/loader.rs",
+            "components/src/dynamo/common/http/url_validator.py",
             "lib/llm/src/local_model.rs",
             "lib/tokens/src/tokens.rs",
             "lib/kv-hashing/src/block.rs"
           ],
           "title": "预处理与分词：OpenAIPreprocessor 与 LocalModel",
-          "topic": "请求进入引擎前的整形：preprocessor.rs 的 OpenAIPreprocessor 做模板/媒体计数/分词，local_model.rs 负责模型与 tokenizer 加载；结合 lib/tokens 与 lib/kv-hashing 理解 token 块与块哈希。"
+          "topic": "请求进入引擎前的整形：preprocessor.rs 的 OpenAIPreprocessor 做模板/媒体计数/分词，media/loader.rs 负责图片等媒体的抓取与解码（经 url_validator 做 SSRF 等安全策略拒绝），local_model.rs 负责模型与 tokenizer 加载；结合 lib/tokens 与 lib/kv-hashing 理解 token 块与块哈希。"
         },
         {
           "action": "new",
@@ -727,12 +737,14 @@
           "learning_goals": [
             "解释 filter-score-pick 三段式策略模型",
             "向 WorkerSelectionPolicyRegistry 注册自定义策略",
+            "说明 selection service 如何直接从 policy registry 构造（ext-proc 也复用同一注册表）",
             "打包并用 custom-policy example 验证插件加载"
           ],
           "level": "advanced",
           "minimal_modules": [
             "selection catalog",
             "policy_registry",
+            "selection service",
             "router-plugins catalog"
           ],
           "order": 5,
@@ -740,12 +752,13 @@
           "source_files": [
             "lib/kv-router/src/services/selection/catalog.rs",
             "lib/kv-router/src/services/selection/core/mod.rs",
+            "lib/kv-router/src/services/selection/service.rs",
             "lib/kv-router/src/services/selection/policy_registry.rs",
             "lib/router-plugins/catalog/src/lib.rs",
             "examples/router/custom-policy-example/simple-filter-score-pick/src/lib.rs"
           ],
           "title": "filter–score–pick 策略框架与自定义路由插件",
-          "topic": "可插拔路由策略：selection/catalog.rs 的目录式注册、core/mod.rs 的策略执行模型（过滤→打分→挑选）、policy_registry.rs 的注册表；lib/router-plugins/catalog 与 examples/router/custom-policy-example 演示如何写自己的策略。"
+          "topic": "可插拔路由策略：selection/catalog.rs 的目录式注册、core/mod.rs 的策略执行模型（过滤→打分→挑选）、service.rs 现在直接从 WorkerSelectionPolicyRegistry 构造选点服务（ext-proc 等外部消费者共用）；lib/router-plugins/catalog 与 examples/router/custom-policy-example 演示如何写自己的策略。"
         }
       ],
       "order": 6,
@@ -891,7 +904,7 @@
           "id": "u8-l2",
           "learning_goals": [
             "解释 SGLang disagg 的 bootstrap 寻址机制",
-            "说出 request_handlers 的多模态分类方式",
+            "说出 request_handlers 的多模态分类方式与 min_tokens 到 min_new_tokens 的参数映射",
             "对比 SGLang 与 vLLM 接入层的设计差异"
           ],
           "level": "intermediate",
@@ -899,18 +912,21 @@
             "sglang/main.py",
             "init_llm",
             "_disagg",
-            "handler_base"
+            "handler_base",
+            "_compat"
           ],
           "order": 2,
           "practice_task": "参照 handler_base.py 写一个新的最小 request handler（回显请求元数据），并让 SGLang 后端在分发时能选中它（可用单元测试验证分发逻辑）。",
           "source_files": [
             "components/src/dynamo/sglang/main.py",
             "components/src/dynamo/sglang/init_llm.py",
+            "components/src/dynamo/sglang/_compat.py",
             "components/src/dynamo/sglang/_disagg.py",
-            "components/src/dynamo/sglang/request_handlers/handler_base.py"
+            "components/src/dynamo/sglang/request_handlers/handler_base.py",
+            "components/src/dynamo/sglang/request_handlers/llm/decode_handler.py"
           ],
           "title": "SGLang 后端接入",
-          "topic": "dynamo.sglang 的接入方式：main.py worker() 入口、init_llm.py 等多模态初始化、_disagg.py 的 bootstrap 地址/预热逻辑、request_handlers/ 按模态分发的处理器体系。"
+          "topic": "dynamo.sglang 的接入方式：main.py worker() 入口、init_llm.py 等多模态初始化、_compat.py 处理 SGLang 0.5.18 版本差异、_disagg.py 的 bootstrap 地址/预热逻辑、request_handlers/ 按模态分发的处理器体系（decode_handler.py 做 min_tokens→min_new_tokens 映射）。"
         },
         {
           "action": "new",
@@ -970,6 +986,37 @@
           ],
           "title": "mocker 与 sidecar：无 GPU 的全链路与旁路接入",
           "topic": "测试与旁路接入两件武器：components mocker 用 aiconfigurator 性能模型模拟 worker（无 GPU 全链路），lib/mocker 是 Rust 全功能模拟引擎；lib/sidecar/* 则以独立进程方式把引擎接入 Dynamo。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "filename": "u8-l5-custom-vision-encoder.md",
+          "id": "u8-l5",
+          "learning_goals": [
+            "解释 custom encoder 如何把视觉编码从 vLLM 主进程拆到独立 worker",
+            "追踪 adapter/factory.py 如何按模型选择并构造编码器适配器",
+            "按 qwen3_5_vision_encoder.py 的模式注册一个自定义编码器并用单测验证"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "custom_encoder example",
+            "adapter factory",
+            "multimodal-serving docs"
+          ],
+          "order": 5,
+          "practice_task": "参照 qwen3_5_vision_encoder.py 与 adapter/factory.py 实现一个返回固定维度特征的自定义编码器并完成注册，运行 components/src/dynamo/vllm/tests/multimodal_utils/custom_encoder 下的相关单测验证适配器可被构造与调用。",
+          "source_files": [
+            "examples/custom_encoder/qwen3_5_vision_encoder.py",
+            "examples/custom_encoder/qwen_vision_encoder.py",
+            "examples/custom_encoder/launch/agg_qwen3_5_native.sh",
+            "components/src/dynamo/vllm/multimodal_utils/custom_encoder/adapter/factory.py",
+            "components/src/dynamo/vllm/multimodal_utils/custom_encoder/adapter/qwen3_vl.py",
+            "docs/fern/pages/use-cases/multimodal-serving/custom-vision-encoders.md"
+          ],
+          "title": "自定义视觉编码器：custom_encoder 扩展点",
+          "topic": "vLLM 多模态的自定义视觉编码器机制（本次新增 Qwen3.5 示例）：examples/custom_encoder 的独立编码 worker、components/src/dynamo/vllm/multimodal_utils/custom_encoder/adapter 的适配器工厂如何桥接不同模型的视觉塔，以及 chat 模板（templates/*.jinja）与启动脚本的配套方式。"
         }
       ],
       "order": 8,
@@ -1203,25 +1250,28 @@
           "learning_goals": [
             "解释 GAIE 拓扑下请求的完整路径",
             "说出 Rust ext-proc 与 Go EPP 的职责边界",
+            "说明 ext-proc 的选点服务现在如何直接从 WorkerSelectionPolicyRegistry 构造",
             "理解 dynamo_kv_scorer 如何复用 KV 路由打分"
           ],
           "level": "advanced",
           "minimal_modules": [
-            "ext-proc epp/picker",
+            "ext-proc runner/selector",
+            "policy registry 构造选点服务",
             "Go EPP",
             "dynamo_kv_scorer"
           ],
           "order": 3,
-          "practice_task": "对照源码画出 GAIE 模式一条请求的时序图（client → Gateway → EPP → ext-proc → frontend → worker），并标注 KV 打分发生在哪一跳。",
+          "practice_task": "对照源码画出 GAIE 模式一条请求的时序图（client → Gateway → EPP → ext-proc → frontend → worker），并标注 KV 打分发生在哪一跳、选点服务从哪个注册表构造。",
           "source_files": [
             "deploy/inference-gateway/ext-proc/src/bin/dynamo-ext-proc.rs",
+            "deploy/inference-gateway/ext-proc/src/runner.rs",
+            "deploy/inference-gateway/ext-proc/src/selector.rs",
             "deploy/inference-gateway/ext-proc/src/epp.rs",
             "deploy/inference-gateway/ext-proc/src/picker.rs",
-            "deploy/inference-gateway/epp/cmd/epp/main.go",
             "deploy/inference-gateway/epp/pkg/plugins/dynamo_kv_scorer/plugin.go"
           ],
           "title": "Inference Gateway：ext-proc 与 EPP",
-          "topic": "Gateway API 路由拓扑：Rust 写的 dynamo-ext-proc（Envoy ext_proc，含 epp.rs/picker.rs 的 KV 感知选点）+ Go 写的 EPP 及 dynamo_kv_scorer 插件。"
+          "topic": "Gateway API 路由拓扑：Rust 写的 dynamo-ext-proc（Envoy ext_proc，runner.rs/selector.rs 承载选点逻辑，选点服务直接从 WorkerSelectionPolicyRegistry 构造并与 kv-router 共用）+ Go 写的 EPP 及 dynamo_kv_scorer 插件。"
         },
         {
           "action": "new",
