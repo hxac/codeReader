@@ -1,0 +1,384 @@
+# u5-l3 流带宽与嵌入式版本的 auto_collect 变体
+
+## 1. 本讲目标
+
+u5-l1 讲了 datacenter 片外带宽线的 auto_collect 总体流程，u5-l2 拆了它的四个代码生成器。本讲把视野扩展到仓库里**另外三套 auto_collect 脚本族**：
+
+- `ubench/streaming_bandwidth/datacenter/auto_collect/`（流带宽 · 数据中心）
+- `ubench/offchip_bandwidth/embedded/auto_collect/`（片外带宽 · 嵌入式 ZCU104）
+- `ubench/streaming_bandwidth/embedded/auto_collect/`（流带宽 · 嵌入式 ZCU104）
+
+学完本讲，你应该能够：
+
+1. 说出流版参数集与片外带宽版的差异：**没有** `ACCESS_TYPE` 与 `MAX_BURST_LENGTH`，**新增**标量 `NUM_KERNEL`，并解释这些增删背后的物理原因（AXIS 流没有地址通道）。
+2. 解释嵌入式版 `MEMORY_TYPE` 为什么用 `PORT_NAMES`（`HP0`/`HPC0` 等 PS 端口名）替代 `BANK_NAME`/`BANK_FLAG`，以及频率为什么从 300MHz 降到 150MHz、落点从 Makefile 移到 `zcu104.cfg`。
+3. 归纳三套（共四份）auto_collect 共享的「config.py 参数空间 + generate_microbenchmarks.py 主循环 + 四个 `*_gen.py` 生成器」架构模式，并能据此读懂、乃至自己写出一套新变体。
+
+## 2. 前置知识
+
+阅读本讲前，你应当已经掌握（对应前置讲义）：
+
+- **u5-l1 / u5-l2**：auto_collect 的三层结构——`config.py` 定义参数空间，`generate_microbenchmarks.py` 用嵌套循环为每个参数组合生成一个五件套工程目录，四个 `*_gen.py` 各负责 Makefile / 连接配置 / 主机代码 / 内核代码；这些脚本是 **Python 2 语法**（裸 `print`），且不可重复执行（`os.mkdir` 已存在目录会抛错）。
+- **u4-l1**：流带宽微基准的运行时形态——`krnl_streamWrite` 与 `krnl_streamRead` 成对出现，数据经 `hls::stream<pkt>`（`ap_axiu`）片上直传，`ubench.ini` 用 `stream_connect=CU名.端口名:CU名.端口名` 在链接期焊死连线。
+- **u4-l3**：嵌入式平台差异——ZCU104 上 ARM 核与 PL 共享 PS 侧 DDR（统一内存），主机不做 bank 绑定；`sp=` 的目标由 DDR/HBM bank 名换成 PS 端口名 `HP0`–`HP3`、`HPC0`/`HPC1`；构建产物是 `sd_card.img` 而非 `make check` 直跑。
+
+两个本讲要反复用到的换算：
+
+- **payload 换算**：生成器把 `CONSECUTIVE_DATA_SIZE` 换算成主机 `payload` 循环边界时用的乘法是 \(\text{payload} = \text{size} \times 1024 / 4\)（int 个数），即**单位是 KB**。
+- **目录数连乘**：生成目录数等于各列表维度长度的连乘 \(\prod_i |D_i|\）；标量配置（如流版的 `NUM_KERNEL = 4`，注意不是 `[4]`）不进循环，不贡献维度。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+| --- | --- |
+| `ubench/streaming_bandwidth/datacenter/auto_collect/config.py` | 流版（数据中心）参数空间：四维列表 + 标量 `NUM_KERNEL` + 内存类型字典 |
+| `ubench/streaming_bandwidth/datacenter/auto_collect/generate_microbenchmarks.py` | 流版主脚本：三层嵌套循环 + runAll.sh 汇总 |
+| `ubench/streaming_bandwidth/datacenter/auto_collect/kernelcode_gen.py` | 生成 `krnl_config.h` 与成对的 streamWrite/streamRead 内核源码 |
+| `ubench/streaming_bandwidth/datacenter/auto_collect/connectivity_gen.py` | 生成 `ubench.ini`：slr/sp/stream_connect/nk |
+| `ubench/streaming_bandwidth/datacenter/auto_collect/hostcode_gen.py` | 生成 `host.cpp`：payload 扫描、CU 命名、带宽公式 |
+| `ubench/streaming_bandwidth/datacenter/auto_collect/makefile_gen.py` | 生成 Makefile：`--kernel_frequency`、两个 .xo 目标 |
+| `ubench/offchip_bandwidth/embedded/auto_collect/config.py` | 片外带宽嵌入式版参数空间：`PORT_NAMES` 端口名模型 |
+| `ubench/offchip_bandwidth/embedded/auto_collect/generate_microbenchmarks.py` | 片外带宽嵌入式版主脚本：五层循环 |
+| `ubench/offchip_bandwidth/embedded/auto_collect/connectivity_gen.py` | 生成 `zcu104.cfg`：platform/[clock]/[connectivity]/[profile] |
+| `ubench/offchip_bandwidth/embedded/auto_collect/kernelcode_gen.py` | 生成嵌入式版内核（0 基端口名 in0/out0，多 sum 写回口） |
+| `ubench/streaming_bandwidth/embedded/auto_collect/config.py` | 流版嵌入式参数空间：MEMORY_TYPE 只剩两个键 |
+| `ubench/streaming_bandwidth/embedded/auto_collect/generate_microbenchmarks.py` | 流版嵌入式主脚本：三层循环 |
+| `ubench/streaming_bandwidth/embedded/auto_collect/connectivity_gen.py` | 生成流版 `zcu104.cfg`：只有 stream_connect，无 sp |
+| `ubench/streaming_bandwidth/embedded/auto_collect/makefile_gen.py` | 生成嵌入式 Makefile：每内核一个 .xo、sd_card 打包 |
+| `ubench/streaming_bandwidth/embedded/auto_collect/hostcode_gen.py` | 生成嵌入式流版 host.cpp：map/unmap + tic/toc 计时 |
+
+对照基准（u5-l1/u5-l2 已精读，本讲只作对照引用）：`ubench/offchip_bandwidth/datacenter/auto_collect/` 下的同名五件脚本。
+
+## 4. 核心概念与源码讲解
+
+### 4.1 流版参数差异：AXIS 没有 地址通道，参数空间因此瘦身
+
+#### 4.1.1 概念说明
+
+datacenter 片外带宽线的参数空间有六个列表维度：频率、端口数、位宽、**最大突发长度**、**访问类型（RD/WR）**、**内存类型（DDR/HBM）**。
+
+后三个维度对片外基准是本质性的：读和写的 AXI 通路行为不同（u3-l4）；DDR 与 HBM 的通道结构不同（u3-l3）；突发长度决定单次传输能摊薄多少协议开销（u3-l2）。
+
+而流带宽测的是**内核到内核的片上 AXIS 直传**（u4-l1）。AXIS 是纯数据流接口：**没有地址通道**，不存在「突发」的概念；数据也不落任何内存 bank，不存在「内存类型」的选择；发送端只写、接收端只读，也不存在 RD/WR 的分叉。所以流版的参数空间理应瘦掉这三个维度——源码证实了这一点，同时还**新增**了一个标量 `NUM_KERNEL`，因为流微基准天然是「一对内核」为单位扩展的，内核对数成为新的并发维度。
+
+#### 4.1.2 核心流程
+
+流版主循环只剩三层（频率 × 端口数 × 位宽），伪代码：
+
+```text
+for kernel_freq in KERNEL_FREQ:            # [300]
+    for num_concurrent_port in NUM_CONCURRENT_PORT:   # [4]
+        for port_width in PORT_WIDTH:      # [128, 256, 512, 1024]
+            目录名 = f"{freq}MHz_{NUM_KERNEL}x{port}port_{width}bit"
+            生成 Makefile(频率) → ubench.ini → host.cpp → 内核对
+runAll.sh 逐目录执行 make check TARGET=hw DEVICE=<DEVICE_NAME>
+```
+
+几个关键数字（默认配置下）：
+
+- 目录数 \(= 1 \times 1 \times 4 = 4\)，目录形如 `300MHz_4x4port_512bit`。
+- 目录名里的 `4x4port` 读作「4 对内核 × 每内核 4 个流端口」，`NUM_KERNEL` 是标量，被直接拼进目录名而不参与连乘。
+- 全芯片并发流端口总数 \(= \text{NUM\_KERNEL} \times \text{NUM\_CONCURRENT\_PORT} = 16\)，这个乘积正是带宽公式里的系数。
+- 理论峰值带宽 \(= \text{频率} \times \text{总端口数} \times \text{位宽} / 8\)，默认 512bit 档为 \(300\,\text{MHz} \times 16 \times 512/8 = 307.2\,\text{GB/s}\)（片上互连的理想值，实测受跨 SLR 与布线约束限制）。
+
+#### 4.1.3 源码精读
+
+先看参数空间定义：
+
+[ubench/streaming_bandwidth/datacenter/auto_collect/config.py:L7-L12](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/auto_collect/config.py#L7-L12) 定义了流版全部配置：`KERNEL_FREQ = [300]`、`NUM_CONCURRENT_PORT = [4]`、`NUM_KERNEL = 4`（注意是无括号的**标量**，不是列表）、`PORT_WIDTH = [128, 256, 512, 1024]`、`CONSECUTIVE_DATA_SIZE`、以及单元素的 `MEMORY_TYPE` 字典。与 datacenter 片外带宽版对照，`MAX_BURST_LENGTH` 与 `ACCESS_TYPE` 两行整个消失了；`MEMORY_TYPE` 从「DDR/HBM 两元素列表」退化为单字典——它只剩 `DEVICE_NAME`（U200）和给空挂 m_axi 端口用的 `BANK_NAME`/`BANK_FLAG`，不再是被扫描的维度。
+
+主脚本的循环与目录命名：
+
+[ubench/streaming_bandwidth/datacenter/auto_collect/generate_microbenchmarks.py:L22-L33](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/auto_collect/generate_microbenchmarks.py#L22-L33) 是三层循环体，目录名拼接为 `str(NUM_KERNEL) + 'x' + str(num_concurrent_port) + 'port'`，把「内核对数 × 每核端口数」这个乘积结构直接写进目录名。对照片外带宽版的六层循环（`for ... in MAX_BURST_LENGTH: for ... in ACCESS_TYPE: for ... in MEMORY_TYPE:`，见 [ubench/offchip_bandwidth/datacenter/auto_collect/generate_microbenchmarks.py:L22-L32](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/offchip_bandwidth/datacenter/auto_collect/generate_microbenchmarks.py#L22-L32)），可以直观看到参数空间的瘦身。
+
+连接配置生成——流版新增的 `stream_connect` 段：
+
+[ubench/streaming_bandwidth/datacenter/auto_collect/connectivity_gen.py:L12-L23](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/auto_collect/connectivity_gen.py#L12-L23) 对每对内核输出：两条 `slr=`（write/read 内核都放 SLR0）、两条 `sp=`（两个内核的 m_axi 端口接到 bank，纯模板空挂）、以及 `num_concurrent_port` 条 `stream_connect=krnl_streamWrite_N.koutM:krnl_streamRead_N.kinM`，最后两条 `nk=` 声明实例数。这里能看到与手写版（u4-l1 里两内核分置 SLR0/SLR1）的一个差异：生成版把成对内核放在**同一个 SLR0**。
+
+内核代码生成——成对内核与 `pkt` 类型：
+
+[ubench/streaming_bandwidth/datacenter/auto_collect/kernelcode_gen.py:L6-L25](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/auto_collect/kernelcode_gen.py#L6-L25) 生成流版 `krnl_config.h`：多了 `#include "ap_axi_sdata.h"`、`#include "hls_stream.h"` 和 `typedef ap_axiu<DWIDTH, 0, 0, 0> pkt;`；少了片外版的 `WIDTH_FACTOR`（位宽换算被内联进主机代码）。[kernelcode_gen.py:L27-L73](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/auto_collect/kernelcode_gen.py#L27-L73) 生成 `krnl_streamWrite`：签名是 `volatile INTERFACE_WIDTH* in0` 加 `num_concurrent_port` 个 `hls::stream<pkt>& koutN`，每个流端口各配 `#pragma HLS INTERFACE axis`，整体 `DATAFLOW`，每端口一个「写常量进流」的双层循环（`NUM_ITERATIONS × size`，II=1）。读内核（[L75-L120](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/auto_collect/kernelcode_gen.py#L75-L120)）完全对称，只是 `kinN.read()`。**没有任何 `max_read_burst_length`/`max_write_burst_length` pragma**——这就是参数维度消失在生成器侧的落点。
+
+主机代码生成——系数变成 `NUM_KERNEL * NUM_PORT`：
+
+[ubench/streaming_bandwidth/datacenter/auto_collect/hostcode_gen.py:L22-L23](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/auto_collect/hostcode_gen.py#L22-L23) 在 host.cpp 顶部生成 `#define NUM_KERNEL (4)` 与 `#define NUM_PORT (4)`；[hostcode_gen.py:L197-L198](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/auto_collect/hostcode_gen.py#L197-L198) 生成带宽公式 `payload * 4 * 0.000010000 / kernel_time_in_sec * NUM_KERNEL * NUM_PORT`——手写版里那个硬编码的 `* 2`（u4-l1 指出漏改会静默失真）在生成版里变成了由 config 派生的乘积，这正是模板化相对于手写的价值。
+
+一个**必须以代码为准**的注释陷阱：
+
+[ubench/streaming_bandwidth/datacenter/auto_collect/hostcode_gen.py:L103](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/auto_collect/hostcode_gen.py#L103) 生成 payload 循环 `for (int payload(START*1024/4); payload <= STOP*1024/4; payload*=2)`。乘法是 \(\times 1024 / 4\)，即**单位是 KB**（`START_SIZE=1` → 256 个 int → 1KB；`STOP_SIZE=1024` → 1MB）。但 [config.py:L11](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/auto_collect/config.py#L11) 的注释写的是 `# in 10MB`，[README.md:L21](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/auto_collect/README.md#L21) 也跟着写 "in units of 10MB"。若真是 10MB 单位，乘数应为 \(\times 10 \times 1024 \times 1024 / 4\)。结论：**注释与 README 均与生成的代码不符，实际单位是 KB**；若想要手写版那种 4MB 上限（[手写版 host.cpp:L108](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/2ports_512bit/src/host.cpp#L108) 的 `payload <= 262144*4`），应把 `STOP_SIZE` 设为 4096，而不是相信注释。同文件 README 的标题也写成了 "Off-chip Memory Bandwidth"（[README.md:L1-L2](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/auto_collect/README.md#L1-L2)），且列参数时漏掉了 `NUM_KERNEL`——文档滞后于代码的又一例。
+
+#### 4.1.4 代码实践
+
+**实践目标**：把流版的参数维度改动落到位，并精确推演生成结果。
+
+**操作步骤**：
+
+1. 制作参数对照表（见下方表格，先自己填再核对）。
+2. 把 [config.py:L8](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/auto_collect/config.py#L8) 的 `NUM_CONCURRENT_PORT = [4]` 改为 `NUM_CONCURRENT_PORT = [4, 8]`。
+3. **先在纸上推演**目录数与目录名，再决定是否真的运行脚本（脚本会真实创建目录，且不可重复执行）。
+
+**需要观察的现象 / 预期结果**：
+
+- 若替换为 `[8]`：目录数 \(=1\times1\times4=4\)，目录名为 `300MHz_4x8port_128bit / 256bit / 512bit / 1024bit`，每目录总流端口 \(=4\times8=32\)。
+- 若扩展为 `[4, 8]`：目录数 \(=1\times2\times4=8\)。
+- 每个生成的 host.cpp 中带宽公式的系数 `NUM_KERNEL * NUM_PORT` 自动变为 `4 * 8`；`ubench.ini` 中每对内核的 `stream_connect` 行数从 4 变 8。
+- 风险自查：ZCU104/U200 上 32 条 512bit 流很可能超出布线与 SLR 资源，`v++ -l` 阶段报错是正常现象——生成器不做资源可行性检查，参数空间的上界由用户自己负责。
+
+（生成 8 个目录并逐一综合需要 Vitis 且耗时数小时，目录名推演本身可离线完成；**本实践不假设你已经运行，推演结果待本地验证**。）
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：流版 config 里 `NUM_KERNEL = 4` 写成标量而不是 `[4]`，这对参数空间意味着什么？
+
+**答案**：标量不进入 `generate_microbenchmarks.py` 的循环，不贡献目录维度；它只是被原样拼进目录名（`4x…port`）并传给四个生成器（决定 `nk=` 实例数、host 的 `NUM_KERNEL` 宏、CU 命名）。若想扫描内核对数（1/2/4/8 对），必须自己把主循环加一层 `for num_kernel in NUM_KERNEL:` 并同步调整目录名拼接。
+
+**练习 2**：为什么流版生成器从不输出 `max_read_burst_length`？为什么它的 `MEMORY_TYPE` 只剩一个元素？
+
+**答案**：突发长度是 AXI 主接口（m_axi）在地址通道上的传输聚合参数；AXIS 流接口没有地址通道，数据是连续拍流，无突发可调。内存类型同理：流数据不落任何片外 bank，`sp=` 行只是给模板里空挂的 m_axi 端口一个合法落点，DDR/HBM 的选择对流带宽无意义，所以不再作为被扫描维度，字典退化为单元素，仅保留 `DEVICE_NAME`（选 U200 还是 U280 平台）。
+
+**练习 3**：生成版 `ubench.ini` 与手写版 `2ports_512bit/ubench.ini` 在 SLR 布局上有何不同？会带来什么测量差异？
+
+**答案**：生成版把 `krnl_streamWrite_N` 与 `krnl_streamRead_N` 都放在 SLR0（`connectivity_gen.py` 第 13、15 行都写 `:SLR0`），手写版则分置 SLR0/SLR1（u4-l1）。因此生成版测的是同 SLR 内的流互连，手写版测的是跨 SLR 流互连，两者的带宽数字不可直接互相比较——比较微基准结果时必须先核对连接配置。
+
+### 4.2 嵌入式端口名模型：从「bank 名」到「PS 端口名」
+
+#### 4.2.1 概念说明
+
+datacenter 平台上，内核经 m_axi 端口接到 Alveo 卡的 DDR/HBM **bank**，所以 `sp=` 的目标是 `DDR[0]`、`HBM[1]` 这类 bank 名，主机还要用 `cl_mem_ext_ptr_t` + `XCL_MEM_*` flag 把缓冲放进同一 bank（u3-l3 的跨工具契约）。
+
+ZCU104（Zynq UltraScale+ MPSoC）的内存系统拓扑完全不同：PL 侧内核通过 **HP/HPC 端口**直接连到 PS（处理系统）侧的 DDR 控制器，ARM 核与 PL **共享同一块 PS DDR**（统一内存，u4-l3）。于是：
+
+- 链接配置里 `sp=` 的合法目标变成端口名 `HP0`–`HP3`、`HPC0`/`HPC1`（每口 128bit、150MHz 级别），config 里相应地用 **`PORT_NAMES` 列表**替代 `BANK_NAME` 字符串。
+- 主机不再需要（也无法）做 bank 绑定，`BANK_FLAG` 字段整个消失，缓冲改用 map/unmap 管理。
+- 频率上限从 Alveo 的 300MHz 降到 150MHz，且嵌入式链路里频率的落点从 Makefile 的 `--kernel_frequency` 移到了 `zcu104.cfg` 的 `[clock]` 段。
+
+至于嵌入式版**没有 `MAX_BURST_LENGTH` 维度**：原因与流版不同但同源——嵌入式生成器干脆不在内核 pragma 里生成突发参数，走 v++/平台默认值；参数空间只保留频率、端口数、位宽、数据量、访问类型、内存（端口组）六个维度。
+
+#### 4.2.2 核心流程
+
+嵌入式片外带宽版主循环（五层，比 datacenter 版少一层 burst）：
+
+```text
+for kernel_freq in KERNEL_FREQ:            # [150]
+    for num_concurrent_port in NUM_CONCURRENT_PORT:   # [4]
+        for port_width in PORT_WIDTH:      # [128]
+            for access_type in ACCESS_TYPE:    # ['RD','WR']
+                for memory_type in MEMORY_TYPE:    # 单元素，含 PORT_NAMES
+                    目录名 = f"{RD|WR}_{freq}MHz_{port}port_{width}bit"
+                    生成 Makefile() → zcu104.cfg(含频率) → host.cpp → 内核
+runAll.sh 逐目录执行 make（不是 make check）
+```
+
+`zcu104.cfg` 的结构（由 `connectivity_gen.py` 产出）：
+
+```text
+platform=xilinx_zcu104_base_202020_1
+[clock]      defaultFreqHz=150000000     ← 频率在这里生效
+[connectivity] sp=krnl_ubench_1.in0:HP0  ← 端口名模型
+             sp=krnl_ubench_1.in1:HP1 ...
+[profile]    data=all:all:all            ← 上板即开 profile
+```
+
+注意端口名是 **0 基**的（`in0`、`out0`），而流版生成器是 1 基的（`kout1`）——两族生成器的命名约定不一致，混读时容易踩坑。
+
+#### 4.2.3 源码精读
+
+两份嵌入式 config：
+
+[ubench/offchip_bandwidth/embedded/auto_collect/config.py:L7-L12](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/offchip_bandwidth/embedded/auto_collect/config.py#L7-L12) 是嵌入式片外带宽版：`KERNEL_FREQ = [150]`（datacenter 版是 300）、`PORT_WIDTH = [128]`（HP/HPC 每口 128bit）、保留 `ACCESS_TYPE = ['RD', 'WR']`、没有 `MAX_BURST_LENGTH`；关键是 `MEMORY_TYPE` 字典的字段从 `{BANK_TYPE, BANK_FLAG, BANK_NAME, DEVICE_NAME}` 变成 `{BANK_TYPE, PORT_NAMES, DEVICE_NAME}`——`PORT_NAMES` 是一个**端口名列表** `['HP0','HP1','HP2','HP3','HPC0','HPC1']`，生成 `sp=` 行时按下标取用。
+
+[ubench/streaming_bandwidth/embedded/auto_collect/config.py:L7-L12](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/embedded/auto_collect/config.py#L7-L12) 是嵌入式流版：进一步瘦到 `{BANK_TYPE, DEVICE_NAME}` 两个键——流不碰任何内存端口，连 `PORT_NAMES` 都不需要了。`CONSECUTIVE_DATA_SIZE` 同样挂着与代码不符的 `# in 10MB` 注释（生成的 host.cpp 换算同样是 \(\times 1024/4\)，见 [hostcode_gen.py:L85](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/embedded/auto_collect/hostcode_gen.py#L85)）。
+
+`PORT_NAMES` 如何变成 `sp=` 行：
+
+[ubench/offchip_bandwidth/embedded/auto_collect/connectivity_gen.py:L6-L27](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/offchip_bandwidth/embedded/auto_collect/connectivity_gen.py#L6-L27) 生成 `zcu104.cfg`（注意文件名不再是 `ubench.ini`）：先写 `platform=` 与 `[clock] defaultFreqHz=<freq>000000`（频率在这里生效，因此 `generateMakefile()` 不再接收频率参数）；然后在 `[connectivity]` 段按 `access_type` 分支生成 `sp=krnl_ubench_1.in<N>:HP<N>`（RD）或 `sp=krnl_ubench_1.out<N>:HP<N>`（WR），端口名直接来自 `PORT_NAMES[port_index]`；最后 `[profile] data=all:all:all` 打开上板剖析。**没有 `slr=`（ZCU104 无 SLR 划分）也没有 `nk=`（单内核单实例，CU 名 `krnl_ubench_1` 由默认命名产生）**。
+
+嵌入式流版的连接配置与 CU 命名：
+
+[ubench/streaming_bandwidth/embedded/auto_collect/connectivity_gen.py:L19-L26](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/embedded/auto_collect/connectivity_gen.py#L19-L26) 同样生成 `zcu104.cfg`，但 `[connectivity]` 段里**只有 `stream_connect=`，一条 `sp=` 都没有**（无内存端口）。连线写作 `krnl_streamWrite_1_1.kout1:krnl_streamRead_1_1.kin1`——这里内核名本身就带下标（`krnl_streamWrite_1`），再补一个 `_1` 的默认 CU 后缀。这与 datacenter 流版的做法不同：datacenter 用**同一内核名 + `nk=` 多实例**（`krnl_streamWrite_1..N` 是 CU 名），嵌入式则是**每实例一个独立命名的内核源文件**，见 [makefile_gen.py:L20-L31](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/embedded/auto_collect/makefile_gen.py#L20-L31)：每对内核各生成一条 `v++ -c -k krnl_streamWrite_<i> ... src/krnl_streamWrite_<i>.cpp` 规则，对应 [kernelcode_gen.py:L27-L34](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/embedded/auto_collect/kernelcode_gen.py#L27-L34) 中按 `kernel_index` 命名的内核函数。
+
+自包含的目录结构：
+
+[ubench/streaming_bandwidth/embedded/auto_collect/makefile_gen.py:L33-L43](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/embedded/auto_collect/makefile_gen.py#L33-L43) 生成的 sd_card 打包规则引用 `./../../common/xrt.ini` 与 `./../../common/run_app.sh`——从生成的设计目录（`auto_collect/uBenchDesignDir/<设计名>/`）上溯两级正好回到 `auto_collect/common/`。这解释了为什么嵌入式两套 auto_collect 自带 `common/`（`run_app.sh`、`xrt.ini`）与 `include/`（`host.h`、`my_timer.h`）子目录：**嵌入式生成器不依赖仓库根的 common/，自成一体**，而 datacenter 生成版 Makefile 仍用 `COMMON_REPO` 六级上溯指回仓库根（[datacenter 流版 makefile_gen.py:L37-L46](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/auto_collect/makefile_gen.py#L37-L46)）。
+
+嵌入式主机生成——统一内存与 tic/toc：
+
+[ubench/streaming_bandwidth/embedded/auto_collect/hostcode_gen.py:L90-L95](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/embedded/auto_collect/hostcode_gen.py#L90-L95) 生成的主机代码里没有任何 `cl_mem_ext_ptr_t`——缓冲直接 `cl::Buffer(context, CL_MEM_READ_ONLY, ...)` 创建，之后用 `enqueueMapBuffer` 取指针（统一内存模型）。[hostcode_gen.py:L117-L122](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/embedded/auto_collect/hostcode_gen.py#L117-L122) 用 `timespec timer = tic(); ... toc(&timer, "Execution time");`（即 u4-l3 的 `my_timer.h`）计时，只打印执行时间、不算带宽。
+
+**两处已核实的生成器缺陷**，使用嵌入式生成器前必须知道：
+
+- [ubench/offchip_bandwidth/embedded/auto_collect/kernelcode_gen.py:L64-L70](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/offchip_bandwidth/embedded/auto_collect/kernelcode_gen.py#L64-L70)：RD 分支生成的 `ap_uint<DWIDTH> temp_data_<i>` **末尾没有分号也没有初始化**（WR 分支有 ` = 100;`）。多端口时相邻声明会拼成一行非法 C++，生成的内核无法编译——这是 u5-l2 在 datacenter 版指出的同类脚本缺陷在嵌入式版的再现，修法同样是给该行补 ` = 0;`。
+- [ubench/streaming_bandwidth/embedded/auto_collect/hostcode_gen.py:L90-L101](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/embedded/auto_collect/hostcode_gen.py#L90-L101)：`buffer_in_<i>` 按 `num_concurrent_port` 循环创建，却按 `num_kernel` 循环引用（`setArg`、map、enqueue 全用 `buffer_in_<kernel>`）。默认 `NUM_KERNEL=4` 恰好等于 `NUM_CONCURRENT_PORT=4` 才能工作；一旦把 `NUM_KERNEL` 调大而端口数不变，生成的 host.cpp 会引用未定义的变量，编译失败。这暴露了标量 `NUM_KERNEL` 与端口数之间**隐式的相等假设**。
+
+runAll 的差异：datacenter 版逐目录执行 `make check TARGET=hw DEVICE=<DEVICE_NAME>`（见 [datacenter 流版 generate_microbenchmarks.py:L53-L54](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/auto_collect/generate_microbenchmarks.py#L53-L54)），嵌入式版只执行裸 `make`（[embedded 流版 generate_microbenchmarks.py:L56-L57](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/embedded/auto_collect/generate_microbenchmarks.py#L56-L57)）——平台已钉死在 `zcu104.cfg` 的 `platform=` 行，`TARGET ?= hw` 由 Makefile 默认值提供（[embedded makefile_gen.py:L51-L52](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/embedded/auto_collect/makefile_gen.py#L51-L52)），产物是 SD 卡镜像而非本机可执行。
+
+#### 4.2.4 代码实践
+
+**实践目标**：解释「嵌入式版为什么不需要 `MAX_BURST_LENGTH`」，并把 `PORT_NAMES` 模型映射到实际端口。
+
+**操作步骤**：
+
+1. 打开 [ubench/offchip_bandwidth/embedded/auto_collect/kernelcode_gen.py](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/offchip_bandwidth/embedded/auto_collect/kernelcode_gen.py)，用编辑器搜索 `burst`——确认整个嵌入式生成器家族不输出任何突发 pragma。
+2. 阅读 [connectivity_gen.py:L18-L24](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/offchip_bandwidth/embedded/auto_collect/connectivity_gen.py#L18-L24)，写出默认 `NUM_CONCURRENT_PORT=4` 时会生成的 4 条 `sp=` 行（RD 情形：`in0→HP0, in1→HP1, in2→HP2, in3→HP3`）。
+3. 把 `PORT_NAMES` 列表里 `HP2`/`HP3` 换成 `HPC0`/`HPC1`，重新推演 4 条 `sp=` 行，并说明 HP 与 HPC 的取舍（HPC 支持一致性访问，HP 不支持；对纯带宽基准两者等价，见 u4-l3）。
+
+**需要观察的现象 / 预期结果**：
+
+- 手工推演的 `sp=` 行与脚本逻辑逐字对应；注意端口下标从 0 开始。
+- 若真要跑生成脚本（需 Python 2，且目录不可重复创建），可在 `uBenchDesignDir/<某设计>/zcu104.cfg` 里核对你推演的行。**无 Python 2 环境时本实践以源码走读完成，生成结果待本地验证。**
+
+**关于「为什么不需要 `MAX_BURST_LENGTH`」的参考答案**（实践第 1 步的结论）：
+
+1. 该维度在生成器中**没有落点**：datacenter 版把它写进 m_axi pragma（`kernelcode_gen.py` 接收 `max_burst_length` 参数），嵌入式版内核生成函数签名里根本没有这个参数，突发行为交给 v++ 默认值与平台约束。
+2. 设计上也说得通：嵌入式扫的是「150MHz × 4 端口 × 128bit」这组远低于峰值的组合（理论峰值约 \(150\,\text{MHz} \times 4 \times 128/8 = 9.6\,\text{GB/s}\)），瓶颈在 PS 端口本身而非突发效率；datacenter 版在 300MHz×512bit 的高吞吐区间，突发长度才是敏感参数。
+3. 换句话说：**参数空间应当只包含对该平台敏感的维度**——这是三套 config 共同传达的方法论。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：嵌入式片外带宽版 config 的 `MEMORY_TYPE` 为什么还保留 `BANK_TYPE: 'DDR'` 字段？它被谁消费？
+
+**答案**：它不再被 `connectivity_gen.py` 消费（sp 用的是 `PORT_NAMES`），也不再有 `BANK_FLAG` 给主机用；在这个脚本族里 `BANK_TYPE` 只用于目录名拼接（`benchmarkDesignName = access_type + '_' + ...`，见 [generate_microbenchmarks.py:L28-L31](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/offchip_bandwidth/datacenter/auto_collect/generate_microbenchmarks.py#L28-L31) 的 datacenter 同构逻辑）并作为人类可读标注保留。ZCU104 只有一种 PS DDR，列表也只有单元素。它是「从 datacenter 模板继承、语义已退化」的字段。
+
+**练习 2**：嵌入式流版 `zcu104.cfg` 的 `[connectivity]` 段为什么可以一条 `sp=` 都不写，而 datacenter 流版 `ubench.ini` 里还保留两条 `sp=`？
+
+**答案**：两版流内核的签名里都保留了空挂的 m_axi 端口（`in0`/`out0`，用于模板统一）。datacenter 链接器要求 m_axi 端口有落点，所以生成器按 `BANK_NAME` 写两条 `sp=` 把它们接到 DDR[0]；嵌入式流版则干脆不写 `sp=`——ZCU104 平台上未显式连线的 m_axi 端口可由工具按默认规则处理，且该端口在测量中不承载流量。差异本质是两代链接配置文件（`ubench.ini` vs `zcu104.cfg`）对未连线端口的默认行为不同，而非内核差异。
+
+**练习 3**：如果把嵌入式流版的 `NUM_KERNEL` 从 4 改成 8（`NUM_CONCURRENT_PORT` 仍为 4），生成的代码能编译吗？
+
+**答案**：内核侧能生成（8 对独立命名的源文件与 .xo 规则），但 host.cpp 不能编译：缓冲按 `num_concurrent_port=4` 只创建了 `buffer_in_1..4`，而 `setArg`/map/unmap 按 `num_kernel=8` 引用 `buffer_in_1..8`，后 4 个未定义（[hostcode_gen.py:L90-L115](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/embedded/auto_collect/hostcode_gen.py#L90-L115)）。正确改法是把缓冲创建循环也改成按 `num_kernel`（或取 `max(num_kernel, num_port)`），这暴露了标量 `NUM_KERNEL` 与 `NUM_CONCURRENT_PORT` 之间的隐式相等假设。
+
+### 4.3 共享架构模式：一套「config + generate + 生成器」打天下
+
+#### 4.3.1 概念说明
+
+把四份 auto_collect（datacenter 片外带宽、datacenter 流、embedded 片外带宽、embedded 流）并排看，会发现它们是**同一个架构模板的四次实例化**：
+
+```text
+auto_collect/
+├── config.py                    ← 唯一需要用户编辑的文件：参数空间
+├── generate_microbenchmarks.py  ← 主脚本：嵌套循环 × 目录命名 × 调度生成器
+├── makefile_gen.py              ← 生成 Makefile
+├── connectivity_gen.py          ← 生成 ubench.ini（datacenter）/ zcu104.cfg（embedded）
+├── hostcode_gen.py              ← 生成 src/host.cpp
+└── kernelcode_gen.py            ← 生成 src/krnl_*.cpp + krnl_config.h
+（embedded 另有 common/ 与 include/，自包含运行时资产）
+```
+
+变异只发生在三个层面：
+
+1. **参数空间的维度集**由基准的物理特性决定：片外带宽全六维；流版砍掉突发/访问类型/内存类型三维、加标量 `NUM_KERNEL`；嵌入式再砍突发维、把 `BANK_NAME/BANK_FLAG` 换成 `PORT_NAMES`。
+2. **生成器的落点**随之变化：频率落进 Makefile（datacenter）还是 `zcu104.cfg [clock]`（embedded）；连接文件叫 `ubench.ini` 还是 `zcu104.cfg`；CU 用 `nk=` 多实例还是每实例独立内核名。
+3. **运行方式**：datacenter 产 `make check` 直跑，embedded 产 `make` 打 SD 卡镜像。
+
+不变的是：目录名可反解参数、`config.py` 单点定义、跨工具契约（内核签名 ↔ setArg 编号 ↔ sp 行 ↔ CU 名）由同组循环变量构造性对齐、「`list` 装字符串再 `writelines`」的朴素拼接技术，以及 Python 2 语法。
+
+#### 4.3.2 核心流程
+
+四份主脚本的骨架完全同构，可以用一个抽象流程描述：
+
+```text
+baseDir = cwd；uBenchDesignDir = baseDir/uBenchDesignDir；mkdir
+for 每个参数组合（维度连乘）:
+    设计目录名 = 由各维度值拼接（可反解）
+    mkdir 设计目录；chdir 进去
+    generateMakefile(...)            # 频率 或 内核数
+    generateConnectivity(...)        # ubench.ini 或 zcu104.cfg
+    mkdir src；chdir src
+    generateHostCode(...)            # payload 边界、bank flag（可选）、CU 名
+    generateKernelCode(...)          # 端口循环、pragma、（可选）突发长度
+    runAll.sh 追加 "cd 目录; make[ check] [DEVICE=...]"
+chdir uBenchDesignDir；写 runAll.sh
+print "Microbenchmark Generation Done!"   ← Python 2 裸 print，四份全同
+```
+
+目录数公式统一为：
+
+\[
+\text{目录数} = \prod_{\text{列表维度 } D} |D|
+\]
+
+四份 config 的连乘结果分别是 20（datacenter 片外带宽：\(1\times1\times1\times5\times2\times2\)）、4（datacenter 流：\(1\times1\times4\)）、2（embedded 片外带宽：\(1\times1\times1\times2\times1\)）、4（embedded 流：\(1\times1\times4\)）。
+
+#### 4.3.3 源码精读
+
+主脚本同构性：
+
+[ubench/streaming_bandwidth/datacenter/auto_collect/generate_microbenchmarks.py:L13-L20](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/auto_collect/generate_microbenchmarks.py#L13-L20) 与 [ubench/offchip_bandwidth/embedded/auto_collect/generate_microbenchmarks.py:L13-L20](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/offchip_bandwidth/embedded/auto_collect/generate_microbenchmarks.py#L13-L20) 的开头 20 行逐行相同（`baseDir` / `uBenchDesignDir` / `os.mkdir` / runAll 初始化）；与 u5-l1 读过的 datacenter 片外带宽版也只差循环层数。差异全部集中在循环体内部四个生成器的调用参数上。
+
+`MEMORY_TYPE` 字段的消费矩阵（对照三份 config 与各自生成器得出的总表）：
+
+| 字段 | datacenter 片外带宽 | datacenter 流 | embedded 片外带宽 | embedded 流 |
+| --- | --- | --- | --- | --- |
+| `BANK_TYPE` | 目录名 | 目录名（字典内但不进循环） | 目录名 | 目录名（保留但退化） |
+| `BANK_FLAG` | → hostcode_gen（cl_mem_ext_ptr_t.flags） | → hostcode_gen（空挂端口也绑） | **无**（统一内存） | **无** |
+| `BANK_NAME` | → connectivity_gen（sp= 目标） | → connectivity_gen（sp= 空挂） | **无**，被 `PORT_NAMES` 取代 | **无** |
+| `PORT_NAMES` | 无 | 无 | → connectivity_gen（sp= 目标，按端口下标取） | 无（流不碰内存） |
+| `DEVICE_NAME` | runAll 的 `DEVICE=` | runAll 的 `DEVICE=` | zcu104.cfg 的 `platform=` | zcu104.cfg 的 `platform=` |
+
+一行对照即可看清「频率落点」的迁移：datacenter 流版 [makefile_gen.py:L75](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/auto_collect/makefile_gen.py#L75) 把频率写进 `CLFLAGS += ... --kernel_frequency <freq>`（生成 Makefile 的唯一频率注入点，`generateMakefile(kernel_freq)`）；嵌入式两版 `generateMakefile()` 不收频率，频率改由 [connectivity_gen.py:L14-L15](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/offchip_bandwidth/embedded/auto_collect/connectivity_gen.py#L14-L15) 写成 `zcu104.cfg` 的 `[clock] defaultFreqHz=<freq>000000`。
+
+架构模式的「构造性对齐」在流版最典型：[generate_microbenchmarks.py:L36-L51](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/auto_collect/generate_microbenchmarks.py#L36-L51) 把同一组 `(NUM_KERNEL, num_concurrent_port, port_width, BANK_NAME, BANK_FLAG)` 分别喂给 connectivity/hostcode/kernelcode 三个生成器——`nk=` 实例数、host 的 `NUM_KERNEL` 宏与 CU 名循环、内核源码里的流端口循环，三者由同一个变量派生，因此永远一致。这正是手写工程里「改了内核忘了改 ini」这类跨工具契约错误的根治方式（对比 u3-l3 手工对齐的痛苦）。
+
+四份主脚本结尾都是同一行 Python 2 裸 `print`（如 [datacenter 流版 generate_microbenchmarks.py:L66](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/auto_collect/generate_microbenchmarks.py#L66)），迁移 Python 3 的改法在 u5-l2 已给出（`print(...)`；若脚本中有整数除法参与运算还需 `/` → `//`，注意 `consecutive_data_start_size*1024/4` 这类表达式在 Python 3 下 `/` 仍得 float，拼进 C 代码会变成 `256.0`，需改 `//`）。
+
+#### 4.3.4 代码实践
+
+**实践目标**：用「干跑」方式验证你对共享架构的理解——不创建任何目录，只打印将生成的目录名与将写入 runAll.sh 的命令。
+
+**操作步骤**：
+
+1. 把 [ubench/streaming_bandwidth/datacenter/auto_collect/generate_microbenchmarks.py](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/streaming_bandwidth/datacenter/auto_collect/generate_microbenchmarks.py) 复制为 `dry_run.py`（放在 auto_collect 目录之外的自习目录，**不要写进仓库源码树**）。
+2. 做三处改造：
+   - 删掉四个 `from *_gen import ...` 与四个 `generate*()` 调用；
+   - 把 `os.mkdir(uBenchDesignDir)`、`os.mkdir(benchmarkDesignDir)`、`os.mkdir(srcDesignDir)` 与所有 `os.chdir` 删掉或注释；
+   - 把结尾 `print "..."` 改成 `print("...")`。
+3. 在同目录放一份改好的 `config.py`（`NUM_CONCURRENT_PORT = [4, 8]`），运行 `python3 dry_run.py`。
+4. 对 `dry_run.py` 再做一次同样改造，但这次基于 embedded 流版主脚本，对比两者输出。
+
+**需要观察的现象 / 预期结果**：
+
+- 终端逐行打印目录名与 runAll 命令；datacenter 流版应输出 8 个目录（`300MHz_4x4port_128bit` … `300MHz_4x8port_1024bit`）和 8 条 `make check TARGET=hw DEVICE=xilinx_u200_xdma_201830_2;`。
+- embedded 流版输出 4 个目录和 4 条裸 `make;`，且目录名里的设备信息只能从 `zcu104.cfg` 的 `platform=` 追溯（目录名不含设备）。
+- 若误删 `os.chdir` 后仍引用 `benchmarkDesignDir` 绝对路径，打印的 `cd` 命令会带 `uBenchDesignDir` 前缀——注意 runAll.sh 是写在 `uBenchDesignDir` 内部、以设计目录名为相对路径执行的，这正是它 `cd <绝对路径>;` 逐目录切换的原因。
+
+**预期结果**：干跑输出与你 4.1.4 的手推目录名完全一致。若不一致，回到 config 的连乘与目录名拼接表达式检查。本实践不依赖 Vitis，任何 Python 3 环境可完成（改造正确性的最终判据仍是与原脚本逐行对照，**待本地验证**）。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：如果要为「片外延迟」微基准（u4-l2）新写一套 auto_collect，参数空间应该怎么设计？
+
+**答案**：按同一方法论——只保留对该基准敏感的维度。延迟基准随机访问、单端口即可饱和测量链路，参数空间可设计为：`PORT_WIDTH`（32/64/…，决定可寻址数组上限）、`CONSECUTIVE_DATA_SIZE`（这里语义是「随机数组大小」而非连续访问量，范围要覆盖 64B 到 2MB）、`MEMORY_TYPE`（DDR/HBM 的 bank 选择影响被测通道）、`KERNEL_FREQ`。不需要 `ACCESS_TYPE`（只测读延迟）、不需要 `NUM_CONCURRENT_PORT` 多维扫描（随机依赖链无法多端口并发）、不需要 `MAX_BURST_LENGTH`（随机地址永不突发）。hostcode_gen 还须额外生成「洗牌下标数组」的初始化代码。
+
+**练习 2**：四套生成器都用「list 装字符串再 `writelines`」而非模板引擎（Jinja2 等）。这带来了本讲指出过的哪些具体缺陷？根源是什么？
+
+**答案**：具体缺陷：① RD 分支临时变量声明缺分号（datacenter 版与 embedded 版各一处，[embedded kernelcode_gen.py:L66](https://github.com/SFU-HiAccel/uBench/blob/57fc9b5be6c902af56dbf6c87f152fd0bbcad1a3/ubench/offchip_bandwidth/embedded/auto_collect/kernelcode_gen.py#L66)）；② embedded 流版缓冲创建与引用的循环上界不一致（`num_concurrent_port` vs `num_kernel`）；③ 缩进与转义靠手工拼 `\n` 与空格，难以审查。根源是：字符串拼接没有语法层检查，生成代码的正确性完全依赖与手写样板逐字对齐；这类「结构性对齐」错误（该同源的两组循环没同源）恰恰是拼接式生成最容易犯、又最难在 review 中发现的。
+
+**练习 3**：为什么 embedded 两套 auto_collect 要自带 `common/` 与 `include/` 目录，而 datacenter 两套不带？
+
+**答案**：datacenter 生成的 Makefile 用 `COMMON_REPO = ../../../../../../` 指回仓库根，复用 `common/utils.mk`、`xcl2.mk`、`opencl.mk` 与 `common/includes/`；embedded 生成的 Makefile 是完全自写的（不 include utils.mk，`v++` 命令硬编码），它引用的 `./../../common/xrt.ini`、`run_app.sh` 与 `-I./../include`（host.h、my_timer.h）都解析到 `auto_collect/` 自身内部——因为嵌入式设计最终要以 `sd_card.img` 形式整体搬到板上，路径上每一级都必须在生成时自洽，不依赖仓库其余部分的存在。这也意味着：拷贝 embedded auto_collect 目录到别处单独使用是可行的，datacenter 版则不行。
+
+## 5. 综合实践
+
+**任务：制作一份《uBench auto_collect 全家福对照报告》，并完成一次带验证的参数扩展。**
+
+1. **参数对照表**：逐行精读四份 `config.py`，产出一张「维度 × 四套脚本」的矩阵表，每个单元格标注：该维度是列表还是标量、默认值、被哪个生成器消费、落点在哪个生成文件（Makefile / ubench.ini / zcu104.cfg / host.cpp / krnl_config.h / 内核 pragma）。特别标注三个「消失的维度」（流版的 burst/access/memory、嵌入式的 burst）及各自原因。
+2. **生成器签名对照**：列出四套 `generateConnectivity` / `generateHostCode` / `generateKernelCode` / `generateMakefile` 的形参表，指出哪些参数只在某一族存在（如 `max_burst_length`、`bank_flag`、`port_names`、`kernel_index`）。
+3. **参数扩展 + 干跑验证**：完成 4.3.4 的 dry_run 实践，把流版 `NUM_CONCURRENT_PORT` 扩为 `[4, 8]`，用干跑输出验证你手推的 8 个目录名；再用同样方法回答：「若同时把 `PORT_WIDTH` 砍成 `[512]`、`KERNEL_FREQ` 扩为 `[250, 300]`，目录数是多少？」（答案：\(2 \times 2 \times 1 = 4\)。）
+4. **文档纠错清单**：汇总你在这三套 auto_collect 里发现的所有「注释/README 与代码不符」项。至少应包括：流版两份 config 的 `# in 10MB` 注释（实际 KB）、流版 README 的标题（写成 Off-chip）与漏列的 `NUM_KERNEL`、embedded 片外带宽版 RD 生成缺分号、embedded 流版 `NUM_KERNEL` 与端口数的隐式相等假设。为每项写出「代码实际行为 → 建议改法」。
+
+产出物：一份 Markdown 报告（建议放在你自己的笔记目录，不放仓库）。完成后，你应当能在不看源码的情况下，为任何一套 auto_collect 说出「改哪个参数 → 哪个生成器 → 哪一行输出变化」。
+
+## 6. 本讲小结
+
+- **流版参数差异**：流带宽 auto_collect 砍掉了 `MAX_BURST_LENGTH`（AXIS 无地址通道、无突发）、`ACCESS_TYPE`（收发内核天然成对）与内存类型扫描（数据不落 bank），新增**标量** `NUM_KERNEL`（内核对数，不进循环、只拼目录名），带宽系数相应变为 `NUM_KERNEL * NUM_PORT`；datacenter 流版 README/注释存在标题错、漏参数、"10MB" 单位错三处滞后，实际 payload 单位是 KB。
+- **嵌入式端口名模型**：ZCU104 上 `sp=` 目标是 PS 端口 `HP0`–`HP3`/`HPC0`/`HPC1`，config 用 `PORT_NAMES` 列表替代 `BANK_NAME`，`BANK_FLAG` 因统一内存而消失；频率 150MHz 且落点从 Makefile 的 `--kernel_frequency` 迁到 `zcu104.cfg [clock]`；连接文件换成 `zcu104.cfg` 并自带 `[profile]`；无 `slr=`/`nk=`，多实例靠每实例独立内核名 + 默认 CU 后缀 `_1`。
+- **嵌入式无 burst 维度的原因**：既因为生成器不给 m_axi 写突发 pragma（走默认值），也因为嵌入式扫的是远低于峰值的端口组合，瓶颈在 PS 端口而非突发效率——参数空间只保留对平台敏感的维度。
+- **共享架构模式**：四套 auto_collect 是同一模板（config 参数空间 + generate 主循环 + 四个生成器）的实例化，跨工具契约靠同组循环变量构造性对齐；变异只发生在维度集、生成落点（ini/cfg、Makefile/cfg）与运行方式（make check 直跑 vs make 打 SD 卡镜像）。
+- **已核实的坑**：embedded 片外带宽版 RD 生成的临时变量声明缺分号（多端口必致编译失败）；embedded 流版缓冲按端口数创建、按内核数引用，`NUM_KERNEL > NUM_CONCURRENT_PORT` 时 host.cpp 编译失败；端口命名 0 基（embedded 片外）与 1 基（流版）不一致；四套主脚本均为 Python 2 裸 `print`，迁移时还要留意 `*1024/4` 整数除法。
+
+## 7. 下一步学习建议
+
+本讲完成了对自动化生成流水线的全景覆盖。接下来两条路：
+
+- **走向案例研究（u6）**：auto_collect 批量产出的是「带宽 × 参数组合」的矩阵，u6-l1/u6-l2 的 KNN 与 u6-l3 的 SpMV 将展示如何从这张矩阵读出设计决策（端口位宽、突发长度、PE 数量的选型），u6-l4 把方法论收拢成「从微基准洞察到加速器参数」的完整链条。建议先读 `case_study/KNN/optimal_14PE/src/krnl_partialKnn.cpp` 的 m_axi pragma，对照本讲的参数落点表。
+- **走向二次开发（u7）**：若你想自己写第五套 auto_collect（比如为延迟基准或 strided 访问基准），u7-l2 将带你复用五件套模板创建新基准并接入生成脚本；届时回看本讲 4.3 的架构模式和练习 1 的参数空间设计法，那就是你的设计蓝图。动手前记得先解决 Python 2 → 3 迁移（u5-l2 已给改法），并规避本讲列出的四个生成器缺陷。
