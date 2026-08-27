@@ -58677,8 +58677,8 @@
     },
     "ai-dynamo/dynamo": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-08-27T11:02:24Z",
+      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"a7fb00a0-d890-4339-ad67-361c683a9a11\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinki",
+      "last_run_at": "2026-08-27T14:38:49Z",
       "lectures": {
         "u1-l1": {
           "status": "keep",
@@ -58958,7 +58958,7 @@
     },
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-27T11:02:24Z"
+      "last_run_at": "2026-08-27T14:38:49Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
@@ -61955,7 +61955,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/passlab/CUDAMicroBench/CUDAMicroBench-tutorial",
       "last_head": "59c4ca6b0c7800c4994428db4b829f98f71c9071",
-      "last_run_at": "2026-08-27T11:02:24Z",
+      "last_run_at": "2026-08-27T14:38:49Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "microsoft/mimalloc": {
@@ -62158,7 +62158,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/microsoft/mimalloc/mimalloc-tutorial",
       "last_head": "cd69707c3ca01a4c5fb358e8b92a710554f15356",
-      "last_run_at": "2026-08-27T11:02:24Z",
+      "last_run_at": "2026-08-27T14:38:49Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "microsoft/RustTraining": {},
