@@ -1,14 +1,14 @@
 {
-  "head": "7feb2b81be941e184314b029c7a43b8a221b5de8",
+  "head": "3d3cf16123241ce36adb71a83053097a3d8457b5",
   "project": "dynamo",
-  "rationale": "增量更新：本次 diff（2c4ab6c..7feb2b8）核心变化有四类——(1) runtime/pyo3 桥接重构（RuntimeConfig 拆出 tokio_builder 并在 Python 扩展模块初始化时交给 pyo3_async_runtimes），影响已写好的 u3-l1 与 u2-l2，属局部逻辑变化标 update；(2) ext-proc 选点服务改为直接从 WorkerSelectionPolicyRegistry 构造（runner/selector/service/core 大改），尚未成文的 u6-l5、u10-l3 仍为 new 但补充了源码范围；(3) vLLM 自定义视觉编码器新增 Qwen3.5 示例与文档迁移，属新机制，在 u8 新增一篇 custom encoder 讲义；(4) 媒体加载器 SSRF 加固与 OpenAI delta 生成器状态共享，补充进 u4-l3、u4-l2 的源码范围。u1/u2 其余已写成讲义与 u3-l2 引用的源码均无变化，标 keep；其余未成文讲义保持 new，整体三层学习路线不变。",
+  "rationale": "增量更新：本次 diff（7feb2b8..3d3cf16）只有四类提交且集中在两处。(1) docs 大重组：u1-l1 引用的 architecture-flow.md 被改名为 architecture.md（并吸收了 communication-planes 三篇内容），knowledge-base/overview.md 也改写了 KVBM 表述，已写成的 u1-l1 标 update；其余被删除的文档（kvbm-guide、dynosim、fastokens 等）没有被任何讲义引用，不影响。(2) feat(sglang)：sidecar 新增原生 /generate HTTP 代理机制（native_http.rs 640 行 + common/endpoint.rs 新增 HttpEndpoint + 能力协商/健康探测），这是新的重要机制，在 u8 新增一篇专门讲义 u8-l6；同时统一 Dockerfile 与 dynamo-sidecar 入口的变化并入尚未成文的 u8-l4（刷新源码范围）。(3)(4) sidecar 构建统一与 vLLM KV-router 端点 flag 修复均为 u8-l4/u8-l6 覆盖范围。lib/runtime、lib/llm、components、deploy/operator、kvbm 各 crate 在本次 diff 中零改动，因此已写成的 u1-l2 至 u5 全部 keep（上一轮对 u1-l4/u2-l2/u3-l1 的 update 已落盘），未成文的 u6/u7/u9/u10/u11/u12 维持 new，整体三层学习路线不变。",
   "units": [
     {
       "id": "u1",
       "level": "beginner",
       "lectures": [
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [],
           "filename": "u1-l1-project-positioning.md",
           "id": "u1-l1",
@@ -21,17 +21,17 @@
           "minimal_modules": [
             "README",
             "knowledge-base overview",
-            "architecture-flow"
+            "architecture"
           ],
           "order": 1,
-          "practice_task": "对照 README 与 architecture-flow 文档，用文本画出一笔 chat/completions 请求从客户端到 worker 的组件图，并标注每一步属于请求面、控制面还是状态面。",
+          "practice_task": "对照 README 与 architecture 文档，用文本画出一笔 chat/completions 请求从客户端到 worker 的组件图，并标注每一步属于请求面、控制面还是状态面。",
           "source_files": [
             "README.md",
             "docs/fern/pages/developer-guide/knowledge-base/overview.md",
-            "docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture-flow.md"
+            "docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture.md"
           ],
           "title": "Dynamo 是什么：数据中心级推理编排层",
-          "topic": "项目定位：Dynamo 是推理引擎之上的编排层，把 GPU 集群变成一个协同推理系统；介绍请求面/控制面/状态面三面架构与核心能力（分离式服务、KV 感知路由、KVBM、Planner）。"
+          "topic": "项目定位：Dynamo 是推理引擎之上的编排层，把 GPU 集群变成一个协同推理系统；介绍请求面/控制面/状态面三面架构与核心能力（分离式服务、KV 感知路由、KVBM、Planner）。注意：原 architecture-flow.md 已在本次 docs 重组中改名为 architecture.md 并吸收了 communication-planes 的内容。"
         },
         {
           "action": "keep",
@@ -89,7 +89,7 @@
           "topic": "读懂仓库地图：lib/ 的 Rust workspace（runtime、llm、kv-router、kvbm-* 等）、components/ 的 Python 包（frontend、router、planner、各后端）、deploy/ 的 Operator 与 Helm，以及 examples/recipes/tests 的分工。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -157,7 +157,7 @@
           "topic": "通过 examples/custom_backend/hello_world 掌握 Python 侧核心 API：DistributedRuntime、namespace、endpoint 注册与 Client 调用，理解一个 worker 的最小骨架。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u1-l4"
@@ -223,7 +223,7 @@
       "level": "intermediate",
       "lectures": [
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -253,7 +253,7 @@
             "lib/runtime/examples/hello_world/src/bin/client.rs"
           ],
           "title": "一切的起点：Runtime 与 DistributedRuntime",
-          "topic": "lib/runtime 核心入口：Runtime 包装 tokio 多线程运行时（config.rs 现在通过 tokio_builder() 暴露 Tokio builder，pyo3 桥接与本地 create_runtime 共用它），DistributedRuntime 提供 namespace/component 层级与三种 DiscoveryBackend（Etcd/Kube/Mock）；config.rs 定义 RuntimeConfig 与环境变量配置。"
+          "topic": "lib/runtime 核心入口：Runtime 包装 tokio 多线程运行时（config.rs 通过 tokio_builder() 暴露 Tokio builder，pyo3 桥接与本地 create_runtime 共用它），DistributedRuntime 提供 namespace/component 层级与三种 DiscoveryBackend（Etcd/Kube/Mock）；config.rs 定义 RuntimeConfig 与环境变量配置。"
         },
         {
           "action": "keep",
@@ -286,7 +286,7 @@
           "topic": "Dynamo 的服务目录抽象：namespace → Component → Service → Endpoint 的层级，endpoint 注册如何写入 etcd，客户端如何按 tag 查找并订阅 endpoint 变化。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -316,7 +316,7 @@
           "topic": "engine.rs 定义 AsyncEngine/AsyncEngineUnary/AsyncEngineStream、ResponseStream 与类型擦除的 AnyAsyncEngine，配合 Data 类型让任意引擎能挂到 endpoint 上；对照 hello_world 的 Rust 示例理解。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2",
             "u3-l3"
@@ -347,7 +347,7 @@
           "topic": "请求如何在网络上传送：pipeline/network.rs 的请求面架构，ingress.rs/egress.rs 的出入端、codec.rs 的负载编解码、PushWorkHandler 与 RouterMode（RoundRobin/Direct）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -386,7 +386,7 @@
       "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l3",
             "u2-l1"
@@ -415,7 +415,7 @@
           "topic": "lib/llm 的装配层：entrypoint.rs 的 RouterConfig/EngineConfig 如何决定启动什么组件，entrypoint/input.rs 解析 CLI 参数，engines.rs 的 EngineDispatcher 装配引擎；Python 侧 make_engine 最终落到这里。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -445,7 +445,7 @@
           "topic": "service_v2.rs 的 HttpService/HttpServiceConfig/State 与 InflightPermit 并发控制，openai.rs/generate.rs 处理 OpenAI 兼容端点与流式生成；delta_common.rs 与 chat/completions 的 delta.rs 共享流式增量序列化器的生成器状态。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -478,7 +478,7 @@
           "topic": "请求进入引擎前的整形：preprocessor.rs 的 OpenAIPreprocessor 做模板/媒体计数/分词，media/loader.rs 负责图片等媒体的抓取与解码（经 url_validator 做 SSRF 等安全策略拒绝），local_model.rs 负责模型与 tokenizer 加载；结合 lib/tokens 与 lib/kv-hashing 理解 token 块与块哈希。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1",
             "u3-l2"
@@ -517,7 +517,7 @@
       "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1",
             "u2-l1"
@@ -546,7 +546,7 @@
           "topic": "dynamo.frontend 启动链：__main__.py 入口、frontend_args.py 的 FrontendConfig、main.py 构建 DistributedRuntime 并调用 dynamo.llm 的 make_engine 装配引擎与路由。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -574,7 +574,7 @@
           "topic": "前端最厚的文件 prepost.py：PreprocessResult、preprocess_chat_request 的请求整形与 StreamingPostProcessor 的 token 流后处理（工具调用解析、reasoning 提取）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l2"
           ],
@@ -758,7 +758,7 @@
             "examples/router/custom-policy-example/simple-filter-score-pick/src/lib.rs"
           ],
           "title": "filter–score–pick 策略框架与自定义路由插件",
-          "topic": "可插拔路由策略：selection/catalog.rs 的目录式注册、core/mod.rs 的策略执行模型（过滤→打分→挑选）、service.rs 现在直接从 WorkerSelectionPolicyRegistry 构造选点服务（ext-proc 等外部消费者共用）；lib/router-plugins/catalog 与 examples/router/custom-policy-example 演示如何写自己的策略。"
+          "topic": "可插拔路由策略：selection/catalog.rs 的目录式注册、core/mod.rs 的策略执行模型（过滤→打分→挑选）、service.rs 直接从 WorkerSelectionPolicyRegistry 构造选点服务（ext-proc 等外部消费者共用）；lib/router-plugins/catalog 与 examples/router/custom-policy-example 演示如何写自己的策略。"
         }
       ],
       "order": 6,
@@ -967,25 +967,28 @@
           "learning_goals": [
             "用 mocker 启动多角色假 worker 复现真实拓扑",
             "解释 grouped_scheduler 的调度模型",
-            "说出 sidecar 二进制与进程内接入的差别"
+            "说出 sidecar 二进制与进程内接入的差别",
+            "用统一 Dockerfile 构建三个 sidecar 可执行文件并用 dynamo-sidecar 包装器选择引擎"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "mocker/main.py",
             "lib/mocker engine",
+            "sidecar unified image",
             "sidecar main"
           ],
           "order": 4,
-          "practice_task": "用 dynamo.mocker 启动 2 prefill + 2 decode 的假集群，接上 frontend 与 kv 路由，跑通一条端到端请求并记录各组件日志中的关键事件。",
+          "practice_task": "用 dynamo.mocker 启动 2 prefill + 2 decode 的假集群，接上 frontend 与 kv 路由，跑通一条端到端请求并记录各组件日志中的关键事件；再用 lib/sidecar/Dockerfile 构建 CPU-only 镜像并通过 dynamo-sidecar 包装器分别打印 vllm/sglang/trtllm 三个可执行文件的 --help。",
           "source_files": [
             "components/src/dynamo/mocker/main.py",
             "lib/mocker/src/engine.rs",
             "lib/mocker/src/grouped_scheduler/dispatch.rs",
             "lib/sidecar/vllm/src/main.rs",
-            "lib/mocker/servers/vllm/src/main.rs"
+            "lib/sidecar/Dockerfile",
+            "lib/sidecar/README.md"
           ],
           "title": "mocker 与 sidecar：无 GPU 的全链路与旁路接入",
-          "topic": "测试与旁路接入两件武器：components mocker 用 aiconfigurator 性能模型模拟 worker（无 GPU 全链路），lib/mocker 是 Rust 全功能模拟引擎；lib/sidecar/* 则以独立进程方式把引擎接入 Dynamo。"
+          "topic": "测试与旁路接入两件武器：components mocker 用 aiconfigurator 性能模型模拟 worker（无 GPU 全链路），lib/mocker 是 Rust 全功能模拟引擎；lib/sidecar/* 以独立进程方式把引擎接入 Dynamo，本次起三个 sidecar（vllm/sglang/trtllm）统一由单个 CPU-only Dockerfile 构建，dynamo-sidecar 便捷入口把引擎短名映射到对应可执行文件。"
         },
         {
           "action": "new",
@@ -1016,7 +1019,41 @@
             "docs/fern/pages/use-cases/multimodal-serving/custom-vision-encoders.md"
           ],
           "title": "自定义视觉编码器：custom_encoder 扩展点",
-          "topic": "vLLM 多模态的自定义视觉编码器机制（本次新增 Qwen3.5 示例）：examples/custom_encoder 的独立编码 worker、components/src/dynamo/vllm/multimodal_utils/custom_encoder/adapter 的适配器工厂如何桥接不同模型的视觉塔，以及 chat 模板（templates/*.jinja）与启动脚本的配套方式。"
+          "topic": "vLLM 多模态的自定义视觉编码器机制：examples/custom_encoder 的独立编码 worker、components/src/dynamo/vllm/multimodal_utils/custom_encoder/adapter 的适配器工厂如何桥接不同模型的视觉塔，以及 chat 模板（templates/*.jinja）与启动脚本的配套方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l2",
+            "u8-l4"
+          ],
+          "filename": "u8-l6-sglang-native-generate-proxy.md",
+          "id": "u8-l6",
+          "learning_goals": [
+            "解释不透明信封（extra_args.sglang_tito）如何只替换路由所属字段重建 SGLang 原生请求",
+            "说出 NativeHttp::discover 的能力协商与 /health 就绪探测流程",
+            "说明 HttpEndpoint 如何从 gRPC 端点派生 HTTP 地址",
+            "对比原生 HTTP 代理路径与既有 gRPC 路径的适用场景与回落逻辑"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "NativeHttp",
+            "HttpEndpoint",
+            "能力协商与健康探测",
+            "engine.rs 装配"
+          ],
+          "order": 6,
+          "practice_task": "阅读 native_http.rs 后画出一条原生 /generate 请求的时序图：sidecar 收到不透明信封 → GetServerInfo 发现 HTTP 端口 → /health 探活 → 重建请求体（input_ids/rid/priority/bootstrap）→ 流式回传，并标出能力协商失败时回落 gRPC 路径的分支；无 SGLang 环境时可对照 native_http.rs 内置单测（如 readiness_probe_accepts_healthy_http_endpoint）静态验证各分支。",
+          "source_files": [
+            "lib/sidecar/sglang/src/native_http.rs",
+            "lib/sidecar/sglang/src/engine.rs",
+            "lib/sidecar/sglang/src/protocol.rs",
+            "lib/sidecar/sglang/src/client.rs",
+            "lib/sidecar/common/src/endpoint.rs",
+            "lib/sidecar/sglang/README.md"
+          ],
+          "title": "SGLang sidecar 原生 generate HTTP 代理（本次新增）",
+          "topic": "本次新增的重要机制：SGLang sidecar 把 Dynamo 原生 /generate 请求以不透明信封转发到 SGLang 自带的流式 HTTP /generate 端点——native_http.rs 的 NativeHttp 通过 GetServerInfo 获取 HTTP 端口、经 /health 就绪探测并确认 incremental-streaming-output 能力后才对外广播 /generate 能力，否则继续走原生 gRPC 路径；common/endpoint.rs 新增 HttpEndpoint 从 gRPC host 派生 HTTP 地址，engine.rs 在启动时完成发现与装配。"
         }
       ],
       "order": 8,

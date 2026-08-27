@@ -4,402 +4,412 @@
 
 学完本讲，你应该能够：
 
-1. 说清楚分块矩阵乘中「全局内存 → 共享内存」的搬运与计算为什么是天然串行的，以及这个串行关系如何限制 kernel 的执行效率。
-2. 掌握 CUDA 11 引入的设备端异步拷贝原语三件套：`__pipeline_memcpy_async`、`__pipeline_commit`、`__pipeline_wait_prior`，并能区分它们与主机端 `cudaMemcpyAsync` 的本质差别（一个在 kernel 内部、一个在 kernel 之外）。
-3. 读懂 `GSOverlap/globalToShmemAsyncCopy.cu` 中的 7 个 kernel 变体，理解「拷贝粒度（float vs float4）」与「流水深度（单级 vs 4 级）」是两个互相独立的优化维度。
-4. 用程序自带的 cudaEvent 计时（100 轮平均、GFlop/s 输出）和 nvprof，设计一个近似 2×2 的对照实验，回答：对本案例而言，拷贝粒度与流水深度哪个因素收益更大。
+1. 说清楚 u4-l1 那种「分块矩阵乘」循环里**装载与计算的天然串行关系**：装载 tile → `__syncthreads()` → 计算 → `__syncthreads()` → 装载下一个 tile，全局内存的长延迟让整个 block 在装载阶段干等。
+2. 掌握 CUDA 11 引入的流水线原语三件套：`__pipeline_memcpy_async`（发出异步拷贝）、`__pipeline_commit`（把已发出的拷贝打包成一个阶段）、`__pipeline_wait_prior(N)`（等待除最近 N 个阶段以外的拷贝全部完成），并知道它们对应的 C++ API（`nvcuda::experimental::pipeline`）。
+3. 读懂 GSOverlap 的 7 个矩阵乘 kernel，特别是三个被指定的对照：`MatrixMulAsyncCopySingleStage`（单级）、`MatrixMulAsyncCopyMultiStage`（四级旋转缓冲）、`MatrixMulAsyncCopyLargeChunk`（float4 大粒度拷贝）。
+4. 独立完成「流水深度 vs 拷贝粒度」的单变量实验，并能回答：对本案例，哪个因素收益更大。
 
-本讲是「GPU 内部深存储层次」单元的最后一站：u4-l1 用共享内存分块解决了**流量**问题（少读几遍全局内存），本讲进一步解决**时序**问题（搬运与计算不要互相干等）。
+本讲依赖 u4-l1（共享内存分块矩阵乘：`__shared__`、`__syncthreads()`、五拍循环），也用到 u1-l4 讲过的测量口径知识。GSOverlap 目录没有 test.sh，实验靠命令行参数 `-kernel=N` 驱动，本讲会自己补上实验脚本。
 
 ## 2. 前置知识
 
-### 2.1 分块矩阵乘的回顾（承接 u4-l1）
+### 2.1 复习：分块矩阵乘的五拍循环
 
-u4-l1 中我们已经见过分块（tiling）矩阵乘：每个 block 负责 C 的一个 16×16（或 32×32）子块，沿 K 维逐 tile 推进；每个 tile 先把 A、B 的子块搬进 `__shared__` 数组，块内所有线程复用这份数据做完乘加，再搬下一个 tile。它把全局内存流量从 \(2N^3\) 降到 \(2N^3/B\)。
-
-但 u4-l1 的 kernel 有一个没有展开的问题：**每个 tile 内部，「搬」和「算」是先后关系**。伪代码是：
+u4-l1 的 `shared_block` kernel 把 C 的每个 \(B\times B\) 子块交给一个 thread block，沿 k 方向逐 tile 推进：
 
 ```text
 for 每个 tile:
-    As[..] = A[..]; Bs[..] = B[..]   # 搬运：全局内存 → 寄存器 → 共享内存
-    __syncthreads()                   # 等全块搬完
-    Csub += As[ty][k] * Bs[k][tx]     # 计算：读共享内存做乘加
-    __syncthreads()                   # 等全块算完（防止下一轮覆写）
+    装载：As[ty][tx] = A[...];  Bs[ty][tx] = B[...]   // 全局内存 → 寄存器 → 共享内存
+    __syncthreads()                                    // 等所有线程装完
+    计算：Csub += As[ty][k] * Bs[k][tx]                // 从共享内存读，做 B 次乘加
+    __syncthreads()                                    // 等所有线程算完，防止下一轮装载覆写
 ```
 
-时间线上，搬运期间乘加单元在等待，计算期间搬运通路在空闲。这就是项目 README 给 GSOverlap 标注的反模式。
+注意时间上的硬性串行：**装载没完成前不能计算，计算没完成前不能装载下一块**（否则会覆写还在被读的 tile）。全局内存一次访问要数百个周期，这段时间里 SM 的计算单元基本闲置。这就是本讲要解决的反模式——根 README 对 GSOverlap 的一句话概括是「Global-shared memory copy takes much time（全局→共享内存拷贝太耗时）」，优化手段是「用 CUDA 11 的新函数 memcpy_async 加速数据搬运」，见 [README.md:L61-L64](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/README.md#L61-L64)。
 
-### 2.2 「经寄存器中转」是什么意思
+### 2.2 延迟隐藏的直觉：流水线与双缓冲
 
-普通的赋值语句 `As[ty][tx] = A[a + wA*ty + tx]` 在 GPU 上实际是两条访存指令：一条全局加载（LDG）把数据从显存读进**寄存器**，一条共享内存写（STS）把寄存器写进共享内存。数据必须「路过」寄存器，而寄存器是线程的执行资源——加载指令未完成前，这个线程的后续指令只能等。
+CPU 的指令流水线、GPU 的 warp 切换，本质都是同一件事：**把「等待」和「工作」重叠起来**。对 tile 循环来说，最直接的做法是双缓冲（double buffering）：
 
-CUDA 11 在 Ampere（SM 80）上提供了**异步拷贝指令**（PTX 中的 `cp.async`，硬件通路常称 LDGSTS）：数据从全局内存**直达共享内存**，不经过寄存器，而且指令发射后立刻返回，搬运在后台进行，线程可以继续干别的（比如先算上一个 tile）。编译器把它包装成本讲的主角——`__pipeline_*` 原语。在低于 SM 80 的架构上，这些原语仍然可用，只是编译器会把它们展开成等价的「LDG + STS」序列：**语义正确，但没有真正的异步效果**。这一点直接决定了本讲实验的硬件门槛（见 4.2.4）。
+```text
+缓冲区 0 装 tile i+1 的同时，用缓冲区 1 计算 tile i
+```
 
-### 2.3 需要区分的两个「异步」
+写成时间线（C=拷贝，X=计算）：
 
-| 名称 | 发生位置 | 数据通路 | 讲义 |
-| --- | --- | --- | --- |
-| `cudaMemcpyAsync` | 主机端 API，kernel 之外 | 主机内存 ↔ 显存 | u3-l3、u5-l1 |
-| `__pipeline_memcpy_async` | 设备端，kernel 内部 | 显存 → 共享内存 | **本讲** |
+```text
+串行：  C0 X0 C1 X1 C2 X2 ...     总时长 = K(C+X)
+双缓冲：C0 [X0∥C1] [X1∥C2] ...    总时长 ≈ C0 + (K-1)·max(C,X) + X
+```
 
-两者名字里都有 Async，但完全不是一个东西。本讲只讨论后者；u5-l1 会专门讲前者。
+理想情况下加速比上界为：
 
-### 2.4 本程序与前几个基准的两点不同
+\[
+S_{\max} \;=\; \frac{C + X}{\max(C,\,X)} \;\le\; 2
+\]
 
-- GSOverlap 目录里**没有 test.sh，也没有 .output.*.txt 归档**（可用 `ls GSOverlap/` 核验），所以本讲无法像 u4-l5 那样借用 Carina/Fornax 的云端结果，性能实践需要本地 NVIDIA GPU；无 GPU 时请做各模块给出的「源码阅读型」替代实践。
-- 它源自 CUDA Samples（主仓库 [README.md:L113-L115](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/README.md#L113-L115) 说明 GSOverlap、Conkernels、TaskGraph 三个基准依赖 Common 目录的 helper 头文件），因此计时方式不是本手册常见的 `read_timer_ms` 墙钟，而是 **cudaEvent 事件计时**（u3-l3 已见过）——这反而是更接近纯 kernel 时间的口径。
+即「装载与计算重叠」这一手段本身最多带来 2 倍。那么多级流水（本讲的 4 级）比双缓冲多买了什么？主要是**吸收延迟抖动**：全局内存返回时间并不均匀，缓冲越深，允许「在飞」的拷贝越多，一次偶发的长延迟越不至于让计算饿死。深度 \(d\) 的流水线最多同时保持 \(d\) 份在飞拷贝。
+
+### 2.3 memcpy_async：让拷贝绕开寄存器、绕开等待
+
+传统装载路径是「全局内存 → 寄存器 → 共享内存」：线程发起 load，**占用一个寄存器并挂起等数据到达**，再写共享内存。CUDA 11 的异步拷贝（async copy）提供两条改进：
+
+1. **数据通路绕开寄存器**：拷贝直通共享内存，不占寄存器，也不受该线程记分板（scoreboard）依赖链限制，可以同时挂起更多在飞读取。
+2. **完成时机可编程**：拷贝完成与否由 `__pipeline_wait_prior` 显式控制，线程发出拷贝后可以继续干别的（比如先算上一个 tile）。
+
+配套的 GSOverlap/README.md 写明：该示例在计算能力 8.0 及以上才使用真正的异步拷贝，同时演示 arrive-wait barrier 同步，见 [GSOverlap/README.md:L5-L9](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/README.md#L5-L9)；支持架构列表覆盖 SM 3.5～8.6（[GSOverlap/README.md:L13](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/README.md#L13)），前提是安装 CUDA Toolkit 11.1（[GSOverlap/README.md:L31-L33](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/README.md#L31-L33)）。**在低于 SM 8.0 的架构上，头文件会把这几个原语降级编译成普通的「load+store」，接口不变但不再真正异步**——这一点在解读实验数据时至关重要（见 4.4.4）。
+
+### 2.4 GSOverlap 的出身：CUDA Samples 单文件风格
+
+和 CoMem_AXPY 那种「三件套」不同，GSOverlap 整个基准是从 CUDA Samples 移植的**单文件**程序（根 README 说明 GSOverlap、Conkernels、TaskGraph 三个基准源自 CUDA Samples，所需 helper 头文件放在 Common 目录，见 [README.md:L115](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/README.md#L115)）。它没有 host/.c + device/.cu 的拆分，也没有 test.sh，计时用的是 **CUDA 事件**而非 `read_timer_ms` 墙钟——测量口径比其他基准更贴近纯 kernel 时间（对照 u1-l4 的口径讨论）。
 
 ## 3. 本讲源码地图
 
-| 文件 | 作用 |
-| --- | --- |
-| [GSOverlap/globalToShmemAsyncCopy.cu](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu) | 全部内容都在这一个文件：7 个矩阵乘 kernel 模板 + host 侧 `MatrixMultiply` 驱动函数 + `main` 命令行解析 |
-| [GSOverlap/README.md](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/README.md) | 样本自述：SM 8.0+ 才走真异步拷贝，需要 CUDA 11.1，支持架构列表到 SM 8.6 |
-| [GSOverlap/Makefile](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/Makefile) | CUDA Samples 风格多架构构建：`-I../Common`、SMS/GENCODE 生成、C++11 |
-| [README.md](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/README.md) | 项目总表：GSOverlap 的反模式是「全局-共享内存拷贝耗时」，对策是 CUDA 11 的 memcpy_async |
+| 文件 | 角色 | 关键内容 |
+|---|---|---|
+| [GSOverlap/globalToShmemAsyncCopy.cu](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L1-L951) | 全部源码（951 行） | 7 个矩阵乘 kernel + host 侧 `MatrixMultiply` + `main` |
+| [GSOverlap/README.md](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/README.md#L1-L74) | 样例说明 | 架构要求、CUDA 11.1、构建方法 |
+| [GSOverlap/Makefile](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/Makefile#L1-L371) | 构建（Samples 模板） | `-I../Common`、SMS 多架构、`--std=c++11`、`make run` |
+| Common/helper_cuda.h、helper_functions.h | CUDA Samples helper | `checkCudaErrors`、`findCudaDevice`、命令行解析 |
 
-程序结构总览（运行时可用 `-kernel=N` 选择，编号定义在 [globalToShmemAsyncCopy.cu:L56-L69](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L56-L69)）：
+7 个 kernel 用一个枚举编号，命令行 `-kernel=N` 选择（编号见 [GSOverlap/globalToShmemAsyncCopy.cu:L56-L69](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L56-L69)，帮助文本见 [L871-L883](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L871-L883)）：
 
-| 编号 | kernel 名 | 拷贝方式 | 粒度 | 流水级数 |
-| --- | --- | --- | --- | --- |
-| 0 | MatrixMulAsyncCopyMultiStageLargeChunk | 异步 | float4 | 4 |
-| 1 | MatrixMulAsyncCopyLargeChunk | 异步 | float4 | 1 |
-| 2 | MatrixMulAsyncCopyLargeChunkAWBarrier | 异步 | float4 | 1（awbarrier 同步） |
-| 3 | MatrixMulAsyncCopyMultiStage | 异步 | float | 4 |
-| 4 | MatrixMulAsyncCopySingleStage | 异步 | float | 1 |
-| 5 | MatrixMulNaive | 同步赋值 | float | — |
-| 6 | MatrixMulNaiveLargeChunk | 同步赋值 | float4 | — |
+| N | kernel | 拷贝方式 | 流水深度 | 本讲角色 |
+|---|---|---|---|---|
+| 5 | `MatrixMulNaive` | 普通 load/store（float） | 无 | 反模式基线 |
+| 4 | `MatrixMulAsyncCopySingleStage` | memcpy_async（float） | 1 级 | API 最小用例 |
+| 3 | `MatrixMulAsyncCopyMultiStage` | memcpy_async（float） | 4 级 | 深度变量 |
+| 6 | `MatrixMulNaiveLargeChunk` | 普通 load/store（float4） | 无 | 粒度对照组 |
+| 1 | `MatrixMulAsyncCopyLargeChunk` | memcpy_async（float4） | 1 级 | 粒度变量 |
+| 0 | `MatrixMulAsyncCopyMultiStageLargeChunk` | memcpy_async（float4） | 4 级 | 默认项（两者叠加） |
+| 2 | `MatrixMulAsyncCopyLargeChunkAWBarrier` | memcpy_async（float4） | 1 级 + arrive-wait barrier | 同步原语变体 |
 
-这张表就是本讲的实验设计图纸：编号 4/1/5/6 恰好构成「是否异步 × 是否 float4」的 2×2 对照，编号 0/3 再叠加「多级流水」维度。
+这张表就是一张实验设计图：**5↔4、4↔3、6↔1 隔离单个变量**（是否异步、深度、粒度），而 0 是两种优化的叠加。`blockSize` 全局固定为 16（[L73](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L73)），所有 kernel 都是 16×16=256 线程的 block。
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 反模式基线：MatrixMulNaive 与 NaiveLargeChunk
+### 4.1 天然串行：MatrixMulNaive 基线
 
 #### 4.1.1 概念说明
 
-任何优化都要有参照系。本基准的反模式就是 u4-l1 学过的经典分块矩阵乘（kernel 5，`MatrixMulNaive`），以及它的 float4 装载变体（kernel 6，`MatrixMulNaiveLargeChunk`）。两者的「搬」与「算」都是彻底串行的：线程发出装载指令后，必须等数据真正落到共享内存才能继续；反过来，下一轮装载也必须等所有线程算完，防止覆写还没读完的 tile。
+`MatrixMulNaive`（kernel=5）就是 u4-l1 讲过的分块矩阵乘，在本文中充当**反模式**：每个 tile 的装载走「全局内存 → 寄存器 → 共享内存」，且装载与计算被两道 `__syncthreads()` 栅栏隔成互不重叠的两段。它回答的问题是：不用任何异步手段，这个 16×16 tile 循环有多慢？
 
 #### 4.1.2 核心流程
 
-`MatrixMulNaive` 单个 tile 的时序：
-
 ```text
-── 装载（LDG→寄存器→STS，每线程 1 个 float × 2 矩阵）── 块栅栏 ── 乘加 16 步 ── 块栅栏 ── 装载下一 tile …
+每轮（沿 k 方向共 wA/16 轮）：
+  1. 每线程从全局内存读 A、B 各 1 个 float，写入 As/Bs   ← 数百周期延迟，期间不计算
+  2. __syncthreads()
+  3. 每线程从共享内存做 16 次乘加，累加到 Csub
+  4. __syncthreads()                                       ← 防下一轮装载覆写正在读的 tile
 ```
 
-若一个 tile 的搬运耗时为 \(T_{copy}\)、计算耗时为 \(T_{comp}\)，共 \(N_K\) 个 tile，则总时间近似为：
-
-\[
-T_{serial} \approx N_K \times (T_{copy} + T_{comp})
-\`
-
-理想情况下的流水线则应达到：
-
-\[
-T_{pipelined} \approx T_{fill} + N_K \times \max(T_{copy},\; T_{comp}), \qquad T_{fill} \approx D \times T_{copy}
-\]
-
-其中 \(D\) 是流水深度，\(T_{fill}\) 是开头「灌管线」的一次性代价。两条公式的差距就是本讲所有优化的收益上限。
+第 2、4 两道栅栏正是「串行关系」的物化：栅栏是 block 级的，最慢的线程不到，所有人都得等；而最慢的线程往往就卡在那次全局内存读取上。
 
 #### 4.1.3 源码精读
 
-装载与两道栅栏（u4-l1 已逐行讲过同样的模式，这里只看关键差异点）：
+装载与两道栅栏的实现在 [globalToShmemAsyncCopy.cu:L561-L585](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L561-L585)：每线程普通赋值 `As[threadIdx.y][threadIdx.x] = A[a + wA*ty + tx]`（[L568-L569](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L568-L569)），随后 [L572](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L572) 第一道栅栏；`#pragma unroll` 展开的 16 次乘加在 [L577-L580](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L577-L580)；[L585](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L585) 第二道栅栏。游标 `aBegin/aEnd/aStep/bBegin/bStep`（[L540-L553](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L540-L553)）是全部 7 个 kernel 共用的模板：A 沿行方向每轮前进 16 列（`aStep=16`），B 沿列方向每轮前进一整块（`bStep=16*wB`）。注意 B 的地址用 `b + wB*ty + tx` 计算——记住这个形式，4.5.3 会拿它对照 float4 版本。
 
-- [globalToShmemAsyncCopy.cu:L568-L572](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L568-L572)：`As[threadIdx.y][threadIdx.x] = A[...]` 同步赋值装载（每线程 1 个 float），随后 `__syncthreads()` 等全块搬完——这是「搬完才算」的栅栏。
-- [globalToShmemAsyncCopy.cu:L577-L585](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L577-L585)：`#pragma unroll` 的 16 步乘加之后又一道 `__syncthreads()`——注释写明这是防止下一迭代装载覆写还在被读的 As/Bs，即「算完才搬」的栅栏。
+#### 4.1.4 代码实践
 
-`MatrixMulNaiveLargeChunk` 只改装载方式，计算部分与 Naive 完全一样：
-
-- [globalToShmemAsyncCopy.cu:L636-L643](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L636-L643)：`t4x = threadIdx.x * 4`，只有 `t4x < BLOCK_SIZE`（即 threadIdx.x < 4，全块 1/4 的线程）参与装载，每人通过 `float4` 一次搬 16 字节（4 个 float）。16×16 的一行是 16 个 float = 64 字节 = 4 个 float4，正好由 x = 0..3 四个线程拼齐。
-
-这样 kernel 5 与 6 之间只有「装载粒度」一个变量；后面 4.4 节你会看到 kernel 1 与 4 之间同样是粒度变量——对照实验的骨架在这里就埋好了。
-
-#### 4.1.4 代码实践（源码阅读型，无需 GPU）
-
-1. **实践目标**：量化「每线程 1 个 float」与「1/4 线程各搬 16 字节」两种装载在指令条数上的差别。
+1. **实践目标**：拿到基线数据，并验证命令行参数系统。
 2. **操作步骤**：
-   - 阅读 L568-L569（Naive）与 L636-L643（NaiveLargeChunk），分别统计**单个 tile 内、单个 block** 为装满 As 与 Bs 需要发起多少条「装载语句」、多少线程参与。
-   - 用 `grep -n "t4x" GSOverlap/globalToShmemAsyncCopy.cu` 找出所有使用 4 元素粒度的 kernel，确认它们都满足 `BLOCK_SIZE % 4 == 0` 的注释要求（BLOCK_SIZE 此处为 16，见 L73）。
-3. **需要观察的现象**：Naive 每 tile 每线程 2 条装载语句（A、B 各一），256 线程共 512 次 4 字节搬运；LargeChunk 版只有 64 个线程干活，但每人 16 字节，总字节数相同（2×16×16×4B = 2KB）。
-4. **预期结果**：总搬运字节数不变，但装载指令数减少为 1/4，且单条指令从 4 字节变为 16 字节对齐访问——这对 warp 内合并访问（u4-l2）更友好。
-5. 本实践为纯阅读推算，结论「待本地验证」的部分是它对实际耗时的贡献（留到综合实践用 `-kernel=5` vs `-kernel=6` 实测）。
+
+   ```bash
+   cd GSOverlap
+   make                       # 需要 CUDA 11+、GCC ≥ 5（Makefile 会自动检查）
+   ./globalToShmemAsyncCopy -kernel=5    # Naive 基线
+   ./globalToShmemAsyncCopy -kernel=6    # Naive + float4
+   ./globalToShmemAsyncCopy              # 不带参数 = kernel=0（默认项）
+   ```
+
+3. **需要观察的现象**：每轮输出三行——`Running kernel = N - 名字`、`Performance= xxx GFlop/s, Time= x.xxx msec, Size= 524288 Ops, WorkgroupSize= 256 threads/block`、`Result = PASS`。默认矩阵为 640×640（`matrixBlock=32`，`10*2*32`，见 [L889-L891](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L889-L891)），单次矩阵乘 \(2\times 640^3 = 524{,}288{,}000\) 次浮点运算，与 `Size` 一致。
+4. **预期结果**：7 个 kernel 全部 `Result = PASS`；`Time=` 是 CUDA 事件对 100 次迭代取的平均（见 4.3.3），数值量级在毫秒级。具体快慢排序**待本地验证**——本文所有性能判断都需要你在自己的 GPU 上复现。若编译报错找不到 `helper_cuda.h`，检查是否在 GSOverlap 目录内执行 make（Makefile 用 `-I../Common` 引用 Common，见 [Makefile:L280](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/Makefile#L280)）。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：`MatrixMulNaive` 的乘加循环里为什么必须有两道 `__syncthreads()`，而去掉第二道会怎样？
+**练习 1**：Naive kernel 里如果把第二道 `__syncthreads()`（[L585](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L585)）删掉，可能出什么错？
+**答案**：下一轮迭代里快的线程会开始写 `As/Bs` 的新 tile，而慢的线程可能还在读旧 tile 计算乘加——写与读竞争，读到新旧混合的数据，结果错误。这正是流水线版本要靠「旋转缓冲」才能删掉这道栅栏的原因（见 4.4）。
 
-**答案**：第一道保证「搬完才算」（否则别的线程可能读到旧 tile）；第二道保证「算完才搬」（否则快的线程开始写下一个 tile，会把慢线程还在读的 As/Bs 覆盖掉）。去掉第二道会产生块内数据竞争，结果错误。
-
-**练习 2**：`MatrixMulNaiveLargeChunk` 中，如果 `BLOCK_SIZE` 是 14（不能被 4 整除），`t4x < BLOCK_SIZE` 的守卫会导致什么问题？
-
-**答案**：`threadIdx.x*4` 会越过 `BLOCK_SIZE-1` 后仍可能小于 BLOCK_SIZE 的组合不再整齐：一行 14 个 float 无法用 4 个 float4 严丝合缝地覆盖，最后一个 float4 会越出该行边界（读到下一行）甚至越出共享内存数组范围。所以源码多处注释 `Requires BLOCK_SIZE % 4 == 0`（如 [L80](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L80)、[L180](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L180)、[L272](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L272)）。
+**练习 2**：为什么栅栏是 block 级的 `__syncthreads()` 而不是线程各自等待自己的拷贝完成？
+**答案**：因为数据是**跨线程共享**的：线程 (0,0) 计算时要读线程 (3,5) 装进 `Bs[3][5]` 的元素。每线程只保证自己那份装载完成没有意义，必须等 block 内所有 256 个线程都装完。这也是 4.2.3 强调「pipeline 是每线程私有的、跨线程可见性仍靠 `__syncthreads()`」的原因。
 
 ### 4.2 `__pipeline` 流水线原语
 
 #### 4.2.1 概念说明
 
-异步拷贝不是一条孤立的指令，而是一套「发起—打包—等待」的协作协议，由头文件 `cuda_pipeline.h` 提供的三个原语组成：
+流水线原语是 CUDA 11 对 memcpy_async 的底层 C 接口，声明在 `<cuda_pipeline.h>`（本文件 [L45](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L45) 引入；arrive-wait barrier 头文件仅在 `__CUDA_ARCH__ >= 700` 时引入，见 [L46-L48](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L46-L48)）。三件套语义：
 
-- **`__pipeline_memcpy_async(dst, src, size)`**：发起一次从全局内存（`src`）到共享内存（`dst`）的异步拷贝，`size` 为字节数（本例中是 4 或 16）。调用立即返回，不保证数据已到位。单次拷贝的字节数较小，float 对应 4 字节、float4 对应 16 字节。
-- **`__pipeline_commit()`**：把「上次 commit 以来」发出的所有异步拷贝打包成一个**组（stage）**。此后它们作为一个整体被跟踪。
-- **`__pipeline_wait_prior(N)`**：等待，直到**最多只剩最近 N 个组**还没完成。`__pipeline_wait_prior(0)` 就是「等全部完成」；`__pipeline_wait_prior(3)` 则允许最新的 3 个组继续在后台飞行，只保证第 4 新的组已就绪——这正是多级流水的钥匙。
+| 原语 | 语义 |
+|---|---|
+| `__pipeline_memcpy_async(dst, src, size)` | 发起一次「全局内存 → 共享内存」异步拷贝（dst 须指向共享内存）。**只是入队，不等待** |
+| `__pipeline_commit()` | 把该线程自上次 commit 以来发出的所有 memcpy_async 打包成一个「阶段」（stage） |
+| `__pipeline_wait_prior(N)` | 等待该线程**除最近 N 个阶段以外**的全部阶段完成（N=0 即全部等完） |
 
-「组」的编号是每次 commit 递增的，所以「等除最近 N 个之外的全部」等价于「我需要的那个数据已经到了」。另外还有一个隐含约定：`__pipeline_wait_prior` 只约束**本线程**发起的拷贝；要让**全块**都看到数据，仍需 `__syncthreads()`。
+关键心智模型：**每个线程有一条自己的流水线**。commit 数的是「该线程」的阶段；wait_prior 等的也是「该线程」的阶段。线程 A 的 wait_prior 不能保证线程 B 的拷贝完成——跨线程的可见性必须另配 `__syncthreads()`（或 4.5.3 的 awbarrier）。
+
+同一套功能还有 C++ API：`nvcuda::experimental::pipeline` 对象的 `memcpy_async(dst, src, pipe)` / `pipe.commit()` / `pipe.wait_prior<N>()` / `pipe.commit_and_wait()`。源码用宏 `USE_CPP_API`（[L71](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L71)，默认 0）在两套 API 之间切换，命名空间别名见 [L54](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L54)。两套 API 生成的机器码是等价的，本文以 C 版为主讲解。
 
 #### 4.2.2 核心流程
 
-单级（拷贝与计算不重叠，只是免寄存器中转）：
+单级流水（发出后立刻等完）的用法骨架：
 
 ```text
-memcpy_async(A...) ; memcpy_async(B...)   # 发起
-commit()                                  # 打包成 1 个组
-wait_prior(0)                             # 等这组完成
-__syncthreads()                           # 等全块完成
-计算本 tile
+__pipeline_memcpy_async(dst_smem, src_gmem, size);   // 入队（可多次）
+__pipeline_commit();                                  // 打包成 1 个阶段
+__pipeline_wait_prior(0);                             // 等所有阶段完成 → 此后共享内存可读
+__syncthreads();                                      // 等块内其他线程也都完成
 ```
 
-多级（拷贝与计算重叠，D = 4 级旋转缓冲）：
+多级流水的用法骨架（深度 d=4）：
 
 ```text
-每轮：
-    预取循环：把领先窗口补满（最多领先 D 个 tile），每个 tile commit 一次
-    wait_prior(D-1)        # 最新 D-1 个组可以还在飞，我要算的这组必须已完成
-    __syncthreads()
-    计算第 i 个 tile（用第 i%D 级缓冲）
-    # 注意：计算后不再需要第二道 __syncthreads（见 4.5）
+预取循环：对未来的 tile 发 memcpy_async，每 tile 一次 commit
+计算循环：__pipeline_wait_prior(d-1)   ← 只要求「最近的 d-1 个阶段」之外的全部完成
+          __syncthreads()
+          用缓冲 j = i mod d 计算 tile i
 ```
+
+`wait_prior(d-1)` 的妙处：计算 tile i 只需要 tile i 的数据（它在较早的阶段里），**不需要等为 tile i+1、i+2… 预取的阶段**——它们正是「最近 d-1 个阶段」，允许继续在飞。
 
 #### 4.2.3 源码精读
 
-- [globalToShmemAsyncCopy.cu:L44-L48](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L44-L48)：`#include <cuda_pipeline.h>` 引入 `__pipeline_*` 原语；`cuda_awbarrier.h` 只在 `__CUDA_ARCH__ >= 700` 时引入，供 kernel 2 使用。
-- [globalToShmemAsyncCopy.cu:L54](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L54)：`namespace nvcuda_namespace = nvcuda::experimental;` 是 C++ 风格 API 的别名。
-- [globalToShmemAsyncCopy.cu:L71](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L71)：`#define USE_CPP_API 0` 是一个编译期开关。置 0 用上面的 C 风格内建原语（默认）；置 1 则每个 kernel 改用 `nvcuda::experimental::pipeline` 对象，接口变为 `memcpy_async(dst, src, pipe)` / `pipe.commit()` / `pipe.wait_prior<N>()`，例如多级版本中的 [L132-L151](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L132-L151)（`#if USE_CPP_API` 分支与 `#else` 分支一一对应）。两条路线语义相同，本讲以默认的 C 风格为主。
+三个 kernel 中的原语调用点（对照阅读）：
 
-#### 4.2.4 代码实践（环境验证型）
+- SingleStage（float 粒度）：[L402-L406](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L402-L406)——两次 memcpy_async（A、B 各一）+ `commit` + `wait_prior(0)`。
+- LargeChunk（float4 粒度）：[L235-L239](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L235-L239)——同样的三步，只是 size 从 `sizeof(float)` 换成 `sizeof(float4)`。注意这三行包在 `if (t4x < BLOCK_SIZE)` 里，**只有 64 个装载线程执行 commit/wait**，其余 192 个线程直接去 `__syncthreads()` 等。这没有问题：pipeline 是每线程私有的，不装东西的线程无需 commit；数据到达块内其他人手上靠的是随后的 `__syncthreads()`。
+- MultiStage（4 级）：[L488-L489](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L488-L489)（发出）→ [L495](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L495)（commit，注意它在 `if (aStage <= aEnd)` 之外——**即使本轮没有发出任何拷贝也要 commit 一个空阶段**，保证所有线程的阶段计数对齐）→ [L501](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L501)（`wait_prior(maxPipelineStages-1)`，由**全部**线程一致执行）。
 
-1. **实践目标**：确认你的工具链与架构组合能否走「真异步」路径。
-2. **操作步骤**：
-   - `nvcc --version` 确认 CUDA ≥ 11（本样本按 CUDA 11.1 编写，见 [GSOverlap/README.md:L33](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/README.md#L33)）。
-   - 阅读 [GSOverlap/Makefile:L313-L332](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/Makefile#L313-L332)：注意默认 `SMS` 列表（x86 上是 `35 37 50 52 60 61 70 75`）**并不包含 80/86**，最高架构只生成 compute_75 的 PTX 用于前向兼容。为 compute_75 编译时，`__pipeline_memcpy_async` 会被展开成等价的同步装载序列；要让编译器生成 Ampere 的原生异步拷贝指令，需显式指定目标架构。
-   - 若你的 GPU 是 SM 80+（如 A100），用 `make SMS="80"`（或 `make SMS="80 86"`）重新编译；其他架构直接 `make` 即可，语义正确但异步收益有限（待本地验证）。
-3. **需要观察的现象**：构建日志会打印 GENCODE 参数；`make SMS="80"` 后产物只在 SM 80 GPU 上可直接运行。
-4. **预期结果**：在非 Ampere GPU 上本基准仍能跑通并 PASS（原语有等价降级实现），但异步/多级版本相对 Naive 的加速会明显缩水——这正是「反模式 vs 优化」的演示价值受硬件代际影响的例子。
+由此提炼两条使用守则：**commit 与 wait_prior 的执行次数必须与「该线程流水线里打包的阶段」一一对应；被全体线程共同经过的 wait_prior 应当在所有线程上执行相同的次数**（MultiStage 把 commit 放在守卫外就是为了这个）。
+
+#### 4.2.4 代码实践
+
+1. **实践目标**：验证两套 API 等价，并体会「编译期开关」这种代码组织。
+2. **操作步骤**：把 [L71](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L71) 的 `#define USE_CPP_API 0` 改成 `1`，重新 `make`，运行 `-kernel=4` 与 `-kernel=3`（改完记得改回去，不要把修改提交进仓库）。
+3. **需要观察的现象**：能否编译通过、`Result` 是否仍 PASS、`Time=` 与 C 版相差多少。
+4. **预期结果**：功能等价、性能差异在噪声范围内；AWBarrier kernel（kernel=2）不受这个开关影响，它本来就只用 C++ API。**待本地验证**。若编译失败，多半是 CUDA 版本对 `nvcuda::experimental` 命名空间的支持问题（CUDA 11.0/11.1 为 `nvcuda::experimental`，更新版本改名 `nvcuda`），这本身就是有价值的观察。
+5. **无 GPU 环境替代**：只做编译实验 `nvcc -I../Common --std=c++11 -arch=sm_80 -c globalToShmemAsyncCopy.cu -o /tmp/t.o`——按 u1-l2 的结论，编译不需要 GPU。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：`__pipeline_wait_prior(0)` 与 `__pipeline_wait_prior(3)` 的区别是什么？后者为什么能带来流水线效果？
+**练习 1**：`__pipeline_wait_prior(3)` 是「等最近 3 个阶段」还是「等除最近 3 个之外的所有阶段」？
+**答案**：后者。N 是**允许继续在飞**的阶段数，等待的是更早的全部阶段。所以 N=0 才是「全部等完」，N 越大越宽松。MultiStage 用 `maxPipelineStages-1`，就是允许 4 个阶段里最新的 3 个还在飞。
 
-**答案**：`wait_prior(0)` 等待本线程发起的全部拷贝组完成，此后没有任何拷贝在飞行，等价于同步屏障；`wait_prior(3)` 允许最近 3 个组继续飞行，只保证更早的组（也就是马上要计算的那个 tile）就绪。这样当前 tile 在做乘加时，后面 3 个 tile 的数据还在后台搬运，搬运延迟被计算掩盖。
+**练习 2**：为什么 SingleStage 用 `wait_prior(0)`，MultiStage 用 `wait_prior(maxPipelineStages-1)`？
+**答案**：SingleStage 只有一份缓冲，本轮计算要用本轮装载的数据，必须等完（0 个在飞）。MultiStage 有 4 份旋转缓冲，计算 tile i 时只需 tile i 完成，而为未来 tile 预取的阶段可以继续在飞，所以放宽到允许 3 个未完成。
 
-**练习 2**：为什么 `__pipeline_wait_prior` 之后还需要 `__syncthreads()`？
+**练习 3**：`__pipeline_memcpy_async` 的目的地址为什么必须指向共享内存？
+**答案**：这条指令的数据通路是「全局内存直通共享内存」（SM 8.0 上对应 LDGSTS 类指令），设计目的就是绕开寄存器。主机内存、常量内存等不在这条通路上。
 
-**答案**：wait_prior 只跟踪**本线程** commit 的组；计算要读的是**整个 block** 256 个线程共同装满的 As/Bs，必须用块级栅栏等所有线程的拷贝都完成，否则会读到别的线程尚未装好的元素。
-
-### 4.3 MatrixMulAsyncCopySingleStage：单级异步流水
+### 4.3 MatrixMulAsyncCopySingleStage：单级流水
 
 #### 4.3.1 概念说明
 
-kernel 4 是最小改动版：保持 Naive 的「单份 tile 缓冲 + 双栅栏」结构，只把装载语句换成 `__pipeline_memcpy_async` + `commit` + `wait_prior(0)`。它是理解异步原语的最好起点，因为它**没有**流水线效果——每轮发起拷贝后立刻等它完成，搬运与计算依旧串行。它的价值在于隔离出「异步通路本身」（免寄存器中转、指令语义）这一个变量：kernel 4 对 kernel 5 的差异 = 异步原语替换同步赋值；其余一切不变。
+`MatrixMulAsyncCopySingleStage`（kernel=4）是 memcpy_async 的**最小用例**：结构上与 Naive 完全同构（一份缓冲、两道栅栏、逐 tile 串行），只把装载那一行换成了「memcpy_async + commit + wait_prior(0)」。它**没有跨迭代的重叠**——发出后立刻等待，拷贝与计算仍然交替执行。那它买了什么？
+
+1. **寄存器直通**：装载不再经过线程寄存器，每线程省下 A、B 各一个寄存器的占用与依赖链；
+2. 在 SM 8.0+ 上走专用异步拷贝通路，**单个线程可以同时挂起多个在飞拷贝**而不被记分板串住（本 kernel 每线程只挂 2 个，收益有限，但为多级流水铺路）。
+
+它是理解「异步」二字的两面性的最佳教具：**发出异步 ≠ 获得重叠**；重叠要靠缓冲编排（4.4）实现。
 
 #### 4.3.2 核心流程
 
 ```text
 for 每个 tile:
-    每线程发起 2 次 4 字节异步拷贝（As、Bs 各一）
-    commit(); wait_prior(0)        # 等自己的拷贝完成
-    __syncthreads()                # 等全块
-    16 步乘加
-    __syncthreads()                # 防覆写（缓冲只有一份，仍需两道栅栏）
-写回 C
+    memcpy_async(As[ty][tx] ← A[...], 4B)      # 每线程 1 个 float
+    memcpy_async(Bs[ty][tx] ← B[...], 4B)
+    commit(); wait_prior(0)                     # 等自己的两份拷贝完成
+    __syncthreads()                             # 等 block 内 256 份全到齐
+    16 次乘加（unroll）
+    __syncthreads()                             # 防下一轮覆写（仍只有一份缓冲）
 ```
 
-注意它保留了第二道 `__syncthreads()`：因为共享缓冲只有一份，下一轮装载会写同一个 As/Bs，必须等全块读完。
+与 Naive 的唯一差别在第一拍：装载从「同步赋值」变成「异步发出 + 显式等待 + 栅栏」。
 
 #### 4.3.3 源码精读
 
-- [globalToShmemAsyncCopy.cu:L353-L363](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L353-L363)：kernel 签名与单份共享内存声明 `__shared__ float As[BLOCK_SIZE][BLOCK_SIZE]`（无 stage 维度）。
-- [globalToShmemAsyncCopy.cu:L392-L407](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L392-L407)：装载主体。`A_float`/`B_float` 仍是每线程 1 个 float 的地址；`__pipeline_memcpy_async(&As[threadIdx.y][threadIdx.x], A_float, sizeof(float))` 把它交给异步通路，随后 `__pipeline_commit()` 打包、`__pipeline_wait_prior(0)` 等待完成。
-- [globalToShmemAsyncCopy.cu:L410-L424](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L410-L424)：乘加与第二道栅栏，与 Naive 的 L411/L424 结构完全对应——确认「除装载外一切不变」。
+kernel 主体在 [globalToShmemAsyncCopy.cu:L353-L431](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L353-L431)。装载块（[L391-L408](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L391-L408)）里先取好两个 float 源地址 `A + a + wA*ty + tx` 与 `B + b + wB*ty + tx`（[L392-L393](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L392-L393)），随后三连调用（[L402-L406](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L402-L406)）对齐 4.2.2 的骨架。两道栅栏与计算在 [L410-L424](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L410-L424)。与 LargeChunk 不同，这里**没有** `t4x` 守卫——256 个线程人人装载自己的 1 个 float，commit/wait 也人人执行。
+
+host 侧计时也值得一读：[MatrixMultiply](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L678-L865) 先 warmup 一次（switch 在 [L734-L758](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L734-L758)，随后 [L761](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L761) 同步），然后在同一条非阻塞流上把同一 kernel 连发 `nIter = 100` 次（[L765-L796](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L765-L796)），用 `cudaEventRecord` 夹住这段（[L768](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L768) / [L799-L802](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L799-L802)），`cudaEventElapsedTime` 除以 100 得到每次的毫秒数（[L804-L820](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L804-L820)）。这符合 u2-l4 总结的「warmup + 多轮平均」方法论，但注意它**不含** cudaMalloc/cudaMemcpy（都在计时区外），事件又在设备侧打点——所以这个 `Time=` 明显比 CoMem 系列的墙钟更接近纯 kernel 时间。
 
 #### 4.3.4 代码实践
 
-1. **实践目标**：量化「同步赋值 → 异步原语（立即等待）」这一步替换的净收益。
-2. **操作步骤**（需 GPU）：
-   - `cd GSOverlap && make`
-   - `./globalToShmemAsyncCopy -kernel=5 -wA=640 -hA=640 -wB=640 -hB=640`，记录输出的 `Performance= ... GFlop/s, Time= ... msec`。
-   - `./globalToShmemAsyncCopy -kernel=4 -wA=640 -hA=640 -wB=640 -hB=640`，同样记录。
-   - 可选：`nvprof ./globalToShmemAsyncCopy -kernel=4 ...` 观察 GPU activities 中 kernel 名与耗时，和程序自打印对照。
-3. **需要观察的现象**：两组输出的 `Result = PASS` 都应出现；GFlop/s 有差异。
-4. **预期结果**：在没有真异步通路的架构上，两者可能接近（都退化为 LDG+STS）；在 SM 80+ 上 kernel 4 应不慢于 kernel 5。具体差距**待本地验证**——本基准目录无历史归档可查。
-5. 无 GPU 替代：对比阅读 L392-L407 与 L568-L569，列出两条路线各自的指令构成（异步：发起+打包+等待；同步：加载+存储），并解释为什么「立即 wait_prior(0)」使流水线深度为 1。
+1. **实践目标**：隔离「是否使用 memcpy_async」这一个变量。
+2. **操作步骤**：`./globalToShmemAsyncCopy -kernel=5` 与 `-kernel=4` 各跑 3 次（排除 GPU 频率扰动），记录各自的 `Time=` 与 `Performance=`；再用 nvprof 复核：`nvprof ./globalToShmemAsyncCopy -kernel=4`（概览表中该 kernel 的 Calls 应为 101：warmup 1 次 + 计时 100 次，可反向验证程序结构——u1-l4 的技巧）。
+3. **需要观察的现象**：两个 kernel 的耗时段位；nvprof 里 Calls 列是否 101。
+4. **预期结果**：在 SM 8.0 以下的 GPU 上两者应**几乎一样快**（头文件降级为普通 load/store）；在 Ampere 及以上 SingleStage 略占优（寄存器与记分板减压），但差距应明显小于多级流水带来的差距。以上为基于 2.3 机理的**预期，待本地验证**。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：SingleStage 版本每轮有两道 `__syncthreads()`，4.5 节的 MultiStage 版本计算后却没有第二道。为什么单级版不能省？
+**练习 1**：SingleStage 已经用了 `__pipeline_memcpy_async`，为什么说它「没有重叠」？
+**答案**：因为它 `wait_prior(0)` 紧跟 `commit`，拷贝必须完成后才继续；时间线仍是 C0 X0 C1 X1……异步只体现在「数据通路」（绕开寄存器），不体现在「时序」。
 
-**答案**：单级版只有一份 As/Bs，下一轮装载会直接覆写同一块缓冲，必须先等全块读完；多级版有 4 份旋转缓冲，下一轮写的是不同的 stage，同一 stage 要到 4 轮之后才会被重写，期间已经历多次轮首栅栏，安全性由「缓冲距离」保证。
+**练习 2**：它仍保留第二道 `__syncthreads()`（[L424](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L424)），与 MultiStage 删掉这道栅栏相比，谁每个 tile 多付一次块级栅栏？
+**答案**：SingleStage 每轮两道栅栏（[L411](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L411)、[L424](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L424)）；MultiStage 每轮只有一道。因为 SingleStage 只有一份缓冲，下一轮装载会覆写本轮还在读的数据，栅栏不可省；MultiStage 的下一轮装载写的是**另一份**缓冲。
 
-**练习 2**：如果误把 `__pipeline_wait_prior(0)` 写成 `__pipeline_memcpy_async` 之后、`__pipeline_commit()` 之前，会发生什么？
-
-**答案**：wait_prior 等待的对象是「已 commit 的组」。尚未 commit 的拷贝请求不属于任何组，等待行为与未完成的组无关——语义上要么编译不通过要么等待范围错误，正确顺序必须是「发起 → commit → wait」。这也是为什么三个原语总是一起出现。
-
-### 4.4 MatrixMulAsyncCopyLargeChunk：float4 拷贝粒度
+### 4.4 MatrixMulAsyncCopyMultiStage：四级旋转缓冲流水线
 
 #### 4.4.1 概念说明
 
-kernel 1 在 kernel 4 的基础上只改一个变量：**每次异步拷贝的字节数**，从 4 字节（float）提升到 16 字节（float4）。参与装载的线程从「全块 256 人」变为「1/4 线程（threadIdx.x < 4）」，每人负责 4 个连续 float。它与 kernel 4 构成「流水深度同为 1，粒度不同」的对照；与 kernel 6（同步 float4）构成「粒度相同，是否异步」的对照。三对关系拼起来就是 2×2 因子实验。
+`MatrixMulAsyncCopyMultiStage`（kernel=3）是本讲的主角：把 2.2 的双缓冲推广为 **4 级旋转缓冲（rotating buffer）**。共享内存里开 4 份 tile 缓冲，编号 \(j = i \bmod 4\)；第 \(i\) 轮计算读缓冲 \(j\)，同时预取循环把第 \(i{+}1 \sim i{+}4\) 块的数据往其他缓冲里灌。计算与拷贝在时间上重叠，且**省掉了计算后的那道栅栏**——下一轮装载写的是不同的缓冲，不存在覆写竞争。
 
-另外，kernel 2（`AsyncCopyLargeChunkAWBarrier`）是它的孪生版本，只是把同步机制从 `__syncthreads()` 换成 arrive-wait barrier（SM 7.0+ 的实验 API，`main` 里会检查架构并拒绝在低版本上运行），本讲只做简介。
+代码用**两套游标**管理「算到哪 / 装到哪」：
+
+- `(a, b, i)`：计算序列的游标，每轮前进一个 tile；
+- `(aStage, bStage, iStage)`：预取序列的游标，始终领先计算游标最多 4 个 tile。
 
 #### 4.4.2 核心流程
 
 ```text
-for 每个 tile:
-    if threadIdx.x < 4:                     # t4x < BLOCK_SIZE
-        把 As/Bs 第 threadIdx.y 行重解释为 4 个 float4
-        memcpy_async(16B) × 2（A、B 各一）
-        commit(); wait_prior(0)
-    __syncthreads()
-    16 步乘加
-    __syncthreads()
-写回 C
+for (计算游标 a, i = 0, ..., T-1):                    # T = wA/16 个 tile
+    预取循环：while aStage ≤ a + 4 个 tile:
+        若 aStage ≤ aEnd：memcpy_async(As[iStage%4] ← tile[iStage])，同 B
+        commit()                                       # 每 tile 一个阶段（含空阶段）
+    wait_prior(3)                                      # 除最近 3 个阶段外全部完成
+    __syncthreads()                                    # 块内对齐
+    j = i % 4
+    用 As[j]/Bs[j] 做 16 次乘加                        # 与下一轮的预取重叠
+    # 注意：这里没有第二道 __syncthreads()
 ```
 
-「重解释」是关键技巧：`reinterpret_cast<float4*>(&As[ty][t4x])` 把 `float` 数组的一段地址当作 `float4` 指针使用，前提是这段地址 16 字节对齐且长度是 4 的倍数——这就是各处 `BLOCK_SIZE % 4 == 0` 注释的由来。
+稳态推演（T 为 tile 总数，tile 记作 0..T-1）：
+
+| 轮次 i | 本轮新提交 | 累计阶段数 | wait_prior(3) 保证完成 | 至多仍在飞 | 计算缓冲 j=i%4（内容） |
+|---|---|---|---|---|---|
+| 0 | tile 0–4 | 5 | tile 0,1 | tile 2,3,4 → 缓冲 2,3,0 | 0（tile 0） |
+| 1 | tile 5 | 6 | tile 0–2 | tile 3,4,5 → 缓冲 3,0,1 | 1（tile 1） |
+| 2 | tile 6 | 7 | tile 0–3 | tile 4,5,6 → 缓冲 0,1,2 | 2（tile 2） |
+| 3 | tile 7 | 8 | tile 0–4 | tile 5,6,7 → 缓冲 1,2,3 | 3（tile 3） |
+| 4 | tile 8 | 9 | tile 0–5 | tile 6,7,8 → 缓冲 2,3,0 | 0（tile 4） |
+
+可以看到预取窗口是「当前 + 向前 4 块」共 **5 块 tile 映射到 4 份缓冲**；每轮计算时总有约 3 份拷贝在飞、1 份正在算、其余已完成。
 
 #### 4.4.3 源码精读
 
-- [globalToShmemAsyncCopy.cu:L208-L227](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L208-L227)：`t4x = threadIdx.x * 4`；四个 `reinterpret_cast` 分别把**共享内存目的地址**与**全局内存源地址**都转成 `float4*`。注意 L218-L220 的注释保留了「旧写法：每线程一个元素」，方便对照。
-- [globalToShmemAsyncCopy.cu:L235-L240](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L235-L240)：`__pipeline_memcpy_async(A4s, A4, sizeof(float4))`——size 参数从 4 变 16，随后仍是 `commit()` + `wait_prior(0)` 的单级协议。
-- [globalToShmemAsyncCopy.cu:L243-L257](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L243-L257）：栅栏与乘加结构同 SingleStage。
-- AWBarrier 变体：[globalToShmemAsyncCopy.cu:L322-L329](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L322-L329) 用 `pipe.arrive_on(barrier)`（拷贝完成时屏障计数自动 +1）替代 `commit+wait`，再用 `barrier.arrive_and_wait()` 替代 `__syncthreads()`；架构守卫在 [L271](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L271) 与 [L934-L940](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L934-L940)（低于 SM 7.0 直接退出）。
-
-**一个值得批判性阅读的细节**：本 kernel 中 B 的源地址写的是 `B[a + wA * threadIdx.y + t4x]`（[L227](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L227)，用的是 **a/wA**），而 Naive 版本用的是 `B[b + wB * threadIdx.y + threadIdx.x]`（[L569](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L569)，**b/wB**）。`a` 起于 `wA*16*blockIdx.y` 而 `b` 起于 `16*blockIdx.x`，地址并不相同。它之所以不影响校验，是因为 host 侧把 B 全部初始化为常量 `valB`（[L692-L694](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L692-L694)），读 B 的任何位置值都一样。这是「常量初始化 + 常量参考答案」的校验设计会掩盖访存差异的活例子（与 u2-l4 讲过的弱校验一脉相承）。
+- 4 份缓冲与深度常量：`constexpr size_t maxPipelineStages = 4`（[L439](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L439)），`__shared__ float As[4][16][16]`、`Bs` 同（[L443-L447](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L443-L447)）。4 份 × 2 个数组 × 1KB = 8KB 共享内存/block（单级版只要 2KB）——**深度是用共享内存容量买的**。
+- 双游标循环头：外层 for 一次性声明 `(a, b, i, aStage, bStage, iStage)` 六个游标（[L471](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L471)）；内层预取 for 的上界是 `aStage <= a + aStep * maxPipelineStages`（[L475](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L475)）——即领先当前计算 tile 4 块。
+- 发出与打包：守卫 `if (aStage <= aEnd)` 内每线程对 A、B 各发一次 4 字节拷贝（[L477-L490](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L477-L490)），commit 在守卫外（[L495](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L495)）——越界轮次提交空阶段，保证阶段计数一致（4.2.3 的守则）。
+- 等待与同步：`__pipeline_wait_prior(maxPipelineStages-1)`（[L501](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L501)）后紧跟**唯一**一道 `__syncthreads()`（[L504](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L504)）。
+- 计算与「消失的栅栏」：乘加读 `As[j][threadIdx.y][k]`（[L506-L513](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L506-L513)），源码注释直白点出无需第二道栅栏的原因：「Don't have to synchronize because next iteration is loading to a different buffer」（[L515-L516](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L515-L516)）。
+- kernel=0 的 `MatrixMulAsyncCopyMultiStageLargeChunk`（[L76-L173](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L76-L173)）是它的 float4 加强版：同样的双游标与旋转缓冲（[L83](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L83)、[L87-L91](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L87-L91)、[L117-L121](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L117-L121)），只是发出的是 16 字节 float4（[L136-L137](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L136-L137)），守卫多了 `t4x < BLOCK_SIZE`（[L123](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L123)，见 4.5）。
 
 #### 4.4.4 代码实践
 
-1. **实践目标**：隔离「拷贝粒度 4B → 16B」这一个变量的收益。
-2. **操作步骤**（需 GPU）：依次运行
-   - `./globalToShmemAsyncCopy -kernel=4 ...`（异步 float）
-   - `./globalToShmemAsyncCopy -kernel=1 ...`（异步 float4）
-   - `./globalToShmemAsyncCopy -kernel=6 ...`（同步 float4）
-   - `./globalToShmemAsyncCopy -kernel=5 ...`（同步 float）
-   （`...` 代表同样的 `-wA=640 -hA=640 -wB=640 -hB=640`；也可再加大到 1280 观察规模影响。）把四个 GFlop/s 填进 2×2 表。
-3. **需要观察的现象**：全部 `Result = PASS`；四格数值两两不同。
-4. **预期结果**：粒度提升（5→6、4→1）通常带来正收益（装载指令更少、16 字节对齐更利于合并）；异步替换（5→4、6→1）的收益依赖架构代际。哪一格最高**待本地验证**。
-5. 无 GPU 替代：完成 4.4.5 练习 2 的地址推算，并回答「若把 `ConstantInit(h_B, ...)` 改为随机值，哪些 kernel 的校验会失败？」——纯源码推演即可完成。
+1. **实践目标**：量化「流水深度」这一个变量（float 粒度下：无 / 1 级 / 4 级）。
+2. **操作步骤**：
+
+   ```bash
+   for k in 5 4 3; do ./globalToShmemAsyncCopy -kernel=$k; done          # Naive / 单级 / 4 级
+   # 改深度：把 L439 的 maxPipelineStages 分别改为 2、8（数组维度随 constexpr 自动变化），各重新 make 后跑 -kernel=3
+   ```
+
+   再用 nvprof 记录每个 kernel 的纯 GPU 时间：`nvprof ./globalToShmemAsyncCopy -kernel=3`（新工具链用 `nsys profile` 或 `ncu` 替代，见 u1-l4）。
+3. **需要观察的现象**：`Time=` 随深度 1→2→4→8 的变化曲线；深度增大后是否出现平台甚至回退（8 级 = 16KB 共享内存/block，可能降低 SM 上可驻留的 block 数，进而损失延迟隐藏的另一个来源——驻留 block 之间的重叠）。
+4. **预期结果**：若 GPU 是 SM 8.0 以下，深度收益应很有限（拷贝本身不是真异步）；在 Ampere+ 上预期 4 级明显优于 1 级、1 级略优于 Naive。**待本地验证**——请以你的实测为准，并与 4.4.1 的机理对照。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：为什么参与装载的线程恰好是 1/4，而不是让 256 个线程都各搬一个 float4？
+**练习 1**：为什么 MultiStage 可以去掉计算后的 `__syncthreads()`，而 Naive/SingleStage 不行？
+**答案**：单缓冲时下一轮装载覆写的正是本轮计算在读的同一份 As/Bs，必须用栅栏隔开；4 份旋转缓冲下，第 i+1 轮预取写的是缓冲 (i+1)%4 起，与本轮计算的缓冲 i%4 不同（缓冲 \(i{+}4\) 在第 i+4 轮才会被再次计算使用，届时中间隔着多次 `__syncthreads()`）。
 
-**答案**：一个 tile 的 As 总共 16×16 = 256 个 float = 64 个 float4，只需要 64 次搬运；块内有 256 个线程，让每人都搬一个 float4 会搬 4 倍的数据（越界）。`t4x < BLOCK_SIZE`（即 x < 4）正好筛出 16 行 × 4 列 = 64 个线程，每人负责本行 1/4 段（4 个 float）。
+**练习 2**：把 `maxPipelineStages` 从 4 改成 1，MultiStage 会退化成什么？
+**答案**：退化为 SingleStage：每轮 `wait_prior(0)` 等完唯一的阶段、缓冲唯一，两道栅栏等价地只剩一道加隐式串行。这也说明「深度」是这个 kernel 里真正的新变量。
 
-**练习 2**：对 640×640 的矩阵、`blockIdx = (2, 3)`、`threadIdx = (1, 5)`，写出 LargeChunk kernel 中 A4 与 B4 各自读取的元素下标区间（按一维展开）。
+**练习 3（进阶，源码推演题）**：按 4.4.2 的表格，第 i 轮发出的预取里包含 tile i+4，它写入缓冲 (i+4)%4 = i%4——**与第 i 轮计算所读的是同一份缓冲**；而 wait_prior(3) 恰好不保证 tile i+4 完成。请推演这是否构成对缓冲 i%4 的「写（在飞拷贝）—读（本轮计算）」重叠窗口，并思考为什么本示例永远 `Result = PASS`。
+**答案（提示性）**：从纯代码推演看，该窗口确实存在：稳态下每轮「至多仍在飞」的 3 个阶段中恰有一个落在计算缓冲上（表中「仍在飞」列的最后一个缓冲号每行都等于 j 列）。严格结论需要结合 wait_prior 的形式语义与硬件实现的完成顺序才能下定论，不宜仅凭表格断言为缺陷；但可以确定的是——host 侧把 A 全部初始化为 1.0f、B 全部初始化为 2.10f（[L692-L694](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L692-L694) 的 `ConstantInit`），**任何 tile 的数据值都相同，即便窗口内被新数据覆写，数值也不会变**，校验永远无法区分。这提示我们：常量初始化的基准会同时掩盖时序竞争与寻址错误（下一模块就有一个实例）。若要严格检验，可在 Ampere+ 上把输入改成随机值做压力测试——但请先做练习 4.5-3。
 
-**答案**：`wA = wB = 640`，`BLOCK_SIZE = 16`，`t4x = 4`。A：基址 `a = 640*16*3 = 30720`，读取 `A[30720 + 640*5 + 4 .. +7]`，即 30744..30747。B：源码用的基址与 A 相同（`a + wA*ty + t4x`，见 L227），即 `B[30744..30747]`；而按 Naive 的语义本应是 `b = 16*2 = 32`，读 `B[32 + 640*5 + 4 .. +7]` = `B[3236..3239]`。两者不一致——再次印证 4.4.3 末尾的观察：只有 B 为常量时结果才碰巧一致。
-
-### 4.5 MatrixMulAsyncCopyMultiStage：多级流水与旋转缓冲
+### 4.5 MatrixMulAsyncCopyLargeChunk：float4 拷贝粒度
 
 #### 4.5.1 概念说明
 
-单级流水里 `wait_prior(0)` 一票否决了重叠。多级版本（kernel 3，float 粒度；kernel 0，float4 粒度）做两件事：
+`MatrixMulAsyncCopyLargeChunk`（kernel=1）在 SingleStage 的基础上只改一个变量：**每次拷贝的粒度**。float 版每线程搬 1 个 float（4B）；LargeChunk 版每线程搬 1 个 `float4`（16B），因此只需要 1/4 的线程参与装载。它单独解决的不是延迟问题，而是**指令与事务效率**：
 
-1. **旋转缓冲（rotating buffer）**：共享内存从 1 份 tile 扩到 `maxPipelineStages = 4` 份，即 `__shared__ float As[4][16][16]`。第 `iStage` 个预取 tile 写入第 `iStage % 4` 级，计算第 `i` 个 tile 时读第 `i % 4` 级。
-2. **预取窗口**：装载循环不再与计算循环一一同步，而是始终保持领先最多 4 个 tile；每轮计算前只 `__pipeline_wait_prior(3)`——最新的 3 组拷贝允许继续飞行，要算的这一组已经落地。
+- 每字节的装载指令数降为 1/4（256 线程 × 4B → 64 线程 × 16B，每个 tile 仍是 2KB）；
+- 16B 恰好是一条对齐的向量访问，warp 层面更容易拼成完整的 32B 扇区事务（回顾 u4-l2：扇区是显存传输的最小粒度）——tile 的一行 16 个 float 共 64B，由 4 个线程各搬 16B，正好 2 个扇区，无浪费。
 
-效果：搬运延迟被后续 tile 的计算掩盖，总时间从 \(N_K (T_{copy}+T_{comp})\) 向 \(T_{fill} + N_K \max(T_{copy},T_{comp})\) 靠拢。代价是共享内存从每块 2 KB 涨到 8 KB（4 级 × 2 矩阵 × 16×16 × 4B），occupancy 可能下降——典型的存储换时间的取舍。
+kernel=6 的 `MatrixMulNaiveLargeChunk` 是它的**完美对照组**：同样的 float4 分工、同样的 1/4 线程装载，但不走 memcpy_async（普通 `*A4s = *A4` 赋值）。于是 6↔1 之差隔离「异步通路」，1↔4 之差隔离「粒度」，两组变量可以分开归因。
 
 #### 4.5.2 核心流程
 
 ```text
-iStage 指针初始与主循环同起点
-for i = 0 .. N_K-1:                        # 计算循环
-    while aStage <= a + aStep*4:           # 预取循环：补满领先窗口
-        if aStage <= aEnd:
-            异步拷贝 tile iStage → 缓冲级 iStage % 4
-        commit()                            # 每个 tile 一个组
-        iStage += 1
-    wait_prior(3)                           # 保留最新 3 组在飞
-    __syncthreads()
-    用缓冲级 i % 4 做 16 步乘加
-    # 计算后无第二道栅栏：下一轮写的是别的级
-写回 C
+t4x = threadIdx.x * 4                       # 只有 tx ∈ {0,1,2,3} 的线程满足 t4x < 16
+for 每个 tile:
+    if t4x < BLOCK_SIZE:                    # 每行 4 个线程 × 16 行 = 64 个装载线程
+        把 A 行地址、B 行地址 reinterpret_cast 成 float4*
+        memcpy_async(A4s ← A4, 16B)；memcpy_async(B4s ← B4, 16B)
+        commit(); wait_prior(0)             # 只有装载线程执行（pipeline 每线程私有）
+    __syncthreads()                         # 全体对齐，数据对块内可见
+    16 次乘加（unroll）
+    __syncthreads()                         # 单缓冲，防覆写
 ```
 
-正确性说明：第 `i` 轮计算读第 `i%4` 级；该级再次被写入发生在预取第 `i+4` 个 tile 时，中间隔着第 i+1、i+2、i+3 轮，每轮开头都有一道 `__syncthreads()`，足以保证全块都读完了第 `i` 轮的数据。源码注释 [L515-L516](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L515-L516) 说的正是这件事。
+`reinterpret_cast<float4*>` 的合法性依赖对齐：`&As[ty][t4x]` 中 t4x 是 4 的倍数，而 `As` 每行 16 个 float，因此行内偏移是 16B 的整数倍；全局侧 `A + a + wA*ty + t4x` 同理（a 与 wA*ty 均为 16 的倍数，wA=640 时行首 2560B 对齐）。这也是「Requires BLOCK_SIZE % 4 == 0」注释（[L80](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L80)、[L180](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L180)）的由来——BLOCK_SIZE=16 满足。
 
 #### 4.5.3 源码精读
 
-（以 kernel 3 `MatrixMulAsyncCopyMultiStage` 为主；kernel 0 是它的 float4 版，结构相同。）
+kernel 主体在 [globalToShmemAsyncCopy.cu:L176-L264](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L176-L264)：`t4x = threadIdx.x * 4`（[L208](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L208)）；装载守卫与四个 float4 指针（[L223-L227](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L223-L227)）；三连原语（[L235-L239](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L235-L239)）；两道栅栏夹住 unroll 乘加（[L244-L257](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L244-L257)）。对照组 NaiveLargeChunk 的对应装载在 [L636-L643](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L636-L643)，用普通赋值 `*A4s = *A4`（[L641-L642](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L641-L642)）。
 
-- [globalToShmemAsyncCopy.cu:L438-L447](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L438-L447)：`constexpr size_t maxPipelineStages = 4;` 与带 stage 维度的共享内存声明——多级版本与单级版本在数据结构上的全部差别。
-- [globalToShmemAsyncCopy.cu:L471-L497](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L471-L497)：主循环与嵌套预取循环共用 6 个循环变量（`a, b, i` 给计算，`aStage, bStage, iStage` 给预取）。内层 `for ( ; aStage <= a + aStep*maxPipelineStages; ...)` 没有初值表达式——它从上一轮停下的地方继续，这就是「保持领先窗口」的实现；`if (aStage <= aEnd)` 处理 K 维末尾不足 4 个 tile 的情况；每个 tile 拷完后 `__pipeline_commit()` 立即打包成组。
-- [globalToShmemAsyncCopy.cu:L498-L506](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L498-L506)：`__pipeline_wait_prior(maxPipelineStages-1)` 即 `wait_prior(3)`，随后唯一的 `__syncthreads()` 与 `j = i % maxPipelineStages` 取本级缓冲。
-- [globalToShmemAsyncCopy.cu:L511-L513](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L511-L513)：乘加读 `As[j][...]`，循环后直接进入下一轮（无第二道栅栏）。
-- kernel 0（float4 多级）：[L121-L151](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L121-L151) 的预取循环里多了 `t4x < BLOCK_SIZE` 的线程筛选与 `float4` 重解释（对应 4.4 的装载方式），`wait_prior` 逻辑与 [L150](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L150) 相同；它是 `main` 里 switch 的 `default` 分支（[L736-L738](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L736-L738)），也是命令行不传 `-kernel` 时的默认选项（[L919](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L919)）——样本作者把它当作「最优组合」的示范。
+**细读会发现一个值得警惕的细节**：源码自己保留的旧写法注释是正确的 B 寻址 `Bs[ty][tx] = B[b + wB * ty + tx]`（[L218-L220](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L218-L220)），而 float4 版实际代码对 B 用的是 **A 的游标和步长**：`&B[a + wA * threadIdx.y + t4x]`（本 kernel [L227](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L227)；同样写法还出现在 MultiStageLargeChunk [L130](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L130)、AWBarrier [L320](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L320)、NaiveLargeChunk [L640](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L640)——四个 float4 kernel 全部如此；三个 float kernel 则用正确的 `b + wB`，如 SingleStage [L393](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L393)、MultiStage [L480](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L480)、Naive [L569](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L569)）。疑似移植时的笔误：预取游标 `bStage`、步长 `bStep` 都维护了却没用于寻址。它没有暴露的原因与 4.4.5 练习 3 同源——B 被常量初始化为 2.10f，从任何（合法区间内的）偏移读 B 都得到 2.10f，数值校验（[L826-L846](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L826-L846)）必然 PASS；默认输入又是方阵（\(wA = wB\)），A 的偏移落在 B 的合法区间内，不越界。**结论：对「耗时」的测量基本无影响（搬运字节数相同），但若复用这段代码到真实数据上，四个 float4 kernel 会算错**。这是「基准的正确性校验可能被数据构造方式完全架空」的活教材。
 
-host 侧驱动（所有 kernel 共用，承接 u3-l3 的事件计时）：warmup 一次并 `cudaStreamSynchronize`（[L734-L761](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L734-L761)），再 `cudaEventRecord` 夹住 100 次循环（[L765-L805](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L765-L805)），`cudaEventElapsedTime` 得到平均每次的毫秒与 GFlop/s。这个口径只含 kernel 执行（同一 stream 中 kernel 之间没有其他工作），比 u1-l4 讲的 wall time 干净得多；但程序在 [L857-L858](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L857-L858) 自我提醒：样本并非为精确性能测量设计，GPU Boost 会带来波动。
+最后补一个变体：`MatrixMulAsyncCopyLargeChunkAWBarrier`（kernel=2，[L267-L350](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L267-L350)）演示用 **arrive-wait barrier** 替代 `__syncthreads()` 等待装载：块内声明 `__shared__ awbarrier` 并由 0 号线程初始化到达数为全体 256 线程（[L282-L288](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L282-L288)）；64 个装载线程发出拷贝后不直接等待，而是 `pipe.arrive_on(barrier)`——**barrier 的这一份到达在拷贝完成时才生效**（[L322-L325](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L322-L325)）；全体线程 `barrier.arrive_and_wait()`（[L329](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L329)）。main 会在运行前检查设备主版本 ≥ 7，否则按样本惯例退出（[L934-L940](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L934-L940)）。
 
 #### 4.5.4 代码实践
 
-1. **实践目标**：隔离「流水深度 1 → 4」这一个变量的收益，并体会 `maxPipelineStages` 的取舍。
-2. **操作步骤**（需 GPU）：
-   - 同规模运行 `-kernel=4`（单级 float）与 `-kernel=3`（4 级 float），记录 GFlop/s；
-   - 同规模运行 `-kernel=1`（单级 float4）与 `-kernel=0`（4 级 float4），记录 GFlop/s；
-   - 把 [L439](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L439) 的 `maxPipelineStages` 分别改为 2 与 8（kernel 0 在 [L83](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L83)），重新编译 `-kernel=3`/`-kernel=0` 各跑一次，观察共享内存占用（每级 2 KB/block）与时间的联动。
-3. **需要观察的现象**：多级应快于同级单级；stage 数从 2 → 4 → 8 时收益递增或饱和。
-4. **预期结果**：若 \(T_{copy}\) 与 \(T_{comp}\) 接近，4 级已足够掩盖大部分延迟，8 级的边际收益趋零甚至因 occupancy 下降而变慢——具体拐点**待本地验证**。
-5. 无 GPU 替代：手工模拟预取循环——设 K 维共 6 个 tile，列表写出外层 `i = 0..5` 各轮进入时 `iStage` 的值与 `wait_prior(3)` 之后「已就绪的最新 tile 编号」，验证第 4 轮起预取循环体不再执行（窗口已顶到 `aEnd`）。
+1. **实践目标**：隔离「拷贝粒度」变量，并亲手验证 4.5.3 的寻址疑点。
+2. **操作步骤**：
+   - 耗时对比：`./globalToShmemAsyncCopy -kernel=4`（float）vs `-kernel=1`（float4）vs `-kernel=6`（float4 但同步装载）。
+   - 寻址验证（纯源码实验，改完还原）：把 [L692-L694](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L692-L694) 中 B 的初始化从 `ConstantInit(h_B, size_B, valB)` 改成 `for (i) h_B[i] = (float)(i % 1000) * 0.001f;`（示例代码），重新编译后依次跑 `-kernel=1` 与 `-kernel=4`。
+3. **需要观察的现象**：改数据后两个 kernel 的 `Result`；以及（若在 Ampere+ 上）`-kernel=1` 与 `-kernel=4` 的 `Time=` 差距。
+4. **预期结果**：kernel=4（正确的 `b + wB` 寻址）应继续 PASS；kernel=1 因 B 寻址用了 A 的游标，预期 `Result = FAIL`（误差信息逐元素打印，[L839-L843](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L839-L843)）；常量初始化还原后两者都 PASS。**待本地验证**。性能上预期 float4 优于 float（指令与事务效率），但幅度依赖架构，**待本地验证**。
 
 #### 4.5.5 小练习与答案
 
-**练习 1**：多级版本每轮只有一道 `__syncthreads()`，为什么不会发生「计算还没读完，下一轮装载就覆写」的竞争？
+**练习 1**：BLOCK_SIZE=16 时，LargeChunk 每轮实际有多少线程参与装载？每个装载线程搬多少字节？
+**答案**：`t4x = threadIdx.x*4 < 16` 要求 tx ∈ {0,1,2,3}，共 4×16(行) = 64 个线程；每个线程对 A、B 各发一次 16B 的 float4 拷贝，合计每人 32B、全 block 每轮 2KB（A、B 两个 tile 各 1KB）。
 
-**答案**：写读相隔 4 级。第 `i` 轮计算读第 `i%4` 级；该级下一次被写入要等到预取第 `i+4` 个 tile，而中间的第 i+1、i+2、i+3 轮每轮开头都有一道 `__syncthreads()`，三轮栅栏保证了全块对第 `i` 级的读取在它被重写前早已完成。
+**练习 2**：为什么 float4 拷贝要求 BLOCK_SIZE 是 4 的倍数、wA 是 16 的倍数？
+**答案**：`As[ty][t4x]` 要能按 float4 对齐，t4x 必须是 4 的倍数且行内 16B 对齐，即每行元素数（=BLOCK_SIZE）是 4 的倍数；全局地址 `a + wA*ty` 中 a 为 16 的倍数，若 wA 不是 4 的倍数，行首就不是 16B 对齐，`reinterpret_cast<float4*>` 会触发未对齐访问错误。默认 wA=640 满足。
 
-**练习 2**：把 `maxPipelineStages` 从 4 改成 1，这个 kernel 会退化成什么？改成 5 呢？
-
-**答案**：改成 1 时，`wait_prior(0)` 等价于等全部完成，且每次都写同一级缓冲——退化为 4.3 节的单级流水（但计算后没有第二道栅栏，`i%1` 级马上被重写，将产生竞争！所以 stage=1 不是合法配置，旋转缓冲的正确性依赖「级数 ≥ 2 且由轮首栅栏隔开」）。改成 5 时预取窗口更深、共享内存每 block 增加 2 KB（5×2×16×16×4B = 10 KB），可能压低 occupancy。这提示我们：流水深度是一个需要实验标定的参数，不是越大越好。
-
-**练习 3**：`wait_prior(maxPipelineStages-1)` 中的 `-1` 若误删（变成 `wait_prior(maxPipelineStages)`），程序还正确吗？性能会怎样？
-
-**答案**：`wait_prior(N)` 只要求「最多剩 N 个组未完成」，把 N 从 3 放宽到 4 意味着连将要计算的那个 tile 也不保证就绪，线程可能读到旧数据——正确性被破坏且校验（常量 B 掩盖下仍可能 PASS，见 4.4.3）未必能发现；性能上等待变少但结果是错的。这个例子再次说明弱校验基准里「读对源码」比「跑过校验」更可靠。
+**练习 3**：如果不修改初始化，有没有办法只靠命令行参数让 float4 版的寻址问题显形？
+**答案**：可以试试非方阵输入，如 `-wA=640 -hA=640 -wB=1280 -hB=640`（外维相等，程序放行，见 [L913-L917](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L913-L917)）：此时按 A 的坐标读 B，列坐标会越出 B 的真实宽度，读到错误的元素；但**常量初始化下值仍全是 2.10f**，所以只要不发生越界访问，结果照样 PASS——这个实验恰好演示了「地址错了但数值对」的隐蔽性。真正让数值显形必须改数据本身（回到 4.5.4 的步骤 2）。
 
 ## 5. 综合实践
 
-**任务：完成「粒度 × 异步 × 流水深度」的完整对照实验，并回答本讲的核心问题。**
+**任务：判定「拷贝粒度 vs 流水深度」对本案例哪个收益更大，并产出一份小实验报告。**
 
-本基准的 7 个 kernel 本身就是一套设计好的因子实验。请按以下步骤完成：
+本任务综合 4.3～4.5 的全部变量。在具备 NVIDIA GPU（最好 SM 8.0+，否则异步通路是降级实现，结论要打折扣）且安装 CUDA 11+ 与 nvprof/nsys 的机器上：
 
-1. **准备**：`cd GSOverlap && make`（A100 等 SM 80+ 显卡建议 `make clean && make SMS="80"`）。确认 `./globalToShmemAsyncCopy -kernel=0` 能输出 `Result = PASS`。先用 `-help` 查看命令行格式（[L871-L882](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L871-L882)）。
-2. **采集**：在固定规模（默认 640×640，可加一组 1280×1280）下依次运行 `-kernel=5、6、4、1、3、0`，把每次的 `Performance`（GFlop/s）与 `Time`（msec）填入下表（每格建议跑 3 次取中位数，抵消 GPU Boost 波动）：
+1. **准备**：`cd GSOverlap && make`；用 `nvidia-smi` 记录 GPU 型号与架构（写进报告，作为结论适用范围声明）。
+2. **数据采集**（每个配置跑 3 次取中位数，填入下表；程序自带的 `Time=` 即事件平均，辅以 `nvprof ./globalToShmemAsyncCopy -kernel=N` 的 GPU kernel 时间交叉核对）：
 
-   | | 同步赋值 | 异步单级 | 异步 4 级 |
-   | --- | --- | --- | --- |
-   | float | kernel 5：__ | kernel 4：__ | kernel 3：__ |
-   | float4 | kernel 6：__ | kernel 1：__ | kernel 0：__ |
+   | kernel | 变量组合 | Time (msec) | GFlop/s | nvprof kernel 时间 |
+   |---|---|---|---|---|
+   | 5 Naive | 同步 + float | | | |
+   | 4 SingleStage | 异步 + float + 1 级 | | | |
+   | 3 MultiStage | 异步 + float + 4 级 | | | |
+   | 6 NaiveLargeChunk | 同步 + float4 | | | |
+   | 1 LargeChunk | 异步 + float4 + 1 级 | | | |
+   | 0 MultiStageLargeChunk | 异步 + float4 + 4 级 | | | |
 
-3. **补充指标**：任选两格（如 kernel 1 与 kernel 0）用 `nvprof ./globalToShmemAsyncCopy -kernel=N -wA=... ...` 采集 GPU activities 表，确认你看到的 kernel 名与 [L67-L69](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L67-L69) 的 `kernelNames[]` 一致，并记录 nvprof 口径的 kernel 时间与程序自打印时间的吻合程度。
-4. **分析（本实践的交付物）**：写一段 200 字左右的分析，回答——**对本案例而言，拷贝粒度（float→float4）与流水深度（1→4）哪个因素收益更大？** 论证要求：
-   - 从表中分别计算「粒度增益」（同列内 float4/float 的 GFlop/s 比值）与「流水增益」（同行内 4 级/单级的比值），比较两个平均比值；
-   - 用 4.1.2 的流水线时间模型解释你观察到的模式（例如若 \(T_{comp} \gg T_{copy}\)，流水深度收益应有限）；
-   - 至少指出一个可能干扰结论的因素（架构代际、GPU Boost、640 规模下 K 维只有 40 个 tile、`__restrict__` 修饰差异——注意 async 系列 kernel 的指针带 `__restrict__` 而 Naive 系列不带，见 [L353-L355](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L353-L355) 与 [L529-L531](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L529-L531)，这也是一个未控制的变量）。
-5. **无 GPU 替代方案**：把第 4 步的分析改为纯推演——基于指令数（4.1.4 的结论）、共享内存占用（2 KB vs 8 KB）与流水线模型做定性排序，并明确标注哪些结论「待本地验证」。
+3. **深度扫描**：修改 [L83](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L83) 与 [L439](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L439) 的 `maxPipelineStages` ∈ {1, 2, 4, 8}，分别重编译、跑 `-kernel=0` 与 `-kernel=3`（注意共享内存用量 = 深度 × 2KB/block，报告里注明你 GPU 的每 block 上限）。
+4. **分析写作**（报告的核心段落），围绕三个问题组织：
+   - 粒度单独贡献多少？（对比 4↔1、5↔6）
+   - 深度单独贡献多少？（对比 4↔3、1↔0，以及第 3 步的扫描曲线）
+   - 两者是否近似可乘？（0 的耗时是否接近「单变量收益相乘」的预测；若优于预测，说明两者打击的瓶颈正交——粒度减指令/事务数、深度隐藏延迟；若低于预测，找出干扰项，如共享内存占用对驻留 block 数的影响。）
+5. **无 GPU 环境的替代任务**：完成 4.4.2 的推演表（把 i=5、6 两行补全）、4.4.5 练习 3 与 4.5.5 练习 3 的源码推演，并写一段 300 字的「预测报告」——预测六个 kernel 的排序及理由，留给将来有 GPU 时验证（明确标注为预测，**待本地验证**）。
 
 ## 6. 本讲小结
 
-- 分块矩阵乘（u4-l1）解决**流量**，本讲解决**时序**：每个 tile 的「搬入共享内存」与「乘加计算」原本串行，异步拷贝让二者重叠。
-- 设备端流水线三原语：`__pipeline_memcpy_async` 发起（全局→共享、不经寄存器、立即返回）、`__pipeline_commit` 打包成组、`__pipeline_wait_prior(N)` 等到只剩最近 N 组未完成；`wait_prior(0)` 是「全等」，`wait_prior(3)` 是流水的钥匙。
-- 真正的异步硬件通路（`cp.async`/LDGSTS）需要 SM 80+ 且以 compute_80+ 为编译目标；低架构上原语退化为等价同步序列——语义对，收益无。默认 Makefile 的 SMS 不含 80，A100 上要做性能实验须 `make SMS="80"`。
-- 7 个 kernel 构成天然因子实验：`{同步, 异步} × {float, float4} × {1 级, 4 级}`；多级流水靠 4 份旋转缓冲 + `wait_prior(D-1)` + 「写读相隔 D 级、轮首栅栏隔开」保证无竞争，还省掉了计算后的第二道 `__syncthreads()`；代价是共享内存每 block 从 2 KB 涨到 8 KB。
-- 本基准的校验用常量矩阵（A 全 1.0、B 全 2.10）+ 常量参考答案，掩盖了 LargeChunk 系列对 B 的可疑索引（用 `a/wA` 而非 `b/wB`）——弱校验之下，读对源码比跑过 PASS 更重要。
-- 计时口径：cudaEvent 夹 100 次循环取平均并换算 GFlop/s，只含 kernel 时间，比手册其他基准的 wall time 干净，但仍受 GPU Boost 波动影响。
+- 分块矩阵乘的装载与计算被两道 `__syncthreads()` 拆成互不重叠的两段，全局内存长延迟让 block 在装载段干等——这是 GSOverlap 要解决的反模式。
+- `__pipeline_memcpy_async / commit / wait_prior(N)` 三件套：发出异步拷贝、打包成阶段、等待「除最近 N 个阶段以外」的全部完成；pipeline 是**每线程私有**的，跨线程可见性仍靠 `__syncthreads()`（或 awbarrier）；空阶段也要 commit 以对齐计数。
+- SingleStage 证明「异步 ≠ 重叠」：发出即等待只买到寄存器直通通路；真正的时序重叠来自 MultiStage 的 4 级旋转缓冲——预取游标领先计算游标，计算 tile i 的同时为未来 tile 装载，并因此省掉计算后的栅栏。
+- LargeChunk 把每线程 4B 拷贝换成 64 线程 × 16B 的 float4，压缩指令数并凑满扇区；kernel=6（NaiveLargeChunk）是它不走异步的对照组，两组变量（粒度、深度/异步）由此可以分离归因。
+- 真正的硬件异步拷贝（LDGSTS 通路）需要 SM 8.0+ 与 CUDA 11；旧架构上原语降级为普通 load/store，实验结论必须注明架构。
+- 两个「常量初始化掩体」：数值校验无法发现 float4 版 kernel 的 B 寻址疑点（用了 A 的游标 `a + wA`），也无法暴露多级预取窗口与计算缓冲的重叠推演——微基准的 PASS 不等于实现无瑕疵。
 
 ## 7. 下一步学习建议
 
-- **进入单元五（CPU-GPU 数据搬运）**：本讲的 `__pipeline_memcpy_async` 是**设备内部**（全局→共享）的异步；u5-l1 的 HDOverlap 讲**主机↔设备**的 `cudaMemcpyAsync` + stream，两者名字相近、机制完全不同，学完后建议回头画一张「三级异步通路」对照图（主机端 cudaMemcpyAsync、设备端 pipeline、kernel 内 warp 异步原语）。
-- **与 u6-l1 互相印证**：Shuffle 的 reduce 优化阶梯里有「每个线程处理多个元素」的算法级优化；本讲的 `maxPipelineStages` 与 tile 尺寸 `blockSize`（[L73](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L73)）同属「参数空间需要实验标定」的问题，可把两处的实验方法统一成一张 checklist。
-- **扩展阅读（源码内）**：kernel 2 的 arrive-wait barrier（[L267-L350](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L267-L350)）展示了比 `__syncthreads()` 更细粒度的块内同步；`USE_CPP_API` 开关（[L71](https://github.com/passlab/CUDAMicroBench/blob/59c4ca6b0c7800c4994428db4b829f98f71c9071/GSOverlap/globalToShmemAsyncCopy.cu#L71)）对应的 `nvcuda::experimental::pipeline` C++ 接口则是后来 `cuda::memcpy_async`（`cuda/barrier>`）正式 API 的前身，可作为进阶跳板。
-- 若要继续本仓库的源码训练，下一讲 u5-l1（HDOverlap）只需 `axpy_cudakernel.cu` 一个文件，阅读量比本讲小很多，适合用来巩固「计时位置测的究竟是什么」这一贯穿全手册的主题。
+- **横向对照 CPU-GPU 异步**：u5-l1（HDOverlap）把「异步 + 重叠」搬到主机↔设备传输上（`cudaMemcpyAsync` + stream），与本讲的设备内异步拷贝互为镜像，建议紧接着读。
+- **纵向深入归约优化**：u6-l1 的 reduce0→reduce6 阶梯与本讲同属「访存受限 kernel 的逐步优化」，可对照建立自己的优化检查清单。
+- **工程化视角**：u6-l3 讲 Common 目录与 CUDA Samples 的 Makefile 体系（SMS/GENCODE 多架构生成），GSOverlap 的 Makefile 正是那一套——本讲实践若要 `SMS="80 86"` 重编译以启用真异步，就是在用那讲的知识。
+- **延伸阅读**：CUDA C Programming Guide 中 memcpy_async 与 pipeline 一节（`cuda::memcpy_async`、`cuda::pipeline` 协作组接口是本讲原语的上层封装）；Ampere 白皮书中的异步拷贝指令与 cp.async 语义。
