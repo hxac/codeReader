@@ -1,11 +1,10 @@
 {
-  "head": "407e8cb75bb98ca51551ce217c9603e446750e39",
+  "head": "c1b6cce1d53227c38f1d09b270f0e4cff85d7ecf",
   "project": "dynamo",
-  "rationale": "增量更新（3d3cf16..407e8cb，13 个提交），影响集中在四条线。(1) #13861「每个路由上下文自持负载状态」是本轮最大重构：新增 lib/llm/src/kv_router/routing_load.rs（470 行 RoutingLoadContext/RouterLoadSource），routing_host 增加带负载上下文的构造器，discovery 的 worker_monitor.rs 大幅简化、watcher.rs/model_manager.rs 引入 LoadThresholdHandle，push_router.rs 新增 dispatch_kv_admitted 与 OverloadCheck 免重复过载检查，并通过 bindings/python/rust/llm/kv.rs 向 Python 暴露 LoadThresholdConfig——因此已写成的 u6-l2、u4-l4、u4-l1、u3-l4 均标 update（行号锚点与机制描述需刷新）。(2) #11157 新增 libjpeg-turbo 图像解码子系统（decoders/image 及 backends、jpeg_turbo.rs、专用 bench 与 Python 侧开关）：u4-l3 因 preprocessor 媒体路径重组标 update，并新增 u4-l5 专门讲解码后端；#13730 对 preprocessor.rs 的 858 行 nvext/tool-call jail 重构也并入 u4-l3 的 update。(3) #13768 新增 POST /v1/responses/input_tokens 端点（openai.rs/metrics.rs），u4-l2 标 update；#13606 RL 发布 RlWorkerMetadata（lib/rl、backend-common/rl.rs），连同 nvext 透传与 /v1/rl/workers 发现新增讲义 u8-l7。(4) #10185 新增 vLLM+LMCache 聚合式部署示例，放在学完 DGD/Helm 之后作为 u10-l5。其余提交（docs Router 文档重组、社区活动刷新、容器浅克隆、global_router 小修、sglang register/trtllm worker 数行改动）不影响任何讲义：u1/u2/u5 与 u6-l1/l3/l4 的引用源码零改动标 keep，u6-l5、u7、u8-l1..l6、u9、u10-l1..l4、u11、u12 维持 new，三层学习路线不变。",
+  "rationale": "增量更新（407e8cb..c1b6cce1，13 个提交），影响集中在四条线。(1) #12157「embeddings：分词对齐、多进程池与 worker 字节传输」是本轮最大特性：新增 components/src/dynamo/vllm/embedding_worker_processes.py（513 行，单 EngineCore 多 API 进程拓扑 + 父进程 watchdog），backend_args.py/handlers.py/main.py/worker_factory.py 配套改造；Rust 侧 preprocessor.rs 新增 new_for_embeddings、protocols/openai/embeddings.rs 扩充 base64 编解码（openai.rs 中原 base64 辅助函数被移出，watcher.rs 的 embeddings 端点改用新构造器），并以 tokenization parity 测试保证 Rust/Python 截断一致——因此新增讲义 u8-l8 专讲 embeddings 服务化，u4-l2（openai.rs 结构变化）、u4-l3（preprocessor.rs +670）、u4-l4（watcher.rs 接线）标 update，u8-l1 的主题描述补充指引。(2) Rust 预处理与协议修复：#13841 让 prompt.rs（+330）正确处理 continue_final_message，#12562 在 chat_completions/completions 的 delta.rs 与 delta_common.rs 抑制已匹配的 stop marker——并入 u4-l3 的 update 与 u8-l2 的主题说明。(3) 前端 Python 修复：#12541 在预处理阶段调用 reasoning parser 的 adjust_request、#12510 剥离未消费的控制标记（prepost.py 共 +211）、sglang_prepost.py 同步 stop marker 处理，u5-l2、u5-l3 标 update。(4) Python sidecar 启动器：#13923/#13924 新增 dynamo.vllm/trtllm 的 sidecar.py 入口，backend.rs 向 _core.backend 注册 _run_vllm_sidecar/_run_trtllm_sidecar，lib/sidecar/common 新增 SidecarStartupError（#13929 保证 CLI 退出码经 PySystemExit 透传），连同 #13922 trtllm 按引擎开关的 per-request return_perf_metrics——这些并入尚未生成的 u8-l3/u8-l4（补入 sidecar.py、backend.rs、error.rs 源文件），仍标 new。其余提交（CI workflow、社区活动文档、README 一行、wheel_builder.Dockerfile 一行）不影响讲义。lib/runtime、lib/kv-router、kvbm-*、deploy/、examples/ 本轮零改动，且上一轮对 u3-l4/u4-l1/u6-l2 的 update 已由 worker 落盘，故 u1/u2/u3/u6 全部已生成讲义标 keep；u4-l5、u6-l5 及 u7 之后的讲义尚未生成，维持 new，三层学习路线不变。",
   "units": [
     {
       "id": "u1",
-      "level": "beginner",
       "lectures": [
         {
           "action": "keep",
@@ -121,12 +120,12 @@
           "topic": "开发环境搭建：uv + maturin 构建 lib/bindings/python 生成 _core 扩展、hatch 打包 ai-dynamo wheel、cargo 构建整个 workspace，以及容器镜像模板体系（含 frontend/planner 的依赖 overrides 固定机制）。"
         }
       ],
+      "level": "beginner",
       "order": 1,
       "title": "初识 Dynamo：定位、运行与仓库结构"
     },
     {
       "id": "u2",
-      "level": "beginner",
       "lectures": [
         {
           "action": "keep",
@@ -184,7 +183,7 @@
             "lib/bindings/python/src/dynamo/llm/__init__.py"
           ],
           "title": "PyO3 绑定：Rust 如何暴露给 Python",
-          "topic": "拆解 _core 扩展模块：rust/lib.rs 如何注册 PyO3 类（DistributedRuntime、Endpoint、Client、Context、PyAsyncRequestStream）、模块初始化时如何把配置好的 Tokio builder 交给 pyo3_async_runtimes（DYN_RUNTIME_* 环境变量由此生效），Python 包装层 dynamo.runtime / dynamo.llm 如何再分发这些能力。"
+          "topic": "拆解 _core 扩展模块：rust/lib.rs 如何注册 PyO3 类（DistributedRuntime、Endpoint、Client、Context、PyAsyncRequestStream）、模块初始化时如何把配置好的 Tokio builder 交给 pyo3_async_runtimes（DYN_RUNTIME_* 环境变量由此生效），Python 包装层 dynamo.runtime / dynamo.llm 如何再分发这些能力。（本轮在 backend.rs 新增的 _run_vllm_sidecar/_run_trtllm_sidecar 入口见 u8-l4。）"
         },
         {
           "action": "keep",
@@ -215,12 +214,12 @@
           "topic": "通过 examples/custom_backend/cancellation 理解多跳链路（client → middle_server → server）中的请求取消、断连传播与资源清理。"
         }
       ],
+      "level": "beginner",
       "order": 2,
       "title": "第一个 Worker：Python API 上手"
     },
     {
       "id": "u3",
-      "level": "intermediate",
       "lectures": [
         {
           "action": "keep",
@@ -316,7 +315,7 @@
           "topic": "engine.rs 定义 AsyncEngine/AsyncEngineUnary/AsyncEngineStream、ResponseStream 与类型擦除的 AnyAsyncEngine，配合 Data 类型让任意引擎能挂到 endpoint 上；对照 hello_world 的 Rust 示例理解。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u3-l2",
             "u3-l3"
@@ -327,7 +326,7 @@
             "追踪 ingress → codec → egress 的请求编解码路径",
             "解释 PushWorkHandler 的推送语义",
             "说出 ingress.rs/egress.rs/push_router 各自的职责",
-            "解释新增 dispatch_kv_admitted 为何跳过共享过载复查（OverloadCheck::AlreadyAdmitted）"
+            "解释 dispatch_kv_admitted 为何跳过共享过载复查（OverloadCheck::AlreadyAdmitted）"
           ],
           "level": "intermediate",
           "minimal_modules": [
@@ -347,7 +346,7 @@
             "lib/runtime/src/pipeline/network/egress/push_router.rs"
           ],
           "title": "请求面 Pipeline：Ingress / Egress / PushRouter",
-          "topic": "请求如何在网络上传送：pipeline/network.rs 的请求面架构，ingress.rs/egress.rs 的出入端、codec.rs 的负载编解码、PushWorkHandler 与 RouterMode（RoundRobin/Direct）。本次 #13861 给 push_router.rs 新增 dispatch_kv_admitted：KV 选点已做过载准入的请求直发时用 OverloadCheck::AlreadyAdmitted 跳过共享 client 过载状态复查（准入可能已同步发布本请求自身负载），原 generate_with_fault_detection 被重构为带 OverloadCheck 参数的 _inner 版本，讲义中的大量行号锚点需要随之刷新。"
+          "topic": "请求如何在网络上传送：pipeline/network.rs 的请求面架构，ingress.rs/egress.rs 的出入端、codec.rs 的负载编解码、PushWorkHandler 与 RouterMode（RoundRobin/Direct）；push_router.rs 的 dispatch_kv_admitted 让 KV 选点已做过载准入的请求以 OverloadCheck::AlreadyAdmitted 直发，跳过共享 client 过载状态复查。"
         },
         {
           "action": "keep",
@@ -381,15 +380,15 @@
           "topic": "控制面与事件面的物理载体：etcd 的 KV/lease/lock（服务发现）、event_plane 的 NATS 与 ZMQ 双实现（PubSub 消息）、storage/kv 的多后端 KV 存储。"
         }
       ],
+      "level": "intermediate",
       "order": 3,
       "title": "Rust 运行时核心 lib/runtime"
     },
     {
       "id": "u4",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u3-l3",
             "u2-l1"
@@ -400,7 +399,7 @@
             "解释 RouterConfig 与 EngineConfig 如何组合出不同拓扑",
             "追踪 make_engine 从 Python 到 Rust 的装配路径",
             "用 EngineType.Dynamic 描述 Python 侧注入引擎的方式",
-            "说出装配层如何与本次新增的 RoutingLoadContext 衔接"
+            "说出装配层如何与 RoutingLoadContext 衔接"
           ],
           "level": "intermediate",
           "minimal_modules": [
@@ -416,7 +415,7 @@
             "lib/llm/src/engines.rs"
           ],
           "title": "引擎装配：entrypoint 与 EngineConfig",
-          "topic": "lib/llm 的装配层：entrypoint.rs 的 RouterConfig/EngineConfig 如何决定启动什么组件，entrypoint/input.rs 解析 CLI 参数，engines.rs 的 EngineDispatcher 装配引擎；Python 侧 make_engine 最终落到这里。本次 #13861 改动了 input/common.rs 的装配函数（build_preprocessed_routing 一线）以接入每个路由上下文自持的负载状态（见 u6-l2 的 routing_load.rs），讲义中引用 common.rs/watcher.rs 的行号锚点需要刷新。"
+          "topic": "lib/llm 的装配层：entrypoint.rs 的 RouterConfig/EngineConfig 如何决定启动什么组件，entrypoint/input.rs 解析 CLI 参数，engines.rs 的 EngineDispatcher 装配引擎；Python 侧 make_engine 最终落到这里；input/common.rs 的 build_preprocessed_routing 一线接入每个路由上下文自持的负载状态（见 u6-l2 的 routing_load.rs）。"
         },
         {
           "action": "update",
@@ -429,7 +428,8 @@
             "追踪 HTTP 请求进入 HttpService 后的处理链",
             "解释并发许可与背压机制",
             "说出 openai.rs/anthropic.rs/generate.rs 三类协议端点的差异",
-            "调用 POST /v1/responses/input_tokens 预估输入 token 数"
+            "调用 POST /v1/responses/input_tokens 预估输入 token 数",
+            "说明 embeddings 端点的 base64 编解码现在位于哪个协议模块"
           ],
           "level": "intermediate",
           "minimal_modules": [
@@ -437,7 +437,8 @@
             "InflightPermit",
             "openai/generate handlers",
             "delta serialization",
-            "input_tokens endpoint"
+            "input_tokens endpoint",
+            "embeddings 编解码"
           ],
           "order": 2,
           "practice_task": "给本地服务施加并发压力（如 200 并发 curl），观察 InflightPermit 限流行为，记录被拒绝/排队的请求数并解释源码中的判断逻辑；再对同一组 prompt 调用 /v1/responses/input_tokens 对比返回的估算与实际分词数。",
@@ -446,10 +447,11 @@
             "lib/llm/src/http/service/openai.rs",
             "lib/llm/src/http/service/generate.rs",
             "lib/llm/src/http/service/metrics.rs",
+            "lib/llm/src/protocols/openai/embeddings.rs",
             "lib/llm/src/protocols/openai/delta_common.rs"
           ],
           "title": "HttpService：OpenAI 兼容 HTTP 服务",
-          "topic": "service_v2.rs 的 HttpService/HttpServiceConfig/State 与 InflightPermit 并发控制，openai.rs/generate.rs 处理 OpenAI 兼容端点与流式生成；delta_common.rs 与 chat/completions 的 delta.rs 共享流式增量序列化器的生成器状态。本次 #13768 在 openai.rs 新增 POST /v1/responses/input_tokens 端点（返回估算输入 token 数，配套 metrics.rs 新指标与 responses_http_replay.rs 回放测试，主要服务 RL rollout 与预算控制，见 u8-l7）；openai.rs 同时是 dynamo_rl 路由的挂载点。"
+          "topic": "service_v2.rs 的 HttpService/HttpServiceConfig/State 与 InflightPermit 并发控制，openai.rs/generate.rs 处理 OpenAI 兼容端点与流式生成；openai.rs 同时是 dynamo_rl 路由与 POST /v1/responses/input_tokens 的挂载点。本次 #12157 把 openai.rs 内原 base64 embedding 解码辅助移入 protocols/openai/embeddings.rs 协议模块（与 Python 侧 handlers 的 torch→numpy.tobytes→base64 字节传输对齐，详见 u8-l8），#12562 又调整了 delta_common.rs 与 chat/completions 的 delta.rs（抑制已匹配的 stop marker），讲义行号锚点需刷新。"
         },
         {
           "action": "update",
@@ -462,7 +464,8 @@
             "追踪从文本到 token 块的转换过程",
             "解释媒体（图片/视频）请求的 token 计数方式与 URL 抓取的 SSRF 防护",
             "理解 block 化的 token 表示对 KV 路由的意义",
-            "说出 nvext 透传（extra_fields/metadata_upload/token_data/cache_salt）与 tool-call jail 的交互"
+            "说出 nvext 透传与 tool-call jail 的交互",
+            "解释 prompt.rs 如何处理 continue_final_message 与 embeddings 专用的截断/分词路径"
           ],
           "level": "intermediate",
           "minimal_modules": [
@@ -471,12 +474,14 @@
             "LocalModel",
             "token blocks",
             "block hashing",
-            "nvext passthrough"
+            "nvext passthrough",
+            "prompt.rs 续写与 embeddings 分词"
           ],
           "order": 3,
           "practice_task": "写一个离线脚本：加载任一分词器，把三条不同 prompt 转成 token 块并计算块哈希，验证相同前缀产生相同的前缀块序列；再给一条带恶意内网图片 URL 的请求（本地 mock）观察 preprocessor 媒体加载层的拒绝路径。",
           "source_files": [
             "lib/llm/src/preprocessor.rs",
+            "lib/llm/src/preprocessor/prompt.rs",
             "lib/llm/src/preprocessor/media/loader.rs",
             "components/src/dynamo/common/http/url_validator.py",
             "lib/llm/src/local_model.rs",
@@ -484,7 +489,7 @@
             "lib/kv-hashing/src/block.rs"
           ],
           "title": "预处理与分词：OpenAIPreprocessor 与 LocalModel",
-          "topic": "请求进入引擎前的整形：preprocessor.rs 的 OpenAIPreprocessor 做模板/媒体计数/分词，media/loader.rs 负责图片等媒体的抓取与解码入口（经 url_validator 做 SSRF 等安全策略拒绝），local_model.rs 负责模型与 tokenizer 加载；结合 lib/tokens 与 lib/kv-hashing 理解 token 块与块哈希。注意两处更新：#13730 对 preprocessor.rs 做了大规模重构（nvext_passthrough_args 透传 extra_fields/metadata_upload/token_data/cache_salt，并保证 nvext 穿越 tool-call jail 不丢失，legacy jail 下 choice-specific 字段要求 n=1）；#11157 把图像解码拆到 decoders/image 的后端体系（单独成篇 u4-l5），讲义需刷新行号与媒体解码小节。"
+          "topic": "请求进入引擎前的整形：preprocessor.rs 的 OpenAIPreprocessor 做模板/媒体计数/分词，media/loader.rs 负责媒体抓取与解码入口（经 url_validator 做 SSRF 防护），local_model.rs 负责模型与 tokenizer 加载；结合 lib/tokens 与 lib/kv-hashing 理解 token 块与块哈希。本轮两处大改需刷新：#13841 让 preprocessor/prompt.rs（+330）正确处理 continue_final_message（assistant 前缀续写不再被截断，chat_completions/completions/validate.rs 配套校验）；#12157 embeddings 分词对齐给 preprocessor.rs 新增 new_for_embeddings 与右截断逻辑（parity 测试见 u8-l8），行号锚点大量位移。"
         },
         {
           "action": "update",
@@ -498,7 +503,8 @@
             "解释 WorkerTypeReadiness 如何表达 P/D 就绪状态",
             "追踪 worker 上下线时 workerSet 的更新过程",
             "说出 Model 抽象在多后端共存时的作用",
-            "解释本次重构后负载阈值（LoadThresholdHandle/KvWorkerMonitor）如何进入发现层"
+            "解释负载阈值（LoadThresholdHandle/KvWorkerMonitor）如何进入发现层",
+            "指出 watcher.rs 为 embeddings 端点改用了哪个预处理器构造器"
           ],
           "level": "intermediate",
           "minimal_modules": [
@@ -519,7 +525,7 @@
             "lib/llm/src/discovery/worker_monitor.rs"
           ],
           "title": "Worker 类型与服务发现：discovery 模块",
-          "topic": "引擎如何知道有哪些 worker：worker_type.rs 区分 prefill/decode/both 等角色，discovery/model.rs 的 Model 与 WorkerTypeReadiness 管理就绪状态，worker_set.rs/model_manager.rs 维护动态 worker 集合。本次 #13861 重构了该模块：worker_monitor.rs 大幅精简（约千行级改动），watcher.rs/model_manager.rs 引入负载阈值接线（LoadThresholdHandle、KvWorkerMonitor），WorkerSet 与 KV 路由改为按路由上下文持有负载状态（routing_load.rs，见 u6-l2），讲义的行号锚点与 worker_monitor 相关描述需重核。"
+          "topic": "引擎如何知道有哪些 worker：worker_type.rs 区分 prefill/decode/both 等角色，discovery/model.rs 的 Model 与 WorkerTypeReadiness 管理就绪状态，worker_set.rs/model_manager.rs 维护动态 worker 集合，worker_monitor/watcher 承接负载阈值接线（LoadThresholdHandle、按路由上下文持有负载状态，见 u6-l2）。本次 #12157 小改 watcher.rs：embeddings 端点的预处理器由 OpenAIPreprocessor::new 改为 new_for_embeddings（分词路径与生成解耦），讲义补一句说明并核对该处行号。"
         },
         {
           "action": "new",
@@ -551,16 +557,16 @@
             "components/src/dynamo/common/utils/media_decoder.py",
             "benchmarks/multimodal/media_decode/run_image.sh"
           ],
-          "title": "图像解码后端：libjpeg-turbo 与并行媒体解码（本次新增）",
-          "topic": "本次 #11157 新增的媒体解码子系统：preprocessor/media/decoders/image.rs 统一解码编排，backends.rs 在 image_reader（PIL 系）与 turbojpeg（libjpeg-turbo 绑定）之间选择，jpeg_turbo.rs 封装 FFI 与错误处理（含 CMYK 转 RGB、与 PIL 的奇偶校验测试数据）；Python 侧 common/utils/media_decoder.py 与 vllm multimodal_utils/media_config.py 提供并行解码开关，容器镜像新增 libturbojpeg 系统依赖，lib/llm/benches/image_decode.rs 与 benchmarks/multimodal/media_decode 提供基准。"
+          "title": "图像解码后端：libjpeg-turbo 与并行媒体解码",
+          "topic": "媒体解码子系统：preprocessor/media/decoders/image.rs 统一解码编排，backends.rs 在 image_reader（PIL 系）与 turbojpeg（libjpeg-turbo 绑定）之间选择，jpeg_turbo.rs 封装 FFI 与错误处理（含 CMYK 转 RGB、与 PIL 的奇偶校验测试数据）；Python 侧 common/utils/media_decoder.py 与 vllm multimodal_utils/media_config.py 提供并行解码开关，容器镜像新增 libturbojpeg 系统依赖，lib/llm/benches/image_decode.rs 与 benchmarks/multimodal/media_decode 提供基准。"
         }
       ],
+      "level": "intermediate",
       "order": 4,
       "title": "lib/llm：LLM 引擎层与 HTTP 服务"
     },
     {
       "id": "u5",
-      "level": "intermediate",
       "lectures": [
         {
           "action": "keep",
@@ -592,7 +598,7 @@
           "topic": "dynamo.frontend 启动链：__main__.py 入口、frontend_args.py 的 FrontendConfig、main.py 构建 DistributedRuntime 并调用 dynamo.llm 的 make_engine 装配引擎与路由。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u5-l1"
           ],
@@ -601,13 +607,16 @@
           "learning_goals": [
             "追踪 chat 请求从 OpenAI 格式到引擎输入的转换",
             "实现流式增量解析（如自定义 reasoning 标签）",
-            "理解 StreamingPostProcessor 与 token 流的对应关系"
+            "理解 StreamingPostProcessor 与 token 流的对应关系",
+            "说出本轮新增的 reasoning parser adjust_request 预处理钩子与控制标记剥离逻辑"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "prepost.py",
             "thinking.py",
-            "StreamingPostProcessor"
+            "StreamingPostProcessor",
+            "reasoning parser adjust_request",
+            "control marker cleanup"
           ],
           "order": 2,
           "practice_task": "扩展 StreamingPostProcessor：识别自定义标签 <answer>...</answer> 并把内容作为单独字段流式返回，用 mocker 后端发固定 token 序列验证。",
@@ -617,10 +626,10 @@
             "components/src/dynamo/frontend/utils.py"
           ],
           "title": "请求整形：prepost.py 与流式后处理",
-          "topic": "前端最厚的文件 prepost.py：PreprocessResult、preprocess_chat_request 的请求整形与 StreamingPostProcessor 的 token 流后处理（工具调用解析、reasoning 提取）。注意工具调用 jail/nvext 的本次变化发生在 Rust 侧（u4-l3/u8-l7），Python 侧文件未改动。"
+          "topic": "前端最厚的文件 prepost.py：PreprocessResult、preprocess_chat_request 的请求整形与 StreamingPostProcessor 的 token 流后处理（工具调用解析、reasoning 提取）。本次两处修复需补入：#12541 在预处理阶段（而非仅后处理）调用 reasoning parser 的 adjust_request，使 <think> 类请求在进入引擎前就被正确整形；#12510 在后处理结束时剥离未被消费的控制标记，避免残留标记泄漏进最终 content；vllm_processor.py 同步小改。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u5-l2"
           ],
@@ -629,13 +638,15 @@
           "learning_goals": [
             "解释 chat_engine_factory 如何被后端替换",
             "对比 vllm_processor 与 sglang_processor 的差异点",
-            "为自定义后端实现一个 processor"
+            "为自定义后端实现一个 processor",
+            "说明 SGLang 侧已匹配 stop marker 的抑制策略如何跨 prepost 与 decode_handler 生效"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "VllmProcessor",
             "SglangProcessor",
-            "EngineFactory"
+            "EngineFactory",
+            "stop marker 抑制"
           ],
           "order": 3,
           "practice_task": "参照 vllm_processor.py 写一个 MyProcessor：在 generator 里对每个 chunk 附加延迟信息，通过环境变量切换启用，验证前端响应内容不变。",
@@ -645,15 +656,15 @@
             "components/src/dynamo/frontend/sglang_prepost.py"
           ],
           "title": "后端差异化 Processor",
-          "topic": "不同后端对请求/响应的特化处理：vllm_processor.py 的 VllmProcessor（含多模态路由）、sglang_processor.py/sglang_prepost.py 的 SGLang 侧逻辑，以及它们如何挂进 EngineFactory。"
+          "topic": "不同后端对请求/响应的特化处理：vllm_processor.py 的 VllmProcessor（含多模态路由）、sglang_processor.py/sglang_prepost.py 的 SGLang 侧逻辑，以及它们如何挂进 EngineFactory。本次 #12562 的 SGLang stop marker 抑制落在 sglang_prepost.py（+128）与 sglang_processor.py（+50）：已匹配的停止串不再作为正文回传，配套 delta 序列化变化发生在 Rust 侧（u4-l2），讲义需刷新相关小节与行号。"
         }
       ],
+      "level": "intermediate",
       "order": 5,
       "title": "Python 前端 dynamo.frontend"
     },
     {
       "id": "u6",
-      "level": "intermediate",
       "lectures": [
         {
           "action": "keep",
@@ -685,7 +696,7 @@
           "topic": "独立路由进程：__main__.py 的 StandaloneRouterHandler 暴露 generate/best_worker_id/get_overlap_scores 三个端点，args.py 与 router_args.py 定义 router_mode（round-robin/kv-aware/least-loaded 等）并映射到 Rust 侧。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u6-l1"
           ],
@@ -695,14 +706,14 @@
             "追踪一次路由决策从请求到选 worker 的完整调用",
             "解释 KV 重合度如何影响最终得分",
             "说出 scheduler.rs 在路由侧的动态批处理作用",
-            "解释本次重构后 RoutingLoadContext 如何让每个路由上下文自持负载状态，以及 KV 准入后直发为何免重复过载检查"
+            "解释 RoutingLoadContext 如何让每个路由上下文自持负载状态，以及 KV 准入后直发为何免重复过载检查"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "RoutingHost",
             "builtin policies",
             "scheduler",
-            "routing_load（本次新增）",
+            "routing_load",
             "LoadThresholdConfig Python 绑定"
           ],
           "order": 2,
@@ -716,7 +727,7 @@
             "lib/bindings/python/rust/llm/kv.rs"
           ],
           "title": "Rust 路由核心：routing_host、负载上下文与调度",
-          "topic": "路由决策的心脏：routing_host.rs 承载路由状态，routing_host/builtin.rs 内置 RoundRobin/KV 感知等策略，scheduler.rs 负责请求调度与批处理；standalone router 与前端内嵌路由共用这一层。本次 #13861『own load state per routing context』重构：新增 routing_load.rs（470 行）定义 RoutingLoadContext 与 RouterLoadSource（Decode/Aggregated/Prefill/Encode），把共享 client/过载状态/取消子树收进每个路由宿主；routing_host 增加 new_with_load_context 系列构造器，选点后经 push_router 的 dispatch_kv_admitted 直发（OverloadCheck 免重复过载复查）；LoadThresholdConfig 通过 bindings/python/rust/llm/kv.rs 暴露给 Python（test_load_threshold_config.py）。讲义需重写负载状态一节并刷新行号。"
+          "topic": "路由决策的心脏：routing_host.rs 承载路由状态，routing_host/builtin.rs 内置 RoundRobin/KV 感知等策略，scheduler.rs 负责请求调度与批处理；routing_load.rs 定义 RoutingLoadContext 与 RouterLoadSource（Decode/Aggregated/Prefill/Encode），把共享 client/过载状态/取消子树收进每个路由宿主，选点后经 push_router 的 dispatch_kv_admitted 直发；LoadThresholdConfig 经 bindings/python/rust/llm/kv.rs 暴露给 Python。standalone router 与前端内嵌路由共用这一层。"
         },
         {
           "action": "keep",
@@ -813,12 +824,12 @@
           "topic": "可插拔路由策略：selection/catalog.rs 的目录式注册、core/mod.rs 的策略执行模型（过滤→打分→挑选）、service.rs 直接从 WorkerSelectionPolicyRegistry 构造选点服务（ext-proc 等外部消费者共用）；lib/router-plugins/catalog 与 examples/router/custom-policy-example 演示如何写自己的策略。"
         }
       ],
+      "level": "intermediate",
       "order": 6,
       "title": "KV 感知路由"
     },
     {
       "id": "u7",
-      "level": "intermediate",
       "lectures": [
         {
           "action": "new",
@@ -879,7 +890,7 @@
             "lib/kv-router/src/conditional_disagg.rs"
           ],
           "title": "Prefill 路由与条件分离",
-          "topic": "请求该进哪个池：prefill_router/mod.rs 的预填充路由器、activation.rs 的激活条件、admission.rs 的准入控制，以及 kv-router 的 conditional_disagg.rs（按负载/请求特征在聚合与分离间切换）。注意本次 #13861 改写了 activation.rs（约百行）与 query.rs：激活判断现在基于每个路由上下文自持的负载状态与负载阈值（u6-l2 的 routing_load.rs），写作时按新结构讲解。"
+          "topic": "请求该进哪个池：prefill_router/mod.rs 的预填充路由器、activation.rs 的激活条件、admission.rs 的准入控制，以及 kv-router 的 conditional_disagg.rs（按负载/请求特征在聚合与分离间切换）；激活判断基于每个路由上下文自持的负载状态与负载阈值（u6-l2 的 routing_load.rs）。"
         },
         {
           "action": "new",
@@ -910,12 +921,12 @@
           "topic": "P/D 之间真正的数据搬运：block/transfer/ 下的 nixl.rs（RDMA/NVLink 高速传输）、nccl.rs、memcpy.rs 多种传输后端及其选择逻辑。"
         }
       ],
+      "level": "intermediate",
       "order": 7,
       "title": "分离式服务与 KV 传输"
     },
     {
       "id": "u8",
-      "level": "intermediate",
       "lectures": [
         {
           "action": "new",
@@ -928,13 +939,15 @@
           "learning_goals": [
             "追踪 vLLM 请求从 Dynamo 到 AsyncLLM 的路径",
             "解释 setup_kv_event_publisher 如何喂养路由器",
-            "说出 kv_connector_protocols 定义的协议"
+            "说出 kv_connector_protocols 定义的协议",
+            "指出 worker_factory 如何按模型任务类型选择生成或嵌入 worker 路径"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "vllm/main.py",
             "engine_generate",
-            "kv_connector_protocols"
+            "kv_connector_protocols",
+            "worker_factory"
           ],
           "order": 1,
           "practice_task": "用 mocker 冒充 vLLM 行为不可行时，直接阅读并画出 vllm worker 的初始化序列图；若装了 vllm extra 则跑通最小 agg 拓扑并记录 KV 事件日志。",
@@ -942,10 +955,11 @@
             "components/src/dynamo/vllm/main.py",
             "components/src/dynamo/vllm/engine_generate.py",
             "components/src/dynamo/vllm/kv_connector_protocols.py",
-            "components/src/dynamo/vllm/publisher.py"
+            "components/src/dynamo/vllm/publisher.py",
+            "components/src/dynamo/vllm/worker_factory.py"
           ],
           "title": "vLLM 后端接入",
-          "topic": "dynamo.vllm 如何包装 vLLM AsyncLLM：main.py 的 worker() 与 setup_* 系列函数（注册模型、指标、KV 事件发布）、engine_generate.py 的生成桥接、kv_connector_protocols.py 的 KV 连接器协议（LMCache 等外部卸载器经此接入，部署示例见 u10-l5）。"
+          "topic": "dynamo.vllm 如何包装 vLLM AsyncLLM：main.py 的 worker() 与 setup_* 系列函数（注册模型、指标、KV 事件发布）、engine_generate.py 的生成桥接、kv_connector_protocols.py 的 KV 连接器协议（LMCache 等外部卸载器经此接入，部署示例见 u10-l5）。本次 #12157 扩展了 main.py/handlers.py/worker_factory.py 的 embeddings 分支（多进程嵌入 worker 池，详见 u8-l8），#13923 新增 Python sidecar 启动入口（见 u8-l4）。"
         },
         {
           "action": "new",
@@ -957,7 +971,8 @@
           "learning_goals": [
             "解释 SGLang disagg 的 bootstrap 寻址机制",
             "说出 request_handlers 的多模态分类方式与 min_tokens 到 min_new_tokens 的参数映射",
-            "对比 SGLang 与 vLLM 接入层的设计差异"
+            "对比 SGLang 与 vLLM 接入层的设计差异",
+            "解释 decode_handler 如何抑制已匹配的 stop marker 防止其回流正文"
           ],
           "level": "intermediate",
           "minimal_modules": [
@@ -965,7 +980,8 @@
             "init_llm",
             "_disagg",
             "handler_base",
-            "_compat"
+            "_compat",
+            "stop marker 抑制"
           ],
           "order": 2,
           "practice_task": "参照 handler_base.py 写一个新的最小 request handler（回显请求元数据），并让 SGLang 后端在分发时能选中它（可用单元测试验证分发逻辑）。",
@@ -978,7 +994,7 @@
             "components/src/dynamo/sglang/request_handlers/llm/decode_handler.py"
           ],
           "title": "SGLang 后端接入",
-          "topic": "dynamo.sglang 的接入方式：main.py worker() 入口、init_llm.py 等多模态初始化、_compat.py 处理 SGLang 0.5.18 版本差异、_disagg.py 的 bootstrap 地址/预热逻辑、request_handlers/ 按模态分发的处理器体系（decode_handler.py 做 min_tokens→min_new_tokens 映射）；register.py 在本次媒体解码合入后多了 turbojpeg 相关环境开关。"
+          "topic": "dynamo.sglang 的接入方式：main.py worker() 入口、init_llm.py 等多模态初始化、_compat.py 处理 SGLang 0.5.18 版本差异、_disagg.py 的 bootstrap 地址/预热逻辑、request_handlers/ 按模态分发的处理器体系；本次 #12562 给 decode_handler.py（+184）加入已匹配 stop marker 的抑制逻辑（与前端 sglang_prepost 及 Rust delta 序列化配套），register.py 含 turbojpeg 相关环境开关。"
         },
         {
           "action": "new",
@@ -990,13 +1006,15 @@
           "learning_goals": [
             "解释 TensorRTLLMEngine 对 TRT-LLM 引擎的封装方式",
             "说出 workers/ 目录按模态拆分 worker 的意图",
-            "追踪 drain 回调在优雅退出中的作用"
+            "追踪 drain 回调在优雅退出中的作用",
+            "说明 per-request return_perf_metrics 如何跟随引擎开关而非全局强制"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "trtllm/main.py",
             "engine.py",
-            "llm_worker"
+            "llm_worker",
+            "return_perf_metrics 开关"
           ],
           "order": 3,
           "practice_task": "阅读 engine.py 后对比它与 vLLM AsyncLLM 封装的异同，写一份接入层设计对比笔记（约 300 字），重点回答：为什么两者 worker 结构不同。",
@@ -1007,7 +1025,7 @@
             "components/src/dynamo/trtllm/workers/image_diffusion_worker.py"
           ],
           "title": "TensorRT-LLM 后端接入",
-          "topic": "dynamo.trtllm 的接入：main.py worker() 与 drain 回调、engine.py 的 TensorRTLLMEngine/Backend 枚举、workers/ 按模态（LLM/图像/视频扩散）拆分的 worker。"
+          "topic": "dynamo.trtllm 的接入：main.py worker() 与 drain 回调、engine.py 的 TensorRTLLMEngine/Backend 枚举、workers/ 按模态（LLM/图像/视频扩散）拆分的 worker。本次 #13922 让 llm_worker.py 的 per-request return_perf_metrics 跟随引擎级开关；#13924 新增 components/src/dynamo/trtllm/sidecar.py Python 启动入口（机制见 u8-l4）。"
         },
         {
           "action": "new",
@@ -1020,27 +1038,32 @@
             "用 mocker 启动多角色假 worker 复现真实拓扑",
             "解释 grouped_scheduler 的调度模型",
             "说出 sidecar 二进制与进程内接入的差别",
-            "用统一 Dockerfile 构建三个 sidecar 可执行文件并用 dynamo-sidecar 包装器选择引擎"
+            "用统一 Dockerfile 构建三个 sidecar 可执行文件并用 dynamo-sidecar 包装器或新的 Python 启动器选择引擎"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "mocker/main.py",
             "lib/mocker engine",
             "sidecar unified image",
-            "sidecar main"
+            "sidecar main",
+            "Python sidecar 启动器"
           ],
           "order": 4,
-          "practice_task": "用 dynamo.mocker 启动 2 prefill + 2 decode 的假集群，接上 frontend 与 kv 路由，跑通一条端到端请求并记录各组件日志中的关键事件；再用 lib/sidecar/Dockerfile 构建 CPU-only 镜像并通过 dynamo-sidecar 包装器分别打印 vllm/sglang/trtllm 三个可执行文件的 --help。",
+          "practice_task": "用 dynamo.mocker 启动 2 prefill + 2 decode 的假集群，接上 frontend 与 kv 路由，跑通一条端到端请求并记录各组件日志中的关键事件；再用 dynamo-sidecar（或新的 python -m dynamo.vllm sidecar 入口）分别打印 vllm/sglang/trtllm 三个 sidecar 的 --help，并对比 Rust 直启与经 Python 包装启动在退出码上的差异。",
           "source_files": [
             "components/src/dynamo/mocker/main.py",
             "lib/mocker/src/engine.rs",
             "lib/mocker/src/grouped_scheduler/dispatch.rs",
             "lib/sidecar/vllm/src/main.rs",
             "lib/sidecar/Dockerfile",
-            "lib/sidecar/README.md"
+            "lib/sidecar/README.md",
+            "components/src/dynamo/vllm/sidecar.py",
+            "components/src/dynamo/trtllm/sidecar.py",
+            "lib/bindings/python/rust/backend.rs",
+            "lib/sidecar/common/src/error.rs"
           ],
           "title": "mocker 与 sidecar：无 GPU 的全链路与旁路接入",
-          "topic": "测试与旁路接入两件武器：components mocker 用 aiconfigurator 性能模型模拟 worker（无 GPU 全链路），lib/mocker 是 Rust 全功能模拟引擎；lib/sidecar/* 以独立进程方式把引擎接入 Dynamo，三个 sidecar（vllm/sglang/trtllm）统一由单个 CPU-only Dockerfile 构建，dynamo-sidecar 便捷入口把引擎短名映射到对应可执行文件。"
+          "topic": "测试与旁路接入两件武器：components mocker 用 aiconfigurator 性能模型模拟 worker（无 GPU 全链路），lib/mocker 是 Rust 全功能模拟引擎；lib/sidecar/* 以独立进程方式把引擎接入 Dynamo，三个 sidecar（vllm/sglang/trtllm）统一由单个 CPU-only Dockerfile 构建。本次 #13923/#13924/#13929 新增 Python 启动器：components/src/dynamo/{vllm,trtllm}/sidecar.py 经 _core.backend 的 _run_vllm_sidecar/_run_trtllm_sidecar（backend.rs）调用 Rust sidecar，lib/sidecar/common/error.rs 的 SidecarStartupError 映射为 PySystemExit 以保留 CLI 退出码，各 engine.rs 改用 try_from_args。"
         },
         {
           "action": "new",
@@ -1137,16 +1160,54 @@
             "lib/llm/src/http/service/openai.rs",
             "docs/fern/pages/use-cases/reinforcement-learning/implementation-guide.md"
           ],
-          "title": "为 RL rollout 服务：nvext、/v1/rl/workers 与传输元数据（本次新增）",
-          "topic": "本次 #13606 强化的 RL 服务面：worker 以 DYN_ENABLE_RL/--enable-rl 注册 dyn://<ns>.<comp>.rl 请求面端点，backend-common/rl.rs 新增 RlWorkerMetadata（world_size、admin_base_url）随端点发布；lib/rl 的 RlDiscoveryConfig/RlDiscoveryState 在 openai.rs 挂载 rl_router，暴露只读的 /v1/rl/workers 发现（含并发探测上限与协议版本协商）；配合 preprocessor 的 nvext 透传（token-in/token-out、prompt_logprobs、SGLang meta_info 带外上传）与新增 POST /v1/responses/input_tokens 端点，构成对 RL 训练循环的完整支撑。"
+          "title": "为 RL rollout 服务：nvext、/v1/rl/workers 与传输元数据",
+          "topic": "RL 服务面：worker 以 DYN_ENABLE_RL/--enable-rl 注册 dyn://<ns>.<comp>.rl 请求面端点，backend-common/rl.rs 的 RlWorkerMetadata（world_size、admin_base_url）随端点发布；lib/rl 的 RlDiscoveryConfig/RlDiscoveryState 在 openai.rs 挂载 rl_router，暴露只读的 /v1/rl/workers 发现（含并发探测上限与协议版本协商）；配合 preprocessor 的 nvext 透传（token-in/token-out、prompt_logprobs、SGLang meta_info 带外上传）与 POST /v1/responses/input_tokens 端点，构成对 RL 训练循环的完整支撑。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1",
+            "u4-l3"
+          ],
+          "filename": "u8-l8-embeddings-worker-pool.md",
+          "id": "u8-l8",
+          "learning_goals": [
+            "解释 embedding-only 多进程池如何用一个 vLLM EngineCore 服务多个 API 进程",
+            "追踪 embedding 响应的 base64 字节传输路径（Python torch→numpy.tobytes→base64 与 Rust 解码对齐）",
+            "说出 Rust 预处理器 new_for_embeddings 与右截断 parity 测试如何保证分词一致",
+            "用 backend_args/args 配置嵌入 worker 的进程数与角色环境变量"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "embedding_worker_processes 多进程池",
+            "backend_args 嵌入参数",
+            "handlers base64 编码",
+            "Rust embeddings 协议与预处理器",
+            "tokenization parity 测试"
+          ],
+          "order": 8,
+          "practice_task": "阅读 embedding_worker_processes.py 后画出父进程与子进程的启动/退出时序图（含 DYN_VLLM_EMBEDDING_PROCESS_* 环境变量与父进程 watchdog 的作用）；再对照 test_vllm_embedding_tokenization_parity.py 与 lib/llm 的右截断 parity 测试数据，写一段说明 Rust 与 Python 两侧为何必须产生完全相同的 token 序列；有环境时用 embedding 模型跑通一条 /v1/embeddings 请求并核对返回的 base64 向量可被解码为 little-endian float32。",
+          "source_files": [
+            "components/src/dynamo/vllm/embedding_worker_processes.py",
+            "components/src/dynamo/vllm/backend_args.py",
+            "components/src/dynamo/vllm/handlers.py",
+            "components/src/dynamo/vllm/main.py",
+            "lib/llm/src/protocols/openai/embeddings.rs",
+            "lib/llm/src/preprocessor.rs",
+            "lib/llm/src/discovery/watcher.rs",
+            "components/src/dynamo/vllm/tests/test_vllm_embedding_tokenization_parity.py",
+            "docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/tokenizer.md"
+          ],
+          "title": "Embeddings 服务化：分词对齐、多进程池与字节传输（本次新增）",
+          "topic": "本次 #12157 新增的 embeddings 服务能力：embedding_worker_processes.py（513 行）把 vLLM『多 API 进程共享一个 EngineCore』的拓扑应用到 Dynamo 嵌入 worker——父进程 launch_core_engines 派生多个子进程端点（DYN_VLLM_EMBEDDING_PROCESS_ROLE/INDEX/ENGINE_ADDRESSES 环境变量 + 父进程 watchdog 防孤儿注册），backend_args.py/args.py 负责池参数；handlers.py 把 PoolingOutput 张量经 torch→numpy.tobytes→base64（显式 little-endian float32）直出，与 Rust 侧 protocols/openai/embeddings.rs 的解码保持字节级一致（openai.rs 原解码辅助随之迁移）；Rust 侧 preprocessor.rs 新增 new_for_embeddings 与右截断逻辑，watcher.rs 的 embeddings 端点改用新构造器，并以 test_vllm_embedding_tokenization_parity.py 与 embedding_right_truncation_parity.json 保证跨语言分词一致。"
         }
       ],
+      "level": "intermediate",
       "order": 8,
       "title": "推理引擎后端接入"
     },
     {
       "id": "u9",
-      "level": "advanced",
       "lectures": [
         {
           "action": "new",
@@ -1296,12 +1357,12 @@
           "topic": "跨节点 KVBM：block_manager/distributed 的 leader/worker/zmq 协调，kvbm-consolidator 把跨节点 KV 事件汇聚去重（tracker.rs 的 BlockState 状态机）；lib/bindings/kvbm 把 BlockManager 暴露给 Python。"
         }
       ],
+      "level": "advanced",
       "order": 9,
       "title": "KVBM：多层 KV 块管理"
     },
     {
       "id": "u10",
-      "level": "advanced",
       "lectures": [
         {
           "action": "new",
@@ -1393,7 +1454,7 @@
             "deploy/inference-gateway/epp/pkg/plugins/dynamo_kv_scorer/plugin.go"
           ],
           "title": "Inference Gateway：ext-proc 与 EPP",
-          "topic": "Gateway API 路由拓扑：Rust 写的 dynamo-ext-proc（Envoy ext_proc，runner.rs/selector.rs 承载选点逻辑，选点服务直接从 WorkerSelectionPolicyRegistry 构造并与 kv-router 共用，epp.rs 在本次负载重构中同步改为按路由上下文取负载）+ Go 写的 EPP 及 dynamo_kv_scorer 插件。"
+          "topic": "Gateway API 路由拓扑：Rust 写的 dynamo-ext-proc（Envoy ext_proc，runner.rs/selector.rs 承载选点逻辑，选点服务直接从 WorkerSelectionPolicyRegistry 构造并与 kv-router 共用，epp.rs 按路由上下文取负载）+ Go 写的 EPP 及 dynamo_kv_scorer 插件。"
         },
         {
           "action": "new",
@@ -1452,16 +1513,16 @@
             "docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/kv-cache-offloading.md",
             "examples/backends/vllm/deploy/README.md"
           ],
-          "title": "KV 卸载部署示例：vLLM + LMCache 聚合式服务（本次新增）",
-          "topic": "本次 #10185 新增的官方部署样例：examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml 用一张 v1beta1 DGD 描述 Frontend + VllmDecodeWorker，worker 启动命令从 ConfigMap 读取 kv-transfer-config JSON 启用 LMCache KV 卸载（聚合式多进程共享 KV）；docs 的 kubernetes/kv-cache-offloading/lmcache.mdx 给出部署与验证步骤。它是 KVBM（u9）之外经 vLLM 连接器接入的外部卸载路线，适合放在学完 DGD/Helm 之后实操。"
+          "title": "KV 卸载部署示例：vLLM + LMCache 聚合式服务",
+          "topic": "官方部署样例：examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml 用一张 v1beta1 DGD 描述 Frontend + VllmDecodeWorker，worker 启动命令从 ConfigMap 读取 kv-transfer-config JSON 启用 LMCache KV 卸载（聚合式多进程共享 KV）；docs 的 kubernetes/kv-cache-offloading/lmcache.mdx 给出部署与验证步骤。它是 KVBM（u9）之外经 vLLM 连接器接入的外部卸载路线，适合放在学完 DGD/Helm 之后实操。"
         }
       ],
+      "level": "advanced",
       "order": 10,
       "title": "Kubernetes 部署层"
     },
     {
       "id": "u11",
-      "level": "advanced",
       "lectures": [
         {
           "action": "new",
@@ -1552,15 +1613,15 @@
             "components/src/dynamo/kv_state_agent/__main__.py"
           ],
           "title": "Global Planner 与集群容量编排",
-          "topic": "多池/多集群协同：global_planner 的 Orchestrator（PoolIntent/ScaleOutcome/PartnerTransfer 协调）、scale_handler 与 kubernetes_capacity_manager 落地 K8s 池容量；kv_state_agent 提供 KV 状态诊断。注意 global_planner 与本次小修的 global_router（跳过模型权重下载）是不同组件，勿混淆。"
+          "topic": "多池/多集群协同：global_planner 的 Orchestrator（PoolIntent/ScaleOutcome/PartnerTransfer 协调）、scale_handler 与 kubernetes_capacity_manager 落地 K8s 池容量；kv_state_agent 提供 KV 状态诊断。注意 global_planner 与 global_router（跳过模型权重下载的小修）是不同组件，勿混淆。"
         }
       ],
+      "level": "advanced",
       "order": 11,
       "title": "Planner 与自动扩缩"
     },
     {
       "id": "u12",
-      "level": "advanced",
       "lectures": [
         {
           "action": "new",
@@ -1617,7 +1678,7 @@
             ".ai/pytest-guidelines.md"
           ],
           "title": "测试体系：cargo test + pytest",
-          "topic": "仓库测试约定：顶层 tests/ 的分层（basic/runtime/frontend/router/serve/deploy/fault_tolerance/kvbm_integration 等）、conftest.py 的路径与 marker 保护、严格 marker 与 GPU 门控（gpu_0…gpu_8）。"
+          "topic": "仓库测试约定：顶层 tests/ 的分层（basic/runtime/frontend/router/serve/deploy/fault_tolerance/kvbm_integration 等）、conftest.py 的路径与 marker 保护、严格 marker 与 GPU 门控（gpu_0…gpu_8）；本轮 #12157/#12541 等提交附带的 parity 与 processor 单测可作为范式引用。"
         },
         {
           "action": "new",
@@ -1647,7 +1708,7 @@
             "lib/bench/src/lib.rs"
           ],
           "title": "基准测试与 AIPerf 工具链",
-          "topic": "性能测量：benchmarks/ 基于 AIPerf 的负载生成与各 workload 剖面（frontend/router/multimodal/request_trace 等，本次新增 multimodal/media_decode 图像解码基准），Rust 侧 lib/bench 与 lib/llm/benches 微基准。"
+          "topic": "性能测量：benchmarks/ 基于 AIPerf 的负载生成与各 workload 剖面（frontend/router/multimodal/request_trace 等，含 multimodal/media_decode 图像解码基准），Rust 侧 lib/bench 与 lib/llm/benches 微基准。"
         },
         {
           "action": "new",
@@ -1679,6 +1740,7 @@
           "topic": "worker 挂了请求不挂：health_check.rs 的健康探测、system_health.rs 的系统级健康状态、etcd lease 到期触发的下线，以及 tests/fault_tolerance 的行为验证。"
         }
       ],
+      "level": "advanced",
       "order": 12,
       "title": "质量保障、可观测与容错"
     }

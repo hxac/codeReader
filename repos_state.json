@@ -58678,7 +58678,7 @@
     "ai-dynamo/dynamo": {
       "prompt_hash": "b21aef51792b02df",
       "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-08-27T23:02:26Z",
+      "last_run_at": "2026-08-28T15:51:04Z",
       "lectures": {
         "u1-l1": {
           "status": "keep",
@@ -58731,11 +58731,9 @@
           "retries": 0
         },
         "u3-l4": {
-          "status": "done",
-          "action": "update",
-          "retries": 0,
-          "cost": 2.234784,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l5": {
           "status": "keep",
@@ -58743,32 +58741,26 @@
           "retries": 0
         },
         "u4-l1": {
-          "status": "done",
-          "action": "update",
-          "retries": 0,
-          "cost": 4.4220999999999995,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l2": {
-          "status": "done",
-          "action": "update",
-          "retries": 0,
-          "cost": 3.396276,
-          "error": null
-        },
-        "u4-l3": {
-          "status": "done",
-          "action": "update",
-          "retries": 0,
-          "cost": 3.046444,
-          "error": null
-        },
-        "u4-l4": {
           "status": "failed",
           "action": "update",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"c624a2bd-e3ae-4ae3-86a9-8e0d"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"e76a4be4-88c6-4308-9381-e96d"
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "update",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "pending",
+          "action": "update",
+          "retries": 0
         },
         "u4-l5": {
           "status": "pending",
@@ -58781,13 +58773,13 @@
           "retries": 0
         },
         "u5-l2": {
-          "status": "keep",
-          "action": "keep",
+          "status": "pending",
+          "action": "update",
           "retries": 0
         },
         "u5-l3": {
-          "status": "keep",
-          "action": "keep",
+          "status": "pending",
+          "action": "update",
           "retries": 0
         },
         "u6-l1": {
@@ -58796,8 +58788,8 @@
           "retries": 0
         },
         "u6-l2": {
-          "status": "pending",
-          "action": "update",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l3": {
@@ -58861,6 +58853,11 @@
           "retries": 0
         },
         "u8-l7": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l8": {
           "status": "pending",
           "action": "new",
           "retries": 0
@@ -58951,16 +58948,16 @@
           "retries": 0
         }
       },
-      "manifest_head": "407e8cb75bb98ca51551ce217c9603e446750e39",
-      "prev_head": "3d3cf16123241ce36adb71a83053097a3d8457b5",
+      "manifest_head": "c1b6cce1d53227c38f1d09b270f0e4cff85d7ecf",
+      "prev_head": "407e8cb75bb98ca51551ce217c9603e446750e39",
       "phase": "workers",
       "mode": "incremental",
       "tutorial_path": "tutorials/ai-dynamo/dynamo/dynamo-tutorial",
-      "last_head": "407e8cb75bb98ca51551ce217c9603e446750e39"
+      "last_head": "c1b6cce1d53227c38f1d09b270f0e4cff85d7ecf"
     },
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-27T23:02:26Z"
+      "last_run_at": "2026-08-28T15:51:04Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
@@ -62137,16 +62134,18 @@
           "error": null
         },
         "u7-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.8263369999999997,
+          "error": null
+        },
+        "u7-l2": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"d96508ef-1d79-4eb8-b7c0-e801"
-        },
-        "u7-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\""
         },
         "u7-l3": {
           "status": "pending",
@@ -62205,7 +62204,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/microsoft/mimalloc/mimalloc-tutorial",
       "last_head": "cd69707c3ca01a4c5fb358e8b92a710554f15356",
-      "last_run_at": "2026-08-27T23:02:26Z",
+      "last_run_at": "2026-08-28T15:51:04Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "microsoft/RustTraining": {
@@ -62240,16 +62239,18 @@
           "error": null
         },
         "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8127790000000001,
+          "error": null
+        },
+        "u2-l2": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"ec905659-1c72-4725-ba6c-a7a1"
-        },
-        "u2-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"62a93465-a4b5-4d75-9bbc-7ce3"
         },
         "u2-l3": {
           "status": "pending",
@@ -62333,7 +62334,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/microsoft/RustTraining/RustTraining-tutorial",
       "last_head": "9d19c482d66ef3995dca794bda74c7852134e0b7",
-      "last_run_at": "2026-08-27T23:02:26Z",
+      "last_run_at": "2026-08-28T15:51:04Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "rayon-rs/rayon": {},
