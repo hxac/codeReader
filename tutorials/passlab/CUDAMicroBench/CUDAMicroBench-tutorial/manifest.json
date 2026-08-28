@@ -1,0 +1,871 @@
+{
+  "head": "59c4ca6b0c7800c4994428db4b829f98f71c9071",
+  "project": "CUDAMicroBench",
+  "rationale": "CUDAMicroBench 是由 14 个相互独立的 CUDA 微基准组成的集合（IPDPSW 2021 论文配套代码），没有统一框架入口，每个目录自成一体（host 的 .c 主程序 + device 的 .cu kernel + Makefile + test.sh），因此学习路线先让读者掌握『项目地图 + 单个基准的通用骨架 + 编译运行与测量方法』（单元一、二，入门层），再按 README 中总结的三大性能挑战分类逐个深入：充分利用 GPU 大规模并行（WarpDivRedux 分支发散、DynParallel 动态并行、Conkernels 并发 kernel、TaskGraph 任务图，单元三）、有效利用 GPU 内部深存储层次（Shmem 共享内存分块、CoMem 合并访问、MemAlign 对齐、BankRedux bank 冲突、Shuffle warp 洗牌、GSOverlap 异步拷贝流水线，单元四）、合理安排 CPU-GPU 间数据搬运（HDOverlap 异步传输、ReadOnlyMem 纹理/常量内存、UniMem 统一内存、MiniTransfer 数据布局，单元五），这三单元为进阶层，每个基准恰好对应一个独立的性能反模式与优化技术，天然适合『一篇讲义解决一个问题』。最后的专家层（单元六）把 Shuffle 的 reduce0 到 reduce6 七步优化阶梯作为综合案例，并引导读者复用项目骨架设计自己的微基准、理解 Common 目录的 CUDA Samples 依赖、以及跨平台实验结果的方法论解读。依赖关系上，单元三、四、五彼此独立、都建立在单元二的 CUDA 基础之上，可按需选读；单元六综合前面内容。共 28 篇讲义，与该中型项目 14 个基准的规模匹配。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 CUDAMicroBench 的定位、来源论文与 BSD 许可背景",
+            "把 14 个基准目录对应到三大性能挑战类别",
+            "通过 README 的表格索引每个基准要演示的反模式与优化手段"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README 性能模式表格",
+            "14 个基准目录"
+          ],
+          "order": 1,
+          "practice_task": "对照 README 中的表格，把仓库里 14 个基准目录逐一分类到三大性能挑战下，为每个目录写一行说明（性能反模式 + 优化技术），并标注哪些目录来自 CUDA Samples（提示：Common 一节提到的 GSOverlap、Conkernels、TaskGraph）。",
+          "source_files": [
+            "README.md",
+            "LICENSE_BSD.txt",
+            "NOTICE"
+          ],
+          "title": "CUDAMicroBench 是什么：14 个微基准的项目地图",
+          "topic": "介绍 CUDAMicroBench 的定位：一套用于演示 CUDA 性能编程挑战与优化技术的 14 个微基准集合，说明 README 中三大类性能问题（并行能力饱和、GPU 内存层次、CPU-GPU 数据搬运）与各基准的对应关系，以及配套论文与许可信息。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-environment-setup-and-build.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "确认 nvcc 版本与 GPU 计算能力是否满足各基准要求",
+            "独立编译并运行一个简单基准",
+            "理解 sm_30、-g -G、-rdc=true 等编译选项的含义"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "nvcc 编译",
+            "Makefile 规则",
+            "test.sh 脚本"
+          ],
+          "order": 2,
+          "practice_task": "在具备 NVIDIA GPU 的机器上进入 CoMem_AXPY 目录执行 make 编译、运行 ./axpy_cuda 1024000，然后用 test.sh 的方式用 n=10240000 再跑一次，记录两次输出的 checksum 和 time。若本机无 GPU，写出编译命令并用 nvcc --version、nvidia-smi 记录环境检查过程。",
+          "source_files": [
+            "README.md",
+            "CoMem_AXPY/Makefile",
+            "CoMem_AXPY/test.sh",
+            "WarpDivRedux/Makefile",
+            "WarpDivRedux/test.sh",
+            "DynParallel/Makefile"
+          ],
+          "title": "环境准备、编译与运行：Makefile 与 test.sh",
+          "topic": "讲解项目要求的软硬件环境（NVIDIA GPU、CUDA 工具链，部分特性需要 CUDA 11），每个基准目录一个 Makefile、用 nvcc 直接编译 .c 与 .cu，通过 test.sh 以不同数据规模运行并用 nvprof 采集指标。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-benchmark-anatomy-and-common-pattern.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "识别微基准的三文件骨架（host 主程序 / kernel / 头文件）",
+            "解释 warmup kernel、计时循环、check 校验在骨架中的作用",
+            "画出一次调用的数据流与控制流图"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "host 主程序骨架",
+            "kernel 文件",
+            "公共头文件"
+          ],
+          "order": 3,
+          "practice_task": "以 CoMem_AXPY 为对象画出模块调用图（main → axpy_cuda → 各 kernel），并在图中标注：数据初始化、串行基线、warmup、计时循环、check 校验五个阶段各自发生在哪个文件哪一行附近；再对照 MemAlign 目录确认两套代码骨架的同构性。",
+          "source_files": [
+            "README.md",
+            "Common/README.md",
+            "CoMem_AXPY/axpy.h",
+            "CoMem_AXPY/axpy_cuda.c",
+            "CoMem_AXPY/axpy_cudakernel.cu"
+          ],
+          "title": "单个微基准的解剖：host 主程序 + kernel + 头文件三件套",
+          "topic": "剖析绝大多数基准共享的代码骨架：host 侧 .c 文件负责初始化、计时（read_timer_ms）、串行基线与 check 校验，.cu 文件负责 cudaMalloc/cudaMemcpy/kernel 启动/cudaFree，.h 文件声明接口；并介绍 Common 目录（源自 CUDA Samples 的 helper 头文件）服务哪几个基准。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l4-output-and-profiling-basics.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "读懂程序打印的 checksum 与 time 输出格式",
+            "使用 nvprof 查看 kernel 耗时占比与 branch_efficiency 指标",
+            "从仓库自带的 .output.txt 结果中提取 GPU 时间信息"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "nvprof 概览",
+            "nvprof --metrics",
+            "输出结果文件"
+          ],
+          "order": 4,
+          "practice_task": "运行 BankRedux：先 ./sum_cuda 102400 观察输出，再执行 nvprof ./sum_cuda 102400 与 nvprof --metrics branch_efficiency ./sum_cuda 102400，把 GPU activities 中三个 kernel（warmingup、sum_cudakernel、sum_cudakernel_bc）的时间与仓库中 sum_cuda.output.carina.txt 的记录做成对照表。",
+          "source_files": [
+            "BankRedux/test.sh",
+            "BankRedux/sum_cuda.output.carina.txt",
+            "BankRedux/Makefile",
+            "README.md"
+          ],
+          "title": "读懂基准输出与性能分析入门：nvprof 与结果文件",
+          "topic": "讲解如何阅读基准的标准输出（checksum、平均耗时）以及仓库自带的在 Carina/Fornax 集群上采集的 .output.txt 结果文件，介绍 test.sh 中 nvprof 与 nvprof --metrics（如 branch_efficiency）的基本用法。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "单元一：认识 CUDAMicroBench——项目地图、构建运行与通用代码骨架"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "filename": "u2-l1-first-cuda-kernel-axpy.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "理解 kernel、grid、block、thread 的层级关系",
+            "手推 blockIdx.x * blockDim.x + threadIdx.x 的全局线程编号",
+            "知道 <<<grid, block>>> 配置如何决定并行规模"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "axpy_cudakernel_warmingup",
+            "axpy_cudakernel_1perThread",
+            "线程索引计算"
+          ],
+          "order": 1,
+          "practice_task": "把 CoMem_AXPY 中 1perThread kernel 的 block size 从 256 改成 128 与 512（同步修改 (n+255)/256 的网格计算），分别在 n=1024000 与 n=10240000 下编译运行，记录时间并解释为什么对这个访存受限 kernel 影响不大。",
+          "source_files": [
+            "CoMem_AXPY/axpy_cudakernel.cu",
+            "CoMem_AXPY/axpy_cuda.c",
+            "CoMem_AXPY/axpy.h"
+          ],
+          "title": "第一个 CUDA kernel：AXPY 与线程索引模型",
+          "topic": "以 CoMem_AXPY 的 axpy_cudakernel_1perThread 为例讲解 CUDA 执行模型：__global__ 函数、blockIdx/threadIdx/blockDim/gridDim、全局线程编号计算与 <<<grid, block>>> 启动配置。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-parallelization-strategies.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "对比 block（连续块）分布与 cyclic（跨步循环）分布的索引方式",
+            "理解网格 stride loop 的写法与适用场景",
+            "修复 n 不能被线程总数整除时的边界问题"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "axpy_cudakernel_block",
+            "axpy_cudakernel_cyclic"
+          ],
+          "order": 2,
+          "practice_task": "源码注释中留有 TODO：block 分布假设 n 可被总线程数整除。请修改 axpy_cudakernel_block，使它在 n=1000000、总线程数 262144 这类不可整除的情况下仍然正确（提示：余数处理或边界判断），并用 check 函数验证 checksum 为 0。",
+          "source_files": [
+            "CoMem_AXPY/axpy_cudakernel.cu",
+            "CoMem_AXPY/axpy_cuda.c"
+          ],
+          "title": "一维数据的多种并行化策略：每线程一个元素、块分布与循环分布",
+          "topic": "对比同一个 AXPY 的三种并行化 kernel：1perThread（每线程一个元素）、block（每线程负责连续一段）、cyclic（跨步循环），理解任务划分方式对线程数量、访问模式与性能的影响。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l3-cuda-memory-management-basics.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "掌握 cudaMalloc/cudaMemcpy/cudaFree 的完整生命周期",
+            "区分 cudaMemcpyHostToDevice 与 cudaMemcpyDeviceToHost",
+            "理解 cudaDeviceSynchronize 的同步语义"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "显存分配与拷贝",
+            "kernel 启动与同步"
+          ],
+          "order": 3,
+          "practice_task": "为 CoMem_AXPY 的 axpy_cuda 函数的每一步 cudaMalloc/cudaMemcpy/kernel 启动添加 cudaGetLastError() 错误检查并打印错误信息，再故意把网格大小改为 0 触发一次启动错误，观察你的检查代码如何报告它。",
+          "source_files": [
+            "CoMem_AXPY/axpy_cudakernel.cu",
+            "MemAlign/axpy_cudakernel.cu",
+            "CoMem_AXPY/axpy.h"
+          ],
+          "title": "CUDA 显存管理基础：cudaMalloc、cudaMemcpy 与同步",
+          "topic": "系统讲解所有基准共用的显存管理流程：cudaMalloc 分配、cudaMemcpy 在主机与设备间搬运、kernel 异步启动与 cudaDeviceSynchronize、cudaFree 释放，以及 H2D/D2H 方向参数。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l4-serial-baseline-and-verification.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "读懂 diffsum/sum 归一化误差的 check 实现",
+            "理解多轮取平均与 warmup 对计时的影响",
+            "知道 REAL 宏切换 float/double 的精度后果"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "check 函数",
+            "串行 axpy 基线",
+            "read_timer_ms 计时"
+          ],
+          "order": 4,
+          "practice_task": "把 CoMem_AXPY 的 REAL 从 float 改为 double（或在 MemAlign 中反向切换）重新编译，观察 checksum 变化；再为 check 增加一个最大绝对误差 max diff 的输出，用它对比串行与 CUDA 结果。",
+          "source_files": [
+            "CoMem_AXPY/axpy_cuda.c",
+            "MemAlign/axpy_cuda.c",
+            "CoMem_AXPY/axpy.h"
+          ],
+          "title": "串行基线与正确性验证：check、checksum 与计时方法",
+          "topic": "讲解基准如何保证『跑得快』不以『算错』为代价：串行参考实现、check() 用差值和/绝对值和的比值衡量误差、printf 输出的 checksum 含义，以及 num_runs=10 次取平均、warmingup kernel 预热的计时方法。"
+        }
+      ],
+      "level": "beginner",
+      "order": 2,
+      "title": "单元二：CUDA 基础与微基准骨架详解"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u1-l4"
+          ],
+          "filename": "u3-l1-warp-divergence.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "理解 warp 是 GPU 调度的基本单位与 SIMT 执行方式",
+            "分析 tid%2 分支导致相邻线程交替走两个分支的危害",
+            "用 branch_efficiency 指标量化分支优化效果"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "warpDivergence",
+            "noWarpDivergence",
+            "warmingup"
+          ],
+          "order": 1,
+          "practice_task": "按照 warpDivergenceTest_cuda.c 中串行版 NoWarpDivergenceSerial 的思路，新写一个 kernel 用 (tid/32)%2 作为分支条件（让整个 warp 走同一分支），加入 warpDivergenceTest_cuda 调用链，用 test.sh 中的 nvprof --metrics branch_efficiency 对比三种 kernel 的指标差异。",
+          "source_files": [
+            "WarpDivRedux/warpDivergenceTest_cudakernel.cu",
+            "WarpDivRedux/warpDivergenceTest_cuda.c",
+            "WarpDivRedux/warpDivergenceTest.h",
+            "WarpDivRedux/test.sh",
+            "WarpDivRedux/Makefile"
+          ],
+          "title": "WarpDivRedux：warp 分支发散与无分支改写",
+          "topic": "通过 WarpDivRedux 理解 warp 分支发散：warpDivergence kernel 中 tid%2 使同一 warp 内线程交替进入不同分支，noWarpDivergence 用算术运算消除分支，并用 nvprof 的 branch_efficiency 指标对比。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u3-l2-dynamic-parallelism.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解设备端 kernel 启动（动态并行）的语法与嵌套 grid 语义",
+            "对比固定网格 + 边界检查与自适应网格两种做法",
+            "知道 -rdc=true 可重定位设备代码是动态并行的编译前提"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "pixel_calc",
+            "dwell_fill_k",
+            "mandelbrot_block_k",
+            "compute"
+          ],
+          "order": 2,
+          "practice_task": "同时编译两个版本（注意 Makefile 中 -rdc=true 与 --cudart=shared 选项），对比 Non_Dynamic_Parallelism 与 Dynamic_Parallelism 在相同图像尺寸下的运行时间；再调整 d（最大迭代/分块粒度）观察动态并行的收益变化。",
+          "source_files": [
+            "DynParallel/Dynamic_Parallelism.cu",
+            "DynParallel/Non_Dynamic_Parallelism.cu",
+            "DynParallel/Makefile"
+          ],
+          "title": "DynParallel：动态并行——让 GPU 自己生成工作（Mandelbrot 实例）",
+          "topic": "以 Mandelbrot 集绘制为例对比 Non_Dynamic_Parallelism.cu（固定 grid + 均匀划分 + 边界检查）与 Dynamic_Parallelism.cu（设备端嵌套启动 kernel 处理自适应网格），讲解动态并行的适用场景与编译要求（-rdc=true、--cudart=shared）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u3-l3-concurrent-kernels.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "用 cudaGetDeviceProperties 查询 concurrentKernels 属性",
+            "创建多个 stream 并把 kernel 指派到不同 stream 并发执行",
+            "通过 Makefile_serialized 对比串行与并发启动的 wall time"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "timed_kernel",
+            "stream 创建与管理",
+            "concurrency 属性检查"
+          ],
+          "order": 3,
+          "practice_task": "阅读 Conkernels/Makefile 与 Makefile_serialized 的差异，分别用两个 Makefile 编译出并发版与串行版可执行文件并对比总耗时；再把程序中的 kernel/流数量减半和加倍，观察并发收益如何变化，记录结论。",
+          "source_files": [
+            "Conkernels/concurrentKernels.cu",
+            "Conkernels/README.md",
+            "Conkernels/Makefile",
+            "Conkernels/Makefile_serialized"
+          ],
+          "title": "Conkernels：并发 kernel 与 CUDA stream",
+          "topic": "讲解 concurrentKernels.cu：用 cudaStreamCreate 建立多条流、让多个 timed_kernel 同时驻留 GPU 执行，用 prop.concurrentKernels 检查设备支持，以及仓库为何额外提供 Makefile_serialized 用于串行对照实验。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l4-cuda-graph.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "掌握 stream capture → instantiate → launch 的 CUDA Graph 三步工作流",
+            "理解 graph 对重复提交同一任务序列时降低 CPU 启动开销的价值",
+            "分析 CG 求解器中多 kernel/spmv/点积如何被 capture 成图"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "流捕获",
+            "graph 实例化与启动",
+            "共轭梯度迭代 kernel"
+          ],
+          "order": 4,
+          "practice_task": "在 conjugateGradientCudaGraphs.cu 中找到 cudaGraphLaunch 的循环次数与每次迭代包含的 kernel 数，估算 graph 节省的启动次数；然后把迭代次数翻倍，用 nvprof 对比 graph 启动与逐个 kernel 启动（可临时改为普通 stream 启动）在 API 时间上的差异。",
+          "source_files": [
+            "TaskGraph/conjugateGradientCudaGraphs.cu",
+            "TaskGraph/README.md",
+            "TaskGraph/Makefile"
+          ],
+          "title": "TaskGraph：CUDA Graph 与共轭梯度求解器",
+          "topic": "以 conjugateGradientCudaGraphs.cu 为例讲解 CUDA Graph：cudaStreamBeginCapture 捕获一整段多 kernel 工作流、cudaGraphInstantiate 实例化、cudaGraphLaunch 反复启动，理解它相对逐个 kernel 提交的启动开销优势。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "单元三：充分利用 GPU 的大规模并行能力"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u4-l1-shared-memory-tiling-mm.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "写出 tiled 矩阵乘的共享内存版本",
+            "理解 __shared__ 声明与 __syncthreads 的块内同步作用",
+            "用分块降低全局内存流量从而提升吞吐"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "global_element/global_block",
+            "shared_block",
+            "mm_kernel_shmem"
+          ],
+          "order": 1,
+          "practice_task": "修改 mm_kernel.cu 中 BLOCK_SIZE（如 8/16/32）并保证矩阵规模 N 是其整数倍，运行 mm_omp_cuda 对比 mm_kernel 与 mm_kernel_shmem 的时间随 N（如 256/512/1024）的变化，画一张简要的对比表。",
+          "source_files": [
+            "Shmem/mm_kernel.cu",
+            "Shmem/mm_omp_cuda.c",
+            "Shmem/mm_omp_cuda.h",
+            "Shmem/Makefile",
+            "Shmem/testResults.txt"
+          ],
+          "title": "Shmem：共享内存分块矩阵乘",
+          "topic": "通过 Shmem 的矩阵乘对比 global_block（直接全局内存累加）与 shared_block（__shared__ 分块缓存 + __syncthreads 同步）两种实现，理解分块如何复用数据、减少全局内存访问。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u4-l2-coalesced-access.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "解释 warp 内 32 个线程连续访问才构成一次合并传输",
+            "用全局线程编号与跨步步长的关系判断合并性",
+            "用 nvprof 观察不同访问模式下的内存事务差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "axpy_cudakernel_1perThread",
+            "axpy_cudakernel_cyclic"
+          ],
+          "order": 2,
+          "practice_task": "新写一个带 stride 参数的 kernel：thread i 访问 x[i*stride]，在 stride=1、2、4、32 下运行并用 nvprof 观察耗时变化，解释为什么 stride=1 时 warp 的 32 次访问可以被合并成最少的事务。",
+          "source_files": [
+            "CoMem_AXPY/axpy_cudakernel.cu",
+            "CoMem_AXPY/axpy_cuda.c"
+          ],
+          "title": "CoMem（AXPY 篇）：全局内存合并访问",
+          "topic": "以 CoMem_AXPY 为载体讲解合并访问（coalescing）概念：warp 内线程访问连续地址时硬件可以合并成少数事务，理解 1perThread 天然合并，而任意跨步访问会放大事务数量，为后续 SpMV/SpMM 的真实场景做铺垫。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-spmm-sparse-formats.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "读懂 CSR 的 ptr/indices/data 三数组编码",
+            "对比 CSR 与 CSC 在 SpMM 乘法中的访问模式差异",
+            "用稀疏格式避免对零元素的计算与存储"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "spmm_csr_csr_kernel",
+            "spmm_csc_csr_kernel"
+          ],
+          "order": 3,
+          "practice_task": "在 SpMM_cuda.c 中找到测试矩阵的构造代码，确定矩阵规模与稀疏度；然后用 nvprof 对比 spmm_csr_cuda 与 spmm_csc_cuda 两个入口的 kernel 时间，结合仓库自带的 fornax/carina 输出文件讨论不同 GPU 上的结论是否一致。",
+          "source_files": [
+            "CoMem_SpMM/SpMM_cudakernel.cu",
+            "CoMem_SpMM/SpMM_cuda.c",
+            "CoMem_SpMM/SpMM.h",
+            "CoMem_SpMM/Makefile",
+            "CoMem_SpMM/SpMM_cuda.output.carina.txt",
+            "CoMem_SpMM/SpMM_cuda.output.fornax.txt"
+          ],
+          "title": "CoMem（SpMM 篇）：稀疏矩阵乘中的 CSR/CSC 存储与访问模式",
+          "topic": "讲解 CoMem_SpMM 如何在真实工作负载（稀疏矩阵-稀疏矩阵乘）中体现合并访问问题：CSR 与 CSC 两种存储格式的 kernel（spmm_csr_csr_kernel、spmm_csc_csr_kernel）访问模式不同，性能也随之不同。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l4-memory-alignment.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "理解 128 字节缓存行与 warp 内存事务对齐的关系",
+            "复现任意 1 元素偏移导致的非对齐惩罚",
+            "识别源码中 warmup kernel 与被测 kernel 的区别"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "axpy_cudakernel_1perThread",
+            "axpy_cudakernel_1perThread_misaligned"
+          ],
+          "order": 4,
+          "practice_task": "把偏移量从 1 改成 2、4、8（分别对应 double 的 16/32/64 字节错位）运行并记录 kernel 时间，回答：多大的错位才不会引起额外事务？用 nvprof 佐证你的答案。",
+          "source_files": [
+            "MemAlign/axpy_cudakernel.cu",
+            "MemAlign/axpy_cuda.c",
+            "MemAlign/axpy.h",
+            "MemAlign/Makefile"
+          ],
+          "title": "MemAlign：内存访问对齐对性能的影响",
+          "topic": "通过 MemAlign 中仅差一个偏移的两个 kernel（1perThread 与 1perThread_misaligned，后者整体偏移 1 个元素）理解地址对齐：错位使每次 warp 事务跨缓存行/扇区，导致额外内存流量。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l5-shared-memory-bank-conflicts.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "解释共享内存 32 bank 的组织方式与 2 路冲突的成因",
+            "手推两种归约树在每一步中各线程访问的 bank 编号",
+            "用 nvprof 共享内存指标验证 bank 冲突消除效果"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "sum_cudakernel",
+            "sum_cudakernel_bc"
+          ],
+          "order": 5,
+          "practice_task": "以 ThreadsPerBlock=256 为例，在纸上推演两个 kernel 前三步迭代中活跃线程访问的 cache 下标与 bank 编号（bank = (index * 4 / 4) % 32，float 情况下即 index % 32），标出发生 2 路冲突的步；再用 nvprof 对比两个 kernel 时间验证分析。",
+          "source_files": [
+            "BankRedux/sum_cudakernel.cu",
+            "BankRedux/sum_cuda.c",
+            "BankRedux/sum.h",
+            "BankRedux/test.sh",
+            "BankRedux/sum_cuda.output.carina.txt"
+          ],
+          "title": "BankRedux：共享内存 bank 冲突与归约算法改写",
+          "topic": "通过 BankRedux 的两个共享内存归约 kernel——sum_cudakernel（无冲突的折半归约）与 sum_cudakernel_bc（跨步 i 递增的归约树，产生 2 路 bank 冲突）——理解 bank 组织与冲突对共享内存吞吐的影响。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u4-l1"
+          ],
+          "filename": "u4-l6-warp-shuffle.md",
+          "id": "u4-l6",
+          "learning_goals": [
+            "掌握 __shfl_down_sync 的掩码、偏移参数与 warp 归约用法",
+            "理解 shuffle 让数据停留在寄存器、避免共享内存往返的优势",
+            "对比同规模数据在共享内存归约与 shuffle 归约下的表现"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "reduce2",
+            "reduce3（shuffle warp 归约）",
+            "reduce 模板分发"
+          ],
+          "order": 6,
+          "practice_task": "分别进入 Shuffle/cuda_global 与 Shuffle/cuda_shuffle 执行 make 编译出 reduction 可执行文件，用 test.sh 运行，记录同一个 size 下 reduce2（共享内存版）与 reduce3（shuffle 版）的 kernel 时间并解释差异来源。",
+          "source_files": [
+            "Shuffle/cuda_shuffle/reduction_kernel.cu",
+            "Shuffle/cuda_global/reduction_kernel.cu",
+            "Shuffle/cuda_shuffle/reduction.cpp",
+            "Shuffle/cuda_shuffle/test.sh",
+            "Shuffle/cuda_global/test.sh",
+            "Shuffle/cuda_shuffle/README.md"
+          ],
+          "title": "Shuffle：warp 内寄存器交换 __shfl_down_sync",
+          "topic": "对比 Shuffle/cuda_global 与 Shuffle/cuda_shuffle 两套归约代码：后者在 reduce3 中用 __shfl_down_sync 直接在 warp 内寄存器间交换数据完成归约，讲解 shuffle 指令相对共享内存归约（cg::sync + sdata）的优势。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l7-async-copy-pipeline.md",
+          "id": "u4-l7",
+          "learning_goals": [
+            "理解全局到共享内存拷贝与计算的天然串行关系",
+            "掌握 __pipeline_memcpy_async/commit/wait_prior 流水线原语",
+            "比较多级流水与单级、float 与 float4 拷贝粒度的差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "MatrixMulAsyncCopySingleStage",
+            "MatrixMulAsyncCopyMultiStage",
+            "MatrixMulAsyncCopyLargeChunk",
+            "__pipeline 流水线原语"
+          ],
+          "order": 7,
+          "practice_task": "在该文件中挑选单级与多级（maxPipelineStages 不同）两个 kernel，在相同矩阵规模下用 nvprof 记录时间；再把 LargeChunk 版本（float4）与 float 版本对比，写一段分析：拷贝粒度与流水深度哪个因素对该案例收益更大。",
+          "source_files": [
+            "GSOverlap/globalToShmemAsyncCopy.cu",
+            "GSOverlap/README.md",
+            "GSOverlap/Makefile"
+          ],
+          "title": "GSOverlap：memcpy_async 异步拷贝与多级流水线",
+          "topic": "讲解 GSOverlap/globalToShmemAsyncCopy.cu 中一系列矩阵乘 kernel：用 __pipeline_memcpy_async（及 nvcuda::memcpy_async）把全局内存数据异步搬入共享内存，通过多级流水（__pipeline_commit / __pipeline_wait_prior）让拷贝与计算重叠。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "单元五：有效利用 GPU 内部的深存储层次"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u5-l1-hd-overlap-async-transfer.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "理解 cudaMemcpy 阻塞语义相对 cudaMemcpyAsync 异步语义的差别",
+            "掌握 cudaStreamCreate 后把拷贝排入流再启动 kernel 的模式",
+            "识别该基准计时位置的局限并提出改进"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "axpy_cuda_normal",
+            "axpy_cuda_async"
+          ],
+          "order": 1,
+          "practice_task": "审查 axpy_cuda_async 的计时与同步位置（它没有对 stream 做 cudaStreamSynchronize 就结束了计时），指出实验设计的缺陷并修正：补上事件计时（cudaEventRecord/cudaEventElapsedTime）或流同步，重新对比 normal 与 async 的真实传输耗时。",
+          "source_files": [
+            "HDOverlap/axpy_cudakernel.cu",
+            "HDOverlap/test.sh",
+            "HDOverlap/Makefile"
+          ],
+          "title": "HDOverlap：主机-设备传输的同步与异步（cudaMemcpyAsync + stream）",
+          "topic": "对比 HDOverlap 中 axpy_cuda_normal（阻塞 cudaMemcpy）与 axpy_cuda_async（cudaStreamCreate + cudaMemcpyAsync 把传输排入流）两条路径，理解异步传输如何为主机端腾出时间、以及计时代码测量的是什么。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u5-l2-readonly-1d-texture.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "掌握 texture 对象声明与 tex1Dfetch 读取方式",
+            "理解纹理缓存对空间局部性好的只读数据的加速机理",
+            "知道何时纹理路径可能不比全局内存快"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "texture<float,1> 声明",
+            "axpy_cudakernel_1perThread_texture",
+            "cudaBindTexture"
+          ],
+          "order": 2,
+          "practice_task": "把纹理 kernel 与 CoMem_AXPY 的普通全局内存 axpy kernel 在相同 n、相同 block 配置下对比运行，记录两者时间；再故意把访问模式改成随机下标（对 x 用打乱后的索引表），观察纹理版与全局版差距如何变化。",
+          "source_files": [
+            "ReadOnlyMem_1D_Texture/axpy_cudakernel.cu",
+            "ReadOnlyMem_1D_Texture/axpy_cuda.c",
+            "ReadOnlyMem_1D_Texture/axpy.h",
+            "ReadOnlyMem_1D_Texture/Makefile"
+          ],
+          "title": "ReadOnlyMem（1D 篇）：一维纹理内存缓存只读数据",
+          "topic": "讲解 ReadOnlyMem_1D_Texture 如何用 texture<float,1> 绑定输入向量、在 kernel 中以 tex1Dfetch 读取，让只读数据走有缓存的纹理通路，与普通全局内存访问做性能对比。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-readonly-2d-texture-constant.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "掌握 cudaChannelFormatDesc 与 cudaBindTexture2D 的二维纹理绑定流程",
+            "理解 cudaMemcpyToSymbol 写入 constant 内存的方法与广播特性",
+            "区分纹理缓存（按局部性缓存）与常量缓存（同址广播）两种只读通路"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "texture<float,2> 绑定",
+            "add_texture",
+            "add_texture_constant"
+          ],
+          "order": 3,
+          "practice_task": "对比同规模矩阵下 add（普通全局内存）、add_texture（二维纹理）与 add_texture_constant（纹理+常量）三个 kernel 的 nvprof 时间，并对照仓库自带的 matadd.output.carina.txt / matadd.output.fornax.txt 讨论结论是否跨平台成立。",
+          "source_files": [
+            "ReadOnlyMem_2D_Texture/matadd_2D_cudakernel.cu",
+            "ReadOnlyMem_2D_Texture/matadd_2D_cuda.c",
+            "ReadOnlyMem_2D_Texture/matadd_2D.h",
+            "ReadOnlyMem_2D_Texture/test.sh"
+          ],
+          "title": "ReadOnlyMem（2D 篇）：二维纹理与常量内存",
+          "topic": "通过矩阵加法讲解二维纹理（texture<float,2> + cudaBindTexture2D + cudaChannelFormatDesc）与常量内存（__constant__ + cudaMemcpyToSymbol 传递 M/N）两类只读数据通路的用法与适用条件。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u5-l4-unified-memory.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "掌握 cudaMallocManaged 分配统一内存的方法",
+            "理解按需缺页传输与整体 cudaMemcpy 两种数据摆放策略的差异",
+            "用访问密度（stride）解释统一内存何时占优"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "LowAccessDensityTest_cuda_discrete_memory",
+            "cudaMallocManaged 路径",
+            "stride 扫描"
+          ],
+          "order": 4,
+          "practice_task": "按 test.sh 的方式取固定 n=134217728、遍历 stride ∈ {1, 64, 1024, 65536, 33554432} 运行程序，记录两种内存模式的时间；找出统一内存开始占优的 stride 区间，并用『实际触碰的字节数』解释这个 crossover 点。",
+          "source_files": [
+            "UniMem/LowAccessDensityTest_cuda.cu",
+            "UniMem/LowAccessDensityTest.h",
+            "UniMem/LowAccessDensityTest_omp.c",
+            "UniMem/test.sh",
+            "UniMem/test2.sh"
+          ],
+          "title": "UniMem：统一内存与低访问密度工作负载",
+          "topic": "讲解 UniMem/LowAccessDensityTest：对同一按 stride 抽样访问的工作负载，分别用离散内存（cudaMalloc + 整体 cudaMemcpy）与统一内存（cudaMallocManaged，按页按需迁移）实现，理解访问密度如何决定哪种方式更划算。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l4",
+            "u4-l2"
+          ],
+          "filename": "u5-l5-data-layout-spmv.md",
+          "id": "u5-l5",
+          "learning_goals": [
+            "对比 dense、CSR、带索引表的 unified 三种布局的传输量与计算量",
+            "理解『只传非零元素及其索引』如何减少无谓搬运",
+            "为给定稀疏度估算最优布局选择"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "spmv_dense",
+            "spmv_csr",
+            "spmv_unified",
+            "spmv_unified_count"
+          ],
+          "order": 5,
+          "practice_task": "在 SpMV_cuda.c 中找出矩阵规模与稀疏度设置，估算三种布局各自需要从主机搬到设备的有效字节数；然后运行程序对比四类 kernel 时间，检验你的传输量估算与实测趋势是否一致，并回答稀疏度多少时 CSR 布局必然优于 dense。",
+          "source_files": [
+            "MiniTransfer_SpMV/SpMV_cudakernel.cu",
+            "MiniTransfer_SpMV/SpMV_cuda.c",
+            "MiniTransfer_SpMV/SpMV.h",
+            "MiniTransfer_SpMV/test.sh"
+          ],
+          "title": "MiniTransfer（SpMV 篇）：数据布局如何决定无谓传输量",
+          "topic": "通过 MiniTransfer_SpMV 的四种 kernel（spmv_dense 全矩阵、spmv_csr 稀疏压缩、spmv_unified 统一内存只传非零、spmv_unified_count 计数变体）理解数据布局对 CPU-GPU 传输量与计算量的双重影响。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 5,
+      "title": "单元四：合理安排 CPU 与 GPU 之间的数据搬运"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l5",
+            "u4-l6"
+          ],
+          "filename": "u6-l1-reduction-optimization-ladder.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "逐版本说出每步优化针对的具体瓶颈",
+            "区分算法级优化（改变每线程处理元素数）与实现级优化（寻址、展开、同步）",
+            "建立可迁移的 CUDA kernel 优化检查清单"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "reduce0/reduce1",
+            "reduce2/reduce3",
+            "reduce4/reduce5/reduce6",
+            "reduce 模板入口"
+          ],
+          "order": 1,
+          "practice_task": "用 test.sh 的方式对同一 size 依次运行 7 个 kernel（阅读 reduction.cpp 确认 whichKernel 参数与命令行用法），把每个版本的耗时与 nvprof 指标整理成阶梯表，并为每一级写一句『瓶颈→改法→收益』总结；对比 result.txt 中已有记录核对你的测量。",
+          "source_files": [
+            "Shuffle/cuda_shuffle/reduction_kernel.cu",
+            "Shuffle/cuda_shuffle/reduction.cpp",
+            "Shuffle/cuda_shuffle/test.sh",
+            "Shuffle/cuda_shuffle/result.txt",
+            "Shuffle/cuda_shuffle/README.md"
+          ],
+          "title": "综合案例：reduce0 到 reduce6 的七步归约优化阶梯",
+          "topic": "把 Shuffle/cuda_shuffle 的 reduce0 至 reduce6 作为一个完整案例精读：从模运算开销、bank 冲突、整 warp 闲置，到 shuffle 归约、循环展开、最后一个块做最终归约、以及让每线程处理多个元素（grid-stride loop）的算法级优化，梳理一条完整的优化决策链。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4",
+            "u1-l3"
+          ],
+          "filename": "u6-l2-design-your-own-microbenchmark.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "复用三件套骨架快速搭建可对比、可校验的基准",
+            "设计能隔离单一性能因素的对照实验",
+            "用 nvprof 指标而非只看 wall time 支撑结论"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "模板骨架复用",
+            "对照实验设计",
+            "测量与校验"
+          ],
+          "order": 2,
+          "practice_task": "以 CoMem_AXPY 为模板实现一个 strided-saxpy 微基准：提供 stride=1 与 stride=k 两个 kernel、共享同一串行基线与 check 校验、带 warmup 与 10 次平均计时，配好 Makefile 与 test.sh（含 nvprof --metrics 相关指标），最后用不同 stride 运行并写出一份简短实验报告。",
+          "source_files": [
+            "CoMem_AXPY/axpy_cuda.c",
+            "CoMem_AXPY/axpy_cudakernel.cu",
+            "CoMem_AXPY/axpy.h",
+            "CoMem_AXPY/Makefile",
+            "CoMem_AXPY/test.sh"
+          ],
+          "title": "动手设计一个新的微基准：复用项目骨架",
+          "topic": "总结前三单元的模式，指导读者按项目约定（host .c + kernel .cu + .h + Makefile + test.sh + 串行基线 + check 校验 + warmup + 多轮平均）设计并落地一个属于自己的微基准。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u6-l3-common-helpers-and-samples-dependency.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "了解 CUDA Samples helper 头文件在项目中的角色",
+            "读懂 CUDA Samples 风格 Makefile 的 SMS/GENCODE 生成逻辑",
+            "完成一次剥离外部依赖的最小化改造"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "helper 头文件",
+            "Samples Makefile 体系",
+            "依赖最小化"
+          ],
+          "order": 3,
+          "practice_task": "通读 Common/README.md 与 Conkernels/Makefile，列出 Conkernels/GSOverlap/TaskGraph 编译时真正 include 的 Common 头文件；然后给 Conkernels 写一个不依赖 ../../Common 的独立 Makefile（只保留必需 helper），验证编译出的可执行文件行为不变。",
+          "source_files": [
+            "Common/README.md",
+            "Common/helper_cuda.h",
+            "Common/helper_timer.h",
+            "Conkernels/Makefile",
+            "TaskGraph/Makefile"
+          ],
+          "title": "Common 依赖与 CUDA Samples 工程化：helper 头文件的作用与移植",
+          "topic": "分析 Common 目录（来自 CUDA Samples 的 helper_cuda.h、helper_timer.h、UtilNPP/FreeImage 等）如何被 Conkernels、GSOverlap、TaskGraph 三个基准使用，讲解 CUDA Samples 风格 Makefile 的 SMS/GENCODE 多架构生成逻辑，以及把样本依赖最小化的思路。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u6-l4-benchmark-methodology-and-interpretation.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "识别计时口径、warmup、平均次数对结论的影响",
+            "从 nvprof 表格中分离 memcpy、kernel、API 三类时间",
+            "按论文/报告规范组织跨平台基准结果"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "多平台结果文件",
+            "warmup 与平均",
+            "结果解读与报告"
+          ],
+          "order": 4,
+          "practice_task": "选取 BankRedux 与 UniMem 两个基准：在你的机器上按 test.sh 复现测量，把结果与仓库自带的 carina/fornax 输出并排成表；指出至少三处可能造成跨平台差异的因素（架构、驱动、计时口径、数据规模），并给出你判断哪个 kernel 更快时依据的指标与理由。",
+          "source_files": [
+            "BankRedux/sum_cuda.output.carina.txt",
+            "CoMem_SpMM/SpMM_cuda.output.carina.txt",
+            "CoMem_SpMM/SpMV_cuda.output.fornax.txt",
+            "UniMem/LowAccessDensityTest_cuda.output.carina.txt",
+            "UniMem/LowAccessDensityTest_cuda_fixed_access_time.output.carina.txt",
+            "README.md"
+          ],
+          "title": "实验方法论与结果解读：跨平台输出、计时陷阱与报告写作",
+          "topic": "综合仓库自带的多平台实验输出（Carina、Fornax 上的 .output.txt 文件）讨论微基准方法论：warmup 的必要性、计时位置与口径、多轮平均、nvprof 中 memcpy 与 kernel 时间占比、以及如何避免从单一平台结果过度泛化。"
+        }
+      ],
+      "level": "advanced",
+      "order": 6,
+      "title": "单元六：专家实践——综合案例、方法论与二次开发"
+    }
+  ]
+}
