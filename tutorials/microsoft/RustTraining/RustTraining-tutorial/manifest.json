@@ -1,0 +1,640 @@
+{
+  "head": "9d19c482d66ef3995dca794bda74c7852134e0b7",
+  "project": "RustTraining",
+  "rationale": "本仓库是一个\"文档工程\"项目：主体是七本 mdBook 培训书，唯一的 Rust 代码是 xtask 构建工具。因此大纲先让读者建立项目定位、理解目录布局并跑通本地构建与预览（单元一），再精读 xtask 全部源码——批量构建编排、落地页生成以及带多层安全防护的自研静态服务器是仓库中最具工程学习价值的代码（单元二）；随后转向项目真正的内容主体，拆解七本书的五级体系、章节写作范式（目标框、Mermaid 图、playground、练习）与各书深潜路线（单元三）；最后覆盖 GitHub Pages 流水线、Docker 多阶段构建与 nginx 安全加固，并以\"添加一本新书\"作为贯通构建、内容、CI、部署全部知识的端到端实战（单元四）。依赖关系按\"先运行、再读码、后内容、终部署扩展\"排列，每篇讲义只解决一个问题、绑定真实存在的源码文件，并配一个可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出项目定位：七本 mdBook 书籍 + xtask 构建工具 + CI/Docker 部署",
+            "理解 Bridge/Deep Dive/Advanced/Expert/Practices 五级分类与各书受众",
+            "了解 MIT（代码）与 CC-BY-4.0（文档）双许可证对使用和复用的含义"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README 项目定位",
+            "七本书清单与五级分类",
+            "双许可证结构"
+          ],
+          "order": 1,
+          "practice_task": "克隆仓库并通读 README，用一张表格列出七本书的名称、级别和目标读者；根据你自己的编程背景选定入口书，并写 3-5 句选择理由。",
+          "source_files": [
+            "README.md",
+            "Cargo.toml",
+            "CONTRIBUTING.md"
+          ],
+          "title": "项目全景：RustTraining 是什么",
+          "topic": "介绍 microsoft/RustTraining 是一个 Rust 培训书库：七本 mdBook 书籍、一个 xtask 构建工具、GitHub Pages 与 Docker 部署。讲解双许可证与五级难度分类。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-repo-layout.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "说出每个顶层目录与关键文件的职责",
+            "理解 BOOKS 常量是目录与构建系统之间的注册契约",
+            "区分内容（书）与基础设施（xtask/docker/CI）两层"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "顶层目录职责",
+            "BOOKS 注册表",
+            "workspace 组成"
+          ],
+          "order": 2,
+          "practice_task": "手绘仓库目录树并为每个目录写一行职责注释；然后在 xtask/src/main.rs 的 BOOKS 常量中核对七个 slug 与磁盘目录一一对应，并思考：只新建目录而不注册到 BOOKS 会发生什么。",
+          "source_files": [
+            "README.md",
+            "Cargo.toml",
+            "xtask/src/main.rs"
+          ],
+          "title": "目录结构：一个文档工程仓库的布局",
+          "topic": "逐个解读仓库顶层结构：七个书籍目录、xtask/、docker/、.github/、.cargo/，以及 xtask 中的 BOOKS 常量如何把磁盘目录与构建系统关联起来。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-local-build-and-preview.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "安装正确版本的 mdbook 与 mdbook-mermaid",
+            "理解 cargo xtask 别名与四个子命令的行为差异",
+            "独立完成一次完整的本地构建-预览-清理循环"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "cargo alias 机制",
+            "xtask 四个子命令",
+            "mdbook 工具链安装"
+          ],
+          "order": 3,
+          "practice_task": "安装 mdbook 与 mdbook-mermaid 后依次运行 cargo xtask build 与 cargo xtask serve，在浏览器验证 http://localhost:3000 的落地页和至少一本书可以打开，最后用 cargo xtask clean 清理产物。",
+          "source_files": [
+            "README.md",
+            ".cargo/config.toml",
+            "xtask/src/main.rs"
+          ],
+          "title": "本地构建与预览：跑起来整个书库",
+          "topic": "讲解 mdbook/mdbook-mermaid 的安装、.cargo/config.toml 中的 cargo xtask 别名机制，以及 build/serve/deploy/clean 四个子命令的行为与输出目录（site/ 与 docs/）的差异。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-book-anatomy-book-toml-summary.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "读懂 book.toml 各配置节的作用",
+            "掌握 SUMMARY.md 的章节/分部语法与导航生成规则",
+            "能独立用 mdbook serve 预览并验证单本书的修改"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "book 配置节",
+            "preprocessor.mermaid",
+            "playground 设置",
+            "SUMMARY 语法"
+          ],
+          "order": 4,
+          "practice_task": "临时修改 async-book/src/SUMMARY.md 中某一章的标题，在 async-book 目录下运行 mdbook serve --open 确认侧边栏变化后还原；再把 book.toml 中 line-numbers 改为 false，观察 playground 渲染差异。",
+          "source_files": [
+            "async-book/book.toml",
+            "async-book/src/SUMMARY.md",
+            "async-book/src/ch00-introduction.md"
+          ],
+          "title": "一本书的解剖：book.toml 与 SUMMARY.md",
+          "topic": "以 async-book 为例讲解 mdBook 的配置文件（输出目录、主题、playground、mermaid 预处理器）以及 SUMMARY.md 如何定义章节、Part 分部与侧边栏导航。"
+        }
+      ],
+      "order": 1,
+      "title": "初识 RustTraining：项目定位与本地运行"
+    },
+    {
+      "id": "u2",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l1-cargo-workspace-and-xtask-pattern.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "理解 workspace members 与 resolver 的作用",
+            "解释 cargo xtask 为何等价于 cargo run --package xtask --",
+            "理解 xtask 模式相对 Makefile/脚本的优势"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "workspace 定义",
+            "cargo alias 机制",
+            "xtask 工程模式"
+          ],
+          "order": 1,
+          "practice_task": "分别运行 cargo xtask help 与 cargo run --package xtask -- help，确认输出一致；然后向 workspace 添加一个空的 notes 子 crate（不改 xtask），验证 members 字段的效果。",
+          "source_files": [
+            "Cargo.toml",
+            "xtask/Cargo.toml",
+            ".cargo/config.toml",
+            "xtask/src/main.rs"
+          ],
+          "title": "Cargo workspace 与 xtask 模式入门",
+          "topic": "解析根 Cargo.toml 的 workspace 定义、xtask/Cargo.toml 的最小依赖（ctrlc），以及 .cargo/config.toml 中 alias 如何让 cargo xtask 等价于 cargo run --package xtask --。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-command-dispatch-and-mdbook-detection.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "读懂 main 的参数分发与分支结构",
+            "理解 check_mdbook 的子进程探测与失败处理",
+            "能仿照现有分支为 xtask 添加新子命令"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "match 命令分发",
+            "check_mdbook 探测",
+            "usage 输出与退出码"
+          ],
+          "order": 2,
+          "practice_task": "把 mdbook 从 PATH 移开（或临时改名）后运行 cargo xtask build，观察错误信息路径；然后仿照现有分支新增一个 version 子命令，打印 BOOKS 中注册的书籍数量。",
+          "source_files": [
+            "xtask/src/main.rs"
+          ],
+          "title": "命令分发与 mdbook 依赖探测",
+          "topic": "精读 main 函数的 match 命令分发、print_usage 的 stdout/stderr 分流与退出码设计，以及 check_mdbook 如何用 Command 探测外部工具是否存在。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-build-pipeline.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "理解 CARGO_MANIFEST_DIR 编译期定位项目根的方式",
+            "梳理 build_to 的清理-构建-计数-收尾流程",
+            "说出 .nojekyll 存在的原因和 site/ 与 docs/ 的分工"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "project_root 定位",
+            "build_to 流程",
+            ".nojekyll",
+            "build 与 deploy 差异"
+          ],
+          "order": 3,
+          "practice_task": "在 async-book 目录下手动执行 mdbook build --dest-dir /tmp/one-book，复现 xtask 为单本书所做的操作；再对比 site/ 与 docs/ 两个输出目标分别被哪条命令和哪条 CI 使用。",
+          "source_files": [
+            "xtask/src/main.rs",
+            "README.md",
+            ".github/workflows/pages.yml"
+          ],
+          "title": "build_to：批量构建与输出目录管理",
+          "topic": "讲解 project_root 基于 CARGO_MANIFEST_DIR 的定位、site/docs 输出目录的清理与重建、逐书调用 mdbook build --dest-dir 的流程、.nojekyll 的作用，以及 build 与 deploy 的差异。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-landing-page-generation.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "理解 BOOKS 元组表的数据结构与单一数据源作用",
+            "读懂 category_label 与 HTML 模板拼接逻辑",
+            "能通过修改 BOOKS/模板改变落地页并在本地验证"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "BOOKS 数据表",
+            "category_label 映射",
+            "HTML/CSS 模板拼接"
+          ],
+          "order": 4,
+          "practice_task": "修改落地页的一个颜色变量（如 --clr-bridge）或某本书的描述文案，重新 cargo xtask build 并刷新页面确认生效；再向 BOOKS 增加一条不存在的目录条目，观察'目录缺失则跳过'的分支行为。",
+          "source_files": [
+            "xtask/src/main.rs",
+            "README.md"
+          ],
+          "title": "write_landing_page：统一落地页生成",
+          "topic": "分析 BOOKS 元组表的结构、category_label 的类别映射，以及如何用 format! 与 iterator 链把内嵌 HTML/CSS 模板和书籍数据拼成带分类色彩的落地页。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l5-static-server-path-resolution-security.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "理解 TcpListener 单线程 accept 循环与请求行解析",
+            "掌握 percent_decode_path 的手写解码实现",
+            "能解释四层路径安全防护各自的攻击场景"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TcpListener 循环",
+            "percent_decode_path",
+            "resolve_site_file 安全层",
+            "ResolveResult 枚举"
+          ],
+          "order": 5,
+          "practice_task": "启动 cargo xtask serve 后，用 curl 分别请求 /../Cargo.toml、含 %2e%2e 编码的路径和正常页面，记录三者状态码；并写一段文字解释为什么 canonicalize + starts_with 前缀校验能防符号链接逃逸。",
+          "source_files": [
+            "xtask/src/main.rs"
+          ],
+          "title": "内置静态服务器 I：路径解析与多层安全防护",
+          "topic": "精读 cmd_serve 的 TcpListener 循环与 HTTP 请求行解析，重点拆解 resolve_site_file 的多层安全设计：百分号解码、空字节拒绝、.. 穿越阻断、canonicalize 前缀校验与目录重定向。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u2-l6-static-server-mime-and-shutdown.md",
+          "id": "u2-l6",
+          "learning_goals": [
+            "理解 guess_mime 的扩展名映射与兜底策略",
+            "能手写构造符合 HTTP/1.1 的最小响应",
+            "解释 ctrlc 处理器为什么能让进程以退出码 0 结束"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "guess_mime 映射",
+            "三条响应路径",
+            "ctrlc_exit 优雅退出"
+          ],
+          "order": 6,
+          "practice_task": "为 guess_mime 增加 .md 与 .webp 的 MIME 映射并重启 serve 验证；用 curl -I 对比正常文件、目录重定向（301）与 404 三种响应的头部差异。",
+          "source_files": [
+            "xtask/src/main.rs",
+            "xtask/Cargo.toml"
+          ],
+          "title": "内置静态服务器 II：MIME、响应构造与优雅退出",
+          "topic": "讲解 guess_mime 的扩展名映射、手写 HTTP/1.1 响应（200/301/404 三条路径的头部与正文），以及 ctrlc crate 实现 Ctrl+C 干净退出的做法。"
+        }
+      ],
+      "order": 2,
+      "title": "xtask 构建工具源码精读"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u3-l1-book-catalog-and-learning-paths.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "说出五级分类的定义与递进关系",
+            "理解 SUMMARY 中 Part 分部承担的教学阶段划分",
+            "能为不同背景读者组合出跨书学习路径"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "五级分类体系",
+            "Part 分部结构",
+            "桥梁书共享主线"
+          ],
+          "order": 1,
+          "practice_task": "为一位虚构读者（如'写了 8 年 Python 的后端工程师，目标是写高性能 CLI'）设计一条跨书学习路径，指出每本书的进入条件、阅读顺序与理由。",
+          "source_files": [
+            "README.md",
+            "async-book/src/SUMMARY.md",
+            "c-cpp-book/src/SUMMARY.md",
+            "engineering-book/src/SUMMARY.md"
+          ],
+          "title": "七本书的体系与分层学习路线",
+          "topic": "纵览五级分类（bridge/deep-dive/advanced/expert/practices）与各书的 Part 分部结构，理解三本桥梁书共享的主线和深潜书的定位。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-chapter-authoring-patterns.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "识别章节开篇目标框、图示与代码块三要素",
+            "理解 book.toml playground 配置如何让代码可编辑运行",
+            "能按仓库范式独立写出一个可预览的小节"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "学习目标框",
+            "mermaid 代码块",
+            "rust 代码块与 playground",
+            "练习章组织"
+          ],
+          "order": 2,
+          "practice_task": "选一个你熟悉的 Rust 概念（如 Option 或 Result），仿照该范式写一节 300-500 字的小节草稿，必须包含目标框、一张 mermaid 图和一个可运行 rust 示例，并用 mdbook serve 预览效果。",
+          "source_files": [
+            "async-book/src/ch02-the-future-trait.md",
+            "async-book/book.toml",
+            "async-book/src/ch15-exercises.md"
+          ],
+          "title": "章节写作范式：目标框、Mermaid 图与可运行代码",
+          "topic": "以 async-book 第 2 章为例拆解章节的固定写作范式：开篇 What you'll learn 目标框、mermaid 时序图、rust 代码块与 playground 可编辑运行，以及练习章的组织方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l3-three-bridge-books-comparison.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "列出三本桥梁书共享的章节主线",
+            "识别各书为特定语言背景定制的深潜章节",
+            "能按读者背景推荐最合适的桥梁书"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "共享章节主线",
+            "背景定制深潜章",
+            "三书差异对比"
+          ],
+          "order": 3,
+          "practice_task": "阅读三本书 'Ownership and Borrowing' 一章的开头部分，写一份对比笔记：三书分别用什么来自源语言的类比引入所有权，哪种讲法对你最有效。",
+          "source_files": [
+            "c-cpp-book/src/SUMMARY.md",
+            "csharp-book/src/SUMMARY.md",
+            "python-book/src/SUMMARY.md",
+            "python-book/src/ch15-migration-patterns.md"
+          ],
+          "title": "三座桥梁：C/C++、C#、Python 路线对比",
+          "topic": "对比三本桥梁书共享的章节主线（类型→所有权→trait→错误处理→并发）与针对背景定制的深潜章节：C/C++ 的 FFI/no_std、C# 的不可变性与泛型约束、Python 的迁移模式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l4-async-book-deep-dive.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "解释 Future/poll/Waker 的协作契约",
+            "理解 Pin/Unpin 存在的原因",
+            "梳理从手写 future 到 Tokio 再到生产模式的递进结构"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Future 与 poll 契约",
+            "Pin/Unpin",
+            "executor 与 Tokio",
+            "生产模式与陷阱"
+          ],
+          "order": 4,
+          "practice_task": "跟随 ch02 的讲解手写实现一个 Delay future 并在本地运行验证；再阅读 ch17 的异步聊天服务器 capstone，列出它会用到前面哪些章节的知识点。",
+          "source_files": [
+            "async-book/src/SUMMARY.md",
+            "async-book/src/ch02-the-future-trait.md",
+            "async-book/src/ch04-pin-and-unpin.md",
+            "async-book/src/ch17-capstone-project.md"
+          ],
+          "title": "Async Rust 深潜：从 Future 到生产",
+          "topic": "走读 async-book 的三段式结构：Part I 的 Future/Poll/Pin/状态机机理，Part II 的执行器与 Tokio 生态，Part III 的生产模式、陷阱与 capstone 项目。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l5-patterns-and-type-driven-books.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "概述 rust-patterns-book 的主题地图",
+            "解释 type-state/幻影类型/能力令牌如何把约束编码进类型",
+            "能写出让非法状态无法表示的最小示例"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "newtype 与 type-state",
+            "幻影类型",
+            "能力令牌",
+            "协议状态机"
+          ],
+          "order": 5,
+          "practice_task": "仿照 type-state 章节写一个 Door<Locked>/Door<Unlocked> 最小示例，让'未解锁就开门'成为编译错误，并用 cargo check 验证错误信息。",
+          "source_files": [
+            "rust-patterns-book/src/SUMMARY.md",
+            "rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md",
+            "type-driven-correctness-book/src/SUMMARY.md",
+            "type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md"
+          ],
+          "title": "高级与专家书：Patterns 与 Type-Driven Correctness",
+          "topic": "概览 rust-patterns-book 的泛型/trait/智能指针/unsafe/宏体系，以及 type-driven-correctness-book 的类型状态、幻影类型、能力令牌与 Redfish 实战，理解'让编译器证明正确性'的设计思路。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l6-engineering-book-tour.md",
+          "id": "u3-l6",
+          "learning_goals": [
+            "说出工程书覆盖的主题地图与适用场景",
+            "理解 Miri 等工具在验证 unsafe 代码中的角色",
+            "能按书指引在本地跑通一个验证工具"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "build.rs 深入",
+            "交叉编译与目标三元组",
+            "Miri 与消毒器",
+            "生产 CI/CD 汇总"
+          ],
+          "order": 6,
+          "practice_task": "按 ch05 的指引在本地安装 Miri 并运行一个含未定义行为的玩具程序（或书中示例），记录 Miri 的报告输出；再从 SUMMARY 中挑一章列出你后续想深入的主题。",
+          "source_files": [
+            "engineering-book/src/SUMMARY.md",
+            "engineering-book/src/ch05-miri-valgrind-and-sanitizers-verifying-u.md",
+            "engineering-book/src/ch11-putting-it-all-together-a-production-cic.md"
+          ],
+          "title": "工程实践书：把 Rust 推向生产",
+          "topic": "浏览 engineering-book 的主题地图：build.rs 深入、交叉编译、基准测试、覆盖率、Miri/消毒器验证、供应链安全、发布配置与生产级 CI/CD 汇总。"
+        }
+      ],
+      "order": 3,
+      "title": "七本书的内容架构与写作范式"
+    },
+    {
+      "id": "u4",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u4-l1-github-pages-pipeline.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "解读 workflow 的触发、并发与最小权限配置",
+            "理解 cargo 缓存键与 artifact 上传/部署两阶段衔接",
+            "能独立触发并排查一次 Pages 部署"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "触发与权限",
+            "cargo 缓存策略",
+            "构建与上传 artifact",
+            "deploy job 衔接"
+          ],
+          "order": 1,
+          "practice_task": "fork 仓库并推送一个提交（或用 workflow_dispatch 手动触发），在 Actions 页面确认 build 与 deploy 两个 job 的执行顺序和产物；解释为什么 deploy job 不需要重新构建。",
+          "source_files": [
+            ".github/workflows/pages.yml",
+            "xtask/src/main.rs"
+          ],
+          "title": "GitHub Pages 自动部署流水线",
+          "topic": "逐段解读 pages.yml：push 到 main 触发、permissions 最小权限、cargo 缓存、cargo xtask deploy 产物生成、upload-pages-artifact 与独立 deploy job 的衔接。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u4-l2-docker-build-and-ci.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解多阶段构建如何让运行时镜像不含工具链",
+            "解释预编译二进制 + 源码编译回退的取舍",
+            "读懂 CI 冒烟断言覆盖的回归场景"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "多阶段构建",
+            "预编译回退策略",
+            "buildx 缓存",
+            "CI 冒烟测试"
+          ],
+          "order": 2,
+          "practice_task": "从仓库根目录运行 docker build -f docker/Dockerfile -t rust-training:local . 并启动容器验证落地页可访问；再阅读 docker.yml 的 smoke test 段，为它增加一条断言：请求某本书的具体章节页面应返回 200。",
+          "source_files": [
+            "docker/Dockerfile",
+            ".github/workflows/docker.yml",
+            "docker/README.md"
+          ],
+          "title": "Docker 多阶段构建与 CI 冒烟测试",
+          "topic": "解析 Dockerfile 的 builder/runtime 两阶段设计、优先下载预编译 mdbook 二进制并在缺失时回退源码编译的策略、TARGETARCH 分支与 build 缓存挂载，以及 docker.yml 的 build-only 策略和 curl 冒烟断言。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-nginx-runtime-hardening.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "理解 try_files 如何兼容无扩展名链接",
+            "解释 add_header 继承规则对配置写法的影响",
+            "掌握缓存、gzip 与非特权运行的加固手段"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "try_files 规则",
+            "安全响应头",
+            "缓存与 gzip 策略",
+            "非特权容器运行"
+          ],
+          "order": 3,
+          "practice_task": "在 nginx.conf 中新增一个安全响应头（如 Strict-Transport-Security）并重建镜像，用 curl -I 验证；然后解释配置注释里 'add_header 不被继承' 的坑如何塑造了当前每个 location 重复声明头部的写法。",
+          "source_files": [
+            "docker/nginx.conf",
+            "docker/compose.yaml",
+            "docker/Dockerfile"
+          ],
+          "title": "nginx 运行时与安全加固",
+          "topic": "讲解 nginx.conf 的 try_files 无扩展名兼容、安全响应头为何在每个 location 重复声明、静态资源缓存与 gzip 策略，以及 compose.yaml 中非特权 8080 端口与 no-new-privileges 加固。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4",
+            "u3-l2"
+          ],
+          "filename": "u4-l4-capstone-add-a-new-book.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "掌握新书目录的完整骨架与 mermaid 资产复制",
+            "理解 BOOKS 注册后构建系统自动收录的机制",
+            "能解释为什么 CI 与 Docker 无需为新书做任何改动"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "新书目录骨架",
+            "book.toml 与 mermaid 资产",
+            "BOOKS 注册",
+            "全链路自动收录"
+          ],
+          "order": 4,
+          "practice_task": "创建 mini-book/（含 book.toml、SUMMARY.md 和 2 个章节文件），在 xtask 的 BOOKS 常量中注册后运行 cargo xtask build，确认落地页出现新卡片且能进入阅读；再说明为什么 Pages 与 Docker 流水线无需任何改动即可收录它。",
+          "source_files": [
+            "xtask/src/main.rs",
+            "async-book/book.toml",
+            "async-book/src/SUMMARY.md",
+            ".github/workflows/pages.yml",
+            "docker/Dockerfile"
+          ],
+          "title": "综合实战：向仓库添加一本新书",
+          "topic": "端到端演练扩展流程：新建书籍目录、准备 book.toml 与 mermaid 资产、编写 SUMMARY.md 与章节、在 xtask 的 BOOKS 中注册，使落地页、构建、Pages 与 Docker 全链路自动收录新书。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1",
+            "u4-l2"
+          ],
+          "filename": "u4-l5-quality-and-contributing.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "说出仓库现有的自动化质量防线及其覆盖盲区",
+            "走通 CLA、行为准则与 PR 的贡献流程",
+            "判断在 MIT 与 CC-BY-4.0 下分别能怎样复用仓库内容"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "CI 质量防线",
+            "CLA 与贡献流程",
+            "双许可证边界"
+          ],
+          "order": 5,
+          "practice_task": "把 u3-l2 写的章节草稿整理成一个真实 PR（修正错别字、补充 mermaid 图或新增小节均可），走完 fork-branch-PR 流程，并根据 CLA bot 的提示完成签署。",
+          "source_files": [
+            "CONTRIBUTING.md",
+            "CODE_OF_CONDUCT.md",
+            "LICENSE",
+            "LICENSE-DOCS",
+            ".github/workflows/docker.yml"
+          ],
+          "title": "质量守护与贡献流程",
+          "topic": "总结仓库的质量防线（Pages 部署验证、Docker 冒烟测试、构建失败即暴露）与贡献流程：CLA、行为准则，以及代码 MIT 与文档 CC-BY-4.0 双许可证对复用的影响。"
+        }
+      ],
+      "order": 4,
+      "title": "部署、CI 与扩展实践"
+    }
+  ]
+}
