@@ -1,0 +1,623 @@
+{
+  "head": "5e1241ac06a803be6970e9e1619e1dbe9b47c7e1",
+  "project": "dynamo",
+  "rationale": "增量更新（d7f06b59..5e1241ac，仅 2 个提交），代码影响集中在一处。(1) #13947「vLLM 聊天处理路径上报 reasoning token 用量」是本轮唯一代码变化，落在 frontend Python 侧三个文件：prepost.py 的 StreamingPostProcessor 新增 _reasoning_token_ids 台账——process_output 在任何分支之前把每个原始生成 token id 记入台账（含不发 chunk 的路径），新增 reasoning_token_total 属性把计数委托给 reasoning parser 自己的 count_reasoning_tokens，刻意不从解析输出重推（避免投影丢弃/延后推理内容、混合 chunk 分类偏差、detokenization 不单射导致的漂移三类错误）——u5-l2（已生成）标 update 补入该小节；vllm_processor.py 新增 _ReasoningUsageAnnotator：汇总各 post-processor 的 reasoning_token_total，仅在 completion_tokens_details.reasoning_tokens 缺失或非正整数时回填（返回副本不改入参），修复 --dyn-chat-processor vllm 这条绕过 Rust OpenAIPreprocessor（#12181 已在 Rust 侧实现计数，见 u4-l3）的 Python 路径上 usage 完全没有 reasoning_tokens 的问题——u5-l3（已生成）标 update 补入该机制与配套测试文件 components/src/dynamo/frontend/tests/test_vllm_processor_unit.py（+313 行，含伪造 count_reasoning_tokens 的 reasoning parser 范式）。(2) #13995 只是 GLM-5.3 recipes 文档（docs/fern recipes 页与 recipes/glm-5.2、新增 glm-5.3 symlink），不触及任何讲义的 source_files（u10-l4 引用的 recipes/README.md 与 qwen3 recipe 零改动）。其余全部 keep：lib/runtime、lib/llm、kv-router、kvbm-*、bindings、components 其余 Python 包、deploy/ 全部零改动；上一轮对 u4-l2 的 update（GenerateMetricLifecycle、FinishReason 裸 error）已确认生成到位。dynamo-tutorial/ 目前生成到 u8-l1，u8-l2 起维持 new，三层学习路线不变。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "初识 Dynamo：定位、运行与仓库结构",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "Dynamo 是什么：数据中心级推理编排层",
+          "order": 1,
+          "filename": "u1-l1-project-positioning.md",
+          "level": "beginner",
+          "topic": "项目定位：Dynamo 是推理引擎之上的编排层，把 GPU 集群变成一个协同推理系统；介绍请求面/控制面/状态面三面架构与核心能力（分离式服务、KV 感知路由、KVBM、Planner）。上一轮 #13942 的 overview.md 链接修正已并入，近两轮该文件零改动。",
+          "learning_goals": [
+            "说出 Dynamo 与 SGLang/vLLM/TensorRT-LLM 的层次关系",
+            "列举分离式服务、KV 感知路由、KVBM、Planner 四大能力",
+            "复述请求面/控制面/状态面的划分"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/fern/pages/developer-guide/knowledge-base/overview.md",
+            "docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture.md"
+          ],
+          "minimal_modules": [
+            "README",
+            "knowledge-base overview",
+            "architecture"
+          ],
+          "practice_task": "对照 README 与 architecture 文档，用文本画出一笔 chat/completions 请求从客户端到 worker 的组件图，并标注每一步属于请求面、控制面还是状态面。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "五分钟跑起来：frontend + worker + curl",
+          "order": 2,
+          "filename": "u1-l2-first-run.md",
+          "level": "beginner",
+          "topic": "用容器或 PyPI 安装方式跑通最小服务：python -m dynamo.frontend 与一个 worker 进程，curl 发送 OpenAI 兼容请求；同时认识 agg 与 disagg 两种启动脚本。",
+          "learning_goals": [
+            "用容器或 uv 安装并启动 frontend 与 worker",
+            "用 curl/OpenAI SDK 发起一次 chat completion",
+            "解释 file discovery 模式下 frontend 如何找到 worker"
+          ],
+          "source_files": [
+            "README.md",
+            "examples/backends/sample/launch/agg.sh",
+            "examples/backends/sample/launch/disagg.sh"
+          ],
+          "minimal_modules": [
+            "README quickstart",
+            "sample launch scripts"
+          ],
+          "practice_task": "按 agg.sh 启动 frontend + sample worker，写一个 Python 脚本连续发送 5 条相同前缀的请求并打印每条 TTFT，观察缓存/路由带来的差异。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库三层结构与 Cargo workspace 总览",
+          "order": 3,
+          "filename": "u1-l3-repo-structure.md",
+          "level": "beginner",
+          "topic": "读懂仓库地图：lib/ 的 Rust workspace（runtime、llm、kv-router、kvbm-* 等）、components/ 的 Python 包（frontend、router、planner、各后端）、deploy/ 的 Operator 与 Helm，以及 examples/recipes/tests 的分工。",
+          "learning_goals": [
+            "说出 lib/、components/、deploy/ 各自的职责",
+            "列出 Cargo workspace 的主要成员 crate",
+            "说明 ai-dynamo Python 包与 PyO3 扩展的关系"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "pyproject.toml",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "Cargo workspace",
+            "pyproject",
+            "AGENTS.md"
+          ],
+          "practice_task": "写一个表格（或脚本生成）：对本仓库每个一级目录，给出它属于哪一层、主要语言和用途，并标出你认为的一条请求会经过的 5 个目录。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "从源码构建与开发环境",
+          "order": 4,
+          "filename": "u1-l4-build-from-source.md",
+          "level": "beginner",
+          "topic": "开发环境搭建：uv + maturin 构建 lib/bindings/python 生成 _core 扩展、hatch 打包 ai-dynamo wheel、cargo 构建整个 workspace，以及容器镜像模板体系（含 frontend/planner 的依赖 overrides 固定机制）。#13959 只改了 sglang 运行时镜像的 NIXL C API 检查脚本，不在本讲义源码范围内。",
+          "learning_goals": [
+            "用 maturin develop 构建 PyO3 扩展并验证 import",
+            "理解 hatch_build.py 的版本注入机制",
+            "运行 cargo build/test 与 pytest 单元测试"
+          ],
+          "source_files": [
+            "pyproject.toml",
+            "hatch_build.py",
+            "lib/bindings/python/rust/lib.rs",
+            "container/Dockerfile.template",
+            "container/deps/overrides.frontend.txt",
+            "container/render.py"
+          ],
+          "minimal_modules": [
+            "maturin",
+            "hatch_build.py",
+            "container templates",
+            "container deps overrides"
+          ],
+          "practice_task": "从源码完成构建后，在 Python 里 import dynamo.runtime 并打印 DistributedRuntime，再用 cargo build -p dynamo-runtime 验证 Rust 侧可单独编译，记录两个构建产物分别是什么。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "第一个 Worker：Python API 上手",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Hello World：用 dynamo.runtime 写最小 worker",
+          "order": 1,
+          "filename": "u2-l1-hello-world-worker.md",
+          "level": "beginner",
+          "topic": "通过 examples/custom_backend/hello_world 掌握 Python 侧核心 API：DistributedRuntime、namespace、endpoint 注册与 Client 调用，理解一个 worker 的最小骨架。",
+          "learning_goals": [
+            "用 DistributedRuntime 创建 namespace 并注册 endpoint",
+            "用 Client 连接远端 endpoint 并收发流式响应",
+            "理解 dynamo.runtime 与 dynamo.llm 两个 Python 模块的分工"
+          ],
+          "source_files": [
+            "examples/custom_backend/hello_world/hello_world.py",
+            "examples/custom_backend/hello_world/client.py",
+            "examples/custom_backend/hello_world/deploy/hello_world.yaml",
+            "lib/bindings/python/src/dynamo/runtime/__init__.py"
+          ],
+          "minimal_modules": [
+            "dynamo.runtime",
+            "hello_world example"
+          ],
+          "practice_task": "复制 hello_world.py 改写一个 echo_upper worker：把收到的每个 token 转大写后流式返回，用自带 client.py 验证。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "PyO3 绑定：Rust 如何暴露给 Python",
+          "order": 2,
+          "filename": "u2-l2-pyo3-bindings.md",
+          "level": "beginner",
+          "topic": "拆解 _core 扩展模块：rust/lib.rs 如何注册 PyO3 类（DistributedRuntime、Endpoint、Client、Context、PyAsyncRequestStream）、模块初始化时如何把配置好的 Tokio builder 交给 pyo3_async_runtimes（DYN_RUNTIME_* 环境变量由此生效），Python 包装层 dynamo.runtime / dynamo.llm 如何再分发这些能力。（backend.rs 的 _run_vllm_sidecar/_run_trtllm_sidecar 入口见 u8-l4。）",
+          "learning_goals": [
+            "追踪一个 Python 类型（如 Context）对应的 Rust 结构体",
+            "解释 AsyncEngine 在 Python 与 Rust 之间的桥接方式",
+            "看懂 lib/bindings/python/src/dynamo/ 下 Python 包装层的再导出"
+          ],
+          "source_files": [
+            "lib/bindings/python/rust/lib.rs",
+            "lib/bindings/python/rust/engine.rs",
+            "lib/bindings/python/rust/context.rs",
+            "lib/bindings/python/src/dynamo/llm/__init__.py"
+          ],
+          "minimal_modules": [
+            "_core pymodule",
+            "pyo3 async runtime init",
+            "dynamo.llm 包装层"
+          ],
+          "practice_task": "在 rust/lib.rs 中找到 DistributedRuntime 与 Endpoint 的 #[pyclass] 定义位置，写一段笔记说明模块初始化时如何用 RuntimeConfig::tokio_builder() 为 pyo3 桥接限定 Tokio 运行时规模，以及 make_engine/EntrypointArgs 是从哪个 Rust 模块导出给 dynamo.llm 的。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "请求取消与生命周期：cancellation 示例",
+          "order": 3,
+          "filename": "u2-l3-cancellation.md",
+          "level": "beginner",
+          "topic": "通过 examples/custom_backend/cancellation 理解多跳链路（client → middle_server → server）中的请求取消、断连传播与资源清理。",
+          "learning_goals": [
+            "理解 Context 上的取消信号如何在链路上传播",
+            "实现多跳 worker 链路中对客户端断连的清理",
+            "用 example 的 middle_server 观察取消风暴"
+          ],
+          "source_files": [
+            "examples/custom_backend/cancellation/server.py",
+            "examples/custom_backend/cancellation/middle_server.py",
+            "examples/custom_backend/cancellation/client.py",
+            "examples/custom_backend/cancellation/README.md"
+          ],
+          "minimal_modules": [
+            "Context 生命周期",
+            "cancellation example"
+          ],
+          "practice_task": "修改 server.py，在收到取消信号时打印日志并统计被取消的 token 数；再让 client 提前断开，验证 middle_server 与 server 都能正确收尾。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "Rust 运行时核心 lib/runtime",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "一切的起点：Runtime 与 DistributedRuntime",
+          "order": 1,
+          "filename": "u3-l1-runtime-and-distributed.md",
+          "level": "intermediate",
+          "topic": "lib/runtime 核心入口：Runtime 包装 tokio 多线程运行时（config.rs 通过 tokio_builder() 暴露 Tokio builder，pyo3 桥接与本地 create_runtime 共用它），DistributedRuntime 提供 namespace/component 层级与三种 DiscoveryBackend（Etcd/Kube/Mock）；config.rs 定义 RuntimeConfig 与环境变量配置。",
+          "learning_goals": [
+            "解释 Runtime 与 DistributedRuntime 的职责边界",
+            "配置不同 DiscoveryBackend 与 RequestPlaneMode",
+            "通过环境变量覆盖 RuntimeConfig 默认值"
+          ],
+          "source_files": [
+            "lib/runtime/src/runtime.rs",
+            "lib/runtime/src/distributed.rs",
+            "lib/runtime/src/config.rs",
+            "lib/runtime/src/worker.rs",
+            "lib/runtime/examples/hello_world/src/bin/server.rs",
+            "lib/runtime/examples/hello_world/src/bin/client.rs"
+          ],
+          "minimal_modules": [
+            "Runtime",
+            "DistributedRuntime",
+            "DiscoveryBackend",
+            "RuntimeConfig",
+            "tokio_builder"
+          ],
+          "practice_task": "运行 lib/runtime/examples/hello_world 的 server + client，然后把 DYNAMO_* 环境变量改掉（如 DYN_RUNTIME_NUM_WORKER_THREADS、namespace），观察 client 找不到服务时与线程数变化时的报错路径。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "服务注册模型：Component / Service / Endpoint",
+          "order": 2,
+          "filename": "u3-l2-component-service-endpoint.md",
+          "level": "intermediate",
+          "topic": "Dynamo 的服务目录抽象：namespace → Component → Service → Endpoint 的层级，endpoint 注册如何写入 etcd，客户端如何按 tag 查找并订阅 endpoint 变化。",
+          "learning_goals": [
+            "说出 Component/Service/Endpoint/StartedEndpoint 各自代表什么",
+            "追踪一次 endpoint_create 从注册到可被 etcd 发现的过程",
+            "解释 EndpointConfig 中标签与元数据的作用"
+          ],
+          "source_files": [
+            "lib/runtime/src/component/component.rs",
+            "lib/runtime/src/component/service.rs",
+            "lib/runtime/src/component/endpoint.rs",
+            "lib/runtime/src/component/registry.rs"
+          ],
+          "minimal_modules": [
+            "Component",
+            "Service",
+            "Endpoint",
+            "Registry"
+          ],
+          "practice_task": "在 hello_world 基础上注册两个同 tag 的 endpoint，写一个 client 用 tag 做服务发现并打印它实际连到了哪个实例，验证负载在两个 endpoint 间分摊。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "引擎抽象：AsyncEngine 与类型擦除",
+          "order": 3,
+          "filename": "u3-l3-async-engine.md",
+          "level": "intermediate",
+          "topic": "engine.rs 定义 AsyncEngine/AsyncEngineUnary/AsyncEngineStream、ResponseStream 与类型擦除的 AnyAsyncEngine，配合 Data 类型让任意引擎能挂到 endpoint 上；对照 hello_world 的 Rust 示例理解。",
+          "learning_goals": [
+            "解释 AsyncEngineUnary 与 AsyncEngineStream 的区别",
+            "说明 AnyAsyncEngine 如何在运行时装不同引擎",
+            "对照 hello_world server.rs 写出自定义引擎"
+          ],
+          "source_files": [
+            "lib/runtime/src/engine.rs",
+            "lib/runtime/src/traits.rs",
+            "lib/runtime/src/engine_routes.rs",
+            "lib/runtime/examples/hello_world/src/bin/server.rs"
+          ],
+          "minimal_modules": [
+            "AsyncEngine",
+            "ResponseStream",
+            "Data",
+            "AnyAsyncEngine"
+          ],
+          "practice_task": "把 hello_world server.rs 中的引擎替换为一个给每条请求附加时间戳前缀的自定义 AsyncEngine，用 client 验证输出格式。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "请求面 Pipeline：Ingress / Egress / PushRouter",
+          "order": 4,
+          "filename": "u3-l4-request-plane-pipeline.md",
+          "level": "intermediate",
+          "topic": "请求如何在网络上传送：pipeline/network.rs 的请求面架构，ingress.rs/egress.rs 的出入端、codec.rs 的负载编解码、PushWorkHandler 与 RouterMode（RoundRobin/Direct）；push_router.rs 的 dispatch_kv_admitted 让 KV 选点已做过载准入的请求以 OverloadCheck::AlreadyAdmitted 直发，跳过共享 client 过载状态复查；addressed_router.rs 的 FirstResponseGuard 保留派发（带守卫的请求在独立任务中派发并等到首个响应后才归还流，attach/propagate_first_response_guard 从 pipeline.rs 再导出）用于保住前端持有的 NIXL 注册内存（#12004，端到端见 u8-l9）。本轮 lib/runtime 零改动。",
+          "learning_goals": [
+            "追踪 ingress → codec → egress 的请求编解码路径",
+            "解释 PushWorkHandler 的推送语义",
+            "说出 ingress.rs/egress.rs/push_router 各自的职责",
+            "解释 dispatch_kv_admitted 为何跳过共享过载复查（OverloadCheck::AlreadyAdmitted）",
+            "解释 addressed_router 新增的 FirstResponseGuard 保留派发：前端持有的资源为何要存活到首个响应，以及 1024 个进程级保留派发上限"
+          ],
+          "source_files": [
+            "lib/runtime/src/pipeline/network.rs",
+            "lib/runtime/src/pipeline/network/ingress.rs",
+            "lib/runtime/src/pipeline/network/egress.rs",
+            "lib/runtime/src/pipeline/network/codec.rs",
+            "lib/runtime/src/pipeline/network/egress/push_router.rs",
+            "lib/runtime/src/pipeline/network/egress/addressed_router.rs"
+          ],
+          "minimal_modules": [
+            "Ingress",
+            "Egress",
+            "RequestPlanePayloadCodec",
+            "RouterMode",
+            "PushRouter fault detection",
+            "addressed_router 保留派发"
+          ],
+          "practice_task": "在 ingress/egress 之间加一个打印 payload 大小的调试中间层（或利用现有 codec 打日志），统计 10 条请求的平均 payload 大小并写成小工具；再对照 push_router.rs 说明 KV 准入后直发与普通直发在过载检查上的差异。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l5",
+          "title": "传输层：etcd 服务发现 + NATS/ZMQ 事件面",
+          "order": 5,
+          "filename": "u3-l5-transports-etcd-nats-zmq.md",
+          "level": "intermediate",
+          "topic": "控制面与事件面的物理载体：etcd 的 KV/lease/lock（服务发现）、event_plane 的 NATS 与 ZMQ 双实现（PubSub 消息）、storage/kv 的多后端 KV 存储。K8s 侧经 Operator 自动注入 NATS/TCP 传输层 TLS 的机制见 u10-l6。",
+          "learning_goals": [
+            "解释 etcd lease 如何实现 worker 存活检测",
+            "对比 NATS 与 ZMQ 事件面实现的取舍",
+            "说出 storage/kv 各后端的适用场景"
+          ],
+          "source_files": [
+            "lib/runtime/src/transports/etcd/kv.rs",
+            "lib/runtime/src/transports/etcd/lease.rs",
+            "lib/runtime/src/transports/event_plane/nats_transport.rs",
+            "lib/runtime/src/transports/event_plane/zmq_transport.rs",
+            "lib/runtime/src/storage/kv/etcd.rs",
+            "lib/runtime/src/storage/kv/nats.rs"
+          ],
+          "minimal_modules": [
+            "etcd transport",
+            "event plane",
+            "kv storage backends"
+          ],
+          "practice_task": "用 etcdctl 观察 hello_world 启动后写入的 key 与 lease TTL；再把 kv 存储换成 file 后端重启，对比两者目录/键内容差异，写成实验记录。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "lib/llm：LLM 引擎层与 HTTP 服务",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "引擎装配：entrypoint 与 EngineConfig",
+          "order": 1,
+          "filename": "u4-l1-entrypoint-and-engine-assembly.md",
+          "level": "intermediate",
+          "topic": "lib/llm 的装配层：entrypoint.rs 的 RouterConfig/EngineConfig 如何决定启动什么组件，entrypoint/input.rs 解析 CLI 参数，engines.rs 的 EngineDispatcher 装配引擎；Python 侧 make_engine 最终落到这里；input/common.rs 的 build_preprocessed_routing 一线接入每个路由上下文自持的负载状态（见 u6-l2 的 routing_load.rs）。",
+          "learning_goals": [
+            "解释 RouterConfig 与 EngineConfig 如何组合出不同拓扑",
+            "追踪 make_engine 从 Python 到 Rust 的装配路径",
+            "用 EngineType.Dynamic 描述 Python 侧注入引擎的方式",
+            "说出装配层如何与 RoutingLoadContext 衔接"
+          ],
+          "source_files": [
+            "lib/llm/src/entrypoint.rs",
+            "lib/llm/src/entrypoint/input.rs",
+            "lib/llm/src/engines.rs"
+          ],
+          "minimal_modules": [
+            "EntrypointArgs",
+            "EngineConfig",
+            "EngineDispatcher"
+          ],
+          "practice_task": "阅读 entrypoint/input.rs 后，用不同参数组合启动 sample 后端（agg vs router 模式），整理一张『参数 → 生成组件』对照表；并标注 build_preprocessed_routing 现在把负载上下文接到哪一步。",
+          "depends_on": [
+            "u3-l3",
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "HttpService：OpenAI 兼容 HTTP 服务",
+          "order": 2,
+          "filename": "u4-l2-httpservice-openai.md",
+          "level": "intermediate",
+          "topic": "service_v2.rs 的 HttpService/HttpServiceConfig/State 与 InflightPermit 并发控制，openai.rs/generate.rs 处理 OpenAI 兼容端点与流式生成；openai.rs 同时是 dynamo_rl 路由与 POST /v1/responses/input_tokens 的挂载点。历史改动：#12157 把 base64 embedding 解码移入 protocols/openai/embeddings.rs、#12562 调整 delta_common.rs、#13930 删除 BackendInvalidArgument 字符串前缀恢复（带类型终端错误经预处理器 jail 旁路保留，见 u4-l3）；#11385 为 /inference/v1/generate 端点补齐指标——generate.rs 新增 GenerateMetricCollector/GenerateMetricLifecycle，复用 metrics.rs 的 InflightGuard/HttpQueueGuard/ResponseMetricCollector，request_span 增加 input_tokens/output_tokens/ttft_ms/avg_itl_ms/prefill_worker_id/decode_worker_id 字段并经 ModelManager.resolve_canonical_name 归一模型名（generate 端点绕过分词器/后处理管线，故从原始 token delta 观测响应指标）；#13984 让 protocols/common.rs 的 FinishReason 反序列化防御性接受裸 \"error\" 字符串（含 msgpack 形式），落回诊断消息，避免后端畸形错误升级为前端 5xx。上述变化已生成到位，本轮相关文件零改动。",
+          "learning_goals": [
+            "追踪 HTTP 请求进入 HttpService 后的处理链",
+            "解释并发许可与背压机制",
+            "说出 openai.rs/anthropic.rs/generate.rs 三类协议端点的差异",
+            "调用 POST /v1/responses/input_tokens 预估输入 token 数",
+            "说明 embeddings 端点的 base64 编解码现在位于哪个协议模块",
+            "解释终端错误为何以带类型注解回传而非字符串前缀恢复",
+            "说出 /inference/v1/generate 的指标生命周期：GenerateMetricLifecycle 如何用 InflightGuard/HttpQueueGuard/ResponseMetricCollector 与 request_span 上的 ttft_ms 等字段采集指标",
+            "解释 FinishReason 为何防御性接受裸 \"error\" 并落回诊断消息"
+          ],
+          "source_files": [
+            "lib/llm/src/http/service/service_v2.rs",
+            "lib/llm/src/http/service/openai.rs",
+            "lib/llm/src/http/service/generate.rs",
+            "lib/llm/src/http/service/metrics.rs",
+            "lib/llm/src/protocols/common.rs",
+            "lib/llm/src/protocols/openai/embeddings.rs",
+            "lib/llm/src/protocols/openai/delta_common.rs"
+          ],
+          "minimal_modules": [
+            "HttpService",
+            "InflightPermit",
+            "openai/generate handlers",
+            "delta serialization",
+            "input_tokens endpoint",
+            "embeddings 编解码",
+            "backend error 提取",
+            "generate 指标生命周期"
+          ],
+          "practice_task": "给本地服务施加并发压力（如 200 并发 curl），观察 InflightPermit 限流行为，记录被拒绝/排队的请求数并解释源码中的判断逻辑；再对同一组 prompt 调用 /v1/responses/input_tokens 对比返回的估算与实际分词数；最后对 /inference/v1/generate 施压，观察 GenerateMetricLifecycle 暴露的 inflight/http 队列/响应指标与 request_span 上的 input_tokens/output_tokens/ttft_ms/avg_itl_ms 及 prefill/decode worker 字段。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "预处理与分词：OpenAIPreprocessor 与 LocalModel",
+          "order": 3,
+          "filename": "u4-l3-preprocessor-tokenizer.md",
+          "level": "intermediate",
+          "topic": "请求进入引擎前的整形：preprocessor.rs 的 OpenAIPreprocessor 做模板/媒体计数/分词，media/loader.rs 负责媒体抓取与解码入口（经 url_validator 做 SSRF 防护），local_model.rs 负责模型与 tokenizer 加载；结合 lib/tokens 与 lib/kv-hashing 理解 token 块与块哈希。历史改动：#13841 让 prompt.rs 正确处理 continue_final_message；#12157 新增 new_for_embeddings 与右截断；#13930 调整 jail 的错误处理（终端错误被 take_while 旁路、JailAnnotated.error 置空并以原始带类型 Dynamo 注解链回）；#12181 在此实现 reasoning token 用量计数（本轮 #13947 只是把同等能力补到 Python 聊天处理路径，见 u5-l2/u5-l3，本文件零改动）。",
+          "learning_goals": [
+            "追踪从文本到 token 块的转换过程",
+            "解释媒体（图片/视频）请求的 token 计数方式与 URL 抓取的 SSRF 防护",
+            "理解 block 化的 token 表示对 KV 路由的意义",
+            "说出 nvext 透传与 tool-call jail 的交互",
+            "解释 prompt.rs 如何处理 continue_final_message 与 embeddings 专用的截断/分词路径",
+            "解释 jail 如何旁路终端错误以保留其类型信息（JailAnnotated.error 置空、原始注解链回）"
+          ],
+          "source_files": [
+            "lib/llm/src/preprocessor.rs",
+            "lib/llm/src/preprocessor/prompt.rs",
+            "lib/llm/src/preprocessor/media/loader.rs",
+            "components/src/dynamo/common/http/url_validator.py",
+            "lib/llm/src/local_model.rs",
+            "lib/tokens/src/tokens.rs",
+            "lib/kv-hashing/src/block.rs"
+          ],
+          "minimal_modules": [
+            "OpenAIPreprocessor",
+            "media loader 与 fetch policy",
+            "LocalModel",
+            "token blocks",
+            "block hashing",
+            "nvext passthrough",
+            "prompt.rs 续写与 embeddings 分词",
+            "jail 终端错误旁路"
+          ],
+          "practice_task": "写一个离线脚本：加载任一分词器，把三条不同 prompt 转成 token 块并计算块哈希，验证相同前缀产生相同的前缀块序列；再给一条带恶意内网图片 URL 的请求（本地 mock）观察 preprocessor 媒体加载层的拒绝路径。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "Worker 类型与服务发现：discovery 模块",
+          "order": 4,
+          "filename": "u4-l4-worker-type-discovery.md",
+          "level": "intermediate",
+          "topic": "引擎如何知道有哪些 worker：worker_type.rs 区分 prefill/decode/both 等角色，discovery/model.rs 的 Model 与 WorkerTypeReadiness 管理就绪状态，worker_set.rs/model_manager.rs 维护动态 worker 集合，worker_monitor/watcher 承接负载阈值接线（LoadThresholdHandle、按路由上下文持有负载状态，见 u6-l2）。#12157 起 watcher.rs 的 embeddings 端点使用 OpenAIPreprocessor::new_for_embeddings；#11385 又用 ModelManager.resolve_canonical_name 为 generate 指标归一模型名（见 u4-l2）。",
+          "learning_goals": [
+            "解释 WorkerTypeReadiness 如何表达 P/D 就绪状态",
+            "追踪 worker 上下线时 workerSet 的更新过程",
+            "说出 Model 抽象在多后端共存时的作用",
+            "解释负载阈值（LoadThresholdHandle/KvWorkerMonitor）如何进入发现层",
+            "指出 watcher.rs 为 embeddings 端点改用了哪个预处理器构造器"
+          ],
+          "source_files": [
+            "lib/llm/src/worker_type.rs",
+            "lib/llm/src/discovery/model.rs",
+            "lib/llm/src/discovery/worker_set.rs",
+            "lib/llm/src/discovery/model_manager.rs",
+            "lib/llm/src/discovery/watcher.rs",
+            "lib/llm/src/discovery/worker_monitor.rs"
+          ],
+          "minimal_modules": [
+            "WorkerType",
+            "Model",
+            "WorkerSet",
+            "ModelManager",
+            "worker_monitor/watcher"
+          ],
+          "practice_task": "先启动 prefill 角色再延迟启动 decode 角色，用日志或 etcd 观察 worker_set 从未就绪到就绪的转变，并解释源码里触发就绪的条件。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l5",
+          "title": "图像解码后端：libjpeg-turbo 与并行媒体解码",
+          "order": 5,
+          "filename": "u4-l5-media-decode-turbojpeg.md",
+          "level": "intermediate",
+          "topic": "媒体解码子系统：preprocessor/media/decoders/image.rs 统一解码编排，backends.rs 在 image_reader（PIL 系）与 turbojpeg（libjpeg-turbo 绑定）之间选择，jpeg_turbo.rs 封装 FFI 与错误处理（含 CMYK 转 RGB、与 PIL 的奇偶校验测试数据）；Python 侧 common/utils/media_decoder.py 与 vllm multimodal_utils/media_config.py 提供并行解码开关，容器镜像新增 libturbojpeg 系统依赖，lib/llm/benches/image_decode.rs 与 benchmarks/multimodal/media_decode 提供基准。前端解码产物如何经 NIXL 送往编码 worker 的端到端消费路径见 u8-l9。",
+          "learning_goals": [
+            "说出图像解码后端的选择顺序与回退逻辑（image_reader vs turbojpeg）",
+            "解释 libjpeg-turbo 相对 PIL 解码的性能收益与兼容性边界（如 CMYK）",
+            "运行 media_decode 基准对比两条解码路径的吞吐"
+          ],
+          "source_files": [
+            "lib/llm/src/preprocessor/media/decoders/image.rs",
+            "lib/llm/src/preprocessor/media/decoders/image/backends.rs",
+            "lib/llm/src/preprocessor/media/decoders/image/backends/turbojpeg.rs",
+            "lib/llm/src/preprocessor/media/jpeg_turbo.rs",
+            "components/src/dynamo/common/utils/media_decoder.py",
+            "benchmarks/multimodal/media_decode/run_image.sh"
+          ],
+          "minimal_modules": [
+            "decoders/image 编排",
+            "backends 选择",
+            "jpeg_turbo 封装",
+            "Python media_decoder 开关",
+            "media_decode benchmark"
+          ],
+          "practice_task": "运行 benchmarks/multimodal/media_decode/run_image.sh（或 cargo bench -p dynamo-llm --bench image_decode）对比 turbojpeg 与默认解码路径的耗时；再阅读 backends.rs 与 media_config.py，写出后端优先级、禁用开关（环境变量）清单和 CMYK 等特殊 JPEG 的处理路径。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "Python 前端 dynamo.frontend",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Python 前端主流程：从 CLI 到 make_engine",
+          "order": 1,
+          "filename": "u5-l1-frontend-main.md",
+          "level": "intermediate",
+          "topic": "dynamo.frontend 启动链：__main__.py 入口、frontend_args.py 的 FrontendConfig、main.py 构建 DistributedRuntime 并调用 dynamo.llm 的 make_engine 装配引擎与路由。",
+          "learning_goals": [
+            "说出 frontend 从启动到可服务的完整初始化链",
+            "解释 FrontendConfig 与 CLI/环境变量的映射",
+            "理解 make_engine 把 Python processor 注入 Rust 引擎的方式"
+          ],
+          "source_files": [
+            "components/src/dynamo/frontend/main.py",
+            "components/src/dynamo/frontend/__main__.py",
+            "components/src/dynamo/frontend/frontend_args.py"
+          ],
+          "minimal_modules": [
+            "main.py",
+            "FrontendConfig",
+            "make_engine"
+          ],
+          "practice_task": "给 frontend 增加一个自定义启动参数（如 --banner-text），打印在服务启动完成时；走通 frontend_args.py → FrontendConfig → main.py 的完整参数传递。",
+          "depends_on": [
+            "u5-l1_tmp"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "KV 感知路由",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": []
+    }
+  ]
+}
