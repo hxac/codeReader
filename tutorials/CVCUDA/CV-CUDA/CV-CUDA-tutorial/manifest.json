@@ -1,0 +1,1131 @@
+{
+  "head": "5ac8708bde57f8cf1c8d19443f6384875e86157c",
+  "project": "CV-CUDA",
+  "rationale": "CV-CUDA 是 NVIDIA 开源的 GPU 计算机视觉算子库，代码分为清晰的四层：nvcv 核心类型层（Tensor/TensorBatch/ImageBatchVarShape 等）、cvcuda 算子层（C API + C++ 类 + priv 实现 + legacy/原生 CUDA kernel）、pybind11 Python 绑定层（python/mod_cvcuda，含对象缓存与 Workspace 缓存）、以及外围的 samples/tests/bench/tools 工程体系。因此学习路线按\"先会用（安装、张量、常用算子）→ 再理解（流与缓存、算子四层解剖、C++/C API）→ 后深入（测试基准、二次开发、端到端应用）\"三层递进设计。第一单元让读者零起点跑通 hello_world 并建立仓库地图；第二、三单元用 Python 掌握张量体系、互操作（DLPack/numpy/PyTorch/cupy）与代表性算子及 allocating/_into 变体；第四单元讲清 Stream 执行模型与对象缓存这两个最影响正确性与性能的机制；第五单元自顶向下解剖一个算子从 Python 调用到 CUDA kernel 的完整链路，并用 OSD、HQResize/PillowResize、SIFT 三个复杂案例覆盖不同内核风格；第六单元补齐 C++/C API、错误处理与符号版本、分配器；第七、八单元面向贡献者讲测试体系（system/python）、nvbench 基准、NVTX 调优以及 tools/mkop 新算子脚手架与 review/optimize 工具链；第九单元以 classification/object detection/segmentation 与编解码互操作收尾，把全部知识串成端到端 GPU 管线。大型项目拆为 36 篇，每篇聚焦单一主题、引用 2-6 个真实源码文件并配一个动手任务。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "order": 1,
+      "title": "初识 CV-CUDA：定位、安装与仓库地图",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 CV-CUDA 的定位、目标场景与支持的平台/CUDA 版本",
+            "描述 src/python/tests/bench/samples/docs 各目录的职责",
+            "对照架构图理解 nvcv 类型层与 cvcuda 算子层的分层关系"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README.md",
+            "src/cvcuda",
+            "src/nvcv",
+            "python/mod_cvcuda"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README 中的架构图后，在纸上画出一次 cvcuda.resize 调用从 Python 到 CUDA kernel 所经过的目录（python/mod_cvcuda → src/cvcuda → kernel），并在仓库中找到每个目录对应的一个真实文件，记录路径。",
+          "source_files": [
+            "README.md",
+            "docs/sphinx/content/cvcuda_arch.svg",
+            "AGENTS.md"
+          ],
+          "title": "CV-CUDA 是什么：项目定位与架构总览",
+          "topic": "介绍 CV-CUDA 的定位：GPU 加速的计算机视觉算子库，面向 AI 数据预处理/推理管线的高吞吐低延迟场景；并给出整体架构分层与目录职责。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-install-and-first-run.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "通过 pip 安装 cvcuda-cu12/cvcuda-cu13 并验证导入",
+            "独立运行 samples/applications/hello_world.py 完成解码-缩放-高斯模糊-编码全 GPU 流程",
+            "理解 nvimgcodec 与 CV-CUDA 在示例中的分工"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README.md",
+            "samples/applications/hello_world.py"
+          ],
+          "order": 2,
+          "practice_task": "安装 cvcuda wheel 后运行 hello_world.py，把输出图与输入图对比；然后修改脚本把 kernel 尺寸与 sigma 换成两组不同参数，观察输出差异，并在代码中标注每一步数据停留在 CPU 还是 GPU。",
+          "source_files": [
+            "README.md",
+            "docs/sphinx/installation.rst",
+            "docs/sphinx/getting_started.rst",
+            "samples/applications/hello_world.py"
+          ],
+          "title": "安装与第一个程序：pip wheel 快速上手",
+          "topic": "讲解预编译包（wheel/deb/tar）的安装方式、兼容性矩阵，并用 hello_world 样例完成第一次全 GPU 图像处理。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-build-from-source.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "解释 build.sh 如何包装 cmake preset 并控制构建目录",
+            "列出 dev/dev-py/dev-bench 等 preset 的差异与用途",
+            "说明 Docker devel 镜像为什么预装 googletest/nvbench/pybind11 等依赖"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "build.sh",
+            "CMakeLists.txt",
+            "CMakePresets.json",
+            "docker/README.md"
+          ],
+          "order": 3,
+          "practice_task": "在有 CUDA 环境的机器上执行 `cmake --preset dev && cmake --build --preset dev`（或用 Docker devel 镜像），记录构建产物中 libnvcv.so、libcvcuda.so 的位置；若无法构建，写出缺失的依赖清单及对应 find_package 名称。",
+          "source_files": [
+            "build.sh",
+            "CMakePresets.json",
+            "CMakeLists.txt",
+            "docker/README.md"
+          ],
+          "title": "从源码构建：CMake preset 与 Docker 开发镜像",
+          "topic": "讲解 build.sh、CMakePresets.json 的 preset 体系、依赖解析方式（find_package/FetchContent）以及 Docker devel 镜像构建路线。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l4-repo-map.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "按文件名规律快速定位任意算子的 C 头/C++ 头/priv 实现/内核/python 绑定/测试/基准",
+            "理解 tests/cvcuda 与 bench、samples 三套外围代码的组织差异",
+            "掌握 AGENTS.md 中仓库不变量（SPDX 头、双 CUDA 版本配对等）"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "AGENTS.md",
+            "src/cvcuda",
+            "python/mod_cvcuda",
+            "tests/cvcuda",
+            "bench"
+          ],
+          "order": 4,
+          "practice_task": "以 GaussianBlur/Gaussian 算子为例，写出它全部相关文件的完整路径（C API、C++ 类、priv 实现、legacy 内核、python 绑定、C++ 系统测试、python 测试、python 基准、sample），做成一张个人速查表。",
+          "source_files": [
+            "AGENTS.md",
+            "src/cvcuda/CMakeLists.txt",
+            "tests/README.md",
+            "bench/README.md",
+            "samples/README.md"
+          ],
+          "title": "仓库代码地图：如何高效检索这个大型仓库",
+          "topic": "系统梳理 src（cvcuda/nvcv）、python、tests、bench、samples、tools、docs 的命名规律，让读者能凭命名约定直接定位任意算子的全部相关文件。"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "level": "beginner",
+      "order": 2,
+      "title": "核心数据类型：张量、布局与变长批处理",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l1-tensor-model.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "用 python 创建指定 shape/dtype/layout 的 cvcuda.Tensor",
+            "解释 TensorShape、DataLayout、stride 三者的关系",
+            "区分 HWC 与 CHW 布局并正确读写像素"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "python/mod_cvcuda/nvcv/Tensor.cpp",
+            "src/nvcv/src/include/nvcv/Tensor.hpp",
+            "samples/datatypes/tensor.py"
+          ],
+          "order": 1,
+          "practice_task": "编写脚本创建 NHWC 布局的 uint8 张量，用 numpy 把每个像素涂成渐变色，再导出为图片查看；然后改用 NCHW 布局重复一次，对比两种布局下 numpy 视图的 shape 与 stride。",
+          "source_files": [
+            "src/nvcv/src/include/nvcv/Tensor.hpp",
+            "src/nvcv/src/include/nvcv/TensorShape.hpp",
+            "src/nvcv/src/include/nvcv/DataLayout.hpp",
+            "samples/datatypes/tensor.py"
+          ],
+          "title": "张量模型：Tensor、TensorShape 与 DataLayout",
+          "topic": "讲解 CV-CUDA 中最核心的数据容器 nvcv Tensor：形状、布局（NHWC/NCHW）、数据类型与 stride 语义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-dtype-and-image-format.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "列举 DataType 与 ImageFormat 的组成维度",
+            "说明 RGB/RGBA/gray 等格式与通道数、布局的组合规则",
+            "用 python API 检查并转换格式"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "src/nvcv/src/include/nvcv/DataType.hpp",
+            "src/nvcv/src/include/nvcv/ImageFormat.hpp",
+            "python/mod_cvcuda/nvcv/ImageFormat.cpp"
+          ],
+          "order": 2,
+          "practice_task": "打印 cvcuda 中若干 ImageFormat（如 RGB8/RGBA16F/Y8）的通道数、每通道位数与布局；再构造两组 DataType 掩码实验，验证 U8 与 F32 的取值范围差异。",
+          "source_files": [
+            "src/nvcv/src/include/nvcv/DataType.hpp",
+            "src/nvcv/src/include/nvcv/ImageFormat.hpp",
+            "python/mod_cvcuda/nvcv/DataType.cpp",
+            "python/mod_cvcuda/nvcv/ImageFormat.cpp"
+          ],
+          "title": "数据类型与图像格式：DataType、TensorLayout、ImageFormat",
+          "topic": "讲解 dtype 体系（bits/channels/packing）与 ImageFormat（颜色空间+通道+布局）如何共同描述图像数据。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "filename": "u2-l3-varshape-batches.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "解释固定 shape Tensor 批与 ImageBatchVarShape 的本质区别",
+            "用 python 构建含不同尺寸图像的变长批",
+            "理解 TensorBatch 与 ImageBatch 的适用场景"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/nvcv/src/include/nvcv/ImageBatch.hpp",
+            "src/nvcv/src/include/nvcv/TensorBatch.hpp",
+            "python/mod_cvcuda/nvcv/ImageBatch.cpp"
+          ],
+          "order": 3,
+          "practice_task": "用 samples/datatypes 中的示例代码构建一个含 3 张不同分辨率图片的 ImageBatchVarShape，逐张读出尺寸；再把它们 pad 成同尺寸后转成 NHWC Tensor，对比两种表示的内存占用差异。",
+          "source_files": [
+            "src/nvcv/src/include/nvcv/ImageBatch.hpp",
+            "src/nvcv/src/include/nvcv/TensorBatch.hpp",
+            "samples/datatypes/imagebatchvarshape.py",
+            "samples/datatypes/tensorbatch.py"
+          ],
+          "title": "变长批处理：ImageBatchVarShape 与 TensorBatch",
+          "topic": "讲解 CV-CUDA 特色容器 ImageBatchVarShape（每张图尺寸不同）与 TensorBatch，这是视频/训练数据预管线的关键抽象。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l4-dlpack-interop.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "解释 DLPack 协议在 python 绑定中的实现位置与流程",
+            "用 as_tensor 包装 numpy/cupy/torch 张量且零拷贝",
+            "识别哪些包装条件（设备、布局、stride）会失败"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "python/mod_cvcuda/nvcv/DLPackUtils.cpp",
+            "python/mod_cvcuda/nvcv/Tensor.cpp",
+            "samples/interoperability/numpy_interop.py"
+          ],
+          "order": 4,
+          "practice_task": "分别用 numpy（CPU）、cupy、torch（GPU）创建同一张图的三份副本，统一包装成 cvcuda.Tensor 后执行 flip，再把结果转回原框架并断言三者一致；记录每种框架包装时的限制条件。",
+          "source_files": [
+            "python/mod_cvcuda/nvcv/DLPackUtils.cpp",
+            "samples/interoperability/numpy_interop.py",
+            "samples/interoperability/cupy_interop.py",
+            "samples/interoperability/pytorch_interop.py"
+          ],
+          "title": "零拷贝互操作：as_tensor 与 DLPack",
+          "topic": "讲解 cvcuda.as_tensor 如何通过 DLPack 与 numpy、cupy、PyTorch 等框架零拷贝共享显存。"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "level": "beginner",
+      "order": 3,
+      "title": "常用算子实战：从单算子到融合算子",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u3-l1-resize-and-flip.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "调用 resize/flip 并理解插值参数 Interp 的取值",
+            "对 Tensor 与 ImageBatchVarShape 两种输入分别执行同一算子",
+            "对照 OpenCV 语义理解 flipCode 等参数含义"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "python/mod_cvcuda/operators/OpResize.cpp",
+            "python/mod_cvcuda/operators/OpFlip.cpp",
+            "samples/operators/resize.py"
+          ],
+          "order": 1,
+          "practice_task": "修改 samples/operators/resize.py，对同一输入分别用 LINEAR 与 CUBIC 插值缩放并保存对比图；再对一个 ImageBatchVarShape（内含 2x2 以下小图）调用 LINEAR resize，观察并解释抛出的异常（提示：priv/OpResize.cpp 有显式检查）。",
+          "source_files": [
+            "samples/operators/resize.py",
+            "python/mod_cvcuda/operators/OpResize.cpp",
+            "python/mod_cvcuda/operators/OpFlip.cpp",
+            "src/cvcuda/priv/OpResize.cpp"
+          ],
+          "title": "第一个算子组：resize 与 flip（固定批与变长批）",
+          "topic": "以最常用的 resize/flip 为例讲解算子的 python 调用方式、插值参数以及 Tensor/ImageBatchVarShape 两套入口。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-color-and-pixel-ops.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "按功能给 CV-CUDA 的 60+ 算子分类",
+            "调用 cvtcolor、brightness_contrast、normalize 并理解参数",
+            "查阅算子 C 头文件中的 Limitations 契约表"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "python/mod_cvcuda/operators/OpCvtColor.cpp",
+            "python/mod_cvcuda/operators/OpBrightnessContrast.cpp",
+            "samples/operators/cvtcolor.py"
+          ],
+          "order": 2,
+          "practice_task": "写一个脚本依次执行 BGR2RGB、brightness_contrast、normalize 形成小管线，处理 hello_world 的输入图；再打开 OpCvtColor.h 的 Limitations 注释，核对你使用的 dtype/通道组合是否被支持。",
+          "source_files": [
+            "samples/operators/cvtcolor.py",
+            "python/mod_cvcuda/operators/OpCvtColor.cpp",
+            "src/cvcuda/include/cvcuda/OpCvtColor.h",
+            "samples/applications/hello_world.py"
+          ],
+          "title": "色彩与像素值算子族：cvtcolor、brightness_contrast、normalize 等",
+          "topic": "按族概览几何变换、色彩调整、滤波、归一化等算子，并以色彩类算子为例讲如何读懂每个算子的支持矩阵。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u2-l4"
+          ],
+          "filename": "u3-l3-allocating-vs-into.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "解释两种变体的实现差异（Tensor::Create+对象缓存 vs 直接写入）",
+            "根据吞吐需求选择正确变体",
+            "预测两种变体在循环管线中的内存分配行为"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "python/mod_cvcuda/operators/OpFlip.cpp",
+            "docs/sphinx/advanced/operator_variants.rst"
+          ],
+          "order": 3,
+          "practice_task": "用 timeit 对比循环 1000 次 `cvcuda.flip(src,...)` 与预分配后 `cvcuda.flip_into(dst,src,...)` 的耗时与峰值显存（可用 torch.cuda.max_memory_allocated 或 nvidia-smi 轮询），写出结论并解释原因。",
+          "source_files": [
+            "docs/sphinx/advanced/operator_variants.rst",
+            "python/mod_cvcuda/operators/OpFlip.cpp",
+            "docs/sphinx/advanced/object_cache.rst"
+          ],
+          "title": "算子的两种变体：allocating 与 _into",
+          "topic": "讲解 cvcuda.flip 与 cvcuda.flip_into 两类 API 的语义差异、内部实现路径以及性能取舍。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l4-fused-ops.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "解释融合算子减少 kernel 启动与显存读写次数的原理",
+            "调用 resize_crop_convert_reformat 与 crop_flip_normalize_reformat",
+            "判断自己的管线能否用融合算子替换"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "python/mod_cvcuda/operators/OpResizeCropConvertReformat.cpp",
+            "samples/operators/resize_crop_convert_reformat.py"
+          ],
+          "order": 4,
+          "practice_task": "先用 resize+centercrop+cvtcolor 三个独立算子组成管线处理一批图片，再用 resize_crop_convert_reformat 一次完成，比较两版的输出一致性与耗时；把结果记成表格。",
+          "source_files": [
+            "samples/operators/resize_crop_convert_reformat.py",
+            "samples/operators/crop_flip_normalize_reformat.py",
+            "python/mod_cvcuda/operators/OpResizeCropConvertReformat.cpp",
+            "src/cvcuda/priv/OpResizeCropConvertReformat.cu"
+          ],
+          "title": "融合算子：resize_crop_convert_reformat 与 crop_flip_normalize_reformat",
+          "topic": "讲解 CV-CUDA 为推理预处理设计的一次读写融合算子，它们把多步几何/色彩/布局变换合并进单个 kernel。"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "order": 4,
+      "title": "执行模型：Stream、缓存与并发",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u4-l1-stream-model.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "解释 python Stream、Stream::Current() 与隐式流的关系",
+            "说明算子提交时 stream 参数如何一路传到 cudaLaunchKernel",
+            "理解 C++ 侧 CudaStream RAII 封装"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "python/mod_cvcuda/nvcv/Stream.cpp",
+            "src/cvcuda/util/Stream.hpp",
+            "python/mod_cvcuda/operators/OpFlip.cpp"
+          ],
+          "order": 1,
+          "practice_task": "创建两个 cvcuda.Stream，把同一批图片分到两条流上并行执行 resize，用 stream 同步事件验证两条流确实并发（对比单流耗时）；再把 hello_world 改成显式 stream 版本。",
+          "source_files": [
+            "python/mod_cvcuda/nvcv/Stream.cpp",
+            "python/mod_cvcuda/operators/OpFlip.cpp",
+            "src/cvcuda/util/Stream.hpp",
+            "src/cvcuda/util/Stream.cpp"
+          ],
+          "title": "Stream 执行模型：一切算子都提交到流上",
+          "topic": "讲解 cudaStream_t 在整条链路中的传递：python Stream 对象、默认流行为、以及算子如何绑定流执行。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-object-cache.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "描述对象缓存的命中条件（shape/layout/dtype 匹配）与缓存增长规律",
+            "区分 wrapped 与 non-wrapped 对象的缓存行为",
+            "用 samples/object_cache 实验验证复用效果"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "python/mod_cvcuda/nvcv/Cache.cpp",
+            "docs/sphinx/advanced/object_cache.rst",
+            "samples/object_cache/basic.py"
+          ],
+          "order": 2,
+          "practice_task": "运行 samples/object_cache 下的 basic.py 与 reuse.py，观察日志或计数输出；写一个故意每轮改变输出 shape 的循环，证明缓存不会命中，并说明这会导致什么后果。",
+          "source_files": [
+            "docs/sphinx/advanced/object_cache.rst",
+            "python/mod_cvcuda/nvcv/Cache.cpp",
+            "samples/object_cache/basic.py",
+            "samples/object_cache/reuse.py"
+          ],
+          "title": "Python 对象缓存：Tensor/ImageBatch 的自动复用",
+          "topic": "讲解只有 python 对象才有的缓存系统：非包装对象如何被缓存复用、包装对象为何不进缓存，以及 unbounded_growth 风险。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1",
+            "u4-l2"
+          ],
+          "filename": "u4-l3-multi-stream-thread-gpu.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "总结多流/多线程/多 GPU 场景下 CV-CUDA 的正确用法",
+            "理解 python 绑定中线程作用域（ThreadScope）与资源守卫的作用",
+            "参考官方测试写出并发安全的调用代码"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "tests/cvcuda/python/test_multi_stream.py",
+            "tests/cvcuda/python/test_multi_threading.py",
+            "python/mod_cvcuda/nvcv/StreamStack.cpp"
+          ],
+          "order": 3,
+          "practice_task": "仿照 tests/cvcuda/python/test_multi_threading.py 写一个 4 线程脚本，每线程各自创建 Stream 并对独立张量循环执行 flip，最后校验所有输出正确；再故意共享同一输出张量复现竞争问题。",
+          "source_files": [
+            "tests/cvcuda/python/test_multi_stream.py",
+            "tests/cvcuda/python/test_multi_threading.py",
+            "tests/cvcuda/python/test_multi_gpu.py"
+          ],
+          "title": "多流、多线程与多 GPU",
+          "topic": "结合官方测试讲解并发使用 CV-CUDA 的语义与坑：每线程的流栈、资源守卫的锁模式、多 GPU 设备切换。"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "order": 5,
+      "title": "算子内部解剖：从 Python 调用到 CUDA kernel",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u5-l1-op-four-layers.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "跟踪 flip 调用穿过 C API、C++ 类、priv 实现到 legacy kernel 的完整路径",
+            "说明 detail::OperatorHandle 的 RAII 设计与 NVCVOperatorHandle 的作用",
+            "在源码中定位任意算子的这四层文件"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/cvcuda/include/cvcuda/OpFlip.hpp",
+            "src/cvcuda/priv/OpFlip.cpp",
+            "src/cvcuda/priv/legacy/flip.cu",
+            "python/mod_cvcuda/operators/OpFlip.cpp"
+          ],
+          "order": 1,
+          "practice_task": "画出 cvcuda.flip(tensor, 1) 的完整调用时序图，标注每一步所在的文件与函数；然后用 debugger 或加打印（NVTX）验证顺序与你的图一致。",
+          "source_files": [
+            "src/cvcuda/include/cvcuda/OpFlip.h",
+            "src/cvcuda/include/cvcuda/OpFlip.hpp",
+            "src/cvcuda/include/cvcuda/IOperator.hpp",
+            "src/cvcuda/priv/OpFlip.cpp",
+            "src/cvcuda/priv/legacy/flip.cu"
+          ],
+          "title": "算子四层结构：C API → C++ 类 → priv 实现 → kernel",
+          "topic": "以 Flip 为例自顶向下解剖一个算子的完整实现链路，这是理解整个仓库的钥匙。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-tensor-data-access.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "使用 TensorDataStridedCuda/ImageBatchVarShapeDataStridedCuda 访问 GPU 数据",
+            "理解 exportData 的失败条件与异常抛出路径",
+            "用 TensorDataAccess 计算任意像素地址"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/nvcv/src/include/nvcv/TensorDataAccess.hpp",
+            "src/cvcuda/priv/OpResize.cpp"
+          ],
+          "order": 2,
+          "practice_task": "写一个小 C++ 程序：创建 NVCV Tensor，exportData 成 TensorDataStridedCuda 后手工计算第 (n=1,h=3,w=5,c=2) 个 NHWC 像素的设备指针并读回校验；再对一个 CPU 张量调用同一 exportData，确认返回 nullptr 并理解原因。",
+          "source_files": [
+            "src/nvcv/src/include/nvcv/TensorDataAccess.hpp",
+            "src/nvcv/src/include/nvcv/TensorData.hpp",
+            "src/cvcuda/priv/OpResize.cpp",
+            "src/cvcuda/priv/OpFlip.cpp"
+          ],
+          "title": "GPU 数据访问：exportData 与 TensorDataAccess",
+          "topic": "讲解算子内部如何把抽象 Tensor/ImageBatch 导出为可直接喂给 kernel 的 strided CUDA 数据视图。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-legacy-vs-native.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "说明 legacy 层的由来（DataShape、cuda_op 命名空间）与现状",
+            "区分两种内核组织方式并给出选择依据",
+            "在 legacy 目录中读懂一个 .cu kernel 的 grid/block 划分"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/cvcuda/priv/legacy/CvCudaLegacy.h",
+            "src/cvcuda/priv/legacy/flip.cu",
+            "src/cvcuda/priv/OpSIFT.cu"
+          ],
+          "order": 3,
+          "practice_task": "对比 legacy/flip.cu 与 OpSIFT.cu 的编译单元组织方式（类内 kernel vs 独立 .cu）；写一份简短笔记：如果新增一个简单 pointwise 算子，你会选哪种方式并为什么。",
+          "source_files": [
+            "src/cvcuda/priv/legacy/CvCudaLegacy.h",
+            "src/cvcuda/priv/legacy/CvCudaLegacyHelpers.hpp",
+            "src/cvcuda/priv/legacy/flip.cu",
+            "src/cvcuda/priv/legacy/resize_var_shape.cu",
+            "src/cvcuda/priv/OpSIFT.cu"
+          ],
+          "title": "两种内核形态：legacy 内核与原生内核",
+          "topic": "讲解 priv/legacy 目录（历史遗留 kernel 集，67 个 .cu）与 Op*.cu 原生内核两种实现形态的差异与取舍。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "filename": "u5-l4-osd-case-study.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "用 python OsdElement 组合文本/矩形/点并执行 osd 算子",
+            "解释 OSD 如何接收动态参数缓冲并用 CUDA 渲染叠加层",
+            "了解 OSD 在 aarch64 上的已知限制"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "src/cvcuda/priv/OpOSD.cpp",
+            "src/cvcuda/priv/legacy/osd.cu",
+            "python/mod_cvcuda/OsdElement.cpp"
+          ],
+          "order": 4,
+          "practice_task": "运行 samples/operators/osd.py，然后扩展它：给同一帧叠加 2 个不同颜色的矩形、一行文本和若干关键点，保存结果图；再修改其中一个元素参数观察重绘行为。",
+          "source_files": [
+            "samples/operators/osd.py",
+            "python/mod_cvcuda/OsdElement.cpp",
+            "src/cvcuda/priv/OpOSD.cpp",
+            "src/cvcuda/priv/legacy/osd.cu"
+          ],
+          "title": "复杂算子案例一：OSD 屏幕叠加渲染",
+          "topic": "解剖 OSD（On Screen Display）这一状态最复杂的算子：元素序列化、文本渲染、多元素 GPU 合成。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "filename": "u5-l5-hq-resize.md",
+          "id": "u5-l5",
+          "learning_goals": [
+            "解释 HQResize/PillowResize 与普通 resize 的质量差异来源",
+            "描述 PillowResize 的多档滤镜（lanczos/bicubic 等）实现思路",
+            "按精度需求选择三档缩放算子"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "src/cvcuda/priv/OpHQResize.cu",
+            "src/cvcuda/priv/legacy/pillow_resize.cu",
+            "samples/operators/pillowresize.py"
+          ],
+          "order": 5,
+          "practice_task": "把同一张图分别用 cvcuda.resize(LINEAR)、pillow_resize(lanczos3)、hq_resize 缩小再放大回原尺寸，计算与原图的 PSNR/SSIM 并排序，验证质量-性能权衡。",
+          "source_files": [
+            "samples/operators/pillowresize.py",
+            "samples/operators/hq_resize.py",
+            "src/cvcuda/priv/legacy/pillow_resize.cu",
+            "src/cvcuda/priv/OpHQResize.cu"
+          ],
+          "title": "复杂算子案例二：HQResize 与 PillowResize 高质量缩放",
+          "topic": "讲解高质量缩放家族：Pillow 语义的 pillow_resize 与分块/滤波复杂的 HQResize 的实现组织。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "filename": "u5-l6-computer-vision-analysis-ops.md",
+          "id": "u5-l6",
+          "learning_goals": [
+            "调用 SIFT/PairwiseMatcher/FindHomography 组成特征匹配管线",
+            "解释分析类算子为何输出 Array/Tensor 而非图像",
+            "理解原生 .cu 实现里多阶段 kernel 的流水关系"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "src/cvcuda/priv/OpSIFT.cu",
+            "src/cvcuda/priv/OpPairwiseMatcher.cu",
+            "src/cvcuda/priv/OpFindHomography.cu"
+          ],
+          "order": 6,
+          "practice_task": "对同一场景的两张视角不同的图片依次执行 SIFT → PairwiseMatcher → FindHomography，得到单应矩阵；用该矩阵配合 warp_perspective 对齐两图并保存叠加效果图。",
+          "source_files": [
+            "src/cvcuda/priv/OpSIFT.cu",
+            "src/cvcuda/priv/OpPairwiseMatcher.cu",
+            "src/cvcuda/priv/OpFindHomography.cu",
+            "samples/operators/sift.py"
+          ],
+          "title": "复杂算子案例三：SIFT、PairwiseMatcher、FindHomography",
+          "topic": "解剖一组原生 GPU 计算机视觉分析算子：特征提取、描述子匹配与单应估计的协作。"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "level": "intermediate",
+      "order": 6,
+      "title": "C/C++ API 与底层机制",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u6-l1-cpp-c-api-usage.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "分别用 C++ 类与纯 C API 完成一次 flip 调用",
+            "理解 cvcudaFlipCreate/Submit/Destroy 句柄式生命周期",
+            "对照 C++ 内联包装读懂 C API 的薄封装模式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "src/cvcuda/include/cvcuda/OpFlip.h",
+            "src/cvcuda/include/cvcuda/OpFlip.hpp",
+            "src/cvcuda/include/cvcuda/Operator.h"
+          ],
+          "order": 1,
+          "practice_task": "写两个等价的最小程序（各约 30 行）：一个用 cvcuda::Flip C++ 类，一个只用 cvcudaFlipCreate/cvcudaFlipSubmit/cvcudaFlipDestroy C 函数，对同一张图做镜像翻转并保存，确认输出一致。",
+          "source_files": [
+            "src/cvcuda/include/cvcuda/OpFlip.h",
+            "src/cvcuda/include/cvcuda/OpFlip.hpp",
+            "src/cvcuda/include/cvcuda/Operator.h",
+            "src/cvcuda/include/cvcuda/IOperator.hpp"
+          ],
+          "title": "用 C++ 和 C API 直接调用算子",
+          "topic": "面向 C/C++ 用户讲解两套公开 API：每个算子都有 .h（C 接口+句柄）与 .hpp（RAII C++ 类）双份定义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-errors-and-symbol-versioning.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "解释 ProtectCall 如何把 C++ 异常翻译成 NVCVStatus 错误码",
+            "读懂 CVCUDA_DEFINE_API 的版本化导出机制",
+            "在 C 与 C++ 两侧分别编写正确的错误处理代码"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "src/nvcv/src/include/nvcv/Exception.hpp",
+            "src/nvcv/src/include/nvcv/Status.h",
+            "src/cvcuda/Operator.cpp"
+          ],
+          "order": 2,
+          "practice_task": "写 C 程序故意传入 NULL handle 或不支持的 dtype 调用 cvcudaFlipSubmit，打印返回的 NVCVStatus 并对照 Status.h 写出含义；再用 C++ 调用同一场景，捕获 nvcv::Exception 并打印 message。",
+          "source_files": [
+            "src/nvcv/src/include/nvcv/Status.h",
+            "src/nvcv/src/include/nvcv/Exception.hpp",
+            "src/cvcuda/Operator.cpp",
+            "src/cvcuda/priv/SymbolVersioning.hpp",
+            "src/nvcv/src/include/nvcv/Version.h"
+          ],
+          "title": "错误处理与符号版本：Status、Exception 与 ABI 兼容",
+          "topic": "讲解 nvcv 的 Status/异常体系、ProtectCall 边界翻译，以及 SymbolVersioning 如何保证跨版本 ABI 兼容。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l3-allocators.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "说明 AllocatorManager/DefaultAllocator 如何服务 Tensor 与 ImageBatch 分配",
+            "实现一个简单的自定义 C++ Allocator 并注入使用",
+            "解释 Requirements 在分配协商中的作用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "src/nvcv/src/priv/DefaultAllocator.hpp",
+            "src/nvcv/src/include/nvcv/alloc/Allocator.hpp",
+            "src/nvcv/src/priv/Allocator.cpp"
+          ],
+          "order": 3,
+          "practice_task": "实现一个统计分配次数与字节数的 C++ Allocator（参考 nvcv/alloc/Allocator.hpp 接口），创建张量并触发分配，打印统计；然后回答：python 对象缓存与这层 allocator 是什么关系（提示：结合 u4-l2）。",
+          "source_files": [
+            "src/nvcv/src/include/nvcv/alloc/Allocator.hpp",
+            "src/nvcv/src/include/nvcv/alloc/Requirements.hpp",
+            "src/nvcv/src/priv/DefaultAllocator.hpp",
+            "src/nvcv/src/priv/Allocator.cpp"
+          ],
+          "title": "内存分配器：nvcv alloc 与自定义 Allocator",
+          "topic": "讲解 nvcv 的分配器抽象：CoreResource/Allocator 接口、默认分配器与 Requirements 协商。"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "level": "advanced",
+      "order": 7,
+      "title": "质量保障：测试、基准与性能分析",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u7-l1-cpp-system-tests.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "说明 system 测试如何用 CPU 参考实现校验 GPU 结果",
+            "掌握 run_tests.sh 的套件过滤方式",
+            "为某算子补充一个 dtype 维度的新用例"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "tests/cvcuda/system/TestOpFlip.cpp",
+            "tests/README.md"
+          ],
+          "order": 1,
+          "practice_task": "编译并运行 `run_tests.sh cvcuda,cpp` 中的 Flip 用例；读懂 TestOpFlip.cpp 的参数化循环后，为它增加一个未覆盖的 dtype/layout 组合并验证通过（按仓库规范补 SPDX 头）。",
+          "source_files": [
+            "tests/README.md",
+            "tests/cvcuda/system/TestOpFlip.cpp",
+            "tests/cvcuda/system/FlipUtils.cpp",
+            "tests/run_tests.sh.in"
+          ],
+          "title": "C++ 系统测试：以 CPU 黄金参考校验 GPU 算子",
+          "topic": "讲解 tests/cvcuda/system 的参数化测试框架：gold 参考实现、算子包装、TestAPI 模板生成。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l2-python-tests.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "说明 python 测试如何借助 cvcuda.internal 做白盒校验",
+            "运行单个 pytest 文件并读懂其断言策略",
+            "为 flip 写一个变长批路径的 python 测试"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "tests/cvcuda/python/test_opflip.py",
+            "tests/cvcuda/python/cvcuda_tools.py"
+          ],
+          "order": 2,
+          "practice_task": "运行 `pytest tests/cvcuda/python/test_opflip.py`；然后模仿其结构为 var-shape flip（ImageBatchVarShape 输入）写一个新测试函数，用 numpy 构造已知输入并断言翻转正确。",
+          "source_files": [
+            "tests/cvcuda/python/test_opflip.py",
+            "tests/cvcuda/python/cvcuda_tools.py",
+            "tests/cvcuda/python/test_cache.py",
+            "python/mod_cvcuda/Main.cpp"
+          ],
+          "title": "Python 测试：pytest 与 internal 白盒子模块",
+          "topic": "讲解 tests/cvcuda/python 的组织：每个算子一个 test_op*.py，以及 cvcuda._test/internal 子模块的白盒测试设计。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l3-benchmarks.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "运行 python 与 C++ 两套基准并解读输出指标",
+            "解释 bench/config 共享配置与 WarmupPolicy 的作用",
+            "用 compare_to_baseline.py 做性能回归对比"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "bench/README.md",
+            "bench/python/ops",
+            "bench/config"
+          ],
+          "order": 3,
+          "practice_task": "运行 python 基准 bench_resize.py（或任选算子），记录不同 batch/尺寸下的吞吐；再用 compare_to_baseline.py 把两次运行结果做对比，写一段结论说明性能是否稳定。",
+          "source_files": [
+            "bench/README.md",
+            "bench/python/ops/bench_resize.py",
+            "bench/python/perf_utils.py",
+            "bench/cpp/WarmupPolicy.hpp",
+            "bench/compare_to_baseline.py"
+          ],
+          "title": "基准测试：nvbench C++ 基准与 Python 基准",
+          "topic": "讲解 bench 目录的双语言基准体系、共享配置与基线对比工具。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "filename": "u7-l4-nvtx-and-profiling.md",
+          "id": "u7-l4",
+          "learning_goals": [
+            "用 Nsight Systems 捕获并查看 CV-CUDA 的 NVTX 范围",
+            "解释 NvtxTrace 包装器如何给每个 python 算子自动打点",
+            "通过时间线找出管线中的空闲段与串行瓶颈"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "src/cvcuda/priv/Nvtx.hpp",
+            "python/mod_cvcuda/NvtxRange.hpp",
+            "tests/cvcuda/nvtx_probe/NvtxProbe.cpp"
+          ],
+          "order": 4,
+          "practice_task": "用 nsys profile 运行 hello_world.py，在时间线中找到 `cvcuda::Flip` 或 `cvcuda.flip` 的 NVTX 区间；统计解码、resize、gaussian 各占的比例，并指出一处可并行化的串行等待。",
+          "source_files": [
+            "src/cvcuda/priv/Nvtx.hpp",
+            "python/mod_cvcuda/NvtxRange.hpp",
+            "tests/cvcuda/python/test_nvtx_markers.py",
+            "docs/sphinx/perf_benchmark.rst"
+          ],
+          "title": "NVTX 埋点与性能分析",
+          "topic": "讲解 CV-CUDA 内置的 NVTX 埋点体系（C++ CVCUDA_NVTX_RANGE 与 python NvtxTrace）以及如何配合 Nsight Systems 定位瓶颈。"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "level": "advanced",
+      "order": 8,
+      "title": "二次开发：新增算子与工具链",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1",
+            "u7-l1"
+          ],
+          "filename": "u8-l1-make-new-operator.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "列出新增算子的完整清单（规格→脚手架→实现→测试→基准→文档）",
+            "运行 tools/mkop/mkop.sh 生成骨架并说明每个生成文件的用途",
+            "理解 make_op.py 各 phase 门禁的意义"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            ".agents/guidance/MAKE_OP_GUIDELINES.md",
+            "tools/mkop/mkop.sh",
+            "tools/make_op.py"
+          ],
+          "order": 1,
+          "practice_task": "以一个假想算子 `invert3`（把三通道图逐通道取反）为例走完规格设计：写出语义定义、参考 oracle（OpenCV/NumPy 等价实现）、支持矩阵（dtype/layout/变长批）；然后运行 mkop.sh --bare 生成骨架并浏览生成物，不必实现。",
+          "source_files": [
+            ".agents/guidance/MAKE_OP_GUIDELINES.md",
+            "docs/sphinx/advanced/make_operator.rst",
+            "tools/mkop/mkop.sh",
+            "tools/make_op.py",
+            "tools/mkop/CppTest.cpp"
+          ],
+          "title": "新增一个算子：mkop 脚手架与完成门禁",
+          "topic": "讲解官方新增算子流程：spec 审批 → tools/mkop 脚手架 → tools/make_op.py 门禁，以及模板文件（Bench.cpp/CppTest.cpp/PythonTest.py 等）如何生成全套骨架。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "filename": "u8-l2-python-binding-anatomy.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "解释 Main.cpp 的导出顺序约束（基类先于派生类）",
+            "仿照 OpFlip.cpp 写出 allocating/_into/变长批三类入口",
+            "理解 CreateOperator 与 NvtxTrace 包装的作用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "python/mod_cvcuda/Main.cpp",
+            "python/mod_cvcuda/operators/OpFlip.cpp",
+            "python/common/PyUtil.hpp"
+          ],
+          "order": 2,
+          "practice_task": "为假想算子 invert3 编写 python 绑定文件 OpInvert3.cpp：实现 Invert3/Invert3Into/Invert3VarShape 三个函数并导出带 docstring 的 m.def；将其加入 Operators.hpp 的包含与导出列表（只写代码，不需编译通过整个仓库，可用 cmake --preset dev-py 尝试）。",
+          "source_files": [
+            "python/mod_cvcuda/Main.cpp",
+            "python/mod_cvcuda/operators/Operators.hpp",
+            "python/mod_cvcuda/operators/OpFlip.cpp",
+            "python/common/PyUtil.hpp"
+          ],
+          "title": "Python 绑定解剖：如何把一个 C++ 算子暴露给 python",
+          "topic": "以 OpFlip 的 pybind11 封装为模板，讲解 Main.cpp 导出注册、ResourceGuard 锁模式与函数包装。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "filename": "u8-l3-workspace-and-stream-cache.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "解释 WorkspaceMem/Workspace 抽象与三种内存类别（Host/Pinned/Cuda）",
+            "描述 WorkspaceCache 如何按 stream 隔离并用 Event 回收安全内存",
+            "说明 PerStreamCache/SimpleCache/StreamId 各自的职责"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "python/mod_cvcuda/WorkspaceCache.cpp",
+            "src/cvcuda/util/PerStreamCache.hpp",
+            "src/cvcuda/util/SimpleCache.hpp"
+          ],
+          "order": 3,
+          "practice_task": "画出让两次连续调用同一算子共享 workspace 的时序图（含 Event 等待与归还）；然后回答：如果把回收事件从输出流挪到输入流会产生什么风险，写清理由。",
+          "source_files": [
+            "src/cvcuda/include/cvcuda/Workspace.hpp",
+            "python/mod_cvcuda/WorkspaceCache.cpp",
+            "src/cvcuda/util/PerStreamCache.hpp",
+            "src/cvcuda/util/SimpleCache.hpp",
+            "src/cvcuda/util/Event.hpp",
+            "src/cvcuda/util/StreamId.hpp"
+          ],
+          "title": "Workspace 与 per-stream 缓存：临时内存的生命周期",
+          "topic": "讲解算子临时缓冲的复用机制：cvcuda::Workspace、python 侧 WorkspaceCache 以及 C++ 侧 PerStreamCache/SimpleCache/Event 的协作。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1",
+            "u7-l3"
+          ],
+          "filename": "u8-l4-op-toolchain.md",
+          "id": "u8-l4",
+          "learning_goals": [
+            "运行 review_op.py/optimize_op.py/refactor_op.py 并解读输出",
+            "解释 preflight/evidence 等阶段门禁如何防止性能回归",
+            "按优化指南的纪律（先基准后改码）改进一个算子"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "tools/review_op.py",
+            "tools/optimize_op.py",
+            ".agents/guidance/OPTIMIZATION_GUIDELINES.md"
+          ],
+          "order": 4,
+          "practice_task": "对 Flip 算子运行 `python3 tools/review_op.py Flip`（及 --domain test/bench/docs），收集所有 MANUAL/GAP 输出并逐条注明现状；再运行 optimize_op.py Flip --phase preflight，总结它检查了哪些前置条件。",
+          "source_files": [
+            "tools/review_op.py",
+            "tools/optimize_op.py",
+            "tools/refactor_op.py",
+            ".agents/guidance/OPTIMIZATION_GUIDELINES.md",
+            ".agents/guidance/REVIEW_OP_GUIDELINES.md"
+          ],
+          "title": "算子工程工具链：review-op、optimize-op、refactor-op",
+          "topic": "讲解三个确定性检查器如何对单个算子做覆盖评审、优化证据门禁与冗余重构评估。"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "level": "intermediate",
+      "order": 9,
+      "title": "端到端应用与生态集成",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4",
+            "u4-l1"
+          ],
+          "filename": "u9-l1-classification-app.md",
+          "id": "u9-l1",
+          "learning_goals": [
+            "描述分类预处理管线的解码→变长批→融合预处理→推理→后处理结构",
+            "识别示例中的 zero-copy 与分批技巧",
+            "把示例改造成自己的数据源"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "samples/applications/classification.py",
+            "samples/common.py"
+          ],
+          "order": 1,
+          "practice_task": "运行 classification.py 后，把它的预处理部分（resize+normalize 风格）替换成你在 u3-l4 写的融合算子版本，对比两版的吞吐与精度，记录结论。",
+          "source_files": [
+            "samples/applications/classification.py",
+            "samples/common.py",
+            "samples/applications/hello_world.py"
+          ],
+          "title": "端到端应用一：图像分类管线",
+          "topic": "剖析官方分类示例：多图解码、批处理、预处理、模型推理与后处理如何全程留在 GPU。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "filename": "u9-l2-detection-segmentation-apps.md",
+          "id": "u9-l2",
+          "learning_goals": [
+            "描述检测框处理与实例分割掩码处理用到的算子组合",
+            "解释示例中 letterbox/pad/坐标变换的实现方式",
+            "为检测结果叠加可视化输出"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "samples/applications/object_detection.py",
+            "samples/applications/segmentation.py"
+          ],
+          "order": 2,
+          "practice_task": "运行 object_detection.py 与 segmentation.py；然后参照 u5-l4 的 OSD 知识，把检测框用 cvcuda.osd 画到输出帧上（替代原示例的可视化方式），保存对比图。",
+          "source_files": [
+            "samples/applications/object_detection.py",
+            "samples/applications/segmentation.py",
+            "samples/common.py"
+          ],
+          "title": "端到端应用二：目标检测与实例分割管线",
+          "topic": "对比两个更复杂的推理应用，重点关注检测框/掩码与几何算子、OSD 的组合使用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4",
+            "u9-l1"
+          ],
+          "filename": "u9-l3-ecosystem-interop.md",
+          "id": "u9-l3",
+          "learning_goals": [
+            "说明各框架（nvimgcodec/pycuda/cuda-python/pynvvideocodec）与 cvcuda 交换显存的接口",
+            "排查常见的互操作失败（设备不符、stride 不连续）",
+            "组装一条解码→处理→编码的最小全 GPU 流水线"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "samples/interoperability/nvimgcodec_interop.py",
+            "samples/interoperability/pycuda_interop.py",
+            "samples/interoperability/cuda_python_interop_1.py"
+          ],
+          "order": 3,
+          "practice_task": "参照 nvimgcodec_interop.py 与 pynvvideocodec_interop.py，写出『nvimgcodec 解码 → cvcuda.resize+cvtcolor → 保存』的最小脚本并跑通；再故意用 CPU 数组直接包装，记录报错信息并解释。",
+          "source_files": [
+            "samples/interoperability/nvimgcodec_interop.py",
+            "samples/interoperability/pycuda_interop.py",
+            "samples/interoperability/cuda_python_interop_1.py",
+            "samples/interoperability/pynvvideocodec_interop.py"
+          ],
+          "title": "生态互操作：编解码器、CUDA 框架与零拷贝集成",
+          "topic": "汇总 samples/interoperability 的 8 个示例：nvimgcodec、pycuda、cuda-python、pynvvideocodec 等如何与 CV-CUDA 协作。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l3",
+            "u8-l4"
+          ],
+          "filename": "u9-l4-architecture-recap.md",
+          "id": "u9-l4",
+          "learning_goals": [
+            "复述 CV-CUDA 四层架构与每层的核心文件位置",
+            "为不同读者（使用者/集成者/贡献者）规划后续深入方向",
+            "总结性能与正确性方面的关键实践清单"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "README.md",
+            "src/cvcuda",
+            "src/nvcv",
+            "python/mod_cvcuda"
+          ],
+          "order": 4,
+          "practice_task": "综合全手册：写一份属于自己的『CV-CUDA 速查手册』，包含 10 条最易犯的错误（如忘记 stream 同步、变长批未预分配、缓存不命中等）及定位方法；并选出 3 个你最想深入阅读的源码文件说明理由。",
+          "source_files": [
+            "README.md",
+            "AGENTS.md",
+            "docs/sphinx/advanced/operator_variants.rst",
+            "docs/sphinx/advanced/object_cache.rst"
+          ],
+          "title": "总结与进阶路线：架构取舍回顾",
+          "topic": "回顾整套手册的知识地图，梳理 CV-CUDA 的设计取舍（C ABI 稳定性、变长批抽象、python 缓存策略），并给出后续学习路径。"
+        }
+      ]
+    }
+  ]
+}
