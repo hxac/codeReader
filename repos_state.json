@@ -58781,7 +58781,7 @@
     },
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-29T11:02:32Z"
+      "last_run_at": "2026-08-29T15:00:42Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
@@ -62452,7 +62452,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"1198f43c-87e5-4025-bc3f-7794"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"2eb9e9d4-c42f-4c78-a784-99b9"
         },
         "u8-l3": {
           "status": "pending",
@@ -62486,7 +62486,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/rayon-rs/rayon/rayon-tutorial",
       "last_head": "ee0a00bdb1ab039e178a215ad5712fb7fa58e58f",
-      "last_run_at": "2026-08-29T11:02:32Z",
+      "last_run_at": "2026-08-29T15:00:42Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "dragostis/chili": {
@@ -62749,7 +62749,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"30b8e074-a9b8-4dcd-a2e6-4908"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"2e3688c1-ea1d-4424-aa08-2941"
         },
         "u5-l4": {
           "status": "pending",
@@ -62763,7 +62763,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/ttrftech/NanoVNA/NanoVNA-tutorial",
       "last_head": "d02db797a7032822137882f8f8a6c4ec21f064cd",
-      "last_run_at": "2026-08-29T11:02:32Z",
+      "last_run_at": "2026-08-29T15:00:42Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "ttrftech/CentSDR": {
@@ -62837,7 +62837,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"0f04cb84-d743-4c60-9c6b-9665"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"2049627a-3dac-4487-938f-f153"
         },
         "u3-l3": {
           "status": "pending",
@@ -62911,7 +62911,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/ttrftech/CentSDR/CentSDR-tutorial",
       "last_head": "e4079566e42790497f004e16f9ebf68c83d024a0",
-      "last_run_at": "2026-08-29T11:02:32Z",
+      "last_run_at": "2026-08-29T15:00:42Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "jankae/LibreVNA": {},
