@@ -1,0 +1,337 @@
+# 综合实战：向仓库添加一本新书
+
+## 1. 本讲目标
+
+本讲是整个学习手册的收官实战。前面十讲里我们分别拆解过 xtask 构建引擎（u2-l3）、落地页生成（u2-l4）、章节写作范式（u3-l2）、Pages 流水线（u4-l1）和 Docker 构建（u4-l2），本讲把这些知识串成一条完整的端到端链路：
+
+1. 掌握一本新书在磁盘上的最小完整骨架（目录、`book.toml`、`SUMMARY.md`、章节、mermaid 资产）。
+2. 理解向 xtask 的 `BOOKS` 常量注册一个元组后，构建系统为什么会"自动"收录这本书。
+3. 能准确解释为什么 GitHub Pages 流水线与 Docker 流水线**一行都不用改**就能部署新书。
+4. 知道这条自动链路的已知盲区（缺书仍退出 0、冒烟测试只盯 async-book），以及人读侧（README 表格）需要手动同步的原因。
+
+## 2. 前置知识
+
+本讲直接建立在前几讲已建立的事实之上，开始前请确认你还记得：
+
+- **BOOKS 是唯一注册表**（u1-l2 / u2-l3）：构建循环遍历的是 `xtask` 里的 `BOOKS` 常量而非扫描磁盘；slug 身兼磁盘目录名、输出目录名与落地页链接三职。
+- **落地页不检查目录是否存在**（u2-l4）：`write_landing_page` 对四元组全字段消费、不做目录校验，所以"先注册后建目录"会产出死链卡片。
+- **一本书的配置层**（u1-l4）：`book.toml` 中 `additional-js` 的路径相对**书根目录**解析；`[preprocessor.mermaid]` 使 `mdbook-mermaid` 成为硬依赖；批量构建时 `--dest-dir` 会覆盖单书的 `build-dir`。
+- **章节写作范式**（u3-l2）：难度 emoji → What you'll learn 目标框 → Mermaid 图 + 自包含 Rust 示例 → Key Takeaways。
+- **两条部署流水线**（u4-l1 / u4-l2）：Pages 走 `cargo xtask deploy` 产出 `docs/` 上传 artifact；Docker 走 `cargo xtask build` 产出 `site/` 后由 runtime 阶段整目录拷走。
+
+一个贯穿本讲的架构概念——**加法式扩展（additive extension）**：好的扩展点应该让"新增一个单元"表现为*纯增加数据*（新建目录 + 注册一条数据），而不是*修改逻辑*（改循环、改 CI 脚本、改 Dockerfile）。RustTraining 的书库正是这种设计，本讲就是要亲手验证它。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 | 本讲关注点 |
+|---|---|---|
+| `xtask/src/main.rs` | 构建工具全部源码 | `BOOKS` 常量、`build_to` 遍历循环、`write_landing_page` 卡片生成 |
+| `async-book/book.toml` | 书籍配置模板标本 | 新书 `book.toml` 要抄哪些节 |
+| `async-book/src/SUMMARY.md` | 章节目录标本 | SUMMARY 语法与文件引用规则 |
+| `async-book/mermaid-init.js` | mermaid 主题初始化脚本 | 两个必须复制的资产之一的行为 |
+| `.github/workflows/pages.yml` | Pages 部署流水线 | 为什么不含任何书名 |
+| `docker/Dockerfile` | 多阶段镜像构建 | `COPY . .` 如何把新书带入镜像 |
+| `.gitignore` | 忽略规则 | `**/book/`、`site/`、`docs/` 不入库 |
+
+## 4. 核心概念与源码讲解
+
+### 4.1 新书目录骨架
+
+#### 4.1.1 概念说明
+
+对 mdBook 而言，"一本书"就是**一个含 `book.toml` 的目录**。`book.toml` 里 `src = "src"` 指向章节源目录，`src/SUMMARY.md` 是章节清单——mdBook 只构建 SUMMARY 中列出的文件，未列出的 Markdown 不会进入产物（u1-l4 已验证过导航完全由 SUMMARY 顺序决定）。
+
+本仓库七本书共用同一套骨架。观察磁盘上任意一本书（如 async-book），结构都是：
+
+```text
+<slug>/
+├── book.toml          # 配置：标题、输出目录、主题、playground、mermaid
+├── mermaid.min.js     # mermaid 库本体（约 2.6 MB，vendored）
+├── mermaid-init.js    # 主题检测与 mermaid.initialize 的启动脚本
+└── src/
+    ├── SUMMARY.md     # 章节清单（唯一的目录真源）
+    ├── ch00-introduction.md
+    ├── ch01-....md
+    └── ...
+```
+
+因此一本**新书的最小骨架**只需要前三层中的两项——`book.toml` + `src/SUMMARY.md` + 若干章节文件；两个 mermaid 资产只有在你的书里要画图时才必须复制（见 4.2）。
+
+还有一个容易忽略的细节：仓库的 `.gitignore` 已经替你处理了构建残留——[.gitignore:L1-L2](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/.gitignore#L1-L2) 忽略所有书目录下默认的 `book/` 输出（`**/book/`），[.gitignore:L4-L7](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/.gitignore#L4-L7) 忽略 xtask 的 `site/`、`docs/` 与 `target/`。也就是说：你在书目录里裸跑 `mdbook build` 产生的 `book/` 目录不会被误提交。
+
+#### 4.1.2 核心流程
+
+新建骨架的步骤：
+
+1. 在仓库根创建 `<slug>/` 目录——**slug 即目录名**，它将成为 URL 路径段（`https://…/mini-book/`）。
+2. 创建 `<slug>/book.toml`（4.2 给出模板）。
+3. 创建 `<slug>/src/SUMMARY.md` 与章节 Markdown 文件。
+4. 此时可以先在书目录内裸跑 `mdbook build` / `mdbook serve --open` 做单书自测——这一步完全不需要 xtask，产物落在被 gitignore 的 `book/`。
+5. 骨架验证通过后再进入 4.3 的 BOOKS 注册。
+
+#### 4.1.3 源码精读
+
+`src = "src"` 与 `build-dir = "book"` 这两个约定定义了骨架的形状：
+
+- [async-book/book.toml:L1-L8](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/async-book/book.toml#L1-L8) —— `[book]` 节声明标题、作者与源目录 `src = "src"`；`[build]` 节的 `build-dir = "book"` 是单书构建的默认输出，批量构建时被 xtask 的 `--dest-dir` 覆盖（u2-l3）。
+
+SUMMARY 的语法要点（以 async-book 为标本）：
+
+- [async-book/src/SUMMARY.md:L3-L5](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/async-book/src/SUMMARY.md#L3-L5) —— `[Introduction](ch00-introduction.md)` 是无编号前缀章；`---` 分隔线之后才是编号区。
+- [async-book/src/SUMMARY.md:L7-L13](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/async-book/src/SUMMARY.md#L7-L13) —— `# Part I: …` 是分部标题（不可点击）；`- [1. …](ch01-….md)` 列表条目按出现顺序获得导航位置，括号里的路径相对 `src/` 解析。
+
+#### 4.1.4 代码实践
+
+1. **实践目标**：不碰 xtask，先让一本"孤儿书"独立成立。
+2. **操作步骤**：
+   ```bash
+   mkdir -p mini-book/src
+   # 按 4.2 的模板写 mini-book/book.toml（可先去掉 mermaid 相关两行）
+   # 写 mini-book/src/SUMMARY.md，列出 2 个章节
+   # 写 mini-book/src/ch01-….md、ch02-….md
+   cd mini-book && mdbook serve --open
+   ```
+3. **观察现象**：浏览器自动打开 `http://localhost:3001`（3000 被 xtask serve 常用，mdbook 会自动顺延端口，终端会打印实际端口）；侧边栏出现你 SUMMARY 里的章节。
+4. **预期结果**：单书可读、可翻页；此时落地页（u2-l4 生成的 `site/index.html`）里**没有**这本书的卡片——因为它尚未注册。此步结果依赖本地 mdbook 安装，待本地验证。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：SUMMARY 里写了一个 `ch99-typo.md` 但磁盘上没有这个文件，构建会发生什么？
+**答案**：mdbook 构建会因找不到章节源文件而报错失败。SUMMARY 是章节清单的真源，条目与文件必须一一对应；这也是为什么改章节文件名时必须同步改 SUMMARY。
+
+**练习 2**：为什么新书目录名（slug）最好不要包含大写字母、空格或下划线？
+**答案**：slug 会同时成为输出目录名与落地页 `href`（`{slug}/`，见 4.3.3），也就是线上 URL 路径段。小写连字符是 URL 的惯例：避免大小写敏感的服务器（Linux 文件系统、部分静态服务器）上 `Mini-Book/` 与 `mini-book/` 解析不一致，也避免 URL 编码空格成 `%20`。仓库现有七个 slug 全部是小写加连字符。
+
+### 4.2 book.toml 与 mermaid 资产
+
+#### 4.2.1 概念说明
+
+七本书的 `book.toml` 是同一模板，仅 `title` 不同（u1-l4 的结论）。这个模板里有三处配置决定了"抄模板"时不能漏：
+
+1. `[output.html]` 的 `additional-js = ["mermaid.min.js", "mermaid-init.js"]`——路径相对**书根**解析，意味着这两个 JS 文件必须躺在每本书自己的根目录里（所以每个书目录都有一份 2.6 MB 的 `mermaid.min.js` 拷贝）。
+2. `[preprocessor.mermaid]`——声明构建期预处理器命令为 `mdbook-mermaid`，使它成为硬依赖：装了配置却没装工具，构建直接失败。
+3. `[output.html.playground]`——`editable` 与 `line-numbers` 让普通 `rust` 代码块获得运行/编辑按钮（u3-l2 讲过三档代码块的区别）。
+
+两个资产各司其职：
+
+- `mermaid.min.js`：mermaid 图表库的压缩发行版，负责在**浏览器端**把构建期被预处理器改写过的图表文本编译成 SVG（两阶段渲染，u3-l2）。
+- `mermaid-init.js`：一段约 40 行的启动脚本，读当前 mdBook 主题并据此初始化 mermaid。
+
+#### 4.2.2 核心流程
+
+准备配置与资产的流程：
+
+```text
+cp async-book/mermaid.min.js   mini-book/
+cp async-book/mermaid-init.js  mini-book/
+# 然后编写 mini-book/book.toml（抄模板改 title）
+```
+
+`mermaid-init.js` 的运行逻辑（配合下面的源码看）：
+
+```text
+读取 <html> 的 class → 命中 ayu/navy/coal 之一？
+  ├─ 是 → mermaid.initialize(theme: "dark")
+  └─ 否 → mermaid.initialize(theme: "default")
+给主题切换按钮挂 click 监听
+  └─ 主题明暗翻转时 window.location.reload()  →  强制 mermaid 按新主题重绘
+```
+
+#### 4.2.3 源码精读
+
+新书 `book.toml` 的模板来源——[async-book/book.toml:L10-L21](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/async-book/book.toml#L10-L21)：
+`[output.html]` 声明仓库地址、明暗主题与两个 additional-js；`[preprocessor.mermaid]` 把 `mdbook-mermaid` 注册为预处理器；`[output.html.playground]` 打开可编辑与行号。改 `title` 后即可整体照抄。
+
+主题检测脚本的入口——[async-book/mermaid-init.js:L5-L20](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/async-book/mermaid-init.js#L5-L20)：
+用 IIFE（立即调用的函数表达式）遍历 `<html>` 元素的 class 列表，命中暗色主题集合 `['ayu', 'navy', 'coal']` 则选择 mermaid 的 `dark` 主题，否则用 `default`，最后 `mermaid.initialize({ startOnLoad: true, theme })` 启动渲染。你的书里凡是写了 ```` ```mermaid ```` 代码块，就同时依赖这份脚本和 4.2.1 的预处理器。
+
+主题切换时强制刷新——[async-book/mermaid-init.js:L22-L39](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/async-book/mermaid-init.js#L22-L39)：
+注释直言"让 mermaid 按新主题重绘的最简单办法就是刷新页面"，于是给明暗两组主题按钮各挂监听，跨越明暗边界时 `window.location.reload()`。这是简洁性与体验的典型取舍。
+
+#### 4.2.4 代码实践
+
+1. **实践目标**：体会 `additional-js` 与资产的绑定关系。
+2. **操作步骤**：先写一份**不含** `additional-js` 与 `[preprocessor.mermaid]` 两项的 `book.toml`，在 `mini-book/` 跑 `mdbook build`；然后加上这两项但**故意不复制** `mermaid.min.js`，再跑一次；最后复制两个资产文件跑第三次。
+3. **观察现象**：第二次构建（或打开产物页面）时，页面控制台报 `mermaid is not defined` / `mermaid-init.js 404` 一类错误；有 mermaid 代码块时预处理器先在构建期报错。
+4. **预期结果**：第三次构建成功且图表渲染。结论：`additional-js` 声明的文件路径**不会**被自动创建或拷贝，资产必须随书携带。涉及本地构建行为，待本地验证。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么仓库选择把 2.6 MB 的 `mermaid.min.js` 复制七份（每书一份），而不是放一处共享？
+**答案**：因为 `additional-js` 相对**书根**解析，而批量构建时每本书是一个独立的 mdBook 实例、独立输出到 `site/<slug>/`，mdBook 不会跨书共享资源。每书自包含换来的是"目录可整体拷走、构建互不干扰"的简单性；代价是仓库体积与同步成本（升级 mermaid 要改多处）。这是"自包含 vs 去重"的取舍，而非疏忽。
+
+**练习 2**：如果新书完全不打算画图，可以省掉哪些东西？
+**答案**：可以省掉两个资产文件的复制，并从 `book.toml` 删去 `additional-js` 行与整个 `[preprocessor.mermaid]` 节。这样 `mdbook-mermaid` 也不再是构建硬依赖。但若要与仓库范式保持一致（u3-l2：章节标配 mermaid 图），建议照抄完整模板。
+
+### 4.3 BOOKS 注册
+
+#### 4.3.1 概念说明
+
+骨架就绪后，唯一的"代码改动"发生在一处：向 `BOOKS` 常量追加一个四元组。`BOOKS` 是机器侧的单一数据源（u2-l4），`(slug, title, description, category)` 四个字段各有一个明确的消费去向：
+
+| 字段 | 消费方 | 效果 |
+|---|---|---|
+| `slug` | `build_to` 循环 | 磁盘目录名 = 输出目录名 = 卡片 href |
+| `title` / `description` | `write_landing_page` | 卡片标题与描述文案 |
+| `category` | `category_label` + CSS 类 `cat-{cat}` | 卡片药丸标签与配色竖条 |
+
+两个方向性要点（承接 u2-l4 的结论）：
+
+- **先建目录、后注册**：构建循环对缺失目录是"跳过并告警"，但落地页**不检查目录**，死链卡片照样生成且退出码为 0。顺序反了会得到一个点进去 404 的卡片。
+- **元组在 `BOOKS` 里的顺序**就是落地页卡片顺序（也是构建顺序）。新书追加在哪个位置，卡片就出现在哪。
+
+`category` 强烈建议**复用现有五类**之一（`bridge` / `deep-dive` / `advanced` / `expert` / `practices`）。原因在 u2-l4 分析过：类别字符串走两条互不知晓的通路——`category_label` 的 match 与 CSS 类名 `cat-{cat}`。全新类别会落入 `_ => cat` 兜底（标签直接显示原始 slug），CSS 侧也没有对应 `.cat-*` 规则使 `--stripe` 无定义，药丸与竖条失去配色。新增类别需要多处同步，是典型的"一义多源"维护点。
+
+#### 4.3.2 核心流程
+
+```text
+编辑 xtask/src/main.rs
+  └─ BOOKS 数组末尾追加 ("mini-book", "My Mini Book", "一句话描述", "practices")
+重新 cargo xtask build
+  ├─ build_to 遍历 BOOKS → 发现 mini-book/ 是目录 → mdbook build --dest-dir site/mini-book
+  └─ write_landing_page 遍历 BOOKS → 生成第八张卡片，href="mini-book/"
+site/index.html 出现新卡片 → 点击 → 进入新书
+```
+
+#### 4.3.3 源码精读
+
+注册表本体——[xtask/src/main.rs:L8-L52](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/xtask/src/main.rs#L8-L52)：
+`const BOOKS: &[(&str, &str, &str, &str)]` 按注释 `/// (slug, title, description, category)` 列出七本书。向这里追加一个同形状的元组，就是注册动作的全部。
+
+构建侧如何消费 slug——[xtask/src/main.rs:L140-L152](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/xtask/src/main.rs#L140-L152)：
+循环 `for &(slug, _, _, _) in BOOKS` 只解构第一个字段；`root.join(slug)` 得到书目录，`is_dir()` 不通过则跳过告警；通过则以 `--dest-dir` 把产物定向到 `site/<slug>/`。注意循环里没有任何书名硬编码——这就是"新书零逻辑改动"的第一处证据。
+
+落地页如何消费全部四字段——[xtask/src/main.rs:L182-L194](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/xtask/src/main.rs#L182-L194)：
+`BOOKS.iter().map(|&(slug, title, desc, cat)| …)` 用 `format!` 生成每张卡片的 HTML 片段：`href="{slug}/"`、标题 `{title}`、`cat-{cat}` 类名与 `{label}` 药丸；片段收集后 `join("\n")` 拼成 `{cards}` 注入整页模板。同样是纯数据驱动，没有分支需要为新书修改。
+
+类别标签的映射与兜底——[xtask/src/main.rs:L170-L179](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/xtask/src/main.rs#L170-L179)：
+五个已知类别各映射一个人类可读标签，`_ => cat` 把未知类别原样透传——这就是 4.3.1 建议复用现有类别的源码依据。
+
+#### 4.3.4 代码实践
+
+1. **实践目标**：完成注册闭环，亲眼看到"一个元组 = 一张卡片 + 一个输出目录"。
+2. **操作步骤**：在 `BOOKS` 最后一个元组（`engineering-book`，[xtask/src/main.rs:L46-L51](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/xtask/src/main.rs#L46-L51)）之后追加：
+   ```rust
+   (
+       "mini-book",
+       "My Mini Book",
+       "A capstone book added while learning the pipeline",
+       "practices",
+   ),
+   ```
+   （示例代码）然后 `cargo xtask build && cargo xtask serve`。
+3. **观察现象**：终端的逐书进度出现 `✓ mini-book` 一行，计数从 `7/7` 变为 `8/8`；打开 `http://localhost:3000`，网格里出现第八张卡片（practices 青色竖条）；点击进入新书目录页。
+4. **预期结果**：卡片、构建、阅读全部就绪。若卡片出现但点击 404，说明目录与 slug 不一致——回到 4.1 检查拼写。涉及本地运行，待本地验证。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：把 `category` 写成 `"tutorial"`（不存在的类别），落地页会怎样？
+**答案**：`category_label("tutorial")` 落入 `_ => cat` 分支，药丸直接显示小写原文 `tutorial` 而非大写化标签；同时 HTML 类名是 `cat-tutorial`，模板 CSS 只定义了五个 `.cat-*` 规则（[xtask/src/main.rs:L269-L274](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/xtask/src/main.rs#L269-L274)），没有规则命中则 `--stripe` 变量无定义，竖条与药丸失去配色。页面不会报错，只是视觉退化。
+
+**练习 2**：注册顺序影响什么、不影响什么？
+**答案**：影响落地页卡片排列顺序与逐书构建的打印顺序（两次都是按 `BOOKS` 的迭代顺序）；不影响输出目录结构（始终是 `site/<slug>/` 与 `docs/<slug>/`）、不影响 URL、也不影响书内导航（那由各书自己的 SUMMARY 决定）。
+
+**练习 3**：为什么说"先注册后建目录"比"先建目录后注册"更危险？
+**答案**：两种顺序下构建循环都会走到"目录缺失"分支（跳过 + 告警），差别在落地页：`write_landing_page` 不检查目录，先注册会生成一张指向 `mini-book/` 的死链卡片，且整个 `cargo xtask build` 以退出码 0 成功结束——问题被静默掩盖，直到用户点进去 404。
+
+### 4.4 全链路自动收录
+
+#### 4.4.1 概念说明
+
+这是本讲的核心论题：**为什么 CI 与 Docker 一行不改就能收录新书？**
+
+答案是三条设计决策的叠加：
+
+1. **单一构建入口**：本地、Pages、Docker 三条路径全部收敛到同一个 xtask 命令（`deploy` 或 `build`），而 xtask 只认 `BOOKS`。注册即收录，无需在任何流水线里再列一次书名。
+2. **Docker 的 `COPY . .`**：构建上下文是整个仓库根，新书目录天然随之进入镜像；builder 阶段跑的 `cargo run --release --package xtask -- build` 会在镜像内把新书构建进 `site/`。
+3. **deploy job 只消费字节**：Pages 的 deploy 阶段不做任何 checkout 与重建，只把 build 阶段上传的 `docs/` artifact 原样发布（u4-l1）。构建产物里有什么，线上就有什么。
+
+同时要诚实面对这条自动链路的**已知盲区**（前两讲分析过，收录新书时同样适用）：
+
+- `build_to` 对单书构建失败只打告警、退出码仍为 0（u4-l1）——你的新书哪怕构建失败，流水线照样绿色部署一个缺书站点。
+- Docker CI 的冒烟断言只点名 async-book（u4-l2）——新书是否真的进了镜像，没有任何断言守护。
+- 人读侧还有一份 README 书籍表格需要手动同步（u1-l1 的"元数据双源"）——机器自动了，文档不会。
+
+#### 4.4.2 核心流程
+
+新书注册后，三个环境里的完整链路：
+
+```text
+本地
+  cargo xtask build → site/mini-book/ + 落地页第八张卡片
+
+GitHub Pages（push 到 main 后）
+  pages.yml build job
+    ├─ cargo xtask deploy            # 遍历 BOOKS，产出 docs/mini-book/
+    ├─ upload-pages-artifact(./docs)  # 整个 docs/ 打包为 artifact
+  deploy job（needs: build，无 checkout）
+    └─ deploy-pages                   # 发布字节快照 → https://<user>.github.io/RustTraining/mini-book/
+
+Docker
+  docker build -f docker/Dockerfile .   # 构建上下文 = 仓库根
+    ├─ builder: COPY . .                # mini-book/ 随仓库进入镜像
+    │          cargo run --release --package xtask -- build   # site/mini-book/
+    └─ runtime: COPY --from=builder /build/site → nginx 文档根
+  容器内 nginx try_files 使 /mini-book（无扩展名链接）也能解析（u4-l3）
+```
+
+#### 4.4.3 源码精读
+
+Pages 构建步骤——[.github/workflows/pages.yml:L48-L54](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/.github/workflows/pages.yml#L48-L54)：
+`run: cargo xtask deploy` 是唯一的文档构建命令，与你在本地敲的完全相同（CI 与本地单一构建入口）；随后 `upload-pages-artifact` 把 `./docs` 整体上传。整个 workflow 文件里**没有出现任何一本书的名字**——这就是"新书零改动"的 YAML 侧证据。
+
+Docker 把仓库整体带入镜像——[docker/Dockerfile:L68-L78](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/docker/Dockerfile#L68-L78)：
+注释解释了 `COPY . .` 的原因——xtask 在编译期用 `CARGO_MANIFEST_DIR` 定位项目根，必须原位构建运行；随后 `cargo run --release --package xtask -- build` 产出 `site/`，紧跟 `test -f site/index.html` 构建期断言与 `find site … | wc -l` 打印收录书目数——你重新构建镜像时，这行 echo 会从 `7` 变成 `8`，是验证收录最直观的信号。
+
+产物整目录搬运——[docker/Dockerfile:L85-L88](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/docker/Dockerfile#L85-L88)：
+runtime 阶段从 nginx-unprivileged 基镜像出发，`COPY --from=builder --chown=nginx:nginx /build/site /usr/share/nginx/html` 把含新书的整个站点搬进文档根。runtime 不知道也不需要知道有几本书。
+
+#### 4.4.4 代码实践
+
+1. **实践目标**：用源码证据回答"为什么零改动"，并学会用镜像内 echo 验证收录。
+2. **操作步骤**：
+   - 在 pages.yml 与 Dockerfile 里全文搜索 `async-book`、`python-book` 等书名，记录命中处；
+   - 从仓库根运行 `docker build -f docker/Dockerfile -t rust-training:local .`，观察 builder 阶段末尾 `==> built N books` 的数字；
+   - `docker run -p 8080:8080 rust-training:local` 后 `curl -sI http://localhost:8080/mini-book/` 看状态码。
+3. **观察现象**：pages.yml 中书名零命中；Dockerfile 中书名仅可能出现在注释里，逻辑零命中；镜像构建 echo 显示 `==> built 8 books`；curl 返回 `200`（nginx 目录索引指向 `index.html`）。
+4. **预期结果**：三条证据共同支撑"注册即全链路收录"。Docker 构建耗时数分钟且依赖本地 Docker 环境，待本地验证。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：如果把新书只注册进 `BOOKS` 却忘了 commit 书目录（`.gitignore` 误伤或漏 add），CI 会怎样？
+**答案**：Pages 与 Docker 的构建循环都会走到 `✗ mini-book/ not found, skipping` 分支：Pages 照常上传缺书的 `docs/` 并绿色部署（退出码 0 掩盖问题）；Docker 的 `find site | wc -l` 会少计一本，但 `test -f site/index.html` 只查落地页、不查各书目录，镜像同样构建成功。唯一能发现的方式是看构建日志——这正是 4.4.1 列的盲区。
+
+**练习 2**：deploy job 为什么天然"收录"新书而不需要任何改动？
+**答案**：它 `needs: build` 之后只执行 `actions/deploy-pages`，全程无 checkout、无工具链，消费的是 build 阶段上传的 artifact 字节快照。新书的 HTML 早在 build 阶段就写进了 `docs/`，deploy 只是搬运字节——"收录"发生在上游，不发生在它这里。
+
+**练习 3**：想让 CI 在"某本书构建失败"时真的变红，最小改动应该加在哪里？
+**答案**：改 `build_to`（xtask/src/main.rs）：把失败计数（或跳过计数）累加，收尾时若 `ok != BOOKS.len()` 则 `std::process::exit(1)`。因为 Pages 与 Docker 都以退出码判断成败，改这一处即可让两条流水线同时获得该守护，这也是单一构建入口带来的杠杆——改一处，全链路生效。
+
+## 5. 综合实践
+
+把本讲四步串成一个完整任务（即规格中的 capstone 任务）：
+
+**任务**：向仓库添加一本真实可读的 `mini-book/`，并让它走完本地构建 → 落地页收录 → （可选）Docker 镜像收录的全链路。
+
+1. **建骨架**：`mkdir -p mini-book/src`，从 async-book 复制 `mermaid.min.js` 与 `mermaid-init.js` 到书根。
+2. **写配置**：照抄 [async-book/book.toml:L1-L21](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/async-book/book.toml#L1-L21) 模板，把 `title` 改成 `"My Mini Book"`，其余保持一致。
+3. **写内容**：`src/SUMMARY.md` 列出 2 章；两个章节文件按 u3-l2 的范式写——难度 emoji 标题、What you'll learn 目标框、一张 mermaid 图（如 `graph LR` 画一个小概念流程）、一个自包含可运行的 `rust` 代码块、Key Takeaways。
+4. **单书自测**：`cd mini-book && mdbook serve --open`，确认图表渲染、代码块可点运行后停止。
+5. **注册**：向 [xtask/src/main.rs:L8-L52](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/xtask/src/main.rs#L8-L52) 的 `BOOKS` 追加 `("mini-book", "My Mini Book", "<一句话描述>", "practices")`。
+6. **全站验证**：`cargo xtask build`（看到 `8/8 books built`）→ `cargo xtask serve` → 打开 `http://localhost:3000`，确认第八张卡片出现、能点进新书、图表与 playground 正常。
+7. **写一段说明**（本任务的书面交付物）：用你自己的话、引用 4.4.3 的三处源码证据，解释为什么 `pages.yml` 与 `Dockerfile` 一行未改，新书就出现在 Pages 站点与 Docker 镜像里；并指出这条链路的两处盲区。
+8. **（可选进阶）**：`docker build -f docker/Dockerfile -t rust-training:local .` 验证 `==> built 8 books`，再 `curl -sI http://localhost:8080/mini-book/` 确认 200。
+9. **收尾**：这是练习而非真实贡献，验证完可用 `cargo xtask clean` 清产物、还原 `BOOKS` 与目录。若想把它变成真实 PR，下一讲（u4-l5）的贡献流程还要求：同步 README 书籍表格、走 fork–branch–PR、签署 CLA。
+
+## 6. 本讲小结
+
+- 一本新书 = 一个含 `book.toml` + `src/SUMMARY.md` + 章节文件的目录；mermaid 的两个 JS 资产因 `additional-js` 相对书根解析而必须随书携带。
+- 唯一的"代码改动"是向 `BOOKS` 追加一个 `(slug, title, description, category)` 元组；构建循环只解构 slug，落地页消费全部四字段，全程纯数据驱动。
+- 顺序很重要：**先建目录再注册**，否则落地页生成不校验目录的死链卡片，且退出码 0 掩盖问题。
+- category 复用现有五类：`category_label` 的 `_ =>` 兜底与 CSS `cat-{cat}` 类名两条通路都依赖字符串精确匹配。
+- Pages 与 Docker 零改动的根源是三条设计决策：单一构建入口（都调 xtask）、Docker `COPY . .` 整仓带入、deploy job 只发布 artifact 字节快照。
+- 盲区依旧：单书失败退出码 0、Docker 冒烟只盯 async-book、README 人读表格需手动同步——把练习成果变成真实贡献时要逐一补齐。
+
+## 7. 下一步学习建议
+
+本讲完成了从内容到部署的全链路实战，下一讲 **u4-l5「质量守护与贡献流程」**是手册最后一讲：把本讲的 mini-book 练习升级为一次真实贡献——了解仓库现有的自动化质量防线及其盲区、走通 CLA 与 PR 流程、弄清 MIT（代码）与 CC-BY-4.0（文档）双许可证下你分别能怎样复用这些书籍内容。若想继续深挖技术侧，建议重读 [xtask/src/main.rs](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/xtask/src/main.rs) 中 4.4.5 练习 3 指出的失败静默问题，动手给 `build_to` 加上非零退出码，为这个文档工程补上最后一块质量拼图。
