@@ -1,10 +1,10 @@
 # HttpService：OpenAI 兼容 HTTP 服务
 
-> 本讲为 update 版本（对应 HEAD `b4338ab8`）。相对上一版的变化：#12157 把 embeddings 的 base64 解码助手从 openai.rs 收拢进 preprocessor.rs 并给协议类型加了 `add_special_tokens` 字段；#12562 给共享 usage 统计加入「后端总量取 max」语义；#13930 删除了 `extract_backend_error_if_present` 中 `BackendInvalidArgument` 字符串前缀恢复分支——带类型的终端错误改由预处理器 jail 旁路保留。本版新增 4.6（embeddings 字节传输）与 4.7（后端错误提取）两节，并刷新全部行号。
+> 本讲为 update 版本（对应 HEAD `d7f06b591`）。相对上一版（`b4338ab8`）只有两处代码变化：**#11385** 给 `/inference/v1/generate` 端点补齐了完整指标——generate.rs（+1150 行）新增 `GenerateMetricCollector`/`GenerateMetricLifecycle`，复用 metrics.rs 既有的 `InflightGuard`/`HttpQueueGuard`/`ResponseMetricCollector` 三件套，并把 `input_tokens`/`output_tokens`/`ttft_ms`/`avg_itl_ms`/`prefill_worker_id`/`decode_worker_id` 记上 `request_span`；**#13984** 让 `protocols/common.rs` 的 `FinishReason` 反序列化防御性接受裸 `"error"` 字符串（含 msgpack 形式），落回诊断消息。本版新增 4.8（generate 指标生命周期）与 4.9（FinishReason 宽容反序列化）两节，刷新 generate.rs 的全部行号与全篇永久链接；其余文件（service_v2.rs、openai.rs、metrics.rs、delta_common.rs、embeddings.rs、preprocessor.rs）本轮零改动，行号与上一版一致。更早的历史改动（#12157 embeddings 编解码收拢、#12562 usage 取 max、#13930 删除字符串前缀恢复）仍体现在 4.4/4.6/4.7 三节中。
 
 ## 1. 本讲目标
 
-上一讲（u4-l1）我们弄清了「引擎如何被装配起来」。本讲顺着装配链往下走一步，回答六个问题：
+上一讲（u4-l1）我们弄清了「引擎如何被装配起来」。本讲顺着装配链往下走一步，回答八个问题：
 
 1. 一条 HTTP 请求进入 frontend 之后，**在到达引擎之前**经历了什么？——路由匹配、就绪检查、并发记账、请求解析、指标打点，这条链全部在 `lib/llm/src/http/` 里。
 2. Dynamo 同时暴露 OpenAI、Anthropic、引擎原生 Generate 三类协议端点，它们**各自的处理套路差异**在哪里？
@@ -12,8 +12,10 @@
 4. `POST /v1/responses/input_tokens` 端点为什么**故意不做任何就绪检查**？它如何在不惊动任何 worker 的情况下估算输入 token 数？
 5. Embeddings 端点为什么在内部链路上传 **base64 字节**而不是 JSON 浮点数组？编解码现在住在哪个模块？
 6. #13930 之后，后端的**带类型错误**（如 `Backend(InvalidArgument)` → 400）是如何一路活着到达客户端的？为什么 HTTP 层不再需要「字符串前缀恢复」这种补丁？
+7. #11385 之后，**绕过分词器/后处理管线**的 `/inference/v1/generate` 端点如何补齐指标？`GenerateMetricLifecycle` 三件套在哪个时机挂上、`ttft_ms` 等字段又是怎么「长」到 tracing span 上的？
+8. #13984 之后，`FinishReason` 为什么从「故意拒绝裸 `error`」翻转为「防御性接受并落回诊断消息」？这和滚动更新有什么关系？
 
-读完本讲，你应该能对着一条 curl 请求说出它在源码中经过的每一个函数名，并且能解释两个容易被误解的点：**`InflightPermit` 不是限流器**、**错误类型信息不是靠字符串约定传递的**。
+读完本讲，你应该能对着一条 curl 请求说出它在源码中经过的每一个函数名，并且能解释四个容易被误解的点：**`InflightPermit` 不是限流器**、**错误类型信息不是靠字符串约定传递的**、**span 上的延迟字段是在 collector 被 drop 时才补写的**、**宽容反序列化是在为 N-2 混部买单**。
 
 ## 2. 前置知识
 
@@ -24,6 +26,10 @@
 - **优雅关停（graceful shutdown）**：进程收到 SIGTERM 后不立刻断连，而是「先拒绝新请求 → 等在途响应发完 → 再真正退出」，Kubernetes 滚动更新依赖这个行为。
 - **token 估算的「len/3」启发式**：不做真实分词，直接按「字符数 ÷ 3」给出输入 token 的粗略估计。这是 RL rollout 预算与客户端预检常用的低成本近似。
 - **base64 与 little-endian f32**：把 4 字节的 IEEE 754 单精度浮点数按小端序排成字节串，再做 base64 编码——这是 embeddings 向量在内部链路上的线格式，比 JSON 浮点数组省得多。
+- **tracing span 与「先声明、后记录」字段**：`tracing::info_span!` 里用 `field::Empty` 声明的字段 initially 为空，之后可以随时 `span.record("ttft_ms", ...)` 补值——4.8 节会看到 Dynamo 用这个机制在指标 collector 被 drop 时一次性补写请求摘要。`.instrument(span)` 让一个 future 的所有日志与 drop 都发生在该 span 之内，`span.in_scope(|| ...)` 则让一段同步代码暂时进入该 span。
+- **Prometheus 指标三形态**：counter（只增计数，如 `output_tokens_total`）、gauge（可升可降的当前值，如 `active_requests`）、histogram（分桶观察，如 `time_to_first_token_seconds`）。每个指标带一组 label（如 `model`/`endpoint`），**label 的取值集合决定基数（cardinality）**——这就是 4.8 节要把未知模型名收敛成 `unknown_model` 哨兵的原因。
+- **msgpack 与自描述格式**：`rmp_serde::to_vec_named` 是请求面 codec 用的 msgpack 编码，属于「自描述」格式——反序列化器能从线数据本身判断「这是一段字符串还是一个 map」，`deserialize_any` 因此可用（4.9 节的 `FinishReason` 依赖这一点）。
+- **N-2 混部兼容**：`lib/llm/AGENTS.md` 规定 frontend 与 worker 在当前版本与往前两个版本之间任意组合都必须可互操作，原则是「宽容的读者、保守的写者」。4.9 节的 `FinishReason` 变更正是这条原则的落地。
 - 前置讲义术语：`Context<T>` 信封（u3-l3）、`AsyncEngine::generate`（u3-l3）、`ModelManager` 与 worker 就绪（u4-l1/u4-l4）、make_engine 装配（u4-l1）。
 
 ## 3. 本讲源码地图
@@ -32,11 +38,12 @@
 |------|------|----------|
 | `lib/llm/src/http/service/service_v2.rs` | HTTP 服务主体：`HttpService`/`HttpServiceConfig`/`State`、生命周期状态机、inflight 记账、路由表组装 | 主战场 |
 | `lib/llm/src/http/service/openai.rs` | OpenAI 兼容端点：chat/completions、embeddings、classify、pooling、responses、`responses/input_tokens`、batch 等全部 handler，以及后端错误提取 | 请求处理链样板 + 错误提取 |
-| `lib/llm/src/http/service/generate.rs` | 实验性引擎原生 `/inference/v1/generate`（token-in-token-out）端点 | 第三类协议端点 |
+| `lib/llm/src/http/service/generate.rs` | 实验性引擎原生 `/inference/v1/generate`（token-in-token-out）端点；#11385 后自带完整指标生命周期（`GenerateMetricCollector`/`GenerateMetricLifecycle`）与 `request_span` 打点 | 第三类协议端点 + 4.8 节主战场 |
 | `lib/llm/src/http/service/anthropic.rs` | Anthropic Messages API（`/v1/messages`）端点 | 第二类协议端点 |
 | `lib/llm/src/http/service/health.rs` | `/health` 与 `/live` 探针 | 观察生命周期的窗口 |
-| `lib/llm/src/http/service/metrics.rs` | Prometheus 指标：`InflightGuard`、`HttpQueueGuard`、`ResponseMetricCollector` | 并发与延迟的可观测面 |
+| `lib/llm/src/http/service/metrics.rs` | Prometheus 指标：`InflightGuard`、`HttpQueueGuard`、`ResponseMetricCollector`（其 `Drop` 会把请求摘要补写进当前 span） | 并发与延迟的可观测面 |
 | `lib/llm/src/http/service/error.rs` | `overload_status_code()`（`DYN_HTTP_OVERLOAD_STATUS_CODE`） | 错误状态码策略 |
+| `lib/llm/src/protocols/common.rs` | 跨端点共享协议类型；本讲关注 `FinishReason` 的线契约与宽容反序列化（#13984） | 4.9 节主战场 |
 | `lib/llm/src/protocols/openai/delta_common.rs` | `DeltaGeneratorState`：chat 与 completions 共享的流式增量生成器状态（含 #12562 的 usage 取 max） | 响应如何拼出来 |
 | `lib/llm/src/protocols/openai/chat_completions/delta.rs` | chat 侧 `DeltaGenerator`，内嵌共享状态与 usage 语义测试 | 同上 |
 | `lib/llm/src/protocols/openai/embeddings.rs` | `NvCreateEmbeddingRequest/Response` 协议类型（`add_special_tokens`、`truncate_prompt_tokens`） | embeddings 请求形状 |
@@ -88,35 +95,35 @@ build()
 
 先看 `HttpService` 与其配置结构。配置用 `derive_builder` 生成 builder 模式，每个字段都带默认值：
 
-[lib/llm/src/http/service/service_v2.rs:620-636](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L620-L636) — `HttpService` 本体：持有的不是「服务器」而是一个已经组装好的 `axum::Router` 加上端口/host/TLS 配置；`rl_router` 是 RL worker 发现专用的第二端口监听器（u8-l7）。
+[lib/llm/src/http/service/service_v2.rs:620-636](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L620-L636) — `HttpService` 本体：持有的不是「服务器」而是一个已经组装好的 `axum::Router` 加上端口/host/TLS 配置；`rl_router` 是 RL worker 发现专用的第二端口监听器（u8-l7）。
 
-[lib/llm/src/http/service/service_v2.rs:640-741](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L640-L741) — `HttpServiceConfig`：默认端口 8787、host 0.0.0.0；`enable_chat_endpoints`/`enable_cmpl_endpoints` 默认 false（由上层按需打开），`enable_embeddings_endpoints`/`enable_responses_endpoints` 默认 true；`enable_engine_apis`（Generate 端点）、`enable_batch_endpoints`、`enable_rl` 默认 false。注意注释明确说明：Batch API 是占位实现（返回 501），Generate API 是实验性且默认关闭。
+[lib/llm/src/http/service/service_v2.rs:640-741](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L640-L741) — `HttpServiceConfig`：默认端口 8787、host 0.0.0.0；`enable_chat_endpoints`/`enable_cmpl_endpoints` 默认 false（由上层按需打开），`enable_embeddings_endpoints`/`enable_responses_endpoints` 默认 true；`enable_engine_apis`（Generate 端点）、`enable_batch_endpoints`、`enable_rl` 默认 false。注意注释明确说明：Batch API 是占位实现（返回 501），Generate API 是实验性且默认关闭。
 
 共享状态 `State` 是所有 handler 的「世界视图」：
 
-[lib/llm/src/http/service/service_v2.rs:135-146](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L135-L146) — `State` 聚合了指标、模型目录、发现客户端、`ServiceObserver`、13 个端点开关、取消令牌和前端 API 行为配置。
+[lib/llm/src/http/service/service_v2.rs:135-146](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L135-L146) — `State` 聚合了指标、模型目录、发现客户端、`ServiceObserver`、13 个端点开关、取消令牌和前端 API 行为配置。
 
-[lib/llm/src/http/service/service_v2.rs:377-391](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L377-L391) — `StateFlags`：每个 `EndpointType`（Chat/Completion/Embedding/…/Batch 共 13 种）对应一个 `AtomicBool`，可以在运行时通过 `enable_model_endpoint` 翻转（Batch 除外）。
+[lib/llm/src/http/service/service_v2.rs:377-391](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L377-L391) — `StateFlags`：每个 `EndpointType`（Chat/Completion/Embedding/…/Batch 共 13 种）对应一个 `AtomicBool`，可以在运行时通过 `enable_model_endpoint` 翻转（Batch 除外）。
 
 推理路由的注册入口：
 
-[lib/llm/src/http/service/service_v2.rs:1427-1478](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L1427-L1478) — `get_endpoints_router` 逐个调用 `super::openai::chat_completions_router(...)` 等函数，把返回的 `(文档, 路由)` 对收进一个以 `EndpointType` 为键的 HashMap。路径全部可用 `DYN_HTTP_SVC_*_PATH` 环境变量覆盖（如 `DYN_HTTP_SVC_CHAT_PATH` 改掉 `/v1/chat/completions`，`DYN_HTTP_SVC_RESPONSES_PATH` 改掉 `/v1/responses`）。
+[lib/llm/src/http/service/service_v2.rs:1427-1478](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L1427-L1478) — `get_endpoints_router` 逐个调用 `super::openai::chat_completions_router(...)` 等函数，把返回的 `(文档, 路由)` 对收进一个以 `EndpointType` 为键的 HashMap。路径全部可用 `DYN_HTTP_SVC_*_PATH` 环境变量覆盖（如 `DYN_HTTP_SVC_CHAT_PATH` 改掉 `/v1/chat/completions`，`DYN_HTTP_SVC_RESPONSES_PATH` 改掉 `/v1/responses`）。
 
-[lib/llm/src/http/service/service_v2.rs:1517-1541](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L1517-L1541) — 关键中间件：每个端点路由外面包了一层闭包，请求进来先查 `state.flags.get(&endpoint_type)`，开关关着就直接返回 404。这就是「端点动态启停」的实现——不需要重建 Router。
+[lib/llm/src/http/service/service_v2.rs:1517-1541](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L1517-L1541) — 关键中间件：每个端点路由外面包了一层闭包，请求进来先查 `state.flags.get(&endpoint_type)`，开关关着就直接返回 404。这就是「端点动态启停」的实现——不需要重建 Router。
 
 三层叠加的顺序（在 build 里）：
 
-[lib/llm/src/http/service/service_v2.rs:1291-1299](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L1291-L1299) — 推理路由先叠 `TraceLayer`（info 级 span），再叠 `track_inflight_inference`；[lib/llm/src/http/service/service_v2.rs:1307-1313](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L1307-L1313) — 系统路由只叠 `TraceLayer`（debug 级 span）。axum 的 layer 是「后加的先执行」，所以 inflight 记账发生在 trace span 内部，日志里能对上号。
+[lib/llm/src/http/service/service_v2.rs:1291-1299](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L1291-L1299) — 推理路由先叠 `TraceLayer`（info 级 span），再叠 `track_inflight_inference`；[lib/llm/src/http/service/service_v2.rs:1307-1313](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L1307-L1313) — 系统路由只叠 `TraceLayer`（debug 级 span）。axum 的 layer 是「后加的先执行」，所以 inflight 记账发生在 trace span 内部，日志里能对上号。
 
-[lib/llm/src/http/service/service_v2.rs:1320-1341](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L1320-L1341) — 兜底路由被刻意注册在 `track_inflight_inference` **之外**（源码注释原话：未匹配的请求不应获取推理许可、也不应在 draining 时返回 503，而是返回正常 404）；随后 [service_v2.rs:1338](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L1338) 全局加一层 `echo_request_id_header`，把请求头里的 `x-request-id` 原样带回响应。
+[lib/llm/src/http/service/service_v2.rs:1320-1341](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L1320-L1341) — 兜底路由被刻意注册在 `track_inflight_inference` **之外**（源码注释原话：未匹配的请求不应获取推理许可、也不应在 draining 时返回 503，而是返回正常 404）；随后 [service_v2.rs:1338](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L1338) 全局加一层 `echo_request_id_header`，把请求头里的 `x-request-id` 原样带回响应。
 
 RL 例外分支：
 
-[lib/llm/src/http/service/service_v2.rs:1340-1352](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L1340-L1352) — `enable_rl_router` 由 builder flag `enable_rl` 或环境变量 `DYN_ENABLE_RL` 打开；打开但没配 `runtime` 会直接报错。RL 面不混入主路由表——它有自己的端口与生命周期（详见 u8-l7）。
+[lib/llm/src/http/service/service_v2.rs:1340-1352](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L1340-L1352) — `enable_rl_router` 由 builder flag `enable_rl` 或环境变量 `DYN_ENABLE_RL` 打开；打开但没配 `runtime` 会直接报错。RL 面不混入主路由表——它有自己的端口与生命周期（详见 u8-l7）。
 
 Python 侧怎么用它？衔接 u4-l1：
 
-[components/src/dynamo/frontend/main.py:418-431](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/components/src/dynamo/frontend/main.py#L418-L431) — frontend 把 `http_host`/`http_port`/`enable_anthropic_api`/`reasoning_field_name` 等参数塞进 kwargs，最终以 `EntrypointArgs(EngineType.Dynamic, **kwargs)` 走 `make_engine`。也就是说你在命令行敲的 `--http-port 8000`，会变成 Rust 侧 `HttpServiceConfig` 的 `port` 字段——HTTP 服务本身完全由 Rust 实现，Python 只负责传配置。
+[components/src/dynamo/frontend/main.py:418-431](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/components/src/dynamo/frontend/main.py#L418-L431) — frontend 把 `http_host`/`http_port`/`enable_anthropic_api`/`reasoning_field_name` 等参数塞进 kwargs，最终以 `EntrypointArgs(EngineType.Dynamic, **kwargs)` 走 `make_engine`。也就是说你在命令行敲的 `--http-port 8000`，会变成 Rust 侧 `HttpServiceConfig` 的 `port` 字段——HTTP 服务本身完全由 Rust 实现，Python 只负责传配置。
 
 #### 4.1.4 代码实践
 
@@ -147,7 +154,7 @@ Python 侧怎么用它？衔接 u4-l1：
 
 **需要观察的现象**：默认路径返回 200/405；改了 `DYN_HTTP_SVC_RESPONSES_PATH` 后，`/v1/responses/input_tokens` 变成 OpenAI 风格 JSON 404（来自 `unmatched_route_fallback`），而 `/api/v2/responses/input_tokens` 正常应答——子路由是**从父路径派生**出来的。
 
-**预期结果**：`/openapi.json` 里能看到所有已注册路由（`route_docs` 的产物），且派生子路由遵循「父路径去尾部斜杠再拼接」的规则。若你的安装版本与 HEAD 不一致，具体环境变量名以 [service_v2.rs:1026-1064](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L1026-L1064) 为准。待本地验证。
+**预期结果**：`/openapi.json` 里能看到所有已注册路由（`route_docs` 的产物），且派生子路由遵循「父路径去尾部斜杠再拼接」的规则。若你的安装版本与 HEAD 不一致，具体环境变量名以 [service_v2.rs:1026-1064](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L1026-L1064) 为准。待本地验证。
 
 #### 4.1.5 小练习与答案
 
@@ -209,21 +216,21 @@ Python 侧怎么用它？衔接 u4-l1：
 
 #### 4.2.3 源码精读
 
-[lib/llm/src/http/service/service_v2.rs:219-225](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L219-L225) — `ServiceStage` 三态枚举，用 `u8` 存储（0/1/2），配合 `AtomicU8` 实现无锁读取。这个阶段与 runtime 的 `CancellationToken` 是**解耦的**——前端需要先停止收新请求、再拆除发现与传输状态。
+[lib/llm/src/http/service/service_v2.rs:219-225](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L219-L225) — `ServiceStage` 三态枚举，用 `u8` 存储（0/1/2），配合 `AtomicU8` 实现无锁读取。这个阶段与 runtime 的 `CancellationToken` 是**解耦的**——前端需要先停止收新请求、再拆除发现与传输状态。
 
-[lib/llm/src/http/service/service_v2.rs:259-263](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L259-L263) — `ServiceObserver` 只有两个字段加一个通知器：`stage: AtomicU8`、`inflight_inference: AtomicU64`、`inflight_zero: Notify`。注意 `Notify` 的用法——它不是计数信号量，只是「唤醒所有等在这一点上的任务」的广播器。状态迁移入口是 [service_v2.rs:290-313](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L290-L313) 的 `start_draining`/`start_stopping`，两者都先打 info 日志再 `store`。
+[lib/llm/src/http/service/service_v2.rs:259-263](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L259-L263) — `ServiceObserver` 只有两个字段加一个通知器：`stage: AtomicU8`、`inflight_inference: AtomicU64`、`inflight_zero: Notify`。注意 `Notify` 的用法——它不是计数信号量，只是「唤醒所有等在这一点上的任务」的广播器。状态迁移入口是 [service_v2.rs:290-313](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L290-L313) 的 `start_draining`/`start_stopping`，两者都先打 info 日志再 `store`。
 
-[lib/llm/src/http/service/service_v2.rs:319-323](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L319-L323) — `acquire_inflight()` 全文就是 `fetch_add(1)` 加构造 guard，**没有任何 if 判断上限**——这就是「它不限流」的直接证据。[service_v2.rs:335-354](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L335-L354) 的 `wait_inflight_zero_or_timeout` 里的循环值得细读：先 `notified()` 再 `enable()` 再查计数，这个顺序保证「注册等待发生在读计数之前」，最后一个 permit 释放时的 notify 不会丢。
+[lib/llm/src/http/service/service_v2.rs:319-323](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L319-L323) — `acquire_inflight()` 全文就是 `fetch_add(1)` 加构造 guard，**没有任何 if 判断上限**——这就是「它不限流」的直接证据。[service_v2.rs:335-354](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L335-L354) 的 `wait_inflight_zero_or_timeout` 里的循环值得细读：先 `notified()` 再 `enable()` 再查计数，这个顺序保证「注册等待发生在读计数之前」，最后一个 permit 释放时的 notify 不会丢。
 
-[lib/llm/src/http/service/service_v2.rs:358-374](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L358-L374) — `InflightPermit` 的 `Drop`：`fetch_sub(1, AcqRel)` 返回的是**旧值**，等于 1 说明这次减完是 0；只有「减到 0」且「已不在 Ready 阶段」才 `notify_waiters()`。Ready 阶段不通知是性能优化——正常运行时每次请求结束都广播一遍毫无意义。
+[lib/llm/src/http/service/service_v2.rs:358-374](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L358-L374) — `InflightPermit` 的 `Drop`：`fetch_sub(1, AcqRel)` 返回的是**旧值**，等于 1 说明这次减完是 0；只有「减到 0」且「已不在 Ready 阶段」才 `notify_waiters()`。Ready 阶段不通知是性能优化——正常运行时每次请求结束都广播一遍毫无意义。
 
-[lib/llm/src/http/service/service_v2.rs:103-132](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L103-L132) — `track_inflight_inference` 中间件全文。注意 `body.into_data_stream().map(move |result| { let _permit = &permit; result })` 这个技巧：把 permit 以引用方式捕获进每一帧的闭包，只要还有帧没被消费，permit 就活着。客户端中途断开导致 body 被 drop 时，permit 同样随之释放——不会泄漏。
+[lib/llm/src/http/service/service_v2.rs:103-132](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L103-L132) — `track_inflight_inference` 中间件全文。注意 `body.into_data_stream().map(move |result| { let _permit = &permit; result })` 这个技巧：把 permit 以引用方式捕获进每一帧的闭包，只要还有帧没被消费，permit 就活着。客户端中途断开导致 body 被 drop 时，permit 同样随之释放——不会泄漏。
 
-[lib/llm/src/http/service/service_v2.rs:928-949](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L928-L949) — 非 TLS 路径的优雅关停：`with_graceful_shutdown` 的 future 一旦被触发，先 `start_draining()`，再 `wait_inflight_zero_or_timeout(shutdown_timeout)`（超时时间来自 [service_v2.rs:1017-1023](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L1017-L1023) 的 `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`，默认 5 秒），最后 `start_stopping()` 并 cancel runtime 令牌。
+[lib/llm/src/http/service/service_v2.rs:928-949](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L928-L949) — 非 TLS 路径的优雅关停：`with_graceful_shutdown` 的 future 一旦被触发，先 `start_draining()`，再 `wait_inflight_zero_or_timeout(shutdown_timeout)`（超时时间来自 [service_v2.rs:1017-1023](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L1017-L1023) 的 `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`，默认 5 秒），最后 `start_stopping()` 并 cancel runtime 令牌。
 
 与 `ServiceObserver` 并行的另一套「HTTP 层指标」在 metrics.rs：
 
-[lib/llm/src/http/service/metrics.rs:1375-1410](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/metrics.rs#L1375-L1410) — `create_inflight_guard` / `create_response_collector` / `create_http_queue_guard` 三件套。注意注释里的明确区分：`InflightGuard` 跟踪「引擎正在处理」，`HttpQueueGuard` 跟踪「handler 开始到首 token」（含 prefill 时间）。它们暴露为 `{prefix}_inflight_requests` 等 Prometheus 指标（见 [metrics.rs:615-623](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/metrics.rs#L615-L623)）。
+[lib/llm/src/http/service/metrics.rs:1375-1410](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/metrics.rs#L1375-L1410) — `create_inflight_guard` / `create_response_collector` / `create_http_queue_guard` 三件套。注意注释里的明确区分：`InflightGuard` 跟踪「引擎正在处理」，`HttpQueueGuard` 跟踪「handler 开始到首 token」（含 prefill 时间）。它们暴露为 `{prefix}_inflight_requests` 等 Prometheus 指标（见 [metrics.rs:615-623](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/metrics.rs#L615-L623)）。
 
 #### 4.2.4 代码实践（本讲主实践）
 
@@ -236,7 +243,7 @@ Python 侧怎么用它？衔接 u4-l1：
    cd examples/backends/sample/launch
    DYN_HTTP_PORT=8000 ./agg.sh --model-name sample-model --delay 0.05 --max-tokens 200
    ```
-   （`--delay`/`--max-tokens` 定义见 [components/src/dynamo/common/backend/sample_engine.py:138-139](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/components/src/dynamo/common/backend/sample_engine.py#L138-L139)，多余参数会透传给 sample_main。）
+   （`--delay`/`--max-tokens` 定义见 [components/src/dynamo/common/backend/sample_engine.py:138-139](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/components/src/dynamo/common/backend/sample_engine.py#L138-L139)，多余参数会透传给 sample_main。）
 2. 写一个压测脚本 `load.sh`（示例代码，非项目自带）：
    ```bash
    #!/bin/bash
@@ -348,41 +355,41 @@ axum 路由匹配 POST /v1/chat/completions
 
 OpenAI 侧的 handler 入口：
 
-[lib/llm/src/http/service/openai.rs:1944-2027](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L1944-L2027) — `handler_chat_completions`：读体、解析、双重就绪检查（进程级 + 模型级，注释解释了为什么聚合请求打到 decode-only 命名空间会挂）、构造 Context、建立断连监控，然后把真正的处理 `tokio::spawn` 出去——handler 本身只负责协议层，业务在子任务中执行，避免长连接拖住 axum worker。
+[lib/llm/src/http/service/openai.rs:1944-2027](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L1944-L2027) — `handler_chat_completions`：读体、解析、双重就绪检查（进程级 + 模型级，注释解释了为什么聚合请求打到 decode-only 命名空间会挂）、构造 Context、建立断连监控，然后把真正的处理 `tokio::spawn` 出去——handler 本身只负责协议层，业务在子任务中执行，避免长连接拖住 axum worker。
 
-[lib/llm/src/http/service/openai.rs:3790-3795](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L3790-L3795) — `check_ready`：一行 `is_ready()` 检查，不 ready 返回 503。所有推理 handler 共用。
+[lib/llm/src/http/service/openai.rs:3790-3795](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L3790-L3795) — `check_ready`：一行 `is_ready()` 检查，不 ready 返回 503。所有推理 handler 共用。
 
-[lib/llm/src/http/service/openai.rs:3813-3849](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L3813-L3849) — `check_model_serving_ready`：**模型级**就绪门，与 `check_ready` 是 AND 关系——进程 ready 且该模型在至少一个命名空间里凑齐了完整 worker 集合（每个 worker 的 `needs` DNF 都被该命名空间当前出现的 worker 类型满足）才放行。doc 注释特意说明用户可见的错误信息刻意不含内部术语（worker type、namespace），运维细节走 `GET /v1/models/{model}/ready`。
+[lib/llm/src/http/service/openai.rs:3813-3849](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L3813-L3849) — `check_model_serving_ready`：**模型级**就绪门，与 `check_ready` 是 AND 关系——进程 ready 且该模型在至少一个命名空间里凑齐了完整 worker 集合（每个 worker 的 `needs` DNF 都被该命名空间当前出现的 worker 类型满足）才放行。doc 注释特意说明用户可见的错误信息刻意不含内部术语（worker type、namespace），运维细节走 `GET /v1/models/{model}/ready`。
 
-[lib/llm/src/http/service/openai.rs:2747-2819](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L2747-L2819) — `chat_completions` 业务体前半段：应用请求模板 → 模型别名规范化（alias → primary，注释提到这是为了与 vLLM/SGLang 行为一致）→ 尽早创建 inflight guard（让校验错误也计入指标）→ 五层校验依次执行，任何一层失败都 `mark_error` 后返回。
+[lib/llm/src/http/service/openai.rs:2747-2819](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L2747-L2819) — `chat_completions` 业务体前半段：应用请求模板 → 模型别名规范化（alias → primary，注释提到这是为了与 vLLM/SGLang 行为一致）→ 尽早创建 inflight guard（让校验错误也计入指标）→ 五层校验依次执行，任何一层失败都 `mark_error` 后返回。
 
-[lib/llm/src/http/service/openai.rs:2947-3040](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L2947-L3040) — 流式分支的核心循环：`async_stream::stream!` 内逐帧处理——`enforce_single_tool_call` 时只保留 index 0 的工具调用、`deduplicate_stream_roles` 去重 role、空块（多字节 token 组装产物）被丢弃但仍要记指标（注释解释了不记账会低估输出 token 与 TTFT）、可选的 `tool_call_dispatch`/`reasoning_dispatch` 侧信道事件先行，最后 `EventConverter` 转成 SSE event。结尾 `Sse::new(...).keep_alive(...)` 挂上心跳。
+[lib/llm/src/http/service/openai.rs:2947-3040](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L2947-L3040) — 流式分支的核心循环：`async_stream::stream!` 内逐帧处理——`enforce_single_tool_call` 时只保留 index 0 的工具调用、`deduplicate_stream_roles` 去重 role、空块（多字节 token 组装产物）被丢弃但仍要记指标（注释解释了不记账会低估输出 token 与 TTFT）、可选的 `tool_call_dispatch`/`reasoning_dispatch` 侧信道事件先行，最后 `EventConverter` 转成 SSE event。结尾 `Sse::new(...).keep_alive(...)` 挂上心跳。
 
-[lib/llm/src/http/service/openai.rs:3041-3084](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L3041-L3084) — 非流式分支：同样先窥视首帧错误，然后 `NvCreateChatCompletionResponse::from_annotated_stream` 把整条流聚合成单条 JSON；聚合完成后如果发现 context 已被 kill（客户端断开），指标改记 Cancelled。
+[lib/llm/src/http/service/openai.rs:3041-3084](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L3041-L3084) — 非流式分支：同样先窥视首帧错误，然后 `NvCreateChatCompletionResponse::from_annotated_stream` 把整条流聚合成单条 JSON；聚合完成后如果发现 context 已被 kill（客户端断开），指标改记 Cancelled。
 
-[lib/llm/src/http/service/openai.rs:3964-3979](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L3964-L3979) — `chat_completions_router`：标准三件套——`smart_json_error_middleware`（错误 JSON 化）、`DefaultBodyLimit`（请求体上限）、`with_state`。所有 openai.rs 里的 router 构造函数都是这个形状。
+[lib/llm/src/http/service/openai.rs:3964-3979](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L3964-L3979) — `chat_completions_router`：标准三件套——`smart_json_error_middleware`（错误 JSON 化）、`DefaultBodyLimit`（请求体上限）、`with_state`。所有 openai.rs 里的 router 构造函数都是这个形状。
 
 Anthropic 侧：
 
-[lib/llm/src/http/service/anthropic.rs:73-92](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/anthropic.rs#L73-L92) — `DEFAULT_MESSAGES_PATH = "/v1/messages"` 与 `anthropic_messages_router`：除了标准三件套还多一层 `anthropic_error_middleware`，把错误转成 Anthropic 的 `{type:"error", error:{...}}` 信封。
+[lib/llm/src/http/service/anthropic.rs:73-92](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/anthropic.rs#L73-L92) — `DEFAULT_MESSAGES_PATH = "/v1/messages"` 与 `anthropic_messages_router`：除了标准三件套还多一层 `anthropic_error_middleware`，把错误转成 Anthropic 的 `{type:"error", error:{...}}` 信封。
 
-[lib/llm/src/http/service/anthropic.rs:249-360](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/anthropic.rs#L249-L360) — `handler_anthropic_messages`：与 chat handler 同构（同样的就绪检查、Context 构造、断连监控），差别在请求校验（`validate_anthropic_messages`/`validate_anthropic_tools`）和响应格式转换。service_v2.rs 里的 `unmatched_route_fallback` 会根据路径是否落在 Anthropic 命名空间内，决定 404 用哪种错误信封（见 [service_v2.rs:83-101](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L83-L101)，`path_within_namespace` 做的是完整路径段匹配，`/v1/messages_beta` 不会误判）。
+[lib/llm/src/http/service/anthropic.rs:249-360](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/anthropic.rs#L249-L360) — `handler_anthropic_messages`：与 chat handler 同构（同样的就绪检查、Context 构造、断连监控），差别在请求校验（`validate_anthropic_messages`/`validate_anthropic_tools`）和响应格式转换。service_v2.rs 里的 `unmatched_route_fallback` 会根据路径是否落在 Anthropic 命名空间内，决定 404 用哪种错误信封（见 [service_v2.rs:83-101](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L83-L101)，`path_within_namespace` 做的是完整路径段匹配，`/v1/messages_beta` 不会误判）。
 
 Generate 侧：
 
-[lib/llm/src/http/service/generate.rs:1-11](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/generate.rs#L1-L11) — 模块文档开宗明义：这是**实验性的引擎原生端点，默认关闭**，`enable_engine_apis` 或 `DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE` 打开；「把完整请求保存在不透明后端信封里」，流式（stream=true）尚未实现。
+[lib/llm/src/http/service/generate.rs:3-11](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L3-L11) — 模块文档开宗明义：这是**实验性的引擎原生端点，默认关闭**，`enable_engine_apis` 或 `DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE` 打开；「把完整请求保存在不透明后端信封里」，流式（stream=true）尚未实现。
 
-[lib/llm/src/http/service/generate.rs:66-80](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/generate.rs#L66-L80) — `generate_router`：默认路径 `/inference/v1/generate`，结构与 openai 的 router 一致（连 `smart_json_error_middleware` 都是复用 openai.rs 导出的）。
+[lib/llm/src/http/service/generate.rs:95-109](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L95-L109) — `generate_router`：默认路径 `/inference/v1/generate`，结构与 openai 的 router 一致（连 `smart_json_error_middleware` 都是复用 openai.rs 导出的）。
 
-[lib/llm/src/http/service/generate.rs:583-660](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/generate.rs#L583-L660) — `handler_generate`：校验 → 拒绝 stream=true（501）→ 若请求未指定 model 则按 `VLLM_INFERENCE_V1_GENERATE_CAPABILITY` 能力查找已注册模型（0 个报 404，多个报 400 要求显式指定）→ 模型级就绪检查 → 按**能力**取引擎（这与 openai 按模型名取引擎不同，是为了防止 vLLM 信封误投给 SGLang worker）。
+[lib/llm/src/http/service/generate.rs:788-966](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L788-L966) — `handler_generate`：校验 → 拒绝 stream=true（501）→ 若请求未指定 model 则按 `VLLM_INFERENCE_V1_GENERATE_CAPABILITY` 能力查找已注册模型（0 个报 404，多个报 400 要求显式指定）→ 模型级就绪检查 → 按**能力**取引擎（这与 openai 按模型名取引擎不同，是为了防止 vLLM 信封误投给 SGLang worker）。#11385 之后它的开头多了一段「模型名归一 + 指标生命周期建立」的前置步骤（793-825 行，详见 4.8 节），且**每个早退分支都会先 `mark_error` 再返回**——被拒请求也要进指标。
 
-[lib/llm/src/http/service/generate.rs:725-812](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/generate.rs#L725-L812) — `generate_dispatch`：`run_until_killed` 把 `engine.generate(context)` 包在 `tokio::select! { biased; operation, killed }` 里——客户端 kill 信号一到立刻放弃，返回 499（nginx 风格的 request_cancelled）。注释解释了为什么 dispatch 要 `tokio::spawn` 分离：unary 工作必须比 Axum handler 活得久，handler 被 drop 时才能触发已武装的断连监控。
+[lib/llm/src/http/service/generate.rs:968-1074](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L968-L1074) — `generate_dispatch`：`run_until_killed` 把 `engine.generate(context)` 包在 `tokio::select! { biased; operation, killed }` 里——客户端 kill 信号一到立刻放弃，返回 499（nginx 风格的 request_cancelled）。注释解释了为什么 dispatch 要 `tokio::spawn` 分离：unary 工作必须比 Axum handler 活得久，handler 被 drop 时才能触发已武装的断连监控。#11385 后它还接收 `GenerateMetricLifecycle` 并在流上逐帧 `observe`（1027-1030 行，见 4.8）。
 
-[lib/llm/src/http/service/generate.rs:163-206](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/generate.rs#L163-L206) — `VllmTitoEnvelope`：把 vLLM 特有字段（sampling_params、cache_salt、priority、kv_transfer_params…）序列化进信封；注释明确 `token_ids` 故意不在其中——`PreprocessedRequest.token_ids` 才是路由与线上格式的权威表示，worker 端从它重建 vLLM 请求。
+[lib/llm/src/http/service/generate.rs:199-248](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L199-L248) — `VllmTitoEnvelope`：把 vLLM 特有字段（sampling_params、cache_salt、priority、kv_transfer_params…）序列化进信封；注释明确 `token_ids` 故意不在其中——`PreprocessedRequest.token_ids` 才是路由与线上格式的权威表示，worker 端从它重建 vLLM 请求。
 
 三类端点共用的探针：
 
-[lib/llm/src/http/service/health.rs:40-61](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/health.rs#L40-L61) 与 [lib/llm/src/http/service/health.rs:63-98](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/health.rs#L63-L98) — `/live` 只查 cancel_token（进程还活着吗），`/health` 查 is_ready 并列出发现到的全部实例端点。K8s 的 livenessProbe 应指 `/live`、readinessProbe 应指 `/health`。
+[lib/llm/src/http/service/health.rs:40-61](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/health.rs#L40-L61) 与 [lib/llm/src/http/service/health.rs:63-98](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/health.rs#L63-L98) — `/live` 只查 cancel_token（进程还活着吗），`/health` 查 is_ready 并列出发现到的全部实例端点。K8s 的 livenessProbe 应指 `/live`、readinessProbe 应指 `/health`。
 
 #### 4.3.4 代码实践
 
@@ -403,7 +410,7 @@ Generate 侧：
    # 触发 405（GET 一个 POST 路由）
    curl -s -i localhost:8000/v1/chat/completions | head -5
    ```
-2. 打开 Anthropic 面重启 frontend（`--enable-anthropic-api`，对应 [main.py:425](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/components/src/dynamo/frontend/main.py#L425) 的 `enable_anthropic_api`），然后：
+2. 打开 Anthropic 面重启 frontend（`--enable-anthropic-api`，对应 [main.py:425](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/components/src/dynamo/frontend/main.py#L425) 的 `enable_anthropic_api`），然后：
    ```bash
    curl -s localhost:8000/v1/messages/missing | python3 -m json.tool   # Anthropic 错误信封
    curl -s localhost:8000/v1/messages_beta/missing | python3 -m json.tool  # 仍是 OpenAI 信封
@@ -427,7 +434,7 @@ Generate 侧：
 
 **练习 2**：流式请求下，后端在第一帧就报了 `InvalidArgument`，客户端会看到什么？怎样才能让它看到 4xx？
 
-**答案**：默认情况下 SSE 一旦开始就是 HTTP 200，错误会以 `event: "error"` 的 SSE 帧出现（EventConverter 负责识别）。要让同步后端错误表现为规范 4xx，需要设置 `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS` 打开 pre-commit 窥视窗口（[openai.rs:2537-2545](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L2537-L2545) 的 `pre_commit_error_peek_timeout` 与 [openai.rs:2912-2933](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L2912-L2933) 的使用点），在提交 200 之前短暂等待第一帧信号——注释里举的例子正是 `Backend(InvalidArgument)`（文本模型收到图片内容）。
+**答案**：默认情况下 SSE 一旦开始就是 HTTP 200，错误会以 `event: "error"` 的 SSE 帧出现（EventConverter 负责识别）。要让同步后端错误表现为规范 4xx，需要设置 `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS` 打开 pre-commit 窥视窗口（[openai.rs:2537-2545](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L2537-L2545) 的 `pre_commit_error_peek_timeout` 与 [openai.rs:2912-2933](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L2912-L2933) 的使用点），在提交 200 之前短暂等待第一帧信号——注释里举的例子正是 `Backend(InvalidArgument)`（文本模型收到图片内容）。
 
 **练习 3**：`handler_chat_completions` 为什么用 `tokio::spawn` 把业务包一层，而不是直接 await？
 
@@ -481,23 +488,23 @@ chat_completions handler
 
 #### 4.4.3 源码精读
 
-[lib/llm/src/protocols/openai/delta_common.rs:17-48](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/protocols/openai/delta_common.rs#L17-L48) — `DeltaGeneratorOptions` 与它的构造函数：开关全部从请求推导——`enable_usage`/`continuous_usage_stats` 来自 `stream_options`，logprobs 来自请求参数，nvext 响应字段来自扩展头。
+[lib/llm/src/protocols/openai/delta_common.rs:17-48](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/openai/delta_common.rs#L17-L48) — `DeltaGeneratorOptions` 与它的构造函数：开关全部从请求推导——`enable_usage`/`continuous_usage_stats` 来自 `stream_options`，logprobs 来自请求参数，nvext 响应字段来自扩展头。
 
-[lib/llm/src/protocols/openai/delta_common.rs:50-100](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/protocols/openai/delta_common.rs#L50-L100) — `DeltaGeneratorState` 本体与构造：记录 created 时间戳（注释幽默地指出 u32 秒级时间戳到 2106 年才溢出）、usage 清零、无条件创建 `RequestTracker`——注释特别强调：即使 `response_fields` 不让 nvext 字段回给客户端，tracker 仍然内部记录 TTFT/ITL 供指标使用。
+[lib/llm/src/protocols/openai/delta_common.rs:50-100](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/openai/delta_common.rs#L50-L100) — `DeltaGeneratorState` 本体与构造：记录 created 时间戳（注释幽默地指出 u32 秒级时间戳到 2106 年才溢出）、usage 清零、无条件创建 `RequestTracker`——注释特别强调：即使 `response_fields` 不让 nvext 字段回给客户端，tracker 仍然内部记录 TTFT/ITL 供指标使用。
 
-[lib/llm/src/protocols/openai/delta_common.rs:138-168](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/protocols/openai/delta_common.rs#L138-L168) — usage 更新逻辑（#12562 修正后的样子）：`completion_tokens` 先按 token_ids 长度累加（注释再次解释 u32 精度足够）；若 backend 提供了 `completion_usage`，prompt_tokens 以它为准覆盖（对 embedding 场景至关重要），而 completion_tokens 改为 [delta_common.rs:155-158](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/protocols/openai/delta_common.rs#L155-L158) 的 `max` 钳制——后端总量更高时采用后端值，后端报 0 时保留本地累计值。[delta_common.rs:174-178](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/protocols/openai/delta_common.rs#L174-L178) 的 `get_usage` 用 `saturating_add` 防溢出。
+[lib/llm/src/protocols/openai/delta_common.rs:138-168](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/openai/delta_common.rs#L138-L168) — usage 更新逻辑（#12562 修正后的样子）：`completion_tokens` 先按 token_ids 长度累加（注释再次解释 u32 精度足够）；若 backend 提供了 `completion_usage`，prompt_tokens 以它为准覆盖（对 embedding 场景至关重要），而 completion_tokens 改为 [delta_common.rs:155-158](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/openai/delta_common.rs#L155-L158) 的 `max` 钳制——后端总量更高时采用后端值，后端报 0 时保留本地累计值。[delta_common.rs:174-178](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/openai/delta_common.rs#L174-L178) 的 `get_usage` 用 `saturating_add` 防溢出。
 
-[lib/llm/src/protocols/openai/delta_common.rs:189-217](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/protocols/openai/delta_common.rs#L189-L217) — `enable_usage_for_nonstreaming`（非流式强制带 usage，满足 OpenAI 规范；带 `original_stream_flag` 参数，流式直接返回）与 `force_include_usage`（无条件开启，配合 `FORCE_INCLUDE_USAGE` 开关在 handler 入口使用，见 [openai.rs:1951-1953](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L1951-L1953)）。文件尾部的单测（221 行起）验证了「缺失时插入、已存在时只翻转 include_usage 且保留兄弟字段」两个行为。
+[lib/llm/src/protocols/openai/delta_common.rs:189-217](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/openai/delta_common.rs#L189-L217) — `enable_usage_for_nonstreaming`（非流式强制带 usage，满足 OpenAI 规范；带 `original_stream_flag` 参数，流式直接返回）与 `force_include_usage`（无条件开启，配合 `FORCE_INCLUDE_USAGE` 开关在 handler 入口使用，见 [openai.rs:1951-1953](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L1951-L1953)）。文件尾部的单测（221 行起）验证了「缺失时插入、已存在时只翻转 include_usage 且保留兄弟字段」两个行为。
 
 chat 侧如何消费共享状态：
 
-[lib/llm/src/protocols/openai/chat_completions/delta.rs:40-62](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/protocols/openai/chat_completions/delta.rs#L40-L62) — chat 的 `DeltaGenerator`：字段就三个——共享的 `state`、可选 `service_tier`、`emitted_role_choices: HashSet<u32>`（记录哪些 choice 的 role 帧已发过，配合 handler 侧的 `deduplicate_stream_roles` 防止 role 重复）。所有身份/usage 访问都是对 `state` 的一行委托（`update_isl`、`tracker` 都是转发）。
+[lib/llm/src/protocols/openai/chat_completions/delta.rs:40-62](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/openai/chat_completions/delta.rs#L40-L62) — chat 的 `DeltaGenerator`：字段就三个——共享的 `state`、可选 `service_tier`、`emitted_role_choices: HashSet<u32>`（记录哪些 choice 的 role 帧已发过，配合 handler 侧的 `deduplicate_stream_roles` 防止 role 重复）。所有身份/usage 访问都是对 `state` 的一行委托（`update_isl`、`tracker` 都是转发）。
 
-[lib/llm/src/protocols/openai/chat_completions/delta.rs:19-38](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/protocols/openai/chat_completions/delta.rs#L19-L38) — `NvCreateChatCompletionRequest::response_generator`：handler 用它从请求一键构造生成器；`object` 字段在这里固定为 `"chat.completion.chunk"`（completions 端点会传不同的 object 字符串，这就是两个端点共享状态却产出不同格式的方式）。
+[lib/llm/src/protocols/openai/chat_completions/delta.rs:19-38](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/openai/chat_completions/delta.rs#L19-L38) — `NvCreateChatCompletionRequest::response_generator`：handler 用它从请求一键构造生成器；`object` 字段在这里固定为 `"chat.completion.chunk"`（completions 端点会传不同的 object 字符串，这就是两个端点共享状态却产出不同格式的方式）。
 
 #12562 的新语义由三个测试钉死（completions/delta.rs 有一组对称的测试）：
 
-[lib/llm/src/protocols/openai/chat_completions/delta.rs:549-626](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/protocols/openai/chat_completions/delta.rs#L549-L626) — 三个测试分别覆盖：后端 usage 更高时采用后端值（`test_completion_tokens_use_backend_usage_when_higher`）、`n=2` 多 choice 时后端值按请求总量对待（`test_completion_tokens_treat_backend_usage_as_request_total`）、后端报 0 时保留本地累计值（`test_completion_tokens_keep_aggregated_count_when_backend_usage_is_zero`）。
+[lib/llm/src/protocols/openai/chat_completions/delta.rs:549-626](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/openai/chat_completions/delta.rs#L549-L626) — 三个测试分别覆盖：后端 usage 更高时采用后端值（`test_completion_tokens_use_backend_usage_when_higher`）、`n=2` 多 choice 时后端值按请求总量对待（`test_completion_tokens_treat_backend_usage_as_request_total`）、后端报 0 时保留本地累计值（`test_completion_tokens_keep_aggregated_count_when_backend_usage_is_zero`）。
 
 #### 4.4.4 代码实践
 
@@ -524,7 +531,7 @@ chat 侧如何消费共享状态：
           "stream_options":{"include_usage":true},
           "messages":[{"role":"user","content":"hello"}]}' | tail -4
    ```
-2. （源码阅读型）打开 `lib/llm/src/protocols/openai/completions/delta.rs` 的测试区（约 363-440 行），对比它与 chat 侧三个 usage 测试的异同；再打开 [delta_common.rs:138-168](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/protocols/openai/delta_common.rs#L138-L168)，在笔记里回答：为什么 `max` 而不是赋值？提示——想想 `n>1` 时「按帧累加」会得到什么、后端报告的又是什么。
+2. （源码阅读型）打开 `lib/llm/src/protocols/openai/completions/delta.rs` 的测试区（约 363-440 行），对比它与 chat 侧三个 usage 测试的异同；再打开 [delta_common.rs:138-168](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/openai/delta_common.rs#L138-L168)，在笔记里回答：为什么 `max` 而不是赋值？提示——想想 `n>1` 时「按帧累加」会得到什么、后端报告的又是什么。
 3. （可选，需 Rust 环境）跑这几个测试：
    ```bash
    cargo test -p dynamo-llm --lib protocols::openai::chat_completions::delta::tests::test_completion_tokens
@@ -538,7 +545,7 @@ chat 侧如何消费共享状态：
 
 **练习 1**：为什么把状态抽到 `delta_common.rs` 而不是让两个 `DeltaGenerator` 各自维护一份字段？
 
-**答案**：chat 与 completions 两个端点对「响应身份、usage 累计、选项、TTFT 计时」的需求完全一致，差异只在增量语义（choice 结构、role 去重、文本拼接）。抽出共享状态后，#12562 这样的 usage 语义修正（后端总量取 max）只改 [delta_common.rs:155-158](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/protocols/openai/delta_common.rs#L155-L158) 一处，就同时修好了两个端点；新增端点也能直接复用。
+**答案**：chat 与 completions 两个端点对「响应身份、usage 累计、选项、TTFT 计时」的需求完全一致，差异只在增量语义（choice 结构、role 去重、文本拼接）。抽出共享状态后，#12562 这样的 usage 语义修正（后端总量取 max）只改 [delta_common.rs:155-158](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/openai/delta_common.rs#L155-L158) 一处，就同时修好了两个端点；新增端点也能直接复用。
 
 **练习 2**：`n=2`（两个 choice）的请求，后端每帧报告 `completion_tokens: 5`（请求总量），本地累加路径会数到多少？最终 usage 报多少？
 
@@ -546,7 +553,7 @@ chat 侧如何消费共享状态：
 
 **练习 3**：客户端没传 `stream_options`，为什么非流式响应里还是有 usage？
 
-**答案**：请求侧调用 `enable_usage_for_nonstreaming(&mut stream_options, original_stream_flag)`（[chat_completions/delta.rs:20-25](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/protocols/openai/chat_completions/delta.rs#L20-L25) 转发到 [delta_common.rs:194-208](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/protocols/openai/delta_common.rs#L194-L208)），它在非流式时把 `stream_options.include_usage` 强制置 true（缺失则先插入默认结构），随后 `DeltaGeneratorOptions::new` 读到 true，`get_usage` 的结果就会进入最终 JSON。注释明确说这是为了符合 OpenAI API 规范「非流式响应必须包含 usage」。
+**答案**：请求侧调用 `enable_usage_for_nonstreaming(&mut stream_options, original_stream_flag)`（[chat_completions/delta.rs:20-25](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/openai/chat_completions/delta.rs#L20-L25) 转发到 [delta_common.rs:194-208](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/openai/delta_common.rs#L194-L208)），它在非流式时把 `stream_options.include_usage` 强制置 true（缺失则先插入默认结构），随后 `DeltaGeneratorOptions::new` 读到 true，`get_usage` 的结果就会进入最终 JSON。注释明确说这是为了符合 OpenAI API 规范「非流式响应必须包含 usage」。
 
 **练习 4**：`RequestTracker` 在客户端没开启任何 nvext 字段时也被创建，为什么？
 
@@ -592,23 +599,23 @@ POST /v1/responses/input_tokens
 
 #### 4.5.3 源码精读
 
-[lib/llm/src/http/service/openai.rs:3228-3236](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L3228-L3236) — `handler_responses_input_tokens` 全文。注意它的 `State` 参数直接绑定成 `(_state, _template)`——连状态都不用看。函数体只有三行：读体 → 解析 → 返回估算。与之对照，紧随其后的 `handler_responses`（[openai.rs:3241-3259](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L3241-L3259)）做了完整的双重就绪检查——两个 handler 的开头并排读，差异一目了然。
+[lib/llm/src/http/service/openai.rs:3228-3236](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L3228-L3236) — `handler_responses_input_tokens` 全文。注意它的 `State` 参数直接绑定成 `(_state, _template)`——连状态都不用看。函数体只有三行：读体 → 解析 → 返回估算。与之对照，紧随其后的 `handler_responses`（[openai.rs:3241-3259](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L3241-L3259)）做了完整的双重就绪检查——两个 handler 的开头并排读，差异一目了然。
 
-[lib/llm/src/http/service/openai.rs:4224-4247](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L4224-L4247) — `responses_router`：父路径 `/v1/responses` 与派生子路径 `/v1/responses/input_tokens` 注册在**同一个** Router 上，共享 `smart_json_error_middleware` 与 `DefaultBodyLimit`。`input_tokens_path = format!("{}/input_tokens", path.trim_end_matches('/'))` 旁边的大段注释解释了尾部斜杠问题；`RouteDoc` 两条都返回，所以 `/openapi.json` 能看到子端点。
+[lib/llm/src/http/service/openai.rs:4224-4247](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L4224-L4247) — `responses_router`：父路径 `/v1/responses` 与派生子路径 `/v1/responses/input_tokens` 注册在**同一个** Router 上，共享 `smart_json_error_middleware` 与 `DefaultBodyLimit`。`input_tokens_path = format!("{}/input_tokens", path.trim_end_matches('/'))` 旁边的大段注释解释了尾部斜杠问题；`RouteDoc` 两条都返回，所以 `/openapi.json` 能看到子端点。
 
 估算逻辑本身在 `dynamo-protocols` crate 的 `CountInputTokensRequest::estimate_tokens`（外部依赖，不在本仓库），行为规格由回放测试钉死：
 
-[lib/llm/tests/responses_http_replay.rs:603-626](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/tests/responses_http_replay.rs#L603-L626) — `input_tokens_counts_input`：断言返回 `object == "response.input_tokens"`、计数 > 0，并且**引擎收到的请求数为 0**（"Counting is pre-flight only; it must never reach a backend"）。
+[lib/llm/tests/responses_http_replay.rs:603-626](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/tests/responses_http_replay.rs#L603-L626) — `input_tokens_counts_input`：断言返回 `object == "response.input_tokens"`、计数 > 0，并且**引擎收到的请求数为 0**（"Counting is pre-flight only; it must never reach a backend"）。
 
-[lib/llm/tests/responses_http_replay.rs:628-654](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/tests/responses_http_replay.rs#L628-L654) — `input_tokens_does_not_gate_on_model`：用一个 frontend 不服务的模型名、以及完全不带 `model` 字段，都必须返回 200。这是「不做模型级就绪检查」的行为规格。
+[lib/llm/tests/responses_http_replay.rs:628-654](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/tests/responses_http_replay.rs#L628-L654) — `input_tokens_does_not_gate_on_model`：用一个 frontend 不服务的模型名、以及完全不带 `model` 字段，都必须返回 200。这是「不做模型级就绪检查」的行为规格。
 
-[lib/llm/tests/responses_http_replay.rs:656-690](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/tests/responses_http_replay.rs#L656-L690) — `input_tokens_counts_instructions_and_tools`：同一 `input` 加上 `instructions` 与 `tools` 后计数必须变大——证明估算范围覆盖了完整请求而非只有 `input` 字段。
+[lib/llm/tests/responses_http_replay.rs:656-690](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/tests/responses_http_replay.rs#L656-L690) — `input_tokens_counts_instructions_and_tools`：同一 `input` 加上 `instructions` 与 `tools` 后计数必须变大——证明估算范围覆盖了完整请求而非只有 `input` 字段。
 
-[lib/llm/tests/responses_http_replay.rs:692-726](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/tests/responses_http_replay.rs#L692-L726) — `input_tokens_rejects_malformed_json`：坏 JSON 返回 400，错误信封与 `/v1/responses` 完全一致（`code:400`、`type:"Bad Request"`）。
+[lib/llm/tests/responses_http_replay.rs:692-726](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/tests/responses_http_replay.rs#L692-L726) — `input_tokens_rejects_malformed_json`：坏 JSON 返回 400，错误信封与 `/v1/responses` 完全一致（`code:400`、`type:"Bad Request"`）。
 
-[lib/llm/tests/responses_http_replay.rs:728-832](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/tests/responses_http_replay.rs#L728-L832) — 工具调用会话 item 的两个测试：`input_tokens_accepts_tool_call_conversation_items`（`function_call`/`function_call_output` 必须被计入，含 `input_tokens_tolerates_tool_shapes_it_cannot_model` 的宽容分支）与 `parallel_tool_calls_are_one_assistant_message_for_both_endpoints`——把同一批 item 同时发给 `input_tokens` 与 `/v1/responses`，用引擎实际收到的 chat 消息作为「应记几次 assistant 角色标记」的真值，钉死估算器与转换器的 coalescing 等价性。
+[lib/llm/tests/responses_http_replay.rs:728-832](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/tests/responses_http_replay.rs#L728-L832) — 工具调用会话 item 的两个测试：`input_tokens_accepts_tool_call_conversation_items`（`function_call`/`function_call_output` 必须被计入，含 `input_tokens_tolerates_tool_shapes_it_cannot_model` 的宽容分支）与 `parallel_tool_calls_are_one_assistant_message_for_both_endpoints`——把同一批 item 同时发给 `input_tokens` 与 `/v1/responses`，用引擎实际收到的 chat 消息作为「应记几次 assistant 角色标记」的真值，钉死估算器与转换器的 coalescing 等价性。
 
-顺带一提 metrics.rs 侧的配套：[lib/llm/src/http/service/metrics.rs](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/metrics.rs) 的测试里有一条回归——「无 choice 的 nvext 元数据帧（如 `engine_data.prompt_token_ids`）必须原样到达客户端 SSE」，测试使用类型化的 `process_chat_response_using_event_converter_and_observe_metrics`（[metrics.rs:2174](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/metrics.rs#L2174)）。这保证了 RL 需要的 token 级元数据不会被指标层吞掉——与 `input_tokens` 一起构成对 rollout 场景的支撑。
+顺带一提 metrics.rs 侧的配套：[lib/llm/src/http/service/metrics.rs](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/metrics.rs) 的测试里有一条回归——「无 choice 的 nvext 元数据帧（如 `engine_data.prompt_token_ids`）必须原样到达客户端 SSE」，测试使用类型化的 `process_chat_response_using_event_converter_and_observe_metrics`（[metrics.rs:2174](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/metrics.rs#L2174)）。这保证了 RL 需要的 token 级元数据不会被指标层吞掉——与 `input_tokens` 一起构成对 rollout 场景的支撑。
 
 #### 4.5.4 代码实践
 
@@ -672,7 +679,7 @@ POST /v1/responses/input_tokens
 
 **练习 2**：如果把 `DYN_HTTP_SVC_RESPONSES_PATH` 设成 `/custom/`（带尾部斜杠），`/custom/input_tokens` 还能访问吗？为什么？
 
-**答案**：能。`responses_router` 派生子路径时用 `path.trim_end_matches('/')` 先去掉尾部斜杠再拼 `/input_tokens`（[openai.rs:4230-4237](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L4230-L4237)），注册出来的是 `/custom/input_tokens`。如果不做这个 trim，会注册出 `/custom//input_tokens`，而 axum 不把它当作等价路径，客户端实际调用的地址就会 404。父路径本身仍按原样（带斜杠）注册，所以已有配置行为不变。回放测试 `input_tokens_path_normalizes_a_trailing_slash_parent`（[responses_http_replay.rs:885](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/tests/responses_http_replay.rs#L885) 起）钉死了这个行为。
+**答案**：能。`responses_router` 派生子路径时用 `path.trim_end_matches('/')` 先去掉尾部斜杠再拼 `/input_tokens`（[openai.rs:4230-4237](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L4230-L4237)），注册出来的是 `/custom/input_tokens`。如果不做这个 trim，会注册出 `/custom//input_tokens`，而 axum 不把它当作等价路径，客户端实际调用的地址就会 404。父路径本身仍按原样（带斜杠）注册，所以已有配置行为不变。回放测试 `input_tokens_path_normalizes_a_trailing_slash_parent`（[responses_http_replay.rs:885](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/tests/responses_http_replay.rs#L885) 起）钉死了这个行为。
 
 **练习 3**：为什么回放测试要专门断言「估算后引擎收到的请求数为 0」，还要断言「并行工具调用只记一次 assistant 消息」？
 
@@ -708,15 +715,15 @@ POST /v1/embeddings（encoding_format 缺省 = float）
 
 #### 4.6.3 源码精读
 
-[lib/llm/src/http/service/openai.rs:1402-1415](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L1402-L1415) — 内部线格式的动机注释 + `client_wants_float` 的判定：worker 永远以 base64 发向量以避免内部跳上的 JSON 浮点数组序列化/解析开销（注释提到 DIS-2154 有实测数据）；客户端要 float（默认）时才在 HTTP 边界解码，使公开响应形状与 `encoding_format` 选择一致。
+[lib/llm/src/http/service/openai.rs:1402-1415](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L1402-L1415) — 内部线格式的动机注释 + `client_wants_float` 的判定：worker 永远以 base64 发向量以避免内部跳上的 JSON 浮点数组序列化/解析开销（注释提到 DIS-2154 有实测数据）；客户端要 float（默认）时才在 HTTP 边界解码，使公开响应形状与 `encoding_format` 选择一致。
 
-[lib/llm/src/http/service/openai.rs:1493-1518](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L1493-L1518) — 出口解码循环：遍历 `response.inner.data`，遇到 `EmbeddingVector::Base64(s)` 就调 `decode_base64_to_floats` 替换成 `Float`；失败路径返回 500 并计入错误指标。
+[lib/llm/src/http/service/openai.rs:1493-1518](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L1493-L1518) — 出口解码循环：遍历 `response.inner.data`，遇到 `EmbeddingVector::Base64(s)` 就调 `decode_base64_to_floats` 替换成 `Float`；失败路径返回 500 并计入错误指标。
 
-[lib/llm/src/preprocessor.rs:300-319](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/preprocessor.rs#L300-L319) — `decode_base64_to_floats`：标准 base64 解码 → 校验字节数是 4 的倍数（尾部残字节拒绝）→ `chunks_exact(4)` 逐块 `f32::from_le_bytes`。doc 注释明确说明它被「tokens 路径的 postprocessor 与 HTTP embedding handler 共享」——这就是 #12157 收拢后的单一实现点。
+[lib/llm/src/preprocessor.rs:300-319](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/preprocessor.rs#L300-L319) — `decode_base64_to_floats`：标准 base64 解码 → 校验字节数是 4 的倍数（尾部残字节拒绝）→ `chunks_exact(4)` 逐块 `f32::from_le_bytes`。doc 注释明确说明它被「tokens 路径的 postprocessor 与 HTTP embedding handler 共享」——这就是 #12157 收拢后的单一实现点。
 
-[lib/llm/src/protocols/openai/embeddings.rs:14-37](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/protocols/openai/embeddings.rs#L14-L37) — `NvCreateEmbeddingRequest`：`inner` flatten 内嵌 OpenAI 的 `CreateEmbeddingRequest`，外加 Dynamo 扩展字段——`add_special_tokens`（#12157 新增，vLLM 兼容：raw text 输入是否加模型声明的特殊 token，缺省时加、与 vLLM pooling 默认一致，调用方给 token_ids 时忽略）与 `truncate_prompt_tokens`（vLLM 风格截断长度，-1 为「截到模型最大长度」哨兵；当前实现走右截断、保留前 N 个 token）。
+[lib/llm/src/protocols/openai/embeddings.rs:14-37](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/openai/embeddings.rs#L14-L37) — `NvCreateEmbeddingRequest`：`inner` flatten 内嵌 OpenAI 的 `CreateEmbeddingRequest`，外加 Dynamo 扩展字段——`add_special_tokens`（#12157 新增，vLLM 兼容：raw text 输入是否加模型声明的特殊 token，缺省时加、与 vLLM pooling 默认一致，调用方给 token_ids 时忽略）与 `truncate_prompt_tokens`（vLLM 风格截断长度，-1 为「截到模型最大长度」哨兵；当前实现走右截断、保留前 N 个 token）。
 
-[lib/llm/src/http/service/openai.rs:1431-1464](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L1431-L1464) — embeddings handler 的指标 guard 与引擎调用：同样「尽早创建 inflight guard 让校验错误也计数」、`get_embeddings_engine(model)` 按模型取引擎、`engine.generate` 的拒绝错误计入 rejection 指标。多进程嵌入 worker 池如何喂这个引擎见 u8-l8。
+[lib/llm/src/http/service/openai.rs:1431-1464](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L1431-L1464) — embeddings handler 的指标 guard 与引擎调用：同样「尽早创建 inflight guard 让校验错误也计数」、`get_embeddings_engine(model)` 按模型取引擎、`engine.generate` 的拒绝错误计入 rejection 指标。多进程嵌入 worker 池如何喂这个引擎见 u8-l8。
 
 #### 4.6.4 代码实践
 
@@ -737,7 +744,7 @@ POST /v1/embeddings（encoding_format 缺省 = float）
        'import json,sys,base64,struct; s=json.load(sys.stdin)["data"][0]["embedding"];
         b=base64.b64decode(s); print("bytes:",len(b),"dim:",len(b)//4,"first3:",struct.unpack("<3f",b[:12]))'
    ```
-2. （离线验证，无需服务）用 Python 生成一段向量，按「little-endian f32 → base64」编码，再对照 [preprocessor.rs:300-319](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/preprocessor.rs#L300-L319) 的规则手算：7 个 float 编码后是 28 字节，能否通过「4 的倍数」校验？如果故意造 5 字节的载荷，Rust 侧会返回什么错误信息？
+2. （离线验证，无需服务）用 Python 生成一段向量，按「little-endian f32 → base64」编码，再对照 [preprocessor.rs:300-319](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/preprocessor.rs#L300-L319) 的规则手算：7 个 float 编码后是 28 字节，能否通过「4 的倍数」校验？如果故意造 5 字节的载荷，Rust 侧会返回什么错误信息？
    ```python
    import base64, struct
    vec = [0.0, 1.0, -1.0, 2.5]
@@ -818,25 +825,25 @@ event.event == "error" ?
 
 #### 4.7.3 源码精读
 
-[lib/llm/src/http/service/openai.rs:2222-2241](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L2222-L2241) — `BackendErrorInfo`：提取结果的载体。注意第三个字段 `sanitized: Option<SanitizedError>`——当状态码本身不足以恢复分类时（如过载被配置成 503/500）保留已确定的消毒标记。
+[lib/llm/src/http/service/openai.rs:2222-2241](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L2222-L2241) — `BackendErrorInfo`：提取结果的载体。注意第三个字段 `sanitized: Option<SanitizedError>`——当状态码本身不足以恢复分类时（如过载被配置成 503/500）保留已确定的消毒标记。
 
-[lib/llm/src/http/service/openai.rs:2245-2267](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L2245-L2267) — `extract_backend_error_if_present` 的开头与**类型化分类**：`error.error_type()` 匹配 `ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)`。注释强调只分类本节点的错误、不查 cause 链——这正是 #13930 之后唯一的 invalid-argument 判定途径（旧的字符串前缀分支已删除）。
+[lib/llm/src/http/service/openai.rs:2245-2267](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L2245-L2267) — `extract_backend_error_if_present` 的开头与**类型化分类**：`error.error_type()` 匹配 `ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)`。注释强调只分类本节点的错误、不查 cause 链——这正是 #13930 之后唯一的 invalid-argument 判定途径（旧的字符串前缀分支已删除）。
 
-[lib/llm/src/http/service/openai.rs:2269-2299](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L2269-L2299) — 诊断串的组装：优先用 `DynamoError::message()`（避免 `to_string()` 带上 `ErrorType` 前缀破坏 JSON 解析），沿 `source()` 链逐层拼接；以及容量拒绝的判定（注释解释了为何错误链优先于 payload code——worker 自报的 503 与真实宕站在客户端视角无法区分，见 `DYN_HTTP_OVERLOAD_STATUS_CODE`）。
+[lib/llm/src/http/service/openai.rs:2269-2299](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L2269-L2299) — 诊断串的组装：优先用 `DynamoError::message()`（避免 `to_string()` 带上 `ErrorType` 前缀破坏 JSON 解析），沿 `source()` 链逐层拼接；以及容量拒绝的判定（注释解释了为何错误链优先于 payload code——worker 自报的 503 与真实宕站在客户端视角无法区分，见 `DYN_HTTP_OVERLOAD_STATUS_CODE`）。
 
-[lib/llm/src/http/service/openai.rs:2301-2350](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L2301-L2350) — 判定阶梯主体：JSON 状态载荷（保留显式 HTTP 风格状态码，如 415）→ typed invalid_argument → 400 → overloaded → 过载状态码 → 兜底 500。**#13930 删除的分支就位于 typed 分支与兜底之间**——旧代码会在兜底前尝试 `error_str.strip_prefix("BackendInvalidArgument: ")` 恢复 400，现在未知错误一律按消毒 500 处理。
+[lib/llm/src/http/service/openai.rs:2301-2350](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L2301-L2350) — 判定阶梯主体：JSON 状态载荷（保留显式 HTTP 风格状态码，如 415）→ typed invalid_argument → 400 → overloaded → 过载状态码 → 兜底 500。**#13930 删除的分支就位于 typed 分支与兜底之间**——旧代码会在兜底前尝试 `error_str.strip_prefix("BackendInvalidArgument: ")` 恢复 400，现在未知错误一律按消毒 500 处理。
 
 jail 侧的旁路实现（机制属 u4-l3，这里只看与错误类型相关的三处）：
 
-[lib/llm/src/preprocessor.rs:4835-4861](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/preprocessor.rs#L4835-L4861) — 大段注释解释了问题与契约：jail 的 vendored finalize 无法区分「错误导致的 EOF」与「自然 EOF」，可能从残缺参数合成假的 `tool_calls` 完成帧；解法是 `terminal_error` 锁存第一个错误 Annotated，`take_while` 让它**根本到不了 jail**，出口侧的 `take_while`/`chain` 丢弃 jail 在该点之后的产出并替换为错误——「绝不让合成完成帧到达调用方」。
+[lib/llm/src/preprocessor.rs:4835-4861](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/preprocessor.rs#L4835-L4861) — 大段注释解释了问题与契约：jail 的 vendored finalize 无法区分「错误导致的 EOF」与「自然 EOF」，可能从残缺参数合成假的 `tool_calls` 完成帧；解法是 `terminal_error` 锁存第一个错误 Annotated，`take_while` 让它**根本到不了 jail**，出口侧的 `take_while`/`chain` 丢弃 jail 在该点之后的产出并替换为错误——「绝不让合成完成帧到达调用方」。
 
-[lib/llm/src/preprocessor.rs:4926-4934](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/preprocessor.rs#L4926-L4934) — 入口映射处：`debug_assert!(a.error.is_none(), "terminal errors must bypass the jail")`，且 `JailAnnotated` 的 `error` 字段**无条件置 `None`**——注释说明终端错误已被上面的 `take_while` 移除、原始带类型 Dynamo 注解将在出口接回。
+[lib/llm/src/preprocessor.rs:4926-4934](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/preprocessor.rs#L4926-L4934) — 入口映射处：`debug_assert!(a.error.is_none(), "terminal errors must bypass the jail")`，且 `JailAnnotated` 的 `error` 字段**无条件置 `None`**——注释说明终端错误已被上面的 `take_while` 移除、原始带类型 Dynamo 注解将在出口接回。
 
-[lib/llm/src/preprocessor.rs:4970-4973](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/preprocessor.rs#L4970-L4973) — 出口映射处的第二道 `debug_assert`："dynamo-parsers must not construct errors"——jail（来自 dynamo-parsers 的 vendored 代码）不构造错误，错误只能来自 Dynamo 原生注解，因此不需要任何字符串转换。
+[lib/llm/src/preprocessor.rs:4970-4973](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/preprocessor.rs#L4970-L4973) — 出口映射处的第二道 `debug_assert`："dynamo-parsers must not construct errors"——jail（来自 dynamo-parsers 的 vendored 代码）不构造错误，错误只能来自 Dynamo 原生注解，因此不需要任何字符串转换。
 
 行为规格由回放测试钉死（#13930 同步修正了它）：
 
-[lib/llm/tests/responses_http_replay.rs:128-232](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/tests/responses_http_replay.rs#L128-L232) — `streaming_backend_error_closes_partial_output_and_counts_failure`：构造一个带类型的 `Backend(InvalidArgument)` 错误（场景正是「多模态内容发给未开启多模态的模型」），断言流式响应正确收尾（partial 输出的 done 帧依次关闭、`response.failed` 最后到达、无 `response.completed`），客户端拿到的错误码是 `invalid_prompt` 且 message 保留原始文本，指标计一次 `ErrorType::Internal` 的失败。**#13930 的改动点在第 146-149 行**：测试直接 `DynamoError::builder().error_type(Backend(InvalidArgument)).build()`，删掉了旧版里 `DynamoError::msg(typed_error.to_string())` 这层「模拟类型擦除」的包装——因为真实链路（jail 修复后）不再擦除类型，测试也就不需要再模拟擦除。
+[lib/llm/tests/responses_http_replay.rs:128-232](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/tests/responses_http_replay.rs#L128-L232) — `streaming_backend_error_closes_partial_output_and_counts_failure`：构造一个带类型的 `Backend(InvalidArgument)` 错误（场景正是「多模态内容发给未开启多模态的模型」），断言流式响应正确收尾（partial 输出的 done 帧依次关闭、`response.failed` 最后到达、无 `response.completed`），客户端拿到的错误码是 `invalid_prompt` 且 message 保留原始文本，指标计一次 `ErrorType::Internal` 的失败。**#13930 的改动点在第 146-149 行**：测试直接 `DynamoError::builder().error_type(Backend(InvalidArgument)).build()`，删掉了旧版里 `DynamoError::msg(typed_error.to_string())` 这层「模拟类型擦除」的包装——因为真实链路（jail 修复后）不再擦除类型，测试也就不需要再模拟擦除。
 
 #### 4.7.4 代码实践
 
@@ -857,7 +864,7 @@ jail 侧的旁路实现（机制属 u4-l3，这里只看与错误类型相关的
      -d '{"model":"sample-model","stream":true,"messages":[{"role":"user","content":"hi"}],"max_tokens":-5}' \
      | head -1
    ```
-2. （源码阅读型）在 [openai.rs:2245](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L2245) 的 `extract_backend_error_if_present` 里做一次「考古」：
+2. （源码阅读型）在 [openai.rs:2245](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L2245) 的 `extract_backend_error_if_present` 里做一次「考古」：
    - `git log -L 2245,2350:lib/llm/src/http/service/openai.rs --oneline | head -30` 查看这段函数最近的演变；
    - `git show 6841ea190a -- lib/llm/src/http/service/openai.rs` 查看 #13930 删除的 26 行；
    - 在笔记里回答：旧分支要恢复的字符串前缀是什么？它存在的前提（哪条路径会产出这种字符串）被哪个提交、在哪一层修掉了？
@@ -884,9 +891,309 @@ jail 侧的旁路实现（机制属 u4-l3，这里只看与错误类型相关的
 
 **答案**：两处断言守护的是**两个不同方向的契约**。入口处（`terminal errors must bypass the jail`）保证进入 jail 映射的 `Annotated` 不可能带错误——如果违反，说明 `take_while` 的扣留逻辑被破坏，错误会再次面对「被 jail finalize 吞掉/改写」的风险；出口处（`dynamo-parsers must not construct errors`）保证 jail（vendored 的 dynamo-parsers 代码）自身不产错误——如果违反，说明 jail 内部开始合成 `JailAnnotated.error`，而下游的错误分类只认 Dynamo 原生类型，字符串化的错误会退化成 500。`debug_assert` 只在 debug 构建生效，release 零开销——这是把「不变量」变成可执行文档的典型手法。
 
+---
+
+### 4.8 Generate 端点的指标生命周期：GenerateMetricLifecycle（#11385）
+
+#### 4.8.1 概念说明
+
+`/inference/v1/generate` 是三类端点里最「裸」的一个：token_ids 进、token_ids 出，**绕过分词器与后处理管线**（请求里的 token 已经是渲染好的，不需要模板、媒体计数、detokenize）。这带来一个指标上的空洞——chat/completions 端点的响应指标（TTFT、ITL、OSL、cached tokens）本来是从后处理管线产出的 `LLMMetricAnnotation` 里观察到的，generate 端点根本没有这条注解流。
+
+#11385（+1150 行）补上了这个空洞，思路不是新写一套指标，而是**复用 metrics.rs 的三件套**并换一个观察点：
+
+- `InflightGuard`：在途请求 gauge（`dynamo_frontend_active_requests`）；
+- `HttpQueueGuard`：从 handler 开始到首 token 的排队 gauge（`dynamo_frontend_queued_requests`）；
+- `ResponseMetricCollector`：TTFT/ITL/OSL/ISL/cached tokens 等 histogram 与 counter。
+
+新的组合体叫 `GenerateMetricLifecycle`：**在 handler 一进来就建立**（哪怕请求随后被 400/404/503 拒绝，也计入 `requests_total` 的失败序列），然后**移动进 dispatch 任务**，在流上逐帧 `observe`，最终随任务结束 drop。这解决了 generate 端点一个特有的结构问题：指标状态要跨越「handler 返回 → spawn 出去的 dispatch 任务」这条所有权边界，用一个结构体把三个 guard 与 tracker 打包搬运，比在两个函数间传一堆可变引用干净得多。
+
+另一个关键设计是 **span 字段的「先声明、后补写」**：`generate_dispatch_span` 用 `tracing::field::Empty` 声明六个字段（`input_tokens`/`output_tokens`/`ttft_ms`/`avg_itl_ms`/`prefill_worker_id`/`decode_worker_id`），真正的值由 `ResponseMetricCollector` 的 `Drop` 实现在 collector 销毁那一刻 `span.record(...)` 补上——因为 TTFT/ITL 只有到请求结束才知道全貌。这就把「Prometheus 指标」与「单请求 tracing 摘要」统一到了同一份数据采集点上。
+
+还有一条容易被忽略的细节：**指标用的模型名是归一过的**。请求里的 `model` 先经 `ModelManager::resolve_canonical_name` 把别名解析成主名；若请求没带 model，则把「按能力发现的模型列表」整体过一遍同样的解析再去重。解析结果再经 `metric_model_for` 收敛——没注册的名字一律换成哨兵 `unknown_model`，防止客户端随便编造模型名把 Prometheus 的 label 基数打爆。
+
+#### 4.8.2 核心流程
+
+```text
+handler_generate（handler 一进来就做，早于任何就绪检查）
+ ├─ 1. 归一模型名
+ │     request.model 有值 → resolve_canonical_name(model)     # 别名 → 主名
+ │     request.model 为空 → list_generate_models_for_capability(...)
+ │                          .map(resolve_canonical_name) 去重   # 能力发现 + 归一
+ ├─ 2. metric_model = metric_model_for(resolved)               # 未注册 → "unknown_model"
+ ├─ 3. tracker = RequestTracker::new(); tracker.record_isl(token_ids.len())
+ ├─ 4. dispatch_span = generate_dispatch_span(request_id, metric_model)
+ │        # target="request_span"，六个字段声明为 Empty
+ ├─ 5. dispatch_span.in_scope(|| GenerateMetricLifecycle::new(state, metric_model, ...))
+ │        ├─ inflight: InflightGuard(model, Endpoint::Generate, unary, request_id)
+ │        └─ collector: GenerateMetricCollector
+ │             ├─ response: ResponseMetricCollector
+ │             ├─ http_queue: Some(HttpQueueGuard)     # 首 token 前 hold
+ │             ├─ tracker / input_tokens / output_tokens=0
+ │             └─ worker_info_observed = false          # worker 标签只抄一次
+ ├─ 6. 之后的每个早退分支（!ready→503 / 校验失败→400 / stream→501 /
+ │        无模型→404 / 多模型→400 / 模型不就绪→503 / 取引擎失败）：
+ │        metric_lifecycle.mark_error(generate_metric_error_type(status)); return
+ └─ 7. tokio::spawn(generate_dispatch(...).instrument(dispatch_span))
+          │   # dispatch 整个跑在 span 里 ⇒ collector 的 drop 也发生在 span 里
+          ├─ engine.generate(context) → stream
+          ├─ stream.map(|mut a| { collector.observe(&mut a); a })
+          │     observe 每帧做五件事：
+          │       a. routing_data.take() → tracker.set_external_timing / 
+          │          set_external_worker_info / set_external_query_token_ids
+          │       b. observe_worker_info()（仅一次）→ response.set_worker_info(
+          │            prefill_id/rank/type, decode_id/rank/type)
+          │       c. cached_tokens = completion_usage.prompt_tokens_details.cached_tokens
+          │            （仅当 usage.prompt_tokens == 本请求 input_tokens 才采信）
+          │       d. output_tokens += token_ids.len(); observe_current_osl(output_tokens)
+          │       e. 首 token 且 chunk>0 → drop(HttpQueueGuard)   # 排队结束
+          │          response.observe_response(input_tokens, chunk_tokens)
+          └─ 结束：mark_ok / mark_error(Cancelled|Unavailable|Internal)
+                    → collector 在 span 内 drop
+                      → ResponseMetricCollector::drop 补写 span 六字段
+                        + flush ITL histogram + 最终 OSL histogram
+```
+
+关于第 6 步的 `generate_metric_error_type`：它把 HTTP 状态码映射回指标用的 `ErrorType`（400→Validation、404→NotFound、501→NotImplemented、429/529→Overload、503→Unavailable、499→Cancelled、其余 5xx→Internal），保证 `requests_total` 的 `error_type` label 与响应状态码语义一致。
+
+关于 cached tokens 的两条规则（容易考）：**流中**采信后端 `completion_usage`，但带一个过滤条件——`usage.prompt_tokens == self.input_tokens` 才算数，因为**迁移重试**（RetryManager）会把已产出的 token 拼回新请求的 prompt，此时 attempt 本地的 usage 不再代表这个逻辑请求；**drop 时**再兜底一次 `tracker.cached_tokens()`（路由器侧的估计），填补后端没报或被迁移撑大的情况。谁先给出有效值用谁，两边都有时后端优先。
+
+#### 4.8.3 源码精读
+
+先看两个新结构体与它们的装配：
+
+[lib/llm/src/http/service/generate.rs:646-659](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L646-L659) — `GenerateMetricCollector` 的 doc 注释直说了动机：generate 端点「刻意绕过产出 `LLMMetricAnnotation` 的分词器/后处理管线，token ID 已经渲染好，所以从**原始 token delta** 观察同样的响应指标，同时不碰分词器与媒体指标」。字段就是三件套的引用加两个计数器和一个「worker 信息是否已抄送」的 bool。
+
+[lib/llm/src/http/service/generate.rs:661-691](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L661-L691) — `GenerateMetricLifecycle`：包着 `InflightGuard` + `GenerateMetricCollector` + `metric_model`。`new()` 一口气建好 inflight guard（`Endpoint::Generate`、unary）与 collector；`mark_error()` 只是转发给 inflight guard——注意它**不动 collector**，失败请求不该往 TTFT/OSL histogram 里灌零值。
+
+[lib/llm/src/http/service/generate.rs:693-708](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L693-L708) — `GenerateMetricCollector::new`：`create_response_collector` + `create_http_queue_guard`，就是 4.2 节讲过的 metrics.rs 三件套工厂。generate 端点没有复用 `create_inflight_guard` 之外的开销——一切与 chat 端点同源。
+
+span 的声明与「补写」两端：
+
+[lib/llm/src/http/service/generate.rs:153-166](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L153-L166) — `generate_dispatch_span`：`info_span!` 指定 `target: "request_span"`，六个业务字段全部 `tracing::field::Empty`——此刻只有 `request_id` 与 `model` 有值。
+
+[lib/llm/src/http/service/metrics.rs:1942-1995](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/metrics.rs#L1942-L1995) — `ResponseMetricCollector::drop` 的后半段就是「补写端」：flush ITL histogram、只为真正产出过 token 的请求记最终 OSL（注释解释了给失败请求记 0 会污染 histogram 的 sum/count），然后 `tracing::Span::current()` 上 `span.record("input_tokens"/"output_tokens"/"ttft_ms"/"avg_itl_ms"/"prefill_worker_id"/"decode_worker_id")`。注释点明动机："InflightGuard::Drop and on_response logs will inherit these"——span 关闭前补的字段会被同 span 的后续日志继承。**这段代码不是 #11385 新写的**（chat 端点早就在用），新的是 generate 端点把 collector 的 drop 安排进了自己的 dispatch span。
+
+handler 侧的接线：
+
+[lib/llm/src/http/service/generate.rs:793-825](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L793-L825) — 指标生命周期的建立点，注意它发生在 `check_ready` **之前**：别名解析（807 行）→ 隐式模型按能力发现并归一（794-803 行，`canonical_generate_models` 的定义在 [generate.rs:49-59](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L49-L59)，用 `BTreeSet` 顺带去重排序）→ `metric_model_for`（809-813 行）→ 建 tracker 并 `record_isl` → `dispatch_span.in_scope(|| GenerateMetricLifecycle::new(...))`（816-825 行）。`in_scope` 保证 `HttpQueueGuard` 的「开始排队」时间戳落在 span 内。
+
+[lib/llm/src/http/service/generate.rs:61-73](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L61-L73) — `generate_metric_error_type`：状态码 → `ErrorType` 的映射表，每个早退分支的 `mark_error` 都用它。
+
+[lib/llm/src/http/service/generate.rs:941-965](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L941-L965) — dispatch 的 spawn 与 `.instrument(dispatch_span)`：这一行是 span 补写能生效的**关键**——collector 随 `GenerateMetricLifecycle` move 进 dispatch 任务，任务又整体 instrument 在 dispatch_span 里，所以 drop 发生时 `Span::current()` 正是那个声明了六个 Empty 字段的 span。
+
+流上逐帧观察的实现：
+
+[lib/llm/src/http/service/generate.rs:711-728](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L711-L728) — `observe_worker_info`：从 `tracker.get_worker_info()` 把 prefill/decode 的 worker id、dp rank、worker type **抄送一次**给 `ResponseMetricCollector`（`worker_info_observed` 防重复）。worker 信息是路由器沿 `routing_data` 注解带回来的，可能晚于首帧到达，所以每帧都试、抄到即止。
+
+[lib/llm/src/http/service/generate.rs:730-774](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L730-L774) — `observe` 全文，五步对应 4.8.2 流程图的 a–e。两段注释值得读：`filter(|usage| usage.prompt_tokens as usize == self.input_tokens)` 旁边解释了**迁移重试会把已交付 token 计入新 attempt 的 prompt**，所以 attempt 本地的 usage 不能代表逻辑请求；`chunk_tokens` 旁边解释 RetryManager 只 yield 新生成的 delta，所以逐帧累加**跨迁移仍然精确**。
+
+[lib/llm/src/http/service/generate.rs:777-785](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L777-L785) — `Drop for GenerateMetricCollector`：兜底 `tracker.cached_tokens()`——「后端匹配的 usage 出现时是权威（流中已 latch）；这个逻辑请求级的路由器估计用来填补缺失或被迁移撑大的 attempt usage」。
+
+[lib/llm/src/http/service/generate.rs:1026-1030](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L1026-L1030) — 消费点：`stream.map(move |mut annotated| { metric_collector.observe(&mut annotated); annotated })`——指标观察以 `&mut` 借用方式嵌在流上，原始帧原样放行给 `GenerateResponse::from_annotated_stream_with_options` 聚合，指标层对业务零侵入。
+
+模型名归一的两侧定义：
+
+[lib/llm/src/discovery/model_manager.rs:601-610](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/discovery/model_manager.rs#L601-L610) — `resolve_canonical_name`：查别名表，命中返回主名，未命中原样返回。
+
+[lib/llm/src/discovery/model_manager.rs:1009-1022](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/discovery/model_manager.rs#L1009-L1022) — `metric_model_for`：注册过的名字原样返回（保留大小写），否则返回 [model_manager.rs:119](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/discovery/model_manager.rs#L119) 的 `UNKNOWN_METRIC_MODEL`（`"unknown_model"`）——doc 注释明说这是为了「未知模型的请求不要污染 Prometheus label 基数」，且要求**所有**在引擎查找之前创建的 metric child 都用它。
+
+行为规格（同文件测试区，全部为 #11385 新增）：
+
+[lib/llm/src/http/service/generate.rs:2222-2251](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L2222-L2251) — `generate_dispatch_span_uses_resolved_request_id`：用一个捕获 span 字段的 tracing Layer 断言 span 用的是**解析后的** request id，且六个业务字段全部存在于 span metadata。
+
+[lib/llm/src/http/service/generate.rs:2593-2759](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L2593-L2759) — `successful_generate_populates_frontend_metrics`：一次成功请求后逐个断言 `dynamo_frontend_active_requests`/`queued_requests` 归零、`request_duration_seconds` 计 1、ISL=3/OSL=2、`output_tokens_total`=2、TTFT 与 ITL histogram 各计 1、`cached_tokens`=2，以及带 worker 标签的 `WORKER_LAST_*` gauge 三件——这张断言清单本身就是「generate 端点暴露哪些指标」的权威索引。
+
+[lib/llm/src/http/service/generate.rs:2761-2824](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L2761-L2824) — `split_router_worker_metadata_populates_generate_metrics`：手工构造带 `routing_data.worker_id`（prefill/decode 各一个 id）的帧，断言 worker 标签确实从 `RequestTracker` 流进了指标——对应 4.8.2 的 a/b 两步。
+
+[lib/llm/src/http/service/generate.rs:2825-2859](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L2825-L2859) 与 [generate.rs:2861](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L2861) 起 — 两条 cached_tokens 规格测试：`generate_metrics_fall_back_to_tracker_cached_tokens`（后端不报时用 tracker 估计）与 `migrated_generate_uses_logical_request_cache_metrics`（迁移场景下 attempt usage 被过滤、以逻辑请求口径计数）。
+
+[lib/llm/src/http/service/generate.rs:1521-1566](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L1521-L1566) — `generate_alias_uses_primary_model_for_routing_and_metrics`：用别名发请求，断言路由与**指标 label** 都用主名——4.8.1 讲的归一链路的行为规格。
+
+[lib/llm/src/http/service/generate.rs:1566-1660](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L1566-L1660) — `generate_early_failures_are_counted`：各种早退（无模型/多模型/stream/坏参数）都要计入失败指标——「生命周期建立在就绪检查之前」的行为规格。
+
+#### 4.8.4 代码实践
+
+**实践目标**：让 `/inference/v1/generate` 真正跑起来（或退化为跑测试），观察三件事——① inflight/queued gauge 随压力起伏；② TTFT/ITL/OSL/cached_tokens 各 histogram 有样本；③ `request_span` 上的六个字段在日志里带值出现。
+
+**操作步骤**：
+
+1. **有 vLLM 环境时**（generate 端点需要 worker 广播 `VLLM_INFERENCE_V1_GENERATE_CAPABILITY`，sample 假后端不会广播）：启动 vLLM 后端并打开端点，然后压测（示例代码，非项目自带）：
+   ```bash
+   DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE=1 DYN_HTTP_PORT=8000 python3 -m dynamo.frontend
+   for i in $(seq 1 50); do
+     curl -s -X POST localhost:8000/inference/v1/generate \
+       -H 'content-type: application/json' \
+       -d '{"model":"<你的模型>","token_ids":[1,2,3,4,5],"stream":false,
+            "max_tokens":32}' > /tmp/gen_$i.json &
+   done; wait
+   ```
+2. 压测中与压测后各采样一次指标：
+   ```bash
+   curl -s localhost:8000/metrics | grep -E 'dynamo_frontend_(active|queued|request_duration|input_sequence|output_sequence|output_tokens_total|time_to_first|inter_token|cached_tokens)' | grep -v '^#'
+   ```
+3. 打开 request_span 日志再发一条请求（让 span 字段可见）：
+   ```bash
+   RUST_LOG=request_span=info python3 -m dynamo.frontend   # 具体级别名待本地验证
+   curl -s -X POST localhost:8000/inference/v1/generate -H 'content-type: application/json' \
+     -d '{"model":"<你的模型>","token_ids":[1,2,3],"stream":false,"max_tokens":8}'
+   # 在日志里找 target=request_span 的 generate 事件，检查
+   # input_tokens/output_tokens/ttft_ms/avg_itl_ms/prefill_worker_id/decode_worker_id
+   ```
+4. **无 vLLM 环境时**（本讲的兜底路径，纯本地可跑）：
+   ```bash
+   cargo test -p dynamo-llm --lib http::service::generate::tests
+   ```
+   重点看 `successful_generate_populates_frontend_metrics`、`split_router_worker_metadata_populates_generate_metrics`、`generate_early_failures_are_counted` 三个测试的断言输出。
+
+**需要观察的现象**：
+
+- 步骤 2：压测中 `dynamo_frontend_active_requests` 与 `dynamo_frontend_queued_requests` 大于 0，压测后归零；`dynamo_frontend_time_to_first_token_seconds` 与 `inter_token_latency_seconds` 的 sample_count 等于成功请求数；`output_tokens_total` 是 counter（只增）。
+- 步骤 3：`request_span` 的 generate 事件里六个字段**有值**（不再是 Empty），且 `ttft_ms` 与首 token 到达时刻对得上、`avg_itl_ms` 大致等于总时长减 TTFT 除以 token 间隔数。
+- 步骤 4：generate 模块的全部测试通过（含 4.8.3 列出的指标测试）。
+
+**预期结果**：整理一张「指标名 → 类型（gauge/histogram/counter）→ 采点（InflightGuard 建立/HttpQueueGuard 释放/observe 每帧/collector drop）」的对照表。若第 1 步环境不可得，以第 4 步的测试断言 + 源码精读为产出。generate 端点在 sample 后端上返回 404 本身也值得记录——那是能力发现（`VLLM_INFERENCE_V1_GENERATE_CAPABILITY`）在防串台，且这条 404 现在也会计入 `requests_total{error_type="not_found"}`。待本地验证。
+
+#### 4.8.5 小练习与答案
+
+**练习 1**：为什么 `GenerateMetricLifecycle` 要在 `check_ready` **之前**建立，而不是等到真正取到引擎之后？
+
+**答案**：因为指标要覆盖「被拒绝的请求」。generate 端点的失败大头恰恰发生在早期——服务未就绪（503）、参数不合法（400）、stream 未实现（501）、模型不存在（404）。若生命周期建立在就绪检查之后，这些请求就 from 指标里消失，`requests_total` 只统计成功路径，过载与配置错误在监控上不可见。建立之后每个早退分支都 `mark_error(generate_metric_error_type(status))` 再返回（generate.rs:827-873 的每个分支），`generate_early_failures_are_counted` 测试钉死了这一行为。代价是失败请求也会短暂占用一个 inflight 计数——这正确反映了「handler 正在处理它」的事实。
+
+**练习 2**：`ttft_ms` 是在哪一行代码写进 span 的？为什么不在首 token 到达时立即写？
+
+**答案**：在 [metrics.rs:1982-1984](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/metrics.rs#L1982-L1984)——`ResponseMetricCollector::drop` 里 `span.record("ttft_ms", ...)`。不立即写有两个原因：其一，span 字段一旦记录还可以再覆盖，但 `tracing` 的惯用法是「摘要字段在 span 关闭前统一补写」，这样同一 span 的所有日志（包括 InflightGuard drop 时的完成日志）都能继承完整字段——metrics.rs 注释原话 "InflightGuard::Drop and on_response logs will inherit these"；其二，`avg_itl_ms` 这类字段本来就只有到结束才能算（`itl_sum_secs / itl_count`），统一在 drop 时写让所有摘要字段的时机一致。而 drop 能落在正确的 span 里，靠的是 dispatch 任务 `.instrument(dispatch_span)`（generate.rs:953）。
+
+**练习 3**：一个客户端用乱编的模型名 `fake-model-x` 连发 1000 条请求，Prometheus 会新建多少个模型 label 序列？为什么？
+
+**答案**：零个新序列——全部落到既有的 `unknown_model` 哨兵上。`handler_generate` 用 `metric_model_for`（model_manager.rs:1016-1022）把未注册名收敛成 `UNKNOWN_METRIC_MODEL`（`"unknown_model"`，model_manager.rs:119），doc 注释明说目的是防止未知模型名污染 label 基数。对比一下：如果不做这个收敛，1000 个不同的乱造名字就是 1000 个新时间序列，Prometheus 的内存与查询都会被拖垮——这是「把不可控输入映射到有界标签集」的标准手法。
+
+**练习 4**：请求在中途被迁移到另一个 worker 重试，`output_tokens` 会不会重复计数？cached_tokens 会不会被高估？
+
+**答案**：都不会，两处各有防护。`output_tokens`：RetryManager 把已交付 token 拼进重试请求的 prompt 但**只 yield 新生成的 delta**，所以逐帧 `chunk_tokens = token_ids.len()` 累加对逻辑请求精确（generate.rs:761-764 的注释）。cached_tokens：流中采信后端 usage 前先过滤 `usage.prompt_tokens == self.input_tokens`——迁移后的 attempt prompt 变长（含已产出 token），这个过滤把 attempt 本地口径挡掉；drop 时兜底的 `tracker.cached_tokens()` 是逻辑请求级的路由器估计（generate.rs:749-758 与 777-785）。`migrated_generate_uses_logical_request_cache_metrics` 测试钉死了这条规格。
+
+---
+
+### 4.9 FinishReason 的宽容反序列化（#13984）
+
+#### 4.9.1 概念说明
+
+`FinishReason` 是后端告诉前端「这条请求为什么停止」的枚举：`eos`、`length`、`stop`、`cancelled`（别名 `abort`）、`content_filter`，以及带消息的 `Error(String)`。它是**跨进程序列化类型**——worker 把它写进流式输出的最后一个 chunk，frontend 反序列化后再决定返回 200 还是 5xx。
+
+它的线契约（wire contract）是「一端保守、一端宽容」：
+
+- **序列化（保守）**：单元变体输出裸字符串（`"stop"`），`Error` 输出单键 map（`{"error":"<msg>"}`）——所有 Rust 生产者都发这个形态；
+- **反序列化（宽容）**：除了上述形态，还接受 `Display` 形态的字符串 `"error: <message>"`——因为 Python 引擎适配器（如 `dynamo.vllm` 的 custom-encoder 路径）用 `str(error)` 上报失败；**#13984 之后**，连裸 `"error"`（无消息）也接受，落回诊断消息 `"backend emitted finish_reason=error without a message"`。
+
+这次变更是一次**立场翻转**，值得把新旧两个 doc 注释对照读：
+
+- **旧版（`b4338ab8`）**：「裸 `"error"` 被故意拒绝。发出它的生产者正在丢弃自己手里的消息；在这里接受它会用编造的文本掩盖缺陷，而不是让缺陷保持可见。」——此时生产者应当改抛 `dynamo._core.InvalidArgument`，让前端拿到带真实消息的 400。
+- ****新版（`d7f06b591`）**：「裸 `"error"` 被防御性接受并落回诊断消息，**避免后端的畸形错误升级成 frontend 的反序列化失败**。」
+
+为什么翻转？关键在**故障的爆炸半径**。反序列化失败发生在 frontend 聚合响应流的路径上——一个本该表现为「这条请求失败、错误信封回给客户端、指标记一次 error」的事件，会变成「整条响应无法解码」的 5xx，错误信息完全丢失（客户端只看到 internal error，日志里是 serde 报错而不是后端的原始线索）。两害相权：接受裸 `"error"` 最多是**这条请求**带一条不够精确的错误消息；拒绝它则把**可观测性也一起毁掉**。再叠加 `lib/llm/AGENTS.md` 的 N-2 混部要求（「宽容的读者、保守的写者」「默认部署路径上的无条件解析失败通常是兼容性 bug」）——某个版本的 worker 或某个 Python 适配器就是会发出裸 `"error"`，frontend 不该因此宕掉整条响应。
+
+#### 4.9.2 核心流程
+
+反序列化的判定阶梯（自定义 `Deserialize` 走 `deserialize_any`，由线数据自身形态分流）：
+
+```text
+线数据到达（JSON / msgpack，均为自描述格式）
+ └─ deserialize_any(FinishReasonVisitor)
+      ├─ 是字符串 → visit_str → str::from_str（FinishReason::from_str）
+      │    ├─ "eos" | "length" | "stop"                       → 单元变体
+      │    ├─ "cancelled" | "abort"                           → Cancelled
+      │    ├─ "content_filter"                                → ContentFilter
+      │    ├─ "error"            ← #13984 新增分支
+      │    │     → Error("backend emitted finish_reason=error without a message")
+      │    ├─ "error: <msg>"                                   → Error(<msg>)
+      │    │     （消息内部再含 "error: " 也原样保留）
+      │    └─ 其他                                              → Err(Invalid FinishReason variant)
+      └─ 是 map    → visit_map
+           ├─ 首键 == "error" 且无第二键 → Error(next_value)
+           └─ 其他（未知键 / 多键 / 空 map）→ Err
+```
+
+序列化方向不变：`Error(msg)` 只输出 `{"error": msg}`——**读宽容、写保守**，Dynamo 自己产出的形态永远是规范的 map 形式。
+
+请求面 codec 用的是 `rmp_serde::to_vec_named`（msgpack），msgpack 的字符串值同样走 `visit_str` → `from_str`，所以裸 `"error"` 的 msgpack 形态自动被新分支覆盖——新增的回归测试正是用 msgpack 钉的（见 4.9.3）。
+
+错误最终如何在 HTTP 面暴露：`generate_dispatch` 聚合流时，`Error` 型 `FinishReason` 会被转成 `MaybeError`，generate 端点返回**消毒过的** 500（消息不外泄，见 4.9.3 的测试）；chat 端点则走 4.7 节的 `extract_backend_error_if_present` 分类阶梯。
+
+#### 4.9.3 源码精读
+
+[lib/llm/src/protocols/common.rs:48-62](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/common.rs#L48-L62) — `FinishReason` 的 doc 注释即线契约文档：序列化形态（裸串/单键 map）、`Display` 形态的来由（Python 适配器）、以及 #13984 后的裸 `"error"` 防御性接受说明。**改这段注释正是本提交的核心**——契约文档与行为一起翻新。
+
+[lib/llm/src/protocols/common.rs:63-82](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/common.rs#L63-L82) — 枚举定义：`#[serde(rename = "error")]` 只约束 `Error` 的**序列化**名（裸 `"error"` 恰好与单元变体同名，这是旧版能「故意拒绝」而新版能「字符串直收」的字面基础）；`Cancelled` 带 `alias = "abort"`。
+
+[lib/llm/src/protocols/common.rs:97-114](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/common.rs#L97-L114) — **本次改动的落点**：`FromStr` 新增第 107-109 行的 `"error"` 分支。注意它排在 `"error: "` 前缀分支**之前**（match 的字面量优先于守卫分支），且诊断消息是固定字符串。
+
+[lib/llm/src/protocols/common.rs:116-129](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/common.rs#L116-L129) — 自定义 `Deserialize` 用 `deserialize_any`：注释解释了这要求**自描述格式**（请求面的 `rmp_serde::to_vec_named` 满足；裸 bincode 这类非自描述格式会在这里失败）——这是「字符串还是 map 由线数据决定」的前提。
+
+[lib/llm/src/protocols/common.rs:136-150](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/common.rs#L136-L150) — `expecting` 消息现在把 `"error"` 列为合法形态（错误提示同步更新）；`visit_str` 直接委托 `value.parse()`，并让 parse 的具体失败原因经 `E::custom` 透传（而不是泛泛的 invalid_value）。
+
+行为规格（同文件测试区）：
+
+[lib/llm/src/protocols/common.rs:836-863](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/common.rs#L836-L863) — `test_finish_reason_deserializes_every_producer_form`：map 形态、`Display` 形态、消息内嵌 `"error: "` 的嵌套用例逐一断言。
+
+[lib/llm/src/protocols/common.rs:879-887](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/common.rs#L879-L887) — **#13984 新增**的 `test_finish_reason_accepts_bare_error_from_msgpack`：`rmp_serde::to_vec_named("error")` 编出的 msgpack 必须反序列化成带诊断消息的 `Error`。用 msgpack 钉是因为请求面 codec 就是它——这条测试守住的是 worker→frontend 内部跳的真实形态。
+
+[lib/llm/src/protocols/common.rs:888-903](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/common.rs#L888-L903) — `test_finish_reason_rejects_unknown_forms`：`"nonsense"`、`{"nonsense":"boom"}`、双键 map、空 map、整数仍然拒绝——**#13984 从这份拒绝清单里删掉了 `r#""error""#`**，宽容只放开这一种形态。
+
+错误在 HTTP 面的终点（与 4.7、4.8 呼应）：
+
+[lib/llm/src/http/service/generate.rs:2465-2482](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/generate.rs#L2465-L2482) — `backend_error_finish_returns_sanitized_500`：终端 `FinishReason::Error("sensitive backend failure")` 到达时，generate 端点返回 500 且响应体只有 `"internal server error"`——断言 `!body.to_string().contains(secret)`。错误细节进日志与指标（`mark_error(ErrorType::Internal)`，见 4.8），不进客户端响应。
+
+#### 4.9.4 代码实践
+
+**实践目标**：亲手验证裸 `"error"` 的接受路径、看到「立场翻转」的提交现场，并跑通全部 FinishReason 回归测试。
+
+**操作步骤**：
+
+1. 跑协议层测试（无需任何服务，只需 Rust 工具链）：
+   ```bash
+   cargo test -p dynamo-llm --lib protocols::common::tests::test_finish_reason
+   ```
+2. 做一次「立场考古」（只读 git 操作）：
+   ```bash
+   git show d7f06b591f -- lib/llm/src/protocols/common.rs
+   # 重点对照两段：
+   #  (a) doc 注释里被删除的「A bare "error" ... stays rejected on purpose」四行
+   #      与新增的「accepted defensively with a diagnostic fallback message」；
+   #  (b) 测试区：删掉的「bare error stays rejected」注释块 vs 新增的 msgpack 测试，
+   #      以及 rejects_unknown_forms 清单里消失的 r#""error""#。
+   ```
+3. （离线推演，示例代码非项目自带）用 Python 模拟一个发裸 `"error"` 的后端 chunk，确认 JSON 与 msgpack 两个形态都在新阶梯的接受范围内：
+   ```python
+   import json, msgpack           # pip install msgpack
+   chunk_json = json.dumps({"token_ids": [], "finish_reason": "error"})
+   chunk_msgpack = msgpack.packb({"token_ids": [], "finish_reason": "error"}, use_bin_type=True)
+   # 两种形态经 FinishReasonVisitor 都应得到
+   # Error("backend emitted finish_reason=error without a message")
+   # 而 {"finish_reason": "error: boom"} 得到 Error("boom")，
+   #    {"finish_reason": "nonsense"} 仍然是 Err。
+   ```
+4. （可选）对照 [lib/llm/AGENTS.md](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/AGENTS.md) 的「N-2 Worker / Frontend Compatibility」一节，找出哪句话直接预言了这次翻转（提示："Prefer tolerant readers and conservative writers"）。
+
+**需要观察的现象**：步骤 1 全绿；步骤 2 的 diff 里能看到「删四行注释 + 加三分支 + 测试清单增删」的完整对照；步骤 3 的推演表三种输入三种结果。
+
+**预期结果**：能用自己的话写出一行结论——「`FinishReason` 的读侧现在覆盖三种 error 形态（map、`error: msg`、裸 `error`），写侧仍只发 map 形态；裸形态的代价是错误消息不精确，收益是后端畸形不再炸掉 frontend 的响应反序列化」。步骤 1 的测试结果待本地验证。
+
+#### 4.9.5 小练习与答案
+
+**练习 1**：旧版注释说「接受裸 error 会用编造的文本掩盖缺陷」，新版接受了它——被「掩盖」的缺陷去哪了？
+
+**答案**：去了两处可观测的地方，而不是消失。其一，诊断消息本身是自描述的：`"backend emitted finish_reason=error without a message"` 明确告诉你**后端发了裸 error**——看到它就知道生产侧有 bug，只是不再是「解不开整条响应」这种灾难式发现；其二，这条请求在指标上仍然计一次失败（generate 路径 `mark_error(ErrorType::Internal)`，chat 路径走 4.7 的分类阶梯），Grafana 上看得到。工程取舍是：**缺陷的可见性从「解析失败炸响应」降级为「日志与指标里的一条记录」，而客户端不再承受连错误都拿不到的 5xx。**
+
+**练习 2**：为什么 `Deserialize` 用 `deserialize_any` 而不是像普通枚举那样 `#[derive(Deserialize)]`？
+
+**答案**：因为 `Error` 变体的线形态是**单键 map**，而其余变体是**裸字符串**——反序列化器必须先看线数据是什么形态再决定怎么解析，这正是 `deserialize_any` 的用途（要求自描述格式，common.rs:116-122 的注释专门讨论了这一点，并指出请求面用的 `rmp_serde::to_vec_named` 满足、裸 bincode 不满足）。派生的 `Deserialize` 没法表达「同一个枚举按值形态分流」这种外部标签（externally tagged）之外的混合契约，所以手写 visitor：`visit_str` 走 `FromStr`（字符串三形态统一在那里判定），`visit_map` 只处理 `{"error": msg}`。
+
+**练习 3**：后端发来 `finish_reason: "error: CustomEncoder failed: error: nested"`，前端解析出的消息是什么？为什么这不是歧义？
+
+**答案**：消息是 `"CustomEncoder failed: error: nested"`——完整保留，内嵌的 `"error: "` 不被误切。因为 `FromStr` 的匹配是**整串相等判断 `"error"` + 前缀判断 `starts_with("error: ")` 后取余全串**（common.rs:107-110），只剥最外层一次前缀，不做递归或反复剥离。[common.rs:849-853](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/protocols/common.rs#L849-L853) 的测试用例就是这条嵌套消息。真正歧义的场景是后端想表达「消息恰好是空串」——`"error: "` 剥完前缀后是空串，会得到 `Error("")`；而裸 `"error"` 得到的是诊断消息，两者可区分。
+
 ## 5. 综合实践
 
-把本讲七个模块串成一条完整的「请求考古」任务：
+把本讲九个模块串成一条完整的「请求考古」任务：
 
 **任务**：对一条 `curl -N .../v1/chat/completions`（stream=true）请求，产出一张「时间线表」，左侧是客户端可观察的现象，右侧是对应的源码位置。
 
@@ -902,9 +1209,10 @@ jail 侧的旁路实现（机制属 u4-l3，这里只看与错误类型相关的
 4. 压测中发 SIGTERM，记录：新请求的状态码（503）、`/live` 的状态码（200）、frontend 日志中的 draining/stopping 两条日志、在途流式请求是被完整发完还是被截断（→ `ServiceStage` 状态机 + `wait_inflight_zero_or_timeout`）。
 5. 最后对同一条 prompt 调一次 `/v1/responses/input_tokens`，把估算值写进时间线的最左端——它是这条请求「还没发生时」就能知道的第一个数字（→ `handler_responses_input_tokens`）。
 6. 补两个错误与字节格式的观察：对 `/v1/embeddings` 分别用 float 与 base64 两种 `encoding_format` 各发一条，记录响应形状差异（→ `decode_base64_to_floats`）；再发一条非法参数请求，记录错误信封与状态码（→ `extract_backend_error_if_present` 的类型化阶梯）。
-7. 把以上观察各写一行「现象 → 源码文件:行号」的对照，作为本讲的产出物。
+7. （#11385/#13984 新增）按 4.8.4 打开 `/inference/v1/generate` 并压测（无 vLLM 环境则跑 `cargo test -p dynamo-llm --lib http::service::generate::tests` 与 `protocols::common::tests::test_finish_reason`），记录：inflight/queued gauge 的起伏、TTFT/ITL histogram 的 sample_count、`request_span` 事件上的六个字段值（→ `GenerateMetricLifecycle` 与 `ResponseMetricCollector::drop`）；再对照 `git show d7f06b591f` 说一遍 `FinishReason` 从「故意拒绝」到「防御性接受」的理由（→ `FromStr` 的裸 `error` 分支）。
+8. 把以上观察各写一行「现象 → 源码文件:行号」的对照，作为本讲的产出物。
 
-如果只能做静态分析（无运行环境），改为：通读 [service_v2.rs:103-132](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/service_v2.rs#L103-L132)、[openai.rs:2947-3040](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L2947-L3040) 与 [openai.rs:2245-2350](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/openai.rs#L2245-L2350)，手绘这条时间线并标注每一步的函数名。
+如果只能做静态分析（无运行环境），改为：通读 [service_v2.rs:103-132](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/service_v2.rs#L103-L132)、[openai.rs:2947-3040](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L2947-L3040) 与 [openai.rs:2245-2350](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/openai.rs#L2245-L2350)，手绘这条时间线并标注每一步的函数名。
 
 ## 6. 本讲小结
 
@@ -916,12 +1224,16 @@ jail 侧的旁路实现（机制属 u4-l3，这里只看与错误类型相关的
 - **`POST /v1/responses/input_tokens`**：本地 len/3 估算、不做就绪/模型门、绝不触达后端，`instructions`/`tools`/工具调用 item 全额计入并对齐 chat 转换器的合并规则——为 RL rollout 预算与客户端预检提供零成本预检。
 - **Embeddings 走 base64(LE f32) 内部线格式**：worker 永远发 base64、HTTP 出口按 `encoding_format` 决定是否转浮点；#12157 后编解码统一在 preprocessor.rs 的 `decode_base64_to_floats`（协议类型在 protocols/openai/embeddings.rs，含 `add_special_tokens`/`truncate_prompt_tokens`）。
 - **#13930 后错误类型全程存活**：jail 用 `take_while` 让终端错误绕行、原始带类型注解链回，HTTP 层凭 `ErrorType` 分类（InvalidArgument→400、过载→可配状态码、未知→消毒 500），`BackendInvalidArgument: ` 字符串前缀恢复分支被删除——类型即契约，取代字符串约定。
+- **#11385 后 generate 端点指标自持**：`/inference/v1/generate` 绕过分词器/后处理管线，改由 `GenerateMetricLifecycle`（`InflightGuard` + `HttpQueueGuard` + `ResponseMetricCollector` + `RequestTracker`）从**原始 token delta** 观察同样的响应指标；生命周期建立在就绪检查之前（早退也计数），模型名经 `resolve_canonical_name` + `metric_model_for` 归一并收敛到 `unknown_model` 哨兵以保 label 基数；worker 标签从 `routing_data` 经 `RequestTracker` 抄送，cached tokens 以后端 usage 为权威、以 tracker 估计兜底，且过滤迁移 attempt 的本地口径。
+- **span 摘要字段的补写时机在 drop**：`request_span` 上六个字段先以 `field::Empty` 声明，由 `ResponseMetricCollector::drop` 统一 `span.record`——dispatch 任务 `.instrument(dispatch_span)` 保证 drop 落在正确的 span 里，同一 span 的完成日志随之继承完整字段。
+- **#13984 后 `FinishReason` 读宽容、写保守**：反序列化接受 map 形态、`"error: <msg>"` Display 形态与裸 `"error"`（落回诊断消息 `"backend emitted finish_reason=error without a message"`，msgpack 路径有专门回归测试），序列化仍只发规范 map 形态；立场从「拒绝以暴露缺陷」翻转为「接受以保住 frontend 的可解码性」——N-2 混部下「宽容的读者」原则的落地。
 
 ## 7. 下一步学习建议
 
 - **下一讲（u4-l3）**顺着「引擎拿到请求之前」往前走：`OpenAIPreprocessor` 如何做模板渲染、媒体计数与分词，`LocalModel` 如何加载 tokenizer——那是 handler 调 `engine.generate` 之后、真正到达 worker 之前的整形层；本讲 4.7 提到的 jail 终端错误旁路（preprocessor.rs 的 `take_while`/`chain` 与两处 `debug_assert`）也将在那里展开完整机制。
-- 想看「指标三件套怎么被消费」，直接读 [lib/llm/src/http/service/metrics.rs](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/src/http/service/metrics.rs) 中 `InflightGuard`/`HttpQueueGuard`/`ResponseMetricCollector` 的实现，并对照 u12-l1 的可观测性讲义。
-- 想追 `input_tokens` 的完整动机与 RL 服务面（`/v1/rl/workers`、nvext token-in/token-out、`RlWorkerMetadata`），直接跳到 u8-l7；估算器与 chat↔Responses 转换器的等价性测试就在 [responses_http_replay.rs:728-832](https://github.com/ai-dynamo/dynamo/blob/b4338ab87e90fc6edd496879b80ed045c7339967/lib/llm/tests/responses_http_replay.rs#L728-L832)。
+- 想看「指标三件套怎么被消费」，直接读 [lib/llm/src/http/service/metrics.rs](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/src/http/service/metrics.rs) 中 `InflightGuard`/`HttpQueueGuard`/`ResponseMetricCollector` 的实现，并对照 u12-l1 的可观测性讲义——4.8 节的 generate 指标家族（`dynamo_frontend_*`）与 `request_span` 字段正是那讲看板对照的素材。
+- 想追 `FinishReason` 的「另一半」：它序列化后如何随 `LLMEngineOutput` 跨进程、迁移重试如何只 yield 新 delta（`RetryManager`），会在 u7（分离式服务）与 u12-l4（故障容忍）中展开；N-2 兼容原则的完整文本在 [lib/llm/AGENTS.md](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/AGENTS.md)。
+- 想追 `input_tokens` 的完整动机与 RL 服务面（`/v1/rl/workers`、nvext token-in/token-out、`RlWorkerMetadata`），直接跳到 u8-l7；估算器与 chat↔Responses 转换器的等价性测试就在 [responses_http_replay.rs:728-832](https://github.com/ai-dynamo/dynamo/blob/d7f06b591f3af60270811b7e2d5d7d0a404b934a/lib/llm/tests/responses_http_replay.rs#L728-L832)。
 - 想看 embeddings 的另一端（Python worker 如何 `torch→numpy.tobytes→base64` 编码、多进程嵌入池如何分词对齐），跳到 u8-l8——本讲的 `decode_base64_to_floats` 就是那条字节链的 Rust 落点。
 - 想理解「请求进入引擎之后怎么跨进程」：回到 u3-l4（请求面 Pipeline）与 u3-l3（AsyncEngine 抽象），本讲的 `engine.generate(request)` 就是那两条链的入口。
 - 建议动手实验：把 `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` 调成 1 秒重做 4.2 的实践，观察在途长流被截断的行为差异；再用 `DYN_HTTP_SVC_RESPONSES_PATH` 带尾部斜杠重启，验证 4.5 练习 2 的派生规则；最后做一遍 4.7 的 git 考古，亲手看到被删除的字符串前缀分支。

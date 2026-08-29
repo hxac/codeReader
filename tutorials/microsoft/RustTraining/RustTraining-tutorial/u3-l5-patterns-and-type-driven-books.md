@@ -1,527 +1,470 @@
 # 高级与专家书：Patterns 与 Type-Driven Correctness
 
-> **What you'll learn（本讲目标框）：**
-> - 概览 `rust-patterns-book`（Advanced 级）与 `type-driven-correctness-book`（Expert 级）两本书的主题地图与互补关系
-> - 理解 newtype、type-state、幻影类型（PhantomData）、能力令牌（capability token）如何把约束编码进类型
-> - 亲手写出一个「让非法状态无法表示」的最小示例：`Door<Locked>` / `Door<Unlocked>`
-
 ## 1. 本讲目标
+
+本讲把视线从三本桥梁书和异步深潜书，转向书架上难度最高的两本：
+
+- **Rust Patterns**（rust-patterns-book，🟡 Advanced 级）
+- **Type-Driven Correctness**（type-driven-correctness-book，🟣 Expert 级）
+
+这两本书回答同一个问题的不同侧面：**能不能让编译器替我们证明程序是对的，而不是靠测试和运行期检查事后发现错误？**
 
 学完本讲，你应该能够：
 
-1. 说出两本书的分工：`rust-patterns-book` 讲**机制**（traits、associated types、type-state 怎么写），`type-driven-correctness-book` 讲**应用**（把这些机制用到 IPMI、PCIe、固件升级、Redfish 等真实领域）。
-2. 解释核心设计思路：「把不变量从运行时检查推进类型系统，让编译器强制执行」——整类 bug 不是被测试发现，而是**根本无法编译**。
-3. 独立写出 type-state 最小示例，并用 `cargo check` 验证「未解锁就开门」是编译错误（E0599），而不是运行时 panic。
-4. 掌握四个互相配合的技巧：newtype 区分相似类型、PhantomData 携带零字节类型信息、能力令牌作为零成本权限证明、协议状态机把状态图编码进 `impl` 块。
+1. 说出 rust-patterns-book 的主题地图（泛型 → trait → newtype/type-state → PhantomData → 并发 → 智能指针 → unsafe → 宏 → 架构）。
+2. 解释 type-driven-correctness-book 的核心思想「让非法状态无法表示」（make illegal states unrepresentable）。
+3. 掌握四个类型层模式的原理与写法：**newtype、type-state（类型状态）、幻影类型（PhantomData）、能力令牌（capability token）**，以及它们在协议状态机（protocol state machine）中的组合运用。
+4. 独立写出一个 `Door<Locked>` / `Door<Unlocked>` 最小示例，让「未解锁就开门」成为**编译错误**，并用 `cargo check` 验证错误信息。
 
 ## 2. 前置知识
 
-本讲是内容层的高级主题，你需要先具备以下概念（不熟悉的部分建议先回看对应讲义）：
+本讲假设你已完成一座「桥」（推荐 c-cpp-book 或 csharp-book 的第 1–7 章），并了解 u3-l2 讲过的章节写作范式。以下概念用通俗语言补齐：
 
-- **mdBook 章节范式**（u3-l2 已建立）：每章开头的 What you'll learn 目标框、难度 emoji（🟢 基础 / 🟡 中级 / 🔴 高级）、`rust,ignore` 注解（仅着色不可运行）、`<details>` 折叠的练习解答。本讲会直接沿用这些约定，不再重复解释。
-- **书的体系定位**（u3-l1 已建立）：七本书分五级，`rust-patterns-book` 是 **Advanced（高级）**，`type-driven-correctness-book` 是 **Expert（专家）**——它们是三本桥梁书之后的两个专项深化方向。
-- **Rust 语言基础**：泛型（`struct Foo<T>`）、trait 与关联类型、所有权移动语义（move）。两本书的引言都明确要求读者先掌握这些。
-- **零大小类型（Zero-Sized Type, ZST）**：编译后不占任何字节的类型，如空结构体 `struct Locked;`。这是本讲所有技巧的「零成本」来源——类型信息只存在于编译期，运行时被完全擦除。
-- **标记类型（marker type）**：不携带数据、只用于「在类型层面做记号」的类型。Rust 标准库的 `PhantomData<T>` 是最常用的标记载体。
+- **编译期检查 vs 运行期检查**：运行期检查是程序跑起来时用 `if` 判断「现在能不能做这件事」，忘了写就出 bug，而且只有测试覆盖到的路径才会暴露；编译期检查是把约束写进类型签名，错误调用根本无法通过编译——**所有调用点**一次性被检查，包括没人想到过的那些。
+- **泛型参数**：`struct Foo<T>` 中的 `T` 是类型参数，像值的占位符一样占着一个「类型的坑」。本讲的关键技巧是：让 `T` 携带的不只是「存什么数据」，还有「现在处于什么状态」「有什么权限」这类**逻辑信息**。
+- **零大小类型（Zero-Sized Type，ZST）**：没有任何字段（或字段全是 ZST）的类型，运行期不占任何一个字节。本讲所有的状态标记、权限令牌都是 ZST——所以这套「证明体系」是**零运行期开销**的。
+- **`PhantomData<T>`**：标准库提供的零大小标记类型，用来告诉编译器「我这个结构体在逻辑上和 `T` 相关，虽然我并没有真的存一个 `T`」。它是把类型参数「挂」到结构体上的正规通道（Rust 会拒绝完全不使用泛型参数的结构体定义）。
+- **marker trait（标记 trait）**：没有任何方法的 trait，唯一的用途是「给类型盖一个章」，让 `impl<T: SomeMarker>` 这样的约束可以按「有没有这个章」来筛选类型。
+- **mdBook playground**：承接 u3-l2——书里的普通 ` ```rust ` 代码块带运行/编辑按钮，可以直接在浏览器里改和跑；` ```rust,ignore ` 只着色不可运行。本讲的实践会同时用到这两条路径。
 
-一个直觉性的总纲（两本书反复强调的唯一原则）：
-
-> **能用类型系统挡住的 bug，就不要留给运行时检查。** 运行时 `if state != ACTIVE { return -EINVAL }` 靠的是程序员记得写检查；类型系统挡住的是「这种调用根本写不出来」。
+一个贯穿全讲的类比：**把类型系统当作「证明助手」**。函数签名是定理的前提条件（precondition），返回类型是它能给出的保证（postcondition）；调用者要做的就是把「证明」——一个具有正确类型的值——递进来。
 
 ## 3. 本讲源码地图
 
+两本书都是标准的 mdBook 目录（book.toml + src/SUMMARY.md + 章节文件），结构上与 u1-l4 解剖过的 async-book 完全一致。本讲涉及的文件：
+
 | 文件 | 作用 |
 |------|------|
-| [rust-patterns-book/src/SUMMARY.md](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/SUMMARY.md#L1-L42) | Advanced 书的目录：三个 Part 共 19 章，从类型级模式到并发再到系统与生产 |
-| [rust-patterns-book/src/ch00-introduction.md](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch00-introduction.md#L1-L78) | 受众定位、难度图例、配速表（每章预计耗时与检查点） |
-| [rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L1-L1119) | 本讲精读主力：newtype、type-state、builder、config trait、双轴 typestate |
-| [rust-patterns-book/src/ch04-phantomdata-types-that-carry-no-data.md](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch04-phantomdata-types-that-carry-no-data.md#L1-L260) | PhantomData 的三大职责：生命周期绑定、所有权模拟、型变控制 |
-| [type-driven-correctness-book/src/SUMMARY.md](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/SUMMARY.md#L1-L35) | Expert 书的目录：四个 Part，核心模式 → 集成实战 → 参考 |
-| [type-driven-correctness-book/src/ch00-introduction.md](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch00-introduction.md#L1-L80) | 两书关系的官方表述、「正确性谱系」图、按角色定制的阅读路径 |
-| [type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md#L1-L240) | 能力令牌：零大小类型作为权限证明 |
-| [type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L1-L551) | 协议状态机：IPMI 会话、PCIe 链路训练、固件升级三连示例 |
-| [xtask/src/main.rs](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/xtask/src/main.rs#L35-L44) | 两本书在 BOOKS 注册表中的条目（category 分别为 `advanced` 与 `expert`） |
+| [rust-patterns-book/src/SUMMARY.md](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/SUMMARY.md) | Advanced 书的主题地图：Part I 类型层模式（1–4 章），Part II 并发与运行期（5–9 章），Part III 系统与生产（10–16 章），附录含参考卡与 capstone |
+| [rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md) | 本讲主力章节：newtype、type-state、类型状态 builder、Config trait、双轴 typestate，末尾附红绿灯练习 |
+| [rust-patterns-book/src/ch04-phantomdata-types-that-carry-no-data.md](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch04-phantomdata-types-that-carry-no-data.md) | PhantomData 的三大职责、生命周期烙印（branding）、型变 |
+| [type-driven-correctness-book/src/SUMMARY.md](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/SUMMARY.md) | Expert 书的主题地图：Part I 哲学，Part II 核心模式（2–11 章），Part III 集成实战（含两个 Redfish 走读），Part IV 参考 |
+| [type-driven-correctness-book/src/ch01-the-philosophy-why-types-beat-tests.md](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch01-the-philosophy-why-types-beat-tests.md) | 「为什么类型胜过测试」：三层正确性（值 / 状态 / 协议），是整本书的总纲 |
+| [type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md) | 能力令牌：ZST 作为权限证明、层级能力、生命周期受限令牌 |
+| [type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md) | 协议状态机：IPMI 会话、PCIe 链路训练、固件升级三拍递进，type-state 与能力令牌的组合 |
+| [type-driven-correctness-book/src/ch09-phantom-types-for-resource-tracking.md](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch09-phantom-types-for-resource-tracking.md) | 幻影类型追踪资源：寄存器宽度、DMA 方向、文件描述符状态 |
 
-> 阅读提示：`type-driven-correctness-book` 的 SUMMARY 里，编号「12. Putting It All Together」指向的文件却是 `ch10-...md`，编号「10. Const Fn」指向 `ch15-...md`——文件名与显示编号并不对应。这再次印证了 u3-l1 的结论：**章节序号与导航完全由 SUMMARY 条目顺序决定，与文件名无关**。引用这两本书时请以 SUMMARY 为准。
+两本书在 README 与 xtask 的 BOOKS 常量中的级别归类可互相印证：README 中 Rust Patterns 标注「🟡 Advanced」、Type-Driven Correctness 标注「🟣 Expert」（[README.md:L53-L54](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/README.md#L53-L54)），xtask 里对应的 category 字段分别是 `"advanced"` 与 `"expert"`（[xtask/src/main.rs:L34-L45](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/xtask/src/main.rs#L34-L45)）。
+
+主题地图速览：
+
+- **rust-patterns-book** 按 [SUMMARY.md:L7-L12](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/SUMMARY.md#L7-L12) 的 Part I 先打类型层地基（Generics 全景 → Traits 深入 → Newtype 与 Type-State → PhantomData），Part II（[L16-L22](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/SUMMARY.md#L16-L22)）转向并发、闭包、智能指针与内部可变性，Part III（[L26-L35](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/SUMMARY.md#L26-L35)）覆盖错误处理、零拷贝、unsafe、宏、测试与 crate 架构，最后以「类型安全任务调度器」capstone 收束（[L39-L42](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/SUMMARY.md#L39-L42)）。本讲精读其 Part I。
+- **type-driven-correctness-book** 的 Part II 是模式主体（[SUMMARY.md:L11-L22](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/SUMMARY.md#L11-L22)）：类型化命令接口、单次使用类型、能力令牌、协议状态机、量纲分析、验证边界、能力 mixin、幻影类型、const fn、Send/Sync——共十个模式章；Part III（[L24-L30](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/SUMMARY.md#L24-L30)）把它们组装成完整诊断平台，并给出 **Redfish 客户端与服务端两个实战走读**。本讲精读其中的能力令牌、协议状态机、幻影类型三章。
 
 ## 4. 核心概念与源码讲解
 
-本讲拆成五个最小模块：先建立两本书的地图（4.1），再按「newtype 与 type-state → 幻影类型 → 能力令牌 → 协议状态机」的顺序逐层深入——这恰好也是两本书自身的递进顺序。
-
-### 4.1 两本书的主题地图与互补关系
+### 4.1 newtype 与 type-state：把「值」和「顺序」编码进类型
 
 #### 4.1.1 概念说明
 
-`rust-patterns-book` 与 `type-driven-correctness-book` 是一对**配套书**，出自同一位作者（微软 SCHIE 硬件基础设施工程团队的 Principal Firmware Architect），但分工明确：
+这是 rust-patterns-book 第 3 章的两个主角，分别解决两类「编译器本来帮不上忙」的错误：
 
-- **rust-patterns-book（Advanced）**：讲**机制**。它是一本「中级以上 Rust 模式手册」，覆盖泛型全景、trait 深入、newtype/type-state、PhantomData、通道与消息传递、闭包、智能指针与内部可变性、错误处理、序列化与零拷贝、unsafe、宏、测试与基准、crate 架构、async 入门。它回答「这个模式怎么写、什么时候用」。
-- **type-driven-correctness-book（Expert）**：讲**应用**。它把上一本的机制套到真实领域——硬件诊断、密码学、协议校验、嵌入式系统——覆盖类型化命令接口、一次性类型、能力令牌、协议状态机、量纲分析、`Parse, Don't Validate`、能力 mixin、幻影类型资源追踪、`const fn`、`Send`/`Sync`，最终汇入 Redfish 客户端/服务端两个完整实战。
+- **newtype（新类型）**：用一个单字段元组结构体把既有类型包一层，制造出一个**全新的、不同的类型**。解决的问题是「两个语义不同的值碰巧同型」——`age: u32` 和 `employee_id: u32` 都是 `u32`，调换参数顺序照样编译通过；包成 `Age(u32)` 和 `EmployeeId(u32)` 之后，调换就变成编译错误。运行期开销为零。
+- **type-state（类型状态）**：把对象「现在处于哪个状态」写进泛型参数，并且**每个状态下的可用方法只定义在对应的 `impl` 块里**。于是「在错误状态下调用方法」不是运行期 panic，而是 `no method named ...` 的编译错误——非法状态**无法表示**（unrepresentable）。
 
-一句话区分：patterns 书教你**造工具**，type-driven 书教你**用工具造出「编译不了错误代码」的系统**。
+Expert 书第 1 章把这个思想整理成「三层正确性」，第 1 层「值正确性」正是 newtype 的哲学：私有字段的 `Port(u16)` 配合 `TryFrom` 校验，让 `Port(0)` 从构造入口就造不出来（[type-driven-correctness-book/src/ch01-the-philosophy-why-types-beat-tests.md:L36-L52](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch01-the-philosophy-why-types-beat-tests.md#L36-L52)）。该章开头还给出了动机总结：运行期检查的四种失败模式「只有在部署后才发现」，而「类型系统覆盖**所有**情况，包括没人想象过的那些」（[L22-L29](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch01-the-philosophy-why-types-beat-tests.md#L22-L29)）。
 
 #### 4.1.2 核心流程
 
-两本书的推荐阅读流程是一个「漏斗」：
+newtype 的工作流程：
 
 ```text
-读完任一桥梁书（掌握所有权、trait、泛型基础）
-        │
-        ▼
-rust-patterns-book Part I（ch01 泛型 → ch02 trait → ch03 newtype/type-state → ch04 PhantomData）
-        │  ←—— 机制层：四个类型级模式
-        ▼
-type-driven-correctness-book ch01（为什么类型胜过测试）
-        │
-        ▼
-type-driven Part II 核心模式（ch02–ch09：按需选读）
-        │
-        ▼
-Part III 集成实战（ch12 诊断平台 → Redfish client/server）
+原始类型 T（如 u32）语义混乱
+    │ 用 struct New(T) 包装
+    ▼
+新类型 New：与 T 是不同类型
+    ├─ 混用 New 与 OtherNew → 编译错误（E0308 类型不匹配）
+    └─ 需要内层数据时用显式方法 .0 或 as_ref() 暴露
 ```
 
-type-driven 书的引言甚至提供了一张**按角色定制**的路径表：IPMI/BMC 开发者走 ch02→ch05→ch07→ch10→ch17 约 2.5 小时；GPU/PCIe 开发者走另一条路；Redfish 实现者又是一条——这是一本被明确设计成「按需查阅」的参考书，而非线性教材。
+type-state 的工作流程（对应章内 [rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md:L159-L169](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L159-L169) 的状态图）：
+
+```text
+定义零大小状态标记：struct Disconnected; struct Connected; struct Authenticated;
+    │
+结构体带状态参数：struct Connection<State> { address: String, _state: PhantomData<State> }
+    │
+每个状态一个专属 impl 块：
+    impl Connection<Disconnected>  → new() / connect()
+    impl Connection<Connected>     → authenticate()
+    impl Connection<Authenticated> → request()
+    │
+转移方法签名固定为 fn transition(self, ...) -> Connection<下一状态>
+    └─ 拿走 self（move）→ 旧状态的对象从此不存在 → 不可能「回到过去」
+```
+
+用状态-操作矩阵来看收益：设协议有 \( n \) 个状态、\( m \) 个操作，运行期检查方案要在 \( n \times m \) 个组合点上各写一次判断；type-state 方案只需 \( n \) 个 `impl` 块，矩阵中每个非法格子自动变成「方法不存在」，由编译器在**每个调用点**无条件检查。
 
 #### 4.1.3 源码精读
 
-**两书关系的官方表述**（type-driven 书引言第一段）：
+先看 newtype 的最小对照示例，章节在 [rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md:L13-L28](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L13-L28)：这段代码先展示裸 `String`/`u32` 参数下「交换 age 和 id 也能编译」的隐患，再用 `UserName`/`Email`/`Age`/`EmployeeId` 四个 newtype 让同样的交换直接报 `expected Age, got EmployeeId`。
 
-[type-driven-correctness-book/src/ch00-introduction.md:L11-L13](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch00-introduction.md#L11-L13) —— 书的开篇直接点名与 patterns 书的分工："While the companion Rust Patterns book covers the **mechanics** ... this guide shows how to **apply** those mechanics to real-world domains"，并给出全书唯一原则：**push invariants from runtime checks into the type system so the compiler enforces them**（把不变量从运行时检查推进类型系统，让编译器强制执行）。
+章节随后花了很大篇幅讲一个重要陷阱：给 newtype 实现 `Deref` 会「在抽象边界上凿一个洞」——内层类型的**所有**方法都自动可调用，任何不变量（比如「邮箱必须含 @」）都可能被 `.trim()`、`.split_at()` 之类的方法破坏（[L60-L62](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L60-L62)）。章末的决策矩阵给出简洁判定（[L147-L153](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L147-L153)）：只有「智能指针式、就是想要内层全部能力」的包装才该实现 `Deref`，为类型安全而生的 newtype 应改用显式委托。
 
-这种承接不是口头说说——type-driven 书的 Prerequisites 表逐条指回 patterns 书的具体章节：
+再看本章核心 `Connection<State>` 例子。状态标记与结构体定义在 [L181-L190](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L181-L190)——三个零大小标记类型，加上一个用 `PhantomData<State>` 把状态参数挂进来的结构体：
 
-[type-driven-correctness-book/src/ch00-introduction.md:L60-L68](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch00-introduction.md#L60-L68) —— 「Newtypes and type-state → Rust Patterns ch03」「PhantomData → Rust Patterns ch04」，前置知识表就是一张跨书依赖图。
+```rust
+struct Disconnected;
+struct Connected;
+struct Authenticated;
 
-**patterns 书的定位与配速**：
+struct Connection<State> {
+    address: String,
+    _state: std::marker::PhantomData<State>,
+}
+```
 
-[rust-patterns-book/src/ch00-introduction.md:L11-L25](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch00-introduction.md#L11-L25) —— "A practical guide to intermediate-and-above Rust patterns ... This is not a language tutorial"：明确不是入门教程，假设你已会写基本 Rust；受众是「读完《The Rust Programming Language》但不知道怎么实际做设计的人」。
+`Disconnected` 状态专属的方法定义在 [L193-L208](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L193-L208)：`Connection<Disconnected>` 只有 `new()` 和 `connect()`，其中 `connect(self) -> Connection<Connected>` 消费旧值、返回新状态的值。同理 `Connected` 状态只有 `authenticate()`（[L210-L219](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L210-L219)），而 `request()` **只存在于** `impl Connection<Authenticated>` 块中（[L221-L226](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L221-L226)）。
 
-[rust-patterns-book/src/ch00-introduction.md:L43-L47](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch00-introduction.md#L43-L47) —— 配速表给 Part I 四章各分配 1–4 小时，并为每章设了一个「检查点」（如 ch03 的检查点是「能构建 type-state builder 模式」）。全书预计 30–45 小时。
+`main` 函数（[L228-L238](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L228-L238)）把编译器的「执法过程」演示得很直观：在 `Disconnected` 或 `Connected` 状态下调用 `conn.request("/data")` 都被注释掉并标注 ❌，只有走完 `connect()` → `authenticate()` 之后（变量被重新绑定为新类型），`request` 才能编译。章节在 [L241-L243](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L241-L243) 点出关键洞察：每次转移消费 `self` 并返回新类型，旧状态转移后不可再用，且 `PhantomData` 零大小、状态在编译期即被擦除。
 
-**两本书的主题骨架**：
-
-[rust-patterns-book/src/SUMMARY.md:L7-L35](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/SUMMARY.md#L7-L35) —— Part I「Type-Level Patterns」（ch01–ch04）是本讲的直接前置；Part II「Concurrency & Runtime」覆盖通道、线程、闭包、智能指针；Part III「Systems & Production」覆盖错误处理、序列化、unsafe、宏、测试、crate 架构与 async。
-
-[type-driven-correctness-book/src/SUMMARY.md:L11-L30](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/SUMMARY.md#L11-L30) —— Part II「Core Patterns」列出了全书最核心的九个模式（含本讲精读的 ch04 能力令牌、ch05 协议状态机、ch09 幻影类型）；Part III「Integration & Practice」以诊断平台和 Redfish 实战收束。
-
-**基础设施层的印证**——回到 xtask 的 BOOKS 注册表（承接 u1-l1 的「元数据双源」结论）：
-
-[xtask/src/main.rs:L35-L44](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/xtask/src/main.rs#L35-L44) —— `rust-patterns-book` 注册为 `"advanced"`，`type-driven-correctness-book` 注册为 `"expert"`，与 u3-l1 的五级分类一致。顺带一个「漂移」实例：BOOKS 给 patterns 书的描述是 "Pin, allocators, lock-free structures, unsafe"，但实际目录覆盖面远比这四个词广（泛型、trait、错误处理、宏、测试都在书里）——落地页的一行描述滞后于内容本体，这正是 u1-l1 指出的「README 与 BOOKS 双源维护」会出现的语义漂移，只是这次发生在描述与真实内容之间。
+同一模式还能造出「强制填写必填字段的 builder」：`ServerConfig<NeedsName>` → `ServerConfig<NeedsPort>` → `ServerConfig<Ready>`，漏掉一步就没有 `build()` 方法可调（[L255-L328](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L255-L328)）；章末 Key Takeaways 把三个模式收成三句话（[L745-L748](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L745-L748)）。
 
 #### 4.1.4 代码实践
 
-1. **实践目标**：用两本书自带的「元数据」为自己规划一条阅读路径。
+这是一个「编译器当裁判」的观察型实践。
+
+1. **实践目标**：亲眼看到 type-state 把「乱序调用」变成编译错误，而不是运行期异常。
 2. **操作步骤**：
-   - 打开 [type-driven-correctness-book/src/ch00-introduction.md:L27-L35](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch00-introduction.md#L27-L35) 的配速表（Pacing Guide），找到最接近你背景的一行（如 "New to correct-by-construction" 或 "IPMI / BMC developer"）。
-   - 对照 [rust-patterns-book/src/ch00-introduction.md:L43-L66](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch00-introduction.md#L43-L66) 的配速表，把 type-driven 路径中每章的前置（指回 patterns 书的章节）补进你的计划，形成一张「先读 patterns 哪几节、再读 type-driven 哪几章」的合并路线。
-3. **需要观察的现象**：type-driven 的每条路径都跳过若干章节——它不是让你从头读到尾，而是按领域裁剪。
-4. **预期结果**：一张标注了预估耗时（两表都给了小时数）的个人路线图。待本地验证（取决于你的背景选择）。
+   - 本地运行 `cargo xtask serve`（或访问在线书站），打开 Rust Patterns 第 3 章，滚动到 `Connection<State>` 示例；该代码块是普通 ` ```rust ` 块，带 playground 编辑与运行按钮（u3-l2 讲过的配置在起作用）。
+   - 点击编辑，把 `main` 中第一行注释 `// conn.request("/data");` 取消注释，点 Run。
+   - 再把 `let conn = conn.connect();` 这一行注释掉，恢复上一条，再 Run 一次。
+3. **需要观察的现象**：playground 的输出区不再是程序输出，而是编译诊断；两次实验的报错对象不同——一次是 `Connection<Disconnected>` 上没有 `request`，一次是 `Connection<Connected>` 上没有。
+4. **预期结果**：两次都得到类似 `error[E0599]: no method named 'request' found for struct 'Connection<...>' in the current scope` 的错误，错误里的状态类型随你注释的转移步骤而变。具体措辞以 playground 实际输出为准（待本地验证）。
+5. **注意**：本实践不修改仓库任何文件，全部改动都发生在浏览器 playground 里。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：type-driven 书的引言里，"correct-by-construction spectrum"（正确性谱系）把手段按安全性从低到高排成四级，是哪四级？
+**练习 1**：`connect` 为什么签名是 `fn connect(self) -> Connection<Connected>`，而不是 `fn connect(&mut self)` 改内部状态？
 
-**答案**：运行时检查（runtime checks）→ 单元测试（unit tests）→ 属性测试（property tests）→ 构造即正确（correct by construction）。见 [type-driven-correctness-book/src/ch00-introduction.md:L70-L80](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch00-introduction.md#L70-L80)，谱系最右端给出的示例正是本讲的主角：`struct Celsius(f64);`——用类型本身消除「温度和转速混淆」这类 bug。
+**答案**：`&mut self` 方案下对象类型不变，`Disconnected` 状态的旧变量仍然存在，编译器无法阻止你在「已经 connect」之后再用旧接口，也无法阻止重复 connect。消费 `self` 后旧值已被 move，任何再用都是 `use of moved value` 错误；新状态是**新类型的值**，方法集合随之切换。
 
-**练习 2**：如果你只想花 30 分钟快速了解 type-driven 书的全貌，引言推荐读哪两章？
+**练习 2**：`struct Age(u32)` 与直接用 `u32` 相比，运行期多付出什么代价？
 
-**答案**：ch01（The Philosophy）+ ch13（Reference Card），即配速表中的 "Quick overview" 路径。参考卡章 [type-driven-correctness-book/src/SUMMARY.md:L34-L35](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/SUMMARY.md#L34-L35) 是全模式的目录与决策流程图。
+**答案**：零。单字段元组结构体与内层类型布局一致（`repr(transparent)` 语义），优化器视其为同一个值；「代价」全部转移到编译期的类型检查上，这正是 newtype 被称为零成本抽象的原因。
 
-### 4.2 newtype 与 type-state：把约束编码进类型
+**练习 3**：如果图省事给 `Email(String)` 实现 `Deref<Target = str>`，会引入什么风险？
+
+**答案**：`Email` 会自动获得 `str` 的全部方法，`split_at`、`trim`、`replace` 都能直接调用，而这些操作不保证「含 @」的不变量；调用者拿到返回的 `&str` 再重新组装，校验就被绕过了。章节把它形容为在抽象边界上「凿洞」（[L60-L78](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L60-L78)），并建议改用显式委托或 `AsRef<str>`。
+
+### 4.2 幻影类型：类型参数不占一个字节
 
 #### 4.2.1 概念说明
 
-这是 patterns 书 Part I 的核心章（🟡 中级难度），解决两个层层递进的问题：
+4.1 的 `Connection<State>` 已经用到了 `PhantomData`，本模块把它扶正。**幻影类型（phantom type）**指出现在泛型参数列表、却不出现在任何真实字段里的类型参数——它纯粹携带类型层信息。`PhantomData<T>` 就是把它合法挂载到结构体上的标准工具。
 
-- **newtype**：用单字段元组结构体把既有类型包成**一个全新的类型**，零运行时开销地消除「参数顺序换错」类 bug。`struct Age(u32)` 和 `struct EmployeeId(u32)` 底层都是 `u32`，但编译器视其为两个不兼容的类型——把 `EmployeeId(42)` 传给期望 `Age` 的参数会直接编译失败。
-- **type-state**：把对象可能处于的每个**状态**做成独立的类型，把状态迁移做成**消费旧值、返回新类型**的方法。于是「在错误状态下调用方法」不再可能——那个方法在错误的类型上**根本不存在**。书中反复引用的设计格言：让非法状态**不可表示**（unrepresentable）。
+为什么需要它？rust-patterns-book 第 4 章开篇给出定义：`PhantomData<T>` 是零大小类型，告诉编译器「这个结构体逻辑上关联了 `T`，虽然并不包含 `T`」，它影响型变（variance）、drop 检查与自动 trait 推断，却不占内存（[rust-patterns-book/src/ch04-phantomdata-types-that-carry-no-data.md:L9-L11](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch04-phantomdata-types-that-carry-no-data.md#L9-L11)）。该章把它的职责整理成三行表格（[L36-L42](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch04-phantomdata-types-that-carry-no-data.md#L36-L42)）：生命周期绑定（`PhantomData<&'a T>`）、所有权模拟（`PhantomData<T>`）、型变控制（`PhantomData<fn(T)>`）。
 
-为什么需要它？对照你在 C/C#/Python 中的经验：一个网络连接必须先创建、再连接、再认证、最后才能发请求。传统写法用一个 state 枚举加运行时检查（`if !authenticated { throw }`），检查一旦漏写就是生产事故。type-state 把这套检查**搬进编译期**。
+type-driven-correctness-book 第 9 章给出工程动机：硬件资源在代码里「长得一样但不可互换」——32 位寄存器和 16 位寄存器都是寄存器，读写 DMA 缓冲和只读 DMA 缓冲都是裸指针（[type-driven-correctness-book/src/ch09-phantom-types-for-resource-tracking.md:L7-L24](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch09-phantom-types-for-resource-tracking.md#L7-L24)）。幻影类型把「宽度」「方向」这类属性编码进类型，整类资源错配 bug 随之消失。
 
 #### 4.2.2 核心流程
 
-type-state 的机制可以用形式化的状态机语言描述。一个状态机：
-
-\[ M = (S,\ s_0,\ \delta,\ F) \]
-
-其中 \( S \) 是状态集，\( s_0 \) 是初始状态，\( \delta: S \times A \to S \) 是迁移函数。type-state 对它的编码规则：
-
-- 每个状态 \( s \in S \) 对应一个零大小标记类型 \( T_s \)（如 `struct Disconnected;`）；
-- 对象类型参数化为 `Machine<State>`，`PhantomData<State>` 让状态活在类型里而不占字节；
-- 每条迁移边 \( \delta(s, a) = s' \) 对应一个方法 \( fn\ a(self) \to Machine<T_{s'} \)——**消费 `self`** 是关键，它保证迁移后旧状态无法继续使用；
-- 初始状态由构造函数固定：`new()` 只存在于 `impl Machine<T_{s_0}>` 上；
-- 只在状态 \( s \) 上合法的操作，只定义在 `impl Machine<T_s>` 里。
-
-于是整个状态机的邻接表被逐行誊写进 `impl` 块的分布中，编译器做方法解析时就是在跑这个状态机：
+以寄存器宽度为例：
 
 ```text
-调用 conn.request("/data") 时编译器的方法解析：
-  conn : Connection<Disconnected>
-  在 impl Connection<Disconnected> 里找 request → 没找到
-  在其他 impl 块里找 → request 定义在 impl Connection<Authenticated>，
-     但 self 类型不匹配
-  ⇒ error[E0599]: no method named `request`  ← 状态违规变成编译错误
+定义宽度标记：Width8 / Width16 / Width32（零大小）
+    │
+句柄带幻影参数：struct Register<W> { base, offset, _width: PhantomData<W> }
+    │
+每个宽度一个 impl：impl Register<Width16> { read() -> u16 } ...
+    │
+工厂方法返回带正确标记的句柄：vendor_id() -> Register<Width16>
+    │
+效果：cfg.vendor_id().read() 只能赋给 u16；
+      cfg.bar0().write(0u16) 直接编译错误（期望 u32）
 ```
+
+与 4.1 的 type-state 相比，幻影类型标记的是「**这个值具有什么静态属性**」（宽度、方向、单位），而 type-state 标记的是「这个值处于生命周期哪一阶段」；两者机制同源（泛型参数 + 专属 impl 块），只是语义侧重不同。
 
 #### 4.2.3 源码精读
 
-**newtype 的动机示例**：
+[type-driven-correctness-book/src/ch09-phantom-types-for-resource-tracking.md:L31-L46](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch09-phantom-types-for-resource-tracking.md#L31-L46) 定义了四个宽度标记和带幻影参数的 `Register<W>`——注意真实字段只有 `base` 与 `offset`，宽度信息**只存在于类型里**：
 
-[rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md:L13-L28](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L13-L28) —— 左边是四个同类型参数（`name, email, age: u32, id: u32`）换错顺序也能编译的隐患代码；右边定义 `struct UserName(String); struct Email(String); struct Age(u32); struct EmployeeId(u32);` 后，`EmployeeId(42)` 传给 `Age` 参数变成编译错误。
+```rust
+pub struct Width8;
+pub struct Width16;
+// ...
+pub struct Register<W> {
+    base: usize,
+    offset: usize,
+    _width: PhantomData<W>,   // 零字节的编译期标记
+}
+```
 
-**type-state 的状态图与定义**：
+接着每个宽度获得专属 `impl` 块，方法签名里的返回类型随之不同：`Register<Width16>::read` 返回 `u16`，`Register<Width32>::read` 返回 `u32`（[L48-L77](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch09-phantom-types-for-resource-tracking.md#L48-L77)）。`PcieConfig` 工厂按 PCIe 规范的偏移量发放带正确标记的句柄：`vendor_id()` 发 `Register<Width16>`，`bar0()` 发 `Register<Width32>`（[L79-L103](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch09-phantom-types-for-resource-tracking.md#L79-L103)）。最终 [L105-L114](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch09-phantom-types-for-resource-tracking.md#L105-L114) 的示例展示了两条被注释掉的「混用」调用及其编译错误——用 `u32` 接 `vendor_id().read()` 会得到 `expected u16`。
 
-[rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md:L159-L171](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L159-L171) —— 用 mermaid `stateDiagram-v2` 画出 `Disconnected → Connected → Authenticated` 的合法迁移，并标注两条**不可能**的迁移（`Disconnected --request()--> ❌ won't compile`）；图下方的引言点明机制："Each transition *consumes* `self` and returns a new type — the compiler enforces valid ordering."
-
-[rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md:L182-L190](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L182-L190) —— 三个零大小状态标记（`struct Disconnected; struct Connected; struct Authenticated;`）加上参数化结构体 `Connection<State> { address: String, _state: PhantomData<State> }`。注意 `_state` 字段是 `PhantomData`——它就是 4.3 节的主角。
-
-[rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md:L193-L227](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L193-L227) —— 三个 `impl` 块分别只对一个状态开放方法：`Connection<Disconnected>` 才有 `new()` 和 `connect(self) -> Connection<Connected>`；`Connection<Connected>` 才有 `authenticate(self) -> Connection<Authenticated>`；`Connection<Authenticated>` 才有 `request()`。迁移方法全部拿 `self`（不是 `&self`），用完即耗散。
-
-[rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md:L228-L238](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L228-L238) —— `main` 里两次被注释掉的 `conn.request("/data")` 分别演示在 `Disconnected` 和 `Connected` 状态下调用是编译错误，只有 `authenticate` 之后的那次调用合法。**这一段是普通 ` ```rust ` 代码块（非 ignore），意味着你在构建出的书页上可以直接点 playground 的运行/编辑按钮改写它**——u3-l2 讲过的「示例自包含 + 可运行」范式在这里兑现。
-
-[rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md:L241-L245](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L241-L245) —— Key insight 块：迁移消费 `self`、旧状态不可复用、零运行时成本；并给出与 C++/C# 的对照——那边只能靠运行时检查（`if (!authenticated) throw ...`）。
-
-本章还有三块延伸内容，本讲只指路不展开：
-
-- **带 type-state 的 builder**（[L249-L329](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L249-L329)）：`ServerConfig<NeedsName> → <NeedsPort> → <Ready>`，强制「必填字段按序提供，缺一步就 `build()` 不了」。
-- **config trait 模式**（[L422-L494](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L422-L494)）：把多个 trait 约束的泛型参数收敛进一个带关联类型的 `BoardConfig` trait，驯服「泛型参数爆炸」。
-- **双轴 type-state**（[L754-L1054](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L754-L1054)）：`Handle<Vendor, State>` 用「厂商 × 状态」两个维度上的条件 `impl` 块编码一张能力矩阵——它预告了 type-driven 书把多个机制组合使用的思路。
-
-章末的交通灯练习是本讲综合实践的模板：
-
-[rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md:L1058-L1115](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L1058-L1115) —— 要求实现 `Red → Green → Yellow → Red` 的交通灯，其余顺序必须不可能；解答用 `<details>` 折叠（u3-l2 讲过的练习组织方式），核心结构与 `Connection` 例子完全同构。
+rust-patterns-book 第 4 章则展示了幻影参数更深的用法——**生命周期烙印**：`ArenaHandle<'arena>` 用 `PhantomData<*mut &'arena ()>` 把句柄与特定 arena 实例绑定，使「拿 A 仓库的句柄去 B 仓库取货」无法通过借用检查（[rust-patterns-book/src/ch04-phantomdata-types-that-carry-no-data.md:L44-L100](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch04-phantomdata-types-that-carry-no-data.md#L44-L100)）。这一技巧在 u3-l4 讲过的 Pin/自引用场景中同样关键。
 
 #### 4.2.4 代码实践
 
-1. **实践目标**：亲眼看到「在错误状态上调用方法」产生的编译器输出。
-2. **操作步骤**（两条路线任选其一）：
-   - **路线 A（零安装，推荐）**：按 u1-l3 跑起本地站点（`cargo xtask serve` 后访问 `http://localhost:3000/rust-patterns-book/`），进入第 3 章，找到 `Connection` 例子的代码块，点 playground 的**编辑**按钮，把 `fn main` 里 `let conn = conn.connect();` 之前的 `// conn.request("/data");` 注释去掉，点运行。
-   - **路线 B（本地 Cargo）**：在仓库**之外**的目录（如 `/tmp/typestate-demo`，注意仓库根是 u2-l1 讲过的虚拟清单 workspace，不要在里面新建 crate）执行 `cargo new typestate-demo`，把书上 [L173-L238](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L173-L238) 的 `Connection` 例子抄进 `src/main.rs`，取消 L230 那行注释，运行 `cargo check`。
-3. **需要观察的现象**：编译器报错，错误形如 `error[E0599]: no method named 'request' found for struct 'Connection<Disconnected>'`；运行时不会得到任何 panic——代码根本没活到运行阶段。
-4. **预期结果**：一条 E0599 错误，错误信息会指出 `request` 存在于 `impl Connection<Authenticated>` 中。确切的措辞随 rustc 版本略有差异，待本地验证。
+源码阅读 + playground 验证。
+
+1. **实践目标**：验证幻影标记确实「零字节」，并体会宽度错配的报错形态。
+2. **操作步骤**：
+   - 在书站打开 type-driven-correctness-book 第 9 章，把 `Register<W>` 定义（`base`、`offset`、`PhantomData`）与任一 `impl` 块抄进 playground，补一个 `fn main`，用 `std::mem::size_of::<Register<Width16>>()` 打印大小。
+   - 再写 `let bad: u32 = cfg.vendor_id().read();`（需补上 `PcieConfig` 工厂）观察错误。
+3. **需要观察的现象**：`size_of` 打印的数值等于两个 `usize` 字段之和（64 位平台上预期为 16），`PhantomData` 没有贡献任何字节；类型错配行报 `expected u16, found u32` 一类的 E0308 错误。
+4. **预期结果**：零大小断言成立；错配行无法编译。`size_of` 的具体数值待本地验证。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么 type-state 的迁移方法必须写 `fn connect(self)` 而不是 `fn connect(&mut self)`？改成 `&mut self` 会失去什么保证？
+**练习 1**：`Register<Width16>` 的 `_width: PhantomData<Width16>` 字段占几个字节？整个结构体呢？
 
-**答案**：`self`（按值获取）会把旧值**移动**进方法，调用方从此无法再触碰旧状态；`&mut self` 只是可变借用，迁移完成后调用方手里仍握着旧状态的值，可以在 `Disconnected` 状态上再次调用别的方法，「迁移后旧状态不可用」的保证随之瓦解。type-driven 书 ch05 的 Key Takeaways 第 2 条正是这句话："Each transition consumes `self` — you can't hold onto an old state after transitioning"（[ch05:L541-L548](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L541-L548)）。
+**答案**：`PhantomData` 是零大小类型，字段占 0 字节；整个 `Register<Width16>` 只含 `base` 与 `offset` 两个 `usize`，大小与标记无关——这正是「零成本」的量化表述。
 
-**练习 2**：本章对 newtype 实现 `Deref` 给出了强烈的警告。什么情况下 `Deref` 是反模式？
+**练习 2**：为什么必须写 `PhantomData<W>`，直接 `struct Register<W> { base: usize, offset: usize }` 不行吗？
 
-**答案**：当 newtype 存在的意义是**保护不变量或收窄 API** 时（如 `Email` 必须含 `@`、`Password` 要隐藏内容），`Deref` 会把内类型的全部方法漏出去，调用方可以绕过构造函数的校验直接操作内部值——相当于在抽象边界上凿了个洞；`DerefMut` 更会让外部直接改写内部值。只有当包装的意义是**透明地提供内类型全部能力**（智能指针、`String → str` 这类薄包装）时才适合 `Deref`。详见 [ch03:L64-L108](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L64-L108) 的两张对照表与决策矩阵。
+**答案**：不行。Rust 要求泛型参数必须被结构体使用，完全不使用 `W` 的定义会触发 `phantom data` 相关错误（unused parameter）；`PhantomData` 是「逻辑使用」这个参数的官方通道，同时让编译器正确处理型变与 drop 检查。
 
-**练习 3**：patterns 书的 Key Takeaways 给 newtype/type-state 各下了一句断语，是什么？
+**练习 3**：幻影类型与 type-state 有什么异同？
 
-**答案**："Newtypes give compile-time type safety at zero runtime cost" 与 "Type-state makes illegal state transitions a compile error, not a runtime bug"，外加 "Config traits tame generic parameter explosion"。见 [ch03:L745-L748](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L745-L748)。
+**答案**：机制相同——零大小标记 + 泛型参数 + 按类型分派的专属 `impl` 块。语义不同——幻影类型标注的是值的**静态属性**（宽度、方向、单位），生命周期内不变；type-state 标注的是**协议阶段**，会通过消费 `self` 的转移方法变化。一本书用 `Register<Width16>`（属性），另一本用 `Connection<Authenticated>`（阶段），就是两种用法的对照。
 
-### 4.3 幻影类型 PhantomData：类型里不占字节的信息
+### 4.3 能力令牌：函数签名即权限检查
 
 #### 4.3.1 概念说明
 
-`PhantomData<T>` 是标准库提供的**零大小**标记类型，用来告诉编译器「我这个结构体在逻辑上与 `T` 相关联，虽然我并没有真的存一个 `T`」。patterns 书第 4 章（🔴 高级）给它列了三个职责：
+type-driven-correctness-book 第 4 章的**能力令牌（capability token）**把「权限」也搬进类型系统：用一个零大小类型充当「调用者有权做危险操作」的**凭证**，危险函数要求按引用传入这个凭证。章首的问题陈述很直白：C/C++ 里每个危险函数都得自己写 `if (!bmc->is_admin)`，漏写一个就是提权漏洞（[type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md:L18-L30](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md#L18-L30)）。
 
-1. **生命周期绑定**（`PhantomData<&'a T>`）：声明结构体借用了 `'a` 的数据；
-2. **所有权模拟**（`PhantomData<T>`）：让 drop 检查按「拥有一个 T」对待结构体；
-3. **型变控制**（`PhantomData<fn(T)>` 等）：决定结构体对 `T` 是协变、逆变还是不变。
+令牌的不可伪造性靠两个手段：
 
-对 4.2 的 type-state 而言，它还有第四个更基础的作用：**Rust 要求泛型参数必须被使用**。`struct Connection<State> { address: String }` 里 `State` 没出现在任何字段中，编译器会拒绝（`parameter State is never used`）；加上 `_state: PhantomData<State>` 既满足规则，又不占一个字节。可以说：**PhantomData 是把「类型信息」从字段中解耦出来的桥梁——类型系统需要知道，内存布局不需要付出**。
+1. **私有字段**：`AdminToken { _private: () }` 的字段私有，模块外无法用字面量构造它；
+2. **唯一铸造入口**：只有模块内经过真正鉴权的 `authenticate_admin()` 才能返回令牌。
+
+于是函数签名 `fn reset_pcie_link(&mut self, _admin: &AdminToken, ...)` 本身就是**证明义务（proof obligation）**——「想调用我，请先出示 AdminToken」，而出示令牌的唯一途径是走过鉴权流程。章节明确说这些令牌在编译产物里是零字节、只在类型检查期间存在（[L119-L122](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md#L119-L122)）。
 
 #### 4.3.2 核心流程
 
-`PhantomData` 在 type-state 里的工作回路：
-
 ```text
-定义侧：struct Door<State> { _state: PhantomData<State> }
-                │
-                │  编译期：State 参与类型检查（Door<Locked> ≠ Door<Unlocked>）
-                │  编译期：size_of::<PhantomData<Locked>>() == 0
-                ▼
-使用侧：door.unlock() 返回 Door<Unlocked>
-                │
-                ▼
-产物：单态化后 Locked/Unlocked 被擦除，Door<Locked> 与
-      Door<Unlocked> 的内存布局完全相同 —— 零运行时成本
+调用者                          模块（唯一的令牌铸造者）
+   │                                │
+   │  authenticate_admin(凭证)  ──▶ │ 校验凭证
+   │◀── Ok(AdminToken) ──────────── │ （唯一能构造 AdminToken 的地方）
+   │                                │
+   │  reset_pcie_link(&admin, ...) ▶│ 签名要求 &AdminToken
+   │                                │ → 编译器核对证明 → 放行
+   │
+   └─ 没有令牌就调用？编译错误：无法凭空产生 AdminToken 类型的值
 ```
 
-书中还有两个「不用 PhantomData 参数、只用零大小标记类型」的兄弟模式值得知道：**量纲模式**（unit-of-measure，`Quantity<Meters>` 与 `Quantity<Seconds>` 不能相加）和**生命周期烙印**（lifetime branding，不同 arena 的句柄不能混用）。
+延伸出三种变体（对应章内小节）：
+
+| 变体 | 建模方式 | 解决的问题 |
+|------|----------|-----------|
+| 多步顺序 | 令牌链：`enable_standby()` 返回 `StandbyOn`，下一步要求 `&StandbyOn` | 上电时序不可颠倒（[L125-L185](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md#L125-L185)） |
+| 权限层级 | trait 层级 `Admin: Operator: Authenticated` + 各级令牌实现 | 角色访问控制（[L187-L238](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md#L187-L238)） |
+| 自动回收 | `ScopedAdminToken<'session>` 持有会话引用 | 令牌不能活得比会话久（[L240-L285](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md#L240-L285)） |
 
 #### 4.3.3 源码精读
 
-[rust-patterns-book/src/ch04-phantomdata-types-that-carry-no-data.md:L9-L34](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch04-phantomdata-types-that-carry-no-data.md#L9-L34) —— 开篇的 `Slice<'a, T>` 对照：裸写 `ptr + len` 时编译器不知道结构体借用了 `'a`；加 `_marker: PhantomData<&'a T>` 后借用关系、协变性、drop 检查全部就位。
+令牌定义与「唯一铸造入口」的约定见 [type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md:L41-L56](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md#L41-L56)：`AdminToken` 带 `_private: ()` 字段且注释声明它「不实现 Clone、不实现 Copy，必须显式传递」——不能复制意味着令牌不能被悄悄扩散。
 
-[rust-patterns-book/src/ch04-phantomdata-types-that-carry-no-data.md:L36-L42](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch04-phantomdata-types-that-carry-no-data.md#L36-L42) —— 「三职责」速查表，一表浓缩上一小节的 1、2、3。
+`BmcController` 的三个方法构成完整闭环（[L58-L91](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md#L58-L91)）：
 
-[rust-patterns-book/src/ch04-phantomdata-types-that-carry-no-data.md:L104-L157](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch04-phantomdata-types-that-carry-no-data.md#L104-L157) —— 量纲模式：`struct Quantity<Unit> { value: f64, _unit: PhantomData<Unit> }` 配合为 `Add`/`Div` 手写的 `impl`，让 `Quantity<Meters> + Quantity<Seconds>` 编译失败、`Meters / Seconds` 自动得到 `Quantity<MetersPerSecond>`。书末点题：`Quantity<Meters>` 的内存布局与裸 `f64` 完全相同——"pure type-system magic"。
+- `authenticate_admin()` 是**唯一**返回 `AdminToken` 的地方；
+- `train_link()` 返回 `LinkTrainedToken`，证明链路已就绪；
+- `reset_pcie_link(&mut self, _admin: &AdminToken, _trained: &LinkTrainedToken, slot)` 同时要求两种证明，方法体内**没有任何**权限判断。
 
-[rust-patterns-book/src/ch04-phantomdata-types-that-carry-no-data.md:L44-L102](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch04-phantomdata-types-that-carry-no-data.md#L44-L102) —— 生命周期烙印：`ArenaHandle<'arena>` 用 `PhantomData<*mut &'arena ()>`（对 `'arena` 不变）把每个句柄烙上所属 arena 的印记，拿 A arena 的句柄去查 B arena 直接编译失败。
-
-本章后半部（L159 起）进入型变（variance）的深水区——协变/逆变/不变如何由 `PhantomData` 的类型参数决定，属于 🔴 高级内容，本讲只指路。
+随后的使用示例（[L97-L117](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md#L97-L117)）给出正反对照：`maintenance_workflow` 先取两枚令牌再重置链接，一切正常；`unprivileged_attempt` 只有 `trained` 没有 `admin`，注释里写着 `???`——那是一个**根本无法写出**的实参。章末的成本表（[L299-L306](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md#L299-L306)）总结：令牌 0 字节、传参被 LLVM 优化掉、trait 层级单态化为静态分发、生命周期只在编译期——整套权限模型运行期总开销为零。
 
 #### 4.3.4 代码实践
 
-1. **实践目标**：亲手触发「泛型参数未使用」错误，理解 `PhantomData` 在 type-state 里存在的必要性。
-2. **操作步骤**：在 4.2.4 路线 B 的 `/tmp/typestate-demo/src/main.rs` 里，把 `Connection` 结构体的 `_state: PhantomData<State>` 字段**整行删掉**（同时删掉各处构造它的 `_state: PhantomData` 行），运行 `cargo check`；随后还原。
-3. **需要观察的现象**：编译器报出类似 `error[E0392]: parameter 'State' is never used` 的错误，并建议考虑使用 `PhantomData`。
-4. **预期结果**：E0392 错误一条；还原后恢复编译通过。确切措辞随版本略有差异，待本地验证。
+源码阅读型实践：亲手体会「不可伪造」。
+
+1. **实践目标**：确认令牌在模块外无法凭空构造。
+2. **操作步骤**：
+   - 在 playground 里新建两个模块：`mod bmc { pub struct AdminToken { _private: () } /* ... */ }` 与外面的 `fn main`。
+   - 在 `main` 里尝试 `let t = bmc::AdminToken { _private: () };`。
+   - 把 `AdminToken` 移到 `main` 同一模块再试一次。
+3. **需要观察的现象**：跨模块构造时编译器报「字段 `_private` 是私有的」（E0603 类错误）；同模块内则可以构造。
+4. **预期结果**：私有字段构成了模块边界上的「铸币厂围墙」——这正是书中 `authenticate_admin()` 必须与 `AdminToken` 同模块的原因。具体错误码待本地验证。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`Quantity<Meters>` 和裸 `f64` 在运行时有什么区别？
+**练习 1**：`_private: ()` 这个字段本身是零大小的，它防住了什么？
 
-**答案**：没有任何区别——`PhantomData<Meters>` 大小为 0，`Quantity<Meters>` 的布局就是 `f64`。区别全部在编译期：前者只能与同量纲相加、除法产生正确的新量纲类型。这就是「零成本抽象」在这两个模式中的字面含义。
+**答案**：防的是**结构体字面量构造**。字段私有后，模块外写不出 `AdminToken { .. }`；而 `()` 又保证这个防护本身不占内存。防线是「可见性」而非「数据」。
 
-**练习 2**：写一个容器拥有自己的数据，`PhantomData` 该怎么选？写一个只指向数据的视图类型呢？
+**练习 2**：令牌不实现 `Clone`/`Copy` 有什么讲究？
 
-**答案**：拥有数据的容器用 `PhantomData<T>`（drop 检查会假定可能 drop 一个 `T`，要求 `T` 活得比容器久）；视图/引用类型用 `PhantomData<&'a T>` 或 `PhantomData<*const T>`（不宣称所有权）。见 [ch04:L159-L184](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch04-phantomdata-types-that-carry-no-data.md#L159-L184) 的对照代码与实用规则。
+**答案**：若可复制，任何拿到令牌的代码都能无限复印并扩散，权限模型的审计边界就失效了。不可复制迫使令牌按值/按引用显式传递，谁在什么时刻持有权限一清二楚。
 
-### 4.4 能力令牌：零大小的权限证明
+**练习 3**：`ScopedAdminToken<'session>` 为什么不用运行期的「过期时间戳」检查？
+
+**答案**：它持有 `&'session AdminSession`，借用检查天然保证令牌活不过会话——会话一旦移动或销毁，令牌的使用就是生命周期错误。这是「让编译器当门禁」的又一例：检查发生在编译期，零运行期成本。
+
+### 4.4 协议状态机：type-state 用于真实硬件
 
 #### 4.4.1 概念说明
 
-进入 Expert 书。能力令牌（capability token，type-driven 书 ch04，🟡）回答的问题是：**谁被允许做什么**。
+type-driven-correctness-book 第 5 章是前三个模块的「会师之地」。硬件协议有严格状态机：IPMI 会话必须按「未认证 → 已认证 → 活跃 → 已关闭」推进，PCIe 链路训练要走「Detect → Polling → Configuration → L0」，乱序发命令轻则破坏会话、重则挂死总线（[type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md:L9-L13](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L9-L13)）。章内先用 Mermaid stateDiagram 画出两张协议状态图（IPMI 见 [L16-L27](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L16-L27)），再用一段 C 代码展示传统方案：enum 记状态 + 每个函数开头手写运行期检查，「很容易忘」（[L45-L63](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L45-L63)）。
 
-硬件诊断里有些操作是危险的——刷 BMC 固件、复位 PCIe 链路、写 OTP 熔丝。C/C++ 的做法是每个危险函数开头写运行时权限检查，漏写一个就是提权漏洞。能力令牌的方案：
-
-- 定义一个**零大小类型**作为「权限证明」，比如 `AdminToken`；
-- 它**只有一个合法的构造入口**（如 `authenticate_admin()`），字段私有（`_private: ()`）使模块外无法字面量构造；
-- 不实现 `Clone`/`Copy`——证明必须显式传递，不能复制；
-- 危险函数把令牌写进签名：`fn reset_pcie_link(&mut self, _admin: &AdminToken, ...)`。
-
-于是**函数签名本身就是检查**（书中称之为 proof obligation，证明义务）：编译期你拿不出 `AdminToken`，就写不出这个调用。而令牌是零字节的——「zero-cost proof of authority」（零成本的权限证明）这一章副标题是字面属实的。
-
-它与 type-state 的分工：type-state 证明「**东西**处在什么状态」，能力令牌证明「**调用者**有什么权限」——4.5 节会看到两者组合。
+type-state 方案的表述见 [L65-L70](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L65-L70)：每个协议状态是一个独立类型，转移是「消费一个状态、返回另一个状态」的方法；错误状态下调用方法之所以编译不过，不是因为检查失败了，而是因为**那个方法在那个类型上根本不存在**。
 
 #### 4.4.2 核心流程
 
+`IpmiSession<State>` 的状态机流程：
+
 ```text
-传统运行时检查                     能力令牌
-──────────────                    ──────────
-fn reset(link, slot) {            fn reset(&mut self,
-  if (!is_admin)      ← 忘写即漏洞      _admin: &AdminToken,   ← 签名即检查
-    return -EPERM;                    _trained: &LinkTrainedToken,
-  if (!link_trained)  ← 又一个           slot: u32)
-    return -EINVAL;                  // 函数体内零检查
-  ...                               }
-}
-                                  唯一入口：authenticate_admin() → AdminToken
-                                  编译失败点：拿不出令牌 = 调用无法通过类型检查
+IpmiSession<Idle>
+    │ authenticate(user, pass)  消费 self，Result<..., String>
+    ▼
+IpmiSession<Authenticated>
+    │ activate()                消费 self
+    ▼
+IpmiSession<Active>
+    ├─ send_command(&mut self)  ✅ 只在此状态存在
+    └─ close(self) ──────────▶ IpmiSession<Closed>（此后什么都做不了）
 ```
 
-多个令牌可以叠加成**时序证明**：电源时序（standby → auxiliary → main → CPU）中，每一步返回下一步要求的令牌，跳步的调用因造不出所需令牌而无法编译。
+全章按「三拍（three beats）」递进，每拍叠加一种已学模式：
+
+| 拍 | 协议 | 状态数 | 组合的模式 |
+|----|------|:---:|-----------|
+| 1 | IPMI 会话 | 4 | 纯 type-state |
+| 2 | PCIe LTSSM | 5 | type-state + Recovery 分支（可回退重训） |
+| 3 | 固件升级 | 6 | type-state + 能力令牌（4.3）+ 单次使用证明（ch03） |
+
+表格源自 [L461-L471](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L461-L471)——到第三拍，编译器同时消灭三类 bug：状态乱序、权限不足、重复应用固件。
 
 #### 4.4.3 源码精读
 
-[type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md:L20-L30](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md#L20-L30) —— 问题陈述的 C 版本：`reset_pcie_link` 里两个运行时检查（`is_admin`、`link_trained`），书点评「每个危险函数都要重复这些检查，忘掉一个就是提权 bug」。
+状态标记与结构体定义在 [type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md:L74-L88](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L74-L88)，注释强调状态「只存在于类型系统里」。`Idle` 状态的转移方法见 [L91-L112](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L91-L112)，`authenticate` 的签名 `pub fn authenticate(self, user: &str, pass: &str) -> Result<IpmiSession<Authenticated>, String>` 完整体现了「消费旧状态、返回新状态、可能失败」三要素。
 
-[type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md:L47-L54](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md#L47-L54) —— 两个令牌的定义：`pub struct AdminToken { _private: () }` 与 `LinkTrainedToken`，注释点明三件事——零大小、编译后完全消失、非 Clone 非 Copy 必须显式传递；私有字段 `_private` 阻止模块外构造。
+最值得细读的是 `Active` 状态的 `impl` 块（[L128-L144](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L128-L144)）：`send_command` 内部直接 `self.session_id.unwrap()`，**敢裸 unwrap 是有类型层靠山的**——`session_id` 只在 `authenticate` 里被置为 `Some`，而只有走过 `authenticate` 才可能拿到 `Active` 状态的值，不变量由构造路径保证，无需运行期检查。随后的 `ipmi_workflow`（[L146-L168](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L146-L168)）在三处注释里演示了 Idle、Authenticated、Closed 状态下调用 `send_command` 的编译错误。章节小结一锤定音：「任何地方都没有运行期状态检查」，编译器负责认证先于激活、激活先于发命令、关闭后不可再发（[L171-L174](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L171-L174)）。
 
-[type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md:L82-L90](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md#L82-L90) —— `reset_pcie_link` 的签名同时要求 `&AdminToken`（权限证明）与 `&LinkTrainedToken`（状态证明），函数体一行检查都不写——"No runtime checks needed — the tokens ARE the proof"。
+第三拍「固件升级」展示了模式组合：状态图（[L331-L345](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L331-L345)）里 `Verified` 状态旁注明「VerifiedImage 令牌被 apply() 消费」；代码中 `VerifiedImage` 与 `FirmwareAdminToken` 都用 `_private: ()` 封死外部构造（[L358-L365](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L358-L365)），而 `apply(self, proof: VerifiedImage)` 按值吃掉证明（[L417-L424](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L417-L424)）——工作流里第二次 `fw.apply(token)` 被注释为「use of moved value」（[L441-L458](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L441-L458)）。4.3 的能力令牌也在此回归：`firmware_update(&mut IpmiSession<Active>, &AdminToken, ...)` 的签名同时要求「会话活跃」与「管理员权限」两份证明，注释写道「签名就是检查」（[L287-L313](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L287-L313)）。
 
-[type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md:L96-L122](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md#L96-L122) —— 用法对照：`maintenance_workflow` 先认证拿令牌、再训练拿令牌、最后复位，三步全过；`unprivileged_attempt` 没有管理员令牌，`reset_pcie_link(???, ...)` 处直接写不出实参。L119-L122 总结：令牌在编译产物里是零字节，只活在类型检查期间——签名就是证明义务，而产出证明的唯一途径是通过认证函数。
+章末的适用性表格（[L473-L482](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L473-L482)）提醒分寸：IPMI、PCIe、TLS 握手、USB 枚举值得用 type-state；只有两个状态的简单请求/响应「大概不必」，无状态的消息收发「不要用」。Key Takeaways 第 6 条点出全书的落点：这套模式延伸为 ch17/ch18 的完整 **Redfish** 客户端与服务端实战（[L541-L548](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L541-L548)），对应 SUMMARY 的 Part III（[type-driven-correctness-book/src/SUMMARY.md:L27-L28](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/SUMMARY.md#L27-L28)）——服务器管理协议 Redfish 的会话生命周期与响应构造，正是本章 IPMI 例子的放大版。
 
-[type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md:L124-L185](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md#L124-L185) —— 电源时序案例：`StandbyOn`/`AuxiliaryOn`/`MainOn`/`CpuPowered` 四个令牌串成链，`enable_auxiliary` 必须吃 `&StandbyOn`——「反序可能损坏硬件」的约束由编译器看守。
-
-本章后半（L187 起）还有层级能力（用 trait 继承 `Operator: Authenticated`、`Admin: Operator` 表达「管理员能做用户的一切再加更多」）与带生命周期的可撤销令牌，指路不展开。
+> **源码阅读小发现**：本章 IPMI 代码块标记为 ` ```rust,ignore `（[L71](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L71)），且 [L76](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L76) 处有一行 `## Case Study: IPMI Session Lifecycle` 标题被误粘进代码栅栏内部——结合 u3-l2 讲过的三档代码块规则，可推断这就是该块只能「着色不可运行」的原因之一。读源码时留意这类排版痕迹，是判断「示例能否直接跑」的实用技巧。
 
 #### 4.4.4 代码实践
 
-1. **实践目标**：验证「模块外造不出令牌」这一保证。
-2. **操作步骤**：新建 `/tmp/cap-demo`（`cargo new cap-demo`），把书上的 `AdminToken`/`BmcController` 精简版抄入，并把 `BmcController` 与令牌放在 `mod auth { ... }` 里、`main` 放在模块外；然后在 `main` 里尝试 `let t = auth::AdminToken { _private: () };`，运行 `cargo check`。
-3. **需要观察的现象**：编译器报错——`_private` 字段是私有的，模块外无法构造 `AdminToken`；你只能调 `authenticate_admin()` 拿令牌。
-4. **预期结果**：一条关于私有字段不可访问（E0616）的错误。待本地验证。
+1. **实践目标**：独立走通一次「模式组合」的阅读验证，为综合实践热身。
+2. **操作步骤**：
+   - 通读 [ch05 的固件升级工作流](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L441-L458)，对照 Mermaid 状态图（[L331-L345](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L331-L345)）。
+   - 用纸笔为 `fw.apply(token)` 之后再加一行 `fw.apply(token)` 标注预期错误类别（提示：不再是「方法不存在」，而是所有权错误）。
+   - 打开同书 `ch17-redfish-applied-walkthrough.md`（SUMMARY 第 13 项），找出它与本章 IPMI 例子在「会话状态」上的对应关系。
+3. **需要观察的现象**：ch05 的工作流注释已经预演了你的答案（`use of moved value: token`）；ch17 的会话类型同样以状态参数化。
+4. **预期结果**：你能画出一根「IPMI（4 状态）→ 固件（6 状态 + 双令牌）→ Redfish（生产规模）」的复杂度递进线。Redfish 章节的具体类型名待阅读时确认。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：为什么 `AdminToken` 要刻意不派生 `Copy`/`Clone`？如果派生了会破坏什么？
+**练习 1**：`activate()` 里 `self.session_id.unwrap()` 为什么是安全的？
 
-**答案**：不派生使令牌成为**必须显式移动/传递**的对象，调用链上每一环都看得见权限的流向；一旦可复制，任何拿到引用的人都能私自复制一份永久留底，权限的授予范围失去控制。同章 ch03（single-use types）更是反向利用移动语义：令牌被消费后不可再用，`fw.apply(token)` 第二次调用会报 use of moved value。
+**答案**：`session_id` 唯一被置为 `Some` 的位置是 `authenticate()`，而能到达 `IpmiSession<Authenticated>` 的唯一路径就是 `authenticate()`——类型状态即构造历史，`Some` 这一不变量对所有 `Active`/`Authenticated` 值恒成立。这是「不变量由构造保证」的教科书示范。
 
-**练习 2**：能力令牌与 type-state 各证明什么？两者的单位成本分别是多少？
+**练习 2**：`firmware_update` 的签名要求哪两份证明？分别来自哪个模式？
 
-**答案**：type-state 证明**对象**当前所处状态（`IpmiSession<Active>`），能力令牌证明**调用方**拥有的权限（`AdminToken`）；两者都是零大小类型，运行时成本均为零，只存在于类型检查期。见 ch05 的组合示例（4.5 节）。
+**答案**：`&mut IpmiSession<Active>`（type-state：证明会话已按协议激活）与 `&AdminToken`（能力令牌：证明调用者有管理员权限）。签名即检查，函数体内无需任何判断。
 
-### 4.5 协议状态机：type-state 在真实硬件上的应用
+**练习 3**：什么样的协议**不该**用 type-state？
 
-#### 4.5.1 概念说明
-
-type-driven 书 ch05（🔴 高级）是 type-state 的「实战篇」，标题直译是「协议状态机——为真实硬件而生的 type-state」。硬件协议都有严格的状态机：IPMI 会话要走 `Idle → Authenticated → Active → Closed`，PCIe 链路训练要走 `Detect → Polling → Configuration → L0`；在错误状态发命令会毁掉会话或挂死总线。
-
-本章的结构是三个难度递增的「beat」（节拍）：
-
-| Beat | 协议 | 状态数 | 组合了什么 |
-|:----:|------|:------:|-----------|
-| 1 | IPMI 会话 | 4 | 纯 type-state |
-| 2 | PCIe LTSSM | 5 | type-state + Recovery 回退分支 |
-| 3 | 固件升级 | 6 | type-state + 能力令牌（ch04）+ 一次性证明（ch03） |
-
-到 beat 3，编译器同时强制三件事：状态顺序、管理员权限、镜像只能应用一次——三类 bug 在一个状态机里同时被消灭。这章也是「专家书」的典型切片：单个机制不新（patterns ch03 已教），新的是**把机制组合起来贴合真实协议**。
-
-#### 4.5.2 核心流程
-
-以 beat 1 的 IPMI 会话为例，状态机 \( M = (S, s_0, \delta, F) \) 的编码映射：
-
-- \( S \)：`{Idle, Authenticated, Active, Closed}` → 四个零大小结构体；
-- \( s_0 = \text{Idle} \)：`new()` 只定义在 `impl IpmiSession<Idle>`；
-- \( \delta \)：`authenticate(self) -> ...<Authenticated>`、`activate(self) -> ...<Active>`、`close(self) -> ...<Closed>`，每条边一个消费 `self` 的方法；
-- 合法动作的**定义域**即状态：`send_command` 只存在于 `impl IpmiSession<Active>`，等价于状态机中「`send_command` 仅在 Active 状态有自环」这条标注。
-
-C 与 Rust 的对照是本章最有教学价值的一组截图：
-
-```text
-C 版本（运行时）：                       Rust 版本（编译期）：
-enum {IDLE, AUTH, ACTIVE, CLOSED};      pub struct Idle; pub struct Authenticated;
-if (s->state != ACTIVE) {               impl IpmiSession<Active> {
-    return -EINVAL;   ← 忘写即事故          pub fn send_command(...)  ← 别处不存在
-}                                       }
-```
-
-#### 4.5.3 源码精读
-
-[type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md:L16-L27](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L16-L27) —— IPMI 状态机的 mermaid 图，两个 note 直接把结论画进图里：`send_command() only exists here`（Active）与 `Idle 状态下 send_command() → compile error`。
-
-[type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md:L45-L63](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L45-L63) —— C 对照版：枚举加 `if (s->state != ACTIVE)` 的运行时检查，注释自评 "runtime check — easy to forget"。
-
-[type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md:L74-L88](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L74-L88) —— Rust 版的状态标记与参数化结构体 `IpmiSession<State>`，注释点明 "The state exists ONLY in the type system (PhantomData is zero-sized)"——这正是 4.3 节 PhantomData 的用武之地。（顺带一个原文档小瑕疵：L76 行「## Case Study: IPMI Session Lifecycle」误落在代码围栏内部，导致这行标题在渲染页上显示为代码而非标题——一个适合 u4-l5 贡献流程练手的真实修复点。）
-
-[type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md:L91-L144](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L91-L144) —— 三个 `impl` 块逐状态开放方法：`Idle` 上是 `new()` 和 `authenticate(self) -> Result<...<Authenticated>, String>`（认证可能失败，所以返回 `Result`）；`Authenticated` 上是 `activate()`；`Active` 上才有 `send_command(&mut self, ...)` 与 `close(self)`。注意 `activate` 里那句注释：`session_id` 在 `Active` 状态**由类型保证是 `Some`**——不变量被迁移路径固化，`unwrap` 不再是赌博。
-
-[type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md:L146-L175](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L146-L175) —— `ipmi_workflow` 串起全程：三处被注释的 `send_command` 分别展示在 `Idle`、`Authenticated`、`Closed` 状态下调用全部是编译错误；收尾总结 "No runtime state checks anywhere"，编译器强制了认证先于激活、激活先于发命令、关闭后不可再发。
-
-[type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md:L287-L322](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L287-L322) —— 机制组合的关键一跳：`firmware_update(session: &mut IpmiSession<Active>, _admin: &AdminToken, image)` 同时要求 Active 会话（type-state）与管理员令牌（能力令牌），注释点题 "the signature IS the check"。调用方必须依次完成认证、激活、取得令牌五步，全部在编译期强制、零运行时成本。
-
-[type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md:L350-L370](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L350-L370) —— beat 3 的固件升级状态机：六个状态标记、一次性证明类型 `VerifiedImage`（私有字段防伪造、携带摘要）、能力令牌 `FirmwareAdminToken`、参数化结构 `FwUpdate<S>` 三件套齐上。
-
-[type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md:L417-L424](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L417-L424) —— 组合的收口：`apply(self, proof: VerifiedImage)` 按值吃掉一次性证明，注释写明 "proof is moved — can't be reused"——验证过的镜像**在类型层面无法被应用第二次**。
-
-[type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md:L461-L482](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L461-L482) —— 三个 beat 的小结表 + 「何时该用 type-state」决策表。后者同样重要：只有 2 个状态的简单请求/响应（⚠️ 大概不必）、无状态的 fire-and-forget（❌ 不用）就不要上 type-state——专家书的克制也是课程的一部分。
-
-[type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md:L541-L549](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L541-L549) —— 章末 Key Takeaways 六条，首尾两条值得背下来：错误顺序的调用**不可能**（方法在错误状态上不存在）；不要过度使用（两状态协议用 type-state 反而更复杂）。最后一条预告 ch17/ch18 把该模式延伸到 Redfish 全流程。
-
-> 一个值得留意的注解细节：本章所有大代码块都用 ` ```rust,ignore ` 标注（u3-l2 讲过：仅着色、不可在 playground 运行），部分段落还用了 `# use std::marker::PhantomData;` 这类以 `#` 开头的隐藏行（rustdoc 文档测试语法）。这与 patterns 书 ch03 的可运行 ` ```rust ` 块形成对照——章节作者会按内容性质选择注解，读源码时它能提示你「这段是否被自动验证过」。
-
-#### 4.5.4 代码实践
-
-1. **实践目标**：独立完成书上留的 USB 枚举练习，再对照官方解答。
-2. **操作步骤**：
-   - 阅读练习题 [ch05:L484-L486](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L484-L486)：建模 USB 设备的 `Attached → Powered → Default → Addressed → Configured` 五态迁移，每步消费前一状态，`send_data()` 仅在 `Configured` 可用。
-   - **先不看解答**，在 `/tmp/usb-demo` 自己写（结构与 4.2 的 `Connection` 完全同构，五个状态五个 `impl` 块）。
-   - 写完展开 [L488-L539](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L488-L539) 的折叠解答对照。
-3. **需要观察的现象**：你的版本能否做到「跳过 `set_address` 直接 `configure`」编译不过；官方解答用了哪些你没想到的简化。
-4. **预期结果**：一个约 40 行的可编译程序，`cargo check` 通过；故意写错顺序时得到 E0599。
-
-#### 4.5.5 小练习与答案
-
-**练习 1**：beat 3 的固件升级中，「防止同一镜像被应用两次」是由哪个机制实现的——type-state、能力令牌还是一次性类型？
-
-**答案**：一次性类型（single-use types，ch03）。`verify_ok` 同时返回 `(FwUpdate<Verified>, VerifiedImage)`，而 `apply(self, proof: VerifiedImage)` 按值消费证明；第二次 `apply(token)` 因 `token` 已被移动而报 use of moved value。type-state 管顺序、能力令牌（`FirmwareAdminToken`）管「只有管理员能开始上传」，三者各司其职——见 [ch05:L461-L471](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L461-L471) 的组合表。
-
-**练习 2**：PCIe LTSSM 的例子比 IPMI 多了什么结构性难点，书上如何处理？
-
-**答案**：多了**回退/重训分支**——`L0` 可经 `enter_recovery()` 进入 `Recovery`，`Recovery` 再经 `retrain(speed)` 回到 `L0`（也可能失败回 Detect）。处理方式仍是老规矩：每个状态一个 `impl` 块，`Recovery` 的 `impl` 里提供 `retrain` 方法，编译器因此自动认可 `L0 → Recovery → L0` 循环、拒绝从 `Detect` 直接 `send_tlp`。见 [ch05:L235-L263](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L235-L263)。
-
-**练习 3**：`activate()` 里的 `self.session_id.unwrap()` 为什么是安全的？
-
-**答案**：因为到达 `IpmiSession<Authenticated>` 的唯一路径是 `authenticate()`，而它已经把 `session_id` 置为 `Some`——不变量由类型迁移链保证，`unwrap` 不会失败。这正是「把运行时断言升级为类型证明」的红利：注释原话 "session_id is guaranteed Some by the type-state transition path"（[ch05:L115-L125](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L115-L125)）。
+**答案**：只有两个状态的简单请求/响应（状态信息太薄，模式收益抵不过样板代码），以及完全无状态的 fire-and-forget 消息（没有状态可编）。章末表格明确标注了这两类（[L481-L482](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch05-protocol-state-machines-type-state-for-r.md#L481-L482)）。
 
 ## 5. 综合实践
 
-把本讲四个模块串成一个任务：**实现一个「未解锁就开门无法编译」的门锁 type-state**，并叠加一个能力令牌。
+**任务：亲手造一扇「编译器看守的门」——`Door<Locked>` / `Door<Unlocked>`。**
 
-**任务描述**：门只有 `Locked`/`Unlocked` 两个状态。`open()` 只对解锁的门可用；`lock()` 只对解锁的门可用；`unlock()` 需要住户令牌（能力令牌）才能调用——没有令牌连门都开不了。
+这是本讲的贯通实践：用 4.1 的 type-state 骨架、4.2 的 `PhantomData` 挂载，让「未解锁就 `open()`」成为编译错误，并用 4.3 的思路体会「方法只存在于正确状态」。
 
-以下为示例代码（本讲义新写，仿照 [rust-patterns-book ch03 的 Connection 范式](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L182-L238)与 [type-driven ch04 的令牌范式](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/ch04-capability-tokens-zero-cost-proof-of-aut.md#L47-L54)）：
+**1. 实践目标**：不看书画出一个两状态 type-state 类型，并通过 `cargo check` 收集两类错误证据（方法不存在 E0599、值被移动后使用 E0382）。
+
+**2. 操作步骤**：
+
+仓库本身没有可运行 crate（这两本书的内容就是 Markdown），因此在仓库**外面**建一个练习项目（不要向仓库添加任何文件）：
+
+```bash
+cargo new /tmp/door-typestate
+cd /tmp/door-typestate
+```
+
+把下面的示例代码写入 `src/main.rs`（**示例代码**，仿照 [rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md:L181-L238](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L181-L238) 的 `Connection` 与 [L1065-L1111](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L1065-L1111) 的红绿灯解写法）：
 
 ```rust
 use std::marker::PhantomData;
 
-// ── 能力令牌（4.4）：零大小、私有字段防外部构造、不可 Clone ──
-pub struct ResidentToken { _private: () }
+// 状态标记：零大小类型
+struct Locked;
+struct Unlocked;
 
-pub struct Building {
-    // 真实系统中这里会有认证逻辑
-}
-
-impl Building {
-    // 产出令牌的唯一入口
-    pub fn authenticate(&mut self, _key: &str) -> ResidentToken {
-        ResidentToken { _private: () }
-    }
-}
-
-// ── type-state（4.2/4.5）：状态即类型 ──
-pub struct Locked;
-pub struct Unlocked;
-
-pub struct Door<State> {
-    room: &'static str,
-    _state: PhantomData<State>,   // ← 4.3：幻影类型，零字节
+// 门，带状态参数；状态只存在于类型系统里
+struct Door<State> {
+    id: u8,
+    _state: PhantomData<State>,
 }
 
 impl Door<Locked> {
-    pub fn new(room: &'static str) -> Self {
-        Door { room, _state: PhantomData }
+    fn new(id: u8) -> Self {
+        Door { id, _state: PhantomData }
     }
 
-    // 解锁需要令牌（能力令牌 × type-state 组合）
-    pub fn unlock(self, _resident: &ResidentToken) -> Door<Unlocked> {
-        println!("🔓 {room} 解锁", room = self.room);
-        Door { room: self.room, _state: PhantomData }
+    // 只有上锁的门才能被解锁；转移消费 self
+    fn unlock(self) -> Door<Unlocked> {
+        println!("门 #{} 已解锁", self.id);
+        Door { id: self.id, _state: PhantomData }
     }
 }
 
 impl Door<Unlocked> {
-    pub fn open(&self) {
-        println!("🚪 {room} 开门", room = self.room);
+    // 只有解锁的门才能打开
+    fn open(&self) {
+        println!("门 #{} 已打开", self.id);
     }
 
-    pub fn lock(self) -> Door<Locked> {
-        println!("🔒 {room} 上锁", room = self.room);
-        Door { room: self.room, _state: PhantomData }
+    fn lock(self) -> Door<Locked> {
+        println!("门 #{} 已上锁", self.id);
+        Door { id: self.id, _state: PhantomData }
     }
 }
 
 fn main() {
-    let mut bldg = Building;
-    let resident = bldg.authenticate("secret-key");
+    let door = Door::new(1);   // Door<Locked>
+    // door.open();            // 实验一：取消注释
+    let door = door.unlock();  // Door<Unlocked>
+    door.open();               // ✅ 只有现在才合法
+    let _door = door.lock();   // Door<Locked>
 
-    let door = Door::new("A-101");            // Door<Locked>
-    // door.open();                           // ① 编译错误：Locked 上没有 open
-    let door = door.unlock(&resident);        // Door<Unlocked>
-    door.open();                              // ✅
-    let door = door.lock();                   // 回到 Door<Locked>
-    // door.open();                           // ② 编译错误：再次上锁后
-
-    // 没有令牌的解锁：
-    // door.unlock(???);                      // ③ 编译错误：造不出 ResidentToken
+    // 实验二：把下面两行加入 main 末尾
+    // let d1 = Door::new(2);
+    // let d2 = d1.unlock();
+    // let d3 = d1.unlock();   // d1 已被上一行移动
 }
 ```
 
-**操作步骤**：
+然后依次做两个实验，每个实验后运行 `cargo check` 并记录输出，再恢复原状：
 
-1. 在仓库外执行 `cargo new /tmp/door-demo && cd /tmp/door-demo`（仓库根是虚拟清单 workspace，勿在其中建 crate——u2-l1 的结论）。
-2. 把上面的代码放进 `src/main.rs`，先原样 `cargo run`，应看到解锁→开门→上锁三条输出。
-3. 依次取消 ①②③ 三行注释，每次只放开一行，运行 `cargo check` 记录错误。
-4. 进阶：把 `open(&self)` 改成 `open(self)` 试试消费语义，或参考 [patterns ch03:L249-L329](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L249-L329) 的 builder 模式给门加一个 `Emergency`（消防通道常开）状态。
+- **实验一**：取消 `door.open();` 那行注释——在 `Door<Locked>` 上调用只存在于 `Door<Unlocked>` 的 `open`。
+- **实验二**：在 `main` 末尾追加实验二的注释代码——对同一扇门**连续调用两次** `unlock`。第一次 `unlock(self)` 已经把 `d1` 移走，第二次再用就是所有权错误。这正是 rust-patterns-book 第 3 章能力表格里「Calling `unlock()` twice → value used after move」一行的复现（[对应表格](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L944-L951)）。
 
-**需要观察的现象**：
+**3. 需要观察的现象**：`cargo run`（不做任何实验时）打印解锁、打开、上锁三条消息；实验一的错误指向「`Door<Locked>` 上没有 `open` 方法」；实验二的错误指向「`d1` 的值已被移动」。
 
-- ①② 两处是 `error[E0599]: no method named 'open' found for struct 'Door<...>'`——**门的状态错误**被 type-state 拦下；
-- ③ 处是你根本无法构造 `ResidentToken`——**权限缺失**被能力令牌拦下（若在模块外还会先撞上私有字段 E0616）；
-- 程序正常路径零运行时检查、零字节额外开销。
+**4. 预期结果**：
 
-**预期结果**：三条 E0599/E0616 类编译错误按预期出现，还原后程序运行输出正常。确切的错误措辞随 rustc 版本略有差异，待本地验证。
+- 基线程序正常编译运行（待本地验证）。
+- 实验一预期出现类似下面的诊断（措辞以本机 rustc 为准，待本地验证）：
+
+```text
+error[E0599]: no method named `open` found for struct `Door<Locked>` in the current scope
+```
+
+- 实验二预期出现 `error[E0382]: use of moved value: d1`——注意它与实验一的机制不同：E0599 是「这个方法在这个状态上不存在」，E0382 是「方法存在，但旧状态的值已经被第一次转移消耗掉了」。两类错误合起来，正好覆盖 type-state 的两道防线（方法集合 + 所有权）。
+
+**5. 思考题（选做）**：给 `Door` 加一个 `alarm(&self)` 方法，要求它**只能在 Locked 状态**调用——你只需要把方法写进 `impl Door<Locked>` 块，其余什么都不用改。再想想：如果想让「开着的门不能重复 open」该怎么做？（提示：让 `open(self)` 也消费 `self`。）
 
 ## 6. 本讲小结
 
-- 两本书是一对配套：`rust-patterns-book`（Advanced）讲**机制**，`type-driven-correctness-book`（Expert）把机制**应用**到硬件诊断、协议校验等真实领域；后者引言的原则一句话概括——把不变量从运行时检查推进类型系统。
-- **newtype** 用单字段包装零成本区分相似类型；**type-state** 把状态机的每个状态编码成类型、每条迁移写成消费 `self` 的方法，让非法状态迁移变成编译错误（E0599）而不是运行时 bug。
-- **PhantomData** 是零大小的标记载体，让类型信息参与编译检查而不占任何内存，同时承担生命周期绑定、所有权模拟、型变控制三项职责。
-- **能力令牌**是零大小、不可复制、只有一个构造入口的权限证明；「函数签名即检查」，拿不出令牌就写不出调用。
-- **协议状态机**把上述机制组合起来贴合真实协议（IPMI、PCIe、固件升级）：状态顺序、管理员权限、一次性消费三类 bug 在同一个状态机里同时被编译器消灭——但决策表也提醒：两状态的简单协议不必上 type-state。
-- 基础设施层侧面印证：xtask 的 BOOKS 注册表把两本书分别标为 `advanced` 与 `expert`，且其一行描述已滞后于书的实际内容——「双源维护」的漂移在描述与内容之间同样存在。
+- **newtype** 用单字段包装制造新类型，零成本消灭「同型不同义」的参数错位；给不变量类型实现 `Deref` 会凿穿抽象边界，应改用显式委托。
+- **type-state** 把协议阶段编码为泛型参数，每个状态的 `impl` 块只定义该状态合法的方法，转移方法消费 `self`——非法转移从运行期 panic 降格为「方法不存在」的编译错误。
+- **幻影类型 / `PhantomData`** 让类型参数不占一个字节地携带「宽度、方向、生命周期烙印」等静态属性，是 type-state 与能力令牌共同的挂载机制。
+- **能力令牌**用零大小类型 + 私有构造做不可伪造的权限凭证，函数签名即证明义务；层级能力用 trait 层级建模，作用域权限用生命周期回收。
+- **协议状态机**是三者会师之处：IPMI → PCIe → 固件升级三拍递进，到 Redfish 实战时，编译器已同时看守状态顺序、操作权限与单次使用三类正确性。
+- 两本书一个偏「工具箱」（patterns：从泛型到宏的 17 章地图），一个偏「方法论」（type-driven：围绕「让编译器证明正确性」的十个模式 + 实战），但底层是同一句话——**能写进类型的约束，就不要留给运行期**。
 
 ## 7. 下一步学习建议
 
-- **下一讲 u3-l6（工程实践书）**：`engineering-book` 覆盖 build.rs 深入、交叉编译、Miri 与消毒器、生产 CI/CD——它是 Practices 级的收官，与本书「编译期证明」互补的是「工具链期的验证」。
-- **继续深挖 patterns 书**：本讲只精读了 Part I 的 ch03/ch04；第 4 章后半的型变（variance）与 [ch12 unsafe](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/SUMMARY.md#L26-L35) 值得单独安排。
-- **type-driven 书的收束章**：[ch17/ch18 的 Redfish 实战](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/SUMMARY.md#L24-L30)把八个模式组合进一个类型安全的 Redfish 客户端/服务端，是「学完就找工作场景」的落点；[ch14 Testing Type-Level Guarantees](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/SUMMARY.md#L32-L35) 教你用 trybuild 把「应该编译不过的代码」变成测试断言——本讲综合实践的手工验证可以升级成自动化测试。
-- **动手方向**：把综合实践的 `Door` 扩展成三态（加 `Jammed`），或给自己项目里的某个真状态机（连接池、事务、订单流）做一次 type-state 改造，用 `cargo check` 感受「整类 bug 消失」。
+- **继续 rust-patterns-book Part I 的剩余两章**：[ch01 Generics 全景](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/SUMMARY.md#L9-L9) 与 ch02 Traits 深入是本讲所有模式的语法地基（关联类型在 Config trait 模式中登场）；ch04 后半的型变（variance）值得与 u3-l4 的 Pin/Unpin 对照着读。
+- **挑战双轴 typestate 与 Config trait**：回到 [rust-patterns-book 第 3 章后半](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/rust-patterns-book/src/ch03-the-newtype-and-type-state-patterns.md#L754-L754)（Dual-Axis 与 Config Trait 两节），看「厂商 × 状态」二维能力矩阵如何全部落进 `impl` 块。
+- **走向 Expert 书的实战部分**：按 SUMMARY Part III 顺序读 ch12 诊断平台集成与 ch17/ch18 Redfish 走读（[SUMMARY.md:L24-L30](https://github.com/microsoft/RustTraining/blob/9d19c482d66ef3995dca794bda74c7852134e0b7/type-driven-correctness-book/src/SUMMARY.md#L24-L30)），观察十个模式在同一个代码库里如何分工；第 16 章 Exercises 可作为自测。
+- **与本系列其他讲义互参**：type-driven 第 11 章 Send/Sync 的编译期并发证明与本讲同源，可与 u3-l4 异步书中 `tokio::spawn` 的 `Send + 'static` 约束互相印证；patterns 第 12 章 unsafe 与第 13 章宏则在 u3-l6 工程书（Miri、验证工具）中有工具化延伸。

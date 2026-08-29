@@ -1,0 +1,415 @@
+{
+  "head": "6c49338d25f1656ba1cdd0b9b21479cd4207652f",
+  "project": "chili",
+  "rationale": "chili 是一个极小的 Rust 并行化库（仅 src/lib.rs 与 src/job.rs 两个源文件加一个基准文件），核心价值在于心跳驱动的低开销 fork-join 机制与大量精心论证的 unsafe 代码。因此大纲不按\"模块漫游\"展开，而是按\"机制逐层剥洋葱\"设计：入门层先讲清项目定位（Spice 的 Rust 移植、与 rayon::join 的差异）、构建运行方式和第一个并行程序；进阶层沿公共 API 深入，先拆解 join 的三条执行路径（顺序 / 心跳 / 降频检查），再讲 ThreadPool 生命周期、worker 线程的 Mutex+Condvar 协作和跨线程任务共享全链路，这是理解整个调度模型的主干；随后进入高级层的三大难点——心跳调度线程（Weak<AtomicBool> 与间隔均摊）、job.rs 中手写的三态 park/unpark 通道、以及 Job/JobStack/JobShared 的类型擦除与 repr(C) 布局技巧；最后以 unsafe 不变量审读、panic 传播与 miri 测试、divan 基准解读收尾，并用一个并行归并排序综合实践把所有知识串起来。讲义之间保持严格依赖递进，每篇都锚定真实源码行号并配可动手的实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "理解 chili 的适用场景：大量小计算、难以估计分支剩余工作量",
+            "读懂 README 中 baseline / rayon / chili 三方对比数据",
+            "了解 Spice 与 chili 的渊源以及 crates.io 上的发布形态"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "项目定位与适用场景",
+            "基准数据解读",
+            "依赖与技术栈"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README 中的两台机器基准表，在 docs.rs 或 crates.io 上查看 chili 的发布信息，然后用注释或笔记写下你自己项目中三类适合 / 不适合使用 chili 的 workload，并说明理由。",
+          "source_files": [
+            "README.md",
+            "Cargo.toml"
+          ],
+          "title": "chili 是什么：低开销并行化库的全景",
+          "topic": "介绍 chili 的定位——Spice 的 Rust 移植版，一个面向 fork-join 工作负载、开销极低的并行原语；讲解它解决什么问题、与 rayon::join 的差异以及基准数据。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-build-and-structure.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "掌握 cargo check / test / clippy / bench 的完整构建验证流程",
+            "理解 src/lib.rs（公共 API 与调度）与 src/job.rs（任务与通道）的分工",
+            "看懂 CI 中 miri 与 nextest 步骤各自守护什么"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "构建与测试命令",
+            "目录结构与入口文件",
+            "CI 流水线"
+          ],
+          "order": 2,
+          "practice_task": "依次运行 cargo check --all、cargo test --all、cargo clippy --all 和 cargo test --doc，记录每条命令的输出结论；再对照 .github/workflows/ci.yml 说明本地验证与 CI 的对应关系。",
+          "source_files": [
+            "Cargo.toml",
+            "src/lib.rs",
+            "src/job.rs",
+            ".github/workflows/ci.yml"
+          ],
+          "title": "构建、运行与代码结构",
+          "topic": "讲解如何构建、测试、跑基准；项目的目录组织、入口文件 src/lib.rs 与 src/job.rs 的分工，以及 CI 流水线（含 miri）的检查内容。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-first-parallel-program.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "会使用 Scope::global() 与 scope::join 两个核心 API",
+            "理解闭包参数是 &mut Scope 从而支持递归并行展开",
+            "能编译运行并行程序并验证结果正确性"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Scope 与 join 基本用法",
+            "二叉树并行求和示例",
+            "递归 fork-join 模型"
+          ],
+          "order": 3,
+          "practice_task": "新建一个二进制 crate 并添加 chili 依赖，参照 src/lib.rs 顶部的文档示例实现 Node::tree(10) 的并行求和，断言结果等于 1023；再改成 tree(20) 观察是否仍然正确。",
+          "source_files": [
+            "src/lib.rs",
+            "README.md"
+          ],
+          "title": "写下第一个并行程序：Scope 与 join",
+          "topic": "使用 Scope::global() 和 scope.join 编写二叉树并行求和程序，理解 fork-join 模型、闭包接收 &mut Scope 的递归写法以及结果收集方式。"
+        }
+      ],
+      "order": 1,
+      "title": "入门：认识 chili 并跑起来"
+    },
+    {
+      "id": "u2",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l1-join-paths.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "理解 join_count 对 TIMES 取模实现心跳检查降频的原理",
+            "理解 job_queue.len() < 3 条件控制何时允许分享工作",
+            "能画出一次 join 调用在三条路径间的完整分支图"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "join 计数与降频",
+            "join_heartbeat 流程",
+            "join_seq 流程"
+          ],
+          "order": 1,
+          "practice_task": "把 join_heartbeat 的代码复制到笔记中逐行加注释，然后分别用 join_with_heartbeat_every::<1,_,_,_,_> 和默认的 ::<64> 运行 tests 里的 join_long 用例，粗测两种参数下的耗时差异并解释原因。",
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "title": "join 的三条执行路径：顺序、心跳与降频检查",
+          "topic": "精读 Scope::join、join_with_heartbeat_every、join_heartbeat 与 join_seq 四个方法，理解为什么大多数调用走顺序路径、只有周期性心跳触发时才真正把任务分享给其他线程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l2-threadpool-config.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "理解线程数默认取 available_parallelism - 1 的原因",
+            "理解 GLOBAL_THREAD_POOL 用 OnceLock 实现惰性初始化与 set_global 只能成功一次",
+            "理解 Drop 中 is_stopping + notify_all + join 的优雅停机顺序"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Config 参数",
+            "全局线程池与 OnceLock",
+            "Drop 停机流程"
+          ],
+          "order": 2,
+          "practice_task": "编写一个测试，用 Config { thread_count: Some(NonZero::new(2).unwrap()), heartbeat_interval: Duration::from_micros(1) } 创建线程池并执行若干 join；再调用 set_global 两次，验证第二次调用会 Err 并返回原池。",
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "title": "ThreadPool 生命周期与 Config 配置",
+          "topic": "解析 ThreadPool::new / with_config / scope / set_global / global / Drop，以及 Config 中 thread_count 与 heartbeat_interval 两个参数的作用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-worker-loop.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "理解 worker 在 job_is_ready Condvar 上阻塞等待任务的主循环",
+            "理解 pop_earliest_shared_job 借助 BTreeMap 实现按投递时间的 FIFO 公平取任务",
+            "理解 first_run + Barrier 保证所有 worker 就绪后才继续的初始化语义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Context 与 LockContext 结构",
+            "worker 主循环",
+            "Condvar 等待与通知"
+          ],
+          "order": 3,
+          "practice_task": "在本地副本中给 execute_worker 的循环加临时打印（输出线程 id 与取到的任务序号），用一个 join_long 风格的任务观察任务被多线程取走的顺序，观察完还原代码。",
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "title": "worker 线程与共享上下文",
+          "topic": "精读 execute_worker、Context 与 LockContext，理解 Mutex + Condvar 的等待-通知模型、BTreeMap 维护的共享任务队列以及 Barrier 完成的首次同步。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u2-l3"
+          ],
+          "filename": "u2-l4-job-sharing.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "理解 shared_jobs 以 heartbeat 指针地址为键标识投递来源的设计",
+            "理解 wait_for_sent_job 在等待结果的同时继续执行其他共享任务的忙等策略",
+            "理解 time 字段与 lock.time 自增如何保证 FIFO 投递顺序"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "heartbeat 任务投递",
+            "等待时偷任务",
+            "接收器判空循环"
+          ],
+          "order": 4,
+          "practice_task": "手绘一次跨线程 join 的时序图（包含发起线程、worker 线程、heartbeat 线程与 LockContext 上的每一步状态变化），然后用 tests::join_wait 用例（thread_count=2、heartbeat_interval=1µs）验证你的图是否与实际一致。",
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "title": "任务共享与结果等待的完整链路",
+          "topic": "跟踪一次真实的跨线程执行：heartbeat() 如何把任务放进 shared_jobs、worker 如何取走执行、wait_for_sent_job 如何在等待结果的同时继续消化别的共享任务。"
+        }
+      ],
+      "order": 2,
+      "title": "进阶：公共 API 与执行模型"
+    },
+    {
+      "id": "u3",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u3-l1-heartbeat-scheduling.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "理解心跳本质是周期性地把本地队列任务分享出去的触发信号",
+            "理解 Weak 引用让失效 Scope 的心跳被 retain 自动清理",
+            "理解 heartbeat_interval / heartbeats.len() 均摊轮询间隔的设计"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Heartbeat 结构与 Weak 引用",
+            "心跳线程循环",
+            "scope_created_from_thread_pool 条件变量"
+          ],
+          "order": 1,
+          "practice_task": "分别用 heartbeat_interval 为 1µs、100µs（默认）和 10ms 的配置重跑 join_very_long 测试并记录耗时，解释心跳频率过高与过低分别带来什么问题。",
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "title": "心跳调度机制：execute_heartbeat",
+          "topic": "精读 execute_heartbeat 线程与 Heartbeat 结构，理解 Weak<AtomicBool> 的自动清理、心跳间隔在线程间均摊以及 scope_created_from_thread_pool 条件变量的唤醒时机。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u3-l2-channel.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 AtomicU8 状态 + UnsafeCell 数据的单值通道并发方案",
+            "理解 recv 中先写 waiting_thread 再 CAS 到 Waiting 的顺序为何能避免丢失唤醒",
+            "理解 Acquire / AcqRel 内存序在该通道中的配对关系"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Channel 三态状态机",
+            "Receiver::recv 与 park",
+            "Sender::send 与 unpark"
+          ],
+          "order": 2,
+          "practice_task": "参照 Channel 的语义，用 safe Rust（可用 Mutex + Condvar）实现一个等价的最小单值通道，编写测试覆盖先 send 后 recv、先 recv 后 send、recv 中途阻塞再被唤醒三种顺序。",
+          "source_files": [
+            "src/job.rs"
+          ],
+          "title": "job.rs 的 Channel：手写 park/unpark 单值通道",
+          "topic": "精读 Channel、Sender、Receiver 的 Pending/Waiting/Ready 三态状态机与 thread::park/unpark 协作，理解先换状态再停车的防丢唤醒技巧与内存序选择。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-job-type-erasure.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解 unsafe fn 指针 + NonNull<JobStack> 如何把任意闭包擦除为统一 Job",
+            "理解 pop_front 时才创建 channel 并通过 Cell 装回 Job::receiver 的流程",
+            "理解 Job 与 JobShared 的区别：本地队列 vs 可跨线程发送的拷贝"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "JobStack 与 take_once",
+            "Job 与 harness 类型擦除",
+            "JobQueue 与 JobShared"
+          ],
+          "order": 3,
+          "practice_task": "画出 JobStack / Job / JobShared / JobQueue / Channel 五者的结构关系图并标注所有 unsafe 调用点；然后用一段文字解释 harness 中 mem::transmute(Sender → Sender<T>) 依赖 repr(C) 与 Box 定长的原因。",
+          "source_files": [
+            "src/job.rs",
+            "src/lib.rs"
+          ],
+          "title": "Job 体系：类型擦除与任务队列",
+          "topic": "精读 JobStack、Job、JobShared、JobQueue，理解 unsafe fn harness 如何擦除闭包类型、NonNull 裸指针的用途以及 repr(C) 布局保证下 Sender 的 transmute。"
+        }
+      ],
+      "order": 3,
+      "title": "深入：心跳与 job.rs 内部机制"
+    },
+    {
+      "id": "u4",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u4-l1-unsafe-invariants.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "能逐条复述每条 SAFETY 注释守护的 invariant",
+            "理解 Job 从 push_back 到被 pop 之间必须存活的生命周期约定",
+            "理解 take_once 只能调用一次与 ManuallyDrop 防泄漏之间的关系"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "unsafe impl Send 论证",
+            "生命周期契约",
+            "单次调用契约"
+          ],
+          "order": 1,
+          "practice_task": "列出两个源文件中全部 SAFETY 注释的位置并按类别（内存安全 / 线程安全 / 单次性）归类；对每类契约在草稿上构造一个违反它会导致的具体 UB 场景描述。",
+          "source_files": [
+            "src/job.rs",
+            "src/lib.rs"
+          ],
+          "title": "unsafe 安全不变量全面审读",
+          "topic": "系统梳理全库的 SAFETY 注释与不变量：JobShared 为何可以 unsafe impl Send、ManuallyDrop 如何避免闭包泄漏、栈上 Job 从入队到出队的存活约定、take_once 的单次性契约。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-panic-tests-miri.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解 panic 经 worker 线程 catch_unwind、Channel 传递、原线程 resume_unwind 的完整路径",
+            "理解 join_panic 测试中单线程环境的人工通过技巧",
+            "会使用 cargo +nightly miri 验证并发 unsafe 代码"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "panic 捕获与恢复",
+            "单元测试设计",
+            "miri 与 nextest"
+          ],
+          "order": 2,
+          "practice_task": "编写一个自定义测试：在 join 的一个分支里 panic!(\"my panic\")，外层用 catch_unwind 断言能捕获到该消息（参照 join_panic 的写法）；有 nightly 环境的话再运行 cargo +nightly miri test --lib 验证。",
+          "source_files": [
+            "src/lib.rs",
+            "src/job.rs",
+            ".github/workflows/ci.yml"
+          ],
+          "title": "panic 传播、测试体系与 miri",
+          "topic": "精读 panic::catch_unwind / resume_unwind 的跨线程 panic 传递路径、src/lib.rs 内嵌测试模块的技巧，以及 CI 中 miri 多种子测试与 nextest 过滤的用法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u4-l3-benchmarks.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "会运行 cargo bench 并正确解读 divan 输出",
+            "理解 no_overhead 基准作为理论上限对照的意义",
+            "理解小任务量（1K 节点）时并行反而更慢的临界点现象"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "divan 基准框架",
+            "对照实验设计",
+            "结果解读"
+          ],
+          "order": 3,
+          "practice_task": "运行 cargo bench --bench overhead，把本机结果整理成与 README 相同格式的表格并对比；再把 LAYERS 常量改为 &[10, 16, 24] 重新测量，观察规模增长时加速比的变化趋势。",
+          "source_files": [
+            "benches/overhead.rs",
+            "README.md",
+            "Cargo.toml"
+          ],
+          "title": "基准测试与性能分析",
+          "topic": "精读 benches/overhead.rs 中的 no_overhead / chili_overhead / rayon_overhead 三个 divan 基准，理解 README 数据的测量方法与对照实验设计。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2",
+            "u4-l3"
+          ],
+          "filename": "u4-l4-capstone-practice.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "能独立用 Scope::join 并行化任意分治算法并保证结果正确",
+            "能用 join_with_heartbeat_every 的 TIMES 参数做性能调优",
+            "能设计线程数扫描实验并得出有依据的结论"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "分治算法并行化",
+            "心跳参数调优",
+            "多线程性能对比"
+          ],
+          "order": 4,
+          "practice_task": "在单独的 crate 中用 chili 实现并行归并排序（或快速排序），对 100 万随机数分别用 1/2/4/8 线程与 TIMES 取 8/64/256 三档测量排序时间，整理成表并写一份简短结论：何时并行收益最大、心跳检查频率的影响。",
+          "source_files": [
+            "src/lib.rs",
+            "benches/overhead.rs"
+          ],
+          "title": "综合实践：用 chili 实现并行归并排序",
+          "topic": "综合运用 Scope::join、ThreadPool 配置与心跳参数调优，独立实现并优化一个并行分治算法，完成从 API 使用到性能分析的闭环。"
+        }
+      ],
+      "order": 4,
+      "title": "专家：安全、测试、性能与二次开发"
+    }
+  ]
+}
