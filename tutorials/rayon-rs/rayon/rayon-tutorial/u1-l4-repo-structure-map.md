@@ -1,406 +1,406 @@
-# u1-l4 仓库结构与代码地图
+# 仓库结构与代码地图（u1-l4）
 
 ## 1. 本讲目标
 
-学完本讲，你应该能够：
+读完本讲，你应该能够：
 
-1. 画出 `rayon`、`rayon-core`、`rayon-demo` 三个 crate 的分层关系图，并说出依赖为什么是单向的。
-2. 说出 `src/`（rayon crate）下 `iter`、`slice`、`collections`、`str` 等目录各自的职责，理解「镜像 std」的目录设计哲学。
-3. 说出 `rayon-core/src/` 下 `job`、`latch`、`registry`、`join`、`scope`、`spawn`、`sleep`、`thread_pool`、`broadcast`、`unwind` 十个模块各自的职责。
-4. 在源码中快速定位三大核心 API 的定义位置：`ParallelIterator`、`join`、`ThreadPool`。
-5. 读懂 `pub use` 再导出（re-export）链条，能从 `rayon::join` 一路追到它在 `rayon-core` 中的真实定义文件。
+1. 画出 rayon 仓库的**三层分层图**：`rayon-demo` → `rayon` → `rayon-core`，并说出每一层的职责。
+2. 说出 `rayon` crate 中 `src/` 下各目录（`iter`、`slice`、`collections`、`str` 等）各自负责什么。
+3. 说出 `rayon-core/src/` 下各模块（`join`、`job.rs`、`registry.rs`、`scope`、`sleep` 等）各自负责什么。
+4. 在源码中**亲手定位**三大核心 API 的定义位置：`ParallelIterator`、`join`、`ThreadPool`。
+5. 读懂两个 crate 入口文件（`src/lib.rs` 与 `rayon-core/src/lib.rs`）中的 `pub use` 再导出语句，明白「你在 prelude 里用的名字到底从哪来」。
 
-本讲是纯粹的「地图课」：不改代码、不写算法，只建立一张在你后续阅读所有讲义时都能随时对照的仓库全景图。
+这一讲不讲解任何算法细节，它的唯一任务是：**为后续所有讲义建立一张可以反复对照的地图**。以后每讲深入某个模块时，你都能在这张图上找到它的位置。
 
 ## 2. 前置知识
 
-本讲需要两个你已经具备的基础和两个新概念。
+本讲只需要两个前置认知（分别在 u1-l1 和 u1-l2 建立）：
 
-**已具备（来自前三讲）：**
+- **Rayon 分三层**：`rayon` 是上层并行迭代器库，`rayon-core` 是底层调度内核，`rayon-demo` 是演示程序。本讲把这句话展开成精确的文件级地图。
+- **Cargo workspace**：一个仓库里可以装多个 crate，根 `Cargo.toml` 用 `[workspace]` 段声明成员，成员之间用 `path` 依赖互相引用。
 
-- `u1-l1`：Rayon 是数据并行库，API 分并行迭代器、`join`、`scope`、`ThreadPool` 四级。
-- `u1-l2`：仓库是三包 Cargo workspace，`rayon` 依赖 `rayon-core`，`rayon-demo` 是 `publish = false` 的演示程序，依赖严格单向。
+再补充两个本讲会反复用到的 Rust 概念，供不熟悉的读者对照：
 
-**新概念一：模块系统与再导出。**
-Rust 中每个 `.rs` 文件就是一个模块（module），用 `mod xxx;` 声明子模块，用 `pub mod xxx;` 让它对外可见。如果一个 crate 想把另一个 crate 的项「挂到自己名下」方便用户使用，就写 `pub use other_crate::Item;`，这叫**再导出（re-export）**。例如你在代码里写的 `rayon::join`，其实真正的定义在 `rayon_core::join`——`rayon` 只是把它转发出来。本讲的实践任务就是把这些转发关系全部标注出来。
-
-**新概念二：门面模式（facade）。**
-`rayon` crate 本身几乎不含调度逻辑，它是一个「门面」：对外提供统一入口（`par_iter`、`join`、`ThreadPool`……），对内把稳定的底层 API 从 `rayon-core` 转发上来，自己再叠加并行迭代器这一大块高层功能。好处是：内核可以独立演进（甚至被其他框架单独引用），用户只需要记住一个 crate 名。
-
-一个术语约定：下文用 **rayon crate** 指 `src/` 目录对应的包，用 **rayon-core** 指 `rayon-core/src/` 对应的包，避免和项目总名「Rayon」混淆。
+| 概念 | 通俗解释 |
+|---|---|
+| `mod foo;` | 声明一个子模块，编译器会去找 `foo.rs` 或 `foo/mod.rs` 文件 |
+| `pub use a::b;` | **再导出**（re-export）：把 `a` 模块里的 `b` 挂到当前模块的公开路径上，外界就可以通过当前模块访问它 |
+| `pub(super)` | 只对父模块可见的可见性，比 `pub` 更窄，常用于 crate 内部实现细节 |
+| `#[cfg(test)]` | 只在测试编译（`cargo test`）时才存在的代码，普通构建会整段跳过 |
 
 ## 3. 本讲源码地图
 
-| 文件 | 角色 | 本讲关注点 |
-|---|---|---|
-| `src/lib.rs` | rayon crate 的根：模块声明 + 从 rayon-core 的再导出 | L84-L105 模块清单，L107-L118 再导出清单 |
-| `rayon-core/src/lib.rs` | rayon-core 的根：十个内部模块 + 对外再导出 | L69-L81 模块清单，L83-L92 再导出清单 |
-| `src/iter/mod.rs` | 并行迭代器核心：两个大头 trait + 全部适配器子模块 | `ParallelIterator` 与 `IndexedParallelIterator` 的定义行号 |
-| `rayon-demo/src/main.rs` | 演示程序入口：命令行分发到各 demo | 模块组织与 `main` 的 match 分发 |
-| `src/slice/mod.rs`（辅助） | 切片并行能力的入口 | `ParallelSlice` / `ParallelSliceMut` trait 定义 |
-| `src/iter/plumbing/mod.rs`（辅助） | 迭代器底层「水管设施」 | `Producer` trait，第四单元的主角 |
-| `rayon-core/src/registry.rs`（辅助） | 线程注册表 | `Registry` 结构体与全局静态 `THE_REGISTRY` |
-| `rayon-core/src/join/mod.rs`（辅助） | `join` 原语 | `pub fn join` 的精确位置 |
-| `rayon-core/src/thread_pool/mod.rs`（辅助） | `ThreadPool` 类型 | `pub struct ThreadPool` 的精确位置 |
+本讲涉及的关键文件：
+
+| 文件 | 作用 |
+|---|---|
+| [Cargo.toml](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/Cargo.toml#L37-L39) | 根包 `rayon` 的清单，同时声明 workspace 成员 |
+| [rayon-core/Cargo.toml](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/Cargo.toml#L1-L7) | 调度内核包清单，`links` 保证全局唯一 |
+| [rayon-demo/Cargo.toml](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-demo/Cargo.toml#L8-L9) | 演示程序清单，path 依赖根包 `rayon` |
+| [src/lib.rs](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/lib.rs#L84-L118) | `rayon` crate 入口：模块声明 + 从 rayon-core 再导出 |
+| [src/iter/mod.rs](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/iter/mod.rs#L359) | 并行迭代器两大 trait 的定义处，全仓库最大的文件 |
+| [src/prelude.rs](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/prelude.rs#L5-L17) | `use rayon::prelude::*` 实际引入的 13 个 trait |
+| [rayon-core/src/lib.rs](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/lib.rs#L69-L92) | `rayon-core` crate 入口：内核模块声明 + 对外再导出 |
+| [rayon-core/src/join/mod.rs](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/join/mod.rs#L93) | `join` 函数定义处 |
+| [rayon-core/src/thread_pool/mod.rs](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/thread_pool/mod.rs#L46) | `ThreadPool` 结构体定义处 |
+| [rayon-demo/src/main.rs](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-demo/src/main.rs#L73-L92) | demo 的 CLI 入口与命令分发 |
 
 ## 4. 核心概念与源码讲解
+
+本讲的三个最小模块：**4.1 三层分层图**、**4.2 src 目录导览**、**4.3 rayon-core 目录导览**。
 
 ### 4.1 三层分层图
 
 #### 4.1.1 概念说明
 
-仓库由三个 crate 组成，依赖严格单向，形成三层：
+rayon 仓库是一个「倒挂」的三层结构：**使用者在最上面，内核在最下面**：
 
 ```
-┌─────────────────────────────────────────────┐
-│  rayon-demo （可执行演示程序，publish=false） │  ← 第三层：示例与基准
-│  matmul / nbody / sieve / quicksort ...      │
-└──────────────────┬──────────────────────────┘
-                   │ 依赖
-                   ▼
-┌─────────────────────────────────────────────┐
-│  rayon （src/ 目录，用户面对的门面）          │  ← 第二层：并行迭代器 + API 转发
-│  iter/  slice/  str/  collections/  range... │
-└──────────────────┬──────────────────────────┘
-                   │ 依赖
-                   ▼
-┌─────────────────────────────────────────────┐
-│  rayon-core （调度内核，可独立发布）          │  ← 第一层：线程池与任务调度
-│  registry  job  latch  join  scope  sleep... │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│  rayon-demo（演示/基准程序，publish = false）        │
+│  fibonacci、matmul、nbody、quicksort、mergesort...   │
+└──────────────────────┬──────────────────────────────┘
+                       │ 依赖（rayon = { path = "../" }）
+┌──────────────────────▼──────────────────────────────┐
+│  rayon（上层库：并行迭代器 + 各数据源适配）          │
+│  src/iter、src/slice、src/collections、src/str...    │
+└──────────────────────┬──────────────────────────────┘
+                       │ 依赖（rayon-core，path + version 双约束）
+┌──────────────────────▼──────────────────────────────┐
+│  rayon-core（调度内核：线程池 + 工作窃取）           │
+│  join、scope、spawn、broadcast、registry、job、sleep │
+└─────────────────────────────────────────────────────┘
 ```
 
-三层各自解决一个问题：
+三层职责一句话概括：
 
-- **rayon-core**：「怎么把一个闭包安全地放到别的线程上去跑，并且在跑完后把结果和 panic 都带回来」。它完全不知道 `par_iter` 的存在。
-- **rayon crate**：「怎么把『遍历一堆数据』这类常见计算自动切分成无数个小闭包，交给 rayon-core 调度」。它包含全部并行迭代器逻辑，并把 rayon-core 的稳定 API 转发给用户。
-- **rayon-demo**：「怎么证明这一切真的更快」。八个可直接运行的演示加十个仅基准测试的模块。
+- **rayon-core**：回答「任务怎么被调度执行」。只有线程池、任务对象、工作窃取、睡眠唤醒，**完全不知道迭代器是什么**。
+- **rayon**：回答「数据怎么被切分给任务」。并行迭代器、各种数据源（切片/字符串/集合）的适配，全部建立在 rayon-core 的 `join` 之上。
+- **rayon-demo**：回答「这套东西性能如何」。一组可运行的基准程序。
 
-为什么依赖必须单向？因为并行迭代器需要调用 `join` 来实现任务切分，反过来调度内核绝不需要知道迭代器的存在。单向依赖让 rayon-core 可以被其他想自建调度器的项目单独引用，也让两个 crate 能各自发版。
+为什么要拆成两个 crate？因为 `rayon-core` 通过 `links` 声明强制整个构建产物里**只能存在一份**（否则会出现两个各自为政的全局线程池），拆开后便于单独锁版本；同时 `rayon` 可以快速迭代上层 API 而不动内核。
 
 #### 4.1.2 核心流程
 
-以 `u1-l3` 中你写过的 `input.par_iter().map(|i| i * i).sum()` 为例，这行代码在三层中的落点：
+依赖方向是严格单向的，可以用三条规则描述：
 
-```text
-用户代码
-  │  input.par_iter()
-  ▼
-rayon crate ── src/slice/mod.rs 提供切片的并行迭代入口，
-  │             产出并行迭代器；map/sum 落在 src/iter/mod.rs 的 trait 方法上
-  │             执行时把数据切分成两半，形成分治递归
-  ▼
-rayon-core ── 每一层「切一半」最终调用 join(a, b)
-  │             join 把闭包装箱成 Job，放入工作窃取队列
-  ▼
-registry / sleep ── 工作线程从队列取任务执行；
-                    空闲线程窃取任务；无事可做时休眠
-```
+1. `rayon-demo` → `rayon`（path 依赖），不直接依赖 `rayon-core`。
+2. `rayon` → `rayon-core`（path + version 双约束），运行时还依赖 `either`。
+3. `rayon-core` 不依赖仓库内任何其他 crate，只依赖外部的 `crossbeam-deque`、`crossbeam-utils`。
 
-本讲只要求记住这条链的**每一站所在的目录**，不要求理解内部实现——那是第五、六单元的内容。
+读代码时的推论：**想理解调度，往下走（rayon-core）；想理解迭代器，留在上面（rayon）；想看用法示例，去 rayon-demo**。任何跨层的调用只会是「上层调下层」，绝不会反向。
 
 #### 4.1.3 源码精读
 
-先看最顶层的演示程序如何组织。[rayon-demo/src/main.rs:6-14](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-demo/src/main.rs#L6-L14) 声明了八个常驻演示模块，而 [rayon-demo/src/main.rs:18-37](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-demo/src/main.rs#L18-L37) 用 `#[cfg(test)]` 又挂了十个只在测试时编译的基准模块——这正是 `u1-l2` 里「fibonacci 只能在 nightly bench 下运行」的源码依据。
+**证据一：workspace 成员声明。** 根 `Cargo.toml` 在文件末尾声明了两个成员，依赖方向由各成员自己的清单决定：
 
-[rayon-demo/src/main.rs:81-91](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-demo/src/main.rs#L81-L91) 是命令行分发：`main` 读第一个参数，用 `match` 把 `"matmul"`、`"nbody"` 等名字转发给对应子模块的 `main` 函数，未知名字走 `usage()` 打印用法并以退出码 1 结束。所以 demo 没有统一的 benchmark 框架，每个演示自治。
+[Cargo.toml:L37-L39](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/Cargo.toml#L37-L39) —— 声明 workspace 包含 `rayon-demo` 与 `rayon-core` 两个成员（根包 `rayon` 自身隐式是成员）。
 
-再看门面层的关键证据——rayon crate 根部对 rayon-core 的再导出。[src/lib.rs:107-118](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/lib.rs#L107-L118) 一共 12 条 `pub use rayon_core::...`，把 `join`、`scope`、`spawn`、`ThreadPool`、`ThreadPoolBuilder`、`broadcast` 等全部稳定 API 转发到 `rayon` 名下：
+[Cargo.toml:L26-L29](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/Cargo.toml#L26-L29) —— `rayon` 对 `rayon-core` 的依赖写成 `{ version = "1.13.0", path = "rayon-core" }`：本地开发走 path，发布到 crates.io 后走版本号。
 
-```rust
-pub use rayon_core::ThreadPool;
-pub use rayon_core::ThreadPoolBuilder;
-pub use rayon_core::{Scope, in_place_scope, scope};
-pub use rayon_core::{join, join_context};
-pub use rayon_core::{spawn, spawn_fifo};
-// ... 共 12 条
-```
+[rayon-demo/Cargo.toml:L8-L9](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-demo/Cargo.toml#L8-L9) —— `rayon-demo` 只依赖 `rayon = { path = "../" }`，印证「demo 不碰 core」。
 
-这就是「用户只需要 `use rayon::prelude::*` 加 `rayon::join`」的实现的全部秘密：没有复制代码，只有名字转发。
+[rayon-core/Cargo.toml:L1-L7](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/Cargo.toml#L1-L7) —— `links = "rayon-core"` 配合 build.rs，是「全局只允许一份内核」的机制来源（u1-l2 已讲过构建细节）。
 
-最后看一个容易被忽略的细节：`ThreadPoolBuilder` 这个类型并不在 `rayon-core` 的某个子模块里，而是直接定义在 [rayon-core/src/lib.rs:165-197](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/lib.rs#L165-L197)——它保存线程数、线程名闭包、栈大小、panic 处理器等九个配置字段。跟踪 re-export 时要留意：并非所有公开项都来自子模块，少数类型就住在 crate 根部（`FnContext` 也是，见 [rayon-core/src/lib.rs:836](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/lib.rs#L836)）。
+**证据二：rayon-demo 的入口分发。** demo 的 `main.rs` 用一个 `match` 把命令行第一个参数分发到各子模块：
+
+[rayon-demo/src/main.rs:L73-L92](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-demo/src/main.rs#L73-L92) —— `main` 函数按 `matmul`/`mergesort`/`nbody`/`quicksort`/`sieve`/`tsp`/`life`/`noop` 八个名字分发，其余情况打印用法并退出。
+
+[rayon-demo/src/main.rs:L6-L14](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-demo/src/main.rs#L6-L14) —— 八个**可直接运行**的 demo 模块声明（`cpu_time` 是辅助模块）。
+
+[rayon-demo/src/main.rs:L18-L37](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-demo/src/main.rs#L18-L37) —— 十个 `#[cfg(test)]` 模块（factorial、fibonacci 等）：它们只在 `cargo bench`/`cargo test` 时编译，命令行运行只会打印用法——这正是 u1-l2 里「fibonacci 跑不起来」的根源。
+
+**证据三：rayon 入口对内核的「转贴」。** 上层 crate 的入口几乎不含逻辑，它做的只是声明自己的模块、再把内核的公共 API 原样搬出来：
+
+[src/lib.rs:L107-L118](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/lib.rs#L107-L118) —— 共 12 条 `pub use rayon_core::...`，把 `join`、`spawn`、`scope`、`ThreadPool` 等全部再导出。**这就是为什么你写 `rayon::join` 而不是 `rayon_core::join`**——官方推荐始终从 `rayon` 使用这些 API（rayon-core 自己的文档也这么说）。
 
 #### 4.1.4 代码实践
 
-**实践目标**：用工具验证依赖方向确实是单向的（而不是只听讲义说）。
+**实践：手工绘制三层依赖图。**
 
-**操作步骤**：
+1. **实践目标**：不看本讲插图，凭源码证据画出三个 crate 的依赖箭头图，并为每条箭头标注源码依据（文件 + 行号）。
+2. **操作步骤**：
+   - 打开三个 `Cargo.toml`（根目录、`rayon-core/`、`rayon-demo/`），找到所有 `[dependencies]` 段。
+   - 在纸上画三个方框，凡出现 `path = "..."` 的依赖就画一条箭头，旁边写「Cargo.toml 第 N 行」。
+   - 再打开 [src/lib.rs:L107-L118](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/lib.rs#L107-L118)，在 `rayon → rayon-core` 的箭头旁补注「12 条 pub use 再导出」。
+3. **需要观察的现象**：三个 Cargo.toml 里**找不到任何一条反向依赖**（rayon-core 不依赖 rayon，rayon 不依赖 rayon-demo）。
+4. **预期结果**：得到一张与 4.1.1 插图同构的图，且每条边都有行号级证据。这张图建议保留，后续每学一个模块就在图上补一个叶子节点。
 
-1. 在仓库根目录执行 `cargo tree -p rayon-demo -e normal --depth 1`。
-2. 再执行 `cargo tree -p rayon --depth 1`。
-3. 打开根目录 `Cargo.toml`，找到 `[workspace.dependencies]` 或各子包的 `dependencies` 段，对照 `rayon = { path = "rayon-core", version = "..." }` 这类双约束写法（`u1-l2` 已讲过其含义）。
-
-**需要观察的现象**：
-
-- `rayon-demo` 的依赖树里同时出现 `rayon` 和 `rayon-core` 吗？还是只出现 `rayon`？
-- `rayon` 的依赖树里是否出现任何指回 `rayon-demo` 或彼此循环的边？
-
-**预期结果**：`rayon-demo` 依赖 `rayon`（`rayon` 再依赖 `rayon-core`）；依赖图是一棵树，没有环。`cargo tree` 的具体输出格式随 Cargo 版本略有差异，待本地验证。
+（本实践为源码阅读型，无需运行命令。）
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：如果让你把 `rayon-demo` 删掉，`rayon` 和 `rayon-core` 还能编译吗？反过来呢？
+**练习 1**：既然 `rayon-demo` 不依赖 `rayon-core`，那 demo 里能使用 `join` 吗？
 
-答案：删掉 `rayon-demo` 完全不影响另外两个包编译——依赖图中没有任何包依赖它，它是纯叶子节点。反过来删 `rayon-core` 则 `rayon` 与 `rayon-demo` 都无法编译，因为整条依赖链的根没了。
+<details><summary>参考答案</summary>
 
-**练习 2**：为什么 `rayon` 要费力地把 `rayon-core` 的 API 再导出，而不是让用户直接依赖 `rayon-core`？
+能。demo 依赖 `rayon`，而 `rayon` 通过 [src/lib.rs:L117](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/lib.rs#L117) 的 `pub use rayon_core::{join, join_context};` 把 `join` 再导出了，所以 `rayon::join` 直接可用。传递依赖 + 再导出让 demo 无需直连内核。
+</details>
 
-答案：一是用户体验——只记一个 crate 名、只写一行依赖；二是解耦——`rayon-core` 保持极简（运行时仅依赖 crossbeam 系列），可被其他调度需求单独引用，`rayon` 则专注高层迭代器，两边可以按各自节奏发版；三是 `rayon-core` 用 `links` 强制全局唯一（`u1-l2` 讲过），统一入口也降低了用户直接引多个版本的风险。
+**练习 2**：为什么 `rayon-core` 要用 `links` 强制全局唯一，而 `rayon` 不需要？
 
-### 4.2 src 目录导览：rayon crate
+<details><summary>参考答案</summary>
+
+`rayon-core` 内部持有**全局线程池**（一个进程级单例，见 4.3 的 `THE_REGISTRY`）。若两份 `rayon-core` 共存，就会出现两个互不知情的全局池，线程数翻倍、任务互不窃取。`rayon` 只是上层适配，无全局状态，共存无害。相关说明见 [rayon-core/src/lib.rs:L39-L55](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/lib.rs#L39-L55) 的文档。
+</details>
+
+### 4.2 src 目录导览：rayon 上层 crate
 
 #### 4.2.1 概念说明
 
-rayon crate 的 `src/` 目录遵循一条明确设计原则：**镜像 std 的模块结构**。[src/lib.rs:55-68](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/lib.rs#L55-L68) 的文档注释原话是：rayon 的模块镜像 `std` 自身——`option` 模块对应 `std::option`，`collections` 模块对应 `std::collections`。所以你找某个类型的并行支持时，「std 里它在哪个模块，rayon 里它就大概在哪个模块」。
+`rayon` crate 的 `src/` 目录遵循一条设计原则，其入口文档写得很清楚：**模块结构镜像标准库**——`std` 有 `option`，rayon 就有 `src/option.rs`；`std` 有 `collections`，rayon 就有 `src/collections/`。每个模块的使命是「给对应的标准库类型装上并行迭代能力」。
 
-目录可分四类：
+除此之外还有三个特殊角色：
 
-| 类别 | 文件/目录 | 职责 |
-|---|---|---|
-| 数据源适配 | `slice/`、`str.rs`、`string.rs`、`vec.rs`、`array.rs`、`option.rs`、`result.rs`、`range.rs`、`range_inclusive.rs`、`collections/`、`par_either.rs` | 为 std 的各类容器实现并行迭代入口 |
-| 迭代器核心 | `iter/`（约 60 个 `.rs` 文件） | 两个核心 trait、全部适配器与消费者 |
-| 基础设施 | `delegate.rs`、`split_producer.rs`、`math.rs` | 宏与工具，被上面的模块复用 |
-| 对外入口 | `lib.rs`、`prelude.rs` | 模块声明、re-export、prelude 汇总 |
+- `src/iter/`：唯一不对应任何 std 模块的大模块，是并行迭代器**本身的定义地**（trait + 几十个适配器）。
+- `src/delegate.rs`：一个内部宏工具箱，用宏消除适配器之间大量重复的转发代码。
+- `src/prelude.rs`：把散落各处的 trait 汇总成一个导入入口。
 
 #### 4.2.2 核心流程
 
-`iter/` 目录的组织逻辑值得单独讲。它内部一条主线是「一个适配器一个文件」：
+`rayon` 上层的一条数据流可以概括为：
 
-```text
-src/iter/
-├── mod.rs          ← ParallelIterator + IndexedParallelIterator 两个 trait
-│                      以及所有 trait 方法的默认实现
-├── map.rs          ← Map 适配器（map 方法的返回类型）
-├── filter.rs       ← Filter 适配器
-├── fold.rs / reduce.rs / sum.rs / ...
-├── collect/        ← collect 的实现（带子模块）
-├── plumbing/       ← Producer/Consumer 底层协议（第四单元主角）
-└── ... 共约 60 个文件
+```
+数据源模块（slice/str/collections/...）
+        │  实现 IntoParallelIterator，产出并行迭代器
+        ▼
+ParallelIterator / IndexedParallelIterator（src/iter/mod.rs 定义）
+        │  .map().filter()... 链式套适配器（src/iter/ 下每个文件一个）
+        ▼
+消费者触发执行（sum/collect/for_each...）
+        │  借助 src/iter/plumbing 的 Producer/Consumer 协议
+        ▼
+最终落到 rayon-core 的 join 上执行
 ```
 
-当你写 `.map(...)` 时，编译器把迭代器包装成 `iter::map::Map` 类型；再 `.filter(...)` 时继续包装成 `iter::filter::Filter<Map<...>>`。**类型即图层**：链式调用有多长，最终类型名就有多长，而每一层类型都能在同名文件里找到。这个「按方法组织文件」的约定就是 `src/iter/` 的阅读地图。
+目录 → 职责速查表：
+
+| 路径 | 职责 | 代表性定义 |
+|---|---|---|
+| `src/iter/` | 迭代器 trait + 适配器 + plumbing 协议 | `ParallelIterator`（L359）、`IndexedParallelIterator`（L2449） |
+| `src/slice/` | 切片并行：视图、排序 | `ParallelSlice`（L31）、`sort.rs` 并行归并排序 |
+| `src/collections/` | 八大 std 集合的并行适配 | `hash_map.rs`、`btree_map.rs` 等 |
+| `src/str.rs` / `src/string.rs` | 字符串并行处理 | `ParallelString`（L59） |
+| `src/range.rs` / `range_inclusive.rs` / `array.rs` / `option.rs` / `result.rs` / `vec.rs` | 各数据源 | 与文件名同名的类型 |
+| `src/delegate.rs` | 委托宏（内部） | `delegate_iterator!`（L11） |
+| `src/split_producer.rs` / `src/math.rs` / `src/par_either.rs` | 内部工具 | 按值切分、数学辅助、Either 支持 |
 
 #### 4.2.3 源码精读
 
-rayon crate 的全部模块声明集中在 [src/lib.rs:84-105](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/lib.rs#L84-L105)。注意声明分两档：`pub mod`（用户可见，如 `iter`、`slice`、`collections`）和裸 `mod`（私有基础设施，如 `delegate`、`math`、`split_producer`）：
+**入口的模块声明分区。** [src/lib.rs:L84-L103](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/lib.rs#L84-L103) 把 `src/` 下的文件分成四组声明，每组性质不同：
 
-```rust
-#[macro_use]
-mod delegate;          // 私有：委托宏，供适配器消除样板代码
+- [src/lib.rs:L84-L87](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/lib.rs#L84-L87) —— 内部基础设施：`#[macro_use] mod delegate;`（宏要先声明才能被后续模块使用）与 `mod split_producer;`。
+- [src/lib.rs:L89-L100](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/lib.rs#L89-L100) —— **公开**的数据源模块（`pub mod array; ... pub mod vec;`），镜像 std 的那一批。
+- [src/lib.rs:L102-L103](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/lib.rs#L102-L103) —— 私有工具模块（`mod math; mod par_either;`）。
 
-pub mod array;         // 公开：镜像 std 的各数据源模块
-pub mod collections;
-pub mod iter;
-pub mod slice;
-pub mod str;
-pub mod vec;
-// ...
-```
+**ParallelIterator 的家。** 全仓库最重要的一行定义：
 
-三大定位目标之一的 **`ParallelIterator`** 定义在 [src/iter/mod.rs:359](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/iter/mod.rs#L359)。它是「并行版 `Iterator`」，全部通用方法（`map`、`for_each`、`filter`、`fold`、`sum`……）都以默认方法的形式写在 trait 体里，所以这个文件长达两千多行：
+[src/iter/mod.rs:L359](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/iter/mod.rs#L359) —— `pub trait ParallelIterator: Sized + Send`，所有并行迭代器的根 trait，`map`/`filter`/`sum` 等几十个方法都在它的提供方法里。
 
-```rust
-pub trait ParallelIterator: Sized + Send {
-    /// The type of item that this parallel iterator produces.
-    type Item: Send;
-    ...
-}
-```
+[src/iter/mod.rs:L2449](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/iter/mod.rs#L2449) —— `pub trait IndexedParallelIterator: ParallelIterator`，加上「已知长度、可随机切分」能力后才能用 `zip`/`enumerate`（u2-l1 展开）。
 
-注意 `type Item: Send` 这个约束——产出元素必须能跨线程移动，这是 `u1-l1` 讲的「数据竞争自由由类型系统保证」在 trait 签名上的直接体现。
+[src/iter/mod.rs:L107-L163](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/iter/mod.rs#L107-L163) —— 私有适配器模块清单：**一个文件一个适配器**（`mod map; mod filter; mod zip;`……共 50 余个）。文件名即适配器名，这是 `src/iter/` 最重要的浏览规律。
 
-带索引的增强版 **`IndexedParallelIterator`** 定义在 [src/iter/mod.rs:2449](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/iter/mod.rs#L2449)，文档说明它是「支持随机访问、可在任意下标处切分」的迭代器。`zip`、`enumerate`、`collect` 等需要预知长度的操作只在这个 trait 上提供——经过 `filter` 之后元素个数未知，这些方法就会不可用，这是 `u2-l1` 的主题。
+[src/iter/mod.rs:L165-L212](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/iter/mod.rs#L165-L212) —— 与上一条对应的 `pub use self::{...}`：把这些私有模块里的**公开类型**（`Map`、`Filter`、`Zip`…）挂到 `iter` 模块路径上，供需要写出具体类型的人使用。
 
-适配器子模块的组织约定写在 [src/iter/mod.rs:96-105](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/iter/mod.rs#L96-L105) 的一段注释里，作者称之为「madness 中的方法」：出现在公共 API 上的类型（如 `Enumerate`）在本模块内**一律不带前缀使用**，强迫维护者补上 `pub use`，漏了就编译报错；只出现在方法体内的辅助函数（如 `find::find()`）则**一律带前缀**，一眼可分。随后 [src/iter/mod.rs:107-154](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/iter/mod.rs#L107-L154) 按字母序列出全部私有适配器子模块（`mod blocks; mod chain; mod chunks; ...`）。
+[src/iter/mod.rs:L91](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/iter/mod.rs#L91) —— `pub mod plumbing;`：Producer/Consumer 协议所在，单元四整讲都围绕它（配套的 [src/iter/plumbing/README.md](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/iter/plumbing/README.md) 是官方设计说明）。
 
-切片是最重要的数据源，入口是 [src/slice/mod.rs:31](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/slice/mod.rs#L31) 的 `ParallelSlice` 与 [src/slice/mod.rs:222](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/slice/mod.rs#L222) 的 `ParallelSliceMut`，提供 `par_split`、`par_windows` 和一族并行排序方法；`slice/` 目录下还有 `sort.rs`（约 1600 行的并行归并排序，`u8-l2` 的主角）。
+**prelude 的真实成分。** [src/prelude.rs:L5-L17](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/prelude.rs#L5-L17) 共 13 条 `pub use`：10 个来自 `crate::iter`（`ParallelIterator`、`IndexedParallelIterator`、`IntoParallelIterator` 等），2 个来自 `crate::slice`，1 个来自 `crate::str`。u1-l3 说「prelude 引入 13 个 trait」，账就在这里对上。
 
-最后，`iter/plumbing/` 是驱动一切的底层协议。[src/iter/plumbing/mod.rs:56](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/iter/plumbing/mod.rs#L56) 定义 `Producer` trait，文档称其为「可切分的 `IntoIterator`」——`split_at` 把数据一分为二正是任务切分的物理基础。现在只需记住位置，第四单元会精读。
+**切片与字符串的扩展 trait。** 数据源模块不为每个方法单开文件，而是用 trait 把方法「贴」到 std 类型上：
+
+- [src/slice/mod.rs:L31](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/slice/mod.rs#L31) / [L222](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/slice/mod.rs#L222) —— `ParallelSlice` 与 `ParallelSliceMut`：给 `&[T]`/`&mut [T]` 贴上 `par_chunks`、`par_sort` 等方法。
+- [src/str.rs:L59](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/str.rs#L59) —— `ParallelString`：给 `&str` 贴上 `par_split`、`par_lines` 等方法。
 
 #### 4.2.4 代码实践
 
-**实践目标**：建立「方法名 → 实现文件」的肌肉记忆，验证「一个适配器一个文件」的约定。
+**实践：给 `src/lib.rs` 的每条再导出标注来源。**
 
-**操作步骤**：
+1. **实践目标**：验证「`rayon` 里凡是任务调度类 API，全部来自 `rayon-core`」这一论断，并给每条 `pub use` 找到它在内核中的原始定义文件。
+2. **操作步骤**：
+   - 读 [src/lib.rs:L107-L118](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/lib.rs#L107-L118)，抄下 12 条 `pub use rayon_core::...`。
+   - 对照下表（答案已给出，你要做的是**逐条在源码里核实**再导出符号在 rayon-core 侧的出处，即 4.3.3 将读到的 [rayon-core/src/lib.rs:L83-L92](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/lib.rs#L83-L92)）：
 
-1. 在 `src/iter/` 目录下盲猜以下方法对应的文件名：`map`、`filter`、`enumerate`、`flat_map`、`panic_fuse`、`with_min_len`。
-2. 用 `ls src/iter/` 对照你的猜测（或用编辑器全局搜索 `mod map;`）。
-3. 对 `with_min_len` 这种猜不到独立文件的，在 `src/iter/mod.rs` 里搜索 `fn with_min_len`，看它定义在哪个 trait 上、返回类型来自哪个文件（提示：`len.rs`）。
+| `rayon` 侧再导出（src/lib.rs 行号） | rayon-core 中的原始来源 |
+|---|---|
+| `FnContext`（L107） | lib.rs 内定义（L836） |
+| `ThreadBuilder`（L108） | `registry` 模块 |
+| `ThreadPool`、`ThreadPoolBuildError`、`ThreadPoolBuilder`（L109-L111） | `thread_pool` 模块 / lib.rs 内定义 |
+| `BroadcastContext`、`broadcast`、`spawn_broadcast`（L112） | `broadcast` 模块 |
+| `Scope`、`in_place_scope`、`scope`（L113） | `scope` 模块 |
+| `ScopeFifo`、`in_place_scope_fifo`、`scope_fifo`（L114） | `scope` 模块 |
+| `Yield`、`yield_local`、`yield_now`（L115） | `thread_pool` 模块 |
+| `current_num_threads`、`current_thread_index`、`max_num_threads`（L116） | lib.rs 函数 / `thread_pool` 模块 / `sleep` 计数上限 |
+| `join`、`join_context`（L117） | `join` 模块 |
+| `spawn`、`spawn_fifo`（L118） | `spawn` 模块 |
 
-**需要观察的现象**：除 `with_min_len` 这类「配置切分粒度」的方法外，绝大多数适配器方法都能直接命中同名文件。
+3. **需要观察的现象**：上表右侧没有一个条目来自 `src/iter`、`src/slice` 等上层模块——调度 API 与迭代器 API 完全两套来源。
+4. **预期结果**：在自己的笔记里产出这张「符号搬运表」。之后在文档里看到 `rayon::scope`，你就能立刻反应出它真正的定义在 `rayon-core/src/scope/mod.rs`。
 
-**预期结果**：`map.rs`、`filter.rs`、`enumerate.rs`、`flat_map.rs`、`panic_fuse.rs` 全部存在；`with_min_len` 没有同名文件，而是定义在 `IndexedParallelIterator` 上，配套类型在 `len.rs`。
+（本实践为源码阅读型；表中「L836」等行号可在本地用 `grep -n "pub struct FnContext" rayon-core/src/lib.rs` 复核。）
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：`Vec<T>` 的并行支持在哪个文件？`HashMap<K, V>` 呢？
+**练习 1**：`rayon::Map` 这个类型（`map` 适配器返回的类型）的模块路径是什么？它是 `pub mod` 直接暴露的吗？
 
-答案：`Vec` 对应 `src/vec.rs`，`HashMap` 对应 `src/collections/hash_map.rs`。依据是镜像 std：`Vec` 在 std 里是顶层类型（所以 rayon 里是顶层文件），`HashMap` 在 `std::collections` 里（所以 rayon 里在 `collections/` 目录下）。
+<details><summary>参考答案</summary>
 
-**练习 2**：为什么 `ParallelIterator` 的方法都写成 trait 默认方法，集中在一个两千多行的文件里，而不是像适配器那样每方法一个文件？
+路径是 `rayon::iter::Map`。`mod map;` 本身是私有的（[src/iter/mod.rs:L134](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/iter/mod.rs#L134)），但通过 [src/iter/mod.rs:L187](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/iter/mod.rs#L187) 的 `pub use self::{... map::Map ...}` 挂到了公开路径上。这正是 mod.rs:L96-L105 注释所说的「私有模块 + 定点再导出」模式。
+</details>
 
-答案：因为这些方法分两类：惰性适配器方法只做类型包装，一行 `Map::new(self, map_op)` 就完事，实现体在各自适配器文件里；立即执行的消费者方法（`sum`、`collect`、`for_each`）则在此处调用底层实现函数。trait 的方法签名必须集中声明（Rust 不允许 trait 方法分散在多个文件），而方法**体**可以只是转发——所以 `mod.rs` 是「方法目录」，适配器文件是「方法实现」。
+**练习 2**：我想找 `flat_map` 适配器的实现代码，应该打开哪个文件？为什么不用搜索也能推断出来？
 
-**练习 3**：`src/delegate.rs` 是私有的（裸 `mod`），它定义的宏如何被其他模块使用？
+<details><summary>参考答案</summary>
 
-答案：见 [src/lib.rs:84-85](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/lib.rs#L84-L85) 的 `#[macro_use] mod delegate;`——`#[macro_use]` 让该模块内定义的宏在声明之后的所有模块中可用，无需路径引用。这是宏（旧版 `macro_rules!`）与普通项的作用域差异。
+`src/iter/flat_map.rs`。因为 `src/iter/` 的组织规律是「一个适配器一个同名文件」，且 [src/iter/mod.rs:L120](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/iter/mod.rs#L120) 确有 `mod flat_map;`。
+</details>
+
+**练习 3**：`src/collections/hash_map.rs` 大概率是怎么给 `HashMap` 提供并行迭代的？说出你的猜测和依据。
+
+<details><summary>参考答案</summary>
+
+猜测：不重写生产逻辑，而是委托给内部已有的并行生产者（或 `par_iter` 产出键值引用再适配）。依据是 u1-l1/u1-l2 的结论——rayon 上层大量使用委托复用；精确答案在 u8-l3「集合的委托实现模式」中用 `src/delegate.rs` 的宏展开验证。
+</details>
 
 ### 4.3 rayon-core 目录导览：调度内核
 
 #### 4.3.1 概念说明
 
-rayon-core 只回答一个问题：**给定一堆闭包，怎么让一组线程把它们高效、安全地跑完**。它的公开 API 面很窄（`join`、`scope`、`spawn`、`ThreadPool`、`broadcast` 及若干线程信息函数），内部却由十个模块精密配合。这一节先给每个模块发一张「职责卡片」，你在第五、六单元精读时会反复回来看这张表。
+`rayon-core` 只有约 15 个源文件，却承担了全部运行时职责。它对迭代器一无所知，只认识一个概念：**「任务」（Job）**。上层把切分好的工作打包成闭包丢进来，内核负责让池里的线程把这些闭包跑完，并且在空闲时互相「偷」活干（工作窃取）。
 
-| 模块 | 职责 | 精读讲义 |
+模块按功能分四组：
+
+| 分组 | 模块 | 职责 |
 |---|---|---|
-| `job.rs` | 任务对象：闭包如何被装箱成可入队的 `JobRef` | u5-l2 |
-| `latch.rs` | 唤醒原语：任务完成后如何通知等待者 | u5-l2 |
-| `join/` | 最小并行原语 `join`/`join_context` | u5-l1 |
-| `registry.rs` | 线程注册表：全局线程池、工作窃取主循环 | u5-l3、u5-l4 |
-| `sleep/` | 休眠唤醒协议：无事可做时省 CPU | u5-l5 |
-| `scope/` | 借用安全的作用域任务 | u6-l1 |
-| `spawn/` | fire-and-forget 任务派发 | u6-l2 |
-| `broadcast/` | 向池内每个线程广播任务 | u6-l3 |
-| `thread_pool/` | `ThreadPool` 类型与 `install`、线程信息函数 | u7-l2、u7-l3 |
-| `unwind.rs` | panic 的捕获与跨线程重放 | u6-l4 |
+| **任务原语** | `join/`、`scope/`、`spawn/`、`broadcast/` | 四种「把闭包交出去」的方式（对应 u1-l1 的四类 API 中间三层） |
+| **任务表示** | `job.rs`、`latch.rs`、`unwind.rs` | 闭包如何装箱成任务、如何通知完成、panic 如何安全传递 |
+| **线程与调度** | `registry.rs`、`thread_pool/`、`sleep/` | 线程注册表、对外池对象、空闲睡眠/唤醒协议 |
+| **测试** | `test.rs`、各模块的 `test.rs` | 内核自测 |
 
 #### 4.3.2 核心流程
 
-十个模块在一次 `join(a, b)` 调用中的协作（只看数据流向，不看实现）：
+一次最简单的 `rayon::join(a, b)` 在内核里走过的路径（后续 u5 各讲逐站展开）：
 
-```text
-join/mod.rs     join(oper_a, oper_b) 被调用
-   │
-   ▼
-job.rs          oper_b 被装箱成 Job，得到 JobRef
-   │
-   ▼
-registry.rs     JobRef 压入当前线程的本地 deque（工作窃取队列）
-   │             当前线程先执行 oper_a；
-   │             其他空闲线程可从队列另一端窃取 oper_b
-   ▼
-latch.rs        oper_b 执行完毕后 set 对应 Latch，
-   │             唤醒可能正在等待结果的线程
-   ▼
-unwind.rs       若任一闭包 panic，先捕获、
-                等另一分支也跑完后在 join 调用处重放
 ```
-
-线程本身则由 `registry.rs` 创建并纳入管理；线程没事做时进入 `sleep/` 模块描述的休眠状态，被新任务唤醒。这条链是第五单元的主线，现在只要能把每个动词对应到模块名即可。
+join(oper_a, oper_b)            join/mod.rs
+   │ 把两个闭包包装成 Job（栈上或堆上）
+   │ oper_b 入队到本地 deque，随后先执行 oper_a
+   ▼
+Job / JobRef                    job.rs —— 任务的统一表示
+   │ 执行完毕后通过 Latch「点亮」通知等待者
+   ▼
+Latch 家族                      latch.rs —— 自旋/阻塞两种等待策略
+   │ 线程从哪来？—— Registry 管理的线程池
+   ▼
+Registry                        registry.rs —— 全局单例 + 每线程主循环
+   │ 主循环：取本地任务 → 失败则尝试窃取 → 都没有则
+   ▼
+sleep 模块                      sleep/ —— 进入休眠等条件变量唤醒
+```
 
 #### 4.3.3 源码精读
 
-十个内部模块的声明在 [rayon-core/src/lib.rs:69-81](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/lib.rs#L69-L81)，全部是私有 `mod`——rayon-core 的用户看不到模块边界，只能通过根部的再导出访问：
+**入口的模块声明与再导出。**
 
-```rust
-mod broadcast;
-mod job;
-mod join;
-mod latch;
-mod registry;
-mod scope;
-mod sleep;
-mod spawn;
-mod thread_pool;
-mod unwind;
-```
+[rayon-core/src/lib.rs:L69-L78](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/lib.rs#L69-L78) —— 10 个内部模块声明，与 4.3.1 的表格一一对应：`broadcast`、`job`、`join`、`latch`、`registry`、`scope`、`sleep`、`spawn`、`thread_pool`、`unwind`。注意其中 6 个是**目录模块**（含 `mod.rs` 与 `test.rs`），4 个是单文件（`job.rs`、`latch.rs`、`registry.rs`、`unwind.rs`）——有配套测试的复杂模块才会长成目录。
 
-紧随其后的 [rayon-core/src/lib.rs:83-92](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/lib.rs#L83-L92) 是十来条 `pub use self::模块::...`，把各模块的公开项提升到 crate 根。**每条 `pub use self::X` 就是下一站路标**：`pub use self::join::{join, join_context};` 告诉你 `join` 函数定义在 `join/` 目录下。
+[rayon-core/src/lib.rs:L83-L92](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/lib.rs#L83-L92) —— 10 条 `pub use self::...`，即内核的全部公共出口。读这张表就能反推出：`ThreadPool` 与 `yield_now` 一族来自 `thread_pool` 模块，`join` 来自 `join` 模块，`ThreadBuilder` 竟来自 `registry` 模块（因为线程的创建与命名由注册表负责）。
 
-三大定位目标在 rayon-core 中的精确落点：
+**三大 API 的精确定位（本讲硬指标）。**
 
-- **`join`**：[rayon-core/src/join/mod.rs:93-106](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/join/mod.rs#L93-L106)。签名 `pub fn join<A, B, RA, RB>(oper_a: A, oper_b: B) -> (RA, RB)`，四个泛型参数上的 `Send` 约束清晰可见；函数体只有一行——转调 `join_context`，把无上下文版本适配成带上下文版本（[rayon-core/src/join/mod.rs:115](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/join/mod.rs#L115)）。
-- **`ThreadPool`**：[rayon-core/src/thread_pool/mod.rs:46](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/thread_pool/mod.rs#L46)，`pub struct ThreadPool`（内部包着一个 `Arc<Registry>`）。
-- **`Registry`**：[rayon-core/src/registry.rs:126](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/registry.rs#L126)。它是包级私有类型（`pub(super)`），外部世界只能通过 `ThreadPool` 间接使用——而全局唯一的实例存放在 [rayon-core/src/registry.rs:154-155](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/registry.rs#L154-L155) 的静态变量 `THE_REGISTRY` 中，配合 `Once` 保证只初始化一次。`u1-l2` 讲的「全局线程池惰性初始化」的落点就是这两行。
+1. `join`：[rayon-core/src/join/mod.rs:L93](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/join/mod.rs#L93) —— `pub fn join<A, B, RA, RB>(oper_a: A, oper_b: B) -> (RA, RB)`；带上下文版本 [join_context](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/join/mod.rs#L115) 紧随其后。
+2. `ThreadPool`：[rayon-core/src/thread_pool/mod.rs:L46](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/thread_pool/mod.rs#L46) —— `pub struct ThreadPool`，其 `install`/`join`/`spawn` 等方法都在同文件 `impl ThreadPool`（L50 起）。
+3. `ParallelIterator`：不在内核，而在上层 [src/iter/mod.rs:L359](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/iter/mod.rs#L359)——这一条特意列出，因为它是最容易找错层的代表。
 
-顺带一提，[rayon-core/src/lib.rs:39-55](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/lib.rs#L39-L55) 的文档解释了为什么这个 crate 用 `links` 属性防止重复链接——若两个版本同时存在，就会有两个「全局」线程池，协调即失效。这是分层设计里内核必须唯一的根源。
+**配置与全局状态的落点。**
+
+[rayon-core/src/lib.rs:L165-L197](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/lib.rs#L165-L197) —— `ThreadPoolBuilder` 结构体定义在 lib.rs 而非 thread_pool 模块：线程数、线程名、栈大小、spawn_handler 等 10 个字段全在此。u7-l1 的链式配置方法都是它的 `impl`。
+
+[rayon-core/src/lib.rs:L131-L133](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/lib.rs#L131-L133) —— `current_num_threads()` 转调 `Registry::current_num_threads()`，是「lib.rs 只做门面、实活在 registry」的典型。
+
+[rayon-core/src/registry.rs:L126](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/registry.rs#L126) —— `pub(super) struct Registry`：注意可见性只有 `pub(super)`（对本 crate 可见），外界永远拿不到这个类型，只能通过 `ThreadPool` 间接使用。
+
+[rayon-core/src/registry.rs:L154-L160](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/registry.rs#L154-L160) —— `static mut THE_REGISTRY: Option<Arc<Registry>>` 与 `global_registry()`：全局线程池单例的存放处（u5-l3 展开）。
+
+**两份「藏在外围的文档」。** 内核目录里有两个不写代码却极重要的文件：[rayon-core/src/sleep/README.md](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/sleep/README.md)（睡眠/唤醒状态机的官方说明，u5-l5 的教材）与 [src/iter/plumbing/README.md](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/iter/plumbing/README.md)（Producer/Consumer 设计说明，u4-l1 的教材，其中开篇的 Pull/Push 双模式图示值得现在就翻一眼）。
 
 #### 4.3.4 代码实践
 
-**实践目标**：为 rayon-core 的十个模块制作职责卡片，并验证 re-export 路标。
+**实践：三大 API 定位 + 内核导出表核实。**
 
-**操作步骤**：
+1. **实践目标**：不看本讲，独立用工具定位 `ParallelIterator`、`join`、`ThreadPool` 的定义行号，并核实 4.2.4 表格中 rayon-core 侧的每一条来源。
+2. **操作步骤**（在仓库根目录执行）：
 
-1. 对照 [rayon-core/src/lib.rs:69-81](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/lib.rs#L69-L81) 的模块清单，逐个打开文件，只读每个文件开头的 `//!` 文档注释（不读实现）。
-2. 给每个模块写一句话职责（可抄改 4.3.1 的表格，但必须核对文档注释原文）。
-3. 挑 `pub use self::spawn::{spawn, spawn_fifo};` 这一条验证：打开 `rayon-core/src/spawn/mod.rs`，用编辑器跳转到 `pub fn spawn` 的定义行。
+   ```bash
+   # 1. 定位三大 API 的定义处
+   grep -n "pub trait ParallelIterator" src/iter/mod.rs
+   grep -n "pub fn join" rayon-core/src/join/mod.rs
+   grep -n "pub struct ThreadPool" rayon-core/src/thread_pool/mod.rs
 
-**需要观察的现象**：`spawn/mod.rs` 里除了 `spawn` 还有 `spawn_fifo`；两者签名相同但入队位置不同（一个栈序一个队序，`u6-l2` 详述）。
+   # 2. 列出内核全部对外导出
+   grep -n "pub use" rayon-core/src/lib.rs
 
-**预期结果**：`pub fn spawn<F>(func: F)` 位于 [rayon-core/src/spawn/mod.rs:58](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/spawn/mod.rs#L58)，与 re-export 路标完全一致。
+   # 3. 数一数内核模块清单
+   grep -n "^mod " rayon-core/src/lib.rs
+   ```
+
+3. **需要观察的现象**：
+   - 第 1 组命令应分别命中 `359`、`93`、`46` 三个行号；
+   - 第 2 组命令恰好 10 条，全部以 `pub use self::` 开头；
+   - 第 3 组命令列出 10 个模块 + 2 个测试模块（`compile_fail`、`test`）。
+4. **预期结果**：输出与本讲给出的行号完全一致。若不一致（例如未来版本行号漂移），以你本地 grep 的结果为准，并回头修正自己笔记里的链接行号。
+5. 本组命令均为只读 grep，可直接运行验证（如在你环境中未安装 grep 等工具则属「待本地验证」）。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`current_thread_index()` 这个函数，用户从 `rayon` 名下调用。请按 re-export 链写出它的完整路径。
+**练习 1**：`rayon_core::ThreadBuilder` 为什么定义在 `registry.rs` 而不是 `thread_pool/mod.rs`？
 
-答案：`rayon::current_thread_index`（[src/lib.rs:116](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/lib.rs#L116) 再导出）→ `rayon_core::current_thread_index`（[rayon-core/src/lib.rs:91](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/lib.rs#L91) 再导出）→ 最终定义在 `rayon_core::thread_pool::current_thread_index`（[rayon-core/src/thread_pool/mod.rs:438](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/thread_pool/mod.rs#L438)）。两跳转发，一个定义点。
+<details><summary>参考答案</summary>
 
-**练习 2**：`Registry` 为什么是 `pub(super)` 而不是 `pub`？
+从再导出表 [rayon-core/src/lib.rs:L85](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/lib.rs#L85) 可见出处是 `self::registry`。`ThreadBuilder` 描述「一个将要被启动的工作线程」（名字、栈大小），而启动线程、跑主循环的是 Registry；`ThreadPool` 只是对外持有的句柄。谁使用谁定义，是内核分文件的惯例。
+</details>
 
-答案：`Registry` 承载全局线程池和工作窃取队列的内部状态，暴露它会使用户绕过 `ThreadPool` 的安全封装直接操作队列。`pub(super)` 让它只在 rayon-core 内部（含子模块）可见，对外只留下 `ThreadPool` 这个把手——这是「窄接口、深实现」的封装原则。
+**练习 2**：`job.rs`、`latch.rs`、`registry.rs`、`unwind.rs` 是单文件，而 `join`、`scope`、`spawn`、`broadcast`、`thread_pool`、`sleep` 是目录。推测这条划分线是什么？
 
-**练习 3**：不看 4.3.1 的表格，说出 `sleep/` 模块存在的意义。
+<details><summary>参考答案</summary>
 
-答案：工作线程找不到任务时不应该忙等烧 CPU，也不应该直接退出（新任务来了还得重建线程）。`sleep/` 实现了一套休眠-唤醒协议：线程空闲一段时间后休眠在条件变量上，registry 注入新任务时批量唤醒。它要在「省电」和「不损失唤醒及时性」之间维护几个原子计数器的不变量，是 `u5-l5` 的全部内容。
+观察目录内容可发现每个目录都含 `mod.rs + test.rs`：**带独立测试文件的模块长成目录**。这与是否核心无关（job/latch 同样核心），只反映代码组织习惯——练习 3 的 grep（`grep -n "^mod " rayon-core/src/lib.rs` 会列出 `mod test;` 与 `mod compile_fail;`）能印证这一点。
+</details>
+
+**练习 3**：在 `rayon-core` 里 grep `ParallelIterator`，预计能找到几处？为什么？
+
+<details><summary>参考答案</summary>
+
+预计 0 处（忽略注释）。内核只认「闭包任务」，迭代器概念完全住在 `rayon` 上层；若在内核见到该词，只可能是文档注释里的说明性引用。这条「找不到」本身就是分层干净的证据。
+</details>
 
 ## 5. 综合实践
 
-这是本讲指定的核心实践任务：**手工绘制仓库模块依赖图，并把两份 re-export 清单的每一条标注到来源子模块**。
+**任务：制作你自己的「rayon 全景地图」页。**
 
-### 实践目标
+把本讲三个实践合并成一页可长期维护的笔记（Markdown 或纸笔均可）：
 
-产出两张可以贴在显示器旁的成果：
+1. **画三层依赖图**（4.1.4）：三个方框、两条 `path` 依赖箭头，每条箭头标注 Cargo.toml 行号；在 `rayon → rayon-core` 箭头旁注明「12 条 pub use 再导出（src/lib.rs L107-L118）」。
+2. **给 `rayon` 层标叶子**：在 `rayon` 方框内列出 `src/` 的 8 个公开数据源模块（iter、slice、collections、str、string、range、range_inclusive、option/result/array/vec 可合并为「std 镜像组」），并标出 `ParallelIterator`（src/iter/mod.rs L359）的位置。
+3. **给 `rayon-core` 层标四组模块**：任务原语（join/scope/spawn/broadcast）、任务表示（job/latch/unwind）、线程与调度（registry/thread_pool/sleep），在 `join`、`ThreadPool` 处标注行号（join/mod.rs L93、thread_pool/mod.rs L46）。
+4. **画一条穿越线**：从 `input.par_iter().map(...).sum()` 出发，画一条线穿过 `src/iter` → plumbing → `rayon-core::join` → `registry.rs` 主循环，表示一次并行计算的完整路径。这条线上的每个站点就是单元二到单元五的课程目录——**本图的穿越线就是本手册的学习路线**。
 
-1. 一张三层模块依赖图（含每层内部的主要目录）。
-2. 一张「re-export 来源对照表」，从 `rayon::X` 出发能查到 `X` 的最终定义文件。
-
-### 操作步骤
-
-**第一步：画依赖图。** 用纸笔或任意画图工具，画出如下骨架并自己补全每个框内的目录名（参考 4.1.1 的 ASCII 图，但这次要求把 `src/iter`、`src/slice`、`rayon-core/src/registry` 等目录都画进去，并标注每条依赖边）。
-
-**第二步：标注 `src/lib.rs` 的 12 条再导出。** 打开 [src/lib.rs:107-118](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/lib.rs#L107-L118)，对每条 `pub use rayon_core::X` 查 [rayon-core/src/lib.rs:83-92](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/lib.rs#L83-L92)，确定 `X` 来自哪个 `self::模块`。
-
-**第三步：处理例外。** 有两条在 rayon-core 的 `pub use self::...` 清单里找不到，需要单独处理（提示见下方答案表）。
-
-**第四步：抽查两条链。** 任选两个项（建议 `join` 和 `Yield`），从 `rayon::` 名下出发，用编辑器「转到定义」逐跳验证你标注的终点是否正确。
-
-### 需要观察的现象
-
-- 绝大多数项走「子模块 → rayon-core 根 → rayon 根」的两跳路线；
-- 少数项只有一跳（直接定义在 rayon-core 根部）；
-- 编辑器的「转到定义」有时一步直达最终文件（编译器内联了 re-export），有时停在转发行——两种都正常。
-
-### 预期结果（参考答案表）
-
-| `rayon::` 下的名字 | rayon-core 内来源 | 最终定义文件 |
-|---|---|---|
-| `join`, `join_context` | `self::join` | `rayon-core/src/join/mod.rs`（L93、L115） |
-| `scope`, `in_place_scope`, `Scope` | `self::scope` | `rayon-core/src/scope/mod.rs` |
-| `scope_fifo`, `in_place_scope_fifo`, `ScopeFifo` | `self::scope` | `rayon-core/src/scope/mod.rs` |
-| `spawn`, `spawn_fifo` | `self::spawn` | `rayon-core/src/spawn/mod.rs`（L58） |
-| `broadcast`, `spawn_broadcast`, `BroadcastContext` | `self::broadcast` | `rayon-core/src/broadcast/mod.rs` |
-| `ThreadPool` | `self::thread_pool` | `rayon-core/src/thread_pool/mod.rs`（L46） |
-| `current_thread_index`, `current_thread_has_pending_tasks`, `Yield`, `yield_now`, `yield_local` | `self::thread_pool` | `rayon-core/src/thread_pool/mod.rs`（L438、L452、L497） |
-| `ThreadBuilder` | `self::registry` | `rayon-core/src/registry.rs`（L22） |
-| `ThreadPoolBuilder`, `ThreadPoolBuildError`, `FnContext` | 无（直接定义在根部） | `rayon-core/src/lib.rs`（L165、L137、L836） |
-| `current_num_threads`, `max_num_threads` | 无（根部函数，转发给 registry） | `rayon-core/src/lib.rs`（L108-L133） |
-
-依赖图则应呈现：`rayon-demo → rayon → rayon-core`，无环；`rayon` 内部 `iter/slice/... → delegate/split_producer`；`rayon-core` 内部 `join/scope/spawn/broadcast/thread_pool → job/latch/registry → sleep/unwind`（这条内部依赖在第五单元还会细化）。
+验收标准：不看讲义，能对着自己的图回答「`rayon::join` 的定义在哪个文件第几行」「`src/iter/flat_map.rs` 为什么存在」「为什么 demo 不能直接依赖 rayon-core 的问题不存在」。
 
 ## 6. 本讲小结
 
-- 仓库是三层单向依赖：`rayon-demo → rayon → rayon-core`；rayon 是门面，rayon-core 是可独立发布的调度内核，rayon-demo 是纯叶子。
-- rayon crate 的 `src/` **镜像 std 的模块结构**：`option.rs`、`collections/`、`str.rs`……找类型先想它在 std 的哪个模块。
-- `src/iter/` 遵循「一个适配器一个文件」约定，`mod.rs` 集中声明两个核心 trait：`ParallelIterator`（L359）与 `IndexedParallelIterator`（L2449）。
-- rayon-core 由十个私有模块组成，通过根部的 `pub use self::模块::...` 对外暴露窄接口；`pub use self::X` 就是定位定义文件的路标。
-- 三大 API 的定义落点：`ParallelIterator` 在 `src/iter/mod.rs:359`，`join` 在 `rayon-core/src/join/mod.rs:93`，`ThreadPool` 在 `rayon-core/src/thread_pool/mod.rs:46`。
-- `Registry` 是 `pub(super)` 的内部类型，全局唯一实例存于 `THE_REGISTRY` 静态变量——`links` 属性强制的「内核唯一」是整个分层的地基。
+- 仓库是**严格单向的三层结构**：`rayon-demo` → `rayon` → `rayon-core`，依赖全部由各 Cargo.toml 的 `path` 声明，可在行号级核实。
+- `rayon` 上层**镜像 std 的模块结构**（option/collections/str...），外加两个特殊角色：`src/iter/`（迭代器定义 + 「一适配器一文件」）与 `src/delegate.rs`（委托宏）。
+- `rayon` 入口的 12 条 `pub use rayon_core::...` 把调度 API 原样搬给用户，所以日常只需依赖 `rayon` 一个 crate。
+- `rayon-core` 只有约 15 个文件，按「任务原语 / 任务表示 / 线程与调度」分组；`ThreadPoolBuilder` 定义在 lib.rs，`Registry` 是 `pub(super)` 的进程单例，外界只见 `ThreadPool`。
+- 三大 API 定位：`ParallelIterator` → src/iter/mod.rs:359；`join` → rayon-core/src/join/mod.rs:93；`ThreadPool` → rayon-core/src/thread_pool/mod.rs:46。
+- 两份藏在外围的设计文档（`sleep/README.md`、`iter/plumbing/README.md`）分别是单元五和单元四的官方教材，现在知道位置即可。
 
 ## 7. 下一步学习建议
 
-本讲之后，入门单元告一段落，你已具备整张地图。接下来进入单元二「并行迭代器使用入门」：
+本讲是地图篇，到此入门单元的「环境 + 用法 + 地图」三件套已齐（u1-l1～u1-l4）。接下来两条路：
 
-- 下一讲 `u2-l1` 将深入 [src/iter/mod.rs:359](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/iter/mod.rs#L359) 的 `ParallelIterator` trait 本身，逐类清点它提供的方法（本讲只定位了它，还没读它）。
-- 建议提前浏览 [src/iter/plumbing/README.md](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/src/iter/plumbing/README.md)——官方写的 plumbing 总览，是第四单元的预习材料，此刻读不懂细节没关系，混个眼熟即可。
-- 如果你对调度内核更好奇，也可以直接跳到单元五从 `u5-l1`（join）读起，但建议至少先完成 `u2-l1`，掌握 trait 面貌后再下潜。
-- 持续使用本讲的成果：以后每读一个新模块，先在依赖图上找到它的位置，再问「它在为谁服务、它依赖谁」。
+- **推荐主线**：进入单元二第 1 讲《ParallelIterator 与 IndexedParallelIterator》（u2-l1），带着本讲的地图去读 `src/iter/mod.rs` 的两大 trait——你已经知道它们在 L359 与 L2449。
+- **支线（偏爱底层者）**：若对调度更感兴趣，可直接跳到 u5-l1《join：最小的并行原语》从 `rayon-core/src/join/mod.rs:93` 开始，之后再回头补单元二；不过官方推荐顺序仍是先上层后内核，因为 plumbing（单元四）是连接两层的桥。
+
+无论走哪条路，遇到陌生文件时先回到本讲的地图上找它的位置——这张图会陪你看完整个手册。

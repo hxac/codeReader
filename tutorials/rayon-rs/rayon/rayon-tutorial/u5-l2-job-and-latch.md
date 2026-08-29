@@ -1,0 +1,521 @@
+# u5-l2 Job 与 Latch:任务的底层表示
+
+## 1. 本讲目标
+
+上一讲(u5-l1)我们站在 `join` 的使用者视角,读完了「B 包装成 StackJob 压入本地队列 → 当前线程就地执行 A → 认领循环找回 B,若被偷则边等边帮全池干活」这条协议。当时我们刻意留下了三个名字没有解释:**StackJob**、**JobRef**、**SpinLatch**。本讲就把这三个名字连同它们的整个家族彻底拆开:
+
+1. 读懂 **JobRef 的编码方式**——为什么它是一对「裸指针 + 函数指针」,而不是 trait 对象;
+2. 读懂 **Job 的栈分配(StackJob)与堆分配(HeapJob、ArcJob)两种形态**,并能回答「谁拥有这块内存、谁负责释放」;
+3. 读懂 **Latch 的 set/probe 协议**,区分 CoreLatch、SpinLatch、LockLatch、OnceLatch、CountLatch 各自的适用场景;
+4. 区分**自旋等待**(池内线程「边等边干活」)与**阻塞等待**(池外线程睡在条件变量上)两条路径的触发条件与代价。
+
+> 一个如实的澄清:本讲规划中提到的 `TickLatch` 在当前 HEAD(`ee0a00b`)的源码中**并不存在**(我们用 `git log --all -S "TickLatch"` 检索过全部历史,同样没有记录)。它所承担的「一次性触发、唤醒指定线程」的角色,在当前代码中由 [`OnceLatch`](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/latch.rs#L285-L317) 实现。同样,规划里提到的 `Job::new`、`new_heaped`、`into_runnable` 是旧版 rayon 的 API,当前版本已经重构为 `StackJob::new` / `HeapJob::new` / `ArcJob::new` 加 `as_job_ref` / `into_job_ref`,本讲按当前真实源码讲解。
+
+## 2. 前置知识
+
+### 2.1 闭包就是一个结构体
+
+Rust 的闭包在编译后会变成一个**匿名结构体**,捕获的环境变量就是它的字段;`FnOnce` 闭包被调用时是**按值消费**这个结构体。所以「把一个闭包变成任务」本质上是「把一个结构体安全地搬到另一个线程去执行」。理解这一点,`Job` 家族的三个字段(闭包、结果、闩锁)就非常自然:任务 = 待执行的闭包 + 放返回值的位置 + 通知「执行完了」的信号。
+
+### 2.2 类型擦除:胖指针的两种做法
+
+把不同类型的任务放进同一个队列,必须抹掉具体类型。Rust 有两种做法:
+
+- **trait 对象 `&dyn Job`**:值是一个胖指针 `(数据指针, vtable 指针)`,每次调用方法都要经 vtable 间接寻址,且 vtable 里带着生命周期与自动 trait 的约束;
+- **手工擦除**:自己存 `(数据指针, 函数指针)`。
+
+rayon 选择了后者(`JobRef`),原因后面源码精读时讲——核心是**控制力**:队列里只需要一个固定形态、可拷贝、可比相等的小结构,不需要完整的 vtable。
+
+### 2.3 原子操作与内存序的直觉
+
+本讲会反复出现 `AtomicUsize` 的 CAS(`compare_exchange`)与 `swap`。只需要三个直觉:
+
+- `load(Acquire)` 与 `store/swap(Release 或更强)` 配对,能建立 **happens-before**:一旦读取方看到新值,写入方在此之前的所有普通内存写入对读取方都可见;
+- `SeqCst`(顺序一致)在此基础上再给**所有 SeqCst 操作一个全局全序**,代价略高,但能排除「两个线程以相反顺序观察两次原子写」的怪异场景;
+- CAS 成功 ≈ 「我抢到了这次状态转移」,失败 ≈ 「别人先动了,我需要重新检查」。
+
+### 2.4 自旋等待与阻塞等待
+
+- **自旋等待(spin)**:循环里反复检查条件,不交出 CPU。响应极快(条件一旦满足立刻发现),但空转会烧 CPU。
+- **阻塞等待(block)**:在条件变量(condition variable)上睡眠,由操作系统在条件满足时唤醒。CPU 占用为零,但一次睡眠/唤醒要走内核,有微秒级延迟,并且睡眠的线程**无法做任何别的事**。
+
+rayon 的策略是:**池内的工作线程绝不纯粹空转**——等待时先弹本地任务、再偷别人的任务,实在无事可做才经睡眠协议真正入睡;**池外的普通线程**(比如调用 `join` 的主线程)则直接阻塞,因为它不是池成员,没有队列可弹、没有任务可偷,自旋纯属浪费。
+
+### 2.5 栈分配与堆分配的所有权
+
+- 栈上数据随栈帧弹出自动释放,零分配开销,但生命周期绑定在当前函数调用上;
+- `Box` 把数据放到堆上,`Box::into_raw` 可以交出所有权得到裸指针,`Box::from_raw` 可以把裸指针还原成 `Box` 恢复所有权——这一对函数是 rayon 堆任务生命周期管理的全部基础。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 | 本讲关注点 |
+|---|---|---|
+| `rayon-core/src/job.rs` | 任务对象的定义 | Job trait、JobRef、StackJob/HeapJob/ArcJob、JobFifo |
+| `rayon-core/src/latch.rs` | 同步原语 Latch 家族 | Latch trait、CoreLatch 四态、五种实现、LatchRef |
+| `rayon-core/src/join/mod.rs` | join 原语(上一讲主角) | StackJob + SpinLatch 的使用点 |
+| `rayon-core/src/registry.rs` | 线程注册表与调度循环 | in_worker_cold/in_worker_cross 两条等待路径、wait_until |
+| `rayon-core/src/scope/mod.rs` | scope 作用域 | HeapJob/ArcJob/JobFifo 的使用点、CountLatch |
+| `rayon-core/src/spawn/mod.rs` | spawn 派发 | HeapJob 的 'static 用法 |
+| `rayon-core/src/broadcast/mod.rs` | broadcast 广播 | ArcJob 多次执行、CountLatch::with_count |
+| `rayon-core/src/unwind.rs` | panic 捕获与重放 | halt_unwinding、AbortIfPanic |
+| `rayon-core/src/sleep/mod.rs` | 睡眠协议(下一讲主角) | CoreLatch 四态与真正入睡的衔接点 |
+
+## 4. 核心概念与源码讲解
+
+### 4.1 Job 与 JobRef:闭包如何变成可入队的任务
+
+#### 4.1.1 概念说明
+
+调度队列(crossbeam-deque)里流动的东西必须是一个**类型统一、尺寸固定、可以跨线程移动**的值。闭包结构体千差万别,直接放不进去。`JobRef` 就是 rayon 给「任意任务」做的统一外壳:一个数据指针加一个执行函数指针。所有任务(栈上的、堆上的、甚至「队列本身」)都被压成这 2 个机器字,队列里存的、线程间偷来偷去的,全部是它。
+
+#### 4.1.2 核心流程
+
+一个闭包变成可入队任务要经过三步:
+
+```text
+用户闭包 F
+   │  包装成具体任务类型(StackJob / HeapJob / ArcJob)
+   ▼
+具体任务 T: Job
+   │  JobRef::new(ptr):擦除类型,记录 (数据指针, execute 函数指针)
+   ▼
+JobRef(2 个机器字,Send + Sync,可入队、可被窃取)
+   │  某个 worker 弹出它,调用 job_ref.execute()
+   ▼
+(T::execute)(ptr) ── 还原类型,运行闭包,写结果,set Latch
+```
+
+关键约束:`JobRef` **必须恰好被执行一次**,否则其背后的堆内存(HeapJob/ArcJob)会泄漏。
+
+#### 4.1.3 源码精读
+
+先看 `Job` trait 本体——它只有一个**静态**方法,不接收 `&self`:
+
+- [rayon-core/src/job.rs:L20-L25](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/job.rs#L20-L25) 定义 `Job` trait:唯一的 `unsafe fn execute(this: *const ())` 以裸指针为参数。注释说明了安全前提:执行线程可能与入队线程不同,实现者必须自己保证 `Send`/`Sync` 语义(所以具体任务类型的 where 子句都带 `Send` 约束)。
+
+再看类型擦除的编码:
+
+- [rayon-core/src/job.rs:L33-L39](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/job.rs#L33-L39) `JobRef` 就是 `pointer: *const ()` 与 `execute_fn: unsafe fn(*const ())` 两个字段,并手工标记 `unsafe impl Send/Sync`——这是 rayon 内部反复出现的模式:类型系统不放心的地方,由人来论证。
+- [rayon-core/src/job.rs:L41-L53](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/job.rs#L41-L53) `JobRef::new` 把 `*const T` 转成 `*const ()`,同时把 `<T as Job>::execute` 这个**函数指针**存下来。安全前提(注释):调用者必须保证 `data` 在任务被执行前一直有效。
+- [rayon-core/src/job.rs:L57-L66](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/job.rs#L57-L66) `id()` 返回 `(指针, 函数指针)` 元组供相等比较——上一讲 join 认领循环里「弹出的任务是不是我的 B」就是靠它;`execute()` 则是简单地 `(self.execute_fn)(self.pointer)` 一步分派。
+
+**为什么不用 `Box<dyn Job>`?** 三个理由:第一,trait 对象的 vtable 里有一整套方法表与 drop 钩子,而这里每个任务只需要**一个**函数,存一个 fn 指针更小更直接;第二,`dyn Job` 会有生命周期擦除与自动 trait 传播的麻烦,而任务要在无锁队列里被任意线程弹走,rayon 需要完全手工掌控安全论证;第三,`JobRef` 的 `id()` 协议需要「指针级相等比较」,胖指针反而碍事。
+
+最后是任务执行结果的容器:
+
+- [rayon-core/src/job.rs:L9-L13](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/job.rs#L9-L13) `JobResult<T>` 三态:`None`(未执行)、`Ok(T)`、`Panic(Box<dyn Any + Send>)`。panic 不是让线程崩溃,而是被装箱存放,稍后在调用方重放(承接 u2-l5 讲过的传播语义)。
+- [rayon-core/src/job.rs:L222-L240](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/job.rs#L222-L240) `JobResult::call` 用 `unwind::halt_unwinding`(即 `panic::catch_unwind`)包住闭包,把正常返回与 panic 都收进 `JobResult`;`into_return_value` 在任务完成后取值,若是 `Panic` 就 `resume_unwinding` 在等待线程上重新抛出。
+
+#### 4.1.4 代码实践
+
+**实践目标**:亲手确认「JobRef 是极小的、可拷贝的值」,并理解 `execute` 的分派。
+
+**操作步骤**(源码阅读型,不需运行):
+
+1. 打开 `rayon-core/src/job.rs`,在 `JobRef` 结构体上数一数字段:一个 `*const ()`,一个 `unsafe fn(*const ())`——在 64 位平台上正好 16 字节,没有堆分配、没有锁。
+2. 用 Grep 在 `rayon-core/src/` 内搜索 `\.execute\(`,你会找到消费 JobRef 的两处:调度循环 `registry.rs` 中 worker 取到任务后调用,以及 `JobFifo::execute` 的间接弹队。
+3. 对照阅读 [rayon-core/src/unwind.rs:L13-L22](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/unwind.rs#L13-L22):`halt_unwinding` 只是把 `catch_unwind` 换了个名字,`resume_unwinding` 只是 `panic::resume_unwind` 的转发——「捕获-搬运-重放」三步在源码上就是这三个函数。
+
+**需要观察的现象 / 预期结果**:你能口头回答「一个闭包从入队到执行,经历了几次类型擦除」(答案:一次,`JobRef::new`;执行时一次函数指针分派还原)。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**:为什么 `JobRef` 的文档注释说「每个 JobRef 必须恰好执行一次,否则数据可能泄漏」?哪两种 Job 不执行会泄漏,哪一种不会?
+
+**参考答案**:`HeapJob` 的内存来自 `Box::into_raw`,只有 `execute` 里的 `Box::from_raw` 会恢复所有权并释放;`ArcJob` 靠 `execute` 里 `Arc::from_raw` 减引用计数,引用计数归零才释放。二者若从不执行,堆内存无人释放,即泄漏。`StackJob` 活在调用者的栈帧上,栈帧弹出时由普通 Rust 所有权机制自动释放,不会泄漏——它的风险不是泄漏而是「栈帧先于执行结束而失效」,这正是 u5-l1 讲过的「join 返回前必等 B 完成」不变量的由来。
+
+**练习 2**:`JobRef::id()` 为什么要单独存在,而不是给 `JobRef` 实现 `PartialEq`?
+
+**参考答案**:`id()` 的注释写明:返回一个「可保存、可比较的不透明句柄」,而不让 `JobRef` 本身变成 `Copy + Eq`。这是刻意的 API 收窄——`JobRef` 语义上是「待执行的一次性凭证」,允随便拷贝/比较容易诱导出重复执行等错误用法;认领循环(joined 的 `job_b_id == job.id()`)只需要临时的相等判断,用元组比较就够了。
+
+### 4.2 三种任务形态:StackJob、HeapJob、ArcJob 与 JobFifo
+
+#### 4.2.1 概念说明
+
+同一个「任务」概念,按**内存放在哪、要被执行几次**分成三种形态:
+
+| 形态 | 内存位置 | 执行次数 | 典型使用者 |
+|---|---|---|---|
+| `StackJob<L, F, R>` | 调用者的**栈帧** | 恰好一次(可能被就地 run_inline) | `join`、`broadcast`、池外调用的桥接 |
+| `HeapJob<BODY>` | **堆**(Box) | 恰好一次 | `scope::spawn`、`spawn` |
+| `ArcJob<BODY>` | **堆**(Arc 引用计数) | **多次**(每个线程各一次) | `spawn_broadcast` |
+| `JobFifo` | WorkerThread 的字段 | 每次弹出一个内部任务 | `spawn_fifo` 的间接队列 |
+
+栈形态最快(零分配),但要求「入队者会一直等到任务完成」;堆形态 slower 一点(一次分配),换来生命周期自由;Arc 形态支持「同一个闭包发给所有线程」的一对多语义。
+
+#### 4.2.2 核心流程
+
+**StackJob 的生命周期**(以 join 为例):
+
+```text
+join_context 调用者的栈帧
+  ├── StackJob::new(closure_b, SpinLatch)   ← 任务对象在栈上诞生
+  ├── job_b.as_job_ref() → 压入本地 deque    ← 只是把栈地址擦除后广播出去
+  ├── 就地执行 A
+  ├── 认领循环:B 被偷就 wait_until,没被偷就 run_inline
+  └── job_b.into_result() ← 栈帧弹出,内存随之消失
+```
+
+**HeapJob 的生命周期**(以 spawn 为例):
+
+```text
+spawn 线程                          执行线程
+  HeapJob::new(closure) → Box
+  Box::into_raw → JobRef
+  入队(inject_or_push) ──────→  弹出 JobRef
+                                     Box::from_raw(ptr) ← 所有权转移到执行线程
+                                     (closure)()
+                                     Box 离开作用域 → 堆内存释放
+```
+
+所有权从派发线程经「裸指针」这一跳,完整转移给了执行线程——没有任何引用计数,没有任何锁,释放者就是执行者。
+
+#### 4.2.3 源码精读
+
+**StackJob:三件套结构**。
+
+- [rayon-core/src/job.rs:L72-L95](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/job.rs#L72-L95) 三个字段一目了然:`latch`(完成信号)、`func: UnsafeCell<Option<F>>`(闭包,`Option` 是为了执行时 `take` 走它)、`result: UnsafeCell<JobResult<R>>`(结果槽)。注意构造函数是 `StackJob::new(func, latch)`——闩锁由调用者选型,这是后面「同一任务形态配不同 Latch」的关键。
+- [rayon-core/src/job.rs:L97-L107](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/job.rs#L97-L107) 三个消费口:`as_job_ref`(擦除类型入队)、`run_inline`(没被偷,当前线程直接跑)、`into_result`(取走结果,panic 会在此重放)。
+- [rayon-core/src/job.rs:L110-L126](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/job.rs#L110-L126) `StackJob::execute` 是被窃取线程调用的版本:`take` 出闭包、调 `JobResult::call`(捕获 panic)、写结果槽、`Latch::set` 唤醒等待者。首尾的 `AbortIfPanic` 守卫含义:如果 panic 恰好发生在**这段框架代码自身**(而非用户闭包)里,直接 `abort` 整个进程——因为此时结果槽可能半写、闩锁可能没 set,任何继续运行的线程都可能读到坏内存([rayon-core/src/unwind.rs:L24-L31](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/unwind.rs#L24-L31))。
+
+**HeapJob:堆上的一次性任务**。
+
+- [rayon-core/src/job.rs:L134-L163](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/job.rs#L134-L163) `HeapJob::new` 返回 `Box<Self>`;`into_job_ref` 用 `Box::into_raw` 把所有权「冻」进裸指针。注意它的 `execute` 与 StackJob 不同:不管理结果槽、不碰 Latch,只是「调用闭包,触发闭包内部的收尾逻辑」——注释里说明这是为实现 `scope` 而设计,完成信号由闭包体自己负责(见下面 scope 的用法)。
+- [rayon-core/src/job.rs:L165-L175](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/job.rs#L165-L175) `HeapJob::execute`:`Box::from_raw` 恢复所有权 → 调闭包 → 函数结束时 Box 被 drop,堆内存释放。**执行者即释放者**。
+
+**ArcJob:堆上的多次执行任务**。
+
+- [rayon-core/src/job.rs:L177-L208](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/job.rs#L177-L208) 与 HeapJob 的唯一区别:`Arc::new` + 每个线程 `as_job_ref` 时 `Arc::clone` 再 `into_raw`,于是同一个闭包可以生成**多个** JobRef,发给池里每个线程各执行一次。
+- [rayon-core/src/job.rs:L210-L220](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/job.rs#L210-L220) `ArcJob::execute` 用 `Arc::from_raw` 减引用计数,最后一个执行完的线程让计数归零,内存释放。闭包约束也从 `FnOnce()` 换成了 `Fn() + Send + Sync`——要被多个线程各调一次,且共享。
+
+**JobFifo:队列本身也是任务**。
+
+- [rayon-core/src/job.rs:L243-L262](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/job.rs#L243-L262) `JobFifo` 内部是一个 crossbeam `Injector<JobRef>`。`push` 时先把真任务压进队列,再返回 `JobRef::new(self)`——**队列自身的地址**被擦成一个 JobRef。于是 LIFO 的本地 deque 里躺着的只是「取队头的代理」,真正弹出来执行时才从 Injector 里按 FIFO 取一个真任务。
+- [rayon-core/src/job.rs:L264-L278](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/job.rs#L264-L278) `JobFifo::execute` 循环 `steal()` 直到取到一个 JobRef 去执行;队列空了还被执行是程序逻辑错误,直接 panic。
+
+**三个真实调用点**(谁在造哪种任务):
+
+- [rayon-core/src/join/mod.rs:L132-L139](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/join/mod.rs#L132-L139) join:闭包 B 包装成 `StackJob`,闩锁选 `SpinLatch::new(worker_thread)`,压入本地队列。
+- [rayon-core/src/scope/mod.rs:L537-L553](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/scope/mod.rs#L537-L553) scope 的 spawn:闭包先包一层「执行业务闭包 + 通知 scope 完成」的外壳,再做成 `HeapJob` 入队——HeapJob 的完成信号就藏在这层外壳里(见 4.3.3 的 `execute_job_closure`)。
+- [rayon-core/src/spawn/mod.rs:L84-L100](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/spawn/mod.rs#L84-L100) 全局 spawn:同样做 `HeapJob`,但闭包是 `'static`,外面还要 `increment_terminate_count` 撑住线程池别提前解散(任务 fire-and-forget,没有等待者,所以不需要 Latch)。
+- [rayon-core/src/broadcast/mod.rs:L107-L121](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/broadcast/mod.rs#L107-L121) broadcast:为每个线程造一个 `StackJob`(闭包以 `&f` 共享),所有任务共享同一个 `CountLatch`(计数 = 线程数),经 `LatchRef` 分发。
+
+#### 4.2.4 代码实践
+
+**实践目标**:把「谁拥有 Job 的内存、谁负责释放」整理成一张所有权地图。这是本讲最重要的实践,也是规划任务的当代版本(原任务中的 `Job::new`/`new_heaped`/`into_runnable` 已重构,对应关系见 4.2.3)。
+
+**操作步骤**(源码阅读型):
+
+1. 逐行读上列四个调用点,为每一处回答四个问题:用了哪种 Job 形态?内存分配在栈还是堆?执行结束时谁释放?完成信号用什么 Latch?
+2. 把答案填进下面的表(「释放者」一列是关键):
+
+| 构造点 | 形态 | 内存 | 释放者 | Latch |
+|---|---|---|---|---|
+| `join/mod.rs:136` | StackJob | 调用者栈帧 | 栈帧弹出(Rust 所有权) | SpinLatch |
+| `scope/mod.rs:542` | HeapJob | 堆 | 执行线程 `Box::from_raw` | CountLatch |
+| `spawn/mod.rs:92` | HeapJob | 堆 | 执行线程 `Box::from_raw` | 无(terminate_count 护池) |
+| `scope/mod.rs:564` | ArcJob | 堆(引用计数) | 最后一个执行线程 | CountLatch |
+| `broadcast/mod.rs:112` | StackJob × N | broadcast_in 栈帧的 Vec | 栈帧弹出 | CountLatch(共享) |
+| `registry.rs:525`(池外调用桥接,见 4.4) | StackJob | 调用线程栈帧 | 栈帧弹出 | LockLatch(经 LatchRef) |
+
+3. 重点核对 [rayon-core/src/scope/mod.rs:L656-L664](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/scope/mod.rs#L656-L664) 的 `heap_job_ref`:它先 `job_completed_latch.increment()` **再** `job.into_job_ref()`。思考顺序反了会发生什么(答案见练习 3)。
+
+**需要观察的现象 / 预期结果**:完成后你应当能不查源码说出「scope::spawn 的闭包内存由哪个线程释放」——答案:**恰好执行它的那个线程**,与派发线程无关。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**:`StackJob::execute` 里为什么要 `(*this.func.get()).take().unwrap()`,而不是直接调用闭包?
+
+**参考答案**:闭包存在 `UnsafeCell<Option<F>>` 里。`take()` 把 `Some(func)` 拿走留下 `None`,实现「按值消费 FnOnce」——`FnOnce` 的 call 消费 self,必须先从单元里搬出来。`unwrap()` 在这里不会失败:协议保证每个 JobRef 恰好执行一次,`Option` 为 `None` 意味着重复执行,属于违反协议的 bug。
+
+**练习 2**:`HeapJob::execute` 与 `ArcJob::execute` 只有几行之差,本质差异是什么?
+
+**参考答案**:所有权恢复方式——`Box::from_raw`(无计数,恢复即独占,drop 即释放)对 `Arc::from_raw`(引用计数减一,只有计数归零才释放)。这直接决定语义:HeapJob 的闭包是 `FnOnce() + Send`,只能执行一次;ArcJob 是 `Fn() + Send + Sync`,可以给每个线程各发一个 JobRef 各执行一次。broadcast 的「同一闭包全池各跑一遍」正是靠 Arc 形态实现的。
+
+**练习 3**:如果 `heap_job_ref` 把顺序反过来(先 `into_job_ref` 入队、再 `increment`),可能出什么错?
+
+**参考答案**:入队后任务可能立刻被别的线程抢走执行完,`execute_job_closure` 里的 `Latch::set` 让计数器减到 0 并 set 内部闩锁,scope 的 `complete` 便认为「所有任务已完成」继续往下走;而此时本线程的 `increment` 还没执行,计数器又被从 0 加回 1,之后再也没有人对称地减它——这个 scope 可能提前返回(借用的栈数据被提前释放),也可能永远等不完。「先计数、后让任务可见」是这类计数闩锁的标准写法;`increment` 里的 `debug_assert!(old_counter != 0)` 也表明计数从 0 回增被视为 bug。
+
+### 4.3 Latch 家族:一次 set,多种等待
+
+#### 4.3.1 概念说明
+
+Latch(闩锁)是 rayon 内部最底层的**单向一次性信号**:出生为 false,某刻被 `set()` 后永远为 true。它回答一个问题——「某件事发生了吗?」任务执行完 set 一下,等待者 probe 到 true 就继续。rayon 没有直接用 `Mutex`+`Condvar` 实现所有闩锁,因为最热路径(join 等 B)上锁的开销不可接受,于是演化出一个家族:
+
+| 类型 | 内部实现 | 等待方式 | 用在哪 |
+|---|---|---|---|
+| `CoreLatch` | `AtomicUsize` 四态 | 不直接等(是 SpinLatch 的芯) | 各种自旋闩的内核 |
+| `SpinLatch` | CoreLatch + registry 引用 | 等待者**自旋/帮工** | join 等 B |
+| `LockLatch` | `Mutex<bool>` + `Condvar` | 等待者**阻塞睡眠** | 池外线程桥接、线程启停 |
+| `OnceLatch` | CoreLatch(不带 registry 引用) | 被动(配 sleep 协议) | 工作线程终止标志 |
+| `CountLatch` | 计数器 + Stealing 或 Blocking | 由构造时的 owner 决定 | scope / broadcast |
+
+选型逻辑一句话:**等待者是池内工作线程就自旋帮工,是普通线程就阻塞睡眠,而「等 N 件事都完成」用计数闩**。
+
+#### 4.3.2 核心流程
+
+先看家族的共同协议([rayon-core/src/latch.rs:L9-L51](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/latch.rs#L9-L51) 的文档):
+
+- `set()` 恰好调用一次;`probe()` 可任意次;一旦 probe 到 true,set 之前的所有内存写入对 probe 之后可见(happens-before);
+- 部分(而非全部)Latch 支持 `wait()`;
+- `set()` 以 `*const Self` 为参数而非 `&self`——因为 set 可能让等待线程立刻醒来并析构这个 Latch 本身。
+
+CoreLatch 的四态状态机(它让「睡眠中的等待者」也能被原子地通知):
+
+```text
+                 get_sleepy (CAS)        fall_asleep (CAS)
+   UNSET(0) ─────────────────► SLEEPY(1) ─────────────────► SLEEPING(2)
+      │                            │                            │
+      │ set(): swap SET,           │ set(): swap SET,           │ set(): swap SET,
+      │ 返回 false(无需唤醒)       │ 返回 false(还没睡着)       │ 返回 true → 必须 notify!
+      ▼                            ▼                            ▼
+   SET(3) ←──────────────────────────────────────────────────────┘
+                  wake_up (CAS SLEEPING→UNSET, 睡眠失败回退)
+```
+
+妙处在于 `set` 的返回值:swap 出旧值是否为 SLEEPING,一次性告诉设置方「有没有一个睡着的线程需要我去唤醒」——判断与通知之间没有竞态窗口。
+
+#### 4.3.3 源码精读
+
+**Latch trait 与内存序契约**。
+
+- [rayon-core/src/latch.rs:L35-L51](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/latch.rs#L35-L51) trait 定义与 `set` 的 `*const Self` 签名;注释里的 WARNING 很有教育意义:set 会触发唤醒链,可能级联释放内存,**先读完要用的字段再 set**。
+- [rayon-core/src/latch.rs:L25-L34](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/latch.rs#L25-L34) 内存序要求两条:probe 可见 set 之前的全部效果;set 之后的下一次 probe 必须能看到。后者需要 SeqCst,链接指向 sleep README 的「tickle-then-get-sleepy」场景(下一讲展开)。
+
+**CoreLatch:四态原子**。
+
+- [rayon-core/src/latch.rs:L57-L77](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/latch.rs#L57-L77) 四个状态常量与 `CoreLatch` 结构。
+- [rayon-core/src/latch.rs:L90-L117](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/latch.rs#L90-L117) 三个仅由等待线程调用的转移:`get_sleepy`、`fall_asleep` 都是 CAS,失败即「set 恰好插进来了」,返回 false 让调用方别睡;`wake_up` 是入睡失败后的回退。
+- [rayon-core/src/latch.rs:L125-L135](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/latch.rs#L125-L135) `CoreLatch::set` 用 `swap(SET, SeqCst)` 并返回旧值是否为 SLEEPING;`probe` 用 `load(Acquire)`。这一对序型正好实现上面的 happens-before 契约。
+
+**SpinLatch:join 的闩锁**。
+
+- [rayon-core/src/latch.rs:L148-L185](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/latch.rs#L148-L185) 结构 = CoreLatch + `registry` 引用 + `target_worker_index` + `cross` 标志。`new` 记录「哪个线程在等我」;`cross` 变体用于跨线程池等待(4.4 详述)。
+- [rayon-core/src/latch.rs:L194-L225](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/latch.rs#L194-L225) `SpinLatch::set` 是全讲义最微妙的一段,请按注释顺序读:① cross 时先 `Arc::clone` 保 registry 活命,否则可能出现「对方醒了、registry 释放了、我还去 notify」的 use-after-free;② **先**读出 `target_worker_index`;③ 才调 `CoreLatch::set`——因为 set 一旦生效,等待线程可能瞬间醒来弹栈,`this` 立刻变成悬垂指针,此后一个字段都不能再读;④ 若返回 true(有线程睡着)才 notify。这就是 `set` 用 `*const Self` 的全部原因。
+
+**LockLatch:真·阻塞闩**。
+
+- [rayon-core/src/latch.rs:L229-L260](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/latch.rs#L229-L260) `Mutex<bool>` + `Condvar` 的教科书实现;`wait_and_reset` 在醒来后把 bool 重置为 false,使同一个闩锁可以复用(registry 的 thread_local 闩锁正是靠它反复使用,见 4.4)。
+- [rayon-core/src/latch.rs:L262-L271](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/latch.rs#L262-L271) `LockLatch::set`:锁住、置 true、`notify_all`。经典「while 循环防虚假唤醒」写在 wait 里。
+
+**OnceLatch:一次性终止闩**。
+
+- [rayon-core/src/latch.rs:L273-L317](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/latch.rs#L273-L317) 文档解释了它为何不实现 Latch trait 也不持有 registry 引用:`Registry` 拥有 `ThreadInfo`,`ThreadInfo` 拥有 terminate 闩锁,若闩锁再持有 `Arc<Registry>` 就构成循环引用。所以唤醒所需的 registry 与目标线程由 set 方在 [rayon-core/src/registry.rs:L594-L600](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/registry.rs#L594-L600) 的 `terminate()` 里显式传入——terminate 计数归零时,给每个线程的 terminate 闩锁逐个 `set_and_tickle_one`。
+- [rayon-core/src/registry.rs:L613-L641](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/registry.rs#L613-L641) `ThreadInfo` 三个闩锁一览:`primed`/`stopped` 用 LockLatch(等线程启停,发生在池外上下文),`terminate` 用 OnceLatch。
+
+**CountLatch:计数闩,scope 的心脏**。
+
+- [rayon-core/src/latch.rs:L324-L382](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/latch.rs#L324-L382) 结构 = `AtomicUsize` 计数器 + 二选一的 kind:`Stealing`(CoreLatch + registry + worker_index,给池内创建的 scope,等待者边等边帮工)或 `Blocking`(LockLatch,给池外线程创建的 scope,纯阻塞)。`with_count(n, owner)` 按 owner 是否为池线程选 kind——**同一个 CountLatch 类型,两种等待方式**。
+- [rayon-core/src/latch.rs:L384-L405](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/latch.rs#L384-L405) `increment`(spawn 一个任务前加一)与 `wait`(按 kind 分流到 `owner.wait_until` 或 `LockLatch::wait`)。
+- [rayon-core/src/latch.rs:L407-L430](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/latch.rs#L407-L430) `CountLatch::set`:`fetch_sub` 减计数,**只有减到 0 的那一次**(返回旧值为 1)才真正 set 内部闩锁并唤醒。与 SpinLatch::set 相同的「set 后 this 可能立即失效」警告再次出现。
+- 配对的使用点:[rayon-core/src/scope/mod.rs:L703-L718](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/scope/mod.rs#L703-L718) 每个任务闭包跑完(含 panic 被捕获后)都会 `Latch::set(&job_completed_latch)`;[rayon-core/src/scope/mod.rs:L679-L689](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/scope/mod.rs#L679-L689) scope 的 `complete` 在业务闭包结束后 `job_completed_latch.wait(owner)`——计数归零,scope 才允许返回。
+
+**LatchRef:为共享闩锁而生**。
+
+- [rayon-core/src/latch.rs:L432-L463](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/latch.rs#L432-L463) 包装 `*const L` 的智能指针。存在理由写在类型注释:给 `Latch::set` 传 `&L` 会附带「可解引用」(dereferenceable)优化承诺,而 broadcast 场景下 N 个任务共享同一个 CountLatch,任何一个 set 都可能让等待者醒来拆掉一切——`LatchRef` 切断这层承诺。broadcast 的 `StackJob::new(&f, LatchRef::new(&latch))` 与 registry 池外桥接的 `LatchRef::new(l)` 都在用它。
+
+#### 4.3.4 代码实践
+
+**实践目标**:验证「同一个 CountLatch,两种等待方式」这一设计。
+
+**操作步骤**(源码阅读型):
+
+1. 读 [rayon-core/src/broadcast/mod.rs:L107-L121](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/broadcast/mod.rs#L107-L121):`CountLatch::with_count(n_threads, current_thread)`——在池内调用 broadcast 时 `current_thread` 是 `Some`,闩锁选 Stealing;从主线程直接调用则可能为 `None`,选 Blocking。
+2. 追 `latch.wait(current_thread)` 一行进入 [latch.rs:L390-L405](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/latch.rs#L390-L405),确认两条分支分别落到 `owner.wait_until`(自旋帮工)与 `LockLatch::wait`(睡眠)。
+3. 自查:join 用的是 CountLatch 吗?(不是,join 只等一件事,用 SpinLatch;CountLatch 专属「等 N 件事」。)
+
+**需要观察的现象 / 预期结果**:你能画出「任务完成 → CountLatch::set → fetch_sub 归零 → 内部 CoreLatch/ LockLatch set → 等待者醒」的完整链路图,并标注每一步发生在哪个线程。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**:`SpinLatch` 相比裸 `CoreLatch` 多存的三个字段各解决什么问题?
+
+**参考答案**:`registry` 引用——set 后要唤醒的线程可能睡在该 registry 的睡眠协议里,需要调 `notify_worker_latch_is_set`;`target_worker_index`——精确唤醒「在等这个闩锁的那一个线程」,而不是吵醒全池;`cross` 标志——跨线程池等待时,set 方先 `Arc::clone` 保住 registry 的生命周期,防止「对方醒了并释放 registry,而我还要去 notify 它」的 use-after-free。
+
+**练习 2**:为什么 `OnceLatch` 不像 SpinLatch 那样自己持有 registry 引用?
+
+**参考答案**:循环引用。terminate 闩锁存放在 `Registry` 拥有的 `ThreadInfo` 里,若闩锁再持 `Arc<Registry>`,引用计数永不归零,registry 永远不释放。解法是把 registry 与目标线程下标改为 `set_and_tickle_one` 的参数,由调用方(Registry 自己)在 set 时临时提供——类型签名上则体现为不实现 Latch trait(它从不出现在泛型 Latch 上下文中)。
+
+**练习 3**:CoreLatch 的 `set` 为什么必须用 `SeqCst` 的 swap,`Release` 不够吗?
+
+**参考答案**:Release 只保证「本线程 set 之前的写入」对看到 SET 的线程可见,但不保证多线程间对**多个原子变量**的修改有一致的观察顺序。latch 文档指出的「tickle-then-get-sleepy」场景里,设置方先 tickle 睡眠计数器再 set 闩锁、等待方先 probe 闩锁再决定入睡,若两次原子操作间没有全序保证,可能出现「设置方以为已经通知、等待方同时决定睡着」的丢失唤醒,线程池从此卡死。SeqCst 给所有 SeqCst 操作一个全局全序,消除这类交错。详细展开在下一讲(u5-l5)sleep 协议。
+
+### 4.4 自旋等待与阻塞等待:两条路径
+
+#### 4.4.1 概念说明
+
+同一个问题「线程如何在 Latch 上等待」有两条截然不同的实现:
+
+- **路径 A(池内,自旋帮工)**:`WorkerThread::wait_until`——先弹本地队列的任务做,再去偷别人的,多轮找不到工作才经 sleep 协议真正入睡。等待的线程同时是生产力。
+- **路径 B(池外,阻塞睡眠)**:`LockLatch::wait`——在 Condvar 上睡死,直到被 notify。等待的线程零 CPU 消耗,但也做不了任何事。
+
+选择标准只有一个:**你是不是池里的工作线程**。是,就有队列可弹、有任务可偷,自旋帮工几乎总是优于睡死;不是,就没有任何「活」可干,睡死是唯一不浪费 CPU 的选择。而且池内线程若也睡死在 LockLatch 上,极端情况下所有池线程都在等任务却没人醒着执行任务,直接死锁。
+
+#### 4.4.2 核心流程
+
+`wait_until_cold` 的「帮工循环」骨架(删减自源码):
+
+```text
+while !latch.probe():
+    if 本地队列有任务: 执行它; continue          # 第一步:先干自己的活
+    进入空闲状态:
+        while !latch.probe():
+            if 找到工作(偷别队 / 全局注入队列):   # 第二步:偷别人的活
+                退出空闲; 执行; 回到外层循环
+            else:
+                no_work_found(...)               # 第三步:退避若干轮后真正入睡
+    # probe 到 true:退出
+```
+
+入睡不是一步完成的:get_sleepy → fall_asleep → 在 condvar 上 wait,每一步都通过 CAS 再确认闩锁仍未 set,任何一步发现「其实已经 set 了」就立即放弃入睡回去干活——这就是 CoreLatch 四态存在的意义:**把「准备睡」也做成可被打断的原子状态转移**,彻底堵死丢失唤醒。
+
+#### 4.4.3 源码精读
+
+**分流点:in_worker**。
+
+- [rayon-core/src/registry.rs:L500-L511](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/registry.rs#L500-L511) 三分支:当前线程不是任何池的成员(`WorkerThread::current()` 为 null)→ `in_worker_cold`(阻塞路径);属于**另一个**池 → `in_worker_cross`(跨池路径);属于本池 → 直接就地执行。join 就是包着这个闭包跑的,所以「join 从哪里调用」决定了走哪条路。
+
+**路径 B:池外线程的阻塞桥接**。
+
+- [rayon-core/src/registry.rs:L514-L538](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/registry.rs#L514-L538) `in_worker_cold`:整个闭包(包括 join 的 A!)包成 `StackJob`,闩锁是**线程本地的** `thread_local!(static LOCK_LATCH: LockLatch)`,注入到池的全局注入队列;当前线程在 `job.latch.wait_and_reset()` 上睡死,醒来直接 `into_result`。`wait_and_reset` 的复用语义在这里兑现:同一个 thread_local 闩锁服务本线程此后所有的池外调用。注意一个反直觉的推论:**主线程调用 `join` 时,连闭包 A 都不在主线程上执行**——A 随整个闭包进了池,主线程只负责睡与醒。
+
+**路径 A:池内线程的自旋帮工**。
+
+- [rayon-core/src/registry.rs:L769-L817](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/registry.rs#L769-L817) `wait_until` 先 probe 一把(fast path),未 set 才进 `wait_until_cold`;`wait_until_cold` 开头的 `AbortIfPanic` 守卫注释直白:这段代码若 panic,其他代码可能基于「闩锁已 set」的假设访问坏内存,宁可 abort。循环体即 4.4.2 的骨架:本地任务优先,然后 `start_looking` 进入空闲、`find_work` 找活、`no_work_found` 逐步退避直至入睡。
+- 与 sleep 协议的衔接在 [rayon-core/src/sleep/mod.rs:L118-L194](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/sleep/mod.rs#L118-L194):`get_sleepy`(L126)、`fall_asleep`(L136)失败即「闩锁恰好 set 了,别睡,回去干活」;真正睡下是 L186-L188 的 `condvar.wait`;醒来后 `latch.wake_up()`(L193)把状态机复位。完整睡眠协议留给 u5-l5。
+
+**路径 A':跨池等待**。
+
+- [rayon-core/src/registry.rs:L540-L563](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/registry.rs#L540-L563) `in_worker_cross`:A 池的线程要在 B 池上执行闭包。闭包照旧包成 StackJob 注入 B 池,但当前线程**不睡 LockLatch**,而是拿着 `SpinLatch::cross` 调 `wait_until` 继续帮 A 池干活——这就是 SpinLatch 的 cross 变体存在的理由(4.3.3 已读它的 set)。跨池死锁的风险(u7-l2 的主题)也因此缓解了一层。
+
+**两条路径汇总表**:
+
+| 场景 | 入口 | Latch | 等待方式 |
+|---|---|---|---|
+| 池内 `join` 等 B | `join_context` 认领循环 → `wait_until` | SpinLatch | 自旋帮工 |
+| 主线程调 `join`/`install` | `in_worker_cold` | thread_local LockLatch | condvar 阻塞 |
+| A 池线程在 B 池执行 | `in_worker_cross` | SpinLatch::cross | 帮 A 池干活(自旋) |
+| 池内 `scope` 等收尾 | CountLatch(Stealing) → `wait_until` | CoreLatch | 自旋帮工 |
+| 主线程 `scope` | CountLatch(Blocking) → `LockLatch::wait` | LockLatch | condvar 阻塞 |
+| 工作线程等终止 | `wait_until_out_of_work` → `wait_until(terminate)` | OnceLatch | 自旋帮工([registry.rs:L819-L833](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/registry.rs#L819-L833)) |
+
+#### 4.4.4 代码实践
+
+**实践目标**:用可运行的示例程序,验证「join 在池外走阻塞路径、在池内走自旋帮工路径」。
+
+**操作步骤**:
+
+1. 新建独立 Cargo 项目,`cargo add rayon`,写入以下程序(示例代码):
+
+```rust
+use rayon::{join_context, ThreadPoolBuilder};
+use std::thread;
+use std::time::{Duration, Instant};
+
+fn where_am_i(tag: &str, migrated: bool) {
+    println!("{tag:>8} 运行于 {:?} (migrated={migrated})",
+        thread::current().id());
+}
+
+fn main() {
+    println!("主线程 id = {:?}", thread::current().id());
+
+    // 情形 1:主线程不是池成员 —— in_worker_cold 阻塞路径
+    // 预期:A、B 都在池线程上执行(A 随整个闭包被注入池),主线程全程睡在 LockLatch 上
+    let start = Instant::now();
+    let _ = join_context(
+        |_| {
+            // 让 A 慢一点,给 B 制造被窃取的机会
+            while start.elapsed() < Duration::from_millis(50) {}
+            where_am_i("A", false);
+        },
+        |ctx| where_am_i("B", ctx.migrated()),
+    );
+
+    // 情形 2:在池内调用 join —— install 之后当前线程就是池线程
+    // 预期:C 与 install 同线程(就地执行);D 可能被其他线程偷走(migrated=true)
+    let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+    pool.install(|| {
+        where_am_i("install", false);
+        let start = Instant::now();
+        let _ = join_context(
+            |_| {
+                while start.elapsed() < Duration::from_millis(50) {}
+                where_am_i("C", false);
+            },
+            |ctx| where_am_i("D", ctx.migrated()),
+        );
+    });
+}
+```
+
+2. 用 `cargo run --release` 运行多次;再用 `RAYON_NUM_THREADS=1 cargo run --release` 跑一次。
+
+**需要观察的现象**:
+
+- 情形 1:A、B 的线程 id 与主线程**不同**(证明整个 join 闭包被 `in_worker_cold` 搬进了池,主线程阻塞);
+- 情形 2:install 与 C 的 id 相同;D 的 migrated 在多核机器上有时为 true(B/D 被偷时 set 闩锁的正是窃取线程);
+- `RAYON_NUM_THREADS=1` 时:情形 1 的 A、B 出现在**同一个**池线程上且顺序固定(唯一的池线程顺序执行整个 StackJob),主线程只能干等——这正是「池外等待 = 阻塞」的极端展示。
+
+**预期结果**:输出与上述三条吻合。运行期间另开终端用 `top -H` 观察,情形 1 的主线程 CPU 占用应接近 0%(阻塞在 condvar,不忙等)。具体的 migrated 值与机器负载相关,「待本地验证」——不同机器上 D 被偷的频率会不同。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**:主线程调用 `join` 时,闭包 A 在哪个线程执行?为什么?
+
+**参考答案**:在池的某个工作线程上。`join_context` 的整个闭包体(包括「执行 A、等待 B」的逻辑)被 `in_worker_cold` 包成一个 StackJob 注入池,主线程睡在 thread_local 的 LockLatch 上等结果。所以 A 不在主线程跑——这与很多人的直觉相反。
+
+**练习 2**:假设把 `in_worker_cold` 的 LockLatch 换成忙等循环 `while !latch.probe() {}`,功能仍正确吗?损失什么?
+
+**参考答案**:功能上仍正确(probe 的 Acquire 语义保证能看到结果),损失的是 CPU 与功耗:主线程在等待期间烧满一个核却不做任何有用功。反之池内线程的 wait_until 在等待期执行的都是真实任务。这就是「等待者有没有活可干」决定等待方式的分野。
+
+**练习 3**:`wait_until_cold` 最外层的 `AbortIfPanic` 守卫,与 `StackJob::execute` 里的那个,防御的是同一种风险吗?
+
+**参考答案**:是同一种风险的两处实例:rayon 框架代码自身(而非用户闭包)发生 panic 时,内部不变量(结果槽、闩锁状态、睡眠状态)可能已被破坏,继续 unwind 会让其他线程基于错误假设访问内存,所以宁可打印一句错误并 `abort` 整个进程。区别只在位置:execute 保护「执行任务并 set 闩锁」这段,wait_until_cold 保护「循环找活 + 操作睡眠状态机」这段。用户闭包的 panic 则被 `halt_unwinding` 正常捕获搬运(u6-l4 展开)。
+
+## 5. 综合实践
+
+把本讲三个模块串起来,完成一份「一次 `scope::spawn` 的全程追踪报告」:
+
+1. **追踪对象**:
+
+```rust
+// 示例代码
+use rayon::scope;
+
+fn main() {
+    let mut data = vec![1, 2, 3];
+    scope(|s| {
+        s.spawn(|_| {
+            data[0] += 10; // 借用主线程栈上的 data
+        });
+    });
+    println!("{data:?}");
+}
+```
+
+2. **按时间顺序回答八个问题**(每题都要给出源码文件与行号的永久链接作为证据):
+   - 1)用户闭包被包进了哪种 Job?在哪一行包装?([scope/mod.rs:L542](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/scope/mod.rs#L542))
+   - 2)这个 Job 的内存在栈还是堆?由谁分配?
+   - 3)它如何变成 JobRef?闭包里包的那层「执行业务 + 通知完成」的外壳在哪两行?
+   - 4)`heap_job_ref` 为什么先 `increment` 再 `into_job_ref`?
+   - 5)任务入队走的是 `inject_or_push`——从池内 spawn 与从主线程 spawn 有何不同?
+   - 6)执行线程弹出 JobRef 后,`HeapJob::execute` 的两行代码各自做什么?堆内存何时释放?
+   - 7)任务完成后,CountLatch 的计数如何变化?第几次 `set` 才真正唤醒等待者?
+   - 8)主线程(池外)在 `complete` 的 `job_completed_latch.wait(owner)` 上走的是自旋还是阻塞?为什么?
+3. **验证**:把 4.4.4 的程序扩展——在 spawn 的闭包里打印线程 id,确认执行者可能是任意池线程;再用 `ThreadPoolBuilder` 建一个 2 线程池并经 `pool.install` 进入 scope,对比 CountLatch 的 owner 分流是否改变了等待行为。
+
+预期成果:一份能自圆其说的调用链文档,从 `s.spawn` 一行代码出发,贯通「闭包 → HeapJob → JobRef → 队列 → 执行 → CountLatch 归零 → scope 返回」全程,并明确每一步的内存归属。
+
+## 6. 本讲小结
+
+- **JobRef = 裸指针 + execute 函数指针**的手工类型擦除,固定 16 字节、可跨线程入队;它必须恰好执行一次,否则 HeapJob/ArcJob 的堆内存泄漏。
+- **三种任务形态按内存归属分野**:StackJob 活在调用者栈帧(零分配,靠「等待者不返回」保命),HeapJob 用 Box 转移所有权(执行者即释放者),ArcJob 用引用计数支持全池各执行一次;JobFifo 则让「队列本身」也成为一个 Job。
+- **Latch 是单向一次性信号**,协议为「set 恰好一次、probe 任意次、set 后效果全可见」;`set` 以 `*const Self` 为参数,因为 set 可能让等待者立刻醒来析构闩锁自身。
+- **CoreLatch 的 UNSET/SLEEPY/SLEEPING/SET 四态**把「准备入睡」做成可打断的原子转移,set 的 swap 返回值一次性回答「有没有睡着的线程要唤醒」;SpinLatch 在其上加精确唤醒,LockLatch 走 Mutex+Condvar,OnceLatch 为避免循环引用不持有 registry,CountLatch 用计数实现「等 N 件事」。
+- **等待方式由等待者身份决定**:池内线程 `wait_until` 自旋帮工(先本地后偷窃,实在无事才入睡),池外线程 `in_worker_cold` 睡在 thread_local 的 LockLatch 上(连闭包 A 都被搬进池执行),跨池线程 `in_worker_cross` 帮自己的池干活。
+- 主线程调用 `join` 时 A 不在主线程执行——这是本讲最反直觉、也最能检验你是否读懂两条路径的事实。
+
+## 7. 下一步学习建议
+
+本讲我们多次在 CoreLatch 的四态边界停下脚步:「真正入睡」「唤醒通知」「jobs event counter」都还没有展开——这正是下一讲 **u5-l5 睡眠与唤醒协议**的主题:研读 `rayon-core/src/sleep/` 模块与它的 README,理解 `AtomicCounters` 维护的不变量、睡眠状态机的完整转移条件,以及 SeqCst 在「tickle-then-get-sleepy」场景里堵死丢失唤醒的原理。在那之前,建议你先自己通读一遍 [rayon-core/src/sleep/README.md](https://github.com/rayon-rs/rayon/blob/ee0a00bdb1ab039e178a215ad5712fb7fa58e58f/rayon-core/src/sleep/README.md),带着本讲建立的「四态 + notify_worker_latch_is_set」词汇去读,会顺畅得多。若想先离开内核层换换视角,也可以跳去 u6-l1(scope)与 u6-l2(spawn),它们会大量复用本讲的 HeapJob、ArcJob 与 CountLatch。
