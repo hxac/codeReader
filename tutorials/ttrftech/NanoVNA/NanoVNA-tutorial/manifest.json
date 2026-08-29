@@ -1,0 +1,670 @@
+{
+  "head": "d02db797a7032822137882f8f8a6c4ec21f064cd",
+  "project": "NanoVNA",
+  "rationale": "NanoVNA 是一份基于 STM32F072（Cortex-M0）+ ChibiOS RTOS 的矢量网络分析仪固件，核心难点在于『射频硬件原理 + 数字信号处理 + 嵌入式 UI』三条线交织。因此大纲按数据流向组织：先让读者建立项目全貌（是什么、怎么编译烧录、代码怎么组织），再沿测量主链路从信号源（si5351）→ 采集（tlv320aic3204 + I2S/DMA）→ 正交解调（dsp.c）→ 扫频线程（Thread1/sweep）逐层深入；随后进入仪器特有的校准误差模型（SOL/Ed-Es-Er-Et-Ex）、掉电存储（flash.c）与时域变换（FFT）；再学习显示与交互子系统（ili9341 驱动、轨迹绘制、markmap 脏矩形重绘、触摸菜单）；最后到达扩展层（USB CDC shell、Python 上位机、RTOS 内存优化与二次开发实战）。讲义间依赖关系模拟真实阅读源码的顺序，入门层不要求读者具备硬件，实践任务大量采用『在 PC 上用 C/Python 复现固件算法』的方式，使没有 NanoVNA 硬件的读者也能动手验证，同时保留烧录到真机的进阶任务。项目约 15 个根目录源码文件、规模中等，故安排 5 个单元共 22 篇讲义。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "order": 1,
+      "title": "初识 NanoVNA：项目定位、构建与代码入口",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 NanoVNA 是什么、能测量哪些量（S11/S21）",
+            "对照框图说出固件各源码文件对应的硬件模块",
+            "理解以 nanovna.h 为中心的模块间接口约定"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README 与文档",
+            "硬件框图",
+            "nanovna.h 公共头文件"
+          ],
+          "order": 1,
+          "practice_task": "在 PC 上通读 README.md 与 nanovna.h，编写一个 30 行左右的 Python 脚本 print_modules.py：用字典列出『源码文件 → 硬件模块 → 职责一句话』（如 si5351.c → 时钟发生器 → 生成激励信号），并对照 doc/nanovna-blockdiagram.png 自查是否遗漏模块。",
+          "source_files": [
+            "README.md",
+            "nanovna.h",
+            "doc/nanovna-blockdiagram.png"
+          ],
+          "title": "NanoVNA 是什么：项目定位与硬件全景",
+          "topic": "介绍矢量网络分析仪的基本概念（反射系数、S 参数）以及 NanoVNA 的硬件组成：STM32F072 主控、si5351 时钟源、电桥、tlv320aic3204 音频编解码器与 LCD；对照仓库目录说明每个源码文件对应的硬件模块。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-build-and-flash.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "理解 Makefile 如何拼装 ChibiOS 启动代码、HAL 与业务源码",
+            "能用 docker 或本地工具链完成一次完整编译",
+            "掌握 DFU 模式进入与固件烧录命令"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Makefile 构建系统",
+            "ChibiOS 子模块",
+            "CircleCI 流水线"
+          ],
+          "order": 2,
+          "practice_task": "使用 docker 镜像 edy555/arm-embedded:8.2 执行 make 完成编译，记录 arm-none-eabi-size 输出的 Flash/RAM 占用；然后通过 make VERSION=\"mytest-1.0\" 重新编译，用 strings 在 build/ch.elf 中确认自定义版本号已编入（有真机的读者可进一步 make flash 烧录并在 Config→Version 菜单中验证）。",
+          "source_files": [
+            "Makefile",
+            "README.md",
+            ".circleci/config.yml",
+            "STM32F072xB.ld",
+            "prog.sh"
+          ],
+          "title": "搭建工具链：编译、烧录与 CI 流程",
+          "topic": "讲解 Makefile 的结构：ChibiOS 子模块、NANOVNA_STM32_F072 板级文件、链接脚本、arm-none-eabi 工具链、docker 构建方式以及 DFU 烧录和 CircleCI 自动发布流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-firmware-entry-and-init.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "梳理 halInit 到主循环之间的完整初始化调用链",
+            "理解 sweep 线程（Thread1）与主线程（shell）的分工",
+            "找到固件中所有后续学习的阅读入口"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "main() 初始化序列",
+            "Thread1 扫频线程",
+            "shell 主循环"
+          ],
+          "order": 3,
+          "practice_task": "阅读 main() 后编写一个 host 端 C 程序 init_trace.c：用 printf 依次打印 main() 中 14 个初始化调用的名称与顺序（i2cStart、si5351_init、sduStart、ili9341_init、config_recall、caldata_recall、dacStart、update_frequencies、tlv320aic3204_init、i2sStart、ui_init、plot_init、redraw_frame、chThdCreateStatic），并在每行注释说明该步初始化了哪个外设。",
+          "source_files": [
+            "main.c",
+            "nanovna.h",
+            "NANOVNA_STM32_F072/board.h"
+          ],
+          "title": "固件入口：main() 初始化流程与线程模型",
+          "topic": "逐行解读 main()：ChibiOS 初始化、I2C/si5351、USB CDC、LCD、配置恢复、DAC、I2S、UI 与绘图初始化，以及 sweep 线程 Thread1 与 shell 主循环的关系；同时介绍 chconf/halconf/mcuconf 三个配置头文件的作用。"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "level": "intermediate",
+      "order": 2,
+      "title": "测量核心链路：从信号源到复数 gamma",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l1-measurement-principle.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "理解 5kHz 频偏（FREQUENCY_OFFSET）如何把射频测量搬到音频频段",
+            "说明 CH0 反射与 CH1 传输两路测量的含义",
+            "建立 sweep 主循环的整体心智模型"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "sweep() 扫频循环",
+            "tlv320aic3204_select 通道切换",
+            "采样函数指针 sample_func"
+          ],
+          "order": 1,
+          "practice_task": "在 PC 上用 Python 写函数 vswr_from_gamma(g)：由复数反射系数计算驻波比 VSWR=(1+|Γ|)/(1-|Γ|)；再模拟理想开路（Γ=1）、短路（Γ=-1）、50Ω 负载（Γ=0）三种情况的 |Γ| 与 VSWR，理解后续校准讲义为什么要测这三种标准。",
+          "source_files": [
+            "main.c",
+            "nanovna.h",
+            "README.md"
+          ],
+          "title": "VNA 测量原理与 sweep() 主循环",
+          "topic": "解释 NanoVNA 的测量原理：电桥比较参考信号与被测信号，本振与激励相差 5kHz 使中频落在音频范围，从而能用音频 codec 采样；结合 sweep() 源码讲解逐频点测量的步骤。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-si5351-clock-generation.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "理解 PLL + Multisynth 分频如何合成任意频率",
+            "说出 1-100M/100-150M/150-300M 三个频段的策略差异",
+            "理解谐波模式下 mul/omul 与 FREQ_HARMONICS 阈值的关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "si5351_set_frequency 频率设置",
+            "si5351_get_band 频段选择",
+            "寄存器写入与 I2C 传输"
+          ],
+          "order": 2,
+          "practice_task": "把 si5351_get_band 与 si5351_set_frequency 中的 mul/omul/rdiv 选择逻辑翻译成 Python 函数 band_plan(freq)：输入频率返回 (band, mul, omul, rdiv)，对 50k/1M/10M/120M/200M/400M/1G/2.6G 打印结果，并与源码注释中的频段表逐行核对。",
+          "source_files": [
+            "si5351.c",
+            "si5351.h",
+            "main.c"
+          ],
+          "title": "si5351 信号源：频段划分与谐波模式",
+          "topic": "解读 si5351.c：如何通过 I2C 配置时钟发生器的 PLL 与 Multisynth 分频器，三个频段的策略，以及超过 300MHz 后利用 3/5/7/9/11 次谐波扩展到 2.7GHz 的原理，CLK0 带频偏、CLK1 激励、CLK2 固定 8MHz 的分工。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l3-codec-and-i2s-dma.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "理解 codec 两个通道与 REFLECT/TRANSMISSION 的对应关系",
+            "说明双缓冲 rx_buffer 与 I2S 回调的触发时机",
+            "理解带宽设置与累计次数的关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "tlv320aic3204_init 编解码器初始化",
+            "I2SConfig 与 i2s_end_callback",
+            "dsp_start/dsp_wait 同步"
+          ],
+          "order": 3,
+          "practice_task": "编写 Python 脚本计算：48kHz 采样率下 5ms 对应多少样本（验证 AUDIO_BUFFER_LEN=96）；再模拟 i2s_end_callback 的 wait_count 递减与 accumerate_count 累计过程，打印设置 bandwidth=4（10Hz）时一次 dsp_wait 需要经历多少次回调，与 bandwidth_accumerate_count 表互相印证。",
+          "source_files": [
+            "tlv320aic3204.c",
+            "main.c",
+            "nanovna.h"
+          ],
+          "title": "tlv320aic3204 编解码器与 I2S DMA 采集",
+          "topic": "讲解音频编解码器的寄存器初始化序列、增益与通道切换（tlv320aic3204_select），以及 I2S 双缓冲 DMA 如何把 48kHz 立体声样本搬进 rx_buffer 并在 i2s_end_callback 中触发 DSP；介绍 5 种带宽档位与 accumerate_count 的对应关系。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-dsp-iq-demodulation.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "理解 sincos_tbl 本质是 5kHz 中频的正交本振表",
+            "掌握多周期相干累积实现窄带滤波的原理",
+            "读懂复数除法 (samp/ref) 得到归一化 gamma 的过程"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "dsp_process 正交累积",
+            "sincos_tbl 本振表",
+            "calculate_gamma 复数除法"
+          ],
+          "order": 4,
+          "practice_task": "把 dsp.c 中 sincos_tbl、dsp_process、calculate_gamma 提取成独立的 host 端 C 文件（用 stdio 打印结果），构造 48 点合成信号：samp=0.5*ref（同相）与 samp=0.5j*ref（正交）两种情况，编译运行并验证输出的 gamma 分别约为 (0.5, 0) 与 (0, 0.5)。",
+          "source_files": [
+            "dsp.c",
+            "nanovna.h",
+            "main.c"
+          ],
+          "title": "dsp.c：数字正交解调与 gamma 计算",
+          "topic": "剖析 dsp_process：用 48 点 sincos_tbl 对参考和采样两路 16bit 样本做数字混频与累加（等效锁相放大），再由 calculate_gamma 做复数除法得到反射/传输系数；解释 STATE_LEN/SAMPLE_LEN 与频偏 5kHz 的对应关系。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u2-l4"
+          ],
+          "filename": "u2-l5-sweep-thread-and-concurrency.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "画出 sweep 线程一次完整迭代的状态流转图",
+            "理解 sweep_mode 标志与 break_on_operation 响应 UI 的机制",
+            "理解操作与测量的并发协作模型"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Thread1 主循环",
+            "sweep() 测量流程",
+            "ui_process 与 redraw_request"
+          ],
+          "order": 5,
+          "practice_task": "给 sweep() 中每个阶段（set_frequency、CH0 测量、CH1 测量、误差修正）加上基于 chVTGetSystemTimeX 的耗时统计并 shell_printf 输出（可参考 nanovna.h 中 START_PROFILE/STOP_PROFILE 宏的写法），烧录后用 scan 命令观察 101 点扫频中各阶段耗时占比。",
+          "source_files": [
+            "main.c",
+            "nanovna.h",
+            "chconf.h"
+          ],
+          "title": "扫频线程：Thread1 主循环与并发协作",
+          "topic": "分析 Thread1 的永久循环：SWEEP_ENABLE/SWEEP_ONCE 控制、shell_function 的跨线程命令执行、ui_process 处理输入、sweep 完成后 plot_into_index 与 draw_all 的绘制流水线，以及 __WFI 低功耗等待。"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "order": 3,
+      "title": "数据、校准与持久化",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u3-l1-frequency-configuration.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "掌握 ST_START/ST_STOP/ST_CENTER/ST_SPAN/ST_CW 五种设定模式",
+            "理解 set_frequencies 的整数误差扩散算法",
+            "理解频率变化如何联动 update_grid 与 marker 索引"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "set_sweep_frequency/get_sweep_frequency",
+            "set_frequencies 频点生成",
+            "update_frequencies 联动刷新"
+          ],
+          "order": 1,
+          "practice_task": "用 Python 复现 set_frequencies 的误差扩散算法（start=50000, stop=900000000, points=101），并与 numpy.linspace 结果逐点对比，打印最大绝对误差；再复现 update_marker_index，验证给定 marker 频率落在两个频点之间时如何选择较近的索引。",
+          "source_files": [
+            "main.c",
+            "nanovna.h"
+          ],
+          "title": "频率配置：start/stop、center/span 与频点表",
+          "topic": "解读 set_sweep_frequency 对五种频率设定模式的处理与边界钳制、set_frequencies 用误差扩散法生成整数频点表、update_frequencies 对 marker 索引和网格的联动更新，以及 cmd_sweep/cmd_scan 两个 shell 命令的用法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u3-l2-calibration-error-model.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "说出 Ed/Es/Er/Et/Ex 五个误差项的物理含义",
+            "理解 cal_collect 如何保存标准件测量数据",
+            "掌握开路容性模型在 eterm_calc_es 中的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "cal_collect 数据采集",
+            "cal_done 误差项求解",
+            "eterm_calc_es/er/et 公式实现"
+          ],
+          "order": 2,
+          "practice_task": "用 Python 复现一端口 SOL 校准：构造带已知误差（Ed=0.05, Es=0.1, Er=0.9）的仿真测量值，按 cal_done 中 eterm_calc_es/eterm_calc_er 的公式（含 50fF 开路模型）反解误差项，验证求解值与真值一致；再模拟只测 OPEN 时的降级路径（Es=0）。",
+          "source_files": [
+            "main.c",
+            "nanovna.h"
+          ],
+          "title": "SOL 校准：一端口/二端口误差模型",
+          "topic": "讲解校准的数学模型：直接性 Ed、源匹配 Es、反射跟踪 Er、传输跟踪 Et、隔离 Ex；解读 cal_collect 如何采集 LOAD/OPEN/SHORT/THRU/ISOLN 数据，cal_done 中 eterm_calc_es/er/et 的复数运算与开路 50fF 电容模型的修正。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-cal-apply-and-interpolation.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解 apply_error_term_at 的逐点修正公式（注意 Et 存倒数）",
+            "理解 CALSTAT_* 状态位与 APPLY/INTERPOLATED 标志",
+            "掌握跨谐波边界的插值特殊处理"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "apply_error_term_at 误差修正",
+            "apply_edelay_at 电延迟",
+            "cal_interpolate 插值"
+          ],
+          "order": 3,
+          "practice_task": "用 Python 实现 cal_interpolate 的等价函数：给定旧频点表上的 5 组误差项和新频点表，输出插值结果；构造一个跨越 300MHz 谐波阈值的例子，验证代码在谐波模式边界处取 k1=0 或 1 而不是线性过渡的效果。",
+          "source_files": [
+            "main.c",
+            "nanovna.h"
+          ],
+          "title": "误差修正应用与校准插值",
+          "topic": "解读 sweep 中每个频点的 apply_error_term_at 修正公式（注意 Et 为提高效率存了倒数）、apply_edelay_at 的电延迟相位旋转，以及当扫描范围与校准范围不一致时 cal_interpolate 如何对 5 组误差项做线性插值并处理谐波模式边界。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l4-flash-persistence.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "掌握 properties_t/config_t 的字段布局与设计意图",
+            "理解 flash_program_half_word 与页擦除的底层操作",
+            "理解 checksum + magic 的数据有效性校验链"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "caldata_save/caldata_recall",
+            "config_save/config_recall",
+            "flash 页擦除与半字编程"
+          ],
+          "order": 4,
+          "practice_task": "编写 Python 脚本按 properties_t 的字段顺序和类型计算其大小（用 struct 模块模拟 uint32/uint16/float 排列），验证总量约 0x1200 字节并解释 _reserved[49] 的对齐作用；再对照 STM32F072xB.ld 说明为什么保存区放在 0x08018000 之后的 5 个 0x1800 间隔槽位。",
+          "source_files": [
+            "flash.c",
+            "nanovna.h",
+            "STM32F072xB.ld"
+          ],
+          "title": "flash.c：配置与校准槽的掉电保存",
+          "topic": "解读 flash.c 的直接闪存编程（不经文件系统）：config_t 全局配置与 5 个 properties_t 校准槽的地址布局、checksum 校验、caldata_save/caldata_recall 的读写与失败回退、clear_all_config_prop_data 的擦除逻辑。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l5-time-domain-transform.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "理解带通/低通冲击/低通阶跃三种时域模式的频域条件",
+            "掌握 kaiser 窗与 bessel0 的实现",
+            "理解最近提交的 wincorr 零填充损耗补偿因子"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "transform_domain 时域变换",
+            "fft.h 反变换",
+            "kaiser_window/bessel0 窗函数"
+          ],
+          "order": 5,
+          "practice_task": "用 numpy 复现 transform_domain：对 202 点模拟 S11 数据补零到 256 点，分别用 beta=0/6/13 的 kaiser 窗做 IFFT，计算窗补偿因子并与源码中 2.01/2.92 两个常数对比；再用 scipy 或自写的 chirp-z / 解卷积实现低通阶跃模式，画出距离域响应。",
+          "source_files": [
+            "main.c",
+            "fft.h"
+          ],
+          "title": "时域变换：FFT、Kaiser 窗与窗口损耗补偿",
+          "topic": "解读 transform_domain：带通与低通（冲击/阶跃）模式的频率数据处理、fft.h 中 Nayuki 的 radix-2 FFT/IFFT 实现、kaiser_window/bessel0 窗函数，以及最新提交中 wincorr 对零填充（202→256 点）和窗函数损耗的幅度补偿。"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "order": 4,
+      "title": "显示与人机交互",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u4-l1-ili9341-lcd-driver.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "理解 SPI 帧格式命令与 __USE_DISPLAY_DMA__ 的作用",
+            "掌握 spi_buffer 双缓冲与 bulk 传输接口",
+            "理解 5x7 点阵字体与 20x22 数字字体的编码方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ili9341_init 初始化",
+            "ili9341_bulk/fill 像素传输",
+            "drawstring/drawfont 字体渲染"
+          ],
+          "order": 1,
+          "practice_task": "在固件中新增一个练习用的 shell 命令 grid_test：调用 ili9341_fill 在屏幕四角画四个不同颜色（用 RGB565 宏）的 20x20 方块，并用 ili9341_drawstring 在中心显示自己的标识字符串，编译烧录后通过串口触发并观察显示效果。",
+          "source_files": [
+            "ili9341.c",
+            "nanovna.h",
+            "Font5x7.c",
+            "numfont20x22.c"
+          ],
+          "title": "ili9341 LCD 驱动：SPI、DMA 与字体渲染",
+          "topic": "解读 ili9341.c：SPI 初始化序列、ili9341_bulk/fill 的像素块传输、2048 像素 spi_buffer 的作用、DMA 传输加速、RGB565 字节序反转宏，以及 5x7 点阵字体与 20x22 数字字体的位图格式与 blit8BitWidthBitmap 绘制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1",
+            "u2-l5"
+          ],
+          "filename": "u4-l2-trace-types-and-plotting.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解 trace_t 的 enabled/type/channel/scale/refpos 字段",
+            "读懂 trace_into_index 中 12 种格式的坐标换算",
+            "理解 logmag/phase 的 scale/refpos 与 Smith 圆图半径映射"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "trace_into_index 坐标换算",
+            "trace 值格式化字符串",
+            "update_grid 网格绘制"
+          ],
+          "order": 2,
+          "practice_task": "用 Python 把 measured 数组（可用 shell 的 data 0 命令导出或手工构造）按 logmag、phase、SWR 三种格式的换算公式换算成屏幕 y 坐标并 matplotlib 绘图，与真机屏幕同参数设置下的曲线对比；再修改 def_trace 默认配置把 CH1 轨迹默认改为 SWR 格式并烧录验证。",
+          "source_files": [
+            "plot.c",
+            "main.c",
+            "nanovna.h"
+          ],
+          "title": "轨迹系统：12 种显示格式与坐标换算",
+          "topic": "解读 plot.c 的 trace_into_index：LOGMAG/PHASE/DELAY/SMITH/POLAR/LINEAR/SWR/REAL/IMAG/R/X/Q 十二种格式如何把 measured 复数换算为屏幕坐标，trace_t 的 scale/refpos 参数、trace_info 默认值表、update_grid 的矩形网格与 Smith 圆图绘制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-markers-and-search.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "掌握 marker_t 的 index/frequency 字段与索引-频率换算",
+            "理解 marker_search 借用 trace_index 的搜索技巧",
+            "理解 marker_tracking 与 REFLOW 的联动关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "marker_search 极值搜索",
+            "marker_position 坐标定位",
+            "cell_draw_marker_info 标注绘制"
+          ],
+          "order": 3,
+          "practice_task": "仿照 set_marker_search 的 greater/lesser 比较函数机制，在 plot.c 中新增一个搜索模式（例如在当前轨迹为 SWR 时搜索最小驻波比），并在 ui.c 的对应菜单里挂接该项；无硬件读者可用 Python 借用 data 命令导出的数据实现同样的 min-SWR 搜索逻辑验证算法。",
+          "source_files": [
+            "plot.c",
+            "main.c",
+            "nanovna.h"
+          ],
+          "title": "标记与搜索：marker 定位、数值读取与极值搜索",
+          "topic": "解读 marker 体系：marker_t 数据结构、search_nearest_index 由触摸坐标反查频点、marker_search/marker_search_left/right 借助 trace_index 做极大/极小值搜索、trace_get_value_string 系列如何按格式显示读数与 delta 读数。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l4-markmap-dirty-redraw.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "理解 markmap 双页交替的脏矩形标记机制",
+            "掌握 REDRAW_* 标志位的请求-响应式刷新模型",
+            "理解 cell_drawline 等以 cell 为单位绘制的接口设计"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "markmap 脏标记",
+            "draw_all/force_set_markmap",
+            "REDRAW_* 标志"
+          ],
+          "order": 4,
+          "practice_task": "在 Python 中用一个二维布尔数组模拟双 markmap（current_mappage 交替），实现 set_markmap/mark_map_index/draw_all 的逻辑，制造『轨迹移动后旧像素如何被清除』的场景验证；随后在固件里临时把 redraw_request 加上 REDRAW_AREA 强制全屏重绘，对比扫频时的闪烁差异（可选真机验证）。",
+          "source_files": [
+            "plot.c",
+            "main.c",
+            "ili9341.c"
+          ],
+          "title": "markmap 脏矩形重绘机制",
+          "topic": "解读 NanoVNA 的局部重绘优化：屏幕被划分为 cell 网格，双 markmap 位图记录哪些 cell 需要重画，plot_into_index 缓存轨迹折线坐标，draw_all 按 redraw_request 标志决定刷新范围，battery/cal status/frequency 各自的刷新时机。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "filename": "u4-l5-ui-touch-and-menus.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "理解 operation_requested/OP_LEVER/OP_TOUCH 的异步请求模型",
+            "掌握 menuitem_t 菜单表驱动定义与菜单栈切换",
+            "理解 resistive 触摸校准与 ADC 电池监测的原理"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ui_process 事件分发",
+            "menuitem_t 菜单表",
+            "触摸与 ADC 驱动"
+          ],
+          "order": 5,
+          "practice_task": "在 ui.c 的某个菜单（如 menu_display）中新增一个菜单项：点击后在屏幕上短暂显示当前 sweep_points 和带宽值（用 plot_printf 格式化、ili9341_drawstring 输出），体验 menuitem_t 的 type/sub/text 字段与回调的挂接方式，编译烧录验证。",
+          "source_files": [
+            "ui.c",
+            "nanovna.h",
+            "adc.c"
+          ],
+          "title": "ui.c：触摸、拨轮、菜单树与数值输入",
+          "topic": "解读 ui.c：触摸屏与拨轮的事件检测（btn_check、handle_touch_interrupt、touch_position）、NORMAL/MENU/NUMERIC/KEYPAD 四种 UI 模式切换、menuitem_t 表驱动的两级菜单树、数字键盘编辑频率的流程，以及 adc.c 的电池电压模拟看门狗。"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "level": "advanced",
+      "order": 5,
+      "title": "生态、优化与二次开发",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u5-l1-usb-cdc-shell.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "理解自研 shell 的命令表与参数解析实现",
+            "掌握 CMD_WAIT_MUTEX 的跨线程命令执行机制",
+            "理解 capture 命令读取显存与 chprintf 的裁剪实现"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "VNAShell 命令解析",
+            "commands 命令表",
+            "SDU1 USB CDC 驱动"
+          ],
+          "order": 1,
+          "practice_task": "仿照现有命令在 main.c 中新增 shell 命令 uptime：读取 chVTGetSystemTimeX 换算为秒并用 shell_printf 输出；把它注册进 commands 表（选好是否需要 CMD_WAIT_MUTEX），烧录后通过 USB 串口终端敲入 uptime 与 help 验证。",
+          "source_files": [
+            "main.c",
+            "usbcfg.c",
+            "usbcfg.h",
+            "chprintf.c"
+          ],
+          "title": "USB CDC Shell：命令系统与跨线程执行",
+          "topic": "解读 main.c 中的自研 shell：VNAShell_readLine 的字符流读取与回显、VNAShell_executeLine 的参数切分、commands 命令表、CMD_WAIT_MUTEX 标志如何让命令延迟到 sweep 线程执行以避免并发冲突，以及 usbcfg.c 的 USB CDC 配置与 chprintf 的流式打印。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-python-pc-client.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "掌握 scan/data/frequencies/capture 等命令的 PC 端封装",
+            "理解 fetch_data 与 scan_gamma 的数据解包格式",
+            "能独立编写自动测量与绘图脚本"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "NanoVNA 类封装",
+            "数据抓取与解包",
+            "Jupyter 分析流程"
+          ],
+          "order": 2,
+          "practice_task": "参考 nanovna.py 已有的 scan/data 封装，编写 plot_s11.py：设置 1M-900M 扫描，抓取 CH0 数据，用 matplotlib 同时画出 |S11|(dB) 与相位曲线并标注 marker 位置；没有真机的读者可以用手工构造的模拟数据走通解包与绘图流程。",
+          "source_files": [
+            "python/nanovna.py",
+            "python/NanoVNA-example.ipynb",
+            "python/README.md",
+            "main.c"
+          ],
+          "title": "Python 上位机：串口协议与数据分析",
+          "topic": "解读 python/nanovna.py：按 VID/PID 自动发现串口设备、send_command 的命令封装、fetch_data/scan_gamma 的二进制/文本数据解析、capture 的屏幕截图抓取，以及 Jupyter Notebook 示例的用法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u2-l5"
+          ],
+          "filename": "u5-l3-rtos-resources-and-optimization.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "理解 0x200 进程栈与 640 字节线程栈的内存约束",
+            "掌握 spi_buffer 多用途复用这类省 RAM 手法及其风险",
+            "能分析固件的 Flash/RAM 占用并做代码裁剪"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "线程与栈大小",
+            "缓冲区复用",
+            "编译选项与体积分析"
+          ],
+          "order": 3,
+          "practice_task": "用 arm-none-eabi-size 和 -fstack-usage（Makefile 已开启）分析 build 目录生成的 .su 文件，找出最耗栈的 5 个函数；再解释 transform_domain 复用 spi_buffer 时 CPU 与 DMA 竞争的潜在风险，写一份 200 字左右的取舍分析（提示：__USE_DISPLAY_DMA__ 与 draw_all 的调用时序）。",
+          "source_files": [
+            "Makefile",
+            "main.c",
+            "chconf.h",
+            "STM32F072xB.ld",
+            "nanovna.h"
+          ],
+          "title": "RTOS 资源约束与固件优化技巧",
+          "topic": "总结固件在小内存 Cortex-M0 上的工程手法：ChibiOS 线程栈尺寸注释（472 字节最大占用）、USE_PROCESS_STACKSIZE=0x200、-O2 与 --specs=nano.specs 编译选项、spi_buffer 在 cmd_capture 与 transform_domain 中的复用、ENABLE_* 条件编译裁剪命令、HardFault 处理。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1",
+            "u4-l2"
+          ],
+          "filename": "u5-l4-extend-firmware-project.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "综合运用 sweep 链路、DSP 累加与数据数组的知识实现完整特性",
+            "掌握修改-编译-烧录-验证的完整迭代流程",
+            "理解新功能如何同时暴露给 shell、UI 和 Python 端"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "sweep 数据通路",
+            "shell 命令注册",
+            "properties_t 持久化"
+          ],
+          "order": 4,
+          "practice_task": "毕业项目：实现『测量平均』功能——新增 shell 命令 average {n}（1-8），在 sweep() 完成一次后继续测量 n-1 次并把 measured 逐点累加取平均（注意浮点边界），把 n 存入 properties_t 的 _reserved 区并保证 caldata_save 后可恢复；验证方式：对比开启前后噪声底的变化，并用 python/nanovna.py 抓数据画图确认平滑效果。",
+          "source_files": [
+            "main.c",
+            "nanovna.h",
+            "dsp.c",
+            "flash.c",
+            "ui.c"
+          ],
+          "title": "二次开发实战：为固件添加新特性",
+          "topic": "以一个贯穿多文件的综合项目收尾：演示如何规划并实现『多次测量平均』特性——在 sweep 链路中累加样本、增加 average 配置项与 shell 命令、考虑 properties_t 持久化与 UI 菜单挂接，复习全手册的知识点。"
+        }
+      ]
+    }
+  ]
+}
