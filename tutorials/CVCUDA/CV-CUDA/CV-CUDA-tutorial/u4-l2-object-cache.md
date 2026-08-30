@@ -1,589 +1,580 @@
-# u4-l2 Python 对象缓存：Tensor/ImageBatch 的自动复用
+# Python 对象缓存：Tensor/ImageBatch 的自动复用
 
 ## 1. 本讲目标
 
 学完本讲，你应该能够：
 
-1. 说出对象缓存（object cache）解决了什么问题：为什么 `cvcuda.Tensor` 被 `del` 后显存没有真正释放。
-2. 准确描述缓存的**命中条件**：什么算「规格完全相同」（shape + layout + dtype + 设备 + 对象类型）。
-3. 区分 **non-wrapped**（CV-CUDA 自己分配显存）与 **wrapped**（包装外部框架显存）两类对象在缓存中的不同待遇——前者占缓存配额、可复用；后者不占配额、进缓存只为生命周期保护。
-4. 解释缓存的**增长规律与失控场景**（unbounded growth）：为什么「每轮换一个 shape」的循环会让缓存永远不命中，以及达到限额时发生的是「整包清空」而非 LRU 淘汰。
-5. 用 `cvcuda.cache_size()`、`cvcuda.current_cache_size_inbytes()` 等官方接口做实验，定量验证上述行为。
+1. 说清 CV-CUDA 对象缓存（object cache）的准确边界：它**只存在于 Python 绑定层**，C/C++ API 完全没有这套机制。
+2. 描述一次缓存命中的全部条件：键匹配（shape 含 layout、dtype、所在 GPU 设备）且对象当前未被使用。
+3. 区分「非包装对象」与「包装对象」在缓存里的两种截然不同的待遇：前者占配额、可复用显存；后者零字节记账、进缓存只为保活（Image 外壳还可复用）。
+4. 解释 `del tensor` 之后显存为什么不下降，以及什么时候内存才真正归还。
+5. 复现 unbounded growth（缓存无界增长）场景，理解默认「半张卡显存」配额与「超限全清」的锯齿式淘汰策略，并会用 `set_cache_limit_inbytes` / `clear_cache` 控制。
+
+本讲是第四单元第二讲。上一讲（u4-l1）我们确立了「一切算子都异步提交到流上」的执行模型；本讲回答的是与之配套的另一半问题：**异步世界里的显存何时才能安全回收、如何高效复用**。这两讲合起来，就是 CV-CUDA Python 层正确性与性能的两大支柱。
 
 ## 2. 前置知识
 
-本讲是纯 Python 侧机制，不需要 CUDA 编程知识，但需要几个基础概念：
+### 2.1 引用计数与 shared_ptr
 
-- **引用计数与 Python 的 `del`**：Python 对象靠引用计数管理生命周期。`del x` 只是删掉一个名字（引用），只有当**最后一个**引用消失时对象才被销毁。CV-CUDA 的缓存恰恰会额外持有引用——这是「del 了却没释放显存」的直接原因。
-- **C++ 的 `shared_ptr`**：Python 绑定层内部用 `std::shared_ptr<CacheItem>` 管理缓存条目，`use_count()`（引用计数）被用来判断「对象当前是否正在被使用」。
-- **`cudaMalloc` 的代价**：GPU 显存分配是昂贵的同步操作（可能伴随设备级锁）。推理/预处理管线通常以每秒几十上百次 的频率创建同形状的中间张量，若每次都真实分配/释放，分配开销会淹没计算本身。
-- **哈希表与「键」**：缓存用「键（Key）」判断两个对象是否规格相同。键的等值规则就是命中条件，本讲的核心之一就是读懂这个键。
-- **线程局部存储（thread-local）**：每个线程各自拥有一份变量副本。CV-CUDA 的缓存实例是线程局部的，但字节配额是全局共享的——这个不对称是第 5 节的主题。
+Python 对象靠引用计数管理生命周期：引用归零即析构。C++ 侧对应物是 `std::shared_ptr`——多个 `shared_ptr` 指向同一对象，每多一个引用计数加一，最后一个引用消失时对象析构、内存释放。`use_count()` 返回当前引用数。本讲会反复用到这个概念，因为**缓存本身就是一个长期持有 `shared_ptr` 的「额外引用」**。
 
-承接前讲：[u3-l3](u3-l3-allocating-vs-into.md) 已经从外面看到「allocating 变体会查对象缓存」，本讲打开它的内部；[u4-l1](u4-l1-stream-model.md) 讲过的 ResourceGuard（资源守卫）会在 4.3 节再次出现——它正是 wrapped 对象必须进缓存的动机。
+### 2.2 哈希表与 multimap
+
+缓存本质是一张哈希表。CV-CUDA 用的是 `std::unordered_multimap`：普通 map 中一个键只对应一个值，而 multimap 允许**同一个键挂多个条目**——比如你同时持有 3 个同形状张量，它们先后闲置后，缓存里同键条目就有 3 个。哈希表查找分两步：先用 `hash()` 把键映射到桶（快速定位），再用 `operator==` 在桶内做精确比较（处理哈希碰撞）。因此「键相等」的判定逻辑就是缓存命中的判定逻辑。
+
+### 2.3 thread_local 与互斥锁
+
+`thread_local` 修饰的变量**每个线程各有一份**，互不干扰；`std::mutex` 则是跨线程的排他锁。CV-CUDA 的缓存实例是 thread_local 的（每个线程一张自己的哈希表），但配额记账（已用字节数、上限）是全局共享的、用锁保护。这个「表按线程分、账全局记」的设计是理解多线程行为的关键。
+
+### 2.4 承接前面几讲
+
+- u2-l1/u2-l4：张量由 shape、dtype、layout 描述；`as_tensor` 包装外部显存得到的是 wrapped tensor，它不拥有内存。
+- u3-l3：allocating 变体（`cvcuda.flip`）每次调用会隐式 `Tensor::Create` 创建输出——本讲会看到这一步其实先查缓存。
+- u4-l1：算子异步提交到流，`ResourceGuard` 会在对象析构时通过事件保证流上的工作先完成。缓存持有的引用同样要过这道闸，所以「放进缓存」与「流安全」是联动的。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
 |------|------|
-| [docs/sphinx/advanced/object_cache.rst](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/docs/sphinx/advanced/object_cache.rst) | 官方文档：缓存行为、限额、多线程注意事项（本讲的权威大纲） |
-| [python/mod_cvcuda/nvcv/Cache.cpp](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp) | 缓存本体：`unordered_multimap` 存储、add/fetch/清空、限额记账、导出全部 Python API |
-| [python/mod_cvcuda/nvcv/Cache.hpp](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.hpp) | `CacheItem`/`ExternalCacheItem` 接口：条目如何报告自己的字节大小 |
-| [python/mod_cvcuda/include/nvcv/python/Cache.hpp](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/include/nvcv/python/Cache.hpp) | `IKey` 基类：设备号捕获、hash 与相等判定的公共框架 |
-| [python/mod_cvcuda/nvcv/Tensor.cpp](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Tensor.cpp) | Tensor 的两条创建路径（真分配 vs 包装）与 `Tensor::Key` 的命中规则 |
-| [python/mod_cvcuda/nvcv/ImageBatch.cpp](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/ImageBatch.cpp) | `ImageBatchVarShape` 以 capacity 为键的缓存复用 |
-| [python/mod_cvcuda/operators/OpFlip.cpp](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/operators/OpFlip.cpp) | allocating 变体如何借道 `Tensor::Create` 触发缓存 |
-| [samples/object_cache/](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/samples/object_cache/basic.py) | 官方实验样例：basic / basic_wrapped / reuse / unbounded_growth / control / threads |
-| [tests/cvcuda/python/test_cache.py](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/tests/cvcuda/python/test_cache.py) | 官方测试：把缓存行为固化成断言，是「预期结果」的金标准 |
+| [python/mod_cvcuda/nvcv/Cache.hpp](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.hpp) | 缓存条目抽象 `CacheItem`、外部条目 `ExternalCacheItem`、`Cache` 类声明 |
+| [python/mod_cvcuda/nvcv/Cache.cpp](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp) | 缓存核心实现：增删查、配额、淘汰、Python API 导出 |
+| [python/mod_cvcuda/include/nvcv/python/Cache.hpp](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/include/nvcv/python/Cache.hpp) | 公共头：键的基类 `IKey`（设备捕获、hash/相等协议） |
+| [python/mod_cvcuda/nvcv/Tensor.cpp](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Tensor.cpp) | Tensor 的缓存键定义与「先查缓存再创建」路径、包装路径 |
+| [python/mod_cvcuda/nvcv/ImageBatch.cpp](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/ImageBatch.cpp) | ImageBatchVarShape 的缓存键（capacity）与创建路径 |
+| [python/mod_cvcuda/nvcv/Image.cpp](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Image.cpp) | 包装 Image 的外壳复用路径 |
+| [docs/sphinx/advanced/object_cache.rst](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/docs/sphinx/advanced/object_cache.rst) | 官方文档：wrapped/non-wrapped、del 与 GC、配额、多线程 |
+| [samples/object_cache/](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/samples/object_cache/basic.py) 下 7 个样例 | basic / basic_wrapped / reuse / unbounded_growth / control / control_torch / threads，全部是文档的 literalinclude 素材 |
+| [tests/cvcuda/python/test_cache.py](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/tests/cvcuda/python/test_cache.py) | 官方测试，用断言固定了缓存的可观察行为 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 为什么需要对象缓存：Python 管线中的重复分配问题
+### 4.1 缓存骨架：CacheItem、IKey 与线程局部 Cache 实例
 
 #### 4.1.1 概念说明
 
-一条典型的 CV-CUDA 推理预处理管线（解码 → resize → cvtcolor → normalize）里，**中间张量的生命周期极短**：每帧创建、用完即弃。若按朴素方式实现，每个中间张量都要经历一次 `cudaMalloc` 和一次 `cudaFree`。
+CV-CUDA 的 Python 层内置了一个资源管理系统：凡是它创建的 `Tensor`、`Image`、`ImageBatchVarShape`、`TensorBatch`、`Array`、`Stream`，以及算子对象，都会被自动登记进一张缓存表。官方文档开宗明义地划出两条边界：
 
-更糟的是 Python 的语义陷阱：用户即使写了 `del tensor`，以为释放了显存，`nvidia-smi` 里的占用却纹丝不动。官方文档把这件事讲得很直白：**由 CV-CUDA 分配的 `Tensor`/`Image` 离开作用域后，底层显存不会被释放，而是存进缓存等待复用**；因此「不要试图手动释放内存」是最佳实践。
+- [docs/sphinx/advanced/object_cache.rst:25-27](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/docs/sphinx/advanced/object_cache.rst#L25-L27) 明确注明：**只有 Python 对象会被缓存，C/C++ 对象没有缓存**。
+- [docs/sphinx/advanced/object_cache.rst:28-29](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/docs/sphinx/advanced/object_cache.rst#L28-L29) 注明：CV-CUDA 与设备无关，**不追踪数据实际躺在哪块 GPU 上**（这个设计在多 GPU 一节会再遇到）。
 
-所以这个缓存同时回答了两个问题：
-
-1. **性能**：同规格对象反复创建时跳过真实分配，稳态零 `cudaMalloc`。
-2. **语义**：解释「del 了为什么不掉显存」，并给出手动兜底手段 `cvcuda.clear_cache()`。
-
-还有一条重要的边界：**只有 Python 对象有缓存，C/C++ 层没有**。用 C++ API 创建的 `nvcv::Tensor` 离开作用域就真实析构。这个缓存是 `python/mod_cvcuda` 绑定层的设施，与 `src/cvcuda` 核心库无关。
+为什么需要缓存？因为在 GPU 上 `cudaMalloc` 是昂贵的同步操作（可能引发隐式同步、微秒到毫秒级开销），而视觉管线的典型形态是「同一组形状每帧重复出现」。把闲置对象按规格存起来复用，稳态循环就几乎不再分配显存。这与 PyTorch 的 caching allocator 解决的是同一类问题，但 CV-CUDA 选择在**对象**层面而非裸内存块层面复用。
 
 #### 4.1.2 核心流程
 
+一次「创建对象」在缓存视角下的流程：
+
 ```text
 Python: cvcuda.Tensor(shape, dtype, layout)
-   │
-   ├─ 计算键 Key = (TensorShape[shape+layout], dtype, deviceId)
-   ├─ Cache.fetch(Key)
-   │     ├─ 命中（存在规格相同且不在使用的条目）→ 直接返回缓存对象，零分配
-   │     └─ 未命中 → new Tensor（内部 cudaMalloc）→ Cache.add() 入缓存 → 返回
-   │
-Python: del tensor
-   │
-   └─ 只删引用；缓存仍持有一个引用 → 显存保留，等下次同规格创建复用
+        │
+        ▼
+构造缓存键 Key = (形状+布局, 数据类型, 当前 CUDA 设备号)
+        │
+        ▼
+Cache::fetch(key) ── 在哈希表里找同键且"当前无人使用"的条目
+        │
+   ┌────┴─────┐
+   命中            未命中
+   │              │
+   ▼              ▼
+直接返回缓存对象    new 对象(此刻分配显存)
+(零分配)          并 Cache::add 登记进表
 ```
+
+「当前无人使用」的判定基于引用计数，这是整个缓存最精妙的一行逻辑：
+
+\[ \text{isInUse} \iff \text{use\_count} > 2 \]
+
+数字 2 的来历：判定时刻，缓存表自身持有 1 个 `shared_ptr`，判定函数的局部变量 `sthis` 又临时持有 1 个。除此之外每多一个引用（Python 变量、ResourceGuard 的 GCBag 等）都意味着还有使用方。所以缓存只回收「世界上只剩缓存自己记得它」的对象。
 
 #### 4.1.3 源码精读
 
-官方文档开头就划定了缓存管辖的对象类型与「仅 Python」的边界：
+先看条目与判定的接口。[python/mod_cvcuda/nvcv/Cache.hpp:36-55](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.hpp#L36-L55) 定义了 `CacheItem`：任何想进缓存的对象必须提供 `key()`（我是谁）和 `GetSizeInBytes()`（我占多少配额）。
 
-[docs/sphinx/advanced/object_cache.rst:L22-L30](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/docs/sphinx/advanced/object_cache.rst#L22-L30)——这段说明 `cvcuda.Image`、`cvcuda.Tensor`、`cvcuda.ImageBatchVarShape`、`cvcuda.TensorBatch` 都由缓存自动管理，并明确「只有 Python 对象被缓存，没有 C/C++ 对象缓存」「CV-CUDA 不追踪数据所在设备」（后者是 4.5 节多 GPU 行为的伏笔）。
+[python/mod_cvcuda/nvcv/Cache.cpp:78-84](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L78-L84) 就是上面那条引用计数规则：
 
-关于 `del` 的语义：
+```cpp
+bool CacheItem::isInUse() const
+{
+    std::shared_ptr<const CacheItem> sthis = this->shared_from_this();
+    // Return true if it is being used anywhere apart from cache and sthis
+    return sthis.use_count() > 2;
+}
+```
 
-[docs/sphinx/advanced/object_cache.rst:L50-L62](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/docs/sphinx/advanced/object_cache.rst#L50-L62)——`del` 只移除引用；当缓存成为唯一持有者时，底层显存即可被后续创建复用；可用 `cvcuda.clear_cache()` 手动清空。
+[python/mod_cvcuda/nvcv/Cache.cpp:86-94](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L86-L94) 是缓存的数据结构：一个 `unordered_multimap`（键可重复），加上三个 `inline static` 成员——全局互斥锁和**按设备记账**的两张表（每个 GPU 各自的配额与当前用量）。
 
-缓存实例本身是**每个线程一个**：
+```cpp
+using Items = std::unordered_multimap<const IKey *, std::shared_ptr<CacheItem>, HashKey, KeyEqual>;
 
-[python/mod_cvcuda/nvcv/Cache.cpp:L376-L380](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L376-L380)——`Cache::Instance()` 返回 `thread_local Cache cache;`，即每线程一份独立的哈希表；同时每个实例构造时把自己登记进静态集合 `instances`（见 [python/mod_cvcuda/nvcv/Cache.cpp:L96-L101](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L96-L101)），供 `ClearAll()`/`TotalSize()` 跨线程汇总。
+struct Cache::Impl
+{
+    Items                                          items;
+    inline static std::mutex                       mtx;
+    inline static std::unordered_map<int, int64_t> cache_limit_inbytes;
+    inline static std::unordered_map<int, int64_t> current_size_inbytes;
+};
+```
+
+键的公共协议在 [python/mod_cvcuda/include/nvcv/python/Cache.hpp:31-78](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/include/nvcv/python/Cache.hpp#L31-L78)：`IKey` 构造时用 `cudaGetDevice` 捕获当前设备号；`hash()` 把「具体键类型」和「设备号」都混进哈希值，`operator==` 先比类型、再比设备、最后交给子类的 `doIsCompatible`。这保证**不同 GPU 上的条目永不互相命中**。
+
+最后看实例的取得方式，[python/mod_cvcuda/nvcv/Cache.cpp:376-380](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L376-L380)：
+
+```cpp
+Cache &Cache::Instance()
+{
+    thread_local Cache cache;
+    return cache;
+}
+```
+
+一行 `thread_local` 道出多线程语义：**每个线程一张独立的缓存表**。同时构造函数把 `this` 登记进静态 `instances` 集合（[python/mod_cvcuda/nvcv/Cache.cpp:96-101](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L96-L101)），供 `ClearAll`/`TotalSize` 遍历所有线程的表。
 
 #### 4.1.4 代码实践
 
-**实践目标**：亲眼看到「del 不释放、clear_cache 才释放」。
+**实践目标**：用官方 `threads.py` 样例直观看到「表按线程分、计数可全局查」。
 
-**操作步骤**（示例代码，基于官方样例改写）：
+**操作步骤**：
 
-```python
-# 示例代码：cache_probe.py
-import cvcuda, numpy as np
+1. 环境按 u1-l2 配好（`pip install cvcuda-cu12` 及 samples 依赖）后运行：
 
-def mk():
-    return cvcuda.Tensor((16, 32, 4), np.float32, cvcuda.TensorLayout.HWC)
+   ```bash
+   python samples/object_cache/threads.py
+   ```
 
-t = mk()
-print("创建后条目数:", cvcuda.cache_size(), "字节数:", cvcuda.current_cache_size_inbytes())
-del t
-print("del 后  条目数:", cvcuda.cache_size(), "字节数:", cvcuda.current_cache_size_inbytes())
-cvcuda.clear_cache()
-print("clear 后条目数:", cvcuda.cache_size(), "字节数:", cvcuda.current_cache_size_inbytes())
-```
+2. 阅读样例时注意 [samples/object_cache/threads.py:29-31](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/samples/object_cache/threads.py#L29-L31)：子线程里先创建一个张量，打印 `cache_size()`（全局）与 `cache_size(ThreadScope.LOCAL)`（本线程），随后 `clear_cache(ThreadScope.LOCAL)` 清空本线程表再打印一次。样例注释里直接写出了预期输出 `2 1` 与 `1 0`。
 
-**需要观察的现象**：`del` 前后 `current_cache_size_inbytes()` 不变（条目仍在缓存里）；`clear_cache()` 之后归零。
+3. 顺手读一下 [samples/object_cache/threads.py:42-65](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/samples/object_cache/threads.py#L42-L65) 那段很长的 WORKAROUND 注释——它解释了 Python `thread.join()` 与 C++ thread_local 析构之间的竞态，是了解「线程局部缓存」实现代价的珍贵材料。
 
-**预期结果**：三行输出形如 `1 / N字节 → 1 / N字节 → 0 / 0字节`。注意：即使 `del` 之后条目仍在缓存中（`cache_size()` 至少为 1），这也与官方 `test_cache_limit_clearing` 中「先建后删仍按缓存记账」的行为一致（[tests/cvcuda/python/test_cache.py:L146-L155](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/tests/cvcuda/python/test_cache.py#L146-L155)）。具体数值**待本地验证**（本讲义写作环境无 GPU）。
+**需要观察的现象**：全局计数 = 主线程条目 + 子线程条目；LOCAL 清空只影响本线程的表。
+
+**预期结果**：输出两行 `2 1` 和 `1 0`。样例自带这些注释，可与实际运行对照。本环境无 GPU，待本地验证。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么说「在 CV-CUDA 管线里不要写 `del tensor` 试图省显存」？
+**练习 1**：`isInUse()` 里为什么阈值是 2 而不是 1？
 
-**答案**：`del` 只减少 Python 引用；只要缓存还持有引用（且配额未触发清空），显存就不会归还驱动。手动 `del` 既达不到释放目的，还剥夺了缓存复用的机会——下一次同规格创建本可以直接命中。真正需要强制释放时用 `cvcuda.clear_cache()`。
+**答案**：判定瞬间有两个「合法」引用：缓存哈希表里的 `shared_ptr` 和 `shared_from_this()` 产生的局部 `sthis`。`use_count() > 2` 意味着除这两者外还有别人（Python 变量、GCBag 等）握着对象，即真在被使用；等于 2 时世界上只剩缓存记得它，可以安全复用。
 
-**练习 2**：C++ 程序里 `nvcv::Tensor` 析构时显存会立即释放吗？
+**练习 2**：为什么缓存要用 `unordered_multimap` 而不是 `unordered_map`？
 
-**答案**：会。对象缓存只存在于 `python/mod_cvcuda` 绑定层（`Cache::Instance()` 只被 Python 侧代码调用），C++/C API 创建的张量没有缓存，`shared_ptr` 引用归零即析构、释放显存。
+**答案**：同一个键（同一规格）的对象可以同时存在多个。例如一个循环里同时持有 3 个同形状输出张量，它们全部闲置后都会以相同键挂在缓存里，下次同一形状需要 3 个并发输出时可以全部复用。`unordered_map` 一个键只留一个值，表达不了这种「同规格对象池」。
 
-### 4.2 缓存核心数据结构与命中条件：multimap + IKey
+### 4.2 非包装对象的复用路径：Tensor 与 ImageBatchVarShape 的命中条件
 
 #### 4.2.1 概念说明
 
-缓存要回答一个核心问题：**「新对象」和「旧对象」什么时候算同一个规格？** 这由三层判定共同决定：
+「非包装对象」（non-wrapped）指由 CV-CUDA 自己分配显存的对象，比如 `cvcuda.Tensor(...)` 直接构造、或 allocating 算子隐式创建的输出。它们是缓存真正服务的对象：**占配额、按规格键复用**。
 
-1. **对象的具体 Key 类型**：Tensor 的键不会和 Image 的键相等（C++ `typeid` 先比一轮）。
-2. **CUDA 设备号**：键在构造时用 `cudaGetDevice` 抓取当前设备；不同 GPU 上的条目互不命中。
-3. **规格本体**：对 Tensor 而言是 `TensorShape`（shape **连同 layout 标签**，见 u2-l1）+ `dtype`。
+每种容器定义自己的键，键的内容就是「命中条件」的全部：
 
-存储上用的是 `unordered_multimap`（一键多值）而非 `map`（一键一值）：同一个规格可能同时存在多个空闲条目——比如你同时持有 3 个同 shape 的张量再全部释放，缓存里就有 3 个可复用条目。
+| 容器 | 键 | 命中条件 |
+|------|-----|---------|
+| `Tensor` | shape + layout + dtype（+设备） | 形状、布局、类型完全一致 |
+| `ImageBatchVarShape` / `TensorBatch` | capacity（+设备） | 容量一致即可，批内每图尺寸无关（承接 u2-l3 的结论） |
+| `Stream` | 同类键 | 同上 |
+| 算子对象（经 `ExternalCacheItem`） | 算子各自定义 | 承接 u3-l3：`CreateOperator` 也走缓存 |
+
+注意 Tensor 的键里 layout 参与匹配是有源码依据的：`TensorShape` 的相等比较同时比较形状和布局（[src/nvcv/src/include/nvcv/TensorShape.hpp:188-191](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/src/nvcv/src/include/nvcv/TensorShape.hpp#L188-L191)）。所以 `(16,32,4)` 的 HWC 张量与同形状但 layout 为 `NHWC` 或 `NONE` 的张量**不会**互相命中。
 
 #### 4.2.2 核心流程
 
+以一次 allocating 算子调用为例（这是缓存最主要的使用方）：
+
 ```text
-add(item):
-  若 item字节 > 设备限额        → 直接不入缓存（return）
-  若 已用字节 + item字节 > 限额  → 把该设备的所有条目整包移出（记账清零）
-  插入 multimap[key] = item；记账 += item字节
-
-fetch(key):
-  在 multimap 里找所有键等于 key 的条目
-  过滤掉「正在被使用」的（isInUse）
-  返回剩余的空闲条目列表（调用方取第一个）
-
-isInUse(): shared_ptr 引用计数 > 2
-  （>2 意味着除「缓存持有」和「本次临时持有」之外还有别人在用）
+cvcuda.flip(src, 1)                      # allocating 变体
+  └─ OpFlip.cpp: Tensor::Create(input.shape(), input.dtype())
+       └─ Tensor::CreateFromReqs(reqs)
+            ├─ Cache::fetch(Key{reqs})   # 键 = (shape+layout, dtype, deviceId)
+            │    ├─ 命中(且未在用) → 返回缓存张量，零显存分配
+            │    └─ 未命中 → new Tensor(reqs)   # 此刻才 cudaMalloc
+            │                └─ Cache::add(*tensor)  # 立即登记进表
+            └─ FlipInto(output, ...)     # 写入复用来的输出
 ```
 
-命中条件的形式化表述：
+两个容易忽略的要点：
 
-\[
-\text{hit}(k_{new}, k_{old}) \iff \text{typeid}(k_{new}) = \text{typeid}(k_{old}) \;\wedge\; dev_{new} = dev_{old} \;\wedge\; (\text{shape}, \text{layout}, \text{dtype})_{new} = (\text{shape}, \text{layout}, \text{dtype})_{old}
-\]
+1. **对象是创建后立即入缓存的**，不是等它「离开作用域」才入缓存。Python 引用消失后对象之所以不析构，是因为缓存早就握着一个 `shared_ptr`。
+2. 键相同 ≠ 一定命中。`fetch` 只返回 `!isInUse()` 的条目；如果旧输出还被某处引用着，本次仍会新分配。
 
 #### 4.2.3 源码精读
 
-存储结构：
+[python/mod_cvcuda/operators/OpFlip.cpp:55-60](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/operators/OpFlip.cpp#L55-L60)：allocating 变体的第一行就是 `Tensor::Create`——u3-l3 说过的「隐式分配」，实际入口在这里：
 
-[python/mod_cvcuda/nvcv/Cache.cpp:L86-L94](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L86-L94)——`Items` 是以 `const IKey *` 为键的 `unordered_multimap`，值是 `shared_ptr<CacheItem>`；哈希与相等由 `HashKey`/`KeyEqual` 代理给 `IKey::hash()`/`operator==`。特别注意 `cache_limit_inbytes` 和 `current_size_inbytes` 是 `inline static`——**哈希表线程私有，但字节记账全局共享**（4.5 节展开）。
+```cpp
+Tensor Flip(Tensor &input, int32_t flipCode, std::optional<Stream> pstream)
+{
+    Tensor output = Tensor::Create(input.shape(), input.dtype());
+    return FlipInto(output, input, flipCode, pstream);
+}
+```
 
-判定「是否正在被使用」：
+[python/mod_cvcuda/nvcv/Tensor.cpp:85-103](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Tensor.cpp#L85-L103) 是「先查缓存再创建」的完整路径：
 
-[python/mod_cvcuda/nvcv/Cache.cpp:L78-L84](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L78-L84)——`isInUse()` 检查 `use_count() > 2`：缓存里的 `shared_ptr` 占 1 个计数，`shared_from_this()` 的临时拷贝占 1 个，再多就说明外界（Python 变量、正在执行的算子等）还引用着它。这个「魔法数字 2」的写法依赖当前持有结构，是读源码时值得停下来想一想的点。
+```cpp
+std::shared_ptr<Tensor> Tensor::CreateFromReqs(const nvcv::Tensor::Requirements &reqs)
+{
+    std::vector<std::shared_ptr<CacheItem>> vcont = Cache::Instance().fetch(Key{reqs});
 
-键的公共框架：
+    // None found?
+    if (vcont.empty())
+    {
+        std::shared_ptr<Tensor> tensor(new Tensor(reqs));
+        Cache::Instance().add(*tensor);
+        return tensor;
+    }
+    else
+    {
+        // Get the first one
+        auto tensor = std::static_pointer_cast<Tensor>(vcont[0]);
+        NVCV_ASSERT(tensor->dtype() == reqs.dtype);
+        return tensor;
+    }
+}
+```
 
-[python/mod_cvcuda/include/nvcv/python/Cache.hpp:L31-L71](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/include/nvcv/python/Cache.hpp#L31-L71)——`IKey` 构造函数里 `cudaGetDevice(&m_deviceId)` 抓取设备号；`hash()` 把派生类哈希、`typeid` 哈希和设备号哈希混在一起；`operator==` 依次比较 `typeid`、设备号，最后才调派生类的 `doIsCompatible`。**这三层就是命中条件的全部来源。**
+Tensor 键的定义与比较在两处：[python/mod_cvcuda/nvcv/Tensor.hpp:67-85](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Tensor.hpp#L67-L85) 声明键成员为 `m_shape`（含布局）、`m_dtype`、`m_wrapper` 三个字段；[python/mod_cvcuda/nvcv/Tensor.cpp:332-364](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Tensor.cpp#L332-L364) 给出哈希与相等实现——普通键按 `(shape, dtype)` 计算，最终命中判定是 `std::tie(m_shape, m_dtype) == std::tie(that.m_shape, that.m_dtype)`：
 
-Tensor 的规格判定：
+```cpp
+bool Tensor::Key::doIsCompatible(const IKey &that_) const
+{
+    const auto &that = static_cast<const Key &>(that_);
+    // ...(wrapper 分支见 4.3)...
+    return std::tie(m_shape, m_dtype) == std::tie(that.m_shape, that.m_dtype);
+}
+```
 
-[python/mod_cvcuda/nvcv/Tensor.cpp:L345-L364](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Tensor.cpp#L345-L364)——`Tensor::Key::doIsCompatible` 在两个键都不是 wrapper 时，比较 `std::tie(m_shape, m_dtype)` 是否相等。`m_shape` 是 `nvcv::TensorShape`（shape + layout），所以 `(16,32,4)+HWC` 与 `(16,32,4)+CHW` **不互相命中**，`(16,32,4)+HWC` 与 `(1,16,32,4)+NHWC` 也**不互相命中**（rank 不同）。wrapper 分支（`m_wrapper`）的行为在 4.3 节专门讲。
+变长批的键则简单得多。[python/mod_cvcuda/nvcv/ImageBatch.cpp:42-52](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/ImageBatch.cpp#L42-L52) 显示 `ImageBatchVarShape::Key` 只由 capacity 构成（因为批容器本身只存指针与元数据，不拥有像素，u2-l3 讲过）；[python/mod_cvcuda/nvcv/ImageBatch.cpp:54-73](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/ImageBatch.cpp#L54-L73) 的 `Create` 走同样的 fetch→复用/新建→add 三段式，命中时还会 `batch->clear()` 把外壳恢复到干净状态。
 
-创建路径上的 fetch-or-create：
-
-[python/mod_cvcuda/nvcv/Tensor.cpp:L85-L103](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Tensor.cpp#L85-L103)——`Tensor::CreateFromReqs` 先用 `Key{reqs}` 查缓存；命中则 `static_pointer_cast` 后直接返回（仅留一个断言确认 dtype 一致）；未命中才 `new Tensor(reqs)` 并 `Cache::Instance().add(*tensor)`。所有 Python 侧张量创建（包括算子 allocating 变体的隐式输出分配）都汇聚到这个函数。
-
-其他容器的键略有不同，但套路一致：
-
-- [python/mod_cvcuda/nvcv/ImageBatch.cpp:L42-L73](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/ImageBatch.cpp#L42-L73)——`ImageBatchVarShape` 的键**只有 capacity**（不关心 maxsize/格式），命中后先 `batch->clear()` 复位成崭新状态再返回；`TensorBatch` 同样以 capacity 为键（[python/mod_cvcuda/nvcv/TensorBatch.cpp:L57-L63](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/TensorBatch.cpp#L57-L63)）。这与 u2-l3 讲过的「变长批以 capacity 为缓存键」呼应。
-- 算子对象也走同一套缓存：[python/mod_cvcuda/operators/Operators.hpp:L195-L224](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/operators/Operators.hpp#L195-L224)——`CreateOperatorEx` 的模板逻辑与 `CreateFromReqs` 一模一样：fetch 为空则构造并 add，否则复用。这是 u3-l3 说「算子对象本身也走缓存」的出处。
+配额的记账口径在 [python/mod_cvcuda/nvcv/Tensor.cpp:266-279](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Tensor.cpp#L266-L279)：`GetSizeInBytes` 用 `nvcvMemRequirementsCalcTotalSizeBytes` 按 Requirements 算出字节数——注意这是**含 stride 对齐后**的缓冲大小（u2-l1 讲过行距对齐），不是元素数乘 dtype 的理论值。
 
 #### 4.2.4 代码实践
 
-**实践目标**：验证命中条件中「layout 参与键」。
+**实践目标**：亲手复现 `reuse.py` 的复用行为，并用计数器证明「命中零分配」。
 
-**操作步骤**（示例代码）：
+**操作步骤**（以下为示例代码，保存为自己是新文件，勿改动仓库样例）：
 
-```python
-# 示例代码：key_probe.py
-import cvcuda, numpy as np
+1. 先原样阅读两个样例：[samples/object_cache/basic.py:18-30](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/samples/object_cache/basic.py#L18-L30)（创建一个非包装张量，缓存 +1）与 [samples/object_cache/reuse.py:18-42](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/samples/object_cache/reuse.py#L18-L42)（两个函数各创建一个同规格张量，第二个复用第一个的显存）。
+2. 写如下脚本（示例代码）：
 
-def report(tag):
-    print(tag, "条目数:", cvcuda.cache_size(), "字节数:", cvcuda.current_cache_size_inbytes())
+   ```python
+   import cvcuda, numpy as np
 
-cvcuda.clear_cache()
-report("清空后")
+   def make(shape):
+       return cvcuda.Tensor(shape, np.float32, cvcuda.TensorLayout.HWC)
 
-a = cvcuda.Tensor((16, 32, 4), np.float32, cvcuda.TensorLayout.HWC)
-report("建 HWC (16,32,4)")
-del a
+   cvcuda.clear_cache()
+   t1 = make((16, 32, 4))
+   print("after t1:", cvcuda.cache_size(), cvcuda.current_cache_size_inbytes())
+   del t1                       # 引用消失，但缓存仍持有
+   t2 = make((16, 32, 4))       # 同 shape+layout+dtype → 应命中
+   print("after t2:", cvcuda.cache_size(), cvcuda.current_cache_size_inbytes())
+   t3 = make((16, 32, 4))       # 与 t2 并存 → 键相同但仍需新分配（isInUse）
+   print("after t3:", cvcuda.cache_size(), cvcuda.current_cache_size_inbytes())
+   ```
 
-b = cvcuda.Tensor((16, 32, 4), np.float32, cvcuda.TensorLayout.CHW)  # 同数值 shape，不同 layout
-report("建 CHW (16,32,4)")
-del b
+3. 对照官方测试 [tests/cvcuda/python/test_cache.py:101-126](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/tests/cvcuda/python/test_cache.py#L101-L126) 检查你的理解：它用 `cvcuda.internal.nbytes_in_cache(obj)`（导出自 [python/mod_cvcuda/nvcv/Cache.cpp:507-508](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L507-L508)）逐对象核对累计字节数。
 
-c = cvcuda.Tensor((16, 32, 4), np.float32, cvcuda.TensorLayout.HWC)  # 与 a 完全同规格
-report("再建 HWC (16,32,4)")
-del c
-```
+**需要观察的现象**：`t2` 创建前后 `current_cache_size_inbytes()` 不变（复用，字节数不增）；`t3` 创建后字节数增加（同键但 t2 在用，须新分配）。
 
-**需要观察的现象**：第二次（CHW）创建后条目数/字节数**继续增长**（没有命中 HWC 的条目）；第三次（HWC）创建后**不再增长**（命中了第一次的空闲条目）。
-
-**预期结果**：四次输出形如 `0 → 1 → 2 → 2`（条目数）。精确数值**待本地验证**。
+**预期结果**：计数呈 `+1 条目 / 字节不变 / 字节翻倍` 的模式。待本地验证。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么缓存用 `unordered_multimap` 而不是 `unordered_map`？
+**练习 1**：`del t1` 之后 `nvidia-smi` 里显存占用会下降吗？什么时候才下降？
 
-**答案**：同一规格可能有多个条目同时存在：多个同规格对象被同时持有（`isInUse` 为真）时，新创建的会作为**同键的新条目**插入；它们后来被释放就成了多个空闲条目。`unordered_map` 一键一值会强迫立即淘汰，无法表达这种「同规格多条目」的状态。
+**答案**：不会。`del` 只移除 Python 引用，缓存表里的 `shared_ptr` 仍持有对象。真正归还发生在：`cvcuda.clear_cache()` 被调用、缓存超限触发整体淘汰、脚本退出时的 `RegisterCleanup` 钩子（[python/mod_cvcuda/nvcv/Cache.cpp:446-447](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L446-L447)），或对象大到超过配额根本不入缓存。
 
-**练习 2**：`isInUse()` 为什么是 `use_count() > 2` 而不是 `> 1`？
+**练习 2**：`(16, 32, 4)` 的 HWC 张量释放后，创建 `(16, 32, 4)` 但 layout 为 `NHWC` 的张量能命中吗？
 
-**答案**：`isInUse()` 本身通过 `shared_from_this()` 取共享指针，这个临时对象本身就占 1 个计数；缓存表里还存着 1 个计数。所以「只有缓存和自己」时计数恰为 2，超过 2 才说明有外部持有者（Python 变量、正在执行的算子等）。
+**答案**：不能。Tensor 的键比较走 `TensorShape::operator==`，它同时比较形状与布局（TensorShape.hpp L188-191），HWC ≠ NHWC，键不相等即不命中。dtype 不同（如 float32 换 uint8）同理。
 
-**练习 3**：`cvcuda.Tensor(2, (37, 7), cvcuda.Format.RGB8, rowalign=1)` 与 `cvcuda.Tensor(2, (37, 7), cvcuda.Format.RGB8)`（默认 rowalign）会互相命中吗？
+**练习 3**：为什么 `ImageBatchVarShape` 的键只看 capacity，而 Tensor 的键要看完整 shape？
 
-**答案**：不会。`rowalign` 影响行对齐，进而进入 `Tensor::Requirements`，最终体现在不同的 `TensorShape`/stride 上，键不同则不命中。想复用就必须保持包括对齐参数在内的整套规格一致。
+**答案**：批容器是句柄式容器，自身只存每图的指针与元数据（u2-l3），内存开销只取决于容量，与批内图像尺寸无关；而 Tensor 直接拥有整块像素缓冲，缓冲大小由 shape/dtype/对齐决定，必须精确匹配才能安全复用。
 
-### 4.3 non-wrapped 与 wrapped：两条进入缓存的路径
+### 4.3 包装对象：零配额、保活与外壳复用
 
 #### 4.3.1 概念说明
 
-按**显存所有权**划分，对象分两类（官方文档的原始区分）：
+「包装对象」（wrapped）指 `as_tensor` / `as_image` 包装外部框架显存得到的对象（u2-l4 讲过：元数据抄入、只登记不分配）。它们的显存归 torch/cupy/numpy 所有，CV-CUDA 无权也无法复用。因此缓存对它们的策略完全不同：
 
-| | non-wrapped（非包装） | wrapped（包装） |
-|---|---|---|
-| 显存由谁分配 | CV-CUDA（`cudaMalloc`） | 外部框架（torch/cupy/numpy 经 DLPack/CAI） |
-| 典型来源 | `cvcuda.Tensor(shape, dtype, layout)`、算子 allocating 输出 | `cvcuda.as_tensor(torch_tensor, layout)` |
-| 占用缓存字节配额 | 占（按真实字节数记账） | **不占**（按 0 记账） |
-| 能否被复用 | 能（同规格创建直接拿旧显存） | 不能复用（显存属于外部，包装外壳用完即弃） |
-| 进缓存的目的 | 复用 | **生命周期保护** |
-
-wrapped 对象「也进缓存却不算尺寸」乍看矛盾，其实目的完全不同：算子是**异步提交到流上**的（u4-l1），Python 侧函数返回时 kernel 可能还没执行。如果包装张量在 Python 里已经没人引用，而 C++ 侧又只被流回调短暂持有，对象可能在 kernel 执行期间被析构——外部框架把显存一回收，kernel 就写进了野指针。把 wrapped 对象放进缓存，等于让缓存多持有一个引用，撑到流上的工作完成。Tensor.cpp 里的注释原话是：「不这么做，事情可能会坏掉」。
+- **零字节记账**：包装张量的 `GetSizeInBytes()` 为 0，完全不占缓存配额。官方文档 [docs/sphinx/advanced/object_cache.rst:43-48](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/docs/sphinx/advanced/object_cache.rst#L43-L48) 的表述是「包装对象不增加缓存占用」。
+- **仍然进缓存，但目的是保活**：算子是异步提交到流上的（u4-l1）。如果 Python 侧引用先消失、而流上的 kernel 还没跑到用它的那一步，对象就会在半路被析构。缓存多持一个引用，相当于给「流上的最后一位使用者」兜底。
+- **包装 Image 还有一层「外壳复用」**：构造 `nvcvpy::Image` 外壳昂贵（其 Resource 基类要创建 `cudaEvent_t` 等资源），所以复用的是外壳，装进新的 buffer 元数据——这正是文档第 77 行「缓存复用同样适用于包装对象」的准确含义：**复用的是 Python/C++ 外壳对象，不是显存**。
 
 #### 4.3.2 核心流程
 
-```text
-non-wrapped: Tensor::Create → CreateFromReqs
-    fetch(Key{shape+layout, dtype}) ── 命中 → 返回旧对象（显存复用）
-                                    └─ 未命中 → new + cudaMalloc → add（按真实字节记账）
+包装张量与包装图像的路径略有不同：
 
-wrapped: Tensor::Wrap(ExternalBuffer)
-    用「wrapper 专用键」removeAllNotInUseMatching  ← 先清掉旧的不在用的包装外壳
-    new Tensor(外部数据, 外部对象引用)               ← 不分配显存
-    add 进缓存                                      ← 记账按 0 字节，只为保命
+```text
+as_tensor(torch_tensor)                 as_image(buffer, fmt)
+  └─ Tensor::Wrap                         └─ Image 包装路径
+       ├─ 构造 wrapper 键                      ├─ 构造 wrapper 键
+       ├─ removeAllNotInUseMatching(wrapper键) ├─ fetchOne(wrapper键)   ← 外壳复用!
+       │   (旧 wrapper 不可复用，清掉)          │    命中 → setWrapData(换新 buffer 元数据)
+       ├─ new Tensor(data, buffer引用)         │    未命中 → new Image + add
+       └─ Cache::add  ← 仅保活                 └─ removeAllNotInUseMatching(清理其余闲置外壳)
 ```
 
 #### 4.3.3 源码精读
 
-官方文档对两类的定义（配合官方样例）：
+[python/mod_cvcuda/nvcv/Tensor.cpp:168-203](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Tensor.cpp#L168-L203) 是 `Tensor::Wrap`。注意第 174-179 行的注释与第 198-201 行的注释——前者说明所有 wrapper 共用一个键，创建时顺手把**不在使用的** wrapper 从缓存清掉（它们反正不可复用）；后者说明把新 wrapper 加进缓存的原因是防止「流还在用、Python 已放手」的悬空：
 
-[docs/sphinx/advanced/object_cache.rst:L31-L48](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/docs/sphinx/advanced/object_cache.rst#L31-L48)——non-wrapped 由 CV-CUDA 分配并**增加缓存占用**（引用 [samples/object_cache/basic.py](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/samples/object_cache/basic.py#L24-L27)：直接 `cvcuda.Tensor((16, 32, 4), np.float32, cvcuda.TensorLayout.HWC)`）；wrapped 包装外部管理的显存，**不增加缓存占用**（引用 [samples/object_cache/basic_wrapped.py](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/samples/object_cache/basic_wrapped.py#L24-L26)：`cvcuda.as_tensor(torch_tensor, layout="N")`）。
+```cpp
+    // This is the key of a tensor wrapper.
+    // All tensor wrappers have the same key.
+    Tensor::Key key;
+    // We take this opportunity to remove from cache all wrappers that aren't
+    // being used. They aren't reusable anyway.
+    Cache::Instance().removeAllNotInUseMatching(key);
+    // ...
+    // Need to add wrappers to cache so that they don't get destroyed by
+    // the cuda stream when they're last used, and python script isn't
+    // holding a reference to them. If we don't do it, things might break.
+    Cache::Instance().add(*tensor);
+```
 
-包装路径的完整逻辑：
+wrapper 键「全部相等」的实现见 [python/mod_cvcuda/nvcv/Tensor.cpp:332-358](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Tensor.cpp#L332-L358)：wrapper 键哈希恒为 0、互相比较恒为真——不是为了让它们命中复用，而是为了让 `removeAllNotInUseMatching` 一次捞出全部闲置 wrapper。
 
-[python/mod_cvcuda/nvcv/Tensor.cpp:L168-L203](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Tensor.cpp#L168-L203)——`Tensor::Wrap` 三步走：① 用 wrapper 键调 `removeAllNotInUseMatching` 清理旧的不在使用的包装外壳（注释说明它们「反正不可复用」）；② 构造包装张量，并用 `buffer.producerStream()` 给资源状态播种生产者流（这正是 u4-l1 讲过的跨流安全机制）；③ `Cache::Instance().add(*tensor)`——注释写明加进缓存是为了「防止它们被 cuda stream 在最后一次使用时销毁，而 python 脚本又不持有引用」。
+零字节记账的机制藏在一个不起眼的构造函数里。[python/mod_cvcuda/nvcv/Tensor.cpp:246-251](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Tensor.cpp#L246-L251)：包装版构造函数用**默认构造的空 Requirements** 计算大小，得到的字节数自然是 0：
 
-「不占配额」的字节来源：
+```cpp
+Tensor::Tensor(const nvcv::TensorData &data, py::object wrappedObject)
+    : m_impl{nvcv::TensorWrapData(data)}
+    , m_size_inbytes{doComputeSizeInBytes(nvcv::Tensor::Requirements())}  // == 0
+    , m_wrappedObject(wrappedObject)
+```
 
-[python/mod_cvcuda/nvcv/Tensor.cpp:L246-L251](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Tensor.cpp#L246-L251)——包装张量的构造函数用一份**空的** `nvcv::Tensor::Requirements()` 计算 `m_size_inbytes`（对照非包装构造函数 [L239-L244](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Tensor.cpp#L239-L244)，后者用真实 `reqs` 计算）。空的内存需求算出的字节数为 0，于是 `add()` 里的记账 `+= 0`，包装对象对配额零影响。
+官方测试为这个行为背书：[tests/cvcuda/python/test_cache.py:128-135](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/tests/cvcuda/python/test_cache.py#L128-L135) 用 cupy 数组 `as_tensor` 包装后断言 `current_cache_size_inbytes() == 0`。
 
-wrapper 键的「一视同仁」：
+包装 Image 的外壳复用在 [python/mod_cvcuda/nvcv/Image.cpp:676-706](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Image.cpp#L676-L706)：`fetchOne` 拿到一个闲置外壳后调 `setWrapData` 换上新的 buffer 元数据。为什么值得这么做？[python/mod_cvcuda/nvcv/Image.cpp:743-745](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Image.cpp#L743-L745) 的注释给出答案：
 
-[python/mod_cvcuda/nvcv/Tensor.cpp:L332-L343](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Tensor.cpp#L332-L343)——wrapper 键的哈希恒为 0（注释：「对缓存而言所有 wrapper 都相等」）。这配合 `doIsCompatible` 的 wrapper 分支（[L345-L359](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Tensor.cpp#L345-L359)：两个 wrapper 键互相兼容、wrapper 与非 wrapper 永不兼容），使 `removeAllNotInUseMatching` 一次就能捞出**所有**空闲的包装外壳。
+```cpp
+//We recreate the nvcv::Image wrapper (m_impl) because it's cheap.
+//It's not cheap to create nvcvpy::Image as it might have allocated expensive resources (cudaEvent_t in Resource parent).
+```
 
-算子对象作为「外部缓存条目」也不占配额：
-
-[python/mod_cvcuda/nvcv/Cache.hpp:L57-L94](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.hpp#L57-L94)——`ExternalCacheItem::doComputeSizeInBytes()` 直接 `return 0;`，注释写明「外部 CacheItem（例如 cvcuda 的算子）不应污染缓存」。这解释了为什么每帧 `cvcuda.flip(...)` 内部 `CreateOperator` 反复查缓存，`current_cache_size_inbytes()` 却不增长。
-
-官方测试对此有直接断言：
-
-[tests/cvcuda/python/test_cache.py:L128-L143](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/tests/cvcuda/python/test_cache.py#L128-L143)——先用 cupy 数组 `as_tensor` 包装：断言 `current_cache_size_inbytes() == 0`（包装不占）；再调用 allocating 算子 `advcvtcolor` 产生非包装输出：断言字节数等于该输出的缓存字节数且 `> 0`。
+最后补一块拼图：算子对象也进缓存，但走 `ExternalCacheItem`（[python/mod_cvcuda/nvcv/Cache.hpp:57-94](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.hpp#L57-L94)）。它的 `doComputeSizeInBytes` 直接返回 0，注释写明「nvcv 之外的缓存条目（例如 cvcuda 的算子）不应污染缓存」——这呼应 u3-l3 讲过的「算子对象创建也走缓存」，且不占显存配额。
 
 #### 4.3.4 代码实践
 
-**实践目标**：对比两类对象的缓存记账差异。
-
-**操作步骤**（示例代码）：
-
-```python
-# 示例代码：wrapped_probe.py（需要 torch；无 torch 可换成 cupy）
-import cvcuda, numpy as np, torch
-
-cvcuda.clear_cache()
-print("清空后:", cvcuda.current_cache_size_inbytes())
-
-ext = torch.zeros((16, 32, 4), device="cuda", dtype=torch.float32)
-wrapped = cvcuda.as_tensor(ext, "HWC")
-print("包装后:", cvcuda.current_cache_size_inbytes())   # 预期仍为 0
-
-own = cvcuda.Tensor((16, 32, 4), np.float32, cvcuda.TensorLayout.HWC)
-print("自建后:", cvcuda.current_cache_size_inbytes())   # 预期 > 0
-```
-
-**需要观察的现象**：包装 torch 张量前后字节数都是 0；自建同规格张量后字节数跳增。
-
-**预期结果**：三行输出 `0 → 0 → N（N≈16×32×4×4 字节，可能因行对齐略大）`。**待本地验证**。
-
-#### 4.3.5 小练习与答案
-
-**练习 1**：既然 wrapped 对象不可复用，为什么还要 `Cache::Instance().add(*tensor)`？
-
-**答案**：为了生命周期保护。算子异步提交到流，Python 返回时 kernel 可能尚未执行完；若 Python 侧已无引用，包装张量可能被析构、外部框架回收显存，导致 kernel 写野指针。缓存持有的那个 `shared_ptr` 让对象活到流上工作结束（配合 u4-l1 的资源守卫记账）。
-
-**练习 2**：`Tensor::Wrap` 为什么在构造新包装对象**之前**先调 `removeAllNotInUseMatching`？
-
-**答案**：wrapper 键哈希恒 0、互相兼容，这次调用会把所有「不在使用」的旧包装外壳一次性清出缓存——它们反正不能复用，留着只占条目数。这是「创建时顺手做垃圾回收」的模式。
-
-### 4.4 缓存增长控制：限额、整包清空与 unbounded growth
-
-#### 4.4.1 概念说明
-
-缓存的键是「规格」。如果每轮循环的输出规格都不同（视频分辨率变化、动态 batch、随机尺寸数据增强……），每一轮都会 miss 并新增一个条目，缓存条目数随时间**无界增长**——官方文档称之为 unbounded growth 风险。更隐蔽的是：这些显存全部被缓存持有着，其他框架（比如同进程的 torch）会率先看到 OOM。
-
-CV-CUDA 的对策是一个**按设备的字节限额**加一条简单粗暴的规则：
-
-- 默认限额 = 当前设备总显存的 **一半**（`import cvcuda` 时逐卡初始化）。
-- 单个对象超过限额 → 根本不入缓存（每次都真实分配/释放）。
-- 加入后累计将超过限额 → **清空该设备的全部缓存条目**（不是 LRU 淘汰最旧的，而是整包倒掉），再插入新条目。
-
-「整包清空」意味着缓存尺寸呈**锯齿形**：爬升到限额 → 一次性跌回单个条目的大小 → 再爬升。理解这一点对解释基准测试里的偶发耗时尖峰很有价值。
-
-#### 4.4.2 核心流程
-
-```text
-import cvcuda 瞬间：
-  for 每块 GPU d: cache_limit_inbytes[d] = total_mem(d) / 2
-
-add(item) 时（设备 d）：
-  size(item) > limit(d)               → 不缓存，直接返回
-  used(d) + size(item) > limit(d)     → 清空设备 d 的所有条目（used(d) 归 0）
-                                       → 插入 item，used(d) = size(item)
-  否则                                → 插入 item，used(d) += size(item)
-
-set_cache_limit_inbytes(n)：
-  n < 0           → 抛 invalid_argument
-  n > 总显存       → 打印 WARNING（但允许，因为 CV-CUDA 不追踪设备）
-  used(d) > n     → 先清空设备 d 的缓存再生效
-```
-
-#### 4.4.3 源码精读
-
-add 的完整限额逻辑：
-
-[python/mod_cvcuda/nvcv/Cache.cpp:L151-L183](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L151-L183)——第一处判断（L158-L161）：对象本身大于限额就直接 `return` 不缓存；第二处（L163-L178）：累计将超限时，遍历并 `extract` 出**该设备**的全部条目（注释明确「只淘汰属于这个设备的条目」，多卡互不干扰），把记账归零；最后 `emplace` 插入并累加字节。注意清出的条目被移进局部容器 `savedItems`，在锁外析构——与 `removeAllNotInUseMatching` 的注释（[L185-L197](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L185-L197)）一样，是为了避免析构递归回调缓存导致死锁。
-
-默认限额的初始化：
-
-[python/mod_cvcuda/nvcv/Cache.cpp:L411-L444](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L411-L444)——`Export()` 里逐卡 `cudaMemGetInfo` 后设 `cache_limit_inbytes[d] = total_mem / 2`；前面一大段注释解释了为何要容忍无 GPU 主机（stub libcuda、`CUDA_VISIBLE_DEVICES=""` 等）：此时跳过初始化，`import cvcuda` 仍可用，等真有设备时再计。
-
-修改限额：
-
-[python/mod_cvcuda/nvcv/Cache.cpp:L286-L327](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L286-L327)——`setCacheLimit` 负数抛异常；超过当前卡总显存打印 WARNING 但仍接受（官方文档举的例子：两块 24GB 卡可以把限额设到 40GB 以上，因为 CV-CUDA 不追踪数据在哪个设备）；若当前已用字节超过新限额，先整包清空该设备。
-
-unbounded growth 的官方复现脚本：
-
-[samples/object_cache/unbounded_growth.py:L25-L33](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/samples/object_cache/unbounded_growth.py#L25-L33)——循环里 `random.randint(1000, 2000)` 取 h 和 w，每轮创建 `(h, w, 3)` float32 张量。随机组合几乎不重复，键几乎不重合，**永远 miss**：每轮真实分配一块 12~48MB 的显存并滞留缓存，直到撑爆限额触发整包清空。文档对应说明在 [docs/sphinx/advanced/object_cache.rst:L79-L90](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/docs/sphinx/advanced/object_cache.rst#L79-L90)。
-
-官方测试固化的三条规则：
-
-[tests/cvcuda/python/test_cache.py:L146-L170](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/tests/cvcuda/python/test_cache.py#L146-L170)——① 把限额设到小于当前缓存尺寸 → 缓存立即清空；② 对象尺寸超过限额 → 不入缓存（字节数保持 0）；③ 限额恰等于一个对象尺寸时，连续创建两个同规格对象（第一个还被 Python 引用着、不能复用）→ 触发整包清空后插入第二个，字节数仍等于单对象尺寸。这三条断言就是 4.4.2 伪代码的可执行版本。
-
-#### 4.4.4 代码实践（本讲主实践）
-
-**实践目标**：复现「不命中」并量化后果；再运行官方 basic/reuse 样例观察命中路径。
+**实践目标**：验证包装对象零配额，并对比非包装对象的记账差异。
 
 **操作步骤**：
 
-1. 运行官方复用样例（它本身无输出，配合探针观察）：
+1. 运行 [samples/object_cache/basic_wrapped.py](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/samples/object_cache/basic_wrapped.py#L18-L29)（需要 torch）：它把一个 `device="cuda"` 的 torch 张量用 `as_tensor` 包装。
+2. 用如下脚本对比两种对象（示例代码）：
 
-```bash
-python samples/object_cache/reuse.py
+   ```python
+   import cvcuda, numpy as np, torch
+
+   cvcuda.clear_cache()
+   w = cvcuda.as_tensor(torch.zeros(1024, 1024, 3, device="cuda"), "HWC")
+   print("wrapped :", cvcuda.current_cache_size_inbytes())  # 预期 0
+   t = cvcuda.Tensor((1024, 1024, 3), np.float32, cvcuda.TensorLayout.HWC)
+   print("non-wrap:", cvcuda.current_cache_size_inbytes())  # 预期 > 0（约 12MB，含对齐）
+   print("per-item:", cvcuda.internal.nbytes_in_cache(t))
+   ```
+
+**需要观察的现象**：包装后计数为 0；自建张量后计数跳增一个 `nbytes_in_cache` 报告的字节数。
+
+**预期结果**：两行输出 `0` 与一个约 12 MB 的数。注意字节数可能略大于 1024×1024×3×4 的理论值（行对齐，见 u2-l1）。待本地验证。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：既然包装张量不可复用，为什么还要 `Cache::Instance().add(*tensor)` 把它放进缓存？
+
+**答案**：为了保活。算子异步提交在流上，Python 引用可能先于流上的消费消失；缓存持有的 `shared_ptr` 保证对象活到流上的使用真正结束（配合 u4-l1 的 ResourceGuard/GCBag 机制）。所以包装对象「进缓存但不进配额、被查询时先被清理」。
+
+**练习 2**：文档说「缓存复用也适用于包装对象」，这句话和「包装对象不可复用显存」矛盾吗？
+
+**答案**：不矛盾。包装 Image 的路径里，复用的对象是 `nvcvpy::Image` 外壳（含 Resource 基类里的 cudaEvent 等昂贵资源），`setWrapData` 会把新 buffer 的元数据装进旧外壳；显存本身始终归外部框架所有，从不复用。
+
+**练习 3**：`ExternalCacheItem::GetSizeInBytes()` 为什么返回 0？
+
+**答案**：它包装的是 nvcv 之外的条目（典型是 cvcuda 算子句柄）。算子对象占用的是主机侧/驱动侧资源而非大块显存，按 0 记账可以避免算子缓存把显存配额吃光（Cache.hpp L85-90 的注释明确说了「不污染缓存」）。
+
+### 4.4 配额与淘汰：unbounded growth、limit 控制与多线程
+
+#### 4.4.1 概念说明
+
+缓存把「复用」做对了，但也带来新问题：**如果每轮创建的形状都不同，缓存就只进不出**——每个新形状都是新键，旧条目永远不会再被命中，却一直占着配额。官方文档称之为 unbounded cache growth（[docs/sphinx/advanced/object_cache.rst:79-90](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/docs/sphinx/advanced/object_cache.rst#L79-L90)），样例 [samples/object_cache/unbounded_growth.py:25-33](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/samples/object_cache/unbounded_growth.py#L25-L33) 用随机 h/w 每轮造新形状来演示它。
+
+CV-CUDA 的对策是**按设备设配额，超限整体清空**：
+
+- 默认配额 = 当前设备总显存的**一半**，在 `import cvcuda` 时初始化（[docs/sphinx/advanced/object_cache.rst:100](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/docs/sphinx/advanced/object_cache.rst#L100)）。
+- 单个对象大于配额 → 直接不入缓存。
+- 加入后总用量超限 → 该设备的**全部**条目被一次性清出（不是 LRU 淘汰）。
+- 配额可跨设备叠加设置（CV-CUDA 不追踪数据所在设备，文档因此允许把配额设得比单卡显存还大，见 [docs/sphinx/advanced/object_cache.rst:107-108](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/docs/sphinx/advanced/object_cache.rst#L107-L108)）；设为 0 等效关闭缓存。
+
+多线程语义（[docs/sphinx/advanced/object_cache.rst:120-131](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/docs/sphinx/advanced/object_cache.rst#L120-L131)）一句话概括：**表按线程隔离，账和限额全局共享**。一个线程释放的对象不能被另一个线程复用；而限额与当前用量是所有线程共用的，多线程程序要当心配额被别的线程的缓存吃掉。
+
+#### 4.4.2 核心流程
+
+`Cache::add` 的完整决策（这是本讲最值得背下来的流程）：
+
+```text
+Cache::add(item)
+  ├─ item.GetSizeInBytes() > 配额?          ── 是 → 直接返回(不入缓存)
+  ├─ 当前用量 + item大小 > 配额?
+  │    └─ 是 → 把该设备的所有条目 extract 出哈希表
+  │            (锁外析构, 避免死锁), 用量归零          ← 整体清空, 非 LRU
+  └─ 插入条目, 该设备用量 += item大小
 ```
 
-2. 给它加打印（示例代码，保存为 `reuse_probe.py`）：
+用量随时间呈**锯齿形**：稳定形状的循环里曲线是平的（复用，不增长）；形状漂移的循环里曲线爬升到配额，然后瞬间归零，再爬升。
 
-```python
-# 示例代码：reuse_probe.py
-import cvcuda, numpy as np
+#### 4.4.3 源码精读
 
-def create_tensor1():
-    tensor1 = cvcuda.Tensor((16, 32, 4), np.float32, cvcuda.TensorLayout.HWC)
-    print("tensor1 存活中:", cvcuda.cache_size(), cvcuda.current_cache_size_inbytes())
+淘汰逻辑在 [python/mod_cvcuda/nvcv/Cache.cpp:151-183](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L151-L183)。两个分支分别对应「对象太大不收」与「超限全清」，全清范围**只限当前设备**的条目：
 
-def create_tensor2():
-    tensor2 = cvcuda.Tensor((16, 32, 4), np.float32, cvcuda.TensorLayout.HWC)
-    print("tensor2 复用时:", cvcuda.cache_size(), cvcuda.current_cache_size_inbytes())
+```cpp
+        if (item.GetSizeInBytes() > doGetDeviceLimit(dev))
+        {
+            return;   // 单个对象超配额, 不缓存
+        }
 
-cvcuda.clear_cache()
-create_tensor1()   # tensor1 离开作用域后被缓存持有
-create_tensor2()   # 同规格 → 命中 tensor1 的显存，零新分配
+        if (item.GetSizeInBytes() + doGetDeviceSize(dev) > doGetDeviceLimit(dev))
+        {
+            // Evict Only items belonging to this device.
+            for (auto it = pimpl->items.begin(); it != pimpl->items.end();)
+            {
+                if (it->first->deviceId() == dev)
+                {
+                    savedItems.insert(pimpl->items.extract(it++));
+                }
+                else
+                {
+                    ++it;
+                }
+            }
+            Impl::current_size_inbytes[dev] = 0;
+        }
 ```
 
-3. 写「故意不命中」的循环（示例代码）：
+默认配额的初始化在导出函数里，[python/mod_cvcuda/nvcv/Cache.cpp:411-444](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L411-L444)：遍历每块 GPU，`cache_limit_inbytes[d] = total_mem / 2`。这段代码对无 GPU 环境（CI、CPU-only 构建）做了大量容错——顺带解释了为什么在纯 CPU 机器上 `import cvcuda` 也不会炸。
 
-```python
-# 示例代码：miss_probe.py
-import cvcuda, numpy as np
+Python 侧的控制面全部由 `Cache::Export` 导出（[python/mod_cvcuda/nvcv/Cache.cpp:449-505](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L449-L505)）：
 
-cvcuda.clear_cache()
-for i in range(5):
-    _ = cvcuda.Tensor((100 + i, 200 + i, 3), np.float32, cvcuda.TensorLayout.HWC)
-    print(f"第 {i} 轮: 条目数={cvcuda.cache_size()}, 字节数={cvcuda.current_cache_size_inbytes()}")
-```
+| Python API | 作用 |
+|-----------|------|
+| `cvcuda.clear_cache(scope)` | 清空缓存；`GLOBAL` 清所有线程（先同步并排空 GCBag），`LOCAL` 只清本线程 |
+| `cvcuda.cache_size(scope)` | 条目数；`GLOBAL` 累加所有线程实例 |
+| `cvcuda.get_cache_limit_inbytes()` / `set_cache_limit_inbytes(n)` | 读/写当前设备配额；设 0 即关闭缓存 |
+| `cvcuda.current_cache_size_inbytes()` | 当前设备已占用字节 |
+| `cvcuda.internal.nbytes_in_cache(obj)` | 单个缓存对象占的字节数（测试/诊断用） |
 
-4. 运行三个脚本：`python samples/object_cache/basic.py`、`python reuse_probe.py`、`python miss_probe.py`（basic.py 无打印，仅为确认可运行）。
+`clear_cache` 的第一行 `Stream::SynchronizeAndClearGCBag()`（[python/mod_cvcuda/nvcv/Cache.cpp:453-455](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L453-L455)）是本讲与 u4-l1 的直接接口：清缓存前必须先排空 ResourceGuard 经由辅助流回调持有的资源，否则清理不彻底——注释写明「否则调用者得再提交一个无关算子内存才会释放」。
+
+配额读写的官方行为被 [tests/cvcuda/python/test_cache.py:89-98](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/tests/cvcuda/python/test_cache.py#L89-L98) 固化：清空后默认配额恰为总显存的一半，且可随意改设。
+
+#### 4.4.4 代码实践（本讲主实践）
+
+**实践目标**：亲手证明「每轮变 shape → 缓存不命中 → 无界增长」，并说出后果与解法。
+
+**操作步骤**：
+
+1. 运行官方样例（注意入口处把迭代次数降到 100，[samples/object_cache/unbounded_growth.py:39-40](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/samples/object_cache/unbounded_growth.py#L39-L40)）：
+
+   ```bash
+   python samples/object_cache/unbounded_growth.py
+   python samples/object_cache/basic.py
+   python samples/object_cache/reuse.py
+   ```
+
+   前两个脚本没有打印输出（它们是文档的代码素材），观察计数需要下一步的自写脚本。
+
+2. 写一个带观测的复现脚本（示例代码）：
+
+   ```python
+   import random, cvcuda, numpy as np
+
+   cvcuda.clear_cache()
+   for i in range(30):
+       h, w = random.randint(1000, 2000), random.randint(1000, 2000)
+       t = cvcuda.Tensor((h, w, 3), np.float32, cvcuda.TensorLayout.HWC)
+       del t   # 形状每轮都新 → 下轮键不同 → fetch 落空 → 新分配
+       print(f"{i:2d} items={cvcuda.cache_size()} "
+             f"bytes={cvcuda.current_cache_size_inbytes()/2**20:8.1f} MiB "
+             f"limit={cvcuda.get_cache_limit_inbytes()/2**20:.0f} MiB")
+   ```
+
+3. 再运行 [samples/object_cache/control.py](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/samples/object_cache/control.py#L18-L31) 并在你自己的循环前加一行 `cvcuda.set_cache_limit_inbytes(0)` 重跑一次对照。
 
 **需要观察的现象**：
 
-- `reuse_probe.py`：两次打印的**字节数相同**——`tensor2` 没有带来新分配（复用了 `tensor1` 留下的显存）；这正是官方 `reuse.py`（[samples/object_cache/reuse.py:L23-L40](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/samples/object_cache/reuse.py#L23-L40)）演示的「同规格创建不发生新内存分配」。
-- `miss_probe.py`：每轮条目数 +1、字节数单调上涨——五轮五个不同的键，无一命中。
+- 无界版本：`items` 与 `bytes` 随迭代单调爬升；若爬到 `limit`，下一次分配后计数**瞬间归零再重新爬升**（锯齿，整体淘汰）。
+- 配额设 0 的版本：`items` 恒为 0（对象超限不入缓存），`nvidia-smi` 的进程显存反而随着 `del` 及时回落。
 
-**预期结果**：`miss_probe.py` 输出形如 `1 → 2 → 3 → 4 → 5`（条目数）。把循环次数加大（并放大尺寸），字节数爬到限额一半时会瞬间跌回单条目大小（整包清空的锯齿）。具体数值**待本地验证**。
-
-**后果说明**（实践任务要求的分析）：不命中循环的后果有三层——① 每轮真实 `cudaMalloc`，分配开销无法摊销，吞吐下降；② 旧显存全部滞留缓存，**其他框架可见的空闲显存被蚕食**，同进程的 torch/cupy 可能先 OOM；③ 达到限额时的整包清空会连带你**正在依赖的**其他规格的缓存条目一起被清掉（比如管线上一步刚建立的可复用输出），造成偶发的性能塌陷。
+**预期结果与后果说明**：变 shape 循环里缓存永不命中，徒增两重代价——显存被不会再用的旧形状占住，挤占模型与数据预算，最终触发一次性全清；全清又把「本可以复用的热点形状」一并清掉，造成分配风暴与性能抖动。解法按优先级：预分配输出改用 `_into` 变体（u3-l3）、把形状分桶对齐、或调低配额/定期 `clear_cache`。待本地验证（本环境无 GPU）。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：把限额设为 0 会怎样？
+**练习 1**：缓存超限时的淘汰策略是什么？为什么 CV-CUDA 不做 LRU？
 
-**答案**：等于禁用缓存——任何对象都不满足「尺寸 ≤ 0」的入缓存条件，每次创建都真实分配、释放即归还。功能正确但性能受损（官方文档 [L110](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/docs/sphinx/advanced/object_cache.rst#L110) 明确此点）。
+**答案**：把当前设备的**全部**条目一次性清出（Cache.cpp L163-178）。不做 LRU 是工程取舍：LRU 需要维护访问顺序、逐条淘汰并精确记账，而这里的典型工作负载是「少数热点形状反复复用、漂移形状一次性的」——到超限那一刻，留下来的大概率都是漂移产物，全清实现最简单且锁持有时间可控（extract 出来的条目在锁外析构）。
 
-**练习 2**：为什么「超限清空」选择整包倒掉而不是 LRU？
+**练习 2**：把配额设成 0 会怎样？有什么副作用？
 
-**答案**：从源码看这是工程取舍：条目存在 `unordered_multimap` 里没有时间序，精确 LRU 需要额外的年龄跟踪与锁开销；而缓存的典型稳态是「少数几个规格反复复用、总量远低于限额」，整包清空代价低且实现一行 `extract` 循环即可。代价是清空是全局性的：命中模式多样的进程会周期性损失全部热条目（锯齿形性能）。
+**答案**：任何大小 > 0 的对象都过不了 `item.GetSizeInBytes() > limit` 的第一道检查，直接不入缓存——缓存被关闭，显存随 Python 引用计数即时分配/释放。副作用是失去复用：固定形状的稳态循环退化为每轮 cudaMalloc，性能下降（文档 L110 也这么提醒）。
 
-**练习 3**：一个 16GB 显存的进程里跑了「随机分辨率增强」循环，另一个跑了「固定 1080p 管线」，谁的 `current_cache_size_inbytes()` 曲线更平稳？
+**练习 3**：两个线程各自跑同形状的循环，A 线程的缓存会把 B 线程的配额吃掉吗？
 
-**答案**：固定分辨率管线。它只有少数几个规格，首轮 miss 后持续命中，曲线是水平线；随机分辨率的曲线是锯齿——持续爬升到 8GB（默认限额）后整包清空、再爬升。
-
-### 4.5 线程语义与 Python API 全景
-
-#### 4.5.1 概念说明
-
-缓存实例是**线程局部**的：A 线程释放的对象，B 线程不能复用（文档原话）。但字节记账与限额是所有线程**共享**的静态变量——所以多线程程序里，每个线程各自往共享的配额里存钱。这带来两条实践准则：
-
-1. 多线程程序中警惕「限额被别人改小/清空」的相互影响（文档的 warning）。
-2. `clear_cache`/`cache_size` 都接受 `ThreadScope.GLOBAL`（默认，作用于所有线程）或 `ThreadScope.LOCAL`（只作用于当前线程）。
-
-最后把全部 Python API 汇总成一张速查表：
-
-| API | 作用 |
-|---|---|
-| `cvcuda.cache_size(scope=GLOBAL)` | 缓存条目数量（GLOBAL=所有线程求和，LOCAL=本线程） |
-| `cvcuda.current_cache_size_inbytes()` | 当前设备已缓存的字节数 |
-| `cvcuda.get_cache_limit_inbytes()` / `set_cache_limit_inbytes(n)` | 读/写当前设备的字节限额 |
-| `cvcuda.clear_cache(scope=GLOBAL)` | 清空缓存（先排空流回调） |
-| `cvcuda.internal.nbytes_in_cache(item)` | 查询单个缓存条目占用的字节数（测试/调试用） |
-
-#### 4.5.2 核心流程
-
-```text
-cache_size(GLOBAL): 对 instances 里每个线程实例求 size() 之和（持全局锁）
-cache_size(LOCAL):  只数当前线程实例的条目
-clear_cache(GLOBAL): Stream::SynchronizeAndClearGCBag() → 合并所有实例的条目并丢弃，记账清零
-clear_cache(LOCAL):  同上，但只清当前线程实例
-脚本退出时:         RegisterCleanup 注册的 Cache::ClearAll() 兜底清空
-```
-
-#### 4.5.3 源码精读
-
-Python API 的导出与 clear 的顺序细节：
-
-[python/mod_cvcuda/nvcv/Cache.cpp:L446-L471](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L446-L471)——先 `util::RegisterCleanup(m, Cache::ClearAll)` 保证脚本结束时清空；`clear_cache` 的 lambda 第一行是 `Stream::SynchronizeAndClearGCBag()`，注释点明原因：ResourceGuard 通过辅助流回调释放已完成的持有，必须先排空这些回调，清缓存才能真正释放资源（与 u4-l1 的流记账闭环衔接）。随后按 scope 分派 `ClearAll()`（全局）或 `Instance().clear()`（本线程）。
-
-查询类 API：
-
-[python/mod_cvcuda/nvcv/Cache.cpp:L473-L508](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L473-L508)——`cache_size` 按 scope 返回 `TotalSize()`（对 `instances` 求和）或 `Instance().size()`；`get/set_cache_limit_inbytes` 与 `current_cache_size_inbytes` 都以 `cudaGetDevice` 取**当前设备**为口径；`internal.nbytes_in_cache` 暴露单条目字节数给测试用。
-
-官方多线程样例（浓缩了全部语义）：
-
-[samples/object_cache/threads.py:L25-L38](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/samples/object_cache/threads.py#L25-L38)——主线程建 1 个张量后启动子线程；子线程内再建 1 个张量时打印 `(2, 1)`：GLOBAL=2（两个线程各 1 条），LOCAL=1（只数本线程）；`clear_cache(LOCAL)` 后打印 `(1, 0)`：只清掉了子线程自己的条目。
-
-该样例后半段的长注释也值得读：
-
-[samples/object_cache/threads.py:L42-L65](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/samples/object_cache/threads.py#L42-L65)——解释了 `thread.join()` 与 C++ thread_local 析构之间的竞态：Python 认为线程已结束时，C++ 侧线程局部对象（包括 Cache 实例）还在异步析构，主线程若随即退出，两个 Cache 析构函数会并发清理 CUDA 资源导致段错误；样例用 `time.sleep(0.1)` 规避。这是「Python 线程模型与 C++ 线程局部存储交错」的鲜活教材，正常业务（长寿命线程池）不会踩到。
-
-对应地，`Cache` 析构函数里有一整套防御：
-
-[python/mod_cvcuda/nvcv/Cache.cpp:L103-L148](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp#L103-L148)——先在锁内手动扣减记账（注释：「在这里调析构函数可能不安全」），再视 Python 解释器状态决定是否持 GIL 销毁条目；异常路径干脆故意泄漏（注释链接到 pybind11 关于 GIL 错误的文档），也不冒段错误风险。
-
-#### 4.5.4 代码实践
-
-**实践目标**：验证「实例线程私有、记账全局共享」。
-
-**操作步骤**（示例代码）：
-
-```python
-# 示例代码：thread_probe.py
-import threading, cvcuda, numpy as np
-
-def worker():
-    t = cvcuda.Tensor((16, 32, 4), np.float32, cvcuda.TensorLayout.HWC)
-    print("子线程内: GLOBAL=%d LOCAL=%d" %
-          (cvcuda.cache_size(), cvcuda.cache_size(cvcuda.ThreadScope.LOCAL)))
-    cvcuda.clear_cache(cvcuda.ThreadScope.LOCAL)
-    print("LOCAL 清空后: GLOBAL=%d LOCAL=%d" %
-          (cvcuda.cache_size(), cvcuda.cache_size(cvcuda.ThreadScope.LOCAL)))
-
-cvcuda.clear_cache()
-main_t = cvcuda.Tensor((16, 32, 4), np.float32, cvcuda.TensorLayout.HWC)
-th = threading.Thread(target=worker)
-th.start(); th.join()
-```
-
-**需要观察的现象**：子线程内 GLOBAL 数到主线程+子线程两个条目，LOCAL 只数到 1；`clear_cache(LOCAL)` 后 GLOBAL 剩 1（主线程的还在）、LOCAL 归 0。
-
-**预期结果**：两行输出 `(2, 1)` 和 `(1, 0)`——与官方 `threads.py` 注释里的预期输出完全一致（[samples/object_cache/threads.py:L29-L31](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/samples/object_cache/threads.py#L29-L31)）。**待本地验证**。
-
-#### 4.5.5 小练习与答案
-
-**练习 1**：4 个线程各自缓存了 100 个条目，`cvcuda.cache_size()` 与 `cvcuda.cache_size(cvcuda.ThreadScope.LOCAL)` 分别返回什么？
-
-**答案**：GLOBAL 返回约 400（各线程实例求和；若主线程也有缓存则更多），LOCAL 返回当前调用线程自己的 100。
-
-**练习 2**：为什么 `clear_cache` 要先调 `Stream::SynchronizeAndClearGCBag()`？
-
-**答案**：ResourceGuard 的跨流保护靠辅助流上的回调在 kernel 完成后释放持有（u4-l1）；若不先排空这些回调就清缓存，回调持有的引用还在，条目要么清不掉、要么在回调触发时命中已失效的状态。先同步、后清理，才能保证引用链归零。
-
-**练习 3**：`set_cache_limit_inbytes` 是按进程还是按设备生效？
-
-**答案**：按设备。函数内部用 `cudaGetDevice` 取当前设备，只写 `cache_limit_inbytes[当前设备]`；清空判断也只淘汰该设备的条目（官方多卡测试 `test_per_device_cache_limits` 固化了这一行为，[tests/cvcuda/python/test_cache.py:L289-L306](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/tests/cvcuda/python/test_cache.py#L289-L306)）。
+**答案**：会。缓存实例是 thread_local 的（A 释放的对象 B 复用不了），但 `current_size_inbytes`/`cache_limit_inbytes` 是全局共享的静态表（Cache.cpp L91-93），A 的缓存增长同样消耗共享配额，甚至可能触发把 B 线程缓存里该设备的条目一并清空的超限淘汰。文档 L125-126 的警告说的就是这件事。
 
 ## 5. 综合实践
 
-把本讲所有知识点串成一个「缓存诊断器」脚本。对下面三段管线各测一轮，记录每轮的 `cache_size()`、`current_cache_size_inbytes()` 与墙钟时间：
+把本讲四条主线串成一个可复现实验：**同一条 flip 管线在三种缓存状态下的行为对比**。
+
+写一个脚本（示例代码，依赖 u1-l2 的环境）：
 
 ```python
-# 示例代码：cache_diagnosis.py
 import time, cvcuda, numpy as np
 
-def probe(tag, make):
-    cvcuda.clear_cache()
+src = cvcuda.Tensor((1080, 1920, 3), np.uint8, cvcuda.TensorLayout.HWC)
+
+def loop(n=200):
     t0 = time.perf_counter()
-    for _ in range(200):
-        obj = make()
-        del obj
-    dt = time.perf_counter() - t0
-    print(f"{tag:<14} 条目={cvcuda.cache_size():>3} 字节={cvcuda.current_cache_size_inbytes():>12} 耗时={dt:.3f}s")
+    for _ in range(n):
+        out = cvcuda.flip(src, 1)   # allocating: 每轮 Tensor::Create → 查缓存
+        del out
+    return (time.perf_counter() - t0) / n * 1e6  # µs/iter
 
-# A. 固定规格：稳态全命中
-probe("固定规格", lambda: cvcuda.Tensor((1080, 1920, 3), np.float32, cvcuda.TensorLayout.HWC))
-
-# B. 交替两种规格：仍然命中（两个键各自积累一个条目）
-def alternating(i=[0]):
-    i[0] ^= 1
-    return cvcuda.Tensor((1080 + i[0], 1920, 3), np.float32, cvcuda.TensorLayout.HWC)
-probe("交替两规格", lambda: alternating())
-
-# C. 随机规格：永不命中，缓存无界增长直到整包清空
-import random
-probe("随机规格", lambda: cvcuda.Tensor((random.randint(1000, 1100), 1920, 3), np.float32, cvcuda.TensorLayout.HWC))
+# 场景 A: 默认配额(半卡), 稳态复用
+cvcuda.clear_cache(); a = loop()
+# 场景 B: 关闭缓存
+cvcuda.set_cache_limit_inbytes(0); cvcuda.clear_cache(); b = loop()
+# 场景 C: 恢复配额, 但每轮换 shape 制造不命中
+cvcuda.set_cache_limit_inbytes(cvcuda.get_cache_limit_inbytes() or 2**30)
+cvcuda.clear_cache(); t0 = time.perf_counter()
+for i in range(200):
+    h = 1000 + (i % 8)              # 8 种形状轮转, 各自能命中但互不复用
+    s = cvcuda.Tensor((h, 1920, 3), np.uint8, cvcuda.TensorLayout.HWC)
+    o = cvcuda.flip(s, 1); del o, s
+c = (time.perf_counter() - t0) / 200 * 1e6
+print(f"A 复用: {a:.1f}µs  B 关缓存: {b:.1f}µs  C 多形状: {c:.1f}µs")
+print(f"缓存条目: {cvcuda.cache_size()}, 字节: {cvcuda.current_cache_size_inbytes()/2**20:.1f} MiB")
 ```
 
-分析任务：
+要求完成：
 
-1. 解释 A/B/C 三段结束时条目数与字节数的差异（C 应远大于 B，B 约为 A 的两倍条目数）。
-2. 对比 A 与 C 的耗时差异，估算单次 `cudaMalloc`+`cudaFree` 的代价。
-3. 对 C 再跑一次加大循环次数的版本，观察字节数是否出现「锯齿」（爬到限额→瞬间跌落），记录锯齿周期。
-4. 最后把 C 的循环改成 `_into` 风格（循环外预分配一个最大规格张量，循环内复用），对比耗时与最终字节数，验证 u3-l3 的结论：形状多变场景应改用预分配。
+1. 记录三个场景的耗时与最后的 `cache_size`/`current_cache_size_inbytes`，填成表格。
+2. 解释场景 A 为何第二轮起近似零分配（对照 4.2 的 fetch→命中路径），场景 B 为何最慢（每轮 cudaMalloc），场景 C 的缓存条目数为何约为形状种数 × 2（输入与输出各一族键）。
+3. 用 `_into` 变体改写循环（预分配一个 `dst`，循环内 `cvcuda.flip_into(dst, src, 1)`），再测一次，说明为什么它能彻底绕开本讲讨论的缓存命中问题（提示：u3-l3——dst 由你持有，`Tensor::Create` 这一步根本不发生）。
+
+预期：A < C < B，且 `_into` 版本与 A 相当或更好、行为最确定。待本地验证（本环境无 GPU，无法代跑）。
 
 ## 6. 本讲小结
 
-- 对象缓存**只存在于 Python 绑定层**（`python/mod_cvcuda`）：`Tensor`、`Image`、`ImageBatchVarShape`、`TensorBatch`、算子对象都会进缓存；C/C++ 层没有缓存，`del` 不释放显存是缓存持有引用的直接结果。
-- 命中条件是三层判定的合取：**同具体 Key 类型 + 同 CUDA 设备 + 规格相等**；对 Tensor 而言规格 = `TensorShape`（shape 含 layout 标签）+ `dtype`，`rowalign` 经由 Requirements 间接参与；变长批容器的键只有 capacity。
-- **non-wrapped** 对象按真实字节记账、可被同规格创建复用（`CreateFromReqs` 的 fetch-or-create）；**wrapped** 对象按 0 字节记账、不可复用，进缓存只为在流上工作完成前保住外部显存的生命周期。
-- 增长控制是「按设备字节限额 + 整包清空」：默认限额为每卡总显存一半；单对象超限不入缓存，累计超限则把该设备条目全部倒掉再插入——缓存曲线呈锯齿形，不是 LRU。
-- 缓存实例**线程私有**、记账与限额**全局共享**；`clear_cache`/`cache_size` 支持 `ThreadScope.GLOBAL/LOCAL`；`clear_cache` 会先排空 ResourceGuard 的流回调再清理。
-- 规格多变的循环（随机分辨率增强等）是缓存的天敌：永不命中 + 显存滞留 + 整包清空连坐，应改用 `_into` 变体预分配输出。
+- 对象缓存**只在 Python 绑定层存在**（`python/mod_cvcuda`），核心是每线程一张的 `unordered_multimap`：键 = (规格, 设备)，值 = 持有 `shared_ptr` 的条目。
+- 非包装对象**创建即入缓存**：allocating 算子的 `Tensor::Create` 先 `fetch`，键匹配（shape 含 layout + dtype + deviceId）且 `isInUse()` 为假（`use_count() > 2` 的引用计数判据）才命中；因此 `del` 后显存不降，`clear_cache`/超限淘汰/进程退出才真正归还。
+- 变长批的键只有 capacity；包装对象零字节记账，进缓存只为流上保活，包装 Image 还会复用昂贵的外壳（Resource 里的 cudaEvent）；算子对象经 `ExternalCacheItem` 入缓存同样记 0 字节。
+- 配额按设备记账，默认半张卡；超限策略是**该设备条目整体清空**（非 LRU），单对象超配额直接不收，`set_cache_limit_inbytes(0)` 可关闭缓存。
+- 每轮变 shape 的循环是缓存的反面案例：只进不出、无界增长，最终挤占显存并触发全清抖动；解法是 `_into` 变体、形状分桶或主动控制配额。
+- 多线程下「表隔离、账共享」：跨线程不复用，但配额与超限淘汰是全局的。
 
 ## 7. 下一步学习建议
 
-下一讲 [u4-l3：多流、多线程与多 GPU](u4-l3-multi-stream-thread-gpu.md) 会把本讲的线程局部缓存与 u4-l1 的流模型放进真实并发场景：参考官方 `test_multi_threading.py`/`test_multi_gpu.py`，理解每线程的流栈、`ThreadScope` 在并发清理中的坑，以及多 GPU 下「设备号参与缓存键」带来的隔离行为。
-
-想继续深挖源码的读者，建议按此顺序读：
-
-1. [python/mod_cvcuda/nvcv/Image.cpp](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Image.cpp)——对比 Image 的 `Key{size, fmt}` 与 Tensor 的键有何不同，以及包装 Image 外壳复用的路径。
-2. [python/mod_cvcuda/nvcv/Stream.cpp](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Stream.cpp)——`Stream` 居然也是缓存条目（`Stream::Key{}`），看看 `SynchronizeAndClearGCBag` 如何与缓存清理协作。
-3. [python/mod_cvcuda/nvcv/CAPI.cpp](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/CAPI.cpp)——`ImplCache_Add`/`ImplCache_Fetch` 把缓存能力通过 C 函数表暴露给 cvcuda 算子层，是理解「算子对象为何算作 ExternalCacheItem」的钥匙。
+- 下一讲 u4-l3《多流、多线程与多 GPU》将直接使用本讲的结论：阅读 [tests/cvcuda/python/test_multi_threading.py](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/tests/cvcuda/python/test_multi_threading.py) 时，留意线程局部的缓存如何与每线程的流栈（`StreamStack`）配合。
+- 缓存与 ResourceGuard/GCBag 的联动（`clear_cache` 里的 `SynchronizeAndClearGCBag`）在 u8-l3《Workspace 与 per-stream 缓存》会看到 C++ 侧的对应物：`PerStreamCache`、`SimpleCache` 与 Event 回收，那是一套更细粒度的按流缓存。
+- 想继续深挖本讲，建议精读 [python/mod_cvcuda/nvcv/Cache.cpp](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/python/mod_cvcuda/nvcv/Cache.cpp) 的析构函数（L103-149，解释器关闭时「故意泄漏」的兜底）与 [tests/cvcuda/python/test_cache.py](https://github.com/CVCUDA/CV-CUDA/blob/5ac8708bde57f8cf1c8d19443f6384875e86157c/tests/cvcuda/python/test_cache.py)（用 refcount 监测包装对象生命周期的技巧）。
