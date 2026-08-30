@@ -2,664 +2,429 @@
 
 ## 1. 本讲目标
 
-上一讲（u3-l1）我们读完了 `DeviceDriver` 这个"抽象合同"。本讲进入官方设备的**真实实现**，学完后你应该能够：
+上一讲（u3-l1）我们看清了 `DeviceDriver` 这个抽象基类定下的"契约"。本讲进入契约的最重要实现者——官方 LibreVNA 驱动。它其实不是一个类，而是**三个类组成的两层结构**：
 
-1. 说清两层继承的分工：`LibreVNADriver` 负责"协议逻辑"（把设置翻译成协议包、把协议包翻译成测量数据），`LibreVNAUSBDriver` / `LibreVNATCPDriver` 只负责"搬运字节"。
-2. 跟踪 USB 后端的完整路径：libusb 设备枚举 → 打开并 claim 接口 → 独立事件线程 → 异步接收 → 解析分发。
-3. 跟踪 TCP 后端的完整路径：SSDP 组播发现 → 双 TCP 连接（数据/日志）→ `readyRead` 信号驱动接收。
-4. 解释 `USBInBuffer` 这类接收缓冲工具解决什么问题（异步回调、粘包、部分帧）。
-5. 独立画出「一包原始字节 → `DeviceDriver::VNAMeasurement` → 发出信号」的调用序列图，并标注每个函数所在的文件与行号。
+- `LibreVNADriver`：公共层，只关心"协议内容"（发什么包、收到的包如何变成测量数据），完全不关心字节怎么到达；
+- `LibreVNAUSBDriver`：传输层之一，用 libusb 走 USB 批量传输；
+- `LibreVNATCPDriver`：传输层之二，用两条 TCP 连接走网络（配合设备端固件的 TCP 桥接）。
+
+学完本讲，你应该能够：
+
+1. 跟踪 USB 路径下"设备发现 → 打开 → 接收线程 → 解析成包"的完整调用链；
+2. 跟踪 TCP 路径下基于 SSDP（UDP 多播）的设备发现与双 socket 数据收发；
+3. 说出两条路径在哪一层汇合（`SendPacket` / `receivedPacket`），以及 `USBInBuffer` 这类接收缓冲工具存在的理由；
+4. 独立画出"一包原始字节 → `DeviceDriver::VNAMeasurement` → Qt 信号"的全链路序列图，并标注文件与行号。
 
 ## 2. 前置知识
 
-### 2.1 libusb 的同步与异步传输
+本讲假设你已读过 u3-l1（`DeviceDriver` 抽象）和 u2-l1（AppWindow 启动），另外补充几个背景概念：
 
-libusb 是跨平台的用户态 USB 库（不需要内核驱动）。本项目用到它的两种用法：
-
-- **同步批量传输**（bulk transfer）：调用 `libusb_bulk_transfer()` 后阻塞直到完成。本项目用它**发送**命令包。
-- **异步传输**（async transfer）：先 `libusb_alloc_transfer()` 分配、`libusb_fill_bulk_transfer()` 填参、`libusb_submit_transfer()` 提交，然后**立刻返回**；数据到达时 libusb 回调你注册的函数。本项目用它**接收**数据。
-- 异步模式必须有人不断调用 `libusb_handle_events()` 来"泵"事件，否则回调永远不会触发——这就是 USB 驱动里那个独立接收线程存在的唯一原因。
-
-### 2.2 USB 端点（endpoint）
-
-USB 设备的每个方向的数据通道叫端点，用地址区分。本项目用了三个（定义在 [librevnausbdriver.h:48-50](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.h#L48-L50)）：
-
-| 端点地址 | 方向 | 用途 |
-|---|---|---|
-| `0x01`（EP_Data_Out） | PC → 设备 | 发送控制/配置包 |
-| `0x81`（EP_Data_In） | 设备 → PC | 接收测量与应答包 |
-| `0x82`（EP_Log_In） | 设备 → PC | 接收设备日志（文本行） |
-
-地址最高位为 1 表示 IN（设备→主机）。所以"数据"和"日志"走两条完全独立的流。
-
-### 2.3 TCP、UDP 组播与 SSDP
-
-- **TCP** 是面向连接的字节流协议：没有"消息边界"，一次 `readAll()` 可能读到半条消息或三条半消息——这与 USB 批量传输一样存在**粘包/半包**问题，所以 TCP 驱动也需要接收缓冲。
-- **UDP 组播**：向组播地址（如 `239.255.255.250:1900`）发包，同一局域网内所有加入该组的设备都能收到。
-- **SSDP**（Simple Service Discovery Protocol）是 UPnP 用的发现协议：客户端周期性向组播地址发 `M-SEARCH` 请求，设备单播回应答，答文里带 `LOCATION`、`ST` 等字段。LibreVNA 复用它来发现"通过 TCP 提供 LibreVNA 服务的设备"。
-
-### 2.4 Qt 跨线程信号槽
-
-- `Qt::DirectConnection`：槽函数在**发射信号的线程**里直接执行（像普通函数调用）。
-- `Qt::QueuedConnection`：槽函数被投递到**接收者所属线程**的事件队列里排队执行（需要该线程有事件循环）。
-- USB 接收回调发生在 libusb 的事件线程里，而 GUI 对象活在主线程——理解这两种连接方式的差别，是看懂本讲代码中 `connect(...)` 第五个参数的关键。
-
-### 2.5 协议帧格式（回顾 + 补充）
-
-GUI 与固件共用同一份 [Protocol.hpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Communication/Protocol.hpp)。帧格式在 [Protocol.cpp:5-12](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Communication/Protocol.cpp#L5-L12) 的注释里写明：
-
-```
-1 字节帧头(0x5A) | 2 字节总长度 | 1 字节包类型 | 变长负载 | 4 字节 CRC32
-```
-
-各字段偏移由 [PacketConstants.h:10-25](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Communication/PacketConstants.h#L10-L25) 定义。有一个值得注意的特例：`VNADatapoint` 包（测量数据）的 CRC 恒为 0，不做校验——测量数据量大，省掉逐包 CRC 换取吞吐（见 [Protocol.cpp:69-90](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Communication/Protocol.cpp#L69-L90)）。
+- **libusb**：一个跨平台的用户态 USB 库。应用程序不用写内核驱动，直接通过它枚举设备、claim 接口、提交"批量传输"（bulk transfer）。LibreVNA GUI 只依赖 Qt 和 libusb 两个外部库（见 u1-l3）。
+- **USB 端点（Endpoint）**：USB 设备对外暴露若干单向"管道"，用地址编号。LibreVNA 用了三个：`0x01`（主机→设备，发命令）、`0x81`（设备→主机，回测量数据）、`0x82`（设备→主机，回日志文本）。
+- **异步传输与事件循环**：libusb 的典型用法是提交一个传输请求，然后在一个专门线程里反复调用 `libusb_handle_events()`；传输完成时 libusb 回调你的函数。回调发生在**libusb 的事件线程**，不是 Qt 主线程——这是本讲最重要的线程知识点。
+- **Qt 信号槽的连接类型**：`Qt::DirectConnection` 表示"在发射信号的线程里直接调用槽"；`Qt::QueuedConnection` 表示"把调用投递到接收者所属线程的事件队列里"。本讲会看到两种都用上了，而且是有意为之。
+- **SSDP**：Simple Service Discovery Protocol，UDP 多播（`239.255.255.250:1900`）上的服务发现协议，是 UPnP 的一部分。家里局域网的设备互相"打招呼"常用它。TCP 驱动借它来找网络上的 LibreVNA。
+- **协议帧格式**：`Protocol.hpp`/`Protocol.cpp` 定义的二进制帧为「1 字节帧头 `PCKT_HEADER_DATA` + 2 字节长度 + 1 字节类型 + 载荷 + 4 字节 CRC32」，详见 [Protocol.cpp:5-12](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Communication/Protocol.cpp#L5-L12)。本讲只用它，逐字段拆解留给单元 4。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
-|---|---|
-| [Device/LibreVNA/librevnadriver.h](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.h) / [.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp) | **公共层**：实现 `DeviceDriver` 的全部语义接口（setVNA/setSA/setSG/...），做"设置⇄协议包"的双向翻译；不含任何 USB/TCP 代码 |
-| [Device/LibreVNA/librevnausbdriver.h](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.h) / [.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp) | **USB 后端**：libusb 枚举/连接/收发线程 |
-| [Device/LibreVNA/librevnatcpdriver.h](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.h) / [.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp) | **TCP 后端**：SSDP 发现 + 双 TCP 连接收发 |
-| [Util/usbinbuffer.h](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.h) / [.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp) | **USB 异步接收缓冲**：一个端点一个实例，负责提交异步传输、累积数据、通知上层 |
-| [VNA_embedded/.../Protocol.hpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Communication/Protocol.hpp) / [.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Communication/Protocol.cpp) | 帧编解码：`DecodeBuffer()` / `EncodePacket()`，GUI 与固件共同编译 |
+| --- | --- |
+| [Device/LibreVNA/librevnadriver.h](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.h) | 公共层类声明：`SendPacket` 纯虚接口、`TransmissionResult` 枚举、测量信号 |
+| [Device/LibreVNA/librevnadriver.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp) | 公共层实现：把 `setVNA/setSA/setSG` 翻译成协议包；`handleReceivedPacket` 把协议包翻译回测量数据 |
+| [Device/LibreVNA/librevnausbdriver.h](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.h) / [.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp) | USB 传输层：libusb 枚举/连接、接收线程、发送队列 |
+| [Device/LibreVNA/librevnatcpdriver.h](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.h) / [.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp) | TCP 传输层：SSDP 发现、双 TCP socket 收发 |
+| [Util/usbinbuffer.h](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.h) / [.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp) | 通用工具：封装"一块 USB 接收缓冲 + 循环提交的异步批量传输" |
+| [Device/devicedriver.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/devicedriver.cpp) | `getDrivers()` 注册表：两个传输驱动在这里各占一行 |
 
-两条传输后端都在 [devicedriver.cpp:19-32](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/devicedriver.cpp#L19-L32) 的 `getDrivers()` 里注册（u3-l1 讲过的懒加载单例），驱动名分别是 `"LibreVNA/USB"` 与 `"LibreVNA/TCP"`。
+三个类如何注册进 GUI 的设备列表，见 [devicedriver.cpp:19-32](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/devicedriver.cpp#L19-L32)——USB 和 TCP 驱动是**两个并列的独立驱动**（驱动名分别是 `"LibreVNA/USB"` 与 `"LibreVNA/TCP"`），在设备下拉框里表现为两类不同的"设备源"。
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 LibreVNADriver 公共层：不关心字节的协议引擎
+### 4.1 LibreVNADriver 公共层：只谈协议，不谈管道
 
 #### 4.1.1 概念说明
 
-回忆 u3-l1 的结论：驱动继承分两层。`LibreVNADriver` 是中间层，它实现了 `DeviceDriver` 的全部"语义"接口——`setVNA()`、`setSA()`、`setSG()`、`setIdle()`……但它**不知道设备在哪**：
+`LibreVNADriver` 解决的问题是：**同一个协议，两种传输方式**。USB 插线能用，网络桥接也能用，但"扫描设置怎么填、测量数据怎么读"这部分逻辑完全一样。于是它把这部分逻辑上提，把"字节怎么发出去"下放成一个纯虚函数：
 
-- 它把 `DeviceDriver::VNASettings` 这样的高层结构翻译成 `Protocol::PacketInfo` 协议包；
-- 它把收到的协议包翻译成 `DeviceDriver::VNAMeasurement` 并发出信号；
-- 它把"怎么把包送出去"声明为**纯虚函数** `SendPacket()`，交给传输后端实现。
+```cpp
+virtual bool SendPacket(const Protocol::PacketInfo& packet,
+                        std::function<void(TransmissionResult)> cb = nullptr,
+                        unsigned int timeout = 500) = 0;
+```
 
-这就是一个教科书式的**策略模式/模板方法**：协议逻辑写一遍，传输通道插两次。
+见 [librevnadriver.h:180](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.h#L180)。注意 `SendPacket` 是**异步**的：调用立刻返回，结果（Ack/Nack/超时）稍后通过回调 `cb` 报告。结果的取值就是 [librevnadriver.h:15-20](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.h#L15-L20) 的 `TransmissionResult` 枚举：`Ack`（设备确认）、`Nack`（设备拒绝）、`Timeout`（超时无响应）、`InternalError`（本地发送失败）。
+
+公共层与传输层的分工边界可以概括成一张表：
+
+| 关注点 | 公共层 `LibreVNADriver` | 传输层 USB / TCP 子类 |
+| --- | --- | --- |
+| 设备发现（`GetAvailableDevices`） | 不实现 | 各自实现（USB 枚举 / SSDP 多播） |
+| 连接生命周期（`connectTo`/`disconnect`） | 不实现 | 各自实现 |
+| 字节进出设备 | 纯虚 `SendPacket` 交给子类 | `libusb_bulk_transfer` / `QTcpSocket::write` |
+| 配置翻译（`setVNA`/`setSA`/`setSG`/`setIdle`） | ✅ | 继承直接用 |
+| 收包解释（`handleReceivedPacket`） | ✅ | 子类只负责把字节解析成包再转发 |
 
 #### 4.1.2 核心流程
 
-**发送方向**（上层 → 设备）：
+**发送方向**（上层模式 → 设备）：
 
 ```text
-模式层调用 setVNA(settings)
-    ├─ 检查 supports(Feature::VNA)
-    ├─ 生成 portStageMapping（端口→激励阶段映射）
-    ├─ 填一个 Protocol::PacketInfo（type = SweepSettings）
-    └─ SendPacket(p, 回调)          ← 纯虚，落到 USB/TCP 子类
-         └─ 子类：入队 → 编码 → 写端点/套接字 → 等Ack → 触发回调
+Mode::initializeDevice()
+  └─ DeviceDriver::setVNA(settings, cb)            ← 上层只认抽象接口
+       └─ LibreVNADriver::setVNA()
+            ├─ 把 VNASettings 逐字段抄进 Protocol::SweepSettings
+            ├─ 记录 portStageMapping / zerospan / lastNonIdlePacket
+            └─ SendPacket(p, 回调包装)              ← 纯虚，落到 USB 或 TCP 子类
+                 └─ 入队 transmissionQueue，空闲则立即发送
+设备回 Ack/Nack ─→ transmissionFinished() ─→ 触发 cb(Ack?) ─→ 上层模式得到通知
 ```
 
-**接收方向**（设备 → 上层），子类解析出完整帧后发出 `receivedPacket` 信号（队列化连接），公共层在 `handleReceivedPacket()` 中按包类型分发：
+**接收方向**（设备 → 上层模式）：
 
 ```text
-handleReceivedPacket(packet)
-    ├─ DeviceInfo            → 填 info / 校验协议版本 → emit InfoUpdated()
-    ├─ DeviceStatus          → 存 lastStatus → emit StatusUpdated()/FlagsUpdated()
-    ├─ VNADatapoint          → 组装 VNAMeasurement → emit VNAmeasurementReceived(m)
-    └─ SpectrumAnalyzerResult→ 组装 SAMeasurement → emit SAmeasurementReceived(m)
+传输层收到字节 ─→ Protocol::DecodeBuffer() 解出一个 PacketInfo
+  ├─ Ack/Nack       ─→ emit receivedAnswer(...)   → 传输层的发送队列消费
+  ├─ Set/ClearTrigger ─→ emit receivedTrigger(...)
+  └─ 其余（DeviceInfo/DeviceStatus/VNADatapoint/SAResult...）
+                    ─→ emit receivedPacket(packet) [队列连接，切回 GUI 线程]
+                         └─ LibreVNADriver::handleReceivedPacket()
+                              ├─ DeviceInfo  → 填 Info/Limits → emit InfoUpdated()
+                              ├─ DeviceStatus → 存 lastStatus → emit StatusUpdated()/FlagsUpdated()
+                              ├─ VNADatapoint → 组装 VNAMeasurement → emit VNAmeasurementReceived(m)
+                              └─ SpectrumAnalyzerResult → 组装 SAMeasurement → emit SAmeasurementReceived(m)
 ```
-
-注意 `skipOwnPacketHandling` 标志：置位时公共层只把包通过 `passOnReceivedPacket` 信号转发（给 CompoundDriver 用），自己不做上述翻译——这是组合驱动"截胡"原始包的钩子（[librevnadriver.cpp:696-702](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L696-L702)）。
 
 #### 4.1.3 源码精读
 
-**① 纯虚的传输接口与信号契约**。公共层给子类规定了两件事：必须实现 `SendPacket`，必须遵守应答信号。
+**① 配置翻译：`setVNA`**
 
-[librevnadriver.h:176-197](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.h#L176-L197)：`passOnReceivedPacket`（给复合驱动）、纯虚 `SendPacket`、`receivedAnswer`/`receivedPacket`/`receivedTrigger` 三个信号，以及 `handleReceivedPacket` 槽。`TransmissionResult` 枚举（Ack/Nack/Timeout/InternalError）就是子类回报发送结果的统一语言。
-
-**② setVNA：高层设置 → 协议包的翻译现场**。
-
-[librevnadriver.cpp:490-516](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L490-L516)（节选）：
+[librevnadriver.cpp:480-532](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L480-L532) 把 u3-l1 学过的硬件无关结构 `DeviceDriver::VNASettings` 翻译成固件认识的 `Protocol::SweepSettings` 包。关键几行：
 
 ```cpp
-// create port->stage mapping
-portStageMapping.clear();
-for(unsigned int i=0;i<s.excitedPorts.size();i++) {
-    portStageMapping[s.excitedPorts[i]] = i;
-}
-
-Protocol::PacketInfo p = {};
 p.type = Protocol::PacketType::SweepSettings;
 p.settings.f_start = s.freqStart;
-p.settings.points = s.points;
-p.settings.if_bandwidth = s.IFBW;
-p.settings.cdbm_excitation_start = s.dBmStart * 100;   // dBm → 1/100 dBm
 ...
-zerospan = (s.freqStart == s.freqStop) && (s.dBmStart == s.dBmStop);
+p.settings.cdbm_excitation_start = s.dBmStart * 100;   // dBm → 厘dBm，定点化
 ```
 
-两个细节值得停下来看：
+三个值得注意的细节：
 
-- **单位换算**：GUI 内部用 dBm（浮点），协议用 `cdbm`（1/100 dBm 的整数），所以乘 100。定点整数传输是嵌入式协议的常见选择，避免两端浮点格式差异。
-- **portStageMapping**：多端口测量是"分时"进行的——第 0 阶段激励端口 1、第 1 阶段激励端口 2……这个 map 记住"哪个端口在第几阶段被激励"，接收方向翻译数据时要反过来查它。
-- **zerospan**：起止频率相同即为零扫宽（点频）模式，此时 X 轴不再是频率而是时间——这个布尔值在接收方向决定取 `frequency` 还是 `us` 字段。
+- [L486-488](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L486-L488)：`excitedPorts` 为空时不发扫描设置，而是转 `setIdle`——"什么都不测"也是一种设备状态。
+- [L491-494](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L491-L494)：建立 `portStageMapping`（端口→激励阶段）。一次多端口扫描分多个"阶段"（stage），每个阶段由一个端口输出激励、所有端口同时接收；这张表记录"哪个端口在第几阶段激励"，接收时要用它反查。
+- [L516](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L516)：`zerospan = (s.freqStart == s.freqStop) && (s.dBmStart == s.dBmStop);` 起止频率相同即"零扫宽"，此时 X 轴从频率变成时间——这个标志会决定后面接收端填 `m.frequency` 还是 `m.us`。
 
-随后 [librevnadriver.cpp:527-531](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L527-L531) 把包交给传输层，并把"发送成功"折叠成回调布尔值（Ack 才算成功）。
+最后 [L527-531](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L527-L531) 调用 `SendPacket`，并把 `TransmissionResult` 收敛成上层期望的 `bool` 回调。`setSA`（[L543-589](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L543-L589)）、`setSG`（[L600-611](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L600-L611)）、`setIdle`（[L613-623](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L613-L623)）是同一套模式的变体，可自行对照阅读。无载荷命令（如 `RequestDeviceInfo`）走便捷封装 [sendWithoutPayload, L890-895](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L890-L895)。
 
-**③ handleReceivedPacket 的 VNADatapoint 分支——本讲最重要的一段**。
+**② 收包解释：`handleReceivedPacket`**
 
-[librevnadriver.cpp:764-796](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L764-L796)（节选）：
+这是接收方向的公共终点，[librevnadriver.cpp:696-814](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L696-L814)。四种包的处理：
 
-```cpp
-case Protocol::PacketType::VNADatapoint: {
-    VNAMeasurement m;
-    Protocol::VNADatapoint<32> *res = packet.VNAdatapoint;
-    m.pointNum = res->pointNum;
-    m.Z0 = 50.0;
-    if(zerospan) {
-        m.us = res->us;
-    } else {
-        m.frequency = res->frequency;
-        m.dBm = (double) res->cdBm / 100;
-    }
-    for(auto map : portStageMapping) {
-        complex<double> ref = res->getValue(map.second, map.first-1, true);
-        for(unsigned int i=1;i<=info.Limits.VNA.ports;i++) {
-            complex<double> input = res->getValue(map.second, i-1, false);
-            if(!std::isnan(ref.real()) && !std::isnan(input.real())) {
-                QString name = "S"+QString::number(i)+QString::number(map.first);
-                m.measurements[name] = input / ref;
-            }
-            ...
-        }
-    }
-    delete res;
-    emit VNAmeasurementReceived(m);
-}
-```
+- **DeviceInfo**（[L705-757](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L705-L757)）：先比对协议版本，不一致会弹窗建议升级固件（[L707-717](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L707-L717)——这正是 u1-l2 说的"两端共同编译 Protocol.hpp"在运行时的兜底）；然后把设备的端口数、频率/功率/点数限制逐项抄进 `info.Limits`（[L728-752](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L728-L752)），最后 `emit InfoUpdated()`。注意 `harmonicMixing` 打开时 maxFreq 改用 `limits_maxFreqHarmonic`（[L730](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L730)），这就是设置页里"谐波混频扩展到 18GHz"开关的落点。
+- **DeviceStatus**（[L759-763](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L759-L763)）：原样存 `lastStatus`，发两个信号。状态栏温度读数（`getStatus`，[L360-402](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L360-L402)）和 `getFlags()` 里的 Unlocked/Unlevel/Overload（[L305-358](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L305-L358)）都从这份缓存读。
+- **VNADatapoint**（[L764-796](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L764-L796)）：本讲的主线。固件送上来的一个数据点包含"各阶段、各端口接收机的原始读数"，驱动负责把它们换算成 S 参数：
 
-这段代码在做的事，用射频语言说就是：**S 参数是反射/传输波与入射波的比值**。设备端测得的 `input`（某端口的接收波）除以 `ref`（参考通道的入射波）就是 \( S_{ij} = \dfrac{b_i}{a_j} \)：
+  \[ S_{ij} = \frac{b_i}{a_j} = \frac{\text{第 } j \text{ 端口激励时的接收读数 } i}{\text{第 } j \text{ 端口激励时的参考通道读数}} \]
 
-- 外层循环遍历"哪个端口在被激励"（`map.first` 是激励端口，决定 S 参数的第二个下标 j）；
-- 内层循环遍历"在哪个端口接收"（`i` 是第一个下标）；
-- `res->getValue(stage, port, reference)` 在最多 32 组 (实部, 虚部, 描述字节) 里按 stage 与源掩码找到匹配的复数，找不到返回 NaN——所以 `isnan` 检查是"这组数据里确实有这个测量"的判断；
-- `packet.VNAdatapoint` 是 `DecodeBuffer` 在堆上 `new` 出来的（见 4.2.3 ④），因此这里必须 `delete res`，内存管理责任在注释里有言在先（[Protocol.hpp:630-631](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Communication/Protocol.hpp#L630-L631)）。
+  对应代码就是 [L775-793](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L775-L793) 的双重循环：外层遍历 `portStageMapping`（谁在激励），内层遍历所有接收端口，`m.measurements[name] = input / ref;`（[L784](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L784)）。`ref`/`input` 若为 NaN（该阶段没测）则跳过；若驱动设置 `captureRawReceiverValues`，还会额外输出未经归一化的原始接收值（[L786-791](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L786-L791)）。组装完 `emit VNAmeasurementReceived(m)`（[L795](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L795)）——这个信号就是 u3-l1 说的"数据经 Qt 信号推送"的推送点。
+- **SpectrumAnalyzerResult**（[L798-810](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L798-L810)）：更简单，直接把两个端口的线性电压值装进 `m.measurements["PORT1"]/["PORT2"]`，`emit SAmeasurementReceived(m)`。
 
-`getValue` 本体在 [Protocol.hpp:81-97](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Communication/Protocol.hpp#L81-L97)：描述字节的低 5 位是"源掩码"（Port1..Port4 + Reference 位，见 [Protocol.hpp:17-23](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Communication/Protocol.hpp#L17-L23)），高位是阶段号；线性扫描匹配即返回。
+另外注意函数开头 [L698](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L698) 的 `emit passOnReceivedPacket(packet);` 和 [L700-702](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L700-L702) 的 `skipOwnPacketHandling`：这是给 `CompoundDriver`（把多台设备组合成虚拟多端口机，u3-l3 讲）留的"旁听原始包"后门。
 
-**④ DeviceInfo 分支：能力协商的入口**。[librevnadriver.cpp:705-757](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L705-L757)：先比对协议版本（不一致就弹窗建议升级固件），再按 `hardware_version` 分支填 `info.supportedFeatures` 与各模式 Limits，最后 `emit InfoUpdated()`。u3-l1 讲过的"能力协商"，数据源头就在这里。
+**③ 构造函数：驱动专属的菜单与 SCPI**
 
-#### 4.1.4 代码实践（源码阅读型）
+[librevnadriver.cpp:114-303](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L114-L303) 的构造函数向基类的 `specificActions` 注册了 Manual Control、Configuration、Firmware Update、三类设备校准、Packet Log 等右键菜单项，并按硬件版本（`0x01`/`0xD0`/`0xE0`/`0xFE`/`0xFF` 对应 LibreVNA、HAR0、SAP1、P2、PT 五种 jankae 家设备）控制可见性（[L242-247](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L242-L247)）。其中 "View Packet Log"（[L234-239](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L234-L239)）与 SCPI 命令 `DEVice:PACKETLOG`（[L299-302](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L299-L302)）都读 `DevicePacketLog` 单例——后面 USB/TCP 的收发路径里你会反复看到往这个日志里塞记录的调用。
 
-1. **实践目标**：亲手推演"单端口 vs 双端口激励"下，一条 `VNADatapoint` 会变成哪些 S 参数。
-2. **操作步骤**：
-   - 假设 `info.Limits.VNA.ports = 2`；
-   - 场景 A：`s.excitedPorts = {1}`。读 [librevnadriver.cpp:491-494](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L491-L494)，写出 `portStageMapping` 的内容（应为 `{1→0}`）；
-   - 场景 B：`s.excitedPorts = {2, 1}`，写出 `portStageMapping`（应为 `{2→0, 1→1}`）；
-   - 对两个场景分别代入 [librevnadriver.cpp:775-785](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L775-L785) 的双重循环，列出 `m.measurements` 里最终出现的键名。
-3. **需要观察的现象**：场景 A 只产生 S11、S21 两个键；场景 B 产生 S12、S11、S22、S21 四个键（`std::map` 按端口序遍历，顺序为 S12/S11 → S22/S21）。
-4. **预期结果**：理解"S 参数的第二个下标由激励端口决定、第一个下标由接收端口决定"，以及为什么**只激励一个端口时设备永远回不出 S12/S22**。
-5. 本实践为纯代码推演，无需硬件，结论可直接从代码逻辑推出；若想验证，可在有设备时用 GUI 的 Manual Control（仅激励一个端口）观察可用 Trace 列表（待本地验证）。
+#### 4.1.4 代码实践
+
+**实践目标**：亲手核对"配置翻译"这张表，确认上层设置与协议字段一一对应。
+
+**操作步骤**：
+
+1. 打开 [librevnadriver.cpp:496-522](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L496-L522)，抄下 `setVNA` 中所有 `p.settings.xxx = s.yyy;` 赋值行。
+2. 为每一行补上"单位换算/语义"备注，例如 `cdbm_excitation_start = s.dBmStart * 100` 备注为「dBm×100 → 厘dBm 定点数」。
+3. 特别留意三行不是简单赋值的：`dwell_us` 的钳位（L505-511）、`fixedPowerSetting`（L513）、`portXStage` 的 `find(...) - begin()`（L517-520），写下你对它们含义的推断。
+4. 用同样方法扫一遍 `setSA` 里的 `UseDFT` 判定（[L569-571](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L569-L571)）：什么条件下 GUI 会请求设备改用 DFT 方式取频谱数据？
+
+**需要观察的现象**：纯源码阅读，无运行现象。
+
+**预期结果**：你会得到一张约 20 行的翻译表；`UseDFT` 的答案应是"未开跟踪源 + 驱动设置允许 + RBW 不超过阈值 + 非零扫宽"四个条件同时满足。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 `LibreVNADriver` 不自己实现 `SendPacket`，而要声明成纯虚？
-**答案**：`SendPacket` 的本质是"把编码后的字节送到设备"，这与传输介质强相关（USB 端点 or TCP 套接字）。声明为纯虚（[librevnadriver.h:180](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.h#L180)）强制每个后端自己实现搬运，而协议内容（包类型、字段）完全复用公共层，符合"逻辑与传输分离"。
+**练习 1**：`setExtRef`（[L625-681](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L625-L681)）在设备"非空闲"时为什么要先 `SetIdle` 再切参考再重发 `lastNonIdlePacket`？
 
-**练习 2**：`setSA()` 里 `SApoints` 是怎么算的？为什么要存下这个数？
-**答案**：[librevnadriver.cpp:556-563](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L556-L563)：频宽 ≥ 1001 或 ≤ 0 时取上限 1001 点，否则逐 Hz 一点。`getSApoints()` 供上层（如频谱仪模式）知道一个扫描周期有多少点，用于判断"一次扫描是否完成"。
+**答案**：代码注释（[L671-674](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L671-L674)）写明：扫描进行中切换参考时钟，若设备端存在频率校准，会产生错误频率。所以顺序是"停下 → 切参考 → 用 `lastNonIdlePacket` 恢复原测量"。`lastNonIdlePacket` 在每次 `setVNA/setSA/setSG` 里被更新（如 [L524-525](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L524-L525)），就是为这里的"恢复"准备的。
 
-**练习 3**：`lastNonIdlePacket` 成员是做什么用的？
-**答案**：`setVNA/setSA/setSG` 都会把刚发的包存进它（如 [librevnadriver.cpp:524-525](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L524-L525)）。`setExtRef()` 在测量进行中切换基准源时，需要先停机（SetIdle）、切源、再重发"上一次的非空闲配置"（[librevnadriver.cpp:667-678](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L667-L678)）——因为带频率校准的内部源切换会导致瞬时不准确的频率。
+**练习 2**：`VNAmeasurementReceived` 信号携带的 `VNAMeasurement` 里，`measurements` 为什么用 `QString` 做 key 而不是固定数组下标？
 
-### 4.2 USB 驱动：libusb 枚举、连接与收发线程
+**答案**：这是 u3-l1 讲过的设计——端口数因设备而异（LibreVNA 是 2 端口，CompoundDriver 可拼出更多），用 `"S11"`、`"S21"` 这类字符串键可以让上层（Trace、校准模块）完全不知道端口数量，第三方驱动也能用同样的容器返回自己的参数名。构造 key 的代码就在 [L783](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L783)。
+
+**练习 3**：如果设备固件比 GUI 旧、协议版本不一致，用户会在什么时候、以什么形式得知？
+
+**答案**：连接建立后驱动主动发送 `RequestDeviceInfo`（见 4.2/4.3 的 `connectTo` 末尾），设备回 `DeviceInfo` 包，`handleReceivedPacket` 比对 `ProtocolVersion != Protocol::Version` 后弹窗询问是否立即升级固件（[L707-717](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L707-L717)）。也就是说版本协商不是连接握手的一部分，而是连上后第一条"问答"驱动的。
+
+### 4.2 USB 驱动：libusb、接收线程与 USBInBuffer
 
 #### 4.2.1 概念说明
 
-`LibreVNAUSBDriver` 回答三个问题：**设备在哪**（枚举）、**怎么独占它**（打开 + claim 接口）、**字节怎么进出**（一个事件线程 + 两个接收缓冲 + 一个发送队列）。
+USB 是 LibreVNA 的主通道。`LibreVNAUSBDriver` 要解决四件事：
 
-USB 的发现不靠广播，靠**总线枚举**：libusb 列出系统里所有 USB 设备，逐一读描述符，用 VID/PID + 产品字符串过滤出"自己的"设备，序列号作为唯一身份。
+1. **发现**：扫总线，找出"VID/PID + 产品字符串"都匹配的设备，读出序列号；
+2. **连接**：`libusb_claim_interface` 独占接口，启动事件线程，创建两个接收缓冲，主动请求设备信息；
+3. **收**：三个端点里两个是输入（数据 `0x81`、日志 `0x82`，定义在 [librevnausbdriver.h:48-50](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.h#L48-L50)），需要有人不停地"提交异步传输→等完成→再提交"；
+4. **发**：协议要求一问一答（发了命令要等 Ack），所以发送必须排队，同一时刻只有一个包"在途"。
+
+第 3 件事被抽成了通用工具 `USBInBuffer`（[Util/usbinbuffer.h](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.h)）：它代表"绑定了某个输入端点的一块接收缓冲"，内部持有 libusb transfer 对象并自动循环提交。驱动只管在 `DataReceived` 信号里消费数据、调用 `removeBytes()` 声明"这些字节我处理完了"。
 
 #### 4.2.2 核心流程
 
+**设备发现与连接（`GetAvailableDevices` / `connectTo` / `SearchDevices`）**：
+
 ```text
-【发现】GetAvailableDevices()
-    libusb_init → SearchDevices(收集所有序列号) → libusb_exit
+GetAvailableDevices()
+  └─ libusb_init(临时ctx) → SearchDevices(收集序列号, ignoreOpenError=true) → libusb_exit
+connectTo(serial)
+  ├─ SearchDevices(..., ignoreOpenError=false)   ← 找到目标序列号即中止，保留句柄
+  ├─ libusb_claim_interface(handle, 0)           ← 独占接口，失败则报错抛异常
+  ├─ new std::thread(USBHandleThread)            ← libusb 事件线程
+  ├─ new USBInBuffer(handle, 0x81, 65536)        ← 数据端点
+  ├─ new USBInBuffer(handle, 0x82, 65536)        ← 日志端点
+  ├─ connect(DataReceived → ReceivedData, DirectConnection)   ★ 关键
+  ├─ connect(TransferError   → ConnectionLost)
+  ├─ connect(receivedPacket  → handleReceivedPacket, QueuedConnection) ★ 关键
+  ├─ sendWithoutPayload(RequestDeviceInfo)       ← 连接后第一问
+  └─ sendWithoutPayload(RequestDeviceStatus)
+```
 
-【连接】connectTo(serial)
-    SearchDevices(匹配序列号后中止搜索并保留句柄)
-    → libusb_claim_interface(0)          独占接口
-    → 启动 USBHandleThread（泵 libusb 事件）
-    → 创建 dataBuffer/logBuffer（提交首批异步接收）
-    → 连接信号、发 RequestDeviceInfo + RequestDeviceStatus
+`SearchDevices`（[librevnausbdriver.cpp:288-359](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L288-L359)）的筛选条件是三重过滤：VID/PID 命中白名单 → `libusb_open` 成功 → 产品字符串等于 `"VNA"`。白名单有三组 ID（[L23-25](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L23-L25)）：`0483:564e`（ST 官方 VID 的早期固件）、`0483:4121`（ST VID）、`1209:4121`（pid.codes 开源 VID，"A" 的十六进制 0x41/0x21 恰是 "A!" 的 ASCII——一个有品味的开源产品号）。
 
-【接收】libusb 事件线程
-    libusb_handle_events → USBInBuffer::Callback → emit DataReceived(DirectConnection)
-    → ReceivedData() 在事件线程中解码循环 → emit receivedPacket(QueuedConnection)
-    → 主线程 handleReceivedPacket → emit VNAmeasurementReceived
+**接收路径（本讲主线）**：
 
-【发送】SendPacket()：入队 → startNextTransmission()
-    EncodePacket → libusb_bulk_transfer(同步发送) → 启动超时定时器
-    收到 Ack/Nack 或超时 → transmissionFinished → 出队 → 发下一个
+```text
+[libusb 事件线程]  USBHandleThread: while(connected) libusb_handle_events()
+    └─ USBInBuffer::Callback(transfer)          usbinbuffer.cpp:57
+         ├─ received_size += actual_length
+         └─ emit DataReceived()  ──(DirectConnection, 仍在 libusb 线程)──▶
+    LibreVNAUSBDriver::ReceivedData()           librevnausbdriver.cpp:158
+         ├─ Protocol::DecodeBuffer(buffer, received, &packet)   ← 解一帧
+         ├─ DevicePacketLog 记录
+         ├─ dataBuffer->removeBytes(handled_len) ← 消费掉已解析字节
+         ├─ Ack/Nack → emit receivedAnswer(...)   → 发送队列消费
+         └─ 其他    → emit receivedPacket(packet) ──(QueuedConnection)──▶
+    [GUI 线程] LibreVNADriver::handleReceivedPacket(packet)   librevnadriver.cpp:696
+         └─ VNADatapoint → 组装 VNAMeasurement → emit VNAmeasurementReceived(m)
+```
+
+线程视角总结成一句话：**解析原始字节发生在 libusb 线程（DirectConnection），解释协议包发生在 GUI 线程（QueuedConnection）**，两次 `connect` 分别在 [librevnausbdriver.cpp:116](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L116) 和 [L121](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L121)。
+
+**发送路径（一问一答的队列）**：
+
+```text
+SendPacket(p, cb, timeout)          librevnausbdriver.cpp:264
+  ├─ transmissionQueue.enqueue({p, timeout, cb})
+  └─ 若无在途包 → startNextTransmission()    L361
+       ├─ Protocol::EncodePacket(p → 1024字节栈缓冲)
+       ├─ DevicePacketLog.addPacket(p)
+       ├─ libusb_bulk_transfer(handle, 0x01, buffer, length, ...)   ← 同步阻塞写
+       └─ transmissionTimer.start(timeout)    ← 超时保险
+设备回 Ack/Nack → ReceivedData → emit receivedAnswer
+  → (Queued) transmissionFinished(result)    librevnausbdriver.cpp:228
+       ├─ dequeue + 调用 cb(result)
+       ├─ transmissionTimer.stop()
+       └─ 队列非空则 startNextTransmission() 继续下一包
 ```
 
 #### 4.2.3 源码精读
 
-**① 认设备的"白名单"**。[librevnausbdriver.cpp:23-25](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L23-L25)：
+**① 连接建立**：[librevnausbdriver.cpp:61-129](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L61-L129)。`SearchDevices` 的回调（[L77-88](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L77-L88)）返回 `false` 表示"就是它，中止搜索并保留句柄"——这是 `SearchDevices` 注释里约定的协议（[头文件 L55-57](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.h#L55-L57)）。claim 失败的报错（[L100-110](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L100-L110)）直接提示了两个最常见原因：Linux 缺 udev 规则、Windows 已被另一个实例占用——排查连不上设备时先看这里。**顺序细节**：接收线程必须先于两个 `USBInBuffer` 启动（[L113-115](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L113-L115)），因为 `USBInBuffer` 构造函数最后一行就提交了传输（[usbinbuffer.cpp:19](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L19)），若无人 `handle_events` 它永远完成不了。
 
-```cpp
-validUSBIDs.append({0x0483, 0x564e, "VNA"});   // ST 官方 VID + 早期 PID
-validUSBIDs.append({0x0483, 0x4121, "VNA"});   // ST VID + 新 PID
-validUSBIDs.append({0x1209, 0x4121, "VNA"});   // pid.codes 开源 VID
-```
+**② 接收数据拆包**：[librevnausbdriver.cpp:158-211](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L158-L211)。`do...while(handled_len > 0)` 循环每次调 `Protocol::DecodeBuffer` 解出**一帧**（[L165](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L165)）——一次 USB 传输里可能粘着好几帧、也可能只有半帧，`DecodeBuffer` 的返回值是"本次消费的字节数"，半帧时返回 0 且 `packet.type = None`，等下次数据到达凑齐（其内部逻辑见 [Protocol.cpp:28-93](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Communication/Protocol.cpp#L28-L93)：跳过帧头前的杂字节、校验长度与 CRC32、`VNADatapoint` 因体积大被固件豁免了 CRC——尾 4 字节恒为 0，见 [L79-90](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Communication/Protocol.cpp#L79-L90)）。解析出的帧先记入 `DevicePacketLog`（[L168-174](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L168-L174)，无效字节也记，便于排查协议失步），再 `removeBytes` 腾出缓冲（[L175](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L175)），最后按类型分流（[L182-201](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L182-L201)）。
 
-`0x0483` 是 STMicroelectronics 的厂商 ID，`0x1209` 是开源硬件常用的 pid.codes。注意第三个字段是**产品字符串**，后续还要与设备的 iProduct 描述符比对才算命中。
+**③ USBInBuffer 的循环提交**：[usbinbuffer.cpp:57-98](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L57-L98)。这是本模块最精巧的 40 行：
 
-**② SearchDevices：三重过滤的枚举器**。[librevnausbdriver.cpp:288-359](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L288-L359)：
+- [L66-75](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L66-L75)：传输完成且有数据时，`received_size` 累加，然后 `emit DataReceived()`。注意 `inCallback` 标志位在发射前置真、发射后置 false——`removeBytes()` 靠它保证"只允许在回调内被调用"（[L40-42](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L40-L42) 抛异常）。这不是多线程保护（单线程事件模型下不需要），而是**调用时机**保护：缓冲只有在回调栈内是静止的。
+- [L94-97](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L94-L97)：重新提交传输时，目标地址是 `&buffer[received_size]`（**追加**在未消费数据之后，所以缓冲同时承担"半帧暂存"职责），长度向下对齐到 512 的倍数——USB 高速批量传输以 512 字节包为单元，不对齐会让末尾零头每次都短包。`removeBytes`（[L38-50](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L38-L50)）消费后用 `memmove` 把剩余字节挪回首部，缓冲就这样无限滚动。
+- [L76-87](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L76-L87)：`NO_DEVICE`（拔线）与 `ERROR/OVERFLOW/STALL` 分支释放 transfer 并 `emit TransferError()`——驱动把它连到 `ConnectionLost`（[librevnausbdriver.cpp:117](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L117)），这就是"设备被拔出后 GUI 弹窗提示"的起点。
+- 静态蹦床函数 `CallbackTrampoline`（[L100-104](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L100-L104)）：libusb 是 C API，只认普通函数指针，靠 `transfer->user_data` 里存的对象指针转回成员函数——C 库回调接入 C++ 类的标准手法。
 
-- [293-316](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L293-L316)：遍历设备列表，比对 VID/PID；
-- [320-334](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L320-L334)：`libusb_open` 逐个试开；失败时若 `ignoreOpenError` 为 false，提示用户最典型的两个原因——**Linux 缺 udev 规则**、**Windows 已被别的实例占用**；
-- [336-351](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L336-L351)：读字符串描述符，产品字符串与白名单一致才调用 `foundCallback`；回调返回 false 表示"就是它，别再搜了"，此时**不关闭句柄**（调用方接手），其余情况关闭句柄继续。
-
-`GetAvailableDevices()`（[41-59](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L41-L59)）用一个"只收集序列号"的 lambda 调它；`connectTo()` 用一个"匹配即中止"的 lambda 调它——同一个枚举器服务两种用法，这是回调式 API 的漂亮用法。
-
-**③ connectTo：连接生命周期**。[librevnausbdriver.cpp:61-129](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L61-L129)，关键四拍：
-
-```cpp
-// 1. 独占 USB 接口（失败则抛异常）
-int ret = libusb_claim_interface(m_handle, 0);              // L99
-// 2. 起事件线程（没有它异步回调不会触发）
-m_receiveThread = new std::thread(&LibreVNAUSBDriver::USBHandleThread, this);  // L113
-// 3. 每个接收端点一个缓冲，构造时即提交第一批异步传输
-dataBuffer = new USBInBuffer(m_handle, EP_Data_In_Addr, 65536);   // L114
-logBuffer  = new USBInBuffer(m_handle, EP_Log_In_Addr, 65536);    // L115
-// 4. 握手：主动询问设备信息与状态
-sendWithoutPayload(Protocol::PacketType::RequestDeviceInfo);      // L125
-sendWithoutPayload(Protocol::PacketType::RequestDeviceStatus);    // L126
-```
-
-信号连接的线程语义（[116-121](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L116-L121)）：`DataReceived → ReceivedData` 用 **DirectConnection**（解码就发生在 libusb 事件线程里，避免数据竞争——缓冲区只有在这个回调里才允许被消费）；`receivedPacket → handleReceivedPacket` 用 **QueuedConnection**（把翻译工作搬回主线程，GUI 对象线程安全）。`TransferError → ConnectionLost` 则是拔线时通知上层断连。
-
-`disconnect()`（[131-156](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L131-L156)）按相反顺序拆除：先 setIdle、删缓冲（析构会取消未完成的传输）、释放接口、关句柄、join 事件线程、销毁 context。
-
-**④ ReceivedData：解码循环**。[librevnausbdriver.cpp:158-211](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L158-L211)（节选）：
-
-```cpp
-do {
-    handled_len = Protocol::DecodeBuffer(dataBuffer->getBuffer(),
-                                         dataBuffer->getReceived(), &packet);
-    if(handled_len > 0) {
-        auto &log = DevicePacketLog::getInstance();
-        if(packet.type != Protocol::PacketType::None) {
-            log.addPacket(packet, serial);       // 写入包日志（调试用）
-        } else {
-            log.addInvalidBytes(...);            // 无效字节也记录
-        }
-    }
-    dataBuffer->removeBytes(handled_len);        // 从缓冲中移除已消费字节
-    switch(packet.type) {
-    case Protocol::PacketType::Ack:  emit receivedAnswer(TransmissionResult::Ack);  break;
-    case Protocol::PacketType::Nack: emit receivedAnswer(TransmissionResult::Nack); break;
-    case Protocol::PacketType::SetTrigger:   emit receivedTrigger(this, true);  break;
-    case Protocol::PacketType::ClearTrigger: emit receivedTrigger(this, false); break;
-    default: emit receivedPacket(packet);       // 其余交给公共层翻译
-    }
-} while (handled_len > 0);
-```
-
-`DecodeBuffer`（[Protocol.cpp:28-93](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Communication/Protocol.cpp#L28-L93)）每次调用**最多解析一帧**，返回本次消费的字节数（0 表示数据不够、等下次；正数表示消费了多少）。所以外面套 `do...while` 把缓冲里挤着的所有帧都榨干——这就是 USB/TCP 两条通道共用的**粘包处理范式**：`decode → remove → loop`。
-
-Ack/Nack/Trigger 三类包被 USB 层"就地消化"（它们关系到发送队列的状态机，属于传输层私事），其余类型统一转交公共层。
-
-**⑤ 发送队列：单飞 + 超时**。`SendPacket`（[264-277](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L264-L277)）只入队并在空闲时启动发送；真正干活的是 `startNextTransmission`（[361-388](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L361-L388)）：`EncodePacket` 编码（[371](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L371)）→ 同步 `libusb_bulk_transfer` 发到 `0x01` 端点（[379](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L379)）→ 启动单次超时定时器（[385](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L385)）。
-
-任何时刻**最多只有一个包在等待应答**（单飞，stop-and-wait）：收到 Ack/Nack（`transmissionFinished`，[228-262](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L228-L262)）或定时器到点（`transmissionTimeout`，[43-45](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L43-L45)）才出队发下一个。这样应答与请求的对应关系永远明确，不需要序列号。
-
-**⑥ 事件线程**。[librevnausbdriver.cpp:279-286](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L279-L286)：`while(connected) libusb_handle_events(m_context);`——全部异步传输的回调都由这个线程驱动，包括接收完成与取消。
+**④ 断开与收尾**：[librevnausbdriver.cpp:131-156](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L131-L156)。顺序是 `setIdle`（让设备停扫）→ 删两个缓冲（析构里 `libusb_cancel_transfer` 并等条件变量，[usbinbuffer.cpp:22-36](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L22-L36)）→ `connected = false`（让事件线程的 while 退出）→ 释放接口、关句柄 → `join` 线程。删缓冲在置 `connected=false` 之前，保证 cancel 生效时 `handle_events` 还在跑。
 
 #### 4.2.4 代码实践
 
-1. **实践目标**：验证 USB 枚举的三重过滤逻辑，并理解 udev 权限问题（Linux 用户最常见的"连不上"原因）。
-2. **操作步骤**：
-   - 有硬件：运行 `lsusb`，在输出中找 VID:PID 为 `0483:564e`、`0483:4121` 或 `1209:4121` 的行；
-   - 再运行 `lsusb -d 0483:4121 -v 2>/dev/null | grep -i -A1 "iProduct\|iSerial"`（按实际 VID:PID 替换），确认产品字符串确实是 `VNA`，并记下序列号；
-   - 无硬件：通读 [librevnausbdriver.cpp:288-359](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L288-L359)，在纸上回答：如果一台设备 VID/PID 命中但产品字符串是别的，会发生什么？（答案：被跳过，且不报错。）
-3. **需要观察的现象**：`lsusb` 能看到设备 ≠ GUI 能打开设备；Linux 下若未安装 udev 规则，`libusb_open` 会失败，GUI 弹出的正是 [librevnausbdriver.cpp:324-331](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L324-L331) 那条提示。
-4. **预期结果**：能说出"VID/PID → 产品字符串 → 序列号"三层各自排除了什么干扰。
-5. 无硬件时本实践为 `lsusb` 观察其他 USB 设备 + 代码走读；`lsusb -v` 的输出因系统而异（待本地验证）。
+**实践目标**：验证"VID/PID → 驱动识别"这一环，并体会回调线程约束。
+
+**操作步骤**：
+
+1. 在终端运行 `lsusb`（Linux；macOS 可用 `system_profiler SPUSBDataType`，Windows 用设备管理器）。搜索输出中是否出现 `0483:4121`、`0483:564e` 或 `1209:4121`。
+2. 对照 [librevnausbdriver.cpp:306-316](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L306-L316)：即使 VID/PID 命中，代码还会再读产品字符串比对 `"VNA"`（[L336-346](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L336-L346)）。想一想：为什么 ST 的 VID `0483` 下有无数设备，仅凭 PID 不够吗？这个双重过滤防的是什么？
+3. 源码走读（无硬件也能做）：假设你在 `ReceivedData` 之外的地方（比如某个按钮的槽）调用 `dataBuffer->removeBytes(10)`，读 [usbinbuffer.cpp:38-42](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L38-L42)，预测会发生什么。
+4. （可选，需硬件 + 已按 u1-l3 配好 udev 规则）连接设备后打开设备菜单里的 "View Packet Log"（入口见 [librevnadriver.cpp:234-239](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L234-L239)），观察连接后最先出现的两个包是不是 `RequestDeviceInfo`/`RequestDeviceStatus` 的请求与应答。
+
+**需要观察的现象**：步骤 1 只需终端输出；步骤 4 若无硬件则**待本地验证**。
+
+**预期结果**：步骤 2 的答案是——ST VID + 任意自选 PID 仍可能撞上其他 ST 开发板产品，再比对产品字符串 `"VNA"` 才能确证是本设备固件；步骤 3 会抛出 `runtime_error("Removing of bytes is only allowed from within receive callback")`，因为此时 `inCallback == false`。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么 `connectTo` 里要先起 `USBHandleThread` 再 `new USBInBuffer`？
-**答案**：`USBInBuffer` 构造函数最后一步就是 `libusb_submit_transfer`（[usbinbuffer.cpp:19](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L19)）。若事件线程尚未运行，传输虽然提交成功，但完成回调无人泵送，数据永远到不了。先起线程保证第一批传输立刻有人处理。
+**练习 1**：为什么 `ReceivedData` 与 `DataReceived` 的连接必须用 `Qt::DirectConnection`（[L116](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L116)），而 `receivedPacket` 与 `handleReceivedPacket` 用 `Qt::QueuedConnection`（[L121](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L121)）？
 
-**练习 2**：`transmissionFinished` 开头为什么检查队列空并打印 "stray Ack?"？
-**答案**：[librevnausbdriver.cpp:232-235](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L232-L235)。Ack 没有携带"我在应答哪个包"的信息（单飞协议不需要），如果队列已空却来了 Ack，说明状态失步（比如超时后设备才回 Ack），此时直接丢弃并留警告，避免把下一个包的应答错配。
+**答案**：`DataReceived` 由 libusb 事件线程发射，而 `USBInBuffer` 属于该线程正在使用的对象；若用队列连接，`ReceivedData` 会被推迟到 GUI 线程执行，期间 `USBInBuffer::Callback` 已经重新提交传输、`received_size` 可能继续增长，`removeBytes` 的"回调栈内缓冲静止"前提被打破，`memmove` 与新数据写入会交错竞争。所以解析+消费必须在 libusb 线程内同步完成。而 `handleReceivedPacket` 会触碰 `Info`、`lastStatus`、各种 Qt 对象并最终驱动 GUI，这些必须在 GUI 线程执行，于是跨线程的那一跳用队列连接完成——传递的 `Protocol::PacketInfo` 也因此在 [librevnadriver.cpp:683-688](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L683-L688) 用 `qRegisterMetaType` 注册过。
 
-**练习 3**：日志端点（`ReceivedLog`，[213-226](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L213-L226)）为什么不用 `Protocol::DecodeBuffer` 而用 `memchr` 找 `\n`？
-**答案**：数据端点走的是二进制协议帧（0x5A 帧头 + CRC），日志端点走的是**文本行协议**——固件直接 printf 风格输出，一行一条。按 `\n` 切分即可，`emit LogLineReceived(line)` 把每行交给上层显示。同一条 USB 连接上并行两种应用层协议，靠端点隔离。
+**练习 2**：`startNextTransmission`（[L361-388](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L361-L388)）里发送用的是**同步**的 `libusb_bulk_transfer`，它运行在哪个线程？会卡住 GUI 吗？
 
-### 4.3 USBInBuffer：一个端点一个接收缓冲
+**答案**：`startNextTransmission` 只有两个调用者：`SendPacket`（谁调用就在谁的线程，通常是 GUI 线程）和 `transmissionFinished`（队列连接，GUI 线程）。所以 bulk 写发生在 GUI 线程。同步 bulk transfer 在数据立刻可写时几乎不阻塞（libusb 内部有缓冲），但理论上长传输会短暂卡 GUI——这是用"简单同步写"换来的取舍；读方向才是高频大流量，所以读完全放到了独立线程+异步传输。
+
+**练习 3**：传输队列为什么必须"一次只允许一个在途包"？
+
+**答案**：因为应答不携带序号。设备回的 `Ack/Nack` 无法指明"确认的是哪个包"，若同时发两个包，收到一个 Ack 时不知道该弹出队列里的哪一个。代码把这一约定写死在流程里：`SendPacket` 只在 `!transmissionActive` 时调用 `startNextTransmission`（[L273-275](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L273-L275)），`transmissionFinished` 弹出队首并继续下一个（[L249-261](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L249-L261)）；超时由 `transmissionTimer` 兜底（[L43-45](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.h#L43-L45) 定义，[L119](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L119) 连接）。"stray Ack"（队列空却收到 Ack）也会被显式警告（[L232-234](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L232-L234)）。
+
+### 4.3 TCP 驱动：SSDP 发现与双 socket 传输
 
 #### 4.3.1 概念说明
 
-`USBInBuffer` 是对"**一个接收端点的异步接收循环**"的封装。它要解决三件事：
+`LibreVNATCPDriver` 面向的场景是：设备不插在 PC 的 USB 口上，而是通过某种网络桥接（例如单板机上跑一个把 USB 转网络的守护进程）接入局域网。它的类结构与 USB 版几乎对称（对比 [librevnausbdriver.h](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.h) 与 [librevnatcpdriver.h](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.h)：连成员名 `transmissionQueue/transmissionTimer/m_receiveThread` 都一致），差异全在"怎么找到设备"和"字节走哪条管道"：
 
-1. **持续接收**：USB 异步传输是一次性的，完成后必须重新提交才能收下一批——它把这个"提交-完成-再提交"循环自动化；
-2. **积累与消费**：一次传输可能只到半帧、也可能好几帧挤在一起——它把字节攒在内部缓冲里，等上层来解析；
-3. **线程纪律**：数据只在 libusb 回调线程里被追加/消费，它用 `inCallback` 标志把这一约定**强制**下来。
+- **发现**：不再扫总线，而是 SSDP 多播——驱动每秒向 `239.255.255.250:1900` 发 `M-SEARCH`，网络上的 LibreVNA 桥接应答自己的 IP 和序列号，驱动维护一张带过期时间的 `detectedDevices` 表；
+- **传输**：不是"一个接口三个端点"，而是**两条 TCP 连接**——数据走 `19544` 端口、日志走 `19545` 端口（[librevnatcpdriver.cpp:13-14](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L13-L14)）。连接上之后，**字节流里跑的仍然是同一套 `Protocol` 帧**，这正是公共层 `LibreVNADriver` 能被两边复用的原因。
 
 #### 4.3.2 核心流程
 
+**设备发现（SSDP 生命周期）**：
+
 ```text
-构造: 分配 buffer → alloc_transfer → fill_bulk_transfer(填好端点/回调) → submit
-      ↓ (数据到达, 由事件线程的 handle_events 驱动)
-Callback(transfer):
-    status == COMPLETED 且 actual_length > 0
-        → received_size += actual_length   追加到已有数据之后
-        → inCallback = true; emit DataReceived(); inCallback = false
-    重新填 buffer 指针/长度(总长减去未消费部分, 按 512 向下取整) → resubmit
-上层(ReceivedData): 循环 DecodeBuffer → removeBytes(handled)
-    removeBytes: 仅允许在回调内调用(否则抛异常);
-                未消费数据 memmove 到缓冲区头部
+构造函数：为每个可用网络接口建 QUdpSocket，加入多播组          L25-45
+ssdpTimer(1000ms) → SSDRequest()：向多播组发 M-SEARCH 报文      L157-174
+   报文: M-SEARCH * HTTP/1.1 / HOST:239.255.255.250:1900
+         / MAN:"ssdp:discover" / MX:1 / ST:urn:...:LibreVNA:1
+设备应答 → SSDPreceived()：解析 LOCATION/ST/LibreVNA-serial/
+   CACHE-CONTROL 字段 → addDetectedDevice()（同序列号则替换）  L176-217, L326-337
+pruneDetectedDevices()：超过 max-age 未刷新的条目删除          L339-349
+GetAvailableDevices()：返回表中所有序列号                      L64-72
+```
+
+**连接与接收**：
+
+```text
+connectTo(serial)
+  ├─ 在 detectedDevices 里查序列号 → 得到 IP；查不到直接 false   L81-93
+  ├─ dataSocket.connectToHost(ip, 19544); logSocket → 19545     L96-97
+  ├─ waitForConnected(1000)，任一失败即报错返回                  L100-106
+  ├─ errorOccurred → ConnectionLost（断线感知）                  L111-112
+  ├─ readyRead → ReceivedData / ReceivedLog                     L118-119
+  ├─ receivedPacket → handleReceivedPacket（Queued）             L122
+  └─ RequestDeviceInfo / RequestDeviceStatus                    L126-127
+
+[Qt 主线程] dataSocket 有数据 → ReceivedData()                  L219-257
+  ├─ dataBuffer.append(dataSocket.readAll())   ← QByteArray 累积
+  ├─ Protocol::DecodeBuffer(...)  ← 与 USB 完全相同的拆包循环
+  └─ 同样的 switch 分流 → emit receivedPacket / receivedAnswer
 ```
 
 #### 4.3.3 源码精读
 
-**① 构造即提交**。[usbinbuffer.cpp:9-20](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L9-L20)：
+**① SSDP 发现三件套**：[librevnatcpdriver.cpp:157-174](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L157-L174) 的 `SSDRequest` 拼出标准 SSDP `M-SEARCH` 报文，搜索目标（ST）是自定义服务类型 `urn:schemas-upnp-org:device:LibreVNA:1`（[L12](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L12)）。应答解析在 [L176-217](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L176-L217)：逐行找 `LOCATION:`（设备 IP）、`LibreVNA-serial:`（序列号）、`CACHE-CONTROL: max-age=N`（有效期）。四字段缺一则丢弃该应答。`pruneDetectedDevices`（[L339-349](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L339-L349)）在每次发搜索前剔除过期条目——所以设备断电后，下拉框里的它最多再活 `max-age` 秒。这套"周期性宣告 + 老化淘汰"和 mDNS/Bonjour 是同一思想。
 
-```cpp
-USBInBuffer::USBInBuffer(libusb_device_handle *handle, unsigned char endpoint, int buffer_size)
-    : ...
-{
-    buffer = new unsigned char[buffer_size];
-    transfer = libusb_alloc_transfer(0);
-    libusb_fill_bulk_transfer(transfer, handle, endpoint, buffer, buffer_size,
-                              CallbackTrampoline, this, 0);
-    libusb_submit_transfer(transfer);
-}
-```
+**② 连接建立**：[librevnatcpdriver.cpp:74-130](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L74-L130)。与 USB 版逐行对照会发现结构完全同构：查设备 → 建管道 → 连信号 → 发 `RequestDeviceInfo`/`RequestDeviceStatus`。两个易被忽略的差别：
 
-`CallbackTrampoline`（[100-104](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L100-L104)）是静态函数——libusb 的 C 回调不能直接是成员函数，于是用 `user_data` 存 `this` 再转发，这是 C 库集成的标准手法（"蹦床函数"）。
+- TCP 版连接失败**返回 false**（[L100-106](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L100-L106)），USB 版 claim 失败则 `throw std::runtime_error`（[librevnausbdriver.cpp:94/109](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L90-L110)）——上层对两种驱动失败的容错路径并不相同。
+- TCP 版的构造函数会**为每个网络接口**建一个多播 socket（[L25-45](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L25-L45)，只留 Ethernet/Wifi/Virtual/Unknown 四类），意味着驱动对象一出生（`getDrivers()` 首次调用时，见 [devicedriver.cpp:24-25](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/devicedriver.cpp#L24-L25)）就开始每秒发多播包，与是否使用 TCP 驱动无关。
 
-**② 回调：追加、通知、再提交**。[usbinbuffer.cpp:57-98](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L57-L98)，核心三段：
+**③ 接收与发送**：`ReceivedData`（[L219-257](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L219-L257)）与 USB 版（[librevnausbdriver.cpp:158-211](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L158-L211)）核心循环逐行相似：`QByteArray dataBuffer` 取代了 `USBInBuffer`，`dataSocket.readAll()` 追加、`dataBuffer.remove(0, handled_len)` 消费。`startNextTransmission`（[L351-376](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L351-L376)）同样先 `EncodePacket` 进 1024 字节栈缓冲、记包日志，只是最后一步换成 `dataSocket.write(...)`（[L368](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L368)）。发送队列、超时定时器、`transmissionFinished`（[L275-309](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L275-L309)）与 USB 版语义一致——TCP 是字节流，同样存在粘包/半包，同样需要一问一答排队。
 
-```cpp
-case LIBUSB_TRANSFER_COMPLETED:
-case LIBUSB_TRANSFER_TIMED_OUT:
-    if(transfer->actual_length > 0) {
-        received_size += transfer->actual_length;   // L70 追加(不覆盖未消费数据)
-        inCallback = true;
-        emit DataReceived();                        // L72 DirectConnection→上层解码
-        inCallback = false;
-    }
-    break;
-...
-// Resubmit the transfer                          // L93
-transfer->buffer = &buffer[received_size];         // L94 从未消费数据之后继续放
-transfer->length = buffer_size - received_size;    // L95 剩余空间
-transfer->length = (transfer->length / 512) * 512; // L96 按 512 取整
-libusb_submit_transfer(transfer);                  // L97
-```
+**④ 两通道对照总表**（复习用）：
 
-两个设计点：
+| 维度 | USB 驱动 | TCP 驱动 |
+| --- | --- | --- |
+| 驱动名 | `"LibreVNA/USB"`（[L36-39](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L36-L39)） | `"LibreVNA/TCP"`（[L59-62](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L59-L62)） |
+| 发现机制 | libusb 枚举 VID/PID + 产品串 | SSDP 多播 + 过期表 |
+| 数据/日志通道 | 端点 `0x81` / `0x82`（同一接口） | TCP `19544` / `19545`（两条连接） |
+| 接收缓冲 | `USBInBuffer`（自管理，512 对齐） | `QByteArray`（Qt 自带） |
+| 接收执行线程 | libusb 事件线程（DirectConnection） | Qt 主线程（readyRead） |
+| 接收线程 `m_receiveThread` | 启动（`USBHandleThread`） | 声明但从不启动（仅构造置 null，[L22](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L22)） |
+| 发送原语 | `libusb_bulk_transfer`（同步） | `QTcpSocket::write`（异步） |
+| 连接失败处理 | 抛 `std::runtime_error` | 返回 false |
+| 帧格式/发送队列/初始两问 | 完全相同（都在公共层或复用其逻辑） | 同左 |
 
-- **追加而非覆盖**（L70 + L94）：上层一次没消费完的"半帧"留在缓冲前部，新数据接在后面——这就是"积累半帧等下次拼齐"的实现。
-- **错误即终止**（[76-88](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L76-L88)）：`NO_DEVICE`（拔线）或 `ERROR/OVERFLOW/STALL` 时释放传输、发 `TransferError`，**不再重新提交**；只有正常完成（以及取消，见下）才继续。取消分支（[59-65](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L59-L65)）与析构函数配合：析构时 `libusb_cancel_transfer` 并用条件变量最多等 100ms 让回调走完取消分支，避免析构后回调还摸已删除的对象。
+#### 4.3.4 代码实践
 
-**③ removeBytes：把"只能回调内消费"写成硬约束**。[usbinbuffer.cpp:38-50](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L38-L50)：
+**实践目标**：不依赖硬件，用抓包思维验证 SSDP 发现逻辑，并对两个 `ReceivedData` 做"找不同"。
 
-```cpp
-void USBInBuffer::removeBytes(int handled_bytes) {
-    if(!inCallback) {
-        throw runtime_error("Removing of bytes is only allowed from within receive callback");
-    }
-    if(handled_bytes >= received_size) {
-        received_size = 0;
-    } else {
-        memmove(buffer, &buffer[handled_bytes], received_size - handled_bytes);
-        received_size -= handled_bytes;
-    }
-}
-```
+**操作步骤**：
 
-因为回调刚返回就要重填 `transfer->buffer` 指针，若消费发生在别的线程、与重提交并发，指针和长度就会失配。所以用 `inCallback` 标志 + 异常把调用时机钉死在回调内——配合驱动里 `DataReceived → ReceivedData` 的 DirectConnection，整套接收路径单线程化，不需要额外锁。
+1. **找不同**：并排打开 [librevnausbdriver.cpp:182-201](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L182-L201) 与 [librevnatcpdriver.cpp:238-255](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L238-L255) 的 switch 语句，找出 case 分支集合的差异。
+2. 追踪这个差异的后果：多出来的（或少掉的）`case PacketType::None` 会让 TCP 版对"无效帧"做什么？沿着 `receivedPacket` → [handleReceivedPacket, librevnadriver.cpp:696-814](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L696-L814) 走一遍，确认最终是否有可观察的行为差异（提示：注意 [L698](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L698) 的 `passOnReceivedPacket`）。
+3. **SSDP 报文观察（可选）**：启动 GUI（可加 `--no-gui`，TCP 驱动对象在 `getDrivers()` 时就已构造并开始发 SSDP），另开终端执行 `tcpdump -ni any udp port 1900`（或 Wireshark 过滤 `ssdp`），观察每秒一个 `M-SEARCH` 与报文内容，与 [L159-167](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L159-L167) 拼的字符串逐行核对。
 
-#### 4.3.4 代码实践（源码阅读型）
+**需要观察的现象**：步骤 1-2 是纯代码推理；步骤 3 依赖本机网络环境与 tcpdump 权限，若无条件则**待本地验证**（即使局域网没有设备，也至少能看到自己发出的 M-SEARCH）。
 
-1. **实践目标**：搞清楚三个"魔法行为"的动机——为什么按 512 取整？为什么 `received_size` 可能大于 0 时还能继续提交？为什么 `removeBytes` 要抛异常？
-2. **操作步骤**：
-   - 通读 [usbinbuffer.cpp:57-98](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L57-L98)，画出一次"收到 700 字节、上层只消费 300 字节"后，`received_size`、`transfer->buffer`、`transfer->length` 各是多少；
-   - 思考：若 L96 不按 512 取整、缓冲剩余空间是 300 字节，会发生什么？（提示：批量传输的完成条件是"填满请求长度 **或** 到一个短包"；请求太小时设备一个最大包都装不下，会产生零长或异常完成。）
-3. **需要观察的现象**：纸面推演 `received_size = 400`（700−300），`transfer->buffer = &buffer[400]`，`transfer->length = (65536−400)/512*512 = 65024`。
-4. **预期结果**：能说出"取整是为了让每次请求都留足整数个最大包的空间；抛异常是把跨线程误用变成显式崩溃而不是数据损坏"。L96 的具体取值（512）与设备端最大包长的精确对应关系代码未注释说明（待确认，可对照 USB 协议文档 v12 的端点描述）。
-5. 本实践为纯推演，无需硬件。
+**预期结果**：步骤 1 的答案见下面练习 1；步骤 3 应看到 `ST: urn:schemas-upnp-org:device:LibreVNA:1` 与代码常量一致。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`USBInBuffer` 与 `ReceivedData` 之间为什么必须用 `Qt::DirectConnection`？
-**答案**：`removeBytes` 只允许在回调内调用（抛异常强制），而"回调内"就是发射 `DataReceived` 的那个 libusb 事件线程。DirectConnection 让 `ReceivedData` 在同一线程同步执行，消费动作天然处于 `inCallback = true` 的区间内；若换成队列化连接，消费发生在主线程，直接触发异常。
+**练习 1**：两个 `ReceivedData` 的 switch 有什么分支差异？后果是什么？
 
-**练习 2**：析构函数里那个条件变量等待（[22-36](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L22-L36)）防的是什么竞态？
-**答案**：`libusb_cancel_transfer` 是异步的——真正的取消完成发生在事件线程的回调里。若不等待就 `delete[] buffer`，事件线程可能还在执行 `Callback` 并访问已释放的缓冲。条件变量等回调走到取消分支（`cv.notify_all`）后再删，最多等 100ms 超时并警告。
+**答案**：USB 版有显式的 `case Protocol::PacketType::None: break;`（[librevnausbdriver.cpp:195-196](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L195-L196)），TCP 版没有。于是 TCP 版中 type 为 `None`（无效/半帧数据）的包落入 `default` 分支，也会 `emit receivedPacket(packet)`。追踪下去：`handleReceivedPacket` 开头无条件 `emit passOnReceivedPacket(packet)`（对 CompoundDriver 可见），随后 switch 无 `None` case、default 什么都不做——所以对 GUI 无可观察影响，只是 `passOnReceivedPacket` 多发了一个空包。这是一个阅读真实代码时很有价值的发现：两个"应该一样"的实现存在轻微不对称，且恰好无害。
 
-**练习 3**：一条 16 字节的半帧还差 8 字节才完整时，`DecodeBuffer` 返回什么？缓冲会怎样？
-**答案**：返回 0（数据不足时不消费，见 [Protocol.cpp:60-64](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Communication/Protocol.cpp#L60-L64)），`removeBytes(0)` 不改变缓冲，`do...while` 因 `handled_len == 0` 退出；半帧留在缓冲里等下一次数据到达拼接。
+**练习 2**：`connectTo` 里 `waitForConnected(1000)` 是阻塞调用，为什么 TCP 驱动敢在（可能的）GUI 线程里这么写？
 
-### 4.4 TCP 驱动：SSDP 发现与双 socket 通道
+**答案**：它只发生在用户明确点击"连接"的一瞬间，且最多阻塞 1 秒，属于可接受的一次性代价；换来的是同步、简单的错误处理（两个 socket 任一失败就统一走失败分支，[L100-106](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L100-L106)）。相比之下，常态化的数据接收没有用任何 `waitFor...`，全部走 `readyRead` 信号，不会卡界面。
 
-#### 4.4.1 概念说明
+**练习 3**：TCP 字节流同样会粘包/半包，`DecodeBuffer` 返回"已消费字节数 + type=None"的机制是如何配合 `QByteArray` 解决这个问题的？
 
-`LibreVNATCPDriver` 面向的是"设备不在 USB 总线上、而在网络里"的场景（例如设备接在一台小主机上再通过网络共享）。它要回答与 USB 版同样的三个问题，但答案完全不同：
-
-- **设备在哪**：USB 能枚举总线，TCP 没有总线——于是借用 SSDP 组播做发现；
-- **怎么独占**：没有 claim 接口，就是向设备的两个固定端口各建一条 TCP 连接；
-- **字节怎么进出**：不需要 libusb 事件线程，`QTcpSocket` 的 `readyRead` 信号天然跑在 Qt 事件循环上。
-
-SSDP 发现条目带有 `max-age`（存活期），过期未刷新就从列表剔除——网络设备可能随时下线，发现列表必须"会腐烂"。
-
-#### 4.4.2 核心流程
-
-```text
-【后台发现（构造时启动，永不停止）】
-构造函数: 对每个以太网/WiFi/虚拟网卡建一个 UDP socket 并加入 239.255.255.250 组播组
-ssdpTimer(1000ms) → SSDRequest(): 向组播地址发 M-SEARCH（ST=urn:schemas-upnp-org:device:LibreVNA:1）
-                          ↓ 设备单播回应
-SSDPreceived(): 解析 LOCATION/ST/LibreVNA-serial/CACHE-CONTROL
-              → addDetectedDevice()（按序列号去重更新）
-GetAvailableDevices(): 返回 detectedDevices 的序列号集合
-pruneDetectedDevices(): 每次发 M-SEARCH 前剔除超龄条目
-
-【连接】connectTo(serial):
-在 detectedDevices 中找到地址 → 连 DataPort(19544)/LogPort(19545) 两条 TCP
-→ waitForConnected(1000) → 绑 readyRead → 发 RequestDeviceInfo/Status
-
-【接收】dataSocket.readyRead → ReceivedData(): readAll 追加到 QByteArray
-        → 同样的 DecodeBuffer/remove 循环 → 同样的信号分发
-```
-
-#### 4.4.3 源码精读
-
-**① 协议常量**。[librevnatcpdriver.cpp:12-16](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L12-L16)：
-
-```cpp
-static const QString service_name = "urn:schemas-upnp-org:device:LibreVNA:1";
-static constexpr int DataPort = 19544;   // 测量/控制数据
-static constexpr int LogPort  = 19545;   // 日志
-static auto SSDPaddress = QHostAddress("239.255.255.250");
-static constexpr int SSDPport = 1900;    // SSDP 标准端口
-```
-
-数据与日志用**两条 TCP 连接**——和 USB 用两个端点完全同构：二进制协议帧与文本日志各行其道，互不干扰。
-
-**② 构造函数：为每块网卡建一个组播 socket**。[librevnatcpdriver.cpp:25-48](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L25-L48)：遍历所有网络接口，只保留以太网/WiFi/虚拟/未知类型，每个接口 `bind` 一个 UDP socket、设置组播出口接口、加入组播组；然后 `ssdpTimer` 每 1000ms 触发一次 `SSDRequest`。注意这些发生在**驱动构造时**而非连接时——发现是常驻后台行为（驱动在 `getDrivers()` 注册时就被构造了）。
-
-**③ M-SEARCH 与应答解析**。`SSDRequest`（[157-174](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L157-L174)）拼出标准 SSDP 报文并从每个组播 socket 发出；`SSDPreceived`（[176-217](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L176-L217)）逐行解析：
-
-```cpp
-if(lines[0] != "HTTP/1.1 200 OK") { continue; }        // 只认 SSDP 应答
-for(QString l : lines) {
-    if(l.startsWith("LOCATION:"))            { location = l.split(" ")[1]; }
-    else if(l.startsWith("ST:"))             { st = l.split(" ")[1]; }
-    else if(l.startsWith("LibreVNA-serial:")){ serial = l.split(" ")[1]; }  // 私有扩展字段
-    else if(l.startsWith("CACHE-CONTROL:"))  { max_age = l.split("=")[1]; }
-}
-```
-
-`LibreVNA-serial:` 是本项目对 SSDP 的私有扩展头。`addDetectedDevice`（[326-337](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L326-L337)）按序列号去重（已存在则覆盖刷新），`pruneDetectedDevices`（[339-349](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L339-L349)）剔除 `responseTime` 距今超过 `maxAgeSeconds` 的条目——设备下线后最多 `max-age` 秒就从设备列表消失。
-
-**④ connectTo：与 USB 版逐行对应**。[librevnatcpdriver.cpp:74-130](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L74-L130)：
-
-```cpp
-dataSocket.connectToHost(devInfo.address, DataPort);   // L96  相当于 libusb_open
-logSocket.connectToHost(devInfo.address, LogPort);     // L97
-if(!dataSocket.waitForConnected(1000) || !logSocket.waitForConnected(1000)) { ... }  // L100
-...
-connect(&dataSocket, &QTcpSocket::readyRead, this, &LibreVNATCPDriver::ReceivedData, ...);  // L118
-sendWithoutPayload(Protocol::PacketType::RequestDeviceInfo);   // L126 与 USB 版相同的握手
-```
-
-错误处理差异：TCP 版连接失败**返回 false**，USB 版**抛异常**（[librevnausbdriver.cpp:94](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L94)）——上层 `connectDevice` 需要同时容忍两种风格。断连检测也不一样：TCP 用 `errorOccurred → ConnectionLost`（[111-112](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L111-L112)），USB 用 `USBInBuffer::TransferError → ConnectionLost`。
-
-**⑤ ReceivedData：与 USB 版只差两行**。[librevnatcpdriver.cpp:219-257](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L219-L257)（对比 4.2.3 ④）：
-
-```cpp
-dataBuffer.append(dataSocket.readAll());                 // L221 代替 USBInBuffer 的异步回调
-handled_len = Protocol::DecodeBuffer((uint8_t*) dataBuffer.data(), dataBuffer.size(), &packet);  // L227
-...
-dataBuffer.remove(0, handled_len);                       // L237 QByteArray 版 removeBytes
-```
-
-解码循环、包日志、`switch` 分发**逐行相同**（唯一差别是 TCP 版的 switch 少了 `None` 分支，效果一样：`None` 落入 default 会被 `emit receivedPacket(packet)` 转发，公共层对 `None` 不做任何事）。缓冲从手工管理的 `USBInBuffer` 换成了 `QByteArray` 的 `append`/`remove`——Qt 替你做了 memmove。`ReceivedLog`（[259-273](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L259-L273)）同样与 USB 版逐行对应。
-
-**⑥ 发送队列：整段复制**。`SendPacket`（[311-324](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L311-L324)）、`transmissionFinished`（[275-309](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L275-L309)）、`startNextTransmission`（[351-376](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L351-L376)）与 USB 版几乎逐字相同，唯一的实质差异在 `startNextTransmission` 里：
-
-```cpp
-auto ret = dataSocket.write((char*) buffer, length);   // L368 代替 libusb_bulk_transfer
-```
-
-还有一个耐人寻味的细节：TCP 头文件里声明了 `std::thread *m_receiveThread`（[librevnatcpdriver.h:108](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.h#L108)），但 `.cpp` 中只在构造函数置过一次 `nullptr`、从未启动——QTcpSocket 的事件驱动模型根本不需要它，这是个从 USB 版"遗传"下来的闲置成员。
-
-#### 4.4.4 代码实践
-
-1. **实践目标**：看懂一条完整的 SSDP M-SEARCH 报文，并验证 `SSDPreceived` 能正确解析一个手工构造的应答。
-2. **操作步骤**：
-   - 读 [librevnatcpdriver.cpp:157-174](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L157-L174)，把 M-SEARCH 报文完整抄写出来（就是那个字符串字面量加 `service_name`）；
-   - 有 LibreVNA 网络环境：运行 `tcpdump -i any -n port 1900 -A` 观察 1 秒一次的 M-SEARCH 与设备应答；
-   - 无设备：在纸上构造一条合法应答并逐行代入 [librevnatcpdriver.cpp:190-215](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L190-L215) 的解析循环，写出 `location/st/serial/max_age` 四个变量的终值；
-   - 思考：应答中若缺 `CACHE-CONTROL` 行，解析结果如何？（提示：`max_age` 初值是 `"2"`，即 [188 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L188)的默认值，条目 2 秒后被剔除。）
-3. **需要观察的现象**：M-SEARCH 每 1 秒重发；应答里的 `LibreVNA-serial:` 头携带序列号；停止设备端服务后条目在 max-age 秒内消失。
-4. **预期结果**：能默写 M-SEARCH 的四个必填头（HOST/MAN/MX/ST）并说明 `ST` 的值如何把 LibreVNA 的应答与其他 UPnP 设备区分开。
-5. 无网络设备时为纸面推演；tcpdump 观察需本地环境（待本地验证）。
-
-#### 4.4.5 小练习与答案
-
-**练习 1**：为什么 TCP 驱动不需要 `USBHandleThread` 那样的接收线程？
-**答案**：`QTcpSocket` 是 `QObject`，数据到达时在**其所属线程的事件循环**里发 `readyRead` 信号——驱动对象活在主线程，主线程的 Qt 事件循环天然就是"泵"。libusb 是裸 C 库没有事件循环，必须自己起线程泵 `libusb_handle_events`。
-
-**练习 2**：`copyDetectedDevices`（[librevnatcpdriver.h:51-53](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.h#L51-L53)）是给谁用的？
-**答案**：给 `CompoundDriver`（复合驱动，下一讲 u3-l3 详讲）。它需要把多台设备的发现列表汇总成自己的设备列表，这个接口让"新构造的驱动实例"直接继承"正在后台发现的老实例"的成果，避免发现列表清空后重新等 1 秒。
-
-**练习 3**：TCP 版 `disconnect()`（[132-149](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L132-L149)）比 USB 版多做了哪三件事？为什么不需要 join 线程？
-**答案**：多了 `transmissionTimer.stop()`、`transmissionQueue.clear()`、`transmissionActive = false`（清发送状态）和 `dataSocket.flush()`（把未写出的数据冲出去再关）。不需要 join，因为没有自建线程；也不用取消异步传输，因为 `QTcpSocket` 关闭即由 Qt 收尾。
-
-### 4.5 两条通道对比：同一协议逻辑的两副躯壳
-
-#### 4.5.1 概念说明
-
-把 4.2–4.4 并排看，会发现一个清晰的分层：**凡是"协议"的部分只有一份，凡是"传输"的部分各有一份**。这个模块用一张对照表把差异收拢，然后画出贯穿本讲的调用序列图（也就是综合实践的预演）。
-
-#### 4.5.2 核心流程：能力对照表
-
-| 关注点 | USB（librevnausbdriver） | TCP（librevnatcpdriver） |
-|---|---|---|
-| 驱动名 | `"LibreVNA/USB"`（[36-39](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L36-L39)） | `"LibreVNA/TCP"`（[59-62](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L59-L62)） |
-| 发现机制 | libusb 总线枚举 + VID/PID + 产品字符串（[288-359](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L288-L359)） | SSDP 组播 M-SEARCH + max-age 老化（[157-217](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L157-L217)） |
-| 独占方式 | `libusb_claim_interface(0)` | 向固定端口建 TCP 连接（数据 19544/日志 19545） |
-| 收数据的驱动源 | libusb 事件线程泵 `handle_events` | Qt 事件循环的 `readyRead` 信号 |
-| 接收缓冲 | `USBInBuffer`（手工 memmove，512 对齐重提交） | `QByteArray`（append/remove） |
-| 发送 | 同步 `libusb_bulk_transfer` 到端点 0x01 | `dataSocket.write()` |
-| 断连检测 | `USBInBuffer::TransferError` | `QTcpSocket::errorOccurred` |
-| 连接失败 | 抛 `std::runtime_error` | 返回 false |
-| 发送队列/超时/解码循环/信号分发 | **完全相同**（代码近乎复制） | **完全相同** |
-| 协议翻译（handleReceivedPacket、setVNA...） | **继承同一份**（librevnadriver.cpp） | **继承同一份** |
-
-#### 4.5.3 源码精读：接收方向的完整调用序列
-
-把三个模块串起来，**USB 路径**「一包原始字节 → VNAMeasurement → 信号」的全序列如下（每步标注文件:行号）：
-
-```text
-[libusb 事件线程]
-1  libusb_handle_events()                          librevnausbdriver.cpp:283
-2  → USBInBuffer::CallbackTrampoline()             usbinbuffer.cpp:100
-3  → USBInBuffer::Callback()  追加 actual_length   usbinbuffer.cpp:57,70
-4  → emit DataReceived()  (DirectConnection)       usbinbuffer.cpp:72
-5  → LibreVNAUSBDriver::ReceivedData()             librevnausbdriver.cpp:158
-6  → Protocol::DecodeBuffer()  解出一帧            librevnausbdriver.cpp:165 → Protocol.cpp:28
-7  → dataBuffer->removeBytes(handled_len)          librevnausbdriver.cpp:175 → usbinbuffer.cpp:38
-8  → (VNADatapoint) emit receivedPacket(packet)    librevnausbdriver.cpp:199  (QueuedConnection)
-   ───────────── 线程边界：队列投递到主线程 ─────────────
-9  LibreVNADriver::handleReceivedPacket()          librevnadriver.cpp:696
-10 → VNADatapoint 分支：new 出的对象已由 DecodeBuffer 创建   librevnadriver.cpp:766 (Protocol.cpp:88)
-11 → getValue(stage, port, ref) 取参考/接收复数    librevnadriver.cpp:778-780 → Protocol.hpp:81
-12 → m.measurements["Sij"] = input / ref           librevnadriver.cpp:784
-13 → delete res; emit VNAmeasurementReceived(m)    librevnadriver.cpp:794-795
-   ↓ (DeviceDriver 基类信号，u3-l1 讲过)
-14 各模式/TraceModel 的槽函数消费 m
-```
-
-**TCP 路径**只有入口不同，第 6 步起完全一致：
-
-```text
-[主线程 Qt 事件循环]
-1' dataSocket 有数据 → emit readyRead               (Qt 内部)
-2' LibreVNATCPDriver::ReceivedData()                librevnatcpdriver.cpp:219
-3' dataBuffer.append(readAll())                     librevnatcpdriver.cpp:221
-4' Protocol::DecodeBuffer()                         librevnatcpdriver.cpp:227 → Protocol.cpp:28
-5' dataBuffer.remove(0, handled_len)                librevnatcpdriver.cpp:237
-6' emit receivedPacket(packet)                      librevnatcpdriver.cpp:253  (QueuedConnection)
-   ── 之后与 USB 路径第 9-14 步逐行相同 ──
-```
-
-两条路径在 `receivedPacket` 信号处**汇流**——这正是分层设计的收益：协议翻译层完全不知道字节来自 USB 还是 TCP，甚至将来换成 WebSocket 也不用改一行 `librevnadriver.cpp`。
-
-#### 4.5.4 代码实践
-
-1. **实践目标**：亲手验证"汇流点"——两条路径的分发 switch 是否真的逐行等价。
-2. **操作步骤**：并排打开 [librevnausbdriver.cpp:182-201](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L182-L201) 与 [librevnatcpdriver.cpp:238-255](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L238-L255)，用 diff 工具或肉眼逐 case 对比，列出所有差异。
-3. **需要观察的现象**：差异只有两处——USB 版多一个 `case None: break;`，以及 USB 版在 switch 前多了两条触发（SetTrigger/ClearTrigger）的 `qDebug`。
-4. **预期结果**：确认 `Ack/Nack/SetTrigger/ClearTrigger → 就地消化；其余 → receivedPacket` 的结构完全一致，"汇流点"名副其实。
-5. 纯代码对比，无需硬件。
-
-#### 4.5.5 小练习与答案
-
-**练习 1**：既然 USB/TCP 的发送队列、解码循环几乎相同，为什么作者不把 `SendPacket/transmissionFinished/startNextTransmission` 上提到 `LibreVNADriver`，只留一个"写字节"的纯虚接口？
-**答案**：确实可以，那样能消除大段复制（也是明显的重构机会）。现状更像是**权衡后的务实选择**：队列本身无需多态、两份代码各自独立演化（TCP 版注释掉的调试输出与 USB 版略不同）。识别"可上提的重复"正是读驱动代码的附加收获——你在评审别人代码时也应能指出这一点。
-**练习 2**：一条 `VNADatapoint` 从设备到 GUI，跨了几个线程（USB 路径）？
-**答案**：两个——libusb 事件线程（第 1-7 步：收字节、解帧）与主线程（第 9-14 步：翻译与消费），中间靠 `receivedPacket` 的 QueuedConnection 投递跨越线程边界。
-**练习 3**：若把第 8 步的 QueuedConnection 改成 DirectConnection，最可能先出什么问题？
-**答案**：`handleReceivedPacket` 会在 libusb 事件线程里执行，进而 `emit VNAmeasurementReceived` 直连或默认连接到 GUI 对象的槽也会在事件线程跑——Qt GUI 类只能在主线程操作，轻则报警告重则崩溃；同时与主线程可能的并发访问（如 `info`、`lastStatus`）产生数据竞争。
+**答案**：`ReceivedData` 每次把 `readAll()` 追加进 `dataBuffer`（[L221](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L221)），然后循环调 `DecodeBuffer`：能解出完整帧就返回帧长、`remove(0, handled_len)` 消费；帧不完整返回 0、循环结束，剩余字节留在 `dataBuffer` 里等下一次 `readyRead` 追加。`DecodeBuffer` 自己还会跳过帧头 `PCKT_HEADER_DATA` 之前的杂散字节（[Protocol.cpp:34-43](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Communication/Protocol.cpp#L34-L43)），从而具备失步自恢复能力。USB 路径的 `USBInBuffer` + `removeBytes` 是同一策略的 libusb 版本。
 
 ## 5. 综合实践
 
-**任务：绘制并标注双通道完整调用序列图**（本讲指定的实践任务）。
+本讲的综合实践就是任务书里的核心作业：**画出两条通道下"一包原始字节 → `DeviceDriver::VNAMeasurement` → 发出信号"的调用序列图**。这是对 4.1–4.3 的总检验。
 
-1. **实践目标**：不看本讲义 4.5.3 的成品，独立画出 USB 与 TCP 两条路径下「收到一包原始字节 → 解析成 `DeviceDriver::VNAMeasurement` → 发出信号」的调用序列图，每个函数标注文件与行号。
-2. **操作步骤**：
-   - 准备一张大纸或绘图工具，画两条竖直生命线：左"libusb 事件线程"、右"主线程"（TCP 版则只有主线程一条）；
-   - 从 4.2.3 ④ / 4.4.3 ⑤ 的解码循环出发，向上追"字节从哪来"（`USBInBuffer::Callback` 或 `readyRead`），向下追"信号到哪去"（`handleReceivedPacket` 的 VNADatapoint 分支 → `VNAmeasurementReceived`）；
-   - 在每条箭头上标 `文件名:起-止行号`，并在跨越线程边界的那条箭头上特别标注连接类型（QueuedConnection）；
-   - 画完后对照 4.5.3 的参考图自评，补上漏掉的 `removeBytes`、`DevicePacketLog`、`delete res` 等细节；
-   - 进阶（可选）：在图上用另一种颜色画出**发送方向**——`setVNA()` → `SendPacket()` → `startNextTransmission()` → 字节写出 → Ack 回来 → `transmissionFinished()` → 回调被调用，形成完整的请求-应答闭环。
-3. **需要观察的现象**：两条路径的图在前几步完全不同（异步传输回调 vs readyRead），在中后段**汇合成同一条**——这个"汇流点"就是 `receivedPacket` 信号。
-4. **预期结果**：一张能当作驱动物理设计的速查表的双通道序列图；你能指着图讲清"为什么换传输层不用动协议层"。
-5. 本实践为纯阅读与绘图，无需硬件、无需编译，所有行号以 HEAD `c4276df` 为准。
+**实践目标**：不看讲义正文，仅凭源码独立完成两条链路，并给出每一步的函数名、文件、行号和执行线程。
+
+**操作步骤**：
+
+1. 准备一张三列的表：`步骤 | 函数（文件:行号） | 运行线程`。
+2. 先做 USB 链路，从"libusb 事件线程里 transfer 完成"开始，到"`VNAmeasurementReceived` 信号被 VNA 模式的某个槽接收"结束（最后一步的接收者可在 [vna.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/VNA/vna.cpp) 中用 Grep 搜 `VNAmeasurementReceived` 确认，属于 u7-l1 的内容，这里只需找到连接语句即可）。
+3. 再做 TCP 链路，起点换成"`dataSocket` 有可读数据"。
+4. 标出两条链路中**线程发生切换的那一行 connect 语句**。
+5. 用两种颜色区分"传输层私有代码"与"公共层代码"，直观看到两条链路在哪个函数汇合。
+
+**参考答案（USB 链路）**：
+
+| 步骤 | 函数（文件:行号） | 线程 |
+| --- | --- | --- |
+| 1 | `USBHandleThread` 循环：`libusb_handle_events` — [librevnausbdriver.cpp:279-286](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L279-L286) | libusb 事件线程 |
+| 2 | `USBInBuffer::CallbackTrampoline` → `Callback`，累加 `received_size`，`emit DataReceived` — [usbinbuffer.cpp:100-104](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L100-L104)、[L57-75](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp#L57-L75) | libusb 事件线程 |
+| 3 | `LibreVNAUSBDriver::ReceivedData`（DirectConnection）— [librevnausbdriver.cpp:158](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L158) | libusb 事件线程 |
+| 4 | `Protocol::DecodeBuffer` 解出一帧 VNADatapoint — [librevnausbdriver.cpp:165](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L165)，实现在 [Protocol.cpp:28-93](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Communication/Protocol.cpp#L28-L93) | 同上 |
+| 5 | `DevicePacketLog::addPacket` + `removeBytes` — [librevnausbdriver.cpp:168-175](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L168-L175) | 同上 |
+| 6 | `emit receivedPacket(packet)`（default 分支）— [librevnausbdriver.cpp:197-200](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L197-L200)；连接建于 [L121](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp#L121)（QueuedConnection）★线程切换点 | 投递到 GUI 线程 |
+| 7 | `LibreVNADriver::handleReceivedPacket`，VNADatapoint 分支 — [librevnadriver.cpp:696](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L696)、[L764-796](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L764-L796) | GUI 线程 |
+| 8 | 双重循环按 `portStageMapping` 计算 `input/ref` 填 `m.measurements` — [L775-793](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L775-L793) | GUI 线程 |
+| 9 | `emit VNAmeasurementReceived(m)` — [L795](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp#L795) | GUI 线程 |
+
+**参考答案（TCP 链路）的差异点**（其余步骤 4-9 完全相同）：
+
+| 步骤 | 函数（文件:行号） | 线程 |
+| --- | --- | --- |
+| 1' | 内核通知 `dataSocket` 可读，Qt 发射 `readyRead`（连接建于 [librevnatcpdriver.cpp:118](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L118)） | GUI 线程（无独立接收线程） |
+| 2' | `LibreVNATCPDriver::ReceivedData`：`dataBuffer.append(dataSocket.readAll())` — [L219-221](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L219-L221) | GUI 线程 |
+| 6' | `emit receivedPacket(packet)` — [L251-254](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L251-L254)；虽然也是 QueuedConnection（[L122](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp#L122)），但两端同在 GUI 线程，**无实际线程切换**（变为一次事件循环内的延迟调用） | GUI 线程 |
+
+**需要观察的现象**：本实践为源码阅读型，产出物是你自己的序列图表；若想用真实数据验证，需连接设备并打开 "View Packet Log" 对照（**待本地验证**）。
+
+**预期结果**：两条链路在 `emit receivedPacket` 处汇入同一个公共层函数 `handleReceivedPacket`；USB 链路有一次真实的线程切换（DirectConnection → QueuedConnection），TCP 链路全程在 GUI 线程。能独立推导出这两点，说明本讲目标达成。
 
 ## 6. 本讲小结
 
-- `LibreVNADriver` 是"协议引擎"：实现 `DeviceDriver` 的全部语义接口，把高层设置翻译成 `Protocol::PacketInfo`、把协议包翻译成测量数据；传输被抽象为纯虚 `SendPacket()`，字节搬运完全交给子类。
-- S 参数在 GUI 侧由一行除法算出：`m.measurements["Sij"] = input / ref`（`接收波/入射波`），端口语义由 `portStageMapping` 提供，`getValue()` 按"阶段+源掩码"从数据点里取复数。
-- USB 驱动的骨架是：三重过滤枚举（VID/PID → 产品字符串 → 序列号）→ claim 接口 → 一个泵 `libusb_handle_events` 的事件线程 + 每端点一个 `USBInBuffer` + 单飞发送队列（Ack/Nack/超时驱动出队）。
-- `USBInBuffer` 封装"提交-完成-追加-通知-重提交"循环；`inCallback` 标志 + 异常把消费时机强制在回调线程内，配 DirectConnection 实现无锁的单线程接收。
-- TCP 驱动用 SSDP 组播（每秒 M-SEARCH、私有 `LibreVNA-serial:` 头、max-age 老化）解决"网络里没有总线"的发现问题，用双 TCP 连接复刻 USB 双端点的数据/日志分流；解码循环与发送队列和 USB 版近乎逐行相同。
-- 两条路径在 `receivedPacket` 信号处汇流，`handleReceivedPacket` 之后的翻译逻辑只有一份——这是"逻辑与传输分离"分层设计的直接收益，也是给其他仪器写驱动时的模板。
+- LibreVNA 官方驱动是**两层结构**：`LibreVNADriver` 公共层持有全部协议语义（配置翻译 `setVNA/setSA/setSG`、收包解释 `handleReceivedPacket`），仅把 `SendPacket` 留成纯虚；USB/TCP 两个子类只负责"字节怎么进出"。
+- 连接生命周期的固定剧本：发现 → 连接（claim 接口 / 双 TCP socket）→ 连接信号 → 主动发 `RequestDeviceInfo` + `RequestDeviceStatus` 两问；`DeviceInfo` 应答填充 `Info/Limits` 并触发协议版本协商。
+- **接收方向**：原始字节经 `Protocol::DecodeBuffer` 拆帧（帧头同步、长度校验、CRC32、VNADatapoint 豁免 CRC），按类型分流：Ack/Nack 喂发送队列，其余经 `receivedPacket`（队列连接）进入 `handleReceivedPacket`，在那里 `input/ref` 相除得到 S 参数并 `emit VNAmeasurementReceived`。
+- **USB 特有**：`USBInBuffer` 把"缓冲 + 循环提交的异步批量传输"封装成通用工具，`removeBytes` 只能在回调栈内调用；解析在 libusb 事件线程（DirectConnection），协议解释在 GUI 线程（QueuedConnection）。
+- **TCP 特有**：SSDP 多播每秒 `M-SEARCH`、`max-age` 老化的 `detectedDevices` 表；数据/日志是 19544/19545 两条连接；帧格式与发送队列逻辑与 USB 完全一致——这就是公共层抽象的价值。
+- 传输队列"一问一答、单包在途"的约束源于 Ack 不带序号；超时由 `transmissionTimer` 兜底。
 
 ## 7. 下一步学习建议
 
-- **u3-l3 驱动生态**：看第三方驱动（SSA3000X/SNA5000A）如何在"能力有限"的设备上实现同一套接口，以及 `CompoundDriver` 如何用本讲的 `passOnReceivedPacket` 钩子与 `copyDetectedDevices` 把多台 LibreVNA 组合成多端口虚拟设备——那是对本讲分层设计的最有力印证。
-- **u4-l1 设备端通信架构**：本讲只看了协议的 GUI 半边；下一单元进入固件侧的 `Communication.cpp`，看 `DecodeBuffer` 的对偶物如何在 STM32 上分发同样的包。
-- **顺手读**：[Device/LibreVNA/devicepacketlog.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/devicepacketlog.cpp)——本讲两处提到的包日志单例，是抓"设备到底发了什么"的第一工具，配合 GUI 菜单里的 "View Packet Log" 使用。
+- **u3-l3（驱动生态）**：看第三方驱动（SSA3000X、SNA5000A）如何继承同一套 `DeviceDriver` 契约但走完全不同的协议，以及 `CompoundDriver` 如何利用本讲出现的 `passOnReceivedPacket` 信号把多台 LibreVNA 拼成多端口设备。
+- **单元 4（通信协议）**：本讲只把 `DecodeBuffer`/`EncodePacket` 当黑盒用了。u4-l1 将进入固件侧 `Communication.cpp` 看这些包如何被分发处理，u4-l2 用仓库自带的 `USB_protocol_v12.tex`/`Device_protocol_v13.tex` 文档逐包核对字段。
+- **动手方向**：若想加深理解，可尝试给 `ReceivedData` 的 `DecodeBuffer` 返回 0（半帧）与返回 `data-buf+1`（CRC 失败跳帧头）两种情况各写一段跟踪日志（仅阅读推演即可，不必真改代码），再对照 [Protocol.cpp:28-93](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Communication/Protocol.cpp#L28-L93) 验证你的推演。
