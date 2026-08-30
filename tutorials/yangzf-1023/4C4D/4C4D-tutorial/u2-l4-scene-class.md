@@ -4,613 +4,690 @@
 
 学完本讲，你应该能够：
 
-1. 说出 `Scene` 在 4C4D 中的角色：它是「磁盘上的数据集」与「可训练/可渲染的 4D 高斯场景」之间的装配器，`train.py` 与 `render.py` 共用这一个入口。
-2. 解释 `Scene` 如何通过 `sceneLoadTypeCallbacks` 回调表，根据目录特征把数据集自动分发给 Colmap 或 Blender 两种读取器。
-3. 手工推导 `cameras_extent`（即 `nerf_normalization["radius"]`）的计算过程，并说出它的两大用途：缩放位置学习率、参与致密化的 clone/split 判定。
-4. 列出一次训练在 `model_path` 下会生成哪些文件，其中哪些是 `Scene` 在构造阶段写出的（`input.ply`、`cameras.json`）。
-5. 说出高斯初始化的三岔路：`loaded_pth` → `create_from_pth`；`load_iteration` → `load_ply`；否则冷启动 `create_from_pcd`。
-
-本讲承接 u2-l2（`readColmapSceneInfo` 与 `SceneInfo` 容器）和 u2-l3（`Camera` 对象与懒加载），把数据链路的最后一环补上：这些零散的信息如何被装配成一个 `Scene`。
+1. 说出 `Scene` 类在训练流程中的位置：它是「数据集描述」与「可训练 4D 高斯」之间的装配工厂。
+2. 解释 `Scene.__init__` 如何通过 `sceneLoadTypeCallbacks` 回调表，仅凭目录特征（有没有 `sparse/`、有没有 `transforms_train.json`）在 Colmap 与 Blender 两种数据集之间自动分发。
+3. 推导 `cameras_extent`（即 `nerf_normalization["radius"]`）的计算公式，并追踪它如何同时影响位置学习率（`spatial_lr_scale`）与致密化中 clone/split 的尺寸分界（`percent_dense * scene_extent`）。
+4. 列出一次训练在 `model_path` 下生成的全部文件，并说明各自由哪段代码写出。
+5. 说清楚高斯初始化的三条分支（`loaded_pth` / `loaded_iter` / `create_from_pcd`）各自的触发条件与适用场景。
 
 ## 2. 前置知识
 
-- **SceneInfo / CameraInfo / BasicPointCloud**：u2-l2 讲过的三个 NamedTuple 容器。`readColmapSceneInfo` 的返回值 `SceneInfo` 打包了点云、训练/测试相机列表、场景归一化信息和点云路径。本讲只消费它，不再深入其构造细节。
-- **Camera 对象**：u2-l3 讲过 `Camera` 把 `CameraInfo` 加工成渲染可用的投影矩阵；`meta_only=True`（即 `dataloader=True`）时不持有真实图像像素。
-- **回调表（callback table）**：就是一个字典，键是数据集类型名，值是「能读取该类型数据的函数」。调用方先探测数据集特征，再查表调用对应函数。这是策略模式的最简实现，新增数据集格式只需往表里加一项（u8-l4 会专门讲）。
-- **相机光心（camera center）**：相机在世界坐标系下的位置。若 \(W2C = [R|T]\) 是世界到相机的变换，则光心 \(C = -R^{\top}T\)（本仓库 `R` 存的是转置后的 C2W 旋转，`getWorld2View2` 负责拼回）。
-- **场景归一化的直觉**：不同数据集的物理尺度差异巨大（桌面物体可能半径不到 1 米，街区可能几十米）。把「所有训练相机光心到其均值的最大距离 × 1.1」压成一个标量，就能让学习率、致密化阈值等超参数跨场景通用。
+本讲建立在前几讲的概念之上，先用通俗语言把几个关键术语补齐：
+
+- **SceneInfo / CameraInfo / BasicPointCloud**：u2-l2 讲过，`dataset_readers.py` 用三个 NamedTuple 容器分别描述「整个场景」（点云 + 相机列表 + 归一化信息 + ply 路径）、「一台相机在某一帧的拍摄参数」和「初始三维点云」。`Scene` 类的输入本质上就是一份 `SceneInfo`。
+- **回调表（callback table）/ 策略模式**：用一个字典把「数据集类型名」映射到「读取函数」，比如 `{"Colmap": readColmapSceneInfo, "Blender": readNerfSyntheticInfo}`。调用方不写 `if/else` 硬编码，而是查表调用。这是本项目支持多种数据格式的唯一注册点，也是 u8-l4 二次开发时新增数据集的挂载点。
+- **C2W / W2C**：世界到相机（W2C）变换用于把世界坐标投到图像；相机到世界（C2W）变换的平移列就是**相机光心**（相机在世界系下的位置）。计算场景半径需要的是光心，所以要先求 C2W。
+- **spatial_lr_scale（空间学习率缩放因子）**：3DGS 的一个工程经验——场景越大，高斯每次该移动的距离就越大。这个因子直接乘在位置学习率上，本讲会看到它正是 `cameras_extent`。
+- **model_path（输出目录）**：训练的一切产物（checkpoint、点云、相机参数、TensorBoard 日志）都写到这里。由 `--model_path` 指定，未指定时自动生成到 `./output/<uuid前10位>`。
+
+如果你对 `timestamp` 归一化、`camXX_YYYY.png` 命名约定、`training_view` 划分还不熟悉，请先复习 u2-l2；对 Camera 的投影矩阵、懒加载还不熟悉，请先复习 u2-l3。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 | 本讲关注点 |
 | --- | --- | --- |
-| [scene/__init__.py](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py) | 定义 `Scene` 类 | 构造流程、产物写出、初始化三岔路、相机获取接口 |
-| [scene/dataset_readers.py](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py) | 数据集读取器 | `sceneLoadTypeCallbacks` 回调表、`getNerfppNorm`、`SceneInfo` |
-| [utils/camera_utils.py](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/utils/camera_utils.py) | 相机工具 | `cameraList_from_camInfos`、`loadCam`、`camera_to_JSON` |
-| [utils/system_utils.py](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/utils/system_utils.py) | 系统工具 | `searchForMaxIteration`（找最新迭代号） |
-| [scene/gaussian_model.py](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py) | 高斯模型 | `create_from_pcd` / `create_from_pth` / `load_ply` 的入口、`spatial_lr_scale` 的消费位置 |
-| [train.py](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/train.py) | 训练入口 | `Scene` 的调用处、`model_path` 目录的创建与文件清单 |
-| [render.py](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/render.py) | 推理入口 | `Scene` 的第二个调用处（`shuffle=False`） |
+| `scene/__init__.py` | `Scene` 类定义 | 构造流程、分发逻辑、输出文件、初始化分支、相机访问接口 |
+| `scene/dataset_readers.py` | 数据集读取 | `sceneLoadTypeCallbacks` 注册表、`getNerfppNorm`、`SceneInfo` 定义 |
+| `utils/camera_utils.py` | 相机工具 | `cameraList_from_camInfos`、`camera_to_JSON` |
+| `utils/system_utils.py` | 系统工具 | `searchForMaxIteration`（找最新迭代号） |
+| `scene/gaussian_model.py` | 高斯模型 | `create_from_pcd` / `create_from_pth` / `load_ply` 三条初始化路径，以及 `training_setup`、`densify_and_clone/split` 中对 `cameras_extent` 的消费 |
+| `train.py` | 训练入口 | `Scene` 的实例化位置、`prepare_output_and_logger` 写出的文件 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 Scene 类：训练与推理共用的场景装配器
+### 4.1 Scene 类：训练世界的装配工厂
 
 #### 4.1.1 概念说明
 
-`Scene` 是一个「装配器（assembler）」：它自己不解析任何数据格式、不定义任何高斯属性，而是把三样东西组装到一起：
+`Scene` 是 4C4D 训练流程中的「中央装配车间」。它不训练任何东西，也不渲染任何东西，只负责把三样东西组装到位：
 
-1. **一批相机**（从数据集读取器拿到的 `CameraInfo` 列表，转成 `Camera` 对象）；
-2. **一份初始点云**（决定高斯的出生状态）；
-3. **一个输出目录 `model_path`**（把初始化证据快照下来，供排查与复现）。
+1. **相机集合**：把 `SceneInfo` 里的 `CameraInfo` 列表转换成真正可用于渲染的 `Camera` 对象，按训练/测试、按分辨率组织成字典。
+2. **场景尺度**：从训练相机位置算出一个标量 `cameras_extent`，交给高斯模型做学习率与致密化阈值缩放。
+3. **高斯初值**：决定高斯从哪来——随机初始化自点云（`create_from_pcd`）、从 `.pth` 检查点初始化（`create_from_pth`），还是加载已训练的 ply（`load_ply`）。
 
-`train.py` 的 `training()` 在创建 `GaussianModel` 之后立刻构造 `Scene`（见 [train.py:62-67](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/train.py#L62-L67)），然后才调用 `gaussians.training_setup(opt)`。也就是说：**高斯的「出生」发生在 Scene 里，高斯的「入学（优化器）」发生在 Scene 之外**。这个顺序是理解本讲的关键。
+为什么需要这样一层？因为 `train.py` 只想问一句「给我训练相机和初始高斯」，不想关心数据是 COLMAP 还是 Blender、图像要不要懒加载、点云要不要下采样。`Scene` 把这些细节全部吸收。
 
 #### 4.1.2 核心流程
 
-`Scene.__init__` 从头到尾做十件事，按执行顺序：
+`Scene.__init__` 的执行顺序（这条顺序本身就含有重要约束，见源码精读）：
 
 ```text
-1. 记录 model_path / loaded_iter / gaussians / white_background
-2. 若指定 load_iteration：
-     -1 → 在 model_path/point_cloud/ 下找最大 iteration_N
-     其他 → 直接用该数字                 （推理/续训模式）
-3. 探测数据集类型 → 查 sceneLoadTypeCallbacks → 得到 scene_info
-4. 若是冷启动（无 loaded_iter）：
-   4a. 把 scene_info.ply_path 复制为 model_path/input.ply
-   4b. 把 test + train 相机逐个转成 JSON，写 model_path/cameras.json
-5. 若 shuffle：随机打乱 train/test 相机顺序
-6. self.cameras_extent = scene_info.nerf_normalization["radius"]
-7. 对每个 resolution_scale（默认只有 1.0）：
-     train_cameras[scale] = cameraList_from_camInfos(train, scale, args)
-     test_cameras[scale]  = cameraList_from_camInfos(test,  scale, args)
-8. 高斯初始化三岔路：
-     args.loaded_pth 非空 → gaussians.create_from_pth(pth, cameras_extent)
-     loaded_iter 非空     → gaussians.load_ply(model_path/point_cloud/iteration_N/point_cloud.ply)
-     否则（冷启动）       → gaussians.create_from_pcd(scene_info.point_cloud, cameras_extent, redundant_ratio)
+Scene.__init__(args, gaussians)
+ 1. 记录 model_path / loaded_iter / white_background
+ 2. 判断数据集类型 → 查 sceneLoadTypeCallbacks 表 → 得到 SceneInfo
+      ├─ source_path 下有 sparse/            → readColmapSceneInfo
+      ├─ source_path 下有 transforms_train.json → readNerfSyntheticInfo
+      └─ 都没有 → assert False
+ 3. 若是全新训练（loaded_iter 为空）：
+      a. 把 source 的 points3D.ply 复制为 model_path/input.ply
+      b. 把 test+train 相机逐个转成 JSON，写出 model_path/cameras.json
+ 4. shuffle 打乱 train/test 相机顺序
+ 5. cameras_extent = SceneInfo.nerf_normalization["radius"]
+ 6. 对每个 resolution_scale：cameraList_from_camInfos → self.train_cameras[scale] / self.test_cameras[scale]
+ 7. 高斯初始化（三选一）：
+      a. args.loaded_pth 非空 → create_from_pth
+      b. loaded_iter 非空     → load_ply(model_path/point_cloud/iteration_N/point_cloud.ply)
+      c. 否则                 → create_from_pcd(SceneInfo.point_cloud, cameras_extent, redundant_ratio)
 ```
-
-注意第 4 步在第 8 步**之前**执行——这一点在综合实践里会用到：即使第 8 步因缺少 GPU 而失败，`input.ply` 和 `cameras.json` 也已经写出，可以用来观察。
 
 #### 4.1.3 源码精读
 
-**构造函数签名**——参数远比 `train.py` 直接传的多，因为有大量默认值：
+构造函数签名与默认参数——注意 `num_pts`、`training_view`、`redundant_ratio`、`downsample_method` 这些 u2-l2 讲过的旋钮都在这里从 `train.py` 透传进数据读取层：[scene/__init__.py:27-30](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L27-L30)
 
-[scene/__init__.py:27-30](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L27-L30)
+```python
+def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, 
+             resolution_scales=[1.0], num_pts=100_000, num_pts_ratio=1.0, time_duration=None, 
+             training_view=['cam10', 'cam01', 'cam20', 'cam13'], redundant_ratio=0.2,
+             downsample_method='random', testing_view=None):
+```
 
-这段定义了 `Scene` 的全部可调项：`load_iteration`（加载已训练模型）、`shuffle`（是否打乱相机顺序）、`resolution_scales`（多分辨率训练）、`num_pts`/`num_pts_ratio`（初始点云规模，见 u2-l2）、`time_duration`（时间域）、`training_view`/`testing_view`（视角划分）、`redundant_ratio`（时间冗余）、`downsample_method`（random/fps）。其中 `training_view` 的默认值 `['cam10', 'cam01', 'cam20', 'cam13']` 与 u2-l2 讲过的 N3V/DyNeRF 数据集约定一致。
+`load_iteration` 的处理：传 `-1` 表示「自动找最新迭代」，靠 `searchForMaxIteration` 扫描 `point_cloud/` 下的 `iteration_N` 目录名取最大值：[scene/__init__.py:39-46](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L39-L46)，而 [utils/system_utils.py:27-29](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/utils/system_utils.py#L27-L29) 就是那个三行函数：
 
-**推理模式的迭代号探测**：
+```python
+def searchForMaxIteration(folder):
+    saved_iters = [int(fname.split("_")[-1]) for fname in os.listdir(folder)]
+    return max(saved_iters)
+```
 
-[scene/__init__.py:39-46](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L39-L46)
+在 `train.py` 中的实例化位置——注意**顺序**：`Scene` 必须先于 `gaussians.training_setup(opt)` 构造，因为 `create_from_pcd` 内部会写入 `self.spatial_lr_scale`（见 4.3 节），而 `training_setup` 要读它来算位置学习率：[train.py:62-67](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/train.py#L62-L67)
 
-当 `load_iteration == -1` 时，用 `searchForMaxIteration` 扫描 `model_path/point_cloud/` 下的目录名（形如 `iteration_7000`），取数字最大者：
+```python
+gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=gaussian_dim, ...)
+scene = Scene(dataset, gaussians, num_pts=num_pts, num_pts_ratio=num_pts_ratio, 
+              time_duration=time_duration, training_view=args.training_view, testing_view=args.testing_view,
+              redundant_ratio=args.redundant_ratio, downsample_method=args.downsample_method)
+gaussians.training_setup(opt)   # ← 必须在 Scene 之后：training_setup 依赖 spatial_lr_scale
+```
 
-[utils/system_utils.py:27-29](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/utils/system_utils.py#L27-L29)
+`Scene` 还暴露四个相机访问接口，全部返回 `CameraDataset`（u2-l3 讲过的懒加载包装），其中 `getTrainCameras` 是训练循环的数据来源、`getAllCameras` 供轨迹渲染插值使用：[scene/__init__.py:114-127](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L114-L127)
 
-这行代码把每个子目录名按 `_` 切开取最后一段转 int 再取 max——它假设该目录下**只有** `iteration_N` 形式的目录，混入其他名字会直接报错。
+```python
+def getTrainCameras(self, scale=1.0):
+    return CameraDataset(self.train_cameras[scale].copy(), self.white_background)
+...
+def getAllCameras(self, scale=1.0):
+    return CameraDataset(self.train_cameras[scale].copy() + self.test_cameras[scale].copy(), self.white_background)
+```
 
-**相机容器是「按分辨率组织的字典」**：
+`save` 方法是检查点写出的唯一入口——一个 `.pth`（含 `capture()` 元组与迭代号）加一个 ply：[scene/__init__.py:109-112](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L109-L112)
 
-[scene/__init__.py:48-49](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L48-L49)
+```python
+def save(self, iteration):
+    torch.save((self.gaussians.capture(), iteration), self.model_path + "/chkpnt" + str(iteration) + ".pth")
+    point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
+    self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
+```
 
-`self.train_cameras` 与 `self.test_cameras` 是 `{resolution_scale: [Camera, ...]}` 的字典而非普通列表，对应签名里的 `resolution_scales=[1.0]`（4C4D 实际只用 1.0，但保留了 3DGS 的多分辨率机制）。
+#### 4.1.4 代码实践
 
-**对外接口**——训练循环和推理脚本只通过这四个方法取相机，返回的都是 `CameraDataset`（懒加载包装，见 u2-l3）：
+**实践目标**：不跑完整训练，仅通过阅读 + 一次轻量实例化，确认 `Scene` 的构造顺序与「先 Scene 后 training_setup」的依赖关系。
 
-[scene/__init__.py:114-127](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L114-L127)
+**操作步骤**：
 
-`getTrainCameras`/`getTestCameras` 对列表做了 `.copy()`（浅拷贝，防止外部 shuffle 污染内部顺序），`getAllCameras` 把两者拼接（u7-l2 的轨迹生成 `generate_path` 就靠它拿全部相机），`getValidationCameras` 用切片 `::num` 隔帧抽样。
+1. 打开 [scene/__init__.py:27-107](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L27-L107)，在纸上（或注释里）给 `__init__` 的 7 个阶段标号（见 4.1.2 的流程图）。
+2. 打开 [train.py:62-67](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/train.py#L62-L67)，验证 `GaussianModel` → `Scene` → `training_setup` 的调用顺序。
+3. 做一个思想实验：如果把 `train.py` 里的 `scene = Scene(...)` 与 `gaussians.training_setup(opt)` 两行对调，会发生什么？提示：沿着 `create_from_pcd`（[scene/gaussian_model.py:406-407](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L406-L407) 里 `self.spatial_lr_scale = spatial_lr_scale`）与 `training_setup`（[scene/gaussian_model.py:485](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L485) 里 `training_args.position_lr_init * self.spatial_lr_scale`）追踪。
 
-**保存接口**（本讲只认识它，细节留给 u5-l5）：
-
-[scene/__init__.py:109-112](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L109-L112)
-
-每次保存写两个东西：`chkpntN.pth`（`gaussians.capture()` 的元组 + 迭代号，用于续训）和 `point_cloud/iteration_N/point_cloud.ply`（高斯属性快照，用于推理）。
-
-#### 4.1.4 代码实践（源码阅读型）
-
-1. **实践目标**：对比两个入口对 `Scene` 的调用方式，理解「训练需要打乱、推理需要保序」。
-2. **操作步骤**：
-   - 打开 [train.py:64-66](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/train.py#L64-L66)，记下它传了哪些关键字参数（`num_pts`、`training_view`、`redundant_ratio`、`downsample_method` 等，`shuffle` 用默认值 `True`）。
-   - 打开 [render.py:48-49](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/render.py#L48-L49)，注意它显式传了 `shuffle=False`，且没有传 `load_iteration`。
-   - 再看 [render.py:52-52](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/render.py#L52)：`Scene` 内部虽然走了 `create_from_pcd` 冷启动，但紧接着 `torch.load(checkpoint)` + `gaussians.restore` 用检查点内容**整体覆盖**了高斯参数。
-3. **需要观察的现象**：`render.py` 里 `Scene` 构造打印的 `Creating gaussians from initial point cloud input.ply` 与随后的 restore 是两次独立的初始化，前者产出的高斯寿命只有几行代码。
-4. **预期结果**：你能说出为什么 `render.py` 必须 `shuffle=False`——测试帧要按时间顺序逐帧渲染与对比指标，打乱会破坏帧序；而训练打乱是为了每个 epoch 的视角序列不同。
-5. 本实践为纯阅读，无需运行（待本地验证的只有你对打印顺序的预测）。
+**需要观察的现象 / 预期结果**：对调后 `training_setup` 读到的 `self.spatial_lr_scale` 仍是 `GaussianModel.__init__` 里的初值 `0`（见 [scene/gaussian_model.py:78](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L78)），位置学习率会变成 0，训练中高斯位置完全不动——一个典型的「静默失败」。此结论可由代码静态推出，**待本地验证**（需要 GPU 数据才能实际跑）。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：如果我把 `train.py` 里构造 `Scene` 与 `gaussians.training_setup(opt)` 两行交换顺序，会发生什么？
+**练习 1**：`Scene` 类自己保存了高斯张量吗？
 
-**答案**：`training_setup` 会立即失败。它第一行就要 `self.get_xyz.shape[0]`（[scene/gaussian_model.py:481-482](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L481-L482)），而 `_xyz` 只有在 `Scene` 内部调用 `create_from_pcd`/`load_ply` 之后才被赋值；交换后 `_xyz` 还是初始化时的 `None`，抛 `AttributeError`/`TypeError`。这印证了「高斯的出生在 Scene 里」。
+**答案**：没有。`Scene` 只持有 `self.gaussians` 这个 `GaussianModel` 的引用（[scene/__init__.py:36](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L36)），真正的高斯属性（`_xyz`、`_t` 等）都在 `GaussianModel` 里。`Scene` 的职责是「装配」而非「持有数据」。
 
-**练习 2**：`scene.getTrainCameras()` 返回的是 `CameraDataset` 而不是 `list[Camera]`，结合 u2-l3，说出一个原因。
+**练习 2**：`searchForMaxIteration` 为什么能工作？它对目录命名有什么隐含要求？
 
-**答案**：`CameraDataset` 配合 `DataLoader`（`collate_fn=lambda x: x`，[train.py:104-105](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/train.py#L104-L105)）实现多 worker 懒加载：图像只有在 `__getitem__` 被调用时才 `cv2.imread` 读入，避免上千帧全量常驻显存（u2-l3 估算约 37 GiB）。直接返回 list 会迫使构造期读完全部图像。
+**答案**：它把 `point_cloud/` 下每个子目录名按 `_` 切开取最后一段转 int 再取 max（[utils/system_utils.py:27-29](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/utils/system_utils.py#L27-L29)）。这要求子目录必须严格命名为 `iteration_<数字>`——正是 `Scene.save` 里 `os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))` 写出的格式。若手工在 `point_cloud/` 下放了别的名字的目录，转 int 会抛 `ValueError`。
 
-### 4.2 sceneLoadTypeCallbacks：两种数据集的分发
+**练习 3**：`getTrainCameras` 返回前为什么要 `.copy()`？
+
+**答案**：`CameraDataset` 包装的是列表引用；`DataLoader` 的 `shuffle=True` 不会改列表，但训练中任何对返回列表的原位修改（append/remove）若不 copy 就会污染 `self.train_cameras[scale]`，影响后续再次取相机（例如 `training_report` 里取测试相机）的一致性。`.copy()` 是浅拷贝，代价很小。
+
+### 4.2 sceneLoadTypeCallbacks：按目录特征自动分发数据集
 
 #### 4.2.1 概念说明
 
-`Scene` 不写 `if/elif` 直接调用某个读取函数，而是先「看目录长什么样」，再查一张注册表。这张表就是 `sceneLoadTypeCallbacks`。好处是：`Scene` 对数据集格式无感，新增格式（例如自己的合成数据）只要注册一个新键值对，`Scene` 一行都不用改——这是 u8-l4 二次开发的基础。
+4C4D 要支持至少两类数据：真实采集的 COLMAP 格式（N3V/ DyNeRF 类多相机视频）与 Blender 合成数据（NeRF synthetic 格式）。两者的文件组织完全不同，但 `Scene` 不想知道这些差异。解决方案是模块级字典 `sceneLoadTypeCallbacks`——一个极简的策略模式：
 
-探测规则很朴素：
+- **Colmap**：`sparse/` 目录 + `camXX_YYYY.png` 图像，相机固定、按帧展开（u2-l2 全讲）。
+- **Blender**：`transforms_train.json` / `transforms_test.json` 声明每帧的 C2W 矩阵，无点云时随机生成初始点。
 
-- 源路径下有 `sparse/` 目录 → 认定为 **Colmap** 数据集；
-- 否则有 `transforms_train.json` → 认定为 **Blender**（NeRF 合成格式）数据集；
-- 两者都没有 → `assert False`，报 `Could not recognize scene type!`。
+分发依据不是配置项，而是**目录探测**：`source_path` 下存在 `sparse` 目录就当 Colmap，存在 `transforms_train.json` 就当 Blender，两者都没有则直接断言失败。
 
 #### 4.2.2 核心流程
 
 ```text
-os.path.exists(source_path/sparse)  ──yes──> sceneLoadTypeCallbacks["Colmap"](path, images, eval,
-        │                                   num_pts_ratio, training_cam, testing_cam,
-        │                                   num_pts, time_duration, downsample_method)
-        no
-        ↓
-os.path.exists(source_path/transforms_train.json) ──yes──> sceneLoadTypeCallbacks["Blender"](path,
-        │                                                   white_background, eval, num_pts,
-        │                                                   time_duration, extension,
-        │                                                   num_extra_pts, frame_ratio, dataloader)
-        no
-        ↓
-assert False  "Could not recognize scene type!"
+os.path.exists(source_path/sparse)          ──是──▶ sceneLoadTypeCallbacks["Colmap"](path, images, eval,
+│                                                    num_pts_ratio, training_cam, testing_cam,
+│                                                    num_pts, time_duration, downsample_method)
+否
+│
+os.path.exists(source_path/transforms_train.json) ─是─▶ sceneLoadTypeCallbacks["Blender"](path, white_background,
+│                                                       eval, num_pts, time_duration, extension,
+│                                                       num_extra_pts, frame_ratio, dataloader)
+否
+└──▶ assert False, "Could not recognize scene type!"
 ```
 
-两个回调都返回同一种 `SceneInfo`，所以下游代码完全一致——这正是「注册表 + 统一返回类型」的价值。
+注意两个回调的**参数签名不同**：Colmap 侧关心视角划分与下采样方式，Blender 侧关心背景色、文件扩展名、额外环境点（`num_extra_pts`，在远处球面上撒点当背景）与帧率缩放。分发处把各自需要的参数硬编码地传过去。
 
 #### 4.2.3 源码精读
 
-**注册表本体**只有两行：
+注册表本体，位于 `dataset_readers.py` 末尾——整份文件先定义两个读取函数，最后两行完成注册：[scene/dataset_readers.py:535-538](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L535-L538)
 
-[scene/dataset_readers.py:535-538](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L535-L538)
+```python
+sceneLoadTypeCallbacks = {
+    "Colmap": readColmapSceneInfo,
+    "Blender" : readNerfSyntheticInfo
+}
+```
 
-`"Colmap"` 映射到 `readColmapSceneInfo`（u2-l2 已精读），`"Blender"` 映射到 `readNerfSyntheticInfo`。注意这张表写在 dataset_readers.py 的**末尾**——因为值就是上面定义的两个函数对象，必须先定义后引用。
+分发逻辑：[scene/__init__.py:51-60](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L51-L60)
 
-**Scene 侧的分发代码**：
+```python
+if os.path.exists(os.path.join(args.source_path, "sparse")):
+    scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval, num_pts_ratio=num_pts_ratio, 
+                                                  training_cam=training_view, testing_cam=testing_view, num_pts=num_pts, time_duration=time_duration,
+                                                  downsample_method=downsample_method)
+    print(f"Found sparse folder in {args.source_path}, assuming Colmap data set!")
+elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
+    print(f"Found transforms_train.json file in {args.source_path}, assuming Blender data set!")
+    scene_info = sceneLoadTypeCallbacks["Blender"](...)
+else:
+    assert False, "Could not recognize scene type!"
+```
 
-[scene/__init__.py:51-60](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L51-L60)
+两个回调的**共同产出契约**是 `SceneInfo` 这个 NamedTuple——这是它们能互换的关键：[scene/dataset_readers.py:60-65](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L60-L65)
 
-Colmap 分支把 u2-l2 讲过的所有点云加工参数原样透传；Blender 分支传的则是另一组参数（`white_background`、`extension`、`num_extra_pts`、`frame_ratio`、`dataloader`）——两个回调的**函数签名不同**，`Scene` 必须分别传参，这是注册表模式里容易踩的坑（注册新格式时，调用处的参数列表要同步扩展）。
+```python
+class SceneInfo(NamedTuple):
+    point_cloud: BasicPointCloud
+    train_cameras: list
+    test_cameras: list
+    nerf_normalization: dict
+    ply_path: str
+```
 
-**统一的返回容器**：
+Colmap 回调在函数末尾打包返回 `SceneInfo`（点云可能已经过 `num_pts`/`num_pts_ratio` 加工）：[scene/dataset_readers.py:346-351](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L346-L351)；Blender 回调 `readNerfSyntheticInfo` 无 COLMAP 数据时在 `[-1.3, 1.3]` 立方体内随机撒 `num_pts` 个点并写成 ply：[scene/dataset_readers.py:466-475](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L466-L475)。
 
-[scene/dataset_readers.py:60-65](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L60-L65)
+一个容易踩的坑：**判断优先级是 sparse 在前**。若某个数据目录同时含 `sparse/` 与 `transforms_train.json`（例如做格式转换的中间产物），会被当作 Colmap 处理，`transforms_train.json` 被静默忽略。
 
-`SceneInfo` 五个字段：初始点云、训练相机、测试相机、场景归一化、点云文件路径。Colmap 与 Blender 的差异被吸收在这个统一结构里。
+#### 4.2.4 代码实践
 
-**两个回调的两处关键差异**（Blender 侧速览，不必精读）：
+**实践目标**：用两个手工构造的最小目录，验证分发规则的三条分支。
 
-- 初始点云来源：Colmap 用真实重建点云（`sparse/0/points3D.ply`，首次运行时从 bin/txt 转换，见 [scene/dataset_readers.py:293-306](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L293-L306)）；Blender 合成场景没有 SfM 点云，直接在 \([-1.3, 1.3]^3\) 立方体里**随机撒点**（[scene/dataset_readers.py:465-475](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L465-L475)），`ply_path` 也从 `sparse/0/points3D.ply` 变成数据集根目录的 `points3d.ply`（[scene/dataset_readers.py:465-465](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L465-L465)）。
-- 相机来源：Colmap 走 qvec/tvec（u2-l1），Blender 走 `transform_matrix`（C2W，含 OpenGL→COLMAP 轴向翻转，[scene/dataset_readers.py:376-384](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L376-L384)）。
+**操作步骤**：
 
-#### 4.2.4 代码实践（源码阅读 + 可选运行）
+1. 新建空目录 `fake_colmap/`，在里面 `mkdir -p sparse/0`，再建 `fake_blender/`，放一个只含 `{"frames": []}` 的 `transforms_train.json`（内容随意，只要文件名对）。
+2. 在 Python 里执行（示例代码）：
 
-1. **实践目标**：亲手摸一下这张注册表，并核对两个回调的签名差异。
-2. **操作步骤**：
-   - 在能 import 该模块的环境（需先编译 pointops2 等扩展，见 u1-l2）执行：
-     ```python
-     from scene.dataset_readers import sceneLoadTypeCallbacks
-     import inspect
-     for k, fn in sceneLoadTypeCallbacks.items():
-         print(k, inspect.signature(fn))
-     ```
-   - 无编译环境时做纯阅读：对照 [scene/dataset_readers.py:255-258](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L255-L258) 与 [scene/dataset_readers.py:452-452](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L452-L452) 两处函数签名手抄参数表。
-3. **需要观察的现象**：两个回调第一个位置参数之后几乎没有任何共同参数（除了 `eval`、`num_pts`、`time_duration`）。
-4. **预期结果**：你会得出结论——`Scene` 的分发代码（L52/L58）之所以要写两串很长的实参列表，正是因为注册表只统一了「返回值类型」，没有统一「入参协议」。
-5. 运行部分依赖扩展编译，无 GPU/扩展环境时结果**待本地验证**；签名阅读部分可直接完成。
+```python
+import os
+# 示例代码：只复现 Scene 的分发判断，不真正实例化 Scene
+for p in ["fake_colmap", "fake_blender", "not_a_dataset"]:
+    has_sparse = os.path.exists(os.path.join(p, "sparse"))
+    has_blender = os.path.exists(os.path.join(p, "transforms_train.json"))
+    kind = "Colmap" if has_sparse else ("Blender" if has_blender else "断言失败")
+    print(f"{p}: {kind}")
+```
+
+3. 观察三个目录分别命中哪条分支。
+
+**需要观察的现象 / 预期结果**：输出依次为 `Colmap`、`Blender`、`断言失败`，与 [scene/__init__.py:51-60](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L51-L60) 的 if/elif/else 一一对应。注意第 2 步只复现了判断条件，并未调用读取函数——真正实例化 `Scene` 需要完整的 `sparse/0` 三件套与图像目录，那正是 4.5 节综合实践要做的事。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么探测顺序是先查 `sparse/` 再查 `transforms_train.json`？如果某个目录两者都有会怎样？
+**练习 1**：想新增一种数据格式（例如自家的 jsonl 标定），最少要改几处？
 
-**答案**：顺序由 `if/elif` 写死（L51→L56），两者都有时 `sparse/` 胜出、走 Colmap 分支。先查 `sparse/` 是因为 4C4D 的主数据链路（N3V/DyNeRF 多相机视频）被 `n3v2colmap.py` 转成 COLMAP 格式（u2-l5），Colmap 是第一公民；Blender 分支是继承自 3DGS 的合成数据支持。
+**答案**：两处。① 在 `dataset_readers.py` 写一个返回 `SceneInfo` 的读取函数；② 在 `sceneLoadTypeCallbacks` 字典（[scene/dataset_readers.py:535-538](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L535-L538)）加一项。③ 还需在 `Scene.__init__` 的 if/elif 里加一个目录特征探测分支（[scene/__init__.py:51-60](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L51-L60)）——严格说是三处，这正是 u8-l4 二次开发实践的入门任务。
 
-**练习 2**：`readNerfSyntheticInfo` 里 `if not eval: train_cam_infos.extend(test_cam_infos)`（[scene/dataset_readers.py:459-461](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L459-L461)）与 Colmap 分支的 `eval` 处理（u2-l2）有什么共同设计意图？
+**练习 2**：为什么 `Scene` 不把 `if/else` 直接写成调用 `readColmapSceneInfo` / `readNerfSyntheticInfo`？
 
-**答案**：共同意图是「不评估时把全部数据用于训练」。Colmap 分支 `eval=False` 时 `train_cam_infos = cam_infos; test_cam_infos = []`；Blender 分支把 test 并回 train。区别在于 Blender 的 test 集来自独立的 `transforms_test.json`（本来就不重叠），Colmap 的划分按相机名（`training_view`）进行。
+**答案**：查表调用让 `scene/__init__.py` 只依赖「键名 → 函数」这一约定，不 import 具体读取函数的符号（实际上它只 import 了 `sceneLoadTypeCallbacks` 这一个名字，见 [scene/__init__.py:17](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L17)）。新增格式时 `Scene` 的分发处仍需加分支，但读取函数的组装完全解耦，也方便在外部测试时替换注册表里的函数做 mock。
 
-### 4.3 场景装配产物：input.ply、cameras.json 与 cameras_extent
+### 4.3 getNerfppNorm 与 cameras_extent：一个数字的两处消费
 
 #### 4.3.1 概念说明
 
-`Scene` 在冷启动时会把两份「初始化证据」快照进 `model_path`：
+`cameras_extent` 是 `Scene` 从 `SceneInfo.nerf_normalization["radius"]` 取出的一个标量，语义是「**相机包围球的半径再放大 1.1 倍**」。它是整个训练里唯一的全局场景尺度量，被两处消费：
 
-- `input.ply`：初始点云的完整拷贝。训练出问题时，第一件事就是看它——初始点云烂，后面全烂。
-- `cameras.json`：所有相机的位姿与内参的人类可读版本，方便用外部工具（如可视化脚本）核对相机摆放。
-
-随后 `Scene` 从 `scene_info.nerf_normalization["radius"]` 提取 `cameras_extent`——整个场景物理尺寸的一个标量摘要。它不是日志摆设，而是**两处关键超参数的缩放因子**（见 4.3.2），理解它就理解了为什么同一套默认学习率能跑不同尺度的场景。
+1. **位置学习率缩放**（`spatial_lr_scale`）：xyz 与时间位置 `_t` 的 Adam 学习率、以及 xyz 的指数衰减调度都乘上它。直觉：大场景里高斯要「走更远的路」，步子应当更大；这样同一套 `position_lr_init` 超参可以跨场景复用。
+2. **致密化尺寸分界**（`percent_dense * scene_extent`）：clone 与 split 用同一个公式比较高斯的最大尺度，一个判「太小」、一个判「太大」，本讲只讲量从哪来，机制细节留给 u5-l4。
 
 #### 4.3.2 核心流程
 
-**cameras_extent 的计算**（在读取器内完成，`Scene` 只取结果）：
-
-对每个**训练**相机 \(i\)（注意：不含测试相机），先求光心 \(C_i\)（C2W 矩阵的平移列），然后：
+`getNerfppNorm` 的数学定义。设训练相机光心为 \( C_1,\dots,C_N \)（3 维列向量），均值为 \( \bar{C} \)，则：
 
 \[
-\text{center} = \frac{1}{N}\sum_{i=1}^{N} C_i, \qquad
-\text{diagonal} = \max_i \lVert C_i - \text{center} \rVert_2, \qquad
-\text{radius} = 1.1 \times \text{diagonal}
+\text{radius} = 1.1 \times \max_i \lVert C_i - \bar{C} \rVert_2, \qquad \text{translate} = -\bar{C}
 \]
 
-1.1 是安全系数：让半径略微超出最远相机，避免边界效应。
+`cameras_extent` 就是这个 `radius`。注意它**只由训练相机计算**（u2-l2 的 `getNerfppNorm(train_cam_infos)`），测试相机不参与——否则留出相机的位置会改变训练超参，评估就不再可控。
 
-**cameras_extent 的两大下游**：
+光心的求法：`CameraInfo` 里存的是 C2W 旋转 `R`（转置过的）与 W2C 平移 `T`，先拼回 W2C 再求逆得到 C2W，取其平移列即光心：
 
-1. **位置学习率缩放**。它作为 `spatial_lr_scale` 传入高斯模型，作用于三处（详见 4.5.3）：
-   \[
-   \text{lr}_{xyz} = \text{position\_lr\_init} \times \text{cameras\_extent}, \qquad
-   \text{lr}_{t} = \text{position\_t\_lr\_init} \times \text{cameras\_extent}
-   \]
-   以及指数衰减调度器的 `lr_init`/`lr_final` 同比缩放。直觉：场景越大，高斯需要移动的距离越远，步子就该迈得越大。
-2. **致密化的 clone/split 判据**。`densify_and_split` 里「该分裂」要求高斯最大尺度**大于** `percent_dense × scene_extent`（[scene/gaussian_model.py:681-684](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L681-L684)），`densify_and_clone` 里「该克隆」要求**小于等于**它（[scene/gaussian_model.py:725-728](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L725-L728)）。直觉：大高斯分裂成小块、小高斯原地复制，而「大小」必须相对场景尺寸衡量。
+\[
+C = \left(\text{W2C}^{-1}\right)_{[:3,\,3]}
+\]
+
+下游消费链（两条）：
+
+```text
+cameras_extent ──▶ create_from_pcd(pcd, spatial_lr_scale=cameras_extent)  # 存为 self.spatial_lr_scale
+                        │
+                        ├─▶ training_setup: xyz lr = position_lr_init × spatial_lr_scale   (L485)
+                        ├─▶ training_setup: _t   lr = position_t_lr_init × spatial_lr_scale (L496)
+                        └─▶ xyz_scheduler: lr_init / lr_final 同乘 spatial_lr_scale       (L506-509)
+
+cameras_extent ──▶ train.py densify_and_prune(..., scene.cameras_extent, ...)
+                        ├─▶ densify_and_clone: max_scaling ≤ percent_dense × extent → clone (L727)
+                        └─▶ densify_and_split: max_scaling > percent_dense × extent → split (L683)
+```
 
 #### 4.3.3 源码精读
 
-**产物写出的完整代码**：
+`getNerfppNorm` 全文——先收集光心，再算中心与最大距离，半径乘 1.1：[scene/dataset_readers.py:67-88](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L67-L88)
 
-[scene/__init__.py:62-76](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L62-L76)
+```python
+def getNerfppNorm(cam_info):
+    def get_center_and_diag(cam_centers):
+        cam_centers = np.hstack(cam_centers)
+        avg_cam_center = np.mean(cam_centers, axis=1, keepdims=True)
+        center = avg_cam_center
+        dist = np.linalg.norm(cam_centers - center, axis=0, keepdims=True)
+        diagonal = np.max(dist)
+        return center.flatten(), diagonal
 
-要点：整段被 `if not self.loaded_iter:` 包住——加载已训练模型时**不**重写这两份文件（目录里已有训练期的版本）；相机列表先 test 后 train 拼接（`camlist.extend`），因此 `cameras.json` 的前半段是测试相机、后半段是训练相机，`id` 是拼接后的下标。
+    cam_centers = []
+    for cam in cam_info:
+        W2C = getWorld2View2(cam.R, cam.T)
+        C2W = np.linalg.inv(W2C)
+        cam_centers.append(C2W[:3, 3:4])
 
-**camera_to_JSON 还原位姿**：
+    center, diagonal = get_center_and_diag(cam_centers)
+    radius = diagonal * 1.1
+    translate = -center
+    return {"translate": translate, "radius": radius}
+```
 
-[utils/camera_utils.py:79-99](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/utils/camera_utils.py#L79-L99)
+`Scene` 侧只取 radius 一个键（`translate` 在本项目里没有被 `Scene` 使用）：[scene/__init__.py:84](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L84)
 
-注意这里的三个变换方向：`camera.R` 存的是**转置过的** C2W 旋转（u2-l1 的约定），所以先 `camera.R.transpose()` 拼出 C2W 矩阵 `Rt`，再 `np.linalg.inv(Rt)` 得到 W2C，从中取 `pos`（光心）与 `rot`。焦距则由视场角反推：`fx = fov2focal(FovX, width)`。这提醒我们：`cameras.json` 里的 `position`/`rotation` 是 **C2W** 语义（`W2C` 变量名的反转矩阵）。
+```python
+self.cameras_extent = scene_info.nerf_normalization["radius"]
+```
 
-**getNerfppNorm 本体**：
+消费点一：`create_from_pcd` 把它存进 `spatial_lr_scale`：[scene/gaussian_model.py:406-407](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L406-L407)，随后 `training_setup` 用它乘三处：[scene/gaussian_model.py:484-485](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L484-L485)（xyz 初始学习率）、[scene/gaussian_model.py:496](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L496)（时间位置 `_t` 学习率）、[scene/gaussian_model.py:506-509](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L506-L509)（指数衰减调度器）：
 
-[scene/dataset_readers.py:67-88](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L67-L88)
+```python
+l = [
+    {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
+    ...
+]
+...
+l.append({'params': [self._t], 'lr': training_args.position_t_lr_init * self.spatial_lr_scale, "name": "t"})
+...
+self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
+                                            lr_final=training_args.position_lr_final*self.spatial_lr_scale, ...)
+```
 
-内层函数 `get_center_and_diag`：`cam_centers` 是 3×N 矩阵（`np.hstack` 拼接每个 3×1 光心），`center` 逐行求均值，`dist` 逐列求欧氏范数，`diagonal` 取最大值。L84 的 `radius = diagonal * 1.1` 就是最终 `cameras_extent`。返回的 `translate`（= -center）在本仓库中**没有任何消费者**，是 3DGS 的遗留字段。
+消费点二：训练循环把 `scene.cameras_extent` 传给致密化：[train.py:251](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/train.py#L251)，clone 与 split 各自的尺寸判据：[scene/gaussian_model.py:723-727](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L723-L727) 与 [scene/gaussian_model.py:676-683](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L676-L683)
 
-**调用点与消费点**：
+```python
+# densify_and_clone：小高斯 + 梯度大 → 复制一份
+selected_pts_mask = torch.logical_and(selected_pts_mask,
+                                      torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
+# densify_and_split：大高斯 + 梯度大 → 一分为 N
+selected_pts_mask = torch.logical_and(selected_pts_mask,
+                                      torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
+```
 
-[scene/dataset_readers.py:291-291](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L291-L291)
+一个值得记住的不对称：`create_from_pth` 同样会写 `spatial_lr_scale`（[scene/gaussian_model.py:450-452](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L450-L452)），但 `load_ply` **不会**（[scene/gaussian_model.py:281-347](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L281-L347) 全文没有赋值语句）。推理路径（render.py 的 `restore` 传 `training_args=None`）不跑 `training_setup`，所以不受影响；但如果你想「从 ply 继续训练」，要意识到 `spatial_lr_scale` 还是 0，需要自己补。
 
-Colmap 分支只用 `train_cam_infos` 算归一化（Blender 分支同理，[scene/dataset_readers.py:463-463](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L463-L463)）——`eval=False` 时训练集是全部相机，`eval=True` 时只有 `training_view` 选中的相机，所以**同一个数据集开不开 `--eval` 会得到不同的 cameras_extent**，进而影响学习率。
+#### 4.3.4 代码实践
 
-[scene/__init__.py:78-84](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L78-L84)
+**实践目标**：手工复算 `cameras_extent`，并量化它对位置学习率的影响。
 
-打乱在前、取 radius 在后；`self.cameras_extent` 保存后立刻在两处使用：多分辨率装配（L86-91）和 4.5 节的初始化三岔路（作为 `spatial_lr_scale` 传入）。
+**操作步骤**：
 
-**model_path 文件全景**（`Scene` 负责前两项，其余由 train.py 各段落写出）：
+1. 构造 4 个相机光心（模拟 4 相机环形阵列），按 `getNerfppNorm` 公式手算 radius（示例代码）：
 
-| 文件/目录 | 写出者 | 内容 |
-| --- | --- | --- |
-| `input.ply` | `Scene`（L63-65） | 初始点云快照 |
-| `cameras.json` | `Scene`（L74-76） | 全部相机的位姿/内参 JSON |
-| `cfg_args` | [train.py:294-295](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/train.py#L294-L295) | ModelParams 等 Namespace 的字符串 |
-| `training_params.txt` | [train.py:476-479](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/train.py#L476-L479) | 合并 yaml 后的最终参数快照 |
-| `events.out.tfevents.*` | [train.py:298-300](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/train.py#L298-L300) | TensorBoard 日志 |
-| `point_cloud/iteration_N/point_cloud.ply` | `Scene.save`（L111-112） | 各保存点的高斯属性 |
-| `chkpntN.pth` / `chkpnt_best.pth` | `Scene.save`（L110）/[train.py:276](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/train.py#L276-L276) | capture 元组 + 迭代号 |
-| `rendered_images/` | [train.py:107-108](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/train.py#L107-L108) | 训练中间渲染图 |
+```python
+# 示例代码：复现 getNerfppNorm 的数学定义（dataset_readers.py:67-88）
+import numpy as np
+C = np.array([[1,0,0], [0,1,0], [-1,0,0], [0,-1,0]], dtype=np.float64).T  # 4 个光心按列堆
+center = C.mean(axis=1, keepdims=True)
+radius = np.linalg.norm(C - center, axis=0).max() * 1.1
+print("cameras_extent =", radius)   # 预期 1.1
+```
 
-#### 4.3.4 代码实践（纯 numpy，无需 GPU 与项目依赖）
+2. 查一下 configs 里 `position_lr_init` 的值（如 `configs/dynerf/flame_steak.yaml` 中的 `position_lr_init`），代入公式
+   \(\text{lr}_{xyz} = \text{position\_lr\_init} \times \text{cameras\_extent}\)
+   算出实际初始学习率。
+3. 把 4 个光心整体放大 10 倍再算一次，观察 `cameras_extent` 与学习率如何同比例变化。
 
-1. **实践目标**：用 numpy 手工复现 `getNerfppNorm`，验证你对公式的理解。
-2. **操作步骤**（以下为**示例代码**，可存成独立小脚本运行）：
-   ```python
-   import numpy as np
-
-   # 造 4 个相机光心，模拟 4 台相机的典型摆放（都看向原点附近）
-   C = np.array([[ 2.0,  0.0,  1.5],
-                 [-2.0,  0.5, 1.5],
-                 [ 0.0,  2.2, 1.6],
-                 [ 0.1, -2.1, 1.4]]).T          # 3xN，等价于 np.hstack(cam_centers)
-
-   center    = C.mean(axis=1, keepdims=True)    # 对应 avg_cam_center
-   dist      = np.linalg.norm(C - center, axis=0, keepdims=True)
-   diagonal  = dist.max()
-   radius    = diagonal * 1.1                   # 对应 L84
-   print("center   =", center.flatten())
-   print("diagonal =", diagonal)
-   print("radius   =", radius)                  # 这就是 cameras_extent
-   ```
-3. **需要观察的现象**：`radius` 约等于最远相机到平均光心距离的 1.1 倍；把任何一个相机挪远，`radius` 单调不减。
-4. **预期结果**：上述数据下 `diagonal ≈ 2.24` 左右、`radius ≈ 2.47` 左右（取决于具体数值，手算可核对）。再用 `radius` 乘 3DGS 默认 `position_lr_init = 0.00016`（[arguments/__init__.py:83](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/arguments/__init__.py#L83)），得到 xyz 参数组的初始学习率约 `4e-4` 量级——这就是「场景尺度缩放学习率」的直接体现。
-5. 数值可自行验证；与真实数据集的对照**待本地验证**（需跑综合实践或真实训练）。
+**需要观察的现象 / 预期结果**：第 1 步输出 `1.1`（到中心的距离全是 1，乘 1.1）；第 3 步光心放大 10 倍后 `cameras_extent` 变为 `11.0`，学习率同样放大 10 倍——这正是「场景尺度自动归一化超参」的含义。第 2 步的具体数值取决于你读到的 yaml 值，**待本地验证**。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么 `getNerfppNorm` 只用训练相机、不用测试相机？
+**练习 1**：如果留出的测试相机离场景中心比训练相机远得多，把它也算进 `getNerfppNorm` 会怎样？
 
-**答案**：`cameras_extent` 的职责是刻画「优化器要走的舞台大小」，学习率与致密化阈值都应只由训练数据决定；若混入测试相机，评估设置（`--eval` 与否、留出哪几台）会额外扰动优化超参数，让实验不可比。Colmap/Blender 两个分支都遵守这一点（L291、L463）。
+**答案**：`radius` 变大 → `cameras_extent` 变大 → 位置学习率变大、clone/split 尺寸分界变大，训练行为被「评估用相机」改变。代码因此在 `readColmapSceneInfo` 里只传 `train_cam_infos`（[scene/dataset_readers.py:291](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L291)），保证训练超参只由训练视角决定。
 
-**练习 2**：若两台相机光心重合（固定机位数据里常见冗余），会对 `radius` 产生什么影响？这是 bug 吗？
+**练习 2**：为什么半径要乘 1.1 而不是精确的最大距离？
 
-**答案**：没有影响，也不算 bug。重合光心到均值的距离相同，`radius` 由**最远**光心决定（取 max），个别相机重合只影响 `center` 的均值位置，通常可以忽略。真正的极端情况是只有一台训练相机——此时 dist 全为 0，`radius` 为 0，学习率被缩放成 0，训练直接失效（4C4D 的 4 相机设定天然避开这一点）。
+**答案**：给包围球留 10% 的余量，避免恰好位于球面的相机让量度「贴边」；这是从 3DGS/NeRF++ 沿袭的经验值，属于工程缓冲，没有严格推导。
 
-**练习 3**：`cameras.json` 里 `rotation` 字段存的是 W2C 还是 C2W 的旋转？
+**练习 3**：`percent_dense` 默认约 0.01，`cameras_extent` 为 1.1 时，多大的高斯会被 clone 而不是 split？
 
-**答案**：C2W。代码先把 `camera.R.transpose()`（还原成标准 C2W 旋转）拼进 `Rt`，再 `np.linalg.inv(Rt)` 得到 W2C 并从中取 `rot`——所以 `rot` 是 W2C 旋转矩阵的逆，即 C2W 旋转；`position` 同理是 C2W 的平移部分（光心）。
+**答案**：clone 判据是 `max_scaling ≤ percent_dense × scene_extent`（[scene/gaussian_model.py:727](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L727)），即最大尺度 ≤ 0.011 的高斯走 clone，超过的走 split——分界线随 `cameras_extent` 线性移动，大场景里「小高斯」的定义也更宽松。
 
-### 4.4 cameraList_from_camInfos：从 CameraInfo 到多分辨率 Camera
+### 4.4 cameraList_from_camInfos：从数据描述到渲染对象
 
 #### 4.4.1 概念说明
 
-`Scene` 拿到的 `scene_info.train_cameras` 是一列 **CameraInfo**（纯元数据：R、T、Fov、宽高、timestamp、图像路径）。渲染需要的是 **Camera** 对象（带投影矩阵、分辨率协商结果、可选的真实像素）。`cameraList_from_camInfos` 就是这条流水线：对每个 CameraInfo 调一次 `loadCam`，产出一个 Camera。它还吃一个 `resolution_scale` 参数，配合 `Scene` 的 `resolution_scales` 列表支持多分辨率训练（4C4D 实际只用 `[1.0]`）。
+`SceneInfo.train_cameras` 里躺着的是 `CameraInfo`（纯数据描述，`image` 字段还是 None——u2-l2 讲过位姿模板机制），而渲染管线需要的是 `Camera` 对象（带投影矩阵、原始图像尺寸、时间戳等）。`cameraList_from_camInfos` 就是这层转换的循环壳子，真正的转换在 `loadCam`（u2-l3 精讲过分辨率协商与懒加载）。`Scene` 用两层容器组织转换结果：
+
+- 外层字典：键是 `resolution_scale`（默认只有 `1.0`，多分辨率训练时会有多个键）；
+- 内层列表：该分辨率下的 `Camera` 对象，训练/测试分开。
+
+`cameras.json` 的写出也发生在这个阶段附近：`camera_to_JSON` 把每个 `CameraInfo` 转成可序列化字典（重算 C2W 得到 position/rotation，焦距用 `fov2focal` 从 Fov 反推）。
 
 #### 4.4.2 核心流程
 
 ```text
-for id, cam_info in enumerate(cam_infos):
-    Camera = loadCam(args, id, cam_info, resolution_scale)
+对每个 resolution_scale（默认 [1.0]）:
+    self.train_cameras[scale] = cameraList_from_camInfos(scene_info.train_cameras, scale, args)
+        └─ 对每个 CameraInfo: loadCam(args, id, c, scale) → Camera(...)   # u2-l3 已精读
+    self.test_cameras[scale]  = cameraList_from_camInfos(scene_info.test_cameras,  scale, args)
 
-loadCam 内部：
-1. 与 args.resolution 协商出目标分辨率与缩放系数 scale
-     - resolution ∈ {1,2,3,4,8}：整数倍下采样，scale = resolution_scale × resolution
-     - resolution == -1 且宽 > 1600：自动缩到 1.6K（只警告一次）
-     - 其他数值：按 宽/分辨率 比例缩放
-2. cx/cy/fl_x/fl_y 同除 scale（内参随图像同步缩放，视场角不变——u2-l3 的结论）
-3. dataloader=False 时读真实图像并 resize；True 时只传元数据（image 为 None）
-4. 构造 Camera(..., meta_only=args.dataloader)
+写出 cameras.json:
+    camlist = test_cameras + train_cameras（先 test 后 train，id 依次递增）
+    对每个 cam: camera_to_JSON(id, cam) → dict
+    json.dump 到 model_path/cameras.json
 ```
+
+注意 `loadCam` 在 `dataloader=True` 时不读图像（`meta_only`），所以这一步对上千帧的 N3V 数据也很快——图像的真正读取发生在 u2-l3 讲的 `CameraDataset.__getitem__`。
 
 #### 4.4.3 源码精读
 
-**列表转换本体**——一个薄薄的循环：
+`cameraList_from_camInfos` 本体，就是「带编号的 loadCam 循环」：[utils/camera_utils.py:71-77](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/utils/camera_utils.py#L71-L77)
 
-[utils/camera_utils.py:71-77](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/utils/camera_utils.py#L71-L77)
+```python
+def cameraList_from_camInfos(cam_infos, resolution_scale, args):
+    camera_list = []
+    for id, c in enumerate(cam_infos):
+        camera_list.append(loadCam(args, id, c, resolution_scale))
+    return camera_list
+```
 
-注意 `id` 是**新列表里的下标**（0,1,2,...），而不是 COLMAP 的 `uid`；后者经 `colmap_id=cam_info.uid` 传入 Camera 保存。所以 `Camera.uid` 与 `Camera.colmap_id` 是两个不同的编号。
+`Scene` 里的多分辨率循环——先打乱（两个列表各自 shuffle，但发生在转换之前，保证同一随机顺序下转换出的 Camera 序列一致）：[scene/__init__.py:78-91](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L78-L91)
 
-**Scene 侧的调用（多分辨率外层循环）**：
+```python
+if shuffle:
+    print("Shuffling training and testing cameras")
+    random.shuffle(scene_info.train_cameras)  # Multi-res consistent random shuffling
+    random.shuffle(scene_info.test_cameras)  # Multi-res consistent random shuffling
+    print("Shuffling done.")
 
-[scene/__init__.py:86-91](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L86-L91)
+self.cameras_extent = scene_info.nerf_normalization["radius"]
 
-对每个 `resolution_scale` 各建一套 train/test 相机，存进 4.1.3 提到的字典。打印语句会报告每套相机的帧数，这是排查「相机数量是否符合预期」的第一现场。
+for resolution_scale in resolution_scales:
+    print(f"Loading cameras at resolution scale {resolution_scale}")
+    self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
+    ...
+    self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
+```
 
-**loadCam 的分辨率协商**：
+注释「Multi-res consistent random shuffling」的含义：shuffle 只做一次、放在 `resolution_scales` 循环之外，所有分辨率共用同一个打乱后的 `CameraInfo` 顺序，多分辨率之间可以按索引对齐。
 
-[utils/camera_utils.py:19-45](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/utils/camera_utils.py#L19-L45)
+`camera_to_JSON`——把 R（存的 C2W 旋转）转置回 W2C 拼成 4×4，再求逆得 C2W，取平移与旋转写 JSON；焦距由 Fov 反算：[utils/camera_utils.py:79-99](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/utils/camera_utils.py#L79-L99)
 
-三个分支（整数倍 / -1 自动 / 显式宽度）在 u2-l3 已详细讲过；本讲只需记住：**`args.resolution` 的最终值受 u1-l4 讲过的「`--res` 恒真守卫覆盖 yaml」问题影响**，排查分辨率问题时先看 `training_params.txt` 里 `resolution` 的实际值。
+```python
+def camera_to_JSON(id, camera : Camera):
+    Rt = np.zeros((4, 4))
+    Rt[:3, :3] = camera.R.transpose()
+    Rt[:3, 3] = camera.T
+    Rt[3, 3] = 1.0
+    W2C = np.linalg.inv(Rt)
+    pos = W2C[:3, 3]
+    rot = W2C[:3, :3]
+    ...
+    camera_entry = {
+        'id' : id, 'img_name' : camera.image_name,
+        'width' : camera.width, 'height' : camera.height,
+        'position': pos.tolist(), 'rotation': serializable_array_2d,
+        'fy' : fov2focal(camera.FovY, camera.height),
+        'fx' : fov2focal(camera.FovX, camera.width)
+    }
+    return camera_entry
+```
 
-**懒加载开关**：
+`Scene` 里写出 `input.ply` 与 `cameras.json` 的完整代码段——只在「全新训练」时执行（`if not self.loaded_iter:`），加载已有模型时不覆盖：[scene/__init__.py:62-76](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L62-L76)
 
-[utils/camera_utils.py:47-55](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/utils/camera_utils.py#L47-L55)
+```python
+if not self.loaded_iter:
+    with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
+        dest_file.write(src_file.read())          # 复制初始点云
+    json_cams = []
+    camlist = []
+    if scene_info.test_cameras:  camlist.extend(scene_info.test_cameras)
+    if scene_info.train_cameras: camlist.extend(scene_info.train_cameras)
+    for id, cam in enumerate(camlist):
+        json_cams.append(camera_to_JSON(id, cam))
+    with open(os.path.join(self.model_path, "cameras.json"), 'w') as file:
+        json.dump(json_cams, file)
+```
 
-`args.dataloader=True` 时 `gt_image = cam_info.image`（Colmap 路径下是 `None`），配合 `meta_only=True`，Camera 构造完全不接触像素——这就是 Colmap/N3V 数据必须开 `dataloader` 的原因（u2-l3）。
+#### 4.4.4 代码实践
 
-#### 4.4.4 代码实践（纸面计算型）
+**实践目标**：亲手检查 `cameras.json` 的内容结构，验证它记录的是 C2W 位姿而非 W2C。
 
-1. **实践目标**：掌握分辨率协商的三个分支，能对任意输入算出输出尺寸。
-2. **操作步骤**：对「原始图像 1920×1080、`resolution_scale=1.0`」分别计算 `args.resolution` 取 `1 / 2 / -1 / 960` 时的输出分辨率与 `scale`，对照 [utils/camera_utils.py:19-45](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/utils/camera_utils.py#L19-L45) 的代码写下来。
-3. **需要观察的现象**：`-1` 分支因 `orig_w=1920 > 1600` 触发自动缩放并打印一次警告。
-4. **预期结果**（待本地验证的纸面推算）：
-   - `resolution=1`：`(1920, 1080)`，`scale=1`
-   - `resolution=2`：`(960, 540)`，`scale=2`
-   - `resolution=-1`：`global_down = 1920/1600 = 1.2`，输出 `(1600, 900)`，`scale=1.2`
-   - `resolution=960`：`global_down = 1920/960 = 2`，输出 `(960, 540)`，`scale=2.0`
-5. 若有环境，可在 `loadCam` 的 return 前临时 `print(resolution, scale)` 验证（改完记得还原，不要提交对源码的修改）。
+**操作步骤**：
+
+1. 跑通 4.5 节综合实践的假数据脚本后（或对任何一次历史训练的输出目录），打开 `model_path/cameras.json`。
+2. 数一下条目数量，应等于 `len(test_cameras) + len(train_cameras)`，且前若干条是 test 相机（写出顺序 test 在前）。
+3. 任取一条，检查 `position` 是否与该相机的光心一致：若手头有 `sparse/0` 的位姿，可用 u2-l1 的 `qvec2rotmat` 拼出 W2C 再求逆对照；或直接验证 `rotation × (position - X) 形式的投影关系`（示例代码）：
+
+```python
+# 示例代码：用 cameras.json 的一条记录做投影自检
+import numpy as np, json
+entry = json.load(open("output/xxx/cameras.json"))[0]
+R_c2w = np.array(entry["rotation"]); t_c2w = np.array(entry["position"])
+w2c = np.linalg.inv(np.vstack([np.hstack([R_c2w, t_c2w[:,None]]), [0,0,0,1]]))
+print("W2C 平移（应接近 COLMAP 的 tvec）:", w2c[:3,3])
+```
+
+**需要观察的现象 / 预期结果**：`cameras.json` 每条含 `id/img_name/width/height/position/rotation/fy/fx` 八个键；`position` 是相机在世界系的位置（C2W 平移）。若没有 GPU 数据，第 3 步的对照**待本地验证**。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：`resolution_scales=[1.0, 0.5]` 时，`scene.train_cameras[0.5]` 与 `[1.0]` 里的 Camera 是什么关系？
+**练习 1**：`resolution_scales=[1.0]` 时字典里有几个键？改成 `[1.0, 0.5]` 呢？
 
-**答案**：两套独立构造的 Camera 对象，同一批 `CameraInfo` 的两种分辨率版本。`0.5` 那套经 `loadCam` 的 `scale = global_down × 0.5` 得到**更大**的图像（分辨率 scale 是除数因子，`0.5` 意味着只缩到一半程度，图像反而比 `1.0` 套大）。每套都有自己的 `uid` 下标序列。这是 3DGS 的 coarse-to-fine 机制遗留，4C4D 默认只用 `[1.0]`。
+**答案**：`self.train_cameras` 与 `self.test_cameras` 各有 1 个键 `1.0`；改成两个 scale 后各有 `1.0` 和 `0.5` 两个键，图像按 u2-l3 的 loadCam 协商分别缩放，可通过 `scene.getTrainCameras(scale=0.5)` 取出。
 
-**练习 2**：`cameraList_from_camInfos` 里 `enumerate` 的下标 `id` 传给了 Camera 的 `uid`。训练循环里 `viewpoint_cam.uid` 能用来做什么？
+**练习 2**：`cameras.json` 里的 `fx/fy` 是怎么来的？为什么不用 `CameraInfo` 里现成的 `fl_x/fl_y`？
 
-**答案**：它是「这套相机列表内的稳定序号」。DataLoader shuffle 后仍可通过 `uid` 追踪某一帧（例如把渲染误差映射回具体帧）；而 `colmap_id` 才能映射回 COLMAP 的 image_id。u5-l3 讲多视角 batch 时会看到按相机组织统计信息的场景，这两个编号的区分就很关键。
+**答案**：由 `fov2focal(camera.FovY, camera.height)` / `fov2focal(camera.FovX, camera.width)` 从视场角反算（[utils/camera_utils.py:96-97](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/utils/camera_utils.py#L96-L97)）。COLMAP 路径的 `CameraInfo` 默认 `fl_x=-1`（见 [scene/dataset_readers.py:55-58](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L55-L58) 的默认值与 `readColmapCameras` 的构造，[scene/dataset_readers.py:123-128](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L123-L128)），真正的焦距信息在 `FovX/FovY` 里，所以 JSON 从 Fov 反推。
 
-### 4.5 高斯初始化三岔路：create_from_pth / load_ply / create_from_pcd
+**练习 3**：为什么 `cameras.json` 的写出顺序是先 test 后 train？
+
+**答案**：代码先 `extend(test_cameras)` 再 `extend(train_cameras)`（[scene/__init__.py:68-71](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L68-L71)），因此 `id` 编号从 0 起先是测试相机。这是从 3DGS 继承的固定顺序，本身没有功能含义，但写脚本解析 `cameras.json` 时若想区分训练/测试相机，不能靠 id 区间，只能靠 `img_name` 前缀（如 `cam09_0000`）对照 `training_view` 判断。
+
+### 4.5 输出目录与初始化三分支
 
 #### 4.5.1 概念说明
 
-`Scene` 装配完相机后，最后一件事是给 `GaussianModel` 一个「起点」。代码按优先级排成三条路：
+一次全新训练会在 `model_path` 下生成一组文件，`Scene` 负责其中三个（`input.ply`、`cameras.json`、`point_cloud/iteration_N/point_cloud.ply` + `chkpntN.pth`），`train.py` 负责其余。完整清单：
 
-| 优先级 | 触发条件 | 调用 | 典型场景 |
+| 文件/目录 | 写出者 | 内容 | 写出时机 |
 | --- | --- | --- | --- |
-| 1 | `args.loaded_pth` 非空 | `create_from_pth(pth, cameras_extent)` | 从外部 4D 高斯字典（如另一段预训练）热启动 |
-| 2 | `load_iteration` 非空 | `load_ply(model_path/point_cloud/iteration_N/point_cloud.ply)` | 加载本目录已训练结果 |
-| 3 | 都没有 | `create_from_pcd(scene_info.point_cloud, cameras_extent, redundant_ratio)` | 冷启动（正常训练） |
+| `cfg_args` | `train.py` `prepare_output_and_logger` | Namespace 字符串（全部参数快照） | 训练开始前 |
+| `training_params.txt` | `train.py`（[train.py:476](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/train.py#L476)） | 训练参数文本 | 训练开始前 |
+| `input.ply` | `Scene.__init__` | 初始点云的逐字节副本 | Scene 构造时（仅全新训练） |
+| `cameras.json` | `Scene.__init__` | 全部相机的 C2W 位姿与焦距 | Scene 构造时（仅全新训练） |
+| `chkpntN.pth` | `Scene.save` | `gaussians.capture()` 元组 + 迭代号 | 每个 save_iteration 与 best |
+| `point_cloud/iteration_N/point_cloud.ply` | `Scene.save` | 当前高斯全体属性 | 同上 |
+| TensorBoard 事件文件 | `tb_writer` | 损失/PSNR/点数曲线 | 训练全程 |
+| `rendered_images/` 等 | `training_report` | 测试渲染中间结果 | 测试迭代点 |
 
-三条路都接收/使用 `cameras_extent`（前两条作为 `spatial_lr_scale` 存进模型），这把 4.3 节的「场景尺度」与后续优化器永久绑定在一起。
+高斯初始化的三条分支，优先级从高到低：
+
+1. **`args.loaded_pth` 非空 → `create_from_pth`**：从 4DGS 官方格式的 `.pth` 字典加载全部属性，要求 `gaussian_dim == 4 and rot_4d`（[scene/gaussian_model.py:450-452](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L450-L452)）。用于「拿别处训练好的 4D 高斯当初始化」。
+2. **`loaded_iter` 非空 → `load_ply`**：加载 `model_path/point_cloud/iteration_N/point_cloud.ply`，即从自己之前的训练续跑/评估。
+3. **默认 → `create_from_pcd`**：从 `SceneInfo.point_cloud`（COLMAP/MASt3R 点云或随机点）全新初始化，细节由 u3-l5 精讲。
 
 #### 4.5.2 核心流程
 
 ```text
-if args.loaded_pth:                 # 路径 1：外部 4D 高斯
-    create_from_pth(loaded_pth, cameras_extent)
-elif loaded_iter:                   # 路径 2：本目录已训练 ply
-    load_ply(model_path/point_cloud/iteration_{loaded_iter}/point_cloud.ply)
-else:                               # 路径 3：冷启动
-    create_from_pcd(scene_info.point_cloud, cameras_extent, redundant_ratio)
-```
+if args.loaded_pth:                       # 分支 1：外部 4D 高斯
+    gaussians.create_from_pth(args.loaded_pth, cameras_extent)
+elif loaded_iter:                         # 分支 2：本目录已训练模型
+    gaussians.load_ply(model_path/point_cloud/iteration_<N>/point_cloud.ply)
+else:                                     # 分支 3：全新训练
+    gaussians.create_from_pcd(scene_info.point_cloud, cameras_extent, redundant_ratio)
 
-路径 3 的内部细节（distCUDA2 定空间尺度、无时间信息时随机采样 `_t`、时间尺度取 duration/5）属于 u3-l5 的主题，本讲只关注入口与 `spatial_lr_scale` 的去向。
+注意：分支 2 跳过 input.ply/cameras.json 的写出（if not self.loaded_iter 守卫）
+     分支 1 不受 loaded_iter 影响，仍会写出这两个文件
+```
 
 #### 4.5.3 源码精读
 
-**三岔路本体**：
+三分支原文：[scene/__init__.py:93-107](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L93-L107)
 
-[scene/__init__.py:93-107](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L93-L107)
+```python
+if args.loaded_pth:
+    print(f"Loading gaussians from {args.loaded_pth}")
+    self.gaussians.create_from_pth(args.loaded_pth, self.cameras_extent)
+else:
+    if self.loaded_iter:
+        print(f"Loading gaussians from trained model's point cloud at iteration {self.loaded_iter}")
+        self.gaussians.load_ply(os.path.join(self.model_path, "point_cloud",
+                                             "iteration_" + str(self.loaded_iter), "point_cloud.ply"))
+    else:
+        print(f"Creating gaussians from initial point cloud input.ply")
+        self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent,
+                                       redundant_ratio=redundant_ratio)
+```
 
-三个分支的打印语句（`Loading gaussians from ...` / `Creating gaussians from initial point cloud input.ply`）是训练日志里判断「走了哪条路」的最快依据。
+分支 3 的被调方开头——注意第二行就把 `cameras_extent` 存为 `spatial_lr_scale`，这正是 4.3 节消费链的起点：[scene/gaussian_model.py:406-408](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L406-L408)
 
-**`create_from_pcd` 的签名与 spatial_lr_scale 的第一站**：
+```python
+def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float, redundant_ratio = 0.2):
+    self.spatial_lr_scale = spatial_lr_scale
+    fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
+```
 
-[scene/gaussian_model.py:406-409](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L406-L409)
+分支 1 的被调方——同样是第一件事就写 `spatial_lr_scale`，且断言只支持 4D+rot_4d：[scene/gaussian_model.py:450-453](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L450-L453)
 
-`spatial_lr_scale` 在这里只是被**存起来**（L407），真正的消费发生在 `training_setup`。同函数接下来把点云转 CUDA 张量并做 SH 颜色转换（L408-409）——这也是路径 3 **必须有 GPU** 的原因。
+```python
+def create_from_pth(self, path, spatial_lr_scale):
+    assert self.gaussian_dim == 4 and self.rot_4d
+    self.spatial_lr_scale = spatial_lr_scale
+    init_4d_gaussian = torch.load(path)
+```
 
-**`create_from_pth` 与 `load_ply` 的入口**：
+`train.py` 侧 `model_path` 的确立与 `cfg_args` 写出：[train.py:283-295](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/train.py#L283-L295)
 
-[scene/gaussian_model.py:450-453](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L450-L453)
+```python
+def prepare_output_and_logger(args):    
+    if not args.model_path:
+        ...
+        unique_str = str(uuid.uuid4())
+        args.model_path = os.path.join("./output/", unique_str[0:10])
+    os.makedirs(args.model_path, exist_ok = True)
+    with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
+        cfg_log_f.write(str(Namespace(**vars(args))))
+```
 
-`create_from_pth` 有硬前提 `assert self.gaussian_dim == 4 and self.rot_4d`——它加载的字典必须含全套 4D 属性（`t`、`scaling_t`、`rotation_r`），3D 模式直接断言失败。
+训练循环里 `scene.save` 的调用点（到达 `save_iterations` 或末尾迭代时）：[train.py:281](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/train.py#L281)。
 
-[scene/gaussian_model.py:281-287](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L281-L287)
+#### 4.5.4 代码实践
 
-`load_ply` 逐字段从 PLY 读回高斯属性（字段名前缀匹配的细节见 u3-l5 与 u5-l5）。注意它**不接收** `spatial_lr_scale` 参数——沿用模型里已有的值；冷启动路径存进去的那份在这里被复用。
+**实践目标**：用假 COLMAP 目录实例化 `Scene`（`gaussian_dim=4`），亲眼看到 `model_path` 下生成 `input.ply` 与 `cameras.json`，并打印 `cameras_extent`。（本讲综合实践的前置小步，这里先给出最小骨架，完整可跑版本见第 5 节。）
 
-**`spatial_lr_scale`（= cameras_extent）的消费现场**：
+**操作步骤**：
 
-[scene/gaussian_model.py:484-499](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L484-L499)
+1. 准备目录结构（示例代码，生成假数据）：
 
-两处相乘：`xyz` 参数组（L485）与 4D 模式新增的 `t` 参数组（L496，`position_t_lr_init < 0` 时回退为 `position_lr_init`，u3-l2 讲过）。其余参数组（f_dc、opacity、scaling、rotation）**不**乘场景尺度——位置是唯一与物理尺寸同单位的属性，时间维 `t` 也被同等对待。
+```python
+# 示例代码：构造最小假 COLMAP 目录
+# mydata/sparse/0/{cameras.bin,images.bin,points3D.bin} 用 u2-l1 的格式手工写入
+# mydata/images/cam00_0000.png ... 若干纯色小图
+```
 
-[scene/gaussian_model.py:506-509](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/gaussian_model.py#L506-L509)
+2. 实例化（示例代码）：
 
-指数衰减调度器的起点与终点学习率同比缩放，保证整个训练过程的位置步长都与场景尺度成比例。
+```python
+# 示例代码：最小 Scene 实例化骨架（需 GPU：create_from_pcd 内部 .cuda()）
+import argparse
+from scene import Scene
+from scene.gaussian_model import GaussianModel
+from arguments import ModelParams
 
-#### 4.5.4 代码实践（源码阅读型）
+parser = argparse.ArgumentParser()
+mp = ModelParams(parser, sentinel=False)          # u1-l4 讲过 ParamGroup 机制
+args = parser.parse_args(["--source_path", "mydata", "--model_path", "output/fake_run",
+                          "--images", "images", "--eval", "1"]).extract(args)
+gaussians = GaussianModel(sh_degree=3, gaussian_dim=4, time_duration=[0, 10])
+scene = Scene(args, gaussians, num_pts=1000, time_duration=[0, 10],
+              training_view=['cam00'], testing_view=['cam01'])
+print("cameras_extent =", scene.cameras_extent)
+```
 
-1. **实践目标**：跟踪 `load_iteration=-1` 时迭代号如何被解析成具体路径。
-2. **操作步骤**：
-   - 从 [scene/__init__.py:39-44](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L39-L44) 出发，假设 `model_path/point_cloud/` 下有 `iteration_7000`、`iteration_30000` 两个目录，写出 `self.loaded_iter` 的值。
-   - 继续跟到 [scene/__init__.py:97-102](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L97-L102)，拼出最终 `load_ply` 的完整路径。
-   - 对照 `Scene.save`（L109-112）确认该路径正是当初 `save_ply` 写出的位置——读写闭环。
-3. **需要观察的现象**：`searchForMaxIteration` 对目录名的解析完全依赖 `iteration_` 前缀 + `_` 切分取末段。
-4. **预期结果**：`loaded_iter = 30000`，路径为 `<model_path>/point_cloud/iteration_30000/point_cloud.ply`。
-5. 可在有历史输出的目录上用 `python -c "from utils.system_utils import searchForMaxIteration; print(searchForMaxIteration('<model_path>/point_cloud'))"` 验证（待本地验证）。
+3. 列出 `output/fake_run/` 下的文件，打开 `cameras.json` 数条目、对 `input.ply` 用 `plyfile` 读顶点数。
+
+**需要观察的现象 / 预期结果**：`output/fake_run/` 下出现 `input.ply`（与 `sparse/0/points3D.ply` 字节数相同）与 `cameras.json`（条目数 = test 帧数 + train 帧数，先 test 后 train）；终端打印 `cameras_extent` 为某正数；随后 `create_from_pcd` 打印 `Number of points at initialisation : <点数>`。整条链依赖 CUDA（`create_from_pcd` 直接 `.cuda()`），无 GPU 环境**待本地验证**。
 
 #### 4.5.5 小练习与答案
 
-**练习 1**：`render.py` 的 `validation()` 没有传 `load_iteration`，也没有传 `loaded_pth`，那它的高斯从哪来？
+**练习 1**：`load_iteration=-1` 与 `args.loaded_pth` 同时设置时会发生什么？
 
-**答案**：先走路径 3 冷启动（`create_from_pcd`，用的是 `scene_info.point_cloud`，且因 `ply_path` 已存在不会重复转换），然后 [render.py:52-52](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/render.py#L52-L52) `torch.load(checkpoint)` + `gaussians.restore` 用检查点整体覆盖参数。冷启动产物只活了几行代码，它的真正作用是让 `restore` 有一个结构正确的宿主模型。
+**答案**：`loaded_pth` 优先——分支 1 在最外层 `if`（[scene/__init__.py:93-95](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L93-L95)），`loaded_iter` 只影响 else 内部。同时由于 `loaded_iter` 非空，`input.ply`/`cameras.json` 不会写出（`if not self.loaded_iter` 守卫）。
 
-**练习 2**：假设你把数据集相机整体外移 10 倍距离（场景变大 10 倍），`position_lr_init` 不变，xyz 的实际初始学习率会怎么变？这合理吗？
+**练习 2**：为什么 `load_ply` 分支不影响继续训练的学习率？
 
-**答案**：`cameras_extent` 约变大 10 倍，`lr = position_lr_init × cameras_extent` 也变大 10 倍。合理——高斯需要挪动的距离同样大了约 10 倍，学习率同步放大才能在相同迭代数内收敛；这也是为什么同一套默认超参数能通吃桌面级与场景级数据。副作用是 `percent_dense × scene_extent` 的 clone/split 阈值也同步放大，致密化的「大小」判据保持相对意义。
+**答案**：严格说**会影响**——`load_ply` 不写 `spatial_lr_scale`（4.3.3 节末尾指出的不对称），若在 `load_ply` 后调用 `training_setup`，位置学习率会按 `spatial_lr_scale=0` 计算。本项目推理路径 `restore(model_params, None)` 跳过 `training_setup` 所以无碍；想基于 ply 续训需要手动补 `gaussians.spatial_lr_scale = scene.cameras_extent`。
 
-**练习 3**：为什么 `load_ply` 不像 `create_from_pcd` 那样接收 `spatial_lr_scale`？如果连续两次调用 `load_ply`，学习率缩放会出错吗？
+**练习 3**：`input.ply` 和 `point_cloud/iteration_30000/point_cloud.ply` 都在 `model_path` 下，区别是什么？
 
-**答案**：`spatial_lr_scale` 是模型级状态而非每次加载都要变的输入——它描述的是「这个输出目录对应场景的尺度」，与加载哪一次迭代的 ply 无关。连续 `load_ply` 不改变它，学习率缩放保持一致；只有换数据集（重新构造 `Scene`/`create_from_pcd`）才会更新。潜在风险是：用 A 场景的 `loaded_pth` 去初始化 B 场景时，`create_from_pth` 会用 B 的 `cameras_extent` 覆盖缩放系数，与 A 原始尺度脱钩——迁移训练时要意识到这一点。
+**答案**：前者是 `Scene.__init__` 从数据源复制的**初始点云**（[scene/__init__.py:63-65](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L63-L65)，只有 x/y/z/rgb/nx/ny/nz 字段）；后者是 `Scene.save` 写出的**训练后高斯**（[scene/__init__.py:109-112](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/__init__.py#L109-L112)，含 opacity/SH/尺度/旋转/时间等全部可优化属性，字段布局见 u3-l5）。
 
-## 5. 综合实践：用假 COLMAP 目录实例化 Scene
+## 5. 综合实践
 
-这是本讲的主实践，把 4.1–4.5 全部串起来：**手工构造一个最小的 COLMAP 文本格式数据集（2 台相机 × 10 帧），实例化 `Scene`（`gaussian_dim=4`），观察 `model_path` 下 `Scene` 写出的两份文件，打印 `cameras_extent` 并算出它对学习率的实际影响。**
+**任务**：写一个独立脚本 `scene_smoke_test.py`（放在教程目录或任意非源码位置，不要放进仓库源码树），用假 COLMAP 数据走通 `Scene` 构造，并产出一份「Scene 构造报告」。
 
-> 前置：需要按 u1-l2 编译好四个 CUDA 扩展（import 链要求 pointops2、simple-knn、diff-gaussian-rasterization 都可导入）。**完整跑到 `create_from_pcd` 需要 GPU**；无 GPU 时按步骤 5 的降级路径执行，产物观察部分依然有效（因为 `input.ply`/`cameras.json` 在高斯初始化**之前**写出）。以下脚本均为**示例代码**，建议存为仓库外的独立文件运行（不要写进仓库）。
+具体要求：
 
-**步骤 1：生成假数据集**。利用 `readColmapSceneInfo` 的「bin 优先、失败回退 txt」逻辑（[scene/dataset_readers.py:259-268](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/dataset_readers.py#L259-L268)），只提供 txt 三件套即可；注意 `read_intrinsics_text` 断言只接受 `PINHOLE` 模型（[scene/colmap_loader.py:159-159](https://github.com/yangzf-1023/4C4D/blob/ed6a3cb69782c4147151b3898944bc38132bae00/scene/colmap_loader.py#L159-L159)），且 `Scene` 靠 `sparse/` 目录探测触发 Colmap 分支：
+1. **构造假数据**（复用 u2-l1/u2-l2 的知识）：
+   - `sparse/0/cameras.bin`：2 台 SIMPLE_PINHOLE 相机（宽高 64×64，焦距 64）；
+   - `sparse/0/images.bin`：每台相机 1 条外参记录，名字分别取 `cam00_0000`、`cam01_0000`（注意 `readColmapCameras` 用文件名前缀匹配相机，见 u2-l2）；
+   - `sparse/0/points3D.bin`：约 500 个随机点（首次运行时 `readColmapSceneInfo` 会自动转成 `points3D.ply`）；
+   - `images/`：`cam00_0000.png`、`cam01_0000.png` 各一张 64×64 纯色图。
+   - 写 bin 文件时参考 u2-l1 的字节布局：`struct.pack` 小端序，`images.bin` 每条记录 `qvec(4d)+tvec(3d)+camera_id(i)+文件名+c00+track数(q=0)`。
+2. **实例化并报告**：按 4.5.4 的骨架构造 `ModelParams` 与 `GaussianModel(gaussian_dim=4, time_duration=[0,10])`，`training_view=['cam00']`、`testing_view=['cam01']`、`num_pts=400`，然后打印：
+   - `scene.cameras_extent`；
+   - `len(scene.train_cameras[1.0])` 与 `len(scene.test_cameras[1.0])`（各应为 1）；
+   - 按公式 \(1.1\max_i\lVert C_i-\bar C\rVert\) 手算的 radius，与 `cameras_extent` 对照；
+   - `position_lr_init × cameras_extent` 的值（`position_lr_init` 取自任一 yaml）。
+3. **检查产物**：列出 `model_path` 目录树，用 `plyfile` 打开 `input.ply` 打印顶点数与字段名，`json.load` 打开 `cameras.json` 打印条目数与第一条的 `position`。
 
-```python
-# build_fake_colmap.py（示例代码）
-import os, numpy as np
-
-root = "/tmp/fake_4c4d"
-os.makedirs(f"{root}/sparse/0", exist_ok=True)
-os.makedirs(f"{root}/images", exist_ok=True)
-
-# cameras.txt：camera_id MODEL width height fx fy cx cy（PINHOLE 四参数）
-with open(f"{root}/sparse/0/cameras.txt", "w") as f:
-    f.write("1 PINHOLE 320 240 300.0 300.0 160.0 120.0\n")
-    f.write("2 PINHOLE 320 240 300.0 300.0 160.0 120.0\n")
-
-# images.txt：image_id qw qx qy qz tx ty tz camera_id name + 空的 points2D 行
-qvec_tvec = [
-    "0.9962 0.0 0.0 0.0872  -1.0  0.2  0.5",   # 相机 1 外参（cam00）
-    "0.9962 0.0 0.0 -0.0872  1.0 -0.2  0.5",   # 相机 2 外参（cam01）
-]
-with open(f"{root}/sparse/0/images.txt", "w") as f:
-    f.write(f"1 {qvec_tvec[0]} 1 cam00_0000.png\n\n")
-    f.write(f"2 {qvec_tvec[1]} 2 cam01_0000.png\n\n")
-
-# images/：camXX_YYYY.png（4 位帧号）。dataloader=True 时不会真的读像素，空文件即可，
-# 但目录里只能有这些 png（数量断言：len(cam_infos) == len(os.listdir(images))）
-for cam in ("cam00", "cam01"):
-    for frame in range(10):
-        open(f"{root}/images/{cam}_{frame:04d}.png", "w").close()
-
-# points3D.txt：point_id x y z r g b error track...
-rng = np.random.default_rng(0)
-with open(f"{root}/sparse/0/points3D.txt", "w") as f:
-    for i in range(500):
-        x, y, z = rng.uniform(-1, 1, 3)
-        r, g, b = rng.integers(0, 255, 3)
-        f.write(f"{i+1} {x:.4f} {y:.4f} {z:.4f} {r} {g} {b} 1.0\n")
-
-print("fake dataset ready at", root)
-```
-
-**步骤 2：实例化 Scene**。用 `ModelParams`/`OptimizationParams` 的正规解析链（u1-l4）拿到参数对象；**必须 `--eval` + `--dataloader`**，前者让 train/test 划分与 `nerf_normalization` 生效，后者避免 `loadCam` 读取空图像文件：
-
-```python
-# run_scene.py（示例代码，需在仓库根目录下运行）
-import sys
-from argparse import ArgumentParser
-from arguments import ModelParams, OptimizationParams
-from scene import Scene, GaussianModel
-
-sys.path.insert(0, ".")
-parser = ArgumentParser()
-lp = ModelParams(parser)
-op = OptimizationParams(parser)
-args = parser.parse_args(["-s", "/tmp/fake_4c4d", "-m", "/tmp/fake_out",
-                          "--eval", "--dataloader", "--white_background"])
-dataset = lp.extract(args)
-opt = op.extract(args)
-
-gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=4,
-                          time_duration=[0, 10], rot_4d=True)
-scene = Scene(dataset, gaussians, num_pts=1_000_000,      # 点数小于上限 → 跳过下采样
-              training_view=["cam00"], testing_view=["cam01"])
-```
-
-**步骤 3：观察 `model_path` 产物**（此步无需 GPU 成功——文件在高斯初始化前已写出）：
-
-```bash
-ls /tmp/fake_out          # 应看到 input.ply 与 cameras.json
-head -c 400 /tmp/fake_out/cameras.json
-python -c "from plyfile import PlyData; \
-  p = PlyData.read('/tmp/fake_out/input.ply'); \
-  print(p['vertex'].data.dtype.names, len(p['vertex'].data))"
-```
-
-预期：`input.ply` 的 vertex 字段为 `x y z nx ny nz red green blue`（由 `storePly` 写出，**无 time 属性**，所以高斯初始化会走「随机采样 `_t` + redundant_ratio」分支——u3-l5 的主题）；`cameras.json` 共 20 条（10 测试在前、10 训练在后，4.3.3 的拼接顺序），每条含 `position/rotation/fx/fy`。
-
-**步骤 4：打印 cameras_extent 与学习率影响**：
-
-```python
-print("cameras_extent =", scene.cameras_extent)          # Scene L84
-print("spatial_lr_scale =", gaussians.spatial_lr_scale)  # 与上面相等（create_from_pcd L407）
-print("xyz lr =", opt.position_lr_init * scene.cameras_extent)        # L485 公式
-print("t   lr =", opt.position_lr_init * scene.cameras_extent)       # L496 回退分支
-```
-
-有 GPU 时再加两行验证到优化器层面（需 `training_setup`，其内部张量建在 cuda 上）：
-
-```python
-gaussians.training_setup(opt)   # 仅 GPU 环境可执行
-for g in gaussians.optimizer.param_groups:
-    if g["name"] in ("xyz", "t"):
-        print(g["name"], g["lr"])
-```
-
-**步骤 5（无 GPU 降级路径）**：跳过 `Scene`，直接调用回调函数观察 `SceneInfo`，同样能看到 `nerf_normalization`（此路径不触碰 GaussianModel，但仍需扩展编译完成 import）：
-
-```python
-from scene.dataset_readers import sceneLoadTypeCallbacks
-info = sceneLoadTypeCallbacks["Colmap"]("/tmp/fake_4c4d", "images", True,
-                                        num_pts=1_000_000, training_cam=["cam00"],
-                                        time_duration=[0, 10])
-print(info.nerf_normalization, len(info.train_cameras), len(info.test_cameras))
-```
-
-**预期结果**（数值**待本地验证**）：`train_cameras` 10 帧、`test_cameras` 10 帧；`cameras_extent` 为一个由两台相机光心距离决定的正数（本例外参下约为光心间距量级 × 1.1）；`xyz lr` 等于 `0.00016 × cameras_extent`。全程应看到 `Found sparse folder ... assuming Colmap data set!`、`Converting point3d.bin to .ply...`（首次）、`Copying input.ply ...`、`Writing cameras.json ...` 等打印，它们与 4.1.2 的十步流程一一对应。
+**预期结果**：`cameras_extent` 与手算 radius 完全一致；`input.ply` 顶点数等于（下采样后的）点数；`cameras.json` 恰有 2 条（test 在前）；`create_from_pcd` 打印的初始化点数与 `input.ply` 顶点数一致。若在无 GPU 环境运行，`create_from_pcd` 的 `.cuda()` 会报错——此时把报告完成到第 2 步的 cameras_extent 对照即可，其余**待本地验证**。
 
 ## 6. 本讲小结
 
-- `Scene` 是装配器而非解析器：它把「数据集读取器返回的 `SceneInfo`」加工成「相机字典 + 初始化完成的 GaussianModel + 输出目录快照」，`train.py` 与 `render.py` 共用；高斯的出生在 `Scene` 里，优化器的建立在 `Scene` 外。
-- 数据集分发靠 `sceneLoadTypeCallbacks` 回调表：探测 `sparse/` → Colmap、`transforms_train.json` → Blender、否则断言失败；两个回调返回统一的 `SceneInfo` 但签名不同，`Scene` 需分别传参。
-- `cameras_extent = nerf_normalization["radius"] = 1.1 × 训练相机光心到均值光心的最大距离`，只由训练相机决定；它既是 `xyz`/`t` 参数组与位置学习率调度器的乘法因子（`spatial_lr_scale`），又是致密化 clone/split 的尺寸判据（`percent_dense × scene_extent`）。
-- 冷启动时 `Scene` 在高斯初始化**之前**写出 `input.ply`（初始点云快照）与 `cameras.json`（全部相机位姿/内参，test 在前 train 在后）；加上 train.py 写的 `cfg_args`、`training_params.txt`、TensorBoard 事件、`chkpntN.pth`、`point_cloud/iteration_N/` 等，构成一次训练的完整输出目录。
-- 高斯初始化按优先级三岔：`loaded_pth` → `create_from_pcd`（要求 gaussian_dim=4 且 rot_4d）；`load_iteration`（-1 表示自动找最大迭代号）→ `load_ply`；否则 `create_from_pcd` 冷启动；三条路都把 `cameras_extent` 带进模型。
-- `cameraList_from_camInfos` 把元数据 `CameraInfo` 逐个经 `loadCam`（分辨率协商 + 内参同步缩放 + 懒加载开关）变成渲染就绪的 `Camera`，按 `resolution_scale` 组织成字典（4C4D 只用 1.0）。
+- `Scene` 是装配工厂：查表分发数据集 → 写出 `input.ply`/`cameras.json` → 打乱相机 → 多分辨率转换 → 三分支初始化高斯，这条顺序里藏着「必须先 Scene 后 training_setup」的依赖。
+- `sceneLoadTypeCallbacks` 是唯一的数据格式注册点（Colmap/Blender 二选一，靠 `sparse/` 与 `transforms_train.json` 的目录探测，sparse 优先），新增数据格式的二次开发从这里挂载。
+- `cameras_extent = 1.1 × 训练相机光心到均值中心的最大距离`，只由训练相机计算；它同时缩放位置学习率（经 `spatial_lr_scale` 作用于 xyz、`_t` 与调度器）和致密化的 clone/split 尺寸分界（`percent_dense × extent`）。
+- `cameraList_from_camInfos` 是 `CameraInfo → Camera` 的转换循环，外层按 `resolution_scale` 组织成字典；shuffle 只做一次保证多分辨率顺序一致。
+- 初始化三分支：`loaded_pth`（外部 4D 高斯，`create_from_pth`）> `loaded_iter`（本目录 ply，`load_ply`，且会跳过两个文件写出）> 默认 `create_from_pcd`；只有前两分支之外时才写 `input.ply`/`cameras.json`。
+- 一次训练的 `model_path` 产物清单：`cfg_args`、`training_params.txt`（train.py）+ `input.ply`、`cameras.json`（Scene 构造）+ `chkpntN.pth`、`point_cloud/iteration_N/point_cloud.ply`（Scene.save）+ TensorBoard 事件与中间渲染图。
 
 ## 7. 下一步学习建议
 
-本讲之后，数据链路（u2 全部）已经闭环：COLMAP 文件 → `SceneInfo` → `Camera`/`Scene` → 初始化好的 4D 高斯。接下来两条路：
+本讲把「数据 → 场景」的最后一环补齐了。接下来按依赖关系建议：
 
-1. **主线（推荐）**：进入单元 3 深入 `GaussianModel` 本身。u3-l1 讲 3D 继承属性（`_xyz`/`_scaling`/`_rotation`/`_opacity` 与激活函数 property），u3-l2 讲 4D 新增的 `_t`/`_scaling_t`/`_rotation_r`，u3-l5 会展开本讲只点了入口的 `create_from_pcd`（distCUDA2 定尺度、随机 `_t` 与 `redundant_ratio`、`duration/5` 时间尺度）——正好解释综合实践中 `input.ply` 没有 time 属性时发生的事情。
-2. **支线**：如果你更关心「训练目录里还有什么、怎么读回来」，可先跳 u5-l5（检查点与 `capture`/`restore` 元组），再回头看本讲 4.5 的三岔路会更有体感。
-
-建议同步阅读的源码：`scene/__init__.py` 全文（128 行，半小时可精读一遍）与 `utils/camera_utils.py`，边读边对照本讲 4.1.2 的十步流程勾选。
+1. **u3-l1（GaussianModel：继承自 3DGS 的属性）**：本讲反复出现的 `create_from_pcd` 内部到底初始化了哪些张量？`_xyz`、`_scaling`、`_opacity` 的形状与激活函数是下一单元的起点。
+2. **u3-l5（初始化与持久化）**：精读 `create_from_pcd` 的初始化策略（`distCUDA2` 定尺度、`redundant_ratio` 时间冗余、时间尺度取 duration/5）与 `save_ply/load_ply` 的字段布局——本讲 4.5 节的三分支在那里展开成完整机制。
+3. **u5-l4（自适应致密化与剪枝）**：本讲只讲了 `percent_dense × scene_extent` 这个量从哪来，clone/split 的完整判定与优化器状态同步在那一讲。
+4. 若你更关心推理侧：可提前浏览 `render.py` 中 `Scene(args, gaussians, load_iteration=..., shuffle=False)` 的调用方式，体会 `load_iteration=-1` 自动找最新迭代的用法。

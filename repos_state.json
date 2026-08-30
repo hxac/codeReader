@@ -58781,7 +58781,7 @@
     },
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-30T16:34:13Z"
+      "last_run_at": "2026-08-30T18:02:22Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
@@ -63134,51 +63134,67 @@
           "error": null
         },
         "u7-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.0514040000000002,
+          "error": null
+        },
+        "u7-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.9436119999999997,
+          "error": null
+        },
+        "u8-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.892755,
+          "error": null
+        },
+        "u8-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 3.0493010000000003,
+          "error": null
+        },
+        "u8-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.8305970000000003,
+          "error": null
+        },
+        "u8-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.916839,
+          "error": null
+        },
+        "u8-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.954622,
+          "error": null
+        },
+        "u8-l6": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.7199689999999999,
+          "error": null
+        },
+        "u9-l1": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"b5d903a4-9f76-4a42-83a1-2a62"
-        },
-        "u7-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l6": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"05f7162f-8d1d-4223-b4fa-0ef4"
         },
         "u9-l2": {
           "status": "pending",
@@ -63237,7 +63253,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/jankae/LibreVNA/LibreVNA-tutorial",
       "last_head": "c4276df1e79c559f878ebc17e9f0bd3bd0a70f57",
-      "last_run_at": "2026-08-30T16:34:13Z",
+      "last_run_at": "2026-08-30T18:02:22Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "CVCUDA/CV-CUDA": {
@@ -63426,41 +63442,53 @@
           "error": null
         },
         "u7-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.0401480000000003,
+          "error": null
+        },
+        "u7-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3445869999999998,
+          "error": null
+        },
+        "u8-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.280928,
+          "error": null
+        },
+        "u8-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.6267749999999999,
+          "error": null
+        },
+        "u8-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.073351,
+          "error": null
+        },
+        "u8-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.0725819999999997,
+          "error": null
+        },
+        "u9-l1": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"d446f6f9-1d1e-45e3-9bb7-e15b"
-        },
-        "u7-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"898b783a-f9f6-406e-9211-9a9b"
         },
         "u9-l2": {
           "status": "pending",
@@ -63484,7 +63512,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/CVCUDA/CV-CUDA/CV-CUDA-tutorial",
       "last_head": "5ac8708bde57f8cf1c8d19443f6384875e86157c",
-      "last_run_at": "2026-08-30T16:34:13Z",
+      "last_run_at": "2026-08-30T18:02:22Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "yangzf-1023/4C4D": {
@@ -63540,51 +63568,67 @@
           "error": null
         },
         "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1563569999999999,
+          "error": null
+        },
+        "u2-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.801964,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.176474,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.613378,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.577844,
+          "error": null
+        },
+        "u3-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.5555359999999996,
+          "error": null
+        },
+        "u3-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.5977299999999999,
+          "error": null
+        },
+        "u4-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.41741,
+          "error": null
+        },
+        "u4-l2": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"b7a2782c-5190-435e-91c0-30af"
-        },
-        "u2-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"d33f1d03-d63b-4953-a9d0-06f0"
         },
         "u4-l3": {
           "status": "pending",
@@ -63678,7 +63722,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/yangzf-1023/4C4D/4C4D-tutorial",
       "last_head": "ed6a3cb69782c4147151b3898944bc38132bae00",
-      "last_run_at": "2026-08-30T16:34:13Z",
+      "last_run_at": "2026-08-30T18:02:22Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "openecos-projects/icsprout55-pdk": {},
