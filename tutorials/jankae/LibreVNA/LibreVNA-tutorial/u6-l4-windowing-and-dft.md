@@ -1,231 +1,493 @@
-# 片上信号处理：加窗与 DFT
+# 片上信号处理:加窗与 DFT
 
 ## 1. 本讲目标
 
-学完本讲，你应该能够：
+上一讲(u6-l3)我们看完了 ADC 接口和采样调度:三路 16 位样本以 800 kHz 进入 FPGA,`Sampling.vhd` 用"单 bin 正交解调"把 VNA 通路压缩成 6 个 48 位 I/Q。本讲沿着数据流再往下走一步,回答三个问题:
 
-1. 说清楚 `Hann.dat` / `Kaiser.dat` / `Flattop.dat` 三个窗系数文件是如何在**综合期**被 `window.vhd` 用 VHDL `textio` 读入、固化成 FPGA 位流里的 ROM 的。
-2. 走读 `Windowing.vhd` 的十分状态机：一个 DSP 乘法器如何分时复用完成三路接收通道的「样本 × 窗系数」。
-3. 走读 `DFT.vhd` 的五状态机：相位累加器如何用「每样本两次乘法 + 每 bin 一次加法」的递推结构，在 BRAM 里维护 96 个 bin × 4 个 48 位累加器。
-4. 用固件侧公式亲手推导「800 kHz 采样、250 kHz 中频、1 kHz 分辨率」需要多少个采样点，并算出 `DFT_FIRST_BIN` / `DFT_FREQ_SPACING` 两个寄存器的具体值。
-5. 解释为什么要把加窗和 DFT 做在 FPGA 片上，而不是把原始样本传回 PC 处理。
-6. 读懂 `Test_DFT.vhd` 注入的激励，推导期望输出，并知道「无断言测试台」的验证边界在哪里。
+1. **窗从哪里来**——`window.vhd` 如何在综合时把 Hann/Kaiser/Flattop 系数文件"烤"进 ROM,`Windowing.vhd` 如何用一个乘法器给三路样本轮流加窗,并且让 128 项的窗表在任何捕获长度下都恰好横跨整个捕获。
+2. **DFT 核怎么算**——`DFT.vhd` 如何用一个正余弦查找表、四个 DSP 乘法器和一块双端口 RAM,对两路信号同时做 96 个任意频率 bin 的递推 DFT,以及固件如何用两条换算公式(2^16 与 2^24 两套相位单位)配置它。
+3. **为什么要在片上做**——算一笔带宽账:原始样本流约 4.8 MB/s,而设备与 PC 之间只有 USB 全速(12 Mbps),不压缩根本传不动。
+
+读完本讲,你应该能独立完成讲义规格里的实践任务:推导"250 kHz 中频、1 kHz 分辨率"所需的样本数,读懂 `Test_DFT.vhd` 注入的激励并预测每个 bin 的期望输出。
 
 ## 2. 前置知识
 
-### 2.1 为什么要加窗（频谱泄漏）
+### 2.1 为什么要加窗:截断即乘矩形窗
 
-对一段有限长度的采样序列做 DFT，等价于先把无限长信号乘上一个矩形窗再变换。矩形窗的频谱是个 sinc 函数，主瓣宽、旁瓣高（第一旁瓣只衰减约 13 dB），于是某个频率的能量会「泄漏」到相邻 bin。改用边缘平滑过渡到零的窗（Hann、Kaiser、Flattop），旁瓣可以压到 -40 dB 甚至 -90 dB 以下，代价是主瓣变宽——**分辨率换动态范围**。
+DFT 假设信号无限长,而硬件只能捕获有限的一段。设捕获长度为 \( N \) 个样本,截断等价于给信号乘上一个矩形窗:
 
-衡量主瓣变宽程度的标准参数是窗的**等效噪声带宽系数** \(k_{window}\)（单位：bin）。加窗后的实际分辨率：
+\[ x_{\text{截断}}[n] = x[n] \cdot w[n], \quad w[n] = \begin{cases}1 & 0 \le n < N\\ 0 & \text{其他}\end{cases} \]
 
-\[ RBW = k_{window} \cdot \frac{f_{ADC}}{N} \]
+时域相乘对应频域卷积。矩形窗的频谱是 sinc 函数,主瓣两侧有很高的旁瓣(-13 dB 起,衰减很慢)。后果是:一个不在 bin 中心的单音会把能量"泄漏"到邻近所有 bin,小信号会被旁边大信号的旁瓣淹没。
 
-其中 \(N\) 是每点采样的样本数，\(f_{ADC}\) 是 ADC 采样率。固件里那张系数表 `{0.89, 2.23, 1.44, 3.77}` 就是四种窗的 \(k_{window}\)。
+Hann、Kaiser、Flattop 等窗的思路一致:**故意让窗的两端平滑归零,用更宽的主瓣换更低的旁瓣**。对频谱仪来说,这直接定义了分辨率带宽(RBW)——同样的捕获长度,Flattop 主瓣最宽(RBW 最粗)但幅度测量最准,Hann 居中,Kaiser 旁瓣特性好。固件里有一张对应的"窗因子"表,后面会看到。
 
-### 2.2 DFT 与「逐样本累加」的直接实现
+### 2.2 任意频率 bin 的 DFT:不必是 FFT
 
-N 点 DFT 的定义：
+标准 DFT 公式:
 
-\[ X_k = \sum_{n=0}^{N-1} x[n] \cdot e^{-j2\pi f_k n / f_s}, \qquad k = 0,1,\dots,BINS-1 \]
+\[ X[k] = \sum_{n=0}^{N-1} x[n] \, e^{-j 2\pi k n / N} \]
 
-本设计的做法不是 FFT，而是最朴素的**直接 DFT**：每来一个样本 \(x[n]\)，就把它与每个 bin 的旋转因子相乘并累加到该 bin 的 accumulator 里，N 个样本累加完就得到全部 bin 的结果。它省去了 FFT 的位反转和蝶形调度，换来两个关键自由度：
+它把 N 个样本变换到 N 个**均匀且位置固定**的频率 bin。但频谱仪想要的往往是"从某个起始频率 \( f_1 \) 开始、间隔 \( \Delta f \) 的 96 个 bin",频率完全可以任意取。把 bin 频率写成 \( f_k = f_1 + k \cdot \Delta f \),用相位表示:
 
-- **bin 位置任意可编程**——频谱仪需要 bin 精确对齐扫频点间隔，而不是 FFT 的 \(f_s/N\) 整数倍网格；
-- **每样本每 bin 只需一次乘加**，4 个 DSP Slice 分时复用即可跑满 96 bin。
+\[ X[k] = \sum_{n=0}^{N-1} x[n] \left( \cos \varphi_k(n) - j \sin \varphi_k(n) \right), \qquad \varphi_k(n) = \frac{2\pi f_k}{f_s} \cdot n \]
 
-### 2.3 定点数与相位累加器（NCO）
+这就是 `DFT.vhd` 的计算模型:**每个 bin 配一个(复数)累加器,每来一个样本,把样本乘上该 bin 当前相位的正弦和余弦,加进累加器**。它不是 FFT——没有蝶形、没有位反转,只是乘累加;好处是 bin 位置任意、每个累加器只需要 48 位,而且和"逐样本流式处理"天然契合。这其实是 Goertzel/滑动 DFT 一族的思想在 FPGA 上的直译。
 
-相位累加器是 DDS/数字下变频的标配：一个 32 位无符号计数器，每个时钟加一个步进 `phase_inc`，计满 \(2^{32}\) 自动回绕——正好对应相位转满一圈 \(2\pi\)。于是「每样本相位步进」与「归一化频率」一一对应：
+### 2.3 相位累加器(NCO)与定点数
 
-\[ \frac{phase\_inc}{2^{32}} = \frac{f}{f_s} \;(\text{周期/样本}) \]
+上一讲 `Sampling.vhd` 已经用过相位累加器:一个 32 位无符号数,每个采样周期加一个常数 `phase_inc`,溢出回绕——把 \( 2^{32} \) 看作一整圈 \( 2\pi \),则频率为
 
-取相位高 12 位查正弦表即可得到定点 sin/cos。LibreVNA 里 VNA 通路的单 bin 解调（上一讲 `Sampling.vhd`）和本讲的 96 bin DFT 用的都是这套机制，只是相位步进的「每 bin 递增」技巧不同。
+\[ f = f_s \cdot \frac{\text{phase\_inc}}{2^{32}} \]
 
-### 2.4 FPGA 资源词汇
+取累加器的高位去查正余弦表,就得到数字本振。本讲的 `DFT.vhd` 用同一个技巧,但多了一层巧思:**两个相位增量用两套单位**(2^16 与 2^24),4.2 节详细拆解。
 
-- **DSP Slice**：Spartan-6 里的硬核乘加单元，本设计通过 CoreGen 包装成 `DSP_SLICE`（.xco 核），实现 \(p = a \times b + c\)，`sel` 端口选择是否把上一次结果 \(p\) 回接到 \(c\) 形成「乘累加」。
-- **BRAM**：块存储器。DFT 的 96 个 bin × 4 个 48 位累加器就存在一块 192 位宽的双端口 BRAM 里，读出旧值→DSP 加→写回同一地址，是经典的「读-改-写」累加模式。
-- **textio**：VHDL 标准库的文件读写功能，`window.vhd` 用它在**综合/仿真 elaboration 时**把 `.dat` 文本读进 `constant`，从而变成 ROM 初值。
+### 2.4 与上一讲的衔接
 
-### 2.5 与前几讲的衔接
+回忆 u6-l3 的结论:主时钟 102.4 MHz;ADC 以预分频产生 800 kHz 采样;`Sampling.vhd` 分时复用一个 DSP 乘法器完成 3 通道 × I/Q 共 6 路乘累加。本讲的 `Windowing.vhd` 和 `DFT.vhd` 延续完全相同的手法——**乘法器是 Spartan 6 上最贵的资源之一,能分时复用就绝不多摆一个**。
 
-本讲站在数据流水线的「加窗 → 频域变换」两站（上一讲 u6-l3 讲了它们上游的 `MCP33131.vhd` 采样与 `Sampling.vhd` 单 bin 解调）。回忆 [top.vhd](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/top.vhd) 里的分岔：三路 ADC 原始样本先一起过 `Windowing`，然后**双支并行**——VNA 路走 `Sampling`（单 bin、含参考通道），频谱仪路走 `DFT`（96 bin、只看端口 1/2）。`NSAMPLES` 等控制量由 `Sweep.vhd`（u6-l2）在扫描配置里下发。
+> 术语:DSP48 是 Xilinx FPGA 里的硬件乘累加单元,一个即可做 \( P = A \times B + C \);本工程用 CoreGen 生成的 `DSP_SLICE` 封装(源码在 `FPGA/VNA/ipcore_dir/DSP_SLICE.xco`),`sel` 引脚选择是否累加。
 
 ## 3. 本讲源码地图
 
-| 文件 | 角色 |
+| 文件 | 作用 |
 | --- | --- |
-| [FPGA/VNA/window.vhd](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/window.vhd) | 窗系数 ROM：综合期读入三个 .dat 文件，按 `WINDOW_TYPE` 选出一个 16 位系数 |
-| [FPGA/VNA/Hann.dat](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Hann.dat) / [Kaiser.dat](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Kaiser.dat) / [Flattop.dat](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Flattop.dat) | 各 128 行、每行 16 个二进制字符的窗系数表 |
-| [FPGA/VNA/Windowing.vhd](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Windowing.vhd) | 加窗引擎：十分状态机，分时复用一个 DSP 给三路通道乘窗系数 |
-| [FPGA/VNA/DFT.vhd](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/DFT.vhd) | 96 bin 直接 DFT 核：相位累加器 + BRAM 累加器 + 4 个 DSP |
-| [FPGA/VNA/Test_DFT.vhd](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Test_DFT.vhd) | DFT 的仿真测试台（无断言，波形判读型） |
-| [FPGA/VNA/Test_Windowing.vhd](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Test_Windowing.vhd) / [Test_Window.vhd](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Test_Window.vhd) | 加窗引擎与窗 ROM 的测试台 |
-| [Software/VNA_embedded/Application/SpectrumAnalyzer.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/SpectrumAnalyzer.cpp) | 固件侧：由 RBW 反推样本数、下发 DFT 频率参数、逐 bin 读结果 |
-| [Software/VNA_embedded/Application/Drivers/FPGA/FPGA.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Drivers/FPGA/FPGA.cpp) | `SetupDFT` / `ReadDFTResult`：频率↔相位增量的换算与 SPI 读出 |
-| [Documentation/DeveloperInfo/FPGA_protocol.tex](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Documentation/DeveloperInfo/FPGA_protocol.tex) | MCU-FPGA 协议文档，含 DFT 寄存器公式与读出时序 |
+| [FPGA/VNA/Windowing.vhd](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Windowing.vhd) | 三通道时分复用加窗器,状态机驱动一个 DSP 乘法器 |
+| [FPGA/VNA/window.vhd](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/window.vhd) | 窗系数 ROM,综合时用 `textio` 从 .dat 文件读入三套 128 点系数 |
+| [FPGA/VNA/Hann.dat](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Hann.dat) / [Kaiser.dat](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Kaiser.dat) / [Flattop.dat](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Flattop.dat) | 每文件 128 行,每行一个 16 位二进制串的窗系数 |
+| [FPGA/VNA/DFT.vhd](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/DFT.vhd) | 96 bin 递推 DFT 核(仅频谱仪通路使用) |
+| [FPGA/VNA/Test_DFT.vhd](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Test_DFT.vhd) | DFT 的仿真测试台 |
+| [FPGA/VNA/top.vhd](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/top.vhd) | 把 Windowing 挂在 ADC 之后、Sampling 与 DFT 之前 |
+| [FPGA/VNA/SPIConfig.vhd](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/SPIConfig.vhd) | MCU 写 DFT 参数寄存器、读 DFT 结果的命令接口 |
+| [Software/VNA_embedded/Application/Drivers/FPGA/FPGA.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Drivers/FPGA/FPGA.cpp) | 固件侧:`SetupDFT` 参数换算、`ReadDFTResult` 读数 |
+| [Software/VNA_embedded/Application/SpectrumAnalyzer.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/SpectrumAnalyzer.cpp) | 固件侧:由 RBW 和窗类型推样本数、调度 DFT |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 窗系数与 Windowing 模块
+### 4.1 窗系数与 Windowing:加窗器
 
 #### 4.1.1 概念说明
 
-`Windowing` 解决的问题是：在三路 ADC 样本进入频域变换之前，逐样本乘上窗系数。它必须跟上 ADC 的实时速率（默认 800 kHz，每个样本只有 128 个主时钟），所以不能为三路通道各配一个乘法器硬扛——设计者用一个 DSP Slice **分时复用**：端口 1、端口 2、参考三路排队过同一个乘法器，用状态机的「延迟存储」节拍把三个乘积按到达顺序分别锁存。
+`Windowing.vhd` 解决的问题:对三路 ADC 原始样本(PORT1/PORT2/REF)在**进入测量引擎之前**统一乘上窗系数。注意它在 `top.vhd` 里的位置——加窗的输出同时喂给 `Sampling`(VNA 单 bin 通路)和 `DFT`(频谱仪 96 bin 通路):
 
-窗系数本身不是逻辑生成的，而是**预先离线算好、存成文本文件**，综合时读入变成 ROM。这带来一个跨层契约：换窗 = 换 .dat 文件（FPGA 侧）+ 改 `window_factors` 表（固件侧），两处必须同步。
+- 对 VNA 通路,窗决定了"中频滤波器"的形状——主瓣就是选择性和 IF 带宽;
+- 对 SA 通路,窗决定了 RBW 滤波器的形状和幅度精度。
+
+一个设计约束立刻浮现:**捕获长度是可变的**(每点 16×NSAMPLES 个样本,NSAMPLES 是 13 位输入,短则 16 个样本、长则 131072 个),而窗系数表只有 128 项。如果窗表只覆盖前 128 个样本,长捕获的后半段就等于没加窗。这个模块的核心技巧就是让 128 项窗表**在任何捕获长度下都恰好横跨整个捕获**——用类似 Bresenham 画线算法的可变步进实现。
 
 #### 4.1.2 核心流程
 
-`window.vhd`（ROM 侧）：
-
 ```
-综合期（elaboration）：
-  打开 Hann.dat / Kaiser.dat / Flattop.dat
-  逐行 read 进 128 × 16bit 的 constant 数组     ← 成为位流中的 ROM 初值
-运行期（每个时钟）：
-  INDEX(7bit) + WINDOW_TYPE(2bit) → 打一拍 → VALUE(16bit)
-    "00" → 常数 0x1000（矩形窗）
-    "01" → Kaiser.dat[INDEX]
-    "10" → Hann.dat[INDEX]
-    "11" → Flattop.dat[INDEX]
-```
-
-`Windowing.vhd`（引擎侧），每个 ADC 样本走一轮：
-
-```
-CalcWindowInc   根据 NSAMPLES 选好「每样本 index 步进量」
-WaitingForADC   等 ADC_READY 脉冲
-CalcPort1       mult_b ← PORT1_RAW，mult_enable=1     ┐
-CalcPort2       mult_b ← PORT2_RAW                     ├ 三次乘法背靠背进流水线
-CalcRef         mult_b ← REF_RAW                      ┘
-MultDelay1/2    等待 DSP 流水线延迟
-StorePort1      取 mult_p(30..13) → PORT1_WINDOWED     ┐
-StorePort2      取 mult_p(30..13) → PORT2_WINDOWED     ├ 三个乘积依次冒出流水线
-StoreRef        取 mult_p(30..13) → REF_WINDOWED，     ┘
-                WINDOWING_DONE=1，窗索引前进一步
+每个测量点开始(RESET = sampling_start):
+  window_index ← 0,按 NSAMPLES 选择 (cnt步进, index步进) 档位
+每个 ADC 样本到达(ADC_READY):
+  状态机走一轮(约 10 个时钟):
+    CalcPort1  → mult_b ← PORT1_RAW   ┐
+    CalcPort2  → mult_b ← PORT2_RAW   │ 同一个 DSP 乘法器
+    CalcRef    → mult_b ← REF_RAW     │ 连续三拍算三个乘积
+    MultDelay1/2(等流水线)            ┘
+    StorePort1 → PORT1_WINDOWED ← mult_p(30:13)
+    StorePort2 → PORT2_WINDOWED ← mult_p(30:13)
+    StoreRef   → REF_WINDOWED  ← mult_p(30:13);WINDOWING_DONE ← 1
+                 同时推进 window_sample_cnt / window_index
 ```
 
-窗索引的推进是个小小的「Bresenham 式」分数步进：128 项的窗要均匀铺满整个测量点 \(16 \times NSAMPLES\) 个样本，即每样本前进 \(8/NSAMPLES\) 项。整数化实现是让 `window_sample_cnt` 以 `cnt_inc` 为步长累加，每超过 `NSAMPLES` 就回绕一次、`window_index` 加一，`case` 语句按 NSAMPLES 档位挑选 2 的幂次步进（NSAMPLES=1 每样本 +8；2~3 每 2 样本 +4；4~7 加 2；≥8 加 1）。可以验证四个档位的平均速率都是 \(8/NSAMPLES\) 项/样本，于是一个测量点恰好走完整个 128 项窗。
+窗表步进规则(见 4.1.3 的档位表):`window_sample_cnt` 每样本加 `cnt_inc`,一旦越过 `NSAMPLES` 就回绕并把 `window_index` 加 `index_inc`。四种档位都满足 \( 16 \times \text{cnt\_inc} \times \text{index\_inc} = 128 \),所以整段捕获内窗表恰好被遍历一遍。
 
 #### 4.1.3 源码精读
 
-先看 ROM 的「文件进位流」机制——[window.vhd:42-54](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/window.vhd#L42-L54) 定义了 `window_data` 数组类型和 `impure function InitWindowDataFromFile`：它用 `textio` 的 `readline`/`read` 逐行读入文件。注意 `for i in window_data'range` 是从 127 降到 0，所以**文件第 1 行落在 rom(127)、第 128 行落在 rom(0)**——对对称窗无所谓，但自己生成系数文件时要记得这个行序。
+**窗系数 ROM——文件如何变成硬件。** [window.vhd:34-39](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/window.vhd#L34-L39) 定义了只有三个端口的 ROM:地址 7 位(128 项)、类型 2 位、输出 16 位。真正魔法在 [window.vhd:44-58](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/window.vhd#L44-L58):
 
-[window.vhd:56-58](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/window.vhd#L56-L58) 把三个文件初始化成三个 `constant`。`constant` 在综合时被求值并折叠进网表，这就是「系数文件 → 位流内 ROM」的全部魔法；副作用是**综合/仿真时工作目录里必须能找到这三个 .dat 文件**（ISE 工程目录即 `FPGA/VNA/`，仿真时需复制到仿真器工作目录）。
+```vhdl
+impure function InitWindowDataFromFile (RomFileName : in string) return window_data is
+FILE romfile : text is in RomFileName;
+...
+constant hann : window_data := InitWindowDataFromFile("Hann.dat");
+constant kaiser : window_data := InitWindowDataFromFile("Kaiser.dat");
+constant flattop : window_data := InitWindowDataFromFile("Flattop.dat");
+```
 
-[window.vhd:64-75](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/window.vhd#L64-L75) 是打了一拍的查表进程，`WINDOW_TYPE` 编码在此定死：`"00"` 直接给常数 `"0001000000000000"`（= 0x1000 = 4096，矩形窗），`"01"`/`"10"`/`"11"` 分别查 Kaiser/Hann/Flattop。这个编码与固件 [SpectrumAnalyzer.cpp:250](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/SpectrumAnalyzer.cpp#L250) 的 `window_factors[4] = {0.89f, 2.23f, 1.44f, 3.77f}` 下标一一对应（矩形、Kaiser、Hann、Flattop），也与协议文档 [FPGA_protocol.tex:368-373](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Documentation/DeveloperInfo/FPGA_protocol.tex#L368-L373) 的 `Window[1:0]` 寄存器描述一致——**三处同源，这是全项目反复出现的跨层契约模式**。
+`InitWindowDataFromFile` 用 VHDL 的 `textio` 逐行读文件、逐行 `read` 成 16 位 `std_logic_vector`,装进 `constant` 数组。因为是 `constant`,这些值在**综合时**就被求值并直接固化成 LUT/BRAM 初值——.dat 文件不需要在运行时加载,bitstream 里已经"烤"好了系数。这也解释了 u1-l4 学过的一件事:改窗系数必须重新综合 FPGA 工程,不能像固件那样 USB 升级就换。
 
-三个系数文件的实际数值（可用 `sed -n '1p;64p;65p;128p' Hann.dat` 之类核对）：
+窗类型选择在 [window.vhd:64-75](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/window.vhd#L64-L75) 的 case 语句:
 
-| 文件 | 边缘值 | 中心峰值 | 形状说明 |
-| --- | --- | --- | --- |
-| Hann.dat | 1 | 0x1FFE = 8190 | 对称 S 曲线，经典 Hann 形状 |
-| Kaiser.dat | 6 | 0x27FD = 10237 | 对称、边缘略高于 Hann |
-| Flattop.dat | 0xFFF8（按带符号数读为 −8） | 0x4A2F = 18991 | 中心峰值最高，近边缘存在约 −1340 的**负瓣**（5 项 Flattop 特征），因此该文件必须按补码理解 |
+| WINDOW_TYPE | 窗 | 来源 |
+| --- | --- | --- |
+| "00" | 矩形(不加窗) | 常量 `"0001000000000000"` = 4096 |
+| "01" | Kaiser | Kaiser.dat(实测峰值 10237) |
+| "10" | Hann | Hann.dat(实测峰值 8190) |
+| "11" | Flattop | Flattop.dat(实测峰值 18991) |
 
-Flattop 的负瓣解释了 [Windowing.vhd:100-103](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Windowing.vhd#L100-L103) 里那两行符号扩展：`mult_a(17:16) <= mult_a(15) & mult_a(15)` 把窗系数当**带符号** 16 位数扩到 18 位——如果没有这一步，Flattop 边缘的 0xFFF8 会被当成 +65528，把样本放大到溢出。Hann/Kaiser 全为正值，不受影响。各窗峰值标度不同（4096/8190/10237/18991），乘法后又统一右移 13 位（见下），绝对增益差异属于固定增益，最终被设备级幅度校准与 SA 归一化吸收。
+这个编码与固件侧 [FPGA.hpp:98-103](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Drivers/FPGA/FPGA.hpp#L98-L103) 的 `enum class Window { None=0x00, Kaiser=0x01, Hann=0x02, Flattop=0x03 }` 一一对应——两端的契约靠约定(而非同源编译)保持一致。
 
-再看引擎。实体端口 [Windowing.vhd:32-45](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Windowing.vhd#L32-L45)：三路 16 位原始样本进、三路 **18 位**加窗样本出；`NSAMPLES` 是 13 位输入——它同时决定窗的拉伸长度，并被复位逻辑锁存到 `window_sample_compare`（[Windowing.vhd:115](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Windowing.vhd#L115)）。
+一个值得玩味的细节:三种系数文件**峰值并不相同**(Hann ≈ 2^13,Flattop ≈ 2.32×2^13)。这不是随手生成的:Hann 系数按 \( w(i) = \tfrac{1}{2}\left(1-\cos\frac{2\pi i}{128}\right) \times 2^{13} \) 生成,均值恰为 \( 0.5 \times 2^{13} = 4096 \);标准平坦顶窗的"相干增益"(均值/峰值)约 0.2156,而 Hann 是 0.5,\( 0.5 / 0.2156 \approx 2.32 \) 正好等于两文件峰值之比 18991/8190。也就是说,**Flattop 系数被刻意放大,使它的均值也凑到约 4096,与矩形窗常量 4096 对齐**。四种窗的相干增益统一后,切换窗类型不会改变幅度读数的标度,只改变选择性。(Kaiser/Hann/Flattop 三个文件均值的精确值留作 4.1.5 的练习验证。)
 
-顶层里它挂在 ADC 之后（[top.vhd:647-660](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/top.vhd#L647-L660)）：`RESET => sampling_start`（每个测量点重启一次窗索引）、`ADC_READY => adc_port1_ready`（三片 ADC 同步，就绪以端口 1 为准，见上一讲）、输出同时喂给 `Sampling`（VNA 路，[top.vhd:662-685](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/top.vhd#L662-L685)）和 `SA_DFT`（频谱仪路，[top.vhd:825-838](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/top.vhd#L825-L838)）——**加窗是两路共用的公共前置级**，`WINDOWING_DONE` 就是下游的 `NEW_SAMPLE`。
+**加窗器主体——一个乘法器伺候三路。** [Windowing.vhd:32-45](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Windowing.vhd#L32-L45) 是端口:输入三路 16 位原始样本,输出三路 **18 位**加窗样本(16×16 乘积取 18 位,位宽变大是乘法的自然结果)。核心例化在 [Windowing.vhd:83-98](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Windowing.vhd#L83-L98):一个 `DSP_SLICE` 乘法器 + 一个 `window` ROM。乘法器的一个输入固定接窗值([Windowing.vhd:99-103](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Windowing.vhd#L99-L103),`mult_a` 符号扩展自 `window_value`),另一个输入 `mult_b` 由状态机每拍换一路样本。
 
-[Windowing.vhd:118-136](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Windowing.vhd#L118-L136) 是步进量选择，四个档位如上所述。[Windowing.vhd:145-159](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Windowing.vhd#L145-L159) 三个 Calc 状态背靠背地把三路样本依次装进 `mult_b`，`mult_a` 保持窗系数不动——DSP 流水线里同时有最多三个乘法在飞。[Windowing.vhd:170-186](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Windowing.vhd#L170-L186) 三个 Store 状态按流水线延迟节奏取结果：`PORT1_WINDOWED <= mult_p(30 downto 13)`，即取 48 位乘积的 30..13 位——等价于**乘积右移 13 位再截 18 位**。矩形窗时 4096×样本>>13 = 样本/2，正好把 16 位输入折进 18 位输出而不溢出。
+状态机共 10 个状态([Windowing.vhd:79](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Windowing.vhd#L79))。三拍连发三个乘法([Windowing.vhd:145-159](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Windowing.vhd#L145-L159)),两拍等流水线,再三拍依次取结果,例如 [Windowing.vhd:170-175](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Windowing.vhd#L170-L175):
 
-[Windowing.vhd:187-193](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Windowing.vhd#L187-L193) 是分数步进的回绕逻辑，`window_index` 是 7 位信号，加到 128 自然回绕，无缝衔接下一个测量点。
+```vhdl
+when StorePort1 =>
+    ...
+    PORT1_WINDOWED <= mult_p(30 downto 13);
+```
+
+`mult_p(30 downto 13)` 即乘积右移 13 位——这是定标:窗值以 2^13 为"满增益",相干增益统一在 4096 = 2^12,所以矩形窗直通时实际增益是 4096/8192 = 0.5,一个无害的常数因子,后级会统一吸收。一次加窗约 10 个时钟,而样本最快每 128 个时钟来一个(102.4 MHz / 800 kHz),裕量充足。
+
+**可变步进——让窗表永远横跨整段捕获。** 档位选择在 [Windowing.vhd:118-137](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Windowing.vhd#L118-L137):
+
+| NSAMPLES(window_sample_compare) | 每点实际样本数 | cnt 步进 | index 步进 | 每样本平均推进表项 |
+| --- | --- | --- | --- | --- |
+| 1 | 16 | 1 | 8 | 8 |
+| 2–3 | 32–48 | 2 | 4 | 4 → 2.67 |
+| 4–7 | 64–112 | 4 | 2 | 2 → 1.14 |
+| ≥8(其他) | ≥128 | 8 | 1 | 1 → 更小 |
+
+步进与回绕逻辑在 [Windowing.vhd:182-194](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Windowing.vhd#L182-L194):
+
+```vhdl
+if window_sample_cnt + window_sample_cnt_inc < window_sample_compare then
+    window_sample_cnt <= window_sample_cnt + window_sample_cnt_inc;
+else
+    window_sample_cnt <= window_sample_cnt + window_sample_cnt_inc - window_sample_compare;
+    window_index <= std_logic_vector( unsigned(window_index) + window_index_inc );
+end if;
+```
+
+验证它为什么总能横跨整表:捕获总样本数为 \( 16 \times \text{NSAMPLES} \),`window_sample_cnt` 每样本加 `cnt_inc`、每越过 NSAMPLES 回绕一次并让 index 前进 `index_inc`,故整段捕获内 index 总推进量为
+
+\[ 16 \times \text{NSAMPLES} \times \frac{\text{cnt\_inc} \times \text{index\_inc}}{\text{NSAMPLES}} = 16 \times \text{cnt\_inc} \times \text{index\_inc} = 16 \times 8 = 128 \]
+
+四档的 `cnt_inc × index_inc` 都是 8,所以无论捕获多长,128 项窗表恰好被走完一遍(短捕获是"抽样式"地走,长捕获是"细步"地走)。
+
+**顶层接线。** [top.vhd:647-660](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/top.vhd#L647-L660) 显示 Windowing 的输入直接来自三路 MCP33131 接口的 `adc_*_data`,`RESET` 接 `sampling_start`(每个测量点开始时复位,窗下标归零),`WINDOWING_DONE` 作为下游的 `NEW_SAMPLE`。注意 REF 通道也加窗——VNA 通路需要它;而 DFT 通路只取 PORT1/PORT2。
 
 #### 4.1.4 代码实践
 
-**实践目标**：验证「系数文件 → ROM」通路，并亲手核对窗索引的分数步进。
+**实践目标**:不依赖任何工具链,用两个手工计算吃透"系数文件"和"可变步进"两件事。
 
-**操作步骤**（纯源码阅读 + 离线计算，无需硬件）：
+**操作步骤**:
 
-1. 打开 [FPGA/VNA/Hann.dat](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Hann.dat)，用文本编辑器或 `sed -n '1p;32p;64p;65p;96p;128p' Hann.dat` 抽查对称性：镜像对称轴应在第 64/65 行之间，两侧行的数值应两两相等。
-2. 用下面的示例脚本复算一个教科书 Hann 并与文件逐行对比（峰值标度取 8190）：
+1. 打开 [FPGA/VNA/Hann.dat](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Hann.dat),找到第 1、64、65、128 行(每行是一个 16 位二进制串,按行号即数组下标 0、63、64、127)。
+2. 把它们换算成十进制,与公式 \( w(i) = \tfrac{1}{2}(1-\cos\tfrac{2\pi i}{128}) \times 2^{13} \) 在 \( i = 0, 63, 64, 127 \) 处的值对比。
+3. 在 [Windowing.vhd:118-137](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Windowing.vhd#L118-L137) 的四档里任选两档(比如 NSAMPLES=1 和 NSAMPLES=45),手推前 5 个样本各自使用的窗表下标序列。
 
-   ```python
-   # 示例代码：复算 128 点 Hann，与仓库 Hann.dat 对比
-   import math
-   N, peak = 128, 8190.0
-   repo = [int(l.strip(), 2) for l in open("FPGA/VNA/Hann.dat")]
-   mine = [round(0.5 * (1 - math.cos(2 * math.pi * m / (N - 1))) * peak)
-           for m in range(N)]
-   for m in (1, 2, 4, 8, 16, 32, 64):
-       print(m, repo[m], mine[m])
-   ```
+**需要观察的现象**(第 2 步):
 
-3. 手工推演 [Test_Windowing.vhd:116-130](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Test_Windowing.vhd#L116-L130) 的激励：`NSAMPLES = "0000000010001"` = 17，即一个测量点 17×16 = 272 个样本（测试台循环恰好跑 272 次）；`WINDOW_TYPE = "10"` 选 Hann；三路输入是三个不同幅度的直流（128/256/512）；`ADC_READY` 每 111 个时钟脉冲一次。NSAMPLES=17 落在 `others` 档位（cnt_inc=8），据此列出前 10 个样本各自的 `window_sample_cnt` 与 `window_index` 值。
+- 第 1 行/第 128 行 ≈ 1(窗两端几乎归零,Hann 的特性);
+- 第 64、65 行 ≈ 8190 ≈ \( 2^{13} \)(窗中心满增益;公式理论值 8192,文件是 8190,差 2 来自生成脚本对余弦采样点的舍入);
+- 整个文件关于中心对称。
 
-**需要观察的现象 / 预期结果**：
+**预期结果**(第 3 步):
 
-- 第 2 步的对比会发现：中段（m ≥ 8）复算值与文件吻合在百分之几以内，但边缘前几点偏差明显（如 m=1 文件为 1 而公式约 5）。结论：**仓库系数不是教科书公式的精确采样**，生成脚本含特定处理（具体生成式待确认）；以文件为准。这本身就是重要一课——不要轻信「应该是」，要读数据。
-- 第 3 步的推演应得到：`window_sample_cnt` 从 0 起按档位步进累加、达到比较值就减去比较值回绕并令 `window_index` 前进一步；一个测量点累计正好走完 128 项。若在 ISE 里跑 `Test_Windowing.vhd`（测试台选了 Hann、三路恒定直流输入），波形上应看到三路输出同相、幅度包络按 Hann 起伏——**待本地验证**（需要 ISE 14.7 仿真环境，且 .dat 文件须在仿真工作目录）。
+- NSAMPLES=1(16 个样本):下标序列 0, 8, 16, …, 120——每个样本跳 8 项,16 个样本正好跳完 128 项;
+- NSAMPLES=45(720 个样本):cnt 每样本 +8,每 45 次回绕让 index +1,平均每 5.625 个样本推进 1 项窗表,720 样本共推进 128 项。
+
+如果推导结果与此不符,回到 [Windowing.vhd:188-193](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Windowing.vhd#L188-L193) 检查回绕条件(注意回绕发生在"加完之后 ≥ NSAMPLES"那一拍,且 index 前进发生在**下一个**样本取窗值之前)。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 `WINDOW_TYPE="00"`（矩形窗）不查 ROM，而是给常数 0x1000？
+**练习 1**:为什么 `window.vhd` 用 `constant` + `textio` 读文件,而不是像 MCU 读 SPI Flash 那样运行时加载?改成运行时加载有什么代价?
 
-**答案**：矩形窗所有系数相同（都是 1），无需存储；给常数省掉一次查表。取 0x1000=4096 而非更大值，配合输出右移 13 位（4096>>13 = 0.5），保证 16 位满量程样本乘窗后仍落在 18 位输出范围内不溢出。
+**答案**:系数作为 `constant` 在综合期求值,直接映射为 LUT/BRAM 的初始值,零运行时开销、零额外电路;代价是改窗必须重新综合、重新生成 bitstream(并且按 u1-l4 的流程重新组装固件)。运行时加载则要额外的加载状态机、RAM 写口和存储空间,而窗形状极少改动,不值得。
 
-**练习 2**：若把 `Windowing.vhd` 的 `RESET` 从 `sampling_start` 改成全局复位 `int_reset`，会有什么后果？
+**练习 2**:用一行脚本(或手工求和)计算三个 .dat 文件所有系数的算术平均值,验证 4.1.3 中"四种窗相干增益统一为 4096"的论断。
 
-**答案**：`RESET` 还负责在每个测量点开始时把 `window_index` 清零并重新锁存 `NSAMPLES`（[Windowing.vhd:108-115](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Windowing.vhd#L108-L115)）。改成全局复位后，每个测量点开始时窗索引不会归零，窗的相位与样本序列错位，且若本点 NSAMPLES 与上一点不同，`window_sample_compare` 也不会更新——加窗结果系统性错误。
+**答案**:Hann 的均值严格等于 4096(余弦项在整周期上均值为 0);Flattop 峰值 18991 ≈ 2.318×8192,与标准平坦顶窗相干增益比 0.5/0.2156 ≈ 2.319 吻合,反推其均值也约为 4096;Kaiser 同理(峰值 10237 ≈ 1.25×8192)。精确均值待本地验证(本讲义作者环境无法执行脚本,只验证了峰值与首尾值)。
 
-**练习 3**：`NSAMPLES=1`（16 样本）档位里 `window_index_inc=8`，为什么 16 个样本正好走完 128 项窗？
+**练习 3**:如果设计者把矩形窗常量从 4096 改成 8192(真正的不衰减直通),会对整个测量链产生什么影响?
 
-**答案**：每样本 index +8，16 样本共 16×8 = 128，恰好覆盖整个 128 项 ROM（7 位 index 自然回绕）。这也是各档位的统一不变量：\(16 \times NSAMPLES \times \frac{8}{NSAMPLES} = 128\)。
+**答案**:加窗增益统一在 0.5(4096/8192),矩形窗与其他三种窗的相干增益一致。改成 8192 后矩形窗增益变为 1.0,是其他窗的两倍——用户在 GUI 里切换窗类型时,同幅度信号的读数会跳变 6 dB,破坏不同窗之间的幅度可比性;同时乘积上限翻倍,`mult_p(30:13)` 的截位可能饱和。正确做法是保持 4096,把 0.5 的固定增益留给后级定标统一补偿。
 
-### 4.2 DFT 核
+### 4.2 DFT 核:96 bin 递推离散傅里叶变换
 
 #### 4.2.1 概念说明
 
-`DFT.vhd` 是频谱仪模式的「片上频谱引擎」。它对端口 1/2 两路（**不含参考通道**——频谱仪测绝对电平，不需要比值）已经加窗的样本流做 96 bin 的直接 DFT，bin 的起始频率与间隔由 MCU 经两个 SPI 寄存器编程。
+频谱仪模式需要在**一次捕获内同时测出 96 个相邻频率点**。为什么不复用 `Sampling.vhd` 的单 bin 解调?因为那需要 96 个 NCO 相位累加器 × 2 端口 × I/Q = 384 路乘累加,还要逐点改本振频率重测 96 次。`DFT.vhd` 的方案是把 2.2 节的公式直接铺成硬件:
 
-数学核心是一个巧妙的**相位分解**。bin \(k\) 在样本 \(n\) 处的相位：
+- 两路输入(PORT1/PORT2,18 位加窗样本——注意 **DFT 没有 REF 输入**,频谱测量不需要参考通道);
+- 96 个 bin,每 bin 每端口两个 48 位累加器(实部=Σx·cos,虚部=Σx·sin),共 4×48=192 位,正好是一行 BRAM;
+- 一个正余弦查找表 + 四个 DSP 乘法器(2 端口 × sin/cos),分时轮转覆盖 96 个 bin;
+- 结果通过 `RESULT_READY`/`NEXT_OUTPUT` 握手,一次吐出一个 bin 的 192 位。
 
-\[ \varphi_{n,k} = \frac{2\pi}{2^{32}}\Big( n \cdot B_1 \cdot 2^{16} + k \cdot n \cdot D \cdot 2^{8} \Big) \]
+bin 频率不是均匀 DFT 网格,而是任意的 \( f_k = f_1 + k \cdot \Delta f \)。这里有个极易踩坑的设计点:**两个频率参数用两套定点单位**。
 
-其中 \(B_1\) 是 `BIN1_PHASEINC`，\(D\) 是 `DIFFBIN_PHASEINC`。把它整理成「随 \(n\) 线性」的形式就能看出每个 bin 分析的归一化频率：
+- `BIN1_PHASEINC`(首 bin 频率):单位 \( 2^{-16} \) 圈/样本。首 bin 是绝对频率,最高到 \( f_s/2 \),12.2 Hz 的分辨率(\( f_s/2^{16} \))足够。
+- `DIFFBIN_PHASEINC`(bin 间距):单位 \( 2^{-24} \) 圈/样本。间距是相对小量,最细 RBW 时不到 1 Hz,\( f_s/2^{24} \approx 0.048 \) Hz 的分辨率才够用;若也用 \( 2^{-16} \) 单位,16 位根本表示不了小于 12.2 Hz 的间距。
 
-\[ f_k = \underbrace{\frac{B_1}{2^{16}}}_{\text{bin 0 频率}} + k \cdot \underbrace{\frac{D}{2^{24}}}_{\text{bin 间隔}} \;(\text{周期/样本}) \]
-
-这正是协议文档 [FPGA_protocol.tex:514-535](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Documentation/DeveloperInfo/FPGA_protocol.tex#L514-L535) 给出的两条公式：
-
-\[ f_{firstBin} = \frac{SR_{ADC} \cdot DFT\_FIRST\_BIN}{2^{16}}, \qquad \Delta f = \frac{SR_{ADC} \cdot DFT\_FREQ\_SPACING}{2^{24}} \]
-
-硬件实现的省钱之处在于：固定样本 \(n\) 扫 bin 时，\(\varphi_{n,k}\) 对 \(k\) 是等差数列——所以**每样本只需算两次乘法**（\(n \times B_1\) 和 \(n \times D\)，用来生成相位初值和相位步进），之后每前进一个 bin 只需**一次加法**（`phase += phase_inc`）。乘法用在刀刃上：每样本每 bin 的 4 次「样本 × sin/cos」乘累加。
-
-**为什么要在片上做，而不是把原始样本传回 PC？** 算一笔账（默认 \(f_{ADC}\) = 800 kHz，见 [Hardware.hpp:37](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Hardware.hpp#L37)）：
-
-- 要 1 kHz 的 Kaiser 窗分辨率，每点需要 1792 个样本（下节推导），三通道 16 bit 即约 10.7 KB/点。一次 501 点扫描就是 5 MB 上行——USB 批量传输和协议打包根本撑不起扫描节奏。
-- 做到硬件极限 RBW ≈ 14 Hz（[Hardware.hpp:86](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Hardware.hpp#L86)，MaxSamples = 130944）时，每点每通道约 785 KB 原始样本——**只有片上预处理这条路存在**。
-- 片上处理后，一个 DFT 块的 96 个 bin 对应 96 个扫频点，每点上行仅 24 字节，压缩比约 450:1。协议文档也点明这个模块的定位：它用于加速频谱仪测量、与其他计算并行运行（[FPGA_protocol.tex:512](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Documentation/DeveloperInfo/FPGA_protocol.tex#L512)）。
+固件侧的换算公式证实了这套单位(见 4.2.3)。
 
 #### 4.2.2 核心流程
 
-五个状态（[DFT.vhd:110](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/DFT.vhd#L110)），每个加窗样本循环一遍：
-
 ```
-WaitingForSample  等 NEW_SAMPLE（= WINDOWING_DONE）
-                  用两个乘法器算 n×B1 和 n×D          ┐ 相位种子，只在每样本
-WaitMult          等若干拍乘法完成                     │ 开始时算一次
-                  phase ← (n×B1 mod 2^16) << 16        │
-                  phase_inc ← (n×D mod 2^24) << 8      ┘
-WaitSinCos        等正弦表查表稳定，
-                  锁存 port1/port2 样本，
-                  按 sample_cnt 是否为 0 选择「首样本覆盖/后续累加」
-BUSY              96 个 bin 的主循环，每时钟一个 bin：
-                    phase += phase_inc                ← 递推：每 bin 一次加法
-                    4 个 DSP 同时做 port1×sin, port1×cos, port2×sin, port2×cos
-                    c 端接 BRAM 读出的旧累加值 → p = a×b + c
-                    写地址滞后 3（流水线对齐），读地址超前 2
-                  bin 计数到 BINS+2 后：
-                    sample_cnt < samples_to_take ? 回 WaitingForSample : 进 Ready
-Ready             RESULT_READY=1，等 MCU 发 NEXT_OUTPUT 逐 bin 取数；
-                  取完（read_address 到 BINS-1）自动回 WaitingForSample 开始下一组
+每来一个新样本(NEW_SAMPLE,由 Windowing 的 WINDOWING_DONE 驱动):
+  WaitingForSample: 锁存样本计数 n,启动两个乘法:
+      phase     = (n × BIN1_PHASEINC) << 16   ← bin 0 的初始相位
+      phase_inc = (n × DIFFBIN_PHASEINC) << 8 ← 每个 bin 的相位增量
+  WaitMult(等乘法): 得到 phase / phase_inc
+  WaitSinCos(等查找表): mult_accumulate ← (n==0 ? 0 : 1)
+      n=0 时 sel=0 → 乘法器输出 P=A×B,覆盖旧值(等价清零累加器)
+      n>0 时 sel=1 → P=A×B+C,累加到 RAM 中旧值上
+  BUSY(96+3 拍): 每拍 phase += phase_inc,查 sin/cos,
+      4 个乘法器算 port1×sin, port1×cos, port2×sin, port2×cos,
+      读地址超前 + 写地址滞后 3 拍对齐流水线,读改写 BRAM
+  样本数达到 NSAMPLES×16 后:
+  Ready: RESULT_READY=1;MCU 每发一次 NEXT_OUTPUT,BRAM 读地址 +1,
+      依次吐出 96 个 bin;读完回 WaitingForSample 等下一点
 ```
 
-数据面：96 个 bin × 4 个 48 位累加器打包成 96 个 192 位字存在 `result_bram`。读改写环路在 [DFT.vhd:207-212](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/DFT.vhd#L207-L212)：四个 DSP 的 `c` 输入分别接 BRAM 输出字的四段，四个乘加结果重新拼接写回——**BRAM 当累加器用，DSP 只出乘加**。
+为什么 `phase_inc` 依赖样本号 \( n \)?因为第 \( k \) 个 bin 在第 \( n \) 个样本处的相位是
 
-时序上最紧的一点：全速 800 kHz 采样时每个样本只有 128 个主时钟（102.4 MHz / 800 kHz），而 DFT 单样本一遍约需百余拍（BUSY 里每时钟一个 bin，96 bin 加流水线余量）——**刚好塞进预算**。这是「每 bin 一个时钟」设计的直接动机；ADC 预分频加大（降采样率）时余量更宽。
+\[ \varphi_k(n) = 2\pi n \frac{f_1 + k\Delta f}{f_s} = \underbrace{2\pi n \frac{f_1}{f_s}}_{\text{初始相位}} + k \cdot \underbrace{\left(2\pi n \frac{\Delta f}{f_s}\right)}_{\text{bin 间相位增量}} \]
+
+对固定 \( n \),bin 间增量正比于 \( n \);对固定 \( k \),它又是 \( n \) 的线性函数——所以每个样本都要先用两个乘法器把 \( n \times \text{BIN1} \) 和 \( n \times \text{DIFF} \) 算出来,这就是 `WaitMult` 状态存在的理由。
+
+#### 4.2.3 源码精读
+
+**实体与存储布局。** [DFT.vhd:32-45](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/DFT.vhd#L32-L45) 声明了泛型 `BINS` 和全部端口。`BINS` 是泛型而非常量,顶层用 96 例化([top.vhd:825](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/top.vhd#L825) `SA_DFT: DFT GENERIC MAP(BINS => 96)`),与固件侧 [FPGA.hpp:10](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Drivers/FPGA/FPGA.hpp#L10) 的 `static constexpr uint16_t DFTbins = 96` 呼应。结果存储在 [DFT.vhd:192-212](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/DFT.vhd#L192-L212) 的双端口 BRAM 里,192 位一行,拆装关系一目了然:
+
+```vhdl
+mult1_c <= ram_out(191 downto 144);  -- port1 × sin  (虚部)
+mult2_c <= ram_out(143 downto 96);   -- port1 × cos  (实部)
+mult3_c <= ram_out(95 downto 48);    -- port2 × sin
+mult4_c <= ram_out(47 downto 0);     -- port2 × cos
+ram_in  <= mult1_p & mult2_p & mult3_p & mult4_p;
+```
+
+DSP 乘法器的 `c` 输入接 RAM 读出的旧累加值、`p` 输出写回同一地址——**读改写全部穿过 DSP48 完成**,一个 `sel` 位就实现了"清零或累加"的分寸。这正是 u6-l3 见过的"影子寄存器 + 显式提交"在算术单元上的对应物。
+
+**样本计数。** [DFT.vhd:227](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/DFT.vhd#L227):
+
+```vhdl
+samples_to_take <= to_integer(unsigned(NSAMPLES & "0000")) - 1;
+```
+
+`NSAMPLES & "0000"` 即左移 4 位 = ×16,再次印证 u6-l3 的结论:**NSAMPLES 以 16 个样本为单位**,DFT 每点消费 \( 16 \times \text{NSAMPLES} \) 个样本(13 位 NSAMPLES 最大 8191 → 131072 样本,与 `sample_cnt : integer range 0 to 131072` 的声明一致)。
+
+**相位初值与两套单位。** [DFT.vhd:229-262](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/DFT.vhd#L229-L262) 是每样本的准备工作,关键两行在 [DFT.vhd:258-259](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/DFT.vhd#L258-L259):
+
+```vhdl
+phase     <= mult1_p(15 downto 0) & "0000000000000000";  -- (n×BIN1) << 16
+phase_inc <= mult2_p(23 downto 0) & "00000000";          -- (n×DIFF) << 8
+```
+
+32 位相位累加器以 \( 2^{32} \) 为一整圈。`<<16` 使 BIN1_PHASEINC 的单位是 \( 2^{-16} \) 圈;`<<8` 使 DIFFBIN_PHASEINC 的单位是 \( 2^{-24} \) 圈。固件侧 [FPGA.cpp:462-468](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Drivers/FPGA/FPGA.cpp#L462-L468) 的换算公式与之严丝合缝:
+
+```cpp
+uint16_t firstBin   = f_firstBin   * (1ULL << 16) / ADC_samplerate;
+uint16_t binSpacing = f_binSpacing * (1ULL << 24) / ADC_samplerate;
+```
+
+于是 bin k 的频率为 \( f_k = f_s\left(\dfrac{\text{BIN1}}{2^{16}} + k\dfrac{\text{DIFF}}{2^{24}}\right) \)。注意取低位再移位不是丢失精度:`(n×BIN1) mod 2^16` 再左移 16,与 `n×BIN1×2^16 mod 2^32` 完全等价——32 位累加器天然按 \( 2^{32} \) 回绕。
+
+**逐 bin 乘累加。** [DFT.vhd:263-292](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/DFT.vhd#L263-L292)(等 SinCos 查找表流水,约 7 拍)与 [DFT.vhd:293-332](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/DFT.vhd#L293-L332)(BUSY)每拍做同样的事:相位步进、锁存四路乘法输入(`sine`/`cosine` 符号扩展到 18 位,如 [DFT.vhd:302-310](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/DFT.vhd#L302-L310))。流水线对齐靠地址错位:[DFT.vhd:311-318](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/DFT.vhd#L311-L318) 在 `bin_cnt ≥ 3` 后才写地址 `bin_cnt - 3`(补 DSP 与 RAM 的读延迟),[DFT.vhd:329-331](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/DFT.vhd#L329-L331) 把读地址超前到 `bin_cnt + 2`。一轮 BUSY 跑满 `BINS+3` 拍([DFT.vhd:319-332](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/DFT.vhd#L319-L332)),写入地址 0..BINS-1 恰好 96 行。样本未取满则回 `WaitingForSample` 继续吃下一个样本,取满则进 `Ready`。
+
+**结果读出协议。** [DFT.vhd:333-348](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/DFT.vhd#L333-L348):`Ready` 状态拉高 `RESULT_READY`,MCU 每发一个 `NEXT_OUTPUT` 脉冲,BRAM 读地址 +1,`OUTPUT` 端口依此吐出 96 行;读完自动清零样本计数、回到 `WaitingForSample`。对面的 MCU 侧在 [SPIConfig.vhd:225-228](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/SPIConfig.vhd#L225-L228):SPI 命令字 `0xA0`(高 3 位 "101")触发一次读——锁存 `DFT_OUTPUT` 高 16 位进移位缓冲、低 16 位直接送上 MISO,同时打一拍 `dft_next`。参数写入则走寄存器 18/19([SPIConfig.vhd:303-304](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/SPIConfig.vhd#L303-L304)),与固件 [FPGA.hpp:30-31](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Drivers/FPGA/FPGA.hpp#L30-L31) 的 `DFTFirstBin=0x12, DFTFreqSpacing=0x13` 对应。
+
+还有一处容易忽略的联动:`DFT_ENABLE <= interrupt_mask(5)`([SPIConfig.vhd:153](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/SPIConfig.vhd#L153)),而顶层 [top.vhd:823](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/top.vhd#L823) 把它取反接 DFT 复位:**"使能 DFTReady 中断"就是"打开 DFT"**——固件 `FPGA::StartDFT()` 只有一行 `EnableInterrupt(Interrupt::DFTReady)`([FPGA.cpp:474-477](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Drivers/FPGA/FPGA.cpp#L474-L477))。VNA 模式不开这个中断,DFT 就一直躺在复位里,零功耗占用数据通路。
+
+**固件怎么用这些结果。** [SpectrumAnalyzer.cpp:338-344](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/SpectrumAnalyzer.cpp#L338-L344):每次测量完成,循环 `DFTpoints` 次调 `FPGA::ReadDFTResult()`。后者([FPGA.cpp:479-499](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Drivers/FPGA/FPGA.cpp#L479-L499))发 0xA0 收 24 字节,拼成 4 个 48 位,最后只取模值 `res.P1 = std::abs(p1)`——频谱仪只要幅度,相位在这一层就被丢掉了(对比 VNA 通路保留完整 I/Q 供 PC 端算 S 参数)。
+
+**为什么片上做——一笔带宽账。** 三通道 16 位 @ 800 kHz 的原始样本流是
+
+\[ 3 \times 2 \, \text{B} \times 800\,\text{kHz} = 4.8\ \text{MB/s} \approx 38.4\ \text{Mbps} \]
+
+而设备与 PC 之间是 USB 全速(固件 USB 栈按 `DEVICE_FS` 编译,[usbd_conf.h:83](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Drivers/USB/Core/Inc/usbd_conf.h#L83) 定义,STM32G4 的 USB 外设为 12 Mbps Full Speed)——理论上限 12 Mbps,连一个通道的原始流都装不下。片上处理后,每个测量点只需上报:
+
+- VNA 通路:6 × 48 bit = 36 字节(对比最坏情形 131072 样本 × 3 通道 × 2 B ≈ 768 KB,压缩比约两万倍);
+- SA 通路:96 bin × 24 字节 = 2304 字节,却换来了 **96 个显示点**——若不用 DFT,固件只能 `DFTpoints = 1`("can only measure one point at a time",[SpectrumAnalyzer.cpp:319-323](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/SpectrumAnalyzer.cpp#L319-L323)),每点都要单独捕获一次。一次捕获出 96 点,是 96 倍的吞吐差距,这就是 DFT 存在的根本理由。
+
+DFT 的跨度也不是无限:[SpectrumAnalyzer.cpp:308-317](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/SpectrumAnalyzer.cpp#L308-L317) 把 bin 数限制为 `maxDFTpoints = 30000 / spacing` 且不超过 96——注释说明原因:DFT 只能看约 30 kHz 的窄带,否则最后一级 ADC 模拟滤波器的通带起伏会直接显现在数据里。
+
+#### 4.2.4 代码实践
+
+**实践目标**:完成讲义规格的核心推导——250 kHz 中频、1 kHz 分辨率,需要多少样本?DFT 的两个相位增量寄存器各写什么值?全部用固件自己的公式,不用猜。
+
+**操作步骤**:
+
+1. 确认采样率:默认 \( f_s \) = 800 kHz([Hardware.hpp:37](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Hardware.hpp#L37) `DefaultADCSamplerate = 800000`),第二中频 250 kHz([Hardware.hpp:39](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Hardware.hpp#L39) `DefaultIF2 = 250000`)。
+2. 查窗因子表:[SpectrumAnalyzer.cpp:248-259](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/SpectrumAnalyzer.cpp#L248-L259) 定义 `window_factors[4] = {0.89, 2.23, 1.44, 3.77}`(下标即 Window 枚举:None/Kaiser/Hann/Flattop),固件的公式是
+
+   \[ N = \frac{f_s \times \text{window\_factor}}{\text{RBW}}, \quad \text{再向上取整到 16 的倍数}, \quad \text{NSAMPLES} = N/16 \]
+
+3. 对四种窗分别代入 RBW = 1 kHz 计算 N 和 NSAMPLES。
+4. 用 [FPGA.cpp:464-465](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Drivers/FPGA/FPGA.cpp#L464-L465) 的公式算两个寄存器值:首 bin 取 250 kHz(对准中频),bin 间距取 1 kHz。
+
+**需要观察的现象 / 预期结果**(手工可得,无需硬件):
+
+第 3 步的表:
+
+| 窗 | 因子 | \( N = 800 \times \text{因子} \) | 取整到 16 倍数 | NSAMPLES | 捕获时长 |
+| --- | --- | --- | --- | --- | --- |
+| 理论矩形(纯 \( f_s/\text{RBW} \)) | 1.0 | 800 | 800 | 50 | 1.0 ms |
+| None | 0.89 | 712 | 720 | 45 | 0.9 ms |
+| Kaiser | 2.23 | 1784 | 1792 | 112 | 2.24 ms |
+| Hann | 1.44 | 1152 | 1152 | 72 | 1.44 ms |
+| Flattop | 3.77 | 3016 | 3024 | 189 | 3.78 ms |
+
+基准关系 \( \text{RBW} \approx f_s / N \) 决定分辨率:1 kHz 分辨率 ⟺ 1 ms 观测时间 ⟺ 800 个样本,窗因子只是在主瓣宽度上做的修正。这也解释了 [Hardware.hpp:86-87](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Hardware.hpp#L86-L87) 的 RBW 极限公式为什么长成 \( f_s \times 2.23 / \text{Samples} \)(默认窗取了 Kaiser 的 2.23)。
+
+第 4 步的寄存器值:
+
+- `BIN1_PHASEINC` = \( 250000 \times 2^{16} / 800000 \) = **20480**(0x5000,恰为整数,能被 2^16 单位精确表示);
+- `DIFFBIN_PHASEINC` = \( 1000 \times 2^{24} / 800000 \approx \) **20971**(整数除法截断;由此也可反推 bin 间距的可表示上限为 \( 65535 \times f_s / 2^{24} \approx 3.1\ \text{kHz} \),与 SA 窄带跨度 ≤ 30 kHz、≤ 96 点的约束自洽)。
+
+**待本地验证**的部分:把上面 NSAMPLES=72(Hann)、BIN1=20480、DIFF=20971 喂给 4.3 节的仿真,用一个 250 kHz 单音激励,应看到能量集中在 bin 0 附近、相邻 bin 按 Hann 主瓣形状衰减。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**:为什么 `BIN1_PHASEINC` 用 \( 2^{-16} \) 单位而 `DIFFBIN_PHASEINC` 用 \( 2^{-24} \) 单位?互换会怎样?
+
+**答案**:首 bin 是绝对频率(最大约 \( f_s/2 \)),需要的是**范围**——\( 2^{-16} \) 单位下 16 位能覆盖整整一圈,分辨率 \( f_s/2^{16} \approx 12.2 \) Hz 够用。bin 间距是相对小量(亚 kHz 到几 kHz,且要精确到远低于 RBW),需要的是**分辨率**——\( 2^{-24} \) 单位下 1 LSB ≈ 0.048 Hz。互换的话:间距用 \( 2^{-16} \) 单位时最小可表示间距 12.2 Hz,细 RBW 直接无法配置;首 bin 用 \( 2^{-24} \) 单位时 16 位只能覆盖 \( f_s/256 \approx 3.1 \) kHz,连中频位置都放不进去。
+
+**练习 2**:`DFT.vhd` 里 `sample_cnt = 0` 那一轮为什么把 `mult_accumulate` 置 0?如果忘了这个分支,现象是什么?
+
+**答案**:BRAM 里留着上一个测量点的旧累加值。第一个样本必须用 \( P = A \times B \)(sel=0)覆盖旧值,等价于隐式清零;之后才用 \( P = A \times B + C \)(sel=1)累加。若忘了,新测量会叠加在上一点的残留上,频谱出现"鬼影"——上一个强信号的形状叠加在当前结果里,且随测量次数累积溢出。
+
+**练习 3**:96 个 bin 的读出为什么用 `NEXT_OUTPUT` 握手逐行读,而不是一次 192×96 位并行输出?
+
+**答案**:一是引脚/布线资源:2.3 KB 的结果一次并行输出需要 18432 根线,物理上不可能;二是 MCU 侧本来就要经 24 字节的 SPI 事务逐行搬运([FPGA.cpp:479-490](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/Drivers/FPGA/FPGA.cpp#L479-L490)),双端口 RAM 的 b 口逐地址读出与 SPI 时序天然匹配,`dft_next` 单脉冲推进一行,协议最简单。
+
+### 4.3 DFT 测试台:Test_DFT.vhd
+
+#### 4.3.1 概念说明
+
+`Test_DFT.vhd` 是 ISE 自动生成的 testbench 骨架加上手工激励。它**没有任何断言(assert)**,正确性判断靠仿真者在波形窗口里核对——这在 u6-l6 会总结为本仓库 FPGA 验证的普遍风格。读它的价值在于:激励参数是作者精心挑的"好数"(2 的幂),能把 DFT 的行为映射成可以手算的闭式结果。
+
+注意一个结构事实:测试台**直接驱动 DFT 的 PORT1/PORT2 输入,没有例化 Windowing**——也就是说仿真里没有加窗,注入什么样本 DFT 就吃什么样本。这让期望输出的推导干净了很多。
+
+#### 4.3.2 核心流程
+
+```
+时钟:CLK_period = 10 ns(100 MHz;真实设计是 102.4 MHz,仿真取整不影响功能)
+复位:RESET 拉高 100 ns 后释放
+激励(常量):
+  PORT1 = "100000000000000000" = -2^17 = -131072(18 位有符号,负满量程一半)
+  PORT2 = "010000000000000000" = +2^16 = +65536(正的半量程)
+  BIN1_PHASEINC  = "0100000000000000" = 0x4000 = 16384
+  DIFFBIN_PHASEINC = "0010000000000000" = 0x2000 = 8192
+  NSAMPLES = "0000000000011" = 3  →  每点 3×16 = 48 个样本
+采样节拍:NEW_SAMPLE 每 80 个时钟拉高 1 拍
+  → 采样率 = 100 MHz / 80 = 1.25 MS/s
+```
+
+#### 4.3.3 源码精读
+
+激励集中在 [Test_DFT.vhd:108-131](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Test_DFT.vhd#L108-L131):
+
+```vhdl
+RESET <= '1';
+PORT1 <= "100000000000000000";
+PORT2 <= "010000000000000000";
+BIN1_PHASEINC <= "0100000000000000";
+DIFFBIN_PHASEINC <= "0010000000000000";
+NSAMPLES <= "0000000000011";
+wait for 100 ns;
+RESET <= '0';
+wait for CLK_period*10;
+NEW_SAMPLE <= '1';
+wait for CLK_period;
+NEW_SAMPLE <= '0';
+while True loop
+    wait for CLK_period * 79;
+    NEW_SAMPLE <= '1';
+    wait for CLK_period;
+    NEW_SAMPLE <= '0';
+end loop;
+```
+
+例化时泛型取 `BINS => 64`([Test_DFT.vhd:82](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/FPGA/VNA/Test_DFT.vhd#L82))——比真实的 96 小,纯为缩短仿真。
+
+**第一步:把参数翻译成频率。** 采样率 \( f_s = 1.25\ \text{MHz} \)。按 4.2 节的公式:
+
+- bin 0 频率:\( f_s \times 16384/2^{16} = f_s/4 = 312.5\ \text{kHz} \);
+- bin 间距:\( f_s \times 8192/2^{24} = f_s/2048 \approx 610.35\ \text{Hz} \);
+- bin k 频率:\( f_k = f_s\,(0.25 + k/2048), \quad k = 0 \ldots 63 \)。
+
+这些值都挑得极准:相位走 12 位查找表(2^-12 分辨率),而 \( 1/2048 = 2/4096 \) 恰是 12 位相位的 2 个 LSB——所有 bin 的所有相位都能被查找表**精确**表示,没有量化误差,期望输出可以手算到个位。
+
+**第二步:预测期望输出。** 注入的是**直流**(两路都是常数,不是正弦!)。直流在频域是 \( f = 0 \) 处的冲击,而 64 个 bin 覆盖 \( 0.25f_s \sim 0.281f_s \),没有一个 bin 对准直流(直流要落在 bin 上需 \( 0.25 + k/2048 \equiv 0 \pmod 1 \),即 k = 1536,超出范围)。于是能量按**截断(矩形)窗的 Dirichlet 核**泄漏到所有 bin:
+
+\[ |X(k)| = |c| \cdot \left| \frac{\sin\!\big(\pi f_k N / f_s\big)}{\sin\!\big(\pi f_k / f_s\big)} \right| = |c| \cdot \left| \frac{\sin(3\pi k/128)}{\sin\!\big(\pi(0.25 + k/2048)\big)} \right| \]
+
+(代入 \( N = 48 \),分子利用 \( \sin(12\pi + x) = \sin x \) 化简。)由此可得三条可直接在波形上核验的结论:
+
+1. **bin 0 恰好为零**:\( 48 \times 0.25 = 12 \) 是整数,bin 0 的复指数在捕获内转了整整 12 圈,与直流正交,\( \sin(0) = 0 \)。
+2. **峰值在 k ≈ 21**:分子 \( \sin(3\pi k/128) \) 在 \( 3k/128 \approx 1/2 \) 即 \( k \approx 21.3 \) 处最大,比值约 1.37。PORT1 幅值约 \( 131072 \times 1.37 \approx 1.8 \times 10^5 \),PORT2 约 \( 65536 \times 1.37 \approx 9.0 \times 10^4 \)——两路幅值恰为 2:1(与 |c| 之比一致),符号相反(PORT1 为负直流,实部累加为负)。
+3. **第二零点在 k ≈ 42.7**:分子在 \( 3k/128 \approx 1 \) 处再次过零,k = 42、43 的 bin 接近零,之后是第二旁瓣。整体形状就是教科书上的 sinc 泄漏曲线。
+
+对比一个"好"的情形:若把 BIN1_PHASEINC 设为 0 且激励换成 bin 0 对准的单音,bin 0 应得到 \( \approx N \times |c| \)(48×131072 ≈ 6.3×10^6,满累加),其余 bin 只剩旁瓣——这正是区分"对准"与"没对准"的判据。
+
+#### 4.3.4 代码实践
+
+**实践目标**:写出 Test_DFT 注入的测试信号与期望输出(讲义规格要求的推导),并设计"注入噪声时如何判断输出正确"的判据。无需 ISE 也能完成大半。
+
+**操作步骤**:
+
+1. **手算/脚本算期望输出**:用上面 Dirichlet 公式算 k = 0, 10, 21, 30, 42 的 |X(k)|,列成表。可以用 20 行 Python 建参考模型:
+
+   ```python
+   # 示例代码:Test_DFT 的参考模型(非项目源码)
+   import math
+   fs, N, c = 1.25e6, 48, -131072          # PORT1 直流幅度
+   for k in range(64):
+       f = fs * (0.25 + k/2048)             # bin k 频率
+       re = sum(c*math.cos(2*math.pi*f*n/fs) for n in range(N))
+       im = sum(c*math.sin(2*math.pi*f*n/fs) for n in range(N))
+       print(k, round(math.hypot(re, im)))
+   ```
+
+2. **(可选,需 ISE)跑仿真**:在 ISE 里把 Test_DFT 设为顶层仿真目标,跑约 5 µs(48 个样本 × 80 拍 × 10 ns ≈ 38.4 µs 加读出,建议跑 50 µs),观察 `RESULT_READY` 拉高后逐次 `NEXT_OUTPUT` 时 `OUTPUT` 的 4 段 48 位。
+3. **改注入噪声**:把 PORT1/PORT2 换成伪随机序列(例如用移位寄存器 LFSR 在每个 NEW_SAMPLE 前更新),重跑观察。
+
+**需要观察的现象**:
+
+- 第 2 步:bin 0 的四段输出全为零;k ≈ 21 附近幅值最大,PORT1 的实部累加器为负、幅值约为 PORT2 的两倍;整体呈 sinc 形状。波形数值应与第 1 步的表一致(**待本地验证**——本讲义没有实际运行仿真)。
+- 第 3 步(噪声):所有 bin 幅值大致相近、无突出尖峰,单个 bin 幅值按 \( \sigma\sqrt{N} \) 量级随机起伏(相干信号才会按 \( N \) 增长);`RESULT_READY` 的时刻与注入直流时完全相同(时序不依赖数据)。
+
+**预期结果 / 判据**:
+
+- **正确性判据一(时序)**:无论注入什么,`RESULT_READY` 都在第 48 个 NEW_SAMPLE 后固定拍数拉高。数据只影响数值不影响节拍——若节拍变了,说明改坏了状态机。
+- **判据二(统计)**:噪声激励下各 bin 幅值同量级(对 N=48,样本间相对起伏可达 ±30%,属正常),不应出现某个 bin 独大;若有 bin 接近满量程累加(48×131072 ≈ 6.3×10^6),先怀疑激励里混入了与某 bin 相干的成分。
+- **判据三(无溢出)**:48 位累加器对 18 位输入的 48 样本累加,上限 \( 48 \times 2^{17} \times 2^{16} \approx 2^{38.6} \),离溢出很远;若波形出现异常跳变(符号翻转),多半是实部/虚部拼接位序弄错,而不是饱和。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**:测试台为什么把 NEW_SAMPLE 周期设为 80 个时钟?这个数和 DFT 的正确性有什么关系?
+
+**答案**:NEW_SAMPLE 只是外部节拍,DFT 对采样率一无所知——它只按收到的样本数(由 NSAMPLES 定)工作,80 拍(即 1.25 MS/s)只是为了留足裕量:一轮"取样本→算 96+3 个 bin"约需 110 拍(BUSY 的 BINS+3 拍加上前后准备),80 拍与真实设计中 1024 拍(800 kHz)一样,都保证了下个样本到来前当前样本的所有 bin 乘累加已完成。若把节拍缩到远小于一轮的拍数,DFT 会丢样本,结果出错——这是做时序修改时最要紧的不变量。
+
+**练习 2**:把激励从直流改成 \( f = f_s \times (0.25 + 21/2048) \)、幅度 65536 的正弦(恰好对准 bin 21),期望输出是什么?
+
+**答案**:bin 21 相干累加,|X(21)| ≈ N×65536 = 48×65536 = 3145728(相位对齐时实部或虚部之一取满、另一个≈0,取决于初相);其余 bin 只剩矩形窗旁瓣,按 |sin(3πk/128)/sin(π(0.25+k/2048))| 的旁瓣包络分布,第一旁瓣约低 13 dB。这与直流激励"k≈21 最大但幅值只有 1.37×65536"形成鲜明对比:同在 bin 21,相干是 N 倍,非相干(泄漏)只有约 1.4 倍。
+
+**练习 3**:Test_DFT 没有断言。如果要给它加一个最小的自动检查,应该断言什么?
+
+**答案**:最省事也最有区分度的是"bin 0 四段全零"——它同时验证了相位初值(n×BIN1 的移位对齐)、正余弦表、乘法器符号扩展和累加清零路径,任何一环错了 bin 0 都不会精确为零。断言写法:在 96 次NEXT_OUTPUT 读出的第一行(对应地址 0)上检查 `OUTPUT = (others => '0')`(在浮点/截断容差内)。更进一步可断言 bin 21 幅值与参考模型之差在定点截断误差以内。
+
+## 5. 综合实践
+
+把本讲三块知识串成一条完整的参数链:假设你在 GUI 里把频谱仪设为 **SPAN 2.88 kHz、101 个点、RBW 1 kHz、窗 Hann**,固件会怎么配置 FPGA?请只靠本讲引用过的源码完成:
+
+1. **推 bin 间距**:spacing = SPAN/(points−1) = 2880/100 = 28.8 Hz……这显然不是固件的算法——实际固件按 [SpectrumAnalyzer.cpp:309](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/SpectrumAnalyzer.cpp#L309) 用设置里的 span/points 算 spacing,再用 `maxDFTpoints = 30000/spacing` 截到 ≤96。请代入算出本例的 DFTpoints,并判断这个 SPAN 下 DFT 一次能覆盖几个点、剩下的点固件怎么办(提示:[SpectrumAnalyzer.cpp:382-386](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/VNA_embedded/Application/SpectrumAnalyzer.cpp#L382-L386) 与 u5-l4 的"MCU 逐点编排")。
+2. **推捕获长度**:Hann、RBW 1 kHz → 查 4.2.4 的表得 N=1152、NSAMPLES=72;再由 `SetupDFT` 公式算 `BIN1_PHASEINC`(首 bin 对准 250 kHz 中频附近)与 `DIFFBIN_PHASEINC`(间距取第 1 步的 spacing)。
+3. **写出一次测量的时序清单**:从 Sweep 启动采样 → Windowing 逐样本加窗(窗表步进按 NSAMPLES=72……注意 72 ≥ 8 落在"步进 1"档,但 72×16=1152 个样本平均每 9 个样本推进 1 项窗表)→ DFT 吃满 1152 个样本 → RESULT_READY 中断 → MCU 发 96 次 0xA0 逐行读数 → 上报 PC。标注每一步涉及的源码文件。
+4. **(可选验证)**:把第 2 步的参数代入 4.3.4 的 Python 参考模型,注入一个 251 kHz 单音(即 bin 0 上方 1 kHz、恰好对准 bin 100——超出 96 怎么办?改为 250.29 kHz 对准 bin 1),验证能量集中在对应 bin。
+
+预期成果:一张"GUI 设置 → NSAMPLES / BIN1_PHASEINC / DIFFBIN_PHASEINC / DFTpoints → FPGA 行为"的完整对照表。能独立填满它,就说明你真正打通了从用户参数到位流的整条链路。
+
+## 6. 本讲小结
+
+- 窗系数在**综合时**由 `window.vhd` 的 `textio` 函数从 Hann/Kaiser/Flattop.dat 读入、固化为 ROM 初值;四种窗(含矩形常量 4096)的相干增益统一为 4096,换窗不改变幅度刻度。
+- `Windowing.vhd` 用一个时分复用的 DSP 乘法器给三路样本加窗;靠四档"cnt 步进 × index 步进"的回绕逻辑,128 项窗表在任何捕获长度(16×NSAMPLES 个样本)下都恰好横跨整段捕获。
+- `DFT.vhd` 是**任意 bin 频率的递推 DFT**:32 位相位累加器 + 12 位正余弦查找表 + 4 个 DSP 乘法器 + 192 位(4×48)双端口 RAM,读改写全在 DSP48 内完成;96 个 bin 一行一行经 NEXT_OUTPUT 握手读出。
+- 两个频率参数用两套定点单位:首 bin \( 2^{-16} \) 圈/样本(重范围),bin 间距 \( 2^{-24} \) 圈/样本(重分辨率),固件 `SetupDFT` 的两条移位公式与 `DFT.vhd` 的 `<<16`/`<<8` 严格对偶。
+- 片上处理的根本动机是带宽与吞吐:原始样本流 4.8 MB/s 远超 USB 全速 12 Mbps;一次捕获出 96 个频谱点,比单 bin 逐点测快 96 倍。
+- `Test_DFT.vhd` 注入的是直流 + 精心挑选的 2 的幂参数,期望输出可用 Dirichlet 核闭式手算:bin 0 恰为零、峰值在 k≈21;无断言的 testbench 要靠"时序不变 + 统计判据 + 无溢出"三条来核验。
+
+## 7. 下一步学习建议
+
+- **u6-l5(MCU-FPGA 接口:SPI 从机与 PLL 控制)**:本讲反复出现的"寄存器 18/19 写入"与"0xA0 命令读出"到底怎么经 `spi_slave.vhd`/`SPIConfig.vhd` 的命令字分发实现,下一讲系统拆解。
+- **u6-l6(FPGA 验证文化)**:本讲只碰了 Test_DFT;Test_Window.vhd、Test_SinCos.vhd、Test_Windowing.vhd 等测试台的激励-断言模式将统一总结,并把 4.3.4 的"加断言"练习扩展成完整用例。
+- **回望 PC 端**:GUI 里 `Traces/Math` 的 `dft.cpp`/`windowfunction.cpp`(u8-l6)做的是同一类数学的浮点版本——对比"FPGA 定点递推 DFT + 烧死的窗 ROM"与"PC 浮点 FFT + 运行时选窗",能加深对两侧约束差异的理解。
+- 若你想动手改窗:用 Python 生成一组新系数(保持均值 4096!)写入 .dat,按 u1-l4 重新综合组装——这是检验本讲理解的最佳实操作业(需要 Xilinx ISE 14.7,待本地验证)。
