@@ -1,0 +1,994 @@
+{
+  "head": "ed6a3cb69782c4147151b3898944bc38132bae00",
+  "project": "4C4D",
+  "rationale": "4C4D 是基于 3DGS/4DGS 的稀疏四相机动态场景重建框架，代码由「Python 训练框架 + 四个 CUDA 子包」组成，核心创新是作用于高斯不透明度的 Neural Decaying Function（module/Coefficient 与 gaussian_model.opacity_decay）。学习路线按依赖链设计：先让读者跑通环境、理解目录与配置（单元1），再沿数据链路从 COLMAP 格式到 Scene 构建逐层深入（单元2），然后自底向上掌握 4D 高斯的属性、协方差时间边缘化与 4D 球谐（单元3）、渲染管线与光栅化绑定（单元4），接着完整走一遍继承自 4DGS 的训练主循环、损失、多视角 batch 与致密化（单元5）；在读者已理解基线流程之后，才进入论文核心 Neural Decaying Function 的网络结构、衰减模式族、渲染接入与联合优化（单元6），最后覆盖推理评估与轨迹视频（单元7）以及 CUDA 内部实现、pointops 下采样、稀疏视角策略和二次开发等专家主题（单元8）。这种顺序保证每篇讲义的依赖都在前文出现，且把论文创新点安排在读者具备基线心智模型之后，避免初学者一开始就陷入衰减梯度与致密化相互作用的细节。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 4C4D 的输入输出与相比 4DGS 的差异",
+            "用自己的话解释 Neural Decaying Function 的动机",
+            "在源码中定位 opacity decay 相关代码"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README.md",
+            "train.py 参数区",
+            "gaussian_renderer.render"
+          ],
+          "order": 1,
+          "practice_task": "通读 README，用 grep 在仓库中找出所有包含 opacity_decay 的文件并列表，写一段 200 字摘要说明 4C4D 与 3DGS/4DGS 的关系。",
+          "source_files": [
+            "README.md",
+            "assets/pipeline.png",
+            "LICENSE_gaussian_splatting.md"
+          ],
+          "title": "4C4D 项目定位与核心思想",
+          "topic": "介绍 4C4D 要解决的问题：仅用 4 台便携相机恢复 4D 动态场景；讲解论文核心洞察（稀疏视角下几何学习比外观学习更难）与 Neural Decaying Function 的一句话理解，并结合 pipeline 图建立整体印象。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-environment-and-cuda-extensions.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "列出四个 CUDA 扩展及其在主框架中的用途",
+            "理解 environment.yml 中本地路径安装方式",
+            "知道每个扩展暴露的 Python 接口入口"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "environment.yml",
+            "各子包 setup.py",
+            "simple_knn._C"
+          ],
+          "order": 2,
+          "practice_task": "阅读四个 setup.py，整理一张表：扩展名 / 暴露的 Python 模块 / 被主代码哪一行 import；若有 GPU 则执行 pip install -e ./simple-knn 并验证 import 成功，否则说明编译依赖。",
+          "source_files": [
+            "environment.yml",
+            "diff-gaussian-rasterization/setup.py",
+            "simple-knn/setup.py",
+            "pointops2/setup.py",
+            "fused-ssim-main/setup.py"
+          ],
+          "title": "环境搭建与四个 CUDA 子包",
+          "topic": "讲解 environment.yml 的 conda 环境与四个本地 CUDA 扩展（diff-gaussian-rasterization、simple-knn、pointops2、fused-ssim）各自提供什么接口、为什么本项目离不开它们。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-repo-structure-and-entrypoints.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "说出每个顶层目录的职责",
+            "追踪 train.py 从参数解析到 training() 的调用链",
+            "区分训练入口与推理评估入口"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "train.py",
+            "render.py",
+            "scene",
+            "gaussian_renderer"
+          ],
+          "order": 3,
+          "practice_task": "画出 train.py 与 render.py 的模块导入关系图（import 依赖图），并用一句话标注每个顶层目录（scene、module、gaussian_renderer、utils、scripts、configs）的职责。",
+          "source_files": [
+            "train.py",
+            "render.py"
+          ],
+          "title": "目录结构与两大入口",
+          "topic": "梳理仓库目录结构（train.py / render.py 两个入口，scene、module、gaussian_renderer、utils、scripts、configs 及 CUDA 子包），并从 main 函数开始走一遍顶层调用链。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-arguments-and-config.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "解释 ParamGroup 如何把类属性变成命令行参数",
+            "理解 configs/dynerf/*.yaml 与命令行的合并优先级",
+            "知道 gaussian_dim、time_duration、rot_4d 等关键开关的含义"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "arguments.ParamGroup",
+            "train.py 配置合并",
+            "configs yaml"
+          ],
+          "order": 4,
+          "practice_task": "复制 configs/dynerf/flame_steak.yaml 为自定义配置，修改 resolution 与 iterations，运行 python train.py --help 对照输出，确认哪些键来自 ModelParams/OptimizationParams/PipelineParams，哪些是 train.py 独有参数。",
+          "source_files": [
+            "arguments/__init__.py",
+            "configs/dynerf/flame_steak.yaml",
+            "train.py"
+          ],
+          "title": "参数体系与 OmegaConf 配置",
+          "topic": "讲解 arguments/__init__.py 中 ModelParams/PipelineParams/OptimizationParams 三组参数的注册机制，以及 train.py 如何用 OmegaConf 递归合并 yaml 配置覆盖命令行默认值。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "初识 4C4D"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l1-colmap-format-and-loader.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "说出 sparse/0 下三个文件分别存什么",
+            "理解四元数到旋转矩阵的转换约定",
+            "会调用 read_extrinsics_binary/read_intrinsics_binary"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "colmap_loader",
+            "CameraInfo",
+            "graphics_utils"
+          ],
+          "order": 1,
+          "practice_task": "写一个脚本调用 scene/colmap_loader.py 的读取函数，打印相机数量、每台相机的内参模型与 3D 点数量；若没有二进制数据，则手工构造一个 txt 版本的 sparse/0 目录再读取。",
+          "source_files": [
+            "scene/colmap_loader.py",
+            "README.md"
+          ],
+          "title": "COLMAP 数据格式与 colmap_loader",
+          "topic": "讲解 sparse/0 目录下 cameras.bin/images.bin/points3D.bin（及 txt 版本）的格式，以及 colmap_loader.py 如何解析内参、外参（qvec2rotmat）与三维点。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-dataset-readers-colmap.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "解释 timestamp = 帧号 / ((max_timestamp+1)/10) 的归一化",
+            "理解 training_view 字符串如何决定 train/test 划分",
+            "掌握 num_pts 与 downsample_method 对初始点云的影响"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "readColmapSceneInfo",
+            "process_camera_info",
+            "fetchPly"
+          ],
+          "order": 2,
+          "practice_task": "在 readColmapSceneInfo 中加入调试打印，验证 300 帧（0000-0299）的 timestamp 恰好落在 [0,10) 区间，并统计 training_view='1,10,13,20' 时 train 与 test 相机各有多少帧。",
+          "source_files": [
+            "scene/dataset_readers.py",
+            "utils/general_utils.py"
+          ],
+          "title": "readColmapSceneInfo：从相机×帧到训练集",
+          "topic": "详解 readColmapSceneInfo 全流程：按 camXX_YYYY 命名把每台相机扩展成所有帧、timestamp 归一化到 time_duration、按 training_view 划分训练/测试相机、点云的数量控制与 random/fps 下采样及时间过滤。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-camera-and-lazy-dataset.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "解释 world_view_transform 与 full_proj_transform 的构成",
+            "理解 resolution 参数如何缩放图像与内参",
+            "说明 dataloader=True 时图像何时才真正读入显存"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Camera",
+            "loadCam",
+            "CameraDataset"
+          ],
+          "order": 3,
+          "practice_task": "构造一个 Camera 实例，打印 original_view/projection_matrix/full_proj_transform/camera_center 的形状与数值，并在注释中解释每个矩阵的含义；再对比 dataloader=True/False 两种模式下显存占用的差异。",
+          "source_files": [
+            "scene/cameras.py",
+            "utils/camera_utils.py",
+            "utils/data_utils.py"
+          ],
+          "title": "Camera 对象与懒加载数据集",
+          "topic": "讲解 scene/cameras.py 中 Camera 的投影矩阵（world_view_transform、full_proj_transform）、camera_utils.loadCam 的分辨率缩放逻辑，以及 data_utils.CameraDataset 配合 dataloader 开关的懒加载图像机制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l4-scene-class.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "解释 Scene 如何在 Colmap 与 Blender 数据集之间分发",
+            "理解 cameras_extent（nerf_normalization radius）的用途",
+            "知道一次训练会在 model_path 下生成哪些文件"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Scene",
+            "sceneLoadTypeCallbacks",
+            "cameraList_from_camInfos"
+          ],
+          "order": 4,
+          "practice_task": "写一个最小脚本用假的 COLMAP 目录实例化 Scene（gaussian_dim=4），观察 model_path 下生成的 input.ply 与 cameras.json 内容，并打印 cameras_extent 的值及其对学习率缩放的影响。",
+          "source_files": [
+            "scene/__init__.py",
+            "scene/dataset_readers.py"
+          ],
+          "title": "Scene 类：数据集分发与场景装配",
+          "topic": "讲解 Scene 如何通过 sceneLoadTypeCallbacks 在 Colmap/Blender 两种数据集之间分发、计算 nerf_normalization 得到 cameras_extent、写出 input.ply 与 cameras.json，并决定高斯初始化走 create_from_pcd 还是 load_ply。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l5-data-preparation-scripts.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "解释为何 COLMAP 在 4 视角下点云过稀",
+            "说出 n3v2colmap.py 生成的 mast3r_N 目录结构",
+            "掌握 README 中 sparse/dense 两种重建的用途区别"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "n3v2colmap",
+            "n3v2blender",
+            "readColmapSceneInfo"
+          ],
+          "order": 5,
+          "practice_task": "自造一个符合 camXX_YYYY.png 命名的 images 目录（可用纯色小图），运行 python scripts/n3v2colmap.py <path> --cams 0,1,2,3，检查生成的 mast3r_4 目录结构与 sparse 目录的去向，并对照 README 写出下一步 MASt3R 命令。",
+          "source_files": [
+            "scripts/n3v2colmap.py",
+            "scripts/n3v2blender.py",
+            "README.md"
+          ],
+          "title": "数据准备脚本与 MASt3R 初始化",
+          "topic": "讲解 scripts/n3v2colmap.py（符号链接选择视角、移动 sparse 目录）与 n3v2blender.py 的作用，以及为什么稀疏视角下要用 MASt3R 重建稠密点云代替 COLMAP 稀疏点云。"
+        }
+      ],
+      "level": "beginner",
+      "order": 2,
+      "title": "数据加载与场景构建"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u3-l1-gaussian-model-3d-attributes.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "列出 3D 高斯的全部可优化属性及形状",
+            "解释 scaling/rotation/opacity 激活函数的作用",
+            "理解 capture/restore 与 checkpoint 的关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "GaussianModel.__init__",
+            "属性 property",
+            "capture/restore"
+          ],
+          "order": 1,
+          "practice_task": "用 1000 个随机点调用 create_from_pcd（gaussian_dim=3），打印 get_xyz/get_scaling/get_rotation/get_opacity/get_features 的形状与数值范围，并解释为什么 _scaling 存的是 log 空间值。",
+          "source_files": [
+            "scene/gaussian_model.py"
+          ],
+          "title": "GaussianModel：继承自 3DGS 的属性",
+          "topic": "讲解 GaussianModel 中来自 3DGS 的基础属性（_xyz、_features_dc/_features_rest、_scaling、_rotation、_opacity）、对应的激活函数 property，以及 capture/restore 的元组结构。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-fourth-dimension-attributes.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "说出 _t、_scaling_t、_rotation_r 的物理含义",
+            "理解 time_duration 对时间参数化的约束",
+            "追踪 gaussian_dim==4 分支在代码中的分布"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "GaussianModel.__init__",
+            "training_setup",
+            "capture/restore"
+          ],
+          "order": 2,
+          "practice_task": "对比 gaussian_dim=3 与 4 时 training_setup 生成的 optimizer 参数组列表，写表格说明新增参数组及其学习率来源（position_t_lr_init 为 -1 时的回退逻辑）。",
+          "source_files": [
+            "scene/gaussian_model.py"
+          ],
+          "title": "第四维：_t、_scaling_t 与 _rotation_r",
+          "topic": "讲解 4D 高斯新增的时间维属性（时间中心 _t、时间尺度 _scaling_t、时间旋转 _rotation_r）、time_duration 参数化，以及 rot_4d / force_sh_3d 开关，并观察 gaussian_dim==4 分支如何贯穿 capture、prune、densify。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-4d-covariance-and-marginal-t.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "推导 4D 协方差在固定时刻的 3D 条件协方差公式",
+            "解释 get_marginal_t 的高斯衰减含义",
+            "理解 mean_offset 如何修正投影中心"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "build_covariance_from_scaling_rotation_4d",
+            "get_marginal_t",
+            "build_scaling_rotation_4d"
+          ],
+          "order": 3,
+          "practice_task": "用 numpy/pytorch 构造一个 4x4 的小型 4D 协方差矩阵，手动计算 cov11 - cov12@cov12.T/cov_t 与均值偏移，再与 build_covariance_from_scaling_rotation_4d 的输出对比验证一致。",
+          "source_files": [
+            "scene/gaussian_model.py",
+            "utils/general_utils.py"
+          ],
+          "title": "4D 协方差与时间边缘化",
+          "topic": "详解 setup_functions 中的 build_covariance_from_scaling_rotation_4d：如何从 4D 协方差得到固定时刻的 3D 条件协方差（cov11 - cov12·cov12ᵀ/cov_t）与均值偏移，以及 get_marginal_t 的时间高斯衰减。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l4-4d-spherical-harmonics.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "解释 4D 球谐如何把时间方向引入视角相关颜色",
+            "计算不同 sh_degree 下的通道数",
+            "理解 oneupSHdegree 的两段进阶策略"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "eval_shfs_4d",
+            "sh_channels_4d",
+            "oneupSHdegree"
+          ],
+          "order": 4,
+          "practice_task": "分别计算 max_sh_degree=3 且 max_sh_degree_t=0/2 时 get_max_sh_channels 的返回值，与 sh_channels_4d=[1,6,16,33] 及 (deg+1)^2*(deg_t+1) 公式对照，并用 eval_shfs_4d 渲染一组假 SH 系数验证输出形状。",
+          "source_files": [
+            "utils/sh_utils.py",
+            "scene/gaussian_model.py"
+          ],
+          "title": "4D 球谐：eval_shfs_4d 与时间视角相关颜色",
+          "topic": "讲解 utils/sh_utils.py 中 eval_sh 与 eval_shfs_4d 的区别、sh_channels_4d 通道表、sh_degree_t 的作用，以及 oneupSHdegree 如何先升空间阶数再升时间阶数。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2",
+            "u2-l4"
+          ],
+          "filename": "u3-l5-initialization-and-persistence.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "解释初始时间尺度取 duration/5 的含义与 redundant_ratio 的作用",
+            "掌握 PLY 字段与模型属性的对应关系",
+            "理解 chkpntN.pth 与 point_cloud.ply 各自保存什么"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "create_from_pcd",
+            "save_ply/load_ply",
+            "capture/restore"
+          ],
+          "order": 5,
+          "practice_task": "用带 time 字段与不带 time 字段的两个点云分别 create_from_pcd，对比 _t 的分布；再 save_ply 后 load_ply 回读，检查 t/scale_t/rot_r 字段是否与原值一致（注意 load_ply 中以 rot/t/scale_t 前缀匹配属性名的细节）。",
+          "source_files": [
+            "scene/gaussian_model.py",
+            "scene/dataset_readers.py"
+          ],
+          "title": "初始化与持久化：create_from_pcd 与 PLY",
+          "topic": "讲解 create_from_pcd 的初始化策略（distCUDA2 决定空间尺度、无时间信息时随机采样 _t 并引入 redundant_ratio、时间尺度取 duration/5）、create_from_pth，以及 save_ply/load_ply 的字段布局与 capture/restore 检查点。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "4D 高斯模型"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2",
+            "u2-l3"
+          ],
+          "filename": "u4-l1-render-function.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "说出 GaussianRasterizationSettings 每个字段的来源",
+            "解释 means2D/visibility_filter/radii 在训练中的用途",
+            "理解 opacity 与 marginal_t 在渲染输入中的关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "render",
+            "GaussianRasterizationSettings",
+            "GaussianModel property"
+          ],
+          "order": 1,
+          "practice_task": "在 render() 返回前插入打印语句，输出每次调用的总高斯数、visibility_filter 求和后的可见高斯数与渲染图像形状；若无法运行 GPU，则在代码上标注每个输入张量的形状来源。",
+          "source_files": [
+            "gaussian_renderer/__init__.py",
+            "gaussian_renderer/diff_gaussian_rasterization.py"
+          ],
+          "title": "render() 渲染主流程",
+          "topic": "逐段讲解 gaussian_renderer/__init__.py 的 render()：如何组装 GaussianRasterizationSettings（FoV、视图/投影矩阵、timestamp、time_duration、rot_4d 等字段）、准备 means3D/opacity/scales/rotations/ts 输入，以及返回 dict 中各张量的含义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-rasterizer-python-binding.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "解释 autograd.Function 如何连接 Python 与 CUDA",
+            "了解 markVisible 的输入输出与用途",
+            "知道 ext.cpp/rasterize_points.cu/pybind 的绑定层次"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "_RasterizeGaussians",
+            "markVisible",
+            "ext.cpp 绑定"
+          ],
+          "order": 2,
+          "practice_task": "追踪一个张量（如 opacities）从 render() 到 _C.rasterize_gaussians_4d CUDA 函数的完整传递路径并画图；再阅读 rasterize_points.cu 中 markVisible 的签名，说明它输出什么类型的掩码。",
+          "source_files": [
+            "diff-gaussian-rasterization/diff_gaussian_rasterization/__init__.py",
+            "diff-gaussian-rasterization/rasterize_points.cu",
+            "diff-gaussian-rasterization/ext.cpp",
+            "gaussian_renderer/__init__.py"
+          ],
+          "title": "光栅化的 Python 绑定与 markVisible",
+          "topic": "讲解 diff_gaussian_rasterization/__init__.py 中 _RasterizeGaussians 这个 autograd.Function 如何组织参数、前向调用 CUDA、反向回传梯度，以及 markVisible 接口（rasterize_points.cu / rasterizer_impl.cu）如何判断高斯是否在视锥内。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1",
+            "u3-l3",
+            "u3-l4"
+          ],
+          "filename": "u4-l3-python-fallbacks-and-env-map.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "解释 convert_SHs_python 与光栅化内置 SH 求值的等价条件",
+            "理解 marginal_t>0.05 预筛选的动机与各张量的同步掩码",
+            "说出 env_map 球面背景的混合公式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "render 的 pipe 分支",
+            "eval_shfs_4d",
+            "env_map 混合"
+          ],
+          "order": 3,
+          "practice_task": "打开 pipe.compute_cov3D_python 后梳理 mask=marginal_t>0.05 需要同步过滤的所有张量列表，说明漏掉任何一个会导致什么错误；再推导 env_map 分支中 rendered_image + (1-alpha)*bg 公式与 alpha blending 的关系。",
+          "source_files": [
+            "gaussian_renderer/__init__.py",
+            "utils/sh_utils.py",
+            "scene/gaussian_model.py"
+          ],
+          "title": "Python 回退路径与环境贴图背景",
+          "topic": "讲解 convert_SHs_python / compute_cov3D_python 两个调试用回退路径：在 Python 中手动计算 4D 球谐颜色、条件协方差，并按 marginal_t>0.05 对所有输入做预筛选；以及 env_map 球面背景贴图与 alpha 的混合。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "渲染管线"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1",
+            "u2-l4",
+            "u1-l4"
+          ],
+          "filename": "u5-l1-training-loop.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "按顺序说出一次迭代中发生的所有步骤",
+            "解释 DataLoader 与 batch_size 的组织方式",
+            "定位训练中控制致密化、保存、评估的时间点"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "training()",
+            "DataLoader 迭代",
+            "training_report"
+          ],
+          "order": 1,
+          "practice_task": "在训练循环中添加一个每 1000 次迭代打印当前高斯数量与学习率的 hook（不改变训练逻辑），并写注释标出 render→loss→backward→densify→step 的行号范围。",
+          "source_files": [
+            "train.py"
+          ],
+          "title": "train.py 训练主循环全景",
+          "topic": "从参数解析、yaml 合并、随机种子到 training() 内部：DataLoader 组织、逐视角 render 与 loss、梯度反传、致密化统计、optimizer step、检查点保存，建立对一次训练迭代的完整心智模型。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-losses-and-metrics.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "写出总损失公式与 lambda_dssim 的作用",
+            "解释为何用 CUDA 版 fused_ssim 而非纯 PyTorch 实现",
+            "会手工计算并核对 PSNR"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "l1_loss",
+            "fused_ssim",
+            "psnr"
+          ],
+          "order": 2,
+          "practice_task": "生成两张随机图像张量，分别用 utils/loss_utils.py 的 l1_loss、fused_ssim 与 utils/image_utils.py 的 psnr 计算指标；再用纯 PyTorch 写一个 SSIM 近似实现对比数量级，解释差异来源。",
+          "source_files": [
+            "train.py",
+            "utils/loss_utils.py",
+            "utils/image_utils.py",
+            "fused-ssim-main/fused_ssim/__init__.py"
+          ],
+          "title": "损失函数与评估指标",
+          "topic": "讲解训练损失 (1-λ)·L1 + λ·(1-SSIM) 的组成：l1_loss、来自 fused-ssim 子包的 fast_ssim、lambda_dssim 权重，以及 psnr 指标与 training_report 的 TensorBoard 日志。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l3-batch-multiview-training.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "解释多视角下 visibility_count 的计算方式",
+            "推导 ×batch_size/visibility_count 梯度归一化的等价性",
+            "说明 4D 时 _t 梯度为何需要同样处理"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "batch 梯度合并",
+            "add_densification_stats_grad",
+            "_t 梯度"
+          ],
+          "order": 3,
+          "practice_task": "写一段伪代码/小张量实验：3 个高斯在 batch_size=4 下的 visibility_count 分别为 4/2/1，验证归一化后等效于每个视角贡献取平均，并解释这为何对致密化阈值公平。",
+          "source_files": [
+            "train.py",
+            "scene/gaussian_model.py"
+          ],
+          "title": "多视角 batch 训练与梯度合并",
+          "topic": "讲解 batch_size>1 时如何跨视角累积 loss、合并 visibility_filter/radii、对 viewspace 梯度与 _t 梯度按可见次数归一化（×batch_size/visibility_count），并区分 add_densification_stats 与 add_densification_stats_grad 两条路径。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l4-densify-and-prune.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "解释 clone 与 split 的判定条件差异",
+            "理解 rot_4d 时在 xyzt 空间采样分裂子高斯的做法",
+            "掌握 cat_tensors_to_optimizer 等优化器状态同步技巧"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "densify_and_clone/split",
+            "densification_postfix",
+            "cat_tensors_to_optimizer/_prune_optimizer"
+          ],
+          "order": 4,
+          "practice_task": "修改 densification_interval 与 densify_grad_threshold 各一档，先写下对高斯数量曲线的预测，再对照 TensorBoard 的 total_points 曲线验证；并解释 prune_mask 中 opacity/屏幕尺寸/世界尺寸三个条件的含义。",
+          "source_files": [
+            "scene/gaussian_model.py",
+            "train.py"
+          ],
+          "title": "自适应致密化与剪枝（4D 版）",
+          "topic": "讲解 densify_and_clone/densify_and_split 在 4D 下的实现（rot_4d 时在 xyzt 四维空间采样新位置、时间梯度阈值）、prune_points 的三重剪枝条件，以及 cat_tensors_to_optimizer/replace_tensor_to_optimizer 如何在张量增删时同步 Adam 状态。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l5-checkpoint-and-logging.md",
+          "id": "u5-l5",
+          "learning_goals": [
+            "说出 chkpntN.pth 元组中每个元素对应什么",
+            "区分 best checkpoint 与常规 checkpoint 的触发条件",
+            "知道 output 目录下每类文件的用途"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "capture/restore",
+            "scene.save",
+            "training_report"
+          ],
+          "order": 5,
+          "practice_task": "写一个独立脚本 torch.load 一个 chkpnt30000.pth，按 capture() 的元组顺序打印每个元素的类型与 shape，并回答其中哪一项存的是 Coefficient 网络的 state_dict。",
+          "source_files": [
+            "train.py",
+            "scene/__init__.py",
+            "scene/gaussian_model.py"
+          ],
+          "title": "检查点、日志与输出目录",
+          "topic": "讲解 capture/restore 元组、scene.save 写出 chkpntN.pth 与 point_cloud/iteration_N/point_cloud.ply、按测试 PSNR 保存 best checkpoint、rendered_images 中间结果以及 cfg_args/training_params.txt 的作用。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 5,
+      "title": "训练主循环与致密化"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u6-l1-coefficient-mlp.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "说出网络输入 7+2 维每一维对应的高斯属性",
+            "解释 pos/scale 的标准化与 opacity 的 [-1,1] 映射",
+            "理解 Sigmoid 输出如何映射到 [f_min, f_max]"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Coefficient.__init__",
+            "_calculate_input_dim",
+            "Coefficient.forward"
+          ],
+          "order": 1,
+          "practice_task": "为 Coefficient 写一个单元测试：构造 N=5000 的假 opacity/positions/scales，检查输入维度拼接逻辑、输出落在 (0,1)、loss.backward() 后网络参数 grad 非空，并画 f_min + (f_max-f_min)*coef 关于 opacity 的散点曲线。",
+          "source_files": [
+            "module/__init__.py"
+          ],
+          "title": "Coefficient：Neural Decaying Function 网络",
+          "topic": "精读 module/__init__.py 的 Coefficient：输入由 opacity、标准化后的 xyz 位置、log 尺度共 7 维（use_4d_features 再加 2 维 4D 特征），经 Linear-ReLU-Dropout-Linear-Sigmoid 输出衰减因子。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1",
+            "u3-l2"
+          ],
+          "filename": "u6-l2-opacity-decay-modes.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "对比各衰减模式的 factor 关于 opacity 的函数形状",
+            "解释 mode='net' 与 'mlp' 的输入差异",
+            "理解 _opacity.data 原位写回绕过 autograd 的设计意图"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "opacity_decay",
+            "Coefficient",
+            "inverse_opacity_activation"
+          ],
+          "order": 2,
+          "practice_task": "在同一个坐标系画出 const/exp_asc/exp_desc/power_asc/power_desc 各模式的 factor(opacity) 曲线，再实现一个自定义模式（如按 log 尺度加权的平滑衰减）加入分支并通过输入检查；讨论 mask=None 与传入 mask 时行为的差别。",
+          "source_files": [
+            "scene/gaussian_model.py",
+            "module/__init__.py"
+          ],
+          "title": "opacity_decay：从常数衰减到神经网络衰减",
+          "topic": "精读 gaussian_model.opacity_decay 的模式族（const、exp_asc/exp_desc、power_asc/power_desc、mlp、net），理解 f_min/f_max 的线性映射、mask 的选择性衰减以及用 inverse_opacity_activation 原位写回 _opacity.data 的细节。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2",
+            "u4-l1"
+          ],
+          "filename": "u6-l3-decay-in-render.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "解释 decay_from_iter 延迟启用的作用",
+            "理解空间可见性与时间可见性相与的掩码构造",
+            "说明衰减发生在渲染前对后续梯度的影响"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "render 的 opacity decay 分支",
+            "markVisible",
+            "get_marginal_t"
+          ],
+          "order": 3,
+          "practice_task": "设计并执行一组小规模消融：改变 decay_from_iter（如 0/500/2000）与 f_min/f_max，记录最终测试 PSNR 与高斯数量，写成表格并分析衰减强度与几何质量的关系；无 GPU 时给出实验设计文档。",
+          "source_files": [
+            "gaussian_renderer/__init__.py",
+            "scene/gaussian_model.py",
+            "diff-gaussian-rasterization/diff_gaussian_rasterization/__init__.py"
+          ],
+          "title": "衰减如何接入渲染：time_aware 可见性掩码",
+          "topic": "精读 gaussian_renderer/__init__.py 中 opacity decay 接入段：iteration > decay_from_iter 后才启用、time_aware 时用 markVisible 的空间可见性与 get_marginal_t>0.05 的时间可见性取交集，只对当前视角「真正可见」的高斯衰减。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l3",
+            "u5-l1",
+            "u5-l4"
+          ],
+          "filename": "u6-l4-joint-optimization.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "解释衰减如何放大不透明度相关的梯度有效信号",
+            "说出 opacity_decay 开启后训练策略的四个联动变化",
+            "理解 coefficient_lr 与 weight_decay 对小网络正则化的作用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "coef_optimizer",
+            "train.py 联动分支",
+            "train.py optimizer step"
+          ],
+          "order": 4,
+          "practice_task": "关闭 opacity_decay（并相应恢复 reset_opacity）跑一次短训练与开启时对比，观察 TensorBoard 中 opacity_histogram 与 total_points 曲线差异，写 300 字分析：为什么联合优化能让梯度更聚焦几何学习。",
+          "source_files": [
+            "train.py",
+            "scene/gaussian_model.py",
+            "module/__init__.py"
+          ],
+          "title": "联合优化：双优化器与训练策略联动",
+          "topic": "讲解 Neural Decaying Function 与 4D 高斯的联合训练：training_setup 中单独的 coef_optimizer（coefficient_lr、weight_decay）、train.py 中两个 optimizer 交替 step，以及 opacity_decay 开启后 densify_until_iter=iterations、禁用 reset_opacity 与 size_threshold 的联动逻辑及其与「梯度聚焦几何学习」的关系。"
+        }
+      ],
+      "level": "advanced",
+      "order": 6,
+      "title": "核心创新：Neural Decaying Function"
+    },
+    {
+      "id": "u7",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l5",
+            "u5-l2"
+          ],
+          "filename": "u7-l1-render-validation.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "掌握 render.py --test 的完整评估流程",
+            "理解 restore 与训练时 Scene 构建的差异",
+            "会汇总多视角多帧的 PSNR/SSIM/L1"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "validation()",
+            "gaussians.restore",
+            "training_report 指标口径"
+          ],
+          "order": 1,
+          "practice_task": "对一个训练完成的输出目录执行 python render.py --config ... --test --start_checkpoint ...，解析输出的测试图像，自己实现一个脚本批量计算 PSNR/SSIM 并与训练日志中的数值对照。",
+          "source_files": [
+            "render.py",
+            "train.py"
+          ],
+          "title": "render.py：测试视角评估",
+          "topic": "讲解 render.py 的 validation() 如何从 checkpoint 恢复 4D 高斯（restore 传入 None 跳过优化器重建）、在 held-out 测试相机上渲染并计算 L1/PSNR/SSIM，以及 --test/--validate 的关系。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1",
+            "u2-l3"
+          ],
+          "filename": "u7-l2-trajectory-generation.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "解释 arc/ellipse 等轨迹模式的插值方式",
+            "理解 fix_time 与 selected_frame 如何冻结时间",
+            "掌握 total_frames 与 time_duration 的换算"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "generate_path",
+            "getAllCameras",
+            "Camera timestamp"
+          ],
+          "order": 2,
+          "practice_task": "写一个只调用 generate_path 的小脚本（用几个假 Camera），打印生成轨迹的相机位置与 timestamp 序列；分别设 fix_time=True/False，验证时间戳是否被冻结在选中帧。",
+          "source_files": [
+            "utils/render_utils.py",
+            "render.py"
+          ],
+          "title": "novel-view 轨迹生成",
+          "topic": "讲解 utils/render_utils.py 的 generate_path：如何在全部相机之间插值出 n_frames 个新视角（arc 等模式、scale_factor 控制半径缩放），以及 fix_time/selected_frame 如何控制渲染时刻、total_frames 与时间戳的对应。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "filename": "u7-l3-extractor-and-video.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "掌握 GaussianExtractor 的渲染-导出两段式接口",
+            "理解 create_videos 的输入输出组织",
+            "知道如何从视频中定位时间不一致区域"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "GaussianExtractor",
+            "generate_path",
+            "create_videos"
+          ],
+          "order": 3,
+          "practice_task": "渲染一段 480 帧的 arc 轨迹视频，用 ffmpeg 或脚本每隔 40 帧抽一帧拼成网格图，检查运动区域的跨帧一致性，并解释轨迹渲染为何必须绕过训练循环直接调用 render()。",
+          "source_files": [
+            "render.py",
+            "utils/mesh_utils.py",
+            "utils/render_utils.py"
+          ],
+          "title": "GaussianExtractor 与视频导出",
+          "topic": "讲解 utils/mesh_utils.py 的 GaussianExtractor 如何包装 render() 完成批量重建与图像导出，utils/render_utils.py 的 create_videos 如何把帧合成 mp4，以及轨迹目录 traj/ours_N 的输出结构。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 7,
+      "title": "推理、轨迹渲染与评估"
+    },
+    {
+      "id": "u8",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u8-l1-cuda-rasterizer-internals.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "按执行顺序说出 CUDA 前向渲染的主要阶段",
+            "定位 ts/scales_t/rotations_r 在 CUDA 侧的消费位置",
+            "解释反向传播中不透明度梯度的累加方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "forward.cu 渲染循环",
+            "rasterizer_impl.cu",
+            "backward.cu"
+          ],
+          "order": 1,
+          "practice_task": "在 forward.cu 中找到消费 opacities 与 ts 的代码位置并注释说明时间边缘化在 CUDA 中如何完成；再追踪 backward.cu 中一个像素梯度如何分配回多个重叠高斯，写成一段执行流程说明。",
+          "source_files": [
+            "diff-gaussian-rasterization/cuda_rasterizer/forward.cu",
+            "diff-gaussian-rasterization/cuda_rasterizer/backward.cu",
+            "diff-gaussian-rasterization/cuda_rasterizer/rasterizer_impl.cu",
+            "diff-gaussian-rasterization/cuda_rasterizer/config.h"
+          ],
+          "title": "CUDA 光栅化器内部实现",
+          "topic": "深入 diff-gaussian-rasterization 的 CUDA 侧：forward.cu 的分块（tile）渲染与 alpha blending、backward.cu 的梯度回传、rasterizer_impl.cu 的预处理与 markVisible、config.h 中的块大小等常量。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u8-l2-pointops-and-downsampling.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "会调用 general_utils.fps/knn 做点云采样与邻域查询",
+            "对比 random 与 fps 下采样对初始几何覆盖的影响",
+            "理解 pointops2 偏移量（offset）批处理约定"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "fps/knn 封装",
+            "furthestsampling/knnquery",
+            "readColmapSceneInfo 下采样分支"
+          ],
+          "order": 2,
+          "practice_task": "生成或加载一个 1 万点云，分别用 random 与 fps 下采样到 1 千点，计算两种结果的最近邻距离分布并画直方图对比；再阅读 pointops.py 的形状约定，解释 offset 数组为什么用 cumsum 构造。",
+          "source_files": [
+            "utils/general_utils.py",
+            "pointops2/functions/pointops.py",
+            "scene/dataset_readers.py"
+          ],
+          "title": "pointops2 与点云下采样策略",
+          "topic": "讲解 pointops2 子包提供的 furthestsampling/knnquery CUDA 算子、utils/general_utils.py 中 fps/knn 的封装（offset 约定），以及 dataset_readers 中 downsample_method='fps' 与 'random' 的选择及其对初始点云均匀性的影响。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l4",
+            "u2-l5"
+          ],
+          "filename": "u8-l3-sparse-view-strategy.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "解释视角数量与重叠度如何影响几何学习",
+            "说出 MASt3R 初始化与 opacity decay 两个策略各自补偿什么",
+            "能设计规范的消融实验"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "training_view 划分",
+            "create_from_pcd 初始化",
+            "opacity decay 联动"
+          ],
+          "order": 3,
+          "practice_task": "设计一张完整消融实验表：视角数（2/4/6）× 初始化来源（COLMAP 稀疏点 vs MASt3R 稠密点）× opacity_decay 开关，为每格写出具体的 yaml 与命令行参数，并说明用哪些指标对比。",
+          "source_files": [
+            "README.md",
+            "scene/dataset_readers.py",
+            "scene/gaussian_model.py",
+            "train.py"
+          ],
+          "title": "稀疏视角策略全景与消融设计",
+          "topic": "从系统视角总结 4C4D 应对稀疏输入的组合策略：training_view 视角选择、num_pts/num_pts_ratio 控制初始点云规模、redundant_ratio 时间冗余、MASt3R 稠密初始化与 Neural Decaying Function 的几何-外观再平衡。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1",
+            "u2-l4"
+          ],
+          "filename": "u8-l4-extensions-and-debugging.md",
+          "id": "u8-l4",
+          "learning_goals": [
+            "掌握新增数据集 loader 的注册方式",
+            "理解 lambda_* 命名约定带来的日志自动化机制",
+            "会用 debug_from/detect_anomaly 定位训练异常"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "sceneLoadTypeCallbacks 注册",
+            "lambda_* 日志约定",
+            "安全状态与环境变量"
+          ],
+          "order": 4,
+          "practice_task": "实现一个最小自定义数据 loader：在 sceneLoadTypeCallbacks 注册新类型（或给 readNerfSyntheticInfo 增加分支），用一个几十张图的小数据跑通 100 次迭代的端到端训练；同时修复或解释 render.py 第 14 行 from flask import testing 这一可疑导入（待确认是否为误引入）。",
+          "source_files": [
+            "scene/__init__.py",
+            "scene/dataset_readers.py",
+            "train.py",
+            "utils/general_utils.py"
+          ],
+          "title": "二次开发与调试工具箱",
+          "topic": "讲解常见扩展点：通过 sceneLoadTypeCallbacks 注册新数据集格式、按 lambda_* 命名约定新增损失并自动获得 EMA 日志、debug_from/detect_anomaly 调试、PYTORCH_CUDA_ALLOC_CONF 显存设置；并指出 render.py 顶部 from flask import testing 这一可疑导入（待确认）。"
+        }
+      ],
+      "level": "advanced",
+      "order": 8,
+      "title": "底层实现与二次开发"
+    }
+  ]
+}
