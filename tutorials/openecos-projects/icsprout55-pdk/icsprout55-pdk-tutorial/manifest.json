@@ -1,0 +1,621 @@
+{
+  "head": "68d89edb47847671e18f9e65d66c0cd883995e05",
+  "project": "icsprout55-pdk",
+  "rationale": "icsprout55-pdk 不是传统软件项目，而是由多种 EDA 视图文件（tech LEF、cell LEF、liberty、verilog、CDL、cell_list）组成的 55nm 开源工艺包，仓库本体只跟踪小体积文本，liberty 与 GDS 通过 Makefile 从 GitHub Release 下载。因此学习路线先让读者建立 PDK 概念与仓库/分发机制的全景（单元 1），再从工艺基石 tech LEF 的金属栈、过孔与 SITE 入手（单元 2），随后进入标准单元库，按“命名→LEF 抽象→_ecos 变体→天线规则→仿真模型→liberty 时序”的顺序逐视图拆解（单元 3），接着盘点 IO 库的 pad 家族与双电压域模型（单元 4），再下沉到晶体管级 CDL 并做跨视图一致性检查（单元 5），最后落到开源 EDA 工具链实战：读入 PDK、综合实验、以及理解 _ecos 平行变体存在的原因并模拟一次贡献（单元 6）。讲义普遍以“普通版 vs _ecos 版”的 diff 为线索，因为这是本仓库最独特、也最能体现开源工具适配思想的设计；实践任务全部基于 grep/awk/Python 脚本解析真实文件，配合可选的 OpenROAD/yosys/iverilog 等开源工具，确保零商业 EDA 授权也能动手。仓库规模属于中小型（41 个跟踪文件），19 篇讲义按“每篇只讲一种视图或一个机制”切分，避免硬凑数量。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-pdk-overview-and-licensing.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说清楚 PDK 在数字后端流程（综合、布局布线、物理验证）中的作用",
+            "复述 ICS55 的发布方、发布时间与 preview 状态的使用限制",
+            "理解 Apache-2.0 对每个源文件保留 license header 的要求"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "PDK 概念与组成",
+            "ICS55 背景与状态",
+            "Apache-2.0 许可与文件头要求"
+          ],
+          "order": 1,
+          "practice_task": "克隆仓库后通读 README，整理出 ICS55 的参与方、当前 Todo 清单与 Contents 目录树；用 grep 统计 LICENSE 与任一 LEF/liberty 文件头部的 Apache-2.0 声明，写一份 200 字的“我能用这个 PDK 做什么/不能做什么”小结。",
+          "source_files": [
+            "README.md",
+            "LICENSE",
+            "CONTRIBUTING.md"
+          ],
+          "title": "ICS55 是什么：开源 55nm PDK 全景与许可",
+          "topic": "介绍 Process Design Kit 的概念与 ICS55 的背景（ICsprout、浙大集成电路学院、ECOS Team），说明 preview 状态下的使用限制（禁止商业量产流片）以及 Apache-2.0 许可证与逐文件 license header 的要求。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-repo-layout-and-views.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "画出 IP/IO、IP/STD_cell、prtech 三大块的目录树",
+            "解释 cdl/cell_list/doc/lef/liberty/verilog/gds 每种视图的用途",
+            "知道哪些文件在 git 内、哪些必须通过 make unzip 获取"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "目录结构",
+            "视图文件族（cdl/lef/liberty/verilog/cell_list/gds）",
+            "git 跟踪与大文件下载的边界"
+          ],
+          "order": 2,
+          "practice_task": "写一个 Python/awk 脚本遍历仓库，统计每个库（H7CH/H7CL/H7CR/IO）的 cell_list 单元数（应约为 748/747/747/23），并核对各库中 cdl、lef、verilog、liberty、gds 目录哪些实际存在、哪些需要下载，输出一张视图×库的可用性矩阵。",
+          "source_files": [
+            "README.md",
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CH/cell_list/ics55_LLSC_H7CH.txt",
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CL/cell_list/ics55_LLSC_H7CL.txt",
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CR/cell_list/ics55_LLSC_H7CR.txt",
+            "IP/IO/ICsprout_55LLULP1233_IO_251013/cell_list/ICSIOA_N55_3P3.txt"
+          ],
+          "title": "仓库目录结构与多视图文件族",
+          "topic": "逐层讲解仓库目录：IP/IO（IO 库）、IP/STD_cell 下 H7CH/H7CL/H7CR 三套标准单元库、prtech/techLEF（布线技术文件），以及每个库中 cdl、cell_list、doc、gds、lef、liberty、verilog 各目录分别对应哪种 EDA 视图。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-makefile-release-fetch.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "解释 Makefile 中 RELEASE_FILE/DECOMP_DIR 的 patsubst 展开逻辑",
+            "掌握 RELEASE_TAG、TOOL、PROXY_USE 三个可调参数",
+            "理解 .gitignore 为何忽略 liberty/gds/tar.bz2/*.mk"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Release 资产与下载规则",
+            "模式规则解压目标",
+            "版本固定与代理/工具切换参数"
+          ],
+          "order": 3,
+          "practice_task": "运行 make -n unzip，解释 $(DECOMP_DIR) 中每个路径如何由 patsubst 从 tar 包名推导出来；有网络条件时执行 make unzip RELEASE_TAG=v1.10.100 验证 liberty/gds 目录生成，并对照 .gitignore 解释为什么这些目录不出现在 git status 中。",
+          "source_files": [
+            "Makefile",
+            ".gitignore",
+            "README.md"
+          ],
+          "title": "Makefile 与大文件分发机制",
+          "topic": "解析 Makefile 如何通过 GitHub Release 分发体积较大的 liberty 与 GDS：curl/wget 双工具、PROXY 代理加速、RELEASE_TAG 固定版本（如 v1.10.100），以及 %_liberty.tar.bz2、%_gds.tar.bz2 模式规则如何把压缩包解压到对应库目录。"
+        }
+      ],
+      "order": 1,
+      "title": "单元一：初识 ICS55 开源 PDK"
+    },
+    {
+      "id": "u2",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l1-techlef-metal-stack.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "读懂 UNITS、MANUFACTURINGGRID 与三类 LAYER 的 TYPE 区别",
+            "列出 MET1–MET5、T4M2、RDL 的方向、pitch、宽度与间距",
+            "理解 RESISTANCE RPERSQ 等参数在寄生提取中的意义"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "单位与制造网格",
+            "MASTERSLICE/CUT/ROUTING 三类层",
+            "金属层参数（pitch/width/spacing/direction/resistance）"
+          ],
+          "order": 1,
+          "practice_task": "写脚本解析 N551P6M.lef 中所有 TYPE ROUTING 的层，输出“层名/方向/pitch/最小宽度/最小间距/电阻”对照表，并回答：MET1 与 MET2 的布线方向为何交替？T4M2 与 RDL 和普通 MET 层有何不同？",
+          "source_files": [
+            "prtech/techLEF/N551P6M.lef"
+          ],
+          "title": "工艺 LEF（一）：金属栈与层规则",
+          "topic": "以 prtech/techLEF/N551P6M.lef 为例讲解 LEF 工艺文件骨架：UNITS/DATABASE、MANUFACTURINGGRID 0.001、MASTERSLICE 层（ACT/NP/PP/NW1/POLY）、CUT 层（CT/VIA1–VIA4/T4V2/RV）、ROUTING 层（MET1–MET5/T4M2/RDL）的 PITCH、WIDTH、SPACING、DIRECTION 与 RESISTANCE。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-via-viarule-site.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "看懂固定 VIA 的 cut+两层 enclosure 矩形定义",
+            "区分固定 VIA 与 GENERATE VIARULE 的用途",
+            "解释 SITE 宽度/高度如何决定行式布局"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "固定 VIA 定义",
+            "GENERATE VIARULE",
+            "SITE 与行高（1.4μm vs 1.8μm）"
+          ],
+          "order": 2,
+          "practice_task": "解析 VIA MET2_MET1_VIA1_0 与 VIARULE MET2_MET1 GENERATE 的完整语句并翻译成“三层矩形清单”；再从 SITE 定义推导 core7（0.2×1.4）与 core9（0.2×1.8）的行高差异，结合标准单元 SIZE 说明本 PDK 单元用的是哪个 site。",
+          "source_files": [
+            "prtech/techLEF/N551P6M.lef"
+          ],
+          "title": "工艺 LEF（二）：VIA、VIARULE 与 SITE",
+          "topic": "讲解 tech LEF 中的固定过孔（每层 9 个 VIA1/VIA2… 变体，以及 T4M2、RDL 相关过孔）、GENERATE VIARULE，以及 CoreSite/core7/core9 三种 SITE 定义和 NONDEFAULTRULE DefaultTaper 的含义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l3-ecos-techlef-rc.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "指出 _ecos 版 tech LEF 的三类差异（RC/OFFSET/DefaultTaper）",
+            "理解 CPERSQDIST 与 EDGECAPACITANCE 的物理单位与用途",
+            "判断什么场景必须选 _ecos 版"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "LEF 电阻电容参数",
+            "两版 tech LEF diff 分析",
+            "开源工具寄生估计依赖"
+          ],
+          "order": 3,
+          "practice_task": "对两个 tech LEF 做 diff，用脚本量化：多少个层新增了 CAPACITANCE/EDGECAPACITANCE、各层 OFFSET 如何变化、DefaultTaper 被移除的内容；写一段说明“在开源布线工具中误用无 RC 版本会导致什么后果”。",
+          "source_files": [
+            "prtech/techLEF/N551P6M.lef",
+            "prtech/techLEF/N551P6M_ecos.lef"
+          ],
+          "title": "工艺 LEF（三）：_ecos 版与 RC 寄生参数",
+          "topic": "对比 N551P6M.lef 与 N551P6M_ecos.lef：ecos 版为每个 ROUTING 层补充 CAPACITANCE CPERSQDIST 与 EDGECAPACITANCE、把 OFFSET 从 0 改为 0.1、并删除 NONDEFAULTRULE DefaultTaper，说明这些改动对开源工具（如 OpenROAD）做电阻电容估计和布线的作用。"
+        }
+      ],
+      "order": 2,
+      "title": "单元二：工艺基石——tech LEF 与金属栈"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u3-l1-cell-naming-and-vt.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "拆解单元名“功能+驱动+后缀”的编码规则",
+            "区分 H7H/H7L/H7R 对应的 HVT/LVT/RVT 阈值含义",
+            "按功能类别对约 750 个单元做归类统计"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "阈值电压家族（HVT/LVT/RVT）",
+            "单元命名语法",
+            "功能类别盘点"
+          ],
+          "order": 1,
+          "practice_task": "写脚本解析三个 cell_list，按功能前缀（INV/AND/AO/OAI/XOR/DFF/ANT/TIE…）和驱动强度（X0P5/X1/X2…）生成统计表，比较 H7CH/H7CL/H7CR 三库的功能覆盖差异，并回答哪类单元只在一个库里出现。",
+          "source_files": [
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CH/cell_list/ics55_LLSC_H7CH.txt",
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CL/cell_list/ics55_LLSC_H7CL.txt",
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CR/cell_list/ics55_LLSC_H7CR.txt",
+            "README.md"
+          ],
+          "title": "标准单元库命名与三阈值家族",
+          "topic": "解读 ics55_LLSC_H7C_V1p10C100 标准单元库：H7CH/H7CL/H7CR 分别对应 HVT/LVT/RVT 三种阈值电压，单元名由功能（如 ADDFX1、AND2、AO21）+ 驱动强度（X0P5、X1、X2…）+ 库后缀（H7H/H7L/H7R）构成。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u3-l1"
+          ],
+          "filename": "u3-l2-celllef-macro-anatomy.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "读懂 MACRO 头部各字段与 SITE/行高的关系",
+            "解释 PIN 的 DIRECTION/USE/PORT/LAYER/RECT 层级",
+            "通过 SIZE 与 pin rect 估算单元面积与引脚分布"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "MACRO 头部字段",
+            "PIN/PORT/RECT 结构",
+            "OBS 障碍区"
+          ],
+          "order": 2,
+          "practice_task": "提取 ADDFX1H7H 的 SIZE、SITE、全部 pin 的矩形坐标，用文本或 matplotlib 画出版图抽象示意图（pin 着色、标注层），并计算该单元相对最小单元 ANT2H7H（0.4×1.4）的面积倍数。",
+          "source_files": [
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CH/lef/ics55_LLSC_H7CH.lef"
+          ],
+          "title": "单元 LEF 抽象视图解剖",
+          "topic": "以 ics55_LLSC_H7CH.lef 为例逐字段讲解 MACRO：CLASS CORE、ORIGIN、FOREIGN、SIZE 4.8 BY 1.4、SYMMETRY X Y、SITE core7，以及 PIN 的 DIRECTION/USE/PORT/LAYER/RECT 结构和 OBS 布线障碍区，说明布线器如何使用这些信息。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-ecos-celllef-power-pins.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "解释 ecos 版新增 VDD/VSS ABUTMENT 引脚的用途",
+            "理解引脚补充 MET2/VIA1 形状对开源布线器的意义",
+            "用脚本量化两版 LEF 的差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "电源轨道 pin 与 ABUTMENT",
+            "高层引脚可达性",
+            "普通版/ecos 版 diff 方法"
+          ],
+          "order": 3,
+          "practice_task": "写脚本对比普通版与 ecos 版 H7CH LEF：统计每个 MACRO 新增的 VDD/VSS rect 数与新增的 MET2/VIA1 rect 数，任选三个单元验证 ecos 版 pin 集合（含电源）与 liberty pin 一一对应（liberty 需 make unzip 下载，未下载时可与 verilog 模块端口对照）。",
+          "source_files": [
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CH/lef/ics55_LLSC_H7CH.lef",
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CH/lef/ics55_LLSC_H7CH_ecos.lef"
+          ],
+          "title": "_ecos 单元 LEF：电源轨道与高层引脚",
+          "topic": "对比 ics55_LLSC_H7CH.lef 与 ics55_LLSC_H7CH_ecos.lef：ecos 版升级到 LEF VERSION 5.8、为每个单元补上 USE POWER/GROUND 且 SHAPE ABUTMENT 的 VDD/VSS MET1 轨道 pin，并把信号引脚扩展到 MET2/VIA1 以便开源布线器访问；结合提交 e5c881b 说明引脚方向修正。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u3-l2"
+          ],
+          "filename": "u3-l4-antenna-ant-lef.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "解释工艺天线效应与 ANTENNAPARTIALMETALAREA/CUTAREA 指标",
+            "知道 ant LEF 与普通 LEF 的确切差异位置",
+            "理解 ANT2/ANT4 天线二极管单元的用法"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "天线效应原理",
+            "LEF ANTENNA 属性",
+            "ANT 二极管单元"
+          ],
+          "order": 4,
+          "practice_task": "diff 普通 LEF 与 ant LEF，找出全部 ANTENNAPARTIALMETALAREA 差异行并定位所属单元与 pin；再从 cell_list 和 LEF 中查 ANT2H7H/ANT4H7H 的尺寸与引脚，说明在流程中何时需要插入这类单元。",
+          "source_files": [
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CH/lef/ics55_LLSC_H7CH.lef",
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CH/lef/ics55_LLSC_H7CH_ant.lef"
+          ],
+          "title": "天线效应与 ant LEF",
+          "topic": "对比 ics55_LLSC_H7CH_ant.lef 与普通 LEF：ant 版仅在个别单元（如 OAI21BX6H7H、XOR3X6H7H 的输出引脚）追加 ANTENNAPARTIALMETALAREA 属性，用于天线效应检查；同时介绍 ANT2H7H/ANT4H7H 天线二极管单元和 IO LEF 中的 ANTENNAPARTIALCUTAREA。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l5-verilog-simulation-models.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "读懂 `celldefine/`timescale/specify 的模板结构",
+            "用 functional 宏切换功能仿真与带延迟仿真",
+            "用 iverilog 对单元级模型做仿真"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "门原语建模",
+            "`ifdef functional 条件编译",
+            "specify 路径延迟",
+            "特殊单元（TIEHI/ANT）"
+          ],
+          "order": 5,
+          "practice_task": "用 iverilog 为 AND2X1H7H 和 TIEHIH7H 写 testbench，分别以默认方式和 -Dfunctional 方式编译仿真，观察 specify 延迟是否生效；再统计整个 verilog 文件里含条件延迟（如 if (B==1'b1)）的模块数量。",
+          "source_files": [
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CH/verilog/ics55_LLSC_H7CH.v"
+          ],
+          "title": "Verilog 仿真模型与 specify 块",
+          "topic": "解读 ics55_LLSC_H7CH.v：模块用门原语（and 等）描述功能，`ifdef functional 可切换纯功能仿真与带 specify 路径延迟的后仿模式；还包含 TIEHI 等电源类单元和 ANT 天线单元的空模型。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u1-l3"
+          ],
+          "filename": "u3-l6-liberty-basics-corners.md",
+          "id": "u3-l6",
+          "learning_goals": [
+            "读懂 liberty 库头的单位与电压/温度标称值",
+            "用文件名解码 corner（电压_温度）",
+            "提取并比较不同 corner 下同一单元的电容参数"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "liberty 库头结构",
+            "corner 命名规则",
+            "cell/pin/capacitance/timing 表"
+          ],
+          "order": 6,
+          "practice_task": "写解析脚本从 tt/ff/ss 三个 IO liberty 中提取 P65_1233_PAR 的 PAD/A 引脚电容，计算 ff 相对 ss 的偏差百分比；执行 make unzip 下载标准单元 liberty（解压后的具体 .lib 文件名 待确认），确认其包含 H7CH 全部单元并报告单元数。",
+          "source_files": [
+            "IP/IO/ICsprout_55LLULP1233_IO_251013/liberty/ICSIOA_N55_3P3_tt_1p2_3p3_25c.lib",
+            "IP/IO/ICsprout_55LLULP1233_IO_251013/liberty/ICSIOA_N55_3P3_ff_1p32_3p63_125c.lib",
+            "IP/IO/ICsprout_55LLULP1233_IO_251013/liberty/ICSIOA_N55_3P3_ss_1p08_2p97_125c.lib",
+            "Makefile"
+          ],
+          "title": "Liberty 时序库基础（以 IO 库为例）",
+          "topic": "以仓库内自带的 IO liberty（约 1150 行，适合入门）讲解 liberty 格式：库头的单位、nom_voltage/nom_temperature、slew 阈值、delay_model table_lookup，corner 命名规则（如 tt_1p2_3p3_25c 表示典型工艺/核 1.2V/IO 3.3V/25℃），以及 cell/pin/电容与一维查找表结构；标准单元库的 liberty 不在 git 内，需 make unzip 下载。"
+        }
+      ],
+      "order": 3,
+      "title": "单元三：标准单元库——从命名到时序模型"
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u4-l1-io-cell-family.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "按功能对 23 个 IO 单元分类",
+            "解释 FILLER 系列按宽度递补 pad 间隙的用法",
+            "区分 CORNER/CUT 等结构单元与电学 pad"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "pad 类型分类",
+            "FILLER 宽度系列",
+            "电源 pad 与拐角/切割单元"
+          ],
+          "order": 1,
+          "practice_task": "从 cell_list 和 LEF 提取所有 FILLER 单元的 SIZE 宽度并排序，验证其宽度系列；再按“信号 pad/电源 pad/填充/拐角/切割”给 23 个单元分类，写出一个假想 40 引脚芯片的 pad 环清单（含拐角和填充）。",
+          "source_files": [
+            "IP/IO/ICsprout_55LLULP1233_IO_251013/cell_list/ICSIOA_N55_3P3.txt",
+            "IP/IO/ICsprout_55LLULP1233_IO_251013/lef/ICSIOA_N55_3P3_1P6M1TM.lef"
+          ],
+          "title": "IO 单元家族盘点",
+          "topic": "梳理 IO 库的 23 个单元：CORNER 拐角、CUT 切割、PAR/PAR_5 并联电阻 pad、PBMUX/PWE 功能 pad、VDD/VSS 系列电源 pad，以及 FILLER0005–FILLER50 八种宽度的填充单元，说明 pad ring 的组成方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u4-l1"
+          ],
+          "filename": "u4-l2-iolef-iosite.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "读懂 PAD 宏的几何与对称性字段",
+            "解释 IOSite/IOCorner 的 site 定义为何只出现在 ecos 版",
+            "根据 pad 尺寸估算 pad ring 用量"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "PAD 宏几何结构",
+            "SITE IOSite/IOCorner",
+            "ecos 版修正内容"
+          ],
+          "order": 2,
+          "practice_task": "从 LEF 提取每个 FILLER 与 PAD 的 SIZE，写脚本按“给定芯片边长”估算每边可摆放的 pad 数并检查间隙能否被 FILLER 系列精确填满；再列出 ecos 版相对普通版修正 USE GROUND 的引脚清单。",
+          "source_files": [
+            "IP/IO/ICsprout_55LLULP1233_IO_251013/lef/ICSIOA_N55_3P3_1P6M1TM.lef",
+            "IP/IO/ICsprout_55LLULP1233_IO_251013/lef/ICSIOA_N55_3P3_1P6M1TM_ecos.lef"
+          ],
+          "title": "IO LEF：PAD 宏、IOSite 与 ecos 适配",
+          "topic": "讲解 IO LEF 的宏结构：CLASS PAD、SIZE 65×130、SYMMETRY X Y R90、ORIGIN/FOREIGN 的 20μm 偏移、SITE IOSite；_ecos 版额外定义了 IOSite（0.005×130）与 IOCorner（130×130）两种 SITE，并把部分电源引脚的 USE SIGNAL 修正为 USE GROUND。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1",
+            "u3-l6"
+          ],
+          "filename": "u4-l3-io-electrical-models.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "理解 IO 库双电压域（1.2V 核 / 3.3V IO）参数",
+            "读懂 pad_cell/is_pad/drive_current 等 liberty 属性",
+            "对照 CDL 晶体管网表理解 pad 的物理实现"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "pad 专用 liberty 属性",
+            "双电压域",
+            "IO verilog/CDL 模型组织"
+          ],
+          "order": 3,
+          "practice_task": "对比 tt/ff/ss 三个 corner 下 P65_1233_PAR 的引脚电容与驱动电流相关字段，计算工艺角偏差；再从 CDL 中定位 PBMUX 的 .SUBCKT，数出晶体管并标注每个端子所属电源域（VDD1/VDDIO/VSSIO 等）。",
+          "source_files": [
+            "IP/IO/ICsprout_55LLULP1233_IO_251013/liberty/ICSIOA_N55_3P3_tt_1p2_3p3_25c.lib",
+            "IP/IO/ICsprout_55LLULP1233_IO_251013/verilog/icsIOA_N55_3P3.v",
+            "IP/IO/ICsprout_55LLULP1233_IO_251013/cdl/ICSIOA_N55_3P3.cdl"
+          ],
+          "title": "IO 电学模型：liberty、Verilog 与 CDL",
+          "topic": "结合三种视图理解 IO 单元电学模型：liberty 中的 pad_cell/is_pad/drive_current 4mA 与双电压域参数（核 1.2V、IO 3.3V， vil/vih=1.42/1.88），verilog 中以无源连接和 `ifdef NOTIMING specify 为主的模型，以及 CDL 晶体管级网表。"
+        }
+      ],
+      "order": 4,
+      "title": "单元四：IO 库与压焊盘"
+    },
+    {
+      "id": "u5",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u5-l1-cdl-transistor-netlists.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "读懂 .SUBCKT/*.PININFO 的语法",
+            "通过器件模型名后缀区分三个阈值库",
+            "从网表重建单元的晶体管级电路图"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "CDL 语法（.SUBCKT/.PININFO/W/L/m）",
+            "器件模型命名与阈值家族",
+            "组合/时序单元电路重建"
+          ],
+          "order": 1,
+          "practice_task": "从 H7CH 的 CDL 中提取 INV（库开头的模板单元）和一个 DFF 单元的网表，逐行还原晶体管连接并画出电路图（手绘或 dot/graphviz），数出 NMOS/PMOS 数量；再用同样方法对比 H7L 版同名单元，确认仅器件模型名不同。",
+          "source_files": [
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CH/cdl/ics55_LLSC_H7CH.cdl",
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CL/cdl/ics55_LLSC_H7L.cdl",
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CR/cdl/ics55_LLSC_H7CR.cdl"
+          ],
+          "title": "CDL 晶体管级网表",
+          "topic": "解读标准单元 CDL：.SUBCKT、*.PININFO（I/O/B 方向标记）、MOS 器件语句（W/L/m 参数）与器件模型名——H7CH 用 nm1p2_hvt_lp/pm1p2_hvt_lp、H7CL 用 lvt、H7CR 用 svt；并注意 CDL 子电路数量（约 1174 个）多于 cell_list（748 个）的现象。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2",
+            "u3-l5",
+            "u3-l6",
+            "u5-l1"
+          ],
+          "filename": "u5-l2-cross-view-consistency.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "建立 cell_list/LEF/verilog/CDL/liberty 五视图的单元与引脚对照",
+            "编写自动化一致性检查脚本",
+            "定位并解释视图间的真实差异（如 CDL 多出的子电路）"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "多视图单元对照",
+            "引脚名/方向核对",
+            "自动检查脚本",
+            "电源引脚约定"
+          ],
+          "order": 2,
+          "practice_task": "写一个 Python 脚本对 H7CH 库生成“单元×视图”与“引脚×视图”两份一致性报告，列出只在某一视图出现的单元和引脚；对 CDL 比 cell_list 多出的子电路抽样 5 个，结合命名推测其用途并标注 待确认。",
+          "source_files": [
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CH/cell_list/ics55_LLSC_H7CH.txt",
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CH/lef/ics55_LLSC_H7CH.lef",
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CH/verilog/ics55_LLSC_H7CH.v",
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CH/cdl/ics55_LLSC_H7CH.cdl",
+            "IP/IO/ICsprout_55LLULP1233_IO_251013/liberty/ICSIOA_N55_3P3_tt_1p2_3p3_25c.lib",
+            "Makefile"
+          ],
+          "title": "多视图一致性检查",
+          "topic": "把前面所有视图串起来：同一单元在 cell_list、LEF、verilog、CDL、liberty 中的单元名与引脚名（含 VDD/VSS 电源约定）应当一致；讲解如何写脚本做交叉核对，以及标准单元 liberty 需下载后才能纳入对比（内部文件名 待确认）。"
+        }
+      ],
+      "order": 5,
+      "title": "单元五：晶体管级视图与一致性"
+    },
+    {
+      "id": "u6",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3",
+            "u3-l3"
+          ],
+          "filename": "u6-l1-load-pdk-into-opensource-eda.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "写出用 OpenROAD 读入 tech LEF+cell LEF+liberty 的 TCL 脚本",
+            "解释为什么开源流程应选择 _ecos 版文件",
+            "核对工具报告的 site/层/单元数量与 PDK 数据一致"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "OpenROAD 读入命令",
+            "ecos 版文件选择策略",
+            "加载结果核对"
+          ],
+          "order": 1,
+          "practice_task": "编写 openroad TCL：read_lef 读入 N551P6M_ecos.lef 与 H7CH_ecos LEF，read_liberty 读入下载的 liberty（文件名 待确认），打印 site、布线层和单元总数，与 u1-l2 的统计互相印证；没有工具时用 Python 实现等价解析并输出同样报告。",
+          "source_files": [
+            "prtech/techLEF/N551P6M_ecos.lef",
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CH/lef/ics55_LLSC_H7CH_ecos.lef",
+            "Makefile"
+          ],
+          "title": "把 PDK 装进开源 EDA 工具",
+          "topic": "演示用开源工具装载 ICS55：OpenROAD 的 read_lef/read_liberty（或 KLayout 导入 LEF/DEF）读入 _ecos 版 tech LEF、cell LEF 与下载的 liberty，核对 site、层栈与单元数量；解释为什么在开源流程中应选 _ecos 版本。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l6",
+            "u6-l1"
+          ],
+          "filename": "u6-l2-yosys-synthesis-experiment.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "掌握 yosys 映射到目标库的完整命令序列",
+            "理解选择 corner liberty 对综合结果的影响",
+            "把综合网表与 PDK verilog 模型联合仿真验证"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "read_liberty/synth 流程",
+            "dfflibmap+abc 库映射",
+            "门级网表后仿对接"
+          ],
+          "order": 2,
+          "practice_task": "写一个 8 位计数器的 Verilog，用 yosys 完成读库、综合、映射到 H7CH（或 H7CR），输出 stat 面积报告与门级网表；再 include ics55_LLSC_H7CR.v 做门级仿真，对比综合前后的波形一致性。",
+          "source_files": [
+            "Makefile",
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CR/verilog/ics55_LLSC_H7CR.v"
+          ],
+          "title": "综合实验：RTL 映射到 H7C 门级网表",
+          "topic": "用 yosys 把小 RTL 综合映射到标准单元库：read_liberty -lib 读入下载的 liberty（解压后文件名 待确认），synth、dfflibmap -liberty、abc -liberty 完成映射，最后用 PDK 自带的 verilog 模型做门级仿真验证功能。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1",
+            "u5-l2"
+          ],
+          "filename": "u6-l3-ecos-variant-design-and-contributing.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "归纳 _ecos 版相对原版的四类适配（RC、电源引脚、高层引脚/SITE、USE 修正）",
+            "按 Apache-2.0 要求为新文件保留 license header",
+            "走通一次模拟的贡献提交流程"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ecos 变体适配要点汇总",
+            "视图文件生成清单",
+            "Apache-2.0 header 与贡献流程"
+          ],
+          "order": 3,
+          "practice_task": "模拟一次贡献：挑选 H7CH 中一个已有单元，为其手工生成一套“新版本视图”变更——cell_list 条目、LEF 片段、ecos 版 LEF 片段（含电源轨道与 MET2 引脚）、verilog 模块和 CDL 网表，所有新文件保留 Apache-2.0 header，并写一份说明 diff 为什么这样改。",
+          "source_files": [
+            "CONTRIBUTING.md",
+            "README.md",
+            "prtech/techLEF/N551P6M_ecos.lef",
+            "IP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CH/lef/ics55_LLSC_H7CH_ecos.lef",
+            "IP/IO/ICsprout_55LLULP1233_IO_251013/lef/ICSIOA_N55_3P3_1P6M1TM_ecos.lef"
+          ],
+          "title": "_ecos 变体设计与二次开发贡献",
+          "topic": "总结仓库维护 _ecos 平行版本的动机：为开源工具补 RC、补电源轨道 pin、补高层引脚可达性、定义 IOSite、修正 USE 属性；再讲贡献流程与 Apache-2.0 逐文件 header 要求，为二次开发（新增单元或修改视图）给出检查清单。"
+        }
+      ],
+      "order": 6,
+      "title": "单元六：开源 EDA 全流程实战"
+    }
+  ]
+}
