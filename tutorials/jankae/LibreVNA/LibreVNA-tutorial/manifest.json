@@ -1,0 +1,1346 @@
+{
+  "head": "c4276df1e79c559f878ebc17e9f0bd3bd0a70f57",
+  "project": "LibreVNA",
+  "rationale": "LibreVNA 是一个\"三合一\"的大型开源项目：Qt 桌面 GUI（分析、校准、可视化、远程控制的主体）、STM32 嵌入式固件、Spartan6 FPGA VHDL 逻辑，三者通过 USB 协议与 SPI 协议衔接。学习路线按\"总—分—合\"设计：先从全局认识（单元1）和 GUI 骨架（单元2）入手，让读者不依赖硬件也能跑起来；再沿数据链路自上而下拆解设备驱动抽象（单元3）与两端通信协议（单元4）；然后深入两个固件层：MCU 固件（单元5）与 FPGA 数据通路（单元6）；回到 GUI 侧三大测量模式（单元7）与 Trace 数据模型/绘图/数学运算（单元8）；最后进入专家主题：误差模型与校准、去嵌入（单元9）、SCPI/TCP 远程控制与 Python 自动化（单元10）、测试体系与二次开发实战（单元11）。依赖关系保证读者先掌握骨架与数据流，再攻校准、协议、FPGA 等硬核主题。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 LibreVNA 的三大组成部分（PC GUI、STM32 固件、FPGA bitstream）及其职责",
+            "对照 RF 框图描述 stimulus 源、参考接收机、两个端口接收链路和两级中频的关系",
+            "理解 'PCB 只是射频前端，处理都在 PC 端完成' 的架构取舍"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "RFBlockdiagram 框图解读",
+            "数字部分与电源部分框图",
+            "仓库三大组件地图"
+          ],
+          "order": 1,
+          "practice_task": "在不连接任何硬件的情况下启动 GUI（或阅读 README），对照 RFBlockdiagram.svg 用自己的话写 200 字总结信号从激励源到 ADC 的完整路径，并指出哪个频率段由 Si5351C 负责、哪个由 MAX2871 负责。",
+          "source_files": [
+            "README.md",
+            "Documentation/DeveloperInfo/RFBlockdiagram.svg",
+            "Documentation/DeveloperInfo/DigitalBlockdiagram.svg"
+          ],
+          "title": "LibreVNA 是什么：项目定位与整体架构",
+          "topic": "介绍矢量网络分析仪的基本概念，以及 LibreVNA 作为 100kHz-6GHz 开源 VNA 的硬件架构：Si5351C/MAX2871 激励源、定向电桥、双接收通道两级下变频，以及 FPGA+MCU+PC 三级数字架构。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-repository-structure.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "画出 Software/PC_Application、Software/VNA_embedded、FPGA 三个子树的职责图",
+            "在代码库中快速定位某个功能（GUI 模式、驱动、协议、测试）对应的目录",
+            "识别文档资产：用户手册、编程指南、三份协议文档的位置"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "顶层目录导览",
+            "PC_Application 子树",
+            "VNA_embedded 与 FPGA 子树"
+          ],
+          "order": 2,
+          "practice_task": "不看任何工具，手工列出 'GUI 中频谱分析仪模式的扫描设置界面'、'固件中 Si5351C 驱动'、'FPGA 中 DFT 模块' 三个功能各自所在的目录和文件，然后用目录浏览验证自己的答案。",
+          "source_files": [
+            "README.md",
+            "Software/PC_Application/LibreVNA-GUI/LibreVNA-GUI.pro",
+            "Software/VNA_embedded/Src/main.c",
+            "FPGA/VNA/top.vhd"
+          ],
+          "title": "仓库地图：目录结构与三大组件",
+          "topic": "带领读者浏览仓库整体布局：Software/PC_Application（GUI 与测试）、Software/VNA_embedded（MCU 固件）、FPGA（VNA 与 Generator 两套 VHDL 工程）、Documentation（协议文档与手册）、Hardware。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-build-and-run-gui.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "安装 Qt6 与 libusb 依赖并成功编译 LibreVNA-GUI",
+            "解释 .pro 工程文件如何组织源码与子目录",
+            "在没有实体设备时验证 GUI 可用（演示模式/导入示例测量）"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "依赖安装与 qmake6/make 流程",
+            "LibreVNA-GUI.pro 工程结构",
+            "无硬件运行与 udev 规则"
+          ],
+          "order": 3,
+          "practice_task": "在本机（Linux 或按文档对应平台）从源码编译并启动 GUI，截图记录编译输出；若无硬件，导入 Documentation/Measurements 下的示例测量并打开一个 Smith 图验证程序工作。",
+          "source_files": [
+            "Documentation/DeveloperInfo/BuildAndFlash.md",
+            "Software/PC_Application/LibreVNA-GUI/LibreVNA-GUI.pro",
+            "Software/PC_Application/LibreVNA-GUI/main.cpp"
+          ],
+          "title": "构建与运行 PC GUI 应用",
+          "topic": "讲解如何用 qmake6/Qt Creator 编译运行 GUI，包括依赖库、libusb、udev 规则，以及 main.cpp 中 QApplication 的启动入口。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l4-firmware-and-fpga-build.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "说出 MCU 固件与 FPGA bitstream 各自的工具链（STM32CubeIDE / Xilinx ISE）",
+            "理解 AssembleFirmware.py 如何把固件与 bitstream 合成单一可烧写文件",
+            "梳理 'FPGA 配置存在 flash、由 MCU 通过 USB 更新' 的免 JTAG 方案"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "STM32CubeIDE 构建流程",
+            "ISE 综合流程与 AssembleFirmware.py",
+            "版本与变更记录"
+          ],
+          "order": 4,
+          "practice_task": "阅读 AssembleFirmware.py，写出它读取哪些输入文件、产出什么，以及它与 GUI 内固件升级对话框的关系；如果你没有 ISE，说明 bitstream 如何从 Release 获取。",
+          "source_files": [
+            "Documentation/DeveloperInfo/BuildAndFlash.md",
+            "AssembleFirmware.py",
+            "FPGA/VNA/VNA.xise",
+            "Documentation/DeveloperInfo/VersionsAndModifications.md"
+          ],
+          "title": "固件与 FPGA 工具链：构建、烧写与版本演进",
+          "topic": "介绍 MCU 固件（STM32CubeIDE）与 FPGA bitstream（Xilinx ISE）的构建方式，以及 AssembleFirmware.py 如何将两者组装成可通过 USB 刷写的固件文件。"
+        }
+      ],
+      "order": 1,
+      "title": "初识 LibreVNA：项目定位、架构与构建"
+    },
+    {
+      "id": "u2",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l1-appwindow-startup.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "跟踪 main.cpp 到 AppWindow 构造函数的启动序列",
+            "理解命令行解析、信号处理与 --no-gui 无头模式",
+            "定位设备连接、模式切换、SCPI/TCP 服务在 AppWindow 中的初始化位置"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "main.cpp 启动",
+            "AppWindow 构造与菜单/工具栏/状态栏",
+            "命令行参数与无头模式"
+          ],
+          "order": 1,
+          "practice_task": "在 appwindow.cpp 中找到 QCommandLineParser 支持的所有选项列表，整理成表格；再用 --no-gui 启动一次程序（可无硬件），观察日志输出证明对话框被抑制（对应提交 c4276df 的行为）。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/main.cpp",
+            "Software/PC_Application/LibreVNA-GUI/appwindow.cpp",
+            "Software/PC_Application/LibreVNA-GUI/appwindow.h"
+          ],
+          "title": "从 main() 到 AppWindow：GUI 启动流程",
+          "topic": "解析 GUI 的启动链路：QApplication 创建、AppWindow 构造、菜单/工具栏/状态栏搭建、命令行参数（含 --no-gui）以及设备连接的初始状态。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-modes-and-modehandler.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "解释 Mode 基类提供了哪些通用能力（菜单、SCPI 节点、设置保存）",
+            "跟踪 ModeHandler 如何创建并注册三种模式并在界面切换",
+            "说出新增一种自定义模式需要继承并实现哪些接口"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Mode 基类",
+            "ModeHandler 与 ModeWindow",
+            "三种内置模式"
+          ],
+          "order": 2,
+          "practice_task": "在 mode.h 中列出 Mode 类的纯虚/关键虚函数；写一份伪代码骨架：继承 Mode 实现一个 'HelloMode'（只显示一个空 QWidget），并说明应插入到 appwindow.cpp 的哪一行才能注册生效。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/mode.cpp",
+            "Software/PC_Application/LibreVNA-GUI/mode.h",
+            "Software/PC_Application/LibreVNA-GUI/modehandler.cpp",
+            "Software/PC_Application/LibreVNA-GUI/modewindow.cpp"
+          ],
+          "title": "Mode 系统与模式切换",
+          "topic": "讲解 GUI 的核心抽象 Mode：VNA、频谱仪、信号源三种模式如何由 Mode/ModeHandler/ModeWindow 组织、切换和持久化。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l3-preferences-and-setup.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "解释 nlohmann::json 在设置体系中的角色",
+            "实现一个自定义 Savable 类的 nlohmann::json toJSON()/fromJSON()",
+            "区分 Preferences（全局）与 Setup（工作区）两类持久化数据"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Savable 接口",
+            "Preferences 系统",
+            "Setup 保存/加载"
+          ],
+          "order": 3,
+          "practice_task": "用 GUI 保存一份 .setup 文件并用文本编辑器打开，对照 appwindow.cpp 的 SaveSetup() 找到你修改过的每一项；再写一个小脚本（Python/手动）修改其中一个参数并重新加载验证。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/savable.cpp",
+            "Software/PC_Application/LibreVNA-GUI/savable.h",
+            "Software/PC_Application/LibreVNA-GUI/preferences.cpp",
+            "Software/PC_Application/LibreVNA-GUI/appwindow.cpp"
+          ],
+          "title": "设置体系：Preferences、Savable 与 JSON Setup",
+          "topic": "分析 GUI 的两级持久化：全局 Preferences 对话框，以及基于 Savable 接口和 nlohmann::json 的工作区 SaveSetup/LoadSetup 机制。"
+        }
+      ],
+      "order": 2,
+      "title": "GUI 应用骨架：启动、模式与设置"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u3-l1-devicedriver-abstraction.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "列出 DeviceDriver 的主要纯虚接口（发现、连接、配置扫描、接收数据）",
+            "理解 getDrivers() 注册机制与驱动名唯一性要求",
+            "解释 VNAMeasurement/SAMeasurement 等数据结构如何向上层解耦硬件"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "DeviceDriver 接口总览",
+            "测量数据结构与信号",
+            "驱动注册与枚举"
+          ],
+          "order": 1,
+          "practice_task": "只看 devicedriver.h 顶部注释和虚函数声明，写一份 '新驱动接入清单'：要实现哪些函数、哪些可选；再对照 librevnadriver.h 检查真实驱动覆盖了哪些。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/Device/devicedriver.h",
+            "Software/PC_Application/LibreVNA-GUI/Device/devicedriver.cpp"
+          ],
+          "title": "DeviceDriver：统一的设备驱动抽象",
+          "topic": "精读 devicedriver.h：如何通过一个抽象基类同时支持 LibreVNA 和第三方仪器（文件头注释明确给出了新增驱动的步骤），以及测量回调、状态标志等通用契约。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-librevna-usb-tcp-drivers.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "跟踪 USB 设备发现、打开、传输线程的完整路径",
+            "对比 USB 与 TCP 两种传输方式在驱动中的异同",
+            "理解 usbinbuffer 这类接收缓冲工具的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "LibreVNADriver 公共层",
+            "USB 驱动",
+            "TCP 驱动"
+          ],
+          "order": 2,
+          "practice_task": "画出 USB 与 TCP 两条路径下 '收到一包原始字节 → 解析成 DeviceDriver::VNAMeasurement → 发出信号' 的调用序列图，标注每个函数所在的文件与行号。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnausbdriver.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnatcpdriver.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Util/usbinbuffer.cpp"
+          ],
+          "title": "LibreVNA 驱动：USB 与 TCP 两条通道",
+          "topic": "分析官方设备的驱动实现：librevnadriver 公共逻辑，USB（libusb）与 TCP 两种传输后端，以及设备枚举与连接生命周期。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l3-driver-ecosystem.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "对比第三方驱动与官方驱动在能力声明上的差异（哪些功能返回不支持）",
+            "理解 CompoundDriver 如何把多台 LibreVNA 组合成多端口虚拟设备",
+            "评估为其他仪器编写驱动的工作量与切入点"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "getDrivers() 注册表",
+            "第三方驱动两例",
+            "CompoundDriver 组合逻辑"
+          ],
+          "order": 3,
+          "practice_task": "在 ssa3000xdriver.cpp 与 sna5000adriver.cpp 中各找出一处 '设备能力有限，接口返回 false/空' 的实现；然后写一段 300 字的方案：为某台你手边的仪器（或假想仪器）设计驱动骨架。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/Device/devicedriver.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Device/SSA3000X/ssa3000xdriver.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Device/SNA5000A/sna5000adriver.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/Compound/compounddriver.cpp"
+          ],
+          "title": "驱动生态：第三方仪器与复合设备",
+          "topic": "浏览驱动家族的其余成员：SSA3000X、SNA5000A、Harogic 第三方驱动，devicetcpdriver 通用 TCP 后端，以及把多台 LibreVNA 组合成虚拟多端口设备的 CompoundDriver。"
+        }
+      ],
+      "order": 3,
+      "title": "设备驱动层：抽象接口与驱动生态"
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u4-l1-communication-architecture.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "说出 Communication 类在固件中的角色与收发路径",
+            "对照 Protocol.hpp 识别命令帧与数据帧的 C 结构布局",
+            "理解固件内同时存在二进制协议与 SCPI 文本协议两套入口"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Communication 收发框架",
+            "Protocol.hpp 帧定义",
+            "PacketConstants 端点约定"
+          ],
+          "order": 1,
+          "practice_task": "在 Protocol.hpp 中找出 ':DEVice:INFO?' 之类查询对应的二进制命令结构（或指出该功能仅走 SCPI 路径），并整理一份 '命令名 → 结构体 → 固件处理函数' 对照表的样例三行。",
+          "source_files": [
+            "Software/VNA_embedded/Application/Communication/Communication.cpp",
+            "Software/VNA_embedded/Application/Communication/Protocol.hpp",
+            "Software/VNA_embedded/Application/Communication/PacketConstants.h"
+          ],
+          "title": "设备端通信架构：Communication 与 Protocol",
+          "topic": "进入固件侧通信层：Communication.cpp 如何接收 USB 数据并按 Protocol.hpp 中定义的包类型分发到 VNA/SA/Generator 等处理模块。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-usb-protocol-docs.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "按 USB_protocol 文档描述一次扫描设置包与测量数据包的端点和字节序",
+            "对照 PacketConstants.h 验证文档与代码的一致性",
+            "理解 Device_protocol 与 USB_protocol 两层协议的划分"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "USB 端点与包格式",
+            "设备层命令语义",
+            "协议版本管理"
+          ],
+          "order": 2,
+          "practice_task": "任选一个测量数据包类型，在文档（.tex 源码）、固件 Protocol.hpp、GUI librevnadriver.cpp 三处各找到它的定义，写一段一致性核对记录（字段、大小、端序）。",
+          "source_files": [
+            "Documentation/DeveloperInfo/USB_protocol_v12.tex",
+            "Documentation/DeveloperInfo/Device_protocol_v13.tex",
+            "Software/VNA_embedded/Application/Communication/PacketConstants.h"
+          ],
+          "title": "USB 协议逐包解析（结合协议文档）",
+          "topic": "以仓库自带的 USB_protocol_v12.tex 与 Device_protocol_v13.tex 文档为教材，逐类解释控制包、扫描设置包、测量数据包的格式，并与代码中的 PacketConstants.h 相互印证。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l3-gui-side-protocol.md",
+          "id": "u4-l3",
+          "learning_task_missing": null,
+          "learning_goals": [
+            "在 GUI 侧找到构造和发送每一种控制包的函数",
+            "解释接收线程如何拆包、校验并转换为测量信号",
+            "使用 devicepacketlog 抓取一次真实的收发会话"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "包构造与发送",
+            "接收解析路径",
+            "包日志工具"
+          ],
+          "order": 3,
+          "practice_task": "如果有设备：用 GUI 的数据包日志功能（或 devicepacketlog.cpp 对应界面）抓取一次 '启动 VNA 扫描' 的完整包序列并解读前三个包；没有设备则在 librevnadriver.cpp 中为发送函数加 qDebug 并在无硬件模式下走读代码路径。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/librevnadriver.h",
+            "Software/PC_Application/LibreVNA-GUI/Device/LibreVNA/devicepacketlog.cpp"
+          ],
+          "title": "GUI 侧协议实现：librevnadriver 收发全链路",
+          "topic": "从 GUI 视角走完协议闭环：librevnadriver.cpp 如何构造扫描设置、下发到 USB/TCP、接收原始包、校验并转换成 DeviceDriver 信号抛给各模式。"
+        }
+      ],
+      "order": 4,
+      "title": "两端对话：设备通信协议"
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u5-l1-firmware-startup-freertos.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "跟踪 main.c → App::init → 任务创建的启动序列",
+            "说出固件中主要 FreeRTOS 任务/中断的分工",
+            "在庞大的 VNA_embedded 工程中定位业务代码（Application/）与生成代码（Src/、Middlewares/）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "CubeMX 生成代码与用户代码区",
+            "App 启动与任务初始化",
+            "中断与同步"
+          ],
+          "order": 1,
+          "practice_task": "画一张固件启动流程图：从复位到 App::initspereported 完成，标注每一步所在文件；用不同颜色区分 ST 生成代码与项目自有代码。",
+          "source_files": [
+            "Software/VNA_embedded/Src/main.c",
+            "Software/VNA_embedded/Src/app_freertos.c",
+            "Software/VNA_embedded/Application/App.cpp"
+          ],
+          "title": "固件启动流程与 FreeRTOS 任务",
+          "topic": "从 Src/main.c 和 app_freertos.c 出发，理解 STM32G4 固件如何初始化外设、创建任务，并进入 Application/App.cpp 的主逻辑。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-hardware-control.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "解释 Hardware::SetOutputUnlevel 等高层 API 如何分解为对多个芯片驱动的寄存器写",
+            "读懂 Si5351C 与 MAX2871 驱动的配置流程",
+            "理解 HW_HAL 对 MCU 引脚/外设的封装作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Hardware 门面",
+            "时钟与 PLL 驱动",
+            "HW_HAL 与板级引脚"
+          ],
+          "order": 2,
+          "practice_task": "选择一个硬件动作（如 '把激励设到 3 GHz、某功率'），在 Hardware.cpp 中找到实现，列出它调用的每个底层驱动函数及寄存器含义，输出为时序清单。",
+          "source_files": [
+            "Software/VNA_embedded/Application/Hardware.cpp",
+            "Software/VNA_embedded/Application/HW_HAL.cpp",
+            "Software/VNA_embedded/Application/Drivers/Si5351C.cpp",
+            "Software/VNA_embedded/Application/Drivers/max2871.cpp"
+          ],
+          "title": "射频硬件控制：时钟、PLL 与硬件门面",
+          "topic": "解析 Hardware.cpp 这一硬件门面：如何协调 Si5351C 时钟树、MAX2871 PLL、衰减器与开关，把一个抽象测量配置翻译成一串芯片寄存器操作。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-device-calibration-and-flash.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "区分设备级校准（Cal.cpp，存于 flash）与 GUI 级校准（单元9）的职责边界",
+            "解释固件在启动时如何从 flash 恢复校准数据并应用到原始采样",
+            "描述 Firmware.cpp 参与的自举/升级流程"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Cal 设备校准",
+            "Flash 读写驱动",
+            "Firmware 升级状态机"
+          ],
+          "order": 3,
+          "practice_task": "列出 Cal.cpp 中保存的所有校准系数类别；对照 GUI 的 amplitudecaldialog.cpp（如读过单元9 再回来对照）说明 PC 端如何写入这些数据，写出写路径经过的函数链。",
+          "source_files": [
+            "Software/VNA_embedded/Application/Cal.cpp",
+            "Software/VNA_embedded/Application/Drivers/Flash.cpp",
+            "Software/VNA_embedded/Application/Firmware.cpp"
+          ],
+          "title": "设备级校准与 Flash 存储",
+          "topic": "讲解固件如何存取板级校准（Cal.cpp：频率误差、源/接收机幅度校准等）以及 Flash 驱动；同时引出 Firmware.cpp 的固件升级协议。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l4-device-modes.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "对比三种设备端模式的状态机与 FPGA 交互方式",
+            "解释一次 VNA 扫描在固件侧的完整时序（配置 FPGA → 等待中断 → 取数 → 预处理 → USB 上报）",
+            "理解触发输入/输出在测量同步中的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "VNA 扫描模式",
+            "频谱分析模式",
+            "Generator 模式与触发"
+          ],
+          "order": 4,
+          "practice_task": "为 VNA.cpp 的扫描处理写伪代码流程图，标出与 FPGA.cpp 交互、与 Communication 上报的每个交点；说明 '零扫宽/点频模式' 与普通扫描在该流程中的分叉位置。",
+          "source_files": [
+            "Software/VNA_embedded/Application/VNA.cpp",
+            "Software/VNA_embedded/Application/SpectrumAnalyzer.cpp",
+            "Software/VNA_embedded/Application/Generator.cpp",
+            "Software/VNA_embedded/Application/Trigger.cpp"
+          ],
+          "title": "设备端三大模式：VNA 扫描、频谱分析与信号源",
+          "topic": "逐个走读固件侧的 VNA.cpp、SpectrumAnalyzer.cpp、Generator.cpp，理解它们如何配置 FPGA 扫描、响应硬件中断并把结果经 Communication 上报。"
+        }
+      ],
+      "order": 5,
+      "title": "嵌入式固件：从 main() 到测量数据上报"
+    },
+    {
+      "id": "u6",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u6-l1-fpga-top-and-dataflow.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "说出 top.vhd 实例化的主要功能块及其互连",
+            "对照 FPGA_protocol 文档解释 MCU 与 FPGA 的命令集",
+            "解释 800kHz IF 采样在 FPGA 内的处理流水线概貌"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "top 实例化结构",
+            "MCU 命令入口",
+            "数据流水线总览"
+          ],
+          "order": 1,
+          "practice_task": "为 top.vhd 画一张模块级框图（手绘即可）：标出 ADC 输入、SPI 从机、各功能块和 MCU 接口；标注每个信号的方向与位宽。",
+          "source_files": [
+            "FPGA/VNA/top.vhd",
+            "FPGA/VNA/VNA.xise",
+            "Documentation/DeveloperInfo/FPGA_protocol.tex"
+          ],
+          "title": "FPGA 顶层设计与数据流总览",
+          "topic": "从 top.vhd 与 ISE 工程入手，梳理 Spartan6 内部的功能块划分：SPI 从机、扫描控制、采样、窗函数、DFT，以及它们与 MCU、ADC 的连接。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-sweep-control.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "解释 Sweep.vhd 如何逐点推进频率与各硬件控制线",
+            "理解 Synchronizer.vhd 在跨时钟域信号传递中的作用",
+            "估算一次扫描中 FPGA 与 PLL 的握手时序"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Sweep 状态机",
+            "跨时钟域同步",
+            "测试台验证思路"
+          ],
+          "order": 2,
+          "practice_task": "阅读 Sweep.vhd 的进程结构，写出它每个状态下驱动哪些输出；解释为什么频率切换后需要等待（PLL 锁定/稳定时间）以及代码里在哪里体现。",
+          "source_files": [
+            "FPGA/VNA/Sweep.vhd",
+            "FPGA/VNA/Synchronizer.vhd"
+          ],
+          "title": "扫描引擎：Sweep.vhd 与 Synchronizer",
+          "topic": "精读 Sweep.vhd：FPGA 如何自主完成一次多点扫描（向 PLL 发送新频率、触发采样、汇总结果），以及 Synchronizer.vhd 的 CDC 作用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l3-sampling-and-adc.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "解释 MCP33131.vhd 如何满足 ADC 时序并缓存样本",
+            "描述 Sampling.vhd 的样本汇聚流程",
+            "理解 16bit@800kHz IF 采样在系统中的位置"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ADC 接口时序",
+            "样本缓冲",
+            "采样测试台"
+          ],
+          "order": 3,
+          "practice_task": "对照 MCP33131 的数据手册时序（或 Test_MCP33131.vhd 的激励），说明 FPGA 在每个采样周期输出的控制脉冲顺序；修改 Test_Sampling.vhd 的一个参数（如样本数）并解释预期波形变化。",
+          "source_files": [
+            "FPGA/VNA/Sampling.vhd",
+            "FPGA/VNA/MCP33131.vhd",
+            "FPGA/VNA/Test_Sampling.vhd"
+          ],
+          "title": "采样链路：Sampling.vhd 与 ADC 接口",
+          "topic": "分析 ADC 数据如何进入 FPGA：MCP33131.vhd 驱动 16 位 ADC 时序，Sampling.vhd 汇聚两路接收通道的样本块并交给后续处理。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "filename": "u6-l4-windowing-and-dft.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "解释 Hann/Flattop/Kaiser 系数文件如何被加载进 ROM",
+            "理解 Windowing.vhd 的串行乘法流程与 DFT.vhd 的递推结构",
+            "说出片上 DFT 相比把原始样本传给 PC 的好处"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "窗系数与 Windowing",
+            "DFT 核",
+            "DFT 测试台"
+          ],
+          "order": 4,
+          "practice_task": "推导 DFT.vhd 对 250kHz IF 做 1kHz 分辨率需要的点数；阅读 Test_DFT.vhd，写出它注入的测试信号与期望输出，并说明若改为注入噪声应如何判断输出正确。",
+          "source_files": [
+            "FPGA/VNA/Windowing.vhd",
+            "FPGA/VNA/window.vhd",
+            "FPGA/VNA/DFT.vhd",
+            "FPGA/VNA/Test_DFT.vhd"
+          ],
+          "title": "片上信号处理：加窗与 DFT",
+          "topic": "理解 FPGA 如何在片上完成下变频后的数字处理：Windowing.vhd 加窗（Hann/Flattop/Kaiser 系数文件）与 DFT.vhd 提取幅度/相位，减轻 USB 带宽压力。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l5-spi-slave-and-pll.md",
+          "id": "u6-l5",
+          "learning_goals": [
+            "解释 spi_slave.vhd 与 SPIConfig.vhd 组成的命令分发机制",
+            "读懂 MAX2871.vhd 如何生成 PLL 寄存器写时序",
+            "对照 FPGA_protocol 文档核对命令编码"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "SPI 从机与命令分发",
+            "PLL 寄存器写入",
+            "SPI 测试台"
+          ],
+          "order": 5,
+          "practice_task": "整理一份 FPGA 命令码表（来自 SPIConfig.vhd 或协议文档），标注每条命令的参数与作用；用 Test_SPICommands.vhd 的思路设计一条假想命令 '读取当前扫描点编号' 的编码方案。",
+          "source_files": [
+            "FPGA/VNA/spi_slave.vhd",
+            "FPGA/VNA/SPIConfig.vhd",
+            "FPGA/VNA/MAX2871.vhd",
+            "FPGA/VNA/Test_SPICommands.vhd"
+          ],
+          "title": "MCU-FPGA 接口：SPI 从机与 PLL 控制",
+          "topic": "解析 spi_slave.vhd/SPIConfig.vhd 组成的寄存器式命令接口，以及 FPGA 侧直接驱动 MAX2871 PLL 的 MAX2871.vhd 模块。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2",
+            "u6-l4"
+          ],
+          "filename": "u6-l6-fpga-testbenches.md",
+          "id": "u6-l6",
+          "learning_goals": [
+            "读懂 VHDL testbench 的激励-断言模式",
+            "为 Test_Windowing.vhd / Test_PLL.vhd 补充一个自定义用例",
+            "建立 '改 VHDL 先跑仿真' 的开发习惯"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "testbench 模式总结",
+            "仿真工具（ISE 仿真器/其他）",
+            "自增用例实践"
+          ],
+          "order": 6,
+          "practice_task": "任选一个 Test_*.vhd，理解其时钟/复位生成与自动检查逻辑，然后添加一个新的激励场景（例如不同窗类型或不同 PLL 频率），运行仿真并记录波形截图与结论。",
+          "source_files": [
+            "FPGA/VNA/Test_Windowing.vhd",
+            "FPGA/VNA/Test_PLL.vhd",
+            "FPGA/VNA/Test_SinCos.vhd"
+          ],
+          "title": "FPGA 验证文化：Testbench 全家福",
+          "topic": "总结仓库自带的仿真测试（Test_DFT/Test_Sampling/Test_SPI/Test_Windowing/Test_MAX2871 等），学习如何在没有实物的情况下验证 VHDL 模块。"
+        }
+      ],
+      "order": 6,
+      "title": "FPGA 设计：VHDL 数据通路逐块精读"
+    },
+    {
+      "id": "u7",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u3-l1"
+          ],
+          "filename": "u7-l1-vna-mode.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "解释 VNA 模式如何把 UI 设置翻译成 DeviceDriver 扫描配置",
+            "跟踪一次测量从驱动信号到 TraceModel 的路径",
+            "理解零扫宽、点数、IF 带宽等参数的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "VNA 类与扫描设置",
+            "数据接收路径",
+            "ConfigureSweep 调用链"
+          ],
+          "order": 1,
+          "practice_task": "在没有硬件的情况下通读代码，回答：把 IF 带宽减半会沿哪条调用链影响设备端配置？写出途经的每个函数名；如有硬件则实际对比降噪效果并截图。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/VNA/vna.cpp",
+            "Software/PC_Application/LibreVNA-GUI/VNA/vna.h"
+          ],
+          "title": "VNA 模式：扫描设置与数据入口",
+          "topic": "走读 VNA/vna.cpp：GUI 中 VNA 模式的扫描参数（起止频率、点数、IF 带宽、功率、端口）如何组织、下发驱动并在收到 VNAMeasurement 后送入数据管线。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l2-spectrum-analyzer-mode.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "对比 SA 与 VNA 模式在配置和数据结构上的差异",
+            "解释归一化（Normalization）在 SA 模式中的实现",
+            "理解 RBW/VBW/Span 等频谱仪特有参数的传递"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "SA 扫描配置",
+            "SAMeasurement 数据流",
+            "归一化逻辑"
+          ],
+          "order": 2,
+          "practice_task": "整理 VNA 模式与 SA 模式的 '设置项 → DeviceDriver 接口' 对照表，指出哪些设置只属于其中一种模式以及驱动如何处理不支持的情况。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/SpectrumAnalyzer/spectrumanalyzer.cpp",
+            "Software/PC_Application/LibreVNA-GUI/SpectrumAnalyzer/spectrumanalyzer.h"
+          ],
+          "title": "频谱分析仪模式",
+          "topic": "分析 SpectrumAnalyzer/spectrumanalyzer.cpp：频谱模式的扫描（SPAN/RBW/VBW/检波方式）、跟踪源（TG）配置与归一化处理。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l3-generator-mode.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "解释 Generator 模式如何维护 '当前输出配置' 并响应频率变更",
+            "跟踪一次频率修改从 UI 到驱动下发的调用链",
+            "对比 Generator 与 VNA 点频模式（零扫宽）的差别"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Generator 模式状态",
+            "信号源控件",
+            "下发链路"
+          ],
+          "order": 3,
+          "practice_task": "从 signalgenwidget.cpp 的某个 UI 事件出发，手动追踪到 DeviceDriver 的输出设置调用，写出完整函数调用栈；说明为什么连续拖动滑块时需要防抖或合并更新。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/Generator/generator.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Generator/signalgenwidget.cpp"
+          ],
+          "title": "信号发生器模式",
+          "topic": "走读 Generator/generator.cpp 与 signalgenwidget.cpp：连续波输出、频率/功率控制、双端口切换的最小模式实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l4-averaging-and-streaming.md",
+          "id": "u7-l4",
+          "learning_goals": [
+            "解释 averaging.cpp 支持的平均策略及其数学含义",
+            "区分 Raw/Calibrated/Deembedded 与 Normalized 数据的流向",
+            "用流式接口把测量数据导出到外部程序"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "averaging 模板",
+            "addStreamingData 数据分级",
+            "StreamingServer 输出"
+          ],
+          "order": 4,
+          "practice_task": "无硬件时：在代码中找到 VNA 与 SA 各自的平均实现并说明触发一次 'reset averaging' 的所有场景；有条件时启动流式服务器用 Python socket 收取一批点并绘制。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/averaging.cpp",
+            "Software/PC_Application/LibreVNA-GUI/averaging.h",
+            "Software/PC_Application/LibreVNA-GUI/appwindow.cpp",
+            "Software/PC_Application/LibreVNA-GUI/streamingserver.cpp"
+          ],
+          "title": "平均、数据分级与流式输出",
+          "topic": "讲解 averaging.cpp 的通用平均器（VNA/SA 各自的策略）以及 AppWindow::addStreamingData 的数据分级（Raw/Calibrated/Deembedded、SA Raw/Normalized）与 StreamingServer 分发。"
+        }
+      ],
+      "order": 7,
+      "title": "GUI 三大测量模式"
+    },
+    {
+      "id": "u8",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u8-l1-trace-and-tracemodel.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "解释 Trace 的数据存储结构、live 属性与更新通知机制",
+            "理解 TraceModel 如何管理多条 Trace 并通知视图刷新",
+            "区分 X 轴类型（频率/时间/功率）对 Trace 的约束"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Trace 数据与信号",
+            "TraceModel 容器",
+            "TraceAxis 轴类型"
+          ],
+          "order": 1,
+          "practice_task": "写一份 Trace 生命周期图：创建 → 添加到 TraceModel → 接收数据 → 通知图 → 删除；标注每一步触发的 Qt 信号与槽函数名。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/Traces/trace.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Traces/trace.h",
+            "Software/PC_Application/LibreVNA-GUI/Traces/tracemodel.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Traces/traceaxis.cpp"
+          ],
+          "title": "Trace 与 TraceModel：测量数据的容器",
+          "topic": "解析 GUI 的核心数据结构：Trace（一条测量曲线的数据、颜色、参数）与 TraceModel（管理所有 Trace 并对接各模式的数据源）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "filename": "u8-l2-trace-plots.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "解释 TracePlot 基类如何完成拖拽、自动缩放与事件分发",
+            "对比 SmithChart、极坐标、XY 图、瀑布图、眼图各自的表达对象",
+            "说明多个图共享同一 Trace 时的更新机制"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TracePlot 基类",
+            "SmithChart 与极坐标",
+            "XY/瀑布/眼图"
+          ],
+          "order": 2,
+          "practice_task": "导入一个示例测量（无硬件可导入 Touchstone），为同一条 S11 Trace 分别创建 Smith 图与 XY 图，然后对照 tracesmithchart.cpp 与 tracexyplot.cpp 找到各自的坐标变换函数并推导一遍数学。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/Traces/traceplot.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Traces/tracesmithchart.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Traces/tracexyplot.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Traces/tracewaterfall.cpp"
+          ],
+          "title": "绘图体系：Smith 图、XY 图与瀑布图",
+          "topic": "讲解 TracePlot 继承体系：tracesmithchart、tracepolarchart、tracexyplot、tracewaterfall、eyediagramplot 如何订阅 TraceModel 并把复数数据变换为屏幕坐标。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "filename": "u8-l3-markers.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "解释 Marker 如何在指定 X 位置插值并读取 Y 值",
+            "配置 marker 的自动搜索（峰值/最小值/带宽）",
+            "理解 MarkerGroup 跨 Trace 联动的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Marker 模型",
+            "自动搜索规则",
+            "MarkerGroup 联动"
+          ],
+          "order": 3,
+          "practice_task": "在导入的示例 Trace 上创建一个 Marker，启用峰值搜索，然后在 marker.cpp 中找到 '从数据点到 marker 显示值' 的插值函数，解释当 marker 落在两个采样点之间时值如何计算。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/Traces/Marker/marker.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Traces/Marker/marker.h",
+            "Software/PC_Application/LibreVNA-GUI/Traces/Marker/markermodel.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Traces/Marker/markergroup.cpp"
+          ],
+          "title": "Marker 系统：读数、搜索与编组",
+          "topic": "分析 Marker/MarkerModel/MarkerGroup：游标如何附着到 Trace、支持哪些自动搜索类型（峰值、带宽、滤波器带宽等）以及编组联动。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "filename": "u8-l4-import-export-formats.md",
+          "id": "u8-l4",
+          "learning_goals": [
+            "写出 Touchstone S1P/S2P 文件的字段格式并手工解析一行",
+            "解释 GUI 中导入向导如何把文件变成 Trace",
+            "实现 CSV 导出并选择合适的小数位与单位"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Touchstone 解析",
+            "导入/导出对话框",
+            "CSV 与单位"
+          ],
+          "order": 4,
+          "practice_task": "手工编写一个两点的 S1P 文件导入 GUI 验证解析正确；再导出为 CSV，对比两种格式保存的信息差异，写 200 字小结。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/touchstone.cpp",
+            "Software/PC_Application/LibreVNA-GUI/csv.cpp",
+            "Software/PC_Application/LibreVNA-GUI/CustomWidgets/touchstoneimport.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Traces/tracetouchstoneexport.cpp"
+          ],
+          "title": "数据进出：Touchstone 与 CSV 导入导出",
+          "topic": "理解标准测量文件格式在 GUI 中的实现：touchstone.cpp 的解析/生成、csv.cpp、以及对应的导入导出对话框。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "filename": "u8-l5-tracemath-framework.md",
+          "id": "u8-l5",
+          "learning_goals": [
+            "解释 TraceMath 的有向图结构与数据流向",
+            "实现一个自定义数学运算节点（如固定增益乘法）",
+            "理解输入/输出 Trace 在链上的传递关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TraceMath 基类与链",
+            "运算节点注册",
+            "时间域与频域互转约束"
+          ],
+          "order": 5,
+          "practice_task": "参照 medianfilter.cpp 实现一个 'Multiply' 运算（把 Trace 乘以常数），注册到 newtracemathdialog 中可选列表，编译并验证导入的数据被正确缩放。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/Traces/Math/tracemath.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Traces/Math/tracemath.h",
+            "Software/PC_Application/LibreVNA-GUI/Traces/Math/medianfilter.cpp"
+          ],
+          "title": "Trace 数学运算框架",
+          "topic": "解析 Traces/Math/tracemath.cpp 的运算链设计：一条 Trace 可以串联多个数学运算节点（TDR、DFT、时间门、中值滤波、表达式），数据沿链逐级变换。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l5"
+          ],
+          "filename": "u8-l6-tdr-dft-timegate.md",
+          "id": "u8-l6",
+          "learning_goals": [
+            "推导从频域 S 参数到时域冲激响应的 IFFT 关系",
+            "解释窗类型对 TDR 分辨率与旁瓣的影响",
+            "理解时间门在时域截断后变换回频域的流程"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TDR 变换",
+            "DFT 与窗函数",
+            "时间门"
+          ],
+          "order": 6,
+          "practice_task": "导入一个示例测量，对 S11 施加 TDR 迹线，改变窗类型观察冲激响应变化；然后在 tdr.cpp 中找到补零与窗处理代码解释你观察到的差异。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/Traces/Math/tdr.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Traces/Math/dft.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Traces/Math/timegate.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Traces/Math/windowfunction.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Traces/fftcomplex.cpp"
+          ],
+          "title": "时频变换实战：TDR、DFT 与时间门",
+          "topic": "深入最有价值的数学节点：tdr.cpp（时域反射）、dft.cpp、timegate.cpp（时间门控）以及底层 fftcomplex.cpp 的 FFT 实现。"
+        }
+      ],
+      "order": 8,
+      "title": "Traces：数据模型、绘图与数学运算"
+    },
+    {
+      "id": "u9",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u9-l1-calkit-and-standards.md",
+          "id": "u9-l1",
+          "learning_goals": [
+            "写出理想 Open/Short/Load/Through 的 S 参数定义及其偏离模型",
+            "解释 calkit.cpp 如何用 JSON 描述整套校准件",
+            "为自制校准件录入一套近似模型"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "校准件模型",
+            "校准件套件管理",
+            "编辑对话框"
+          ],
+          "order": 1,
+          "practice_task": "在 GUI 中新建一个校准件套件，录入一个 '理想 Short'（零偏移），再用 calstandard.cpp 的模型公式手算该件在 1GHz 的理论反射系数，验证与 GUI 显示一致。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/Calibration/calkit.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Calibration/calkit.h",
+            "Software/PC_Application/LibreVNA-GUI/Calibration/calstandard.cpp"
+          ],
+          "title": "校准件与校准套件模型",
+          "topic": "理解校准的物理基础：calkit.cpp/calstandard.cpp 如何建模 Open/Short/Load/Through 标准件的寄生参数（偏移长度、损耗、寄生电抗等）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "filename": "u9-l2-calibration-solver.md",
+          "id": "u9-l2",
+          "learning_goals": [
+            "推导 12 项误差模型与各误差项的物理来源",
+            "跟踪 calibration.cpp 求解误差项与应用修正的两段代码",
+            "解释测量数量不足时求解器如何降级（部分校准）"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "误差模型",
+            "测量调度",
+            "求解与应用"
+          ],
+          "order": 2,
+          "practice_task": "阅读 calibration.cpp 的求解函数，写出 '读取校准测量 → 组建方程组 → 求解误差项 → 存係数' 每一步对应的代码位置；手动推导 SOL 三步测量的三个方程。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/Calibration/calibration.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Calibration/calibration.h",
+            "Software/PC_Application/LibreVNA-GUI/Calibration/calibrationmeasurement.cpp"
+          ],
+          "title": "校准求解器：从测量到误差模型",
+          "topic": "精读 calibration.cpp：GUI 如何引导用户按顺序测量校准件、构造并求解误差项矩阵（SOLT 等），再把原始测量变换为校准后 S 参数。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "filename": "u9-l3-librecal.md",
+          "id": "u9-l3",
+          "learning_goals": [
+            "解释 LibreCAL 的端口切换原理与 USB 控制方式",
+            "跟踪 GUI 自动校准测量流程与人工流程的差异",
+            "评估自动校准件相对传统校准件的风险与收益"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "LibreCAL USB 设备抽象",
+            "电子校准件协议",
+            "自动测量流程"
+          ],
+          "order": 3,
+          "practice_task": "梳理 '使用 LibreCAL 完成一次全双端口校准' 的软件流程为步骤清单，标注每步涉及的类；没有 LibreCAL 硬件时，仅做代码走读并指出流程在哪里检测硬件存在与否。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/Calibration/LibreCAL/caldevice.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Calibration/LibreCAL/usbdevice.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Calibration/LibreCAL/librecaldialog.cpp"
+          ],
+          "title": "LibreCAL：电子自动化校准件",
+          "topic": "分析对配套电子校准件 LibreCAL 的支持：caldevice/usbdevice 如何枚举与切换标准件、librecaldialog 如何与校准流程联动实现一键校准。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l2"
+          ],
+          "filename": "u9-l4-deembedding-framework.md",
+          "id": "u9-l4",
+          "learning_goals": [
+            "解释 DeembeddingOption 的接口约定与启用/禁用时机",
+            "理解去嵌入作用在 '已校准' 数据上的管线位置",
+            "编写一个最简去嵌入选项（如理想衰减器）"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DeembeddingOption 接口",
+            "选项管理对话框",
+            "与校准管线衔接"
+          ],
+          "order": 4,
+          "practice_task": "参照 portextension.cpp 的结构实现一个 'IdealAttenuator' 去嵌入选项（对 S21 除以固定系数），注册进 deembeddingdialog 可选列表并在导入数据上验证。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/VNA/Deembedding/deembedding.cpp",
+            "Software/PC_Application/LibreVNA-GUI/VNA/Deembedding/deembeddingoption.cpp",
+            "Software/PC_Application/LibreVNA-GUI/VNA/Deembedding/deembeddingoption.h"
+          ],
+          "title": "去嵌入框架与选项体系",
+          "topic": "讲解 VNA/Deembedding 的插件式设计：deembedding.cpp 管理选项列表，deembeddingoption.cpp 定义基类，各选项在测量数据上做夹具效应修正。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l4"
+          ],
+          "filename": "u9-l5-deembedding-options.md",
+          "id": "u9-l5",
+          "learning_goals": [
+            "推导端口延伸的时延-相位旋转公式",
+            "解释阻抗再归一化需要的参考阻抗变换矩阵",
+            "描述 2xthru 去嵌入求解夹具网络的过程"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "端口延伸",
+            "阻抗与匹配网络",
+            "2x-Thru 智能去嵌入"
+          ],
+          "order": 5,
+          "practice_task": "对一条导入的 S21 迹线手动施加 100ps 端口延伸，在 portextension.cpp 中核对相位修正公式并手算 1GHz 处应旋转的相角，与 GUI 结果对比；再简述 2x-Thru 需要哪些测量输入。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/VNA/Deembedding/portextension.cpp",
+            "Software/PC_Application/LibreVNA-GUI/VNA/Deembedding/impedancerenormalization.cpp",
+            "Software/PC_Application/LibreVNA-GUI/VNA/Deembedding/matchingnetwork.cpp",
+            "Software/PC_Application/LibreVNA-GUI/VNA/Deembedding/twothru.cpp"
+          ],
+          "title": "去嵌入实战：端口延伸、阻抗与 2x-Thru",
+          "topic": "逐个分析内置去嵌入选项：portextension（端口延伸）、matchingnetwork（匹配网络）、impedancerenormalization（阻抗再归一化）、twothru（2x-Thru 智能去嵌入）的数学与实现。"
+        }
+      ],
+      "order": 9,
+      "title": "校准与去嵌入：测量误差的软件修正"
+    },
+    {
+      "id": "u10",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u10-l1-scpi-framework.md",
+          "id": "u10-l1",
+          "learning_goals": [
+            "解释 SCPI 命令树的层级组织与解析过程",
+            "区分 command 与 query 两种回调",
+            "用 SCPICommand 注册一条自定义命令"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "SCPICommand 与 SCPINode",
+            "命令树解析",
+            "错误处理约定"
+          ],
+          "order": 1,
+          "practice_task": "在 scpi.h/scpi.cpp 中画出 ':VNA:FREQuency:STARt' 命令的解析路径；然后给某个节点添加一条假想命令 ':DEMO:HELLO?'，编译后用 TCP 方式（结合下一讲）验证返回值。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/scpi.cpp",
+            "Software/PC_Application/LibreVNA-GUI/scpi.h",
+            "Software/PC_Application/LibreVNA-GUI/appwindow.cpp"
+          ],
+          "title": "SCPI 命令框架：语法树与解析",
+          "topic": "精读 scpi.cpp/scpi.h：SCPINode/SCPICommand 如何构成命令树、长短期助记符匹配、命令与查询的回调机制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "filename": "u10-l2-scpi-tcp-integration.md",
+          "id": "u10-l2",
+          "learning_goals": [
+            "列出各模式注册的 SCPI 命令命名空间",
+            "解释 TCPServer 的事件循环与多客户端处理",
+            "用telnet/netcat完成一次无 GUI 交互的测量配置"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "AppWindow SCPI 装配",
+            "各模式 SCPI 节点",
+            "TCP 服务器与无头运行"
+          ],
+          "order": 2,
+          "practice_task": "启动 GUI（可用 --no-gui），用 nc/telnet 连接 SCPI 端口，完成 '查询识别 → 设置中心频率 → 读回' 三个命令并记录往返报文；对照 tcpserver.cpp 解释粘包处理。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/appwindow.cpp",
+            "Software/PC_Application/LibreVNA-GUI/mode.cpp",
+            "Software/PC_Application/LibreVNA-GUI/tcpserver.cpp"
+          ],
+          "title": "SCPI 集成与 TCP 远程控制",
+          "topic": "看 AppWindow::SetupSCPI 与各 Mode 的 createSCPI 导出的命令面，以及 tcpserver.cpp 如何在端口上提供这套命令（配合 --no-gui 即可作为无头服务）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u10-l2"
+          ],
+          "filename": "u10-l3-streaming-and-python.md",
+          "id": "u10-l3",
+          "learning_goals": [
+            "说出流式服务器输出的数据格式与五个通道（VNA Raw/Cal/Deemb、SA Raw/Norm）",
+            "阅读 libreVNA.py 封装的连接与命令原语",
+            "编写一个自动取数脚本"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "StreamingServer 协议",
+            "libreVNA.py 测试库",
+            "测试用例组织"
+          ],
+          "order": 3,
+          "practice_task": "复用 Integrationtests 的 libreVNA.py（或其思路）写一个 20 行脚本：连接设备 → 读 IDN → 设置一个 VNA 扫描 → 取回 S11 幅度数组；没有硬件时写 'dry-run' 分支仅打印将发送的 SCPI 命令。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/streamingserver.cpp",
+            "Software/Integrationtests/tests/libreVNA.py",
+            "Software/Integrationtests/tests/TestBase.py",
+            "Software/Integrationtests/tests/TestVNASweep.py"
+          ],
+          "title": "流式数据服务与 Python 自动化",
+          "topic": "先讲 streamingserver.cpp 的二进制流输出（区别于 SCPI），再学 Integrationtests 的 Python 测试库 libreVNA.py，掌握脚本化控制 LibreVNA 的两条路线。"
+        }
+      ],
+      "order": 10,
+      "title": "远程控制与自动化"
+    },
+    {
+      "id": "u11",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "filename": "u11-l1-unit-tests.md",
+          "id": "u11-l1",
+          "learning_goals": [
+            "搭建 Qt 测试工程并运行现有用例",
+            "理解对参数矩阵运算类（S参数转换）的测试方法",
+            "为 parameters.cpp 中一个未覆盖函数补充测试"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "测试工程结构",
+            "校准与参数测试用例",
+            "新增用例方法"
+          ],
+          "order": 1,
+          "practice_task": "编译并运行 LibreVNA-Test，记录全部通过/失败项；然后为 Tools/parameters.h 中任一 S 参数转换函数写一个新测试（手算期望值），跑通后统计自己的用例与现有用例的风格差异。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-Test/main.cpp",
+            "Software/PC_Application/LibreVNA-Test/parametertests.cpp",
+            "Software/PC_Application/LibreVNA-Test/calibrationtests.cpp",
+            "Software/PC_Application/LibreVNA-Test/ffttests.cpp"
+          ],
+          "title": "单元测试与数值验证",
+          "topic": "分析 LibreVNA-Test 单元测试工程：parameters（S 参数运算）、calibration、FFT、portextension、impedance renormalization、util 各测试文件如何用已知答案验证数学代码。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "filename": "u11-l2-tools-and-widgets.md",
+          "id": "u11-l2",
+          "learning_goals": [
+            "使用 parameters.cpp 的 S 参数矩阵函数完成混合模式转换等计算",
+            "复用 SI 单位编辑框等自定义控件",
+            "理解 Eigen 库在校准/去嵌入求解中的角色"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "parameters 数学库",
+            "实用工具（eseries/混合模式）",
+            "自绘控件复用"
+          ],
+          "order": 2,
+          "practice_task": "写一个独立小demo（或测试用例）：对一组 2 端口 S 参数调用 mixedmodeconversion 与 parameters 的矩阵函数，输出差模/共模 S 参数，并与 impedancematchdialog 的用途对应起来说明。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/Tools/parameters.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Tools/parameters.h",
+            "Software/PC_Application/LibreVNA-GUI/Tools/mixedmodeconversion.cpp",
+            "Software/PC_Application/LibreVNA-GUI/CustomWidgets/siunitedit.cpp"
+          ],
+          "title": "工具箱：S 参数数学、E 系列、阻抗匹配与自定义控件",
+          "topic": "走读 Tools 与 CustomWidgets：parameters.cpp 的 S/Z/Y 参数转换与矩阵运算（含 Eigen）、eseries 标准值、impedancematchdialog、mixedmodeconversion，以及 siunitedit 等可复用控件。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u8-l1"
+          ],
+          "filename": "u11-l3-capstone-new-driver.md",
+          "id": "u11-l3",
+          "learning_goals": [
+            "独立完成一个 DeviceDriver 子类的骨架",
+            "把驱动注册进 getDrivers() 并在设备列表 UI 中出现",
+            "总结本手册三层数据链路（FPGA→固件→GUI）的知识闭环"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "驱动骨架实现",
+            "注册与设备列表",
+            "联调与验证手段"
+          ],
+          "order": 3,
+          "practice_task": "实现一个 'DemoDriver'：getDriverName 返回 'Demo'，GetAvailableDevices 返回一个虚拟序列号，连接后定时产生正弦形状的假 S 参数数据；注册到 devicedriver.cpp 的 getDrivers()，编译后不接硬件即可在 GUI 中选中 Demo 设备并看到滚动更新的迹线。",
+          "source_files": [
+            "Software/PC_Application/LibreVNA-GUI/Device/devicedriver.h",
+            "Software/PC_Application/LibreVNA-GUI/Device/devicedriver.cpp",
+            "Software/PC_Application/LibreVNA-GUI/Device/SSA3000X/ssa3000xdriver.cpp",
+            "Software/PC_Application/LibreVNA-GUI/VNA/vna.cpp"
+          ],
+          "title": "毕业实战：为 LibreVNA 编写一个新设备驱动",
+          "topic": "以综合实战收尾：把手册所学串起来，从零实现一个最小 DeviceDriver（虚拟演示设备），经历接口实现、注册、设备列表显示、数据上报的完整闭环。"
+        }
+      ],
+      "order": 11,
+      "title": "测试、工具与二次开发实战"
+    }
+  ]
+}
