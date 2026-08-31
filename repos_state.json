@@ -58781,7 +58781,7 @@
     },
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-30T23:02:21Z"
+      "last_run_at": "2026-08-31T18:02:26Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
@@ -63246,31 +63246,36 @@
           "error": null
         },
         "u11-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"75d4ec4d-94f8-4409-9dff-3c62"
+          "cost": 1.8163829999999999,
+          "error": null
         },
         "u11-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 2.634709,
+          "error": null
         },
         "u11-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.263798,
+          "error": null
         }
       },
       "manifest_head": "c4276df1e79c559f878ebc17e9f0bd3bd0a70f57",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/jankae/LibreVNA/LibreVNA-tutorial",
       "last_head": "c4276df1e79c559f878ebc17e9f0bd3bd0a70f57",
-      "last_run_at": "2026-08-30T23:02:21Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-08-31T18:02:26Z",
+      "last_error": null,
+      "abandoned": []
     },
     "CVCUDA/CV-CUDA": {
       "prompt_hash": "b21aef51792b02df",
@@ -63724,51 +63729,64 @@
           "error": null
         },
         "u7-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"7563697a-024a-47b8-8fa5-d9e0"
+          "cost": 1.910178,
+          "error": null
         },
         "u7-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.315963,
+          "error": null
         },
         "u7-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.248537,
+          "error": null
         },
         "u8-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 2.6841400000000006,
+          "error": null
         },
         "u8-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.305218,
+          "error": null
         },
         "u8-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.278655,
+          "error": null
         },
         "u8-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 2.051916,
+          "error": null
         }
       },
       "manifest_head": "ed6a3cb69782c4147151b3898944bc38132bae00",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/yangzf-1023/4C4D/4C4D-tutorial",
       "last_head": "ed6a3cb69782c4147151b3898944bc38132bae00",
-      "last_run_at": "2026-08-30T23:02:21Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-08-31T18:02:26Z",
+      "last_error": null,
+      "abandoned": []
     },
     "openecos-projects/icsprout55-pdk": {
       "prompt_hash": "b21aef51792b02df",
@@ -63809,36 +63827,46 @@
           "error": null
         },
         "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.0798810000000003,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.190665,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.5438399999999997,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "failed",
+          "action": "new",
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\n\"Structural diff of normal vs ecos cell LEF with Python parser\"}},{\"tool_name\":\"Bash\",\"tool_use_id\":\"call_1b37a63ecb2b479c94633b23\",\"tool_input\":{\"command\":\"python3 -c \\\"print('ok')"
+        },
+        "u3-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.8557389999999998,
+          "error": null
+        },
+        "u3-l5": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"50981dd0-f22d-4ef1-a465-27f5"
-        },
-        "u3-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"0d58e08d-211a-427c-ab9e-f3ef"
         },
         "u3-l6": {
           "status": "pending",
@@ -63892,11 +63920,316 @@
       "mode": "full",
       "tutorial_path": "tutorials/openecos-projects/icsprout55-pdk/icsprout55-pdk-tutorial",
       "last_head": "68d89edb47847671e18f9e65d66c0cd883995e05",
-      "last_run_at": "2026-08-30T23:02:21Z",
+      "last_run_at": "2026-08-31T18:02:26Z",
       "last_error": "quota exhausted; will resume next window"
     },
-    "Pixel-Talk/PEAR": {},
-    "MoonshotAI/checkpoint-engine": {},
+    "Pixel-Talk/PEAR": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8996750000000001,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0859469999999998,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.9461499999999998,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1150479999999998,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.408913,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"29daac6d-eea6-429c-8444-6765"
+        },
+        "u2-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "230fa1534367c9f357c1c192a328cdc87ab4491c",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/Pixel-Talk/PEAR/PEAR-tutorial",
+      "last_head": "230fa1534367c9f357c1c192a328cdc87ab4491c",
+      "last_run_at": "2026-08-31T18:02:26Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
+    "MoonshotAI/checkpoint-engine": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.969444,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"cd34fe82-71e2-442c-b4f6-26d7"
+        },
+        "u1-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u1-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "d1de07b3aacff34050d09c3efa093f9a2fcdcf73",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/MoonshotAI/checkpoint-engine/checkpoint-engine-tutorial",
+      "last_head": "d1de07b3aacff34050d09c3efa093f9a2fcdcf73",
+      "last_run_at": "2026-08-31T18:02:26Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
     "MoonshotAI/FlashKDA": {},
     "MoonshotAI/Attention-Residuals": {},
     "MoonshotAI/Moonlight": {},
