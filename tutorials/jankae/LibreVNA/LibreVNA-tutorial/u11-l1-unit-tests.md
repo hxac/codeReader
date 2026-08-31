@@ -1,520 +1,456 @@
 # 单元测试与数值验证
 
-> **模块映射**：4.1 对应「测试工程结构」，4.2 与 4.3 对应「校准与参数测试用例」，4.4 对应「新增用例方法」。
-
 ## 1. 本讲目标
 
-学完本讲，你应当能够：
+LibreVNA 的 GUI 里藏着一座"数学工厂"：S 参数在各参数域之间来回换算、FFT 正逆变换、校准误差项求解、端口延伸的相位斜率回归……这些代码有一个共同特点——**写错了一样能跑，只是结果悄悄不对**。一座桥的图纸画错了会塌，一个 `Zparam` 转换公式抄错了一个符号，Smith 图上只会显示一条"看起来不太对劲"的曲线。
 
-1. **搭建并运行** LibreVNA-Test 测试工程：全量运行、只跑一个测试类、只跑一个测试函数，并看懂 Qt Test 的输出与退出码。
-2. **读懂现有用例**：说出参数测试、校准测试、FFT 测试各自「期望值从哪里来」，并识别每种策略的强弱点（手算常数、对偶往返、公式镜像、合成数据、边界值）。
-3. **独立新增一个用例**：为 `Tools/parameters.h` 中尚未被覆盖的 S↔T 参数转换函数手算期望值、写出测试、编译运行直至通过，并能把自己用例的风格与现有用例做对比分析。
+本讲带你走进仓库里的 `Software/PC_Application/LibreVNA-Test/` 测试工程，学完之后你应该能够：
 
-本讲是「专家层」的入口：前面十一个单元教你怎么**读**这套代码，本讲开始教你怎么**证明**它是对的——以及怎么证明你自己新写的代码是对的。
+1. 说清这个测试工程如何组织：一个 `main.cpp` 聚合六个测试类、`.pro` 文件把整个 GUI 编进测试可执行文件的原因。
+2. 编译并运行 LibreVNA-Test，读懂 Qt Test 的输出，并能挑选单个测试函数运行。
+3. 掌握数值代码的三种验证套路：**已知答案测试**（手算期望值）、**独立公式对照**（用另一条算法路径当裁判）、**往返一致性**（变过去再变回来）。
+4. 理解浮点断言的容差艺术：为什么有的测试用 `qFuzzyCompare(double)`、有的要降级成 `float` 比较、有的干脆用 `1e-14` 绝对容差。
+5. 为 `Tools/parameters.h` 中一个**目前完全没有测试覆盖**的函数（`Tparam` 转换）亲手补一个测试，走完"选函数 → 手算 → 写断言 → 登记 → 运行"的完整闭环。
 
 ## 2. 前置知识
 
-### 2.1 什么是「已知答案」测试
+### 2.1 什么是单元测试
 
-LibreVNA 里最有价值的代码是**数学代码**：S 参数矩阵转换、校准误差项求解、FFT、圆拟合。这类代码的单元测试有一个统一范式——**已知答案测试（oracle test）**：
+单元测试就是把程序里**最小可独立执行的单位**（通常是一个函数）单独拎出来，喂给它输入，检查输出是否符合预期。C++ 世界里最常见的做法是"断言式"测试：
 
 ```
-构造输入（通常是一个小到能手算的值）
-    ↓
-调用被测函数
-    ↓
-把输出与「事先手算/查表得到的期望值」比对
+准备输入 → 调用被测函数 → 用断言比较"实际值"和"期望值"
 ```
 
-关键在「事先」二字：期望值必须**独立于被测代码**得出。如果期望值是让被测代码自己跑一遍抄下来的，测试就永远绿色、毫无意义。本讲会反复回到这个原则，并指出仓库里一处「轻微违反」它的用例（见 4.3.3 的 portextensiontests）。
+断言失败时测试框架记录一条失败并继续（或中止当前用例），全部跑完汇总报告。这样一次编译就能把几十个数学函数的正确性全部"点名"一遍。
 
-### 2.2 Qt Test 最小骨架
+### 2.2 Qt Test 框架的三个关键词
 
-Qt 自带的测试框架只需要三样东西：
+LibreVNA 用的是 Qt 自带的测试框架 Qt Test，只需要认识三个东西：
 
-1. 一个继承 `QObject` 的类，带 `Q_OBJECT` 宏；
-2. 类里声明一个 `private slots:` 区域——**每个 slot 函数就是一个测试用例**，框架靠 Qt 元对象系统自动发现它们，不需要手工注册清单；
-3. `main()` 里调用 `QTest::qExec(new MyTests, argc, argv)` 执行。
+| 关键词 | 作用 |
+|---|---|
+| `private slots:` | 测试类的**私有槽**就是测试用例。Qt Test 用 moc 反射枚举类里所有私有槽，按声明顺序逐个调用 |
+| `QVERIFY(条件)` | 最基本的断言：条件为假则当前测试函数失败 |
+| `QTest::qExec(测试对象, argc, argv)` | 驱动一个测试类跑完它全部的槽，返回非零表示有失败 |
 
-断言常用两个宏：
+所以一个测试类 = 一个 `QObject` 子类 + 一堆私有槽，仅此而已。
 
-- `QVERIFY(条件)`——条件为假则该用例失败并记录行号；
-- `QCOMPARE(实际值, 期望值)`——除了失败还能打印两个值，便于诊断。
+### 2.3 数值测试的特殊困难：浮点数没有"相等"
 
-后面 4.2.3 会看到，本仓库几乎只用 `QVERIFY`，这本身就是一个值得讨论的风格取舍。
+整数可以 `==`，浮点不行。`0.1 + 0.2 != 0.3` 是 IEEE 754 的天性。数值测试必须回答两个问题：
 
-### 2.3 浮点数不能用 `==`：`qFuzzyCompare` 家族
+- **期望值从哪来？** 用被测代码自己算一遍再存下来，等于没测（这叫"录音式测试"，只能防回归、不能防原本就错）。正规做法是期望值来自**被测代码之外**的独立来源：手算、教科书公式、物理常识。
+- **容差设多大？** 太严会误报（两条数值路径的合法差异被判失败），太松会漏报（真 bug 被吞掉）。Qt 提供的 `qFuzzyCompare` 是**相对**容差比较：
 
-数学代码的输出是浮点数，而 `0.1 + 0.2 != 0.3`（二进制浮点无法精确表示大部分十进制小数）。Qt 提供模糊比较，其语义是**相对误差**：
+\[ |p_1 - p_2| \times 10^{k} \le \min(|p_1|, |p_2|), \quad k = 12\ (\text{double}),\; 5\ (\text{float}) \]
 
-\[ |p_1 - p_2| \;\le\; \varepsilon \cdot \min(|p_1|, |p_2|), \qquad \varepsilon_{\text{double}} = 10^{-12},\; \varepsilon_{\text{float}} = 10^{-5} \]
+注意两点：相对容差意味着**一边接近 0 时不可靠**（此时应改用 `qFuzzyIsNull`）；把 double 强转成 float 再比较，等价于把容差从约 \(10^{-12}\) 放宽到约 \(10^{-5}\)——本讲稍后会看到作者在 `parametertests.cpp` 里正是这么干的，并且留了注释解释原因。
 
-注意两个推论，它们解释了仓库测试里所有「奇怪」的写法：
+### 2.4 数值代码的三种验证套路
 
-- **分母是 min(|p1|,|p2|)，一旦其中一个值为 0，右边就恒为 0**——于是 `qFuzzyCompare(x, 0.0)` 几乎永远失败（除非 x 精确等于 0）。**与 0 比较必须用 `qFuzzyIsNull`**（判 |x| ≤ 阈值）。
-- double 版的 \(10^{-12}\) 太苛刻，复数矩阵求逆这类多步运算的累积误差常常超过它——所以仓库测试大量使用 **先转 float 再比较** 的技巧（见 4.2.3）。
+本讲的测试文件恰好示范了三种互补的思路，先记住名字：
 
-### 2.4 承接前面各讲
+1. **已知答案测试（golden value）**：挑一个能手算的输入，把期望值硬编码进测试。例如理想直通的 T 参数就是单位矩阵。
+2. **独立公式对照（oracle）**：在测试里**用另一条数学路径**现场算出期望值，再和被测函数比。例如 `S2Z_2P` 在测试里手写了教科书上的 \(Z_{11}\) 展开式，与代码里的 Eigen 矩阵算法对质。
+3. **往返一致性（round-trip）**：S→ABCD→S，或者 FFT→IFFT，变换过去再变换回来必须还原。抓的是"成对实现的两个函数不是彼此的逆"这类错误。
 
-- u1-l2 已经建立认知：`LibreVNA-Test` 是**纯 PC 侧单元测试**，不连接真实硬件；需要硬件的端到端测试在 `Software/Integrationtests/`（u10-l3 已讲）。
-- u1-l3 讲过 qmake6/make 的通用构建流程，本讲直接套用。
-- u8-l6 精读过 `ffttests.cpp` 的两个细节（5 点数据走 Bluestein 分支、逆变换后 `/size` 的缩放契约），本讲只做方法学归纳，不再展开数学。
-- u9-l2 已带你跑过 `CalibrationTests` 单类；本讲补全「全量运行、单函数运行、退出码」等完整工作流。
+三种套路强度递减、成本也递减：往返测试不需要期望值，但它测不出"两个方向犯了同一个错"。
 
 ## 3. 本讲源码地图
 
-| 文件 | 作用 |
+| 文件 | 角色 |
 |---|---|
-| [Software/PC_Application/LibreVNA-Test/main.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/main.cpp) | 测试入口：创建 QApplication，串联 6 个测试类的 qExec |
-| [Software/PC_Application/LibreVNA-Test/LibreVNA-Test.pro](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/LibreVNA-Test.pro) | 工程文件：声明测试框架依赖，并把整个 GUI 编进测试二进制 |
-| [Software/PC_Application/LibreVNA-Test/parametertests.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.cpp) | S/Z/ABCD 参数转换测试（本讲精读 + 补测试的对象） |
-| [Software/PC_Application/LibreVNA-GUI/Tools/parameters.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Tools/parameters.cpp) | 被测的参数转换实现，含**未被测试覆盖的 S↔T、swapPorts、reduceTo** |
-| [Software/PC_Application/LibreVNA-Test/calibrationtests.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/calibrationtests.cpp) | 校准频率栅格检测测试（假数据工厂范式） |
-| [Software/PC_Application/LibreVNA-Test/ffttests.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/ffttests.cpp) | FFT 引擎测试（含一个**空的占位用例**） |
-| [Software/PC_Application/LibreVNA-Test/utiltests.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/utiltests.cpp) | 圆拟合、固件版本比较、阻抗↔S 参数测试（边界值范式） |
-| [Software/PC_Application/LibreVNA-Test/impedancerenormalizationtests.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/impedancerenormalizationtests.cpp) | 阻抗再归一化去嵌入选项的测试 |
-| [Software/PC_Application/LibreVNA-Test/portextensiontests.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/portextensiontests.cpp) | 端口延伸自动提取与修正的测试（合成数据范式） |
+| `Software/PC_Application/LibreVNA-Test/main.cpp` | 测试入口：聚合六个测试类，累积退出码 |
+| `Software/PC_Application/LibreVNA-Test/LibreVNA-Test.pro` | 测试工程定义：把整个 GUI + 协议层编进测试 |
+| `Software/PC_Application/LibreVNA-Test/parametertests.{h,cpp}` | S/ABCD/Z 参数互转的已知答案与独立公式测试 |
+| `Software/PC_Application/LibreVNA-Test/calibrationtests.cpp` | 校准测量频率栅格探测（线性/对数/混合）测试 |
+| `Software/PC_Application/LibreVNA-Test/ffttests.cpp` | FFT 手算期望值 + 往返一致性测试 |
+| `Software/PC_Application/LibreVNA-Test/utiltests.cpp` | 圆拟合、版本比较、阻抗↔S 参数等工具测试 |
+| `Software/PC_Application/LibreVNA-Test/portextensiontests.cpp` | 端口延伸自动计算与修正的端到端测试 |
+| `Software/PC_Application/LibreVNA-Test/impedancerenormalizationtests.cpp` | 阻抗再归一化的物理已知值测试 |
+| `Software/PC_Application/LibreVNA-GUI/Tools/parameters.{h,cpp}` | 被测对象：参数域转换数学库（本讲实践对象） |
+| `Software/PC_Application/LibreVNA-GUI/Traces/fftcomplex.h` | 被测对象：Nayuki FFT 接口声明 |
+| `Software/PC_Application/LibreVNA-GUI/Util/util.h` | 被测对象：圆拟合、传输线、版本比较声明 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 测试工程结构：一个把整个 GUI 链接进来的测试二进制
+本讲的三个最小模块：**测试工程结构**、**校准与参数测试用例**、**新增用例方法**。
+
+### 4.1 测试工程结构
 
 #### 4.1.1 概念说明
 
-初学者想象的「单元测试」是：只编译被测的那一个 `.cpp` 加一个 `main()`，几秒钟出结果。LibreVNA-Test **不是**这种。
+测试工程要回答的第一个问题是：**被测代码怎么进来？** LibreVNA 的 GUI 没有把数学库拆成独立的 `.so`/`.a`，`calibration.cpp` 依赖 `calkit.cpp`，后者又依赖 `touchstone.cpp` 和一堆对话框控件……C++ 的头文件依赖会像滚雪球一样把半个工程拖进来。这个测试工程的选择是干脆利落的：**把整个 GUI 全部编进来**。好处是不用维护一份"精简源文件清单"，坏处是编译一次测试等于编译一次 GUI。
 
-它是一个**把几乎整个 GUI 应用（约 160 个源文件）连同固件侧 `Protocol.cpp` 一起编进来的测试程序**。这么做的动机很实际：`Calibration`、`PortExtension`、`ImpedanceRenormalization` 这些被测类并非孤立的头文件 + 实现，它们的构造函数、JSON 反序列化、甚至 `edit()` 都会触碰 `Trace`、`DeviceDriver`、`CalStandard` 等一大片类型。与其为测试做一层假的编译边界，不如直接复用 GUI 的 `.pro` 内容。
-
-代价是编译时间与 GUI 相当；收益是**测试里可以直接使用生产代码的全部类型**，写起来毫无阻抗。理解这一点，你才能理解下面两个「怪现象」：
-
-- `main.cpp` 创建的是 `QApplication`（GUI 应用对象）而不是 `QCoreApplication`；
-- 跑测试时屏幕上可能**真的闪现出对话框**。
+第二个问题是：**六个测试类怎么装进一个可执行文件？** Qt Test 的常规用法是一个测试类一个 `main`，这里采用"聚合器"模式：一个 `main.cpp` 依次 `qExec` 六个类。
 
 #### 4.1.2 核心流程
 
-构建期（与 u1-l3 的 GUI 构建完全同构）：
+测试程序从启动到退下的完整流程：
 
-```
-cd Software/PC_Application/LibreVNA-Test
-qmake6 LibreVNA-Test.pro      ← 生成 Makefile（QT += testlib 起作用）
-make -j$(nproc)               ← 编译 GUI 全部源文件 + 7 个测试文件
-./LibreVNA-Test               ← 运行
-```
-
-运行期：
-
-```
-main() 创建 QApplication
-  → qExec(UtilTests)            返回 0 或非 0
-  → qExec(PortExtensionTests)   结果按位或累积
-  → qExec(ParameterTests)
-  → qExec(fftTests)
-  → qExec(ImpedanceRenormalizationTests)
-  → qExec(CalibrationTests)
-  → return status               0 = 全部通过
-```
-
-每个 `qExec` 会解析命令行参数，所以你可以**在运行时选择执行范围**：
-
-```
-./LibreVNA-Test                          # 全部 6 类
-./LibreVNA-Test ParameterTests           # 只跑一个类
-./LibreVNA-Test ParameterTests::S2ABCD   # 只跑一个用例
-./LibreVNA-Test -functions               # 列出所有用例名（不含运行）
-make check                               # CONFIG += testcase 提供的目标
-echo $?                                  # 0 = 全绿
-```
+1. `main()` 创建 `QApplication`（注意：不是 `QCoreApplication`，原因见 4.1.3）。
+2. 依次 `QTest::qExec(new XxxTests, argc, argv)` 执行六个测试类。
+3. 每个类的所有 `private slots` 按声明顺序运行，断言失败被记录。
+4. 各类的退出码用 `|=` 按位累积——**任何一类失败，总退出码就非零**，方便 CI 判断。
+5. 进程退出码交给 `make check` 或调用方。
 
 #### 4.1.3 源码精读
 
-**入口：一个 QApplication 串六个 qExec**
+先看入口，总共只有 23 行：
 
-[main.cpp:10-23](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/main.cpp#L10-L23) 是整个测试工程的全部入口，这段代码做了三件事：第 12 行创建 `QApplication`（因为多个测试会实例化真实控件，事件循环由 qExec 内部维护）；第 15-20 行按固定顺序执行 6 个测试类，用 `|=` 把每次的退出码按位或起来——**任何一类失败，最终返回值就非 0**，这是脚本能用退出码判断全绿的原因；第 22 行返回累积状态。
+[Software/PC_Application/LibreVNA-Test/main.cpp:L1-L23](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/main.cpp#L1-L23)
 
-注意第 14-20 行的顺序是「从纯函数到重控件」排列：`UtilTests`（纯数学）在前，`CalibrationTests`（要构造校准件对象图）在后。这个顺序没有功能意义，但读起来有层次感。
+这段代码做了三件事：包含六个测试类的头文件；创建 `QApplication`；用 `status |=` 依次执行六个测试类并累积结果。注意第 12 行用的是 `QApplication` 而非 `QCoreApplication`——测试也要有完整的 widgets 环境，因为 `PortExtensionTests` 会调用 `PortExtension::edit()` 去创建真实的编辑对话框控件（见 4.2.3），没有 widgets 环境直接崩溃。这是"被测代码与 UI 耦合，测试就得把 UI 基础设施拉起来"的典型例子。
 
-**工程文件：三个关键声明**
+再看工程文件的关键几行：
 
-[LibreVNA-Test.pro:1](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/LibreVNA-Test.pro#L1) 的 `QT += testlib widgets network svg` 引入 Qt Test 模块（`QVERIFY`/`qExec` 所在），同时保留 widgets——再次印证「测试会碰真实控件」。
+[Software/PC_Application/LibreVNA-Test/LibreVNA-Test.pro:L1-L6](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/LibreVNA-Test.pro#L1-L6)
 
-[LibreVNA-Test.pro:3](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/LibreVNA-Test.pro#L3) 的 `CONFIG += ... testcase` 让 qmake 额外生成 `make check` 目标，方便 CI 一键跑测试。
+- `QT += testlib widgets network svg`：引入 Qt Test 框架和 GUI 所需模块。
+- `CONFIG += qt console warn_on depend_includepath testcase`：其中 **`testcase`** 会让 qmake 额外生成 `make check` 目标和 `target_wrapper.sh` 包装脚本（后者被一并提交进了仓库，内容就是设置 `LD_LIBRARY_PATH`/`QT_PLUGIN_PATH` 后 `exec "$@"`）。
+- `CONFIG -= app_bundle`：macOS 上不打包成 `.app`，保持命令行程序形态。
 
-[LibreVNA-Test.pro:8-9](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/LibreVNA-Test.pro#L8-L9) 把固件侧的 `Protocol.cpp` 也编进来——与 GUI 的 `.pro` 做法一致（u1-l3 讲过「协议两端同源编译」），测试二进制因此也携带同一份协议定义。
+SOURCES 列表的开头和结尾最能说明"全量编译"策略：
 
-至于被测代码：第 13-163 行是 GUI 的几乎全部源文件（`../LibreVNA-GUI/...` 相对路径引用），第 164-170 行才是 6 个测试文件自己。**这带来一个对你极其重要的推论**：只要你把新测试写进**已存在的**测试文件（如 `parametertests.cpp`），**完全不需要改 `.pro`**——新增用例的门槛被降到最低。
+[Software/PC_Application/LibreVNA-Test/LibreVNA-Test.pro:L8-L20](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/LibreVNA-Test.pro#L8-L20)
 
-**支线：为什么跑测试会弹出对话框**
+第 9 行是点睛之笔：**固件侧的 `Protocol.cpp` 也被编进 PC 测试**。这正是 u1-l3 讲过的"协议两端同源编译"策略在测试工程里的延续——测试环境和 GUI 用同一份协议实现。接下来第 10 行开始一直到第 163 行，是几乎完整的 GUI 源文件清单（校准、设备驱动、Traces、模式……），最后第 164-170 行才是六个测试文件自己。换句话说，**测试代码约 800 行，被拖进来的被测代码约 15 万行**。
 
-[portextensiontests.cpp:35](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/portextensiontests.cpp#L35) 直接调用了被测对象的 `edit()`——这是「打开编辑对话框」的函数。[portextension.cpp:63-139](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/VNA/Deembedding/portextension.cpp#L63-L139) 显示它会 `new QDialog()`、`setupUi`、连接一堆信号槽，最后在 [第 136-138 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/VNA/Deembedding/portextension.cpp#L136-L138) 以 `if(AppWindow::showGUI()) dialog->show()` 收尾。
+依赖也原样照搬：
 
-`show()` 是**非模态**显示，不会阻塞；而 `showGUI()` 的实现在 [appwindow.cpp:1288-1291](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/appwindow.cpp#L1288-L1291)，只是返回 `!noGUIset`——测试进程没人设置过 `--no-gui` 标志，所以条件为真，对话框会被显示出来。测试之所以还能继续跑，全靠「非模态 + 事件循环由 qExec 驱动」。这算是一个历史包袱式的写法：更干净的做法是测试里根本不调 `edit()`，只测纯逻辑。
+[Software/PC_Application/LibreVNA-Test/LibreVNA-Test.pro:L460-L468](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/LibreVNA-Test.pro#L460-L468)
+
+`LIBS += -lusb-1.0`、C++17、git 哈希宏、固件版本号——与 GUI 工程完全一致。这份 `.pro` 实际上是 `LibreVNA-GUI.pro` 的超集（多了 testlib 和六个测试文件），维护时两边要同步增删文件。
 
 #### 4.1.4 代码实践
 
-**实践 A：编译、运行并盘点结果**
+**实践一：编译并运行测试工程**
 
-1. **目标**：亲手建立「改代码 → 跑测试」的反馈回路，并留下一份基线记录。
-2. **步骤**：
-   - 确认依赖与 u1-l3 编译 GUI 时完全相同（Qt6 + libusb），无需额外安装；
-   - 执行：
-     ```bash
-     cd Software/PC_Application/LibreVNA-Test
-     qmake6 LibreVNA-Test.pro && make -j$(nproc) 2>&1 | tail -5
-     ./LibreVNA-Test 2>&1 | tee test-baseline.txt
-     echo "exit code: $?"
-     ./LibreVNA-Test -functions
-     ```
-3. **观察现象**：Qt Test 对每个用例输出一行 `PASS` 或 `FAIL`，每类结束有 `Totals: X passed, Y failed`；`-functions` 列出形如 `ParameterTests::S2ABCD()` 的全限定名；跑 `PortExtensionTests` 前后可能会闪现编辑对话框。
-4. **预期结果**：6 个测试类、共 21 个非空用例全部 PASS，退出码 0。若你的环境缺 Qt6 testlib 模块（如 `Project ERROR: Unknown module(s) in QT: testlib`），需先补装 Qt6 测试组件——**完整清单待本地验证**（不同发行版包名不同，如 Debian 系为 `qt6-base-dev` 所含或 `libqt6test6`）。
-5. 把 `test-baseline.txt` 存好，4.4 的实践要用它做前后对比。
+1. **实践目标**：亲手跑通 LibreVNA-Test，拿到一份全量的通过/失败清单。
+2. **操作步骤**（承接 u1-l3 的 GUI 构建环境，依赖完全相同：Qt6 + libusb）：
+   ```bash
+   cd Software/PC_Application/LibreVNA-Test
+   qmake6 LibreVNA-Test.pro
+   make -j$(nproc)
+   ./LibreVNA-Test
+   ```
+   也可以用 `make check`（`testcase` 配置生成的目标），它会经由 `target_wrapper.sh` 运行测试。
+3. **需要观察的现象**：终端按六个类依次输出 Qt Test 报告，形如 `********* Start testing of ParameterTests *********`，每个用例一行 `PASS` 或 `FAIL!`，每类结束有 `Totals: ... passed, ... failed`；最后返回 shell 时可用 `echo $?` 查看总退出码（0 = 全部通过）。
+4. **预期结果**：六个类共 21 个测试函数（Util 5 + PortExtension 2 + Parameter 6 + fft 4 + ImpedanceRenormalization 1 + Calibration 3）全部 PASS，退出码为 0。若某个环境相关的用例失败（例如涉及平台路径），如实记录失败项与报错信息。
+5. **待本地验证**：本讲义在编写时未实际执行编译运行，上述命令与输出格式请以本地结果为准。
+
+**进阶操作**：`./LibreVNA-Test ParameterTests` 只跑一个类；`./LibreVNA-Test ParameterTests::S2ABCD` 只跑一个用例；`./LibreVNA-Test -functions` 列出全部可运行的测试函数名。这些是 Qt Test 内建的命令行约定，调试单个失败时非常顺手。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么不把 6 个测试类合并成一个大类？
-**答案**：分开的类各自拥有独立的构造/析构与命名空间（`private slots` 里的函数名可以重复，如各类都可以有 `correct()`），并且 `qExec` 支持按类名单独执行——合并后就不能 `./LibreVNA-Test ParameterTests` 这样精准重跑，失败定位也要在几百个用例里翻找。
+**练习 1**：为什么 `main.cpp` 里用 `status |= QTest::qExec(...)` 而不是 `status = QTest::qExec(...)`？
 
-**练习 2**：`status |= QTest::qExec(...)` 里为什么用按位或而不是 `status = ...`？
-**答案**：要保证「任何一个类失败，最终退出码就非 0」。若直接赋值，最后一类的 PASS 会覆盖前面所有失败，CI 会误判全绿。这是多 qExec 程序的标准写法。
+**答案**：`qExec` 每次返回该类的失败计数（非零即有失败）。用 `|=` 按位累积，可以保证前面某个类失败后，后续类的结果不会把失败码"冲掉"；六个类里任何一个失败，进程退出码都非零。如果用 `=`，最后一个类通过就会掩盖前面的失败。
 
-**练习 3**：测试二进制里链接了 `librevnausbdriver.cpp` 等真实 USB 驱动代码，测试会不会连上设备？
-**答案**：不会。链接了代码不等于执行了代码——所有用例都只调用纯计算路径（参数转换、栅格检测、FFT），没有任何用例触发设备枚举或 `connectTo`。需要真机的验证在 `Software/Integrationtests/`（u10-l3）。
+**练习 2**：如果不提交 `target_wrapper.sh` 到仓库，会有什么影响？
 
-### 4.2 参数测试用例：期望值从哪里来的五种策略
+**答案**：`target_wrapper.sh` 本是 qmake 在生成 `make check` 目标时自动产出的构建产物（设置库和插件搜索路径后 exec 测试程序），按理应被 `.gitignore` 忽略。它被提交只是历史意外；删掉它不影响 `./LibreVNA-Test` 直接运行，只影响 `make check` 在缺少系统路径环境时的包装调用，下次运行 qmake 会重新生成。
+
+### 4.2 校准与参数测试用例
 
 #### 4.2.1 概念说明
 
-`parametertests.cpp` 测的是 `Tools/parameters.cpp` 里的 S/Z/ABCD 参数矩阵互转——这些公式在 u9-5（去嵌入）里已经被你当工具用过，现在换一个视角：**怎么知道这些公式实现对了？**
+这个模块逐个拆开六份测试文件，看它们各自用哪种套路对付哪种数学。先给一张总览表，后文挑最有教学价值的三个精读：
 
-这类测试的全部难点浓缩成一个问题：**期望值从哪里来？** 本仓库用了五种策略，各有适用场景与陷阱，整理如下表（这是本讲最重要的方法论输出）：
-
-| 策略 | 做法 | 优点 | 陷阱 | 仓库示例 |
-|---|---|---|---|---|
-| ① 手算常数 | 把高精度期望值硬编码进源码 | 完全独立于被测代码，最可信 | 值本身抄错则测试错 | `S2ABCD` |
-| ② 对偶往返 | A→B→A，断言回到起点 | 不需要外部值，天然覆盖两个方向 | 两处错误可能互相抵消 | `ABCD2S` |
-| ③ 公式镜像 | 在测试里**重新实现**教科书公式再比对 | 顺便文档化了公式 | 与实现抄同一处错则同错 | `S2Z_2P`、`Z2S_2P` |
-| ④ 参数扫描 | 对 Z0 = 10..100 循环重复断言 | 覆盖参数空间，暴露量纲错误 | 计算量大时慢 | 所有 Z/S 用例 |
-| ⑤ 解析边界 | 挑物理上有精确解的输入（50Ω→0、开路→1） | 期望值可心算，无浮点争议 | 覆盖面窄 | `utiltests` 的阻抗部分 |
-
-好的测试套件会**组合**使用：①给锚点、②给广度、⑤给边界。
+| 测试文件 | 被测对象 | 主要套路 | 期望值来源 |
+|---|---|---|---|
+| `parametertests.cpp` | `Sparam`/`ABCDparam`/`Zparam` 互转 | 已知答案 + 独立公式 | 硬编码高精度常数 / 测试内手写教科书公式 |
+| `calibrationtests.cpp` | `Calibration::hasFrequencyOverlap` | 合成数据 + 行为断言 | 构造数据时自己选定的起止频率、点数、栅格类型 |
+| `ffttests.cpp` | `Fft::transform` | 手算 DFT + 往返 | 解析计算 + 还原性 |
+| `utiltests.cpp` | 圆拟合、版本比较、阻抗换算 | 解析构造 + 物理常识 + 边界 | 几何构造 / 手算 / `±inf` 边界 |
+| `portextensiontests.cpp` | `PortExtension` 自动计算与修正 | 合成数据端到端 | 已知的时延/损耗参数（放进去多少，拿出来就该是多少） |
+| `impedancerenormalizationtests.cpp` | `ImpedanceRenormalization` | 物理已知值 | 50Ω 负载归一到 75Ω 的反射系数 −0.2 |
 
 #### 4.2.2 核心流程
 
-单个参数测试的执行流程：
+**parametertests 的双套路**。`S2ABCD`/`ABCD2S` 是纯已知答案：输入一组"真实感"的 S 参数，期望的 A/B/C/D 四个复数以 16 位有效数字硬编码在测试里（作者显然在某个可信环境里算好后誊写进来的）。`S2Z_1P`/`S2Z_2P`/`Z2S_1P`/`Z2S_2P` 则是独立公式对照：测试内用文献里的标量公式现场算期望值，与被测的 Eigen 矩阵实现对质。
 
-```
-用 complex literals 写死 4 个复数（S11/S12/S21/S22）
-  → 构造 Sparam 值类型（内部是 Eigen::MatrixXcd）
-  → 调被测构造函数（如 ABCDparam(S, 50.0)）完成转换
-  → 对结果的 4 个元素 × 实/虚部共 8 个数逐一 QVERIFY
-```
+**calibrationtests 的栅格探测**。回忆 u9-l2：校准求解前要先用 `hasFrequencyOverlap` 检查各项测量的频率范围是否交叠、并投票决定按线性还是对数栅格取点。三个用例分别构造线性栅格、对数栅格、一者线性两者对义的混合栅格，各喂 1001 个点，断言探测出的起止频率、点数、栅格类型与构造时完全一致。
 
-被测对象都是**值类型**（无状态、无 IO），所以测试不需要 setup/teardown——这正是「纯函数最好测」的体现。
+**ffttests 的一手一脚**。`fft` 用 5 点实序列手算 DFT；`fftAndIfft`/`ifftAndFft` 做往返。第四个 `fftAndIfftWithShift` 是**空函数**——一个测试盲区，4.2.5 会专门讨论。
 
 #### 4.2.3 源码精读
 
-**策略①：S2ABCD 的手算常数**
+**（a）已知答案测试的样板：S→ABCD**
 
-[parametertests.cpp:12-36](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.cpp#L12-L36) 先在第 16-19 行写死一组 S 参数（形如 `0.0038 + 0.0248i` 的典型「近似理想直通」测量值），第 20-21 行完成 S→ABCD 转换；随后 [第 23-26 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.cpp#L23-L26) 的期望值是**17 位有效数字的高精度常数**——这显然来自某个外部可信计算源（如 Python/scikit-rf 的参考实现），而非手抄被测代码输出。第 28-35 行对 4 个矩阵元素的实部虚部分别 `qFuzzyCompare`，共 8 条断言。
+[Software/PC_Application/LibreVNA-Test/parametertests.cpp:L12-L36](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.cpp#L12-L36)
 
-**策略②：ABCD2S 的对偶往返**
+输入是四个接近"低损直通"的 S 参数（`S21 ≈ 0.9964 − 0.0254i`），期望的 ABCD 四元组精确到 17 位有效数字，然后对实部、虚部分别做 8 次 `qFuzzyCompare` 断言。它对应的被测实现是：
 
-[parametertests.cpp:38-63](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.cpp#L38-L63) 与 S2ABCD **互为逆过程**：输入是上一测的 ABCD 期望值，期望值是上一测的 S 输入。两个用例合起来构成「S→ABCD→S」的往返闭环，且两边的期望值都独立硬编码——这比单纯 `S→X→S` 断言相等更强，因为逐元素的值都被外部锚定过。
+[Software/PC_Application/LibreVNA-GUI/Tools/parameters.cpp:L75-L86](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Tools/parameters.cpp#L75-L86)
 
-**策略③＋④：S2Z_1P 的公式镜像 + 阻抗扫描**
+这正是 S 参数转 ABCD 级联矩阵的标准公式（分母里的 \(2 S_{21}\sqrt{Z_{01} Z_{02}}\) 是归一化因子）。注意 `ABCD2S` 用例（L38-L63）把同一对数据反着喂——A/B/C/D 进、S 出，两个方向互相印证，已知答案与往返测试在这里合二为一。
 
-[parametertests.cpp:65-83](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.cpp#L65-L83) 是**单端口** S→Z 用例，麻雀虽小五脏俱全：
+**（b）独立公式对照与容差降级：S→Z**
 
-- [第 73 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.cpp#L73) 对 Z0 从 10 到 100 每 10Ω 扫一遍（策略④）——参考阻抗错了量纲或漏乘 Z0，扫描会立刻暴露；
-- [第 77 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.cpp#L77) 在测试里写出教科书单端口公式：
+[Software/PC_Application/LibreVNA-Test/parametertests.cpp:L85-L116](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.cpp#L85-L116)
 
-\[ Z_{11} = Z_0\,\frac{1+S_{11}}{1-S_{11}} \]
+这个用例有两个值得驻足的细节：
 
-- [第 79-81 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.cpp#L79-L81) 的注释直白地解释了 float 技巧：**「浮点误差对 qFuzzyCompare(double,double) 太大，改用 qFuzzyCompare(float,float)」**——double 转 float 截断到约 7 位有效数字，加上 float 版 10⁻⁵ 的相对容差，让多步复数矩阵运算的累积误差得以通过。
+1. **期望值来自测试内部的手写公式**：第 100-104 行现场展开了 \(\Delta_S = (1-S_{11})(1-S_{22}) - S_{12}S_{21}\) 与 \(Z_{11} = \frac{(1+S_{11})(1-S_{22}) + S_{12}S_{21}}{\Delta_S} Z_0\) 等教科书公式，与被测代码采用的矩阵形式
+   \[ Z = \sqrt{z}\,(1+S)\,(1-S)^{-1}\,\sqrt{z} \]
+   （见 [parameters.cpp:L186-L208](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Tools/parameters.cpp#L186-L208)）走的是**两条完全不同的算法路径**。矩阵求逆的舍入路径和手写公式的舍入路径天然不同，这正好引出第二个细节。
+2. **容差主动降级**：第 106 行注释写明"浮点误差对 `qFuzzyCompare(double, double)` 太大，改用 `qFuzzyCompare(float, float)`"。相对容差从约 \(10^{-12}\) 放宽到约 \(10^{-5}\)。同时它还在 `Z0 = 10…100Ω` 的循环里重复验证，一条公式错一点都难逃十组断面。
+3. 顺带注意 `S2Z_1P`（[L65-L83](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.cpp#L65-L83)）里单端口公式 \(Z_{11} = \frac{1+S_{11}}{1-S_{11}} Z_0\) 同样是手写 oracle，连"1 端口 Sparam 与 2 端口 Sparam 走不同构造函数"这种重载分派也被顺带覆盖了。
 
-[parametertests.cpp:85-116](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.cpp#L85-L116) 的 `S2Z_2P` 是双端口版本，[第 100-104 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.cpp#L100-L104) 镜像了完整的双端口公式族（以 ΔS 为公分母）：
+**（c）校准栅格探测：合成数据的"种瓜得瓜"**
 
-\[ \Delta_S = (1-S_{11})(1-S_{22}) - S_{12}S_{21}, \qquad Z_{11} = \frac{(1+S_{11})(1-S_{22}) + S_{12}S_{21}}{\Delta_S}\,Z_0 \]
+[Software/PC_Application/LibreVNA-Test/calibrationtests.cpp:L91-L136](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/calibrationtests.cpp#L91-L136)
 
-而 [parametertests.cpp:118-169](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.cpp#L118-L169) 的 `Z2S_1P/Z2S_2P` 用同一组策略测反方向，[第 130 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.cpp#L130) 的镜像公式为 \( S_{11} = \dfrac{Z_{11}/Z_0 - 1}{Z_{11}/Z_0 + 1} \)。
+`MixedDetection` 构造了 Open 用线性栅格、Short/Load 用对数栅格的"脏"数据（L112-L122），然后断言探测结果是"对数"。它的价值在于覆盖了**投票合并**逻辑：多个测量栅格类型不一致时以多数为准——这是纯单元测试很难想到构造、却真实会发生（用户中途改了扫描设置）的场景。被测函数声明在：
 
-**对照被测实现**：[parameters.cpp:186-208](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Tools/parameters.cpp#L186-L208) 的 `Zparam(S, Z0n)` 并没有用教科书标量公式，而是走**通用矩阵形式** \( Z = \sqrt{z}\,(1+S)(1-S)^{-1}\sqrt{z} \)（第 191-207 行的注释与实现），靠 Eigen 的矩阵求逆一次支持任意端口数。测试用标量公式镜像矩阵实现——**两条独立路径殊途同归**才是这类测试的价值所在，恰好规避了策略③「抄同一公式」的陷阱。
+[Software/PC_Application/LibreVNA-GUI/Calibration/calibration.h:L144](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Calibration/calibration.h#L144)
 
-**基类索引细节**：[parameters.h:23-25](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Tools/parameters.h#L23-L25) 的 `get(row, col)` 是**1 基索引**（文献惯例），内部再减一映射到 Eigen 的 0 基——所有测试断言里的 `get(1,1)`、`get(2,1)` 都遵守这个约定。
+一个值得记录的**覆盖盲区**：calibrationtests 只测栅格探测，u9-l2 精读过的 `computeOSL`/`computeSOLT` 误差项求解与 `correctMeasurement` 修正矩阵——校准最核心的数学——**没有任何直接单元测试**（它们只被 u10-l3 提到的 Integrationtests 间接着色）。想给校准求解器补测试，是本讲方法的天然延伸方向。
+
+**（d）FFT：手算期望值与"逆变换不缩放"契约**
+
+[Software/PC_Application/LibreVNA-Test/ffttests.cpp:L9-L30](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/ffttests.cpp#L9-L30)
+
+期望值是可以亲手验算的。对 \(x = \{1,2,3,4,5\}\) 做 5 点 DFT \(X[k] = \sum_n x[n]\,e^{-2\pi j kn/5}\)：
+
+- \(X[0] = 1+2+3+4+5 = 15\)（直流就是求和）；
+- \(X[1]\) 实部 \(= \sum_n x[n]\cos(72°n) = 1 + 0.618 - 2.427 - 3.236 + 1.545 = -2.5\)；
+- \(X[1]\) 虚部 \(= -\sum_n x[n]\sin(72°n) = -(1.902 + 1.763 - 2.351 - 4.755) = +3.44095\ldots\)
+
+与硬编码的 `complex(-2.5, 3.440954801177934)` 逐位吻合——这就是"期望值来自被测代码之外的独立来源"的含义。另外注意第 14 行的比较器用的是 **1e-14 绝对容差**而非 `qFuzzyCompare`：因为 FFT 输出量级跨度大，相对容差对小幅值 bin 过松、对大幅值 bin 过严，绝对容差在这里更贴切。容差选择没有银弹，**跟着数据的数值结构走**。
+
+[Software/PC_Application/LibreVNA-Test/ffttests.cpp:L32-L54](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/ffttests.cpp#L32-L54)
+
+往返用例里第 39 行和第 50 行都出现 `d /= data.size()`——这不是可有可无的归一化，而是在兑现被测接口的文档契约：
+
+[Software/PC_Application/LibreVNA-GUI/Traces/fftcomplex.h:L35-L38](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Traces/fftcomplex.h#L35-L38)
+
+注释明说"逆变换不做缩放，因此不是真正的逆"。u8-l6 讲过这是 Nayiki 库的设计（正逆都不除 N），测试用例把这个易踩的坑固化成了可执行文档：忘了除以 N，往返立刻不还原。
+
+**（e）端口延伸：合成数据端到端**
+
+[Software/PC_Application/LibreVNA-Test/portextensiontests.cpp:L8-L25](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/portextensiontests.cpp#L8-L25)
+
+构造函数在测试对象里预置了 501 点合成数据：端口 1 是理想开路 `S11 = 1.0`；端口 2 用 `Util::addTransmissionLine(0.5, 50.0, 1e-9, 10, f)` 造出"反射系数 0.5 的负载 + 1ns 单向时延 + 损耗 10 的传输线"的测量值（该工具按校准件偏移线模型实现，声明于 [util.h:L134](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Util/util.h#L134)）。**种进去 1ns，等会儿就该挖出来 1ns**——期望值来自合成参数，这是合成数据测试的精髓。
+
+[Software/PC_Application/LibreVNA-Test/portextensiontests.cpp:L27-L54](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/portextensiontests.cpp#L27-L54)
+
+`autocalc` 用例的流程是：`fromJSON` 选端口 → `edit()` 创建编辑对话框（不 `exec()`，只搭好控件和信号连接）→ `measurementCompleted(dummyData)` 触发 u9-l5 精读过的自动计算（相位斜率解时延、√f 模型最小二乘解损耗，见 [portextension.cpp:L186-L210](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/VNA/Deembedding/portextension.cpp#L186-L210)，计算结果写回 UI 控件、再经信号同步进 `ext` 结构）→ `toJSON` 读出结果断言：`delay ≈ 1e-9`、`DCloss ≈ -10·log10(0.5)`。第 35 行的 `edit()` 调用解释了整个工程为什么必须链接 widgets 并使用 `QApplication`。注意断言同样转成了 `float` 比较——回归求解的数值容差需求与矩阵求逆类似。
+
+`correct` 用例（[L56-L70](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/portextensiontests.cpp#L56-L70)）接着做第二轮验证：用刚标定出的参数对每个点执行 `transformDatapoint` 修正，断言 S22 回到纯实数 1.0——端口延伸把"线 + 0.5 负载"整体视为"等效损耗的线 + 理想开路"，修掉线之后剩下的就是理想开路。**一个测试类里先标定、后修正，两段断言互相咬合**。
+
+**（f）阻抗再归一化：物理常识当期望值**
+
+[Software/PC_Application/LibreVNA-Test/impedancerenormalizationtests.cpp:L18-L43](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/impedancerenormalizationtests.cpp#L18-L43)
+
+期望值第 39 行的 −0.2 不是算出来的，是**背出来的物理**：50Ω 匹配负载在 50Ω 系统里 Γ=0，重新归一到 75Ω 参考阻抗后
+
+\[ \Gamma' = \frac{Z - Z_0'}{Z + Z_0'} = \frac{50 - 75}{50 + 75} = -0.2 \]
+
+短路永远反射 −1（与参考阻抗无关），开路永远 +1。第 30 行用 `0.9999999999999999` 代替精确的 1.0 并注明原因：Γ=1 处 \(Z \to \infty\)，实数除法会得到 `inf`。`utiltests.cpp` 里则更进一步，专门把这条边界写成了断言：
+
+[Software/PC_Application/LibreVNA-Test/utiltests.cpp:L102-L107](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/utiltests.cpp#L102-L107)
+
+让 `SparamToImpedance(1.0)` 先产出 `inf` 阻抗，再 `ImpedanceToSparam` 变回去，断言仍回到 1.0——**边界值（0、±1、inf）是数值测试性价比最高的投入点**，因为连续区间中段通常表现良好，奇点才是翻车现场。`utiltests` 的其余用例同理：圆拟合用解析几何构造理想圆/弧并加噪声后放宽到 0.1 绝对容差（[L47-L65](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/utiltests.cpp#L47-L65)），版本比较用一张手写的真值表做精确布尔断言（[L67-L80](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/utiltests.cpp#L67-L80)）。
 
 #### 4.2.4 代码实践
 
-**实践 B：亲手复核一个期望值，验证「锚点」可信**
+**实践二：三问法读一个测试**
 
-1. **目标**：不依赖被测代码，独立算出 `S2Z_1P` 在 Z0=50Ω 时的期望值，确认测试锚点真实可靠。
-2. **步骤**：
-   - 取 [parametertests.cpp:69](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.cpp#L69) 的输入 \( S_{11} = 0.0038 + 0.0248i \)；
-   - 按公式 \( Z_{11} = 50 \cdot \frac{1+S_{11}}{1-S_{11}} \) 手算（或用 Python 复数运算交叉验证）：
-     - 分子 \( 1.0038 + 0.0248i \)，分母 \( 0.9962 - 0.0248i \)；
-     - 除法展开后约得 \( 1.00639 + 0.04995i \)；
-     - 乘 50 得 \( Z_{11} \approx 50.32 + 2.497i \ \Omega \)。
-3. **观察现象**：把这三个数记下来。
-4. **预期结果**：这个值就是被测 `Zparam` 在该输入下**应当**给出的结果。如果你接着写一个临时断言 `QVERIFY(qFuzzyCompare((float)Z.get(1,1).real(), 50.32f))`，它应当通过——即你的手算、测试的镜像公式、Eigen 矩阵实现三者一致。手算过程与运行结果均为**待本地验证**（复数除法手算容易错位，建议用 `python3 -c "print(50*(1+(0.0038+0.0248j))/(1-(0.0038+0.0248j)))"` 复核）。
-5. 体会：**你能手算，测试才可信**——这就是「已知答案」的含金量。
+1. **实践目标**：建立"任何测试都能用三问拆开"的阅读习惯。
+2. **操作步骤**：任选 `NoisyCircleApproximation`（[utiltests.cpp:L47-L65](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/utiltests.cpp#L47-L65)），依次回答：
+   - **输入从哪来？**（答：测试里 `polar(radius, angle)` 解析构造 + `srand(0)` 固定种子的伪噪声）
+   - **期望值从哪来？**（答：构造时的圆心 `(2.34, 4.12)` 本身）
+   - **容差为什么是这个数？**（答：噪声幅度 0.1，故用 `abs(差) <= 0.1` 的绝对容差，且 `srand(0)` 保证可复现）
+3. **需要观察的现象**：你会发现三问答完，这个测试的设计意图、强度边界、可维护性全部浮现；同理可以拆开其余 20 个用例。
+4. **预期结果**：三问法适用于本工程全部 21 个测试函数，无一例外。
+5. 此实践为纯源码阅读，无需运行环境。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：`S2ABCD` 里为什么对 4 个元素×2（实虚部）写 8 条 `QVERIFY`，而不是一条 `QVERIFY(abcd.get(1,1) == A)`？
-**答案**：两个原因。其一，复数 `==` 是精确比较，浮点结果几乎必然不等；其二，`qFuzzyCompare` 没有复数重载，只能拆成实虚部分别比。拆开还有个附带好处：失败时能立刻看出是哪个分量错了。
+**练习 1**：`fftAndIfftWithShift` 是一个空函数（[ffttests.cpp:L56-L59](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/ffttests.cpp#L56-L59)），运行时它会怎样？这暴露了什么问题？
 
-**练习 2**：策略③「公式镜像」的最大风险是什么？本仓库如何缓解？
-**答案**：风险是实现与测试抄了同一处错误的公式（比如同一本写错的书），测试仍然全绿。缓解办法是让两边走**不同路径**：实现用 Eigen 矩阵广义公式（`Z = √z(1+S)(1-S)⁻¹√z`），测试镜像的是标量教科书公式；再加上 `S2ABCD` 完全独立的高精度常数锚点，三路互证。
+**答案**：Qt Test 对私有槽的运行不要求其中有断言，空槽会被正常执行并报告 `PASS`（0 个断言、0 次失败）。它因此是一个**虚假的绿色**：测试统计里贡献一个通过，实际什么都没验证。这暴露了"绿灯 ≠ 被覆盖"——评估测试强度要看断言密度和覆盖面，不能只看通过数。它多半是作者预留的 TODO（名字里预告了 FFT + fftshift 的往返场景），补全它是读者现成的练手机会。
 
-**练习 3**：如果想知道 parametertests 覆盖了 parameters.cpp 的多少比例，最快的办法是什么？
-**答案**：对照函数清单做减法。`parametertests.cpp` 只测了 `Sparam(ABCD)`、`ABCDparam(S)`、`Zparam(S)`、`Sparam(Z)` 四个构造函数；而 [parameters.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Tools/parameters.cpp) 还有 `Sparam(Tparam)`（第 5-11 行）、`Tparam(S)`（第 88-98 行）、`swapPorts`（第 58-62 行）、`reduceTo`（第 64-73 行）、全部 `Yparam` 转换（第 169-184 行）以及 ABCD/T 的 `inverse()`/`root()` 均**无覆盖**——这正是 4.4 实践的选题依据。
+**练习 2**：`S2Z_2P` 为什么把期望值写成测试内的标量公式，而不是像 `S2ABCD` 那样硬编码 17 位常数？
 
-### 4.3 校准与其余用例：假数据工厂、边界值与两个「反面教材」
+**答案**：硬编码常数的维护成本高（换一组输入就要重新誊写四个 17 位数），而且它是"一次性"的——只能防回归。测试内手写公式让用例可以循环扫过 `Z0 = 10…100Ω` 十组断面，期望值随输入自动生成，强度和维护性都更好。代价是期望公式若与被测实现抄自同一处，会"同源失明"——所以 `S2ABCD` 的硬编码值反而提供了独立于文献公式的第二个参照。两种套路并存是刻意为之。
+
+**练习 3**：`impedancerenormalizationtests` 为什么给开路用 `0.9999999999999999` 而短路用精确的 `-1.0`？
+
+**答案**：换域公式 \(Z = Z_0\frac{1+\Gamma}{1-\Gamma}\) 在 Γ = +1 处分母为零，会得到 `inf` 阻抗，后续矩阵运算把 `inf` 传得到处都是；而 Γ = −1 只让分子为零，得到有限的 0Ω，完全安全。用 `1-1e-16`（在 double 里恰好是距 1.0 最近的下一个数）绕开奇点，断言 `qFuzzyCompare(..., 1.0)` 依然成立。
+
+### 4.3 新增用例方法
 
 #### 4.3.1 概念说明
 
-参数转换是「纯函数」，期望值好办。但校准、去嵌入这些模块的输入是**一整条扫描的测量序列**——测试需要「无中生有」地造出这些数据。这就引出两种新范式：
+会读测试之后，本模块解决"写"：为 `parameters.h` 中**没有被任何测试覆盖**的 `Tparam`（散射传输参数，级联形式）补测试。先看覆盖现状——`parametertests.h` 声明的六个槽只覆盖三条路径：
 
-- **假数据工厂**：在测试里按已知规律（线性栅格、对数栅格、带已知延迟的传输线）生成测量点，喂给被测逻辑，断言它「提取/检测」出的参数与造数据时埋进去的参数一致；
-- **解析边界值**：挑选物理上有**精确解**的输入（50Ω 负载、理想开路/短路），使期望值可以心算、甚至可以用 `==` 精确比较。
+```text
+S ⇄ ABCD    （S2ABCD / ABCD2S）
+S → Z       （S2Z_1P / S2Z_2P）
+Z → S       （Z2S_1P / Z2S_2P）
+─────────────────────────────────
+S ⇄ T       ✗ 无测试        S ⇄ Y  ✗ 无测试
+ABCD inverse/root  ✗        swapPorts / reduceTo  ✗
+```
 
-同时本节也会指出仓库里的两处「反面教材」：一个**空占位用例**和一个**循环验证**用例——读测试与分析测试一样重要，能识别无效的绿色才知道什么是有效的绿色。
+而 `Tparam` 在产品代码里并非死代码：u9-l5 讲过的 2x-Thru 去嵌入正是靠 T/ABCD 参数的级联与求逆来剥离夹具的。它无测试，正是"最值得补的第一个洞"。
 
 #### 4.3.2 核心流程
 
-以 calibrationtests 为例的假数据工厂流程：
+给现有测试类新增一个用例只需要**两处改动、五步流程**（因为是向已有文件添加代码，连 `.pro` 都不用碰——`parametertests.cpp` 已在 SOURCES 里）：
 
-```
-new Calibration + getKit().setIdealDefault()      ← 理想校准件，免除标准件建模
-  → new Open/Short/Load 测量对象（port=1）
-  → for 每个频点：构造 VNAMeasurement{frequency=f, S11=0}
-       依次 addPoint 给三个测量对象
-  → 调被测的栅格检测 hasFrequencyOverlap(...)
-  → 断言检出的 start/stop/points/log 与造数据时的参数一致
-```
-
-关键洞察：**被测函数只看频率轴**，所以 `S11=0.0` 这种毫无物理意义的复数值也完全够用——假数据只需要在「被测函数关心的维度」上真实。
+1. **选函数**：从 `parameters.h` 里挑一个未覆盖、且你能独立算出期望值的函数（本文选 `Tparam(const Sparam&)`）。
+2. **手算期望值**：找一组有物理意义、能手算的输入。理想直通（\(S_{11}=S_{22}=0,\ S_{12}=S_{21}=1\)）是最优选。
+3. **写断言**：在 `parametertests.cpp` 实现测试函数，期望值与容差按 4.2 的套路选。
+4. **登记**：在 `parametertests.h` 的 `private slots:` 里加一行声明。**忘记这一步，写了实现也不会被执行**——Qt Test 靠 moc 枚举私有槽发现用例，未声明的普通成员函数是隐身 的。
+5. **运行验证**：重编译后用 `./LibreVNA-Test ParameterTests::新用例名` 单独运行，再跑全量确认无副作用。
 
 #### 4.3.3 源码精读
 
-**校准栅格检测：三个孪生用例**
+被测的转换公式在（本讲的实践靶子）：
 
-[calibrationtests.cpp:7-47](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/calibrationtests.cpp#L7-L47) 的 `LinearDetection`：第 16-24 行造出 100 kHz–6 GHz、1001 点的理想校准件测量对象；[第 26-34 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/calibrationtests.cpp#L26-L34) 按线性公式 \( f_i = f_{start} + (f_{stop}-f_{start})\frac{i}{N-1} \) 生成频率并喂入；[第 41-46 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/calibrationtests.cpp#L41-L46) 断言检测函数还原出全部四个参数（含 `detectedLog == false`）。
+[Software/PC_Application/LibreVNA-GUI/Tools/parameters.cpp:L88-L98](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Tools/parameters.cpp#L88-L98)
 
-[calibrationtests.cpp:49-89](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/calibrationtests.cpp#L49-L89) 的 `LogDetection` 唯一区别在 [第 69 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/calibrationtests.cpp#L69) 的对数栅格公式 \( f_i = f_{start}\cdot 10^{\,i\log_{10}(f_{stop}/f_{start})/(N-1)} \)，期望 `detectedLog == true`。
+即
 
-[calibrationtests.cpp:91-136](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/calibrationtests.cpp#L91-L136) 的 `MixedDetection` 最有趣：[第 110-123 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/calibrationtests.cpp#L110-L123) 让 Open 吃线性栅格、Short/Load 吃对数栅格，[第 135 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/calibrationtests.cpp#L135) 断言最终判为对数——u9-l2 讲过的「多数投票」行为在这里被固化为回归测试。
+\[ T = \begin{pmatrix} -\dfrac{S_{11}S_{22}-S_{12}S_{21}}{S_{21}} & \dfrac{S_{11}}{S_{21}} \\[2mm] -\dfrac{S_{22}}{S_{21}} & \dfrac{1}{S_{21}} \end{pmatrix} \]
 
-**utiltests：解析边界值的教科书**
+把理想直通代入：四个分子中三个为 0，\(T_{11} = -(0-1)/1 = 1\)，\(T_{22} = 1/1 = 1\)，于是 **T = 单位矩阵**——物理上"直通就是什么都不做"，级联形式下正是恒等变换，这既是最好手算的期望值，也是对物理直觉的直接校验。再补一个非平凡断面防止"恰好全零"假通过：3dB 衰减器（\(S_{12}=S_{21}=1/\sqrt2\)）应得 \(T_{11} = \sqrt2/2\)、\(T_{22} = \sqrt2\)。
 
-[utiltests.cpp:82-108](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/utiltests.cpp#L82-L108) 的 `ImpedanceSparameterCalculation` 是策略⑤的范本：50Ω 负载的反射系数**精确**为 0（分子 50−50=0），所以 [第 87 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/utiltests.cpp#L87) 敢用 `QVERIFY(S == 0.0)` 精确比较；0Ω（短路）精确得 −1（[第 92 行](https://github.com/jankae/LibreVNA/blob/c427df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/utiltests.cpp#L92)）；100Ω 得精确的 1/3（[第 97 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/utiltests.cpp#L97)）。[第 102-107 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/utiltests.cpp#L102-L107) 还专门测了 S=1.0（对应无穷大阻抗）这个奇异点往返。
+反向转换（`Sparam(const Tparam&)`）在 [parameters.cpp:L5-L11](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Tools/parameters.cpp#L5-L11)，两式互逆，正好构成往返测试的一对。
 
-同文件的 [第 47-65 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/utiltests.cpp#L47-L65) `NoisyCircleApproximation` 展示了**噪声数据的容差带断言**：造圆时叠加模长 0.1 的随机扰动，断言就不能再用 `qFuzzyCompare`，而是 `abs(中心偏差) <= 0.1` 的**绝对误差带**——被测函数是拟合算法，本来就只承诺近似解。
+测试类的声明结构（登记位置）：
 
-[utiltests.cpp:67-80](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/utiltests.cpp#L67-L80) 的 `FirmwareComparison` 则是**表驱动**的离散值测试：九行断言覆盖「大于/等于/小于」与「位数不齐（2.2.2 对 2.3）」各分支，最后一行 `qFuzzyIsNull` 都不需要——布尔结果精确可比。
-
-**impedancerenormalizationtests：一段注释就是一道物理题**
-
-[impedancerenormalizationtests.cpp:18-43](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/impedancerenormalizationtests.cpp#L18-L43)：构造三个单端口「测量」（S11 = −1 短路 / 0 匹配 / 接近 1 开路），经 75Ω 再归一化后，[第 38-39 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/impedancerenormalizationtests.cpp#L38-L39) 断言 50Ω 匹配负载变成 −0.2：
-
-\[ \Gamma' = \frac{Z_L - Z_0'}{Z_L + Z_0'} = \frac{50 - 75}{50 + 75} = -0.2 \]
-
-短路/开路是「与参考阻抗无关」的物理不变量，所以变换后仍是 ±1（第 37、41 行）。[第 30 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/impedancerenormalizationtests.cpp#L30) 的注释「用精确的 1.0 会撞上 inf」记录了一个只有踩过坑才会写下的实现细节。
-
-**portextensiontests：合成数据 + 一个循环验证风险**
-
-[portextensiontests.cpp:8-25](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/portextensiontests.cpp#L8-L25) 在**构造函数**里造 501 点假数据：端口 1 是纯开路（S11=1.0），端口 2 用 [第 22 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/portextensiontests.cpp#L22) 的 `Util::addTransmissionLine(0.5, 50.0, 1e-9, 10, f)` 合成「1ns 单向延迟 + 已知损耗」的反射。`autocalc` 用例（[第 27-54 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/portextensiontests.cpp#L27-L54)）断言 PortExtension 的自动提取还原出埋进去的 1ns 与 −10·log10(0.5) dB；`correct` 用例（[第 56-70 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/portextensiontests.cpp#L56-L70)）断言修正后 S22 回到纯实数 1.0。
-
-注意这里的**循环验证风险**：造数据的 `addTransmissionLine` 与被测的修正逻辑很可能共享同一套传输线公式——若公式符号错，两者一起错，测试照绿。它不如 `S2ABCD` 的高精度外部锚点可信，但胜在能覆盖「自动提取」这条多步骤流程。这是策略表之外值得单列的认知：**合成数据测试验证的是流程贯通，未必是公式正确**。
-
-**ffttests 与那个空用例**
-
-[ffttests.cpp:24-30](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/ffttests.cpp#L24-L30) 用 5 点数据（非 2 的幂，走 Bluestein 分支）对照硬编码期望值；[第 32-42 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/ffttests.cpp#L32-L42) 的往返用例在逆变换后逐点除以 `data.size()`——这两点 u8-l6 已详解。真正要新增的是本讲视角的观察：[ffttests.cpp:56-59](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/ffttests.cpp#L56-L59) 的 `fftAndIfftWithShift` 是一个**空函数体**——Qt Test 照样把它当用例执行并报 PASS。**空用例 = 占位符 = 假覆盖**，统计「全绿」时必须把它剔除。这提醒你：看测试报告先看有没有空洞，再 celebratе。
+[Software/PC_Application/LibreVNA-Test/parametertests.h:L12-L19](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.h#L12-L19)
 
 #### 4.3.4 代码实践
 
-**实践 C：预测一个未写的用例**
+**实践三：为 `Tparam` 补测试（本讲主实践）**
 
-1. **目标**：在不动代码的前提下，用「假数据工厂」思维预测被测行为，训练测试设计能力。
-2. **步骤**：
-   - 读 [calibrationtests.cpp:91-136](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/calibrationtests.cpp#L91-L136) 的 `MixedDetection`（1 线性 + 2 对数 → 判对数）；
-   - 在纸上写出它的镜像用例 `MixedDetection2`：**2 个线性 + 1 个对数**（把第 120-122 行的喂食对象互换），先预测 `detectedLog` 的值；
-   - 再进一步预测：如果三个测量的频率范围**不完全重叠**（比如 Open 只测 1–3 GHz，其余测全带），`hasFrequencyOverlap` 会返回交集还是失败？
-3. **观察现象**：把两个预测写下来。
-4. **预期结果**：按「多数投票」逻辑，2 线性 + 1 对数应判 `detectedLog == false`；频率不重叠的行为需要读 [calibration.cpp](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Calibration/calibration.cpp) 中 `hasFrequencyOverlap` 的实现才能确认（u9-l2 讲过它取交集）。两个预测均**待本地验证**——验证方式就是把它写成真用例跑一遍，这正是 4.4 要教的方法。
-5. 若想立即验证而不改仓库文件，可以把预测记在笔记里，等学完 4.4 后作为加练。
+1. **实践目标**：把 4.3.2 的五步法完整走一遍，产出一个能防止 `Tparam` 公式回归的测试。
 
-#### 4.3.5 小练习与答案
+2. **操作步骤**：
 
-**练习 1**：为什么 calibrationtests 敢给所有测量点填 `S11 = 0.0` 这种物理上不存在的值？
-**答案**：被测函数 `hasFrequencyOverlap` 只消费频率轴，不读 S 参数数值。假数据只需在被测函数关心的维度上真实——这也是设计假数据工厂的总原则：先问「被测函数读什么」，再造什么。
-
-**练习 2**：`NoisyCircleApproximation` 为什么改用 `abs(偏差) <= 0.1` 而不是 `qFuzzyCompare`？
-**答案**：被测的 `findCenterOfCircle` 是对带噪声数据做拟合的算法，输出本来就是近似值；`qFuzzyCompare` 的相对误差语义（且分母含 min）不适合「允许固定绝对偏差」的表达。绝对误差带才是与算法承诺匹配的断言。
-
-**练习 3**：找出本节两个「无效绿色」的例子并各给一句修复建议。
-**答案**：① `ffttests.cpp:56-59` 的空用例——要么实现（造数据 → shift → 正逆变换 → 反 shift → 比对），要么删除，别留占位；② `portextensiontests` 的循环验证——保留（它测流程贯通），但应再补一个用**外部工具**（如 scikit-rf 对同一延迟算出的相位）做锚点的用例，使公式正确性也有独立证据。
-
-### 4.4 新增用例方法：为 S↔T 转换补一个测试
-
-#### 4.4.1 概念说明
-
-学测试最终是为了**写**测试。本节把新增用例的完整流程走一遍，选题是 [parameters.cpp:88-98](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Tools/parameters.cpp#L88-L98) 的 `Tparam(const Sparam&)` 与 [parameters.cpp:5-11](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Tools/parameters.cpp#L5-L11) 的 `Sparam(const Tparam&)`——它们被 u9-5 的 2x-Thru 去嵌入真实使用，却完全没有测试覆盖。
-
-**新增用例四步清单**（写进已存在的测试文件时）：
-
-1. 在对应 `*tests.h` 的 `private slots:` 里声明函数；
-2. 在 `*tests.cpp` 里实现：构造输入 → 调被测函数 → 断言；
-3. `.pro` **不用改**（文件已在 SOURCES 里）；
-4. `make` 增量编译，用 `类名::函数名` 精准重跑新用例。
-
-若要**新建**测试文件，才需要额外做三件事：新文件加进 `.pro` 的 SOURCES/HEADERS、`main.cpp` 加一行 `#include` 与一行 `qExec`、仿照现有类建 `*tests.h` 骨架。
-
-#### 4.4.2 核心流程
-
-```
-选题（未被覆盖的纯函数，输入小到能手算）
-  → 手算期望值（纸面推导，独立于实现）
-  → 写用例（声明 slot + 实现 + 选对断言宏）
-  → make → ./LibreVNA-Test ParameterTests::S2T
-  → 失败则诊断：是手算错还是实现错？（测试第一个功劳往往是发现手算错）
-  → 通过后做风格对比（QVERIFY vs QCOMPARE、float 截断、注释密度）
-```
-
-#### 4.4.3 源码精读
-
-**被测公式：S → T**
-
-[parameters.cpp:88-98](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Tools/parameters.cpp#L88-L98) 按如下映射把散射参数折叠成传输参数（[第 91 行](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Tools/parameters.cpp#L91) 还有个把「ABCD」写进错误消息的复制粘贴笔误，可作顺手修 bug 的候选——但本讲不修改源码）：
-
-\[ T = \begin{pmatrix} -\dfrac{S_{11}S_{22}-S_{12}S_{21}}{S_{21}} & \dfrac{S_{11}}{S_{21}} \\[8pt] -\dfrac{S_{22}}{S_{21}} & \dfrac{1}{S_{21}} \end{pmatrix} \]
-
-逆映射见 [parameters.cpp:5-11](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Tools/parameters.cpp#L5-L11)：\( S_{11}=T_{12}/T_{22},\; S_{21}=1/T_{22},\; S_{12}=(T_{11}T_{22}-T_{12}T_{21})/T_{22},\; S_{22}=-T_{21}/T_{22} \)。
-
-**手算期望值**：为了让纸面推导可行，选**全实数**的 S 矩阵（实数运算是复数的子集，不影响覆盖；复数路径已被现有 ABCD/Z 用例覆盖）：
-
-\[ S = \begin{pmatrix} 0.1 & 0.3 \\ 0.5 & 0.2 \end{pmatrix} \]
-
-代入公式（分母 \(S_{21}=0.5\)）：
-
-- \( T_{11} = -(0.1\times0.2 - 0.3\times0.5)/0.5 = -(-0.13)/0.5 = 0.26 \)
-- \( T_{12} = 0.1/0.5 = 0.2 \)
-- \( T_{21} = -0.2/0.5 = -0.4 \)
-- \( T_{22} = 1/0.5 = 2.0 \)
-
-**断言宏的选择**（2.3 节原则的直接应用）：
-
-- 实部期望值 0.26/0.2/−0.4/2.0 均非零且非精确可表示 → 用 `qFuzzyCompare((float)a, 0.26f)`（float 截断 + 宽容差，仿 [parametertests.cpp:79-81](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.cpp#L79-L81) 的既有注释与做法）；
-- 虚部理论上为 0，实际是复数运算残留的 ~1e-17 → **必须**用 `qFuzzyIsNull((float)...)`，用 `qFuzzyCompare(x, 0.0f)` 会因 min=0 恒失败（[portextensiontests.cpp:52-53](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/portextensiontests.cpp#L52-L53) 正是这么用的）。
-
-#### 4.4.4 代码实践
-
-**实践 D（本讲主实践）：写出 S2T / T2S 并跑通**
-
-1. **目标**：完整走一遍「手算 → 写用例 → 增量编译 → 精准重跑 → 风格对比」，产出两个通过的新用例。
-
-2. **步骤**：
-
-   第一步，在 [parametertests.h:12-19](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.h#L12-L19) 的 `private slots:` 末尾追加两行声明：
+   第一步，在 [parametertests.h:L18-L19](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.h#L18-L19) 的 `private slots:` 末尾追加两行声明：
 
    ```cpp
-   void S2T();
-   void T2S();
+   void S2T_2P();
+   void T2S_roundtrip();
    ```
 
-   第二步，在 `parametertests.cpp` 末尾追加实现（**示例代码，非仓库原有内容**；遵循现有用例的命名与断言风格）：
+   第二步，在 `parametertests.cpp` 末尾追加实现（**以下为示例代码**，非项目原有内容；`Tparam` 头文件已随 `Tools/parameters.h` 一并包含）：
 
    ```cpp
-   void ParameterTests::S2T()
+   void ParameterTests::S2T_2P()
    {
-       // 全实数矩阵，便于手算期望值；复数路径已由 S2ABCD 等用例覆盖
-       auto S = Sparam(0.1, 0.3, 0.5, 0.2);
+       using namespace std::complex_literals;
+
+       // 场景一：理想直通 S11=S22=0, S12=S21=1
+       // 手算期望：T11=-(0-1)/1=1, T12=0/1=0, T21=-0/1=0, T22=1/1=1 → 单位矩阵
+       auto S = Sparam(0.0, 1.0, 1.0, 0.0);
        auto t = Tparam(S);
+       QVERIFY(qFuzzyCompare(t.get(1,1).real(), 1.0));
+       QVERIFY(qFuzzyIsNull(t.get(1,1).imag()));
+       QVERIFY(qFuzzyIsNull(t.get(1,2).real()));
+       QVERIFY(qFuzzyIsNull(t.get(1,2).imag()));
+       QVERIFY(qFuzzyIsNull(t.get(2,1).real()));
+       QVERIFY(qFuzzyIsNull(t.get(2,1).imag()));
+       QVERIFY(qFuzzyCompare(t.get(2,2).real(), 1.0));
+       QVERIFY(qFuzzyIsNull(t.get(2,2).imag()));
 
-       // 手算：T11 = -(S11*S22 - S12*S21)/S21 = -(0.02-0.15)/0.5 = 0.26
-       QVERIFY(qFuzzyCompare((float)t.get(1,1).real(), 0.26f));
-       QVERIFY(qFuzzyIsNull((float)t.get(1,1).imag()));
-       // T12 = S11/S21 = 0.2
-       QVERIFY(qFuzzyCompare((float)t.get(1,2).real(), 0.2f));
-       QVERIFY(qFuzzyIsNull((float)t.get(1,2).imag()));
-       // T21 = -S22/S21 = -0.4
-       QVERIFY(qFuzzyCompare((float)t.get(2,1).real(), -0.4f));
-       QVERIFY(qFuzzyIsNull((float)t.get(2,1).imag()));
-       // T22 = 1/S21 = 2.0
-       QVERIFY(qFuzzyCompare((float)t.get(2,2).real(), 2.0f));
-       QVERIFY(qFuzzyIsNull((float)t.get(2,2).imag()));
+       // 场景二：理想 3dB 衰减器 S12=S21=1/sqrt(2)
+       // 手算期望：T11=0.5*sqrt(2)=sqrt(2)/2, T22=sqrt(2)
+       auto atten = 1.0 / sqrt(2.0);
+       auto S2 = Sparam(0.0, atten, atten, 0.0);
+       auto t2 = Tparam(S2);
+       QVERIFY(qFuzzyCompare(t2.get(1,1).real(), sqrt(2.0) / 2.0));
+       QVERIFY(qFuzzyCompare(t2.get(2,2).real(), sqrt(2.0)));
+       QVERIFY(qFuzzyIsNull(t2.get(1,2).real()));
+       QVERIFY(qFuzzyIsNull(t2.get(2,1).real()));
    }
 
-   void ParameterTests::T2S()
+   void ParameterTests::T2S_roundtrip()
    {
-       // 用 S2T 手算得到的 T 矩阵作为输入，期望值即最初的 S
-       auto t = Tparam(0.26, 0.2, -0.4, 2.0);
-       auto s = Sparam(t);
+       using namespace std::complex_literals;
 
-       QVERIFY(qFuzzyCompare((float)s.get(1,1).real(), 0.1f));
-       QVERIFY(qFuzzyIsNull((float)s.get(1,1).imag()));
-       QVERIFY(qFuzzyCompare((float)s.get(1,2).real(), 0.3f));
-       QVERIFY(qFuzzyIsNull((float)s.get(1,2).imag()));
-       QVERIFY(qFuzzyCompare((float)s.get(2,1).real(), 0.5f));
-       QVERIFY(qFuzzyIsNull((float)s.get(2,1).imag()));
-       QVERIFY(qFuzzyCompare((float)s.get(2,2).real(), 0.2f));
-       QVERIFY(qFuzzyIsNull((float)s.get(2,2).imag()));
+       // 沿用本文件其他用例的"真实感"数据
+       auto S = Sparam(0.0038 + 0.0248i, 0.9961 - 0.0250i,
+                       0.9964 - 0.0254i, 0.0037 + 0.0249i);
+       auto roundtrip = Sparam(Tparam(S));
+
+       // 参照 S2Z_2P 的做法：往返经过两条求逆路径，降到 float 容差
+       QVERIFY(qFuzzyCompare((float)roundtrip.get(1,1).real(), (float)S.get(1,1).real()));
+       QVERIFY(qFuzzyCompare((float)roundtrip.get(1,1).imag(), (float)S.get(1,1).imag()));
+       QVERIFY(qFuzzyCompare((float)roundtrip.get(1,2).real(), (float)S.get(1,2).real()));
+       QVERIFY(qFuzzyCompare((float)roundtrip.get(1,2).imag(), (float)S.get(1,2).imag()));
+       QVERIFY(qFuzzyCompare((float)roundtrip.get(2,1).real(), (float)S.get(2,1).real()));
+       QVERIFY(qFuzzyCompare((float)roundtrip.get(2,1).imag(), (float)S.get(2,1).imag()));
+       QVERIFY(qFuzzyCompare((float)roundtrip.get(2,2).real(), (float)S.get(2,2).real()));
+       QVERIFY(qFuzzyCompare((float)roundtrip.get(2,2).imag(), (float)S.get(2,2).imag()));
    }
    ```
 
-   第三步，增量编译并精准重跑（不需要改 `.pro`，文件本就在 [LibreVNA-Test.pro:168](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/LibreVNA-Test.pro#L168) 的 SOURCES 里）：
+   断言风格说明：期望值精确为 0 的量用 `qFuzzyIsNull`（`qFuzzyCompare` 对接近 0 的相对比较不可靠，见 2.3），非零量用 `qFuzzyCompare(double)`——本转换是纯标量除法、无矩阵求逆，double 档容差足够；往返用例参照 `S2Z_2P` 的先例降为 float。
+
+   第三步，重新编译并单独运行：
 
    ```bash
    make -j$(nproc)
-   ./LibreVNA-Test ParameterTests::S2T
-   ./LibreVNA-Test ParameterTests::T2S
-   ./LibreVNA-Test ParameterTests        # 整类回归，确认没破坏别的
+   ./LibreVNA-Test ParameterTests::S2T_2P ParameterTests::T2S_roundtrip
+   ./LibreVNA-Test        # 全量回归，确认没有影响其他用例
    ```
 
-3. **观察现象**：两条新用例各自输出 `PASS`；整类运行时用例总数从 6 变 8；`T2S` 的通过同时说明 4.4.3 的手算与实现互证成功。
+3. **需要观察的现象**：新用例输出 `PASS`；全量运行时 `ParameterTests` 的用例计数从 6 变为 8，`Totals` 相应增加 2 个 passed；`-functions` 列表中出现两个新函数名。
 
-4. **预期结果**：全部 PASS。**若 `S2T` 失败**，优先怀疑两处：手算时 \(S_{11}S_{22}-S_{12}S_{21}\) 的符号（这是最常见的笔误），或断言误用了 `qFuzzyCompare(x, 0.0f)`（见 2.3 节，与 0 比较必用 `qFuzzyIsNull`）。**若 `T2S` 失败而 `S2T` 通过**，则说明两个转换函数之一有 bug——这恰恰是测试的价值时刻，请把失败值打印出来与手算对照（可临时用 `qDebug() << t.get(1,1);`）。完整运行结果**待本地验证**。
+4. **预期结果**：两个新用例通过，其余 21 个原有用例不受影响（总退出码仍为 0）。若 `T2S_roundtrip` 偶发失败，优先怀疑容差档位而非公式。
 
-5. **风格对比**（本实践的收尾产出，写 5-10 行笔记即可）：
-   - 现有用例几乎全用 `QVERIFY`，失败时只报行号不报值；你可以在自己的用例里试把实部断言换成 `QCOMPARE((float)t.get(1,1).real(), 0.26f)`，再故意改错期望值跑一次，**体验两者失败输出的信息量差别**——`QCOMPARE` 会同时打印 actual 与 expected；
-   - 现有用例把期望值集中在函数开头（如 [parametertests.cpp:23-26](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-Test/parametertests.cpp#L23-L26)），而我们的示例把推导写在每条断言旁的注释里——前者紧凑，后者可维护（改一个值不用跨屏找）；两种都符合仓库整体风格，取其一并保持一致；
-   - 现有用例不使用 `init()/cleanup()` fixture、不使用 `QTest::addColumn` 数据驱动；单个手算用例没必要引入，但若你要给 `reduceTo` 写「多组端口组合」的测试，数据驱动是更优雅的选项。
+5. **待本地验证**：以上代码未在本讲义编写环境中编译运行，登记与编译步骤请以本地实际输出为准。
 
-#### 4.4.5 小练习与答案
+**实践收尾（题目要求的风格统计）**：对照自己刚写的用例与现有用例，记录三组差异并写进笔记——① 期望值来源：现有用例多为"誊写的高精度常数"或"测试内手写公式"，你的第一个用例用的是"解析手算的物理理想元件"（直通/衰减器），第二个用往返规避期望值；② 容差档位：现有用例在涉及求逆/回归的地方一律降 float，纯标量处用 double，你的用例遵循了同一规律；③ 断言粒度：现有用例对每个复数拆实虚各一条 `QVERIFY`，共 8 条/用例，保持这个粒度能让失败时精确定位到"哪个矩阵元素的哪一半"。
 
-**练习 1**：为 `Sparam::swapPorts`（[parameters.cpp:58-62](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Tools/parameters.cpp#L58-L62)）写用例，期望值是什么？
-**答案**：交换端口 1、2 后，矩阵行列同时互换：新 S11=旧 S22、新 S12=旧 S21、新 S21=旧 S12、新 S22=旧 S11。用 `Sparam(0.1, 0.3, 0.5, 0.2)` 调 `swapPorts(1,2)` 后应为 `[[0.2, 0.5], [0.3, 0.1]]`。行列**同时**换是关键（只换行列之一会得到转置而非换端口），这正是该函数容易写错、值得测的点。
+#### 4.3.5 小练习与答案
 
-**练习 2**：为 `Sparam::reduceTo`（[parameters.cpp:64-73](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Tools/parameters.cpp#L64-L73)）设计最小测试数据。
-**答案**：造一个 4 端口 S 参数，全部 16 个元素填可辨识的值（如 `S.get(i,j)` 填 `i/10+j/100`），然后 `reduceTo({1,3})`，断言结果 2×2 矩阵的四个元素分别等于原 S11、S13、S31、S33（头文件 [parameters.h:56-61](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Tools/parameters.h#L56-L61) 的注释就是这个例子，可直接当规格）。注意 `set` 是 1 基索引。
+**练习 1**：如果把新用例的声明忘在 `parametertests.h` 之外，只写了 `.cpp` 实现，会发生什么？
 
-**练习 3**：为什么 `T2S` 用例不像 `S2ABCD/ABCD2S` 那样用 17 位高精度常数？
-**答案**：高精度常数需要一个独立的外部计算源（当时大概来自参考软件）；我们只有纸面手算，只能得到 2-3 位有效数字，因此断言必须配合 float 截断 + 模糊比较。若想升级可信度，可以用 Python 复数运算把四个 T 值算到 17 位再硬编码——这就完全复刻了 `S2ABCD` 的锚点策略。
+**答案**：编译和链接都能通过（成员函数有定义），但 Qt Test 不会运行它——`QTest::qExec` 通过 moc 元对象枚举的是**私有槽**，普通成员函数不在其列。于是测试总数不变、报告全绿，新用例实际上是"隐身"的。这就是 4.3.2 第 4 步强调登记的原因，也是"绿灯 ≠ 被覆盖"的又一实例。
+
+**练习 2**：`Tparam` 转换在什么输入下会失效？测试需要为此做什么？
+
+**答案**：公式以 \(S_{21}\) 为统一分母，\(S_{21} = 0\) 时除零（实际是无意义的 \(T \to \infty\)，传输参数对"完全隔离"的网络不存在有限表示）。测试不应主动构造该输入当正常断言；若要覆盖，合理做法是断言结果为 `inf`/`NaN` 并注释说明这是已知奇点（参照 `utiltests` 对 Γ=1 的 inf 边界的处理方式）。
+
+**练习 3**：为什么选"理想直通"和"3dB 衰减器"做 `S2T_2P` 的两个断面，而不是只测其中一个？
+
+**答案**：逐项代入就能看清每个断面的"抓错半径"。直通（\(S_{11}=S_{22}=0,\ S_{12}=S_{21}=1\)）下 \(T_{11}=-(0-1)/1=1\)：外层负号若丢失会得 \(-1\)，立刻被抓住；但 \(T_{22}=1/S_{21}=1/1=1\)，若错写成 \(S_{21}\) 本身也等于 1——**抓不住**。3dB 衰减器正是为这个洞存在的：\(T_{22}=1/(1/\sqrt2)=\sqrt2 \ne 1/\sqrt2\)，分母"求倒数"这类标度错误在它面前现形。但两个断面有个共同盲区——\(S_{11}\) 与 \(S_{22}\) 都是 0，若 \(T_{12}=S_{11}/S_{21}\) 被误写为 \(S_{22}/S_{21}\)，两种输入下都恒等于 0，永远通过。**要咬住这类对称性错误，必须用 \(S_{11}, S_{22} \ne 0\) 且互不相等的一般数据**——`T2S_roundtrip` 恰好提供了（\(0.0038+0.0248j\) 与 \(0.0037+0.0249j\)）。三个用例各守一层：直通锁定物理直觉（级联恒等变换 = 单位阵），衰减器锁定标度，一般数据往返咬住公式细节。
 
 ## 5. 综合实践
 
-**任务：给 parameters.cpp 做一次「覆盖审计 + 补测」，产出你的第一份测试报告。**
+**任务：给参数转换矩阵做一次"覆盖体检"，并补上第一个洞。**
 
-把本讲所有环节串成一次完整的工作流（在实践 A、D 的基础上继续）：
+把本讲三块知识串起来，完成一份可归档的测试笔记：
 
-1. **建基线**（实践 A 的产物）：`./LibreVNA-Test 2>&1 | tee test-baseline.txt`，记录 6 类 21 个非空用例的通过情况，剔除 `fftAndIfftWithShift` 这个空占位后统计**真实**覆盖。
-2. **覆盖审计**：对照 [parameters.h](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Tools/parameters.h) 列出全部公开构造函数与成员函数，逐一标记「已测 / 未测」，未测项再标注「是否纯函数、能否手算」。你应当至少找到：S↔T（实践 D 已补）、`swapPorts`、`reduceTo`、三个 `Yparam` 构造、`ABCDparam::operator*`/`inverse()`/`root()`、`Tparam` 的同名运算。
-3. **补测**：从审计表里**再挑一个**纯函数补上用例（推荐 `swapPorts` 或 `reduceTo`，手算最简单；`ABCDparam::inverse()` 可用「乘以逆 = 单位阵」的往返策略）。
-4. **验证**：`make` 后先跑新用例，再跑 `./LibreVNA-Test` 全量，与基线文件 `diff test-baseline.txt` 对比，确认**只有增加、没有破坏**。
-5. **报告**（半页即可）：覆盖审计表、新增用例清单、一次「失败→诊断→修复」的记录（哪怕失败原因是自己手算错了——那也是测试在正确地工作）、以及三条你与现有用例的风格差异结论。
+1. **跑基线**：按实践一编译运行 LibreVNA-Test，把 21 个（加上你新增的共 23 个）用例的通过/失败情况记入表格，注明版本 commit。
+2. **画覆盖地图**：对照 [parameters.h:L38-L169](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Tools/parameters.h#L38-L169) 的全部公开接口，逐个标注"已测 / 未测 / 不可单测"，并给未测项排优先级（提示：`Sparam::swapPorts` 与 `Sparam::reduceTo` 是纯排列操作、期望值最易手算；`ABCDparam::root` 涉及矩阵开方，可先用"root 的平方应还原原矩阵"这一往返性质构造断言；`Yparam` 链路可仿照 `S2Z` 用手写公式对照）。
+3. **补一个洞**：完成实践三的 `Tparam` 用例；学有余力再从第 2 步的清单里挑一个实现。
+4. **写结论**：用三问法（输入来源 / 期望来源 / 容差理由）为你新增的每个用例写一行注释，并统计"每用例断言数"与现有代码（平均约 8 条）的差异。
 
-完成这份报告，你就具备了在本仓库「安全地改数学代码」的完整能力闭环：**改之前能跑基线，改之后能证明没坏，新功能能配上可信的测试**。
+预期成果：一份覆盖地图 + 至少两个合入 `parametertests` 的新用例 + 一页体检报告。这份地图同时是下一讲（u11-l2 精读 `Tools/` 数学库）的预习提纲。
 
 ## 6. 本讲小结
 
-- LibreVNA-Test 是**把整个 GUI 编进来的测试二进制**：`main.cpp` 一个 `QApplication` 串联 6 个 `qExec`、退出码按位或；`CONFIG += testcase` 提供 `make check`；测试文件已在 `.pro` 中意味着**在既有文件里加用例零配置**。
-- 期望值来源五策略：**手算常数**（最可信）、**对偶往返**（免外部值）、**公式镜像**（须与实现走不同路径防同错）、**参数扫描**（暴露量纲错）、**解析边界值**（可精确比较）；好的套件组合使用。
-- 浮点断言三定律：与 0 比较用 `qFuzzyIsNull`；多步运算的期望值用 **float 截断**放宽容差；物理精确解（50Ω→0）才可用 `==`。
-- 假数据工厂原则：先问「被测函数读什么维度」，只在该维度上造真实数据（栅格检测只看频率轴，`S11=0` 即可）。
-- 两处「无效绿色」警示：**空占位用例**（`fftAndIfftWithShift`）照报 PASS；**循环验证**（portextension 用被测系统自己的传输线公式造数据）只能证明流程贯通、不能证明公式正确。
-- 新增用例四步：`private slots` 声明 → 实现手算期望值 → 免改 `.pro` → `类名::函数名` 精准重跑；本讲已为 S↔T 转换补出 `S2T`/`T2S` 两个通过用例（含 0.26/0.2/−0.4/2.0 的完整纸面推导）。
+- LibreVNA-Test 采用**聚合器入口**：一个 `main.cpp` 用 `QTest::qExec` 串联六个测试类，`status |=` 累积退出码；`.pro` 把**整个 GUI 加固件协议层**全部编进测试，`CONFIG += testcase` 提供 `make check`。
+- 测试类 = `QObject` 子类 + `private slots`，**声明即登记**：漏写槽声明，实现再多也是隐身的；空槽会"虚假地 PASS"（`fftAndIfftWithShift` 即是明证）。
+- 数值测试三板斧：**已知答案**（硬编码或解析手算，如理想直通的 T 参数是单位矩阵）、**独立公式对照**（`S2Z_2P` 用手写教科书公式对质 Eigen 矩阵实现）、**往返一致性**（FFT↔IFFT、S⇄ABCD），强度递减、成本递减。
+- 期望值必须来自**被测代码之外**：物理常识（50Ω 负载归一到 75Ω 得 −0.2）、合成参数（种进 1ns 时延就要挖出 1ns）、解析几何（理想圆的圆心），唯独不能用被测函数自己算。
+- 容差是设计决策：相对容差（`qFuzzyCompare`）在求逆/回归等双路径场景要降级为 float（约 \(10^{-5}\)），量级跨度大的 FFT 用绝对容差（1e-14），期望值为零用 `qFuzzyIsNull`；边界值（0、±1、inf）是数值测试性价比最高的投入点。
+- 覆盖现状有明确盲区：`Tparam`/`Yparam`/`ABCDparam::root`/`swapPorts`/`reduceTo` 全部无测试，校准误差项求解器也只有间接覆盖——补第一个洞只需改头文件与实现两处，`.pro` 都不必动。
 
 ## 7. 下一步学习建议
 
-1. **u11-l2 工具箱**：本讲的被测对象 `parameters.cpp` 将在下一讲以「使用者」视角重新登场——混合模式转换、阻抗匹配对话框如何消费这些矩阵运算；两讲对照着读，你会同时看清一个数学库的**内与外**。
-2. **把覆盖审计扩展到 Calibration**：`calibration.cpp` 里 `computeOSL`、`correctMeasurement`（u9-2 精读过）目前只有栅格检测被测、求解器本身无单元测试。试着为「理想校准件 + 理想误差模型」构造一个可手算的闭环用例——这是仓库公认最有价值也最难的补测方向。
-3. **修一个小笔误练手**：[parameters.cpp:91](https://github.com/jankae/LibreVNA/blob/c4276df1e79c559f878ebc17e9f0bd3bd0a70f57/Software/PC_Application/LibreVNA-GUI/Tools/parameters.cpp#L91) 的异常消息把「T parameter」误写成「ABCD parameter」。先写一个触发该异常的测试（`QVERIFY_THROWN` 风格或 try/catch），再修消息——体验「测试先行」的微缩流程。
-4. **毕业实战预告**：u11-l3 将带你实现一个完整的 `DemoDriver`。届时你写的每一行驱动代码，都可以用本讲的方法配上「已知答案」用例——测试能力是二次开发的隐形地基。
+- **下一讲 u11-l2（工具箱：S 参数数学、E 系列、阻抗匹配与自定义控件）** 将正面精读 `Tools/parameters.cpp` 的完整数学体系与 Eigen 用法，本讲的覆盖地图正好作为预习提纲——先知道哪些函数没被测试保护，再读实现时会对风险点格外敏感。
+- 想继续补测试的读者，优先顺序建议：`Sparam::swapPorts`/`reduceTo`（纯排列，10 分钟一个用例）→ `Yparam` 链路（仿 `S2Z` 手写公式）→ `ABCDparam::root`（用"平方还原"性质）→ 校准求解器 `computeOSL`（用理想校准件 + 理想误差模型构造可手算的闭环，难度最高）。
+- 顺手填掉 `fftAndIfftWithShift` 这个空壳：仿照 `fftAndIfft` 的写法，在两次变换之间插入/移除 fftshift 的等价操作（交换前后半段），断言还原。
+- 若想了解黑盒端到端测试与单元测试如何互补，回看 u10-l3 讲过的 `Software/Integrationtests/`：它用 SCPI 拉起真实（无头）GUI 验证整机行为，与本讲的数值白盒测试分守两道防线。
