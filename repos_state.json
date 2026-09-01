@@ -58781,7 +58781,7 @@
     },
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-08-31T23:02:31Z"
+      "last_run_at": "2026-09-01T18:02:39Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
@@ -63850,9 +63850,9 @@
         "u3-l3": {
           "status": "failed",
           "action": "new",
-          "retries": 2,
+          "retries": 3,
           "cost": null,
-          "error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\n\\)，行数差恰好等于每个信号引脚新增的 4 行。\\n- **提交 e5c881b** 只修 3 个 `*_ecos.lef` 的 356 处引脚方向（326 处改为 INPUT：SN/SE/SI；30 处改为 OUTPUT：ECK 门控时钟输出），与 verilog 功能真值一致。\\n- **错误仍未清零**：DFFNSRQX 的 SN、MSDFFQX 的 S"
+          "error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\nIP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CH/lef/ics55_LLSC_H7CH.lef > /tmp/nope 2>/dev/null; true\",\"description\":\"Find macro names near line 73688\"}},{\"tool_name\":\"Bash\",\"t"
         },
         "u3-l4": {
           "status": "done",
@@ -63862,11 +63862,11 @@
           "error": null
         },
         "u3-l5": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\ncovery', m[1])]\\nprint('modules with no timing entries:', len(empty), empty[:15])\\n\\\"\",\"description\":\"Count modules with conditional paths and empty specify via python -c\"}},{\"tool_"
+          "cost": 5.523363,
+          "error": null
         },
         "u3-l6": {
           "status": "done",
@@ -63890,21 +63890,25 @@
           "error": null
         },
         "u4-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 3.0805280000000006,
+          "error": null
+        },
+        "u5-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.861020000000001,
+          "error": null
+        },
+        "u5-l2": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"888977c1-64d6-407e-92e9-c209"
-        },
-        "u5-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"20e4de82-2a63-4e35-8f60-3aa5"
         },
         "u6-l1": {
           "status": "pending",
@@ -63928,7 +63932,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/openecos-projects/icsprout55-pdk/icsprout55-pdk-tutorial",
       "last_head": "68d89edb47847671e18f9e65d66c0cd883995e05",
-      "last_run_at": "2026-08-31T23:02:31Z",
+      "last_run_at": "2026-09-01T18:02:39Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "Pixel-Talk/PEAR": {
@@ -64040,46 +64044,60 @@
           "error": null
         },
         "u4-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.065424,
+          "error": null
+        },
+        "u4-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.86829,
+          "error": null
+        },
+        "u4-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.285844,
+          "error": null
+        },
+        "u5-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.1604240000000003,
+          "error": null
+        },
+        "u5-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3966339999999997,
+          "error": null
+        },
+        "u5-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.8029100000000002,
+          "error": null
+        },
+        "u5-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3575249999999999,
+          "error": null
+        },
+        "u5-l5": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"88438d8f-f5f9-4a79-8069-7875"
-        },
-        "u4-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"08599112-94e3-4e2e-9476-3078"
         }
       },
       "manifest_head": "230fa1534367c9f357c1c192a328cdc87ab4491c",
@@ -64088,7 +64106,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/Pixel-Talk/PEAR/PEAR-tutorial",
       "last_head": "230fa1534367c9f357c1c192a328cdc87ab4491c",
-      "last_run_at": "2026-08-31T23:02:31Z",
+      "last_run_at": "2026-09-01T18:02:39Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "MoonshotAI/checkpoint-engine": {
@@ -64186,51 +64204,67 @@
           "error": null
         },
         "u3-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.9894629999999998,
+          "error": null
+        },
+        "u3-l6": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.37114,
+          "error": null
+        },
+        "u4-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.7159470000000003,
+          "error": null
+        },
+        "u4-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.4061669999999997,
+          "error": null
+        },
+        "u4-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.820322,
+          "error": null
+        },
+        "u4-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.34107,
+          "error": null
+        },
+        "u4-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.031442,
+          "error": null
+        },
+        "u5-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.105954,
+          "error": null
+        },
+        "u5-l2": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"d698345a-7013-4aee-8bec-d018"
-        },
-        "u3-l6": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"1f57f4f8-7e62-49ac-a63c-50e6"
         },
         "u5-l3": {
           "status": "pending",
@@ -64279,7 +64313,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/MoonshotAI/checkpoint-engine/checkpoint-engine-tutorial",
       "last_head": "d1de07b3aacff34050d09c3efa093f9a2fcdcf73",
-      "last_run_at": "2026-08-31T23:02:31Z",
+      "last_run_at": "2026-09-01T18:02:39Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "MoonshotAI/FlashKDA": {},
