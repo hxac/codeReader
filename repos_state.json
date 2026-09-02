@@ -58781,7 +58781,7 @@
     },
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-09-01T18:02:39Z"
+      "last_run_at": "2026-09-01T23:02:29Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
@@ -63850,9 +63850,9 @@
         "u3-l3": {
           "status": "failed",
           "action": "new",
-          "retries": 3,
+          "retries": 4,
           "cost": null,
-          "error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\nIP/STD_cell/ics55_LLSC_H7C_V1p10C100/ics55_LLSC_H7CH/lef/ics55_LLSC_H7CH.lef > /tmp/nope 2>/dev/null; true\",\"description\":\"Find macro names near line 73688\"}},{\"tool_name\":\"Bash\",\"t"
+          "error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\n[m]['pins'][name]['layers'].get(lay, 0)\\n    dist[added] += 1\\nprint('per-macro added-rect distribution (added -> #macros):', dict(sorted(dist.items())))\\n\"}},{\"tool_name\":\"Bash\",\"t"
         },
         "u3-l4": {
           "status": "done",
@@ -63904,26 +63904,32 @@
           "error": null
         },
         "u5-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"20e4de82-2a63-4e35-8f60-3aa5"
+          "cost": 3.5064510000000007,
+          "error": null
         },
         "u6-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.827608,
+          "error": null
         },
         "u6-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.6626190000000003,
+          "error": null
         },
         "u6-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 3.06319,
+          "error": null
         }
       },
       "manifest_head": "68d89edb47847671e18f9e65d66c0cd883995e05",
@@ -63932,8 +63938,9 @@
       "mode": "full",
       "tutorial_path": "tutorials/openecos-projects/icsprout55-pdk/icsprout55-pdk-tutorial",
       "last_head": "68d89edb47847671e18f9e65d66c0cd883995e05",
-      "last_run_at": "2026-09-01T18:02:39Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-09-01T23:02:29Z",
+      "last_error": "1 篇未完成: ['u3-l3']",
+      "abandoned": []
     },
     "Pixel-Talk/PEAR": {
       "prompt_hash": "b21aef51792b02df",
@@ -64093,21 +64100,22 @@
           "error": null
         },
         "u5-l5": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"08599112-94e3-4e2e-9476-3078"
+          "cost": 1.978482,
+          "error": null
         }
       },
       "manifest_head": "230fa1534367c9f357c1c192a328cdc87ab4491c",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/Pixel-Talk/PEAR/PEAR-tutorial",
       "last_head": "230fa1534367c9f357c1c192a328cdc87ab4491c",
-      "last_run_at": "2026-09-01T18:02:39Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-09-01T23:02:29Z",
+      "last_error": null,
+      "abandoned": []
     },
     "MoonshotAI/checkpoint-engine": {
       "prompt_hash": "b21aef51792b02df",
@@ -64260,64 +64268,238 @@
           "error": null
         },
         "u5-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.259108,
+          "error": null
+        },
+        "u5-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.191517,
+          "error": null
+        },
+        "u5-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.9306370000000002,
+          "error": null
+        },
+        "u5-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.173508,
+          "error": null
+        },
+        "u5-l6": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.5862129999999999,
+          "error": null
+        },
+        "u6-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.5924609999999997,
+          "error": null
+        },
+        "u6-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.20075,
+          "error": null
+        },
+        "u6-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.366273,
+          "error": null
+        },
+        "u6-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.168718,
+          "error": null
+        }
+      },
+      "manifest_head": "d1de07b3aacff34050d09c3efa093f9a2fcdcf73",
+      "prev_head": null,
+      "phase": "done",
+      "mode": "full",
+      "tutorial_path": "tutorials/MoonshotAI/checkpoint-engine/checkpoint-engine-tutorial",
+      "last_head": "d1de07b3aacff34050d09c3efa093f9a2fcdcf73",
+      "last_run_at": "2026-09-01T23:02:29Z",
+      "last_error": null,
+      "abandoned": []
+    },
+    "MoonshotAI/FlashKDA": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8804980000000002,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.4252049999999996,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.183301,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.5638490000000003,
+          "error": null
+        },
+        "u1-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.097625,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3934099999999998,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3489189999999998,
+          "error": null
+        },
+        "u2-l3": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"1f57f4f8-7e62-49ac-a63c-50e6"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"ce81a364-0b4c-4896-9d1d-599e"
         },
-        "u5-l3": {
+        "u2-l4": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u5-l4": {
+        "u2-l5": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u5-l5": {
+        "u2-l6": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u5-l6": {
+        "u2-l7": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u6-l1": {
+        "u2-l8": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u6-l2": {
+        "u3-l1": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u6-l3": {
+        "u3-l2": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u6-l4": {
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l7": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l8": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l9": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l10": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l11": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l12": {
           "status": "pending",
           "action": "new",
           "retries": 0
         }
       },
-      "manifest_head": "d1de07b3aacff34050d09c3efa093f9a2fcdcf73",
+      "manifest_head": "7afb9f454f160a6c4bbc0999beca0a8c40a38934",
       "prev_head": null,
       "phase": "workers",
       "mode": "full",
-      "tutorial_path": "tutorials/MoonshotAI/checkpoint-engine/checkpoint-engine-tutorial",
-      "last_head": "d1de07b3aacff34050d09c3efa093f9a2fcdcf73",
-      "last_run_at": "2026-09-01T18:02:39Z",
+      "tutorial_path": "tutorials/MoonshotAI/FlashKDA/FlashKDA-tutorial",
+      "last_head": "7afb9f454f160a6c4bbc0999beca0a8c40a38934",
+      "last_run_at": "2026-09-01T23:02:29Z",
       "last_error": "quota exhausted; will resume next window"
     },
-    "MoonshotAI/FlashKDA": {},
-    "MoonshotAI/Attention-Residuals": {},
+    "MoonshotAI/Attention-Residuals": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"1d2a78c4-ce56-4ddf-afae-8885fd981aa3\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0",
+      "last_run_at": "2026-09-01T23:02:29Z"
+    },
     "MoonshotAI/Moonlight": {},
     "MoonshotAI/MoBA": {},
     "MoonshotAI/Kimi-VL": {},
