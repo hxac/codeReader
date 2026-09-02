@@ -1,0 +1,734 @@
+{
+  "head": "7afb9f454f160a6c4bbc0999beca0a8c40a38934",
+  "project": "FlashKDA",
+  "rationale": "FlashKDA 是一个体量中等但密度极高的 CUDA/CUTLASS 项目：Python 层极薄（仅一个 fwd 包装），核心全部集中在约 2400 行的 C++/CUDA 源码中，分为\"Kernel 1（token 并行的准备阶段）+ Kernel 2（按 head 并行的递推阶段）\"两级流水，中间以 workspace 传递 6 类中间张量。因此学习路线设计为：第一单元（入门）先建立 KDA/线性注意力的算法直觉，跑通构建、测试与最小调用，并画出从 Python 到两个 kernel 的调用链；第二单元（进阶）沿主链路自顶向下读代码——先读懂 bit-exact 的 torch 参考实现以获得算法骨架，再依次进入 pybind 入口校验、模板分发、CuTe 布局基础、TMA 描述符与启动配置，然后拆解 Kernel 1 的各计算阶段和 workspace 契约；第三单元（专家）深入最难的三个主题：16x16 前代换矩阵求逆、Kernel 2 的 warp 专用化与双流水线（按 load/MMA 各相位/store 三讲展开）、以及数值精度取舍，最后覆盖测试方法学、benchmark 与 ncu 剖析、FLA 后端接入和二次开发消融实践。依赖关系上严格保证先算法后实现、先串行参考后并行内核、先结构后优化，每篇讲义均锚定 1-6 个真实源码文件并配一个可操作的代码实践。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "单元一 初识 FlashKDA：算法背景、构建运行与项目地图",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "FlashKDA 是什么：项目定位、性能与设计概览",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 FlashKDA（Flash Kimi Delta Attention）的定位：基于 CUTLASS/CuTe 的高性能 KDA 前向 kernel，用于替代 flash-linear-attention 中的 Triton chunk_kda。结合 README 和官方 deep-dive 博客了解 SM90 要求、双 kernel 划分与 CHUNK=16 等核心设计决策。",
+          "learning_goals": [
+            "说出 FlashKDA 解决的问题、目标硬件（SM90+、CUDA 12.9+）和与 fla chunk_kda 的关系",
+            "理解 deep-dive 中四个设计主题：chunk 大小、kernel 融合、数值精度、底层优化",
+            "了解 BENCHMARK_H20/GB200 中性能数字的含义（相对 chunk_kda 约 1.85-2.3 倍加速）"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/20260420-flashkda-v1-deep-dive.md",
+            "BENCHMARK_H20.md"
+          ],
+          "minimal_modules": [
+            "README 导读",
+            "deep-dive 博客四大设计决策",
+            "性能基准表解读"
+          ],
+          "practice_task": "编写一个 Python 脚本 check_env.py：打印 torch 版本、CUDA 版本、当前 GPU 的 compute capability，判断是否满足 FlashKDA 的运行要求（SM90+、CUDA 12.9+、PyTorch 2.4+），并输出结论。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "前置数学：门控 Delta 规则与 KDA 的递推形式",
+          "order": 2,
+          "filename": "u1-l2-kda-recurrence-math.md",
+          "level": "beginner",
+          "topic": "从线性注意力的外积状态 S_t 出发，推导 KDA 的逐 token 递推：S_t = g_t * S_{t-1} + k_t v_t^T 的 delta 修正形式，以及 gate 激活（A_log、dt_bias、sigmoid、lower_bound）、beta 门控和 L2 归一化的作用。以 tests/torch_ref.py 的公式为对照。",
+          "learning_goals": [
+            "写出 KDA 的状态递推公式和输出公式 o_t = q_t S_t",
+            "理解 g = lower_bound * sigmoid(exp(A_log) * (g_raw + dt_bias)) 的门控构造",
+            "理解 beta（写入强度）和 q/k L2 归一化在 delta rule 中的角色"
+          ],
+          "source_files": [
+            "tests/torch_ref.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "线性注意力状态递推",
+            "KDA 门控与 beta",
+            "L2 归一化"
+          ],
+          "practice_task": "不参考 torch_ref.py 的向量化写法，用纯 PyTorch 双层 for 循环实现一个逐 token 的 KDA 递推（B=1, T=64, H=2, D=128，门控参数随机），并把它与 torch_ref 的输出做数量级对比（允许数值误差，检查形状与量级）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "从零构建与运行：submodule、架构选择与测试脚本",
+          "order": 3,
+          "filename": "u1-l3-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解 setup.py 的构建流程：CUTLASS submodule 拉取、FLASH_KDA_CUDA_ARCHS 的 auto/all/列表三种模式、nvcc 编译选项（--use_fast_math、ptxas register-usage-level 等），以及 tests/test.sh 一键测试。",
+          "learning_goals": [
+            "独立完成 clone → submodule update → pip install --no-build-isolation 的构建流程",
+            "理解 SUPPORTED_CUDA_ARCHS（90a/100a/103a/120a）与 -gencode 的关系",
+            "知道 setup.py 中各 nvcc flag 的用途和 clangd 开发环境配置（setup_clangd.sh）"
+          ],
+          "source_files": [
+            "setup.py",
+            "README.md",
+            "tests/test.sh",
+            ".gitmodules"
+          ],
+          "minimal_modules": [
+            "CUDAExtension 构建骨架",
+            "架构探测与 FLASH_KDA_CUDA_ARCHS",
+            "测试入口 test.sh"
+          ],
+          "practice_task": "在一台 SM90 机器上从零完成安装（FLASH_KDA_CUDA_ARCHS 默认 auto），跑通 bash tests/test.sh；然后用 FLASH_KDA_CUDA_ARCHS=all 重新编译一次，记录两种方式下编译产物针对的 sm 架构（可用 cuobjdump --list-elf 查看）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "项目地图：从 flash_kda.fwd 到两个 CUDA kernel 的调用链",
+          "order": 4,
+          "filename": "u1-l4-repo-structure.md",
+          "level": "beginner",
+          "topic": "梳理仓库结构与数据流：flash_kda/__init__.py 分配 workspace 并调用 pybind 模块 flash_kda_C.fwd；csrc/flash_kda.cpp 做校验与模板分发；csrc/smxx/fwd_launch.cu 构建 TMA 描述符并启动 _flash_kda_fwd_prepare（K1）与 _flash_kda_fwd_recurrence（K2）；csrc/smxx/utils.cuh 提供公共工具。",
+          "learning_goals": [
+            "画出 Python → pybind → launch → K1/K2 的完整调用链",
+            "说出每个源码文件的职责分工与代码量级（K1 586 行、K2 839 行、utils 438 行）",
+            "理解双 kernel 划分：K1 按 token/tile 并行做准备，K2 按 head 并行做递推"
+          ],
+          "source_files": [
+            "flash_kda/__init__.py",
+            "csrc/flash_kda.cpp",
+            "csrc/smxx/fwd_launch.cu",
+            "csrc/smxx/fwd_kernel1.cuh",
+            "csrc/smxx/fwd_kernel2.cuh"
+          ],
+          "minimal_modules": [
+            "仓库目录结构",
+            "调用链与文件职责",
+            "双 kernel 流水线总览"
+          ],
+          "practice_task": "用 mermaid 或 ASCII 画出从 flash_kda.fwd 到 K1/K2 的调用链与数据流图（标注 workspace 中 6 类中间张量的生产者 K1 与消费者 K2），保存为 notes/callgraph.md。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "第一次调用：flash_kda.fwd 的参数、形状与运行模式",
+          "order": 5,
+          "filename": "u1-l5-first-call.md",
+          "level": "beginner",
+          "topic": "逐项讲解 flash_kda.fwd 的 API：q/k/v/g/beta/out 的 [B,T,H,K] 布局与 dtype 约束、scale、A_log/dt_bias/lower_bound、initial_state/final_state 的 [B,H,V,K] 布局与 bf16/fp32 两种 dtype，以及 cu_seqlens 变长模式（B 必须为 1）。",
+          "learning_goals": [
+            "正确构造一次 flash_kda.fwd 调用所需的全部输入张量",
+            "区分 batched 模式与 varlen 模式下状态张量的形状差异",
+            "理解 workspace 由 get_workspace_size(T_total, H, N) 自动分配的机制"
+          ],
+          "source_files": [
+            "flash_kda/__init__.py",
+            "README.md",
+            "tests/test_fwd.py"
+          ],
+          "minimal_modules": [
+            "Python 包装层与 workspace 分配",
+            "输入张量规格表",
+            "stateless/bf16 state/fp32 state 三种运行模式"
+          ],
+          "practice_task": "编写 mini_run.py：固定 B=1、T=4096、H=32、D=128，随机生成输入，分别以（a）无状态、（b）bf16 初始/最终状态两种模式调用 flash_kda.fwd，用 torch.cuda.Event 计时并打印 out 与 final_state 的统计信息（均值、最大值）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "单元二 读懂主链路：torch 参考、绑定分发与 Kernel 1",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "chunk 化算法骨架：bit-exact 的 torch 参考实现",
+          "order": 1,
+          "filename": "u2-l1-chunked-algorithm.md",
+          "level": "intermediate",
+          "topic": "精读 tests/torch_ref.py：CHUNK=16 分块下每个 chunk 的计算序列——g 激活与 cumsum、k_decayed/q_decayed/k_inv/k_restored 四个衰减变体、L=(tril(k_decayed@k_inv^T,-1))*beta、Mqk=tril(q_decayed@k_inv^T)、INV=(I+L)^-1、U=INV@((v-k_decayed@s^T)*beta)、out=q_decayed@s^T+Mqk@U、状态更新 s = g_total*s + k_restored^T@U。",
+          "learning_goals": [
+            "把 u1-l2 的逐 token 递推等价改写成 chunk 矩阵形式",
+            "说出四个 k/q 衰减变体的定义与相互关系（k_restored = k*exp(g_total-g_cumsum)）",
+            "理解为什么参考实现要逐操作模拟 kernel 的数值行为（fp32_fma、ex2_ftz、bf16 量化点）"
+          ],
+          "source_files": [
+            "tests/torch_ref.py"
+          ],
+          "minimal_modules": [
+            "g 激活/cumsum/g_total",
+            "decay 家族与 L/Mqk/INV",
+            "U 计算、输出与状态更新"
+          ],
+          "practice_task": "基于 torch_ref.py 写一个 dump_chunk.py：对某个 chunk（如 chunk_idx=3, h=0）打印 k_decayed、q_decayed、k_inv、k_restored、g_total、L、Mqk、INV、U 的数值，并用代码验证 k_restored == k * exp(g_total - g_cumsum)（bf16 容差内）。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "pybind 入口：get_workspace_size 与 fwd 的校验链",
+          "order": 2,
+          "filename": "u2-l2-binding-and-validation.md",
+          "level": "intermediate",
+          "topic": "精读 csrc/flash_kda.cpp：workspace 尺寸公式（total_tiles 上界、per_tile_bytes、128 字节对齐 static_assert 与 tile_prefix 尾部缓冲）；fwd 中一连串 TORCH_CHECK（dtype/shape/contiguous/state 组合）；[B,T,H,D]→[B*T,H,D] 的 reshape、beta 转置 [T,H]→[H,T]、gate_scale = lower_bound*log2(e) 的换底。",
+          "learning_goals": [
+            "独立推导 get_workspace_size 在给定 T_total/H/N 下的字节数",
+            "列出所有输入校验规则和非法输入对应的报错",
+            "理解 beta 转置为何用 1D TMA（无 T 对齐约束）以及 gate_scale 预乘 log2(e) 的意义"
+          ],
+          "source_files": [
+            "csrc/flash_kda.cpp",
+            "flash_kda/__init__.py"
+          ],
+          "minimal_modules": [
+            "workspace 尺寸计算与对齐",
+            "TORCH_CHECK 校验链",
+            "布局预处理（reshape/beta 转置/换底）"
+          ],
+          "practice_task": "写 invalid_inputs.py：构造至少 6 种非法输入（fp32 的 q、非连续 g、D=64、varlen 时 B=2、state dtype 不匹配、cu_seqlens 是 int32），逐个调用 fwd 并收集报错信息，整理成一张『规则 → 报错』对照表。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "模板参数分发：7 种 state 组合 × varlen 的实例化",
+          "order": 3,
+          "filename": "u2-l3-template-dispatch.md",
+          "level": "intermediate",
+          "topic": "分析 fwd.h 的 launch_fwd 模板签名（D、HasStateIn、HasStateOut、StateFP32、IsVarlen）与 flash_kda.cpp 中 DISPATCH_STATE/LAUNCH 宏的 7 分支分发；fwd_launch.cu 末尾的显式实例化表如何避免链接错误。",
+          "learning_goals": [
+            "解释每个模板布尔参数对 kernel 行为的影响（是否加载/存储状态、状态精度、变长寻址）",
+            "读懂 DISPATCH_STATE 宏的分支顺序与 state_fp32 的推导逻辑",
+            "理解为什么用编译期模板而不是运行时分支（性能与死代码消除）"
+          ],
+          "source_files": [
+            "csrc/flash_kda.cpp",
+            "csrc/fwd.h",
+            "csrc/smxx/fwd_launch.cu"
+          ],
+          "minimal_modules": [
+            "launch_fwd 模板签名",
+            "DISPATCH_STATE 七分支",
+            "显式实例化与链接"
+          ],
+          "practice_task": "写 dispatch_matrix.py：枚举 (has_in, has_out) × (bf16, fp32) × (varlen, batched) 的全部合法组合（准备对应的 initial_state/final_state/cu_seqlens），逐个调用 flash_kda.fwd 并打印成功标记，形成一张 7×2 的分发矩阵表。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "读懂 CuTe：本项目用到的布局、swizzle 与 GMMA atom",
+          "order": 4,
+          "filename": "u2-l4-cute-layouts.md",
+          "level": "intermediate",
+          "topic": "以 K1Layouts/K2Layouts 为例讲解 CuTe 基础：make_layout/make_shape/make_stride、LayoutLeft/LayoutRight、tile_to_shape 拼接 GMMA::Layout_K_INTER_Atom 与 Layout_MN_INTER_Atom 的 bf16 布局、prepend 构造 TMA smem 布局、以及 composition 派生 TMAVOLayout/TMALMLayout 的技巧。",
+          "learning_goals": [
+            "看懂 QKLayout/MMALayout/LMLayout/StateSmemLayout 的类型定义并算出 cosize",
+            "区分 K_INTER（行主 A/B 操作数）与 MN_INTER（转置视图）两类 atom 的用途",
+            "理解为什么 workspace 的 smem 目标布局必须与 TMA store 布局一致（K1 写、K2 读同一份比特）"
+          ],
+          "source_files": [
+            "csrc/smxx/fwd_kernel1.cuh",
+            "csrc/smxx/fwd_kernel2.cuh",
+            "csrc/smxx/utils.cuh"
+          ],
+          "minimal_modules": [
+            "CuTe Layout 基础",
+            "GMMA atom 与 tile_to_shape",
+            "TMA smem 布局（prepend/composition）"
+          ],
+          "practice_task": "写一个独立 CUDA 小程序 cute_probe.cu（编译时 include cutlass）：用 cute::print 分别打印 Layout_K_INTER_Atom<bfloat16_t>、tile_to_shape 后的 MMALayout(16x128) 与 LMLayout(16x16) 的 shape/stride/cosize，把输出截图/粘贴进学习笔记并标注 swizzle 位宽。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "启动配置：TMA 描述符、gmem 布局与 workspace 切分",
+          "order": 5,
+          "filename": "u2-l5-tma-descriptors-and-launch.md",
+          "level": "intermediate",
+          "topic": "精读 fwd_launch.cu 主函数：输入 [H,T_total,D]（stride D, D*H, 1）的 gmem 布局、workspace 按 WorkspaceSizes 切成 6 段数组 + tile_prefix 尾部、make_tma_copy(SM90_TMA_LOAD/STORE) 的用法、make_state_tma 按 StateFP32 选择 bf16/fp32 描述符（无状态时用 out_ptr 做哑指针）、K1 grid=(total_tiles,H) 与 K2 grid=(N,H) 的差异、cudaFuncSetAttribute 设置动态 smem。",
+          "learning_goals": [
+            "解释 q/k/v/g/out 共用 gmem_layout 但 workspace 各自独立描述符的原因",
+            "手工计算 workspace 中 6 段数组在给定 (H, total_tiles) 下的字节偏移",
+            "说出 K1 与 K2 的 grid 维度分别对应哪一并行轴、BLOCK_LEVEL_K1/K2 宏的作用"
+          ],
+          "source_files": [
+            "csrc/smxx/fwd_launch.cu",
+            "csrc/smxx/utils.cuh"
+          ],
+          "minimal_modules": [
+            "gmem 布局与 tensor 构造",
+            "workspace 六段切分",
+            "TMA 描述符家族与两个 grid"
+          ],
+          "practice_task": "写 workspace_layout.py：输入 (T_total=8200, H=96, N=1/batched 与 N=8/varlen) 复现 get_workspace_size 公式并打印每段（k_decayed/q_decayed/k_restored/g_total/INV/Mqk/tile_prefix）的起始偏移和总字节数，与 C++ 函数返回值对拍。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "Kernel 1 骨架：tile 映射、varlen 前缀和与单发 TMA 加载",
+          "order": 6,
+          "filename": "u2-l6-kernel1-skeleton.md",
+          "level": "intermediate",
+          "topic": "讲解 _flash_kda_fwd_prepare 的前 260 行：blockIdx 到 (global_tile_idx, head_idx) 的映射、varlen 下 _flash_kda_build_tile_prefix 前缀和 + O(log N) 二分查找 vs batched 下的整除映射、total_tiles 上界导致的 early return、以及单线程（threadIdx.x==0）发起全部 TMA load、ClusterTransactionBarrier 的 init/arrive_and_expect_tx/wait 三步与 fence_view_async_shared 的代理围栏。",
+          "learning_goals": [
+            "手工模拟 varlen 输入下 tile_prefix 的构建和二分查找过程",
+            "解释『只有线程 0 发 TMA、事务字节数一次声明』的单发加载模式与 K2 多级流水的区别",
+            "理解 fence_barrier_init / fence_view_async_shared 在 generic 与 async 代理之间的可见性作用"
+          ],
+          "source_files": [
+            "csrc/smxx/fwd_kernel1.cuh",
+            "csrc/smxx/fwd_launch.cu"
+          ],
+          "minimal_modules": [
+            "tile 映射与 early exit",
+            "tile_prefix + 二分搜索",
+            "单发 TMA 与事务 barrier"
+          ],
+          "practice_task": "构造 varlen 输入 seq_lens=[7,33,16,64]，手算每序列 tile 数与 tile_prefix=[0,1,3,4,8]；再写 prefix_check.py 用 PyTorch 模拟 _flash_kda_build_tile_prefix 与二分查找函数，对 100 个随机 global_tile_idx 验证 seq_idx/local_t 与暴力法一致。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "Kernel 1 计算阶段：L2 归一化、门控 cumsum 与 decay_apply",
+          "order": 7,
+          "filename": "u2-l7-kernel1-compute-stages.md",
+          "level": "intermediate",
+          "topic": "逐段精读 K1 的计算主体：QK L2 归一化（每线程 8 元素、warp shuffle 树归约、rsqrt）；128 线程做门控激活+cumsum 与另 128 线程做 k 尾部清零的双任务分支；decay_apply 的寄存器分块（8x64 tile、warp/g/t 索引映射）一次性生成 k_decayed/q_decayed（乘 exp(cumsum)）与 k_inv/k_restored（乘 exp(-cumsum)、再乘 exp(g_total)）；随后单 warp MMA 构造 L（fp32 累加）与 Mqk（bf16 存储）、tril+beta 掩码。",
+          "learning_goals": [
+            "把 decay_apply 的线程-数据映射（warp_id/g/t ↔ 16x128 矩阵元素）画成图",
+            "对照 torch_ref 验证 kernel 中每一步的数值等价性（含 ex2/tanh 近似与 bf16 量化点）",
+            "理解 L/Mqk 的 tril 掩码与 beta 相乘的融合写法（同线程同元素）"
+          ],
+          "source_files": [
+            "csrc/smxx/fwd_kernel1.cuh",
+            "csrc/smxx/utils.cuh",
+            "tests/torch_ref.py"
+          ],
+          "minimal_modules": [
+            "L2 归一化 warp 归约",
+            "融合门控 cumsum + 尾部清零",
+            "decay_apply 分块与 L/Mqk 构造"
+          ],
+          "practice_task": "把 decay_apply 的索引映射翻译成 Python 伪代码 decay_map.py（输入 warp_id/lane/g/t，输出该线程负责的 (row, col) 与读写的寄存器），并用它核对 16x128 矩阵被 256 线程完整覆盖且无重叠。",
+          "depends_on": [
+            "u2-l6",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l8",
+          "title": "workspace 契约：K1 如何写、K2 如何读",
+          "order": 8,
+          "filename": "u2-l8-workspace-contract.md",
+          "level": "intermediate",
+          "topic": "总结 K1 末尾的 6 次 TMA store（k_decayed/q_decayed/k_restored/g_total/INV/Mqk，按 ws_idx = head_idx*total_tiles + global_tile_idx 寻址、tma_store_arrive/wait 收尾），以及 K2 load warp 按 ws_idx = head_idx*total_tiles + tile_base + t 对同一份 workspace 的读取；两边布局必须逐比特一致。同时解释 SharedStorageK1 中 union 复用（q/k/g 与后续缓冲不重叠生命周期）如何省下约 14KB smem。",
+          "learning_goals": [
+            "写出 workspace 每个分量的形状/dtype/字节大小及 K1→K2 的读写地址公式",
+            "解释 K1 smem union 的生命周期划分（Phase A: q/k/g；Phase B: decay 产物）",
+            "理解 K1 用 __launch_bounds__(256, 8) 换 occupancy 的取舍"
+          ],
+          "source_files": [
+            "csrc/smxx/fwd_kernel1.cuh",
+            "csrc/smxx/fwd_kernel2.cuh",
+            "csrc/smxx/utils.cuh",
+            "csrc/smxx/fwd_launch.cu"
+          ],
+          "minimal_modules": [
+            "六次 TMA store 与 ws_idx 寻址",
+            "K2 侧的对称读取",
+            "smem union 复用策略"
+          ],
+          "practice_task": "画一张 workspace 内存图（按比例）：以 H=32、T_total=4096、batched 为例标出 6 段数组范围与 tile_prefix 尾部；再在图中标出 K2 处理 (seq_idx=2, head_idx=5, t=4) 时读取的 ws_idx 在 k_decayed 段内的位置。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "单元三 深入内核：矩阵求逆、递推 kernel、精度与工程化",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "16x16 求逆：8x8 fp32 前代换 + bf16 HMMA 块合并",
+          "order": 1,
+          "filename": "u3-l1-forward-substitution-inverse.md",
+          "level": "advanced",
+          "topic": "精读 utils.cuh 中的 inv_fwd_subst_fused_1warp：把单位下三角 X=I+L 分块为 [A 0; C B]，对角 8x8 块用 fp32 前代换（每 lane 持一行、__shfl_sync 广播主元行）求逆，非对角块用两次 bf16 HMMA（dc=P@M、o=(-dc)@P）合并，最后 P+bf16(o) 得到 INV。对照 git 历史 7afb9f4：该方法替代了在 |L|→1（近共线 key）时会灾难性抵消的 fp16 Neumann 级数。",
+          "learning_goals": [
+            "推导分块求逆公式 X^-1 = [A^-1 0; -(B^-1 C)A^-1 B^-1] 并对应到代码中的 P/M/dc/o",
+            "解释 lane 分组（group 0/2 做 A、1/3 做 B）与冗余拷贝保持 shuffle 收敛的原因",
+            "理解 seed L 全程 fp32、只在 HMMA 输入处量化 bf16 的精度设计"
+          ],
+          "source_files": [
+            "csrc/smxx/utils.cuh",
+            "csrc/smxx/fwd_kernel1.cuh",
+            "tests/torch_ref.py"
+          ],
+          "minimal_modules": [
+            "分块前代换算法",
+            "warp shuffle 求逆实现",
+            "与 Neumann 级数的精度对比"
+          ],
+          "practice_task": "写 inv_compare.py：随机生成严格下三角 L，分别实现（a）fp64 朴素求逆、（b）torch_ref.inv_fwd_subst_16、（c）fp16 Neumann 级数 (I-L)(I+L^2)(I+L^4)(I+L^8)，在 |L| 从 0.3 到 0.99 扫描下绘制相对误差曲线，复现 Neumann 在 |L|→1 时发散的结论。",
+          "depends_on": [
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Kernel 2 架构：warp 专用化、共享存储与双流水线",
+          "order": 2,
+          "filename": "u3-l2-kernel2-architecture.md",
+          "level": "advanced",
+          "topic": "总览 _flash_kda_fwd_recurrence：192 线程 = 4 个 MMA warp + 1 个 LOAD warp + 1 个 STORE warp 的角色划分（WarpRole）；SharedStorageK2 中常驻的 state_acc(128x128 bf16) 与 input[3]/output[2] 多级缓冲，以及 pipeline 缓冲与 fp32 状态转换缓冲 state_fp32_buf 的 union；make_load_pipeline(PipelineTmaAsync)/make_store_pipeline(PipelineAsync) 的生产者-消费者参数与 NamedBarrier 的使用。",
+          "learning_goals": [
+            "画出 6 个 warp 的角色图与各自执行的代码区间",
+            "解释 InputStages=3/OutputStages=2 的多级缓冲与 state_fp32_buf union 的生命周期复用",
+            "读懂 pipeline 参数（transaction_bytes、num_consumers、producer_arv_count）的含义"
+          ],
+          "source_files": [
+            "csrc/smxx/fwd_kernel2.cuh",
+            "csrc/smxx/utils.cuh"
+          ],
+          "minimal_modules": [
+            "warp 角色划分",
+            "SharedStorageK2 布局与 union",
+            "两条 pipeline 的构造"
+          ],
+          "practice_task": "把 fwd_launch.cu 中 kInputStages/kOutputStages 改为 (2,2) 与 (4,3) 各编译一次，用 --ptxas-options=-v 记录 K2 的 smem 字节数变化，并跑 benchmarks/bench_fwd.py 对比三种配置的性能，写一份简短实验记录。",
+          "depends_on": [
+            "u2-l8",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "LOAD warp：多张量 TMA 预取与事务字节预算",
+          "order": 3,
+          "filename": "u3-l3-load-warp.md",
+          "level": "advanced",
+          "topic": "精读 K2 的 load warp 循环：producer_acquire 后在同一个 barrier 上聚合发起 v、beta（1D、按 &~7 对齐）与 workspace 6 项共 8 次 TMA 拷贝，kTmaTransactionBytes 的编译期预算公式，producer_tail 收尾；以及 elect_one_sync 只由单个 lane 发起的细节。",
+          "learning_goals": [
+            "统计一个 stage 的 TMA 事务总字节并验证与 kTmaTransactionBytes 公式一致",
+            "解释 beta 的 1D TMA 对齐（beta_linear & ~7）与 K1/K2 中 beta_smem_offset=(linear)&7 的呼应",
+            "理解多张量共享一个 transaction barrier 的完成语义"
+          ],
+          "source_files": [
+            "csrc/smxx/fwd_kernel2.cuh",
+            "csrc/smxx/fwd_kernel1.cuh"
+          ],
+          "minimal_modules": [
+            "producer 循环与 stage 管理",
+            "8 次 TMA 拷贝清单",
+            "事务字节预算公式"
+          ],
+          "practice_task": "手工计算 cosize(VOLayout)*2 + 32*2 + 3*cosize(MMALayout)*2 + 128*4 + 2*cosize(LMLayout)*2（CHUNK=16, D=128）的值；再定义 TMA_DISABLE_ALL 重编译，跑 tests/test_fwd.py 与 benchmark，记录关闭 load/store warp 后 kernel 是否仍正确、慢多少。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "MMA 相位 1-5：双 GEMM、delta 修正与输出投影",
+          "order": 4,
+          "filename": "u3-l4-mma-phases-1-5.md",
+          "level": "advanced",
+          "topic": "逐相位精读 MMA warp 主体：Phase1 双 GEMM k_decayed@s 与 q_decayed@s（K_BLOCKS 级联、A/B 操作数 LDSM 预取双缓冲）；Phase2 out 转 bf16 存寄存器、加载 v/INV/beta；Phase3 u=(v-u)*beta 后用 SM75_U32x1_MOVM_T 在寄存器内转置再 INV@u；Phase4 Mqk@U 累加到 out；Phase5 用 SM90_U32x4_STSM_N 写 smem out tile。每个 warp 负责两个 16x16 列块（N=128/4 warp=32）。",
+          "learning_goals": [
+            "为 Phase1-5 列出每步 GEMM 的矩阵形状与每 warp 负责的列块",
+            "解释 MOVM_T 如何避免 u 的 smem 往返（U 直接作为 B 操作数留在寄存器）",
+            "理解 SM80_16x8x16_F32BF16BF16F32_TN atom 与 Tile<_16,_16,_16> 的组装方式"
+          ],
+          "source_files": [
+            "csrc/smxx/fwd_kernel2.cuh",
+            "csrc/smxx/utils.cuh"
+          ],
+          "minimal_modules": [
+            "Phase1 双 GEMM 与操作数预取",
+            "Phase3 delta 修正 + 寄存器转置",
+            "Phase4/5 输出累加与 STSM"
+          ],
+          "practice_task": "写 phases_shapes.md：以表格形式列出 Phase1-5 中每次 gemm 调用的 A/B/C 形状、来源（smem 或寄存器）与累加 dtype；并对照 torch_ref 中 v-u、U=INV@u、out 三条语句逐一对号。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "MMA 相位 6：状态更新的寄存器转置与预取环",
+          "order": 5,
+          "filename": "u3-l5-mma-phase-6-state-update.md",
+          "level": "advanced",
+          "topic": "精读状态更新 s_acc = s_acc*g_total + k_restored^T @ U：通过给同一块 smem 换 TransposedMMALayout/TransposedStateSmemLayout 视图 + LDSM_T/STSM_T 实现『寄存器文件内转置』，S_M_BLOCKS 级 M 维循环配合 PREFETCH=1 的 ring_A_kr/ring_S_acc 预取，g_total 衰减与 HMMA 结果用 fp32 FMA 融合后量化回 bf16。",
+          "learning_goals": [
+            "解释为什么状态更新需要转置视图而输出路径不需要（k_restored^T 的形状）",
+            "跟踪 PREFETCH 环中每个 slot 的装载-计算-回写时机",
+            "论证 bf16 存储状态 + fp32 FMA 更新的精度取舍（对照 deep-dive 第 3 节）"
+          ],
+          "source_files": [
+            "csrc/smxx/fwd_kernel2.cuh",
+            "docs/20260420-flashkda-v1-deep-dive.md"
+          ],
+          "minimal_modules": [
+            "转置布局视图与 LDSM_T/STSM_T",
+            "PREFETCH 预取环",
+            "g_total 衰减融合"
+          ],
+          "practice_task": "写出 Phase6 循环的伪代码（含 ring 数组下标随 m 的变化），并分析如果把 PREFATCH 改为 2 需要额外占用多少寄存器片段；对照 torch_ref 的 work_state 更新行验证数学等价。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "状态输入输出：bf16 直通、fp32 转换与零初始化路径",
+          "order": 6,
+          "filename": "u3-l6-state-io-paths.md",
+          "level": "advanced",
+          "topic": "讲解 K2 开头/结尾的三条状态路径：HasStateIn 且 bf16 时 TMA 直接载入 state_acc；StateFP32 时先载入 state_fp32_buf 再由 smem_cvt_fp32_to_bf16 做 K_SW32→K_INTER 布局转换；无输入状态时全线程清零 + 代理围栏。输出侧对称：bf16 直接 TMA store，fp32 先 smem_cvt_bf16_to_fp32 再由 STORE warp 发 TMA。",
+          "learning_goals": [
+            "解释 FP32StateSmemLayout 用 Layout_K_SW32_Atom 且与 bf16 原子同构（Swizzle<0,0,3>）的妙处",
+            "写出两条转换函数的按 8x8 原子、每线程 2 元素的并行映射",
+            "理解每条路径上 fence_view_async_shared/__syncthreads 的正确位置"
+          ],
+          "source_files": [
+            "csrc/smxx/fwd_kernel2.cuh",
+            "csrc/smxx/utils.cuh"
+          ],
+          "minimal_modules": [
+            "三条输入路径",
+            "fp32↔bf16 smem 布局转换",
+            "两条输出路径与围栏"
+          ],
+          "practice_task": "写 state_precision.py：固定 T=8192, H=32，分别以 bf16 与 fp32 状态模式跑 flash_kda.fwd，把 final_state 与 fla 的 fp64 fused_recurrent_kda 参考（见 tests/test_fwd.py 的 run_fla_gold_reference）对比，统计 max/mean 误差，验证两种状态 dtype 的精度差异。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l7",
+          "title": "STORE warp 与尾块处理：整块 TMA 与逐元素回退",
+          "order": 7,
+          "filename": "u3-l7-store-warp-and-tail.md",
+          "level": "advanced",
+          "topic": "精读 K2 的 STORE warp：store_pipeline.consumer_wait 后，若 actual_len<CHUNK（尾块/短序列）则退化为单线程逐元素写 out_raw_ptr 以避免 TMA 整 16 行写越界覆盖下一条序列；否则 TMA store 整块并 tma_store_arrive/wait。这是 varlen 正确性的关键分支。",
+          "learning_goals": [
+            "解释尾块为什么必须绕过 TMA（16 行 tile 会写到下一条序列的 token）",
+            "跟踪 store_pipeline 的 consumer_release 与 out stage 回收时机",
+            "理解 tma_store_wait<0> 在手动写路径与 TMA 路径下的不同必要性"
+          ],
+          "source_files": [
+            "csrc/smxx/fwd_kernel2.cuh"
+          ],
+          "minimal_modules": [
+            "store 循环与双分支",
+            "尾块逐元素写",
+            "流水线回收"
+          ],
+          "practice_task": "构造 varlen 输入 seq_lens=[1300, 547, 16]（1300 与 547 都不是 16 的倍数），运行正确性测试确认无越界；再用 ncu（参考 benchmarks/ncu.sh 的 -k 正则）分别抓取 recurrence kernel 在 fixed 与 varlen 下的执行配置，记录尾块分支带来的指令数差异。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l8",
+          "title": "数值精度总账：bf16 状态、ex2/tanh 近似与量化点",
+          "order": 8,
+          "filename": "u3-l8-precision-design.md",
+          "level": "advanced",
+          "topic": "汇总全 kernel 的精度决策：状态与多数中间量存 bf16、状态更新与 L 累加用 fp32 FMA、ex2.approx.ftz（换底 log2 预乘）与 tanh.approx.f32 实现 sigmoid、CHUNK=16 保证 exp(cumsum) 落在 bf16 表示范围（lower_bound=-5）、fp32↔bf16 的量化只发生在特定边界。对照 deep-dive 第 3 节与 fla 的精度对比图。",
+          "learning_goals": [
+            "在 kernel 源码中标出所有 fp32 保持点与 bf16 量化点",
+            "解释 ex2/tanh 近似与精确函数的 ulp 差异为何可被 exact-match 测试接受",
+            "推导 CHUNK=16 与 lower_bound=-5 下 exp(cumsum) 的动态范围上界"
+          ],
+          "source_files": [
+            "csrc/smxx/fwd_kernel1.cuh",
+            "csrc/smxx/fwd_kernel2.cuh",
+            "csrc/smxx/utils.cuh",
+            "docs/20260420-flashkda-v1-deep-dive.md"
+          ],
+          "minimal_modules": [
+            "bf16/fp32 分工地图",
+            "PTX 近似指令",
+            "CHUNK=16 的范围论证"
+          ],
+          "practice_task": "写 approx_study.py：修改 tests/torch_ref.py 的副本，把其中 ex2/tanh 近似逐个替换为精确 exp/torch.sigmoid，分别观察哪些替换会破坏与 kernel 的 bit-exact（torch.equal 变 False），据此总结『kernel 精度复刻的最小必要集合』。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l9",
+          "title": "测试方法学：bit-exact 参考、FLA 对拍与参数扫描",
+          "order": 9,
+          "filename": "u3-l9-testing-methodology.md",
+          "level": "advanced",
+          "topic": "分析测试体系：torch_ref.py 如何逐 FMA 顺序复刻 kernel（l2_normalize_kernel_match、inv_fwd_subst_16、fp32_fma）；test_fwd.py 的 exact match 断言、g/bias 扫描用例与 fla fp64 金标 + matplotlib 误差可视化；test_fwd_full.py 对 4 种 state IO × 2 种 dtype × 多 H/T 的全组合扫描与 conftest.py 的 xdist GPU 分配。",
+          "learning_goals": [
+            "理解『参考实现模拟硬件行为』这一测试范式的实现技巧与局限",
+            "学会用 run_test_full.sh 做多 GPU 并行参数扫描",
+            "能独立为新场景补充 exact-match 测试用例"
+          ],
+          "source_files": [
+            "tests/torch_ref.py",
+            "tests/test_fwd.py",
+            "tests/test_fwd_full.py",
+            "tests/conftest.py",
+            "tests/run_test_full.sh"
+          ],
+          "minimal_modules": [
+            "bit-exact 参考实现技巧",
+            "FLA 金标与误差可视化",
+            "pytest 参数扫描与 GPU 分配"
+          ],
+          "practice_task": "在 test_fwd_full.py 中新增一个参数化用例（例如 T=129 的奇数长度 varlen 或 H=8），确保 _make_inputs/_make_state 适配后 pytest 通过 exact match，并用 run_test_full.sh 的 -n 16 方式跑一次全量回归。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l10",
+          "title": "基准与剖析：bench_fwd、ncu 与性能报告",
+          "order": 10,
+          "filename": "u3-l10-benchmark-and-profiling.md",
+          "level": "advanced",
+          "topic": "讲解 benchmarks/bench_fwd.py 的 bench_fn（cuda.Event 计时、warmup/iters/repeats）、fixed/varlen 两种模式、与 fla chunk_kda/chunk_gated_delta_rule 的对比设置；ncu.sh 用 -k 正则同时抓两个 kernel 的 full 指标；generate_benchmark_md.py 与 BENCHMARK_H20/GB200.md 报告的生成关系。",
+          "learning_goals": [
+            "独立运行并读懂 bench_fwd.py 输出的 mean/min/max 三列",
+            "掌握用 ncu 抓取 _flash_kda_fwd_prepare/recurrence 的 occupancy、smem、寄存器指标",
+            "能复现一份 BENCHMARK_H20 风格的对比表格"
+          ],
+          "source_files": [
+            "benchmarks/bench_fwd.py",
+            "benchmarks/bench.sh",
+            "benchmarks/ncu.sh",
+            "benchmarks/generate_benchmark_md.py",
+            "BENCHMARK_H20.md"
+          ],
+          "minimal_modules": [
+            "计时框架 bench_fn",
+            "ncu 剖析流程",
+            "基准报告生成"
+          ],
+          "practice_task": "在本机运行 python benchmarks/bench_fwd.py（至少 fixed 一个形状），把 flash_kda 三种 state 模式与 chunk_kda 的结果整理成 BENCHMARK_H20.md 风格的 Markdown 表，并计算相对加速比。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l11",
+          "title": "作为 FLA 后端：chunk_kda 的自动分发与退出口",
+          "order": 11,
+          "filename": "u3-l11-fla-backend-integration.md",
+          "level": "advanced",
+          "topic": "讲解 FlashKDA 与 flash-linear-attention 的集成方式：安装 fla>=0.5.0 后 chunk_kda 自动分发到 flashkda（use_gate_in_kernel/use_qk_l2norm_in_kernel/use_beta_sigmoid_in_kernel/safe_gate/transpose_state_layout 等参数的映射），FLA_FLASH_KDA=0 退回 Triton 路径，以及用 logging.INFO 查看 [FLA Backend] 分发命中/拒绝原因。",
+          "learning_goals": [
+            "理解作为 drop-in 后端需要满足的接口与语义约束（inference_mode、参数开关）",
+            "掌握分发调试与强制退出的方法",
+            "能对比 flashkda 与 Triton 路径的输出一致性与性能"
+          ],
+          "source_files": [
+            "README.md",
+            "tests/test_fwd.py"
+          ],
+          "minimal_modules": [
+            "fla 集成调用方式",
+            "环境开关与日志调试",
+            "Triton 回退对比"
+          ],
+          "practice_task": "安装 flash-linear-attention>=0.5.0，写 fla_dispatch.py：按 README 的参数组合调用 chunk_kda（含 cu_seqlens 变长），开启 logging.INFO 确认日志出现 kda.chunk_kda -> flashkda；再设 FLA_FLASH_KDA=0 重跑，对比两条路径的输出与耗时。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l12",
+          "title": "二次开发实践：消融、调参与扩展方向",
+          "order": 12,
+          "filename": "u3-l12-extensions-and-ablation.md",
+          "level": "advanced",
+          "topic": "把前几讲的知识用于改造：BLOCK_LEVEL_K1/K2 与 TMA_DISABLE_ALL 宏做结构消融；kInputStages/CHUNK/launch_bounds 等调参旋钮；分析支持 D=64 或新 head_dim、更换门控激活等扩展需要触碰的代码面（flash_kda.cpp 的 D==128 检查、K1/K2Layouts 的所有布局、WorkspaceSizes、MMA 分块），以及 lower_bound 与 CHUNK 的 bf16 范围耦合这一架构约束。",
+          "learning_goals": [
+            "列出项目中所有可安全实验的编译期/运行时旋钮及其风险",
+            "评估『支持新的 head_dim』的真实工作量（布局、TMA、MMA、workspace 全链）",
+            "形成一套『改一处 → 重编译 → exact-match 回归 → benchmark』的二次开发流程"
+          ],
+          "source_files": [
+            "csrc/smxx/fwd_launch.cu",
+            "csrc/smxx/fwd_kernel1.cuh",
+            "csrc/smxx/fwd_kernel2.cuh",
+            "csrc/smxx/utils.cuh",
+            "setup.py"
+          ],
+          "minimal_modules": [
+            "编译期消融开关",
+            "调参旋钮盘点",
+            "head_dim 扩展影响面分析"
+          ],
+          "practice_task": "完成一次完整消融实验：分别以 (a) 基线、(b) BLOCK_LEVEL_K1=0、(c) BLOCK_LEVEL_K2=0、(d) TMA_DISABLE_ALL 编译四个版本，各跑 tests/test_fwd.py 确认正确性、再跑 benchmarks/bench_fwd.py 记录耗时，输出一张消融对照表并解释每个开关对应流水线阶段的贡献。",
+          "depends_on": [
+            "u3-l4",
+            "u3-l10"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
