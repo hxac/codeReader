@@ -1,0 +1,682 @@
+{
+  "head": "230fa1534367c9f357c1c192a328cdc87ab4491c",
+  "project": "PEAR",
+  "rationale": "PEAR 是一个中等规模的单包 Python 研究项目（根目录入口脚本 + models/dataset/utils 三个子包），核心链路非常清晰：图像 patch → ViT 骨干 → Transformer 解码头（SMPLX+FLAME 参数与相机）→ EHM_v2 统一人体模型（LBS + FLAME 头替换）→ GS_Camera/Renderer2 渲染。因此大纲按「先跑通、再沿数据流精读、最后进训练与二次开发」三层组织：单元 1 让读者完成环境、资产准备并用三个入口（app.py / inference_images.py / inference_wo_detect.py）跑出第一份网格结果；单元 2 拆解配置系统与三条推理链路的工程细节（检测裁剪回贴、Gradio 会话、Ehm_Pipeline 前向）；单元 3 和单元 4 沿前向数据流逐模块精读网络与人体模型（ViT → TransformerDecoder → SMPLXTransformerDecoderHead → 相机 → SMPL-X/FLAME/LBS → EHM_v2 → 渲染）；单元 5 进入专家层，覆盖 WebDataset 数据管线、OurPipeline + Lightning Fabric 训练循环、损失设计、时序平滑，以及扩展实践。依赖关系严格对应调用链，每篇讲义只讲一个模块并配一个可操作实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 expressive human mesh recovery 任务的目标与 SMPL-X/FLAME 的角色",
+            "列出 PEAR 推理的输入（256×256 人体 patch）与输出（body_param、flame_param、pd_cam、10475 顶点网格）",
+            "知道 README 中的论文、项目页、HuggingFace Demo 等资源入口"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README 概览与 Quick Start",
+            "Ehm_Pipeline.forward 的输入输出注释",
+            "输出字典三个关键字段"
+          ],
+          "order": 1,
+          "practice_task": "通读 README 后，画出 PEAR 的数据流图（图像 → ViT → Head → EHM → Renderer），并结合 ehm_pipeline.py 中 forward 的注释列出返回字典里三个关键字段的名称与张量形状。",
+          "source_files": [
+            "README.md",
+            "models/pipeline/ehm_pipeline.py",
+            "app.py"
+          ],
+          "title": "PEAR 是什么：像素对齐的 expressive 人体网格恢复",
+          "topic": "介绍 PEAR 的研究定位：从单张图像或视频实时恢复 SMPL-X + FLAME 参数化人体网格（EHM 参数），达到 100 FPS，并说明它与 HMR/OSX/Multi-HMR 等工作的关系。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-environment-and-assets.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "按 requirements.txt 完成 conda 环境与 pytorch3d、chumpy 安装",
+            "把 SMPL/SMPLX/FLAME 模型文件放到 assets/ 下正确的位置",
+            "理解 app.py 顶部对 chumpy/pytorch3d 的导入校验逻辑"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "requirements.txt 依赖清单",
+            "assets 目录约定",
+            "app.py 顶部的环境校验代码"
+          ],
+          "order": 2,
+          "practice_task": "创建 pear conda 环境，安装 requirements.txt、pytorch3d 与 chumpy；下载 SMPL_NEUTRAL.pkl、SMPLX_NEUTRAL_2020.npz、generic_model.pkl 并放到 assets/ 对应目录；运行一段 import 校验脚本，确认 app.py 顶部的『All systems go』检查能通过。",
+          "source_files": [
+            "requirements.txt",
+            "README.md",
+            "app.py"
+          ],
+          "title": "环境搭建与人体模型资产准备",
+          "topic": "讲解如何安装依赖（含 pytorch3d、chumpy 的特殊安装方式）以及如何准备 SMPL、SMPL-X、FLAME、SMPLX2SMPL 等模型资产目录。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-repo-structure-map.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "说出根目录五个入口脚本各自的用途",
+            "把 models/、dataset/、utils/、configs/ 下的文件按职责分类",
+            "通过 import 关系判断哪些模块在推理链路上、哪些只在训练中使用"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "入口脚本一览",
+            "models 子包职责划分",
+            "dataset 与 utils 子包职责划分"
+          ],
+          "order": 3,
+          "practice_task": "手绘仓库目录树，把 models/、dataset/、utils/ 下的 .py 文件按『入口 / 骨干 / 解码头 / 人体模型 / 渲染 / 数据 / 工具』分类标注，并用 grep 统计每个入口脚本 import 的顶层模块，验证你的分类。",
+          "source_files": [
+            "README.md",
+            "train_ehms.py",
+            "inference_images.py",
+            "inference_wo_detect.py"
+          ],
+          "title": "仓库目录结构与代码地图",
+          "topic": "带读者浏览整个仓库的目录组织：入口脚本、models（backbones/smplx/modules/pipeline/vitdet）、dataset、utils、configs、example、assets，并说明各部分在推理/训练中的角色。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "filename": "u1-l4-first-inference-run.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "成功运行图像批量推理并得到 mesh_*.jpg / result_*.jpg",
+            "成功运行 Gradio 视频演示并得到 mesh_video.mp4 与 results.npz",
+            "区分三个入口的适用场景（单人已知框 / 多人自动检测 / 视频演示）"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "inference_images.py 的命令行参数与主循环",
+            "app.py 的启动方式与界面流程",
+            "输出产物含义"
+          ],
+          "order": 4,
+          "practice_task": "依次运行 python inference_images.py --input_path example/images 和 python app.py（上传 example/example_1.mp4），收集输出的 mesh_*.jpg、result_*.jpg、mesh_video.mp4 和 results.npz，并记录每个产物是由哪段代码写出的。",
+          "source_files": [
+            "inference_images.py",
+            "inference_wo_detect.py",
+            "app.py"
+          ],
+          "title": "跑通第一次推理：三个入口脚本",
+          "topic": "实操运行三个推理入口：多人图像推理（YOLO 检测）、无检测单人推理、Gradio 视频演示，理解各自输入输出产物。"
+        }
+      ],
+      "order": 1,
+      "title": "单元一：初识 PEAR —— 定位、环境与第一次运行"
+    },
+    {
+      "id": "u2",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l1-config-system.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "解释 ConfigDict 如何把 YAML 读成 dict 并包装成只读 OmegaConf",
+            "说明 cfg.BACKBONE / cfg.HEAD / cfg.TRAIN / cfg.DATASET 各配置段的含义",
+            "使用 device_parser 解析 '0,1' 或 '0-3' 形式的 GPU 参数"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "ConfigDict 与 read_config/merge_a_into_b",
+            "add_extra_cfgs",
+            "device_parser"
+          ],
+          "order": 1,
+          "practice_task": "写一个 15 行脚本：用 ConfigDict(model_config_path='configs/infer.yaml') + add_extra_cfgs 构造 meta_cfg，打印 cfg.BACKBONE.embed_dim、cfg.HEAD、cfg.TRAIN；再用 cfg.update 修改一个键并观察 OmegaConf 只读锁的切换行为；最后对 '0,2-3' 调用 device_parser 验证输出。",
+          "source_files": [
+            "utils/general_utils.py",
+            "configs/infer.yaml",
+            "configs/train.yaml"
+          ],
+          "title": "ConfigDict：YAML 配置加载与只读 OmegaConf 封装",
+          "topic": "精读 utils/general_utils.py 中的 ConfigDict、add_extra_cfgs、device_parser，理解 configs/infer.yaml 与 configs/train.yaml 中各配置段如何驱动模型构建。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4",
+            "u2-l1"
+          ],
+          "filename": "u2-l2-inference-wo-detect.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "走读从读图、pad_and_resize、to_tensor 到 ehm_model 前向的完整流程",
+            "说明 ehm(body_param, flame_param) 如何把参数变成顶点",
+            "解释 GS_Camera 构造参数（focal_length=24、image_size 1024）与 alpha 混合渲染"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "图像预处理 pad_and_resize/to_tensor",
+            "模型与权重加载",
+            "渲染与叠加输出"
+          ],
+          "order": 2,
+          "practice_task": "把 inference_wo_detect.py 中的 alpha 混合系数和 pad_and_resize 的 target_size 改成 argparse 命令行参数，分别用 0.3/0.7 和 320 重新推理，对比 result_*.jpg 的差异。",
+          "source_files": [
+            "inference_wo_detect.py",
+            "models/pipeline/ehm_pipeline.py",
+            "models/modules/ehm/EHM_v2.py"
+          ],
+          "title": "单人推理全链路：inference_wo_detect.py 逐行走读",
+          "topic": "逐行走读无检测推理脚本：pad_and_resize 预处理、模型与权重自动下载（hf_hub_download）、EHM_v2 参数到网格、GS_Camera 构造、Renderer2 渲染与结果叠加保存。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-multi-person-detection.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "读懂 sanitize_bbox/process_bbox 的等比扩展与 ratio 放大逻辑",
+            "用 gen_trans_from_patch_cv / generate_patch_image 理解 crop 与 inv_trans 的互逆关系",
+            "用 warpAffine + mask 把 patch 网格结果贴回原图"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "YOLOv8 检测调用",
+            "process_bbox / generate_patch_image 仿射裁剪",
+            "warpAffine 回贴"
+          ],
+          "order": 3,
+          "practice_task": "写一段代码把 YOLO 检测框和 process_bbox 扩展后的框都画在原图上保存对比；再把脚本里自带的 calculate_iou/non_max_suppression 接到一个 conf 阈值更高的检测输出上做一次手工 NMS 实验，观察保留框数量的变化。",
+          "source_files": [
+            "inference_images.py"
+          ],
+          "title": "多人场景：YOLO 检测、bbox 仿射裁剪与回贴",
+          "topic": "精读 inference_images.py 的多人处理：YOLOv8 人体检测、process_bbox 等比扩框、generate_patch_image 仿射变换裁剪 256×256 patch，推理后用 inv_trans warpAffine 把渲染网格贴回原图。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l4-gradio-video-app.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "理解 create_user_temp_dir / delete_later 的会话临时目录与延迟清理机制",
+            "走读 mesh_inference 中逐帧前向、参数堆叠与平滑渲染的流程",
+            "掌握 gr.Blocks 中 video_input.change / launch_btn.click 的事件绑定"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "会话临时目录管理",
+            "mesh_inference 主流程",
+            "Gradio 界面与事件绑定"
+          ],
+          "order": 4,
+          "practice_task": "在 app.py 中把『截取前 3 秒』的秒数改成 gr.Slider 组件（1~5 秒）并接入 handle_video_upload 的 max_frames 计算；再增加一个 gr.Checkbox 控制是否启用 polynomial_smooth，重新运行 demo 验证。",
+          "source_files": [
+            "app.py"
+          ],
+          "title": "Gradio 视频演示：app.py 的会话管理与视频推理",
+          "topic": "解析 app.py：上传视频截取前 3 秒、临时会话目录与延迟删除、mesh_inference 逐帧推理与参数平滑、Gradio Blocks 界面组件与事件绑定，以及 HuggingFace spaces.GPU 适配。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l5-ehm-pipeline-forward.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "说明 normalize 与 x[:, :, :, 32:-32] 裁剪的原因（256×256 → 256×192）",
+            "描述 backbone 与 head 的调用顺序及特征图形状",
+            "从 pear_model.pt 的 state dict 结构反推 backbone/head 两部分权重"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Ehm_Pipeline 构造",
+            "forward 三步流程",
+            "权重加载约定"
+          ],
+          "order": 5,
+          "practice_task": "写脚本：hf_hub_download 下载 pear_model.pt，按 app.py 的方式 strict=False 加载 backbone 和 head，对一张 pad_and_resize 到 256 的图片跑 ehm_model(img_patch)，打印 body_param 各键、flame_param 各键的 shape 以及 pd_cam 的 4×4 矩阵。",
+          "source_files": [
+            "models/pipeline/ehm_pipeline.py",
+            "utils/pipeline_utils.py",
+            "configs/infer.yaml"
+          ],
+          "topic": "精读 Ehm_Pipeline：normalize、256×192 裁剪、ViT 特征提取、SMPLXTransformerDecoderHead 输出参数字典，以及 backbone/head 权重的加载约定。",
+          "title": "Ehm_Pipeline.forward：从图像 patch 到参数字典"
+        }
+      ],
+      "order": 2,
+      "title": "单元二：配置系统与三条推理链路"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u3-l1-vit-backbone.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "解释 PatchEmbed 如何把 256×192 图像变成 patch 序列",
+            "说明 Block 中 Attention/Mlp/DropPath 的组织方式",
+            "对照 infer.yaml 理解 embed_dim=1280、depth=32、num_heads=16 的巨大骨干配置"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "PatchEmbed",
+            "Block（Attention+Mlp+DropPath）",
+            "ViT.forward_features"
+          ],
+          "order": 1,
+          "practice_task": "用 configs/infer.yaml 的 BACKBONE 段（随机权重）实例化 ViT，输入 (1,3,256,192) 张量，打印各中间形状并验证输出特征图通道数与 token 数；再统计可训练参数量，解释该骨干来自 ViTPose 预训练（backbone_ckpt 字段）。",
+          "source_files": [
+            "models/backbones/vit.py",
+            "configs/infer.yaml"
+          ],
+          "title": "ViT 骨干：PatchEmbed、Block 与位置编码",
+          "topic": "精读 models/backbones/vit.py 的 ViT 实现：PatchEmbed、带 cls token 的位置编码、32 层 Transformer Block、last_norm，以及冻结策略（frozen_stages/freeze_attn/freeze_ffn）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-transformer-decoder.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "解释零 token 作为查询、图像 token 作为 context 的 cross-attention 设计",
+            "说明 PreNorm/FeedForward/TransformerCrossAttn 的堆叠结构",
+            "理解 DropTokenDropout 与 ZeroTokenDropout 的区别"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Attention 与 CrossAttention",
+            "TransformerCrossAttn",
+            "TransformerDecoder.forward"
+          ],
+          "order": 2,
+          "practice_task": "构造一个 (1,128,1024) 的假 context，用 HEAD 配置实例化 TransformerDecoder 跑通 forward 并打印输出形状；再把 num_tokens 改成 4，观察 pos_embedding 与输出形状如何变化。",
+          "source_files": [
+            "models/smplx/pose_transformer.py",
+            "configs/infer.yaml"
+          ],
+          "title": "TransformerDecoder：零 token 查询与 cross-attention",
+          "topic": "精读 pose_transformer.py：CrossAttention 如何让一个零初始化 token 不断从图像特征中查询信息，TransformerDecoder 的 token 嵌入、位置嵌入与 dropout 变体。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-smplx-decoder-head.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "列出全部解码器的输入输出维度与语义",
+            "实现并单测 6D 旋转到旋转矩阵的转换",
+            "说明 init_body_pose 均值参数回归的动机（残差式预测）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "参数解码器组",
+            "rot6d_to_rotmat",
+            "set_smpl_init 均值初始化"
+          ],
+          "order": 3,
+          "practice_task": "写一张表格统计 smplx_poses_decoder/scale/shape/expression/joint 与 flame 系列、cam_decoder 的输出维度，与源码注释一一对应；再为 rot6d_to_rotmat 写单测：随机输入 (B,N,6)，断言输出 (B,N,3,3) 满足正交且行列式≈1。",
+          "source_files": [
+            "models/smplx/smplx_head.py"
+          ],
+          "title": "SMPLXTransformerDecoderHead：参数解码器全家桶",
+          "topic": "精读 smplx_head.py 的解码器结构：smplx_poses(312)/scale(6)/shape(200)/exp(50)/joint(165) 与 flame_poses(14)/shape(300)/exp(50)、cam(3)，以及 rot6d_to_rotmat 和 set_smpl_init 的均值参数初始化。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l4-camera-model.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "解释 pd_cam 的 bias 与 24/s 缩放构造及弱透视到透视的转换",
+            "推导 get_proj_matrix 中 tanfov 与焦距的关系",
+            "会用 GS_Camera.perspective_projection 把 3D 点投到图像平面"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "get_proj_matrix / get_full_proj",
+            "pd_cam 构造",
+            "GS_Camera 与透视投影"
+          ],
+          "order": 4,
+          "practice_task": "取一张真实推理的 pd_cam（4×4），按 inference_wo_detect.py 的方式构造 GS_Camera，把 ehm(...) 输出的 joints 用 perspective_projection 投影到 1024×1024 平面并缩放回原图尺寸，用 cv2.circle 画点检查与人体轮廓是否对齐。",
+          "source_files": [
+            "models/smplx/smplx_head.py",
+            "utils/graphics_utils.py"
+          ],
+          "title": "相机模型：pd_cam、get_full_proj 与投影矩阵",
+          "topic": "理解弱相机参数如何变成 4×4 RT：pd_cam 的 bias 与 24/s 深度换算、固定 R 对角矩阵、get_proj_matrix 的透视投影内参（focal_length=24），以及 GS_Camera 的 perspective_projection。"
+        }
+      ],
+      "order": 3,
+      "title": "单元三：网络结构 —— ViT 骨干与 SMPLX 解码头"
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u4-l1-smplx-body-model.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "说出 SMPL-X 模板顶点数、关节数与核心张量形状",
+            "理解 smplx2flame_ind、uvmap 等索引缓冲的用途",
+            "用 blend_shapes/vertices2joints 施加 shape 并回归关节"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "SMPLX 初始化与资产加载",
+            "核心 buffer 形状",
+            "UV/索引工具"
+          ],
+          "order": 1,
+          "practice_task": "加载 assets/SMPLX 下的 SMPLX（参考 EHM_v2 的构造方式），打印 v_template、J_regressor、lbs_weights、shapedirs、smplx2flame_ind 的形状与 dtype；用 blend_shapes 把随机 betas 加到模板上，用 vertices2joints 回归关节并打印坐标范围。",
+          "source_files": [
+            "models/modules/smplx/SMPLX.py",
+            "models/smplx/SMPLXV2.py"
+          ],
+          "title": "SMPL-X：参数化人体模型的加载与模板",
+          "topic": "阅读 SMPLX 模型类如何从 assets/SMPLX 加载模板、blend skin 权重、关节回归器、landmark 索引和 UV 贴图相关缓冲，理解后续 EHM 所需的全部张量。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-flame-head-model.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "说出 FLAME 参数各维含义与模板顶点数",
+            "理解 eyelid 线性偏移与 add_teeth 的处理",
+            "独立运行 FLAME 前向得到头部网格"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "FLAME 资产加载",
+            "full_pose 拼接与前向",
+            "eyelid/teeth 细节"
+          ],
+          "order": 2,
+          "practice_task": "参考 EHM_v2.forward 的 FLAME 分支，写脚本：零 shape/expression 下跑 FLAME 得到中性头；然后分别只改 jaw_params（下颌张合）和 eyelid_params（眨眼）各渲染一帧对比图（可先用matplotlib绘制3D顶点散点代替渲染）。",
+          "source_files": [
+            "models/modules/flame/FLAME.py",
+            "models/modules/ehm/EHM_v2.py"
+          ],
+          "title": "FLAME：参数化头部模型与眼睑/下颌控制",
+          "topic": "阅读 FLAME 模型：shape/expression/jaw/eye/eyelid 参数、neck/global pose 被置零的处理、lbs 调用与 r_eyelid/l_eyelid 顶点偏移、add_teeth 选项。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-lbs-skinning.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "推导 batch_rigid_transform 的前向运动学",
+            "说明 lbs_wobeta 与经典 lbs 的输入差异与适用场景",
+            "理解 lbs_get_transform 输出的逐顶点变换矩阵用途"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "lbs 标准流程",
+            "lbs_wobeta",
+            "batch_rigid_transform"
+          ],
+          "order": 3,
+          "practice_task": "对同一组 pose 与已 shape 化的模板分别调用 lbs 和 lbs_wobeta，对比输出顶点的最大误差范数；再画出 parents 关节树（55 个关节）帮助理解运动学链。",
+          "source_files": [
+            "models/modules/flame/lbs.py",
+            "models/modules/smplx/lbs.py"
+          ],
+          "title": "LBS 蒙皮：lbs / lbs_wobeta / lbs_get_transform",
+          "topic": "深入线性混合蒙皮：rot_mat_to_euler、blend_shapes、batch_rodrigues、batch_rigid_transform，以及 PEAR 定制的 lbs_wobeta（先做 shape blend 再蒙皮）与 lbs_get_transform（返回逐顶点变换矩阵）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u4-l4-ehm-v2-fusion.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "解释 smplx2flame_ind 顶点替换与颈部边界顶点保留逻辑",
+            "说明头部平移对齐（joints 3:5 均值）与 head_scale 缩放",
+            "理解 laplacian_matrix 等缓冲在正则化中的潜在用途"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "模板头部替换初始化",
+            "forward 中 FLAME→SMPLX 融合",
+            "landmark 与关节输出组装"
+          ],
+          "order": 4,
+          "practice_task": "在 EHM_v2.forward 中给头部替换逻辑加一个布尔开关（跳过 selected_head 融合分支），用同一组参数渲染有/无 FLAME 头的两张网格对比图；再打印 ori_head_vertices 与替换后头部顶点的差异统计。",
+          "source_files": [
+            "models/modules/ehm/EHM_v2.py",
+            "models/modules/ehm/EHM.py"
+          ],
+          "title": "EHM_v2：用 FLAME 头替换 SMPL-X 头的统一表达",
+          "topic": "精读 PEAR 的核心人体表达 EHM_v2：构造时用 FLAME 模板替换 SMPL-X 头部顶点并对齐颈部关节，forward 中把 FLAME 预测头平移缩放后嵌回 SMPL-X 身体再做 LBS，输出 10475 顶点、145 关节与 landmark。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4",
+            "u4-l4"
+          ],
+          "filename": "u4-l5-mesh-renderer.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "说明 GS_BaseMeshRenderer 与 pytorch3d MeshRasterizer/SoftPhongShader 的关系",
+            "理解 lights 位置与强度如何影响渲染结果",
+            "掌握从 vertices+faces 导出 obj 的方法"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Renderer2 初始化（obj 拓扑与 UV）",
+            "render_mesh 光栅化+着色",
+            "网格导出"
+          ],
+          "order": 5,
+          "practice_task": "修改 PointLights 的 location 和 ambient/diffuse 颜色重新渲染一张推理结果并对比；再把 pd_smplx_dict['vertices'] 与 renderer.faces 用 trimesh 导出为 result.obj，用任意查看器打开验证网格完整性。",
+          "source_files": [
+            "models/modules/renderer/body_renderer.py",
+            "models/modules/renderer/base_renderer.py",
+            "utils/graphics_utils.py"
+          ],
+          "title": "网格渲染：Renderer2、GS_BaseMeshRenderer 与光照",
+          "topic": "理解渲染链路：Renderer2 加载 smplx_tex.obj 拓扑与 UV，GS_BaseMeshRenderer/GS_MeshRasterizer 完成光栅化与着色，PointLights 控制光照，最终把 EHM 顶点渲染成 1024×1024 图像。"
+        }
+      ],
+      "order": 4,
+      "title": "单元四：人体模型 —— SMPL-X、FLAME 与 EHM 统一表达"
+    },
+    {
+      "id": "u5",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u5-l1-webdataset-pipeline.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "说出 tar 分片、RandomMix、with_epoch/shuffle 组成的流式数据管线",
+            "理解一个样本从 annotation.pyd 变成训练 batch 的全部字段",
+            "掌握 get_example 的裁剪、翻转与关键点同步变换"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "load_tars_as_wds",
+            "example_formatter",
+            "get_example 数据增强"
+          ],
+          "order": 1,
+          "practice_task": "按 README 下载示例 000000.tar 放到 ehm_datasets/，写脚本用 build_web_tracked_data(cfg_dataset=meta_cfg.DATASET, split='train') 取一个样本，打印 image/ehm_image/dwpose_kp2d/smpl_kp2d/smpl_coeffs 各字段形状，并标注哪些字段与推理时的输出一一对应。",
+          "source_files": [
+            "dataset/webdata_loader.py",
+            "dataset/dataset_utils.py",
+            "configs/train.yaml"
+          ],
+          "title": "WebDataset 数据管线：tar 分片、RandomMix 与 example_formatter",
+          "topic": "解析训练数据如何流动：wds.WebDataset 流式读取 tar、MixedWebDataset+RandomMix 按权重混合多数据集、example_formatter 把标注裁剪成 256 patch 并同步变换关键点与 SMPL 参数。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1",
+            "u3-l3",
+            "u4-l4"
+          ],
+          "filename": "u5-l2-training-loop.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "说明 train() 如何组装配置、数据、模型与 Fabric",
+            "走读 run_fit 的单步训练：前向→EHM→投影→损失→反向",
+            "理解 checkpoint 的保存内容（backbone/head/meta_cfg）与恢复方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "train_ehms.train 入口",
+            "OurPipeline.__init__（Fabric/DDP 装配）",
+            "run_fit 主循环与 save_checkpoints"
+          ],
+          "order": 2,
+          "practice_task": "用示例数据运行 python train_ehms.py -c train -d 0 跑几十步，用 TensorBoard 查看 outputs/<时间戳>/writers 下的 Loss/train_total、param_smplx 等曲线；把 TRAIN.check_interval 调小后确认 outputs/<时间戳>/stage1_checkpoints 下生成 ehm_model.pt。",
+          "source_files": [
+            "train_ehms.py",
+            "models/pipeline/pipeline.py"
+          ],
+          "title": "训练主循环：OurPipeline 与 Lightning Fabric DDP",
+          "topic": "精读训练装配与主循环：train_ehms.py 的入口、OurPipeline 用 lightning.Fabric + DDPStrategy 包装 backbone/head/optimizer/dataloader，run_fit 手动优化循环含前向、损失、反向、可视化与验证。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-loss-design.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "区分 SMPL 关键点监督与 DWPose 全身关键点监督的适用条件（smpl_kp 标志）",
+            "理解 BodyParameterLoss/HeadParameterLoss 的逐参数加权",
+            "会用 smplx2smpl_joints 做 SMPL-X→SMPL 关节转换以便计算 loss"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Keypoint2D/3DLoss",
+            "Body/HeadParameterLoss",
+            "run_fit 中的损失组合与权重"
+          ],
+          "order": 3,
+          "practice_task": "复制 run_fit 的前向+损失段做消融：把 loss_dwpose_2d 权重置 0 后训练若干步，用 draw_landmarks 生成红（预测）/绿（GT）叠加图，与原始权重训练的同 iter 可视化对比。",
+          "source_files": [
+            "models/pipeline/loss.py",
+            "models/pipeline/pipeline.py",
+            "utils/smplx2smpl_joints.py"
+          ],
+          "title": "损失函数设计：2D/3D 关键点与参数监督",
+          "topic": "解读损失体系：Keypoint2DLoss/Keypoint3DLoss（置信度加权）、BodyParameterLoss/HeadParameterLoss（含 has_hand/has_flame 有效性门控）、CameraLoss 与 GMoF 鲁棒度量，以及 run_fit 中的权重组合。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u5-l4-temporal-smoothing.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "理解 Savitzky-Golay 滤波的 window_size/polyorder 参数效果",
+            "说明对 body/flame/cam 三组参数分别平滑的原因",
+            "掌握 mp4 编码参数（libx264/yuv420p/faststart）对浏览器播放的影响"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "polynomial_smooth 实现",
+            "参数序列拆分与堆叠",
+            "视频编码写出"
+          ],
+          "order": 4,
+          "practice_task": "把 polynomial_smooth 的 window_size 分别设为 3、7、21（body/flame/cam 三组同步改），各生成一份 mesh_video.mp4，逐帧对比抖动抑制程度与动作延迟，并写一段结论说明平滑窗口的取舍。",
+          "source_files": [
+            "app.py",
+            "utils/get_video.py"
+          ],
+          "title": "视频时序平滑与结果导出",
+          "topic": "分析 app.py 中的 polynomial_smooth（Savitzky-Golay）如何对 body/flame/cam 参数序列做时序滤波以消除逐帧推理抖动，以及 imageio 写出浏览器兼容 mp4 的细节。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l5",
+            "u5-l2"
+          ],
+          "filename": "u5-l5-extension-practice.md",
+          "id": "u5-l5",
+          "learning_goals": [
+            "能把 PEAR 嵌入自己的管线（逐帧取参数、离线重建渲染）",
+            "了解 models/vitdet 备选检测器入口 build_detector 的存在与差异",
+            "掌握参数级结果（body_param/flame_param/pd_cam）的序列化与复用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "入口改造模式",
+            "参数导出格式设计",
+            "离线渲染复用"
+          ],
+          "order": 5,
+          "practice_task": "新写 export_params.py：参考 inference_wo_detect.py，对一段视频逐帧推理，把每帧 body_param、flame_param、pd_cam 以及 faces 保存为 npz；再写一个独立脚本只读取 npz（不跑网络）重建网格并渲染成视频，验证导出数据的自包含性。",
+          "source_files": [
+            "models/vitdet/__init__.py",
+            "inference_images.py",
+            "inference_wo_detect.py",
+            "dataset/webdata_loader.py"
+          ],
+          "title": "二次开发实践：参数导出、检测器替换与接入自己的数据",
+          "topic": "综合所学做扩展：把推理结果导出为可复用的参数文件、了解 models/vitdet 提供的 detectron2 备选检测入口（当前主入口用 YOLOv8）、以及如何按 webdataset 格式准备自己的训练数据。"
+        }
+      ],
+      "order": 5,
+      "title": "单元五：训练、数据管线与二次开发"
+    }
+  ]
+}
