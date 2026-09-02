@@ -1,0 +1,877 @@
+{
+  "head": "d1de07b3aacff34050d09c3efa093f9a2fcdcf73",
+  "project": "checkpoint-engine",
+  "rationale": "checkpoint-engine 是一个代码量不大但涉及面很广的系统:单进程视角它只有 ps.py、worker.py、pin_memory.py 等约两千行源码,但它同时横跨 PyTorch 分布式(TCPStore/NCCL/HCCL/自定义 comm)、CUDA/SYCL 跨进程 IPC、锁页内存与 safetensors 解析、RDMA 传输(Mooncake)以及 vLLM/SGLang 推理引擎集成。因此大纲采用\"先全局后局部、先数据后控制\"的顺序:第一单元让读者跑通端到端流程并建立代码地图与三阶段(H2D/broadcast/reload)数据流的心智模型;第二单元先讲纯数据结构(data_types.py)和内存(pin_memory.py),因为它们没有分布式依赖、最适合初学;第三单元进入 ParameterServer 主链路,按生命周期(初始化→注册→gather_metas→update→bucket 切分→ZMQ 协议)逐层拆解,把最复杂的 _update_per_bucket 流水线放在该单元后段;第四单元切换到推理引擎侧视角,先讲 worker 状态机,再讲 CUDA IPC 与 XPU SYCL IPC 两个零拷贝实现,最后补上 HTTP API 服务层;第五单元是专家层的分布式与 P2P 内容,从 DeviceManager 多后端抽象、distributed 抽象层、vLLM NCCL/HCCL 后端,到 P2PStore、RDMA 设备发现与 bucket 分配算法;第六单元收尾于测试体系、examples/update.py 完整编排、metas 导出与 join 复用机制、FP8 补丁与限制。讲义之间的依赖关系保证读者在进入广播主流程前已理解 IPC handler,在进入 P2P 分配算法前已理解 bucket 切分与 RDMA 拓扑,每篇都附带可在 CPU 或单机环境下操作的实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "理解 RL 训练中推理引擎权重同步的痛点以及 middleware 的定位",
+            "区分 Broadcast 与 P2P 两种更新方式的适用场景",
+            "了解项目的性能指标(1T 参数约 20s)与支持的硬件(CUDA/NPU/XPU)"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README",
+            "ParameterServer",
+            "Broadcast",
+            "P2P"
+          ],
+          "order": 1,
+          "source_files": [
+            "README.md",
+            "pyproject.toml"
+          ],
+          "title": "项目概览:RL 权重更新问题与 checkpoint-engine 的定位",
+          "topic": "介绍强化学习训练循环中推理引擎权重同步的痛点,说明 checkpoint-engine 作为轻量级权重更新中间件的定位、两种更新方式(Broadcast 与 P2P)以及性能基准。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-setup-and-first-run.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "掌握 pip install checkpoint-engine 与 [p2p] extra 的区别",
+            "会用 torchrun 运行 examples/update.py 并理解 --worker-extension-cls 的作用",
+            "知道哪些测试需要 GPU、哪些可以在 CPU 上运行"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "pyproject.toml",
+            "examples/update.py",
+            "安装与运行"
+          ],
+          "order": 2,
+          "source_files": [
+            "README.md",
+            "pyproject.toml",
+            "examples/update.py"
+          ],
+          "title": "环境搭建与端到端体验:从安装到第一次权重更新",
+          "topic": "讲解依赖安装、vLLM 环境准备、--worker-extension-cls 启动参数以及用 torchrun 运行 examples/update.py 完成一次权重更新的完整流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-code-map.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "说出每个源码文件的职责",
+            "画出 ps.py 对其他模块的依赖关系图",
+            "区分服务端(ps.py)与消费端(worker.py)代码"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "__init__.py",
+            "ps.py",
+            "worker.py",
+            "目录结构"
+          ],
+          "order": 3,
+          "source_files": [
+            "checkpoint_engine/__init__.py",
+            "checkpoint_engine/ps.py",
+            "checkpoint_engine/worker.py",
+            "checkpoint_engine/data_types.py",
+            "checkpoint_engine/pin_memory.py"
+          ],
+          "title": "目录结构与代码地图:每个文件负责什么",
+          "topic": "逐个介绍 checkpoint_engine 包下各源码文件、distributed 与 xpu_ipc 子包、examples、tests、patches 的职责,建立项目全局代码地图。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-architecture-and-dataflow.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "画出一次广播权重更新的时序图",
+            "指出 H2D、broadcast、reload 三阶段分别对应的源码位置",
+            "理解显存不足时从流水线退化为串行的条件"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "ParameterServer._update_per_bucket",
+            "update_weights_from_ipc",
+            "三阶段流水线"
+          ],
+          "order": 4,
+          "source_files": [
+            "README.md",
+            "checkpoint_engine/ps.py",
+            "checkpoint_engine/worker.py"
+          ],
+          "title": "整体架构与三阶段数据流总览",
+          "topic": "从宏观上讲解 Broadcast 更新的 H2D、broadcast、reload 三阶段流水线,以及 P2P 更新用于动态扩容场景的架构,梳理 PS 与 worker 之间的协作关系。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "入门:认识 checkpoint-engine 并跑起来"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l1-data-types.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "掌握 ParameterMeta、H2DBucket、MemoryBuffer 等核心模型",
+            "理解 _TorchDtype/_TorchSize 自定义校验与序列化的实现",
+            "知道这些模型在 HTTP API 与 metas 导出中的 JSON 化方式"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "ParameterMeta",
+            "H2DBucket",
+            "MemoryBufferMetas",
+            "DataToGather"
+          ],
+          "order": 1,
+          "source_files": [
+            "checkpoint_engine/data_types.py",
+            "checkpoint_engine/__init__.py"
+          ],
+          "title": "data_types.py:贯穿全项目的核心数据模型",
+          "topic": "讲解 ParameterMeta、BucketRange、H2DBucket、MemoryBuffer(Metas)、DataToGather 等数据模型,以及 pydantic 对 torch.dtype、torch.Size、torch.Tensor 的自定义校验与序列化。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-checkpoint-loading.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "理解 _load_checkpoint_file 对 safetensors/npy 两种格式的处理",
+            "掌握 _concat_tp_weights 的 TP 拼接与共享权重语义",
+            "理解 _ALIGN_SIZE=256 的对齐计算及其对内存布局的影响"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "_load_checkpoint",
+            "_load_checkpoint_file",
+            "_concat_tp_weights",
+            "_align_size"
+          ],
+          "order": 2,
+          "source_files": [
+            "checkpoint_engine/pin_memory.py"
+          ],
+          "title": "checkpoint 文件加载:safetensors 解析与 TP 权重拼接",
+          "topic": "讲解 _load_checkpoint 如何加载 safetensors 与(已废弃的)npy 文件、如何按 tp_concat_dim 拼接张量并行分片,以及 256 字节对齐规则。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-pinned-memory.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "解释锁页内存对异步 H2D 拷贝的意义",
+            "掌握 _normal_pin_memory 中 MemoryBucket 切桶与多线程拷贝流程",
+            "理解 inplace pin 通过 cudaHostRegister 直接锁页文件映射的原理"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "_normal_pin_memory",
+            "_inplace_pin_memory",
+            "MemoryBuffer"
+          ],
+          "order": 3,
+          "source_files": [
+            "checkpoint_engine/pin_memory.py",
+            "checkpoint_engine/ps.py"
+          ],
+          "title": "pinned memory:锁页内存与两种 pin 策略",
+          "topic": "解释为什么 H2D 传输需要锁页内存,对比 _normal_pin_memory(先分配再拷贝)与 _inplace_pin_memory(对 /dev/shm 的 safetensors 直接 cudaHostRegister)两种策略的原理与取舍。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-inplace-pin-and-unpin.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "掌握 safetensors 文件头手工解析流程",
+            "理解 cudaHostRegister/cudaHostUnregister 与 cudaHostGetFlags 的 ctypes 调用",
+            "解释 pin 成功后删除源文件的内存复用动机"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "_parse_and_pin_from_safetensors",
+            "ParameterServer.unregister_checkpoint",
+            "_unpin"
+          ],
+          "order": 4,
+          "source_files": [
+            "checkpoint_engine/pin_memory.py",
+            "checkpoint_engine/ps.py",
+            "tests/test_inplace_unpin.py"
+          ],
+          "title": "inplace pin 的底层实现与手动 unpin",
+          "topic": "深入 _parse_and_pin_from_safetensors 的文件头手工解析与手动锁页,以及 unregister_checkpoint 中用 cudaHostGetFlags 校验后 cudaHostUnregister 的手动解页流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l5-shared-memory-pool.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "理解 shared_memory_pool_name 与 _current_shared_memory_pool_user 的状态管理",
+            "掌握 register_pin_memory 复用已有 buffer 的形状约束",
+            "解释 force 参数控制共享池真正释放的语义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "register_checkpoint",
+            "unregister_checkpoint",
+            "register_pin_memory"
+          ],
+          "order": 5,
+          "source_files": [
+            "checkpoint_engine/pin_memory.py",
+            "checkpoint_engine/ps.py",
+            "tests/test_reuse_pin_memory.py"
+          ],
+          "title": "共享 pin memory 池:跨 checkpoint 的内存复用",
+          "topic": "讲解 use_shared_memory_pool=True 时 pin 内存池的复用机制:形状首次固定、单一使用者约束、force 释放语义,以及与 p2p store 注册的交互。"
+        }
+      ],
+      "level": "beginner",
+      "order": 2,
+      "title": "数据结构与内存管理"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4",
+            "u2-l1"
+          ],
+          "filename": "u3-l1-parameter-server-init.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "理解 rank/local_rank/gpu_count 的换算关系",
+            "掌握 _get_master_port 取 MASTER_PORT+1 的原因",
+            "理解 TCPStore、设备 UUID 获取与 XPU IPC 预热的初始化顺序"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ParameterServer.__init__",
+            "_get_master_port",
+            "_get_physical_gpu_id",
+            "DeviceManager"
+          ],
+          "order": 1,
+          "source_files": [
+            "checkpoint_engine/ps.py",
+            "checkpoint_engine/device_utils.py"
+          ],
+          "title": "ParameterServer 初始化:rank、TCPStore 与设备识别",
+          "topic": "拆解 ParameterServer.__init__:RANK/WORLD_SIZE 环境变量、local_rank 计算、DeviceManager、p2p store 的条件初始化、设备 UUID 获取以及 TCPStore 的端口选择。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u2-l3",
+            "u2-l5"
+          ],
+          "filename": "u3-l2-register-unregister.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "掌握 files 与 named_tensors 两种注册输入",
+            "理解注册失败时的回滚清理逻辑",
+            "解释 _register_parameters_to_p2p_store 的命名规则"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "register_checkpoint",
+            "unregister_checkpoint",
+            "_register_checkpoint",
+            "_register_parameters_to_p2p_store"
+          ],
+          "order": 2,
+          "source_files": [
+            "checkpoint_engine/ps.py",
+            "checkpoint_engine/pin_memory.py"
+          ],
+          "title": "checkpoint 注册与注销生命周期",
+          "topic": "讲解 register_checkpoint/unregister_checkpoint 的完整生命周期:内存池管理、p2p store 注册、失败回滚,以及注销时的手动解页与 host cache 清理。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-gather-metas.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解 DataToGather 中各字段的用途",
+            "掌握 _current_global_parameter_metas 的组织方式(owner_rank 为键)",
+            "说明 _local_rdma_devices 拓扑如何被构建以及 load_metas 如何改写远端拓扑"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "gather_metas",
+            "DataToGather",
+            "load_metas",
+            "get_metas"
+          ],
+          "order": 3,
+          "source_files": [
+            "checkpoint_engine/ps.py",
+            "checkpoint_engine/data_types.py"
+          ],
+          "title": "gather_metas:全局元数据收集",
+          "topic": "讲解 gather_metas 如何用 all_gather_object 收集各 rank 的内存缓冲元数据、构建全局参数表与本地 RDMA 拓扑,以及 load_metas 如何用外部 metas 覆盖远端拓扑。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3",
+            "u4-l3"
+          ],
+          "filename": "u3-l4-update-broadcast-pipeline.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "读懂 _update_per_bucket 主循环中 h2d_buffer 与双 buffer 的流水线重叠",
+            "理解 dist.broadcast(src=receiver_rank) 的数据分发方式",
+            "掌握错误传播与提前退出的 all_reduce ret_code 机制"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "update",
+            "_update_per_bucket",
+            "_copy_to_buffer",
+            "_detect_bucket_size"
+          ],
+          "order": 4,
+          "source_files": [
+            "checkpoint_engine/ps.py"
+          ],
+          "title": "update 广播主流程:双缓冲流水线与错误传播",
+          "topic": "逐段精读 update 与 _update_per_bucket:进程组生命周期、ipc_handler 上下文、h2d_buffer 与 2 倍 bucket 的双缓冲、广播与 ZMQ 应答的交替、ret_code 全体约减以及收尾的资源释放顺序。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u3-l5-bucket-splitting.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "理解 _gen_h2d_buckets 按 owner_rank 和 bucket_size 切桶的过程",
+            "掌握 _detect_bucket_size 中 free/3 与 disable_h2d_buffer 的回退逻辑",
+            "会用环境变量 PS_MAX_BUCKET_SIZE_GB 调整桶大小"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "_gen_h2d_buckets",
+            "_detect_bucket_size",
+            "H2DBucket",
+            "BucketRange"
+          ],
+          "order": 5,
+          "source_files": [
+            "checkpoint_engine/ps.py"
+          ],
+          "title": "bucket 切分与 bucket size 自动探测",
+          "topic": "讲解 _gen_h2d_buckets 如何把全局参数元数据按 bucket_size 切成 H2DBucket,以及 _detect_bucket_size 如何结合剩余显存、最大张量与 PS_MAX_BUCKET_SIZE_GB 决定桶大小和是否禁用 h2d_buffer。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4",
+            "u4-l1"
+          ],
+          "filename": "u3-l6-zmq-protocol.md",
+          "id": "u3-l6",
+          "learning_goals": [
+            "掌握 REQ/REP 每一步传递的 payload 类型",
+            "理解抽象 Unix domain socket 地址(ipc://@)与设备 UUID 寻址",
+            "解释双方如何通过 None 消息协调资源释放"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "_bind_zmq_socket",
+            "req_func",
+            "update_weights_from_ipc"
+          ],
+          "order": 6,
+          "source_files": [
+            "checkpoint_engine/ps.py",
+            "checkpoint_engine/worker.py"
+          ],
+          "title": "ZMQ 协议:PS 与 worker 的消息状态机",
+          "topic": "梳理 _bind_zmq_socket 生成的抽象 UDS 地址、REQ/REP 严格交替下每种消息(IPC handle、named tensor 列表、None、Exception)的含义与两侧状态转换的对应关系。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "ParameterServer 主链路"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4",
+            "u4-l3"
+          ],
+          "filename": "u4-l1-worker-state-machine.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "理解 payload 为 list/Exception/None/None 的四类分支语义",
+            "掌握 _extract_weights 从扁平 buffer 还原张量的做法",
+            "解释 worker 收到异常不 raise 而是回传 PS 的原因"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "update_weights_from_ipc",
+            "_extract_weights",
+            "FlattenedTensorMetadata"
+          ],
+          "order": 1,
+          "source_files": [
+            "checkpoint_engine/worker.py",
+            "tests/test_update.py"
+          ],
+          "title": "worker 侧状态机:update_weights_from_ipc",
+          "topic": "精读 worker 端 REP 循环:IPC handle attach、按 FlattenedTensorMetadata 从共享 buffer 切出权重、released 标志与两次 None 信号(释放资源、post_hook)的状态机。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-vllm-extension.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "掌握 vLLM --worker-extension-cls 与 /collective_rpc 的调用链",
+            "理解 _device_uuid 在 cuda/npu/xpu 三种平台的生成规则",
+            "了解 MTP/drafter 模型与 process_weights_after_loading 的后处理"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "VllmColocateWorkerExtension",
+            "_device_uuid",
+            "_load_weights",
+            "_post_hook"
+          ],
+          "order": 2,
+          "source_files": [
+            "checkpoint_engine/worker.py",
+            "README.md"
+          ],
+          "title": "VllmColocateWorkerExtension:vLLM 集成与设备 UUID 寻址",
+          "topic": "讲解 vLLM worker 扩展如何被注入并被 collective_rpc 调用、_device_uuid 在不同平台的生成方式如何与 PS 的 ZMQ 寻址对齐,以及 load_weights 与 post_hook 对 MTP drafter 的处理。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u4-l3-cuda-ipc-handler.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "理解 reduce_tensor 产出的 (func, args) 句柄结构与重建过程",
+            "掌握 _rebuild_ipc 改写 device_id 解决 CUDA_VISIBLE_DEVICES 不一致的技巧",
+            "理解 IPCHandler 抽象的 export/attach/detach 契约"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "IPCHandler",
+            "TorchIPCHandler",
+            "reduce_tensor",
+            "_rebuild_ipc"
+          ],
+          "order": 3,
+          "source_files": [
+            "checkpoint_engine/ipc_handler.py",
+            "tests/test_ipc_handler.py"
+          ],
+          "title": "CUDA IPC:TorchIPCHandler 与 reduce_tensor",
+          "topic": "讲解 IPCHandler 抽象基类与 TorchIPCHandler:如何用 torch.multiprocessing.reductions 的 reduce_tensor 导出可序列化句柄、消费端如何重建共享显存以及 detach 的清理职责。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u4-l4-xpu-sycl-ipc.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "理解 XpuIPCHandler 的 dict 线格式与 kind 标签的作用",
+            "掌握 _find_icpx 的候选探测与版本排序、JIT 编译缓存策略",
+            "理解 detach 中打开/导出两侧句柄的释放时序约束"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "XpuIPCHandler",
+            "xpu_ipc.load_ext",
+            "xpu_ipc._find_icpx",
+            "sycl_ipc.cpp"
+          ],
+          "order": 4,
+          "source_files": [
+            "checkpoint_engine/ipc_handler.py",
+            "checkpoint_engine/xpu_ipc/__init__.py",
+            "checkpoint_engine/xpu_ipc/sycl_ipc.cpp",
+            "tests/test_xpu_ipc.py"
+          ],
+          "title": "XPU SYCL IPC:原生扩展与 JIT 编译",
+          "topic": "讲解 Intel XPU 上基于 SYCL ipc_memory 的零拷贝共享:XpuIPCHandler 的字节串句柄、sycl_ipc.cpp 原生扩展、icpx 编译器探测与运行时 JIT 编译(prewarm)流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u4-l5-http-api.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "掌握各 REST 端点与 ParameterServer 方法的映射",
+            "理解 update 端点中 update_func/inference_group_ranks 的过滤逻辑",
+            "会用 _init_api + TestClient 做 CPU 级接口测试"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "_init_api",
+            "request_inference_to_update",
+            "run_from_cli"
+          ],
+          "order": 5,
+          "source_files": [
+            "checkpoint_engine/api.py",
+            "checkpoint_engine/__main__.py",
+            "tests/test_api.py"
+          ],
+          "title": "HTTP API 服务层:FastAPI 端点与 UDS 部署",
+          "topic": "讲解 _init_api 暴露的 register/unregister/gather-metas/metas/update 端点、request_inference_to_update 如何通过 HTTP 或 Unix domain socket 调用推理引擎,以及 __main__ 的 UDS 服务启动方式。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "推理引擎侧与跨进程 IPC"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u5-l1-device-manager.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "掌握设备探测与 backend/transfer_engine_protocol 的映射表",
+            "理解 supports_inplace_pin/supports_device_ipc/supports_device_p2p 的能力语义",
+            "理解 ipc_collect 与 host_empty_cache 在不同后端的差异实现"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DeviceManager",
+            "_detect_device_type",
+            "supports_device_ipc",
+            "supports_device_p2p"
+          ],
+          "order": 1,
+          "source_files": [
+            "checkpoint_engine/device_utils.py",
+            "tests/test_device_manager.py"
+          ],
+          "title": "DeviceManager:多硬件后端的统一抽象",
+          "topic": "讲解 DeviceManager 如何统一 cuda/npu/xpu 三种后端:设备类型探测、通信后端(nccl/hccl/xccl)、传输协议(ascend_direct/rdma/efa)以及各能力开关在 ps.py 中的消费位置。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u5-l2-distributed-abstraction.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "理解 _BACKEND_INSTANCE 全局单例与模块级函数的分发方式",
+            "掌握 _common_all_gather_object 基于 all_gather 的对象收集实现",
+            "会用 use_backend 注册自定义后端"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Distributed",
+            "TorchBackend",
+            "use_backend",
+            "_common_all_gather_object"
+          ],
+          "order": 2,
+          "source_files": [
+            "checkpoint_engine/distributed/base.py",
+            "checkpoint_engine/distributed/__init__.py"
+          ],
+          "title": "distributed 抽象层:后端接口与动态切换",
+          "topic": "讲解 distributed 包的抽象设计:Distributed ABC 定义的操作集合、TorchBackend 默认实现、_BACKEND_INSTANCE 动态切换(use_backend)以及对象序列化辅助函数。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-vllm-nccl-backend.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "理解 ctypes 扩展 NCCLLibrary 增加 ncclCommSplit 的做法",
+            "掌握 create_newcomm 的 color/key 语义与 _use_group 的 rank 重映射",
+            "理解 create_stateless_process_group 对不同 vLLM 版本构造签名的兼容"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DistributedNccl",
+            "PyNcclCommunicatorEx",
+            "create_stateless_process_group",
+            "_use_group"
+          ],
+          "order": 3,
+          "source_files": [
+            "checkpoint_engine/distributed/vllm_nccl.py",
+            "checkpoint_engine/distributed/vllm_compat.py",
+            "tests/test_vllm_compat.py"
+          ],
+          "title": "vLLM NCCL 后端:ncclCommSplit 子通信组",
+          "topic": "精读 DistributedNccl:如何基于 vLLm 的 StatelessProcessGroup 与 PyNcclCommunicator 建立无 torch 进程组的 NCCL 通信,如何用 ncclCommSplit 创建子通信组并做 rank 重映射。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "filename": "u5-l4-npu-hccl-backend.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "掌握 HcclCreateSubCommConfig 创建子通信组的参数含义",
+            "对比 NPU 与 CUDA 路径在 new_group/广播语义上的差异",
+            "了解昇腾环境的软件版本约束"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DistributedHccl",
+            "PyHcclCommunicatorEx",
+            "HcclCommConfig"
+          ],
+          "order": 4,
+          "source_files": [
+            "checkpoint_engine/distributed/vllm_hccl.py",
+            "docs/npu_start.md"
+          ],
+          "title": "NPU/HCCL 后端与昇腾平台适配",
+          "topic": "讲解 DistributedHccl 如何扩展 vllm_ascend 的 PyHcclCommunicator:ctypes 增加 HcclAllGather/HcclCreateSubCommConfig、HcclCommConfig 结构体初始化以及昇腾环境要求。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2",
+            "u5-l1"
+          ],
+          "filename": "u5-l5-p2p-store-and-rdma.md",
+          "id": "u5-l5",
+          "learning_goals": [
+            "理解 TransferEngine 初始化的重试与端口冲突处理",
+            "掌握 batch_register_memory/batch_transfer_sync_read 的批量接口",
+            "会解析 NCCL_IB_HCA 的 =、^、^= 前缀语义"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "P2PStore",
+            "_get_rdma_devices",
+            "_parse_NCCL_IB_HCA",
+            "_get_my_rdma_device"
+          ],
+          "order": 5,
+          "source_files": [
+            "checkpoint_engine/p2p_store.py",
+            "checkpoint_engine/device_utils.py",
+            "tests/test_rdma_parser.py"
+          ],
+          "title": "P2PStore 与 RDMA 设备发现",
+          "topic": "讲解 P2PStore 对 mooncake TransferEngine 的封装(初始化重试、内存注册、批量同步读)以及 RDMA 网卡发现:ibverbs 枚举、NCCL_IB_HCA 语法解析、网卡与 rank 的均分策略。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l5",
+            "u5-l5"
+          ],
+          "filename": "u5-l6-assign-receiver-ranks.md",
+          "id": "u5-l6",
+          "learning_goals": [
+            "理解按 RDMA 设备分组与按列展平的贪心分配策略",
+            "掌握 occupied_devices 去重保证带宽利用的机制",
+            "能手工推演小规模拓扑下的分配结果"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "_assign_receiver_ranks",
+            "_gen_h2d_buckets",
+            "local_topo",
+            "remote_topo"
+          ],
+          "order": 6,
+          "source_files": [
+            "checkpoint_engine/ps.py",
+            "tests/test_assign_receiver_ranks.py"
+          ],
+          "title": "P2P bucket 分配算法:带宽最大化贪心",
+          "topic": "精读 _assign_receiver_ranks:如何把桶按 owner 的 RDMA 设备分组、列优先展平、每轮为每个接收端选择不重复网卡的桶,使收发双方带宽都被打满。"
+        }
+      ],
+      "level": "advanced",
+      "order": 5,
+      "title": "分布式后端与 P2P 传输"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4",
+            "u4-l1"
+          ],
+          "filename": "u6-l1-test-suite.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "掌握 pytest -m not gpu 的 CPU 测试运行方式",
+            "理解 test_update.py 用多进程 + ZMQ mock 验证广播正确性的思路",
+            "能模仿现有测试为新逻辑补测试"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "test_update.py",
+            "test_api.py",
+            "test_p2p_guard.py",
+            "pytest markers"
+          ],
+          "order": 1,
+          "source_files": [
+            "tests/test_update.py",
+            "tests/test_api.py",
+            "tests/test_p2p_guard.py",
+            "README.md"
+          ],
+          "title": "测试体系:GPU 端到端测试与 CPU 单元测试",
+          "topic": "梳理 tests 目录:需要 GPU 的端到端正确性测试(test_update.py)与可在 CPU 运行的单元测试(数据类型、API、RDMA 解析、bucket 分配、IPC、XPU 等)的组织方式与运行方法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4",
+            "u4-l5"
+          ],
+          "filename": "u6-l2-examples-update-walkthrough.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "理解 rank 与 inference_parallel_size 决定哪个进程触发推理请求",
+            "掌握按文件切分与按张量切分两种负载均衡策略的选择条件",
+            "会用 --update-method/--custom-dist/--uds 等参数"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "update_weights",
+            "split_checkpoint_files",
+            "split_tensors",
+            "req_inference"
+          ],
+          "order": 2,
+          "source_files": [
+            "examples/update.py",
+            "README.md"
+          ],
+          "title": "examples/update.py 完整编排解析",
+          "topic": "通读示例驱动脚本:checkpoint 文件/张量切分、vLLM 就绪检查、req_inference 的 src rank 计算、broadcast/p2p/all 三种更新方法的执行顺序与 dist 后端选择。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3",
+            "u5-l6"
+          ],
+          "filename": "u6-l3-join-and-metas-reuse.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "掌握 metas 的 JSON 导出(get_metas)与导入(load_metas)流程",
+            "理解 join 模式下新实例通过 P2P 获取已有权重的过程",
+            "会用 /v1/metas 端点或 --metas-url 跨进程共享元数据"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "join",
+            "ps.get_metas",
+            "ps.load_metas",
+            "get_metas 端点"
+          ],
+          "order": 3,
+          "source_files": [
+            "examples/update.py",
+            "checkpoint_engine/api.py",
+            "checkpoint_engine/ps.py",
+            "tests/test_api.py"
+          ],
+          "title": "metas 导出与新实例 join:权重复用机制",
+          "topic": "讲解 --save-metas-file/--load-metas-file/--metas-url 与 /v1/metas 端点支撑的权重复用场景:新推理实例如何拿到旧实例的元数据并经 load_metas 重建远端拓扑后用 P2P 拉取权重。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l4-fp8-patch-and-future.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "理解 FP8 权重更新需要补丁的原因与补丁修改点",
+            "掌握项目声明的限制(未实现的三阶段流水线、后端覆盖面)",
+            "能为新推理框架设计 worker 扩展的实现清单"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "vllm_fp8.patch",
+            "worker 扩展接口",
+            "update_weights_from_ipc"
+          ],
+          "order": 4,
+          "source_files": [
+            "patches/vllm_fp8.patch",
+            "README.md"
+          ],
+          "title": "FP8 补丁、限制与二次开发方向",
+          "topic": "分析 vllm_fp8.patch 解决 FP8 量化权重更新的思路,总结项目当前限制与未来工作(三阶段完美流水线、更多推理框架),并给出二次开发的切入点。"
+        }
+      ],
+      "level": "advanced",
+      "order": 6,
+      "title": "高级主题:测试、编排与二次开发"
+    }
+  ]
+}
