@@ -1,0 +1,417 @@
+{
+  "head": "c2ad5b20c605086526a179d36901bfc41b52b44b",
+  "project": "Moonlight",
+  "rationale": "Moonlight 仓库本身很小（核心源码集中在 examples/toy_train.py 一个文件，约 360 行），但技术密度高：它同时包含完整可运行的 Muon 优化器实现、Qwen2 玩具训练管线，以及论文（Moonlight.pdf）中的 scaling law 与分布式结论。因此大纲按\"先跑通、再读懂优化器、最后做实验与扩展\"三层推进：入门层 4 讲覆盖项目定位、环境运行、训练主循环与数据管线，让读者从零跑起训练；进阶层 5 讲逐函数拆解 toy_train.py 中的 Muon 实现（参数分组、Newton-Schulz 正交化、动量与权重衰减、更新 RMS 一致化缩放、内嵌 AdamW 后备），这是论文两大核心贡献（weight decay 与按参数形状调整更新尺度）在代码中的落点；专家层 5 讲进入对比实验、模型定制、16B 模型推理、分布式 ZeRO-1 方向（细节多在 PDF 与 Megatron-LM PR #1428 中，标注待确认）以及二次开发。讲义之间通过函数级分工避免重复引用同一文件造成的重叠，依赖关系按\"运行→原理→实验\"链路组织。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 Moonlight 项目的定位与主要成果（16B-A3B MoE、5.7T tokens、约 52% 训练 FLOPs）",
+            "理解 Muon 相对 AdamW 的两大关键改进：权重衰减与按参数形状调整更新尺度",
+            "熟悉仓库的文件组成与各自作用"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "项目背景与成果",
+            "Muon 核心思想",
+            "仓库文件结构",
+            "技术报告导读"
+          ],
+          "order": 1,
+          "practice_task": "克隆仓库并按 requirements.txt 安装依赖，浏览 README 与 Moonlight.pdf 摘要，写下三个你最想弄懂的问题，后续单元逐一回答。",
+          "source_files": [
+            "README.md",
+            "Moonlight.pdf",
+            "requirements.txt"
+          ],
+          "title": "Moonlight 项目总览：Muon 与大规模语言模型训练",
+          "topic": "介绍 Moonlight 项目定位：它是 Moonshot AI 技术报告《Muon is Scalable for LLM Training》的配套开源仓库，核心结论是 Muon 经权重衰减与更新尺度调整后可扩展到 16B MoE 训练。同时梳理仓库组成（README、技术报告 PDF、examples 训练示例）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-run-first-training.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "正确安装 torch/datasets/transformers 等依赖",
+            "理解 --model/--optimizer/--lr/--wd/--hidden_size/--dataset 六个命令行参数",
+            "独立跑通一次 AdamW 与一次 Muon 训练"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "依赖环境",
+            "命令行参数",
+            "训练执行流程",
+            "日志输出解读"
+          ],
+          "order": 2,
+          "practice_task": "分别以 --optimizer adamw 和 --optimizer muon 运行 examples/toy_train.py（可用较小 hidden_size 加速），观察并记录两种优化器前若干步的 loss 变化。",
+          "source_files": [
+            "README.md",
+            "examples/toy_train.py",
+            "requirements.txt"
+          ],
+          "title": "跑通第一个训练：环境、命令与参数",
+          "topic": "讲解如何安装依赖并运行 examples/toy_train.py，理解命令行参数（model、optimizer、lr、wd、dataset、hidden_size）以及 loguru 日志输出的含义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-training-loop-anatomy.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "梳理 __main__ 入口的整体执行顺序",
+            "理解 cosine warmup 学习率调度的行为",
+            "掌握 loss.backward / optimizer.step / zero_grad 的标准训练步"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "入口与 argparse",
+            "模型与数据装配",
+            "学习率调度",
+            "训练循环与日志"
+          ],
+          "order": 3,
+          "practice_task": "在训练循环中增加每 N 步打印窗口平均 loss 与梯度范数的逻辑，并注释掉 optimizer.zero_grad() 观察训练异常，验证梯度清零的作用。",
+          "source_files": [
+            "examples/toy_train.py"
+          ],
+          "title": "训练主循环解剖：从 loss.backward 到 optimizer.step",
+          "topic": "逐行阅读 toy_train.py 的 __main__ 部分：argparse 参数、模型与数据装配、cosine warmup 学习率调度、标准的前向-反向-更新训练循环与日志记录。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l4-dataset-pipeline.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "理解 datasets.load_dataset 与 Qwen2Tokenizer 的用法",
+            "解释 token 缓存与定长分块策略",
+            "能够替换 max_length 并评估其对训练的影响"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "数据集加载",
+            "分词与缓存",
+            "定长分块",
+            "DataLoader 组织"
+          ],
+          "order": 4,
+          "practice_task": "把 max_length 从 512 改为 256 并对比训练速度与 loss 走向；进一步实现一个独立函数，在若干 batch 上评估模型的语言建模 loss。",
+          "source_files": [
+            "examples/toy_train.py"
+          ],
+          "title": "数据管线：MoonDataset 的分词与分块",
+          "topic": "分析 MoonDataset 类：加载 openwebtext-100k、用 Qwen2 分词器编码、把 token 序列缓存到 .bin 文件，再按 max_length 切成定长样本交给 DataLoader。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "入门：认识 Moonlight 并跑通训练"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l1-param-grouping.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "掌握 named_parameters 遍历与按 ndim/名称过滤的写法",
+            "理解 embedding 与 lm_head 不做矩阵正交化的原因",
+            "看懂 Muon.__init__ 中 use_muon 标记的设置逻辑"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "参数命名与维度",
+            "Muon 参数判据",
+            "AdamW 参数判据",
+            "优化器构造流程"
+          ],
+          "order": 1,
+          "practice_task": "编写脚本打印 muon_params 与 adamw_params 的名称、形状与数量，核对哪些层进入 Muon、哪些留在 AdamW，并解释这样分组的理由。",
+          "source_files": [
+            "examples/toy_train.py"
+          ],
+          "title": "优化器参数分组：谁用 Muon，谁留给 AdamW",
+          "topic": "解读 get_optimizer 与 Muon.__init__ 的参数分组逻辑：二维及以上且非 embed_tokens/lm_head 的参数交给 Muon，其余（embedding、lm_head、一维参数）交给内嵌 AdamW。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-newton-schulz-iteration.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "说明 Newton-Schulz 迭代如何近似矩阵零次幂（正交化）",
+            "解释 (3.4445, -4.7750, 2.0315) 系数与谱归一化的作用",
+            "理解 bfloat16 计算与 @torch.compile 带来的收益"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "正交化目标",
+            "NS 五次迭代",
+            "系数与收敛特性",
+            "bfloat16 与 torch.compile"
+          ],
+          "order": 2,
+          "practice_task": "构造一个 64x32 随机矩阵，将 zeropower_via_newtonschulz5 的输出与 torch.linalg.svd 得到的 UV^T 对比（奇异值分布、正交性误差与耗时），并改写 ns_steps 观察近似质量变化。",
+          "source_files": [
+            "examples/toy_train.py"
+          ],
+          "title": "Newton-Schulz 迭代：不依赖 SVD 的矩阵正交化",
+          "topic": "精读 zeropower_via_newtonschulz5：用五次 Newton-Schulz 迭代近似梯度的零次幂，系数取 (3.4445, -4.7750, 2.0315)，先做谱归一化并在 bfloat16 下运行，配合 @torch.compile 加速。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-muon-step-momentum-decay.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "梳理 momentum_buffer 的惰性初始化与更新公式",
+            "区分 nesterov 开关下两种梯度形式",
+            "解释权重衰减为何以 p.data.mul_(1 - lr*wd) 解耦实现"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "动量缓冲",
+            "Nesterov 动量",
+            "高维梯度展平",
+            "权重衰减与更新应用"
+          ],
+          "order": 3,
+          "practice_task": "把 momentum 在 0.8/0.95/0.99 之间、ns_steps 在 3/5/8 之间做小网格，各训练 100 步并记录 loss，总结超参敏感性。",
+          "source_files": [
+            "examples/toy_train.py"
+          ],
+          "title": "Muon.step 拆解（上）：动量、正交化与权重衰减",
+          "topic": "拆解 Muon.step 的 Muon 分支：动量缓冲与 Nesterov 选项、对二维以上梯度做 view 展平、调用 Newton-Schulz 得到正交化更新，再以 p.data.mul_(1 - lr*wd) 解耦地施加权重衰减并应用更新。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-update-rms-scaling.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "理解更新 RMS 的定义与它对训练稳定性的影响",
+            "推导 0.2*sqrt(max(A,B)) 缩放的来源与作用",
+            "说明该缩放与权重衰减如何共同支撑 Muon 的规模化"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "更新 RMS 概念",
+            "0.2*sqrt(max(A,B)) 缩放公式",
+            "形状自适应学习率",
+            "论文两大贡献的联系"
+          ],
+          "order": 4,
+          "practice_task": "数值实验：对若干不同形状的参数矩阵计算 adjust_lr_for_muon 的等效更新 RMS（更新矩阵的均方根乘以调整后学习率），验证不同形状参数的更新量级近似一致。",
+          "source_files": [
+            "examples/toy_train.py",
+            "README.md"
+          ],
+          "title": "更新 RMS 一致化：adjust_lr_for_muon 的缩放设计",
+          "topic": "聚焦 adjust_lr_for_muon：按参数形状以 0.2*sqrt(max(A,B)) 缩放学习率，使不同形状矩阵参数的更新均方根（RMS）保持一致，这是论文让 Muon 免调参规模化的两大技术之一。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l5-adamw-fallback.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "梳理手写 AdamW 的状态初始化与 lerp_ 更新",
+            "理解 bias_correction 与 scale 的计算方式",
+            "对比手写实现与 torch.optim.AdamW 的行为差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "AdamW 状态初始化",
+            "lerp_ 动量更新",
+            "偏差校正与 scale",
+            "与标准 AdamW 的差异"
+          ],
+          "order": 5,
+          "practice_task": "构造相同的一串随机梯度，分别喂给手写 AdamW 分支与 torch.optim.AdamW，逐步对比参数更新量，说明两者在数学上是否等价、差异来自哪里。",
+          "source_files": [
+            "examples/toy_train.py"
+          ],
+          "title": "内嵌 AdamW 后备轨道：与标准 AdamW 对比",
+          "topic": "分析 Muon.step 中对非 Muon 参数的手写 AdamW 更新：lerp_ 维护一阶二阶动量、偏差校正缩放 scale、以与 Muon 相同的 lr/wd 施加衰减，并与 torch.optim.AdamW 逐项对照。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 2,
+      "title": "进阶：Muon 优化器核心原理与实现"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u3-l1-muon-vs-adamw-experiment.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "设计学习率扫描等公平对比方案",
+            "正确采集并可视化训练 loss 曲线",
+            "把小规模实验现象与论文 scaling law 结论对应起来"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "公平对比原则",
+            "学习率扫描",
+            "计算效率结论解读",
+            "结果可视化"
+          ],
+          "order": 1,
+          "practice_task": "对 adamw 与 muon 各做至少 3 组学习率扫描（固定其余超参），绘制 loss-步数曲线并汇总各最优结果，写出你对'Muon 更样本高效'的定性验证报告。",
+          "source_files": [
+            "examples/toy_train.py",
+            "README.md"
+          ],
+          "title": "Muon vs AdamW：设计你自己的对比实验",
+          "topic": "基于 toy_train.py 设计公平的优化器对比：控制模型、数据与训练步数一致，做学习率扫描，绘制 loss 曲线，理解论文'Muon 约需 AdamW 52% 训练 FLOPs'的结论如何在小实验中定性体现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u3-l2-customize-qwen2-config.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "掌握用代码构造 Qwen2Config 而非从预训练权重加载的方式",
+            "理解 tie_word_embeddings、rms_norm_eps 等关键配置的作用",
+            "能独立缩放模型规模做快速实验"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Qwen2Config 字段含义",
+            "模型规模控制",
+            "tokenizer 与 vocab 对齐",
+            "参数量与吞吐评估"
+          ],
+          "order": 2,
+          "practice_task": "把模型改为 6 层、hidden_size 512、intermediate_size 1536 的小模型，跑通训练并统计参数量与每步耗时，再换用不同的 tokenizer 处理 vocab_size 不匹配问题（可记录待确认之处）。",
+          "source_files": [
+            "examples/toy_train.py"
+          ],
+          "title": "定制你的玩具模型：Qwen2Config 配置详解",
+          "topic": "逐项解读 get_model_and_dataloader 中手工构造的 Qwen2Config（hidden_size、num_hidden_layers、num_attention_heads、intermediate_size、tie_word_embeddings、vocab_size 等），学会缩放模型规模以适配自己的算力。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u3-l3-inference-with-moonlight.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "掌握 AutoModelForCausalLM 加载 Moonlight 权重的流程",
+            "理解 trust_remote_code 与 chat template 的作用",
+            "了解 Moonlight 与 DeepSeek-V3 同构带来的部署便利"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "模型下载",
+            "transformers 推理",
+            "chat template",
+            "推理引擎生态"
+          ],
+          "order": 3,
+          "practice_task": "编写并运行一个推理脚本：用 Moonlight-16B-A3B-Instruct 的 chat template 提问'123 是否为质数'并生成回答；若无足够显存则完成可运行脚本并估算所需显存（可标注待确认）。",
+          "source_files": [
+            "README.md",
+            "Moonlight_intermediate_checkpoints.pdf"
+          ],
+          "title": "使用 Moonlight-16B-A3B 进行推理",
+          "topic": "实践 README 中的推理代码：从 HuggingFace 下载 Moonlight-16B-A3B / Instruct，用 transformers 与 trust_remote_code 加载，使用 chat template 生成；了解其与 DeepSeek-V3 同构、可被 vLLM/SGLang 部署，以及中间检查点的发布情况。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u3-l4-distributed-muon-zer01.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "解释 ZeRO-1 优化器状态分片如何降低显存占用",
+            "描述分布式 Muon 需要的 all-gather/reduce-scatter 通信模式",
+            "定位论文与 Megatron-LM PR #1428 中的分布式实现细节"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ZeRO-1 状态分片",
+            "通信优化模式",
+            "Megatron-LM 集成入口",
+            "论文实现细节（待确认）"
+          ],
+          "order": 4,
+          "practice_task": "阅读 Moonlight.pdf 中分布式实现相关章节与 README 链接的 Megatron-LM PR #1428，绘制梯度-优化器状态的通信数据流图；在本地用 torch.distributed 把 toy 训练改为 DDP 版本，并说明 Muon 状态应放置在何处、该版本与论文的 ZeRO-1 方案差在哪里。",
+          "source_files": [
+            "README.md",
+            "Moonlight.pdf"
+          ],
+          "title": "走向分布式：ZeRO-1 式 Muon 与 Megatron 集成",
+          "topic": "介绍论文的分布式 Muon：ZeRO-1 风格优化器状态分片与通信优化，在保持算法数学性质的同时做到内存最优；其工业实现位于外部 Megatron-LM PR #1428（本仓库内无对应源码，细节待确认，以 PDF 与 README 为准）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2",
+            "u2-l5"
+          ],
+          "filename": "u3-l5-extend-optimizer-and-dataset.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "掌握在 get_optimizer 中新增优化器分支的改法",
+            "学会在 MoonDataset/name2path 中接入新数据集",
+            "建立改动后与基线对照的回归验证习惯"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "新优化器接入",
+            "新数据集接入",
+            "回归验证方法",
+            "改动范围控制"
+          ],
+          "order": 5,
+          "practice_task": "为 get_optimizer 增加一个 'hybrid' 选项：仅对注意力投影权重使用 Muon、其余参数用 AdamW，并在小模型上与纯 adamw/纯 muon 基线各训练若干步对比 loss；再为 name2path 增加一个新的 HuggingFace 数据集选项并跑通。",
+          "source_files": [
+            "examples/toy_train.py",
+            "README.md"
+          ],
+          "title": "二次开发：扩展优化器与数据集",
+          "topic": "以 toy_train.py 为改造对象练习二次开发：在 get_optimizer 中接入新的优化器组合，在 MoonDataset/name2path 中接入新数据集，并用小规模回归实验验证改动没有破坏训练。"
+        }
+      ],
+      "level": "advanced",
+      "order": 3,
+      "title": "专家：实验、推理与二次开发"
+    }
+  ]
+}

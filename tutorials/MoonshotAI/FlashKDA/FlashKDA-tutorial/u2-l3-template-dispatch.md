@@ -1,342 +1,464 @@
-# 模板参数分发：7 种 state 组合 × varlen 的实例化
+# u2-l3 模板参数分发：7 种 state 组合 × varlen 的实例化
 
 ## 1. 本讲目标
 
-上一讲（u2-l2）我们读完了 `fwd` 入口的前半段：一连串 `TORCH_CHECK` 校验和三项布局预处理。校验通过之后、真正启动 kernel 之前，还有一道关键工序——**从 14 份预先编译好的 kernel 实现中，挑出与本次调用匹配的那一份**。
+学完本讲，你应该能够：
 
-本讲结束时，你应该能够：
+1. 读懂 [csrc/fwd.h](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/fwd.h) 中 `launch_fwd` 的模板签名，说清 `D`、`HasStateIn`、`HasStateOut`、`StateFP32`、`IsVarlen` 五个模板参数各自控制 kernel 的哪一段行为。
+2. 读懂 [csrc/flash_kda.cpp](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp) 中 `LAUNCH` / `DISPATCH_STATE` 两个宏的七分支分发逻辑，理解 `state_fp32` 是如何从两个可选状态张量的 dtype 推导出来的，以及为什么恰好是 7 个分支而不是 8 个。
+3. 解释 [csrc/smxx/fwd_launch.cu](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu) 末尾那张显式实例化表（explicit instantiation）的作用：没有它，链接器会报什么错。
+4. 从性能角度论证：为什么这些配置用编译期模板布尔而不是运行时 `if`。
 
-1. 说出 `launch_fwd` 模板的 5 个模板参数（`D`、`HasStateIn`、`HasStateOut`、`StateFP32`、`IsVarlen`）各自控制 kernel 的哪一段行为。
-2. 手工推导：给定一次 `flash_kda.fwd` 调用的参数（给了哪些状态张量、什么 dtype、有没有 `cu_seqlens`），它会命中 `DISPATCH_STATE` 七个分支中的哪一个。
-3. 解释为什么是 **7** 种 state 组合而不是 8 种，以及为什么总共实例化 **14** 份 `launch_fwd`。
-4. 解释「显式实例化」（explicit instantiation）在 `fwd_launch.cu` 末尾解决了什么链接问题，为什么 `flash_kda.cpp` 不直接 `#include` kernel 代码。
-5. 论证为什么这些选择必须放在**编译期**（模板 + `if constexpr`），而不是运行时 `if`——核心原因是 TMA 描述符的 **C++ 类型**本身随配置改变。
-
----
+本讲承接 u2-l2（校验链与预处理）。u2-l2 讲的是「进入分发之前发生什么」，本讲讲的是「校验通过之后，调用如何被路由到 14 份编译出的代码中的一份」。
 
 ## 2. 前置知识
 
-### 2.1 模板不是代码，是「生成代码的配方」
+### 2.1 C++ 函数模板与编译期布尔
 
-C++ 模板（function template / class template）本身不产生任何机器码。编译器只有看到「模板 + 一组具体模板实参」（比如 `launch_fwd<128, true, false, false, true>`）时，才会按配方**实例化**（instantiate）出一份真正的函数。同一份模板配上不同实参，生成的是完全独立的函数体，各自编译、各自优化。
-
-### 2.2 `if constexpr`：编译期裁剪
+C++ 的函数模板（function template）像一张「生成函数的配方」：
 
 ```cpp
-if constexpr (HasStateIn) {
-    // 只有 HasStateIn == true 的实例化里，这段代码才被编译
-} else {
-    // HasStateIn == false 的实例化里，只编译这一段
+template <bool IsVarlen>
+void launch_fwd(/* 参数 */) {
+    if constexpr (IsVarlen) {
+        // 只有 IsVarlen == true 时才编译这段代码
+    } else {
+        // 只有 IsVarlen == false 时才编译这段代码
+    }
 }
 ```
 
-与运行时 `if` 不同，`if constexpr` 的**另一侧分支根本不进入编译产物**——不是「运行时跳过」，而是「代码不存在」。这对 GPU kernel 极其重要：不存在的代码不占寄存器、不占共享内存、不需要 warp 发散处理。
+`if constexpr` 是 C++17 引入的编译期分支：条件是编译期常量，不满足的分支**根本不会被编译**，这在 CUDA 术语里叫死代码消除（dead code elimination）。这与运行时 `if (is_varlen)` 有本质区别——后者两个分支都会编译成机器码，执行时靠分支预测硬扛。
 
-### 2.3 声明与定义分离时的「显式实例化」
+### 2.2 翻译单元、声明与定义、链接
 
-普通函数只要在一个 `.cpp` 里定义、在头文件里声明，链接器就能找到符号。模板不同：**编译器只会在「看得见模板定义」的编译单元里实例化**。如果 A.cpp 只 include 了模板声明就去调用 `launch_fwd<...>`，A.cpp 里不会生成函数体，链接时报 undefined symbol。
+- **翻译单元（translation unit, TU）**：一个 `.cpp` / `.cu` 文件经过预处理（展开 `#include`）后交给编译器的完整内容。本项目的构建脚本 [setup.py:58-61](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/setup.py#L58-L61) 只有两个源文件：`csrc/flash_kda.cpp`（由 host 编译器编译，只做校验与分发）和 `csrc/smxx/fwd_launch.cu`（由 nvcc 编译，包含全部 CUDA 代码），即两个翻译单元。
+- **声明 vs 定义**：`csrc/fwd.h` 里只有 `launch_fwd` 的**声明**（告诉编译器「有这个函数，长这样」）；真正的**定义**（函数体）在 `fwd_launch.cu` 里。
+- **链接器**：`flash_kda.cpp` 调用 `launch_fwd<128, true, ...>` 时，编译器只看声明就放行；到链接阶段，链接器需要找到一份**实例化出来的函数体**（即模板按具体参数展开并编译出的机器码），找不到就报 undefined reference。
 
-解决办法有两种：
+模板不会被「顺带」编译——除非编译器在某处看到了完整定义加具体参数。显式实例化（explicit instantiation）就是程序员主动写下的指令：
 
-- **header-only**：把定义放进 `.h`，让每个调用方都能实例化（多个编译单元生成同一实例时由链接器去重）。
-- **显式实例化**：定义留在 `.cu`/`.cpp` 里，在其末尾用 `template void launch_fwd<128, true, true, false, true>(...);` 这样的语句**点名要求生成某几份实例**。调用方只 include 声明，链接到这些现成符号。
+```cpp
+template void launch_fwd<128, true, true, false, true>(/* 完整参数类型列表 */);
+```
 
-FlashKDA 选择了后者，原因见 4.3。
+它告诉 nvcc：「请按这组参数把模板展开并生成机器码，放到符号表里供链接」。
 
-### 2.4 为什么 GPU kernel 偏爱编译期分支
+### 2.3 pybind11 的 optional 参数
 
-三个在 CPU 代码里不突出、在 CUDA kernel 里致命的理由：
+Python 侧的 `initial_state=None`、`final_state=None`、`cu_seqlens=None` 在 C++ 侧映射为 `std::optional<torch::Tensor>`（见 [csrc/flash_kda.cpp:40-42](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp#L40-L42)）。`has_value()` 把「用户传没传」变成一个运行时布尔，这个布尔随后被折算成模板参数——这就是本讲的全部故事：**运行时的可选性 → 编译期的代码特化**。
 
-1. **类型不同**：TMA 描述符由 `make_tma_copy(算子, gmem 张量, smem 布局)` 生成，bf16 状态和 fp32 状态产出的描述符是**不同的 C++ 类型**。类型无法用运行时 `if` 切换，只能走模板。
-2. **资源不同**：不同配置需要的共享内存布局、同步 barrier 数量不同。运行时分支要求所有路径的资源并存，可能直接超过 48KB/228KB 的 smem 上限。
-3. **同步语句不能进发散分支**：`__syncthreads()` 若被运行时条件包裹，一旦部分线程走另一侧就是未定义行为。`if constexpr` 保证整块线程（乃至整个实例化）看到的代码一致，天然安全。
+### 2.4 一个背景：TMA 描述符是「类型」，不只是「数值」
 
----
+launch 层会在 host 侧为每块要搬的显存构造 TMA 描述符，然后按值传进 kernel（`CUTE_GRID_CONSTANT`，本质是 `__grid_constant__` 的常量内存传参）。bf16 状态和 fp32 状态对应的 smem 布局类型不同（`TMAStateSmemLayout` vs `TMAFP32StateSmemLayout`），所以**描述符本身是不同的 C++ 类型**，进而成为 kernel 模板的类型参数。这一点决定了「状态精度」很难退化成运行时布尔——后面 4.3 会再回到这里。
 
 ## 3. 本讲源码地图
 
-| 文件 | 角色 | 本讲关注点 |
+| 文件 | 行数（约） | 本讲关注点 |
 | --- | --- | --- |
-| [csrc/fwd.h](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/fwd.h) | `launch_fwd` 的**模板声明**（仅 27 行） | 5 个模板参数与默认值 |
-| [csrc/flash_kda.cpp](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp) | pybind 入口（host 编译单元） | 运行时布尔推导 + `DISPATCH_STATE` 七分支 |
-| [csrc/smxx/fwd_launch.cu](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu) | `launch_fwd` 的**模板定义** + 两次 kernel 启动（device 编译单元） | 定义端签名、哑指针技巧、末尾 14 个显式实例化 |
-| [csrc/smxx/fwd_kernel2.cuh](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel2.cuh) | Kernel 2（递推）实现头 | 4 个布尔参数如何用 `if constexpr` 改变形为 |
-| [csrc/smxx/fwd_kernel1.cuh](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel1.cuh) | Kernel 1（准备）实现头 | `IsVarlen` 在 K1 侧的二分查找 |
-| [tests/test_fwd.py](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/tests/test_fwd.py) | 正确性测试 | 实践任务的输入构造模板 |
-
-两个编译单元的关系（承接 u1-l4 的单翻译单元策略）：
-
-```text
-flash_kda.cpp  (host 单元)          fwd_launch.cu  (device 单元)
-  include "fwd.h" ──────────────────► include "fwd.h"
-  调用 launch_fwd<128, HI, HO,        include "fwd_kernel1.cuh"
-                 FP32, VL>()          include "fwd_kernel2.cuh"
-       │                              定义 launch_fwd 模板
-       │  链接期解析符号               末尾显式实例化 14 份
-       └──────────────────────────────────► 14 个具体符号
-```
-
----
+| [csrc/fwd.h](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/fwd.h) | 27 行 | `launch_fwd` 的模板声明，五个模板参数及默认值 |
+| [csrc/flash_kda.cpp](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp) | 233 行 | `has_state_in`/`has_state_out`/`state_fp32`/`is_varlen` 的推导，`LAUNCH`/`DISPATCH_STATE` 七分支宏，pybind 注册 |
+| [csrc/smxx/fwd_launch.cu](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu) | 239 行 | 模板定义体、`make_state_tma` 的类型分叉、两个 kernel 的启动、末尾的显式实例化表 |
+| [csrc/smxx/fwd_kernel1.cuh](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel1.cuh) | 586 行 | 只接收 `IsVarlen` 一个布尔：tile 映射的二分查找 vs 整除 |
+| [csrc/smxx/fwd_kernel2.cuh](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel2.cuh) | 839 行 | 接收全部四个布尔：状态三进两出路径、varlen 寻址 |
+| [setup.py](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/setup.py) | — | 确认只有两个编译单元，这是理解「为什么要显式实例化」的前提 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 launch_fwd 模板签名
+### 4.1 模块一：`launch_fwd` 模板签名——五个参数各管什么
 
 #### 4.1.1 概念说明
 
-`launch_fwd` 是 Python 层与 CUDA kernel 之间的**最后一层 C++ 函数**：它负责构造 TMA 描述符、切分 workspace、启动 K1/K2 两个 kernel。它的行为由 5 个模板参数决定，其中 4 个是布尔开关：
+从 Python 进来的一次调用，最终要在 GPU 上跑出不同「形态」的代码，差异来自四个正交的配置维度：
 
-| 模板参数 | 类型 | 控制什么 |
-| --- | --- | --- |
-| `D` | `int` | head 维度。当前硬编码为 128（校验链里 `TORCH_CHECK(D == 128)`，见 u2-l2） |
-| `HasStateIn` | `bool` | K2 开头是否加载 `initial_state`（三条路径：bf16 直载 / fp32 转换载 / 清零） |
-| `HasStateOut` | `bool` | K2 结尾是否把最终状态写出（两条路径：bf16 直存 / fp32 转存） |
-| `StateFP32` | `bool` | 状态张量在**全局内存**中的精度（bf16 或 fp32），决定 TMA 描述符类型与转换缓冲 |
-| `IsVarlen` | `bool` | 是否变长模式（有 `cu_seqlens`），决定 K1/K2 的 tile 寻址方式，还控制是否启动第三个辅助 kernel |
+- 有没有初始状态（`HasStateIn`）？
+- 有没有最终状态输出（`HasStateOut`）？
+- 状态用什么精度（`StateFP32`：false = bf16，true = fp32）？
+- 序列长度是变长的（`cu_seqlens`，`IsVarlen`）还是等长 batch 的？
 
-注意语义分工：`HasStateIn`/`HasStateOut` 说的是「**有没有**这次 IO」，`StateFP32` 说的是「IO 的**精度**」。二者正交组合，再乘上 `IsVarlen`，就是全部实例。
+`launch_fwd` 把这四个问题编码成四个 `bool` 模板参数，外加一个 `int D`（head 维度，当前恒为 128）。它是 pybind 层与 kernel 层之间唯一的桥梁：**host 编译的 `flash_kda.cpp` 只认识这个函数签名，nvcc 编译的 `fwd_launch.cu` 负责在它内部启动两个真正的 `__global__` kernel**。
 
 #### 4.1.2 核心流程
 
-一次 `flash_kda.fwd` 调用中，模板实参的确定过程：
+一次 `flash_kda.fwd` 调用穿过分发层的路径：
 
 ```text
-Python 侧传参                    C++ 侧推导                    模板实参
-─────────────────────────────────────────────────────────────────────
-initial_state 是否为 None   →  has_state_in               →  HasStateIn
-final_state   是否为 None   →  has_state_out              →  HasStateOut
-状态张量 dtype 是否 fp32    →  state_fp32                 →  StateFP32
-cu_seqlens   是否为 None    →  is_varlen                  →  IsVarlen
-D == 128（校验保证）                                        →  D
+Python fwd(...)
+  └─ flash_kda.cpp::fwd
+       ├─ 校验（u2-l2 已讲）
+       ├─ 推导运行时布尔:
+       │    has_state_in  = initial_state.has_value()
+       │    has_state_out = final_state.has_value()
+       │    state_fp32    = 任一存在的状态张量 dtype == fp32
+       │    is_varlen     = cu_seqlens.has_value()
+       └─ is_varlen ? DISPATCH_STATE(true) : DISPATCH_STATE(false)
+            └─ 七分支 if-else 链 → LAUNCH(HI, HO, FP32, VL)
+                 └─ launch_fwd<128, HI, HO, FP32, VL>(...)   ← 链接到 14 份实例之一
+                  ├─ 构造全部 TMA 描述符（make_state_tma 按 StateFP32 分叉）
+                  ├─ 启动 Kernel 1（模板参数：..., IsVarlen）
+                  └─ 启动 Kernel 2（模板参数：..., HasStateIn, HasStateOut, StateFP32, IsVarlen）
 ```
-
-关键点：**模板实参全部来自「参数的存在性」和「dtype」这类零成本可判定的元信息**，不需要看任何张量的数值。这也是为什么分发能放在 host 侧一行 `if` 链里完成。
 
 #### 4.1.3 源码精读
 
-先看声明端 [csrc/fwd.h:6-27](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/fwd.h#L6-L27)：模板声明带默认实参（`HasStateIn = true`、`HasStateOut = true`、`StateFP32 = false`、`IsVarlen = true`），函数体参数全是裸指针与标量——两个状态指针是 `void const*`/`void*`，**精度信息不在指针类型里，只存在于模板参数中**：
+**声明：一个只有 27 行的头文件。** 模板签名与默认实参：
+
+[csrc/fwd.h:6-27](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/fwd.h#L6-L27)
 
 ```cpp
 template <int D, bool HasStateIn = true, bool HasStateOut = true,
           bool StateFP32 = false, bool IsVarlen = true>
 void launch_fwd(
     cutlass::bfloat16_t const* q_ptr,
-    ...
-    void const* initial_state_ptr,   // 精度由 StateFP32 表达
-    ...
-    void* final_state_ptr,
-    ...);
+    /* ...共 18 个参数... */
+    cudaStream_t stream
+);
 ```
 
-再看定义端 [csrc/smxx/fwd_launch.cu:6-27](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L6-L27)：定义端写的是 `template <int D, bool HasStateIn, bool HasStateOut, bool StateFP32, bool IsVarlen>`，**不带默认值**。C++ 规定默认模板实参在声明与定义中只能出现一次——本项目选择放在头文件里，方便少数内部调用省写参数，而显式实例化时永远全部显式给出。
+注意两点：`D` 是 `int` 非类型参数，状态指针是 `void const*` / `void*`——因为 dtype 由 `StateFP32` 在定义体内决定如何 reinterpret。默认实参（`= true` 等）写在声明上，而 [csrc/smxx/fwd_launch.cu:6](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L6) 的定义处不再重复（C++ 规则：默认实参在同一 TU 内不得重复给出）。实际上调用方 `LAUNCH` 宏永远显式传满五个参数，这些默认值更像一份「典型用法」的文档。
 
-模板参数在定义体内最直接的消费点是两次 kernel 启动。Kernel 1 只接收 `IsVarlen`（[csrc/smxx/fwd_launch.cu:153-160](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L153-L160)）——因为 K1 只做块内准备、完全不触碰状态：
+**定义体开头：把模板参数交给布局与描述符。** [csrc/smxx/fwd_launch.cu:6-27](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L6-L27) 处定义与声明签名一致（去掉默认值），随后 `kInputStages = 3`、`kOutputStages = 2` 等常量在此写死——流水线深度不是本讲的模板旋钮，留给 u3-l2。
+
+**状态描述符的编译期分叉。** 最能体现「模板参数改变生成代码」的段落是 `make_state_tma`：
+
+[csrc/smxx/fwd_launch.cu:118-144](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L118-L144)
 
 ```cpp
-auto kernel1 = _flash_kda_fwd_prepare<
-    decltype(tma_load_q), decltype(tma_load_k), ...,
-    CHUNK, D, kK1Threads, IsVarlen>;      // 只有 IsVarlen 一个布尔
+auto make_state_tma = [&]() {
+    if constexpr (StateFP32) {
+        // fp32 状态：按 float 指针构造 load/store 描述符（FP32 smem 布局）
+        ...
+        return cute::make_tuple(tma_load, tma_store);
+    } else {
+        auto state_ptr_load = HasStateIn
+            ? static_cast<BF16 const*>(initial_state_ptr)
+            : reinterpret_cast<BF16 const*>(out_ptr);  // dummy, never used
+        auto state_ptr_store = HasStateOut
+            ? static_cast<BF16*>(final_state_ptr)
+            : reinterpret_cast<BF16*>(out_ptr);        // dummy, never used
+        ...
+    }
+};
+auto [tma_load_initial_state, tma_store_final_state] = make_state_tma();
 ```
 
-Kernel 2 则接收全部 4 个布尔（[csrc/smxx/fwd_launch.cu:190-199](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L190-L199)），因为状态的加载与写出都发生在 K2。
+三个细节：
 
-还有一个容易被忽略的细节：`IsVarlen` 不仅影响 device 代码，还控制 **host 侧是否启动第三个辅助 kernel**。[csrc/smxx/fwd_launch.cu:164-167](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L164-L167) 中，只有 varlen 实例化才会启动 32 线程的 `_flash_kda_build_tile_prefix`（u2-l6 会精读它）：
+1. `StateFP32` 决定描述符的**类型**（fp32 布局 vs bf16 布局），两个分支返回的 tuple 类型不同，这就是 2.4 节说的「类型级差异」。
+2. `HasStateIn == false` 时仍要构造一个 load 描述符（保持类型整齐），指针用 `out_ptr` 顶替——这个哑描述符**永远不会被真正使用**，因为 kernel 里对应的拷贝代码已被 `if constexpr` 删除。
+3. 结构化绑定拿到的 `tma_load_initial_state` 的 decltype 会作为 kernel 模板参数传入 K2（[csrc/smxx/fwd_launch.cu:190-199](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L190-L199)），状态精度的差异就这样一路「类型化」地传导进 kernel。
+
+**每个布尔在 kernel 内部点亮/删除的代码。** 四个布尔各自控制的行为，可用下表概括（引用处即 `if constexpr` 的分叉点）：
+
+| 模板参数 | `true` 时的行为 | `false` 时的行为 | 分叉点 |
+| --- | --- | --- | --- |
+| `IsVarlen`（K1 与 K2 都接收） | 读 `tile_prefix` 前缀和 + 二分查找定位 tile；K2 逐段重算 `tile_base`；launch 前先跑 `_flash_kda_build_tile_prefix` 小 kernel | 等长序列：一次整除即得 `seq_idx`，乘法即得 `tile_base` | [fwd_kernel1.cuh:175-195](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel1.cuh#L175-L195)、[fwd_launch.cu:164-167](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L164-L167) |
+| `IsVarlen`（K2 侧） | `bos/eos` 查 `cu_seqlens`，`tile_base` 线性累加 | `bos = seq_idx * T_seq` 等纯算术 | [fwd_kernel2.cuh:221-234](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel2.cuh#L221-L234) |
+| `HasStateIn && !StateFP32` | LOAD warp 直接把 bf16 状态 TMA 载入常驻的 `state_acc` | — | [fwd_kernel2.cuh:241-266](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel2.cuh#L241-L266) |
+| `HasStateIn && StateFP32` | 先载入 fp32 缓冲，再全线程做 fp32→bf16 的 smem 布局转换 | — | [fwd_kernel2.cuh:267-304](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel2.cuh#L267-L304) |
+| `HasStateIn == false` | — | 全线程把 `state_acc` 清零 + 代理围栏（零状态起步） | [fwd_kernel2.cuh:305-317](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel2.cuh#L305-L317) |
+| `HasStateOut && !StateFP32` | STORE warp 直接把 `state_acc` 整块 TMA 写回 | — | [fwd_kernel2.cuh:786-801](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel2.cuh#L786-L801) |
+| `HasStateOut && StateFP32` | 全线程 bf16→fp32 转换后，STORE warp 发 fp32 TMA | — | [fwd_kernel2.cuh:804-835](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel2.cuh#L804-L835) |
+
+以 `IsVarlen` 在 K1 中的分叉为例直观看一下两种生成的代码：
+
+[fwd_kernel1.cuh:175-195](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel1.cuh#L175-L195)
 
 ```cpp
 if constexpr (IsVarlen) {
-    _flash_kda_build_tile_prefix<<<1, 32, 0, stream>>>(
-        cu_seqlens_ptr, N, CHUNK, ws_tile_prefix);
+    int lo = 0, hi = N;
+    while (lo + 1 < hi) {                 // O(log N) 二分查找 tile_prefix
+        int mid = (lo + hi) >> 1;
+        if (tile_prefix[mid] <= global_tile_idx) lo = mid; else hi = mid;
+    }
+    seq_idx = lo; ...
+} else {
+    int T_seq = T_total / N;
+    int tiles_per_seq = (T_seq + CHUNK - 1) / CHUNK;
+    seq_idx = global_tile_idx / tiles_per_seq;   // 一次整除搞定
+    ...
 }
 ```
 
-最后看哑指针技巧。[csrc/smxx/fwd_launch.cu:131-136](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L131-L136)：构造 TMA 描述符需要合法的全局内存地址，但 `HasStateIn = false` 时根本没有初始状态张量，于是拿 `out_ptr` 充当地址构造一个**永远不会被使用**的哑描述符：
-
-```cpp
-auto state_ptr_load = HasStateIn
-    ? static_cast<BF16 const*>(initial_state_ptr)
-    : reinterpret_cast<BF16 const*>(out_ptr);  // dummy, never used
-```
-
-这个「never used」的保证来自 kernel 内的 `if constexpr`（见 4.2.3）：使用该描述符的代码路径在 `HasStateIn = false` 的实例化里已被整体裁掉，哑指针只是让**描述符构造本身**（在 host 侧无条件执行）不崩溃。
+batched 模式下编译出的 kernel 里**根本不存在**二分循环——这正是模板分发的价值。状态三进两出路径的完整机制属于 u3-l6 的内容，本讲只需记住：`HasStateIn`/`HasStateOut`/`StateFP32` 三个布尔在 K2 内部选择的是**整段互斥的 TMA 载入/写出代码**，而不是某个开关值。
 
 #### 4.1.4 代码实践
 
-**实践目标**：确认「模板实参完全由参数元信息决定」这一论断，并观察哑指针策略下 stateless 调用不会出错。
+**实践目标**：验证「同一个 `flash_kda.fwd` Python 入口，底层路由到不同 kernel 实例」最直接的证据——不同模式跑出来的结果行为一致、但配置矩阵必须逐格构造才不触发 u2-l2 的校验报错。
 
-**操作步骤**：
+**操作步骤**（示例代码，需已在 SM90 机器上安装 flash_kda）：
 
-1. 打开 [csrc/smxx/fwd_launch.cu:119-144](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L119-L144) 的 `make_state_tma` lambda，对照 [csrc/smxx/fwd_kernel2.cuh:241-317](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel2.cuh#L241-L317) 的三个 `if constexpr` 分支，画一张「模板组合 → 描述符类型 → kernel 内路径」对照表。
-2. 运行 `tests/test_fwd.py` 中的 `test_fwd`（它给了 bf16 的 `initial_state` 与 `final_state`，即 `(true, true, false)` 组合），确认通过。
+```python
+# probe_isvarlen.py（示例代码）
+import math, torch, torch.nn.functional as F
+import flash_kda
 
-**需要观察的现象**：`make_state_tma` 在 host 侧对每种实例化都构造了 load 和 store 两个描述符——即使 `HasStateIn = false` 也会构造 load 描述符（用哑指针）。
+D, H, LB = 128, 2, -5.0
+def make_qkv(B, T):
+    torch.manual_seed(0)
+    q = F.normalize(torch.randn((B, T, H, D), device="cuda"), p=2, dim=-1).to(torch.bfloat16)
+    k = F.normalize(torch.randn((B, T, H, D), device="cuda"), p=2, dim=-1).to(torch.bfloat16)
+    v = torch.randn((B, T, H, D), dtype=torch.bfloat16, device="cuda")
+    g = torch.randn((B, T, H, D), dtype=torch.bfloat16, device="cuda")
+    beta = torch.randn((B, T, H), dtype=torch.bfloat16, device="cuda")
+    A_log = torch.rand(H, dtype=torch.float32, device="cuda")
+    dt_bias = torch.rand(H, D, dtype=torch.float32, device="cuda")
+    return q, k, v, g, beta, A_log, dt_bias, 1.0 / math.sqrt(D)
 
-**预期结果**：stateless 模式下程序正常运行，无非法地址访问。因为哑描述符在 kernel 内无任何使用点。
+# 同样 48 个 token：batched B=3,T=16 vs varlen [4,8,12]
+for mode in ("batched", "varlen"):
+    if mode == "batched":
+        inp = make_qkv(3, 16); cu = None
+    else:
+        inp = make_qkv(1, 24); cu = torch.tensor([0, 4, 12, 24], dtype=torch.long, device="cuda")
+    q, k, v, g, beta, A_log, dt_bias, scale = inp
+    out = torch.zeros_like(q)
+    flash_kda.fwd(q, k, v, g, beta, scale, out, A_log, dt_bias, LB, cu_seqlens=cu)
+    torch.cuda.synchronize()
+    print(mode, "out.mean =", out.float().mean().item())
+```
 
-**本实践依赖 GPU 环境，运行结果待本地验证。**
+**需要观察的现象**：两种模式都正常返回，`out` 均为有限值且量级相同（0.x）。
+
+**预期结果**：batched 分支命中 `launch_fwd<128, false, false, false, false>`，varlen 分支命中 `launch_fwd<128, false, false, false, true>`；两者输出均值接近但不必相等（随机输入、切分方式不同）。若把 batched 模式的 `B` 改为 2 又同时传 `cu_seqlens`，会触发 u2-l2 讲过的 `B must be 1` 校验。待本地验证（本讲义写作环境无 GPU）。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：`initial_state_ptr` 为什么声明成 `void const*` 而不是 `cutlass::bfloat16_t const*`？
+**练习 1**：用户调用时传 `initial_state=None`、`final_state` 为 fp32 张量。这次调用命中哪组模板实参？kernel 里的状态路径是什么？
 
-**答案**：状态张量有两种合法 dtype（bf16 与 fp32），指针类型无法同时表达两者。精度信息改由模板参数 `StateFP32` 携带，定义端在 [csrc/smxx/fwd_launch.cu:120-127](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L120-L127) 里 `static_cast<float const*>` 或 [131-133](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L131-L133) 里 `static_cast<BF16 const*>` 还原。这是「类型信息上移到模板参数」的典型手法。
+**答案**：`(HasStateIn=false, HasStateOut=true, StateFP32=true, IsVarlen=...)`，即七分支中的第 4 支。K2 开头走零初始化路径（全线程清零 `state_acc`），结尾走 fp32 写出路径（bf16→fp32 smem 转换 + TMA store）。它对应的真实场景是「解码/推理链第一步：冷启动、但要落盘精确状态」。
 
-**练习 2**：如果把 `fwd_launch.cu:6` 定义端的模板参数也写上默认值（`bool HasStateIn = true`），会发生什么？
+**练习 2**：`fwd.h` 里写了默认实参 `HasStateIn = true` 等，但 `LAUNCH` 宏永远显式传满。这些默认值有什么实际作用？
 
-**答案**：编译错误。C++ 标准禁止默认模板实参在声明和定义中重复出现（同一默认值也不行）。默认实参只能给一次，本项目给在了 `fwd.h` 的声明端。
+**答案**：对本项目的调用方式没有作用，纯文档意义（标出「典型配置」）。但 C++ 语法上它们只能出现在声明处（`fwd.h`），定义处（`fwd_launch.cu:6`）不能重复；而且有了默认值，`fwd.h` 的其他潜在使用者可以少写参数。这是一个「声明的默认值不参与显式实例化匹配」的好例子。
 
-**练习 3**：为什么 Kernel 1 不需要 `HasStateIn`/`HasStateOut`/`StateFP32`？
+**练习 3**：`StateFP32` 的差异为什么不能像 `IsVarlen` 那样「既做模板参数、也可轻易改成运行时布尔」？
 
-**答案**：双 kernel 分工（u1-l4）中 K1 只做块内准备（L2 归一化、门控 cumsum、decay 家族、L/Mqk/INV 构造），状态递推全部在 K2。状态 IO 只发生在 K2 的开头与结尾，所以这 3 个参数对 K1 无意义——不传它们还能减少 K1 的实例化数量（K1 只有 2 份：varlen 与 batched）。
+**答案**：`StateFP32` 改变的不是一段算法分支，而是 **TMA 描述符的 C++ 类型**（fp32 smem 布局 vs bf16 smem 布局，见 [fwd_launch.cu:120-142](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L120-L142)），描述符类型又作为 kernel 模板类型参数传入 K2。要运行时化就得同时携带两套描述符并在 kernel 内部分支，smem 布局类型也随之膨胀——开销和复杂度都远超收益。
 
----
-
-### 4.2 DISPATCH_STATE 七分支
+### 4.2 模块二：`DISPATCH_STATE` 七分支与 `state_fp32` 的推导
 
 #### 4.2.1 概念说明
 
-`DISPATCH_STATE` 是 `flash_kda.cpp` 里的一个预处理器宏，它把 3 个运行时布尔（`has_state_in`、`has_state_out`、`state_fp32`）翻译成对 `launch_fwd` 的正确模板实参。它要覆盖的组合数是：
+校验通过后，`flash_kda.cpp` 手里有四个运行时布尔：`has_state_in`、`has_state_out`、`state_fp32`、`is_varlen`。要把它们折算成模板实参，需要一个运行时的 if-else 链。这段代码用两个预处理器宏写成：`LAUNCH` 负责「一次调用怎么写」，`DISPATCH_STATE` 负责「七个状态分支怎么排」。
 
-\[ 4 \text{ 种 (in, out) 存在性组合} \times 2 \text{ 种 dtype} - 1 \text{ 种不可能组合} = 7 \]
-
-那个「不可能的组合」是 `(无 in, 无 out, fp32)`：`state_fp32` 只能从**实际传入**的状态张量的 dtype 推导出来，两个状态都没给时它永远是 `false`。所以是 7 而不是 8。
+分支数是 7 不是 8 的原因：`(has_state_in, has_state_out, state_fp32)` 理论上有 \(2^3 = 8\) 种组合，但**无状态调用（两者皆 None）时 `state_fp32` 恒为 false**——`state_fp32` 只在检查某个实际存在的状态张量 dtype 时才会被置 true。于是 `(false, false, true)` 这一组不可达，实际可实例化的是 \(8 - 1 = 7\) 种。
 
 #### 4.2.2 核心流程
 
-运行时布尔从哪来？三段逻辑：
+三个运行时布尔的推导关系：
 
-1. **存在性**：[csrc/flash_kda.cpp:57-59](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp#L57-L59) 直接由 `std::optional::has_value()` 得到 `has_state_in`/`has_state_out`，`state_fp32` 初始化为 `false`。
-2. **精度推导**：[csrc/flash_kda.cpp:61-74](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp#L61-L74) 校验存在的状态张量 dtype 必须是 bf16 或 fp32；**任一**状态张量是 fp32 就把 `state_fp32` 置 `true`。
-3. **一致性**：[csrc/flash_kda.cpp:76-79](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp#L76-L79) 若两个状态都给，dtype 必须一致（否则报错），因此 `state_fp32` 不会有歧义。
+```text
+has_state_in  = initial_state.has_value()
+has_state_out =  final_state.has_value()
+state_fp32    = false                                  ← 初值
+             ← 若 initial_state.dtype == fp32 则置 true
+             ← 若  final_state.dtype == fp32 则置 true
+（两者都存在时，校验链强制 dtype 相同，所以不会冲突）
+```
 
-varlen 判定在 [csrc/flash_kda.cpp:145-160](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp#L145-L160)：`cu_seqlens` 存在即 varlen（且要求 `B == 1`、int64），`N` 取 `cu_seqlens.numel() - 1`；否则 `N = B`。
+七分支的判定顺序（先看「有没有」，再看「精度」）：
 
-随后分发分两层展开：外层 [csrc/flash_kda.cpp:209-213](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp#L209-L213) 用运行时 `is_varlen` 选 `DISPATCH_STATE(true)` 或 `DISPATCH_STATE(false)`，内层再按 state 组合走七分支。完整映射表：
-
-| # | has_state_in | has_state_out | state_fp32 | 典型调用场景 |
-| --- | --- | --- | --- | --- |
-| 1 | false | false | false | 纯 stateless 前向（只关心 out） |
-| 2 | true | true | false | 训练 / 推理双向传递，bf16 状态 |
-| 3 | true | true | true | 训练 / 推理双向传递，fp32 状态 |
-| 4 | false | true | true | 只收集最终状态，fp32 精度 |
-| 5 | false | true | false | 只收集最终状态，bf16 |
-| 6 | true | false | true | 只注入初始状态，fp32（如接力解码但状态由外部管理） |
-| 7 | true | false | false | 只注入初始状态，bf16 |
+| # | 分支条件 | 模板实参 (HI, HO, FP32) | 语义 |
+| --- | --- | --- | --- |
+| 1 | `!in && !out` | `(false, false, false)` | 无状态前向 |
+| 2 | `in && out && fp32` | `(true, true, true)` | fp32 状态直通 |
+| 3 | `in && out && !fp32` | `(true, true, false)` | bf16 状态直通 |
+| 4 | `!in && out && fp32` | `(false, true, true)` | 零起步、fp32 落盘 |
+| 5 | `!in && out && !fp32` | `(false, true, false)` | 零起步、bf16 落盘 |
+| 6 | `in && !out && fp32` | `(true, false, true)` | fp32 热启动、不落盘 |
+| 7 | `else`（即 `in && !out && !fp32`） | `(true, false, false)` | bf16 热启动、不落盘 |
 
 #### 4.2.3 源码精读
 
-分发宏本体在 [csrc/flash_kda.cpp:184-216](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp#L184-L216)。`LAUNCH` 宏（L184-190）把 4 个布尔填进模板实参列表，`D` 硬编码为 128，并把前面准备好的所有指针、`total_tiles`、stream 一并转发：
+**第一步：从可选张量推导三个布尔。**
+
+[csrc/flash_kda.cpp:57-79](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp#L57-L79)
+
+```cpp
+bool has_state_in = initial_state.has_value();
+bool has_state_out = final_state.has_value();
+bool state_fp32 = false;
+
+if (has_state_in) {
+    auto& is = initial_state.value();
+    TORCH_CHECK(is.dtype() == torch::kBFloat16 || is.dtype() == torch::kFloat32, ...);
+    if (is.dtype() == torch::kFloat32) state_fp32 = true;
+}
+if (has_state_out) { /* 同理，fp32 时置 true */ }
+if (has_state_in && has_state_out) {
+    TORCH_CHECK(initial_state->dtype() == final_state->dtype(), ...);
+}
+```
+
+`state_fp32` 的语义是「**任一**存在的状态张量是 fp32 就算 fp32 模式」，而不是「两者各自独立」。最后一行的同 dtype 校验保证了这个「或」逻辑无歧义：不可能出现 initial 是 bf16、final 是 fp32 的分裂调用。这也解释了为什么没有 `StateFP32In`/`StateFP32Out` 两个独立布尔——上游约定输入输出状态精度必须一致，独立布尔会产生永远非法的组合。
+
+**第二步：`is_varlen` 与 `N` 的确定。**
+
+[csrc/flash_kda.cpp:145-160](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp#L145-L160)
+
+```cpp
+bool is_varlen = cu_seqlens.has_value();
+if (is_varlen) {
+    TORCH_CHECK(B == 1, "B must be 1 when cu_seqlens is provided");
+    N_val = cu_seqlens_t.numel() - 1;      // 序列条数 = 段数
+} else {
+    N_val = B;                              // batched：每条 batch 一个序列
+}
+```
+
+注意 varlen 是**最外层**的分发维度（先分 varlen、再分 state），与 state 分支完全正交，所以总实例化数 = \(7 \times 2 = 14\)。
+
+**第三步：两个宏。**
+
+[csrc/flash_kda.cpp:184-216](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp#L184-L216)
 
 ```cpp
 #define LAUNCH(HI, HO, FP32, VL) \
     launch_fwd<128, HI, HO, FP32, VL>( \
         q_ptr, k_ptr, v_ptr, g_ptr, beta_t_ptr, \
         initial_state_raw, scale_f, final_state_raw, out_ptr, \
-        workspace_ptr, total_tiles, ...)
-```
+        workspace_ptr, total_tiles, \
+        int(T_total), int(H), int(N_val), cu_seqlens_dev, \
+        A_log_ptr, dt_bias_ptr, gate_scale, stream)
 
-`DISPATCH_STATE` 宏（L192-207）是一条 `if / else if` 链，分支条件就是上表 7 行的逐字翻译：
-
-```cpp
 #define DISPATCH_STATE(VL) \
     if (!has_state_in && !has_state_out) { \
-        LAUNCH(false, false, false, VL); \        // 组合 1
+        LAUNCH(false, false, false, VL); \
     } else if (has_state_in && has_state_out && state_fp32) { \
-        LAUNCH(true, true, true, VL); \           // 组合 3
+        LAUNCH(true, true, true, VL); \
     } else if (has_state_in && has_state_out && !state_fp32) { \
-        LAUNCH(true, true, false, VL); \          // 组合 2
+        LAUNCH(true, true, false, VL); \
     } else if (!has_state_in && has_state_out && state_fp32) { \
-        LAUNCH(false, true, true, VL); \          // 组合 4
+        LAUNCH(false, true, true, VL); \
     } else if (!has_state_in && has_state_out && !state_fp32) { \
-        LAUNCH(false, true, false, VL); \         // 组合 5
+        LAUNCH(false, true, false, VL); \
     } else if (has_state_in && !has_state_out && state_fp32) { \
-        LAUNCH(true, false, true, VL); \          // 组合 6
+        LAUNCH(true, false, true, VL); \
     } else { \
-        LAUNCH(true, false, false, VL); \         // 组合 7（兜底 else）
+        LAUNCH(true, false, false, VL); \
     }
+
+if (is_varlen) {
+    DISPATCH_STATE(true);
+} else {
+    DISPATCH_STATE(false);
+}
+
+#undef DISPATCH_STATE
+#undef LAUNCH
 ```
 
-两个值得注意的写法细节：
+精读要点：
 
-- **7 个条件互斥且完备**，所以分支顺序理论上可以任意重排，结果不变；最后一个分支因此可以省略条件直接写 `else`。作者把最复杂的 `(true, false, false)` 留作 `else` 兜底——前提正是前 6 个条件已把其余组合全部排除。这也意味着**改动任何一个条件都要重新核对完备性**，否则错误组合会被 `else` 静默吞掉。
-- 宏用完立刻 [csrc/flash_kda.cpp:215-216](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp#L215-L216) `#undef` 清理，避免宏名泄漏到其他翻译单元（`DISPATCH_STATE(VL)` 这种带参宏如果与 CUTLASS 头文件中的名字撞车会产生极难定位的编译错误）。
-
-再看 kernel 侧，模板参数是如何用 `if constexpr` 改变形为的。K2 的模板参数列表见 [csrc/smxx/fwd_kernel2.cuh:128-131](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel2.cuh#L128-L131)。**输入侧三条互斥路径**：
-
-- bf16 直载（[csrc/smxx/fwd_kernel2.cuh:241-266](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel2.cuh#L241-L266)）：`HasStateIn && !StateFP32` 时 LOAD warp 用 TMA 把 bf16 状态直接搬进常驻的 `state_acc` 共享内存，全块等一个事务 barrier。
-- fp32 转换载（[csrc/smxx/fwd_kernel2.cuh:267-304](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel2.cuh#L267-L304)）：`HasStateIn && StateFP32` 时先 TMA 载入 fp32 到 `state_fp32_buf`，再由全体线程做 `smem_cvt_fp32_to_bf16` 布局转换——多了两步同步和一次转换。
-- 清零（[csrc/smxx/fwd_kernel2.cuh:305-317](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel2.cuh#L305-L317)）：无输入状态时全线程把 `state_acc` 清零，连 TMA 都不用。
-
-**输出侧两条路径**：bf16 直存（[csrc/smxx/fwd_kernel2.cuh:786-801](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel2.cuh#L786-L801)）与 fp32 转存（[csrc/smxx/fwd_kernel2.cuh:804-834](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel2.cuh#L804-L834)，先 `smem_cvt_bf16_to_fp32` 再由 STORE warp 发 TMA）。
-
-`IsVarlen` 则改变**寻址算法**。K2 侧（[csrc/smxx/fwd_kernel2.cuh:221-234](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel2.cuh#L221-L234)）：varlen 时每个块从 `cu_seqlens` 读出本序列的 `[bos, eos)` 并线性扫描累出 `tile_base`；batched 时退化为整除映射 `bos = seq_idx * T_seq`。K1 侧（[csrc/smxx/fwd_kernel1.cuh:175-195](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel1.cuh#L175-L195)）则是「二分查找 `tile_prefix`」对「整除映射」的切换（u2-l6 精读）。
+1. **`LAUNCH` 把 `D` 写死为 128**，与 [flash_kda.cpp:110](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp#L110) 的 `TORCH_CHECK(D == 128)` 呼应——`D` 虽是模板参数，但当前只实例化了 128 一档；支持其它 head_dim 的影响面见 u3-l12。
+2. 分支排列**从「双无」开始、以兜底 `else` 收尾**。最后一个 `else` 承接的正是唯一剩余组合 `(in=true, out=false, fp32=false)`，链首的「双无」分支**不检查 `state_fp32`**（直接传 `false`），依赖的正是 4.2.1 论证的不变量：无状态时 `state_fp32` 必为 false。若在此多写一个 `(false, false, true)` 分支，就会实例化一份永远进不去的代码。
+3. 宏在函数体内定义、用完立刻 `#undef`（[flash_kda.cpp:215-216](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp#L215-L216)），避免 `LAUNCH` 这种通用名污染后续翻译单元。这是预处理宏的卫生习惯；用宏而非普通函数是因为要拼接**模板实参列表**（`launch_fwd<128, HI, HO, ...>` 中的 `HI` 必须逐字面展开）。
+4. 分发完成后，**`total_tiles` 的取值在两种模式下含义不同**：[flash_kda.cpp:176-181](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp#L176-L181) 中 varlen 用上界 \(\lceil T_{total}/16 \rceil + N\)（每条序列至多多算一个尾 tile，K1 里靠 early return 吸收），batched 用精确值 \(N \cdot \lceil T_{seq}/16 \rceil\)。这解释了为什么 varlen 的 K1 grid 会略大于实际 tile 数。
 
 #### 4.2.4 代码实践
 
-**实践目标**：验证「运行时 if 链无法替代这套机制」中的类型障碍——用 `nm` 观察 14 份实例化确实是 14 个不同符号。
+**实践目标**：亲眼确认「七分支中每个分支都可被 Python 侧独立触发」，并观察不可达组合 `(false, false, fp32)` 的报错边界。
 
-**操作步骤**：
+**操作步骤**（示例代码）：
 
-1. 找到已安装的扩展模块：`python -c "import flash_kda_C, inspect; print(flash_kda_C.__file__)"`。
-2. 对该 `.so` 执行：`nm -C <so路径> | grep launch_fwd | head -20`（若符号被 strip 则改用构建目录下的 `fwd_launch.o`：`nm build/temp.*/csrc/smxx/fwd_launch.o | grep launch_fwd | wc -l`）。
+```python
+# probe_branches.py（示例代码）
+import math, torch, torch.nn.functional as F
+import flash_kda
 
-**需要观察的现象**：输出中应出现多行形如 `launch_fwd<128, true, true, false, true>` 的符号（`-C` 会还原可读的模板名），计数为 14。
+D, H, T, LB = 128, 2, 64, -5.0
+torch.manual_seed(0)
+q = F.normalize(torch.randn((1, T, H, D), device="cuda"), p=2, dim=-1).to(torch.bfloat16)
+k = F.normalize(torch.randn((1, T, H, D), device="cuda"), p=2, dim=-1).to(torch.bfloat16)
+v = torch.randn((1, T, H, D), dtype=torch.bfloat16, device="cuda")
+g = torch.randn((1, T, H, D), dtype=torch.bfloat16, device="cuda")
+beta = torch.randn((1, T, H), dtype=torch.bfloat16, device="cuda")
+A_log = torch.rand(H, dtype=torch.float32, device="cuda")
+dt_bias = torch.rand(H, D, dtype=torch.float32, device="cuda")
+scale = 1.0 / math.sqrt(D)
 
-**预期结果**：14 个 `launch_fwd` 实例符号——7 种 state 组合 × varlen/batched。这正是 4.3 要讲的显式实例化的直接产物。
+cases = {  # (has_in, has_out, dtype_name) -> 分支号
+    (False, False, None):  1, (True, True, "fp32"): 2, (True, True, "bf16"): 3,
+    (False, True, "fp32"): 4, (False, True, "bf16"): 5,
+    (True, False, "fp32"): 6, (True, False, "bf16"): 7,
+}
+for (hi, ho, dn), no in cases.items():
+    dt = {"bf16": torch.bfloat16, "fp32": torch.float32}[dn] if dn else None
+    init = torch.randn(1, H, D, D, dtype=dt, device="cuda") if hi else None
+    fin  = torch.zeros(1, H, D, D, dtype=dt, device="cuda") if ho else None
+    out = torch.zeros_like(q)
+    flash_kda.fwd(q, k, v, g, beta, scale, out, A_log, dt_bias, LB,
+                  initial_state=init, final_state=fin)
+    torch.cuda.synchronize()
+    print(f"branch#{no} in={hi} out={ho} dtype={dn}: OK, out.mean={out.float().mean():.4f}")
 
-**待本地验证**（符号是否可见取决于构建配置；`.o` 文件路径随 Python/CUDA 版本变化）。
+# 非法组合：in=bf16 + out=fp32（dtype 不一致）
+try:
+    flash_kda.fwd(q, k, v, g, beta, scale, torch.zeros_like(q), A_log, dt_bias, LB,
+                  initial_state=torch.randn(1, H, D, D, dtype=torch.bfloat16, device="cuda"),
+                  final_state=torch.zeros(1, H, D, D, dtype=torch.float32, device="cuda"))
+except RuntimeError as e:
+    print("expected error:", str(e).splitlines()[0])
+```
+
+**需要观察的现象**：7 个分支依次打印 OK；最后一组抛出 `initial_state and final_state must have the same dtype`。
+
+**预期结果**：7/7 通过；dtype 混用被校验链拦截——正因为有这道拦截，`state_fp32` 才能用单一布尔表达。待本地验证。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：调用 `flash_kda.fwd` 时只传了 fp32 的 `final_state`（不传 `initial_state`）和 `cu_seqlens`，会命中哪个分支？模板实参是什么？
+**练习 1**：把链首分支改成 `if (!has_state_in && !has_state_out && !state_fp32) LAUNCH(false,false,false,VL); else if (!has_state_in && !has_state_out) LAUNCH(false,false,true,VL); ...` 会发生什么？
 
-**答案**：`has_state_in = false`、`has_state_out = true`、`state_fp32 = true`（由 [csrc/flash_kda.cpp:68-74](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp#L68-L74) 从 final_state 的 fp32 dtype 推出）、`is_varlen = true`。命中组合 4 分支，展开为 `LAUNCH(false, true, true, true)`，即 `launch_fwd<128, false, true, true, true>`。
+**答案**：功能上仍正确（`state_fp32` 无状态时恒 false，新分支永不命中），但 `LAUNCH(false, false, true, VL)` 会**多实例化一份永远无法到达的 launch_fwd**（及其内部两个 kernel），白白增加编译时间和 .so 体积。实例化表（4.3）也得跟着加一行，否则反而链接失败——这是「运行时不可达 ≠ 编译期不存在」的直接例子。
 
-**练习 2**：如果传了 bf16 的 `initial_state` 和 fp32 的 `final_state`，会发生什么？
+**练习 2**：为什么 `IsVarlen` 在 `DISPATCH_STATE` 之外再包一层 if，而不是并进同一个 if-else 链（变成 14 个手写分支）？
 
-**答案**：被 [csrc/flash_kda.cpp:76-79](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp#L76-L79) 的 `TORCH_CHECK` 拦下，抛出 "initial_state and final_state must have the same dtype"。注意在校验顺序上，dtype 合法性检查（L64/L71）先于一致性检查（L77），所以「bf16 + fp32」会走到一致性报错，而「int32 状态」会更早报 dtype 非法——这条「先失败先报」链在 u2-l2 已详细分析。
+**答案**：两个维度正交。分层写法用 \(7 + 2\) 个分支表达了 \(7 \times 2 = 14\) 种组合，宏展开一次、复用两次；揉平成 14 分支既难维护又容易漏分支。这也是「宏参数 `VL` 逐字面穿透到 `LAUNCH`」的价值所在。
 
-**练习 3**：为什么 `DISPATCH_STATE` 的分支里，`stateless`（组合 1）不检查 `state_fp32`？
+**练习 3**：varlen 模式下 `total_tiles` 为什么是上界 \(\lceil T_{total}/16 \rceil + N\) 而不是精确值？多出来的 CTA 去哪了？
 
-**答案**：因为 `(false, false, true)` 是不可能的组合——`state_fp32` 只能被 L61-74 中「实际存在的状态张量」置位，两个状态都没有时它在 L59 初始化为 `false` 后不会再变。所以第一个分支直接写 `LAUNCH(false, false, false, VL)` 即可，无需多余条件。
+**答案**：因为序列边界在 device 内存里（`cu_seqlens`），host 侧不想为算精确 tile 数做一次 D2H 同步。上界中每条序列至多多算一个 tile（尾 tile 向上取整的误差 ≤ 1/序列），N 条序列累计至多多 N 个。多出来的 CTA 在 K1 里通过 [fwd_kernel1.cuh:198-199](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel1.cuh#L198-L199) 的 `if (local_t >= t_tiles_this_seq) return;` 提前退出。workspace 尺寸同样按上界分配（u2-l2）。
 
----
-
-### 4.3 显式实例化与链接
+### 4.3 模块三：显式实例化与链接——`fwd_launch.cu` 末尾的那张表
 
 #### 4.3.1 概念说明
 
-显式实例化解决的问题是：**`flash_kda.cpp`（调用方）与 `fwd_launch.cu`（定义方）是两个独立的编译单元，调用方看不到模板定义，链接器必须有现成的符号可指**。
+现在回答本讲最后一个问题：`flash_kda.cpp`（host 编译器编译）调用 `launch_fwd<128, ...>`，但函数体在 `fwd_launch.cu`（nvcc 编译）里，两个翻译单元如何对接？
 
-`fwd_launch.cu` 末尾的实例化表把「这套库支持哪 14 种调用形态」**固化成了链接期契约**：只要 `flash_kda.cpp`（或未来任何 host 代码）调用的组合在表内，链接成功；调到表外的组合，直接链接失败——错误在编译/链接期暴露，而不是运行时。
+答案是教科书式的「声明 + 显式实例化」模式：
+
+- `flash_kda.cpp` include `fwd.h`，只见到声明，编译通过；
+- `fwd_launch.cu` 里定义函数体，并在文件末尾**显式枚举**所有会被用到的模板实参组合，强制 nvcc 生成这 14 份机器码并导出符号；
+- 链接器把 `flash_kda.cpp` 的调用点与这 14 个符号之一绑定。
+
+如果删掉表里任何一行，编译照常成功，**链接阶段**才报 undefined reference。
 
 #### 4.3.2 核心流程
 
-构建期发生的事：
+实例化的组合数逐层放大：
 
-```text
-nvcc 编译 flash_kda.cpp
-  ├─ include "fwd.h"（只依赖 cutlass/bfloat16.h，不含 kernel 代码）
-  └─ 产出：对 14 个 launch_fwd<...> 符号的重定位引用（无定义）
+\[ \underbrace{1}_{D=128} \times \underbrace{7}_{\text{state 组合}} \times \underbrace{2}_{\text{varlen/batched}} = 14 \text{ 份 } launch\_fwd \]
 
-nvcc 编译 fwd_launch.cu
-  ├─ include 两个 kernel 实现头（拖入全部 CUTLASS/CuTe 头链）
-  ├─ 隐式实例化：无（模板定义本身不产码）
-  └─ 显式实例化 14 份 → 产出 14 个具体函数符号（每份含两个 kernel 的启动代码）
+每份 `launch_fwd` 内部又实例化：
 
-链接 → flash_kda.cpp 的调用点逐个绑定到 14 个符号上
-```
+- 1 份 `_flash_kda_fwd_prepare`（K1 只依赖 `IsVarlen`，去重后实际 2 份）；
+- 1 份 `_flash_kda_fwd_recurrence`（K2 依赖全部四个布尔，14 份互不相同）；
+- varlen 专属的 `_flash_kda_build_tile_prefix`（非模板）。
 
-实例化数量：7 种 state 组合 × 2 种 varlen = 14，即 \[ (4 \times 2 - 1) \times 2 = 14 \]。
+编译成本估算：CUTLASS/CuTe 模板的单个 kernel 实例化相当重，14 份 `launch_fwd` × 4 个目标架构（`FLASH_KDA_CUDA_ARCHS=all` 时）= 56 组 K1/K2 编译，这就是 u1-l3 提到「全架构构建明显更慢」的根源。
 
 #### 4.3.3 源码精读
 
-实例化表在 [csrc/smxx/fwd_launch.cu:219-238](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L219-L238)，两层宏嵌套：
+**实例化宏。** [csrc/smxx/fwd_launch.cu:219-238](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L219-L238)
 
 ```cpp
-// 显式实例化的语法：template + 函数签名 + 全部模板实参
+// Explicit instantiations
 #define INSTANTIATE_LAUNCH_FWD(D, HI, HO, FP32, VL) \
     template void launch_fwd<D, HI, HO, FP32, VL>( \
-        cutlass::bfloat16_t const*, ...完整参数类型列表..., cudaStream_t);
+        cutlass::bfloat16_t const*, cutlass::bfloat16_t const*, \
+        /* ...18 个参数的完整类型列表... */ \
+        int64_t const*, float const*, float const*, float, cudaStream_t);
 
 #define INSTANTIATE_STATE_VARIANTS(VL) \
     INSTANTIATE_LAUNCH_FWD(128, true,  true,  false, VL) \
@@ -347,184 +469,161 @@ nvcc 编译 fwd_launch.cu
     INSTANTIATE_LAUNCH_FWD(128, false, true,  true,  VL) \
     INSTANTIATE_LAUNCH_FWD(128, true,  false, true,  VL)
 
-INSTANTIATE_STATE_VARIANTS(true)   // varlen：7 份
-INSTANTIATE_STATE_VARIANTS(false)  // non-varlen：7 份
+INSTANTIATE_STATE_VARIANTS(true)   // varlen
+INSTANTIATE_STATE_VARIANTS(false)  // non-varlen
 ```
 
-注意 `INSTANTIATE_LAUNCH_FWD` 里必须**逐字重复完整的函数参数类型列表**——显式实例化要求编译器能无歧义地指认函数，不能依赖默认参数或省略。
+精读要点：
 
-这张表的 7 行与 `DISPATCH_STATE` 的 7 个分支**一一对应**。这是本讲最重要的一条对应关系：host 侧 `if` 链的每一个分支，都在实例化表里有且仅有一行。两边任何一边增删组合（例如未来支持 D=64，或新增「只出不进 + fp32」之外的形态）都必须同步修改另一边，否则要么链接错误（表少了），要么死代码（表多了，没人调用）。
+1. **显式实例化必须写出完整参数类型列表**（不能省略成 `...`），因为它是对一个具体函数符号的显式声明，类型必须与 [fwd.h:7-27](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/fwd.h#L7-L27) 的声明逐参数精确匹配。
+2. 表中的 7 行与 `DISPATCH_STATE` 的 7 分支**一一对应**（顺序不必一致，集合必须一致）：`(false,false,true)` 同样不在表中——运行时不可达的组合不实例化，两个文件靠这一不变量保持同步。改分发逻辑时必须同时改这张表，这是一个隐式耦合点（见练习 1）。
+3. `INSTANTIATE_STATE_VARIANTS` 被调用两次（`VL=true/false`），把 7 × 2 = 14 份实例压成 7 行宏代码——与分发侧「先 state 后 varlen」的分层完全同构。
 
-为什么不用 header-only 方案（把定义搬进 `fwd.h`）？三个理由：
+**为什么不把定义放进头文件让调用方自行实例化？** 三个理由：
 
-1. **隔离重依赖**：`fwd_launch.cu` include 了 `fwd_kernel1.cuh`/`fwd_kernel2.cuh`，进而拖入整个 CUTLASS/CuTe 头链与两个 kernel 共约 1400 行设备代码。header-only 会让 `flash_kda.cpp` 也背上这一切，任何 kernel 头文件的改动都会触发两个编译单元全量重编。
-2. **控制实例化数量**：显式实例化把实例数量钉死在 14。header-only 下每个调用方编译单元都可能产生自己的隐式实例，虽然链接器最终去重，但编译期的开销与不可控性更高。
-3. **编译器选择**：`flash_kda.cpp` 是纯 host 代码，当前方案下它几乎不依赖 CUDA 设备编译路径；这与 u1-l3 讲过的「host 侧 `flash_kda.cpp` + 唯一 `.cu` 文件 `fwd_launch.cu`」的双编译单元构建结构互为表里。
+- `flash_kda.cpp` 由 host 编译器以 `cxx` 选项编译（[setup.py:68-69](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/setup.py#L68-L69)），而 `launch_fwd` 的函数体充满 `__global__`、`CUTE_GRID_CONSTANT`、CuTe device 代码，**必须**由 nvcc 编译。把定义移进 `fwd.h` 会让 pybind TU 也变成 CUDA TU，构建脚本随之复杂化。
+- 集中在一个 `.cu` 里实例化，14 份（× 每架构）编译只发生一次；若定义散进头文件被多个 TU include，要么重复编译浪费，要么得精心安排显式实例化避免 ODR 问题。
+- 这也符合 u1-l3 讲过的「单翻译单元策略」：K1/K2 以 `.cuh` 实现头汇入唯一的 `fwd_launch.cu`，整个扩展的 CUDA 面积收敛在一个编译单元里。
 
-最后把「编译期 vs 运行时」的论证收拢成一张表，这也是本讲的学习目标之三：
+**launch 层另一个（非模板的）开关。** [fwd_launch.cu:147](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L147) 与 [fwd_launch.cu:184](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L184) 的 `#if BLOCK_LEVEL_K1 >= 0` / `#if BLOCK_LEVEL_K2 >= 0`（默认值 1 定义于 [utils.cuh:30-35](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/utils.cuh#L30-L35)）是**预处理器级**的消融开关，可整体砍掉 K1 或 K2 的启动代码，与模板分发是两套机制（它们的用法留给 u3-l12 的消融实验）。
 
-| 维度 | 运行时 `if` | 编译期模板 + `if constexpr`（本项目） |
-| --- | --- | --- |
-| TMA 描述符类型 | 无法切换（bf16/fp32 是不同 C++ 类型） | 每种实例化持有自己的描述符类型 |
-| 状态 IO 路径 | 三条路径代码并存，寄存器/smem 都要预留 | 未选中的路径不存在（4.2.3 的三分支） |
-| `__syncthreads` 安全 | 分支内同步有死锁风险 | 整块线程看到同一份代码，天然安全 |
-| smem 布局 | 无法用 union 复用（[csrc/smxx/fwd_kernel2.cuh:99-107](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel2.cuh#L99-L107) 中 fp32 转换缓冲与流水线缓冲的 union 复用依赖「路径编译期互斥」的保证） | union 复用合法且有据可依 |
-| 哑指针安全性 | 「never used」无编译期保证 | 使用点被 `if constexpr` 裁掉，可证明安全 |
-| 代价 | — | 二进制体积 ×14、编译时间增加 |
+**那为什么必须编译期分发，运行时 `if` 不行吗？** 把本讲三处证据合起来：
+
+1. **热路径零开销**：`IsVarlen` 的分支位于 K1/K2 每个 CTA 的入口（每 tile 执行一次），`HasStateOut` 的写出分支位于每个 block 的结尾。`if constexpr` 让每份实例只含它需要的指令；运行时布尔则在每个实例里都拖着两条路径的代码与分支。
+2. **类型必须分叉**：`StateFP32` 改变 TMA 描述符与 smem 布局的**类型**（4.1.3 / 4.1.5 练习 3），这不是运行时值能表达的。
+3. **资源占用精确**：不同实例的寄存器/smem 用量不同，`if constexpr` 让每份实例被 ptxas 独立调度（`--register-usage-level=10`，见 u1-l3），互不拖累。
+
+代价则是本模块的主题：**每新增一个配置维度，实例化数翻倍，且分发宏与实例化表必须手工同步**。
 
 #### 4.3.4 代码实践
 
-**实践目标**：亲手制造一次「表外组合」的链接错误，理解实例化表是链接期契约。
+**实践目标**：直观感受「删一行实例化 → 链接失败」的因果链，把本模块的论断变成亲手实验。
 
 **操作步骤**：
 
-1. 在 [csrc/smxx/fwd_launch.cu:237-238](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L237-L238) 处临时注释掉 `INSTANTIATE_STATE_VARIANTS(false)` 这一行（即删掉全部 7 个 batched 实例）。
-2. 重新构建：`pip install --no-build-isolation .`（或直接重跑 u1-l3 的安装流程）。
-3. 观察链接器输出。
-4. **改完后务必还原**（本讲义禁止修改源码，此实验应在本地副本进行）。
+1. 确认当前安装正常：`python -c "import flash_kda; print('ok')"`。
+2. 编辑 `csrc/smxx/fwd_launch.cu`（实验后还原！），注释掉实例化表中的一行，例如：
+   `INSTANTIATE_LAUNCH_FWD(128, false, true, true, VL)`（第 6 行，对应「零起步、fp32 落盘」）。
+3. 重新安装：`pip install --no-build-isolation -e . 2>&1 | tail -40`（编译仍会成功，注意观察**链接阶段**的报错，形如 `undefined reference to 'void launch_fwd<128, false, true, true, false>(...)'`，由 `flash_kda.cpp.o` 的调用点触发；具体报错文本随平台而异，待本地验证）。
+4. 还原该行，重装确认恢复。
+5. 附加观察：`nvcc --ptxas-options=-v` 已在默认编译选项中（u1-l3），重装时在输出里搜索 `_flash_kda_fwd_recurrence`，可看到 14 份 K2 实例各自的寄存器/smem 报告行，对比 `(true,true,*)` 与 `(false,false,*)` 实例的资源差异。
 
-**需要观察的现象**：链接阶段报 undefined reference / unresolved external symbol，符号名里包含 `launch_fwd<128, true, true, false, false>` 之类的模板实参——因为 `DISPATCH_STATE(false)` 展开的 7 处调用都找不到定义。
+**需要观察的现象**：步骤 3 出现链接错误（而非编译错误），且报错符号正是被注释掉的那组模板实参；步骤 5 中不同实例的 `Used N registers` 数字存在差异。
 
-**预期结果**：链接失败，错误信息逐条列出 7 个缺失的 batched 符号。这从反面证明了：`flash_kda.cpp` 的调用之所以能链接，完全依赖实例化表逐行供给符号。
-
-**待本地验证**（需要完整构建环境与 GPU 机器；不同链接器报错措辞不同）。
+**预期结果**：链接错误的符号名里能读出 `<128, false, true, true, false>`（batched 侧）与/或 `<128, false, true, true, true>`（varlen 侧）两组——因为那一行宏在 `INSTANTIATE_STATE_VARIANTS(true/false)` 里各展开一次。待本地验证。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：如果把实例化表删掉一行 `INSTANTIATE_LAUNCH_FWD(128, false, false, false, true)`（varlen 的 stateless 组合），构建和运行各会怎样？
+**练习 1**：如果要新增一种配置（例如独立的 `StateInFP32`/`StateOutFP32`，允许输入输出精度不同），分发侧和实例化侧各要改什么？工作量有多大？
 
-**答案**：构建（链接）失败。`flash_kda.cpp` 中 `DISPATCH_STATE(true)` 的第一个分支 `LAUNCH(false, false, false, true)` 引用了 `launch_fwd<128, false, false, false, true>` 的符号，而表中已无供给。错误在链接期暴露、不会进入运行期——这正是显式实例化作为「白名单契约」的价值。
+**答案**：`fwd.h` 与 `fwd_launch.cu:6` 的模板签名各加一个 `bool`；`DISPATCH_STATE` 从 7 分支膨胀为最多 \(4 \times 4 - \text{不可达} = 13\) 分支左右（`(false,false,*,*)` 仍只算 1 个）；实例化表同步加到 13 行 × 2 varlen = 26 份 `launch_fwd`；K2 内部新增两条混合精度转换路径（fp32 入 → bf16 出等）。同时 u2-l2 的「同 dtype」校验要删除。可见一个看似小的语义放宽，在编译期分发架构下是全链路的改动——这正是该项目选择「输入输出精度必须一致」约定的原因之一。
 
-**练习 2**：`INSTANTIATE_LAUNCH_FWD` 宏为什么要写出全部 19 个参数类型，而不能写 `launch_fwd<D, HI, HO, FP32, VL>` 加省略号？
+**练习 2**：`launch_fwd` 的 14 份实例中，`_flash_kda_fwd_prepare`（K1）为什么去重后只有 2 份？`_flash_kda_fwd_recurrence`（K2）为什么 14 份互不相同？
 
-**答案**：显式实例化的语法要求给出**完整的函数签名**（`template 返回类型 函数名<实参>(参数类型列表);`），编译器据此无歧义地指认要实例化哪个函数。C++ 没有函数签名的「省略号」写法；且参数类型列表不能依赖默认实参推导（模板实参必须显式，函数参数类型必须完整）。
+**答案**：看模板参数列表即可：K1 的模板只接收 `IsVarlen` 一个布尔（[fwd_launch.cu:153-160](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L153-L160)），所以 14 份 `launch_fwd` 内引用的 K1 类型只有 `IsVarlen ∈ {true,false}` 两种；K2 接收全部四个布尔（[fwd_launch.cu:190-199](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L190-L199)），\(7 \times 2 = 14\) 个 (HI,HO,FP32,VL) 组合互异，故 14 份。链接器视角下 K1 符号被多份 `launch_fwd` 共享引用，不重复生成。
 
-**练习 3**：实例化表里有 `D = 128`，那么 `D` 作为模板参数存在的意义是什么？既然只有一个合法值？
+**练习 3**：pybind 注册处（[flash_kda.cpp:219-232](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp#L219-L232)）为什么只注册 `fwd` 和 `get_workspace_size` 两个函数，而不是按 14 种组合各注册一个？
 
-**答案**：目前它更像「为扩展预留的维度参数」：kernel 内所有布局（`K1Layouts<D, CHUNK>`、`K2Layouts<D, CHUNK>`，见 [csrc/smxx/fwd_launch.cu:33-35](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L33-L35)）都以 `D` 为编译期输入，若未来支持 D=64/256，只需在实例化表加行、并在校验链放开 `D == 128` 的检查（u3-l12 会分析这项扩展的真实工作量）。在当前版本里，`D` 的约束由 [csrc/flash_kda.cpp:110](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp#L110) 的 `TORCH_CHECK` 在运行时把关。
-
----
+**答案**：分发点收拢在 C++ 内部的 `DISPATCH_STATE`，Python 侧永远只调一个 `fwd`，可选参数天然由 pybind 的 `py::arg(...) = py::none()` 表达。若按组合拆成 14 个入口，Python 包装层（u1-l5）就得自己实现同样的分支逻辑，校验和默认值两处维护；收拢后「Python 看到的是 1 个函数，链接器看到的是 14 个符号」，各取所需。
 
 ## 5. 综合实践
 
-写一个 `dispatch_matrix.py`，把本讲三个模块串起来：**用 Python 枚举全部 14 种合法调用形态，逐个实际调用 `flash_kda.fwd`，并与 `DISPATCH_STATE` 的分支推导互相对拍**。
-
-**实践目标**：
-
-1. 证明 7 × 2 = 14 种组合全部可用（每个组合都能成功命中一份实例化）。
-2. 在 Python 侧复刻 [csrc/flash_kda.cpp:57-79](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp#L57-L79) 与 [L145-160](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/flash_kda.cpp#L145-L160) 的推导逻辑，打印每行调用「应该命中」的模板实参 `(HI, HO, FP32, VL)`，与 C++ 分支表（4.2.2 的表）逐行核对。
-
-**参考实现骨架**（示例代码，输入构造方式参照 [tests/test_fwd.py:230-240](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/tests/test_fwd.py#L230-L240)）：
+写一个 `dispatch_matrix.py`（示例代码），把本讲三个模块串起来：枚举 7 种合法 state 配置 × 2 种序列模式，逐格调用 `flash_kda.fwd`，输出一张 7×2 分发矩阵表，并抽查其中两格与 `tests/torch_ref.py` 的 bit-exact 参考对拍。
 
 ```python
 # dispatch_matrix.py（示例代码）
-import math
-import torch
-import torch.nn.functional as F
+# 运行前提：SM90 机器，已 pip install --no-build-isolation -e .（见 u1-l3）
+import math, sys, torch, torch.nn.functional as F
 import flash_kda
 
-H, D = 4, 128
-LOWER_BOUND = -5.0
-torch.manual_seed(0)
+D, H, LB, DEV = 128, 4, -5.0, "cuda"
 
-def make_inputs(B, T, N):
-    q = F.normalize(torch.randn((B, T, H, D), dtype=torch.float32, device='cuda'),
-                    p=2, dim=-1).to(torch.bfloat16)
-    k = F.normalize(torch.randn((B, T, H, D), dtype=torch.float32, device='cuda'),
-                    p=2, dim=-1).to(torch.bfloat16)
-    v = torch.randn((B, T, H, D), dtype=torch.bfloat16, device='cuda')
-    g = torch.randn((B, T, H, D), dtype=torch.bfloat16, device='cuda')
-    beta = torch.randn((B, T, H), dtype=torch.bfloat16, device='cuda')
-    A_log = torch.rand(H, dtype=torch.float32, device='cuda')
-    dt_bias = torch.rand(H, D, dtype=torch.float32, device='cuda')
-    return q, k, v, g, beta, A_log, dt_bias
+def make_inputs(B, T):
+    torch.manual_seed(42)   # 与 tests/test_fwd_full.py 对齐，便于对拍
+    q = F.normalize(torch.randn((B, T, H, D), device=DEV), p=2, dim=-1).to(torch.bfloat16)
+    k = F.normalize(torch.randn((B, T, H, D), device=DEV), p=2, dim=-1).to(torch.bfloat16)
+    v = torch.randn((B, T, H, D), dtype=torch.bfloat16, device=DEV)
+    g = torch.randn((B, T, H, D), dtype=torch.bfloat16, device=DEV)
+    beta = torch.randn((B, T, H), dtype=torch.bfloat16, device=DEV)
+    A_log = torch.rand(H, dtype=torch.float32, device=DEV)
+    dt_bias = torch.rand(H, D, dtype=torch.float32, device=DEV)
+    return q, k, v, g, beta, A_log, dt_bias, 1.0 / math.sqrt(D)
 
-def make_state(N, dtype):
-    return torch.arange(N * H * D * D, dtype=torch.float32,
-                        device='cuda').reshape(N, H, D, D).to(dtype)
-
-# (name, has_in, has_out, state_fp32)：7 种合法 state 组合
-COMBOS = [
-    ("in=F,out=F,fp32=F", False, False, False),
-    ("in=T,out=T,fp32=F", True,  True,  False),
-    ("in=T,out=T,fp32=T", True,  True,  True),
-    ("in=F,out=T,fp32=T", False, True,  True),
-    ("in=F,out=T,fp32=F", False, True,  False),
-    ("in=T,out=F,fp32=T", True,  False, True),
-    ("in=T,out=F,fp32=F", True,  False, False),
+# 7 种合法 state 配置：与 DISPATCH_STATE 七分支一一对应
+# (名称, has_in, has_out, dtype_name)
+CONFIGS = [
+    ("no_state        ", False, False, None),
+    ("in+out   bf16   ", True,  True,  "bf16"),
+    ("in+out   fp32   ", True,  True,  "fp32"),
+    ("out_only bf16   ", False, True,  "bf16"),
+    ("out_only fp32   ", False, True,  "fp32"),
+    ("in_only  bf16   ", True,  False, "bf16"),
+    ("in_only  fp32   ", True,  False, "fp32"),
 ]
 
-MODES = {
-    "varlen":  dict(B=1, seq_lens=[48, 80]),   # N=2，T_total=128
-    "batched": dict(B=2, seq_lens=[64, 64]),   # N=2，T_total=128
-}
+def run_one(cfg, mode):
+    _, hi, ho, dn = cfg
+    if mode == "batched":
+        B, T, cu = 3, 64, None
+        N = B
+        q, k, v, g, beta, A_log, dt_bias, scale = make_inputs(B, T)
+    else:  # varlen
+        seq_lens = [4, 8, 12]
+        N = len(seq_lens)
+        cu = torch.tensor([0] + list(torch.cumsum(torch.tensor(seq_lens), 0)),
+                          dtype=torch.long, device=DEV)
+        q, k, v, g, beta, A_log, dt_bias, scale = make_inputs(1, sum(seq_lens))
+    dt = {"bf16": torch.bfloat16, "fp32": torch.float32}[dn] if dn else None
+    init = torch.randn(N, H, D, D, dtype=dt, device=DEV).to(dt) if hi else None
+    fin  = torch.zeros(N, H, D, D, dtype=dt, device=DEV) if ho else None
+    out = torch.zeros_like(q)
+    flash_kda.fwd(q, k, v, g, beta, scale, out, A_log, dt_bias, LB,
+                  initial_state=init, final_state=fin, cu_seqlens=cu)
+    torch.cuda.synchronize()
+    return bool(torch.isfinite(out.float()).all()), out
 
-def derive(hi, ho, fp32, is_varlen):
-    """复刻 flash_kda.cpp L57-79 / L145-160 的推导，返回模板实参。"""
-    return f"launch_fwd<128, {hi}, {ho}, {fp32}, {is_varlen}>"
+if __name__ == "__main__":
+    print(f"{'config':<18} | {'batched (VL=false)':<20} | varlen (VL=true)")
+    print("-" * 64)
+    for cfg in CONFIGS:
+        cells = []
+        for mode in ("batched", "varlen"):
+            try:
+                ok, _ = run_one(cfg, mode)
+                cells.append("PASS" if ok else "FAIL(nonfinite)")
+            except Exception as e:
+                cells.append("ERR: " + str(e).splitlines()[0][:24])
+        print(f"{cfg[0]:<18} | {cells[0]:<20} | {cells[1]}")
 
-rows = []
-for mode, cfg in MODES.items():
-    B, seq_lens = cfg["B"], cfg["seq_lens"]
-    T_total = sum(seq_lens)
-    q, k, v, g, beta, A_log, dt_bias = make_inputs(B, T_total, len(seq_lens))
-    is_varlen = (mode == "varlen")
-    cu_seqlens = None
-    if is_varlen:
-        cu_seqlens = torch.tensor([0] + list(torch.cumsum(
-            torch.tensor(seq_lens), dim=0).tolist()), dtype=torch.long, device='cuda')
-    N = len(seq_lens)
-    for name, hi, ho, fp32 in COMBOS:
-        dtype = torch.float32 if fp32 else torch.bfloat16
-        initial_state = make_state(N, dtype) if hi else None
-        final_state = torch.zeros(N, H, D, D, dtype=dtype, device='cuda') if ho else None
-        out = torch.zeros(B, T_total, H, D, dtype=torch.bfloat16, device='cuda')
-        try:
-            flash_kda.fwd(q, k, v, g, beta, 1.0 / math.sqrt(D), out,
-                          A_log=A_log, dt_bias=dt_bias, lower_bound=LOWER_BOUND,
-                          initial_state=initial_state, final_state=final_state,
-                          cu_seqlens=cu_seqlens)
-            torch.cuda.synchronize()
-            rows.append((mode, name, derive(hi, ho, fp32, is_varlen), "OK"))
-        except Exception as e:
-            rows.append((mode, name, derive(hi, ho, fp32, is_varlen), f"FAIL: {e}"))
-
-print(f"{'mode':<8} {'state combo':<20} {'template instantiation':<44} {'result'}")
-print("-" * 88)
-for r in rows:
-    print(f"{r[0]:<8} {r[1]:<20} {r[2]:<44} {r[3]}")
+    # 可选加深：任选一格与 torch_ref 做 bit-exact 对拍（需能 import 到 tests 目录）
+    # sys.path.insert(0, "tests"); from torch_ref import torch_ref
+    # 复制 tests/test_fwd_full.py 中 test_fwd_fixed 的断言写法：torch.equal(out_kernel, out_ref)
 ```
+
+**实践目标**：证明 14 个格子全部 PASS——即 `DISPATCH_STATE` × `IsVarlen` 的每个编译实例都能从 Python 侧唯一触达，且不存在「编译了却到不了」或「到了却没编译」的格子。
 
 **操作步骤**：
 
-1. 在已安装 FlashKDA 的机器上保存并运行 `python dispatch_matrix.py`。
-2. 核对输出的 14 行：`result` 列应全为 `OK`。
-3. 把 `template instantiation` 列与 4.2.2 的组合表、[csrc/smxx/fwd_launch.cu:228-235](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_launch.cu#L228-L235) 的实例化表逐行对照——三者应完全一致。
-4. 可选：故意构造第 8 种「非法组合」（例如 stateless 但希望 fp32），确认 Python 侧根本没有途径表达它（没有状态张量就没有 dtype 可言），从调用接口层面印证 7 而非 8 的原因。
+1. 按 u1-l3 完成安装；把上面脚本保存到仓库任意位置（不要放进 `tests/`，避免被 pytest 收集）。
+2. 运行 `python dispatch_matrix.py`。
+3. 观察表格输出；如需数值级验证，取消末尾注释并参照 [tests/test_fwd_full.py:70-94](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/tests/test_fwd_full.py#L70-L94) 的 `torch.equal` 断言扩展脚本。
 
-**需要观察的现象**：14 行全 OK；varlen 列的 `cu_seqlens` 版本与 batched 列互不干扰；`initial_state` 与 `final_state` 的 dtype 一致性在脚本里天然满足（同一 `dtype` 变量生成两者），因此不会触发 u2-l2 讲过的 dtype 一致性报错。
+**需要观察的现象**：7 行 × 2 列全为 PASS；varlen 列与 batched 列使用相同的 state 配置但不同的 `cu_seqlens`/形状（batched 状态 `[3,H,D,D]`，varlen 状态 `[3,H,D,D]`——形状恰好一致但语义不同：前者每 batch 一份，后者每序列一份）。
 
-**预期结果**：得到一张 7 行 state 组合 × 2 列模式的分发矩阵，每格都成功执行并打印出对应的模板实例名。
-
-**待本地验证**：本环境无 GPU，以上输出为基于源码推导的预期，请读者在 SM90 机器上运行确认。
-
----
+**预期结果**：14/14 PASS。若某格 ERR 且报错来自 u2-l2 的校验链（如 dtype/shape），说明该格的输入构造与本讲的配置约定不符，应修脚本而非怀疑分发。待本地验证（写作环境无 GPU）。
 
 ## 6. 本讲小结
 
-- `launch_fwd` 的 4 个布尔模板参数（`HasStateIn`/`HasStateOut`/`StateFP32`/`IsVarlen`）全部由调用时的**参数元信息**（optional 是否有值、状态 dtype、cu_seqlens 是否存在）决定，与张量数值无关。
-- state 组合是 4 × 2 − 1 = 7 种：「无 in 无 out 但 fp32」不可能存在，因为 `state_fp32` 只能由实际传入的状态张量置位；再乘 varlen/batched，共 7 × 2 = 14 份实例。
-- `DISPATCH_STATE` 的 7 个 `else if` 条件互斥完备，与 `fwd_launch.cu` 末尾实例化表的 7 行一一对应——一边是运行期入口，一边是链接期契约，改动必须两侧同步。
-- `IsVarlen` 不仅切换 K1/K2 的寻址算法（二分查找 vs 整除映射），还在 host 侧决定是否启动第三个辅助 kernel `_flash_kda_build_tile_prefix`。
-- 必须用编译期模板而非运行时分支的根本原因：TMA 描述符的 C++ 类型随配置改变、`if constexpr` 可整段裁掉未选路径（含 `__syncthreads` 与 smem 布局差异）、哑指针技巧的安全性依赖「使用点已被裁掉」的编译期保证。
-- 显式实例化把 CUTLASS 重依赖隔离在 `fwd_launch.cu` 单个编译单元内，`flash_kda.cpp` 只需 27 行的 `fwd.h` 声明即可完成调用与链接。
+- `launch_fwd` 的五个模板参数中，`HasStateIn`/`HasStateOut`/`StateFP32` 描述状态 IO 的有无与精度，`IsVarlen` 描述序列组织方式；`D` 当前写死 128。
+- `state_fp32` 由「任一存在的状态张量是否为 fp32」推导；由于无状态时它恒为 false，(HI, HO, FP32) 的 8 种组合中 `(false,false,true)` 不可达，故分发是 7 分支、实例化是 7 × 2 = 14 份。
+- `DISPATCH_STATE` 是运行时 if-else 链 + 宏拼接模板实参；`LAUNCH` 宏把 `D=128`、指针包与 stream 打包成一次调用；`#undef` 收尾保证宏卫生。
+- `StateFP32` 的差异是**类型级**的（TMA 描述符与 smem 布局不同），这也是状态精度必须编译期分发、不能运行时分支的根本原因之一。
+- 显式实例化表（`INSTANTIATE_STATE_VARIANTS`）与分发宏是**隐式耦合**的一对：改一侧必须同步另一侧，否则编译成功、链接失败。
+- 编译期分发的收益：热路径死代码消除、类型可分叉、每份实例独立调度寄存器；代价：实例数随配置维度指数增长、构建时间随架构数线性放大。
 
 ## 7. 下一步学习建议
 
-本讲止步于 `launch_fwd` 的签名与分发。函数体内部「构造 TMA 描述符、切分 workspace、启动两个 kernel」的细节由下一讲接管：
-
-- **u2-l4（CuTe 布局）**：`make_state_tma` 里出现的 `TMAStateSmemLayout`/`TMAFP32StateSmemLayout` 等布局类型从何而来，`make_tma_copy` 如何用它们生成描述符。
-- **u2-l5（TMA 描述符与启动配置）**：`fwd_launch.cu` 主体的逐行精读，包括 workspace 六段切分与两个 grid 的设计。
-- **u2-l6（Kernel 1 骨架）**：`IsVarlen=true` 分支里 `tile_prefix` 的构建与二分查找的完整实现。
-
-若想先巩固本讲的 C++ 知识，建议阅读 cppreference 的 [explicit instantiation](https://en.cppreference.com/w/cpp/language/function_template#Explicit_instantiation) 与 [if constexpr](https://en.cppreference.com/w/cpp/language/if#Consteval_if) 章节，再回头重读 `fwd_launch.cu` 的 219-238 行。
+- 下一讲 u2-l4「读懂 CuTe」将拆开 `K1Layouts`/`K2Layouts`，本讲反复出现的 `TMAStateSmemLayout`/`TMAFP32StateSmemLayout` 等类型届时会得到完整解释——建议先记住本讲的结论「类型不同」再去看「为何不同」。
+- 若想先看模板布尔在 kernel 内的完整效果，可直接跳读 [csrc/smxx/fwd_kernel2.cuh:241-317](https://github.com/MoonshotAI/FlashKDA/blob/7afb9f454f160a6c4bbc0999beca0a8c40a38934/csrc/smxx/fwd_kernel2.cuh#L241-L317)（状态三进入口），但其布局细节依赖 u2-l4。
+- 对「编译期分发 vs 运行时分支」想有更多体感的读者，可以对比 flash-linear-attention 中 Triton kernel 用 `tl.constexpr` 表达同类配置的方式（Triton 的 constexpr 同样触发特化编译，思想同源）。
+- 本讲的实例化表是 u3-l12 消融实验的邻居：`BLOCK_LEVEL_K1/K2` 与 `TMA_DISABLE_ALL` 是另一套（预处理级）开关，做消融时注意区分两套机制。
