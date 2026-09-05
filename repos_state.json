@@ -58781,7 +58781,7 @@
     },
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-09-05T18:02:24Z"
+      "last_run_at": "2026-09-05T23:02:31Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
@@ -64468,7 +64468,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"75b5aa00-8a01-46cc-9713-2209"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"81825d91-b324-430d-909f-b9fe"
         },
         "u3-l6": {
           "status": "pending",
@@ -64512,13 +64512,13 @@
       "mode": "full",
       "tutorial_path": "tutorials/MoonshotAI/FlashKDA/FlashKDA-tutorial",
       "last_head": "7afb9f454f160a6c4bbc0999beca0a8c40a38934",
-      "last_run_at": "2026-09-05T18:02:24Z",
+      "last_run_at": "2026-09-05T23:02:31Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "MoonshotAI/Attention-Residuals": {
       "prompt_hash": "b21aef51792b02df",
       "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-09-05T18:02:24Z",
+      "last_run_at": "2026-09-05T23:02:31Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -64588,7 +64588,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"5289419a-4766-4d81-aa51-27ff"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"defb2f6e-c441-497b-bf13-5255"
         },
         "u3-l3": {
           "status": "pending",
@@ -64728,8 +64728,8 @@
     },
     "MoonshotAI/MoBA": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"c9f7c347-7786-48d7-9e02-5a1612a0a99a\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0",
-      "last_run_at": "2026-09-05T18:02:24Z"
+      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"f0ef0b7e-ca00-41cd-b148-d1e56cfe2b34\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0",
+      "last_run_at": "2026-09-05T23:02:31Z"
     },
     "MoonshotAI/Kimi-VL": {},
     "MoonshotAI/MoonEP": {},
