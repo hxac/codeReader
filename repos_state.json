@@ -58781,7 +58781,7 @@
     },
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-09-13T18:02:22Z"
+      "last_run_at": "2026-09-13T23:02:20Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
@@ -65108,7 +65108,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"fb851d2d-8219-44e3-bc5b-1f0a"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"826e2469-9124-44c2-8e13-0d11"
         },
         "u4-l5": {
           "status": "pending",
@@ -65172,7 +65172,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/MoonshotAI/MoonEP/MoonEP-tutorial",
       "last_head": "2bd860b4dd083df62b79d5e916fca71ec5742228",
-      "last_run_at": "2026-09-13T18:02:22Z",
+      "last_run_at": "2026-09-13T23:02:20Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "openinfer-project/openinfer": {
@@ -65274,7 +65274,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"296ab84a-0234-4ae7-a2bf-47bb"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"6b23fc97-14eb-43c1-8b3d-4cd1"
         },
         "u4-l5": {
           "status": "pending",
@@ -65433,12 +65433,12 @@
       "mode": "full",
       "tutorial_path": "tutorials/openinfer-project/openinfer/openinfer-tutorial",
       "last_head": "139d925e8693dcff412b8501f8db09eb639d0ffd",
-      "last_run_at": "2026-09-13T18:02:22Z",
+      "last_run_at": "2026-09-13T23:02:20Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "openinfer-project/openinfer@openinfer-bench": {
       "last_error": "子目录不存在: 'openinfer-bench'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-09-13T18:02:22Z"
+      "last_run_at": "2026-09-13T23:02:20Z"
     },
     "openinfer-project/openinfer@openinfer-build": {},
     "openinfer-project/openinfer@openinfer-core": {},
