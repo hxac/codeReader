@@ -1,0 +1,470 @@
+{
+  "head": "b5d58363311d3ca946f1ec444182727c15e338b5",
+  "project": "MoBA",
+  "rationale": "MoBA 是一个小型且高度聚焦的项目：核心代码仅 moba/ 下四个文件，围绕\"块稀疏注意力\"单一主题提供 naive 参考实现与基于 flash-attn 的高效实现，并通过 transformers 注意力注册机制对外暴露。因此学习路线设计为：先在入门单元建立长上下文注意力的问题意识，掌握 varlen/flash-attn/GQA 等前置概念并跑通示例；再用 2 篇讲义精读 moba_naive.py 这个\"教科书式\"实现以掌握算法本身（KV 分块、无参数 gate、top-k 块选择、因果规则）；随后用 6 篇讲义逐段攻克 moba_efficient.py 这一核心难点（chunk 元数据、向量化 gate、varlen 重组索引、LSE 在线合并、自定义反向），将其密集的索引操作拆开由浅入深讲解；最后在进阶单元覆盖 transformers 集成、正确性测试与性能基准的读法和写法，并以动手改造任务收尾，让读者从\"读懂\"走向\"二次开发\"。依赖链上每篇讲义只依赖直接前置，naive 实现作为高效实现的黄金参考贯穿全程，符合小项目 8-15 篇讲义的规模。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "理解长上下文 LLM 中全量注意力的平方复杂度瓶颈",
+            "掌握 MoBA 的可训练块稀疏注意力与无参数 top-k gating 核心思想",
+            "理解 MoBA 需要继续训练而非即插即用、且支持全量/稀疏无缝切换的使用前提"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README 关键信息",
+            "MoBA 核心概念",
+            "项目依赖与定位"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README 并用自己的话写一段约 100 字总结，说明 MoBA 与全量注意力、滑动窗口注意力的区别；再列出 moba 与 moba_naive 两个注意力后端在 README 中的定位差异，以及 README 中提到的性能数据对应的测试条件。",
+          "source_files": [
+            "README.md",
+            "pyproject.toml",
+            "requirements.txt"
+          ],
+          "title": "MoBA 是什么：项目定位与长上下文注意力背景",
+          "topic": "介绍 MoBA（Mixture of Block Attention）要解决的问题：长上下文中全量注意力的平方复杂度开销；MoBA 的 less structure 思想、块稀疏注意力与无参数 top-k gating 的核心概念，以及本仓库的定位（naive 教学实现 + 基于 flash-attn 的高效实现）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-quick-start.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "学会安装项目依赖并跑通单元测试",
+            "理解 register_moba 与 MoBAConfig(moba_chunk_size, moba_topk) 的作用",
+            "能用不同 --attn 后端与参数组合运行 examples/llama.py"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "register_moba",
+            "MoBAConfig",
+            "examples/llama.py 命令行参数"
+          ],
+          "order": 2,
+          "practice_task": "在 GPU 环境安装项目并运行 pytest tests/test_moba_attn.py 中的少量用例，然后分别用 --attn moba 和 --attn moba_naive 以及不同的 --moba-chunk-size、--moba-topk 运行 examples/llama.py，记录输出差异；无 GPU 环境时可只完成代码阅读并在纸上推演各参数含义。",
+          "source_files": [
+            "README.md",
+            "pyproject.toml",
+            "moba/__init__.py",
+            "moba/config.py",
+            "examples/llama.py"
+          ],
+          "title": "快速上手：安装、注册注意力后端并运行示例",
+          "topic": "演示如何 pip install 本项目、用 register_moba 把 moba 和 moba_naive 注册为 transformers 的注意力后端，并用 examples/llama.py 加载 Llama 模型完成一次生成。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-tensor-format-varlen-basics.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "掌握 HF 与 flash-attn 两种 QKV 内存布局及互转方法",
+            "理解 cu_seqlens 与 max_seqlen 的 varlen 打包语义",
+            "理解 GQA 中 q_heads/kv_heads 的关系以及 prefill 与 decode 两个阶段的区别"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "hf_to_fa",
+            "fa_to_hf",
+            "cu_seqlens 约定",
+            "GQA 与 prefill/decode 分支",
+            "generate_data"
+          ],
+          "order": 3,
+          "practice_task": "手写一个函数把形状为 [2, 4, 10, 128] 的 HF 布局 Q 张量转换为 flash-attn 布局，再为 batch=2、序列长度分别为 6 和 10 的 varlen 批次构造 cu_seqlens 与 max_seqlen，验证两次布局转换互相可逆。",
+          "source_files": [
+            "moba/wrapper.py",
+            "tests/test_moba_attn.py"
+          ],
+          "title": "读懂源码前的必备知识：张量布局、varlen 与 flash-attn",
+          "topic": "讲解本项目通用的三种约定：HF 布局 [batch, heads, seqlen, dim] 与 flash-attn 布局 [seqlen, heads, dim] 的转换；cu_seqlens/max_seqlen 的 varlen 打包格式；GQA 与 prefill/decode 两阶段注意力的差异。"
+        }
+      ],
+      "order": 1,
+      "title": "入门：认识 MoBA 并跑通项目"
+    },
+    {
+      "id": "u2",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l1-moba-naive-walkthrough.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "理解 KV 分块与每块代表向量（K 均值）的构造",
+            "掌握 gate logits 的 fp32 计算与因果修正规则",
+            "掌握从 top-k 块选择到稠密注意力掩码再到带掩码 softmax 注意力的完整链路"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "key_gate_weight 构造",
+            "gate 计算",
+            "因果修正与 topk 选择",
+            "gate 掩码展开",
+            "带掩码注意力计算"
+          ],
+          "order": 1,
+          "practice_task": "把 moba_attn_varlen_naive 复制到独立脚本，在 batch=1、seqlen=512、chunk_size=128、topk=2 的设置下打印 need_attend 掩码中前 3 个 query 位置选中的块编号，并手工验证第一个 query 只能选中第 0 块（因果性）。",
+          "source_files": [
+            "moba/moba_naive.py"
+          ],
+          "title": "moba_naive 逐行精读：分块、gate 与块选择掩码",
+          "topic": "精读 moba_attn_varlen_naive 的完整前向流程：按 moba_chunk_size 切分 KV、对每块 K 求均值得到 key_gate_weight、与 Q 做内积得到 gate logits、用因果规则修正 gate（当前块强制选中、未来块强制排除）、top-k 选块并展开成注意力掩码，最后做带掩码的标准注意力。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-block-selection-and-edge-cases.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "理解当前块强制选中与因果下三角掩码的叠加逻辑",
+            "理解 top-k 数值平局时 gate_idx_mask 的必要性与实现",
+            "学会导出并可视化 MoBA 的块选择掩码并观察参数影响"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "gate 因果修正",
+            "gate_top_k_val 最小值筛选",
+            "gate_idx_mask scatter",
+            "掩码可视化方法"
+          ],
+          "order": 2,
+          "practice_task": "写一个脚本把 moba_attn_varlen_naive 中间的 need_attend 掩码保存下来，用 matplotlib 画出某个 head 的块选择热力图（横轴 query 位置、纵轴块编号），再对比 chunk_size 和 topk 变化时选择模式如何变化，并解释对角线附近为何总是被选中。",
+          "source_files": [
+            "moba/moba_naive.py",
+            "README.md"
+          ],
+          "title": "块选择细节与可视化：当前块必选与 top-k 平局处理",
+          "topic": "深入 naive 实现的两处关键细节：gate 中把当前块设为 +inf、未来块设为 -inf 的因果与当前块必选设计；以及 top-k 数值平局时用 scatter 构造 gate_idx_mask 防止误选的处理；并学习导出和可视化块选择掩码。"
+        }
+      ],
+      "order": 2,
+      "title": "基础：moba_naive 参考实现与算法原理"
+    },
+    {
+      "id": "u3",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u1-l3"
+          ],
+          "filename": "u3-l1-moba-efficient-overview.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "建立高效实现的四步心智模型",
+            "理解最后一块保留给 self-attention 且 topk 需要减一的原因",
+            "理解 need_moba_attn 为假时退化为 flash_attn_varlen_func 的兜底逻辑"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "moba_attn_varlen 主流程",
+            "kv 堆叠",
+            "moba_topk 调整",
+            "MixedAttention 调用"
+          ],
+          "order": 1,
+          "practice_task": "画出 moba_attn_varlen 的流程图（含 self-attn 与 moba-attn 两条支路），标注每一步输入输出张量的形状；再分析 batch=1、chunk_size=256、seqlen=1024、topk=1 时的行为，解释为什么此时结果应与纯 self-attention 一致。",
+          "source_files": [
+            "moba/moba_efficient.py"
+          ],
+          "title": "moba_attn_varlen 总览：从 naive 到高效实现的四步流程",
+          "topic": "总览 moba_attn_varlen 的四步核心逻辑：计算 chunk 元数据并把每个 batch 的最后一块留给 self-attention 支路；用块内 K 均值计算 gate 并 top-k 选块；用 varlen 技巧把所有（query, 块）选择对拼接成变长序列交给 flash-attn；用 online softmax（LSE 合并）融合两路结果；同时说明 moba_topk 减一的调整与无需 MoBA 时退化为纯 self-attention 的分支。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-calc-chunks-metadata.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "掌握 cu_chunk/chunk_to_batch 等 chunk 级元数据张量的推导过程",
+            "理解过滤每个 batch 最后一块的原因与 filtered_chunk_indices 的构造",
+            "理解 lru_cache 用张量作 cache key 的行为与局限（待确认：张量按对象身份哈希的影响）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "calc_chunks",
+            "cu_num_chunk 与 cu_chunk",
+            "chunk_to_batch",
+            "filtered_chunk_indices",
+            "lru_cache"
+          ],
+          "order": 2,
+          "practice_task": "单独导入 calc_chunks，对 cu_seqlens=[0, 10, 30, 45]、chunk_size=16 先手工计算每个返回张量的期望值再用代码验证；说明每个 batch 的最后一块大小分别是多少、为什么它们不出现在 filtered_chunk_indices 中。",
+          "source_files": [
+            "moba/moba_efficient.py",
+            "tests/test_moba_attn.py"
+          ],
+          "title": "calc_chunks：chunk 元数据构造与最后一块的过滤",
+          "topic": "精读 calc_chunks：由 cu_seqlens 推导 batch_num_chunk、cu_num_chunk、cu_chunk、chunk_to_batch 等索引张量；解释 filtered_chunk_indices 为什么把每个 batch 的最后一块排除在 MoBA 注意力之外（尾部 token 由 self-attention 支路处理），以及 lru_cache 的使用条件与风险。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2",
+            "u2-l1"
+          ],
+          "filename": "u3-l3-gate-topk-vectorized.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解 filtered_kv_indices 的 gather 逻辑",
+            "掌握 gate 掩码如何统一处理块内因果与 batch 边界两种约束",
+            "理解 topk 在块维度上按 head 分别进行与 naive 版本的等价关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "filtered_kv gather",
+            "key_gate_weight 均值",
+            "gate_chunk_end_mask",
+            "gate_batch_end_mask",
+            "gate_top_k_idx"
+          ],
+          "order": 3,
+          "practice_task": "构造 batch=2（长度 20 和 13）、chunk_size=8 的输入，打印 gate_inf_mask，验证第二个 batch 的 query 不会选中第一个 batch 的块、每个 query 只能选到其所在位置之前的块；再对照 moba_naive.py 指出 naive 版本中实现同样语义的代码行。",
+          "source_files": [
+            "moba/moba_efficient.py",
+            "moba/moba_naive.py"
+          ],
+          "title": "gate 的向量化计算与跨 batch 因果掩码",
+          "topic": "精读高效实现的 gate 部分：filtered_kv 的 gather、块内 K 均值 key_gate_weight、einsum('nhd,shd->nhs') 得到 gate、用 gate_chunk_end_mask 与 gate_batch_end_mask 同时完成块内因果和跨 batch 隔离两种掩码，以及在块维度上按 head 分别 top-k 的实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l4-varlen-trick-reindex.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "理解 gate_mask.nonzero 到 moba_q_indices 的形状约定",
+            "掌握 moba_q_sh_indices 中 % seqlen 与 // seqlen 的下标换算",
+            "理解零 expert 裁剪为什么能避免反向梯度 NaN 以及两个 cu_seqlen 形状断言的作用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "moba_q_indices",
+            "moba_seqlen_q",
+            "moba_q_sh_indices",
+            "moba_kv 重排",
+            "零 expert 裁剪与 moba_cu_seqlen_kv"
+          ],
+          "order": 4,
+          "practice_task": "写一个玩具脚本：构造 2 个块、2 个 head、seqlen=8 的 gate_mask（手工指定 True 位置），按源码公式计算 moba_q_indices、moba_seqlen_q、moba_q_sh_indices 与 moba_cu_seqlen_q 并逐步核对索引含义；再故意把某个块全部置 False，验证零 expert 裁剪分支和形状断言。",
+          "source_files": [
+            "moba/moba_efficient.py"
+          ],
+          "title": "varlen trick：被选中的 Q 与 KV 的重组索引",
+          "topic": "精读本项目最精巧的索引变换：由 gate_mask 得到 moba_q_indices（按块×head 展开的选中位置）、moba_seqlen_q（每个块-head 段的 Q 数量）、moba_q_sh_indices（映射回原始 Q 位置），以及 moba_kv 的 rearrange+split+cat 重排、零 expert（没有任何 Q 选中的块-head）裁剪和 moba_cu_seqlen_kv 的等差构造。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u3-l5-mixed-attention-forward-lse.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "理解 self-attn 支路复用 cu_chunk 作为 varlen 边界的设计",
+            "掌握 LSE（log-sum-exp）合并两路注意力的数学原理",
+            "理解 index_reduce 求最大 LSE、指数加权和 factor 校正的实现细节"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "_flash_attn_varlen_forward 两次调用",
+            "max_lse_1d index_reduce",
+            "mixed_attn_lse_sh",
+            "factor 重加权与 index_add_"
+          ],
+          "order": 5,
+          "practice_task": "用三个标量情形手工验证 LSE 合并公式：两路 attention 输出各自 softmax 归一后，按 exp(lse_i - lse_mixed) 加权相加应等于把两组 key 放在一起做 softmax 的结果；再用 PyTorch 实现该小例子验证公式，并对照源码逐行标注对应关系。",
+          "source_files": [
+            "moba/moba_efficient.py"
+          ],
+          "title": "MixedAttention 前向：两路注意力与 LSE 在线合并",
+          "topic": "精读 MixedAttention.forward：self-attn 支路用 cu_chunk 作为 varlen 边界（每个 batch 的最后一块内部做因果注意力），moba 支路对重组后的 varlen 序列做非因果注意力；随后用 log-sum-exp 数学在线合并两路输出（减去 max_lse 防溢出、index_reduce/index_add 聚合、按 factor 重加权相加）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "filename": "u3-l6-mixed-attention-backward.md",
+          "id": "u3-l6",
+          "learning_goals": [
+            "理解把混合注意力拆成两次 flash-attn 反向的数学依据",
+            "掌握 ctx.save_for_backward 保存的各张量的用途",
+            "理解反向前必须做零 expert 裁剪否则梯度出现 NaN 的原因"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "_flash_attn_varlen_backward 两次调用",
+            "softmax_lse 复用",
+            "d_moba_output 索引选取",
+            "dmkv stack 打包返回"
+          ],
+          "order": 6,
+          "practice_task": "对照 tests/test_moba_attn.py 解释梯度断言 gqkv_diff 的容忍度设置；再做一个实验：在本地脚本副本中把 zero_expert_count>0 时的裁剪代码注释掉，构造一个必然出现零 expert 的小输入，观察反向是否产生 NaN，从而验证源码注释 cut off zero Q expert or the grad may be nan。",
+          "source_files": [
+            "moba/moba_efficient.py",
+            "tests/test_moba_attn.py"
+          ],
+          "title": "MixedAttention 反向：复用 flash-attn 反向内核",
+          "topic": "精读 MixedAttention.backward：如何用合并后的 LSE 与合并输出直接调用 _flash_attn_varlen_backward 分别对 self-attn 支路和 moba 支路求梯度，梯度为何能拆成两路独立反传（每路隐含混合 softmax 的归一化因子），以及 dmkv 的 stack 打包返回。"
+        }
+      ],
+      "order": 3,
+      "title": "核心：moba_efficient 高效实现源码精读"
+    },
+    {
+      "id": "u4",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u3-l1"
+          ],
+          "filename": "u4-l1-transformers-integration.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "掌握 transformers ALL_ATTENTION_FUNCTIONS 注册自定义注意力的机制",
+            "理解 wrapper 中 GQA 的 KV 复制与 prefill/decode 分支逻辑",
+            "了解 decode 阶段尚未启用 MoBA 的现状与 paged attention TODO"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "moba_layer 接口适配",
+            "hf_to_fa/fa_to_hf",
+            "GQA repeat_interleave",
+            "ALL_ATTENTION_FUNCTIONS 注册",
+            "decode 分支"
+          ],
+          "order": 1,
+          "practice_task": "阅读本机已安装 transformers 包中 attention 分发的相关代码，梳理从 model.generate 到 moba_layer 的完整调用链并写成时序说明；再解释为什么 decode 阶段（q_len=1）直接用 flash_attn_func 不会破坏 MoBA 语义，以及为什么注释掉的 fa_to_hf 不影响正确性（提示：返回值形状恰与 HF 期望一致）。",
+          "source_files": [
+            "moba/wrapper.py",
+            "moba/__init__.py",
+            "examples/llama.py"
+          ],
+          "title": "transformers 集成：moba_layer 包装器与 prefill/decode 分支",
+          "topic": "精读 wrapper.py 与 __init__.py：moba_layer 如何适配 HF 注意力接口（参数与返回值约定）、hf_to_fa/fa_to_hf 布局转换、GQA 下用 repeat_interleave 复制 KV、q_len==kv_len 判定 prefill 并调用 MoBA、decode 阶段退回 flash_attn_func（TODO：paged attention），以及通过 ALL_ATTENTION_FUNCTIONS 注册自定义后端的机制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u3-l6"
+          ],
+          "filename": "u4-l2-correctness-tests.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解用 naive 实现作为黄金参考的测试策略",
+            "掌握 varlen 随机切分 cu_seqlens 的测试数据构造",
+            "学会为注意力内核设计数值容忍度断言并新增测试用例"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "generate_data",
+            "test_attn_varlen_moba 参数化",
+            "前向/反向双重建模",
+            "allclose 与 max/mean 容忍度"
+          ],
+          "order": 2,
+          "practice_task": "仿照现有测试新增一个用例：固定 batch=1、head=2、seqlen=1024，测试 chunk_size 大于 seqlen（如 chunk_size=4096）时 topk=1、2 的行为，先预测会发生什么（提示：num_block=1 与 need_moba_attn 分支），再运行验证预测并记录 efficient 与 naive 的最大误差。",
+          "source_files": [
+            "tests/test_moba_attn.py",
+            "moba/moba_naive.py",
+            "moba/moba_efficient.py"
+          ],
+          "title": "正确性测试：naive 与 efficient 的前向/反向对齐",
+          "topic": "解读 tests/test_moba_attn.py：batch/head/seqlen/chunk/topk 的参数化组合覆盖、generate_data 构造 varlen 批次的方式、efficient 与 naive 在输出和梯度上的双重建模（allclose 加 max/mean 双重容忍度），以及 bf16 下 eps=2e-2 的精度设定。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-speedup-benchmark.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "掌握 GPU 基准测试的预热与同步计时方法",
+            "理解 MoBA 加速来自稀疏注意力减少计算量以及 topk/chunk_size 对稀疏度的影响",
+            "能设计并运行对比不同配置的性能实验"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "warmup 迭代",
+            "cuda synchronize 计时",
+            "flash-attn 基线",
+            "加速比统计"
+          ],
+          "order": 3,
+          "practice_task": "在 GPU 环境运行 python tests/test_moba_speedup.py 得到基准加速比，再修改 __main__ 在 seqlen=8192/32768、topk=2/3/8 的组合下测量并填一张加速比表格；无 GPU 时分析代码并推导哪些配置下 MoBA 可能反而变慢（提示：gate 计算与索引重组的额外开销）。",
+          "source_files": [
+            "tests/test_moba_speedup.py",
+            "README.md"
+          ],
+          "title": "性能测试：MoBA 相对 flash-attn 的加速比测量",
+          "topic": "解读 tests/test_moba_speedup.py：预热迭代、torch.cuda.synchronize 配合 time.perf_counter 的正确计时方法、前向加反向整体吞吐对比，以及 chunk_size/topk/seqlen 对加速比的影响；结合 README 中 32K 序列、单头、chunk 2048、topk 3 约 40 倍加速的说法理解测试条件。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l6",
+            "u4-l1"
+          ],
+          "filename": "u4-l4-design-tradeoffs-and-extensions.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "理解无参数 gate 与需要继续训练之间的因果关系",
+            "掌握 chunk_size/topk 对稀疏度、效果与速度的权衡",
+            "能基于现有代码结构实现一个小改动并用测试验证"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "无参数 gate",
+            "稀疏度参数 chunk_size/topk",
+            "全量/稀疏无缝切换",
+            "二次开发切入点"
+          ],
+          "order": 4,
+          "practice_task": "实现一个变体并用测试思路验证：例如让每个 query 强制额外选中第一个块（类似 attention sink），先在 moba_naive.py 副本中实现该规则，再在 moba_efficient.py 副本中同步实现，仿照 tests/test_moba_attn.py 对比两者输出是否一致，最后用 tests/test_moba_speedup.py 的方法测量新稀疏模式下的速度变化。",
+          "source_files": [
+            "README.md",
+            "moba/moba_efficient.py",
+            "moba/moba_naive.py",
+            "moba/wrapper.py"
+          ],
+          "title": "设计取舍与二次开发：从理解到改造 MoBA",
+          "topic": "站在架构层面复盘 MoBA 的关键取舍：无参数 gate（零额外参数但需要继续训练）、less structure 与全量/稀疏无缝切换、chunk_size 与 topk 的稀疏度调节、docstring 提到 triton kernel 但当前实现完全基于 flash-attn 组合（待确认），并给出可动手的改造方向。"
+        }
+      ],
+      "order": 4,
+      "title": "进阶：框架集成、测试与二次开发"
+    }
+  ]
+}

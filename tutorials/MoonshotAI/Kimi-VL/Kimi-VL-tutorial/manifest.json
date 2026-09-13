@@ -1,0 +1,419 @@
+{
+  "head": "41d5ef072bc52a04524f94ab736ff9c29f125fda",
+  "project": "Kimi-VL",
+  "rationale": "本仓库是 Kimi-VL 模型的发布型仓库（README + 技术报告 PDF + requirements.txt + 示例图），模型实现代码并不在本仓库内，而是托管在 HuggingFace 模型仓库中通过 trust_remote_code=True 加载，因此大纲以 README 中的真实代码示例、figures 架构图与技术报告为主线，按「先跑通、再理解、后部署、终深挖」的顺序组织：入门层先讲清项目定位、仓库形态与环境搭建；进阶层以 README 中的 Transformers 推理示例为骨架，覆盖单图推理、多图与 Thinking 变体、Processor 输入组装与采样参数；第三单元结合 figures/arch.png 和技术报告解析 MoE 解码器 + MoonViT + MLP 投影层的架构，再进入 vLLM 离线推理、OpenAI 兼容服务部署与 LLaMA-Factory 微调入口；专家层精读技术报告、分析基准评测数据，最后以构建多模态问答小应用收尾。全篇共 14 讲，符合小型仓库 8-15 讲的规模，每篇引用的源码文件均已确认真实存在。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "order": 1,
+      "title": "初识 Kimi-VL：项目定位、环境与仓库结构",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 Kimi-VL 的定位：开源 MoE 视觉语言模型，总参数 16B、激活约 2.8B、128K 上下文",
+            "区分三个模型变体 Instruct、Thinking（已废弃）与 Thinking-2506 的适用场景",
+            "理解本仓库是模型发布仓库，模型实现代码托管在 HuggingFace 并通过 trust_remote_code 加载"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "项目背景与模型定位",
+            "模型变体一览",
+            "仓库形态与代码位置"
+          ],
+          "order": 1,
+          "practice_task": "通读 README.md 后整理一张表格：列出三个模型变体的总参数量、激活参数量、上下文长度与推荐 Temperature；再到 HuggingFace 模型页 moonshotai/Kimi-VL-A3B-Instruct 确认 trust_remote_code 实际加载了哪些 .py 文件，把文件名记录下来。",
+          "source_files": [
+            "README.md",
+            "figures/arch.png",
+            "LICENSE"
+          ],
+          "title": "项目总览：Kimi-VL 是什么，这个仓库里有什么",
+          "topic": "介绍 Kimi-VL 的定位（高效开源 MoE 视觉语言模型）、三大能力（多模态推理、长上下文、Agent 能力）、三个模型变体的区别，以及本 GitHub 仓库的形态：它是模型发布与文档仓库，真正的模型实现代码位于 HuggingFace 模型仓库中。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-environment-setup.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "按 README 步骤用 conda 创建 python=3.10 的 kimi-vl 环境",
+            "解释 requirements.txt 中 torch、transformers、accelerate、openai 等依赖的用途",
+            "理解 flash-attn 的作用及其在显存与推理速度上的收益"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "conda 环境创建",
+            "依赖清单逐项解读",
+            "flash-attn 可选加速"
+          ],
+          "order": 2,
+          "practice_task": "创建 conda 环境并执行 pip install -r requirements.txt，然后运行 python -c \"import torch, transformers; print(torch.__version__, transformers.__version__)\" 验证版本为 torch 2.5.1 与 transformers 4.51.3；如有 GPU 环境再尝试安装 flash-attn 并验证 import flash_attn 成功。",
+          "source_files": [
+            "requirements.txt",
+            "README.md"
+          ],
+          "title": "环境搭建与依赖解读：从 requirements.txt 到可运行环境",
+          "topic": "逐行解读 requirements.txt 中锁定的 torch 2.5.1、torchvision、transformers 4.51.3 等依赖版本及其作用，演示按 README 创建 conda 环境并安装依赖，说明 flash-attn 的可选安装方式与使用条件。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-repo-structure-and-assets.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "画出本仓库的文件地图：README、PDF 报告、figures、requirements、LICENSE",
+            "理解 trust_remote_code=True 时模型实现代码的真实来源",
+            "了解 Kimi-VL.pdf 技术报告的章节结构，为后续精读做准备"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "仓库文件地图",
+            "模型代码的真实位置",
+            "技术报告与示例图资产"
+          ],
+          "order": 3,
+          "practice_task": "浏览仓库根目录与 figures 目录，写出一份仓库地图文档；打开 Kimi-VL.pdf 阅读目录页，把各章标题抄录成清单并标注你最想深入的章节（如架构、训练、评测），为后续 u4 单元的精读做准备。",
+          "source_files": [
+            "README.md",
+            "Kimi-VL.pdf",
+            "figures/demo.png"
+          ],
+          "title": "仓库结构与模型资产：从 GitHub 仓库到 HuggingFace 权重",
+          "topic": "梳理仓库的完整文件结构（README.md、requirements.txt、LICENSE、Kimi-VL.pdf 技术报告、figures 下的架构图与示例图），说明示例图片在后续推理实践中的用途，并演示如何从 README 中的链接找到 HuggingFace 模型权重与在线 Demo。"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "level": "intermediate",
+      "order": 2,
+      "title": "上手推理：Transformers 与两种模型变体",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l1-first-inference-instruct.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "使用 AutoModelForCausalLM 与 AutoProcessor 加载 Kimi-VL-A3B-Instruct",
+            "理解 messages 结构、apply_chat_template 与 processor 调用之间的衔接",
+            "掌握裁剪输入 token 再解码输出的标准写法（generated_ids_trimmed）"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "模型与 Processor 加载",
+            "消息构造与模板渲染",
+            "生成与输出解码"
+          ],
+          "order": 1,
+          "practice_task": "运行 README 中 Instruct 示例对 figures/demo.png 提问「穹顶建筑是什么」，成功后修改 prompt 换成图片描述任务；再对比开启 flash_attention_2 + torch.bfloat16 前后的显存占用（可用 torch.cuda.max_memory_allocated 观察）。",
+          "source_files": [
+            "README.md",
+            "figures/demo.png"
+          ],
+          "title": "第一次推理：用 Transformers 跑通 Kimi-VL-A3B-Instruct 单图问答",
+          "topic": "逐行拆解 README 中 Instruct 变体的推理代码：模型加载参数（torch_dtype、device_map、trust_remote_code）、messages 列表结构、apply_chat_template、processor 编码、model.generate 与输出裁剪解码，并说明 flash-attn 推荐配置的写法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-multi-image-thinking-inference.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "用列表方式构造多张图片的 messages 输入并正确传给 processor",
+            "理解 Thinking 模型 max_new_tokens=32768 与 temperature=0.8 的推荐设置",
+            "识别思维链输出格式并提取最终答案"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "多图输入构造",
+            "Thinking 模型生成参数",
+            "思维链输出口径"
+          ],
+          "order": 2,
+          "practice_task": "运行 README 中 Thinking-2506 示例对 figures/demo1.png 与 figures/demo2.png 做手稿推断；然后把 max_new_tokens 分别设为 2048 与 32768，记录输出长度与答案质量差异，思考为什么长思维链模型需要更大的生成预算。",
+          "source_files": [
+            "README.md",
+            "figures/demo1.png",
+            "figures/demo2.png"
+          ],
+          "title": "多图输入与 Thinking 模型：Kimi-VL-A3B-Thinking-2506 推理实践",
+          "topic": "拆解 README 中 Thinking-2506 的多图推理示例：多图 messages 的构造方式、images 列表与单图写法的差异、max_new_tokens=32768 与 temperature=0.8 的推荐配置，以及 Thinking 模型输出长思维链的解读方法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l3-processor-and-chat-template.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "解释 apply_chat_template 如何把 messages 渲染为含特殊 token 的模型输入文本",
+            "理解 processor(images=..., text=...) 如何统一产出 input_ids 与 pixel_values",
+            "分析输出裁剪（out_ids[len(in_ids):]）与 batch_decode 各参数的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "聊天模板渲染",
+            "多模态编码与张量输出",
+            "生成后处理与解码"
+          ],
+          "order": 3,
+          "practice_task": "写一个小脚本：打印 apply_chat_template 的返回文本，观察特殊 token 与图像占位符的位置；再打印 processor 返回字典的 keys 和各张量形状（input_ids、attention_mask、pixel_values 等），并把 prompt 部分与生成部分按 README 的裁剪写法手动切分开验证。",
+          "source_files": [
+            "README.md"
+          ],
+          "title": "Processor 与聊天模板：多模态输入是如何组装成张量的",
+          "topic": "聚焦推理链路中的输入组装环节：apply_chat_template 与 add_generation_prompt 的作用、processor 如何同时处理图像与文本并产出 input_ids 等张量、padding/truncation 参数含义，以及生成后为何要先裁剪输入再 batch_decode。模型内部实现细节位于 HuggingFace 模型仓库，具体文件名待确认。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l4-variants-and-sampling.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "根据任务类型（通用理解 vs 深度推理 vs Agent）选择合适的模型变体",
+            "记住 Instruct 用 temperature=0.2、Thinking 用 temperature=0.8 的官方推荐",
+            "理解 128K 上下文与 3.2M 像素（1792x1792）输入上限对实际任务的含义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "变体能力矩阵",
+            "采样参数建议",
+            "上下文与分辨率规格"
+          ],
+          "order": 4,
+          "practice_task": "对同一张 figures/demo.png 分别用 Instruct（temperature=0.2）与 Thinking-2506（temperature=0.8）提问同一个数学/推理类问题，把两份回答、token 数与耗时记录成对比表，总结两变体各自适合的任务类型。",
+          "source_files": [
+            "README.md"
+          ],
+          "title": "模型变体选择与采样参数：Temperature、上下文长度与分辨率规格",
+          "topic": "总结 README 中模型变体对比表与推荐参数：Instruct 与 Thinking-2506 的分工、Thinking 旧版为何废弃、Temperature 0.8 与 0.2 的推荐值、128K 上下文与 2506 版支持的 3.2M 总像素（1792x1792）高分辨率输入能力。"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "order": 3,
+      "title": "架构解析与生产部署",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u3-l1-architecture-overview.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "描述三大组件的职责与数据流：MoonViT 编码 → MLP 投影 → MoE 语言解码",
+            "解释原生分辨率视觉编码相比固定分辨率patch编码的优势",
+            "理解 16B 总参数与 2.8B 激活参数的 MoE 稀疏激活含义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "三大组件与数据流",
+            "MoonViT 原生分辨率设计",
+            "MoE 稀疏激活与效率"
+          ],
+          "order": 1,
+          "practice_task": "对照 figures/arch.png 手绘一份数据流图，标注图像与文本两条路径的汇合点；再查阅 Kimi-VL.pdf 中的架构章节，把 MoonViT 与 MoE 解码器的关键配置（层数、专家数、激活专家数等，具体数值以报告为准，报告中未明确的记为待确认）补充到图上。",
+          "source_files": [
+            "README.md",
+            "figures/arch.png",
+            "Kimi-VL.pdf"
+          ],
+          "title": "架构解析：MoE 语言解码器 + MoonViT 视觉编码器 + MLP 投影层",
+          "topic": "结合 README 架构章节、figures/arch.png 与技术报告，讲解 Kimi-VL 的三段式结构：原生分辨率的 MoonViT 视觉编码器、把视觉特征对齐到语言空间的 MLP 投影层、只激活 2.8B 参数的 MoE 语言解码器，以及 128K 长上下文的由来。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u3-l2-vllm-offline-inference.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "用 vllm.LLM 加载 Kimi-VL 并用 SamplingParams 控制生成",
+            "理解 multi_modal_data 传入图像的方式与 Transformers 写法的差异",
+            "用 vLLM 批量处理多张图片的离线推理任务"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "LLM 对象初始化",
+            "多模态提示构造",
+            "SamplingParams 与批处理"
+          ],
+          "order": 2,
+          "practice_task": "运行 README 中的 vLLM 离线推理示例后，把它改造成批量脚本：对 figures 下所有图片提出同一个问题，用 SamplingParams(max_tokens=512) 一次生成并打印每张图的回答。",
+          "source_files": [
+            "README.md",
+            "requirements.txt"
+          ],
+          "title": "vLLM 离线批量推理：从 Transformers 迁移到 vLLM",
+          "topic": "拆解 README 中 vLLM 离线推理示例：LLM 类加载（trust_remote_code=True）、继续复用 transformers 的 AutoProcessor 做模板渲染、通过 multi_modal_data 传入图像、SamplingParams 控制生成长度，并对比与 Transformers 写法的异同。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-vllm-openai-server.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "用 vllm serve 启动 Kimi-VL 服务并理解各关键参数的作用",
+            "用 openai SDK 以 base64 图片 URL 的形式发起多模态请求",
+            "根据业务需求调整 --max-model-len 与 --limit-mm-per-prompt"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "vllm serve 启动参数",
+            "base64 图像编码调用",
+            "多模态并发与限制调优"
+          ],
+          "order": 3,
+          "practice_task": "按 README 启动 vllm serve（先用 --max-model-len 32768 --limit-mm-per-prompt image=64 跑通），再用 openai SDK 发送 base64 编码的 figures/demo.png 完成一次问答；随后调整 --limit-mm-per-prompt 与 --max-model-len 各一次，观察启动日志中的配置变化。",
+          "source_files": [
+            "README.md",
+            "requirements.txt"
+          ],
+          "title": "vLLM OpenAI 兼容服务：启动参数与 API 调用全流程",
+          "topic": "讲解 README 中的服务化部署路径：vllm serve 命令的关键参数（--served-model-name、--trust-remote-code、--tensor-parallel-size、--max-model-len、--limit-mm-per-prompt），以及用 openai SDK 调用服务时图像转 base64 data URL 的完整代码。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u3-l4-llama-factory-finetune.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "说明 Kimi-VL 微调依赖外部框架 LLaMA-Factory 的原因",
+            "理解单卡 LoRA 50GB 显存与 DeepSpeed ZeRO-2 多卡全量/LoRA 的资源画像",
+            "读懂社区 PR 中给出的微调配置并迁移到自己的数据集"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "微调生态入口",
+            "LoRA 与全量微调资源对比",
+            "配置迁移实践"
+          ],
+          "order": 4,
+          "practice_task": "克隆最新版 LLaMA-Factory，阅读其 README 与 PR #7719 中的 Kimi-VL 配置示例，为自己的多模态数据集写一份 LoRA 微调配置文件（数据格式参照 LLaMA-Factory 文档，Kimi-VL 专属配置项以该 PR 为准），不必真正跑完训练，但要保证配置能通过框架的校验。",
+          "source_files": [
+            "README.md"
+          ],
+          "title": "微调入口：通过 LLaMA-Factory 对 Kimi-VL 做 LoRA / 全量微调",
+          "topic": "说明 Kimi-VL 的微调路径由社区框架 LLaMA-Factory 支持：单卡 50GB 显存的 LoRA 微调、DeepSpeed ZeRO-2 多卡全量/LoRA 微调，以及 README 指向的配置说明 PR，帮助读者理解本仓库不含训练代码时的微调生态衔接方式。"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "level": "advanced",
+      "order": 4,
+      "title": "深入原理与综合实战",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u4-l1-technical-report-reading.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "按「架构 → 预训练 → 微调 → 评测」主线定位报告中的关键章节",
+            "总结 MoonViT 原生分辨率与 MoE 长上下文扩展的设计动机",
+            "梳理 Kimi-VL-Thinking 的长思维链 SFT 与 RL 训练路径"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "MoonViT 设计细节",
+            "预训练与长上下文扩展",
+            "Thinking 版 SFT 与 RL 路径"
+          ],
+          "order": 1,
+          "practice_task": "精读 Kimi-VL.pdf 中的 MoonViT 与训练章节，写一篇千字笔记：用自己的话解释原生分辨率编码为什么既省算力又能看清高分辨率图，并整理 Thinking 模型从 SFT 到 RL 的训练流程图（具体章节页码以 PDF 实际内容为准，未找到的部分标注待确认）。",
+          "source_files": [
+            "Kimi-VL.pdf",
+            "README.md"
+          ],
+          "title": "精读技术报告：训练流程、MoonViT 与 Thinking 能力的来源",
+          "topic": "带着问题导读 Kimi-VL.pdf 技术报告：MoonViT 的原生分辨率 NaViT 风格设计、MoE 语言模型的预训练与 128K 上下文扩展、多阶段后训练（SFT/RL）如何造就 Thinking 变体，并对照 README 的性能声明建立报告结论与产品能力的映射。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1",
+            "u3-l1"
+          ],
+          "filename": "u4-l2-benchmark-analysis.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "按「通用理解 / 推理 / 长上下文 / Agent 定位」四类归类 README 提到的基准",
+            "解读 2506 版相对旧版的提升幅度（如 MathVision +20.1）与平均思维长度下降 20%",
+            "建立「任务类型 → 变体选择 → 参数设置」的决策清单"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "基准数据归类",
+            "版本间提升解读",
+            "选型决策清单"
+          ],
+          "order": 2,
+          "practice_task": "把 README Introduction 与 figures 两张性能图中出现的所有基准（MMMU、MathVista、MathVision、InfoVQA、ScreenSpot-Pro、LongVideoBench、OSWorld 等）整理成一张含分数与对比对象的分析表，写 200 字结论：什么任务该选哪个变体、用什么参数。",
+          "source_files": [
+            "README.md",
+            "figures/instruct_perf.png",
+            "figures/thinking_perf.png"
+          ],
+          "title": "基准评测与性能分析：读懂 README 里的每一条成绩",
+          "topic": "系统整理 README 中出现的评测维度：多模态推理（MMMU、MathVista、MathVision）、OCR 与高分辨率感知（InfoVQA、ScreenSpot-Pro）、长上下文（LongVideoBench、MMLongBench-Doc）、Agent（OSWorld、OSWorld-G）以及 2506 版的改进幅度，训练读者从榜单数据反推选型决策。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u3-l3"
+          ],
+          "filename": "u4-l3-capstone-multimodal-app.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "把模板渲染、多模态输入、生成参数与服务调用串成完整应用链路",
+            "实现图像预处理（base64 / PIL）与结果解析的工程化封装",
+            "根据延迟与 token 成本选择本地 Transformers 或 vLLM 服务两种部署形态"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "应用链路设计",
+            "图像输入封装",
+            "两种部署形态对比"
+          ],
+          "order": 3,
+          "practice_task": "综合全篇所学实现一个命令行小工具：输入一张图片路径与一个问题，输出结构化答案（answer 与 thinking 两字段），要求同时支持「本地 Transformers」与「vLLM 服务」两种后端，用 figures/demo.png 与一个推理型问题各验证一次并对比耗时。",
+          "source_files": [
+            "README.md",
+            "figures/demo.png"
+          ],
+          "title": "综合实战：基于 Kimi-VL 构建多模态问答小应用",
+          "topic": "以一个端到端小项目收尾：读取本地/多张图片 → 组装多模态消息 → 通过 vLLM OpenAI 兼容接口或本地 Transformers 推理 → 解析 Thinking 输出并结构化展示，综合运用前 13 讲的模板、采样、部署知识。"
+        }
+      ]
+    }
+  ]
+}
