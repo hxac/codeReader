@@ -58781,7 +58781,7 @@
     },
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-09-16T18:02:26Z"
+      "last_run_at": "2026-09-16T23:02:21Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
@@ -65445,15 +65445,15 @@
     },
     "openinfer-project/openinfer@openinfer-bench": {
       "last_error": "子目录不存在: 'openinfer-bench'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-09-16T18:02:26Z"
+      "last_run_at": "2026-09-16T23:02:21Z"
     },
     "openinfer-project/openinfer@openinfer-build": {
       "last_error": "子目录不存在: 'openinfer-build'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-09-16T18:02:26Z"
+      "last_run_at": "2026-09-16T23:02:21Z"
     },
     "openinfer-project/openinfer@openinfer-core": {
       "last_error": "子目录不存在: 'openinfer-core'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-09-16T18:02:26Z"
+      "last_run_at": "2026-09-16T23:02:21Z"
     },
     "openinfer-project/openinfer@openinfer-cupti": {},
     "openinfer-project/openinfer@openinfer-deepseek-v2-lite": {},
