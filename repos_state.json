@@ -58781,7 +58781,7 @@
     },
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-09-13T23:02:20Z"
+      "last_run_at": "2026-09-16T18:02:26Z"
     },
     "typst/typst@crates/typst-bundle": {
       "prompt_hash": "b21aef51792b02df",
@@ -65104,344 +65104,357 @@
           "error": null
         },
         "u4-l4": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"826e2469-9124-44c2-8e13-0d11"
+          "cost": 2.4385959999999995,
+          "error": null
         },
         "u4-l5": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.44414,
+          "error": null
         },
         "u4-l6": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.5117129999999999,
+          "error": null
         },
         "u5-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.37072,
+          "error": null
         },
         "u5-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.746663,
+          "error": null
         },
         "u5-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.5255849999999997,
+          "error": null
         },
         "u6-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.16869,
+          "error": null
         },
         "u6-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.2863339999999999,
+          "error": null
         },
         "u6-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 2.225102,
+          "error": null
         },
         "u6-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.41736,
+          "error": null
         },
         "u6-l5": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.495785,
+          "error": null
         },
         "u6-l6": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.5638850000000002,
+          "error": null
         }
       },
       "manifest_head": "2bd860b4dd083df62b79d5e916fca71ec5742228",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/MoonshotAI/MoonEP/MoonEP-tutorial",
       "last_head": "2bd860b4dd083df62b79d5e916fca71ec5742228",
-      "last_run_at": "2026-09-13T23:02:20Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-09-16T18:02:26Z",
+      "last_error": null,
+      "abandoned": []
     },
     "openinfer-project/openinfer": {
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
         "u1-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.7946010000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.003527,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.0367369999999998,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.552422,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.9801710000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.08243,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.503931,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.1510799999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.993457,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 2.083774,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.358086,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.221528,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.9059269999999997,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l4": {
-          "status": "failed",
-          "action": "new",
-          "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"generate_session_title\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"6b23fc97-14eb-43c1-8b3d-4cd1"
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l5": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u4-l6": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.3790010000000001,
+          "error": null
         },
         "u5-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u5-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u5-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u7-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u7-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u7-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u7-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u7-l5": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u8-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 3.1073079999999997,
+          "error": null
         },
         "u8-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u8-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u8-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u8-l5": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u8-l6": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
-        "u9-l1": {
-          "status": "pending",
+        "u8-l7": {
+          "status": "done",
           "action": "new",
+          "retries": 0,
+          "cost": 2.216873,
+          "error": null
+        },
+        "u9-l1": {
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u9-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u9-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u9-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u9-l5": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u10-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u10-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u10-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u10-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u10-l5": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         }
       },
-      "manifest_head": "139d925e8693dcff412b8501f8db09eb639d0ffd",
-      "prev_head": null,
-      "phase": "workers",
-      "mode": "full",
+      "manifest_head": "72cbbe8a72e06329b2b4d6fa1e8e906acf2acc85",
+      "prev_head": "139d925e8693dcff412b8501f8db09eb639d0ffd",
+      "phase": "done",
+      "mode": "incremental",
       "tutorial_path": "tutorials/openinfer-project/openinfer/openinfer-tutorial",
-      "last_head": "139d925e8693dcff412b8501f8db09eb639d0ffd",
-      "last_run_at": "2026-09-13T23:02:20Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_head": "72cbbe8a72e06329b2b4d6fa1e8e906acf2acc85",
+      "last_run_at": "2026-09-16T18:02:26Z",
+      "last_error": null,
+      "abandoned": []
     },
     "openinfer-project/openinfer@openinfer-bench": {
       "last_error": "子目录不存在: 'openinfer-bench'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-09-13T23:02:20Z"
+      "last_run_at": "2026-09-16T18:02:26Z"
     },
-    "openinfer-project/openinfer@openinfer-build": {},
-    "openinfer-project/openinfer@openinfer-core": {},
+    "openinfer-project/openinfer@openinfer-build": {
+      "last_error": "子目录不存在: 'openinfer-build'（检查 repos.yml 的 folders）",
+      "last_run_at": "2026-09-16T18:02:26Z"
+    },
+    "openinfer-project/openinfer@openinfer-core": {
+      "last_error": "子目录不存在: 'openinfer-core'（检查 repos.yml 的 folders）",
+      "last_run_at": "2026-09-16T18:02:26Z"
+    },
     "openinfer-project/openinfer@openinfer-cupti": {},
     "openinfer-project/openinfer@openinfer-deepseek-v2-lite": {},
     "openinfer-project/openinfer@openinfer-dynamo-backend": {},
