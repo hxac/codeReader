@@ -1,13 +1,13 @@
 {
-  "head": "139d925e8693dcff412b8501f8db09eb639d0ffd",
+  "head": "72cbbe8a72e06329b2b4d6fa1e8e906acf2acc85",
   "project": "openinfer",
-  "rationale": "PegaInfer 是一个大型多 crate 的纯 Rust+CUDA LLM 推理引擎，核心设计是\"共享基础设施、每个模型自持执行\"。学习路线按依赖层次递进：先让读者从零认识项目并跑通服务（单元1-2），再沿真实请求路径学习前端契约与 vLLM 协议栈（单元3），然后下沉到共享运行时 core/kernels/sample 的张量、算子、构建与采样机制（单元4）；接着以默认开启、资料最全的 Qwen3 为解剖标本，按\"配置→权重→前向→调度→执行器→CUDA Graph 解码\"的顺序精读（单元5-6）；KV 缓存体系（分页池、kvbm 逻辑块、前缀缓存、offload、kv-store）单列一个单元（单元7），因为它是跨模型的生命线；单元8横向巡礼七条模型线各自的注意力/MoE/并行架构差异；单元9进入投机解码、green ctx、LoRA、TP、free-running EP 等专家级机制；单元10收尾于测试门禁、基准、profiling、可观测性与\"新增一条模型线\"的二次开发实践。依赖关系保证每篇讲义只在前置知识就绪后出现，所有源码引用均经实际探查确认。",
+  "rationale": "PegaInfer 是一个大型多 crate 的纯 Rust+CUDA LLM 推理引擎，核心设计是\"共享基础设施、每个模型自持执行\"。学习路线按依赖层次递进：先让读者从零认识项目并跑通服务（单元1-2），再沿真实请求路径学习前端契约与 vLLM 协议栈（单元3），然后下沉到共享运行时 core/kernels/sample 的张量、算子、构建与采样机制（单元4）；接着以默认开启、资料最全的 Qwen3 为解剖标本，按\"配置→权重→前向→调度→执行器→CUDA Graph 解码\"的顺序精读（单元5-6）；KV 缓存体系（分页池、kvbm 逻辑块、前缀缓存、offload、kv-store）单列一个单元（单元7），因为它是跨模型的生命线；单元8横向巡礼七条模型线各自的注意力/MoE/并行架构差异；单元9进入投机解码、green ctx、LoRA、TP、free-running EP 等专家级机制；单元10收尾于测试门禁、基准、profiling、可观测性与\"新增一条模型线\"的二次开发实践。本次增量（139d925e..72cbbe8a，仅一个提交 #1046：qwen35 logits GEMM 宽度 tile 对齐）的判定：pegainfer-sample 的 SampleScratch 新增 with_selection_width 构造器、select_batch 的 effectively_greedy 路由改为按可解码宽度判定，直接影响 u4-l6（update）；u8-l1 引用的 tp_executor.rs 调用点随之变化（update）；该提交引入的\"selection_vocab 对齐 + output_logits_into 统一 logits 出口 + pad 行抑制 + 采样路由宽度\"是一条新的跨层机制，有专门文档 decode-kernel-attribution.md 和两道新门禁测试支撑，符合\"新增重要机制单独立讲\"，故在单元8末尾新增 u8-l7（advanced，依赖 u8-l1/u4-l3/u4-l6）；其余讲义引用的源码与教学内容均不受此 diff 影响，全部 keep。",
   "units": [
     {
       "id": "u1",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -33,7 +33,7 @@
           "topic": "介绍 PegaInfer 的定位：纯 Rust + CUDA 的 LLM 推理引擎，OpenAI 兼容 API，按模型线组织 crate 与 feature 的整体格局。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -63,7 +63,7 @@
           "topic": "讲解构建前提（Rust 工具链、CUDA Toolkit、驱动要求）、release 构建方式、Docker 开发流程与关键环境变量。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -93,7 +93,7 @@
           "topic": "以 Cargo.toml members 为纲，导览每个 crate 的职责（server 纯分发、frontend 契约+协议栈、每模型一 crate、core/kernels 共享运行时、KV 三件套、bench/sim/cupti 辅助工具）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -130,7 +130,7 @@
       "id": "u2",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -157,7 +157,7 @@
           "topic": "精读单文件入口 main.rs：CLI 组装、读取 config.json 探测模型家族、校验参数、spawn_blocking 启动引擎、按 ServePlan 选择服务入口。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -193,7 +193,7 @@
       "id": "u3",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -224,7 +224,7 @@
           "topic": "学习 legacy 引擎契约：GenerateRequest/TokenEvent/TokenSink/KvPrefix 与 EngineHandle 的多分区提交路由（运行中+4×等待的负载估计）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -255,7 +255,7 @@
           "topic": "学习 step 驱动契约：Request/QueuedRequest/StepOutputs/RequestUpdate、RequestLedger 恰好一次终结账本、Scheduler trait 与专用线程 drive 循环、SchedulerHandle/LaunchedEngine 接线。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -285,7 +285,7 @@
           "topic": "讲解 vllm 模块：serve 系列入口、外部 vllm-server crate 承载 HTTP/SSE/分词，LocalEngineBridge（legacy）与 SteppedEngineBridge（新）两条桥的实现与 wire.rs 协议转换。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l3"
           ],
@@ -322,7 +322,7 @@
       "id": "u4",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -349,7 +349,7 @@
           "topic": "学习 pegainfer-kernels/src/tensor.rs：DeviceContext（上下文+流）、bf16 一统的 DeviceVec、const 泛型 GpuTensor/GpuWeight/NormWeight、流覆盖机制。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -379,7 +379,7 @@
           "topic": "解剖 pegainfer-kernels/build.rs：pegainfer-build 工具链发现、SM 目标探测、并行 nvcc 编译 105 个 csrc 文件、feature 门控的 Triton AOT（qwen35）与 TileLang（glm52/k3）代码生成。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -409,7 +409,7 @@
           "topic": "学习共享 GPU 算子的三层结构：kernels::ffi 原始 extern、kernels::ops 安全包装、core::ops 门面；重点是 attention 包装族（prefill/decode/split_kv/hd256）与 paged_plan。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -436,7 +436,7 @@
           "topic": "学习 pegainfer-core 的 weight_loader：shard 探测、mmap、pinned staging 上传、TP 行/列分片与缝合，以及 WeightPrefetch 的 madvise 预取。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1",
             "u4-l3"
@@ -466,7 +466,7 @@
           "topic": "学习 CUDA Graph 状态机（CudaGraphPhase/CudaGraphState）、捕获期指针稳定性要求、graph dump 与渲染工具，为后续模型 crate 的图捕获解码做铺垫。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u4-l1"
           ],
@@ -475,7 +475,8 @@
           "learning_goals": [
             "理解 SampleScratch 一次分配反复使用的缓冲策略",
             "区分 greedy fast path 与 temperature/top-k/top-p 的 FlashInfer 批量路径",
-            "理解 seed 行的 SplitMix64 philox 混合重放"
+            "理解 seed 行的 SplitMix64 philox 混合重放",
+            "掌握 selection_width 与 arena 宽度（vocab）的区分：effectively_greedy 的 top_p <= 1/vocab 核判定按可解码宽度而非 arena 宽度度量"
           ],
           "level": "intermediate",
           "minimal_modules": [
@@ -484,14 +485,14 @@
             "SampleScratch"
           ],
           "order": 6,
-          "practice_task": "运行 pegainfer-sample 的 select_batch 测试与 bench，构造一组参数（temperature=0 与 top_p=0.9 混合批次），用 effectively_greedy 验证 fast path 判定，并记录两条路径的耗时差。",
+          "practice_task": "运行 pegainfer-sample 的 select_batch 测试与 bench，构造一组参数（temperature=0 与 top_p=0.9 混合批次），用 effectively_greedy 验证 fast path 判定并记录两条路径的耗时差；再精读（或运行）新增的 padded_arena_width_does_not_suppress_the_argmax_routing 测试，解释为什么对齐 pad 列若计入核判定会把一个 effectively-greedy 请求推入 rejection sampler 并破坏确定性。",
           "source_files": [
             "pegainfer-sample/src/lib.rs",
             "pegainfer-sample/tests/select_batch.rs",
             "pegainfer-frontend/src/sampler.rs"
           ],
           "title": "采样层：pegainfer-sample",
-          "topic": "学习共享采样策略：批量 split argmax 贪心、FlashInfer 批量 temperature/top-k/top-p、min_p 分区、按 seed 的确定性重放，以及 graph 可捕获的分段贪心路径。"
+          "topic": "学习共享采样策略：批量 split argmax 贪心、FlashInfer 批量 temperature/top-k/top-p、min_p 分区、按 seed 的确定性重放；以及 #1046 新增的 SampleScratch::with_selection_width——模型把 logits arena 对齐到 tile 倍数后，argmax-vs-sample 路由仍按可解码词表宽度判定。"
         }
       ],
       "level": "intermediate",
@@ -502,7 +503,7 @@
       "id": "u5",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -528,7 +529,7 @@
           "topic": "精读 qwen3 的 config.rs：HF config.json 探测、Config 结构、TensorParallelConfig、EOS 处理，以及 DFlash/Eagle3 投机配置。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1",
             "u4-l4"
@@ -557,7 +558,7 @@
           "topic": "学习 Qwen3Model 结构、Qwen3MemoryOptions 显存选项、weights/load.rs 的 HF→GPU 张量映射，以及 PackedLoraProjection 的打包设计。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l2",
             "u4-l3"
@@ -598,7 +599,7 @@
       "id": "u6",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2",
             "u5-l1"
@@ -630,7 +631,7 @@
           "topic": "学习 engine-contract-free 的调度核心：PendingRequest/ActiveRequestState 队列、KV 预取停车、chunked prefill 批处理、plan 选择产出纯 StepEffects 数据。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l1"
           ],
@@ -657,7 +658,7 @@
           "topic": "学习 frontend_adapter.rs：契约侧 typestate 句柄注册表、Scheduler trait 实现、serve 循环接线，以及 --no-prefix-cache 等模型 CLI 的挂接。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l1",
             "u5-l3"
@@ -688,7 +689,7 @@
           "topic": "解剖 executor.rs：Qwen3Executor 的 Plan/Result 体系、ModelExecutor trait、RankWorker 多卡工作线程、StepCommand 通道与 LocalQwen3Lane。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l3",
             "u4-l5"
@@ -728,7 +729,7 @@
       "id": "u7",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1",
             "u5-l1"
@@ -761,7 +762,7 @@
           "topic": "学习 GPU 侧分页 KV：KvCacheManager（BlockPool+KvBuffer 配对）、块池引用计数、KvView，以及 core 侧 KvPool/PagePool 的关系。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l1"
           ],
@@ -791,7 +792,7 @@
           "topic": "学习 dynamo 衍生的逻辑块层：Mutable→Complete→Immutable→Weak 类型状态生命周期、PositionalRadixTree 注册表、G1-G4 分层编码与事件管线。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l2",
             "u6-l3"
@@ -821,7 +822,7 @@
           "topic": "学习 qwen3 执行器中的前缀缓存：PrefixProbe GPU 命中、prefix_cache_enabled 开关（投机解码时自动关闭）、与实测 TTFT 收益。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l3"
           ],
@@ -852,7 +853,7 @@
           "topic": "学习 pegainfer-kv-offload：OffloadEngine 的搬运时机决策、pegaflow 承载的 host/SSD/RDMA 深层、P2P RDMA 服务模式与可轮询的 OffloadHandle。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l4"
           ],
@@ -891,7 +892,7 @@
       "id": "u8",
       "lectures": [
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u6-l4",
             "u4-l2"
@@ -901,7 +902,8 @@
           "learning_goals": [
             "理解 Gated DeltaNet 线性注意力的 chunkwise 前向",
             "掌握 recurrent_state 快照为何是前缀缓存命中的必要条件",
-            "了解 TP 执行器与主执行器的结构差异"
+            "了解 TP 执行器与主执行器的结构差异",
+            "注意到 TP 路径的采样 scratch 现经 with_selection_width 携带可解码词表宽度（机制详见 u8-l7）"
           ],
           "level": "intermediate",
           "minimal_modules": [
@@ -922,7 +924,7 @@
           "topic": "学习线性注意力+全注意力混合架构：gated delta rule 的 chunkwise Triton 内核、循环状态与 conv 快照对前缀缓存的影响、TP 执行器。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l3"
           ],
@@ -952,7 +954,7 @@
           "topic": "学习单卡两族注意力（滑动窗+全局）的 KV 契约、批解码、可选 chunked prefill，以及一组 env 旋钮（KV FP8、前缀缓存、准入合并、async prefill 绿色通道）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l3"
           ],
@@ -983,7 +985,7 @@
           "topic": "以最小的 MoE+EP 模型学习 MLA 注意力、MoE 路由与 2 卡 EP2 的 nccl_backend 设备驻留通信。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l3"
           ],
@@ -1014,7 +1016,7 @@
           "topic": "学习大规模 MoE 服务的工程化：runner 调度框架、tp1_dp8/tp8_dp1 双拓扑执行器、DeepEP/NCCL 两条 MoE all-to-all 路径、Marlin INT4 权重。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l3"
           ],
@@ -1046,7 +1048,7 @@
           "topic": "学习 Blackwell 级模型线：DeepSeek-V3.2 式稀疏 MLA indexer、FP8 GEMM、EP4/EP8 MoE、原生 MTP 投机解码与 P/D 分离。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u8-l5"
           ],
@@ -1074,6 +1076,39 @@
           ],
           "title": "Kimi-K3：KDA + whale gang + 上下文并行",
           "topic": "学习 bring-up 中的 K3：KDA 混合注意力、latent MoE MXFP4、whale-gang 舰队调度、CP 弹性预填充通道与 DSpark draft lane。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1",
+            "u4-l3",
+            "u4-l6"
+          ],
+          "filename": "u8-l7-qwen35-selection-width-alignment.md",
+          "id": "u8-l7",
+          "learning_goals": [
+            "说出 vocab_size / decodable_vocab / selection_vocab 三个宽度的语义与 4B checkpoint 下的实际取值（248320 / 248077 / 248192）",
+            "解释奇数选择宽度如何让 cublasLt 落到 align-1 的 sm_75 时代内核（1.67 ms/step，约占 c16 TPOT 12%）以及 tile 对齐后的实测收益（c16 TPOT −5.3%）",
+            "理解 output_logits_into 为何把输出投影 GEMM 与 pad 行 -inf 抑制绑定为唯一 logits 出口：pad 行是训练过的 embedding，漏掉抑制不崩溃而会在 wire 上吐出不可解码 id 并回灌解码",
+            "理解两道新门禁各自守护的不变量：pad_columns_are_suppressed_on_the_model_logits_paths（模型侧掩码）与 padded_arena_width_does_not_suppress_the_argmax_routing（采样路由宽度），以及 hf_golden_gate 为何对此天然失明"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Config35::bound_selection_vocab",
+            "Qwen35Model::output_logits_into 与 SuppressIds",
+            "SampleScratch::with_selection_width"
+          ],
+          "order": 7,
+          "practice_task": "以 248077 为例手工推导 next_multiple_of(128) 与 clamp 到 vocab_size 的结果，画出 decodable_vocab/selection_vocab/vocab_size 三个宽度在 config、权重、decode_buffers、sampler 各层的传播图；然后注释掉 output_logits_into 中的 suppress 调用（或精读其断言），说明 pad_columns_are_suppressed_on_the_model_logits_paths 如何在 prefill 与 decode 两条 logits 路径上失败，并解释为何 HF golden 门禁（teacher-forced logprobs，exp(-inf)=0）看不见该失效。",
+          "source_files": [
+            "pegainfer-qwen35/src/config/model.rs",
+            "pegainfer-qwen35/src/weights.rs",
+            "pegainfer-qwen35/src/unified_forward.rs",
+            "pegainfer-sample/src/lib.rs",
+            "docs/models/qwen35/decode-kernel-attribution.md"
+          ],
+          "title": "Qwen3.5 logits 宽度对齐：tile 对齐 GEMM 与 pad 行抑制",
+          "topic": "讲解 #1046 引入的跨层机制：bound_selection_vocab 把 selection_vocab 向上对齐到 128 倍数并记录 decodable_vocab；output_logits_into 把输出投影 GEMM 与 SuppressIds 的 -inf 抑制合并为模型唯一 logits 出口；SampleScratch::with_selection_width 保证 effectively_greedy 路由按可解码宽度而非 arena 宽度判定。"
         }
       ],
       "level": "intermediate",
@@ -1084,7 +1119,7 @@
       "id": "u9",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l4",
             "u4-l6"
@@ -1118,7 +1153,7 @@
           "topic": "学习 qwen3 的三条投机解码路径：目标模型侧的 VerifyStepItem/verify_graph、dflash/eagle3 draft 权重与预约、dspark 集成模式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l4"
           ],
@@ -1146,7 +1181,7 @@
           "topic": "学习绿色上下文流分区：DecodeOverlap 枚举、OverlapStreams 的创建与销毁、async prefill 车道在 qwen3 与 gemma4 中的实现差异。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l3"
           ],
@@ -1176,7 +1211,7 @@
           "topic": "学习 LoRA 全链路：前端 LoraControl/LoraClient 动态控制、vllm 侧可覆写适配器的 OpenAI 代理路由、qwen3 的 PackedLora 投影融合内核。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l3"
           ],
@@ -1206,7 +1241,7 @@
           "topic": "学习 qwen3 的 TP 实现：TensorParallelConfig、executor 中 RankWorker 每 rank 一线程、StepCommand/WorkerStepOutcome 通道、权重行列分片与 NCCL 约定。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u8-l5"
           ],
@@ -1244,7 +1279,7 @@
       "id": "u10",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l2"
           ],
@@ -1274,7 +1309,7 @@
           "topic": "学习项目的测试哲学：HF golden logits 门禁、批不变性八连测、调度健壮性、logprobs 契约，以及 GPU 依赖测试的运行方式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l3"
           ],
@@ -1303,7 +1338,7 @@
           "topic": "学习内核基准框架 measure_loop/LatencyStats/KernelCall 日程，以及 qwen3 的 kernel/model report 二进制如何产出可复现的算子级报告。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -1332,7 +1367,7 @@
           "topic": "学习 GPU 性能定位：nsys 常见坑、CUPTI 区间剖析绑定 profile_range_with_prepare、以及内核调用 trace 的采集。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l4"
           ],
@@ -1360,7 +1395,7 @@
           "topic": "学习 SchedulerMetrics/SpecDecodeCounters 如何经 bridge 的 publish_scheduler_stats 上到 vLLM wire 并暴露为 Prometheus 指标。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u6-l2"
