@@ -1,0 +1,1434 @@
+{
+  "head": "72cbbe8a72e06329b2b4d6fa1e8e906acf2acc85",
+  "project": "openinfer",
+  "rationale": "PegaInfer 是一个大型多 crate 的纯 Rust+CUDA LLM 推理引擎，核心设计是\"共享基础设施、每个模型自持执行\"。学习路线按依赖层次递进：先让读者从零认识项目并跑通服务（单元1-2），再沿真实请求路径学习前端契约与 vLLM 协议栈（单元3），然后下沉到共享运行时 core/kernels/sample 的张量、算子、构建与采样机制（单元4）；接着以默认开启、资料最全的 Qwen3 为解剖标本，按\"配置→权重→前向→调度→执行器→CUDA Graph 解码\"的顺序精读（单元5-6）；KV 缓存体系（分页池、kvbm 逻辑块、前缀缓存、offload、kv-store）单列一个单元（单元7），因为它是跨模型的生命线；单元8横向巡礼七条模型线各自的注意力/MoE/并行架构差异；单元9进入投机解码、green ctx、LoRA、TP、free-running EP 等专家级机制；单元10收尾于测试门禁、基准、profiling、可观测性与\"新增一条模型线\"的二次开发实践。本次增量（139d925e..72cbbe8a，仅一个提交 #1046：qwen35 logits GEMM 宽度 tile 对齐）的判定：pegainfer-sample 的 SampleScratch 新增 with_selection_width 构造器、select_batch 的 effectively_greedy 路由改为按可解码宽度判定，直接影响 u4-l6（update）；u8-l1 引用的 tp_executor.rs 调用点随之变化（update）；该提交引入的\"selection_vocab 对齐 + output_logits_into 统一 logits 出口 + pad 行抑制 + 采样路由宽度\"是一条新的跨层机制，有专门文档 decode-kernel-attribution.md 和两道新门禁测试支撑，符合\"新增重要机制单独立讲\"，故在单元8末尾新增 u8-l7（advanced，依赖 u8-l1/u4-l3/u4-l6）；其余讲义引用的源码与教学内容均不受此 diff 影响，全部 keep。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 PegaInfer 的定位：无 PyTorch/Python 运行时的纯 Rust+CUDA 推理引擎",
+            "列出七条模型线及其 feature flag（仅 qwen3 默认开启）",
+            "理解'共享基础设施、模型自持执行'的架构分层"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README",
+            "Cargo.toml workspace",
+            "架构图"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README 与 Cargo.toml 的 members 列表，画出'前端契约 / 模型 crate / 共享运行时 / KV 基础设施'四层架构图，并标注每层包含哪些 crate。",
+          "source_files": [
+            "README.md",
+            "CLAUDE.md",
+            "Cargo.toml"
+          ],
+          "title": "项目总览：PegaInfer 是什么",
+          "topic": "介绍 PegaInfer 的定位：纯 Rust + CUDA 的 LLM 推理引擎，OpenAI 兼容 API，按模型线组织 crate 与 feature 的整体格局。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-build-and-run.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "用 cargo run --release 启动 Qwen3-4B 服务",
+            "理解 --release 必要性与关键环境变量（CUDA_HOME、PEGAINFER_CUDA_SM、PEGAINFER_TRITON_PYTHON）",
+            "掌握 Docker 开发环境的使用方式"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "cargo workspace 构建",
+            "CUDA 工具链",
+            "docker 开发环境"
+          ],
+          "order": 2,
+          "practice_task": "在本机（或无 GPU 环境下仅执行 cargo cargo check --release -p pegainfer-server）验证默认 qwen3 构建无需 Python，记录构建产物与耗时；有 GPU 则完整启动服务并 curl /v1/completions。",
+          "source_files": [
+            "README.md",
+            "rust-toolchain.toml",
+            "install.sh",
+            "docker/README.md",
+            "scripts/setup_dev.sh"
+          ],
+          "title": "构建与运行：从源码到 GPU 服务",
+          "topic": "讲解构建前提（Rust 工具链、CUDA Toolkit、驱动要求）、release 构建方式、Docker 开发流程与关键环境变量。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-workspace-tour.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "说出 server/frontend/model crate/core/kernels/KV 各 crate 的职责边界",
+            "理解 default-members 与 feature-gated 成员的关系",
+            "在源码树中快速定位'某个功能在哪个 crate'"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "pegainfer-server",
+            "pegainfer-frontend",
+            "pegainfer-core",
+            "pegainfer-kernels"
+          ],
+          "order": 3,
+          "practice_task": "对照 README 架构表，为 19 个 workspace 成员各写一句职责说明，并标注哪些是模型 crate、哪些是共享基础设施、哪个是 dynamo 衍生 fork。",
+          "source_files": [
+            "Cargo.toml",
+            "README.md",
+            "pegainfer-server/src/main.rs",
+            "pegainfer-frontend/src/lib.rs"
+          ],
+          "title": "Workspace 全景：19 个 crate 的职责地图",
+          "topic": "以 Cargo.toml members 为纲，导览每个 crate 的职责（server 纯分发、frontend 契约+协议栈、每模型一 crate、core/kernels 共享运行时、KV 三件套、bench/sim/cupti 辅助工具）。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l4-first-request-and-sim.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "用 curl 调用流式与非流式补全接口",
+            "理解 SimulatedEngineConfig 的 TTFT/TPOT 参数化模拟",
+            "在没有 GPU 的机器上跑通前端全链路"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "pegainfer-sim",
+            "pegainfer-frontend::vllm"
+          ],
+          "order": 4,
+          "practice_task": "运行 pegainfer-sim（可调大并发），用 curl 发起 streaming chat 请求，用 wrk 或简单脚本测量模拟 TTFT，并修改 SimulatedEngineConfig 的 TPOT 观察输出节奏变化。",
+          "source_files": [
+            "pegainfer-sim/src/main.rs",
+            "pegainfer-sim/src/lib.rs",
+            "pegainfer-sim/src/logprobs.rs",
+            "README.md",
+            "docs/subsystems/frontend/simulated-inference-engine.md"
+          ],
+          "title": "发出第一个请求与无 GPU 体验（pegainfer-sim）",
+          "topic": "通过 OpenAI 兼容 API 发第一个请求；介绍 pegainfer-sim 如何在无 GPU 环境用可配置 TTFT/TPOT 模拟引擎跑通完整前端链路。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "初识 PegaInfer：定位、构建与运行"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l1-server-main-dispatch.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "追踪 main() 六步流程：注册→CLI→探测→校验→launch→按 ServePlan 分发",
+            "理解 feature_gate_hint 如何提示'用 --features 重建'",
+            "解释 server 为何能做到'永不出现模型 crate 的选项类型'"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "pegainfer-server::main",
+            "ModelLineRegistry",
+            "ServePlan"
+          ],
+          "order": 1,
+          "practice_task": "在 main.rs 中为每一步流程添加注释并画出流程图；然后故意用一个未启用 feature 的模型目录（如 gemma4 checkpoint）启动服务，观察错误提示如何引导重建。",
+          "source_files": [
+            "pegainfer-server/src/main.rs",
+            "pegainfer-frontend/src/model_line.rs"
+          ],
+          "title": "server 入口：从 config.json 到引擎启动",
+          "topic": "精读单文件入口 main.rs：CLI 组装、读取 config.json 探测模型家族、校验参数、spawn_blocking 启动引擎、按 ServePlan 选择服务入口。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-model-line-trait.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "掌握 ModelLine 七个核心方法的语义与调用时机",
+            "理解 probe 的'唯一认领者'规则与 SharedArgs 的 consume-or-reject 校验",
+            "能对照 pegainfer-qwen3/src/model_line.rs 看 trait 的真实实现"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "ModelLine",
+            "ModelLineRegistry",
+            "qwen3 model_line"
+          ],
+          "order": 2,
+          "practice_task": "写出 ModelLine 各方法在启动时序中的调用顺序表；再模拟'两条模型线同时 probe 认领同一 config'的场景，阅读 detect 的唯一认领实现并解释冲突如何报错。",
+          "source_files": [
+            "pegainfer-frontend/src/model_line.rs",
+            "pegainfer-qwen3/src/model_line.rs",
+            "pegainfer-server/src/main.rs"
+          ],
+          "title": "ModelLine trait：新模型接入的分发协议",
+          "topic": "讲解 ModelLine trait（probe/augment_cli/validate/serve_plan/launch）与 ModelLineRegistry 的 detect、validate_provided 机制，这是新模型线接入的核心协议。"
+        }
+      ],
+      "level": "beginner",
+      "order": 2,
+      "title": "服务器入口与模型线分发"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u3-l1-legacy-engine-contract.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "说出 GenerateRequest、TokenEvent、TokenSink、KvPrefix 各自的角色",
+            "理解 EngineHandle 的分区路由与 least_loaded_partition 策略",
+            "明白 TokenSink 的 abort 机制如何支持请求取消"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "engine::request",
+            "engine::event",
+            "engine::sink",
+            "engine::handle"
+          ],
+          "order": 1,
+          "practice_task": "画出 legacy 契约下一次 submit 的时序图（含前缀命中路由与拒绝路径），并指出 TokenEvent 七种变体分别在什么时机发出。",
+          "source_files": [
+            "pegainfer-frontend/src/engine/request.rs",
+            "pegainfer-frontend/src/engine/event.rs",
+            "pegainfer-frontend/src/engine/sink.rs",
+            "pegainfer-frontend/src/engine/kv.rs",
+            "pegainfer-frontend/src/engine/handle.rs"
+          ],
+          "title": "旧契约：EngineHandle 与 TokenEvent 流",
+          "topic": "学习 legacy 引擎契约：GenerateRequest/TokenEvent/TokenSink/KvPrefix 与 EngineHandle 的多分区提交路由（运行中+4×等待的负载估计）。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-step-contract-and-scheduler-trait.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 RequestUpdate/StepOutputs 一次调度步一条消息的设计",
+            "掌握 RequestLedger 的 terminal-exactly-once 保证",
+            "读懂 Scheduler trait 与 spawn_scheduler 专用 OS 线程驱动模型"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "engine::step",
+            "engine::ledger",
+            "engine::driver",
+            "engine::wiring"
+          ],
+          "order": 2,
+          "practice_task": "梳理 RequestLedger 的 admit/push_tokens/finish/defer_finish 状态机并画图；解释为什么 finish 必须恰好一次、defer_finish 用于什么场景。",
+          "source_files": [
+            "pegainfer-frontend/src/engine/step.rs",
+            "pegainfer-frontend/src/engine/ledger.rs",
+            "pegainfer-frontend/src/engine/driver.rs",
+            "pegainfer-frontend/src/engine/wiring.rs",
+            "pegainfer-frontend/src/engine/request_lifecycle.rs"
+          ],
+          "title": "新契约：step 驱动的 Scheduler trait 与 RequestLedger",
+          "topic": "学习 step 驱动契约：Request/QueuedRequest/StepOutputs/RequestUpdate、RequestLedger 恰好一次终结账本、Scheduler trait 与专用线程 drive 循环、SchedulerHandle/LaunchedEngine 接线。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-vllm-protocol-and-bridges.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解 OpenAI 路由为何在外部 vllm-server crate 而非本仓库",
+            "追踪 ZeroMQ ipc 上 EngineCoreRequest/EngineCoreOutputs 的双向流动",
+            "区分 legacy 桥与 stepped 桥的差异与迁移方向"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "vllm::mod",
+            "vllm::bridge",
+            "vllm::bridge::stepped",
+            "vllm::wire"
+          ],
+          "order": 3,
+          "practice_task": "画出新旧两条桥的完整数据通路图（HTTP→ZMQ→SchedulerHandle→StepOutputs→SSE），并对照 wire.rs 列出至少三个 sampling 参数在契约与 wire 格式间的转换规则。",
+          "source_files": [
+            "pegainfer-frontend/src/vllm/mod.rs",
+            "pegainfer-frontend/src/vllm/bridge.rs",
+            "pegainfer-frontend/src/vllm/bridge/stepped.rs",
+            "pegainfer-frontend/src/vllm/wire.rs"
+          ],
+          "title": "vLLM 协议栈与 ZeroMQ 桥",
+          "topic": "讲解 vllm 模块：serve 系列入口、外部 vllm-server crate 承载 HTTP/SSE/分词，LocalEngineBridge（legacy）与 SteppedEngineBridge（新）两条桥的实现与 wire.rs 协议转换。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l4-request-end-to-end-walkthrough.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "独立追踪一次 chat 请求从前端到 TokenEvent 回流的全部函数跳转",
+            "理解契约分层的演进原因（见 frontend-architecture.md）",
+            "能定位任意请求阶段异常该看哪个文件"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "frontend 全链路",
+            "engine 双契约",
+            "vllm 桥"
+          ],
+          "order": 4,
+          "practice_task": "以 streaming chat 请求为例，写一份'函数级'旅程日志（每跳列出文件与函数名），并在 pegainfer-sim 上用日志验证你的旅程描述是否准确。",
+          "source_files": [
+            "docs/subsystems/frontend/frontend-architecture.md",
+            "pegainfer-frontend/src/vllm/bridge/stepped.rs",
+            "pegainfer-frontend/src/engine/driver.rs",
+            "pegainfer-frontend/src/engine/wiring.rs"
+          ],
+          "title": "一个请求的完整旅程（端到端串联）",
+          "topic": "把前三讲串成端到端链路：POST /v1/chat/completions → 模板渲染/分词 → ZMQ → SchedulerHandle.submit → 模型 Scheduler.step → StepOutputs → SSE 流回客户端。"
+        }
+      ],
+      "level": "beginner",
+      "order": 3,
+      "title": "前端与引擎契约"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u4-l1-tensor-and-device-context.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "理解 DeviceContext 对 CudaContext/CudaStream 的封装与 graph 捕获注意事项",
+            "掌握 GpuTensor/GpuWeight/HiddenStates 等常量泛型张量类型",
+            "理解 StreamOverrideGuard 与 active_cu_stream 的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "kernels::tensor",
+            "DeviceContext",
+            "GpuTensor"
+          ],
+          "order": 1,
+          "practice_task": "写一个独立小示例（或扩展现有单测）：创建 DeviceContext、分配 DeviceVec、执行一次拷贝与 sync，并打印底层 CUDA stream 地址，验证 StreamOverrideGuard 的切换行为。",
+          "source_files": [
+            "pegainfer-kernels/src/tensor.rs",
+            "pegainfer-core/src/tensor.rs"
+          ],
+          "title": "张量与设备层：DeviceContext 与 bf16 张量体系",
+          "topic": "学习 pegainfer-kernels/src/tensor.rs：DeviceContext（上下文+流）、bf16 一统的 DeviceVec、const 泛型 GpuTensor/GpuWeight/NormWeight、流覆盖机制。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u4-l2-kernels-build-rs.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "追踪 build.rs 从工具链发现到 libkernels_cuda.a 归档的完整流水线",
+            "理解 SM 目标自动探测与 PEGAINFER_CUDA_SM 覆盖",
+            "掌握 feature 如何裁剪 csrc 编译单元与 AOT 子模块要求"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "kernels build.rs",
+            "pegainfer-build",
+            "triton AOT",
+            "nvcc 并行池"
+          ],
+          "order": 2,
+          "practice_task": "在 build.rs 中定位 is_qwen35_source 与 generate_triton_artifacts 的调用条件，写一段文字说明'--features qwen35 从 csrc 选择到 Triton AOT 产物落地'的完整因果链；用 PEGAINFER_BUILD_TIMING=1 观察各阶段耗时。",
+          "source_files": [
+            "pegainfer-kernels/build.rs",
+            "pegainfer-build/src/lib.rs",
+            "pegainfer-kernels/tools/triton/gen_triton_aot.py",
+            "docs/subsystems/kernels/build-rs-submodule-init.md"
+          ],
+          "title": "kernels 构建系统：nvcc、SM 探测、Triton/TileLang AOT",
+          "topic": "解剖 pegainfer-kernels/build.rs：pegainfer-build 工具链发现、SM 目标探测、并行 nvcc 编译 105 个 csrc 文件、feature 门控的 Triton AOT（qwen35）与 TileLang（glm52/k3）代码生成。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l3-core-ops-facade.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "理清 ffi→kernels::ops→core::ops 三层调用约定",
+            "掌握 attention 包装函数族与 SplitKvCsr 分页计划的输入输出",
+            "会用 KernelCall/CallSpec 描述一次内核调用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "core::ops",
+            "kernels::ops",
+            "paged_plan"
+          ],
+          "order": 3,
+          "practice_task": "以 prefill_attention_paged_into 为例，从 core::ops 包装向下追到 kernels::ops 再到 ffi 声明，写出每层的函数签名对照；再用 build_split_kv_csr 的单测理解 CSR 布局。",
+          "source_files": [
+            "pegainfer-core/src/ops.rs",
+            "pegainfer-core/src/ops/attention.rs",
+            "pegainfer-core/src/ops/paged_plan.rs",
+            "pegainfer-kernels/src/ops.rs",
+            "docs/subsystems/kernels/pegainfer-kernels-boundary.md"
+          ],
+          "title": "core::ops 算子门面与注意力包装",
+          "topic": "学习共享 GPU 算子的三层结构：kernels::ffi 原始 extern、kernels::ops 安全包装、core::ops 门面；重点是 attention 包装族（prefill/decode/split_kv/hd256）与 paged_plan。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l4-weight-loading.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "理解 load_shard_info/mmap_shards/deserialize_shards 的加载管线",
+            "掌握 StagedWeightLoader 的 pinned staging 上传优化",
+            "能看懂 2D 权重的 row/col shard 与 row_stitch 切分函数"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "weight_loader",
+            "staging",
+            "safetensors"
+          ],
+          "order": 4,
+          "practice_task": "用 load_tensor_2d_row_shard 与 load_tensor_2d_col_shard 写一个主机端小测试（CPU safetensors 或手工构造的 shard），验证两种切片在 2 卡 TP 下拼回原矩阵的正确性。",
+          "source_files": [
+            "pegainfer-core/src/weight_loader.rs",
+            "pegainfer-core/src/weight_loader/staging.rs"
+          ],
+          "title": "权重加载：safetensors 到显存",
+          "topic": "学习 pegainfer-core 的 weight_loader：shard 探测、mmap、pinned staging 上传、TP 行/列分片与缝合，以及 WeightPrefetch 的 madvise 预取。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l1",
+            "u4-l3"
+          ],
+          "filename": "u4-l5-cuda-graph-state.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "理解 CudaGraphState 的捕获/回放状态与指针稳定性约束",
+            "知道 graph dump/render 如何用于验证",
+            "理解 gpu_buffers! 宏与批量可伸缩缓冲区的配合"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "cuda_graph",
+            "gpu_buffers!",
+            "dump/render"
+          ],
+          "order": 5,
+          "practice_task": "阅读 CudaGraphState 与 dump.rs，跑通（或阅读现有测试中）graph dump 输出，解释捕获图中节点与流的关系；随后在 u6-l4 之前写一段'为什么解码路径需要 CUDA Graph'的分析。",
+          "source_files": [
+            "pegainfer-core/src/cuda_graph.rs",
+            "pegainfer-core/src/cuda_graph/dump.rs",
+            "pegainfer-kernels/src/gpu_buffers.rs",
+            "pegainfer-kernels/src/tensor.rs"
+          ],
+          "title": "CUDA Graph 基础设施",
+          "topic": "学习 CUDA Graph 状态机（CudaGraphPhase/CudaGraphState）、捕获期指针稳定性要求、graph dump 与渲染工具，为后续模型 crate 的图捕获解码做铺垫。"
+        },
+        {
+          "action": "update",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l6-sampling.md",
+          "id": "u4-l6",
+          "learning_goals": [
+            "理解 SampleScratch 一次分配反复使用的缓冲策略",
+            "区分 greedy fast path 与 temperature/top-k/top-p 的 FlashInfer 批量路径",
+            "理解 seed 行的 SplitMix64 philox 混合重放",
+            "掌握 selection_width 与 arena 宽度（vocab）的区分：effectively_greedy 的 top_p <= 1/vocab 核判定按可解码宽度而非 arena 宽度度量"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "pegainfer-sample",
+            "FlashInfer sampling",
+            "SampleScratch"
+          ],
+          "order": 6,
+          "practice_task": "运行 pegainfer-sample 的 select_batch 测试与 bench，构造一组参数（temperature=0 与 top_p=0.9 混合批次），用 effectively_greedy 验证 fast path 判定并记录两条路径的耗时差；再精读（或运行）新增的 padded_arena_width_does_not_suppress_the_argmax_routing 测试，解释为什么对齐 pad 列若计入核判定会把一个 effectively-greedy 请求推入 rejection sampler 并破坏确定性。",
+          "source_files": [
+            "pegainfer-sample/src/lib.rs",
+            "pegainfer-sample/tests/select_batch.rs",
+            "pegainfer-frontend/src/sampler.rs"
+          ],
+          "title": "采样层：pegainfer-sample",
+          "topic": "学习共享采样策略：批量 split argmax 贪心、FlashInfer 批量 temperature/top-k/top-p、min_p 分区、按 seed 的确定性重放；以及 #1046 新增的 SampleScratch::with_selection_width——模型把 logits arena 对齐到 tile 倍数后，argmax-vs-sample 路由仍按可解码词表宽度判定。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "共享运行时：core、kernels 与采样"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u5-l1-qwen3-config.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "掌握 Config/TensorParallelConfig/EosTokenIds 的解析与默认值",
+            "理解 probe_config_json 如何从 HF config.json 得到 Config",
+            "了解 DFlashConfig 与 Eagle3Config 这些投机解码配置的入口"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "qwen3 config",
+            "probe_config_json"
+          ],
+          "order": 1,
+          "practice_task": "下载（或手工构造）Qwen3-4B 的 config.json，用 probe_config_json 所在模块写一个单测断言关键字段解析正确，并列出 config 缺字段时的错误传播路径。",
+          "source_files": [
+            "pegainfer-qwen3/src/config.rs",
+            "pegainfer-qwen3/src/lib.rs"
+          ],
+          "title": "Qwen3 配置解析",
+          "topic": "精读 qwen3 的 config.rs：HF config.json 探测、Config 结构、TensorParallelConfig、EOS 处理，以及 DFlash/Eagle3 投机配置。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l1",
+            "u4-l4"
+          ],
+          "filename": "u5-l2-qwen3-weights.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "掌握 Qwen3Model 权重的内存布局与 Qwen3MemoryOptions",
+            "追踪 weights/load.rs 如何把 HF 张量名映射到 GpuWeight",
+            "理解 PackedLoraRegistry 预留的 LoRA 打包结构"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "weights.rs",
+            "weights/load.rs",
+            "Qwen3Model"
+          ],
+          "order": 2,
+          "practice_task": "对照 HF Qwen3-4B 的 safetensors 索引，列出 qwen3 与 o_proj 等每个权重经 load.rs 映射后的切分方式（replicate/row-shard/col-shard），制成表格。",
+          "source_files": [
+            "pegainfer-qwen3/src/weights.rs",
+            "pegainfer-qwen3/src/weights/load.rs",
+            "pegainfer-core/src/weight_loader.rs"
+          ],
+          "title": "Qwen3 权重装载与显存布局",
+          "topic": "学习 Qwen3Model 结构、Qwen3MemoryOptions 显存选项、weights/load.rs 的 HF→GPU 张量映射，以及 PackedLoraProjection 的打包设计。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l2",
+            "u4-l3"
+          ],
+          "filename": "u5-l3-qwen3-forward.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "追踪 prefill/unified_forward/batch_decode 三条前向的算子序列",
+            "理解 split-KV 解码与 projection_fusion 的优化动机",
+            "能对照文档解释 batched decode attention 的页表输入"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "prefill",
+            "unified_forward",
+            "batch_decode",
+            "projection_fusion"
+          ],
+          "order": 3,
+          "practice_task": "为 unified_forward 的一次调用写出逐算子的伪代码（RMSNorm→QKV→RoPE→Attention→O_proj→MLP），并标注每个算子来自 core::ops 的哪个包装；阅读 decode-attention.md 校对你的理解。",
+          "source_files": [
+            "pegainfer-qwen3/src/prefill.rs",
+            "pegainfer-qwen3/src/unified_forward.rs",
+            "pegainfer-qwen3/src/batch_decode.rs",
+            "pegainfer-qwen3/src/projection_fusion.rs",
+            "pegainfer-qwen3/src/split_kv.rs",
+            "docs/models/qwen3/decode-attention.md"
+          ],
+          "title": "Qwen3 前向计算：prefill、统一前向与批量解码",
+          "topic": "精读 Qwen3Model 的三条执行路径：prefill.rs 的分块预填充缓冲与计算、unified_forward.rs 混合批前向、batch_decode.rs 的 GQA 分页注意力解码与投影融合。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 5,
+      "title": "解剖 Qwen3（上）：配置、权重与前向"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l2",
+            "u5-l1"
+          ],
+          "filename": "u6-l1-qwen3-scheduler.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "理解 PendingRequest→ActiveRequestState 的生命周期与 prefill_pos 推进",
+            "掌握 chunked prefill 批的构造与 KV 预取停车（parking）机制",
+            "体会'调度产出纯数据、副作用由 effects 表达'的分层设计"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "scheduler.rs",
+            "scheduler::plan",
+            "scheduler::effects",
+            "scheduler::resolve"
+          ],
+          "order": 1,
+          "practice_task": "阅读 scheduler/tests.rs 与 test_support.rs，选取一个调度场景（如两条请求竞争 KV 页）复述 plan 选择的输入与输出，然后手画该场景的时间线。",
+          "source_files": [
+            "pegainfer-qwen3/src/scheduler.rs",
+            "pegainfer-qwen3/src/scheduler/plan.rs",
+            "pegainfer-qwen3/src/scheduler/effects.rs",
+            "pegainfer-qwen3/src/scheduler/resolve.rs",
+            "pegainfer-qwen3/src/scheduler/tests.rs"
+          ],
+          "title": "Qwen3 调度器：准入、分块预填充与计划选择",
+          "topic": "学习 engine-contract-free 的调度核心：PendingRequest/ActiveRequestState 队列、KV 预取停车、chunked prefill 批处理、plan 选择产出纯 StepEffects 数据。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-qwen3-frontend-adapter.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "读懂 frontend_adapter 如何把 StepEffects 翻译成 RequestUpdate",
+            "掌握 typestate 句柄注册表按 request_id 索引的设计",
+            "理解 --no-prefix-cache 等 CLI 如何穿透到执行器"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "frontend_adapter",
+            "Scheduler trait 实现"
+          ],
+          "order": 2,
+          "practice_task": "在 frontend_adapter.rs 中定位 Scheduler::submit 与 Scheduler::step 的实现，写出它们与 u3-l2 契约类型的对应关系表；再追踪 --no-prefix-cache 从 clap 定义到 executor 开关的完整路径。",
+          "source_files": [
+            "pegainfer-qwen3/src/frontend_adapter.rs",
+            "pegainfer-qwen3/src/scheduler.rs",
+            "pegainfer-frontend/src/engine/driver.rs"
+          ],
+          "title": "Qwen3 前端适配器：Scheduler trait 的实现",
+          "topic": "学习 frontend_adapter.rs：契约侧 typestate 句柄注册表、Scheduler trait 实现、serve 循环接线，以及 --no-prefix-cache 等模型 CLI 的挂接。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l1",
+            "u5-l3"
+          ],
+          "filename": "u6-l3-qwen3-executor.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "掌握 PrefillStepItem/DecodeStepItem 到三种 Plan 的组装",
+            "理解 executor.rs 与 executor/ 子模块（spec、dflash_lane、remote_fetch）的分工",
+            "弄清 4151 行执行器如何通过 StepCommand 驱动 RankWorker"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Qwen3Executor",
+            "ModelExecutor",
+            "RankWorker",
+            "LocalQwen3Lane"
+          ],
+          "order": 3,
+          "practice_task": "画出 Qwen3Executor 的结构图（含 KV 池、前缀探测、offload 引擎、缓冲区），并为一次'prefill 一条 + decode 四条'的 unified step 列出从 Plan 到 GPU 调用的执行序列。",
+          "source_files": [
+            "pegainfer-qwen3/src/executor.rs",
+            "pegainfer-qwen3/src/executor/spec.rs",
+            "pegainfer-qwen3/src/sizing.rs",
+            "pegainfer-qwen3/src/batch_decode_buffers.rs"
+          ],
+          "title": "Qwen3 执行器：Qwen3Executor 与 RankWorker",
+          "topic": "解剖 executor.rs：Qwen3Executor 的 Plan/Result 体系、ModelExecutor trait、RankWorker 多卡工作线程、StepCommand 通道与 LocalQwen3Lane。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l3",
+            "u4-l5"
+          ],
+          "filename": "u6-l4-qwen3-decode-cuda-graph.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "理解 DecodeGraphPlan 的形状池与批间伸缩策略",
+            "掌握 batch_decode_dag 的依赖构建与 verify_graph 的投机验证图",
+            "能解释捕获图中缓冲区指针为何必须预分配固定"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "batch_decode",
+            "batch_decode_dag",
+            "verify_graph",
+            "DecodeGraphPlan"
+          ],
+          "order": 4,
+          "practice_task": "运行 tests/batch_invariance_decode_gemm_graph.rs（或无 GPU 时精读），解释'图捕获后不同 batch size 如何复用同一张图'；对照 docs/models/qwen3/cuda-graph-png.md 写出捕获流程五步。",
+          "source_files": [
+            "pegainfer-qwen3/src/batch_decode.rs",
+            "pegainfer-qwen3/src/batch_decode_dag.rs",
+            "pegainfer-qwen3/src/batch_decode_buffers.rs",
+            "pegainfer-qwen3/src/verify_graph.rs",
+            "docs/models/qwen3/cuda-graph-png.md"
+          ],
+          "title": "Qwen3 CUDA Graph 解码路径",
+          "topic": "学习批量解码的图捕获：DecodeGraphPlan 形状规划、batch_decode_dag 依赖图、预分配缓冲 batch_decode_buffers，以及投机验证图 verify_graph。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 6,
+      "title": "解剖 Qwen3（下）：调度、适配与执行"
+    },
+    {
+      "id": "u7",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l1",
+            "u5-l1"
+          ],
+          "filename": "u7-l1-paged-kv-cache.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "理解 KvBuffer 的 page-first GPU 布局与 KvLayout 几何",
+            "掌握 BlockPool 的块引用计数、PrefixProbe 与 KvBlockGuard 语义",
+            "知道 MLA 模型为何绕过 KvCacheManager 直接消费 BlockPool"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "kv-cache::manager",
+            "kv-cache::buffer",
+            "kv-cache::pool",
+            "core::kv_pool"
+          ],
+          "order": 1,
+          "practice_task": "画出一个请求从分配首块到释放末块的块生命周期图（含前缀命中复用），并用 pool.rs 中 PrefixProbe 的返回值标注每一步的池状态。",
+          "source_files": [
+            "pegainfer-kv-cache/src/manager.rs",
+            "pegainfer-kv-cache/src/buffer.rs",
+            "pegainfer-kv-cache/src/pool.rs",
+            "pegainfer-kv-cache/src/layout.rs",
+            "pegainfer-core/src/kv_pool.rs",
+            "pegainfer-core/src/page_pool.rs"
+          ],
+          "title": "分页 KV 缓存：BlockPool 与 KvBuffer",
+          "topic": "学习 GPU 侧分页 KV：KvCacheManager（BlockPool+KvBuffer 配对）、块池引用计数、KvView，以及 core 侧 KvPool/PagePool 的关系。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l2-kvbm-logical-blocks.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "掌握类型状态块的合法迁移路径",
+            "理解 PositionalRadixTree 前缀索引与 SequenceHash",
+            "区分 G1-G4 四级分层与 pools 的 reset/active/inactive 生命周期"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "kvbm-logical blocks",
+            "registry",
+            "pools",
+            "manager"
+          ],
+          "order": 2,
+          "practice_task": "画出块类型状态迁移图（含 pin 与 eviction 到 inactive 池的路径），并说明一次'两条请求共享 80% 前缀'在 radix 树上的节点结构。",
+          "source_files": [
+            "kvbm/kvbm-logical/src/lib.rs",
+            "kvbm/kvbm-logical/src/registry/mod.rs",
+            "kvbm/kvbm-logical/src/blocks/mutable.rs",
+            "kvbm/kvbm-logical/src/sequence/mod.rs"
+          ],
+          "title": "kvbm-logical：类型状态块与基数树注册表",
+          "topic": "学习 dynamo 衍生的逻辑块层：Mutable→Complete→Immutable→Weak 类型状态生命周期、PositionalRadixTree 注册表、G1-G4 分层编码与事件管线。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u7-l2",
+            "u6-l3"
+          ],
+          "filename": "u7-l3-qwen3-prefix-cache.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "追踪 prefix_cache_enabled 开关与投机解码互斥的逻辑",
+            "理解 VllmBlockHasher 的 vLLM 兼容块哈希",
+            "掌握 GPU 命中 + CPU 命中堆叠为一条连续前缀的机制"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "qwen3 executor 前缀路径",
+            "prefix_probe",
+            "VllmBlockHasher"
+          ],
+          "order": 3,
+          "practice_task": "运行（或精读）tests/prefix_cache.rs 与 tests/cached_tokens_usage.rs，写一份'两次相同长 prompt 请求'的 KV 块复用跟踪表，标注每块来自 GPU 命中还是新算。",
+          "source_files": [
+            "pegainfer-qwen3/src/executor.rs",
+            "pegainfer-kv-cache/src/pool.rs",
+            "docs/models/qwen3/prefix-cache.md",
+            "pegainfer-qwen3/tests/prefix_cache.rs"
+          ],
+          "title": "Qwen3 前缀缓存集成",
+          "topic": "学习 qwen3 执行器中的前缀缓存：PrefixProbe GPU 命中、prefix_cache_enabled 开关（投机解码时自动关闭）、与实测 TTFT 收益。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "filename": "u7-l4-kv-offload.md",
+          "id": "u7-l4",
+          "learning_goals": [
+            "理解 OffloadEngine 的上下行换页决策与 KvArena 布局",
+            "掌握 OffloadHandle 的 Miss/Loading/Hit 查询语义",
+            "理解 kv-offload 作为 pegainfer 与 pegaflow 分界连接器的定位"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "kv-offload::engine",
+            "kv-offload::host",
+            "OffloadHandle"
+          ],
+          "order": 4,
+          "practice_task": "阅读 tests/kv_offload_cpu_hit.rs，画出让长上下文请求'首块驻 CPU、尾块驻 GPU'时的查询与加载时序；再解释 OffloadHost 为何所有 DP rank 共用一个 PegaEngine。",
+          "source_files": [
+            "pegainfer-kv-offload/src/engine.rs",
+            "pegainfer-kv-offload/src/host.rs",
+            "pegainfer-kv-offload/src/handle.rs",
+            "pegainfer-kv-offload/src/config.rs",
+            "docs/subsystems/runtime/pegaflow-offload-integration.md",
+            "pegainfer-qwen3/tests/kv_offload_cpu_hit.rs"
+          ],
+          "title": "KV Offload：GPU↔主机↔SSD/RDMA 换页",
+          "topic": "学习 pegainfer-kv-offload：OffloadEngine 的搬运时机决策、pegaflow 承载的 host/SSD/RDMA 深层、P2P RDMA 服务模式与可轮询的 OffloadHandle。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u7-l4"
+          ],
+          "filename": "u7-l5-kv-store-unification.md",
+          "id": "u7-l5",
+          "learning_goals": [
+            "掌握 KvStore 的 probe→host query→reserve→load→radix commit 读路径",
+            "理解 HostTier/TierQuery 的 Loading 态与四调度触点",
+            "能对照 design.md 说明 kv-store 统一 qwen3 手写编排的迁移路线"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "kv-store::store",
+            "kv-store::tier",
+            "kv-store::policy",
+            "builder"
+          ],
+          "order": 5,
+          "practice_task": "对照 qwen3 executor.rs 中手写的 probe+load 序列与 KvStore::resolve_prefix 的实现，写一份逐行对照表，指出两处语义相同的步骤与 kv-store 新增的能力。",
+          "source_files": [
+            "pegainfer-kv-store/src/store.rs",
+            "pegainfer-kv-store/src/tier.rs",
+            "pegainfer-kv-store/src/policy.rs",
+            "pegainfer-kv-store/src/builder.rs",
+            "docs/subsystems/kv-cache/design.md"
+          ],
+          "title": "kv-store：统一的 KV 读写编排（演进方向）",
+          "topic": "学习计划中的统一层：KvStore 的 resolve_prefix 全读路径、seal/retire 写路径、HostTier 接缝与 CacheScope/ResolvePolicy 策略，以及四触点调度集成。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 7,
+      "title": "KV 缓存体系：从分页池到分层 offload"
+    },
+    {
+      "id": "u8",
+      "lectures": [
+        {
+          "action": "update",
+          "depends_on": [
+            "u6-l4",
+            "u4-l2"
+          ],
+          "filename": "u8-l1-qwen35-hybrid.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "理解 Gated DeltaNet 线性注意力的 chunkwise 前向",
+            "掌握 recurrent_state 快照为何是前缀缓存命中的必要条件",
+            "了解 TP 执行器与主执行器的结构差异",
+            "注意到 TP 路径的采样 scratch 现经 with_selection_width 携带可解码词表宽度（机制详见 u8-l7）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "qwen35 recurrent",
+            "recurrent_state",
+            "tp_executor",
+            "Triton AOT"
+          ],
+          "order": 1,
+          "practice_task": "对比 qwen3 与 qwen35 的 prefill 缓冲与状态管理差异，写一份'全注意力 vs 混合注意力'的调度影响清单（KV 页 vs 循环状态快照）。",
+          "source_files": [
+            "pegainfer-qwen35/src/recurrent.rs",
+            "pegainfer-qwen35/src/recurrent_state.rs",
+            "pegainfer-qwen35/src/tp_executor.rs",
+            "pegainfer-qwen35/src/scheduler/tp.rs"
+          ],
+          "title": "Qwen3.5：Gated DeltaNet 混合注意力",
+          "topic": "学习线性注意力+全注意力混合架构：gated delta rule 的 chunkwise Triton 内核、循环状态与 conv 快照对前缀缓存的影响、TP 执行器。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "filename": "u8-l2-gemma4-two-family-kv.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "理解滑动窗族与全局族的页尺寸差异与预算公式",
+            "掌握六个服务旋钮（fp8 KV、prefix cache、admission coalesce、async prefill、chunked walk、decode slots）",
+            "理解 green ctx 在 gemma4 中保护解码尾延迟的用法"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "gemma4 engine",
+            "gemma4 kv",
+            "prefix_cache",
+            "green_ctx"
+          ],
+          "order": 2,
+          "practice_task": "设计一组实验矩阵：在 pegainfer-sim 或阅读 engine 测试的基础上，预测 PEGAINFER_KV_FP8 与 PEGAINFER_PREFIX_CACHE 组合开启时的显存与 TTFT 变化，并写出预测依据（引用 kv.rs 的预算公式）。",
+          "source_files": [
+            "pegainfer-gemma4/src/engine.rs",
+            "pegainfer-gemma4/src/kv.rs",
+            "pegainfer-gemma4/src/prefix_cache.rs",
+            "pegainfer-gemma4/src/green_ctx.rs"
+          ],
+          "title": "Gemma 4：滑动窗+全局双族 KV 与服务旋钮",
+          "topic": "学习单卡两族注意力（滑动窗+全局）的 KV 契约、批解码、可选 chunked prefill，以及一组 env 旋钮（KV FP8、前缀缓存、准入合并、async prefill 绿色通道）。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "filename": "u8-l3-dsv2-lite-mla-moe.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "理解 MLA 与标准 GQA KV 的存储差异",
+            "掌握 MoE 路由与专家分发在 EP2 下的数据流",
+            "了解设备驻留 NCCL 通信后端的设计取舍"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "dsv2 runtime::layers",
+            "runtime::moe",
+            "ep",
+            "nccl_backend"
+          ],
+          "order": 3,
+          "practice_task": "画出 EP2 下一条 token 的往返路径（router→本卡专家→对卡专家→combine），并标注每步的张量形状；对照 status.md 说明该模型线'正确性路径'与生产就绪的差距。",
+          "source_files": [
+            "pegainfer-deepseek-v2-lite/src/ep.rs",
+            "pegainfer-deepseek-v2-lite/src/runtime/layers.rs",
+            "pegainfer-deepseek-v2-lite/src/runtime/moe.rs",
+            "pegainfer-deepseek-v2-lite/src/runtime/routing.rs",
+            "pegainfer-deepseek-v2-lite/src/config.rs"
+          ],
+          "title": "DeepSeek-V2-Lite：MLA + MoE + 专家并行",
+          "topic": "以最小的 MoE+EP 模型学习 MLA 注意力、MoE 路由与 2 卡 EP2 的 nccl_backend 设备驻留通信。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "filename": "u8-l4-kimi-k2-mla-marlin.md",
+          "id": "u8-l4",
+          "learning_goals": [
+            "理解 tp1_dp8 与 tp8_dp1 两种执行器拓扑的适用场景",
+            "掌握 moe_deepep 与 moe_nccl 两条 MoE 通信路径",
+            "了解 Marlin INT4 量化权重的加载约束"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "kimi runner",
+            "moe_deepep",
+            "executor tp1_dp8/tp8_dp1",
+            "worker::forward"
+          ],
+          "order": 4,
+          "practice_task": "画出 8 卡上 tp1_dp8 与 tp8_dp1 的卡间通信拓扑对比图，标注每步走 DeepEP 还是 NCCL；再解释 runner/load_balancer.rs 在 DP 路由中的角色。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/runner.rs",
+            "pegainfer-kimi-k2/src/runner/moe_deepep.rs",
+            "pegainfer-kimi-k2/src/runner/executor/tp1_dp8.rs",
+            "pegainfer-kimi-k2/src/runner/executor/tp8_dp1.rs",
+            "pegainfer-kimi-k2/src/runner/worker/forward.rs"
+          ],
+          "title": "Kimi-K2：MLA + Marlin INT4 + 8 卡 EP",
+          "topic": "学习大规模 MoE 服务的工程化：runner 调度框架、tp1_dp8/tp8_dp1 双拓扑执行器、DeepEP/NCCL 两条 MoE all-to-all 路径、Marlin INT4 权重。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "filename": "u8-l5-glm52-sparse-mla-mtp.md",
+          "id": "u8-l5",
+          "learning_goals": [
+            "理解稀疏 MLA（indexer 选 topk latent）与 dense MLA 的差别",
+            "掌握 MTP 投机解码的 draft-verify 循环与 96 行步约束",
+            "了解 FP8 GEMM 与 per-TU SM 目标（sm_90a/sm_100f）的构建映射"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "glm52 mla_decode",
+            "indexer",
+            "moe_ep",
+            "mtp",
+            "scheduler"
+          ],
+          "order": 5,
+          "practice_task": "以 GLM52_DECODE_SLOTS 与 GLM52_MTP_DRAFTS 为变量推导 96 行步的合法组合区间，并解释 MTP 吞吐档位（32/2）与默认档（8/5）各自的收益来源。",
+          "source_files": [
+            "pegainfer-glm52/src/mla_decode.rs",
+            "pegainfer-glm52/src/indexer.rs",
+            "pegainfer-glm52/src/moe_ep.rs",
+            "pegainfer-glm52/src/mtp.rs",
+            "pegainfer-glm52/src/scheduler/mtp.rs"
+          ],
+          "title": "GLM-5.2：稀疏 MLA + FP8 + MTP 投机解码",
+          "topic": "学习 Blackwell 级模型线：DeepSeek-V3.2 式稀疏 MLA indexer、FP8 GEMM、EP4/EP8 MoE、原生 MTP 投机解码与 P/D 分离。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u8-l5"
+          ],
+          "filename": "u8-l6-k3-kda-whale-gang.md",
+          "id": "u8-l6",
+          "learning_goals": [
+            "理解 KDA 门控差分注意力与 MLA 混合的调用序列",
+            "掌握 K3EpRendezvous 的舰队会合与固定集合通信链",
+            "理解 CP 上下文并行对长 prompt 预填充的加速方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "k3 executor::ep",
+            "executor::cp",
+            "scheduler::whale",
+            "forward"
+          ],
+          "order": 6,
+          "practice_task": "对照 PEGAINFER_K3_CP 与 PEGAINFER_K3_CP_MIN 两个旋钮，画出 CP 宽度=4 时一条 8k prompt 的分块流向图，并解释低于下限的 prompt 为何回退本地预填充。",
+          "source_files": [
+            "pegainfer-k3/src/executor/ep.rs",
+            "pegainfer-k3/src/executor/cp.rs",
+            "pegainfer-k3/src/scheduler/whale.rs",
+            "pegainfer-k3/src/executor/forward/decode.rs"
+          ],
+          "title": "Kimi-K3：KDA + whale gang + 上下文并行",
+          "topic": "学习 bring-up 中的 K3：KDA 混合注意力、latent MoE MXFP4、whale-gang 舰队调度、CP 弹性预填充通道与 DSpark draft lane。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1",
+            "u4-l3",
+            "u4-l6"
+          ],
+          "filename": "u8-l7-qwen35-selection-width-alignment.md",
+          "id": "u8-l7",
+          "learning_goals": [
+            "说出 vocab_size / decodable_vocab / selection_vocab 三个宽度的语义与 4B checkpoint 下的实际取值（248320 / 248077 / 248192）",
+            "解释奇数选择宽度如何让 cublasLt 落到 align-1 的 sm_75 时代内核（1.67 ms/step，约占 c16 TPOT 12%）以及 tile 对齐后的实测收益（c16 TPOT −5.3%）",
+            "理解 output_logits_into 为何把输出投影 GEMM 与 pad 行 -inf 抑制绑定为唯一 logits 出口：pad 行是训练过的 embedding，漏掉抑制不崩溃而会在 wire 上吐出不可解码 id 并回灌解码",
+            "理解两道新门禁各自守护的不变量：pad_columns_are_suppressed_on_the_model_logits_paths（模型侧掩码）与 padded_arena_width_does_not_suppress_the_argmax_routing（采样路由宽度），以及 hf_golden_gate 为何对此天然失明"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Config35::bound_selection_vocab",
+            "Qwen35Model::output_logits_into 与 SuppressIds",
+            "SampleScratch::with_selection_width"
+          ],
+          "order": 7,
+          "practice_task": "以 248077 为例手工推导 next_multiple_of(128) 与 clamp 到 vocab_size 的结果，画出 decodable_vocab/selection_vocab/vocab_size 三个宽度在 config、权重、decode_buffers、sampler 各层的传播图；然后注释掉 output_logits_into 中的 suppress 调用（或精读其断言），说明 pad_columns_are_suppressed_on_the_model_logits_paths 如何在 prefill 与 decode 两条 logits 路径上失败，并解释为何 HF golden 门禁（teacher-forced logprobs，exp(-inf)=0）看不见该失效。",
+          "source_files": [
+            "pegainfer-qwen35/src/config/model.rs",
+            "pegainfer-qwen35/src/weights.rs",
+            "pegainfer-qwen35/src/unified_forward.rs",
+            "pegainfer-sample/src/lib.rs",
+            "docs/models/qwen35/decode-kernel-attribution.md"
+          ],
+          "title": "Qwen3.5 logits 宽度对齐：tile 对齐 GEMM 与 pad 行抑制",
+          "topic": "讲解 #1046 引入的跨层机制：bound_selection_vocab 把 selection_vocab 向上对齐到 128 倍数并记录 decodable_vocab；output_logits_into 把输出投影 GEMM 与 SuppressIds 的 -inf 抑制合并为模型唯一 logits 出口；SampleScratch::with_selection_width 保证 effectively_greedy 路由按可解码宽度而非 arena 宽度判定。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 8,
+      "title": "模型线巡礼：七种架构的对照阅读"
+    },
+    {
+      "id": "u9",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l4",
+            "u4-l6"
+          ],
+          "filename": "u9-l1-speculative-decoding.md",
+          "id": "u9-l1",
+          "learning_goals": [
+            "掌握 DraftStepItem/VerifyStepItem 的 draft-verify 数据流",
+            "理解 dflash 与 eagle3 两种 draft 模型的加载与预约",
+            "解释投机解码与前缀缓存互斥的原因"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "speculative",
+            "dspark",
+            "dflash",
+            "eagle3"
+          ],
+          "order": 1,
+          "practice_task": "画出一轮 DSpark draft-verify 的时间线（draft N 步→单步 verify→接受/回滚），并对照 tests/dflash_speculative_gate.rs 说明验收门禁测什么。",
+          "source_files": [
+            "pegainfer-qwen3/src/speculative.rs",
+            "pegainfer-qwen3/src/dspark.rs",
+            "pegainfer-qwen3/src/dflash.rs",
+            "pegainfer-qwen3/src/dflash/loading.rs",
+            "pegainfer-qwen3/src/eagle3.rs",
+            "pegainfer-qwen3/src/verify_graph.rs",
+            "docs/models/qwen3/dflash-speculative-decoding.md"
+          ],
+          "title": "投机解码：DFlash、DSpark 与 Eagle3",
+          "topic": "学习 qwen3 的三条投机解码路径：目标模型侧的 VerifyStepItem/verify_graph、dflash/eagle3 draft 权重与预约、dspark 集成模式。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "filename": "u9-l2-green-ctx-overlap.md",
+          "id": "u9-l2",
+          "learning_goals": [
+            "理解 SM 分区（green context）如何让 prefill 与 decode 并行不争抢",
+            "掌握 DecodeOverlap 与 OverlapStreams 的流生命周期",
+            "了解 async prefill 车道与混合步的约束关系"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "green_ctx",
+            "DecodeOverlap",
+            "OverlapStreams"
+          ],
+          "order": 2,
+          "practice_task": "画出一个 decode 步与一个 async prefill 步在两个 SM 受限流上的重叠时序图；对照 gemma4 的 PEGAINFER_ASYNC_PREFILL 说明 green/shared 两模式的差异。",
+          "source_files": [
+            "pegainfer-qwen3/src/green_ctx.rs",
+            "pegainfer-qwen3/src/executor.rs",
+            "docs/models/qwen3/green-ctx-sm-partition.md"
+          ],
+          "title": "Green Context：SM 分区与 prefill/decode 重叠",
+          "topic": "学习绿色上下文流分区：DecodeOverlap 枚举、OverlapStreams 的创建与销毁、async prefill 车道在 qwen3 与 gemma4 中的实现差异。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "filename": "u9-l3-lora.md",
+          "id": "u9-l3",
+          "learning_goals": [
+            "理解 LoraAdapter 的模块匹配与 DeviceLoraLayer 的权重布局",
+            "掌握 PackedLoraRegistry 的预分配打包策略",
+            "追踪 LoraControl 控制通道到 /v1 代理路由的链路"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "qwen3 lora",
+            "frontend control",
+            "vllm lora 代理"
+          ],
+          "order": 3,
+          "practice_task": "运行（或精读）tests/lora_smoke.rs 与 tests/lora_golden_gate.rs，画出'HTTP 指定 adapter→LoraClient 控制→内核融合计算'的调用链，并说明 LoRA 请求的确定性如何被门禁保护。",
+          "source_files": [
+            "pegainfer-qwen3/src/lora.rs",
+            "pegainfer-qwen3/src/weights.rs",
+            "pegainfer-frontend/src/engine/control.rs",
+            "pegainfer-frontend/src/vllm/lora.rs",
+            "pegainfer-qwen3/tests/lora_golden_gate.rs"
+          ],
+          "title": "LoRA 多适配器服务",
+          "topic": "学习 LoRA 全链路：前端 LoraControl/LoraClient 动态控制、vllm 侧可覆写适配器的 OpenAI 代理路由、qwen3 的 PackedLora 投影融合内核。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "filename": "u9-l4-tensor-parallel.md",
+          "id": "u9-l4",
+          "learning_goals": [
+            "掌握 TensorParallelConfig 的秩协调与列切/行切配对",
+            "理解 RankWorker 线程模型与 StepCommand 通道协议",
+            "了解 TP 下 batch-invariance 门禁测什么"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "RankWorker",
+            "TensorParallelConfig",
+            "tp_design 文档"
+          ],
+          "order": 4,
+          "practice_task": "推导一次两层 MLP 前向在 TP2 下需要的通信次数与张量切分（对照 weights.rs 的 shard 函数），并解释 tests/tp_concurrent_decode.rs 如何验证并发解码正确性。",
+          "source_files": [
+            "pegainfer-qwen3/src/executor.rs",
+            "pegainfer-qwen3/src/config.rs",
+            "pegainfer-qwen3/src/weights/load.rs",
+            "docs/models/qwen3/tp-design.md",
+            "pegainfer-qwen3/tests/tp_concurrent_decode.rs"
+          ],
+          "title": "张量并行：RankWorker 多卡协同",
+          "topic": "学习 qwen3 的 TP 实现：TensorParallelConfig、executor 中 RankWorker 每 rank 一线程、StepCommand/WorkerStepOutcome 通道、权重行列分片与 NCCL 约定。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u8-l5"
+          ],
+          "filename": "u9-l5-free-running-ep.md",
+          "id": "u9-l5",
+          "learning_goals": [
+            "背诵自由运行三铁律：不停等、固定集合链、launch 计数为全局时钟",
+            "理解 padding 行为何是协议面（字节到达对端）",
+            "能对照 glm52 scheduler 与 k3 gang 找到三条铁律的代码落点"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "free-running-dp 文档",
+            "glm52 scheduler",
+            "k3 whale gang"
+          ],
+          "order": 5,
+          "practice_task": "做一次'违规模式查检'：在 glm52 scheduler 与 k3 whale 代码中各找一个容易误加 condvar/sleep 的位置，说明为什么那里绝不能等，并写出 padding 行的确定性构造要求。",
+          "source_files": [
+            "docs/models/glm52/free-running-dp.md",
+            "pegainfer-glm52/src/scheduler/admission.rs",
+            "pegainfer-glm52/src/rendezvous.rs",
+            "pegainfer-k3/src/executor/ep.rs",
+            "pegainfer-k3/src/scheduler/gang.rs"
+          ],
+          "title": "EP 自由运行纪律：不停等与填充行协议",
+          "topic": "深入 8 卡 EP 的自由运行数据并行设计：每 rank 独立全速循环、固定 per-step 集合通信链、launch 计数对齐时钟、确定性 padding 行。"
+        }
+      ],
+      "level": "advanced",
+      "order": 9,
+      "title": "高级机制：投机解码、重叠、LoRA 与并行"
+    },
+    {
+      "id": "u10",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u10-l1-testing-gates.md",
+          "id": "u10-l1",
+          "learning_goals": [
+            "理解 hf_golden_gate 的 logits 基线比对原理",
+            "掌握 batch_invariance 系列测的'批不改变输出'契约",
+            "能按'需要什么资源'归类运行全部测试"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "hf_golden_gate",
+            "batch_invariance 系列",
+            "scheduler_robustness"
+          ],
+          "order": 1,
+          "practice_task": "把 tests/ 下 23 个测试文件按'纯 CPU 单测 / GPU 无权重 / GPU+权重'分类制表，并实际运行 cargo test --release --workspace --lib 验证第一类的通过情况。",
+          "source_files": [
+            "pegainfer-qwen3/tests/hf_golden_gate.rs",
+            "pegainfer-qwen3/tests/batch_invariance_endtoend.rs",
+            "pegainfer-qwen3/tests/scheduler_robustness.rs",
+            "pegainfer-qwen3/tests/sampling_behavior.rs",
+            "pegainfer-qwen3/tests/logprobs_contract.rs"
+          ],
+          "title": "测试体系：golden 基线与批不变性门禁",
+          "topic": "学习项目的测试哲学：HF golden logits 门禁、批不变性八连测、调度健壮性、logprobs 契约，以及 GPU 依赖测试的运行方式。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u10-l2-bench-and-kernel-reports.md",
+          "id": "u10-l2",
+          "learning_goals": [
+            "掌握 measure_loop 的 CUDA 事件计时与 LatencyStats 指标",
+            "会用 KernelCall/CallSpec 表达一个基准日程",
+            "能生成并解读 qwen3_kernel_report"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "pegainfer-bench",
+            "kernel_report bin",
+            "call_spec"
+          ],
+          "order": 2,
+          "practice_task": "选一个已有 bench（如 pegainfer-sample 的 select_batch bench），记录 p50/p99 并用 KernelCall 概念标注每次计时对应哪个内核；无 GPU 时精读 qwen3_kernel_report.rs 写出报告的生成流程。",
+          "source_files": [
+            "pegainfer-bench/src/lib.rs",
+            "pegainfer-core/src/ops/call_spec.rs",
+            "pegainfer-qwen3/src/bin/qwen3_kernel_report.rs",
+            "pegainfer-qwen3/src/bin/qwen3_model_report.rs"
+          ],
+          "title": "基准测试：pegainfer-bench 与内核报告",
+          "topic": "学习内核基准框架 measure_loop/LatencyStats/KernelCall 日程，以及 qwen3 的 kernel/model report 二进制如何产出可复现的算子级报告。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u10-l3-profiling.md",
+          "id": "u10-l3",
+          "learning_goals": [
+            "掌握 nsys 捕获解码/预填负载的参数选择",
+            "理解 CUPTI range profiler 的按区间硬件计数采集",
+            "能从 trace 中定位内核间隙与尾部延迟"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "nsys",
+            "pegainfer-cupti",
+            "profiling playbook"
+          ],
+          "order": 3,
+          "practice_task": "按 playbook 采集一次小负载 trace（或使用仓库 bench_snapshots 中的既有数据），找出解码一步中的前三大耗时段，写出每个时段对应的源码模块名。",
+          "source_files": [
+            "docs/playbooks/profiling-guide.md",
+            "pegainfer-cupti/src/lib.rs",
+            "pegainfer-core/src/tracing.rs",
+            "pegainfer-core/src/ops/call_trace.rs"
+          ],
+          "title": "性能剖析：nsys 与 CUPTI",
+          "topic": "学习 GPU 性能定位：nsys 常见坑、CUPTI 区间剖析绑定 profile_range_with_prepare、以及内核调用 trace 的采集。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u10-l4-observability.md",
+          "id": "u10-l4",
+          "learning_goals": [
+            "掌握 SchedulerMetrics/SpecDecodeCounters 的指标语义",
+            "追踪 publish_scheduler_stats 到 vLLM wire 的转换",
+            "会搭建并阅读 prometheus 指标面板"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "engine::metrics",
+            "bridge stats 发布",
+            "prometheus"
+          ],
+          "order": 4,
+          "practice_task": "在服务运行时抓取 /metrics（或阅读 dashboards 目录的既有面板定义），为 queue_depth、spec-decode 计数等五个指标写出计算来源（对应哪行代码的哪个计数器）。",
+          "source_files": [
+            "pegainfer-frontend/src/engine/metrics.rs",
+            "pegainfer-frontend/src/vllm/bridge.rs",
+            "docs/subsystems/frontend/prometheus-metrics.md"
+          ],
+          "title": "可观测性：调度指标与 Prometheus",
+          "topic": "学习 SchedulerMetrics/SpecDecodeCounters 如何经 bridge 的 publish_scheduler_stats 上到 vLLM wire 并暴露为 Prometheus 指标。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2",
+            "u6-l2"
+          ],
+          "filename": "u10-l5-adding-a-new-model-line.md",
+          "id": "u10-l5",
+          "learning_goals": [
+            "掌握接入新模型的七步：probe→CLI→config→weights→forward→scheduler→adapter",
+            "理解 server 端需要的两处登记（feature 与 model_lines）",
+            "能评估'复用 core::ops 与 kv-cache'与'自持执行'的边界"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "model_line 模式",
+            "qwen3 crate 结构",
+            "接入清单"
+          ],
+          "order": 5,
+          "practice_task": "综合全手册：写一份'接入一个假想模型线 mymodel'的实施清单，包含每个文件级的改动点（frontend/model_line.rs 登记、新 crate 骨架、config/weights/forward/scheduler/adapter），并注明哪些步骤可复制 qwen3、哪些必须新写。",
+          "source_files": [
+            "pegainfer-frontend/src/model_line.rs",
+            "pegainfer-qwen3/src/model_line.rs",
+            "pegainfer-server/src/main.rs",
+            "docs/models/qwen3/model-crate.md",
+            "docs/roadmap/direction.md"
+          ],
+          "title": "实战：接入一条新模型线",
+          "topic": "以 model-crate.md 与 qwen3 为模板，总结从零接入新模型的完整步骤清单：ModelLine trait 实现、feature 登记、crate 结构与测试门禁。"
+        }
+      ],
+      "level": "advanced",
+      "order": 10,
+      "title": "工程质量：测试、基准、剖析与二次开发"
+    }
+  ]
+}
