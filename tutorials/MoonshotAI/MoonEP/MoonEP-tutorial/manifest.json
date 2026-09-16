@@ -1,0 +1,829 @@
+{
+  "head": "2bd860b4dd083df62b79d5e916fca71ec5742228",
+  "project": "MoonEP",
+  "rationale": "MoonEP 是一个中等规模的 CuTe DSL + CUDA C++ 专家并行通信库，核心链路清晰：NVLink 对称内存基础设施（buffer.py + csrc）→ 在线规划器（planning.py，动态冗余专家的均衡算法）→ dispatch/combine 通信内核（含去重 epilogue/prologue）→ 权重预取与梯度归约（prefetch.py / grad_reduce.py）→ 顶层的 Buffer API（api.py）。大纲按\"先跑起来、再懂内存、再懂算法、再懂内核、最后懂工程化\"的顺序分六个单元：入门层解决项目定位、构建运行与 API 上手；进阶层先铺垫 VMM/组播等内存地基（不理解 meta_buf 布局就无法读懂任何内核），再沿规划器的 Phase A/B/C/D 数据流逐讲拆解均衡算法与去重编码；专家层深入 warp 特化内核、量化预取、异步流与零拷贝等并发与性能主题，并以测试方法论和基准测试收尾，最终指向二次开发。讲义间的依赖关系（depends_on）严格对应这条从外到内、从算法到实现的学习路径，每篇都锚定 1-6 个真实源码文件并配一个可操作的代码实践。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "理解 MoE 专家并行（EP）的基本概念与 S/K/E/R 符号",
+            "理解 maxvio 指标与路由不均衡对通信和训练的危害",
+            "能概述 MoonEP 的三大核心设计及其相互关系"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README 性能与用法章节",
+            "moonep 包公共导出"
+          ],
+          "order": 1,
+          "practice_task": "编写脚本 maxvio_demo.py：参考 tests/generate_topk_routing.py 的生成方式构造均衡和偏置两种随机 topk 路由，统计每个专家的 token 数并计算 maxvio，验证偏置路由下 maxvio 显著大于 0。",
+          "source_files": [
+            "README.md",
+            "moonep/__init__.py",
+            "tests/generate_topk_routing.py"
+          ],
+          "title": "MoonEP 是什么：专家并行通信与负载不均衡问题",
+          "topic": "介绍 Mixture-of-Experts 专家并行（EP）背景，解释 token 路由不均衡（maxvio 指标）为什么会拖慢通信与训练，以及 MoonEP 用动态冗余专家、在线规划和零拷贝静态形状实现每个 rank 恰好接收 S×K 个 token 的完美均衡。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-build-and-test.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "理解 CUDAExtension 的编译链路与 moonep._C 的导入方式",
+            "掌握 pip install -e . 与 build_ext --inplace 两种构建方式",
+            "知道六组多卡测试如何用 torchrun 启动及其硬件前提"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "setup 构建脚本",
+            "CUDA 扩展绑定",
+            "pytest 配置"
+          ],
+          "order": 2,
+          "practice_task": "在可用环境执行 pip install -e . 并运行 torchrun --nproc_per_node=8 -m pytest tests/test_planning.py；若无 GPU，写一个脚本解析 setup.py 的 nvcc_flags，逐项注释每个编译开关的作用。",
+          "source_files": [
+            "setup.py",
+            "csrc/bindings.cu",
+            "tests/conftest.py"
+          ],
+          "title": "构建、安装与运行测试",
+          "topic": "讲解 setup.py 如何把 csrc/bindings.cu 编译为 moonep._C 扩展、为什么依赖 nvidia-cutlass-dsl，以及如何用 torchrun 以多 GPU + NVLink 环境运行 tests/ 下的六组测试。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-code-map.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "说出每个 moonep 子模块的职责与核心入口",
+            "区分 Python 内核（CuTe DSL）、C++ 绑定与测试/基准三层代码",
+            "建立后续讲义的文件索引"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "moonep 各子模块",
+            "测试工具",
+            "基准脚本"
+          ],
+          "order": 3,
+          "practice_task": "编写脚本扫描 moonep/ 下各模块的 import 语句并输出模块依赖邻接表，验证 api.py 是所有子内核模块的唯一汇聚点。",
+          "source_files": [
+            "moonep/api.py",
+            "moonep/constants.py",
+            "tests/kernel_test_utils.py",
+            "benchmarks/bench_comm.py"
+          ],
+          "title": "代码地图：目录结构与模块职责",
+          "topic": "带读者走一遍 moonep/（API、规划、dispatch/combine 内核、预取、梯度归约）、csrc/（VMM/CUDA 绑定）、tests/、benchmarks/ 的文件布局，建立“哪个功能在哪个文件”的索引。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "filename": "u1-l4-api-quickstart.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "掌握 Buffer 构造参数 S/H/K/E/num_ep_ranks/num_sms/token_padding/B 的含义",
+            "知道 dispatch/prefetch_weight/combine/reduce_grad 的输入输出张量约定",
+            "能独立写出最小的 dispatch→combine 调用序列"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Buffer 类",
+            "端到端测试"
+          ],
+          "order": 4,
+          "practice_task": "仿照 tests/test_e2e.py 编写 my_first_moonep.py：初始化进程组、构造 Buffer、完成一次 dispatch→prefetch_weight→combine，并打印每步输出的形状。",
+          "source_files": [
+            "moonep/api.py",
+            "tests/test_e2e.py",
+            "README.md"
+          ],
+          "title": "Buffer API 快速上手",
+          "topic": "以 tests/test_e2e.py 为参照，演示 Buffer 的构造参数与 dispatch、prefetch_weight、combine、reduce_grad 四个入口的参数、返回值和张量形状约定，先会“用”再深入“怎么实现”。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "初识 MoonEP：问题、定位与运行"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l1-notation-and-dataflow.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "熟练说出每个符号的含义及相互关系（如 NvS = S×K + padding 余量）",
+            "跟踪一次前向中 hidden/route_weights/cu_seqlens 的形状流转",
+            "理解静态形状如何消除逐层 MoE 宿主同步"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "api 模块头文档",
+            "_create_context 尺寸计算"
+          ],
+          "order": 1,
+          "practice_task": "编写 shapes_tour.py：给定 S=4096,H=7168,K=8,E=256,R=8 打印 B 默认值、NvS、hidden_buf/meta_buf 各维度以及 dispatch/combine 的输入输出形状，并对照 _create_context 的公式逐项核对。",
+          "source_files": [
+            "moonep/api.py",
+            "README.md"
+          ],
+          "title": "符号系统与端到端数据流",
+          "topic": "系统梳理 S/K/E/R/B/NvS/H/H' 记号在 api.py 与 README 中的含义，跟踪一次 dispatch→prefetch→专家 FFN→combine 中所有张量的形状、dtype 与设备变化，理解静态形状的意义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l2-vmm-symmetric-memory.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "理解 cuMemCreate/cuMemMap 的分配-映射两步模型与粒度对齐",
+            "掌握 nvl_dist_alloc/nvl_dist_map 导出的 Python 接口",
+            "理解为什么每个 rank 的本地 chunk 物理上就是其参数内存"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "VMM 头文件",
+            "pybind 绑定"
+          ],
+          "order": 2,
+          "practice_task": "编写单进程实验脚本调用 moonep.buffer.get_vmm_granularity 与 pad_dim0_for_alignment，对多组 shape/dtype 验证输出满足 VMM 粒度对齐约束。",
+          "source_files": [
+            "csrc/nvl_shared_buffer.cuh",
+            "csrc/bindings.cu",
+            "moonep/buffer.py"
+          ],
+          "title": "CUDA VMM 与 NVLink 对称内存",
+          "topic": "解析 csrc/nvl_shared_buffer.cuh 与 bindings.cu 中基于 cuMemCreate/cuMemMap 的分布式显存分配：粒度对齐、每个 rank 拥有一段物理内存、再映射成一块所有 rank 可读写的连续虚拟地址。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-handle-sharing-fabric-fd.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "理解 SCM_RIGHTS 传 fd 的内核语义与 barrier 保证的关闭时机",
+            "掌握 fabric handle 的适用条件（同一 NVLink 域/多节点）",
+            "理解 _use_fabric_for_group 的探测与回退逻辑"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "buffer 句柄交换",
+            "fabric 探测"
+          ],
+          "order": 3,
+          "practice_task": "阅读 _exchange_ipc_fds 与 _use_fabric_for_group，画出 fd 与 fabric 两种模式的时序图（脚本输出文本时序），并写小脚本验证 MOONEP_MEM_HANDLE_TYPE 各取值下的分支行为。",
+          "source_files": [
+            "moonep/buffer.py"
+          ],
+          "title": "跨进程共享：fabric 句柄与 POSIX fd",
+          "topic": "讲解 buffer.py 如何在 rank 间传递内存句柄：同节点用 unix datagram socket 的 SCM_RIGHTS 传 fd，跨节点 NVLink fabric 用 64 字节 handle，以及 MOONEP_MEM_HANDLE_TYPE=auto/fabric/fd 的选择与探测逻辑。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3",
+            "u2-l1"
+          ],
+          "filename": "u2-l4-multicast-and-meta-layout.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "掌握 meta_buf 各区段（weights/tpe/plan/topk0/order/barrier/src_info）的偏移计算",
+            "理解 multicast 对象的创建-导入-绑定-映射四步流程",
+            "理解 chunk 同时满足 VMM 与 multicast 双重对齐的约束"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "组播视图创建",
+            "_create_context meta 布局"
+          ],
+          "order": 4,
+          "practice_task": "编写脚本按 _create_context 的公式计算一组 (S,H,K,E,R,token_padding) 配置下所有 meta 偏移、meta_chunk_logical 与 meta_chunk_padded，并检查代码中的 int32 溢出断言条件。",
+          "source_files": [
+            "moonep/buffer.py",
+            "moonep/api.py"
+          ],
+          "title": "组播视图与 meta_buf 共享布局",
+          "topic": "说明 NVSwitch 组播（multimem）对象如何叠加在 meta_buf 之上实现一次写全 rank 广播，并逐段解析 _create_context 中 meta_buf 的 WEIGHTS/TPE/PLAN/TOPK0/ORDER0/BARRIER/SRC_INFO 偏移布局与对齐规则。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 2,
+      "title": "内存基础设施：对称内存与共享布局"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u2-l4"
+          ],
+          "filename": "u3-l1-comm-plan-structure.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "说出 plan 每个张量字段的形状、dtype 与语义",
+            "理解 plan 为何被设计为不可变快照并支持 clone",
+            "掌握 allocate_planning_outputs 的对齐与边界检查"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "MoonEPCommPlan 数据类",
+            "规划输出分配"
+          ],
+          "order": 1,
+          "practice_task": "编写脚本复现 allocate_planning_outputs 对一组配置的分配逻辑（借用 api._create_context 的注释确定 ctx 字段），打印 plan 各张量形状，并为每个字段写一行语义注释。",
+          "source_files": [
+            "moonep/planning.py",
+            "moonep/api.py"
+          ],
+          "title": "MoonEPCommPlan：规划输出的数据结构",
+          "topic": "逐字段讲解 MoonEPCommPlan 中 dst、experts_to_copy、zero_fill_ranges、remote_stats 与去重三件套 dup_groups/dup_loffs/dup_counts 的形状与语义，以及 allocate_planning_outputs 的分配、对齐与 clone 设计。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-group-balance.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 tpe 汇聚与 tpe_cumsum 的作用",
+            "掌握 surplus/deficit 贪心平衡循环生成 z 矩阵的过程",
+            "能用 PyTorch 独立复现群组级平衡算法"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "规划内核 Phase A",
+            "PyTorch 参考实现"
+          ],
+          "order": 2,
+          "practice_task": "只看 tests/planning_reference.py 的输入定义，独立用 PyTorch 实现 balance 与 z 矩阵的计算，再用随机 tpe 矩阵与参考实现对拍。",
+          "source_files": [
+            "moonep/planning.py",
+            "tests/planning_reference.py"
+          ],
+          "title": "群组级均衡：surplus/deficit 平衡算法",
+          "topic": "解读规划内核 Phase A：各 rank 的 tokens_per_expert 汇聚到 rank0、按 home group 统计 group_tokens、再用 surplus 最大与 deficit 最小配对的贪心循环生成 token 迁移矩阵 z，并用 planning_reference.py 的 PyTorch 参考对照理解。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-expert-alloc-top-b.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解 alloc 矩阵如何把群组级迁移量落到具体专家",
+            "掌握 top-B 远程专家选择与 experts_to_copy 的填充",
+            "理解 cu_seqlens 与 zero_fill_ranges 的 padded 段语义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "规划内核 Phase B",
+            "规划内核 Phase C"
+          ],
+          "order": 3,
+          "practice_task": "给定手工构造的 alloc[E,R] 矩阵，用 PyTorch 写出 top-B 选择、cu_seqlens 与 zero_fill_ranges 的参考实现，并用 2-3 个小用例（含空段、满段）自测。",
+          "source_files": [
+            "moonep/planning.py",
+            "tests/planning_reference.py"
+          ],
+          "title": "专家级分配与 top-B 预取专家选择",
+          "topic": "讲解 Phase B/C：owner rank 如何把 z 矩阵展开成逐专家的 alloc 分配，每个目的 rank 如何挑选 top-B 个最热远程专家写入 experts_to_copy，以及 cu_seqlens 与 zero_fill_ranges 如何按 token_padding 对齐生成 padded 段布局。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l4-dst-ordering-binary-search.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "理解 vblock 直方图 + 前缀和的多块排序设计",
+            "掌握 alloc_cumsum 上的二分查找如何定位目的 rank",
+            "理解 src_info 的 rank-stride 编码与 -1 哨兵"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "run_c1 排序",
+            "passB 槽位映射"
+          ],
+          "order": 4,
+          "practice_task": "用 PyTorch 复现“全局 token 序号 → (目的 rank, loff)”的映射（含 LOG2_R 二分查找版本），在随机数据上与直接向量化实现对比正确性。",
+          "source_files": [
+            "moonep/planning.py"
+          ],
+          "title": "dst 槽位计算：排序、二分查找与 src_info 溯源",
+          "topic": "分析 run_c1 的分块直方图/前缀和排序（含 warp match_any 加速），以及 passB 如何用 tpe_cumsum 与 alloc_cumsum 上的固定步数二分查找，把每个 token 映射到目的 rank 的槽位并向目的 rank 发布 src_info 溯源。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u3-l5-dedup-encoding.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "理解 -raw_dst-1 负数编码的判别与解码规则",
+            "理解去重如何减少 NVLink 上的冗余 payload 传输",
+            "掌握 dup_groups/dup_loffs/dup_counts 的数据契约"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "dst 规范化",
+            "去重结构契约"
+          ],
+          "order": 5,
+          "practice_task": "编写纯 Python 函数 simulate_dedup(topk, dst)：检测每个 token 落到相同目的 rank 的重复 top-k 项并输出等价的 dup_groups/dup_loffs 列表，与 MoonEPCommPlan 的字段定义对齐。",
+          "source_files": [
+            "moonep/planning.py",
+            "moonep/constants.py"
+          ],
+          "title": "去重编码：负数 dst 与重复组结构",
+          "topic": "讲解同一 token 的多个 top-k 落到同一目的 rank 时，dst 如何被规范化为 -raw_dst-1（只传权重不传 payload），以及 dispatch 端如何据此构建 dup_groups/dup_loffs/dup_counts 供 epilogue/prologue 使用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3",
+            "u2-l4"
+          ],
+          "filename": "u3-l6-plan-publish-and-sync.md",
+          "id": "u3-l6",
+          "learning_goals": [
+            "理解 multimem_st 广播发布的时机与数据范围",
+            "掌握自复位屏障如何免去每次清零",
+            "理解 inter_rank_sync 存在的理由"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Phase D 暂存",
+            "跨 rank 屏障",
+            "inter_rank_sync 内核"
+          ],
+          "order": 6,
+          "practice_task": "阅读 cross_rank_barrier 与 grid_sync 的实现，写出两者的到达/离开协议伪代码并解释 sentinel 位翻转如何免去每次清零；再说明 inter_rank_sync 为什么放在 planning 之前。",
+          "source_files": [
+            "moonep/planning.py",
+            "moonep/_common.py",
+            "moonep/inter_rank_sync.py"
+          ],
+          "title": "计划发布：组播广播、Phase D 暂存与同步原语",
+          "topic": "讲解 rank0 的规划结果如何经 multimem 组播一次性发布到所有 rank 的 PLAN 区、各 rank 如何用 G2S bulk 拷贝暂存自己的切片（Phase D），以及贯穿全库的 grid_sync/cross_rank_barrier 自复位屏障与 launch_inter_rank_sync 预同步的作用。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "在线规划器：动态冗余专家的均衡算法"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u4-l1-cute-dsl-ptx-basics.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "理解 cute.jit/cute.kernel/launch 的编译-启动模型与 constexpr 特化",
+            "掌握 cp.async.bulk 单线程指令的调用约束",
+            "理解 DSL 两个 TMA 限制的具体表现与绕开方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "共享 PTX 助手",
+            "编译缓存"
+          ],
+          "order": 1,
+          "practice_task": "写出 _common.py 中各 inline asm 助手与等价 CUDA C++ 内建函数/PTX 指令的对照表脚本；有环境时运行一个最小 CuTe DSL 内核验证 atom_add_relaxed_gpu_s32 的累加语义。",
+          "source_files": [
+            "moonep/_common.py",
+            "moonep/dispatch.py"
+          ],
+          "title": "CuTe DSL 与 PTX 基础设施",
+          "topic": "讲解 _common.py 中用 llvm.inline_asm 封装的原子操作、cp.async.bulk G2S/S2G、grid_sync、PDL 原语，以及为什么需要绕开 nvidia-cutlass-dsl 4.4.2 的两个 TMA lowering 限制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1",
+            "u3-l5"
+          ],
+          "filename": "u4-l2-dispatch-kernel.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "掌握 dispatch 内核的 warp 角色分工与启动几何",
+            "理解按行 TMA + mbarrier 流水线的生产消费协议",
+            "理解负数 dst 只散射权重不拷 payload 的执行路径"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DispatchKernel",
+            "launch_dispatch 封装"
+          ],
+          "order": 2,
+          "practice_task": "修改 dispatch.py 的 _pick_stages 候选表副本并在多卡环境运行 tests/test_dispatch.py 观察行为；同时写出给定 H 下各 stage 数的 smem 用量计算并核对 _smem_bytes。",
+          "source_files": [
+            "moonep/dispatch.py"
+          ],
+          "title": "dispatch 内核：warp 特化与 TMA 流水线",
+          "topic": "解析 DispatchKernel 的 warp 划分（G2S 生产者、S2G 消费者、零填充、去重构建）、按设备 smem 预算自适应选择流水线深度、按行 TMA 把 token 直写到远端 expert 分组位置，以及退出时的跨 rank 发布屏障。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-dispatch-zero-and-dedup-builder.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "理解零填充 warp 与 zero_fill_ranges 的对应关系",
+            "掌握 primary_packed/kmask/kidx_to_loff 三个 scratch 的编码含义",
+            "理解 dedup 结构顺序不稳定的原因（atomicAdd）"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "零填充 warp",
+            "去重构建 warp"
+          ],
+          "order": 3,
+          "practice_task": "手工构造一个 3-4 个 token、含重复目的 rank 的小用例，推导 primary_packed 与 kidx_to_loff 的期望内容，再对照内核写入逻辑逐行验证。",
+          "source_files": [
+            "moonep/dispatch.py",
+            "moonep/constants.py"
+          ],
+          "title": "dispatch 的零填充 warp 与去重构建 warp",
+          "topic": "讲解 zero warp 如何按 zero_fill_ranges 清零本 rank 分段的 padding 行（含权重槽），以及 fresh-planning 路径上 builder warps 如何消费 planning 发布的 src_info，用 packed 编码（primary_packed/kmask/kidx_to_loff）原子构建去重结构。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u4-l4-dispatch-epilogue.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "理解 epilogue 与 dispatch 的流水衔接（PDL）",
+            "掌握 round-robin 组批次划分与 _B_CANDIDATES 的取舍",
+            "理解设备端读取 dup_counts[0] 如何避免宿主同步"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DispatchEpilogueKernel"
+          ],
+          "order": 4,
+          "practice_task": "为 epilogue 写一个 PyTorch 参考实现（输入 dup_groups/dup_loffs 与 shard 张量，输出展开后的 shard），并用随机重复组验证与逐组 copy 语义等价。",
+          "source_files": [
+            "moonep/dispatch_epilogue.py"
+          ],
+          "title": "dispatch epilogue：本地重复展开",
+          "topic": "分析 DispatchEpilogueKernel 如何把主行经 smem 流水线一次性扇出到同 shard 上的所有重复槽位，理解 dup_counts[0] 在设备端读取以避免宿主同步、组批次 round-robin 映射到 CTA 的设计。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l5-combine-prologue.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "理解 prologue 与 epilogue 的镜像关系（扇出 vs 归约）",
+            "掌握生产者预扫描与 expect_tx 精确声明机制",
+            "理解 stage 可跨组边界时生产消费计数器的对齐方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "CombinePrologueKernel"
+          ],
+          "order": 5,
+          "practice_task": "写出 prologue 的 PyTorch 参考实现（重复组 fp32 求和回写主行），并构造包含跨 stage 组边界的用例说明 cnt 计数器如何对齐生产者与消费者。",
+          "source_files": [
+            "moonep/combine_prologue.py"
+          ],
+          "title": "combine prologue：本地重复累加",
+          "topic": "讲解 CombinePrologueKernel 在 combine 之前把每个重复组以 fp32 精度累加回主行的流水线，以及生产者如何预扫描组头得到精确行数、按 min(B, rows_left) 宣布 expect_tx 以省去填充拷贝。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l5"
+          ],
+          "filename": "u4-l6-combine-kernel.md",
+          "id": "u4-l6",
+          "learning_goals": [
+            "掌握三段式流水线与 NamedBarrier 子块同步",
+            "理解入口跨 rank 屏障为何在 combine 而非 prologue",
+            "理解 combine 同时充当 dispatch bwd 的对偶性"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "CombineKernel"
+          ],
+          "order": 6,
+          "practice_task": "用 PyTorch 写 combine 的参考实现（按 dst 分组累加回 token-major，并支持 route_weights 收集），与 tests/test_combine.py 的断言口径对齐。",
+          "source_files": [
+            "moonep/combine.py",
+            "tests/test_combine.py"
+          ],
+          "title": "combine 内核：K 求和与路由权重收集",
+          "topic": "解析 CombineKernel 的三段式流水线（G2S 加载、4 个 fp32 ACC warp、S2G 写回）如何把每个 token 的 K 份派发结果累加回 token-major 输出，以及负数 dst 条目跳过加载、路由权重照常解码的契约和入口跨 rank 屏障。"
+        }
+      ],
+      "level": "advanced",
+      "order": 4,
+      "title": "通信内核：dispatch 与 combine"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3",
+            "u4-l1"
+          ],
+          "filename": "u5-l1-weight-prefetch.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "掌握权重缓冲区 [E+B,H,H'] 的行语义与 B 的取值规则",
+            "理解 2D TMA 流水线的 tile 划分与持久化 CTA 设计",
+            "理解预取槽物理内存由进程级池共享的成本模型"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "PrefetchKernel",
+            "launch_prefetch 封装"
+          ],
+          "order": 1,
+          "practice_task": "读懂 tests/test_prefetch.py 的 assert_prefetched 检查逻辑，然后写脚本对给定 experts_to_copy 推导每个预取槽应等于哪个源专家行并自检。",
+          "source_files": [
+            "moonep/prefetch.py",
+            "README.md",
+            "tests/test_prefetch.py"
+          ],
+          "title": "权重缓冲区布局与预取内核",
+          "topic": "讲解 [E+B,H,H'] 权重缓冲区约定（前 E 行是经对称内存映射的各 rank 本地专家、后 B 行是预取槽），以及 PrefetchKernel 的持久化 2D TMA 流水线如何按 experts_to_copy 把远程专家权重搬进本地槽位。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-mxfp4-prefetch.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "掌握 _ELEM_TYPES 的类型映射与字节宽度处理",
+            "理解 retile_for_prefetch 的重排动机与 prefetch_retile_nbytes",
+            "理解 H、H' 需为 128 倍数的约束来源"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "元素类型映射",
+            "scale 重排助手"
+          ],
+          "order": 2,
+          "practice_task": "编写脚本对 [E+B, H, K/32] 的 scale 张量执行 retile_for_prefetch 等价重排并验证 round-trip 一致性；再解释 M_BLOCK/N_BLOCK=128 对权重张量形状的约束。",
+          "source_files": [
+            "moonep/prefetch.py"
+          ],
+          "title": "MXFP4 量化权重与 scale 重排",
+          "topic": "讲解预取对 bf16/int8/uint8（MXFP4 e2m1 每字节打包两个值）权重的支持、_ELEM_TYPES 的元素类型映射，以及 retile_for_prefetch 为什么要把 K/32 宽的 scale 张量重排成 128 对齐的 2D tile 再进 TMA。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l3-grad-reduce.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "掌握梯度三缓冲（参数梯度/预取槽梯度/归约缓冲）的镜像关系",
+            "理解预取槽梯度必须绕开框架梯度归约的原因",
+            "理解只本地清零而非远程清零的 NVLink 带宽权衡"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "GradReduceKernel",
+            "launch_grad_reduce 封装"
+          ],
+          "order": 3,
+          "practice_task": "用 PyTorch 写 reduce_grad 的多 rank 模拟（各 rank 归约缓冲 → owner 累加 → 清零消费过的槽位），在 tests/test_grad_reduce.py 的 grad_base/reduce_base 构造下验证期望结果。",
+          "source_files": [
+            "moonep/grad_reduce.py",
+            "README.md",
+            "tests/test_grad_reduce.py"
+          ],
+          "title": "梯度缓冲区与 reduce_grad",
+          "topic": "讲解训练侧 [E+B,H,H'] fp32 梯度缓冲与 [R,B,H,H'] 归约缓冲的镜像布局，以及 GradReduceKernel 如何远程读取各 rank 归约槽、用本地梯度做种子累加、跨 rank 屏障后只清零自己消费过的槽位。"
+        }
+      ],
+      "level": "advanced",
+      "order": 5,
+      "title": "权重预取与梯度归约"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u6-l1-async-comm-stream.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "掌握主/通信流事件握手模式与 record_stream 的必要性",
+            "理解 comm stream 优先级与 PDL 开关的作用",
+            "理解环境变量覆盖不加公开参数的设计取舍"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "comm stream 管理",
+            "async_finish 路径"
+          ],
+          "order": 1,
+          "practice_task": "编写双流实验脚本：主流产生输入、通信流执行拷贝内核，用事件复现 api.py 的 wait_event/record_event 握手模式，再故意漏掉 record_stream 观察潜在的生命周期问题。",
+          "source_files": [
+            "moonep/api.py"
+          ],
+          "title": "异步通信流与 CUDA 事件",
+          "topic": "分析 Buffer 内部 comm stream 的创建（优先级、enable_pdl、MOONEP_NUM_SMS_DEDUP 环境变量）与 async_finish=True 路径：record_stream 生命周期保护、主/通信流事件握手，以及四个 API 共享同一通信流的串行化含义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1",
+            "u4-l2"
+          ],
+          "filename": "u6-l2-zero-copy-views.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "掌握 zero_copy 与 router_weights_zero_copy 的分层语义",
+            "理解视图别名缓冲区被后续通信覆盖的风险模型",
+            "能判断何种框架集成场景必须退回 zero_copy=False"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "零拷贝路径",
+            "缓冲区视图属性"
+          ],
+          "order": 2,
+          "practice_task": "修改 u1-l4 的脚本分别以 zero_copy=True/False 运行，用 data_ptr 验证视图别名关系，并写断言复现 combine 的零拷贝检查逻辑。",
+          "source_files": [
+            "moonep/api.py",
+            "moonep/buffer.py"
+          ],
+          "title": "零拷贝模式：视图别名与安全约束",
+          "topic": "讲解 zero_copy 与 router_weights_zero_copy 的分层控制：dispatch 返回 NVL shard 视图、combine 用 data_ptr 断言输入必须精确别名，以及视图不可跨通信调用存活（autograd 保存即出错）的风险与适用场景。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l4",
+            "u4-l6",
+            "u5-l1"
+          ],
+          "filename": "u6-l3-training-full-loop.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "画出训练步四象限的 API 调用顺序与张量流转",
+            "理解 plan 复用路径为何免规划且免预取",
+            "理解 reduce_grad 与框架自身梯度归约的边界"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Buffer 四入口",
+            "plan 复用路径",
+            "端到端测试"
+          ],
+          "order": 3,
+          "practice_task": "编写 train_step.py：构造 Buffer、权重与梯度缓冲，按四象限顺序调用 API，并在 combine bwd 后校验 plan 复用生效（cu_seqlens 为 None）且各输出形状正确。",
+          "source_files": [
+            "README.md",
+            "moonep/api.py",
+            "tests/test_e2e.py"
+          ],
+          "title": "训练全链路：fwd/bwd 四象限",
+          "topic": "把 dispatch fwd/bwd、combine fwd/bwd、prefetch_weight 与 reduce_grad 串成一次完整 MoE 训练步，说明 plan 的复用路径（combine bwd 用保存的 plan 免规划、免预取）、cu_seqlens 驱动的组 GEMM 契约和梯度归约时机。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u6-l4-testing-methodology.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "掌握 GPU 分布式内核的分参考实现对拍方法",
+            "理解顺序不稳定输出为何必须比较集合语义",
+            "掌握 KernelCase 参数化与 Buffer 自动清理机制"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "PyTorch 参考实现",
+            "KernelCase 框架",
+            "规划测试"
+          ],
+          "order": 4,
+          "practice_task": "为 tests/test_planning.py 增加一个新的 KernelCase（如 epn=8、token_padding=64、biased 路由），运行并解释参考实现与内核输出为何逐张量相等。",
+          "source_files": [
+            "tests/planning_reference.py",
+            "tests/kernel_test_utils.py",
+            "tests/test_planning.py",
+            "tests/conftest.py"
+          ],
+          "title": "测试方法论：参考实现与语义等价",
+          "topic": "讲解 tests/ 的组织方式：planning_reference.py 的 PyTorch 参考实现、kernel_test_utils.py 的 KernelCase 参数化与语义比较（builder 用 atomicAdd 导致 dup 顺序不稳定、必须比较集合）、conftest.py 的 Buffer 自动清理 fixture。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "filename": "u6-l5-benchmarks.md",
+          "id": "u6-l5",
+          "learning_goals": [
+            "理解各通信算子的字节计数与带宽口径",
+            "掌握用 bias_ratio 扫描模拟路由不均衡的方法",
+            "能复现 MoonEP vs DeepEP 的对比结论"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "算子级基准",
+            "对比基准"
+          ],
+          "order": 5,
+          "practice_task": "在可用硬件上运行 bench_comm.py 的一个子集配置并整理结果表；若硬件不可用，则写脚本解析 bench 输出结构并推导每个算子的理论字节数与带宽公式。",
+          "source_files": [
+            "benchmarks/bench_comm.py",
+            "benchmarks/bench_vs_deepep.py",
+            "benchmarks/bench_prefetch.py",
+            "benchmarks/bench_grad_reduce.py"
+          ],
+          "title": "基准测试：度量与对比方法",
+          "topic": "解读 bench_comm.py 的算子级扫描维度（H/K/EP/bias_ratio）与各算子的带宽口径、bench_vs_deepep.py 的对比设置，以及 bench_prefetch.py 与 bench_grad_reduce.py 两个专用基准脚本的度量重点。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "filename": "u6-l6-extensions.md",
+          "id": "u6-l6",
+          "learning_goals": [
+            "定位扩展新 dtype/新设备时需要改动的文件清单",
+            "理解 B、num_sms、token_padding 等调优参数的影响面",
+            "掌握 Buffer 生命周期与 destroy 的正确顺序"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "类型注册表",
+            "Buffer 生命周期",
+            "构建配置"
+          ],
+          "order": 6,
+          "practice_task": "实现 prefetch._ELEM_TYPES 增加 float16 支持的最小改动（含 _smem_bytes 的 elem_bytes 变化），列出需要同步修改的断言与测试，并说明验证步骤。",
+          "source_files": [
+            "moonep/prefetch.py",
+            "moonep/api.py",
+            "setup.py",
+            "README.md"
+          ],
+          "title": "扩展与二次开发",
+          "topic": "总结加入新权重 dtype、调整内核 SM/smem 配置、把 MoonEP 接入 Megatron 风格训练框架的钩子，以及 Buffer 生命周期与 destroy 语义；Zhenwu PPU 设备适配目前标注为待确认（README 标注 under review）。"
+        }
+      ],
+      "level": "advanced",
+      "order": 6,
+      "title": "工程实践：异步、零拷贝、测试与基准"
+    }
+  ]
+}
