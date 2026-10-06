@@ -65,8 +65,12 @@ for name, e in repos.items():
     print(f"  phase={e.get('phase', '?')}  v{e.get('version', 0)}  "
           f"head={(e.get('manifest_head') or '?')[:10]}  讲义 {done}/{tot} "
           f"[{'█' * filled}{'░' * (20 - filled)}] {pct:.0f}%  累计 ${cost:.2f}")
-    # 把非零的状态计数列出来，一眼看清还有几篇没动。
-    print("  " + "  ".join(f"{k}={counts[k]}" for k in STATUS_ORDER if counts.get(k)))
+    # 把非零的状态计数列出来，一眼看清还有几篇没动；未知状态（可能是新版才引入
+    # 的）也列出来，不让它无声消失。
+    parts = [f"{k}={counts[k]}" for k in STATUS_ORDER if counts.get(k)]
+    parts += [f"{k}={v}" for k, v in sorted(counts.items())
+              if k not in STATUS_ORDER and v]
+    print("  " + "  ".join(parts))
     # 上次跑要是没干净收尾，这里会留一笔错误，截前 140 字符看个大概。
     if e.get("last_error"):
         print(f"  last_error: {e['last_error'][:140]}")

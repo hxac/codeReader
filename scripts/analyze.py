@@ -97,14 +97,18 @@ BACKOFF_SEC = float(os.environ.get("RC_BACKOFF_SEC", "0"))
 QUOTA_RETRY_MAX = int(os.environ.get("RC_QUOTA_RETRIES", "10"))
 QUOTA_RETRY_BASE = 1.0
 QUOTA_RETRY_CAP = 60.0
+# 讲义产物验收的最小字节数：worker 回报成功但文件小于它，视为占位符/未完成，判失败。
+# 早先只查文件存在，一个 11 字节的 "placeholder" 都能混过验收（zed-rope 的实际事故）。
+LECTURE_MIN_BYTES = int(os.environ.get("RC_LECTURE_MIN_BYTES", "512"))
 MOCK = env_truthy("RC_MOCK")
 MOCK_PLANNER_CALLS = 0   # selftest 用：统计 mock planner 被调次数
 MOCK_WORKER_CALLS = 0    # selftest 用：统计 mock worker 被调次数，用来验超时不当场重试
 MOCK_SUMMARIZE_CALLS = 0  # selftest 用：统计 mock summarize 被调次数
 
 # 全局并发控制：一把给所有仓库共享的停牌信号，外加一把写状态的锁。
-# main 入口先 clear 停牌信号，之后任何一个仓库一旦碰上额度耗尽、死区或软截止，就把它 set 上；
+# main 入口先 clear 停牌信号，之后任何一个仓库一旦碰上死区或软截止，就把它 set 上；
 # 其余仓库会在各自下一篇讲义的边界上检查到，然后有序退出。
+# 注意：额度耗尽【不】设停牌，只暂停当前仓库（见 run_lectures_sequential 的 quota 分支）。
 GLOBAL_STOP = threading.Event()
 # 用 RLock 而不是 Lock，是因为 save_state 可能嵌套调用，RLock 允许同一线程重复加锁。
 GLOBAL_STATE_LOCK = threading.RLock()
@@ -643,8 +647,14 @@ def _utc_hour(now: datetime) -> float:
 
 
 def in_dead_zone(now: datetime | None = None) -> bool:
-    """判断当前是不是落在死区里，时间按 UTC 算。死区可以跨午夜：START 大于 END 时按 wrap-around 处理。"""
+    """判断当前是不是落在死区里，时间按 UTC 算。死区可以跨午夜：START 大于 END 时按 wrap-around 处理。
+
+    START 等于 END 视为「零长区间 = 没有死区」（比如有人把两个值都设成 0 想关掉死区）。
+    早先这里会掉进 wrap-around 分支算出恒 True，结果整条管线永远「处于死区」直接退出。
+    """
     h = _utc_hour(now or _now())
+    if DEAD_START == DEAD_END:
+        return False
     if DEAD_START < DEAD_END:
         return DEAD_START <= h < DEAD_END
     # 跨午夜：死区 = [START, 24) ∪ [0, END)
@@ -652,11 +662,17 @@ def in_dead_zone(now: datetime | None = None) -> bool:
 
 
 def near_dead_zone(now: datetime | None = None) -> bool:
-    """判断是不是快到死区了，margin 那段也得把跨午夜算对。"""
+    """判断是不是快到死区了，margin 那段也得把跨午夜算对。
+
+    margin 为 0 表示不要软停窗口——早先 start==end 会掉进跨午夜分支算出恒 True，
+    变成「永远软停、永远不干活」，这里显式挡掉。
+    """
+    if SOFT_MARGIN_HOURS <= 0 or DEAD_START == DEAD_END:
+        return False
     h = _utc_hour(now or _now())
     start = DEAD_START - SOFT_MARGIN_HOURS   # 软停窗口的起点，可能小于 0，意味着跨午夜
     end = DEAD_START                          # 软停窗口的终点就是死区的起点
-    if start >= 0 and start < end:
+    if start >= 0:                            # margin>0 时 start 恒小于 end，无需再比
         return start <= h < end
     # 软停窗口跨午夜。比如 START 是 1、margin 是 2，那 start 就是 -1，对 24 取模得 23，
     # 软停窗口就成了 23 到 1 这一段。
@@ -677,6 +693,7 @@ def load_repos() -> list[Repo]:
 
     name 是必填的，其余字段缺了就用合理默认。如果 name 以 https:// 开头，视为第三方仓库地址，
     自动推导 url 和 project；否则按 owner/repo 拼出 GitHub 地址，project 取 name 最后一段。
+    owner/repo 形式不合法的条目跳过，重复条目去重（重复会触发并发双跑）。
     最后如果设了 RC_REPO_NAME，就只留它指的那一个，方便 debug 单仓库。
     """
     if not REPOS_YML.exists():
@@ -685,19 +702,27 @@ def load_repos() -> list[Repo]:
     data = yaml.safe_load(REPOS_YML.read_text(encoding="utf-8")) or {}
     repos: list[Repo] = []
     for item in data.get("repos", []) or []:
-        name = (item.get("name") or "").strip()
-        if not name:
+        raw = (item.get("name") or "").strip()
+        if not raw:
             continue
-        if name.startswith("https://"):
+        if raw.startswith("https://"):
             # 第三方仓库：name 即 URL，自动推导 state key 和 project
-            url = name
-            name = name.removeprefix("https://")
-            project = (item.get("project") or "").strip() or (
-                url.rstrip("/").split("/")[-1].removesuffix(".git"))
+            url = raw
+            name = raw.removeprefix("https://").strip("/")
         else:
-            # url 和 project 缺省都由 name 推出来
+            name = raw
+            url = ""
+        # 校验：GitHub 形式的 name 必须恰好 owner/repo；URL 形式的 name（即 state key，
+        # host 之后的部分）允许多级路径但段不能为空。不合格的条目直接跳过，免得拖到
+        # process_repo 的 split("/", 1) 才 ValueError，然后每轮静默标 failed。
+        segs = name.split("/")
+        if len(segs) < 2 or not all(segs) or (not url and len(segs) != 2):
+            log(f"WARN repos.yml 条目 {raw!r} 不是合法的 owner/repo（或 https://host/owner/repo）形式，已跳过")
+            continue
+        project = (item.get("project") or "").strip() or name.split("/")[-1].removesuffix(".git")
+        if not url:
+            # url 缺省由 name 推出来
             url = (item.get("url") or "").strip() or f"https://github.com/{name}.git"
-            project = (item.get("project") or "").strip() or name.split("/")[-1]
         branch = (item.get("branch") or "").strip() or None
         focus = (item.get("focus") or "").strip()
         folders = item.get("folders") or []
@@ -719,6 +744,26 @@ def load_repos() -> list[Repo]:
         else:
             repos.append(Repo(name=name, url=url, branch=branch,
                               project=project, focus=focus, subpath=""))
+    # 重复条目去重：同名（含 folders 展开后的 @subpath key）条目只会保留一份。
+    # 早先不去重，同一 repo_key 会被当成两个独立条目在并发里同时跑 process_repo，
+    # 争抢同一份 clone / state / 产物目录（实际发生过：rasbt/LLMs-from-scratch
+    # 在清单里出现了两次）。仅大小写不同的条目保留但告警，提示可能造成产物目录分裂。
+    seen: dict[str, None] = {}
+    lower_seen: dict[str, str] = {}
+    deduped: list[Repo] = []
+    for r in repos:
+        k = repo_key(r)
+        if k in seen:
+            log(f"WARN repos.yml 重复条目 {k}，只保留一份（重复会触发并发双跑）")
+            continue
+        if k.lower() in lower_seen and k.lower() != k:
+            log(f"WARN repos.yml 条目 {k} 与 {lower_seen[k.lower()]} 仅大小写不同，"
+                f"建议统一写法，避免产物目录大小写分裂")
+        seen[k] = None
+        lower_seen.setdefault(k.lower(), k)
+        deduped.append(r)
+    repos = deduped
+
     # RC_REPO_NAME 用来只处理某一个仓库，debug 单仓库模式就靠它。
     # 给父仓库名（owner/repo）→ 选中它的全部 folder；给完整的 name@subpath → 只选那一个。
     filt = (os.environ.get("RC_REPO_NAME") or "").strip()
@@ -776,6 +821,27 @@ def _remote_branch_exists(repo_dir: Path, branch: str) -> bool:
     return r.returncode == 0
 
 
+def _head_matches_upstream(repo_dir: Path) -> tuple[bool, str | None]:
+    """当前在跟踪分支上且 HEAD 与上游一致？返回 (是否一致, 当前分支名或 None)。
+
+    sync_repo 的快路径用：多个 folder 条目共享同一份 clone，别的条目的 worker
+    可能正在工作树里读文件，不必要的 checkout/pull 会把树从它脚底换掉。
+    已经是最新的话就什么都不动，把竞争窗口压缩到「真的有新提交」时。"""
+    br = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                        cwd=str(repo_dir), capture_output=True, text=True)
+    if br.returncode != 0:
+        return False, None
+    branch = br.stdout.strip()
+    if not branch or branch == "HEAD":
+        return False, None
+    r = subprocess.run(["git", "rev-parse", "HEAD", f"origin/{branch}"],
+                       cwd=str(repo_dir), capture_output=True, text=True)
+    if r.returncode != 0:
+        return False, branch
+    shas = r.stdout.split()
+    return (len(shas) == 2 and shas[0] == shas[1]), branch
+
+
 def sync_repo(repo: Repo) -> Path:
     """把被分析的项目弄到本地工作区，保证是最新的一份。
 
@@ -804,10 +870,18 @@ def sync_repo(repo: Repo) -> Path:
                     _git(["checkout", default], repo_dir)
                     _git(["reset", "--hard", f"origin/{default}"], repo_dir)
                 else:
-                    _git(["checkout", repo.branch], repo_dir)
-                    _git(["reset", "--hard", f"origin/{repo.branch}"], repo_dir)
+                    # 快路径：已经在目标分支且与上游一致就不碰工作树（共享 clone 减扰）
+                    upto_date, cur = _head_matches_upstream(repo_dir)
+                    if upto_date and cur == repo.branch:
+                        pass
+                    else:
+                        _git(["checkout", repo.branch], repo_dir)
+                        _git(["reset", "--hard", f"origin/{repo.branch}"], repo_dir)
             else:
-                _git(["pull", "--ff-only"], repo_dir)
+                # 快路径：无分支指定时，本地已与上游一致就跳过 pull，避免无谓的工作树翻动
+                upto_date, _ = _head_matches_upstream(repo_dir)
+                if not upto_date:
+                    _git(["pull", "--ff-only"], repo_dir)
         else:
             if repo_dir.exists():
                 shutil.rmtree(repo_dir, ignore_errors=True)
@@ -862,14 +936,21 @@ def harvest(clone_tutorial: Path, control_tutorial: Path) -> None:
 
     # staging 必须跟 control 同一个盘，跨盘 rename 会失败。
     staging = control_tutorial.parent / (control_tutorial.name + ".new")
+    old = control_tutorial.parent / (control_tutorial.name + ".old")
+    # 上次崩溃的残骸恢复：control 缺失而 .old 还在，说明死在「旧的已改名、新的
+    # 还没换上」的窗口里，先把旧的还回去，别让历史产物凭空消失。任何情况下
+    # 都先把残留的 .new/.old 清掉，免得它们被 `git add tutorials/` 提交进仓。
     if staging.exists():
         shutil.rmtree(staging, ignore_errors=True)
+    if old.exists():
+        if not control_tutorial.exists():
+            old.rename(control_tutorial)
+            log(f"  恢复上次崩溃残留的 {old.name} → {control_tutorial.name}")
+        else:
+            shutil.rmtree(old, ignore_errors=True)
     shutil.copytree(clone_tutorial, staging)
 
     if control_tutorial.exists():
-        old = control_tutorial.parent / (control_tutorial.name + ".old")
-        if old.exists():
-            shutil.rmtree(old, ignore_errors=True)
         control_tutorial.rename(old)             # 第一步：旧目录改名为 .old，原子
         try:
             staging.rename(control_tutorial)     # 第二步：staging 改名为目标，原子
@@ -897,12 +978,59 @@ def _normalize_filename(fn: str) -> str:
     return fn or "lecture.md"
 
 
+def _normalize_lec_id(lid: object) -> str:
+    """讲义 id 消毒：id 会被用作 state key 和摘要 sidecar 的文件名（f\"{lid}.summary.md\"），
+
+    不能放任 planner 输出路径分隔符之类的字符。filename 有 _normalize_filename 把关，
+    id 这里同样兜一层：取 basename、只保留安全字符，洗完为空就回退 lecture。
+    """
+    lid = str(lid or "").replace("\\", "/").strip().strip("/")
+    lid = lid.split("/")[-1]
+    lid = re.sub(r"[^A-Za-z0-9._-]", "_", lid)
+    if lid in (".", ".."):
+        return "lecture"
+    return lid or "lecture"
+
+
 def normalize_manifest_filenames(manifest: dict) -> None:
     """把 manifest 里所有讲义的 filename 就地规范成裸 basename，写盘前调一次就够。"""
     for u in manifest.get("units", []):
         for lec in u.get("lectures", []):
             if "filename" in lec:
                 lec["filename"] = _normalize_filename(lec["filename"])
+            if lec.get("id"):
+                lec["id"] = _normalize_lec_id(lec["id"])
+
+
+def _prune_stale_tutorial_files(clone_tutorial: Path, manifest: dict) -> list[str]:
+    """清掉 clone 讲义目录里上一份 manifest 遗留下来的孤儿文件（incremental 场景）。
+
+    planner 改名/合并讲义后，旧文件名会永远躺在目录里，harvest 又是整目录拷贝，
+    垃圾跟着一路发布到 main（实际案例：zed-rope 的 u1-l2-crate-struct-map.md
+    占位残骸与正主 u1-l2-crate-structure-map.md 并存）。只保留：当前 manifest
+    的讲义 md、它们的摘要 sidecar、manifest.json 本体和 .transcripts 目录。
+    """
+    keep = {"manifest.json", ".transcripts"}
+    for u in manifest.get("units", []):
+        for lec in u.get("lectures", []):
+            if lec.get("filename"):
+                keep.add(_lec_filename(lec))
+            if lec.get("id"):
+                keep.add(f"{lec['id']}.summary.md")
+    removed: list[str] = []
+    if not clone_tutorial.is_dir():
+        return removed
+    for p in clone_tutorial.iterdir():
+        if p.name in keep:
+            continue
+        if p.is_dir():
+            # 未知目录保守不删，只提示（预期内只有 .transcripts）
+            if p.name != ".transcripts":
+                log(f"  WARN 讲义目录里发现未知目录（未清理）：{p.name}")
+            continue
+        removed.append(p.name)
+        p.unlink(missing_ok=True)
+    return removed
 
 
 def _record_harvest(entry: dict, control_tutorial: Path, head: str, generated_at: str) -> None:
@@ -1011,6 +1139,25 @@ def _collect_prior_summaries(ordered_lectures: list[dict], current_lec: dict,
 # --------------------------------------------------------------------------- #
 # workers：串行生成讲义，全程感知配额和时间，还支持链式前文
 # --------------------------------------------------------------------------- #
+def _validate_lecture_md(path: Path) -> str | None:
+    """讲义产物最低限度验收：通过返回 None，否则返回失败原因。
+
+    只查“文件存在”是不够的：一个十几字节的 placeholder 文件都能混过验收，
+    而且下一轮规划还会把它标 keep 永久固化。这里拦两种最典型的坏产物：
+    文件过小（阈值 RC_LECTURE_MIN_BYTES，默认 512B）和内容就是占位符。
+    """
+    try:
+        data = path.read_bytes()
+    except OSError as e:
+        return f"讲义文件不可读：{e}"
+    if len(data) < LECTURE_MIN_BYTES:
+        return f"文件过小（{len(data)}B < {LECTURE_MIN_BYTES}B），疑似占位符或未写完"
+    head = data[:256].decode("utf-8", errors="replace").strip().lower()
+    if head in ("placeholder", "todo", "tbd", "待补"):
+        return "内容是占位符，不是成品讲义"
+    return None
+
+
 def run_lectures_sequential(repo: Repo, repo_dir: Path,
                             ordered_lectures: list[dict], state: dict,
                             entry: dict, head: str, prev_head: str | None,
@@ -1074,8 +1221,13 @@ def run_lectures_sequential(repo: Repo, repo_dir: Path,
                 break
             try:
                 r = call_worker(repo, repo_dir, lec, prompt, worker_cfg)
-                # 校验 .md 写入并生成摘要 sidecar
+                # 产物验收：.md 不光要存在，内容也得像篇成品。mock 桩写的就是几十字节的
+                # 小文件， selftest 靠它离线跑，所以 mock 模式跳过这项检查。
                 md_path = clone_tutorial / _lec_filename(lec)
+                if not MOCK:
+                    bad = _validate_lecture_md(md_path)
+                    if bad:
+                        raise ClaudeRunnerError(f"讲义 {lid} 产物验收失败：{bad}")
                 if md_path.exists():
                     try:
                         summary_text = call_summarize(repo, repo_dir, lec, tutorial_dir,
@@ -1263,7 +1415,11 @@ def process_repo(repo: Repo, state: dict, generated_at: str) -> str:
             save_state(state)
 
         # workers 只跑 pending 和 failed。abandoned、keep、done 都跳过生成，但仍留在 ordered 里当链式前文的来源
+        # 从磁盘统一读一遍生效的 manifest（无论是刚规划完还是续传），顺便清掉旧 manifest 的孤儿文件
         manifest = json.loads((clone_tutorial / "manifest.json").read_text(encoding="utf-8"))
+        stale = _prune_stale_tutorial_files(clone_tutorial, manifest)
+        if stale:
+            log(f"  清理旧 manifest 遗留文件 {len(stale)} 个：{stale[:5]}")
         lec_specs = {lec["id"]: lec for u in manifest.get("units", [])
                      for lec in u.get("lectures", []) if lec.get("id")}
         # 全部讲义按 manifest 顺序排好。done、keep、abandoned 在循环里会跳过生成，只用来收集前文摘要

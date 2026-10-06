@@ -255,6 +255,28 @@ check(analyze.MOCK_WORKER_CALLS == 1,
 check(e["phase"] == "workers", "phase 仍 workers（未停本轮、未 done）")
 os.environ.pop("RC_MOCK_TIMEOUT_ON", None)
 
+# ---- Run 4.75：孤儿文件清理 ----
+# 模拟「planner 改名过讲义」的场景：控制目录里躺着一个旧 manifest 遗留的孤儿文件。
+# 正确行为是：续传时把它清掉（clone 内先清，harvest 后控制目录也干净），
+# 而不是像早先那样永远留在产物里被发布到 main（zed-rope 占位符事故）。
+print("\n=== Run 4.75: 旧 manifest 孤儿文件清理 ===")
+st = json.loads(STATE.read_text(encoding="utf-8"))
+st["repos"]["test/fixture"]["lectures"]["u1-l1"]["status"] = "pending"
+st["repos"]["test/fixture"]["lectures"]["u1-l1"]["retries"] = 0
+st["repos"]["test/fixture"]["phase"] = "workers"
+STATE.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+stale_file = TUTDIR / "zz-orphan-stale.md"
+stale_file.write_text("placeholder\n", encoding="utf-8")   # 模拟旧讲义残留
+os.environ["RC_MODE"] = "auto"; os.environ["RC_FORCE_FULL"] = "false"
+analyze.MOCK_PLANNER_CALLS = 0
+rc475 = analyze.main()
+e = state_entry()
+check(rc475 == 0, f"退出码 0（got {rc475}）")
+check(not stale_file.exists(), "孤儿文件被清理，不再随 harvest 复活")
+check((TUTDIR / "u1-l1.md").exists(), "正主讲义仍在")
+check(e["phase"] == "done", "phase 回到 done")
+analyze.MOCK_PLANNER_CALLS = 0
+
 # ---- Run 4.8：子目录拆分（folders）----
 # 验证 folders 字段把一个仓库展开成多个头等 fleet 条目：共享一份 clone，每个子目录独立
 # 规划/生成，state key 带 @subpath 后缀，worker 写到子目录下（CWD 落子目录），收割到各自目录。
@@ -407,6 +429,65 @@ check("None" not in prompt and "自动判断" in prompt,
       "level=None 时渲染含兜底文案，无字面 None")
 check("由 worker 根据主题和源码自行设计" in prompt,
       "practice_task=None 时渲染含兜底文案")
+
+# --- 5e. 死区边界配置：margin=0 和 START==END ---
+# 早先这两个配置会掉进 wrap-around 分支算出恒 True：margin=0 变成永远软停、
+# START==END 变成永远死区。这里把它们钉死。
+_s, _e, _m = analyze.DEAD_START, analyze.DEAD_END, analyze.SOFT_MARGIN_HOURS
+analyze.DEAD_START, analyze.DEAD_END, analyze.SOFT_MARGIN_HOURS = 6.0, 10.0, 0.0
+check(analyze.near_dead_zone(dt_mod(2026,1,1,3,0, tzinfo=tz_mod.utc)) is False,
+      "margin=0 → 无软停窗口（早先恒 True，永久软停 bug）")
+check(analyze.near_dead_zone(dt_mod(2026,1,1,5,30, tzinfo=tz_mod.utc)) is False,
+      "margin=0 → 死区前夜也不软停")
+analyze.DEAD_START, analyze.DEAD_END = 6.0, 6.0
+check(analyze.in_dead_zone(dt_mod(2026,1,1,3,0, tzinfo=tz_mod.utc)) is False,
+      "START==END → 零长死区=无死区（早先恒 True，管线永不干活 bug）")
+analyze.DEAD_START, analyze.DEAD_END = 0.0, 0.0
+check(analyze.in_dead_zone(dt_mod(2026,1,1,8,0, tzinfo=tz_mod.utc)) is False,
+      "START==END=0 → 同上")
+analyze.DEAD_START, analyze.DEAD_END, analyze.SOFT_MARGIN_HOURS = _s, _e, _m
+
+# --- 5f. 讲义产物验收：占位符/过小文件不放行 ---
+from pathlib import Path as _P
+_vt = TMP / "validate_test"; _vt.mkdir(exist_ok=True)
+(_vt / "tiny.md").write_text("placeholder\n", encoding="utf-8")
+check(analyze._validate_lecture_md(_vt / "tiny.md") is not None,
+      "11 字节 placeholder 被验收拦截（早先只要文件存在就算 done）")
+(_vt / "missing.md").unlink(missing_ok=True)
+check(analyze._validate_lecture_md(_vt / "missing.md") is not None,
+      "文件缺失被验收拦截")
+(_vt / "ok.md").write_text("# " + "很" * 600 + "\n", encoding="utf-8")
+check(analyze._validate_lecture_md(_vt / "ok.md") is None,
+      "正常大小的讲义通过验收")
+shutil.rmtree(_vt, ignore_errors=True)
+
+# --- 5g. 讲义 id 消毒 ---
+check(analyze._normalize_lec_id("u1-l2") == "u1-l2", "正常 id 原样保留")
+check(analyze._normalize_lec_id("../evil") == "evil", "路径穿越片段被 basename 化")
+check(analyze._normalize_lec_id("a b/c d") == "c_d", "目录前缀丢弃+空格消毒")
+check(analyze._normalize_lec_id("") == "lecture", "空 id 回退 lecture")
+check(analyze._normalize_lec_id("..") not in ("..", ""), "纯点号 id 不得保留为 ..")
+
+# --- 5h. load_repos：重复条目去重 + owner/repo 校验 ---
+_dup_yml = TMP / "dup_repos.yml"
+_dup_yml.write_text(
+    "repos:\n"
+    "  - name: a/b\n"
+    "  - name: a/b\n"           # 完全重复 → 去重
+    "  - name: nowner\n"         # 无 owner → 跳过
+    "  - name: A/B\n"            # 仅大小写不同 → 保留但告警
+    "  - name: https://example.com/x/y.git\n"  # URL 形式，合法
+    "  - name: https://onlyhost\n"             # URL 但无路径 → 跳过
+    "", encoding="utf-8")
+_yml_prev = analyze.REPOS_YML
+analyze.REPOS_YML = _dup_yml
+os.environ["RC_REPO_NAME"] = ""
+_rs = analyze.load_repos()
+_keys = sorted(analyze.repo_key(r) for r in _rs)
+check(_keys == ["A/B", "a/b", "example.com/x/y.git"],
+      f"去重+校验后剩 3 条（got {_keys}）：重复删除、无 owner 跳过、大小写不同保留、URL 全路径保留")
+analyze.REPOS_YML = _yml_prev
+os.environ["RC_REPO_NAME"] = "test/fixture"
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("\n" + ("SELFTEST PASSED ✅" if not failures

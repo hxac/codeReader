@@ -140,6 +140,7 @@ jobs:
           RC_PLANNER_MAX_TURNS: ${{ vars.RC_PLANNER_MAX_TURNS || '30' }}
           RC_PLANNER_MAX_BUDGET_USD: ${{ vars.RC_PLANNER_MAX_BUDGET_USD || '3.00' }}
           RC_BACKOFF_SEC: ${{ vars.RC_BACKOFF_SEC || '0' }}
+          RC_WORKER_INRUN_RETRIES: ${{ vars.RC_WORKER_INRUN_RETRIES || '1' }}
           RC_MAX_RETRIES: ${{ vars.RC_MAX_RETRIES || '5' }}
           RC_RUN_DEADLINE_MIN: ${{ vars.RC_RUN_DEADLINE_MIN || '270' }} # 软截止：到点干净 exit 75，给 commit/publish 留余量、防硬超时丢进度
           RC_DEADZONE_UTC_START: ${{ vars.RC_DEADZONE_UTC_START || '6' }}
@@ -155,23 +156,16 @@ jobs:
           echo "RC_EXIT=$code" >> "$GITHUB_ENV"
           exit 0
 
-      # 中断时（exit 75/1）转存 claude 会话 transcript 到临时分支，便于排查
+      # 中断时（exit 75/1）把 claude 会话 transcript 存为 workflow artifact（30 天自动过期），便于排查。
+      # 早先是推到 origin 的 transcripts/<run_id> 分支——公开仓库等于把会话记录公开，改用 artifact。
       - name: Salvage Claude transcripts (on interruption)
         if: ${{ env.ACT != 'true' && env.RC_EXIT != '0' }}
-        shell: bash
-        run: |
-          TRANSCRIPT_DIR="$CLAUDE_CONFIG_DIR/projects"
-          if [ -d "$TRANSCRIPT_DIR" ] && [ -n "$(find "$TRANSCRIPT_DIR" -name '*.jsonl' -type f 2>/dev/null | head -1)" ]; then
-            STAGE=".transcripts-$GITHUB_RUN_ID"
-            rm -rf "$STAGE"; mkdir -p "$STAGE"
-            cp -r "$TRANSCRIPT_DIR" "$STAGE/" 2>/dev/null || true
-            git checkout -B "transcripts/$GITHUB_RUN_ID" 2>/dev/null || true
-            git add "$STAGE/" 2>/dev/null || true
-            git commit -m "transcripts: exit $RC_EXIT (run $GITHUB_RUN_ID)" || echo "nothing to commit"
-            git push origin "transcripts/$GITHUB_RUN_ID" || echo "push failed (non-blocking)"
-            git checkout tutorial-cache 2>/dev/null || true
-            rm -rf "$STAGE"
-          fi
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-transcripts-${{ github.run_id }}
+          path: ${{ runner.temp }}/claude-config-${{ github.run_id }}/projects
+          retention-days: 30
+          if-no-files-found: ignore
 
       # 进度 state + tutorials，含未完成的提交到 tutorial-cache
       - name: Commit progress to tutorial-cache
@@ -208,12 +202,22 @@ jobs:
             fi
             git checkout tutorial-cache -- "$path" || { echo "::warning::skip (missing in cache): $path"; continue; }
             rm -rf "$path/.transcripts"   # transcripts 不进 main，仅保留在 tutorial-cache
+            rm -f "$path"/*.summary.md    # 摘要 sidecar 是内部链式前文材料，随 cache 保留即可，不进 main
             git add "$path"
-            git commit -m "tutorial: publish $name" || echo "up to date: $name"
+            # 有暂存变更时提交必须成功（不能把失败误报成 up to date）；无变更才跳过
+            if git diff --cached --quiet; then
+              echo "up to date: $name"
+            else
+              git commit -m "tutorial: publish $name"
+            fi
           done
           git checkout tutorial-cache -- repos_state.json
           git add repos_state.json
-          git commit -m "tutorial: sync repos_state.json" || true
+          if git diff --cached --quiet; then
+            echo "repos_state.json 无变化，跳过 commit"
+          else
+            git commit -m "tutorial: sync repos_state.json"
+          fi
           # 推送：被拒（非快进，常见于 PR 合并碰撞）→ rebase 后重试一次；其它失败明确报错。
           # 原 `|| echo "...already up to date"` 会把 rejected/权限/网络错误一律误报为成功。
           if ! git push origin main 2>/tmp/push.err; then
