@@ -418,7 +418,6 @@ repos:
   - name: facebookresearch/Mask2Former
   - name: aria2/aria2
   - name: GopeedLab/gopeed
-  - name: rasbt/LLMs-from-scratch
   - name: rasbt/reasoning-from-scratch
   - name: rasbt/machine-learning-book
   - name: rasbt/deeplearning-models
