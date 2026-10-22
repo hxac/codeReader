@@ -28758,7 +28758,11 @@
       "last_error": null,
       "abandoned": []
     },
-    "typst/typst": {},
+    "typst/typst": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"b5a0a28e-2e25-41ca-98a7-ffd8613ad0d8\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_in",
+      "last_run_at": "2026-10-22T23:02:24Z"
+    },
     "THU-DSP-LAB/ventus-gpgpu": {
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
@@ -65532,6 +65536,38 @@
     "LinxlSA/PTO-Kernel": {},
     "lizardbyte/sunshine": {},
     "databendlabs/openraft": {},
-    "kenforthewin/atomic-editor": {}
+    "kenforthewin/atomic-editor": {},
+    "openinfer-project/openinfer@pegainfer-bench": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"2e4a0180-889e-454b-9334-6bd63f8de9d1\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_in",
+      "last_run_at": "2026-10-22T23:02:24Z"
+    },
+    "openinfer-project/openinfer@pegainfer-build": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"779402b0-13c2-465b-9c01-439e95feb616\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_in",
+      "last_run_at": "2026-10-22T23:02:24Z"
+    },
+    "openinfer-project/openinfer@pegainfer-core": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"ccc96c38-1fa2-41d3-8428-74df3ab125b2\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_in",
+      "last_run_at": "2026-10-22T23:02:24Z"
+    },
+    "openinfer-project/openinfer@pegainfer-cupti": {},
+    "openinfer-project/openinfer@pegainfer-deepseek-v2-lite": {},
+    "openinfer-project/openinfer@pegainfer-glm52": {},
+    "openinfer-project/openinfer@pegainfer-kernels": {},
+    "openinfer-project/openinfer@pegainfer-kimi-k2": {},
+    "openinfer-project/openinfer@pegainfer-kv-cache": {},
+    "openinfer-project/openinfer@pegainfer-kv-offload": {},
+    "openinfer-project/openinfer@pegainfer-qwen3": {},
+    "openinfer-project/openinfer@pegainfer-qwen35": {},
+    "openinfer-project/openinfer@pegainfer-sample": {},
+    "openinfer-project/openinfer@pegainfer-server": {},
+    "openinfer-project/openinfer@pegainfer-sim": {},
+    "xichan96/dinotty": {},
+    "servo/servo": {},
+    "pubgrub-rs/pubgrub": {},
+    "libgit2/libgit2": {},
+    "symbolica-dev/symbolica": {}
   }
 }
