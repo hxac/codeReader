@@ -221,7 +221,7 @@ repos:
   - name: typst/typst
     folders:
       [
-        ”self“,
+        "self",
         "crates/typst-bundle",
         "crates/typst-cli",
         "crates/typst-eval",
@@ -330,7 +330,6 @@ repos:
       [
         "self",
         "crates/zed",
-        "crates/editor ",
         "crates/rope",
         "crates/multi_buffer",
         "crates/text",
@@ -354,7 +353,6 @@ repos:
         "crates/sidebar",
         "crates/picker",
         "crates/editor",
-        "crates/rope",
       ]
   - name: https://gitcode.com/ascend-tribe/openPangu-2.0-Op
     folders: ["inference", "training"]
@@ -386,30 +384,30 @@ repos:
   - name: MoonshotAI/MoBA
   - name: MoonshotAI/Kimi-VL
   - name: MoonshotAI/MoonEP
+  # 上游已改名 openinfer-project/openinfer → pegainfer-project/pegainfer，子目录也从
+  # openinfer-* 改成 pegainfer-*（GitHub 对旧地址 301 重定向，故 name 保留旧名，免得
+  # 已发布的整仓讲义目录被拆成两套；只修正 folders）。
+  # 已消失、且无对应新目录的旧条目（dynamo-backend / dynamo-frontend / engine /
+  # vllm-frontend / vllm-support）已移除——它们会让每个窗口都失败一次。
   - name: openinfer-project/openinfer
     folders:
       [
         "self",
-        "openinfer-bench",
-        "openinfer-build",
-        "openinfer-core",
-        "openinfer-cupti",
-        "openinfer-deepseek-v2-lite",
-        "openinfer-dynamo-backend",
-        "openinfer-dynamo-frontend",
-        "openinfer-engine",
-        "openinfer-glm52",
-        "openinfer-kernels",
-        "openinfer-kimi-k2",
-        "openinfer-kv-cache",
-        "openinfer-kv-offload",
-        "openinfer-qwen3",
-        "openinfer-qwen35-4b",
-        "openinfer-sample",
-        "openinfer-server",
-        "openinfer-sim",
-        "openinfer-vllm-frontend",
-        "openinfer-vllm-support"
+        "pegainfer-bench",
+        "pegainfer-build",
+        "pegainfer-core",
+        "pegainfer-cupti",
+        "pegainfer-deepseek-v2-lite",
+        "pegainfer-glm52",
+        "pegainfer-kernels",
+        "pegainfer-kimi-k2",
+        "pegainfer-kv-cache",
+        "pegainfer-kv-offload",
+        "pegainfer-qwen3",
+        "pegainfer-qwen35",
+        "pegainfer-sample",
+        "pegainfer-server",
+        "pegainfer-sim"
       ]
   - name: AmolHarsh/ground3d-lmm
   - name: dk-liang/UniSeg3D
@@ -450,7 +448,7 @@ repos:
   - name: SemiAnalysisAI/InferenceX
   - name: unslothai/unsloth
   - name: silverbulletmd/silverbullet
-  - name: xichan96/dinotty'
+  - name: xichan96/dinotty
   - name: sandboxie-plus/sandboxie
   - name: sandboxie/sandboxie
   - name: erweixin/RaTeX
@@ -476,3 +474,7 @@ repos:
   - name: lizardbyte/sunshine
   - name: databendlabs/openraft
   - name: kenforthewin/atomic-editor
+  - name: servo/servo
+  - name: pubgrub-rs/pubgrub
+  - name: libgit2/libgit2
+  - name: symbolica-dev/symbolica

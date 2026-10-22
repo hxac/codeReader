@@ -41,15 +41,20 @@ gh workflow run tutorial -f mode=full
 
 | Secret | 必填 | 说明 |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | 否* | 真 Anthropic 端点密钥 |
-| `ANTHROPIC_AUTH_TOKEN` | 否* | 第三方端点的令牌 |
-| `ANTHROPIC_BASE_URL` | 否 | 第三方兼容端点的完整地址 |
+| `ANTHROPIC_API_KEY` | 否* | 真 Anthropic 端点密钥（claude agent 用） |
+| `ANTHROPIC_AUTH_TOKEN` | 否* | 第三方端点的令牌（claude agent 用） |
+| `ANTHROPIC_BASE_URL` | 否 | 第三方兼容端点的完整地址（claude agent 用） |
 | `RC_MODEL` | 否 | 所用模型 |
+
+> 换 agent（见 `RC_AGENT`）时，把该 CLI 自己的鉴权变量（如 `GOOGLE_API_KEY`、`OPENAI_API_KEY`）以同样方式加进 workflow 的 env 即可。
 
 **参数（Variables）** —— 填在仓库 Settings → Variables。
 
 | Variable | 默认 | 说明 |
 |---|---|---|
+| `RC_AGENT` | `claude` | 用哪个 Agent CLI：`claude` / `gemini` / `codex` / `custom`（未知值回落 custom） |
+| `RC_AGENT_BINARY` | — | 覆盖 Agent 可执行文件（名或完整路径） |
+| `RC_AGENT_EXTRA_ARGS` | — | 追加的 CLI 参数（JSON 字符串数组，或空格分隔） |
 | `RC_CONCURRENCY` | `4` | 同时处理几个仓库 |
 | `RC_MAX_TURNS` / `RC_MAX_BUDGET_USD` | `50` / `10.00` | 单篇讲义的上限，轮数和预算 |
 | `RC_PLANNER_MAX_TURNS` / `RC_PLANNER_MAX_BUDGET_USD` | `30` / `3.00` | 排大纲的上限|
@@ -57,7 +62,7 @@ gh workflow run tutorial -f mode=full
 | `RC_TIMEOUT` | `3600` | 一次 claude 子进程的超时时间 |
 | `RC_WORKER_INRUN_RETRIES` / `RC_BACKOFF_SEC` | `1` / `0` | 同一窗口内单篇重试次数与退避间隔 |
 | `RC_MAX_RETRIES` | `5` | 跨窗口最大失败次数 |
-| `RC_RUN_DEADLINE_MIN` | `0` (本地) / `270` (CI) | 软截止：到点 clean exit 75 保进度 |
+| `RC_RUN_DEADLINE_MIN` | `0` (本地) / `180` (CI) | 软截止：到点 clean exit 75 保进度 |
 | `RC_DEADZONE_UTC_START` / `RC_DEADZONE_UTC_END` | `6` / `10` | 死区（UTC 6‑10，3× 消耗，绝不跑）|
 | `RC_DEADZONE_SOFT_MARGIN_MIN` | `30` | 提前死区软停分钟 |
 
@@ -73,6 +78,24 @@ gh workflow run tutorial -f mode=full
 | `mock` | `false` | 管线测试桩，不调用 Claude Code |
 | `debug` | `false` | 写进 `.debug/` 沙箱 |
 | `runner` | `ubuntu-latest` | 默认 GitHub 官方；选 `self-hosted` 走变量 `RC_RUNNER_LABELS` |
+
+## Agent 支持
+
+管线默认用 **claude**（Claude Code CLI，`claude -p` headless），全部参数实测过。
+
+- `RC_AGENT=gemini` / `codex`：**best-effort** —— 只传各自 CLI 最稳的参数（print 模式、模型、JSON 输出），不传 turns/budget/tools/schema 限制，系统提示词内联进 stdin，输出按宽松规则解析（planner 的 manifest 从 result 文本里再解析 JSON）。
+- `RC_AGENT=custom`（或任意未收录的名字）：完全由 `RC_AGENT_BINARY`（必填）+ `RC_AGENT_EXTRA_ARGS` 驱动，拼一个最朴素的调用（`binary --model X` + stdin prompt），适合接任何新 CLI。
+
+注意：写盘范围约束（`--allowedTools` 只准写 `<Project>-tutorial/`）和 transcript 收集目前只有 claude 支持，其他 agent 靠提示词约束。
+
+## 本地运行（uv）
+
+```bash
+uv sync                                        # 首次：装依赖 + 生成 .venv
+uv run codereader-status                       # 进度仪表盘
+uv run codereader                              # 跑管线
+uv run python -m tests.selftest                # 离线自测（RC_MOCK 桩，不烧额度）
+```
 
 ## 注意事项
 

@@ -60,7 +60,7 @@ jobs:
     # Runner：默认 GitHub 官方 ubuntu-latest。
     # 选 runner=self-hosted 时读变量 RC_RUNNER_LABELS（JSON 数组，如 ["self-hosted","<runner-id>"]），未设回退 ["self-hosted"]。
     runs-on: ${{ inputs.runner == 'self-hosted' && fromJSON(vars.RC_RUNNER_LABELS || '["self-hosted"]') || 'ubuntu-latest' }}
-    timeout-minutes: 288
+    timeout-minutes: 195
     steps:
       - uses: actions/checkout@v6
         with:
@@ -71,7 +71,7 @@ jobs:
         with:
           node-version: "20"
 
-      - uses: actions/setup-python@v6
+      - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
 
@@ -79,8 +79,8 @@ jobs:
         if: ${{ !(env.ACT == 'true' && inputs.mock == 'true') }}
         run: npm install -g @anthropic-ai/claude-code@latest
 
-      - name: Install Python deps
-        run: pip install -r requirements.txt
+      - name: Install Python deps (uv)
+        run: uv sync --frozen
 
       # 切到 tutorial-cache 分支，首次从 main 建、之后累积进度并同步 main 的改动
       - name: Switch to tutorial-cache branch
@@ -129,6 +129,9 @@ jobs:
           RC_ALLOW_DEADZONE: ${{ github.event_name == 'schedule' && 'false' || (inputs.debug && 'true' || inputs.ignore_timing) }}
           RC_MOCK: ${{ github.event_name == 'schedule' && 'false' || inputs.mock }}
           RC_DEBUG: ${{ github.event_name == 'schedule' && 'false' || inputs.debug }}
+          RC_AGENT: ${{ vars.RC_AGENT || 'claude' }}
+          RC_AGENT_BINARY: ${{ vars.RC_AGENT_BINARY || '' }}
+          RC_AGENT_EXTRA_ARGS: ${{ vars.RC_AGENT_EXTRA_ARGS || '' }}
           RC_CONCURRENCY: ${{ vars.RC_CONCURRENCY || '4' }}
           RC_SUMMARY_MAX_TURNS: ${{ vars.RC_SUMMARY_MAX_TURNS || '8' }}
           RC_SUMMARY_MAX_BUDGET_USD: ${{ vars.RC_SUMMARY_MAX_BUDGET_USD || '0.50' }}
@@ -140,9 +143,10 @@ jobs:
           RC_PLANNER_MAX_TURNS: ${{ vars.RC_PLANNER_MAX_TURNS || '30' }}
           RC_PLANNER_MAX_BUDGET_USD: ${{ vars.RC_PLANNER_MAX_BUDGET_USD || '3.00' }}
           RC_BACKOFF_SEC: ${{ vars.RC_BACKOFF_SEC || '0' }}
-          RC_WORKER_INRUN_RETRIES: ${{ vars.RC_WORKER_INRUN_RETRIES || '1' }}
           RC_MAX_RETRIES: ${{ vars.RC_MAX_RETRIES || '5' }}
-          RC_RUN_DEADLINE_MIN: ${{ vars.RC_RUN_DEADLINE_MIN || '270' }} # 软截止：到点干净 exit 75，给 commit/publish 留余量、防硬超时丢进度
+          RC_REPO_BLOCK_LIMIT: ${{ vars.RC_REPO_BLOCK_LIMIT || '3' }}
+          RC_REPO_BLOCK_RETRY_HOURS: ${{ vars.RC_REPO_BLOCK_RETRY_HOURS || '72' }}
+          RC_RUN_DEADLINE_MIN: ${{ vars.RC_RUN_DEADLINE_MIN || '180' }} # 软截止：到点干净 exit 75，给 commit/publish 留余量、防硬超时丢进度
           RC_DEADZONE_UTC_START: ${{ vars.RC_DEADZONE_UTC_START || '6' }}
           RC_DEADZONE_UTC_END: ${{ vars.RC_DEADZONE_UTC_END || '10' }}
           RC_DEADZONE_SOFT_MARGIN_MIN: ${{ vars.RC_DEADZONE_SOFT_MARGIN_MIN || '30' }}
@@ -150,22 +154,29 @@ jobs:
           TZ: UTC
         run: |
           set +e
-          python scripts/analyze.py
+          uv run codereader
           code=$?
           set -e
           echo "RC_EXIT=$code" >> "$GITHUB_ENV"
           exit 0
 
-      # 中断时（exit 75/1）把 claude 会话 transcript 存为 workflow artifact（30 天自动过期），便于排查。
-      # 早先是推到 origin 的 transcripts/<run_id> 分支——公开仓库等于把会话记录公开，改用 artifact。
+      # 中断时（exit 75/1）转存 claude 会话 transcript 到临时分支，便于排查
       - name: Salvage Claude transcripts (on interruption)
         if: ${{ env.ACT != 'true' && env.RC_EXIT != '0' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: claude-transcripts-${{ github.run_id }}
-          path: ${{ runner.temp }}/claude-config-${{ github.run_id }}/projects
-          retention-days: 30
-          if-no-files-found: ignore
+        shell: bash
+        run: |
+          TRANSCRIPT_DIR="$CLAUDE_CONFIG_DIR/projects"
+          if [ -d "$TRANSCRIPT_DIR" ] && [ -n "$(find "$TRANSCRIPT_DIR" -name '*.jsonl' -type f 2>/dev/null | head -1)" ]; then
+            STAGE=".transcripts-$GITHUB_RUN_ID"
+            rm -rf "$STAGE"; mkdir -p "$STAGE"
+            cp -r "$TRANSCRIPT_DIR" "$STAGE/" 2>/dev/null || true
+            git checkout -B "transcripts/$GITHUB_RUN_ID" 2>/dev/null || true
+            git add "$STAGE/" 2>/dev/null || true
+            git commit -m "transcripts: exit $RC_EXIT (run $GITHUB_RUN_ID)" || echo "nothing to commit"
+            git push origin "transcripts/$GITHUB_RUN_ID" || echo "push failed (non-blocking)"
+            git checkout tutorial-cache 2>/dev/null || true
+            rm -rf "$STAGE"
+          fi
 
       # 进度 state + tutorials，含未完成的提交到 tutorial-cache
       - name: Commit progress to tutorial-cache
@@ -183,7 +194,7 @@ jobs:
         run: |
           git fetch origin main
           # 解析 repos_state.json：列出 phase==done 仓库的 "name<TAB>tutorial_path<TAB>abandoned数"
-          mapfile -t DONE < <(python <<'PY'
+          mapfile -t DONE < <(uv run python <<'PY'
           import json
           s = json.load(open("repos_state.json"))
           for name, e in s.get("repos", {}).items():
@@ -202,22 +213,12 @@ jobs:
             fi
             git checkout tutorial-cache -- "$path" || { echo "::warning::skip (missing in cache): $path"; continue; }
             rm -rf "$path/.transcripts"   # transcripts 不进 main，仅保留在 tutorial-cache
-            rm -f "$path"/*.summary.md    # 摘要 sidecar 是内部链式前文材料，随 cache 保留即可，不进 main
             git add "$path"
-            # 有暂存变更时提交必须成功（不能把失败误报成 up to date）；无变更才跳过
-            if git diff --cached --quiet; then
-              echo "up to date: $name"
-            else
-              git commit -m "tutorial: publish $name"
-            fi
+            git commit -m "tutorial: publish $name" || echo "up to date: $name"
           done
           git checkout tutorial-cache -- repos_state.json
           git add repos_state.json
-          if git diff --cached --quiet; then
-            echo "repos_state.json 无变化，跳过 commit"
-          else
-            git commit -m "tutorial: sync repos_state.json"
-          fi
+          git commit -m "tutorial: sync repos_state.json" || true
           # 推送：被拒（非快进，常见于 PR 合并碰撞）→ rebase 后重试一次；其它失败明确报错。
           # 原 `|| echo "...already up to date"` 会把 rejected/权限/网络错误一律误报为成功。
           if ! git push origin main 2>/tmp/push.err; then
