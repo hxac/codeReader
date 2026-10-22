@@ -1,0 +1,21 @@
+[project]
+name = "codereader"
+version = "0.1.0"
+description = "为一批 GitHub 项目自动生成中文讲义教程的编排管线（planner → workers + 配额/死区/续传）"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "jinja2>=3.1",
+    "pyyaml>=6",
+]
+
+[project.scripts]
+codereader = "codereader.cli:main"
+codereader-status = "codereader.status_cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/codereader"]
