@@ -1,0 +1,966 @@
+{
+  "project": "typst",
+  "head": "64c5e8c02fe0394d913ead36e42ef8c1334d2107",
+  "rationale": "Typst 是一个由 17 个 Rust crate 组成的大型 Cargo workspace，编译器按「解析(typst-syntax) → 求值(typst-eval) → 内容实现(typst-realize) → 排版(typst-layout) → 导出(typst-pdf/typst-html/typst-render/typst-svg)」的流水线组织，而所有核心类型与 World/Engine 抽象集中在 typst-library，行为被拆分到各独立 crate（见 docs/dev/architecture.md 与各 lib.rs 文档注释）。因此学习路线设计为：第一单元从零开始，先让读者装好 CLI、用 Cargo 构建编译器、看清仓库与 crate 全景、跑通第一次编译并接触 tests/ 测试体系（cargo testit）；第二单元沿数据流进入语法层，依次讲 Source/FileId、Lexer、Parser/SyntaxNode、AST/Span 与增量重解析；第三单元进入 typst-library 与 typst-eval，讲 World、Library/全局作用域、Value、Content、Func/Args、解释器主循环和 Styles/set-show 数据模型；第四单元覆盖 realize、页面/flow/inline/grid/数学排版与 introspection 两遍编译；第五单元为专家层，讲 PDF/渲染/SVG 导出、Format 多目标注册机制、typst-bundle 新格式、proc-macro 体系、typst-ide 工具、typst-kit 字体与包生态、comemo 增量编译和 WASM 插件。讲义间用 depends_on 构成 DAG，每篇只讲一个主题并配一个可在本地仓库完成的代码实践任务，用 tests/ 套件或 CLI 输出验证结果。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "初识 Typst：项目定位、构建与运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "Typst 是什么：项目定位与语言初印象",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Typst 是基于标记的排版系统、它与 LaTeX 的差异、仓库组成（编译器 crates、docs 文档站、tests 测试套件），并演示安装 typst CLI 后编译第一个 hello.typ 文档。",
+          "learning_goals": [
+            "说出 Typst 的定位、核心卖点与仓库顶层目录的职责划分",
+            "独立安装 typst CLI 并成功编译出第一份 PDF",
+            "知道从 README 与 docs/ 入口找到后续学习资料"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/README.md"
+          ],
+          "minimal_modules": [
+            "README 项目介绍与安装说明",
+            "docs 文档站结构与阅读入口"
+          ],
+          "practice_task": "安装 typst CLI，编写包含标题、列表、#let 变量与数学公式的 hello.typ，用 typst compile 编译为 PDF 与 PNG，并截取或描述输出效果。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "从源码构建：Cargo workspace 与构建命令",
+          "order": 2,
+          "filename": "u1-l2-build-with-cargo.md",
+          "level": "beginner",
+          "topic": "解读根 Cargo.toml 的 workspace 成员、git 依赖（typst-assets、typst-dev-assets）与常用构建命令，说明如何只构建 typst-cli 以及 Rust 版本要求。",
+          "learning_goals": [
+            "看懂 workspace Cargo.toml 中成员列表与依赖组织方式",
+            "掌握 cargo build / cargo run -p typst-cli / cargo test 的基本用法",
+            "理解 docs 构建别名 cargo docit 的存在（其别名定义位置为待确认，可查看 docs/README.md 说明）"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "docs/README.md",
+            "docs/dev/architecture.md"
+          ],
+          "minimal_modules": [
+            "workspace 成员与依赖声明",
+            "构建与运行命令速查"
+          ],
+          "practice_task": "克隆仓库后执行 cargo build -p typst-cli 完成编译，再用 cargo run -p typst-cli -- compile 一个示例文件，记录编译耗时与产物路径。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库全景：17 个 crate 的分工地图",
+          "order": 3,
+          "filename": "u1-l3-repo-structure-and-crates.md",
+          "level": "beginner",
+          "topic": "以 docs/dev/architecture.md 为纲，梳理 crates/ 下各 crate 的职责：typst-syntax（解析）、typst-library（类型与 World）、typst-eval（求值）、typst-realize（内容实现）、typst-layout（排版）、typst-pdf/typst-html/typst-render/typst-svg（导出）、typst-ide、typst-kit、typst-macros、typst-bundle、typst-timing、typst-utils、typst-cli 与总装 crate typst。",
+          "learning_goals": [
+            "画出主要 crate 之间的依赖与数据流方向草图",
+            "说出「类型在 typst-library、行为拆分到 typst-eval/typst-realize/typst-layout」的架构决策",
+            "能根据要改的功能快速定位应去的 crate"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "docs/dev/architecture.md",
+            "crates/typst/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "architecture.md 的流水线总览",
+            "crate 清单与职责表",
+            "typst 总装 crate 的入口说明"
+          ],
+          "practice_task": "阅读 architecture.md 后手工绘制 crate 依赖图，并运行 cargo test -p typst-syntax --lib 验证单个 crate 的单元测试可以独立执行。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "CLI 入口：从命令行到一次编译的调用链",
+          "order": 4,
+          "filename": "u1-l4-cli-entry-and-first-compile.md",
+          "level": "beginner",
+          "topic": "精读 crates/typst-cli/src/main.rs 的模块划分（args、compile、fonts、init、packages、download 等）与 compile.rs 中 compile_once 的主干，跟踪 typst compile 命令如何组装 World、调用 typst::compile 并写出文件。",
+          "learning_goals": [
+            "读懂 main.rs 的模块组织与命令分发方式",
+            "描述 compile 命令从解析参数到写出 PDF 的主干调用链",
+            "知道 watch、query 等子命令在 CLI 中的存在（对应源码模块名以 main.rs 实际内容为准，watch 模块细节为待确认）"
+          ],
+          "source_files": [
+            "crates/typst-cli/src/main.rs",
+            "crates/typst-cli/src/args.rs",
+            "crates/typst-cli/src/compile.rs"
+          ],
+          "minimal_modules": [
+            "main.rs 模块声明与命令分发",
+            "args.rs 参数定义",
+            "compile.rs 编译主干"
+          ],
+          "practice_task": "在本地分支为 compile 主干临时加入 eprintln! 打点，重新构建并编译一个文件，按顺序记录打印出的调用链，完成后还原改动。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "测试体系入门：cargo testit 与 tests/ 目录",
+          "order": 5,
+          "filename": "u1-l5-testing-overview.md",
+          "level": "beginner",
+          "topic": "讲解 tests/ 的 src、suite、ref、store 四层结构与 --- name attr+ --- 测试语法，介绍 eval/paged/render/pdf/html 等 stage、哈希引用机制以及 cargo testit 别名的用法。",
+          "learning_goals": [
+            "掌握 cargo testit 的按名过滤、按路径过滤与 --stages 用法",
+            "能看懂 suite 中三类测试：断言型、诊断型、视觉对照型",
+            "理解 ref 目录与哈希引用的差异及 --update 更新流程"
+          ],
+          "source_files": [
+            "tests/README.md"
+          ],
+          "minimal_modules": [
+            "tests 目录结构",
+            "测试属性与 stage 树",
+            "引用更新与测试报告"
+          ],
+          "practice_task": "运行 cargo testit --exact 精确执行一个 eval 测试，然后仿照格式在 suite 下新写一个含 #test 断言的测试并通过 --update 跑通。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "语法层：typst-syntax 的解析世界",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "源码与文件身份：Source、FileId 与包路径",
+          "order": 1,
+          "filename": "u2-l1-source-and-fileid.md",
+          "level": "intermediate",
+          "topic": "讲解 source.rs 中 Source 如何持有文本并做行/列与字节区间换算，span.rs 的 Span 与 DiagSpan，以及 package.rs、path.rs 中 FileId、包标识与虚拟路径如何为多文件与包系统提供身份。",
+          "learning_goals": [
+            "理解 Source 的不可变编辑模型与定位 API（line/column/range）",
+            "说出 FileId 由包与虚拟路径组成的设计意图",
+            "明白为什么 Span 要同时支持编号与区间两种形态（DiagSpanKind）"
+          ],
+          "source_files": [
+            "crates/typst-syntax/src/source.rs",
+            "crates/typst-syntax/src/span.rs",
+            "crates/typst-syntax/src/package.rs",
+            "crates/typst-syntax/src/path.rs"
+          ],
+          "minimal_modules": [
+            "Source 文本与定位",
+            "Span/DiagSpan 表示",
+            "PackageSpec 与 VirtualPath"
+          ],
+          "practice_task": "写一个小 Rust 程序（或单元测试）：用 Source 解析多行字符串，打印第 2 行第 3 列对应的字节区间，再把该区间转回行列，验证往返一致。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "词法与类别：Lexer 与 SyntaxKind",
+          "order": 2,
+          "filename": "u2-l2-lexer-and-syntax-kind.md",
+          "level": "intermediate",
+          "topic": "精读 kind.rs 中 SyntaxKind 枚举的类别划分（标记、字面量、关键字、错误等）与 lexer.rs 的手写状态机，理解 markup、code、math 三种模式下词法行为的切换。",
+          "learning_goals": [
+            "列举 SyntaxKind 的主要分组并解释其组织方式",
+            "跟踪 Lexer 在遇到 #、引号、数字、标识符时的分词路径",
+            "解释词法错误如何以 Error 节点形式保留而非中断"
+          ],
+          "source_files": [
+            "crates/typst-syntax/src/kind.rs",
+            "crates/typst-syntax/src/lexer.rs"
+          ],
+          "minimal_modules": [
+            "SyntaxKind 分类体系",
+            "Lexer 状态机与模式切换",
+            "错误 token 化策略"
+          ],
+          "practice_task": "对输入字符串 \"= Hi #for i in range(3) [*#i*]\" 手工预测 token 序列，再用 lexer 的公开 API（或编写测试）打印实际 SyntaxKind 序列并对比。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "语法树：Parser 与 SyntaxNode",
+          "order": 3,
+          "filename": "u2-l3-parser-and-syntax-node.md",
+          "level": "intermediate",
+          "topic": "讲解 parser.rs 的递归下降解析器如何在 markup/code/math 上下文间切换，node.rs 中 SyntaxNode 的节点/文本两类孩子、绿树结构与 number 表示，理解容错解析。",
+          "learning_goals": [
+            "描述 parser.rs 中解析入口在 markup/code/math 三种模式间的分工",
+            "理解 SyntaxNode 的树结构与错误节点的挂载方式",
+            "解释 Typst「解析永不失败、错误进树」的容错设计"
+          ],
+          "source_files": [
+            "crates/typst-syntax/src/parser.rs",
+            "crates/typst-syntax/src/node.rs"
+          ],
+          "minimal_modules": [
+            "递归下降主循环",
+            "SyntaxNode 节点模型",
+            "容错与错误恢复策略"
+          ],
+          "practice_task": "编写调试代码打印一段含语法错误的 typst 源码的完整 SyntaxNode 树（含 Error 节点），观察错误如何不阻断后续解析。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "AST 视图与 Span 定位系统",
+          "order": 4,
+          "filename": "u2-l4-ast-and-span.md",
+          "level": "intermediate",
+          "topic": "讲解 ast.rs 如何在 SyntaxNode 之上提供类型化的零成本 AST 视图（cast、unwrap 模式）以及 set.rs 与 Span 的关联，理解「一棵树、两个视图」的设计。",
+          "learning_goals": [
+            "用 ast.rs 的类型化接口遍历表达式、字段访问与函数调用",
+            "理解 SyntaxNode 与 AST 节点之间的 cast 关系",
+            "掌握通过 Span 反查 Source 字节区间的用法（配合 typst-library 提供的 WorldExt::range）"
+          ],
+          "source_files": [
+            "crates/typst-syntax/src/ast.rs",
+            "crates/typst-syntax/src/span.rs",
+            "crates/typst-syntax/src/set.rs"
+          ],
+          "minimal_modules": [
+            "AST 类型化视图",
+            "Span 与节点关联",
+            "遍历与反查模式"
+          ],
+          "practice_task": "遍历一段代码模式的 AST，收集所有函数调用节点的函数名与其 Span，再通过 Span 打印出对应的源码片段。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "增量解析与语法高亮",
+          "order": 5,
+          "filename": "u2-l5-reparser-and-highlight.md",
+          "level": "intermediate",
+          "topic": "讲解 reparser.rs 如何在编辑后只重解析受影响区间、lines.rs 的行结构维护，以及 highlight.rs 如何基于 SyntaxKind 生成语法高亮标签，说明它们对编辑器场景的意义。",
+          "learning_goals": [
+            "解释增量重解析的区间裁剪策略与安全性约束",
+            "理解 Source::edit 与 reparser 的配合方式",
+            "用 highlight.rs 的 Tag 输出为编辑器着色"
+          ],
+          "source_files": [
+            "crates/typst-syntax/src/reparser.rs",
+            "crates/typst-syntax/src/highlight.rs",
+            "crates/typst-syntax/src/lines.rs"
+          ],
+          "minimal_modules": [
+            "编辑与增量重解析",
+            "行信息维护",
+            "高亮 Tag 体系"
+          ],
+          "practice_task": "对同一 Source 连续执行多次小编辑，分别记录每次编辑后树中被替换的节点范围，验证只有局部子树发生变化而非整树重建。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "类型与求值：typst-library 与 typst-eval",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "World 抽象：编译器与环境的契约",
+          "order": 1,
+          "filename": "u3-l1-world-and-engine.md",
+          "level": "intermediate",
+          "topic": "精读 typst-library/src/lib.rs 中的 #[comemo::track] trait World（library/book/main/source/file/font/today），结合 typst/src/lib.rs 的 compile 入口，说明宿主环境如何向编译器提供输入与缓存责任。",
+          "learning_goals": [
+            "逐条解释 World 各方法的职责与缓存约定",
+            "说明 Engine/Routines 如何在库 crate 之间传递行为",
+            "理解为什么 World 由宿主实现缓存而编译器负责追踪"
+          ],
+          "source_files": [
+            "crates/typst-library/src/lib.rs",
+            "crates/typst/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "World trait 契约",
+            "compile 入口与 Engine 交接",
+            "comemo::track 的作用位置"
+          ],
+          "practice_task": "借助 typst-kit（或在测试中模仿其做法）实现一个只含内联字符串源码的最小 World，用它编译 Hello World 并断言得到非空文档。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "标准库的诞生：Library、global 作用域与 prelude",
+          "order": 2,
+          "filename": "u3-l2-library-and-global-scope.md",
+          "level": "intermediate",
+          "topic": "讲解 Library 结构（global/math 模块、styles、features、formats）、LibraryBuilder 的配置项，以及 global() 与 prelude() 如何把 foundations/model/text/layout 等模块定义注入全局作用域。",
+          "learning_goals": [
+            "描述 Library 的字段含义与 LibraryBuilder 的定制点（inputs、features、formats）",
+            "跟踪 global() 中各模块 define 的注入顺序",
+            "理解 prelude 中颜色、方向、对齐等常量的定义方式"
+          ],
+          "source_files": [
+            "crates/typst-library/src/lib.rs",
+            "crates/typst-library/src/foundations/mod.rs"
+          ],
+          "minimal_modules": [
+            "Library 与 LibraryBuilder",
+            "global() 装配流程",
+            "prelude 常量注入"
+          ],
+          "practice_task": "写一个测试：构建 Library 后遍历 global 模块，打印全部绑定名并按 Category 分类计数，再尝试向 scope 注入一个自定义函数并在脚本中调用它。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Value 类型系统：从 none 到 dict",
+          "order": 3,
+          "filename": "u3-l3-value-type-system.md",
+          "level": "intermediate",
+          "topic": "以 value.rs 的 Value 枚举为纲，串讲 str.rs、array.rs、dict.rs、int.rs/float.rs、bytes.rs 等基础类型，以及 ops.rs 中的运算符派发和 repr.rs 的显示表示。",
+          "learning_goals": [
+            "列举 Value 的全部变体并说明其 Rust 表示",
+            "理解 ops.rs 中运算符如何按类型组合派发与报错",
+            "掌握 str/array/dict 的方法注册与调用机制"
+          ],
+          "source_files": [
+            "crates/typst-library/src/foundations/value.rs",
+            "crates/typst-library/src/foundations/str.rs",
+            "crates/typst-library/src/foundations/array.rs",
+            "crates/typst-library/src/foundations/dict.rs",
+            "crates/typst-library/src/foundations/ops.rs"
+          ],
+          "minimal_modules": [
+            "Value 枚举与类型标识",
+            "运算符派发 ops",
+            "基础类型方法表"
+          ],
+          "practice_task": "在测试中构造 int、str、array、dict 各一个 Value，分别执行一次加法或拼接并打印 repr，再故意触发一次类型错误，观察错误消息如何生成。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "Content 与元素机制：文档的统一表示",
+          "order": 4,
+          "filename": "u3-l4-content-and-elements.md",
+          "level": "intermediate",
+          "topic": "讲解 foundations/content/ 目录中元素(elem)与标签(label)体系：元素如何由宏生成字段与构造函数、Content 的存储方式，以及 selector.rs 中选择器的表示。",
+          "learning_goals": [
+            "解释 Content 如何统一表示文本、元素序列与样式化结构",
+            "理解元素字段、必选/可选参数与内省(reflect)信息的来源",
+            "说明 Selector 在 show/if 匹配中的作用"
+          ],
+          "source_files": [
+            "crates/typst-library/src/foundations/content",
+            "crates/typst-library/src/foundations/mod.rs",
+            "crates/typst-library/src/foundations/selector.rs",
+            "crates/typst-library/src/foundations/label.rs"
+          ],
+          "minimal_modules": [
+            "Content 数据结构",
+            "元素字段与构造",
+            "Selector/Label 体系"
+          ],
+          "practice_task": "在测试中用标准库构造一个 heading 元素的 Content，遍历并打印其字段名与值，再用 selector 构造一个匹配 heading 的选择器。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "函数是一等公民：Func、Args 与类型转换 cast",
+          "order": 5,
+          "filename": "u3-l5-func-and-args.md",
+          "level": "intermediate",
+          "topic": "精读 func.rs 中 Func 的多种形态（原生、闭包、with 绑定等）、args.rs 的位置/命名参数消费协议，以及 cast.rs 的 FromValue/Reflect 体系如何连接 Value 与 Rust 类型。",
+          "learning_goals": [
+            "说出 Func 的内部表示与调用入口的派发逻辑",
+            "理解 Args 的 expect/find/named 消费模型与错误报告",
+            "掌握 cast 体系在原生函数签名中的展开方式"
+          ],
+          "source_files": [
+            "crates/typst-library/src/foundations/func.rs",
+            "crates/typst-library/src/foundations/args.rs",
+            "crates/typst-library/src/foundations/cast.rs",
+            "crates/typst-eval/src/call.rs"
+          ],
+          "minimal_modules": [
+            "Func 表示与调用",
+            "Args 消费协议",
+            "cast 双向转换"
+          ],
+          "practice_task": "在测试里直接以 Rust 调用内置函数 upper：手工构造 Args（含一个命名参数和一个多余参数），观察期望参数消费成功、多余参数报错的完整过程。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "解释器主循环：typst-eval 如何执行代码",
+          "order": 6,
+          "filename": "u3-l6-eval-interpreter.md",
+          "level": "intermediate",
+          "topic": "以 typst-eval/src/lib.rs 的模块划分（code、markup、flow、binding、import、access、call）为地图，讲解表达式求值、标记求值、作用域绑定、模块导入与控制流中断的完整路径。",
+          "learning_goals": [
+            "描述 eval 一段 #let 与 #for 代码时经过的函数路径",
+            "理解 markup 模式求值如何产生 Content 而 code 模式产生 Value",
+            "说明 flow.rs 中 break/continue/return 的信号机制"
+          ],
+          "source_files": [
+            "crates/typst-eval/src/lib.rs",
+            "crates/typst-eval/src/code.rs",
+            "crates/typst-eval/src/markup.rs",
+            "crates/typst-eval/src/flow.rs",
+            "crates/typst-eval/src/binding.rs",
+            "crates/typst-eval/src/import.rs"
+          ],
+          "minimal_modules": [
+            "eval 模块地图",
+            "作用域与绑定",
+            "控制流信号与模块导入"
+          ],
+          "practice_task": "编写含 #let、#for、#import 的脚本，用调试器或打点跟踪从 eval 入口到 import 完成的调用栈，记录每一层函数名与关键分支。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l7",
+          "title": "样式系统：Styles 与 set/show 的数据模型",
+          "order": 7,
+          "filename": "u3-l7-styles-and-show-rules.md",
+          "level": "intermediate",
+          "topic": "讲解 styles.rs 中 Styles/StyleChain 的不可变样式链、set 规则产生的属性修补与 show 规则的存储形态，为下一单元的 realize 阶段做铺垫。",
+          "learning_goals": [
+            "解释样式链的查找优先级与继承规则",
+            "区分 set 规则、show 规则在数据层上的不同表示",
+            "理解 context.rs 中 context 表达式获取样式与位置信息的方式"
+          ],
+          "source_files": [
+            "crates/typst-library/src/foundations/styles.rs",
+            "crates/typst-library/src/foundations/scope.rs",
+            "crates/typst-library/src/foundations/context.rs"
+          ],
+          "minimal_modules": [
+            "Styles 与 StyleChain",
+            "set/show 的数据形态",
+            "context 机制"
+          ],
+          "practice_task": "编写嵌套 set text(size) 与 show heading 的文档，编译并观察效果；再阅读 styles.rs 对应结构，用一句话总结每种规则在数据层上的形态差异。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "排版管线：realize、layout 与 introspection",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "编译主流程总览：五个阶段的衔接",
+          "order": 1,
+          "filename": "u4-l1-compile-pipeline-overview.md",
+          "level": "intermediate",
+          "topic": "以 typst/src/lib.rs 文档注释与 docs/dev/architecture.md 为纲，串联 parse → eval → realize → layout → export 五个阶段的数据形态变化：字符串、SyntaxNode、Content、Frame、字节输出。",
+          "learning_goals": [
+            "说出每个阶段的输入输出类型与负责的 crate",
+            "理解多轮迭代（introspection 重试）在主流程中的位置",
+            "会用 typst-timing 或日志观察各阶段耗时（具体 API 以 typst-timing 源码为准，细节待确认）"
+          ],
+          "source_files": [
+            "crates/typst/src/lib.rs",
+            "docs/dev/architecture.md"
+          ],
+          "minimal_modules": [
+            "五阶段数据流",
+            "迭代收敛入口",
+            "计时与观测"
+          ],
+          "practice_task": "编译一个中等复杂度文档，借助计时功能或打点记录五个阶段的耗时占比，绘制简单柱状图并指出最耗时阶段。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "realize 阶段：show 规则如何改写文档",
+          "order": 2,
+          "filename": "u4-l2-realize-stage.md",
+          "level": "intermediate",
+          "topic": "讲解 typst-realize 如何消费 Content 并应用 show 规则与样式，产出统一的可排版内容；结合 typst-library 的 NativeRuleMap 与 typst-layout/src/rules.rs 的 register，说明内置规则表的装配。",
+          "learning_goals": [
+            "描述 realize 的遍历策略与 show 规则触发时机",
+            "理解 NativeRuleMap 与 Library.rules 的装配路径",
+            "能定位某个内置元素默认外观对应的 realize/规则代码"
+          ],
+          "source_files": [
+            "crates/typst-realize/src/lib.rs",
+            "crates/typst-library/src/lib.rs",
+            "crates/typst-layout/src/rules.rs"
+          ],
+          "minimal_modules": [
+            "realize 主循环",
+            "内置规则注册表",
+            "样式应用时机"
+          ],
+          "practice_task": "编写使用自定义 show heading 规则的文档，在 realize 相关函数处加日志，对比有无 show 规则时传给 layout 的内容差异。",
+          "depends_on": [
+            "u3-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "页面与文档：layout_document 与 PagedDocument",
+          "order": 3,
+          "filename": "u4-l3-pages-and-document.md",
+          "level": "intermediate",
+          "topic": "精读 typst-layout/src/pages.rs 的 layout_document 主循环与 document.rs 的 Page/PagedDocument 结构，理解页面运行、页边距与多页收集过程。",
+          "learning_goals": [
+            "跟踪 layout_document 如何创建页面 region 并递归布局子内容",
+            "说出 PagedDocument/Page 的字段与导出 crate 的消费方式",
+            "理解 layout_document_for_bundle 与默认入口的差异（bundle 相关行为待确认）"
+          ],
+          "source_files": [
+            "crates/typst-layout/src/lib.rs",
+            "crates/typst-layout/src/pages.rs",
+            "crates/typst-layout/src/document.rs"
+          ],
+          "minimal_modules": [
+            "layout_document 主循环",
+            "Page/PagedDocument 结构",
+            "页面 region 分配"
+          ],
+          "practice_task": "修改示例文档的 page(width/height/margin) 参数并编译对比页数与版心，同时在源码中找到读取这些参数的位置。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "流式布局：flow、regions 与分页",
+          "order": 4,
+          "filename": "u4-l4-flow-and-regions.md",
+          "level": "intermediate",
+          "topic": "讲解 flow.rs 的 layout_fragment/layout_frame 如何把块级内容分配进剩余空间、regions 的耗尽与切换逻辑，以及 stack.rs、pad.rs 等容器如何复用该机制。",
+          "learning_goals": [
+            "解释 region 的剩余空间概念与块级布局协商过程",
+            "跟踪一个段落块从 layout_fragment 到产出 Frame 的路径",
+            "理解 stack/pad 容器对 region 的变换方式"
+          ],
+          "source_files": [
+            "crates/typst-layout/src/flow.rs",
+            "crates/typst-layout/src/stack.rs",
+            "crates/typst-layout/src/pad.rs"
+          ],
+          "minimal_modules": [
+            "region 生命周期",
+            "flow 布局协商",
+            "容器变换"
+          ],
+          "practice_task": "构造一篇会触发多次分页的长文档，在 flow 关键分支打点统计每个子内容得到的 region 高度，画出分配序列。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "行内排版：inline 与文本整形",
+          "order": 5,
+          "filename": "u4-l5-inline-layout.md",
+          "level": "intermediate",
+          "topic": "讲解 inline.rs 的行收集、断行与双向算法骨架，以及它如何借助 typst-library 的 text 模块（Font/FontBook 等）做整形；CJK 与西文混排的处理差异一并说明。",
+          "learning_goals": [
+            "描述一个段落从文本项列表到多行 Frame 的处理阶段",
+            "理解字体选择（FontBook 查询）与整形调用发生在哪一层",
+            "解释行内项（文本、空格、内联公式、盒子）的统一表示"
+          ],
+          "source_files": [
+            "crates/typst-layout/src/inline.rs",
+            "crates/typst-layout/src/lib.rs",
+            "crates/typst-library/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "行收集与断行",
+            "字体查询接口",
+            "行内项表示"
+          ],
+          "practice_task": "分别编译纯英文与中英混排段落，用调试输出对比行内项序列与断行位置，指出两者在整形路径上的差异。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l6",
+          "title": "网格世界：grid、table、列表与数学布局",
+          "order": 6,
+          "filename": "u4-l6-grid-table-math.md",
+          "level": "intermediate",
+          "topic": "讲解 grid.rs 中通用网格引擎的单元格/轨道模型与跨行列处理，说明 table 与列表如何基于 grid/list 构建，以及 math.rs 中数学排版对网格与基线的复用。",
+          "learning_goals": [
+            "解释轨道尺寸协商（auto/fr/固定值）在 grid 中的实现思路",
+            "描述 lists.rs 列表项复用网格的方式",
+            "了解 math 布局如何组织符号行与分数/根式结构"
+          ],
+          "source_files": [
+            "crates/typst-layout/src/grid.rs",
+            "crates/typst-layout/src/lists.rs",
+            "crates/typst-layout/src/math.rs"
+          ],
+          "minimal_modules": [
+            "网格轨道模型",
+            "列表复用",
+            "数学排版结构"
+          ],
+          "practice_task": "构造一个含跨两列单元格与 auto 轨道的表格，编译后对照源码解释列宽如何确定；再编译一个含分数的公式观察 math 布局输出。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l7",
+          "title": "内省机制：counter、引用与两遍编译",
+          "order": 7,
+          "filename": "u4-l7-introspection.md",
+          "level": "intermediate",
+          "topic": "讲解 typst-layout/src/introspect.rs 的 PagedIntrospector 与 typst-library introspection 模块，理解 location/counter/query 如何迫使编译器多轮迭代直到文档稳定。",
+          "learning_goals": [
+            "解释 Introspector 如何从已布局页面收集 location 元数据",
+            "描述 query/counter 触发重排版直至收敛的循环条件",
+            "理解两遍编译对性能的影响与 comemo 缓存的作用点"
+          ],
+          "source_files": [
+            "crates/typst-layout/src/introspect.rs",
+            "crates/typst-library/src/lib.rs",
+            "crates/typst-layout/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Introspector 收集",
+            "query/counter 语义",
+            "迭代收敛判定"
+          ],
+          "practice_task": "编写含目录与交叉引用的文档，通过日志或打点统计实际进行的布局轮数，再删除引用后对比轮数变化。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "专家之路：导出格式、宏体系与工程化",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "PDF 导出：从 PagedDocument 到字节流",
+          "order": 1,
+          "filename": "u5-l1-pdf-export.md",
+          "level": "advanced",
+          "topic": "讲解 typst-pdf/src/lib.rs 的导出入口：页面树构建、字体子集嵌入、渐变与图像写入，以及无障碍标签树的支持，理解导出 crate 如何只依赖 PagedDocument 抽象。",
+          "learning_goals": [
+            "描述 pdf 导出入口对 Page/Frame 的遍历与转换流程",
+            "理解字体子集化与资源去重的处理位置（具体子模块划分待确认）",
+            "了解标签化 PDF（a11y）在导出层的实现入口"
+          ],
+          "source_files": [
+            "crates/typst-pdf/src/lib.rs",
+            "crates/typst-layout/src/document.rs"
+          ],
+          "minimal_modules": [
+            "导出入口遍历",
+            "资源嵌入",
+            "标签树支持"
+          ],
+          "practice_task": "编译最小 PDF 后用 pdfinfo 或文本工具检查页数、字体与生成器信息，再追踪这些元数据在源码中的写入位置。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "像素与矢量：typst-render 与 typst-svg",
+          "order": 2,
+          "filename": "u5-l2-render-and-svg.md",
+          "level": "advanced",
+          "topic": "讲解 typst-render 如何把 Frame 栅格化为 PNG（图元到像素的绘制路径）以及 typst-svg 如何生成矢量 SVG，比较两者与 tests/ 中 render/svg stage 的对应关系。",
+          "learning_goals": [
+            "描述栅格化器对矩形、文本、图像、渐变图元的处理顺序",
+            "理解 SVG 导出对相同 Frame 的另一种序列化方式",
+            "能把 tests/ 的 render/svg stage 与这两个 crate 对应起来"
+          ],
+          "source_files": [
+            "crates/typst-render/src/lib.rs",
+            "crates/typst-svg/src/lib.rs",
+            "tests/README.md"
+          ],
+          "minimal_modules": [
+            "Frame 图元模型消费",
+            "栅格化路径",
+            "SVG 序列化"
+          ],
+          "practice_task": "用同一文档分别导出 PNG 与 SVG，对比文件中体现的图元结构，并用 cargo testit --stages render,svg 跑一个视觉测试观察参考产物。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "多目标架构：Format 注册与 HTML 导出",
+          "order": 3,
+          "filename": "u5-l3-format-registration.md",
+          "level": "advanced",
+          "topic": "讲解 typst-library 中 Format 抽象、Library.formats 与 format.register_rules 的注册机制，以及 typst-html 如何按 HTML 目标组织文档与导出（其内部子模块划分待确认）。",
+          "learning_goals": [
+            "解释 Format trait 与 Category 中各格式类别的关系",
+            "跟踪 LibraryBuilder::build 中规则注册与 prelude 注入",
+            "理解同一套 Content 面向 paged 与 html 两种目标的分叉点"
+          ],
+          "source_files": [
+            "crates/typst-library/src/lib.rs",
+            "crates/typst-html/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Format trait 与注册",
+            "HTML 目标组织",
+            "目标分叉点"
+          ],
+          "practice_task": "分别以 paged 与 html 目标编译同一文档（CLI 参数实际拼写待确认），对比两份输出的结构差异并指出分叉发生的调用点。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "typst-bundle：实验性格式的内部结构（待确认）",
+          "order": 4,
+          "filename": "u5-l4-bundle-format.md",
+          "level": "advanced",
+          "topic": "介绍 workspace 中较新的 typst-bundle crate：Feature::Bundle、Category::Bundle、prelude 中 format.bundle.asset 的注入以及 layout_document_for_bundle 的存在，梳理这一实验导出格式的装配路径；因该 crate 较新，讲义需以实际源码为准。",
+          "learning_goals": [
+            "找到 Feature::Bundle 从 library 到布局与导出的完整链路",
+            "说明 bundle 格式注册规则与资源暴露的方式",
+            "培养面对新模块时从注册点反向阅读源码的方法"
+          ],
+          "source_files": [
+            "crates/typst-bundle/src/lib.rs",
+            "crates/typst-library/src/lib.rs",
+            "crates/typst-layout/src/pages.rs"
+          ],
+          "minimal_modules": [
+            "Bundle 特性开关",
+            "bundle 布局入口",
+            "资源注入链路"
+          ],
+          "practice_task": "在启用了 bundle 特性开关的自建 World（或测试）中触发 bundle 相关代码路径，记录从 feature 开启到 layout_document_for_bundle 被调用的调用链。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "宏的魔法：typst-macros 与声明式库开发",
+          "order": 5,
+          "filename": "u5-l5-proc-macros.md",
+          "level": "advanced",
+          "topic": "讲解 typst-macros 提供的过程宏（func、elem、cast、time 等以 lib.rs 实际导出为准）如何从少量声明生成参数解析、字段存储与文档注册代码，结合 foundations/cast.rs 与 func.rs 看展开后的形态。",
+          "learning_goals": [
+            "解释 #[func] 与 #[elem] 各自生成哪些代码",
+            "会用 cargo expand 查看宏展开结果（需自行安装 cargo-expand）",
+            "理解声明式宏体系如何保证库函数与文档站同步"
+          ],
+          "source_files": [
+            "crates/typst-macros/src/lib.rs",
+            "crates/typst-library/src/foundations/func.rs",
+            "crates/typst-library/src/foundations/cast.rs"
+          ],
+          "minimal_modules": [
+            "过程宏清单",
+            "展开产物结构",
+            "文档与注册同步"
+          ],
+          "practice_task": "挑一个简单内置函数（如 luma 或 upper），用 cargo expand 观察其展开代码，总结宏生成的参数解析与错误处理样板。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l6",
+          "title": "语言工具：typst-ide 的补全、定义与提示",
+          "order": 6,
+          "filename": "u5-l6-ide-tooling.md",
+          "level": "advanced",
+          "topic": "讲解 typst-ide 面向编辑器场景的公开能力（自动补全、定义跳转、悬停提示等以 lib.rs 导出为准），以及它如何复用 typst-syntax 的 Span/AST 与 typst-library 的作用域信息。",
+          "learning_goals": [
+            "说出 typst-ide 各公开 API 的输入输出契约",
+            "理解补全候选如何从 Scope 与语法上下文推导",
+            "能把 IDE 查询映射回 AST/Span 层的定位机制"
+          ],
+          "source_files": [
+            "crates/typst-ide/src/lib.rs",
+            "crates/typst-syntax/src/span.rs",
+            "crates/typst-syntax/src/ast.rs"
+          ],
+          "minimal_modules": [
+            "IDE API 面",
+            "补全候选来源",
+            "跳转与定位"
+          ],
+          "practice_task": "编写测试：对一段含函数调用与变量的源码，在调用点位置查询自动补全与定义跳转，打印返回的候选与目标 Span。",
+          "depends_on": [
+            "u2-l4",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l7",
+          "title": "字体与包生态：typst-kit 与 CLI 资源管理",
+          "order": 7,
+          "filename": "u5-l7-kit-fonts-packages.md",
+          "level": "advanced",
+          "topic": "讲解 typst-kit 提供的字体发现、下载器与包管理的可复用实现，结合 typst-cli 的 fonts.rs、download.rs、packages.rs 看这些能力如何接入 World 与命令行。",
+          "learning_goals": [
+            "描述字体搜索路径的发现顺序与嵌入字体策略",
+            "理解包的解析、下载与缓存流程",
+            "能配置自定义字体目录并验证生效"
+          ],
+          "source_files": [
+            "crates/typst-kit/src/lib.rs",
+            "crates/typst-cli/src/fonts.rs",
+            "crates/typst-cli/src/download.rs",
+            "crates/typst-cli/src/packages.rs"
+          ],
+          "minimal_modules": [
+            "字体发现",
+            "下载器抽象",
+            "包解析与缓存"
+          ],
+          "practice_task": "把一个自定义字体放入指定目录，用 typst fonts 与编译输出验证字体被发现和使用，再追踪 fonts.rs 中路径枚举的代码位置。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l8",
+          "title": "增量编译：comemo、track 与 watch 模式",
+          "order": 8,
+          "filename": "u5-l8-incremental-comemo.md",
+          "level": "advanced",
+          "topic": "讲解 World 上的 #[comemo::track] 注解、记忆化追踪如何让重复编译只重算受影响部分，结合 typst watch（watch 子命令实现文件以 main.rs 实际模块为准，待确认）与 typst-timing 理解长驻编译场景。",
+          "learning_goals": [
+            "解释 track/memo 的输入失效与结果复用机制",
+            "描述 Source::edit 增量解析与增量求值的配合",
+            "会用 watch 模式对比修改前后第二次编译的耗时变化"
+          ],
+          "source_files": [
+            "crates/typst/src/lib.rs",
+            "crates/typst-library/src/lib.rs",
+            "crates/typst-syntax/src/reparser.rs"
+          ],
+          "minimal_modules": [
+            "comemo 追踪模型",
+            "增量解析配合",
+            "watch 长驻编译"
+          ],
+          "practice_task": "用 typst watch 打开文档，做一次小改动并记录第二次编译耗时与首次的对比，再解释缓存命中的层次（解析、求值、布局）。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l9",
+          "title": "插件系统：WASM 插件的加载与调用",
+          "order": 9,
+          "filename": "u5-l9-plugin-wasm.md",
+          "level": "advanced",
+          "topic": "讲解 foundations/plugin.rs 中 Plugin 基于 WASM 的加载、导出函数调用与缓冲区协议，说明它如何扩展标准库的计算能力并保持安全隔离。",
+          "learning_goals": [
+            "描述 plugin 函数从 typst 脚本到 WASM 模块的调用路径",
+            "理解字节缓冲区协议与参数序列化方式",
+            "能编译并运行一个最小 WASM 插件示例（仓库内示例位置待确认，可参考官方文档）"
+          ],
+          "source_files": [
+            "crates/typst-library/src/foundations/plugin.rs",
+            "crates/typst-eval/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Plugin 加载协议",
+            "调用与序列化",
+            "安全边界"
+          ],
+          "practice_task": "用 Rust 编译一个向宿主输出字符串的最小 wasm32-wasip1 模块，在 typst 文档中以 plugin 加载并调用其函数打印结果。",
+          "depends_on": [
+            "u3-l6"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

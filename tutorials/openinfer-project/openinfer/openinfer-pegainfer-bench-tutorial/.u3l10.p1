@@ -1,0 +1,28 @@
+# u3-l10 · kv 场景：分页 KV cache 基准（勘误重定位版）
+
+> **勘误声明**：本讲在大纲中的预设是「走读 `src/loop/kv.rs`（约 8KB）与 `src/loop/mod.rs`（约 6KB）的分页 KV cache 基准」。经对当前 HEAD（`223206b7`）的实际检索，pegainfer-bench 中**不存在** `src/loop/` 目录，也不存在 `kv.rs`、`serve.rs`、`timings.rs`、`cli.rs` 中的任何一个；整个 crate 只有两个文件——`Cargo.toml`（15 行）与 `src/lib.rs`（273 行），且 `src/lib.rs` 全文对 `kv` / `paged` / `cache` 三个词零命中。本讲因此沿 u2-l4、u3-l9 的勘误路线重定位：4.1 讲清「大纲假设 vs 真实代码」的落差与验证方法；4.2–4.4 把大纲许诺的三块内容——「基准参数与访问模式」「loop 模块组织方式」「指标解读与场景对照」——落在本库真实存在的代码上，并把标题里的「kv 场景」转化为一个贯穿全讲的**纸面设计任务**（见第 5 节）。本讲引用的所有行号均来自对 HEAD 工作区文件的逐行读取（`cat -n`），未做任何推测。
+
+## 1. 本讲目标
+
+学完本讲你应当能够：
+
+1. 独立验证「pegainfer-bench 没有 kv 场景」这一事实，并说出分页 KV cache 的实现与专属基准在本仓库中的真实归属（`pegainfer-kv-cache` 与各模型 crate 的 benches）。
+2. 解释 `KernelCall` 的形状（op 名 + inputs/outputs 的 `TensorSpec` + attrs）如何充当**任何**内核——包括假想的 KV cache 内核——的「基准参数」，以及 `bench_key` 如何为参数扫描提供去重身份。
+3. 读懂单文件库 `src/lib.rs` 的五段式组织，以及模块文档（L1–L9）声明的契约：harness 留在这里，`measure_*` provider 与调度游走留在各模型 crate 的 report bin。
+4. 手算 `LatencyStats` 的 mean / 样本标准差 / p50 / p95 / p99，理解 `percentile` 的上卷取整语义与小样本下尾部分位数退化为 max 的陷阱。
+5. 沿 `Accum → RollupRow / CallSiteRow` 的折叠链读懂模型报告的两级聚合粒度与 `pct` 份额列。
+
+## 2. 前置知识
+
+### 2.1 KV cache 与分页 KV cache：为什么会有「kv 基准」这种场景
+
+Transformer 自回归解码时，每生成一个 token 都要对之前所有 token 做注意力计算，因此每一层的 Key/Value 投影结果要缓存下来复用——这就是 **KV cache**。它的体积随序列长度线性增长，是长上下文推理最主要的显存压力源。**分页 KV cache**（paged KV cache）把连续的缓存切成固定大小的「页/块」，用一张页表间接寻址，从而抑制外部碎片、支持前缀共享——vLLM 等系统的经典做法。对它做基准，通常关心三件事：页分配/释放的主机开销、按页表 gather 的设备访存带宽、延迟随序列长度与批大小的伸缩。这类负载是「访存受限」型，与 GEMM 这类「计算受限」型负载构成基准场景的两极——这正是大纲想安排一个 kv 场景的动机。
+
+### 2.2 它在本仓库的真实归属
+
+仓库根 `CLAUDE.md`（Architecture 一节，链接见第 7 节）写明：
+
+- 模型调度器持有请求状态；**共享的分页 KV 原语在 `pegainfer-kv-cache` crate**；主机/SSD/RDMA 卸载桥在 `pegainfer-kv-offload`。
+- **每个模型 crate 自带自己的 tests 与 benches**（"each model owns config, weights, prefill/decode execution, scheduler, tests, and benches"）。
+
+而 pegainfer-bench 的定位由它自己的模块文档给出（见 4.1.3 的源码引用）：**模型无关的内核测量 harness**——CUDA 事件计时循环、延迟统计、对 `KernelCall` 调度的访问器、把逐调用延迟折叠成报告行的 rollup。一句话：KV cache 的「实现」和「专属基准」都不在本 crate；本 crate 提供的是任何内核（包括未来某天进入调度表的 KV 内核）统一使用的计时与统计骨架。

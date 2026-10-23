@@ -1,0 +1,359 @@
+{
+  "head": "223206b7ddbc7441063741484d9aa610d5ed9bb0",
+  "project": "openinfer-pegainfer-build",
+  "rationale": "pegainfer-build 是 PegaInfer 工作区中一个单文件、约 300 行的构建辅助库（源头是 e2073505 从各 build.rs 中抽出的共享 CUDA 探测逻辑），初学者真正的门槛不是这份代码本身，而是它运行的特殊环境——Cargo build script 协议与 CUDA 工具包的多种安装布局。因此学习路线分三层递进：入门层先建立工作区定位与 build script 协议的心智模型，学会跑通它的纯 CPU 测试；进阶层按调用链逐函数精读 discover→target_dirs→from_root 的三种布局探测，以及结果收敛与 link_search 输出；专家层覆盖无 GPU 的 TempTree 测试设计、pegainfer-kernels 与 pegainfer-cupti 两个真实消费方的集成、rerun-if 缓存语义的正确性分析，最后以「扩展一种新工具包布局」作为贯穿全部知识的实战。所有实践任务都可以在没有 GPU、甚至没有 CUDA 安装的机器上完成，与 CI 中 cpu-tests 跑 `cargo test -p pegainfer-build --lib` 的设计保持一致。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说清 pegainfer-build 解决的问题：构建期在多种 CUDA 安装布局下找到 nvcc、头文件和库目录",
+            "在工作区成员列表中定位该 crate，并用 grep 找到全部引用它的 Cargo.toml",
+            "理解这个 crate 为什么只有一个 lib.rs、publish=false、仅 tempfile 一个 dev 依赖"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "项目定位与架构图",
+            "工作区成员与 build-dependency 依赖关系",
+            "crate 的最小形态（无 [lib] 段、publish=false、edition 2024）"
+          ],
+          "order": 1,
+          "practice_task": "在仓库根目录运行 cargo test --release -p pegainfer-build --lib，确认 7 个测试全部通过；再用 Grep 全仓搜索 \"pegainfer-build\"，列出所有把它声明为 build-dependency 的 crate，并记录每个消费方 build.rs 中调用 CudaToolkit 的行号。",
+          "source_files": [
+            "README.md",
+            "Cargo.toml",
+            "CLAUDE.md",
+            "pegainfer-build/Cargo.toml",
+            "pegainfer-build/src/lib.rs"
+          ],
+          "title": "项目定位与工作区全景",
+          "topic": "说明 pegainfer-build 是纯 Rust + CUDA 推理引擎 PegaInfer 工作区中的一个构建辅助库，职责是在构建期定位本机 CUDA 工具包；介绍它在工作区架构图中的位置，以及 pegainfer-kernels 和 pegainfer-cupti 两个 build.rs 消费方。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-cargo-build-script-basics.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "区分 build-dependency 与普通依赖：构建脚本编译给宿主机、在包构建前执行一次",
+            "能逐条说出 cargo:rustc-link-search、cargo:rustc-link-lib、cargo:warning、cargo:rerun-if-env-changed 的作用",
+            "独立通读 pegainfer-cupti/build.rs 的 34 行完整生命周期：discover → include → compile → link"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "build.rs 运行模型与 OUT_DIR",
+            "cargo: 指令清单与效果",
+            "最小消费方 pegainfer-cupti/build.rs 精读"
+          ],
+          "order": 2,
+          "practice_task": "为 pegainfer-cupti/build.rs 的每一行 println!(\"cargo:...\") 写注释说明其效果；然后新建一个 scratch crate，声明 pegainfer-build 为 build-dependency，写一个 build.rs 调用 CudaToolkit::discover() 并打印 toolkit.root，观察在没有 CUDA 的机器上构建时的告警输出。",
+          "source_files": [
+            "pegainfer-build/Cargo.toml",
+            "pegainfer-cupti/build.rs",
+            "pegainfer-kernels/Cargo.toml"
+          ],
+          "title": "Cargo build script 协议入门",
+          "topic": "讲解 build.rs 与 [build-dependencies] 的运行机制：构建脚本运行在宿主机上、通过 println!(\"cargo:...\") 指令（rustc-link-search、warning、rerun-if-env-changed）与 Cargo 通信；以体量最小的真实消费方 pegainfer-cupti/build.rs 为完整例证。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "filename": "u1-l3-lib-rs-tour.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "画出 lib.rs 的分层结构：探测入口、数据结构、工具函数、测试模块四块",
+            "列出 CudaToolkit 的公开字段（root、nvcc、include_dirs）与方法（discover、header_dir、link_search）",
+            "解释为什么 lib_dirs 是私有字段而 include_dirs 公开，以及 find_package 为什么被 #[cfg(test)] 限制"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "文件分层与阅读顺序",
+            "CudaToolkit 公开 API 面",
+            "可见性设计与 edition 2024 let-chain 语法"
+          ],
+          "order": 3,
+          "practice_task": "运行 cargo doc -p pegainfer-build --no-deps --open 核对文档中呈现的公开 API 与你手工列出的清单是否一致；再为 lib.rs 中每个函数和 impl 块写一行职责注释，形成你自己的导览笔记。",
+          "source_files": [
+            "pegainfer-build/src/lib.rs"
+          ],
+          "title": "lib.rs 单文件全景导览",
+          "topic": "自顶向下通读 pegainfer-build/src/lib.rs 的 299 行：测试专用的 find_package、私有的 target_dirs 与 existing_deduped、公开的 CudaToolkit 结构体及其三个方法，梳理公开 API 面与内部实现的分层，并介绍 edition 2024 的 let-chain 写法。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "入门：从零认识 pegainfer-build"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l1-discover-env-probing.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "说清 CUDA_HOME → CUDA_PATH → /usr/local/cuda 的优先级回落链",
+            "理解 env 根无效时只告警不失败的容错设计",
+            "掌握 rerun-if-env-changed 指令的语义：环境变量未变时 Cargo 不会重跑 build.rs"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "环境变量优先级链与默认根",
+            "无效根的告警路径",
+            "rerun-if-env-changed 的声明时机"
+          ],
+          "order": 1,
+          "practice_task": "在 scratch crate 中把 CUDA_HOME 分别设为不存在的路径和有效目录各构建一次，对比输出的 cargo:warning 差异；随后保持其他条件不变再触发一次构建，验证 build.rs 因环境变量未变而未重跑（可在 build.rs 中打印时间戳佐证）。",
+          "source_files": [
+            "pegainfer-build/src/lib.rs"
+          ],
+          "title": "discover：环境变量驱动的探测入口",
+          "topic": "精读 CudaToolkit::discover：CUDA_HOME 优先于 CUDA_PATH、默认回落 /usr/local/cuda、环境变量指向非目录时的告警，以及两条 rerun-if-env-changed 指令如何声明对 Cargo 缓存的依赖。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l2-target-dirs-arch.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "理解 CUDA 工具包 targets/<dir> 目录结构及其存在的原因（同一安装覆盖多架构）",
+            "区分 CARGO_CFG_TARGET_ARCH（目标架构）与 std::env::consts::ARCH（宿主架构）",
+            "能推断 x86_64 与 aarch64 下 target_dirs 返回的候选列表"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "targets 目录与双命名变体",
+            "CARGO_CFG_TARGET_ARCH 的来源",
+            "非 build script 上下文的宿主架构回落"
+          ],
+          "order": 2,
+          "practice_task": "编写三个单元测试（可放进 scratch crate 复制 target_dirs 实现，或在 pegainfer-build 测试模块中仿写）：分别断言 CARGO_CFG_TARGET_ARCH 未设置、设为 aarch64、设为 x86_64 时 target_dirs() 的返回值，覆盖双候选与单候选两种形态。",
+          "source_files": [
+            "pegainfer-build/src/lib.rs"
+          ],
+          "title": "target_dirs：交叉编译下的架构目录名",
+          "topic": "精读 target_dirs：aarch64 工具包存在 aarch64-linux 与 sbsa-linux 两种 targets 子目录名所以返回两个候选；CARGO_CFG_TARGET_ARCH 反映构建目标架构、在非 build script 上下文回落到宿主 ARCH。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "filename": "u2-l3-from-root-toolkit-layouts.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "说出三种布局各自的目录特征与探测顺序",
+            "理解用 file_name/parent 路径运算定位 HPC SDK math_libs 兄弟树的技巧",
+            "理解 nvcc 回落语义：PathBuf::from(\"nvcc\") 表示交给进程 PATH 解析"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "候选目录的组装顺序（include、lib64/lib、targets）",
+            "HPC SDK math_libs 兄弟目录定位",
+            "nvcc 探测与 $PATH 回落"
+          ],
+          "order": 3,
+          "practice_task": "参照测试模块的手法，用 tempfile 在 /tmp 下分别搭出 classic、conda、HPC SDK 三种假目录树，各自调用 CudaToolkit::from_root 并打印 nvcc、include_dirs、lib_dirs，验证三种布局的探测结果与预期一致（注意 from_root 是私有方法，可通过复制实现或写进 pegainfer-build 自己的测试模块来完成）。",
+          "source_files": [
+            "pegainfer-build/src/lib.rs"
+          ],
+          "title": "from_root：三种 CUDA 工具包布局的统一探测",
+          "topic": "精读 CudaToolkit::from_root：classic 布局（include/lib64/bin/nvcc）、conda 布局（targets/<arch>/include 与 lib）、NVIDIA HPC SDK 布局（math_libs 兄弟目录树）如何由同一套候选目录逻辑覆盖，以及 nvcc 缺失时回落到裸 \"nvcc\" 走 $PATH。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-dedupe-header-dir-link-search.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "理解 canonicalize 去重如何处理符号链接目录（同一物理目录出现两次只保留一项）",
+            "掌握 header_dir(\"cuda.h\") 在 pegainfer-kernels/build.rs:2211 的用途：给 cc/c++ 宿主编译器加 -I",
+            "掌握 link_search 的输出形态与 lib_dirs 为空时的告警行为"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "目录存在性过滤与规范化去重",
+            "header_dir 的查找逻辑与消费场景",
+            "link_search 指令发射与空结果告警"
+          ],
+          "order": 4,
+          "practice_task": "复现 symlinked_dirs_dedupe 测试的场景：用 tempfile 建一棵树，把 include 做成指向 targets/<arch>/include 的符号链接，断言探测后 include_dirs 和 lib_dirs 各只剩一项且 header_dir(\"cuda.h\") 命中符号链接路径；随后调用 link_search 并检查输出中不出现重复的 rustc-link-search 行。",
+          "source_files": [
+            "pegainfer-build/src/lib.rs",
+            "pegainfer-kernels/build.rs"
+          ],
+          "title": "existing_deduped、header_dir 与 link_search",
+          "topic": "精读探测结果的收敛与输出环节：existing_deduped 过滤不存在目录并用 canonicalize 去重（conda 安装常用符号链接指向 targets 目录）、header_dir 帮宿主编译器定位真正包含指定头文件的目录、link_search 发射 cargo:rustc-link-search 指令并在无库目录时告警。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l5-find-package-probe-template.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "理解 roots × check_files 的双层探测矩阵与 env 优先语义",
+            "分析命中、env 失配降级、全空 panic 三种分支的诊断文案设计（含 Hint 与候选列表）",
+            "通过 git log --follow 追溯 find_package 从 pub 到 #[cfg(test)] 的可见性降级原因"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "探测矩阵与分支设计",
+            "panic/warning 文案的可操作性设计",
+            "crate 演变史与可见性取舍"
+          ],
+          "order": 5,
+          "practice_task": "在 pegainfer-build 的测试模块中新增两个用例：一个构造含两个布局变体（如 targets/missing/include/gdrapi.h 与 include/gdrapi.h）的假包，验证 check_files 顺序命中第二个变体；另一个用 #[should_panic(expected = \"none of\")] 验证全空场景的 panic 文案包含 env 状态与默认路径列表。",
+          "source_files": [
+            "pegainfer-build/src/lib.rs"
+          ],
+          "title": "find_package：通用包探测模板与历史演变",
+          "topic": "精读当前仅存于 #[cfg(test)] 的 find_package：env 变量优先、默认路径兜底、多个 check 文件覆盖布局变体、env 根全部失配时降级告警并继续；结合 git 历史（e2073505 创建时为 pub、供旧 openinfer-comm-* sys crate 使用，后降级为测试专用）理解它的演变。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 2,
+      "title": "进阶：核心探测机制源码精读"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3",
+            "u2-l4"
+          ],
+          "filename": "u3-l1-testing-with-temp-tree.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "掌握 TempTree 夹具的设计要点：自动清理、相对路径操作、touch 自动建父目录",
+            "理解每个布局测试断言的意图：nvcc 解析、header_dir 命中、lib_dirs 顺序与内容",
+            "理解 #[cfg(unix)] 条件测试与 should_panic 测试在本 crate 中的运用，以及 CI 中 cpu-tests 作业的位置"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "TempTree 夹具设计",
+            "五种布局场景测试逐一解析",
+            "平台条件测试与 CI 中的位置"
+          ],
+          "order": 1,
+          "practice_task": "仿照 TempTree 新增一个测试 unknown_targets_only_include：构造只有 targets/<arch>/include/cuda.h 而无任何 lib 目录的树，断言 lib_dirs 为空、include_dirs 非空且 header_dir(\"cuda.h\") 命中 targets 下的 include；运行 cargo test --release -p pegainfer-build --lib 验证通过。",
+          "source_files": [
+            "pegainfer-build/src/lib.rs",
+            ".github/workflows/ci.yml"
+          ],
+          "title": "无 GPU 环境下的确定性测试设计",
+          "topic": "精读 lib.rs 测试模块：TempTree 夹具（tempfile::tempdir + mkdirs + touch）如何以假目录树模拟五种工具包布局场景（classic、conda、HPC SDK、符号链接去重、未知布局），以及 CI 在纯 CPU runner 上只跑 --lib 测试的设计原因。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u3-l2-consumer-integration.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "在 pegainfer-kernels/build.rs 的两千余行中定位全部 toolkit 使用点并说明各自用途",
+            "理解 header_dir 返回 None 时 kernels 的兜底（toolkit.root.join(\"include\")）及其风险",
+            "对比两个消费方的使用深度：kernels 用 nvcc/header_dir/link_search，cupti 还额外用 root 拼 extras 路径"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "kernels 构建链路中的工具包消费点",
+            "cupti 的 extras/CUPTI 目录特例",
+            "CudaToolkit 四个出口（root/nvcc/include_dirs/lib_dirs）的用途映射"
+          ],
+          "order": 2,
+          "practice_task": "在 pegainfer-kernels/build.rs 中定位第 929、2209、2211-2213、2884-2887 行附近的工具包使用点，绘制一张「discover 输出 → 各消费点用途 → 最终 cargo: 指令」的数据流图；然后回答：若 header_dir(\"cuda.h\") 返回 None，glm52 的 cutedsl 构建会用哪个目录，这一兜底在 conda 布局下是否正确。",
+          "source_files": [
+            "pegainfer-kernels/build.rs",
+            "pegainfer-cupti/build.rs",
+            "pegainfer-build/src/lib.rs"
+          ],
+          "title": "消费方集成：kernels 与 cupti 如何使用 CudaToolkit",
+          "topic": "从消费方视角串起完整调用链：pegainfer-kernels/build.rs 用 discover 拿 nvcc 命令与 header_dir(\"cuda.h\") 头目录、末尾调用 link_search 完成链接搜索；pegainfer-cupti/build.rs 展示最小完整生命周期并处理 CUPTI 在 extras/CUPTI 下的特例目录。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u2-l1"
+          ],
+          "filename": "u3-l3-rerun-if-cache-semantics.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "说清 rerun-if-env-changed 的精确语义：以环境变量值为指纹，而非文件系统状态",
+            "识别本项目的设计权衡：探测函数体内发射 rerun 指令 vs 在 build.rs 顶部集中声明",
+            "分析「更换 CUDA 安装但环境变量不变」场景下缓存过期导致的构建错配风险及规避手段（cargo clean 或 touch build.rs）"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Cargo 指纹与 rerun-if 指令语义",
+            "库函数发射指令的利弊分析",
+            "诊断可见性与缓存过期风险"
+          ],
+          "order": 3,
+          "practice_task": "设计并执行一个实验：让 scratch crate 的 build.rs 用假 CUDA 根目录构建成功后，仅替换该目录下的内容而保持 CUDA_HOME 不变，再次构建并对比 build.rs 打印的时间戳证明未重跑；接着修改 CUDA_HOME 的值验证重跑发生；最后用 touch build.rs 触发强制重跑，把三种情形整理成一张行为对照表。",
+          "source_files": [
+            "pegainfer-build/src/lib.rs",
+            "pegainfer-cupti/build.rs"
+          ],
+          "title": "rerun-if 语义与构建缓存正确性",
+          "topic": "深入 Cargo 指纹机制与本项目探测逻辑的交互：rerun-if-env-changed 只感知环境变量变化、不感知 CUDA 安装目录内容变化；分析 discover 与 find_package 在函数体内发射这些指令的设计含义、漏重跑与过度重跑的风险，以及 cargo:warning 在无 GPU CI 上的可见性影响。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
+          "filename": "u3-l4-extend-new-layout.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "完成一次端到端二次开发：候选目录 → 探测实现 → TempTree 测试 → CI 命令验证",
+            "评估 API 取舍：是否恢复 find_package 为 pub、是否开放 lib_dirs、新增布局是否需要新字段",
+            "用项目自己的质量门槛（cargo fmt、clippy -D warnings、--locked 测试）验证改动"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "新布局探测的实现步骤",
+            "TempTree 测试与 CI 验证命令",
+            "API 泛化与可见性设计讨论"
+          ],
+          "order": 4,
+          "practice_task": "动手实现：选择一种真实存在的 CUDA 安装变体（如 WSL 的 /usr/lib/wsl/lib 或 conda 拆分的 cuda-nvcc 包布局），在 from_root 中增加对应候选目录，仿照 hpc_sdk_layout_adds_math_libs_sibling 写一个 TempTree 测试覆盖它；运行 cargo fmt、cargo clippy --release --all-targets -p pegainfer-build -- -D warnings、cargo test --release --locked -p pegainfer-build --lib 三条命令并全部通过。",
+          "source_files": [
+            "pegainfer-build/src/lib.rs",
+            "pegainfer-build/Cargo.toml",
+            ".github/workflows/ci.yml"
+          ],
+          "title": "二次开发实战：扩展一种新的工具包布局",
+          "topic": "综合实战：为 from_root 增加一种新布局的探测支持（例如 apt/WSL 风格的库目录或 conda 拆分包装法），同步补 TempTree 单元测试并接入 CI；同时讨论把 find_package 泛化为可复用探测库、lib_dirs 可见性开放等 API 设计取舍。"
+        }
+      ],
+      "level": "advanced",
+      "order": 3,
+      "title": "专家：测试设计、消费方集成与二次开发"
+    }
+  ]
+}
