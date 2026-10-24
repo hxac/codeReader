@@ -1,0 +1,93 @@
+
+#### 4.1.4 代码实践：复跑勘误验证
+
+1. **实践目标**：亲手确认本讲的勘误结论，建立「先验证、再相信」的读码习惯。
+2. **操作步骤**：在 `pegainfer-bench/` 目录下依次执行：
+
+   ```bash
+   find . -name '*.rs' -not -path './target/*'   # 预期仅输出 ./src/lib.rs
+   grep -niE 'kv|paged|cache' src/lib.rs         # 预期无任何输出
+   grep -rn 'src/loop' . --include='*.rs'        # 预期无任何输出
+   ```
+
+3. **需要观察的现象**：三条命令的输出是否与预期一致。
+4. **预期结果**：三条均为空/仅 `./src/lib.rs`。本讲生成时已在 HEAD `223206b7` 上实际执行过等价检索并得到该结果；若你检出的 commit 不同，结果可能不同，请以你的检出为准。
+
+#### 4.1.5 小练习与答案
+
+1. **问**：仅凭 `Cargo.toml` 能否证明「没有独立可运行的 kv 场景」？依据是什么？
+   **答**：能。它没有任何 `[[bin]]` / `[[example]]` 目标，也没有 dev-dependencies（说明连测试/基准专用依赖都没有），是纯库形态；场景只能由外部 bin 驱动。
+2. **问**：pegainfer-bench 与分页 KV 原语的正确关系是什么？
+   **答**：原语在 `pegainfer-kv-cache`（卸载桥在 `pegainfer-kv-offload`），模型各自的 benches 在各自 crate；本库只提供计时/统计/访问器/汇总，任何内核（含 KV 内核）以 `KernelCall` 进入。
+3. **问**：如果未来真要出现「kv 场景」，按本库的契约应该把代码放在哪里？
+   **答**：不在本 crate。应在某个模型 crate 的 report bin 里新增 `measure_kv_*` provider，并让该模型的运行时 trace 产出对应的 `KernelCall`；本库只在需要新统计量时才需要改动。
+
+### 4.2 「基准参数」的载体：`KernelCall` 形状与 `bench_key` 身份
+
+#### 4.2.1 概念说明
+
+传统微基准工具为每类内核手写参数结构（GEMM 有 M/N/K，KV 基准有 seq_len/batch/page_size）。本库反其道而行：**不认识任何具体内核**。一个内核进入测量体系的唯一形态是 `KernelCall`——一个 op 名加上若干输入/输出 `TensorSpec`（每个 spec 带命名轴 `axes`）和若干 `attrs`（字符串键值）。于是「基准参数」被泛化为「调度的形状」，「参数扫描」被泛化为「调度里有几种不同形状的 `KernelCall`」；`bench_key` 把形状序列化成稳定 JSON 字符串作为身份，`measure_catalog`（u2-l4）用它去重——同一形状只测一次。假想一个 KV 追加内核进入调度表，它的 seq_len、kv_heads、head_dim、page_size 天然落进 axes 与 attrs，无需本库任何改动。这就是大纲「kv 基准参数与访问模式」在本库的真实对应物：**参数即形状，访问模式即调度**。
+
+#### 4.2.2 核心流程
+
+一个 provider（住在模型 crate 里）测量一个 `KernelCall` 的典型路径：
+
+```text
+拿到 call
+  ├─ input(call, "名字") / output(call, "名字")   → 按 name 取出 TensorSpec（找不到则报错）
+  ├─ axis(spec, "轴名")                          → 从 spec.axes 取该轴大小（找不到则报错）
+  ├─ attr_usize(call, "属性名")                   → 从 attrs 取字符串并解析成 usize
+  ├─ zero_matrix / zero_weight                    → 按形状在设备上分配零填充缓冲
+  └─ measure_loop(ctx, iters, launch)             → 预热 + CUDA 事件计时，得到 LatencyStats
+```
+
+u3-l9 的一个补充在这里落地：`bench_key` 本体（L125–L132）序列化调度里携带的全部属性，**rank 相关属性的过滤发生在模型侧调用之前**，以保持形状身份稳定——这是 u3-l9 讲过的「bench_key 滤除 rank 属性」在源码上的位置。
+
+#### 4.2.3 源码精读
+
+身份键——注意它把 op、inputs、outputs、attrs 四类信息全部编进 JSON：
+
+[src/lib.rs:L124-L132](https://github.com/openinfer-project/openinfer/blob/223206b7ddbc7441063741484d9aa610d5ed9bb0/pegainfer-bench/src/lib.rs#L124-L132) —— `bench_key` 把一个 `KernelCall` 的 op 名、输入/输出张量规格、属性序列化成一个稳定 JSON 字符串，作为「同一形状只测一次」的去重身份。
+
+```rust
+pub fn bench_key(call: &KernelCall) -> Result<String> {
+    Ok(serde_json::to_string(&serde_json::json!({
+        "op": call.op,
+        "inputs": call.inputs,
+        "outputs": call.outputs,
+        "attrs": call.attrs,
+    }))?)
+}
+```
+
+四个访问器是 provider 读取「参数」的唯一通道，全部走「找不到就 `anyhow!` 报错、由 provider 的 `?` 向上传播」的风格（u2-l4 讲过的快速失败惯例）：
+
+[src/lib.rs:L134-L140](https://github.com/openinfer-project/openinfer/blob/223206b7ddbc7441063741484d9aa610d5ed9bb0/pegainfer-bench/src/lib.rs#L134-L140) —— `axis` 在 `TensorSpec` 的命名轴里按名字找轴并返回其大小，找不到时报错并附上 `spec.compact()` 的紧凑描述。
+
+```rust
+pub fn axis(spec: &TensorSpec, name: &str) -> Result<usize> {
+    spec.axes
+        .iter()
+        .find(|axis| axis.name == name)
+        .map(|axis| axis.size)
+        .ok_or_else(|| anyhow!("missing axis `{name}` in {}", spec.compact()))
+}
+```
+
+[src/lib.rs:L142-L156](https://github.com/openinfer-project/openinfer/blob/223206b7ddbc7441063741484d9aa610d5ed9bb0/pegainfer-bench/src/lib.rs#L142-L156) —— `input`/`output` 在 `call.inputs`/`call.outputs` 里按参数名找 `TensorSpec`，报错信息带上 `call.label`（调用点标签），让模型报告能直接定位是哪个调用点缺了哪个参数。
+
+[src/lib.rs:L158-L166](https://github.com/openinfer-project/openinfer/blob/223206b7ddbc7441063741484d9aa610d5ed9bb0/pegainfer-bench/src/lib.rs#L158-L166) —— `attr_usize` 按 name 找 attr 并把它的**字符串值** `parse` 成 usize（L163–L164）；找不到时报「missing attr」（L162），解析失败时映射为一个同样带 `call.label` 的 `anyhow!` 错误（L165–L166）。属性值以字符串承载，是这个调度格式的一个值得注意的设计。
+
+零填充缓冲——尺寸直接取自内核形状，而非 provider 手写：
+
+[src/lib.rs:L168-L181](https://github.com/openinfer-project/openinfer/blob/223206b7ddbc7441063741484d9aa610d5ed9bb0/pegainfer-bench/src/lib.rs#L168-L181) —— `zero_matrix` 在设备流上 `alloc_zeros` 分配 `rows × cols` 的零矩阵（文档注释明说 "sized straight from a kernel shape"）；`zero_weight` 把它包成编译期定维的 `GpuWeight<OUT, IN>`。计时不关心数值内容，只关心形状与访存模式，所以零填充即可。
+
+```rust
+pub fn zero_matrix(ctx: &DeviceContext, rows: usize, cols: usize) -> Result<DeviceMatrix> {
+    Ok(DeviceMatrix {
+        data: ctx.stream.alloc_zeros(rows * cols)?,
+        rows,
+        cols,
+    })
+}
+```

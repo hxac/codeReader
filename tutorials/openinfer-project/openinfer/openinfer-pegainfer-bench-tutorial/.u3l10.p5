@@ -1,0 +1,71 @@
+
+#### 4.3.3 源码精读
+
+计时循环本体：
+
+[src/lib.rs:L94-L122](https://github.com/openinfer-project/openinfer/blob/223206b7ddbc7441063741484d9aa610d5ed9bb0/pegainfer-bench/src/lib.rs#L94-L122) —— 文档注释一句话概括：「Time `launch` over `iters` CUDA-event-bracketed iterations after a 3-shot warmup」。函数体内依次是 iters 零值拦截（L100–L102）、三次预热（L103–L105）、排空流（L106）、创建两个默认 CUDA 事件（L107–L112）、逐圈 record/launch/record/elapsed 并把毫秒差乘 1000 存为微秒样本（L113–L119）、最终 sync 后交给 `from_samples`（L120–L121）。
+
+```rust
+pub fn measure_loop(
+    ctx: &DeviceContext,
+    iters: u64,
+    mut launch: impl FnMut() -> Result<()>,
+) -> Result<LatencyStats> {
+    if iters == 0 {
+        bail!("iters must be greater than zero");
+    }
+    for _ in 0..3 {
+        launch()?;
+    }
+    ctx.sync()?;
+    // ……（L107–L119：创建 start/end 两个 CU_EVENT_DEFAULT 事件；
+    //      循环 iters 次 start.record → launch → end.record，
+    //      samples.push(start.elapsed_ms(&end)? × 1000)）……
+    ctx.sync()?;
+    LatencyStats::from_samples(iters, samples)
+}
+```
+
+（上面为节选，注释段是对 L107–L119 的转述；完整实现见链接。）
+
+统计结构与其构造：
+
+[src/lib.rs:L22-L32](https://github.com/openinfer-project/openinfer/blob/223206b7ddbc7441063741484d9aa610d5ed9bb0/pegainfer-bench/src/lib.rs#L22-L32) —— `LatencyStats` 携带 `iters` 与七个统计量：`mean_us`、`stddev_us`、`min_us`、`p50_us`、`p95_us`、`p99_us`、`max_us`（单位微秒），可 `Serialize`——报告直接落 JSON。
+
+[src/lib.rs:L57-L86](https://github.com/openinfer-project/openinfer/blob/223206b7ddbc7441063741484d9aa610d5ed9bb0/pegainfer-bench/src/lib.rs#L57-L86) —— `from_samples`：空样本 `bail!`（L58–L60）；`total_cmp` 排序（L61）；均值（L62）；\( n-1 \) 分母的样本方差开方（L63–L75，\( n=1 \) 时记 0.0）；`min` 取排序后首元素、`max` 取尾元素（L80、L84），p50/p95/p99 走 `percentile`（L81–L83）。
+
+[src/lib.rs:L89-L92](https://github.com/openinfer-project/openinfer/blob/223206b7ddbc7441063741484d9aa610d5ed9bb0/pegainfer-bench/src/lib.rs#L89-L92) —— `percentile` 的全部实现只有两行：`ceil` 取上卷索引并钳制到 `len-1`。
+
+```rust
+fn percentile(sorted: &[f64], quantile: f64) -> f64 {
+    let idx = ((sorted.len() as f64 - 1.0) * quantile).ceil() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+```
+
+两种退化信封：
+
+[src/lib.rs:L34-L39](https://github.com/openinfer-project/openinfer/blob/223206b7ddbc7441063741484d9aa610d5ed9bb0/pegainfer-bench/src/lib.rs#L34-L39) —— `MeasuredCall { supported, reason, stats }`：一次调用的测量结果信封；`supported=false` + `reason` 表达 u3-l9 的「本地不可测」。
+
+[src/lib.rs:L42-L55](https://github.com/openinfer-project/openinfer/blob/223206b7ddbc7441063741484d9aa610d5ed9bb0/pegainfer-bench/src/lib.rs#L42-L55) —— `LatencyStats::zero(iters)`：全零统计，文档注释明说用于「counted but deliberately not timed (e.g. a no-op collective on a single rank)」——正是 u3-l9 的 no-op 纪律在库里的落点。
+
+#### 4.3.4 代码实践：手算一组样本的完整统计
+
+1. **实践目标**：不依赖运行，纯手工复现 `from_samples` + `percentile` 的每一步，彻底吃透口径。
+2. **操作步骤**：设某内核 `measure_loop` 采样 6 次（已排序，单位 µs）：`[8.2, 8.4, 8.5, 8.7, 9.0, 12.4]`。按 4.3.2 的公式计算 mean、样本标准差、p50、p95、p99。
+3. **需要观察的现象**：p95/p99 与 max 的关系；偶数样本下 p50 取的是哪一个中位。
+4. **预期结果**（参考答案）：
+   - mean = 55.2 / 6 = **9.2 µs**；
+   - 离差平方和 = 1.00+0.64+0.49+0.25+0.04+10.24 = 12.66，方差 = 12.66/5 = 2.532，s ≈ **1.59 µs**；
+   - p50：\( \lceil 5×0.5 \rceil = 3 \) → sorted[3] = **8.7**（上卷取的是偏大的那个中位）；
+   - p95：\( \lceil 5×0.95 \rceil = 5 \) → sorted[5] = **12.4**；p99 同样 = **12.4**。
+   - 教训：小样本下尾部分位数会**上卷到 max**——一次离群采样（12.4）直接决定了 p95/p99。读模型报告时若 `iters` 小，务必把 p99 与 max 放在一起看。（以上为手工计算；可另写一个小 Rust 程序直接调 `LatencyStats::from_samples(6, vec![...])` 打印对照——待本地验证。）
+
+#### 4.3.5 小练习与答案
+
+1. **问**：为什么 `iters == 0` 要在进入计时前就 `bail!`，而不是等到 `from_samples` 报「空样本」？
+   **答**：提前拦截（L100–L102 在事件创建之前）避免白建 CUDA 事件；同时把「测 0 次」显式定义为调用方错误，而不是让它伪装成统计错误（`from_samples` 的空样本 bail 在 L58–L60）。
+2. **问**：`zero()` 与 `from_samples()` 各自的适用场景？
+   **答**：`zero` = 计数但不计时（单 rank 的 no-op 集合通信，u3-l9）；`from_samples` = 真实采样的统计（`measure_loop` 的唯一出口）。
+3. **问**：`percentile` 用 `ceil` 而不是插值，对 p50 意味着什么？
+   **答**：偶数样本时 p50 取**上侧中位**（上例 8.7 而非 8.5）；报告口径是「至少有相应比例的样本 ≤ 该值」的保守侧。
