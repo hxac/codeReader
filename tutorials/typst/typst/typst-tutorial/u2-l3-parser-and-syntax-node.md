@@ -1,358 +1,348 @@
 # 语法树：Parser 与 SyntaxNode
 
-> 承接 [u2-l2 词法与类别：Lexer 与 SyntaxKind]：上一讲我们看到 Lexer 把字符流切成一个个带 `SyntaxKind` 的 token。本讲跟随这些 token 进入 Parser，看它们如何被组装成一棵完整的语法树，以及 Typst 为什么「解析永不失败」。
-
 ## 1. 本讲目标
 
-学完本讲，你应该能够：
+学完本讲，你应当能够：
 
-1. 说出 `parse` / `parse_code` / `parse_math` 三个解析入口的分工，以及 Parser 在 markup、code、math 三种模式之间切换的机制（`enter_modes` / `with_nl_mode`）。
-2. 读懂 `SyntaxNode` 的节点模型：叶节点存原文文本、内部节点存孩子列表与缓存信息、错误与警告作为树的组成部分存在，以及 span 编号（numberize）如何为每个节点分配位置身份。
-3. 解释 Typst 的容错设计：语法错误不抛异常、不中断，而是变成树中的 `Error` 节点，解析照常继续——这是编辑器「边打字边标红」体验的基础。
-4. 亲手打印一棵含错误节点的语法树，并观察错误之后的内容仍被正常解析。
+- 说清 `parse` / `parse_code` / `parse_math` 三个解析入口各自的使用场景，以及 markup（标记）、code（代码）、math（数学）三种语法模式如何在**同一次**解析中互相切换；
+- 读懂 `SyntaxNode` 的内部形态（叶子、内部节点、错误节点、警告包装）与它的「无损具体语法树（CST）」设计：父节点缓存的长度、后代数、诊断摘要，以及 span 编号区间；
+- 解释 Typst「解析永不失败、错误进树」的容错策略：错误如何变成树上的 `Error` 节点、解析器如何避免错误级联、如何在嵌套深度超限时自保；
+- 亲手打印一段含语法错误的源码的完整语法树，并验证错误不会阻断后续内容的解析。
 
 ## 2. 前置知识
 
-- **token 与词法**：Lexer 已经把源码切成了 token 序列，每个 token 有一个类别（`SyntaxKind`）。本讲只关心 Parser 如何消费它们。
-- **CST 与 AST 的区别**：
-  - **CST（Concrete Syntax Tree，具体语法树）**：完整保留源码中的一切——包括空格、注释、逗号。Typst 的 `SyntaxNode` 树就是 CST，所以「树 + 无损」可以直接还原出全部原文。
-  - **AST（Abstract Syntax Tree，抽象语法树）**：只保留语义上有意义的部分，跳过空白与标点。Typst 没有为 AST 单独建树，而是在 CST 之上提供「懒视图」（`ast.rs`，下一讲 u2-l4 详解）。
-- **递归下降解析（recursive descent）**：为每类语法结构写一个函数，函数里看当前 token 是什么就调用哪个子函数，天然递归。Typst 的 `parser.rs` 全部由这类手写函数组成，没有用解析器生成器。
-- **优先级爬升（precedence climbing）**：处理 `1 + 2 * 3` 这类优先级问题时，给每个运算符一个优先级数字，解析函数带一个「最低优先级」参数，决定是否继续吞掉后面的运算符。`code_expr_prec` 与 `math_expr_prec` 都是这个套路。
-- **前看（lookahead）**：解析器在决定动作前先偷看当前 token 的能力。Typst 的 Parser 恰好持有一个「当前 token」，相当于 1 个前看。
-- **绿树（green tree）**：来自 rust-analyzer 的术语——节点不可变、孩子用引用计数（Rust 中是 `Arc`）共享、克隆子树代价极低。父节点不存指向孩子的反向信息之外的任何「位置」，需要父链和偏移时用 `LinkedNode` 包装（红节点）临时补上。
+在进入源码之前，先用通俗语言补齐几个概念。上一讲（u2-l2）讲过词法器 `Lexer`，本讲直接消费它的产物。
+
+- **token 与 `SyntaxKind`**：词法器把源码字符串切成一个个带类别的片段（标识符、数字、星号……），类别就是 `SyntaxKind` 枚举。本讲只需要知道两件事：`SyntaxKind::Error` 表示「这段字符序列本身就不合法」；每个 `SyntaxKind` 都能通过 `name()`、`is_trivia()`、`is_keyword()`、`is_grouping()` 等方法快速分类。
+- **三种语法模式 `SyntaxMode`**：Typst 源码里同一串字符在不同位置含义不同。文件顶层是 markup（正文文本），`#` 之后是 code（表达式），`$ ... $` 之间是 math（公式）。模式决定了词法器怎么分词、解析器期待什么结构。
+- **递归下降（recursive descent）**：手写解析器最常见的写法——「看到什么 token，就调用对应的解析函数」。函数体里再调用更深的解析函数，调用栈的形状恰好对应语法树的嵌套形状。
+- **优先级爬升（precedence climbing）**：处理 `1 + 2 * 3` 这类二元运算的技巧：给每个运算符定优先级，解析函数带一个「当前最低优先级」参数，遇到优先级更低的运算符就返回，交给上层处理。
+- **具体语法树 CST vs 抽象语法树 AST**：AST 只保留语义上有意义的结构；CST（本讲的 `SyntaxNode`）**无损**地保留源码中的一切——包括空白、注释这类「琐碎内容」（trivia），因此可以从树完整还原出源文本。typst-syntax 的 README 明确说 parser.rs 的职责是「preparing a Concrete Syntax Tree made of nested vectors of `SyntaxNode`s」（见 [crates/typst-syntax/README.md:L11-L12](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/README.md#L11-L12)），并且整个 parser 的结构借鉴自 rust-analyzer（[crates/typst-syntax/README.md:L26-L28](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/README.md#L26-L28)）。
+- **容错解析（error-tolerant parsing）**：编辑器需要在用户写了一半、甚至写错的情况下继续工作，所以解析器**不能一遇到错误就中断**，而要把错误记录下来继续解析。Typst 把这条原则推到极致：`parse` 永远返回一棵树，错误只是树上的特殊节点。
+- **Span**：上一讲（u2-l1）介绍过的源码定位手段。本讲会看到解析结束后如何给整棵树的节点分配编号区间。
 
 ## 3. 本讲源码地图
 
-| 文件 | 作用 |
+| 文件 | 角色 |
 | --- | --- |
-| [crates/typst-syntax/src/parser.rs](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs) | 递归下降解析器本体：入口函数、各语法结构的解析函数、`Parser` 状态机、错误生成 |
-| [crates/typst-syntax/src/node.rs](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs) | `SyntaxNode` / `InnerNode` / `ErrorNode` / `LinkedNode`：树的数据结构与 span 编号 |
-| [crates/typst-syntax/src/kind.rs](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/kind.rs) | `SyntaxKind` 枚举与各类判定（`is_trivia` / `is_terminator` / `is_error`），上一讲已精读，本讲引用其判定函数 |
-| [crates/typst-syntax/src/set.rs](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/set.rs) | `SyntaxSet`：一个 `u128` 位图，Parser 用它表达「停在哪里」的停止条件 |
-| [crates/typst-syntax/src/lib.rs](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/lib.rs) | `SyntaxMode` 枚举定义（Markup/Math/Code 三模式）与 crate 公开导出清单 |
+| [crates/typst-syntax/src/parser.rs](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs) | 手写递归下降解析器：三个入口、三套主循环、错误恢复都在这里 |
+| [crates/typst-syntax/src/node.rs](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs) | `SyntaxNode`：CST 的数据结构、错误/警告节点、诊断收集、span 编号 |
+| [crates/typst-syntax/src/kind.rs](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/kind.rs) | `SyntaxKind` 枚举：所有 token 与节点类别，以及 `is_error()` 等分类判断 |
+| [crates/typst-syntax/src/set.rs](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/set.rs) | `SyntaxSet`：用 `u128` 位图表示的一组 `SyntaxKind`，解析器靠它声明「我可以接受哪些 token」 |
+| [crates/typst-syntax/src/lib.rs](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/lib.rs) | crate 出口；`SyntaxMode` 三模式枚举定义于此 |
+| [crates/typst-syntax/README.md](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/README.md) | crate 自述：各文件职责与设计出处（rust-analyzer、Martin 的增量编译论文） |
+
+本讲的重点是前两个文件；后三个只取用到的片段。
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 递归下降主循环：三种模式如何切换
+### 4.1 递归下降主循环
 
 #### 4.1.1 概念说明
 
-Typst 源码里有三种「方言」：markup（正文标记）、code（`#` 后的脚本）、math（`$...$` 里的公式）。同一个字符在三 种模式里含义完全不同——比如 `_` 在 markup 里是强调记号，在 code 里是匿名参数，在 math 里是下标 attachment。所以解析器必须随时知道自己「在哪种模式里」，并且能在遇到 `[`、`{`、`$`、`#` 时切换模式、递归进入子结构，结束时再切回来。
+parser.rs 要解决的问题：把 token 流组织成一棵结构化的 `SyntaxNode` 树。难点在于 Typst 的「三模式」——markup 里可以嵌 code（`#` 引出表达式）和 math（`$` 引出公式），code 里又可以嵌 markup（`[ ... ]` 内容块）和 math，如此往复。
 
-Parser 的核心工作方式可以概括为三种动作（这段总结直接来自源码文档注释）：
+Typst 的做法不是为每种模式写三个独立解析器，而是**一个 `Parser` 结构，模式作为词法器的一个状态**，在递归下降过程中通过 `enter_modes` 压栈/出栈式地切换。README 对 parser.rs 的定位是「The main parser definition」（[crates/typst-syntax/README.md:L11-L12](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/README.md#L11-L12)）。
 
-1. **eat（吃掉）**：把当前 token 作为一个叶节点压进 `nodes` 数组，然后让 Lexer 前进，准备下一个 token。
-2. **wrap（打包）**：从之前记录的标记（marker）到 `nodes` 末尾（不含当前 token 及其后随 trivia）的所有节点打包成一个指定 `SyntaxKind` 的内部节点。
-3. **出错（error）**：期望的东西没出现、或出现了不该出现的东西时，生成或转换出一个 `Error` 节点。
+三种模式由 [crates/typst-syntax/src/lib.rs:L38-L47](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/lib.rs#L38-L47) 中的 `SyntaxMode` 枚举定义：
 
-这套「先吃后打包」的写法让解析函数可以只管往前吃，最后一步 `p.wrap(m, Kind)` 决定这堆节点整体是什么结构——不需要预知子结构的形状。
+- `Markup`：文件顶层、内容块 `[ ... ]` 内部——正文文本；
+- `Math`：公式 `$ ... $` 内部——数学原子与运算符；
+- `Code`：`#` 之后、代码块 `{ ... }` 内部——关键字、字面量、运算符。
 
 #### 4.1.2 核心流程
 
-一次 `typst compile` 中的解析主链路（结合 u1-l4 的 CLI 调用链）：
+一次 `parse(text)` 的整体流程：
 
 ```text
-Source 文本
-   │
-   ▼
-parse(text)                      ← 入口：markup 模式
-   │  创建 Parser(text, 0, SyntaxMode::Markup)
-   ▼
-markup_exprs                     ← 主循环：逐个解析 markup 表达式
-   │  循环体 markup_expr(p) 按当前 token 分发：
-   │    Text/Link/Label → 直接 eat
-   │    Star  → strong(p)          *强调*
-   │    HeadingMarker(且在行首) → heading(p)
-   │    Dollar → equation(p)       进入 math 模式
-   │    Hash  → embedded_code_expr(p)  进入 code 模式
-   │    其它  → p.unexpected()     生成错误节点后继续
-   ▼
-p.finish_into(SyntaxKind::Markup)  → 根为 Markup 的 SyntaxNode
+parse(text)
+ ├─ Parser::new(text, 0, SyntaxMode::Markup)   ← 创建解析器，模式为 Markup
+ ├─ markup_exprs(p, stop 集合含 End)           ← 主循环：逐个吃 markup 表达式
+ │    while !p.at_set(stop_set):
+ │        markup_expr(p, at_start, &mut nesting)
+ │            ├─ 看到 Text/Space/Link/Label/... → p.eat()          （直接吃掉）
+ │            ├─ 看到 *  → strong()               （递归：粗体）
+ │            ├─ 看到行首的标题标记 → heading()     （递归：标题）
+ │            ├─ 看到 $  → equation()             ← 切到 Math 模式
+ │            ├─ 看到 #  → embedded_code_expr()   ← 切到 Code 模式
+ │            └─ 其他      → p.unexpected()        （错误进树，见 4.3）
+ └─ p.finish_into(SyntaxKind::Markup)           ← 把所有孩子打包成根节点
 ```
 
-模式切换与停止条件的两个正交维度：
+三个入口完全对称，只是初始模式和主循环不同：
 
-- **`SyntaxMode`（语法模式，存在 Lexer 里）**：决定 Lexer 会产出哪些 `SyntaxKind`。`enter_modes` 在进入子结构前切换、退出后还原。
-- **`AtNewline`（换行模式，存在 Parser 里）**：决定「遇到换行要不要假装到了结尾」。比如标题内容遇到换行就该停（`Stop`），而列表项要求下一行缩进更深才继续（`RequireColumn`）。需要停时，Parser 把当前 token 的 kind 临时改成 `End` 制造「假结尾」，退出时再还原真实 kind。
+- `parse`（[parser.rs:L15-L22](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L15-L22)）：Markup 模式 + `markup_exprs`，根节点 kind 为 `Markup`；
+- `parse_code`（[parser.rs:L24-L31](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L24-L31)）：Code 模式 + `code_exprs`，根节点 kind 为 `Code`；
+- `parse_math`（[parser.rs:L33-L40](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L33-L40)）：Math 模式 + `math_exprs`，根节点 kind 为 `Math`。
 
-停止条件用 `SyntaxSet`（一个 `u128` 位图）表达，比如 `syntax_set!(Star, RightBracket, End)` 表示「遇到 `*`、`]` 或结尾就停」。
+模式切换的四个「铰链」：
+
+| 源码形态 | 触发函数 | 进入的模式 |
+| --- | --- | --- |
+| `#expr`（markup/math 中嵌代码） | `embedded_code_expr` | Code |
+| `$ ... $`（markup 中嵌公式） | `equation` | Math |
+| `{ ... }`（代码块） | `code_block` | Code |
+| `[ ... ]`（内容块） | `content_block` | Markup |
+
+code 模式的主循环里，表达式之间要求分号或换行分隔，否则报 `expected semicolon or line break`；math 模式的主循环最简单：不是数学表达式就 `unexpected()`。三者都由 `check_depth_until` / `increase_depth` 兜底，嵌套深度上限是 `MAX_DEPTH`，值为 256（[parser.rs:L12](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L12)），防止病态输入（如几百个左括号）把递归调用栈撑爆。
 
 #### 4.1.3 源码精读
 
-**三个解析入口**，分别以 Markup、Code、Math 模式起跳，最终分别产出 `Markup`、`Code`、`Math` 根节点。`parse` 是编译文档时用的入口：
+**① 三个入口**（[crates/typst-syntax/src/parser.rs:L15-L40](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L15-L40)）：每个入口只做三件事——建 `Parser`、跑主循环、`finish_into` 打包根节点。函数体开头的 `typst_timing::TimingScope` 只在启用 `timing` feature 时生效，用于统计解析耗时。
 
-[crates/typst-syntax/src/parser.rs:L15-L39](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L15-L39) — 定义 `parse`、`parse_code`、`parse_math`：各自创建一个对应初始模式的 `Parser`，跑一遍 `*_exprs` 主循环，再 `finish_into` 成单一根节点。
+**② markup 主循环**（[crates/typst-syntax/src/parser.rs:L52-L76](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L52-L76)）：`while !p.at_set(stop_set)` 不断调用 `markup_expr`；`at_start` 记录「是否位于行首」，它决定标题、列表这类**行首标记**（`HeadingMarker`、`ListMarker` 等）是否生效。`nesting` 计数器处理 markup 里裸 `[` `]` 的嵌套——行内括号会被当作普通文本吃掉，而不是结构符号。
 
-三模式枚举本体在 [crates/typst-syntax/src/lib.rs:L42-L51](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/lib.rs#L42-L51)，导出于 [crates/typst-syntax/src/lib.rs:L28](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/lib.rs#L28)。
+**③ markup 分发**（[crates/typst-syntax/src/parser.rs:L89-L137](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L89-L137)）：一个巨大的 `match p.current()`。这是理解「看到什么 token 走什么路」的最好速查表：`Star` 走 `strong()`，`Dollar` 走 `equation()`，`Hash` 走 `embedded_code_expr()`，行首的 `HeadingMarker`/`ListMarker`/`EnumMarker`/`TermMarker` 走对应结构函数；落空则 `p.unexpected()`。
 
-**markup 主循环**：
+**④ 嵌入式代码表达式**（[crates/typst-syntax/src/parser.rs:L560-L580](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L560-L580)）：`#` 之后切到 Code 模式解析一个表达式。注意 `if p.had_trivia() || p.end()` 分支会调用 `p.expected("expression")` 然后返回——`#` 后面直接结束（源码只有一个 `#`）就会在这里产生 `expected expression` 错误节点，这正是 4.3.4 实践会看到的树形。
 
-[crates/typst-syntax/src/parser.rs:L52-L63](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L52-L63) — `markup_exprs`：`while !p.at_set(stop_set)` 反复调用 `markup_expr`；`at_start` 记录「当前是否在行首」，供标题/列表记号判定；`nesting` 处理内容块里嵌套 `[` `]` 的特殊情况。
+**⑤ 公式与两种块**（[crates/typst-syntax/src/parser.rs:L227-L244](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L227-L244)）：`equation` 用 `p.enter_modes(SyntaxMode::Math, ...)` 进入数学模式，吃掉 `$`、解析 `Math` 节点、用 `expect_closing_delimiter` 等待收尾 `$`，最后 `wrap` 成 `Equation` 节点。[parser.rs:L748-L768](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L748-L768) 的 `code_block` / `content_block` 同理，分别用 `enter_modes` 切到 Code / Markup——「调用栈就是模式栈」。
 
-**分发中枢**：
+**⑥ 模式切换的实现**（[crates/typst-syntax/src/parser.rs:L1791-L1830](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L1791-L1830)）：`enter_modes` 保存旧模式，设置词法器新模式，执行闭包，然后恢复旧模式并**重新词法分析当前 token**（因为同一段字符在 markup 和 code 下会分成不同的 token）。`with_nl_mode` 的文档注释说得很直白：「This function effectively repurposes the call stack as a stack of modes」。
 
-[crates/typst-syntax/src/parser.rs:L89-L136](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L89-L136) — `markup_expr`：一个 `match p.current()` 完成全部分发。注意两个细节：(1) `HeadingMarker if at_start`——同样的 `=` 不在行首就只会落到兜底分支被当成 `Text`；(2) 兜底分支 `_ => p.unexpected()`——任何认不出的 token 都不会让解析崩溃，而是生成错误节点后由外层循环继续。
+**⑦ Parser 的状态**（[crates/typst-syntax/src/parser.rs:L1480-L1529](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L1480-L1529)）：`Parser` 持有共享文本 `text`、多模式 `lexer`、`nodes`（已产出的语法树节点，按序排列）、单 token 前瞻 `token`（`Token` 结构缓存了当前 token 的 kind、节点、前置 trivia 数量、换行信息）、`balanced`（括号是否配平）以及记忆化用的 `memo`。**已经解析好的节点以扁平 `Vec` 形式堆在 `nodes` 里，需要成组时用 `wrap` 收拢**——这就是「nested vectors of SyntaxNodes」的真正含义。
 
-**从 markup 进入 code 的跳板**：
+**⑧ 吃 token 与打包**（[crates/typst-syntax/src/parser.rs:L1750-L1789](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L1750-L1789)）：`eat` 把当前 token 的节点 push 进 `nodes` 再前移词法器；`wrap(from, kind)` 把 `from` 标记到当前 token 之前的所有节点 drain 出来，包成一个 `SyntaxNode::inner` 放回原位。配合 `marker()`（[parser.rs:L1702-L1712](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L1702-L1712)）记录的位置，「先解析孩子、再包装父亲」就是 Typst 建树的全部秘密。
 
-[crates/typst-syntax/src/parser.rs:L559-L579](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L559-L579) — `embedded_code_expr`：吃掉 `#` 后立刻用 `enter_modes(SyntaxMode::Code, AtNewline::Stop, ...)` 切进 code 模式；`atomic = true` 表示内嵌表达式不允许后随运算符继续组合（`#1 + 2` 里的 `+` 属于 markup 文本而非代码）；末尾检查语句是否需要分号收尾。
+另外值得一提：`code_expr_prec`（[parser.rs:L587](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L587) 起）实现优先级爬升；`Parser` 的 `memo` 字段配合 `expr_with_paren`（[parser.rs:L987](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L987) 起）做了类似 packrat 的解析回溯记忆化，本讲不展开。
 
-**模式切换的实现——「把调用栈当模式栈」**：
+#### 4.1.4 代码实践
 
-[crates/typst-syntax/src/parser.rs:L1791-L1806](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L1791-L1806) — `enter_modes`：进入前保存 Lexer 旧模式，退出后恢复并**从上一 token 末尾重新词法分析**（同一个 token 在不同模式下可能切法不同，所以必须重切）。
-
-[crates/typst-syntax/src/parser.rs:L1812-L1828](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L1812-L1828) — `with_nl_mode`：换行模式的进/出与恢复；退出时决定当前 token 保持真实 kind 还是被标记为临时 `End`。
-
-换行模式的五种取值与判定在 [crates/typst-syntax/src/parser.rs:L1539-L1574](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L1539-L1574)：`Continue` / `Stop` / `ContextualContinue`（code 里 `else`、`.` 可跨行续接）/ `StopParBreak`（markup 里普通换行不断句）/ `RequireColumn(min_col)`（列表项靠缩进列决定续行）。
-
-**Parser 的全部状态**：
-
-[crates/typst-syntax/src/parser.rs:L1480-L1506](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L1480-L1506) — `struct Parser`：共享的源文本、多模式 Lexer、换行模式、当前 token（唯一的前看）、`balanced` 标记、已产出的 `nodes` 向量、回溯记忆表 `memo`、递归深度 `depth`。文档注释（L1446-L1479）详细说明了 eat/wrap/error 三动作与 CST/AST 关系，非常值得整段阅读。
-
-**吃与打包**：
-
-[crates/typst-syntax/src/parser.rs:L1750-L1753](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L1750-L1753) — `eat`：把 token 自带的现成 `SyntaxNode` 压进 `nodes`，再调 `lex` 取下一个 token。
-
-[crates/typst-syntax/src/parser.rs:L1702-L1704](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L1702-L1704) 与 [crates/typst-syntax/src/parser.rs:L1766-L1771](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L1766-L1771) — `marker()` 只是记下 `nodes.len()` 这个下标；`wrap` 把 `from..to` 区间的节点 drain 出来，塞进一个新的 `SyntaxNode::inner` 再插回去——「后进先包」，树是自底向上长出来的。
-
-**停止条件的位图实现**：
-
-[crates/typst-syntax/src/set.rs:L7-L42](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/set.rs#L7-L42) — `SyntaxSet(u128)`：每个 `SyntaxKind` 占一位，`contains` 是一次位与；[crates/typst-syntax/src/set.rs:L51-L57](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/set.rs#L51-L57) 的 `syntax_set!` 宏让它能写成编译期常量，零运行时开销。
-
-**优先级爬升与一处回溯**（进阶阅读，先知道有这回事即可）：
-
-[crates/typst-syntax/src/parser.rs:L587-L661](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L587-L661) — `code_expr_prec`：先解析一个主表达式（`code_primary`），再在循环里不断尝试「后随 `(` `[` → 函数调用」「`.` → 字段访问」「二元运算符 → 递归右侧操作数」，运算符优先级不够就 break。math 侧对应 [crates/typst-syntax/src/parser.rs:L270-L400](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L270-L400) 的 `math_expr_prec`。
-
-[crates/typst-syntax/src/parser.rs:L987-L1049](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L987-L1049) — `expr_with_paren`：遇到 `(` 时无法确定它是括号表达式、数组、字典、参数列表还是解构，先按最常见的猜测解析，看到 `=>` 或 `=` 再回溯重解。L1010-L1024 的注释解释了为什么朴素回溯最坏要 \( O(2^n) \)（嵌套 `(x: (x: (x) => y) => y) => y` 反复重解），以及用 memo 表把复杂度压到 \( O(2n) \) 的技巧——每个括号结构至多被解析两次。
-
-#### 4.1.4 代码实践：对照模式切换读一段源码
-
-**实践目标**：验证 `=` 不在行首时不会被解析为标题，体会「分发 + at_start 判定」。
+**实践目标**：亲眼看到递归下降「一个 token 一个 token 地吃」的过程。
 
 **操作步骤**：
 
-1. 打开 [crates/typst-syntax/src/parser.rs:L121-L132](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L121-L132)，注意 `HeadingMarker if at_start` 分支与兜底的 `Colon => p.convert_and_eat(SyntaxKind::Text)`。
-2. 写两个对比文件（临时文件即可， anywhere 均可，不放进仓库）：
-   - `a.typ` 内容：`= Intro`（`=` 在行首）
-   - `b.typ` 内容：`some = sign`（`=` 在单词后）
-3. 用已构建好的 CLI 分别编译：`cargo run -p typst-cli -- compile a.typ a.pdf` 与 `cargo run -p typst-cli -- compile b.typ b.pdf`。
+1. 打开 `crates/typst-syntax/src/parser.rs`，定位到 `fn eat`（约 L1750）；
+2. 在 `self.nodes.push(...)` 之后临时加一行日志（示例代码，验证后请还原）：
 
-**需要观察的现象**：`a.typ` 产出一级标题；`b.typ` 不报错，`= sign` 只是普通正文文本。
+```rust
+fn eat(&mut self) {
+    self.nodes.push(std::mem::take(&mut self.token.node));
+    eprintln!("eat: {:?}", self.nodes.last().unwrap()); // 临时添加
+    self.token = Self::lex(&mut self.nodes, &mut self.lexer, self.nl_mode);
+}
+```
 
-**预期结果**：`b.typ` 中 `=` 走不到 `heading` 分支，因为 `at_start` 为假，最终落入兜底被 `convert_and_eat(SyntaxKind::Text)` 吃成文本。具体 PDF 渲染效果「待本地验证」。
+3. 运行仓库自带的树形输出测试：
+
+```bash
+cargo test -p typst-syntax test_debug -- --nocapture
+```
+
+**需要观察的现象**：stderr 里按时间顺序打印出每个进入 `nodes` 的节点（含空白这类 trivia 节点），形如 `eat: HeadingMarker: "="`、`eat: SpaceNoNewline: " "`、`eat: Text: "Head"`……（具体顺序与措辞待本地验证）。
+
+**预期结果**：日志序列恰好是测试断言的那棵树（见 4.3.4）的**前序遍历**；测试本身仍然通过，说明加日志没有破坏解析行为。观察完后删除日志行。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：`parse`、`parse_code`、`parse_math` 三个入口分别被什么场景使用？如果只想检查一段 `#let x = 1` 脚本的语法，该用哪个？
+**练习 1**：`parse`、`parse_code`、`parse_math` 分别在什么场景被调用？
 
-**答案**：`parse` 编译整个文档（markup 为根）；`parse_math` 由 `parse` 内部进入 `$` 时间接使用，也用于独立解析公式片段（如 math 模式的补全场景）；`parse_code` 用于纯脚本上下文。检查 `#let x = 1` 这种以 `#` 开头的内嵌脚本时，`parse` 即可（`#` 会经 `embedded_code_expr` 进入 code 模式）；若文本本身不含 `#`（如 `"let x = 1"`），应选 `parse_code`，因为 `let` 在 markup 模式下只是普通文本。
+**答案**：`parse` 解析整个源文件（markup 是文档顶层）；`parse_code` 用于解析「纯代码」的片段（需要以代码模式为起点的输入场景）；`parse_math` 用于把一整段文本按公式解析。三者共享同一套 `Parser` 机制，只是初始 `SyntaxMode` 与主循环不同。
 
-**练习 2**：为什么 `enter_modes` 退出时要 `lexer.jump(self.token.prev_end)` 并重新 lex 当前 token，而不是直接继续？
+**练习 2**：标题标记（`HeadingMarker`，即行首的等号加空格）为什么只有出现在行首才生效？
 
-**答案**：因为模式决定切词。同一个字符序列在不同模式下切出的 token 不同（例如退出 code 模式后，剩下的 `+` 在 markup 里应属于 `Text`）。只有从上一个 token 的末尾重新开始、用恢复后的模式重新切词，才能保证树与「从头到尾一次性解析」的结果一致——这对增量重解析（u2-l5）的正确性至关重要。
+**答案**：`markup_exprs` 主循环用 `at_start`（由 `p.had_newline()` 维护）追踪是否位于行首；`markup_expr` 的 match 分支写成 `SyntaxKind::HeadingMarker if at_start` 才调用 `heading(p)`，非行首的等号会走别的分支（被当作文本处理）。行首约束是 markup 模式区别于 code 模式的关键上下文敏感性。
 
-**练习 3**：`syntax_set!(Star, RightBracket, End)` 在内存里是什么？`add`/`contains` 的开销是多少？
+**练习 3**：`Parser` 的 `token` 字段为什么说是「单 token 前瞻」？
 
-**答案**：一个 `SyntaxSet(u128)`，即 128 位整数里按 `SyntaxKind` 的判别值把对应位置 1。`add` 与 `contains` 都是一次位或/位与，编译期常量折叠后零运行时成本（见 [crates/typst-syntax/src/set.rs:L7-L42](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/set.rs#L7-L42)）。
+**答案**：解析器任何时刻只持有当前 token（还没进 `nodes`），`current()`/`at()` 都只看它；`eat()` 之后才通过 `lex()` 取下一个。匹配分支时只能「看一眼前」，需要更多上下文的场合靠 `wrap`（事后成组）和 `memo`（回溯记忆化）弥补。
 
-### 4.2 SyntaxNode 节点模型：一棵「绿树」
+### 4.2 SyntaxNode 节点模型
 
 #### 4.2.1 概念说明
 
-`SyntaxNode` 是整个编译器的地基数据结构：求值（u3 单元）、高亮、IDE、增量重解析全都围着它转。它的设计要点：
+`SyntaxNode` 是整个 typst-syntax 的中枢数据结构：parser 造它、AST 在它之上提供类型化视图（下一讲）、高亮器和 IDE 遍历它。它的设计目标是**无损 + 可增量维护**，也就是 rust-analyzer 一系的「绿树」思想（README 明确说 parser 结构 adapted from Rust Analyzer，[crates/typst-syntax/README.md:L26-L28](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/README.md#L26-L28)）。
 
-1. **四种形态合一**：叶节点（存原文文本）、内部节点（存孩子）、错误节点（存出错文本 + 消息 + 提示）、警告包装节点（透明地包住另一个节点，附加警告消息）。注意：较老版本的 Typst 只有前三种，本仓库当前版本新增了 `Warning`——网上旧文章若说「只有三种」，已过时。
-2. **无损**：所有叶节点文本依次拼接 = 原文；内部节点不存自己的文本，只存长度等缓存。
-3. **绿树**：孩子放在 `Arc<InnerNode>` 里，克隆节点只是引用计数 +1；树不可变，共享结构免费。这对增量重解析（u2-l5）是决定性的：改动后新树可以和旧树共享未变动的绝大部分子树。
-4. **span 编号（numberize）**：解析完成后给每个节点分配一个数字，父节点编号小于所有孩子、兄弟从左到右递增。这样凭编号就能在树里二分定位（`LinkedNode::find_number`），也是 u2-l1 讲过的 `Span` 的编号来源。
+「无损」体现在：树上保留一切 token（包括空白、注释这些 trivia），任意子树的文本拼接起来就是原文。「可增量维护」体现在两点：
+
+1. 每个内部节点缓存了整棵子树的**摘要信息**（总字节长、总节点数、有无错误/警告），改一个孩子只需沿路径更新祖先的摘要（`replace_children`，[node.rs:L737](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L737) 起），配合下一讲（u2-l5）的增量重解析使用；
+2. 每个节点持有**编号区间**（span number），新节点插进来时尽量不动兄弟的编号。
 
 #### 4.2.2 核心流程
 
-树的生长与编号：
+一个节点的四种内部形态（`Node` 枚举，[node.rs:L53-L59](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L53-L59)）：
+
+| 形态 | 存储内容 | 对应 `SyntaxKind` |
+| --- | --- | --- |
+| `Leaf(text, kind)` | token 原文 + 类别 | 除 Error 外的任意类别 |
+| `Inner(Arc<InnerNode>, kind)` | 孩子列表 + 摘要 | 结构类别（Markup、Heading、Equation…） |
+| `Error(Arc<ErrorNode>, kind)` | 错误消息 + 触发文本 + 提示 | 恒为 `SyntaxKind::Error` |
+| `Warning(Arc<WarningWrapper>, kind)` | 包裹一个孩子 + 警告消息 | 同被包裹孩子的类别 |
+
+文档注释（[node.rs:L27-L52](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L27-L52)）写明了不变式：**错误节点的 kind 恒为 `Error`，叶子和内部节点永远不是 `Error`**；警告只是「包装」，穿透后仍是原节点。
+
+建树与聚合流程：
 
 ```text
-Parser 阶段（自底向上）
-  eat  → SyntaxNode::leaf(kind, text)          叶：文本 + 类别
-  wrap → SyntaxNode::inner(kind, children)     内部：孩子们 + 缓存
-  出错 → SyntaxNode::error(message, text)      错误：文本 + 消息
-
-InnerNode::new 时同步汇总缓存：
-  len         = Σ child.len()          （字节长度）
-  descendants = 1 + Σ child.descendants()
-  diagnosis   = OR(child.diagnosis)    （子树是否含错/警告）
-
-解析完成后 numberize（自顶向下分配编号区间）
-  给根一个总区间，按 descendants 切分给各孩子
-  目标：尽量只占区间左半，把右半留给未来的插入（增量场景）
+SyntaxNode::leaf(kind, text)    → 叶子
+SyntaxNode::inner(kind, kids)   → InnerNode::new(kids)：
+      len         = Σ child.len()
+      descendants = 1 + Σ child.descendants()
+      diagnosis   = OR(所有 child.diagnosis)      ← 错误/警告向上冒泡缓存
+SyntaxNode::error(msg, text)    → 错误节点
+node.warn(msg)                  → 把现有节点包进 Warning
 ```
 
-编号区间分配的关键直觉：如果每次插入新节点都要给后面所有节点重新编号，增量编译就废了。所以 Typst 采用「稀疏编号」——子树编号挤在可用区间的左半边，中段留白；将来插入时直接用留白里的数字，无需重排（留白耗尽时才局部重排，见 `replace_children` 里的指数扩圈重试）。
+span 编号（`numberize`）把一个 `u64` 区间 `within` 分配给子树：先算步长
+
+\[ \text{stride} = \left\lfloor \frac{\text{within.end} - \text{within.start}}{2 \times \text{descendants}} \right\rfloor \]
+
+每个孩子分到「后代数 × stride」宽的子区间，节点自己的编号取其中点 `(start + end) / 2`。刻意只用**左半边**空间，是为了「留出空位给未来的插入」——增量编辑插入新节点时，兄弟的编号可以保持不变。区间挤不下时返回 `Unnumberable`，上层（`Source`）会改用全量重编号。
 
 #### 4.2.3 源码精读
 
-**外壳与内核**：
+**① 结构定义**（[crates/typst-syntax/src/node.rs:L18-L25](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L18-L25)）：`SyntaxNode` 只有 `data: Node` 和 `span: Span` 两个字段——span 提到顶层是为了高频访问的效率（注释里甚至为省 8 个字节把 kind 留在 `Node` 里）。
 
-[crates/typst-syntax/src/node.rs:L18-L25](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L18-L25) — `struct SyntaxNode` 只有两个字段：`data: Node` 与 `span: Span`（span 放顶层是注释里明说的性能取舍）。
+**② 四个构造器**（[crates/typst-syntax/src/node.rs:L111-L152](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L111-L152)）：`leaf` / `inner` 带 `debug_assert!(!kind.is_error())`，把「错误必须用 `error()` 造」这一不变式写进调试断言；`error(message, text)` 注意参数顺序是「消息在前、文本在后」；`warn` 则是原地包裹。
 
-[crates/typst-syntax/src/node.rs:L53-L58](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L53-L58) — `enum Node` 四形态：`Leaf(EcoString, SyntaxKind)` / `Inner(Arc<InnerNode>, SyntaxKind)` / `Error(Arc<ErrorNode>, SyntaxKind)` / `Warning(Arc<WarningWrapper>, SyntaxKind)`。注释（L27-L51）解释了为什么 `SyntaxKind` 要冗余存在 `Node` 里（省 8 字节 + 警告包装会复制 kind 带来的维护约束）。
+**③ InnerNode 与聚合**（[crates/typst-syntax/src/node.rs:L640-L667](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L640-L667)）：`InnerNode` 的字段就是 4.2.2 表里列的摘要：`len`、`descendants`、`diagnosis`、`upper`（编号区间上界）、`children`。`new` 在建节点时一次算清全部摘要。
 
-**三个构造器**：
+**④ 编号算法**（[crates/typst-syntax/src/node.rs:L672-L713](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L672-L713)）：即上面的 stride 公式，源码注释原话是「we try to fit all numbers into the left half of `within` so that there is space for future insertions」。`Unnumberable` 与 `NumberingResult` 定义在 [node.rs:L1467-L1479](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L1467-L1479)。
 
-[crates/typst-syntax/src/node.rs:L109-L140](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L109-L140) — `leaf` / `inner` / `error`。注意 `debug_assert!(!kind.is_error())`：普通节点绝不允许携带 `Error` kind，错误必须走 `error` 构造器，这是树的不变量。
+**⑤ 诊断摘要与收集**（[crates/typst-syntax/src/node.rs:L291-L329](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L291-L329)）：`diagnosis()` 直接返回缓存的 `Diagnosis`（`errors`、`warnings` 两个布尔位，见 [node.rs:L873-L906](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L873-L906)），所以「这棵子树有没有错」是 O(1) 查询；`errors_and_warnings()` 才真正遍历树，且用 `diagnosis` 剪枝——没问题的子树直接跳过。错误节点与警告包装转成的 `SyntaxDiagnostic` 结构（含 `is_error`、`span`、`message`、`hints`）定义于 [node.rs:L908-L920](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L908-L920)。
 
-**内部节点的缓存**：
+**⑥ Debug 输出**（[crates/typst-syntax/src/node.rs:L615-L630](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L615-L630) 与 [node.rs:L861-L870](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L861-L870)）：`{:?}` 格式为——叶子 `Kind: "text"`、内部节点 `Kind: len [ ...孩子... ]`、错误节点 `Error: "message"` 或带 text/message/hint 字段的结构体。用 `{:#?}` 就能得到缩进的整棵树，这是本讲实践的读树工具。
 
-[crates/typst-syntax/src/node.rs:L640-L652](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L640-L652) — `InnerNode` 的五个字段：`len`（字节长）、`descendants`（子树节点总数）、`diagnosis`（是否含错/警告）、`upper`（编号区间上界）、`children`。[crates/typst-syntax/src/node.rs:L654-L668](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L654-L668) 的 `new` 在构造时一次性汇总前三项——之后查询零遍历。
+**⑦ 定位与遍历辅助**：`children()`（[node.rs:L278-L286](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L278-L286)）对叶子/错误返回空迭代器；带父指针、可反查字节区间的 `LinkedNode`（[node.rs:L1068](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L1068) 起）是 IDE 场景的主力，本讲不展开。
 
-**常用查询接口**：
+#### 4.2.4 代码实践
 
-[crates/typst-syntax/src/node.rs:L216-L237](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L216-L237) — `kind()` 与 `len()`：`len` 对叶节点取文本长度、对内部节点取缓存值，O(1)。
+**实践目标**：用 Rust 亲手造几个节点，验证「摘要聚合」与 Debug 格式。
 
-[crates/typst-syntax/src/node.rs:L278-L283](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L278-L283) — `children()`：只有内部节点有孩子；叶与错误节点返回空切片（错误节点是「文本终端」，出错原文就存在它自己身上，[crates/typst-syntax/src/node.rs:L921-L930](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L921-L930)）。
+**操作步骤**：
 
-[crates/typst-syntax/src/node.rs:L291-L327](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L291-L327) — `diagnosis()` 与 `errors_and_warnings()`：前者 O(1) 判定子树有没有问题（靠缓存），后者真正遍历收集 `SyntaxDiagnostic`；且遍历时会跳过 `diagnosis` 为空的内部子树（L311 的剪枝）。
+1. 打开 `crates/typst-syntax/src/node.rs`，滚到文件末尾的 `#[cfg(test)] mod tests`（L1481 起，`test_debug` 就在这里）；
+2. 在 `mod tests` 内临时添加一个测试（示例代码，验证后可删除）：
 
-**span 编号**：
+```rust
+#[test]
+fn test_manual_tree() {
+    // 手工构造：Markup 包着一个文本叶子和一个错误节点
+    let text = SyntaxNode::leaf(SyntaxKind::Text, "Hi");
+    let err = SyntaxNode::error("boom", "!!");
+    let root = SyntaxNode::inner(SyntaxKind::Markup, vec![text, err]);
 
-[crates/typst-syntax/src/node.rs:L672-L719](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L672-L719) — `InnerNode::numberize`：先算步长 `stride = space / (2 * descendants)`（L692-L694，只占左半），给本节点取区间中点作编号，再按孩子的 `descendants` 加权切分区间递归。区间塞不下时返回 `Unnumberable`，由上层换更大区间重试。
+    // 摘要聚合：2 字节文本 + 2 字节错误文本
+    assert_eq!(root.len(), 4);
+    assert!(root.diagnosis().errors);   // 错误向上冒泡到了根
+    println!("{root:#?}");              // 观察树形 Debug 输出
+}
+```
 
-**LinkedNode：给绿树临时装上「父链与偏移」**：
+3. 运行：
 
-[crates/typst-syntax/src/node.rs:L1068-L1077](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L1068-L1077) — `LinkedNode` 持有节点引用 + 父链 + 在原文中的字节偏移；[crates/typst-syntax/src/node.rs:L1101-L1103](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L1101-L1103) 的 `range()` 直接给出节点在源文件中的字节区间。绿树本体不存这些信息（省内存、保共享），需要时包一层就有了。
+```bash
+cargo test -p typst-syntax test_manual_tree -- --nocapture
+```
 
-#### 4.2.4 代码实践：用 LinkedNode 遍历并核对偏移
+**需要观察的现象**：打印出的树根是 `Markup: 4 [...]`，孩子包含 `Text: "Hi"` 与带 text、message 字段的 `Error` 节点（具体排版细节待本地验证）。
 
-**实践目标**：确认「叶节点文本长度之和 == 根节点 `len()`」，并学会用 `LinkedNode` 取每个节点的字节区间。
-
-**操作步骤**（不修改任何已有源码，只新增一个示例文件）：
-
-1. 新建 `crates/typst-syntax/examples/offsets.rs`（cargo 会自动发现 `examples/` 目录）：
-
-   ```rust
-   // 示例代码：打印每个叶节点的字节区间与文本
-   use typst_syntax::{LinkedNode, Side, SyntaxNode};
-
-   fn main() {
-       let src = "= Hello *world* #counter(page)";
-       let tree = SyntaxNode::leaf(typst_syntax::SyntaxKind::End, ""); // 占位防未用告警
-       drop(tree);
-       let root = typst_syntax::parse(src);
-       println!("root len = {}", root.len(),);
-       let mut leaf_sum = 0usize;
-       fn walk(node: &LinkedNode, leaf_sum: &mut usize) {
-           if node.children().count() == 0 {
-               *leaf_sum += node.len();
-               println!("{:?} @ {:?} = {:?}", node.kind(), node.range(), node.leaf_text());
-           }
-           for child in node.children() {
-               walk(&child, leaf_sum);
-           }
-       }
-       walk(&LinkedNode::new(&root), &mut leaf_sum);
-       println!("leaf length sum = {leaf_sum}");
-   }
-   ```
-
-2. 运行：`cargo run -p typst-syntax --example offsets`。
-
-**需要观察的现象**：每个叶子一行的 `kind @ 区间 = 文本` 列表；最后两行 `root len` 与 `leaf length sum` 相等；区间从 `0..1`（`=`）开始严格首尾相接直到覆盖整个源串。
-
-**预期结果**：`root len` == `leaf length sum` == 源文字节长度。这正是「CST 无损」的直接体现。完整输出「待本地验证」。
+**预期结果**：`len()` 等于各孩子字节长之和；`diagnosis().errors` 为 true；`children()` 能迭代出两个孩子。这说明摘要字段在建节点时就被正确聚合。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么 `SyntaxNode` 的 `Clone` 很便宜？这给增量重解析带来什么好处？
+**练习 1**：为什么错误不做成独立的顶层类型，而是 `Node` 枚举的一个变体？
 
-**答案**：克隆只是复制 `Node` 枚举（内部是 `Arc` 指针）加一个 `Span`，引用计数加一而已（[crates/typst-syntax/src/node.rs:L17](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L17) 的 `#[derive(Clone, ...)]`）。增量重解析时，未被编辑影响的新旧两棵树可以共享绝大部分 `InnerNode`，比较与替换都只发生在局部。
+**答案**：统一在 `SyntaxNode` 里，parser 的 `nodes: Vec<SyntaxNode>` 与所有 `wrap`/`children` 逻辑无需为错误特判类型；同时不变式「kind 为 Error 的节点只出现在 Error 变体里」由构造器断言和 `convert_to_kind` 的 panic 保证，诊断收集又能靠 `diagnosis` 摘要 O(1) 剪枝。
 
-**练习 2**：`InnerNode` 为什么要缓存 `diagnosis`？谁靠它加速？
+**练习 2**：`InnerNode` 为什么要缓存 `len` 和 `descendants`？
 
-**答案**：`errors_and_warnings` 收集诊断时可以整棵跳过「无错无警告」的子树（[crates/typst-syntax/src/node.rs:L311-L314](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L311-L314) 的剪枝）；对一份几乎全对的文档，收集错误无需真正遍历全树。
+**答案**：CST 的文本与结构查询极高频（诊断定位、增量重解析、IDE 跳转都要「这个节点覆盖哪个字节区间」）。缓存后，任意节点的区间可由「祖先偏移累加 + 自身 len」直接得出；`numberize` 分配编号区间也直接依赖 `descendants`。没有缓存就要每次遍历子树。
 
-**练习 3**：`numberize` 里 `stride = space / (2 * descendants)` 的「除以 2」是为了什么？
+**练习 3**：`numberize` 的步长为什么要除以 `2 * descendants` 而不是 `descendants`？
 
-**答案**：让本子树的编号只占可用区间的左半，右半留白。未来在子树中间插入新节点时，插入位置附近有富余编号可用，不必给后续所有节点重排编号（见 [crates/typst-syntax/src/node.rs:L689-L699](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L689-L699) 的注释与 u2-l5 将讲的 `replace_children` 重编号策略）。
+**答案**：只用区间左半边给现有节点编号，右半边留白。将来在中间插入新节点时，可以从留白中取号，**兄弟节点的编号保持稳定**，下游基于 span 的缓存（comemo 记忆化、增量编译）就不会大面积失效。这就是「绿树」为增量编译准备的编号方案。
 
-### 4.3 容错与错误恢复：解析永不失败
+### 4.3 容错与错误恢复策略
 
 #### 4.3.1 概念说明
 
-传统编译器教学里，「语法错误」往往意味着解析函数返回 `Err` 或直接 panic。Typst 反其道而行：**`parse` 的签名返回 `SyntaxNode`，不是 `Result`**——解析在类型层面就不可能失败。所有问题都变成树里的 `Error` 节点，树始终完整、始终覆盖全部原文。
+Typst 的解析阶段**永不返回 Err**：`parse(&str) -> SyntaxNode` 总是给出完整的树。所有语法错误都表现为树上的 `Error` 节点，后续阶段（求值、IDE）通过 `errors_and_warnings()` 把它们收集成 `SyntaxDiagnostic`。这带来三个直接好处：
 
-这个设计换来三个实际好处：
+1. 编辑器在文档半成品状态下仍能继续提供高亮、补全、预览；
+2. 一次编译可以**同时**报告多个错误，而不是第一个错误就停；
+3. 错误节点本身携带原文文本，树仍然无损，错误修复后增量重解析可以精确替换。
 
-1. **报错不打断**：文档里第 3 行有语法错误，第 4 行以后的标题、列表照常解析，编辑器可以一次标出所有错误，而不是停在第一个。
-2. **降级渲染**：即使有错，树仍可继续走求值/排版管线，错误片段显示为红波浪线而不是让整个文档编译失败（配合 u1-l5 讲过的诊断型测试）。
-3. **增量友好**：错误是树的一部分，编辑后局部重解析时错误节点与其他节点一视同仁，缓存键（`spanless_eq`）不会因为「有没有错」而特殊化。
-
-容错的核心难题是**错误恢复**：出错后从哪里继续？连续报几个错？Typst 的策略可以概括为：
-
-- **该吃就吃**：意外 token 生成错误节点后照常吃掉，主循环前进，保证解析总是向前推进。
-- **防止连锁报错**：刚报过错的位置不再立刻报第二个错（`after_error`），并清理零长度错误节点（`trim_errors`），避免「一个错引发一串错」。
-- **括号感知**：`balanced` 标志记录括号是否配平；未闭合的定界符把「开括号」本身转成错误节点，防止错误扩散到结构外。
+错误的来源分两类：词法错误（Lexer 发现非法字符序列，直接产出 kind 为 `Error` 的 token）与语法错误（Parser 发现结构不符合预期）。Parser 对两类错误的处理统一收敛到几个小函数。
 
 #### 4.3.2 核心流程
 
-以 `#foo(\nMore *bold* text`（函数调用未闭合括号）为例的错误恢复路径：
+Parser 挂错误的四种方式：
 
 ```text
-markup_expr 看到 Hash
-  └─ embedded_code_expr：切 code 模式
-       └─ code_primary: Ident("foo") → 循环中 directly_at(LeftParen)
-            └─ args(p)
-                 ├─ assert(LeftParen)          ← 此时记住 m2 标记
-                 ├─ 换行处 AtNewline::Stop 制造假 End → 循环退出
-                 └─ expect_closing_delimiter(RightParen) 失败
-                      └─ nodes[m2]（那个 "("）convert_to_error("unclosed delimiter")
-  ← 回到 markup：换行照旧、More/Strong/Text 全部正常解析
-最终树：Markup[ Hash, FuncCall[ Ident, Error("unclosed delimiter"), Args[...] ],
-           SpaceWithNewline, Text("More "), Strong[...], Text(" text") ]
+① expected_at(m, thing)   在标记 m 处「插入」一个零长 Error 节点
+                           （不消耗任何 token，表示"这里缺东西"）
+② node.unexpected()       把当前 token 吃掉并整体转成
+                           Error("unexpected " + kind 名)
+③ node.expected(name)     把已吃掉的 token 转成
+                           Error("expected X, found Y")
+④ expect_closing_delimiter(open, kind)
+                           到结束都没等到右括号时，把开头 m 处的
+                           左括号节点转成 Error("unclosed delimiter")
 ```
 
-三个关键不变量：
+防级联与保底机制：
 
-1. 错误节点也是 `SyntaxNode`，有 `kind() == Error`、有文本（可为空）、有消息与 hints。
-2. 任何时刻叶节点文本拼接仍等于原文（错误节点保存它「吃掉」的原文）。
-3. `diagnosis` 缓存让「树里有没有错」永远 O(1) 可查。
+- `after_error()`：上一个非 trivia 节点已是错误时，`expected` 不再重复插入零长错误（避免一行错报十次）；
+- `trim_errors()`：回滚掉末尾连续的零长错误节点，常在产生「更有信息量」的错误前先清理现场；
+- `balanced` 标志：遇到未配平的分组括号就置 false，增量重解析（u2-l5）据此放弃局部重解析、退回更大范围；
+- 深度保护：`check_depth_until` / `increase_depth` 超过 `MAX_DEPTH`（256）时调用 `depth_check_error`，它会**保证向前吃掉至少一个 token**（必要时顺带配平括号）再返回，防止死循环。
 
 #### 4.3.3 源码精读
 
-**错误节点本体**：
+**① expected 家族**（[crates/typst-syntax/src/parser.rs:L1964-L2023](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L1964-L2023)）：`expect(kind)` 吃到就吃、吃不到就报 `expected` 加 kind 名；`expected_at(m, thing)` 构造一个文本为空串的 `SyntaxNode::error` 插入到标记处——注意文本为空串，所以是**零长错误**。`expected` 的注释（[parser.rs:L1991-L2010](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L1991-L2010)）特别有意思：当前 token 本身是错误 token 时要**把它吃掉再继续**，否则退出当前词法模式后，增量重解析可能在错误模式下重新分词，导致「全量解析不等于增量解析」——`#import "str` 未闭合字符串就是注释里给出的例子。这是容错设计与增量编译的深度耦合点。
 
-[crates/typst-syntax/src/node.rs:L132-L140](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L132-L140) — `SyntaxNode::error(message, text)`：消息在前、原文在后（注释特意提醒参数顺序）。错误节点数据结构在 [crates/typst-syntax/src/node.rs:L921-L930](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L921-L930)：`text` + `message` + `hints`（可选的用户提示，例如「试试 `\]` 转义」）。
+**② unexpected 与节点级转换**（[crates/typst-syntax/src/parser.rs:L2034-L2039](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L2034-L2039) 与 [crates/typst-syntax/src/node.rs:L491-L515](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L491-L515)）：`unexpected()` 先 `trim_errors()` 再吃掉 token 并调节点级 `convert_to_error`（已是错误节点则保持原消息）。node.rs 侧的 `expected`/`unexpected` 还会补提示，例如把关键字误用为标识符时提示「keyword `x` is not allowed as an identifier; try `x_` instead」。
 
-**错误的两条生成路径**：
+**③ 防级联**（[crates/typst-syntax/src/parser.rs:L2012-L2017](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L2012-L2017) 与 [parser.rs:L2041-L2059](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L2041-L2059)）：`after_error` 只看标记前一个节点的 kind 是否 `is_error()`（`SyntaxKind::is_error` 的判定见 [kind.rs:L413-L421](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/kind.rs#L413-L421)）；`trim_errors` 从尾部回收零长错误。
 
-[crates/typst-syntax/src/parser.rs:L1991-L2022](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L1991-L2022) — `expected`：想要某物而不得。若当前 token 本身就是 Lexer 产出的错误 token，则直接吃掉它（保证前进，且注释 L1996-L2003 解释了为什么必须吃：否则增量重解析可能在错误模式下切词）；否则在当前位置**插入**一个零长度 `Error` 节点（`expected_at`）。`after_error`（L2012-L2015）确保不会紧跟在错误后面再插一个零长错误。
+**④ 未闭合括号**（[crates/typst-syntax/src/parser.rs:L1981-L1989](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L1981-L1989)）：`expect_closing_delimiter` 找不到右括号时，把**开头**的左括号节点转成 `unclosed delimiter` 错误——错误精确落在「括号打开」的位置，比报在文件末尾有用得多。
 
-[crates/typst-syntax/src/parser.rs:L2034-L2038](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L2034-L2038) — `unexpected`：出现了不该出现的东西。先 `trim_errors` 清掉尾部零长错误（把「expected X」+「unexpected Y」两条合并成一条更清晰的信息），再把吃掉的 token 转换为错误节点。
+**⑤ 兜底分支**：code 模式的 `code_primary` 尾部（[crates/typst-syntax/src/parser.rs:L666-L737](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L666-L737)）注释写明它会「Consume erroneous tokens for things like `#12p`, `#]`」——`#` 后跟不合法 token 时，要么 `unexpected()` 吃掉（atomic 情形），要么 `expected("expression")` 插零长错误。math 主循环（[parser.rs:L246-L262](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L246-L262)）同样：不属于 `set::MATH_EXPR` 的 token 一律 `unexpected()` 吃掉继续。markup 分发（[parser.rs:L89-L137](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L89-L137)）里多余的 `]` 也是 `unexpected()` 加一条提示「try using a backslash escape: \]」。
 
-**token 节点就地转错误**：
+**⑥ 深度保护**（[crates/typst-syntax/src/parser.rs:L2061-L2112](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L2061-L2112)）：`increase_depth` 返回一个 RAII 守卫（`defer`），离开作用域自动减一；超限时 `depth_check_error` 的注释强调「must guarantee some sort of forward progress」——每个分支至少吃一个 token，这是容错解析不死的最后防线。
 
-[crates/typst-syntax/src/node.rs:L491-L509](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L491-L509) — `convert_to_error` 取出原节点全文转成错误节点；`expected` 变体还能拼出「expected X, found Y」的消息，并在关键字误用作标识符时附加提示（试试 `keyword_`）。
+**⑦ 警告也是一种树节点**：`SyntaxNode::warn`（[node.rs:L143-L152](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L143-L152)）把既有节点包进 `WarningWrapper`（[node.rs:L978-L1008](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L978-L1008)），例如 `**`（空粗体）会得到「no text within stars」警告但**不阻断**解析——Strong 结构照常建出来。
 
-**未闭合定界符**：
+#### 4.3.4 代码实践（本讲核心实践）
 
-[crates/typst-syntax/src/parser.rs:L1981-L1987](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L1981-L1987) — `expect_closing_delimiter`：闭括号没等到，就把标记 `open` 处的**开括号**转成 `Error("unclosed delimiter")`。错误挂在开括号上而不是闭括号位置（根本没有闭括号），用户点错误信息正好跳到需要补括号的地方。
+**实践目标**：打印一段含语法错误的源码的完整 `SyntaxNode` 树，亲眼确认「错误进树、解析不中断」。
 
-**零长错误的清理与 `expect` 的整合**：
+**操作步骤**：
 
-[crates/typst-syntax/src/parser.rs:L2041-L2051](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L2041-L2051) — `trim_errors`：从尾部回溯，删掉所有零长错误节点，为合并报错做准备。
+1. 仓库已经帮我们准备好读树工具：`node.rs` 测试模块里的 `test_debug`（[crates/typst-syntax/src/node.rs:L1481-L1545](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L1481-L1545)）用 `format!("{:#?}", crate::parse(...))` 断言了四棵真实树。先运行它建立直觉：
 
-[crates/typst-syntax/src/parser.rs:L1964-L1976](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L1964-L1976) — `expect`：吃掉期望的 kind，吃不到就报「expected …」；特判「期望标识符却遇到关键字」时给出带提示的更友好错误（`try `if_` instead` 一类）。
+```bash
+cargo test -p typst-syntax test_debug
+```
 
-**括号配平**：
+2. 在同一个 `mod tests` 里添加自己的测试（示例代码）：
 
-[crates/typst-syntax/src/parser.rs:L1494-L1496](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L1494-L1496) — `balanced` 字段：初值 `true`，只在遇到不配对的分组定界符时变 `false`，永不回真。谁消费它？增量重解析：`reparse_markup` 只在 `p.balanced` 时才接受重解析结果（[crates/typst-syntax/src/parser.rs:L66-L84](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L66-L84)），防止把残缺块当成完整块替换进树里。
+```rust
+#[test]
+fn test_error_does_not_stop_parsing() {
+    // `#]` 是 code_primary 注释里点名的非法组合：
+    // `#` 开启代码表达式，`]` 不是合法的代码开头
+    let tree = crate::parse("Hi #] there *bold*");
 
-**递归深度保护**：
+    println!("{tree:#?}");   // 完整树，含 Error 节点
+    let (errors, warnings) = tree.errors_and_warnings();
+    println!("{} errors, {} warnings", errors.len(), warnings.len());
+    for e in &errors {
+        println!("  - {}", e.message);
+    }
+}
+```
 
-[crates/typst-syntax/src/parser.rs:L11-L12](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L11-L12) 与 [crates/typst-syntax/src/parser.rs:L2073-L2111](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L2073-L2111) — `MAX_DEPTH = 256`：嵌套表达式过深时不再无限递归（防栈溢出），而是生成一个合并的 `maximum parsing depth exceeded` 错误，并保证至少吃掉一个 token 向前推进（`depth_check_error` 的注释明确要求前进性，否则解析器可能死循环）。
+3. 运行：
 
-**真实错误样例（来自仓库自带测试，可直接当文档读）**：
+```bash
+cargo test -p typst-syntax test_error_does_not_stop_parsing -- --nocapture
+```
 
-[crates/typst-syntax/src/node.rs:L1505-L1544](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/node.rs#L1505-L1544) — `test_debug` 断言了三组真实输出，其中 `parse("#")` 的树是：
+**需要观察的现象**：树中 `#]` 附近出现一个 `Error` 节点（来自 `code_primary` 对 atomic 情形的 `p.unexpected()` 处理，消息形如 `unexpected right bracket`，具体措辞待本地验证）；**关键在于** `there *bold*` 之后的文本与 `Strong` 结构仍然完整地出现在树里。
+
+**预期结果**：`errors` 至少 1 条；后续 `Text` 与 `Strong` 节点照常存在；整体根节点仍是完整的 `Markup: n [...]`。作为对照，`test_debug` 里 `parse("#")` 的断言树（真实源码中的断言，可直接引用）是：
 
 ```text
 Markup: 1 [
@@ -361,83 +351,52 @@ Markup: 1 [
 ]
 ```
 
-`parse("##")` 展示了带消息与 hints 的错误节点；`parse("**")` 展示了 `Warning` 包装节点（`no text within stars` 警告透明地包住 `Strong` 节点，不改变其结构）。这些是理解错误节点外观最可靠的参照。
-
-#### 4.3.4 代码实践：打印含错误节点的完整语法树（本讲核心实践）
-
-**实践目标**：亲眼验证「错误不阻断解析」——含错误源码的树里，`Error` 节点之后的内容依然被完整解析成正常节点。
-
-**操作步骤**：
-
-1. 新建 `crates/typst-syntax/examples/tree-dump.rs`：
-
-   ```rust
-   // 示例代码：dump 语法树 + 收集诊断
-   use typst_syntax::SyntaxNode;
-
-   fn main() {
-       // 第一处错误：括号未闭合；其后是正常 markup。
-       let src = "#foo(\nMore *bold* text";
-       let tree: SyntaxNode = typst_syntax::parse(src);
-       println!("{tree:#?}");
-
-       let (errors, warnings) = tree.errors_and_warnings();
-       println!("\nerrors = {}, warnings = {}", errors.len(), warnings.len());
-       for e in &errors {
-           println!("  error: {}", e.message);
-       }
-   }
-   ```
-
-2. 运行：`cargo run -p typst-syntax --example tree-dump`。
-3. 对照运行已有单测确认 Debug 格式理解无误：`cargo test -p typst-syntax --lib test_debug`。
-4. 把 `src` 换成 `"#let x = "`（表达式缺失）再跑一次，对比错误形态的差异：这次错误是**插入的零长度节点**（消息 `expected expression`），而上一次是**开括号就地转换**（消息 `unclosed delimiter`）。
-
-**需要观察的现象**：
-
-- 树的根仍是完整的 `Markup`，`FuncCall`（或 `LetBinding`）内部嵌着一个 `Error` 节点；
-- `Error` 之后的 `SpaceWithNewline`、`Text("More ")`、`Strong` 等节点结构完好；
-- `errors = 1`，且树上其余部分（`diagnosis` 为假的子树）未被真正遍历。
-
-**预期结果**：与 4.3.2 的流程图一致——错误被「就地封装」，后续解析完全不受影响。`#let x = ` 的情形应看到 `Error: "expected expression"` 出现在 `Eq` 与空格之后。两份完整输出格式「待本地验证」，若与上述结构性描述有出入，以本地实际输出为准并回头核对对应源码分支。
+而 `parse("**")` 得到的是包着完整 `Strong` 结构的 `Warning` 节点——错误与警告都只是树上的普通居民。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`expected` 在什么情况下会「吃掉」token 而不是「插入」零长错误节点？
+**练习 1**：`expected_at` 插入的错误节点为什么文本是空串？空串错误和吃掉 token 的错误有什么分工？
 
-**答案**：当前 token 本身已是错误 token（Lexer 产出的 `SyntaxKind::Error`）时（[crates/typst-syntax/src/parser.rs:L1992-L2005](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L1992-L2005)）。注释给出的理由：如 `#import "str` 的未闭合字符串必须保证以 code 模式消费，否则将来补一个引号时增量重解析会把它当 markup 文本切词，导致增量结果与全量解析不一致。
+**答案**：空串（零长）错误表示「这里**缺**一个东西」，不占据任何源码位置，纯粹是占位标记，用于缺分号、缺表达式等场景；吃掉 token 的错误（`unexpected`）表示「这里**多**了个不合法的东西」，错误节点携带该 token 的原文。`trim_errors` 专门回收零长错误，避免它们堆积。
 
-**练习 2**：`parse("(1, 2"` 中那个 `(` 最终会变成什么？报错为什么挂在那里？
+**练习 2**：`expected()` 在当前 token 本身是错误 token 时为什么要吃掉它而不是只插入零长错误？
 
-**答案**：`parenthesized_or_array_or_dict` 末尾的 `expect_closing_delimiter` 失败，`(` 被就地转换成 `Error("unclosed delimiter")`（见 [crates/typst-syntax/src/parser.rs:L1099](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L1099) 与 L1981-L1987）。挂到开括号是因为根本没有闭括号可指，而用户修补的位置正是开括号处。
+**答案**：源码注释（parser.rs:L1991-L2010）解释：若不吃掉就退出当前词法模式，之后增量重解析时这段文本可能在**markup 模式**下重新分词；例如 `#import "str` 的未闭合字符串若不被吃掉，将来补上右引号时增量解析可能不再把它当作字符串，导致全量解析与增量解析结果不一致。容错策略必须与增量编译保持一致。
 
-**练习 3**：如果没有 `trim_errors`，`#1 +`（假设后续 token 也不合法）这类输入会怎样？
+**练习 3**：`depth_check_error` 为什么必须「至少吃掉一个 token」？
 
-**答案**：会先插入零长的「expected expression」错误，紧跟着又对同一个意外 token 报「unexpected …」，产生成串的重复诊断。`trim_errors`（[crates/typst-syntax/src/parser.rs:L2034-L2051](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/parser.rs#L2034-L2051)）在报「unexpected」前删除尾部零长错误，把两条合并为一条指向真实问题的信息。
+**答案**：深度超限的输入（如几百层括号）如果恢复逻辑不吃 token 就返回，外层循环的条件不变，会无限循环。保证前进（forward progress）是容错解析器不死循环的必要条件，函数注释明确写了这一点。
 
 ## 5. 综合实践
 
-**任务：写一个 30 行的「语法诊断报告器」示例，把本讲三个模块串起来。**
+把本讲三个模块串成一个「预测—验证」闭环：
 
-在 `crates/typst-syntax/examples/report.rs` 中实现（示例代码，全部使用 `typst-syntax` 的公开 API）：
+1. **准备输入**（可以直接把源码内联进测试，不必单独存文件）：
 
-1. **输入**：一段故意包含三类问题的源码——未闭合括号（`#image(` 后直接换行）、行中误写的标题记号（`some = sign`，预期被当文本，不报错）、以及一个真正缺失表达式的 `#let y = `。
-2. **第一步（模块 4.1）**：`parse` 之后用 `LinkedNode::new(&root)` 遍历，打印每个 `SyntaxKind` 出现的次数，验证三模式协作产出的节点种类（`Markup`、`FuncCall`、`Text`、`Strong`…）。
-3. **第二步（模块 4.2）**：断言 `root.len() == src.len()`；再用 `LinkedNode::range()` 把每个 `Error` 节点映射回源码字节区间，打印 `src[range]` 与错误消息。
-4. **第三步（模块 4.3）**：调用 `errors_and_warnings()`，把诊断数量与自己遍历找到的 `Error` 节点数量对比——两者应相等，这就是对「诊断缓存 + 遍历剪枝」正确性的一次交叉验证。
-5. **收尾**：`cargo run -p typst-syntax --example report`，再跑一遍 `cargo test -p typst-syntax --lib`，确认没有破坏 crate 自身测试。
+```typst
+#heading[Title] $x^2$
+#let f(x) = x * 2
+#f(3) and ## oops
+- item one
+```
 
-预期现象：报告列出全部错误且每条都带可定位的原文片段；`=` 在行中不产生任何错误（它是文本）；删除 `#let y = ` 行后重跑，错误数恰好减一。完整输出「待本地验证」。
+2. **手工预测**：只看源码，按 `markup_expr` 的 match 分发表写出根节点 `Markup` 的顶层孩子序列，并标注：哪个位置切到 Math 模式（`Equation` 节点）、哪个位置切到 Code 模式（`LetBinding`、函数调用节点）、`#heading[...]` 的方括号里为什么会出现 `ContentBlock`、`##` 处会出现什么样的 `Error` 节点（参考 4.3.4 中 `test_debug` 对两个连续井号的断言）。
+3. **机器验证**：仿照 4.3.4，在 `node.rs` 的 `mod tests` 里写一个临时测试，把上面四行源码作为字符串传给 `crate::parse`，用 `{:#?}` 打印整棵树，与你的预测逐项对照。
+4. **统计与解释**：调用 `errors_and_warnings()` 数出错误数；再用 4.1 的模式切换知识解释树里各结构节点的来历。
+5. **修复对比**：把 `##` 改成转义形式（反斜杠加井号），重新打印，确认 Error 节点消失、其余子树不变——这正是下一讲增量重解析只替换局部子树的基础。
+
+预期：预测与实际树在孩子种类上完全一致；连续两个井号会产生一个带两条 hint 的 `Error` 节点（`test_debug` 已断言其形态），转义后消失。（整棵树的具体输出待本地验证。）
 
 ## 6. 本讲小结
 
-- Parser 是手写递归下降解析器，`parse` / `parse_code` / `parse_math` 三个入口分别以 Markup、Code、Math 模式起跳；`markup_expr` 的 `match p.current()` 是全部分发逻辑，「行首」等状态决定同一记号的两种命运。
-- 模式切换由 `enter_modes`（语法模式，存于 Lexer）与 `with_nl_mode`（换行模式，靠临时假 `End` 实现）正交管理，函数调用栈本身就是模式栈。
-- `SyntaxNode` 是无损 CST「绿树」：叶存文本、内存孩子、错误与警告皆入树；`InnerNode` 缓存 `len` / `descendants` / `diagnosis` 让常用查询 O(1)；`numberize` 用稀疏编号为增量编译预留插入空间。
-- 容错三件套：`expected` 插零长错误、`unexpected` 就地转错误并 `trim_errors` 合并、`expect_closing_delimiter` 把错误挂到开括号；`balanced` 与 `MAX_DEPTH` 分别守护括号配平与递归深度。
-- `parse` 返回 `SyntaxNode` 而非 `Result`——错误是数据不是控制流，这是「一次标出所有错误 + 降级渲染 + 增量友好」三个特性的共同根源。
-- `LinkedNode` 在不可变绿树之上按需补上父链与字节偏移，是 IDE 与诊断定位的桥。
+- Typst 用**一套** `Parser` + 模式切换实现三语法：`#`、`$`、`{}`、`[]` 四个铰链通过 `enter_modes` 在 Markup/Code/Math 间切换，「调用栈即模式栈」。
+- 解析产物是**无损 CST**：`SyntaxNode` 有 Leaf/Inner/Error/Warning 四种形态，trivia 也进树；内部节点缓存 `len`/`descendants`/`diagnosis` 摘要，支撑 O(1) 查询与增量维护。
+- span 编号用「区间取半留白」的 stride 方案，为增量编辑预留插入空间，编号不稳定时才全量重编号（`Unnumberable`）。
+- 解析**永不失败**：错误以零长插入、token 转换、括号定位三种方式变成树上的 `Error` 节点；`after_error`/`trim_errors` 防级联，`balanced` 标志与 `MAX_DEPTH` 深度保护守住底线，且恢复逻辑保证向前推进。
+- 容错设计与增量编译深度耦合：错误 token 必须被吃掉，以保证全量解析与增量重解析结果一致。
 
 ## 7. 下一步学习建议
 
-下一讲 **u2-l4（AST 视图与 Span 定位系统）** 将回答一个自然的问题：CST 里到处是空格、逗号、括号，求值器怎么用？答案是 `ast.rs` 在同一棵树上提供类型化的懒 AST 视图（`SyntaxNode::cast` 到 `ast::Expr` 等），配合 `Span` 反查字节区间。建议提前浏览 [crates/typst-syntax/src/ast.rs](https://github.com/typst/typst/blob/64c5e8c02fe0394d913ead36e42ef8c1334d2107/crates/typst-syntax/src/ast.rs) 的开头注释，并留意本讲 4.2.4 实践里已经用过的 `LinkedNode`——它就是下一讲「跳转定位」的底层工具。之后再进入 u2-l5 的增量重解析，看 `replace_children` 如何利用本讲的绿树共享与稀疏编号做到「只重排局部」。
+- 下一讲（u2-l4）**AST 视图与 Span 定位系统**：`ast.rs` 如何在这棵「无类型」CST 之上提供零成本的类型化视图（`SyntaxNode` 与 AST 节点之间的 cast 关系），以及如何用 Span 从树反查源码字节区间。建议先重读本讲 4.2 的 `LinkedNode` 一节。
+- 之后（u2-l5）**增量解析与语法高亮**：`reparser.rs` 如何利用本讲的 `replace_children`/`spanless_eq` 只重解析受影响的子树，`highlight.rs` 如何消费 `SyntaxKind`。
+- 延伸阅读：crates/typst-syntax/README.md 链接的 rust-analyzer 语法设计文档，以及 Martin Haug 的增量排版论文（Section 4 讲重解析算法）。

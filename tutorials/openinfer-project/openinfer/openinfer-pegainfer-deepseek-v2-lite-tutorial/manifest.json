@@ -1,0 +1,644 @@
+{
+  "head": "8886aa47b95bc4beedb63584eb367276650b2fec",
+  "project": "openinfer-pegainfer-deepseek-v2-lite",
+  "rationale": "本大纲针对 PegaInfer（openinfer）工作区中的 pegainfer-deepseek-v2-lite 模型 crate（DeepSeek-V2-Lite：MoE + 专家并行 EP，2-GPU，特性开关 deepseek-v2-lite）设计从零到专家的学习路径。第一单元解决『是什么、怎么构建、怎么跑、代码在哪』；第二单元沿『HTTP 请求 → pegainfer-frontend 前端契约（EngineHandle / GenerateRequest / TokenEvent）→ 模型 crate』的调用链，并落到 DeepSeek-V2-Lite 的配置加载；第三单元按执行顺序深入权重加载、prefill/decode 路径、MoE 路由、EP 专家并行、KV cache 与调度批处理六大核心机制；第四单元进入专家层底层（CUDA Graph、pegainfer-kernels 构建系统、pegainfer-core::ops 共享算子、EP free-running 纪律）；第五单元收束到测试、精度门、基准剖析与一次综合二次开发实践，形成『读得懂 → 跑得通 → 改得动』的闭环。依赖关系上，机制讲义先于底层讲义，底层讲义先于二次开发实践，保证每篇只解决一个主题且可独立验证。说明：本次规划环境内 Read/Grep/Glob 与只读 git 均不可用、网络读取工具亦不可用，因此 crate 内部具体源码文件名无法逐一核实，凡未由仓库 CLAUDE.md 或任务参数确证存在的文件路径均已标注（待确认），worker 生成讲义时需先在 pegainfer-deepseek-v2-lite/src/ 下核实并替换为真实路径；仓库级文件（CLAUDE.md、docs/index.md、docker/*、pegainfer-kernels/build.rs、docs/models/glm52/free-running-dp.md、根 Cargo.toml 与 crate 级 Cargo.toml）均已确证存在。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "理解『纯 Rust + CUDA、无 Python 依赖（默认特性）』的引擎定位与意义",
+            "记住 HTTP 请求 → 前端 → EngineHandle → 模型 crate 调度/执行器 → TokenEvent 的主链路",
+            "能说出 dsv2-lite 在模型矩阵中的架构标签（MoE + EP，2-GPU）与特性开关 deepseek-v2-lite"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "项目定位与设计取舍",
+            "模型 crate 矩阵与特性开关",
+            "整体架构图解读",
+            "dsv2-lite 的位置"
+          ],
+          "order": 1,
+          "practice_task": "通读仓库 CLAUDE.md 的『What is PegaInfer』与『Architecture』两节和 docs/index.md，然后手绘（或用文本画）一张从 HTTP 请求到 TokenEvent 的调用链图，标出 pegainfer-deepseek-v2-lite、pegainfer-frontend、pegainfer-core、pegainfer-kernels、pegainfer-kv-cache 各自所在的层，并写 5 句话说明每一层为什么存在。",
+          "source_files": [
+            "CLAUDE.md",
+            "docs/index.md"
+          ],
+          "title": "项目定位与整体架构：PegaInfer 是什么，dsv2-lite 在哪里",
+          "topic": "介绍 PegaInfer 是纯 Rust + CUDA 的 LLM 推理引擎（无 PyTorch、无框架、OpenAI 兼容 /v1/completions），讲解模型 crate 矩阵与各特性开关，以及 pegainfer-deepseek-v2-lite（MoE + EP，2-GPU）在工作区架构图中的位置。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-build-and-features.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "掌握 cargo run/build --release --features deepseek-v2-lite 的正确用法，理解为什么必须 --release",
+            "理解虚拟工作区根没有构建脚本、pegainfer-kernels/build.rs 统一负责 nvcc/SM 探测/特性门控编译",
+            "会配置 PEGAINFER_NCCL_ROOT（NCCL ≥ 2.30.4）、PEGAINFER_CUDA_SM、PEGAINFER_BUILD_TIMING 等环境变量",
+            "会用 docker/Dockerfile.dev 与 docker/dev.sh 搭建 GPU 开发环境"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "工作区与特性开关机制",
+            "build.rs 的 nvcc/SM 探测流程",
+            "关键环境变量",
+            "Docker 开发环境"
+          ],
+          "order": 2,
+          "practice_task": "在 GPU 机器上按 docker/README.md 用 docker/Dockerfile.dev 启动开发容器（或在裸机上配置 PEGAINFER_NCCL_ROOT 与 PEGAINFER_CUDA_SM），执行 cargo build --release --features deepseek-v2-lite 并开启 PEGAINFER_BUILD_TIMING=1，记录各构建阶段耗时；再执行一次不带该特性的 stock 构建，对比两者编译出的目标差异并写一段说明。",
+          "source_files": [
+            "CLAUDE.md",
+            "Cargo.toml",
+            "pegainfer-deepseek-v2-lite/Cargo.toml",
+            "pegainfer-kernels/build.rs",
+            "docker/Dockerfile.dev",
+            "docker/dev.sh",
+            "docker/README.md"
+          ],
+          "title": "构建环境准备与特性开关：编译 deepseek-v2-lite",
+          "topic": "讲解工作区虚拟清单结构、pegainfer-kernels/build.rs 拥有 CUDA/Triton 编译这一构建体系，以及启用 deepseek-v2-lite 特性所需的命令、PEGAINFER_NCCL_ROOT（DeepEP shim 的 moe 特性）、PEGAINFER_CUDA_SM 等关键环境变量和 Docker 开发环境。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-run-and-serve.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "掌握 DeepSeek-V2-Lite 权重目录的放置与 --model-path 用法",
+            "理解 dsv2-lite 是 2-GPU EP 部署形态及其启动方式（具体多进程/多卡启动命令待确认）",
+            "会用 curl 或任意 HTTP 客户端调用 /v1/completions 并解读流式响应"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "权重目录准备",
+            "启动命令与多卡形态",
+            "OpenAI 兼容接口调用",
+            "日志与启动期输出解读"
+          ],
+          "order": 3,
+          "practice_task": "准备 models/DeepSeek-V2-Lite 权重目录，用 --release --features deepseek-v2-lite 启动引擎，分别发送一条短 prompt 和一条长 prompt 到 /v1/completions，把请求体、响应片段和启动日志中与 EP/专家相关的行摘录下来，并用自己的话解释每一行日志对应架构图中的哪一环。",
+          "source_files": [
+            "CLAUDE.md",
+            "pegainfer-deepseek-v2-lite/src（入口文件待确认）"
+          ],
+          "title": "运行服务与发起推理请求",
+          "topic": "讲解如何放置 DeepSeek-V2-Lite 权重、以 2-GPU（MoE + EP）方式启动引擎（cargo run --release --features deepseek-v2-lite -- --model-path models/DeepSeek-V2-Lite），并通过 OpenAI 兼容的 /v1/completions 接口发请求观察流式输出。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l4-crate-layout.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "能用 cargo tree -p pegainfer-deepseek-v2-lite 画出依赖图并说明每条关键依赖的用途",
+            "能在 src/ 中定位配置、权重加载、prefill/decode 执行、调度等模块（具体文件名待确认，需在阅读时核实）",
+            "理解每个模型 crate 自包含 config/weights/执行/调度/测试/基准的分层约定"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Cargo.toml 依赖分析",
+            "src 目录地图",
+            "模块分层约定",
+            "入口与导出项"
+          ],
+          "order": 4,
+          "practice_task": "执行 cargo tree -p pegainfer-deepseek-v2-lite 并把依赖树存成文件；对照 src/ 目录逐个打开模块文件（本讲需先核实真实文件名，替换大纲中的待确认路径），制作一张『文件名 → 职责 → 关键 pub 项』三列表格，至少覆盖 6 个文件。",
+          "source_files": [
+            "pegainfer-deepseek-v2-lite/Cargo.toml",
+            "pegainfer-deepseek-v2-lite/src/（具体文件待确认）"
+          ],
+          "title": "crate 目录结构与入口导航",
+          "topic": "带读者走读 pegainfer-deepseek-v2-lite 的 Cargo.toml（依赖：pegainfer-frontend、pegainfer-core、pegainfer-kernels、pegainfer-kv-cache 等）与 src/ 目录布局，建立『配置、权重、执行、调度、测试』的文件地图。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "入门：认识 PegaInfer 并把 DeepSeek-V2-Lite 跑起来"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l1-engine-contract.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "理解契约三件套（EngineHandle / GenerateRequest / TokenEvent）的字段与生命周期",
+            "能追踪一条请求从提交到产生 TokenEvent 的代码路径",
+            "解释『模型 crate 实现面向契约、服务端二进制只做纯派发』的解耦设计"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "GenerateRequest 结构",
+            "TokenEvent 流转",
+            "EngineHandle 抽象",
+            "dsv2-lite 侧的契约实现点"
+          ],
+          "order": 1,
+          "practice_task": "在 pegainfer-frontend 中定位 engine 模块的真实文件，抄录 EngineHandle、GenerateRequest、TokenEvent 的完整类型定义并逐字段注释；再在 pegainfer-deepseek-v2-lite 中找到消费 GenerateRequest、产出 TokenEvent 的函数，用调用图（函数 → 函数）把两端连起来。",
+          "source_files": [
+            "pegainfer-frontend/src（engine 模块文件路径待确认）",
+            "pegainfer-deepseek-v2-lite/src（实现侧文件待确认）"
+          ],
+          "title": "引擎契约：EngineHandle、GenerateRequest 与 TokenEvent",
+          "topic": "精读 pegainfer_frontend::engine 模块定义的引擎请求/事件契约：GenerateRequest 如何提交、TokenEvent 如何回流、EngineHandle 如何把前端与每模型调度器/执行器解耦，以及模型 crate 为什么只需面向契约实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-vllm-frontend.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "理解 vllm 模块在 HTTP 与引擎契约之间承担的翻译职责",
+            "掌握 ModelLine 派发 trait 的形状与 dsv2-lite 的接入点（具体文件待确认）",
+            "能描述一次 /v1/completions 请求从前端到模型 crate 的完整序列"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "OpenAI 兼容请求解析",
+            "ModelLine 派发 trait",
+            "dsv2-lite 接入点",
+            "协议栈扩展展望（dynamo）"
+          ],
+          "order": 2,
+          "practice_task": "给一次真实的 /v1/completions 请求画时序图：标注 HTTP 解析、EngineHandle 提交、调度、执行、TokenEvent 回传五个阶段各自调用的函数名与所在文件；然后回答：如果要新增一个协议栈（如 dynamo），需要实现/复用哪些接口（以代码位置作答）。",
+          "source_files": [
+            "pegainfer-frontend/src（vllm 模块文件路径待确认）",
+            "pegainfer-deepseek-v2-lite/src（ModelLine 实现文件待确认）"
+          ],
+          "title": "vLLM 协议栈与 ModelLine 派发",
+          "topic": "讲解 pegainfer-frontend 中 vllm 协议栈如何把 OpenAI 兼容 HTTP 请求翻译成引擎契约调用，以及 ModelLine dispatch trait 如何按模型线把请求路由到 dsv2-lite crate；顺带提及 dynamo 为规划中的下一协议栈。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l3-model-config.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "了解 DeepSeek-V2-Lite 的 MoE 架构参数（具体层数/专家数字段以实际 config.json 为准，代码字段名待确认）",
+            "掌握模型 crate 从模型目录读取与校验配置的流程",
+            "能指出配置错误（如缺字段、shape 不符）在启动期的报错路径"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "config.json 关键字段",
+            "运行时配置结构与校验",
+            "配置到张量 shape 的推导",
+            "启动期报错路径"
+          ],
+          "order": 3,
+          "practice_task": "取一份 DeepSeek-V2-Lite 的 config.json（HuggingFace 下载或本地权重目录），列出所有与 MoE 和注意力相关的字段并注明含义；然后对照 crate 中解析 config 的代码，逐字段标注它被读进哪个结构体、参与哪些 shape 计算，产出一张映射表。",
+          "source_files": [
+            "pegainfer-deepseek-v2-lite/src（config 相关文件待确认）",
+            "pegainfer-deepseek-v2-lite/Cargo.toml"
+          ],
+          "title": "DeepSeek-V2-Lite 模型结构与配置加载",
+          "topic": "对照 DeepSeek-V2-Lite 的 config.json（MoE 层数、专家数、共享专家、注意力配置、hidden size 等）讲解模型 crate 如何加载并校验配置，把 HF 配置字段映射到运行时结构。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 2,
+      "title": "进阶：前端契约与请求进入模型 crate 的链路"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u3-l1-weights-loading.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "理解权重文件到设备张量的映射流程与命名约定（具体实现文件待确认）",
+            "掌握 2-GPU 形态下张量切分（TP/EP 维度）的分配方式",
+            "能定位权重加载失败的常见报错点"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "权重文件读取",
+            "tensor 名到缓冲的映射",
+            "多卡切分策略",
+            "shape/dtype 校验"
+          ],
+          "order": 1,
+          "practice_task": "在启动日志或代码中找出 dsv2-lite 权重按 rank 切分的证据（哪些 tensor 整卡复制、哪些按 expert 或按列/行切分），写一段 200 字的切分策略说明；再故意把权重目录里的某个文件改名，观察并记录报错堆栈，定位到抛错的具体函数。",
+          "source_files": [
+            "pegainfer-deepseek-v2-lite/src（weights 相关文件待确认）",
+            "pegainfer-deepseek-v2-lite/Cargo.toml"
+          ],
+          "title": "权重加载与张量布局",
+          "topic": "讲解模型 crate 如何从模型目录读取权重文件（safetensors 等）、按 tensor 名映射到设备端缓冲、在 2-GPU 间切分，以及在加载期做的 shape/dtype 校验。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-prefill-decode-path.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "能按顺序列出 prefill/decode step 的算子调用链",
+            "理解稳态 decode 与预热/首 token 阶段的差异，以及设备端注意力的收益",
+            "能在执行器代码中定位 CUDA Graph 捕获边界（本讲只定位、细节留给 u4-l1）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "嵌入与位置编码",
+            "prefill 注意力与 MoE 前馈",
+            "decode 稳态路径与设备端注意力",
+            "采样出口"
+          ],
+          "order": 2,
+          "practice_task": "为一次 prefill step 和一次 decode step 分别写出『函数 → 调用的算子（pegainfer-core::ops / kernels）→ 输入输出 shape』的伪代码清单；再用 git show 223206b7 阅读 steady decode attention 改动，用三句话概括它把什么从 host 挪到了 device、为什么这能提速。",
+          "source_files": [
+            "pegainfer-deepseek-v2-lite/src（executor 相关文件待确认）"
+          ],
+          "title": "prefill 与 decode 执行路径",
+          "topic": "精读模型执行器中一次 prefill step 与一次 decode step 的完整调用链：嵌入、注意力、MoE 前馈、残差与 norm、采样出口，并重点解读 commit 223206b7『steady decode attention on device』把稳态 decode 注意力搬到设备端的意义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l3-moe-routing.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解 router 打分、top-k 选择与专家输出加权的数学流程",
+            "掌握专家权重在显存中的组织与索引方式（具体 kernel 与数据结构待确认）",
+            "能解释一条 token 在 MoE 层内的完整数据流"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "router 打分与 top-k",
+            "专家 GEMM 计算",
+            "输出加权合并",
+            "专家权重布局"
+          ],
+          "order": 3,
+          "practice_task": "手算一个 2 token、8 专家、top-2 的小例子：给定 router logits 矩阵（自己造数），算出每个 token 的专家选择、softmax 权重和最终加权输出公式（不必算数值结果，写出表达式即可）；再对照代码找出真正执行 top-k 与专家 GEMM 的函数名，验证你的流程图与实现一致。",
+          "source_files": [
+            "pegainfer-deepseek-v2-lite/src（MoE 相关文件待确认）",
+            "pegainfer-core/src（ops 相关文件待确认）"
+          ],
+          "title": "MoE 路由与专家计算",
+          "topic": "深入 DeepSeek-V2-Lite 的 MoE 层：router 如何为每个 token 选 top-k 专家、被选中/共享专家（若配置存在，以实际代码为准）如何计算与加权合并，以及专家权重的组织方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l4-expert-parallelism.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "理解 EP 下 dispatch/combine 的数据流与张量形状变化",
+            "掌握 moe 特性、DeepEP shim 与 NCCL 版本要求的关系",
+            "能定位通信相关代码路径（pegainfer-kernels 侧 shim 具体文件待确认）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "EP 分片与 token 归属",
+            "dispatch/combine 通信",
+            "DeepEP shim 与 NCCL 依赖",
+            "EP 与批处理的相互作用"
+          ],
+          "order": 4,
+          "practice_task": "画出 2-GPU EP 下 4 个 token（分属不同卡上的专家）经过 dispatch → 专家计算 → combine 的来回数据流图，标注每一步的张量形状与所在设备；再在代码中找到 shim/通信调用点，把图中每个箭头对应到真实函数调用。",
+          "source_files": [
+            "pegainfer-deepseek-v2-lite/src（EP 通信相关文件待确认）",
+            "pegainfer-kernels/csrc/*.cu",
+            "pegainfer-kernels/build.rs"
+          ],
+          "title": "专家并行（EP）与 DeepEP/NCCL 通信",
+          "topic": "讲解 2-GPU 专家并行的通信机制：token 按 expert 归属跨卡分发与收回（DeepEP shim、moe 特性、PEGAINFER_NCCL_ROOT ≥ 2.30.4）、dispatch/combine 集合通信的形状与时机，以及 EP 与 batch 的相互作用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l5-kv-cache.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "理解 paged-KV 的 page/块组织与寻址方式",
+            "掌握 prefill/decode 对 KV 池的读写时序",
+            "了解 kv-offload 桥的定位及 dsv2-lite 是否启用（待确认）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "page 组织与寻址",
+            "prefill/decode 的 KV 读写",
+            "请求生命周期与池释放",
+            "offload 桥定位"
+          ],
+          "order": 5,
+          "practice_task": "追踪一个 3 轮对话请求的 KV 足迹：画出每一步 prefill/decode 后 KV 池中该请求占用页的变化图；再阅读 pegainfer-kv-cache 的分配/释放函数，说明『请求被抢占或取消时』KV 状态由哪段代码回收。",
+          "source_files": [
+            "pegainfer-deepseek-v2-lite/src（请求状态相关文件待确认）",
+            "pegainfer-kv-cache/src（具体文件待确认）",
+            "pegainfer-kv-offload/src（具体文件待确认）"
+          ],
+          "title": "KV cache：请求状态与 paged-KV 原语",
+          "topic": "讲解『模型调度器拥有请求状态、共享 paged-KV 原语放在 pegainfer-kv-cache』的分工：page 组织、prefill 写入与 decode 追加、请求结束后的释放，以及 pegainfer-kv-offload 提供的 host/SSD/RDMA 桥接在 dsv2-lite 中的角色。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u3-l2"
+          ],
+          "filename": "u3-l6-scheduler-batching.md",
+          "id": "u3-l6",
+          "learning_goals": [
+            "理解调度器的 admission 与批组合策略",
+            "掌握连续批处理下 prefill/decode 交替的驱动逻辑",
+            "能解释调度决策如何受 KV 页预算约束（具体字段待确认）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "admission 策略",
+            "连续批处理循环",
+            "请求退出与资源回收",
+            "调度与 KV 预算的耦合"
+          ],
+          "order": 6,
+          "practice_task": "同时用 4 个并发请求压测本地服务（其中 1 条 prompt 很长），从日志或时间戳推断每一步是 prefill 还是 decode、哪些请求被合入同一步，绘制成甘特图；然后对照调度器代码，指出控制『什么时候把新请求放进当前批』的具体分支，并尝试把该分支的阈值（如有）改一个值重新编译，观察吞吐变化。",
+          "source_files": [
+            "pegainfer-deepseek-v2-lite/src（scheduler 相关文件待确认）"
+          ],
+          "title": "调度器：多请求批处理与请求生命周期",
+          "topic": "讲解 dsv2-lite 调度器如何把并发的 GenerateRequest 组织成批：admission、连续批处理下新请求加入/旧请求退出对 prefill 与 decode 步的影响，以及调度器与执行器、KV 预算之间的配合。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "进阶：dsv2-lite 核心执行机制"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u4-l1-cuda-graph.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "理解 CUDA Graph 消除 launch 开销的原理与 decode 场景的适配性",
+            "掌握『预分配缓冲 + 指针稳定』这一约束的代码体现",
+            "能定位 graph 捕获与回放分支（具体函数待确认）"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "graph 捕获时机",
+            "预分配缓冲与指针稳定",
+            "回放与批大小匹配",
+            "故障模式与回退"
+          ],
+          "order": 1,
+          "practice_task": "找到 decode graph 捕获与回放的代码分支，回答三个问题：捕获发生在启动后第几步？哪些缓冲是捕获前预分配的？批大小变化时如何选择 graph？然后设计一个思想实验：如果把某个捕获期缓冲改成运行时按需分配，会发生什么（写出推理过程，不改代码）。",
+          "source_files": [
+            "pegainfer-deepseek-v2-lite/src（CUDA Graph 相关文件待确认）"
+          ],
+          "title": "CUDA Graph 捕获与指针稳定性",
+          "topic": "讲解 decode 路径在模型执行器内捕获 CUDA Graph 的机制：为什么需要预分配缓冲来保持指针稳定、捕获/回放的时机、以及批大小变化时 graph 的选择与上限。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u4-l2-kernels-build-system.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解 build.rs 的编译流水线与 SM 探测/覆盖逻辑",
+            "掌握 moe 特性引入的内核集合与链接方式（具体 .cu 文件待确认）",
+            "能诊断常见构建失败（nvcc 版本、SM 不匹配、NCCL 路径）"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "build.rs 流水线",
+            "SM 探测与覆盖",
+            "特性门控的内核集合",
+            "构建失败诊断"
+          ],
+          "order": 2,
+          "practice_task": "分别用 PEGAINFER_CUDA_SM 指定一个存在与一个不存在的 SM 目标各构建一次，记录两次的完整报错/警告；再阅读 build.rs 找到 SM 探测调用 nvidia-smi 的代码，画出『探测 → 决定 nvcc 参数 → 编译 → 链接』的流程图，标出 deepseek-v2-lite 相关 feature 在哪一步改变了行为。",
+          "source_files": [
+            "pegainfer-kernels/build.rs",
+            "pegainfer-kernels/csrc/*.cu",
+            "pegainfer-deepseek-v2-lite/Cargo.toml"
+          ],
+          "title": "pegainfer-kernels 构建系统与 csrc 内核",
+          "topic": "精读 pegainfer-kernels/build.rs：nvcc 编译 csrc/*.cu、GPU SM 目标自动探测（PEGAINFER_CUDA_SM 覆盖）、特性门控（deepseek-v2-lite 走 moe/DeepEP shim 路径时引入的 CUDA 源）、以及张量/FFI/kernel 的所有权边界。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u4-l3-core-ops.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "掌握 ops 层暴露的算子类别与调用约定",
+            "理解模型专属 kernel 与共享算子的分工边界",
+            "能评估『用共享算子替换/新增一处调用』的成本"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ops 层算子清单",
+            "调用约定与错误处理",
+            "专属 kernel 与共享算子的分工",
+            "新增算子的接入路径"
+          ],
+          "order": 3,
+          "practice_task": "为 pegainfer-core::ops 制作一份算子清单表（名称、输入输出、底层后端）；统计 dsv2-lite 执行路径中每类算子的调用次数，找出调用最多与最少的算子各一个，并为『最少那个』写一段分析：如果把它换成新写的专用 kernel，预期收益与风险各是什么。",
+          "source_files": [
+            "pegainfer-core/src（ops 模块文件待确认）",
+            "pegainfer-deepseek-v2-lite/src（算子调用点待确认）"
+          ],
+          "title": "pegainfer-core::ops 共享算子层",
+          "topic": "梳理 pegainfer-core::ops 提供给各模型 crate 的共享 GPU 算子封装（GEMM、norm、采样等类别，以实际代码为准），以及 dsv2-lite 如何在自身 kernel 与共享算子之间做选择。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u4-l4-ep-free-running.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "理解四条 EP 不变量各自防住的死锁形态",
+            "能把『launch 计数即时钟』映射到 dsv2-lite 的引擎循环",
+            "能用文档清单审查一段 EP 协调代码是否违规"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "四不变量逐条精读",
+            "padding 行协议面",
+            "launch 计数时钟模型",
+            "对 dsv2-lite 的适用性审查"
+          ],
+          "order": 4,
+          "practice_task": "把四条不变量做成检查表，逐条审查 dsv2-lite 的 EP 循环代码：为每条找到『满足它的代码证据』或标注『未找到/不适用』；如果发现疑似违反（例如任何静默等待），写清楚文件、行号与你的推理，并给出一个最小的修正思路。",
+          "source_files": [
+            "docs/models/glm52/free-running-dp.md",
+            "pegainfer-deepseek-v2-lite/src（EP 循环相关文件待确认）"
+          ],
+          "title": "EP free-running 纪律与集体通信不变量",
+          "topic": "以 docs/models/glm52/free-running-dp.md 为规范文本，讲解 EP 协调的四大不变量：任何 rank 不许停下等待、每步 collective 链固定、launch 计数即全局时钟、padding 行是协议面；并讨论这些纪律对 dsv2-lite EP 路径的适用性与检验方法（dsv2-lite 是否完整遵循该纪律待确认）。"
+        }
+      ],
+      "level": "advanced",
+      "order": 4,
+      "title": "专家：底层机制与性能"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u5-l1-unit-tests.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "掌握 --lib 单测与 GPU 集成测试的边界（后者需权重）",
+            "能在 dsv2-lite 中找到现有单测并新增一个（具体测试文件待确认）",
+            "会用过滤参数快速定位失败用例"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "测试分层与命令",
+            "现有单测走读",
+            "新增单测的写法",
+            "失败定位手法"
+          ],
+          "order": 1,
+          "practice_task": "运行 cargo test --release --workspace --lib 确认全绿；然后在 dsv2-lite 中挑选一个纯逻辑函数（如路由索引计算或配置校验），为它新增一个表驱动单测覆盖边界输入，运行通过后记录你选择该函数的理由与覆盖到的边界。",
+          "source_files": [
+            "pegainfer-deepseek-v2-lite/src（单测所在文件待确认）",
+            "pegainfer-deepseek-v2-lite/Cargo.toml"
+          ],
+          "title": "单元测试与测试组织",
+          "topic": "讲解工作区测试组织：cargo test --release --workspace --lib 的纯逻辑单测（约 9 秒、无需 GPU）如何覆盖 dsv2-lite 的可纯化部分，以及按名称过滤、--nocapture 的调试手法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1",
+            "u1-l3"
+          ],
+          "filename": "u5-l2-golden-accuracy-tests.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "理解『与 HF 黄金 logits 对比』精度门为何比逐文本对比更稳",
+            "掌握为模型 crate 设计精度测试的要素：fixture 生成、容差、种子",
+            "能动手为 dsv2-lite 搭建最小精度冒烟验证"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "精度门设计思想",
+            "fixture 生成与容差",
+            "dsv2-lite 现有测试入口盘点",
+            "最小冒烟验证搭建"
+          ],
+          "order": 2,
+          "practice_task": "先盘点 dsv2-lite/tests 下现有集成测试（如无 golden fixture 测试则如实记录）；然后写一个独立脚本（不在 CI 内）加载 DeepSeek-V2-Lite，对固定 prompt 提取首 token logits 与一次贪心 32 token 续写，将结果存档为本地基线文件，作为后续改动的对照组——说明你的脚本在无 GPU 环境下应如何跳过。",
+          "source_files": [
+            "pegainfer-deepseek-v2-lite/tests（具体测试文件待确认）",
+            "CLAUDE.md"
+          ],
+          "title": "精度验证：golden fixture 与 HF 对齐",
+          "topic": "以 qwen3 的 hf_golden_gate（logits 对 HF 黄金 fixture）为范式，讲解精度门的设计思想，并考察 dsv2-lite 当前具备的精度/集成测试入口（具体测试名与是否已有 golden gate 待确认）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u5-l3-benchmark-profiling.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "掌握 bench 的运行方式与统计口径选择（TTFT、每 token 延迟、吞吐）",
+            "理解预热（graph 捕获、GEMM 调优）对测量的影响",
+            "能设计一次可复现的 2-GPU EP 基准并解读结果"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "bench 组织与运行",
+            "预热与测量的坑",
+            "指标口径设计",
+            "结果解读与归因"
+          ],
+          "order": 3,
+          "practice_task": "设计并执行一次基准：3 组并发（1/4/16）× 2 种 prompt 长度（短/长），固定采样参数，每组预热后测 TTFT 与稳态每 token 延迟，输出一张结果表；然后任选一个指标异常点（如 TTFT 随并发激增），结合调度器与 EP 代码给出你的归因假设。",
+          "source_files": [
+            "pegainfer-deepseek-v2-lite/benches（具体文件待确认）",
+            "pegainfer-deepseek-v2-lite/Cargo.toml",
+            "CLAUDE.md"
+          ],
+          "title": "基准测试与性能剖析",
+          "topic": "讲解模型 crate 自带 benches 的组织方式、PEGAINFER_BUILD_TIMING 的分阶段构建计时，以及针对 2-GPU EP 部署做推理吞吐/延迟基准的方法论（固定 prompt 分布、预热、统计口径）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l6",
+            "u5-l1"
+          ],
+          "filename": "u5-l4-extension-practice.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "能在不破坏 EP 不变量与契约的前提下插入观测点",
+            "掌握小步修改 + 单测 + 基线对比的验证闭环",
+            "按仓库贡献规范（分支命名、commitizen、cargo fmt）整理变更"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "观测点设计与数据结构",
+            "跨模块计数传递",
+            "输出与测试",
+            "贡献规范整理"
+          ],
+          "order": 4,
+          "practice_task": "完整实现该计数器：在调度循环中累计三项统计，每 N 步输出一行日志；用 u5-l1 的手法补一个纯逻辑单测；跑通 u5-l2 存档的基线对比确认 logits 不变；按仓库规范创建 feat/ 分支并写出符合 commitizen 的提交信息（无需真正提交，产出 patch 与说明即可），最后用一段文字说明你的改动不违反 EP free-running 四不变量中的任何一条。",
+          "source_files": [
+            "pegainfer-deepseek-v2-lite/src（scheduler 与 EP 相关文件待确认）",
+            "pegainfer-frontend/src（engine 模块文件待确认）",
+            "CLAUDE.md"
+          ],
+          "title": "综合实践：为 dsv2-lite 添加一个可观测计数器",
+          "topic": "以『给调度器添加每步统计计数器（admitted/running/decoding 请求数、dispatch/combine 字节数）并在日志周期输出』为综合任务，串联前端契约、调度器、EP 通信与测试四条线索，完成一次规范的二次开发闭环。"
+        }
+      ],
+      "level": "advanced",
+      "order": 5,
+      "title": "专家：测试、基准与二次开发"
+    }
+  ]
+}

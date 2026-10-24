@@ -1,343 +1,343 @@
 {
+  "head": "8886aa47b95bc4beedb63584eb367276650b2fec",
   "project": "openinfer-pegainfer-bench",
-  "head": "223206b7ddbc7441063741484d9aa610d5ed9bb0",
-  "rationale": "pegainfer-bench 是工作区中的小型基准测试 crate（已确认的源码约 7 个文件、约 73KB Rust），定位为『纯 Rust + CUDA 的 LLM 基准工具：GEMM 微基准、分页 KV cache 基准与高性能请求循环压测』，直接依赖 pegainfer-kernels（Cuda 设备抽象、Tensor、EngineHandle、Layer）与 cudarc，而不依赖前端/引擎 crate。因此学习路线设计为三单元 11 篇：入门层先建立定位（u1-l1）、构建纪律（--release 与 PEGAINFER_CUDA_SM/PEGAINFER_TEST_MODEL_PATH 等环境变量，u1-l2）和入口链路（main.rs 委托 cli::run 再分发到 loop 模块，u1-l3）；进阶层按『共享骨架先于具体场景』的顺序推进——先讲 CLI 分发与 timings.rs 计时统计骨架（所有场景共用），再讲 CUDA 设备/内存池初始化，然后完整走读 serve.rs 请求循环压测（已实读 18KB 源码：getopts 参数、tokenizer 加载、随机 prompt、token/layer 双层循环、cuBLAS GEMM、softmax 采样、分位数统计），最后讲其内部的 qwen3 层构造与 GEMM 微基准；专家层上升到多卡张量并行（Ock 套接字、rank/size、P2P 权重广播、EP free-running 纪律）、kv.rs 分页 KV cache 基准，以及基准方法学（预热、CUDA 事件与主机计时差异、mean/median/p90/p99 选择）与『新增一个基准场景』的端到端扩展实践。注意：受读取条件限制，cli.rs、kv.rs、loop/mod.rs、lib.rs 仅确认存在与对外调用关系，内部细节在讲义中标注『待确认』，worker 生成时必须实读补全；serve.rs 与 Cargo.toml 内容已实读验证。",
+  "rationale": "pegainfer-bench 是工作区中的小型基准测试 crate，定位为『纯 Rust + CUDA 的 LLM 基准工具：GEMM 微基准、分页 KV cache 基准与高性能请求循环压测』，直接依赖 pegainfer-kernels 与 cudarc，因此学习路线维持三单元 11 篇：入门层建立定位（u1-l1）、构建纪律（--release 与环境变量，u1-l2）和入口链路（u1-l3）；进阶层按『共享骨架先于具体场景』推进——CLI 分发、timings 计时统计、CUDA 设备与内存池，再到 serve 请求循环压测全走读与 qwen3 层构造/GEMM 微基准；专家层上升到多卡 Ock 协调与 P2P 权重广播、kv 分页基准、基准方法学与新增场景的端到端扩展。本次增量结论：git diff 223206b7..8886aa47 区间内仅三个提交（8886aa47 fix(gemma4)、8b5b84a9 feat(qwen3) DFlash2、73d998ea feat(kernels) grouped RMSNorm），作用域分别为 pegainfer-gemma4、pegainfer-qwen3+pegainfer-kernels 及各自 docs/tests，pegainfer-bench/ 目录 diff 为空，仓库级 CLAUDE.md 与 workspace 根 Cargo.toml 也未变动，即本 crate 的源码、CLI 契约与讲义引用的全部文件均无变化，故 11 篇讲义全部 keep，无需新增或重建；唯一边界提示：kernels 侧新增了 qwen4 grouped (1+w) RMSNorm 算子（pegainfer-kernels/src/ops/qwen4.rs），但 bench 的 qwen3_layers 仍走既有 LayerKind 路径且 serve.rs 未变，不影响 u2-l8 的现有结论（bench 是否后续接入该算子待确认）。原 manifest 中 cli.rs、kv.rs、loop/mod.rs、lib.rs 内部细节的『待确认』标注继续有效，worker 生成或重写时仍须实读补全（其中 u1-l2、u2-l4、u3-l9、u3-l10 四篇已有生成稿，其源码未变故无需重写）。",
   "units": [
     {
       "id": "u1",
-      "title": "从零认识 pegainfer-bench",
-      "level": "beginner",
-      "order": 1,
       "lectures": [
         {
-          "id": "u1-l1",
-          "title": "项目定位与全景：pegainfer-bench 是什么",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [],
           "filename": "u1-l1-project-overview.md",
-          "level": "beginner",
-          "topic": "介绍 pegainfer-bench 在 pegainfer 工作区中的定位：一个纯 Rust + CUDA 的 LLM 基准测试工具，聚焦 GEMM 微基准、分页 KV cache 基准和请求循环压测三大场景。说明它直接依赖 pegainfer-kernels 与 cudarc，通过 Cuda/Tensor/EngineHandle/Layer 等抽象直接驱动 GPU 内核，为引擎优化提供测量依据。",
+          "id": "u1-l1",
           "learning_goals": [
             "说出 pegainfer-bench 的三大基准场景及其服务对象",
             "理解 Cargo.toml 中 anyhow/cudarc/pegainfer-kernels/serde/serde_json 各自的作用",
             "理解本 crate 与 pegainfer 推理引擎、pegainfer-kernels 的层次关系"
           ],
-          "source_files": [
-            "Cargo.toml",
-            "src/main.rs",
-            "../CLAUDE.md"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "项目定位与三大基准场景",
             "依赖关系图",
             "与 pegainfer-kernels 的分工"
           ],
+          "order": 1,
           "practice_task": "阅读 pegainfer-bench/Cargo.toml 与仓库 CLAUDE.md，列出本 crate 的全部依赖并标注每项依赖服务于哪个基准场景；再用三句话写清楚『pegainfer-bench 和推理引擎的关系』。",
-          "depends_on": [],
-          "action": "new"
+          "source_files": [
+            "Cargo.toml",
+            "src/main.rs",
+            "../CLAUDE.md"
+          ],
+          "title": "项目定位与全景：pegainfer-bench 是什么",
+          "topic": "介绍 pegainfer-bench 在 pegainfer 工作区中的定位：一个纯 Rust + CUDA 的 LLM 基准测试工具，聚焦 GEMM 微基准、分页 KV cache 基准和请求循环压测三大场景。说明它直接依赖 pegainfer-kernels 与 cudarc，通过 Cuda/Tensor/EngineHandle/Layer 等抽象直接驱动 GPU 内核，为引擎优化提供测量依据。"
         },
         {
-          "id": "u1-l2",
-          "title": "构建与运行：workspace 成员、feature 与环境变量",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
           "filename": "u1-l2-build-and-run.md",
-          "level": "beginner",
-          "topic": "讲解如何在 pegainfer 工作区内构建与运行 pegainfer-bench：workspace 成员关系与 workspace = true 依赖继承、必须使用 --release 的纪律、cuda 默认 feature（映射到 cudarc/cuda）、以及 PEGAINFER_CUDA_SM、PEGAINFER_TEST_MODEL_PATH 等环境变量的作用。",
+          "id": "u1-l2",
           "learning_goals": [
             "用 cargo run --release -p pegainfer-bench 完成一次构建与 --help 查看（具体子命令清单待确认，以实际输出为准）",
             "解释 debug 构建对 GPU 基准的失真影响",
             "说明 PEGAINFER_CUDA_SM 与 PEGAINFER_TEST_MODEL_PATH 各自解决什么问题"
           ],
-          "source_files": [
-            "Cargo.toml",
-            "../Cargo.toml",
-            "../CLAUDE.md"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "workspace 与依赖继承",
             "release 构建纪律与 feature 门控",
             "关键环境变量"
           ],
+          "order": 2,
           "practice_task": "执行 cargo run --release -p pegainfer-bench -- --help 并完整记录输出；若机器无 nvidia-smi，则设置 PEGAINFER_CUDA_SM 完成一次构建，并记录构建日志中与 SM 目标相关的输出。",
-          "depends_on": [
-            "u1-l1"
+          "source_files": [
+            "Cargo.toml",
+            "../Cargo.toml",
+            "../CLAUDE.md"
           ],
-          "action": "new"
+          "title": "构建与运行：workspace 成员、feature 与环境变量",
+          "topic": "讲解如何在 pegainfer 工作区内构建与运行 pegainfer-bench：workspace 成员关系与 workspace = true 依赖继承、必须使用 --release 的纪律、cuda 默认 feature（映射到 cudarc/cuda）、以及 PEGAINFER_CUDA_SM、PEGAINFER_TEST_MODEL_PATH 等环境变量的作用。"
         },
         {
-          "id": "u1-l3",
-          "title": "目录结构与入口链路",
-          "order": 3,
+          "action": "keep",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
           "filename": "u1-l3-structure-and-entry.md",
-          "level": "beginner",
-          "topic": "自顶向下走读入口链路：src/main.rs 仅做委托调用 pegainfer_bench::cli::run()，src/cli.rs（约 31KB）承载命令行分发，src/timings.rs 提供计时统计，src/loop/ 下是各基准场景（mod.rs、kv.rs、serve.rs 已确认存在）。lib.rs 的具体模块声明方式待确认，需实读补全。",
+          "id": "u1-l3",
           "learning_goals": [
             "画出从 main() 到各基准场景函数的调用链路图",
             "说明 cli.rs、timings.rs、src/loop 各文件的分工与大致规模",
             "掌握用 grep 在真实源码中验证调用关系的方法"
           ],
+          "level": "beginner",
+          "minimal_modules": [
+            "入口委托模式",
+            "文件分工地图",
+            "调用链验证方法"
+          ],
+          "order": 3,
+          "practice_task": "用文本画出 main → cli::run → 各子命令处理 → loop 模块的完整调用链，标注每步所在文件与行号；再用 grep -n 验证你画出的每一条边在源码中真实存在。",
           "source_files": [
             "src/main.rs",
             "src/lib.rs",
             "src/cli.rs",
             "src/loop/serve.rs"
           ],
-          "minimal_modules": [
-            "入口委托模式",
-            "文件分工地图",
-            "调用链验证方法"
-          ],
-          "practice_task": "用文本画出 main → cli::run → 各子命令处理 → loop 模块的完整调用链，标注每步所在文件与行号；再用 grep -n 验证你画出的每一条边在源码中真实存在。",
-          "depends_on": [
-            "u1-l1",
-            "u1-l2"
-          ],
-          "action": "new"
+          "title": "目录结构与入口链路",
+          "topic": "自顶向下走读入口链路：src/main.rs 仅做委托调用 pegainfer_bench::cli::run()，src/cli.rs（约 31KB）承载命令行分发，src/timings.rs 提供计时统计，src/loop/ 下是各基准场景（mod.rs、kv.rs、serve.rs 已确认存在）。lib.rs 的具体模块声明方式待确认，需实读补全。"
         }
-      ]
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "从零认识 pegainfer-bench"
     },
     {
       "id": "u2",
-      "title": "核心模块与基准场景",
-      "level": "intermediate",
-      "order": 2,
       "lectures": [
         {
-          "id": "u2-l4",
-          "title": "CLI 入口与子命令分发",
-          "order": 1,
+          "action": "keep",
+          "depends_on": [
+            "u1-l3"
+          ],
           "filename": "u2-l4-cli-dispatch.md",
-          "level": "intermediate",
-          "topic": "解析 src/cli.rs 的子命令定义与分发逻辑：约 31KB 的单文件如何组织参数解析（serve 场景使用 getopts 风格的 -c/-n/-i/-o 短参数，其余子命令的解析方式待确认）、如何进入对应基准循环，以及 anyhow 错误传播风格。",
+          "id": "u2-l4",
           "learning_goals": [
             "读懂 cli.rs 中参数定义与 run() 的分发结构（细节待实读确认）",
             "追踪一个子命令从解析到进入基准循环的完整路径",
             "理解 anyhow 在本 crate 中的错误处理惯例"
           ],
-          "source_files": [
-            "src/cli.rs",
-            "src/main.rs",
-            "src/lib.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "子命令与参数定义",
             "run() 分发逻辑",
             "错误处理风格"
           ],
+          "order": 1,
           "practice_task": "给 cli.rs 新增一个最小子命令 stub（例如 hello）：只打印自己的名字即返回；运行 cargo run --release -p pegainfer-bench -- hello 验证分发路径正确。",
-          "depends_on": [
-            "u1-l3"
+          "source_files": [
+            "src/cli.rs",
+            "src/main.rs",
+            "src/lib.rs"
           ],
-          "action": "new"
+          "title": "CLI 入口与子命令分发",
+          "topic": "解析 src/cli.rs 的子命令定义与分发逻辑：约 31KB 的单文件如何组织参数解析（serve 场景使用 getopts 风格的 -c/-n/-i/-o 短参数，其余子命令的解析方式待确认）、如何进入对应基准循环，以及 anyhow 错误传播风格。"
         },
         {
-          "id": "u2-l5",
-          "title": "计时与统计骨架：timings.rs",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u2-l4"
+          ],
           "filename": "u2-l5-timings.md",
-          "level": "intermediate",
-          "topic": "讲解 src/timings.rs 的 Timings 原语：按标签 start/end 收集各阶段耗时，stats() 输出 mean/median/p90/p99/min/max。这是所有基准场景共用的统计骨架（serve.rs 中的用法已实读验证；timings.rs 内部实现细节待实读确认）。",
+          "id": "u2-l5",
           "learning_goals": [
             "掌握 Timings 的 start/标签/end/stats 使用方式",
             "理解 mean/median/p90/p99 各自适合刻画什么现象",
             "知道在哪里为基准结果增加自定义统计量"
           ],
-          "source_files": [
-            "src/timings.rs",
-            "src/loop/serve.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "Timings 数据结构",
             "标签化计时流程",
             "分位数统计输出"
           ],
+          "order": 2,
           "practice_task": "写一个独立的小程序（或复用任一基准入口）用 Timings 收集 100 次模拟迭代的耗时并打印 stats；再跑一次 serve 基准，对照其输出中的 stats 列解释每个分位数的含义。",
+          "source_files": [
+            "src/timings.rs",
+            "src/loop/serve.rs"
+          ],
+          "title": "计时与统计骨架：timings.rs",
+          "topic": "讲解 src/timings.rs 的 Timings 原语：按标签 start/end 收集各阶段耗时，stats() 输出 mean/median/p90/p99/min/max。这是所有基准场景共用的统计骨架（serve.rs 中的用法已实读验证；timings.rs 内部实现细节待实读确认）。"
+        },
+        {
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u2-l6",
-          "title": "CUDA 设备抽象与内存池初始化",
-          "order": 3,
           "filename": "u2-l6-cuda-device-and-pool.md",
-          "level": "intermediate",
-          "topic": "结合 serve.rs 的 init 阶段讲解 pegainfer-kernels 暴露的 Cuda 设备抽象：malloc_pool 预分配内存池、H2D 权重拷贝、Tensor 的使用方式，以及底层 cudarc 与 cuBLAS 的关系（已从 serve.rs 实读验证）。",
+          "id": "u2-l6",
           "learning_goals": [
             "理解 Cuda 设备抽象与 malloc_pool 预分配模式",
             "追踪 serve.rs init 阶段每类 buffer 的分配与初始化",
             "说明 Tensor 如何包装设备内存并参与 GEMM"
           ],
-          "source_files": [
-            "src/loop/serve.rs",
-            "Cargo.toml"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "Cuda 设备抽象",
             "内存池与 H2D 拷贝",
             "Tensor 与 cuBLAS 调用"
           ],
+          "order": 3,
           "practice_task": "在 serve.rs 中找到 malloc_pool 的调用点，列出每个池的用途与大致容量来源；把其中一个池的容量减半并运行，记录程序在哪个阶段出现什么行为变化。",
-          "depends_on": [
-            "u2-l4"
+          "source_files": [
+            "src/loop/serve.rs",
+            "Cargo.toml"
           ],
-          "action": "new"
+          "title": "CUDA 设备抽象与内存池初始化",
+          "topic": "结合 serve.rs 的 init 阶段讲解 pegainfer-kernels 暴露的 Cuda 设备抽象：malloc_pool 预分配内存池、H2D 权重拷贝、Tensor 的使用方式，以及底层 cudarc 与 cuBLAS 的关系（已从 serve.rs 实读验证）。"
         },
         {
-          "id": "u2-l7",
-          "title": "serve 场景：请求循环压测全走读",
-          "order": 4,
+          "action": "keep",
+          "depends_on": [
+            "u2-l5",
+            "u2-l6"
+          ],
           "filename": "u2-l7-serve-bench.md",
-          "level": "intermediate",
-          "topic": "完整走读 src/loop/serve.rs（约 18KB，已实读）：getopts 参数（-c 并发、-n 请求数、-i 输入 token、-o 输出 token、model-path、tp）、tokenizer 加载与随机 prompt 生成、token 循环与 layer 循环的嵌套驱动、softmax/argmax 采样、chunked prefill 与 stepwise decode 的分阶段统计输出，以及 PEGAINFER_TEST_MODEL_PATH 的回退逻辑。",
+          "id": "u2-l7",
           "learning_goals": [
             "解释 -c/-n/-i/-o/tp 每个参数对压测形态的影响",
             "追踪一次生成请求从 prompt 到采样输出 token 的完整代码路径",
             "读懂 init/prefill/decode/stepwise 各阶段的 stats 输出"
           ],
-          "source_files": [
-            "src/loop/serve.rs",
-            "src/timings.rs",
-            "../CLAUDE.md"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "参数与请求生成",
             "token/layer 双层主循环",
             "采样与分阶段统计"
           ],
+          "order": 4,
           "practice_task": "用三组不同参数（例如 -c 1/-c 4/-c 8）各跑一次 serve 基准，把 decode per-token 的 median/p99 与整体 TPS 填入对比表，并写一段结论解释并发对吞吐和尾延迟的影响。",
-          "depends_on": [
-            "u2-l5",
-            "u2-l6"
+          "source_files": [
+            "src/loop/serve.rs",
+            "src/timings.rs",
+            "../CLAUDE.md"
           ],
-          "action": "new"
+          "title": "serve 场景：请求循环压测全走读",
+          "topic": "完整走读 src/loop/serve.rs（约 18KB，已实读）：getopts 参数（-c 并发、-n 请求数、-i 输入 token、-o 输出 token、model-path、tp）、tokenizer 加载与随机 prompt 生成、token 循环与 layer 循环的嵌套驱动、softmax/argmax 采样、chunked prefill 与 stepwise decode 的分阶段统计输出，以及 PEGAINFER_TEST_MODEL_PATH 的回退逻辑。"
         },
         {
-          "id": "u2-l8",
-          "title": "模型层构造与 GEMM 微基准",
-          "order": 5,
+          "action": "keep",
+          "depends_on": [
+            "u2-l6",
+            "u2-l7"
+          ],
           "filename": "u2-l8-layers-and-gemm.md",
-          "level": "intermediate",
-          "topic": "讲解 serve.rs 中 LoopEngine::qwen3_layers 如何用 pegainfer_kernels::nn::layer 的 Layer/LayerKind（Embedding/RMSNorm/QKV/OProj/MLPGate/MLPUp/MLPDown/LMHead）构造一套 Qwen3 几何（hidden 2560、36 层、32/8 注意力头、vocab 151936）的层栈，每层如何落到 cuBLAS GEMM；并结合仓库定位说明 GEMM 微基准子命令的作用（cli.rs 中的具体微基准入口待确认）。",
+          "id": "u2-l8",
           "learning_goals": [
             "读懂 LayerKind 到各投影 GEMM 的映射关系",
             "理解默认 Qwen3 几何参数在代码中的位置与含义",
             "说明 GEMM 微基准与 serve 压测分别测量什么"
           ],
-          "source_files": [
-            "src/loop/serve.rs",
-            "src/cli.rs",
-            "Cargo.toml"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "Layer/LayerKind 抽象",
             "qwen3 层栈构造",
             "GEMM 计时与吞吐解读"
           ],
+          "order": 5,
           "practice_task": "修改 qwen3_layers 中的 hidden size 或层数（各改一次）运行 serve 基准，记录 TPS 与各阶段 stats 的变化，并用 GEMM FLOPs 估算解释变化的来源。",
+          "source_files": [
+            "src/loop/serve.rs",
+            "src/cli.rs",
+            "Cargo.toml"
+          ],
+          "title": "模型层构造与 GEMM 微基准",
+          "topic": "讲解 serve.rs 中 LoopEngine::qwen3_layers 如何用 pegainfer_kernels::nn::layer 的 Layer/LayerKind（Embedding/RMSNorm/QKV/OProj/MLPGate/MLPUp/MLPDown/LMHead）构造一套 Qwen3 几何（hidden 2560、36 层、32/8 注意力头、vocab 151936）的层栈，每层如何落到 cuBLAS GEMM；并结合仓库定位说明 GEMM 微基准子命令的作用（cli.rs 中的具体微基准入口待确认）。注：pegainfer-kernels 在 8886aa47 新增了 qwen4 grouped (1+w) RMSNorm 算子，但 serve.rs 与本 crate 均未引用，不影响本讲义。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 2,
+      "title": "核心模块与基准场景"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "keep",
           "depends_on": [
             "u2-l6",
             "u2-l7"
           ],
-          "action": "new"
-        }
-      ]
-    },
-    {
-      "id": "u3",
-      "title": "多卡、KV 基准与扩展实践",
-      "level": "advanced",
-      "order": 3,
-      "lectures": [
-        {
-          "id": "u3-l9",
-          "title": "多卡与张量并行：Ock 协调与 P2P 权重广播",
-          "order": 1,
           "filename": "u3-l9-tp-and-ock.md",
-          "level": "advanced",
-          "topic": "讲解 serve.rs 的多卡路径：OckSocket::connect(\"ock://npus\") 建立 rank 协调、从 Ock 获取 rank/size、tp 参数的意义，以及 init 阶段 rank0 通过 scatter/gather P2P 播放权重的实现；结合仓库 CLAUDE.md 的 EP free-running 纪律说明为什么协调要『提前约定每步内容』而不是『等待就绪』。",
+          "id": "u3-l9",
           "learning_goals": [
             "解释 Ock 套接字在多卡基准中的协调作用",
             "画出权重从 rank0 广播到各 rank 的数据流时序",
             "理解 EP free-running 四条不变量对基准设计的约束"
           ],
-          "source_files": [
-            "src/loop/serve.rs",
-            "../CLAUDE.md"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "Ock 套接字与 rank 协调",
             "P2P 权重广播",
             "free-running 纪律"
           ],
+          "order": 1,
           "practice_task": "阅读 serve.rs 的 broadcast 相关代码，画出 rank0→rankN 权重分发的时序图（标注每步的 scatter/gather 与 H2D）；单卡运行时打印 rank/size 验证退化为单 rank 的路径。",
-          "depends_on": [
-            "u2-l6",
-            "u2-l7"
+          "source_files": [
+            "src/loop/serve.rs",
+            "../CLAUDE.md"
           ],
-          "action": "new"
+          "title": "多卡与张量并行：Ock 协调与 P2P 权重广播",
+          "topic": "讲解 serve.rs 的多卡路径：OckSocket::connect(\"ock://npus\") 建立 rank 协调、从 Ock 获取 rank/size、tp 参数的意义，以及 init 阶段 rank0 通过 scatter/gather P2P 播放权重的实现；结合仓库 CLAUDE.md 的 EP free-running 纪律说明为什么协调要『提前约定每步内容』而不是『等待就绪』。"
         },
         {
-          "id": "u3-l10",
-          "title": "kv 场景：分页 KV cache 基准",
-          "order": 2,
+          "action": "keep",
+          "depends_on": [
+            "u1-l3",
+            "u2-l5"
+          ],
           "filename": "u3-l10-kv-bench.md",
-          "level": "advanced",
-          "topic": "走读 src/loop/kv.rs（约 8KB）与 src/loop/mod.rs（约 6KB）的分页 KV cache 基准：如何驱动页分配、写入与读取并计时；两文件的内部实现细节待确认，需实读补全后与 serve 场景的 decode 统计对照。",
+          "id": "u3-l10",
           "learning_goals": [
             "理解分页 KV cache 基准模拟的访问模式与参数（待确认）",
             "追踪 loop/mod.rs 如何把 kv 与 serve 组织成统一入口",
             "解读 kv 基准输出指标与 cache 行为的对应关系"
           ],
-          "source_files": [
-            "src/loop/kv.rs",
-            "src/loop/mod.rs",
-            "src/lib.rs"
-          ],
+          "level": "advanced",
           "minimal_modules": [
             "kv 基准参数与访问模式",
             "loop 模块组织方式",
             "指标解读与场景对照"
           ],
+          "order": 2,
           "practice_task": "运行 kv 基准并调整其参数各跑一次（具体参数以实读 kv.rs 后为准），记录延迟与命中率类指标的变化，并写一段与 serve 场景 decode 统计的对照结论。",
-          "depends_on": [
-            "u1-l3",
-            "u2-l5"
+          "source_files": [
+            "src/loop/kv.rs",
+            "src/loop/mod.rs",
+            "src/lib.rs"
           ],
-          "action": "new"
+          "title": "kv 场景：分页 KV cache 基准",
+          "topic": "走读 src/loop/kv.rs（约 8KB）与 src/loop/mod.rs（约 6KB）的分页 KV cache 基准：如何驱动页分配、写入与读取并计时；两文件的内部实现细节待确认，需实读补全后与 serve 场景的 decode 统计对照。"
         },
         {
-          "id": "u3-l11",
-          "title": "基准方法学与扩展实践：新增一个基准场景",
-          "order": 3,
+          "action": "keep",
+          "depends_on": [
+            "u2-l4",
+            "u2-l5",
+            "u3-l10"
+          ],
           "filename": "u3-l11-methodology-and-extension.md",
-          "level": "advanced",
-          "topic": "从方法学角度审视基准可信度：预热迭代、CUDA 侧执行与主机侧计时的差异、时钟与温控干扰、mean/median/p90/p99 的选择；然后综合全手册知识完成端到端扩展——在 cli.rs 注册新子命令、在 src/loop 下新增场景模块、复用 Timings 输出统计，保持与既有代码风格一致。",
+          "id": "u3-l11",
           "learning_goals": [
             "判断一个基准结果是否可信并给出依据",
             "设计包含预热与多次重复的低噪声实验流程",
             "独立完成从 CLI 到循环到统计输出的新基准场景"
           ],
+          "level": "advanced",
+          "minimal_modules": [
+            "预热与稳态判定",
+            "计时层次与噪声控制",
+            "新场景端到端接入"
+          ],
+          "order": 3,
+          "practice_task": "新增子命令 bench-rmsnorm：对固定大小的设备张量循环执行 RMSNorm（复用 qwen3_layers 中已有的 Layer 构造），输出 mean/median/p99；先不加热跑 5 次、再加 10 次预热跑 5 次，对比两组方差并写分析。",
           "source_files": [
             "src/timings.rs",
             "src/cli.rs",
             "src/loop/serve.rs",
             "src/loop/mod.rs"
           ],
-          "minimal_modules": [
-            "预热与稳态判定",
-            "计时层次与噪声控制",
-            "新场景端到端接入"
-          ],
-          "practice_task": "新增子命令 bench-rmsnorm：对固定大小的设备张量循环执行 RMSNorm（复用 qwen3_layers 中已有的 Layer 构造），输出 mean/median/p99；先不加热跑 5 次、再加 10 次预热跑 5 次，对比两组方差并写分析。",
-          "depends_on": [
-            "u2-l4",
-            "u2-l5",
-            "u3-l10"
-          ],
-          "action": "new"
+          "title": "基准方法学与扩展实践：新增一个基准场景",
+          "topic": "从方法学角度审视基准可信度：预热迭代、CUDA 侧执行与主机侧计时的差异、时钟与温控干扰、mean/median/p90/p99 的选择；然后综合全手册知识完成端到端扩展——在 cli.rs 注册新子命令、在 src/loop 下新增场景模块、复用 Timings 输出统计，保持与既有代码风格一致。"
         }
-      ]
+      ],
+      "level": "advanced",
+      "order": 3,
+      "title": "多卡、KV 基准与扩展实践"
     }
   ]
 }
