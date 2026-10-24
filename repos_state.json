@@ -28761,7 +28761,7 @@
     "typst/typst": {
       "prompt_hash": "b21aef51792b02df",
       "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-10-23T23:02:25Z",
+      "last_run_at": "2026-10-24T11:02:29Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -28838,7 +28838,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"4838f469-a595-4145-b4df-3d4103be616c\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"14505cb1-3315-468a-991f-fe42e3afcebd\",\"total_co"
         },
         "u3-l2": {
           "status": "pending",
@@ -65882,7 +65882,7 @@
     "openinfer-project/openinfer@pegainfer-core": {
       "prompt_hash": "b21aef51792b02df",
       "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-10-23T23:02:25Z",
+      "last_run_at": "2026-10-24T11:02:29Z",
       "lectures": {
         "u1-l1": {
           "status": "keep",
@@ -65954,16 +65954,18 @@
           "error": null
         },
         "u4-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.69606,
+          "error": null
+        },
+        "u4-l2": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"10d09f91-d0ed-4a4c-b460-19504158e55f\",\"total_co"
-        },
-        "u4-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"28b1e469-ee26-40c9-baa7-6caad699e939\",\"total_co"
         },
         "u4-l3": {
           "status": "pending",
@@ -66013,16 +66015,18 @@
           "error": null
         },
         "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.118234400000001,
+          "error": null
+        },
+        "u2-l2": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"d521012a-888e-4d59-b9bd-967dc54c0f61\",\"total_co"
-        },
-        "u2-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"0e123cff-33bd-4898-8940-ec89c05237c8\",\"total_co"
         },
         "u2-l3": {
           "status": "pending",
@@ -66066,7 +66070,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/openinfer-project/openinfer/openinfer-pegainfer-cupti-tutorial",
       "last_head": "8886aa47b95bc4beedb63584eb367276650b2fec",
-      "last_run_at": "2026-10-23T23:02:25Z",
+      "last_run_at": "2026-10-24T11:02:29Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "openinfer-project/openinfer@pegainfer-deepseek-v2-lite": {
@@ -66091,7 +66095,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"83419884-16e6-4407-903f-37c4feabf5a3\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"b27426f3-c5eb-4861-8489-60052d0055b9\",\"total_co"
         },
         "u1-l4": {
           "status": "pending",
@@ -66190,7 +66194,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/openinfer-project/openinfer/openinfer-pegainfer-deepseek-v2-lite-tutorial",
       "last_head": "8886aa47b95bc4beedb63584eb367276650b2fec",
-      "last_run_at": "2026-10-23T23:02:25Z",
+      "last_run_at": "2026-10-24T11:02:29Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "openinfer-project/openinfer@pegainfer-glm52": {},
