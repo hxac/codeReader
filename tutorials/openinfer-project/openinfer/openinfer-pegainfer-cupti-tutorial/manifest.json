@@ -1,0 +1,377 @@
+{
+  "head": "09a1a38f8b4938b06ee4e4f63f64fd4feed59434",
+  "project": "openinfer-pegainfer-cupti",
+  "rationale": "增量分析：上次 HEAD 8886aa47 到当前 HEAD 09a1a38f 之间仅有一次提交 09a1a38f（fix(kimi-k2): select distinct router experts when choices are NaN，#1170），改动集中在 Kimi-K2 模型线的 MoE 路由专家选择逻辑，不涉及 pegainfer-cupti 的四个文件（Cargo.toml、build.rs、src/lib.rs、csrc/range_profiler.cpp），也不影响任何讲义引用的消费方与支撑文件（pegainfer-qwen3 的 qwen3_kernel_report.rs 及其 Cargo.toml 的 kernel-report feature、pegainfer-build 的 CudaToolkit 探测、CI 中对该 crate 的排除规则、docs/subsystems/kernels/kernel-op-reports.md）。因此全部 12 篇讲义内容仍然成立，action 均为 keep，不新增、不移除讲义；整体学习路线维持原设计：入门层讲定位、构建链接与消费者实跑，进阶层沿 C ABI 契约 → CUPTI 会话装配 → UserReplay 回放循环 → 解码求值 → Rust 封装的数据流推进，专家层聚焦回调蹦床、RAII 与异常驯化、context 纪律与一次初始化，最后以『为自己的 kernel 接上 CUPTI』收尾。仅更新 head 字段至当前提交。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 pegainfer-cupti 的职责边界：只做单区间硬件计数器采样，不做吞吐基准测试",
+            "画出 从 Rust 调用方 到 C++ 实现 再到 CUPTI 库 的调用链路",
+            "在仓库中用 grep 找到全部消费方并解释为什么它被设计成独立 crate"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "crate 职责与四文件分工",
+            "workspace 中的位置与依赖关系",
+            "唯一公开 API profile_range_with_prepare 一览",
+            "消费方 qwen3_kernel_report 的引用方式"
+          ],
+          "order": 1,
+          "practice_task": "在仓库根目录执行 `cargo metadata --no-deps --format-version 1 | grep -A2 pegainfer-cupti` 确认它是 workspace 成员；再用 `grep -rn \"pegainfer-cupti\" --include=Cargo.toml` 列出所有把它列为依赖的 crate，写一段 5-10 行的笔记回答：为什么 CUPTI 依赖不放进默认构建图（提示：看 pegainfer-qwen3/Cargo.toml 中 kernel-report feature 与 optional 依赖）。",
+          "source_files": [
+            "pegainfer-cupti/Cargo.toml",
+            "pegainfer-cupti/src/lib.rs",
+            "pegainfer-cupti/csrc/range_profiler.cpp",
+            "Cargo.toml",
+            "pegainfer-qwen3/src/bin/qwen3_kernel_report.rs"
+          ],
+          "title": "pegainfer-cupti 是什么：四个文件搭起的 CUPTI 桥",
+          "topic": "介绍 pegainfer-cupti 在 openinfer workspace 中的定位：它是一个把 NVIDIA CUPTI Range Profiler 包装成单个 C ABI 函数、再暴露给 Rust 的 crate。梳理 Cargo.toml、build.rs、csrc/range_profiler.cpp、src/lib.rs 四个文件的分工，以及它在 workspace 成员列表和 pegainfer-qwen3 kernel-report 工具链中的位置。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-build-and-linking.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "理解 cc::Build 在 build.rs 中编译 C++ 源文件并注入链接参数的机制",
+            "解释 CUPTI 在经典安装中位于 toolkit extras 目录而非主目录的原因及探测逻辑",
+            "看懂 cargo:rustc-link-search / rustc-link-lib 指令与 rerun-if-changed 声明"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "CudaToolkit::discover 与 root/include_dirs",
+            "CUPTI 头文件与 lib64 的 extras 路径处理",
+            "cc 编译与链接指令输出",
+            "CI 排除该 crate 的原因"
+          ],
+          "order": 2,
+          "practice_task": "在有 CUDA 工具链的机器上运行 `cargo build -p pegainfer-cupti -v`，在输出中找到编译 range_profiler.cpp 的命令行和最终链接命令里的 -lcupti；然后修改 csrc/range_profiler.cpp（加一行注释）重新构建，观察因为 cargo:rerun-if-changed 声明而触发的重编译。没有 GPU 的环境下，改为阅读 target/debug/build/pegainfer-cupti-*/output 文件并摘录其中的链接指令。",
+          "source_files": [
+            "pegainfer-cupti/build.rs",
+            "pegainfer-build/src/lib.rs",
+            "pegainfer-cupti/Cargo.toml",
+            ".github/workflows/ci.yml"
+          ],
+          "title": "构建与链接：build.rs 如何找到藏在 extras 里的 CUPTI",
+          "topic": "逐行解读 build.rs：用 pegainfer_build::CudaToolkit::discover() 探测 CUDA 工具链，从 extras/CUPTI/include 和 extras/CUPTI/lib64 补充 CUPTI 头文件与库，用 cc crate 以 C++17 编译 range_profiler.cpp，并输出链接 cuda、cupti、stdc++ 的指令；解释 CI 里为什么把这个 crate 排除在 clippy 之外。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "filename": "u1-l3-consumer-usage.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "掌握 profile_range_with_prepare 的调用模板：context、device_index、range 名、指标列表、prepare/launch 两个闭包",
+            "理解 prepare 回调用于清 L2、launch 回调发射被测 kernel 的分工",
+            "认识 CUPTI_METRICS 中常见指标名的含义（gpu__time_duration.sum、dram__bytes.sum、sm__throughput 百分比等）"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "measure_cupti_decode 的调用模板",
+            "prepare 闭包：L2CacheClear 与冷缓存测量",
+            "CUPTI_METRICS 指标清单",
+            "cupti_metric_map 与原始指标落盘约定"
+          ],
+          "order": 3,
+          "practice_task": "在有 GPU 与 CUDA 工具链的机器上执行 `cargo run --release -p pegainfer-qwen3 --features kernel-report --bin qwen3_kernel_report -- run --no-cupti --iters 1 --contexts 1024 --batch-sizes 1 --variants non_partition --out /tmp/report_nocupti.json`，然后去掉 --no-cupti 再跑一次，对比两份 JSON 中 case.cupti 字段的出现与指标键名；没有 GPU 时，改为在 qwen3_kernel_report.rs 中定位 measure_cupti_dense / measure_cupti_decode / measure_cupti_prefill 三处调用并写注释说明各自的 range 命名规则。",
+          "source_files": [
+            "pegainfer-qwen3/src/bin/qwen3_kernel_report.rs",
+            "pegainfer-qwen3/Cargo.toml",
+            "pegainfer-cupti/src/lib.rs",
+            "docs/subsystems/kernels/kernel-op-reports.md"
+          ],
+          "title": "从消费者看效果：qwen3_kernel_report 如何用一次 profile 调用拿到硬件计数器",
+          "topic": "以 pegainfer-qwen3 的 kernel-report 工具为实例，展示 profile_range_with_prepare 的标准用法：prepare 闭包清 L2 缓存、launch 闭包发射被测 kernel、CUPTI_METRICS 指定要采集的原始指标名，返回值经 cupti_metric_map 转成指标名到数值的映射；同时介绍 docs 中『运行器只存原始指标、解释放在离线分析层』的团队约定。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "入门：定位、构建与第一次看到度量"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u2-l1-c-abi-contract.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "能默写 C ABI 函数的参数分组：输入上下文、输入配置、回调三元组、输出缓冲、错误通道",
+            "理解调用方预分配输出/错误缓冲与 write_error 截断写入的配合方式",
+            "识别函数入口处的防御性校验（null context、null range 名、空指标列表）及其顺序"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "extern \"C\" 导出函数完整签名",
+            "入口参数校验与提前失败",
+            "write_error 的截断语义",
+            "Rust 侧 unsafe extern 声明的对应关系"
+          ],
+          "order": 1,
+          "practice_task": "写一个约 30 行的独立 Rust bin（临时实验，不必提交），用 `extern \"C\"` 声明链接到 libpegainfer_cupti_range_profiler 的符号，传入空指针 context 和一个合法指标名，观察返回值 1 与错误缓冲中的 \"CUDA context is null\"；再传入 metric_count=0 验证 \"metric list is empty\"。这两个校验发生在任何 CUDA 初始化之前，因此无 GPU 机器也能完成实验。",
+          "source_files": [
+            "pegainfer-cupti/csrc/range_profiler.cpp",
+            "pegainfer-cupti/src/lib.rs"
+          ],
+          "title": "C ABI 契约：pegainfer_cupti_profile_range 的 13 个参数",
+          "topic": "逐参数解读 csrc/range_profiler.cpp 导出的 extern \"C\" 函数签名：CUcontext、device_index、range 名、指标名数组及其长度、两个回调函数指针加 userdata、输出缓冲 metric_values、错误缓冲 error 与 error_len。总结这条边界上的设计规约：int 返回状态、调用方分配缓冲、错误以 NUL 结尾字符串回传、异常绝不跨过 FFI。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-profiler-session.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "按顺序列出一次 CUPTI Range Profiler 会话需要的全部 CUPTI 对象及其宿主侧句柄",
+            "掌握『先查 size 再取 data』的 CUPTI 参数结构体两次调用模式",
+            "理解 config image 与 counter data image 各自承载什么：前者是采集计划，后者是计数结果容器"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "initialize_cupti_once 与全局初始化状态",
+            "chip_name 与 counter_availability_image",
+            "initialize_host 与 create_config_image",
+            "enable_range_profiler 与 create_counter_data_image",
+            "set_config 的 UserRange/UserReplay 与嵌套参数"
+          ],
+          "order": 2,
+          "practice_task": "在本地复制一份 range_profiler.cpp（或直接在阅读笔记中），为会话装配的每个函数补充一行『输入对象 → 输出对象』的流水线注释，最终画出从 CUcontext 到『已配置好的 RangeObject』的对象依赖图；再回答：如果把 maxNumOfRanges 从 1 改成 2，counter data image 的申请大小会受哪一步影响。",
+          "source_files": [
+            "pegainfer-cupti/csrc/range_profiler.cpp"
+          ],
+          "title": "会话建立：从 cuptiProfilerInitialize 到 SetConfig 的七步装配线",
+          "topic": "深入 range_profiler.cpp 匿名命名空间中的会话装配函数：initialize_cupti_once（std::call_once 全局只初始化一次）、chip_name（拿 GPU 架构代号）、counter_availability_image（先查大小再取数据的两次调用惯用法）、initialize_host 与 create_config_image（指标名编译成 config image）、enable_range_profiler、create_counter_data_image、set_config（UserRange + UserReplay、单层嵌套）。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-pass-replay-loop.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "解释 UserReplay 模式下 kernel 重放与 pass 提交的关系，以及 isAllPassSubmitted 的循环终止条件",
+            "说明 prepare 回调为什么在 Start 之前、且每个 pass 都会执行",
+            "推导 launch 闭包必须幂等（可安全重复发射）的原因，并对照消费者的 launch_once 实现"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "profile_passes 的 pass 循环骨架",
+            "Start/PushRange/PopRange/Stop 四元组",
+            "isAllPassSubmitted 与多 pass 成因",
+            "消费者的 prepare/launch 闭包对照"
+          ],
+          "order": 3,
+          "practice_task": "在一个实验分支里给 profile_passes 增加一个静态 pass 计数器，在循环结束时通过 stderr 打印总 pass 数；然后在有 GPU 的机器上分别用 1 个指标（gpu__time_duration.sum）和完整 CUPTI_METRICS 列表跑 qwen3_kernel_report 的单 case，对比 pass 数差异，验证『指标越多 pass 越多』。",
+          "source_files": [
+            "pegainfer-cupti/csrc/range_profiler.cpp",
+            "pegainfer-qwen3/src/bin/qwen3_kernel_report.rs"
+          ],
+          "title": "回放循环：UserReplay 为什么让 launch 闭包被执行多次",
+          "topic": "剖析 profile_passes 的 do-while 循环：每个 pass 依次执行 prepare 回调、cuCtxSynchronize、cuptiRangeProfilerStart、PushRange、launch 回调、同步、PopRange、Stop，直到 isAllPassSubmitted 为真。解释多 pass 的成因（指标分组超出单次可采集集合，硬件计数器有限需重放），以及这对 launch 回调幂等性提出的要求。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-decode-and-evaluate.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "区分 counter data image（原始计数）与 evaluate 后的 metric value（换算结果）两个阶段",
+            "理解 evaluate 中 metric_value_count >= metric_count 的防御检查与 rangeIndex=0 的单区间语义",
+            "能用两个原始指标做一次离线推导，例如 DRAM 带宽 = dram__bytes.sum / gpu__time_duration.sum"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "decode_data 与 GetCounterDataInfo",
+            "EvaluateToGpuValues 的参数与输出缓冲契约",
+            "CUPTI_METRICS 指标语义速查",
+            "离线推导示例：带宽与算力占比"
+          ],
+          "order": 4,
+          "practice_task": "用一份已有的 kernel report JSON（或从 docs/subsystems/kernels/kernel-op-reports.md 中抄录的示例数值），写一个 20 行左右的小脚本或手算表格，对每个 case 计算 dram__bytes_op_read.sum 除以 gpu__time_duration.sum 得到 GB/s，再除以该 GPU 标称带宽得到占比；对照文档结论（如 10k prefill attention 的 DRAM 占比很低、瓶颈在 occupancy）验证你的计算方向正确。",
+          "source_files": [
+            "pegainfer-cupti/csrc/range_profiler.cpp",
+            "pegainfer-qwen3/src/bin/qwen3_kernel_report.rs"
+          ],
+          "title": "解码与求值：从 counter data 到 f64 指标值",
+          "topic": "讲解收尾三步：decode_data 让 CUPTI 把硬件计数器原始镜像解码、GetCounterDataInfo 校验 numTotalRanges 非零、cuptiProfilerHostEvaluateToGpuValues 把计数换算成指标值写入 Rust 侧的 f64 数组；并对照消费方的 CUPTI_METRICS，说明 duration、DRAM/L2 字节数、SM 与 tensor pipe 百分比等指标如何支撑后续离线分析（如带宽百分比、MFU 判断）。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l5-rust-wrapper.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "理解 CString/CStr 在跨边界字符串上的角色：为何 interior NUL 会导致 CString::new 失败",
+            "看懂 metric_ptrs 指针数组必须在 CString 向量存活期间完成调用的生命周期约束",
+            "复述错误合并三分支：仅 FFI 错误、仅回调错误、两者拼接"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "unsafe extern 声明与类型别名",
+            "CuptiProfilerError 与 Display",
+            "指针与缓冲的组装（CString、values、4096 字节错误缓冲）",
+            "status 处理与错误合并三分支"
+          ],
+          "order": 5,
+          "practice_task": "在本 crate 里补一个 #[test]（实验性质，可放临时分支）：调用 profile_range_with_prepare，传入包含 '\\0' 的 range 名（如 \"bad\\0range\"）、任意的空指标切片与非空 context 指针，断言它返回 Err 且错误信息来自 CString 转换而不是 CUDA——这验证了字符串清洗发生在任何 GPU 访问之前，因此无 GPU 也能跑通该测试。",
+          "source_files": [
+            "pegainfer-cupti/src/lib.rs"
+          ],
+          "title": "Rust 侧封装：lib.rs 如何把 C ABI 变成一个可用的 unsafe 函数",
+          "topic": "通读 src/lib.rs：Rust 2024 的 unsafe extern 声明块、CuContext 等类型别名、CuptiProfilerError 的构造与 Display/Error 实现、CString 转换与指标名指针数组的组装、输出与错误缓冲的预分配、status 与两条错误来源（FFI 错误缓冲 + 回调记录错误）的三分支合并逻辑。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 2,
+      "title": "进阶：C ABI 契约与 CUPTI Range Profiler 生命周期"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "filename": "u3-l1-callback-trampolines.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "解释 userdata + trampoline 的经典 FFI 回调模式及 CallbackState<'a> 生命周期的作用",
+            "理解 `&raw mut state` 这类 Rust 2024 写法相对 `&mut state as *mut _` 的安全性差别",
+            "列出 trampoline 的两条硬约束：不 panic、不在错误路径上 unwind 跨界"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "CallbackState 结构与借用式闭包",
+            "prepare_trampoline / launch_trampoline 的 int 协议",
+            "prepare 可选性与 nullptr 契约",
+            "panic 跨界与 UB 风险"
+          ],
+          "order": 1,
+          "practice_task": "在实验分支上为这条边界增加第三个可选回调（例如 pass 结束的 notify 回调）：修改 C++ 签名与 profile_passes 调用点、Rust 侧 CallbackState 与 trampoline、以及 profile_range_with_prepare 的参数，保持 nullptr 可选语义一致；编译通过并写一段说明：如果 trampoline 里直接 panic 会发生什么、你会用什么手段（catch_unwind 或错误通道）兜住它。",
+          "source_files": [
+            "pegainfer-cupti/src/lib.rs",
+            "pegainfer-cupti/csrc/range_profiler.cpp"
+          ],
+          "title": "回调蹦床：Rust 闭包如何安全地被 C++ 反复调用",
+          "topic": "聚焦 src/lib.rs 中的 CallbackState、prepare_trampoline 和 launch_trampoline：dyn FnMut 闭包借用如何藏进 *mut c_void 的 userdata、trampoline 如何把 Result 转成 int 并把错误字符串暂存到 state.error、为什么只在 prepare 为 Some 时才传函数指针（与 C++ 侧 nullptr 判空对应），以及 panic 绝不能穿过 extern \"C\" 边界的纪律。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u3-l2-raii-and-error-channel.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "解释为什么跨 FFI 边界必须用『内部异常 + 边界 catch』而不是让异常外泄",
+            "掌握 move-only RAII 包装 CUPTI 对象的写法：删除拷贝、转移指针、析构释放",
+            "理解 CurrentContextGuard 的保存-切换-恢复模式如何保证不污染调用线程的上下文"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "check_cupti / check_cuda 与错误字符串构造",
+            "CurrentContextGuard 的构造-析构对",
+            "HostObject / RangeObject 的 move-only RAII",
+            "顶层 try/catch 与 write_error 兜底"
+          ],
+          "order": 2,
+          "practice_task": "对 pegainfer_cupti_profile_range 做一次失败路径审计：列出所有会走到 catch 的分支（至少含 null 参数、cuptiProfilerInitialize 失败、chip name 查询失败、指标非法、零 range 返回），并确认每个分支下三个 RAII 对象的析构顺序是否安全；然后用 u2-l1 的实验 bin 实际触发一条失败路径，核对 Rust 侧拿到的错误字符串与 C++ 抛出的消息一致。",
+          "source_files": [
+            "pegainfer-cupti/csrc/range_profiler.cpp"
+          ],
+          "title": "C++ 侧的 RAII 与异常驯化：让错误安全地变成一个字符串",
+          "topic": "分析 range_profiler.cpp 的错误与资源管理：check_cupti/check_cuda 借助 cuptiGetResultString / cuGetErrorString 抛 runtime_error；CurrentContextGuard 在构造时切换、析构时恢复 CUcontext；HostObject 与 RangeObject 是 move-only（删除拷贝、std::exchange 转移指针），析构分别做 Deinitialize 与 Disable；最外层 try/catch 把任何异常压缩进 write_error 的 NUL 结尾缓冲。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u3-l3-context-discipline.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "解释 CUcontext 的线程绑定语义与 CurrentContextGuard 的必要性",
+            "分析 std::call_once + 缓存初始化结果模式在『首次失败』场景下的行为取舍",
+            "说明为什么 Rust 侧的 values/error 向量与 CallbackState 在 FFI 调用返回前不能被移动或释放"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "CUcontext 切换契约与文档化安全前提",
+            "call_once 与全局初始化状态的并发语义",
+            "两处 cuCtxSynchronize 的计数边界作用",
+            "多 pass 下的缓冲指针稳定性要求"
+          ],
+          "order": 3,
+          "practice_task": "写一份『如果我在线程 A 持有 context、线程 B 调用 profile_range_with_prepare』的分析笔记：指出 guard 如何防止破坏线程 B 的原 context、launch 回调在错误线程上发射会发生什么；再在实验分支里给 CallbackState 加一个 AtomicUsize 计数器统计 launch 被调次数，在多指标场景下验证回放次数大于 1 时 userdata 指针在整个循环中始终未变。",
+          "source_files": [
+            "pegainfer-cupti/csrc/range_profiler.cpp",
+            "pegainfer-cupti/src/lib.rs",
+            "pegainfer-qwen3/src/bin/qwen3_kernel_report.rs"
+          ],
+          "title": "context 纪律与一次初始化：并发、同步与指针稳定性",
+          "topic": "讨论这条边界的运行时不变量：CUcontext 是线程当前绑定而非全局，函数内部通过 guard 临时切换并要求回调只在该 context 上发射工作（对应 lib.rs 文档注释的安全契约）；cuptiProfilerInitialize 用 std::call_once + 全局 g_cupti_init_status 保证多线程只初始化一次且首次失败会持续失败；profile_passes 中两处 cuCtxSynchronize 的位置决定了计数区间只覆盖 launch 的工作；回放导致 userdata、metric_values、error 三个缓冲必须在整个调用期间保持地址稳定。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2",
+            "u1-l3"
+          ],
+          "filename": "u3-l4-integration-playbook.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "独立设计一个最小可用的 CUPTI 采样 bin：选指标、写 prepare/launch、处理返回值与错误",
+            "掌握 feature 门控隔离可选 profiler 依赖的 cargo 手法及其在 CI 上的影响",
+            "能依据团队文档约定判断哪些衍生指标（带宽、MFU）应放在离线层而不是运行器里"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "feature 门控与 required-features 模式",
+            "最小采样 bin 的四要素：context、指标、prepare、launch",
+            "CI 与工具链兼容性取舍",
+            "原始指标 vs 离线解释的分层约定"
+          ],
+          "order": 4,
+          "practice_task": "新建一个临时 crate（或在 pegainfer-qwen3 里加一个 feature 门控的实验 bin）：用 cudarc 创建 device 与 context，发射一个极简 kernel（例如向量加法），以 gpu__time_duration.sum 和 dram__bytes.sum 两个指标调用 profile_range_with_prepare，prepare 里做一次空同步、launch 里发射该 kernel，把返回的两个 f64 打印出来并手工算出带宽；整个 bin 放在非默认 feature 之后，确保默认构建不引入 CUPTI 链接。",
+          "source_files": [
+            "pegainfer-cupti/src/lib.rs",
+            "pegainfer-qwen3/Cargo.toml",
+            "pegainfer-qwen3/src/bin/qwen3_kernel_report.rs",
+            ".github/workflows/ci.yml",
+            "docs/subsystems/kernels/kernel-op-reports.md"
+          ],
+          "title": "综合实践：为你自己的 kernel 接上 CUPTI 区间采样",
+          "topic": "作为收尾，复盘把 pegainfer-cupti 接入一个模型 crate 的完整工程决策：用 feature 门控避免 CUPTI 进入生产依赖图（pegainfer-qwen3 的 kernel-report feature 与 required-features 的 bin）、CI 中因工具链缺 CUPTI 头而排除该 crate 的取舍、报告只存原始指标的约定，以及 qwen3_kernel_report 中 prepare 清 L2 / launch 发射的单区间模板如何复制到新场景。"
+        }
+      ],
+      "level": "advanced",
+      "order": 3,
+      "title": "专家：unsafe 边界、RAII、并发纪律与二次开发"
+    }
+  ]
+}
