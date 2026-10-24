@@ -1,13 +1,13 @@
 {
-  "head": "8886aa47b95bc4beedb63584eb367276650b2fec",
+  "head": "09a1a38f8b4938b06ee4e4f63f64fd4feed59434",
   "project": "openinfer-pegainfer-cupti",
-  "rationale": "pegainfer-cupti 是一个极小但跨语言纵深很大的 crate（Rust FFI + C++ 实现 + CUPTI Range Profiler，共 4 个文件），唯一入口是 profile_range_with_prepare。学习顺序设计为：入门层先讲清它在 workspace 中的定位、谁在消费它（pegainfer-qwen3 的 kernel-report 工具链），再讲 build.rs 如何发现 CUDA/CUPTI 并完成链接，最后从消费者的真实运行看到度量输出，建立『这个库解决什么问题』的直观图景；进阶层沿数据流拆解 C ABI 契约、CUPTI 会话建立、UserReplay 多 pass 回放循环、计数数据解码与指标求值，以及 Rust 侧 lib.rs 的封装与错误合并；专家层聚焦跨语言边界的硬问题——闭包蹦床与 unsafe 契约、C++ RAII 与异常到错误缓冲的转换、CUDA context 纪律与一次初始化的并发语义，最后以『给自己的 kernel 接上 CUPTI』作为综合实践。每篇讲义只覆盖一个主题，源码引用集中在 1-6 个真实文件上；由于本 crate 本体只有 402 行 C++ 和 145 行 Rust，多篇讲义共享同一批源文件但各自聚焦不同函数段落，避免为凑数量而硬拆。",
+  "rationale": "增量分析：上次 HEAD 8886aa47 到当前 HEAD 09a1a38f 之间仅有一次提交 09a1a38f（fix(kimi-k2): select distinct router experts when choices are NaN，#1170），改动集中在 Kimi-K2 模型线的 MoE 路由专家选择逻辑，不涉及 pegainfer-cupti 的四个文件（Cargo.toml、build.rs、src/lib.rs、csrc/range_profiler.cpp），也不影响任何讲义引用的消费方与支撑文件（pegainfer-qwen3 的 qwen3_kernel_report.rs 及其 Cargo.toml 的 kernel-report feature、pegainfer-build 的 CudaToolkit 探测、CI 中对该 crate 的排除规则、docs/subsystems/kernels/kernel-op-reports.md）。因此全部 12 篇讲义内容仍然成立，action 均为 keep，不新增、不移除讲义；整体学习路线维持原设计：入门层讲定位、构建链接与消费者实跑，进阶层沿 C ABI 契约 → CUPTI 会话装配 → UserReplay 回放循环 → 解码求值 → Rust 封装的数据流推进，专家层聚焦回调蹦床、RAII 与异常驯化、context 纪律与一次初始化，最后以『为自己的 kernel 接上 CUPTI』收尾。仅更新 head 字段至当前提交。",
   "units": [
     {
       "id": "u1",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -36,7 +36,7 @@
           "topic": "介绍 pegainfer-cupti 在 openinfer workspace 中的定位：它是一个把 NVIDIA CUPTI Range Profiler 包装成单个 C ABI 函数、再暴露给 Rust 的 crate。梳理 Cargo.toml、build.rs、csrc/range_profiler.cpp、src/lib.rs 四个文件的分工，以及它在 workspace 成员列表和 pegainfer-qwen3 kernel-report 工具链中的位置。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -66,7 +66,7 @@
           "topic": "逐行解读 build.rs：用 pegainfer_build::CudaToolkit::discover() 探测 CUDA 工具链，从 extras/CUPTI/include 和 extras/CUPTI/lib64 补充 CUPTI 头文件与库，用 cc crate 以 C++17 编译 range_profiler.cpp，并输出链接 cuda、cupti、stdc++ 的指令；解释 CI 里为什么把这个 crate 排除在 clippy 之外。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1",
             "u1-l2"
@@ -105,7 +105,7 @@
       "id": "u2",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -133,7 +133,7 @@
           "topic": "逐参数解读 csrc/range_profiler.cpp 导出的 extern \"C\" 函数签名：CUcontext、device_index、range 名、指标名数组及其长度、两个回调函数指针加 userdata、输出缓冲 metric_values、错误缓冲 error 与 error_len。总结这条边界上的设计规约：int 返回状态、调用方分配缓冲、错误以 NUL 结尾字符串回传、异常绝不跨过 FFI。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -161,7 +161,7 @@
           "topic": "深入 range_profiler.cpp 匿名命名空间中的会话装配函数：initialize_cupti_once（std::call_once 全局只初始化一次）、chip_name（拿 GPU 架构代号）、counter_availability_image（先查大小再取数据的两次调用惯用法）、initialize_host 与 create_config_image（指标名编译成 config image）、enable_range_profiler、create_counter_data_image、set_config（UserRange + UserReplay、单层嵌套）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -189,7 +189,7 @@
           "topic": "剖析 profile_passes 的 do-while 循环：每个 pass 依次执行 prepare 回调、cuCtxSynchronize、cuptiRangeProfilerStart、PushRange、launch 回调、同步、PopRange、Stop，直到 isAllPassSubmitted 为真。解释多 pass 的成因（指标分组超出单次可采集集合，硬件计数器有限需重放），以及这对 launch 回调幂等性提出的要求。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -217,7 +217,7 @@
           "topic": "讲解收尾三步：decode_data 让 CUPTI 把硬件计数器原始镜像解码、GetCounterDataInfo 校验 numTotalRanges 非零、cuptiProfilerHostEvaluateToGpuValues 把计数换算成指标值写入 Rust 侧的 f64 数组；并对照消费方的 CUPTI_METRICS，说明 duration、DRAM/L2 字节数、SM 与 tensor pipe 百分比等指标如何支撑后续离线分析（如带宽百分比、MFU 判断）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -252,7 +252,7 @@
       "id": "u3",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l5"
           ],
@@ -280,7 +280,7 @@
           "topic": "聚焦 src/lib.rs 中的 CallbackState、prepare_trampoline 和 launch_trampoline：dyn FnMut 闭包借用如何藏进 *mut c_void 的 userdata、trampoline 如何把 Result 转成 int 并把错误字符串暂存到 state.error、为什么只在 prepare 为 Some 时才传函数指针（与 C++ 侧 nullptr 判空对应），以及 panic 绝不能穿过 extern \"C\" 边界的纪律。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -307,7 +307,7 @@
           "topic": "分析 range_profiler.cpp 的错误与资源管理：check_cupti/check_cuda 借助 cuptiGetResultString / cuGetErrorString 抛 runtime_error；CurrentContextGuard 在构造时切换、析构时恢复 CUcontext；HostObject 与 RangeObject 是 move-only（删除拷贝、std::exchange 转移指针），析构分别做 Deinitialize 与 Disable；最外层 try/catch 把任何异常压缩进 write_error 的 NUL 结尾缓冲。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -336,7 +336,7 @@
           "topic": "讨论这条边界的运行时不变量：CUcontext 是线程当前绑定而非全局，函数内部通过 guard 临时切换并要求回调只在该 context 上发射工作（对应 lib.rs 文档注释的安全契约）；cuptiProfilerInitialize 用 std::call_once + 全局 g_cupti_init_status 保证多线程只初始化一次且首次失败会持续失败；profile_passes 中两处 cuCtxSynchronize 的位置决定了计数区间只覆盖 launch 的工作；回放导致 userdata、metric_values、error 三个缓冲必须在整个调用期间保持地址稳定。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1",
             "u3-l2",
