@@ -28761,7 +28761,7 @@
     "typst/typst": {
       "prompt_hash": "b21aef51792b02df",
       "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-10-24T11:02:29Z",
+      "last_run_at": "2026-10-24T13:09:55Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -28838,7 +28838,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"14505cb1-3315-468a-991f-fe42e3afcebd\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"e32f4c85-8150-4e29-a3e2-db20ccb920c1\",\"total_co"
         },
         "u3-l2": {
           "status": "pending",
@@ -65882,7 +65882,7 @@
     "openinfer-project/openinfer@pegainfer-core": {
       "prompt_hash": "b21aef51792b02df",
       "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-10-24T11:02:29Z",
+      "last_run_at": "2026-10-24T13:09:55Z",
       "lectures": {
         "u1-l1": {
           "status": "keep",
@@ -65965,7 +65965,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"28b1e469-ee26-40c9-baa7-6caad699e939\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"8ae80eb9-8738-4bc6-baf3-0a8b18c12d85\",\"total_co"
         },
         "u4-l3": {
           "status": "pending",
@@ -66026,7 +66026,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"0e123cff-33bd-4898-8940-ec89c05237c8\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"2de1032a-dff8-47aa-9a0e-7e58e2e7482d\",\"total_co"
         },
         "u2-l3": {
           "status": "pending",
@@ -66070,7 +66070,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/openinfer-project/openinfer/openinfer-pegainfer-cupti-tutorial",
       "last_head": "8886aa47b95bc4beedb63584eb367276650b2fec",
-      "last_run_at": "2026-10-24T11:02:29Z",
+      "last_run_at": "2026-10-24T13:09:55Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "openinfer-project/openinfer@pegainfer-deepseek-v2-lite": {
@@ -66095,7 +66095,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"b27426f3-c5eb-4861-8489-60052d0055b9\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"67d83fd0-3356-472e-8110-059791f9ba88\",\"total_co"
         },
         "u1-l4": {
           "status": "pending",
@@ -66194,7 +66194,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/openinfer-project/openinfer/openinfer-pegainfer-deepseek-v2-lite-tutorial",
       "last_head": "8886aa47b95bc4beedb63584eb367276650b2fec",
-      "last_run_at": "2026-10-24T11:02:29Z",
+      "last_run_at": "2026-10-24T13:09:55Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "openinfer-project/openinfer@pegainfer-glm52": {},
