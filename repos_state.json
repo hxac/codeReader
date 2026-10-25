@@ -28761,7 +28761,7 @@
     "typst/typst": {
       "prompt_hash": "b21aef51792b02df",
       "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-10-25T13:02:38Z",
+      "last_run_at": "2026-10-25T18:02:32Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -28887,7 +28887,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"c68226b1-7eac-4cd4-9eb4-1004efb42d86\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"b5172105-9251-4c2d-8a6b-3c23dd00d83b\",\"total_co"
         },
         "u4-l2": {
           "status": "pending",
@@ -66310,7 +66310,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"f4135937-6b6f-4ca4-9e11-67326cae3e80\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"bbae64ac-5205-449d-a669-36667a07436c\",\"total_co"
         },
         "u5-l1": {
           "status": "pending",
@@ -66444,7 +66444,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/openinfer-project/openinfer/openinfer-pegainfer-glm52-tutorial",
       "last_head": "09a1a38f8b4938b06ee4e4f63f64fd4feed59434",
-      "last_run_at": "2026-10-25T13:02:38Z",
+      "last_run_at": "2026-10-25T18:02:32Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "openinfer-project/openinfer@pegainfer-kernels": {
@@ -66546,7 +66546,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"46c22be4-7376-4c59-8fd7-5bebc348d6e9\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"87266b41-55d3-4b6f-8762-ee921ffbeace\",\"total_co"
         },
         "u3-l6": {
           "status": "pending",
@@ -66660,7 +66660,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/openinfer-project/openinfer/openinfer-pegainfer-kernels-tutorial",
       "last_head": "09a1a38f8b4938b06ee4e4f63f64fd4feed59434",
-      "last_run_at": "2026-10-25T13:02:38Z",
+      "last_run_at": "2026-10-25T18:02:32Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "openinfer-project/openinfer@pegainfer-kimi-k2": {
@@ -66720,7 +66720,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"0b95e53f-673b-44a2-af09-c8735d05d45c\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"150583f8-9187-40dd-ac4e-a215ae6defa6\",\"total_co"
         },
         "u3-l1": {
           "status": "pending",
@@ -66819,7 +66819,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/openinfer-project/openinfer/openinfer-pegainfer-kimi-k2-tutorial",
       "last_head": "09a1a38f8b4938b06ee4e4f63f64fd4feed59434",
-      "last_run_at": "2026-10-25T13:02:38Z",
+      "last_run_at": "2026-10-25T18:02:32Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "openinfer-project/openinfer@pegainfer-kv-cache": {},
