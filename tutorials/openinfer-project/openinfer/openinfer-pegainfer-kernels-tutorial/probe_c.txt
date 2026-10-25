@@ -1,0 +1,3 @@
+C1: first line
+C2: test [hidden, tokens] bracket
+C3: last line

@@ -1,0 +1,46 @@
+
+### 4.2 prefill_attention_paged_into：一层注意力的三步链
+
+#### 4.2.1 概念说明
+
+`prefill_attention_paged_into` 是模型 crate 每层 prefill 调用的总入口。它把一层注意力的三件事串在一次调用里：
+
+1. **QK RMSNorm + RoPE**（原地修改 q/k）；
+2. **把本批 K/V 写入分页池**（scatter，从连续行布局搬到页内 NHD 布局）；
+3. **批式 paged prefill 注意力本体**（读池、算 attention、写输出）。
+
+设计要点是**位置数组的单一真源**：RoPE 旋转位置、scatter 写入位置、注意力因果掩码全部读 plan 的 `positions_d`，而不是各自从某个标量起点推导。这让分块 prefill（`start_pos > 0`）和前缀缓存续算天然正确。doc 注释（[src/ops/attention.rs:598-603](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L598-L603)）明确写着「Token positions (RoPE, scatter, attention) come from the plan's per-token position array, so chunked or prefix-cached prefill (start > 0) works for any batch size」。
+
+#### 4.2.2 核心流程
+
+```text
+prefill_attention_paged_into(ctx, q, k, v, 权重, 缓存, kv_buffer, layout, layer, plan, out, 头数, eps)
+  ├─ checked_paged_geometry(layout, layer, ...)   → k_offset / v_offset / stride_page
+  ├─ 取全部 device_ptr（借用守卫保活）+ active_cu_stream(ctx)
+  ├─ unsafe: qk_norm_rope_batched_decode_cuda      ← 步骤 1：RoPE 位置读 plan.positions
+  ├─ unsafe: paged_kv_scatter_cuda                 ← 步骤 2：K/V 落页
+  └─ unsafe: batch_prefill_paged_cuda_with_cta_tile_q ← 步骤 3：注意力
+  （每步返回值 != 0 即 bail，附 ffi_exception_message 解码）
+```
+
+池几何承接 u3-l3：`checked_paged_geometry` 从 `PagedKvLayout` 派生当前层 K/V 块的元素偏移和页 stride。缩放系数按标准定义：
+
+\[
+\text{sm\_scale} = \frac{1}{\sqrt{\text{head\_dim}}}
+\]
+
+#### 4.2.3 源码精读
+
+**几何守卫。** [src/ops/attention.rs:627-640](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L627-L640) 调用 `checked_paged_geometry` 拆出 `k_offset / v_offset / stride_page`。该函数（[src/ops/attention.rs:1519-1533](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L1519-L1533) 为 `PagedGeometry` 结构，[src/ops/attention.rs:1535-1552](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L1535-L1552) 为入口检查）第一条 `ensure!` 就是 `layout.format == KvFormat::Split`：FlashInfer 的 paged 视图只能表达「每层一个 K 块 + 一个 V 块」的 Split 布局，Folded 布局在这里被拒绝而不是被错误读取。
+
+**指针与流。** [src/ops/attention.rs:642-663](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L642-L663) 一次性取完 q/k/v、norm 权重、RoPE 缓存、KV 池、输出和 plan 全部 11 个元数据数组的设备指针（u3-l1 的「取指针 + 守卫保活」步骤），最后 `active_cu_stream(ctx)` 解析当前流。
+
+**步骤 1：QK norm + RoPE。** [src/ops/attention.rs:665-686](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L665-L686) 调 `qk_norm_rope_batched_decode_cuda`，RoPE 位置传的是 `pos_ptr`（plan 的 positions）。内嵌注释记录了一段删除的历史：「A scalar-start_pos fast path for batch_size == 1 used to live here; it silently rotated prefix-cache-hit suffixes from position 0」——单请求标量快速路径曾把前缀缓存命中的后缀从位置 0 开始旋转，是个 bug，已删。CUDA 侧实现见 [csrc/shared/prefill_attention.cu:275-322](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/prefill_attention.cu#L275-L322)：`prefill_qk_norm_rope_warp_kernel` 的 grid 是 `(num_q_heads + num_kv_heads, tiles)`、block 是 `(WARP_SIZE, QK_TOKENS_PER_BLOCK)`，且 `QK_ASSERT(head_dim == HEAD_DIM)` 硬性钉死 128（唯一调用方 Qwen3 在任意 TP 度下 head_dim 都是 128）。
+
+**步骤 2：K/V 落页。** [src/ops/attention.rs:691-716](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L691-L716) 调 `paged_kv_scatter_cuda`，源 strides 按行布局给出（`src_stride_n = kv_dim`、`src_stride_h = head_dim`）。CUDA 侧（[csrc/shared/paged_attention.cu:96-135](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/paged_attention.cu#L96-L135)）用 `make_paged_kv` 构造 FlashInfer 的 paged 视图后调 `AppendPagedKVCache`，把连续布局的 K/V 按 `batch_indices + positions` 散射进页。函数头注释称之为「bridge contiguous → paged」。
+
+**步骤 3：批注意力。** [src/ops/attention.rs:718-744](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L718-L744) 调 `batch_prefill_paged_cuda_with_cta_tile_q`，把 plan 的全部元数据数组加上 `plan.batch_size()`、`plan.num_tiles`、`plan.cta_tile_q()` 一并传入。错误收尾见 [src/ops/attention.rs:745-750](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L745-L750)（`anyhow::bail!` + `ffi_exception_message`，即 u2-l3 的错误契约）。
+
+**CUDA 侧薄包装。** [csrc/shared/paged_attention.cu:137-146](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/paged_attention.cu#L137-L146) 的段落注释总括了约定：Q 读列主序 `[q_dim, seq_len]`（就是 `HiddenStates`）、K/V 读分页布局（页优先、页内 NHD）、kernel 内不做 RoPE（调用方已做）、因果掩码、无 split-KV（partition_kv=false）、**plan 元数据由 Rust 预计算并作为 GPU 数组传入，避免每次调用时的 GPU 分配**。入口 [csrc/shared/paged_attention.cu:206-224](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/paged_attention.cu#L206-L224) 只是转发到模板 `prefill_paged_launch</*HEAD_DIM=*/128, Variant>`；不带覆盖的老入口 [csrc/shared/paged_attention.cu:226-261](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/paged_attention.cu#L226-L261) 在 guard 内以 `cta_tile_q_override=0` 调它。
+
+**launch 模板。** [csrc/shared/paged_launch.cuh:239-272](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/paged_launch.cuh#L239-L272) 的参数注释是一份权威的元数据语义表（`q_indptr` 是 CSR token 边界、`request_indices` 是 tile→请求映射、`kv_tile_indices` 全零表示无 KV 分区、`total_num_rows` 是 Q token 总数……）。[csrc/shared/paged_launch.cuh:284-313](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/paged_launch.cuh#L284-L313) 组装 `BatchPrefillPagedParams`，注意 `params.o_indptr = q_indptr` 的行内注释：「non-partition: rows land at their request boundaries」——非分区模式下每个 tile 的输出直接落回它所属请求的行区间，无需 merge。dispatch 见 [csrc/shared/paged_launch.cuh:315-346](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/paged_launch.cuh#L315-L346)：先 `resolve_prefill_cta_tile_q`（[csrc/shared/paged_launch.cuh:223-237](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/paged_launch.cuh#L223-L237)：override=0 走 `FA2DetermineCtaTileQ` 启发式，override ∈ {16, 64, 128} 直接采用，其余返回 0 即非法），再经 `DISPATCH_CTA_TILE_Q` 宏实例化 `BatchPrefillWithPagedKVCacheDispatched`，模板参数锁定 bf16、`kNone` 位置编码、无 FP16 QK 归约、`kCausal` 掩码。

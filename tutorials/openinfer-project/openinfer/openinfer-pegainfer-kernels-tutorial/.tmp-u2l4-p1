@@ -1,0 +1,38 @@
+# typed_pipeline! 前向声明 DSL
+
+## 1. 本讲目标
+
+学完本讲，你应该能够：
+
+1. 说出 `typed_pipeline!` 要消灭的样板是什么：一条前向链里反复出现的「拿引用 → 调 `typed_ops` → `?` 传播错误」三段式。
+2. 默写宏的 4 种 header 形态与 11 种语句，并把每条语句对应到它展开出的那个 `typed_ops` 函数调用。
+3. 解释 `prefill` / `graphsafe` 两档 GEMM 模式如何被 header 与语句级覆盖（`gemm[...]`）两级控制，以及为什么 `tensor` 分配被硬性绑定在 `gemm = prefill` 上。
+4. 掌握 `try` / `call` 两个逃逸口的语义差别（`?` 传播 vs 普通语句），并判断什么时候应当放弃 DSL、直接手写 `typed_ops` 链。
+5. 会用 `cargo expand`（或纯手工展开）验证「宏展开 == 手写 typed_ops 链」这一等价关系。
+
+## 2. 前置知识
+
+### 2.1 声明宏（macro_rules!）最小必备
+
+本讲会读一段真实的 `macro_rules!`，只需要以下四点：
+
+- **fragment 说明符**：`$x:expr` 匹配一个表达式，`$name:ident` 匹配一个标识符，`$dim:path` 匹配一条路径（如常量 `KIMI_K2_MLA_QKV_A_OUT`），`$($rest:tt)*` 匹配「剩下的全部 token 树」。
+- **递归展开（tt muncher）**：宏的一条规则把队首语句翻译成 Rust 代码，再把剩余 token 重新喂给自己，直到队列空。本讲的 `@steps` 就是这么写的。
+- **内部规则**：以 `(@steps ...)`、`(@gemm ...)` 开头的臂不是给用户写的，是宏自己递归调用的「内部入口」，用户只会写 header + 语句。
+- **hygiene**：宏定义里的路径要用 `$crate::` 前缀（展开到「定义处 crate」而不是调用处的某个本地模块），`swap` 语句用 `::std::mem::swap` 绝对路径，都是同一原因。
+
+### 2.2 承接前几讲的结论
+
+| 来自 | 结论 | 在本讲的用途 |
+|---|---|---|
+| u2-l1 | `GpuTensor` 维度是编译期常量、token 按列主序连续存放；预分配缓冲保指针稳定 | DSL 的 `tensor` 语句分配的就是 `GpuTensor` |
+| u2-l2 §4.1 | `GpuWeight<OUT, IN>`、`NormWeight<DIM>` 用 const generics 锁形状 | DSL 语句里 `$dim:path`、`$w:expr` 的类型来源 |
+| u2-l2 §4.2–4.3 | `gemm_into` 家族签名；graphsafe 变体走 workspace-free cuBLAS 句柄 | DSL 的 `gemm = prefill/graphsafe` 两档最终落到这里 |
+| u2-l3 | wrapper 统一返回 `anyhow::Result` | DSL 每条语句展开都带 `?` |
+
+术语速查：
+
+- **DSL（领域特定语言）**：在 Rust 语法内部用宏造出的一套「小语言」，只覆盖前向链这一种场景。
+- **逃逸口（escape hatch）**：DSL 故意留的口子，让你随时退回普通 Rust 调用（本讲是 `try` 与 `call`）。
+- **header**：`typed_pipeline! { ... }` 花括号里的第一行，声明上下文、eps、长度与 GEMM 模式。
+- **graphsafe**：可在 CUDA Graph 捕获里安全回放的执行形态（无工作区分配、无指针漂移），细节见 u2-l2 §4.3 与 u4-l3。

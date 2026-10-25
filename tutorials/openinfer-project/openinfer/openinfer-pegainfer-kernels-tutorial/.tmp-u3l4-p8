@@ -1,0 +1,65 @@
+
+### 4.4 GQA 组大小门控：只门控优化，不门控正确性
+
+#### 4.4.1 概念说明
+
+FlashInfer 的 kernel 通过 C++ 模板实例化，GQA 组大小是模板维度之一：只有显式实例化过的组大小才有编译好的 kernel。于是 crate 导出一张白名单：
+
+```rust
+pub const SUPPORTED_GQA_GROUP_SIZES: &[usize] = &[1, 2, 3, 4, 6, 8];
+```
+
+它的 doc 注释（[src/ops/attention.rs:16-21](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L16-L21)）把语义契约讲得很清楚：这张表匹配 pinned FlashInfer 的 `DISPATCH_GQA_GROUP_SIZE` 实例化集合；**组大小不在表内不会被拒绝，而是走 eager 回退**——「so this list gates an optimization, not correctness. Keep it in step with the pinned FlashInfer」。
+
+换句话说：正确性由回退路径兜底，这张表只决定「能不能用优化 kernel」。典型的落榜者是 Qwen3-14B：40 个 query 头 / 8 个 KV 头，组大小 5，不在 `[1,2,3,4,6,8]` 里——[tests/prefill_plan_refill.rs:17-19](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/tests/prefill_plan_refill.rs#L17-L19) 的常量注释就写着「GQA group 5, which has no compiled decode kernel」。prefill 不受影响：batch prefill kernel 的模板维度是 `cta_tile_q`（16/64/128 三档，见 `resolve_prefill_cta_tile_q`），不按组大小逐个实例化。
+
+一个需要注意的细节：[csrc/shared/paged_attention.cu:7-8](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/paged_attention.cu#L7-L8) 的文件头注释写的是「(1,2,3,4,8)」，与 Rust 常量 `[1,2,3,4,6,8]` 并不一致。Rust 常量的 doc 注释声明自己与 pinned FlashInfer 对齐且必须保持同步，是更权威的一份；csrc 头注释更像是历史快照。读源码时要意识到这类「注释漂移」，以声明了维护义务的一方为准。
+
+另外，在本 crate 内这张表只有定义和再导出（[src/ops.rs:52](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops.rs#L52) 的 `pub use`），没有内部消费者——真正的查表决策发生在模型 crate 侧（如 qwen3 的执行器据此在「编译 kernel 路径」与「eager 回退路径」之间选择），超出本讲源码范围，此处只按契约理解语义。
+
+#### 4.4.2 核心流程
+
+模型侧的决策逻辑可以概括为：
+
+```text
+g = num_q_heads / num_kv_heads
+if g ∈ SUPPORTED_GQA_GROUP_SIZES:
+    decode → paged_attention_batch_decode_into（或 split-KV 变体）
+    （FlashInfer 按组大小分发到对应实例化）
+else:
+    decode → eager 回退路径（正确性等价，速度较慢）
+prefill → 永远走 batch prefill（不查此表）
+```
+
+GQA 组大小还直接参与 prefill 的 tile 计算：4.1.2 公式里 `packed_qo_len = seq_len × g`——组越大，同样 seq_len 的打包行数越多、tile 越多。
+
+#### 4.4.3 源码精读
+
+- 常量与契约：[src/ops/attention.rs:16-21](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L16-L21)。
+- 再导出：[src/ops.rs:52](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops.rs#L52) 把它作为 `ops` 门面的一部分供模型 crate 使用。
+- 组大小参与 tile 计划：[src/ops/attention.rs:565-567](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L565-L567)（`packed_qo_len = seq_len * group_size`）与 CUDA 侧同式（[csrc/shared/paged_attention.cu:155-158](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/paged_attention.cu#L155-L158)）。
+- 整除守卫：[src/ops/attention.rs:58-67](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L58-L67)——组大小由整数除法得出，plan 在入口就拒绝不整除的头数组合。
+
+#### 4.4.4 代码实践
+
+**源码阅读型实践：把身边模型的组大小过一遍表。**
+
+1. 实践目标：建立「模型头数 → GQA 组大小 → 是否命中编译 kernel」的直觉。
+2. 操作步骤：
+   - Qwen3-4B：32 q / 8 kv（见 [KERNELS.md:19](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/KERNELS.md#L19)）；
+   - Qwen3-14B：40 q / 8 kv（[tests/prefill_plan_refill.rs:17-19](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/tests/prefill_plan_refill.rs#L17-L19)）；
+   - 自选一个你关注的模型配置（从其 config.json 的 `num_attention_heads` 与 `num_key_value_heads` 读出）。
+   分别计算 \(g\) 并查 `[1,2,3,4,6,8]`。
+3. 需要观察的现象：Qwen3-4B 命中（g=4），Qwen3-14B 落榜（g=5）；再注意 TP 分片只分头数、不分 head_dim，TP=2 时 32/8 变 16/4，g 仍是 4。
+4. 预期结果：写出三行结论；对落榜者，注明其 decode 走 eager 回退、prefill 照常走 batch prefill。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：某新模型 GQA 组大小为 7，decode 会算错吗？
+**答案**：不会。7 不在白名单内，decode 分发到 eager 回退路径，结果正确只是慢；prefill 完全不查这张表。这正是「gates an optimization, not correctness」的含义。
+
+**练习 2**：如果升级 pinned FlashInfer 后它多实例化了组大小 12，这张表要动吗？不动会怎样？
+**答案**：要动——把 12 加进 `SUPPORTED_GQA_GROUP_SIZES`。不动则组大小 12 的模型白白走 eager 回退（浪费新实例化）；反之若 FlashInfer 删了某档而表没跟上，模型侧会误选一条已不存在的编译路径。doc 注释的「Keep it in step with the pinned FlashInfer」就是这条维护义务。
+
+**练习 3**：`checked_head_relation` 拒绝「q 头数不是 kv 头数整数倍」，这与白名单是同一层检查吗？
+**答案**：不是。整除检查守护的是**数学可行性**（GQA 的定义要求每组 query 头共享同一 KV 头，非整除根本没有定义）；白名单守护的是**实现可用性**（有没有编译好的 kernel）。前者失败会直接报错，后者失败静默降级。

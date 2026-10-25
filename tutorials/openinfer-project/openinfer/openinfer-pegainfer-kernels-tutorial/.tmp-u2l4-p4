@@ -1,0 +1,78 @@
+
+#### 4.1.3 源码精读
+
+文件头的文档与完整示例（注意示例 fence 标了 `ignore`，是示意风格，取材 kimi-k2 线）：
+
+- [src/forward_pass.rs:L1-L6](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L1-L6)：声明宏的职责边界——只做张量分配、typed op 分发、错误传播、缓冲交换，模型专属 kernel 经 `try ...;` / `call ...;` 保持普通 Rust 调用。
+- [src/forward_pass.rs:L10-L18](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L10-L18)：官方示例：header 声明 `ctx/eps/seq_len/gemm = prefill`，`tensor qkv_a: ...` 分配，`rms_norm` → `gemm` → `try kimi_mla_split_qkv_a(...)` 逃逸。读它就能看出 DSL 的完整长相。
+- [src/forward_pass.rs:L20-L22](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L20-L22)：三条默认规则——`gemm` 省略时默认 `graphsafe`；`tensor` 分配要求 `gemm = prefill`（让解码 graph 路径零分配）；单条语句可用 `gemm[prefill](...)` / `gemm[graphsafe](...)` 覆盖 header 模式。
+
+四个公开 header 臂（[L24-L52](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L24-L52)），以全量臂为例：
+
+```rust
+#[macro_export]
+macro_rules! typed_pipeline {
+    (
+        ctx = $ctx:expr, eps = $eps:expr, seq_len = $seq_len:expr, gemm = $gemm_mode:ident;
+        $($rest:tt)*
+    ) => {
+        $crate::typed_pipeline!(@steps $ctx, $eps, $gemm_mode, (@some $seq_len); $($rest)*)
+    };
+```
+
+- [L26-L31](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L26-L31)：全量 header。`$gemm_mode:ident` 接收任意标识符，模式合法性由后面的 `@gemm` 终结臂把关。
+- [L33-L38](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L33-L38)：写了 `seq_len` 却没写 `gemm = prefill` → `compile_error!("typed_pipeline `seq_len = ...` requires `gemm = prefill`")`。
+- [L40-L45](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L40-L45)：`ctx/eps/gemm` 三键形态，seq_len 标记为 `(@none)`。
+- [L47-L52](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L47-L52)：最简两键形态，模式直接填默认值 `graphsafe`。
+- [L54](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L54)：`(@steps ...; ) => {};`——空语句队列的基例，递归在这里终止。
+
+seq_len 的「有/无」被编码成 `(@some $seq_len:expr)` / `(@none)` 两个 token 组：`$seq_len:tt` 能整体接住这两种标记继续下传，这是 macro_rules 里表达 Option 的惯用法。
+
+#### 4.1.4 代码实践：编译期门禁探针
+
+1. **实践目标**：用三个「故意写错」的 pipeline，验证 4.1.2 表格里三个门禁确实各自报出专属错误。
+2. **操作步骤**：在本 crate 的 `tests/` 下新建 `dsl_gate_probe.rs`（本目录 tests 为自动发现，无需登记 Cargo.toml；示例代码）：
+
+```rust
+// 示例代码：三个应当编译失败的探针
+use pegainfer_kernels::typed_pipeline;
+
+fn probe_missing_gemm(ctx: &pegainfer_kernels::tensor::DeviceContext, n: usize) -> anyhow::Result<()> {
+    typed_pipeline! {
+        ctx = ctx, eps = 1e-5, seq_len = n;      // 漏掉 gemm = prefill
+        tensor t: 64;
+    }
+    let _ = t; Ok(())
+}
+
+fn probe_graphsafe_alloc(ctx: &pegainfer_kernels::tensor::DeviceContext, n: usize) -> anyhow::Result<()> {
+    typed_pipeline! {
+        ctx = ctx, eps = 1e-5, seq_len = n, gemm = graphsafe;  // graphsafe 下分配
+        tensor t: 64;
+    }
+    let _ = t; Ok(())
+}
+
+fn probe_no_seqlen(ctx: &pegainfer_kernels::tensor::DeviceContext) -> anyhow::Result<()> {
+    typed_pipeline! {
+        ctx = ctx, eps = 1e-5;                   // 无 seq_len 却要分配
+        tensor t: 64;
+    }
+    let _ = t; Ok(())
+}
+```
+
+3. **需要观察的现象**：`PEGAINFER_CUDA_SM=120 cargo check --release -p pegainfer-kernels --tests`（无 GPU 环境用 SM 覆盖；build.rs 仍需 nvcc）应当编译失败，且三条错误分别指向 [L37](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L37)、[L60](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L60)、[L90](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L90) 的三条 `compile_error!` 文案。
+4. **预期结果**：错误文案逐一命中——「`seq_len = ...` requires `gemm = prefill`」「tensor allocation requires `gemm = prefill`」「tensor statements require `seq_len = ...`」。**待本地验证**（本讲未在本机执行该命令）。
+5. 观察完删除该探针文件，避免污染测试目录。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：header 写 `ctx, eps, seq_len, gemm = graphsafe;` 合法吗？随后写 `tensor t: 64;` 呢？
+答案：header 本身合法（[L26-L31](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L26-L31) 的 `$gemm_mode:ident` 不挑值），但 `tensor` 语句会命中 [L56-L61](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L56-L61) 的 graphsafe+分配守卫臂而编译失败。
+
+**练习 2**：为什么不把模式合法值直接写成字面量 `prefill` / `graphsafe` 两个臂？
+答案：用 `$gemm_mode:ident` 透传，同一套 `@steps` 机器可以同时服务 header 模式与语句级覆盖（`gemm[$stmt_mode]`，[L101-L107](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L101-L107)），模式对不对由 `@gemm` 终结臂最终把关。
+
+**练习 3**：`(@none)` 标记的 pipeline 里为什么连 `tensor` 都不让写？
+答案：`tensor` 语句的展开需要调用 `GpuTensor::zeros(ctx, seq_len)`，`(@none)` 意味着 header 没提供 seq_len，无从分配——[L86-L91](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L86-L91) 直接报「tensor statements require `seq_len = ...` in the header」。

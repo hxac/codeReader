@@ -1,0 +1,59 @@
+
+### 4.3 逃逸口：try / call 与「故意不扩展」的边界
+
+#### 4.3.1 概念说明
+
+DSL 的价值来自它的「小」。如果把模型专属 kernel（MLA 拆分、MoE 路由、注意力……）都做成宏语句，宏会无限膨胀，而它们各自的参数形态千差万别，声明式语法反而更难读。所以设计者把边界画在「typed_ops 已有的标准调用」，其余全部退回普通 Rust：
+
+- `try EXPR;`——`EXPR` 是任何返回 `Result` 的调用，展开为 `EXPR?;`，错误随链传播；
+- `call EXPR;`——任何普通调用/副作用，展开为 `EXPR;`，返回值被丢弃。
+
+两者合起来覆盖了「模型专属 kernel + 日志/断言/宿主侧小动作」两类需求，而且逃逸表达式里可以直接引用宏内新建的 `tensor` 绑定（所有标识符都是调用处的 token，无 hygiene 隔离问题）。
+
+什么时候应当**整体放弃** DSL、回到手写 typed_ops 链：
+
+- 出现条件分支、循环、提前返回等控制流（宏语句是线性的）；
+- 中间量依赖运行时 shape 计算（DSL 只认 const-generic 维度）；
+- 某步需要把张量传给 typed_ops 里没有对应函数的 op——虽然可以全程 `try` 串，但那样 DSL 只剩噪音，不如手写。
+
+判断标准一句话：**当一条链里逃逸语句占比过高，DSL 就失去了压缩样板的意义**。
+
+#### 4.3.2 核心流程
+
+```text
+写新语句前先问：
+  是 tensor 分配且在 prefill 链里？ → tensor / tensor_at
+  是 W @ X 线性投影？              → gemm（必要时 [mode] 覆盖）
+  是 rms_norm / add / dtype 转换？  → 对应语句
+  是两个既有缓冲互换？              → swap
+  返回 Result 的其它调用？          → try EXPR;
+  普通调用/副作用？                 → call EXPR;
+  都不是（控制流、shape 计算）？    → 放弃 DSL，手写 typed_ops 链
+```
+
+#### 4.3.3 源码精读
+
+逃逸口的两条臂是全文件最短的规则（[L149-L163](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L149-L163)）：
+
+```rust
+(@steps $ctx:expr, $eps:expr, $gemm_mode:ident, $seq_len:tt;
+    try $call:expr;
+    $($rest:tt)*
+) => {
+    $call?;
+    $crate::typed_pipeline!(@steps $ctx, $eps, $gemm_mode, $seq_len; $($rest)*)
+};
+
+(@steps $ctx:expr, $eps:expr, $gemm_mode:ident, $seq_len:tt;
+    call $call:expr;
+    $($rest:tt)*
+) => {
+    $call;
+    $crate::typed_pipeline!(@steps $ctx, $eps, $gemm_mode, $seq_len; $($rest)*)
+};
+```
+
+- `try` 臂（[L149-L155](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L149-L155)）：展开成 `$call?;`，错误并入外层函数的 `Result`（u2-l3 的 anyhow 链）。
+- `call` 臂（[L157-L163](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L157-L163)）：展开成 `$call;`。注意 `call` 一个返回 `Result` 的函数不会传播错误，只会得到 `unused_must_use` 警告——要传播就用 `try`。
+- 两臂的 `$call:expr` 都是调用处 token，可以引用链上先前 `tensor` 语句创建的绑定（如文档示例里 `try kimi_mla_split_qkv_a(ctx, &qkv_a, ...)` 直接用了上一行分配的 `qkv_a`，[L16](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L16)）。
+- 兜底安全网：写出任何不匹配的语句形态时，`@steps` 没有臂可配，编译器直接在宏调用处报「no rules expected the token」，不存在静默忽略。

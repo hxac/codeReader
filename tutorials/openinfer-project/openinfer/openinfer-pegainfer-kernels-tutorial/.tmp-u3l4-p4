@@ -1,0 +1,34 @@
+
+#### 4.1.4 代码实践
+
+**实践 A（可运行，需 GPU）：跑 plan 复用门禁。**
+
+1. 实践目标：验证「重填 plan 与 fresh plan 逐数组等价、且数组指针从不移动」这条不变量。
+2. 操作步骤：在 GPU 机器上执行。注意该测试是 manual gate——CI 只编译不运行（[tests/prefill_plan_refill.rs:6-8](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/tests/prefill_plan_refill.rs#L6-L8)）；无 GPU 时被 `device_or_skip` 跳过，`PEGAINFER_REQUIRE_GPU=1` 会把跳过变成失败（[tests/common/mod.rs:5-34](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/tests/common/mod.rs#L5-L34)）：
+
+   ```bash
+   PEGAINFER_REQUIRE_GPU=1 cargo test --release -p pegainfer-kernels --test prefill_plan_refill -- --nocapture
+   ```
+
+3. 需要观察的现象：测试 `a_refilled_plan_matches_a_fresh_one_and_never_moves` 通过；其中 `too_wide` 用例（9 行超过 8 行容量，[tests/prefill_plan_refill.rs:168-175](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/tests/prefill_plan_refill.rs#L168-L175)）返回的错误信息含「exceeds preallocated capacity」，且「a refused refill moved an array」断言不触发。
+4. 预期结果：全部断言通过。撰写本讲的环境无 GPU，**待本地验证**。
+
+**实践 B（源码阅读，无需 GPU）：手推一个批次的元数据。**
+
+按 [tests/prefill_plan_refill.rs:33-44](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/tests/prefill_plan_refill.rs#L33-L44) 的 `row(first_page, kv_len, query)` 语义，取 batch = `[row(0, 33, 3), row(4, 16, 1)]`，`PAGE_SIZE = 16`：
+
+1. 实践目标：不依赖运行，手工推导 `BatchPlanHost` 的全部数组。
+2. 操作步骤：先算两请求的 `page_indices` / `last_page_len` / `start_position` / `seq_len`，再代入 4.1.2 的四步，写出 `page_indptr`、`positions`、`batch_indices`、`q_indptr`、`kv_chunk_size`，以及 `num_q_heads = 32, num_kv_heads = 8, cta_tile_q = 64` 时两请求各自的 tile 数。
+3. 需要观察的现象：`row` 的换算——请求 0：33 个 token 占 ⌈33/16⌉=3 页（页 0,1,2），末页长 33−2×16=1，start=33−3=30，seq=3；请求 1：16 个 token 占 1 页（页 4），末页长 16，start=15，seq=1。
+4. 预期结果：`page_indptr = [0, 3, 4]`；`q_indptr = [0, 3, 4]`；`positions = [30, 31, 32, 15]`；`batch_indices = [0, 0, 0, 1]`；`kv_chunk_size = [33, 16]`；GQA 组 \(g=4\)，请求 0 的打包行数 3×4=12，tile 数 ⌈12/64⌉=1；请求 1 打包行数 4，tile 数 1；总 tile 数 2，`request_indices = [0, 1]`，`qo_tile_indices = [0, 0]`。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 `q_indptr_host` 在没有任何请求时也要保留一个元素？
+**答案**：`batch_size` 从 `q_indptr_host.len() - 1` 派生（[src/ops/attention.rs:129-135](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L129-L135)）。空向量时饱和减法把 batch size 归零而非回绕成负数；同时 CSR 边界数组的惯例就是长度 batch+1，「只有前导零」正是它的空批形态（预分配 plan 的初始状态）。
+
+**练习 2**：`update_batch_with_cta_tile_q` 为什么把九个容量检查全部放在第一个 `memcpy_htod` 之前？
+**答案**：让拒绝成为原子操作。若先拷一半再发现超容量，设备缓冲就成了「半新半旧」，而 CUDA Graph 场景下调用方可能继续用上一个有效步骤的输出。先检查后拷贝保证被拒绝的重填之后 plan 仍完整持有上一个被接受批次的数据——[tests/prefill_plan_refill.rs:181-183](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/tests/prefill_plan_refill.rs#L181-L183) 的最后一条断言验证的正是这一点。
+
+**练习 3**：plan 为什么必须经 FFI 去 C++ 侧问 `cta_tile_q`，而不是在 Rust 里复刻 FlashInfer 的启发式？
+**答案**：tile 计划必须与 kernel dispatch 的实际切块完全一致，否则 `qo_tile_indices` 与 kernel 内部假设错位。启发式随 FlashInfer 版本可能变化，跨语言共用一份实现杜绝双份漂移——[csrc/shared/paged_attention.cu:179-191](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/paged_attention.cu#L179-L191) 的注释直接写明「Rust needs this to compute per-request tile counts that are consistent with the kernel dispatch」。

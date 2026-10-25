@@ -1,0 +1,44 @@
+
+#### 4.2.4 代码实践
+
+**对拍实践（可运行，需 GPU）：用 `single_prefill_nhd_causal_into` 做参考，验证 paged prefill。**
+
+paged prefill 路径环节多（plan、scatter、tile 计划），一旦出错难定位；而 `single_prefill_nhd_causal_into`（[src/ops/attention.rs:1160-1219](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L1160-L1219)）直接读连续布局的 K/V 缓存（`k_cache` / `v_cache` 是 `HiddenStates`，无分页），是天然的参考实现。对拍思路：同一组 Q/K/V，一条路走 single 参考路径，另一条路构造合成页表走 `prefill_attention_paged_into`，比较输出。
+
+1. 实践目标：构造 GQA = 4（如 `num_q_heads = 8, num_kv_heads = 2, head_dim = 128`）的合成 KV 页表，验证两条路径输出一致。
+2. 操作步骤（以下为**示例代码**，非项目原有代码，可作为 `tests/paged_prefill_parity.rs` 的骨架）：
+
+   ```rust
+   // 示例代码：GQA=4 的 paged prefill 对拍骨架（需 GPU 才能运行）
+   mod common;
+   use pegainfer_kernels::ops::{PrefillPagedPlan, prefill_attention_paged_into,
+       single_prefill_nhd_causal_into};
+
+   #[test]
+   fn paged_prefill_matches_single_prefill() {
+       let Some(ctx) = common::device_or_skip() else { return };
+       // 常量
+       let (nq, nkv, hd, page) = (8usize, 2usize, 128usize, 16usize);
+       let seq_len = 33usize;                 // 跨 3 页，末页 1 token
+       // 1) 用 common::fill 造确定性的 q/k/v 并上传（HiddenStates）
+       // 2) 参考路径：k/v 另存为连续 HiddenStates，
+       //    q 先做一遍与 paged 路径相同的 QK norm + RoPE（两条路径共享同一预处理结果），
+       //    调 single_prefill_nhd_causal_into(&ctx, &q, 0, seq_len, &k, &v, ...)
+       // 3) paged 路径：page_indices = vec![vec![0,1,2]]，last_page_len=1，
+       //    start_pos=0，构造 PrefillPagedPlan::new_with_cta_tile_q(..., cta_tile_q=64)，
+       //    按 PagedKvLayout 分配 kv_buffer，调 prefill_attention_paged_into(..., layer=0, &plan, ...)
+       // 4) 拷回两份输出，用 common::worst_delta 比对，断言在 bf16 容差内
+   }
+   ```
+
+   关键坑位：参考路径没有 scatter 步骤，两条路径必须从**同一份已经 norm+RoPE 过的 Q** 出发，否则对不上；`single_prefill_nhd_causal_into` 的断言要求 `q_seq_len <= kv_len` 且 `kv_len <= k_cache.seq_len`（[src/ops/attention.rs:1173-1183](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L1173-L1183)）。
+3. 需要观察的现象：`worst_delta` 返回的最大绝对差在 bf16 舍入量级（同一算法同一数据应当接近位级一致；若两条路径的累加顺序不同则在 1e-2 量级）。
+4. 预期结果：断言通过。本环境无 GPU，**待本地验证**。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么删除了「batch_size == 1 时用标量 start_pos」的 RoPE 快速路径？
+**答案**：它把前缀缓存命中的后缀 token 从位置 0 开始旋转，产出错误结果；而删掉后两个入口启动的是同一个 kernel，没有性能损失（[src/ops/attention.rs:665-670](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L665-L670) 的注释原话是「both entry points launch the same kernel anyway」）。这是「单一真源」原则的实例：位置只能来自一个地方。
+
+**练习 2**：`prefill_attention_paged_into` 的参数里既有 `num_q_heads/num_kv_heads/head_dim`，又有 `layout: &PagedKvLayout`，后者不是也带 `head_dim/num_kv_heads` 吗？
+**答案**：`checked_paged_geometry` 会交叉验证两者一致（`layout.head_dim == head_dim` 等），布局字段是公开的，一个矛盾的 layout 必须在任何 unsafe launch 之前失败——这正是该函数 doc 注释声明的职责（[src/ops/attention.rs:1519-1524](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L1519-L1524)）。

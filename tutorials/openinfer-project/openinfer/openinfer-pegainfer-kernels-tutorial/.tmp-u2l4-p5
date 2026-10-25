@@ -1,0 +1,34 @@
+
+### 4.2 与 typed_ops 的对应关系：一条语句 = 一次函数调用
+
+#### 4.2.1 概念说明
+
+`typed_pipeline!` **不实现任何新算子**。它的每条语句都原样展开为一个已存在的 `typed_ops` 函数调用（或 `GpuTensor::zeros` / `std::mem::swap` 这类标准动作）。这意味着：
+
+- 语义完全透明：想知道一条 DSL 语句干了什么，查下表即可，不必猜；
+- 等价可验证：宏链与手写链可以用 `cargo expand` 逐行对照（4.3.4 实践）；
+- 性能零损耗：宏在编译期消失，运行时就是那几个函数调用。
+
+#### 4.2.2 核心流程
+
+语句目录与展开对照表（行号指向宏规则所在的臂）：
+
+| DSL 语句 | 展开（伪形式） | 落点 | 规则行号 |
+|---|---|---|---|
+| `tensor n: DIM;` | `let mut n = GpuTensor::<{DIM}>::zeros(ctx, seq_len)?;` | [tensor.rs:L657-L658](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/tensor.rs#L657-L658) | [L70-L76](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L70-L76) |
+| `tensor_at n: DIM, len;` | 同上，但用语句自带 `len` | 同上 | [L78-L84](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L78-L84) |
+| `gemm(x => y, w);` | `gemm_into` 或 `gemm_graphsafe_into`（按 header 模式） | [typed_ops.rs:L22](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L22) / [L50](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L50) | [L93-L99](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L93-L99) + [L165-L171](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L165-L171) |
+| `gemm[mode](x => y, w);` | 同上，按语句级 `mode` 覆盖 | 同上 | [L101-L107](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L101-L107) |
+| `rms_norm(x => y, w);` | `rms_norm_into(ctx, x, &w, eps, y)?` | [typed_ops.rs:L80](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L80) | [L109-L115](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L109-L115) |
+| `add(a, b => y);` | `add_into(ctx, a, b, y)?` | [typed_ops.rs:L152](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L152) | [L117-L123](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L117-L123) |
+| `bf16_to_f32(x => y);` | `bf16_to_f32_into(ctx, x, y)?` | [typed_ops.rs:L243](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L243) | [L125-L131](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L125-L131) |
+| `f32_to_bf16(x => y);` | `f32_to_bf16_into(ctx, x, y)?` | [typed_ops.rs:L269](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L269) | [L133-L139](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L133-L139) |
+| `swap(a, b);` | `::std::mem::swap(a, b);`（无 `?`） | std | [L141-L147](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L141-L147) |
+| `try EXPR;` | `EXPR?;` | 任意返回 `Result` 的调用 | [L149-L155](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L149-L155) |
+| `call EXPR;` | `EXPR;` | 任意普通调用 | [L157-L163](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L157-L163) |
+
+引用的传递规则（读 DSL 类型是否匹配的关键）：
+
+- `x` / `y` / `a` / `b` 等张量表达式**原样透传**：调用处要给出 `&buf`、`&mut buf` 这类引用形态（或绑定本身是引用变量）。文件头 L10-L18 的示例是 `ignore` 的示意风格，真实调用处以引用表达式为准（可在模型 crate 里搜 `typed_pipeline!` 对照，**待确认**具体写法惯例）。
+- `w` 由宏自动加 `&`：调用处写权重值或引用都可以（`&&T` 会被解引用强制折回 `&T`）。
+- 两个类型陷阱：`bf16_to_f32` 的目标是普通 `CudaSlice<f32>` 而不是 `GpuTensor`；`f32_to_bf16` 的输入同理（见 4.2.3）。

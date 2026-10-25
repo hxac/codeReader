@@ -1,0 +1,60 @@
+
+## 4. 核心概念与源码讲解
+
+### 4.1 宏语法：header 四形态与语句目录
+
+#### 4.1.1 概念说明
+
+一个解码/预填（prefill）step 的前向链，手写出来是这样一遍遍重复的：
+
+```rust
+// 手写形态（节选示意）
+typed_ops::rms_norm_into(ctx, &hidden, &attn.input_norm, eps, &mut normed)?;
+typed_ops::gemm_into(ctx, &attn.fused_qkv_a_proj, &normed, &mut qkv_a)?;
+kimi_mla_split_qkv_a(ctx, &qkv_a, &mut q_a, &mut compressed_kv, &mut k_rope)?;
+```
+
+每个算子都在重复「ctx、引用、`?`」。`typed_pipeline!` 把这类**已存在于 typed_ops 的标准调用**折叠成一行声明，而把模型专属 kernel（如上面的 `kimi_mla_split_qkv_a`）留在普通 Rust 调用形态。它的职责边界写在文件头：
+
+> The macro expands common `typed_ops` calls while keeping model-specific kernels as normal Rust calls through `try ...;` or `call ...;` escape hatches. It is intentionally limited to tensor allocation, typed op dispatch, error propagation, and buffer swaps.
+
+即：只做「张量分配、typed op 分发、错误传播、缓冲交换」四件事，其余一概逃逸。
+
+#### 4.1.2 核心流程
+
+宏的执行模型分两个阶段：
+
+```text
+typed_pipeline! { header; s1; s2; ...; sn; }
+   │
+   ├─ 阶段一：header 归一化（4 个公开臂）
+   │     解析 ctx / eps / seq_len / gemm 四个键
+   │     → 统一转成内部形式 @steps(ctx, eps, 模式, seq_len标记; 语句...)
+   │     seq_len 标记：(@some 表达式) 或 (@none)
+   │
+   ├─ 阶段二：@steps 递归消化语句（tt muncher）
+   │     每条语句：
+   │       ① 匹配一条语句臂
+   │       ② 展开成一行 Rust（typed_ops 调用 / zeros / mem::swap / 逃逸表达式）
+   │       ③ 把剩余语句重新喂给 @steps
+   │     gemm 语句额外转发到 @gemm 终结臂，按模式选 gemm_into / gemm_graphsafe_into
+   │
+   └─ 语句队列为空 → 基例展开为 {}，递归终止
+```
+
+header 的四种合法形态与去向：
+
+| header 写法 | seq_len 标记 | GEMM 模式 | 结果 |
+|---|---|---|---|
+| `ctx, eps, seq_len, gemm = prefill;` | `(@some ...)` | prefill | 允许 `tensor` 分配，`gemm` 走 `gemm_into` |
+| `ctx, eps, seq_len, gemm = graphsafe;` | `(@some ...)` | graphsafe | header 合法，但一写 `tensor` 即编译错误 |
+| `ctx, eps, seq_len;`（漏 gemm） | — | — | 直接 `compile_error!` |
+| `ctx, eps, gemm = <mode>;` 或只写 `ctx, eps;` | `(@none)` | 指定模式 / 默认 graphsafe | 不允许任何 `tensor` 语句 |
+
+三个编译期门禁（都是刻意设计，不是限制不足）：
+
+- `seq_len = ...` 必须搭配 `gemm = prefill`；
+- graphsafe 模式下 `tensor` / `tensor_at` 一律拒绝；
+- 没有 `seq_len` 的 header 里出现 `tensor` 一律拒绝。
+
+三者合起来表达一条纪律：**解码/graph 回放路径零分配**——分配只发生在 prefill 链里。
