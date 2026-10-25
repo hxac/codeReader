@@ -1,0 +1,519 @@
+{
+  "project": "openinfer-pegainfer-core",
+  "head": "09a1a38f8b4938b06ee4e4f63f64fd4feed59434",
+  "rationale": "本轮增量评估（8886aa47 → 09a1a38f）：本环境未提供本地文件读取与 git 工具，评估依据为系统提供的 git 快照、上一版 manifest（其已对 core 的 14 个顶层文件、ops//cuda_graph//weight_loader/ 三个子目录与 lib.rs 的 13 个 pub mod 做过实际读取验证）以及当前 CLAUDE.md。区间内仅 1 个提交——09a1a38f『fix(kimi-k2): select distinct router experts when choices are NaN (#1170)』，按提交范围落在 pegainfer-kimi-k2 模型 crate 及 pegainfer-kernels 的 kimi_k2 内核路径，而 core 的模块清单（tensor、ops、attention/paged_plan/call_spec/call_trace/traced、kv_pool、page_pool、cuda_graph+dump、weight_loader+staging、rope、decodable_vocab、eos、ffi、cpu_topology、logging、tracing）中不存在任何专家路由相关入口，git 快照中 pegainfer-core 也无任何变更条目；CLAUDE.md 的架构图、测试命令与 PEGAINFER_* 环境变量对 core 的描述不变。因此已落盘的 4 篇（u1-l1、u1-l2、u1-l3、u2-l1）全部 keep；其余 12 篇讲义尚未生成，action 保持 new。本轮仅对未生成的 u2-l2 topic 做一处文字修正：原文『本轮 HEAD 区间内 kernels 侧有改动』指向的是上一区间的 qwen4 分组 RMSNorm，改为与区间无关的表述（kernels 侧持续演进而 core 门面稳定），不影响其 new 状态，worker 将按当前代码撰写。学习顺序与单元划分沿用既定依赖链：u1 从零认识（定位、目录地图、构建测试），u2 张量与算子层（tensor 门面 → FFI 边界 → ops 总览 → 分页注意力调度面），u3 状态与装配层（page_pool → kv_pool、权重加载、RoPE/词表/EOS 配套），u4 执行与集成机制（CUDA Graph、宿主服务、模型 crate 消费视角），u5 并发正确性纪律与贡献实践，形成『先整体后局部、先机制后纪律』的递进路径。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "从零认识 pegainfer-core",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与架构全景：pegainfer-core 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-positioning.md",
+          "level": "beginner",
+          "topic": "介绍 PegaInfer 是纯 Rust + CUDA 的 LLM 推理引擎（无 PyTorch），pegainfer-core 是其中被 qwen3、qwen35、kimi-k2 等模型 crate 复用的共享运行时层。结合 lib.rs 的 13 个 pub mod 与 CLAUDE.md 的架构图，说明 core 位于\"模型 crate → core + kernels → CUDA/cuBLAS/FlashInfer\"链条的中间层，不负责 HTTP 协议（那是 pegainfer-frontend）也不负责内核编译（那是 pegainfer-kernels）。",
+          "learning_goals": [
+            "说出 pegainfer-core 在整个推理引擎中的位置与职责边界",
+            "列出 lib.rs 暴露的全部模块名并按职责粗分类",
+            "区分 pegainfer-core 与 pegainfer-kernels、pegainfer-frontend、pegainfer-kv-cache 各自的分工"
+          ],
+          "source_files": [
+            "pegainfer-core/src/lib.rs",
+            "pegainfer-core/Cargo.toml",
+            "CLAUDE.md"
+          ],
+          "minimal_modules": [
+            "lib.rs 模块清单",
+            "crate 定位（Shared runtime API）",
+            "工作区分层架构"
+          ],
+          "practice_task": "运行 cargo doc -p pegainfer-core --no-deps 生成文档，对照 lib.rs 逐条写出 13 个 pub mod 的名字；然后写一页笔记回答两个问题：(1) core 为谁服务、(2) core 明确不做什么（提示：HTTP 前端、nvcc 编译均不在 core），并标出仅凭模块名无法确定职责的条目作为待确认清单。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与模块地图",
+          "order": 2,
+          "filename": "u1-l2-module-map.md",
+          "level": "beginner",
+          "topic": "逐个走读 pegainfer-core 的物理结构：src 下 14 个顶层 .rs 文件（tensor、ops、kv_pool、page_pool、cuda_graph、weight_loader、rope、decodable_vocab、eos、ffi、cpu_topology、logging、tracing），以及 ops/（attention、call_spec、call_trace、paged_plan、traced）、cuda_graph/（dump.rs、dump/）、weight_loader/（staging.rs）三个子目录，外加 tests/ 目录。讲解 Rust \"模块文件 + 同名目录\"的组织惯例在这个 crate 里的体现。",
+          "learning_goals": [
+            "画出 pegainfer-core 的完整目录树并标注每个文件的推断职责",
+            "理解 ops.rs 与 ops/ 目录、cuda_graph.rs 与 cuda_graph/ 目录的模块对应关系",
+            "识别出\"纯数据结构\"（kv_pool、page_pool）与\"机制\"（cuda_graph、ops）两类模块"
+          ],
+          "source_files": [
+            "pegainfer-core/src/lib.rs",
+            "pegainfer-core/src/ops.rs",
+            "pegainfer-core/src/kv_pool.rs",
+            "pegainfer-core/src/page_pool.rs"
+          ],
+          "minimal_modules": [
+            "目录树巡览",
+            "Rust 模块声明与文件布局",
+            "职责推断方法"
+          ],
+          "practice_task": "对照仓库中的目录树，为 14 个顶层文件和 3 个子目录各写一行\"职责卡\"（格式：文件 → 一句话职责 → 依据）；其中 kv_pool.rs 和 page_pool.rs 已有 doc 注释可以引用，其余文件的职责卡先写出推断并标记\"待确认\"，后续单元逐个回填验证。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建、依赖与测试：把 crate 跑起来",
+          "order": 3,
+          "filename": "u1-l3-build-and-tests.md",
+          "level": "beginner",
+          "topic": "讲解 pegainfer-core 的构建与测试方式：Cargo.toml（edition 2024、Apache-2.0）与工作区依赖（anyhow、cudarc、half、parking_lot、thiserror、safetensors、fastrace、pegainfer-kernels）；core 的单测就地内嵌在源文件中（page_pool.rs、kv_pool.rs 的 #[cfg(test)] 模块），其中依赖 GPU 的测试用 #[ignore = \"requires GPU\"] 显式隔离，tests/ 下另有一个需 GPU 的集成测试 weight_loader_gpu.rs。给出 CLAUDE.md 中工作区级测试命令与 PEGAINFER_* 环境变量的关系。",
+          "learning_goals": [
+            "掌握 cargo test --release -p pegainfer-core --lib 的运行方式并解读结果",
+            "理解为什么 GPU 相关测试被 #[ignore] 隔离以及如何按名过滤运行",
+            "知道 core 对 cudarc 与 pegainfer-kernels 的依赖关系及各自提供什么"
+          ],
+          "source_files": [
+            "pegainfer-core/Cargo.toml",
+            "pegainfer-core/src/kv_pool.rs",
+            "pegainfer-core/src/page_pool.rs",
+            "pegainfer-core/tests/weight_loader_gpu.rs",
+            "CLAUDE.md"
+          ],
+          "minimal_modules": [
+            "Cargo 依赖图",
+            "内嵌单元测试",
+            "GPU 测试隔离约定"
+          ],
+          "practice_task": "运行 cargo test --release -p pegainfer-core --lib，统计通过与忽略的测试数量；再用 cargo test --release -p pegainfer-core --lib -- --ignored 尝试触发被忽略的 GPU 测试（无 GPU 环境时改为阅读测试代码并写出预期断言）；最后在 kv_pool.rs 里找出 stride 几何相关的纯 CPU 测试并说明它们为何不需要 GPU。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "张量与算子层：从 Tensor 到 GPU kernel",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "tensor.rs：动态 GPU 张量与 DeviceContext",
+          "order": 1,
+          "filename": "u2-l1-tensor-basics.md",
+          "level": "intermediate",
+          "topic": "精读 tensor.rs：注意它是一行再出口门面（pub use pegainfer_kernels::tensor::*），真正的 Tensor/DeviceContext 等类型定义在 pegainfer-kernels 的 tensor 模块。结合 core 内部消费点（kv_pool.rs 的 DeviceContext/CudaSlice<bf16>、rope.rs 的 DeviceVec::from_host、weight_loader 的 DeviceMatrix）反推张量 API 的公开面，讲清\"core 拥有 API 门面、kernels 拥有实现\"的分层边界。本讲为全部后续讲义的基石。",
+          "learning_goals": [
+            "解释 tensor.rs 的门面角色与 pegainfer_kernels::tensor 真身的分层关系",
+            "使用 DeviceContext 完成 H2D/D2H 往返与流上分配（alloc_zeros/clone_dtoh 等）",
+            "区分设备侧 RAII 所有权（CudaSlice）与宿主侧 pinned 暂存（alloc_pinned）的用途"
+          ],
+          "source_files": [
+            "pegainfer-core/src/tensor.rs",
+            "pegainfer-core/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "一行再出口门面",
+            "DeviceContext 公开面",
+            "CudaSlice 与 pinned 暂存"
+          ],
+          "practice_task": "在带 GPU 的环境参照 tests/weight_loader_gpu.rs 写一个最小测试：用 DeviceContext 建上下文，分配一个 BF16 张量，从 host 写入数据再拷回并逐元素校验 round-trip；无 GPU 环境时改为梳理 core 内部对 crate::tensor:: 的全部 use 点，整理出 tensor 模块向消费方暴露的类型清单并标注每个类型的证据行号。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "ffi.rs：Rust 与 CUDA 的边界",
+          "order": 2,
+          "filename": "u2-l2-ffi-boundary.md",
+          "level": "intermediate",
+          "topic": "走读 ffi.rs：与 tensor.rs 同款的一行再出口门面（pub use pegainfer_kernels::ffi::*），真正的 FFI 符号声明在 pegainfer-kernels 的 ffi 模块（如 ffi/qwen4.rs、ffi/shared.rs）；kernels 侧会持续演进（例如 qwen4 分组 RMSNorm、kimi-k2 内核修复都只发生在 kernels/模型 crate 一侧）而 core 门面保持稳定，本讲撰写时以当前 HEAD 的实际再出口内容为准。结合 CLAUDE.md 中\"pegainfer-kernels 的 build.rs 负责 nvcc 编译 csrc/*.cu\"的事实，画出 Rust 声明 → kernels 编译 → 运行时加载的闭环，并解释为什么 FFI 边界收敛在 core 与 kernels 两个 crate 而不散落在模型 crate。",
+          "learning_goals": [
+            "画出 Rust 调用 CUDA kernel 的声明-编译-加载-调用四步闭环",
+            "解释 ffi.rs 与 tensor.rs 采用同一行再出口门面的动机（单一事实源、编译边界）",
+            "理解为什么 FFI 边界集中在 core 与 kernels 两个 crate 而不散落在模型 crate"
+          ],
+          "source_files": [
+            "pegainfer-core/src/ffi.rs",
+            "pegainfer-core/src/tensor.rs",
+            "CLAUDE.md"
+          ],
+          "minimal_modules": [
+            "一行 re-export 门面",
+            "kernels 侧 FFI 真身",
+            "声明-编译-加载闭环"
+          ],
+          "practice_task": "先逐行确认 ffi.rs 与 tensor.rs 的门面内容；然后整理一张\"边界清单\"表格：core 门面路径 → kernels 侧真身模块 → 被 core 内哪个模块消费（可用 grep 在 core 内检索 use 引用）；对 core 内查不到消费点的条目标注待确认，并说明要到 pegainfer-kernels/src/ffi/（本讲义范围外）做交叉验证的方法。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "ops.rs：共享 GPU 算子封装总览",
+          "order": 3,
+          "filename": "u2-l3-ops-overview.md",
+          "level": "intermediate",
+          "topic": "精读 ops.rs（\"Shared GPU op wrappers and kernel-crate re-exports\"）：它由两部分组成——原生子模块 attention/paged_plan/call_spec（call_trace 与 traced 仅在 kernel-call-trace feature 下编译），以及对 pegainfer_kernels::ops 的大宗再出口（rms_norm 家族、silu_mul、gelu_tanh_mul、gemm/gemv/linear、embedding、argmax、dflash_qk_norm_rope_into、eagle3_rope_into 等约 80 项，撰写时以当前 HEAD 实际清单为准）。重点讲清 cfg 换出口机制：同一个名字（如 gemm_into、rms_norm_batch_into）在开/关 kernel-call-trace 时分别从 traced.rs 或 kernels 导出。",
+          "learning_goals": [
+            "说清 ops.rs 的门面定位：把 kernels 的底层能力包装成模型 crate 可直接调用的稳定路径",
+            "按\"归一化/激活、GEMM/GEMV、注意力、gather/extract\"四类归纳再出口清单",
+            "解释 kernel-call-trace feature 如何在不改调用方代码的情况下替换算子出口"
+          ],
+          "source_files": [
+            "pegainfer-core/src/ops.rs",
+            "pegainfer-core/src/tensor.rs",
+            "pegainfer-core/src/ops/call_spec.rs",
+            "pegainfer-core/src/ops/traced.rs"
+          ],
+          "minimal_modules": [
+            "算子再出口门面",
+            "cfg 换出口（kernel-call-trace）",
+            "call_spec 调用规格",
+            "traced 包装器"
+          ],
+          "practice_task": "从 ops.rs 挑 rms_norm_batch_into 与 silu_mul_fused_batch_into 两个入口：先写出模型 crate 视角的最小调用用例（输入输出都是 tensor 门面类型），再对照 ops.rs 中同一符号的两条 cfg 出口（kernels 直出 vs traced.rs 包装）画出时序图：参数准备 → kernel 启动 → （可选）call_trace 记录 → 流同步；最后统计再出口清单里归一化/激活类占比并说明这暗示了模型前向的什么形态。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "ops/attention.rs 与 ops/paged_plan.rs：分页注意力的调度面",
+          "order": 4,
+          "filename": "u2-l4-attention-paged-plan.md",
+          "level": "intermediate",
+          "topic": "走读 ops/attention.rs 与 ops/paged_plan.rs：前者提供三个注意力封装入口——paged_attention_batch_decode_into、paged_attention_batch_decode_split_kv_into、prefill_attention_paged_into；后者定义 PrefillPagedPlan、SplitKvCsr 与 build_split_kv_csr（直接 use crate::kv_pool::KvDesc，把请求级页表元数据整理成 kernel 可消费的分页计划）。与 kv_pool.rs 的 KvDesc<'a>（pages + last_page_len，kv_pool.rs:427 起）对拍，理解\"core 描述状态、kernels 消费状态\"的契约。",
+          "learning_goals": [
+            "解释 paged attention 中\"计划\"与\"KV 数据\"分离的原因",
+            "对照 KvDesc 说明 build_split_kv_csr 至少要携带哪些信息",
+            "梳理 prefill 与 batch decode（含 split-KV）两条路径从 desc 到 kernel 调用的参数流"
+          ],
+          "source_files": [
+            "pegainfer-core/src/ops/attention.rs",
+            "pegainfer-core/src/ops/paged_plan.rs",
+            "pegainfer-core/src/kv_pool.rs",
+            "pegainfer-core/src/ops.rs"
+          ],
+          "minimal_modules": [
+            "paged_attention 三入口",
+            "PrefillPagedPlan / SplitKvCsr",
+            "KvDesc 对拍"
+          ],
+          "practice_task": "写一份对照笔记：左栏列 kv_pool.rs 中 KvDesc<'a> 的字段及其语义（含 desc_for_len 与 desc 的差异），右栏列 paged_plan.rs 中 PrefillPagedPlan/SplitKvCsr 的字段与构造入口；再回答一个设计题——如果要在不迁移数据的前提下把两个请求的 KV 合并成一个批次，plan 和 desc 各需要补充什么信息。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "状态与装配层：页池、KV 池、权重与解码配套",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "page_pool.rs：固定页分配器与 RAII 许可",
+          "order": 1,
+          "filename": "u3-l1-page-pool.md",
+          "level": "intermediate",
+          "topic": "精读 page_pool.rs：PagePool 是带锁保护 free-list 的共享固定页分配器，页通过 PageId(usize) 标识；OwnedPagePermit 用 Drop 语义保证\"permit 释放即页归还\"，并提供 absorb（把另一个 permit 的页吸收进来且吸收方 drop 时统一归还）与 try_grow（持锁扩张容量）。该类型是 kv_pool 的地基，也是全 crate \"构造性确定性\"纪律的第一个样本。",
+          "learning_goals": [
+            "解释 RAII permit 如何消除手动归还页的遗漏风险",
+            "推演 absorb 与 try_grow 对 free-list 的精确影响",
+            "结合源文件内嵌单测理解并发 acquire/drop 的恢复语义"
+          ],
+          "source_files": [
+            "pegainfer-core/src/page_pool.rs",
+            "pegainfer-core/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "PagePool",
+            "OwnedPagePermit",
+            "PageId",
+            "内嵌单元测试"
+          ],
+          "practice_task": "为 PagePool 补两个新单测（放在 page_pool.rs 的 tests 模块旁或新文件，遵循现有风格）：(1) 多轮 acquire/drop 之后 free-list 完整恢复；(2) permit.absorb(other) 之后仅释放吸收方时页才回到池中。用 cargo test --release -p pegainfer-core --lib page_pool 验证。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "kv_pool.rs：page-first KV 布局、两段式准入与生命周期",
+          "order": 2,
+          "filename": "u3-l2-kv-pool.md",
+          "level": "intermediate",
+          "topic": "精读 kv_pool.rs（本手册最核心的一讲，563 行）：KvLayout 描述 page-first 几何，stride 经 derive_strides 从 pegainfer-kernels 的 paged_kv 推导（kernel_layout() 返回 PagedKvLayout）；KvPool 持单块 CudaSlice<bf16> buffer、提供 new/with_storage/with_storage_and_format 三档构造、padding_page_id() 暴露为 CUDA Graph 预留的确定性页；准入采用 try_reserve（reserve 半段，返回 KvReservation）→ KvState 侧 commit（commit 半段）的两段式协议；KvState 用 RAII permit 管理 per-request 页，alloc/seq_len/page_indices_i32/desc/desc_for_len 提供运行时操作，KvDesc<'a> 是给 kernel 的元数据。",
+          "learning_goals": [
+            "手算 page-first 布局下任意 (page, layer, token) 的偏移并理解为何页内跨层连续",
+            "解释两段式 admission 如何避免多池场景下的部分资源占用问题",
+            "梳理一个请求从 try_reserve → commit → ensure_capacity → advance → drop 的完整状态迁移",
+            "说出 padding_page_id 对应的预留页存在的原因及其与 CUDA Graph 的关系"
+          ],
+          "source_files": [
+            "pegainfer-core/src/kv_pool.rs",
+            "pegainfer-core/src/page_pool.rs",
+            "pegainfer-core/src/tensor.rs"
+          ],
+          "minimal_modules": [
+            "KvLayout",
+            "KvPool",
+            "KvReservation",
+            "KvState",
+            "KvDesc"
+          ],
+          "practice_task": "以源文件测试中可见的模型几何为参数手算 page_size=16 时的 kv_block_len/layer_stride/page_stride，并与 derive_strides 的输出对拍（可用源文件中的 stride 测试作参照）；再写一个 out-of-pages 场景的测试，验证 try_reserve 在池耗尽时返回 None 的行为；最后解释 with_storage 与 with_storage_and_format 两个构造入口分别服务什么场景。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "weight_loader.rs 与 staging.rs：权重从磁盘到显存",
+          "order": 3,
+          "filename": "u3-l3-weight-loader.md",
+          "level": "intermediate",
+          "topic": "走读 weight_loader.rs（头注释明确 \"Safetensors weight loading\"，1169 行，core 内最大文件）与 weight_loader/staging.rs（517 行，pinned 双缓冲与异步 H2D 上载、流一致性检查）：safetensors 解析责任在 core（Cargo.toml 直接依赖 safetensors），StagedWeightLoader 的 take/take_vec 返回 DeviceMatrix/DeviceVec，结合 tensor 门面的 DeviceContext 能力梳理\"mmap 磁盘 → pinned 暂存 → 流式分块 H2D → 设备侧落位\"的数据流，并说明权重显存与 KV 池共享预算时的协调点。",
+          "learning_goals": [
+            "画出权重从 safetensors 文件到 device buffer 的数据流图并标注 staging 双缓冲的作用",
+            "识别加载路径上对 pinned 内存复用与流一致性的检查点",
+            "解释权重加载与 KV 池共享显存时需要哪些协调"
+          ],
+          "source_files": [
+            "pegainfer-core/src/weight_loader.rs",
+            "pegainfer-core/src/weight_loader/staging.rs",
+            "pegainfer-core/tests/weight_loader_gpu.rs",
+            "pegainfer-core/src/tensor.rs"
+          ],
+          "minimal_modules": [
+            "StagedWeightLoader",
+            "pinned 双缓冲 staging",
+            "safetensors H2D 路径"
+          ],
+          "practice_task": "通读两个文件后绘制数据流图（磁盘 → host 暂存 → device），在图上标出每一跳的同步点与拷贝类型；对照 tests/weight_loader_gpu.rs 的 round-trip 测试理解校验方式；随后在模型 crate（pegainfer-qwen3）中检索 StagedWeightLoader 的调用点，回答\"谁负责解析模型 config、谁负责张量重排\"（以检索结果为准）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "rope.rs、decodable_vocab.rs 与 eos.rs：解码链路的小配套",
+          "order": 4,
+          "filename": "u3-l4-rope-vocab-eos.md",
+          "level": "intermediate",
+          "topic": "一并走读三个小而关键的模块：rope.rs（\"RoPE cos/sin table generation\"，用 DeviceVec::from_host 把宿主侧生成的表搬上 GPU）；decodable_vocab.rs（头注释 \"Frontend tokenizer schema and decodable-vocabulary width\"——合并 tokenizer.json 的 vocab+added_tokens 与 tokenizer_config.json 的 added_tokens_decoder，求最宽可解码 token id，把输出选择约束到该 id 空间的稠密前缀，不做分词）；eos.rs（\"The checkpoint's EOS set\"——从检查点文件解析 EOS 集合，各模型线统一解析方式）。三者合起来覆盖\"位置编码表 → 前向输出 token id → 词表宽度约束与 EOS 停止\"的推理出口配套。",
+          "learning_goals": [
+            "复述 RoPE cos/sin 频率表的生成规则并独立实现一份对照",
+            "解释 decodable_vocab 的真实职责：合并 tokenizer schema 求最宽可解码 id 并约束输出选择，而非 id→文本解码",
+            "说明 EOS 集合从检查点的解析方式及其在请求生命周期（prefill→decode→finish）中的消费位置"
+          ],
+          "source_files": [
+            "pegainfer-core/src/rope.rs",
+            "pegainfer-core/src/decodable_vocab.rs",
+            "pegainfer-core/src/eos.rs"
+          ],
+          "minimal_modules": [
+            "RoPE cos/sin 表",
+            "decodable vocab 宽度",
+            "EOS 集合解析"
+          ],
+          "practice_task": "从 rope.rs 抽出频率公式，用 Python/NumPy 独立实现并在 head_dim=128、若干位置上与 Rust 版输出对拍（可写成一个临时 Rust 测试打印表值）；再写一段伪代码模拟\"逐 token 生成 → 用 decodable_vocab 的宽度上界约束候选 → 命中 eos.rs 解析出的 EOS 集合即停止\"的循环，标注每一步调用的 core 接口（消费点在模型 crate 的，用 grep 找到并引用文件名）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "执行与集成机制：CUDA Graph、宿主服务与模型 crate 视角",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "cuda_graph.rs：图捕获、指针稳定性与 padding 页",
+          "order": 1,
+          "filename": "u4-l1-cuda-graph.md",
+          "level": "advanced",
+          "topic": "走读 cuda_graph.rs（基于 cudarc 的 CUgraph/CUgraphExec，CU_STREAM_CAPTURE_MODE_THREAD_LOCAL 捕获模式与 CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH 实例化标志）与 cuda_graph/dump.rs（569 行的图检视工具），结合 CLAUDE.md 的既定事实——\"decode 路径在模型 executor 内捕获 CUDA Graph，用预分配 buffer 保持指针稳定\"——以及 kv_pool.rs 的 padding_page_id()（为图回放时的 padding 行预留确定性页）与 cuda_graph.rs 中\"图捕获期间禁止分配\"的纪律（active_cu_stream），讲解图回放为何要求地址不变以及 dump 工具如何辅助诊断。",
+          "learning_goals": [
+            "解释 CUDA Graph 重放对指针稳定性的要求及其与预分配 buffer 的因果",
+            "把 padding 页、两段式 admission、图捕获三件事串成一个一致的内存纪律故事",
+            "了解 dump 子模块在诊断已捕获图结构时的用途"
+          ],
+          "source_files": [
+            "pegainfer-core/src/cuda_graph.rs",
+            "pegainfer-core/src/cuda_graph/dump.rs",
+            "pegainfer-core/src/kv_pool.rs",
+            "CLAUDE.md"
+          ],
+          "minimal_modules": [
+            "图捕获/回放入口",
+            "指针稳定性约束",
+            "padding 页",
+            "dump 工具"
+          ],
+          "practice_task": "写一篇结构化笔记回答三个问题：(1) 如果 decode 步骤的 KV 页地址每步都变，图回放会坏在哪一行语义上；(2) padding 页为什么必须在池构造期就预留而不是运行期再申请；(3) dump.rs 能暴露图的哪些信息（以原文为准）。随后在源码中找到图捕获与 KvState/KvDesc 的交汇点并引用行号。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "cpu_topology.rs、logging.rs、tracing.rs：宿主侧运行时服务",
+          "order": 2,
+          "filename": "u4-l2-host-services.md",
+          "level": "advanced",
+          "topic": "走读三个宿主侧服务模块：cpu_topology.rs（经 FFI/CStr 探测 CPU/NUMA 拓扑，329 行，具体消费点在模型 crate 需检索）；logging.rs（\"Unified logging configuration\"，基于 chrono/colored 的统一日志初始化，Once 保证单次生效，配合 core 各处 rt_err/rt_warn/current_tag 的用法）；tracing.rs（头注释明确是 \"Distributed request tracing via fastrace → OTLP\"——收集 host 侧 span 树如请求生命周期与调度步，送往 OTLP 后端，与算子级的 ops/call_trace.rs 是两回事）。讲解三类可观测性/拓扑设施的分工。",
+          "learning_goals": [
+            "区分 logging（人读诊断）、fastrace→OTLP 请求追踪（host 侧 span 树）与 ops/call_trace（kernel 调用追踪）三层可观测性",
+            "跟踪 current_tag 从设置到 rt_err 输出的传播路径（以 core 内用法为锚点）",
+            "调研 cpu_topology 的输出被哪些决策消费（结论可能落在模型 crate，标注待确认）"
+          ],
+          "source_files": [
+            "pegainfer-core/src/cpu_topology.rs",
+            "pegainfer-core/src/logging.rs",
+            "pegainfer-core/src/tracing.rs",
+            "pegainfer-core/src/ops/call_trace.rs"
+          ],
+          "minimal_modules": [
+            "cpu topology（FFI 探测）",
+            "统一日志配置与 rt_err/rt_warn",
+            "fastrace→OTLP 请求追踪"
+          ],
+          "practice_task": "梳理 tracing.rs 的 span 层级与 OTLP 导出配置项，画出一次\"请求入队 → prefill → decode\"在 span 树里的样子；以 core 内现有的 rt_err/rt_warn 调用为模板，为一个假想的张量操作函数补上完整错误路径（设置 tag → 校验 → 出错时带上下文返回）；再用 grep 在工作区内检索 cpu_topology 的调用方并写一页\"拓扑感知决策清单\"，找不到调用方的条目标注待确认。",
+          "depends_on": [
+            "u1-l2",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "从模型 crate 看核心：pegainfer-core 的消费面",
+          "order": 3,
+          "filename": "u4-l3-model-crate-integration.md",
+          "level": "advanced",
+          "topic": "切换到消费者视角：以默认 feature 的 pegainfer-qwen3 为例（cargo run --release -- --model-path models/Qwen3-4B；qwen3 在此前区间新增了 DFlash2 检查点与 selector，但对 core 的消费方式未变），系统梳理模型 crate 如何组合 core 的各模块——tensor 门面做前向载体、ops 做算子、kv_pool/page_pool 管状态、weight_loader 装配权重、cuda_graph 捕 decode——并对照 CLAUDE.md 的 EngineHandle→scheduler/executor→TokenEvent 主链路定位 core 的落点。模型 crate 内具体文件路径以检索结果为准。",
+          "learning_goals": [
+            "列出模型 crate 对 pegainfer_core:: 的典型 use 清单并按模块归类",
+            "在架构图中标出 core 每个模块参与推理请求生命周期的时刻",
+            "评估\"新增一种模型架构时 core 需要扩展什么、不需要动什么\""
+          ],
+          "source_files": [
+            "pegainfer-core/src/lib.rs",
+            "pegainfer-core/src/kv_pool.rs",
+            "pegainfer-core/src/ops.rs",
+            "CLAUDE.md"
+          ],
+          "minimal_modules": [
+            "core 公开面清单",
+            "请求生命周期落点",
+            "扩展面评估"
+          ],
+          "practice_task": "在工作区内检索 pegainfer_core:: 的全部 use 语句（重点 pegainfer-qwen3，其余模型 crate 可抽样），把结果整理成\"core 消费清单\"表格：模块 → 被谁用 → 用在 prefill/decode/加载的哪一环；基于清单写 200 字判断：如果要新增一个纯 dense 模型，core 的哪些模块可以原样复用。",
+          "depends_on": [
+            "u2-l4",
+            "u3-l2",
+            "u3-l3",
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "架构、正确性与贡献实践",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "并发正确性：两段式准入、RAII 纪律与 EP 自由跑动",
+          "order": 1,
+          "filename": "u5-l1-concurrency-discipline.md",
+          "level": "advanced",
+          "topic": "综合 u3/u4 的源码事实上升到纪律层面：try_reserve/commit 两段式 admission 防止多池下\"占了 A 池却等不到 B 池\"；RAII permit（OwnedPagePermit/KvState）保证任何 panic/early-return 路径都归还页；padding 行必须是构造性确定的（padding_page_id 在构造期预留）。再对照 CLAUDE.md 的 EP free-running 纪律（每步集体链固定、launch 次数即全局时钟、padding 行是协议面，规范文档 docs/models/glm52/free-running-dp.md），说明这些不变量如何延伸到多卡 EP 协调。",
+          "learning_goals": [
+            "独立复述两段式 admission 与 RAII 归还各自防御的失败模式",
+            "论证\"padding 页为什么必须在构造期预留且内容确定\"",
+            "把 core 的单卡内存纪律映射到 EP free-running 的三条不变量"
+          ],
+          "source_files": [
+            "pegainfer-core/src/kv_pool.rs",
+            "pegainfer-core/src/page_pool.rs",
+            "pegainfer-core/src/cuda_graph.rs",
+            "CLAUDE.md"
+          ],
+          "minimal_modules": [
+            "两段式 admission",
+            "RAII 归还不变量",
+            "padding 确定性",
+            "EP free-running 不变量"
+          ],
+          "practice_task": "写一篇短文（含代码引用）：(1) 构造一个反例调度序列，说明若 admission 只有单段 try_reserve 会如何死锁或泄漏；(2) 指出 KvReservation 的 reserve 半段/commit 半段与 EP 文档中\"先约定第 N 步内容、绝不等待\"的对应关系；(3) 审计 kv_pool.rs 中所有 early-return/bail 路径，逐一确认无页泄漏。",
+          "depends_on": [
+            "u3-l2",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "测试策略与二次开发：向 core 贡献一个改动",
+          "order": 2,
+          "filename": "u5-l2-testing-and-contributing.md",
+          "level": "advanced",
+          "topic": "收束全手册：core 的测试分层（就地内嵌的纯 CPU 单测如 page_pool/kv_pool 的几何与生命周期测试、#[ignore] 的 GPU 测试、tests/ 下唯一的集成测试 weight_loader_gpu.rs（BF16 round-trip，需 GPU）、模型 crate 侧的 hf_golden_gate 精度门与 e2e_scheduler，后者需 PEGAINFER_TEST_MODEL_PATH）；贡献规范来自 CLAUDE.md——Commitizen 格式提交信息、禁止直推 main、提交前 cargo fmt、AI 辅助 PR 必须给出可验证证据且每个文件服务于同一不变量。",
+          "learning_goals": [
+            "为一处 core 改动选择正确的验证层级（单测/GPU 测试/模型 crate 精度门）",
+            "按仓库规范组织一次完整贡献：分支、fmt、Commitizen 提交",
+            "识别\"模拟或源码文本测试冒充生产证据\"这类被明令禁止的做法"
+          ],
+          "source_files": [
+            "pegainfer-core/src/kv_pool.rs",
+            "pegainfer-core/src/page_pool.rs",
+            "pegainfer-core/tests/weight_loader_gpu.rs",
+            "CLAUDE.md"
+          ],
+          "minimal_modules": [
+            "测试分层",
+            "精度门与环境变量",
+            "贡献与提交规范"
+          ],
+          "practice_task": "完成一次演练贡献：先阅读 tests/weight_loader_gpu.rs（core 唯一集成测试）归纳它测什么、为什么必须独占文件而非内嵌；然后为 core 挑一个未被覆盖的分支（如 page_pool 的 grow 边界或 kv_pool 的某个 bail 路径）补一个生产性单测并跑通；最后按规范写好分支名与 Commitizen 格式的提交信息（不实际提交，演练即可），自查是否满足\"每个改动文件服务于同一不变量\"。",
+          "depends_on": [
+            "u1-l3",
+            "u3-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
