@@ -2,376 +2,442 @@
 
 ## 1. 本讲目标
 
-学完本讲，你应该能够：
+学完本讲你应该能够：
 
-1. 复述 RoPE cos/sin 频率表的生成规则（`inv_freq` 公式与半分裂布局），并用 Python/NumPy 独立实现一份对照实现。
-2. 说清 `decodable_vocab` 模块的真实职责：**镜像前端 tokenizer 的合并规则，求最宽可解码 token id，把输出选择约束到该 id 空间的稠密前缀**——它不做 id→文本解码，更不做分词。
-3. 说明 EOS 集合从检查点的解析方式（来源优先级、单值/列表、去重与范围校验）及其在请求生命周期（prefill→decode→finish）中的消费位置。
-
-本讲是 u3 单元「装配层」的收尾：u3-l1、u3-l2 讲运行期状态（页池、KV 池），u3-l3 讲权重装配，本讲讲**加载期一次性装配**的三件小配套——位置编码表、词表宽度、停止条件。三个文件合计 555 行，都很小，但任何一个出错，推理输出都会「看起来正常、实际全错」，所以每个文件都把「看起来合法但实际错误」的输入挡在加载期。
+- 复述 `rope.rs` 生成 RoPE cos/sin 表的精确公式（含 half-split 布局），并能用 Python/NumPy 独立实现一份对照版本，与 Rust 版输出对拍。
+- 解释 `decodable_vocab.rs` 的真实职责：它**不做** id→文本解码，而是镜像 frontend 的分词器 schema 合并，求出「可解码词表宽度」，并把这个宽度变成输出投影 GEMM 的行数约束（含 128 对齐）。
+- 说明 `eos.rs` 从检查点解析 EOS 集合的三级回退顺序、全部失败模式，以及它在请求生命周期（prefill → decode → finish）中的消费位置。
+- 把三件事串成一条完整链路：**位置编码表 → 前向输出 token id → 词表宽度约束与 EOS 停止**。
 
 ## 2. 前置知识
 
-- **RoPE（旋转位置编码）**：Transformer 需要知道 token 的先后顺序。RoPE 的做法是：把第 \(p\) 个位置的查询/键向量按角度旋转后再做点积，使点积只依赖相对位置差。每个频率通道 \(i\) 的旋转角是 \(p \times \text{inv\_freq}_i\)，与具体 token 内容无关——因此 cos/sin 值可以**离线预计算成一张表**，前向时直接查表，这就是 rope.rs 存在的全部理由。
-- **rotary_dim 与 frequency_dim 分离**：只旋转向量的一部分叫 partial rotary。此时「旋转多少维」（rotary_dim）和「频率公式分母用多少维」（frequency_dim）是两件事——分母固定用 head_dim（frequency_dim），即使只旋转前 rotary_dim 维。这就是源码注释里「比例式（proportional）」公式与「普通 partial」公式的区别，后面有测试专门锁住这个区别。
-- **bf16**：brain float 16，指数位多、尾数位少的半精度浮点。Rust 侧由 `half` crate 提供（[Cargo.toml:L14](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/Cargo.toml#L14)），本讲里 cos/sin 表以 bf16 存储。
-- **tokenizer 的两份文件**：HuggingFace 格式检查点里，`tokenizer.json` 有主词表（`model.vocab`，token→id）和 `added_tokens` 列表；`tokenizer_config.json` 另有 `added_tokens_decoder`（以 id 字符串为键）。一个 id 能否被解码，是这三处并起来的结果。
-- **EOS（end-of-sequence）**：终止 token id。生成循环每采出一个 token 就检查它是否在 EOS 集合里，命中即结束请求。
-- **稠密前缀（dense prefix）**：如果可解码的 id 集合恰好是 \(0..N\) 无空洞，就能用「只计算前 N 行 logits」这种行范围手段做约束；有空洞时行范围会漏掉或错放 id，所以必须直接拒绝加载。
-- **fail-closed**：解析失败时宁可丢弃/报错，也不带着不完整的信息继续跑。
-- 前置讲义：u2-l1 讲过 tensor 门面（`DeviceContext` / `DeviceVec`，真身在 pegainfer-kernels），本讲的 `precompute_rope` 用 `DeviceVec::from_host` 把宿主表搬上 GPU，是那套往返链的直接应用。
+### 位置编码与 RoPE
+
+Transformer 的注意力本身「不知道」词的先后顺序，必须额外注入位置信息。RoPE（Rotary Position Embedding，旋转位置编码）的做法是：把每个注意力头的向量切成若干「二维对」，每对看作复平面上的一个点，按位置乘上一个角度旋转。位置越靠后，旋转角越大。两个位置做注意力内积时，各自的角度差恰好等于相对位置差——这就是「相对位置编码」的直觉。
+
+旋转角 \(\phi\) 只依赖位置和频率，与前向数据无关，所以可以**提前一次性算好整张 cos/sin 表**，前向时 kernel 直接查表，不必在 GPU 上反复算三角函数。
+
+### token id、logits 与采样
+
+模型每一步的输出不是文字，而是一个整数 token id。最后一层输出投影（lm_head）是一个大矩阵乘（GEMM）：行数等于词表行数 \(V\)，对每个候选 token 算出一个分数。这些分数叫 logits；从 logits 里选出一个 id 的过程叫采样（贪心 argmax 是最简单的一种）。
+
+### 检查点目录里有什么
+
+一个模型目录（如 `models/Qwen3-4B`）里，本讲相关的文件有：
+
+| 文件 | 内容 | 本讲的消费者 |
+| --- | --- | --- |
+| `tokenizer.json` | 分词器主 schema：`model.vocab`（token→id）与 `added_tokens` | `decodable_vocab.rs` |
+| `tokenizer_config.json` | 分词器配置：`added_tokens_decoder` 等 | `decodable_vocab.rs` |
+| `generation_config.json` | 生成参数，可能含 `eos_token_id` | `eos.rs` |
+| `config.json` | 模型几何；多模态检查点可能把文本模型藏在 `text_config` 里 | `eos.rs` |
+
+而 RoPE 表的参数（`rotary_dim`、`theta` 等）来自模型 config 的解析，由模型 crate 传入——`rope.rs` 只认一个显式的几何结构体。
+
+### 承接 u2-l1：tensor 门面
+
+本讲会用到 u2-l1 讲过的两个事实：`crate::tensor` 是 `pegainfer_kernels::tensor` 的一行再出口门面；`DeviceVec::from_host(ctx, &host)` 是「宿主向量 → 一次 H2D 拷贝 → 设备侧 RAII 缓冲」的入口。`rope.rs` 正是 core 内部消费这两个类型的一个典型样本。
 
 ## 3. 本讲源码地图
 
-| 文件 | 行数 | 职责 | lib.rs 出口 |
+三个文件都位于 `pegainfer-core/src/`，都在 [src/lib.rs:3-15](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/lib.rs#L3-L15) 的 `pub mod` 清单里声明（`decodable_vocab` 在 [src/lib.rs:5](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/lib.rs#L5)、`eos` 在 [src/lib.rs:6](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/lib.rs#L6)、`rope` 在 [src/lib.rs:12](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/lib.rs#L12)）。
+
+| 文件 | 行数 | 公开面（全部） | 一句话职责 |
 | --- | --- | --- | --- |
-| `src/rope.rs` | 232 | RoPE cos/sin 表：宿主侧生成 + 上载 GPU | [src/lib.rs:L12](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/lib.rs#L12) |
-| `src/decodable_vocab.rs` | 161 | 镜像前端 tokenizer 合并，求最宽可解码 id 与 logits 行对齐 | [src/lib.rs:L5](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/lib.rs#L5) |
-| `src/eos.rs` | 162 | 从检查点三处来源解析 EOS 集合，全模型线统一 | [src/lib.rs:L6](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/lib.rs#L6) |
+| `src/rope.rs` | 232 | `RopeTableSpec`、`precompute_rope` | 宿主生成 RoPE cos/sin 表并一次 H2D 上传 |
+| `src/decodable_vocab.rs` | 161 | `decodable_vocab_width`、`aligned_logits_rows` | 镜像 frontend 分词器合并，求可解码词表宽度与对齐行数 |
+| `src/eos.rs` | 162 | `eos_token_ids` | 按统一三级回退解析检查点的 EOS id 集合 |
 
-配套事实（本讲验证过）：
+三者的共性（在本讲撰写环境中实际 grep 验证过：`grep -rn "crate::rope\|crate::decodable_vocab\|crate::eos" --include="*.rs" src tests` 无任何匹配）：
 
-- lib.rs 头注释是「Shared runtime API used by pegainfer model crates」（[src/lib.rs:L1-L15](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/lib.rs#L1-L15)），13 个 `pub mod` 全部平铺。
-- 在 pegainfer-core 内部，`RopeTableSpec` / `precompute_rope` / `decodable_vocab_width` / `aligned_logits_rows` / `eos_token_ids` 这五个符号**只出现在各自文件和 lib.rs 里，没有任何内部调用者**（grep 验证）。它们是纯粹的出口面，消费者在各模型 crate——这正是「core 拥有 API 门面、模型 crate 组合 core」分层的又一例证。
-- 辨析：ops 再出口里有名字含 rope 的算子（如 `dflash_qk_norm_rope_into`，见 u2-l3），那是 kernel 侧的融合算子，与 `src/rope.rs` 的表生成没有关系。
-- 三个文件的测试都用 `tempfile` 造临时检查点目录，它是 core 唯一的 dev-dependency（[Cargo.toml:L31-L32](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/Cargo.toml#L31-L32)）。
+- **core 内部没有任何消费者**——它们是纯出口模块，只被模型 crate 使用。
+- 都在**装配期（加载模型时）执行一次**，不在 decode 热路径上。
+- 都采用 **fail-fast** 纪律：检查点/分词器里缺了什么、格式不对，直接让加载失败，绝不静默猜一个默认值。
+
+> 待确认：三个接口在模型 crate（`pegainfer-qwen3` 等）中的具体调用点，本讲撰写环境无法访问兄弟 crate 目录（会话只授权了 `pegainfer-core`），相关行号留作本讲实践任务，由读者本地 grep 回填。
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 rope.rs：RoPE cos/sin 表的宿主侧生成与上载
+### 4.1 rope.rs：RoPE cos/sin 表的生成与上传
 
 #### 4.1.1 概念说明
 
-RoPE 前向只需要每对 (位置, 频率通道) 的 cos/sin 值。这些值与输入无关，只由几何参数决定，所以引擎启动时一次性生成整张表上载 GPU，之后每个请求的前向只读表不计算。
+RoPE 需要一张「位置 × 频率」的 cos/sin 查找表。这张表有三个特点决定了它的实现形态：
 
-为什么这张表住在 core 而不是各模型 crate？因为所有用 RoPE 的模型线（Qwen、Kimi、GLM 等）的表生成公式完全一致，差异只体现在参数上。把「公式 + 校验 + 布局」收进 core，模型 crate 只需从 config 里抄出四个数。
-
-注意这个模块「小而防御性强」：`RopeTableSpec::validate` 的注释直说动机——每个被拒绝的几何「否则会产出一张看起来格式良好、实际是错的表」。比如 rotary_dim 是奇数时，半分裂布局会静默错位。
+1. **纯常量**：只依赖几何参数（旋转维度、基数 theta、最大长度），与输入数据、与权重都无关。所以宿主侧一次算好、量化成 bf16、一次 H2D 上传、常驻显存即可，GPU 上不必重算。
+2. **half-split 布局**：旋转以「一对维度」为单位。half-split 风格把向量的前半与后半配对旋转，所以表把每个 cos/sin 值**在前半和后半各写一份**，kernel 对两段各自用同一个下标 \(i\) 查表。
+3. **两个独立的维度参数**：`rotary_dim`（实际被旋转的分量数）与 `frequency_dim`（频率公式的分母）是两回事。分母用 `frequency_dim`（通常是整个 head_dim）而旋转只用前 `rotary_dim` 维——这就是所谓 proportional RoPE，与「rotary_dim 当分母」的普通 partial RoPE 是**不同的表**（源码测试专门钉死了这一点）。
 
 #### 4.1.2 核心流程
 
-设 rotary_dim = \(R\)（被旋转的分量数，必须为偶数），frequency_dim = \(F\)（频率公式的分母维度），最大序列长 \(N\)，底数 \(\theta\)。表生成分三步：
-
-1. **频率倒数**（对 \(i = 0, 1, \dots, R/2-1\)）：
-
-\[ \text{inv\_freq}_i \;=\; \frac{1}{\theta^{\,2i/F}} \]
-
-2. **逐位置求角并取 cos/sin**：位置 \(p\)、通道 \(i\) 的旋转角是 \(\text{angle}_{p,i} = p \times \text{inv\_freq}_i\)，先算 f32 的 cos/sin，再转 bf16 存储。
-3. **半分裂布局**：表按 \([N \times R]\) 平铺，位置 \(p\) 起始于 \(p \times R\)；把同一个值写两遍——前半 \(i\) 与后半 \(i + R/2\)：
-
-\[ \text{cos}[p,\,i] \;=\; \text{cos}[p,\,i+R/2] \;=\; \mathrm{bf16}\big(\cos(\text{angle}_{p,i})\big) \]
-
-（sin 同理。）这样写是因为 rotate-half 风格的 RoPE 把向量切成前后两半，两半用同一个角度旋转，表里直接复制两份，kernel 里就不用做索引换算。
-
-伪代码：
-
 ```text
-validate: R>0, R 偶, R<=F, N>0, θ 有限且>0, N*R 不溢出 usize   # 否则加载失败
-inv_freq[i] = 1 / θ^(2i/F)            # i ∈ [0, R/2)
-for p in 0..N:
-    base = p * R
-    for i in 0..R/2:
-        angle = p * inv_freq[i]
-        cos[base+i] = cos[base+i+R/2] = bf16(cos(angle))
-        sin[base+i] = sin[base+i+R/2] = bf16(sin(angle))
-上载: (cos_dev, sin_dev) = DeviceVec::from_host(cos), DeviceVec::from_host(sin)
+RopeTableSpec { rotary_dim: r, frequency_dim: f, max_seq_len: n, theta }
+        |
+        v  validate()                      <- 拒绝一切「算出来看着合法其实错」的几何
+        |  返回 total = n * r（usize 乘法溢出检查）
+        v  tables()                        <- 纯 CPU：f32 算 cos/sin -> 量化 bf16
+        |     inv_freq[i] = theta^(-2i/f)            （i = 0 .. r/2-1）
+        |     对每个 pos：angle = pos * inv_freq[i]
+        |     half-split：值写 [pos*r + i] 与 [pos*r + i + r/2] 两个槽
+        v  precompute_rope(ctx, spec)
+        |     DeviceVec::from_host x 2      <- cos 表、sin 表各一次 H2D
+        v
+(DeviceVec<cos>, DeviceVec<sin>)            <- 常驻显存，前向只读
 ```
+
+数学上，表值由两条公式给出：
+
+\[ \mathrm{inv\_freq}[i] = \theta^{-\,2i/F}, \quad i = 0, 1, \ldots, r/2 - 1 \]
+
+\[ \phi_{\text{pos},i} = \text{pos} \cdot \mathrm{inv\_freq}[i] \]
+
+\[ \cos_{\text{host}}[\text{pos} \cdot r + i] = \cos_{\text{host}}[\text{pos} \cdot r + i + r/2] = \cos(\phi_{\text{pos},i}) \]
+
+其中 sin 表同形。注意分母是 \(F\)（`frequency_dim`），不是 \(r\)。
 
 #### 4.1.3 源码精读
 
-**参数结构**：[src/rope.rs:L9-L17](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/rope.rs#L9-L17) 定义 `RopeTableSpec`，四个字段各管一件事：`rotary_dim` 驱动表的长度和半分裂；`frequency_dim` 的注释写得很克制——「只作为 `theta^(2i/frequency_dim)` 的分母，不做别的」；`max_seq_len` 决定位置数；`theta` 是底数。
-
-**几何校验**：[src/rope.rs:L22-L42](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/rope.rs#L22-L42) 的 `validate` 依次拒绝：零/奇数 rotary_dim（L29-L30）、rotary_dim 超过 frequency_dim（L31-L34）、零 max_seq_len（L35）、非有限或非正的 theta（L36-L39），最后用 `checked_mul` 保证表元素总数 \(N \times R\) 不溢出 usize（L40-L41）并把它作为返回值。
-
-**公式本体**：[src/rope.rs:L70-L72](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/rope.rs#L70-L72) 生成 inv_freq，指数是 `i as f32 * 2.0 / frequency_dim as f32`——注意 f32 算术，后面对拍时要保持同样的精度路径。[src/rope.rs:L74-L87](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/rope.rs#L74-L87) 是双重循环：先 `vec![bf16::ZERO; total]` 清零，再对每个 (pos, i) 算 `freq = pos as f32 * inv_freq[i]`，取 f32 的 cos/sin 后 `bf16::from_f32` 落位；L84-L87 四行赋值就是「前半与后半写同一个值」的半分裂布局。整个 `tables()`（[src/rope.rs:L60-L93](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/rope.rs#L60-L93)）是**纯宿主侧计算，不需要 GPU**。
-
-**上载**：[src/rope.rs:L46-L55](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/rope.rs#L46-L55) 的 `precompute_rope` 是唯一需要 `DeviceContext` 的入口：调用 `spec.tables()` 拿到两份宿主 Vec，再用两个 `DeviceVec::from_host`（L52-L53）分别上载，返回 cos/sin 两个设备向量。这就是 u2-l1 讲的「宿主暂存→H2D」最小形态。
-
-**测试即文档**：测试模块固定 `THETA = 1e6`（[src/rope.rs:L101](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/rope.rs#L101)），四条测试各锁一个契约：
-
-- [src/rope.rs:L122-L152](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/rope.rs#L122-L152)：rotary_dim == frequency_dim（512/512）时与单参数公式逐位兼容，且参考值由测试内**重新实现公式**得出，不是二次调用被测函数。
-- [src/rope.rs:L154-L183](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/rope.rs#L154-L183)：比例式 (128, 512) 的表与全量 (512, 512) 的表在前 64 个通道逐位一致、后半必然分歧——两行内容相同但偏移不同，所以恒等式只覆盖前一半。
-- [src/rope.rs:L185-L203](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/rope.rs#L185-L203)：比例式不等于「普通 partial」——只有 \(i=0\)（\(\theta^0\)）与分母无关，从 \(i=1\) 起两个公式立刻分开（pos=1 处 cos 差约 0.109，约 28 个 bf16 ulp）。
-- [src/rope.rs:L205-L231](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/rope.rs#L205-L231)：所有非法几何被拒，包括 `usize::MAX` 触发溢出保护和四种坏 theta。
-
-
-#### 4.1.4 代码实践：与 Python/NumPy 对拍频率表
-
-**实践目标**：证明你真的理解了公式——用另一种语言独立实现一遍，并与 Rust 版输出对拍。
-
-**操作步骤**：
-
-1. 跑通 core 内的既有契约测试（纯 CPU，不需要 GPU）：
-
-```bash
-cargo test --release -p pegainfer-core --lib rope
-```
-
-2. 写一份 Python/NumPy 对照实现（**示例代码**，参数取自测试里的 512/512、theta=1e6）：
-
-```python
-import numpy as np
-
-R, F, N, theta = 512, 512, 8, 1e6
-half = R // 2
-# 与 Rust 侧一致：i(转f32) * 2.0 / F(转f32) 作为指数，全部 f32 算术
-inv_freq = np.array(
-    [np.float32(1.0) / np.float32(np.float32(theta) ** np.float32(2.0 * i / F)) for i in range(half)],
-    dtype=np.float32,
-)
-for pos in range(N):
-    angle = np.float32(pos) * inv_freq              # 逐元素 f32
-    cos_row, sin_row = np.cos(angle), np.sin(angle)  # f32 的 cos/sin
-    print(pos, cos_row[:3], sin_row[:3])
-```
-
-3. 想逐位对拍 bf16 表值时，可参照现有测试的写法（tests 模块里直接调用私有方法，见 [src/rope.rs:L112-L120](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/rope.rs#L112-L120) 的 `tables` 辅助函数），临时加一个打印测试、实验后删除（**示例代码**）：
+**几何参数结构体。** [src/rope.rs:9-17](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L9-L17) 定义 `RopeTableSpec`，字段注释直接说明了两个维度参数的分工：`rotary_dim` 驱动表的长度与 half-split，`frequency_dim` 「只做 `theta^(2i / frequency_dim)` 的分母，不做别的」。
 
 ```rust
-#[test]
-fn dump_rope_reference_values() {
-    let (cos, _sin) = RopeTableSpec {
-        rotary_dim: 512,
-        frequency_dim: 512,
-        max_seq_len: 2,
-        theta: 1e6,
-    }
-    .tables()
-    .unwrap();
-    println!("cos[pos=1][0..3] = {:?}", &cos[512..515]);
+pub struct RopeTableSpec {
+    /// Components that get rotated. Drives the cache extent and the half-split.
+    pub rotary_dim: usize,
+    /// Denominator of `theta^(2i / frequency_dim)`, and nothing else.
+    pub frequency_dim: usize,
+    pub max_seq_len: usize,
+    pub theta: f32,
 }
 ```
 
-**需要观察的现象**：f32 层面 cos/sin 与 NumPy 一致到约 6 位有效数字；bf16 表值先舍入到最近可表示值再比较。
+**校验先行。** [src/rope.rs:19-43](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L19-L43) 的 `validate()` 在算任何三角函数之前拒绝不可用几何，注释（[src/rope.rs:20-21](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L20-L21)）说得很直白：**每一种被拒绝的情况，若放行都会产出一张「看起来格式完好、实际是错的」表**：
 
-**预期结果**：`rope` 过滤出的 4 个测试全部通过；Python 对照值数值吻合。若只有最后一位不同，优先怀疑两侧 `powf` 的 ulp 差（Rust `f32::powf` 与 NumPy 的求幂路径不同源），以角度值和前 6 位有效数字为准。逐位结果**待本地验证**。
+- `rotary_dim` 为正、为偶数（[src/rope.rs:29-30](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L29-L30)）——旋转按维度对进行，奇数会让 half 截断错位；
+- `rotary_dim <= frequency_dim`（[src/rope.rs:31-34](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L31-L34)）；
+- `max_seq_len` 为正、`theta` 有限且为正（[src/rope.rs:35-39](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L35-L39)）；
+- `n * r` 用 `checked_mul` 防溢出（[src/rope.rs:40-42](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L40-L42)），返回的 `total` 就是两张表各自的元素个数。
+
+**上传入口。** [src/rope.rs:45-55](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L45-L55) 是模块对外的唯一函数：宿主算表，然后 cos、sin 各做一次 `DeviceVec::from_host`（H2D），返回两个设备侧缓冲：
+
+```rust
+pub fn precompute_rope(
+    ctx: &DeviceContext,
+    spec: &RopeTableSpec,
+) -> Result<(DeviceVec, DeviceVec)> {
+    let (cos_host, sin_host) = spec.tables()?;
+    Ok((
+        DeviceVec::from_host(ctx, &cos_host)?,
+        DeviceVec::from_host(ctx, &sin_host)?,
+    ))
+}
+```
+
+**表生成本体。** [src/rope.rs:68-72](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L68-L72) 先算 `half_dim` 与逆频率序列，公式就是上面的 theta^(-2i/F)：
+
+```rust
+let half_dim = rotary_dim / 2;
+
+let inv_freq: Vec<f32> = (0..half_dim)
+    .map(|i| 1.0 / theta.powf(i as f32 * 2.0 / frequency_dim as f32))
+    .collect();
+```
+
+[src/rope.rs:77-89](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L77-L89) 双层循环填表：外层位置、内层频率对，`f32` 算 cos/sin 后经 `bf16::from_f32` 量化（[src/rope.rs:81-82](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L81-L82)），再按 half-split 写进两个槽位（[src/rope.rs:83-87](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L83-L87)）：
+
+```rust
+// Half-split layout: [cos(0)..cos(half-1), cos(0)..cos(half-1)]
+cos_host[base + i] = cos_val;
+cos_host[base + i + half_dim] = cos_val;
+sin_host[base + i] = sin_val;
+sin_host[base + i + half_dim] = sin_val;
+```
+
+**测试钉死的行为。** 文件后半（[src/rope.rs:95-232](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L95-L232)）是纯 CPU 单测（不需要 GPU；`tables()` 是私有方法，测试写在同文件的 `mod tests` 里）：
+
+- `rope_tables_backward_compatible_with_single_param`（[src/rope.rs:122-152](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L122-L152)）：`rotary_dim == frequency_dim` 时与「单参数公式」逐位（`to_bits`）一致——这是旧模型的兼容锚点。
+- `rope_tables_proportional_matches_full_rope_leading_half`（[src/rope.rs:154-183](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L154-L183)）：proportional 表（128/512）的前 64 个条目与全维表（512/512）对应行的前缀一致。
+- `rope_tables_proportional_is_not_ordinary_partial`（[src/rope.rs:185-203](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L185-L203)）：分母不同的两种表从 i=1 起立刻分离（注释给出量化数字：pos=1 处 cos 差约 0.109，约 28 个 bf16 ulp）。
+- `rope_spec_rejects_unusable_geometry`（[src/rope.rs:205-231](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L205-L231)）：把 `validate()` 的每条拒绝路径各打一枪，包括 `theta` 为 0、负数、NaN、无穷。
+
+#### 4.1.4 代码实践：用 Python/NumPy 复现并对拍
+
+1. **实践目标**：证明你真的理解了公式与 half-split 布局——独立写出一份 Python 实现，与 Rust 版逐值对拍。
+2. **操作步骤**：
+   - 第一步，写 Python 参考实现（**示例代码**，非项目原有代码）：
+
+     ```python
+     import numpy as np
+
+     def rope_tables(rotary_dim, frequency_dim, max_seq_len, theta):
+         half = rotary_dim // 2
+         i = np.arange(half, dtype=np.float64)
+         inv_freq = 1.0 / np.power(theta, 2.0 * i / frequency_dim)
+         cos = np.zeros((max_seq_len, rotary_dim), dtype=np.float32)
+         sin = np.zeros((max_seq_len, rotary_dim), dtype=np.float32)
+         for pos in range(max_seq_len):
+             phi = pos * inv_freq          # 角度 = pos * inv_freq[i]
+             c, s = np.cos(phi), np.sin(phi)
+             cos[pos, :half] = c           # half-split：前半
+             cos[pos, half:] = c           # half-split：后半复制同一份
+             sin[pos, :half] = s
+             sin[pos, half:] = s
+         return cos, sin
+     ```
+
+   - 第二步，让 Rust 版把表值吐出来。`tables()` 是私有函数，所以 dump 测试必须写在 `src/rope.rs` 已有的 `#[cfg(test)] mod tests`（[src/rope.rs:95-110](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L95-L110)）内部，那里已有 `spec()` 辅助函数可直接复用（**示例代码**；这是本地临时实验，验证完请删除，不要提交）：
+
+     ```rust
+     #[test]
+     fn dump_tables_for_cross_check() {
+         let (cos, _sin) = spec(128, 128, 4).tables().unwrap();
+         for pos in 0..4 {
+             let row: Vec<String> = (0..8)
+                 .map(|i| format!("i={i}:{:.6}", cos[pos * 128 + i].to_f32()))
+                 .collect();
+             println!("pos={pos} {}", row.join(" "));
+         }
+     }
+     ```
+
+   - 第三步，运行并抓输出：`cargo test --release -p pegainfer-core --lib dump_tables_for_cross_check -- --nocapture`（纯 CPU，不需要 GPU）。
+   - 第四步，Python 侧用同样参数（`rotary_dim=128, frequency_dim=128, max_seq_len=4, theta=1e6`，1e6 来自测试常量 [src/rope.rs:101](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L101)）打印对应位置，逐值比对。
+3. **需要观察的现象**：
+   - `pos=0` 行：cos 全为 1.0，sin 全为 0.0（角度为 0）；
+   - 任意行的后半段与前半段逐值相同（half-split 复制）；
+   - 随 `i` 增大，`inv_freq[i]` 递减，同位置上角度变化越来越慢；
+   - 由于 Rust 版量化到 bf16（约 3 位十进制有效数字），两侧不是逐位相等，差异应落在 bf16 舍入误差内（相对误差量级 \(2^{-8}\)）。
+4. **预期结果**：在 bf16 舍入容差内，两侧表值一致。**待本地验证**（本讲撰写环境未执行上述对拍）。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 cos 表每一行的后半与前半完全相同？
+**练习 1**：`rotary_dim` 为什么必须是偶数？
+**答案**：旋转以「一对维度」为单位：`half_dim = rotary_dim / 2`（[src/rope.rs:68](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L68)），half-split 布局把每个值写在前半第 `i` 槽与后半第 `i + half_dim` 槽（[src/rope.rs:84-87](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L84-L87)）。奇数 `rotary_dim` 会让整数除法截断、后半错位，产出一张「看似合法实则错误」的表，所以 `validate()` 在 [src/rope.rs:30](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L30) 直接拒绝。
 
-答案：rotate-half 风格的 RoPE 把向量切成前后两半、用同一个角度旋转。表在 [src/rope.rs:L84-L87](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/rope.rs#L84-L87) 直接把同一个值写到 `base+i` 与 `base+i+half_dim` 两处，kernel 查表时两个下标共用同一套索引逻辑，省去 kernel 内的偏移换算。
+**练习 2**：proportional RoPE（`rotary_dim=128, frequency_dim=512`）与普通 partial RoPE（`rotary_dim=128, frequency_dim=128`）的表差在哪？
+**答案**：只有 i=0 相同（theta^0=1，与分母无关）；从 i=1 起两套 `inv_freq` 立刻分离，pos=1、i=1 处 cos 差约 0.109（约 28 个 bf16 ulp）。测试 `rope_tables_proportional_is_not_ordinary_partial`（[src/rope.rs:185-203](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L185-L203)）同时断言了「i=0 必须相等」和「i=1 必须不等」。
 
-**练习 2**：`{ rotary_dim: 128, frequency_dim: 512 }` 与 `{ rotary_dim: 128, frequency_dim: 128 }` 生成的表差在哪？
+**练习 3**：把表的生成放宿主、一次上传，相比让 GPU kernel 每步现算 cos/sin，有什么收益？
+**答案**：表只依赖几何参数，是纯常量——一次生成、一次 H2D、常驻复用（[src/rope.rs:45-55](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L45-L55)）；宿主用 f32 计算后统一量化 bf16（[src/rope.rs:81-82](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/rope.rs#L81-L82)），每步前向只做查表，省掉 decode 热路径上的重复三角函数计算。
 
-答案：inv_freq 的指数分母不同。i=0 时 theta^0 = 1 两边一致；从 i=1 起频率立刻分开（测试 [src/rope.rs:L185-L203](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/rope.rs#L185-L203) 给出 pos=1 处 cos 差约 0.109、约 28 个 bf16 ulp）。前者是「比例式」公式（分母固定用 head_dim 维度），后者只是把被旋转向量当成独立的小表。
-
-**练习 3**：`max_seq_len = usize::MAX`、`rotary_dim = 128` 为什么在加载期失败而不是 OOM？
-
-答案：`validate` 用 `checked_mul` 计算表元素总数（[src/rope.rs:L40-L41](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/rope.rs#L40-L41)），乘法溢出 usize 即返回错误，走不到内存分配那一步。
-
-### 4.2 decodable_vocab.rs：可解码词表宽度与 logits 行对齐
+### 4.2 decodable_vocab.rs：可解码词表宽度
 
 #### 4.2.1 概念说明
 
-先纠正模块名带来的直觉偏差：`decodable_vocab` **不做任何 id→文本解码，也不做分词**。文本编解码是前端（pegainfer-frontend）的职责。这个模块回答一个更窄的问题：
+这个模块的名字容易误导：它**不做分词、不做 id→文本解码**——那是 frontend 的事。头注释（[src/decodable_vocab.rs:1-6](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L1-L6)）写明了它的真实职责：frontend 实际可解码的 token 集合是 `tokenizer.json`（`vocab` + `added_tokens`）与 `tokenizer_config.json`（`added_tokens_decoder`）的**并集**；core 镜像这次合并，算出**最宽可解码 token id**，再把输出选择约束到该 id 空间的**稠密前缀**。
 
-> 检查点的 lm_head 有 `vocab` 行，但前端 tokenizer 实际只能解码其中哪些 id？输出投影应该为多少行计算 logits？
+为什么值得做：检查点的输出投影有 V 行（vocab 行数），但 frontend 真正能解码的 id 可能只有前 `decodable` 个。输出投影 GEMM 只需算这个前缀，其余行根本不用算——省一大块矩阵乘。doc 注释举了实例：Qwen3.5-4B 只解码 248077 个 id（[src/decodable_vocab.rs:106-111](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L106-L111)）。
 
-头注释（[src/decodable_vocab.rs:L1-L6](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/decodable_vocab.rs#L1-L6)）说得很清楚：前端从 `tokenizer.json`（vocab + added_tokens）与 `tokenizer_config.json`（added_tokens_decoder）的合并结果里服务；core **镜像**同一套合并，求最宽可解码 token id，把输出选择约束到该 id 空间的稠密前缀。
+两个关键设计约束：
 
-为什么 core 要自己算而不是去问前端？因为约束最终落在 GEMM 形状和 logits 缓冲区上——那是 core/模型 crate 的地盘。镜像规则必须逐字对齐，否则「前端能解码的 id」与「引擎允许选出的 id」两个集合会漂移。
+- **fail-closed 镜像 frontend**：`tokenizer_config.json` 解析失败时，frontend 会丢弃全部 decoder tokens；core 用「整文件类型化解析」达到同样效果——任何一个条目畸形（例如 `special` 不是 bool），整个文件解析失败，全部 decoder tokens 丢弃并发 warn（[src/decodable_vocab.rs:87-89](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L87-L89)）。宁可少算也不能与 frontend 的解码集合不一致。
+- **必须稠密**：输出选择用的是「行范围」截断，**表达不了洞**。若 id 空间有洞（如 {0,1,5}），行范围会把 5 永远挡在外面、输出空间被静默截断——所以直接让加载失败（[src/decodable_vocab.rs:98-102](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L98-L102)）。
 
 #### 4.2.2 核心流程
 
-合并与求宽度的流程（三处来源、三种失败语义）：
-
 ```text
-读 tokenizer.json         # 读失败 / 解析失败 / 空 vocab → 整个加载失败（前端离了它无法服务）
-ids = model.vocab 的全部 id
-ids ∪= added_tokens[].id
-读 tokenizer_config.json   # 文件缺失 → 静默贡献为空
-  类型化解析成功 → ids ∪= added_tokens_decoder 里能 parse::<u32>() 的键   # 非数字键逐条跳过
-  类型化解析失败 → warn 一条，丢弃全部 decoder tokens（fail-closed，镜像前端）
-width = ids.len();  max_id = ids.max()
-要求 max_id + 1 == width    # 稠密前缀；有空洞直接让加载失败
+model_path/tokenizer.json          <- 必须可读、可解析、vocab 非空（失败 = 致命错误）
+   model.vocab 的全部 id 值
+   + added_tokens[].id
+                +
+model_path/tokenizer_config.json   <- 可选；整文件解析失败 -> warn + 全部丢弃
+   added_tokens_decoder 的数字 key（非数字 key 逐条跳过）
+                v
+        HashSet<u32> ids
+                v
+   width = ids.len()；max_id = max(ids)
+   要求 max_id + 1 == width（id 空间是稠密前缀，否则报错）
+                v
+   aligned_logits_rows(decodable, vocab)
+   = decodable.next_multiple_of(128).min(vocab)
 ```
-
-关键不变量：**可解码 id 空间必须是稠密前缀**。「只算前 width 行 logits」是行范围选择，行范围遮不住中间的洞——有洞时要么采样到不可解码 id、要么把合法 id 排除在采样之外，两者都静默损坏输出，所以宁可加载失败。
-
-第二个函数解决对齐问题：GEMM 的 M 维和 logits 缓冲区首维要取行数，而 Qwen3.5-4B 的 248077 个可解码 id 这类不对齐宽度会迫使 cublasLt 退到 align-1 kernel。于是把宽度上取整到 128 的倍数、再不超过检查点行数（[src/decodable_vocab.rs:L112-L114](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/decodable_vocab.rs#L112-L114)）；**多算出来的行在选择（argmax/采样）之前必须 mask 掉**。
 
 #### 4.2.3 源码精读
 
-**入口骨架**：[src/decodable_vocab.rs:L69-L104](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/decodable_vocab.rs#L69-L104) 的 `decodable_vocab_width(model_path: &str) -> Result<usize>`。L70-L77 完成第一段合并：读 + 类型化解析 tokenizer.json（失败即 fatal），断言 vocab 非空，`HashSet<u32>` 收拢 vocab 值与 added_tokens 的 id。
+**一个「故意死掉」的 schema。** [src/decodable_vocab.rs:15-41](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L15-L41) 定义 `FrontendAddedToken`，doc 注释（[src/decodable_vocab.rs:15-23](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L15-L23)）值得整段读懂：这是一个显式拥有的 frontend 兼容契约，字段**没有被任何代码读取**（所以挂着 `#[allow(dead_code)]`），它们存在的唯一意义是「塑造解析」——让 `special: "not-a-bool"` 这类畸形条目使整文件类型化解析失败，从而镜像 frontend 的丢弃行为。
 
-**fail-closed 的 schema 契约**：[src/decodable_vocab.rs:L15-L41](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/decodable_vocab.rs#L15-L41) 的 `FrontendAddedToken` 有全文件最值得读的注释：这些字段**故意不参与任何逻辑**，存在的唯一意义是让整文件类型化解析在前端 schema 变形（比如 `special` 不再是 bool）时**整份失败**，从而镜像前端「一条坏 → 全部 decoder tokens 丢弃」的行为。这是「用类型形状表达协议」的写法样板。
+**两份输入的 schema。** [src/decodable_vocab.rs:43-48](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L43-L48) 对应 `tokenizer.json`（其 `model.vocab` 是 token→id 的 `HashMap<String, u32>`，见 [src/decodable_vocab.rs:50-53](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L50-L53)），[src/decodable_vocab.rs:55-59](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L55-L59) 对应 `tokenizer_config.json` 的 `added_tokens_decoder`（key 是字符串形式的 id）。
 
-**第二段合并**：[src/decodable_vocab.rs:L79-L91](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/decodable_vocab.rs#L79-L91)——config 文件缺失时 `if let Ok` 静默贡献为零；类型化解析失败时 `warn!`（日志原文就是「skipping its added tokens like the frontend does」）；成功时只收能解析为 u32 的键，非数字键逐条跳过。
+**合并主函数。** [src/decodable_vocab.rs:69-104](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L69-L104) 的 `decodable_vocab_width` 分三步：
 
-**稠密性检查**：[src/decodable_vocab.rs:L93-L103](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/decodable_vocab.rs#L93-L103) 求 `width = ids.len()` 与 `max_id`，用 `max_id + 1 == width` 拒绝稀疏 id 空间，错误信息直接点明原因：「a row-range selection bound cannot mask holes」。
+1. 读并解析 `tokenizer.json`，vocab 非空；收集 `model.vocab` 的全部 id 值和 `added_tokens` 里的 id（[src/decodable_vocab.rs:70-77](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L70-L77)）——这一步失败是致命的（frontend 离开它无法服务）。
+2. 尝试 `tokenizer_config.json`：解析成功则并入数字 key（非数字 key 用 `filter_map(... .ok())` 逐条跳过）；解析失败只 warn 并跳过（[src/decodable_vocab.rs:79-91](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L79-L91)），warn 文案明说「like the frontend does」。
+3. 稠密性检查：`width = ids.len()`、`max_id = max(ids)`，要求 `max_id + 1 == width`（[src/decodable_vocab.rs:93-103](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L93-L103)），错误信息直说原因——行范围选择 bound 掩盖不了洞。
 
-**行对齐**：[src/decodable_vocab.rs:L106-L114](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/decodable_vocab.rs#L106-L114) 的 `aligned_logits_rows(decodable, vocab)` 单行实现 `decodable.next_multiple_of(128).min(vocab)`，注释交代动机（cublasLt align-1、128-token tile）与义务（多出的行必须 mask 后才能参与选择）。
+**对齐行数。** [src/decodable_vocab.rs:106-114](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L106-L114) 的 `aligned_logits_rows` 只有一行实质逻辑，但 doc 信息量很大：GEMM 的 M 维和 logits buffer 的主维都取这个宽度；未对齐的宽度（如 248077）会把 cuBLASLt 逼到 align-1 kernel，所以向上取整到 128 的倍数、再以检查点行数封顶；**超出 `decodable` 的行必须在选择前 mask 掉**（这是消费者的责任，不是本函数做的）：
 
-**测试**：[src/decodable_vocab.rs:L129-L160](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/decodable_vocab.rs#L129-L160) 三条测试分别锁住：vocab 3 个 + added 1 个 + decoder 数字键 2 个（非数字键 x 跳过）= 宽度 6；vocab {0,1} 加 decoder 键 5 是稀疏空间 → 失败；decoder 里一条 `special: "not-a-bool"` 毒化整份解析 → 全部 decoder tokens 丢弃、宽度退回 2。
-
-#### 4.2.4 代码实践：读测试推演宽度
-
-**实践目标**：不写代码，靠读测试把合并与失败语义内化。
-
-**操作步骤**：
-
-1. 运行并观察三个测试通过：
-
-```bash
-cargo test --release -p pegainfer-core --lib decodable_vocab
+```rust
+pub fn aligned_logits_rows(decodable: usize, vocab: usize) -> usize {
+    decodable.next_multiple_of(128).min(vocab)
+}
 ```
 
-2. 打开 [src/decodable_vocab.rs:L150-L160](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/decodable_vocab.rs#L150-L160)，回答：为什么 `special: "not-a-bool"` 导致宽度是 **2** 而不是 3（tokenizer.json 的 vocab 2 个 + decoder 里那个格式合法的键 2 哪去了）？
-3. 心算推演：把该 fixture 里 decoder 的键 2 换成 8，其余不变——加载成功还是失败？宽度是多少？
+**测试。** [src/decodable_vocab.rs:116-161](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L116-L161) 用 `tempfile` 临时目录造 fixture（纯 CPU，不需要 GPU）：三个测试分别钉死「合并结果 = 稠密宽度 6」（[src/decodable_vocab.rs:129-139](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L129-L139)，含一条非数字 key 被跳过）、「稀疏 id 空间失败」（[src/decodable_vocab.rs:141-148](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L141-L148)）、「一条坏 decoder 条目丢掉全部 decoder tokens」（[src/decodable_vocab.rs:150-160](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L150-L160)，宽度回落到 2）。
 
-**需要观察的现象**：3 个用例的通过状态；你对步骤 3 的推演结论。
+#### 4.2.4 代码实践：跑通并手工推演三个测试
 
-**预期结果**：步骤 2——整份 tokenizer_config.json 的类型化解析失败，全部 decoder tokens 丢弃，宽度 = tokenizer.json 侧的 2；步骤 3——失败，vocab {0,1} 加 id 8 后 max_id=8、count=3，稠密性检查不成立。运行结果**待本地验证**。
+1. **实践目标**：用现有单测验证你对合并规则、fail-closed 与稠密约束的理解。
+2. **操作步骤**：
+   - 运行：`cargo test --release -p pegainfer-core --lib decodable_vocab -- --nocapture`（纯 CPU，应当全绿；**待本地验证**——本讲撰写环境未执行）。
+   - 打开 [src/decodable_vocab.rs:129-139](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L129-L139)，合上讲义手工推演 fixture：vocab 给了 {0,1,2}，`added_tokens` 给 id 3，decoder keys 给 "4"、"5" 和非数字 "x"。自己算：ids = {0..5}，width = 6，max_id = 5，5 + 1 == 6，通过。
+   - 再对 [src/decodable_vocab.rs:150-160](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L150-L160) 推演：id 2 的条目合法、id 3 的 `special` 是字符串 → 整文件解析失败 → decoder tokens 全丢 → 宽度回落为 2。
+3. **需要观察的现象**：测试通过；手工推演与断言值（6 和 2）一致。
+4. **预期结果**：三个测试全绿，两次推演与断言吻合。
+5. 若本地有真实模型目录（如 `models/Qwen3-4B`），可加一步（可选）：用 `jq '[.model.vocab[], .added_tokens[]?.id] | length' tokenizer.json` 粗看 id 数量，体会真实词表的规模。**待本地验证**。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么 tokenizer.json 解析失败是 fatal，tokenizer_config.json 解析失败却只 warn + 跳过？
+**练习 1**：为什么一条畸形 decoder 条目会丢掉**全部** decoder tokens，而不是只跳过那一条？
+**答案**：因为 frontend 就是这么做的，core 必须镜像（[src/decodable_vocab.rs:61-68](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L61-L68) 的 doc 与 [src/decodable_vocab.rs:87-89](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L87-L89) 的 warn 文案）。实现上靠「整文件类型化解析 + 字段 schema 塑形」：`FrontendAddedToken` 的字段虽不被读取，但保证畸形条目让整个 `TokenizerConfigIds` 解析失败（fail-closed），随后 match 到 `Err` 分支整体跳过。
 
-答案：与被镜像的前端一致——前端没有 tokenizer.json 的主词表根本无法服务（fatal），added_tokens_decoder 只是补充，坏了可以降级（丢弃）。warn 文案也在强调「like the frontend does」。
+**练习 2**：Qwen3.5-4B 的 decodable 宽度是 248077，`aligned_logits_rows(248077, vocab)` 返回多少？为什么要取整？
+**答案**：248192（248077 = 128×1938 + 13，向上进一块 → 128×1939 = 248192）。因为输出投影 GEMM 的 M 维和 logits buffer 的主维都取这个宽度，未对齐的奇数宽度会让 cuBLASLt 落到 align-1 kernel（[src/decodable_vocab.rs:106-111](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L106-L111)）；`.min(vocab)` 保证不超检查点实际行数。
 
-**练习 2**：`aligned_logits_rows(100, 500)` 与 `aligned_logits_rows(600, 500)` 各返回多少？
-
-答案：128（100 上取整到 128 的倍数，未超过 500）；500（640 被 `min(vocab)` 截回 500）。对齐不能凭空造出超出检查点的行。
-
-**练习 3**：若检查点 lm_head 有 151936 行、可解码宽度 151646，稠密性检查怎么判？多出的行怎么办？
-
-答案：通过——稠密性检查针对**可解码 id 集合内部**无洞（max_id+1 == width），不要求可解码宽度等于检查点行数。多出的行不参与输出选择；走行范围优化时，采样前要把 [151646, 对齐宽度) 的行 mask 掉。（行数为示例数字，用于说明关系。）
+**练习 3**：若 ids 集合是 {0, 1, 5}，`decodable_vocab_width` 会怎样？
+**答案**：报错、加载失败。width = 3 而 max_id = 5，`max_id + 1 == width` 不成立（[src/decodable_vocab.rs:98-102](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L98-L102)），错误信息明说「id space is not dense」——行范围选择表达不了洞，静默截断输出空间是不可接受的。测试 [src/decodable_vocab.rs:141-148](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/decodable_vocab.rs#L141-L148) 钉死此行为。
 
 ### 4.3 eos.rs：检查点的 EOS 集合
 
 #### 4.3.1 概念说明
 
-EOS（end-of-sequence）是生成循环的停止条件：decode 每采出一个 token id，先查它是否在 EOS 集合里，命中即把请求标记为完成、走 finish 路径。头注释（[src/eos.rs:L1](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/eos.rs#L1)）强调「对每条模型线用同样的方式解析」——各模型检查点的 EOS 声明位置五花八门，core 把它收敛成一个函数，模型 crate 不各写各的。
+EOS（end of sequence）是「生成到此为止」的特殊 token。decode 循环每步采样出一个 token id，若命中 EOS 集合，请求就 finish。有的检查点有**多个** EOS（`eos_token_id` 是数组），有的把生成参数放进 `generation_config.json`，有的只在 `config.json`（甚至其嵌套的 `text_config`）里声明。
 
-与前两个模块一样，这也是**加载期一次性装配**：EOS 集合启动时解析一次，之后每个请求的 decode 循环只做集合查询。
+`eos.rs` 的价值在于**统一**：头注释（[src/eos.rs:1](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/eos.rs#L1)）明说「The checkpoint's EOS set, resolved the same way for every model line」——所有模型线共用这一份解析，避免每个模型 crate 各写一份、彼此漂移。
+
+它同样贯彻 fail-fast：一个不声明 EOS、声明了空列表、条目不是 u32、或 id 越界出词表的检查点，直接让加载失败（[src/eos.rs:13-17](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/eos.rs#L13-L17)）——因为一个永远停不下来的推理请求比一次加载失败糟糕得多。
 
 #### 4.3.2 核心流程
 
 ```text
-sources = [ generation_config.json, config.json, config.json 的 text_config 子对象 ]
-          # 优先级从高到低；text_config 服务把文本模型参数装在子对象里的复合检查点
-对 sources 依序尝试：第一个声明了非 null eos_token_id 的来源胜出
-  全部落空 → 加载失败（declares no eos_token_id）
-取值：单个 id 或 id 数组；空数组 → 失败
-每个条目：必须能转 u32（负数 / 字符串 → 失败），且 < vocab_size（越界 → 失败）
-按出现顺序去重，返回 Vec<u32>
+按顺序找第一个「声明了非 null eos_token_id」的来源：
+  1. generation_config.json
+  2. config.json
+  3. config.json 的 text_config          <- 嵌套配置（多模态系）
+  都没声明 -> bail（加载失败）
+        v
+字段形状归一：单值 -> [单值]；数组 -> 逐项
+        v
+空列表 -> bail
+逐项校验：
+  必须能转 u32（负数、字符串、超范围都失败）
+  必须 < vocab_size（越界失败）
+  去重保序（Vec::contains）
+        v
+Vec<u32>（按首次出现顺序、去重后的 EOS id 集合）
 ```
-
-两个容易忽略的细节：
-
-- `null` 视为「未声明」，继续往低优先级来源找（不是失败，也不是空集）。
-- 文件**不存在**（NotFound）是正常情况；文件存在但读失败或解析失败是 fatal——见 `read_optional_json`（[src/eos.rs:L62-L70](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/eos.rs#L62-L70)）对 `ErrorKind::NotFound` 的特判。
 
 #### 4.3.3 源码精读
 
-**函数契约**：[src/eos.rs:L13-L18](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/eos.rs#L13-L18) 的文档注释交代完整语义：来源顺序、单值或列表、按序去重，「没声明 / 空列表 / 非 u32 条目 / 越界 id」四类失败全部让加载失败。签名 `eos_token_ids(model_path, vocab_size) -> Result<Vec<u32>>`——vocab_size 由调用方传入，越界检查依赖它。
+**签名与契约。** [src/eos.rs:18](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/eos.rs#L18) 的 `eos_token_ids(model_path, vocab_size)` 接收检查点目录和词表行数——后者用于越界校验，由调用方（模型 crate）从 config 解析后传入。
 
-**来源选择**：[src/eos.rs:L20-L38](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/eos.rs#L20-L38) 构造三个 (来源名, JSON) 候选，`find_map` 找第一个 `get("eos_token_id")` 存在且非 null 的来源；全部落空时 `bail!` 报「declares no eos_token_id」。
+**三级回退表达成数据。** [src/eos.rs:20-32](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/eos.rs#L20-L32) 把三个来源装进一个 `sources` 数组（带可读的来源名，报错时能说清是哪个文件），[src/eos.rs:33-38](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/eos.rs#L33-L38) 用 `find_map` 取第一个命中者；注意 `null` 被显式当作「未声明」继续回退：
 
-**条目解析**：[src/eos.rs:L40-L59](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/eos.rs#L40-L59)——数组或单值统一为条目列表；空列表 `ensure!` 失败；每条先 `as_u64` 再 `u32::try_from`（所以 -1 和字符串都落进「is not a u32」）；再 `ensure!` 范围检查；最后 `if !ids.contains(&id)` 去重保序。
-
-**测试**：[src/eos.rs:L97-L133](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/eos.rs#L97-L133) 用一张表覆盖五种真实加载形态：generation_config 里的列表 [7,5,7] 压过 config 的 6（注释点名 Qwen3、Kimi-K2 的形态）；config 里的列表；`eos_token_id: null` 落穿到 text_config（注释点名 Qwen3.5 不带 generation_config 的形态）；generation_config 存在但缺字段、或字段为 null，都落穿。[src/eos.rs:L135-L161](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/eos.rs#L135-L161) 锁住五类失败各自的错误文案（declares no / lists no / is not a u32 / outside the vocabulary）。
-
-#### 4.3.4 代码实践：给失败用例找命中的检查行
-
-**实践目标**：把每类失败精确映射到源码里的那一条检查。
-
-**操作步骤**：
-
-1. 运行：
-
-```bash
-cargo test --release -p pegainfer-core --lib eos
+```rust
+let Some((source, field)) = sources.into_iter().find_map(|(source, json)| {
+    let field = json?.get("eos_token_id")?;
+    (!field.is_null()).then_some((source, field))
+}) else {
+    bail!("{} declares no eos_token_id", model_path.display());
+};
 ```
 
-2. 打开 [src/eos.rs:L135-L161](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/eos.rs#L135-L161)，为五个失败用例各写一行「用例 → 命中的检查」：
-   - config 什么都没声明
-   - `{"eos_token_id": []}`
-   - `{"eos_token_id": [3, "eos"]}`
-   - `{"eos_token_id": -1}`
-   - `{"eos_token_id": 16}`（vocab_size=16）
+**形状归一与逐项校验。** [src/eos.rs:40-58](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/eos.rs#L40-L58)：单值包装成单元素数组；空列表 bail；每个条目走 `as_u64()` + `u32::try_from`（负数和字符串在这里死掉，错误信息带来源与原值）；越界检查 `id < vocab_size`；最后 `if !ids.contains(&id)` 去重并保持首次出现顺序。
 
-**需要观察的现象**：测试通过；你的映射表。
+**可选文件的读取。** [src/eos.rs:62-70](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/eos.rs#L62-L70) 的 `read_optional_json` 三分支：解析成功返回 `Some`；文件不存在（`ErrorKind::NotFound`）返回 `None`——这是回退链能继续的前提；其他 IO 错误（如权限）则是致命错误。
 
-**预期结果**：依次命中 L37 的 `bail!`、L44 的 `ensure!`、L47-L50 的 u32 转换（字符串条目）、同一条 u32 转换（负数经 `as_u64` 失败）、L51-L54 的范围 `ensure!`。运行结果**待本地验证**。
+**测试即模型线名录。** [src/eos.rs:96-133](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/eos.rs#L96-L133) 的用例注释直接点名真实模型线：generation_config 的**列表** `[7, 5, 7]` 覆盖 config 的单值 6（注释标注 Qwen3、Kimi-K2 走这条路径，结果 `[7, 5]`）；config 顶层为 `null` 时落到 `text_config` 的 9（注释标注 Qwen3.5 无 generation_config 的情形）。[src/eos.rs:135-161](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/eos.rs#L135-L161) 则把五种失败模式（不声明、空列表、字符串条目、负数、越界）逐一断言。
+
+#### 4.3.4 代码实践：推演回退矩阵并找消费点
+
+1. **实践目标**：内化三级回退与失败模式；找到 EOS 集合在请求生命周期中的实际消费位置。
+2. **操作步骤**：
+   - 运行现有测试：`cargo test --release -p pegainfer-core --lib eos -- --nocapture`（纯 CPU；**待本地验证**）。
+   - 对 [src/eos.rs:98-128](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/eos.rs#L98-L128) 的六个用例，先合上讲义手写预期 `Vec`，再对照 [src/eos.rs:129-132](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/eos.rs#L129-L132) 的断言核对。
+   - 在**仓库根目录**执行（本讲撰写环境无法访问兄弟 crate，行号待本地验证）：
+
+     ```bash
+     git grep -n "eos_token_ids" -- pegainfer-qwen3 pegainfer-qwen35
+     ```
+
+     记录：模型 crate 在装配期哪一行调用它、得到的 `Vec<u32>` 存进什么结构、decode 循环哪一步对照它决定 finish（若 finish 判断落在 frontend/EngineHandle 一侧，把证据也记下来）。
+3. **需要观察的现象**：六个用例推演全对；grep 能定位到至少一个模型 crate 的调用点。
+4. **预期结果**：能画出「解析（装配期，一次）→ 存储 → 每步 decode 采样后比对 → finish」的时序；模型 crate 内行号由读者本地回填。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：generation_config.json 是 `{"eos_token_id": [7, 5, 7]}`，config.json 是 `{"eos_token_id": 6}`，返回什么？
+**练习 1**：为什么还要查 `config.json` 的 `text_config`？
+**答案**：嵌套配置的检查点把文本模型的字段藏在 `text_config` 里。测试注释点名：Qwen3.5 在没有 generation_config.json、且 config 顶层 `eos_token_id` 为 `null` 时，靠 `text_config` 提供 EOS（[src/eos.rs:111-116](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/eos.rs#L111-L116)）；`null` 在 [src/eos.rs:35](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/eos.rs#L35) 被当作未声明继续回退。
 
-答案：`[7, 5]`——第一个声明的来源获胜，列表按出现顺序去重；config 的 6 根本不会被看。
+**练习 2**：`eos_token_id: -1` 会发生什么？
+**答案**：加载失败。`serde_json::Value::as_u64()` 对负数返回 `None`，落入 `with_context` 的「is not a u32」错误（[src/eos.rs:47-50](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/eos.rs#L47-L50)），测试 [src/eos.rs:149](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/eos.rs#L149) 钉死。
 
-**练习 2**：generation_config.json 是 `{"eos_token_id": null}`，config.json 是 `{"text_config": {"eos_token_id": 9}}`（顶层无该字段），返回什么？
+**练习 3**：`[7, 5, 7]` 解析成什么？为什么选择保序去重？
+**答案**：`[7, 5]`。逐项 push 前用 `Vec::contains` 去重、保留首次出现顺序（[src/eos.rs:55-57](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/eos.rs#L55-L57)）。保序让同一检查点解析出的集合**逐字节确定**——这既是可测试性（测试可直接 `assert_eq!` 一个 `Vec`），也延续了 u1-l1 以来「构造性确定性」的纪律：同样的输入永远得到同样的输出。
 
-答案：`[9]`——null 视为未声明，顶层 config 也落空，最后由 text_config 提供。这正是测试注释标为「Qwen3.5 without generation_config」的形态。
+### 4.4 串起来：三个模块在请求生命周期中的位置
 
-**练习 3**：为什么 `eos_token_id: 16` 在 vocab_size = 16 时被拒绝？
+#### 4.4.1 概念说明
 
-答案：合法 id 范围是 [0, 16)，16 已越界——否则解码循环可能指向不存在的词表行。vocab_size 由模型 crate 从自己的 config 读出后传入。
+三个模块都只在**装配期**运行一次，但服务的时刻横跨整条推理链路：RoPE 表服务于每一步前向（prefill 与 decode 都要给 Q/K 注入位置），词表宽度约束决定每步输出投影的形状，EOS 集合决定请求何时结束。
 
-## 5. 综合实践：把三件配套串进 decode 循环
+#### 4.4.2 核心流程
 
-三件配套分别服务请求生命周期的不同时刻：rope 表和词表宽度在**加载期**装配，EOS 集合在加载期解析、在**每步 decode** 消费。本实践用一个伪代码骨架把它们串起来，并审计真实消费点。
+| 时机 | 模块 | core 接口 | 结果去向 |
+| --- | --- | --- | --- |
+| 装配期（一次） | rope | `precompute_rope` | cos/sin 表常驻显存，被每步前向的旋转 kernel 只读查询 |
+| 装配期（一次） | decodable_vocab | `decodable_vocab_width` + `aligned_logits_rows` | 决定输出投影 GEMM 的行数与 logits buffer 的主维 |
+| 装配期（一次） | eos | `eos_token_ids` | EOS id 集合交给模型 crate 保存 |
+| 每步 decode | （模型 crate，core 之外） | — | logits 前缀 mask → 采样出 token id → 命中 EOS 集合即 finish |
 
-**实践目标**：
+#### 4.4.3 源码精读
 
-1. 写出（伪代码即可）一个「逐 token 生成」循环，在正确的位置调用正确的 core 接口。
-2. 用 grep 找到模型 crate 侧的真实消费点并填表。
+三个模块的声明集中在 [src/lib.rs:3-15](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/lib.rs#L3-L15)（`decodable_vocab` 在 [src/lib.rs:5](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/lib.rs#L5)、`eos` 在 [src/lib.rs:6](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/lib.rs#L6)、`rope` 在 [src/lib.rs:12](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/lib.rs#L12)），core 内部再无其他模块引用它们（见第 3 节的 grep 证据）——它们是纯粹的「出口」，全部消费发生在模型 crate。表中最后一行的具体实现位置（mask 在哪里做、finish 事件如何产生）属于模型 crate 与 frontend 的领域，本讲环境无法访问兄弟 crate，**待本地验证**。
 
-**操作步骤**：
+## 5. 综合实践
 
-1. 阅读下面这副骨架（**示例伪代码**，接口名均为本讲验证过的 core 公开面；GEMM/采样等算子走 u2-l3 讲过的 ops 再出口，此处只示意位置）：
+**任务：把「推理出口链路」写成一份带证据的伪代码笔记。**
 
-```text
-# ---- 加载期（每个进程一次）----
-width   = decodable_vocab::decodable_vocab_width(model_path)          # 词表宽度，稠密前缀
-rows    = decodable_vocab::aligned_logits_rows(width, vocab_rows)     # 128 对齐、不超检查点行数
-eos_set = eos::eos_token_ids(model_path, vocab_rows)                  # 全模型线统一的 EOS 解析
-(cos, sin) = rope::precompute_rope(&ctx, &RopeTableSpec{ ... })       # 表在宿主生成、from_host 上载
+1. **实践目标**：把本讲三个模块串成一个从装配到停止的完整故事，并用 grep 给每个环节补上真实消费点。
+2. **操作步骤**：
+   - 第一步，写出装配期 + decode 循环的伪代码（**示例代码**，非项目实现）：
 
-# ---- 每个请求：prefill → decode 循环 ----
-loop {
-    hidden = 前向一步(...)            # 注意力用 (cos, sin) 表做位置编码、读写 KV 池（u3-l1/u3-l2）
-    logits = lm_head GEMM，M 维 = rows   # 用 rows 而不是 vocab_rows，避免 cublasLt align-1
-    mask 掉 logits 的 [width, rows) 行   # 对齐多算出的行在选择前必须 mask
-    next = argmax / 采样，且保证 next < width
-    if next ∈ eos_set { 请求 finish; break }
-    # 否则把 next 追加进序列，进入下一步 decode
-}
-```
+     ```text
+     装配期（模型 crate 加载检查点时，各执行一次）：
+       ctx = DeviceContext::new()
+       (cos, sin) = pegainfer_core::rope::precompute_rope(&ctx, &spec)?       # 表常驻显存
+       decodable  = decodable_vocab_width(model_path)?                        # 镜像 frontend 合并
+       rows       = aligned_logits_rows(decodable, vocab_rows)                # 128 对齐、vocab 封顶
+       eos_ids    = eos_token_ids(model_path, vocab_rows)?                    # fail-fast
 
-2. 在**工作区根目录**（pegainfer-core 的上一级）运行下面的 grep，找出模型 crate 里的真实调用点，并把结果填进表格（本讲义基于 core 内部验证撰写，模型 crate 内的文件名以你自己的 grep 结果为准，不要照抄别人的结论）：
+     每步 decode：
+       hidden = 前向(上一步 token, 查 cos/sin 表旋转 Q/K)                       # rope 表被只读查询
+       logits = lm_head(hidden[.., ..rows])                                    # 只算对齐前缀行
+       logits[decodable..] 全部置 -inf                                          # mask 是消费者责任
+       token = sample(logits)                                                   # 采样出 token id
+       if token 属于 eos_ids: 发出 finish；break                                # eos 集合命中即停
+     ```
 
-```bash
-grep -rn "precompute_rope\|RopeTableSpec" pegainfer-qwen3/src
-grep -rn "decodable_vocab_width\|aligned_logits_rows" pegainfer-qwen3/src
-grep -rn "eos_token_ids" pegainfer-qwen3/src
-```
+   - 第二步，给每个环节找证据。在仓库根执行：
 
-   | core 接口 | 模型 crate 消费文件（grep 结果） | 生命周期阶段 |
-   | --- | --- | --- |
-   | `precompute_rope` | 待填 | 加载期 |
-   | `decodable_vocab_width` / `aligned_logits_rows` | 待填 | 加载期 + 每步 decode |
-   | `eos_token_ids` | 待填 | 加载期解析，decode 判停 |
+     ```bash
+     git grep -n "precompute_rope\|RopeTableSpec" -- pegainfer-qwen3
+     git grep -n "decodable_vocab_width\|aligned_logits_rows" -- pegainfer-qwen3
+     git grep -n "eos_token_ids" -- pegainfer-qwen3
+     ```
 
-   想扩大范围可对其他模型 crate（目录名见 CLAUDE.md 的 crate 表：pegainfer-qwen35、pegainfer-kimi-k2 等）重复同样的 grep。
-
-**需要观察的现象**：每条 grep 命中的文件与行号；它们出现在加载路径还是调度器/executor 的 decode 路径。
-
-**预期结果**：三个模块的消费点都应在模型 crate 的「模型装配/调度」一侧，且 decodable 宽度会一路传到输出投影与采样约束处。具体文件名**以 grep 结果为准**（本讲不预设）；若某条 grep 在某个模型 crate 里没有命中，说明该 crate 未走 core 的这条公共路径，值得把发现记进你的笔记。
+   - 第三步，回填一张消费表：接口 → 调用文件:行号 → 用在装配/前向/停止的哪一环；mask 与 finish 判断的落点若在模型 crate 之外（frontend 的 `EngineHandle`/`TokenEvent` 一侧），也记入表中。
+3. **需要观察的现象**：伪代码的每个环节都能对应到至少一条真实代码位置；`precompute_rope` 应出现在模型装配处而非 decode 循环内。
+4. **预期结果**：一份「接口 → 消费点 → 生命周期阶段」三列对照表。本讲撰写环境无法访问 `pegainfer-qwen3`，全部行号**待本地验证**。
 
 ## 6. 本讲小结
 
-- `rope.rs`：RoPE 表在宿主侧按公式 \(\text{inv\_freq}_i = \theta^{-2i/F}\) 生成、以 bf16 半分裂布局（前半 = 后半）平铺，再经 `DeviceVec::from_host` 一次性上载；`validate` 把「看似合法、实际错误」的几何全部挡在加载期。rotary_dim（旋转多少维）与 frequency_dim（频率分母）是两个独立参数。
-- `decodable_vocab.rs` 的职责是**求宽度，不是做解码**：镜像前端 tokenizer 三处来源的合并规则，要求可解码 id 构成稠密前缀（行范围选择遮不住洞），并把 logits 行数对齐到 128 的倍数、采样前 mask 多出的行。
-- `eos.rs`：按 generation_config → config → text_config 的优先级取第一个非 null 声明，单值/列表皆可、按序去重、必须 u32 且在词表内；null 视为未声明，文件缺失正常、解析失败 fatal。
-- 三者都是加载期一次性装配 + 纯出口面：core 内部没有任何调用者（grep 验证），消费者在各模型 crate。
-- 三个模块的测试全部是纯 CPU 测试（rope 的 `tables()` 不碰 GPU；另两个用 tempfile 造临时检查点），`cargo test --release -p pegainfer-core --lib` 即可运行。
+- `rope.rs`：宿主侧按 inv_freq[i] = theta^(-2i/F) 生成 half-split 布局的 cos/sin 表，量化 bf16 后经 `DeviceVec::from_host` 各上传一次；`rotary_dim` 与 `frequency_dim` 分离以支持 proportional RoPE，`validate()` 把一切「看似合法实则错误」的几何挡在计算之前。
+- `decodable_vocab.rs`：不做 id→文本解码；它镜像 frontend 的 tokenizer schema 合并，求最宽可解码 id，要求 id 空间是稠密前缀（否则加载失败），并用 `next_multiple_of(128)` 给出输出投影的对齐行数；超出 `decodable` 的行由消费者在选择前 mask。
+- `eos.rs`：`generation_config.json` → `config.json` → `text_config` 三级回退取第一个非 null 声明，单值/数组归一、u32 与词表边界校验、保序去重，任何失败都让加载 fail-fast。
+- 三者都是 core 的纯出口模块（core 内部零消费点）、装配期一次性执行，全部消费发生在模型 crate。
+- 三个模块共同构成推理出口链路：位置编码表（输入侧）→ 前向输出 token id → 词表宽度约束与 EOS 停止（输出侧）。
 
 ## 7. 下一步学习建议
 
-- 回顾 u2-l1 的 tensor 门面，`precompute_rope` 的两个 `DeviceVec::from_host` 是那套「宿主→设备」往返链的最小真实用例。
-- 如果 `ls openinfer-pegainfer-core-tutorial/` 里已有 u3-l2（kv_pool）讲义，结合本讲的 (cos, sin) 表消费点去看 prefill 注意力如何同时用「表」和「KV 池」。
-- u4-l1（cuda_graph.rs）将讲解码路径的图捕获：本讲的「加载期一次性装配」思想在那里推到极致——连 kernel 启动序列本身也被预录制。
-- 动手方向：对拍完 rope 表后，可以试着自己推一遍 `aligned_logits_rows` 在一个真实检查点上的两个输入值（从 config.json 的 vocab_size 和 tokenizer 的合并宽度出发），再用模型 crate 的 grep 命中点验证你的推断。
+- 先完成本讲的 grep 回填任务，再进入 **u4-l1（cuda_graph.rs）**：你会发现 RoPE 表这类「常驻显存、指针不变」的常量正是 CUDA Graph 回放所依赖的内存纪律的一部分。
+- 装配期的邻居是 **u3-l3（weight_loader）**：权重装显存与本讲的表上传/配置解析同属模型加载阶段，可对照两讲的 H2D 路径差异（一次性 `from_host` vs pinned 双缓冲流式上载）。
+- 想看「宽度约束」的下游效果，可去模型 crate 检索 `aligned_logits_rows` 的调用处，观察 logits buffer 与输出投影 GEMM 的形状如何由它决定（行号待本地验证）。

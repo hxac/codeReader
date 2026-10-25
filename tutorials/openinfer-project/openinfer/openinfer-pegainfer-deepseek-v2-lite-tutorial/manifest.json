@@ -1,13 +1,13 @@
 {
-  "head": "8886aa47b95bc4beedb63584eb367276650b2fec",
+  "head": "09a1a38f8b4938b06ee4e4f63f64fd4feed59434",
   "project": "openinfer-pegainfer-deepseek-v2-lite",
-  "rationale": "本大纲针对 PegaInfer（openinfer）工作区中的 pegainfer-deepseek-v2-lite 模型 crate（DeepSeek-V2-Lite：MoE + 专家并行 EP，2-GPU，特性开关 deepseek-v2-lite）设计从零到专家的学习路径。第一单元解决『是什么、怎么构建、怎么跑、代码在哪』；第二单元沿『HTTP 请求 → pegainfer-frontend 前端契约（EngineHandle / GenerateRequest / TokenEvent）→ 模型 crate』的调用链，并落到 DeepSeek-V2-Lite 的配置加载；第三单元按执行顺序深入权重加载、prefill/decode 路径、MoE 路由、EP 专家并行、KV cache 与调度批处理六大核心机制；第四单元进入专家层底层（CUDA Graph、pegainfer-kernels 构建系统、pegainfer-core::ops 共享算子、EP free-running 纪律）；第五单元收束到测试、精度门、基准剖析与一次综合二次开发实践，形成『读得懂 → 跑得通 → 改得动』的闭环。依赖关系上，机制讲义先于底层讲义，底层讲义先于二次开发实践，保证每篇只解决一个主题且可独立验证。说明：本次规划环境内 Read/Grep/Glob 与只读 git 均不可用、网络读取工具亦不可用，因此 crate 内部具体源码文件名无法逐一核实，凡未由仓库 CLAUDE.md 或任务参数确证存在的文件路径均已标注（待确认），worker 生成讲义时需先在 pegainfer-deepseek-v2-lite/src/ 下核实并替换为真实路径；仓库级文件（CLAUDE.md、docs/index.md、docker/*、pegainfer-kernels/build.rs、docs/models/glm52/free-running-dp.md、根 Cargo.toml 与 crate 级 Cargo.toml）均已确证存在。",
+  "rationale": "增量更新：上次大纲基于 HEAD 8886aa47，本次 HEAD 为 09a1a38f。两次 HEAD 之间仅有一个提交：09a1a38f『fix(kimi-k2): select distinct router experts when choices are NaN (#1170)』，其作用域是 kimi-k2 模型线的 router 专家选择修复；按仓库 CLAUDE.md 的架构约定，模型专属 kernel 位于特性门控子模块（kimi_k2、glm52），该提交预计不触及 pegainfer-deepseek-v2-lite、pegainfer-frontend、pegainfer-core、pegainfer-kernels 共享部分、pegainfer-kv-cache、CLAUDE.md 或本大纲引用的任何 docs/ 文件（本轮规划环境内 Read/Grep/Glob、只读 git 与网络读取工具均不可用，无法逐文件核验 diff，此判断基于当前提交列表与仓库架构说明，待确认；若后续核验发现该提交改动了共享 MoE 路由 kernel，则仅 u3-l3 需降级为 update）。因此全部既有讲义 action=keep，不新增、不移除讲义。学习路径维持原设计：第一单元解决『是什么、怎么构建、怎么跑、代码在哪』；第二单元沿『HTTP 请求 → pegainfer-frontend 前端契约（EngineHandle / GenerateRequest / TokenEvent）→ 模型 crate』链路并落到配置加载；第三单元按执行顺序深入权重加载、prefill/decode 路径、MoE 路由、EP 专家并行、KV cache 与调度批处理六大机制；第四单元进入底层（CUDA Graph、pegainfer-kernels 构建系统、pegainfer-core::ops 共享算子、EP free-running 纪律）；第五单元收束到测试、精度门、基准剖析与综合二次开发，形成『读得懂 → 跑得通 → 改得动』闭环，机制讲义先于底层讲义、底层讲义先于二次开发实践，保证每篇只解决一个主题且可独立验证。crate 内部源码路径仍沿用上版的（待确认）标注，worker 后续更新讲义时需先在 pegainfer-deepseek-v2-lite/src/ 等目录核实真实文件名；仓库级文件（CLAUDE.md、docs/index.md、docs/models/glm52/free-running-dp.md、docker/*、pegainfer-kernels/build.rs、根 Cargo.toml 与 crate 级 Cargo.toml）均已确证存在。",
   "units": [
     {
       "id": "u1",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -33,7 +33,7 @@
           "topic": "介绍 PegaInfer 是纯 Rust + CUDA 的 LLM 推理引擎（无 PyTorch、无框架、OpenAI 兼容 /v1/completions），讲解模型 crate 矩阵与各特性开关，以及 pegainfer-deepseek-v2-lite（MoE + EP，2-GPU）在工作区架构图中的位置。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -67,7 +67,7 @@
           "topic": "讲解工作区虚拟清单结构、pegainfer-kernels/build.rs 拥有 CUDA/Triton 编译这一构建体系，以及启用 deepseek-v2-lite 特性所需的命令、PEGAINFER_NCCL_ROOT（DeepEP shim 的 moe 特性）、PEGAINFER_CUDA_SM 等关键环境变量和 Docker 开发环境。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -95,7 +95,7 @@
           "topic": "讲解如何放置 DeepSeek-V2-Lite 权重、以 2-GPU（MoE + EP）方式启动引擎（cargo run --release --features deepseek-v2-lite -- --model-path models/DeepSeek-V2-Lite），并通过 OpenAI 兼容的 /v1/completions 接口发请求观察流式输出。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -131,7 +131,7 @@
       "id": "u2",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l4"
           ],
@@ -159,7 +159,7 @@
           "topic": "精读 pegainfer_frontend::engine 模块定义的引擎请求/事件契约：GenerateRequest 如何提交、TokenEvent 如何回流、EngineHandle 如何把前端与每模型调度器/执行器解耦，以及模型 crate 为什么只需面向契约实现。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -187,7 +187,7 @@
           "topic": "讲解 pegainfer-frontend 中 vllm 协议栈如何把 OpenAI 兼容 HTTP 请求翻译成引擎契约调用，以及 ModelLine dispatch trait 如何按模型线把请求路由到 dsv2-lite crate；顺带提及 dynamo 为规划中的下一协议栈。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l4"
           ],
@@ -223,7 +223,7 @@
       "id": "u3",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -251,7 +251,7 @@
           "topic": "讲解模型 crate 如何从模型目录读取权重文件（safetensors 等）、按 tensor 名映射到设备端缓冲、在 2-GPU 间切分，以及在加载期做的 shape/dtype 校验。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -278,7 +278,7 @@
           "topic": "精读模型执行器中一次 prefill step 与一次 decode step 的完整调用链：嵌入、注意力、MoE 前馈、残差与 norm、采样出口，并重点解读 commit 223206b7『steady decode attention on device』把稳态 decode 注意力搬到设备端的意义。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -306,7 +306,7 @@
           "topic": "深入 DeepSeek-V2-Lite 的 MoE 层：router 如何为每个 token 选 top-k 专家、被选中/共享专家（若配置存在，以实际代码为准）如何计算与加权合并，以及专家权重的组织方式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l3"
           ],
@@ -335,7 +335,7 @@
           "topic": "讲解 2-GPU 专家并行的通信机制：token 按 expert 归属跨卡分发与收回（DeepEP shim、moe 特性、PEGAINFER_NCCL_ROOT ≥ 2.30.4）、dispatch/combine 集合通信的形状与时机，以及 EP 与 batch 的相互作用。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -364,7 +364,7 @@
           "topic": "讲解『模型调度器拥有请求状态、共享 paged-KV 原语放在 pegainfer-kv-cache』的分工：page 组织、prefill 写入与 decode 追加、请求结束后的释放，以及 pegainfer-kv-offload 提供的 host/SSD/RDMA 桥接在 dsv2-lite 中的角色。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u3-l2"
@@ -400,7 +400,7 @@
       "id": "u4",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -427,7 +427,7 @@
           "topic": "讲解 decode 路径在模型执行器内捕获 CUDA Graph 的机制：为什么需要预分配缓冲来保持指针稳定、捕获/回放的时机、以及批大小变化时 graph 的选择与上限。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -456,7 +456,7 @@
           "topic": "精读 pegainfer-kernels/build.rs：nvcc 编译 csrc/*.cu、GPU SM 目标自动探测（PEGAINFER_CUDA_SM 覆盖）、特性门控（deepseek-v2-lite 走 moe/DeepEP shim 路径时引入的 CUDA 源）、以及张量/FFI/kernel 的所有权边界。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -484,7 +484,7 @@
           "topic": "梳理 pegainfer-core::ops 提供给各模型 crate 的共享 GPU 算子封装（GEMM、norm、采样等类别，以实际代码为准），以及 dsv2-lite 如何在自身 kernel 与共享算子之间做选择。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l4"
           ],
@@ -520,7 +520,7 @@
       "id": "u5",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -548,7 +548,7 @@
           "topic": "讲解工作区测试组织：cargo test --release --workspace --lib 的纯逻辑单测（约 9 秒、无需 GPU）如何覆盖 dsv2-lite 的可纯化部分，以及按名称过滤、--nocapture 的调试手法。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1",
             "u1-l3"
@@ -577,7 +577,7 @@
           "topic": "以 qwen3 的 hf_golden_gate（logits 对 HF 黄金 fixture）为范式，讲解精度门的设计思想，并考察 dsv2-lite 当前具备的精度/集成测试入口（具体测试名与是否已有 golden gate 待确认）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -606,7 +606,7 @@
           "topic": "讲解模型 crate 自带 benches 的组织方式、PEGAINFER_BUILD_TIMING 的分阶段构建计时，以及针对 2-GPU EP 部署做推理吞吐/延迟基准的方法论（固定 prompt 分布、预热、统计口径）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l6",
             "u5-l1"

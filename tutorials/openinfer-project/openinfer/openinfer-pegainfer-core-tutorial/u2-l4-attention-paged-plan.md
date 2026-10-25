@@ -1,404 +1,375 @@
-# ops/attention.rs 与 ops/paged_plan.rs：分页注意力的调度面
+# u2-l4 · ops/attention.rs 与 ops/paged_plan.rs：分页注意力的调度面
 
-> 前置讲义：u2-l3（ops.rs 算子门面总览）。本讲是 u2 单元的收官：ops.rs 里再出口之外的「自研部分」——`attention` 与 `paged_plan` 两个子模块。
+> 依赖：u2-l3（ops.rs 总览）。本讲是 ops.rs 中「再出口之外的自研部分」的精读：三个注意力封装入口、两套分页计划类型，以及它们与 `kv_pool.rs` 中 `KvDesc` 的契约。
 
 ## 1. 本讲目标
 
 学完本讲，你应该能够：
 
-1. 说出 `ops/attention.rs` 三个入口（`prefill_attention_paged_into`、`paged_attention_batch_decode_into`、`paged_attention_batch_decode_split_kv_into`）各自服务的执行形态，以及它们传给 kernel 的参数流。
-2. 解释 paged attention 中「计划（plan）」与「KV 数据」分离的原因：为什么 kernel 不直接吃 `KvState`，而只认设备侧的扁平 `i32` 数组。
-3. 读懂 `ops/paged_plan.rs` 的两个数据结构：`PrefillPagedPlan`（prefill 的分页计划，包装 kernels 侧同名类型）与 `SplitKvCsr`（split-KV decode 的宿主侧 CSR），并能手工推演 `build_split_kv_csr` 的输出。
-4. 对照 `kv_pool.rs` 的 `KvDesc<'a>`，理解「core 描述状态、kernels 消费状态」这条契约，说清 `desc()` 与 `desc_for_len()` 的差异。
+1. 解释 paged attention 中「计划（plan）」与「KV 数据」分离的原因——为什么 kernel 需要的是一张"页号索引表"而不是 KV 张量本身。
+2. 逐参数读懂 `prefill_attention_paged_into`、`paged_attention_batch_decode_into`、`paged_attention_batch_decode_split_kv_into` 三个入口，并把参数按「KV 数据 / 几何 / 计划 / 输出」归类。
+3. 讲清 `PrefillPagedPlan`（含预分配 + 原地重填的图稳定用法）、`SplitKvCsr` 与 `build_split_kv_csr` 各自解决什么问题，手算一个 split-KV CSR 实例。
+4. 对照 `KvDesc<'a>`（含 `desc()` 与 `desc_for_len()` 的差异），复述「core 描述状态、kernels 消费状态」这条契约，并能回答"两个请求合并成一个批次"这类设计题。
 
 ## 2. 前置知识
 
-### 2.1 从注意力公式到「为什么要分页」
+本讲默认你已读过 u2-l1（tensor 门面）与 u2-l3（ops.rs 总览），另外补充三个概念：
 
-Transformer 的自注意力计算：
-
-\[ \mathrm{Attention}(Q,K,V) = \mathrm{softmax}\!\left(\frac{QK^\top}{\sqrt{d}}\right)V \]
-
-推理时为避免每生成一个 token 都重算全部历史，会把历史的 K、V 缓存下来，这就是 **KV cache**。朴素的实现是为每个请求开一块「长度 = 最大上下文」的连续显存。问题在于：请求长度参差不齐，预留太大浪费显存，预留太小放不下长请求——本质是**显存的内部碎片与外部碎片**问题。
-
-解法和操作系统的虚拟内存一样：把 KV cache 切成固定大小的**页（page）**，逻辑上连续的序列在物理上由一串离散页拼成。请求需要更多空间时再分配一页，请求结束时页归还池子复用。于是：
-
-- **KV 数据**：一整块池化显存 `kv_buffer`，按 page-first 布局组织（u3-l2 会精读 `KvPool`）。
-- **页表**：每个请求持有自己的页编号列表（`KvDesc` 里的 `pages`），就像进程的页表。
-
-### 2.2 prefill 与 decode
-
-- **prefill（预填充）**：一次处理整段 prompt，请求侧有多个 token（多个 query 行），注意力要对「已有 KV + 本段新写入的 KV」做因果计算。
-- **decode（解码）**：每个请求每步只生成 1 个 token，query 只有 1 行，但要扫过该请求的全部历史 KV。把多个请求的这「1 行 query」合在一起跑，就叫 **batch decode**。
-
-decode 的一个经典痛点：批量小、上下文长时，单个 kernel 的并行块（CUDA 里的 CTA）数量不足，喂不饱 GPU 的流处理器。**split-KV** 的思路是把每个请求的长 KV 切成若干 chunk，让多个并行块各算一段的部分结果，最后再合并——用更多的并行度换取吞吐。这也是 `SplitKvCsr` 名字的由来。
-
-### 2.3 CSR（压缩稀疏行）格式
-
-CSR 是一种用「值数组 + 行偏移数组」表达稀疏结构的紧凑格式。本讲的 CSR 长这样：
-
-- `request_indices[i]`：第 `i` 个槽位属于哪个请求；
-- `kv_tile_indices[i]`：第 `i` 个槽位是该请求的第几个 KV chunk；
-- `block_valid_mask[i]`：该槽位是真数据（1）还是补齐用的填充（0）；
-- `o_indptr[r]`：请求 `r` 的槽位区间是 `[o_indptr[r], o_indptr[r+1])`。
-
-`indptr`（index pointer）就是这个「每行从哪开始」的前缀和数组，长度 = 行数 + 1。
-
-### 2.4 「计划」与「数据」分离（承接 u2-l3）
-
-u2-l3 已经确立：`ops.rs` 是 core 在再出口之外的唯一自研重镇，其中 `attention` 与 `paged_plan` 是「core 描述状态、kernels 消费状态」契约的两个端点：
-
-- **core 侧**：拥有请求的生命周期状态（`KvState`/`KvDesc`，kv_pool.rs），并负责把这些宿主侧的 Rust 结构**翻译**成 kernel 能吃的设备侧数组（plan/CSR）。
-- **kernels 侧**：只认扁平的 `CudaSlice<i32>` 页表与几何参数（`PagedKvLayout`），不认识任何 Rust 请求对象。
-
-为什么要分离？本讲会从源码里给出四个理由（见 4.1.1）。
-
-### 2.5 术语表
-
-| 术语 | 含义 |
-|------|------|
-| page / page_size | KV cache 的固定分页单元；一页容纳 `page_size` 个 token 的全部层、全部 KV 头 |
-| last_page_len | 最后一页里的有效 token 数（1..=page_size；0 表示空请求） |
-| 页表（page indices） | 一个请求持有的页编号序列，如 `[7, 3, 11]` 表示逻辑第 0 页放在物理页 7 |
-| CSR / indptr | 压缩稀疏行格式；`indptr` 为每行的起始偏移前缀和 |
-| H2D / D2H | host（CPU 内存）到 device（显存）/ 反方向的拷贝 |
-| CTA tile | kernel 内一个线程块负责的 tile 粒度（`cta_tile_q` 是 query 侧 tile 的覆盖参数） |
-| newtype + Deref | 用一个只含一个字段的结构体包装另一类型，并实现 `Deref` 让引用可以自动强制转换到内层类型 |
+- **Paged KV cache（分页 KV 缓存）**：KV 缓存不像连续数组那样整块存放，而是切成固定大小的「页」（page，如 16 个 token 一页），每页在池里有自己的页号。一个请求的 KV 散落在若干页里，注意力 kernel 需要一张「页号表」才能找到它们。u3-l2 会精读池本身；本讲只把它当作数据侧的既成事实。
+- **CSR（Compressed Sparse Row，压缩稀疏行）**：一种用「值数组 + 行偏移数组」表达变长分组的数据结构。本讲的 `SplitKvCsr` 与 plan 里的 `page_indptr`、`o_indptr`、`q_indptr` 都是 CSR：例如 `o_indptr = [0, 2, 4]` 表示第 0 个请求占输出槽 `[0,2)`、第 1 个占 `[2,4)`。
+- **Split-KV（KV 切分）**：解码时若某请求的上下文很长，一个线程块算不完整个 KV，就把它的 KV 切成若干 chunk，多个块并行各算一段，最后归并。这要求调度面额外提供"哪个请求的第几个 chunk"的索引——这正是 `SplitKvCsr` 的由来。
+- **padding 行（填充行）**：CUDA Graph 回放要求每一步的形状固定，所以批次数组都按最坏情况（`padded_bs × cap` 个槽位）预分配，空槽填 0 并用 `block_valid_mask = 0` 标记无效。这与 u1-l1 提过的「padding 行是协议面」一脉相承。
 
 ## 3. 本讲源码地图
 
-| 文件 | 行数 | 作用 |
-|------|------|------|
-| [pegainfer-core/src/ops.rs](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops.rs#L1-L116) | 116 | 算子门面：声明私有子模块 `attention`/`paged_plan`，并把本讲的 6 个名字再出口给模型 crate |
-| [pegainfer-core/src/ops/attention.rs](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops/attention.rs#L1-L147) | 147 | 三个注意力入口：转发到 kernels 同名函数，唯一的加工是把 `KvLayout` 转成 kernel 认的 `PagedKvLayout` |
-| [pegainfer-core/src/ops/paged_plan.rs](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops/paged_plan.rs#L1-L247) | 247 | 分页计划：`SplitKvCsr` + `build_split_kv_csr`（纯宿主侧计算），`PrefillPagedPlan`（kernels 类型的 newtype 包装 + 四条构造路径） |
-| [pegainfer-core/src/kv_pool.rs](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/kv_pool.rs#L1-L564) | 564 | KV 池与请求状态（u3-l2 的主角）；本讲只取 `KvDesc<'a>` 与 `desc()`/`desc_for_len()`、`KvLayout::kernel_layout()` |
-
-消费方（用于验证参数流，属模型 crate，只引用不精读）：
-
-- [pegainfer-qwen3/src/prefill.rs](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-qwen3/src/prefill.rs#L296-L296)：调 `ops::prefill_attention_paged_into`，用 `PrefillPagedPlan::from_raw_batch_with_cta_tile_q` 建计划。
-- [pegainfer-qwen3/src/batch_decode_buffers.rs](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-qwen3/src/batch_decode_buffers.rs#L436-L449)：调 `build_split_kv_csr` 并 `memcpy_htod` 上传 CSR。
-- [pegainfer-qwen3/src/unified_forward.rs](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-qwen3/src/unified_forward.rs#L599-L599)：经 core 门面调 `paged_attention_batch_decode_split_kv_into`。
-- [pegainfer-gemma4/src/serve.rs](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-gemma4/src/serve.rs#L1592-L1617)：`desc_for_len` → `PrefillPagedPlan::new` 的完整生产链样本。
+| 文件 | 作用 |
+|------|------|
+| `pegainfer-core/src/ops.rs` | 算子门面：声明 `mod attention` / `mod paged_plan` 两个私有子模块，并 `pub use` 本讲的全部 6 个名字 |
+| `pegainfer-core/src/ops/attention.rs` | 三个注意力封装入口：薄包装 kernels 同名函数，负责把 core 的 `KvLayout` 转成 kernels 的 `PagedKvLayout` |
+| `pegainfer-core/src/ops/paged_plan.rs` | 分页计划：`PrefillPagedPlan`（包装 kernels 同名类型）、`SplitKvCsr` 与纯 CPU 构造器 `build_split_kv_csr` |
+| `pegainfer-core/src/kv_pool.rs` | KV 池与请求状态：`KvState::desc()` / `desc_for_len()` 产出 `KvDesc<'a>`，是 plan 的上游数据源 |
+| `pegainfer-kernels/src/ops/attention.rs` | （真身，本讲只作交叉引用）kernels 侧的 `PrefillPagedPlan` 定义与三个注意力 kernel 封装的实现 |
+| `pegainfer-qwen3/src/batch_decode_buffers.rs` | （消费方示例）调用 `build_split_kv_csr` 装配解码元数据，并带三个纯 CPU 的 CSR 单测，是本讲实践的锚点 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 模块一：paged attention 三入口（ops/attention.rs）
+### 4.1 计划与数据分离：为什么需要一个「调度面」
 
 #### 4.1.1 概念说明
 
-`attention.rs` 只做一件事：为三种执行形态各提供一个**薄封装入口**，把 core 侧类型（`KvLayout`、core 的 `PrefillPagedPlan`）适配成 kernels 侧类型后原样转发。三个入口对应三种形态：
+KV 数据（`CudaSlice<bf16>` 大缓冲）与「哪些页属于哪个请求」这两件事在物理上是分离的：池里只有无主的页，请求持有的只是页号列表。注意力 kernel 做一次计算，需要两类输入：
 
-| 入口 | 形态 | query 形状 | 计划载体 |
-|------|------|-----------|---------|
-| `prefill_attention_paged_into` | prefill（可整段多 token） | 每请求 `seq_len` 行 | `PrefillPagedPlan` |
-| `paged_attention_batch_decode_into` | batch decode（不切 KV） | 每请求 1 行 | 7 个独立的 `CudaSlice<i32>` 设备缓冲 |
-| `paged_attention_batch_decode_split_kv_into` | batch decode（KV 切 chunk） | 每请求 1 行 | 上述 7 个缓冲 + split 系列 CSR 缓冲 + 两个临时缓冲 |
+- **数据侧**：整块 KV 缓冲的指针 + 几何（每页多大、多少层、多少头、头维度多少）——所有请求共享同一份。
+- **调度侧**：本批次每个请求的页号表、序列长度、输出行位置——每个请求都不同、每一步都变。
 
-「计划与数据分离」的原因，从源码结构就能读出四条：
+「调度面」就是后者：把请求级的页表元数据整理成 kernel 可直接消费的设备端数组。pegainfer-core 里 `kv_pool.rs` 的 `KvDesc` 是最小粒度的描述（单请求、宿主侧），`ops/paged_plan.rs` 是批次粒度的计划（多请求、含设备端上传与图稳定复用），`ops/attention.rs` 则是把两者与数据侧拼装后转交给 kernels 的入口。
 
-1. **FFI 边界只认扁平数组**：kernel 是 CUDA 代码，看不到 Rust 的 `KvState`、借用、泛型；页表必须先变成设备侧 `i32` 数组（`CudaSlice<i32>`）才能被 kernel 索引。
-2. **同一份 KV 数据支持多种读法**：`kv_buffer` 是池里唯一的一块大显存，prefill 计划、decode 页表、split-KV CSR 都只是对它的不同「索引方式」，数据本身不用动。
-3. **状态与调度解耦**：`KvState` 活在请求的整个生命周期，计划则随每步的批次形态重建（或原地复用）——两者的变化频率完全不同。
-4. **图稳定复用**：计划可以预分配到最坏尺寸后原地重填（见 4.2），指针不变是 CUDA Graph 回放的前提（呼应 u1-l1 引入的 CUDA Graph 概念，u4-l1 精读）。
+这个分离在源码里有明文注释：`KvPool::buffer()` 的文档写明"池中所有状态都是同一缓冲的视图，executor 可以持有池、从 plan（而非请求状态）取页元数据"（[kv_pool.rs:254-259](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/kv_pool.rs#L254-L259)）。
+
+为什么值得分离？三个直接收益：
+
+1. **零拷贝调度**：请求来了又走，页在池里换手，KV 数据从不在请求间搬运；改变批次只需重写一张小小的索引表。
+2. **CUDA Graph 兼容**：索引表可以预分配到最坏大小后原地重填，设备指针不变（见 4.3.3）。
+3. **职责单一**：core 描述"状态长什么样"，kernels 决定"怎么消费"，两边只隔着几个 `i32` 数组的契约。
 
 #### 4.1.2 核心流程
 
-**prefill 路径**的参数流：
+一次注意力计算的拼装过程（伪代码）：
 
 ```text
-KvState（请求状态，持页表）
-   │  desc() / desc_for_len()            —— kv_pool.rs
-   ▼
-KvDesc<'a> { pages, last_page_len }       —— 宿主侧最小充分信息
-   │  PrefillPagedPlan::new / from_raw_batch_with_cta_tile_q
-   │    （页表 i32 化 + H2D 上传 + 算 q tile 划分）
-   ▼
-PrefillPagedPlan（设备侧页表 + indptr + tile 索引）
-   │
-   ▼
-ops::prefill_attention_paged_into(ctx, q,k,v, …, kv_buffer, layout, layer, plan, …)
-   │  layout.kernel_layout() 把 core 几何转成 kernels 的 PagedKvLayout
-   ▼
-pegainfer_kernels::ops::prefill_attention_paged_into(...)   —— 真正启动 kernel
+# 宿主侧（每个调度步）
+for req in batch:
+    desc = req.kv_state.desc()            # 页号切片 + last_page_len（宿主侧，零 GPU）
+plan = PrefillPagedPlan::from_raw_batch(...)   # 或 update_batch 原地重填
+csr  = build_split_kv_csr(chunk_size, cap, kv_lens, padded_bs)  # split-KV 索引，纯 CPU
+
+# 设备侧（kernel 启动）
+prefill_attention_paged_into(
+    kv_buffer,            # 数据侧：整块池缓冲（所有请求共享）
+    layout,               # 数据侧：几何（stride 等）
+    plan,                 # 调度侧：page_indices_d / q_indptr_d / ...
+    ...
+)
 ```
 
-**batch decode 路径**的参数流（以 qwen3 为例）：
+分层的形状：
 
 ```text
-每个请求的 KvState
-   │  extend_page_indices_i32() 把各请求页号按批顺序追加进一个行缓冲
-   ▼
-宿主侧 Vec<i32> 页表 + 每请求 last_page_len / position
-   │  上传到 BatchDecodeBuffers 自有的 7 个设备缓冲
-   │  （page_indices_d / page_indptr_d / last_page_len_d /
-   │    positions_d / request_indices_d / kv_tile_indices_d / kv_chunk_size_d）
-   ▼
-paged_attention_batch_decode[_split_kv]_into(...)
+KvState（每请求，RAII 持页）
+   └─ desc() / desc_for_len() → KvDesc<'a>（单请求页表，宿主侧切片）
+                                   │
+                                   ▼
+        PrefillPagedPlan（批次计划，设备端 i32 数组，可预分配/原地重填）
+        SplitKvCsr（split-KV 的批次计划，宿主 Vec，由消费方上传）
+                                   │
+                                   ▼
+        ops/attention.rs 三入口（把 数据+几何+计划 打包交给 kernels）
+                                   │
+                                   ▼
+        pegainfer_kernels::ops::attention（真身：真正的 kernel 启动）
 ```
-
-**split-KV** 额外多两步：先用 `build_split_kv_csr` 在宿主侧把每个请求的 `kv_len` 展开成「槽位 → (请求号, chunk 号)」的 CSR（详见 4.2），再连同 `split_o_indptr_d`、`split_block_valid_mask_d` 和两个临时缓冲 `split_tmp_v`（部分输出）、`split_tmp_s`（部分统计量）一起交给 kernel；kernel 先各 chunk 算部分 softmax 结果，再按 `o_indptr` 合并。合并的数学基础是 softmax 的在线重算（log-sum-exp 分解）：
-
-\[ \mathrm{softmax}(x)_i = \frac{e^{x_i - m}}{\sum_j e^{x_j - m}}, \quad m = \max_j x_j \]
-
-分块后每块各自记录局部最大值与局部和，第二阶段用 \( m = \max(m_1, m_2) \)、\( s = s_1 e^{m_1 - m} + s_2 e^{m_2 - m} \) 合并——这正是「部分输出 + 部分统计量」两个临时缓冲存在的理由。（chunk 内部的精确归约实现位于 kernels crate，本讲只依据缓冲命名与 CSR 结构讲到这一层。）
 
 #### 4.1.3 源码精读
 
-**（1）模块与再出口。** `attention` 与 `paged_plan` 都是**私有模块**（对比 `pub mod call_spec`），外部只能通过 ops.rs 的再出口使用：
+ops.rs 的模块声明与再出口——本讲的 6 个公开名字全部出自这里，两个子模块本身是私有的：
 
-[pegainfer-core/src/ops.rs:L3-L9](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops.rs#L3-L9) —— 声明私有子模块 `attention`（L3）与 `paged_plan`（L7），公开面完全收敛到下面的再出口；
+[ops.rs:L3-L16](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/ops.rs#L3-L16)：声明 `mod attention`（私有）、`mod paged_plan`（私有），再出口 3 个注意力函数、`PrefillPagedPlan`、`SplitKvCsr`、`build_split_kv_csr`。注意 attention 与 paged_plan 没有走 u2-l3 里那 69 项 kernels 再出口的路子——它们是 core **自研**的封装层。
 
-[pegainfer-core/src/ops.rs:L11-L16](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops.rs#L11-L16) —— 本讲的全部 6 个公开名字：三个注意力函数 + `PrefillPagedPlan` + `SplitKvCsr` + `build_split_kv_csr`。
+kernels 侧真身的位置（交叉验证用，细节留待读 kernels 时展开）：[pegainfer-kernels/src/ops/attention.rs:L31](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L31) 定义 `pub struct PrefillPagedPlan`，同文件 [L604](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L604)、[L1226](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L1226)、[L1355](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L1355) 分别是三个注意力入口的实现。
 
-**（2）prefill 入口。**
+#### 4.1.4 代码实践
 
-[pegainfer-core/src/ops/attention.rs:L11-L50](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops/attention.rs#L11-L50) —— prefill 入口签名：注意它一次吃下归一化权重（`q_norm`/`k_norm`）、RoPE 表（`cos_cache`/`sin_cache`）、池缓冲（`kv_buffer`）、core 几何（`layout: &KvLayout`）与计划（`plan: &PrefillPagedPlan`）——即「norm + RoPE + 追加 KV + 分页注意力」在这个 kernel 里是一体的；
-
-[pegainfer-core/src/ops/attention.rs:L31-L49](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops/attention.rs#L31-L49) —— 唯一的加工点：第 41 行把 `&layout.kernel_layout()` 传给 kernels（core 的 `KvLayout` → kernels 的 `PagedKvLayout`，见 4.3.3），`plan` 原样透传。
-
-**（3）batch decode 入口。**
-
-[pegainfer-core/src/ops/attention.rs:L52-L91](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops/attention.rs#L52-L91) —— 不带 split 的批量解码；本步的新写入 K/V（`k`/`v`）与历史 `kv_buffer` 一起参与计算；
-
-[pegainfer-core/src/ops/attention.rs:L61-L67](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops/attention.rs#L61-L67) —— 7 个设备侧 `i32` 缓冲参数，逐一对应：扁平页表、页表行偏移（CSR 的 indptr）、每请求末页有效长度、每请求位置、槽位→请求映射、槽位→KV chunk 映射、chunk 大小。**这就是「计划」在 decode 形态下的真身：一组裸设备数组**。
-
-**（4）split-KV 入口。**
-
-[pegainfer-core/src/ops/attention.rs:L93-L146](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops/attention.rs#L93-L146) —— split-KV 批量解码，参数表在前一入口之上再叠加 split 系列；
-
-[pegainfer-core/src/ops/attention.rs:L99-L115](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops/attention.rs#L99-L115) —— 新增参数：`row_offset`（本步 query 行在合并缓冲里的起点，供「prefill + decode 同一步」的混合批次定位自己的行）、5 个 split CSR 缓冲、部分输出/部分统计量两个**可变**临时缓冲（`&mut`，kernel 就地写）、以及补齐后的槽位总数 `split_padded_slots`。
-
-**（5）消费点核对（模型 crate 侧）。**
-
-[pegainfer-qwen3/src/prefill.rs:L296-L296](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-qwen3/src/prefill.rs#L296-L296) —— qwen3 的 prefill 调 `ops::prefill_attention_paged_into`（经 core 门面）；计划在 [prefill.rs:L526](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-qwen3/src/prefill.rs#L526-L526) 用 `from_raw_batch_with_cta_tile_q` 构建。
-
-[pegainfer-qwen3/src/unified_forward.rs:L599-L599](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-qwen3/src/unified_forward.rs#L599-L599) —— qwen3 的混合步经 core 门面调 `ops::paged_attention_batch_decode_split_kv_into`，`row_offset` 正是用来跳过同批 prefill 行的。
-
-[pegainfer-qwen3/src/batch_decode_dag.rs:L295-L316](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-qwen3/src/batch_decode_dag.rs#L295-L316) —— 一个诚实的旁证：qwen3 这条 decode 路径**绕过 core 封装直调** `pegainfer_kernels::ops::paged_attention_batch_decode_into`，自己补上 `&self.layout.kernel_layout()`。由于 core 封装本来就只是「转发 + 几何适配」，两条路进的是同一个 kernel；这提醒我们门面的价值在「统一类型出口」，而非增加执行逻辑。
-
-#### 4.1.4 代码实践：跟踪一条真实调用链（源码阅读型）
-
-1. **实践目标**：不写代码，把 qwen3 prefill 一步中「状态 → 计划 → kernel」的参数流亲手走一遍，验证 4.1.2 的流程图。
+1. **实践目标**：亲眼确认「计划与数据分离」在源码中的落点。
 2. **操作步骤**：
-   - 打开 [pegainfer-qwen3/src/prefill.rs:L285-L320](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-qwen3/src/prefill.rs#L285-L320)，找到 `ops::prefill_attention_paged_into` 调用，抄下它实参里的 `plan` 变量名；
-   - 向上回溯 `plan` 的来源（`PrefillPagedPlan::from_raw_batch_with_cta_tile_q`，[prefill.rs:L526](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-qwen3/src/prefill.rs#L526-L526)），再回溯 `page_indices`/`last_page_lens` 两个入参各自从哪个请求状态方法来；
-   - 最后列出 kernel 调用还额外需要、但不来自 `KvState` 的三类信息（提示：本段 query 的起点与长度、头几何、池缓冲与布局）。
-3. **需要观察的现象**：`KvState` 只贡献「页号 + 末页长度」；位置、几何、缓冲都由调用方另行提供——`KvDesc` 恰好是最小充分信息。
-4. **预期结果**：得到一张与本讲 4.1.2 流程图同构的调用链笔记（各环节文件:行号可点开对上）。
+   - 打开 [kv_pool.rs:L254-L259](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/kv_pool.rs#L254-L259)，抄下 `buffer()` 的文档注释。
+   - 在 `pegainfer-core/src/` 内检索 `kv_buffer` 与 `page_indices_d` 两个词，数一数它们各自出现在哪些文件。
+3. **需要观察的现象**：`kv_buffer` 只以 `&CudaSlice<bf16>` 引用的形式出现在 attention.rs 的签名里——core 从不读写 KV 数据内容；`page_indices_d` 只出现在 plan 的 getter 里——core 只搬运索引。
+4. **预期结果**：你会得到一个结论：core 对 KV 数据是"纯转发"，对页表是"全程经手"。这正是调度面的含义。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 `paged_attention_batch_decode_into` 的 7 个缓冲参数里没有 `KvState` 或 `KvDesc`？
-**答案**：这些参数是 kernel 的输入，而 kernel 在 CUDA 侧只认扁平设备数组；`KvState`/`KvDesc` 是宿主侧 Rust 类型，必须在调用前翻译（页表 i32 化 + H2D 上传）成 `CudaSlice<i32>` 系列。这正是「core 描述状态、kernels 消费状态」的边界。
+**练习 1**：如果不做计划/数据分离，每个请求各自持有连续的 KV 张量，注意力批次会发生什么？
 
-**练习 2**：`row_offset` 参数为什么只在 split-KV 版本出现，普通 batch decode 版本没有？
-**答案**：split-KV 版本服务于「prefill 与 decode 合并在同一步」的统一前向（见 qwen3 `unified_forward.rs` 的用法）：一个批次里 prefill 行排前面、decode 行排后面，decode kernel 需要 `row_offset` 找到本步自己那 1 行 query 在合并缓冲中的位置。不带 split 的入口假定整个缓冲都属于 decode 批（或调用方已自行保证行对齐），故无需偏移。
+**答案**：批内每个请求的 KV 长度不同、地址不连续，kernel 无法用一个统一的 GEMM/attention 形状覆盖整批，只能逐请求启动或先做一次数据搬运合并；同时请求的进出让 KV 缓冲频繁重排，CUDA Graph 也无法捕获固定形状的批内核。分页 + 索引表让"数据不动、索引动"。
 
-**练习 3**：如果让你给三个入口各写一句「一句话职责」，怎么写？
-**答案**：`prefill_attention_paged_into` = 整段 prompt 的「norm+RoPE+写 KV+因果注意力」一步到位；`paged_attention_batch_decode_into` = 多请求各 1 行 query 对全量历史 KV 的合批解码；`paged_attention_batch_decode_split_kv_into` = 同上，但把长 KV 切 chunk 提高并行度，代价是要额外归并部分结果。
+**练习 2**：`KvDesc` 与 `PrefillPagedPlan` 分别住在宿主侧还是设备侧？
 
-### 4.2 模块二：PrefillPagedPlan 与 SplitKvCsr（ops/paged_plan.rs）
+**答案**：`KvDesc<'a>` 是宿主侧的借用切片（`&[PageId]` + `usize`），不涉及 GPU；`PrefillPagedPlan` 内部持有 kernels 侧类型，暴露的 `page_indices_d()` 等是已上传的 `CudaSlice<i32>` 设备缓冲。前者是"描述"，后者是"已装填的调度数据"。
+
+### 4.2 attention.rs：paged attention 三入口
 
 #### 4.2.1 概念说明
 
-这个文件承载两类「翻译器」：
+[ops/attention.rs](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/ops/attention.rs) 提供三个函数，分别对应推理的两条主路径：
 
-1. **`SplitKvCsr` + `build_split_kv_csr`**：纯宿主侧计算，输入只有 `kv_lens`（每请求的 KV 长度）、`chunk_size`、`cap`（每请求最多 chunk 数）与 `padded_bs`（补齐后的批大小），输出 CSR 四个数组。它**完全不碰 GPU**——GPU 相关的只有调用方随后自己做的 `memcpy_htod`。
-2. **`PrefillPagedPlan`**：kernels 侧同名类型的 **newtype 包装**（`inner` 字段）。core 不复制 kernels 的计划逻辑，只包一层并提供「用 core 类型表达」的构造入口；包装上实现的 `Deref` 让 `&PrefillPagedPlan`（core 的）在传给 kernels 函数（形参是 `&PrefillPagedPlan`（kernels 的），见 [pegainfer-kernels/src/ops/attention.rs:L604-L622](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-kernels/src/ops/attention.rs#L604-L622) 的 `plan` 形参）时自动解引用强制转换——4.1.3 里「`plan` 原样透传」能编译正是靠它。
+| 入口 | 路径 | 调度输入形态 |
+|------|------|--------------|
+| `prefill_attention_paged_into` | 预填充（一次吃整段 prompt，含 causal mask） | 一个 `&PrefillPagedPlan` 对象 |
+| `paged_attention_batch_decode_into` | 批解码（每请求每步 1 个新 token） | 逐个传入 plan 提供的 `&CudaSlice<i32>` 数组 |
+| `paged_attention_batch_decode_split_kv_into` | 长 KV 的批解码（KV 切 chunk 并行，随后归并） | decode 数组 + split-KV 专属数组 + 两块临时归并缓冲 |
+
+三个函数都是**薄包装**：参数几乎原样转发给 `pegainfer_kernels::ops` 的同名函数，core 唯一主动做的变换是把 `&KvLayout` 换成 `&layout.kernel_layout()`——即「core 的几何描述 → kernels 的几何描述」。此外 prefill 入口把 core 的 plan 类型经 Deref 自动转成 kernels 的 plan 类型（见 4.3.3）。
+
+注意 prefill 入口还接收 `q_norm` / `k_norm` / `cos_cache` / `sin_cache` / `rms_eps`——QK 的 RMSNorm 与 RoPE 旋转被融进这一次调用里，这是 kernels 侧融合设计在 core 签名上的直接投影（对照 u2-l3 提过的 `dflash_qk_norm_rope_into` 命名习惯：减少访存优先）。
 
 #### 4.2.2 核心流程
 
-`build_split_kv_csr` 的算法：
+prefill 路径（单入口吃掉一个 plan 对象）：
 
 ```text
-输入: chunk_size = C, cap = K, kv_lens[r] (r = 0..B-1), padded_bs = P (≥ B)
-输出: 4 个数组，总槽位 padded_slots = P × K
-
-for 每个请求 r:
-    chunks(r) = max(1, ⌈kv_lens[r] / C⌉)          # 空请求也占 1 个 chunk
-    校验 chunks(r) ≤ K，否则报错
-    for c in 0..chunks(r):
-        request_indices.push(r); kv_tile_indices.push(c); block_valid_mask.push(1)
-    o_indptr.push(len(request_indices))            # 行偏移前缀和
-for 空槽位 r in B..P:
-    o_indptr.push(len(request_indices))            # 空请求区间长度为 0
-把 request_indices / kv_tile_indices / block_valid_mask 补零到 padded_slots 长（mask=0）
+调用方（模型 executor）
+  ├─ 持有 KvPool → kv_buffer（数据侧）
+  ├─ 持有 KvLayout → layout（几何）
+  ├─ 构造/重填 PrefillPagedPlan（调度侧）
+  └─ prefill_attention_paged_into(ctx, q, k, v, norms, caches,
+         kv_buffer, layout, layer, plan, output, 头数, head_dim, eps)
+        └─ layout.kernel_layout()   # core→kernels 的几何转换（唯一主动变换）
+        └─ &plan ──Deref──▶ &kernels::ops::PrefillPagedPlan
+        └─ pegainfer_kernels::ops::prefill_attention_paged_into(...)
 ```
 
-用公式表达补齐不变量：
+batch decode 路径（plan 被"拆散"成数组传入）：
 
-\[ \text{padded\_slots} = P \times K, \qquad \text{chunks}(r) = \max\!\left(1,\ \left\lceil \frac{\text{kv\_len}_r}{C} \right\rceil\right) \le K \]
+```text
+plan / decode buffers 提供：
+  page_indices_d    # 展平的页号表（所有请求拼接）
+  page_indptr_d     # 每请求在页号表中的起始偏移（CSR）
+  last_page_len_d   # 每请求最后一页的有效 token 数
+  positions_d       # 每请求当前位置（RoPE 用）
+  request_indices_d / kv_tile_indices_d / kv_chunk_size_d  # tile 调度
+paged_attention_batch_decode_into(ctx, q/k/v 新 token, kv_buffer, layout,
+    layer, 上述数组, output, num_qo_heads, batch_size)
+```
 
-`PrefillPagedPlan` 的四条构造路径，对应三种使用姿势：
+split-KV 在此之上追加：`split_request_indices_d`（某槽位属于哪个请求）、`split_kv_tile_indices_d`（第几个 chunk）、`split_o_indptr_d`（部分结果落哪一行）、`split_block_valid_mask_d`（padding 槽位标 0），以及归并用的两块临时缓冲 `split_tmp_v`（bf16）与 `split_tmp_s`（f32）。kernel 分两阶段：先各 chunk 独立算出局部的 max/sum 归一化中间量，再做一次在线 softmax 归并：
 
-| 入口 | 输入 | 场景 |
-|------|------|------|
-| `new`（→ 私有 `new_with_cta_tile_q`） | 单个 `&KvDesc` + 段几何 | 单请求一步（gemma4 在用） |
-| `from_raw_batch_with_cta_tile_q` | 每请求一行的裸页表 `&[Vec<i32>]` + 各自 last_page_len / start_pos / seq_len | 批量 prefill（qwen3 在用） |
-| `new_preallocated` | 最坏尺寸四元组（max_tokens/pages/batch/tiles） | 预分配，供图捕获 |
-| `update_batch_with_cta_tile_q` | 同 `from_raw_batch` 的数据 | **原地重填、零分配、指针不变**，配合 `new_preallocated` 实现 graph-stable 复用 |
+\[ o = \sum_c \frac{e^{m_c - m}\, s_c}{\sum_j e^{m_j - m}} \cdot v_c,\qquad m = \max_c m_c \]
+
+其中 \(m_c\)、\(s_c\)（softmax 分母）、\(v_c\)（加权值和）是各 chunk 的局部结果——这就是需要 `split_tmp_s`/`split_tmp_v` 两块临时缓冲的原因。
 
 #### 4.2.3 源码精读
 
-**（1）`SplitKvCsr` 结构。**
+[attention.rs:L1-L9](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/ops/attention.rs#L1-L9)：导入清单本身就是一张依赖表——`super::PrefillPagedPlan`（本模块的 plan）、`crate::kv_pool::KvLayout`（几何来自 KV 池）、`crate::tensor::{DeviceContext, DeviceVec, HiddenStates}`（tensor 门面）。attention 模块直接依赖 kv_pool，是「调度面横跨 ops 与 kv_pool 两章」的实证。
 
-[pegainfer-core/src/ops/paged_plan.rs:L9-L16](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops/paged_plan.rs#L9-L16) —— 文档注释写明：split-KV decode kernel 的宿主侧 CSR，含「补齐后的请求/chunk 索引、每槽位有效位掩码、每请求 chunk 偏移」；四个 `Vec` 字段全部是宿主侧普通内存。
+[attention.rs:L12-L50](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/ops/attention.rs#L12-L50)：`prefill_attention_paged_into` 的签名与转发。参数可分四类：
 
-**（2）`build_split_kv_csr` 主循环。**
+- **本步激活**：`q_batch` / `k_batch` / `v_batch`（`&mut HiddenStates`，k 需可变因为 norm/RoPE 原地写）；
+- **数据侧**：`kv_buffer: &CudaSlice<bf16>` + `layout: &KvLayout` + `layer: usize`；
+- **调度侧**：`plan: &PrefillPagedPlan`（第 24 行）+ `start_pos`/`seq_len` 语义都封装在 plan 内部；
+- **几何与输出**：头数三元组、`rms_eps`、`output: &mut HiddenStates`。
 
-[pegainfer-core/src/ops/paged_plan.rs:L20-L32](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops/paged_plan.rs#L20-L32) —— 入参与三条前置校验（chunk_size/cap 必须 > 0、请求数不得超过补齐批大小）；
+第 41 行 `&layout.kernel_layout()` 是整个文件里 core 最实质的一步操作。
 
-[pegainfer-core/src/ops/paged_plan.rs:L40-L53](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops/paged_plan.rs#L40-L53) —— 核心循环：第 41 行 `kv_len.div_ceil(chunk_size).max(1)` 计算 chunk 数（空请求也至少 1 块）；第 42-46 行超过 `cap` 直接报错（错误信息提示「context limit misconfigured」——这是配置期就该发现的问题，不是运行期能恢复的）；随后逐 chunk 压入三个平行的槽位数组并推进 `o_indptr`；
+[attention.rs:L53-L91](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/ops/attention.rs#L53-L91)：`paged_attention_batch_decode_into`——注意签名里没有 plan 对象，而是 7 个独立的 `&CudaSlice<i32>` 调度数组（L61-L67），它们的名字与 4.3.3 里 plan 的 getter 一一对应；executor 可以从 plan 取，也可以从自己的 decode buffers 取，core 不关心。
 
-[pegainfer-core/src/ops/paged_plan.rs:L54-L61](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops/paged_plan.rs#L54-L61) —— 补齐段：空请求槽位贡献零 chunk（`o_indptr` 原地重复），剩余槽位填 `(0, 0, mask=0)`——**填充是构造性确定的**，kernel 靠 `block_valid_mask=0` 识别并跳过（这与 u1-l1 讲过的「padding 行是协议面」一脉相承）。
+[attention.rs:L94-L146](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/ops/attention.rs#L94-L146)：`paged_attention_batch_decode_split_kv_into`——最长的签名。三个值得注意的点：`row_offset: usize`（输出行偏移，多流/多段输出共用一个 output 时定位本段）；`split_tmp_v: &mut CudaSlice<bf16>` 与 `split_tmp_s: &mut CudaSlice<f32>`（可变借用：归并阶段原地写）；`split_padded_slots: usize`（把 padded 大小显式传给 kernel，配合 mask 用）。依旧逐参转发给 kernels 同名函数（L120-L145）。
 
-**（3）`PrefillPagedPlan` 包装。**
+#### 4.2.4 代码实践
 
-[pegainfer-core/src/ops/paged_plan.rs:L71-L73](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops/paged_plan.rs#L71-L73) —— newtype 声明，`inner` 即 kernels 的计划类型；
-
-[pegainfer-core/src/ops/paged_plan.rs:L76-L95](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops/paged_plan.rs#L76-L95) —— `new`：**core 与 kv_pool 契约的交汇点**——形参 `desc: &KvDesc<'_>`，第 6 行的 `use crate::kv_pool::KvDesc` 让本文件直接消费 kv_pool 的状态描述；
-
-[pegainfer-core/src/ops/paged_plan.rs:L108-L124](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops/paged_plan.rs#L108-L124) —— 翻译现场：把 `desc.page_indices()` 的 `PageId` 逐个映射成 `i32`（L108-L112），连同 `desc.last_page_len()`（L117）一起交给 kernels 的构造器——**`KvDesc` 的全部两个字段在此各就各位**；
-
-[pegainfer-core/src/ops/paged_plan.rs:L129-L153](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops/paged_plan.rs#L129-L153) —— `from_raw_batch_with_cta_tile_q`：批量版，不吃 `KvDesc` 而吃「每请求一行页表」的裸数据（`page_indices: &[Vec<i32>]`）——当页表来自别处（如 qwen3 的 `pegainfer_kv_cache::KvView`）时走这条路；
-
-[pegainfer-core/src/ops/paged_plan.rs:L155-L173](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops/paged_plan.rs#L155-L173) —— `new_preallocated`：按最坏尺寸预分配，文档注明供原地重填、图稳定缓冲复用（qwen3 的 `unified_forward.rs:203` 与 `verify_graph.rs:119` 都在用）；
-
-[pegainfer-core/src/ops/paged_plan.rs:L175-L200](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops/paged_plan.rs#L175-L200) —— `update_batch_with_cta_tile_q`：**原地重填（no allocation, pointers unchanged）**——CUDA Graph 捕获的是固定地址，每步变化的内容必须写进预分配的同一块缓冲（qwen3 `unified_forward.rs:369` 每步调它）；
-
-[pegainfer-core/src/ops/paged_plan.rs:L202-L237](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops/paged_plan.rs#L202-L237) —— 一组只读访问器，逐个暴露设备缓冲（`page_indices_d`、`page_indptr_d`、`last_page_len_d`、`q_indptr_d`、`request_indices_d`、`qo_tile_indices_d`、`kv_tile_indices_d`、`kv_chunk_size_d`、`total_num_rows_d`）与标量（`batch_size`、`num_tiles`）——**decode 路径需要的页表缓冲正来自这里**（或模型 crate 自建的等价缓冲）；
-
-[pegainfer-core/src/ops/paged_plan.rs:L240-L246](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/ops/paged_plan.rs#L240-L246) —— `Deref` 实现，让这个包装能直接传给 kernels 的函数（见 4.2.1）。
-
-**（4）CSR 上传的消费点。**
-
-[pegainfer-qwen3/src/batch_decode_buffers.rs:L436-L449](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-qwen3/src/batch_decode_buffers.rs#L436-L449) —— 生产样本：`build_split_kv_csr(...)` 之后，五个数组（含单元素 `split_kv_chunk_size`）逐个 `memcpy_htod` 进预分配设备缓冲，最后记下 `split_padded_slots = padded_bs * cap`——正好是 4.1.3 里那个形参的实参来源；
-
-[pegainfer-qwen3/src/batch_decode_buffers.rs:L454-L466](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-qwen3/src/batch_decode_buffers.rs#L454-L466) —— 什么时候用 split-KV：小批量走 SplitKv（用 chunk 并行度补 SM），大批量走 NonPartition——调度决策在模型 crate，core 只提供两种弹药。
-
-#### 4.2.4 代码实践：手工推演 build_split_kv_csr（纯 CPU，可直接验证）
-
-qwen3 的 [batch_decode_buffers.rs:L526-L549](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-qwen3/src/batch_decode_buffers.rs#L526-L549) 已经为这个函数准备了三个现成单测。本实践分两段：
-
-1. **实践目标**：不依赖 GPU，确认你真的会算 CSR。
+1. **实践目标**：不借助 IDE 的类型提示，靠签名本身把三个入口的参数归类。
 2. **操作步骤**：
-   - 先不看断言，自己笔算：`build_split_kv_csr(64, 4, &[40, 100], 3)`（chunk_size=64, cap=4, 两个请求 kv_len 为 40 和 100，补齐到 3 槽）的四个输出数组；
-   - 再对照同文件 `padding_requests_contribute_zero_chunks` 测试（L539）的断言核对：`o_indptr == [0, 1, 3, 3]`、`request_indices[..3] == [0, 1, 1]`、`kv_tile_indices[..3] == [0, 0, 1]`、总长度 `== 3 * 4`；
-   - 最后推演 `errors_when_a_request_exceeds_the_cap`（L548）：`build_split_kv_csr(64, 4, &[1000], 1)` 为何必须报错（⌈1000/64⌉ = 16 > 4）。
-3. **需要观察的现象**：请求 0（kv_len=40 < 64）仍占 1 个 chunk；请求 1（kv_len=100）占 2 个 chunk；第 3 个槽位是纯填充，`o_indptr` 最后两值相同表示零 chunk；`request_indices` 数组长度被补齐到 `padded_bs × cap = 12`，填充槽 mask=0。
-4. **预期结果**：手算结果与断言逐项一致。若想机器验证，可运行 `cargo test --release -p pegainfer-qwen3 --lib batch_decode_buffers`（该函数本身是纯 CPU 逻辑，但编译 qwen3 需要先经 kernels 的 build.rs 跑 nvcc，环境开销较大）——**待本地验证**。
+   - 打开 [attention.rs](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/ops/attention.rs)，为 `paged_attention_batch_decode_split_kv_into` 的全部参数做四分法标注：**激活 / KV 数据与几何 / 调度索引 / 输出与临时缓冲**。
+   - 数一下调度索引类参数有几个 `CudaSlice<i32>`、几个 `CudaSlice<u8>`，并写下每个数组"每个元素属于谁"（每请求一个？每槽位一个？）。
+3. **需要观察的现象**：你会发现在三个入口里，「KV 数据」始终只有 `kv_buffer` 一个参数；批次的一切差异都体现在 `i32` 索引数组的长度与内容上。
+4. **预期结果**：得到一张 4 列表格；split-KV 入口的调度索引数量是 prefill 入口的数倍，直观印证"KV 越长、调度面越厚"。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：`build_split_kv_csr` 为什么把槽位总数固定为 `padded_bs * cap`，而不是「实际 chunk 数」？
-**答案**：固定尺寸让设备缓冲可以一次性预分配到最坏情况并反复复用（同批大小/上限内指针稳定），这与 CUDA Graph 的地址稳定性要求、以及「每步集合形状固定」的纪律一致；代价是空槽，用 `block_valid_mask=0` 显式标记，kernel 构造性跳过。
+**练习 1**：为什么 prefill 入口把 plan 作为对象传入，而两个 decode 入口把调度数据拆成独立数组？
 
-**练习 2**：`PrefillPagedPlan` 为什么是 newtype + Deref，而不是 `pub use` 直接再出口 kernels 的类型？
-**答案**：因为 core 要在这层提供**以 core 类型为入参**的构造入口（`new` 吃 `KvDesc`），这是 kernels 侧没有的 API；同时 newtype 隐藏 kernels 类型细节，Deref 又保留了「传给 kernels 函数」的零成本互通。`tensor.rs`/`ffi.rs` 用整行再出口是因为它们**没有**要加的 API，`ops.rs` 的 `PrefillPagedPlan` 用包装是因为**有**——门面形式的差异反映职责差异。
+**答案**：prefill 的调度数据天然聚在一个 plan 对象里（q_indptr、tile 索引等由 plan 一次性算好），传对象最省事；decode 每步只前进一个 token，调度数据由 executor 的常驻 decode buffers 持有并逐步推进（对照 ops.rs 再出口的 `advance_decode_metadata`，以及 plan 的 `decode_metadata_d_mut()` 返回可变二元组），executor 需要灵活拼装（split-KV 的 CSR 数组来自另一处上传），拆散传数组让 kernel 封装不绑定单一持有者。
 
-**练习 3**：`new_with_cta_tile_q` 里的 `cta_tile_q_override` 传 0 意味着什么？
-**答案**：0 表示不覆盖、让 kernels 侧用自己的默认 tile 划分（具体默认值在 kernels 的实现里，本讲不展开）；非 0 值用于调用方要强行指定 query 侧 CTA tile 粒度的场景，例如 qwen3 用常量 `PREFILL_ATTENTION_CTA_TILE_Q` 对齐它的统一前向缓冲布局。
+**练习 2**：三个入口的函数名都以 `_into` 结尾，这与 u2-l3 归纳的命名约定一致吗？
 
-### 4.3 模块三：KvDesc 对拍——core 描述状态、kernels 消费状态
+**答案**：一致。`_into` 表示结果写入调用方提供的缓冲（这里是 `output: &mut HiddenStates`）而不是新建返回值；这让输出缓冲可以被 executor 预分配并纳入 CUDA Graph 的指针稳定集。
+
+### 4.3 paged_plan.rs：PrefillPagedPlan 与 SplitKvCsr
 
 #### 4.3.1 概念说明
 
-`KvDesc<'a>` 是 kv_pool.rs 定义、paged_plan.rs 消费的**最小充分信息**载体：要让一个 kernel 正确读到某请求的 KV，最少需要知道「这个请求的页号序列」和「最后一页有多少有效 token」。多了浪费，少了读错（要么越界读别人的页，要么把末页的垃圾当有效数据）。
+[paged_plan.rs](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/ops/paged_plan.rs) 承载两套调度数据：
 
-它和 plan/CSR 的分工是**视角差异**：
-
-- `KvDesc`：**单请求视角**、宿主侧、借用（`'a` 借的是 `KvState` 里页表的生存期）——描述「状态是什么」；
-- `PrefillPagedPlan` / `SplitKvCsr`：**批次视角**、（前者）设备侧/（后者）宿主侧——描述「这一步怎么调度」。
-
-`desc()` 与 `desc_for_len()` 的差异是本模块的关键考点：前者「照实汇报」（用 `KvState` 当前 `seq_len` 推末页长度，不校验页数）；后者「按假想长度汇报」（用调用方给的 `seq_len`，并**强校验**持有页数恰好等于 `⌈seq_len / page_size⌉`）——用于「状态还没推进、但要用推进后的长度做计划」的场景（如 gemma4 在写 KV 前就要构造本步计划）。
+- **`PrefillPagedPlan`**：预填充计划。core 侧是一个包装器（`inner: pegainfer_kernels::ops::PrefillPagedPlan`），提供四条构造路径与一组设备端数组 getter。它的杀手锏是「预分配 + 原地重填」：先按最坏情况分配（`new_preallocated`），之后每步用 `update_batch_with_cta_tile_q` 原地重填——文档注释明说"no allocation, pointers unchanged"（图稳定缓冲复用），这是 decode/prefill 混排路径能进 CUDA Graph 的前提。
+- **`SplitKvCsr` + `build_split_kv_csr`**：split-KV 解码的宿主侧 CSR，纯 CPU 构造、零 GPU 依赖。它解决"批内各请求的 KV 长短不一，且都可能被切成多个 chunk"的索引问题，并统一 padding 到 `padded_bs × cap` 个槽位。
 
 #### 4.3.2 核心流程
 
-生产链（已由 gemma4 的源码证实）：
+`build_split_kv_csr` 的算法（宿主侧，纯 CPU）：
+
+1. 校验：`chunk_size > 0`、`cap > 0`、`kv_lens.len() <= padded_bs`。
+2. 对每个请求 \(r\)，计算 chunk 数：
+
+\[ \text{chunks}(r) = \max\left(1,\ \left\lceil \frac{\text{kv\_len}_r}{\text{chunk\_size}} \right\rceil\right) \]
+
+（`.max(1)`：哪怕 KV 长度为 0 也保留一个 chunk，避免空请求在 CSR 里消失。）
+3. 若 \(\text{chunks}(r) > \text{cap}\) 则报错——`cap` 是预分配的每请求 chunk 上限，超限说明"上下文上限配错了"（错误信息原文：context limit misconfigured）。
+4. 逐 chunk 追加 `(request_idx, chunk_idx, mask=1)`，并把当前累计长度压入 `o_indptr`——标准 CSR 前缀和。
+5. 把不足 `padded_bs` 的空请求的 `o_indptr` 补齐为同一累计值（空区间 `[len, len)`）。
+6. 把三个定长数组 padding 到 `padded_bs * cap` 个槽位，`mask=0`、索引填 0（确定性填充）。
+
+一个完整实例（取自 qwen3 的真实单测，见 4.3.4）：`chunk_size=64, cap=64, kv_lens=[100, 100], padded_bs=2`。每请求 \( \lceil 100/64 \rceil = 2 \) 个 chunk：
 
 ```text
-KvState（持 permit 页表 + seq_len）
-   │ desc_for_len(start_pos + seq_len)     ← 用「本步结束时的长度」
-   ▼
-KvDesc { pages, last_page_len }
-   │ PrefillPagedPlan::new(ctx, &desc, start_pos, seq_len, 头几何...)
-   │    ├─ PageId[] → Vec<i32>（i32 化）
-   │    └─ 交 kernels 构造器：上传设备 + 算 tile
-   ▼
-PrefillPagedPlan（设备侧）
-   │ prefill_attention_paged_into(ctx, q,k,v, ..., kv_buffer, layout, layer, plan, ...)
-   ▼
-kernels kernel：按 plan 的页表逐页跳读 kv_buffer
+request_indices = [0, 0, 1, 1, 0×124…]   # 长度 2×64=128
+kv_tile_indices = [0, 1, 0, 1, 0×124…]
+block_valid_mask = [1, 1, 1, 1, 0×124…]
+o_indptr         = [0, 2, 4]              # 请求 0 占槽 [0,2)，请求 1 占 [2,4)
 ```
+
+`PrefillPagedPlan` 的四条构造路径与用途：
+
+| 构造入口 | 输入 | 场景 |
+|----------|------|------|
+| `new` | 单个 `&KvDesc` + start_pos/seq_len + 头几何 | 单请求，`cta_tile_q` 用默认（override=0） |
+| `from_raw_batch_with_cta_tile_q` | 多请求的原始页号 `Vec<i32>` 列表 | 批量 prefill，executor 已有扁平化页表 |
+| `new_preallocated` | 只给最坏尺寸（tokens/pages/batch/tiles 四上限） | 图稳定路径的第一步：只分配一次 |
+| `update_batch_with_cta_tile_q` | 同 `from_raw_batch` 的数据 | 图稳定路径的每步：原地重填，指针不动 |
 
 #### 4.3.3 源码精读
 
-**（1）`KvDesc` 的定义。**
+[paged_plan.rs:L9-L16](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/ops/paged_plan.rs#L9-L16)：`SplitKvCsr` 的四个 `Vec` 字段与文档注释——"padded request/chunk indices, the per-slot validity mask, and the per-request chunk offsets"，一行说清三个数组的语义分工。
 
-[pegainfer-core/src/kv_pool.rs:L423-L430](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/kv_pool.rs#L423-L430) —— 文档注释点明它是「kernel 面向的请求分页 KV 元数据」：捆绑池几何之外的全部请求级状态（页表 + 末页长度）；结构体仅两个私有字段：`pages: &'a [PageId]`（借用，零拷贝）与 `last_page_len: usize`；
+[paged_plan.rs:L20-L69](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/ops/paged_plan.rs#L20-L69)：`build_split_kv_csr` 全函数。L41 的 `kv_len.div_ceil(chunk_size).max(1)` 是 chunk 数公式；L42-L46 的 `anyhow::ensure!` 是 cap 越界检查（错误信息带 kv_len 与 chunk_size，可诊断）；L47-L51 逐 chunk 填三个数组；L52 压入 `o_indptr` 前缀和；L54-L61 空请求补 `o_indptr`、padding 槽位填 `(0,0,0)` 且 `mask=0`。注意 L28-L32 的前置校验顺序：先验参数合法性再算 `padded_slots`。
 
-[pegainfer-core/src/kv_pool.rs:L432-L446](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/kv_pool.rs#L432-L446) —— 两个读取器：`last_page_len()` 公开；`page_indices()` 仅 `pub(crate)`——**页号不外泄给模型 crate**，只有 core 内部（正是 paged_plan.rs）能翻译它，这是把「状态翻译」职责钉死在 core 的手段。
+[paged_plan.rs:L71-L95](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/ops/paged_plan.rs#L71-L95)：`PrefillPagedPlan` 包装结构 + `new`。`new` 只是 `new_with_cta_tile_q(..., 0)` 的默认化（override=0 表示"用内核默认 tile"）。`new_with_cta_tile_q` 是私有的（L98，`fn` 无 `pub`）——外部想自定义 tile 只能走 batch 路径。
 
-**（2）两个构造入口。**
+[paged_plan.rs:L98-L126](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/ops/paged_plan.rs#L98-L126)：**本文件最关键的一跳**——`KvDesc` 到 kernels plan 的桥。L108-L112 把 `desc.page_indices()`（`&[PageId]`）逐个 `p.index() as i32` 收集成 `Vec<i32>`；L114-L124 把「页号表 + `desc.last_page_len()` + start_pos/seq_len + 头几何」整体交给 kernels 的 `PrefillPagedPlan::new_with_cta_tile_q`。core 在这里完成了「宿主侧 PageId 切片 → 设备侧 i32 数组」的形态转换。
 
-[pegainfer-core/src/kv_pool.rs:L390-L395](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/kv_pool.rs#L390-L395) —— `desc()`：直接用当前 `seq_len`（`last_page_len()` 的实现在 [L315-L322](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/kv_pool.rs#L315-L322)：`token_count % page_size`，整除时取 `page_size`、零长度取 0）；
+[paged_plan.rs:L128-L153](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/ops/paged_plan.rs#L128-L153)：`from_raw_batch_with_cta_tile_q`——批量入口，注意它**不接收 `KvDesc`**，直接吃调用方准备好的 `&[Vec<i32>]` 页号表（kernels 侧对应 `new_batch_with_cta_tile_q`）。executor 侧的真实用法见 [pegainfer-qwen3/src/unified_forward.rs:L336](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-qwen3/src/unified_forward.rs#L336)。
 
-[pegainfer-core/src/kv_pool.rs:L397-L408](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/kv_pool.rs#L397-L408) —— `desc_for_len(seq_len)`：多出的 `ensure!(held == needed)` 强校验「持有页数与假想长度严丝合缝」——页多说明状态超前、页少说明容量没给够，两者都会让 kernel 读到错位数据，所以宁可当场报错。
+[paged_plan.rs:L155-L200](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/ops/paged_plan.rs#L155-L200)：`new_preallocated`（L157-L173，按 `max_total_tokens/max_total_pages/max_batch/max_tiles` 四个上限一次性分配）与 `update_batch_with_cta_tile_q`（L177-L200，原地重填）。L155-L156 与 L175 的文档注释直说动机："graph-stable buffer reuse"、"no allocation, pointers unchanged"。qwen3 的 [unified_forward.rs:L203](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-qwen3/src/unified_forward.rs#L203) 正是 `new_preallocated` 的消费点。
 
-**（3）几何翻译。**
+[paged_plan.rs:L202-L246](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/ops/paged_plan.rs#L202-L246)：getter 群 + `Deref`。getter 名与 4.2 里 decode 入口的参数名严格一一对应（`page_indices_d()` / `page_indptr_d()` / `last_page_len_d()` / `request_indices_d()` / `kv_tile_indices_d()` / `kv_chunk_size_d()`，另有 prefill 专属的 `q_indptr_d()` / `qo_tile_indices_d()` / `total_num_rows_d()`）；`decode_metadata_d_mut()` 返回 `(request_indices, kv_chunk_size)` 的可变借用，供每步推进 decode 元数据。L240-L246 的 `Deref` 让 `&PrefillPagedPlan`（core 型）能自动当作 `&kernels::ops::PrefillPagedPlan` 用——4.2 的 prefill 入口能直接把 `plan` 传给 kernels 函数，靠的就是这次 deref 强制转换。
 
-[pegainfer-core/src/kv_pool.rs:L102-L114](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/kv_pool.rs#L102-L114) —— `KvLayout::kernel_layout()`：core 的 `KvLayout`（[L15-L33](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/kv_pool.rs#L15-L33)）字段逐一抄进 kernels 的 `PagedKvLayout`——三个注意力入口第 41/78/127 行传的都是它，这是除 `KvDesc` 之外的另一条「描述翻译」管道：**请求级走 desc，池级走 layout**。
+#### 4.3.4 代码实践
 
-**（4）生产链实证。**
-
-[pegainfer-gemma4/src/serve.rs:L1592-L1617](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-gemma4/src/serve.rs#L1592-L1617) —— 一步到位的完整样本：`kv.global.desc_for_len(kv_len)`（L1592，kv_len = start_pos + seq_len，即「推进后长度」）→ `PrefillPagedPlan::new(ctx, &global_desc, start_pos, seq_len, ...)`（L1609）——4.3.2 流程图的每一环都有真实行号背书。
-
-#### 4.3.4 代码实践：写一份「desc ↔ plan」对照笔记（本讲主实践）
-
-1. **实践目标**：把「core 描述状态、kernels 消费状态」的契约固化成一张可复查的对照表，并用一道设计题检验理解。
+1. **实践目标**：验证你手算 CSR 的能力，并跑通仓库里现成的纯 CPU 测试。
 2. **操作步骤**：
-   - 建一张两栏表。**左栏**：`KvDesc<'a>` 的字段及语义（`pages`、`last_page_len`），外加两个构造入口 `desc()` / `desc_for_len()` 的差异（校验有无、seq_len 来源）；**右栏**：`PrefillPagedPlan` 的四条构造入口与暴露的设备缓冲清单、`SplitKvCsr` 的四个字段与唯一构造函数；
-   - 每一格标注证据行号（本讲引用过的链接即可）；
-   - 在表下回答设计题（见第 5 节综合实践，先自己写再看参考答案）。
-3. **需要观察的现象**：左栏只有 2 个字段，右栏却有 8+ 个设备缓冲——「请求状态」到「批次调度」之间，多出来的信息全部是**批次上下文**（行偏移、槽位映射、tile 划分、位置），没有一样来自单个请求自身。
-4. **预期结果**：一张对照表 + 一段设计题回答。核心结论应能用自己的话复述：`KvDesc` 是单请求、宿主侧、最小充分；plan/CSR 是批次级、面向 kernel 的调度投影。
+   - 先手算：`build_split_kv_csr(chunk_size=64, cap=4, kv_lens=[40, 100], padded_bs=3)` 的 `o_indptr` 与前几个槽位。
+   - 再对照真实测试 [pegainfer-qwen3/src/batch_decode_buffers.rs:L536-L544](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-qwen3/src/batch_decode_buffers.rs#L536-L544)（`padding_requests_contribute_zero_chunks`）核对：`o_indptr = [0, 1, 3, 3]`（请求 0 只有 1 个 chunk，请求 1 有 2 个，第 3 槽是 padding、贡献空区间）。
+   - 有 CUDA 工具链的环境可运行（qwen3 编译会触发 kernels 的 nvcc 构建，耗时较长）：
+     ```bash
+     cargo test --release -p pegainfer-qwen3 --lib uniform_batch_csr -- --nocapture
+     ```
+     该过滤只会命中 `uniform_batch_csr` 这类纯 CPU 测试，不会触发同文件里需要 GPU 的 `shared_prefix_views_are_counted_by_reference`。
+3. **需要观察的现象**：手算值与断言一致；三个 CSR 测试（[L525-L549](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-qwen3/src/batch_decode_buffers.rs#L525-L549)）分别覆盖均匀批、padding 批、cap 越界三种形态。
+4. **预期结果**：测试通过（或无编译环境时，以手算对照断言值完成验证；本条命令**待本地验证**）。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`KvDesc.pages` 为什么是 `&'a [PageId]` 借用而不是 `Vec<PageId>` 拷贝？
-**答案**：`desc()` 是每步前向都会调的热路径，借用零拷贝、零分配；页表的真身由 `KvState` 的 RAII permit 持有，生存期由 `'a` 绑定，不会悬空。拷贝版反而制造了「两份页表不同步」的可能。
+**练习 1**：`new_preallocated` 之后如果实际批次比四个 max 都小，会发生什么？比 max 大呢？
 
-**练习 2**：把 `desc_for_len` 的 `ensure!(held == needed)` 校验去掉，最坏会发生什么？
-**答案**：页数多于所需时 kernel 会把多余页也当有效历史读（读到上一个使用这些页的请求残留数据——页是复用的）；页数少于所需时 kernel 会按页表读到未分配/他人的页。两种都是静默数据污染，比 panic 恶劣得多，所以这行校验是正确性护栏。
+**答案**：比 max 小没问题——`update_batch_with_cta_tile_q` 重填实际内容，多余部分是 padding（这正是预分配的意义）；比 max 大则重填时必然越界，qwen3 侧在更上层（如 `sync_paged_meta` 的 page-index overflow 检查，见 [batch_decode_buffers.rs:L515-L522](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-qwen3/src/batch_decode_buffers.rs#L515-L522) 的同类语义）显式报错而不是让设备拷贝悄悄越界。
 
-**练习 3**：为什么 `page_indices()` 是 `pub(crate)` 而 `last_page_len()` 是 `pub`？
-**答案**：末页长度只是个数字，公开无妨；页号序列一旦外泄，模型 crate 就可能绕过 core 直接拼页表、与 `KvState` 的生命周期管理脱钩（页归还后页号悬空）。`pub(crate)` 把「页号 → i32」的翻译权独占给 paged_plan.rs，契约就锁死在 core 内部。
+**练习 2**：为什么 `build_split_kv_csr` 里 `.max(1)` 是必要的？去掉它会怎样？
+
+**答案**：若某请求 kv_len=0，`div_ceil` 得 0 个 chunk，该请求在 `request_indices` 里没有任何槽位、`o_indptr` 出现两个相等的前缀——CSR 结构上仍合法，但 kernel 侧按"每请求至少一个输出行"的假设做归并时会读到未初始化槽位；`.max(1)` 保证空请求也占一个显式的、被 mask 标记的槽位，行为确定。
+
+**练习 3**：`PrefillPagedPlan` 为什么不直接 `pub use pegainfer_kernels::ops::PrefillPagedPlan`（像 u2-l2 的 ffi 那样一行再出口），而要包一层？
+
+**答案**：因为 core 需要在边界上做**有内容的适配**：`new` 系列构造入口接收 core 自己的 `KvDesc`（含 `PageId → i32` 的转换，L108-L112），这是一行再出口给不了的；同时 `Deref` 又保留了"零成本当 kernels 类型用"的便利。这是「纯转发门面」与「适配器门面」的分界：attention 三入口是前者，`PrefillPagedPlan` 是后者。
+
+### 4.4 KvDesc 对拍：core 描述状态、kernels 消费状态
+
+#### 4.4.1 概念说明
+
+`KvDesc<'a>` 是 KV 池交给前向代码的「单请求身份卡」，定义在 [kv_pool.rs:L427-L430](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/kv_pool.rs#L427-L430)：只有两个字段——`pages: &'a [PageId]`（借用的页号切片）与 `last_page_len: usize`（最后一页的有效 token 数）。它不拥有任何东西（纯借用）、不知道池缓冲在哪（页号只在签发它的池里有意义，见 `belongs_to`，[kv_pool.rs:L349-L353](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/kv_pool.rs#L349-L353)）、也不含几何（stride 在 `KvLayout` 里，由入口单独传）。
+
+「对拍」的意思是：把 `KvDesc`（最小描述）与 plan（批次调度数据）并排放，看信息是如何逐级补充的——这正是「core 描述状态、kernels 消费状态」契约的具体形状。
+
+#### 4.4.2 核心流程
+
+`KvDesc` 的两个生产出口（都在 `KvState` 上）：
+
+- `desc()`（[kv_pool.rs:L390-L395](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/kv_pool.rs#L390-L395)）：按**当前** `seq_len` 产出描述，信任状态本身。
+- `desc_for_len(seq_len)`（[kv_pool.rs:L397-L408](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/kv_pool.rs#L397-L408)）：按**调用方声称的长度**产出描述，但先 `ensure!` 校验持有页数恰好等于该长度所需页数（多了少了都报错），再按该长度算 `last_page_len`。用途是"本步即将写入/读取到某个长度"的预演——例如写 KV 前先拿到目标长度的描述。
+
+信息从 desc 到 kernel 的完整对拍表（本讲的综合结论）：
+
+| 信息 | KvDesc（单请求） | PrefillPagedPlan（批次） | SplitKvCsr（split-KV 批次） | 作用 |
+|------|------------------|--------------------------|------------------------------|------|
+| 页号表 | `pages: &[PageId]`（宿主借用） | `page_indices_d`（设备，展平拼接） | ——（split 阶段直接复用 decode 的页表） | 定位 KV 数据 |
+| 页表行偏移 | 隐含（单个请求无需偏移） | `page_indptr_d`（CSR） | `o_indptr`（输出行 CSR） | 批次内切分归属 |
+| 末页长度 | `last_page_len: usize` | `last_page_len_d`（每请求一个） | ——（由 kv_len 与 chunk_size 隐含） | 末页只算有效 token |
+| 序列位置/长度 | 不含（在 `KvState::seq_len`） | start_pos/seq_len → `q_indptr_d` 等派生 | `kv_lens` 输入 | causal mask 与 RoPE |
+| chunk 调度 | —— | `qo_tile_indices_d` / `kv_tile_indices_d` / `kv_chunk_size_d` | `request_indices` / `kv_tile_indices` | kernel 网格到数据的映射 |
+| 有效性 | —— | 由各数组长度隐含 | `block_valid_mask`（padding 槽位=0） | padding 行确定性 |
+| 几何（stride/头数） | 不含（`KvLayout` 单独传） | 构造时消费，kernel 侧另有 | —— | 数据解释方式 |
+
+一句话总结这条链：**`KvDesc` 说"我有哪些页"，plan 补上"批次里谁在哪行、哪块归谁算"，`KvLayout` + `kv_buffer` 补上"数据在哪、怎么读"。**
+
+#### 4.4.3 源码精读
+
+[kv_pool.rs:L423-L446](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/kv_pool.rs#L423-L446)：`KvDesc` 定义与实现。文档注释点明它是 "Kernel-facing metadata"，但注意结构本身**不携带几何**（doc 里"bundles pool geometry"指的是它与 `KvLayout` 配对使用的整体观感）；`page_indices()` 是 `pub(crate)`（L443）——只有 core 内部（正是 paged_plan.rs L109）能把页号切片取出来转成 i32，模型 crate 拿到的 `KvDesc` 是不透明的，只能整体传给前向代码。
+
+[kv_pool.rs:L310-L322](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/kv_pool.rs#L310-L322)：两个纯函数 `pages_needed`（`div_ceil`）与 `last_page_len_for`（整除时返回 `page_size` 而非 0——恰满一页与空页的区分），是 desc 一致性的算术基础。
+
+[kv_pool.rs:L495-L538](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/kv_pool.rs#L495-L538)：`kv_state_lifecycle` 测试，展示了 desc 随生命周期的演化：空状态 `num_pages=0, last_page_len=0`；prefill 10 token 后 `1 页, last_page_len=10`；decode 到 16 恰满一页 `last_page_len=16`（注意不是 0）；第 17 个 token 跨页后 `2 页, last_page_len=1`。这是「desc 与页分配同步推进」的行为基准。
+
+[paged_plan.rs:L98-L126](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/ops/paged_plan.rs#L98-L126)：4.3.3 已逐行读过，从对拍视角再看一遍：`KvDesc` 的全部两个字段在这里被消费（`page_indices()` 与 `last_page_len()`），plan 的其余信息（start_pos、头几何、tile 参数）全部由调用方另行提供——即 **plan = Σ(desc) + 批次拓扑 + 几何**。
+
+#### 4.4.4 代码实践
+
+源码阅读型实践（对照笔记）：
+
+1. **实践目标**：产出一张「desc ↔ plan」对照表，作为你理解调度面的长期笔记。
+2. **操作步骤**：
+   - 左栏：抄录 [kv_pool.rs:L427-L446](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/kv_pool.rs#L427-L446) 的 `KvDesc` 字段、每个字段的生产者（`desc()` 还是 `desc_for_len()`）、以及两个生产出口的差异（一个信任当前 seq_len，一个校验"持有页数 == 目标长度所需页数"后按目标长度计算）。
+   - 右栏：抄录 `PrefillPagedPlan` 与 `SplitKvCsr` 的字段/getter 及其构造入口（`new` / `from_raw_batch_with_cta_tile_q` / `new_preallocated`+`update_batch_with_cta_tile_q` / `build_split_kv_csr`）。
+   - 中间列：写下信息在哪一跳被补齐（如"页号 → 设备 i32 数组：L108-L112"；"末页长度 → 每请求数组：L114-L124"）。
+3. **需要观察的现象**：`KvDesc` 的信息量在 plan 构造入口处被一次性"榨干"，此后 kernel 只认 plan 不认 desc。
+4. **预期结果**：一张三列对照表，外加一句话结论（可用 4.4.2 的对拍表自查）。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：`desc()` 和 `desc_for_len(n)` 会在什么场景下给出不同的 `last_page_len`？
+
+**答案**：当状态当前长度与目标长度落在"同一页的不同位置"时。例如 page_size=16、当前 seq_len=10：`desc()` 给 `last_page_len=10`；若本步要写 5 个 token，`desc_for_len(15)` 校验仍只需 1 页后给 `last_page_len=15`。若 `desc_for_len` 的目标长度需要的页数与持有页数不符（如持有 1 页却要 17 token），它会 `ensure!` 报错——这就是它比 `desc()` 多出来的防御。
+
+**练习 2**（设计题，综合实践的前菜）：不迁移任何 KV 数据，把两个请求 A、B 合并成一个批次，desc 侧和 plan 侧各需要补充什么？
+
+**答案**：desc 侧——`KvDesc` 是"单请求、连续页切片"的形状，两个请求就是两个 desc；合并意味着需要**批次的 desc 视图**：页号表拼接后的展平数组 + 每请求的行偏移（CSR 的 `indptr`）+ 每请求的 `last_page_len` 数组 + 每请求的位置（RoPE 用）——即从"结构体"升级为"数组化的同款信息"。plan 侧——`PrefillPagedPlan::from_raw_batch_with_cta_tile_q` 表明 plan 本来就是这个形状（`&[Vec<i32>]` + 各长度数组），所以"合并"只是把两个请求的页表 append 进同一批输入并重编 request 序号；真正要补的是**输出路由**（`q_indptr`/`o_indptr` 保证 A、B 的结果落回各自的行）与**池一致性**：页号只在签发它的池里有意义（`belongs_to`，[kv_pool.rs:L349-L353](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/kv_pool.rs#L349-L353)），A、B 必须同池（或 batch 入口显式携带池身份）。
 
 ## 5. 综合实践
 
-**设计题：不迁移任何 KV 数据，把两个请求 A、B 的注意力合并成一个批次跑，plan 和 desc 各需要补充什么信息？**
+把 4.4.4 的对照笔记扩展成一份完整的「合并批次设计稿」：
 
-参考分析（先自己做，再对照）：
-
-- **前提**：A、B 必须同池（同 `kv_buffer`、同 `KvLayout`）。`KvState::belongs_to`（[kv_pool.rs:L349-L353](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-core/src/kv_pool.rs#L349-L353)）就是为这种检查而存在的——页号只在签发它的池里有意义。
-- **desc 侧缺什么**：`KvDesc` 是单请求视角，只有「页表 + 末页长度」，**没有请求边界**。合并需要把两个 desc 变成批次视图：每请求各自的页表行、每请求各自的 `last_page_len`（注意：合并后只有 B 的末页长度是「全局最后一页」，A 的末页长度仍必须保留，否则 A 在页边界处的有效长度会算错）。
-- **plan 侧缺什么**：需要批次级的三类索引——`page_indptr`（每请求页表在扁平页表中的起点）、`q_indptr`/query 行到请求的归属（prefill 时每请求行数不同）、`positions`/`start_pos` 数组（每请求的因果位置不同）。**这正是 `from_raw_batch_with_cta_tile_q` 的入参形态**（`page_indices: &[Vec<i32>]` 每请求一行 + `last_page_lens`/`start_positions`/`seq_lens` 三个数组）——这个构造入口的存在本身就是这道题的官方答案。
-- **split-KV CSR 侧**：天然不用改——`build_split_kv_csr` 的输入本来就是 `kv_lens` 数组，把 `[len_A, len_B]` 传进去，`request_indices` 自动区分两个请求的 chunk 归属，`o_indptr` 长度 = 3。
-- **结论**：合并的成本全部在「描述层」（页表按行拼接 + 增加边界数组），KV 数据一字节都不动——这就是计划与数据分离的直接红利。
+1. **任务**：假设你接到一个需求——"两个已在线的请求 A（2 页，last_page_len=5）与 B（1 页，last_page_len=16，恰满页），要在下一步把它们放进同一个 split-KV 解码批次，且不许搬任何 KV 数据"。
+2. **步骤**：
+   - 用 4.4.5 练习 2 的结论写出：`KvDesc` 侧需要升级的字段清单（页表展平 + indptr + last_page_len 数组 + positions）。
+   - 手算 `build_split_kv_csr(chunk_size=32, cap=4, kv_lens=[37, 16], padded_bs=2)` 的四个数组（A 的 kv_len=2×16+5=37；B=16），写出 `o_indptr` 与全部非 padding 槽位。
+   - 指出这一步里 `KvLayout` 与 `kv_buffer` 是否需要任何变化，并说明理由（提示：数据侧共享、几何不变，这正是分离的红利）。
+   - 在 [paged_attention_batch_decode_split_kv_into](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-core/src/ops/attention.rs#L94-L146) 的签名上勾出你会传入的每一项及其来源（desc 升级 / CSR 上传 / 常驻 buffers）。
+3. **验证**：`o_indptr = [0, 2, 3]`（A 占 2 个 chunk：\(\lceil 37/32 \rceil = 2\)；B 占 1 个），`request_indices` 非零槽为 `[0, 0, 1]`，`kv_tile_indices` 为 `[0, 1, 0]`，`block_valid_mask` 为 `[1, 1, 1]` 后接 5 个 0 槽（`padded_bs × cap = 8` 槽）。若你的手算与此一致即通过。
 
 ## 6. 本讲小结
 
-- `ops/attention.rs` 提供三个入口：整段 prefill（norm+RoPE+写 KV+注意力一体）、合批 decode、split-KV decode；封装本身只做一件事——把 `KvLayout` 翻译成 `PagedKvLayout` 后转发 kernels。
-- 计划与 KV 数据分离的四条理由：FFI 只认扁平数组、同一数据多种读法、状态与调度变化频率不同、图稳定复用需要固定缓冲。
-- `build_split_kv_csr` 是纯宿主侧计算：\( \text{chunks}(r) = \max(1, \lceil \text{kv\_len}_r / C \rceil) \)，槽位补齐到 `padded_bs × cap`，填充槽 `mask=0` 且内容构造性确定。
-- `PrefillPagedPlan` 是 kernels 类型的 newtype：`new` 吃 `KvDesc`（单请求）、`from_raw_batch_with_cta_tile_q` 吃裸页表行（批次）、`new_preallocated` + `update_batch_with_cta_tile_q` 实现指针不变的图稳定复用；`Deref` 让它直传 kernels 函数。
-- `KvDesc<'a>` 是「最小充分信息」：`pages`（借用、`pub(crate)` 翻译权锁在 core）+ `last_page_len`；`desc()` 照实汇报、`desc_for_len()` 按假想长度并强校验页数吻合。
-- 契约一句话：**core 描述状态（KvDesc/KvLayout），kernels 消费状态（i32 页表 + PagedKvLayout）**；生产链 `KvState::desc_for_len → PrefillPagedPlan::new → prefill_attention_paged_into` 在 gemma4 serve.rs 有完整实证。
+- **计划与数据分离**：KV 数据（`kv_buffer`）全批次共享一份，请求差异全部编码在 `i32` 索引数组里——数据不动、索引动，这是零拷贝调度与 CUDA Graph 兼容的共同前提。
+- **三入口**：`prefill_attention_paged_into`（吃 plan 对象，norm/RoPE 融合在调用内）、`paged_attention_batch_decode_into`（吃拆散的 7 个调度数组）、`paged_attention_batch_decode_split_kv_into`（再叠加 split-KV CSR 数组与在线 softmax 归并的两块临时缓冲）；三者都是薄包装，core 的实质动作只有 `layout.kernel_layout()` 这一次几何转换。
+- **两套计划**：`PrefillPagedPlan` 是适配器门面（`KvDesc → 设备 i32 数组` 的桥，Deref 直通 kernels 型），`new_preallocated` + `update_batch_with_cta_tile_q` 提供"分配一次、原地重填、指针不变"的图稳定用法；`SplitKvCsr` 是纯 CPU 的 CSR 构造，`.max(1)`、cap 校验与确定性 padding 各有讲究。
+- **KvDesc 契约**：`desc()` 信任当前状态、`desc_for_len()` 校验页数后按目标长度预演；`KvDesc` 只说"我有哪些页"，几何与池缓冲由入口另行传入——core 描述状态，kernels 消费状态。
+- **`belongs_to` 的提醒**：页号只在签发它的池里有意义，任何跨请求、跨池的批次拼装都必须先过池一致性这一关。
 
 ## 7. 下一步学习建议
 
-- **u3-l1 / u3-l2（下一站）**：`KvDesc` 的另一半故事——页从哪来、怎么归还？`page_pool.rs` 的 RAII permit 与 `kv_pool.rs` 的 page-first 布局、两段式 admission 是本讲所有「状态」的地基。
-- **u4-l1**：CUDA Graph 精读。本讲 `new_preallocated`/`update_batch_with_cta_tile_q` 的「指针不变」纪律在那里与图捕获、padding 页会合成一个完整的内存纪律故事。
-- **横向延伸（kernels crate）**：注意力 kernel 的真身在 [pegainfer-kernels/src/ops/attention.rs](https://github.com/openinfer-project/openinfer/blob/8886aa47b95bc4beedb63584eb367276650b2fec/pegainfer-kernels/src/ops/attention.rs#L604-L622)，split-KV 的归并数学与 `PagedKvLayout` 的 stride 推导（`paged_kv::derive_strides`）都在那一侧。
-- **u4-l3**：换成消费者视角，看 qwen3 的统一前向如何把本讲的三个入口、`call_spec`（u2-l3）与 CUDA Graph 串成一次完整的请求生命周期。
+本讲讲完了「调度面」，下一讲 u3-l1 进入它的地基：`page_pool.rs` 的固定页分配器与 `OwnedPagePermit` 的 RAII 归还语义——`KvDesc.pages` 里的每个 `PageId` 为什么一定不会泄漏，答案在那里。若你想先看消费侧全貌，可以读 `pegainfer-qwen3/src/unified_forward.rs`（`new_preallocated` 与两条 decode 入口的实际编排）与 `pegainfer-kernels/src/ops/attention.rs`（`PrefillPagedPlan` 真身的字段与 tile 划分逻辑）；u4-l1 讲 CUDA Graph 时还会回到 `new_preallocated` 的"指针不变"约束。
