@@ -1,0 +1,1210 @@
+{
+  "project": "openinfer-pegainfer-glm52",
+  "head": "ca25b80fa4491509ccef418467b37d4d6fd64e9b",
+  "rationale": "维持既有 10 单元 40 讲结构不变。本次增量区间 09a1a38f..ca25b80f 只含两个 frontend 范围提交（f6910714 路由器扩展服务、ca25b80f 请求 seed 透传到引擎）：按仓库 Commitizen scope 约定，二者落在 pegainfer-frontend 服务前端与请求契约上游，本手册引用的 pegainfer-glm52 源码与 docs/models/glm52 活文档未受影响（glm52 侧逐请求种子采样在 u7-l6 已覆盖，seed 透传属于上游协议补齐），因此 40 讲全部 keep、无需重写。同时为本轮之前缺失 practice_task 元数据的 14 讲（u1 全部、u2 全部、u3-l1..l3、u4-l1..l3）补齐实践任务描述，属于 manifest 元数据补全，不改变讲义正文与依赖关系；若后续增量发现 frontend 契约变更波及 glm52 采样入口或启动参数，再对 u7-l6、u1-l2 置 update。学习顺序仍按'跑起来→数据与权重→算子→执行链路→调度架构→高级机制→测试与二次开发'递进，依赖链保证每讲只增量引入 2-5 个模块，全部引用真实源码与 docs/models/glm52 活文档。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：项目定位、构建运行与启动链路",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "GLM5.2 是什么：模型架构与 crate 定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 GLM5.2（glm_moe_dsa：MLA+DSA 稀疏索引+256 专家 MoE+FP8）以及本 crate 在 PegaInfer 多模型引擎中的位置与职责。",
+          "learning_goals": [
+            "说出 MLA、DSA indexer、MoE、FP8 四要素各自解决什么问题",
+            "理解本 crate 与 frontend/kernels/kv-store 的依赖边界",
+            "知道 Blackwell-only（SM>=10.0）门槛的来源"
+          ],
+          "source_files": [
+            "../CLAUDE.md",
+            "src/lib.rs",
+            "../docs/models/glm52/serving-status.md"
+          ],
+          "minimal_modules": [
+            "GLM5.2 架构速览",
+            "crate 位置与依赖",
+            "serving-status 能力矩阵"
+          ],
+          "practice_task": "对照 ../docs/models/glm52/serving-status.md 的能力矩阵与 src/lib.rs 的模块声明，列一张本 crate 依赖的 workspace crate 清单（frontend/kernels/kv-cache/kv-offload/sample 等），并用 5-8 行话写清：相比 Qwen3 的全注意力，GLM5.2 多出的四类机制各自解决什么问题、为何必须 SM>=10.0。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建与运行：feature、CLI 与环境变量",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解 glm52 feature 启用方式、GLM5.2 专属 CLI 参数（--moe-topo、--glm52-native-mtp、--glm52-ranks 等）与 GLM52_DECODE_SLOTS/GLM52_MTP_DRAFTS 等环境变量。",
+          "learning_goals": [
+            "能用 --features glm52 完成 release 构建并解释为何必须 --release",
+            "读懂 Glm52Cli 每个 GLM5.2 专属 flag 的用途与默认值",
+            "区分共享参数与模型专属参数的归属"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "src/model_line.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "构建与 feature 门控",
+            "Glm52Cli 逐项解读",
+            "运行期环境变量"
+          ],
+          "practice_task": "在无 GPU 机器上跑 cargo metadata --features glm52（或触发一次 release 依赖解析）确认 feature 链能解析；再从 src/model_line.rs 抄录 Glm52Cli 的 GLM5.2 专属 flag 表（名称/默认值/校验规则），标注每个 flag 与 GLM52_DECODE_SLOTS、GLM52_MTP_DRAFTS 等环境变量的联动关系。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "源码地图：模块划分与各自职责",
+          "order": 3,
+          "filename": "u1-l3-module-map.md",
+          "level": "beginner",
+          "topic": "逐个梳理 src/ 下约 40 个模块的职责：算子层、执行层、调度层、投机解码与测试模块。",
+          "learning_goals": [
+            "能快速定位任一功能对应的源码文件",
+            "理解 cfg(test) 的 oracle 等测试模块为何与生产代码同树",
+            "建立后续讲义的阅读坐标系"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/runner.rs",
+            "src/scheduler/mod.rs",
+            "src/model/mod.rs"
+          ],
+          "minimal_modules": [
+            "模块树总览",
+            "算子层文件族",
+            "调度与执行层文件族"
+          ],
+          "practice_task": "为 src/ 下每个顶层文件/目录写一张不超过 40 字的职责卡片，按依赖方向（算子层←执行层←调度层）排成一张分层图，单独标出只在 cfg(test) 下编译的模块（oracle、contract_tests、testkit）并说明它们为何与生产代码同树。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "启动链路：从 ModelLine 到 EngineHandle",
+          "order": 4,
+          "filename": "u1-l4-launch-path.md",
+          "level": "beginner",
+          "topic": "追踪完整启动：Glm52Line::launch 到 launch 校验再到 start_engine 的 validate_startup/权重加载/构建/引擎 spawn，最后返回 EngineHandle。",
+          "learning_goals": [
+            "复述 start_engine 六阶段及顺序原因",
+            "理解 Glm52MoeTopo 如何决定 TP/DP/EP 组合与校验",
+            "理解 bootstrap barrier 与失败时的并发拆除"
+          ],
+          "source_files": [
+            "src/model_line.rs",
+            "src/lib.rs",
+            "src/runner.rs"
+          ],
+          "minimal_modules": [
+            "launch 选项校验",
+            "start_engine 六阶段",
+            "EngineHandle 组装与失败拆除"
+          ],
+          "practice_task": "从 Glm52Line::launch 出发手绘启动时序图（引擎线程、各 rank worker、rendezvous 参与者），标出 start_engine 六阶段各自的入口函数名与失败出口（谁先发现错误、其余 rank 如何被并发拆除）；再用 grep 把每个阶段对应的函数名写回图中。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "模型几何、checkpoint 与显存预算",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "模型几何常量与 config.json 探针",
+          "order": 1,
+          "filename": "u2-l1-config-geometry.md",
+          "level": "intermediate",
+          "topic": "解读 78 层/6144 hidden/154880 vocab/MLA 各维度/256+1 专家/index_topk=2048 等常量，以及 probe_config_json 逐字段钉死 config.json。",
+          "learning_goals": [
+            "记住关键几何数字及相互推导（如 QK_HEAD_DIM=nope192+rope64）",
+            "理解 probe_config_json 的 fail-fast 校验哲学",
+            "会推导 78 层中哪些是 full indexer 层"
+          ],
+          "source_files": [
+            "src/config.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "几何常量族",
+            "probe_config_json 校验链",
+            "层类型与 fp8 配置校验"
+          ],
+          "practice_task": "取一份 GLM5.2 的 config.json（或直接对照 src/config.rs 的 probe 常量），推导 78 层中 full indexer 层的编号集合与 6144→q/kv 各维度的形状链；再从 probe_config_json 抄出三条会 fail-fast 的校验规则，各构造一个会被拒绝的 config.json 反例。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "checkpoint 布局与权重清单",
+          "order": 2,
+          "filename": "u2-l2-weight-manifest.md",
+          "level": "intermediate",
+          "topic": "讲解 model.safetensors.index.json 如何解析为 Glm52WeightManifest，以及 all_rank_load_bundles 如何按拓扑切分各 rank 加载包并做覆盖校验。",
+          "learning_goals": [
+            "理解非专家栈全量复制、专家按 rank 区间划分的分配原则",
+            "读懂 rank 覆盖校验的防漏逻辑",
+            "理解 expert-major 打包为何必须在 H2D 时完成"
+          ],
+          "source_files": [
+            "src/weights.rs",
+            "src/config.rs"
+          ],
+          "minimal_modules": [
+            "manifest 解析与 rank bundle 切分",
+            "expert region 步长常量",
+            "MTP layer-78 权重归属"
+          ],
+          "practice_task": "用 jq 或 Python 解析 model.safetensors.index.json，按 EP8 拓扑（每 rank 32 专家）切出 rank 0 的专家区间与全量复制的非专家张量清单，统计两类张量的数量与字节量，并对照 all_rank_load_bundles 的 rank 覆盖校验说明漏配一个专家时会在哪个断言变红。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "rank 权重加载：mmap、staging 与 GPU 驻留",
+          "order": 3,
+          "filename": "u2-l3-rank-weight-loading.md",
+          "level": "intermediate",
+          "topic": "追踪加载路径：per-rank worker、mmap 分组、可选 pinned 双缓冲 staging、fp8 张量驻留与 free VRAM 上报。",
+          "learning_goals": [
+            "解释 mmap 分组常量针对的大尾部回归",
+            "理解 pageable 与 staged 两种上传器的取舍",
+            "弄清 free_vram_bytes 如何喂给显存预算"
+          ],
+          "source_files": [
+            "src/weights/load.rs",
+            "src/weights/staging.rs",
+            "src/weights/context.rs",
+            "src/runner.rs"
+          ],
+          "minimal_modules": [
+            "worker 线程与异步加载",
+            "staging pinned 双缓冲",
+            "加载报告与 VRAM 探测"
+          ],
+          "practice_task": "画一张一次权重上传的缓冲流转图（mmap 分组→pageable 直传或 pinned 双缓冲 staging→H2D→fp8 驻留），标注 pageable/staged 两种上传器的启用条件与取舍；再从源码找出 free_vram_bytes 的上报时机，说明它如何被后续显存预算消费。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "显存预算：上下文上限推导与实测 KV 池填充",
+          "order": 4,
+          "filename": "u2-l4-vram-budget-and-pool-sizing.md",
+          "level": "intermediate",
+          "topic": "解读 derive_max_model_len（精确账本+二分对齐上限）与 #818 两阶段实测填充：固定构建后按 fleet 最小空闲 VRAM 与 per-block 边际成本买 KV 页，池容量与 cap 解耦。",
+          "learning_goals": [
+            "理解 glm52_cap_bytes 精确账本为何让预算可单测",
+            "复述 reserve 分层与 post-finish 已知开销",
+            "解释 floor 池与 GLM52_KV_POOL_BLOCKS 的两道栅栏"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/model/mod.rs"
+          ],
+          "minimal_modules": [
+            "derive_max_model_len 二分推导",
+            "measured pool fill 与 slab 边际成本",
+            "post-build headroom 再探测"
+          ],
+          "practice_task": "以一张 B200（约 180 GB 可见显存）代入 glm52_cap_bytes 精确账本，手算权重驻留、reserve 分层与 post-finish 已知开销后的剩余额，再模拟 derive_max_model_len 二分的 3 轮迭代（写出每轮 cap 候选与判定），最后算出实测填充阶段能买多少个 64-token KV 页。",
+          "depends_on": [
+            "u2-l3",
+            "u1-l4"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "共享算子层：FP8 原语、bookend 与 dense MLP",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "FP8 块量化原语：weight-only GEMV 与 groupwise GEMM",
+          "order": 1,
+          "filename": "u3-l1-fp8-primitives.md",
+          "level": "intermediate",
+          "topic": "讲解 fp8.rs 共享投影原语：fp8 e4m3+128 块 scale、小 m 的 weight-only GEMV 与大 m 的激活量化+SM100 groupwise GEMM，以及 FP8_GEMV_MAX_ROWS=8 的实测分界。",
+          "learning_goals": [
+            "解释 weight-only GEMV 为何省激活量化与 TMA 重排",
+            "理解 scratch 构造约束与 graph 捕获窗口的关系",
+            "掌握 gate|up 打包惯例"
+          ],
+          "source_files": [
+            "src/fp8.rs",
+            "../docs/models/glm52/fp8-blockwise-gemm-lab.md"
+          ],
+          "minimal_modules": [
+            "fp8 e4m3 与块 scale",
+            "GEMV vs GEMM 路径选择",
+            "投影打包与 scratch 约定"
+          ],
+          "practice_task": "在 kernel_lab 中对 fp8 单元跑一次 check（无 GPU 机器则静态读 shape 断言），记录 m=1..16 各行分别走 weight-only GEMV 还是激活量化+groupwise GEMM，验证 FP8_GEMV_MAX_ROWS=8 的分界；再写出 gate|up 打包后 scratch 需要的宽度推导。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "bookend：embedding、final norm 与 lm_head",
+          "order": 2,
+          "filename": "u3-l2-bookends.md",
+          "level": "intermediate",
+          "topic": "讲解夹住 78 层堆栈的两端：设备端 embedding 查表与 final RMSNorm+lm_head+argmax 尾巴，全部 bf16 非 fp8。",
+          "learning_goals": [
+            "理解 embedding 查表为何必须设备端读 token_ids 才可 graph 重放",
+            "弄清三者形状契约与 Rows 携带行列数的约定",
+            "知道 bookend 只是薄封装"
+          ],
+          "source_files": [
+            "src/bookend.rs",
+            "src/config.rs"
+          ],
+          "minimal_modules": [
+            "glm52_embed_into",
+            "final norm 与 lm_head",
+            "graph 安全的输入重写"
+          ],
+          "practice_task": "从 src/bookend.rs 抄录三个入口（embed、final norm+lm_head、argmax 尾巴）的签名与形状契约，画出首尾数据流图；标注 token_ids 为何必须留在设备端被 kernel 直接读取（对照 CUDA Graph 重放时输入重写的位置），并解释若回 host 再上传会破坏什么。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "dense MLP 与 Rows 类型化行缓冲",
+          "order": 3,
+          "filename": "u3-l3-dense-mlp-and-rows.md",
+          "level": "intermediate",
+          "topic": "讲解前 3 层 dense MLP（SwiGLU，中间维 12288）复用 fp8_mlp helper，以及 Rows<C> 用 const 泛型把缓冲宽度变成类型事实、消灭约 30 处重复 ensure。",
+          "learning_goals": [
+            "理解 dense MLP 与共享专家共用 fp8_mlp 形状",
+            "掌握 Rows<C> 构造点不变量设计",
+            "读懂打包后一次 GEMV+SwiGLU+一次 GEMV 的 decode 流程"
+          ],
+          "source_files": [
+            "src/dense.rs",
+            "src/rows.rs",
+            "src/fp8.rs"
+          ],
+          "minimal_modules": [
+            "Glm52DenseMlpWeights 与前向",
+            "Rows<const C> 设计",
+            "与共享专家形状对比"
+          ],
+          "practice_task": "手算前 3 层 dense MLP（中间维 12288、fp8 128 块 scale）一次单行 decode 的 GEMV 次数与搬运字节量；再写 10 行说明 Rows<C> 的构造点不变量如何消灭约 30 处重复 ensure，并举一个新行缓冲接入 Rows 的最小代码示例。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "注意力子系统：MLA、KV 页、稀疏解码与 DSA 索引器",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "MLA 前半：q_a/kv_a/q_b 投影与 norm",
+          "order": 1,
+          "filename": "u4-l1-mla-front.md",
+          "level": "intermediate",
+          "topic": "解读 mla_front.rs：hidden 到 q_a(2048) 再 q_b 出 64 头查询，hidden 到 kv_a 出 512+64 压缩 KV 与 rope 分量，含 RMSNorm 与 fp8 投影调度。",
+          "learning_goals": [
+            "画出 MLA front 形状链（2048 lora 到 64x256 q；512+64 kv_a）",
+            "理解 latent KV 表示（512 压缩+64 rope）",
+            "分清各 fp8_linear 变体的行数适用域"
+          ],
+          "source_files": [
+            "src/mla_front.rs",
+            "src/config.rs"
+          ],
+          "minimal_modules": [
+            "投影链与形状数学",
+            "head 维度分解",
+            "front scratch 持久缓冲"
+          ],
+          "practice_task": "按 src/mla_front.rs 的常量手推一次单行 decode 的完整形状链：hidden 6144→q_a 2048→RMSNorm→q_b（64×256）与 kv_a（512+64），逐步写出矩阵形状、fp8 路径选择（GEMV vs GEMM）与 rope 分量从哪一刀切出，再标注 front scratch 为何是启动期持久缓冲。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "KV 页布局：64-token 页、MLA 与 index-K 切片",
+          "order": 2,
+          "filename": "u4-l2-kv-page-layout.md",
+          "level": "intermediate",
+          "topic": "解读页几何：64=FlashMLA 页=index-K 块=对齐单位，一页含 78 个 MLA 切片+21 个 full-indexer index-K 切片+L78 MTP 镜像，及 pool_blocks/table_width 推导。",
+          "learning_goals": [
+            "解释 cap 为何必须 64 对齐（页表寻址约束）",
+            "算出一页内容字节构成",
+            "理解悬空 token 契约的 +1 页预留"
+          ],
+          "source_files": [
+            "src/model/mod.rs",
+            "src/layer.rs"
+          ],
+          "minimal_modules": [
+            "页几何常量与推导",
+            "Glm52KvSlab 与层缓存",
+            "padding 页角色"
+          ],
+          "practice_task": "用页几何常量算出一页的总字节数（78 个 MLA 切片+21 个 full-indexer index-K 切片+L78 MTP 镜像，按 bf16 计），把 cap 64 对齐、pool_blocks、table_width 的推导抄成一张速查卡，并解释悬空 token 契约为何需要 +1 页预留。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "MLA 解码后半：absorb、稀疏后端与 o_proj",
+          "order": 3,
+          "filename": "u4-l3-mla-decode-backends.md",
+          "level": "intermediate",
+          "topic": "解读 mla_decode.rs：kv_b 预反量化为 W_UK/W_UV 吸收因子、FlashMLA fp8-ds 与 FlashInfer fp8 双后端选择、metadata 准备与收尾投影。",
+          "learning_goals": [
+            "解释吸收式解码为何用低秩 latent 注意力替代逐头 KV",
+            "复述双后端选择条件与回退关系",
+            "理解 UE8M0 约束的教训来源"
+          ],
+          "source_files": [
+            "src/mla_decode.rs",
+            "src/mla_front.rs"
+          ],
+          "minimal_modules": [
+            "吸收因子与 QUERY_DIM=576",
+            "双后端与 sched metadata",
+            "cache-pack/query-assemble 编排"
+          ],
+          "practice_task": "画出 decode 一步 MLA 的完整 kernel 序列（cache-pack→sched metadata→后端 kernel→query-assemble→o_proj），写出 FlashMLA fp8-ds 与 FlashInfer fp8 双后端的选择条件与回退关系，并推导 W_UK/W_UV 吸收后 QUERY_DIM=576 的来历。",
+          "depends_on": [
+            "u4-l1",
+            "u4-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "DSA 索引器：2048 稀疏 top-k 与跨层共享",
+          "order": 4,
+          "filename": "u4-l4-dsa-indexer.md",
+          "level": "intermediate",
+          "topic": "解读 indexer.rs 对齐 vLLM DeepseekV32Indexer 的链路：q/k 投影、带偏置 LayerNorm、RoPE、fp8 逐组量化、权重折叠、DeepGEMM paged MQA logits、确定性 top-2048 与全局槽位换算，及 layer.rs 的 topk_carry 复用。",
+          "learning_goals": [
+            "复述 indexer 数据流图",
+            "理解 full/shared 两类层与 topk 跨层复用",
+            "解释索引即全局 KV 槽位使复用成立"
+          ],
+          "source_files": [
+            "src/indexer.rs",
+            "src/layer.rs",
+            "src/config.rs",
+            "../docs/models/glm52/indexer-forward.md"
+          ],
+          "minimal_modules": [
+            "indexer 前向 kernel 链",
+            "topk_carry 跨层共享",
+            "index-K 缓存写入"
+          ],
+          "practice_task": "用 glm52_layer_has_full_indexer 打印 0..78 层的 full/shared 序列，标出 dense(0-2) 与首个 MoE full 层；再解释 shared 层没有 indexer 权重时加载器如何保证不会引用空指针。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "MoE 子系统：路由器、DeepEP/DeepGEMM 与多种拓扑",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "路由器 noaux_tc 与共享专家",
+          "order": 1,
+          "filename": "u5-l1-router-and-shared-expert.md",
+          "level": "intermediate",
+          "topic": "解读 moe_decode.rs：sigmoid 打分+noaux_tc top-8+norm_topk_prob+scaling 2.5 的路由、共享专家（bank 256 折叠）与专家库表示。",
+          "learning_goals": [
+            "复述 noaux_tc 路由流程",
+            "理解 router 与共享专家就地执行、专家库按 rank 分片",
+            "掌握 W13/W2 形状常量与 scale 块布局"
+          ],
+          "source_files": [
+            "src/moe_decode.rs",
+            "src/moe_ep8.rs"
+          ],
+          "minimal_modules": [
+            "router config 与 kernel",
+            "共享专家前向",
+            "Glm52MoeExpertBank 布局"
+          ],
+          "practice_task": "写一个 8 token 的假想路由表（每 token top-8），手工模拟 select 之后每个专家收到的行数，并解释 psum_expert 如何成为 recv 侧真实行数的设备端真值。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "EP MoE：DeepEP dispatch/combine 与 SM100 DeepGEMM",
+          "order": 2,
+          "filename": "u5-l2-ep-deepep-deepgemm.md",
+          "level": "intermediate",
+          "topic": "解读 moe_ep.rs 核心链路：dispatch 得 expert-major 对齐布局、psum 掩码元数据、UE8M0 量化、DeepGEMM W13、silu 乘 up 再量化、DeepGEMM W2、route_weight 重排回对齐槽、combine 求和。",
+          "learning_goals": [
+            "逐步复述 dispatch 到 combine 的数据流与各 kernel 形状",
+            "理解缓冲启动期固定+host 静默为何是整步 graph 捕获前提",
+            "理解协议最大 bound 与设备端行数校正"
+          ],
+          "source_files": [
+            "src/moe_ep.rs",
+            "src/moe_decode.rs"
+          ],
+          "minimal_modules": [
+            "dispatch/combine 契约",
+            "UE8M0 量化与掩码 grouped GEMM",
+            "对齐桥接与元数据陷阱"
+          ],
+          "practice_task": "对照 moe_ep.rs 头部图示，为 8 rank x 32 专家、每 rank 8 行 token 写出 dispatch 后 recv buffer 的 expert-major 布局，并指出 psum_expert 与协议最大 bound 各约束什么。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "EP 宽度泛化：Glm52MoeTopo 与 EP4/8/16/32/64",
+          "order": 3,
+          "filename": "u5-l3-ep-width-generics.md",
+          "level": "intermediate",
+          "topic": "解读拓扑泛型：每个 EP 宽度是 DeepEP shim 的一次常量实例化，形状全部来自 DeepEpInfo；以及 Glm52MoeTopo 的派生量与拓扑单测。",
+          "learning_goals": [
+            "解释新 EP 宽度是一次实例化的设计",
+            "会用 topology_tests 验证专家分片（EP8 到 32、EP4 到 64、EP64 到 4）",
+            "理解 DeepGEMM VRAM 计费如何按拓扑入账"
+          ],
+          "source_files": [
+            "src/moe_ep.rs",
+            "src/lib.rs",
+            "../docs/models/glm52/ep4-gb300.md"
+          ],
+          "minimal_modules": [
+            "Glm52MoeTopo 派生量",
+            "shim 常量实例化族",
+            "topology_tests 单测"
+          ],
+          "practice_task": "运行 cargo test --release -p pegainfer-glm52 --features glm52 --lib topology_tests，为 cross_tray_ep_widths_shard_all_routed_experts 补一张 (topo, ranks, local_experts) 对照表并核对 EP64 的 4 专家/rank。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l4",
+          "title": "TP4 prefill-only：切片 MoE 与 NCCL all-reduce 前向",
+          "order": 4,
+          "filename": "u5-l4-tp4-prefill-only.md",
+          "level": "intermediate",
+          "topic": "解读 moe_tp.rs（每 rank 持 257 专家切片+bank 256 折叠共享专家）与 prefill_tp.rs 的 layer-outer 分块前向：chunk 级 fp8 大 GEMM、indexer 与 FlashMLA 子平铺、逐层 NCCL bf16 all-reduce。",
+          "learning_goals": [
+            "解释 layer-outer 为何让 fp8 GEMM 保持大 M 且专家库每 chunk 只读一次",
+            "理解先打包整 chunk KV 再注意力的因果性论证",
+            "复述词表并行 pack/unpack 与 NCCL 通道数调优"
+          ],
+          "source_files": [
+            "src/moe_tp.rs",
+            "src/prefill_tp.rs",
+            "../docs/models/glm52/tp4-prefill-only.md"
+          ],
+          "minimal_modules": [
+            "TP 切片银行与 Glm52TpExchange",
+            "prefill chunk 前向骨架",
+            "NCCL 通道数调优"
+          ],
+          "practice_task": "对照 lib.rs 设置 NCCL_MIN/MAX_NCHANNELS 的注释，计算 16K 行 chunk 一次 all-reduce 的数据量（hidden 6144 bf16），并解释默认 2 通道为何卡在约 46 GB/s。",
+          "depends_on": [
+            "u5-l1",
+            "u4-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "整步执行：层组合、step body 与 CUDA Graph",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "decoder 层组合：双 norm 残差与半场拆分",
+          "order": 1,
+          "filename": "u6-l1-layer-composition.md",
+          "level": "intermediate",
+          "topic": "解读 layer.rs：input_layernorm 到 MLA(+DSA) 到残差加再到 post_attention_layernorm 到 dense/MoE 到残差加，及 Glm52LayerMlp 三分支与 Glm52LayerIndexer 二态。",
+          "learning_goals": [
+            "对照 vLLM DeepseekV2DecoderLayer 复述逐层数学",
+            "理解 Box 化权重枚举在 78 项 vec 的取舍",
+            "掌握 attention 半场与 finish 的职责切分"
+          ],
+          "source_files": [
+            "src/layer.rs",
+            "src/config.rs"
+          ],
+          "minimal_modules": [
+            "残差与 norm 布局",
+            "Glm52LayerMlp/Indexer 枚举",
+            "跨层 top-k 共享接线"
+          ],
+          "practice_task": "画出第 6 层（首个 MoE+full indexer 层）一步 decode 的完整数据流（含 kernel 名），并与第 1 层（dense、无索引权重）对比标注差异点。",
+          "depends_on": [
+            "u4-l3",
+            "u4-l4",
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "整步前向：Glm52RankModel 与 run_step_body",
+          "order": 2,
+          "filename": "u6-l2-whole-step-body.md",
+          "level": "intermediate",
+          "topic": "解读 Glm52RankModel（每 rank 全量非专家路径+本地专家）与 step_body 捕获区：embed 到 78 层到 lm_head 到设备端 argmax，所有 bucket 共用同一段代码。",
+          "learning_goals": [
+            "解释 GLM52_DECODE_BUCKETS 与 96 行步预算的容量关系",
+            "理解 prefill 以 span 搭 decode 便车的执行模型",
+            "弄清 scratch 为何必须启动期预分配"
+          ],
+          "source_files": [
+            "src/model/mod.rs",
+            "src/model/step_body.rs",
+            "src/scratch.rs"
+          ],
+          "minimal_modules": [
+            "decode_step 入口与 Glm52StepShape",
+            "run_step_body 捕获区",
+            "decode scratch 布局"
+          ],
+          "practice_task": "数一数 run_step_body 一个 78 层循环每层调用多少 kernel（分 dense/MoE 与 full/shared indexer 两种情形），据此估算 bucket=8 单步 kernel 总数并解释为何必须整步 graph 化。",
+          "depends_on": [
+            "u6-l1",
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "CUDA Graph：预捕获序列、指针稳定性与图导出",
+          "order": 3,
+          "filename": "u6-l3-cuda-graphs.md",
+          "level": "intermediate",
+          "topic": "解读整步 graph 机制：graph.rs 在 bootstrap 期对每 bucket 用全 padding 行预捕获（预捕获序列即 fleet 会合点）、build.rs 两阶段构建保证指针稳定、--dump-graph-png 导出。",
+          "learning_goals": [
+            "解释预捕获即 bootstrap 会合的原理",
+            "理解指针稳定性如何贯穿权重驻留与 scratch 预分配",
+            "会用 --dump-graph-png 导出并读图"
+          ],
+          "source_files": [
+            "src/model/build.rs",
+            "src/scheduler/graph.rs",
+            "src/runner.rs",
+            "../docs/models/glm52/cuda-graph-png.md"
+          ],
+          "minimal_modules": [
+            "precapture_step_graphs",
+            "两阶段 build",
+            "graph dump 协议"
+          ],
+          "practice_task": "梳理 precapture_step_graphs 逐 bucket 提交 padding step 的时序，解释若某 rank 缺失一个 bucket 的捕获会在哪一步以什么方式失败（对照 free-running 的 launch-count 即时钟纪律）。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l4",
+          "title": "launch-ahead 投机回放：隐藏 cuGraphLaunch 延迟",
+          "order": 4,
+          "filename": "u6-l4-launch-ahead.md",
+          "level": "intermediate",
+          "topic": "解读 launch_ahead.rs：当前步执行期间提前入队 feed kernel+下一步 graph 回放以隐藏约 0.8ms 的 host 侧 launch，及 consume/lease 协议与失配退化为重算的安全论证。",
+          "learning_goals": [
+            "复述 expect 输入语义（活跃行 argmax+1、padding 行自喂）",
+            "理解 rank-local lease 为何免跨 rank 协商",
+            "弄清 5.4us 与 810us 两个实测数字的差异"
+          ],
+          "source_files": [
+            "src/model/launch_ahead.rs",
+            "src/runner.rs"
+          ],
+          "minimal_modules": [
+            "decode_step_harvest 尾部协议",
+            "feed kernel 与原地推进",
+            "失配时全量覆写"
+          ],
+          "practice_task": "构造三种下一形状情形（形状一致、bucket 变大、出现新请求）逐个推演 lease/consume 标志与 stale replay 的命运，说明逐行数学独立如何保证过期回放不污染后续真实回放。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "调度核心：free-running 逐 rank 引擎",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "free-running 架构：删除 coordinator 的设计",
+          "order": 1,
+          "filename": "u7-l1-free-running-architecture.md",
+          "level": "advanced",
+          "topic": "结合设计文档与 scheduler/mod.rs 讲透：每个 DP rank 是自治引擎，loop 无条件全速跑，唯一耦合是每步固定节拍的 DeepEP collective 链；三条静态纪律。",
+          "learning_goals": [
+            "解释为什么静默等待在 EP 协调里都是 bug",
+            "复述 launch 次数即全局时钟、正负 1 次配对",
+            "理解 padding 行作为协议面必须构造性确定"
+          ],
+          "source_files": [
+            "src/scheduler/mod.rs",
+            "../docs/models/glm52/free-running-dp.md",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "不可约同步与三条纪律",
+            "单引擎 loop 结构",
+            "TP4 镜像 N=1 特例"
+          ],
+          "practice_task": "把 free-running-dp.md 第 2 节的三条不可约同步逐条映射到源码证据（如 moe_ep.rs 的协议最大 bound、slot.rs 的 padding 输入），写一份纪律到代码位置的对照表。",
+          "depends_on": [
+            "u6-l2",
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "slot 状态机：feed_want 与 advance_span",
+          "order": 2,
+          "filename": "u7-l2-slot-state-machine.md",
+          "level": "advanced",
+          "topic": "解读 slot.rs：Glm52SlotState 作为纯数据转换决定每步喂什么与一段 span 输出意味着什么（PrefillChunk/PrefillBoundary/Decode/Speculative 四种语义）。",
+          "learning_goals": [
+            "区分 slot（batch 泳道）与 KV 页两个正交概念",
+            "复述四种 SpanKind 的 KV 推进与 token 提交规则",
+            "理解纯数据状态机为何可独立单测"
+          ],
+          "source_files": [
+            "src/scheduler/slot.rs",
+            "src/scheduler/mod.rs"
+          ],
+          "minimal_modules": [
+            "Glm52SlotState 转换",
+            "SpanKind 语义",
+            "GLM52_PADDING_STEP"
+          ],
+          "practice_task": "跟踪 prompt=200、max_tokens=10 的请求在 64 对齐页下从 admit 到 finish 的每步 feed_want 序列（时间线），标注每步属于哪种 SpanKind。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "步规划：rank 本地 bucket、prefill span 与 padding",
+          "order": 3,
+          "filename": "u7-l3-step-planning.md",
+          "level": "advanced",
+          "topic": "解读 plan.rs：从 feed-want 快照选覆盖自身需求的最小 bucket，剩余容量轮转扩成连续 prefill span，active_rows 之外全 padding；bucket 是 rank 本地的。",
+          "learning_goals": [
+            "解释 bucket 选择的下界约束",
+            "理解 span 逐 slot 连续的契约原因",
+            "复述 padding 行 slot id 无意义化的 #812 背景"
+          ],
+          "source_files": [
+            "src/scheduler/plan.rs",
+            "../docs/models/glm52/continuous-batching.md"
+          ],
+          "minimal_modules": [
+            "plan_step_shape/plan_prefill_spans",
+            "rank-local bucket 与保守 bound",
+            "padding_step_kv"
+          ],
+          "practice_task": "手算 8 slot、wants=[1,1,0,300,0,1,64,0] 时的 bucket 选择与 span 分配（先从源码确认 GLM52_DECODE_BUCKETS），写出每 slot 行数与 padding 行数。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l4",
+          "title": "admission：入口校验与全生命周期 KV 预留",
+          "order": 4,
+          "filename": "u7-l4-admission.md",
+          "level": "advanced",
+          "topic": "解读 admission.rs：validate_request 门口快速拒绝，admit_from_queue 按全生命周期页数 honor-or-reject 填 slot，保证 decode 中途永不缺页。",
+          "learning_goals": [
+            "推导 last_position=prompt+max_tokens-1 的边界公式",
+            "解释 honor-or-reject 与排队等待的区别",
+            "理解请求预绑定让 admission 永不搬请求"
+          ],
+          "source_files": [
+            "src/scheduler/admission.rs",
+            "src/scheduler/mod.rs"
+          ],
+          "minimal_modules": [
+            "validate_request 边界公式",
+            "admit_from_queue 预算逻辑",
+            "FIFO 与拒绝事件"
+          ],
+          "practice_task": "对 max_model_len=40960、页 64，预测三个请求（40000/512、40960/1、40961/1）在 validate_request 与页预留上的结果，并用源码公式验证。",
+          "depends_on": [
+            "u7-l2",
+            "u2-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l5",
+          "title": "分页 KV 与前缀缓存：BlockPool 与边界页",
+          "order": 5,
+          "filename": "u7-l5-paged-kv-prefix-cache.md",
+          "level": "advanced",
+          "topic": "解读分页 KV 栈：每 rank 一个 BlockPool（64-token 内容哈希页，block 0 为 padding 页），RAII 块归还可匹配为前缀缓存，命中即 suffix-only prefill；及 BoundaryCopy 与 drafter 互斥规则。",
+          "learning_goals": [
+            "解释内容哈希页+释放块登记如何零 kernel 改动换来前缀复用",
+            "复述 prefix_cache_enabled 三分支（DSpark 永禁）",
+            "理解 page stride 作为命名空间身份"
+          ],
+          "source_files": [
+            "src/model/mod.rs",
+            "src/lib.rs",
+            "../docs/models/glm52/paged-kv-prefix-cache.md"
+          ],
+          "minimal_modules": [
+            "BlockPool 与 RequestKv RAII",
+            "前缀命中与 suffix prefill",
+            "BoundaryCopy 首步 D2D"
+          ],
+          "practice_task": "设计一个两轮对话（第二轮前缀完全包含第一轮），推演 BlockPool 的页匹配与复用路径，算出第二轮少算多少 prefill 行；再说明 DSpark 为何必须关掉该机制。",
+          "depends_on": [
+            "u7-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l6",
+          "title": "采样与负载指标",
+          "order": 6,
+          "filename": "u7-l6-sampling-and-load-metrics.md",
+          "level": "advanced",
+          "topic": "解读采样编排：collect_sampling_rows 决定哪些行绕过融合 argmax 交给 pegainfer-sample 批量采样（philox 种子混 step 可重放），及 load.rs 经 watch 通道发布调度指标。",
+          "learning_goals": [
+            "解释逐行种子混合为何让 spec 与 plain 产生同一采样流",
+            "理解贪心 argmax 与批量采样的分流",
+            "复述 SchedulerMetrics 发布路径"
+          ],
+          "source_files": [
+            "src/scheduler/plan.rs",
+            "src/scheduler/load.rs",
+            "src/model/step_body.rs"
+          ],
+          "minimal_modules": [
+            "collect_sampling_rows",
+            "gpu_sample_batch_into 集成",
+            "SchedulerMetrics 发布"
+          ],
+          "practice_task": "对一个 3 请求混合批（带种子采样、贪心、无种子）写出一步中每个提交 token 的产生路径（argmax 还是采样、用什么种子），对照 mix_seed 调用点验证。",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "运行时机制：worker 协议、多进程 fleet 与 KV 卸载",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "worker 线程与异步指令协议",
+          "order": 1,
+          "filename": "u8-l1-worker-protocol.md",
+          "level": "advanced",
+          "topic": "解读 runner.rs：每 GPU 一线程持有 CUDA 上下文，引擎经 crossbeam 通道发 step_async/build_fixed_async/finish_kv_async/setup_comm_async 等指令并等响应。",
+          "learning_goals": [
+            "解释 worker 线程模型与 CUDA 上下文绑定",
+            "复述启动期指令序列",
+            "理解响应丢弃为何一律致命"
+          ],
+          "source_files": [
+            "src/runner.rs",
+            "src/weights/context.rs"
+          ],
+          "minimal_modules": [
+            "Glm52Worker 与 placement",
+            "指令-响应通道族",
+            "跨线程消息类型"
+          ],
+          "practice_task": "从 start_engine 出发列出引擎线程与 worker 线程启动期交互的全部消息（时间序序列图），标注发送方/接收方与阻塞点。",
+          "depends_on": [
+            "u6-l2",
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "多进程 EP fleet 与 bootstrap rendezvous",
+          "order": 2,
+          "filename": "u8-l2-multiprocess-rendezvous.md",
+          "level": "advanced",
+          "topic": "解读跨节点形态：--glm52-ranks 让每节点只 host 自己的 rank，rendezvous.rs 用一次性 TCP 握手分发 DeepEP unique id，之后无运行时控制面。",
+          "learning_goals": [
+            "解释 fate-sharing：一步失败全 fleet 一起死",
+            "复述 wire 版本、重试与幂等 serve",
+            "理解只探测本进程 GPU 的原因"
+          ],
+          "source_files": [
+            "src/rendezvous.rs",
+            "src/lib.rs",
+            "../docs/models/glm52/cross-node-scaling.md"
+          ],
+          "minimal_modules": [
+            "unique_id 三分支",
+            "ranks/rendezvous 校验链",
+            "fail-stop 语义"
+          ],
+          "practice_task": "为 EP16 双节点（各 8 卡）写出两个进程的完整命令行与启动时序（谁先 bind、谁重试、id 何时流动），再推演杀掉 rank-0 进程后另一侧的失败路径。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "KV 卸载主机层：pegaflow pinned 池与 P2P mesh",
+          "order": 3,
+          "filename": "u8-l3-kv-offload.md",
+          "level": "advanced",
+          "topic": "解读 --kv-offload 链：每 rank 的 page-first arena 注册进共享 PegaflowHost（pinned 池、hugepages、可选 P2P/RDMA mesh），释放请求的封存页入主机池、错失 HBM 的前缀在 admission 恢复。",
+          "learning_goals": [
+            "解释命名空间折叠了哪些布局事实",
+            "理解镜像 arena 必须全部落地的原因",
+            "复述 offload 与 no-prefix-cache/DSpark 的互斥"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/scheduler/offload.rs"
+          ],
+          "minimal_modules": [
+            "offload/P2P 选项结构",
+            "build_kv_store 注册契约",
+            "OffloadMirror 镜像一致性"
+          ],
+          "practice_task": "为 8 rank 单 arena 部署写出 KvStoreBuilder 注册调用序列（含 instance_id 与 namespace 实际值），并解释 page_first=false 与 ArenaSpec 三项断言各防什么错配。",
+          "depends_on": [
+            "u7-l5"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "投机解码：DSpark、native MTP 与 P/D 交接",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "drafter 选择与投机解码总览",
+          "order": 1,
+          "filename": "u9-l1-drafter-overview.md",
+          "level": "advanced",
+          "topic": "解读 Glm52Drafter 三态（None/DSpark/NativeMtp）的接线：拓扑约束、与 prefill-only/前缀缓存/KV offload 的组合矩阵、slots*(1+drafts) 不超过 96 的启动校验。",
+          "learning_goals": [
+            "画出 drafter 三态与拓扑/选项的合法组合矩阵",
+            "解释 #812 故障：超额 (slots,drafts) 静默截断 verify span",
+            "理解草稿通道计入精确账本的原因"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/model_line.rs"
+          ],
+          "minimal_modules": [
+            "Glm52Drafter 组合校验",
+            "slots 乘 drafts 预算",
+            "drafter 对 cap/prefix-cache 的影响"
+          ],
+          "practice_task": "枚举 (slots, drafts) 若干组合并算出占用行数，对照 model_line.rs 的 native_mtp 系列测试解释为何 TP4 仅 prefill-only 允许 native MTP。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "DSpark 草稿通道：anchor-drop 布局与 Markov 头",
+          "order": 2,
+          "filename": "u9-l2-dspark-lane.md",
+          "level": "advanced",
+          "topic": "解读 dspark.rs：5 层 qwen3 骨干+rank-256 Markov 头，块输入 [anchor, mask x 7] 的 anchor-drop 约定、aux 层 {7,22,38,54,69} 校正，及复用目标 embed/lm_head。",
+          "learning_goals": [
+            "复述四个 DSpark 常量的来源",
+            "解释 aux 层索引的 off-by-one 校正",
+            "理解 draft lane 完全 rank-local"
+          ],
+          "source_files": [
+            "src/dspark.rs",
+            "src/dspark_slot.rs",
+            "../docs/models/glm52/dspark-mtp.md"
+          ],
+          "minimal_modules": [
+            "检查点解析与 sha256 校验",
+            "anchor-first 块布局",
+            "dspark slot 与验证 span"
+          ],
+          "practice_task": "写出 DSpark 一轮 propose 到 verify 到 commit 的行数账（draft 8 行块 vs verify span 8 行 bucket），并推演贪心与采样（prefix-match 验收）两种模式下接受长度如何统计。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l3",
+          "title": "native MTP：第 78 层服务化通道",
+          "order": 3,
+          "filename": "u9-l3-native-mtp-lane.md",
+          "level": "advanced",
+          "topic": "解读原生 MTP：mtp.rs 的 bookend 数学、model/mtp.rs 的服务化驻留（final-norm 后 hidden 喂草稿、提交行左移、拒绝 KV 不回拷）、scheduler/mtp.rs 的固定链 round。",
+          "learning_goals": [
+            "复述一轮 round 结构与 draft span 控制",
+            "解释草稿必须消费 final-normalized hidden（1.753 到 3.725 的修复）",
+            "理解固定链纪律在 MTP round 的体现"
+          ],
+          "source_files": [
+            "src/mtp.rs",
+            "src/model/mtp.rs",
+            "src/scheduler/mtp.rs",
+            "../docs/models/glm52/native-mtp-accuracy.md"
+          ],
+          "minimal_modules": [
+            "MTP bookend 数学",
+            "服务化草稿轮与 KV 镜像",
+            "固定链 collective round"
+          ],
+          "practice_task": "对照 mtp.rs 头部公式写出一步 draft 的张量形状链（拼接 2x6144 到 eh_proj 到 decoder_layer_78 到 shared norm 到 lm_head），并解释 raw_hidden 为何必须保留。",
+          "depends_on": [
+            "u9-l1",
+            "u6-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l4",
+          "title": "P/D 分离交接：handoff 信封与恢复入列",
+          "order": 4,
+          "filename": "u9-l4-pd-handoff.md",
+          "level": "advanced",
+          "topic": "解读原生 P/D 协议：NativeMtpHandoff v3 信封（fingerprint、committed_len、anchor、drafts）、纯 prompt 内容走 KV 数据面而 anchor 相关续写走信封、零义务 resolver 异步回投 admission。",
+          "learning_goals": [
+            "解释 fingerprint 以 page stride 为线格式身份",
+            "复述 D 侧 first_step=verify 与 BoundaryCopy 首步 D2D",
+            "理解引擎 loop 永不因解析阻塞"
+          ],
+          "source_files": [
+            "src/scheduler/offload.rs",
+            "src/scheduler/admission.rs",
+            "../docs/models/glm52/pd-native-mtp-handoff.md"
+          ],
+          "minimal_modules": [
+            "NativeMtpHandoff 信封",
+            "handoff_fingerprint 与拒绝路径",
+            "resolver 异步 intake"
+          ],
+          "practice_task": "设计 P(TP4 prefill-only) 到 D(EP16) 会话，写出信封各字段取值与 fingerprint 字符串，推演 D 侧第二次命中前缀时哪些内容从 radix 恢复、哪些来自信封。",
+          "depends_on": [
+            "u9-l3",
+            "u8-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "验证、基准与二次开发",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "oracle 精度门：HF 种子探针与逐块门禁",
+          "order": 1,
+          "filename": "u10-l1-oracle-gates.md",
+          "level": "advanced",
+          "topic": "解读 oracle/ 自包含精度门：外部 Python harness 生成种子输入与硬编码探针常量，Rust 侧各门重放并断言 RMS 容差，全部 ignore（需 GPU+checkpoint）。",
+          "learning_goals": [
+            "解释探针常量硬编码而非提交 fixture 的原因",
+            "掌握运行单个 oracle 门的命令形态",
+            "理解 freerun 门与单元门的层次差异"
+          ],
+          "source_files": [
+            "src/oracle/mod.rs",
+            "src/oracle/mla.rs",
+            "src/oracle/layer.rs",
+            "../docs/models/glm52/oracle-harness.md"
+          ],
+          "minimal_modules": [
+            "oracle 门分类与运行方式",
+            "探针常量再生成流程",
+            "负对照与容差语义"
+          ],
+          "practice_task": "梳理 mla.rs 一个断言块的种子输入、期望常数、容差三要素，写出一个 kernel 回归时该门如何变红的具体场景（如 UE8M0 scale 非 2 的幂）。无 GPU 时可只做静态分析并注明。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l2",
+          "title": "调度器契约测试与 testkit",
+          "order": 2,
+          "filename": "u10-l2-contract-tests.md",
+          "level": "advanced",
+          "topic": "解读 contract_tests.rs 与 testkit.rs：不依赖 GPU 对 admission/plan/slot 纯函数与引擎循环做契约覆盖，含 MTP production gate 探针与 slot 复用门。",
+          "learning_goals": [
+            "理解纯函数规划如何支撑 CPU 可跑的调度测试",
+            "复述 cfg(test) 探针的埋点手法",
+            "能定位并运行调度测试"
+          ],
+          "source_files": [
+            "src/scheduler/contract_tests.rs",
+            "src/scheduler/testkit.rs",
+            "src/scheduler/slot.rs"
+          ],
+          "minimal_modules": [
+            "契约测试组织",
+            "testkit 桩件",
+            "测试探针统计"
+          ],
+          "practice_task": "运行 cargo test --release -p pegainfer-glm52 --features glm52 --lib scheduler，列出测试分组并挑一个 admission 契约测试说明它复现哪条生产不变量。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l3",
+          "title": "kernel_lab：fp8 GEMM 检查/基准/对比流水线",
+          "order": 3,
+          "filename": "u10-l3-kernel-lab.md",
+          "level": "advanced",
+          "topic": "解读 kernel_lab 流水线：ctypes 直开与生产 SASS 同源链接的 so、CUTLASS 基线与 CuTe DSL tcgen05 实验线、check/bench/compare 与 cold-l2/baseline-so 工作流。",
+          "learning_goals": [
+            "解释被测物即生产 SASS 的保证机制",
+            "掌握 ledger 分桶与 warm/cold 协议边界",
+            "会用 same-session A/B 对比"
+          ],
+          "source_files": [
+            "benches/README.md",
+            "benches/kernel_lab/__main__.py",
+            "benches/kernel_lab/registry.py",
+            "../docs/models/glm52/kernel-lab-ops.md"
+          ],
+          "minimal_modules": [
+            "manifest/registry/ledger 链",
+            "check 与 bench 命令族",
+            "capability 键与 fail-closed"
+          ],
+          "practice_task": "在 CPU 机器运行 pytest pegainfer-glm52/benches/tests/ -q 与 kernel_lab list，读输出理解 8 个 unit 的行为域；为 fp8_gemm.q_b 手写一条 manifest 观察项说明。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l4",
+          "title": "二次开发实战：新增能力的工作流与证据要求",
+          "order": 4,
+          "filename": "u10-l4-extending-glm52.md",
+          "level": "advanced",
+          "topic": "以新增 EP 宽度为线索串联改动面（shim 实例化、Glm52MoeTopo、拓扑测试、VRAM 账本、CLI 校验、文档），对照 AI 辅助贡献的三档证据要求。",
+          "learning_goals": [
+            "列出新增拓扑的改动面清单与顺序",
+            "理解活文档工作流与提交规范",
+            "掌握验收证据分级"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/moe_ep.rs",
+            "../docs/models/glm52/serving-status.md",
+            "../docs/models/glm52/whole-step-decode-graph.md"
+          ],
+          "minimal_modules": [
+            "改动面清单",
+            "证据与验收纪律",
+            "文档同步工作流"
+          ],
+          "practice_task": "假设新增 --moe-topo=ep128：写出完整改动计划（文件、常量、测试、free-running 三纪律各需什么新证据），按仓库规范拟一条 feat(glm52) 提交信息与 PR 描述骨架。",
+          "depends_on": [
+            "u5-l3",
+            "u8-l2",
+            "u10-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
