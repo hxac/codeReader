@@ -1,0 +1,48 @@
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+| --- | --- |
+| `src/ops/attention.rs` | 共享注意力 Rust 包装层：`PrefillPagedPlan`、prefill/decode 全部 wrapper、从 `PagedKvLayout` 派生池几何的 `checked_paged_geometry` |
+| `csrc/shared/paged_attention.cu` | FlashInfer 注意力算子的 `extern "C"` 薄包装：decode、split-KV decode、KV scatter、batch prefill、single prefill 的全部入口 |
+| `csrc/shared/paged_launch.cuh` | 上述薄包装共用的 launch 模板：`make_paged_kv`、`decode_launch`、`decode_split_kv_launch`、`prefill_paged_launch`、`resolve_prefill_cta_tile_q` |
+| `csrc/shared/prefill_attention.cu` | 注意力的「前置准备」kernel：`qk_norm_rope_batched_decode_cuda`（QK RMSNorm + RoPE），prefill 与 decode 共用 |
+| `src/ffi/shared.rs` | 上述 CUDA 入口的 Rust `extern "C"` 声明 |
+| `tests/prefill_plan_refill.rs` | plan 复用的正确性门禁：预分配 plan 原地重填后须与 fresh plan 逐数组一致，且指针不得移动 |
+| `tests/common/mod.rs` | 测试公共设施：`device_or_skip` 设备门（`PEGAINFER_REQUIRE_GPU`）、确定性随机填充 `fill`、容差比较 `worst_delta` |
+
+一个容易搞混的事实：**paged prefill 的 CUDA 入口在 `paged_attention.cu`，不在 `prefill_attention.cu`**——后者只放「注意力之前的 QK norm + RoPE 准备 kernel」。可用 `KERNELS.md` 的登记行核对：`qwen3_4b.attn.prefill_paged` 与 `qwen3_4b.attn.decode_paged` 两行的 csrc 列都指向 `csrc/shared/paged_attention.cu`（见 [KERNELS.md:28-31](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/KERNELS.md#L28-L31)，其中还登记了 `qwen3_4b.attn.qk_norm_rope` 指向 `csrc/shared/prefill_attention.cu`、`qwen3_4b.kv.scatter` 指向 `paged_attention.cu`）。
+
+## 4. 核心概念与源码讲解
+
+### 4.1 PrefillPagedPlan：一次构建、多层共享的批前缀计划
+
+#### 4.1.1 概念说明
+
+FlashInfer 的批式 paged prefill 接口不只收 Q/K/V 指针，还要一批「调度元数据」：每请求的页表（CSR）、每 token 的绝对位置、query 边界（CSR）、以及把 query 切成 CTA tile 的 tile 计划。这些元数据**与层无关**——第 0 层与第 39 层用同一张页表、同一组位置。PegaInfer 把它们抽成 `PrefillPagedPlan`：**每个 prefill 步构建一次，全部 transformer 层共享**；每层调用时只传 `layer`，让 kernel 算出自己那层 K/V 在池中的偏移。
+
+plan 还有第二个使命：为 CUDA Graph 服务。u2-l1/u4-l3 讲过 Graph 回放要求指针稳定，而「每步新建 plan」意味着每步重新分配显存。于是 plan 提供预分配 + 原地重填形态：缓冲按最坏情况一次分配，之后每步只往里拷数据，指针永不变化。
+
+#### 4.1.2 核心流程
+
+四条构造/更新路径，主机侧计算只有一个真源 `BatchPlanHost::compute`：
+
+```text
+new_with_cta_tile_q          单请求一步构造
+new_batch_with_cta_tile_q    多请求一步构造 ────────┐ 主机计算完全
+new_preallocated             按最坏容量分配，不填内容 │ 由 BatchPlanHost
+update_batch_with_cta_tile_q 原地重填，无分配无移址 ─┘ ::compute 承担
+```
+
+`BatchPlanHost::compute` 对一个 batch 的输入（每请求页表、末页长度、起始位置、query 长度）做四件事：
+
+1. **页元数据（CSR）**：拼接 `all_page_indices` 并累加出 `page_indptr`；记录每请求 `last_page_len`（末页有效 token 数）与 `kv_chunk_size = start_pos + seq_len`（该请求可见的 KV 总长）。
+2. **每 token 元数据**：`batch_indices[t]` = token t 属于哪个请求；`positions[t]` = token t 的绝对位置（从 `start_pos` 起数）。`start_pos > 0` 是常态——分块 prefill、前缀缓存续算都从这里开始。
+3. **query 边界（CSR）**：`q_indptr`，长度 batch+1。
+4. **tile 计划**：先经 FFI 问 C++ 侧拿 `cta_tile_q`（与 kernel dispatch 用同一套启发式），再对每个请求展开 tile 数组：
+
+\[
+\text{num\_tiles}_{req} = \left\lceil \frac{\text{seq\_len} \times g}{\text{cta\_tile\_q}} \right\rceil,\quad g = \frac{\text{num\_q\_heads}}{\text{num\_kv\_heads}}
+\]
+
+分页池按「打包行」（token × GQA 组）切 tile；本路径不做 KV 分区，`kv_tile_indices` 恒为 0。

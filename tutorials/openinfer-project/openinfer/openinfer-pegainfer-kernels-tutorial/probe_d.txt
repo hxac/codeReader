@@ -1,0 +1,3 @@
+D1: math line
+\[ p_i = \frac{\exp(x_i / T)}{\sum_j \exp(x_j / T)} \]
+D3: inline \( x \in \mathbb{R}^{V} \) done

@@ -1,0 +1,83 @@
+
+#### 4.3.4 代码实践：三步链 + cargo expand 对照（本讲指定实践）
+
+1. **实践目标**：写一段 `RMSNorm → GEMM → call 逃逸` 的三步链，用 `cargo expand` 拿到展开产物，与手写版本逐行对照，量化 DSL 省掉的样板。
+
+2. **操作步骤**：
+
+   a. 在 `tests/` 下新建 `dsl_expand_probe.rs`（示例代码；tests 自动发现，无需改 Cargo.toml）：
+
+```rust
+// 示例代码：三步链探针
+use anyhow::Result;
+use pegainfer_kernels::tensor::{DeviceContext, GpuTensor, GpuWeight, NormWeight};
+use pegainfer_kernels::typed_pipeline;
+
+fn note_step(seq_len: usize) {
+    println!("escape hatch: produced {seq_len} rows");
+}
+
+fn probe_step(
+    ctx: &DeviceContext,
+    hidden: &GpuTensor<128>,
+    norm_w: &NormWeight<128>,
+    proj: &GpuWeight<64, 128>,
+    seq_len: usize,
+) -> Result<GpuTensor<64>> {
+    typed_pipeline! {
+        ctx = ctx, eps = 1e-5, seq_len = seq_len, gemm = prefill;
+        tensor normed: 128;
+        tensor y: 64;
+        rms_norm(hidden => &mut normed, norm_w);
+        gemm(&normed => &mut y, proj);
+        call note_step(seq_len);
+    }
+    Ok(y)
+}
+```
+
+   b. 展开宏：`cargo expand -p pegainfer-kernels --test dsl_expand_probe`（需先 `cargo install cargo-expand`，且依赖 nightly 工具链的 `-Zunpretty`；**待本地验证**环境是否具备）。
+   c. 若 cargo-expand 不可用：退回 4.2.4 的手工展开，按表逐条翻译，效果等同。
+
+3. **需要观察的现象**：展开产物中 `typed_pipeline!` 消失，取而代之的应当依次是——`let mut normed = pegainfer_kernels::tensor::GpuTensor::<128>::zeros(ctx, seq_len)?;`、`let mut y = ...zeros...?;`、`pegainfer_kernels::typed_ops::rms_norm_into(ctx, hidden, &norm_w, 1e-5, &mut normed)?;`、`pegainfer_kernels::typed_ops::gemm_into(ctx, &proj, &normed, &mut y)?;`、`note_step(seq_len);`（`$crate::` 前缀以绝对路径出现，`&$w` 自动加引用）。**待本地验证**（本讲未在本机执行）。
+
+4. **预期结果**：宏链 6 行语句对应展开 5 行普通 Rust；手写同样链需要每次写全 `pegainfer_kernels::typed_ops::…`（或 use）+ 4 个实参 + `?`。统计两种写法的字符数/行数差，写进你的笔记——这就是 DSL 的全部收益：**纯样板压缩，零语义增量**。
+
+5. **运行时验证（可选，需 GPU）**：给 `probe_step` 补一个测试：随机权重 + CPU 参考实现对拍（rms_norm 参考可参考 u3-l6 的做法）。无 GPU 时跳过，此步**待本地验证**。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：一行说清 `try` 与 `call` 的差别。
+答案：`try EXPR;` 展开为 `EXPR?;`（错误沿链传播，[L153](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L153)）；`call EXPR;` 展开为 `EXPR;`（普通执行、返回值丢弃，[L161](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L161)）。
+
+**练习 2**：为什么复用缓冲用 `swap` 而不是赋值/新增拷贝语句？
+答案：`::std::mem::swap`（[L145](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L145)）在宿主侧交换两个既有 `GpuTensor` 的内容，零设备操作、零分配，保住预分配缓冲的指针稳定（承接 u2-l1 / u4-l3）；DSL 因此不需要任何 CUDA 拷贝语句。
+
+**练习 3**：一条链里 80% 是 `try` 包裹的模型专属 kernel，该继续用 DSL 吗？
+答案：不该。逃逸语句没有压缩效果，还额外套了一层宏语法；直接手写 typed_ops 链（两者展开等价，见 4.2），可读性更好。
+
+## 5. 综合实践
+
+把本讲三块内容串成一个「展开审计」小任务：
+
+1. **写**：以 [L10-L18](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L10-L18) 官方示例为蓝本，改写成引用形态可编译的版本（参照 4.3.4 的探针），要求覆盖：1 条 `tensor`、1 条 `rms_norm`、1 条 `gemm`、1 条 `gemm[graphsafe]` 覆盖、1 条 `try`、1 条 `swap`。
+2. **审**：用 `cargo expand`（或手工按 4.2.2 表格）展开，逐行标注每行来自哪条语句、落到 typed_ops 哪个函数哪个行号。
+3. **验**：故意做两个破坏实验——(a) header 去掉 `gemm = prefill`；(b) `gemm` 写成 `gemm[quantized]`——分别观察 `compile_error!`（[L37](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L37)）与「无臂可配」两类报错的差异。
+4. **量**：统计等价手写链与 DSL 链的行数/字符数，写一句结论：这条链用 DSL 值不值。
+5. 全程产物只是你自己的笔记与临时测试文件，**不要提交**到仓库；所有需要编译/运行的结果均**待本地验证**。
+
+## 6. 本讲小结
+
+- `typed_pipeline!` 是纯语法糖：header 归一化（4 种形态）+ `@steps` 递归消化语句 + `@gemm` 终结分派，每条语句恰好展开为一个 `typed_ops` 调用（或 zeros / mem::swap / 逃逸表达式）。
+- 11 种语句里，`tensor`/`tensor_at` 管分配、`gemm`（含 `[mode]` 覆盖）管线性投影、`rms_norm`/`add`/`bf16_to_f32`/`f32_to_bf16` 管逐元素、`swap` 管缓冲复用、`try`/`call` 是逃逸口。
+- 分配被三重门禁锁在 `gemm = prefill` + `seq_len` 之下，落点是「解码/graph 回放路径零分配」这条引擎纪律。
+- `gemm` 模式两级可控：header 定基调、`gemm[...]` 单条覆盖；prefill 模式下单 token 形状自动走 graphsafe 路径（`x.seq_len == 1`）。
+- 逃逸口的语义就一行：`try` 是 `?`、`call` 是普通语句；逃逸占比过高的链应当整体放弃 DSL。
+- 验证等价性的两条路：`cargo expand` 逐行对照，或按 4.2.2 对照表手工展开——两者都不需要 GPU。
+
+## 7. 下一步学习建议
+
+- **u4-l3（CUDA Graph 安全与流管理）**：本讲反复出现的 graphsafe/prefill 之分，其下游原因（workspace-free 句柄、指针稳定、`set_batch_size` 重放）在那里展开。
+- **u3-l1（ops.rs 分发与算子包装解剖）**：从 DSL 再往下沉一层，看 typed_ops 之下的 ops wrapper 与 FFI 入口如何组织。
+- **模型 crate 实地观察**：到本 crate 之外的模型 crate（kimi-k2 线的 `pegainfer-kimi-k2`）里搜索 `typed_pipeline!` 的真实调用，对照本讲的语句表核对引用形态与逃逸用法（此目录在本 crate 工作区之外，**待确认**具体文件位置）。
+- 若你还没读 u2-l2 的 `gpu_buffers!` 一节，建议补读：它与本讲的 `tensor` 语句是「预分配缓冲 vs 链内分配」的互补两半。

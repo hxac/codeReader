@@ -1,0 +1,1153 @@
+{
+  "head": "ca25b80fa4491509ccef418467b37d4d6fd64e9b",
+  "project": "openinfer-pegainfer-kernels",
+  "rationale": "本次为增量更新：上一版 manifest 停在 09a1a38f，之后仅有两个提交（f6910714 feat(frontend): serve behind a caller's router extension 与 ca25b80f feat(frontend): pass a request's seed through to the engine），二者均落在 pegainfer-frontend：前者是 HTTP 服务层的路由扩展托管，后者把请求级 seed 从协议层传到引擎契约；kernels 侧的采样入口 gpu_sample_batch_into 本就接收每次调用的 philox seed（src/ops/sampling.rs），无需任何 kernel/FFI/KERNELS.md 改动。经核对当前 HEAD 下 Cargo.toml 的 feature 矩阵、src/lib.rs 模块清单、src/ops.rs 的 cfg 门控导出与 KERNELS.md 的表结构均与既有讲义假设一致，pegainfer-kernels 在两个 HEAD 之间无实质变化，因此全部 35 篇讲义 action 置为 keep，仅更新 head。原学习路径设计保持不变：u1 建立定位、目录与构建心智模型并以 KERNELS.md 作导航；u2 下沉 Rust 侧运行时（tensor→类型层→FFI 契约→前向 DSL）；u3 按共享算子族精读（paged_kv 布局先于 attention，norm 家族引出首个 CUDA kernel 精读）；u4 把模式变成工程能力（端到端新增算子与 CUDA Graph 安全）；u5-u8 按模型线走专属 kernel 面（Qwen 线含 Triton AOT 与 TVM FFI、gemma4 注意力与量化、kimi-k2 Marlin、最难的 MoE/EP 多机底座），难度递增到 advanced；u9 以测试类型学、基准规范和二次开发清单收束。依赖链保证每篇只引入一两个新概念，实践任务均落在真实源码与真实测试命令上。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [],
+          "filename": "u1-l1-project-role.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "理解 KERNELS.md Scope 段定义的职责边界（KvPool、PagePool、SamplingParams 等运行时对象不属于本 crate）",
+            "对照 Cargo.toml 的 feature 表说出每条模型线背后的开关与构建期需求",
+            "理解默认构建零 Python 依赖的设计取舍"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "crate 定位与职责边界",
+            "feature 门控矩阵",
+            "与 pegainfer-core 及模型 crate 的分工"
+          ],
+          "order": 1,
+          "practice_task": "阅读 Cargo.toml 的 [features] 段与 KERNELS.md 的 Scope 段，写一份笔记：列出每个 feature 对应的模型线及其构建期需求（是否需要 Python/Triton/TileLang/NCCL），并用 `cargo tree -p pegainfer-kernels` 验证依赖关系。",
+          "source_files": [
+            "Cargo.toml",
+            "KERNELS.md",
+            "src/lib.rs"
+          ],
+          "title": "pegainfer-kernels 是什么：定位与职责边界",
+          "topic": "说明 pegainfer-kernels 在 PegaInfer 纯 Rust + CUDA 推理引擎中的角色：它拥有 CUDA/Triton 构建产物、FFI 声明、kernel ABI 张量助手、paged-KV 布局元数据和 Rust 算子包装层。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-directory-tour.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "记住 src/lib.rs 暴露的模块清单及各自一句话职责",
+            "能把每个 csrc/<模型线>/ 目录对应到 cargo feature",
+            "知道 examples 与 tests 的命名分组规律"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "src 顶层模块",
+            "csrc 按模型线分组",
+            "tools 生成器与 cubin 资产",
+            "examples 与 tests 布局"
+          ],
+          "order": 2,
+          "practice_task": "绘制一张目录结构图，为每个 csrc/<line>/ 子目录标注对应的 cargo feature 与一两个代表 kernel 文件；再统计 tests/ 下按前缀（dflash2/gemma4/glm52/k3/qwen4/hd256/hd512）分组的测试文件数量。",
+          "source_files": [
+            "src/lib.rs",
+            "src/ops.rs",
+            "src/ffi.rs",
+            "KERNELS.md"
+          ],
+          "title": "目录结构导览：src、csrc、tools、cubin、examples、tests",
+          "topic": "带读者走一遍 crate 的六个顶层区域：src 的七个 Rust 模块、csrc 按模型线分组的 CUDA 源、tools 的代码生成器、cubin 的预编译资产、examples 与 tests。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "filename": "u1-l3-build-nvcc-pipeline.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "找到 build.rs 中 SM 探测与 nvcc 参数拼装的代码路径",
+            "理解 FlashInferIncludes 为何要把 vendored CCCL 放在 CTK include 之前",
+            "会用 PEGAINFER_BUILD_TIMING 与 PEGAINFER_NVCC_JOBS 观察构建"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "SM 探测与 PEGAINFER_CUDA_SM",
+            "NvccTask 并行编译",
+            "FlashInferIncludes 与 vendored CCCL",
+            "构建计时与并行度环境变量"
+          ],
+          "order": 3,
+          "practice_task": "在 build.rs 中定位 SM 探测函数与 NvccTask 队列，记录一次 `PEGAINFER_BUILD_TIMING=1 cargo build --release -p pegainfer-kernels` 的各阶段耗时；在无 GPU 环境用 PEGAINFER_CUDA_SM=120 覆盖并解释 cargo:rerun-if-changed 的触发条件。",
+          "source_files": [
+            "build.rs",
+            "Cargo.toml",
+            "csrc/common.cuh"
+          ],
+          "title": "构建管线 I：nvcc 编译、SM 检测与 FlashInfer 头",
+          "topic": "解析 build.rs 的 nvcc 阶段：GPU SM 架构自动探测与 PEGAINFER_CUDA_SM 覆盖、NvccTask 并行编译、FlashInfer/CUTLASS/CCCL 头文件搜索路径的组装。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-build-aot-codegen.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "理解 TritonKernelSpec 各字段的含义",
+            "知道 TileLang/Triton 生成器的目录约定与解释器探测链",
+            "理解 GLM52_TRTLLM_FMHA_CUBINS 表与 cubin/ 目录的关系"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "TritonKernelSpec 与 AOT 产物",
+            "TileLang 生成器目录约定",
+            "GLM52 cubin 嵌入",
+            "AOT 相关环境变量矩阵"
+          ],
+          "order": 4,
+          "practice_task": "对照 build.rs 的 GLM52_TRTLLM_FMHA_CUBINS 表与 cubin/glm52/ 目录，写出每个 cubin 文件名隐含的 kernel 形状参数（Qk576/HV512/Q8/Q16/PerCta 等）；再整理一份 qwen35 构建前置步骤清单（uv venv + triton + PEGAINFER_TRITON_PYTHON）。",
+          "source_files": [
+            "build.rs",
+            "Cargo.toml",
+            "tools/triton/README.md",
+            "tools/tilelang/README.md",
+            "cubin/glm52/README.md"
+          ],
+          "title": "构建管线 II：feature 门控的 AOT 生成与 cubin 嵌入",
+          "topic": "讲解 feature 门控的构建期代码生成：qwen35 的 Triton AOT（PEGAINFER_TRITON_PYTHON）、glm52 的 TileLang sparse-MLA 与 DeepGEMM/FlashMLA CUDA、以及 checked-in FlashInfer cubin 如何被转成可链接的 Rust 符号。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "filename": "u1-l5-kernels-index.md",
+          "id": "u1-l5",
+          "learning_goals": [
+            "掌握 op_id 的命名结构与表格六列的语义",
+            "能按模型线分节快速定位 kernel 面",
+            "理解 Editing Rule 中 kernels crate 与模型 crate 的元数据归属"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "op_id 命名与表格列语义",
+            "按模型线分节的表结构",
+            "Editing Rule 与职责边界"
+          ],
+          "order": 5,
+          "practice_task": "任选三个不同模型线的 op_id（如 shared.sampling.batch_topk_topp、qwen3_4b.norm.rms_batch、任一 k3 条目），在源码中找到对应 wrapper 函数、extern 声明与 .cu 文件，各写一张 op 路径卡。",
+          "source_files": [
+            "KERNELS.md",
+            "src/ops/norm.rs",
+            "src/ffi/shared.rs"
+          ],
+          "title": "KERNELS.md：算子索引与编辑规则",
+          "topic": "学会用 KERNELS.md 这张 op 路由表导航：从 op_id 定位 Rust wrapper、FFI symbol、csrc 源文件与后端（CUDA/cuBLAS/FlashInfer/Triton），并理解维护这张表的 Editing Rule。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "初识 pegainfer-kernels：定位、目录与构建"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "filename": "u2-l1-device-context-tensor.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "理解 DeviceContext 持有哪些 CUDA 资源",
+            "掌握 GpuTensor/DeviceVec/HiddenStates 的关系与列主序约定",
+            "理解 StreamOverrideGuard 的 RAII 语义与 active_cu_stream 的解析顺序"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "DeviceContext",
+            "GpuTensor 与 DeviceVec",
+            "StreamOverrideGuard 与 active_cu_stream",
+            "stream_spin_wait"
+          ],
+          "order": 1,
+          "practice_task": "写一个集成测试：创建 DeviceContext，分配两个张量，用 StreamOverrideGuard::activate 切到自建流，断言 active_cu_stream 返回新流，guard drop 后再断言恢复为上下文默认流。",
+          "source_files": [
+            "src/tensor.rs",
+            "src/lib.rs"
+          ],
+          "title": "DeviceContext 与 GpuTensor：cudarc 之上的运行时",
+          "topic": "精读 src/tensor.rs 的设备上下文与张量抽象：CudaContext/CudaStream 封装、设备指针获取、thread-local 流覆盖（Green Context SM 分区）与 stream_spin_wait。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-typed-ops-gpu-buffers.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "理解 GpuTensor<IN> 与 GpuWeight<OUT,IN> 如何把形状检查移到编译期",
+            "区分 gemm_into 与 gemm_graphsafe_into 的行为差异来源",
+            "能读懂并使用 gpu_buffers! 宏生成的 new/set_batch_size"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "GpuWeight 与 NormWeight 类型",
+            "gemm_into 家族",
+            "gpu_buffers! 宏展开",
+            "set_batch_size 语义"
+          ],
+          "order": 2,
+          "practice_task": "定义 GpuWeight<64,128> 与 GpuTensor<128>，调用 typed_ops::gemm_into 完成一次 GEMM；故意传 GpuTensor<64> 观察编译错误信息；再用 gpu_buffers! 声明一个含两个字段的结构，演示 set_batch_size 只改逻辑长度而不重新分配显存。",
+          "source_files": [
+            "src/typed_ops.rs",
+            "src/gpu_buffers.rs",
+            "src/tensor.rs"
+          ],
+          "title": "常量泛型类型层：typed_ops 与 gpu_buffers!",
+          "topic": "讲解用 const generics 在编译期锁定矩阵维度的类型层：GpuWeight/NormWeight、typed_ops::gemm_into 系列，以及 gpu_buffers! 宏如何声明随 batch 尺寸伸缩的缓冲结构。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l3-ffi-error-contract.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "掌握 src/ffi 模块的组织方式与 Half 映射",
+            "理解 PEGAINFER_CUBLAS_STATUS_BASE 与 CUresult 统一映射的设计",
+            "能追踪一次 kernel 失败从 CUDA 错误码到 anyhow::Error 的完整路径"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "extern \"C\" 声明与 Half",
+            "FFI 异常捕获",
+            "CUresult 与 cuBLAS 状态映射",
+            "last_error 读取"
+          ],
+          "order": 3,
+          "practice_task": "运行 tests/ffi_exception_catch.rs；然后选一个 FFI 入口，纸面推导并落码实现出错写 last_error、Rust 侧读出并转为 anyhow::Error 的最小闭环，说明为什么未捕获的 C++ 异常会直接 abort 进程。",
+          "source_files": [
+            "src/ffi.rs",
+            "src/ffi/shared.rs",
+            "csrc/shared/ffi_guard.cuh",
+            "csrc/shared/ffi_last_error.cu",
+            "tests/ffi_exception_catch.rs"
+          ],
+          "title": "FFI 声明与跨语言错误契约",
+          "topic": "分析 Rust 与 CUDA 之间的 ABI 约定：unsafe extern \"C\" 声明、Half 类型、C++ 异常不能穿越 extern \"C\" 边界的原因、ffi_guard.cuh 的捕获与 map_cuda_error 错误码映射、last_error 通道与 Rust 侧解码。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l4-forward-pass-dsl.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "掌握 typed_pipeline! 的宏语法与支持的语句类型",
+            "理解宏展开与手写 typed_ops 调用的等价关系",
+            "知道何时应放弃 DSL 直接用逃逸口"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "宏语法",
+            "与 typed_ops 的对应关系",
+            "逃逸口设计动机"
+          ],
+          "order": 4,
+          "practice_task": "用 typed_pipeline! 写一段 RMSNorm→GEMM→call 逃逸调用自定义函数的三步链，用 cargo expand 展开宏并与手写版本逐行对照，总结 DSL 省掉的样板代码。",
+          "source_files": [
+            "src/forward_pass.rs",
+            "src/typed_ops.rs"
+          ],
+          "title": "typed_pipeline! 前向声明 DSL",
+          "topic": "阅读 src/forward_pass.rs 的 typed_pipeline! 宏：它把常见 typed_ops 调用串成声明式前向链，并用 try/call 逃逸口接入模型专属 kernel 调用。"
+        }
+      ],
+      "level": "beginner",
+      "order": 2,
+      "title": "Rust 侧运行时基础：张量、类型层与 FFI"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1",
+            "u2-l3"
+          ],
+          "filename": "u3-l1-ops-wrapper-anatomy.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "看懂 src/ops.rs 的 cfg 门控与再导出模式",
+            "掌握 wrapper 的标准五步：取指针→转类型→传流→unsafe 调用→返回 Result",
+            "能独立阅读任意一个 ops 模块"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ops.rs 的 cfg 门控导出",
+            "wrapper 标准五步",
+            "HiddenStates 布局约定"
+          ],
+          "order": 1,
+          "practice_task": "从 ops.rs 任选一个未讲过的导出函数（elementwise 或 sampling 中的一个），画出 Rust wrapper→device_ptr→extern→csrc 入口→__global__ kernel 的完整调用图，并标注每一步的类型。",
+          "source_files": [
+            "src/ops.rs",
+            "src/ops/norm.rs",
+            "src/ffi/shared.rs"
+          ],
+          "title": "ops.rs 分发与算子包装解剖",
+          "topic": "以 rms_norm_into 为标本解剖一个算子包装的标准形态：feature 门控导出、device_ptr 借用、FFI 调用、active stream 传参与 Result 返回。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1",
+            "u2-l2"
+          ],
+          "filename": "u3-l2-linear-cublas-gemm.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 gemm_per_token 作为逐行精度参考的用途",
+            "理解 batch 不变性为什么是精度对拍的基石",
+            "掌握 lt algo store 的记录格式与命中条件"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "gemm_per_token 参考路径",
+            "graph-safe 与 workspace 取舍",
+            "lt algo store 记录格式",
+            "batch 不变性测试"
+          ],
+          "order": 2,
+          "practice_task": "运行 tests/batch_invariance_gemm.rs 与 tests/lt_algo_store.rs；设置 PEGAINFER_GEMM_LT_CACHE=<file> 观察第二次构建/启动是否命中缓存记录，并解释每条记录为何要携带 GPU 型号、CUDA 运行时/驱动与 cublasLt 版本指纹。",
+          "source_files": [
+            "src/ops/linear.rs",
+            "src/typed_ops.rs",
+            "csrc/shared/linear.cu",
+            "csrc/shared/lt_algo_store.cu",
+            "tests/batch_invariance_gemm.rs"
+          ],
+          "title": "线性层与 cuBLAS：GEMM、batch 不变性与 algo store",
+          "topic": "讲解线性层 kernel 家族：typed GEMM 经 cuBLAS 的路径、gemm_per_token 参考实现、batch 不变性约束，以及 cublasLt algo 离线存储如何缩短启动调优时间。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l3-paged-kv-layout.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "区分 KvStorage 与 KvFormat 两个正交维度",
+            "推导 Folded 布局如何把 K 的范数权重折进 query 以压缩行宽",
+            "理解 permute 对 writer 与 reader 的双向约束"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "KvStorage",
+            "KvFormat Split 与 Folded",
+            "stride 推导",
+            "fp8 KV 池测试"
+          ],
+          "order": 3,
+          "practice_task": "给定 head_dim=128、rotary=64，手算 Folded 的 values_per_token、row_width 与前 8 列的 permute 映射并写成单元测试断言；再阅读 tests/hd256_fp8_pool.rs，解释 e4m3 池为何与启用的 prefix cache 互斥。",
+          "source_files": [
+            "src/paged_kv.rs",
+            "src/ops/attention.rs",
+            "tests/hd256_fp8_pool.rs"
+          ],
+          "title": "paged KV 布局元数据：KvStorage 与 KvFormat",
+          "topic": "精读 src/paged_kv.rs：存储宽度轴（Bf16/E4m3）与形状轴（Split/Folded）正交组合出页内布局，values_per_token/row_width/permute 是所有 reader 与 writer 的唯一真源。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1",
+            "u3-l3"
+          ],
+          "filename": "u3-l4-paged-attention.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "理解 PrefillPagedPlan 的字段与一次构建多层共享的机制",
+            "掌握 prefill 与 decode 两条 paged 路径的参数差异",
+            "理解 GQA 组大小列表只门控优化不门控正确性"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "PrefillPagedPlan",
+            "prefill_attention_paged_into",
+            "batch decode 与 split-KV 变体",
+            "GQA 组大小门控"
+          ],
+          "order": 4,
+          "practice_task": "构造 GQA=4 的合成 KV 页表，先跑 single_prefill_nhd_causal_into 作为参考，再跑 paged prefill 路径并写对拍测试；运行 tests/prefill_plan_refill.rs 并解释 plan 复用的正确性条件。",
+          "source_files": [
+            "src/ops/attention.rs",
+            "csrc/shared/prefill_attention.cu",
+            "csrc/shared/paged_attention.cu",
+            "tests/prefill_plan_refill.rs"
+          ],
+          "title": "注意力：FlashInfer paged prefill 与 batch decode",
+          "topic": "讲解共享注意力层：PrefillPagedPlan 的构建与复用、BatchPrefillWithPagedKVCache 的调用形态、batch decode 与 split-KV 变体、SUPPORTED_GQA_GROUP_SIZES 与 eager 回退的关系。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l5-elementwise-embedding-sampling.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "掌握 embedding_batch 的 u32 输入与列主序输出约定",
+            "理解 argmax 家族与 gpu_sample_batch 的按行过滤设计",
+            "能独立读懂一个简单 CUDA kernel 与其 wrapper 的配对"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "embedding_batch",
+            "argmax 家族",
+            "gpu_sample_batch 按行过滤",
+            "softcap 与 gelu"
+          ],
+          "order": 5,
+          "practice_task": "组合 embedding→随机 logits→argmax_batch 与 gpu_sample_batch 两条采样路径，写一个对比脚本验证贪心与 top-k/top-p 在温度趋近 0 时结果收敛一致；运行 tests/softcap_smoke.rs 与 tests/gelu_scale_smoke.rs。",
+          "source_files": [
+            "src/ops/elementwise.rs",
+            "src/ops/embedding.rs",
+            "src/ops/sampling.rs",
+            "csrc/shared/elementwise.cu",
+            "csrc/shared/flashinfer_sampling.cu"
+          ],
+          "title": "elementwise、embedding 与采样",
+          "topic": "过一遍最贴近上手写 kernel 的算子族：token embedding、softcap/gelu 等 elementwise、argmax 贪心与 FlashInfer top-k/top-p 采样在 KERNELS.md 中的登记方式。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l6-norm-family.md",
+          "id": "u3-l6",
+          "learning_goals": [
+            "理解自研 kernel 与 FlashInfer 委托的取舍标准",
+            "掌握 head→blockIdx、head_dim→threadIdx 的映射与 band stride 处理",
+            "熟悉 common.cuh 提供的公共设施"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "FlashInfer norm 委托",
+            "rms_norm_gated_kernel",
+            "head 与 slot 索引推导",
+            "common.cuh 公共设施"
+          ],
+          "order": 6,
+          "practice_task": "为 rms_norm_gated_kernel 写一个 CPU f32 参考实现，构造随机输入做 bf16 容差对拍；画出 head、slot、x_stride、gate_stride 四者的索引关系图，解释为什么 gate 可以是融合投影的一个 band。",
+          "source_files": [
+            "src/ops/norm.rs",
+            "csrc/shared/norm.cu",
+            "csrc/shared/flashinfer_norm.cu",
+            "csrc/common.cuh"
+          ],
+          "title": "norm 家族与第一个 CUDA kernel 精读",
+          "topic": "从 ops/norm.rs 下沉到 csrc/shared/norm.cu 与 flashinfer_norm.cu：哪些 norm 委托 FlashInfer 模板、哪些自研（gated RMSNorm 的 SiLU/sigmoid 两变体），逐行精读 rms_norm_gated_kernel 的 grid/block 映射。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "共享算子层：从 wrapper 到 CUDA kernel"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l3",
+            "u3-l6"
+          ],
+          "filename": "u4-l1-cuda-conventions-guard.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "掌握入口样板四件套：检查、guard、launch、错误返回",
+            "理解 map_cuda_error 把 runtime 错误统一到 driver 码的原因",
+            "理解 last_error 的线程生命周期约定"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "入口样板四件套",
+            "map_cuda_error",
+            "cuBLAS 状态基址偏移",
+            "last_error 生命周期"
+          ],
+          "order": 1,
+          "practice_task": "选一个尚未完整走 guard 样板的模型专属入口，对照约定写一份补齐清单，并实际为其加上异常捕获与错误映射后跑通该模块既有测试。",
+          "source_files": [
+            "csrc/common.cuh",
+            "csrc/shared/ffi_guard.cuh",
+            "csrc/shared/ffi_last_error.cu",
+            "csrc/shared/norm.cu",
+            "tests/ffi_exception_catch.rs"
+          ],
+          "title": "CUDA 侧工程约定与异常防护",
+          "topic": "总结 csrc 侧入口约定：extern \"C\" 入口的参数检查、ffi_guard 的 try/catch 包装、cudaError 到 CUresult 的统一映射，以及这些样板为何是每个新 kernel 的必经之路。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l1",
+            "u3-l1",
+            "u1-l5"
+          ],
+          "filename": "u4-l2-add-new-op-walkthrough.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "能独立完成 kernel 到测试的五处联动改动",
+            "掌握 smoke 测试的最小形态",
+            "养成同步更新 KERNELS.md 的习惯"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Editing Rule 五步",
+            "gelu_scale 先例",
+            "测试落位",
+            "索引表更新"
+          ],
+          "order": 2,
+          "practice_task": "新增一个 shared.elementwise.<自选> 算子（例如带缩放因子的 softcap 变体），完成 kernel、FFI 声明、wrapper、smoke 测试与 KERNELS.md 表行共五处改动，并用 `cargo test --release -p pegainfer-kernels --test <新测试>` 验证通过。",
+          "source_files": [
+            "KERNELS.md",
+            "src/ffi/shared.rs",
+            "src/ops.rs",
+            "csrc/shared/elementwise.cu",
+            "tests/gelu_scale_smoke.rs"
+          ],
+          "title": "实战：端到端新增一个共享算子",
+          "topic": "按 KERNELS.md 的 Editing Rule 走完新增算子全链路：csrc kernel、FFI 声明、ops wrapper、单元测试、索引表更新，形成可复用的五步肌肉记忆。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l2",
+            "u2-l1"
+          ],
+          "filename": "u4-l3-cuda-graph-safety.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "理解 graph capture 对指针稳定性与条件分支的限制",
+            "区分 gemm_into 与 gemm_graphsafe_into 的实现差异",
+            "理解预分配缓冲加逻辑 batch 重放的组合模式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "graph-safe GEMM 差异",
+            "指针稳定性与预分配",
+            "StreamOverrideGuard 与 capture",
+            "set_batch_size 重放语义"
+          ],
+          "order": 3,
+          "practice_task": "写一个最小 capture 实验：保持缓冲地址不变，仅用 set_batch_size 改变逻辑 batch 并重复 launch，观察输出行数随之变化；总结哪些 ops 路径（如 workspace 依赖或主机侧分支）不能进 graph 及原因。",
+          "source_files": [
+            "src/tensor.rs",
+            "src/typed_ops.rs",
+            "src/gpu_buffers.rs"
+          ],
+          "title": "CUDA Graph 安全与流管理",
+          "topic": "讲解为 CUDA Graph 回放而生的约束：指针稳定性、workspace-free cuBLAS handle、set_batch_size 只改逻辑维度，以及 Green Context 流覆盖如何与 capture 共存。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "kernel 工程化：约定、新增算子与 Graph 安全"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u5-l1-qwen35-hybrid-attention.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "理清 qwen35 混合架构下两类注意力各自对应的 kernel",
+            "掌握 conv1d 与 gated delta rule 的输入输出形状",
+            "理解 paged_attention_split_hd256 与基础版的分池差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "hd256 全注意力",
+            "conv1d 前置卷积",
+            "gated delta rule 解码",
+            "split 池变体"
+          ],
+          "order": 1,
+          "practice_task": "画出一次 qwen35 decode step 的算子数据流图（标注每个张量的 shape 与所用 kernel 文件），并对照 KERNELS.md 的 Non-Qwen3 Compatibility 段核对链路登记是否完整。",
+          "source_files": [
+            "src/ops/qwen35.rs",
+            "src/ffi/qwen35.rs",
+            "csrc/qwen35/prefill_attention_hd256.cu",
+            "csrc/qwen35/paged_attention_hd256.cu",
+            "csrc/qwen35/conv1d.cu",
+            "csrc/qwen35/gated_delta_rule.cu"
+          ],
+          "title": "qwen35 混合注意力 kernel：hd256 全注意力与线性注意力",
+          "topic": "讲解 Qwen3.5（Gated DeltaNet 与全注意力混合）在 csrc/qwen35 的 kernel 家族：hd256 prefill/paged 全注意力、conv1d 前置卷积、gated delta rule 解码与 split 池变体。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l4",
+            "u5-l1"
+          ],
+          "filename": "u5-l2-triton-aot-pipeline.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "掌握 TritonKernelSpec 每个字段的下游作用",
+            "理解解释器探测链（PEGAINFER_TRITON_PYTHON、.venv、python3、python）",
+            "理解 AOT 产物缓存与 rerun-if-changed 的关系"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TritonKernelSpec",
+            "gen_triton_aot.py 流程",
+            "解释器探测链",
+            "产物缓存与 rerun"
+          ],
+          "order": 2,
+          "practice_task": "用 uv 建立 .venv 并安装 triton，设置 PEGAINFER_TRITON_PYTHON 与 PEGAINFER_CUDA_SM，执行 `cargo build --release --features qwen35` 并检查生成的 AOT 产物目录；修改一个 kernel 的 num_warps 验证重新生成路径被触发。",
+          "source_files": [
+            "build.rs",
+            "tools/triton/README.md",
+            "tools/triton/gen_triton_aot.py",
+            "tools/triton/gated_delta_rule_chunkwise_kernels.py"
+          ],
+          "title": "Triton AOT 管线：从 Python kernel 到构建期 cubin",
+          "topic": "解析 qwen35 GDR chunkwise prefill 的 Triton AOT 链：gated_delta_rule_chunkwise_kernels.py 定义 kernel，gen_triton_aot.py 在构建期编译为 cubin 与 C 包装，TritonKernelSpec 声明签名、grid、num_warps。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-tvm-ffi-cubin.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "理解 triton_cubin 模块在 feature 门控下的编译条件",
+            "掌握 tvm-ffi 依赖的构建与运行时要求",
+            "跑通 examples/triton_cubin_tvm_ffi 示例"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "triton_cubin 模块",
+            "tvm-ffi 依赖边界",
+            "示例启动路径"
+          ],
+          "order": 3,
+          "practice_task": "开启 `--features tvm-ffi-triton-cubin` 构建 examples/triton_cubin_tvm_ffi，梳理一个 cubin 从 build.rs 生成、C stub 链接到 TVM FFI 启动的完整路径并画成时序图。",
+          "source_files": [
+            "src/triton_cubin.rs",
+            "examples/triton_cubin_tvm_ffi.rs",
+            "tools/triton/README.md",
+            "Cargo.toml"
+          ],
+          "title": "TVM FFI cubin 桥：triton_cubin 与示例",
+          "topic": "讲解 tvm-ffi-triton-cubin feature 如何把选定的 Triton cubin 经 TVM FFI 运行时暴露为 triton_cubin 模块，作为 DSL 侧包装层与底层 C stub 启动器的分工。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l6",
+            "u4-l2"
+          ],
+          "filename": "u5-l4-qwen4-qsa-grouped-norm.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "理解 QSA indexer score kernel 的行与可见性约束",
+            "掌握 grouped (1+w) RMSNorm 的语义与等价门禁",
+            "区分 trap 测试与 parity 测试的守护对象"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "QSA indexer score",
+            "grouped RMSNorm",
+            "trap 测试设计",
+            "golden fixture 门禁"
+          ],
+          "order": 4,
+          "practice_task": "用 `--features qwen4` 运行 qwen4_qsa_indexer_* 三个测试与 grouped_rmsnorm_equivalence，解释 trap 与 parity 各自守护的不变量；为 grouped RMSNorm 写一个 numpy 参考实现做本地对拍。",
+          "source_files": [
+            "src/ops/qwen4.rs",
+            "src/ffi/qwen4.rs",
+            "csrc/qwen4/qwen4_qsa_indexer_score.cu",
+            "csrc/qwen4/qwen4_grouped_rmsnorm.cu",
+            "tests/qwen4_qsa_indexer_score_parity.rs",
+            "tests/grouped_rmsnorm_equivalence.rs"
+          ],
+          "title": "qwen4 线：QSA token indexer 与 grouped RMSNorm",
+          "topic": "讲解 qwen4 feature 带来的两个 kernel 面：QSA 块级打分 indexer 与把权重折进 1+w 形式的 grouped RMSNorm，以及 trap 测试与 golden fixture 等价门禁各自守护的不变量。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u5-l5-dflash2-selector.md",
+          "id": "u5-l5",
+          "learning_goals": [
+            "理解 dflash2_grouped_conv 的分组维度含义",
+            "掌握 selector 的输入输出与决策语义",
+            "能独立运行并读懂 dflash2 三个测试"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "分组卷积 kernel",
+            "selector 决策面",
+            "dflash2_attention 集成"
+          ],
+          "order": 5,
+          "practice_task": "运行 tests/dflash2_conv.rs 与 tests/dflash2_selector.rs，画出 selector 从动态路由权重到静态选择的决策图；在 src/ffi/shared.rs 中数出 dflash2 家族共暴露的 FFI 入口并列表说明。",
+          "source_files": [
+            "src/ops/dflash2.rs",
+            "src/ops/dflash2_conv.rs",
+            "csrc/shared/dflash2_selector.cu",
+            "tests/dflash2_conv.rs",
+            "tests/dflash2_selector.rs"
+          ],
+          "title": "DFlash2：分组卷积与专家选择器",
+          "topic": "讲解 Qwen3 native DFlash2 checkpoint 的 kernel 支撑：dflash2 分组卷积、从动态路由权重到静态专家选择的 selector kernel，以及对应集成测试的构造方式。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 5,
+      "title": "Qwen 线专属 kernel：混合注意力、Triton AOT 与 DFlash2"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u6-l1-gemma4-attention-kernels.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "区分滑窗 family 与全局 family 的页遍历方式",
+            "理解 hd256/hd512 两种 head_dim 的 kernel 特化",
+            "掌握 parity 测试对两族 kernel 的守护方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "滑窗 decode",
+            "hd512 全局 decode",
+            "plain prefill",
+            "parity 门禁"
+          ],
+          "order": 1,
+          "practice_task": "用 `--features gemma4` 运行 tests/gemma4_local_prefill_parity.rs 与 tests/gemma4_local_decode_parity.rs，写笔记对比滑窗与全局 kernel 在页遍历上的差异（window 游标推进 vs 全量扫描）。",
+          "source_files": [
+            "src/ops/gemma4_attention.rs",
+            "src/ops/gemma4.rs",
+            "csrc/gemma4/paged_attention_window_hd256.cu",
+            "csrc/gemma4/paged_attention_hd512.cu",
+            "csrc/gemma4/prefill_attention_hd256_plain.cu",
+            "tests/gemma4_local_decode_parity.rs"
+          ],
+          "title": "gemma4 注意力 kernel：滑窗 hd256 与全局 hd512",
+          "topic": "讲解 gemma4 的两族注意力 CUDA kernel：滑窗 family 的 windowed paged decode 与 plain prefill（hd256）以及全局 full attention（hd512），它们如何与 Split KV 池耦合。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l1",
+            "u3-l3"
+          ],
+          "filename": "u6-l2-gemma4-tilelang-global-attn.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "理解 off/tilelang/tilelang640 三态的池格式与 kernel 差异",
+            "推导 folded 池 640 列的来历（512 值加 128 旋转）",
+            "掌握 hd512 两个 bench 示例的用法"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "三态全局注意力",
+            "folded 640 列布局",
+            "fp8 KV 池",
+            "bench 示例"
+          ],
+          "order": 2,
+          "practice_task": "用 examples/hd512_prefill_bench.rs 与 hd512_decode_bench.rs 在 off 与 tilelang640 两种状态下各测一轮，记录启动时打印的全局池字节数与延迟；对照 tests/hd256_fp8_pool.rs 说明 fp8 池字节减半的收益与精度代价。",
+          "source_files": [
+            "src/ops/gemma4_tilelang.rs",
+            "src/ffi/gemma4_tilelang.rs",
+            "tools/tilelang/README.md",
+            "examples/hd512_prefill_bench.rs",
+            "examples/hd512_decode_bench.rs",
+            "tests/gemma4_global_prefill_parity.rs"
+          ],
+          "title": "gemma4 TileLang 全局注意力与 fp8 KV",
+          "topic": "讲解 PEGAINFER_GLOBAL_ATTN 的三态选择：生成式全局 kernel、tilelang640 折叠池布局（K 范数折进 query、每 token 每头 640 列）以及 PEGAINFER_KV_FP8 的 e4m3 本地池。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u6-l3-gemma4-w4a16-nvfp4.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "理解 4bit 权重从 checkpoint 布局到 kernel tile 布局的变换",
+            "掌握 NVFP4 反量化路径与 CUDA 版本约束",
+            "能运行 w4a16 等价测试"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "w4a16 重排",
+            "NVFP4 反量化",
+            "prepare 阶段",
+            "等价测试"
+          ],
+          "order": 3,
+          "practice_task": "运行 tests/gemma4_w4a16_gemm.rs，画出 4bit 权重从原始布局到 Marlin tile 布局的变换示意图，并注明 Cargo.toml 注释中 CUDA 12.8 约束具体落在哪些转换 intrinsic 上。",
+          "source_files": [
+            "src/ops/gemma4_w4a16.rs",
+            "csrc/gemma4/w4a16_layout.cu",
+            "csrc/gemma4/marlin_nvfp4.cu",
+            "csrc/gemma4/marlin_nvfp4_prepare.cu",
+            "tests/gemma4_w4a16_gemm.rs"
+          ],
+          "title": "gemma4 量化：W4A16 布局与 NVFP4",
+          "topic": "讲解 gemma4 的量化 GEMM：w4a16_layout 的权重重排、Marlin 风格 NVFP4 反量化（其转换 intrinsics 依赖 CUDA 12.8 以上）与 prepare kernel 的分工。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 6,
+      "title": "gemma4 线：滑窗注意力、TileLang 全局注意力与量化"
+    },
+    {
+      "id": "u7",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u7-l1-marlin-substrate.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "掌握 repack 与 moe_align 在 MoE 量化 GEMM 前的准备流水线",
+            "理解 vendored 上游源与本 crate 自有代码的边界维护策略",
+            "知道 marlin_face 如何被 gemma4 与 kimi-k2 两个 feature 复用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "repack_4bit",
+            "moe_align",
+            "vendored 模板边界",
+            "marlin_face"
+          ],
+          "order": 1,
+          "practice_task": "画出一次 MoE 量化 GEMM 的准备流水线（原始权重→repack→expert 对齐→launch），标注 vendored vLLM 代码与本 crate 自有代码的分界线，并写一段说明保留上游模板不改动带来的维护收益。",
+          "source_files": [
+            "src/ops/marlin_face.rs",
+            "csrc/marlin/repack_4bit.cu",
+            "csrc/marlin/moe_align.cu",
+            "csrc/marlin/vllm_marlin/moe/marlin_moe_wna16/marlin_template.h",
+            "csrc/marlin/ffi.cuh"
+          ],
+          "title": "Marlin 基座：repack、moe_align 与 vendored vLLM 源",
+          "topic": "讲解 csrc/marlin 的共享量化 GEMM 基座：repack_4bit 权重重排、moe_align 的 expert-token 对齐、从 vLLM vendored 的 marlin_moe_wna16 模板，以及 ffi.cuh 与 Rust 侧 marlin_face 的接缝。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u7-l1",
+            "u4-l2"
+          ],
+          "filename": "u7-l2-kimi-k2-marlin-mla.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "理清 experts、MLA、router 三块 kernel 的协作关系",
+            "理解 router 在 NaN 传播时保证选中专家互不重复的修复语义",
+            "会用 tools/kimi_k2 的参考脚本生成对照输出"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "INT4 experts GEMM",
+            "MLA decode 与 cublasLt 路径",
+            "router top-k 与 top1",
+            "NaN 容错"
+          ],
+          "order": 2,
+          "practice_task": "构造含 NaN 的 router logits 用例，验证 top-k 在 NaN 传播时仍选出互不重复的专家（对照提交 09a1a38f 的修复语义）；用 tools/kimi_k2/torch_reference.py 生成参考输出，与 kimi experts kernel 的结果对拍。",
+          "source_files": [
+            "src/ops/kimi_k2.rs",
+            "src/ops/kimi_k2/experts.rs",
+            "src/ops/kimi_k2/mla.rs",
+            "src/ops/kimi_k2/router.rs",
+            "csrc/kimi_k2/kimi_marlin_int4.cu",
+            "csrc/kimi_k2/kimi_mla.cu"
+          ],
+          "title": "kimi-k2 线：Marlin INT4 experts、MLA 与 router",
+          "topic": "讲解 kimi-k2 的 kernel 面：Marlin INT4/WnA16 experts GEMM、MLA decode（含 cublasLt 变体）、router top-k 与 top1、shared_gate_up 融合，以及 NaN 路由下 distinct expert 选择的正确性修复背景。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 7,
+      "title": "kimi-k2 线：Marlin INT4 experts 与 MLA"
+    },
+    {
+      "id": "u8",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l4",
+            "u2-l3"
+          ],
+          "filename": "u8-l1-deepep-shim-ep.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "理解 shim 层对 DeepEP ABI 的封装方式",
+            "掌握 epN config 头之间的差异维度",
+            "理解 free-running 三不变量（不等待、固定集合通信链、launch 计数即时钟）"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "shim 与 ABI",
+            "epN config 差异",
+            "NCCL root 约束",
+            "free-running 不变量"
+          ],
+          "order": 1,
+          "practice_task": "对比 deepep_config_glm52_ep4 与 ep16 头文件的 diff，列出随 EP 宽度变化的常量；写笔记说明为什么任何主机侧静默等待（condvar、sleep 轮询）在 EP 集群里都是死锁设计，引用 free-running 文档的三条不变量逐一对应。",
+          "source_files": [
+            "src/ops/deepep.rs",
+            "src/ffi/deepep.rs",
+            "csrc/deepep/deepep.h",
+            "csrc/deepep/deepep_shim.cu",
+            "csrc/deepep/deepep_config_glm52_ep4.cuh",
+            "../docs/models/glm52/free-running-dp.md"
+          ],
+          "title": "DeepEP shim 与 EP 配置族",
+          "topic": "讲解 csrc/deepep 的 shim 结构：deepep.h 对 DeepEP 库的绑定、按 EP 宽度（4/16/32/64）生成的 config 头与 shim 实例、PEGAINFER_NCCL_ROOT 的作用，以及 free-running 不变量为何禁止在 shim 里做主机侧等待协商。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "filename": "u8-l2-dsv2-routed-moe.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "掌握路由 scratch 每个字段的读写方与存活期",
+            "理解 2-GPU EP 下 MoE 层的完整时序",
+            "理解设备侧注意力对 host 同步点的消除"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "路由与 scratch",
+            "dispatch/combine 与 NCCL",
+            "dsv2_lite_moe kernel",
+            "设备侧注意力"
+          ],
+          "order": 2,
+          "practice_task": "为 Dsv2RoutedMoeScratch 的每个字段标注由谁写、何时读、跨多少步存活；画出 2-GPU EP 下一次 MoE 层的时序图，并对照提交 223206b7 的设备侧注意力改动说明同步点减少了哪些。",
+          "source_files": [
+            "src/ops/dsv2_routed_moe.rs",
+            "src/ops/deepseek_v2_lite.rs",
+            "csrc/deepseek_v2_lite/dsv2_lite_moe.cu",
+            "csrc/deepseek_v2_lite/dsv2_lite_attention.cu"
+          ],
+          "title": "deepseek-v2-lite：routed MoE 与设备侧注意力",
+          "topic": "讲解 DSV2-Lite 的 kernel 组织：Dsv2RoutedMoeScratch 的字段与生命周期、route logits→dispatch→experts→combine 的数据流，以及把稳态 decode attention 搬到设备侧的演进方向。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "filename": "u8-l3-glm52-moe-mla-surface.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "理清 indexer→topk→稀疏 MLA 的张量流与 dtype/scale 约定",
+            "理解两个稀疏 MLA 后端的分工与选择",
+            "掌握 checked-in cubin 的嵌入与新增流程"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "indexer 链",
+            "稀疏 MLA 双后端",
+            "FP8 与 DeepGEMM",
+            "cubin 嵌入"
+          ],
+          "order": 3,
+          "practice_task": "梳理 indexer→topk→稀疏 MLA 的张量流并标注每步的 dtype 与 scale；对照 cubin/glm52/README.md 与 build.rs 的 cubin 表，写出新增一个 cubin 需要改动的全部位置清单。",
+          "source_files": [
+            "src/ops/glm52.rs",
+            "src/ops/glm52/indexer.rs",
+            "src/ops/glm52/fp8_gemm.rs",
+            "csrc/glm52/glm52_indexer.cu",
+            "csrc/glm52/glm52_flashmla_sparse.cu",
+            "cubin/glm52/README.md"
+          ],
+          "title": "glm52 线：indexer、topk、稀疏 MLA 与 cubin 资产",
+          "topic": "讲解 glm52 的 bring-up kernel 面：indexer 打分与 k-gather/RoPE、topk、FlashMLA sparse 与 FlashInfer sparse 双后端（TRT-LLM 生成 cubin 的嵌入方式）、FP8 GEMM 与 DeepGEMM 分组接口。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u8-l1",
+            "u5-l2"
+          ],
+          "filename": "u8-l4-k3-kda-megamoe.md",
+          "id": "u8-l4",
+          "learning_goals": [
+            "理解 MegaMoE 用 peer access 取代集合通信的适用边界",
+            "掌握 FlashKDA chunked prefill 的分块时序",
+            "理解 moe_chain 串联的 gate 与 parity 门禁"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "MegaMoE 融合",
+            "FlashKDA chunked prefill",
+            "moe_chain",
+            "parity gate"
+          ],
+          "order": 4,
+          "practice_task": "用 `--features k3` 运行 tests/k3_mega_parity_gate.rs 与 tests/k3_moe_chain_gate.rs，解释 MegaMoE 的 peer access 设计在单机多卡与跨机场景的适用边界；画出 FlashKDA chunked prefill 的分块时序图。",
+          "source_files": [
+            "src/ops/k3/mod.rs",
+            "src/ops/k3/flash_kda.rs",
+            "src/ops/k3/mega_moe.rs",
+            "csrc/k3/k3_flash_kda.cu",
+            "csrc/k3/k3_mega_moe_sm100.cu",
+            "tests/k3_mega_parity_gate.rs"
+          ],
+          "title": "k3 线：FlashKDA、MegaMoE 与 moe_chain",
+          "topic": "讲解 k3 的 TileLang 生成面与 MegaMoE 融合 EP kernel（NVLink peer access、绕开 DeepEP/NCCL 底座）、FlashKDA chunked prefill、MLA paged attention 与 router_topk 的组织方式。"
+        }
+      ],
+      "level": "advanced",
+      "order": 8,
+      "title": "MoE 与 EP 多机底座：DeepEP、DSV2、glm52、k3"
+    },
+    {
+      "id": "u9",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l2",
+            "u5-l4"
+          ],
+          "filename": "u9-l1-test-strategy.md",
+          "id": "u9-l1",
+          "learning_goals": [
+            "能按文件名前缀识别测试类型并给出运行命令",
+            "理解 trap 测试如何用负向用例锁住非法输入行为",
+            "理解 golden fixture 的 sha/provenance 校验为何必要"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "公共测试设施",
+            "parity/trap/smoke 三分类",
+            "golden fixture 与 sha 校验",
+            "短写容错测试"
+          ],
+          "order": 1,
+          "practice_task": "给 u4-l2 新增的算子补一个 trap 型测试（喂越界长度或错误 stride，断言被拒绝或 panic 信息），并把该算子的正向对拍归入现有分类；总结每类测试的单测运行命令。",
+          "source_files": [
+            "tests/common/mod.rs",
+            "tests/qwen4_qsa_indexer_score_parity.rs",
+            "tests/gemma4_local_decode_parity.rs",
+            "tests/ffi_exception_catch.rs",
+            "tests/lt_algo_store.rs"
+          ],
+          "title": "测试策略：parity、trap、smoke 与 golden gate",
+          "topic": "归纳本 crate 的测试类型学与公共设施：tests/common 的构造器、parity 对拍、trap 负向用例、smoke 冒烟、golden fixture 门禁（safetensors fixture 与 provenance 校验）各自守护什么。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u9-l2-bench-examples.md",
+          "id": "u9-l2",
+          "learning_goals": [
+            "掌握 hd512 两个 bench 的参数面与输出解读",
+            "理解 A/B 基准要求同上下文配对比较的原因",
+            "会用参考脚本生态生成对照数据"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "hd512 基准参数面",
+            "基准记录规范",
+            "参考脚本生态"
+          ],
+          "order": 2,
+          "practice_task": "用 hd512_decode_bench 做 PEGAINFER_GLOBAL_ATTN 为 off 与 tilelang 的 A/B，各跑 5 轮取中位数，按仓库 docs 规范（TL;DR、环境、命令、原始数据）写一份基准记录草稿。",
+          "source_files": [
+            "examples/hd512_prefill_bench.rs",
+            "examples/hd512_decode_bench.rs",
+            "examples/triton_cubin_tvm_ffi.rs",
+            "tools/kimi_k2/torch_reference.py"
+          ],
+          "title": "examples 与基准实践",
+          "topic": "讲解三个 example 的用途（TVM FFI 启动、hd512 prefill/decode 基准）与 tools/kimi_k2 的参考生成脚本，示范如何按仓库规范做一次可复现的 A/B 基准。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l5",
+            "u4-l2",
+            "u8-l1"
+          ],
+          "filename": "u9-l3-architecture-playbook.md",
+          "id": "u9-l3",
+          "learning_goals": [
+            "能向他人解释 KERNELS.md Editing Rule 背后的分层原则",
+            "理解默认构建零 Python 与各 AOT feature 的取舍",
+            "掌握新模型线接入的六个改动点"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "职责切分与 Editing Rule",
+            "feature 与构建哲学",
+            "新模型线接入清单"
+          ],
+          "order": 3,
+          "practice_task": "撰写接入一条新模型线的 checklist：feature 定义、build.rs 接线（nvcc 或 AOT）、ffi 模块、ops 模块、KERNELS.md 新表段、测试门禁六项，逐项给出要改动的真实文件路径，并对照 qwen35 与 k3 线自查一致性。",
+          "source_files": [
+            "KERNELS.md",
+            "Cargo.toml",
+            "src/lib.rs",
+            "build.rs"
+          ],
+          "title": "架构取舍与二次开发导则",
+          "topic": "收束全书的架构视角：kernels crate 与 core/model crate 的职责切分（可复用算子 vs 模型 DAG 元数据）、feature 门控与默认零 Python 的构建哲学、新增一条模型线的完整接入清单。"
+        }
+      ],
+      "level": "advanced",
+      "order": 9,
+      "title": "测试、基准与二次开发导则"
+    }
+  ]
+}

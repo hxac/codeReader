@@ -1,0 +1,32 @@
+
+## 5. 综合实践
+
+**综合任务（需 GPU）：为 plan 复用流程补一个「前缀缓存续算」步骤并全程对拍。**
+
+任务背景：[tests/prefill_plan_refill.rs:156-161](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/tests/prefill_plan_refill.rs#L156-L161) 的 `steps` 数组覆盖了混合批、单 decode 行、共享前缀三种形态。请你依样添加第四种形态——**start_pos > 0 的分块 prefill**：`Batch::default().row(10, 400, 100)`（KV 已有 400 个 token，本步只 prefill 末 100 个）。
+
+1. 实践目标：把本讲四个模块串起来——plan 构造（4.1）、位置单一真源（4.2）、decode 与 prefill 共用 plan 基础设施（4.3）、GQA 组大小（4.4，本测试用 40/8 即组 5，无编译 decode kernel，恰是「prefill 照常、decode 回退」的活例）。
+2. 操作步骤：
+   - 复制 `tests/prefill_plan_refill.rs` 为一个本地实验分支测试（不要改动源测试，遵守仓库纪律），在 `steps` 中插入上述新行；
+   - 运行 `PEGAINFER_REQUIRE_GPU=1 cargo test --release -p pegainfer-kernels --test <你的测试名> -- --nocapture`；
+   - 单独打开 `assert_matches`（[tests/prefill_plan_refill.rs:112-136](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/tests/prefill_plan_refill.rs#L112-L136)）的注释逻辑，确认它对 `positions` 的前缀等价断言覆盖了 `start_pos > 0` 的 token；
+   - （可选进阶）按 4.2.4 的骨架把该 batch 真正跑过一遍 `prefill_attention_paged_into`，用 `single_prefill_nhd_causal_into` 对拍。
+3. 需要观察的现象：新步骤通过 `assert_matches`（refill 与 fresh 一致）且指针未移动；`positions` 的前 100 个值应是 300..=399 而不是 0..=99。
+4. 预期结果：全部断言通过；能口头解释「为什么 300..=399 正确」——绝对位置来自 `start_position`，这正是前缀缓存/分块 prefill 不算错 RoPE 的根基。本环境无 GPU，**待本地验证**。
+
+## 6. 本讲小结
+
+- `PrefillPagedPlan` 把与层无关的调度元数据（页表 CSR、每 token 绝对位置、query 边界、CTA tile 计划）收拢成一次构建、多层共享的对象；`new_preallocated` + `update_batch_with_cta_tile_q` 提供「容量检查先行、原地覆写、指针永不动」的 CUDA Graph 安全重填形态，主机计算唯一真源是 `BatchPlanHost::compute`。
+- `prefill_attention_paged_into` 是一层 prefill 的三步链：QK norm + RoPE（位置读 plan）→ `paged_kv_scatter_cuda` 落页 → `batch_prefill_paged_cuda_with_cta_tile_q` 批注意力；`checked_paged_geometry` 强制 Split 布局并派生每层 K/V 偏移。
+- decode 有两条 paged 路径：非分区 `paged_attention_batch_decode_into`（grid ≈ batch × kv_heads，`tmp=nullptr` 无 merge）与 split-KV 变体（KV 切 chunk、`tmp_v/tmp_s` 存部分和、`block_valid_mask` 标记 graph 稳定 padding 槽、`o_indptr` 驱动 merge），后者面向低 batch 长上下文。
+- paged prefill 的 CUDA 入口住在 `paged_attention.cu`（薄包装）+ `paged_launch.cuh`（launch 模板），`prefill_attention.cu` 只放 QK norm + RoPE 准备 kernel；tile 大小由 FlashInfer 的 `FA2DetermineCtaTileQ` 决定，Rust 经 FFI 查询以保证两侧一致。
+- `SUPPORTED_GQA_GROUP_SIZES = [1,2,3,4,6,8]` 只门控「能否用编译好的 decode kernel」，不门控正确性——落榜组大小（如 Qwen3-14B 的 5）走 eager 回退；表必须与 pinned FlashInfer 保持同步。
+- 对拍的黄金搭档是 `single_prefill_nhd_causal_into`（连续 KV、无分页环节），配合 `tests/common` 的 `fill` 与 `worst_delta` 可以低成本锁住 paged 路径的正确性。
+
+## 7. 下一步学习建议
+
+- **下一讲 u3-l5（elementwise、embedding 与采样）**：继续共享算子层的轻量算子族，wrapper 形态与本章相同但 kernel 更小，适合练手写第一个对拍。
+- **u3-l6（norm 家族与第一个 CUDA kernel 精读）**：把本讲 4.2 里一带而过的 `qk_norm_rope_batched_decode_cuda` 背后的 norm kernel 家族读透。
+- **u6-l1（gemma4 注意力 kernel）**：对照本讲的 FlashInfer 委托路径，看滑窗注意力如何在自有 CUDA kernel 里直接消费 `KvFormat` 与 window 游标——那是对本讲 paged 布局知识的第一次「换引擎」检验。
+- **u5-l1（qwen35 混合注意力）**：看线性注意力（Gated DeltaNet）与全注意力混合的模型线如何复用/绕开本章的共享 prefill 面。
+- 建议随手重读 [KERNELS.md:28-31](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/KERNELS.md#L28-L31) 的 qwen3 注意力登记行——学完本讲，这四行的每一列（wrapper、FFI symbol、csrc、后端、备注）你应该都能对应到具体代码。

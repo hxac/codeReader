@@ -1,0 +1,53 @@
+
+### 4.3 batch decode 与 split-KV 变体
+
+#### 4.3.1 概念说明
+
+decode 时每个请求只有一个新 token 的 query。非分区的 FlashInfer decode kernel 的网格大致是 `(batch, kv_heads)` 个 CTA：batch 小、KV 头少时**并行度不足**——GPU 有上百个 SM，却只派出比如 1×8=8 个 CTA，长上下文的 KV 串行扫描。split-KV（partition-KV）变体把每个请求的 KV 切成若干 chunk，多个 CTA 各算一部分，把**部分和**（partial output 与 partial softmax 统计量）写进临时缓冲 `tmp_v` / `tmp_s`，再由一个 merge 步骤合成最终输出。代价是元数据更多、要管理临时缓冲；收益是低 batch 长上下文 decode 的吞吐。wrapper 的 doc 注释说得直白：「intended for low-batch, long-context decode where the non-partition grid `(batch, kv_heads)` does not expose enough CTAs」（[src/ops/attention.rs:1347-1353](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L1347-L1353)）。
+
+两条路径共享同一个 scatter：decode 的新 K/V 也先经 `paged_kv_scatter_cuda` 落页（每请求恰好 1 行），只是元数据数组换成了 decode 专用的 `request_indices_d + positions_d`（而非 prefill 的 `batch_indices_d + positions_d`）。
+
+#### 4.3.2 核心流程
+
+**非分区路径**（[src/ops/attention.rs:1226-1345](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L1226-L1345)）：
+
+```text
+paged_attention_batch_decode_into(q, k, v, kv_buffer, layout, layer, 7 组元数据数组, out, 头数, batch)
+  ├─ checked_paged_geometry → k_offset / v_offset / stride_page
+  ├─ Step 1: paged_kv_scatter_cuda      ← 新 K/V 落页（与 prefill 同一通用路径）
+  └─ Step 2: paged_attention_decode_cuda ← 非分区批 decode
+```
+
+**split-KV 路径**（[src/ops/attention.rs:1355-1380](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L1355-L1380)）多出 7 个输入：`split_request_indices_d`（split 槽 → 原 batch 槽）、`split_kv_tile_indices_d`（split 槽 → KV chunk 号）、`split_kv_chunk_size_d`、`split_o_indptr_d`（每请求活跃 split 槽区间，merge 用）、`split_block_valid_mask_d`（u8 掩码：false 槽是纯 padding）、可变的 `split_tmp_v` / `split_tmp_s`，以及 `split_padded_slots`（对齐后的槽位总数）。它还带 `row_offset`：统一步里 decode 行排在 prefill 行之后，Q/K/V/输出都在 `[row_offset, row_offset + batch_size)` 窗口上读写（`checked_row_offset` 逐参数校验，[src/ops/attention.rs:1381-1404](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L1381-L1404)）。
+
+#### 4.3.3 源码精读
+
+**decode 的 CUDA 入口。** [csrc/shared/paged_attention.cu:14-29](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/paged_attention.cu#L14-L29) 的 `paged_attention_decode_cuda` 一行转发到 `decode_launch<128, Variant>`，`window_left = -1`（全注意力；window 语义见 paged_launch.cuh 头部注释 [csrc/shared/paged_launch.cuh:26-27](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/paged_launch.cuh#L26-L27)：N-token 窗口传 N-1，-1 退化为全注意力）。
+
+**decode_launch 模板。** [csrc/shared/paged_launch.cuh:94-137](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/paged_launch.cuh#L94-L137)：组装 `BatchDecodeParams` 后显式置 `params.partition_kv = false`，并传 `tmp_v = nullptr`——行内注释点明「tmp_v = nullptr → non-partition path (no merge step)」。Q 的行 stride 按列主序 `HiddenStates` 给出（`q_stride_n = num_qo_heads * head_dim`，`q_stride_h = head_dim`）。
+
+**split-KV 的协议。** [csrc/shared/paged_launch.cuh:140-149](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/paged_launch.cuh#L140-L149) 的注释把 split 计划的四元组语义写全：`request_indices[slot]` 指回原 batch 槽、`kv_tile_indices[slot]` 是该请求的 KV chunk 号、`o_indptr[request]` 给出 merge 要收集的活跃槽区间、`block_valid_mask[slot] = false` 标记**为 graph 稳定性而填充的 padding 槽**；`tmp_v/tmp_s` 存每 chunk 的部分状态，由 FlashInfer 合并。Rust 入口 `paged_attention_decode_split_kv_cuda` 在 [csrc/shared/paged_attention.cu:31-50](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/paged_attention.cu#L31-L50)，转发 `decode_split_kv_launch<128, Variant>`；Rust 侧 FFI 调用点在 [src/ops/attention.rs:1480-1507](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L1480-L1507)，错误收尾 [src/ops/attention.rs:1509-1514](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L1509-L1514)。
+
+**共享的 scatter。** 非分区 decode 的 Step 1 见 [src/ops/attention.rs:1279-1310](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L1279-L1310)，代码注释强调「using the same generic scatter path as prefill, with explicit request indices and positions」；Step 2 见 [src/ops/attention.rs:1312-1342](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L1312-L1342)。函数头 doc（[src/ops/attention.rs:1221-1224](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L1221-L1224)）写明元数据是跨请求拼接的 CSR。
+
+**类型别名与变体。** [csrc/shared/paged_launch.cuh:18-24](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/paged_launch.cuh#L18-L24) 把 `DType` 钉为 `__nv_bfloat16`、`IdType` 钉为 `int32_t`，并定义 `Variant = DefaultAttention<custom_mask=false, sliding_window=false, logits_soft_cap=false, alibi=false>`——本讲所有入口共享这个「无花哨特性」变体。文件头注释 [csrc/shared/paged_attention.cu:1-8](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/paged_attention.cu#L1-L8) 同时声明了实例化范围（bf16、NHD、无 RoPE、HEAD_DIM 128）。
+
+#### 4.3.4 代码实践
+
+**源码阅读型实践：解码一次 split-KV decode 的元数据流。**
+
+1. 实践目标：不看运行结果，仅凭签名与注释写出 split-KV 路径每个元数据数组的「谁写、谁读、多大」。
+2. 操作步骤：对照 [src/ops/attention.rs:1364-1376](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L1364-L1376) 的参数列表与 [csrc/shared/paged_launch.cuh:140-149](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/paged_launch.cuh#L140-L149) 的协议注释，画一张表格，列：数组名 / 长度单位 / 由谁填充 / 被 kernel 哪一步消费。`split_padded_slots` 与 `batch_size` 的差值部分对应 `block_valid_mask` 为 false 的 padding 槽。
+3. 需要观察的现象：`tmp_v`（bf16）与 `tmp_s`（f32）是仅有的两个**可变**设备缓冲（`&mut CudaSlice`），其余元数据在一次调用内只读——这是 CUDA Graph 指针稳定性的又一处体现。
+4. 预期结果：能说清「chunk 部分和先落 tmp，merge 按 `o_indptr` 区间收回」的两阶段结构；`split_*` 数组的长度单位是 split 槽（padded），而 `page_*` 数组的单位是页或请求。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么 prefill 的 paged 路径不需要 split-KV（模板里 `tmp_v = nullptr`、`partition_kv = false`）？
+**答案**：prefill 的并行度来自 query tile：CTA 数 ≈ tile 数 × 头数，长 prompt 自然产生大量 tile，网格已经饱和；再切 KV 只会增加 merge 开销与临时缓冲。decode 才是「query 只有 batch 个、KV 却很长」的形态，需要沿 KV 维度切分补并行度。
+
+**练习 2**：`block_valid_mask` 为什么存在？padding 槽直接不参与不行吗？
+**答案**：split 槽数按最坏情况对齐（`split_padded_slots`），CUDA Graph 回放时网格尺寸固定，不能随实际批收缩。padding 槽照常启动 CTA，由 mask 标记其输出在 merge 阶段无效（[csrc/shared/paged_launch.cuh:145-147](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/csrc/shared/paged_launch.cuh#L145-L147) 注释称其为「graph-stability padding slots」）。「形状固定、有效性用掩码表达」是 Graph 安全的通用手法，与 u2-l2 `gpu_buffers!` 的 `set_batch_size` 只改逻辑长度一脉相承。
+
+**练习 3**：非分区 decode 与 paged prefill 都调 `paged_kv_scatter_cuda`，两者的元数据数组有何不同？
+**答案**：prefill 传 `batch_indices_d`（每 token 一个请求号，长度 = 总 token 数）；decode 传 `request_indices_d`（每请求一个槽位，长度 = batch）。scatter 内部按 `nnz` 行数散射，decode 的 `nnz` 恰为 batch_size，且 K/V 源缓冲的行窗口由 `row_offset` 偏移（[src/ops/attention.rs:1279-1282](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/ops/attention.rs#L1279-L1282) 的注释）。

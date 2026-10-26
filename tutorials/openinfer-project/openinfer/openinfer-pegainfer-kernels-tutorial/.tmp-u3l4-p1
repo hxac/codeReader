@@ -1,0 +1,24 @@
+# 注意力：FlashInfer paged prefill 与 batch decode
+
+## 1. 本讲目标
+
+学完本讲，你应该能够：
+
+1. 说出 `PrefillPagedPlan` 每个字段的含义，并解释它为什么「一次构建、多层共享」。
+2. 跟踪 `prefill_attention_paged_into` 内部「QK norm + RoPE → 写入分页池 → 批注意力」的三步调用链。
+3. 区分 batch decode 的两条路径：非分区 `paged_attention_batch_decode_into` 与 split-KV 变体 `paged_attention_batch_decode_split_kv_into`，并说明各自的适用场景。
+4. 解释 `SUPPORTED_GQA_GROUP_SIZES` 为什么「只门控优化、不门控正确性」。
+
+本讲属于共享算子层的注意力一讲，前置依赖：u3-l1（wrapper 标准五步）、u3-l3（paged KV 布局元数据 `KvStorage` 与 `KvFormat`）。
+
+## 2. 前置知识
+
+本讲用到的概念各用一句话讲清：
+
+- **prefill 与 decode**：LLM 推理分两个阶段。prefill 一次吃进整段 prompt（每请求几十到几千个 token 的 query），decode 每步只生成一个新 token（每请求一个 query）。两者并行形态完全不同，所以 kernel 也是两套。
+- **KV cache**：注意力要反复访问每个历史 token 的 Key/Value。这些 K/V 被缓存下来，decode 时只追加新 token 的 K/V，不重算历史。
+- **分页 KV（paged KV）**：若每个请求的 K/V 各占一段连续显存，长度不一会造成碎片。「分页」借鉴操作系统虚拟内存：把 K/V 切成固定大小的**页（page）**（本 crate 常见 `page_size = 16`），每个请求通过页表（`page_indices`）指向它占用的页。承接 u3-l3：页内布局由 `PagedKvLayout`（`KvStorage` 存储宽度 × `KvFormat` 形状）描述。
+- **CSR 格式**（Compressed Sparse Row）：变长列表的紧凑表示。例如各请求页表长度不一，就把所有页号拼成长数组 `page_indices`，再用长度为 batch+1 的边界数组 `page_indptr` 记录「请求 i 的页表是 `page_indices[page_indptr[i] .. page_indptr[i+1]]`」。本讲元数据几乎全是 CSR。
+- **GQA**（Grouped Query Attention）：现代模型 query 头数通常是 KV 头数的整数倍。例如 Qwen3-4B 有 32 个 query 头、8 个 KV 头，**GQA 组大小** \(g = 32/8 = 4\)：每 4 个 query 头共享一组 KV。组大小是 kernel 模板的一个编译期维度。
+- **FlashInfer**：header-only 的 CUDA 注意力算子库（C++ 模板）。PegaInfer 不自己写 flash-attention 主循环，而是 include FlashInfer 头文件、只实例化需要的模板组合，再套一层 `extern "C"` 薄包装——这正是本讲 CUDA 侧 `csrc/shared/paged_attention.cu` 的全部内容。
+- **CTA tile**：prefill kernel 把 query 按 tile 切块，一个 CTA（CUDA 线程块）处理一个 tile。`cta_tile_q` 是每 tile 打包的 (token × GQA 组) 行数，由 FlashInfer 的 `FA2DetermineCtaTileQ` 启发式决定，也允许显式覆盖。

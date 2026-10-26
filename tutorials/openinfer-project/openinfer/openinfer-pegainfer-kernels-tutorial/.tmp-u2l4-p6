@@ -1,0 +1,49 @@
+
+#### 4.2.3 源码精读
+
+**分配语句**。[L70-L76](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L70-L76)：
+
+```rust
+(@steps $ctx:expr, $eps:expr, $gemm_mode:ident, (@some $seq_len:expr);
+    tensor $name:ident : $dim:path;
+    $($rest:tt)*
+) => {
+    let mut $name = $crate::tensor::GpuTensor::<{ $dim }>::zeros($ctx, $seq_len)?;
+    $crate::typed_pipeline!(@steps $ctx, $eps, $gemm_mode, (@some $seq_len); $($rest)*)
+};
+```
+
+`$dim:path` 允许写 `KIMI_K2_MLA_QKV_A_OUT` 这类常量路径，`<{ $dim }>` 把它放进 const-generic 块。`GpuTensor::zeros` 定义在 [src/tensor.rs:L657-L658](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/tensor.rs#L657-L658)（`pub fn zeros(ctx: &DeviceContext, seq_len: usize) -> Result<Self>`），结构体本体在 [L652](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/tensor.rs#L652)。`tensor_at`（[L78-L84](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L78-L84)）只是把长度换成语句自带的第二个表达式，header 的默认长度继续下传。
+
+**GEMM 两级分派**。语句臂只做转发（[L93-L99](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L93-L99)）：header 模式给 `@gemm $gemm_mode`；带方括号的语句（[L101-L107](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L101-L107)）改传 `$stmt_mode`，这就是「单条语句覆盖 header」的实现。终结臂只有两条（[L165-L171](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L165-L171)）：
+
+```rust
+(@gemm graphsafe, $ctx:expr, $x:expr, $y:expr, $w:expr) => {
+    $crate::typed_ops::gemm_graphsafe_into($ctx, &$w, $x, $y)?
+};
+(@gemm prefill, $ctx:expr, $x:expr, $y:expr, $w:expr) => {
+    $crate::typed_ops::gemm_into($ctx, &$w, $x, $y)?
+};
+```
+
+两个函数签名一致（承接 u2-l2 §4.3）：`gemm_into`（[typed_ops.rs:L22-L47](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L22-L47)）与 `gemm_graphsafe_into`（[L50-L75](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L50-L75)），差别只在传给 `launch_gemm` 的 `graphsafe` 布尔值：前者传 `x.seq_len == 1`（[L44](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L44)——单 token 形状视同解码），后者恒为 `true`。`launch_gemm`（[L465-L506](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L465-L506)）据此选择 `ffi::gemm_graphsafe_cuda`（workspace-free cuBLAS 句柄，见 [L49](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L49) 的文档注释）或 `ffi::gemm_cuda`，并在启动前先做 `ensure_tuned_policy(m, n, k)` 检查（[L475](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L475)）。三个形状参数是 `m=OUT, n=x.seq_len, k=IN`（[L41-L43](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L41-L43)），即 `Y = W @ X`、`X:[IN,bs]`、`Y:[OUT,bs]`。
+
+**逐元素与转换语句**。`rms_norm` 臂（[L109-L115](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L109-L115)）展开为 `rms_norm_into(ctx, x, &w, eps, y)?`——注意 eps 是 header 注入的，所以**同一 pipeline 内所有 rms_norm 共享一个 eps**；函数签名在 [typed_ops.rs:L80-L86](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L80-L86)（`(ctx, x: &GpuTensor<DIM>, w: &NormWeight<DIM>, eps: f32, out: &mut GpuTensor<DIM>)`，`NormWeight` 本体在 [tensor.rs:L700](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/tensor.rs#L700)）。`add` 臂（[L117-L123](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L117-L123)）落到 [add_into](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L152-L157)（三者同 DIM、seq_len 相等，[L158-L164](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L158-L164) 有运行时 ensure）。两个 dtype 转换臂落到的函数签名值得抄一遍（[typed_ops.rs:L243-L247](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L243-L247) 与 [L269-L273](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L269-L273)）：`bf16_to_f32_into(ctx, x: &GpuTensor<DIM>, out: &mut CudaSlice<f32>)`、`f32_to_bf16_into(ctx, x: &CudaSlice<f32>, out: &mut GpuTensor<DIM>)`——f32 侧是裸切片（文档注释注明用途是确定性 all-reduce，[L242](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L242)）。`swap` 臂（[L141-L147](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L141-L147)）展开为 `::std::mem::swap(a, b);`，不带 `?`：交换的是两个既有 `GpuTensor` 绑定的内容，零分配、不碰 CUDA，正是解码路径复用预分配缓冲的手段（承接 u2-l1 的指针稳定结论）。
+
+#### 4.2.4 代码实践：手工展开对照（无需 GPU）
+
+1. **实践目标**：不依赖任何工具，验证 4.2.2 表格的每一行。
+2. **操作步骤**：把 [L10-L18](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L10-L18) 的示例链逐条翻译成手写 Rust：`tensor qkv_a: ...` 查分配行、`rms_norm(...)` 查 rms_norm 行、`gemm(...)` 先按 header 模式（此处 prefill）选定 `gemm_into`、`try ...` 补 `?`。
+3. **需要观察的现象**：翻译结果应当是 4 句普通 Rust 语句，其中没有任何一个函数是 typed_ops 之外的新名字。
+4. **预期结果**：手写链与 4.1.1 的手写形态一致；若某条语句在表里找不到落点，说明你写出了 DSL 不支持的语法（会在编译期无臂可配而报错）。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`rms_norm(a => b, w);` 展开后 eps 从哪来？多个 rms_norm 语句可以用不同 eps 吗？
+答案：来自 header 的 `$eps`（[L26-L52](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L26-L52) 一路透传，[L113](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L113) 使用）；同一 pipeline 内共享，不能逐语句覆盖（要换 eps 就换一个 pipeline 或用逃逸口直调）。
+
+**练习 2**：`gemm[graphsafe](x => y, w);` 出现在 `gemm = prefill` 的链里，展开成什么？
+答案：语句级 `mode` 覆盖 header（[L101-L107](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L101-L107) 转发 `$stmt_mode`），终结臂选 `gemm_graphsafe_into`（[L165-L167](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/forward_pass.rs#L165-L167)）。
+
+**练习 3**：`gemm_into` 在 prefill 模式下什么时候实际走 graphsafe 路径？
+答案：`x.seq_len == 1` 时（[typed_ops.rs:L44](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L44) 传布尔，[launch_gemm L477-L497](https://github.com/openinfer-project/openinfer/blob/09a1a38f8b4938b06ee4e4f63f64fd4feed59434/pegainfer-kernels/src/typed_ops.rs#L477-L497) 分派到 `ffi::gemm_graphsafe_cuda`）——单 token 形状按解码对待，天然是 graph 安全的。
