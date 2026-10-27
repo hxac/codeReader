@@ -28760,8 +28760,8 @@
     },
     "typst/typst": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"63b1468c-adf6-4f2f-ac8f-09f143ba6d53\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_in",
-      "last_run_at": "2026-10-26T23:02:45Z",
+      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"b6eb9d0e-aff3-43a5-8fce-330e3d316afa\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_in",
+      "last_run_at": "2026-10-27T18:03:15Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -66755,8 +66755,8 @@
       "mode": "incremental",
       "tutorial_path": "tutorials/openinfer-project/openinfer/openinfer-pegainfer-kimi-k2-tutorial",
       "last_head": "ca25b80fa4491509ccef418467b37d4d6fd64e9b",
-      "last_run_at": "2026-10-26T23:02:45Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-10-27T18:03:15Z",
+      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"d95acce9-a3a7-4746-a189-d86011d2d8e7\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_in"
     },
     "openinfer-project/openinfer@pegainfer-kv-cache": {
       "prompt_hash": "b21aef51792b02df",
@@ -66825,13 +66825,13 @@
       "mode": "full",
       "tutorial_path": "tutorials/openinfer-project/openinfer/openinfer-pegainfer-kv-cache-tutorial",
       "last_head": "ca25b80fa4491509ccef418467b37d4d6fd64e9b",
-      "last_run_at": "2026-10-26T23:02:45Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-10-27T18:03:15Z",
+      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"c6a02efc-70d0-42de-ac38-dafe0fdae873\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_in"
     },
     "openinfer-project/openinfer@pegainfer-kv-offload": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"68a214d0-2e4f-4f1f-8cc7-e36205e96ae8\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_in",
-      "last_run_at": "2026-10-26T23:02:45Z"
+      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"e34fad1c-b7c4-41d6-92e7-88959b5c770a\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_in",
+      "last_run_at": "2026-10-27T18:03:15Z"
     },
     "openinfer-project/openinfer@pegainfer-qwen3": {},
     "openinfer-project/openinfer@pegainfer-qwen35": {},
