@@ -1,0 +1,829 @@
+{
+  "head": "785d04871df37ddfb3e1b1432ce544b94505a801",
+  "project": "openinfer-pegainfer-kimi-k2",
+  "rationale": "手册结构维持上一版：沿『定位与构建 → 权重加载 → 运行时拓扑 → 调度与请求生命周期 → 前向计算 → MoE 双后端 → 专家主题』的引擎真实链路递进，25 讲每讲只解决一个问题。本次增量（ca25b80f → 785d0487，共 6 个提交）经 git diff 核对：pegainfer-kimi-k2/、pegainfer-kernels、pegainfer-core、pegainfer-kv-cache、docs/models/kimi-k2/ 全部零改动；变化集中在 frontend（785d0487 给引擎内部 step::Request 新增 history_marks 字段并在 vllm/history.rs 度量多轮对话边界、0a26c394 给 PrefixCacheCounters 增加 external_unspecified_hits 指标）、qwen3 推测解码、gemma4 停止策略与 k3/glm52 feature 重构——均不触及本手册任何讲义引用的 kimi-k2 源码。对外契约层面，讲义 u1-l1 引用的 GenerateRequest/TokenEvent 所在的 engine/request.rs、u7-l2 引用的 sampler.rs 与 vllm/wire.rs 本次均未改动，kimi-k2 引擎也未消费 history_marks（该字段仅供保留多轮快照的调度器使用），故无需新增讲义；u1-l1/u1-l4 引用的 CLAUDE.md 仅新增 k3/glm52 单测命令，u4-l3 引用的 free-running-dp.md 仅更新 Last-touched 日期并修正一条 glm52 测试命令，三条 EP 不变量正文未变，均不影响讲义内容。u7-l2 上一轮因 SamplingParams.seed 契约变化标记 update，其修订后的讲义条目（种子契约核对与 sampling.md 文档漂移练习）已写入 manifest，且本次其引用文件全部未变，故回落为 keep。全部 25 讲 action 均为 keep。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 pegainfer-kimi-k2 在 workspace 成员中的角色与依赖的兄弟 crate",
+            "理解『每个模型一个 crate、共享内核与运行时在 pegainfer-kernels / pegainfer-core』的组织方式",
+            "对照 CLAUDE.md 的架构图定位 Kimi-K2 的 MLA + MoE + Marlin INT4 特征"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "workspace 布局与模型 crate 分工",
+            "kimi-k2 的依赖清单",
+            "架构图中的位置"
+          ],
+          "order": 1,
+          "practice_task": "在仓库根目录运行 cargo tree -p pegainfer-kimi-k2 列出直接依赖；再用 rg 在 pegainfer-kimi-k2/src 中各找一处对 pegainfer_kernels、pegainfer_frontend、pegainfer_kv_cache 的 use 引用，写一份 20 行以内的『crate 分工对照笔记』，注明每处引用承担的职责。",
+          "source_files": [
+            "CLAUDE.md",
+            "README.md",
+            "Cargo.toml",
+            "pegainfer-kimi-k2/Cargo.toml",
+            "pegainfer-kimi-k2/src/lib.rs"
+          ],
+          "title": "PegaInfer 与 Kimi-K2 crate 的定位",
+          "topic": "说明 PegaInfer 是纯 Rust + CUDA 的 LLM 推理引擎、pegainfer-kimi-k2 在 workspace 中承担 Kimi-K2.6（MLA + MoE + Marlin INT4，8 卡 EP）模型线的位置，以及它与 pegainfer-frontend / pegainfer-core / pegainfer-kernels / pegainfer-kv-cache 等邻居 crate 的分工。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-model-geometry-config.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "说出 Kimi-K2.6 的关键几何：hidden 7168、64 头、q_lora 1536、kv_lora 512、384 路由专家 top-8、INT4 组 32",
+            "理解 probe_config_json 是『纯门』：只校验不物化，且同时接受 kimi_k25 外层与 kimi_k2 内层两种身份",
+            "会用 KimiK2ParallelShape::tp8_ep8 / tp1_dp8 推导 heads_per_tp、local_experts、vocab_per_tp 与 KimiLocalDims"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "几何常量表",
+            "probe_config_json 校验门",
+            "KimiK2ParallelShape 与 KimiLocalDims"
+          ],
+          "order": 2,
+          "practice_task": "参照 config.rs 的校验项手写一份最小合法的 kimi_k2 text_config JSON 和一份把 hidden_size 改成 4096 的非法 JSON；在本地为 probe_config_json 各写一个单测（合法通过、非法报出 mismatch 字段），运行 cargo test -p pegainfer-kimi-k2 --lib 验证。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/config.rs"
+          ],
+          "title": "模型几何：常量、配置探针与并行形状",
+          "topic": "逐项解读 config.rs 中的 KIMI_K2_* 常量（61 层、60 MoE 层、384 专家、top-8、MLA 各头维、YaRN 参数等），理解 probe_config_json 如何作为纯校验门验证 checkpoint 配置，以及 KimiK2ParallelShape / KimiLocalDims 如何从 TP/DP 推导每 rank 的本地维度。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-crate-module-map.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "能不借助工具说出 runner 与 weights 两个子树各自的文件职责",
+            "理解 lib.rs 中 #[cfg(feature = ...)] 门的意义：默认构建只有 config 与 start_engine 桩",
+            "知道 docs/models/kimi-k2/source-layout.md 是历史快照，其 layers/ 结构已演进为当前 runner/worker 布局"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "模块树总览",
+            "扁平模块布局约定",
+            "feature 门与可见性",
+            "文档快照的历史性"
+          ],
+          "order": 3,
+          "practice_task": "运行 rg -n \"cfg\\(feature\" pegainfer-kimi-k2/src 列出全部 feature 门，把每个模块归类到 kimi-k2 / kernel-report / kernel-call-trace 三种组合，输出一张 feature → 模块映射表；再对照 source-layout.md 标注哪些描述已与当前代码不一致。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/lib.rs",
+            "pegainfer-kimi-k2/src/runner.rs",
+            "pegainfer-kimi-k2/src/weights.rs",
+            "pegainfer-kimi-k2/Cargo.toml",
+            "docs/models/kimi-k2/source-layout.md"
+          ],
+          "title": "crate 模块地图与 feature 门",
+          "topic": "画出 pegainfer-kimi-k2/src 的完整模块树（lib.rs、config、model_line、weights.rs + weights/、runner.rs + runner/、typed_scratch、kernel_report、batch_decode_trace、bin/、tests/），说明仓库采用的扁平模块风格（foo.rs + foo/ 目录，无 mod.rs），以及 kimi-k2 / kernel-report / kernel-call-trace 三个 feature 各自门住哪些模块。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l4-build-and-run.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "能独立构建并启动 Kimi-K2 引擎（8 GPU），知道必须 --release",
+            "理解 ModelLine trait 的 probe → CLI 合并 → launch 流程与 KimiCli 的 --ep-backend 参数（TP1/DP8 需 deepep，TP8/DP1 需 nccl）",
+            "读懂 launch 中 ParallelConfig、device_ordinals、seed 的组装方式"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "构建命令与 feature",
+            "ModelLine 接入与 CLI",
+            "start_engine / launch 入口"
+          ],
+          "order": 4,
+          "practice_task": "在有 8 GPU 的机器上运行 cargo run --release --features kimi-k2 -- --model-path models/Kimi-K2，记录日志中 resolving engine startup 一行的 tp/dp/ep/backend 与设备数校验；再故意传错 --ep-backend 与拓扑组合，收集并解释两条报错。无 GPU 环境则改跑 cargo check --features kimi-k2 并记录 pegainfer-kernels 构建阶段产物清单。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/model_line.rs",
+            "pegainfer-kimi-k2/src/lib.rs",
+            "pegainfer-kimi-k2/Cargo.toml",
+            "CLAUDE.md"
+          ],
+          "title": "构建与运行：feature、CLI 与引擎入口",
+          "topic": "讲解如何用 --features kimi-k2 构建（CLAUDE.md 的 cargo run --release --features kimi-k2 -- --model-path models/Kimi-K2），model_line.rs 中 MODEL_LINE 如何挂进 ModelLine 调度（probe / augment_cli / launch）并提供 --ep-backend 与默认 dp_size=8，以及 lib.rs 的 start_engine / launch 如何组装 EngineLoadOptions。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "入门：项目定位、构建与代码地图"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "filename": "u2-l1-weight-manifest.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "能从 index.json 的 weight_map 还原出 manifest 的张量集合",
+            "理解第 0 层是 dense、其余 60 层是 MoE 的分层规则",
+            "掌握 with_parallel_shape 与 validate 的整除校验（experts/heads/vocab 对 EP、TP 整除）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "weight_map 解析",
+            "layer manifest 结构",
+            "text-only 门与校验"
+          ],
+          "order": 1,
+          "practice_task": "取一份真实 Kimi-K2 权重目录（或手写最小 weight_map JSON），用小脚本列出全部 language_model.* 张量名；按 manifest.rs 规则预测 embed_tokens/final norm/lm_head 与第 0、1 层各自需要的名字，再写单测调用 KimiK2WeightManifest::from_index_json 验证预测。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/weights/manifest.rs",
+            "pegainfer-kimi-k2/src/weights/load.rs",
+            "pegainfer-kimi-k2/src/weights.rs"
+          ],
+          "title": "index 解析与 KimiK2WeightManifest",
+          "topic": "讲解 weights/manifest.rs 如何解析 model.safetensors.index.json 的 weight_map，剥掉 language_model. 前缀取 text-only 部分，把 61 层组织成 attention + dense/MoE 两种 layer manifest，以及 validate 如何核对层数与并行形状整除性。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-rank-slicing-plan.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "会手算给定 rank 在 tp8_ep8 与 tp1_dp8 下的 attention_head_range、vocab_range、local_expert_range",
+            "理解 rank_weight_names 与 rank_sliced_load_plan 两份产物的用途差别（点名 vs 切片加载）",
+            "能解释为什么 384 专家在 EP8 下每 rank 恰好 48 个"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "rank_plan 区间推导",
+            "张量命名方案",
+            "切片加载计划"
+          ],
+          "order": 2,
+          "practice_task": "对 rank=3 分别在 KimiK2ParallelShape::tp8_ep8() 与 tp1_dp8() 下手算三个区间，再写单测调用 rank_weight_names(3) 比较两种 shape 的张量数量与专家张量归属是否符合手算。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/weights/manifest.rs",
+            "pegainfer-kimi-k2/src/weights/load.rs"
+          ],
+          "title": "rank 切分计划：TP 头片、EP 专家片与词表片",
+          "topic": "讲解 manifest.rs 的 rank_plan / rank_tensor_names / rank_sliced_load_plan 与 weights/load.rs 的 KimiTensorLoadSlice / KimiRankSlicedLoadPlan：一个 rank 按 tp_rank 切注意力头区间与词表区间、按 ep_rank 切本地专家区间，并生成逐张量的加载切片规格。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-int4-marlin-packaging.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "理解 compressed-tensors pack-quantized INT4（组大小 32）与 Marlin 布局的差别",
+            "说出 w13 融合前后的维度变化（MARLIN_W13_OUT_DIM = 2×2048）",
+            "能追踪一个专家权重从 safetensors 名字到 Marlin buffer 的路径"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "INT4 量化布局",
+            "Marlin 重排与 nibble 顺序",
+            "w13 融合",
+            "专家主序缓冲组织"
+          ],
+          "order": 3,
+          "practice_task": "写出一段不超过 30 行的伪代码（或注释体代码），描述一个 gate_up 权重从 checkpoint 布局到 expert-major Marlin 布局的完整变换步骤（重排权重 → 重排 scale → fuse w13），并在 package.rs 中为每一步找到对应函数调用点标注行号。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/weights.rs",
+            "pegainfer-kimi-k2/src/weights/package.rs",
+            "pegainfer-kimi-k2/src/weights/manifest.rs"
+          ],
+          "title": "INT4 Marlin 权重打包",
+          "topic": "讲解 weights.rs 引入的 kimi_marlin_int4_reorder_weight / reorder_scale / fuse_w13 与 package.rs 的专家主序 Marlin 缓冲（KimiExpertMajorProjectionMarlinBuffers、KimiRankExpertMarlinWeights、KimiRouterGpuWeights）：checkpoint 的 compressed-tensors INT4 如何重排成 Marlin 核需要的布局、w13 如何融合。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u2-l3",
+            "u1-l4"
+          ],
+          "filename": "u2-l4-weight-upload-gpu.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "跟踪 mmap → 切片 → H2D 拷贝的完整数据通路",
+            "理解 KimiRankGpuWeights / KimiRouterGpuWeights / KimiRankExpertMarlinWeights 的层次关系",
+            "知道加载失败的报错如何带上 rank 与张量上下文"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "切片加载与 H2D",
+            "rank GPU 上下文",
+            "层前向缓存构建",
+            "加载测试"
+          ],
+          "order": 4,
+          "practice_task": "写一个小脚本从 index.json 推导任一 rank 需要打开的 shard 文件集合（去重后的文件数）；有 GPU 时运行 cargo run --release -p pegainfer-kimi-k2 --features kernel-report --bin kimi_model_report 观察输出的 tensor_count / bytes / expert layers 统计并和推导对账。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/weights/load.rs",
+            "pegainfer-kimi-k2/src/weights/context.rs",
+            "pegainfer-kimi-k2/src/runner/worker/load.rs",
+            "pegainfer-kimi-k2/src/weights/tests.rs"
+          ],
+          "title": "mmap 上载与 GPU 权重包",
+          "topic": "讲解 weights/load.rs 的 load_rank_sliced_weights_to_gpu 如何用 mmap 按切片读 shard、拷入显存，weights/context.rs 的 KimiRankGpuContext 如何持有每 rank 的 CUDA 上下文，最终组装成 KimiRankGpuWeights；再看 worker/load.rs 的 load_layer_forward_cache 如何把原始张量整理成前向用的层缓存并做形状检查，以及 weights/tests.rs 的测试模式。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 2,
+      "title": "权重加载：从 safetensors 索引到 Marlin 显存布局"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u1-l4",
+            "u2-l2"
+          ],
+          "filename": "u3-l1-start-engine-topology.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "画出 TP8/DP1 与 TP1/DP8 两条启动路径的函数调用时序",
+            "解释 KIMI_TP8_KV_POOL_PAGES 与 KIMI_DP_KV_POOL_PAGES_PER_RANK 背后的显存权衡（每 rank 约 9.2 GiB vs 1.15 GiB）",
+            "理解『先把命令发给所有 rank 再等待任一响应』的集体初始化模式（init_tp_nccl / install_deepep_backends）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "并行配置解析与设备校验",
+            "两条启动分支",
+            "worker 拉起与集体初始化",
+            "KV 页池预算"
+          ],
+          "order": 1,
+          "practice_task": "对照 bringup.rs 写出 TP8/DP1 与 TP1/DP8 从 start_engine 到 EngineHandle::new_with_join_handle 的两份时序图（标注每步的函数与通道），并注明两条路径在 MoE 后端、BlockPool 数量、调度线程上的三处差异。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/runner/bringup.rs",
+            "pegainfer-kimi-k2/src/runner/config.rs",
+            "pegainfer-kimi-k2/src/lib.rs"
+          ],
+          "title": "start_engine：双拓扑启动流程",
+          "topic": "讲解 runner/bringup.rs 的 start_engine 如何按 (tp_world, dp_world) 分派到 TP8/DP1（NCCL MoE）与 TP1/DP8（DeepEP MoE）两条启动路径，KV 页池常量为何分别是 8192 页与每 rank 1024 页，以及 spawn_workers → 加载权重 → 初始化 NCCL/DeepEP 的时序。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-rank-worker-threads.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "说出 KimiRankWorker 对外暴露的异步命令接口与响应通道模式",
+            "理解为什么 DeepEP/NCCL 初始化是集体操作：所有 rank 的 worker 线程必须同时进入",
+            "解释 affinity.rs 的 KimiRankThreadPlacementPlan 如何给调度线程与 worker 线程分配核"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "worker 线程与通道",
+            "命令处理器集合",
+            "线程绑核"
+          ],
+          "order": 2,
+          "practice_task": "用 rg 列出 KimiRankWorker 的全部 *_async 方法与 worker/state.rs 中对应 handler 的配对表；对每条命令注明它是单 rank 操作还是集体操作，并解释 state.rs 中 enable_deepep 注释强调『graph 可捕获、无 D2H』的原因。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/runner/worker.rs",
+            "pegainfer-kimi-k2/src/runner/worker/state.rs",
+            "pegainfer-kimi-k2/src/runner/affinity.rs",
+            "pegainfer-kimi-k2/src/runner/config.rs"
+          ],
+          "title": "KimiRankWorker：每 rank 一个线程的命令模型",
+          "topic": "讲解 worker.rs 的 KimiRankWorker::spawn（每 rank 一个线程 + crossbeam 通道）、KimiK2RankPlacement、worker/state.rs 的 KimiRankThreadState 命令处理（load_sliced_weights / init_tp_comm / enable_deepep / step），以及 affinity.rs 的线程绑核计划。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-forward-executor.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "读懂 forward_prefill / forward_decode_batch 签名中 slot、cached_tokens、kv_pages、row options 的含义",
+            "对比两个执行器在 worker 所有权、comm、deepep 状态上的差异",
+            "理解 KimiOneTokenForwardReport 作为调度器消费的统一输出"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "executor trait 契约",
+            "TP8/DP1 执行器",
+            "TP1/DP8 执行器",
+            "前向报告结构"
+          ],
+          "order": 3,
+          "practice_task": "为 ForwardExecutor 的五个方法写一张 TP8/DP1 vs TP1/DP8 的实现对照表（参数如何分发给 worker、comm 从哪来、返回如何聚合）；再写一个空 mock 实现并注释每个方法最简返回值，说明它可以用来给调度器做无 GPU 的干跑测试。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/runner/executor.rs",
+            "pegainfer-kimi-k2/src/runner/executor/tp8_dp1.rs",
+            "pegainfer-kimi-k2/src/runner/executor/tp1_dp8.rs"
+          ],
+          "title": "ForwardExecutor：一套 trait，两种执行器",
+          "topic": "讲解 executor.rs 的 ForwardExecutor trait（ensure_decode_batch / forward_prefill / forward_decode_batch / worker_count / gpu_weight_ready_count，DP_MAX_BATCH_PER_RANK=8）及其两个实现 tp8_dp1.rs 与 tp1_dp8.rs：前者持全部 8 个 worker 走 NCCL，后者每 rank 一个 executor 交给 DP 协调器。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "运行时拓扑：启动流程、rank worker 与执行器抽象"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u4-l1-tp8-scheduler.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "写出调度器主循环的状态机：pending → batch → prefill → decode → retire",
+            "解释 KIMI_RUNNER_MAX_BATCH=64 与 KIMI_DECODE_ADMISSION_MICROBATCH 的关系",
+            "理解 KV 预算推迟（deferred 逆序压回队首）为何能保持 FCFS 顺序"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "预热与构造",
+            "主循环与批合并",
+            "prefill/decode 分派"
+          ],
+          "order": 1,
+          "practice_task": "阅读 run() 与 handle_request_batch()，写出一张含状态迁移的条件表（队列空/合并窗口/KV 预算三个维度），并为 KIMI_PREFILL_BATCH_COALESCE 与 KIMI_PREFILL_BATCH_POLL 各举一个极端取值下的行为预测，用注释形式的推演记录在笔记里。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/runner/scheduler.rs",
+            "pegainfer-kimi-k2/src/runner/scheduler/lifecycle.rs"
+          ],
+          "title": "TP8/DP1 单调度器 KimiK2Scheduler",
+          "topic": "讲解 scheduler.rs 的 KimiK2Scheduler：构造时先用 padding 页预热 bs64 的 decode arena，run 循环如何阻塞等首请求、100ms 合并窗口凑 prefill 批、FCFS 出队并在 KV 预算不足时把请求放回队首。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-request-lifecycle-kv.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "会用公式 ceil((prompt+max)/block_size) 手算请求峰值 block 数并判断是否被拒",
+            "理解 dangling token（最后一个生成 token 只返回不回写 KV）对预算的影响",
+            "说出 RequestKv 的 RAII 语义：请求退出即归还页"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "生命周期 block 公式",
+            "准入校验与拒绝文案",
+            "BlockPool / RequestKv 语义"
+          ],
+          "order": 2,
+          "practice_task": "针对 4 个典型请求（短 prompt 长 max、长 prompt 短 max、恰好触到 8192、超出 8192 一个 token）手算 request_lifetime_blocks 与校验结果，再写 4 个单测调 validate_kv_capacity 验证手算，覆盖边界恰好通过与恰好拒绝两例。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/runner/scheduler/lifecycle.rs",
+            "pegainfer-kimi-k2/src/runner/worker.rs",
+            "pegainfer-kimi-k2/src/runner/scheduler/dp.rs"
+          ],
+          "title": "请求生命周期与 KV 容量：honor-or-reject",
+          "topic": "讲解 scheduler/lifecycle.rs 的 request_lifetime_blocks / validate_kv_capacity / preflight_prefill_candidate / send_scheduled 与 worker.rs 的 KIMI_KV_PAGE_SIZE=16、KIMI_MAX_REQUEST_TOKENS=8192：请求在准入时被校验并显式拒绝，而不是在 decode 中途写越界；同时引入 pegainfer-kv-cache 的 BlockPool / RequestKv 与 dp.rs 的 future_blocks 思路。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-dp-coordinator.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "解释为什么空闲 rank 也必须带 padding 行参与每一步（集体链固定、launch 计数即全局时钟）",
+            "跟踪一条请求从 pick_rank 到 TokenEvent 的完整路径（DecodeAdmission → DecodeBatchRow → StepCommand → 结果回收）",
+            "理解 per-rank 独立 seed 的必要性：同 seed 会让跨 rank 同 index 行抽到同一 uniform"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "lock-step 步进模型",
+            "槽位与准入状态机",
+            "负载均衡与种子派发",
+            "free-running 纪律对照"
+          ],
+          "order": 3,
+          "practice_task": "写出一条请求在 DP 路径上的端到端时序（提交 → 负载均衡选 rank → 准入 decode 步 → 逐 token 步进 → finish），标注空闲 rank 同一步在做什么；再从 free-running-dp.md 摘出三条不变量，各配一段 dp.rs 中体现它的代码位置。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/runner/scheduler/dp.rs",
+            "pegainfer-kimi-k2/src/runner/load_balancer.rs",
+            "pegainfer-kimi-k2/src/runner/scheduler/lifecycle.rs",
+            "docs/models/glm52/free-running-dp.md",
+            "docs/models/kimi-k2/dp-design.md"
+          ],
+          "title": "DpCoordinator：lock-step 的 DP 协调器",
+          "topic": "讲解 scheduler/dp.rs 的 DpCoordinator：一个协调线程以 lock-step 驱动全部 DP rank，每个 decode 步所有 rank 同时前向（活跃 rank 真 token、空闲 rank padding）以满足 DeepEP 每 layer 都要 dispatch/combine 的契约；含 DpRankState 槽位管理、DpLoadBalancer 的最多空槽选 rank、每步每 rank 派发独立 philox 种子，以及与 EP free-running 纪律的对应。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "调度与请求生命周期"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u3-l3",
+            "u2-l4"
+          ],
+          "filename": "u5-l1-decode-forward-chain.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "按顺序列出一步 decode 的 kernel 调用序列并标注输入/输出 scratch",
+            "理解 maybe_all_reduce_hidden_via_f32_in_place 的条件与作用（TP 才有 comm）",
+            "说出 61 层循环中第 0 层与后 60 层走的不同分支"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "embedding 与 all-reduce",
+            "层循环与归一化",
+            "dense/MoE 分支",
+            "输出与采样衔接"
+          ],
+          "order": 1,
+          "practice_task": "为一步 bs=N 的 decode 写出完整的 kernel 序列表（函数名 + 读哪个 scratch + 写哪个 scratch），并单独标注 dense 层（第 0 层）与 MoE 层的差异行；对照 runtime.rs 说明 f32 中转 all-reduce 为什么出现在 hidden 上。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/runner/worker/forward.rs",
+            "pegainfer-kimi-k2/src/runner/worker/runtime.rs",
+            "pegainfer-kimi-k2/src/runner/worker.rs"
+          ],
+          "title": "decode 前向主链路",
+          "topic": "沿 worker/forward.rs 的 forward_decode_batch_next_token_kernels 走一遍单步 decode：词表分片 embedding →（TP 时）f32 all-reduce → 逐层 MLA 注意力 → fused_add_rms_norm → dense MLP 或 MoE → 残差，最后 lm_head 与采样；说明 cache.layers 里 dense 与 MoE 两种层分支的调度。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-mla-attention.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "写出 MLA 每一步的张量形状（用 KimiLocalDims 与常量表达）",
+            "理解 q_lora 1536 / kv_lora 512 / nope 128 / rope 64 / v_head 128 各自的角色",
+            "解释 q_nope 吸收为何能把 W_UK 折进注意力计算"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "QKV 下投影与 norm",
+            "YaRN RoPE 缓存",
+            "q_nope 吸收与分页 KV",
+            "FlashInfer 解码与输出投影"
+          ],
+          "order": 2,
+          "practice_task": "用 30 行以内的脚本复算 build_yarn_rope_cache 的 cos/sin 表（theta 5e4、factor 64、beta 32/1、original 4096），抽 3 个位置与代码值对齐；再为 MLA 链每一步写出 shape 流水表（以 tp8 每 rank 8 头为例）。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/runner/worker.rs",
+            "pegainfer-kimi-k2/src/runner/worker/runtime.rs",
+            "pegainfer-kimi-k2/src/typed_scratch.rs",
+            "pegainfer-kimi-k2/src/config.rs"
+          ],
+          "title": "MLA 注意力：压缩、吸收与 FlashInfer 解码",
+          "topic": "拆解 MLA 的张量链：kimi_mla_split_qkv_a(_norm) 下投影 → YaRN RoPE（runtime.rs 的 build_yarn_rope_cache 与 rope_split/rope_apply_kpe）→ q_nope 吸收（absorb_q_nope）→ 分页 KV 追加（paged_kv_append / assemble_cached_kv）→ FlashInfer 的 batch decode MLA（kimi_flashinfer_batch_decode_mla_rt）→ v_up 上投影与 o_proj（cublasLt）。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u5-l3-paged-kv-decode-arena.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "解释逻辑 BlockPool 与 worker 物理 KV 池一一镜像的关系（页大小 16）",
+            "手推一个多请求的 KimiKvStepPages CSR 并用 row(i) 读回",
+            "说出 padding page『benign by construction』成立的两个前提"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "物理 KV 页池",
+            "decode arena 槽位",
+            "CSR 步进页表",
+            "padding 页语义"
+          ],
+          "order": 3,
+          "practice_task": "构造 2 个请求（分别 35 与 16 个 token）的页分配，手写 KimiKvStepPages 的 pages/indptr 两个数组与 padding_page，写单测用 new() + row() 断言每个请求的页数（3 页与 1 页）与顺序，并补一个越界 row 断言报错信息的用例。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/runner/worker/cache.rs",
+            "pegainfer-kimi-k2/src/runner/worker.rs"
+          ],
+          "title": "分页 KV 池、decode arena 与步进页表",
+          "topic": "讲解 worker/cache.rs 的 KimiWorkerKvPool（物理页池）、KimiWorkerDecodeArena（稳定 batch 行的解码竞技场）与 build_slot_page_table，以及 worker.rs 的 KimiKvStepPages：一步前向的页分配以 CSR（pages + indptr）表达，padding_page 给空闲槽与图捕获 padding 行兜底，写垃圾无害。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l4-typed-scratch.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "按 TP 相关 / 全局常量给每个子 scratch 的字段分类",
+            "解释指针稳定对 CUDA graph 捕获（worker.rs 的 CudaGraphState 与 #227 注释）的意义",
+            "理解类型化维度（GpuTensor<CONST>）如何把 shape 错误挡到编译期"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "scratch 类型族",
+            "编译期维度与本地维度",
+            "预分配与复用契约"
+          ],
+          "order": 4,
+          "practice_task": "列出 KimiWorkerDecodeScratch 聚合的全部子 scratch 及其字段，标注每个字段的尺寸来源（KimiLocalDims / 模型常量 / batch 上限 64），并写出『若把 batch 上限改为 32，哪些字段尺寸变化、哪些不变』的推演清单。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/typed_scratch.rs",
+            "pegainfer-kimi-k2/src/typed_scratch/top1.rs",
+            "pegainfer-kimi-k2/src/runner/worker/cache.rs",
+            "pegainfer-kimi-k2/src/runner/worker.rs"
+          ],
+          "title": "typed scratch：为什么解码缓冲要一次性定型",
+          "topic": "讲解 typed_scratch.rs 的类型化 scratch 体系（MlaDecodeScratch / DenseMlpDecodeScratch / SharedExpertDecodeScratch / MarlinExpertScratch / CommScratch / SamplingScratch 聚合进 KimiWorkerDecodeScratch）与 gpu_buffers 宏：尺寸在编译期由模型常量定型、随 KimiLocalDims 随 TP 变化，一次分配终身复用。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 5,
+      "title": "前向计算：decode 链路、MLA、分页 KV 与 scratch"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u6-l1-noaux-tc-router.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "用 numpy 复算 sigmoid → top8 → renorm → ×2.827 的路由输出",
+            "解释 config 探针为何强制 topk_method=noaux_tc、scoring_func=sigmoid、n_group=1",
+            "说出 router scale 在两条 MoE 后端中都在残差加法处统一生效的约定"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "sigmoid 打分与 top-k",
+            "归一与缩放",
+            "采样侧 top-1 配合"
+          ],
+          "order": 1,
+          "practice_task": "写一个不超过 40 行的 numpy 小程序，对随机 8 token × 384 expert 的 logits 复算 noaux_tc 路由（sigmoid、top-8、renorm、×2.827），并验证每行 top-8 权重和为 1；把输出与代码中 KimiRouterOutput 的字段一一对名。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/runner/moe_deepep.rs",
+            "pegainfer-kimi-k2/src/runner/moe_nccl.rs",
+            "pegainfer-kimi-k2/src/runner/worker/runtime.rs",
+            "pegainfer-kimi-k2/src/config.rs"
+          ],
+          "title": "noaux_tc 路由器与 top-8 选择",
+          "topic": "讲解 Kimi 的 noaux_tc 路由：sigmoid 打分（n_group=1）、无偏置 top-8、概率归一（norm_topk_prob=true）、routed_scaling_factor 2.827 在残差处生效（moe_deepep.rs 注释与 KIMI_K2_ROUTER_SCALE），以及 runtime.rs 的 sample_local_top1_with_value / launch_local_top1_batch 在采样侧的配合。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-nccl-moe-path.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "列出 NCCL MoE 一层的 collective 与 kernel 序列",
+            "解释 Marlin block size（runtime.rs 的 kimi_marlin_block_size，上限 64）如何随 active tokens 选择",
+            "画出 token 在 rank 间一进一出的分组示意"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "collective 序列",
+            "Marlin GEMM 与激活",
+            "top-k 加权与残差回加"
+          ],
+          "order": 2,
+          "practice_task": "为一层 MoE（decode，bs=8）写出 NCCL 路径的步骤表：每步标注 collective/kernel 名、参与 rank 与张量形状；对照代码确认 routed scaling 是在残差加法处一次生效而不是逐专家生效，引用对应代码行。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/runner/moe_nccl.rs",
+            "pegainfer-kimi-k2/src/runner/worker/runtime.rs",
+            "pegainfer-kimi-k2/src/runner/worker/forward.rs"
+          ],
+          "title": "NCCL MoE 路径（TP8/DP1）",
+          "topic": "讲解 moe_nccl.rs 的 forward_moe_layer_decode_normed_into 与 forward_moe_layer_batch_into：TP8 下 token 先聚合到持有专家的 rank，Marlin w13/w2 GEMM + swiglu 后按 top-k 权重求和（kimi_marlin_sum_topk_rows），残差处以 router scale 回加；每一步的集体通信由 worker 的 NCCL comm 承担。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u6-l1",
+            "u5-l4"
+          ],
+          "filename": "u6-l3-deepep-moe-path.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "解释 expert_alignment == Marlin block(8) 这一『属性』如何消灭 gather/scatter 与 D2H",
+            "对比 decode 与 prefill 两条路径在缓冲分配与 host 参与上的差别",
+            "说出 KIMI_K2_ROUTER_SCALE 在残差回加（kimi_residual_add_scaled_bf16）处与 NCCL 后端对齐的约定"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "expert-major 接收缓冲",
+            "流上路由构建与零拷贝",
+            "decode host-quiet 与图捕获",
+            "prefill CPU-sync 与 token 上限"
+          ],
+          "order": 3,
+          "practice_task": "写一段文字推演：若 expert_alignment 是 16 而非 8，Marlin 直读零拷贝在哪一步被破坏、需要什么补偿；再对照 state.rs 的 enable_deepep 注释列出『decode 可被图捕获』要求满足的三个条件（无 alloc、无 D2H、seq_len 不变）在代码中的落点。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/runner/moe_deepep.rs",
+            "pegainfer-kimi-k2/src/runner/worker/state.rs",
+            "pegainfer-kimi-k2/src/runner/bringup.rs",
+            "docs/models/kimi-k2/deepep-migration.md"
+          ],
+          "title": "DeepEP elastic all-to-all（TP1/DP8/EP8）",
+          "topic": "讲解 moe_deepep.rs：expanded dispatch 的接收缓冲按专家主序、段对齐到 Marlin 块大小 8，因此路由元数据可在流上构建（kimi_deepep_build_marlin_routing_on_stream）让 Marlin 零拷贝直读；decode（do_cpu_sync=false）走一次性分配的最坏情况缓冲、全程 host-quiet 从而可被 CUDA graph 捕获，prefill（do_cpu_sync=true）CPU 自旋等待计数以把缓冲压到 prompt 长度（上限 DEEPEP_MAX_DISPATCH_TOKENS=2048）。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 6,
+      "title": "MoE：路由器与 NCCL / DeepEP 双后端"
+    },
+    {
+      "id": "u7",
+      "lectures": [
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l3",
+            "u5-l4",
+            "u6-l3"
+          ],
+          "filename": "u7-l1-cuda-graph-pointer-stability.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "解释为什么按桶捕获而不是逐 batch 捕获，以及 warm 阶段（scheduler 预热 bs64）的作用",
+            "列出参与捕获的全部指针稳定资源清单（arena、scratch、deepep 缓冲、KV 池基址）",
+            "说出 padding 行如何让同一张图服务不满批的 decode"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "图捕获生命周期",
+            "批大小桶",
+            "指针稳定资源清单",
+            "padding 行复用"
+          ],
+          "order": 1,
+          "practice_task": "整理一张『图捕获资源清单』表：每行一个资源（decode arena 各缓冲、MLA/MoE/comm/sampling scratch、DeepEP recv/marlin 缓冲），标注分配位置、尺寸是否随桶变化、是否被捕获；并解释 KIMI_DECODE_BATCH_BUCKETS 为何止于 64。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/runner/worker.rs",
+            "pegainfer-kimi-k2/src/runner/worker/cache.rs",
+            "pegainfer-kimi-k2/src/runner/moe_deepep.rs",
+            "pegainfer-kimi-k2/src/typed_scratch.rs"
+          ],
+          "title": "CUDA Graph 与指针稳定性",
+          "topic": "讲解 worker.rs 引入的 pegainfer_core::cuda_graph::CudaGraphState、KIMI_DECODE_BATCH_BUCKETS 的 7 档桶（1/2/4/8/16/32/64）与 KimiWorkerDecodeArenas：图捕获要求参与 kernel 的全部指针稳定，因此 decode arena、DeepEP 状态与 scratch 都一次分配；DeepEP decode 路径 host-quiet 是图捕获的前置（#227 注释）。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "filename": "u7-l2-sampling-top1.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "解释 top-1 采样路径的 GPU/host 分工与 logprob 的按需计算",
+            "区分引擎级种子（lib.rs 固定 42 → DpCoordinator 每步每 rank 派生独立 philox 种子）与请求级种子契约（SamplingParams.seed 已随 GenerateRequest.params 传入引擎，kimi-k2 尚未消费）",
+            "复现『同一序列跑两遍 token 完全一致、logprob 在分页 KV ULP 内浮动』的合同",
+            "能识别并修正 sampling.md 中已过时的 seed 表述（文档主张 → 当前代码事实）"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "top-1 采样内核与包格式",
+            "种子派发：引擎级 42 与新的请求级 seed 契约",
+            "greedy 与 logprobs 分路",
+            "确定性合同与文档漂移校对"
+          ],
+          "order": 2,
+          "practice_task": "设计一个确定性实验：同一 prompt 以相同引擎配置在 DP 路径连跑两遍，收集逐 token 输出与 logprob，写出比较脚本（token 全等、|Δlogprob| 上界）；再推演若两个 rank 意外共享同一 seed，哪个现象会最先暴露。最后做一次契约核对：阅读 pegainfer-frontend/src/sampler.rs 的 seed 字段与 vllm/wire.rs convert_sampling 的 seed 传递，确认请求级 seed 已到达 GenerateRequest.params.seed，而 kimi-k2 侧 rg params.seed 无命中；据此写 3-5 行修正笔记，指出 sampling.md 第 23 行『dropped at convert_sampling』与第 76 行『Next』哪半句已过时、哪半句仍然成立。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/runner/worker/runtime.rs",
+            "pegainfer-kimi-k2/src/typed_scratch/top1.rs",
+            "pegainfer-kimi-k2/src/runner/scheduler/dp.rs",
+            "pegainfer-kimi-k2/src/runner/worker.rs",
+            "pegainfer-frontend/src/sampler.rs",
+            "docs/models/kimi-k2/sampling.md"
+          ],
+          "title": "采样、top-1、种子与确定性",
+          "topic": "讲解 runtime.rs 的 sample_local_top1_with_value / launch_local_top1_batch、typed_scratch/top1.rs 的 top-1 包缓冲（TOP1_PACKET_BYTES=8，与 csrc kimi_top1.cu 的 Top1Packet 对齐）与 KimiRowOptions 的 greedy/采样分路；DpCoordinator 每步每 rank 独立 philox 种子如何保证跨 rank 不串随机数、同 seed 重放得到同一序列。另含一层契约事实：pegainfer-frontend 的 SamplingParams 带 seed: Option<u64> 字段（sampler.rs），vllm/wire.rs 的 convert_sampling 把请求 seed 传入引擎（不再丢弃），但 kimi-k2 引擎种子仍固定 42（lib.rs 的 launch）、未消费 params.seed——docs/models/kimi-k2/sampling.md 中『per-request seed is dropped at convert_sampling』一行已成文档漂移，正好作为读文档对代码的校对练习。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u7-l3-kernel-report-trace.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "会用 kernel-report feature 构建并运行两个报告二进制",
+            "理解 trace 归一化如何把动态 batch 的调用点折叠成可统计类别",
+            "能把一次 decode step 的 kernel 分布与讲义 u5-l1 的链路对上"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "feature 组合与入口",
+            "计时与统计框架",
+            "调用点归一化",
+            "两个报告二进制"
+          ],
+          "order": 3,
+          "practice_task": "在有 GPU 的机器上运行 cargo run --release -p pegainfer-kimi-k2 --features kernel-report --bin kimi_kernel_report，按类别汇总输出并挑出最耗时的 3 类 kernel；无 GPU 时阅读 trace_runtime_decode_kernel_calls，写一个脚本对任意调用点字符串输出 normalize_call_site 的等价结果并自测 5 个样例。",
+          "source_files": [
+            "pegainfer-kimi-k2/src/kernel_report.rs",
+            "pegainfer-kimi-k2/src/batch_decode_trace.rs",
+            "pegainfer-kimi-k2/src/bin/kimi_kernel_report.rs",
+            "pegainfer-kimi-k2/src/bin/kimi_model_report.rs",
+            "pegainfer-kimi-k2/Cargo.toml"
+          ],
+          "title": "kernel-report 与 decode trace 工具链",
+          "topic": "讲解 kernel-report feature 驱动的观测工具：kernel_report.rs 复用 pegainfer-bench 的计时与统计框架（LatencyStats/MeasuredCall）并提供 measure_call 与各 measure_* 提供者；batch_decode_trace.rs 的 trace_decode_kernel_calls / trace_runtime_decode_kernel_calls / normalize_call_site 归一化 kernel 调用点；两个 bin（kimi_kernel_report / kimi_model_report）作为入口。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u4-l3",
+            "u6-l3"
+          ],
+          "filename": "u7-l4-accuracy-gate.md",
+          "id": "u7-l4",
+          "learning_goals": [
+            "推导 regret ≤ REGRET_BASE + 斜率×(−vllm_top1_lp) 的数值含义（0.34 nat @ 高置信 ≈ 1.07 @ 平坦）",
+            "解释为何选 vLLM 而不是 HF 作 golden（同为 INT4/marlin 数值域）",
+            "说出 exact-match 地板与确定性容差（DET_TOP1_TOLERANCE）各防哪类漂移"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "fixture 与参照选择",
+            "regret 规则",
+            "两遍扫描（teacher-forced + free-greedy）",
+            "确定性与缓存覆盖"
+          ],
+          "order": 4,
+          "practice_task": "有 8 GPU 与权重时运行 PEGAINFER_TEST_MODEL_PATH=models/Kimi-K2 cargo test --release -p pegainfer-kimi-k2 --features kimi-k2 --test vllm_golden_gate 并解读输出的 regret 分布；无 GPU 时手绘 regret 上界随 −top1_lp 变化的直线，标出 90% 与 11% top-1 置信两点，并解释 exact floor 为什么还要存在。",
+          "source_files": [
+            "pegainfer-kimi-k2/tests/vllm_golden_gate.rs",
+            "pegainfer-kimi-k2/Cargo.toml",
+            "docs/models/kimi-k2/accuracy-gate.md"
+          ],
+          "title": "精度门禁：vLLM golden 与 regret 规则",
+          "topic": "讲解 tests/vllm_golden_gate.rs：以 vLLM 执行同一 INT4 量化模型为参照（fixture 固化 prompt、greedy tail 与 top-K logprobs），teacher-forced 逐位 argmax 用随 vLLM 不确定度放宽的 regret 上界约束，free-greedy 解码做逐 token 对照，另有并发、确定性二连跑与 prefix cache 命中覆盖；门槛需要 8 GPU、kimi-k2 feature 与 PEGAINFER_TEST_MODEL_PATH。"
+        },
+        {
+          "action": "keep",
+          "depends_on": [
+            "u7-l4"
+          ],
+          "filename": "u7-l5-perf-docs-map.md",
+          "id": "u7-l5",
+          "learning_goals": [
+            "掌握把一篇设计文档拆成可验证主张、再回源码定位的读法",
+            "对照 dp-design / kv-cache-design 找到 scheduler/dp.rs、worker/cache.rs、bringup.rs 中的对应实现",
+            "了解基线对比方法（vllm-h20-baseline、tp1-dp8-ep8-performance）与性能结论的证据形态"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "文档拆解方法",
+            "设计主张回源码",
+            "基线与性能证据",
+            "演进路线"
+          ],
+          "order": 5,
+          "practice_task": "精读 dp-design.md 与 kv-cache-design.md，各产出 3 条『文档主张 → 代码落点（文件 + 函数/常量）』映射，注明验证方式（日志、单测或注释）；再从 optimization.md 挑一项优化，指出其对应源码位置并写 10 行以内的效果复述。",
+          "source_files": [
+            "docs/models/kimi-k2/dp-design.md",
+            "docs/models/kimi-k2/kv-cache-design.md",
+            "docs/models/kimi-k2/optimization.md",
+            "docs/models/kimi-k2/tp1-dp8-ep8-performance.md",
+            "docs/models/kimi-k2/vllm-h20-baseline.md"
+          ],
+          "title": "性能与设计文档导读：从主张到代码落点",
+          "topic": "以 docs/models/kimi-k2 下的 dp-design、kv-cache-design、optimization、tp1-dp8-ep8-performance、vllm-h20-baseline 等文档为对象，练习『文档主张 → 源码落点』的映射方法，并了解该模型线仍在演进的取舍（deepep-migration、pplx-ep 系列、roadmap）。"
+        }
+      ],
+      "level": "advanced",
+      "order": 7,
+      "title": "专家主题：CUDA Graph、确定性、工具链、精度门禁与性能"
+    }
+  ]
+}
