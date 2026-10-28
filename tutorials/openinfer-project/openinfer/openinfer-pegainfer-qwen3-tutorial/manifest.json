@@ -1,0 +1,1174 @@
+{
+  "head": "785d04871df37ddfb3e1b1432ce544b94505a801",
+  "project": "openinfer-pegainfer-qwen3",
+  "rationale": "pegainfer-qwen3 是约 2.8 万行、横跨九个子系统的模型 crate，学习路线按\"由外到内、由静到动\"设计：入门层先看清 crate 定位、ModelLine 接入与引擎契约这两层外壳，读者不写 CUDA 也能跑起单测；随后进入静态结构（配置解析、权重布局、checkpoint 装载、显存画像），再进入动态运行时（executor plan/result 契约、GPU 线程模型、prefill/批解码/统一前向三条前向、CUDA Graph、双流重叠、split-KV）；然后是纯函数调度层（队列装箱、执行计划、effects 解析、契约适配生命周期）。有了前向与调度两侧基础，才展开服务特性（前缀缓存、KV offload、P2P/vLLM P/D、logprobs）与最深的投机解码栈（事务核心 → DFlash/DSpark/EAGLE-3 草稿器 → verify 分段图 → 车道与调优），LoRA 作为独立分支；最后以专家层收尾：batch-invariant 数值不变性、HF golden 精度门、kernel/model 报告工具与张量并行、行为测试族。依赖关系保证每篇只要求前置讲义已建立的概念，practice_task 优先选择无需多卡 GPU、可在 lib 单测层面完成的扩展任务。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-positioning.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 pegainfer-qwen3 在 PegaInfer 工作区中的角色与默认 feature 的意义",
+            "对照 src/lib.rs 的模块声明把各模块归类到配置/权重/前向/调度/投机/LoRA/数据面",
+            "理解 runtime 模块导出的 plan/result 类型是本 crate 的公共执行边界"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "src/lib.rs 模块声明",
+            "runtime 再导出",
+            "Cargo.toml features"
+          ],
+          "order": 1,
+          "practice_task": "阅读 Cargo.toml 与 src/lib.rs 后制作一张模块分层表：把每个 mod 标注为配置、权重、前向执行、调度、投机解码、LoRA、KV 数据面或诊断工具；再运行 cargo test --release -p pegainfer-qwen3 --lib，记录哪些测试无 GPU 也能通过，作为后续讲义的实验基线。",
+          "source_files": [
+            "Cargo.toml",
+            "src/lib.rs"
+          ],
+          "title": "crate 定位与模块地图：pegainfer-qwen3 是什么",
+          "topic": "介绍 pegainfer-qwen3 作为纯 Rust + CUDA 推理引擎中 Qwen3 模型线 crate 的定位：默认 feature、无 Python 构建、依赖的 workspace 内部 crate（frontend/core/kernels/kv-cache/kv-offload/sample），以及 src/lib.rs 的模块划分与 runtime 再导出层。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-run-and-tests.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "区分 lib 单测与需要 GPU + 权重的集成测试并知道如何分别运行",
+            "理解 PEGAINFER_TEST_MODEL_PATH 与测试 skip 逻辑",
+            "掌握 tests/common/harness.rs 阻塞式引擎泵的用法"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "hf_golden_gate 测试",
+            "common/harness",
+            "--lib 单测入口"
+          ],
+          "order": 2,
+          "practice_task": "通读 tests/common/harness.rs 与任一集成测试的 skip 分支，写一个最小集成测试骨架（复用 harness 的 submit/pump 语义，无 GPU 时 clean skip），先用 cargo test --release -p pegainfer-qwen3 --lib 验证骨架所在 crate 编译通过。",
+          "source_files": [
+            "Cargo.toml",
+            "tests/hf_golden_gate.rs",
+            "tests/common/harness.rs"
+          ],
+          "title": "运行与测试地图：单测、GPU 集成测试与测试夹具",
+          "topic": "梳理 crate 的测试组织：--lib 单测（无需 GPU）、tests/ 下需要 GPU + 模型权重的集成测试、PEGAINFER_TEST_MODEL_PATH 约定，以及 harness 如何把 step 批量协议还原成每请求阻塞流。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-model-line-cli.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "解释 probe/augment_cli/validate/launch 各 hook 的职责与调用时机",
+            "读懂 consumed_shared_args 与 arg_requirements 的机制",
+            "追踪 Qwen3Cli 字段到 Qwen3LaunchOptions 的组装路径"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Qwen3Line::validate",
+            "Qwen3Line::launch",
+            "Qwen3Cli"
+          ],
+          "order": 3,
+          "practice_task": "在 src/model_line.rs 的 tests 模块中仿照 validate_argv，为 arg_requirements 里的一条规则（如 --kv-pd-miss-w-ms 依赖 --kv-pd-vllm-seed）补一个拒绝用例并运行通过。",
+          "source_files": [
+            "src/model_line.rs",
+            "src/lib.rs"
+          ],
+          "title": "ModelLine：Qwen3 如何挂进服务器 CLI",
+          "topic": "讲解 ModelLine trait 的 Qwen3 实现：config.json probe、Qwen3 专属 CLI 段、跨标志互斥规则（LoRA、batch-invariant、DFlash、decode-overlap、TP 的组合表）以及 launch 如何组装 Qwen3LaunchOptions。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-engine-contract.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "说出 Engine/Scheduler/RequestLedger 各自的职责边界",
+            "追踪 launch → start_engine_with_offload_inner → frontend_adapter::start_qwen3 的调用链",
+            "理解 executor 构建后 set_no_prefix_cache/enable_decode_overlap/load_dflash_draft_model 的顺序原因"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "launch",
+            "start_qwen3",
+            "start_with_executor"
+          ],
+          "order": 4,
+          "practice_task": "用 rg 从 pegainfer_qwen3::launch 出发追踪到 spawn_scheduler，写出完整启动调用链并为每个函数标注源码行号；标注 LoRA 分支与 DFlash 分叉点，检查是否遗漏 dump_graph_png 校验。",
+          "source_files": [
+            "src/frontend_adapter.rs",
+            "src/lib.rs"
+          ],
+          "title": "引擎契约与启动装配：frontend_adapter 全景",
+          "topic": "介绍 pegainfer_frontend 引擎契约（Engine、Scheduler trait、RequestLedger、submit/step/metrics 驱动循环）以及 frontend_adapter.rs 承担的两个契约面职责：把每步 effects 写进 ledger、组装并返回 Engine。"
+        }
+      ],
+      "order": 1,
+      "title": "起步：认识 pegainfer-qwen3"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u2-l1-config-parsing.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "解释 probe_config_json 身份检查与完整 Config 校验的分层",
+            "理解 TensorParallelConfig 如何从层数推导切分",
+            "跟踪 Raw* 中间结构到最终 Config 的归一化路径"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Config 解析与校验",
+            "TensorParallelConfig",
+            "probe_config_json"
+          ],
+          "order": 1,
+          "practice_task": "对照 src/config.rs 的校验分支，为 Config 加载补一个拒绝非法配置（如层数不能被 TP 整除或缺失关键字段）的单测，仿照 src/model_line.rs tests 的组织方式运行通过。",
+          "source_files": [
+            "src/config.rs",
+            "src/model_line.rs"
+          ],
+          "title": "配置解析：从 config.json 到 Config",
+          "topic": "拆解 config.rs：Config 与 Raw* 中间结构的 serde 解析、probe_config_json 的身份检查、TensorParallelConfig 的层数切分推导、layer_types 缺省补全，以及投机解码配置（DFlashConfig/Eagle3Config）的入口位置。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-weights-layout.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "解释 QKV 合存与 gate+up 合存的行偏移访问方式",
+            "说出 Qwen3Model 只含权重与配置、请求状态归 executor 的所有权设计",
+            "理解 Qwen3MemoryOptions 三参数对 KV 池的影响"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "AttentionWeights",
+            "MlpWeights",
+            "Qwen3Model",
+            "Qwen3MemoryOptions"
+          ],
+          "order": 2,
+          "practice_task": "依据结构体尺寸注释手工计算 Qwen3-4B（36 层）全部 QKV 与 MLP 矩阵的 bf16 字节数，写成单测断言（用 src/sizing.rs 的 checked 乘加函数），并与 weights.rs 已有测试对照。",
+          "source_files": [
+            "src/weights.rs",
+            "src/sizing.rs"
+          ],
+          "title": "权重布局：Qwen3Model 与内存选项",
+          "topic": "讲解 weights.rs 的数据布局：QKV 单 concatenated 矩阵、gate+up 合存、TransformerBlock、Qwen3Model（权重 + 配置，不含请求状态）以及 Qwen3MemoryOptions（gpu_memory_utilization / margin / page_size）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-checkpoint-loading.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "解释 safetensors 分片读取与两阶段装载的动机",
+            "推导 TP>1 时行切投影矩阵的切片边界",
+            "理解 sizing.rs 防溢出算术为何先于张量校验生效"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "load_shard_info",
+            "WeightPrefetch",
+            "ModelRuntimeConfig"
+          ],
+          "order": 3,
+          "practice_task": "梳理 load.rs 中\"先记录整个计划再上传\"的两阶段结构，写出 TP=2 时任一 QKV 矩阵的切片边界推导；再为某个装载纯函数找到或补充一个单测并运行。",
+          "source_files": [
+            "src/weights/load.rs",
+            "src/sizing.rs"
+          ],
+          "title": "checkpoint 装载：先记录计划，再上传",
+          "topic": "讲解 weights/load.rs：分片信息探测、装载计划记录、逐层上传与 TP 行切分，以及 sizing.rs 的 checked 乘加为何必要（配置维度先于张量校验，坏配置必须立刻失败而不是溢出成少预留）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l4-memory-and-kv-budget.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "解释 startup profiling 如何测出激活峰值并推导 KV 块数",
+            "说出 KvBudget 与 servable_len 如何决定单请求最大长度",
+            "理解 page_size 只能取 16/64 的原因"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "KvBudget",
+            "profile_temp_blocks",
+            "servable_len"
+          ],
+          "order": 4,
+          "practice_task": "手工推导给定 gpu_memory_utilization、margin、page_size 下 4B 模型的可用块数与 servable_len，写成计算笔记；再用 rg 找到 weights.rs 与 scheduler.rs 中相关单测验证你的公式。",
+          "source_files": [
+            "src/weights.rs",
+            "src/sizing.rs",
+            "src/scheduler.rs"
+          ],
+          "title": "显存画像与 KV 预算",
+          "topic": "讲解启动期显存账本：profile_temp_blocks 的临时块画像、KvBudget 的推导（权重 + 运行时缓冲 + 激活峰值 + margin + 图捕获），以及 servable_len 如何把 max_context 与块数折算成服务上限。"
+        }
+      ],
+      "order": 2,
+      "title": "配置与权重：模型本体"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4",
+            "u2-l2"
+          ],
+          "filename": "u3-l1-executor-overview.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "列出 prefill/decode/unified 三组 plan→result 的对应关系",
+            "解释 ModelExecutor trait 为何是 scheduler 与 benchmark 共用的相位边界",
+            "说出 RequestId 端到端不变量的意义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ModelExecutor trait",
+            "PrefillPlan/DecodePlan/UnifiedPlan",
+            "ConnectorLookupCounters"
+          ],
+          "order": 1,
+          "practice_task": "写一页速查表：三组 plan 的字段、对应 result 的字段、以及 RequestId 如何贯穿；为 build_decode_request_results 一类纯函数找到已有单测，运行并注释每个断言验证的字段。",
+          "source_files": [
+            "src/executor.rs",
+            "src/lib.rs"
+          ],
+          "title": "Qwen3Executor 与 ModelExecutor 契约",
+          "topic": "总览 executor.rs：Qwen3Executor 的公开面、ModelExecutor trait（scheduler 与模型本地 benchmark 共用的相位边界）、PrefillPlan/DecodePlan/UnifiedPlan 与对应 Result 类型、RequestLedger 相关的 DeferredFinish 通路。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-gpu-thread-model.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "解释 StepCommand/WorkerCommand 的通道协议与启动预捕获",
+            "说出 CublasThreadGuard 与 Drop 如何绑定 cuBLAS 句柄线程",
+            "理解 WorkerLost 错误如何向 scheduler 传播"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "RankWorker",
+            "LocalQwen3Lane",
+            "CublasThreadGuard",
+            "WorkerCommand/StepCommand"
+          ],
+          "order": 2,
+          "practice_task": "画出一次 decode step 从 executor 线程到 RankWorker 再回结果的消息时序图（含 PrecapturePhase 启动阶段）；写一段分析说明 bind_model_thread 与 CublasThreadGuard 各自防什么，引用源码行号。",
+          "source_files": [
+            "src/executor.rs"
+          ],
+          "title": "GPU 线程模型：RankWorker 与 LocalQwen3Lane",
+          "topic": "拆解 executor.rs 的线程结构：crossbeam 通道、RankWorker、LocalQwen3Lane、StepCommand/WorkerCommand、启动期 PrecapturePhase（TP 预捕获）、CublasThreadGuard 的线程绑定与 WorkerLost 传播。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l3-prefill-forward.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "逐 op 说出 prefill 前向序列与 KV 写入点",
+            "解释 PrefillBuffers/PrefillTempBin 的分配与回收策略",
+            "理解分块 prefill 如何在同一前向里从任意 start position 续算"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "execute_prefill",
+            "PrefillBuffers",
+            "PrefillTempBin"
+          ],
+          "order": 3,
+          "practice_task": "以一条 prompt 为例逐 op 写出 prefill 前向序列（embedding → rmsnorm → qkv → rope → attention → o_proj → mlp → …），对照 src/bin/report_support/prefill_attention.rs 的报告路径验证两个视角一致；标注每步 KV 写入的位置。",
+          "source_files": [
+            "src/prefill.rs",
+            "src/bin/report_support/prefill_attention.rs"
+          ],
+          "title": "prefill 前向：分块、缓冲与算子序列",
+          "topic": "讲解 prefill.rs：PrefillBuffers 的临时分配与 PrefillTempBin 回收、分块 prefill 的 start position 语义、前缀命中后的后缀 GEMM 缩小，以及与 executor 中 execute_prefill 的衔接。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l4-batch-decode-forward.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "解释 BATCH_BUCKETS 与 bucket_for 的凑整策略及 padding 行来源",
+            "说出 DecodeGraphPlan/DecodeGraphUse 何时用图、何时 eager",
+            "理解 decode 前向与 prefill 前向在算子选择上的差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "batch_decode 前向",
+            "DecodeGraphPlan/DecodeGraphUse",
+            "bucket_for"
+          ],
+          "order": 4,
+          "practice_task": "推导 batch=5、batch=17 时实际使用的 bucket；阅读 batch_decode_dag.rs 的模块注释，解释\"方法既是执行步骤又是元数据契约\"如何让 model-report 观察到与执行一致的算子序列，写一段总结。",
+          "source_files": [
+            "src/batch_decode.rs",
+            "src/batch_decode_buffers.rs",
+            "src/batch_decode_dag.rs"
+          ],
+          "title": "批量解码前向：N 请求一步",
+          "topic": "讲解 batch_decode.rs：多请求单 token 的批前向、BATCH_BUCKETS 凑整、DecodeGraphUse/DecodeGraphPlan 的图使用决策，以及 grouped_projection_from_packed 的分组投影。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u3-l5-cuda-graph-decode.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "解释图重放对指针稳定性的要求及预分配缓冲如何满足",
+            "说出 bucket 图族为何按固定 batch 尺寸捕获",
+            "梳理 --dump-graph-png 从 CLI 校验到 dot/png 落盘的链路"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "BatchDecodeBuffers",
+            "DecodeGraphUse",
+            "dump_decode_graph_png"
+          ],
+          "order": 5,
+          "practice_task": "梳理 dump 链路：model_line.rs 的互斥校验 → lib.rs 的 validate_graph_dump_request → frontend_adapter.rs 的 dump_decode_graph_png 日志；写出 PNG/DOT 两个文件的生成路径与 summary 各字段含义，并解释为何 LoRA 服务下不可用。",
+          "source_files": [
+            "src/batch_decode_buffers.rs",
+            "src/batch_decode.rs",
+            "src/batch_decode_trace.rs",
+            "src/frontend_adapter.rs"
+          ],
+          "title": "CUDA Graph：捕获、bucket 与图导出",
+          "topic": "讲解解码 CUDA Graph：BatchDecodeBuffers 为何一次性预分配（cuMemAllocAsync churn 与图捕获的指针稳定性）、bucket 图族、kernel-call-trace 特性下的调用追踪，以及 --dump-graph-png 图导出。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u3-l6-unified-forward.md",
+          "id": "u3-l6",
+          "learning_goals": [
+            "解释统一步的动机：GEMM 合并处理 prefill+decode 行",
+            "说出 NumericPolicy 如何决定 decode 行走哪条注意力路径",
+            "理解统一路径与纯 decode 步的等价性测试思路"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "unified_forward",
+            "NumericPolicy",
+            "batch_invariance_unified 测试"
+          ],
+          "order": 6,
+          "practice_task": "写一张路径选择表：Tuned/Pin × 有无编译好的 split-KV kernel → 各行走 BatchPrefill 还是 decode 算子；对照 tests/batch_invariance_unified.rs 的断言验证表格，并解释 Pin 模式坚持同核路径的原因。",
+          "source_files": [
+            "src/unified_forward.rs",
+            "tests/batch_invariance_unified.rs"
+          ],
+          "title": "统一前向：prefill 与 decode 同一步",
+          "topic": "讲解 unified_forward.rs：prefill 行与 decode 行在同一 GEMM 里处理，Tuned/无 split-KV kernel 时全部走 BatchPrefill，Pin/PerToken 时 decode 行走 decode 注意力算子以保持与纯 decode 步同核。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2",
+            "u3-l6"
+          ],
+          "filename": "u3-l7-decode-overlap-green-ctx.md",
+          "id": "u3-l7",
+          "learning_goals": [
+            "说出 DecodeOverlap 三态各自的流拓扑",
+            "解释 GreenCtx 下 decode 与 prefill 的 SM 配比及无 prefill 时的回退",
+            "理解 fence_producers_before_override 的同步语义"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DecodeOverlap",
+            "OverlapStreams",
+            "fence_producers_before_override"
+          ],
+          "order": 7,
+          "practice_task": "梳理 enable_decode_overlap 在 executor.rs 的落点与 lib.rs 的 TP 互斥校验，写出三态对比表（流数量、SM 归属、无 prefill 时行为）；解释 green_ctx.rs 中 query_total_sm 与 decode_pct 如何换算分区，引用行号。",
+          "source_files": [
+            "src/green_ctx.rs",
+            "src/executor.rs",
+            "src/lib.rs"
+          ],
+          "title": "双流重叠与 Green Context",
+          "topic": "讲解 green_ctx.rs：DecodeOverlap 三态（Off/SharedSm/GreenCtx）、两条 CUDA 流、Green Context SM 分区（decode 拿 decode_pct%）、fence_producers_before_override 的流切换防护，以及为何与 TP 互斥。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u3-l8-split-kv-projection-fusion.md",
+          "id": "u3-l8",
+          "learning_goals": [
+            "推导 split_chunk_size_for 与 chunk/max 标签的对应",
+            "解释 DecodeAttentionPath 的 non_partition/split_kv 分叉",
+            "理解 QUALIFIED_QKV 表为何按 SM+几何逐行认证"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "SplitKvConfig",
+            "split_chunk_size_for",
+            "DecodeProjectionPath"
+          ],
+          "order": 8,
+          "practice_task": "对照 kernel_manifests/qwen3.toml 的 split_kv 变体与 batch_decode_buffers.rs 的常量，推导给定 max_context 下 Pin 与 Tuned 的 chunk 尺寸；为 projection_fusion.rs 的 QUALIFIED_QKV 写一段分析：为何 cuBLASLt 选算法不等于融合更优。",
+          "source_files": [
+            "src/split_kv.rs",
+            "src/batch_decode_buffers.rs",
+            "src/projection_fusion.rs",
+            "kernel_manifests/qwen3.toml"
+          ],
+          "title": "split-KV 解码与投影融合",
+          "topic": "讲解 split_kv.rs 的 chunk 公式与标签、batch_decode_buffers.rs 的 SPLIT_KV_* 常量与 DecodeAttentionPath 选择、projection_fusion.rs 的 QKV 融合路径及其按设备几何逐行认证的资格表。"
+        }
+      ],
+      "order": 3,
+      "title": "执行器与前向：GPU 运行时"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u4-l1-scheduler-queues.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "说出 PendingRequest 与 ActiveRequestState 的字段语义与状态迁移",
+            "解释 take_prefill_chunks 的预算装箱与 request_local 整段-or-跳过",
+            "理解 prompt_logprobs 请求必须整段 prefill 的约束"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "PendingRequest",
+            "ActiveRequestState",
+            "take_prefill_chunks"
+          ],
+          "order": 1,
+          "practice_task": "为 take_prefill_chunks 补两个单测：一个覆盖 prompt_logprobs 整段约束，一个覆盖 request_local 整段-or-跳过与按 request_id 排序；运行 cargo test --release -p pegainfer-qwen3 --lib take_prefill 验证。",
+          "source_files": [
+            "src/scheduler.rs",
+            "src/scheduler/tests.rs",
+            "src/scheduler/test_support.rs"
+          ],
+          "title": "调度器 Ⅰ：队列与 chunked prefill 装箱",
+          "topic": "讲解 scheduler.rs 的核心结构：该模块不接触引擎契约、只拥有 PendingRequest 队列并产出纯 effect 数据；take_prefill_chunks 的 max_prefill_tokens 预算装箱、request_local（batch-invariant）模式与 servable_len。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-execution-plan.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "说出 ExecutionPlan 各变体的产生条件与 ExecutionArtifacts 的内容",
+            "解释 speculation_decision_at 的全有-or-全无门控逻辑",
+            "理解 PEGAINFER_SPEC_MAX_BATCH 负载感知门的读取与校验"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "build_next_plan",
+            "SpeculationDecision",
+            "speculation_decision_at"
+          ],
+          "order": 2,
+          "practice_task": "构造三行伪输入（含一个 LoRA 请求、一个 logprobs 请求）手工推导 SpeculationDecision，再对照 src/scheduler/tests.rs 已有用例验证；解释为什么采样参数不是门控条件。",
+          "source_files": [
+            "src/scheduler/plan.rs",
+            "src/spec_env.rs",
+            "src/scheduler/tests.rs"
+          ],
+          "title": "调度器 Ⅱ：执行计划与投机门控",
+          "topic": "讲解 scheduler/plan.rs：build_next_plan 如何在纯 prefill、纯 decode、speculative verify 之间选择，speculation_decision_at 的负载感知门（spec_max_batch）与全批 draft-ready 检查，以及 spec_env.rs 的环境旋钮校验。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-resolve-effects.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "说出 StepEffects 各字段的产生来源与消费方",
+            "解释 CachedTokensEffect/PromptEchoEffect 的上报时机",
+            "理解 effects 与 resolve 分层对 decode-overlap 路径的意义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "resolve_step",
+            "StepEffects",
+            "failure_target_ids"
+          ],
+          "order": 3,
+          "practice_task": "写出一次混合步（prefill+decode+finish）产生的 StepEffects 各字段来源表；为 failure_target_ids 或另一个纯函数补单测并运行，对照 effects.rs 的文档注释核对语义。",
+          "source_files": [
+            "src/scheduler/resolve.rs",
+            "src/scheduler/effects.rs"
+          ],
+          "title": "调度器 Ⅲ：resolve 与 StepEffects",
+          "topic": "讲解 scheduler/resolve.rs 与 effects.rs：executor 结果如何被解析成纯 StepEffects（PendingEffect/DecodeEffect/CachedTokensEffect/PromptEchoEffect），以及这层 sink-free 设计为何让 decode-overlap 路径可以克隆 PendingRequest。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u4-l4-frontend-adapter-lifecycle.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "跟踪请求 submit → prefill → decode → Finished 的完整生命周期",
+            "解释取消的响应式模型与 DeferredFinish 的 KV-ready 语义",
+            "说出 phase_trace 各 span 的语义与 TTFT 读法"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Qwen3Scheduler",
+            "RequestLedger 写入",
+            "PhaseTracker"
+          ],
+          "order": 4,
+          "practice_task": "画出请求状态迁移图（queued/prefilling/decoding/finished + abort 分支），标注 frontend_adapter.rs 行号；运行 frontend_adapter/tests.rs 中覆盖取消或 deferred finish 的用例并注释关键断言。",
+          "source_files": [
+            "src/frontend_adapter.rs",
+            "src/frontend_adapter/tests.rs",
+            "src/scheduler/phase_trace.rs"
+          ],
+          "title": "契约适配层：ledger 写入、取消与完成事件",
+          "topic": "讲解 frontend_adapter.rs 的生命周期管理：effects → ledger verdict/tokens 的翻译、abort 的响应式退休、DeferredFinish（P/D prefill 角色的 KV-ready 信号）以及 phase_trace.rs 的 queue/prefill/decode span。"
+        }
+      ],
+      "order": 4,
+      "title": "调度器：从队列到事件"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3",
+            "u4-l1"
+          ],
+          "filename": "u5-l1-prefix-cache.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "解释块粒度匹配、部分尾块重算与满块上限规则",
+            "理解 no_prefix_cache 开关的两层含义",
+            "说出 warm/cold 混合批次共享一个 prefill plan 的约束"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "前缀匹配与 set_no_prefix_cache",
+            "PrefixProbe/KvView 使用点",
+            "prefix_cache 行为测试"
+          ],
+          "order": 1,
+          "practice_task": "列出 tests/prefix_cache.rs 的用例清单并为\"部分块命中 + 冷暖混合批次\"场景写一个新断言或论证已有用例覆盖；无 GPU 时说明 skip 路径并指出可在 lib 层验证的纯函数。",
+          "source_files": [
+            "src/executor.rs",
+            "tests/prefix_cache.rs",
+            "tests/cached_tokens_usage.rs"
+          ],
+          "title": "前缀缓存：匹配、复用与行为契约",
+          "topic": "讲解 GPU 内前缀缓存：块粒度匹配与命中计数上报（CachedTokensEffect/cached_tokens_usage）、部分尾块必重算、满块仍留一块 prefill 的规则，以及 no_prefix_cache 开关语义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-kv-offload-prefetch.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "解释 sealed 块落主机层与 prefill 前 H2D 回填的时机",
+            "说出 deferred/loading 队列与 reserve_floor 的配合",
+            "理解 remote_fetch 决策级联为何可在无 GPU/RDMA 下测试"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "offer_prefetch/reclaim_ready_prefetch",
+            "remote_fetch_action 级联",
+            "build_offload"
+          ],
+          "order": 2,
+          "practice_task": "对照 remote_fetch.rs 写出五分支触发条件表（still loading / timeout / zero-hit / 超预算 lease / 命中起载）；利用其\"注入即测\"设计新增一个 zero-hit 超时转本地 prefill 的单测并运行。",
+          "source_files": [
+            "src/lib.rs",
+            "src/executor/remote_fetch.rs",
+            "src/scheduler.rs",
+            "tests/kv_offload_cpu_hit.rs"
+          ],
+          "title": "KV offload：主机层与预取停车场",
+          "topic": "讲解 Qwen3OffloadOptions 与 offload 数据面：pinned 池、sealed 块保存、scheduler 的 deferred/loading 停车场（offer_prefetch/reclaim_ready_prefetch/block_on_loading）以及 remote_fetch.rs 的纯决策级联。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-p2p-vllm-pd.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "说出 P2P 各字段的网络含义与 flush_on_finish 的角色分工",
+            "解释 vLLM 兼容哈希为何要求 PYTHONHASHSEED 与 namespace 双方一致",
+            "理解 zero-hit 等待窗口与 15s 远取上限的关系"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Qwen3P2pOptions",
+            "Qwen3VllmCompatOptions",
+            "kv_pd CLI 段"
+          ],
+          "order": 3,
+          "practice_task": "梳理 Qwen3VllmCompatOptions 从 CLI 到 offload 查询键的完整数据流（model_line.rs → lib.rs → executor.rs），写一页说明：namespace 不含模型身份时的跨模型误载风险、miss_wait 与远取 deadline 的关系。",
+          "source_files": [
+            "src/lib.rs",
+            "src/model_line.rs",
+            "src/executor.rs"
+          ],
+          "title": "P2P 共享与 vLLM 兼容 P/D 部署",
+          "topic": "讲解跨实例 KV 共享：Qwen3P2pOptions（MetaServer/RDMA/advertise_addr）、P/D 角色下 flush_on_finish 的语义，以及 vLLM 兼容模式（xxhash_cbor 块哈希、namespace、miss_wait）的数据面。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u5-l4-logprobs.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "解释 decode 行 top-k 评分的批内收集方式",
+            "说出 prompt_logprobs 为何要求整段 prefill",
+            "对照契约测试列出 logprobs 的对外承诺"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "DecodeRows/PrefillRows",
+            "gather_decode_logprobs",
+            "logprobs 契约测试"
+          ],
+          "order": 4,
+          "practice_task": "对照 tests/logprobs_contract.rs 列出\"契约 × 关键断言\"清单；为 logprobs=None/Some(0)/Some(k) 三种取值写一张行为差异表，并在 executor/logprobs.rs 中找到各自的处理分支。",
+          "source_files": [
+            "src/executor/logprobs.rs",
+            "tests/logprobs_contract.rs"
+          ],
+          "title": "logprobs 通路：解码与提示词评分",
+          "topic": "讲解 executor/logprobs.rs 的 DecodeRows/PrefillRows：decode 步的 top-k 收集、prefill 的全位置评分，以及 prompt_logprobs 请求必须整段 prefill 的调度约束（回连 u4-l1）。"
+        }
+      ],
+      "order": 5,
+      "title": "KV 数据面与服务特性"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4",
+            "u4-l2"
+          ],
+          "filename": "u6-l1-speculative-core.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "用伪代码复述 propose→verify→accept→commit/rollback 事务",
+            "解释贪心与采样请求共用的 accept_prefix_match 规则",
+            "理解草稿/验证边界为何是纯 token 跨界"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "VerifyStepItem",
+            "accept 前缀规则",
+            "KV 事务（executor/spec.rs）"
+          ],
+          "order": 1,
+          "practice_task": "写出投机事务的伪代码（含 span=K+1、最长前缀+1 奖励、KV 回滚），并解释为何采样请求也用同一接受规则而不破坏分布；找到 speculative 相关单测运行并注释。",
+          "source_files": [
+            "src/speculative.rs",
+            "src/executor/spec.rs"
+          ],
+          "title": "投机解码事务核心：propose/verify/accept",
+          "topic": "讲解 speculative.rs 的方法无关核心：把投机解码建模为对 decode 循环的乐观并发事务，验证 span 是纯 token 边界，接受规则对贪心与采样请求统一（逐位置选出 committed token 后比对草稿）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u6-l1"
+          ],
+          "filename": "u6-l2-dflash-drafter.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "列出草稿模型新增张量清单及形状来源",
+            "解释 DFlashBatchScratch 密集缓冲与 varlen 尾缓冲的分配策略",
+            "理解 DFlashConfig 对多种 schema 的归一化"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DFlashDraftModel",
+            "DFlashBatchScratch",
+            "DFlashConfig",
+            "dflash/loading"
+          ],
+          "order": 2,
+          "practice_task": "对照 config.rs 的 DFlashConfig 解析与 dflash/loading.rs 的张量装载，写出草稿模型相对目标的全部新增张量清单（名称、形状、来源 schema），并标注哪些与目标共享（embed/lm_head）。",
+          "source_files": [
+            "src/dflash.rs",
+            "src/dflash/loading.rs",
+            "src/dflash/reservation.rs",
+            "src/config.rs"
+          ],
+          "title": "DFlash 草稿模型：结构、装载与批草稿缓冲",
+          "topic": "讲解 dflash.rs 的 DFlashDraftModel（单层 fc + 层缓存 + 每 request 上下文投影）、DFlashBatchScratch 的一次分配跨步复用，以及 dflash/loading.rs 与 reservation.rs 的装载和显存预留。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l3-dflash2-selector.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "解释 learned top-16 相对逐位置 argmax 的收益来源",
+            "说出 selector 的 CUDA 图捕获与 scratch 复用方式",
+            "理解配置缺省时独立 argmax 的回退行为"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "dflash2_select_into",
+            "selector 捕获",
+            "独立 argmax 回退"
+          ],
+          "order": 3,
+          "practice_task": "解释 selector.rs 顶部注释中\"两个 head rank 全零则逐位置独立 argmax\"的回退；跟踪 selector 的输出如何进入 u6-l1 的 verify span，写一段分析说明 top-16 与逐位置 argmax 在接受长度上的预期差异。",
+          "source_files": [
+            "src/dflash/selector.rs",
+            "src/dflash/conv.rs",
+            "src/config.rs"
+          ],
+          "title": "DFlash2 选择器：learned top-16 提案",
+          "topic": "讲解 dflash/selector.rs 在既有 backbone 上的 learned top-16 提案选择：dflash2_select_into 的选择内核、捕获进 CUDA 图、以及配置缺省（head ranks 全零）时退回逐位置 argmax。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l4-dspark-markov.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "手推 block 内逐位置采样的偏置循环",
+            "解释贪心解码下重排提案无损的原因",
+            "说出 hedge 变体与乐观 KV 事务的复用关系"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "MarkovHead",
+            "MarkovScratch",
+            "markov_graph_enabled"
+          ],
+          "order": 4,
+          "practice_task": "手推一个 2 位置 block 的 Markov 采样循环（w1 查表 → w2 GEMM → 偏置加和 → 采样/argmax），写出每步张量形状；解释\"验证仍逐 token 确认，故贪心无损\"这句话对应 dspark.rs 里哪段代码。",
+          "source_files": [
+            "src/dspark.rs"
+          ],
+          "title": "DSpark：低秩 Markov 头的半自回归草稿",
+          "topic": "讲解 dspark.rs：在 DFlash backbone 上叠加 B(prev)=w2·w1[prev] 的 bigram 式 logit 偏置，block 内从左到右采样使草稿半自回归；贪心下无损，因为偏置只重塑提案、验证仍逐 token 确认。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l5-eagle3-drafter.md",
+          "id": "u6-l5",
+          "learning_goals": [
+            "推导三层捕获索引从 (2,N/2,N-3) 到 (1,N/2-1,N-4) 的换算",
+            "解释 2*hidden 输入拼接与 draft_vocab 重映射",
+            "理解骨架落地的分阶段计划（预留先行）"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "EAGLE3_CHAIN_LENGTH",
+            "捕获层索引换算",
+            "Eagle3MemoryReservation"
+          ],
+          "order": 5,
+          "practice_task": "写出三层索引换算的推导（为什么 vLLM 的 post-layer idx+1 对应本 crate 的 0-based 前移一位），并对照 config.rs Eagle3Config 列出 midlayer 的输入/输出维度与 d2t/t2d 的作用。",
+          "source_files": [
+            "src/eagle3.rs",
+            "src/eagle3/loading.rs",
+            "src/eagle3/reservation.rs",
+            "src/config.rs"
+          ],
+          "title": "EAGLE-3 草稿器：骨架与捕获层换算",
+          "topic": "讲解 eagle3.rs 的单层 midlayer 草稿器：拼接 [norm(embed), norm(fused_hidden)] 的 2*hidden 输入、低中高三层隐藏捕获的索引换算、γ=3 链长、d2t/t2d 词表重映射，以及当前骨架与显存预留状态。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1",
+            "u3-l5"
+          ],
+          "filename": "u6-l6-verify-graph.md",
+          "id": "u6-l6",
+          "learning_goals": [
+            "解释 attention 必须留在图外的 KV 迭代数原因",
+            "说出分段捕获覆盖 ~84% launch gap 的代价模型",
+            "理解 span_variant 何时允许图重放、何时退回 eager"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "VerifyGraphBuffers",
+            "分段图捕获",
+            "span_variant"
+          ],
+          "order": 6,
+          "practice_task": "画出分段图的结构（捕获段/attention eager 段/边界），标注每段包含的算子；解释 span_variant 的形状判定逻辑并推导 max_batch=8、span=4 时选中的变体。",
+          "source_files": [
+            "src/verify_graph.rs",
+            "src/prefill.rs"
+          ],
+          "title": "verify 前向缓冲与分段 CUDA Graph",
+          "topic": "讲解 verify_graph.rs 的 VerifyGraphBuffers：按最坏形状一次性预分配、逐段捕获稠密算子成 piecewise CUDA Graph、attention 保持 eager（FlashInfer 分页 prefill 核在录制时固定 KV 迭代数）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2",
+            "u6-l6"
+          ],
+          "filename": "u6-l7-spec-lane-tuning.md",
+          "id": "u6-l7",
+          "learning_goals": [
+            "解释草稿车道为何与目标同线程、隐藏态不出车道",
+            "说出 auto hedge 的 explore-then-commit 控制器设计",
+            "汇总全部投机旋钮与 CLI 互斥规则"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DFlashLaneState",
+            "dflash_prefill_action",
+            "auto hedge 控制器",
+            "spec_env 校验"
+          ],
+          "order": 7,
+          "practice_task": "制作\"旋钮 × 作用面 × 默认值 × 互斥项\"矩阵（PEGAINFER_SPEC_MAX_DRAFTS/MAX_BATCH/HEDGE/HEDGE_AUTO、--dflash-draft-model-path），并仿照 spec_env.rs 现有校验为其中一个旋钮补一个非法值拒绝单测。",
+          "source_files": [
+            "src/executor/dflash_lane.rs",
+            "src/executor/dflash_prefill.rs",
+            "src/executor/auto_hedge.rs",
+            "src/spec_env.rs",
+            "tests/dflash_speculative_gate.rs"
+          ],
+          "title": "草稿车道集成与投机调优旋钮",
+          "topic": "讲解 worker 线程侧的 dflash_lane（草稿模型 + 每 request 草稿态，隐藏态不出车道）、dflash_prefill 的上下文捕获决策、auto_hedge 的窗口化 explore-then-commit 自定价，以及 spec_env 的旋钮校验与负载门测试。"
+        }
+      ],
+      "order": 6,
+      "title": "投机解码：从事务到三种草稿器"
+    },
+    {
+      "id": "u7",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u7-l1-lora-loading.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "列出 PEFT 适配器目录的期望结构与校验分支",
+            "解释 target_modules 归一化与投影 spec 的映射",
+            "理解 max_lora_rank 的合法值集合"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "load_lora_adapter",
+            "PeftAdapterConfig/TargetModules",
+            "LoraMatrix"
+          ],
+          "order": 1,
+          "practice_task": "利用 src/lora/fixtures.rs 的夹具走一遍 load_lora_adapter 的校验路径，列出每个 ensure!/bail! 分支的触发条件；为 Qwen3LoraOptions::validate 的非法 rank 再补一个单测变体并运行。",
+          "source_files": [
+            "src/lora.rs",
+            "src/lora/fixtures.rs",
+            "src/lib.rs"
+          ],
+          "title": "LoRA Ⅰ：适配器解析、校验与矩阵装载",
+          "topic": "讲解 lora.rs 的加载侧：PEFT adapter_config 解析、target_modules 归一化到投影 spec、张量目录校验、bf16 转换，以及 rank 合法值集合与请求级 LoraTokenRange 分组。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1",
+            "u3-l2"
+          ],
+          "filename": "u7-l2-lora-serving.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "解释 PackedLoraRegistry 的打包结构与按请求切换机制",
+            "说出 LoRA 与 CUDA Graph 互斥的根本原因",
+            "区分 lora_smoke 行为测试与 lora_golden_gate 数值测试的分工"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "PackedLoraRegistry",
+            "ensure_lora_capacity",
+            "LoraControl 通道"
+          ],
+          "order": 2,
+          "practice_task": "梳理一次\"运行时热加载适配器 → 下一步用它服务\"的完整路径（frontend_adapter 的 LoraControl → executor 的 Load/Unload 命令 → registry 安装），画出时序图；对照 tests/lora_golden_gate.rs 说明数值断言比较的是什么。",
+          "source_files": [
+            "src/weights.rs",
+            "src/executor.rs",
+            "src/frontend_adapter.rs",
+            "tests/lora_smoke.rs",
+            "tests/lora_golden_gate.rs"
+          ],
+          "title": "LoRA Ⅱ：打包注册表与运行时服务",
+          "topic": "讲解 LoRA 服务运行时：weights.rs 的 PackedLora* 打包注册表、executor 的 ensure_lora_capacity 与热加载/卸载命令、LoRA 强制关闭 CUDA Graph 的原因（图会烘焙适配器指针），以及 vLLM 风格 --lora-modules 接入。"
+        }
+      ],
+      "order": 7,
+      "title": "LoRA 服务"
+    },
+    {
+      "id": "u8",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l5",
+            "u4-l1"
+          ],
+          "filename": "u8-l1-batch-invariant.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "解释 NumericPolicy::Pin 与 Tuned 的差异及 set_numeric_policy 的全局生效",
+            "为 ensure_batch_invariant_supported 的五条拒绝各写一条理由",
+            "理解 request-local chunk 网格如何保证同请求逐位一致"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "apply_batch_invariant_policy",
+            "ensure_batch_invariant_supported",
+            "verify_pin_envelope",
+            "tune_decode_gemm_algos"
+          ],
+          "order": 1,
+          "practice_task": "从 ensure_batch_invariant_supported 的五条拒绝出发写一页\"为什么每个组合都不行\"；对照 tests/batch_invariance_reject.rs 与 tests/batch_invariance_envelope.rs 列出各自验证的层级（CLI 拒绝 vs 数值包络）。",
+          "source_files": [
+            "src/lib.rs",
+            "src/executor.rs",
+            "tests/batch_invariance_reject.rs",
+            "tests/batch_invariance_envelope.rs",
+            "tests/batch_invariance_endtoend.rs"
+          ],
+          "title": "batch-invariant 服务：Pin 数值策略与请求本地网格",
+          "topic": "讲解 --batch-invariant 的完整机制：NumericPolicy Pin/tune_decode_gemm_algos 的 pin 预热、verify_pin_envelope 自检、take_prefill_chunks 的 request-local 网格，以及与 prefix-cache/offload/TP/DFlash/LoRA 的互斥理由。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u8-l2-hf-golden-gate.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "解释 bf16 噪声地板容差为何比位快照更可移植",
+            "说出 argmax margin 与 mean/p99 logprob 容差各捕捉什么",
+            "理解 harness 的 demux 泵在测试里的复用方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "hf_golden_gate 断言",
+            "teacher-forcing 回放",
+            "report_gemm_faithful 对照"
+          ],
+          "order": 2,
+          "practice_task": "写一页设计说明：如果改用自由贪心对比会发生什么、margin 阈值如何避免伪失败；再用 tests/common/harness.rs 写一个最小 replay 测试骨架（无 GPU skip），并列出 report_gemm_faithful.rs 补充验证的 GEMM 面。",
+          "source_files": [
+            "tests/hf_golden_gate.rs",
+            "tests/common/harness.rs",
+            "tests/report_gemm_faithful.rs"
+          ],
+          "title": "HF golden 精度门：teacher-forcing 与容差设计",
+          "topic": "讲解 hf_golden_gate.rs：以 HF 为数值真值、固定序列 teacher-forcing 回放、argmax margin 避开真实平局、logprob 的 mean/p99 双界，以及 vllm-text 与 harness 在其中的角色。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u8-l3-kernel-report-bin.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "解释 manifest 的 op/phase/variant 笛卡尔积如何驱动扫参",
+            "说出 kernel-report 各子命令的产出与 CUPTI 计时路径",
+            "理解 split_kv 变体命名与 u3-l8 chunk 公式的对应"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "manifest 解析",
+            "CUPTI profile",
+            "report_support 变体执行"
+          ],
+          "order": 3,
+          "practice_task": "阅读 kernel_manifests/qwen3.toml，为 paged_decode_attention 计算全部 (batch × kv_len × variant) 组合数；梳理 qwen3_kernel_report.rs 的子命令结构并写出\"输入 manifest → 执行变体 → 输出报告\"的数据流图。",
+          "source_files": [
+            "src/bin/qwen3_kernel_report.rs",
+            "src/bin/report_support/mod.rs",
+            "src/bin/report_support/decode_attention.rs",
+            "kernel_manifests/qwen3.toml"
+          ],
+          "title": "kernel-report 工具链：清单驱动的内核扫参",
+          "topic": "讲解 kernel-report feature 与 qwen3_kernel_report 二进制：kernel_manifests/qwen3.toml 清单、report_support 各模块按变体执行并 CUPTI 计时、kernel-call-trace 特性的联动。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l3",
+            "u3-l4"
+          ],
+          "filename": "u8-l4-model-report-decode-context.md",
+          "id": "u8-l4",
+          "learning_goals": [
+            "解释 batch_decode_dag\"方法即元数据\"的设计收益",
+            "说出 model-report 与 kernel-report 的视角差异",
+            "理解 decode-context 基准的上下文长度扫描与指标"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DAG 构建",
+            "model-report",
+            "decode-context 基准主循环"
+          ],
+          "order": 4,
+          "practice_task": "对照 src/batch_decode_dag.rs 与 qwen3_model_report.rs 验证\"报告看到的算子序列 = 执行序列\"这一承诺，写一段分析；再总结 qwen3_decode_context.rs 的 DEFAULT_CONTEXTS 扫描与测量循环输出的指标含义。",
+          "source_files": [
+            "src/bin/qwen3_model_report.rs",
+            "src/bin/qwen3_decode_context.rs",
+            "src/batch_decode_dag.rs"
+          ],
+          "title": "model-report 与 decode-context：执行级观测",
+          "topic": "讲解 qwen3_model_report（经 batch_decode_dag 的元数据契约观察真实解码算子序列）与 qwen3_decode_context（跨上下文长度的 decode 步计时基准）两个诊断二进制。"
+        }
+      ],
+      "order": 8,
+      "title": "数值不变性、精度与观测"
+    },
+    {
+      "id": "u9",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2",
+            "u2-l3"
+          ],
+          "filename": "u9-l1-tensor-parallel.md",
+          "id": "u9-l1",
+          "learning_goals": [
+            "推导 TP 下 Q/K/V/OP 与 KV cache 的切分方式",
+            "解释 TP 为何预捕获每 rank 的 decode 图而服务期走 eager 的取舍",
+            "理解并发 decode 集成测试对 TP 路径的覆盖方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "TensorParallelConfig",
+            "PrecapturePhase 预捕获",
+            "tp_concurrent_decode 测试"
+          ],
+          "order": 1,
+          "practice_task": "推导 TP=2 时各投影矩阵的切片边界与每 rank KV cache 的形状；梳理 PrecapturePhase 在启动期为每个 rank 捕获图的流程，并对照 tests/tp_concurrent_decode.rs 列出它验证的行为点。",
+          "source_files": [
+            "src/config.rs",
+            "src/weights/load.rs",
+            "src/executor.rs",
+            "tests/tp_concurrent_decode.rs"
+          ],
+          "title": "张量并行：分片、rank worker 与并发解码",
+          "topic": "讲解 Qwen3 的 TP 路径：TensorParallelConfig 的切分推导、加载期分片、executor 多 RankWorker（每设备一个）、启动期 decode 图预捕获与服务期 eager 解码的取舍。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3",
+            "u5-l1"
+          ],
+          "filename": "u9-l2-behavior-tests.md",
+          "id": "u9-l2",
+          "learning_goals": [
+            "为行为测试族建一张契约×测试文件×关键断言索引",
+            "解释上下文窗口测试对拒绝/截断路径的验证方式",
+            "理解采样行为测试如何锚定 sampler 语义"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "scheduler_robustness 场景",
+            "context_window 拒绝路径",
+            "sampling_behavior 锚定"
+          ],
+          "order": 2,
+          "practice_task": "制作\"契约 × 测试文件 × 关键断言\"索引表（含 logprobs/prefix-cache 已见文件的交叉引用）；挑 scheduler_robustness.rs 一个场景在纸面推演各队列（deferred/loading/prefilling/active）逐步变化，与测试断言对照。",
+          "source_files": [
+            "tests/scheduler_robustness.rs",
+            "tests/context_window.rs",
+            "tests/context_window_in_window.rs",
+            "tests/sampling_behavior.rs"
+          ],
+          "title": "行为测试族：调度健壮性、上下文窗口与采样行为",
+          "topic": "收尾巡礼行为测试族：scheduler_robustness（调度器异常路径）、context_window 与 in_window（容量边界与窗口内拒绝）、sampling_behavior（采样语义），总结如何用行为断言而非数值快照钉住服务契约。"
+        }
+      ],
+      "order": 9,
+      "title": "专家收尾：张量并行与行为测试"
+    }
+  ]
+}

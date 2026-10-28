@@ -1,340 +1,341 @@
 {
+  "head": "785d04871df37ddfb3e1b1432ce544b94505a801",
   "project": "openinfer-pegainfer-kv-cache",
-  "head": "ca25b80fa4491509ccef418467b37d4d6fd64e9b",
-  "rationale": "pegainfer-kv-cache 只有约 1700 行（src 五个模块 + 两个集成测试），但它是整个 PegaInfer 引擎的公共 KV 底座，核心设计是『逻辑块池与物理显存分离』：BlockPool 只管块 ID 与哈希身份、不持有 GPU 内存，KvBuffer 只持有一块永不移动的连续显存。因此学习路线先在入门层（u1）建立全景定位、构建方式与分页几何直觉；进阶层（u2）沿真实调用链『池 → 请求生命周期 → 内核视图契约 → 物理配对 → 前缀缓存』逐文件展开，每篇只聚焦一个机制；专家层（u3）覆盖恢复-提交/offload 桥、KV 事件流与缓存感知路由、测试分层与 git 演进史三个高阶主题。依赖顺序严格对应源码耦合方向，所有 source_files 均为实际确认存在的文件。注意：本规划环境中 src/buffer.rs 的两次读取内容不一致（疑为环境噪声），凡依赖该文件细节的讲义均已标注待确认，worker 生成时应以仓库实际代码为准。",
+  "rationale": "增量判定：ca25b80f..785d0487 之间的 6 个提交（qwen3 投机门控、frontend history_marks、gemma4 stop 策略、k3/glm52 kernel surface、/metrics 前缀缓存计数器）没有任何一个触及 pegainfer-kv-cache/，本 crate 的源码、测试与 Cargo.toml 字节不变；CLAUDE.md 仅新增 6 行 k3 CP 环境变量，讲义引用的架构图、KV state 与构建测试章节未受影响，因此上一版三单元十一讲的结构、依赖关系与文件名全部保留。但 openinfer-pegainfer-kv-cache-tutorial/ 目录中只有 manifest.json、没有任何已生成的讲义 .md，所以每篇讲义仍需创建，全部标记为 new。本次复核同时修正了两处旧 manifest 的不确定与偏差：src/buffer.rs 的真实表面已确认为 new/layout/buffer/device_ptr/num_blocks/copy_page（去掉待确认）；事件通道的公共入口确认为 KvCacheManager::new_with_events（manager.rs，返回 broadcast::Receiver<KvCacheEvent>），BlockPool::with_events 仅是 pub(crate) 内部实现而非唯一路径。学习顺序维持原设计：入门层建全景与分页几何直觉，进阶层沿『池 → 请求生命周期 → 内核视图契约 → 物理配对 → 前缀缓存』真实调用链逐文件展开，专家层覆盖恢复-提交/offload 桥、事件流与测试分层演进。",
   "units": [
     {
       "id": "u1",
-      "title": "入门：认识 pegainfer-kv-cache",
       "level": "beginner",
-      "order": 1,
       "lectures": [
         {
-          "id": "u1-l1",
-          "title": "PegaInfer 全景与 kv-cache 的位置",
-          "order": 1,
+          "action": "new",
+          "depends_on": [],
           "filename": "u1-l1-project-overview.md",
-          "level": "beginner",
-          "topic": "PegaInfer 是纯 Rust + CUDA 的 LLM 推理引擎，本 crate 提供共享的分页 KV 原语：逻辑块池（BlockPool）与物理 GPU 缓冲（KvBuffer）分离，各模型 crate 的调度器自持请求状态并按块 ID 索引物理缓冲。讲清它与 pegainfer-kernels、pegainfer-kv-offload 及各模型 crate 的关系。",
+          "id": "u1-l1",
           "learning_goals": [
             "说出 pegainfer-kv-cache 在整个引擎中的职责边界",
             "理解逻辑块池与物理显存两层分离的设计动机",
             "浏览 src/lib.rs 并列出全部公共导出类型"
           ],
+          "level": "beginner",
+          "minimal_modules": [
+            "架构定位：CLAUDE.md 中的引擎分层图",
+            "lib.rs 的模块声明与 11 个自有公共类型再导出，外加 pub use kvbm_logical 与 KvCacheEvent 两条再导出",
+            "workspace 中的相邻 crate：pegainfer-kernels 与 pegainfer-kv-offload"
+          ],
+          "order": 1,
+          "practice_task": "阅读 ../CLAUDE.md 的架构章节与 src/lib.rs，手绘一张『HTTP 请求 → 模型调度器 → BlockPool + KvBuffer → attention 内核』的数据流图，并为 lib.rs 导出的每个公共类型（KvBuffer、KvLayout、KvCacheManager、BlockPool、KvBlockGuard、LoadReservation、PrefixProbe、RegisteredBlock、RequestKv、KvView、KvViewDesc）写一句话职责说明。",
           "source_files": [
             "../CLAUDE.md",
             "Cargo.toml",
             "src/lib.rs"
           ],
-          "minimal_modules": [
-            "架构定位：CLAUDE.md 中的引擎分层图",
-            "lib.rs 的模块声明与 11 个公共类型再导出（含 pub use kvbm_logical 与 KvCacheEvent）",
-            "workspace 中的相邻 crate：pegainfer-kernels 与 pegainfer-kv-offload"
-          ],
-          "practice_task": "阅读 ../CLAUDE.md 的架构章节与 src/lib.rs，手绘一张『HTTP 请求 → 模型调度器 → BlockPool + KvBuffer → attention 内核』的数据流图，并为 lib.rs 导出的每个公共类型（KvBuffer、KvLayout、KvCacheManager、BlockPool、KvBlockGuard、LoadReservation、PrefixProbe、RegisteredBlock、RequestKv、KvView、KvViewDesc）写一句话职责说明。",
-          "depends_on": [],
-          "action": "new"
+          "title": "PegaInfer 全景与 kv-cache 的位置",
+          "topic": "PegaInfer 是纯 Rust + CUDA 的 LLM 推理引擎，本 crate 提供共享的分页 KV 原语：逻辑块池（BlockPool）与物理 GPU 缓冲（KvBuffer）分离，各模型 crate 的调度器自持请求状态并按块 ID 索引物理缓冲。讲清它与 pegainfer-kernels、pegainfer-kv-offload 及各模型 crate 的关系。"
         },
         {
-          "id": "u1-l2",
-          "title": "crate 结构、依赖与本地构建测试",
-          "order": 2,
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
           "filename": "u1-l2-crate-structure-and-build.md",
-          "level": "beginner",
-          "topic": "五个模块（buffer/layout/manager/pool/view）的分工与行数分布；外部依赖的作用：cudarc（CUDA 驱动 API）、kvbm-logical（块管理器与哈希）、dynamo-kv-hashing（加盐哈希）、half（bf16）、tokio（事件广播）；如何单独构建和测试本 crate，并区分无需 GPU 的纯逻辑测试与需要 CUDA 的集成测试。",
+          "id": "u1-l2",
           "learning_goals": [
             "说出五个源码模块各自的分工",
             "理解每个 workspace 依赖在 KV 缓存中的角色",
             "掌握只针对本 crate 的 cargo 构建/测试命令"
           ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Cargo.toml：edition 2024、依赖清单与 workspace 继承",
+            "tests/restore_commit.rs（纯逻辑、无 GPU）与 tests/lifecycle.rs（需 CUDA）的分层",
+            "workspace 级构建约定：--release 与 GPU/CUDA 测试要求"
+          ],
+          "order": 2,
+          "practice_task": "运行 cargo test --release -p pegainfer-kv-cache --test restore_commit（该测试文件自述为纯逻辑池测试、无需 GPU）并记录输出；再运行 cargo build --release -p pegainfer-kv-cache 验证编译，最后用 wc -l 列出 src 下五个模块的行数并据此判断哪个文件是核心。",
           "source_files": [
             "Cargo.toml",
             "src/lib.rs",
             "tests/restore_commit.rs",
             "../CLAUDE.md"
           ],
-          "minimal_modules": [
-            "Cargo.toml：edition 2024、依赖清单与 workspace 继承",
-            "tests/restore_commit.rs（纯逻辑、无 GPU）与 tests/lifecycle.rs（需 CUDA）的分层",
-            "workspace 级构建约定：--release 与 GPU/CUDA 测试要求"
-          ],
-          "practice_task": "运行 cargo test --release -p pegainfer-kv-cache --test restore_commit（该测试文件自述为纯逻辑池测试、无需 GPU）并记录输出；再运行 cargo build --release -p pegainfer-kv-cache 验证编译，最后用 wc -l 列出 src 下五个模块的行数并据此判断哪个文件是核心。",
-          "depends_on": [
-            "u1-l1"
-          ],
-          "action": "new"
+          "title": "crate 结构、依赖与本地构建测试",
+          "topic": "五个模块（buffer/layout/manager/pool/view）的分工与行数分布；外部依赖的作用：cudarc（CUDA 驱动 API）、kvbm-logical（块管理器与哈希）、dynamo-kv-hashing（加盐哈希）、half（bf16）、tokio（事件广播）；如何单独构建和测试本 crate，并区分无需 GPU 的纯逻辑测试与需要 CUDA 的集成测试。"
         },
         {
-          "id": "u1-l3",
-          "title": "分页 KV 与页优先布局 KvLayout",
-          "order": 3,
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
           "filename": "u1-l3-paged-kv-and-layout.md",
-          "level": "beginner",
-          "topic": "为什么推理引擎要把 KV 切成固定大小的页（显存碎片控制、前缀块共享、CUDA Graph 捕获所需的指针稳定）；KvLayout 这个纯值类型的几何推导：kv_block_len、layer_stride（一层内 K 在前 V 在后）、page_stride（页优先、层在内层）。",
+          "id": "u1-l3",
           "learning_goals": [
             "解释分页 KV 相比连续 per-request 分配的优势",
             "独立推导 kv_block_len/layer_stride/page_stride 三个步长",
             "理解『页优先』排布与『层优先』排布的差异"
           ],
-          "source_files": [
-            "src/layout.rs",
-            "src/buffer.rs",
-            "src/pool.rs"
-          ],
+          "level": "beginner",
           "minimal_modules": [
             "KvLayout 结构体与 KvLayout::new 的推导式",
             "页优先排布：每页内 [层][K|V]",
             "从布局到显存字节数的换算"
           ],
+          "order": 3,
           "practice_task": "给定 num_layers=32、num_kv_heads=8、head_dim=128、page_size=16，先手算 kv_block_len、layer_stride、page_stride，再写一个临时 Rust 测试调用 KvLayout::new 验证结果一致，最后算出一页 bf16 元素对应的显存字节数。",
-          "depends_on": [
-            "u1-l2"
+          "source_files": [
+            "src/layout.rs",
+            "src/buffer.rs",
+            "src/pool.rs"
           ],
-          "action": "new"
+          "title": "分页 KV 与页优先布局 KvLayout",
+          "topic": "为什么推理引擎要把 KV 切成固定大小的页（显存碎片控制、前缀块共享、CUDA Graph 捕获所需的指针稳定）；KvLayout 这个纯值类型的几何推导：kv_block_len、layer_stride（一层内 K 在前 V 在后）、page_stride（页优先、层在内层）。"
         }
-      ]
+      ],
+      "order": 1,
+      "title": "入门：认识 pegainfer-kv-cache"
     },
     {
       "id": "u2",
-      "title": "进阶：核心机制与调用链",
       "level": "intermediate",
-      "order": 2,
       "lectures": [
         {
-          "id": "u2-l1",
-          "title": "BlockPool：逻辑块池与 padding 块",
-          "order": 1,
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
           "filename": "u2-l1-blockpool-padding-block.md",
-          "level": "intermediate",
-          "topic": "BlockPool 包装 kvbm-logical 的 BlockManager（LRU 后端、允许块复制），构造时预留一个块作为 CUDA Graph 的 padding 槽：先 stage 再用 ImmutableBlock 的 RAII 注册、随后 std::mem::forget 使其与引擎同寿；容量 API（total_blocks/available_blocks/max_request_blocks/padding_block_id）与『至少 2 块』的构造约束。",
+          "id": "u2-l1",
           "learning_goals": [
             "理解 BlockPool 与 kvbm-logical BlockManager 的包装关系",
             "解释 padding 块的分配、注册与 forget 的完整链路及其存在理由",
             "掌握容量查询 API 的语义"
           ],
-          "source_files": [
-            "src/pool.rs",
-            "tests/restore_commit.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "BlockPool::new/build：BlockManager 构建参数（block_count、block_size、BlockDuplicationPolicy::Allow、with_lru_backend）",
             "padding 块：allocate_blocks(1) → stage(SequenceHash::default(), block_size) → register_block + std::mem::forget",
             "容量 API：block_size/available_blocks/total_blocks/padding_block_id/max_request_blocks"
           ],
+          "order": 1,
           "practice_task": "仿照 tests/restore_commit.rs 的纯逻辑测试风格新写一个测试：BlockPool::new(16, 64) 后断言 available_blocks() 为 63（1 块被 padding 占用）；再调用 BlockPool::new(16, 1) 验证构造返回错误；最后用一段注释解释为什么 padding 块绝不能被回收入空闲池。",
-          "depends_on": [
-            "u1-l3"
+          "source_files": [
+            "src/pool.rs",
+            "tests/restore_commit.rs"
           ],
-          "action": "new"
+          "title": "BlockPool：逻辑块池与 padding 块",
+          "topic": "BlockPool 包装 kvbm-logical 的 BlockManager（LRU 后端、允许块复制），构造时预留一个块作为 CUDA Graph 的 padding 槽：先 stage 再用 ImmutableBlock 的 RAII 注册、随后 std::mem::forget 使其与引擎同寿；容量 API（total_blocks/available_blocks/max_request_blocks/padding_block_id）与『至少 2 块』的构造约束。"
         },
         {
-          "id": "u2-l2",
-          "title": "RequestKv：一个请求的 KV 生命周期",
-          "order": 2,
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
           "filename": "u2-l2-request-kv-lifecycle.md",
-          "level": "intermediate",
-          "topic": "主链路：pool.new_request → schedule_prefill/schedule_decode → prefill_view/decode_view → apply_prefill/apply_decode → release；schedule 与 apply 两阶段分离的意义（只调度不应用时，drop 守卫会把块还给池，对应测试 schedule_without_apply_returns_blocks_on_drop）；失败回退 revert_schedule 与投机解码 schedule_speculative/apply_speculative 路径。",
+          "id": "u2-l2",
           "learning_goals": [
             "完整复述一个请求从预填到释放的 KV 状态变迁",
             "解释 schedule 与 apply 分离带来的失败恢复能力",
             "理解 decode_view 的 seq_len 不变式与 prefill_view 覆盖目标长度"
           ],
-          "source_files": [
-            "src/pool.rs",
-            "tests/lifecycle.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "调度族：schedule_prefill/schedule_decode/schedule_speculative 与 ScheduleError",
             "视图族：prefill_view/decode_view/speculative_view",
             "提交族：apply_prefill/apply_prefill_chunk/apply_decode(DecodeOutcome)/apply_speculative、revert_schedule、release",
             "状态查询：kv_position/generated_tokens/is_complete/resident_blocks"
           ],
+          "order": 2,
           "practice_task": "精读 tests/lifecycle.rs 的 single_request_prefill_decode_release 与 multiple_requests_share_capacity 两个测试，写出每一步操作后 pool.available_blocks() 的期望值并解释来源；再补充一个场景：调度成功后故意不 apply 就 drop，验证块被归还（对照 schedule_without_apply_returns_blocks_on_drop）。",
-          "depends_on": [
-            "u2-l1"
+          "source_files": [
+            "src/pool.rs",
+            "tests/lifecycle.rs"
           ],
-          "action": "new"
+          "title": "RequestKv：一个请求的 KV 生命周期",
+          "topic": "主链路：pool.new_request → schedule_prefill/schedule_decode → prefill_view/decode_view → apply_prefill/apply_decode → release；schedule 与 apply 两阶段分离的意义（只调度不应用时，drop 守卫会把块还给池，对应测试 schedule_without_apply_returns_blocks_on_drop）；失败回退 revert_schedule 与投机解码 schedule_speculative/apply_speculative 路径。"
         },
         {
-          "id": "u2-l3",
-          "title": "KvView 与注意力内核的契约",
-          "order": 3,
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
           "filename": "u2-l3-kvview-kernel-contract.md",
-          "level": "intermediate",
-          "topic": "KvView 只携带 page_indices、seq_len、page_size 三个字段，构造断言页数必须恰好覆盖 seq_len（多一页会让注意力内核读到序列之后的垃圾 K/V，少一页则越界，见源码引用的 #291）；内核用 (num_pages-1)*page_size + last_page_len 反推序列长；KvViewDesc 把 layout、底层 buffer 指针与页表打包成内核友好的元数据束。",
+          "id": "u2-l3",
           "learning_goals": [
             "理解 paged attention 内核对页表与序列长度的硬性契约",
             "推导任意 seq_len 下的 num_pages 与 last_page_len",
             "掌握从 RequestKv 生成 KvView 再生成 KvViewDesc 的链路"
           ],
-          "source_files": [
-            "src/view.rs",
-            "src/pool.rs",
-            "tests/lifecycle.rs"
-          ],
+          "level": "intermediate",
           "minimal_modules": [
             "KvView::new 的覆盖断言与 last_page_len 推导",
             "KvViewDesc：layout()/buffer()/page_indices()/seq_len()/num_pages() 访问器",
             "RequestKv::current_page_indices/step_page_indices 与视图的关系"
           ],
+          "order": 3,
           "practice_task": "写一个纯逻辑测试：为 17 个 token、page_size=16 构造 KvView，断言 num_pages()==2、last_page_len()==1；再故意用 2 页配 10 个 token 调 KvView::new，验证断言 panic，并用一段文字解释这一契约被破坏时内核会出什么错。",
-          "depends_on": [
-            "u2-l2"
+          "source_files": [
+            "src/view.rs",
+            "src/pool.rs",
+            "tests/lifecycle.rs"
           ],
-          "action": "new"
+          "title": "KvView 与注意力内核的契约",
+          "topic": "KvView 只携带 page_indices、seq_len、page_size 三个字段，构造断言页数必须恰好覆盖 seq_len（多一页会让注意力内核读到序列之后的垃圾 K/V，少一页则越界，见源码引用的 #291）；内核用 (num_pages-1)*page_size + last_page_len 反推序列长；KvViewDesc 把 layout、底层 buffer 指针与页表打包成内核友好的元数据束。"
         },
         {
-          "id": "u2-l4",
-          "title": "KvBuffer 与 KvCacheManager：物理层配对",
-          "order": 4,
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
           "filename": "u2-l4-kvbuffer-manager-pairing.md",
-          "level": "intermediate",
-          "topic": "KvBuffer 一次性分配 num_blocks × page_stride 的 bf16 连续显存、按页优先排布且分配永不移动，页的回收完全交给逻辑池，这正是 CUDA Graph 捕获安全的前提；KvCacheManager 把 BlockPool 与同几何的 KvBuffer 配成全注意力模型的引擎级门面，MLA 模型（kimi-k2）绕过门面直接消费 BlockPool 并自持物理缓冲；from_buffer 支持张量并行各 rank 取最小公共逻辑容量；new_with_scratch_pages 给投机验证预留事务层不可见的 scratch 页。",
+          "id": "u2-l4",
           "learning_goals": [
             "解释连续单块分配为何是 CUDA Graph 捕获的必要条件",
-            "理解逻辑/物理配对在 TP 场景下的容量协商（from_buffer）",
+            "理解逻辑/物理配对在 TP 场景下的容量协商（from_buffer）与整页搬运原语 copy_page 的用途",
             "说明 scratch 页的编号范围与『事务层不可见』的含义"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "KvBuffer：new/layout/buffer/device_ptr/num_blocks/copy_page（src/buffer.rs 已逐行核实：Arc<Inner> 持有 CudaSlice<bf16>，alloc_zeros 一次分配、永不移动；copy_page 做整页 device-to-device 拷贝且允许 scratch 页作目标）",
+            "KvCacheManager::new 与 new_with_scratch_pages（scratch 页 id 从 num_blocks 起，仅供投机验证链使用）",
+            "KvCacheManager::from_buffer：num_blocks 不得超过物理容量，TP 取最小公共逻辑容量"
+          ],
+          "order": 4,
+          "practice_task": "阅读 src/manager.rs 的 from_buffer 与 new_with_scratch_pages 实现并回答三个问题：(1) 为什么张量并行各 rank 的物理 buffer 大小可能不同而逻辑容量必须取最小值？(2) scratch 页的 page id 范围是什么、为什么 BlockPool 绝不发放它们？(3) KvBuffer::copy_page 为什么要求页号小于物理 num_blocks 却允许超过池的逻辑块数？如有 GPU 环境，运行 cargo test --release -p pegainfer-kv-cache --test lifecycle 观察端到端生命周期。",
           "source_files": [
             "src/buffer.rs",
             "src/manager.rs",
             "src/pool.rs",
             "src/view.rs"
           ],
-          "minimal_modules": [
-            "KvBuffer：new/layout/buffer/num_blocks 及页优先布局（buffer.rs 具体字段与辅助方法以仓库实际代码为准，待确认）",
-            "KvCacheManager::new 与 new_with_scratch_pages（scratch 页 id 从 num_blocks 起，仅供投机验证链使用）",
-            "KvCacheManager::from_buffer：num_blocks 不得超过物理容量，TP 取最小公共逻辑容量"
-          ],
-          "practice_task": "阅读 src/manager.rs 的 from_buffer 实现并回答两个问题：(1) 为什么张量并行各 rank 的物理 buffer 大小可能不同而逻辑容量必须取最小值？(2) scratch 页的 page id 范围是什么、为什么 BlockPool 绝不发放它们？如有 GPU 环境，运行 cargo test --release -p pegainfer-kv-cache --test lifecycle 观察端到端生命周期。",
-          "depends_on": [
-            "u2-l3"
-          ],
-          "action": "new"
+          "title": "KvBuffer 与 KvCacheManager：物理层配对",
+          "topic": "KvBuffer 一次性分配 num_blocks × page_stride 的 bf16 连续显存（alloc_zeros）、按页优先排布且分配永不移动（device_ptr 生命周期由 Arc 保证稳定，供 kv-offload 注册），页的回收完全交给逻辑池，这正是 CUDA Graph 捕获安全的前提；KvCacheManager 把 BlockPool 与同几何的 KvBuffer 配成全注意力模型的引擎级门面，MLA 模型（kimi-k2）绕过门面直接消费 BlockPool 并自持物理缓冲；from_buffer 支持张量并行各 rank 取最小公共逻辑容量；new_with_scratch_pages 给投机验证预留事务层不可见的 scratch 页，copy_page 提供整页 device-to-device 搬运。"
         },
         {
-          "id": "u2-l5",
-          "title": "前缀缓存：块哈希、匹配与 LoRA salt",
-          "order": 5,
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
           "filename": "u2-l5-prefix-cache-and-salt.md",
-          "level": "intermediate",
-          "topic": "probe_prefix 产出 PrefixProbe（gpu_hit_blocks/cpu_query_window/held_blocks/reusable_blocks）；match_and_add_prefix 把 prompt 的整块前缀挂到已注册块上跳过预填，且永远留下最后一个 prompt token 不缓存，保证首个生成 token 仍由最后一段 prefill 产生；块身份由 token 哈希链（kvbm-logical）构成，dynamo-kv-hashing 的 compute_salt_hash 用 LoRA 名做盐实现缓存隔离（见测试 lora_salt_isolates_prefix_cache）；配合 evict_inactive 与 LRU 后端做回收。",
+          "id": "u2-l5",
           "learning_goals": [
             "说出前缀匹配『只匹配整块、永远留最后一个 token』两条规则的原因",
             "理解块哈希链与 salt 对缓存键的影响",
             "掌握 LoRA 场景下缓存隔离的验证方法"
           ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "PrefixProbe：probe_prefix 与内部 probe_prefix_with_cache_salt/new_request_with_cache_salt 的加盐链路",
+            "RequestKv::match_and_add_prefix / match_and_add_prefix_up_to 与 kv_position 前进语义",
+            "回收：evict_inactive 与 active_prefix_hashes、BlockManager 的 LRU 后端"
+          ],
+          "order": 5,
+          "practice_task": "复现 tests/lifecycle.rs 中 lora_salt_isolates_prefix_cache 的场景：同一 prompt 分别用两个 LoRA 名创建请求，先让第一个请求封块释放，再断言同名 LoRA 的第二个请求能命中前缀而异名的不命中；最后回答：如果去掉 salt，两个不同 LoRA 适配器会出什么正确性事故？",
           "source_files": [
             "src/pool.rs",
             "tests/lifecycle.rs",
             "Cargo.toml"
           ],
-          "minimal_modules": [
-            "PrefixProbe：probe_prefix/probe_prefix_with_cache_salt 与 new_request_with_cache_salt",
-            "RequestKv::match_and_add_prefix / match_and_add_prefix_up_to 与 kv_position 前进语义",
-            "回收：evict_inactive 与 active_prefix_hashes、BlockManager 的 LRU 后端"
-          ],
-          "practice_task": "复现 tests/lifecycle.rs 中 lora_salt_isolates_prefix_cache 的场景：同一 prompt 分别用两个 LoRA 名创建请求，先让第一个请求封块释放，再断言同名 LoRA 的第二个请求能命中前缀而异名的不命中；最后回答：如果去掉 salt，两个不同 LoRA 适配器会出什么正确性事故？",
-          "depends_on": [
-            "u2-l2"
-          ],
-          "action": "new"
+          "title": "前缀缓存：块哈希、匹配与 LoRA salt",
+          "topic": "probe_prefix 产出 PrefixProbe（gpu_hit_blocks/cpu_query_window/held_blocks/reusable_blocks）；match_and_add_prefix 把 prompt 的整块前缀挂到已注册块上跳过预填，且永远留下最后一个 prompt token 不缓存，保证首个生成 token 仍由最后一段 prefill 产生；块身份由 token 哈希链（kvbm-logical）构成，dynamo-kv-hashing 的 compute_salt_hash 用 LoRA 名做盐实现缓存隔离（见测试 lora_salt_isolates_prefix_cache）；配合 evict_inactive 与 LRU 后端做回收。"
         }
-      ]
+      ],
+      "order": 2,
+      "title": "进阶：核心机制与调用链"
     },
     {
       "id": "u3",
-      "title": "专家：offload、事件流与工程演进",
       "level": "advanced",
-      "order": 3,
       "lectures": [
         {
-          "id": "u3-l1",
-          "title": "恢复-提交：reserve_loaded_blocks 与 KV offload 桥",
-          "order": 1,
+          "action": "new",
+          "depends_on": [
+            "u2-l5"
+          ],
           "filename": "u3-l1-restore-commit-offload.md",
-          "level": "advanced",
-          "topic": "CPU/SSD 层恢复路径：probe_prefix 得到 cpu_query_hashes/cpu_query_window → reserve_loaded_blocks 拿到 LoadReservation（page_ids）→ commit_loaded_blocks 在探测器的 continuation 哈希下把恢复块注册成可整体再匹配的连续前缀；sequence_hash_bytes 把 128 位 lineage 哈希打包成大端 16 字节内容键供 offload 层寻址；与兄弟 crate pegainfer-kv-offload（host/SSD/RDMA 桥，待确认其内部路径）的分工；tests/restore_commit.rs 顶部注释记录的 #704 注册成本回归（1024 块提交从 36ms 降到约 1.6ms）。",
+          "id": "u3-l1",
           "learning_goals": [
             "走通 probe → reserve → commit → 再匹配 的完整恢复链路",
             "理解 16 字节内容键与 lineage/continuation 哈希的关系",
             "认识 #704 性能回归锚的记录方式"
           ],
+          "level": "advanced",
+          "minimal_modules": [
+            "PrefixProbe 的 cpu_query_hashes/cpu_query_window/boundary_hash 与 LoadReservation::page_ids/len",
+            "commit_loaded_blocks：GPU 命中之后的 continuation 哈希注册",
+            "sequence_hash_bytes：SequenceHash → [u8;16] 大端内容键；相邻 crate pegainfer-kv-offload 的角色（内部结构待确认）"
+          ],
+          "order": 1,
+          "practice_task": "以 tests/restore_commit.rs 的 commit_extends_partial_gpu_hit 为蓝本新写一个测试：先用真实请求在 GPU 池种下 2 块前缀，再恢复 6 块（reserve_loaded_blocks(6) + commit_loaded_blocks），断言 probe.held_blocks()==8，最后用同 prompt 的新请求 match_and_add_prefix 断言命中 8×16 个 token。",
           "source_files": [
             "src/pool.rs",
             "tests/restore_commit.rs",
             "../CLAUDE.md"
           ],
-          "minimal_modules": [
-            "PrefixProbe 的 cpu_query_hashes/cpu_query_window/boundary_hash 与 LoadReservation::page_ids",
-            "commit_loaded_blocks：GPU 命中之后的 continuation 哈希注册",
-            "sequence_hash_bytes：SequenceHash → [u8;16] 大端内容键；相邻 crate pegainfer-kv-offload 的角色（内部结构待确认）"
-          ],
-          "practice_task": "以 tests/restore_commit.rs 的 commit_extends_partial_gpu_hit 为蓝本新写一个测试：先用真实请求在 GPU 池种下 2 块前缀，再恢复 6 块（reserve_loaded_blocks(6) + commit_loaded_blocks），断言 probe.held_blocks()==8，最后用同 prompt 的新请求 match_and_add_prefix 断言命中 8×16 个 token。",
+          "title": "恢复-提交：reserve_loaded_blocks 与 KV offload 桥",
+          "topic": "CPU/SSD 层恢复路径：probe_prefix 得到 cpu_query_hashes/cpu_query_window → reserve_loaded_blocks 拿到 LoadReservation（page_ids）→ commit_loaded_blocks 在探测器的 continuation 哈希下把恢复块注册成可整体再匹配的连续前缀；sequence_hash_bytes 把 128 位 lineage 哈希打包成大端 16 字节内容键供 offload 层寻址；与兄弟 crate pegainfer-kv-offload（host/SSD/RDMA 桥，待确认其内部路径）的分工；tests/restore_commit.rs 顶部注释记录的 #704 注册成本回归（1024 块提交从 36ms 降到约 1.6ms）。"
+        },
+        {
+          "action": "new",
           "depends_on": [
             "u2-l5"
           ],
-          "action": "new"
-        },
-        {
-          "id": "u3-l2",
-          "title": "KV 事件流与缓存感知路由",
-          "order": 2,
           "filename": "u3-l2-events-cache-aware-router.md",
-          "level": "advanced",
-          "topic": "with_events 构造路径（注意：pub(crate)，当前仅 crate 内部可用，外部等价能力待确认）给 BlockRegistry 挂一个容量 65536 的 tokio broadcast，向 out-of-band 的缓存感知路由广播块 Create/Remove 事件；RequestKv 用 emitted_blocks 光标配合 take_newly_registered_blocks 产出 RegisteredBlock（plh 是引擎 128 位 lineage 哈希，sequence_hash/tokens_hash/parent_sequence_hash 是路由侧 u64 哈希）；Remove 事件携带 lineage 哈希、需映射回 sequence_hash；注释明确：丢一个事件就会让路由的前缀树失步，且默认关闭、单机服务不付任何开销。",
+          "id": "u3-l2",
           "learning_goals": [
             "理解事件通道的容量选择与『丢事件即失步』的风险模型",
             "梳理 RegisteredBlock 中两套哈希体系（引擎 lineage 与路由 u64）的对应关系",
-            "说明该能力默认关闭的原因与开启路径"
+            "说明该能力的公共入口（KvCacheManager::new_with_events）、默认关闭的原因与开启路径"
           ],
+          "level": "advanced",
+          "minimal_modules": [
+            "KV_EVENT_CHANNEL_CAPACITY（65_536）与 BlockPool::with_events（pub(crate)）：EventsManager/BlockRegistry/broadcast::Receiver<KvCacheEvent>（KvCacheEvent 经 lib.rs 从 kvbm-logical 再导出）",
+            "公共入口：KvCacheManager::new_with_events（src/manager.rs，pub，内部调用 BlockPool::with_events 并返回 broadcast Receiver）",
+            "emitted_blocks 光标与 take_newly_registered_blocks/RegisteredBlock(plh/sequence_hash/tokens_hash/parent_sequence_hash)",
+            "事件消费契约：忽略 Create、在封块点自产 store 事件、Remove→sequence_hash 反查"
+          ],
+          "order": 2,
+          "practice_task": "精读 src/pool.rs 中 KV_EVENT_CHANNEL_CAPACITY 常量注释与 src/manager.rs 的 new_with_events 实现，写一份设计说明回答：为什么广播容量要『宽裕』、为什么消费路径默认不开启、消费者为何要忽略 Create 事件并在封块点自行生成更丰富的 store 事件（引用注释原文）；并说明外部使用者应通过 KvCacheManager::new_with_events 拿到 Receiver（BlockPool::with_events 本身是 pub(crate) 仅供 crate 内部复用）。",
           "source_files": [
             "src/pool.rs",
             "src/manager.rs",
             "src/lib.rs"
           ],
-          "minimal_modules": [
-            "KV_EVENT_CHANNEL_CAPACITY 与 with_events：EventsManager/BlockRegistry/broadcast::Receiver<KvCacheEvent>（KvCacheEvent 经 lib.rs 从 kvbm-logical 再导出）",
-            "emitted_blocks 光标与 take_newly_registered_blocks/RegisteredBlock(plh/sequence_hash/tokens_hash/parent_sequence_hash)",
-            "事件消费契约：忽略 Create、在封块点自产 store 事件、Remove→sequence_hash 反查"
-          ],
-          "practice_task": "精读 src/pool.rs 中 KV_EVENT_CHANNEL_CAPACITY 常量注释与 with_events 的实现，写一份设计说明回答：为什么广播容量要『宽裕』、为什么该路径默认关闭、消费者为何要忽略 Create 事件并在封块点自行生成更丰富的 store 事件（引用注释原文）；并标注 pub(crate) 可见性意味着 crate 外使用者当前无法直接构造该通道（外部替代方案待确认）。",
-          "depends_on": [
-            "u2-l5"
-          ],
-          "action": "new"
+          "title": "KV 事件流与缓存感知路由",
+          "topic": "KvCacheManager::new_with_events（pub 入口）经 pub(crate) 的 BlockPool::with_events 给 BlockRegistry 挂一个容量 65536 的 tokio broadcast，向 out-of-band 的缓存感知路由广播块 Create/Remove 事件；RequestKv 用 emitted_blocks 光标配合 take_newly_registered_blocks 产出 RegisteredBlock（plh 是引擎 128 位 lineage 哈希，sequence_hash/tokens_hash/parent_sequence_hash 是路由侧 u64 哈希）；Remove 事件携带 lineage 哈希、需映射回 sequence_hash；注释明确：丢一个事件就会让路由的前缀树失步，且该路径默认不启用、单机服务不付任何开销。"
         },
         {
-          "id": "u3-l3",
-          "title": "测试分层、性能回归与机制演进史",
-          "order": 3,
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u2-l5"
+          ],
           "filename": "u3-l3-tests-perf-evolution.md",
-          "level": "advanced",
-          "topic": "三层测试：pool.rs 内联 #[cfg(test)]（如 prompt_block_hashes_stable_across_shared_prefix，守护『共享前缀的 prompt 块哈希必须一致』这一 offload 查询键前提）、tests/restore_commit.rs（纯逻辑、无 GPU、兼作 #704 性能回归锚）、tests/lifecycle.rs（需 CUDA 的端到端生命周期）；用 git log -- 追溯机制落地顺序：kvbm-logical 集成(#187) → qwen3 全块匹配前缀缓存(#216) → kimi-k2 分页池+前缀缓存(#292) → kv-offload pegaflow 桥(#316) → 公共面收缩(#858) → DSpark 投机验证 scratch 页(#958) → qwen35 联合前缀缓存(#836)。",
+          "id": "u3-l3",
           "learning_goals": [
             "为本 crate 选择合适的测试层级（纯逻辑 / 需 GPU）",
             "理解『测试文件注释即性能回归锚』的工程实践",
             "通过提交史还原每个 KV 机制解决的真实问题"
           ],
+          "level": "advanced",
+          "minimal_modules": [
+            "内联单测：prompt_block_hashes_stable_across_shared_prefix 及同组哈希稳定性测试",
+            "集成测试分层：restore_commit（无 GPU，含 commit_absorbs_full_prefix 与 commit_extends_partial_gpu_hit）与 lifecycle（需 CUDA，经 KvCacheManager）",
+            "git 演进：de26afa4/267be7c1/d0a02764/cb49983a/8f99ea2d/bc923e08/69692ba3 七个里程碑"
+          ],
+          "order": 3,
+          "practice_task": "在 crate 目录运行 git log --oneline -- .，从中挑三个里程碑提交（建议 #216、#292、#958）逐一 git show 阅读 diff，产出一张『机制-时间线』表：每个机制解决什么问题、主要改动落在 pool/manager/view/buffer 哪个文件、配套测试在哪里。",
           "source_files": [
             "tests/restore_commit.rs",
             "tests/lifecycle.rs",
             "src/pool.rs",
             "../CLAUDE.md"
           ],
-          "minimal_modules": [
-            "内联单测：prompt_block_hashes_stable_across_shared_prefix 及同组哈希稳定性测试",
-            "集成测试分层：restore_commit（无 GPU）与 lifecycle（需 CUDA，经 KvCacheManager）",
-            "git 演进：de26afa4/267be7c1/d0a02764/cb49983a/8f99ea2d/bc923e08/69692ba3 七个里程碑"
-          ],
-          "practice_task": "在 crate 目录运行 git log --oneline -- .，从中挑三个里程碑提交（建议 #216、#292、#958）逐一 git show 阅读 diff，产出一张『机制-时间线』表：每个机制解决什么问题、主要改动落在 pool/manager/view/buffer 哪个文件、配套测试在哪里。",
-          "depends_on": [
-            "u2-l2",
-            "u2-l5"
-          ],
-          "action": "new"
+          "title": "测试分层、性能回归与机制演进史",
+          "topic": "三层测试：pool.rs 内联 #[cfg(test)]（如 prompt_block_hashes_stable_across_shared_prefix，守护『共享前缀的 prompt 块哈希必须一致』这一 offload 查询键前提）、tests/restore_commit.rs（纯逻辑、无 GPU、兼作 #704 性能回归锚）、tests/lifecycle.rs（需 CUDA 的端到端生命周期）；用 git log -- 追溯机制落地顺序：kvbm-logical 集成(#187) → qwen3 全块匹配前缀缓存(#216) → kimi-k2 分页池+前缀缓存(#292) → kv-offload pegaflow 桥(#316) → 公共面收缩(#858) → DSpark 投机验证 scratch 页(#958) → qwen35 联合前缀缓存(#836)。"
         }
-      ]
+      ],
+      "order": 3,
+      "title": "专家：offload、事件流与工程演进"
     }
   ]
 }
