@@ -1,14 +1,13 @@
 {
-  "head": "785d04871df37ddfb3e1b1432ce544b94505a801",
+  "head": "af9e40e12108141bb18f93188c82d2583df18509",
   "project": "openinfer-pegainfer-kv-offload",
-  "rationale": "pegainfer-kv-offload 是一个源码量很小（6 个模块约 1000 行）但概念密度极高的 crate：它是 pegainfer 的 GPU 分页 KV 与 pegaflow 的 host/SSD/RDMA 深层之间的进程内桥接层，横跨 GPU 显存布局数学、异步句柄轮询、跨流拷贝时序契约、内容寻址哈希链和 P2P RDMA 数据面。因此学习路线按\"先建心智模型、再沿数据流精读、最后进入互操作与生产化\"三层展开：入门层（u1）先讲清这个 crate 在整个推理引擎里的位置（为什么要卸载 KV、三层存储与 P/D 分离的背景）以及如何编译和跑测试；进阶层（u2）沿真实调用链逐模块精读——配置（config.rs）→ GPU 布局映射（layout.rs，本 crate 最核心的数学）→ 共享宿主与 tokio runtime（host.rs）→ 引擎构造与注册（engine.rs 前半）→ 可轮询句柄（handle.rs）→ save 链路及其两大时序契约 → query/load/lease 链路 → flush 屏障链；专家层（u3）覆盖跨引擎互操作（vllm_hash.rs 的 xxh3_128+CBOR 哈希链、P2P 数据面与 MetaServer）、qwen3 executor 的真实接线（remote_fetch 状态机）、端到端 roundtrip 测试解剖，以及设计权衡与二次开发方向（namespace 设计、with_arenas_on 多 arena 注册、已知边界与演进计划）。讲义之间用 depends_on 串成从零到能改造的单调路径，每篇都锚定在真实源码文件上，实践任务从跑通现有单测逐步过渡到手写几何断言、CBOR 编码与注册方案设计。",
+  "rationale": "pegainfer-kv-offload 是一个源码量很小（6 个模块约 1000 行）但概念密度极高的 crate：它是 pegainfer 的 GPU 分页 KV 与 pegaflow 的 host/SSD/RDMA 深层之间的进程内桥接层，横跨 GPU 显存布局数学、异步句柄轮询、跨流拷贝时序契约、内容寻址哈希链和 P2P RDMA 数据面。因此学习路线按「先建心智模型、再沿数据流精读、最后进入互操作与生产化」三层展开：入门层（u1）先讲清这个 crate 在整个推理引擎里的位置（为什么要卸载 KV、三层存储与 P/D 分离的背景）以及如何编译和跑测试；进阶层（u2）沿真实调用链逐模块精读——配置（config.rs）→ GPU 布局映射（layout.rs，本 crate 最核心的数学）→ 共享宿主与 tokio runtime（host.rs）→ 引擎构造与注册（engine.rs 前半）→ 可轮询句柄（handle.rs）→ save 链路及其两大时序契约 → query/load/lease 链路 → flush 屏障链；专家层（u3）覆盖跨引擎互操作（vllm_hash.rs 的 xxh3_128+CBOR 哈希链、P2P 数据面与 MetaServer）、qwen3 executor 的真实接线（remote_fetch 状态机）、端到端 roundtrip 测试解剖，以及设计权衡与二次开发方向。讲义之间用 depends_on 串成从零到能改造的单调路径，每篇都锚定在真实源码文件上，实践任务从跑通现有单测逐步过渡到手写几何断言、CBOR 编码与注册方案设计。增量核查结论：上次 HEAD（785d0487）到当前 HEAD（af9e40e1）区间的唯一提交是 qwen3 的 EAGLE-3 drafter 前向（af9e40e1），pegainfer-kv-offload/ 目录 diff 为空；manifest 引用的 crate 外文件（pegainfer-qwen3/src/executor.rs 的 offload 接线、executor/remote_fetch.rs 的 QueryView/RemoteFetchAction/wait_on_miss/park_on_loading、tests/kv_offload_cpu_hit.rs、pegainfer-kv-cache 的 page-first 布局 API、三篇 docs 文档）经逐一验证全部存在且语义未变，故全部讲义标记为 keep，无需新增或重建。",
   "units": [
     {
       "id": "u1",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-crate-position-and-exports.md",
           "id": "u1-l1",
@@ -34,7 +33,7 @@
           "topic": "介绍 pegainfer-kv-offload 在整个推理引擎中的位置：pegainfer 拥有 GPU 分页 KV（KvBuffer + kvbm BlockPool），pegaflow 拥有 host/SSD/RDMA 深层，本 crate 是把两者接起来的进程内连接器。走读 lib.rs 的模块划分与公开导出面，以及 Cargo.toml 里对 pegaflow-core 的 git rev pin 与 feature 取舍。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -62,7 +61,7 @@
           "topic": "建立 KV 卸载的领域模型：前缀缓存为什么能跨请求复用、GPU→CPU→SSD→RDMA 的分层存储、prefill/decode（P/D）分离数据面如何靠内容寻址免去 handle 协议，以及『save 尽力而为、load 不阻塞 admission』这条 v1 设计红线。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -90,14 +89,15 @@
           "topic": "说明本 crate 的构建与验证方式：workspace 中的位置、对 pegaflow-core git 依赖的编译要求（rdma feature）、--lib 单测（layout/vllm_hash 纯 CPU 可跑）与 tests/cpu_roundtrip.rs（需要真实 CUDA GPU）的区别，以及 --release 的必要性。"
         }
       ],
+      "level": "beginner",
+      "order": 1,
       "title": "入门：认识 KV 卸载与 crate 全貌"
     },
     {
       "id": "u2",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1",
             "u1-l2"
@@ -124,7 +124,7 @@
           "topic": "精读 config.rs：OffloadConfig 的 builder 式构造（instance_id、namespace、pinned_pool_bytes、use_hugepages、runtime_threads、p2p），HostConfig 作为 host() 拆分的私有一半，以及 P2pConfig 三个字段（metaserver_addr、advertise_addr、rdma_nics）各自约束。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u1-l2"
@@ -153,7 +153,7 @@
           "topic": "精读 layout.rs——本 crate 最核心的数学：KvBuffer 的 page-first 融合布局（页内 K|V 连续、跨页同层块相隔 page_stride）如何拆成 per-layer KvArena，block_stride_bytes 与 copy size 解耦的动机，以及 from_arenas 的断言与 size_bytes 上界公式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -180,7 +180,7 @@
           "topic": "精读 host.rs：一个 OffloadHost 如何持有 PegaEngine + 多线程 tokio runtime，PegaEngine 为什么必须在 runtime.enter() 里构建，P2P 模式下 TcpListener 先 bind 再 serve 的 fail-fast 设计，1 分钟一次的 GC 双清扫（过期 transfer lock + 陈旧 prefetch 状态），以及 drop 语义。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u2-l3"
@@ -209,7 +209,7 @@
           "topic": "精读 engine.rs 的构造半边：OffloadEngine::new（私有 host + fused KvBuffer）与 with_arenas_on（共享 host + 显式 arena 列表，DP-rank 共享与跨引擎 namespace 的入口），register 如何把 Registration 喂给 pegaflow 的 register_context_layer_batch_strided，以及 PEGAINFER_KV_TRANSFER_MODE 的 Direct/Kernel 选择。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -235,7 +235,7 @@
           "topic": "精读 handle.rs：OffloadHandle<T> 如何用 oneshot 包出 LoadHandle/SaveHandle/QueryHandle 三种别名，poll（调度器非阻塞 tick）、wait（同步线程阻塞）、settle（异步等待）三种收账方式，drop 句柄只分离观察者而 I/O 继续跑，以及 settled/in_flight 两个测试构造器。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l5"
           ],
@@ -262,7 +262,7 @@
           "topic": "精读 engine.rs 的 save 半边：build_saves 如何把一组 (block_id, hash) 扇出到所有 layer，submit_save 提交到 pegaflow runtime 后立即返回 SaveHandle，save/save_blocking 两种包装，以及两条必须由调用方维护的契约——ORDERING CONTRACT（只能在 forward 步同步后保存已封块）与 REUSE CONTRACT（keep_alive 持有 allocator guard 到 D2H 落地）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l5",
             "u2-l6"
@@ -290,7 +290,7 @@
           "topic": "精读 engine.rs 的 query/load 半边：submit_query 走 count_prefix_hit_blocks_with_prefetch，Ready 分支用 create_query_lease 拿到钉住命中块的租约，Loading 分支表示远端/SSD 后台拉取中需带同一 req_id 重查；load 把租约块按序拷进目标 GPU 块并返回 LoadHandle；release_query_lease 是不加载时必须显式调用的释放口。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l6"
           ],
@@ -316,14 +316,15 @@
           "topic": "精读 engine.rs 的 flush_saves_then：单锁保护的 WriteBarrierState（pending_saves + prev_flush_done），屏障先等前一个屏障、再等所有在途 save、再排空写管线与 MetaServer 注册，FLUSH_DEADLINE=5s 封顶且延迟不累积；它是 P/D KV-ready 信号—— withhold Finished 事件直到 KV 对 peer 可见。"
         }
       ],
+      "level": "intermediate",
+      "order": 2,
       "title": "进阶：核心机制源码精读"
     },
     {
       "id": "u3",
-      "level": "advanced",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l7"
           ],
@@ -349,7 +350,7 @@
           "topic": "精读 vllm_hash.rs：为了让 pegainfer 解码节点按内容找到 vLLM prefill 节点存的块，必须逐字节复刻 vLLM 的 hash_block_tokens——xxh3_128(cbor(parent_hash, token_ids, None)) 链式哈希，链根 NONE_HASH 由 PYTHONHASHSEED 推导，含手工实现的 canonical CBOR write_head 与 golden vector 测试；以及 docs/subsystems/kv-cache/design.md 中记录的『vLLM P/D 互通将整体移除』演进计划。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3",
             "u2-l7",
@@ -376,10 +377,10 @@
             "docs/models/qwen3/pd-disaggregation-m2.md"
           ],
           "title": "P2P 数据面：MetaServer 发现、RDMA READ 与故障退化",
-          "topic": "综合 config.rs 的 P2pConfig、host.rs 的 P2pTransferService 服务面与 GC、以及 engine.rs 的 flush 屏障，讲清跨实例 P2P 共享的完整数据面：本地 host 层 miss 时经 MetaServer 按 (namespace, hash) 发现 owner，单边 RDMA READ 拉进本地 pinned pool 再走正常 H2D load；含无 handle 协议的设计与故障退化语义。"
+          "topic": "综合 config.rs 的 P2pConfig、host.rs 的 P2PTransferService 服务面与 GC、以及 engine.rs 的 flush 屏障，讲清跨实例 P2P 共享的完整数据面：本地 host 层 miss 时经 MetaServer 按 (namespace, hash) 发现 owner，单边 RDMA READ 拉进本地 pinned pool 再走正常 H2D load；含无 handle 协议的设计与故障退化语义。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l6",
             "u2-l7",
@@ -409,7 +410,7 @@
           "topic": "站在 crate 作者视角看下游怎么用：pegainfer-qwen3 的 executor 持 Option<OffloadEngine>，封块后 fire-and-forget save，admission 时拆 match_and_add_prefix 为 GPU hit + CPU query + 异步 load；remote_fetch.rs 的 QueryView/RemoteFetchAction 把每次查询 tick 的决策（Wait/Scratch/Release/Load）抽成无 GPU 可测的纯函数，lease 泛型化让 dropped-lease 不可表示。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u2-l6",
@@ -439,7 +440,7 @@
           "topic": "逐行解剖 GPU→CPU→GPU 字节级回归测试：几何常量与 buffer.layout() 的对账断言、确定性 pattern 填充、save_blocking + flush_saves、query 断言 3 块全命中、load 到不同目标块后逐 layer/segment 比对 bits，以及未触碰块保持为零的负向控制——为什么布局算错时这个测试必然失败。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4",
             "u3-l2",
@@ -470,6 +471,8 @@
           "topic": "收束到架构层：pegaflow 退为语义无关 raw transfer 后端、connector 大脑自建的机制/策略分层；三模型三 KV 形态（dense paged / MLA latent / linear recurrent）如何决定 connector 只收 block-structured、content-addressable KV 的边界；为带 sidecar 的新模型扩展时 with_arenas_on 的注册方案；以及文档中已记录的演进方向（vLLM 互通移除清单、rdma feature 打包欠账）。"
         }
       ],
+      "level": "advanced",
+      "order": 3,
       "title": "专家：跨引擎互操作与生产化"
     }
   ]

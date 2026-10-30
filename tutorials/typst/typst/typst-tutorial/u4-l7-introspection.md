@@ -4,259 +4,667 @@
 
 学完本讲，你应该能够：
 
-1. 解释 `Location` 与 `Locatable` 元素体系：哪些元素可以被查询、由谁决定、清单在哪里维护。
-2. 描述 `Tag` 如何在 realize 阶段被"埋进"排版产物 `Frame`，以及 `PagedIntrospector` 如何从 `Frame` 中收集出一张可查询的表。
-3. 说出 `query`/`counter` 的执行语义：它们为什么必须出现在 `context` 中，以及 `Introspect` 询问协议如何工作。
-4. 描述编译主循环的迭代收敛判定：comemo 的 `constraint.validate` 快路径、`MAX_ITERS = 5` 的上限、不收敛时的警告生成方式。
-5. 独立统计一篇文档实际进行了几轮排版，并用 `query(divider)` 验证 0.15 起新增的可定位元素。
+1. 解释为什么交叉引用、目录、页码计数器会迫使编译器**多轮排版**，以及 Typst 如何用「迭代直到收敛」解决这个问题。
+2. 说出 `Location`、`Locatable`、`Tag`、`Introspector` 四个概念各自的含义与它们之间的数据流关系。
+3. 描述 `PagedIntrospector` 如何从已经排完版的 `Frame` 中收集元素与位置，并建成可供查询的索引。
+4. 描述 `query` / `counter` 在数据层如何变成一次「对上一轮文档的读取」（`Introspect` trait），以及这种读取如何被编译器记录下来用于收敛诊断。
+5. 解释两遍（乃至五遍）编译的收敛判定条件、不收敛时警告如何生成，以及多轮迭代对性能的影响和 comemo 缓存在哪些位置起作用。
+
+本讲是排版管线单元（第四单元）的收官：前面几讲我们走完了 realize → 页面 → flow → 行内 → 网格，本讲回答的问题是——**当排版结果本身又成为排版的输入时，会发生什么？**
 
 ## 2. 前置知识
 
-- **两遍编译（multi-pass compilation）**：目录页码、交叉引用这类信息有个鸡生蛋问题——第 1 页的目录要写"第 3 章 在第 5 页"，但第 5 页的存在本身可能受目录长度影响。经典解法（LaTeX 也是如此）是"先排一遍、再回头填答案、再排一遍"，直到结果不再变化。Typst 把这个过程做成了编译器内建的循环，而不是让用户手动跑两遍命令。
-- **不动点与收敛**：把排版看作函数 \( f \)，它读取上一轮的"文档事实"（内省器），产出新一轮文档。若第 \( n \) 轮与第 \( n-1 \) 轮产出完全相同，称为**收敛**（converged）；Typst 最多尝试 5 轮，超限则带着警告返回末轮结果。
-- **`Location`**：元素的 128 位唯一身份证。与 u2 讲过的 `Span`（源码位置）不同，`Location` 标识的是**文档中排版后的元素实例**，由 realize 阶段的 `Locator` 分配。
-- **comemo 记忆化**：u4-l1 已讲过 `#[comemo::track]` 与约束验证。本讲会用到它作为收敛判定的快路径，不再展开原理。
-- **Frame 与 FrameItem**：排版产物是一棵 `Frame` 树，叶子项包括文本、形状、图像、链接，以及本讲的主角 `FrameItem::Tag`。
+### 2.1 鸡生蛋问题：正向引用
+
+考虑一个目录页：它想列出每个章节标题所在的页码。但页码只有在**整个文档排完版**之后才知道；而目录页本身的长度又会影响后面内容的分页。这就是排版的「鸡生蛋问题」（forward reference）：
+
+- LaTeX 的做法是编译多遍，把页码写进 `.aux` 辅助文件，下一遍读取；
+- Typst 的做法是在**同一次编译的内存里**反复排版，直到文档不再变化（不动点迭代）。
+
+这种「排版结果反过来查询排版结果」的机制，Typst 官方称为**内省（introspection）**。
+
+### 2.2 你需要先掌握的旧知识
+
+本讲建立在前面讲义之上，需要你记得：
+
+- **u3-l7（样式系统）**：`context` 表达式在求值期被挂起为 `ContextElem`，等排版期有了位置与样式链再回放——内省函数全部要求在 `context` 中调用，原因本讲会揭晓。
+- **u4-l2（realize 阶段）**：realize 输出「元素 + 生效样式链」的扁平列表 `Vec<Pair>`，其中有一种特殊元素 `TagElem`（当时被称为「Tag/TagElem」新术语），本讲会完整讲清它。
+- **u4-l3（页面与文档）**：`layout_document` 产出 `PagedDocument`，内含每页一个 `Frame`；`PagedDocument::new` 内部「顺便构建了 introspector」这句话当时一笔带过，本讲正是它的展开。
+- **u4-l1（编译主流程）**：编译循环中**求值只执行一次，循环的是排版**；comemo 通过 `Constraint` 追踪本轮流式读取了哪些数据。本讲会看到 `constraint.validate` 在这里的具体用法。
+
+### 2.3 术语表
+
+| 术语 | 含义 |
+|---|---|
+| 内省 introspection | 在排版过程中查询「已完成文档」的信息（位置、计数、元素集合） |
+| `Location` | 一个 128 位哈希，唯一标识文档中一个元素**实例** |
+| Locatable 可定位元素 | 被 `#[elem(Locatable)]` 标记、自动获得 `Location` 的元素类型 |
+| `Tag` | 打进 `Frame` 里的开始/结束标记，是 `Location` 的物理载体 |
+| `Introspector` | 已完成文档的「查询数据库」，从 `Frame` 中收集所有 `Tag` 而来 |
+| 收敛 convergence | 连续两轮排版产出的内省观测值完全一致 |
+| `MAX_ITERS` | 排版迭代上限，当前为 5 |
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
-| --- | --- |
-| [crates/typst-library/src/introspection/location.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/location.rs) | `Location` 类型、Locatable 元素的权威文档清单、位置类内省询问 |
-| [crates/typst-library/src/introspection/locator.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/locator.rs) | realize/layout 阶段分配 `Location` 的 `Locator`，分层哈希策略 |
-| [crates/typst-library/src/introspection/tag.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/tag.rs) | `Tag`/`TagFlags`/`TagElem`：埋进 Frame 的起止标记 |
-| [crates/typst-realize/src/lib.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-realize/src/lib.rs) | `prepare` 函数：给元素分配 `Location` 并生成起止 `Tag` |
-| [crates/typst-library/src/introspection/introspector.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs) | `Introspector` trait（comemo 追踪）、目标无关的 `ElementIntrospector` 查询引擎 |
-| [crates/typst-layout/src/introspect.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-layout/src/introspect.rs) | `PagedIntrospector`：从已排好的页面收集元素与位置 |
-| [crates/typst-library/src/introspection/query.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/query.rs) | `query()` 函数与 `QueryIntrospection` 等询问类型 |
-| [crates/typst-library/src/introspection/counter.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/counter.rs) | `Counter` 及 `CounterAtIntrospection` 等：计数器语义 |
-| [crates/typst-library/src/introspection/convergence.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/convergence.rs) | `MAX_ITERS`、`Introspect` trait、`History`、`analyze` 不收敛诊断 |
-| [crates/typst/src/lib.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs) | `compile_impl` 主循环：求值一次 + 排版迭代至收敛 |
-| [crates/typst-library/src/engine.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/engine.rs) | `Engine::introspect`：执行询问并登记到 `Sink` |
-| [crates/typst-library/src/foundations/context.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/foundations/context.rs) | `Context` 与 `ContextElem`：`context` 表达式的挂起与回放 |
-| [crates/typst-library/src/model/divider.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/model/divider.rs) | 0.15 起变为 `Locatable` 的 divider 元素 |
-| [tests/suite/introspection/](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/tests/suite/introspection/convergence.typ) | 收敛警告测试集与 `switch.typ` 迭代开关工具 |
+|---|---|
+| [crates/typst/src/lib.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs) | 总装 crate：`compile_impl` 中的多轮排版主循环 |
+| [crates/typst-library/src/introspection/convergence.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/convergence.rs) | `MAX_ITERS`、`Introspect` trait、`History`、不收敛诊断 `analyze` |
+| [crates/typst-library/src/introspection/introspector.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs) | `Introspector` trait 与目标无关的查询引擎 `ElementIntrospector` |
+| [crates/typst-layout/src/introspect.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-layout/src/introspect.rs) | `PagedIntrospector`：遍历页面 `Frame` 收集元素与页面位置 |
+| [crates/typst-library/src/introspection/location.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/location.rs) | `Location` 类型、`Locatable` 元素清单文档、各类位置内省 |
+| [crates/typst-library/src/introspection/tag.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/tag.rs) | `Tag`（Start/End）与 `TagElem` |
+| [crates/typst-realize/src/lib.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-realize/src/lib.rs) | `prepare`：给可定位元素分配 `Location` 并生成一对 `Tag` |
+| [crates/typst-library/src/introspection/query.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/query.rs) | `query` 函数与 `QueryIntrospection` 等 |
+| [crates/typst-library/src/introspection/counter.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/counter.rs) | `Counter`、计数更新元素、计数回放与页面计数器 |
+| [crates/typst-library/src/introspection/locator.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/locator.rs) | `Locator`：分层哈希地分配稳定 `Location` |
+| [crates/typst-layout/src/document.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-layout/src/document.rs) | `PagedDocument` / `Page` 结构，`Output` trait 的 introspector 接口 |
+| [crates/typst-cli/src/eval.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-cli/src/eval.rs) | `typst eval` 子命令：编译文档后对最终 introspector 求值表达式 |
+
+> 说明：`crates/typst-library/src/lib.rs:19` 以 `pub mod introspection;` 挂载内省模块，[crates/typst-library/src/introspection/mod.rs:35-45](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/mod.rs#L35-L45) 把 `Location`、`Counter`、`State`、`metadata`、`here`、`query`、`locate` 注册进全局作用域；[crates/typst-layout/src/lib.rs:L8](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-layout/src/lib.rs#L8) 声明 `mod introspect;` 并在 [L22](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-layout/src/lib.rs#L22) 导出 `PagedIntrospector`。
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 Locatable 元素体系与 Location
+本讲拆成 5 个最小模块：
+
+1. 为什么需要多轮编译：内省与主循环
+2. `Location` 与 Locatable 元素体系（含 `Tag` 的诞生）
+3. Introspector 收集：从 `Frame` 到查询索引
+4. `query` / `counter` 的内省语义
+5. 迭代收敛判定、不收敛诊断与性能
+
+---
+
+### 4.1 为什么需要多轮编译：内省与主循环
 
 #### 4.1.1 概念说明
 
-脚本能"看见"文档（目录、计数、引用）的前提是：排版后的文档里有一批元素是**可被查询的**。但让所有元素都可查询代价太高——每个元素都要分配身份、写入 Frame、进入索引。因此 Typst 用 `Locatable` 标记做了白名单：只有语义层元素（heading、figure、footnote……）默认可定位；装饰性元素（rect、text）默认不可。`Location` 则是被定位元素的身份证：一个不透明 的 128 位哈希值。
+内省要解决的核心矛盾是：**排版需要的信息（页码、编号、总数）在排版完成前不存在**。
+
+Typst 的解法可以概括为一句话：
+
+> 先假设一份「上一轮的文档」，排版时所有内省查询都读它；排完后再检查「本轮读到的答案」放在新文档里是否依然成立；不成立就用新文档当「上一轮」，再来一遍。
+
+这就是**不动点迭代**：只要文档不再变化（不动点），查询结果就自洽了。绝大多数文档 2~3 轮就收敛；理论上限 5 轮，超过则放弃并发出「不收敛」警告（注意：是警告不是错误，编译仍然产出最后一轮的文档）。
 
 #### 4.1.2 核心流程
 
-`Locatable` 能力沿着这条链路生效：
+`compile_impl` 的主干（伪代码）：
 
-1. 元素声明处写 `#[elem(Locatable, ...)]`；
-2. `#[elem]` 过程宏把它写进元素 vtable 的 `IntrospectionCapabilities`；
-3. 运行时通过 `Element::is_locatable()` 查询；
-4. `query()` 的参数类型 `LocatableSelector` 在 cast 阶段用 `is_locatable()` 做门禁，不满足直接报错；
-5. realize 阶段据此决定是否给元素分配 `Location` 并生成 `Tag`（见 4.2）。
+```text
+content = eval(main_source)            # 求值只做一次，在循环之外
+history = 容量 4 的旧文档队列            # MAX_ITERS - 1
+loop:
+    introspector = history 最后一份文档的 introspector
+                 （第一轮没有历史 → EmptyIntrospector，所有查询返回空）
+    constraint = comemo::Constraint::new()
+    document  = 排版(content, introspector 以 constraint 追踪)
+                # 排版期间每一次对 introspector 的读取都被 constraint 记账
 
-`Location` 本身的生成采用**分层哈希**：每一层布局用"本层内第几个具有某 span 的元素"作为局部键 \( k_n \)，与上层哈希递归复合 \( h_n = \mathrm{hash}(h_{n-1}, k_n) \)。这既保证跨迭代同一元素得到同一 `Location`，又保证文档局部编辑不会像自增计数器那样让后续所有 ID 平移（保护增量编译缓存），还避免了全局可变状态（允许并行布局）。
+    if constraint.validate(document.introspector()):
+        break                          # 本轮读到的数据在新文档中仍成立 → 收敛
+
+    if history 已满:
+        analyze(所有记录过的内省请求)     # 生成「不收敛」警告
+        break
+
+    history.push(document)             # 用新文档当下一轮的「上一轮」
+```
+
+两个关键点：
+
+- **第一轮是「盲排」**：没有任何历史文档，introspector 是空的 `EmptyIntrospector`，所以第一轮里 `query` 返回空数组、`counter` 从初值开始、`loc.position()` 返回 `none`。第一轮的意义就是把 `Tag` 铺进 `Frame`，造出第一份可查询的文档。
+- **收敛判定在编译器手里，不在用户手里**：用户写 `#context query(heading)` 时并不指定迭代次数，是否再排一轮由 `constraint.validate` 决定。
 
 #### 4.1.3 源码精读
 
-`Location` 就是一个包装哈希的类型，外加派生"变体位置"的能力（文献目录用它从一个位置派生多个可链接条目）：
+先看总装 crate 的主循环。求值发生在循环**之外**——这印证了 u4-l1 的结论「求值只执行一次，循环的是排版」：
 
-- [crates/typst-library/src/introspection/location.rs:L55-L78](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/location.rs#L55-L78) — `pub struct Location(u128)` 与 `variant(n)`：对 `(自身哈希, n)` 再哈希，造出语义上隶属于它的新位置。
+[crates/typst/src/lib.rs:L123-L132](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs#L123-L132) —— 获取主源文件并**只求值一次**，得到 `content`（元素树）。此后的循环只围绕 `content` 反复排版。
 
-Locatable 元素的**权威清单不是代码生成的，而是手写在文档注释里**的：
+[crates/typst/src/lib.rs:L134-L145](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs#L134-L145) —— `history` 是容量为 `MAX_ITERS - 1`（即 4）的 `ArrayVec`；每轮循环用 `TimingScope` 打上 `iter (1)`、`iter (2)`……的时间标记（这就是实践里数轮数的依据）；`introspector` 取自 `history.last()`，没有历史时用 `empty_introspector`；`constraint` 是本轮的「记账本」。
 
-- [crates/typst-library/src/introspection/location.rs:L26-L51](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/location.rs#L26-L51) — 文档列出各类别中的可定位元素：Model 类的 `asset`、`bibliography`、`cite`、`divider`、`document`、`emph`、`enum`、`figure`、`footnote`、`heading`、`link`、`list`、`outline`、`par`、`quote`、`ref`、`strong`、`table`、`terms`、`title`；Text 类的 `raw` 与四种装饰；Introspection 类的 `metadata`；以及例外 `math.equation`、`image`、`pdf.attach`。
+[crates/typst/src/lib.rs:L146-L157](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs#L146-L157) —— 引擎的 introspector 通过 `introspector.track_with(&constraint)` 交给排版，意味着排版期间对 introspector 的每次读取都被 comemo 记录在 `constraint` 里；随后 `T::create` 执行整轮排版（对 paged 目标就是 `layout_document`）。
 
-最近一次清单更新来自 `Make divider locatable` 提交，divider 元素声明里现在带有 `Locatable`：
+[crates/typst/src/lib.rs:L159-L186](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs#L159-L186) —— 收敛判定三连：
 
-- [crates/typst-library/src/model/divider.rs:L40-L41](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/model/divider.rs#L40-L41) — `#[elem(since = "0.15.0", Locatable, ShowSet)] pub struct DividerElem {}`。
+- L159：`constraint.validate(document.introspector())` —— 「本轮从旧 introspector 读到的所有数据，在新文档的 introspector 里还成立吗？」成立则收敛，`break`；
+- L164：`history.is_full()` —— 已经排了 5 轮还没稳定，调用 `introspection::analyze` 生成警告后放弃；
+- L185：否则把本轮文档压入历史，进入下一轮。
 
-能力标记最终落在元素 vtable 中，由三个布尔位组成：
+再看常量定义：
 
-- [crates/typst-library/src/foundations/content/vtable.rs:L318-L326](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/foundations/content/vtable.rs#L318-L326) — `IntrospectionCapabilities { locatable, unqueriable, tagged }`：`unqueriable` 给 `place` 这类"可定位但用户不该查"的元素用。
-- [crates/typst-library/src/foundations/content/element.rs:L89-L97](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/foundations/content/element.rs#L89-L97) — `is_locatable()`/`is_unqueriable()` 读取 vtable 位。
+[crates/typst-library/src/introspection/convergence.rs:L16-L18](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/convergence.rs#L16-L18) —— `MAX_ITERS = 5` 与 `ITER_NAMES`（五轮的计时名称）。迭代上限选 5 是经验值：正常文档 2~3 轮收敛，病态文档（查询影响自身）多排也无济于事，及时止损并警告。
 
-`query` 的参数类型在 cast 时就用这个位做门禁，所以错误在**求值期**就会被拦下，根本轮不到排版：
+而 `PagedDocument` 是在哪里挂上 introspector 的？在 u4-l3 我们见过 `PagedDocument::new`，当时没展开的这句话现在可以读懂了：
 
-- [crates/typst-library/src/foundations/selector.rs:L421-L461](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/foundations/selector.rs#L421-L461) — `FromValue for LocatableSelector` 的 `validate`：元素选择器若 `!elem.is_locatable() || elem.is_unqueriable()` 则报 `"{name} is not locatable"`，并递归校验 `or`/`and`/`before`/`after`/`within` 的子选择器。
-
-分层哈希策略的完整论证（为什么不用自增计数器）写在 `Locator` 的文档里，值得精读：
-
-- [crates/typst-library/src/introspection/locator.rs:L49-L112](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/locator.rs#L49-L112) — 三种策略对比，最终方案：\( h_n = \mathrm{hash}(h_{n-1}, k_n) \)，逐层累积、无全局状态。
+[crates/typst-layout/src/document.rs:L29-L41](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-layout/src/document.rs#L29-L41) —— `PagedDocument::new` 内部调用 `PagedIntrospector::new(&pages)`：**文档一旦排完，introspector 立即从页面帧里构建出来**，成为下一轮排版的「上一轮文档」。`Output` trait 的 `introspector()` 方法（[document.rs:L78-L82](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-layout/src/document.rs#L78-L82)）则让总装循环可以用统一接口拿到它——无论目标是 paged 还是 html。
 
 #### 4.1.4 代码实践
 
-**实践目标**：亲手验证 Locatable 门禁与 divider 的可定位性。
+**实践目标**：用 `--timings` 亲眼数出一篇带目录/交叉引用的文档排了几轮。
 
-1. 在任意目录新建 `locatable.typ`：
+**操作步骤**：
+
+1. 写一个 `toc.typ`：
 
    ```typ
-   #context query(divider).len()  // 预期输出 0（还没有 divider）
-   #divider()
-   #context query(divider).len()  // 预期输出 1
+   #set page(numbering: "1")
+   #outline()
+
+   = Introduction <intro>
+   #lorem(80)
+
+   = Discussion
+   See @intro for the introduction.
+   #lorem(80)
    ```
 
-2. 用仓库里构建的 CLI 运行：`cargo run -p typst-cli -- compile locatable.typ`，打开 PDF 查看两处数字。
-3. 再把第一行换成 `#context query(rect).len()` 重新编译，观察报错。
+2. 用仓库里的 CLI 编译并导出计时（`--timings` 的定义见 [crates/typst-cli/src/args.rs:L465-L471](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-cli/src/args.rs#L465-L471)）：
 
-**需要观察的现象**：第 2 步两个数字分别是 0 和 1（query 看到的是**上一轮**的文档，这正是多轮迭代的直接证据）；第 3 步报错 `rect is not locatable`。
+   ```sh
+   cargo run -p typst-cli -- compile --timings timings.json toc.typ
+   ```
 
-**预期结果**：divider（0.15 起 Locatable）可查询；rect 在 cast 阶段被拒。若你的本地二进制版本低于 0.15，`query(divider)` 也会报同样错误。具体输出文案以本地运行为准（待本地验证）。
+3. 打开 `timings.json`（Chrome Tracing 格式），搜索字符串 `iter (`。每个布局轮次对应一个名为 `iter (1)`、`iter (2)`……的计时区间（名字来自 `ITER_NAMES`）。
+
+4. 删掉 `#outline()` 与 `@intro`（引用），再编译一次，重新数 `iter (` 的个数。
+
+**需要观察的现象**：带目录与引用的文档应出现至少 2 个 `iter (N)` 区间；删掉内省依赖后应只剩 1 个（一轮即收敛）。
+
+**预期结果**：`timings.json` 中 `iter (N)` 的最大编号 = 实际布局轮数。具体轮数取决于分页是否被目录长度扰动，**待本地验证**。
 
 #### 4.1.5 小练习与答案
 
-1. **练习**：`query(text)`、`query(<my-label>)`、`query(raw)` 分别能通过编译吗？
-   **答案**：`query(text)` 不能，text 非 Locatable，在 [selector.rs:L426-L429](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/foundations/selector.rs#L426-L429) 被拦；`query(<my-label>)` 能，标签选择器无需 Locatable；`query(raw)` 能，raw 在白名单里（location.rs 文档 Text 类）。
-2. **练习**：为什么 `Location` 用分层哈希而不是文档序自增整数？
-   **答案**：三条理由见 [locator.rs:L50-L61](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/locator.rs#L50-L61)：自增 ID 会因内省生成的新内容而整体平移（跨轮不稳定）、会被局部编辑打乱（增量编译缓存失效）、需要全局计数器状态（阻碍并行）。
-3. **练习**：想给某个第三方或自定义元素加上可定位能力，最少要改几处？
-   **答案**：元素声明加 `Locatable` 标记即可；但按惯例还应同步更新 location.rs 的手写清单文档（divider 的提交就是两处一起改的）。
+**练习 1**：为什么第一轮排版时 `#context query(heading)` 返回空数组，编译却不报错？
 
-### 4.2 Tag 与 Introspector 收集：从 realize 到 Frame 再到查询表
+**答案**：第一轮的 introspector 是 `EmptyIntrospector`（[introspector.rs:L91-L164](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs#L91-L164)），`query` 对它只是返回空集合；这些「空答案」与后续轮次的「真答案」不一致，恰好触发下一轮迭代。查询结果为空不是错误，只有「五轮后仍不稳定」才会警告。
+
+**练习 2**：求值（`eval`）会随迭代重复执行吗？这带来什么好处？
+
+**答案**：不会。`eval` 在循环之前只执行一次（[typst/src/lib.rs:L124-L132](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs#L124-L132)）。好处：(1) 用户脚本中的副作用（如 `sys` 输出）不会重复发生；(2) 最贵的 `Content` 树只建一次，循环里复用同一棵树做排版，配合 comemo 记忆化，未受扰动的大段内容直接命中缓存。
+
+**练习 3**：如果文档五轮后仍不收敛，编译器会输出文档吗？
+
+**答案**：会。`history.is_full()` 分支只是收集 `analyze` 产生的警告然后 `break`（[typst/src/lib.rs:L164-L183](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs#L164-L183)），`document` 仍是最后一轮的完整产物，函数最后 `Ok(document)` 返回。不收敛是警告，不是错误。
+
+---
+
+### 4.2 `Location` 与 Locatable 元素体系：元素的身份证
 
 #### 4.2.1 概念说明
 
-`Location` 分配完只是"有了身份证"，还要让排版产物里**物理地留下痕迹**，下一轮编译才能据此回答查询。这个痕迹就是 `Tag`：realize 阶段为每个可内省元素生成一对 `Tag::Start` / `Tag::End`，作为 `TagElem` 混入内容流，最终被排版器原样写进 `Frame`（`FrameItem::Tag`），自身不占空间。一轮排版结束后，`PagedIntrospector` 扫描所有页面的 Frame，把 Tag 收集成一张"元素 → 文档位置"的表，供下一轮（以及导出后的 `typst eval`）查询。
+要让「上一轮文档」可查询，必须先能给文档里的每个元素实例发一张**身份证**。这张身份证就是 `Location`：
+
+- 它是一个 `u128` 哈希（不是自增序号，也不是源码位置）；
+- 它标识的是「文档中这个位置上的这个元素实例」，同一个 `#for` 循环生成的 5 个 figure 各有不同 `Location`；
+- 与 `Span`（u2-l1/u2-l4）区分开：`Span` 回答「这段代码来自源文件哪里」，`Location` 回答「这个元素实例排在文档哪里」。
+
+**谁有资格获得身份证？** 由元素声明处的 `#[elem(Locatable, ...)]` 能力标记决定，这类元素称为 **Locatable（可定位）元素**。设计原则是：**语义元素才可定位**——标题、图、脚注这类会被引用/计数/查询的元素；而 `text`、`box` 这类纯排版元素默认不可定位。此外，**任何被贴了 `<标签>` 的元素也会临时获得 `Location`**（否则 `<标签>` 引用无从谈起）。
 
 #### 4.2.2 核心流程
 
+`Location` 的产生与消费链路：
+
+```text
+#[elem(Locatable)] 声明
+    │  (typst-macros 生成的 IntrospectionCapabilities)
+    ▼
+realize 的 prepare 阶段：elem.is_locatable()？
+    │ 是（或有标签/已有 location）
+    ▼
+Locator::next_location  → 分配一个分层哈希的 u128
+    ▼
+给元素打一对 Tag：Tag::Start(元素快照) + Tag::End(location, key)
+    ▼
+TagElem 混入排版流 → 布局器把它写进 Frame（FrameItem::Tag）
+    ▼
+（下一节）Introspector 从 Frame 收集这些 Tag
 ```
-realize 阶段（每轮排版内部）
-  prepare(elem):
-    key   = hash(elem)                       # 元素内容哈希，用于测量匹配
-    flags = { introspectable, tagged }        # 4.1 的能力位 + 有无标签
-    若 elem 无 location 且需要 → locator 分配
-    产出 (Tag::Start(elem, flags), Tag::End(loc, key, flags))
-        ↓ 排版
-Frame 树（含 FrameItem::Tag）
-        ↓ PagedIntrospector::new（每轮结束时）
-discover_frame: 递归遍历 Frame
-  Tag::Start → 记录 (元素, 页号+坐标)，seen 去重
-  Tag::End   → 闭合该 location 的区间范围
-  Group(parent) → 插入组：乱序内容（如脚注）挂回父元素的文档序
-        ↓
-ElementIntrospector: elems 列表 + locations/labels/keys 索引 + 查询缓存
-```
+
+`Locator` 的分层哈希策略（为什么要哈希而不是计数器）在 4.5.3 的性能视角里展开，这里只需要知道：**`Location` 的设计目标之一是跨轮次、跨编辑保持稳定**，这样第二轮里的 heading 和第一轮里的同一个 heading 拿到同一个 `Location`，查询才能对上号。
 
 #### 4.2.3 源码精读
 
-realize 的 `prepare` 是身份与痕迹的诞生地：
+`Location` 本体非常朴素——就是 `u128` 的薄包装：
 
-- [crates/typst-realize/src/lib.rs:L540-L556](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-realize/src/lib.rs#L540-L556) — 注释明确说"只给显式标记为 locatable 和带标签的元素生成 location，因为有开销"；`introspectable` 三条件：`is_locatable() || label().is_some() || location().is_some()`（第三个条件覆盖来自 query 结果的元素）。
-- [crates/typst-realize/src/lib.rs:L575-L582](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-realize/src/lib.rs#L575-L582) — 在合成（synthesize）与样式物化**之后**创建起止 Tag，所以 Tag 里携带的 Content 已含合成字段（如 heading 的编号）；`key` 存进 `Tag::End` 只是为了让两个变体内存尺寸均衡。
+[crates/typst-library/src/introspection/location.rs:L55-L78](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/location.rs#L55-L78) —— `Location(u128)`：`new` 从哈希构造、`hash` 取回原值、`variant(n)` 从一个已有 location 派生「变体」（文献目录用它给每条参考文献造出独立可链接的位置）。
 
-Tag 的数据结构：
+[crates/typst-library/src/introspection/location.rs:L151-L167](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/location.rs#L151-L167) —— `Debug` 输出默认截断为低 16 位以便阅读（`Location(12345)`），`Repr` 在脚本里显示为 `location(..)`——脚本层拿不到哈希本体，只能把它当作不透明句柄传递。
 
-- [crates/typst-library/src/introspection/tag.rs:L11-L24](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/tag.rs#L11-L24) — `Tag::Start(Content, TagFlags)` / `Tag::End(Location, u128, TagFlags)`。
-- [crates/typst-library/src/introspection/tag.rs:L46-L61](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/tag.rs#L46-L61) — `TagFlags { introspectable, tagged }`：前者决定是否进入 Introspector，后者服务 PDF 标签树。
-- [crates/typst-library/src/introspection/tag.rs:L63-L83](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/tag.rs#L63-L83) — `TagElem` 是承载 Tag 的元素包装，文档注释点破机制："held element becomes available for introspection in the **next** compiler iteration"。
+哪些元素是 Locatable？**权威清单就维护在 `Location` 的文档注释里**：
 
-收集端——`PagedIntrospector`：
+[crates/typst-library/src/introspection/location.rs:L26-L54](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/location.rs#L26-L54) —— 逐类别列出的可定位元素：Model 类最多（`asset`、`bibliography`、`cite`、`divider`、`document`、`emph`、`enum`、`figure`、`figure.caption`、`footnote`、`footnote.entry`、`heading`、`link`、`list`、`outline`、`outline.entry`、`par`、`quote`、`ref`、`strong`、`table`、`terms`、`title`）；Text 类有 `raw` 与装饰元素 `underline`/`overline`/`strike`/`highlight`；Introspection 类的 `metadata`（被查询就是它的主业）；其余类别的例外是 `math.equation`、`image`、`pdf.attach`。文档同时说明：非可定位元素贴了标签后同样能被观察到。
 
-- [crates/typst-layout/src/introspect.rs:L37-L58](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-layout/src/introspect.rs#L37-L58) — `PagedIntrospector::new(&[Page])`：逐页记录页码编号（numbering）与补充文本（supplement），对每页 Frame 调 `discover_frame`，闭包把 Frame 内坐标加上页号包装成 `PagedPosition`。
-- [crates/typst-layout/src/introspect.rs:L177-L207](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-layout/src/introspect.rs#L177-L207) — `discover_frame`：遇 `FrameItem::Tag` 上报；遇 `Group` 递归并累积变换矩阵；若 Group 带 `parent`（如脚注区），用插入组把它挂回父元素的文档序；遇 `Link` 记录链接目标集合 `frame_link_targets`。
+值得注意的一个**新近变化**：`divider`（主题分隔线）现在是可定位的——
 
-目标无关的查询引擎 `ElementIntrospector`：
+[crates/typst-library/src/model/divider.rs:L40-L41](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/model/divider.rs#L40-L41) —— `#[elem(since = "0.15.0", Locatable, ShowSet)]`。这正是本仓库最近一次提交之一「Make `divider` locatable (#9023)」的结果（见 `git log` 中 `26d92af60`），对应上面清单里 `divider` 的出现：现在 `#query(divider)` 可以统计全文出现了多少条分隔线。
 
-- [crates/typst-library/src/introspection/introspector.rs:L170-L190](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs#L170-L190) — 核心字段：`elems`（文档序元素列表）、`locations`（`Location → Range<usize>`，把"元素及其全部概念后代"编码成区间，使 `before`/`after`/`within` 选择器可以二分查找）、`labels`、`keys`（测量辅助）、`queries`（查询缓存）。
-- [crates/typst-library/src/introspection/introspector.rs:L513-L530](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs#L513-L530) — `discover_tag`：`seen` 集合按 location 去重——测量（measure）会让同一内容被排版多次，只有一份进入索引。
-- [crates/typst-library/src/introspection/introspector.rs:L578-L631](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs#L578-L631) — `finalize`/`visit`：按 Start/End 事件流重建嵌套区间，Start 时先记 `idx..idx+1`，遇到 End 时把区间终点扩到当前长度，并把插入组填进父元素的范围内。
-- [crates/typst-library/src/introspection/introspector.rs:L194-L342](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs#L194-L342) — `query()` 按 `Selector` 变体派发：元素选择器线性过滤、标签查索引、`Or` 用 BTreeSet 归并排序、`And` 取最小列表再二分交集、`Before`/`After`/`Within` 基于 `locations` 区间二分；开头先查 `QueryCache`（注释说明：不同顶层查询常有共享子查询，例如多个 counter 查询都依赖同一个全局 counter 序列）。
+`Locatable` 标记如何变成运行时判断？宏展开时会生成能力位：
 
-收集的触发点在 `PagedDocument` 构造时，一轮排版结束即得到该轮的内省器：
+[crates/typst-macros/src/elem.rs:L702-L724](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-macros/src/elem.rs#L702-L724) —— `create_introspection_capabilities` 把 `Locatable`/`Unqueriable`/`Tagged` 三个内省能力编译成 `IntrospectionCapabilities { locatable, unqueriable, tagged }` 位标志，供 `elem.is_locatable()` 之类的检查使用（u5-l5 会从宏的角度再讲一遍）。
 
-- [crates/typst-layout/src/document.rs:L29-L41](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-layout/src/document.rs#L29-L41) — `PagedDocument::new` 内部 `PagedIntrospector::new(&pages)`。
-- [crates/typst-layout/src/document.rs:L59-L66](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-layout/src/document.rs#L59-L66) — `Hash for PagedDocument` 故意不哈希 introspector：它完全由 pages 派生，这样哈希更快且语义等价。
+真正发放身份证的现场在 realize 的 `prepare`（u4-l2 讲过 prepare 负责「一次性完成合成与物化」，当时略过了打标签）：
+
+[crates/typst-realize/src/lib.rs:L540-L556](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-realize/src/lib.rs#L540-L556) —— 三步：(1) `key = hash128(&elem)` 算出元素的内容哈希；(2) 组装 `TagFlags`，其中 `introspectable = elem.is_locatable() || elem.label().is_some() || elem.location().is_some()`——**可定位、带标签、或来自查询（已带 location）三种情况之一**；(3) 若还没有 `Location` 且确有需要，向 `Locator` 申请一个并 `set_location` 写回元素。
+
+[crates/typst-realize/src/lib.rs:L575-L582](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-realize/src/lib.rs#L575-L582) —— 在合成与物化**之后**（这样标签里的元素快照包含合成字段），生成一对标签 `(Tag::Start(elem.clone(), flags), Tag::End(loc, key, flags))`。注意 Start 里存的是**整个元素的克隆**——这就是为什么 `query` 能返回带完整字段的元素。
+
+标签的载体定义：
+
+[crates/typst-library/src/introspection/tag.rs:L10-L24](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/tag.rs#L10-L24) —— `Tag` 只有两种形态：`Start(Content, TagFlags)`（元素从这里开始，附完整快照）与 `End(Location, u128, TagFlags)`（该元素到此结束；key 哈希放在 End 里只是为了让两个变体内存大小平衡——注释原话如此）。
+
+[crates/typst-library/src/introspection/tag.rs:L46-L61](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/tag.rs#L46-L61) —— `TagFlags { introspectable, tagged }`：前者决定这个标签会不会进入 Introspector；`tagged` 是另一类需要打标但不需要被查询的元素。
+
+[crates/typst-library/src/introspection/tag.rs:L63-L83](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/tag.rs#L63-L83) —— `TagElem`：把 `Tag` 包装成一种**不可由用户构造**（`Construct` 实现直接报错 "cannot be constructed manually"）的内部元素，文档注释写明「所有布局器都会处理它；它承载的元素在**下一次编译迭代**中变得可内省」——这句话正是本讲主题的官方表述。
+
+最后，`query` 对「不可定位元素」的拒绝发生在参数类型转换处：
+
+[crates/typst-library/src/foundations/selector.rs:L421-L433](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/foundations/selector.rs#L421-L433) —— `LocatableSelector::from_value` 校验选择器里的每个元素函数：`!elem.is_locatable() || elem.is_unqueriable()` 时报错「`{} is not locatable`」。所以 `query(text)` 会在**求值期**（而不是排版期）直接报类型错误。
 
 #### 4.2.4 代码实践
 
-**实践目标**：通过打点观察"每轮排版各发现多少个可内省元素"。
+**实践目标**：验证 `divider` 现在可被查询，并对比查询一个不可定位元素时的报错。
 
-1. 在本地分支给 `discover_tag` 加一行临时日志（**示例代码**，观察完请还原）：
+**操作步骤**：
 
-   ```rust
-   // crates/typst-library/src/introspection/introspector.rs::discover_tag 开头
-   if flags.introspectable {
-       eprintln!("discover {:?}", tag);
-   }
+1. 写 `dividers.typ`：
+
+   ```typ
+   First part
+   #divider()
+   Second part
+   #divider()
+   Third part
    ```
 
-2. 重新 `cargo build -p typst-cli`，编译一篇含 `#outline()` 与若干标题的文档，把 stderr 重定向到文件。
-3. 统计：`grep -c 'Discover(heading' log.txt`（按 Tag 的 Debug 输出格式调整，见 [tag.rs:L36-L44](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/tag.rs#L36-L44) 的 `Start(heading, Location(..))` 格式）。
+2. 用 `typst eval` 在文档上下文里查询（`eval` 子命令的实现在 [crates/typst-cli/src/eval.rs:L32-L129](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-cli/src/eval.rs#L32-L129)：先编译 `--in` 的文档，再把表达式对着最终 introspector 求值）：
 
-**需要观察的现象**：同一批 heading 的 Tag 会在日志中**成组重复出现**——每个布局轮次收集一次；元素数量随轮次增长（outline 条目本身也可定位）。
+   ```sh
+   cargo run -p typst-cli -- eval 'query(divider).len()' --in dividers.typ
+   ```
 
-**预期结果**：重复组数 = 实际布局轮数；同一组内 `Location` 值逐轮相同（分层哈希的跨轮稳定性）。具体输出待本地验证。
+3. 再故意查询一个不可定位元素：
+
+   ```sh
+   cargo run -p typst-cli -- eval 'query(text)' --in dividers.typ
+   ```
+
+**需要观察的现象**：第 2 步应输出 `2`；第 3 步应报错，错误消息形如 `text is not locatable`。
+
+**预期结果**：`query(divider).len()` 返回 `2`（两条分隔线都被收集）；`query(text)` 报 `text is not locatable`。此用法源自 [query.rs:L103-L131](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/query.rs#L103-L131) 的官方文档示例（该示例用 `query(<note>)` 查询 `metadata`）。具体输出格式**待本地验证**。
 
 #### 4.2.5 小练习与答案
 
-1. **练习**：为什么 `Tag::Start` 里携带的 Content 要在 synthesize 与 materialize 之后才克隆？
-   **答案**：[realize/lib.rs:L575-L579](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-realize/src/lib.rs#L575-L579) 注释：这样 query 拿到的元素包含合成字段与已物化样式，`show heading: it => it.numbering` 这类规则才拿得到编号。
-2. **练习**：`discover_tag` 的 `seen` 去重防的是什么场景？
-   **答案**：防测量——同一内容被 `measure` 或试探布局多次排版时会产生多份相同 `Location` 的 Tag，[introspector.rs:L517-L520](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs#L517-L520) 只让第一份进入索引，避免 query 结果重复。
-3. **练习**：脚注正文排在页面底部，为什么 `query(footnote.entry)` 的结果仍按正文顺序而非页面位置顺序？
-   **答案**：脚注 Frame 是带 `parent` 的 Group，`discover_frame` 用 `start_insertion`/`end_insertion`（[introspect.rs:L191-L197](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-layout/src/introspect.rs#L191-L197)、[introspector.rs:L562-L574](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs#L562-L574)）把它的条目插回父元素的文档序区间。
+**练习 1**：`Span` 和 `Location` 都能「定位」，它们定位的对象有什么不同？
 
-### 4.3 query/counter 语义：Introspect 询问协议
+**答案**：`Span` 定位**源码**——一个 8 字节编号，高 16 位是 `FileId`，用于把错误/提示指回源文件字节区间（u2-l4）；`Location` 定位**文档中的元素实例**——一个 u128 内容哈希，用于跨轮次识别「同一个元素」。一个 `Span` 可以对应多个 `Location`（如 `#for` 循环五次生成五个 figure，同源码处），反之一个元素实例只有一个 `Location`。
+
+**练习 2**：为什么 `Tag::Start` 里要克隆整个元素，而不是只存 `Location`？
+
+**答案**：因为 `query` 的语义是返回**元素本身**（含全部字段，用户还要读 `chapter.body`、`figure.caption` 等字段）。Introspector 若只存 `Location`，查询结果就只是个句柄，用户拿不到内容。克隆发生在 realize 的 `prepare`（[realize/lib.rs:L580-L582](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-realize/src/lib.rs#L580-L582)），且在合成与物化之后进行，保证快照里有合成字段。`Content` 是 `Arc` 化的廉价克隆（u3-l4），所以代价可控。
+
+**练习 3**：`#metadata("note") <mynote>` 里的 `metadata` 为什么天然是 Locatable？
+
+**答案**：`metadata` 的存在意义就是「被查询」——它是用户往文档里塞自定义标记、再在别处用 `query(<mynote>)` 取回的主要手段（见 [location.rs:L44-L45](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/location.rs#L44-L45) 的说明「being queried for is its primary purpose」）。它不可见、无排版副作用，可定位是它的设计目的。
+
+---
+
+### 4.3 Introspector 收集：从 `Frame` 到查询索引
 
 #### 4.3.1 概念说明
 
-脚本层的 `query()`、`counter().at()`、`here().page()`、`locate()` 形态各异，但在编译器内部它们是同一种东西：一次**内省询问（Introspection）**——"带着这个问题去问上一轮的内省器，把答案记下来"。统一抽象的好处有二：其一，comemo 追踪 `Introspector` trait 的每次调用，天然知道本轮排版"看过"上轮文档的哪些部分，这是收敛判定的基础；其二，每个询问类型自带 `diagnose`，不收敛时能生成贴近用户语言的警告（"第 3 个标题的页码未稳定"），而不是干巴巴的内部错误。`counter` 与 `state` 之所以不用现成的 `QueryIntrospection` 而自定义询问类型，就是为了定制诊断文案（见 convergence.rs 的 trait 文档）。
+`Introspector` 是「已完成文档」的查询数据库。它的输入是排完版的页面帧，输出是一张**按文档顺序排列**的元素表，外加几组加速索引。
+
+typst-library 提供了目标无关的内核 `ElementIntrospector<P>`（`P` 是位置类型），typst-layout 提供 paged 目标的实现 `PagedIntrospector`（`P = PagedPosition`，即「第几页 + 页内坐标」）。这样 html 等其他目标可以复用同一套查询引擎，只是位置语义不同。
+
+`Introspector` trait 本身带 `#[comemo::track]`——这一点至关重要：主循环正是通过 `track_with(&constraint)` 追踪「本轮读了哪些条目」，才能在排完后做收敛判定（见 4.5）。
 
 #### 4.3.2 核心流程
 
-```
-#context { query(heading) }          ← 用户代码
-  求值期：context 体被包成 ContextElem（Locatable）挂起
-  realize 期：ContextElem 的内置 show 规则回放闭包，此刻才有 location/styles
-    query():
-      context.introspect()?           ← 门禁：没有 context 直接报错
-      engine.introspect(QueryIntrospection(selector, span))
-        → introspection.introspect(engine, tracked_introspector)
-            → introspector.query(&selector)      ← 真正查表
-        → sink.introspection(...)                ← 登记询问，供不收敛诊断用
+收集流水线：
+
+```text
+PagedIntrospector::new(pages)
+    │ 逐页：记录 page numbering / supplement
+    ▼
+discover_frame(frame, transform)
+    │ 递归遍历帧内条目，坐标系随 Group 变换逐层复合
+    ├─ FrameItem::Tag(t)      → builder.discover_tag(t, 页内绝对坐标)
+    ├─ FrameItem::Group(g)    → 递归；若 g.parent 存在（测量场景）
+    │                            则把这段发现「登记为 parent 的插入件」
+    ├─ FrameItem::Link(dest)  → 记入 frame_link_targets（导出时判断死链）
+    └─ Text/Shape/Image       → 忽略（内省只关心 Tag）
+    ▼
+ElementIntrospectorBuilder（sink 里攒 Start/End 事件流）
+    ▼
+finalize / visit：展平成有序 elems 数组，同时建三张索引：
+    locations: Location → Range（元素及其全部后代在数组中的区间）
+    labels:    Label → [下标]
+    keys:      key 哈希 → [Location]（测量模式的位置配对用）
 ```
 
-counter 的读取同样走询问：`CounterAtIntrospection` 先把 counter 键翻译成选择器，扫描文档序中该选择器之前的全部 `CounterUpdateElem` 得到状态序列，再取目标位置之前的那一份。
+查询时（`query(selector)`）按选择器形态选择策略，结果**始终按文档顺序**返回，并有进程内查询缓存 `QueryCache`。
 
 #### 4.3.3 源码精读
 
-`context` 的门禁与挂起机制：
+先看 paged 侧的入口：
 
-- [crates/typst-library/src/foundations/context.rs:L47-L51](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/foundations/context.rs#L47-L51) — `Context::introspect()`：要求至少有 location 或 styles 之一，否则报 "can only be used when context is known"。这就是 `query` 必须包在 `context` 里的根源。
-- [crates/typst-library/src/foundations/context.rs:L64-L87](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/foundations/context.rs#L64-L87) — `ContextElem` 本身是 `Locatable` 的（它需要位置才能给出 `here()`），其内置 show 规则 `CONTEXT_RULE` 用元素自身的 location + 当前样式链构造 `Context` 后调用用户闭包——u3-l7 讲过的"context 表达式延迟到 realize 期回放"在此落地。
+[crates/typst-layout/src/introspect.rs:L37-L58](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-layout/src/introspect.rs#L37-L58) —— `PagedIntrospector::new`（带 `time` 计时标注）：逐页收集 `numbering`/`supplement`，对每页调用 `discover_frame`，闭包 `to_pos` 把帧内坐标包装成 `PagedPosition { page: 页号, point }`。注意页号从 1 开始（`NonZeroUsize::new(1 + i)`）。
 
-`query` 函数本体：
+[crates/typst-layout/src/introspect.rs:L176-L207](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-layout/src/introspect.rs#L176-L207) —— `discover_frame` 是一次**带坐标变换的前序遍历**：
 
-- [crates/typst-library/src/introspection/query.rs:L159-L176](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/query.rs#L159-L176) — 两行核心：`context.introspect()?` 门禁 + `engine.introspect(QueryIntrospection(target.0, span))`；参数类型 `LocatableSelector` 即 4.1 的门禁类型。
-- [crates/typst-library/src/introspection/query.rs:L179-L203](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/query.rs#L179-L203) — `QueryIntrospection`：`Output = EcoVec<Content>`；`diagnose` 里有个精巧设计——先比较**长度**历史，长度不稳就报 "number of heading elements did not stabilize" 并附逐轮数量 hint，长度稳但内容不稳则只报 "query ... did not stabilize"。
-- 同文件还有 `QueryFirstIntrospection`、`QueryUniqueIntrospection`、`QueryLabelIntrospection`（L205-L273），分别对应 `first`/唯一匹配/标签查找，`@ref` 的解析用的正是 `QueryLabelIntrospection`：[crates/typst-library/src/model/reference.rs:L215-L221](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/model/reference.rs#L215-L221) — `RefElem::synthesize` 里 `let Ok(found)` 的写法表明：第一轮标签还不存在时不立刻报错（错误是询问的 `Output` 的一部分，收敛后仍失败才真正浮出）。
+- L183-L185：遇到 `FrameItem::Tag` 就把标签连同「经过变换后的绝对坐标」交给 builder；
+- L186-L198：遇到 `Group` 先把 `Transform::translate(pos)` 与群自身变换 `pre_concat` 进累计变换 `ts`，再递归。**关键分支**在 L191-L195：`group.parent` 存在时（这是被「测量」后放置的内容，见 locator.rs 的 Dealing with Measurement 一节），用 `start_insertion`/`end_insertion(parent.location)` 把这段发现登记为父元素的「插入件」，排序时归到父元素名下；
+- L199-L203：`Link` 目标是 `Destination::Location` 时记入 `frame_link_targets`（PDF/SVG 导出用它判断链接目标是否存在）；
+- L204：文本/形状/图像对内省不可见。
 
-`Engine::introspect` 是所有询问的唯一入口：
+再看目标无关的查询内核。trait 定义：
 
-- [crates/typst-library/src/engine.rs:L104-L117](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/engine.rs#L104-L117) — 取出被 comemo 追踪的 introspector 引用、执行询问、把询问登记进 `Sink`。注释点明副作用："If the document does not converge, the recorded introspections are used to determine the cause"。
-- [crates/typst-library/src/engine.rs:L150-L172](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/engine.rs#L150-L172) — `Sink` 的字段表：`introspections`（询问记录）、`delayed`（延迟错误——前几轮 introspector 未就绪时 show 规则抛出的错误先压着，末轮仍在才升级为致命错误）、`warnings`。
+[crates/typst-library/src/introspection/introspector.rs:L28-L89](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs#L28-L89) —— `#[comemo::track] pub trait Introspector`：`query`/`query_first`/`query_unique`/`query_label`/`query_labelled`/`query_count_before`（计数器专用优化）/`label_count`/`locator`（测量配对）/`pages`/`page`/`position`/`page_numbering`/`page_supplement` 等。文档注释明确：由**目标特定**的 introspector 实现，html 目标对 `page` 类请求可以返回 `None`。
 
-counter 的读取语义：
+数据结构与索引：
 
-- [crates/typst-library/src/introspection/counter.rs:L383-L447](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/counter.rs#L383-L447) — `Counter::display`：`at` 缺省取 `context.location()`（即 `here()`），然后 `engine.introspect(CounterAtIntrospection / CounterBothIntrospection)`；`both: true` 用于 `page numbering: "1 / 1"` 这类"当前页 + 总页数"。
-- [crates/typst-library/src/introspection/counter.rs:L788-L819](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/counter.rs#L788-L819) — `CounterAtIntrospection::introspect`：`counter.select()` 把键翻译为选择器 → `sequence()` 扫描全部更新元素 → `query_count_before` 二分出目标位置之前有几个 → 取序列中该偏移的状态；若这是**页计数器**，还要用 `introspector.page(loc)` 与扫描时记录的物理页号之差做校正——因为逻辑页码（可被 `counter(page).update` 改写）与物理页号可能脱节。
-- [crates/typst-library/src/introspection/counter.rs:L751-L773](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/counter.rs#L751-L773) — `ManualPageCounter::visit`：布局期间的物理页计数器直接扫 Frame 里的 `Tag::Start(CounterUpdateElem)` 应用更新——页码这种"边排边走"的计数不需要走完整询问协议。
+[crates/typst-library/src/introspection/introspector.rs:L169-L190](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs#L169-L190) —— `ElementIntrospector<P>` 的字段就是它的索引清单：`elems: Vec<(Content, P)>`（按文档序的元素+位置表）、`keys`（内容哈希 → locations，测量配对用）、`locations: FxHashMap<Location, Range<usize>>`（**区间索引**：元素自己 + 它的全部概念上的后代占据的数组范围）、`labels`（标签多映射）、`queries: QueryCache`。
 
-位置类询问与诊断文案：
+builder 如何把事件流变成索引：
 
-- [crates/typst-library/src/introspection/location.rs:L99-L102](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/location.rs#L99-L102) 与 [L144-L148](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/location.rs#L144-L148) — `location().page()` / `location().position()` 分别对应 `PageIntrospection` / `PositionIntrospection`；文档特别提醒：`page()` 返回物理页号，要逻辑页码请用 `counter(page).at(loc)`。
-- [crates/typst-library/src/introspection/location.rs:L393-L417](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/location.rs#L393-L417) — `format_convergence_warning`：用最终内省器反查该 location 对应的元素名，生成 "heading position did not stabilize" + "heading was created here"（附源码 span）+ 逐轮观测值列表。
+[crates/typst-library/src/introspection/introspector.rs:L513-L530](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs#L513-L530) —— `discover_tag`：`Start` 时若 `flags.introspectable` 且该 `Location` 未见过（`seen` 去重——测量与实排共享同一 `Location`，标签会出现多次，只记一次），压入 `Start` 事件；`End` 时登记 `keys` 并压入 `End` 事件。
 
-#### 4.3.4 代码实践
+[crates/typst-library/src/introspection/introspector.rs:L561-L574](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs#L561-L574) —— `start_insertion`/`end_insertion`：测量场景的插入件机制。`start` 暂存当前 sink，`end` 把期间攒下的元素挂到 `insertions[parent]`，等待排序时插到父元素区间内。
 
-**实践目标**：复现"影响自身的查询"，亲眼看收敛警告与逐轮观测值。
+[crates/typst-library/src/introspection/introspector.rs:L576-L631](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs#L576-L631) —— `finalize` 消费事件流，`visit` 逐项处理：`Start` 时先在 `locations` 里插入「只覆盖自己」的区间 `idx..idx+1`，登记 `labels`，压入 `elems`，然后**递归处理属于自己的插入件**（L618-L622）；`End` 时把该元素区间的终点改写为当前数组长度（L624-L629）。这一进一出，恰好让每个元素的 `Range` 覆盖自己与全部后代——`Selector::Within`（祖先后代查询）与二分查找都依赖这一点。
 
-1. 新建 `self-query.typ`：
+查询引擎的策略分派：
+
+[crates/typst-library/src/introspection/introspector.rs:L194-L342](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs#L194-L342) —— `query` 开头先查缓存（L195-L198），然后按选择器形态分派：
+
+- `Elem(..)`：全表线性过滤（L201-L205）；
+- `Label`：直接查标签索引（L209-L214）；
+- `Or`：各子查询结果合并进 `BTreeSet<usize>` 按下标**去重并恢复文档顺序**（L215-L222）；
+- `And`：取最小的结果集，对其余结果集做二分求交（L223-L245）；
+- `Before`/`After`：先算子查询，再用 `binary_search` 在有序结果里切一刀（L246-L273）——能二分的前提正是 `elems` 按文档序排列；
+- `Within`：沿祖先的 `loc_range` 区间收集后代（L274-L335）；
+- `Can`/`Regex` 在此不支持（L336-L337）。
+
+[crates/typst-library/src/introspection/introspector.rs:L392-L405](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs#L392-L405) —— `query_count_before`：`query(selector).len()` 的优化版，计数器专用（4.4 会用到）。
+
+[crates/typst-library/src/introspection/introspector.rs:L685-L703](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs#L685-L703) —— `QueryCache`：以选择器哈希为键的 `RwLock` 缓存。字段注释解释了动机：即使顶层查询各不相同，它们常有**共享的子查询**（例如许多个带 `before` 的计数器查询都依赖同一个全局计数查询）。
+
+最后补一个布局侧的细节：文档末尾（最后一页之外）悬空的标签怎么办？
+
+[crates/typst-layout/src/pages/mod.rs:L236-L242](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-layout/src/pages/mod.rs#L236-L242) —— `layout_pages` 把页与页之间收集到的 `tags`（比如恰好在分页点上的元素标签）统一追加到**最后一页末尾**（纵坐标取页高），保证任何可定位元素都不会因为落在页面间隙而丢失。
+
+#### 4.3.4 代码实践（源码阅读型）
+
+**实践目标**：通过可观察的查询行为验证「结果按文档顺序排列」与「标签索引」两个论断。
+
+**操作步骤**：
+
+1. 写 `order.typ`：
+
+   ```typ
+   = Alpha <a>
+   = Beta <b>
+
+   = Gamma <a>
+   ```
+
+   （故意让 `<a>` 出现两次，检验 label 多映射与 `query_first`。）
+
+2. 依次执行：
+
+   ```sh
+   cargo run -p typst-cli -- eval 'query(heading).map(h => h.body)' --in order.typ
+   cargo run -p typst-cli -- eval 'query(<a>).len()' --in order.typ
+   cargo run -p typst-cli -- eval 'query(<b>).first().body' --in order.typ
+   ```
+
+3. 对照 [introspector.rs:L194-L222](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs#L194-L222) 阅读：`Elem` 分支是对 `elems` 顺序表的过滤，因此输出顺序即文档顺序；`Label` 分支查 `labels` 多映射，所以重复标签返回多个元素。
+
+**需要观察的现象**：第一个命令按 Alpha、Beta、Gamma 的顺序返回三个标题体；第二个命令返回 `2`；第三个命令返回 `Beta`。
+
+**预期结果**：如上。输出为 JSON 序列化格式（`typst eval` 默认序列化，见 [eval.rs:L159-L191](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-cli/src/eval.rs#L159-L191)）。具体输出形状**待本地验证**。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么 `elems` 必须严格按文档顺序排列？举两个依赖它的机制。
+
+**答案**：(1) `query` 的语义要求结果按文档中出现的先后排序（目录、编号都依赖这个顺序）；(2) `Selector::Before`/`After` 与 `query_count_before` 用**二分查找**在结果列表里定位切分点（[introspector.rs:L246-L273](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs#L246-L273)），二分的前提是有序；此外 `Selector::Or` 用 `BTreeSet<usize>` 去重后也要靠下标恢复顺序。
+
+**练习 2**：`locations` 索引为什么存「区间」而不是单个下标？
+
+**答案**：区间 `idx..end` 覆盖元素**及其全部概念上的后代**（在 `visit` 里由 Start/End 事件对维护，[introspector.rs:L598-L631](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs#L598-L631)）。`Selector::Within { selector, ancestor }` 要找「祖先内部的所有匹配元素」，就是拿祖先的区间去列表里截取（L274-L335）。单下标无法表达包含关系。
+
+**练习 3**：内省器为什么忽略 `FrameItem::Text/Shape/Image`，却又专门收集 `FrameItem::Link`？
+
+**答案**：内省的对象是**语义元素**（由 `Tag` 承载），文本/形状/图像是排版终态图元，查询它们没有意义。`Link` 是例外：`frame_link_targets`（[introspect.rs:L70-L74](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-layout/src/introspect.rs#L70-L74)）记录文档实际链接到了哪些 `Location`，供导出器判断「链接目标不存在」这类问题——这是排版结果自身携带、别处无从得知的信息。
+
+---
+
+### 4.4 `query` / `counter` 的内省语义
+
+#### 4.4.1 概念说明
+
+前两节解决了「查询什么」（数据库），本节回答「怎么查、查了之后发生什么」。
+
+核心抽象是 `Introspect` trait：**把一次内省请求建模为一个可哈希、可诊断的值对象**。`query(heading)` 在排版期变成一个 `QueryIntrospection(Selector, Span)` 值，交给 `Engine::introspect`：
+
+1. 立即对「本轮持有的上一轮 introspector」执行，拿到结果（哪怕结果是错的/空的）；
+2. 同时把这个请求**记录**到 `Sink::introspections`——如果最终没收敛，这些记录就是诊断的原料（4.5）。
+
+这个设计把「读取」和「记账」绑定在一起：编译器不需要理解每种查询的语义，只需要在排完版后检查「所有已记录请求的答案变没变」。
+
+`counter` 在此之上再叠一层语义：**计数器的当前值 = 从文档开头回放到当前位置的全部更新**。每次 `counter.step()/update()` 都会在文档里放一个（不可见的）`CounterUpdateElem`——它本身是 Locatable 的，因此出现在 introspector 里；读取计数器就是查出所有这些更新元素、按文档顺序回放状态机。
+
+#### 4.4.2 核心流程
+
+`query` 的路径：
+
+```text
+脚本: #context query(heading)
+    ▼ (u3-l7: context 表达式提供 location/styles)
+query() 函数体:
+    context.introspect()?        # 守卫：没有 context 直接报错
+    engine.introspect(QueryIntrospection(selector, span))
+        ├─ introspection.introspect(engine, introspector)  # 真正读取
+        └─ sink.introspection(请求)                        # 记账
+```
+
+`counter` 的路径（以 `counter.at(loc)` 为例）：
+
+```text
+counter.select(introspector, loc)
+    → 选择器 = 「所有 key 匹配的 CounterUpdateElem」
+               Or 「被计数的元素本身」（如全部 heading）
+sequence(选择器)                 # 沿文档顺序回放更新，得到 (状态, 页号) 序列
+    → 第 i 步状态 = 前 i 次更新后的值；每步还记录所在物理页
+query_count_before(选择器, loc)  # loc 之前有几个匹配 → 定位到序列下标
+    → 序列[下标] 即该位置的计数器值
+（page 计数器额外用物理页差值修正）
+```
+
+#### 4.4.3 源码精读
+
+`query` 函数与它的守卫：
+
+[crates/typst-library/src/introspection/query.rs:L159-L176](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/query.rs#L159-L176) —— `query` 是 `#[func(contextual)]`：第一行 `context.introspect()?` 要求至少知道一点上下文（位置或样式），否则报 "can only be used when context is known"；随后 `engine.introspect(QueryIntrospection(target.0, span))`。文档注释（L73-L101）里有个经典反例：查询 heading 的数量再生成同样数量的假 heading——每轮查询结果都在变，永不收敛，Typst 五轮后放弃并警告。
+
+[crates/typst-library/src/foundations/context.rs:L47-L60](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/foundations/context.rs#L47-L60) —— `Context::introspect` 守卫：`location` 或 `styles` 任一存在即放行；错误附带提示「try wrapping this in a `context` expression」。这解释了 u3-l7 的设计：`context` 表达式挂起为 `ContextElem`，正是为了在排版期把 location/styles 塞进来。
+
+`Engine::introspect`——执行 + 记账：
+
+[crates/typst-library/src/engine.rs:L109-L117](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/engine.rs#L109-L117) —— 两行核心：先 `introspection.introspect(self, introspector)` 拿到输出，再 `self.sink.introspection(Introspection::new(introspection))` 把请求记入 sink。排版结束后 `subsink.introspections()` 就是本轮全部内省请求清单。
+
+`Introspect` trait 的契约：
+
+[crates/typst-library/src/introspection/convergence.rs:L93-L140](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/convergence.rs#L93-L140) —— 关联类型 `Output: Hash`（**要稳定的就是它**，注释特别提醒：输出的信息量会影响收敛速度——把查询结果压缩成布尔可能早一轮收敛）；`introspect` 执行读取；`diagnose` 在不收敛时生成诊断。文档注释说明了为什么 counter/state 不直接复用 `QueryIntrospection`：为了给用户更贴近直觉的报错文案。
+
+[crates/typst-library/src/introspection/query.rs:L178-L203](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/query.rs#L178-L203) —— `QueryIntrospection`：`Output = EcoVec<Content>`，`introspect` 委托 `introspector.query(&self.0)`；`diagnose` 先比较各轮结果**长度**，长度不稳就说「number of X did not stabilize」，否则说「query for X did not stabilize」。
+
+`counter` 的数据模型：
+
+[crates/typst-library/src/introspection/counter.rs:L217-L230](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/counter.rs#L217-L230) —— `Counter(CounterKey)`：键有三种——`Page`（页计数器）、`Selector`（元素计数器，如 `counter(heading)`）、`Str`（自定义计数器，如 `counter("my-counter")`）。
+
+[crates/typst-library/src/introspection/counter.rs:L238-L263](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/counter.rs#L238-L263) —— `select`：把键翻译成选择器——先选「所有 key 匹配的 `CounterUpdateElem`」，`Selector` 键再把**被计数的元素本身**用 `Or` 并进来（heading 计数器既要知道你手动 update 过几次，也要数 heading 元素本身出现的次数）。
+
+[crates/typst-library/src/introspection/counter.rs:L661-L684](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/counter.rs#L661-L684) —— `CounterUpdateElem`：`#[elem(Construct, Locatable, Count)]`——**计数更新自己就是一种可定位元素**（不可手动构造）。它必须 Locatable，否则 `query_count_before(selector, loc)` 无法按位置切分更新序列。`Count` trait（[L584-L588](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/counter.rs#L584-L588)）让特殊元素自定义计数行为（如 heading 按层级 step）。
+
+回放状态机：
+
+[crates/typst-library/src/introspection/counter.rs:L894-L967](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/counter.rs#L894-L967) —— `sequence` / `sequence_impl`：从初值（页计数器从 1 开始，见 `CounterState::init`）出发，遍历 `introspector.query(selector)` 的**按文档序**结果，逐个应用更新（没有 `Count` 实现的匹配元素默认 `Step(1)`），每一步记录 `(状态, 物理页号)`。函数带 `#[comemo::memoize]`，注释点明动机：**所有对同一计数器的读取共享一次回放，把复杂度从平方降到线性**。
+
+[crates/typst-library/src/introspection/counter.rs:L788-L819](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/counter.rs#L788-L819) —— `CounterAtIntrospection::introspect`：`sequence` 回放 → `query_count_before(selector, loc)` 算出 loc 之前有几个匹配 → `sequence[offset]` 即答案；页计数器额外用「当前物理页 − 序列记录页」的差值补上隐式翻页步进（L805-L812）。
+
+顺带两个相邻机制：
+
+- [crates/typst-library/src/introspection/counter.rs:L726-L786](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/counter.rs#L726-L786) —— `ManualPageCounter`：**排版期**（而非查询期）维护的物理/逻辑页计数器。`visit` 扫描每页帧里的 `CounterUpdateElem` 应用显式更新，`step` 在翻页时双计数加一。它在 [pages/mod.rs:L203-L224](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-layout/src/pages/mod.rs#L203-L224) 的 finalize 流程中逐页推进，用来生成 `Page::number`（逻辑页号，见 [document.rs:L117-L119](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-layout/src/document.rs#L117-L119)）。
+- [crates/typst-library/src/introspection/here.rs:L49-L52](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/here.rs#L49-L52) 与 [locate.rs:L27-L42](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/locate.rs#L27-L42) —— `here()` 直接从 context 取当前 `Location`；`locate(selector)` 要求选择器唯一匹配并返回其 `Location`（内部走 `QueryUniqueIntrospection`）。`state` 类型的机制与 counter 同构，见同目录 `state.rs`。
+
+#### 4.4.4 代码实践
+
+**实践目标**：亲手用 `query` + `counter` 搭一个迷你目录，体会「查询结果喂给计数器」的完整链路。
+
+**操作步骤**：
+
+1. 写 `manual-toc.typ`（改编自 [query.rs:L31-L65](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/query.rs#L31-L65) 的官方示例）：
+
+   ```typ
+   #set page(numbering: "1")
+   #heading(outlined: false)[Table of Contents]
+   #context {
+     let chapters = query(heading.where(level: 1, outlined: true))
+     for chapter in chapters {
+       let loc = chapter.location()
+       let nr = counter(page).display(at: loc)
+       [#chapter.body #h(1fr) #nr \ ]
+     }
+   }
+
+   = Introduction
+   #lorem(60)
+
+   = Discussion
+   #lorem(60)
+   ```
+
+2. 编译：`cargo run -p typst-cli -- compile manual-toc.typ`。
+
+3. 用 `typst eval` 直接查询计数器在某标签处的值（`typst eval` 的求值上下文带样式，因此 `context.introspect()` 守卫放行）：
+
+   ```sh
+   cargo run -p typst-cli -- eval 'counter(page).at(<disc>)' --in manual-toc.typ
+   ```
+
+   （需要先给 Discussion 标题加 `<disc>` 标签。）
+
+**需要观察的现象**：目录两行的页码正确；即使 Introduction 被目录挤到第 2 页，页码依然正确（多轮迭代生效）。
+
+**预期结果**：第 3 步输出类似 `(2,)` 的数组（counter 值是 `CounterState`，脚本形态为数组）。具体数值取决于分页，**待本地验证**。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：为什么 `counter` 的更新要作为元素（`CounterUpdateElem`）放进文档，而不是维护一张全局表？
+
+**答案**：因为「计数器在某位置的值」本质上取决于**文档结构**（哪些更新排在这个位置之前），而文档结构每轮排版都可能变。把更新做成可定位元素后，求值期只是「往文档里放元素」（纯数据，无副作用），真正的计算推迟到查询时沿文档序回放（`sequence`）——这天然与多轮迭代兼容：重排后更新序列变了，回放结果跟着变，收敛判定自动接管。全局表则无法表达「位置」这个维度。
+
+**练习 2**：`query` 为什么必须是 `contextual` 函数（必须在 `context` 里调用）？
+
+**答案**：两个原因。(1) 语义上：查询结果依赖于「排版的当前状态」，在没有位置/样式上下文的地方（如模块顶层）查询语义不明；(2) 机制上：`context.introspect()` 守卫（[context.rs:L48-L50](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/foundations/context.rs#L48-L50)）要求 context 至少携带 location 或 styles 之一，而这两样正是 u3-l7 里 `ContextElem` 挂起后在排版期注入的。反例是 `typst eval`：它构造的 context 只有 styles 没有 location，所以 `query` 可用但 `here()` 会报错。
+
+**练习 3**：`query_count_before(selector, end)` 与 `query(selector.before(end, true)).len()` 等价，为什么前者要单独存在？
+
+**答案**：性能。前者复用一次 `query(selector)` 的（缓存的）完整结果，再用二分查找定位切分点（[introspector.rs:L392-L405](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/introspector.rs#L392-L405)）；后者要为每个 `end` 构造新选择器、触发新的（子）查询。计数器对每个读取位置都要做一次「之前有多少个」，这是热路径，trait 注释直接称之为 "An optimized version"。
+
+---
+
+### 4.5 迭代收敛判定、不收敛诊断与性能
+
+#### 4.5.1 概念说明
+
+收敛判定有**两层**：
+
+1. **快路径：comemo 约束验证**。排版时对 introspector 的每次读取都被 `constraint` 记账；排完新版文档后，`constraint.validate(新 introspector)` 保守地回答「本轮读到的所有条目在新文档里是否原样成立」。成立 → 收敛，结束。这是 u4-l1 讲过的 comemo 追踪机制在内省上的应用。
+2. **慢路径：`History` 逐轮重放**。只有当快路径失败（且已到迭代上限）时才启动：把本轮记录的每一个内省请求在**六个**introspector（空 + 四份历史 + 最终）上重放一遍，比较最后两个观测值的哈希；不一致的请求生成「did not stabilize」警告。
+
+为什么要两层？[crates/typst-library/src/introspection/convergence.rs:L37-L56](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/convergence.rs#L37-L56) 的注释给了答案：comemo 看到的数据可能比内省请求**多**（内省可能把数据过滤后再返回），存在「comemo 验证失败但文档实际已收敛」的情况——此时慢路径重放发现无差异，就不再误报警告。
+
+性能视角：多轮迭代听起来昂贵，实际上有三道护栏：
+
+- **求值只跑一次**（4.1）；
+- **布局整体被 `#[comemo::memoize]` 包裹**，且 `Location` 的分层哈希设计让「未受扰动的元素」跨轮拿到相同身份证，缓存大面积命中；
+- **查询侧有 `QueryCache` 与 memoized `sequence`**，把重复查询/回放压到近线性。
+
+#### 4.5.2 核心流程
+
+快路径（主循环内，每轮一次）：
+
+```text
+constraint = Constraint::new()
+排版（introspector 以 constraint 追踪）
+stable = constraint.validate(新文档的 introspector)
+stable == true → break（收敛）
+```
+
+慢路径（仅在五轮耗尽时）：
+
+```text
+introspectors = [Empty, history[0..4], 最终文档]     # 共 6 个
+for 记录在案的每个内省请求 I:
+    history = History::compute(在 6 个 introspector 上分别执行 I)
+    hash(history[4]) != hash(history[5])  # 第 5 轮 vs 假想的第 6 轮
+        → I.diagnose(history) 生成警告（附每轮观测值清单）
+汇总为一条 "document did not converge within five attempts" 总警告
+```
+
+数学上，设某内省请求在第 \(i\) 轮的观测值为 \(v_i\)（\(i = 1..5\)，另记最终文档上的重放值为 \(v_{\text{final}}\)），收敛条件是：
+
+\[
+\mathrm{hash}(v_{5}) = \mathrm{hash}(v_{\text{final}})
+\]
+
+即「若再排一轮，答案也不会再变」。用哈希比较而非相等比较是有意的（[crates/typst-library/src/introspection/convergence.rs:L242-L249](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/convergence.rs#L242-L249) 的注释）：`0.0`（float）与 `0`（int）值相等但类型不同，下一轮可能表现出差异，不应算收敛。
+
+#### 4.5.3 源码精读
+
+快路径的调用点在 4.1.3 已精读（[typst/src/lib.rs:L145](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs#L145)、[L159-L162](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs#L159-L162)）。这里看慢路径：
+
+[crates/typst-library/src/introspection/convergence.rs:L24-L70](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/convergence.rs#L24-L70) —— `analyze`：遍历本轮记录的所有 `Introspection`，逐个 `diagnose`（内部做 History 重放，见下），有产出的收集为警告；最后若存在任何警告，再插入一条汇总警告 "document did not converge within five attempts"，并附帮助链接 hint。L37-L56 的大段注释解释了「为什么 comemo 验证失败却可能没有警告」——即上文两层判定的理由。
+
+[crates/typst-library/src/introspection/convergence.rs:L174-L187](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/convergence.rs#L174-L187) —— `Bounds::diagnose`（类型擦除后的分发）：`History::compute` 在六个 introspector 上重放请求，`!history.converged()` 时才调用具体类型的 `diagnose` 生成警告。
+
+[crates/typst-library/src/introspection/convergence.rs:L211-L250](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/convergence.rs#L211-L250) —— `History`：长度固定为 `INSTANCES = MAX_ITERS + 1 = 6` 的数组，每项是 (introspector, 该 introspector 上的观测值)；`compute` 为每个 introspector 临时组装一个 `Engine` 执行请求；`converged()` 比较下标 `MAX_ITERS-1`（第 5 轮用的内省器）与 `MAX_ITERS`（最终文档）上观测值的 `hash128`。
+
+[crates/typst-library/src/introspection/convergence.rs:L267-L280](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/convergence.rs#L267-L280) —— `History::hint`：把每轮观测值格式化成提示文本——前五轮标 `run 1`…`run 5`，最后一个标 `final`。这是用户在「不收敛」警告里看到的那份「观测历史」的出处。
+
+具体诊断的样例：
+
+[crates/typst-library/src/introspection/location.rs:L392-L417](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/location.rs#L392-L417) —— 位置类内省的 `format_convergence_warning`：先反查该 `Location` 对应的元素名（`query_first(&Selector::Location(loc))`），生成「`{元素} position did not stabilize`」并附「元素创建于这里」的 span hint 与逐轮观测值。
+
+最后看性能护栏的源码证据：
+
+[crates/typst-layout/src/pages/mod.rs:L52-L76](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-layout/src/pages/mod.rs#L52-L76) —— `layout_document_impl` 带 `#[comemo::memoize]`：整个文档排版是记忆化函数，输入（world、library、introspector、content、styles）不变则直接返回缓存。多轮迭代中真正变化的往往只是 introspector 的少数条目，配合下游各级 memoize，未受影响的大段布局全部命中缓存。
+
+[crates/typst-library/src/introspection/locator.rs:L49-L112](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/locator.rs#L49-L112) —— `Locator` 的设计说明：为什么用「span + 每层消歧 + 分层哈希」而不是全局计数器——依次否决了三种策略（计数器：轮间漂移 + 编辑不稳定 + 有状态；span+计数器：仍有全局状态），最终方案按执行树逐层哈希：
+
+\[
+h_n = \mathrm{hash}(h_{n-1}, k_n)
+\]
+
+其中 \(k_n\) 是第 \(n\) 层的本地标识（span + 同 span 消歧计数）。状态完全局部化（可并行）、编辑局部扰动（缓存友好）、跨轮稳定（迭代可对上号）。L107-L112 还说明这一切都在 comemo 追踪下进行：不含可定位元素的内容即使出现在不同位置也能共享布局缓存。
+
+[crates/typst-library/src/introspection/counter.rs:L894-L898](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/counter.rs#L894-L898) —— `sequence` 的文档注释：memoization 让同一计数器的全部读取共享一次回放，「从平方降到线性」。
+
+#### 4.5.4 代码实践
+
+**实践目标**：制造一次「不收敛」，观察五轮上限与诊断警告的完整形态。
+
+**操作步骤**：
+
+1. 写 `fake.typ`（即 [query.rs:L91-L101](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/query.rs#L91-L101) 文档中的官方反例）：
 
    ```typ
    = Real
-
    #context {
      let elems = query(heading)
      let count = elems.len()
@@ -264,134 +672,84 @@ counter 的读取语义：
    }
    ```
 
-2. 编译：`cargo run -p typst-cli -- compile self-query.typ`，观察终端警告。
-3. 运行仓库现成的测试对照：`cargo testit convergence-query`（见 [tests/suite/introspection/convergence.typ:L3-L47](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/tests/suite/introspection/convergence.typ#L3-L47)，其断言了 "run 1: 0 → run 5: 4 → final: 5" 的完整序列）。
+2. 编译：`cargo run -p typst-cli -- compile fake.typ`，观察终端诊断。
 
-**需要观察的现象**：警告 "document did not converge within five attempts"，hint 逐轮列出查询数量 `run 1: 0, run 2: 1, … final: 5`；PDF 里最终有 5 个 Fake 标题（Typst 放弃迭代前的末轮结果）。
+3. 打开 4.1 实践里的计时方法再跑一次（`--timings fake-timings.json`），数 `iter (` 的个数。
 
-**预期结果**：与测试文件注释的断言一致；这是理解"鸡生蛋查询永不收敛"的最小样本。
+4. 把 `count * [= Fake]` 改成固定数量（如 `2 * [= Fake]`），重新编译，确认警告消失。
 
-#### 4.3.5 小练习与答案
+**需要观察的现象**：第 2 步应出现警告，总警告形如 "document did not converge within five attempts"，下面还有针对查询本身的 "number of headings did not stabilize"，hint 里逐轮列出 `run 1`…`run 5`/`final` 的观测数量（来自 `History::hint`）；第 3 步应能数出 5 个迭代区间；第 4 步警告消失。
 
-1. **练习**：把 `query(heading)` 写在 `context` 外面会发生什么？为什么？
-   **答案**：编译错误 "can only be used when context is known"，hint 建议包进 `context`；根源是 [query.rs:L173](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/query.rs#L173) 的 `context.introspect()?`——query 的答案依赖"问的人在哪"，没有 location 就没有稳定答案。
-2. **练习**：`#set page(numbering: "1")` 后 `counter(page).at(here())` 与 `here().page()` 何时会不相等？
-   **答案**：当文档中有 `counter(page).update(3)` 之类手动改写时：`at()` 返回逻辑计数（可跳号），`page()` 返回物理页号（恒从 1 连续递增），见 [location.rs:L83-L90](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/location.rs#L83-L90) 与 [counter.rs:L805-L812](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/counter.rs#L805-L812) 的 delta 校正。
-3. **练习**：为什么 `Sink` 要区分 `delayed` 错误与普通错误？
-   **答案**：前几轮 introspector 里标签/文献可能暂不存在，show 规则抛错是**预期内**的；[engine.rs:L160-L165](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/engine.rs#L160-L165) 注释：先吞掉继续排，只有末轮仍存在的错误才在主循环结束时升级（[typst/src/lib.rs:L188-L192](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs#L188-L192)）。
+**预期结果**：如上。文档仍会输出 PDF，其中 Fake 标题的数量停留在某一轮的值（文档注释说「Typst simply gives up after a few attempts」）。具体警告文案**待本地验证**。
 
-### 4.4 迭代收敛判定与两遍编译
+#### 4.5.5 小练习与答案
 
-#### 4.4.1 概念说明
+**练习 1**：`constraint.validate` 通过的标准是什么？它是精确判定吗？
 
-"两遍编译"是通俗说法：Typst 实际是**求值一遍、排版最多五遍**。求值（eval）只跑一次，因为它不依赖内省结果；`context` 块被挂起为 `ContextElem`，`@ref` 的解析、outline 的条目生成都发生在每轮排版的 realize 里。于是主循环的任务是：用上一轮文档的内省器排这一轮的版，然后判断"这一轮读过的那些答案，在新文档里是否仍然成立"。判定有两条路径：**快路径**由 comemo 完成——本轮所有对 tracked `Introspector` 的调用都记录了约束，`constraint.validate` 检查新内省器是否满足全部约束，代价低；**慢路径**只在五轮耗尽时触发——`analyze` 把本轮登记的每个询问在六个历史内省器上重放一遍，构造 `History`，比较末两轮输出，生成针对每个不稳定询问的警告。
+**答案**：标准是「本轮从旧 introspector **实际读取过**的每个条目，在新 introspector 中保持原值」。comemo 只知道「读了什么、读到什么」，不知道「读取的结果如何被使用」，所以它是**保守**的：可能出现「读到的数据变了、但最终文档恰好不变」的假阴性（这时候进入慢路径重放，若 History 显示无差异则不警告），但不会出现假阳性（验证通过就一定安全）。
 
-#### 4.4.2 核心流程
+**练习 2**：`History` 为什么固定重放六个 introspector，而不是五个？
 
-```
-compile_impl:
-  eval(main) → content            # 只有一次
-  history = []                    # 容量 MAX_ITERS - 1 = 4
-  loop:
-    introspector = history.last()?.introspector() 或 EmptyIntrospector（首轮）
-    constraint = comemo::Constraint::new()
-    engine.introspector = introspector.track_with(&constraint)   # 带约束追踪
-    document = T::create(...)      # realize + layout，期间所有询问被追踪+登记
-    if constraint.validate(document.introspector()):
-        收敛，break                 # 快路径
-    if history 满（已排 5 轮）:
-        analyze(world, 六个内省器, subsink.introspections())
-        → 逐询问 History 比较 hash(第4轮) == hash(第5轮) ?
-        → 汇总 "document did not converge within five attempts" 警告，break
-    history.push(document)
-  末轮 document 仍作为产物返回（不收敛不报错，只警告）
-```
+**答案**：六个实例 = 第一轮用的 `EmptyIntrospector` + 中间压入历史的四份文档（`MAX_ITERS - 1`）+ 触发放弃的那份最终文档（见 [typst/src/lib.rs:L164-L170](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs#L164-L170) 的组装代码）。前五个对应用户五轮排版各自「看到的」文档；最后一个是「假如再排一轮将会看到的」文档。`converged()` 比较的正是这两个：第 5 轮的输入 vs 假想第 6 轮的输入。缺任何一个都无法回答「如果再来一轮会不会变」。
 
-轮次与警告里 "run N / final" 的对应关系：`run 1` 是首轮排版时查询的**空**内省器，`run k`（k ≥ 2）是第 k−1 轮产出的内省器，`final` 是第 5 轮产物——所以不收敛时总共排了 5 遍版。
+**练习 3**：同样是「同一内容布局多次」，`Locator::split` 与 `Locator::relayout` 有什么区别？这与内省有什么关系？
 
-#### 4.4.3 源码精读
+**答案**：`split` 用于「布局多个**不同**的孩子」——为每个孩子派生独立 `Locator`，各自拿到不同 `Location`（五个 figure 五个号）；`relayout` 用于「同一内容布局**多次**」（典型是测量）——复用同一 `Locator`，各次产出拿到**相同** `Location`，编译器据此识别「这是同一个元素」，查询/计数不会重复计数（见 [locator.rs:L17-L47](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/locator.rs#L17-L47)）。这就是 4.3 里 `discover_tag` 用 `seen` 按 `Location` 去重、`discover_frame` 处理 `group.parent` 插入件的根源：测量的产出虽然也带着 Tag 进了收集流程，但最终与实排的同一元素合并为一份。
 
-主循环全部集中在 `compile_impl` 后半段：
-
-- [crates/typst/src/lib.rs:L118-L132](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs#L118-L132) — 主文件求值恰好一次，得到 `content`；循环里再未出现 `eval`。
-- [crates/typst/src/lib.rs:L134-L145](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs#L134-L145) — `history` 是容量 `MAX_ITERS - 1` 的 ArrayVec；每轮开一个名为 `iter (N)` 的计时作用域（u4-l1 讲过的 `--timings` 就靠它数轮数）；首轮的 introspector 是 `EmptyIntrospector`——这解释了 4.3 实践里 "run 1: 0"：第一轮任何查询都得到空结果。
-- [crates/typst/src/lib.rs:L147-L157](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs#L147-L157) — 关键一行 `introspector.track_with(&constraint)`：comemo 在追踪调用的同时记录约束；`T::create` 即 realize+layout。
-- [crates/typst/src/lib.rs:L159-L163](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs#L159-L163) — 快路径收敛判定：`constraint.validate(document.introspector())` 为真则本轮 subsink 并入总 sink 并 break。
-- [crates/typst/src/lib.rs:L164-L183](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs#L164-L183) — 五轮耗尽：组装 `[empty, history[0..3], 最终]` 共 `MAX_ITERS + 1 = 6` 个内省器交给 `analyze`，其产出的警告逐条 `sink.warn`；**然后仍然 break 并返回 document**——不收敛不是错误。
-- [crates/typst/src/lib.rs:L185](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs#L185) — 未满则推入 history 进入下一轮。
-
-收敛模块的公共参数与诊断入口：
-
-- [crates/typst-library/src/introspection/convergence.rs:L16-L20](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/convergence.rs#L16-L20) — `MAX_ITERS = 5`、`ITER_NAMES`（"iter (1)"…"iter (5)"）、`INSTANCES = MAX_ITERS + 1`。
-- [crates/typst-library/src/introspection/convergence.rs:L25-L70](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/convergence.rs#L25-L70) — `analyze`：逐询问 `diagnose`；开头的长注释解释一个微妙情形——若询问把 comemo 观察到的数据**过滤后**才输出（比如查询后只取布尔值），可能 comemo 校验失败而文档实际已收敛，此时 `diags` 为空，就不再发收敛警告。
-- [crates/typst-library/src/introspection/convergence.rs:L93-L140](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/convergence.rs#L93-L140) — `Introspect` trait：`type Output: Hash`（输出越精简可能越早一轮收敛，文档举了 `location.page()` vs `location.position().page` 的例子）、`introspect`（执行）、`diagnose`（不收敛时如何报警）。
-- [crates/typst-library/src/introspection/convergence.rs:L174-L187](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/convergence.rs#L174-L187) — 类型擦除后的 `diagnose`：对六个内省器重放询问得到 `History`，`!history.converged()` 才生成诊断。
-- [crates/typst-library/src/introspection/convergence.rs:L240-L250](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/convergence.rs#L240-L250) — `converged` 的实现是比较第 5、6 份输出的哈希；注释强调用哈希而非 `==`：`0.0`（float）变 `0`（int）虽相等但可被下一轮观察出差异，不算收敛。
-- [crates/typst-library/src/introspection/convergence.rs:L268-L280](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/convergence.rs#L268-L280) — `hint`：把观测值格式化为 "run 1..run 5 / final" 列表，正是 4.3 实践中看到的警告形态。
-
-性能视角的两点补充：收敛判定本身是 O(询问数) 的哈希比较而非 O(文档)；而 comemo 的增量性意味着第二轮起 realize/layout 的记忆化结果在输入（Content、样式、以及**被满足的约束**）不变时直接复用——这就是 watch 模式下小改动通常只需毫秒级重排的原因（u5-l8 会展开）。
-
-#### 4.4.4 代码实践
-
-**实践目标**：数出一篇真实文档的布局轮数，并验证"去掉内省依赖 → 轮数下降"。
-
-1. 新建 `toc.typ`（含目录、页码、交叉引用三个内省源）：
-
-   ```typ
-   #set page(numbering: "1")
-   #outline(title: [目录])
-
-   = 引言 <intro>
-   相关讨论见 @discussion。
-
-   = 方法
-   #lorem(60)
-
-   = 讨论 <discussion>
-   呼应 @intro 的观点。
-   ```
-
-2. 带计时编译：`cargo run -p typst-cli -- compile --timings trace.json toc.typ`（`--timings` 参数见 [crates/typst-cli/src/args.rs:L465-L471](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-cli/src/args.rs#L465-L471)）。
-3. 统计 trace.json（Chrome Tracing 格式）中名字形如 `iter (N)` 的事件条数，即布局轮数。
-4. 把 `#outline(...)` 一行和两处 `@...` 引用全部删掉，重复第 2、3 步。
-
-**需要观察的现象**：第 3 步得到 2 或 3（outline 条目与引用页码需要后续轮次补齐）；第 4 步得到 1——没有任何询问时首轮 `constraint.validate` 即通过。
-
-**预期结果**：轮数随内省依赖移除单调下降；具体数值依赖文档结构（待本地验证）。也可用 `cargo testit convergence` 一次跑完整个收敛测试组做回归参照。
-
-#### 4.4.5 小练习与答案
-
-1. **练习**：为什么 eval 在循环外而 layout 在循环内？
-   **答案**：eval 的输入只有源码与全局库，输出 Content 与内省结果无关；而 `context` 回放、`@ref` 解析、outline 生成都发生在 realize（每轮 layout 内部），必须逐轮重跑，见 [typst/src/lib.rs:L124-L157](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs#L124-L157) 的结构。
-2. **练习**：警告里的 "run 5" 与 "final" 各对应哪次排版的观察结果？
-   **答案**：`run k` = 第 k 轮排版时所用内省器的答案（run 1 恒为空）；`final` = 第 5 轮产物内省器的答案，格式化逻辑在 [convergence.rs:L268-L275](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/convergence.rs#L268-L275)。
-3. **练习**：文档不收敛时编译会失败吗？
-   **答案**：不会。五轮后 `analyze` 只生成警告（汇总警告 + 每个不稳定询问的细节），随后照常 break 并返回末轮 document；只有 `sink.delayed()` 非空（末轮仍有真错误）才返回 `Err`，见 [typst/src/lib.rs:L164-L194](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs#L164-L194)。
+---
 
 ## 5. 综合实践
 
-**任务**：做一份"内省依赖体检报告"，把本讲四个模块串起来。
+把本讲全部内容串成一个可复现的实验（在仓库根目录操作，全部用 `cargo run -p typst-cli`）：
 
-1. **建文档** `report.typ`：包含 `#outline()`、3 个带标签的章节、两处 `@` 交叉引用、一个 `#counter(eq).display()` 编号的公式块，以及一个 `#divider()`。
-2. **数轮数**：`cargo run -p typst-cli -- compile --timings trace1.json report.typ`，统计 `iter (N)` 事件数，记为 R1。
-3. **看逐轮观测**：把交叉引用改成 `#context locate(<intro>).position()`，再编译一次并观察是否出现 "did not stabilize" 警告；对照 [tests/suite/introspection/convergence.typ:L77-L88](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/tests/suite/introspection/convergence.typ#L77-L88) 的收敛位置测试理解 hint。
-4. **减依赖**：删除 outline 与全部引用/counter 显示，得到 `trace2.json`，轮数记为 R2。验证 R2 < R1 且 R2 = 1。
-5. **验可定位性**：在文档末尾加 `#context query(divider).len()`，确认输出 1（4.1 的门禁体系 + 4.3 的询问协议 + 4.4 的多轮机制三者协同的最终验证）。
-6. **（可选，打点还原后）** 依 4.2.4 的日志法交叉核对：日志中 Tag 重复组数 == 计时文件中的轮数。
+**任务**：量化「内省依赖 → 多轮迭代」的因果关系，并验证 `divider` 的可定位性。
 
-**验收标准**：能口头回答——R1 为什么大于 1？R2 为什么等于 1？第 5 步的 `1` 是哪一轮排版给出的答案？
+**步骤**：
+
+1. 准备 `experiment.typ`：
+
+   ```typ
+   #set page(numbering: "1")
+   #outline()
+
+   = Introduction <intro>
+   #lorem(120)
+
+   = Method
+   #lorem(40)
+   #divider()
+   #lorem(40)
+
+   = Conclusion
+   As shown in @intro, we are done.
+   #lorem(60)
+   ```
+
+2. 编译并导出计时：`cargo run -p typst-cli -- compile --timings exp1.json experiment.typ`。在 `exp1.json` 里数 `iter (` 出现的个数，记为 \(N_1\)。
+3. 查询 divider：`cargo run -p typst-cli -- eval 'query(divider).len()' --in experiment.typ`，预期 `1`。
+4. 查询标题页码：`cargo run -p typst-cli -- eval 'query(heading).map(h => (h.body, h.location().page()))' --in experiment.typ`，对照 PDF 核对页码。
+5. 删除 `#outline()` 与 `@intro`（保留 `#divider()` 与正文），另存为 `experiment-min.typ`，同样导出计时，记轮数为 \(N_2\)。
+6. 比较 \(N_1\) 与 \(N_2\)，并用一句话解释差异来源（提示：`outline` 读取全部标题的页码；`@intro` 读取目标位置；`divider` 的 query 只发生在 `typst eval` 里，发生在**编译完成后**，不参与迭代）。
+
+**验收标准**：
+
+- \(N_1 \geq 2\)、\(N_2 = 1\)（**待本地验证**；若 `lorem` 文本量导致分页恰好不受目录影响，\(N_1\) 也可能为 2 或 3）；
+- 能指出第 2 步的轮数统计依据是 `ITER_NAMES`（[convergence.rs:L17-L18](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-library/src/introspection/convergence.rs#L17-L18)）与主循环里的 `TimingScope`（[typst/src/lib.rs:L140](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs#L140)）；
+- 能解释为什么 `typst eval` 里的查询不增加编译轮数（[eval.rs:L63-L87](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-cli/src/eval.rs#L63-L87)：先 `typst::compile` 完成迭代收敛，再对最终 introspector 求值表达式）。
 
 ## 6. 本讲小结
 
-- **Locatable 白名单**：元素声明 `#[elem(Locatable)]` → vtable 能力位 → `LocatableSelector` cast 门禁；权威清单手写在 location.rs 文档中，divider 自 0.15 起加入（`@divider` 现可查询）。
-- **Location 是分层哈希不是序号**：\( h_n = \mathrm{hash}(h_{n-1}, k_n) \)，兼顾跨轮一致、跨编辑稳定与无状态并行。
-- **Tag 是留痕**：realize 的 `prepare` 为可内省元素分配 Location 并产出起止 Tag，排进 Frame；`PagedIntrospector::new` 每轮结束扫 Frame 收集出带位置/标签/区间索引与查询缓存的 `ElementIntrospector`。
-- **一切查询皆是询问**：`query`/`counter`/`position` 统一为 `Introspect` 询问，经 `Engine::introspect` 执行并登记到 Sink；`Output: Hash` 的粒度直接影响收敛速度与诊断质量。
-- **收敛双路径**：comemo `constraint.validate` 是每轮的快路径；五轮耗尽才由 `analyze` 重放询问、比较末两轮哈希并生成 "run 1..final" 逐轮警告；不收敛只警告不失败，返回末轮文档。
-- **求值一次、排版至多五次**：`MAX_ITERS = 5`，"两遍编译"是习惯说法；`iter (N)` 计时作用域让轮数可被 `--timings` 直接观测。
+- **多轮排版是内省的代价与解法**：求值只跑一次；排版以「上一轮文档」为输入迭代到不动点，上限 `MAX_ITERS = 5`，不收敛发警告但仍然产出文档（[typst/src/lib.rs:L134-L186](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst/src/lib.rs#L134-L186)）。
+- **`Location` 是元素实例的身份证**：u128 分层哈希、跨轮稳定；只有 `#[elem(Locatable)]` 标记的语义元素（清单维护在 location.rs 文档里，`divider` 新近加入）或带标签的元素才有。
+- **`Tag` 是 `Location` 的物理载体**：realize 的 `prepare` 给元素发证并打上一对 `Start/End` 标签，随布局流进 `Frame`；下一轮的 `PagedIntrospector` 遍历帧收集它们，建成按文档序的元素表 + 区间/标签/哈希三组索引 + 查询缓存。
+- **`Introspect` trait 把「读取」变成「可记账的请求」**：`Engine::introspect` 执行请求的同时把它记入 sink；`query` 是对上一轮文档的选择器查询，`counter` 则把更新序列做成可定位元素、沿文档序回放状态机。
+- **收敛判定分两层**：comemo `constraint.validate` 是保守快路径；五轮耗尽后 `History` 在六个 introspector 上重放请求、比较末两轮哈希，生成带逐轮观测值的「did not stabilize」警告。
+- **性能有三道护栏**：求值一次 + `layout_document_impl` 整体 memoize + `Locator` 稳定哈希保缓存命中；查询侧再有 `QueryCache` 与 memoized `sequence` 兜底。
 
 ## 7. 下一步学习建议
 
-- **u5-l1（PDF 导出）**：`TagFlags::tagged` 与 `frame_link_targets` 在导出层如何变成 PDF 标签树与内部链接，是本讲 Tag 体系的下游消费者。
-- **u5-l8（增量编译与 comemo）**：本讲的 `track_with(&constraint)` 只是 comemo 约束机制的冰山一角，该讲系统展开 track/memo 失效与 watch 场景。
-- **继续阅读源码**：`introspection/state.rs`（state 与 counter 同构，但诊断多一条 help 链接）；`introspection/locate.rs`（`locate()` 函数 = resolve_unique + 位置询问的组合）；以及 [tests/suite/introspection/](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/tests/suite/introspection/convergence.typ) 全目录——`switch.typ` 这个"按轮次切换行为"的测试工具本身就是内省机制的绝佳教材。
+本讲之后，第四单元（排版管线）完结。推荐三条继续路线：
+
+1. **横向补全内省家族**：阅读 `crates/typst-library/src/introspection/state.rs`（状态管理，机制与 counter 同构）、`crates/typst-library/src/model/outline.rs` 与 `reference.rs`（目录与交叉引用如何组合 query/counter/locate）、以及 `bibliography` 相关代码（`Location::variant` 的真实用户）。
+2. **进入第五单元导出层**：u5-l1（PDF 导出）会消费本讲的 `PagedDocument` 与 `frame_link_targets`（判断链接目标是否存在）；u5-l8（增量编译）会把本讲的 comemo `Constraint`/`memoize` 讲透。
+3. **工具链视角**：u5-l6（typst-ide）会展示 IDE 的跳转/补全如何复用 `Location`/`Introspector`；如果你想立刻动手，试着给 [crates/typst-layout/src/introspect.rs](https://github.com/typst/typst/blob/84cca406aafe7f830ed3f37f1cc6f0c8b6b65a03/crates/typst-layout/src/introspect.rs) 的 `PagedIntrospector::new` 加一行 `eprintln!` 打印每页发现的 Tag 数量，再跑第 5 节的综合实践，亲眼看看每轮迭代收集到的元素数量如何变化。

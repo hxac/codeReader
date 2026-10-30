@@ -6,9 +6,11 @@
 
 1. 解释 safetensors 分片读取的三个步骤（`load_shard_info` 探测清单 → `mmap_shards` 内存映射 → `deserialize_shards` 零拷贝视图）与"先记录整个计划、再统一上传"两阶段装载的动机——**每个张量都校验通过之前，一个字节都不上传**。
 2. 推导 TP>1 时投影矩阵的切片边界：行切（q/k/v、gate/up 经 `shard_range` + `FusedPart`）与列切（`o_proj`/`down_proj` 经 `col_shard`）各自切在哪一维、为什么。
-3. 理解 [src/sizing.rs](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/sizing.rs) 的 checked 乘加为何必要：**预算在配置维度通过张量校验之前就要计算**，坏配置必须在这里响亮失败，而不是回绕成一个"少预留"的小数字。
+3. 理解 [src/sizing.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/sizing.rs) 的 checked 乘加为何必要：**预算在配置维度通过张量校验之前就要计算**，坏配置必须在这里响亮失败，而不是回绕成一个"少预留"的小数字。
 
-> 范围说明：Qwen3 的装载入口 [src/weights/load.rs](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs) 是"用户"，真正的装载机制住在 workspace 的 `pegainfer-core` 里（[pegainfer-core/src/weight_loader.rs](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs) 及其 [staging.rs](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader/staging.rs) 子模块）。本讲两边都读，永久链接同样指向当前 HEAD。
+> **本讲更新（对应 HEAD af9e40e1）**：EAGLE-3 草稿器落地带来一处与装载直接相关的推广——`ModelRuntimeConfig.dflash_enabled` 改名 `draft_enabled`（DFlash 与 EAGLE-3 共用同一开关），executor 的草稿显存预留也从"DFlash 专用一段"变成按 `DraftModel` 枚举分派的**两条臂**。受影响的 4.3、4.5 节已刷新，其余源码未变。
+
+> 范围说明：Qwen3 的装载入口 [src/weights/load.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs) 是"用户"，真正的装载机制住在 workspace 的 `pegainfer-core` 里（[pegainfer-core/src/weight_loader.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs) 及其 [staging.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader/staging.rs) 子模块）。本讲两边都读，永久链接同样指向当前 HEAD。
 
 ## 2. 前置知识
 
@@ -22,12 +24,15 @@
 
 | 文件 | 角色 |
 | --- | --- |
-| [src/weights/load.rs](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs) | Qwen3 侧装载入口：`ModelRuntimeConfig`、`from_safetensors_with_runtime` 全流程；模块注释一句话点题 "record the whole plan, then upload" |
-| [pegainfer-core/src/weight_loader.rs](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs) | 装载机制本体：`load_shard_info`（分片清单）、`WeightPrefetch`（咨询式预取）、`StagedWeightLoader`（两阶段装载器）、`FusedPart`（融合切片描述）、`SlotId`/`VecSlotId`（兑换凭证） |
-| [pegainfer-core/src/weight_loader/staging.rs](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader/staging.rs) | pinned 双缓冲 `WeightStager` 与 `ColShardPlan`；`prepare`/`prepare_cols` 在记录时验证目标区间 |
-| [src/config.rs](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/config.rs) | `TensorParallelConfig`（L12-L25）、`validate_for` 的整除闸门（L849-L883）、`shard_range` 切片公式（L885-L888）、`local_*` 本地维度（L346-L364） |
-| [src/sizing.rs](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/sizing.rs) | 全部 23 行：`product` / `sum` 两个 checked 乘加函数 |
-| [src/executor.rs](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/executor.rs) | 调用点：单卡装载（L1318-L1330）、TP 逐 rank 装载 + 共享一份预取（L1398-L1418）、装载后用 sizing 算 DFlash/hedge 预留（L1331-L1380） |
+| [src/weights/load.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs) | Qwen3 侧装载入口：`ModelRuntimeConfig`、`from_safetensors_with_runtime` 全流程；模块注释一句话点题 "record the whole plan, then upload" |
+| [pegainfer-core/src/weight_loader.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs) | 装载机制本体：`load_shard_info`（分片清单）、`WeightPrefetch`（咨询式预取）、`StagedWeightLoader`（两阶段装载器）、`FusedPart`（融合切片描述）、`SlotId`/`VecSlotId`（兑换凭证） |
+| [pegainfer-core/src/weight_loader/staging.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader/staging.rs) | pinned 双缓冲 `WeightStager` 与 `ColShardPlan`；`prepare`/`prepare_cols` 在记录时验证目标区间 |
+| [src/config.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/config.rs) | `TensorParallelConfig`（L12-L25）、`validate_for` 的整除闸门（L849-L882）、`shard_range` 切片公式（L884-L887）、`local_*` 本地维度（L345-L363） |
+| [src/sizing.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/sizing.rs) | 全部 23 行：`product` / `sum` 两个 checked 乘加函数 |
+| [src/executor.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/executor.rs) | 调用点：单卡装载（L1338-L1349）、装载后按 `DraftModel` 分派草稿预留并把 `fixed_bytes` 折进 margin（L1350-L1411）、TP 逐 rank 装载 + 共享一份预取（L1431-L1449） |
+| [src/dflash/reservation.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/dflash/reservation.rs) | DFlash 草稿的显存预留，整段由 `sizing::product/sum` 拼成 |
+| [src/eagle3/reservation.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/eagle3/reservation.rs) | 本讲更新新增的 EAGLE-3 草稿显存预留：与 DFlash 同一套"按 token 记账 vs 固定 margin"两分法（L5-L21 的文档注释） |
+| [src/projection_fusion.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/projection_fusion.rs) | `select_decode_projection_path` 的 `draft_enabled` 闸门（L32-L53）：理由标签已从 `"dflash"` 推广为 `"speculative"` |
 
 ## 4. 核心概念与源码讲解
 
@@ -51,15 +56,15 @@
 
 #### 4.1.3 源码精读
 
-**清单探测**——[pegainfer-core/src/weight_loader.rs:L57-L89](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L57-L89)：单文件分支在 L59-61（空 HashMap），分片分支在 L63-88。注意它只读 JSON 与做路径拼接，**不打开任何张量数据**——数据打开是 mmap 阶段的事。
+**清单探测**——[pegainfer-core/src/weight_loader.rs:L57-L89](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L57-L89)：单文件分支在 L59-61（空 HashMap），分片分支在 L63-88。注意它只读 JSON 与做路径拼接，**不打开任何张量数据**——数据打开是 mmap 阶段的事。
 
-**mmap 与反序列化**——[pegainfer-core/src/weight_loader.rs:L301-L329](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L301-L329)：`mmap_shards` 的 SAFETY 注释写明前提（文件在装载期间不被并发修改）；`deserialize_shards` 把每个 mmap 变成 `SafeTensors` 视图。文档注释里的链式用法正是 load.rs 的真实写法。
+**mmap 与反序列化**——[pegainfer-core/src/weight_loader.rs:L301-L329](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L301-L329)：`mmap_shards` 的 SAFETY 注释写明前提（文件在装载期间不被并发修改）；`deserialize_shards` 把每个 mmap 变成 `SafeTensors` 视图。文档注释里的链式用法正是 load.rs 的真实写法。
 
-**按名取张量**——[pegainfer-core/src/weight_loader.rs:L331-L349](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L331-L349)：先查表、后线性扫描的回退让"单文件的空表"无需特判。
+**按名取张量**——[pegainfer-core/src/weight_loader.rs:L331-L349](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L331-L349)：先查表、后线性扫描的回退让"单文件的空表"无需特判。
 
-**对齐陷阱**——[pegainfer-core/src/weight_loader.rs:L369-L394](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L369-L394)：safetensors **允许**张量数据不对齐，而未对齐的 bf16 切片在 Rust 里是 UB。`tensor_bf16_cow` 检查负载地址是否对齐 `bf16`：对齐则零拷贝借用，不对齐则逐元素小端解码进 owned 缓冲。该文件尾部的三个单测（[L1099-L1168](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L1099-L1168)）专门钉住这个行为——本讲综合实践会跑到它们。
+**对齐陷阱**——[pegainfer-core/src/weight_loader.rs:L369-L394](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L369-L394)：safetensors **允许**张量数据不对齐，而未对齐的 bf16 切片在 Rust 里是 UB。`tensor_bf16_cow` 检查负载地址是否对齐 `bf16`：对齐则零拷贝借用，不对齐则逐元素小端解码进 owned 缓冲。该文件尾部的三个单测（[L1099-L1168](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L1099-L1168)）专门钉住这个行为——本讲综合实践会跑到它们。
 
-**Qwen3 的调用点**——[src/weights/load.rs:L127-L132](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs#L127-L132)：`load_shard_info` → （条件）预取 → `mmap_shards` → `deserialize_shards`，与上面的流程一一对应。顺带一提，core 里还有个 [load_shard_info_fixed（L1055-L1087）](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L1055-L1087) 修 Qwen3.5 索引文件名与实际文件名不符的问题，Qwen3 自己用的是普通版。
+**Qwen3 的调用点**——[src/weights/load.rs:L127-L132](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs#L127-L132)：`load_shard_info` → （条件）预取 → `mmap_shards` → `deserialize_shards`，与上面的流程一一对应。顺带一提，core 里还有个 [load_shard_info_fixed（L1055-L1087）](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L1055-L1087) 修 Qwen3.5 索引文件名与实际文件名不符的问题，Qwen3 自己用的是普通版。
 
 #### 4.1.4 代码实践
 
@@ -73,7 +78,7 @@
 
 **练习 1**：单文件情形下 `weight_map` 是空的，为什么后面取张量不出错？
 
-答案：`find_tensor` 查表失败后进入回退分支，对所有分片（此时只有一个）逐个尝试 `shard.tensor(name)`（[pegainfer-core/src/weight_loader.rs:L340-L347](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L340-L347)）。空表 + 单文件 = 线性扫描天然命中。
+答案：`find_tensor` 查表失败后进入回退分支，对所有分片（此时只有一个）逐个尝试 `shard.tensor(name)`（[pegainfer-core/src/weight_loader.rs:L340-L347](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L340-L347)）。空表 + 单文件 = 线性扫描天然命中。
 
 **练习 2**：为什么 `deserialize_shards` 之后内存里没有出现一份几 GB 的权重拷贝？
 
@@ -93,31 +98,31 @@ mmap 的缺点是**第一次**读每一页都要缺页中断、从磁盘调入�
 
 #### 4.2.2 核心流程
 
-1. `spawn(shard_paths)`：把每个文件按 16 MiB 切成 chunk 列表（[L143](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L143) `CHUNK = 16 << 20`），起 `min(8, chunk 数)` 个 worker。
+1. `spawn(shard_paths)`：把每个文件按 16 MiB 切成 chunk 列表（[L143](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L143) `CHUNK = 16 << 20`），起 `min(8, chunk 数)` 个 worker。
 2. 每个 worker 从共享游标 `fetch_add` 领 chunk：先用 `chunk_looks_resident` 探测该 chunk 首页是否已在 page cache——用 `preadv2` + `RWF_NOWAIT` 读 4096 字节，内核需要取盘时就返回 `EAGAIN`，一页代表整个 chunk；已驻留则跳过（"A resident checkpoint reads no chunk at all"，L193-194）。
 3. 未驻留则 `read_exact_at` 真读 16 MiB 进缓冲（读完即丢，目的只是把页调入 cache）。
-4. **自觉退场控制器**：累计读满 512 MiB 时测一次速率，若源设备低于 1 GB/s（[L146-L149](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L146-L149) 的两个常量），置 cancel——"prefetch 跟装载抢一个慢设备只会互相拖累，不如把设备让给装载路径"。
+4. **自觉退场控制器**：累计读满 512 MiB 时测一次速率，若源设备低于 1 GB/s（[L146-L149](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L146-L149) 的两个常量），置 cancel——"prefetch 跟装载抢一个慢设备只会互相拖累，不如把设备让给装载路径"。
 5. `Drop`：置 cancel、join 所有 worker、聚合"打不开的片数 / 起线程失败数 / chunk 读错误数 / panic 数 + 首个错误"成一条 warning。
 
 #### 4.2.3 源码精读
 
-**驻留探测**——[pegainfer-core/src/weight_loader.rs:L120-L139](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L120-L139)：`RWF_NOWAIT` 的语义注释写得很清楚——内核需要取页就 `EAGAIN`，任何错误都算 miss，`got > 0` 才算命中。
+**驻留探测**——[pegainfer-core/src/weight_loader.rs:L120-L139](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L120-L139)：`RWF_NOWAIT` 的语义注释写得很清楚——内核需要取页就 `EAGAIN`，任何错误都算 miss，`got > 0` 才算命中。
 
-**worker 主循环与退场**——[pegainfer-core/src/weight_loader.rs:L185-L232](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L185-L232)：领号 → 探测 → 读；速率探测在 L212-223，`done >= PROBE_BYTES` 那一次跨越点测速并决定 cancel。
+**worker 主循环与退场**——[pegainfer-core/src/weight_loader.rs:L185-L232](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L185-L232)：领号 → 探测 → 读；速率探测在 L212-223，`done >= PROBE_BYTES` 那一次跨越点测速并决定 cancel。
 
-**Drop 聚合**——[pegainfer-core/src/weight_loader.rs:L260-L292](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L260-L292)：四类失败计数相加大于零才打 warning，且保留首个错误详情。注意 `spawn` 本身**永不失败**（返回 `Self` 而非 `Result`）——这是"咨询式"的类型学体现。
+**Drop 聚合**——[pegainfer-core/src/weight_loader.rs:L260-L292](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L260-L292)：四类失败计数相加大于零才打 warning，且保留首个错误详情。注意 `spawn` 本身**永不失败**（返回 `Self` 而非 `Result`）——这是"咨询式"的类型学体现。
 
-**谁在什么条件下spawn**——[src/weights/load.rs:L129-L130](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs#L129-L130)：`(tensor_parallel.world_size == 1).then(|| WeightPrefetch::spawn(&shard_paths))`——只有单卡在装载函数内部起预取。TP 路径并非没有预取：executor 在**逐 rank 装载循环外**起一份共享预取（[src/executor.rs:L1398-L1418](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/executor.rs#L1398-L1418)，注释"TP ranks load sequentially and suppress per-rank prefetch, so keep one whole-checkpoint prefetch alive across the loop"）——N 个 rank 顺序装、读的是同一批文件，一份预取就够，循环结束 `drop(prefetch)`。
+**谁在什么条件下spawn**——[src/weights/load.rs:L129-L130](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs#L129-L130)：`(tensor_parallel.world_size == 1).then(|| WeightPrefetch::spawn(&shard_paths))`——只有单卡在装载函数内部起预取。TP 路径并非没有预取：executor 在**逐 rank 装载循环外**起一份共享预取（[src/executor.rs:L1431-L1449](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/executor.rs#L1431-L1449)，注释"TP ranks load sequentially and suppress per-rank prefetch, so keep one whole-checkpoint prefetch alive across the loop"）——N 个 rank 顺序装、读的是同一批文件，一份预取就够，循环结束 `drop(prefetch)`。
 
-**收尾时机**——[src/weights/load.rs:L296-L297](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs#L296-L297)：`drop(loader)` 之后、打"GPU model loaded"日志之前 `drop(prefetch)`——所有上传落定时预取的使命已尽，cancel 语义让它立即收工。
+**收尾时机**——[src/weights/load.rs:L296-L297](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs#L296-L297)：`drop(loader)` 之后、打"GPU model loaded"日志之前 `drop(prefetch)`——所有上传落定时预取的使命已尽，cancel 语义让它立即收工。
 
 #### 4.2.4 代码实践
 
 **实践目标**：纸面推演预取的 chunk 划分。
 
-1. 操作步骤：设某模型 4 个分片各 3.5 GiB。按 `CHUNK = 16 MiB` 计算总 chunk 数（每片 `ceil(3.5×1024/16)`），再算 worker 线程数（`min(8, chunks)`）；对照 [L143-L149](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L143-L149) 的常量核对。
+1. 操作步骤：设某模型 4 个分片各 3.5 GiB。按 `CHUNK = 16 MiB` 计算总 chunk 数（每片 `ceil(3.5×1024/16)`），再算 worker 线程数（`min(8, chunks)`）；对照 [L143-L149](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L143-L149) 的常量核对。
 2. 需要观察的现象：chunk 数远大于 8，故线程数恒为 8；若第二次启动同一模型（页已驻留），每个 chunk 的 `chunk_looks_resident` 都命中，实际读字节数为零。
-3. 预期结果：每片 224 个 chunk、共 896 个 chunk、8 线程。启动日志应出现 "Prefetching 4 weight shard(s) (14.0 GB) on 8 threads"（[L242-L248](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L242-L248)）——**待本地验证**（需本地模型与 GPU 环境）。
+3. 预期结果：每片 224 个 chunk、共 896 个 chunk、8 线程。启动日志应出现 "Prefetching 4 weight shard(s) (14.0 GB) on 8 threads"（[L242-L248](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L242-L248)）——**待本地验证**（需本地模型与 GPU 环境）。
 
 #### 4.2.5 小练习与答案
 
@@ -131,7 +136,7 @@ mmap 的缺点是**第一次**读每一页都要缺页中断、从磁盘调入�
 
 **练习 3**：TP=8 时若每个 rank 都在自己的装载函数里 spawn 一份预取，会发生什么？
 
-答案：8 份 × 8 线程 = 64 个线程对同一批文件做重复读，page cache 与磁盘带宽白白内耗。所以代码把内部预取 gate 在 `world_size == 1`（load.rs L129-130），TP 由 executor 在循环外起**一份**共享预取（executor.rs L1400-1403 的注释正是这个理由）。
+答案：8 份 × 8 线程 = 64 个线程对同一批文件做重复读，page cache 与磁盘带宽白白内耗。所以代码把内部预取 gate 在 `world_size == 1`（load.rs L129-130），TP 由 executor 在循环外起**一份**共享预取（executor.rs L1431-1432 的注释正是这个理由）。
 
 ### 4.3 先记录计划，再上传：StagedWeightLoader 两阶段与 ModelRuntimeConfig
 
@@ -147,7 +152,7 @@ naive 装载是"逐张量：找到 → 校验 → 分配 → 上传 → 存进�
 
 `StagedWeightLoader` 的文档注释就是这句话："every method checks dtype and config-derived dimensions at the load boundary; **Uploads run in `finish`, after every tensor has been validated**"。
 
-`ModelRuntimeConfig` 则回答"装载为什么需要运行时配置"：装载不只是搬字节，还做三个**依赖运行时开关的决定**——`select_decode_projection_path` 在装载期定死解码投影路径并存进模型（u3-l8 展开）；`max_loras`/`max_lora_rank` 决定 `PackedLoraRegistry` 的预分配容量；`tensor_parallel` 决定一切切片边界。
+`ModelRuntimeConfig` 则回答"装载为什么需要运行时配置"：装载不只是搬字节，还做三个**依赖运行时开关的决定**——`select_decode_projection_path` 在装载期定死解码投影路径并存进模型（u3-l8 展开）；`max_loras`/`max_lora_rank` 决定 `PackedLoraRegistry` 的预分配容量；`tensor_parallel` 决定一切切片边界。第七个旋钮 `draft_enabled`（本讲更新中由 `dflash_enabled` 改名而来）把"是否装载草稿器"也带进装载期决策——**DFlash 与 EAGLE-3 两种草稿器共用这一个开关**（见 4.3.3）。
 
 #### 4.3.2 核心流程
 
@@ -177,29 +182,29 @@ naive 装载是"逐张量：找到 → 校验 → 分配 → 上传 → 存进�
 
 #### 4.3.3 源码精读
 
-**ModelRuntimeConfig 七旋钮**——[src/weights/load.rs:L31-L40](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs#L31-L40)：`enable_cuda_graph` / `tensor_parallel` / `device_ordinal` / `max_loras` / `max_lora_rank` / `decode_overlap` / `dflash_enabled`；[Default（L42-L54）](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs#L42-L54) 给出"单卡、开图、rank0、LoRA 默认容量、无重叠、无草稿"的基线。注意后两个旋钮在 ④ 参与路径决策（[L107-L117](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs#L107-L117) 把 `runtime.decode_overlap`、`runtime.dflash_enabled` 一起喂给 `select_decode_projection_path`）——**运行时开关改变的是权重侧的决策**，这就是它出现在装载配置里的原因。
+**ModelRuntimeConfig 七旋钮**——[src/weights/load.rs:L31-L40](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs#L31-L40)：`enable_cuda_graph` / `tensor_parallel` / `device_ordinal` / `max_loras` / `max_lora_rank` / `decode_overlap` / `draft_enabled`；[Default（L42-L54）](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs#L42-L54) 给出"单卡、开图、rank0、LoRA 默认容量、无重叠、无草稿"的基线。第七个旋钮本讲更新中由 `dflash_enabled` 改名 `draft_enabled`：executor 现在拿到的是 `Option<DraftModel>`（DFlash 与 EAGLE-3 二选一的枚举，u6-l1 展开），单卡路径写 `draft_enabled: draft.is_some()`（[src/executor.rs:L1347](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/executor.rs#L1347)）——**两种草稿器都打开同一个开关**；TP 路径没有草稿器，恒为 `false`（[src/executor.rs:L1445](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/executor.rs#L1445)）。这个开关在 ④ 路径决策里生效：[L107-L117](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs#L107-L117) 把 `runtime.decode_overlap`、`runtime.draft_enabled` 一起喂给 `select_decode_projection_path`——任一草稿器在身都会强制 Split 解码投影路径，且 [src/projection_fusion.rs:L52-L53](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/projection_fusion.rs#L52-L53) 的理由标签随改名从 `"dflash"` 推广为 `"speculative"`。**运行时开关改变的是权重侧的决策**，这就是它出现在装载配置里的原因。
 
-**词表收敛**——[src/weights/load.rs:L77-L100](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs#L77-L100)：tokenizer 实际可解码的词表不得超 checkpoint 的 `vocab_size`（否则 `ensure!` 硬失败）；`logits_rows` 是对齐后的投影行数，多出的尾部行由 `SuppressIds` 压制（u2-l2 4.3.3 讲过消费侧）。
+**词表收敛**——[src/weights/load.rs:L77-L100](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs#L77-L100)：tokenizer 实际可解码的词表不得超 checkpoint 的 `vocab_size`（否则 `ensure!` 硬失败）；`logits_rows` 是对齐后的投影行数，多出的尾部行由 `SuppressIds` 压制（u2-l2 4.3.3 讲过消费侧）。
 
-**两阶段装载器本体**——[pegainfer-core/src/weight_loader.rs:L484-L500](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L484-L500)：`StagedWeightLoader` 持有 `slots`（矩阵槽）、`vec_slots`（向量槽）、`pending`（待上传操作）、`retained`（未对齐向量的 owned 源）与 `finished/failed` 两个状态位。
+**两阶段装载器本体**——[pegainfer-core/src/weight_loader.rs:L484-L500](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L484-L500)：`StagedWeightLoader` 持有 `slots`（矩阵槽）、`vec_slots`（向量槽）、`pending`（待上传操作）、`retained`（未对齐向量的 owned 源）与 `finished/failed` 两个状态位。
 
-**记录原语的公共骨架**——`matrix`（[L637-L644](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L637-L644)）：`tensor_2d` 校验 → `alloc_timed` 分配（顺带累计分配耗时）→ `prepare` 验证目标区间并返回设备地址 → push `PendingUpload::Contiguous`。`ensure_recording`（[L523-L529](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L523-L529)）保证 finish 之后不能再记录。
+**记录原语的公共骨架**——`matrix`（[L637-L644](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L637-L644)）：`tensor_2d` 校验 → `alloc_timed` 分配（顺带累计分配耗时）→ `prepare` 验证目标区间并返回设备地址 → push `PendingUpload::Contiguous`。`ensure_recording`（[L523-L529](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L523-L529)）保证 finish 之后不能再记录。
 
-**config 是尺子**——[pegainfer-core/src/weight_loader.rs:L613-L625](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L613-L625)：`tensor_2d` 的错误信息 "Tensor '{name}' has shape {shape:?}, **config expects** [{rows}, {cols}]"——checkpoint 与 config 不符在这里、在上传之前被抓住。这一刻正是 sizing.rs 模块注释里"配置维度被张量校验"的时间点（4.5 呼应）。
+**config 是尺子**——[pegainfer-core/src/weight_loader.rs:L613-L625](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L613-L625)：`tensor_2d` 的错误信息 "Tensor '{name}' has shape {shape:?}, **config expects** [{rows}, {cols}]"——checkpoint 与 config 不符在这里、在上传之前被抓住。这一刻正是 sizing.rs 模块注释里"配置维度被张量校验"的时间点（4.5 呼应）。
 
-**finish 的"毒化直到成功"**——[pegainfer-core/src/weight_loader.rs:L540-L568](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L540-L568)：进入即置 `failed = true`，全部上传落地才清回并置 `finished`；失败路径调 `drain_or_abort` 排干流（健全性边界在 `finish` 内闭合，注释 L552-554 解释了为什么不能依赖 Drop——`mem::forget` 可跳过 Drop）。成功日志分别报告 `alloc_api_wall` 与 `execute_and_drain_wall`——**分配与上传两段耗时被刻意分开计量**，这是两阶段结构的可观测收益。
+**finish 的"毒化直到成功"**——[pegainfer-core/src/weight_loader.rs:L540-L568](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L540-L568)：进入即置 `failed = true`，全部上传落地才清回并置 `finished`；失败路径调 `drain_or_abort` 排干流（健全性边界在 `finish` 内闭合，注释 L552-554 解释了为什么不能依赖 Drop——`mem::forget` 可跳过 Drop）。成功日志分别报告 `alloc_api_wall` 与 `execute_and_drain_wall`——**分配与上传两段耗时被刻意分开计量**，这是两阶段结构的可观测收益。
 
-**pinned 双缓冲**——[pegainfer-core/src/weight_loader/staging.rs:L134-L162](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader/staging.rs#L134-L162)：注释点明动机——"Pinned double-buffering **overlaps the source read with the H2D copy** that pageable `clone_htod` would serialize"；两块 32 MiB pinned 缓冲（[L20-L22](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader/staging.rs#L20-L22)）。核心循环 `stage_chunk`（[L233-L281](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader/staging.rs#L233-L281)）：等本块缓冲的 `dma_done` 事件 → fill 团队（≤8 线程，≥1 MiB 才并行，[L67-L79](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader/staging.rs#L67-L79)）把源字节填进 pinned → `memcpy_htod_async` → 记录事件。下一块用另一块缓冲，填充与 DMA 重叠。
+**pinned 双缓冲**——[pegainfer-core/src/weight_loader/staging.rs:L134-L162](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader/staging.rs#L134-L162)：注释点明动机——"Pinned double-buffering **overlaps the source read with the H2D copy** that pageable `clone_htod` would serialize"；两块 32 MiB pinned 缓冲（[L20-L22](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader/staging.rs#L20-L22)）。核心循环 `stage_chunk`（[L233-L281](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader/staging.rs#L233-L281)）：等本块缓冲的 `dma_done` 事件 → fill 团队（≤8 线程，≥1 MiB 才并行，[L67-L79](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader/staging.rs#L67-L79)）把源字节填进 pinned → `memcpy_htod_async` → 记录事件。下一块用另一块缓冲，填充与 DMA 重叠。
 
-**目标区间的记录期验证**——[pegainfer-core/src/weight_loader/staging.rs:L352-L377](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader/staging.rs#L352-L377) 的 `prepare`（连续块：`dst_offset + src.len() ≤ dst.len()`、字节数是 bf16 整数倍）与 [L381-L425](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader/staging.rs#L381-L425) 的 `prepare_cols`（跨步块：源字节数是 `src_cols×2` 整数倍、列区间不越界、`take×2 ≤ 32 MiB`、`rows×take == dst.len()`）。**deferred 上传的安全性在记录时就已验证完**，执行期的 `unsafe upload_*` 只是兑现。
+**目标区间的记录期验证**——[pegainfer-core/src/weight_loader/staging.rs:L352-L377](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader/staging.rs#L352-L377) 的 `prepare`（连续块：`dst_offset + src.len() ≤ dst.len()`、字节数是 bf16 整数倍）与 [L381-L425](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader/staging.rs#L381-L425) 的 `prepare_cols`（跨步块：源字节数是 `src_cols×2` 整数倍、列区间不越界、`take×2 ≤ 32 MiB`、`rows×take == dst.len()`）。**deferred 上传的安全性在记录时就已验证完**，执行期的 `unsafe upload_*` 只是兑现。
 
-**兑换**——[pegainfer-core/src/weight_loader.rs:L602-L611](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L602-L611) 的 `take`（`assert!(self.finished)`，每个槽只能取一次）。Qwen3 侧的兑换现场在 [src/weights/load.rs:L273-L295](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs#L273-L295)：`finish()` → `take(embed_slot)` → 逐层 `take`/`take_vec` 组装 `Attention { qkv_proj, o_proj, q_norm, k_norm, q_dim: q_rows, kv_dim: kv_rows }` 与 `MLP`——u2-l2 见过的字段在这里出生。
+**兑换**——[pegainfer-core/src/weight_loader.rs:L602-L611](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L602-L611) 的 `take`（`assert!(self.finished)`，每个槽只能取一次）。Qwen3 侧的兑换现场在 [src/weights/load.rs:L273-L295](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs#L273-L295)：`finish()` → `take(embed_slot)` → 逐层 `take`/`take_vec` 组装 `Attention { qkv_proj, o_proj, q_norm, k_norm, q_dim: q_rows, kv_dim: kv_rows }` 与 `MLP`——u2-l2 见过的字段在这里出生。
 
-**收尾三件事**——[src/weights/load.rs:L296-L308](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs#L296-L308)：`drop(loader)`（触发 stager Drop 排干事件）→ `drop(prefetch)` → 打"GPU model loaded in Xms"→ 把 `mmaps` 的 drop 挪进后台线程（注释：多 GB 映射的页表拆除不值得阻塞启动）。最终模型组装（[L310-L329](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs#L310-L329)）里有两个装载期预分配：`PackedLoraRegistry::empty(runtime.max_loras, num_hidden_layers)`（L326，u7-l2 展开）与 RoPE 常量表。
+**收尾三件事**——[src/weights/load.rs:L296-L308](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs#L296-L308)：`drop(loader)`（触发 stager Drop 排干事件）→ `drop(prefetch)` → 打"GPU model loaded in Xms"→ 把 `mmaps` 的 drop 挪进后台线程（注释：多 GB 映射的页表拆除不值得阻塞启动）。最终模型组装（[L310-L329](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs#L310-L329)）里有两个装载期预分配：`PackedLoraRegistry::empty(runtime.max_loras, num_hidden_layers)`（L326，u7-l2 展开）与 RoPE 常量表。
 
 #### 4.3.4 代码实践
 
-**实践目标**：给 [src/weights/load.rs:L127-L308](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs#L127-L308) 的每个调用贴上"记录 / 执行 / 兑换 / 旁路"标签。
+**实践目标**：给 [src/weights/load.rs:L127-L308](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs#L127-L308) 的每个调用贴上"记录 / 执行 / 兑换 / 旁路"标签。
 
 1. 操作步骤：通读该区间，制作四列清单。提示：`loader.matrix/fused_rows/col_shard/vector` = 记录；`precompute_rope` 与 `SuppressIds::upload` = 旁路（在 GPU 上**计算**小表，不走装载器）；`loader.finish()` = 执行；`loader.take/take_vec` = 兑换。
 2. 需要观察的现象：`loader.finish()`（L273）之前，对权重的唯一 H2D 都藏在 `pending` 队列里；`take` 全部发生在 `finish` 成功之后；`drop(loader)` 在所有 `take` 之后。
@@ -209,15 +214,19 @@ naive 装载是"逐张量：找到 → 校验 → 分配 → 上传 → 存进�
 
 **练习 1**：`vector` 为什么不走 pinned staging，而是 pageable 直传？
 
-答案：源码注释一锤定音——"Small tensors; uploaded as plain pageable copies"（[L713-L714](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L713-L714)）。norm 向量只有 hidden（2560）或 head_dim（128）个元素，几 KB 的拷贝摊不平双缓冲的调度成本，直接 `memcpy_htod_async`（`PendingUpload::Vector` 分支，[L584-L596](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L584-L596)）。
+答案：源码注释一锤定音——"Small tensors; uploaded as plain pageable copies"（[L713-L714](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L713-L714)）。norm 向量只有 hidden（2560）或 head_dim（128）个元素，几 KB 的拷贝摊不平双缓冲的调度成本，直接 `memcpy_htod_async`（`PendingUpload::Vector` 分支，[L584-L596](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L584-L596)）。
 
 **练习 2**：`finish` 一进来就把 `failed` 置真、成功才置假，这个"先毒化"写法防什么？
 
-答案：防"失败后的空调用"——`execute_uploads` 用 `std::mem::take` 掏空了 `pending`（[L571](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L571)），如果失败后允许再次 `finish`，队列已空，会"成功"得毫无意义。毒化 + `ensure_recording` 让失败后的 loader 只能被丢弃重建（注释 L546-548）。
+答案：防"失败后的空调用"——`execute_uploads` 用 `std::mem::take` 掏空了 `pending`（[L571](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L571)），如果失败后允许再次 `finish`，队列已空，会"成功"得毫无意义。毒化 + `ensure_recording` 让失败后的 loader 只能被丢弃重建（注释 L546-548）。
 
 **练习 3**：双缓冲为什么恰好是**两**块？
 
-答案：流水线只需要"正在填的"和"正在飞的"各一块：填 A 时 B 的 DMA 在飞，下次用 B 前先同步它的 `dma_done`（[staging.rs:L239-L244](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader/staging.rs#L239-L244)）。第三块只会增加 pinned 内存占用（32 MiB×2 = 64 MiB 的上限写在该常量注释里），不会让两级流水更快。
+答案：流水线只需要"正在填的"和"正在飞的"各一块：填 A 时 B 的 DMA 在飞，下次用 B 前先同步它的 `dma_done`（[staging.rs:L239-L244](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader/staging.rs#L239-L244)）。第三块只会增加 pinned 内存占用（32 MiB×2 = 64 MiB 的上限写在该常量注释里），不会让两级流水更快。
+
+**练习 4**（本讲更新）：把 `dflash_enabled` 改名 `draft_enabled` 之后，为什么不需要为 EAGLE-3 再加一个独立的布尔旋钮？
+
+答案：两种草稿器在装载期需要的是**同一个决策输入**——"解码投影路径要不要因草稿器强制 Split"。`Option<DraftModel>` 的 `is_some()` 恰好表达了"任一草稿器在身"；草稿器之间的差异（批一贪心 vs 批草稿）不影响这条路径决策，所以一个开关够了。若将来出现"不强制 Split 的草稿器"，才需要把这个布尔细化成枚举。
 
 ### 4.4 TP 切片边界：shard_range、FusedPart 与 col_shard
 
@@ -260,23 +269,23 @@ down_proj    ← col_shard(src_rows=hidden, src_cols=inter,    col_offset=in_off
 
 #### 4.4.3 源码精读
 
-**shard_range 公式**——[src/config.rs:L885-L888](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/config.rs#L885-L888)：三行代码，整除由 [validate_for（L849-L883）](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/config.rs#L849-L883) 保证（L851-860 查 world_size/rank 合法性，L861-881 查三个整除）。`is_sharded`（[L890-L892](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/config.rs#L890-L892)）决定 o/down 走 `col_shard` 还是整矩阵。
+**shard_range 公式**——[src/config.rs:L884-L887](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/config.rs#L884-L887)：三行代码，整除由 [validate_for（L849-L882）](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/config.rs#L849-L882) 保证（L850-859 查 world_size/rank 合法性，L860-880 查三个整除）。`is_sharded`（[L889-L891](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/config.rs#L889-L891)）决定 o/down 走 `col_shard` 还是整矩阵。
 
-**Qwen3 侧的三次 shard_range**——[src/weights/load.rs:L151-L157](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs#L151-L157)：`q_total/kv_total/inter_total` 三个总量在循环外算一次，三对 `(offset, rows)` 对所有层通用（每层切法相同）。
+**Qwen3 侧的三次 shard_range**——[src/weights/load.rs:L151-L157](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs#L151-L157)：`q_total/kv_total/inter_total` 三个总量在循环外算一次，三对 `(offset, rows)` 对所有层通用（每层切法相同）。
 
-**FusedPart 与 QKV 融合**——[src/weights/load.rs:L163-L188](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs#L163-L188)：三个 `FusedPart` 各带 `src_rows`（**源**张量的全量行数，供形状校验）、`row_offset`、`rows`。结构体定义在 [pegainfer-core/src/weight_loader.rs:L445-L452](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L445-L452)："One row-consecutive part of a fused matrix"。gate/up 同构（[L190-L208](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs#L190-L208)）。
+**FusedPart 与 QKV 融合**——[src/weights/load.rs:L163-L188](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs#L163-L188)：三个 `FusedPart` 各带 `src_rows`（**源**张量的全量行数，供形状校验）、`row_offset`、`rows`。结构体定义在 [pegainfer-core/src/weight_loader.rs:L445-L452](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L445-L452)："One row-consecutive part of a fused matrix"。gate/up 同构（[L190-L208](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs#L190-L208)）。
 
-**fused_rows 的记录逻辑**——[pegainfer-core/src/weight_loader.rs:L646-L679](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L646-L679)：逐 part `tensor_2d(name, src_rows, cols)`（源形状必须是**全量**）→ 行区间 `checked_add` 越界检查（L656-664）→ 字节切片（L665-668，即上面的公式）→ 分配 `total_rows × cols` → 逐 part `prepare` 并 push 连续上传。**切片发生在源上、融合发生在目标里**。
+**fused_rows 的记录逻辑**——[pegainfer-core/src/weight_loader.rs:L646-L679](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L646-L679)：逐 part `tensor_2d(name, src_rows, cols)`（源形状必须是**全量**）→ 行区间 `checked_add` 越界检查（L656-664）→ 字节切片（L665-668，即上面的公式）→ 分配 `total_rows × cols` → 逐 part `prepare` 并 push 连续上传。**切片发生在源上、融合发生在目标里**。
 
-**col_shard 的记录逻辑**——[pegainfer-core/src/weight_loader.rs:L681-L711](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L681-L711)：校验源形状 `[src_rows, src_cols]`、列区间越界检查，然后 `prepare_cols` 生成 `ColShardPlan`（[staging.rs:L126-L132](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader/staging.rs#L126-L132)：`stride_b/off_b/take_b/rows/dst_at`）。执行期 `upload_cols_at`（[L206-L228](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader/staging.rs#L206-L228)）按行分块、每块内每行跨 `stride_b` 取 `take_b` 字节——列不连续，所以不能整段 memcpy，只能逐行 gather（gather 本身有并行 fill 团队加速）。
+**col_shard 的记录逻辑**——[pegainfer-core/src/weight_loader.rs:L681-L711](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L681-L711)：校验源形状 `[src_rows, src_cols]`、列区间越界检查，然后 `prepare_cols` 生成 `ColShardPlan`（[staging.rs:L126-L132](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader/staging.rs#L126-L132)：`stride_b/off_b/take_b/rows/dst_at`）。执行期 `upload_cols_at`（[L206-L228](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader/staging.rs#L206-L228)）按行分块、每块内每行跨 `stride_b` 取 `take_b` 字节——列不连续，所以不能整段 memcpy，只能逐行 gather（gather 本身有并行 fill 团队加速）。
 
-**o_proj/down_proj 的分叉**——[src/weights/load.rs:L214-L228](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs#L214-L228)（o_proj）与 [L242-L256](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs#L242-L256)（down_proj）：`is_sharded()` 时 col_shard、否则整矩阵。注意参数：o_proj 是 `(name, hidden, q_total, q_row_offset, q_rows)`——源 `[hidden × q_total]`，取列 `[q_off, q_off+q_rows)`；down_proj 是 `(name, hidden, inter_total, inter_row_offset, inter_rows)`。
+**o_proj/down_proj 的分叉**——[src/weights/load.rs:L214-L228](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs#L214-L228)（o_proj）与 [L242-L256](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs#L242-L256)（down_proj）：`is_sharded()` 时 col_shard、否则整矩阵。注意参数：o_proj 是 `(name, hidden, q_total, q_row_offset, q_rows)`——源 `[hidden × q_total]`，取列 `[q_off, q_off+q_rows)`；down_proj 是 `(name, hidden, inter_total, inter_row_offset, inter_rows)`。
 
 #### 4.4.4 代码实践
 
 **实践目标**：写出 TP=4 下 Qwen3-4B 每个 rank 的全部切片边界（TP=2 的完整推导放在综合实践）。
 
-1. 操作步骤：按 4.4.2 公式代入 `world_size=4`：`q_total=4096 → shard_len=1024`，`kv_total=1024 → 256`，`inter=9728 → 2432`。写出 rank 0..3 的 `(offset, rows)` 三元组、每 rank 融合矩阵形状（`qkv_proj` 行数 = `q_rows + 2×kv_rows`）、o_proj/down_proj 形状。再用 [src/config.rs:L346-L364](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/config.rs#L346-L364) 的 `local_q_dim`/`local_kv_dim` 交叉验证（`local_q_dim = heads/world × head_dim`，应等于 `q_rows`）。
+1. 操作步骤：按 4.4.2 公式代入 `world_size=4`：`q_total=4096 → shard_len=1024`，`kv_total=1024 → 256`，`inter=9728 → 2432`。写出 rank 0..3 的 `(offset, rows)` 三元组、每 rank 融合矩阵形状（`qkv_proj` 行数 = `q_rows + 2×kv_rows`）、o_proj/down_proj 形状。再用 [src/config.rs:L345-L363](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/config.rs#L345-L363) 的 `local_q_dim`/`local_kv_dim` 交叉验证（`local_q_dim = heads/world × head_dim`，应等于 `q_rows`）。
 2. 需要观察的现象：rank r 的 offset 恰为 `r × shard_len`；融合矩阵行数随 world_size 等比缩小；向量（norm）不变。
 3. 预期结果：rank3 的 qkv 行数 = 1024 + 2×256 = 1536；o_proj = 2560×1024；down_proj = 2560×2432。纯数值推导，无需 GPU；机器验证方式见综合实践的单测。
 
@@ -292,42 +301,46 @@ down_proj    ← col_shard(src_rows=hidden, src_cols=inter,    col_offset=in_off
 
 **练习 3**：TP=2、rank1 的 `k_proj`（源 `[1024 × 2560]`，bf16）的字节区间是多少？
 
-答案：`kv_off=512, kv_rows=512`，代入公式得 `full[512×2560×2, 1024×2560×2)` = `full[2_621_440, 5_242_880)`（[pegainfer-core/src/weight_loader.rs:L665-L668](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L665-L668) 的切片表达式）。这段 2.5 MiB 连续字节随后作为 `PendingUpload::Contiguous` 拼进融合矩阵的 K 段。
+答案：`kv_off=512, kv_rows=512`，代入公式得 `full[512×2560×2, 1024×2560×2)` = `full[2_621_440, 5_242_880)`（[pegainfer-core/src/weight_loader.rs:L665-L668](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L665-L668) 的切片表达式）。这段 2.5 MiB 连续字节随后作为 `PendingUpload::Contiguous` 拼进融合矩阵的 K 段。
 
 ### 4.5 防溢出算术：sizing.rs 为何先于张量校验
 
 #### 4.5.1 概念说明
 
-[src/sizing.rs](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/sizing.rs) 只有 23 行、两个函数：`product`（checked 乘法折叠）与 `sum`（checked 加法折叠）。它存在的理由写在模块注释里：
+[src/sizing.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/sizing.rs) 只有 23 行、两个函数：`product`（checked 乘法折叠）与 `sum`（checked 加法折叠）。它存在的理由写在模块注释里：
 
 > "Budgets are computed from config-file dims **before** those dims are validated against the weight tensors, so a corrupt config must fail loudly here rather than wrap into an under-reservation."
 
-时间线回放：启动时 `Config::from_file` 先做 schema 与语义校验（u2-l1），随后**大量字节预算直接由这些配置维度连乘出来**（KV 每块字节、DFlash 草稿预留、hedge 暂存页……），而"配置维度 vs checkpoint 张量形状"的核对要等到装载记录期 `tensor_2d` 才发生（4.3.3）。也就是说存在一个窗口：**维度还没被任何真实张量对过账，就要拿它算显存**。一个手滑的 config（比如 `intermediate_size` 多打三个 9）在 release 构建里用普通 `*` 会**静默回绕**成一个可能是小数字的 `usize`——预算"变小"比"报错"危险得多：池子被开小、服务上限被算错，问题在几小时后的运行期才爆。checked 乘加把这个失败提前到乘法现场，错误信息还带上整个因子表（`"sizing overflow in product {factors:?}"`）。
+时间线回放：启动时 `Config::from_file` 先做 schema 与语义校验（u2-l1），随后**大量字节预算直接由这些配置维度连乘出来**（KV 每块字节、DFlash/EAGLE-3 草稿预留、hedge 暂存页……），而"配置维度 vs checkpoint 张量形状"的核对要等到装载记录期 `tensor_2d` 才发生（4.3.3）。也就是说存在一个窗口：**维度还没被任何真实张量对过账，就要拿它算显存**。一个手滑的 config（比如 `intermediate_size` 多打三个 9）在 release 构建里用普通 `*` 会**静默回绕**成一个可能是小数字的 `usize`——预算"变小"比"报错"危险得多：池子被开小、服务上限被算错，问题在几小时后的运行期才爆。checked 乘加把这个失败提前到乘法现场，错误信息还带上整个因子表（`"sizing overflow in product {factors:?}"`）。
 
 #### 4.5.2 核心流程
 
 两条使用纪律：
 
-1. **预算算术一律走 sizing**。真实调用形态如 [src/executor.rs:L1376-L1379](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/executor.rs#L1376-L1379)：草稿 hedge 暂存页折算成 margin 字节，`sum(&[margin, product(&[pages, page_bytes])?])?`——嵌套调用里任何一层溢出都会带着自己的因子表冒出来。
-2. **"先于张量"的场景是常态**。最直接的例证：[src/executor.rs:L1331-L1373](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/executor.rs#L1331-L1373) 在主模型装载完成后、**草稿模型张量尚未装载**时，就从草稿 config 用 `DFlashMemoryReservation` 算出固定字节数并加进 margin——注释明说"loads after profiling but lives outside the paged KV pool, so reserve its footprint up front **from the draft config**"。而 [dflash/reservation.rs:L93-L148](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/dflash/reservation.rs#L93-L148) 整段预算全部由 `sizing::product/sum` 拼成。
+1. **预算算术一律走 sizing**。真实调用形态如 [src/executor.rs:L1407-L1410](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/executor.rs#L1407-L1410)：草稿 hedge 暂存页折算成 margin 字节，`sum(&[margin, product(&[pages, page_bytes])?])?`——嵌套调用里任何一层溢出都会带着自己的因子表冒出来。
+2. **"先于张量"的场景是常态**。最直接的例证：[src/executor.rs:L1350-L1404](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/executor.rs#L1350-L1404) 在主模型装载完成后、**草稿模型张量尚未装载**时，就对 `draft: Option<DraftModel>` 做 match，只读草稿 checkpoint 的 config 就算出预留——注释原话 "The draft model loads after profiling but lives outside the paged KV pool, so reserve its footprint up front **from the draft config**"。本讲更新后这里是**并列的两条草稿臂**：
+   - **DFlash 臂**（[L1356-L1390](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/executor.rs#L1356-L1390)）：`DFlashMemoryReservation::from_path` 只读草稿 config，`fixed_bytes` 经 `sizing::sum` 折进 margin（L1362-L1365），hedge 暂存页另行记账（L1366-L1388）；[dflash/reservation.rs:L93-L148](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/dflash/reservation.rs#L93-L148) 整段预算全部由 `sizing::product/sum` 拼成。
+   - **EAGLE-3 臂**（[L1391-L1402](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/executor.rs#L1391-L1402)，本讲更新新增）：`Eagle3MemoryReservation::from_path(path, max_prefill_tokens, EAGLE3_MAX_BATCH)`（批上限 `EAGLE3_MAX_BATCH = 1`，[src/eagle3.rs:L24](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/eagle3.rs#L24)），`fixed_bytes` 同样经 `sizing::sum` 折进 margin（L1397-L1400）；批一贪心草稿没有 hedge 暂存，返回值直接是 `(kv_bytes_per_token, 0)`。预留本体的"按 token 记账 vs 固定 margin"两分法与 DFlash 同构（[src/eagle3/reservation.rs:L5-L21](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/eagle3/reservation.rs#L5-L21) 的文档注释：`kv_bytes_per_token` 缩减块预算，`fixed_bytes` 走 margin）。
 
 #### 4.5.3 源码精读
 
-**两个函数**——[src/sizing.rs:L10-L15](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/sizing.rs#L10-L15) 的 `product`：`try_fold(1usize, checked_mul)`，任一步溢出即 `Err`，错误信息打印完整因子列表；[L17-L22](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/sizing.rs#L17-L22) 的 `sum` 同构。
+**两个函数**——[src/sizing.rs:L10-L15](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/sizing.rs#L10-L15) 的 `product`：`try_fold(1usize, checked_mul)`，任一步溢出即 `Err`，错误信息打印完整因子列表；[L17-L22](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/sizing.rs#L17-L22) 的 `sum` 同构。
 
-**全乘积支配部分乘积**——u2-l2 读过的 `kv_bytes_per_block`（[src/weights.rs:L823-L861](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights.rs#L823-L861)）在构造 layout **之前**先对全乘积做 `sizing::product`，注释解释：layout 内部用普通乘法推步长，但全乘积支配一切部分乘积——清零全乘积等于清零全部。这是"哪些点必须 checked"的选择标准：**看住支配项**。
+**全乘积支配部分乘积**——u2-l2 读过的 `kv_bytes_per_block`（[src/weights.rs:L823-L861](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights.rs#L823-L861)）在构造 layout **之前**先对全乘积做 `sizing::product`，注释解释：layout 内部用普通乘法推步长，但全乘积支配一切部分乘积——清零全乘积等于清零全部。这是"哪些点必须 checked"的选择标准：**看住支配项**。
 
-**checked 与 saturating 的分工**——同一片 executor 代码里，hedge 页数上限用的是 `saturating_mul` + `min`（[src/executor.rs:L1359-L1369](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/executor.rs#L1359-L1369)）：那里算的是**封顶值**（两个上界取小），钳到饱和是语义正确的；而 margin 字节数是**精确账目**，必须 checked。两种算术并存不是不一致，而是"必须精确的 checked、允许钳制的 saturating"。
+**checked 与 saturating 的分工**——同一片 executor 代码里，hedge 页数上限用的是 `saturating_mul` + `min`（[src/executor.rs:L1378-L1388](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/executor.rs#L1378-L1388)）：那里算的是**封顶值**（两个上界取小），钳到饱和是语义正确的；而 margin 字节数是**精确账目**，必须 checked（L1407-L1410）。两种算术并存不是不一致，而是"必须精确的 checked、允许钳制的 saturating"。
 
-**对照组：装载路径里的普通乘法**——[pegainfer-core/src/weight_loader.rs:L665-L668](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L665-L668) 的 `row_offset * cols * elem` 是普通乘法，为什么可以？因为它发生在 `tensor_2d` 已验证源形状 == `[src_rows, cols]`、行区间已 `checked_add` 验证 ≤ `src_rows` **之后**——乘积被已验证的张量字节长度上界住。sizing 保护的是"张量还不存在"的阶段；张量已对账后，普通算术有前序校验兜底。**同一段启动流程里两种算术的边界，就是"校验已否发生"的边界。**
+**两个草稿器，两种 sizing 深度（本讲更新对照）**——DFlash 的预留（[src/dflash/reservation.rs:L52-L108](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/dflash/reservation.rs#L52-L108)）整段由 `sizing::product/sum` 拼成；EAGLE-3 的预留（[src/eagle3/reservation.rs:L38-L90](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/eagle3/reservation.rs#L38-L90)）内部用普通乘法（如 L52 的 `num_hidden_layers * 2 * kv_dim * BF16`），但折进 margin 的那一步在 executor 里走 `sizing::sum`（L1397-L1400）。同一个"精确账目必须 checked"的纪律，两个草稿器贯彻的深度不同：**外层累加（margin 是精确账目）两处都 checked**，内层几何乘法只有 DFlash 全程 checked。读代码时可以用这条边界自查一个问题："这个数字如果回绕，会被哪一层接住？"
+
+**对照组：装载路径里的普通乘法**——[pegainfer-core/src/weight_loader.rs:L665-L668](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L665-L668) 的 `row_offset * cols * elem` 是普通乘法，为什么可以？因为它发生在 `tensor_2d` 已验证源形状 == `[src_rows, cols]`、行区间已 `checked_add` 验证 ≤ `src_rows` **之后**——乘积被已验证的张量字节长度上界住。sizing 保护的是"张量还不存在"的阶段；张量已对账后，普通算术有前序校验兜底。**同一段启动流程里两种算术的边界，就是"校验已否发生"的边界。**
 
 #### 4.5.4 代码实践
 
 **实践目标**：数一数 sizing 的真实覆盖面。
 
-1. 操作步骤：在 crate 根执行 `rg "sizing::(product|sum)" src/ -c`，按文件汇总命中数；挑 [src/dspark.rs:L807-L825](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/dspark.rs#L807-L825) 任一条链，写出它算的是哪块缓冲的字节数、维度来自哪个 config。
-2. 需要观察的现象：所有命中都出现在"预算/预留"语境（reservation、budget、margin、scratch），没有一个出现在已验证张量的搬运路径——与 4.5.3 的边界论述互证。
-3. 预期结果：一张"文件 × 命中数 × 用途"小表（executor.rs、weights.rs、dflash/reservation.rs、dspark.rs、dflash/selector.rs 五处为主）。只读搜索，无需 GPU。
+1. 操作步骤：在 crate 根执行 `rg "sizing::(product|sum)" src/ -c`，按文件汇总命中数；挑 [src/dspark.rs:L807-L825](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/dspark.rs#L807-L825) 任一条链，写出它算的是哪块缓冲的字节数、维度来自哪个 config。
+2. 需要观察的现象：所有命中都出现在"预算/预留"语境（reservation、budget、margin、scratch），没有一个出现在已验证张量的搬运路径——与 4.5.3 的边界论述互证。顺带一问：`src/eagle3/reservation.rs` 有几处命中？（零——见 4.5.3 的对照段。）
+3. 预期结果：一张"文件 × 命中数 × 用途"小表（executor.rs、weights.rs、dflash/reservation.rs、dspark.rs、dflash/selector.rs 五处为主；eagle3/reservation.rs 为零命中）。只读搜索，无需 GPU。
 
 #### 4.5.5 小练习与答案
 
@@ -343,13 +356,17 @@ down_proj    ← col_shard(src_rows=hidden, src_cols=inter,    col_offset=in_off
 
 答案：分别返回 `Ok(1)` 与 `Ok(0)`——乘法单位元与加法单位元（`try_fold` 的初值）。对空因子表这是数学上自洽的定义；调用方若传空表，通常说明维度本身缺失，值得在更高层被形状校验拦下（而不是让单位元悄悄通过预算）。
 
+**练习 4**（本讲更新）：EAGLE-3 臂为什么第二项直接写 `0`，而 DFlash 臂要算 `hedge_scratch_pages`？
+
+答案：hedge 暂存页是 DFlash 家族的可选投机旋钮（PEGAINFER_SPEC_HEDGE，u6-l7）所需要的草稿 KV 超前写入空间；EAGLE-3 v1 是批一贪心草稿器（`EAGLE3_MAX_BATCH = 1`），没有 hedge 链，也就没有这笔账。`match` 的返回值形状 `(kv_bytes_per_token, hedge_scratch_pages)` 对两个草稿器统一，EAGLE-3 在自己不适用的格子上填零——与 4.3.5 练习 4 的"一个开关够用"是同一种"差异留在臂内、接口保持统一"的思路。
+
 ## 5. 综合实践
 
 **任务：梳理两阶段结构的完整清单 + TP=2 QKV 切片边界推导 + 为装载纯函数补一个单测并运行。**
 
 ### 5.1 两阶段结构清单（记录 → 执行 → 兑换）
 
-对照 [src/weights/load.rs:L127-L308](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs#L127-L308) 填出下表（答案已给出，核对时关注**顺序**）：
+对照 [src/weights/load.rs:L127-L308](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs#L127-L308) 填出下表（答案已给出，核对时关注**顺序**）：
 
 | 阶段 | 代码点（load.rs） | 内容 |
 | --- | --- | --- |
@@ -378,11 +395,11 @@ down_proj    ← col_shard(src_rows=hidden, src_cols=inter,    col_offset=in_off
 | `gate/up_proj` [9728×2560] | 行切 | [0, 4864) | [4864, 9728) |
 | `down_proj.weight` [2560×9728] | **列**切 [in_off, in_off+in_rows) | 列 [0, 4864) → 2560×4864 | 列 [4864, 9728) → 2560×4864 |
 
-逐项核对源码：三对区间来自 [load.rs:L155-L157](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs#L155-L157) 的三次 `shard_range`；rank1 `k_proj` 的字节区间为 `full[512×2560×2, 1024×2560×2)` = `[2_621_440, 5_242_880)`（切片公式在 [weight_loader.rs:L665-L668](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L665-L668)）；融合矩阵内三段的行偏移用**本地**维度：Q ∈ [0, 2048)、K ∈ [2048, 2560)、V ∈ [2560, 3072)——正是 u2-l2 偏移公式代入 `q_dim=2048, kv_dim=512` 的结果，与 [load.rs:L286-L287](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs#L286-L287) 写进 `Attention` 的 `q_dim/kv_dim` 一致。
+逐项核对源码：三对区间来自 [load.rs:L155-L157](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs#L155-L157) 的三次 `shard_range`；rank1 `k_proj` 的字节区间为 `full[512×2560×2, 1024×2560×2)` = `[2_621_440, 5_242_880)`（切片公式在 [weight_loader.rs:L665-L668](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L665-L668)）；融合矩阵内三段的行偏移用**本地**维度：Q ∈ [0, 2048)、K ∈ [2048, 2560)、V ∈ [2560, 3072)——正是 u2-l2 偏移公式代入 `q_dim=2048, kv_dim=512` 的结果，与 [load.rs:L286-L287](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs#L286-L287) 写进 `Attention` 的 `q_dim/kv_dim` 一致。
 
 ### 5.3 为装载纯函数补单测并运行
 
-切片公式的唯一 owner `shard_range` 目前**没有**直接单测（整除性由 `validate_for` 的调用方保证，公式本身靠 4.4 的推导）。在**你自己的工作副本**里（学习练习，勿提交，与 u2-l2 综合实践同一约定）把它加进 [src/config.rs:L914](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/config.rs#L914) 起的 `#[cfg(test)] mod tests`：
+切片公式的唯一 owner `shard_range` 目前**没有**直接单测（整除性由 `validate_for` 的调用方保证，公式本身靠 4.4 的推导）。在**你自己的工作副本**里（学习练习，勿提交，与 u2-l2 综合实践同一约定）把它加进 [src/config.rs:L912-L913](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/config.rs#L912-L913) 起的 `#[cfg(test)] mod tests`：
 
 ```rust
 // 示例代码：加入 src/config.rs 的 tests 模块（学习用，不改动生产逻辑）
@@ -417,16 +434,16 @@ fn shard_range_covers_tp2_qkv_totals() {
 运行与对照：
 
 1. `cargo test --release -p pegainfer-qwen3 --lib shard_range`——只做整数断言，无需 GPU；通过即证明 5.2 表格的机器可验证。**待本地验证**。
-2. 顺带跑一遍已有的装载侧纯函数测试（它们已在库里，属于"找到"的部分）：`cargo test --release -p pegainfer-core --lib weight_loader`——覆盖未对齐 bf16/f32 的 Cow 行为（[weight_loader.rs:L1099-L1168](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader.rs#L1099-L1168)）与 staging 的并行 gather/chunk 边界（[staging.rs:L457-L516](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-core/src/weight_loader/staging.rs#L457-L516)）。测试本身不创建 CUDA 设备，但前提是本地工具链能编译该 crate。**待本地验证**。
+2. 顺带跑一遍已有的装载侧纯函数测试（它们已在库里，属于"找到"的部分）：`cargo test --release -p pegainfer-core --lib weight_loader`——覆盖未对齐 bf16/f32 的 Cow 行为（[weight_loader.rs:L1099-L1168](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader.rs#L1099-L1168)）与 staging 的并行 gather/chunk 边界（[staging.rs:L457-L516](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-core/src/weight_loader/staging.rs#L457-L516)）。测试本身不创建 CUDA 设备，但前提是本地工具链能编译该 crate。**待本地验证**。
 
 ## 6. 本讲小结
 
 - 分片读取三步归一：`load_shard_info` 把"单文件/带索引的分片"统一成 `(路径表, 张量→分片下标)`；`mmap_shards` + `deserialize_shards` 得到零拷贝 `TensorView`，未对齐负载经 `Cow` 兜底。
 - `WeightPrefetch` 是咨询式预取：8 线程 × 16 MiB chunk、`RWF_NOWAIT` 探测驻留、慢于 1 GB/s 自觉退场、失败只聚合 warning；单卡在装载函数内 spawn，TP 由 executor 在逐 rank 循环外共享一份。
-- 装载是三阶段纯流水：**记录**（config 当尺子逐张量校验 + 分配 + 压 pending，不上传一个字节）→ **执行**（`finish` 走 32 MiB×2 pinned 双缓冲统一搬运）→ **兑换**（`take` 组装模型，`assert!(finished)` 挡住半装载逃逸）；`ModelRuntimeConfig` 的七个旋钮之所以出现在装载期，是因为投影路径决策与 LoRA 注册表预分配都发生在装载时。
+- 装载是三阶段纯流水：**记录**（config 当尺子逐张量校验 + 分配 + 压 pending，不上传一个字节）→ **执行**（`finish` 走 32 MiB×2 pinned 双缓冲统一搬运）→ **兑换**（`take` 组装模型，`assert!(finished)` 挡住半装载逃逸）；`ModelRuntimeConfig` 的七个旋钮之所以出现在装载期，是因为投影路径决策与 LoRA 注册表预分配都发生在装载时——第七旋钮已改名 `draft_enabled`，executor 从 `Option<DraftModel>` 折出 `is_some()`，DFlash 与 EAGLE-3 共用。
 - TP 切片只有一个公式 `shard_range(total) = (rank×total/ws, total/ws)`（整除由 `validate_for` 预先保证，ws=1 退化为全量）：q/k/v、gate/up **行切**后融合（TP=2 时每 rank `qkv_proj` 为 3072×2560），o_proj/down_proj **列切**消费被切输入，层数不切。
-- [src/sizing.rs](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/sizing.rs) 的 checked 乘加守住"配置维度已读、张量未对账"的窗口：release 下普通乘法静默回绕会让坏 config 变成**少预留**而不是错误；已验证张量路径上的普通算术则由前序形状校验兜底——两种算术的边界就是校验发生与否的边界。
+- [src/sizing.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/sizing.rs) 的 checked 乘加守住"配置维度已读、张量未对账"的窗口：release 下普通乘法静默回绕会让坏 config 变成**少预留**而不是错误；executor 的 DFlash 与 EAGLE-3 两条草稿预留臂都在草稿张量装载前只凭草稿 config 折 margin（L1362-L1365 / L1397-L1400），是这扇窗最活的例子；已验证张量路径上的普通算术则由前序形状校验兜底——两种算术的边界就是校验发生与否的边界。
 
 ## 7. 下一步学习建议
 
-权重现已落进显存，但"能装下多少 KV"的账还没算——下一讲 **u2-l4（显存画像与 KV 预算）** 把本讲的装载结果当作账本第一行：`profile_temp_blocks` 画像激活峰值、`KvBudget` 从预算里数出块数、`servable_len` 折算服务上限（你会再次遇到 `sizing::product`，这次在它最主场的位置）。往执行侧走，**u3-l1（Qwen3Executor 与 ModelExecutor 契约）** 会展示 [src/executor.rs:L1318-L1330](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/executor.rs#L1318-L1330) 这个调用点的下半场；**u9-l1（张量并行）** 则把本讲 4.4 的切片边界放进多 rank 服务的完整图景（含启动期每 rank 图预捕获）。建议重读 [src/weights/load.rs](https://github.com/openinfer-project/openinfer/blob/785d04871df37ddfb3e1b1432ce544b94505a801/pegainfer-qwen3/src/weights/load.rs) 一遍并核对 5.1 清单——此时你应当能对每个调用说出它属于哪个阶段、校验了什么、何时才有字节进显存。
+权重现已落进显存，但"能装下多少 KV"的账还没算——下一讲 **u2-l4（显存画像与 KV 预算）** 把本讲的装载结果当作账本第一行：`profile_temp_blocks` 画像激活峰值、`KvBudget` 从预算里数出块数、`servable_len` 折算服务上限（你会再次遇到 `sizing::product`，这次在它最主场的位置，还会看到本讲 4.5 两条草稿臂折进 margin 的字节如何从 KV 预算里扣走）。往执行侧走，**u3-l1（Qwen3Executor 与 ModelExecutor 契约）** 会展示 [src/executor.rs:L1338-L1349](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/executor.rs#L1338-L1349) 这个调用点的下半场；**u9-l1（张量并行）** 则把本讲 4.4 的切片边界放进多 rank 服务的完整图景（含启动期每 rank 图预捕获）。建议重读 [src/weights/load.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/weights/load.rs) 一遍并核对 5.1 清单——此时你应当能对每个调用说出它属于哪个阶段、校验了什么、何时才有字节进显存。

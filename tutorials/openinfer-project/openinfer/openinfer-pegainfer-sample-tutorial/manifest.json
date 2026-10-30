@@ -1,0 +1,355 @@
+{
+  "head": "af9e40e12108141bb18f93188c82d2583df18509",
+  "project": "openinfer-pegainfer-sample",
+  "rationale": "pegainfer-sample 是一个小而密的 crate：整个库只有一个 src/lib.rs（约 700 行），承担所有模型 crate 共享的两件事——批式选下一个 token（select_batch）与批式 logprob 提取（token_logprobs_batch）。学习顺序因此设计为四层递进：先让读者建立全局定位（这个 crate 在 kernels 与模型 crate 之间的分层位置、公共 API 面、如何构建与测试），再沿主链路逐机制拆解 select_batch（参数与贪心判定 → 一次性分配的 SampleScratch → 三路分发 → 种子确定性），接着走平行的 logprob 通道（主机参考实现 → 设备批量孪生），最后进入高级主题（CUDA 图友好的分阶段贪心路径、固定内存与流同步的 #704 教训、模型无关的测试与基准策略）。依赖关系严格沿源码真实调用链展开：scratch 的 selection_width 只有理解 effectively_greedy 才说得清，分阶段路径只有理解 select_batch 的贪心分支才有意义，测试篇放在最后可以让读者带着对全部机制的把握去读回归测试里冻结的历史教训。每篇讲义只解决一个机制问题，并配一个可动手的实践（优先安排无需 GPU 的单元测试编写，GPU 集成测试与基准作为可选实践）。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-crate-position-and-layering.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出这个 crate 的两个模型无关职责：select_batch 与 token_logprobs_batch",
+            "画出 pegainfer-kernels → pegainfer-sample → 各模型 crate 的分层图，并说明每层拥有什么",
+            "从代码出发列出全部 pub API，理解 pub use 再导出 BatchSamplingRow 等底层原语的意图",
+            "复述模块文档中 Kimi-K2 的例外：为什么它自带贪心路径却仍复用本 crate 的非贪心与 logprob 通道"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "crate 模块文档与定位",
+            "Cargo.toml 依赖与分层",
+            "公共 API 面与再导出"
+          ],
+          "order": 1,
+          "practice_task": "通读 src/lib.rs 顶部模块文档与 Cargo.toml 的依赖表，手画一张分层图（pegainfer-kernels 提供什么、pegainfer-sample 拥有什么、模型 crate 消费什么），并列出 crate 的全部 pub 项清单（函数、结构体、再导出类型）；同时记录一个待确认点：模块文档说契约类型在 \"pegainfer-engine\"，而 import 实际来自 pegainfer_frontend，请核对这个命名差异并写下你的解释。",
+          "source_files": [
+            "src/lib.rs",
+            "Cargo.toml"
+          ],
+          "title": "pegainfer-sample 是什么：全局定位与分层架构",
+          "topic": "介绍这个 crate 在整个推理引擎中的位置：它是所有模型 crate 共享的采样层，负责把一个 logits 竞技场变成每行一个 token id，以及批量提取 logprob。讲解 lib.rs 顶部模块文档所描述的分层——底层 .cu/FFI 与批式原语在 pegainfer-kernels，本 crate 拥有策略层（贪心/非贪心路由、logprob 数学），契约类型 SamplingParams/TokenLogprob 来自前端契约 crate 并在此再导出。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-build-test-and-bench.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "区分三类测试：lib 内 CPU 单元测试、需要 GPU 的集成测试、需要 GPU 的基准",
+            "独立运行 cargo test --release -p pegainfer-sample --lib 并解释它为什么不需要 GPU",
+            "说出 ignored 测试（延迟探针）的用途与手动运行方式",
+            "理解 benches/select_batch.rs 中 greedy/sampling/mixed 三种混合的意义"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "workspace 构建与 --release 纪律",
+            "CPU 单元测试与 GPU 门测试的分界",
+            "criterion 微基准与延迟探针"
+          ],
+          "order": 2,
+          "practice_task": "在没有 GPU 的机器上运行 cargo test --release -p pegainfer-sample --lib，确认三个 logprob 单元测试通过；然后逐一打开 tests/select_batch.rs、tests/gpu_logprobs.rs、benches/select_batch.rs，列出每个测试/基准是否需要 GPU 及理由（看它是否构造 DeviceContext）；最后用 cargo doc --no-deps -p pegainfer-sample 生成并浏览本 crate 的文档，检查 pub API 清单是否与上一讲一致。",
+          "source_files": [
+            "Cargo.toml",
+            "src/lib.rs",
+            "tests/select_batch.rs",
+            "tests/gpu_logprobs.rs",
+            "benches/select_batch.rs"
+          ],
+          "title": "构建、测试与基准：验证这个 crate 的三条途径",
+          "topic": "讲清楚这个 crate 的验证面：lib 内嵌的三个 CPU 单元测试（token_logprob_from_row，不需要 GPU）、两个需要 GPU 的集成测试文件（select_batch 路由行为、gpu_logprobs 的 GPU-主机 A/B），以及 criterion 微基准和一个被 #[ignore] 的延迟探针测试。同时说明 release 构建纪律与 workspace lints。"
+        }
+      ],
+      "order": 1,
+      "title": "单元一：定位与上手"
+    },
+    {
+      "id": "u2",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u2-l1-sampling-params-and-effectively-greedy.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "读懂 SamplingParams 各字段（temperature/top_k/top_p/min_p/seed）的语义来源",
+            "推导 effectively_greedy 中 top_p <= 1/vocab 使核收敛为单 token 的论证",
+            "解释 bf16 并列最大值下走拒绝采样器会导致不确定性的原因",
+            "区分 is_greedy（显式贪心）与 effectively_greedy（语义等价贪心）两级判定"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "SamplingParams 契约字段",
+            "effectively_greedy 判定",
+            "top_p 核数学与 bf16 并列"
+          ],
+          "order": 1,
+          "practice_task": "用纸笔对一个 vocab=8 的均匀分布验证：softmax 最大值恒 >= 1/vocab，因此 top_p <= 1/vocab 时核只剩 argmax token；然后照 tiny_top_p_routes_to_argmax_even_under_bf16_ties 的思路，为 effectively_greedy 写一个新的 CPU 侧表驱动单元测试（不需要 GPU，直接调用 pub fn effectively_greedy），至少覆盖：显式贪心、top_p 恰等于 1/vocab、top_p 略大于 1/vocab、top_p 为 0 或 NaN、selection_width 小于 vocab 五种情形。",
+          "source_files": [
+            "src/lib.rs",
+            "tests/select_batch.rs"
+          ],
+          "title": "SamplingParams 与 effectively_greedy：一行走不走 argmax 由什么决定",
+          "topic": "讲解从 pegainfer_frontend::sampler 再导出的 SamplingParams 如何驱动路由：除显式贪心参数外，top_p <= 1/vocab 的核只含 argmax token，因此这类行也必须走确定性的 argmax 路径——否则拒绝采样器会在 bf16 并列的最大值里随机挑一个。tests/select_batch.rs 中的 tiny_top_p 与 padded_arena_width 两个回归测试就是这条数学论证的冻结形式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-sample-scratch-buffers.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "说出每个缓冲区的角色：row_indices、argmax partials、top1_values、argmax_out、identity_rows、BatchSamplingScratch",
+            "解释 argmax_batch_bf16_split_partials_len 如何由 (max_rows, vocab) 决定 partial 缓冲长度",
+            "理解 with_selection_width 解决的 tile 对齐问题（#1046 场景）",
+            "解释贪心与非贪心缓冲为什么可以不相交、共用一份 scratch"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "SampleScratch::new / with_selection_width",
+            "argmax partials 定长公式",
+            "selection_width 与 tile 对齐词表"
+          ],
+          "order": 2,
+          "practice_task": "给定 vocab=151936、max_rows=16，写一张表逐项列出 SampleScratch 每个设备缓冲与两个 pinned 缓冲的元素类型、长度和用途；再对照 tests/select_batch.rs 的 padded_arena_width_does_not_suppress_the_argmax_routing，写一段 200 字以内的分析：如果把 with_selection_width(ctx, vocab=512, selection_width=256, max_rows) 用成 SampleScratch::new(ctx, 512, max_rows)，哪一个测试断言会失败、为什么。",
+          "source_files": [
+            "src/lib.rs",
+            "tests/select_batch.rs"
+          ],
+          "title": "SampleScratch：一次分配的缓冲区布局与 selection_width",
+          "topic": "逐字段拆解 SampleScratch：为什么解码路径要求指针稳定、绝不能每步重分配；贪心行（indexed argmax 输入输出、partials、top1）与非贪心行（BatchSamplingScratch）各占哪些互不相交的缓冲；以及 selection_width 与 vocab 分离的原因——模型把 logits GEMM 对齐到 tile 倍数后，多出来的填充列不是可发射 token，不能参与 1/vocab 核判定。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "filename": "u2-l3-select-batch-three-way-dispatch.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "沿源码走通 greedy 行的 H2D 行号上传 → indexed argmax → D2H 回读全流程",
+            "理解 BatchSamplingRow 的组装与 min_p 行在 gpu_sample_batch_into 内部被分区的原因",
+            "说出 select_batch 顶部四个 ensure! 各自守护的不变量",
+            "解释 benches 中 mixed 混合是常见服务形态、greedy 是批式 argmax 下限的原因"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "前置校验与容量不变量",
+            "greedy 行批式 indexed argmax",
+            "非 greedy 行 FlashInfer 批式采样",
+            "结果按行号归位"
+          ],
+          "order": 3,
+          "practice_task": "对照 tests/select_batch.rs 的 mixed_batch_routes_and_places_each_row，手工跟踪三行（greedy、top_p=0.5 采样、greedy）各自落入哪条路径、各自的 token 如何写回 tokens 向量的正确下标；然后自行设计一个 5 行批（含 1 行 min_p、1 行 seeded、2 行贪心、1 行普通采样），在纸上写出每行进入哪个集合（greedy / sampling_rows / seeded 循环），并到源码里核对 filter 闭包确认答案。",
+          "source_files": [
+            "src/lib.rs",
+            "tests/select_batch.rs",
+            "benches/select_batch.rs"
+          ],
+          "title": "select_batch 三路分发：argmax、批式采样与 seeded 单行",
+          "topic": "精读 select_batch 主体：先把参数分成三个集合——贪心行合并成一次批式 indexed argmax，无种子采样行合并成一次 FlashInfer 批式调用（min_p 行由底层自动分区出融合快路径），带种子的行逐行做单行可重放调用。同时讲解函数顶部一连串 ensure! 校验（步数、容量、arena 行数、vocab 宽度）守护的不变量。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-mix-seed-and-determinism.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "读懂 mix_seed 的 SplitMix64 混合实现",
+            "解释 seeded 行必须单行调用的原因：FlashInfer philox 把批内位置折进子序列",
+            "复述可重放契约：token 是 (seed, step, 分布) 的纯函数",
+            "理解 engine 级种子按步推进与请求级种子按 (seed, step) 混合的分工"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "SplitMix64 mix_seed",
+            "philox 子序列与批组合",
+            "每步引擎种子推进"
+          ],
+          "order": 4,
+          "practice_task": "写一个 CPU 单元测试验证 mix_seed 的三个性质：(1) 相同 (seed, step) 输出相同；(2) step 变化输出几乎必然不同（在 0..1024 上采样检查碰撞）；(3) 不同 seed 输出分布良好（简单雪崩测试：翻转 seed 最低位后统计输出位翻转比例）；再用自己的话回答：为什么 tests/select_batch.rs 的 seeded_rows_replay_independent_of_batch_position 要构造 \"seeded 行在批首\" 与 \"在批尾\" 两个布局。",
+          "source_files": [
+            "src/lib.rs",
+            "tests/select_batch.rs"
+          ],
+          "title": "mix_seed 与确定性：seeded 行为什么必须单独调用",
+          "topic": "讲解种子体系：引擎启动取一个种子、每个解码步推进，无种子行通过 philox 子序列去相关；带请求种子的行则用 mix_seed（SplitMix64 混合请求种子与请求内步数）做单行调用，使 token 成为 (seed, step, 分布) 的纯函数、与批组合无关——因为 FlashInfer 核把批内位置折进 philox 子序列，seeded 行不能搭批式调用。"
+        }
+      ],
+      "order": 2,
+      "title": "单元二：select_batch 批式选 token 主链路"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u3-l1-host-logprob-reference.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "推导 log-softmax：max 平移、exp 求和（f64）、取对数回加",
+            "理解 16 万宽词表用 f32 求和会损失精度、必须 f64 累加的原因",
+            "解释 rank 在减 LSE 之前用原始 logit 比较的原因",
+            "读懂插入 + 截断维护 top-k 的 O(V·k) 手法与并列时按 token id 升序的稳定序"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "泛型行输入 (f32/bf16)",
+            "log-softmax 与 f64 累加",
+            "rank 与 top-k 提取"
+          ],
+          "order": 1,
+          "practice_task": "手算一行 5 个 logit（如 [-2.0, 0.5, 1.25, -0.75, 1.25]）的 logprob、rank 和 top-3；然后仿照 lib.rs 内 token_logprob_matches_exact_log_softmax 的写法，新增一个含负值与并列最大值的 CPU 单元测试，断言：picked 的 logprob 与你手算的 f64 参考值误差 < 1e-6、并列 token 在 top_logprobs 中按 id 升序、k=0 时 top_logprobs 为空但 logprob/rank 仍正确。",
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "title": "token_logprob_from_row：主机端 log-softmax 参考实现",
+          "topic": "精读主机单行参考实现：一次 O(V) 遍历同时求 max 与 rank（用原始 logit 比较，避免 f32 舍入改变名次），指数和用 f64 累加（16 万宽词表 f32 会失精度），再用 partition_point 插入法维护 top-k。泛型 T: Copy + Into<f32> 让 Qwen 喂 f32、Kimi 直接喂 bf16 而无需加宽拷贝。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-device-batch-logprobs.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "算出一次调用每个设备缓冲的元素个数（rows、picked、ks、picked_lp、ranks、vals/ids = rows*k_max）",
+            "解释为什么本函数每次现分配而不入 scratch（logprob 只在请求方要求时运行）",
+            "理解 has_stream_override 防护与主 stream 上缓冲流量排序的关系",
+            "复述分片词表警告：分片局部的 logsumexp 不是全局的，必须先跨 rank 归并"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "LogprobRequest 布局与校验",
+            "logprob_topk_batch_bf16_into 调用",
+            "D2H 回读与结果重组"
+          ],
+          "order": 2,
+          "practice_task": "画出 token_logprobs_batch 一次调用的完整数据流图：标出每个 H2D 缓冲、每个 D2H 缓冲的长度公式（含 topk_len 的 rows*k_max 计算与 .max(1)），并注明 ctx.sync() 的位置；然后阅读 tests/gpu_logprobs.rs 的 rejects_out_of_range_requests，回答：为什么把 seq_len 手动改成 4 是一个有效的测试手法，以及 stream override 激活时这个函数为何必须报错而不是排队。",
+          "source_files": [
+            "src/lib.rs",
+            "tests/gpu_logprobs.rs"
+          ],
+          "title": "token_logprobs_batch：设备端批量孪生与它的防护栏",
+          "topic": "精读批式设备孪生：LogprobRequest 描述行号/选中 token/top_k，函数组装三组 i32 输入与五组输出缓冲，一次 logprob_topk_batch_bf16_into launch 完成后回读拼装 TokenLogprob（vals/ids 按 i*k_max+j 布局）。同时讲解它每个调用临时分配（与 scratch 路径的取舍）、越界拒绝、空请求短路，以及 stream override 激活时拒绝执行的原因。"
+        }
+      ],
+      "order": 3,
+      "title": "单元三：logprob 通道"
+    },
+    {
+      "id": "u4",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u4-l1-staged-greedy-graph-path.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "理解图内必须指针稳定、D2H 回读不能在图内等待的约束",
+            "说出四个函数的分工：图内 argmax+dtod、图外排队回读、组合封装、只同步收集",
+            "解释 identity_rows 让 argmax 复用 indexed 版本而无需第二个核的原因",
+            "理解 has_stream_override 防护守护的 base-stream-only 约束"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "greedy_argmax_ids 图内段",
+            "greedy_stage_readback 双槽排队",
+            "greedy_collect_resident 收集",
+            "base-stream-only 防护"
+          ],
+          "order": 1,
+          "practice_task": "写出一段解码循环的伪代码：用 greedy_stage_resident 在第 N 步把 token 写入 ids_out 并向 slot N%2 排队回读，在随后合适的时机用 greedy_collect_resident 收集该槽并发射给请求；在伪代码旁标注每一步哪些操作发生在 CUDA 图内、哪些在图外，并解释 identity_rows（0..max_rows 恒等映射）为什么让贪心路径复用 indexed argmax 核而不需要专门的连续行内核。",
+          "source_files": [
+            "src/lib.rs",
+            "tests/select_batch.rs"
+          ],
+          "title": "CUDA 图友好的分阶段贪心路径",
+          "topic": "讲解 greedy_argmax_ids / greedy_stage_readback / greedy_stage_resident / greedy_collect_resident 四件套：解码路径被 CUDA 图捕获时指针必须稳定，D2H 回读不能在图内等待，因此 argmax 与 dtod 拷贝留在图内（用 identity_rows 做恒等行映射），pinned 回读在图外排入两个交替槽位，之后只做轻量收集。每个入口都用 has_stream_override 拒绝非 base stream。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u4-l1"
+          ],
+          "filename": "u4-l2-pinned-memory-and-stream-sync.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "解释 pageable D2H 的同步拷贝语义如何让步骤线程排在并发大块拷贝之后",
+            "理解 pinned（且 write-combined）页让 D2H 保持异步、读取方只阻塞在拷贝自身事件上",
+            "说出 write-combined 页 CPU 读不缓存、不要把该缓冲扩展成热点读取结构的告诫",
+            "论证 stream_spin_wait 等待拷贝事件为何传递覆盖同 stream 上先前排队的 argmax 核"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "pageable vs pinned D2H (#704)",
+            "write-combined 页告诫",
+            "stream_spin_wait 事件级等待"
+          ],
+          "order": 2,
+          "practice_task": "写一篇简短的机制笔记：先用时序图画出 #704 事故（pageable 回读的同步语义让步骤线程排在 KV 恢复大块拷贝之后、token 交付冻结 23.6ms），再画出 pinned 方案（D2H 异步 + 读者只阻塞拷贝自身事件）；最后解释 select_batch 贪心分支里 stream_spin_wait 前的那段注释——为什么等这个拷贝的事件就传递等到了同 stream 上更早排队的 argmax 核，从而等价于旧的整流同步。",
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "title": "固定内存、流同步与 #704 教训",
+          "topic": "专题讲解主机回读的内存与同步纪律：SampleScratch 里的 argmax_host/argmax_host_alt 是 unsafe alloc_pinned 得到的固定页——历史上一次 pageable 回读（同步拷贝语义）撞上 P/D KV 恢复的大块拷贝流量，把这个亚毫秒调用拖成 23.6ms 并冻结所有活跃流的 token 交付（#704）；pinned 让 D2H 保持异步，读者只阻塞在拷贝自身事件上，stream_spin_wait 则把调度器唤醒从步骤循环里拿掉。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3",
+            "u3-l2"
+          ],
+          "filename": "u4-l3-tests-and-benchmarks.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "掌握用合成 logits arena 替代模型权重的模型无关测试法",
+            "理解 GPU-主机 A/B（token_logprobs_batch vs token_logprob_from_row）作为正确性门的双实现互证结构",
+            "读懂把历史 bug（per-step philox 迁移、tile 对齐、min_p 邻居扰动）写成回归断言的写法",
+            "会跑并会扩展 criterion 基准与 --ignored 延迟探针"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "合成 arena 测试法",
+            "GPU-主机 A/B 对照",
+            "回归测试即文档",
+            "criterion 微基准与延迟探针"
+          ],
+          "order": 3,
+          "practice_task": "模仿现有测试的合成 arena 手法（make_arena、peak_row、noise_row），为 select_batch 新写一个集成测试：构造一个 4 行批，其中两行带不同请求种子、一行 min_p、一行贪心，断言 (1) 两个 seeded 行在更换邻居与引擎种子后 token 完全重放，(2) 贪心行结果与单独调用一致；如无 GPU 则先写出测试与预期断言并标注待验证，有 GPU 时跑通它；再任选 criterion 基准的一个维度（如把 batch 换成 4/16/128）复制一份跑对比。",
+          "source_files": [
+            "src/lib.rs",
+            "tests/select_batch.rs",
+            "tests/gpu_logprobs.rs",
+            "benches/select_batch.rs"
+          ],
+          "title": "模型无关的测试策略与性能基准",
+          "topic": "收束全篇：这个 crate 的测试哲学是模型无关——用合成 logits arena（peak_row 单峰、noise_row 确定性 bf16 噪声）替代模型权重，把每条策略行为（路由、归位、种子重放、min_p 隔离、容量拒绝）钉成一个集成测试；gpu_logprobs 则用 GPU-主机 A/B 双实现互证。每个回归测试的注释都是一段历史（per-step philox 迁移、#1046 tile 对齐），基准面覆盖 greedy 下限 / 纯采样 / 混合三种服务形态。"
+        }
+      ],
+      "order": 4,
+      "title": "单元四：高级主题——图捕获、内存纪律与工程验证"
+    }
+  ]
+}
