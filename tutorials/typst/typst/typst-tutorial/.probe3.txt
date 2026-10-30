@@ -1,0 +1,3 @@
+line one [bracket] (link#L1-L2)
+line two `code` $dollar "quotes"
+line three 中文
