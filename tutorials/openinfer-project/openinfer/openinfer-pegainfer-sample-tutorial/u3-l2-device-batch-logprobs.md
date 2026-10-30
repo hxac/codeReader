@@ -2,519 +2,349 @@
 
 ## 1. 本讲目标
 
-上一讲（u3-l1）我们精读了主机端的单行参考实现 `token_logprob_from_row`：一次 O(V) 遍历算出 log-softmax、rank 和 top-k。本讲进入它的**设备端批量孪生** `token_logprobs_batch`。学完本讲，你应该能够：
+上一讲（u3-l1）我们精读了主机端单行参考实现 `token_logprob_from_row`：一次 O(V) 遍历算出 log-softmax、rank 和 top-k。它是「正确性锚点」，但如果每个解码步都对 16 万宽的词表逐行做主机计算，代价是把整行 logits 从 GPU 搬下来再在 CPU 上扫一遍——批越大越不可承受。
 
-1. 说出 `LogprobRequest` 三个字段（`row` / `picked` / `top_k`）各自的语义，以及入口处每一条校验守护的不变量。
-2. 对一次调用**算出全部 8 个设备缓冲的元素个数**——三组 H2D 输入（`rows` / `picked` / `ks`，各 `requests.len()` 个 i32）、五组输出（`picked_lp`、`ranks` 各 `requests.len()` 个，`vals` / `ids` 各 `topk_len = requests.len() × k_max` 与 `.max(1)` 兜底）。
-3. 解释为什么这个函数**每次调用临时分配**缓冲，而不像 `select_batch` 那样进 `SampleScratch` 长期持有。
-4. 理解 `has_stream_override` 防护栏：为什么流覆盖激活时它必须**报错拒绝**而不是把工作排队到别的流上。
-5. 复述分片词表警告：分片局部的 logsumexp 不是全局的，必须先跨 rank 归并（#236）。
+本讲精读它的设备端批量孪生 `token_logprobs_batch`：一次内核 launch 服务整批请求，只回读一份紧凑的 \( O(\text{rows} \times (k_{\max}+1)) \) 结果。学完本讲你应该能够：
+
+1. 算出一次调用中每块设备缓冲的元素个数（三组 i32 输入、四组输出，其中 top-k 两组的长度是 `max(1, rows × k_max)`）。
+2. 解释为什么这个函数每次调用现分配临时缓冲，而不像 `select_batch` 那样用常驻 `SampleScratch`。
+3. 读懂结果重组时的 `i*k_max + j` 布局，以及 `ctx.sync()` 在数据流中的位置。
+4. 复述它的三道防护栏：空请求短路、逐条越界拒绝（以及下层内核对「说谎的 `seq_len`」的兜底校验）、stream override 激活时直接报错。
+5. 复述分片词表警告：分片局部的 logsumexp 不是全局的，必须先跨 rank 归并。
 
 ## 2. 前置知识
 
-- **log-softmax 与 LSE**（上一讲已建立）：一行 logits 的 logprob = 被选 logit − LSE，其中 LSE 需先做 max 平移防溢出。回顾公式：
-
-  \[ \mathrm{logprob}(x_{\text{picked}}) = x_{\text{picked}} - \mathrm{LSE}(x), \qquad \mathrm{LSE}(x) = \max_i x_i + \ln\sum_i e^{x_i - \max_j x_j} \]
-
-- **logits arena**：模型 crate 里未分片的全词表 logits 住在一个 `HiddenStates` 里——`seq_len` 行 × `hidden_dim` 列的 bf16 行主序设备缓冲，`hidden_dim` 就是词表宽度 V。
-- **`TokenLogprob` 契约类型**：来自 `pegainfer_frontend::engine`，三个字段 `logprob: f32`、`rank: u32`、`top_logprobs: Vec<(u32, f32)>`（token id → logprob，按 logit 降序、并列按 id 升序）。
-- **CUDA stream**：可以把流理解为 GPU 上的「按序执行队列」。同一个流里，先入队的拷贝/核函数先完成，天然有顺序保证；**不同流之间没有任何顺序保证**，需要事件显式同步。本讲的防护栏全部围绕这一点。
-- **流覆盖（stream override）**：本仓库里的一些执行器会把当前线程的「生效流」临时切到别的流上（比如 qwen3 的 prefill/decode 双流切分），这是一个线程局部开关，详见 4.1.3。
-- 不需要：CUDA 图（那是 u4-l1 的事）、pinned 内存细节（u4-l2 的事）。本讲的 D2H 用的是普通回读加整流同步。
+- **logits arena**：模型执行完最后 projections 后的二维 bf16 矩阵 `HiddenStates { data, hidden_dim, seq_len }`——`hidden_dim` 是词表宽度（每行一个 token 的 logit），`seq_len` 是行数（每行一个序列位置/请求）。本讲的「行号」都是指 arena 的行下标。
+- **log-softmax 与 LSE**：被选 token 的 logprob = 被选 logit − LSE（log-sum-exp），其中 \[ \mathrm{LSE}(x) = \log \sum_v e^{x_v - \max(x)} + \max(x). \] u3-l1 已推导过 max 平移防溢出与 f64 累加的必要性，本讲直接沿用。
+- **H2D / D2H**：host-to-device / device-to-host 的内存拷贝。`clone_htod` 把主机 `Vec` 上传成一块新的 `CudaSlice`；`clone_dtoh` 把设备缓冲拷回一个新的主机 `Vec`；`alloc_zeros` 在设备上分配清零缓冲。
+- **stream override（流覆盖）**：`pegainfer-kernels` 里一个线程本地的开关（`StreamOverrideGuard`），激活后 `active_cu_stream(ctx)` 返回覆盖流而不是 `DeviceContext` 自带的主流——用于 Green Context SM 分区等并发车道。内核 launch 走 `active_cu_stream`，而 `ctx.stream.alloc_zeros` / `clone_htod` / `clone_dtoh` 永远走主流。
+- **CUDA 图与指针稳定**：解码热路径的缓冲必须一次分配、地址固定（u2-l2 讲过 `SampleScratch` 的动机），否则图捕获会失效。
+- **分片词表（sharded vocab）**：张量并行/专家并行下，词表按 rank 切片，每个 rank 只看到一部分 logit 列。Kimi-K2 就属于这类（见 u1-l1 的例外说明）。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
 |------|------|
-| [src/lib.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs) | 本 crate 唯一源文件。`LogprobRequest`（L522–L529）与 `token_logprobs_batch`（L531–L649）是本讲主角；L463–L520 的 `token_logprob_from_row` 是它的正确性锚点 |
-| [tests/gpu_logprobs.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs) | 7 个 GPU 集成测试：GPU-主机 A/B 互证 + 越界/流覆盖拒绝 + 批组合无关性 |
-| [pegainfer-kernels/src/ops/sampling.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-kernels/src/ops/sampling.rs) | 底层 `unsafe fn logprob_topk_batch_bf16_into`（L527–L606）：内核签名、第二层形状校验、真实 launch |
-| [pegainfer-kernels/src/tensor.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-kernels/src/tensor.rs) | `has_stream_override`（L63–L66）、`active_cu_stream`（L73–L79）、`DeviceContext::sync`（L400–L404） |
-| [pegainfer-qwen3/src/executor/logprobs.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/executor/logprobs.rs) | 真实调用方：Qwen3 如何按需组装 `LogprobRequest`（只有要求 logprob 的请求才进批） |
+| [src/lib.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs) | 本讲主体：`LogprobRequest`（L522-L529）、`token_logprobs_batch`（L533-L649）；顶部模块文档交代分层与 Kimi-K2 例外（L1-L25） |
+| [tests/gpu_logprobs.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs) | 7 个需要 GPU 的集成测试：GPU-主机 A/B 互证 + 越界/流覆盖拒绝 + 批组合无关性 |
+| [../pegainfer-kernels/src/ops/sampling.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-kernels/src/ops/sampling.rs) | 底层 `pub unsafe fn logprob_topk_batch_bf16_into`（L527-L606）：形状校验 + FFI launch，是本函数的唯一内核入口 |
+| [../pegainfer-kernels/src/tensor.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-kernels/src/tensor.rs) | `HiddenStates`（L551-L555）、`StreamOverrideGuard`/`has_stream_override`（L18-L66）、`ctx.sync()`（L400-L404） |
+| [../pegainfer-gemma4/src/engine.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-gemma4/src/engine.rs) | 一个真实调用方：按请求是否要求 logprobs 过滤出 `LogprobRequest`（L987-L1005），印证「按需运行」 |
 
 ## 4. 核心概念与源码讲解
 
-本讲的三个最小模块：**4.1** `LogprobRequest` 布局与入口校验（含流覆盖防护栏与分片警告）；**4.2** 一次 `logprob_topk_batch_bf16_into` 调用的 8 个缓冲与按需分配取舍；**4.3** D2H 回读与 `i*k_max+j` 布局的结果重组。
-
-### 4.1 LogprobRequest 布局与入口校验
+### 4.1 LogprobRequest：请求布局与入口校验
 
 #### 4.1.1 概念说明
 
-设备孪生与主机参考实现输入形状不同：主机版吃「一行裸切片」，设备版吃「整个 arena + 一份行级请求清单」。`LogprobRequest` 就是清单里的一行——它描述的是**一个问题**，不是数据：
+`token_logprobs_batch` 的调用方不传「整行都要」，而是传一个精简的请求列表：每条请求说清「我要 arena 的第几行、被选中的是哪个 token、顺便给我这行的 top-k」。`LogprobRequest` 就是这个三字段 POD：
 
-> 「对 arena 的第 `row` 行，告诉我 `picked` 这个 token 的 logprob 和排名，顺便把这行 logits 的前 `top_k` 名也带回来。」
+- `row: usize`——arena 行号（一个 arena 行可以被多条请求引用，同一行请求不同 picked/top_k 也行）；
+- `picked: u32`——已经采样定的 token id（先采样后打分，见 4.2.1 调用方时序）；
+- `top_k: usize`——要的 top-k 个数，`0` 表示只要 logprob 和 rank，不要 top 列表。
 
-三个字段各有来头：
-
-- `row: usize`——arena 行号。解码时一行就是一个活跃请求；prompt logprobs 时一行对应 prompt 里的一个位置。同一行可以出现在多个请求里（比如同一行问两个不同 `picked`）。
-- `picked: u32`——被选 token。它通常不是这个函数自己选的，而是调用方刚用 `select_batch`（或贪心路径）采出来的 token：logprob 通道与采样通道是**两条平行通道**，采样决定「发什么」，logprob 事后解释「这个 token 有多可能」。
-- `top_k: usize`——除了 `picked` 本身，还要这一行的前 k 名。对应 OpenAI 风格 API 里的 `top_logprobs` 参数；`0` 表示不要 top 名单，只要 logprob 和 rank。
-
-结构体标注了 `#[derive(Clone, Copy, Debug)]`——纯数据小结构体，主机侧随手构造、按值传递。
+函数入口的职责是把这份「意图列表」变成可执行且可信任的输入：空列表短路、逐条越界拒绝、k 截断到词表宽度、`usize → i32` 收窄。
 
 #### 4.1.2 核心流程
 
-`token_logprobs_batch` 入口的完整校验链，按代码顺序：
-
+```text
+requests 为空？ ──是──▶ 返回 Ok(vec![])
+     │否
+stream override 激活？ ──是──▶ 报错（见 4.4）
+     │否
+vocab == 0？ ──是──▶ 报错
+     │否
+对每条 r ∈ requests：
+    r.row    ≥ seq_len ？ ──是──▶ 报错（行越界）
+    r.picked ≥ vocab   ？ ──是──▶ 报错（token 越界）
+    k = min(r.top_k, vocab)          ← 截断
+    k_max = max(k_max, k)            ← 累积批内最大 k
+    rows.push(row as i32)、picked.push、ks.push(k)
+    （usize→i32 转换失败也直接以错误冒泡）
 ```
-requests 为空?          ──是──> 直接返回空 Vec（空请求短路，不碰 GPU）
-      │否
-流覆盖激活?             ──是──> 报错拒绝（4.1.3 详述）
-      │否
-vocab（hidden_dim）== 0? ──是──> 报错（空词表无意义）
-      │否
-逐请求循环:
-  ├─ r.row    >= seq_len?      ──是──> 报错（行号越界）
-  ├─ r.picked >= vocab?        ──是──> 报错（token 越界）
-  ├─ k = min(r.top_k, vocab)             （k 钳制，防止 k > V）
-  ├─ k_max = max(k_max, k)               （本轮请求里的最大 k）
-  └─ row/picked/k 逐一 i32::try_from     （防 usize > i32 上界）
-      │全部通过
-组装缓冲 → 一次 launch → 回读（4.2 / 4.3）
-```
-
-要点：`k` 的钳制发生在**入口**（`min(top_k, vocab)`），后续传给内核和结果重组用的都是钳制后的值——所以 `k_larger_than_vocab_is_clamped` 测试里 `top_k: 32` 对 `vocab: 8` 的行最终只返回 8 项。
 
 #### 4.1.3 源码精读
 
-先是 `LogprobRequest` 本体与函数文档：
+请求结构体本身就三个 pub 字段，语义全部由文档注释钉死——[src/lib.rs:522-529](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L522-L529) 定义 `LogprobRequest`：一条 `token_logprobs_batch` 请求 = 被选 token 的 logprob + 该 arena 行的 top-k 条目。
 
-[tests/gpu_logprobs.rs 无关，先看 lib.rs L522-L537](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L522-L537)
+入口的三段校验在 [src/lib.rs:538-547](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L538-L547)：`requests.is_empty()` 直接返回空 `Vec`（调用方不必特判）；`has_stream_override()` 时 `ensure!` 报错，错误信息原文是 "cannot run under a stream override — buffer traffic is ordered on the primary stream"（为什么必须报错而不是排队，见 4.4）；`vocab > 0` 拒绝空词表。
 
-```rust
-/// One row of a [`token_logprobs_batch`] call: the logprob of `picked` plus
-/// the arena row's `top_k` entries.
-#[derive(Clone, Copy, Debug)]
-pub struct LogprobRequest {
-    pub row: usize,
-    pub picked: u32,
-    pub top_k: usize,
-}
+逐条校验循环在 [src/lib.rs:548-569](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L548-L569)：`r.row < logits.seq_len` 与 `(r.picked as usize) < vocab` 两条 `ensure!` 各自给出带具体数值的错误消息；随后 `let k = r.top_k.min(vocab)` 把 k 截断到词表宽度（所以 `k_max ≤ vocab` 恒成立，top-k 缓冲不会因调用方传了一个荒谬的 `top_k = 10^9` 而爆掉）；最后三个 `i32::try_from(..)?` 把 `usize/u32` 收窄成内核需要的 i32——收窄失败（数值超过 21 亿）会作为 `anyhow` 错误直接冒泡，而不是截断成错误答案。
 
-/// Batched device twin of [`token_logprob_from_row`]: one launch and a
-/// compact O(rows x (top_k + 1)) readback per call.
-pub fn token_logprobs_batch(
-```
-
-文档里的「batched device twin」是本讲的题眼：主机版一次一行、一次 O(V)；设备版一次 launch 处理全部行，回读量只有 \( O(\text{rows} \times (k_{\max}+1)) \) 而不是 \( O(\text{rows} \times V) \)——对 15 万宽词表、多行 prompt logprobs，这就是这个孪生存在的理由。
-
-再看入口三连（空短路、流覆盖拒绝、空词表拒绝）：
-
-[lib.rs L538-L547](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L538-L547)
-
-```rust
-    if requests.is_empty() {
-        return Ok(Vec::new());
-    }
-    ensure!(
-        !has_stream_override(),
-        "token_logprobs_batch: cannot run under a stream override — buffer \
-         traffic is ordered on the primary stream"
-    );
-    let vocab = logits.hidden_dim;
-    ensure!(vocab > 0, "token_logprobs_batch: empty vocab");
-```
-
-空请求短路排在最前：一个 `Vec::new()` 直接返回，连设备上下文都不碰——`rejects_out_of_range_requests` 测试专门断言了这一点（空清单是无操作，不是错误）。
-
-**为什么流覆盖必须报错而不是排队？** 关键在错误信息那半句「buffer traffic is ordered on the primary stream」。看本函数后续的所有缓冲操作：H2D 上传用的是 `ctx.stream.clone_htod`、输出分配用的是 `ctx.stream.alloc_zeros`、回读用的是 `ctx.stream.clone_dtoh`——全部排在**主 stream**上；而内核 launch 走的是 `active_cu_stream(ctx)`，即「线程局部覆盖流（若激活）否则主 stream」（[tensor.rs L73-L79](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-kernels/src/tensor.rs#L73-L79)）。如果流覆盖激活时放行：
-
-1. 输入 H2D 排在主 stream，内核却 launch 在覆盖流上——两条流无顺序保证，内核可能在 H2D 落地前就读 `rows/picked/ks`；
-2. 结尾的 `ctx.sync()` 同步的只是 `ctx.stream`（[tensor.rs L400-L404](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-kernels/src/tensor.rs#L400-L404)），根本等不到覆盖流上的内核，回读会读到未写完的输出。
-
-要正确支持覆盖流，得在两条流之间架事件依赖、把每次拷贝都改到覆盖流上——代价远超收益。所以契约干脆定成「仅限 base stream」：在入口用一个布尔检查把整类竞态挡掉。这不是本函数独有的纪律，分阶段贪心路径（u4-l1）的每个入口都有同款 `ensure!(!has_stream_override(), ...)`。真实世界里流覆盖确实会被激活——比如 qwen3 执行器的 prefill/decode 双流切分（[pegainfer-qwen3/src/executor.rs L453](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/executor.rs#L453)、[L471](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/executor.rs#L471)），所以这道护栏是会被真实触发的，测试也确实钉住了它（见 4.1.4）。
-
-然后是逐请求校验循环：
-
-[lib.rs L548-L569](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L548-L569)
-
-```rust
-    for r in requests {
-        ensure!(
-            r.row < logits.seq_len,
-            "token_logprobs_batch: row {} out of bounds for arena of {} rows",
-            ...
-        );
-        ensure!(
-            (r.picked as usize) < vocab,
-            "token_logprobs_batch: picked token {} out of bounds for vocab {vocab}",
-            ...
-        );
-        let k = r.top_k.min(vocab);
-        k_max = k_max.max(k);
-        rows.push(i32::try_from(r.row)?);
-        picked.push(i32::try_from(r.picked)?);
-        ks.push(i32::try_from(k)?);
-    }
-```
-
-注意循环在做校验的同时**顺手完成了主机侧的数据重组**：把 `usize`/`u32` 压成 i32 三个平行数组（`rows` / `picked` / `ks`），它们就是稍后三组 H2D 的载荷。`i32::try_from` 是最后一道保险——内核 API 用 i32 传形状，arena 真有大到 2^31 行的问题会在这里以错误而不是截断收场。
-
-最后是**分片词表警告**。它写在主机参考实现的文档里，对设备孪生同样成立：
-
-[lib.rs L471-L472](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L471-L472)
-
-> The row must be the unsharded global vocab: a shard-local logsumexp is not
-> the global one, so sharded callers must merge across ranks first (#236).
-
-直觉：LSE 要对**整个词表**求和。若词表被 EP 分片，每个 rank 只握着一截，分片局部算出的 \(\ln\sum e^x\) 少了其他分片的贡献，logprob 会系统性偏高。数学上，设词表被切成 \( S_1, S_2 \)，全局 LSE 与任意分片局部 LSE 的关系是：
-
-\[ \mathrm{LSE}(S_1 \cup S_2) = \max(m_1, m_2) + \ln\!\left(e^{m_1 - \max(m_1,m_2)} \cdot \Sigma_1 + e^{m_2 - \max(m_1,m_2)} \cdot \Sigma_2\right), \quad m_i = \max S_i,\ \Sigma_i = \sum_{x \in S_i} e^{x - m_i} \]
-
-也就是说跨 rank 归并只需要交换每片的 `(max, 局部和)` 两个标量——但必须先归并。这正是模块文档里 Kimi-K2 的处境（[lib.rs L21-L25](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L21-L25)）：它的贪心路径是分片局部 argmax 加跨 rank 归约，没法喂给「假设全词表」的 arena 接口，所以它的 logprob 走主机参考实现（配合归并后的行）。设备孪生的前提始终是：`logits.hidden_dim` 就是完整词表宽度。
+注意一个细节：主机侧的 `ks` 向量（截断后的 k）在函数尾部的组装阶段还会被再次读用（4.3.3），它兼任「组装元数据」。
 
 #### 4.1.4 代码实践
 
-**实践目标**：确认调用方真的按「按需、逐请求」的方式组装 `LogprobRequest`，并亲眼看一遍两条防护栏的拒绝行为。
+**实践目标**：不运行代码，仅凭源码推演校验结果，训练「读 ensure! 判结果」的能力。
 
 **操作步骤**：
 
-1. 打开 [pegainfer-qwen3/src/executor/logprobs.rs L19-L36](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/executor/logprobs.rs#L19-L36)，读 `gather_decode_logprobs`：注意 `req.logprobs.map(|top_k| LogprobRequest { row: ..., picked: rows.tokens[...], top_k })`——只有请求带 `logprobs` 参数才会产出一条请求，`picked` 直接取刚采出的 token。再读 [L91-L103](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/executor/logprobs.rs#L91-L103) 的 `score_rows`：`Vec<Option<LogprobRequest>>` 先 `flatten` 成紧凑子集再一次性调用，返回结果再按 `Option` 摊回原位。
-2. 打开 [tests/gpu_logprobs.rs L210-L261](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L210-L261) 的 `rejects_out_of_range_requests` 与 [L263-L281](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L263-L281) 的 `rejects_active_stream_override`，对照 4.1.3 的校验链逐条标注每个 `assert!(...is_err())` 命中的是哪一条 `ensure!`。
-3. （需要 GPU，待本地验证）有 GPU 时可单跑：
+1. 假设 arena 是 `seq_len = 2, hidden_dim = 64`（即 2 行 × 64 列），逐条预测以下请求会通过、报错，还是被静默修改：
+   - `LogprobRequest { row: 0, picked: 63, top_k: 1 }`
+   - `LogprobRequest { row: 2, picked: 0, top_k: 1 }`
+   - `LogprobRequest { row: 0, picked: 64, top_k: 1 }`
+   - `LogprobRequest { row: 1, picked: 0, top_k: 100 }`
+   - `[]`（空切片）
+2. 到 [src/lib.rs:538-569](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L538-L569) 逐条核对。
+3. 对照 [tests/gpu_logprobs.rs:210-261](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L210-L261) 的 `rejects_out_of_range_requests`，看测试作者选的越界值（`picked: 64`、`row: 2`）与你预测的报错边界是否一致。
 
-   ```bash
-   cargo test --release -p pegainfer-sample --test gpu_logprobs -- --nocapture
-   ```
-
-**需要观察的现象**：步骤 1 中「想 要 logprob 的请求」与「批里实际发出的请求」是两个不同的集合（后者是前者的过滤压缩）；步骤 2 中四个拒绝断言与入口校验一一对应，而空清单断言的是 `unwrap().is_empty()`（成功路径）。
-
-**预期结果**：能画出「解码步 → 每请求 logprobs 参数 → LogprobRequest 子集 → token_logprobs_batch」的过滤链；能说出 `rejects_active_stream_override` 里 `StreamOverrideGuard::activate(ctx.stream.cu_stream())` 激活的覆盖流**就是主 stream 本身**——测试证明拒绝逻辑只看「覆盖是否激活」这个布尔，与覆盖流具体是哪条无关。
+**需要观察的现象 / 预期结果**：前两条边界值恰好是「最大合法值」与「最小非法值」；`top_k: 100` 不报错而是被截成 64；空切片返回空结果。本实践是纸面推演，无需 GPU，也无需运行（如想真正运行对应测试需要 GPU，待本地验证）。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：同一个 `LogprobRequest { row: 5, picked: 100, top_k: 0 }`，`top_k: 0` 时函数还做有意义的事吗？
+**练习 1**：为什么 `picked` 用 `u32` 而 `row`、`top_k` 用 `usize`？
 
-**答案**：做。`top_k = 0` 只表示不要 top 名单；`picked` 的 logprob 和 rank 照算（内核仍会写 `picked_lp[5]` 和 `ranks[5]`，只是该行在 `vals`/`ids` 里的槽位不被读回）。A/B 测试 `matches_host_reference_across_k_at_model_vocab` 的第一条请求正是 `top_k: 0`。
+**答案**：`picked` 是 token id，与采样路径的返回类型 `Vec<u32>`、`TokenLogprob.top_logprobs` 里的 `(u32, f32)` 对齐，跨crate 传输时定宽；`row`/`top_k` 是内存下标和元素个数，Rust 惯例用 `usize`，进内核前统一收窄成 i32。
 
-**练习 2**：`ensure!(r.row < logits.seq_len)` 校验的是 `seq_len` 这个**元数据字段**。如果调用方伪造了 `seq_len`（声称 4 行实际只有 1 行的底层存储），还有第二道防线吗？
+**练习 2**：同一行被两条请求引用（`row: 0` 出现两次、picked 不同）合法吗？
 
-**答案**：有。底层 `logprob_topk_batch_bf16_into` 会再算一遍 `backing = hidden_dim * seq_len` 并要求 `logits.data.len() >= backing`（[sampling.rs L544-L552](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-kernels/src/ops/sampling.rs#L544-L552)）。策略层校验语义（行号在声称范围内），内核层校验物理（底层数组真装得下），双层防御。`rejects_out_of_range_requests` 末段的 `inflated.seq_len = 4` 正是专门打第二道防线的（见综合实践）。
+**答案**：合法。校验只看单条请求是否越界，不要求行号唯一；[tests/gpu_logprobs.rs:57-92](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L57-L92) 的测试里 `row: 0` 就出现了两次（picked 分别为 7 和 0、top_k 分别为 0 和 20）。
 
-**练习 3**：为什么 `LogprobRequest` 里的 `picked` 由调用方传入，而不是函数内部自己 argmax？
+**练习 3**：`k = r.top_k.min(vocab)` 之后才累积 `k_max`，这个顺序换掉会怎样？
 
-**答案**：因为 logprob 通道的职责是**解释**而不是**选择**：被评估的 token 是采样通道（`select_batch` 或贪心路径）按请求的采样参数选出来的，可能是低概率 token。函数内部 argmax 只能回答「最可能的 token 有多可能」，无法回答「实际发出的这个 token 有多可能」——后者才是 API 语义（`logprobs` 指的是已生成 token 的对数概率）。
+**答案**：先累积会把未截断的原始 `top_k` 记进 `k_max`，导致 top-k 输出缓冲按一个可能远超词表的长度分配（浪费显存甚至 OOM），而实际每行只写得出最多 `vocab` 条。
 
-### 4.2 一次 logprob_topk_batch_bf16_into 调用：8 个缓冲与按需分配取舍
+### 4.2 缓冲区组装与一次 launch：长度公式与「不入 scratch」的取舍
 
 #### 4.2.1 概念说明
 
-校验通过后，函数把一次调用需要的**全部**设备内存现场组装出来：三组 H2D 输入、五组输出缓冲，然后一次 `logprob_topk_batch_bf16_into` launch 搞定所有行。这一节解决两个问题：
+校验通过后，函数把主机侧的三个 `Vec<i32>` 上传成三块设备输入缓冲，再分配四块设备输出缓冲，然后**一次** `logprob_topk_batch_bf16_into` launch 服务整批。一次调用共触及 8 块设备缓冲（3 输入 + 4 输出 + 1 块只读复用的 logits arena）。
 
-1. 每个缓冲多长？（这是本讲的学习目标之一，下面直接给公式表。）
-2. 为什么**每次调用现分配**，而不是像 `select_batch` 那样把缓冲搬进 `SampleScratch` 一次分配、长期持有？
-
-第 2 个问题的答案有三层：
-
-- **频率**：`select_batch` 每个解码步、每一行都要跑，是热路径，且解码路径被 CUDA 图捕获，图内烘焙了缓冲地址——指针必须稳定，所以必须 allocate-once。而 logprob 通道「只在请求方要求时运行」（主机参考实现的文档原话，[lib.rs L464](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L464)）：多数请求根本不带 `logprobs` 参数，这个函数常常整个请求生命周期都不被调用。为一条冷路径常驻显存不划算。
-- **形状**：scratch 的两个维度（`max_rows`、`vocab`）在启动时就已知且固定；而 logprob 批的形状每次都不同——`requests.len()` 与 `k_max` 都随请求组合浮动。要入 scratch 就得按两个维度的最大值预留，进一步放大冷路径的常驻成本。
-- **同步模型**：本函数以 `ctx.sync()` 收尾、在主机侧拼装结果，本来就是同步工具函数，不在 CUDA 图捕获范围内；走 CUDA 缓存分配器的临时分配对它足够便宜。
-
-一句话：**scratch 的纪律是「热路径 + 图捕获 + 指针稳定」三件套催生的；logprob 通道一条都不沾，按需分配反而最简**。
+为什么不像 `select_batch` 那样把这些缓冲放进常驻 `SampleScratch`？因为 logprob 是**按需路径**：只有在请求显式要求 logprobs 时才会运行（调用方 gemma4 的 engine 里，`spec.logprobs` 为 `None` 的行根本不产生 `LogprobRequest`，请求列表为空时整个调用被跳过——见 [../pegainfer-gemma4/src/engine.rs:987-1005](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-gemma4/src/engine.rs#L987-L1005)，`filter_map` 只为 `spec.logprobs = Some(top_k)` 的行造请求，`if !requests.is_empty()` 才调用）。为一条多数请求不走的路径常驻一块按最大形状预留的显存，既浪费又要面对「形状每次都不同」的现实：行数是**本次**要 logprob 的行数，`k_max` 是**本次**截断后 k 的最大值。所以这里宁可每次现分配——几微秒级的分配开销，换来零常驻 footprint，也不把临时分配的语义混进解码路径的指针稳定纪律。
 
 #### 4.2.2 核心流程
 
-设 `R = requests.len()`（行数），`k_max = max(min(r.top_k, vocab))`（本批最大钳制后 k）。一次调用的缓冲清单：
+记 \( n = \text{requests.len()} \)，\( k_{\max} \) 为截断后批内最大 k，\( V = \text{hidden\_dim} \)。各缓冲长度：
 
-| 缓冲 | 方向 | 元素类型 | 长度公式 | 用途 |
-|------|------|---------|---------|------|
-| `rows_gpu` | H2D | i32 | `R` | 每条请求的 arena 行号 |
-| `picked_gpu` | H2D | i32 | `R` | 每条请求的被评 token |
-| `ks_gpu` | H2D | i32 | `R` | 每条请求钳制后的 k |
-| `picked_lp_gpu` | 设备分配→D2H | f32 | `R` | 每条请求 picked 的 logprob |
-| `ranks_gpu` | 设备分配→D2H | i32 | `R` | 每条请求 picked 的 rank |
-| `vals_gpu` | 设备分配→D2H | f32 | `topk_len = R × k_max`（`.max(1)` 兜底） | top-k 的 logprob 值，`i*k_max + j` 布局 |
-| `ids_gpu` | 设备分配→D2H | i32 | `topk_len`（同上） | top-k 的 token id，同布局 |
+| 缓冲 | 方向 | 元素类型 | 长度（元素个数） | 用途 |
+|------|------|----------|------------------|------|
+| `rows_gpu` | H2D | i32 | \( n \) | 每条请求的 arena 行号 |
+| `picked_gpu` | H2D | i32 | \( n \) | 每条请求的被选 token |
+| `ks_gpu` | H2D | i32 | \( n \) | 每条请求截断后的 k |
+| `picked_lp_gpu` | 设备输出 | f32 | \( n \) | 每条请求被选 token 的 logprob |
+| `ranks_gpu` | 设备输出 | i32 | \( n \) | 每条请求被选 token 的 rank |
+| `vals_gpu` | 设备输出 | f32 | \( \max(1,\; n \cdot k_{\max}) \) | top-k 的 logprob 值，`i*k_max+j` 布局 |
+| `ids_gpu` | 设备输出 | i32 | \( \max(1,\; n \cdot k_{\max}) \) | top-k 的 token id，同上布局 |
+| logits arena | 只读输入 | bf16 | \( \text{seq\_len} \times V \)（调用方已持有） | 打分的原始行 |
 
-数据流（一次调用内）：
+其中 \[ \text{topk\_len} = \max\bigl(1,\; n \times k_{\max}\bigr), \qquad k_{\max} \le V. \]
 
-```
-主机 rows/picked/ks (各 R 个 i32)
-   │ clone_htod ×3（主 stream）
-   ▼
-rows_gpu / picked_gpu / ks_gpu ──┐
-                                 ├─→ logprob_topk_batch_bf16_into（一次 launch）
-logits arena（已在设备上，不搬运）─┘         │
-                                    写入 picked_lp/ranks (各 R)
-                                    写入 vals/ids    (各 R×k_max)
-   │ clone_dtoh ×4（主 stream）
-   ▼
-主机 picked_lp / ranks / vals / ids ──ctx.sync()──→ 按 i*k_max+j 重组（4.3）
-```
+`.max(1)` 的用意：当批内所有请求都 `top_k = 0`（只要 logprob/rank）时 \( n \cdot k_{\max} = 0 \)，而 0 个元素既不是一块能交给内核解引用的合法设备缓冲，也让后续 D2H 无处落——垫到 1 个元素当占位符，内核侧 `k_max = 0` 时本来就一条 top-k 都不写。
 
-两个值得注意的细节：
-
-- **logits 不上传**。arena 本来就在设备上，H2D 只有 3 个 `R` 元素的小 i32 数组——这也是「设备孪生」省钱的一部分：主机版要拿到行数据必须先 D2H 整行（V 个元素），设备版只回传答案。
-- **`topk_len` 的 `.max(1)`**：若本批所有请求 `top_k` 都是 0（或都被钳成 0 不可能——钳制下限是 0），`k_max = 0`，`R × k_max = 0`。但内核签名**无条件**接收 `vals`/`ids` 指针（见 4.2.3），零长度的 `CudaSlice` 没有有效设备内存可指。`.max(1)` 保证至少分配 1 个元素让指针合法，读回时那一个元素也不会被任何人消费（重组循环只读 `0..ks[i]` 步）。
+乘法用 `checked_mul` 而不是裸 `*`：\( n \) 与 \( k_{\max} \) 都来自调用方输入，溢出时报 "rows * k_max overflows" 而不是回绕出一个过小的长度。
 
 #### 4.2.3 源码精读
 
-缓冲组装的完整代码：
+三组 i32 输入的上传在 [src/lib.rs:571-578](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L571-L578)：一个 `htod` 闭包把 `ctx.stream.clone_htod` 包上统一错误消息，`rows`、`picked`、`ks` 三个主机向量各成一块 `CudaSlice<i32>`。
 
-[lib.rs L571-L599](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L571-L599)
+四组输出缓冲的分配在 [src/lib.rs:579-599](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L579-L599)：`picked_lp_gpu`/`ranks_gpu` 各 `alloc_zeros(requests.len())`；`topk_len` 的计算是 [src/lib.rs:587-591](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L587-L591) 的 `checked_mul(...).ok_or_else(...)?.max(1)`；`vals_gpu`/`ids_gpu` 按 `topk_len` 分配。
 
-```rust
-    let htod = |data: &[i32]| -> Result<CudaSlice<i32>> {
-        ctx.stream
-            .clone_htod(data)
-            .map_err(|e| anyhow!("token_logprobs_batch H2D failed: {e}"))
-    };
-    let rows_gpu = htod(&rows)?;
-    let picked_gpu = htod(&picked)?;
-    let ks_gpu = htod(&ks)?;
-    let mut picked_lp_gpu: CudaSlice<f32> = ... alloc_zeros(requests.len()) ...;
-    let mut ranks_gpu: CudaSlice<i32> = ... alloc_zeros(requests.len()) ...;
-    let topk_len = requests
-        .len()
-        .checked_mul(k_max)
-        .ok_or_else(|| anyhow!("token_logprobs_batch: rows * k_max overflows"))?
-        .max(1);
-    let mut vals_gpu: CudaSlice<f32> = ... alloc_zeros(topk_len) ...;
-    let mut ids_gpu: CudaSlice<i32> = ... alloc_zeros(topk_len) ...;
-```
+内核调用在 [src/lib.rs:601-616](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L601-L616)：被 `unsafe` 包住，旁边一行注释 "Indices validated and stream override rejected above." 说明 unsafe 契约（下标在界内、流环境正确）正是由上面那些 `ensure!` 兑现的。被调函数是 kernels 里的 [../pegainfer-kernels/src/ops/sampling.rs:527-539](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-kernels/src/ops/sampling.rs#L527-L539) `pub unsafe fn logprob_topk_batch_bf16_into`——签名就是上面那 8 块缓冲加 `rows`、`k_max` 两个标量。
 
-（省略号处都是同构的 `ctx.stream.alloc_zeros(...).map_err(...)`，见链接原文。）三组 H2D 与五组分配全部排在 `ctx.stream` 主 stream 上——记住这一点，4.1.3 的防护栏才有落点。`checked_mul` 防的是 `R × k_max` 本身溢出 usize，与内核侧同款检查（[sampling.rs L566-L568](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-kernels/src/ops/sampling.rs#L566-L568)）。
+内核侧自己还有第二层形状校验，[../pegainfer-kernels/src/ops/sampling.rs:540-574](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-kernels/src/ops/sampling.rs#L540-L574)：`rows > 0`、`hidden_dim > 0`、`backing = hidden_dim × seq_len` 用 `checked_mul` 算出后要求 `logits.data.len() >= backing`（arena 背衬必须真装得下它声称的形状——这道兜底校验在 4.4.1 会再登场）、三组输入各 ≥ `rows`、`picked_lp`/`ranks` ≥ `rows`、`vals`/`ids` ≥ `rows × k_max`。真正的 launch 在 [../pegainfer-kernels/src/ops/sampling.rs:588-603](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-kernels/src/ops/sampling.rs#L588-L603)：取各缓冲的设备指针，调 FFI 的 `logprob_topk_batch_bf16_cuda`，落在 `active_cu_stream(ctx)` 上——没有 stream override 时它就是 `ctx.stream` 主流，与前面所有 H2D/分配同流、天然按序。
 
-然后是 launch 本体：
-
-[lib.rs L601-L616](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L601-L616)
-
-```rust
-    // Indices validated and stream override rejected above.
-    unsafe {
-        logprob_topk_batch_bf16_into(
-            ctx,
-            logits.as_ref(),
-            &rows_gpu,
-            &picked_gpu,
-            &ks_gpu,
-            requests.len(),
-            k_max,
-            &mut picked_lp_gpu,
-            &mut ranks_gpu,
-            &mut vals_gpu,
-            &mut ids_gpu,
-        )?;
-    }
-```
-
-那行注释就是 `unsafe` 的合同：底层函数是 `unsafe fn`，它信任调用方已保证行号/token 越界与流纪律——而这三样恰好在上面几十行里被 `ensure!` 过了。跨到 kernels crate 看被调用方的形状与第二层校验：
-
-[sampling.rs L527-L539 与 L540-L574](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-kernels/src/ops/sampling.rs#L527-L574)
-
-```rust
-pub unsafe fn logprob_topk_batch_bf16_into(
-    ctx: &DeviceContext,
-    logits: HiddenStatesRef<'_>,
-    row_indices: &CudaSlice<i32>,
-    picked: &CudaSlice<i32>,
-    top_k: &CudaSlice<i32>,
-    rows: usize,
-    k_max: usize,
-    out_picked_lp: &mut CudaSlice<f32>,
-    out_picked_rank: &mut CudaSlice<i32>,
-    out_topk_vals: &mut CudaSlice<f32>,
-    out_topk_ids: &mut CudaSlice<i32>,
-) -> Result<()> {
-```
-
-函数体里的 `ensure!` 群（`rows > 0`、arena 底层容量、三输入各 ≥ `rows`、两个 picked 输出各 ≥ `rows`、两个 top-k 输出各 ≥ `rows × k_max`）复核了**纯形状**不变量——它看不到「行号是否越界语义」，但能拦住「元数据与底层存储不一致」这类调用方 bug。launch 时内核拿到的是 `active_cu_stream(ctx)`（[sampling.rs L588-L603](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-kernels/src/ops/sampling.rs#L588-L603)），这就是 4.1.3 里「覆盖流一旦激活就会产生跨流竞态」的机制根源。
+`token_logprob_from_row` 的文档注释（[src/lib.rs:463-472](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L463-L472)）里那句 "runs only when a request asked for logprobs" 正是「按需路径」的出处；同样的运行条件对设备孪生成立。
 
 #### 4.2.4 代码实践
 
-**实践目标**：对两组具体参数手算全部 8 个缓冲的长度，检验公式表。
+**实践目标**：给具体数字算出全部缓冲长度，把 4.2.2 的公式落地。
 
-**操作步骤**（纸笔即可，无需 GPU）：
+**操作步骤**：
 
-1. **情形 A**：`R = 4` 条请求，钳制后 k 分别为 `0, 1, 5, 20`（即 A/B 测试 `matches_host_reference_across_k_at_model_vocab` 的真实请求），vocab = 151_936。逐项写出 `rows_gpu` / `picked_gpu` / `ks_gpu` / `picked_lp_gpu` / `ranks_gpu` / `vals_gpu` / `ids_gpu` 的元素个数。
-2. **情形 B**：`R = 3`，三条请求全是 `top_k: 0`。再算一遍，重点看 `topk_len`。
-3. 对照 [lib.rs L587-L591](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L587-L591) 核对 `.checked_mul(k_max).max(1)` 的求值顺序。
+1. 取 [tests/gpu_logprobs.rs:57-92](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L57-L92) 的测试参数：`vocab = 151_936`，4 条请求的 `top_k` 分别为 `0, 1, 5, 20`。
+2. 算出：\( n \)、\( k_{\max} \)、`topk_len`、三组输入缓冲各多少元素、`vals_gpu`/`ids_gpu` 各多少元素、其中第 0 条请求（top_k=0）会占用多少个有效槽位。
+3. 再算一个极端：4 条请求全部 `top_k: 0`，`topk_len` 是多少？为什么不是 0？
+4. 换成 [tests/gpu_logprobs.rs:191-208](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L191-L208) 的 `k_larger_than_vocab_is_clamped`：vocab=8、`top_k: 32`，算截断后的 `ks[0]`、\( k_{\max} \)、`topk_len`。
 
-**需要观察的现象**：情形 A 中 `vals_gpu` 与 `ids_gpu` 按 `k_max = 20`（批内最大值）统一加宽——k 只有 0 的那行也在 `vals`/`ids` 里占 20 个槽位（浪费但无害）；情形 B 中 `k_max = 0`，`topk_len` 落到 `.max(1)` 的兜底值 1。
-
-**预期结果**：
-- 情形 A：三组 H2D 各 4；`picked_lp_gpu`/`ranks_gpu` 各 4；`topk_len = 4 × 20 = 80`。
-- 情形 B：三组 H2D 各 3；`picked_lp_gpu`/`ranks_gpu` 各 3；`topk_len = 3 × 0 = 0 → max(1) → 1`。
+**需要观察的现象 / 预期结果**：(2) \( n=4, k_{\max}=20 \)，`topk_len = 80`；第 0 条请求占 0 个有效槽位（但它的 `base = 0×20 = 0`，槽位 0..20 属于它却全不被读）。(3) `topk_len = 1`（`.max(1)` 垫底）。(4) `ks[0] = 8`，`k_max = 8`，`topk_len = 8`。纸面计算即可，无需 GPU。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么 `vals`/`ids` 按 `R × k_max` 统一分配，而不是按 `sum(ks[i])` 紧凑分配？
+**练习 1**：如果把 `token_logprobs_batch` 的临时缓冲挪进 `SampleScratch`，至少要解决哪两个新问题？
 
-**答案**：统一步长让内核与主机重组都能用 `base = i * k_max` 一个乘法定位每行槽位，无需前缀和；代价是 k 较小的行浪费 `(k_max − k)` 个槽。logprob 是冷路径，用一点尾部空洞换索引简单是正确取舍。紧凑布局还得把每行偏移额外上传给内核。
+**答案**：一是形状可变——行数与 `k_max` 每次调用都不同，scratch 只能按「史上最大」预留，为一条按需路径常驻显存；二是解码路径的 scratch 纪律是「一次分配、指针稳定、绝不每步重分配」（CUDA 图捕获要求），把一块形状随请求变化的缓冲混进去会破坏这条纪律，且本函数里的 `clone_htod`/`alloc_zeros` 本身就是临时分配语义。
 
-**练习 2**：如果把 `token_logprobs_batch` 的缓冲搬进某个长期持有的 scratch，最先撞上什么问题？
+**练习 2**：为什么 `unsafe` 块只包住内核调用一行，而校验都在块外？
 
-**答案**：形状不可预知——`requests.len()` 与 `k_max` 每次调用都随请求组合浮动，scratch 只能按两个维度的最大值预留。而这条路径本来就「只在请求方要求时运行」，绝大多数调用根本不发生，常驻显存纯属浪费；它也不在 CUDA 图捕获范围内，享受不到指针稳定的必要性（那是 `select_batch`/scratch 的动机）。
+**答案**：`unsafe` 标记的是「调用方必须维护的契约」（下标在界内、缓冲够长、流环境正确）无法由类型系统表达；把校验写在块外的普通代码里，用 `ensure!`/`try_from` 兑现契约后再进入 `unsafe`，正是让 unsafe 面积最小、契约出处可追溯的写法（注释 "Indices validated and stream override rejected above." 即契约清单）。
 
-**练习 3**：`unsafe` 块上方那行注释「Indices validated and stream override rejected above」起到了什么作用？
+**练习 3**：内核 launch 用 `active_cu_stream(ctx)` 而临时缓冲全在 `ctx.stream` 上——两者什么时候是同一条流？
 
-**答案**：它是 Rust `unsafe` 合同的书面形式——`logprob_topk_batch_bf16_into` 是 `unsafe fn`，安全性由调用方保证；注释把「保证了什么、在哪保证」钉在调用点，让这两个函数之间的责任边界可审计。被调用方仍保留纯形状的第二层 `ensure!`，双层防御但职责不同。
+**答案**：没有 stream override 时，`active_cu_stream` 返回 `DeviceContext` 自己的流，与 `ctx.stream` 是同一条，H2D → 分配 → 内核 → D2H 全部同流按序；一旦线程激活了 `StreamOverrideGuard`，两者分叉，这正是 4.4 里函数直接拒绝执行的原因。
 
-### 4.3 D2H 回读与结果重组：`i*k_max + j` 布局
+### 4.3 D2H 回读与结果重组：ctx.sync() 与 i*k_max+j 布局
 
 #### 4.3.1 概念说明
 
-launch 之后设备上躺着的全是答案，但请求方要的是主机上的 `Vec<TokenLogprob>`。这一步做三件事：**回读**（四组 D2H）、**同步**（一次 `ctx.sync()`）、**重组**（把平行数组拼回契约类型）。核心是理解 `vals`/`ids` 的行主序布局：
+内核写完七块缓冲后，函数把四个输出缓冲各 `clone_dtoh` 回主机，`ctx.sync()` 等整条流完成，然后在主机上把扁平缓冲重组回契约类型 `TokenLogprob { logprob, rank, top_logprobs }`。
 
-```
-vals / ids（各 R×k_max 个元素，行主序，步长 k_max）:
-
-行 0:  [0*k_max + 0] [0*k_max + 1] ... [0*k_max + k_max-1]
-行 1:  [1*k_max + 0] [1*k_max + 1] ...
-...
-行 i:  base = i*k_max, 有效前 ks[i] 个, 尾部是未写/未读的空洞
-```
-
-对第 i 条请求，重组读的是 `picked_lp[i]`、`ranks[i]`、以及 `vals[base + j]` / `ids[base + j]`（`j ∈ 0..ks[i]`）。注意用的是**主机侧留存的 `ks[i]`**（钳制后的 k），不是原始 `top_k`。
+关键布局：top-k 的 `vals`/`ids` 不是按「实际 k」紧凑排布，而是**按 `k_max` 定长分行**——第 \( i \) 条请求的条目住在下标区间 \( [i \cdot k_{\max},\; i \cdot k_{\max} + k_i) \)，即第 \( j \) 个条目在 \( i \cdot k_{\max} + j \)。因为内核按批内统一的最大 k 写出（GPU 上每行变长输出要引入复杂的紧凑化），`k_i < k_max` 的行在区间尾部留下一段不被读取的填充槽。重组循环只读每行的前 \( k_i \) 个槽，天然跳过填充。
 
 #### 4.3.2 核心流程
 
+```text
+（主 stream 上已按序排好：H2D×3 → alloc×4 → 内核 → ）
+clone_dtoh(picked_lp_gpu) → 主机 Vec<f32>，长 n
+clone_dtoh(ranks_gpu)     → 主机 Vec<i32>，长 n
+clone_dtoh(vals_gpu)      → 主机 Vec<f32>，长 topk_len
+clone_dtoh(ids_gpu)       → 主机 Vec<i32>，长 topk_len
+ctx.sync()                ← 同步点：此后内核与全部拷贝确已落地
+对 i = 0..n：
+    k   = ks[i]                     ← 复用上传前截断好的主机侧 k
+    base = i * k_max
+    TokenLogprob {
+        logprob: picked_lp[i],
+        rank:    ranks[i] as u32,
+        top_logprobs: (0..k).map(|j| (ids[base+j] as u32, vals[base+j])),
+    }
+返回 Vec<TokenLogprob>（与 requests 等长、同序）
 ```
-四组 clone_dtoh（主 stream，按序排队）:
-  picked_lp_gpu(R) → picked_lp: Vec<f32>
-  ranks_gpu(R)    → ranks:    Vec<i32>
-  vals_gpu(L)     → vals:     Vec<f32>     ┐ L = topk_len
-  ids_gpu(L)      → ids:      Vec<i32>     ┘
-ctx.sync()   ←── 全函数唯一同步点：等主 stream 上 launch + 四份拷贝全部完成
-重组: for i in 0..R:
-  k = ks[i] as usize; base = i * k_max
-  TokenLogprob {
-    logprob: picked_lp[i],
-    rank:    ranks[i] as u32,
-    top_logprobs: (0..k).map(|j| (ids[base+j] as u32, vals[base+j])).collect(),
-  }
-```
-
-回读量核算（这正对应函数文档里的 \( O(\text{rows} \times (k_{\max}+1)) \)）：每行 1 个 f32 logprob + 1 个 i32 rank + \( 2k_{\max} \) 个 top-k 元素，共 \( R(2 + 2k_{\max}) \) 个元素 = \( 8R(k_{\max}+1) \) 字节。对比把整行 D2H 回主机再算（\( R \times V \times 2 \) 字节，V = 15 万时约 300 KB/行），差距三个数量级——这就是「compact readback」的含义。
 
 #### 4.3.3 源码精读
 
-回读与同步：
+四次回读与同步点在 [src/lib.rs:618-634](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L618-L634)：四个 `clone_dtoh` 依次排队并各自返回主机向量，随后一次 `ctx.sync()`（实现即 [../pegainfer-kernels/src/tensor.rs:400-404](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-kernels/src/tensor.rs#L400-L404) 的 `stream.synchronize()`）。sync 位于「全部拷贝已排队」与「主机开始读向量组装」之间——它把完成点显式钉死：流上此前排队的内核与全部 D2H 都已结束，主机读到的四个向量必然完整。
 
-[lib.rs L618-L634](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L618-L634)
+组装循环在 [src/lib.rs:636-648](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L636-L648)：`let k = ks[i] as usize` 直接复用 4.1 阶段截断后的主机侧 `ks`（这就是它兼任组装元数据的含义）；`let base = i * k_max` 落实 \( i \cdot k_{\max} \) 的行基址；`(0..k)` 只读该行前 k 个槽，`ids[base+j] as u32` 与 `vals[base+j]` 配成 `(token_id, logprob)` 对。`rank: ranks[i] as u32` 的 u32 化与主机参考实现返回的 `rank: u32` 对齐——rank 语义（原始 logit 不小于被选值的个数、含并列含自己）在 u3-l1 已推导，设备内核实现的正是同一约定，由 A/B 测试钉死。
 
-```rust
-    let picked_lp = ctx
-        .stream
-        .clone_dtoh(&picked_lp_gpu)
-        .map_err(|e| anyhow!("token_logprobs_batch D2H failed: {e}"))?;
-    let ranks = ... clone_dtoh(&ranks_gpu) ...;
-    let vals = ... clone_dtoh(&vals_gpu) ...;
-    let ids = ... clone_dtoh(&ids_gpu) ...;
-    ctx.sync()?;
-```
-
-四份拷贝都在主 stream 上，彼此按序；`ctx.sync()` 是整函数唯一的同步点——它内部就是 `self.stream.synchronize()`（[tensor.rs L400-L404](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-kernels/src/tensor.rs#L400-L404)），一个等待同时覆盖 launch 与四份拷贝。与 `select_batch` 贪心分支的 `stream_spin_wait` 精细化等待（u4-l2 的主题）相比，这里选择了最朴素的整流同步——再次印证「冷路径从简」。
-
-重组循环：
-
-[lib.rs L636-L648](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L636-L648)
-
-```rust
-    Ok((0..requests.len())
-        .map(|i| {
-            let k = ks[i] as usize;
-            let base = i * k_max;
-            TokenLogprob {
-                logprob: picked_lp[i],
-                rank: ranks[i] as u32,
-                top_logprobs: (0..k)
-                    .map(|j| (ids[base + j] as u32, vals[base + j]))
-                    .collect(),
-            }
-        })
-        .collect())
-```
-
-四行核心：`k = ks[i]`（每行自己的 k，不是 k_max）、`base = i * k_max`（统一步长定位）、三元组拼装、`k = 0` 时 `top_logprobs` 自然为空。
-
-重组的契约由 A/B 测试钉死。测试文件头两句就是方法宣言：
-
-[gpu_logprobs.rs L1-L2](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L1-L2)
-
-> GPU-vs-host A/B: `token_logprobs_batch` must match `token_logprob_from_row`
-> on the same bf16 rows — top-k ids exactly, values within `TOL`. Needs a GPU.
-
-也就是：**top-k 的 id 序列必须逐位相等，数值容差 `TOL = 5e-5`**（[L13](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L13)）。`assert_matches_host`（[L37-L55](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L37-L55)）把这条规则落到 rank、logprob、id 序列、每个 top logprob 四个维度。两个最值得读的钉子：
-
-- **乱序行与批组合无关性**：`indexes_arena_rows_out_of_order`（[L161-L189](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L161-L189)）让请求引用行 3、1、3；`outputs_are_independent_of_batch_composition`（[L283-L336](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L283-L336)）让同一行「单独成批」与「夹在 3 行批中间」产出**按位相同**（`to_bits()` 比较）的结果——logprob 是确定性的纯函数，不像采样那样有种子问题，这里连比特都不许变。
-- **并列与 k 边界**：`tie_ordering_matches_host`（[L94-L159](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L94-L159)）造了两个精确并列的峰值层（三个 8.0、四个 6.5），在 k = 2/3/5/7 边界上断言 id 序列恰为 `[77, 901, 2048, 15, 512]`（降序值、并列按 id 升序）、rank 把三个并列峰全算进去（rank = 3）。设备核与主机参考实现必须在**破并列规则**上也逐位一致——这是把 u3-l1 讲过的稳定序契约搬到了设备侧验证。
+值得注意：这里读回的是**整个** `vals`/`ids`（含每行尾部的填充槽），而非每行只拷 k 个元素——一次整块 D2H 比多次短拷贝便宜得多，填充槽只是几十字节的浪费，换来拷贝次数从 \( 2n \) 降到 2。
 
 #### 4.3.4 代码实践
 
-**实践目标**：手工跟踪一次真实调用的 `i*k_max + j` 寻址，确认自己真的理解布局。
+**实践目标**：在纸上走出 `i*k_max+j` 布局，确认「谁读哪里、哪些槽是填充」。
 
-**操作步骤**（纸笔）：
+**操作步骤**：
 
-1. 取 `indexes_arena_rows_out_of_order` 的请求（[L168-L184](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L168-L184)）：三条请求 `(row:3, k:4)`、`(row:1, k:2)`、`(row:3, k:1)`，vocab = 8192。
-2. 写出 `R`、钳制后各 `ks[i]`、`k_max`、`topk_len`。
-3. 对每条请求 i 算 `base = i * k_max`，标出它在 `vals`/`ids` 里占用的下标区间与有效长度。
-4. （需要 GPU，待本地验证）单跑该测试对照：
+1. 构造一个 3 条请求的批：`top_k` 分别为 `3, 0, 5`（vocab ≥ 5）。算出 \( k_{\max} \)、`topk_len`。
+2. 画一条长为 `topk_len` 的格子，标出每条请求的 `[base, base+k)` 有效区间和填充区间。
+3. 对每条请求写出组装时读到的 `top_logprobs` 长度；再写出第 2 条请求（top_k=0）的 `base` 和它读取的槽位数。
+4. 核对 [src/lib.rs:636-648](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L636-L648)：`k = ks[2]` 是多少、`(0..k)` 循环体执行几次。
 
-   ```bash
-   cargo test --release -p pegainfer-sample --test gpu_logprobs indexes_arena_rows_out_of_order -- --nocapture
-   ```
-
-**需要观察的现象**：第 0 条与第 2 条请求引用**同一个 arena 行 3** 但 k 不同（4 vs 1）；它们在输出数组里各占 `k_max` 宽的独立槽位，互不干扰。
-
-**预期结果**：`R = 3`，`ks = [4, 2, 1]`，`k_max = 4`，`topk_len = 12`；槽位区间：请求 0 → `[0, 4)` 有效 4，请求 1 → `[4, 8)` 有效 2（`[6, 8)` 空洞），请求 2 → `[8, 12)` 有效 1（`[9, 12)` 空洞）。
+**需要观察的现象 / 预期结果**：\( k_{\max}=5 \)，`topk_len = 15`；请求 0 读槽 0..3，槽 3..5 填充；请求 1 `base=5`、读 0 个槽（槽 5..10 全是填充）；请求 2 读槽 10..15。第 2 条请求的 `top_logprobs` 是空 `Vec`，但 `logprob`/`rank` 仍从 `picked_lp[2]`/`ranks[2]` 正常取出。纸面推演，无需 GPU。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`ctx.sync()` 若被删掉，最可能的故障形态是什么？
+**练习 1**：为什么 `ctx.sync()` 放在四次 `clone_dtoh` 之后、组装循环之前，而不是每次拷贝后各 sync 一次？
 
-**答案**：四份 `clone_dtoh` 的结果在主机侧被读时，主 stream 上的 launch/拷贝可能尚未完成，读到未写满的输出——典型的静默数据错乱而非崩溃。因为拷贝在主 stream 上按序排队，删掉 sync 只丢「等待」，不丢「顺序」，所以表现为偶发、与负载时序相关的错误值（这类 bug 最难复现）。
+**答案**：四次拷贝连同内核都在同一条流上按序排队，一次全流同步即可保证全部落地；逐次 sync 会引入四次主机-设备的等待往返，白付延迟而没有换来任何额外的正确性。
 
-**练习 2**：`outputs_are_independent_of_batch_composition` 为什么用 `to_bits()` 比较 f32 而不是 `abs(a-b) < eps`？
+**练习 2**：如果调用方把 `top_k` 全传 0，返回的 `TokenLogprob` 里 `top_logprobs` 是什么？`logprob` 和 `rank` 呢？
 
-**答案**：它要钉的是**更强**的命题：同一行的输出不仅近似相等，而且按位相同——logprob 通道没有随机源，同一行进不进批、批里第几位，都不该改变哪怕一个舍入位。`to_bits()` 把「一个比特都不许动」写成断言；`abs(a-b) < eps` 会放过最后一位的漂移，钉不住这个不变量。
+**答案**：`top_logprobs` 为空 `Vec`（`(0..0)` 不产生条目），`logprob` 与 `rank` 照常由内核写出并回读——这正是「只要 logprob/rank、不要 top 列表」的用法，[tests/gpu_logprobs.rs:64-69](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L64-L69) 的第一条请求就是 `top_k: 0`。
 
-**练习 3**：为什么重组时用 `ks[i]` 而不是原始 `requests[i].top_k` 截断 `top_logprobs`？
+**练习 3**：`vals`/`ids` 为什么要按 `k_max` 定长分行，而不是每行只写 k 个、紧凑排列？
 
-**答案**：两个原因。其一，`ks[i] = min(top_k, vocab)` 是钳制后的值，内核也只写了 `ks[i]` 个有效项，用它截断才与设备产出一致（k > vocab 的行没有更多可读的）。其二，`ks` 是入口循环已经在主机侧留存的数组，零额外成本；若用原始 `top_k`，`k > vocab` 时会读到槽位空洞甚至越界。
+**答案**：GPU 内核按统一步长写定长行无需行间依赖或第二个紧凑化 pass，写侧最简单；代价是行尾填充槽与稍大的 D2H。由于 \( k_{\max} \le V \) 且 n 通常只有几行，这点冗余远小于紧凑化所需的额外内核工作或多次短拷贝。
+
+### 4.4 防护栏专题：stream override 必须拒绝，以及分片词表警告
+
+#### 4.4.1 概念说明
+
+本函数有三道防护栏，前两道已见（空请求短路、逐条越界拒绝），这一模块讲后两道深水区：
+
+**（a）「说谎的 `seq_len`」与纵深防御。** 包装层的 `r.row < logits.seq_len` 信任 arena 自报的形状；但 `HiddenStates` 的 `seq_len` 是个 pub 字段，调用方 bug 可能把它改得比背衬数据大。此时包装层校验会放行，真正拦住它的是内核层的兜底校验 `logits.data.len() >= hidden_dim × seq_len`——两层校验各拦一类错：包装层拦「下标超界」，内核层拦「结构体自身不一致」。
+
+**（b）stream override 为什么必须报错而不是排队。** 错误信息已经给出答案的骨架："buffer traffic is ordered on the primary stream"。这个函数的全部显存流量（H2D、`alloc_zeros`、D2H）都排在 `ctx.stream` 主流上，而内核 launch 落在 `active_cu_stream(ctx)`——覆盖激活时这是另一条流。两条流之间没有任何排序：D2H 可能跑在内核之前（读回全零）、更糟的是函数返回时各临时 `CudaSlice` 被 drop，而 drop 的释放语义排在主流上——覆盖流上的内核可能还在读写一块已被释放的内存。「排队等着执行」并不能修复这种跨流乱序，唯一正确的做法是拒绝：这是一条按需、非重叠的路径，稳态下拒绝零成本，还把误用变成显式错误而不是隐性数据竞争。测试 [tests/gpu_logprobs.rs:263-281](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L263-L281) 用 `StreamOverrideGuard::activate(ctx.stream.cu_stream())` 激活覆盖后断言调用 `is_err()`，再 drop guard。
+
+**（c）分片词表警告。** 内核对 arena 行的 `hidden_dim` 列做 LSE。若 arena 只装着本 rank 的词表分片，算出的是**分片局部** LSE：\[ \log\!\Bigl(\sum_{v \in \text{shard}_r} e^{x_v}\Bigr) \;\ne\; \log\!\Bigl(\sum_{v \in \text{global}} e^{x_v}\Bigr), \] 概率根本不归一。所以文档要求行必须是未分片的全词表，分片调用方必须先跨 rank 归并（Kimi-K2 的做法，#236）。这条警告写在主机参考实现的文档里（[src/lib.rs:470-472](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L470-L472)），对设备孪生同样成立——两者在同一 arena 行上做同一数学。
+
+#### 4.4.2 核心流程
+
+```text
+调用 token_logprobs_batch
+  ├─ requests 空 ──────────────▶ Ok(vec![])                （护栏 1：短路）
+  ├─ has_stream_override() ────▶ Err("…ordered on the primary stream")（护栏 2：拒绝）
+  ├─ 逐条 row/picked 越界 ─────▶ Err（护栏 3：包装层下标校验）
+  └─ 全部通过
+       └─ 内核层再校验 backing/长度 ──▶ Err（护栏 4：兜底结构校验，
+                                          拦「seq_len 说谎」这类调用方 bug）
+```
+
+#### 4.4.3 源码精读
+
+stream override 拒绝在 [src/lib.rs:541-545](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L541-L545)，`ensure!(!has_stream_override(), ...)`；`has_stream_override` 是 [../pegainfer-kernels/src/tensor.rs:63-66](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-kernels/src/tensor.rs#L63-L66) 的线程本地开关读数，覆盖机制（`StreamOverrideGuard`，drop 恢复）在 [../pegainfer-kernels/src/tensor.rs:25-61](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-kernels/src/tensor.rs#L25-L61)，文件头 L18 注明其用途是 Green Context SM 分区。
+
+「seq_len 说谎」测试在 [tests/gpu_logprobs.rs:246-260](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L246-L260)：`make_arena` 造了一个真实的 1 行 × 64 列 arena，然后 `inflated.seq_len = 4` 手动把行数改成 4——背衬只有 64 个元素，声称的形状却是 4×64。`row: 3 < seq_len: 4` 骗过了包装层，最终由内核层的 `data.len() >= hidden_dim × seq_len`（[../pegainfer-kernels/src/ops/sampling.rs:544-552](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-kernels/src/ops/sampling.rs#L544-L552)）报 "arena backing too small"。分片词表警告见 [src/lib.rs:470-472](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L470-L472)（"a shard-local logsumexp is not the global one, so sharded callers must merge across ranks first (#236)"）；模块文档 [src/lib.rs:21-25](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/src/lib.rs#L21-L25) 交代了 Kimi-K2 跨 rank 归并的背景。
+
+批组合无关性（同一行在单独批与混批里结果逐位一致）由 [tests/gpu_logprobs.rs:283-336](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L283-L336) 用 `to_bits()` 逐位断言钉死——这与 u2-l4 讲的采样侧可重放契约是同一精神在 logprob 通道的体现。
+
+#### 4.4.4 代码实践
+
+**实践目标**：弄清两件事——`inflated.seq_len = 4` 为什么是有效的测试手法；stream override 激活时为什么必须报错而不是排队。
+
+**操作步骤**：
+
+1. 读 [tests/gpu_logprobs.rs:210-261](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L210-L261) `rejects_out_of_range_requests` 的四段断言，注意前两段（`picked: 64`、`row: 2`）测的是包装层校验，第四段测的是内核层兜底。
+2. 问自己：正常构造函数 `HiddenStates::zeros(ctx, vocab, rows)`（见 [tests/gpu_logprobs.rs:15-23](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L15-L23) 的 `make_arena`）能不能造出「seq_len 大于背衬」的结构体？如果不能，测试只能靠手动改字段来模拟这种调用方 bug。
+3. 读 [tests/gpu_logprobs.rs:263-281](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L263-L281) `rejects_active_stream_override`，注意 guard 是 `drop(guard)` 之前完成断言的。
+4. （可选，需 GPU，待本地验证）`cargo test --release -p pegainfer-sample --test gpu_logprobs -- --nocapture`。
+
+**需要观察的现象 / 预期结果**：步骤 1-3 的参考答案——`seq_len` 与背衬不一致的结构体无法经正常构造函数产出（`zeros` 按形状真实分配），所以 `inflated.seq_len = 4` 是制造「结构性谎言」的唯一手段，它验证的是防线纵深：包装层信任形状、内核层验证背衬，两层合起来把「形状说谎」也拦住；stream override 必须报错，因为函数的全部缓冲流量排在主流而内核落在覆盖流，跨流无排序——D2H 可能在内核前执行、临时缓冲可能在内核仍在写时被 drop 释放，「排队」修不了乱序，只有拒绝才安全（且这是按需路径，拒绝无稳态成本）。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：如果去掉内核层的 backing 校验、只留包装层的 `row < seq_len`，`inflated` 那个用例会发生什么？
+
+**答案**：包装层会放行（3 < 4），内核随后按 `row × hidden_dim = 3 × 64 = 192` 的偏移读一个只有 64 元素的缓冲——越界读设备内存，读到未定义数据甚至触发 CUDA 错误；错误从「清晰的 ensure! 消息」退化成「不可复现的内存事故」。
+
+**练习 2**：为什么 `token_logprobs_batch` 不像 `greedy_stage_readback` 那样用 pinned 缓冲加事件等待（u4 将讲到的手法），而是普通 `clone_dtoh` + `ctx.sync()`？
+
+**答案**：pinned 双槽 + 事件等待是为解码热路径的延迟纪律设计的（每步都要跑、不能整流同步）；本函数是低频按需路径，回读量是 \( O(n(k_{\max}+1)) \) 的几个向量，一次整流同步的实现简单性胜过微秒级的延迟优化。
+
+**练习 3**：Kimi-K2 为什么不能直接把本 rank 的 logits arena 喂给 `token_logprobs_batch`？
+
+**答案**：它的词表按 rank 分片，arena 行只含本 rank 的列；内核算出的 LSE 是分片局部的，logprob 不归一、top-k 也不全局。必须先跨 rank 归并出全词表行（或改走主机参考实现配合跨 rank 归并，#236/#237 的 DP 归并背景见模块文档）。
 
 ## 5. 综合实践
 
-把本讲全部内容串成一张图和两个追问。全程纸笔即可完成，GPU 部分标注为待本地验证。
+把本讲全部内容串成一张数据流图，并回答两个源码问题。
 
-### 任务：绘制 `token_logprobs_batch` 一次调用的完整数据流图
+**任务**：画出 `token_logprobs_batch` 一次调用的完整数据流图，要求：
 
-**步骤 1 —— 画图**。以 `R` 条请求、批内最大钳制 k 为 `k_max` 作参数，画出从 `requests: &[LogprobRequest]` 到 `Vec<TokenLogprob>` 的完整数据流，必须标注：
+1. 从 `requests: &[LogprobRequest]` 开始，到返回 `Vec<TokenLogprob>` 结束；
+2. 标出每块 H2D 缓冲与每块 D2H 缓冲的**长度公式**（不是具体数字），特别是 `topk_len` 的 `checked_mul` 与 `.max(1)` 两步；
+3. 用竖线或标记注明 `ctx.sync()` 的位置（四次 D2H 之后、组装循环之前）；
+4. 标出内核 launch 落在哪条流上（`active_cu_stream`），以及它与 `ctx.stream` 的关系。
 
-- 入口校验链的四个拒绝点 + 空短路（内容写进图旁的图例）；
-- 三组 H2D（`rows` / `picked` / `ks`，各 `R` 个 i32，`ctx.stream.clone_htod`）；
-- 五组设备缓冲（`picked_lp`、`ranks` 各 `R`；`vals`、`ids` 各 `topk_len = R × k_max` 经 `.checked_mul` 与 `.max(1)`）；
-- 唯一一次 launch（`logprob_topk_batch_bf16_into`，行内标注它读 arena、写五组输出）；
-- 四组 D2H（`ctx.stream.clone_dtoh`）与 **`ctx.sync()` 的位置**——画在四份拷贝之后、重组循环之前；
-- 重组的 `base = i * k_max` 与 `j ∈ 0..ks[i]` 寻址。
+**参考画法**（可以照此核对，也可自创画法）：
 
-**步骤 2 —— 回答两个追问**（答案依据都在源码里）：
-
-**追问 A**：`rejects_out_of_range_requests`（[L246-L260](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L246-L260)）先造一个 1 行的 arena，再手动 `inflated.seq_len = 4`、请求 `row: 3`。为什么这是一个有效的测试手法？
-
-参考答案：`seq_len` 是 `HiddenStates` 上的普通元数据字段，这一改伪造出的正是「元数据声称 4 行、底层存储只有 1 行」的不一致状态。它有效的三层理由：① 策略层的 `ensure!(r.row < logits.seq_len)` 只看元数据，`row: 3 < 4` 会被放过——单测第一段（row: 2 对 2 行 arena）打的是这一层，测不到更深；② 把行号合法化之后，命中内核层的 `logits.data.len() >= hidden_dim × seq_len` 容量检查（[sampling.rs L544-L552](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-kernels/src/ops/sampling.rs#L544-L552)），从而证明第二道防线真实存在且可达；③ 这类「arena 别名/元数据与底层脱节」的 bug 在真实调用方是可能发生的，直接改字段是构造它的最小手段——不需要真的分配一个大 arena。
-
-**追问 B**：流覆盖激活时，为什么 `token_logprobs_batch` 必须**报错**而不是把工作排队到覆盖流上？
-
-参考答案：它的全部缓冲流量（H2D、分配、D2H）都排在主 stream `ctx.stream` 上，而内核 launch 走 `active_cu_stream(ctx)`——覆盖激活时这是另一条流。放行会产生两处竞态：内核可能在 H2D 落地前读输入；结尾 `ctx.sync()` 只同步主 stream（`stream.synchronize()`），等不到覆盖流上的内核，回读取到未写完的输出。要正确支持就得把所有拷贝改道 + 架跨流事件依赖，成本远超一条冷路径的收益，所以契约定为 base-stream-only、入口拒绝。`rejects_active_stream_override`（[L263-L281](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs#L263-L281)）里激活用的覆盖流甚至就是主 stream 本身——证明拒绝只认「覆盖激活」这个布尔状态，不看你覆盖到哪条流。
-
-**步骤 3 ——（可选，需要 GPU，待本地验证）**：跑全量 GPU A/B 并试着让其中一条失败（例如把 `TOL` 收紧到 1e-7 观察 GPU-主机浮点差异在什么量级；或给某条请求加一个越界 `picked` 看错误信息落点是策略层还是内核层）：
-
-```bash
-cargo test --release -p pegainfer-sample --test gpu_logprobs -- --nocapture
+```text
+requests: &[LogprobRequest]
+   │ ① 校验循环：ensure! 逐条拦截 row/picked 越界；k=min(top_k,V)；k_max 累积；i32 收窄
+   ▼
+rows / picked / ks  三个 Vec<i32>（长 n）
+   │ ── clone_htod ×3（ctx.stream 主流） ──▶  rows_gpu / picked_gpu / ks_gpu     [H2D，各 n 个 i32]
+   │ ── alloc_zeros ×4（ctx.stream 主流） ──▶  picked_lp_gpu (f32×n)  ranks_gpu (i32×n)
+   │                                          vals_gpu (f32×max(1,n·k_max))
+   │                                          ids_gpu  (i32×max(1,n·k_max))
+   │ ② unsafe logprob_topk_batch_bf16_into ── 一次 launch，落在 active_cu_stream(ctx)
+   │    （无 override 时 = ctx.stream 主流，与上面全部同流按序）
+   │ ── clone_dtoh ×4（ctx.stream 主流） ──▶  picked_lp / ranks / vals / ids 四个主机 Vec
+   ▼
+═══ ctx.sync() ═══  ← 全流同步点：内核 + 全部拷贝确已落地
+   │ ③ 组装循环：k=ks[i]，base=i·k_max，
+   │    TokenLogprob { picked_lp[i], ranks[i] as u32, (ids|vals)[base..base+k] }
+   ▼
+Vec<TokenLogprob>（与 requests 等长同序）
 ```
+
+**源码问题**（参考答案已分别在 4.4.4 给出，这里要求你先独立作答再核对）：
+
+- 为什么 `rejects_out_of_range_requests` 里「把 `seq_len` 手动改成 4」是一个有效的测试手法？（提示：正常构造函数造不出这种结构体；它测的是哪一层防线？）
+- stream override 激活时这个函数为何必须报错而不是排队？（提示：数一数这个函数有几块缓冲排在主流、内核落在哪条流、函数返回时临时缓冲发生了什么。）
+
+**验收标准**：图上 7 块新建设备缓冲（3 H2D + 4 输出）各有长度公式；`ctx.sync()` 位置正确；两个问题能脱离讲义复述。全程纸面即可完成；若想在 GPU 上跑对应测试验证（`cargo test --release -p pegainfer-sample --test gpu_logprobs`），待本地验证。
 
 ## 6. 本讲小结
 
-- `LogprobRequest { row, picked, top_k }` 是一行「问题」：`picked` 由调用方传入（通常是刚采出的 token），logprob 通道解释选择，不做选择。
-- 入口校验链：空请求短路 → 流覆盖拒绝 → 空词表拒绝 → 逐请求行号/token 越界与 k 钳制；内核层还有一道纯形状的第二防线（元数据 vs 底层容量）。
-- 8 个缓冲的长度公式：三组 H2D 各 `R` 个 i32；`picked_lp`/`ranks` 各 `R`；`vals`/`ids` 各 `topk_len = R × k_max`（`.max(1)` 保证零 k 批也有合法指针）。
-- 按需分配而非 scratch：logprob 只在请求方要求时运行、批形状（R 与 k_max）逐次浮动、且不在 CUDA 图捕获内——三条都推翻了 allocate-once 的动机。
-- 回读是「compact」的 \( O(R(k_{\max}+1)) \)，logits 全程留在设备上；`i*k_max + j` 统一步长布局让重组只需一个乘法定位。
-- 契约由 GPU-主机 A/B 钉死：top-k id 序列逐位相等、数值容差 5e-5、并列按 id 升序、输出按位独立于批组合；分片词表必须先跨 rank 归并 LSE（#236），Kimi-K2 因此走主机参考实现。
+- `token_logprobs_batch` 是 `token_logprob_from_row` 的设备端批量孪生：一次 `logprob_topk_batch_bf16_into` launch 服务整批，只回读 \( O(n(k_{\max}+1)) \) 的紧凑结果。
+- 一次调用新建 7 块设备缓冲：三组 i32 输入（各 \( n \) 个）+ 四组输出，其中 `vals`/`ids` 长度 \( \max(1,\, n \cdot k_{\max}) \)——`checked_mul` 防溢出、`.max(1)` 给全零 k 的批垫一个合法占位缓冲。
+- 结果按 `i*k_max + j` 定长分行布局重组，`k_i < k_max` 的行尾填充槽不被读取；主机侧 `ks` 向量兼任组装元数据；`ctx.sync()` 钉在四次 D2H 之后、组装之前。
+- 它每次现分配而不入 scratch：logprob 只在请求方要求时运行，形状每次不同，不值得为按需路径常驻显存，也不能把临时分配混进解码路径的指针稳定纪律。
+- 防护栏成纵深：空请求短路 → stream override 拒绝（缓冲流量排在主流、内核落在覆盖流，跨流无序，排队救不了）→ 包装层下标校验 → 内核层背衬兜底（拦「seq_len 说谎」）。
+- 分片词表警告：分片局部的 logsumexp 不是全局的，必须先跨 rank 归并（Kimi-K2，#236）。
 
 ## 7. 下一步学习建议
 
-- **u4-l1（CUDA 图友好的分阶段贪心路径）**：本讲看到了「logprob 冷路径从简、整流同步」的一面；下一讲看热路径的另一面——图内指针稳定、pinned 双槽排队回读、`stream_spin_wait` 事件级等待，两讲对照着读最能体会取舍。
-- **u4-l2（固定内存、流同步与 #704 教训）**：本讲的 `ctx.sync()` 是最粗粒度的等待；#704 讲的正是回读同步语义如何把亚毫秒调用拖成 23.6ms 的故事，是本讲同步话题的深化。
-- 继续读源码的话，推荐两条线：① [pegainfer-qwen3/src/executor/logprobs.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-qwen3/src/executor/logprobs.rs) 的 `score_prompts`（L105-L123）——prompt logprobs 如何把多行多位置压成一批 `LogprobRequest`，是本讲 API 的最大规模用例；② [pegainfer-kernels/src/ops/sampling.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-kernels/src/ops/sampling.rs) 里 `logprob_topk_batch_bf16_into` 旁边的 `markov_step_argmax_into`（L608 起），看同一个 crate 里批式内核的另一种「请求主序」布局长什么样。
+- 下一讲（u4-l1）进入 CUDA 图友好的分阶段贪心路径：`greedy_argmax_ids` / `greedy_stage_readback` / `greedy_stage_resident` / `greedy_collect_resident` 四件套，你会看到「图内指针稳定 + 图外 pinned 回读」的完整纪律——本讲的 `ctx.sync()` 与「为何不入 scratch」正好是它的铺垫。
+- 若想巩固 logprob 通道，重读 [tests/gpu_logprobs.rs](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-sample/tests/gpu_logprobs.rs) 的 `tie_ordering_matches_host`（L94-L159）：它用两个人造并列梯队和一组「f32 减 LSE 后塌缩成同值」的相邻 bf16 位模式，把并列排序契约钉到逐位。
+- 想看真实调用方的完整时序（先采样后打分、logprob 请求按需过滤），读 [../pegainfer-gemma4/src/engine.rs:975-1007](https://github.com/openinfer-project/openinfer/blob/af9e40e12108141bb18f93188c82d2583df18509/pegainfer-gemma4/src/engine.rs#L975-L1007)。

@@ -1,0 +1,487 @@
+{
+  "head": "af9e40e12108141bb18f93188c82d2583df18509",
+  "project": "openinfer-pegainfer-sim",
+  "rationale": "pegainfer-sim 是一个小而密的 crate：文件不多，但同时承载\"假引擎定时模型（legacy 车道）\"、\"确定性 vLLM V1 调度状态机（worker.rs）\"、\"JSON 校准档案 + 三线性插值步计时（profile.rs）\"和\"OpenAI 兼容前端的全套 e2e/指标契约（tests/）\"四块相对独立的机制。因此学习路线先让读者在单元一从零把它跑起来（定位、CLI、start_engine 契约），再沿\"legacy 定时车道 → worker 状态机 → 取消语义\"进入单元二逐层拆一条请求的生命周期；单元三把 profile 机制独立成篇，因为它是自成体系的文件契约（sha256 清单、覆盖域、确定性插值），最后用 ProfiledRuntime 把它与 worker 缝合；单元四面向专家层，以真实 e2e 测试为教材讲透可观测性计数器、logprobs/工具调用协议测缝、失败传播，并以\"添加一个新旋钮\"作为综合实践。依赖链保证每篇讲义只引入一个新机制，且所有引用均来自实际读过的源码文件。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 pegainfer-sim 存在的三个理由：前端协议、调度器行为与指标可以在 CPU 上验证",
+            "对照 Cargo.toml 解释 anyhow/clap/tokio/logforth 与 pegainfer-frontend 各自承担什么",
+            "独立完成 --release 构建与 --lib 单元测试运行"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "crate 依赖图（Cargo.toml）",
+            "src 模块划分：lib/profile/worker/logprobs",
+            "tests 布局：frontend_e2e、tool_call_roundtrip、fixtures"
+          ],
+          "order": 1,
+          "practice_task": "运行 cargo build --release -p pegainfer-sim 和 cargo test --release -p pegainfer-sim --lib，记录通过的单元测试数量；再用 cargo tree -p pegainfer-sim 画出依赖图，标出哪些依赖来自 workspace、哪些是外部 crate。",
+          "source_files": [
+            "Cargo.toml",
+            "src/lib.rs",
+            "src/main.rs"
+          ],
+          "title": "pegainfer-sim 是什么：无 GPU 的模拟推理引擎",
+          "topic": "介绍 pegainfer-sim 在 PegaInfer 工作区中的定位：一个纯 CPU、无模型权重的\"假\"推理引擎，用来在不依赖 GPU 的情况下测试与基准化 vLLM 兼容前端。梳理 crate 的文件构成与依赖关系。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-cli-and-server-bootstrap.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "说出两种模式各自的参数集与 DEFAULT_* 常量默认值",
+            "解释 --profile 与定时参数互斥的防御逻辑及其报错文案",
+            "跟踪 main() 从参数解析到 vllm::serve 的完整启动路径"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Args（clap 定义）",
+            "build_runtime",
+            "ensure_legacy_timing_flags_are_absent",
+            "report_profile / init_logging"
+          ],
+          "order": 2,
+          "practice_task": "启动 cargo run --release -p pegainfer-sim -- --port 8001，用 curl 依次请求 /health、/v1/models、/v1/completions（prompt 用 token id 数组 [1,2]），记录三者响应；然后同时传 --profile 某 fixture 路径与 --tpot-ms 12，解释启动失败信息。",
+          "source_files": [
+            "src/main.rs"
+          ],
+          "title": "CLI 与服务器引导：legacy 定时模式与 --profile 档案模式",
+          "topic": "精读 main.rs：clap 参数定义、build_runtime 如何区分 legacy 定时模式与 --profile 档案模式、两种模式的参数冲突校验，以及最终如何调用 pegainfer_frontend::vllm::serve 把模拟引擎挂到 OpenAI 兼容 HTTP 服务上。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-engine-config-and-start.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "用 SimulatedEngineConfig::new 加 with_* builder 方法组装一份配置",
+            "解释 partitions 与 Engine.schedulers 数量的对应关系",
+            "理解 EngineInfo 中 kv_capacity/servable_len 为 None 对前端的影响"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "SimulatedEngineConfig 及 with_* builder",
+            "start_engine / start_engine_with_partitions",
+            "Engine/EngineInfo 装配",
+            "spawn_scheduler 每分区一线程"
+          ],
+          "order": 3,
+          "practice_task": "参考 lib.rs 中 start_engine_with_partitions_exposes_that_many_schedulers 测试，在 tests 里新增一个测试：用 with_fallback_token_id(7) 构造配置并提交空 prompt 请求（max_tokens=2），走 collect_completion 辅助函数断言输出 token 恰为 [7, 7]。",
+          "source_files": [
+            "src/lib.rs",
+            "src/main.rs"
+          ],
+          "title": "引擎契约接入：SimulatedEngineConfig 与 start_engine",
+          "topic": "讲解 SimulatedEngineConfig 的构造与全部\"旋钮\"（base_ttft_ms/prefill_tokens_per_ms/tpot_ms、fallback token、脚本化补全、假想投机解码、假想前缀缓存、引擎档案），以及 start_engine/start_engine_with_partitions 如何用 spawn_scheduler 组装出前端可用的 Engine。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "入门：认识 pegainfer-sim 并把它跑起来"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l1-legacy-timing-lane.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "推导 ttft() = base_ttft_ms + prompt_len / prefill_tokens_per_ms 与 tpot() 的时长模型",
+            "解释 park_if_waiting 为什么按 WAIT_SLICE=1ms 切片睡眠而不是睡满整段",
+            "跟踪一个请求从 submit、admit、push_tokens 到 Terminal::Finished 的事件序列"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "SimScheduler::step_legacy",
+            "RunningRequest（pending 反转存储）",
+            "park_if_waiting / WAIT_SLICE",
+            "ttft/tpot/duration_from_ms"
+          ],
+          "order": 1,
+          "practice_task": "写一个单元测试（复用 collect_completion 辅助函数）：配置 base_ttft=0、tpot=0，断言 max_tokens 个 token 全部输出且 FinishReason::Length；再把 tpot_ms 调到 50，用 Instant 度量 collect_completion 的墙钟时间，验证节拍近似 token 数 × 50ms。",
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "title": "legacy 定时车道：固定 TTFT/TPOT 的 step 循环",
+          "topic": "逐段拆解 SimScheduler::step_legacy：排队请求如何被 admit、TTFT = base_ttft_ms + prompt_len/prefill_tokens_per_ms 的推导、TPOT 节拍、WAIT_SLICE 切片睡眠，以及 RunningRequest 的生命周期直到 finish。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-planned-completion-and-logprobs.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "按 planned_completion 的分支推演出任意 (script, max_tokens) 组合的输出与终止原因",
+            "解释 fake_token_id 对空 prompt 走 fallback 的必要性",
+            "说出 logprobs 夹具中 rank=3、首位置为 None 的协议含义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "planned_completion / planned_completion_len",
+            "fake_token_id",
+            "logprobs::prompt / completion",
+            "alternatives（不含被计分 token）"
+          ],
+          "order": 2,
+          "practice_task": "用 with_scripted_completion(vec![11, 22, 33]) 写两个测试：一个 max_tokens=2 断言只输出 [11, 22] 且 FinishReason::Length；一个 max_tokens=8 断言完整重放并以 FinishReason::Stop 结束（参考 scripted_completion_replays_ids_and_stops 与 scripted_completion_truncated_by_max_tokens_is_length）。",
+          "source_files": [
+            "src/lib.rs",
+            "src/logprobs.rs"
+          ],
+          "title": "假想输出：planned_completion 与 logprobs 协议夹具",
+          "topic": "讲解模拟引擎的输出从哪里来：planned_completion 在脚本为空时用 fake_token_id 循环复用 prompt token、在脚本非空时逐字重放并据此决定 Stop/Length；以及 logprobs.rs 如何合成 PromptEcho 与 TokenLogprob 协议夹具。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l3-worker-state-machine.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "画出请求在 Waiting/Prefill/Decode 之间的迁移条件",
+            "解释 preflight 中两类拒绝各自的判定表达式",
+            "区分 SubmissionResult 三种结果并说明 output_tokens==0 短路的设计"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "RequestPhase",
+            "WorkerState::submit / preflight",
+            "RequestRejection（ModelLengthExceeded / WholePrefillExceedsStepBudget）",
+            "SubmissionResult"
+          ],
+          "order": 3,
+          "practice_task": "参照 impossible_and_duplicate_requests_are_rejected，构造 SchedulerProfile(max_num_seqs=2, max_num_batched_tokens=4, max_model_len=8, Whole)：分别提交 prompt=7/output=2、prompt=5/output=1、重复 id、output=0 四种请求，断言四种结果（两类拒绝、重复 id 报错、直接 Finished）。",
+          "source_files": [
+            "src/worker.rs"
+          ],
+          "title": "WorkerState 状态机（上）：请求阶段、准入与拒绝",
+          "topic": "进入 worker.rs 的确定性泛型调度状态机：RequestPhase 三阶段、WorkerRequest 的提交路径、preflight 的两类拒绝，以及 SubmissionResult 的三种结果与请求快照查询。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-plan-and-complete-step.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "手推一个小型混合负载在给定预算下的完整步序列",
+            "解释最后一段 prefill 直接产出首个输出 token 的 TTFT 动机",
+            "说出 StepShape 三个分量如何作为后续计时预测的键"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "plan_step 预算分配",
+            "complete_step 推进语义",
+            "StepPlan / StepOutcome / StepShape",
+            "scheduled_prefill_tokens 与 PrefillPolicy"
+          ],
+          "order": 4,
+          "practice_task": "仿照 chunk_cap_changes_same_step_admission_without_changing_outputs 写一个回放脚本：固定 3~4 个请求（含一个长 prompt），对比 max_chunk_tokens=1 与 =4 两种 Chunked 策略下的总步数、每步 shape 与最终 generated/finished 集合，验证\"步调度变化但输出集合不变\"。",
+          "source_files": [
+            "src/worker.rs",
+            "tests/frontend_e2e.rs"
+          ],
+          "title": "WorkerState（下）：plan_step 的预算分配与 complete_step 的推进",
+          "topic": "深入 plan_step 的预算分配（先 decode 后 prefill、max_num_seqs 与 max_num_batched_tokens 双上限、whole vs chunked 的 scheduled_prefill_tokens）与 complete_step 的推进语义（prefill 收尾即产首 token、decode 逐 token、完成即出队）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u2-l5-cancellation-semantics.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "枚举 CancelResult 四种返回各自对应请求所处的位置",
+            "解释 in_flight 期间只能标记、complete 后统一收割的设计",
+            "区分 ledger 的 retire 与 finish 对前端可见性的差别"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "WorkerState::cancel / CancelResult",
+            "cancel_requested 标记与 complete_step 的 cancelled 汇总",
+            "ProfiledRuntime::cancel_aborted / cancel_worker_requests",
+            "ledger.retire"
+          ],
+          "order": 5,
+          "practice_task": "参考 late_abort_cleanup_removes_nonterminal_worker_request 与 cancellation_after_nonterminal_step_completion_removes_running_request，写一个序列测试：submit → plan_step → cancel（断言 Deferred）→ complete_step，断言 outcome.cancelled 包含该请求且 worker.request(id) 变为 None、plan_step 返回 None。",
+          "source_files": [
+            "src/worker.rs",
+            "src/lib.rs"
+          ],
+          "title": "取消语义：CancelResult 四分支与中止清理",
+          "topic": "讲解 worker.rs 的 cancel 四种返回（Cancelled/Deferred/AlreadyRequested/NotFound）与 in_flight 约束，以及 lib.rs 中 ProfiledRuntime::cancel_aborted / apply_outcome / cancel_worker_requests 如何把前端 abort 传导为 ledger 的 retire。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 2,
+      "title": "进阶：两条调度车道与确定性 worker"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u3-l1-engine-profile-loading.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "读懂一份 profile JSON 四段结构中每个字段的含义",
+            "解释 manifest 相对路径 + sha256 固定的防漂移设计",
+            "跟踪 validate 的分层调用链（schema→calibration→scheduler→predictor）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "EngineProfile::from_json_slice / load_from_path / validate",
+            "CalibrationReference / CalibrationManifest",
+            "LoadedEngineProfile（Deref 到 EngineProfile）",
+            "sha256_hex / is_sha256"
+          ],
+          "order": 1,
+          "practice_task": "把 tests/fixtures/online-step-gate.json 与其 manifest 复制到临时目录并成功加载；然后改动 manifest 一个字符，断言 load_from_path 返回 digest mismatch 错误；再删掉 profile 里 scheduler.max_num_seqs 字段，观察 deny_unknown_fields/缺字段时的 serde 报错形态。",
+          "source_files": [
+            "src/profile.rs",
+            "tests/fixtures/online-step-gate.json",
+            "tests/fixtures/online-step-gate.manifest.json"
+          ],
+          "title": "EngineProfile：校准档案的加载、清单与摘要校验",
+          "topic": "讲解 profile.rs 的 JSON 契约：EngineProfile 四段结构、deny_unknown_fields 与旧版字段（profile_id/provenance/timing）的迁移报错、CalibrationReference + CalibrationManifest 组成的可重定位 bundle，以及 load_from_path 的 sha256 清单校验流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-scheduler-profile-and-coverage.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "解释 max_num_seqs <= max_num_batched_tokens 等约束背后的调度事实",
+            "说出 coverage 与 grid 的 domain 必须完全一致的原因",
+            "按\"形状非法 → 域外 → 缺网格值\"三级失败定位 estimate_step 的错误"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "SchedulerProfile::validate / validate_shape",
+            "PredictorCoverage::validate / contains / domain",
+            "TimingGrid::validate / domain",
+            "TimingDomain"
+          ],
+          "order": 2,
+          "practice_task": "参考 profile_rejects_invalid_scheduler_and_grid：构造三个坏 profile（grid 轴非严格递增、step_duration_us 数量与维度不符、max_chunk_tokens 超过 max_num_batched_tokens），断言各自错误信息关键字；再写一个用例，让 estimate_step 收到 decode_reqs=0 但 sum_decode_ctx_tokens>0 的形状，断言在 coverage 之前就被 validate_shape 拒绝。",
+          "source_files": [
+            "src/profile.rs"
+          ],
+          "title": "调度画像与覆盖域：SchedulerProfile、PredictorCoverage 与 TimingGrid 校验",
+          "topic": "讲解 SchedulerProfile（policy/max_num_seqs/max_num_batched_tokens/max_model_len/prefill）的约束体系，以及 PredictorCoverage 与 TimingGrid 的轴、domain 一致性校验和 validate_shape 对 StepShape 的守卫。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-timing-grid-interpolation.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "用二分查找语义推演 bracket 对命中点/区间内/区间外三种输入的行为",
+            "手算一个非网格点的三线性插值期望值",
+            "解释 u128 中间量与 checked_add/sub 防御式写法覆盖的失败模式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "TimingGrid::interpolate / value_at",
+            "bracket / AxisBracket",
+            "interpolate_bracket（四舍五入与溢出防护）",
+            "行主序索引"
+          ],
+          "order": 3,
+          "practice_task": "参考 grid_returns_exact_points_and_deterministic_interpolation：自造一个各轴 3 点的 grid（自己填 duration 值），挑两个非网格点手算期望微秒数，写测试与 estimate_step 的输出断言一致，并额外断言两次调用结果逐位相同（确定性）。",
+          "source_files": [
+            "src/profile.rs"
+          ],
+          "title": "三线性插值：把 StepShape 映射为微秒级步时长",
+          "topic": "讲解数值方法部分：bracket 的二分定位与 AxisBracket 分数表示、interpolate_bracket 的整数四舍五入与溢出防护、三轴嵌套插值顺序，以及 value_at 的行主序索引。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3",
+            "u3-l1"
+          ],
+          "filename": "u3-l4-profiled-runtime-lane.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "复述\"规划 → 定价 → 睡眠 → 完成\"的 profiled 步进循环",
+            "解释 ProfiledRequest.completion_tokens 与 worker token_index 的索引对应",
+            "说明两条车道为何共享同一个 PrefixCacheTally"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ProfiledRuntime::step / drain_submissions / apply_outcome",
+            "ProfiledInFlight 与 estimate_step 定价",
+            "reject_reason 映射",
+            "spec_decode 计数观测"
+          ],
+          "order": 4,
+          "practice_task": "参考 profiled_scheduler_replays_scripted_completion 与 zero_cost_profile_fixture_is_valid：用 online-zero-cost.json fixture 加 with_scripted_completion(vec![5,6,7]) 写一个测试，断言输出、prompt_tokens 计数与 FinishReason::Stop，并用 Instant 度量整条 collect_completion 链路的墙钟开销接近零。",
+          "source_files": [
+            "src/lib.rs",
+            "src/profile.rs",
+            "tests/fixtures/online-zero-cost.json"
+          ],
+          "title": "ProfiledRuntime：档案驱动的在线引擎车道",
+          "topic": "把前三讲合拢：SimScheduler::step 在 profile 模式下切换到 ProfiledRuntime——drain_submissions 的准入与 preflight、in_flight 的就绪时刻由 estimate_step 定价、apply_outcome 把 StepOutcome 翻译成 ledger 的 echo_prompt/push_tokens/finish，以及 spec_decode 计数器观测。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "进阶：引擎档案与步计时预测"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u1-l2"
+          ],
+          "filename": "u4-l1-http-e2e-harness.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "解释 token-id prompt 仍需真实 tokenizer.json 的原因（生成 id 需要 detokenize）",
+            "说出 TINY_TOKENIZER/TINY_CONFIG 三件套各自的最低要求",
+            "用 parse_terminal_sse_chunks 的约束校验一条 SSE 流"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "SimServer（spawn 重试与 shutdown）",
+            "model_dir_with_minimal_metadata / TINY_* 常量",
+            "wait_for_health / reserve_loopback_port",
+            "parse_terminal_sse_chunks"
+          ],
+          "order": 1,
+          "practice_task": "为 SimServer 写一个新的 spawn 变体（自定义 tpot_ms 与独立 model_name，避免 Prometheus 系列串台），复制 chat_completions_returns_correct_format 的核心断言（object=chat.completion、finish_reason=length、usage 三项自洽）并跑通。",
+          "source_files": [
+            "tests/frontend_e2e.rs"
+          ],
+          "title": "HTTP e2e 测试骨架：SimServer 与最小模型元数据",
+          "topic": "解析 tests/frontend_e2e.rs 的基础设施：SimServer 的多次重试启动、reserve_loopback_port、最小模型元数据（TINY_TOKENIZER_JSON 等常量）、健康检查与优雅 shutdown，以及为什么 token-id prompt 仍需要真实 tokenizer 做解码。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4",
+            "u2-l2"
+          ],
+          "filename": "u4-l2-metrics-contract.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "解释调度器只保存累计值、delta 换算交给 StatsTracker 桥接层的分工",
+            "区分\"查询且未命中\"与\"从未查询\"在计数器上的表现",
+            "用带标签断言验证 per-position 投机计数且检查 K 之外的序列不外泄"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "SimScheduler::metrics（两车道）",
+            "PrefixCacheTally::note / counters",
+            "SpecDecodeCounters::observe_draft",
+            "wait_for_labeled_metrics"
+          ],
+          "order": 2,
+          "practice_task": "参考 aborted_request_still_ships_its_prefix_lookup 与 prefix_cache_miss_counts_its_query_without_a_hit：写一个测试，用 with_prefix_cache(3, 2) 与慢 TTFT 让第一个请求被客户端放弃，再发一个正常请求，断言四族计数器（prefix_cache_queries/hits、external_prefix_cache_queries/hits）恰为两次查找之和、无重复 delta。",
+          "source_files": [
+            "src/lib.rs",
+            "tests/frontend_e2e.rs"
+          ],
+          "title": "可观测性契约：Prometheus 指标、投机解码与前缀缓存计数器",
+          "topic": "讲解模拟引擎如何向 Prometheus 暴露指标：SchedulerMetrics 在两条车道的组装方式、SpecDecodeCounters::observe_draft 的假想验证步、PrefixCacheTally 四族计数的口径（含 prompt_logprobs 跳过查找、未配置不上报的 Option 语义），以及 e2e 中 wait_for_metrics 的稳定断言手法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l3-protocol-tests-logprobs-toolcall.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "说出 scripted completion + 定制 tokenizer 如何精确控制解码字节流",
+            "解释脚本末尾补 EOS 的原因（Stop 时上游抑制最后一个 token id，#584）",
+            "复述 logprobs=0 与 prompt_logprobs 边界用例各自锁定的行为"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ToolCallSimServer / qwen_model_dir / fuse_tokenizer_json",
+            "三段 CHUNK 脚本与跨分片重组断言",
+            "EOS pad 约定与 Auto parser 按模型路径选择",
+            "logprobs 边界用例（logprobs=0、单 token prompt、流式对齐）"
+          ],
+          "order": 3,
+          "practice_task": "扩展 tool_call_roundtrip：把脚本与 fuse_tokenizer_json 的词表改成两段完整 <tool_call> 块（两个不同工具名），断言非流式响应 message.tool_calls 解析出两个条目，且流式路径两个工具的 arguments 各自跨 >=2 个分片重组成功。",
+          "source_files": [
+            "tests/tool_call_roundtrip.rs",
+            "tests/frontend_e2e/logprobs.rs",
+            "src/logprobs.rs"
+          ],
+          "title": "协议层测缝：logprobs 边界与工具调用往返",
+          "topic": "两个\"纯 CPU 验证协议层\"的样板：logprobs 子模块覆盖 prompt_logprobs、logprobs=0 等边界；tool_call_roundtrip 用脚本化补全 + Fuse 解码器的定制 tokenizer，让 <tool_call> JSON 跨多个流式分片重组，并解释脚本为何要补一个 EOS（Stop 终止时的末 token 抑制）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1",
+            "u4-l2"
+          ],
+          "filename": "u4-l4-failure-propagation-and-extension.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "解释 spawn_scheduler 线程模型下\"调度器退出即服务退出\"的取舍",
+            "复述前端在启动时如何校验声明的引擎数与实际 scheduler 数",
+            "独立完成一个新旋钮的端到端落地：config → scheduler 状态 → metrics → 测试"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "FatalScheduler / HoldScheduler 注入",
+            "frontend_rejects_engine_partition_mismatch",
+            "旋钮添加模式：with_* builder → SimScheduler 字段 → metrics",
+            "测试金字塔：--lib 单测 + e2e 断言"
+          ],
+          "order": 4,
+          "practice_task": "综合实践：仿照 with_prefix_cache 实现 with_abort_after_tokens(n)——请求发出 n 个 token 后走 ledger 中止/retire 路径；为它写一个单元测试（断言终止路径与已产出 token 数）和一个 e2e 断言（/metrics 中该请求计入失败侧而非成功侧），并写一段说明新增的每处代码服务于哪条生产不变量。",
+          "source_files": [
+            "tests/frontend_e2e.rs",
+            "src/lib.rs",
+            "src/main.rs"
+          ],
+          "title": "失败传播与二次开发实践：给引擎加一个新旋钮",
+          "topic": "收尾两件事：一是前端契约下的失败语义——FatalScheduler/HoldScheduler 证明调度器 panic 或 Err 会停掉整个服务与兄弟引擎、分区数不匹配在启动即被拒绝；二是综合实践：按 with_prefix_cache 的模式给 SimulatedEngineConfig 增加一个新旋钮并让它流经 config → scheduler → metrics。"
+        }
+      ],
+      "level": "advanced",
+      "order": 4,
+      "title": "专家：服务化契约、可观测性与扩展实践"
+    }
+  ]
+}
