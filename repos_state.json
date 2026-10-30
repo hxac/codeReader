@@ -28761,7 +28761,7 @@
     "typst/typst": {
       "prompt_hash": "b21aef51792b02df",
       "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-10-28T21:04:12Z",
+      "last_run_at": "2026-10-30T02:02:27Z",
       "lectures": {
         "u1-l1": {
           "status": "keep",
@@ -28893,41 +28893,53 @@
           "error": null
         },
         "u4-l7": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.486996,
+          "error": null
+        },
+        "u5-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9049096,
+          "error": null
+        },
+        "u5-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9849784,
+          "error": null
+        },
+        "u5-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0071984,
+          "error": null
+        },
+        "u5-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.7218480000000005,
+          "error": null
+        },
+        "u5-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.4471096,
+          "error": null
+        },
+        "u5-l6": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"3184959d-3ec9-486e-b0c1-42710e3fc19d\",\"total_co"
-        },
-        "u5-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l6": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"5c1c6d7e-0b4f-49b9-b599-3cc2c6051b22\",\"total_co"
         },
         "u5-l7": {
           "status": "pending",
@@ -66735,263 +66747,446 @@
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
         "u1-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.5086928000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.6645088,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.6383920000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.6797224,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.8119255999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.6857592,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.7863352,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l5": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.8573448,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.9770552000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.9243192000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l3": {
-          "status": "failed",
-          "action": "new",
-          "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"538c31f5-7b7b-455e-b604-e0e0a0604e0c\",\"total_co"
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         }
       },
-      "manifest_head": "785d04871df37ddfb3e1b1432ce544b94505a801",
-      "prev_head": "ca25b80fa4491509ccef418467b37d4d6fd64e9b",
-      "phase": "workers",
+      "manifest_head": "af9e40e12108141bb18f93188c82d2583df18509",
+      "prev_head": "785d04871df37ddfb3e1b1432ce544b94505a801",
+      "phase": "done",
       "mode": "incremental",
       "tutorial_path": "tutorials/openinfer-project/openinfer/openinfer-pegainfer-kv-cache-tutorial",
-      "last_head": "785d04871df37ddfb3e1b1432ce544b94505a801",
-      "last_run_at": "2026-10-28T21:04:12Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_head": "af9e40e12108141bb18f93188c82d2583df18509",
+      "last_run_at": "2026-10-30T02:02:27Z",
+      "last_error": null,
+      "abandoned": []
     },
     "openinfer-project/openinfer@pegainfer-kv-offload": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-10-28T21:04:12Z",
+      "last_error": null,
+      "last_run_at": "2026-10-30T02:02:27Z",
       "lectures": {
         "u1-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.601244,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.909776,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.6068399999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.7554240000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.797092,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.5855056,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.7432192,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l5": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.1846432000000002,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l6": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.5923999999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l7": {
-          "status": "failed",
-          "action": "new",
-          "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"06787b0e-ad14-4447-9cd4-f211f6556099\",\"total_co"
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l8": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u3-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u3-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u3-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u3-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u3-l5": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         }
       },
-      "manifest_head": "785d04871df37ddfb3e1b1432ce544b94505a801",
-      "prev_head": null,
-      "phase": "workers",
-      "mode": "full",
+      "manifest_head": "af9e40e12108141bb18f93188c82d2583df18509",
+      "prev_head": "785d04871df37ddfb3e1b1432ce544b94505a801",
+      "phase": "done",
+      "mode": "incremental",
       "tutorial_path": "tutorials/openinfer-project/openinfer/openinfer-pegainfer-kv-offload-tutorial",
-      "last_head": "785d04871df37ddfb3e1b1432ce544b94505a801"
+      "last_head": "af9e40e12108141bb18f93188c82d2583df18509",
+      "abandoned": []
     },
     "openinfer-project/openinfer@pegainfer-qwen3": {
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
         "u1-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.7531191999999998,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.6042703999999999,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.6252472,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.3240576000000002,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.3481751999999998,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l5": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l6": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l7": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l8": {
+          "status": "failed",
+          "action": "update",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"909b5a53-d3f6-4b4d-9e73-6fe2b80672e2\",\"total_co"
+        },
+        "u4-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "update",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "update",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l5": {
+          "status": "pending",
+          "action": "rebuild",
+          "retries": 0
+        },
+        "u6-l6": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l7": {
+          "status": "pending",
+          "action": "update",
+          "retries": 0
+        },
+        "u6-l8": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u7-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "pending",
+          "action": "update",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u8-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u8-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u9-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u9-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        }
+      },
+      "manifest_head": "af9e40e12108141bb18f93188c82d2583df18509",
+      "prev_head": "785d04871df37ddfb3e1b1432ce544b94505a801",
+      "phase": "workers",
+      "mode": "incremental",
+      "tutorial_path": "tutorials/openinfer-project/openinfer/openinfer-pegainfer-qwen3-tutorial",
+      "last_head": "af9e40e12108141bb18f93188c82d2583df18509",
+      "last_run_at": "2026-10-30T02:02:27Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
+    "openinfer-project/openinfer@pegainfer-qwen35": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.6702032000000001,
+          "cost": 0.8335032,
           "error": null
         },
         "u1-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.85432,
+          "cost": 0.8369936,
           "error": null
         },
         "u1-l3": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.1341048,
+          "cost": 0.7852184000000001,
           "error": null
         },
         "u1-l4": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.1020072,
+          "cost": 1.2055344000000001,
           "error": null
         },
         "u2-l1": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.845528,
+          "cost": 0.5411808,
           "error": null
         },
         "u2-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.6966688,
+          "cost": 0.7189952,
           "error": null
         },
         "u2-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.2361263999999998,
-          "error": null
-        },
-        "u2-l4": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"6cb19f03-edcc-4605-8b32-aaeb9f1371a4\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"6ea4325b-a1ba-490c-99ff-4325a74e784e\",\"total_co"
+        },
+        "u2-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
         },
         "u3-l1": {
           "status": "pending",
@@ -67004,31 +67199,6 @@
           "retries": 0
         },
         "u3-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l6": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l7": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l8": {
           "status": "pending",
           "action": "new",
           "retries": 0
@@ -67083,37 +67253,17 @@
           "action": "new",
           "retries": 0
         },
-        "u6-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l6": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l7": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
         "u7-l1": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
         "u7-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l3": {
           "status": "pending",
           "action": "new",
           "retries": 0
@@ -67132,34 +67282,101 @@
           "status": "pending",
           "action": "new",
           "retries": 0
+        }
+      },
+      "manifest_head": "af9e40e12108141bb18f93188c82d2583df18509",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/openinfer-project/openinfer/openinfer-pegainfer-qwen35-tutorial",
+      "last_head": "af9e40e12108141bb18f93188c82d2583df18509",
+      "last_run_at": "2026-10-30T02:02:27Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
+    "openinfer-project/openinfer@pegainfer-sample": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.5553728,
+          "error": null
         },
-        "u8-l4": {
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7129472000000001,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.6542152,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7523864,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7885432,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1834224,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8699431999999999,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"d6c6315a-1b89-4ef9-9a3f-9dc1d70adf15\",\"total_co"
+        },
+        "u4-l1": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u9-l1": {
+        "u4-l2": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u9-l2": {
+        "u4-l3": {
           "status": "pending",
           "action": "new",
           "retries": 0
         }
       },
-      "manifest_head": "785d04871df37ddfb3e1b1432ce544b94505a801",
+      "manifest_head": "af9e40e12108141bb18f93188c82d2583df18509",
       "prev_head": null,
       "phase": "workers",
       "mode": "full",
-      "tutorial_path": "tutorials/openinfer-project/openinfer/openinfer-pegainfer-qwen3-tutorial",
-      "last_head": "785d04871df37ddfb3e1b1432ce544b94505a801",
-      "last_run_at": "2026-10-28T21:04:12Z",
+      "tutorial_path": "tutorials/openinfer-project/openinfer/openinfer-pegainfer-sample-tutorial",
+      "last_head": "af9e40e12108141bb18f93188c82d2583df18509",
+      "last_run_at": "2026-10-30T02:02:27Z",
       "last_error": "quota exhausted; will resume next window"
     },
-    "openinfer-project/openinfer@pegainfer-qwen35": {},
-    "openinfer-project/openinfer@pegainfer-sample": {},
     "openinfer-project/openinfer@pegainfer-server": {},
     "openinfer-project/openinfer@pegainfer-sim": {},
     "xichan96/dinotty": {},
