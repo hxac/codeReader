@@ -1,0 +1,730 @@
+{
+  "project": "openinfer-pegainfer-server",
+  "head": "a474b264537268022a9c06766f65c90ffd0be6c1",
+  "rationale": "pegainfer-server 本身是一个约 300 行的纯分发二进制，它的全部实质在它驱动的 pegainfer-frontend 契约（model_line 与 engine 模块）里，因此大纲以 server 为锚点、沿真实依赖深入 frontend：第一单元从零跑起二进制并走通 main 流程与检测门；第二单元拆解 ModelLine trait、SharedArgs、注册表与 ServePlan 这条 CLI 装配链；第三单元进入引擎契约，按「两代契约地图→线类型→账本→驱动循环→接线与路由」递进，全部可用无 GPU 的单元测试和 echo-server 实践；第四单元升到 vLLM 协议栈，覆盖 serve 函数族、HTTP 装配、两代引擎桥、请求整形与特殊路由、可观测性；第五单元以 KV/生命周期细节、接入新模型线的完整清单和设计取舍复盘收尾。source_files 一律相对 pegainfer-server/ 目录书写（crate 外文件以 ../ 开头），与永久链接 base 一致；讲义间依赖构成 DAG，实践任务尽量不依赖 GPU 与真实权重。本次增量（af9e40e1 → a474b264）经 git diff 核实仅含一个纯文档提交 a474b264：改动只落在 docs/index.md、docs/lessons/control-row-beats-the-baseline.md 与 docs/models/qwen3/dspark-integration.md，pegainfer-server、pegainfer-frontend、pegainfer-qwen3 的全部源码与 README 均零变化，且没有任何讲义的 source_files 引用这三个文档，故结构不变、不新增不移除讲义：已生成的 8 篇（u1-l1..u2-l4，文件已在 openinfer-pegainfer-server-tutorial/ 落盘）标记 keep，尚未生成的 16 篇（u2-l5、u3 全部、u4 全部、u5 全部）保持 new 待 worker 生成。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "单元一 · 入门：跑起 pegainfer-server",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与架构地图：pegainfer-server 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "PegaInfer 是纯 Rust + CUDA 的 LLM 推理引擎，pegainfer-server 是它的服务器二进制，只做「检测模型 + 校验 CLI + 启动引擎 + 分发服务」，本讲建立全局地图。",
+          "learning_goals": [
+            "说出 PegaInfer 的定位：纯 Rust + CUDA 的 LLM 推理引擎，提供 OpenAI 兼容 /v1 API",
+            "描述 pegainfer-server 在工作区中的职责：检测模型、校验 CLI、启动所选引擎，不做任何模型逻辑",
+            "对照 README 的架构边界表，指出 server / frontend / 模型 crate / core+kernels / KV 基础设施各层负责什么"
+          ],
+          "source_files": [
+            "../README.md",
+            "Cargo.toml",
+            "src/main.rs"
+          ],
+          "minimal_modules": [
+            "README 架构章节",
+            "server Cargo features 表",
+            "main.rs 模块文档与 model_lines()"
+          ],
+          "practice_task": "阅读 README 与 Cargo.toml 的 [features] 表，画一张 feature 名到模型 crate 的映射表；运行 cargo run --release -- --help（或细读 --help 输出），标注当前默认构建编译进了哪条模型线（qwen3）、哪些线被编译掉，并用 main.rs 里 families() 的 compiled 字段核对结论。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建与运行：feature 矩阵、--release 与全局分配器",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "feature 矩阵决定二进制里有哪些模型线：default=qwen3（构建期无 Python），其余按 --features 拉入；GPU 构建必须 --release；非 msvc 使用 jemallocator。",
+          "learning_goals": [
+            "解释 feature 如何决定二进制内容：default = qwen3，其余模型线经 --features 拉入对应 crate",
+            "说明为什么 GPU 构建必须 --release、为什么非 msvc 平台用 jemallocator 做全局分配器",
+            "会用 cargo tree 与 --version 验证自己的 feature 构建假设"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "../README.md",
+            "src/main.rs"
+          ],
+          "minimal_modules": [
+            "Cargo.toml [features]",
+            "[[bin]] 与 default-run",
+            "jemalloc 全局分配器"
+          ],
+          "practice_task": "执行 cargo tree -p pegainfer-server -e features | head -50 记录默认 feature 集，再对比加 --features gemma4 后依赖图的变化并解释 optional dependency 如何被激活；运行 cargo run --release -- --version，确认二进制名 pegainfer 与版本号来自 Cargo.toml 的哪些字段。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "main.rs 全景：从 CLI 到 serve 的启动主流程",
+          "order": 3,
+          "filename": "u1-l3-main-flow.md",
+          "level": "beginner",
+          "topic": "逐段走读 main()：建注册表、合并 CLI、读 config.json、detect、两级 validate、serve_plan、spawn_blocking 加载引擎、三条 serve 分支的选择。",
+          "learning_goals": [
+            "按顺序说出 main() 的各阶段：ModelLineRegistry::new → build_command → 读 config.json → detect → validate_provided → shared.validate → line.validate → serve_plan → launch → serve",
+            "指出引擎加载为何放在 tokio::task::spawn_blocking（与 HTTP 前端并行）以及 LoRA 路径为何例外地串行",
+            "定位 tracing::flush 在错误传播前被调用的原因"
+          ],
+          "source_files": [
+            "src/main.rs",
+            "../pegainfer-frontend/src/model_line.rs"
+          ],
+          "minimal_modules": [
+            "model_lines()",
+            "main() 服务装配",
+            "引擎加载与 Ctrl-C 两段式"
+          ],
+          "practice_task": "给 main() 画一张流程图，标注每一步失败时返回给用户的错误形态；分别用 --port 9000 启动到引擎加载阶段、以及 --model-path 指向不存在目录两种方式运行，把日志/错误逐条对应回流程图中的阶段。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "检测门：config.json 判定与 feature 提示",
+          "order": 4,
+          "filename": "u1-l4-detection-gate.md",
+          "level": "beginner",
+          "topic": "detect 的判定逻辑，以及当配置属于「存在但被编译掉」的家族时 feature_gate_hint 给出 rebuild 建议；detect_gate 集成测试如何驱动真实二进制验证这道门。",
+          "learning_goals": [
+            "解释 registry.detect 的三种结果：唯一认领、Conflict（两条线都认领）、NoMatch（带各线拒绝原因）",
+            "说明 families() 为什么是「必要的第二真相源」：被编译掉的线的 probe 无法运行，只能硬编码 identity 表",
+            "读懂 detect_gate.rs 集成测试如何用冻结 config 与最小 tokenizer 驱动真实二进制断言两种出厂行为"
+          ],
+          "source_files": [
+            "src/main.rs",
+            "tests/detect_gate.rs",
+            "../pegainfer-qwen4/tests/frozen_config.json",
+            "../pegainfer-frontend/examples/echo-model/tokenizer.json"
+          ],
+          "minimal_modules": [
+            "families() 身份表",
+            "feature_gate_hint()",
+            "detect_gate 集成测试"
+          ],
+          "practice_task": "手工构造目录：config.json 写 {\"model_type\": \"glm_moe_dsa\"}，再放一个 tokenizer.json（可复制 pegainfer-frontend/examples/echo-model/tokenizer.json），运行二进制观察输出中的 --features glm52 提示；换 model_type 为 frobnicate_lm 验证未知家族不触发提示；最后对照 tests/detect_gate.rs 说明 stock 与 enabled 两种断言分别验证什么。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "单元二 · 进阶：ModelLine 契约与 CLI 装配",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "ModelLine trait：server 与模型 crate 之间的接缝",
+          "order": 1,
+          "filename": "u2-l1-model-line-trait.md",
+          "level": "intermediate",
+          "topic": "ModelLine 是模型线暴露给 server 的全部表面：probe 认领 config、augment_cli 增补独占 flag、launch 启动调度器线程并交回 LaunchedEngine。",
+          "learning_goals": [
+            "逐个说出 ModelLine 的 8 个方法及默认实现（augment_cli、consumed_shared_args、arg_requirements、validate、serve_plan 都可缺省）",
+            "解释「接缝」含义：server 二进制只持有 &'static dyn ModelLine，从不 import 任何模型 crate 的选项类型",
+            "理解 launch 返回 LaunchedEngine 及其错误为何用 anyhow（深层上下文链，调用方不分支）"
+          ],
+          "source_files": [
+            "../pegainfer-frontend/src/model_line.rs",
+            "../pegainfer-qwen3/src/model_line.rs",
+            "src/main.rs",
+            "../pegainfer-frontend/examples/echo-server.rs"
+          ],
+          "minimal_modules": [
+            "ModelLine trait 定义",
+            "LaunchContext",
+            "DetectError/CliError"
+          ],
+          "practice_task": "以 ../pegainfer-frontend/examples/echo-server.rs 的 EchoLine 为模板，在草稿工程里实现一个 ReverseLine：name 返回 \"Reverse\"，probe 认领 model_type=reverse，launch 返回最简 Engine（可先照抄 EchoScheduler）；目标是编译通过并说清哪两个方法必选、哪些可省。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "SharedArgs：跨模型线共享的参数面",
+          "order": 2,
+          "filename": "u2-l2-shared-args.md",
+          "level": "intermediate",
+          "topic": "SharedArgs 定义所有线共有的 CLI 面，每条线用 consumed_shared_args 声明自己读哪个子集；跨 flag 规则一部分在 clap requires_all、一部分在 validate() 里手写。",
+          "learning_goals": [
+            "区分三类 flag：CORE_ARGS（所有线可用）、SharedArgs 中按线消费的子集、各线独占 flag",
+            "读懂 SHARED_ARG_REQUIREMENTS 与 SharedArgs::validate 分别在哪个阶段生效（clap requires_all vs 显式 validate）",
+            "理解 provided_args 如何借助 ValueSource 区分「用户显式提供」与「默认值填充」"
+          ],
+          "source_files": [
+            "../pegainfer-frontend/src/model_line.rs",
+            "../pegainfer-qwen3/src/model_line.rs"
+          ],
+          "minimal_modules": [
+            "SharedArgs 定义",
+            "SHARED_ARG_REQUIREMENTS 与 validate()",
+            "provided_args()"
+          ],
+          "practice_task": "整理一张 SharedArgs 字段表（字段名 / CLI 拼写 / 默认值 / Qwen3Line 是否消费，consumed_shared_args 可查）；实际运行二进制触发两条规则错误：--decode-sm-pct 50（未开 green-ctx，来自 SharedArgs::validate）与 --kv-offload-host-gib 8（未给 --kv-offload，来自 clap requires_all），并说明两条错误为何措辞来源不同。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "ModelLineRegistry：注册表与 CLI 归属自检",
+          "order": 3,
+          "filename": "u2-l3-registry-internals.md",
+          "level": "intermediate",
+          "topic": "注册表在构造时对全部 flag 做 id 与拼写的唯一性检查（冲突即 panic），detect 要求恰好一条线认领配置，validate_provided 做 consume-or-reject。",
+          "learning_goals": [
+            "解释 RegistryClaims 对 flag id 与 CLI 拼写（含长/短 alias）做唯一性断言、为什么 release 构建也要自己验（clap 的 schema 断言在 release 被禁用）",
+            "走查 detect 的收集逻辑：rejections 列表如何拼进 NoMatch 错误、Conflict 如何点名两条线",
+            "理解 consume-or-reject：每个显式提供的 flag 必须是核心、被消费的共享、或本线独占之一"
+          ],
+          "source_files": [
+            "../pegainfer-frontend/src/model_line.rs"
+          ],
+          "minimal_modules": [
+            "RegistryClaims",
+            "ModelLineRegistry::new/detect/validate_provided",
+            "parse_for_line 测试帮手"
+          ],
+          "practice_task": "在 pegainfer-frontend 的测试模块里（或复制 model_line.rs 测试中的 StubLine 模式到草稿测试）构造两条声明同一 --flag 拼写的 StubLine，确认 ModelLineRegistry::new 按预期 panic；再用公开的 parse_for_line 帮手验证「给 A 线传 B 线独占 flag」会得到 UnconsumedFlag 错误，并写出错误消息原文。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "一条真实模型线：Qwen3Line 的独占 CLI 与校验矩阵",
+          "order": 4,
+          "filename": "u2-l4-qwen3-line.md",
+          "level": "intermediate",
+          "topic": "以 Qwen3Line 为例看完整实现：独占 CLI（LoRA、batch-invariant、eagle3、KV P2P…）、validate 里的冲突矩阵、launch 把 SharedArgs+Qwen3Cli 折成 Qwen3LaunchOptions。",
+          "learning_goals": [
+            "列出 Qwen3Line 的独占 flag 分组：LoRA（enable-lora/lora-modules/max-loras/max-lora-rank）、KV P2P/PD、显存预算、batch-invariant、eagle3",
+            "读懂 validate() 的冲突矩阵写法：以 provided 集合 + cli 布尔值交叉判断并返回 CliError::rule",
+            "跟踪 launch 如何把 SharedArgs 与 Qwen3Cli 折叠成 Qwen3LaunchOptions 并调用 crate::launch"
+          ],
+          "source_files": [
+            "../pegainfer-qwen3/src/model_line.rs",
+            "../pegainfer-frontend/src/model_line.rs"
+          ],
+          "minimal_modules": [
+            "Qwen3Cli 独占 flag",
+            "validate 冲突矩阵",
+            "launch 选项组装"
+          ],
+          "practice_task": "从 validate() 抄录 --eagle3-draft-model-path 与 --batch-invariant 各自的完整冲突表并画成二维表；准备一个只含真实 Qwen3 config.json（无权重）的模型目录，运行 --model-path <dir> --batch-invariant，确认在引擎加载之前就被「requires --no-prefix-cache」拒绝，再补上 --no-prefix-cache 观察错误推进到哪一步（应到权重加载），以证明校验先于 launch。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l5",
+          "title": "ServePlan：引擎加载前就必须知道的服务形态",
+          "order": 5,
+          "filename": "u2-l5-serve-plan.md",
+          "level": "intermediate",
+          "topic": "ServePlan 把「前端在引擎加载完成前就需要知道的事实」从模型线带出来：分区数、prefill-only、LoRA 模块、auto 工具解析器，main.rs 按它选 serve 分支。",
+          "learning_goals": [
+            "说出 ServePlan 四个字段各自的消费点：scheduler_partition_count、prefill_only、lora_modules、auto_tool_call_parser",
+            "解释 partition 数为何必须在引擎加载前可知：HTTP 前端在引擎仍加载时就要按分区注册 engine identity，并在加载后与实际分区数对账",
+            "理解 resolve_tool_call_parser 的优先级：显式用户选择 > 线自带默认 > Auto"
+          ],
+          "source_files": [
+            "../pegainfer-frontend/src/model_line.rs",
+            "src/main.rs",
+            "../pegainfer-frontend/src/vllm/mod.rs"
+          ],
+          "minimal_modules": [
+            "ServePlan 定义",
+            "main() 的三分支选择",
+            "serve_with_engine_count 引擎计数对账"
+          ],
+          "practice_task": "对照 main.rs 写出 plan 每个字段到具体行为的映射表（lora_modules 非空→serve_model_with_lora_routes；prefill_only→serve_prefill_only_with_engine_count；scheduler_partition_count→engine_count 参数）；再回答：如果把 partition 数推迟到引擎加载后才告知，vllm/mod.rs 里哪段代码会失去依据（提示：TransportMode::Bootstrapped 的 engine_count 与加载完成后的分区数校验）。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "单元三 · 进阶：引擎契约与请求生命周期",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "引擎契约总览：两代契约并存的地图",
+          "order": 1,
+          "filename": "u3-l1-contract-overview.md",
+          "level": "intermediate",
+          "topic": "engine 模块的地图：新一代 step 驱动契约（step/ledger/request_lifecycle/metrics/wiring/driver/control）与迁移中的 legacy 每 token 契约（request/event/sink/kv/handle），LaunchedEngine 二选一。",
+          "learning_goals": [
+            "画出 engine 模块的两代分组：step 驱动（step/ledger/request_lifecycle/metrics/wiring/driver/control）与 legacy（request/event/sink/kv/handle）",
+            "解释 LaunchedEngine::Handle 与 ::Stepped 的区别及 main.rs LoRA 分支为何要求 Stepped",
+            "说明 mod.rs 「扁平 re-export」约定：pegainfer_frontend::engine::X 路径不因内部分拆而变"
+          ],
+          "source_files": [
+            "../pegainfer-frontend/src/engine/mod.rs",
+            "src/main.rs",
+            "../pegainfer-frontend/src/engine/wiring.rs"
+          ],
+          "minimal_modules": [
+            "engine/mod.rs 模块文档",
+            "LaunchedEngine 枚举",
+            "Engine/EngineInfo/LiveScheduler"
+          ],
+          "practice_task": "按 mod.rs 的文档注释画模块依赖图并标注每个模块的生产者/消费者角色；在工作区 grep 统计 LaunchedEngine::Handle 与 LaunchedEngine::Stepped 的出现点（含 From 实现与 serve 装配处），据此写一句话总结当前迁移状态：哪些路径还依赖 legacy 契约。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "legacy 契约线类型：GenerateRequest、TokenEvent 与 TokenSink",
+          "order": 2,
+          "filename": "u3-l2-legacy-wire.md",
+          "level": "intermediate",
+          "topic": "旧契约的请求/事件类型：GenerateRequest 的字段、TokenEvent 的事件族、TokenSink 的共享打标通道与 abort reason 机制。",
+          "learning_goals": [
+            "说出 GenerateRequest 各字段职责：data_parallel_rank 的路由含义、token_tx 的事件出口、trace_parent 的链路上下文",
+            "区分 TokenEvent 的事件族（Scheduled/Token/PromptTokens/KvTransfer/Finished/Error/Rejected）与 FinishReason",
+            "解释共享打标通道设计：TokenSink 把事件打上 RequestTag 推进单一 channel，abort reason 用原子状态替代「drop 接收端」"
+          ],
+          "source_files": [
+            "../pegainfer-frontend/src/engine/request.rs",
+            "../pegainfer-frontend/src/engine/event.rs",
+            "../pegainfer-frontend/src/engine/sink.rs",
+            "../pegainfer-frontend/src/sampler.rs",
+            "../pegainfer-frontend/src/engine/handle.rs"
+          ],
+          "minimal_modules": [
+            "GenerateRequest",
+            "TokenEvent/RequestTag",
+            "TokenSink"
+          ],
+          "practice_task": "仿照 handle.rs 测试里的 routed_request 辅助，写一个小测试（可放草稿 crate，依赖 pegainfer-frontend）：用 TokenSink::standalone 构造请求通道，按 Scheduled → Token → Finished 顺序手动 send 三个事件并断言接收顺序；再验证 SamplingParams::is_greedy 在 temperature=0 与 top_k=1 两种参数下都返回 true。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "step 契约线类型：StepOutputs 与扁平 RequestUpdate",
+          "order": 3,
+          "filename": "u3-l3-step-wire.md",
+          "level": "intermediate",
+          "topic": "新契约的线类型：RequestId、Request（history_tokens/history_marks）、StepOutputs，以及把「一步内发生的一切」压成一条扁平 RequestUpdate 的设计。",
+          "learning_goals": [
+            "解释 RequestId 为何是 Copy 整数（进程内路由 id，外部字符串 id 留在协议栈）",
+            "说出 Request 上 history_tokens 与 history_marks（新者在前）的多轮会话含义",
+            "论证 RequestUpdate 的扁平结构如何把旧协议「Scheduled 先于 token、terminal 恰一次」的约定变成类型本身"
+          ],
+          "source_files": [
+            "../pegainfer-frontend/src/engine/step.rs",
+            "../pegainfer-frontend/src/engine/stop.rs"
+          ],
+          "minimal_modules": [
+            "RequestId/Request/QueuedRequest",
+            "StepOutputs/RequestUpdate",
+            "StopPolicy/StopCause"
+          ],
+          "practice_task": "手写一个 fold 函数消费 Vec<RequestUpdate>：按字段顺序处理 admission 事实 → 新 token → terminal，配两三个手工构造样例写成单元测试；再回答：为什么「terminal 之后再出 token」在这个类型上不可表达，而旧 TokenEvent 协议只能靠约定保证。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "RequestLedger：活请求的账本与 terminal 恰一次",
+          "order": 4,
+          "filename": "u3-l4-request-ledger.md",
+          "level": "intermediate",
+          "topic": "账本为每个未答复请求开户：register/admit/push_tokens/finish/fail/reject/retire，commit_step 每迭代出一次账单，terminal 恰一次由「碰已关账户即 panic」强制。",
+          "learning_goals": [
+            "走查账户生命周期：register 开户（Queued）→ admit 转 Active → push_tokens 计数 → finish/fail/reject/retire/defer_finish 关户",
+            "解释 terminal-exactly-once 的强制方式：触碰已关闭或未知账户直接 panic 在出错调用点",
+            "区分 pub 与 pub(crate) 的职责划分：register/commit_step/fail_all 只有 driver 能碰，节奏由 driver 拥有"
+          ],
+          "source_files": [
+            "../pegainfer-frontend/src/engine/ledger.rs",
+            "../pegainfer-frontend/src/engine/request_lifecycle.rs",
+            "../pegainfer-frontend/src/engine/driver.rs"
+          ],
+          "minimal_modules": [
+            "Account/AccountState",
+            "RequestLedger 记账方法",
+            "StepStatement 合并"
+          ],
+          "practice_task": "在 pegainfer-frontend crate 的测试模块里（参考 driver.rs::tests 的 EchoScheduler 写法，或直接运行 cargo test -p pegainfer-frontend --lib engine 检查既有用例）编写一个两步调度测试：第一步 admit + push_tokens，第二步再 push_tokens + finish，断言步流上恰好两条 RequestUpdate 且 token 计数来自账本而非模型侧；复述「对已关账户再 finish 会 panic」由哪类代码保证。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "Scheduler trait 与 drive 轮询循环",
+          "order": 5,
+          "filename": "u3-l5-scheduler-driver.md",
+          "level": "intermediate",
+          "topic": "Scheduler 只有三方法（submit/step/metrics），drive 循环把排空顺序、每迭代一次 metrics 发布一次 commit、致命写销、空闲自旋统一成一份代码而非各 crate 纪律。",
+          "learning_goals": [
+            "说出 Scheduler 三个方法的分工：submit 只做所有权转移、step 是唯一裁决点、metrics 供每迭代发布",
+            "走查 drive 循环的顺序保证：先排空提交、再 step、再发布 metrics、再 commit 一次",
+            "解释致命错误路径：step 返回 Err → 账本 fail_all 写销全部未答复请求 → 线程退出"
+          ],
+          "source_files": [
+            "../pegainfer-frontend/src/engine/driver.rs",
+            "../pegainfer-frontend/src/engine/metrics.rs"
+          ],
+          "minimal_modules": [
+            "Scheduler trait",
+            "drive 循环",
+            "spawn_scheduler"
+          ],
+          "practice_task": "在 frontend 测试模块里把 driver.rs::tests 的 EchoScheduler 改成每步 push 两个 token 的变体，断言同样 max_tokens 下 finish 提前一半步数到达；再借助 spawn_scheduler + SchedulerHandle::submit 跑一次完整回路：提交一个请求、从 take_steps() 取出的接收端读到 Scheduled 与 terminal（参考 echo-server.rs 的用法）。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "接线与路由：scheduler_pair、Engine 与 legacy EngineHandle",
+          "order": 6,
+          "filename": "u3-l6-wiring-and-handle.md",
+          "level": "intermediate",
+          "topic": "scheduler_pair 一次铸出双端接线；Engine/EngineInfo 是 step 引擎的交接包；legacy EngineHandle 按绑定 rank 或最低负载（running+4×waiting）做多分区路由。",
+          "learning_goals": [
+            "解释 scheduler_pair 两侧的通道选型：提交用 crossbeam（同步消费者）、步流用 tokio mpsc（异步消费者）、metrics 用共享单元",
+            "说出 Engine/EngineInfo/LaunchedEngine 的装配关系与 EngineInfo 两个 Option 字段的显式语义",
+            "推导 legacy EngineHandle 的路由：绑定 rank 优先、无绑定走 running + 4×waiting 最低分、越界 rank 以 Scheduled→Rejected 应答而非丢请求"
+          ],
+          "source_files": [
+            "../pegainfer-frontend/src/engine/wiring.rs",
+            "../pegainfer-frontend/src/engine/handle.rs",
+            "../pegainfer-frontend/src/engine/kv.rs"
+          ],
+          "minimal_modules": [
+            "scheduler_pair/SchedulerHandle/SchedulerBackend",
+            "MetricsPublisher/Engine/EngineInfo",
+            "EngineHandle 提交与路由"
+          ],
+          "practice_task": "复现 handle.rs 的 least-loaded 测试思路于草稿测试：用 EngineHandle::new_with_join_handles 造三个分区并挂不同 SchedulerMetrics 的 watch，提交无绑定请求断言落在分数最低（running+4×waiting）的分区；再用 KvPrefix 的 rank 语义解释 submit_resolved 里「已解析前缀绑定 rank、与调用方绑定不一致视为调用方 bug」的 debug_assert。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "单元四 · 高级：vLLM 协议栈与对外服务面",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "serve 函数族：并发加载与装配骨架",
+          "order": 1,
+          "filename": "u4-l1-serve-paths.md",
+          "level": "advanced",
+          "topic": "vllm::serve / serve_with_engine_count / serve_prefill_only_with_engine_count / serve_model_with_lora_routes 的共同骨架：预绑定 unix socket、HTTP 前端与引擎加载并发、分区数对账、shutdown 级联。",
+          "learning_goals": [
+            "列出 serve 函数族并说明 main.rs 选中每条的条件（普通、prefill-only、LoRA）",
+            "解释 serve_model_on_host_with_router_extension 的装配：预绑定 unix socket fd、bridges JoinSet、引擎失败时 server_shutdown 取消",
+            "说出引擎计数对账与 30 分钟 ready_timeout 的用意"
+          ],
+          "source_files": [
+            "../pegainfer-frontend/src/vllm/mod.rs",
+            "src/main.rs"
+          ],
+          "minimal_modules": [
+            "serve 函数族",
+            "serve_model_on_host_with_router_extension 装配",
+            "引擎任务与 shutdown 级联"
+          ],
+          "practice_task": "从 main.rs 的非 LoRA 分支出发画两条并行时间线：spawn_blocking 的引擎加载与 vllm-server 的 tokenizer/模板加载，标出二者在哪个 await 点汇合、HTTP 端口何时才算「可达即就绪」；再写出引擎加载失败时的完整取消链（engine 任务 → server_shutdown.cancel → 错误向上传播）。",
+          "depends_on": [
+            "u2-l5",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "HTTP 前端装配：Config 逐项与路由扩展链",
+          "order": 2,
+          "filename": "u4-l2-http-frontend.md",
+          "level": "advanced",
+          "topic": "serve_model_on_host_with_router_extension 里那个完整的 vllm_server::Config 逐项精读，以及 router 扩展链（mark_history → normalize_chat_requests → 用户扩展）的包裹顺序。",
+          "learning_goals": [
+            "逐项说出 Config 中与本教程相关的关键字段：TransportMode::Bootstrapped、ListenerMode::BindTcp、tool_call_parser、stream_interval、disable_log_stats",
+            "解释 load_model_backends 失败时仅告警降级（chat 请求整形关闭）的原因",
+            "描述路由扩展链的包裹顺序：最外层 normalize_chat_requests，内层 mark_history，最里层 extend_router"
+          ],
+          "source_files": [
+            "../pegainfer-frontend/src/vllm/mod.rs",
+            "../pegainfer-frontend/src/vllm/wire.rs",
+            "../pegainfer-frontend/examples/echo-server.rs"
+          ],
+          "minimal_modules": [
+            "vllm_server::Config 装配",
+            "load_model_backends 降级",
+            "路由扩展链"
+          ],
+          "practice_task": "运行 cargo run -p pegainfer-frontend --example echo-server（无 GPU），按其文件头注释的 curl 分别打 /v1/completions 与流式 /v1/chat/completions；整理一段「CLI flag → SharedArgs 字段 → Config 字段」的映射笔记（至少覆盖 --port 与 --tool-call-parser 两条链），并指出 echo 请求的 completion 文本为什么等于 prompt。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "两代引擎桥：LocalEngineBridge 与 SteppedEngineBridge",
+          "order": 3,
+          "filename": "u4-l3-engine-bridges.md",
+          "level": "advanced",
+          "topic": "引擎桥把引擎接到 vLLM EngineCore 协议（zmq）：legacy 桥把共享打标事件流 demux 并折叠成 burst 输出；stepped 桥把每个 StepOutputs 消息 1:1 翻译成 EngineCoreOutputs。",
+          "learning_goals": [
+            "解释 zmq dealer/push 双 socket 与预绑定 listener fd 的对接方式（Bootstrapped transport）",
+            "对比两代桥：legacy 把每 token 事件流 demux 并折叠成 burst 输出，stepped 把 StepOutputs 1:1 翻译成 EngineCoreOutputs",
+            "说出 stepped 桥如何把契约的单调 Instant 渲染成线上墙钟时间（每桥一个锚点）"
+          ],
+          "source_files": [
+            "../pegainfer-frontend/src/vllm/bridge.rs",
+            "../pegainfer-frontend/src/vllm/bridge/stepped.rs"
+          ],
+          "minimal_modules": [
+            "LocalEngineBridge 事件 demux",
+            "SteppedEngineBridge 1:1 翻译",
+            "BridgeLink/StatsTracker"
+          ],
+          "practice_task": "跟踪一个 token 的完整旅程并画成时序图：HTTP body → EngineCoreRequest → 桥 → SchedulerHandle::submit → 调度器 step → RequestUpdate.tokens → EngineCoreOutputs → SSE chunk；在图上并排画 legacy 与 stepped 两代桥，标注它们在「每 token 唤醒次数」与「批处理折叠位置」上的差异。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l2",
+            "u3-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "请求整形：history 边界测量与 reasoning effort 规范化",
+          "order": 4,
+          "filename": "u4-l4-request-shaping.md",
+          "level": "advanced",
+          "topic": "两个 axum 中间层：history.rs 测量会话边界（generation prompt 尾长 T、history_tokens、history_marks），reasoning_effort.rs 做 effort 别名规范化；测量结果经 vllm_xargs 与桥进入 Request。",
+          "learning_goals": [
+            "复述边界测量算法：单独渲染最后一条消息、比较带/不带 generation prompt 的 tokenization 差 T，桥侧置 history_tokens = prompt_len - T",
+            "解释 history_marks（新者在前）如何让保留多快照的调度器从更早边界恢复下一轮",
+            "说明为什么 effort 规范化要放在最外层（边界测量要读到路由真正渲染用的值）"
+          ],
+          "source_files": [
+            "../pegainfer-frontend/src/vllm/history.rs",
+            "../pegainfer-frontend/src/vllm/reasoning_effort.rs",
+            "../pegainfer-frontend/src/engine/step.rs"
+          ],
+          "minimal_modules": [
+            "Boundary/history_tokens 测量",
+            "history_marks 测量",
+            "normalize_chat_requests"
+          ],
+          "practice_task": "给 echo-server 发两轮对话（第二轮带上第一轮的 assistant 回复），依据 history.rs 的算法手工推算第二轮请求的 history_tokens 与 history_marks 序列，并对照 step.rs::Request 的字段注释核验；再解释 add_generation_prompt=false 与 continue_final_message=true 时 T=0、整个 prompt 都是 history 的含义。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "特殊服务面：prefill-only 门与 LoRA 路由",
+          "order": 5,
+          "filename": "u4-l5-special-routes.md",
+          "level": "advanced",
+          "topic": "两个非默认服务面：prefill-only 路由在 axum 层强制 max_tokens=1（否则 400）；LoRA 路由要求引擎铸造 control 通道（LoraClient 是能力本身），启动时装载列出的适配器。",
+          "learning_goals": [
+            "走查 prefill-only 门：读 body → 判 max_tokens/max_completion_tokens 恰为 1 → 改写 Content-Length 转发内层路由，否则 400",
+            "解释 LoraClient 的 Option 即能力：未铸造控制通道的引擎无法服务 LoRA 路由（serve_model_with_lora_routes 显式报错）",
+            "复述 main.rs LoRA 分支为何串行：路由构建期就需要引擎控制平面，且要求 LaunchedEngine::Stepped"
+          ],
+          "source_files": [
+            "../pegainfer-frontend/src/vllm/request_contract.rs",
+            "../pegainfer-frontend/src/vllm/lora.rs",
+            "../pegainfer-frontend/src/engine/control.rs",
+            "src/main.rs"
+          ],
+          "minimal_modules": [
+            "prefill_only_routes 校验中间层",
+            "lora_routes/openai 路由",
+            "LoraClient/LoraModule"
+          ],
+          "practice_task": "仿照 request_contract.rs 在草稿测试里用 tower::ServiceExt::oneshot 驱动一个挂了 prefill-only 门的 axum Router：对 /v1/completions 分别发 max_tokens=2（期望 400 且错误 JSON 含 invalid_request_error）与 max_tokens=1（期望透传到内层 fallback）；再写出 --enable-lora 从 CLI 到 serve_model_with_lora_routes 的完整触发链。",
+          "depends_on": [
+            "u4-l2",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l6",
+          "title": "可观测性：SchedulerMetrics 从调度器到 /metrics",
+          "order": 6,
+          "filename": "u4-l6-observability.md",
+          "level": "advanced",
+          "topic": "SchedulerMetrics 是调度器每迭代发布的自画像（KV 块占用、running/waiting、spec-decode 与 prefix-cache 累计计数），经共享单元或 watch 通道到桥的 stats，最终进入 /metrics。",
+          "learning_goals": [
+            "说出 SchedulerMetrics 各字段含义与两类累计计数器（spec_decode、prefix_cache）的语义",
+            "解释发布通道两代差异：stepped 引擎写共享单元（MetricsPublisher），legacy 引擎用 watch 通道，changed() 仅在真实变化时唤醒",
+            "论证计数器为何必须是累计值：读者只看到最新快照，无法对每步增量求和"
+          ],
+          "source_files": [
+            "../pegainfer-frontend/src/engine/metrics.rs",
+            "../pegainfer-frontend/src/engine/wiring.rs",
+            "../pegainfer-frontend/src/vllm/bridge.rs"
+          ],
+          "minimal_modules": [
+            "SchedulerMetrics/累计计数器",
+            "MetricsPublisher 与 watch 双通道",
+            "桥侧 stats 上报"
+          ],
+          "practice_task": "运行 echo-server 并 curl /metrics，尝试定位 scheduler/stats 相关输出（如找不到，对照代码说明 stepped 桥 stats 从 SchedulerHandle::metrics 而来、由上游 recorder 决定导出名）；写出一条前缀缓存命中数（prefix_cache.hits）从调度器到 /metrics 的传播路径，并解释「计数必须是累计值」在代码里的注释依据。",
+          "depends_on": [
+            "u4-l3",
+            "u3-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "单元五 · 专家：扩展、细节与二次开发",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "KV 前缀解析与请求控制细节",
+          "order": 1,
+          "filename": "u5-l1-kv-and-lifecycle.md",
+          "level": "advanced",
+          "topic": "契约边缘的三块硬骨头：KvPrefix 的不透明 RAII hold 与 rank 绑定、RequestEnvelope 的 drop 炸弹与 RequestControl abort、DeferredFinish 与 StopPolicy 的迟到终态。",
+          "learning_goals": [
+            "解释 KvPrefix 的三个成员：hit_tokens（退化解析也只是一个更小的数）、绑定 rank、drop-only 的不透明 hold",
+            "走查 RequestEnvelope 的 drop 炸弹：调度器线程消失后新提交仍能拿到 Failed 终态",
+            "区分 RequestControl 的 abort 置位路径与调度器的 retire 响应，以及 DeferredFinish 的迟到终态场景"
+          ],
+          "source_files": [
+            "../pegainfer-frontend/src/engine/kv.rs",
+            "../pegainfer-frontend/src/engine/request_lifecycle.rs",
+            "../pegainfer-frontend/src/engine/stop.rs",
+            "../pegainfer-frontend/src/engine/handle.rs"
+          ],
+          "minimal_modules": [
+            "KvPrefix/hold",
+            "RequestEnvelope/RequestControl/DeferredFinish",
+            "StopPolicy/StopCause"
+          ],
+          "practice_task": "对 echo-server 发一个 max_tokens 较大的流式请求并中途 Ctrl-C，对照代码指出：abort 状态在哪一层被置位（TokenSink 的原子状态 / stepped 契约的 ledger is_aborted）、调度器在哪个方法里 retire；再论证「已解析前缀与调用方绑定 rank 不一致」为什么是调用方 bug 而非引擎故障（提示：hold 把块钉在解析时的 rank 上）。",
+          "depends_on": [
+            "u3-l6",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "从零接入一条新模型线：完整清单",
+          "order": 2,
+          "filename": "u5-l2-onboard-new-line.md",
+          "level": "advanced",
+          "topic": "把前四单元串成一个可操作清单：在模型 crate 实现 ModelLine、在 server 注册、加 Cargo feature、补 families() 行与提示测试、写 detect_gate 式端到端测试；echo-server.rs 是全程可跑的参考。",
+          "learning_goals": [
+            "按清单复述接入步骤：实现 ModelLine → 注册进 model_lines() → Cargo feature → families() 行 + 单测 → detect_gate 式端到端测试",
+            "解释 echo-server.rs 为何是官方参考：一个不含 GPU 的完整模型线（probe + Scheduler + launch + 镜像 main 的服务流程）",
+            "说出 detect_gate.rs 的双 fixture 设计：冻结 config 来自模型 crate，tokenizer 来自 echo-model，两条路径都不触达 CUDA"
+          ],
+          "source_files": [
+            "../pegainfer-frontend/examples/echo-server.rs",
+            "src/main.rs",
+            "Cargo.toml",
+            "tests/detect_gate.rs"
+          ],
+          "minimal_modules": [
+            "EchoLine/EchoScheduler 参考实现",
+            "server 注册与 families 行",
+            "detect_gate 集成测试"
+          ],
+          "practice_task": "把 echo-server.rs 复制改造成 Reverse 线：probe 认领 model_type=reverse，调度器把 prompt 逆序逐 token 吐回（改 EchoScheduler 的出队方向），在 examples 或临时 bin 里跑起来，用 /v1/completions 验证输出顺序；随后在草稿中完成剩余清单——给 families() 加 reverse 行、写 hint 单测、仿 detect_gate.rs 写一个针对该二进制的检测门测试。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l3",
+            "u3-l5",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "设计取舍复盘：纯分发二进制与契约迁移",
+          "order": 3,
+          "filename": "u5-l3-design-tradeoffs.md",
+          "level": "advanced",
+          "topic": "复盘三个架构决定：server 只做纯分发的代价与收益、families() 作为「必要的第二真相源」的 identity-only 边界、两代引擎契约共存的迁移边界与删除条件。",
+          "learning_goals": [
+            "论证纯分发二进制的收益：server 不 import 任何模型的选项类型，新增模型线对 server 的唯一改动是注册一行",
+            "界定 feature_gate_hint 的能力边界：identity-only，无法运行被编译掉的 probe，量化变体/绑词嵌入/YaRN 也会命中提示",
+            "给出两代契约合并的判据：所有模型线迁到 step 驱动后 LaunchedEngine 可删，ServePlan::default 的扩展约定（CI 编译三条线）是防漂移手段"
+          ],
+          "source_files": [
+            "src/main.rs",
+            "../pegainfer-frontend/src/model_line.rs",
+            "../pegainfer-frontend/src/engine/mod.rs",
+            "../README.md"
+          ],
+          "minimal_modules": [
+            "server 纯分发设计",
+            "families 第二真相源",
+            "LaunchedEngine 迁移边界"
+          ],
+          "practice_task": "写一页设计笔记回答三问：(1) 若把 SharedArgs 拆进各模型 crate，注册表的哪些自检（id/拼写唯一性、consume-or-reject）会失效或变贵；(2) 一个 model_type=qwen3 的量化变体在 stock 构建下会得到什么提示、这个提示在什么意义上是「过度承诺」，依据 families() 的文档注释作答；(3) 删除 LaunchedEngine::Handle 需要哪些前提，当前 main.rs 与 vllm/mod.rs 里哪些分支会随之消失。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
