@@ -1,0 +1,823 @@
+{
+  "project": "ground3d-lmm",
+  "head": "4b2c733e5326a4607920616adf61ce8468f52395",
+  "rationale": "Ground3D-LMM 是一个基于 OpenMMLab（mmdet3d/mmengine）框架的 3D 点云接地大模型项目，由三大部分组成：SpConvUNet 稀疏点云编码器、注入点云 token 的 Qwen3-VL-4B（LoRA 微调）、Mask2Former 式 6 层查询解码器，配合 247 万 QA 对的 Ground3D 数据集。学习路线按『先跑通、再读数据、后读模型』的顺序设计：单元 1 让读者完成环境安装与一次真实推理，建立全局认知；单元 2 沿『HF 原始数据 → create_data.py 转换 → Dataset/Transform/Format 数据管线』这条真实数据流讲清数据侧；单元 3 进入 3D 侧（Grounded_LMM_main 主链路、稀疏主干、超点池化）；单元 4 是项目最核心的 LMM 侧创新（point token 注入 hook、LoRA 初始化、训练/推理两条语言分支、<SEG> 查询提取、RGB 图像分支与 Joint/3D 变体）；单元 5 覆盖解码器逐层结构与损失函数并串起完整训练流程；单元 6 覆盖三类评估指标（mIoU、APE/δ@1.25/LLM judge/GM-δ）与可视化；单元 7 面向二次开发，讲 ScanRefer/Reason3D 迁移、扩展点与架构取舍。讲义之间用 depends_on 严格串联，每篇只讲一个主题并附可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "order": 1,
+      "title": "入门：认识项目并跑起来",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 Ground3D-LMM 要解决的 8 类子任务与输入输出形式",
+            "描述 SpConvUNet → 超点池化 → Qwen3-VL + 查询解码器的数据流",
+            "区分 Joint（3D+2D）与 3D-only 两种模型变体"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "项目定位与 8 个子任务",
+            "四组件架构与 <SEG> 接地机制",
+            "模型动物园与数据集规模"
+          ],
+          "order": 1,
+          "source_files": [
+            "README.md"
+          ],
+          "title": "Ground3D-LMM 是什么：项目定位与总体架构",
+          "topic": "介绍 Ground3D-LMM 的研究目标（细粒度 3D 点接地与空间推理）、8 个子任务、2.47M QA 数据集，以及 SpConvUNet + Qwen3-VL + Mask2Former 式解码器的整体架构。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-install-and-environment.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "按 Option B 完成 mmcv 与 MinkowskiEngine 源码编译",
+            "理解 environment.yml 与 docs/INSTALL.md 各步骤的作用",
+            "确认 spconv、torch_scatter、peft 等关键依赖可用"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "conda 环境与依赖清单",
+            "mmcv 源码编译",
+            "MinkowskiEngine 源码编译",
+            "本包安装（pip install -e .）"
+          ],
+          "order": 2,
+          "source_files": [
+            "docs/INSTALL.md",
+            "environment.yml",
+            "pyproject.toml",
+            "README.md"
+          ],
+          "title": "环境搭建：OpenMMLab 栈与 MinkowskiEngine 安装",
+          "topic": "讲解 docs/INSTALL.md 的安装路径、环境锁定与常见坑（mmcv 无预编译 wheel、MinkowskiEngine 需源码编译），并安装本包。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-repo-structure-and-registry.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "画出 configs/tools/uniseg3d/docs 的职责关系图",
+            "解释 custom_imports 如何触发 uniseg3d 注册",
+            "追踪 type='Grounded_LMM_main' 到具体 Python 类的解析过程"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "目录结构与各目录职责",
+            "mmdet3d 注册表与 custom_imports",
+            "mmengine Config 继承与覆盖"
+          ],
+          "order": 3,
+          "source_files": [
+            "README.md",
+            "uniseg3d/__init__.py",
+            "configs/ground3dlmm_train.py",
+            "pyproject.toml"
+          ],
+          "title": "仓库结构与 OpenMMLab 注册机制",
+          "topic": "梳理仓库目录组织，解释 uniseg3d 包如何通过 mmdet3d registry 与 configs 中的 type 字符串关联起来。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "filename": "u1-l4-quickstart-inference.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "用 snapshot_download 拉取 checkpoint 与标注子集",
+            "通过 --cfg-options 切换 task_level/task_type/sub_task",
+            "检查 preds 目录中每个场景 JSON 的内容结构"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "tools/test.py 参数解析",
+            "eval 配置中 test_pipeline 的切换点",
+            "预测 JSON 输出结构"
+          ],
+          "order": 4,
+          "source_files": [
+            "README.md",
+            "tools/test.py",
+            "configs/ground3dlmm_eval_ground3d_scannet.py"
+          ],
+          "title": "快速上手：用预训练权重跑一次接地推理",
+          "topic": "从 HuggingFace 下载 checkpoint，用 tools/test.py 在 scale_estimation 子任务上跑一次推理，理解 --cfg-options 覆盖机制与输出文件。"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "level": "beginner",
+      "order": 2,
+      "title": "数据侧：Ground3D 数据集与数据管线",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u2-l1-dataset-structure.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "描述 processed_data 与 refined_qa_data 的目录层级",
+            "区分 part_qa、object_qa、multiturn_qa 三种 QA 层级",
+            "列出每个场景帧的四类 .npy 文件及其维度"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "HF 数据集目录布局",
+            "四类 npy（vert/sp/part/object）",
+            "QA JSON 的层级与 9 类任务名"
+          ],
+          "order": 1,
+          "source_files": [
+            "README.md",
+            "tools/part3d_glamm_data_utils.py"
+          ],
+          "title": "Ground3D 数据集结构：从 npy 到 QA JSON",
+          "topic": "讲解 HuggingFace 上 Ground3D 数据集的目录结构、每帧的 vert/sp_label/part_label/object_label 四类 npy 文件，以及 part/object/multi-turn 三层 QA 标注。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-data-conversion.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "运行 create_data.py 生成 points/ 等 bin 目录与 infos pkl",
+            "解释 _flatten_qa_data 如何把 QA JSON 变成 qa_data 字典",
+            "说明 <SEG> 标记在转换阶段如何被补齐"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "create_data.py 入口分发",
+            "Part3dGlammData 转换流程",
+            "QA 展平与 <SEG> 补齐",
+            "infos v2 更新"
+          ],
+          "order": 2,
+          "source_files": [
+            "tools/create_data.py",
+            "tools/part3d_glamm_data_utils.py",
+            "tools/update_infos_to_v2.py"
+          ],
+          "title": "数据转换：create_data.py 生成 infos.pkl",
+          "topic": "分析 tools/create_data.py 与 part3d_glamm_data_utils.py 如何把 HF 原始 .npy/.json 转成配置实际消费的 .bin 与 part3d_glamm_infos_{train,val}.pkl。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-dataset-and-loading.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "解释 parse_data_info 如何拼接 super_pts/part_mask/object_mask 路径",
+            "对比 Part3DGlamm_Dataset 与原生 ScanNetSegDataset 的差异",
+            "描述 LoadAnnotations3D_ 加载的超点与 mask 键名"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Part3DGlamm_Dataset.parse_data_info",
+            "LoadAnnotations3D_ 与 NormalizePointsColor_",
+            "data_prefix 路径映射"
+          ],
+          "order": 3,
+          "source_files": [
+            "uniseg3d/scannet_dataset.py",
+            "uniseg3d/loading.py",
+            "configs/ground3dlmm_train.py"
+          ],
+          "title": "数据集类与点云/标注加载",
+          "topic": "讲解 Part3DGlamm_Dataset 如何解析 infos.pkl，以及 LoadAnnotations3D_、NormalizePointsColor_ 等 transform 如何读取点云、超点标签与部件/物体 mask。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-qa-generation-transform.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "跟踪 flatten_qa_data 对三种 QA 层级的展平逻辑",
+            "解释 <p>...</p> 数量如何决定 sp_gt_seg 的形状",
+            "说明 ElasticTransfrom 与 AddSuperPointAnnotations_Part3DGlamm 的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "QA_Generation_v2 展平与采样",
+            "get_seg_from_single_qa 与 <p> 标签计数",
+            "AddSuperPointAnnotations_Part3DGlamm",
+            "ElasticTransfrom 弹性增强"
+          ],
+          "order": 4,
+          "source_files": [
+            "uniseg3d/transforms_3d.py",
+            "uniseg3d/prompt_template.py"
+          ],
+          "title": "QA 采样与超点标注生成（QA_Generation_v2）",
+          "topic": "深入 QA_Generation_v2：如何把嵌套 QA 数据展平采样、根据答案中的 <p> 标签构造超点级 GT 分割，以及 ElasticTransfrom 等增强。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u2-l5-formatting-and-preprocess.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "列出 Pack3DDetInputs_Part_Glamm 打包的每个键",
+            "追踪 selected_qa_data 从 transform 到 decoder 的传递路径",
+            "解释 Det3DDataPreprocessor_ 与基类的差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Pack3DDetInputs_Part_Glamm 键收集",
+            "Det3DDataPreprocessor_",
+            "batch_inputs_dict 结构"
+          ],
+          "order": 5,
+          "source_files": [
+            "uniseg3d/formatting.py",
+            "uniseg3d/data_preprocessor.py",
+            "configs/ground3dlmm_train.py"
+          ],
+          "title": "打包与预处理：从 pipeline 到 batch_inputs_dict",
+          "topic": "讲解 Pack3DDetInputs_Part_Glamm 如何把 points、sp_pts_mask、selected_qa_data、scene_name 等键打包进 data sample，最终成为模型收到的 batch_inputs_dict。"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "order": 3,
+      "title": "3D 侧：主模型、稀疏主干与超点池化",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4",
+            "u2-l5"
+          ],
+          "filename": "u3-l1-model-entry-grounded-lmm-main.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "说明 __init__ 中 unet/decoder/criterion 三大组件的构建方式",
+            "复述 loss() 中 batch_offsets 与超点偏移的对齐算法",
+            "对比 loss() 与 predict() 的共用主干与差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "__init__ 组件构建",
+            "loss() 前向链路",
+            "predict() 与 mask dump"
+          ],
+          "order": 1,
+          "source_files": [
+            "uniseg3d/uniseg3d.py",
+            "configs/ground3dlmm_train.py"
+          ],
+          "topic": "解读模型入口类 Grounded_LMM_main 的组件构建、loss() 与 predict() 两条前向链路，重点是多场景超点拼接的 batch_offsets 机制。",
+          "title": "模型主入口 Grounded_LMM_main：init/loss/predict"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-spconv-unet-backbone.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "解释 ResidualBlock 的 pre-norm 设计与 indice_key 复用",
+            "画出 num_planes=[32,64,96,128,160] 的 U-Net 结构图",
+            "说明 return_blocks=True 时多尺度输出的组织方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ResidualBlock 稀疏残差块",
+            "递归 U-Net 下采样/上采样",
+            "SparseConvTensor 基本概念"
+          ],
+          "order": 2,
+          "source_files": [
+            "uniseg3d/spconv_unet.py",
+            "uniseg3d/uniseg3d.py"
+          ],
+          "title": "稀疏卷积主干 SpConvUNet",
+          "topic": "逐层解读 spconv 实现的稀疏 U-Net：ResidualBlock、下采样/上采样、return_blocks 多尺度返回，及其在 extract_feat 中的调用方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-superpoint-pooling.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "解释 MinkowskiEngine TensorField 量化与 inverse_mapping 的作用",
+            "推导 scatter_mean 后 (M, d) 超点特征的形成过程",
+            "说明训练时 elastic_coords 如何改变坐标量化"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "collate 稀疏批组装",
+            "extract_feat 中的 scatter_mean 超点池化",
+            "超点质心 point_positions 计算"
+          ],
+          "order": 3,
+          "source_files": [
+            "uniseg3d/uniseg3d.py",
+            "uniseg3d/transforms_3d.py"
+          ],
+          "title": "超点池化：collate、scatter_mean 与特征组织",
+          "topic": "讲解 collate() 如何把 batch 点云组装成稀疏张量、extract_feat() 如何用 scatter_mean 把逐点特征池化成逐超点特征，以及超点质心的计算。"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "level": "advanced",
+      "order": 4,
+      "title": "LMM 侧：点云 token 注入与语言推理",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u4-l1-point-qwen3-vl.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "解释 forward pre-hook 修改 inputs_embeds 的原理",
+            "说明 point_mask 与 point_token_id 的对应关系",
+            "对比 point_qwen3_vl 与 point_qwen2_5_vl 的实现差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "add_point_embedding 前向钩子",
+            "<|point|> 特殊 token 注册与词表扩容",
+            "PointQwen3VLForConditionalGeneration 注册"
+          ],
+          "order": 1,
+          "source_files": [
+            "uniseg3d/point_qwen3_vl.py",
+            "uniseg3d/point_qwen2_5_vl.py"
+          ],
+          "title": "点云 token 注入：PointQwen3VL 的实现技巧",
+          "topic": "解读 point_qwen3_vl.py 如何通过 forward pre-hook 把超点嵌入 masked_scatter 到 <|point|> token 位置，从而让 Qwen3-VL 接收 3D 特征。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u4-l2-decoder-init-and-lora.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "说明 point2token/query_proj 的维度变换（256 ↔ hidden_size）",
+            "解释 get_target_modules 按 lora_type 筛选注入层",
+            "统计 LoRA 可训练参数占比"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "point2token / query_proj 投影层",
+            "_init_reason_model 与特殊 token 词表扩容",
+            "LoRA 注入与可训练参数统计",
+            "FPS/位置 FPS 聚合器"
+          ],
+          "order": 2,
+          "source_files": [
+            "uniseg3d/query_decoder.py",
+            "configs/ground3dlmm_train.py"
+          ],
+          "title": "Grounded_Decoder_Joint 初始化与 LoRA 配置",
+          "topic": "分析解码器 __init__ 中的 point2token、query_proj 投影层，_init_reason_model 的词表扩容与 LoRA 注入（get_peft_model），以及 FPS 聚合器。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1",
+            "u4-l2"
+          ],
+          "filename": "u4-l3-infer-reason-train.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "复述 messages 组装与 apply_chat_template 的产物",
+            "解释 point_mask = input_ids == point_token_id 的对齐逻辑",
+            "说明语言损失如何只计算在 assistant 回复上"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "多轮 messages 构造",
+            "processor 编码与 point_embeds 附加",
+            "preprocess_chatml 标签构造与语言损失",
+            "超点数超限时 FPS 聚合降采样"
+          ],
+          "order": 3,
+          "source_files": [
+            "uniseg3d/query_decoder.py",
+            "uniseg3d/transforms_3d.py"
+          ],
+          "title": "训练分支 infer_reason_train：构造多轮对话与标签",
+          "topic": "跟踪训练时语言分支：把 QA 对组织成 chat messages、编码成 input_ids、用 preprocess_chatml 生成仅在 assistant 回复上计算的 labels。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u4-l4-seg-query-extraction.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "解释 get_query_tokens 如何按 assistant 回复切分 token 区间",
+            "说明 <SEG> 隐状态如何变成 query_proj 后的分割查询",
+            "理解无效/NaN 查询的兜底处理"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "get_query_tokens / get_query_tokens_id 训练版",
+            "get_query_tokens_eval 推理版",
+            "query_proj 与空查询 NaN 处理"
+          ],
+          "order": 4,
+          "source_files": [
+            "uniseg3d/query_decoder.py"
+          ],
+          "title": "<SEG> 查询提取：从隐状态到分割查询",
+          "topic": "讲解 get_query_tokens 系列方法如何从最后一层隐状态中按 QA 轮次抽取 <SEG> 位置的向量，作为后续分割解码器的查询。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "filename": "u4-l5-infer-reason-eval.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "说明 generate 与二次前向两步各自的作用",
+            "解释单轮与多轮 QA 的处理差异",
+            "定位 save_pred_qa_dir 输出 JSON 的写出位置"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "generate 解码与重复惩罚设置",
+            "二次前向取隐状态",
+            "单轮/多轮 QA 处理与预测 JSON 写出"
+          ],
+          "order": 5,
+          "source_files": [
+            "uniseg3d/query_decoder.py",
+            "configs/ground3dlmm_eval_ground3d_scannet.py"
+          ],
+          "title": "推理分支 infer_reason_eval：生成回答并提取查询",
+          "topic": "跟踪推理时语言分支：_generate_response 生成文本、二次前向取隐状态、单轮/多轮 QA 的差异化处理与预测 JSON 写盘。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l5"
+          ],
+          "filename": "u4-l6-image-branch-joint-vs-3d.md",
+          "id": "u4-l6",
+          "learning_goals": [
+            "解释 message 中 image 条目如何被编码进 Qwen3-VL",
+            "说明 3D-only 配置如何通过过滤 image 条目实现无图推理",
+            "用 build_frame_images.py 从 infos pkl 抽取所需帧"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "消息中的 image 条目与 max_pixels 约束",
+            "_prepare_messages_data 的空图过滤",
+            "joint 与 _3d 配置的三字段差异",
+            "帧图像抽取工具"
+          ],
+          "order": 6,
+          "source_files": [
+            "uniseg3d/query_decoder.py",
+            "configs/ground3dlmm_eval_ground3d_scannet_3d.py",
+            "configs/ground3dlmm_eval_ground3d_scannet.py",
+            "tools/build_frame_images.py",
+            "docs/DATA_IMAGES.md"
+          ],
+          "title": "2D 图像分支：Joint 与 3D-only 两种变体",
+          "topic": "讲解 Joint 变体如何在 QA 消息中加入 RGB 帧、帧图像如何准备，以及 3D-only 配置如何仅覆盖 image_dir 等字段去掉图像输入。"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "level": "advanced",
+      "order": 5,
+      "title": "分割解码与训练全流程",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "filename": "u5-l1-mask2former-decoder-layers.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "说明 Cross/Self Attention 与 FFN 三件套的堆叠方式",
+            "解释 attn_mask 与 interaction_masks 的屏蔽语义",
+            "对比训练（整 batch 查询）与推理（逐 QA 查询）两条循环"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "CrossAttentionLayer / SelfAttentionLayer / FFN",
+            "_forward_head 的 mask 打分",
+            "forward_iter_pred 训练/推理双路径"
+          ],
+          "order": 1,
+          "source_files": [
+            "uniseg3d/query_decoder.py"
+          ],
+          "title": "Mask2Former 式查询解码器：逐层前向",
+          "topic": "解读解码器的 Cross-Attn → Self-Attn → FFN 六层堆叠、masked attention、_forward_head 的 mask 预测，以及训练/推理两条 forward_iter_pred 路径。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-losses.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "说明语言损失与分割损失如何加权合并",
+            "解释 TextPrompt_Criterion_Glamm 的 BCE/Dice 组合",
+            "追踪 sp_gt_masks 从数据管线到 criterion 的形状"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Part3dGlammCriterion_v2 组合",
+            "TextPrompt_Criterion_Glamm 分割损失",
+            "CoTCriterion 语言损失"
+          ],
+          "order": 2,
+          "source_files": [
+            "uniseg3d/unified_criterion.py",
+            "uniseg3d/text_prompt_instance_criterion.py",
+            "uniseg3d/cot_criterion.py"
+          ],
+          "title": "损失函数：语言损失 + 分割损失",
+          "topic": "分析 Part3dGlammCriterion_v2 如何组合 TextPrompt_Criterion_Glamm（mask BCE/Dice）与 CoTCriterion（语言建模损失）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-training-config-and-launch.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "解释 ConcatDataset 双数据源与 paramwise 差异学习率",
+            "说明 load_from 的 sstnet_scannet.pth 主干预训练来源",
+            "用 train.sh 在多卡上发起一次训练"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "配置字段与调参表",
+            "分布式启动与 lr 分层",
+            "预训练权重加载"
+          ],
+          "order": 3,
+          "source_files": [
+            "configs/ground3dlmm_train.py",
+            "tools/train.py",
+            "train.sh"
+          ],
+          "title": "训练配置与启动：train.sh 背后发生了什么",
+          "topic": "逐项讲解 ground3dlmm_train.py 的训练配置（双数据集 Concat、paramwise 学习率、load_from 主干初始化）与 train.sh/tools/train.py 的 Runner 启动流程。"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "level": "intermediate",
+      "order": 6,
+      "title": "评估与可视化",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u6-l1-seg-metric.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "解释 qa_pred_masks 与 qa_gt_masks 的多轮对齐规则",
+            "推导 get_iou 在多维 mask 上的逐实例计算",
+            "说明 existence_verification 无 mask 样本的排除逻辑"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "get_iou 计算",
+            "Part3DGlamm_SegMetric.process/compute",
+            "超点级到点级 mask 的映射"
+          ],
+          "order": 1,
+          "source_files": [
+            "uniseg3d/unified_metric.py",
+            "uniseg3d/uniseg3d.py"
+          ],
+          "title": "分割指标 Part3DGlamm_SegMetric：mIoU 怎么算",
+          "topic": "讲解 Part3DGlamm_SegMetric 如何对每个 QA 的预测/GT mask 计算 IoU 并聚合 mIoU，以及 qa_predict_by_feat 中的 GT 对齐逻辑。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4",
+            "u6-l1"
+          ],
+          "filename": "u6-l2-eval-launcher-and-configs.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "解释 probe_lora_rank 如何避免权重静默失载",
+            "说明 _3d 配置继承仅覆盖三个字段的精简设计",
+            "用 --levels/--sub_tasks 控制评估范围"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "eval_ground3d.sh 参数与流程",
+            "LoRA rank 探测与变体选择",
+            "配置继承体系（joint/_3d/scannetpp）"
+          ],
+          "order": 2,
+          "source_files": [
+            "eval_ground3d.sh",
+            "configs/ground3dlmm_eval_ground3d_scannet.py",
+            "configs/ground3dlmm_eval_ground3d_scannet_3d.py",
+            "configs/ground3dlmm_eval_ground3d_scannetpp.py"
+          ],
+          "title": "评估启动器 eval_ground3d.sh 与配置族",
+          "topic": "解读统一评估脚本的参数体系、基于 checkpoint LoRA rank 的变体自动探测，以及 scannet/scannetpp/joint/_3d 四个评估配置的差异。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l3-text-metrics.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "推导 APE 与 δ@1.25 的计算规则（含缺失预测罚 0）",
+            "说明 GM-δ 如何同时要求 mask IoU 与数值精度",
+            "解释 judge 阶段的提示构造与打分含义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "任务感知的递归展平",
+            "ape 阶段：LLM 数字抽取 + APE/δ",
+            "judge 阶段：幻觉与完整性",
+            "gmdelta 阶段：IoU 与 δ 联合"
+          ],
+          "order": 3,
+          "source_files": [
+            "tools/evaluate_text_metrics.py"
+          ],
+          "title": "文本指标：APE、δ@1.25、LLM judge 与 GM-δ",
+          "topic": "分析 tools/evaluate_text_metrics.py 的 ape/judge/gmdelta 三个阶段：LLM 数字抽取、数值误差指标、VL judge 打分与 IoU+δ 联合判定。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l4-grounding-visualization.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "说明 MASK_DUMP_DIR 与 save_viz_dir 两种开关",
+            "解释每个 <SEG> 到一种颜色的映射规则",
+            "区分 combine 与 per_qa 两种 ply 输出模式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "mask dump 开关",
+            "export_grounding_ply 的 combine/per_qa 模式",
+            "grounding_viz 写 ply"
+          ],
+          "order": 4,
+          "source_files": [
+            "tools/export_grounding_ply.py",
+            "uniseg3d/grounding_viz.py",
+            "uniseg3d/uniseg3d.py"
+          ],
+          "topic": "讲解如何 dump 预测 mask 并用 export_grounding_ply.py/grounding_viz.py 把 <SEG> 接地结果染成红/绿/N 色点云 PLY。",
+          "title": "接地可视化：导出彩色 PLY 点云"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "level": "advanced",
+      "order": 7,
+      "title": "进阶：迁移基准、扩展与架构取舍",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u7-l1-scanrefer-reason3d.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "说明 scanrefer/reason3d 标注到 infos pkl 的转换链",
+            "理解 build_scene_images.py 如何准备 20 视角图像",
+            "区分 3D 与 3D+2D 两套 eval 配置的差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "两个基准的数据准备脚本",
+            "20 视图图像构建",
+            "四个迁移评估配置与 mIoU 基线"
+          ],
+          "order": 1,
+          "source_files": [
+            "docs/DATA_SCANREFER_REASON3D.md",
+            "tools/create_data_scanrefer.py",
+            "tools/create_data_reason3d.py",
+            "tools/build_scene_images.py",
+            "configs/ground3dlmm_eval_scanrefer.py",
+            "configs/ground3dlmm_eval_reason3d.py"
+          ],
+          "title": "迁移基准：ScanRefer 与 Reason3D 的微调评估",
+          "topic": "讲解 Ground3D-LMM 如何迁移到 ScanRefer/Reason3D 基准：专用数据转换脚本、20 视图图像准备与四套评估配置。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l3",
+            "u7-l1"
+          ],
+          "filename": "u7-l2-extending-the-project.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "列出新增子任务时数据、transform、评估三处的改动点",
+            "说明新增数据集需要实现的 Dataset/Transform/Converter",
+            "评估替换 LLM 底座（qwen2_5_vl 路径）的可行性"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "新增子任务的改动链",
+            "新增数据集的三件套",
+            "更换 LLM 底座（base_model 分支）",
+            "LoRA/聚合器的调参入口"
+          ],
+          "order": 2,
+          "source_files": [
+            "uniseg3d/transforms_3d.py",
+            "uniseg3d/query_decoder.py",
+            "tools/create_data.py",
+            "configs/ground3dlmm_train.py"
+          ],
+          "title": "二次开发：新增子任务、数据集与替换底座",
+          "topic": "总结项目的扩展点：新增 QA 子任务、接入新数据集、更换/升级 LMM 底座（base_model 分支）、调整 LoRA 与点 token 预算。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "filename": "u7-l3-architecture-tradeoffs.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "论证超点池化相对逐点 token 的效率优势",
+            "分析一次生成 + 二次前向取隐状态的代价与动机",
+            "评价 Joint 与 3D-only 变体的精度/成本权衡"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "超点 vs 逐点 token 的取舍",
+            "<SEG> 查询机制 vs 专用分割头",
+            "joint vs 3D-only 权衡",
+            "与 UniSeg3D/Mask2Former 的继承关系"
+          ],
+          "order": 3,
+          "source_files": [
+            "README.md",
+            "uniseg3d/query_decoder.py",
+            "uniseg3d/uniseg3d.py",
+            "uniseg3d/point_qwen3_vl.py"
+          ],
+          "title": "架构取舍与总结：设计决策回顾",
+          "topic": "回顾关键设计取舍：超点 token 化的效率、<SEG> 隐状态复用为分割查询、LoRA 而非全参微调、生成后再前向的精度考量，并与 UniSeg3D/Mask2Former 对比。"
+        }
+      ]
+    }
+  ]
+}
