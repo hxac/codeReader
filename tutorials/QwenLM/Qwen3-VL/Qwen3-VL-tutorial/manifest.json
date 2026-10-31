@@ -1,0 +1,973 @@
+{
+  "head": "96588727e44c78b25ba03ea03b8e12f7e64fd0da",
+  "project": "Qwen3-VL",
+  "rationale": "本仓库是 Qwen3-VL 多模态大模型的官方工程仓库，由四个相对独立的子项目组成：qwen-vl-utils（视觉输入预处理库）、qwen-vl-finetune（SFT 微调框架）、evaluation（基准评测脚手架）与 cookbooks（能力示例笔记本），模型结构代码本身位于 transformers 库中而不在本仓库。因此学习路线设计为：第一单元先让读者从零跑通推理并摸清仓库地图；第二、三单元沿“输入预处理→processor→vLLM 部署”这条所有上层应用共用的调用链推进，其中 qwen-vl-utils 的 smart_resize/帧采样/视频 metadata 是理解 Qwen3-VL 像素预算与时间戳机制的钥匙；第四、五单元进入微调体系，按“数据格式→数据集注册→打包→训练主流程→参数→标签构造→MRoPE 位置编码（rope2d.py 是本仓库中最接近模型内部机制的源码）→拼批 collator→FlashAttention varlen 补丁→LoRA 与分层学习率→DeepSpeed 分布式”的依赖顺序递进拆解源码；第六单元以 mmmu/VideoMME/ODinW-13 三个结构同构的评测目录讲解 run/dataset_utils/eval_utils 三件套模式并实战复现；第七单元面向二次开发，覆盖 cookbooks 能力矩阵、GUI Agent 工具注册（qwen_agent BaseTool 扩展）、2D/3D grounding 坐标体系，最后以“自定义数据集微调端到端闭环”收束全手册。讲义间依赖构成 DAG，先跑通再读码、读完码即实践，每篇均锚定真实源码文件与一个可操作任务。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 Qwen3-VL 的模型家族构成与命名规则",
+            "列举 Interleaved-MRoPE、DeepStack、文本-时间戳对齐三大架构更新的作用",
+            "理解本仓库只包含工程代码、模型实现位于 transformers 中的事实"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "项目定位与模型家族",
+            "核心能力清单",
+            "三大架构更新",
+            "Instruct 与 Thinking 版本差异"
+          ],
+          "order": 1,
+          "practice_task": "安装 transformers>=4.57.0，用 Qwen/Qwen3-VL-2B-Instruct 跑通 README Quickstart 中的最小图像对话示例，把生成文本与使用的模型规格记录到一个 notes.md 中。",
+          "source_files": [
+            "README.md"
+          ],
+          "title": "项目总览：Qwen3-VL 是什么、模型家族与架构更新",
+          "topic": "介绍 Qwen3-VL 的定位、Dense/MoE 与 Instruct/Thinking 模型家族、核心能力，以及 Interleaved-MRoPE、DeepStack、文本-时间戳对齐三大架构更新。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-repo-structure.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "说出仓库四大子项目的职责边界",
+            "找到每个子项目的入口文件或说明文档",
+            "判断一个新需求应该改哪个子项目"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "根目录文件",
+            "qwen-vl-utils 子项目",
+            "qwen-vl-finetune 子项目",
+            "evaluation 与 cookbooks 子项目"
+          ],
+          "order": 2,
+          "practice_task": "在本地画出仓库两级目录树，为每个子项目写一句中文定位说明；确认 pip install -e ./qwen-vl-utils 后能在 Python 中 import qwen_vl_utils 并打印其版本。",
+          "source_files": [
+            "README.md",
+            "qwen-vl-finetune/README.md",
+            "qwen-vl-utils/README.md"
+          ],
+          "title": "仓库结构与四大子项目地图",
+          "topic": "讲解仓库目录组织：qwen-vl-utils、qwen-vl-finetune、evaluation、cookbooks 各自的定位、入口文件和相互关系。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-first-inference.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "掌握 messages 内容列表的 image/text/video 三种元素写法",
+            "理解 apply_chat_template 到 model.generate 到 batch_decode 的完整调用链",
+            "会裁剪 generated_ids 去掉输入部分"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "messages 结构",
+            "apply_chat_template",
+            "generate 与输出裁剪",
+            "多图与视频输入"
+          ],
+          "order": 3,
+          "practice_task": "编写一个 infer.py：分别对单图、两张图、一个视频执行推理（统一使用 2B 小模型与 dtype=auto），打印每种的输入 token 数与输出文本。",
+          "source_files": [
+            "README.md",
+            "qwen-vl-utils/src/qwen_vl_utils/__init__.py"
+          ],
+          "title": "第一次推理：单图、多图与视频",
+          "topic": "基于 transformers 的 AutoModelForImageTextToText 与 AutoProcessor 跑通图像、多图、视频三种输入的推理，理解 messages 结构与生成输出裁剪。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-web-demo.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "理解 web_demo_mm.py 的参数与双后端设计",
+            "掌握会话历史到 messages 的重组逻辑",
+            "会用官方 Docker 镜像一键起服务"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "命令行参数",
+            "模型加载双后端",
+            "Gradio 界面与流式输出",
+            "Docker 部署"
+          ],
+          "order": 4,
+          "practice_task": "用 --backend hf 启动 web_demo_mm.py 并完成一次上传图片提问；然后阅读 _get_args，写出用 vllm 后端、指定 tensor-parallel-size 为 1 的完整启动命令并记录到笔记。",
+          "source_files": [
+            "web_demo_mm.py",
+            "requirements_web_demo.txt",
+            "docker/docker_web_demo.sh"
+          ],
+          "title": "Web Demo 与 Docker 部署",
+          "topic": "解读 web_demo_mm.py：hf 与 vllm 双后端加载、Gradio 交互流程、流式输出线程，以及官方 Docker 镜像启动方式。"
+        }
+      ],
+      "order": 1,
+      "title": "单元一：初识 Qwen3-VL 与环境搭建"
+    },
+    {
+      "id": "u2",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l1-utils-overview.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "理解 process_vision_info 的输入输出契约",
+            "掌握 image_patch_size 从 14 到 16 的代际差异",
+            "理解 return_video_kwargs 与 return_video_metadata 两个开关的作用"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "extract_vision_info",
+            "process_vision_info",
+            "返回值与 kwargs",
+            "版本兼容策略"
+          ],
+          "order": 1,
+          "practice_task": "构造包含 1 张图和 1 个视频的 messages，分别以 image_patch_size=14 和 16 调用 process_vision_info，打印两次返回的图像尺寸并解释差异。",
+          "source_files": [
+            "qwen-vl-utils/src/qwen_vl_utils/vision_process.py",
+            "qwen-vl-utils/src/qwen_vl_utils/__init__.py",
+            "qwen-vl-utils/README.md"
+          ],
+          "title": "qwen-vl-utils 总览与 process_vision_info 主流程",
+          "topic": "从 extract_vision_info 到 process_vision_info 讲清 qwen-vl-utils 的整体数据流，以及 Qwen3-VL 相比 Qwen2.5-VL 新增的 image_patch_size 与 return_video_metadata 机制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-image-pipeline.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "实现 round/ceil/floor_by_factor 与 smart_resize 的等价逻辑",
+            "理解 min_pixels/max_pixels 与视觉 token 数的换算（32 倍空间压缩）",
+            "掌握 resized_height/resized_width 精确控制方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "对齐取整函数",
+            "smart_resize 约束条件",
+            "像素与 token 预算换算",
+            "resized_height/width 直控"
+          ],
+          "order": 2,
+          "practice_task": "对同一张图分别设置 min_pixels=max_pixels=256*32*32、1280*32*32 两档，验证 fetch_image 输出的宽高都是 32 的倍数，并按公式 (H/32)*(W/32) 手算视觉 token 数与实际一致。",
+          "source_files": [
+            "qwen-vl-utils/src/qwen_vl_utils/vision_process.py",
+            "README.md"
+          ],
+          "title": "图像链路：fetch_image 与 smart_resize 像素预算",
+          "topic": "精读 fetch_image 与 smart_resize：多种图像来源（本地/URL/base64/PIL）、对齐取整函数、像素预算约束与长宽比保持算法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l3-video-pipeline.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "手算给定 fps 与时长下的 nframes",
+            "理解 total_pixels 与 max_pixels 联合限制单帧分辨率的逻辑",
+            "会用 FORCE_QWENVL_VIDEO_READER 切换解码后端"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "smart_nframes 帧数计算",
+            "三种解码后端实现",
+            "total_pixels 帧分辨率限制",
+            "帧列表输入路径"
+          ],
+          "order": 3,
+          "practice_task": "下载一个本地 mp4，分别设置 FORCE_QWENVL_VIDEO_READER 为 torchvision/decord/torchcodec（可用则装）调用 fetch_video，记录每次的帧数、分辨率与耗时；再用 fps=1 与 fps=4 各跑一次，验证帧数符合 smart_nframes 公式。",
+          "source_files": [
+            "qwen-vl-utils/src/qwen_vl_utils/vision_process.py",
+            "README.md"
+          ],
+          "title": "视频链路：fetch_video、smart_nframes 与三种解码后端",
+          "topic": "精读 fetch_video：smart_nframes 帧数采样公式、torchvision/decord/torchcodec 三种解码后端的选择与回退、total_pixels 总预算对单帧分辨率的约束。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-video-metadata.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "理解 video_metadata 中各字段的时间语义",
+            "解释 Qwen3-VL 用时间戳替代 T-RoPE 绝对时间位置的设计",
+            "会用 sample_fps 与帧列表构造带时间信息的视频输入"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "video_metadata 结构",
+            "时间戳编码机制",
+            "帧列表元数据合成",
+            "video_kwargs 传递"
+          ],
+          "order": 4,
+          "practice_task": "调用 fetch_video(ele, return_video_metadata=True, return_video_sample_fps=True)，打印 metadata 的 fps、frames_indices、total_num_frames 字段；再传入 4 帧图片列表 + sample_fps=1，观察合成 metadata 的 total_num_frames 并解释其含义。",
+          "source_files": [
+            "qwen-vl-utils/src/qwen_vl_utils/vision_process.py",
+            "README.md"
+          ],
+          "title": "video metadata 与 Qwen3-VL 时间戳对齐机制",
+          "topic": "讲解 return_video_metadata 返回的 fps/frames_indices/total_num_frames 如何支撑 Qwen3-VL 的文本-时间戳对齐，以及帧列表输入时的合成 metadata。"
+        }
+      ],
+      "order": 2,
+      "title": "单元二：多模态输入处理源码（qwen-vl-utils）"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u3-l1-processor-deep-dive.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "读懂 chat template 渲染后的完整提示串",
+            "通过 processor.image_processor.size/video_processor.size 控制视觉 token 预算",
+            "掌握 batch 推理的 padding_side 设置"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "apply_chat_template 两种模式",
+            "size 预算参数",
+            "add_vision_id",
+            "batch 推理与左填充"
+          ],
+          "order": 1,
+          "practice_task": "对同一组 messages 分别执行 tokenize=False 与 tokenize=True，对照观察 <|vision_start|>/<|image_pad|> 等特殊 token；再把 processor.image_processor.size 设为 longest_edge=1280*32*32、shortest_edge=256*32*32，统计 input_ids 长度变化并写入笔记。",
+          "source_files": [
+            "README.md",
+            "web_demo_mm.py"
+          ],
+          "title": "深入 processor：chat template、像素预算与 add_vision_id",
+          "topic": "深入 AutoProcessor 的使用：chat template 渲染、image_processor/video_processor 分离的 size 预算语义、add_vision_id 多图编号与 batch 推理的 padding 细节。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u2-l4"
+          ],
+          "filename": "u3-l2-vllm-offline.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "独立实现 prepare_inputs_for_vllm 函数",
+            "理解 prompt/multi_modal_data/mm_processor_kwargs 三个字段的作用",
+            "掌握 video 与 video_metadata 的解包与传参"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "输入准备函数",
+            "多模态数据字典",
+            "video_metadata 解包",
+            "SamplingParams 设置"
+          ],
+          "order": 2,
+          "practice_task": "参照 web_demo_mm.py 与 README 的 vLLM 示例，编写批量离线推理脚本：对 2 张图 + 1 个视频各生成一次结果，正确传入 do_sample_frames 与 video_metadata。",
+          "source_files": [
+            "web_demo_mm.py",
+            "README.md"
+          ],
+          "title": "vLLM 离线推理与 prepare_inputs_for_vllm 模式",
+          "topic": "提炼仓库中反复出现的 prepare_inputs_for_vllm 模式：process_vision_info 预处理、multi_modal_data 组装、mm_processor_kwargs 传参与 LLM.generate 离线批量推理。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-online-serving.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "掌握 vllm serve 的多模态关键参数",
+            "会用 OpenAI SDK 发送 image_url/video_url 请求",
+            "通过 extra_body 控制视频采样"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "vLLM server 启动参数",
+            "SGLang server",
+            "OpenAI 兼容请求",
+            "视频采样控制"
+          ],
+          "order": 3,
+          "practice_task": "用小模型启动 vllm serve（如 Qwen3-VL-2B-Instruct），分别用 OpenAI SDK 发送图像与视频请求；再用 extra_body={\"mm_processor_kwargs\": {\"fps\": 4}} 观察视频请求行为变化并记录。",
+          "source_files": [
+            "README.md",
+            "docker/Dockerfile-qwen3vl-cu128"
+          ],
+          "title": "vLLM/SGLang 在线服务部署",
+          "topic": "讲解 vllm serve 与 SGLang 两种在线服务方式的启动参数（tensor-parallel、mm-encoder-tp-mode、media-io-kwargs）以及 OpenAI 风格 API 的图像/视频请求写法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l4-long-context-yarn.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "写出 1M 上下文的 rope_scaling 配置",
+            "解释 Interleaved-MRoPE 下 factor 取 2-3 而非 4 的原因",
+            "会启用 flash_attention_2 加速推理"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "YaRN 原理与配置",
+            "mrope_interleaved 与 scaling factor",
+            "vLLM 长上下文参数",
+            "FlashAttention-2"
+          ],
+          "order": 4,
+          "practice_task": "为一个本地下载的 Qwen3-VL 模型目录编写 1M 上下文的 config.json 修改脚本（max_position_embeddings、rope_scaling、mrope_interleaved），并写出对应的 vllm serve --rope-scaling 启动命令。",
+          "source_files": [
+            "README.md"
+          ],
+          "title": "长上下文 YaRN 与 FlashAttention 加速",
+          "topic": "讲解 256K 原生上下文扩展到 1M 的 YaRN 配置：rope_scaling 字段、Interleaved-MRoPE 下 factor 的取值原则，以及 flash_attention_2 的启用方式。"
+        }
+      ],
+      "order": 3,
+      "title": "单元三：推理进阶与生产部署"
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u4-l1-finetune-overview.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "说出 qwenvl 包内各模块职责",
+            "理解 tools 目录三个工具的用途",
+            "按 README 搭好可训练的依赖版本组合"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "目录结构",
+            "依赖版本清单",
+            "工具脚本",
+            "模型支持范围"
+          ],
+          "order": 1,
+          "practice_task": "按 README 的 Requirements 清单安装 torch/transformers/deepspeed/flash_attn/peft 等依赖并打印各版本；对照目录结构写出 qwenvl 包的模块依赖图。",
+          "source_files": [
+            "qwen-vl-finetune/README.md",
+            "qwen-vl-finetune/qwenvl/train/train_qwen.py"
+          ],
+          "title": "微调框架总览：目录、依赖与训练流程",
+          "topic": "介绍 qwen-vl-finetune 的整体结构：train/、data/、tools/、scripts/ 各目录职责，支持的模型代际（Qwen2-VL/2.5-VL/3-VL 及 MoE）与依赖版本要求。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-data-format.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "独立编写符合规范的训练样本 JSON",
+            "理解 image/video 字段的单值与列表两种写法",
+            "掌握 grounding 样本的 bbox JSON 标注格式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "单图样本",
+            "多图样本",
+            "视频样本",
+            "grounding 样本与 packed 样本"
+          ],
+          "order": 2,
+          "practice_task": "选 5 张自己的图片各写一句问答，按 single_images.json 的格式制作 my_dataset.json；用 check_image.py（或手写校验脚本）确认所有图片路径可访问、占位符数量与图片数量一致。",
+          "source_files": [
+            "qwen-vl-finetune/README.md",
+            "qwen-vl-finetune/demo/single_images.json",
+            "qwen-vl-finetune/demo/video.json"
+          ],
+          "title": "训练数据格式精读：conversations 与 <image>/<video> 占位符",
+          "topic": "精读微调数据格式：image/video 路径字段、human/gpt 对话结构、<image>/<video> 占位符匹配规则，以及 grounding 与 packed 数据示例。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-dataset-registry.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "理解 annotation_path 与 data_path 的分工",
+            "实现自定义数据集注册",
+            "掌握 %X 采样率语法"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "数据集字典",
+            "data_list 解析",
+            "sampling_rate 语法",
+            "LazySupervisedDataset 加载"
+          ],
+          "order": 3,
+          "practice_task": "在 data/__init__.py 中注册 MY_DATASET（指向上一讲制作的 my_dataset.json），运行 data_list([\"my_dataset%50\"]) 验证 sampling_rate 解析，再实例化 LazySupervisedDataset 观察打印的样本总数。",
+          "source_files": [
+            "qwen-vl-finetune/qwenvl/data/__init__.py",
+            "qwen-vl-finetune/qwenvl/data/data_processor.py"
+          ],
+          "title": "数据集注册表与采样率控制",
+          "topic": "讲解 qwenvl/data/__init__.py 的数据集注册机制：data_dict 字典、dataset_use 解析、%X 百分比采样率，以及 LazySupervisedDataset 如何读取 JSON/JSONL 标注。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u4-l4-data-packing.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "理解按 token 长度装箱的 packing 策略",
+            "掌握 pre-calculate 长度对训练效率的意义",
+            "会为自有数据生成 packed 标注"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "长度预估",
+            "binpacking 装箱",
+            "packed 输出格式",
+            "图像完整性校验"
+          ],
+          "order": 4,
+          "practice_task": "阅读 pack_data.py 的装箱主流程后，写一个 50 行以内的简化打包器：估算每条样本 token 数，用 binpacking 把 my_dataset.json 打包成不超过 8192 token 的桶，输出 packed json 并抽查一个桶内的样本顺序。",
+          "source_files": [
+            "qwen-vl-finetune/tools/pack_data.py",
+            "qwen-vl-finetune/tools/check_image.py"
+          ],
+          "title": "数据打包 pack_data.py 与长度分桶",
+          "topic": "解读 tools/pack_data.py：用处理器预估每条样本 token 长度、按目标长度 binpacking 装箱生成 packed 标注，以及 check_image.py 的数据完整性校验。"
+        }
+      ],
+      "order": 4,
+      "title": "单元四：微调数据准备"
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u5-l1-train-entry.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "跟踪 train() 从参数解析到 trainer.train() 的完整流程",
+            "理解 set_model 三个开关控制的模块范围",
+            "掌握断点续训与 processor 保存逻辑"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "模型代际判定",
+            "set_model 三开关",
+            "梯度检查点处理",
+            "训练循环与保存"
+          ],
+          "order": 1,
+          "practice_task": "画出 train_qwen.py 的调用流程图（模型加载→tokenizer→LoRA/冻结→data_module→Trainer→保存）；用 Qwen3-VL-2B + demo 数据以 num_train_epochs=0.01 启动一次冒烟训练，确认 loss 正常反传。",
+          "source_files": [
+            "qwen-vl-finetune/qwenvl/train/train_qwen.py"
+          ],
+          "title": "train_qwen.py 训练主流程精读",
+          "topic": "逐段精读训练入口：按模型名自动选择 Qwen2VL/Qwen2.5VL/Qwen3VL/Qwen3VLMoe 类、set_model 冻结策略、梯度检查点、断点续训与保存流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-arguments.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "按 dataclass 归类脚本中的每个参数",
+            "理解视频相关八个数据参数的联动关系",
+            "独立改写出适配自己场景的启动脚本"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ModelArguments",
+            "DataArguments",
+            "TrainingArguments 与 LoRA 扩展",
+            "脚本参数对照"
+          ],
+          "order": 2,
+          "practice_task": "对照 scripts/sft_qwen3_4b.sh，把其中每个参数标注归属（模型/数据/训练三类）并解释含义；复制出一份单卡 2B 模型的启动脚本，调整 batch_size、model_max_length、max_pixels 并注释理由。",
+          "source_files": [
+            "qwen-vl-finetune/qwenvl/train/argument.py",
+            "qwen-vl-finetune/scripts/sft_qwen3_4b.sh"
+          ],
+          "title": "参数体系：argument.py 三组 dataclass 与脚本对照",
+          "topic": "精读 ModelArguments/DataArguments/TrainingArguments 三组 dataclass，并与 sft_qwen3_4b.sh 中的命令行参数逐条对照。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l3-dataset-labels.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "跟踪 <image> 占位符到 messages content 的转换过程",
+            "理解 77091/151645 两个魔法数字与标签区间的对应",
+            "掌握 update_processor_pixels 的预算注入方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "update_processor_pixels",
+            "_build_messages 占位符替换",
+            "preprocess_qwen_visual 标签掩码",
+            "__getitem__ 重试机制"
+          ],
+          "order": 3,
+          "practice_task": "在 __getitem__ 处单步调试一条 demo 样本，打印 input_ids、labels 和 pixel_values 形状；用 tokenizer.decode 分别解码 labels 中非 -100 的区间，验证恰好是 assistant 回复（含结束符）。",
+          "source_files": [
+            "qwen-vl-finetune/qwenvl/data/data_processor.py"
+          ],
+          "title": "LazySupervisedDataset 与标签掩码构造",
+          "topic": "精读 data_processor.py 的样本处理：_build_messages 的占位符替换、preprocess_qwen_visual 中基于 token id 的 assistant 区间标签掩码、__getitem__ 的容错重试。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "filename": "u5-l4-rope2d-mrope.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "解释 position_ids 三行分别编码什么维度",
+            "对比三代实现的 t_index 差异（绝对时间/时间戳/帧序号）",
+            "理解 text 段与 vision 段位置 id 的衔接规则"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "纯文本路径",
+            "图像/视频混合扫描",
+            "get_rope_index_3 时间戳设计",
+            "三代实现差异对比"
+          ],
+          "order": 4,
+          "practice_task": "构造一条含 1 张图（grid_thw=[1,64,64]）和若干文本 token 的 input_ids，分别调用三个 get_rope_index_* 打印 3×L 的 position_ids；标出视觉段的 t/h/w 三行取值，并用文字说明 Qwen3-VL 中 t_index 恒为 0 的原因。",
+          "source_files": [
+            "qwen-vl-finetune/qwenvl/data/rope2d.py",
+            "README.md"
+          ],
+          "title": "rope2d.py：三代 MRoPE 位置编码与 Interleaved-MRoPE",
+          "topic": "精读 rope2d.py 中 get_rope_index_2/25/3 三个实现，对比 Qwen2-VL、Qwen2.5-VL（T-RoPE 时间步进）与 Qwen3-VL（时间戳编码、t_index 恒 0）的位置 id 计算差异。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "filename": "u5-l5-collator-flatten.md",
+          "id": "u5-l5",
+          "learning_goals": [
+            "理解常规 collator 的 pad 与 grid 拼接",
+            "解释 Flattened collator 中 attention_mask 变为累计序列长度的设计",
+            "区分 data_flatten 与 data_packing 两个开关"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "DataCollator 常规路径",
+            "FlattenedDataCollator 拼接路径",
+            "cumsum attention_mask",
+            "packed 样本递归处理"
+          ],
+          "order": 5,
+          "practice_task": "构造 2 条短样本分别过两种 collator，打印 input_ids/labels/position_ids/attention_mask 的形状与内容；重点验证 Flattened 版本输出的 attention_mask 是首元素为 0 的累计长度向量（如 [0, 12, 12+35]）。",
+          "source_files": [
+            "qwen-vl-finetune/qwenvl/data/data_processor.py"
+          ],
+          "title": "两种 DataCollator：常规 padding 与 flatten/packing 拼接",
+          "topic": "对比 DataCollatorForSupervisedDataset 与 FlattenedDataCollatorForSupervisedDataset：前者按 batch padding，后者把多样本拼成一条序列并用 cumsum 序列长度充当 attention_mask。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l5"
+          ],
+          "filename": "u5-l6-trainer-flash-attn.md",
+          "id": "u5-l6",
+          "learning_goals": [
+            "理解 varlen 注意力对拼接训练的必要性",
+            "解释 cu_seqlens 的构造与 causal 语义",
+            "掌握跨四类模型模块的运行时替换手法"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "flash_attention_forward varlen 实现",
+            "qwen2vl_forward/qwen3vl_forward",
+            "monkey patch 替换",
+            "自定义优化器参数组"
+          ],
+          "order": 6,
+          "practice_task": "为 flash_attention_forward 与 replace_qwen2_vl_attention_class 写逐行中文注释，说明 cu_seqlens 如何由上一讲的 collator 生成、max_seqlen 如何计算；再用一段伪代码演示若不替换会发生样本间注意力泄漏。",
+          "source_files": [
+            "qwen-vl-finetune/qwenvl/train/trainer.py",
+            "qwen-vl-finetune/qwenvl/train/train_qwen.py"
+          ],
+          "title": "trainer.py：FlashAttention varlen 替换与 monkey patch",
+          "topic": "精读 trainer.py：flash_attn_varlen_func 按 cu_seqlens 分段做因果注意力、qwen2vl/qwen3vl 两套 forward 替换、create_causal_mask 短路，以及 create_optimizer 的多参数组改造。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l7-lora-and-lr.md",
+          "id": "u5-l7",
+          "learning_goals": [
+            "配置 q/k/v/o_proj 的 LoRA 训练",
+            "理解 vision/merger/LLM 三模块独立解冻粒度",
+            "实现 mm_projector_lr 与 vision_tower_lr 分组"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "LoRA 配置与目标层",
+            "全量微调冻结策略",
+            "分层学习率参数组",
+            "脚本参数对照"
+          ],
+          "order": 7,
+          "practice_task": "用 sft_30a3b_lora.sh 的参数在 2B 模型 + demo 数据上跑一次 LoRA 微调（lora_r=8, lora_alpha=16），训练后用 peft 合并权重并对比合并前后对同一张图的输出。",
+          "source_files": [
+            "qwen-vl-finetune/qwenvl/train/train_qwen.py",
+            "qwen-vl-finetune/qwenvl/train/trainer.py",
+            "qwen-vl-finetune/scripts/sft_30a3b_lora.sh"
+          ],
+          "title": "LoRA 微调与分层学习率",
+          "topic": "讲解 train_qwen.py 中的 LoRA 分支（target_modules 为 q/k/v/o_proj）与 trainer.py 中按 merger/visual 名称划分的 mm_projector_lr、vision_tower_lr 多参数组优化器。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l8-deepspeed-scripts.md",
+          "id": "u5-l8",
+          "learning_goals": [
+            "区分 ZeRO-2/3/offload 的显存与通信取舍",
+            "按模型规模选择对应脚本模板",
+            "理解 MoE 模型不支持 ZeRO-3 的限制"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ZeRO 三档配置对比",
+            "多规模脚本模板",
+            "MoE 限制说明",
+            "显存估算方法"
+          ],
+          "order": 8,
+          "practice_task": "对比 zero2.json/zero3.json/zero3_offload.json 的字段差异并写成对照表；根据本机 GPU 数量与显存选择一档配置，说明单卡 24G 跑 2B 模型时应选哪档及理由。",
+          "source_files": [
+            "qwen-vl-finetune/scripts/sft_30a3b.sh",
+            "qwen-vl-finetune/scripts/sft_32b.sh",
+            "qwen-vl-finetune/scripts/zero2.json",
+            "qwen-vl-finetune/scripts/zero3.json",
+            "qwen-vl-finetune/scripts/zero3_offload.json"
+          ],
+          "title": "DeepSpeed 配置与多规格训练脚本",
+          "topic": "对比 zero2/zero3/zero3_offload 三份 DeepSpeed 配置与 4B/30B-A3B/32B 等不同规格的 sft 脚本，理解显存、并行与 offload 的取舍及 MoE 模型的 ZeRO-3 限制。"
+        }
+      ],
+      "order": 5,
+      "title": "单元五：微调核心源码"
+    },
+    {
+      "id": "u6",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u6-l1-eval-architecture.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "说出三件套各自维护的内容",
+            "跟踪从数据集加载到判分的数据流",
+            "理解 OpenAIWrapper 兜底判分的设计"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "run_*.py 主流程",
+            "dataset_utils 数据侧",
+            "eval_utils 判分侧",
+            "vLLM 输入准备复用"
+          ],
+          "order": 1,
+          "practice_task": "以 mmmu 目录为例画出从 load_dataset→build_mmmu_prompt→prepare_inputs_for_vllm→llm.generate→build_judge→eval_single_sample 的数据流图，并标注每个环节所在的文件与函数。",
+          "source_files": [
+            "evaluation/mmmu/run_mmmu.py",
+            "evaluation/mmmu/dataset_utils.py",
+            "evaluation/mmmu/eval_utils.py",
+            "evaluation/mmmu/common_utils.py"
+          ],
+          "title": "评测框架通用架构：run/dataset_utils/eval_utils 三件套",
+          "topic": "抽象出 evaluation 各基准目录的共同结构：run_*.py 主流程、dataset_utils.py 数据加载与图像导出、eval_utils.py 判分（含 OpenAI 兼容 API 兜底 judge）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-mmmu-eval.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "理解多选题 prompt 的组装规则",
+            "掌握按数据集设定 min/max_pixels 的技巧",
+            "跑通一次完整 MMMU 评测并读数"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "MMMU prompt 组装",
+            "分辨率预算设定",
+            "推理主循环",
+            "结果判分与汇总"
+          ],
+          "order": 2,
+          "practice_task": "下载 MMMU 验证集的一个 subject 子集（如 ART_AND_DESIGN），配置 LMUData 环境变量后用 2B 模型跑 run_mmmu.py，输出准确率并抽查 3 个判错样本的模型原始输出。",
+          "source_files": [
+            "evaluation/mmmu/run_mmmu.py",
+            "evaluation/mmmu/dataset_utils.py",
+            "evaluation/mmmu/eval_utils.py"
+          ],
+          "title": "MMMU 图文混评基准实战",
+          "topic": "以 MMMU 为例实战：build_mmmu_prompt 的题目/选项拼接与 MIN/MAX_PIXELS 分辨率设定、vLLM 批量推理循环与准确率统计。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1",
+            "u2-l4"
+          ],
+          "filename": "u6-l3-videomme-eval.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "区分 Instruct 与 Thinking 模式的采样超参",
+            "看懂 infer/eval 两段式脚本设计",
+            "跑通一次视频理解评测"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "视频数据加载与 prompt",
+            "推理与评测两段式脚本",
+            "Instruct/Thinking 超参对照",
+            "视频多模态输入复用"
+          ],
+          "order": 3,
+          "practice_task": "对比 infer_instruct.sh 与 infer_think.sh 的采样参数差异并写进笔记；用 2B Instruct 模型对 5 条视频样本执行推理脚本，检查输出文件中每条记录的字段。",
+          "source_files": [
+            "evaluation/VideoMME/run_videomme.py",
+            "evaluation/VideoMME/README.md",
+            "evaluation/VideoMME/infer_instruct.sh",
+            "evaluation/VideoMME/infer_think.sh"
+          ],
+          "title": "VideoMME 视频评测与 Instruct/Thinking 双模式",
+          "topic": "解读 VideoMME 评测：视频 prompt 构建、infer/eval 两段式 shell 脚本，以及 Instruct 与 Thinking 模型不同的采样超参与官方评测设置。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l4-odinw-eval.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "理解 bbox JSON 输出格式的解析规则",
+            "掌握相对/绝对坐标的归一化处理",
+            "会计算并解释检测指标"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "检测任务 prompt",
+            "bbox 解析与归一化",
+            "指标计算",
+            "同构目录横向对比"
+          ],
+          "order": 4,
+          "practice_task": "阅读 run_odinw.py 的 bbox 解析与指标计算逻辑后，写一个可视化脚本：把模型输出的 bbox 画回原图并打印 IoU 与类别是否正确；再用它对比 MathVision/RealWorldQA 目录与 ODinW-13 的结构异同。",
+          "source_files": [
+            "evaluation/ODinW-13/run_odinw.py",
+            "evaluation/ODinW-13/dataset_utils.py",
+            "evaluation/ODinW-13/eval_utils.py"
+          ],
+          "title": "ODinW-13 开放域检测评测与 bbox 解析",
+          "topic": "解读 ODinW-13 检测基准：检测 prompt 模板、模型输出的 bbox JSON 解析与坐标归一化、检测指标计算。"
+        }
+      ],
+      "order": 6,
+      "title": "单元六：评测体系"
+    },
+    {
+      "id": "u7",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u7-l1-cookbooks-matrix.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "按任务类型归类 12 个 cookbook",
+            "总结各能力对应的 prompt 模板规律",
+            "会挑选 cookbook 组合解决实际业务"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "能力分类地图",
+            "OCR 与文档解析类",
+            "识别与 grounding 类",
+            "Agent 与编码类"
+          ],
+          "order": 1,
+          "practice_task": "挑选 ocr.ipynb 与 video_understanding.ipynb 两个 cookbook 在本地（或 Colab）跑通核心单元格，把两者使用的系统提示与用户提示模板抽取成对照表。",
+          "source_files": [
+            "README.md",
+            "cookbooks/ocr.ipynb",
+            "cookbooks/video_understanding.ipynb"
+          ],
+          "title": "Cookbooks 能力地图与提示词模式",
+          "topic": "梳理 cookbooks 目录的 12 个能力笔记本（识别、OCR、grounding、视频、Agent、编码等），归纳每类任务背后的 prompt 模式与输出格式约定。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l2-gui-agent-tools.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "理解 BaseTool 的 description/parameters 契约",
+            "掌握 mobile_use 各 action 的参数格式",
+            "会注册自定义工具供模型调用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "qwen_agent 工具基类",
+            "mobile_use 动作集",
+            "参数 schema 设计",
+            "工具注册机制"
+          ],
+          "order": 2,
+          "practice_task": "仿照 mobile_use，继承 BaseTool 实现一个 pc_use 工具（支持 click/type/scroll/hotkey 四个动作），用 @register_tool 注册后打印其 schema，并写一段示例说明模型应如何生成调用参数。",
+          "source_files": [
+            "cookbooks/utils/agent_function_call.py",
+            "README.md"
+          ],
+          "title": "GUI Agent 与工具调用：mobile_use 工具实现",
+          "topic": "精读 cookbooks/utils/agent_function_call.py：基于 qwen_agent BaseTool 的 mobile_use 工具，其 description 文案、action 枚举与 coordinate 参数 schema 如何引导模型正确调用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l3-grounding-practice.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "区分智能框（绝对坐标）与默认框（0-1000 相对坐标）",
+            "会解析模型输出的 bbox/point JSON",
+            "能把外部检测标注转换为 Qwen-VL 训练格式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "相对坐标约定",
+            "bbox 与 point 输出解析",
+            "可视化验证",
+            "训练数据 bbox 转换"
+          ],
+          "order": 3,
+          "practice_task": "用 2d_grounding 的提示模板对一张含多个物体的图片做定位，把返回的 JSON bbox 解析后画框可视化；再打开 process_bbox.ipynb，用它把任意一份 COCO 格式标注转成 Qwen-VL 训练可用的 value 文本。",
+          "source_files": [
+            "cookbooks/2d_grounding.ipynb",
+            "cookbooks/3d_grounding.ipynb",
+            "qwen-vl-finetune/tools/process_bbox.ipynb"
+          ],
+          "title": "2D/3D Grounding 实践与坐标格式体系",
+          "topic": "结合 2d/3d grounding 笔记本与 process_bbox.ipynb，讲清 Qwen-VL 的相对坐标约定、bbox/point 输出 JSON 格式，以及如何把自有检测标注转换成训练格式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l7",
+            "u6-l2"
+          ],
+          "filename": "u7-l4-e2e-custom-finetune.md",
+          "id": "u7-l4",
+          "learning_goals": [
+            "独立完成数据制作→注册→训练→合并→评测全流程",
+            "会根据任务类型设计训练超参",
+            "能定位常见训练与推理报错"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "数据制作与注册",
+            "训练脚本定制",
+            "LoRA 合并与导出",
+            "微调效果评测"
+          ],
+          "order": 4,
+          "practice_task": "综合项目：围绕一个自定义小任务（如特定类型图表问答）制作 20 条样本，完成数据集注册、LoRA 微调、权重合并导出，再用 mmmu 同款评测脚本（改造为自测集）对比微调前后准确率，输出完整实验报告。",
+          "source_files": [
+            "qwen-vl-finetune/qwenvl/data/__init__.py",
+            "qwen-vl-finetune/qwenvl/train/train_qwen.py",
+            "qwen-vl-finetune/scripts/sft_qwen3_4b.sh",
+            "evaluation/mmmu/run_mmmu.py"
+          ],
+          "title": "端到端实战：自定义数据集微调与评测闭环",
+          "topic": "作为收官讲义，串联数据格式、注册、pack、LoRA 训练、合并导出与评测脚本复用，完成一个可复现的微调小项目。"
+        }
+      ],
+      "order": 7,
+      "title": "单元七：高阶应用与二次开发"
+    }
+  ]
+}
