@@ -1,10 +1,13 @@
 {
+  "head": "a474b264537268022a9c06766f65c90ffd0be6c1",
+  "project": "openinfer-pegainfer-qwen35",
+  "rationale": "增量审查结论：上次 HEAD af9e40e1 到当前 HEAD a474b264 之间仅有一个提交（a474b264），它是 qwen3 线的纯文档变更（docs/models/qwen3/dspark-integration.md、docs/lessons/control-row-beats-the-baseline.md、docs/index.md），对 pegainfer-qwen35 crate 与 docs/models/qwen35/ 的 diff 为空，也未触及任何讲义引用的 source_files，因此全部 27 篇讲义 action 均为 keep，结构与依赖关系维持原设计。原始学习顺序设计：pegainfer-qwen35 是 PegaInfer 中最复杂的模型 crate 之一，同时实现 Gated DeltaNet 线性注意力与全注意力的混合前向、CUDA Graph 批解码、分块预填充、联合前缀缓存、单 GPU SharedSM 重叠和张量并行执行器；学习路线按『先看清边界，再进数据结构，再走执行链，最后看并行与质量门』组织——单元 1 让读者从 workspace 定位、feature 门控与 Triton AOT 构建入手建立模块地图；单元 2 沿 config.json → Config35 → LocalGeometry → safetensors 权重 → 层结构这条加载链讲清『不可表示非法状态』的校验风格；单元 3 拆开混合注意力的两种层状态与 FFI 内核边界；单元 4 沿 prefill 分块、批解码、CUDA Graph 桶、unified/overlap 的顺序走完执行路径；单元 5 进入调度器的计划/准入/执行/发射四层；单元 6 讲混合模型特有的 KV+recurrent 联合前缀缓存；单元 7 放到专家层讲 TP 控制器/worker 协议、预捕获扫描与槽位压缩这些并发不变量；单元 8 用精度门、E2E 测试和 criterion 基准收尾。每篇讲义都锚定真实源码文件并配一个可动手的实践任务，依赖关系保证读者不会在没学状态布局前撞上 TP 细节。",
   "units": [
     {
       "id": "u1",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-crate-positioning.md",
           "id": "u1-l1",
@@ -31,7 +34,7 @@
           "topic": "介绍 PegaInfer 纯 Rust + CUDA 推理引擎的整体架构，以及 pegainfer-qwen35 这个模型 crate 在 workspace 中的位置。说明 Qwen3.5 混合 Gated DeltaNet 线性注意力与全注意力的架构特点和 Qwen3.8 共线的关系。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -59,7 +62,7 @@
           "topic": "讲解 qwen35 feature 如何拉起 pegainfer-kernels 的 Triton AOT 内核生成，为什么构建时需要 Python + Triton。梳理 [[test]]/[[bench]] 的 required-features 声明和常用测试命令。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -86,7 +89,7 @@
           "topic": "逐个过一遍 src/ 下的模块（config、weights、recurrent、prefill、batch_decode、scheduler、tp_executor、prefix_cache 等），建立一张后续学习用的地图。说明 runtime / runtime_ops 公开出口的用途。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -121,7 +124,7 @@
       "id": "u2",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -149,7 +152,7 @@
           "topic": "讲解 config 模块如何把磁盘上的 text_config 反序列化成 RawConfig，再通过 TryFrom 一次性校验成 Config35。重点看 LayerType、RoPE 参数、linear_* 几何字段和 selection_vocab 的词表宽度规则。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -176,7 +179,7 @@
           "topic": "讲解 config/tp.rs 的方向性边界：TensorParallelConfig 让非法 (rank, world_size) 不可构造，LocalGeometry 从已验证的 Config35 派生本 rank 的分片维度，并强制整除性等 TP 兼容规则。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u2-l2"
@@ -204,7 +207,7 @@
           "topic": "解析 Qwen35Model::from_safetensors* 系列构造函数：mmap safetensors 分片、ModelRuntimeConfig（cuda graph / TP / prefix snapshot 预算）、decode_admission_batch 与物理桶容量的分离（#470）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -239,7 +242,7 @@
       "id": "u3",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -267,7 +270,7 @@
           "topic": "深入 full-attention 路径：KvView/KvBuffer 分页布局、部分旋转 RoPE（partial_rotary_factor）、qk_norm，以及 head_dim=256 的 paged attention prefill/decode 内核选择。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -295,7 +298,7 @@
           "topic": "讲解 RecurrentState / LayerRecurrentState 的 [H,K,V] f32 状态与 conv_state 布局，以及 LinearStatePointerTables 如何为批量内核提供每槽指针表。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1",
             "u3-l2"
@@ -332,7 +335,7 @@
       "id": "u4",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l3"
           ],
@@ -360,7 +363,7 @@
           "topic": "解析 prefill_last_hidden 的串行分块执行：先整段校验位置与 RoPE 覆盖，再按 PREFILL_CHUNK_LEN 推进 paged KV 与 recurrent 状态，以及 GdrChunkwiseScratch35 的保守预留。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l3"
           ],
@@ -387,7 +390,7 @@
           "topic": "阅读 batch_decode 的核心循环：N 个请求各 1 token，full-attn 共享批量内核，linear-attn 通过指针表按槽更新；以及 select_tokens_* 的逐请求参数采样。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l2"
           ],
@@ -415,7 +418,7 @@
           "topic": "讲解 BATCH_BUCKETS=[1,2,4,8,16,32,64] 桶填充策略、slot_states 固定地址保证重放指针一致、以及 copy_state_to_slot / move_slot_within 的槽位管理契约。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1",
             "u4-l3"
@@ -452,7 +455,7 @@
       "id": "u5",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l4"
           ],
@@ -479,7 +482,7 @@
           "topic": "解析 scheduler/mod.rs 如何在专属 GPU 线程上组织 step 循环：ActiveRequest35 / PrefillingRequest35 状态机、RequestLedger 账本、以及 start_with_capacity* 与 start_tp_with_capacity 两条启动路径。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1"
           ],
@@ -507,7 +510,7 @@
           "topic": "阅读 plan.rs 的纯函数规划层：build_next_plan 在 Prefill/Decode/Unified 间选择，admit_pending_requests 按槽位与 KV 页预算准入，choose_prefill_budget 实现 Off/Auto 两种策略。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l2",
             "u4-l4"
@@ -536,7 +539,7 @@
           "topic": "讲解 steps.rs 的五个驱动函数（prefill_batch、overlap launch、unified、decode、retire）如何驱动 SchedulerBackend::Single/Tp 两个后端，以及错误路径的 fail_chunk 语义。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l3"
           ],
@@ -573,7 +576,7 @@
       "id": "u6",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1",
             "u3-l2"
@@ -601,7 +604,7 @@
           "topic": "解析联合前缀缓存的数据结构：内容寻址的 PrefixBoundaryKey、SNAPSHOT_STRIDE_TOKENS 快照步长、SnapshotCache 的 LRU 与 SnapshotGuard 的 RAII pin，以及 PrefixCacheStats 计数器。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l1",
             "u5-l3"
@@ -639,7 +642,7 @@
       "id": "u7",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l3",
             "u2-l2"
@@ -668,7 +671,7 @@
           "topic": "解析 Qwen35TpExecutor 的整体结构：控制器持有命令通道与 worker JoinHandle，TpWorkerCommand/Response 构成每步一条统一 eager 命令的协议，采样集中在 rank 0。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l1"
           ],
@@ -696,7 +699,7 @@
           "topic": "深入 worker.rs 的线程循环与 responses.rs 的响应类型：worker 自建 CUDA/NCCL 上下文、按命令执行分片前向、以固定集合通信序列聚合，DropExpectation 保证优雅关闭。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l2"
           ],
@@ -733,7 +736,7 @@
       "id": "u8",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1",
             "u4-l2"
@@ -763,7 +766,7 @@
           "topic": "讲解 tests/hf_golden_gate.rs 如何用 Qwen35Executor 做教师强制前向并与存储的 HF golden logits 对拍，以及为何它是数值正确性的唯一裁决。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l4",
             "u6-l2"
@@ -794,7 +797,7 @@
           "topic": "梳理三个集成测试如何借助 common 夹具（EngineHarness、RequestGuard、model_fixture 跳过逻辑）验证调度活性、分块预填充与采样行为。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u8-l1"
           ],
@@ -829,8 +832,5 @@
       "order": 8,
       "title": "质量保障：精度门、E2E 测试与性能基准"
     }
-  ],
-  "head": "af9e40e12108141bb18f93188c82d2583df18509",
-  "project": "openinfer-pegainfer-qwen35",
-  "rationale": "pegainfer-qwen35 是 PegaInfer 中最复杂的模型 crate 之一：它同时实现 Gated DeltaNet 线性注意力与全注意力的混合前向、CUDA Graph 批解码、分块预填充、联合前缀缓存、单 GPU SharedSM 重叠和张量并行执行器，约 2 万行代码。学习路线按『先看清边界，再进数据结构，再走执行链，最后看并行与质量门』组织：单元 1 让读者从 workspace 定位、feature 门控与 Triton AOT 构建入手建立模块地图；单元 2 沿 config.json → Config35 → LocalGeometry → safetensors 权重 → 层结构这条加载链讲清『不可表示非法状态』的校验风格；单元 3 拆开混合注意力的两种层状态与 FFI 内核边界；单元 4 沿 prefill 分块、批解码、CUDA Graph 桶、unified/overlap 的顺序走完执行路径；单元 5 进入调度器的计划/准入/执行/发射四层；单元 6 讲混合模型特有的 KV+recurrent 联合前缀缓存；单元 7 放到专家层讲 TP 控制器/worker 协议、预捕获扫描与槽位压缩这些并发不变量；单元 8 用精度门、E2E 测试和 criterion 基准收尾。每篇讲义都锚定真实源码文件并配一个可动手的实践任务，依赖关系保证读者不会在没学状态布局前撞上 TP 细节。"
+  ]
 }

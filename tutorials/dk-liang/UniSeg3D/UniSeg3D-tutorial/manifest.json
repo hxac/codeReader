@@ -1,0 +1,851 @@
+{
+  "head": "c2729548d6f64122a92fce39b45d94b948782e67",
+  "project": "UniSeg3D",
+  "rationale": "UniSeg3D 是基于 MMDetection3D/mmengine 构建的统一 3D 分割框架，单模型同时完成全景、语义、实例、交互式、指代与开放词汇六类分割任务。学习路线遵循\"先跑通、再读数据流、后读模型与损失、最终推理评估与二次开发\"的主线：单元 1 建立项目认知并完成 ScanNet 数据准备；单元 2 讲清 mmengine 注册器与配置系统，这是理解一切模块组装的前提；单元 3 沿\"数据集→加载打包→超点标注→点/文本提示→弹性增广\"的完整数据管线推进；单元 4 深入稀疏卷积骨干、统一查询解码器、CLIP 语言分支与提示查询注入，理解\"超点即查询\"的统一表示；单元 5 剖析统一损失体系，重点讲清 base/novel 双路匹配、IoU 预测分支以及跨任务对比蒸馏等论文核心机制；单元 6 覆盖一次前向出六任务结果的推理链路、mask matrix NMS、统一评估指标、开放词汇分割实战与二次开发扩展点。讲义以真实源码文件为依据、以数据流为依赖纽带，先易后难，每篇配一个可动手的实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "理解六类 3D 分割任务的定义、输入提示与输出形式的差异",
+            "了解 UniSeg3D 整体架构：稀疏骨干 + 统一查询解码器 + CLIP 语言分支",
+            "对照 README 指标表理解各任务的评估指标（PQ/mIoU/mAP/AP）与 checkpoints 的对应关系"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README 章节导读（News/Abstract/Overview/Models）",
+            "六任务与评价指标对照表",
+            "uniseg3d/__init__.py 注册清单速览"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README 与项目主页图，整理一张表格：六类分割任务各自的输入提示、输出形式与论文报告指标（PQ/mIoU/mAP/AP），并在 uniseg3d/__init__.py 的注册清单中标注与每个任务最相关的类名。",
+          "source_files": [
+            "README.md",
+            "uniseg3d/__init__.py",
+            "uniseg3d/uniseg3d.py"
+          ],
+          "title": "项目总览：一个模型如何统一六类 3D 分割任务",
+          "topic": "介绍 UniSeg3D 的研究背景与目标：用统一的超点查询表示和同一个 Transformer 同时完成全景、语义、实例、交互式、指代与开放词汇六类 3D 分割任务。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-environment-and-scripts.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "按正确顺序完成依赖安装并逐项验证 import",
+            "理解 dist_train.sh 随机选端口并用 torch.distributed.launch 拉起 train.py 的机制",
+            "掌握单卡/多卡训练与推理评估命令"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "依赖安装清单与顺序（PyTorch/OpenMMLab/MinkowskiEngine/segmentator）",
+            "dist_train.sh 与 dist_test.sh 逐行解读",
+            "train.py/test.py 的参数与 launcher 选项"
+          ],
+          "order": 2,
+          "practice_task": "搭建 conda 环境并验证 import torch、mmdet3d、spconv、MinkowskiEngine、torch_scatter 全部成功；随后运行 ./tools/dist_train.sh configs/uniseg3d_1xb4_scannet_scanrefer_scannet200_unified.py 1 观察启动阶段是否正确加载配置并打印模型结构（数据缺失时记录报错位置即可）。",
+          "source_files": [
+            "README.md",
+            "tools/dist_train.sh",
+            "tools/dist_test.sh",
+            "tools/train.py",
+            "tools/test.py"
+          ],
+          "title": "环境搭建与训练/推理脚本",
+          "topic": "讲解如何安装 PyTorch、OpenMMLab 系列、MinkowskiEngine、segmentator 等依赖，并梳理 tools/dist_train.sh 与 tools/dist_test.sh 的启动方式与参数。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-repo-structure.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "说出每个目录与核心文件的职责",
+            "理解 uniseg3d/__init__.py 通过 import 触发 Registry 注册的机制",
+            "能快速定位模型、数据、损失、评估四类代码的位置"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "目录职责总览（uniseg3d/open_clip/configs/tools/data/content）",
+            "uniseg3d 包内模块清单与相互引用",
+            "open_clip 第三方库在项目中的定位"
+          ],
+          "order": 3,
+          "practice_task": "用 grep 统计 uniseg3d/ 下所有 register_module 装饰器，按 MODELS/TRANSFORMS/DATASETS/METRICS/TASK_UTILS 分类输出注册清单，注明每个类所在文件与行号，并标注哪些类只被 config 引用、哪些只被内部 import。",
+          "source_files": [
+            "uniseg3d/__init__.py",
+            "uniseg3d/uniseg3d.py",
+            "uniseg3d/query_decoder.py",
+            "open_clip/factory.py",
+            "tools/create_data.py"
+          ],
+          "title": "仓库目录结构与代码地图",
+          "topic": "系统介绍 uniseg3d/、open_clip/、configs/、tools/、data/ 各目录的职责，绘制模块依赖图，帮助读者建立源码导航能力。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "filename": "u1-l4-data-preparation.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "掌握 points/instance_mask/semantic_mask/super_points 四类 bin 文件的生成方式",
+            "理解 uniseg3d_infos_train/val.pkl 中 ScanNet 信息、ScanRefer 文本、OpenCLIP 分词与 SAM3D 伪掩码的作用",
+            "理解 scannet_cls_embedding.pth 类别嵌入文件与 super_points（SSTNet/segmentator 产物）的来源"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "batch_load_scannet_data.py 主流程",
+            "load_scannet_data.py 单场景解析",
+            "create_data.py/indoor_converter.py 生成 infos",
+            "官方 pkl 与类别嵌入文件内容说明"
+          ],
+          "order": 4,
+          "practice_task": "下载 ScanNet 的 1-2 个 scene，运行 data/scannet/batch_load_scannet_data.py 生成四个 bin 文件，用 python 读取并打印各自的 shape 与取值范围，对照 README 给出的目录结构检查产物是否一致。",
+          "source_files": [
+            "README.md",
+            "data/scannet/batch_load_scannet_data.py",
+            "data/scannet/load_scannet_data.py",
+            "data/scannet/scannet_utils.py",
+            "tools/create_data.py",
+            "tools/indoor_converter.py",
+            "tools/scannet_data_utils.py"
+          ],
+          "title": "数据准备：从 ScanNet 原始数据到训练输入",
+          "topic": "讲解 ScanNet v2 数据的下载、batch_load_scannet_data.py 的解析流程、create_data.py 生成 infos，以及三个官方发布文件（infos pkl 与类别嵌入）的内容构成。"
+        }
+      ],
+      "order": 1,
+      "title": "初识 UniSeg3D：项目定位、环境与数据准备"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l1-registry-and-runner.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "理解配置字符串如何经 Registry 实例化为具体对象",
+            "掌握 custom_imports、sys.path 注入与注册触发的完整链路",
+            "理解 Runner 的 train/val/test 循环与 hook 触发时机"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Registry 与 MODELS.build 流程",
+            "custom_imports 触发 uniseg3d 注册",
+            "Runner 生命周期与常用 hooks"
+          ],
+          "order": 1,
+          "practice_task": "编写一个最小 mmengine 脚本：自定义一个注册到 MODELS 的小模型和一个数据集，用 Config 字典构建 Runner 跑通若干 iter 的空训练，体会『配置即代码』的组装方式。",
+          "source_files": [
+            "tools/train.py",
+            "tools/test.py",
+            "uniseg3d/__init__.py",
+            "configs/uniseg3d_1xb4_scannet_scanrefer_scannet200_unified.py"
+          ],
+          "title": "注册器机制与 Runner 生命周期",
+          "topic": "讲解 mmdet3d/mmengine 的 Registry 注册机制、custom_imports 如何触发 uniseg3d 包注册，以及 train.py 中 Runner.from_cfg 到 runner.train() 的完整生命周期。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-config-deep-dive.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "能对照配置中每个 type 找到对应源码类",
+            "理解 1xb4 与 4xb4 配置的差异（学习率、分布式环境配置）",
+            "掌握 test_cfg 中 topk_insts、sp_score_thr、npoint_thr 等推理阈值含义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "model 配置五件套（backbone/decoder/lang/criterion/data_preprocessor）",
+            "train_pipeline 与 test_pipeline 逐项对照",
+            "优化器/调度器/hooks/load_from 设置"
+          ],
+          "order": 2,
+          "practice_task": "用 diff 对比两份 config 并解释每一处差异的原因；再用 --cfg-options 把 batch_size 覆盖为 2、max_epochs 覆盖为 1 跑一次 dry-run，从日志验证配置覆盖确实生效。",
+          "source_files": [
+            "configs/uniseg3d_1xb4_scannet_scanrefer_scannet200_unified.py",
+            "configs/uniseg3d_4xb4_scannet_scanrefer_scannet200_unified.py"
+          ],
+          "title": "精读主配置：模型、数据管线与训练策略",
+          "topic": "逐段精读 uniseg3d_1xb4 与 4xb4 两份配置：model 五大组件、train/test pipeline、dataloader、优化器、调度器、hooks 与 load_from 预训练设置。"
+        }
+      ],
+      "order": 2,
+      "title": "mmengine 框架基础：注册器、配置与 Runner"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u1-l4"
+          ],
+          "filename": "u3-l1-dataset-class.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "理解 mmdet3d 数据集类的继承体系与 ann_file infos 的作用",
+            "掌握 super_pts_path 的注入方式与 data_prefix 拼装规则",
+            "能仿写一个最小数据集子类"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "继承关系与重写点（parse_data_info/get_scene_idxs）",
+            "data_prefix 与 infos 路径拼装"
+          ],
+          "order": 1,
+          "practice_task": "在 parse_data_info 处打印一条完整 data_info（含 points/instance_mask/semantic_mask/super_points 路径与 text_info），再写一个继承 ScanNetUnifiedSegDataset 的新类，重写 get_scene_idxs 只返回前 10 个场景并用小配置验证生效。",
+          "source_files": [
+            "uniseg3d/scannet_dataset.py",
+            "configs/uniseg3d_1xb4_scannet_scanrefer_scannet200_unified.py"
+          ],
+          "title": "数据集类：ScanNetUnifiedSegDataset",
+          "topic": "讲解 ScanNetUnifiedSegDataset 如何继承 ScanNetSegDataset 并注入 super_pts_path，以及 parse_data_info 与 data_prefix 的路径拼装规则。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-load-pack-preprocess.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 results 字典在 pipeline 中的逐步流转",
+            "掌握 INPUTS_KEYS/SEG_KEYS/INSTANCEDATA_3D_KEYS 的键分拣规则",
+            "理解 Det3DDataPreprocessor_ 在 collate 后组装 batch_inputs 的过程"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "LoadAnnotations3D_ 超点掩码加载与 NormalizePointsColor_",
+            "Pack3DDetInputs_ 的键分拣与 Det3DDataSample 组装",
+            "Det3DDataPreprocessor_ 的键透传"
+          ],
+          "order": 2,
+          "practice_task": "手动实例化这三个 transform（按 config 传参），把一条 data_info 依次喂入，打印每步之后 results/batch_inputs 新增的键与形状，整理成键流转表。",
+          "source_files": [
+            "uniseg3d/loading.py",
+            "uniseg3d/formatting.py",
+            "uniseg3d/data_preprocessor.py"
+          ],
+          "title": "加载、打包与批处理：三个改造版组件",
+          "topic": "讲解 LoadAnnotations3D_ 如何额外加载超点掩码、Pack3DDetInputs_ 如何把 point/text 提示相关键分拣进 inputs 与 data_sample，以及 Det3DDataPreprocessor_ 如何在批组装时透传这些键。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-superpoint-annotations.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解『超点掩码 = 点级掩码在超点维度聚合』的核心技巧",
+            "理解 stuff/things 类别处理与 gt_labels_3d 的构造",
+            "理解 is_novel 标记在开放词汇训练中的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "实例 id 重映射与 one-hot 构造",
+            "scatter_mean 聚合与 0.5 阈值二值化",
+            "merge_ov 伪掩码合并与 is_novel 标记",
+            "eval_ann_info 评估标注生成"
+          ],
+          "order": 3,
+          "practice_task": "用随机生成的 1000 个点、20 个超点、3 个实例模拟输入，单独复现 transform 内的聚合逻辑（one-hot→scatter_mean→>0.5），验证输出 gt_sp_masks 的形状以及每列至多一个 True 的约束。",
+          "source_files": [
+            "uniseg3d/transforms_3d.py",
+            "uniseg3d/__init__.py",
+            "configs/uniseg3d_1xb4_scannet_scanrefer_scannet200_unified.py"
+          ],
+          "title": "超点标注构造：AddSuperPointAnnotations",
+          "topic": "讲解如何由 pts_instance_mask 与 pts_semantic_mask 出发，用 one-hot + scatter_mean + 0.5 阈值生成超点级 gt_sp_masks，合并 SAM3D 伪掩码（merge_ov 与 is_novel），并生成评估用标注。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l4-point-prompt-generation.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "理解 point_prompts/point_prompt_instance_ids/point_prompt_sp_ids 三个键的语义与对齐关系",
+            "对比训练随机采样与测试『最难 点』采样的差异",
+            "理解 pts_instance_objextId_shuffle 的用途"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "PointPromptGeneration 采样流程",
+            "PointPromptTest 的 agile 模式",
+            "提示键与模型侧消费的对应关系"
+          ],
+          "order": 4,
+          "practice_task": "修改 PointPromptGeneration，把『距质心最近』改为『距质心最远』的点，并用一个合成的两实例点云对比两种策略选出的点下标差异。",
+          "source_files": [
+            "uniseg3d/transforms_3d.py",
+            "uniseg3d/uniseg3d.py"
+          ],
+          "title": "交互式分割的数据侧：点提示生成",
+          "topic": "讲解训练时 PointPromptGeneration 如何为每个 GT 实例采样一个点（含 500 点下采样后按到质心距离排序的策略），与测试时 PointPromptTest 的 agile 模式（0.05 体素量化后找离背景最远的点）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l5-text-prompt-generation.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "理解 ScanRefer 文本如何进入训练批次",
+            "掌握 gt_text_prompt 与 text_object_id 的对齐方式",
+            "理解训练与测试在文本选择上的差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "text_info 结构与取样逻辑",
+            "gt_text_prompt 的超点投影",
+            "TextPromptTest 的全量展开"
+          ],
+          "order": 5,
+          "practice_task": "构造一个包含 2 个实例、每实例 2 条描述的假 text_info，运行 TextPromptGeneration 与 TextPromptTest，打印各输出键的形状，并验证 gt_text_prompt 每行覆盖的超点集合与实例点集一致。",
+          "source_files": [
+            "uniseg3d/transforms_3d.py",
+            "uniseg3d/lang_module.py",
+            "configs/uniseg3d_1xb4_scannet_scanrefer_scannet200_unified.py"
+          ],
+          "title": "指代分割的数据侧：文本提示生成",
+          "topic": "讲解 TextPromptGeneration/TextPromptTest 如何从 infos 的 text_info（ScanRefer 描述 + 预分词 token）构造 text_token、label_text、gt_text_prompt 与 text_object_id，并用 scatter_mean 把点级 GT 投影到超点。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l6-elastic-transform.md",
+          "id": "u3-l6",
+          "learning_goals": [
+            "理解弹性增广的数学过程与 gran/mag 参数含义",
+            "理解 elastic_coords 与原始坐标在 collate 中的两条路径",
+            "能调整参数观察形变强度"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "elastic() 噪声生成与网格插值",
+            "transform() 的概率控制与坐标输出",
+            "collate 中 elastic_points 分支"
+          ],
+          "order": 6,
+          "practice_task": "对一个真实场景点云分别用原始 [6,20]/[40,160] 与放大 4 倍的 mag 运行 elastic()，用 open3d 或 matplotlib 画出形变前后的点云对比图。",
+          "source_files": [
+            "uniseg3d/transforms_3d.py",
+            "uniseg3d/uniseg3d.py",
+            "configs/uniseg3d_1xb4_scannet_scanrefer_scannet200_unified.py"
+          ],
+          "title": "弹性变换与增广管线",
+          "topic": "讲解 ElasticTransfrom 如何用高斯噪声 + 三方向卷积 + 网格插值对坐标施加弹性形变并生成 elastic_coords 供模型 collate 使用，以及它在 train_pipeline 中的位置与概率控制。"
+        }
+      ],
+      "order": 3,
+      "title": "数据流：从点云文件到模型输入张量"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u3-l2"
+          ],
+          "filename": "u4-l1-model-overview-loss.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "画出『点云→稀疏张量→UNet→超点特征→查询→解码器→损失』的数据流图",
+            "理解 batch_offsets 与 sp_pts_mask 偏移拼接的批处理技巧",
+            "理解 _select_queries 的 query_thr 采样策略"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "__init__ 组件与关键配置项（type_embedding/pred_iou/alpha/beta）",
+            "collate 与 extract_feat 的稀疏化与聚合",
+            "loss() 训练前向步骤拆解"
+          ],
+          "order": 1,
+          "practice_task": "在 loss() 关键位置插入打印，跟踪一个 batch（batch_size=1 的假数据即可）中坐标、特征、稀疏张量 features、超点特征、queries 的 shape 变化，并整理成数据流表。",
+          "source_files": [
+            "uniseg3d/uniseg3d.py"
+          ],
+          "title": "UniSeg3D 模型骨架与训练前向 loss()",
+          "topic": "讲解 UniSeg3D 类的组装（unet/decoder/lang/criterion）、collate 如何用 MinkowskiEngine TensorField 构建稀疏张量、extract_feat 如何用 scatter_mean 把体素特征聚合到超点，以及 loss() 前向的完整步骤。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-spconv-unet.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解 spconv 稀疏张量与 indice_key 机制",
+            "掌握 U-Net 递归构建与跳连特征拼接",
+            "能计算 num_planes=[32..160] 下各层通道数"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ResidualBlock 结构（pre-norm 残差）",
+            "SpConvUNet 递归与 return_blocks",
+            "input_conv/output_layer 外壳"
+          ],
+          "order": 2,
+          "practice_task": "构造一个随机稀疏张量（如 5000 个体素、6 通道）手动跑 SpConvUNet 前向，打印每层输出 features 的通道数；再把 num_planes 改为 3 层，验证递归结构仍能正确前向。",
+          "source_files": [
+            "uniseg3d/spconv_unet.py",
+            "uniseg3d/uniseg3d.py"
+          ],
+          "title": "稀疏卷积骨干 SpConvUNet",
+          "topic": "讲解 ResidualBlock（SubMConv3d + pre-norm 残差）与递归构建的五层 SpConvUNet（SparseConv3d 下采样、SparseInverseConv3d 上采样、特征拼接）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l3-query-decoder.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "理解『超点即查询』范式下 query 的来源（num_instance_queries=0、无可学习 query）",
+            "掌握 _forward_head 中 einsum 点积掩码预测与注意力掩码生成",
+            "理解迭代预测为何每层都输出预测（aux_outputs 深监督）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "CrossAttentionLayer/SelfAttentionLayer/FFN",
+            "_get_queries 与 query_proj 投影",
+            "_forward_head 与 attn_mask",
+            "forward_iter_pred 深监督输出"
+          ],
+          "order": 3,
+          "practice_task": "用 batch=1、10 个超点、d_model=64 的小张量手动依次调用 input_proj/x_mask/cross_attn/self_attn/ffn/_forward_head，验证每步 shape，并统计 attn_mask 中被屏蔽位置的比例。",
+          "source_files": [
+            "uniseg3d/query_decoder.py"
+          ],
+          "title": "查询解码器：mask attention 与迭代预测",
+          "topic": "讲解 QueryDecoder 的 CrossAttentionLayer/SelfAttentionLayer/FFN 三件套、query_proj 超点查询投影、attn_mask 掩码注意力、iter_pred 迭代预测与 aux_outputs 深监督。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u4-l4-unified-decoder-sphere-cls.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "理解 sphere_cls 替代线性分类头的开放词汇意义",
+            "掌握 mask_pool 的 einsum 归一化池化",
+            "理解 forward_logit 中 max-over-prototypes 与 logit_scale 的作用",
+            "区分实例分类（去掉 stuff 类）与语义分类两套投影头"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "cls_embed 原型加载与 back_token 广播",
+            "mask_pool 与两个池化投影头",
+            "forward_logit 相似度分类",
+            "_forward_head 的 last_flag 语义分支"
+          ],
+          "order": 4,
+          "practice_task": "加载 data/scannet/scannet_cls_embedding.pth 打印其形状并解释三个维度；用 8 个查询、50 个点的小张量复现 mask_pool→cls_proj→forward_logit 流程，核对实例与语义 logits 的类别维数。",
+          "source_files": [
+            "uniseg3d/query_decoder.py",
+            "uniseg3d/mask_pool.py",
+            "configs/uniseg3d_1xb4_scannet_scanrefer_scannet200_unified.py"
+          ],
+          "title": "UnifiedQueryDecoder：CLIP 词表分类与 mask pooling",
+          "topic": "讲解 UnifiedQueryDecoder 如何加载 scannet_cls_embedding.pth 作为类别原型（球面分类），用 mask_pool 从掩码内点特征池化，经 cls_proj/cls_proj_sem 投影后与原型做余弦相似度得到实例/语义分类 logits。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l5-lang-module-openclip.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "理解仓库内嵌 open_clip/ 目录与官方 OpenCLIP 库的关系",
+            "掌握文本编码前向（token embedding→transformer→eot 取特征→投影）",
+            "理解 fix=True 冻结策略与 out_features=32 对齐查询维度的设计"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "open_clip 工厂与 convnext_large_d_320 模型配置",
+            "OpenCLIPBackboneText 文本前向",
+            "LangModule 冻结与 MLP 投影"
+          ],
+          "order": 5,
+          "practice_task": "编写脚本用 open_clip.get_tokenizer 对三句 ScanRefer 风格描述分词，构造 text_token 后调用 LangModule（加载预训练权重或随机初始化）得到词嵌入，打印形状并验证反向传播只更新 MLP 参数。",
+          "source_files": [
+            "uniseg3d/lang_module.py",
+            "uniseg3d/openclip_backbone.py",
+            "open_clip/factory.py",
+            "open_clip/model.py",
+            "open_clip/model_configs/convnext_large_d_320.json"
+          ],
+          "title": "语言分支：LangModule 与 OpenCLIP 文本编码",
+          "topic": "讲解 OpenCLIPBackboneText 如何从 open_clip 工厂加载 convnext_large_d_320 的文本塔（token embedding、transformer、ln_final、text_projection），LangModule 如何冻结它并用 MLP 把 768 维文本特征投影到 32 维查询空间。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3",
+            "u3-l4",
+            "u3-l5"
+          ],
+          "filename": "u4-l6-prompt-query-injection.md",
+          "id": "u4-l6",
+          "learning_goals": [
+            "理解统一 Transformer 中三类查询的融合与隔离机制（set_query_mask/set_all_mask）",
+            "掌握 train/val 两种模式下按提示数量切分 masks 的差异",
+            "理解提示 GT（InstanceData_）各字段的组装"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "type_embedding 与查询拼接",
+            "interaction_masks 构造",
+            "split_original_and_*_prompt_queries 的输出拆分"
+          ],
+          "order": 6,
+          "practice_task": "构造 batch=1、原查询 100 条、点提示 3 条、文本提示 2 条的假数据，复现 interaction_masks 的构造，验证四个区域（原始×提示、提示×原始、提示×提示）的布尔取值与 set_all_mask 开关的关系。",
+          "source_files": [
+            "uniseg3d/uniseg3d.py",
+            "uniseg3d/structures.py"
+          ],
+          "title": "提示查询注入与结果拆分",
+          "topic": "讲解 add_point_prompt_queries/add_text_prompt_queries 如何把点提示特征与文本嵌入拼接进查询列表并用 3 维 type_embedding 区分类型，interaction_masks 如何屏蔽不同提示组之间的自注意力，以及 split_original_and_*_prompt_queries 如何把解码输出拆回原始查询与提示查询。"
+        }
+      ],
+      "order": 4,
+      "title": "模型核心：稀疏骨干、统一查询解码器与语言分支"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1",
+            "u3-l3"
+          ],
+          "filename": "u5-l1-unified-criterion.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "理解 gt_sp_masks 行布局 = [实例(含伪掩码), stuff 类, 语义 one-hot, unlabeled]",
+            "掌握 query_masks 在各子损失间传递的作用",
+            "列出一次前向产生的全部 loss key"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "__call__ 中的 gt 拆分逻辑",
+            "五个子损失的调用顺序与合并",
+            "seg_loss 超点交叉熵"
+          ],
+          "order": 1,
+          "practice_task": "构造假 pred dict（含 sem_preds/cls_preds/masks/scores）与假 insts，分别调用各子损失并汇总，打印完整 loss 字典的 key 与量级，对照官方训练日志确认键名一致。",
+          "source_files": [
+            "uniseg3d/unified_criterion.py",
+            "uniseg3d/semantic_criterion.py",
+            "uniseg3d/transforms_3d.py"
+          ],
+          "title": "损失总调度 ScanNetUnifiedCriterion 与语义损失",
+          "topic": "讲解 ScanNetUnifiedCriterion 如何把 gt_sp_masks 按行拆成实例部分与语义部分（后 n+1 行）分发给五个子损失，以及 ScanNetSemanticCriterion 的超点级交叉熵实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u5-l2-sparse-matcher.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "理解超点查询天然携带归属信息从而无需全局匈牙利匹配的设计",
+            "掌握 topk+1 阈值与 inf 掩码技巧",
+            "能手动计算一个小例子的匹配结果"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "QueryClassificationCost/MaskBCECost/MaskDiceCost",
+            "SparseMatcher 的 query_masks 约束",
+            "topk 稀疏匹配的返回格式"
+          ],
+          "order": 2,
+          "practice_task": "构造 5 个查询、3 个 GT 的小矩阵（用 query_masks 约束掉一半组合），手动计算三类代价并运行 SparseMatcher，验证被禁止的组合绝不出现在返回的 indices 中。",
+          "source_files": [
+            "uniseg3d/instance_criterion.py",
+            "uniseg3d/unified_criterion.py"
+          ],
+          "title": "匹配器 SparseMatcher 与代价函数",
+          "topic": "讲解 QueryClassificationCost/MaskBCECost/MaskDiceCost 三种代价，以及 SparseMatcher 如何只在 query_masks 允许的 query-GT 对里做稀疏匹配。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-ov-instance-criterion.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "理解开放词汇训练中伪掩码的监督方式",
+            "掌握『先 base 匹配、剩余查询再 novel 匹配』的两阶段流程与 cls_target=-1 的处理",
+            "理解 iter_matcher、fix_dice_loss_weight、fix_mean_loss 等工程细节"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "base/novel 拆分与两阶段匹配",
+            "cls/mask 损失计算与权重",
+            "aux_outputs 逐层损失累加"
+          ],
+          "order": 3,
+          "practice_task": "构造 6 个 GT（4 base + 2 novel）、20 个查询的假数据，在 get_layer_loss 中插桩打印 indices 与 ov_indices，验证同一查询不会同时命中 base 与 novel 匹配，并核对 cls_target 中 -1 的设置位置。",
+          "source_files": [
+            "uniseg3d/instance_criterion.py",
+            "uniseg3d/unified_criterion.py",
+            "uniseg3d/transforms_3d.py"
+          ],
+          "title": "开放词汇实例损失 OVInstanceCriterion：base/novel 双路监督",
+          "topic": "讲解 OVInstanceCriterion 如何用 is_novel 把 GT 拆为 base 与 novel（SAM3D 伪掩码）两路：base 走完整匹配并计算 cls/BCE/dice 损失，novel 在剩余查询上用 ov_matcher 二次匹配且只有掩码损失，并汇总 aux_outputs 深监督。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "filename": "u5-l4-pred-iou-branch.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "理解 IoU 感知分数对实例分割精度的作用",
+            "掌握 get_pred_iou 对主输出与 aux_outputs 的处理",
+            "理解 test_cfg 中 inst_test_iou/pano_test_iou 的开关差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "pred_iou_proj 三层 MLP 结构",
+            "iou_loss 的目标构造与 iou_thr 过滤",
+            "推理中 preds_iou 的分数乘法与 OV 掩码过滤"
+          ],
+          "order": 4,
+          "practice_task": "用假数据分别以 pred_iou=True/False 组装损失，对比 loss key 差异；再推导在 predict_by_feat_instance 中 scores 乘上 preds_iou 后 topk 排序会如何变化（举例说明）。",
+          "source_files": [
+            "uniseg3d/uniseg3d.py",
+            "uniseg3d/instance_criterion.py",
+            "configs/uniseg3d_1xb4_scannet_scanrefer_scannet200_unified.py"
+          ],
+          "title": "IoU 预测分支：训练监督与推理应用",
+          "topic": "讲解 UniSeg3D 中 pred_iou_proj 三层 MLP 如何从 contras_embeds 回归预测掩码 IoU，训练中用 get_iou 计算的目标分数做 MSE 监督（可按 iou_thr 过滤），推理中 preds_iou 乘进实例分数并用于开放词汇掩码过滤。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1",
+            "u4-l6"
+          ],
+          "filename": "u5-l5-prompt-instance-losses.md",
+          "id": "u5-l5",
+          "learning_goals": [
+            "理解提示分支为什么不需要匹配器",
+            "对比两个 criterion 与 OVInstanceCriterion 的异同",
+            "理解 total_weight 缩放与 aux 层累加"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "恒等 indices 的构造",
+            "cls/mask 损失与 cls_weight 开关",
+            "aux 层损失与 total_weight"
+          ],
+          "order": 5,
+          "practice_task": "构造 3 条点提示与 3 条文本提示的假 pred/gt，分别调用两个 criterion，打印 point_prompt_inst_loss 与 text_prompt_inst_loss；再把 use_cls_supervise 置 False 观察数值变化并解释。",
+          "source_files": [
+            "uniseg3d/point_prompt_instance_criterion.py",
+            "uniseg3d/text_prompt_instance_criterion.py",
+            "uniseg3d/unified_criterion.py"
+          ],
+          "title": "提示实例损失：点提示与文本提示的一对一监督",
+          "topic": "讲解 PointPromptInstanceCriterion 与 TextPromptInstanceCriterion：由于提示查询与 GT 天然一一对应，匹配退化为恒等映射，损失只剩 cls/BCE/dice，且 text 分支可用 use_cls_supervise 控制是否监督分类。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l5"
+          ],
+          "filename": "u5-l6-cross-task-contrastive.md",
+          "id": "u5-l6",
+          "learning_goals": [
+            "理解同一物体的『文本查询-点查询』正样本对构造",
+            "掌握三条蒸馏/对比路径各自的输入与梯度流向",
+            "理解可学习 logit_scale 温度的作用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "对称 InfoNCE 与 object_id 正样本对齐",
+            "MarginRanking 排序损失与距离加权",
+            "IntrinsicPointAndQuery 与伪分布蒸馏"
+          ],
+          "order": 6,
+          "practice_task": "构造 2 个共享 object_id 的文本/点提示嵌入（含一正一负样本对），运行 ContrastiveCriterion 验证正对角线 logits 最大时损失最小；再单独运行 IntrinsicPointAndQuery 段代码，观察 BCE 蒸馏的梯度方向（stop_gradient 用在哪一侧）。",
+          "source_files": [
+            "uniseg3d/contrastive_criterion.py",
+            "uniseg3d/instance_criterion.py",
+            "uniseg3d/query_decoder.py"
+          ],
+          "title": "跨任务知识共享：对比学习、排序与伪分布蒸馏",
+          "topic": "讲解论文核心的跨任务知识共享：ContrastiveCriterion 用 text_object_id 对齐文本嵌入与点提示嵌入做对称对比损失与 MarginRanking 排序（可用 point_prompt_distance_norms 加权），OVInstanceCriterion 中的 IntrinsicPointAndQuery 损失把点提示掩码作为伪标签蒸馏给常规查询，伪分布损失用点提示分类分布监督文本分支。"
+        }
+      ],
+      "order": 5,
+      "title": "训练机制：统一损失体系与跨任务知识共享"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l4",
+            "u4-l6",
+            "u5-l4"
+          ],
+          "filename": "u6-l1-inference-pipeline.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "掌握 test_cfg 每个阈值在代码中的落点与作用",
+            "理解超点级掩码如何经 superpoints 索引映射回原始点",
+            "理解一次推理同时产出 PS/SS/IS/Interactive/Referring 结果的机制"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "predict_by_feat_instance 的阈值过滤链",
+            "predict_by_feat_semantic 与 predict_by_feat_panoptic",
+            "mask_matrix_nms 的矩阵打分衰减",
+            "点/文本提示结果的直通输出"
+          ],
+          "order": 1,
+          "practice_task": "在验证集（或小子集）上运行 dist_test.sh，分别修改 sp_score_thr 与 topk_insts 各跑一次，记录预测实例数与指标变化，并结合代码逐行解释差异来源。",
+          "source_files": [
+            "uniseg3d/uniseg3d.py",
+            "uniseg3d/mask_matrix_nms.py",
+            "configs/uniseg3d_1xb4_scannet_scanrefer_scannet200_unified.py"
+          ],
+          "title": "推理链路：一次前向输出六任务结果",
+          "topic": "讲解 predict() 与 predict_by_feat 系列：实例预测的 topk、obj_normalization、mask_matrix_nms、超点阈值与 npoint_thr 过滤，语义预测的 argmax 映射回原始点，全景预测的 things/stuff 合并规则，以及点/文本提示结果的输出。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-unified-metric.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "理解 process() 中五元组结果的组装与 map_inst_markup 的类别映射",
+            "掌握 cal_ap/cal_ap_thr 的 AP 数值积分实现",
+            "能从评估日志定位每个指标的计算来源"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "process() 结果收集与分支",
+            "三任务指标调用（seg_eval/instance_seg_eval/panoptic_seg_eval）",
+            "提示任务 AP@25/50 与 precision 自定义计算"
+          ],
+          "order": 2,
+          "practice_task": "构造 2 个场景的假 gt/pred（含点提示与文本提示结果），调用 compute_metrics，核对输出的 mIoU/mAP/PQ/Point Prompt AP/Text Prompt mIoU 等键与手工计算结果一致。",
+          "source_files": [
+            "uniseg3d/unified_metric.py",
+            "uniseg3d/instance_seg_eval.py",
+            "uniseg3d/evaluate_semantic_instance.py",
+            "configs/uniseg3d_1xb4_scannet_scanrefer_scannet200_unified.py"
+          ],
+          "title": "六任务统一评估：PromptSupportedUnifiedSegMetric",
+          "topic": "讲解评估器如何收集结果并分别调用 seg_eval（mIoU）、instance_seg_eval（mAP）、panoptic_seg_eval（PQ），以及交互式/指代任务的 IoU→AP@25/50 与 precision 指标自定义实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l3-open-vocabulary.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "理解开放词汇任务『先生成类无关掩码、再用基础模型分类』的两阶段范式",
+            "掌握 iou_threshold/mask_threshold 的作用",
+            "能把本仓库输出对接 Open3DIS 输入格式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "uniseg3d.py 中的类无关掩码生成代码块（约 L829-L873）",
+            "mask_score×pred_iou 的过滤逻辑",
+            "Open3DIS 对接步骤与输出格式"
+          ],
+          "order": 3,
+          "practice_task": "恢复 uniseg3d.py 中被注释的保存代码块并设置 save_path，对一个验证场景运行推理，检查保存的 .pth 中 ins 掩码形状与 conf 数量；再编写脚本把该输出转换成 Open3DIS 期望的输入格式。",
+          "source_files": [
+            "uniseg3d/uniseg3d.py",
+            "README.md",
+            "uniseg3d/unified_metric.py"
+          ],
+          "title": "开放词汇分割实战：类无关掩码 + Open3DIS",
+          "topic": "讲解如何取消 uniseg3d.py 中 L840-L872 的注释生成类无关掩码（mask score × pred_iou 过滤后保存 ins/conf），再按 README 用 Open3DIS 的掩码分类步骤完成开放词汇分割。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2",
+            "u6-l3",
+            "u5-l6"
+          ],
+          "filename": "u6-l4-extensions.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "能独立设计一个新功能（如 box prompt 或新数据集）的改造方案并定位所有需修改的文件",
+            "理解注册器让新增模块即插即用的原因",
+            "评估改动对六任务联动的影响"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "新提示类型四件套改造点",
+            "新数据集接入清单",
+            "配置与注册的联动修改"
+          ],
+          "order": 4,
+          "practice_task": "动手实现一个最小化的新提示类型（如『框提示』：给定 GT 实例质心与半径圈选超点作为提示查询），完成 transform、add_*_prompt_queries、split_*、criterion 注册与 config 修改，并在小数据上跑通一次前向。",
+          "source_files": [
+            "uniseg3d/uniseg3d.py",
+            "uniseg3d/transforms_3d.py",
+            "uniseg3d/unified_criterion.py",
+            "uniseg3d/scannet_dataset.py",
+            "configs/uniseg3d_1xb4_scannet_scanrefer_scannet200_unified.py"
+          ],
+          "title": "二次开发指南：扩展点与改造清单",
+          "topic": "总结本项目的扩展点：新增提示类型（仿照 point/text 提示的 transforms + 注入 + 拆分 + 损失四件套）、替换骨干或解码器、接入新数据集（infos 构造与 AddSuperPointAnnotations 适配）、调整多任务损失权重与训练策略。"
+        }
+      ],
+      "order": 6,
+      "title": "推理、评估与二次开发"
+    }
+  ]
+}

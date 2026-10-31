@@ -1,13 +1,13 @@
 {
-  "head": "af9e40e12108141bb18f93188c82d2583df18509",
+  "head": "a474b264537268022a9c06766f65c90ffd0be6c1",
   "project": "openinfer-pegainfer-sim",
-  "rationale": "pegainfer-sim 是一个小而密的 crate：文件不多，但同时承载\"假引擎定时模型（legacy 车道）\"、\"确定性 vLLM V1 调度状态机（worker.rs）\"、\"JSON 校准档案 + 三线性插值步计时（profile.rs）\"和\"OpenAI 兼容前端的全套 e2e/指标契约（tests/）\"四块相对独立的机制。因此学习路线先让读者在单元一从零把它跑起来（定位、CLI、start_engine 契约），再沿\"legacy 定时车道 → worker 状态机 → 取消语义\"进入单元二逐层拆一条请求的生命周期；单元三把 profile 机制独立成篇，因为它是自成体系的文件契约（sha256 清单、覆盖域、确定性插值），最后用 ProfiledRuntime 把它与 worker 缝合；单元四面向专家层，以真实 e2e 测试为教材讲透可观测性计数器、logprobs/工具调用协议测缝、失败传播，并以\"添加一个新旋钮\"作为综合实践。依赖链保证每篇讲义只引入一个新机制，且所有引用均来自实际读过的源码文件。",
+  "rationale": "pegainfer-sim 是一个小而密的 crate：文件不多，但同时承载\"假引擎定时模型（legacy 车道）\"、\"确定性 vLLM V1 调度状态机（worker.rs）\"、\"JSON 校准档案 + 三线性插值步计时（profile.rs）\"和\"OpenAI 兼容前端的全套 e2e/指标契约（tests/）\"四块相对独立的机制。因此学习路线先让读者在单元一从零把它跑起来（定位、CLI、start_engine 契约），再沿\"legacy 定时车道 → worker 状态机 → 取消语义\"进入单元二逐层拆一条请求的生命周期；单元三把 profile 机制独立成篇，因为它是自成体系的文件契约（sha256 清单、覆盖域、确定性插值），最后用 ProfiledRuntime 把它与 worker 缝合；单元四面向专家层，以真实 e2e 测试为教材讲透可观测性计数器、logprobs/工具调用协议测缝、失败传播，并以\"添加一个新旋钮\"作为综合实践。依赖链保证每篇讲义只引入一个新机制，且所有引用均来自实际读过的源码文件。本次增量核对（af9e40e1 → a474b264）：区间内唯一提交 a474b264 仅改动 docs/ 下 qwen3 相关文档，pegainfer-sim 目录零改动，src 与 tests 全部引用文件及关键符号（start_engine_with_partitions、planned_completion、ProfiledRuntime、CancelResult、TimingGrid、step_legacy、PrefixCacheTally 等）均确认仍在源码中，故全部讲义标记为 keep，仅更新 head。",
   "units": [
     {
       "id": "u1",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -33,7 +33,7 @@
           "topic": "介绍 pegainfer-sim 在 PegaInfer 工作区中的定位：一个纯 CPU、无模型权重的\"假\"推理引擎，用来在不依赖 GPU 的情况下测试与基准化 vLLM 兼容前端。梳理 crate 的文件构成与依赖关系。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -60,7 +60,7 @@
           "topic": "精读 main.rs：clap 参数定义、build_runtime 如何区分 legacy 定时模式与 --profile 档案模式、两种模式的参数冲突校验，以及最终如何调用 pegainfer_frontend::vllm::serve 把模拟引擎挂到 OpenAI 兼容 HTTP 服务上。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -96,7 +96,7 @@
       "id": "u2",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -123,7 +123,7 @@
           "topic": "逐段拆解 SimScheduler::step_legacy：排队请求如何被 admit、TTFT = base_ttft_ms + prompt_len/prefill_tokens_per_ms 的推导、TPOT 节拍、WAIT_SLICE 切片睡眠，以及 RunningRequest 的生命周期直到 finish。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -151,7 +151,7 @@
           "topic": "讲解模拟引擎的输出从哪里来：planned_completion 在脚本为空时用 fake_token_id 循环复用 prompt token、在脚本非空时逐字重放并据此决定 Stop/Length；以及 logprobs.rs 如何合成 PromptEcho 与 TokenLogprob 协议夹具。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -178,7 +178,7 @@
           "topic": "进入 worker.rs 的确定性泛型调度状态机：RequestPhase 三阶段、WorkerRequest 的提交路径、preflight 的两类拒绝，以及 SubmissionResult 的三种结果与请求快照查询。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -206,7 +206,7 @@
           "topic": "深入 plan_step 的预算分配（先 decode 后 prefill、max_num_seqs 与 max_num_batched_tokens 双上限、whole vs chunked 的 scheduled_prefill_tokens）与 complete_step 的推进语义（prefill 收尾即产首 token、decode 逐 token、完成即出队）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -242,7 +242,7 @@
       "id": "u3",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -271,7 +271,7 @@
           "topic": "讲解 profile.rs 的 JSON 契约：EngineProfile 四段结构、deny_unknown_fields 与旧版字段（profile_id/provenance/timing）的迁移报错、CalibrationReference + CalibrationManifest 组成的可重定位 bundle，以及 load_from_path 的 sha256 清单校验流程。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -298,7 +298,7 @@
           "topic": "讲解 SchedulerProfile（policy/max_num_seqs/max_num_batched_tokens/max_model_len/prefill）的约束体系，以及 PredictorCoverage 与 TimingGrid 的轴、domain 一致性校验和 validate_shape 对 StepShape 的守卫。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -325,7 +325,7 @@
           "topic": "讲解数值方法部分：bracket 的二分定位与 AxisBracket 分数表示、interpolate_bracket 的整数四舍五入与溢出防护、三轴嵌套插值顺序，以及 value_at 的行主序索引。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3",
             "u3-l1"
@@ -363,7 +363,7 @@
       "id": "u4",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u1-l2"
@@ -391,7 +391,7 @@
           "topic": "解析 tests/frontend_e2e.rs 的基础设施：SimServer 的多次重试启动、reserve_loopback_port、最小模型元数据（TINY_TOKENIZER_JSON 等常量）、健康检查与优雅 shutdown，以及为什么 token-id prompt 仍需要真实 tokenizer 做解码。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l4",
             "u2-l2"
@@ -420,7 +420,7 @@
           "topic": "讲解模拟引擎如何向 Prometheus 暴露指标：SchedulerMetrics 在两条车道的组装方式、SpecDecodeCounters::observe_draft 的假想验证步、PrefixCacheTally 四族计数的口径（含 prompt_logprobs 跳过查找、未配置不上报的 Option 语义），以及 e2e 中 wait_for_metrics 的稳定断言手法。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -449,7 +449,7 @@
           "topic": "两个\"纯 CPU 验证协议层\"的样板：logprobs 子模块覆盖 prompt_logprobs、logprobs=0 等边界；tool_call_roundtrip 用脚本化补全 + Fuse 解码器的定制 tokenizer，让 <tool_call> JSON 跨多个流式分片重组，并解释脚本为何要补一个 EOS（Stop 终止时的末 token 抑制）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1",
             "u4-l2"
