@@ -1,0 +1,1525 @@
+{
+  "head": "fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed",
+  "project": "gopeed",
+  "rationale": "本手册遵循「从零开始、由浅入深、源码与实践结合」的路径设计：第一单元让读者建立 Gopeed「Go 核心 + Flutter 外壳」的整体认知并能亲手构建运行；第二单元先攻克贯穿全项目的领域模型（Request/Resource/Options/Task/全局配置），因为后续所有源码阅读都依赖这套词汇；第三、四单元进入架构脊柱——Fetcher 协议抽象与 Downloader 任务生命周期（含 watch 事件循环、并发调度与断点恢复），这是理解一切功能的钥匙；第五到七单元按协议逐个深潜，HTTP 多连接分块下载是重中之重，其次是 BitTorrent 的做种/统计/tracker 定时任务，再到 HLS、FTP、ED2K；第八单元自底向上讲解同一核心如何暴露为无传输服务层、REST 服务器、桌面 FFI/移动 gomobile 桥接、任务事件流、MCP 与 Docker 部署；第九单元讲解最具特色的基于 goja 与 WebView 双运行时的 JavaScript 扩展系统（含 Blob 资源机制）；第十单元补齐下载完成后的自动分类、归档解压、webhook/脚本、GitHub 镜像等周边机制；第十一单元以测试体系、并发与优雅关闭、Flutter 前端对接收尾，并以毕业实践串联全链路。讲义间用 depends_on 显式声明先后关系，48 篇的规模与项目 250+ Go 文件加完整 Flutter 应用的体量相匹配，每篇只解决一个主题并配有可落地的代码实践。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "初识 Gopeed：架构、构建与第一次运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "Gopeed 是什么：项目定位与总体架构",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Gopeed 作为 Go + Flutter 下载管理器的定位、支持的协议（HTTP/BT/磁力/ED2K/HLS/FTP）与产品形态（桌面、移动、Web、CLI、Go 库）。建立「一个 Go 核心、多种外壳」以及 Flutter 与 Go 通过 FFI/REST 通信的整体心智模型。",
+          "learning_goals": [
+            "说出 Gopeed 的核心功能特性与支持的下载协议",
+            "理解 Go 后端与 Flutter 前端的职责分工与通信方式",
+            "识别仓库中承载核心、桥接、前端的三类代码位置"
+          ],
+          "source_files": [
+            "README.md",
+            "README_zh-CN.md",
+            "CONTRIBUTING.md",
+            "ui/flutter/docs/backend-transport-architecture.md"
+          ],
+          "minimal_modules": [
+            "README 功能与协议清单",
+            "Go 核心 + Flutter 外壳架构",
+            "bind 桥接层概览"
+          ],
+          "practice_task": "阅读 README 与 backend-transport-architecture.md，手绘一张 Gopeed 架构图，标出 Go 核心、Flutter UI、REST/FFI 通道、JS 扩展引擎、存储层，并注明桌面、移动、Web、CLI 四种产品形态分别复用了其中哪些部分。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "把它跑起来：环境准备与各端构建运行",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解 Go 1.25+/Flutter 3.41+ 环境要求，如何构建 CLI、Web 服务端（含嵌入 UI）、桌面 c-shared 库与移动 gomobile 产物，以及用 Docker 快速启动。",
+          "learning_goals": [
+            "掌握 go install 与 go build 构建 CLI 的方法",
+            "理解 -tags nosqlite/web 与 -buildmode=c-shared 等构建参数的含义",
+            "会用 docker-compose 启动 Web 版并访问"
+          ],
+          "source_files": [
+            "README.md",
+            "go.mod",
+            "Dockerfile",
+            "docker-compose.yml",
+            ".github/workflows/build.yml"
+          ],
+          "minimal_modules": [
+            "构建命令矩阵",
+            "build tags 的作用",
+            "Docker 部署入口"
+          ],
+          "practice_task": "在本地用 go build 编译 cmd/gopeed 并用它下载一个文件；再用 Dockerfile/docker-compose 构建并启动 Web 服务，浏览器访问确认可用，记录每一步用到的构建标签。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库地图：目录结构与模块职责",
+          "order": 3,
+          "filename": "u1-l3-repo-structure.md",
+          "level": "beginner",
+          "topic": "逐个讲解 cmd、bind、pkg/base、pkg/download、pkg/api、pkg/rest、pkg/mcpserver、internal/fetcher、internal/protocol、internal/webview、ui/flutter 等目录的职责，建立检索源码的索引。",
+          "learning_goals": [
+            "能说出每个顶层目录对应的模块职责",
+            "能在 1 分钟内定位某功能所在的大致文件",
+            "了解 go.mod 中的关键第三方依赖（torrent、goja、bbolt、mux 等）"
+          ],
+          "source_files": [
+            "go.mod",
+            "cmd/gopeed/main.go",
+            "cmd/web/main.go",
+            "bind/desktop/main.go",
+            "pkg/base/model.go",
+            "pkg/download/downloader.go",
+            "pkg/api/service.go",
+            "ui/flutter/lib/main.dart"
+          ],
+          "minimal_modules": [
+            "cmd 多入口",
+            "pkg 与 internal 的分层",
+            "bind 桥接目录",
+            "ui/flutter 前端目录"
+          ],
+          "practice_task": "为仓库每个顶层目录（cmd/bind/pkg/internal/ui/_examples）写一页职责说明；再从 go.mod 中挑出 5 个关键第三方依赖，说明它们分别被哪些模块使用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "第一个程序：用 Boot API 写命令行下载器",
+          "order": 4,
+          "filename": "u1-l4-first-downloader.md",
+          "level": "beginner",
+          "topic": "通过 _examples/basic 与 cmd/gopeed 源码，学习把 Gopeed 当作 Go 库使用的最简方式：Boot() 链式创建任务、监听事件、配置 HTTP 连接数。",
+          "learning_goals": [
+            "掌握 download.Boot() 的链式 API 用法",
+            "理解 EventKey 各事件的触发时机",
+            "知道如何通过 http.OptsExtra 控制连接数"
+          ],
+          "source_files": [
+            "_examples/basic/main.go",
+            "cmd/gopeed/main.go",
+            "cmd/gopeed/flags.go",
+            "pkg/download/downloader.go",
+            "pkg/download/event.go"
+          ],
+          "minimal_modules": [
+            "Boot 链式构造器",
+            "Listener 事件回调",
+            "Options 与 OptsExtra"
+          ],
+          "practice_task": "仿照 _examples/basic 写一个小工具：监听 progress 与 finally 事件，在终端打印进度条与结果；分别用 Connections=1 和 8 下载同一文件并对比耗时。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心领域模型：下载世界的词汇表",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Request、Resource、Options：一次下载的三要素",
+          "order": 1,
+          "filename": "u2-l1-request-resource-options.md",
+          "level": "beginner",
+          "topic": "精读 pkg/base/model.go：请求（URL/Extra/Labels/Proxy）、资源（名称/大小/Range/文件列表）与选项（路径/选择文件/协议 Extra）如何构成一次下载的全部输入，以及各协议的 Extra 结构。",
+          "learning_goals": [
+            "解释 Request/Resource/FileInfo/Options 每个字段的含义",
+            "理解 Extra 的泛型解析机制 ParseReqExtra/ParseOptExtra",
+            "能写出各协议 ReqExtra/OptsExtra 的用途对照表"
+          ],
+          "source_files": [
+            "pkg/base/model.go",
+            "pkg/protocol/http/model.go",
+            "pkg/protocol/bt/model.go",
+            "pkg/protocol/ed2k/model.go",
+            "pkg/base/model_test.go"
+          ],
+          "minimal_modules": [
+            "Request 与 RequestProxy",
+            "Resource 与 FileInfo",
+            "Options 与 SelectFiles",
+            "协议 Extra 模型"
+          ],
+          "practice_task": "写一个 Go 单元测试：构造含 SelectFiles 的 Options 与多文件 Resource，验证 CalcSize 的计算逻辑；再为 HTTP ReqExtra 填充 Method/Header/Body 并打印 JSON 序列化结果。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Task 结构与任务状态机",
+          "order": 2,
+          "filename": "u2-l2-task-model-status.md",
+          "level": "beginner",
+          "topic": "讲解 pkg/download.Task 的字段构成（Meta/Status/Progress/NeedsPreparation 等）、六种状态常量、DoneAt 一次性写入语义以及速度滑动窗口计算。",
+          "learning_goals": [
+            "画出 ready/wait/running/pause/error/done 的状态迁移图",
+            "理解 Task.Name() 的多级回退逻辑与 MarshalJSON 定制",
+            "掌握 speedArr 滑动窗口求平均速度的算法"
+          ],
+          "source_files": [
+            "pkg/download/model.go",
+            "pkg/base/constants.go",
+            "pkg/download/downloader.go"
+          ],
+          "minimal_modules": [
+            "Task 字段与生命周期注释",
+            "base.Status 状态常量",
+            "updateStatus/DoneAt 语义",
+            "calcSpeed 速度窗口"
+          ],
+          "practice_task": "画出完整状态迁移图并标注触发者（Downloader 还是 Fetcher）；写测试验证 done 任务 DoneAt 只写一次、以及 5 秒窗口内平均速度的计算结果。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "DownloaderStoreConfig：全局配置体系",
+          "order": 3,
+          "filename": "u2-l3-store-config.md",
+          "level": "intermediate",
+          "topic": "讲解全局配置结构：下载目录、MaxRunning、ProtocolConfig、代理、webhook、脚本、自动种子、解压、分类、API 服务等子配置，以及 Init 默认值、Merge 部分更新与 legacy 分类迁移机制。",
+          "learning_goals": [
+            "说出每个子配置的作用与默认值",
+            "理解 Merge 在「部分更新」场景下的必要性",
+            "了解 MigrateLegacyExtraCategories 这类配置迁移如何编写"
+          ],
+          "source_files": [
+            "pkg/base/model.go",
+            "pkg/download/protocol_config.go",
+            "pkg/download/downloader.go"
+          ],
+          "minimal_modules": [
+            "DownloaderStoreConfig 字段组",
+            "Init/Merge 逻辑",
+            "协议配置归一化 normalizeProtocol"
+          ],
+          "practice_task": "写一段代码读取默认配置，修改 MaxRunning 与 ProtocolConfig 后调用 Merge 模拟部分更新并观察结果；再写测试复现 MigrateLegacyExtraCategories 把 legacy 分类搬移到顶层字段的过程。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "Fetcher 抽象：协议接入层",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Fetcher 接口：协议实现的生命周期契约",
+          "order": 1,
+          "filename": "u3-l1-fetcher-interface.md",
+          "level": "intermediate",
+          "topic": "精读 internal/fetcher/fetcher.go：Fetcher 的 Setup/Resolve/Start/Patch/Pause/Close/Stats/Progress/Wait 方法契约，FetcherMeta 与 Progress 的含义，以及 Stats 快照/运行时二分设计。",
+          "learning_goals": [
+            "解释 Fetcher 每个接口方法的调用时机与职责",
+            "理解 DefaultFetcher 基类与 DoneCh 的作用",
+            "说明 Stats 分 Snapshot/Runtime 的原因"
+          ],
+          "source_files": [
+            "internal/fetcher/fetcher.go",
+            "pkg/download/downloader.go",
+            "internal/protocol/http/fetcher.go"
+          ],
+          "minimal_modules": [
+            "Fetcher 接口",
+            "FetcherMeta 路径计算",
+            "Stats 双负载",
+            "DefaultFetcher.Wait"
+          ],
+          "practice_task": "为 Fetcher 接口写一份方法级中文文档，标注每个方法由 Downloader 的哪个函数调用；用表格对比 HTTP 与 BT 实现中 Resolve/Patch/Stats 的职责差异。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "FetcherManager 与协议路由：URL 如何选中协议",
+          "order": 2,
+          "filename": "u3-l2-fetcher-manager-routing.md",
+          "level": "intermediate",
+          "topic": "讲解 FetcherManager 的 Name/Filters/Build/ParseName/Store/Restore 契约，SchemeFilter 的 url/file/base64 三类匹配规则，以及 DownloaderConfig.Init 中管理器注册顺序如何决定协议路由。",
+          "learning_goals": [
+            "掌握 SchemeFilter 三种匹配类型的语义",
+            "理解 parseFm/buildFetcher 的路由过程",
+            "解释 FetchManagers 顺序敏感性（FTP 为何排最前）"
+          ],
+          "source_files": [
+            "internal/fetcher/fetcher.go",
+            "pkg/download/downloader.go",
+            "pkg/download/model.go",
+            "internal/protocol/ftp/fetcher_manager.go"
+          ],
+          "minimal_modules": [
+            "FetcherManager 接口",
+            "SchemeFilter.Match",
+            "DownloaderConfig.Init 注册顺序",
+            "parseFm/buildFetcher"
+          ],
+          "practice_task": "写表驱动测试覆盖 SchemeFilter.Match 的 url/file/base64 三类匹配（含带 ?query 的 URL）；再用一段注释解释 ftp://host/x.torrent 为何走 FTP 而不是 BT。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Controller 与共享基础服务",
+          "order": 3,
+          "filename": "u3-l3-controller-services.md",
+          "level": "intermediate",
+          "topic": "讲解 internal/controller 提供的共享服务：临时文件 Scope、配置读取、代理处理、日志注入、文件 Touch 预分配，以及 tempfiles/logger/httpclient 等基础设施如何被协议使用。",
+          "learning_goals": [
+            "理解 Controller 在 Fetcher 与 Downloader 之间的中介角色",
+            "掌握 Touch 预分配文件大小的作用",
+            "了解临时文件目录的作用域管理"
+          ],
+          "source_files": [
+            "internal/controller/controller.go",
+            "internal/tempfiles/scope.go",
+            "internal/logger/logger.go",
+            "internal/httpclient/client.go"
+          ],
+          "minimal_modules": [
+            "Controller 结构与回调注入",
+            "DefaultFileController.Touch",
+            "tempfiles.Scope"
+          ],
+          "practice_task": "追踪一次 HTTP 下载中 Touch 的调用点；实现一个记录每次文件创建日志的自定义 FileController，通过 DownloaderConfig.Controller 注入并验证生效。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "实战：实现一个自定义协议 Fetcher",
+          "order": 4,
+          "filename": "u3-l4-custom-protocol.md",
+          "level": "intermediate",
+          "topic": "以最小的 mock:// 或 data: 协议为例，从零实现 FetcherManager 与 Fetcher 并注册进 Downloader，打通 resolve→create→download→done 全流程。",
+          "learning_goals": [
+            "独立实现 Fetcher 全部接口方法",
+            "正确实现 Store/Restore 使任务可恢复",
+            "理解 setupFetcher 注入 Controller 的时机"
+          ],
+          "source_files": [
+            "internal/fetcher/fetcher.go",
+            "internal/protocol/ed2k/fetcher.go",
+            "internal/protocol/ed2k/config.go",
+            "pkg/download/model.go",
+            "pkg/download/downloader.go"
+          ],
+          "minimal_modules": [
+            "FetcherManager 骨架",
+            "Fetcher Resolve/Start 实现",
+            "DoneCh 完成通知",
+            "注册与验证"
+          ],
+          "practice_task": "参考 ed2k 实现实现，写一个支持 mock:// 前缀 URL 的协议：Resolve 返回固定 Resource，Start 用 goroutine 模拟分块写入并在完成后向 DoneCh 发送结果；注册进 FetchManagers 后用 Boot API 完成一次下载。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "Downloader 核心：任务生命周期",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Downloader 的结构体与初始化",
+          "order": 1,
+          "filename": "u4-l1-downloader-setup.md",
+          "level": "intermediate",
+          "topic": "精读 Downloader 结构体的字段（storage、tasks、waitTasks、fetcherCache、extensions、blob、各类锁）与 NewDownloader/Setup 的初始化流程，以及存储桶的划分。",
+          "learning_goals": [
+            "说出 Downloader 各字段的用途与保护它的锁",
+            "理解七个存储桶（task/save/task_stats/protocol_state/protocol_jobs/config/extension）分别存什么",
+            "掌握 Setup 阶段完成的初始化清单"
+          ],
+          "source_files": [
+            "pkg/download/downloader.go",
+            "pkg/download/model.go",
+            "pkg/download/storage.go",
+            "pkg/download/temp.go"
+          ],
+          "minimal_modules": [
+            "Downloader 结构体",
+            "NewDownloader/Setup",
+            "存储桶常量",
+            "DownloaderConfig.Init"
+          ],
+          "practice_task": "画一张 Downloader 字段与锁的对应关系图；用 MemStorage 启动一个 Downloader，观察日志文件、临时目录的创建位置，并列出 Setup 执行的所有初始化步骤。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "主链路：Resolve → Create → doStart",
+          "order": 2,
+          "filename": "u4-l2-task-lifecycle.md",
+          "level": "intermediate",
+          "topic": "跟踪创建任务的完整调用链：Resolve 生成 ResolveResult 与缓存、CreateDirect/Create 建任务入队、notifyRunning 调度、doStart 中 restoreFetcher、prepareTask 目录决策、fetcher.Start 与 watch 启动。",
+          "learning_goals": [
+            "解释 Resolve 与 CreateDirect 两种建任务路径的区别",
+            "理解 NeedsPreparation 一次性准备目录与重命名的机制",
+            "掌握 doStart 中 statusMut 与 handler 异步执行的结构"
+          ],
+          "source_files": [
+            "pkg/download/downloader.go",
+            "pkg/download/model.go"
+          ],
+          "minimal_modules": [
+            "Resolve/ResolveResult",
+            "CreateDirect/doCreate",
+            "notifyRunning 排队",
+            "doStart 异步 handler",
+            "prepareTask"
+          ],
+          "practice_task": "用日志或调试器跟踪一个 HTTP 任务从 Resolve 到 fetcher.Start() 的完整调用链，写出每一步对 Task 字段的修改清单；并解释重复下载同名文件时 checkDuplicateLock 为何要包住 fetcher.Start。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "watch 循环、事件系统与进度刷新",
+          "order": 3,
+          "filename": "u4-l3-watch-and-events.md",
+          "level": "intermediate",
+          "topic": "讲解 watch 协程如何轮询 fetcher 进度、计算速度、持久化检查点并发出 start/progress/done/error 事件，以及 Listener 回调与 RefreshInterval 的关系。",
+          "learning_goals": [
+            "读懂 watch 函数的完整循环逻辑",
+            "理解七种 EventKey 的触发位置与 finally 的合成逻辑",
+            "掌握 shouldSaveTaskCheckpoint 的落盘策略"
+          ],
+          "source_files": [
+            "pkg/download/downloader.go",
+            "pkg/download/event.go",
+            "pkg/util/timer.go",
+            "pkg/download/model.go"
+          ],
+          "minimal_modules": [
+            "watch 轮询循环",
+            "emit/Listener 分发",
+            "进度与速度计算",
+            "检查点保存策略"
+          ],
+          "practice_task": "基于 Listener 实现一个终端进度打印器（与 cmd/gopeed 对比优劣）；把 RefreshInterval 从 350ms 调到 1000ms，测量事件频率与存储写入次数的变化。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "暂停、继续、删除与最大并发调度",
+          "order": 4,
+          "filename": "u4-l4-pause-continue-delete.md",
+          "level": "advanced",
+          "topic": "讲解 Pause/Continue/Delete 的过滤批量语义、doPauseForScheduling 如何在 MaxRunning 满时把任务压回 wait 状态，以及 runGeneration 代数机制如何防止暂停/完成竞态下旧协程覆盖新状态。",
+          "learning_goals": [
+            "解释 TaskFilter 的批量操作模型",
+            "理解 wait 队列与 notifyRunning 的唤醒机制",
+            "掌握 runGeneration 与 preparePause/runPauseHandler 的竞态防护设计"
+          ],
+          "source_files": [
+            "pkg/download/downloader.go"
+          ],
+          "minimal_modules": [
+            "Pause/Continue/Delete",
+            "doPauseForScheduling",
+            "runGeneration 代数",
+            "markTaskDone/markTaskError"
+          ],
+          "practice_task": "创建 8 个任务并把 MaxRunning 设为 2，记录 wait→running 的切换时序；再写一个并发测试复现「暂停与完成同时发生」的场景，验证 runGeneration 防止旧协程把任务标成 done。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "持久化与断点恢复：存储桶与 Store/Restore",
+          "order": 5,
+          "filename": "u4-l5-persistence-restore.md",
+          "level": "intermediate",
+          "topic": "讲解 Storage 接口与 MemStorage/BoltStorage 双实现、saveTask 的落盘内容、restoreTask/restoreFetcher 的重启恢复路径，以及各协议通过 Manager.Store/Restore 序列化自己的续传数据。",
+          "learning_goals": [
+            "解释 bbolt 存储桶的键值布局",
+            "理解 saveTask 保存 Task 与 fetcherData 的时机",
+            "掌握 ContinueOnStartup 的自动续跑逻辑"
+          ],
+          "source_files": [
+            "pkg/download/storage.go",
+            "pkg/download/downloader.go",
+            "internal/protocol/http/fetcher_manager.go",
+            "internal/protocol/bt/fetcher.go"
+          ],
+          "minimal_modules": [
+            "Storage 接口与双实现",
+            "saveTask/restoreTask",
+            "Manager Store/Restore 约定",
+            "ContinueOnStartup"
+          ],
+          "practice_task": "下载中途强制结束进程再重启，跟踪 fetcherCache、bucketSave、bucketTaskStats 的读取路径；为 u3-l4 的自定义协议补上 Store/Restore，使任务可跨进程续传并验证。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "HTTP 协议实现深潜",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "HTTP Resolve：元数据探测与预取",
+          "order": 1,
+          "filename": "u5-l1-http-resolve.md",
+          "level": "intermediate",
+          "topic": "精读 HTTP Fetcher 的 Resolve：如何用探测请求解析文件名、大小、Range 支持、重定向与 ETag，以及 asyncPrefetch 如何在解析阶段提前下载数据并在 Start 时无缝接管。",
+          "learning_goals": [
+            "理解文件名从 Content-Disposition/URL 解析的优先级",
+            "解释 Range 字段对多连接可行性的决定作用",
+            "掌握 asyncPrefetch/stopPrefetchAndCopyData 的免二次请求设计"
+          ],
+          "source_files": [
+            "internal/protocol/http/fetcher.go",
+            "internal/protocol/http/config.go",
+            "internal/httpclient/client.go"
+          ],
+          "minimal_modules": [
+            "Resolve 探测请求",
+            "Resource 字段填充",
+            "asyncPrefetch 预取",
+            "预取数据接管"
+          ],
+          "practice_task": "用 internal/test 的 httptest 服务器分别返回 200、206、重定向、带 Content-Disposition 的响应，观察 Resource 各字段如何被填充；解释预取数据如何免二次请求直接进入下载文件。",
+          "depends_on": [
+            "u3-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "多连接分块下载：chunk、connection 与慢启动",
+          "order": 2,
+          "filename": "u5-l2-http-multi-connection.md",
+          "level": "advanced",
+          "topic": "讲解 chunk 区间模型、connection 结构、downloadLoop 的调度循环、expandConnections 的扩张策略与 slowStartController 的 TCP 慢启动式连接批量增长/失败回退算法。",
+          "learning_goals": [
+            "解释 chunk 的 begin/end/openEnded 语义与切分算法",
+            "理解 downloadLoop 如何驱动连接并处理 helpOtherConnection 协作",
+            "掌握慢启动控制器的批次扩张与失败收缩条件"
+          ],
+          "source_files": [
+            "internal/protocol/http/fetcher.go"
+          ],
+          "minimal_modules": [
+            "chunk 模型",
+            "connection 状态机",
+            "downloadLoop/expandConnections",
+            "slowStartController",
+            "helpOtherConnection"
+          ],
+          "practice_task": "写测试统计不同 Connections 配置下实际建立的连接数与批次节奏；画出一次 4 连接下载中各 connection 的 chunk 占用与互助（helpOtherConnection）示意图。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "Range 校验、断点续传与降级策略",
+          "order": 3,
+          "filename": "u5-l3-http-range-recovery.md",
+          "level": "advanced",
+          "topic": "讲解 downloadChunkOnce 的主循环、validateRangeResponse/parseRangeResponse 对服务器响应的严格校验、If-Range 与顺序下载回退、未知大小资源的 openEnded 处理与断线重连。",
+          "learning_goals": [
+            "理解 206/200/416 响应分别触发的处理分支",
+            "掌握 fallbackToSequentialDownload 降级时机的判断",
+            "解释 openEnded chunk 如何在运行中确定文件总大小"
+          ],
+          "source_files": [
+            "internal/protocol/http/fetcher.go",
+            "pkg/base/constants.go"
+          ],
+          "minimal_modules": [
+            "downloadChunkOnce",
+            "validateRangeResponse",
+            "顺序回退与重启",
+            "openEnded 大小解析",
+            "resumeConnections"
+          ],
+          "practice_task": "构造三类「坏服务器」：忽略 Range 恒返 200、206 与 200 混杂、传输中途断开，分别验证 fetcher 的校验、回退与续传行为，并记录每种情况下任务事件序列。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "完成判定、校验和与 HTTP OptsExtra",
+          "order": 4,
+          "filename": "u5-l4-http-completion-checksum.md",
+          "level": "intermediate",
+          "topic": "讲解 checkCompletion/onDownloadComplete 的收尾流程、ChecksumOption 的 md5/sha1/sha256 校验与失败处理，以及 OptsExtra 中 AutoTorrent/AutoExtract 等字段如何影响后续流程。",
+          "learning_goals": [
+            "理解完成判定的条件与收尾步骤顺序",
+            "掌握校验和算法归一化与哈希长度校验规则",
+            "说明 OptsExtra 各字段在 Downloader 层的联动效果"
+          ],
+          "source_files": [
+            "internal/protocol/http/fetcher.go",
+            "pkg/protocol/http/model.go"
+          ],
+          "minimal_modules": [
+            "checkCompletion/onDownloadComplete",
+            "verifyChecksum",
+            "ChecksumOption 校验",
+            "OptsExtra 联动字段"
+          ],
+          "practice_task": "为一次下载配置 md5 校验并故意提供错误哈希，观察 error 事件与已下载文件的保留策略；整理 OptsExtra 每个字段的生效时机与全局配置的覆盖关系。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "BitTorrent 协议实现",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "BT 客户端、种子与磁力解析",
+          "order": 1,
+          "filename": "u6-l1-bt-client-torrent.md",
+          "level": "intermediate",
+          "topic": "讲解基于 anacrolix/torrent 的 BT 客户端初始化、Resolve 如何解析种子文件与磁力链接生成多文件 Resource、以及 Filters 对 magnet/torrent/file 后缀的三类匹配。",
+          "learning_goals": [
+            "理解 initClient 的共享客户端设计",
+            "掌握种子文件与磁力链接在 addTorrent 中的分支差异",
+            "解释 torrentFileLayout 如何映射出 Resource 文件列表"
+          ],
+          "source_files": [
+            "internal/protocol/bt/fetcher.go",
+            "internal/protocol/bt/config.go",
+            "internal/protocol/bt/testdata/test.torrent"
+          ],
+          "minimal_modules": [
+            "initClient",
+            "Resolve/addTorrent",
+            "Filters 匹配规则",
+            "torrentFileLayout"
+          ],
+          "practice_task": "用仓库自带的 testdata/test.torrent 走一遍 Resolve，打印生成的 Resource 文件列表与大小；再对比磁力链接路径上 InfoHash 的获取方式。",
+          "depends_on": [
+            "u3-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "文件选择与 Patch：修改进行中的任务",
+          "order": 2,
+          "filename": "u6-l2-bt-selection-patch.md",
+          "level": "intermediate",
+          "topic": "讲解 BT 的 Patch 如何更新 SelectFiles、updateRes 重算大小、removeUnselectedFile 清理未选文件，以及 Downloader.Patch 到 fetcher.Patch 的传递链。",
+          "learning_goals": [
+            "理解 SelectFiles 索引与 Resource.Files 的对应关系",
+            "掌握运行中修改文件选择后的资源重算逻辑",
+            "解释未选中文件的删除时机与风险"
+          ],
+          "source_files": [
+            "internal/protocol/bt/fetcher.go",
+            "pkg/download/downloader.go"
+          ],
+          "minimal_modules": [
+            "Patch 更新选择",
+            "updateRes 重算",
+            "removeUnselectedFile"
+          ],
+          "practice_task": "对一个多文件种子先只选 1 个文件启动下载，再通过 Downloader.Patch 追加选择另一个文件，跟踪 removeUnselectedFile 与 updateRes 的执行效果并验证任务大小变化。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "做种、上传与统计：PieceMap 与 Peers",
+          "order": 3,
+          "filename": "u6-l3-bt-seeding-stats.md",
+          "level": "advanced",
+          "topic": "讲解 Uploader 接口与 doUpload 做种循环、分享率与做种限制，Stats 快照/运行时的 BT 载荷（peers、piece 状态、传输统计）以及 PieceMap 的位图表示。",
+          "learning_goals": [
+            "理解 Upload/WaitUpload/UploadedBytes 三方法的协作",
+            "掌握 buildBTPieceMap/buildBTPeers 统计的构造方式",
+            "解释 PieceMap 位图与 piece 完成度的关系"
+          ],
+          "source_files": [
+            "internal/protocol/bt/fetcher.go",
+            "pkg/base/piece_map.go",
+            "pkg/base/stats.go"
+          ],
+          "minimal_modules": [
+            "Uploader 接口",
+            "doUpload 做种循环",
+            "Stats 载荷构造",
+            "PieceMap 位图"
+          ],
+          "practice_task": "下载完成后开启做种，通过 /api/v1/tasks/{id}/stats 观察 peers 与 piece 状态变化；用测试数据构造一个 PieceMap 并验证完成度计算。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "Tracker 管理与协议定时任务",
+          "order": 4,
+          "filename": "u6-l4-bt-trackers-jobs.md",
+          "level": "advanced",
+          "topic": "讲解 effectiveTrackers 合并订阅源、CronJobs 暴露定时任务、protocolScheduler 的 signal/loop/execute 调度，以及手动触发 TriggerProtocolJob 与 API 的对应关系。",
+          "learning_goals": [
+            "理解 tracker 列表的订阅、去重与热更新机制",
+            "掌握 CronProvider/CronJob/ProtocolHost 的契约",
+            "解释协议状态（bucketProtocolState）如何被定时任务读写"
+          ],
+          "source_files": [
+            "internal/protocol/bt/trackers.go",
+            "internal/fetcher/jobs.go",
+            "pkg/download/protocol_jobs.go",
+            "internal/protocol/bt/dns_cache_resolver.go"
+          ],
+          "minimal_modules": [
+            "effectiveTrackers/updateTrackers",
+            "CronJobs 声明",
+            "protocolScheduler 调度循环",
+            "TriggerProtocolJob"
+          ],
+          "practice_task": "配置自定义 tracker 订阅并通过 TriggerProtocolJob 手动触发更新，观察 protocolScheduler 的注册、signal、execute 全过程与 protocol_state 桶中的状态变化。",
+          "depends_on": [
+            "u6-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "BT 会话存储与恢复",
+          "order": 5,
+          "filename": "u6-l5-bt-storage.md",
+          "level": "intermediate",
+          "topic": "讲解 internal/protocol/bt/storage.go 的_pieceCompletion 持久化、fetcherData 序列化内容，以及 FetcherManager.Store/Restore 如何让做种任务跨重启恢复。",
+          "learning_goals": [
+            "理解 piece 完成状态为何要独立持久化",
+            "对比 HTTP 与 BT 的 Store 数据差异",
+            "掌握重启后恢复做种的路径"
+          ],
+          "source_files": [
+            "internal/protocol/bt/storage.go",
+            "internal/protocol/bt/fetcher.go"
+          ],
+          "minimal_modules": [
+            "storage.go 完成状态存储",
+            "fetcherData",
+            "FetcherManager Store/Restore"
+          ],
+          "practice_task": "对比 HTTP 与 BT 两个 Manager 的 Store/Restore 实现并写出差异清单；重启进程后验证 BT 任务能继续做种且 piece 状态不丢失。",
+          "depends_on": [
+            "u6-l1",
+            "u4-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "流媒体与其它协议",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "HLS：m3u8 播放列表解析与下载计划",
+          "order": 1,
+          "filename": "u7-l1-hls-playlist.md",
+          "level": "intermediate",
+          "topic": "讲解 HLS Fetcher 的整体设计（doc.go）、playlist.go 对 m3u8 的解析（变体列表、分片、EXT-X-KEY、fMP4）以及 resolvePlanLocked 如何生成下载计划与临时暂存目录。",
+          "learning_goals": [
+            "理解主播放列表与媒体播放列表的处理差异",
+            "掌握分片清单与 EXT-X-KEY 信息的解析结果结构",
+            "解释 hlsRun/fetcherState 与任务状态的关系"
+          ],
+          "source_files": [
+            "internal/protocol/hls/doc.go",
+            "internal/protocol/hls/playlist.go",
+            "internal/protocol/hls/fetcher.go",
+            "internal/protocol/hls/testdata/olemovienews.m3u8"
+          ],
+          "minimal_modules": [
+            "playlist 解析",
+            "Resolve/resolvePlanLocked",
+            "hlsRun 暂存结构"
+          ],
+          "practice_task": "解析仓库 testdata 中的 m3u8 文件，输出分片清单、加密信息与总时长；说明一个含 master playlist 的源会如何展开为多个可选清晰度。",
+          "depends_on": [
+            "u3-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "HLS 解密、日志与 ffmpeg 合并",
+          "order": 2,
+          "filename": "u7-l2-hls-crypto-merge.md",
+          "level": "advanced",
+          "topic": "讲解 crypto.go 的 AES-128 解密、journal.go 的进度日志与断点恢复、分片暂存后如何调用内置 ffmpeg 运行时把 ts/fMP4 分片合并为单一产物。",
+          "learning_goals": [
+            "理解 EXT-X-KEY 解密的密钥获取与 IV 处理",
+            "掌握 journal 日志如何记录分片完成状态以支持续传",
+            "解释 ffmpeg spool 运行时与 inject/ffmpeg 模块的关系"
+          ],
+          "source_files": [
+            "internal/protocol/hls/crypto.go",
+            "internal/protocol/hls/journal.go",
+            "pkg/download/engine/ffmpeg/runtime.go",
+            "pkg/download/engine/inject/ffmpeg/module.go",
+            "pkg/download/engine/ffmpeg/README.md"
+          ],
+          "minimal_modules": [
+            "AES 解密",
+            "journal 进度日志",
+            "ffmpeg 合并运行时"
+          ],
+          "practice_task": "对加密分片源走一遍「下载→解密→暂存→合并」流程，观察 .gopeed-hls- 临时目录与 journal 文件的内容；中断后续传并验证产物完整。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "FTP/FTPS：连接、遍历与下载",
+          "order": 3,
+          "filename": "u7-l3-ftp.md",
+          "level": "intermediate",
+          "topic": "讲解 FTP 协议实现：fetcher_manager 仅按 scheme 匹配、conn.go 的控制/数据连接管理、walk.go 的目录遍历生成多文件 Resource，以及 testserver 辅助测试的搭建方式。",
+          "learning_goals": [
+            "理解 FTP 控制连接与数据连接的分离设计",
+            "掌握目录遍历如何映射为 Resource 文件列表",
+            "解释 FTP 为何在 FetchManagers 中排在扩展名匹配的协议之前"
+          ],
+          "source_files": [
+            "internal/protocol/ftp/fetcher.go",
+            "internal/protocol/ftp/conn.go",
+            "internal/protocol/ftp/walk.go",
+            "internal/protocol/ftp/fetcher_manager.go",
+            "internal/protocol/ftp/testserver_test.go"
+          ],
+          "minimal_modules": [
+            "FetcherManager scheme 匹配",
+            "conn 连接管理",
+            "walk 目录遍历",
+            "testserver 测试服务"
+          ],
+          "practice_task": "参考 testserver_test.go 搭一个本地 FTP 服务，完成目录 Resolve 与多文件下载；再用 ftp:// 前缀指向 .torrent 文件验证它不会被 BT 协议抢走。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "ED2K：eDonkey2000 协议实现",
+          "order": 4,
+          "filename": "u7-l4-ed2k.md",
+          "level": "intermediate",
+          "topic": "讲解 ed2k:// 链接的解析结构、fetcher 如何基于文件哈希与大小构造单文件 Resource、以及其传输模型与 HTTP/BT 的本质差异。",
+          "learning_goals": [
+            "解析 ed2k 链接中文件名/大小/哈希字段的含义",
+            "理解 ED2K 的哈希分块校验模型",
+            "对比三种协议在资源发现与传输上的差异"
+          ],
+          "source_files": [
+            "internal/protocol/ed2k/fetcher.go",
+            "internal/protocol/ed2k/config.go",
+            "pkg/protocol/ed2k/model.go"
+          ],
+          "minimal_modules": [
+            "链接解析",
+            "Resource 构造",
+            "ed2k Extra 配置"
+          ],
+          "practice_task": "解析一个 ed2k:// 链接的各字段并跟踪 Resolve 如何构造 Resource；写一段对比总结 ED2K 与 HTTP/BT 在「资源发现—分块—校验」三个环节的差异。",
+          "depends_on": [
+            "u3-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "API 层与多端接入",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "pkg/api：与传输无关的服务层",
+          "order": 1,
+          "filename": "u8-l1-api-service.md",
+          "level": "intermediate",
+          "topic": "讲解 RouteSpec 路由表的声明与匹配算法、Service.Dispatch 如何在进程内直接执行 handler，使 REST、FFI、测试共享同一套接口实现。",
+          "learning_goals": [
+            "掌握 /api/v1 全部路由与 handler 的对应关系",
+            "理解 RouteSpec.Match 的路径参数解析实现",
+            "会用 Service.JSON/Dispatch 在进程内直接调用接口"
+          ],
+          "source_files": [
+            "pkg/api/routes.go",
+            "pkg/api/service.go"
+          ],
+          "minimal_modules": [
+            "RouteSpec 与 Match",
+            "Service.Dispatch",
+            "handler 实现集"
+          ],
+          "practice_task": "梳理 /api/v1 全部路由的用途并制成表格；写一个测试用 Service.Dispatch 直接调用 createTask 与 getTasks，全程不启动 HTTP 服务器。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "pkg/rest：REST 服务器、鉴权与 Web UI 托管",
+          "order": 2,
+          "filename": "u8-l2-rest-server.md",
+          "level": "intermediate",
+          "topic": "讲解 buildServer 的组装过程：路由注册、/mcp 与 /api 命名空间保留、API token 与 Web 会话双层鉴权、CORS、gzip、静态资源与 /fs/tasks 文件服务、panic 恢复中间件。",
+          "learning_goals": [
+            "理解 Start/Stop 与 apiServerManager 的生命周期管理",
+            "掌握 token 与 cookie 会话两种鉴权的优先级与判定顺序",
+            "解释 taskFileSystem/extensionFileSystem 的文件暴露方式"
+          ],
+          "source_files": [
+            "pkg/rest/server.go",
+            "pkg/rest/api.go",
+            "pkg/rest/model/server.go",
+            "pkg/rest/gizp_middleware.go",
+            "pkg/rest/api_server_manager.go"
+          ],
+          "minimal_modules": [
+            "Start/BuildServer",
+            "鉴权中间件",
+            "静态资源与文件系统",
+            "apiServerManager"
+          ],
+          "practice_task": "启动带 token 与 Web 账号密码的服务，用 curl 分别验证 X-Api-Token、登录 cookie、未授权路径三种情况的行为；解释 /mcp 与 /api 命名空间为何必须注册在 Web 静态兜底路由之前。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "原生桥接：桌面 FFI 与移动 gomobile",
+          "order": 3,
+          "filename": "u8-l3-native-bridge.md",
+          "level": "advanced",
+          "topic": "讲解 bind/desktop 的 C 导出接口（Start/Stop/InvokeAsync）、bind/mobile 的 gomobile 绑定、bind/native 的 invokeExecutor 请求池，以及 StopTimeout 保证优雅关闭不卡死的机制。",
+          "learning_goals": [
+            "理解 InvokeAsync→invokeExecutor→rest.Dispatch 的完整链路",
+            "掌握 PauseInvokesAndWait/Stop 的有限时间排水设计",
+            "说明桌面与移动两种绑定形态共享了哪些代码"
+          ],
+          "source_files": [
+            "bind/desktop/main.go",
+            "bind/mobile/main.go",
+            "bind/native/invoke.go",
+            "pkg/rest/invoke.go",
+            "ui/flutter/docs/backend-transport-architecture.md"
+          ],
+          "minimal_modules": [
+            "C 导出接口",
+            "invokeExecutor",
+            "rest.Dispatch",
+            "停止时序"
+          ],
+          "practice_task": "绘制 InvokeAsync 请求从 Dart 侧发起至 rest.Dispatch 返回的时序图（含失败与停止分支）；解释「一个卡死请求不能阻塞其他请求与关闭」在代码中的具体保障。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "任务事件流：从 Downloader 到前端",
+          "order": 4,
+          "filename": "u8-l4-task-events.md",
+          "level": "intermediate",
+          "topic": "讲解 Downloader.emit 到 pkg/api 事件位掩码订阅、SubscribeTaskEvents 经 rest/invoke 暴露给原生端回调的完整事件管道，以及回调中的 recover 保护。",
+          "learning_goals": [
+            "理解 TaskEventMask 位掩码订阅模型",
+            "掌握事件从 fetcher 进度到平台回调的传递路径",
+            "解释为何平台回调绝不能压垮下载协程"
+          ],
+          "source_files": [
+            "pkg/api/events.go",
+            "pkg/download/event.go",
+            "pkg/download/downloader.go",
+            "pkg/rest/invoke.go"
+          ],
+          "minimal_modules": [
+            "emit 分发",
+            "TaskEventMask 订阅",
+            "SubscribeTaskEvents",
+            "回调 recover 保护"
+          ],
+          "practice_task": "实现一个只订阅 done+error 事件的监听器并打印 payload；统计开启 progress 位后每秒回调次数，并解释位掩码相比全量推送的优势。",
+          "depends_on": [
+            "u8-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l5",
+          "title": "MCP 服务器：让 AI 管理下载",
+          "order": 5,
+          "filename": "u8-l5-mcp-server.md",
+          "level": "advanced",
+          "topic": "讲解 mcpserver 如何用官方 MCP SDK 以 Streamable HTTP 暴露 resolve_task/create_task/list_tasks 等工具、工具 schema 的反射生成与无状态会话设计。",
+          "learning_goals": [
+            "理解 MCP handler 与 REST 服务共用同一 Downloader 的架构",
+            "掌握工具注册与输入 schema 的定义方式",
+            "会用 MCP 客户端完成一次端到端下载"
+          ],
+          "source_files": [
+            "pkg/mcpserver/server.go",
+            "pkg/mcpserver/server_test.go",
+            "pkg/rest/server.go"
+          ],
+          "minimal_modules": [
+            "NewHandler/NewServer",
+            "registerTools 工具集",
+            "schema 生成"
+          ],
+          "practice_task": "启用 MCP 后用任意 MCP 客户端依次调用 resolve_task、create_task、list_tasks、get_task_stats 完成一次下载，并对照 registerTools 记录每个工具的输入输出。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l6",
+          "title": "部署形态：cmd/web、cmd/api 与 Docker",
+          "order": 6,
+          "filename": "u8-l6-deployment.md",
+          "level": "intermediate",
+          "topic": "对比三种服务端入口：cmd/web（嵌入 Flutter Web 的生产服务器）、cmd/api（纯 API）、cmd/server.go 共享启动逻辑，以及 Dockerfile/entrypoint 的容器化细节。",
+          "learning_goals": [
+            "理解 -tags web 与 go:embed dist 的配合方式",
+            "掌握 StartConfig 中网络、存储、白名单等关键参数",
+            "会用 docker-compose 部署并加固服务"
+          ],
+          "source_files": [
+            "cmd/web/main.go",
+            "cmd/web/flags.go",
+            "cmd/api/main.go",
+            "cmd/server.go",
+            "Dockerfile",
+            "docker-compose.yml",
+            "entrypoint.sh"
+          ],
+          "minimal_modules": [
+            "cmd/web 启动流程",
+            "cmd/api 精简形态",
+            "Docker 构建"
+          ],
+          "practice_task": "用 docker-compose 起一套服务，配置下载目录白名单、token 与做种参数；对比三种入口在 StartConfig 字段上的差异并整理成表。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "JavaScript 扩展系统",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "扩展模型与安装生命周期",
+          "order": 1,
+          "filename": "u9-l1-extension-lifecycle.md",
+          "level": "advanced",
+          "topic": "讲解 Extension 模型与 manifest 约定、从 git 仓库或本地文件夹安装、dev 模式、升级检查与更新、设置读写、启用禁用与删除，以及扩展数据的持久化桶。",
+          "learning_goals": [
+            "理解扩展的目录结构与 Identity 机制",
+            "掌握 InstallExtensionByGit/ByFolder 的差异与 dev 模式行为",
+            "说明扩展设置与存储（bucketExtensionStorage）的读写路径"
+          ],
+          "source_files": [
+            "pkg/download/extension.go",
+            "pkg/download/extension_git_transport.go",
+            "pkg/download/extension_host.go"
+          ],
+          "minimal_modules": [
+            "Extension 模型",
+            "安装/升级/删除",
+            "设置与存储"
+          ],
+          "practice_task": "从本地文件夹以 dev 模式安装一个扩展，再走 git 安装与升级检查流程，对比 extensions 目录、bucketExtension 与 DevPath 在两种模式下的差异。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "goja 引擎与注入模块",
+          "order": 2,
+          "filename": "u9-l2-js-engine.md",
+          "level": "advanced",
+          "topic": "讲解基于 goja 的事件循环引擎、polyfill 脚本提供的浏览器式全局对象，以及 fetch/xhr/file/stream/vm/error 各注入模块的能力边界与 Promise 桥接。",
+          "learning_goals": [
+            "理解 Engine.RunString/CallFunction 的 Promise 解析机制",
+            "掌握各注入模块提供的 API 与限制",
+            "说明 polyfill 如何让浏览器风格脚本在 Go 里运行"
+          ],
+          "source_files": [
+            "pkg/download/engine/engine.go",
+            "pkg/download/engine/inject/fetch/module.go",
+            "pkg/download/engine/inject/xhr/module.go",
+            "pkg/download/engine/inject/file/module.go",
+            "pkg/download/engine/inject/stream/module.go",
+            "pkg/download/engine/polyfill/package.json"
+          ],
+          "minimal_modules": [
+            "Engine 与事件循环",
+            "Promise 桥接",
+            "fetch/xhr 注入",
+            "file/stream 注入",
+            "polyfill"
+          ],
+          "practice_task": "用 engine.Run/RunString 直接执行一段 JS：依次调用 fetch、xhr、file API 打印结果；列出 polyfill 提供的全局对象清单并注明来源。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "扩展钩子：onResolve/onStart/onDone 的执行流",
+          "order": 3,
+          "filename": "u9-l3-extension-hooks.md",
+          "level": "advanced",
+          "topic": "讲解四个激活事件在下载链路中的触发位置、扩展如何通过 ExtensionTaskRequest 改写 URL/Header/Body/标签/Tracker，以及引擎会话（extension_engine_session）的生命周期。",
+          "learning_goals": [
+            "定位每个钩子在 Downloader 主链路中的触发点",
+            "掌握 ExtensionTaskRequest 各 Set 方法的影响范围",
+            "理解引擎会话与任务的生命周期绑定关系"
+          ],
+          "source_files": [
+            "pkg/download/extension_task_request.go",
+            "pkg/download/extension_engine.go",
+            "pkg/download/extension_engine_session.go",
+            "pkg/download/downloader.go"
+          ],
+          "minimal_modules": [
+            "ActivationEvent 触发点",
+            "ExtensionTaskRequest 改写 API",
+            "引擎会话管理"
+          ],
+          "practice_task": "写一个扩展在 onResolve 修改文件名、在 onStart 追加 Header，验证 ExtensionTaskRequest 各 Set 方法对最终下载请求的实际影响，并记录触发顺序。",
+          "depends_on": [
+            "u9-l2",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "WebView 运行时与 Blob 资源",
+          "order": 4,
+          "filename": "u9-l4-webview-blob.md",
+          "level": "advanced",
+          "topic": "讲解扩展何时需要真实浏览器环境（WebView 运行时、rpc 桥接、代理）、webview profile 管理，以及 internal/blob 注册表如何把扩展在内存中产出的资源变成支持 Range 的可下载任务。",
+          "learning_goals": [
+            "理解 goja 与 WebView 双运行时的分工与切换条件",
+            "掌握 rpcprovider/provider 抽象的桥接方式",
+            "解释 Blob 注册表的 lease 机制与 /__blob/ 读取路径"
+          ],
+          "source_files": [
+            "pkg/download/extension_runtime_webview.go",
+            "pkg/download/engine/webview/runtime.go",
+            "pkg/download/engine/webview/provider.go",
+            "internal/blob/registry.go",
+            "internal/webview/README.md"
+          ],
+          "minimal_modules": [
+            "WebView 运行时判定",
+            "rpc/provider 桥接",
+            "Blob 注册表与 lease"
+          ],
+          "practice_task": "跟踪一个使用 WebView 运行时的扩展：从会话创建、profile 复用到任务完成释放；再跟踪一次 Blob 任务从注册、被 HTTP fetcher 通过 /__blob/ 读取到 lease 续期与释放的全过程。",
+          "depends_on": [
+            "u9-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l5",
+          "title": "实战：编写并安装一个完整扩展",
+          "order": 5,
+          "filename": "u9-l5-write-extension.md",
+          "level": "advanced",
+          "topic": "综合运用扩展 API：编写包含 manifest.json 与 main.js 的扩展，实现 onResolve 解析真实下载地址并改写请求，安装后完成一次真实下载。",
+          "learning_goals": [
+            "独立编写符合规范的扩展清单与脚本",
+            "正确使用 hooks API 与存储",
+            "掌握扩展的调试与升级路径"
+          ],
+          "source_files": [
+            "pkg/download/extension.go",
+            "internal/webview/extension-api.d.ts",
+            "pkg/download/extension_task_request.go"
+          ],
+          "minimal_modules": [
+            "manifest 规范",
+            "hooks 脚本",
+            "安装验证"
+          ],
+          "practice_task": "参考 extension-api.d.ts 编写一个扩展：解析某个直链页面的真实下载地址（onResolve 改写 URL 或 Header），本地 dev 模式安装调试，最终通过 git 方式安装并完成一次真实下载。",
+          "depends_on": [
+            "u9-l1",
+            "u9-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "下载完成之后：周边机制",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "自动分类与目录决策",
+          "order": 1,
+          "filename": "u10-l1-category.md",
+          "level": "intermediate",
+          "topic": "讲解 DownloadCategory 模型、内置分类与扩展名映射、categoryForResource 的匹配规则、decideDownloadDir 的白名单校验，以及 ResolveResult.SuggestedDownloadDir 的提示机制。",
+          "learning_goals": [
+            "理解分类路由的匹配优先级与白名单约束",
+            "掌握内置分类种子与 legacy 迁移的兼容设计",
+            "解释建议目录与最终目录决策的分离"
+          ],
+          "source_files": [
+            "pkg/download/category.go",
+            "pkg/base/model.go",
+            "pkg/download/downloader.go"
+          ],
+          "minimal_modules": [
+            "DownloadCategory 模型",
+            "categoryForResource 匹配",
+            "decideDownloadDir 白名单"
+          ],
+          "practice_task": "配置两个自定义分类与扩展名映射，验证 resolve 返回的建议目录与任务最终目录；再测试 SkipAutoCategorize 与 AsDefaultPath 的旁路效果。",
+          "depends_on": [
+            "u2-l3",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "归档自动解压与多卷处理",
+          "order": 2,
+          "filename": "u10-l2-extract.md",
+          "level": "advanced",
+          "topic": "讲解 ExtractionQueue 的串行队列与 worker、zip/rar/7z 及多分卷格式的识别与收集、claimedExtractions 的认领去重，以及 ExtractStatus/ExtractProgress 在任务进度中的呈现。",
+          "learning_goals": [
+            "理解解压为何要全局串行队列",
+            "掌握多卷归档的分卷收集与就绪判定",
+            "解释解压状态如何回写任务进度"
+          ],
+          "source_files": [
+            "pkg/download/extract.go",
+            "pkg/download/extract_queue.go",
+            "pkg/download/extract_zip.go",
+            "pkg/download/extract_rar.go",
+            "pkg/download/extract_7z.go"
+          ],
+          "minimal_modules": [
+            "ExtractionQueue",
+            "多卷收集与认领",
+            "状态回写"
+          ],
+          "practice_task": "开启 AutoExtract 分别下载一个 zip 与一组分卷压缩包，跟踪 ExtractionQueue 的排队、认领与 ExtractStatus 变化；再测试 DeleteAfterExtract 的清理行为。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "Webhook 与脚本钩子",
+          "order": 3,
+          "filename": "u10-l3-webhook-script.md",
+          "level": "intermediate",
+          "topic": "讲解下载完成/出错事件的两种外发机制：HTTP webhook 的载荷与并发发送、外部脚本（跨平台）的执行协议与参数传递，以及测试接口。",
+          "learning_goals": [
+            "掌握 WebhookPayload 的字段与触发时机",
+            "理解脚本执行的跨平台差异与超时处理",
+            "会用测试接口验证配置"
+          ],
+          "source_files": [
+            "pkg/download/webhook.go",
+            "pkg/download/script.go",
+            "pkg/rest/api.go"
+          ],
+          "minimal_modules": [
+            "triggerWebhooks",
+            "executeScripts",
+            "测试接口"
+          ],
+          "practice_task": "用本地 HTTP 服务接收下载完成事件并打印载荷；再写一个脚本钩子输出任务信息与环境变量，对比两种机制在触发点、失败处理与平台差异上的不同。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l4",
+          "title": "GitHub 镜像与下载加速",
+          "order": 4,
+          "filename": "u10-l4-github-mirror.md",
+          "level": "intermediate",
+          "topic": "讲解 githubmirror 模块如何识别 GitHub 下载 URL、按规则改写到镜像站、失败回退原地址，以及 mirrors API 与全局镜像配置的关系。",
+          "learning_goals": [
+            "理解 URL 识别与改写发生的时机",
+            "掌握镜像候选列表与回退策略",
+            "会用 API 查询与配置镜像"
+          ],
+          "source_files": [
+            "internal/githubmirror/config.go",
+            "internal/githubmirror/execute.go",
+            "pkg/download/github_mirror.go",
+            "pkg/download/mirror.go",
+            "pkg/base/github_mirror.go"
+          ],
+          "minimal_modules": [
+            "镜像规则配置",
+            "URL 改写执行",
+            "候选与回退"
+          ],
+          "practice_task": "配置一个镜像后下载一个 GitHub release 文件，通过日志确认 URL 改写发生的阶段（Resolve 前还是请求时）；再调用 mirrors candidates 接口观察候选列表与回退顺序。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "稳定性、测试与二次开发",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "测试体系与 CI",
+          "order": 1,
+          "filename": "u11-l1-testing.md",
+          "level": "advanced",
+          "topic": "讲解项目分层测试策略：internal/test 的 HTTP 假服务器、cmd/extmock 扩展模拟服务、协议级与下载器级单测、webview 标签集成测试，以及 CI 工作流的矩阵与覆盖率采集。",
+          "learning_goals": [
+            "掌握各层测试的组织方式与命名约定",
+            "理解 httptest/extmock 测试替身的作用",
+            "能在本地复现 CI 的测试命令"
+          ],
+          "source_files": [
+            ".github/workflows/test.yml",
+            "internal/test/httptest.go",
+            "internal/test/util.go",
+            "pkg/download/downloader_test.go",
+            "cmd/extmock/main.go"
+          ],
+          "minimal_modules": [
+            "internal/test 辅助",
+            "extmock 扩展模拟",
+            "CI 命令矩阵"
+          ],
+          "practice_task": "运行 go test ./pkg/download/... 并读懂关键测试的结构；为 u3-l4 的自定义协议补一组单元测试（含 Resolve、断点续传与错误分支）。",
+          "depends_on": [
+            "u4-l2",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "并发控制与优雅关闭",
+          "order": 2,
+          "filename": "u11-l2-concurrency-shutdown.md",
+          "level": "advanced",
+          "topic": "系统梳理 Downloader 的锁体系（lock/configLock/fetcherMapLock/checkDuplicateLock/statusLock）、runGeneration 代数、backgroundCtx 取消、扩展 git 的 WaitGroup，以及原生桥接与 REST 停止的有限时间排水设计。",
+          "learning_goals": [
+            "说出每把锁保护的临界区与获取顺序",
+            "理解 Close 的完整清理清单与不可阻塞目标",
+            "掌握关闭与在途请求/下载的竞态处理"
+          ],
+          "source_files": [
+            "pkg/download/downloader.go",
+            "bind/native/invoke.go",
+            "pkg/rest/server.go",
+            "pkg/download/protocol_jobs.go"
+          ],
+          "minimal_modules": [
+            "锁清单",
+            "runGeneration",
+            "Close 时序",
+            "invoke 排水"
+          ],
+          "practice_task": "绘制 Downloader.Close() 的关闭时序图（含 backgroundCtx 取消、extensionGitWG 等待、fetcher 关闭、存储关闭）与原生桥接 PauseInvokesAndWait 的交互；标注每步的超时保护。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "Flutter 前端如何对接 Go 核心",
+          "order": 3,
+          "filename": "u11-l3-flutter-ui.md",
+          "level": "intermediate",
+          "topic": "从 ui/flutter 侧看整个系统：FFI/gomobile 启动引导（libgopeed_boot）、api.dart 封装的调用层、能力与窗口 RPC 体系，以及三端（桌面/移动/Web）通信策略差异。",
+          "learning_goals": [
+            "理解三端通信策略选型的原因",
+            "定位 Flutter 调用 createTask 与订阅事件的代码路径",
+            "了解窗口能力 RPC 与后端能力的边界"
+          ],
+          "source_files": [
+            "ui/flutter/docs/backend-transport-architecture.md",
+            "ui/flutter/docs/window-capability-rpc.md",
+            "ui/flutter/lib/api/api.dart",
+            "ui/flutter/lib/main.dart",
+            "ui/flutter/lib/core/libgopeed_boot.dart"
+          ],
+          "minimal_modules": [
+            "启动引导",
+            "api 调用层",
+            "事件订阅",
+            "窗口能力 RPC"
+          ],
+          "practice_task": "阅读 transport 文档并总结桌面/移动/Web 三端的通信策略表；在 Flutter 代码中定位创建任务、订阅事件、读取配置三条调用链并记录涉及的文件。",
+          "depends_on": [
+            "u8-l3",
+            "u8-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l4",
+          "title": "毕业实践：为 Gopeed 添加一个完整特性",
+          "order": 4,
+          "filename": "u11-l4-capstone.md",
+          "level": "advanced",
+          "topic": "综合全手册知识，沿「配置项→领域模型→Downloader→协议/API→测试」的路径实现一个贯穿多层的小特性，完成从阅读到贡献的闭环。",
+          "learning_goals": [
+            "独立完成跨模块特性设计与实现",
+            "遵循项目的测试与文档规范",
+            "具备向本项目提交 PR 的能力"
+          ],
+          "source_files": [
+            "pkg/base/model.go",
+            "internal/fetcher/fetcher.go",
+            "pkg/download/downloader.go",
+            "pkg/api/service.go"
+          ],
+          "minimal_modules": [
+            "配置与模型扩展",
+            "Downloader 钩子点",
+            "API 暴露",
+            "测试补充"
+          ],
+          "practice_task": "任选一个特性完整实现（例如「下载完成后自动移动文件到指定目录」或新增一种协议 scheme）：在配置与模型中加字段、在 Downloader 生命周期中找正确的挂载点、通过 API 暴露开关、补单元测试并撰写说明文档。",
+          "depends_on": [
+            "u4-l2",
+            "u5-l2",
+            "u8-l1",
+            "u9-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

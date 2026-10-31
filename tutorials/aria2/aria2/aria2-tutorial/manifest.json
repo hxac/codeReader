@@ -1,0 +1,1689 @@
+{
+  "head": "9e7273583f83e881e3ec067b523ba88724088d2f",
+  "project": "aria2",
+  "rationale": "aria2 是一个约 950 个源码文件的大型 C++ 项目，同时实现 HTTP(S)/FTP/SFTP/BitTorrent/Metalink 五类协议、DHT、RPC 服务和 C 嵌入式 API，因此学习路线按“先跑起来、再懂引擎、后攻子系统”的顺序设计：单元 1 让读者完成构建、理解入口 main.cc→Context→MultiUrlRequestInfo 与命令行选项系统，建立全局地图；单元 2-3 讲解支撑一切的核心机制——DownloadEngine 事件循环、EventPoll 多路复用、Command 生命周期、Socket/DNS，以及 RequestGroup/DownloadContext/SegmentMan 的任务模型；单元 4-5 沿“网络协议链路→磁盘 I/O 与数据完整性”两条主线展开 HTTP 命令链、认证与 Cookie、代理隧道、FTP/SFTP、流式过滤，再落到 DiskWriter、PieceStorage、DiskAdaptor、文件预分配、校验和与写盘缓存；单元 6-7 是 BitTorrent 与 DHT 两大难点，按“元数据→注册表→握手→交互循环→消息分发→请求流水线→Tracker→扩展协议→magnet→做种→会话恢复”和“路由表→报文→任务队列→启动命令→peer announce”递进拆分；单元 8 覆盖 Metalink 解析状态机、内嵌 HTTP/WebSocket 服务器、RPC 方法分发与 libaria2 嵌入；单元 9 回到工程层面，讲基础工具库、ValueBase/解析器骨架、日志异常、TLS 多后端矩阵、测试体系与二次开发扩展点。每篇讲义只解决一个问题、绑定真实源码文件，并配一个可动手的实践任务，讲义间通过 depends_on 形成清晰的先后依赖，读者可按序精读，也可按依赖图跳读单个子系统。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 aria2 的五大协议支持与多源并行下载的核心卖点",
+            "对照 README 的 Feature 列表映射到后续要学的源码子系统",
+            "理解项目版本号与发布节奏、源码托管位置"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README 特性清单",
+            "协议支持矩阵",
+            "依赖特性表"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README.rst 的 Features 与 Dependency 两节，列出你最感兴趣的 3 个特性，并在 src/ 目录下用文件名搜索（如 DHT、Rpc、Metalink）猜测每个特性对应的源码区域，写一份简短的特性-源码映射笔记。",
+          "source_files": [
+            "README.rst",
+            "NEWS"
+          ],
+          "title": "项目总览：aria2 是什么、能做什么",
+          "topic": "介绍 aria2 的定位：支持 HTTP(S)/FTP/SFTP/BitTorrent/Metalink 的多协议命令行下载工具，梳理其核心特性清单与依赖矩阵，帮助读者建立对项目的整体预期。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-build-system.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "读懂 configure.ac 中的依赖探测与特性开关宏",
+            "理解 Makefile.am 如何组织 src/test 的编译单元",
+            "掌握本机构建 aria2 的完整命令序列与常见编译失败原因"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "configure.ac 特性探测",
+            "Makefile.am 源码组织",
+            "交叉编译 Dockerfile"
+          ],
+          "order": 2,
+          "practice_task": "在本机执行 autoreconf -i && ./configure && make -j$(nproc) 完成 aria2 的编译（缺依赖时可先用 ./configure --without-gnutls --without-libxml2 等开关裁剪），记录 configure 输出中各特性是否启用的汇总表。",
+          "source_files": [
+            "configure.ac",
+            "Makefile.am",
+            "build_test.sh",
+            "Dockerfile.mingw",
+            "README.rst"
+          ],
+          "title": "构建系统与依赖：从 configure.ac 到可执行文件",
+          "topic": "讲解 aria2 基于 autotools 的构建体系：configure.ac 如何探测可选依赖（OpenSSL/GnuTLS/libxml2/libssh2 等）、Makefile.am 如何组织源码编译、以及各平台构建脚本的作用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-entry-and-main.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "跟踪 Platform 的构造与销毁所做的一次性初始化",
+            "解释 Context 如何把 argv 解析结果转化为 reqinfo",
+            "用日志或断点观察一次完整启动流程的调用顺序"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "main 入口",
+            "Platform 生命周期",
+            "Context 装配",
+            "MultiUrlRequestInfo"
+          ],
+          "order": 3,
+          "practice_task": "在 main() 中加入一行打印（或用 gdb 断点），观察 Platform 构造、Context 构造和 reqinfo->execute() 三步的先后顺序，再运行 ./src/aria2c https://example.com 验证你的理解，写一份启动时序笔记。",
+          "source_files": [
+            "src/main.cc",
+            "src/Context.cc",
+            "src/Platform.cc",
+            "src/MultiUrlRequestInfo.cc",
+            "src/LogFactory.cc"
+          ],
+          "title": "进程入口：main.cc 与启动流程",
+          "topic": "从 src/main.cc 出发，跟踪 Platform 初始化、Context 构造和 MultiUrlRequestInfo::execute 的调用链，理解 aria2 进程从敲下命令到进入下载主循环之前的全部动作。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-codebase-map.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "根据文件名前缀快速定位子系统所在的源码文件",
+            "识别 Command、RequestGroup、Bt、DHT 等命名规律",
+            "知道 examples/ 与 test/ 目录分别能提供什么学习材料"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "src 命名规约",
+            "examples 示例",
+            "test 测试样例"
+          ],
+          "order": 4,
+          "practice_task": "手工绘制一张 src/ 目录分区图，把文件按“引擎/HTTP/FTP/BT/DHT/RPC/工具”分组，并统计每组文件数量；再用 ls src | grep -c '^DHT' 之类命令验证你的统计。",
+          "source_files": [
+            "src/main.cc",
+            "src/common.h",
+            "src/a2functional.h",
+            "examples/libaria2ex.cc",
+            "test/AllTest.cc"
+          ],
+          "title": "源码地图：src 目录结构与命名规约",
+          "topic": "系统梳理 src/ 下约 950 个文件的命名规律（Bt* 前缀是 BitTorrent、DHT* 是 DHT、Http*/Ftp*/Sftp* 是各协议命令链等），帮助读者建立按图索骥的能力。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l5-option-system.md",
+          "id": "u1-l5",
+          "learning_goals": [
+            "跟踪一个命令行参数从 argv 到 Option 存储的路径",
+            "理解 OptionHandler 的 add/parse/translate 流程与校验规则",
+            "学会从 OptionHandlerFactory 中查找任意 --option 的定义"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "option_processing",
+            "OptionParser",
+            "OptionHandler 体系",
+            "prefs 键表"
+          ],
+          "order": 5,
+          "practice_task": "在 OptionHandlerFactory.cc 中找到 --max-connection-per-server 的定义，抄录其类型、默认值与取值范围；然后运行 ./src/aria2c --max-connection-per-server=99 验证报错信息，并对照源码解释这条报错是哪段代码产生的。",
+          "source_files": [
+            "src/option_processing.cc",
+            "src/OptionParser.cc",
+            "src/Option.cc",
+            "src/OptionHandlerFactory.cc",
+            "src/AbstractOptionHandler.cc",
+            "src/prefs.cc",
+            "src/usage_text.h"
+          ],
+          "title": "命令行选项系统：解析、校验与帮助文本",
+          "topic": "剖析 aria2 庞大的选项体系：OptionParser 如何把 argv 解析进 Option，OptionHandler 家族如何做类型转换与取值校验，prefs.h 如何用字符串键统一存取，以及 --help 文本如何生成。"
+        }
+      ],
+      "order": 1,
+      "title": "入门：认识 aria2 并把它跑起来"
+    },
+    {
+      "id": "u2",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3",
+            "u1-l5"
+          ],
+          "filename": "u2-l1-download-engine-loop.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "解释 waitData/afterEachIteration 两个阶段的分工",
+            "跟踪一次超时命令的 requeue 与调度过程",
+            "理解 DownloadEngineFactory 如何按选项组装引擎"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "DownloadEngine 主循环",
+            "命令队列 scheduling",
+            "DownloadEngineFactory 组装"
+          ],
+          "order": 1,
+          "practice_task": "在 DownloadEngine::run 里用 A2_LOG_INFO 打印每轮循环的队列长度，重新编译后用 --enable-color=false 跑一次小文件下载，观察命令数量的消长曲线并解释其与下载阶段的关系。",
+          "source_files": [
+            "src/DownloadEngine.cc",
+            "src/DownloadEngine.h",
+            "src/DownloadEngineFactory.cc"
+          ],
+          "title": "DownloadEngine：事件驱动主循环",
+          "topic": "讲解 aria2 心脏 DownloadEngine 的 run 循环：如何不断取出到期命令执行、处理读写事件、执行周期性任务（AutoSave、SeedLimit 等），以及 DownloadEngineFactory 如何按选项装配引擎。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-event-poll-backends.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "对比四套后端在事件结构体与注册接口上的异同",
+            "解释 A2_EVENT_NET_* 事件常量如何映射到各平台原语",
+            "理解 commands_ 延迟执行机制在事件回调中的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "EventPoll 接口",
+            "epoll/kqueue/select 后端",
+            "SocketEntry 事件回调"
+          ],
+          "order": 2,
+          "practice_task": "阅读 EpollEventPoll::poll，画出一次 socket 可读事件从 epoll_wait 返回到对应 Command 被调度的完整时序图，并说明 read_event_ 与 write_event_ 的用途差异。",
+          "source_files": [
+            "src/EventPoll.h",
+            "src/EpollEventPoll.cc",
+            "src/KqueueEventPoll.cc",
+            "src/PortEventPoll.cc",
+            "src/SelectEventPoll.cc"
+          ],
+          "title": "EventPoll：I/O 多路复用的多后端抽象",
+          "topic": "分析 EventPoll 抽象接口与 epoll/kqueue/port/select 四个平台后端的实现差异，理解 aria2 如何以统一接口支持不同操作系统的事件通知机制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l3-command-lifecycle.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "跟踪 INITIATE→REQUEST→RESPONSE→DOWNLOAD 的状态迁移",
+            "区分 Command 的三个出口：正常退出、setStatusExit、异常重试",
+            "理解 socket 完成回调与命令重排的配合方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Command 基类",
+            "AbstractCommand 状态机",
+            "DownloadCommand 数据泵"
+          ],
+          "order": 3,
+          "practice_task": "在 AbstractCommand::execute 里打印 segment/index 与 status 的日志，跑一次 HTTP 下载，统计 Initiate/Request/Response/Download 四类命令各出现了多少次，解释流水线是如何接力前进的。",
+          "source_files": [
+            "src/Command.h",
+            "src/AbstractCommand.cc",
+            "src/AbstractCommand.h",
+            "src/TimeBasedCommand.h",
+            "src/DownloadCommand.cc"
+          ],
+          "title": "Command 体系：命令的生命周期与状态机",
+          "topic": "深入 AbstractCommand 的 execute 状态机：连接建立、发送请求、读取响应、下载数据各阶段如何由不同 Command 接力，命令如何通过 setStatusExit/setStatusRetry 控制自身去向。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l4-socket-and-dns.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "解释 SocketCore 的阻塞/非阻塞切换与连接建立细节",
+            "跟踪 AsyncNameResolverMan 的双栈解析与超时处理",
+            "理解 BackupIPv4ConnectCommand 实现的回退连接策略"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "SocketCore",
+            "NameResolver/AsyncNameResolverMan",
+            "Happy Eyeballs 回退"
+          ],
+          "order": 4,
+          "practice_task": "使用 aria2 --all-proxy 或直连下载一个域名，开启 -l 日志，找到 DNS 解析开始与结束的日志行，对照 AsyncNameResolverMan 源码说明 getaddrinfo 是如何被异步化包装的。",
+          "source_files": [
+            "src/SocketCore.cc",
+            "src/NameResolver.cc",
+            "src/AsyncNameResolver.cc",
+            "src/AsyncNameResolverMan.cc",
+            "src/SocketRecvBuffer.cc",
+            "src/BackupIPv4ConnectCommand.cc"
+          ],
+          "title": "SocketCore 与异步 DNS：网络底座",
+          "topic": "讲解 SocketCore 对 BSD socket 的封装（非阻塞连接、读写缓冲、地址族选择），以及 AsyncNameResolver 系列如何把 getaddrinfo 异步化并实现 IPv4/IPv6 的 Happy Eyeballs 回退。"
+        }
+      ],
+      "order": 2,
+      "title": "下载引擎核心：事件循环与命令调度"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u3-l1-request-group.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "解释 RequestGroup 如何决定并发连接数与 URI 选择策略",
+            "跟踪 RequestGroupMan 的 fillRequestGroup 从等待队列取任务的过程",
+            "理解 RequestGroup 之间如何形成依赖（如 BT 对 Metalink 的依赖）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "RequestGroup",
+            "RequestGroupMan 调度",
+            "URISelector"
+          ],
+          "order": 1,
+          "practice_task": "用 3 个 URL 下载同一文件并加 -x2 -s3，在日志中观察同一 RequestGroup 生成了几条 HTTP 连接，对照 RequestGroup::createNextCommand 与 RequestGroupMan 的并发上限逻辑解释结果。",
+          "source_files": [
+            "src/RequestGroup.cc",
+            "src/RequestGroup.h",
+            "src/RequestGroupMan.cc",
+            "src/RequestGroupEntry.cc",
+            "src/SequentialPicker.h"
+          ],
+          "title": "RequestGroup：一次下载任务的容器",
+          "topic": "剖析 RequestGroup 如何表示一个下载任务（一组 URI + 一个 DownloadContext + 并发连接数上限），以及 RequestGroupMan 如何管理队列、并发上限与下载结果。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-download-context.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "区分 DownloadContext、DownloadResult、ContextAttribute 三者职责",
+            "理解 getBasePath/getBaseNamePaths 等方法对多文件下载的意义",
+            "了解 TORRENT/METALINK 属性如何挂载在同一个对象上"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "DownloadContext",
+            "DownloadResult",
+            "ContextAttribute/TorrentAttribute"
+          ],
+          "order": 2,
+          "practice_task": "写一段测试代码（参考 test 目录的用法）构造一个含两个文件的 DownloadContext，打印其文件路径与总长度；或者直接在 download_helper.cc 中加日志，观察从 .torrent 到 DownloadContext 的赋值过程。",
+          "source_files": [
+            "src/DownloadContext.cc",
+            "src/DownloadContext.h",
+            "src/DownloadResult.cc",
+            "src/ContextAttribute.cc",
+            "src/TorrentAttribute.cc"
+          ],
+          "title": "DownloadContext：下载任务的元数据模型",
+          "topic": "分析 DownloadContext 如何承载文件列表、piece 长度、校验和等元数据，ContextAttribute/TorrentAttribute 如何附加协议专属信息，DownloadResult 如何携带完成状态。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u1-l5"
+          ],
+          "filename": "u3-l3-download-helper-pipeline.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "跟踪 download_helper.cc 中各协议的分支判断顺序",
+            "理解 DownloadHandler 抽象与 post-handlers 的衔接",
+            "说明 input file 每行 URI 如何被 UriListParser 解析并展开"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "download_helper",
+            "UriListParser",
+            "DownloadHandler/DownloadHandlers"
+          ],
+          "order": 3,
+          "practice_task": "创建一个含多行 URI 与 -o 选项的 input 文件，用 -i 参数下载并开启日志，统计最终生成了几个 RequestGroup，再对照 UriListParser 源码解释每行文本的解析规则。",
+          "source_files": [
+            "src/download_helper.cc",
+            "src/UriListParser.cc",
+            "src/download_handlers.cc",
+            "src/MultiUrlRequestInfo.cc",
+            "src/paramed_string.cc"
+          ],
+          "title": "任务创建流水线：download_helper 与协议识别",
+          "topic": "梳理从命令行参数到 RequestGroup 集合的完整流水线：UriListParser 如何解析 -i 输入文件、paramed_string 如何展开参数化 URI、download_helper 如何根据 URI/文件类型分派到 HTTP/BT/Metalink 处理器。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l4-segment-man.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "解释 BitfieldMan 的位图运算如何支撑 segment 分配与合并",
+            "跟踪 getSegmentWithIndex/getNextSegment 的分配策略",
+            "理解 ServerStat 如何辅助挑选最快的镜像源"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "SegmentMan",
+            "Segment/BitfieldMan",
+            "RequestSlot"
+          ],
+          "order": 4,
+          "practice_task": "用 -s4 -k1M 下载一个大文件，结束后查看 .aria2 控制文件的位图（或加日志打印 bitfield），对照 SegmentMan 源码解释 4 个 segment 各自覆盖的字节区间。",
+          "source_files": [
+            "src/SegmentMan.cc",
+            "src/SegmentMan.h",
+            "src/Segment.h",
+            "src/BitfieldMan.cc",
+            "src/RequestSlot.cc",
+            "src/Piece.cc"
+          ],
+          "title": "SegmentMan 与分段调度：多线程下载的切分逻辑",
+          "topic": "讲解 aria2 分段下载的核心：SegmentMan 如何用 BitfieldMan 位图把文件切成 segment 分给各连接、如何回收过期 RequestSlot、以及多源下载时 segment 的分配与冲突处理。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u3-l5-speed-and-throttle.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "解释 SpeedCalc 的滑动窗口计算逻辑",
+            "理解 DownloadEngine 在哪两个位置实施限速",
+            "跟踪 StatCalc 周期性输出进度行的触发链路"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "SpeedCalc",
+            "StatCalc/ConsoleOutput",
+            "calculateStatistics 限速"
+          ],
+          "order": 5,
+          "practice_task": "用 --max-download-limit=500K 下载一个大文件，观察实际速度曲线；再阅读 calculateStatistics 中当超限时如何调整 shouldIncreaseConcurrency 与读写事件的启用，写一段源码推导笔记。",
+          "source_files": [
+            "src/SpeedCalc.cc",
+            "src/SpeedCalc.h",
+            "src/StatCalc.h",
+            "src/OutputFile.h",
+            "src/console.cc",
+            "src/DownloadEngine.cc"
+          ],
+          "title": "速度统计与限速：SpeedCalc 与统计输出",
+          "topic": "分析 SpeedCalc 如何在滑动窗口内计算瞬时与平均速度，DownloadEngine 如何依据限速选项暂停/恢复读写事件，以及 StatCalc 如何格式化控制台进度输出。"
+        }
+      ],
+      "order": 3,
+      "title": "任务模型：RequestGroup 与下载上下文"
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3",
+            "u3-l4"
+          ],
+          "filename": "u4-l1-http-command-chain.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "按顺序说出 HTTP 命令链四类命令的职责边界",
+            "解释命令切换时 Socket、Request、Segment 等资源如何传递",
+            "理解连接失败时的重试与镜像切换逻辑"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "HttpInitiateConnectionCommand",
+            "HttpRequestCommand/HttpResponseCommand",
+            "HttpDownloadCommand"
+          ],
+          "order": 1,
+          "practice_task": "开启 -l=debug 日志下载一个 HTTP 文件，按时间顺序摘出 Initiate→Request→Response→Download 四类命令的日志行各一条，标注每条命令退出时创建的下一个命令，画出接力图。",
+          "source_files": [
+            "src/HttpInitiateConnectionCommand.cc",
+            "src/HttpRequestCommand.cc",
+            "src/HttpResponseCommand.cc",
+            "src/HttpDownloadCommand.cc",
+            "src/DownloadCommand.cc"
+          ],
+          "title": "HTTP 下载命令链：从发起到落盘的接力",
+          "topic": "完整跟踪一次 HTTP 下载的四段命令接力：HttpInitiateConnectionCommand 建立连接、HttpRequestCommand 发请求、HttpResponseCommand 处理响应头、HttpDownloadCommand 循环读数据。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-http-protocol-parsing.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "解释 HttpHeaderProcessor 的增量解析与可重用设计",
+            "列出 aria2 支持的重要响应头及其处理位置",
+            "理解 persistent connection 的复用条件"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "HttpConnection",
+            "HttpHeader/HttpHeaderProcessor",
+            "HttpRequest 求值"
+          ],
+          "order": 2,
+          "practice_task": "写一个返回 Location 跳转与 Content-Encoding: gzip 的小型 HTTP 服务，用 aria2 下载并开启日志，对照 HttpHeaderProcessor 源码列出 aria2 对这两个头分别做了什么。",
+          "source_files": [
+            "src/HttpConnection.cc",
+            "src/HttpHeader.cc",
+            "src/HttpHeaderProcessor.cc",
+            "src/HttpRequest.cc",
+            "src/Request.cc"
+          ],
+          "title": "HTTP 协议实现：HttpConnection 与报文解析",
+          "topic": "剖析 HttpConnection 如何组织请求发送与响应接收、HttpHeaderProcessor 如何以流式状态机解析头部、HttpHeader 如何存取各头部字段，以及HttpRequest 如何决定 Range、鉴权与压缩。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-auth-and-cookies.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "解释 AuthResolver/AuthConfig 两层抽象的分工",
+            "跟踪 --http-user/--netrc/--load-cookies 三个入口的取值优先级",
+            "理解 CookieStorage 的域名匹配与过期清理"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "AuthConfigFactory",
+            "NetrcAuthResolver",
+            "Cookie/CookieStorage"
+          ],
+          "order": 3,
+          "practice_task": "准备一份 Netscape 格式的 cookies.txt 和一个需要 Cookie 的 URL，用 --load-cookies 下载并在 CookieStorage::parseCookie 处加日志，验证你的 Cookie 是否被正确匹配并随请求发出。",
+          "source_files": [
+            "src/AuthConfig.cc",
+            "src/AuthConfigFactory.cc",
+            "src/AbstractAuthResolver.cc",
+            "src/Netrc.cc",
+            "src/NetrcAuthResolver.cc",
+            "src/Cookie.cc",
+            "src/CookieStorage.cc",
+            "src/NsCookieParser.cc",
+            "src/cookie_helper.cc"
+          ],
+          "title": "认证与 Cookie：AuthConfig、Netrc 与 CookieStorage",
+          "topic": "讲解 HTTP 认证的三层结构（AuthResolver→AuthConfig→请求头生成）、Netrc 文件解析，以及 CookieStorage 如何加载/保存 Netscape 格式 Cookie 并在请求时匹配域名。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l4-proxy-tunnel.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "解释 CONNECT 隧道与绝对 URI 两种代理方式的适用协议",
+            "跟踪代理认证头的生成流程",
+            "理解隧道建立后命令链如何切回普通协议命令"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "AbstractProxyRequest/ResponseCommand",
+            "HttpProxyRequestCommand",
+            "FtpTunnel 链"
+          ],
+          "order": 4,
+          "practice_task": "用一个本地 HTTP 代理（如 squid）抓包，分别用 http:// 和 https:// 目标 URL 走代理下载，观察 CONNECT 方法出现与否，并对照源码说明 FTP over HTTP 代理时命令链多了哪几个命令。",
+          "source_files": [
+            "src/AbstractProxyRequestCommand.cc",
+            "src/AbstractProxyResponseCommand.cc",
+            "src/HttpProxyRequestCommand.cc",
+            "src/HttpProxyResponseCommand.cc",
+            "src/FtpTunnelRequestCommand.cc",
+            "src/FtpTunnelResponseCommand.cc"
+          ],
+          "title": "代理与隧道：HTTP 代理及 CONNECT 隧道",
+          "topic": "分析 aria2 的代理体系：AbstractProxyRequestCommand/ResponseCommand 如何把请求改写为绝对 URI 形式、HTTPS/FTP 如何通过 CONNECT 隧道（FtpTunnel 命令链）穿透代理。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l5-ftp-sftp-chain.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "按顺序复述 FTP 控制连接各命令的协商流程",
+            "解释主动/被动模式对数据连接建立的影响",
+            "对比 SftpNegotiationCommand 与 FTP 协商链的异同"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "FtpConnection 控制协议",
+            "Ftp 命令链",
+            "Sftp 命令链"
+          ],
+          "order": 5,
+          "practice_task": "搭建或找一个 FTP 与 SFTP 站点分别下载一个文件，开日志对比两条命令链各命令出现的顺序，列出 FTP 的 USER/PASS/TYPE/PASV/RETR 与 SFTP 会话初始化的对应关系。",
+          "source_files": [
+            "src/FtpConnection.cc",
+            "src/FtpInitiateConnectionCommand.cc",
+            "src/FtpNegotiationCommand.cc",
+            "src/FtpDownloadCommand.cc",
+            "src/FtpFinishDownloadCommand.cc",
+            "src/SftpNegotiationCommand.cc",
+            "src/SftpDownloadCommand.cc"
+          ],
+          "title": "FTP 与 SFTP：两套文件传输命令链",
+          "topic": "讲解 FtpConnection 如何实现 FTP 控制协议（USER/PASS/PASV/RETR 等）、Ftp 命令链如何完成协商与传输，以及基于 libssh2 的 Sftp 命令链与 FTP 链在结构上的对应关系。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l6-stream-filters.md",
+          "id": "u4-l6",
+          "learning_goals": [
+            "解释 StreamFilter 的 initFilter/popInputData/pushOutputData 三段式接口",
+            "跟踪 ChunkedEncoding 的状态机如何处理粘包与半包",
+            "理解 filter 链如何挂接在 DownloadCommand 的读循环中"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "StreamFilter 接口",
+            "ChunkedDecodingStreamFilter",
+            "DownloadCommand 过滤链"
+          ],
+          "order": 6,
+          "practice_task": "写一个分块编码的 HTTP 响应服务，人为把 chunk 边界切在数字与数据中间，用 aria2 下载并验证文件完整，然后在 ChunkedDecodingStreamFilter 的状态切换处加日志说明边界错位时发生了什么。",
+          "source_files": [
+            "src/StreamFilter.cc",
+            "src/ChunkedDecodingStreamFilter.cc",
+            "src/DownloadCommand.cc"
+          ],
+          "title": "流式过滤：chunked 解码与 gzip 解压",
+          "topic": "分析 StreamFilter 抽象如何让响应体在写盘前经过处理链，重点拆解 ChunkedDecodingStreamFilter 的分块解码状态机，并说明 gzip/deflate 解压过滤器的挂接方式。"
+        }
+      ],
+      "order": 4,
+      "title": "HTTP(S)/FTP/SFTP：协议下载链路"
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u5-l1-disk-writer.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "解释 write/seek 与全量写入两个接口的适用场景",
+            "理解 DiskWriterFactory 的按需创建机制",
+            "了解 bencode/RPC 用的内存型 DiskWriter 特例"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "DiskWriter 接口",
+            "AbstractDiskWriter",
+            "DiskWriterFactory"
+          ],
+          "order": 1,
+          "practice_task": "阅读 AbstractDiskWriter 的 open/truncate 实现，说明 --allow-overwrite 与 --auto-file-renaming 两个选项在创建写入器前后分别由哪些代码路径生效，并实际验证重名文件时的行为。",
+          "source_files": [
+            "src/DiskWriter.h",
+            "src/AbstractDiskWriter.cc",
+            "src/DiskWriterFactory.h",
+            "src/AnonDiskWriterFactory.h",
+            "src/BencodeDiskWriter.h"
+          ],
+          "title": "DiskWriter 抽象：文件写入的统一接口",
+          "topic": "剖析 DiskWriter 接口与 AbstractDiskWriter 的实现（打开、截断、定位写、关闭），以及 DiskWriterFactory 如何按任务类型选择具体写入器。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u5-l2-piece-storage.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "解释 piece、bitfield、DiskWriter 三者在存储层的组合关系",
+            "跟踪 getMissingPiece/completePiece 的完整调用链",
+            "理解 UnknownLengthPieceStorage 对动态长度下载的处理"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "PieceStorage 接口",
+            "DefaultPieceStorage",
+            "Piece/BitfieldMan"
+          ],
+          "order": 2,
+          "practice_task": "下载一个多文件种子，在 DefaultPieceStorage::completePiece 处加日志统计每个 piece 完成的时间戳，观察下载顺序是否与磁盘顺序一致，并解释 --select-file 对 piece 选择的影响。",
+          "source_files": [
+            "src/PieceStorage.h",
+            "src/DefaultPieceStorage.cc",
+            "src/Piece.cc",
+            "src/BitfieldMan.cc",
+            "src/UnknownLengthPieceStorage.cc"
+          ],
+          "title": "PieceStorage：piece 级别的数据管理",
+          "topic": "分析 PieceStorage/DefaultPieceStorage 如何以 piece 为单位管理下载状态：bitfield 记录完成情况、Piece 对象缓存未写完数据、以及如何为 HTTP 分段下载复用同一套 piece 机制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l3-disk-adaptor.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "解释多文件任务如何用一个逻辑偏移映射到多个物理文件",
+            "理解 MultiDiskAdaptor 的 openFile/writeData 与 piece 边界处理",
+            "了解单文件与多文件适配器的选择逻辑"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "DiskAdaptor 接口",
+            "MultiDiskAdaptor",
+            "AbstractSingleDiskAdaptor"
+          ],
+          "order": 3,
+          "practice_task": "用 --select-file 选择种子中的第 2 个文件下载并对比目录结构变化，对照 MultiDiskAdaptor 源码解释未选中文件在 open/写入时如何被跳过。",
+          "source_files": [
+            "src/DiskAdaptor.cc",
+            "src/MultiDiskAdaptor.cc",
+            "src/AbstractSingleDiskAdaptor.cc"
+          ],
+          "title": "DiskAdaptor：单文件与多文件布局适配",
+          "topic": "讲解 DiskAdaptor 层如何把逻辑文件偏移映射到真实磁盘布局：AbstractSingleDiskAdaptor 处理单文件，MultiDiskAdaptor 处理种子的多文件树形目录。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l4-file-allocation.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "按顺序说出 dispatcher 与 entry 的协作方式",
+            "对比 fallocate/ftruncate/adaptive 三种分配器的系统调用差异",
+            "理解文件分配作为独立下载阶段被调度的机制"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "FileAllocationEntry",
+            "FileAllocationCommand 调度",
+            "三种分配迭代器"
+          ],
+          "order": 4,
+          "practice_task": "分别用 --file-allocation=none/trunc/falloc 和 prealloc 下载同一大文件，用 time 与 strace（或日志）对比四种方式的耗时与系统调用差异，写成对比表。",
+          "source_files": [
+            "src/FileAllocationEntry.cc",
+            "src/FileAllocationCommand.cc",
+            "src/FileAllocationDispatcherCommand.cc",
+            "src/AdaptiveFileAllocationIterator.cc",
+            "src/FallocFileAllocationIterator.cc",
+            "src/TruncFileAllocationIterator.cc"
+          ],
+          "title": "文件预分配：从 truncate 到 fallocate",
+          "topic": "梳理文件预分配子系统：FileAllocationEntry 如何作为下载前的一个队列阶段被调度，三种分配迭代器（falloc/adaptive/trunc）分别对应哪些系统调用与适用文件系统。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2",
+            "u3-l2"
+          ],
+          "filename": "u5-l5-checksum-validation.md",
+          "id": "u5-l5",
+          "learning_goals": [
+            "解释 MessageDigest 如何把多种后端统一到同一 API",
+            "跟踪 IteratableChecksumValidator 的分块迭代验证流程",
+            "理解 --check-integrity 与断点续存位图如何配合跳过已完成块"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Checksum/ChunkChecksum",
+            "MessageDigest 后端抽象",
+            "Iteratable 校验器"
+          ],
+          "order": 5,
+          "practice_task": "构造一个带错误 sha-256 校验和的下载（可用 --checksum=sha-256=<错误值>），观察 aria2 校验失败后是否重下；再故意截断已下载文件后用 --check-integrity=true 续传，解释哪些 piece 被重新下载。",
+          "source_files": [
+            "src/Checksum.cc",
+            "src/ChunkChecksum.cc",
+            "src/MessageDigest.cc",
+            "src/IteratableChecksumValidator.cc",
+            "src/IteratableChunkChecksumValidator.cc",
+            "src/message_digest_helper.cc"
+          ],
+          "title": "校验与哈希：MessageDigest 与分块校验",
+          "topic": "剖析校验体系：MessageDigest 如何抽象 OpenSSL/libgcrypt/Apple/Windows 多哈希后端，IteratableChecksumValidator 与 ChunkChecksumValidator 如何把整文件与分块校验拆成可中断的迭代任务。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l6-wr-disk-cache.md",
+          "id": "u5-l6",
+          "learning_groups": [],
+          "learning_goals": [
+            "解释 WrDiskCacheEntry 的块组织与 flush 时机",
+            "理解缓存大小控制与 writeBuffered 遍历逻辑",
+            "分析缓存命中/写穿对磁盘 I/O 次数的影响"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "WrDiskCache",
+            "WrDiskCacheEntry",
+            "DefaultPieceStorage 集成"
+          ],
+          "order": 6,
+          "practice_task": "用 --disk-cache=64M 下载大种子并在 WrDiskCacheEntry::writeDataTo 链路加日志统计 flush 次数，再与 --disk-cache=0 对比，说明缓存开启后 write 系统调用次数的变化。",
+          "source_files": [
+            "src/WrDiskCache.cc",
+            "src/WrDiskCacheEntry.cc",
+            "src/DefaultPieceStorage.cc"
+          ],
+          "title": "写盘缓存：WrDiskCache 的块管理",
+          "topic": "分析 --disk-cache 选项背后的写缓存实现：WrDiskCache 如何把未写满的 piece 数据缓存在内存、如何按容量淘汰并批量落盘以减少碎片化写。"
+        }
+      ],
+      "order": 5,
+      "title": "磁盘 I/O 与数据完整性"
+    },
+    {
+      "id": "u6",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u6-l1-torrent-metadata.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "解释 torrent 字典各字段的读取与校验（infohash、piece length、files）",
+            "理解 AnnounceList 的层级结构与 tracker 权重",
+            "说出 TorrentAttribute 承载哪些运行时信息"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "bittorrent_helper",
+            "AnnounceList/AnnounceTier",
+            "TorrentAttribute"
+          ],
+          "order": 1,
+          "practice_task": "用 --show-files 查看一个种子的文件列表，同时在 bittorrent_helper.cc 的解析函数处加日志，打印 infohash 的十六进制值与 announce 层级，验证与 aria2 控制台输出一致。",
+          "source_files": [
+            "src/bittorrent_helper.cc",
+            "src/AnnounceList.cc",
+            "src/AnnounceTier.cc",
+            "src/TorrentAttribute.cc",
+            "src/bencode2.cc"
+          ],
+          "title": "torrent 元数据解析：bencode 与种子结构",
+          "topic": "讲解 bencode2 解析工具与 bittorrent_helper 如何把 .torrent 文件解析成 DownloadContext/TorrentAttribute，以及 AnnounceList 如何组织多 tracker 层级。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-bt-registry-setup.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "解释 BtRegistry 以 RequestGroup 为键管理 BT 运行时对象的设计",
+            "跟踪 BtSetup 为每个种子装配的组件清单",
+            "理解全局对象（DHT、本地发现）与单种子对象的边界"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "BtRegistry",
+            "BtSetup",
+            "bittorrent_helper 全局状态"
+          ],
+          "order": 2,
+          "practice_task": "阅读 BtSetup::setup，列出一次种子下载被创建的 10 个以上关键对象（如 PIECE_STORAGE、PEER_STORAGE、BT_INTERACTIVE），并注明每个对象在后续哪篇讲义的机制中被使用。",
+          "source_files": [
+            "src/BtRegistry.cc",
+            "src/BtRegistry.h",
+            "src/BtSetup.cc",
+            "src/bittorrent_helper.cc"
+          ],
+          "title": "BtRegistry 与 BtSetup：BT 运行时的装配",
+          "topic": "分析 BtRegistry 如何作为全局注册表保存每个种子下载的运行时对象（PeerStorage、PieceStorage、BtInteractive 等），以及 BtSetup 如何在下载开始时把整套对象装配起来。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2",
+            "u2-l4"
+          ],
+          "filename": "u6-l3-peer-handshake.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "解释保留位（reserved bytes）各比特代表的扩展能力",
+            "跟踪握手消息的发送与校验流程",
+            "理解 PeerStorage 中 peer 的接纳与淘汰"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "PeerConnection",
+            "PeerReceiveHandshakeCommand",
+            "BtHandshakeMessage"
+          ],
+          "order": 3,
+          "practice_task": "用 --bt-max-peers=5 下载一个热门种子，在日志中摘出握手成功的 peer 数与各自保留位，对照 BtConstants/bittorrent_helper 的常量说明哪些 peer 支持 DHT/扩展协议/Fast 扩展。",
+          "source_files": [
+            "src/Peer.cc",
+            "src/PeerConnection.cc",
+            "src/PeerAbstractCommand.cc",
+            "src/PeerReceiveHandshakeCommand.cc",
+            "src/BtHandshakeMessage.cc",
+            "src/BtHandshakeMessageValidator.cc",
+            "src/DefaultPeerStorage.cc"
+          ],
+          "title": "Peer 连接与握手协议",
+          "topic": "剖析 peer 连接建立：PeerConnection 如何收发定长数据、PeerReceiveHandshakeCommand 如何完成 TCP 层与协议层两次握手、BtHandshakeMessage 的 68 字节结构与保留位扩展标记。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "filename": "u6-l4-bt-interactive.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "解释一次循环内 receive/dispatch/send 的处理顺序",
+            "理解 keepalive 与超时裁定的实现方式",
+            "分析 ActivePeerConnectionCommand 维持连接数的策略"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DefaultBtInteractive",
+            "PeerStorage",
+            "ActivePeerConnectionCommand"
+          ],
+          "order": 4,
+          "practice_task": "在 DefaultBtInteractive::doReceivedHandshakeHandshake 之后的交互主循环加计数日志，统计一次下载中各消息类型的收发次数分布，找出最繁忙的 3 种消息并解释原因。",
+          "source_files": [
+            "src/BtInteractive.h",
+            "src/DefaultBtInteractive.cc",
+            "src/ActivePeerConnectionCommand.cc",
+            "src/PeerStorage.h",
+            "src/DefaultPeerStorage.cc"
+          ],
+          "title": "DefaultBtInteractive：与单个 peer 的交互循环",
+          "topic": "讲解 DefaultBtInteractive 作为与单个 peer 会话大脑的循环逻辑：每 tick 如何收消息、分发、做 choke/unchoke 决策、发送请求与保持连接，以及 ActivePeerConnectionCommand 如何补充新 peer。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "filename": "u6-l5-bt-messages-dispatch.md",
+          "id": "u6-l5",
+          "learning_goals": [
+            "解释消息四字节长度前缀的解析与 0 长度 keepalive 特例",
+            "对比 request/piece/cancel/have/bitfield 等核心消息的处理",
+            "理解 dispatcher 中发送队列、取消与事件回调的协作"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "AbstractBtMessage",
+            "DefaultBtMessageDispatcher",
+            "DefaultBtMessageReceiver/Factory"
+          ],
+          "order": 5,
+          "practice_task": "选一个空闲系统时间实现 BtHaveNoneMessage 的收发路径梳理：从字节到达到对应回调触发，画出完整时序图，并说明 factory 如何根据消息 id 实例化对象。",
+          "source_files": [
+            "src/AbstractBtMessage.cc",
+            "src/DefaultBtMessageDispatcher.cc",
+            "src/DefaultBtMessageReceiver.cc",
+            "src/DefaultBtMessageFactory.cc",
+            "src/BtPieceMessage.cc",
+            "src/BtRequestMessage.cc"
+          ],
+          "title": "BtMessage 家族：消息定义与分发执行",
+          "topic": "梳理 BtMessage 类层次（choke/unchoke/request/piece/cancel/have 等）与 DefaultBtMessageDispatcher/Receiver/Factory 三件套如何完成消息的接收、构造、排队与 onSendReply。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "filename": "u6-l6-bt-request-pipeline.md",
+          "id": "u6-l6",
+          "learning_goals": [
+            "解释 pipelining 深度与目标请求字节数的动态调整",
+            "对比 end-game 模式与普通模式的请求策略差异",
+            "理解 piece 请求与 HTTP segment 两套切片如何共存"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DefaultBtRequestFactory",
+            "BtConstants 常量",
+            "StreamPieceSelector"
+          ],
+          "order": 6,
+          "practice_task": "用 -l 日志观察下载临近结束时的消息序列，确认进入 end-game 后 request 是否转向分散的缺失块，并在源码中找到控制该切换的判断条件。",
+          "source_files": [
+            "src/DefaultBtRequestFactory.cc",
+            "src/BtConstants.h",
+            "src/DefaultBtInteractive.cc",
+            "src/InorderStreamPieceSelector.cc"
+          ],
+          "title": "请求流水线：DefaultBtRequestFactory 与排队策略",
+          "topic": "分析 DefaultBtRequestFactory 如何生成 piece 请求、如何维持每 peer 的流水线深度、timeout 请求如何被重排，以及 end-game 阶段的请求策略变化。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "filename": "u6-l7-bt-tracker.md",
+          "id": "u6-l7",
+          "learning_goals": [
+            "解释 AnnounceList 的 tier 轮换与 tracker 失败降级",
+            "跟踪 HTTP tracker 请求参数的构造（info_hash/peer_id/left）",
+            "对比 UDP tracker 的 connect/announce 两步握手"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DefaultBtAnnounce",
+            "TrackerWatcherCommand",
+            "UDPTrackerClient"
+          ],
+          "order": 7,
+          "practice_task": "下载任一种子并用抓包或日志观察 announce 的时间间隔序列，对照 DefaultBtAnnounce 的 interval 处理逻辑说明为何间隔会动态变化；再找一个 UDP tracker 种子对比两种协议的交互次数。",
+          "source_files": [
+            "src/BtAnnounce.h",
+            "src/DefaultBtAnnounce.cc",
+            "src/TrackerWatcherCommand.cc",
+            "src/UDPTrackerClient.cc",
+            "src/UDPTrackerRequest.cc"
+          ],
+          "title": "Tracker 交互：HTTP/UDP announce",
+          "topic": "讲解 DefaultBtAnnounce 如何按 AnnounceList 轮询 tracker 发起 HTTP announce、TrackerWatcherCommand 如何守护 announce 请求，以及 UDPTrackerClient 的 UDP tracker 协议实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l5"
+          ],
+          "filename": "u6-l8-bt-extensions.md",
+          "id": "u6-l8",
+          "learning_goals": [
+            "解释扩展消息的 id 协商机制与 ExtensionMessageRegistry 的注册",
+            "对比 ut_pex 与 lt_tex 的消息负载结构",
+            "理解扩展能力对 peer 选择的间接影响"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "HandshakeExtensionMessage",
+            "ExtensionMessageRegistry",
+            "ut_pex/ut_metadata"
+          ],
+          "order": 8,
+          "practice_task": "在 ExtensionMessageRegistry 的注册点加日志，打印与每个 peer 协商得到的扩展 id 表；下载时观察 ut_pex 是否带来了 tracker 之外的额外 peer（对比 --bt-enable-pex=false 前后的 peer 来源）。",
+          "source_files": [
+            "src/ExtensionMessageRegistry.cc",
+            "src/HandshakeExtensionMessage.cc",
+            "src/BtExtendedMessage.cc",
+            "src/UTPexExtensionMessage.cc",
+            "src/UTMetadataExtensionMessage.cc"
+          ],
+          "title": "扩展协议：extended handshake、PEX 与 ut_metadata",
+          "topic": "剖析 BT 扩展消息机制：HandshakeExtensionMessage 如何协商各扩展的 id、UTPex 如何交换 peer 列表、UTMetadata 扩展族如何传输种子元数据。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l7"
+          ],
+          "filename": "u6-l9-magnet-utmetadata.md",
+          "id": "u6-l9",
+          "learning_goals": [
+            "解析 magnet URI 的 xt/dn/tr 参数含义",
+            "解释 UnknownLengthPieceStorage 如何在长度未知时工作",
+            "描述 metadata 获取完成后任务如何无缝切换到普通种子下载"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "magnet 解析",
+            "UTMetadata 扩展族",
+            "BtDependency"
+          ],
+          "order": 9,
+          "practice_task": "把一个种子的 infohash 拼成 magnet 链接下载，在 UTMetadataPostDownloadHandler 处加日志，确认 metadata piece 收齐后 BtDependency 如何触发真正的文件下载任务，画出两阶段任务的依赖图。",
+          "source_files": [
+            "src/magnet.cc",
+            "src/UTMetadataPostDownloadHandler.cc",
+            "src/UTMetadataRequestFactory.cc",
+            "src/UTMetadataRequestTracker.cc",
+            "src/BtDependency.cc"
+          ],
+          "title": "magnet 链接：先下元数据再下数据",
+          "topic": "分析 magnet URI 的解析与“无种子文件下载”流程：先创建一个只下载 metadata 的特殊任务，通过 ut_metadata 从 peer 获取完整种子后由 BtDependency 派生出真正的文件下载任务。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l5"
+          ],
+          "filename": "u6-l10-bt-seeding.md",
+          "id": "u6-l10",
+          "learning_goals": [
+            "解释 ShareRatioSeedCriteria 的比例判定计算方式",
+            "理解 Union/Time 等条件的组合求值逻辑",
+            "跟踪下载完成后 BtPostDownloadHandler 的后处理链"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "SeedCriteria 家族",
+            "BtPostDownloadHandler",
+            "RequestGroup 状态流转"
+          ],
+          "order": 10,
+          "practice_task": "用 --seed-time=0 与 --seed-ratio=1.0 分别测试做种退出行为，在 UnionSeedCriteria::evaluate 加日志，观察多条件并存时的求值顺序，说明实际退出时刻由哪个条件决定。",
+          "source_files": [
+            "src/ShareRatioSeedCriteria.cc",
+            "src/UnionSeedCriteria.cc",
+            "src/TimeSeedCriteria.cc",
+            "src/BtPostDownloadHandler.cc",
+            "src/RequestGroup.cc"
+          ],
+          "title": "做种与退出：种子条件判定",
+          "topic": "讲解下载完成后的做种阶段：ShareRatioSeedCriteria/TimeSeedCriteria/UnionSeedCriteria 如何组合判定退出时机，BtPostDownloadHandler 如何完成从下载到做种的状态切换。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l9",
+            "u5-l5"
+          ],
+          "filename": "u6-l11-bt-resume-session.md",
+          "id": "u6-l11",
+          "learning_goals": [
+            "解释控制文件中 bitfield 与 piece 哈希的保存结构",
+            "对比 Stream/Bt/Checksum 三种 CheckIntegrityEntry 的适用场景",
+            "理解 --bt-detach-seed-only 与断点续存的触发链路"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DefaultBtProgressInfoFile",
+            "CheckIntegrityEntry 家族",
+            "BtFileAllocationEntry"
+          ],
+          "order": 11,
+          "practice_task": "下载种子到一半 Ctrl-C 中断，检查磁盘上的 .aria2 控制文件；重新启动相同命令续传并开日志，对照 BtCheckIntegrityEntry 源码说明已下载 piece 如何被跳过校验或直接复用。",
+          "source_files": [
+            "src/DefaultBtProgressInfoFile.cc",
+            "src/BtCheckIntegrityEntry.cc",
+            "src/BtFileAllocationEntry.cc",
+            "src/StreamCheckIntegrityEntry.cc"
+          ],
+          "title": "会话恢复与 .aria2 控制文件",
+          "topic": "剖析断点续存：DefaultBtProgressInfoFile 如何把 bitfield、piece 哈希与上传状态写进 .aria2 文件，以及恢复时 BtCheckIntegrityEntry 如何依据选项决定校验与复用策略。"
+        }
+      ],
+      "order": 6,
+      "title": "BitTorrent 子系统"
+    },
+    {
+      "id": "u7",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u7-l1-dht-routing-table.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "解释节点 ID 与 XOR 距离度量在分桶中的作用",
+            "跟踪 bucket 分裂与 stale 节点替换的触发条件",
+            "理解 DHTRegistry 保存 IPv4/IPv6 两套路由表的设计"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DHTNode",
+            "DHTBucket/DHTBucketTree",
+            "DHTRoutingTable"
+          ],
+          "order": 1,
+          "practice_task": "运行 aria2 --enable-dht 并找到 dht.dat 路由表文件，对照 DHTRoutingTableSerializer 的保存格式手工解析出节点数量与前几个节点的 ID 前缀，验证桶的覆盖范围。",
+          "source_files": [
+            "src/DHTNode.cc",
+            "src/DHTBucket.cc",
+            "src/DHTBucketTree.cc",
+            "src/DHTRoutingTable.cc",
+            "src/DHTRegistry.cc"
+          ],
+          "title": "DHT 基础：Kademlia 路由表与分桶",
+          "topic": "讲解 DHT 的 Kademlia 基础在 aria2 中的实现：DHTNode 的节点表示、DHTBucket/BucketTree 的路由桶组织与分裂规则、DHTRoutingTable 的查找算法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1",
+            "u6-l1"
+          ],
+          "filename": "u7-l2-dht-messages-bencode.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "解释 DHT 报文的 transaction id 的作用与匹配方式",
+            "跟踪 ping/find_node/get_peers/announce_peer 四类消息的字段",
+            "理解 MessageFactory 的构造与消息校验流程"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DHTAbstractMessage",
+            "DHTMessageFactoryImpl",
+            "bencode2 编解码"
+          ],
+          "order": 2,
+          "practice_task": "用日志观察一次 get_peers 的完整往返（请求与响应的 bencode 字典），手工解码响应中的 nodes 字段，列出返回的节点 IP 与端口，验证你已读懂报文结构。",
+          "source_files": [
+            "src/DHTAbstractMessage.cc",
+            "src/DHTFindNodeMessage.cc",
+            "src/DHTAnnouncePeerMessage.cc",
+            "src/DHTMessageFactoryImpl.cc",
+            "src/bencode2.cc"
+          ],
+          "title": "DHT 报文：bencode 编码的 RPC 协议",
+          "topic": "分析 DHT 报文体系：DHTAbstractMessage 与 query/response 家族如何用 bencode 编码，DHTMessageFactoryImpl 如何从收到的字典构造消息对象。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "filename": "u7-l3-dht-task-queue.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "解释 TaskExecutor 每轮如何调度与回收任务",
+            "理解 MessageTracker 用 transaction id 匹配请求响应的机制",
+            "对比 NodeLookup 与 PeerLookup 任务的目标差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DHTTaskQueue/Executor",
+            "DHTNodeLookupTask",
+            "DHTMessageTracker"
+          ],
+          "order": 3,
+          "practice_task": "在 DHTTaskExecutor::update 加日志统计每轮执行的任务数，观察路由表自我刷新（bucket refresh）时任务的突发规律，并解释任务超时后如何被清理。",
+          "source_files": [
+            "src/DHTTaskQueueImpl.cc",
+            "src/DHTTaskExecutor.cc",
+            "src/DHTNodeLookupTask.cc",
+            "src/DHTTaskFactoryImpl.cc",
+            "src/DHTMessageTracker.cc"
+          ],
+          "title": "DHT 任务系统：队列、执行器与消息追踪",
+          "topic": "剖析 DHTTaskQueue/TaskExecutor 的任务调度模型，DHTNodeLookupTask 如何递归查找更近节点，以及 DHTMessageTracker 如何把发出的请求与收到的响应配对。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "filename": "u7-l4-dht-commands-bootstrap.md",
+          "id": "u7-l4",
+          "learning_goals": [
+            "跟踪 dht.dat 的加载与失效重建流程",
+            "理解周期命令在 DownloadEngine 中的注册方式",
+            "解释 entry point 解析失败时的兜底策略"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DHTSetup",
+            "DHTInteractionCommand",
+            "路由表序列化"
+          ],
+          "order": 4,
+          "practice_task": "删除 dht.dat 后启动 aria2，观察从 bootstrap 到路由表自我填充的全过程日志，绘制启动前 30 秒内节点数增长曲线，并指出自动保存发生的时刻。",
+          "source_files": [
+            "src/DHTSetup.cc",
+            "src/DHTInteractionCommand.cc",
+            "src/DHTBucketRefreshCommand.cc",
+            "src/DHTAutoSaveCommand.cc",
+            "src/DHTEntryPointNameResolveCommand.cc",
+            "src/DHTRoutingTableSerializer.cc"
+          ],
+          "title": "DHT 启动与周期命令：自举、刷新与保存",
+          "topic": "讲解 DHT 子系统的生命周期：DHTSetup 如何装配整套组件、EntryPoint 解析与自举、DHTInteractionCommand 的收发循环、BucketRefresh 与 AutoSave 两个周期命令。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "filename": "u7-l5-dht-peer-announce.md",
+          "id": "u7-l5",
+          "learning_goals": [
+            "解释 PeerAnnounceEntry 按 infohash 聚合、按 peer 去重的结构",
+            "理解 TokenTracker 如何用 token 防御伪造 announce",
+            "跟踪 get_peers 命中本地存储时返回 values 字段的路径"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DHTGetPeersCommand",
+            "DHTPeerAnnounceStorage",
+            "DHTTokenTracker"
+          ],
+          "order": 5,
+          "practice_task": "下载一个热门种子，在 DHTPeerAnnounceStorage::handleAnnouncePeer 加日志，统计不同 infohash 收到的 announce 数量与 peer 去重效果，解释时间窗口的作用。",
+          "source_files": [
+            "src/DHTGetPeersCommand.cc",
+            "src/DHTPeerAnnounceStorage.cc",
+            "src/DHTPeerAnnounceEntry.cc",
+            "src/DHTTokenTracker.cc"
+          ],
+          "title": "get_peers 与 peer announce 存储",
+          "topic": "分析 DHTGetPeersCommand 如何为种子查找 peer、DHTPeerAnnounceStorage 如何记录“哪个 infohash 有哪些 peer”、DHTTokenTracker 的 token 校验如何防止恶意宣告。"
+        }
+      ],
+      "order": 7,
+      "title": "DHT：无 tracker 的 peer 发现网络"
+    },
+    {
+      "id": "u8",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u8-l1-metalink-parser.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "解释 pull 式解析回调如何驱动状态机流转",
+            "对比 Metalink v3 与 v4 状态集合的差异",
+            "理解 XmlParser 对 libxml2/Expat 的适配方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "MetalinkParserStateMachine",
+            "ParserState 家族",
+            "XmlParser 后端适配"
+          ],
+          "order": 1,
+          "practice_task": "找一个 Metalink 4.0 文件（或用 --metalink-version=3 处理 v3），在 MetalinkParserController 的 URL/hash 回调处加日志，打印解析出的每个候选资源与校验和，对照状态机源码说明元素嵌套如何映射状态切换。",
+          "source_files": [
+            "src/MetalinkParserStateMachine.cc",
+            "src/MetalinkParserStateImpl.cc",
+            "src/MetalinkParserStateV4Impl.cc",
+            "src/MetalinkParserController.cc",
+            "src/XmlParser.cc"
+          ],
+          "title": "Metalink 解析：基于 SAX 的状态机",
+          "topic": "剖析 Metalink 解析器的状态机骨架：MetalinkParserStateMachine 与 V3/V4 两套状态实现如何处理 XML SAX 事件，MetalinkParserController 如何收集 entry。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "filename": "u8-l2-metalink-download.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "解释资源优先级与位置（country/preference）对排序的影响",
+            "理解 MetalinkHttpEntry 从 Link 头提取分块校验的规则",
+            "对比 Metalink 与普通多 URI 下载在 RequestGroup 构造上的差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Metalinker/MetalinkEntry",
+            "Metalink2RequestGroup",
+            "Metalink/HTTP"
+          ],
+          "order": 2,
+          "practice_task": "下载一个发布版的 .meta4 文件并用 aria2 下载，在 Metalinker 的排序函数处加日志，验证资源列表的最终顺序由哪些字段决定；再用 --metalink-preferred-protocol=https 实验协议过滤效果。",
+          "source_files": [
+            "src/Metalinker.cc",
+            "src/MetalinkEntry.cc",
+            "src/MetalinkResource.cc",
+            "src/Metalink2RequestGroup.cc",
+            "src/MetalinkHttpEntry.cc",
+            "src/MetalinkPostDownloadHandler.cc"
+          ],
+          "title": "Metalink 下载：从 entry 到多源任务",
+          "topic": "分析 Metalinker 如何对 entry 与资源排序、Metalink2RequestGroup 如何把 entry 转为 RequestGroup，以及 Metalink/HTTP（RFC 6249）如何从响应头动态构建等价信息。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u4-l2"
+          ],
+          "filename": "u8-l3-http-websocket-server.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "解释 HttpServerCommand 与 BodyCommand 在 keep-alive 下的循环",
+            "跟踪 WebSocket 升级请求的握手与帧收发流程",
+            "理解会话管理器如何向订阅方推送通知"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "HttpListenCommand/HttpServer",
+            "WebSocketSession",
+            "命令循环"
+          ],
+          "order": 3,
+          "practice_task": "启动 aria2c --enable-rpc 后用 wscat 或浏览器扩展连上 WebSocket，订阅下载事件，对照 WebSocketSession 源码说明一条系统通知（如 downloadStart）如何从 DownloadEngine 被序列化并推送到客户端。",
+          "source_files": [
+            "src/HttpServer.cc",
+            "src/HttpListenCommand.cc",
+            "src/HttpServerCommand.cc",
+            "src/HttpServerBodyCommand.cc",
+            "src/WebSocketSession.cc",
+            "src/WebSocketSessionMan.cc"
+          ],
+          "title": "内嵌 HTTP 与 WebSocket 服务器",
+          "topic": "讲解 --enable-rpc 之后的监听体系：HttpListenCommand 接受连接、HttpServer 解析请求、命令链如何复用 HTTP 下载那套机制，以及 WebSocket 會话的握手与帧处理。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l3"
+          ],
+          "filename": "u8-l4-rpc-methods.md",
+          "id": "u8-l4",
+          "learning_goals": [
+            "解释 RpcMethod 的 authorize/execute/processing 三段流程",
+            "跟踪 HttpServerBodyCommand 中 XML/JSON 分支的解析与响应构造",
+            "使用 addUri/changeOption/tellStatus 等常用方法完成一次全流程调用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "RpcMethod/Factory",
+            "RpcMethodImpl",
+            "XML/JSON 解析状态机",
+            "ValueBase"
+          ],
+          "order": 4,
+          "practice_task": "用 curl 向 aria2 的 JSON-RPC 端点调用 aria2.addUri 添加下载、用 aria2.tellStatus 轮询进度、最后 aria2.remove 删除任务；对照 RpcMethodImpl 源码说明 secret 令牌鉴权发生在哪一行检查。",
+          "source_files": [
+            "src/RpcMethod.cc",
+            "src/RpcMethodFactory.cc",
+            "src/RpcMethodImpl.cc",
+            "src/XmlRpcRequestParserStateMachine.cc",
+            "src/ValueBase.cc",
+            "src/json.cc"
+          ],
+          "title": "RPC 方法分发：XML-RPC 与 JSON-RPC",
+          "topic": "剖析 RPC 核心：HttpServerBodyCommand 如何区分 JSON-RPC 与 XML-RPC 并交给解析器，RpcMethodFactory 如何按方法名分发，RpcMethodImpl 中 addUri/tellStatus 等方法的实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u8-l5-libaria2-embed.md",
+          "id": "u8-l5",
+          "learning_goals": [
+            "解释 library 初始化会话与 run 循环的阻塞模型",
+            "对比会话 API 与 RPC API 的适用场景",
+            "跟踪事件回调（onDownloadComplete 等）的注册与触发链路"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "aria2 API",
+            "session/run 循环",
+            "事件监听器"
+          ],
+          "order": 5,
+          "practice_task": "阅读 examples/libaria2ex.cc，将其改写为：添加 3 个下载 URI、在回调里打印每个任务完成事件、全部结束后退出会话；编译链接 libaria2 后运行验证。",
+          "source_files": [
+            "src/aria2api.cc",
+            "src/aria2api.h",
+            "src/ApiCallbackDownloadEventListener.cc",
+            "examples/libaria2ex.cc",
+            "examples/libaria2wx.cc"
+          ],
+          "title": "libaria2：把 aria2 嵌入你的程序",
+          "topic": "分析 libaria2 的 C API（aria2::session、addUri、run、事件回调），说明它与命令行模式共用同一套引擎，以及示例程序如何组织事件循环。"
+        }
+      ],
+      "order": 8,
+      "title": "Metalink 与 RPC：服务化能力"
+    },
+    {
+      "id": "u9",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u9-l1-util-foundations.md",
+          "id": "u9-l1",
+          "learning_goals": [
+            "说出 util.h 中字符串切分、路径拼接、数字解析的常用函数",
+            "解释 uri.h 对 URL 各组成部分的解析模型",
+            "理解 File 对文件属性的查询与路径运算封装"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "util 工具集",
+            "uri 解析",
+            "File 封装",
+            "格式化与编码"
+          ],
+          "order": 1,
+          "practice_task": "编写一个独立小程序链接 util.cc（或直接阅读后手写等价逻辑），对一个含 userinfo/query/fragment 的 URL 调用 aria2::uri::parse 系列函数，逐字段打印解析结果并与 RFC 3986 对照。",
+          "source_files": [
+            "src/util.cc",
+            "src/uri.cc",
+            "src/base32.cc",
+            "src/base64.h",
+            "src/fmt.cc",
+            "src/File.cc"
+          ],
+          "title": "基础工具库：util、uri 与 File",
+          "topic": "盘点被所有子系统共享的基础设施：util 的字符串/路径/数字工具、uri 的 URL 解析、base32/base64 编码、fmt 的格式化封装以及 File 的文件系统抽象。"
+        },
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u9-l2-valuebase-parsers.md",
+          "id": "u9-l2",
+          "learning_goals": [
+            "解释 ValueBase 的 Variant 类型设计与类型安全访问器",
+            "理解 StructParserStateMachine 的通用嵌套解析骨架",
+            "对比 bencode 与 json 解析器的共通结构"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ValueBase",
+            "BencodeParser",
+            "JsonParser",
+            "StructParserStateMachine"
+          ],
+          "order": 2,
+          "practice_task": "写一段使用 ValueBaseJsonParser 的测试代码解析一段含嵌套的 JSON（参考 test/Bencode2Test.cc 的写法），打印得到的 ValueBase 树，再修改输入制造一个语法错误验证异常路径。",
+          "source_files": [
+            "src/ValueBase.cc",
+            "src/BencodeParser.cc",
+            "src/JsonParser.cc",
+            "src/StructParserStateMachine.h",
+            "src/ValueBaseBencodeParser.h"
+          ],
+          "title": "ValueBase 与解析器骨架：bencode/JSON 的统一表示",
+          "topic": "剖析 ValueBase 这一动态类型如何在 C++ 中表示 bencode/JSON 结构，BencodeParser 与 JsonParser 如何共享 StructParserStateMachine 的状态机骨架。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u9-l3-logging-exceptions.md",
+          "id": "u9-l3",
+          "learning_goals": [
+            "使用 --log 与 --log-level 获取不同粒度的运行信息",
+            "解释 Exception 层级与 error_code 的映射关系",
+            "从一份失败的下载日志定位到抛出异常的源码位置"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "LogFactory",
+            "Exception/error_code",
+            "失败诊断流程"
+          ],
+          "order": 3,
+          "practice_task": "分别触发一次 DNS 失败与一次 HTTP 404 下载失败，从日志摘录异常栈信息，对照 error_code.h 写出两次失败各自的退出码，并在源码中找到抛出点。",
+          "source_files": [
+            "src/LogFactory.cc",
+            "src/Exception.h",
+            "src/message.h",
+            "src/error_code.h",
+            "src/UnknownOptionException.cc"
+          ],
+          "title": "日志与异常体系：诊断 aria2 的行为",
+          "topic": "讲解 LogFactory 的全局日志机制、Exception 家族如何携带错误码与堆栈、error_code.h 中退出码的含义，以及如何利用日志体系调试真实下载问题。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u9-l4-platform-tls-backends.md",
+          "id": "u9-l4",
+          "learning_goals": [
+            "解释 TLSContext/TLSSession 抽象的证书加载与握手接口",
+            "对比 GnuTLS/OpenSSL/Apple/Windows 四后端的能力差异",
+            "通过 FeatureConfig 的输出判断当前二进制启用了哪些后端"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "TLS 抽象接口",
+            "四个平台后端",
+            "FeatureConfig 能力上报"
+          ],
+          "order": 4,
+          "practice_task": "运行 aria2c --version 查看 Feature 列表确认 TLS 后端，然后分别用 --check-certificate=true/false 下载一个自签名证书的 URL，在 LibsslTLSSession（或对应后端）的握手函数处加日志观察验证分支。",
+          "source_files": [
+            "src/TLSContext.h",
+            "src/TLSSession.h",
+            "src/LibsslTLSContext.cc",
+            "src/LibgnutlsTLSContext.cc",
+            "src/WinTLSContext.cc",
+            "src/AppleTLSContext.cc",
+            "src/FeatureConfig.cc"
+          ],
+          "title": "平台抽象与 TLS 多后端矩阵",
+          "topic": "分析 TLSContext/TLSSession 抽象接口下四个平台后端（OpenSSL/GnuTLS/Apple/Windows）的实现差异，FeatureConfig 如何上报编译期特性，以及 a2io/a2netcompat 等平台兼容层。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u9-l5-testing-debugging.md",
+          "id": "u9-l5",
+          "learning_goals": [
+            "用 AllTest.cc 找到任意子系统测试的注册位置",
+            "掌握编译运行单个测试用例的方法",
+            "学会以测试用例作为理解源码行为的实验台"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "测试框架组织",
+            "单测编写范式",
+            "调试运行方法"
+          ],
+          "order": 5,
+          "practice_task": "阅读 BittorrentHelperTest 的一个用例，仿照它为新行为补一个用例（例如解析一个含 url-list 的种子字典），运行 make check 验证通过，并说明测试数据是如何构造的。",
+          "source_files": [
+            "test/AllTest.cc",
+            "test/AbstractCommandTest.cc",
+            "test/Bencode2Test.cc",
+            "test/BittorrentHelperTest.cc",
+            "test/Aria2ApiTest.cc"
+          ],
+          "title": "测试体系：如何验证 aria2 的行为",
+          "topic": "介绍基于 CppUnit 的测试组织（AllTest 汇总注册）、典型测试的写法风格，以及如何构建并只运行关心的测试用例来辅助源码理解。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l5",
+            "u6-l2",
+            "u3-l3"
+          ],
+          "filename": "u9-l6-extend-and-integrate.md",
+          "id": "u9-l6",
+          "learning_goals": [
+            "列出 DownloadHandler/Notifier/RPC 方法三类主要扩展点",
+            "走通“新选项→新行为”的完整改动路径",
+            "评估一个新协议应作为独立命令链还是 StreamFilter 实现"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "扩展点盘点",
+            "选项驱动的功能开关",
+            "Notifier 事件体系"
+          ],
+          "order": 6,
+          "practice_task": "综合实践：仿照 --bt-detach-seed-only 或 --conditional-get 的模式，在 OptionHandlerFactory 注册一个自定义布尔选项（如 --my-debug-flag），在 DownloadEngine 的周期逻辑中读取它打印一行信息，重新编译验证功能生效，并写一份“新增一个功能要改哪几个文件”的清单。",
+          "source_files": [
+            "src/download_handlers.cc",
+            "src/DownloadHandler.h",
+            "src/Notifier.cc",
+            "src/DownloadEngineFactory.cc"
+          ],
+          "title": "二次开发实战：扩展点与新功能接入",
+          "topic": "总结 aria2 的可扩展面：DownloadHandler 的协议级插件、Notifier 的事件通知、RPC 方法注册、选项驱动的能力开关，并以一个小改动为例走完设计-实现-验证全流程。"
+        }
+      ],
+      "order": 9,
+      "title": "工程实践与二次开发"
+    }
+  ]
+}
