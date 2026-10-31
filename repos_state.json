@@ -65686,8 +65686,8 @@
     "openinfer-project/openinfer@openinfer-vllm-support": {},
     "AmolHarsh/ground3d-lmm": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "near dead zone; will resume next window",
-      "last_run_at": "2026-10-31T11:02:38Z",
+      "last_error": "quota exhausted; will resume next window",
+      "last_run_at": "2026-10-31T14:16:31Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -65858,19 +65858,25 @@
           "error": null
         },
         "u6-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.9118936000000001,
+          "error": null
         },
         "u7-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.6195671999999999,
+          "error": null
         },
         "u7-l2": {
-          "status": "pending",
+          "status": "failed",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"185dff25-aa69-4b2d-a427-76adfb529e25\",\"total_co"
         },
         "u7-l3": {
           "status": "pending",
@@ -66022,24 +66028,32 @@
           "error": null
         },
         "u5-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.6750599999999999,
+          "error": null
         },
         "u5-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.898112,
+          "error": null
         },
         "u5-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.9691168,
+          "error": null
         },
         "u5-l5": {
-          "status": "pending",
+          "status": "failed",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"b2ee9360-33ad-40f6-ae76-ef60fddca65c\",\"total_co"
         },
         "u5-l6": {
           "status": "pending",
@@ -66073,8 +66087,8 @@
       "mode": "full",
       "tutorial_path": "tutorials/dk-liang/UniSeg3D/UniSeg3D-tutorial",
       "last_head": "c2729548d6f64122a92fce39b45d94b948782e67",
-      "last_run_at": "2026-10-31T11:02:38Z",
-      "last_error": "near dead zone; will resume next window"
+      "last_run_at": "2026-10-31T14:16:31Z",
+      "last_error": "quota exhausted; will resume next window"
     },
     "QwenLM/Qwen3-VL": {
       "prompt_hash": "b21aef51792b02df",
@@ -66227,24 +66241,32 @@
           "error": null
         },
         "u5-l6": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.0496296,
+          "error": null
         },
         "u5-l7": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.7427736,
+          "error": null
         },
         "u5-l8": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.6052808000000001,
+          "error": null
         },
         "u6-l1": {
-          "status": "pending",
+          "status": "failed",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"149ba67d-70c0-4ba7-ba18-084aa7cdf3da\",\"total_co"
         },
         "u6-l2": {
           "status": "pending",
@@ -66288,8 +66310,8 @@
       "mode": "full",
       "tutorial_path": "tutorials/QwenLM/Qwen3-VL/Qwen3-VL-tutorial",
       "last_head": "96588727e44c78b25ba03ea03b8e12f7e64fd0da",
-      "last_run_at": "2026-10-31T11:02:38Z",
-      "last_error": "near dead zone; will resume next window"
+      "last_run_at": "2026-10-31T14:16:31Z",
+      "last_error": "quota exhausted; will resume next window"
     },
     "open-mmlab/mmdetection3d": {
       "prompt_hash": "b21aef51792b02df",
@@ -66323,24 +66345,32 @@
           "error": null
         },
         "u1-l5": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.5806232,
+          "error": null
         },
         "u2-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.6391336,
+          "error": null
         },
         "u2-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.8831216,
+          "error": null
         },
         "u2-l3": {
-          "status": "pending",
+          "status": "failed",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"d1f116a3-3bc4-4ffc-af81-0438bd4db772\",\"total_co"
         },
         "u2-l4": {
           "status": "pending",
@@ -66524,8 +66554,8 @@
       "mode": "full",
       "tutorial_path": "tutorials/open-mmlab/mmdetection3d/mmdetection3d-tutorial",
       "last_head": "fe25f7a51d36e3702f961e198894580d83c4387b",
-      "last_run_at": "2026-10-31T11:02:38Z",
-      "last_error": "near dead zone; will resume next window"
+      "last_run_at": "2026-10-31T14:16:31Z",
+      "last_error": "quota exhausted; will resume next window"
     },
     "facebookresearch/Mask2Former": {},
     "aria2/aria2": {},
