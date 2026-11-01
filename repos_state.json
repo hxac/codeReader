@@ -66490,7 +66490,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"40f1ea36-34f7-411f-a153-07713fdbb336\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"e6119c20-485b-4096-8751-588226bb3c5f\",\"total_co"
         },
         "u5-l2": {
           "status": "pending",
@@ -66609,7 +66609,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/open-mmlab/mmdetection3d/mmdetection3d-tutorial",
       "last_head": "fe25f7a51d36e3702f961e198894580d83c4387b",
-      "last_run_at": "2026-11-01T11:02:27Z",
+      "last_run_at": "2026-11-01T13:02:37Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "facebookresearch/Mask2Former": {
@@ -66725,7 +66725,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"bff70097-0b1b-4ef4-8140-57e656b47dce\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"fd3a1506-8aa8-4c10-a154-3128c0955898\",\"total_co"
         },
         "u4-l3": {
           "status": "pending",
@@ -66844,7 +66844,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/facebookresearch/Mask2Former/Mask2Former-tutorial",
       "last_head": "9b0651c6c1d5b3af2e6da0589b719c514ec0d69a",
-      "last_run_at": "2026-11-01T11:02:27Z",
+      "last_run_at": "2026-11-01T13:02:37Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "aria2/aria2": {
@@ -66911,7 +66911,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"41089f44-bb7a-4b36-be0c-9d15f0424148\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"870c9d17-43ea-4bec-83f9-519a22ea0bf5\",\"total_co"
         },
         "u3-l1": {
           "status": "pending",
@@ -67140,7 +67140,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/aria2/aria2/aria2-tutorial",
       "last_head": "9e7273583f83e881e3ec067b523ba88724088d2f",
-      "last_run_at": "2026-11-01T11:02:27Z",
+      "last_run_at": "2026-11-01T13:02:37Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "GopeedLab/gopeed": {
@@ -67193,7 +67193,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"7e625024-e5c5-439b-b9c7-bfcda997d599\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"2a38a857-3ce3-47ed-8106-d3b0252af950\",\"total_co"
         },
         "u3-l1": {
           "status": "pending",
@@ -67407,7 +67407,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/GopeedLab/gopeed/gopeed-tutorial",
       "last_head": "fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed",
-      "last_run_at": "2026-11-01T11:02:27Z",
+      "last_run_at": "2026-11-01T13:02:37Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "rasbt/reasoning-from-scratch": {},
